@@ -6,6 +6,8 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	nmerrors "github.com/cnlangzi/nightme/internal/errors"
 )
 
 // version is set at build time via -ldflags (see Makefile / scripts).
@@ -42,9 +44,15 @@ func newRootCmd() *cobra.Command {
 
 // Execute runs the CLI and exits with an appropriate code. main.go
 // calls this directly; tests can call newRootCmd() for finer control.
+//
+// The panic guard installed by Recover() converts unexpected
+// panics to nmerrors.CodeGenericError so the exit code still
+// reflects something scriptable.
 func Execute() {
-	if err := newRootCmd().Execute(); err != nil {
+	root := newRootCmd()
+	Recover(root)
+	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
-		os.Exit(1)
+		os.Exit(nmerrors.ExitCode(err))
 	}
 }

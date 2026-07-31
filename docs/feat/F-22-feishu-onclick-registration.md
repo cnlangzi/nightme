@@ -1,6 +1,6 @@
 # F-22: Feishu One-Click App Registration (QR 扫码授权)
 
-> **Status**: designed (v0.1)
+> **Status**: designed (v0.1) — implemented in PR #4 (commit bfcd7d0 + c395722 + 80953d3)
 > **Milestone**: M2 (跟 M2 一起实施)
 > **Depends on**: F-08 (Channel)
 > **Used by**: 用户 onboarding 流程
@@ -142,9 +142,15 @@ Next: run `nightme run` to start the gateway.
 | Event | `im.message.receive_v1` | 收消息事件 |
 
 **Credentials 持久化**：
-- 写入 `~/.config/nightme/config.yaml` 的 `channels.feishu.accounts.main` 段
+- 写入 `~/.config/nightme/config.yaml` 的 `feishu.app_id` / `feishu.app_secret` 顶层字段（v0.1 single-account）
 - 文件权限 0600
 - 原子写（temp + rename，跟 registry 一样）
+
+**v0.1 single-account**：nightme v0.1 只支持一个飞书 app（一个 CLI / 进程一个 app）。多 account 场景留 v0.2。
+- 如果 v0.2 需要 multi-account，再重构为 `channels.feishu.accounts.<name>.{app_id, app_secret}` 嵌套结构
+- 届时 `F-08 Channel` 也要扩展为支持多 instance
+
+> **历史**：F-22 v1.0 设计稿（已过时）使用 `channels.feishu.accounts.main.{...}` 嵌套结构。后续根据 Devin 反馈（2026-07-31）改为顶层字段，因为 v0.1 single-account 场景下两种写法等价，且顶层结构更简单、不牵动 Config 其他调用点。
 
 **Manual 模式 fallback**：
 - config 里已有 `appId` / `appSecret` → `nightme auth login` 报错 "already configured, use --force to overwrite"
@@ -203,10 +209,10 @@ Next: run `nightme run` to start the gateway.
 |------|------|
 | F-08 Channel Abstraction | 依赖 F-22：Channel 用 F-22 拿到的 credentials 工作 |
 | F-20 Gateway | 独立——Gateway 路由 slash command，不涉及 auth |
-| 现有 `internal/config/` | F-22 写入 config.yaml 的 `channels.feishu.accounts` 段（chmod 0600）|
+| 现有 `internal/config/` | F-22 写入 config.yaml 的 `feishu.app_id` / `feishu.app_secret` 顶层字段（chmod 0600）|
 
 **对 F-08 的影响**：
-- F-08 Channel 启动时读 `channels.feishu.accounts.main.appId/appSecret`
+- F-08 Channel 启动时读 `feishu.app_id` / `feishu.app_secret` 顶层字段
 - 这两个值可以来自：
   1. `nightme auth login feishu`（F-22 写入）✅ 推荐
   2. 手动编辑 config.yaml（v0.1 兼容）
@@ -229,10 +235,10 @@ PR #4 内部先做 F-22，再做 F-08（让 F-08 测试时用 F-22 拿到的真�
 - **不要打印 ClientSecret 到日志**：log 时 redact
 - **不存储 secret 到任何 log 文件**
 
-## 10. Open questions
+## 10. Open questions (resolved)
 
 - Lark (国际版) 是否用相同 SDK？倾向：同 SDK，自动检测 tenant_brand
-- 多 tenant 支持（一个 nightme 跑多个飞书 app）？v0.1 不支持，v0.2 考虑
+- ~~多 tenant 支持（一个 nightme 跑多个飞书 app）？v0.1 不支持，v0.2 考虑~~ — **2026-07-31 决议：v0.1 明确 single-account，不预留 multi-account 结构。v0.2 需要时重构为 `channels.feishu.accounts.<name>.{...}`。**
 - 用户拒绝授权后如何清理（feishu 侧是否残留）？飞书只授权后才会创建 app，拒绝则不创建，无需清理
 - 是否支持 `nightme auth export feishu` 输出可分享的 env var？v0.2 考虑
 - 与 M2 现有计划的 conflicts：原 M2 假设 manual setup，新增 F-22 是增量（向后兼容）

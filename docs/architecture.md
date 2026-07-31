@@ -1,9 +1,9 @@
 # nightme — Architecture
 
-> **状态**：v1.0（与 PRD 同步）
+> **状态**：v1.0（与 SPEC 同步）
 > **作者**：🦞 虾哥（PM/Architect）
 > **日期**：2026-07-31
-> **依赖**：`PRD.md`
+> **依赖**：`SPEC.md`、`FEATURES.md`
 
 本文档回答：**nightme 由哪些模块组成、各模块怎么协作、数据/控制流怎么走**。
 
@@ -34,7 +34,8 @@ nightme
 │   └── ipc/                          # 本地 HTTP API（CLI 管理命令用）
 │       └── server.go
 ├── docs/
-│   ├── PRD.md
+│   ├── SPEC.md
+│   ├── FEATURES.md
 │   ├── architecture.md               # 本文件
 │   └── cli-bridge.md
 ├── go.mod

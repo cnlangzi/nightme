@@ -1,4 +1,4 @@
-# nightme — Product Requirements Document (PRD)
+# nightme — Technical Specification (SPEC)
 
 > **状态**：v1.0（已锁定）
 > **作者**：🦞 虾哥（PM/Architect）
@@ -6,6 +6,7 @@
 > **来源**：与 Devin 在飞书 DM 的需求澄清对话
 > **更新日志**：
 > - v1.0 — 锁定 6 项关键决策（Q1-Q6），明确 Chat↔Session 1:1 绑定模型
+> - v1.0r — 重命名 PRD → SPEC，功能列表抽取到 FEATURES.md
 
 ---
 
@@ -92,37 +93,11 @@
 
 ---
 
-## 4. 功能需求 (Functional Requirements)
+## 4. 功能需求
 
-### 4.1 必需（MVP）
+完整功能列表（F-1 ~ F-18）见 [`FEATURES.md`](./FEATURES.md)。
 
-| ID | 描述 |
-|----|------|
-| F-1 | **Session 创建**：用户在 Chat 首条消息写 `workspace: /path/to/project`，nightme 验证后创建 session 并 spawn CLI |
-| F-2 | **消息透传**：用户在 Chat 里的输入 → 该 Chat 绑定 session 的 PTY stdin |
-| F-3 | **输出推送**：session 的 PTY stdout/stderr → 该 Chat |
-| F-4 | **PTY 模拟**：spawn CLI 时使用 PTY，cols/lines 由 nightme 配置（默认 120x40） |
-| F-5 | **进程注册**：nightme 启动的所有 CLI 进程写入本地 registry 文件（pid, sid, agent, ws, started_at） |
-| F-6 | **进程清理**：nightme 退出时（SIGTERM/SIGINT），按策略清理自己启动的进程（默认：保留，让用户手动 kill） |
-| F-7 | **Workspace 绑定**：CLI 启动时 `cwd = session.workspace`；不存在则失败，提示用户 |
-| F-8 | **Channel 抽象**：Channel 是 interface，MVP 实现 Feishu，结构上留位给其他 IM |
-| F-9 | **Agent 抽象**：Agent 是 interface，MVP 实现 Claude Code，结构上留位给 Codex/OpenCode |
-| F-10 | **Session 列表**（管理命令）：用户用 `nightme list` 命令行查所有 session 状态 |
-
-> **删除项**：原 F-2 (Session 列表在 Channel 内查询)、F-3 (Session 切换) 因 Chat↔Session 1:1 模型被删除。
-
-### 4.2 后续（v0.2+）
-
-| ID | 描述 |
-|----|------|
-| F-11 | 多个 Channel 同时 attach 到一个 session（mirror 模式） |
-| F-12 | WhatsApp / Telegram / Slack / Web UI Channel adapter |
-| F-13 | 终端大小调整（用户手机横竖屏切换 → PTY SIGWINCH） |
-| F-14 | 图片 / 文件附件透传 |
-| F-15 | Session 持久化（nightme 重启后，已结束的 session 可恢复 stdout 历史） |
-| F-16 | Web TTY UI（浏览器实时看 + 操作） |
-| F-17 | 健康检查 / 心跳（session 失联自动告警） |
-| F-18 | Token / API key 注入（避免在 channel 里裸露） |
+> 本 SPEC 只保留高层产品定位 + 技术栈 + 决策；逐项功能描述 + 验收标准独立维护，便于后续按需追加。
 
 ---
 
@@ -185,9 +160,9 @@
 
 ## 9. 下一步
 
-PRD 已锁定。下一步：
+SPEC 已锁定。下一步：
 
-1. ✅ 本 PRD 冻结
+1. ✅ 本 SPEC 冻结
 2. ⏭ 写 `docs/architecture.md`（PTY 桥、Session lifecycle、process registry schema、Channel/Agent interface）
 3. ⏭ 写 `docs/cli-bridge.md`（byte pipe 协议 + ANSI 处理策略 + 重连/崩溃恢复）
 4. ⏭ 出 **Implementation Brief**（milestone 拆分 + 第一个 PR 的 commit 计划）

@@ -3,7 +3,7 @@
 > **状态**：v1.0
 > **作者**：🦞 虾哥（PM/Architect）
 > **日期**：2026-07-31
-> **依赖**：`PRD.md`、`architecture.md`
+> **依赖**：`SPEC.md`、`architecture.md`、`FEATURES.md`
 
 本文档回答：**nightme 怎么把 Claude Code 的 TTY 字节流搬到飞书、再把飞书的字节流搬回 TTY**。
 

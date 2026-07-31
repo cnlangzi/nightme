@@ -1,7 +1,7 @@
 # F-21: Agent Communication Modes (ACP | SDK | PTY)
 
-> **Status**: designed (v0.1 architecture; v0.1 implementation order = ACP first)
-> **Milestone**: M1 architecture / M2 partial (PTY fallback) / v0.2 SDK
+> **Status**: implemented (v0.2: ACP + SDK fallback + PTY)
+> **Milestone**: M1 architecture / v0.1 PTY fallback / v0.2 ACP and SDK adapter
 > **Depends on**: F-09 (Agent abstraction), F-19 (CLI Bridge)
 > **Related docs**: SPEC.md §1.1 (Agent), [F-09-agent-abstraction.md](./F-09-agent-abstraction.md), [F-19-cli-bridge.md](./F-19-cli-bridge.md)
 
@@ -118,7 +118,7 @@ type AgentSession interface {
 
 ## 5. 三个 Mode 实现（实施顺序）
 
-### 5.1 ModeACP（v0.1 实施 — baseline）
+### 5.1 ModeACP (v0.2 implemented)
 
 **为什么 ACP 优先实施**：
 - Codex 已支持（Happy Coder 验证）
@@ -306,78 +306,61 @@ func (s *ptySession) readLoop() {
 - ANSI / 进度条 / spinner 在 IM 显示为乱码
 
 **v0.1 实际用法**：
-- Claude Code 暂时走 PTY（Anthropic 不支持 ACP，等 SDK adapter）
+- Claude Code 暂时走 PTY；v0.2 registry 已切到 ModeSDK seam，但 Go SDK 缺失时明确返回 `ErrNotImplemented`
 - 未知 CLI 走 PTY
 
-## 6. v0.1 Agent 注册表
+
+### 5.4 v0.2 implementation notes
+
+#### ACP wire protocol
+
+The bridge implements stable ACP v1 over newline-delimited JSON-RPC 2.0. `internal/bridge/acp/rpc.go` owns request IDs, concurrent writes, response correlation, and JSON-RPC error decoding. `internal/bridge/acp/session.go` starts the read pump before the handshake, sends:
+
+1. `initialize` with `protocolVersion: 1`, `clientInfo`, and conservative filesystem/terminal capabilities;
+2. `session/new` with `cwd` and an empty `mcpServers` list; and
+3. `session/prompt` for each `SendText` call.
+
+Stable ACP uses `session/update` notifications. The adapter maps `agent_message_chunk` to `EventText`, `tool_call` / `tool_call_update` to tool events, and `session/request_permission` requests to `EventPermission`. The older `message_chunk`, `permission_request`, `tool_start`, `tool_end`, and `session_end` names from the original design are accepted as compatibility aliases for mock servers and early adapters. ACP v1 has no required `session_end` notification; EOF is mapped to `EventDone{ExitCode: -1}`.
+
+The PTY is only the physical carrier. Invalid non-JSON banner lines are ignored so a CLI banner cannot corrupt JSON-RPC framing. `Close` closes the transport; it does not wait for an optional `shutdown` method because ACP v1 sessions use `session/close` or process lifetime rather than a universal JSON-RPC shutdown handshake.
+
+#### Agent launch commands
+
+- **OpenCode** exposes ACP as `opencode acp`, not `opencode --acp`; the example config uses `command: opencode` and `args: [acp]`.
+- **Codex CLI** does not expose a first-party `--acp` mode. The maintained ACP adapter is the separate `codex-acp` executable (`@agentclientprotocol/codex-acp`); the example config uses `command: codex-acp`. `CODEX_PATH` can point the adapter at a non-default Codex binary.
+- Custom agent names remain ModePTY. A configured `claude`, `codex`, or `opencode` selects SDK, ACP, or ACP respectively; a path passed directly to the CLI remains PTY.
+
+#### Claude Code SDK finding
+
+Anthropic's official Claude Agent SDK is currently published for Python and TypeScript only. There is no official `github.com/anthropics/claude-code-sdk-go` package. `github.com/anthropics/anthropic-sdk-go` is the Messages API client, not the Claude Code agent runtime, and would require reimplementing the tool loop and built-in tools. Therefore `internal/bridge/sdk` implements the requested ModeSDK surface and returns `ErrNotImplemented` with a PTY fallback instruction. When Anthropic publishes an official Go Agent SDK, this adapter is the narrow replacement point.
+
+#### Deliberate deviations and deferred work
+
+- The original design's `new_session` / `send_message` names are represented by ACP v1's `session/new` / `session/prompt` methods.
+- Initial prompts are sent after session creation through `SendText`; `StartConfig` has no initial-message field.
+- Permission responses use the ACP request response ID and `outcome.selected.optionId`, rather than a second request, while the legacy notification shape is still accepted for compatibility.
+- ACP filesystem, terminal, authentication, session persistence, resize, attachment, and MCP forwarding are not implemented in this sub-task. They are v0.3+ work.
+
+## 6. v0.2 Agent 注册表
+
+注册表由配置驱动（`cmd/nightme/test.go`）；实现选择保持在统一 `agent.Agent` 接口之后：
 
 ```go
-// internal/agent/registry.go
-func init() {
-    // Codex: 用 ACP（已支持）
-    codex.Register(&acpagent.Agent{
-        name:    "codex",
-        command: "codex",       // Codex 自带的 ACP server 入口
-        args:    []string{"--acp"},
-    })
-    
-    // OpenCode: 用 ACP（如支持）
-    opencode.Register(&acpagent.Agent{
-        name:    "opencode",
-        command: "opencode",    // OpenCode 的 ACP server 入口（待验证 flag）
-    })
-    
-    // Claude Code: 暂时用 PTY（Anthropic 暂不支持 ACP）
-    // v0.2 加 SDK adapter 后切到 ModeSDK
-    claude.Register(&ptyagent.Agent{
-        name:    "claude",
-        command: "claude",
-    })
-}
+// claude -> ModeSDK (SDK adapter currently returns ErrNotImplemented)
+// codex -> ModeACP (codex-acp executable)
+// opencode -> ModeACP (opencode acp)
+// unknown configured names and direct binary paths -> ModePTY
 ```
 
 ## 7. Channel 渲染（事件 → IM）
 
-Channel Adapter 接收 `AgentSession.Events()` 的事件流：
+Channel Adapter 接收 `AgentSession.Events()` 的统一事件流：
 
-```go
-// internal/channel/feishu/feishu.go
-func (a *feishuAdapter) renderAndSend(chatID string, event AgentEvent) error {
-    switch event.Kind {
-    case EventText:
-        return a.SendMessage(chatID, event.Text)
-    
-    case EventPermission:
-        // 飞书 interactive card（按钮）
-        return a.sendPermissionCard(chatID, event.Permission)
-    
-    case EventToolStart:
-        return a.SendMessage(chatID, "🔧 "+event.ToolStart.Name+"...")
-    
-    case EventToolEnd:
-        if event.ToolEnd.Err != nil {
-            return a.SendMessage(chatID, "❌ "+event.ToolEnd.Name+" failed")
-        }
-        return a.SendMessage(chatID, "✅ "+event.ToolStart.Name+" done")
-    
-    case EventDone:
-        return a.SendMessage(chatID, "Session ended (exit "+strconv.Itoa(event.Done.ExitCode)+")")
-    
-    case EventError:
-        return a.SendMessage(chatID, "Error: "+event.Error.Err.Error())
-    }
-}
-```
-
-**不同 Mode 的渲染差异**：
-- **PTY mode**：所有 event 都是 TextEvent（字节流），全部当文本发；ANSI 显示为字面量
-- **ACP mode**：结构化 event，飞书渲染为富文本（按钮、emoji）
-- **SDK mode**：同 ACP，更丰富（vendor-specific event types）
+- PTY mode sends raw `EventText` bytes, including any ANSI sequences.
+- ACP mode can render `EventPermission`, `EventToolStart`, and `EventToolEnd` as structured UI elements.
+- SDK mode has the same target event model; the current Go adapter reports its unavailable SDK explicitly.
 
 ## 8. SessionManager 变化
-
-```go
-// internal/session/manager.go
 type Session struct {
     ChatID       string
     Workspace    string
@@ -414,19 +397,17 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Session, erro
 
 | 阶段 | Mode | 工作量 | 状态 |
 |------|------|--------|------|
-| **v0.1** | **ACP** | ~2 周 | 实施（baseline） |
-| **v0.1** | **PTY** | 已完成 | 兜底（已有 codebase） |
-| **v0.2** | **SDK** | ~1.5 周 | Claude Code Agent SDK |
-| **v0.3+** | 优化 | - | ACP/PTY 性能优化、新 CLI 支持 |
+| **v0.1** | **PTY** | 已完成 | 通用 byte pipe 兜底 |
+| **v0.2** | **ACP** | 已完成 | stable ACP v1 JSON-RPC bridge |
+| **v0.2** | **SDK** | 已完成（fallback） | Go Agent SDK 不存在，保留 ModeSDK seam |
+| **v0.3+** | 优化 | - | ACP capability expansion, SDK when available, persistence |
 
-**为什么 v0.1 不做 SDK**：
-- ACP 已经能服务 Codex 和 OpenCode
-- Claude Code 走 PTY 暂时能用（用户妥协）
-- SDK 是 vendor-specific 工作，等 ACP 普及后再补
+**v0.2 已完成**：ACP session handshake/event mapping、Claude ModeSDK adapter seam、配置驱动的 Claude/Codex/OpenCode mode selection，以及 PTY fallback。
 
 **未来可能的演进**：
-- Claude Code 支持 ACP → 切到 ACP，下掉 SDK adapter
-- OpenCode 加自定义协议 → 评估是否值得写 SDK adapter（多数情况不需要）
+- Anthropic 发布官方 Go Claude Agent SDK → replace `internal/bridge/sdk` sentinel with native session adapter
+- Claude Code 支持 ACP → prefer ACP and remove the vendor-specific path
+- Add ACP filesystem/terminal/MCP capabilities only with explicit permission and security review
 
 ## 10. Edge cases
 
@@ -437,37 +418,29 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Session, erro
 | Agent Mode=ACP 但 handshake 失败 | Start 返回 error |
 | Agent Mode=PTY 但 binary 不存在 | Detect 提前检查，Start 返回 error |
 | PTY mode 下用户需要权限确认 | 用户看到 "Allow? [Y/n]"，手动输 `Y\n` |
-| ACP mode 下用户需要权限确认 | IM 渲染为按钮，用户点 → SendPermission |
+| ACP mode 下用户需要权限确认 | JSON-RPC permission request 映射为 `EventPermission`，用户选择后发送 response ID |
 | Channel 不支持 PermissionRequest 渲染 | 降级为文本（"Permission: X，respond 'yes' or 'no'"）|
-| SDK adapter 和 ACP adapter 同时存在（如 Claude Code 后续加 ACP）| 优先 ACP（user 切换到 ACP mode 后下掉 SDK 注册）|
-| nightme 重启，session 已 detach（ACP mode）| v0.2 评估（ACP session 寿命跟 client 绑，可能需要 SDK persistence API）|
+| SDK adapter 不可用 | 返回 `sdk.ErrNotImplemented`，用户改用 PTY |
+| nightme 重启，session 已 detach（ACP mode）| v0.3 评估 ACP session persistence |
 
 ## 11. Test plan
 
 **单元测试**：
 - ptySession.readLoop 正确把 bytes 转 TextEvent
 - ptySession.SendText / SendPermission / Close 正确
-- acpSession 把 ACP events 正确转 AgentEvent
+- acpSession 把 ACP v1 events 及 legacy aliases 转 AgentEvent
 - acpSession.SendPermission 正确发给 ACP server
+- SDK adapter Detect / Mode / ErrNotImplemented
 
 **集成测试**：
-- mock ACP server（JSON-RPC）→ SessionManager.Create + consume events
-- mock SDK → 同上
+- mock ACP server（JSON-RPC）→ initialize + session/new + prompt + event mapping
+- mock SDK fallback → ErrNotImplemented
 - mock PTY → 同上
-
-**E2E（v0.1 ACP mode）**：
-- 飞书 DM `/run codex` → Codex ACP server 启动 → 飞书收到结构化事件
-- 权限确认渲染为飞书按钮
-
-**E2E（v0.1 PTY fallback）**：
-- 飞书 DM `/run claude` → claude PTY 启动 → 飞书收到字节流（含 ANSI 字面量）
-- 用户输 `Y\n` 响应权限确认
 
 ## 12. Open questions
 
-- ACP 协议版本管理（nightme 支持 ACP 哪些版本？v0.2 评估）
-- Claude Code 何时支持 ACP？（看 Anthropic 节奏）
-- 多 mode fallback 是否值得？（如 SDK 失败 → ACP → PTY）v0.1 不做
-- Channel 渲染 PermissionRequest 的飞书 card UX 怎么设计？v0.2 单独 spec
-- SDK session 的 detach + reattach 怎么实现？v0.2 评估
-- OpenCode 的 ACP server 入口是什么 flag？需要查 OpenCode docs（v0.1 实施时确认）
+- ACP v1 capability negotiation: when should filesystem, terminal, auth, and MCP methods be enabled?
+- ACP v2 is experimental; v0.3 should pin a schema version before adding v2-only methods.
+- Should an ACP failure fall back automatically to PTY, or require an explicit user/config choice?
+- How should Feishu render permission options and long-running tool progress? Separate UX work remains.
+- When Anthropic publishes an official Go Agent SDK, should nightme switch from the current sentinel to that adapter, or continue using Claude Code CLI PTY as a compatibility fallback?

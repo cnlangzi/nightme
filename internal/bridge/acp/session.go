@@ -87,7 +87,7 @@ func NewSession(ctx context.Context, bridge Bridge, agentName string, options ..
 	go s.readPump()
 	go func() {
 		<-parentCtx.Done()
-		_ = bridge.Close()
+		_ = s.Close()
 	}()
 
 	config := SessionOptions{}
@@ -262,6 +262,10 @@ func (s *acpSession) handleMethod(message rpcMessage) {
 		s.handleToolEnd(message.Params)
 	case "session_end":
 		s.emit(agent.AgentEvent{Kind: agent.EventDone, Done: &agent.DoneEvent{ExitCode: 0}})
+	case "initialize", "session/new", "session/prompt":
+		// A PTY may echo client requests before the ACP server disables
+		// terminal echo. They are outbound methods, not server calls.
+		return
 	default:
 		if len(message.ID) > 0 {
 			_ = s.rpc.respond(message.ID, nil, &rpcError{Code: -32601, Message: "method not found"})

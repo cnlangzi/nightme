@@ -27,30 +27,31 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 ┌─────────────────────────────────────────────────────────────┐
 │  nightme (single binary on user's laptop)                   │
 │                                                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│  │ Channel      │  │ Session      │  │ PTY Bridge       │  │
-│  │ Adapter      │←→│ Manager      │←→│ (per session)    │  │
-│  │              │  │              │  │                  │  │
-│  └──────────────┘  └──────┬───────┘  └────────┬─────────┘  │
-│                           │                   │             │
-│                           ▼                   ▼             │
-│                    ┌─────────────────┐  ┌──────────────────┐│
-│                    │ Workspace Map  │  │ Claude Code /    ││
-│                    │ chat_id → ws   │  │ Codex / OpenCode ││
-│                    └─────────────────┘  │ (PTY, cwd=ws)    ││
-│                                         └──────────────────┘│
+│  ┌──────────────┐  ┌───────────────────┐  ┌──────────────┐ │
+│  │ Channel      │  │ Session Manager   │  │ PTY Bridge   │ │
+│  │ Adapter      │←→│ (+ Workspace:     │←→│ (per session)│ │
+│  │              │  │  session.ws)      │  │              │ │
+│  └──────────────┘  └─────────┬─────────┘  └──────┬───────┘ │
+│                              │                    │         │
+│                              ▼                    ▼         │
+│                       (session 状态)      ┌──────────────────┐│
+│                                          │ Claude Code /    ││
+│                                          │ Codex / OpenCode ││
+│                                          │ (PTY, cwd=ws)    ││
+│                                          └──────────────────┘│
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 1.1 五个逻辑组件
+### 1.1 四个逻辑组件
 
 | 组件 | 职责 |
 |------|------|
 | **Channel Adapter** | 把 IM 协议（飞书 WebSocket / WhatsApp webhook 等）抽象成统一接口；把 IM 消息收上来、把 nightme 输出推回去 |
-| **Session Manager** | 维护 chat_id ↔ session 的绑定；管理 session 的创建、查询、销毁 |
-| **PTY Bridge** | 在 pseudo-terminal 中 spawn AI Coding CLI；提供读 / 写 / resize 三个能力 |
-| **Workspace Mapper** | 记录 chat_id → workspace 路径；workspace 是 session 的 cwd |
+| **Session Manager** | 维护 chat_id ↔ session 的绑定；管理 session 的创建、查询、销毁；**每个 session 绑定一个 workspace**（session.Workspace 字段，session 创建时确定，生命周期内不变） |
+| **PTY Bridge** | 在 pseudo-terminal 中 spawn AI Coding CLI；提供读 / 写 / resize 三个能力；一个 session 一个 PTY，cwd = session.Workspace |
 | **Process Registry** | 记录 nightme 启动的所有进程（pid + chat_id + workspace + 启动时间）；用于查询、重启恢复、清理 |
+
+> **Workspace 不再是独立组件**：原"Workspace Mapper"是 Session Manager 的子功能——每个 session 自带 workspace 字段，查找 chat_id 对应 workspace = `session.Workspace`，无需独立映射表。
 
 > **实现细节**：这些组件的 Go 接口、struct、文件路径在 [`feat/`](./feat/) 各自的 feature doc 里。
 

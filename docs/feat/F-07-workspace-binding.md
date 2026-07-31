@@ -3,7 +3,7 @@
 > **Status**: designed (v0.1)
 > **Milestone**: M1 (used by M2)
 > **Depends on**: F-01 (Session), F-04 (PTY)
-> **Related docs**: SPEC.md §1.1 (Workspace Mapper 组件), §3 (lifecycle)
+> **Related docs**: SPEC.md §1.1 (Session Manager 包含 workspace), §3 (lifecycle)
 
 ## 1. Description
 

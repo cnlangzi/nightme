@@ -45,6 +45,23 @@ type Manager interface {
 	// succeeds.
 	Create(ctx context.Context, req CreateRequest) (*Session, error)
 
+	// CreateOrUpdate binds a chat to a session with the given
+	// workspace. New chatIDs get a detached session record; existing
+	// exited/detached sessions get their workspace rebinded in
+	// place; an already-running session is rejected with
+	// ErrChatAlreadyBound (caller must /kill first).
+	CreateOrUpdate(chatID, workspace, agent string, args []string) (*Session, error)
+
+	// Run ensures a CLI is running for chatID. It is a no-op when
+	// a CLI is already there; otherwise it spawns one in the
+	// session's bound workspace. Returns ErrSessionNotFound when
+	// the chat has no /cwd yet.
+	Run(ctx context.Context, chatID, agent string, extraArgs []string) (*Session, error)
+
+	// KillByChat stops the CLI bound to chatID. The session record
+	// is retained. ErrSessionNotFound when chatID is unknown.
+	KillByChat(chatID string) error
+
 	// GetByChat returns the session bound to chatID, or
 	// ErrSessionNotFound.
 	GetByChat(chatID string) (*Session, error)

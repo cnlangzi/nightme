@@ -79,6 +79,15 @@ type fakeRunManager struct {
 func (f *fakeRunManager) Create(context.Context, session.CreateRequest) (*session.Session, error) {
 	return nil, errors.New("fake run manager: Create not used")
 }
+func (f *fakeRunManager) CreateOrUpdate(string, string, string, []string) (*session.Session, error) {
+	return nil, errors.New("fake run manager: CreateOrUpdate not used")
+}
+func (f *fakeRunManager) Run(context.Context, string, string, []string) (*session.Session, error) {
+	return nil, errors.New("fake run manager: Run not used")
+}
+func (f *fakeRunManager) KillByChat(string) error {
+	return errors.New("fake run manager: KillByChat not used")
+}
 func (f *fakeRunManager) GetByChat(string) (*session.Session, error) {
 	return nil, session.ErrSessionNotFound
 }

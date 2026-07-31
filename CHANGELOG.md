@@ -6,8 +6,26 @@ as closely as a pre-1.0 project can.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-01
+
+Second public release. Closes out the F-21 (JSON-IO + ACP/SDK/PTY per-agent bridges), F-23 (heartbeat), F-24 (Claude Code bridge), and F-25 (input buffer + dual-track receipts) milestones and ships a deterministic streaming status surface (event-driven, no clock-based guessing).
+
 ### Added
-- GitHub Actions CI workflow (`.github/workflows/ci.yml`)
+- F-23 Heartbeat & Streaming Status: event-driven tick + `ProcessProbe` (进程级 truth) + 用户主权 kill
+- F-24 Claude Code Bridge: `--input-format stream-json` + `--output-format stream-json` + `--permission-mode bypassPermissions` + `AskUserQuestion` 双路兼容 (tool_use 拦截 + text fallback) + `PreToolUse` hook (可选 headless answer)
+- F-25 Input Buffer: in-memory queue (50 msgs / 100KB, 3 states: Waiting / Active / Done); `flush` 把 buffer 合成单条 prompt 喂给 bridge
+- F-25 MessageReceipt: 双轨状态 (Reaction emoji + Reply note), in-place swap 不堆叠; Feishu adapter exposes `AddReaction`
+- F-21 ACP backend: `internal/bridge/acp` JSON-RPC client + session 实现
+- F-21 SDK adapter fallback: `internal/bridge/sdk` Claude Code SDK adapter
+- F-21 agent mode registry: `claude` / `codex` / `opencode`
+- ChatType discriminator on incoming messages (DM vs group) + gateway wire (`run.go`)
+- Renderer + F-25 receipts 接入 run daemon (text fallback + `updateMessage` + buffer integration)
+- GitHub Actions CI workflow (`.github/workflows/ci.yml`, `go build` + `go vet` + `go test -race`)
+- Release workflow builds + uploads binary on `v*` tag push
+
+### Fixed
+- channel/feishu: swap reactions in-place, no accumulation
+- session test: drop unused `sync/atomic` import to satisfy `go vet`
 
 ## [0.1.0] - 2026-07-31
 

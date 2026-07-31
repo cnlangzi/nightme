@@ -40,3 +40,4 @@ sessions.json
 data/
 # Claude local config
 .claude/
+.codegraph/

@@ -38,3 +38,5 @@ go.work.sum
 registry.json
 sessions.json
 data/
+# Claude local config
+.claude/

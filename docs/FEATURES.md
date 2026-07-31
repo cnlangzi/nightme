@@ -29,8 +29,10 @@
 | F-10 | Session 列表命令（`nightme list` / `kill`）| [feat/F-10-session-list-cmd.md](./feat/F-10-session-list-cmd.md) | M3 |
 | F-19 | PTY Mode Byte Pipe（Bridge 的 PTY 实现细节）| [feat/F-19-cli-bridge.md](./feat/F-19-cli-bridge.md) | M1 |
 | F-20 | Command Gateway（slash command 路由 + /cwd /run /kill /help）| [feat/F-20-gateway.md](./feat/F-20-gateway.md) | M2 |
-| F-21 | Agent Communication Modes（ACP / SDK / PTY 三层降级）| [feat/F-21-agent-modes.md](./feat/F-21-agent-modes.md) | M1 arch / M2 partial |
+| F-21 | Agent Communication Modes（ACP / SDK / PTY / JSON-IO 四层降级）| [feat/F-21-agent-modes.md](./feat/F-21-agent-modes.md) | M1 arch / M2 partial / v0.2 JSON-IO |
 | F-22 | Feishu One-Click App Registration（QR 扫码授权 onboarding）| [feat/F-22-feishu-onclick-registration.md](./feat/F-22-feishu-onclick-registration.md) | M2 |
+| F-23 | Heartbeat & Streaming Status（event-driven tick + 进程级 DEAD 检测）| [feat/F-23-heartbeat.md](./feat/F-23-heartbeat.md) | v0.2 |
+| F-24 | Claude Code Bridge（JSON-IO + auto-accept + AskUserQuestion）| [feat/F-24-claudecode-bridge.md](./feat/F-24-claudecode-bridge.md) | v0.2 |
 
 ## 2. 后续功能（v0.2+）
 
@@ -42,10 +44,12 @@
 | F-14 | 图片 / 文件附件透传 | [feat/F-14-attachment-passthrough.md](./feat/F-14-attachment-passthrough.md) | v0.2 |
 | F-15 | Session 持久化（stdout 历史）| [feat/F-15-session-persistence.md](./feat/F-15-session-persistence.md) | v0.2 |
 | F-16 | Web TTY UI（xterm.js + WebSocket）| [feat/F-16-web-tty-ui.md](./feat/F-16-web-tty-ui.md) | v0.2 |
-| F-17 | 健康检查 / 心跳 | [feat/F-17-health-check.md](./feat/F-17-health-check.md) | v0.2 |
+| F-17 | ~~健康检查 / 心跳~~ | ~~[feat/F-17-health-check.md](./feat/F-17-health-check.md)~~ | **superseded by F-23** |
 | F-18 | ~~Token / API key 注入~~ | — | **cancelled** |
 
 > **F-19 编号说明**：cli-bridge 在早期版本是独立顶层文档；按"feature 都在 feat/"原则，作为基础设施类 feature 加入，编号 19 跟在 MVP 功能后面。v0.2+ 功能保持原编号。
+
+> **F-17 → F-23 supersession**：原 F-17（v0.2 stub）是基于"30s/5min 阈值判断 idle/timeout"的设计，收敛后由 F-23（event-driven + 进程级 truth）取代。F-17 设计文档保留作历史记录。
 
 > **注意**：v0.2+ 功能的设计文档目前是 stub，仅记录设计方向和 open questions。详细设计在 v0.2 设计阶段补全。
 >

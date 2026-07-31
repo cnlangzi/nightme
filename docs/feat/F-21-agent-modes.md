@@ -1,9 +1,9 @@
-# F-21: Agent Communication Modes (ACP | SDK | PTY)
+# F-21: Agent Communication Modes (ACP | SDK | PTY | JSON-IO)
 
-> **Status**: implemented (v0.2: ACP + SDK fallback + PTY)
-> **Milestone**: M1 architecture / v0.1 PTY fallback / v0.2 ACP and SDK adapter
+> **Status**: implemented (v0.2: ACP + SDK fallback + PTY) / v0.2 extension (JSON-IO for Claude Code)
+> **Milestone**: M1 architecture / v0.1 PTY fallback / v0.2 ACP and SDK adapter / v0.2 JSON-IO for Claude Code
 > **Depends on**: F-09 (Agent abstraction), F-19 (CLI Bridge)
-> **Related docs**: SPEC.md §1.1 (Agent), [F-09-agent-abstraction.md](./F-09-agent-abstraction.md), [F-19-cli-bridge.md](./F-19-cli-bridge.md)
+> **Related docs**: SPEC.md §1.1 (Agent), [F-09-agent-abstraction.md](./F-09-agent-abstraction.md), [F-19-cli-bridge.md](./F-19-cli-bridge.md), [F-24-claudecode-bridge.md](./F-24-claudecode-bridge.md)
 
 ## 1. Description
 
@@ -13,7 +13,10 @@
 |--------|------|------|-----|----------|
 | **1 (baseline)** | **ACP**（Agent Client Protocol）| Codex、OpenCode、未来 ACP agent | 好：结构化事件、权限确认、工具进度 | 中：协议标准、实现一次复用多 CLI |
 | **2 (vendor-specific)** | **SDK**（CLI 自定义 SDK）| Claude Code（Anthropic 暂不支持 ACP）| 优：原生体验 | 高：每个 CLI 单独写，vendor lock-in |
-| **3 (fallback)** | **PTY 透传** | 任何不支持 ACP/SDK 的 CLI | 差：ANSI / 进度条 / spinner 乱码 | 低：通用 byte pipe |
+| **3 (JSON-IO)** | **JSON-IO**（专用 stream-json 模式）| Claude Code（v0.2+）| 优：结构化 event + AskUserQuestion 渲染 | 中：每个 CLI 独立 bridge package |
+| **4 (fallback)** | **PTY 透传** | 任何不支持以上三种的 CLI | 差：ANSI / 进度条 / spinner 乱码 | 低：通用 byte pipe |
+
+> **v0.2 新增 ModeJSONIO**：Claude Code 走专用 bridge（不用 SDK 也不用 PTY）。详细设计见 [F-24-claudecode-bridge.md](./F-24-claudecode-bridge.md)。
 
 **设计原则**：
 - **ACP 优先**——标准化协议，nightme 不需要为每个 CLI 写 vendor-specific 代码
@@ -46,6 +49,11 @@ nightme 启动 session 时:
   │              → 调 SDK client（如 Claude Code Agent SDK）
   │              → SDK 原生返回结构化 events
   │              → AgentSession 包装 SDK connection
+  ├─ ModeJSONIO → 用 CLI 自家的 stream-json 模式
+  │              → spawn `claude --input-format stream-json --output-format stream-json ...`
+  │              → parse JSON events（system / assistant / tool_use / tool_result / result）
+  │              → AskUserQuestion 双路兼容（tool_use 拦截 + text fallback）
+  │              → AgentSession 包装 claudecode.Bridge
   └─ ModePTY  → 兜底（任何 CLI 都能用）
                  → spawn CLI 在 PTY 中
                  → read goroutine 把 bytes 转 TextEvent
@@ -65,6 +73,7 @@ const (
     ModeACP Mode = iota  // 优先：Agent Client Protocol
     ModeSDK              // vendor-specific（如 Claude Code SDK）
     ModePTY              // 兜底：透明透传
+    ModeJSONIO           // 专用 stream-json 模式（如 Claude Code v0.2+）
 )
 
 type EventKind int
@@ -310,7 +319,58 @@ func (s *ptySession) readLoop() {
 - 未知 CLI 走 PTY
 
 
-### 5.4 v0.2 implementation notes
+### 5.4 ModeJSONIO（v0.2 实施 — Claude Code 专用）
+
+**适用**：Claude Code（Anthropic CLI）。使用 `--input-format stream-json --output-format stream-json` 模式 + `--permission-mode bypassPermissions`。
+
+**详细设计**：[F-24-claudecode-bridge.md](./F-24-claudecode-bridge.md)。
+
+**核心机制**：
+
+```go
+// internal/bridge/claudecode/claudecode.go
+
+type Agent struct{}
+
+func (a *Agent) Mode() Mode { return ModeJSONIO }
+
+func (a *Agent) Start(ctx context.Context, cfg StartConfig) (AgentSession, error) {
+    cmd := exec.CommandContext(ctx, "claude",
+        "--print",
+        "--input-format", "stream-json",
+        "--output-format", "stream-json",
+        "--permission-mode", "bypassPermissions",
+        "--verbose",
+    )
+    cmd.Dir = cfg.Workspace
+    // ... spawn + pipe stdin/stdout
+    
+    session := &claudeSession{
+        cmd: cmd, stdin: stdin, stdout: stdout,
+        events: make(chan AgentEvent, 64),
+    }
+    go session.pumpStdout()  // parse stream-json events
+    return session, nil
+}
+```
+
+**为什么不用 SDK**：
+- Anthropic 官方 Claude Agent SDK 只发布 Python / TypeScript 版本
+- 没有官方 Go SDK
+- ModeSDK seam 在 v0.1 是占位（`ErrNotImplemented`）
+
+**为什么不用 PTY**：
+- PTY 看不到结构化 event（只有 raw bytes + ANSI 垃圾）
+- 权限确认靠用户手动输 `Y\n`
+- AskUserQuestion 工具的卡片渲染不可能（PTY 看不出 tool_use）
+
+**为什么不用 ACP**：
+- Claude Code 暂不支持 ACP
+- 如果未来支持，nightme 可以下掉 JSON-IO bridge 切 ACP
+
+**v0.2 决策**：每 CLI 独立 bridge package（per-agent bridge 架构），不复用 PTY/ACP/SDK 基础设施。
+
+### 5.5 v0.2 implementation notes
 
 #### ACP wire protocol
 

@@ -35,8 +35,8 @@ M2  ──  "Feishu Round-Trip MVP"（ACP 模式 + Gateway）
 M3  ──  "Hardening + v0.1 release"
   目标: 错误处理 + 重连 + 进程清理 + CI + 文档 + v0.1 release
 
-v0.2  ──  SDK adapter（Claude Code Agent SDK）
-v0.3+ ──  更多 CLI 支持、终端 resize、健康检查等
+v0.2  ──  Claude Code 专用 bridge（F-24）+ 心跳/streaming status（F-23）
+v0.3+ ──  更多 CLI 支持、终端 resize、SDK 等
 ```
 
 **M0 → M1 → M2 → M3 是主要工作**。M1 必须稳（架构骨架），M2 加 IM 链路（最大跳跃），M3 是 production-readiness。
@@ -361,8 +361,135 @@ commit 19: docs: e2e manual test guide + ACP/PTY design notes
 |-----|------|----------|------|
 | **codex** | ACP | M2 实施 | 复用 acp.go |
 | **opencode** | ACP | M2 实施（如支持）| 需要 OpenCode 的 ACP server flag，v0.1 stub，verify in M2 |
-| **claude** | PTY | M2 用 PTY | Anthropic 不支持 ACP，v0.2 切 SDK |
+| **claude** | PTY → JSON-IO | M2 PTY（临时）/ v0.2 JSON-IO | Anthropic 不支持 ACP，v0.2 切专用 JSON-IO bridge（F-24）|
 | **未知 CLI** | PTY | M2 fallback | 任何 CLI 都能用 |
+
+---
+
+## 4.5 v0.2: Claude Code Bridge + Heartbeat
+
+### 4.5.1 目标
+
+让 Claude Code 在 nightme 里获得原生体验：
+
+- **结构化 event 流**：不再有 ANSI 垃圾
+- **自动接受权限**：`--permission-mode bypassPermissions`
+- **AskUserQuestion 卡片渲染**：用户可以在飞书里多选 / 自定义
+- **心跳可见性**：用户随时知道"还在响应 / 真断了"
+
+**心路历程**：原计划"v0.2 = SDK adapter" → Anthropic 没 Go SDK → 改走"Claude Code 专用 bridge (JSON-IO)"。详见 [F-24-claudecode-bridge.md](./feat/F-24-claudecode-bridge.md) §1。
+
+**F-23 vs F-17 关系**：原 F-17（v0.2 stub）基于"30s/5min 阈值"判断 idle/timeout — 这是错误设计。**F-23 取代 F-17**，基于 event-driven tick + 进程级 DEAD 检测。
+
+### 4.5.2 范围
+
+- ✅ **F-24**: Claude Code bridge (JSON-IO + auto-accept + AskUserQuestion)
+- ✅ **F-23**: Heartbeat (event-driven + 进程级 DEAD + 用户主权)
+- ❌ PreToolUse hook（v0.3 评估）
+- ❌ Codex / OpenCode 升级（维持 ACP 模式）
+
+### 4.5.3 文件结构（v0.2 新增）
+
+```
+internal/
+├── bridge/
+│   └── claudecode/        # v0.2 新增
+│       ├── claudecode.go
+│       ├── session.go
+│       ├── stream.go
+│       ├── permissions.go
+│       ├── ask.go          # AskUserQuestion 拦截
+│       ├── format.go
+│       └── testdata/
+│           ├── init.json
+│           ├── text_chunk.json
+│           ├── tool_use.json
+│           ├── tool_result.json
+│           ├── ask_question.json
+│           └── result.json
+├── heartbeat/              # v0.2 新增
+│   ├── heartbeat.go
+│   ├── process.go          # ProcessProbe interface
+│   ├── format.go           # text/idle duration
+│   └── heartbeat_test.go
+└── channel/
+    └── feishu/
+        └── card.go         # v0.2 扩展：card note update API
+```
+
+### 4.5.4 v0.2 Commit 拆分（5 commits）
+
+```
+commit A: docs(feat): F-23 heartbeat (event-driven tick + 进程级 DEAD)
+  - docs/feat/F-23-heartbeat.md
+  - 取代 F-17 stub
+
+commit B: docs(feat): F-24 claudecode-bridge spec
+  - docs/feat/F-24-claudecode-bridge.md
+  - 含 4 个触发条件 / JSON-IO schema / AskUserQuestion 双路兼容
+
+commit C: feat(heartbeat): event-driven tick + ProcessProbe
+  - internal/heartbeat/{heartbeat,process,format}.go
+  - heartbeat_test.go (含 mock ProcessProbe)
+  - single-line note update 机制
+  - ✅ test: 单元测试全绿（覆盖 idle 检测、DEAD 双路、format）
+
+commit D: feat(bridge/claudecode): JSON-IO + auto-accept
+  - internal/bridge/claudecode/{claudecode,session,stream,permissions}.go
+  - spawn `claude --print --input-format stream-json --output-format stream-json --permission-mode bypassPermissions --verbose`
+  - parse stream-json events → AgentEvent
+  - testdata/ 提供 6 个 mock JSON fixture
+  - ✅ test: 单元测试用 fixture 验证 event parse
+
+commit E: feat(bridge/claudecode): AskUserQuestion 双路兼容
+  - internal/bridge/claudecode/ask.go
+  - tool_use 拦截路径 + text fallback 路径
+  - 答案回写：string (单选) + string (多选逗号) + array (多选 array) 都支持
+  - ✅ test: 5 个 trigger prompt 测试用例（待真 Claude 验证）
+
+commit F: feat(channel/feishu): AskUserQuestion 卡片 + heartbeat card update
+  - internal/channel/feishu/card.go 扩展
+  - AskUserQuestion 卡片渲染（第一项 Recommended 高亮）
+  - heartbeat card note update API
+  - ✅ test: 卡片 schema 验证
+```
+
+**实际可能拆 6+ commits**，每个 commit 单独可验收。
+
+### 4.5.5 验收标准（v0.2）
+
+| 项 | 标准 |
+|----|------|
+| Claude Code spawn | `claude --print --input-format stream-json --output-format stream-json --permission-mode bypassPermissions` 启动成功 |
+| Event parse | 6 个 fixture 全部正确 parse（init/text/tool_use/tool_result/ask/result）|
+| AskUserQuestion tool_use 拦截 | 检测到 `tool_use.name=="AskUserQuestion"` → emit EventPermissionRequest |
+| AskUserQuestion text fallback | 检测 markdown 表格 + "Pick one" 关键词 → emit EventPermissionRequest |
+| 飞书卡片 | AskUserQuestion 渲染为 interactive card，第一项加 (Recommended) |
+| 答案回写（单选）| string 格式正确写入 stdin |
+| 答案回写（多选 array）| array 格式正确写入 stdin |
+| 答案回写（多选 string）| 逗号分隔 string 正确写入 stdin |
+| Heartbeat tick | 每个 event +1，card note 显示 "⏳ N · HH:MM:SS" |
+| Heartbeat idle | 30s+ 没 event 显示 "⏳ N · HH:MM:SS · idle Xs/Xm" |
+| DEAD 检测（进程退出）| signal 0 失败 → card note 变 "❌ 已退出（exit code: X）" |
+| DEAD 检测（stdout EOF）| pipe 关闭 → card note 变 "❌ 输出流已关闭" |
+| 不自动 kill | 长 idle 30 min 也不报 DEAD，不 kill 进程 |
+| 飞书 reaction | turn 开始加 1 个 "👀"，不堆叠 |
+
+### 4.5.6 与 v0.1 PTY mode 的关系
+
+Claude Code 在 v0.1 走 PTY。v0.2 切 JSON-IO 后：
+
+- **PTY 仍然保留**（v0.1 不变）—— 兜底给未知 CLI
+- **Claude Code 切到 JSON-IO** —— 用专用 bridge package
+- **每 CLI 独立 bridge** —— per-agent bridge 架构（详见 F-21 §1 + §8.1）
+
+### 4.5.7 未实测部分
+
+- **本地测试环境限制**：ANTHROPIC_BASE_URL 强制 routing 到 MiniMax，本地不能实测真 Claude 的 AskUserQuestion 行为
+- **user answer 实际 wire format**：需要真 Claude 验证（推断为 tool_result.content 字符串/数组）
+- **CHANGELOG 显示 AskUserQuestion 持续维护**——大方向稳定，细节需实测
+
+**v0.2 release note** 必须标"待真 Claude 验证"。
 
 ---
 
@@ -382,15 +509,18 @@ commit 19: docs: e2e manual test guide + ACP/PTY design notes
 
 ### 4.2 不在 M3 范围（留给 v0.2+）
 
-- SDK adapter（Claude Code Agent SDK）— v0.2
-- 图片 / 文件透传（F-14）— v0.2
-- 终端 resize（F-13）— v0.2
-- 多 Channel mirror（F-11）— v0.2
-- WhatsApp / Telegram（F-12）— v0.2
-- Web TTY UI（F-16）— v0.2
-- 健康检查（F-17）— v0.2
-- Session 历史持久化（F-15）— v0.2
+- **F-23** Heartbeat（event-driven + 进程级 DEAD）— v0.2
+- **F-24** Claude Code Bridge（JSON-IO + AskUserQuestion）— v0.2
+- 图片 / 文件透传（F-14）— v0.2+
+- 终端 resize（F-13）— v0.2+
+- 多 Channel mirror（F-11）— v0.2+
+- WhatsApp / Telegram（F-12）— v0.2+
+- Web TTY UI（F-16）— v0.2+
+- ~~F-17 健康检查~~ — **superseded by F-23**
+- Session 历史持久化（F-15）— v0.2+
 - ~~密码注入（F-18）~~ — **cancelled**，透传处理（PRD §4.1）
+
+> **SDK adapter 取消**：原计划"v0.2 = SDK adapter"，但 Anthropic 没官方 Go Claude Agent SDK（只有 Python/TS）。改走"Claude Code 专用 JSON-IO bridge"（F-24）。
 
 ---
 
@@ -402,7 +532,7 @@ commit 19: docs: e2e manual test guide + ACP/PTY design notes
 | M1 | 2-3 sessions | ~1000 行 Go | Bridge 抽象 + PTY backend + Session + Registry |
 | M2 | 3-4 sessions | ~1800 行 Go | Gateway + ACP backend + Channel + 飞书 round-trip |
 | M3 | 1-2 sessions | ~400 行 Go + docs | hardening + CI + v0.1 release |
-| v0.2 | 1-2 sessions | ~500 行 Go | SDK adapter + Claude Code native 体验 |
+| v0.2 | 2-3 sessions | ~1200 行 Go | F-23 heartbeat + F-24 claudecode-bridge |
 
 每个 session 内：
 - 读 docs → 写 commit → 跑测试 → 汇报 → 等用户反馈
@@ -440,6 +570,11 @@ M1 的第一个 PR：
 ## 8. 文档变更日志
 
 - **v1.0** — 初始版本（基于早期 PRD/SPEC 设计）
+- **v2.1** — v0.2 设计加入：
+  - F-23 heartbeat 取代 F-17（event-driven tick + 进程级 DEAD + 用户主权）
+  - F-24 claudecode-bridge（JSON-IO + AskUserQuestion 双路兼容）
+  - F-21 ModeJSONIO（v0.2 新增模式，取代原计划 SDK adapter）
+  - per-agent bridge 架构明确化（每 CLI 独立 bridge package）
 - **v2.0** — 重写以适配最新架构：
   - Session lifecycle 改为 `/cwd` + `/run` 两步式（不再用文字 `workspace:` 前缀）
   - Bridge 抽象支持 ACP/SDK/PTY 三层模式（不再只是 PTY）

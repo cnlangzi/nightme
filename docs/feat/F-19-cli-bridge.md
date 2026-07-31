@@ -322,7 +322,7 @@ v0.1 不做决策，等用户反馈。
 ### 8.1 单元测试
 
 ```go
-// internal/pty/bridge_test.go
+// internal/bridge/pty/pty_test.go
 func TestBridge_BasicEcho(t *testing.T) {
     b, _ := pty.New(t.TempDir(), "/bin/echo", []string{"hello"})
     defer b.Close()

@@ -17,15 +17,15 @@
 
 | ID | 功能 | 设计文档 | 里程碑 |
 |----|------|----------|--------|
-| F-01 | Session 创建（`workspace: <path>` 触发）| [feat/F-01-session-create.md](./feat/F-01-session-create.md) | M2 |
-| F-02 | 消息透传（Channel → PTY）| [feat/F-02-message-passthrough.md](./feat/F-02-message-passthrough.md) | M2 |
-| F-03 | 输出推送（PTY → Channel）| [feat/F-03-output-push.md](./feat/F-03-output-push.md) | M2 |
+| F-01 | Session 生命周期（`/cwd` + `/run` 两步式；workspace 持久，CLI 可重启）| [feat/F-01-session-create.md](./feat/F-01-session-create.md) | M2 |
+| F-02 | 消息透传（Channel → AgentSession via Gateway）| [feat/F-02-message-passthrough.md](./feat/F-02-message-passthrough.md) | M2 |
+| F-03 | 输出推送（AgentSession Events → Channel）| [feat/F-03-output-push.md](./feat/F-03-output-push.md) | M2 |
 | F-04 | PTY 模拟（aymanbagabas/go-pty）| [feat/F-04-pty-simulation.md](./feat/F-04-pty-simulation.md) | M1 |
 | F-05 | 进程注册（JSON registry）| [feat/F-05-process-registry.md](./feat/F-05-process-registry.md) | M1 |
 | F-06 | 进程清理（默认 detach，--cleanup kill）| [feat/F-06-process-cleanup.md](./feat/F-06-process-cleanup.md) | M3 |
 | F-07 | Workspace 绑定（cwd 校验 + 路径展开）| [feat/F-07-workspace-binding.md](./feat/F-07-workspace-binding.md) | M1 |
 | F-08 | Channel 抽象（interface + 飞书实现）| [feat/F-08-channel-abstraction.md](./feat/F-08-channel-abstraction.md) | M2 |
-| F-09 | Agent 抽象（interface + Claude 实现）| [feat/F-09-agent-abstraction.md](./feat/F-09-agent-abstraction.md) | M1 |
+| F-09 | Agent 抽象（interface + mode 选择）| [feat/F-09-agent-abstraction.md](./feat/F-09-agent-abstraction.md) | M1 |
 | F-10 | Session 列表命令（`nightme list` / `kill`）| [feat/F-10-session-list-cmd.md](./feat/F-10-session-list-cmd.md) | M3 |
 | F-19 | PTY Mode Byte Pipe（Bridge 的 PTY 实现细节）| [feat/F-19-cli-bridge.md](./feat/F-19-cli-bridge.md) | M1 |
 | F-20 | Command Gateway（slash command 路由 + /cwd /run /kill /help）| [feat/F-20-gateway.md](./feat/F-20-gateway.md) | M2 |

@@ -98,7 +98,7 @@ type SessionManager interface {
 - `internal/gateway/commands.go` — `/cwd` 和 `/run` handlers
 - `internal/session/manager.go` — SessionManager 实现
 - `internal/session/session.go` — Session 数据结构
-- `internal/pty/bridge.go` — pty.New
+- `internal/bridge/pty/pty.go` — pty.New
 - `internal/registry/registry.go` — JSON 持久化
 
 **`/cwd <path>` handler 流程**：
@@ -142,7 +142,7 @@ RunHandler(ctx, msg, args)
 
 **PTY 启动时的 args 合并**：
 ```go
-// internal/pty/bridge.go
+// internal/bridge/pty/pty.go
 finalArgs := append(agent.Args(), userArgs...)  // agent 默认 + 用户透传
 cmd := exec.Command(agent.Command(), finalArgs...)
 cmd.Dir = workspace

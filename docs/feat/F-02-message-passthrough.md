@@ -1,13 +1,18 @@
-# F-02: Message Passthrough (Channel → PTY)
+# F-02: Message Passthrough (Channel → AgentSession)
 
 > **Status**: designed (v0.1)
 > **Milestone**: M2
-> **Depends on**: F-01 (Session), F-04 (PTY), F-08 (Channel), F-20 (Gateway)
-> **Related docs**: [`F-19-cli-bridge.md`](./F-19-cli-bridge.md) §2.1, §4, [`F-20-gateway.md`](./F-20-gateway.md)
+> **Depends on**: F-01 (Session), F-08 (Channel), F-20 (Gateway), F-21 (Agent Modes)
+> **Related docs**: [`F-19-cli-bridge.md`](./F-19-cli-bridge.md) §2.1, §4, [`F-20-gateway.md`](./F-20-gateway.md), [`F-21-agent-modes.md`](./F-21-agent-modes.md)
 
 ## 1. Description
 
-用户在 Chat 里的输入 → 经过 Gateway 路由判断 → 透传到该 Chat 绑定 session 的 PTY stdin。
+用户在 Chat 里的输入 → 经过 Gateway 路由判断 → 透传到该 Chat 绑定 session 的 `AgentSession.SendText()`。
+
+**注意**：发送目标是 `AgentSession`（不是 PTY stdin）。AgentSession 内部决定怎么写：
+- PTY 模式：`bridge.Write(text)`
+- ACP 模式：ACP `SendPrompt` 消息
+- SDK 模式：SDK `Send` 调用
 
 **Gateway 之前**的职责：决定这条消息是 slash command 还是普通文本。
 **本 feature 的职责**：仅处理"普通文本"分支——把消息原样写入 PTY stdin。

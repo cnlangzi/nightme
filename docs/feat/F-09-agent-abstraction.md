@@ -3,11 +3,16 @@
 > **Status**: designed (v0.1)
 > **Milestone**: M1 (used by M2)
 > **Depends on**: (none — interface)
-> **Related docs**: SPEC.md §1.1 (Bridge 组件 spawn agent (见 F-21 三层模式))
+> **Related docs**: SPEC.md §1.1 (Bridge 组件), [F-21-agent-modes.md](./F-21-agent-modes.md) (Mode 决策)
 
 ## 1. Description
 
-定义 `Agent` interface 让 nightme 支持多种 AI Coding CLI。MVP 仅实现 Claude Code，通过抽象 interface 保留扩展位（Codex / OpenCode / Goose / Aider 等）。
+定义 `Agent` interface 让 nightme 支持多种 AI Coding CLI。MVP 注册：
+- `codex` → ModeACP（Codex CLI 支持 ACP）
+- `opencode` → ModeACP（如支持）
+- `claude` → ModePTY（v0.1 临时，v0.2 切 ModeSDK）
+
+每个 agent 实现自己的 Mode（ACP/SDK/PTY），通过 `Mode()` 暴露。nightme 启动 session 时根据 Mode 选择对应的 Bridge backend（见 F-21）。
 
 ## 2. Interface
 

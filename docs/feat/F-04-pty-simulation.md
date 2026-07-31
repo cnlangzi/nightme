@@ -12,7 +12,7 @@
 ## 2. Interface
 
 ```go
-// internal/pty/bridge.go
+// internal/bridge/pty/pty.go
 type Bridge interface {
     io.ReadWriteCloser
     PID() int
@@ -59,7 +59,7 @@ func (b *ptyBridge) Setsize(cols, rows int) error {
 ## 3. Implementation
 
 **文件**：
-- `internal/pty/bridge.go` — Bridge 接口 + ptyBridge 实现
+- `internal/bridge/pty/pty.go` — Bridge 接口 + ptyBridge 实现
 - `go.mod` — `github.com/aymanbagabas/go-pty`
 
 **默认配置**（来自 `configs/nightme.example.yaml`）：

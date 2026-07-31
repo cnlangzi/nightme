@@ -48,8 +48,8 @@ func Resolve(path string) (string, error) {
 - `internal/workspace/workspace_test.go` — 单测
 
 **调用点**：
-- F-01 SessionManager.Create 中，spawn PTY 之前
-- 解析用户首条消息的 `workspace: <path>` 后立即调用
+- F-01 SessionManager.Create 中，agent.Start() 之前
+- 解析用户 `/cwd <path>` slash command 后立即调用
 
 **为什么在 spawn 之前验证**：
 - 避免 spawn 失败的副作用（PTY half-open 等）

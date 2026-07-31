@@ -1,13 +1,20 @@
-# F-03: Output Push (PTY → Channel)
+# F-03: Output Push (AgentSession Events → Channel)
 
 > **Status**: designed (v0.1)
 > **Milestone**: M2
-> **Depends on**: F-01 (Session), F-04 (PTY), F-08 (Channel)
-> **Related docs**: [`F-19-cli-bridge.md`](./F-19-cli-bridge.md) §2.2, §3, SPEC.md §4 (并发模型 + back-pressure)
+> **Depends on**: F-01 (Session), F-08 (Channel), F-20 (Gateway), F-21 (Agent Modes)
+> **Related docs**: [`F-19-cli-bridge.md`](./F-19-cli-bridge.md) §2.2, §3, [`F-21-agent-modes.md`](./F-21-agent-modes.md), SPEC.md §4 (并发模型 + back-pressure)
 
 ## 1. Description
 
-Session 的 PTY stdout/stderr → 聚合（200ms / 4KB）→ 该 Chat。完整 byte pipe，ANSI 转义码 v0.1 原样透传。
+Session 的 `AgentSession.Events()` 事件流 → 聚合（PTY 模式 200ms / 4KB）→ 该 Chat。
+
+**注意**：源是 `AgentSession.Events()`（不是 PTY 字节流）。AgentSession 内部产生的事件类型：
+- PTY 模式：只有 `TextEvent`（字节流转文本）
+- ACP 模式：`TextEvent` / `PermissionRequest` / `ToolStartEvent` / `ToolEndEvent`
+- SDK 模式：同 ACP，可能更多 vendor-specific 事件
+
+Channel adapter 决定怎么渲染（v0.1：Text → 普通消息，Permission → 飞书 card，ToolStart/End → emoji 消息）。
 
 ## 2. Interface
 

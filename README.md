@@ -7,8 +7,9 @@ nightme is a single-process daemon that bridges AI Coding CLIs
 Web UI), so you can drop "write X for me" into a chat at night and
 collect the result in the morning.
 
-> **Status**: v0.1 — M1 done (11/11 commits). Local Bridge test mode
-> ships; the Feishu round-trip lands in M2. See
+> **Status**: v0.1 — M1 done (11/11 commits). M2 PR #4 ships the Feishu
+> Channel adapter, event renderer, and `nightme run` daemon skeleton. The
+> Gateway and Feishu round-trip land in M2 PR #5. See
 > [`docs/PLAN.md`](./docs/PLAN.md) for the roadmap.
 
 ## Quickstart
@@ -37,6 +38,20 @@ The `list` command reads `~/.local/share/nightme/registry.json`
 and prints every persisted session. Pass `--json` for a
 machine-readable view.
 
+### Feishu daemon (M2 PR #4)
+
+After building, register a Feishu app with the QR flow and start the daemon:
+
+```bash
+./bin/nightme auth login feishu
+./bin/nightme run
+```
+
+Send `hello` to the bot. PR #4 prints `received: hello` in the daemon
+terminal; it does not reply in Feishu or create an agent session yet. See the
+[`docs/E2E_TESTING.md`](./docs/E2E_TESTING.md) guide for the full manual test
+and troubleshooting steps.
+
 ## Configuration
 
 nightme reads YAML from `~/.config/nightme/config.yaml` (or
@@ -55,6 +70,8 @@ docs/                     # PRD / SPEC / FEATURES / PLAN / feat/*
 internal/
   agent/                  # Agent / AgentSession / Event interfaces + registry
     ptyagent/             #   PTY-mode agent (default for v0.1)
+  channel/                # Channel interface and Feishu adapter/renderer
+    feishu/               #   WebSocket receive + IM message rendering
   bridge/                 # Bridge abstraction (ACP / SDK / PTY)
     acp/  pty/  sdk/      #   three backend implementations
   config/                 # YAML loader + NIGHTME_* env overrides
@@ -71,10 +88,17 @@ internal/
 | [`docs/FEATURES.md`](./docs/FEATURES.md) | Feature index — every F-XX in one table |
 | [`docs/PLAN.md`](./docs/PLAN.md) | Implementation roadmap — M1 → M2 → M3 |
 | [`docs/feat/`](./docs/feat/) | Per-feature design docs (F-01, F-04, F-05, F-10, …) |
+| [`docs/E2E_TESTING.md`](./docs/E2E_TESTING.md) | Manual Feishu channel and daemon test guide |
+
+## M2 status
+
+- **PR #4 (complete)** — Feishu Channel adapter, AgentEvent rendering,
+  `nightme run`, session restore, and the manual E2E harness.
+- **PR #5 (next)** — Gateway routing and the Feishu-to-agent round-trip.
 
 ## v0.1 plan
 
-- **M2** — Feishu round-trip MVP: Gateway (`/cwd` / `/run` / `/kill`),
-  ACP backend, Channel adapter, ACP/PTY agent registration.
+- **M2** — Feishu channel and Gateway MVP: `/cwd` / `/run` / `/kill`,
+  ACP/PTY agent registration, and the Feishu round-trip.
 - **M3** — Hardening: error edges, slog logging, `--cleanup` flag,
   CI, v0.1.0 release.

@@ -40,11 +40,13 @@
 | F-15 | Session 持久化（stdout 历史）| [feat/F-15-session-persistence.md](./feat/F-15-session-persistence.md) | v0.2 |
 | F-16 | Web TTY UI（xterm.js + WebSocket）| [feat/F-16-web-tty-ui.md](./feat/F-16-web-tty-ui.md) | v0.2 |
 | F-17 | 健康检查 / 心跳 | [feat/F-17-health-check.md](./feat/F-17-health-check.md) | v0.2 |
-| F-18 | Token / API key 注入 | [feat/F-18-secret-injection.md](./feat/F-18-secret-injection.md) | v0.2 |
+| F-18 | ~~Token / API key 注入~~ | — | **cancelled** |
 
 > **F-19 编号说明**：cli-bridge 在早期版本是独立顶层文档；按"feature 都在 feat/"原则，作为基础设施类 feature 加入，编号 19 跟在 MVP 功能后面。v0.2+ 功能保持原编号。
 
 > **注意**：v0.2+ 功能的设计文档目前是 stub，仅记录设计方向和 open questions。详细设计在 v0.2 设计阶段补全。
+>
+> **F-18 已取消**：原计划"检测 hidden input 模式 + 用飞书 card 输入"——违背透传原则。密码 / API key 走标准 IM 透传（详见 PRD §4.1）。F-18 设计文档保留作历史记录（feat/F-18-secret-injection.md）。
 
 ---
 

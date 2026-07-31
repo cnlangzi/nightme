@@ -204,8 +204,7 @@ nightme 从 `~/.config/nightme/config.yaml` 读取配置。
 - **网络出站**：仅连 IM 平台的长连接 endpoint，无其他出口
 - **本地 IPC**：仅 listen `127.0.0.1`，不暴露 `0.0.0.0`
 - **日志脱敏**：app_secret / API key 一律 redact
-
-> **具体安全策略 + 密码注入设计**：见 [`feat/F-18-secret-injection.md`](./feat/F-18-secret-injection.md) (v0.2)
+- **密码 / API key 透传**：见 [PRD §4.1](./PRD.md#41-完全透传不解析) — 透传原则优先，不做特殊处理
 
 ---
 

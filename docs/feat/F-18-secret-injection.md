@@ -1,8 +1,20 @@
-# F-18: Token / API Key Injection
+# F-18: Token / API Key Injection [CANCELLED]
 
-> **Status**: deferred (v0.2)
-> **Milestone**: v0.2
-> **Related**: [`../FEATURES.md`](../FEATURES.md#f-18-token--api-key-注入)
+> **Status**: **cancelled** (2026-07-31)
+> **Decision**: 违背 nightme "完全透传"原则（PRD §4.1），采用透传替代
+> **Related**: [PRD §4.1](../PRD.md#41-完全透传不解析), [`../FEATURES.md`](../FEATURES.md)
+
+## 决策记录
+
+原计划：检测 CLI 进入 "hidden input" 模式（密码 / API key）→ 弹出飞书 input card → 用户输入走加密通道，不写入飞书聊天记录。
+
+**为什么取消**：
+- nightme 的整个存在意义是"完全透传"
+- 多一层"密码检测 / 飞书 card 重定向"等于在 byte pipe 中间插入一个语义识别器
+- 复杂度上升、安全收益有限（飞书聊天记录本身就不算高安全边界）
+- 违背 PRD §3 "Minimal 原则"
+
+**新方案**：密码 / API key 跟普通文本一样，从 IM 输入 → nightme 原样转给 PTY stdin。代价是密码出现在 IM 聊天记录——这是透传的必然结果，用户已知情。
 
 ## 1. Description (stub)
 

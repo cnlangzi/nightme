@@ -3,7 +3,7 @@
 > **Status**: designed (v0.1)
 > **Milestone**: M1 (built first, used by M2)
 > **Depends on**: F-04 (PTY), F-08 (Channel)
-> **Used by**: F-02 (input), F-03 (output), F-06 (cleanup), F-18 (password filter)
+> **Used by**: F-02 (input), F-03 (output), F-06 (cleanup)
 > **Related docs**: SPEC.md §1, §4 (架构 + 并发模型), FEATURES.md
 
 本文档回答：**nightme 怎么把 Claude Code 的 TTY 字节流搬到飞书、再把飞书的字节流搬回 TTY**。
@@ -157,7 +157,7 @@ func (a *Aggregator) Write(p []byte) {
 | `\x1b[2J` | 清屏 | 透传（飞书会显示为空白） |
 | `\x1b[H` | 光标归零 | 透传 |
 | `\x1b[?25l/h` | 隐藏/显示光标 | 透传（v0.1 不影响） |
-| `\x1b[8m` / `\x1b[28m` | 隐藏/显示密码 | **过滤**（避免密码通过飞书泄露） |
+| `\x1b[8m` / `\x1b[28m` | 隐藏/显示密码 | **透传**（密码与普通文本一视同仁，详见 PRD §4.1）|
 
 ### 4.2 输入方向（Channel → PTY）
 
@@ -170,18 +170,19 @@ func (a *Aggregator) Write(p []byte) {
 | 飞书 emoji | 转 UTF-8 字节透传（PTY 一般能显示） |
 | 图片 / 文件 | v0.1 丢弃，提示 "v0.1 not supported" |
 
-### 4.3 为什么不做 "认证模式" 过滤？
+### 4.3 密码 / API key 处理（已决策）
 
-Claude Code / OpenCode 可能会让用户输入密码 / API key。如果用户直接在飞书发密码，密码**会出现在飞书聊天记录**——这是个安全问题。
+nightme 对密码 / API key 与普通文本一视同仁——**完全透传**，不做任何过滤、重定向或检测。
 
-**v0.1 缓解**：
-- README 警告用户："不要在飞书里发密码 / API key"
-- 默认在 daemon 日志里 redact 密码（但飞书记录没法删）
+**决策依据**：见 [PRD §4.1](../PRD.md#41-完全透传不解析)。原计划 F-18（用飞书 input card 重定向密码输入）已取消，因为违背 nightme 的"完全透传"哲学。
 
-**v0.2 加**：
-- 检测 CLI 进入 "hidden input" 模式（`\x1b[8m` 输出 + 等待输入）
-- 自动通过飞书 card 弹出密码输入框（飞书 input 组件）
-- 用户输入走加密通道，**不**进入飞书聊天记录
+**实际行为**：
+- 用户在 IM 输入密码 → 原样转给 PTY stdin（跟普通字符完全一样）
+- Claude Code 收到密码 → 进入正常登录流程
+- 密码出现在 IM 聊天记录中（飞书侧的存储 = 飞书的责任）
+- nightme 日志 redact 密码字符串（避免本地泄露），但**不**阻止传输
+
+**用户须知**：nightme README 应明确提示"飞书聊天记录包含密码 / API key"作为知情同意。
 
 ---
 

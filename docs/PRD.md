@@ -70,7 +70,9 @@ nightme · side-project   ← session C，workspace ~/code/side
 ### 4.1 完全透传，不解析
 nightme **不解析** CLI 输出，不识别"成功 / 失败 / TODO"，不拆分任务、不合并结果、不主动建议。它就是一个 byte pipe。
 
-**为什么**：让用户感觉 agent 在"另一个终端"运行，不是被 nightme 过滤过的版本。透明带来信任。
+**包括敏感内容**：密码、API key、token 也走透传。用户从 IM 输入，nightme 原样转给 PTY stdin，不做任何过滤、重定向、检测。代价是密码会进入 IM 聊天记录——这是透传的必然结果。
+
+**为什么**：让用户感觉 agent 在"另一个终端"运行，不是被 nightme 过滤过的版本。透明带来信任。多做一层"密码检测"等于违背整个 nightme 的存在意义。
 
 ### 4.2 模拟 TTY，让 CLI 无感
 nightme **不调** Claude Code 的 non-interactive 模式（`--print` / `-p`）。它必须用 PTY 启动 CLI，让 CLI 以为自己跑在真正的终端里——这样颜色、进度条、交互 prompt 全部正常。
@@ -111,7 +113,7 @@ nightme **只控制自己启动的进程**。用户的 bash / zsh / vscode / 其
 - F-10 Session 列表命令
 - F-19 CLI Bridge Protocol（byte pipe 协议）
 
-**v0.2+ 后续**：F-11 ~ F-18（多 Channel、附件、resize、Web UI、健康检查、密码注入等）
+**v0.2+ 后续**：F-11 ~ F-17（多 Channel、附件、resize、Web UI、健康检查等；F-18 已取消，见 §4.1）
 
 ---
 
@@ -127,7 +129,6 @@ nightme 明确**不**做以下事情：
 | Multi-user RBAC | 单用户假设 |
 | 云端 SaaS | 用户电脑始终是唯一运行环境 |
 | 写底层 AI Coding Agent 的 prompt / system message | 透传原则 |
-| 密码 / API key 直接通过 IM 收发 | 安全（v0.2 F-18 用 card 解决）|
 | 主动补全 / 联想 / 模板化建议 | 透传原则 |
 | 项目的 git / 文件系统扫描 | nightme 不关心项目结构 |
 

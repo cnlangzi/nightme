@@ -92,4 +92,4 @@ flushFn(chunk)  // = Channel.SendLongMessage(chatID, chunk)
 
 - 聚合窗口 200ms 是否合理？倾向：根据飞书 UX 测试调（手机推送频率）
 - 是否检测 "PTY idle 500ms" 提前 flush？v0.1 不做（200ms 已经够短）
-- 是否过滤 `\x1b[8m`（密码隐藏模式）？v0.1 不做，留给 F-18
+- 是否过滤 `\x1b[8m`（密码隐藏模式）？**不做**——密码走透传，详见 [PRD §4.1](../PRD.md#41-完全透传不解析)

@@ -307,8 +307,8 @@ commit 18: docs: e2e manual test guide
 - WhatsApp / Telegram（F-12）
 - Web TTY UI（F-16）
 - 健康检查（F-17）
-- 密码注入（F-18）
 - Session 历史持久化（F-15）
+- ~~密码注入（F-18）~~ — 已取消，透传处理（PRD §4.1）
 
 ---
 

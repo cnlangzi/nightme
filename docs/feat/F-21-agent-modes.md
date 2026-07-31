@@ -1,0 +1,473 @@
+# F-21: Agent Communication Modes (ACP | SDK | PTY)
+
+> **Status**: designed (v0.1 architecture; v0.1 implementation order = ACP first)
+> **Milestone**: M1 architecture / M2 partial (PTY fallback) / v0.2 SDK
+> **Depends on**: F-09 (Agent abstraction), F-19 (CLI Bridge)
+> **Related docs**: SPEC.md §1.1 (Agent), [F-09-agent-abstraction.md](./F-09-agent-abstraction.md), [F-19-cli-bridge.md](./F-19-cli-bridge.md)
+
+## 1. Description
+
+不同 AI Coding CLI 提供不同程度的"可控性"。nightme 的策略是**优先用最标准的协议**，避免 vendor lock-in：
+
+| 优先级 | Mode | 适用 | UX | 实施难度 |
+|--------|------|------|-----|----------|
+| **1 (baseline)** | **ACP**（Agent Client Protocol）| Codex、OpenCode、未来 ACP agent | 好：结构化事件、权限确认、工具进度 | 中：协议标准、实现一次复用多 CLI |
+| **2 (vendor-specific)** | **SDK**（CLI 自定义 SDK）| Claude Code（Anthropic 暂不支持 ACP）| 优：原生体验 | 高：每个 CLI 单独写，vendor lock-in |
+| **3 (fallback)** | **PTY 透传** | 任何不支持 ACP/SDK 的 CLI | 差：ANSI / 进度条 / spinner 乱码 | 低：通用 byte pipe |
+
+**设计原则**：
+- **ACP 优先**——标准化协议，nightme 不需要为每个 CLI 写 vendor-specific 代码
+- **SDK 是过渡方案**——当 CLI 不支持 ACP 时才用（如 Claude Code 现状）
+- **PTY 是最后兜底**——保证任何 CLI 至少能跑
+
+## 2. 为什么 ACP 第一
+
+1. **标准化**：ACP 是 Agent Client Protocol 的开源标准（Happy Coder 已用它接 Codex）
+2. **复用性**：nightme 写一个 ACP client 适配器，所有支持 ACP 的 CLI 都能用
+3. **降低差异化要求**：nightme 的价值在 channel 抽象 + 编排层，**不**在 agent-specific 知识
+4. **未来扩展**：新 CLI（如 OpenCode、未来的 Anthropic agent）如果支持 ACP，nightme 自动适配
+5. **UX 够用**：ACP 提供结构化事件（权限、工具调用），PTY 没法比
+
+**SDK 排第二**：因为它是 vendor-specific（如 Claude Code Agent SDK）。如果未来 Anthropic 加入 ACP，nightme 可以下掉 SDK adapter。
+
+**PTY 排最后**：因为 UX 差（ANSI 乱码、spinner 刷屏）。只在前面两个都不支持时才用。
+
+## 3. 模式选择决策树
+
+```
+nightme 启动 session 时:
+  agent.Mode() 返回什么？
+  ├─ ModeACP  → 用 ACP client（首选）
+  │              → spawn ACP server 二进制
+  │              → JSON-RPC 握手
+  │              → 消费 ACP events → 转换 AgentEvent
+  │              → AgentSession 包装 ACP 连接
+  ├─ ModeSDK  → 用 vendor-specific SDK
+  │              → 调 SDK client（如 Claude Code Agent SDK）
+  │              → SDK 原生返回结构化 events
+  │              → AgentSession 包装 SDK connection
+  └─ ModePTY  → 兜底（任何 CLI 都能用）
+                 → spawn CLI 在 PTY 中
+                 → read goroutine 把 bytes 转 TextEvent
+                 → AgentSession 包装 pty.Bridge
+```
+
+**关键**：SessionManager 跟 AgentSession 交互，**不直接**跟 PTY/ACP/SDK 交互。所有模式都返回统一的 `AgentSession` 接口。
+
+## 4. Agent 接口（统一抽象）
+
+```go
+// internal/agent/agent.go
+package agent
+
+type Mode int
+const (
+    ModeACP Mode = iota  // 优先：Agent Client Protocol
+    ModeSDK              // vendor-specific（如 Claude Code SDK）
+    ModePTY              // 兜底：透明透传
+)
+
+type EventKind int
+const (
+    EventText EventKind = iota
+    EventPermission
+    EventToolStart
+    EventToolEnd
+    EventDone
+    EventError
+)
+
+type AgentEvent struct {
+    Kind       EventKind
+    Text       string
+    Permission *PermissionRequest
+    ToolStart  *ToolStartEvent
+    ToolEnd    *ToolEndEvent
+    Done       *DoneEvent
+    Error      *ErrorEvent
+}
+
+type PermissionRequest struct {
+    Tool       string         // "Bash" / "Write" / etc.
+    Action     string         // human-readable description
+    Options    []string       // ["once", "session", "reject"]
+    ResponseCh chan string    // handler 写入用户选择
+}
+
+type Agent interface {
+    Name() string
+    Mode() Mode
+    Detect() error  // binary / SDK availability check
+    
+    Start(ctx context.Context, cfg StartConfig) (AgentSession, error)
+}
+
+type StartConfig struct {
+    Workspace string
+    Args      []string
+    Env       []string
+}
+
+type AgentSession interface {
+    Events() <-chan AgentEvent      // 结构化事件流
+    SendText(text string) error     // 发送用户输入
+    SendPermission(resp string) error  // 响应权限请求（ACP/SDK 模式）
+    Close() error
+}
+```
+
+## 5. 三个 Mode 实现（实施顺序）
+
+### 5.1 ModeACP（v0.1 实施 — baseline）
+
+**为什么 ACP 优先实施**：
+- Codex 已支持（Happy Coder 验证）
+- OpenCode 可能支持
+- 一个 adapter 服务多个 CLI
+- 提供结构化事件
+
+**实现**：
+```go
+// internal/agent/acpagent/acpagent.go (v0.1)
+type Agent struct {
+    name    string  // "codex", "opencode"
+    command string  // ACP server 二进制路径
+    args    []string
+}
+
+func (a *Agent) Mode() Mode { return ModeACP }
+
+func (a *Agent) Start(ctx context.Context, cfg StartConfig) (AgentSession, error) {
+    // 1. spawn ACP server（CLI 在 PTY 中跑，作为 ACP server）
+    bridge, err := pty.New(cfg.Workspace, a.command, a.args...)
+    if err != nil { return nil, err }
+    
+    // 2. 启动 ACP client，通过 stdin/stdout 与 server 通信
+    //    ACP 是 JSON-RPC over stdio
+    client := acp.NewClient(bridge)
+    
+    // 3. 握手 + 启动 session
+    if err := client.Initialize(ctx); err != nil {
+        bridge.Close()
+        return nil, err
+    }
+    if err := client.NewSession(ctx, cfg.Workspace); err != nil {
+        bridge.Close()
+        return nil, err
+    }
+    
+    return &acpSession{client: client, bridge: bridge, events: make(chan AgentEvent, 64)}, nil
+}
+
+type acpSession struct {
+    client *acp.Client
+    bridge pty.Bridge          // ACP 通信的物理载体
+    events chan AgentEvent
+}
+
+func (s *acpSession) Events() <-chan AgentEvent { return s.events }
+func (s *acpSession) SendText(text string) error { return s.client.SendPrompt(text) }
+func (s *acpSession) SendPermission(resp string) error {
+    return s.client.SendPermissionDecision(resp)
+}
+func (s *acpSession) Close() error {
+    s.client.Close()
+    return s.bridge.Close()
+}
+
+// background: 把 ACP events 转 AgentEvent
+func (s *acpSession) pump() {
+    for acpEvent := range s.client.Events() {
+        switch acpEvent.Type {
+        case "message_chunk":
+            s.events <- AgentEvent{Kind: EventText, Text: acpEvent.Content}
+        case "permission_request":
+            s.events <- AgentEvent{
+                Kind: EventPermission,
+                Permission: &PermissionRequest{
+                    Tool:    acpEvent.Tool,
+                    Action:  acpEvent.Description,
+                    Options: acpEvent.Options,
+                    ResponseCh: make(chan string, 1),
+                },
+            }
+        case "tool_start":
+            s.events <- AgentEvent{Kind: EventToolStart, ToolStart: &ToolStartEvent{...}}
+        case "tool_end":
+            s.events <- AgentEvent{Kind: EventToolEnd, ToolEnd: &ToolEndEvent{...}}
+        case "session_end":
+            s.events <- AgentEvent{Kind: EventDone, Done: &DoneEvent{ExitCode: 0}}
+            close(s.events)
+            return
+        }
+    }
+}
+```
+
+**ACP 的好处**：
+- ✅ 结构化权限请求（IM 渲染为按钮）
+- ✅ 工具调用进度可视化
+- ✅ 无 ANSI 垃圾
+- ✅ session 状态机标准化
+- ✅ 一个 adapter 服务所有 ACP-supporting CLIs
+
+### 5.2 ModeSDK（v0.2 实施 — vendor-specific）
+
+**仅当 CLI 不支持 ACP 时才用**。当前只有 Claude Code 走这条路。
+
+**实现**：
+```go
+// internal/agent/claudesdk/claudesdk.go (v0.2)
+type Agent struct{}
+
+func (a *Agent) Mode() Mode { return ModeSDK }
+func (a *Agent) Detect() error { return nil }  // SDK 是 Go 库，无 binary 检查
+
+func (a *Agent) Start(ctx context.Context, cfg StartConfig) (AgentSession, error) {
+    client, err := claudecode.NewClient(claudecode.Options{
+        Cwd:  cfg.Workspace,
+        Args: cfg.Args,
+        Env:  cfg.Env,
+    })
+    if err != nil { return nil, err }
+    
+    session := client.NewSession()
+    return &claudeSession{client: client, session: session, events: make(chan AgentEvent, 64)}, nil
+}
+
+type claudeSession struct {
+    client  *claudecode.Client
+    session *claudecode.Session
+    events  chan AgentEvent
+}
+
+// SendText / SendPermission / Close / Events 类似 acpSession
+// 区别在于 client 是 SDK（不是 JSON-RPC）
+```
+
+**SDK 模式的取舍**：
+- 优点：Claude Code 原生体验，无 vendor-specific 协议限制
+- 缺点：nightme 必须懂 Claude Code SDK；将来 Anthropic 改 SDK，nightme 要跟进
+- v0.2 加；如果将来 Claude Code 支持 ACP，可以下掉 SDK adapter
+
+### 5.3 ModePTY（v0.1 实施 — 兜底）
+
+**作为 ACP/SDK 都不支持时的最后兜底**。当前已经在做。
+
+**实现**：
+```go
+// internal/agent/ptyagent/ptyagent.go (v0.1)
+type Agent struct {
+    name    string
+    command string
+    args    []string
+}
+
+func (a *Agent) Mode() Mode { return ModePTY }
+
+func (a *Agent) Start(ctx context.Context, cfg StartConfig) (AgentSession, error) {
+    bridge, err := pty.New(cfg.Workspace, a.command, a.args...)
+    if err != nil { return nil, err }
+    
+    s := &ptySession{bridge: bridge, events: make(chan AgentEvent, 64)}
+    go s.readLoop()
+    return s, nil
+}
+
+type ptySession struct {
+    bridge pty.Bridge
+    events chan AgentEvent
+}
+
+func (s *ptySession) Events() <-chan AgentEvent { return s.events }
+func (s *ptySession) SendText(text string) error { return s.bridge.Write([]byte(text)) }
+func (s *ptySession) SendPermission(resp string) error {
+    return s.bridge.Write([]byte(resp))  // best-effort：PTY 不理解"permission"，原样写入
+}
+func (s *ptySession) Close() error { return s.bridge.Close() }
+
+func (s *ptySession) readLoop() {
+    buf := make([]byte, 4096)
+    for {
+        n, err := s.bridge.Read(buf)
+        if err != nil {
+            s.events <- AgentEvent{Kind: EventDone, Done: &DoneEvent{ExitCode: -1}}
+            close(s.events)
+            return
+        }
+        s.events <- AgentEvent{Kind: EventText, Text: string(buf[:n])}
+    }
+}
+```
+
+**PTY 的局限**（已知）：
+- 只产生 `TextEvent`，没有 `PermissionRequest` / `ToolStart` / `ToolEnd`
+- 权限确认靠用户手动输入 `Y` / `n`（看到 "Allow? [Y/n]" 后输）
+- ANSI / 进度条 / spinner 在 IM 显示为乱码
+
+**v0.1 实际用法**：
+- Claude Code 暂时走 PTY（Anthropic 不支持 ACP，等 SDK adapter）
+- 未知 CLI 走 PTY
+
+## 6. v0.1 Agent 注册表
+
+```go
+// internal/agent/registry.go
+func init() {
+    // Codex: 用 ACP（已支持）
+    codex.Register(&acpagent.Agent{
+        name:    "codex",
+        command: "codex",       // Codex 自带的 ACP server 入口
+        args:    []string{"--acp"},
+    })
+    
+    // OpenCode: 用 ACP（如支持）
+    opencode.Register(&acpagent.Agent{
+        name:    "opencode",
+        command: "opencode",    // OpenCode 的 ACP server 入口（待验证 flag）
+    })
+    
+    // Claude Code: 暂时用 PTY（Anthropic 暂不支持 ACP）
+    // v0.2 加 SDK adapter 后切到 ModeSDK
+    claude.Register(&ptyagent.Agent{
+        name:    "claude",
+        command: "claude",
+    })
+}
+```
+
+## 7. Channel 渲染（事件 → IM）
+
+Channel Adapter 接收 `AgentSession.Events()` 的事件流：
+
+```go
+// internal/channel/feishu/feishu.go
+func (a *feishuAdapter) renderAndSend(chatID string, event AgentEvent) error {
+    switch event.Kind {
+    case EventText:
+        return a.SendMessage(chatID, event.Text)
+    
+    case EventPermission:
+        // 飞书 interactive card（按钮）
+        return a.sendPermissionCard(chatID, event.Permission)
+    
+    case EventToolStart:
+        return a.SendMessage(chatID, "🔧 "+event.ToolStart.Name+"...")
+    
+    case EventToolEnd:
+        if event.ToolEnd.Err != nil {
+            return a.SendMessage(chatID, "❌ "+event.ToolEnd.Name+" failed")
+        }
+        return a.SendMessage(chatID, "✅ "+event.ToolStart.Name+" done")
+    
+    case EventDone:
+        return a.SendMessage(chatID, "Session ended (exit "+strconv.Itoa(event.Done.ExitCode)+")")
+    
+    case EventError:
+        return a.SendMessage(chatID, "Error: "+event.Error.Err.Error())
+    }
+}
+```
+
+**不同 Mode 的渲染差异**：
+- **PTY mode**：所有 event 都是 TextEvent（字节流），全部当文本发；ANSI 显示为字面量
+- **ACP mode**：结构化 event，飞书渲染为富文本（按钮、emoji）
+- **SDK mode**：同 ACP，更丰富（vendor-specific event types）
+
+## 8. SessionManager 变化
+
+```go
+// internal/session/manager.go
+type Session struct {
+    ChatID       string
+    Workspace    string
+    AgentName    string
+    Args         []string
+    agentSession agent.AgentSession  // 统一接口，不直接持有 pty.Bridge
+    cancel       context.CancelFunc
+}
+
+func (m *Manager) Create(ctx context.Context, req CreateRequest) (*Session, error) {
+    a, err := agent.Get(req.Agent)
+    if err != nil { return nil, err }
+    
+    agentSession, err := a.Start(ctx, agent.StartConfig{
+        Workspace: req.Workspace,
+        Args:      req.Args,
+    })
+    if err != nil { return nil, err }
+    
+    s := &Session{
+        ChatID:       req.ChatID,
+        Workspace:    req.Workspace,
+        AgentName:    req.Agent,
+        Args:         req.Args,
+        agentSession: agentSession,
+    }
+    
+    go s.pumpEvents(ctx)  // 消费 AgentSession.Events() → 推给 Channel
+    return s, nil
+}
+```
+
+## 9. 实施顺序（roadmap）
+
+| 阶段 | Mode | 工作量 | 状态 |
+|------|------|--------|------|
+| **v0.1** | **ACP** | ~2 周 | 实施（baseline） |
+| **v0.1** | **PTY** | 已完成 | 兜底（已有 codebase） |
+| **v0.2** | **SDK** | ~1.5 周 | Claude Code Agent SDK |
+| **v0.3+** | 优化 | - | ACP/PTY 性能优化、新 CLI 支持 |
+
+**为什么 v0.1 不做 SDK**：
+- ACP 已经能服务 Codex 和 OpenCode
+- Claude Code 走 PTY 暂时能用（用户妥协）
+- SDK 是 vendor-specific 工作，等 ACP 普及后再补
+
+**未来可能的演进**：
+- Claude Code 支持 ACP → 切到 ACP，下掉 SDK adapter
+- OpenCode 加自定义协议 → 评估是否值得写 SDK adapter（多数情况不需要）
+
+## 10. Edge cases
+
+| 场景 | 处理 |
+|------|------|
+| Agent Mode=ACP 但 ACP server 启动失败 | Start 返回 error → 报错 "ACP server unavailable" |
+| Agent Mode=ACP 但 ACP server crash | AgentSession.Events() 收到 error event → SessionManager 标记 session exited |
+| Agent Mode=ACP 但 handshake 失败 | Start 返回 error |
+| Agent Mode=PTY 但 binary 不存在 | Detect 提前检查，Start 返回 error |
+| PTY mode 下用户需要权限确认 | 用户看到 "Allow? [Y/n]"，手动输 `Y\n` |
+| ACP mode 下用户需要权限确认 | IM 渲染为按钮，用户点 → SendPermission |
+| Channel 不支持 PermissionRequest 渲染 | 降级为文本（"Permission: X，respond 'yes' or 'no'"）|
+| SDK adapter 和 ACP adapter 同时存在（如 Claude Code 后续加 ACP）| 优先 ACP（user 切换到 ACP mode 后下掉 SDK 注册）|
+| nightme 重启，session 已 detach（ACP mode）| v0.2 评估（ACP session 寿命跟 client 绑，可能需要 SDK persistence API）|
+
+## 11. Test plan
+
+**单元测试**：
+- ptySession.readLoop 正确把 bytes 转 TextEvent
+- ptySession.SendText / SendPermission / Close 正确
+- acpSession 把 ACP events 正确转 AgentEvent
+- acpSession.SendPermission 正确发给 ACP server
+
+**集成测试**：
+- mock ACP server（JSON-RPC）→ SessionManager.Create + consume events
+- mock SDK → 同上
+- mock PTY → 同上
+
+**E2E（v0.1 ACP mode）**：
+- 飞书 DM `/run codex` → Codex ACP server 启动 → 飞书收到结构化事件
+- 权限确认渲染为飞书按钮
+
+**E2E（v0.1 PTY fallback）**：
+- 飞书 DM `/run claude` → claude PTY 启动 → 飞书收到字节流（含 ANSI 字面量）
+- 用户输 `Y\n` 响应权限确认
+
+## 12. Open questions
+
+- ACP 协议版本管理（nightme 支持 ACP 哪些版本？v0.2 评估）
+- Claude Code 何时支持 ACP？（看 Anthropic 节奏）
+- 多 mode fallback 是否值得？（如 SDK 失败 → ACP → PTY）v0.1 不做
+- Channel 渲染 PermissionRequest 的飞书 card UX 怎么设计？v0.2 单独 spec
+- SDK session 的 detach + reattach 怎么实现？v0.2 评估
+- OpenCode 的 ACP server 入口是什么 flag？需要查 OpenCode docs（v0.1 实施时确认）

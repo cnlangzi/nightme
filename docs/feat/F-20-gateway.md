@@ -10,7 +10,7 @@
 
 **Gateway** 是 nightme 在 Channel Adapter 和 Session Manager 之间的**命令路由器**。它判断每条进来的 IM 消息是：
 
-- **slash command 命中 nightme 表**（`/cwd`、`/start`、`/kill`、`/help`） → nightme 执行
+- **slash command 命中 nightme 表**（`/cwd`、`/run`、`/kill`、`/help`） → nightme 执行
 - **slash command 未命中 nightme 表**（如 `/clear`、`/compact`、`/init`）→ **透传**给 PTY stdin，让底层 AI agent 自己处理
 - **非 `/` 开头的普通文本** → 透传给 Session Manager → 写入 PTY stdin
 
@@ -30,8 +30,8 @@ type Command struct {
 }
 
 type CommandResult struct {
-    Reply     string  // 回复给用户的文本（仅当 nightme 处理时用）
-    Consumed  bool    // true = nightme 已处理；false = 应交给 fallback（agent）
+    Reply     string
+    Consumed  bool
 }
 
 type FallbackHandler func(ctx context.Context, msg *Message) error
@@ -49,8 +49,8 @@ func New(fallback FallbackHandler) *Gateway
 
 **文件**：
 - `internal/gateway/gateway.go` — Gateway 接口 + 实现
-- `internal/gateway/parser.go` — slash command 解析（`/cmd arg1 arg2` → name + args）
-- `internal/gateway/commands.go` — v0.1 命令注册（cwd / start / kill / help）
+- `internal/gateway/parser.go` — slash command 解析
+- `internal/gateway/commands.go` — v0.1 命令注册（cwd / run / kill / help）
 
 **核心流程**：
 ```
@@ -62,8 +62,6 @@ Gateway.Handle(ctx, msg)
       ├─ ParseCommand(text) → (name, args)
       ├─ 查 commands[name]（含 Aliases）
       │   ├─ 命中 → Command.Handler(ctx, msg, args)
-      │   │         ├─ 执行成功 → 回复用户（如 "Session started"）
-      │   │         └─ 执行失败（如 args 错误） → 回复用户 error
       │   └─ 未命中 → fallback(msg) → SessionManager → PTY stdin
       │                                  （agent 自己处理 /foo）
 ```
@@ -76,88 +74,115 @@ Gateway.Handle(ctx, msg)
 **Parser 行为**：
 - `/cmd` → name="cmd", args=[]
 - `/cmd arg1 arg2` → name="cmd", args=["arg1", "arg2"]
-- `/cmd "arg with space"` → v0.2 支持引号；v0.1 按空格切分（限制）
-- `/  cmd  ` → 忽略前导 / 尾部空白
-- `//cmd` → v0.1 不识别（只切第一个 / 后面的全当 args）
+- `/cmd "arg with space"` → v0.2 支持；v0.1 按空格切分
 - 解析失败的输入（如纯 `/` 后无字符）→ 视为普通文本，走 fallback
 
 ## 4. v0.1 命令集（nightme 的 namespace）
 
-| 命令 | 参数 | 行为 | Session 要求 |
-|------|------|------|--------------|
-| `/cwd` | `<path>` | 创建 session（cwd = path）| 必须**没有** active session |
-| `/start` | `<agent> [args...]` | 创建 session（agent = `<agent>`，透传 args 给 agent CLI）| 必须**没有** active session |
-| `/help` | (无) | 返回所有已注册 nightme 命令的列表和描述 | 任意 |
-| `/kill` | (无) | 终止当前 session | 必须有 active session |
+| 命令 | 参数 | 行为 | 前置条件 |
+|------|------|------|----------|
+| `/cwd` | `<path>` | 设置/更新 workspace（创建 session 如不存在）| 任意 |
+| `/run` | `<agent> [args...]` | 确保 CLI 在跑（spawn 或 attach）| **workspace 已设** |
+| `/help` | (无) | 返回所有 nightme 命令列表 | 任意 |
+| `/kill` | (无) | 停止当前 CLI（保留 session）| CLI 正在跑 |
 
-**别名**：`/workspace` 是 `/cwd` 的别名。两者等价。
+**别名**：`/workspace` 是 `/cwd` 的别名。
 
 ### 4.1 `/cwd <path>` 详细行为
 
 - 解析 `path`（支持 `~` 展开）
 - 验证 path 是已存在的目录
-- 验证 agent（默认 claude）可执行
-- 调 `SessionManager.Create(chatID, path, agent, [])`
-- 返回 "Session started in {path}" 或错误
+- **创建或更新 session**：
+  - chat_id 无 session → 创建，workspace = path
+  - chat_id 已有 session 且 CLI 没在跑 → 更新 workspace
+  - chat_id 已有 session 且 CLI 在跑 → **拒绝** "CLI running, /kill first to change workspace"
+- CLI **不**自动启动（必须 `/run` 单独触发）
 
-**已存在 session 时**：
-- v0.1：拒绝，回复 "session already active in {path}, /kill first to switch"
+**回复**：
+- 首次创建："Workspace set to {path}. Send /run <agent> to start CLI."
+- 更新："Workspace updated to {path}."
+- 拒绝："CLI running, /kill first to change workspace"
 
-### 4.2 `/start <agent> [args...]` 详细行为
+### 4.2 `/run <agent> [args...]` 详细行为
 
-- `args[0]` 必须是一个已注册的 agent name（claude / codex / opencode 等）
-- `args[1:]` 是要透传给 agent 的额外参数（**nightme 不解析**）
-- 默认 workspace = `$HOME`（如果该 chat 之前没有 `/cwd`）
-- 验证 agent 二进制存在（`agent.Detect()`）
-- 调 `SessionManager.Create(chatID, workspace, agent, extraArgs)`
-- 返回 "Session started: {agent} {args}, cwd={workspace}"
+**核心**：**Workspace 是 /run 的硬性前置条件**。没有 workspace → 不能 spawn claude/codex/opencode。
 
-**关键点**：
-- **args 透明透传**：nightme 不验证 / 不清理 / 不解释 agent 命令的 flag
-- 用户的 `/start claude --model opus` → spawn `claude --model opus`
-- 用户的 `/start codex --sandbox workspace-write` → spawn `codex --sandbox workspace-write`
-- agent CLI 自己负责 args 合法性（不符合会自己报错）
+**逻辑**：
+```
+/run <agent> [args...]
+  ↓
+1. 查 chat_id 的 session
+   - 不存在 → 报错 "no workspace set, send /cwd <path> first"
+2. session.Workspace 必须存在（registry 已存）
+3. 检查 CLI 当前状态
+   ├─ PID alive（PTY 还连着）→ "Already running, reconnecting..."
+   │     * 实际上：readPump/writePump 已在跑，这条消息只是 user feedback
+   └─ PID dead 或 session 没 CLI → 启动新 CLI
+         ├─ agent.Get(name) → 验证 agent 已注册
+         ├─ agent.Detect() → 验证二进制存在
+         ├─ pty.New(workspace, agent.Command(), append(agent.Args(), args...))
+         ├─ registry.Upsert(session with new PID)
+         ├─ 启动 readPump/writePump goroutines
+         └─ Reply "Started: {agent} {args}, cwd={workspace}"
+```
 
-**已存在 session 时**：
-- v0.1：拒绝（同 `/cwd`）
+**args 透传**：
+- `args[0]` = agent name
+- `args[1:]` = 额外参数，原样透传给 agent CLI
+- nightme 不解析 / 不验证 / 不 sanitize
+
+**为什么"智能"**：
+- 用户不需要记"CLI 现在跑没跑"
+- nightme 根据 PID 状态自动决定 spawn 或 reconnect
+- **绝不无故重启正在跑的 CLI**（避免丢失 agent 内部状态）
+
+**回复模板**：
+| 场景 | 回复 |
+|------|------|
+| CLI 没在跑，成功启动 | "Started: `{agent} {args}`, cwd=`{workspace}`" |
+| CLI 已在跑，reconnect | "Already running (pid={pid}). Connected." |
+| workspace 没设 | "no workspace set, send /cwd `<path>` first" |
+| agent 未知 | "unknown agent: {name}" |
+| agent 二进制找不到 | "{name} binary not found, please install" |
 
 **示例**：
-| 输入 | 行为 |
-|------|------|
-| `/start claude` | spawn `claude` in $HOME |
-| `/start codex` | spawn `codex` in $HOME |
-| `/start claude --model opus` | spawn `claude --model opus` in $HOME |
-| `/start codex --full-auto` | spawn `codex --full-auto` in $HOME |
-| `/cwd /tmp/foo` then `/start codex` | spawn `codex` in /tmp/foo（/cwd workspace 优先）|
-| `/start foo` | 报错 "unknown agent: foo" |
-| `/start` | 报错 "usage: /start <agent> [args...]" |
-
-**跟 `/cwd` 的协作**：
-- 如果 chat 内之前发过 `/cwd <path>`，`/start` 使用该 workspace
-- 如果 chat 内之前**没**发过 `/cwd`，`/start` 使用 `$HOME`
-- 反过来同理（`/start` 先于 `/cwd`：`/cwd` 也使用 `$HOME`，但 agent 来自 `/start`）
+| 顺序 | 输入 | 行为 |
+|------|------|------|
+| 1 | `/cwd /tmp/foo` | workspace set |
+| 2 | `/run claude` | spawn `claude` in /tmp/foo |
+| 3 | `/run claude --model opus` | CLI 在跑 → reconnect（不动 args）|
+| 4 | `/kill` | CLI 停止 |
+| 5 | `/run claude --model opus` | spawn `claude --model opus` |
+| 6 | `/run` 无参数 | "usage: /run <agent> [args...]" |
+| 7 | `/run foo` | "unknown agent: foo" |
 
 ### 4.3 `/help` 详细行为
 
-返回格式（飞书用 markdown）：
+返回（飞书 markdown）：
 ```
 Available commands:
-/cwd <path>          Create session in workspace
-/start <agent> [args] Create session with specific CLI + args
+/cwd <path>          Set workspace (session-level)
+/run <agent> [args]  Ensure CLI running (spawn or attach)
 /help                Show this help
-/kill                Terminate current session
+/kill                Stop current CLI (keep session)
+
+Workflow:
+  1. /cwd /path/to/project
+  2. /run claude
+  3. ... work ...
+  4. /kill    (or restart with /run again)
 
 Anything else (including unknown /-commands) is sent to the agent.
 ```
 
-**已知 trade-off**：nightme 的 `/help` 会拦截 agent 的 `/help`。
-
 ### 4.4 `/kill` 详细行为
 
-- 调 `SessionManager.Kill(sessionID)` → `bridge.Close()` → SIGTERM → 等 5s → SIGKILL
-- 标记 session 为 `exited`
-- 从 active session 移除
-- 回复 "session killed"
+- 调 `SessionManager.Kill(sessionID)`
+- bridge.Close() → SIGTERM → 等 5s → SIGKILL
+- 标记 session.PID = nil（session 保留，workspace 保留）
+- 回复 "session killed (was: {agent} {args}, cwd={workspace})"
+
+**关键**：kill 只停止 CLI，**不删除 session**。workspace / agent / args 都保留，方便 `/run` 重启。
 
 ## 5. 透传语义详解（重要）
 
@@ -165,66 +190,71 @@ nightme 只在**表 4** 列出的 4 个命令上拦截。其他所有以 `/` 开
 
 | 用户输入 | nightme 表命中？ | 行为 |
 |----------|-----------------|------|
-| `/cwd /tmp/foo` | ✅ | nightme 创建 session |
-| `/start codex --flag` | ✅ | nightme 创建 session（透传 `--flag` 给 codex）|
+| `/cwd /tmp/foo` | ✅ | nightme 设置 workspace |
+| `/run claude` | ✅ | nightme 启动 CLI |
 | `/help` | ✅ | nightme 列命令 |
-| `/kill` | ✅ | nightme kill session |
+| `/kill` | ✅ | nightme 停止 CLI |
 | `/workspace /tmp/foo` | ✅（alias）| 等同 `/cwd` |
 | `/clear` | ❌ | 透传 → agent 收到 `/clear` |
 | `/compact` | ❌ | 透传 → agent 收到 `/compact` |
 | `/foo` | ❌ | 透传 → agent 收到 `/foo` |
 | `hello` | — | 透传 → agent 收到 `hello` |
-| `/cwd`（无参数）| ✅ | nightme 报 usage 错误 |
 
 ## 6. Edge cases
 
 | 场景 | 处理 |
 |------|------|
-| 用户消息以 `/` 开头但不是合法 nightme 命令 | **透传**给 agent（不拒绝） |
-| `/cwd` 无参数 | nightme 报 "usage: /cwd <path>" |
-| `/cwd /nonexistent` | nightme 报 "workspace does not exist: /nonexistent" |
-| `/start foo`（未知 agent）| nightme 报 "unknown agent: foo" |
-| `/start codex --bad-flag` | nightme 透传，codex 自己报错 |
-| `/cwd` 但 session 已存在 | nightme 报 "session already active, /kill first" |
-| `/start` 但 session 已存在 | nightme 报 "session already active, /kill first" |
-| 用户发空消息（""）| 丢弃，不传给 PTY |
+| `/cwd /nonexistent` | 报错 "workspace does not exist: /nonexistent" |
+| `/cwd <path>` 但 CLI 在跑 | 拒绝 "CLI running, /kill first" |
+| `/run` 前没发过 `/cwd` | 报错 "no workspace set, /cwd first" |
+| `/run foo`（未知 agent）| 报错 "unknown agent: foo" |
+| `/run codex --bad-flag` | 透传，codex 自己报错 |
+| `/run` 但 session 不存在 | 同上（自动隐含） |
+| `/run` 时 nightme 之前检测到 CLI 死了 | spawn 新 CLI |
+| `/kill` 但 CLI 没在跑 | "no running CLI to kill" |
+| `/kill` 后 session 已存在，user 再 `/run` | 正常 spawn（session 没被删除）|
+| nightme 重启后，session 已 detached 且 PID 还活着 | `/run` 时检测到 PID alive → reconnect |
+| nightme 重启后，session 已 detached 且 PID 死了 | `/run` 时检测到 PID dead → spawn 新 CLI |
 | 中文 slash command（如 `/帮助`）| v0.1 不支持，会**透传**给 agent |
-| `/` 单独一个字符 | Parser 失败 → 视为普通文本，透传 |
-| `//cmd`（双斜杠）| v0.1 不识别为 escape，第一个 `/` 后整个 `/cmd` 当 agent command？需确认实现 |
 
 ## 7. Test plan
 
 **单元测试**：
 - `ParseCommand("/cwd /tmp/foo")` → `("cwd", ["/tmp/foo"], nil)`
-- `ParseCommand("/start codex --flag")` → `("start", ["codex", "--flag"], nil)`
-- `ParseCommand("/help")` → `("help", [], nil)`
-- `ParseCommand("/foo")` → `("foo", [], nil)`（**不报错**——只是没命中 nightme 表）
-- `ParseCommand("not a command")` → 标记 Consumed=false
-- `ParseCommand("")` → 标记 Consumed=false
-- `ParseCommand("/")` → 标记 Consumed=false（fallback 处理）
+- `ParseCommand("/run claude --model opus")` → `("run", ["claude", "--model", "opus"], nil)`
+- `ParseCommand("/foo")` → `("foo", [], nil)`（**不报错**）
+- `ParseCommand("not a command")` → Consumed=false
+- `ParseCommand("")` → Consumed=false
 
 **集成测试**：
-- Gateway.Handle(普通消息) → fallback 被调
 - Gateway.Handle("/cwd /tmp/foo") → cwd handler 被调
-- Gateway.Handle("/start claude") → start handler 被调，fallback 未被调
-- Gateway.Handle("/start claude --model opus") → start handler 被调，args = ["claude", "--model opus"]
-- Gateway.Handle("/foo") → **fallback 被调**（未命中透传）
-- Gateway.Handle("/clear") → fallback 被调（agent 命令透传）
+- Gateway.Handle("/run claude") → run handler 被调（前置条件：workspace 已设）
+- Gateway.Handle("/run") 无参数 → usage error
+- Gateway.Handle("/run foo") → unknown agent
+- Gateway.Handle("/foo") → fallback 被调（未命中透传）
+- Gateway.Handle("/clear") → fallback 被调
+- Gateway.Handle("hello") → fallback 被调
+
+**RunHandler 行为测试**（集成）：
+- workspace 已设，PID=0 → spawn new CLI → PID 更新
+- workspace 已设，PID=alive → 返回 "already running"，不动 CLI
+- workspace 已设，PID=dead → spawn new CLI（覆盖旧 PID）
+- workspace 未设 → 报错
 
 **手动 / E2E（M2）**：
-- 飞书 DM 发 `/help` → bot 回复 nightme 命令列表
-- 飞书 DM 发 `/cwd /tmp/foo` → bot 回复 "Session started"
-- 飞书 DM 发 `/start codex --full-auto` → bot 回复 "Session started: codex --full-auto"
-- 飞书 DM 发 `/clear` → claude/codex 收到 `/clear` 字面量 → 自己处理
-- 飞书 DM 发 `/foo` → claude/codex 收到 `/foo`（可能当文本显示）
-- 飞书 DM 发 `hello` → agent 收到 `hello`
-- 验证：spawn 的进程命令行真的是 `claude --model opus`（用 `ps aux | grep`）
+- 飞书 DM 发 `/cwd /tmp/foo` → "Workspace set"
+- 飞书 DM 发 `/run claude` → "Started: claude, cwd=/tmp/foo"
+- 飞书 DM 发 `hello` → claude 收到
+- 飞书 DM 发 `/run claude` → "Already running (pid=12345). Connected."
+- 飞书 DM 发 `/kill` → "session killed"
+- 飞书 DM 发 `/run claude` → "Started: claude"（新 PID）
+- 飞书 DM 发 `/clear` → claude 收到 `/clear`（透传）
+- `ps aux | grep claude` → 验证进程命令行
 
 ## 8. Open questions
 
-- 是否支持 `/cwd -` 切回上一个 workspace？v0.1 不支持
-- 是否支持 `/start -` 切回上一个 agent？v0.1 不支持
-- v0.2 是否引入 `//escape` 语法让用户把 `/<cmd>` 字面量发给 nightme？v0.2 评估
-- v0.2 是否需要 namespace（如 `/nm/kill`）？取决于 agent slash command 冲突程度
-- args 含空格怎么办？v0.1 按空格切分（限制），v0.2 加引号支持
-- `//cmd` 是否要识别为 escape syntax（让 nightme 收到 `/cmd` 字面量）？v0.1 不识别
+- `/cwd <path>` 在 CLI 跑着时能否 update workspace？v0.1 拒绝，v0.2 可加 `--force` 或先 kill
+- `/run` 是否允许切换 agent？v0.1 不允许（必须 /kill 后再 /run 新 agent），v0.2 评估
+- agent args 跟之前不同时，是否需要先 /kill？v0.1 智能：如果 CLI 在跑就不变（保持 agent 状态），如果死了才 spawn 新的
+- `/run` 启动失败后 session 状态？v0.1 报错后 PID 仍为 nil（用户可重试）
+- 是否需要 `/forget` 命令清空 session？v0.1 不需要（/cwd 覆盖 + /run 重启就够）

@@ -112,30 +112,39 @@ CLI stdout/stderr
 
 ## 3. Session 生命周期
 
+Session 分**两层状态**：
+- **Session 层**（持久）：chat_id ↔ workspace，由 /cwd 设置
+- **CLI 层**（瞬时）：CLI 进程是否在跑，由 /run 启动、/kill 停止
+
 ```
-                    workspace: <path>
-    [无 session] ────────────────────────► [pending] (验证 workspace)
-                                              │
-                                              │  workspace 存在 + agent 可执行
-                                              ▼
-                                          [running] (PTY alive)
-                                              │
-                                              │  CLI exit / PTY 关闭 / 用户 kill
-                                              ▼
-                                          [exited] (保留在 registry)
+                       /cwd (session 不存在)
+    [no session] ────────────────────────────────► [session, no CLI]
+                                                           │
+                                                           │ /run
+                                                           ▼
+                           /kill ◄─────────────── [session, CLI running]
+                             │                          ▲
+                             │                          │ /run (CLI 死了)
+                             ▼                          │
+                      [session, no CLI] ────── /run ────┘
 ```
+
+**关键规则**：
+- **Workspace 是启动 CLI 的硬性前置条件**：没有 /cwd → 无法 /run
+- ** 智能处理**：CLI 没跑 → spawn；CLI 在跑 → reconnect（不重启）
+- **Session 永不过期**：workspace 永久绑定 chat；CLI 死后 session 保留
 
 **状态转换触发器**：
 
 | From | 触发 | To |
 |------|------|-----|
-| (none) | 用户发送 /cwd slash command | pending |
-| (none) | 用户发送 /start slash command | pending |
-| pending | workspace + agent 校验通过 + PTY spawn | running |
-| pending | 校验失败 | (none, 提示用户) |
-| running | CLI 正常 / 异常 exit | exited |
-| running | PTY EOF | exited |
-| running | 用户发送 /kill slash command | exited |
+| (no session) | 用户发送 /cwd | session created, workspace set |
+| session, no CLI | 用户发送 /cwd | workspace updated |
+| session, CLI running | 用户发送 /cwd | rejected (CLI running) |
+| session, no CLI | 用户发送 /run | CLI spawned |
+| session, CLI running | 用户发送 /run | reconnect (no-op for CLI) |
+| session, CLI running | CLI exit / PTY EOF | session, no CLI |
+| session, CLI running | 用户发送 /kill | session, no CLI |
 | running | nightme SIGTERM | detached（registry 标记，进程继续） |
 | exited | 用户下次创建 session | (走 pending 流程) |
 

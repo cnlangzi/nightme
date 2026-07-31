@@ -98,10 +98,10 @@ nightme **只控制自己启动的进程**。用户的 bash / zsh / vscode / 其
 
 ## 5. 功能范围
 
-完整功能列表（F-01 ~ F-19）见 [`FEATURES.md`](./FEATURES.md)。每个功能的设计细节见 [`feat/`](./feat/)。
+完整功能列表（F-01 ~ F-20）见 [`FEATURES.md`](./FEATURES.md)。每个功能的设计细节见 [`feat/`](./feat/)。
 
 **MVP（v0.1）**：
-- F-01 Session 创建（slash command cwd 触发，触发后 session 生命周期内 cwd 固定）
+- F-01 Session 生命周期（`/cwd` 设 workspace + `/run` 启 CLI 两步式；workspace 持久，CLI 可重启）
 - F-02 消息透传（IM → PTY stdin）
 - F-03 输出推送（PTY stdout → IM）
 - F-04 PTY 模拟

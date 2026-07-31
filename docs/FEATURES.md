@@ -28,7 +28,7 @@
 | F-09 | Agent 抽象（interface + Claude 实现）| [feat/F-09-agent-abstraction.md](./feat/F-09-agent-abstraction.md) | M1 |
 | F-10 | Session 列表命令（`nightme list` / `kill`）| [feat/F-10-session-list-cmd.md](./feat/F-10-session-list-cmd.md) | M3 |
 | F-19 | CLI Bridge Protocol（PTY↔Channel byte pipe）| [feat/F-19-cli-bridge.md](./feat/F-19-cli-bridge.md) | M1 |
-| F-20 | Command Gateway（slash command 路由 + /start agent args 透传）| [feat/F-20-gateway.md](./feat/F-20-gateway.md) | M2 |
+| F-20 | Command Gateway（slash command 路由 + /cwd /run /kill /help）| [feat/F-20-gateway.md](./feat/F-20-gateway.md) | M2 |
 
 ## 2. 后续功能（v0.2+）
 

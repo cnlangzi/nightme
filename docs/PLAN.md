@@ -417,7 +417,7 @@ internal/
         └── card.go         # v0.2 扩展：card note update API
 ```
 
-### 4.5.4 v0.2 Commit 拆分（5 commits）
+### 4.5.4 v0.2 Commit 拆分（6 commits）
 
 ```
 commit A: docs(feat): F-23 heartbeat (event-driven tick + 进程级 DEAD)
@@ -427,6 +427,10 @@ commit A: docs(feat): F-23 heartbeat (event-driven tick + 进程级 DEAD)
 commit B: docs(feat): F-24 claudecode-bridge spec
   - docs/feat/F-24-claudecode-bridge.md
   - 含 4 个触发条件 / JSON-IO schema / AskUserQuestion 双路兼容
+
+commit B2: docs(feat): F-25 input-buffer spec
+  - docs/feat/F-25-input-buffer.md
+  - 3 状态 + 双轨 Reaction/Reply + 纯内存 buffer
 
 commit C: feat(heartbeat): event-driven tick + ProcessProbe
   - internal/heartbeat/{heartbeat,process,format}.go
@@ -447,14 +451,21 @@ commit E: feat(bridge/claudecode): AskUserQuestion 双路兼容
   - 答案回写：string (单选) + string (多选逗号) + array (多选 array) 都支持
   - ✅ test: 5 个 trigger prompt 测试用例（待真 Claude 验证）
 
-commit F: feat(channel/feishu): AskUserQuestion 卡片 + heartbeat card update
-  - internal/channel/feishu/card.go 扩展
+commit F: feat(channel/feishu): AskUserQuestion 卡片 + MessageReceipt
+  - internal/channel/feishu/{card,receipt}.go 扩展
   - AskUserQuestion 卡片渲染（第一项 Recommended 高亮）
-  - heartbeat card note update API
-  - ✅ test: 卡片 schema 验证
+  - MessageReceipt: 双轨 Reaction + Reply (3 状态)
+  - ✅ test: 卡片 schema 验证 + receipt state transition
+
+commit G: feat(session): InputBuffer (3 状态 + 纯内存 buffer)
+  - internal/session/{input_buffer,state}.go
+  - 50 条 / 100KB 上限
+  - 集成 F-25 + F-23 heartbeat (Heartbeat() callback)
+  - 集成 F-24 claudecode bridge (state 转换来源)
+  - ✅ test: buffer 流转 + 并发 + 边界
 ```
 
-**实际可能拆 6+ commits**，每个 commit 单独可验收。
+**实际可能拆 7+ commits**，每个 commit 单独可验收。
 
 ### 4.5.5 验收标准（v0.2）
 

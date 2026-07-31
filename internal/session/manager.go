@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/registry"
 )
 
 // EventCallback is invoked by the Manager for every AgentEvent
@@ -59,6 +61,20 @@ type Manager interface {
 	// StatusExited. Idempotent: killing an already-exited session is
 	// a no-op and returns nil.
 	Kill(sid string) error
+
+	// Restore reads persisted session entries from the registry and
+	// rebuilds the in-memory table. Entries whose persisted status
+	// was StatusRunning are loaded as StatusDetached (their PID may
+	// have died while nightme was down — the next Create / /run will
+	// decide whether to respawn). Restore is idempotent: calling it
+	// on an already-populated manager returns nil without touching
+	// state.
+	Restore(ctx context.Context) error
+
+	// Persist writes the current session table to the registry.
+	// Sessions are written as-is; callers that want to flush a
+	// terminal state should call Kill first.
+	Persist() error
 }
 
 // Errors surfaced by the Manager. Sentinel values so callers can
@@ -84,6 +100,12 @@ type MemoryManager struct {
 
 	agents *agent.Registry
 
+	// reg is the on-disk registry backing the session table. nil
+	// disables persistence (tests that don't care about disk state
+	// can pass nil). When non-nil, Create / Kill / Restore / Persist
+	// keep it in sync.
+	reg *registry.File
+
 	// callback is invoked for every event from every session. nil
 	// means events are drained and discarded (useful for tests).
 	callback EventCallback
@@ -99,11 +121,14 @@ type MemoryManager struct {
 
 // NewMemoryManager constructs an empty Manager backed by the given
 // agent registry. The callback is optional (nil = discard events).
-func NewMemoryManager(reg *agent.Registry, cb EventCallback) *MemoryManager {
+// reg is the persistence layer; pass nil to disable on-disk writes
+// (used by tests that don't exercise Restore / Persist).
+func NewMemoryManager(agents *agent.Registry, reg *registry.File, cb EventCallback) *MemoryManager {
 	return &MemoryManager{
 		sessions:  make(map[string]*Session),
 		chatIndex: make(map[string]string),
-		agents:    reg,
+		agents:    agents,
+		reg:       reg,
 		callback:  cb,
 	}
 }
@@ -165,6 +190,19 @@ func (m *MemoryManager) Create(ctx context.Context, req CreateRequest) (*Session
 	m.sessions[sess.ID] = sess
 	m.chatIndex[req.ChatID] = sess.ID
 	m.mu.Unlock()
+
+	if err := m.upsertEntry(sess, registry.StatusRunning, 0); err != nil {
+		// Persistence is best-effort for Create: the agent is
+		// already running, but if the registry write fails we
+		// surface it so the caller can react. Cleanup: drop the
+		// in-memory session and close the agent.
+		m.mu.Lock()
+		delete(m.sessions, sess.ID)
+		delete(m.chatIndex, sess.ChatID)
+		m.mu.Unlock()
+		_ = agentSession.Close()
+		return nil, fmt.Errorf("session: persist: %w", err)
+	}
 
 	pumpCtx, cancel := context.WithCancel(ctx)
 	sess.setCancel(cancel)
@@ -242,7 +280,139 @@ func (m *MemoryManager) Kill(sid string) error {
 	if as != nil {
 		_ = as.Close()
 	}
+	// Persist the exited state so /run on the next launch sees
+	// status=exited and respawns. Best-effort: a write failure is
+	// logged but does not surface to the caller (the agent is
+	// already gone).
+	if err := m.upsertEntry(s, registry.StatusExited, -1); err != nil && m.reg != nil {
+		// Surface as a non-fatal log line; no error return.
+		fmt.Fprintf(os.Stderr, "session: persist kill: %v\n", err)
+	}
 	return nil
+}
+
+// Restore reads persisted entries from the registry and rebuilds the
+// in-memory session table. Each entry becomes a Session whose
+// metadata is restored verbatim; the lifecycle is mapped as:
+//
+//	StatusRunning  -> StatusDetached (PID may be dead after restart)
+//	StatusDetached -> StatusDetached
+//	StatusExited   -> StatusExited
+//
+// Restore does NOT respawn agents — the CLI is decoupled from the
+// in-memory session record. Callers that want to reattach / respawn
+// must iterate List() and use /run. Calling Restore twice is a no-op
+// (an already-populated manager keeps its state).
+//
+// If reg is nil, Restore is a no-op and returns nil.
+func (m *MemoryManager) Restore(_ context.Context) error {
+	if m.reg == nil {
+		return nil
+	}
+	entries := m.reg.List()
+	if len(entries) == 0 {
+		return nil
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, e := range entries {
+		// Skip entries the in-memory table already has — Restore
+		// must not stomp a freshly-Created session.
+		if _, exists := m.sessions[e.SessionID]; exists {
+			continue
+		}
+		sess := &Session{
+			ID:        e.SessionID,
+			ChatID:    e.ChatID,
+			Workspace: e.Workspace,
+			Agent:     e.Agent,
+			Args:      append([]string(nil), e.Args...),
+			PID:       e.PID,
+			StartedAt: e.StartedAt,
+			LastRunAt: e.LastRunAt,
+		}
+
+		var status Status
+		switch e.Status {
+		case registry.StatusRunning, registry.StatusDetached:
+			// Running is "lose-the-PID" detached: nightme went
+			// down and the agent's PID is stale. Detached is
+			// explicit "we already said goodbye".
+			status = StatusDetached
+		default:
+			status = StatusExited
+		}
+		sess.status = status
+		sess.exitCode = e.ExitCode
+
+		m.sessions[sess.ID] = sess
+		if sess.ChatID != "" {
+			m.chatIndex[sess.ChatID] = sess.ID
+		}
+	}
+	return nil
+}
+
+// Persist writes every in-memory session to the registry. It is the
+// explicit flush hook for callers that want to serialize state — most
+// code paths do not need it because Create / Kill already persist.
+func (m *MemoryManager) Persist() error {
+	if m.reg == nil {
+		return nil
+	}
+	sessions := m.List()
+	for _, s := range sessions {
+		regStatus := registry.StatusRunning
+		switch s.Status() {
+		case StatusRunning:
+			regStatus = registry.StatusRunning
+		case StatusDetached:
+			regStatus = registry.StatusDetached
+		default:
+			regStatus = registry.StatusExited
+		}
+		if err := m.upsertEntry(s, regStatus, exitCodeOr(s, -1)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// upsertEntry writes a Session to the registry under its ID. If reg
+// is nil this is a no-op (useful for tests that don't care about
+// persistence).
+func (m *MemoryManager) upsertEntry(s *Session, status registry.Status, exitCode int) error {
+	if m.reg == nil {
+		return nil
+	}
+	snap := s.Snapshot()
+	entry := registry.Entry{
+		SessionID: snap.ID,
+		ChatID:    snap.ChatID,
+		Workspace: snap.Workspace,
+		Agent:     snap.Agent,
+		Args:      snap.Args,
+		PID:       snap.PID,
+		StartedAt: snap.StartedAt,
+		LastRunAt: snap.LastRunAt,
+		Status:    status,
+	}
+	if status == registry.StatusExited {
+		code := exitCode
+		entry.ExitCode = &code
+	}
+	return m.reg.Upsert(entry)
+}
+
+// exitCodeOr returns the session's exit code, or fallback if it has
+// none. Used by Persist where every entry must carry a code when
+// exited.
+func exitCodeOr(s *Session, fallback int) int {
+	if c := s.ExitCode(); c != nil {
+		return *c
+	}
+	return fallback
 }
 
 // readPump drains the session's event channel and dispatches each
@@ -254,10 +424,15 @@ func (m *MemoryManager) Kill(sid string) error {
 // it observes EventDone; Kill and natural termination therefore
 // produce the same final state.
 func (m *MemoryManager) readPump(s *Session, ctx context.Context) {
-	if s.agentSession == nil {
+	// Snapshot the agent handle under the per-session lock so Kill
+	// (which swaps it for nil) does not race with this goroutine.
+	s.mu.RLock()
+	as := s.agentSession
+	s.mu.RUnlock()
+	if as == nil {
 		return
 	}
-	for ev := range s.agentSession.Events() {
+	for ev := range as.Events() {
 		if m.callback != nil {
 			m.callback(s, ev)
 		}

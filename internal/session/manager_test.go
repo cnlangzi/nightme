@@ -3,11 +3,13 @@ package session
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/registry"
 )
 
 // fakeAgent is a minimal in-process Agent used by the Manager tests.
@@ -101,7 +103,7 @@ func TestCreateAndGet(t *testing.T) {
 
 	var seen []agent.AgentEvent
 	var mu sync.Mutex
-	mgr := NewMemoryManager(reg, func(s *Session, ev agent.AgentEvent) {
+	mgr := NewMemoryManager(reg, nil, func(s *Session, ev agent.AgentEvent) {
 		mu.Lock()
 		seen = append(seen, ev)
 		mu.Unlock()
@@ -163,7 +165,7 @@ func TestCreateAndGet(t *testing.T) {
 // TestGetByChatNotFound verifies the not-found error is the package
 // sentinel so callers can use errors.Is.
 func TestGetByChatNotFound(t *testing.T) {
-	mgr := NewMemoryManager(agent.New(), nil)
+	mgr := NewMemoryManager(agent.New(), nil, nil)
 	if _, err := mgr.GetByChat("nope"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("GetByChat unknown error = %v, want ErrSessionNotFound", err)
 	}
@@ -171,7 +173,7 @@ func TestGetByChatNotFound(t *testing.T) {
 
 // TestGetNotFound covers the by-ID lookup miss path.
 func TestGetNotFound(t *testing.T) {
-	mgr := NewMemoryManager(agent.New(), nil)
+	mgr := NewMemoryManager(agent.New(), nil, nil)
 	if _, err := mgr.Get("s_xxx"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("Get unknown error = %v, want ErrSessionNotFound", err)
 	}
@@ -184,7 +186,7 @@ func TestListEmptyAndPopulated(t *testing.T) {
 	reg.Register(&fakeAgent{name: "a", mode: agent.ModePTY})
 	reg.Register(&fakeAgent{name: "b", mode: agent.ModePTY})
 
-	mgr := NewMemoryManager(reg, nil)
+	mgr := NewMemoryManager(reg, nil, nil)
 
 	if got := mgr.List(); len(got) != 0 {
 		t.Fatalf("List() on empty manager = %d, want 0", len(got))
@@ -219,7 +221,7 @@ func TestKill(t *testing.T) {
 		},
 	})
 
-	mgr := NewMemoryManager(reg, nil)
+	mgr := NewMemoryManager(reg, nil, nil)
 	sess, err := mgr.Create(context.Background(), CreateRequest{
 		ChatID:    "chat-1",
 		Workspace: t.TempDir(),
@@ -257,7 +259,7 @@ func TestKill(t *testing.T) {
 // TestCreateUnknownAgent confirms a misspelled agent name bubbles up
 // as the agent registry's sentinel error.
 func TestCreateUnknownAgent(t *testing.T) {
-	mgr := NewMemoryManager(agent.New(), nil)
+	mgr := NewMemoryManager(agent.New(), nil, nil)
 	_, err := mgr.Create(context.Background(), CreateRequest{
 		ChatID:    "chat-1",
 		Workspace: t.TempDir(),
@@ -280,7 +282,7 @@ func TestCreateDetectFailure(t *testing.T) {
 		mode:    agent.ModePTY,
 		detectF: func() error { return errors.New("binary not found") },
 	})
-	mgr := NewMemoryManager(reg, nil)
+	mgr := NewMemoryManager(reg, nil, nil)
 
 	_, err := mgr.Create(context.Background(), CreateRequest{
 		ChatID:    "chat-1",
@@ -302,7 +304,7 @@ func TestCreateChatAlreadyBound(t *testing.T) {
 	reg := agent.New()
 	reg.Register(&fakeAgent{name: "claude", mode: agent.ModePTY})
 
-	mgr := NewMemoryManager(reg, nil)
+	mgr := NewMemoryManager(reg, nil, nil)
 	if _, err := mgr.Create(context.Background(), CreateRequest{
 		ChatID:    "chat-1",
 		Workspace: t.TempDir(),
@@ -333,7 +335,7 @@ func TestCreateValidationErrors(t *testing.T) {
 		{"no workspace", CreateRequest{ChatID: "c", Agent: "claude"}, "Workspace is required"},
 		{"no agent", CreateRequest{ChatID: "c", Workspace: "/tmp"}, "Agent is required"},
 	}
-	mgr := NewMemoryManager(agent.New(), nil)
+	mgr := NewMemoryManager(agent.New(), nil, nil)
 	for _, tc := range cases {
 		_, err := mgr.Create(context.Background(), tc.req)
 		if err == nil {
@@ -348,6 +350,280 @@ func TestCreateValidationErrors(t *testing.T) {
 		ChatID: "c", Workspace: "/tmp", Agent: "claude",
 	}); err == nil {
 		t.Fatalf("Create with nil registry returned nil error")
+	}
+}
+
+// TestRestoreLoadsFromFile seeds a registry.json, opens a fresh
+// Manager, calls Restore, and verifies every entry shows up in the
+// in-memory table with the right lifecycle mapping.
+func TestRestoreLoadsFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "registry.json")
+	file, err := registry.Open(path)
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	runningCode := 0
+	exitedCode := 2
+	entries := []registry.Entry{
+		{
+			SessionID: "s_running",
+			ChatID:    "chat-run",
+			Workspace: "/tmp/run",
+			Agent:     "claude",
+			Args:      []string{"--foo"},
+			PID:       12345,
+			StartedAt: now.Add(-time.Hour),
+			LastRunAt: now,
+			Status:    registry.StatusRunning,
+			ExitCode:  &runningCode,
+		},
+		{
+			SessionID: "s_detached",
+			ChatID:    "chat-det",
+			Workspace: "/tmp/det",
+			Agent:     "codex",
+			PID:       67890,
+			StartedAt: now.Add(-2 * time.Hour),
+			LastRunAt: now.Add(-time.Minute),
+			Status:    registry.StatusDetached,
+		},
+		{
+			SessionID: "s_exited",
+			ChatID:    "chat-exit",
+			Workspace: "/tmp/exit",
+			Agent:     "claude",
+			PID:       0,
+			StartedAt: now.Add(-3 * time.Hour),
+			LastRunAt: now.Add(-2 * time.Hour),
+			Status:    registry.StatusExited,
+			ExitCode:  &exitedCode,
+		},
+	}
+	for _, e := range entries {
+		if err := file.Upsert(e); err != nil {
+			t.Fatalf("seed Upsert(%s): %v", e.SessionID, err)
+		}
+	}
+
+	// Re-open the file (simulates nightme restarting) and build a
+	// Manager that reads from it.
+	file2, err := registry.Open(path)
+	if err != nil {
+		t.Fatalf("registry.Open(2): %v", err)
+	}
+	mgr := NewMemoryManager(agent.New(), file2, nil)
+	if err := mgr.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	// Running -> Detached.
+	if s, err := mgr.Get("s_running"); err != nil {
+		t.Fatalf("Get(s_running): %v", err)
+	} else if s.Status() != StatusDetached {
+		t.Errorf("running entry status = %s, want detached", s.Status())
+	} else if s.Agent != "claude" || s.Workspace != "/tmp/run" {
+		t.Errorf("running entry metadata = %+v, want claude@/tmp/run", s.Snapshot())
+	}
+
+	// Detached -> Detached.
+	if s, err := mgr.Get("s_detached"); err != nil {
+		t.Fatalf("Get(s_detached): %v", err)
+	} else if s.Status() != StatusDetached {
+		t.Errorf("detached entry status = %s, want detached", s.Status())
+	}
+
+	// Exited -> Exited, exit code preserved.
+	if s, err := mgr.Get("s_exited"); err != nil {
+		t.Fatalf("Get(s_exited): %v", err)
+	} else if s.Status() != StatusExited {
+		t.Errorf("exited entry status = %s, want exited", s.Status())
+	} else if s.ExitCode() == nil || *s.ExitCode() != 2 {
+		t.Errorf("exited entry exit code = %v, want 2", s.ExitCode())
+	}
+
+	if got := len(mgr.List()); got != 3 {
+		t.Errorf("List() = %d, want 3", got)
+	}
+}
+
+// TestRestoreEmptyRegistry is a no-op sanity check: Restore against
+// an empty registry should leave the manager empty and return nil.
+func TestRestoreEmptyRegistry(t *testing.T) {
+	dir := t.TempDir()
+	file, err := registry.Open(filepath.Join(dir, "registry.json"))
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
+	}
+	mgr := NewMemoryManager(agent.New(), file, nil)
+	if err := mgr.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if got := len(mgr.List()); got != 0 {
+		t.Errorf("List() = %d, want 0", got)
+	}
+}
+
+// TestRestoreNilRegistry documents the no-op behavior when reg is
+// nil (callers that opt out of persistence).
+func TestRestoreNilRegistry(t *testing.T) {
+	mgr := NewMemoryManager(agent.New(), nil, nil)
+	if err := mgr.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore(nil): %v", err)
+	}
+}
+
+// TestCreatePersists exercises the round-trip: Create writes to disk,
+// Kill writes again, a fresh Manager + Restore sees the terminal
+// state.
+func TestCreatePersists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "registry.json")
+	file, err := registry.Open(path)
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
+	}
+
+	reg := agent.New()
+	reg.Register(&fakeAgent{
+		name: "claude",
+		mode: agent.ModePTY,
+		events: []agent.AgentEvent{
+			{Kind: agent.EventText, Text: "hello"},
+			// No EventDone — let Kill do the transition.
+		},
+	})
+	mgr := NewMemoryManager(reg, file, nil)
+
+	sess, err := mgr.Create(context.Background(), CreateRequest{
+		ChatID:    "chat-persist",
+		Workspace: t.TempDir(),
+		Agent:     "claude",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Registry should now have the running entry.
+	if got, ok := file.Get(sess.ID); !ok {
+		t.Fatalf("registry missing entry after Create")
+	} else if got.Status != registry.StatusRunning {
+		t.Errorf("after Create, registry status = %s, want running", got.Status)
+	}
+
+	// Kill it.
+	if err := mgr.Kill(sess.ID); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	if got, ok := file.Get(sess.ID); !ok {
+		t.Fatalf("registry missing entry after Kill")
+	} else if got.Status != registry.StatusExited {
+		t.Errorf("after Kill, registry status = %s, want exited", got.Status)
+	}
+
+	// Re-open registry + Manager, Restore, verify state.
+	file2, err := registry.Open(path)
+	if err != nil {
+		t.Fatalf("registry.Open(2): %v", err)
+	}
+	mgr2 := NewMemoryManager(agent.New(), file2, nil)
+	if err := mgr2.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	got, err := mgr2.Get(sess.ID)
+	if err != nil {
+		t.Fatalf("Get after Restore: %v", err)
+	}
+	if got.Status() != StatusExited {
+		t.Errorf("after Restore, session status = %s, want exited", got.Status())
+	}
+	if got.Workspace == "" || got.Agent != "claude" {
+		t.Errorf("after Restore, session metadata = %+v, want non-empty workspace + claude", got.Snapshot())
+	}
+}
+
+// TestChatIndexRestored verifies the secondary chat → session index
+// is rebuilt by Restore, so GetByChat works without any in-memory
+// priming.
+func TestChatIndexRestored(t *testing.T) {
+	dir := t.TempDir()
+	file, err := registry.Open(filepath.Join(dir, "registry.json"))
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := file.Upsert(registry.Entry{
+		SessionID: "s_idx",
+		ChatID:    "oc_chat_42",
+		Workspace: "/tmp/idx",
+		Agent:     "claude",
+		StartedAt: now,
+		LastRunAt: now,
+		Status:    registry.StatusDetached,
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	mgr := NewMemoryManager(agent.New(), file, nil)
+	if err := mgr.Restore(context.Background()); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	got, err := mgr.GetByChat("oc_chat_42")
+	if err != nil {
+		t.Fatalf("GetByChat after Restore: %v", err)
+	}
+	if got.ID != "s_idx" {
+		t.Errorf("GetByChat returned ID %q, want s_idx", got.ID)
+	}
+
+	// Unknown chat still returns the sentinel.
+	if _, err := mgr.GetByChat("nope"); !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("GetByChat(unknown) error = %v, want ErrSessionNotFound", err)
+	}
+}
+
+// TestPersistFlushesState covers the explicit Persist() hook used by
+// callers that want to force a write without going through Kill.
+func TestPersistFlushesState(t *testing.T) {
+	dir := t.TempDir()
+	file, err := registry.Open(filepath.Join(dir, "registry.json"))
+	if err != nil {
+		t.Fatalf("registry.Open: %v", err)
+	}
+
+	reg := agent.New()
+	reg.Register(&fakeAgent{
+		name:   "claude",
+		mode:   agent.ModePTY,
+		events: []agent.AgentEvent{{Kind: agent.EventText, Text: "hi"}},
+	})
+	mgr := NewMemoryManager(reg, file, nil)
+
+	sess, err := mgr.Create(context.Background(), CreateRequest{
+		ChatID:    "c",
+		Workspace: t.TempDir(),
+		Agent:     "claude",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Manually flip the session to detached (no agent involved).
+	sess.setLifecycle(StatusDetached, nil, 0, nil)
+
+	if err := mgr.Persist(); err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+	got, ok := file.Get(sess.ID)
+	if !ok {
+		t.Fatalf("registry missing entry after Persist")
+	}
+	if got.Status != registry.StatusDetached {
+		t.Errorf("after Persist, status = %s, want detached", got.Status)
 	}
 }
 

@@ -22,13 +22,14 @@ agent:
       env: {}
 
     codex:
-      command: "codex"
-      args: ["--acp"]
+      # Codex ships ACP through the official adapter binary.
+      command: "codex-acp"
+      args: []
       env: {}
 
     opencode:
       command: "opencode"
-      args: []
+      args: ["acp"]
       env: {}
 
 session:

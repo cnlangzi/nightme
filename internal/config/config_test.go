@@ -25,8 +25,11 @@ func TestLoadExample(t *testing.T) {
 	if cfg.Agent.Agents["claude"].Command != "claude" {
 		t.Errorf("Agent.Agents[claude].Command = %q, want claude", cfg.Agent.Agents["claude"].Command)
 	}
-	if got := cfg.Agent.Agents["codex"].Args; len(got) != 1 || got[0] != "--acp" {
-		t.Errorf("Agent.Agents[codex].Args = %v, want [--acp]", got)
+	if got := cfg.Agent.Agents["codex"].Command; got != "codex-acp" {
+		t.Errorf("Agent.Agents[codex].Command = %q, want codex-acp", got)
+	}
+	if got := cfg.Agent.Agents["opencode"].Args; len(got) != 1 || got[0] != "acp" {
+		t.Errorf("Agent.Agents[opencode].Args = %v, want [acp]", got)
 	}
 	if cfg.Session.DefaultPtyCols != 80 {
 		t.Errorf("Session.DefaultPtyCols = %d, want 80", cfg.Session.DefaultPtyCols)

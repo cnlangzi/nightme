@@ -251,39 +251,55 @@ func TestRun_GracefulShutdown(t *testing.T) {
 	}
 }
 
-func TestBuildRunAgentRegistry_UsesArgsAndEnv(t *testing.T) {
+func TestBuildRunAgentRegistry_UsesModes(t *testing.T) {
 	cfg := &config.Config{
 		Agent: config.AgentConfig{Agents: map[string]config.AgentEntry{
-			"claude": {Command: "/bin/echo", Args: []string{"--flag"}, Env: map[string]string{"Z": "last", "A": "first"}},
+			"claude":   {Command: "/bin/echo", Args: []string{"--flag"}},
+			"codex":    {Command: "/bin/echo"},
+			"opencode": {Command: "/bin/echo"},
+			"custom":   {Command: "/bin/echo", Args: []string{"--custom"}, Env: map[string]string{"Z": "last", "A": "first"}},
 		}},
 		Session: config.SessionConfig{DefaultPtyCols: 100, DefaultPtyRows: 40},
 	}
 	reg := buildRunAgentRegistry(cfg)
-	a, err := reg.Get("claude")
-	if err != nil {
-		t.Fatalf("Get(claude): %v", err)
+	for name, want := range map[string]agent.Mode{
+		"claude":   agent.ModeSDK,
+		"codex":    agent.ModeACP,
+		"opencode": agent.ModeACP,
+		"custom":   agent.ModePTY,
+	} {
+		a, err := reg.Get(name)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", name, err)
+		}
+		if got := a.Mode(); got != want {
+			t.Errorf("%s mode = %s, want %s", name, got, want)
+		}
 	}
-	pty, ok := a.(*ptyagent.Agent)
+
+	custom, ok := mustAgent(reg, "custom").(*ptyagent.Agent)
 	if !ok {
-		t.Fatalf("agent type = %T, want *ptyagent.Agent", a)
+		t.Fatalf("custom agent type = %T, want *ptyagent.Agent", mustAgent(reg, "custom"))
 	}
-	if pty.Name() != "claude" || pty.Command != "/bin/echo" {
-		t.Fatalf("agent = name %q command %q", pty.Name(), pty.Command)
+	if len(custom.Args) != 1 || custom.Args[0] != "--custom" {
+		t.Errorf("custom args = %v", custom.Args)
 	}
-	if len(pty.Args) != 1 || pty.Args[0] != "--flag" {
-		t.Errorf("args = %v, want [--flag]", pty.Args)
+	if len(custom.Env) != 2 || custom.Env[0] != "A=first" || custom.Env[1] != "Z=last" {
+		t.Errorf("custom env = %v, want sorted values", custom.Env)
 	}
-	if len(pty.Env) != 2 || pty.Env[0] != "A=first" || pty.Env[1] != "Z=last" {
-		t.Errorf("env = %v, want sorted values", pty.Env)
-	}
-	if pty.Cols != 100 || pty.Rows != 40 {
-		t.Errorf("pty size = %dx%d, want 100x40", pty.Cols, pty.Rows)
+	if custom.Cols != 100 || custom.Rows != 40 {
+		t.Errorf("custom PTY size = %dx%d, want 100x40", custom.Cols, custom.Rows)
 	}
 }
 
-// TestRun_CleanupFlagKillsSessions verifies that --cleanup=true
-// routes shutdown through killAllSessions (so each session sees
-// Manager.Kill) instead of the default detach path.
+func mustAgent(reg *agent.Registry, name string) agent.Agent {
+	a, err := reg.Get(name)
+	if err != nil {
+		panic(err)
+	}
+	return a
+}
+
 func TestRun_CleanupFlagKillsSessions(t *testing.T) {
 	cfg := runTestConfig()
 	ch := newFakeRunChannel()

@@ -36,7 +36,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agent/acpagent"
 	"github.com/cnlangzi/nightme/internal/agent/ptyagent"
+	"github.com/cnlangzi/nightme/internal/bridge/sdk"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/session"
 )
@@ -132,11 +134,11 @@ func validateTestRequest(f testCmdFlags) error {
 	return nil
 }
 
-// buildAgentRegistry seeds an agent.Registry from cfg.Agent.Agents
-// (each entry becomes a PTY-mode agent — ACP/SDK wiring lands in
-// later milestones). If the requested agent is not in the registry,
-// we fall back to treating the name as a path to a binary and
-// registering it as PTY on the fly.
+// buildAgentRegistry seeds an agent.Registry from cfg.Agent.Agents. The
+// built-in agents use their v0.2 protocol adapters: Claude uses the SDK
+// adapter, while Codex and OpenCode use ACP. Unknown configured names remain
+// PTY agents for backwards compatibility. If the requested agent is not in
+// the registry, an existing bare path is still registered as PTY.
 func buildAgentRegistry(cfg *config.Config, requested string) *agent.Registry {
 	reg := agent.New()
 	if cfg == nil {
@@ -146,12 +148,12 @@ func buildAgentRegistry(cfg *config.Config, requested string) *agent.Registry {
 		if entry.Command == "" {
 			continue
 		}
-		a := ptyagent.New(name, entry.Command)
-		a.Args = append([]string(nil), entry.Args...)
-		a.Env = configuredAgentEnv(entry.Env)
-		a.Cols = cfg.Session.DefaultPtyCols
-		a.Rows = cfg.Session.DefaultPtyRows
-		reg.Register(a)
+		configured := configuredAgent(name, entry)
+		if pty, ok := configured.(*ptyagent.Agent); ok {
+			pty.Cols = cfg.Session.DefaultPtyCols
+			pty.Rows = cfg.Session.DefaultPtyRows
+		}
+		reg.Register(configured)
 	}
 	if _, err := reg.Get(requested); err != nil {
 		// Auto-register a bare-path agent when the user passed
@@ -167,8 +169,24 @@ func buildAgentRegistry(cfg *config.Config, requested string) *agent.Registry {
 	return reg
 }
 
-// configuredAgentEnv converts the YAML map into the flat environment format
-// accepted by ptyagent. Sorting keeps child environments deterministic.
+func configuredAgent(name string, entry config.AgentEntry) agent.Agent {
+	args := append([]string(nil), entry.Args...)
+	switch name {
+	case "claude":
+		return sdk.New(name, entry.Command, args)
+	case "codex", "opencode":
+		if name == "opencode" && len(args) == 0 {
+			args = []string{"acp"}
+		}
+		return acpagent.New(name, entry.Command, args)
+	default:
+		a := ptyagent.New(name, entry.Command)
+		a.Args = args
+		a.Env = configuredAgentEnv(entry.Env)
+		return a
+	}
+}
+
 func configuredAgentEnv(env map[string]string) []string {
 	if len(env) == 0 {
 		return nil
@@ -185,10 +203,8 @@ func configuredAgentEnv(env map[string]string) []string {
 	return out
 }
 
-// buildRunAgentRegistry registers every configured PTY agent. The example
-// config names the three v0.1 agents claude, codex, and opencode; keeping the
-// helper config-driven also permits a user to add another CLI without a code
-// change.
+// buildRunAgentRegistry registers every configured agent with its selected
+// v0.2 mode. User-defined names still use PTY as the safe fallback.
 func buildRunAgentRegistry(cfg *config.Config) *agent.Registry {
 	return buildAgentRegistry(cfg, "")
 }

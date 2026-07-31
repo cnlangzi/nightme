@@ -39,7 +39,7 @@ nightme 为以下用户设计：
 ## 3. 典型使用场景
 
 ### 3.1 通勤路上继续写代码
-- 早上地铁上打开手机 → DM nightme bot → 发 "workspace: ~/code/bailing"
+- 早上地铁上打开手机 → DM nightme bot → 发 slash command 设置 cwd
 - bot 回复 "Session started"，用户在飞书里继续跟 Claude Code 聊
 - Claude Code 实际写在用户的 MacBook 上（agent 在本地跑）
 - 到公司打开电脑，看到工作目录里已经有了改动
@@ -60,7 +60,7 @@ nightme · side-project   ← session C，workspace ~/code/side
 
 ### 3.4 应急修复
 - 周末出门在外，线上服务报警
-- DM nightme · production-tools → "workspace: ~/tools/prod"
+- DM nightme · production-tools → slash command 设置 cwd 到 ~/tools/prod
 - 通过 Claude Code 排查问题（agent 有完整的工具 + 上下文）
 
 ---
@@ -101,7 +101,7 @@ nightme **只控制自己启动的进程**。用户的 bash / zsh / vscode / 其
 完整功能列表（F-01 ~ F-19）见 [`FEATURES.md`](./FEATURES.md)。每个功能的设计细节见 [`feat/`](./feat/)。
 
 **MVP（v0.1）**：
-- F-01 Session 创建（`workspace: <path>` 触发）
+- F-01 Session 创建（slash command cwd 触发，触发后 session 生命周期内 cwd 固定）
 - F-02 消息透传（IM → PTY stdin）
 - F-03 输出推送（PTY stdout → IM）
 - F-04 PTY 模拟
@@ -112,6 +112,7 @@ nightme **只控制自己启动的进程**。用户的 bash / zsh / vscode / 其
 - F-09 Agent 抽象（Claude Code MVP）
 - F-10 Session 列表命令
 - F-19 CLI Bridge Protocol（byte pipe 协议）
+- F-20 Command Gateway（slash command 路由）
 
 **v0.2+ 后续**：F-11 ~ F-17（多 Channel、附件、resize、Web UI、健康检查等；F-18 已取消，见 §4.1）
 

@@ -2,18 +2,23 @@
 
 > **Status**: designed (v0.1)
 > **Milestone**: M2
-> **Depends on**: F-01 (Session), F-04 (PTY), F-08 (Channel)
-> **Related docs**: [`F-19-cli-bridge.md`](./F-19-cli-bridge.md) §2.1, §4
+> **Depends on**: F-01 (Session), F-04 (PTY), F-08 (Channel), F-20 (Gateway)
+> **Related docs**: [`F-19-cli-bridge.md`](./F-19-cli-bridge.md) §2.1, §4, [`F-20-gateway.md`](./F-20-gateway.md)
 
 ## 1. Description
 
-用户在 Chat 里的输入（IM 文本消息）透明转发到该 Chat 绑定 session 的 PTY stdin。nightme 不解析内容、不拆分、不重写，只做 byte pipe。
+用户在 Chat 里的输入 → 经过 Gateway 路由判断 → 透传到该 Chat 绑定 session 的 PTY stdin。
+
+**Gateway 之前**的职责：决定这条消息是 slash command 还是普通文本。
+**本 feature 的职责**：仅处理"普通文本"分支——把消息原样写入 PTY stdin。
+
+slash command 分支由 [F-20 Gateway](./F-20-gateway.md) 负责（包括 `/cwd`、`/kill`、`/help` 等）。
 
 ## 2. Interface
 
 ```go
-// Channel adapter receives Message, hands to Router
-func (s *Session) HandleInput(text string) error {
+// Session.WriteText 是 fallback 路径（普通文本走这里）
+func (s *Session) WriteText(text string) error {
     normalized := normalizeInput(text)
     _, err := s.bridge.Write([]byte(normalized))
     return err
@@ -33,55 +38,60 @@ func normalizeInput(text string) string {
 ## 3. Implementation
 
 **文件**：
-- `internal/session/session.go` — `Session.HandleInput()`
-- `internal/channel/feishu/feishu.go` — `Incoming()` handler 路由到 session
+- `internal/session/session.go` — `Session.WriteText()` 方法
+- `internal/channel/feishu/feishu.go` — Incoming handler（不含命令解析）
+- `internal/gateway/gateway.go` — fallback handler（未命中命令时调 Session.WriteText）
 
-**流程**：
+**完整流程**：
 ```
 飞书 WebSocket 收到消息事件
   ↓
 feishuAdapter.handleEvent()
-  → Channel.Message{ChatID, Text, SenderID, Time}
+  → Channel.Message{ChatID, Text}
   ↓
 Router.Lookup(chatID) → *Session
   ↓
-session.HandleInput(text)
-  → normalizeInput → bridge.Write
-  ↓
-PTY master fd → PTY slave → claude stdin
+session.Gateway.Handle(msg)
+  ├─ text 以 "/" 开头 → 走命令路由（[F-20](./F-20-gateway.md)）
+  └─ text 不是 "/" 开头 → fallback:
+      session.WriteText(text) → normalizeInput → bridge.Write
+                                          ↓
+                                    PTY master → PTY slave → claude stdin
 ```
 
-**异步模型**：
+**异步模型**（不变）：
 - Channel 的 `Incoming()` 是 buffered channel (size=128)
-- 每个 session 一个 `writePump` goroutine，从 session 的 `inputStream` chan 读 → bridge.Write
-- Channel handler 只负责 dispatch 到 session.inputStream，不阻塞
+- 每个 session 一个 `writePump` goroutine
+- Gateway.Handle 在 Channel handler goroutine 中调用
 
 ## 4. Edge cases
 
 | 场景 | 处理 |
 |------|------|
-| 飞书富文本（@、emoji） | @ 前缀丢弃保留正文；emoji UTF-8 字节透传 |
-| 多行粘贴 | 原样转发，PTY 自行处理（Claude Code 支持多行输入）|
+| 用户发 slash command（以 `/` 开头）| Gateway 拦截，不透传（[F-20](./F-20-gateway.md)） |
+| 多行粘贴 | 原样转发，PTY 自行处理 |
 | 用户发空消息 | 丢弃，不写入 PTY |
-| PTY 已关闭 | bridge.Write 返回 error → session 进入 exited → 提示用户 "session ended" |
+| PTY 已关闭 | bridge.Write 返回 error → session 进入 exited → 提示用户 |
 | 用户狂发消息（>10 QPS）| Channel adapter 内部 rate limit（飞书侧）|
 | 含 ANSI 转义码的用户消息 | 原样转发（用户极少这么用）|
-| 长消息（>4KB）| 飞书侧已限制发送大小，无需 nightme 处理 |
+| 长消息（>4KB）| 飞书侧已限制发送大小 |
+| session 未创建时用户发普通文本 | Gateway 提示 "no active session, send /cwd first" |
 
 ## 5. Test plan
 
 **单元测试**：
 - `normalizeInput("hello")` → `"hello\n"`
 - `normalizeInput("hello\r\nworld")` → `"hello\nworld\n"`
-- `normalizeInput("hello\n")` → `"hello\n"`（不去重已有 \n）
+- `normalizeInput("hello\n")` → `"hello\n"`
 
 **集成测试**：
-- mock channel → mock agent（cat）→ 输入 "hello" → 验证 cat 输出 "hello"
+- Gateway.Handle(普通文本) → fallback 触发 → bridge.Write 被调
 
 **E2E（M2）**：
-- 飞书 DM 发消息 → claude 进程 stdin 收到（`strace -e trace=read` 或类似工具验证）
+- 创建 session（/cwd）后，飞书 DM 发 "hello" → claude 收到 stdin
+- 飞书 DM 发 `/help` → bot 回命令列表（不进 PTY）
 
 ## 6. Open questions
 
 - 是否需要支持 Ctrl+C / Ctrl+D 等控制字符？倾向：飞书用户极少需要，v0.1 不支持
-- 是否需要支持 `/` 命令（如 `/kill`、`/clear`）？倾向：v0.1 不支持，v0.2 加 command router
+- session 未创建时的 fallback 行为：当前设计"提示用户"，但这等于 Gateway 在做 SessionManager 的事情。是否应让 SessionManager 报错？

@@ -2,21 +2,20 @@
 
 > **Status**: designed (v0.1)
 > **Milestone**: M2 (Feishu integration)
-> **Depends on**: F-04 (PTY), F-07 (Workspace binding), F-08 (Channel), F-09 (Agent)
-> **Related docs**: SPEC.md §2.1, §2.3 (数据流), §3 (lifecycle)
+> **Depends on**: F-04 (PTY), F-07 (Workspace binding), F-08 (Channel), F-09 (Agent), F-20 (Gateway)
+> **Related docs**: SPEC.md §2.1, §2.3 (数据流), §3 (lifecycle), [F-20-gateway.md](./F-20-gateway.md)
 
 ## 1. Description
 
-用户在新 Chat（DM/group/thread）的**第一条**消息中以 `workspace: <path>` 触发 session 创建。nightme 验证路径存在 + agent 可执行，spawn PTY 进程，注册到 registry，回复 "Session started"。
+用户在新 Chat（DM/group/thread）发送 **`/cwd <path>`** slash command 触发 session 创建。
+
+slash command 由 [F-20 Gateway](./F-20-gateway.md) 识别并路由到本 feature 的 handler。handler 验证路径存在 + agent 可执行，spawn PTY 进程，注册到 registry，回复 "Session started"。
+
+**触发协议**：见 [F-20 §4.1](./F-20-gateway.md#41-cwd-path-详细行为)
 
 ## 2. Interface
 
 ```go
-// Router returns ErrNewChat if chat_id has no session yet
-type Router interface {
-    Lookup(ctx context.Context, chatID string) (*Session, error)
-}
-
 // SessionManager.Create validates workspace and spawns PTY
 type SessionManager interface {
     Create(ctx context.Context, req CreateRequest) (*Session, error)
@@ -24,73 +23,92 @@ type SessionManager interface {
 
 type CreateRequest struct {
     ChatID    string  // from Channel.Message
-    Workspace string  // parsed from first message
+    Workspace string  // parsed from /cwd args[0]
     Agent     string  // optional, defaults to config default_agent
 }
 
-// Workspace parser (internal/workspace/parser.go)
-func ParseWorkspaceDirective(text string) (workspace string, body string, err error)
+// Triggered by Gateway when /cwd <path> is received
+func CwdHandler(ctx context.Context, msg *Message, args []string) (*gateway.CommandResult, error) {
+    if len(args) != 1 {
+        return errorReply("usage: /cwd <path>"), nil
+    }
+    session, err := sessionManager.Create(ctx, CreateRequest{
+        ChatID:    msg.ChatID,
+        Workspace: args[0],
+    })
+    if err != nil {
+        return errorReply(err.Error()), nil
+    }
+    return successReply(fmt.Sprintf("Session started in %s", session.Workspace)), nil
+}
 ```
-
-**消息格式**：
-- 首条消息前缀 `workspace: ` 必须存在
-- workspace 路径必须为绝对路径
-- 后续 body 部分（如 `请帮我修复 login bug`）作为 PTY stdin 第一条输入
 
 ## 3. Implementation
 
 **文件**：
-- `internal/workspace/parser.go` — 解析 `workspace: <path>` 前缀
+- `internal/gateway/commands.go` — `/cwd` handler（调 SessionManager）
 - `internal/session/manager.go` — `Create()` 方法
 - `internal/pty/bridge.go` — `pty.New()` 实际 spawn
+- `internal/workspace/workspace.go` — path 验证 + `~` 展开
 
 **流程**：
 ```
-Router.Lookup(chatID)
-  → ErrNewChat
+用户 DM 发 "/cwd /tmp/foo"
   ↓
-Channel.Message.Text 解析
-  → ParseWorkspaceDirective → workspace, body
+ChannelAdapter.Incoming() → Message{ChatID, Text="/cwd /tmp/foo"}
   ↓
-SessionManager.Create(req)
-  ├─ 验证 workspace 存在 (os.Stat)
-  ├─ 验证 agent 可执行 (exec.LookPath)
-  ├─ pty.New(workspace, agent.Command(), agent.Args())
-  ├─ registry.Upsert(session)
-  ├─ 启动 readPump / writePump goroutines
-  └─ 返回 *Session
-  ↓
-Channel.SendMessage(chatID, "Session started in {workspace}")
-Channel.SendMessage(chatID, body)  // 把第一条输入送进 PTY
+Gateway.Handle(msg)
+  ├─ 识别以 / 开头 → 走命令路由
+  ├─ ParseCommand("/cwd /tmp/foo") → ("cwd", ["/tmp/foo"])
+  ├─ 查 commands["cwd"] → 命中
+  └─ CwdHandler(ctx, msg, ["/tmp/foo"])
+      ├─ args 长度检查
+      ├─ Resolve(path) — 展开 ~
+      ├─ Validate(path) — 存在性 + 目录 + 权限
+      ├─ sessionManager.Create(req)
+      │   ├─ 检查 session 是否已存在（chat_id 已绑定）→ 报错
+      │   ├─ pty.New(workspace, agent.Command(), agent.Args())
+      │   ├─ registry.Upsert(session)
+      │   ├─ 启动 readPump / writePump goroutines
+      │   └─ 返回 *Session
+      └─ Reply("Session started in /tmp/foo")
 ```
 
 ## 4. Edge cases
 
 | 场景 | 处理 |
 |------|------|
-| workspace 路径不存在 | 返回错误 → Channel 提示 "workspace does not exist: {path}" |
-| workspace 是相对路径 | 拒绝，要求绝对路径 |
-| agent 不在 PATH | 返回错误 → Channel 提示 "claude not found, please install" |
-| PTY 启动后立刻 exit | 注册后立即取消，registry 删除记录，提示用户 |
-| 首条消息没有 `workspace:` 前缀 | 提示用户 "please start with 'workspace: <abs path>'" |
-| 用户输入的 workspace 包含特殊字符 | 转义处理（`"` `\` 等） |
-| 同时多条首条消息（IM 重发） | 利用 chat_id 路由去重，第二次 Lookup 返回已有 session |
+| `/cwd` 无参数 | 报错 "usage: /cwd `<path>`" |
+| `/cwd /nonexistent` | 报错 "workspace does not exist: /nonexistent" |
+| `/cwd /path/to/file`（不是目录）| 报错 "not a directory" |
+| `/cwd /path/no/exec` | 报错 "no execute permission" |
+| `claude` 不在 PATH | 报错 "claude binary not found" |
+| PTY 启动后立刻 exit | registry 立即删除，回复 "agent failed to start" |
+| 该 chat_id 已有 active session | 报错 "session already active in {path}, /kill first to switch" |
+| `/cwd` 同时收到多次（IM 重发）| Gateway 串行处理，第二个请求被"session already active"挡住 |
+| 路径含空格 / 中文 / emoji | 原样保留，PTY 启动不 care |
+| `~` 展开 | Resolve 展开为 $HOME 再 Validate |
 
 ## 5. Test plan
 
 **单元测试**：
-- `ParseWorkspaceDirective("workspace: /tmp/foo 请帮我修 bug")` → `("/tmp/foo", "请帮我修 bug", nil)`
-- `ParseWorkspaceDirective("hello")` → `("", "", ErrNoWorkspace)`
-- `os.Stat` 不存在 → 返回 `ErrWorkspaceNotExist`
+- `CwdHandler` 无 args → 返回 usage error
+- `CwdHandler` 有效 path → 调 SessionManager.Create，返回 success
+- `CwdHandler` chat 已有 session → 返回 "already active"
+- `workspace.Resolve("~/code")` → `/home/devin/code`
+- `workspace.Validate("/tmp")` → nil
+- `workspace.Validate("/nonexistent")` → ErrNotExist
 
 **集成测试**：
-- 启动 mock channel + mock agent → Create → 验证 session 创建 + registry 写入
+- mock Channel + mock SessionManager → 触发 /cwd → 验证 reply 内容
 
 **E2E（M2）**：
-- 飞书 DM 首条消息 `workspace: /tmp/foo` → 收到 "Session started" 消息
+- 飞书 DM 发 `/cwd /tmp/foo` → 收到 "Session started" 消息
+- 飞书 DM 后续发 "hello" → claude 收到 stdin
+- 飞书 DM 再发 `/cwd /tmp/bar` → 收到 "session already active" 错误
 
 ## 6. Open questions
 
-- 是否支持 `~` 展开（`workspace: ~/code/bailing`）？倾向：是，但先 expand 再 stat
-- 是否允许 workspace = `file://...`？倾向 v0.1 不支持，留给后续
-- 首条消息 body 是否作为第一条 stdin 输入？倾向：是（参考 [F-19](./F-19-cli-bridge.md) §2.1）
+- 是否允许 `/cwd ~/code/bailing`（带 `~`）？倾向：是，先 expand 再 stat
+- session 内 `/cwd <new path>` 是否自动 kill 旧 session 并创建新 session？v0.1 拒绝（用 `/kill` 后再 `/cwd`）；v0.2 可能加 `/force` flag
+- 是否支持 `/cwd -` 切回上一个 workspace？v0.1 不支持

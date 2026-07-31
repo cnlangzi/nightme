@@ -27,31 +27,33 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 ┌─────────────────────────────────────────────────────────────┐
 │  nightme (single binary on user's laptop)                   │
 │                                                              │
-│  ┌──────────────┐  ┌───────────────────┐  ┌──────────────┐ │
-│  │ Channel      │  │ Session Manager   │  │ PTY Bridge   │ │
-│  │ Adapter      │←→│ (+ Workspace:     │←→│ (per session)│ │
-│  │              │  │  session.ws)      │  │              │ │
-│  └──────────────┘  └─────────┬─────────┘  └──────┬───────┘ │
-│                              │                    │         │
-│                              ▼                    ▼         │
-│                       (session 状态)      ┌──────────────────┐│
-│                                          │ Claude Code /    ││
-│                                          │ Codex / OpenCode ││
-│                                          │ (PTY, cwd=ws)    ││
-│                                          └──────────────────┘│
+│  ┌────────────┐  ┌──────────┐  ┌────────────────┐  ┌───────┐ │
+│  │ Channel    │→ │ Gateway  │→ │ Session Manager│  │ PTY   │ │
+│  │ Adapter    │  │ (slash   │←→│ (+ Workspace:  │←→│ Bridge│ │
+│  │            │  │  cmd)    │  │  session.ws)   │  │       │ │
+│  └────────────┘  └──────────┘  └────────┬───────┘  └───┬───┘ │
+│                                          │              │     │
+│                                          ▼              ▼     │
+│                                   (session 状态)   Claude / │
+│                                                  Codex /    │
+│                                                  OpenCode   │
+│                                                  (PTY)      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 1.1 四个逻辑组件
+### 1.1 五个逻辑组件
 
 | 组件 | 职责 |
 |------|------|
 | **Channel Adapter** | 把 IM 协议（飞书 WebSocket / WhatsApp webhook 等）抽象成统一接口；把 IM 消息收上来、把 nightme 输出推回去 |
+| **Gateway** | Slash command 路由器：判断每条消息是系统命令还是普通文本；系统命令命中表后执行 / 不命中报错，普通文本透传给 SessionManager |
 | **Session Manager** | 维护 chat_id ↔ session 的绑定；管理 session 的创建、查询、销毁；**每个 session 绑定一个 workspace**（session.Workspace 字段，session 创建时确定，生命周期内不变） |
 | **PTY Bridge** | 在 pseudo-terminal 中 spawn AI Coding CLI；提供读 / 写 / resize 三个能力；一个 session 一个 PTY，cwd = session.Workspace |
 | **Process Registry** | 记录 nightme 启动的所有进程（pid + chat_id + workspace + 启动时间）；用于查询、重启恢复、清理 |
 
 > **Workspace 不再是独立组件**：原"Workspace Mapper"是 Session Manager 的子功能——每个 session 自带 workspace 字段，查找 chat_id 对应 workspace = `session.Workspace`，无需独立映射表。
+
+> **Gateway 与 Channel Adapter 的关系**：Channel Adapter 只负责 IM 协议编解码；Gateway 负责"这是命令还是文本"的语义判断。两者职责单一不重叠。
 
 > **实现细节**：这些组件的 Go 接口、struct、文件路径在 [`feat/`](./feat/) 各自的 feature doc 里。
 
@@ -64,9 +66,14 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 ```
 IM 消息事件
   → Channel Adapter 解码为统一 Message{chat_id, text}
-  → Router 查 chat_id → session
-  → Session 把 text 写入 PTY stdin
-  → CLI 收到输入
+  → Gateway 判断 text 是否以 / 开头
+      ├─ 是 slash command → 查命令表
+      │       ├─ 命中 → 执行（创建 / kill session / help 等）
+      │       └─ 不命中 → 回复 "unknown command"
+      └─ 否（普通文本）→ 透传给 Session Manager
+              → Router 查 chat_id → session
+              → Session 把 text 写入 PTY stdin
+              → CLI 收到输入
 ```
 
 ### 2.2 CLI 输出 → 用户
@@ -79,17 +86,21 @@ CLI stdout/stderr
   → IM 用户收到消息
 ```
 
-### 2.3 新 Chat 触发 Session
+### 2.3 用户用 slash command 创建 Session
 
 ```
-用户在新 DM 首条消息 "workspace: /path/to/project"
+用户在新 DM 发 "/cwd /path/to/project"
   → Channel Adapter 收到 Message
-  → Router 查 chat_id → 没有 session → 触发创建
-  → Session Manager 验证 workspace + agent
+  → Gateway 识别为 /cwd slash command
+  → Gateway 查 commands 表 → 命中
+  → cwd handler 验证 path + agent
+  → Session Manager 创建 session（chat_id, workspace, agent）
   → PTY Bridge spawn CLI（cwd = workspace）
   → Process Registry 记录 PID
-  → Channel Adapter 回复 "Session started in {workspace}"
+  → Gateway 回复 "Session started in {workspace}"
 ```
+
+**为什么用 slash command**：原方案"workspace:" 文字前缀识别不可靠——用户可能真在聊 workspace 这个词。`/` 前缀明确，无歧义，Gateway 路由表清晰。
 
 ---
 
@@ -112,12 +123,12 @@ CLI stdout/stderr
 
 | From | 触发 | To |
 |------|------|-----|
-| (none) | 用户首条消息 `workspace:` | pending |
+| (none) | 用户发送 cwd slash command | pending |
 | pending | workspace 校验通过 + agent spawn | running |
 | pending | 校验失败 | (none, 提示用户) |
 | running | CLI 正常 / 异常 exit | exited |
 | running | PTY EOF | exited |
-| running | 用户 `/kill` (v0.2) | exited |
+| running | 用户发送 kill slash command | exited |
 | running | nightme SIGTERM | detached（registry 标记，进程继续） |
 | exited | 用户下次创建 session | (走 pending 流程) |
 
@@ -131,6 +142,7 @@ nightme 用 Go 的 goroutine 实现并发，结构如下：
 
 - **Main goroutine**：信号处理、组件启动顺序、优雅退出
 - **Channel goroutines**：长连接收发 + 发送队列（每个 Channel adapter 一组）
+- **Gateway**：在 Channel handler goroutine 内同步执行（命令路由极快，不阻塞 I/O）
 - **Per-session goroutines**：每个 session 两个 goroutine
   - `readPump`：PTY → Aggregator → Channel
   - `writePump`：Channel input → PTY stdin

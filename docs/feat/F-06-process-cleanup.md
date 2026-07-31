@@ -3,7 +3,7 @@
 > **Status**: designed (v0.1)
 > **Milestone**: M3 (Hardening)
 > **Depends on**: F-05 (Registry)
-> **Related docs**: SPEC.md §3 (lifecycle triggers)
+> **Related docs**: SPEC.md §3 (lifecycle triggers), [`F-20-gateway.md`](./F-20-gateway.md) §4.3 (`/kill` command)
 
 ## 1. Description
 

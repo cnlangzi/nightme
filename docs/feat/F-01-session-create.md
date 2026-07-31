@@ -7,11 +7,14 @@
 
 ## 1. Description
 
-用户在新 Chat（DM/group/thread）发送 **`/cwd <path>`** slash command 触发 session 创建。
+Session 由 nightme 的 slash command 创建。两个独立的触发命令：
+
+- **`/cwd <path>`** — 设置 workspace，使用默认 agent（claude）+ 默认 args
+- **`/start <agent> [args...]`** — 设置 agent + args，使用默认 workspace（$HOME）
+
+两个命令任一发到 chat 都会触发 session 创建（缺的字段走默认）。session 已存在时两个命令都拒绝（必须先 `/kill`）。
 
 slash command 由 [F-20 Gateway](./F-20-gateway.md) 识别并路由到本 feature 的 handler。handler 验证路径存在 + agent 可执行，spawn PTY 进程，注册到 registry，回复 "Session started"。
-
-**触发协议**：见 [F-20 §4.1](./F-20-gateway.md#41-cwd-path-详细行为)
 
 ## 2. Interface
 
@@ -22,72 +25,123 @@ type SessionManager interface {
 }
 
 type CreateRequest struct {
-    ChatID    string  // from Channel.Message
-    Workspace string  // parsed from /cwd args[0]
-    Agent     string  // optional, defaults to config default_agent
+    ChatID    string    // from Channel.Message
+    Workspace string    // 已 expand 的绝对路径
+    Agent     string    // agent name (must be in agent registry)
+    Args      []string  // 额外参数，透传给 agent CLI
 }
 
-// Triggered by Gateway when /cwd <path> is received
+// 由 Gateway 调用：处理 /cwd <path>
 func CwdHandler(ctx context.Context, msg *Message, args []string) (*gateway.CommandResult, error) {
     if len(args) != 1 {
         return errorReply("usage: /cwd <path>"), nil
     }
-    session, err := sessionManager.Create(ctx, CreateRequest{
-        ChatID:    msg.ChatID,
-        Workspace: args[0],
-    })
+    workspace, err := workspace.Resolve(args[0])
     if err != nil {
         return errorReply(err.Error()), nil
     }
-    return successReply(fmt.Sprintf("Session started in %s", session.Workspace)), nil
+    session, err := sessionManager.Create(ctx, CreateRequest{
+        ChatID:    msg.ChatID,
+        Workspace: workspace,
+        Agent:     config.DefaultAgent(),  // "claude"
+        Args:      nil,
+    })
+    // ...
+}
+
+// 由 Gateway 调用：处理 /start <agent> [args...]
+func StartHandler(ctx context.Context, msg *Message, args []string) (*gateway.CommandResult, error) {
+    if len(args) < 1 {
+        return errorReply("usage: /start <agent> [args...]"), nil
+    }
+    agentName := args[0]
+    extraArgs := args[1:]
+
+    agent, err := agent.Get(agentName)
+    if err != nil {
+        return errorReply("unknown agent: " + agentName), nil
+    }
+    if err := agent.Detect(); err != nil {
+        return errorReply("agent not found: " + err.Error()), nil
+    }
+
+    workspace := chatContext.GetWorkspaceOrDefault(msg.ChatID)  // /cwd 优先；否则 $HOME
+
+    session, err := sessionManager.Create(ctx, CreateRequest{
+        ChatID:    msg.ChatID,
+        Workspace: workspace,
+        Agent:     agentName,
+        Args:      extraArgs,  // 透传给 agent CLI
+    })
+    // ...
 }
 ```
+
+**`chatContext` 的作用**：记录该 chat 之前是否发过 `/cwd`。v0.1 简单实现：每个 chat 记一个 `lastCwd string`，session 销毁后清空。
 
 ## 3. Implementation
 
 **文件**：
-- `internal/gateway/commands.go` — `/cwd` handler（调 SessionManager）
+- `internal/gateway/commands.go` — `/cwd` 和 `/start` handlers
 - `internal/session/manager.go` — `Create()` 方法
 - `internal/pty/bridge.go` — `pty.New()` 实际 spawn
 - `internal/workspace/workspace.go` — path 验证 + `~` 展开
+- `internal/chatcontext/` — chat 维度的临时状态（last cwd 等）
 
-**流程**：
+**session 创建流程**（统一）：
 ```
-用户 DM 发 "/cwd /tmp/foo"
+Gateway.Handle("/cwd /tmp/foo") 或 Gateway.Handle("/start codex --flag")
   ↓
-ChannelAdapter.Incoming() → Message{ChatID, Text="/cwd /tmp/foo"}
-  ↓
-Gateway.Handle(msg)
-  ├─ 识别以 / 开头 → 走命令路由
-  ├─ ParseCommand("/cwd /tmp/foo") → ("cwd", ["/tmp/foo"])
-  ├─ 查 commands["cwd"] → 命中
-  └─ CwdHandler(ctx, msg, ["/tmp/foo"])
-      ├─ args 长度检查
-      ├─ Resolve(path) — 展开 ~
-      ├─ Validate(path) — 存在性 + 目录 + 权限
-      ├─ sessionManager.Create(req)
-      │   ├─ 检查 session 是否已存在（chat_id 已绑定）→ 报错
-      │   ├─ pty.New(workspace, agent.Command(), agent.Args())
-      │   ├─ registry.Upsert(session)
-      │   ├─ 启动 readPump / writePump goroutines
-      │   └─ 返回 *Session
-      └─ Reply("Session started in /tmp/foo")
+对应 handler (CwdHandler 或 StartHandler)
+  ├─ 解析 / 验证参数
+  ├─ workspace.Resolve(path)（/start 用 chatContext 里的 last cwd 或 $HOME）
+  ├─ agent.Get + agent.Detect（/cwd 用默认 claude，无需 Detect）
+  ├─ sessionManager.Create(req)
+  │   ├─ 检查 session 是否已存在（chat_id 已绑定）→ 报错
+  │   ├─ pty.New(workspace, agent.Command(), append(agent.Args(), extraArgs...))
+  │   ├─ registry.Upsert(session)
+  │   ├─ 启动 readPump / writePump goroutines
+  │   └─ 返回 *Session
+  └─ Reply("Session started: ...")
 ```
+
+**PTY 启动时的 args 合并**：
+```go
+// internal/pty/bridge.go
+func New(workspace, command string, args []string, ...) (Bridge, error) {
+    cmd := exec.Command(command, args...)  // 透传所有 args
+    cmd.Dir = workspace
+    // ...
+}
+
+// 调用：
+agentArgs := append(agent.Args(), req.Args...)  // 合并：agent 默认 args + 透传 args
+pty.New(req.Workspace, agent.Command(), agentArgs, ...)
+```
+
+- `agent.Args()` 是 agent 的固定 args（如 claude 可能需要 `--quiet`）
+- `req.Args` 是用户通过 `/start` 透传的 args
+- nightme 把两者合并后给 PTY（agent 的在前，用户的在后；v0.1 简单合并，不去重）
 
 ## 4. Edge cases
 
 | 场景 | 处理 |
 |------|------|
-| `/cwd` 无参数 | 报错 "usage: /cwd `<path>`" |
+| `/cwd` 无参数 | 报错 "usage: /cwd <path>" |
 | `/cwd /nonexistent` | 报错 "workspace does not exist: /nonexistent" |
-| `/cwd /path/to/file`（不是目录）| 报错 "not a directory" |
-| `/cwd /path/no/exec` | 报错 "no execute permission" |
-| `claude` 不在 PATH | 报错 "claude binary not found" |
+| `/cwd` 但 session 已存在 | 报错 "session already active, /kill first" |
+| `/start` 无参数 | 报错 "usage: /start <agent> [args...]" |
+| `/start foo`（未知 agent）| 报错 "unknown agent: foo" |
+| `/start claude` 但 claude 不在 PATH | 报错 "claude binary not found, please install" |
+| `/start codex --bad-flag` | 透传，codex 自己报错（nightme 不验证 args 合法性）|
+| `/start` 但 session 已存在 | 报错 "session already active, /kill first" |
+| `/cwd` 后 `/start claude --flag` | `/start` 用 /cwd 设的 workspace，agent 用 claude，args=["--flag"] |
+| `/start` 后 `/cwd /tmp/foo` | `/cwd` 用 /start 设的 agent，workspace 改成 /tmp/foo |
+| `/kill` 后 `/start codex` | 创建新 session（agent=codex, workspace=$HOME 默认） |
 | PTY 启动后立刻 exit | registry 立即删除，回复 "agent failed to start" |
-| 该 chat_id 已有 active session | 报错 "session already active in {path}, /kill first to switch" |
-| `/cwd` 同时收到多次（IM 重发）| Gateway 串行处理，第二个请求被"session already active"挡住 |
 | 路径含空格 / 中文 / emoji | 原样保留，PTY 启动不 care |
 | `~` 展开 | Resolve 展开为 $HOME 再 Validate |
+| 用户 args 包含 `--help` | nightme 不识别为 nightme help，直接透传给 agent |
 
 ## 5. Test plan
 
@@ -95,20 +149,29 @@ Gateway.Handle(msg)
 - `CwdHandler` 无 args → 返回 usage error
 - `CwdHandler` 有效 path → 调 SessionManager.Create，返回 success
 - `CwdHandler` chat 已有 session → 返回 "already active"
+- `StartHandler` 无 args → 返回 usage error
+- `StartHandler("foo")` → "unknown agent"
+- `StartHandler("claude", "--model", "opus")` → CreateRequest{Agent:"claude", Args:["--model","opus"]}
+- `StartHandler` chat 已有 session → 返回 "already active"
+- `StartHandler` 前 chat 发过 `/cwd /tmp/foo` → workspace=/tmp/foo
+- `StartHandler` 前 chat 没发过 `/cwd` → workspace=$HOME
+- `pty.New` 启动 `claude --model opus` → 验证 cmd.Args 包含 "--model opus"
 - `workspace.Resolve("~/code")` → `/home/devin/code`
 - `workspace.Validate("/tmp")` → nil
-- `workspace.Validate("/nonexistent")` → ErrNotExist
 
 **集成测试**：
-- mock Channel + mock SessionManager → 触发 /cwd → 验证 reply 内容
+- mock Channel + mock SessionManager + mock Agent registry → 触发 /cwd → 验证 CreateRequest
+- 触发 /start claude --model opus → 验证 agent 收到 args
 
 **E2E（M2）**：
-- 飞书 DM 发 `/cwd /tmp/foo` → 收到 "Session started" 消息
-- 飞书 DM 后续发 "hello" → claude 收到 stdin
-- 飞书 DM 再发 `/cwd /tmp/bar` → 收到 "session already active" 错误
+- 飞书 DM 发 `/cwd /tmp/foo` → "Session started in /tmp/foo"
+- 飞书 DM 发 `/start codex --full-auto` → "Session started: codex --full-auto, cwd=$HOME"
+- 飞书 DM 发 `/cwd /tmp/foo` → `/start codex` → session 用 workspace=/tmp/foo + agent=codex
+- 验证 spawn 的进程：`ps aux | grep codex` 看到 `codex --full-auto`
 
 ## 6. Open questions
 
-- 是否允许 `/cwd ~/code/bailing`（带 `~`）？倾向：是，先 expand 再 stat
-- session 内 `/cwd <new path>` 是否自动 kill 旧 session 并创建新 session？v0.1 拒绝（用 `/kill` 后再 `/cwd`）；v0.2 可能加 `/force` flag
-- 是否支持 `/cwd -` 切回上一个 workspace？v0.1 不支持
+- `/cwd` 和 `/start` 的顺序是否影响结果？v0.1：后者覆盖前者（但 session 已存在时都拒绝）
+- v0.2 是否支持 `/start --workspace <path> claude --flag` 一次性设置？v0.2 评估
+- `/start` 的 args 含特殊字符（如空格、`"`、`'`）怎么办？v0.1 按空格切分；v0.2 加引号支持
+- agent 默认 args 与用户 args 冲突时如何处理？v0.1 简单拼接（用户在后）；v0.2 可考虑覆盖

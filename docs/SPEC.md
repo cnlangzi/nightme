@@ -129,12 +129,13 @@ CLI stdout/stderr
 
 | From | 触发 | To |
 |------|------|-----|
-| (none) | 用户发送 cwd slash command | pending |
-| pending | workspace 校验通过 + agent spawn | running |
+| (none) | 用户发送 /cwd slash command | pending |
+| (none) | 用户发送 /start slash command | pending |
+| pending | workspace + agent 校验通过 + PTY spawn | running |
 | pending | 校验失败 | (none, 提示用户) |
 | running | CLI 正常 / 异常 exit | exited |
 | running | PTY EOF | exited |
-| running | 用户发送 kill slash command | exited |
+| running | 用户发送 /kill slash command | exited |
 | running | nightme SIGTERM | detached（registry 标记，进程继续） |
 | exited | 用户下次创建 session | (走 pending 流程) |
 

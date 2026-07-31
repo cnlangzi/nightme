@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -138,22 +139,58 @@ func validateTestRequest(f testCmdFlags) error {
 // registering it as PTY on the fly.
 func buildAgentRegistry(cfg *config.Config, requested string) *agent.Registry {
 	reg := agent.New()
+	if cfg == nil {
+		return reg
+	}
 	for name, entry := range cfg.Agent.Agents {
 		if entry.Command == "" {
 			continue
 		}
-		reg.Register(ptyagent.New(name, entry.Command))
+		a := ptyagent.New(name, entry.Command)
+		a.Args = append([]string(nil), entry.Args...)
+		a.Env = configuredAgentEnv(entry.Env)
+		a.Cols = cfg.Session.DefaultPtyCols
+		a.Rows = cfg.Session.DefaultPtyRows
+		reg.Register(a)
 	}
 	if _, err := reg.Get(requested); err != nil {
 		// Auto-register a bare-path agent when the user passed
 		// `--agent /some/binary`. Only do this if the file exists
 		// so a typo surfaces as "agent not found" instead of a
 		// confusing exec error.
-		if _, statErr := os.Stat(requested); statErr == nil {
-			reg.Register(ptyagent.New(requested, filepath.Base(requested)))
+		if requested != "" {
+			if _, statErr := os.Stat(requested); statErr == nil {
+				reg.Register(ptyagent.New(requested, filepath.Base(requested)))
+			}
 		}
 	}
 	return reg
+}
+
+// configuredAgentEnv converts the YAML map into the flat environment format
+// accepted by ptyagent. Sorting keeps child environments deterministic.
+func configuredAgentEnv(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key+"="+env[key])
+	}
+	return out
+}
+
+// buildRunAgentRegistry registers every configured PTY agent. The example
+// config names the three v0.1 agents claude, codex, and opencode; keeping the
+// helper config-driven also permits a user to add another CLI without a code
+// change.
+func buildRunAgentRegistry(cfg *config.Config) *agent.Registry {
+	return buildAgentRegistry(cfg, "")
 }
 
 // pumpIO bridges stdin ↔ session and stdout. It returns when the

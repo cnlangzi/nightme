@@ -20,6 +20,7 @@ type fakeAgent struct {
 	mode    agent.Mode
 	events  []agent.AgentEvent
 	detectF func() error
+	pid     int
 }
 
 func (f *fakeAgent) Name() string  { return f.name }
@@ -31,7 +32,7 @@ func (f *fakeAgent) Detect() error {
 	return nil
 }
 func (f *fakeAgent) Start(context.Context, agent.StartConfig) (agent.AgentSession, error) {
-	return &fakeAgentSession{events: f.events}, nil
+	return &fakeAgentSession{events: f.events, pid: f.pid}, nil
 }
 
 // fakeAgentSession is the AgentSession returned by fakeAgent.Start.
@@ -46,6 +47,7 @@ type fakeAgentSession struct {
 	closed    bool
 	sendErr   error
 	closeErr  error
+	pid       int
 }
 
 func (s *fakeAgentSession) ensureStarted() {
@@ -71,6 +73,7 @@ func (s *fakeAgentSession) Events() <-chan agent.AgentEvent {
 
 func (s *fakeAgentSession) SendText(string) error     { return s.sendErr }
 func (s *fakeAgentSession) SendPermission(string) error { return s.sendErr }
+func (s *fakeAgentSession) PID() int                  { return s.pid }
 func (s *fakeAgentSession) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

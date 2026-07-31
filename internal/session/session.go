@@ -112,6 +112,17 @@ func (s *Session) Status() Status {
 	return s.status
 }
 
+// MarkDetached changes a live session to detached without touching the
+// underlying agent handle. The MemoryManager uses this during daemon shutdown
+// before it releases its own handle.
+func (s *Session) MarkDetached() {
+	s.mu.Lock()
+	if s.status != StatusExited {
+		s.status = StatusDetached
+	}
+	s.mu.Unlock()
+}
+
 // ExitCode returns the exit code recorded for an exited session, or
 // nil if the session is still running.
 func (s *Session) ExitCode() *int {

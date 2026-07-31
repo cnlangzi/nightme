@@ -45,6 +45,23 @@ type Manager interface {
 	// succeeds.
 	Create(ctx context.Context, req CreateRequest) (*Session, error)
 
+	// CreateOrUpdate binds a chat to a session with the given
+	// workspace. New chatIDs get a detached session record; existing
+	// exited/detached sessions get their workspace rebinded in
+	// place; an already-running session is rejected with
+	// ErrChatAlreadyBound (caller must /kill first).
+	CreateOrUpdate(chatID, workspace, agent string, args []string) (*Session, error)
+
+	// Run ensures a CLI is running for chatID. It is a no-op when
+	// a CLI is already there; otherwise it spawns one in the
+	// session's bound workspace. Returns ErrSessionNotFound when
+	// the chat has no /cwd yet.
+	Run(ctx context.Context, chatID, agent string, extraArgs []string) (*Session, error)
+
+	// KillByChat stops the CLI bound to chatID. The session record
+	// is retained. ErrSessionNotFound when chatID is unknown.
+	KillByChat(chatID string) error
+
 	// GetByChat returns the session bound to chatID, or
 	// ErrSessionNotFound.
 	GetByChat(chatID string) (*Session, error)
@@ -149,24 +166,10 @@ func (m *MemoryManager) Create(ctx context.Context, req CreateRequest) (*Session
 	if req.Agent == "" {
 		return nil, errors.New("session: Agent is required")
 	}
-	if m.agents == nil {
-		return nil, errors.New("session: agent registry is nil")
-	}
 
-	a, err := m.agents.Get(req.Agent)
+	agentSession, pid, err := m.startAgent(ctx, req.Agent, req.Workspace, req.Args)
 	if err != nil {
-		return nil, fmt.Errorf("session: %w", err)
-	}
-	if err := a.Detect(); err != nil {
-		return nil, fmt.Errorf("session: detect %s: %w", req.Agent, err)
-	}
-
-	agentSession, err := a.Start(ctx, agent.StartConfig{
-		Workspace: req.Workspace,
-		Args:      req.Args,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("session: start %s: %w", req.Agent, err)
+		return nil, err
 	}
 
 	m.mu.Lock()
@@ -178,15 +181,15 @@ func (m *MemoryManager) Create(ctx context.Context, req CreateRequest) (*Session
 
 	now := m.now()
 	sess := &Session{
-		ID:           m.newID(),
-		ChatID:       req.ChatID,
-		Workspace:    req.Workspace,
-		Agent:        req.Agent,
-		Args:         append([]string(nil), req.Args...),
-		StartedAt:    now,
-		LastRunAt:    now,
+		ID:        m.newID(),
+		ChatID:    req.ChatID,
+		Workspace: req.Workspace,
+		Agent:     req.Agent,
+		Args:      append([]string(nil), req.Args...),
+		StartedAt: now,
+		LastRunAt: now,
 	}
-	sess.setLifecycle(StatusRunning, agentSession, 0, nil)
+	sess.setLifecycle(StatusRunning, agentSession, pid, nil)
 	m.sessions[sess.ID] = sess
 	m.chatIndex[req.ChatID] = sess.ID
 	m.mu.Unlock()
@@ -291,9 +294,39 @@ func (m *MemoryManager) Kill(sid string) error {
 	return nil
 }
 
+// MarkDetached releases the manager's live handle for sid without closing the
+// underlying agent. This is the daemon shutdown policy: the CLI may continue
+// running after nightme exits and the registry records the detached state.
+// Already-exited sessions are left unchanged.
+func (m *MemoryManager) MarkDetached(sid string) error {
+	m.mu.RLock()
+	s, ok := m.sessions[sid]
+	m.mu.RUnlock()
+	if !ok {
+		return ErrSessionNotFound
+	}
+
+	s.mu.Lock()
+	if s.status == StatusExited {
+		s.mu.Unlock()
+		return nil
+	}
+	pid := s.PID
+	s.status = StatusDetached
+	s.agentSession = nil
+	cancel := s.cancel
+	s.cancel = nil
+	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	return m.upsertEntry(s, registry.StatusDetached, pid)
+}
+
 // Restore reads persisted entries from the registry and rebuilds the
-// in-memory session table. Each entry becomes a Session whose
-// metadata is restored verbatim; the lifecycle is mapped as:
+// in-memory session table. Each entry's metadata is restored verbatim; the
+// lifecycle is mapped as:
 //
 //	StatusRunning  -> StatusDetached (PID may be dead after restart)
 //	StatusDetached -> StatusDetached

@@ -227,6 +227,12 @@ type AgentSession interface {
 	// terminal EventError.
 	Events() <-chan AgentEvent
 
+	// PID returns the OS process id of the underlying child, or 0
+	// when the session has no process (e.g. SDK backends that do
+	// not spawn one). The Session Manager caches this value for
+	// /run reconnect logic and for the registry.
+	PID() int
+
 	// SendText delivers user input. In PTY mode it is written as bytes
 	// to the child's stdin; in ACP/SDK mode it is a structured prompt.
 	SendText(text string) error

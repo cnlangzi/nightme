@@ -67,6 +67,15 @@ type Session struct {
 	// GetByChat. One chat maps to at most one Session (Q4 / SPEC §9).
 	ChatID string
 
+	// ChatType mirrors channel.Message.ChatType at create time:
+	// "p2p" for DMs, "group" for group chats, "" for unknown.
+	// DMs are a special case — the bot ↔ user relationship is 1:1
+	// so a DM has at most one session, and that session is treated
+	// as a single "control plane" (users typically issue /cwd +
+	// /run from a DM and watch replies there). Group chats each
+	// have their own session keyed by chat_id.
+	ChatType string
+
 	// Workspace is the directory the agent operates in. It is bound
 	// at creation time and never changes for the lifetime of the
 	// Session.

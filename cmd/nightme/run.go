@@ -283,6 +283,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 				Text:     msg.Text,
 				SenderID: msg.SenderID,
 				Time:     msg.Time,
+				ChatType: msg.ChatType,
 			}); err != nil {
 				fmt.Fprintf(out, "[nightme] gateway error: %v\n", err)
 			}

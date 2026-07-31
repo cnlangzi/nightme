@@ -106,7 +106,7 @@ func TestCwdHandler_RejectsActiveSession(t *testing.T) {
 	dir := t.TempDir()
 	gw, mgr, resp := newTestStack(t)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", dir, "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	if _, err := mgr.Run(context.Background(), "oc_chat", "claude", nil); err != nil {
@@ -196,7 +196,7 @@ func TestRunHandler_Success(t *testing.T) {
 	dir := t.TempDir()
 	gw, mgr, resp := newTestStack(t)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", dir, "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 
@@ -227,7 +227,7 @@ func TestRunHandler_AlreadyRunning(t *testing.T) {
 	dir := t.TempDir()
 	gw, mgr, resp := newTestStack(t)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", dir, "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	if _, err := mgr.Run(context.Background(), "oc_chat", "claude", nil); err != nil {
@@ -250,7 +250,7 @@ func TestRunHandler_UnknownAgent(t *testing.T) {
 	dir := t.TempDir()
 	gw, mgr, resp := newTestStack(t)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", dir, "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	_ = gw.Handle(WithGateway(context.Background(), gw), &Message{
@@ -267,7 +267,7 @@ func TestRunHandler_MissingArgs(t *testing.T) {
 	dir := t.TempDir()
 	gw, mgr, resp := newTestStack(t)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", dir, "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	_ = gw.Handle(WithGateway(context.Background(), gw), &Message{
@@ -284,7 +284,7 @@ func TestKillHandler(t *testing.T) {
 	dir := t.TempDir()
 	gw, mgr, resp := newTestStack(t)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", dir, "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	if _, err := mgr.Run(context.Background(), "oc_chat", "claude", nil); err != nil {
@@ -381,7 +381,7 @@ func TestRunHandler_ExtraArgsForwarded(t *testing.T) {
 	dir := t.TempDir()
 	gw, mgr, _ := newTestStack(t)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", dir, "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	_ = gw.Handle(WithGateway(context.Background(), gw), &Message{
@@ -404,7 +404,7 @@ func TestRunHandler_DetectFailure(t *testing.T) {
 	gw := New(nil)
 	RegisterDefaultCommands(gw, mgr, reg, resp)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", dir, "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	_ = gw.Handle(WithGateway(context.Background(), gw), &Message{
@@ -460,7 +460,7 @@ func TestRunHandler_ResponderErrorPropagates(t *testing.T) {
 	gw := New(nil)
 	RegisterDefaultCommands(gw, mgr, reg, errorResponder{err: want})
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", dir, "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	err := gw.Handle(WithGateway(context.Background(), gw), &Message{
@@ -499,7 +499,7 @@ func TestRunHandler_NilResponderWhenNil(t *testing.T) {
 	gw := New(nil)
 	RegisterDefaultCommands(gw, mgr, ptyAgentRegistry(t), nil)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", dir, "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	if err := gw.Handle(WithGateway(context.Background(), gw), &Message{

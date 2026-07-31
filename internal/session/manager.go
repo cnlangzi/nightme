@@ -26,6 +26,15 @@ type CreateRequest struct {
 	// ChatID is required.
 	ChatID string
 
+	// ChatType discriminates DM (channel.ChatTypeP2P) from group
+	// chats (channel.ChatTypeGroup / ChatTypeThread). Empty means
+	// unknown / legacy callers. See internal/channel.Message for
+	// the canonical semantics; the Session Manager uses this to
+	// decide whether the chat should host a workspace (every
+	// group chat does; a DM has at most one session since the
+	// bot ↔ user relationship is 1:1 by definition).
+	ChatType string
+
 	// Workspace is the directory the agent will operate in. Required.
 	Workspace string
 
@@ -62,7 +71,12 @@ type Manager interface {
 	// exited/detached sessions get their workspace rebinded in
 	// place; an already-running session is rejected with
 	// ErrChatAlreadyBound (caller must /kill first).
-	CreateOrUpdate(chatID, workspace, agent string, args []string) (*Session, error)
+	//
+	// chatType discriminates DM (channel.ChatTypeP2P) from group
+	// chats. Empty string means unknown; the session Manager
+	// treats unknown as "group" for safety (every chat gets its
+	// own workspace unless proven otherwise).
+	CreateOrUpdate(chatID, chatType, workspace, agent string, args []string) (*Session, error)
 
 	// Run ensures a CLI is running for chatID. It is a no-op when
 	// a CLI is already there; otherwise it spawns one in the
@@ -195,6 +209,7 @@ func (m *MemoryManager) Create(ctx context.Context, req CreateRequest) (*Session
 	sess := &Session{
 		ID:        m.newID(),
 		ChatID:    req.ChatID,
+		ChatType:  req.ChatType,
 		Workspace: req.Workspace,
 		Agent:     req.Agent,
 		Args:      append([]string(nil), req.Args...),

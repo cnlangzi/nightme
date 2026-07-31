@@ -80,7 +80,7 @@ type fakeRunManager struct {
 func (f *fakeRunManager) Create(context.Context, session.CreateRequest) (*session.Session, error) {
 	return nil, errors.New("fake run manager: Create not used")
 }
-func (f *fakeRunManager) CreateOrUpdate(string, string, string, []string) (*session.Session, error) {
+func (f *fakeRunManager) CreateOrUpdate(string, string, string, string, []string) (*session.Session, error) {
 	return nil, errors.New("fake run manager: CreateOrUpdate not used")
 }
 func (f *fakeRunManager) Run(context.Context, string, string, []string) (*session.Session, error) {
@@ -378,8 +378,8 @@ type realRunManager struct {
 	*session.MemoryManager
 }
 
-func (r *realRunManager) CreateOrUpdate(chatID, workspace, agentName string, args []string) (*session.Session, error) {
-	return r.MemoryManager.CreateOrUpdate(chatID, workspace, agentName, args)
+func (r *realRunManager) CreateOrUpdate(chatID, chatType, workspace, agentName string, args []string) (*session.Session, error) {
+	return r.MemoryManager.CreateOrUpdate(chatID, chatType, workspace, agentName, args)
 }
 
 func (r *realRunManager) Run(ctx context.Context, chatID, agentName string, extraArgs []string) (*session.Session, error) {

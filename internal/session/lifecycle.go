@@ -34,7 +34,7 @@ import (
 // agentName is recorded on the session but no agent is started (use
 // Run for that). It is required today so the session table matches
 // what /run will need.
-func (m *MemoryManager) CreateOrUpdate(chatID, workspace, agentName string, args []string) (*Session, error) {
+func (m *MemoryManager) CreateOrUpdate(chatID, chatType, workspace, agentName string, args []string) (*Session, error) {
 	if chatID == "" {
 		return nil, errors.New("session: ChatID is required")
 	}
@@ -54,6 +54,8 @@ func (m *MemoryManager) CreateOrUpdate(chatID, workspace, agentName string, args
 				return nil, fmt.Errorf("session: %w", ErrChatAlreadyBound)
 			}
 			// Exited / detached -> rebind workspace + agent in place.
+			// Preserve ChatType from the first binding; switching a
+			// DM into a group (or vice versa) is not user-driven.
 			sess.Workspace = workspace
 			sess.Agent = agentName
 			sess.Args = append([]string(nil), args...)
@@ -72,6 +74,7 @@ func (m *MemoryManager) CreateOrUpdate(chatID, workspace, agentName string, args
 	sess := &Session{
 		ID:        m.newID(),
 		ChatID:    chatID,
+		ChatType:  chatType,
 		Workspace: workspace,
 		Agent:     agentName,
 		Args:      append([]string(nil), args...),

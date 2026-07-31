@@ -20,7 +20,7 @@ func TestCreateOrUpdate_NewSession(t *testing.T) {
 	reg.Register(&fakeAgent{name: "claude", mode: agent.ModePTY, pid: 100})
 	mgr := NewMemoryManager(reg, nil, nil)
 
-	sess, err := mgr.CreateOrUpdate("chat-cu", "/tmp/work", "claude", nil)
+	sess, err := mgr.CreateOrUpdate("chat-cu", "group", "/tmp/work", "claude", nil)
 	if err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
@@ -52,14 +52,14 @@ func TestCreateOrUpdate_RebindsExitedWorkspace(t *testing.T) {
 	reg.Register(&fakeAgent{name: "claude", mode: agent.ModePTY})
 	mgr := NewMemoryManager(reg, nil, nil)
 
-	first, err := mgr.CreateOrUpdate("chat-cu", "/tmp/old", "claude", nil)
+	first, err := mgr.CreateOrUpdate("chat-cu", "group", "/tmp/old", "claude", nil)
 	if err != nil {
 		t.Fatalf("first CreateOrUpdate: %v", err)
 	}
 	// Mark the session exited manually (no agent, etc).
 	first.setLifecycle(StatusExited, nil, 0, nil)
 
-	second, err := mgr.CreateOrUpdate("chat-cu", "/tmp/new", "claude", nil)
+	second, err := mgr.CreateOrUpdate("chat-cu", "group", "/tmp/new", "claude", nil)
 	if err != nil {
 		t.Fatalf("second CreateOrUpdate: %v", err)
 	}
@@ -78,14 +78,14 @@ func TestCreateOrUpdate_RejectsActiveSession(t *testing.T) {
 	reg.Register(&fakeAgent{name: "claude", mode: agent.ModePTY})
 	mgr := NewMemoryManager(reg, nil, nil)
 
-	sess, err := mgr.CreateOrUpdate("chat-cu", "/tmp/work", "claude", nil)
+	sess, err := mgr.CreateOrUpdate("chat-cu", "group", "/tmp/work", "claude", nil)
 	if err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	// Mark the session running with a fake PID.
 	sess.setLifecycle(StatusRunning, &fakeAgentSession{}, 12345, nil)
 
-	_, err = mgr.CreateOrUpdate("chat-cu", "/tmp/other", "claude", nil)
+	_, err = mgr.CreateOrUpdate("chat-cu", "group", "/tmp/other", "claude", nil)
 	if !errors.Is(err, ErrChatAlreadyBound) {
 		t.Errorf("second CreateOrUpdate error = %v, want ErrChatAlreadyBound", err)
 	}
@@ -106,7 +106,7 @@ func TestCreateOrUpdate_ValidationErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := mgr.CreateOrUpdate(tc.chatID, tc.workspace, tc.agent, nil); err == nil {
+			if _, err := mgr.CreateOrUpdate(tc.chatID, "group", tc.workspace, tc.agent, nil); err == nil {
 				t.Errorf("CreateOrUpdate(%s) = nil error, want validation", tc.name)
 			}
 		})
@@ -125,7 +125,7 @@ func TestCreateOrUpdate_PersistsToRegistry(t *testing.T) {
 	reg.Register(&fakeAgent{name: "claude", mode: agent.ModePTY})
 	mgr := NewMemoryManager(reg, file, nil)
 
-	sess, err := mgr.CreateOrUpdate("chat-cu", "/tmp/work", "claude", nil)
+	sess, err := mgr.CreateOrUpdate("chat-cu", "group", "/tmp/work", "claude", nil)
 	if err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestRun_RespawnsAfterExit(t *testing.T) {
 	reg.Register(&fakeAgent{name: "claude", mode: agent.ModePTY, pid: 9999})
 	mgr := NewMemoryManager(reg, nil, nil)
 
-	if _, err := mgr.CreateOrUpdate("chat-r", "/tmp/work", "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("chat-r", "group", "/tmp/work", "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 
@@ -208,7 +208,7 @@ func TestRun_NoopWhenRunning(t *testing.T) {
 	reg.Register(&fakeAgent{name: "claude", mode: agent.ModePTY, pid: 7777})
 	mgr := NewMemoryManager(reg, nil, nil)
 
-	if _, err := mgr.CreateOrUpdate("chat-r", "/tmp/work", "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("chat-r", "group", "/tmp/work", "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	first, err := mgr.Run(context.Background(), "chat-r", "claude", nil)
@@ -235,7 +235,7 @@ func TestRun_UnknownAgent(t *testing.T) {
 	reg.Register(&fakeAgent{name: "claude", mode: agent.ModePTY})
 	mgr := NewMemoryManager(reg, nil, nil)
 
-	if _, err := mgr.CreateOrUpdate("chat-r", "/tmp/work", "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("chat-r", "group", "/tmp/work", "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	_, err := mgr.Run(context.Background(), "chat-r", "mystery", nil)
@@ -267,7 +267,7 @@ func TestRun_RespawnPersistsWorkspace(t *testing.T) {
 	reg.Register(&fakeAgent{name: "claude", mode: agent.ModePTY, pid: 1234})
 	mgr := NewMemoryManager(reg, file, nil)
 
-	if _, err := mgr.CreateOrUpdate("chat-r", "/tmp/work", "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("chat-r", "group", "/tmp/work", "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	if _, err := mgr.Run(context.Background(), "chat-r", "claude", nil); err != nil {
@@ -313,7 +313,7 @@ func TestKillByChat_StopsAgent(t *testing.T) {
 	reg.Register(&fakeAgent{name: "claude", mode: agent.ModePTY, pid: 4242})
 	mgr := NewMemoryManager(reg, nil, nil)
 
-	if _, err := mgr.CreateOrUpdate("chat-k", "/tmp/work", "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("chat-k", "group", "/tmp/work", "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	sess, err := mgr.Run(context.Background(), "chat-k", "claude", nil)
@@ -343,7 +343,7 @@ func TestRun_PreservesExtraArgs(t *testing.T) {
 	reg.Register(&fakeAgent{name: "claude", mode: agent.ModePTY, pid: 1})
 	mgr := NewMemoryManager(reg, nil, nil)
 
-	if _, err := mgr.CreateOrUpdate("chat-r", "/tmp/work", "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("chat-r", "group", "/tmp/work", "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	sess, err := mgr.Run(context.Background(), "chat-r", "claude", []string{"--opus", "--fast"})
@@ -376,7 +376,7 @@ func TestRun_ReadPumpDeliversEvents(t *testing.T) {
 		mu.Unlock()
 	})
 
-	if _, err := mgr.CreateOrUpdate("chat-r", "/tmp/work", "claude", nil); err != nil {
+	if _, err := mgr.CreateOrUpdate("chat-r", "group", "/tmp/work", "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	if _, err := mgr.Run(context.Background(), "chat-r", "claude", nil); err != nil {

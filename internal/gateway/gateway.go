@@ -20,6 +20,13 @@ type Message struct {
 	Text     string
 	SenderID string
 	Time     time.Time
+
+	// ChatType is forwarded from channel.Message (see
+	// internal/channel). "p2p" / "group" / "topic_group" / "".
+	// Gateway commands use it to decide chat-aware behaviour
+	// (e.g. /cwd in a DM is fine; /sessions list is fine in
+	// either).
+	ChatType string
 }
 
 // Command is one nightme-level slash command. The Handler is

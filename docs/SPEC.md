@@ -133,6 +133,35 @@ Session 分**两层状态**：
 - ** 智能处理**：CLI 没跑 → spawn；CLI 在跑 → reconnect（不重启）
 - **Session 永不过期**：workspace 永久绑定 chat；CLI 死后 session 保留
 
+### 3.1 DM vs Group Chat（Chat Type 语义）
+
+Session Manager 通过 `Message.ChatType`（v0.2 引入）区分会话类型：
+
+| ChatType | 含义 | Session 行为 |
+|----------|------|--------------|
+| `p2p` (Feishu) / `private` (Telegram) / `im` (Slack) | 1-on-1 DM | **只有 1 个 session** — bot 与用户是 1:1关系，DM 的 chat_id 永不变。/cwd 仍可以设独立 workspace，代替为“控制台”。 |
+| `group` / `topic_group` | 群聊 / 话题群 | **每个 chat_id 一个独立 session** — workspace 不冲突，多个项目并行。 |
+| `""` | 未知 / 遗留 | **缺省按 group 处理**（安全侧） |
+
+**关键设计原则**（v0.2.1 明确）：
+- **一个群聊 = 一个独立 session (workspace)**：用户在群 A 设 /tmp/project-a，群 B 设 /tmp/project-b，两边完全隔离。
+- **DM 不不够**（永远只有一个）：bot ↔ user 1:1 关系。DM 是“控制面板”，可以用来 /sessions list 所有 session、查看状态。未来可以 /switch <session-id> 跨会话操作。
+- **同一 DM 仍是 session**：用户可以在 DM 里 /cwd /tmp/personal + /run claude，占用唯一一个 session。
+
+ChatType 在三个路径流转：
+1. Feishu adapter `handleMessage` 从 `P2MessageReceiveV1.event.message.chat_type` 提取 →
+2. `channel.Message.ChatType` 传递 →
+3. `gateway.Message.ChatType` 转发 →
+4. `session.Session.ChatType` 持久（仅作为元数据记录，不影响 chat_id→session 的现有映射）。
+
+实现位置：
+- `internal/channel/channel.go: ChatTypeP2P / ChatTypeGroup / ChatTypeThread`
+- `internal/channel/feishu/adapter.go: normalizeChatType`
+- `internal/session/manager.go: CreateRequest.ChatType`
+- `internal/gateway/handlers.go: h.manager.CreateOrUpdate(msg.ChatID, msg.ChatType, …)`
+
+**v0.3 计划**：DM 里实现 `/sessions` 和 `/switch` 命令，主动跨会话操作。v0.2 仅记录 ChatType。
+
 **状态转换触发器**：
 
 | From | 触发 | To |

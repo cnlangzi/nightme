@@ -463,11 +463,13 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 		return nil
 	}
 	content := stringValue(message.Content)
+	chatType := normalizeChatType(stringValue(message.ChatType))
 	msg := channel.Message{
 		ChatID:   chatID,
 		Text:     messageText(content),
 		SenderID: senderID(event),
 		Time:     messageTime(message.CreateTime),
+		ChatType: chatType,
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -537,6 +539,24 @@ func messageText(content string) string {
 	// structured `{text: ...}` shape (e.g. image / post), preserve the
 	// raw text so downstream consumers can decide.
 	return content
+}
+
+// normalizeChatType maps a Feishu chat_type value to the channel-
+// neutral constants in internal/channel. Feishu sends "p2p" for
+// 1-on-1 DM, "group" for normal groups, and "topic_group" for
+// topic groups. Unknown values pass through unchanged so future
+// Feishu additions don't silently misclassify.
+func normalizeChatType(raw string) string {
+	switch raw {
+	case "p2p":
+		return channel.ChatTypeP2P
+	case "group":
+		return channel.ChatTypeGroup
+	case "topic_group":
+		return channel.ChatTypeThread
+	default:
+		return raw
+	}
 }
 
 func messageTime(value *string) time.Time {

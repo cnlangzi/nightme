@@ -107,7 +107,7 @@ func (h *handlerContext) cwd(ctx context.Context, msg *Message, args []string) (
 		agentName = "claude"
 	}
 
-	sess, err := h.manager.CreateOrUpdate(msg.ChatID, abs, agentName, nil)
+	sess, err := h.manager.CreateOrUpdate(msg.ChatID, msg.ChatType, abs, agentName, nil)
 	if err != nil {
 		if errors.Is(err, session.ErrChatAlreadyBound) {
 			return h.reply(ctx, msg.ChatID, "session already active, /kill first"), nil

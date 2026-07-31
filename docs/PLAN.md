@@ -3,7 +3,11 @@
 > **状态**：v1.0
 > **作者**：🦞 虾哥（PM/Architect）
 > **日期**：2026-07-31
-> **依赖**：`SPEC.md`、`FEATURES.md`、`feat/F-XX-*.md`
+> **关联文档**：
+> - 产品 → [`PRD.md`](./PRD.md)
+> - 技术架构 → [`SPEC.md`](./SPEC.md)
+> - 功能索引 → [`FEATURES.md`](./FEATURES.md)
+> - 每个 feature 的详细设计 → [`feat/`](./feat/)
 
 本文档回答：**怎么把 nightme 从 0 写到能跑通的最小闭环，分几个里程碑，第一个 PR 怎么拆 commit**。
 
@@ -13,7 +17,7 @@
 
 ```
 M0 (本轮对话)  ──  docs only, no code yet
-  SPEC + FEATURES + feat/* + PLAN (本文)
+  PRD + SPEC + FEATURES + feat/* + PLAN (本文)
   验收: 4 个 md 文件 commit，Devin review 通过
 
 M1 (下一个 session)  ──  "Local PTY Echo"（本地能跑，无 Channel）
@@ -67,6 +71,7 @@ nightme/
 ├── go.sum
 ├── README.md
 ├── docs/
+│   ├── PRD.md                  (v1.0)
 │   ├── SPEC.md                 (v1.0)
 │   ├── FEATURES.md             (v1.0)
 │   ├── PLAN.md                 (v1.0, 本文件)
@@ -336,8 +341,8 @@ commit 18: docs: e2e manual test guide
 ## 7. 下一步
 
 **当前会话（M0）即将结束**。已交付：
+- ✅ `docs/PRD.md` v1.0
 - ✅ `docs/SPEC.md` v1.0
-- ✅ `docs/SPEC.md` v1.0（含 architecture）
 - ✅ `docs/FEATURES.md` v1.0
 - ✅ `docs/feat/F-01..F-19` v1.0
 - ✅ `docs/PLAN.md` v1.0（本文）

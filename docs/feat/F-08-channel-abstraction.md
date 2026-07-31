@@ -3,7 +3,7 @@
 > **Status**: designed (v0.1)
 > **Milestone**: M2 (Feishu implementation)
 > **Depends on**: (none — interface)
-> **Related docs**: SPEC.md §4.3 (Channel interface)
+> **Related docs**: SPEC.md §1.1 (Channel Adapter 组件), §4 (并发模型)
 
 ## 1. Description
 

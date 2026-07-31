@@ -3,7 +3,7 @@
 > **Status**: designed (v0.1)
 > **Milestone**: M1 (used by M2)
 > **Depends on**: (none — foundation)
-> **Related docs**: SPEC.md §4.3 (Bridge interface)
+> **Related docs**: SPEC.md §1.1 (PTY Bridge 组件), §4 (并发模型)
 
 ## 1. Description
 

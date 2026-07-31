@@ -3,7 +3,7 @@
 > **Status**: designed (v0.1)
 > **Milestone**: M1 (used by M2)
 > **Depends on**: (none — interface)
-> **Related docs**: SPEC.md §4.3 (Agent interface)
+> **Related docs**: SPEC.md §1.1 (PTY Bridge 组件 spawn agent)
 
 ## 1. Description
 

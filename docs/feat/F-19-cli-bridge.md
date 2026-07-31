@@ -4,7 +4,7 @@
 > **Milestone**: M1 (built first, used by M2)
 > **Depends on**: F-04 (PTY), F-08 (Channel)
 > **Used by**: F-02 (input), F-03 (output), F-06 (cleanup), F-18 (password filter)
-> **Related docs**: SPEC.md §4 Architecture, FEATURES.md
+> **Related docs**: SPEC.md §1, §4 (架构 + 并发模型), FEATURES.md
 
 本文档回答：**nightme 怎么把 Claude Code 的 TTY 字节流搬到飞书、再把飞书的字节流搬回 TTY**。
 

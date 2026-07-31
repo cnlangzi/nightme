@@ -3,7 +3,7 @@
 > **Status**: designed (v0.1)
 > **Milestone**: M2
 > **Depends on**: F-01 (Session), F-04 (PTY), F-08 (Channel)
-> **Related docs**: [`F-19-cli-bridge.md`](./F-19-cli-bridge.md) §2.2, §3, SPEC.md §4.5
+> **Related docs**: [`F-19-cli-bridge.md`](./F-19-cli-bridge.md) §2.2, §3, SPEC.md §4 (并发模型 + back-pressure)
 
 ## 1. Description
 

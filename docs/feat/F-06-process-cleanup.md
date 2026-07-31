@@ -3,7 +3,7 @@
 > **Status**: designed (v0.1)
 > **Milestone**: M3 (Hardening)
 > **Depends on**: F-05 (Registry)
-> **Related docs**: SPEC.md §4.6 (清理策略)
+> **Related docs**: SPEC.md §3 (lifecycle triggers)
 
 ## 1. Description
 

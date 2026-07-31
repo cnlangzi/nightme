@@ -3,7 +3,7 @@
 > **Status**: designed (v0.1)
 > **Milestone**: M2 (Feishu integration)
 > **Depends on**: F-04 (PTY), F-07 (Workspace binding), F-08 (Channel), F-09 (Agent)
-> **Related docs**: SPEC.md §4.2 (数据流), §4.4 (lifecycle)
+> **Related docs**: SPEC.md §2.1, §2.3 (数据流), §3 (lifecycle)
 
 ## 1. Description
 

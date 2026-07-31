@@ -3,8 +3,11 @@
 > **状态**：v1.0
 > **作者**：🦞 虾哥（PM/Architect）
 > **日期**：2026-07-31
-> **依赖**：`SPEC.md`
-> **详细设计**：`feat/F-XX-*.md`（每个 feature 一份独立设计文档）
+> **关联文档**：
+> - 产品定位 → [`PRD.md`](./PRD.md)
+> - 技术架构 → [`SPEC.md`](./SPEC.md)
+> - 实施计划 → [`PLAN.md`](./PLAN.md)
+> - 每个 feature 的详细设计 → [`feat/`](./feat/)
 
 本文档是 nightme 的**功能索引**。每项功能的设计细节（接口、实现、edge cases、测试计划）见 [`feat/`](./feat/) 目录下的独立文档。
 

@@ -8,10 +8,8 @@ import (
 	"github.com/spf13/cobra"
 
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
+	"github.com/cnlangzi/nightme/internal/version"
 )
-
-// version is set at build time via -ldflags (see Makefile / scripts).
-var version = "v0.1.0"
 
 // newRootCmd builds the top-level `nightme` command. All subcommands
 // attach to it; main.go only adds Execute().
@@ -31,8 +29,8 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 
-	root.SetVersionTemplate("nightme {{.Version}}\n")
-	root.Version = version
+	root.SetVersionTemplate(version.String() + "\n")
+	root.Version = version.Version
 
 	root.AddCommand(newTestCmd())
 	root.AddCommand(newListCmd())

@@ -256,21 +256,27 @@ func (a *Adapter) SendMessageText(ctx context.Context, chatID, text string) (str
 	return a.sendContent(ctx, chatID, larkim.MsgTypeText, string(content))
 }
 
-// AddReaction adds a reaction emoji to an existing message. Used by
-// MessageReceipt for the F-25 dual-track status display (see
-// receipt.go). Errors are non-fatal — best-effort.
+// AddReaction adds a reaction emoji to an existing message and
+// returns the new reaction's ID. Used by MessageReceipt for the F-25
+// dual-track status display (see receipt.go).
+//
+// The reaction ID is needed because the only way to "change" a
+// reaction in Feishu is Delete + Create — Feishu does not expose a
+// UpdateReaction API. The caller stores the returned ID so a later
+// state transition can swap the emoji by deleting the old reaction
+// and creating a new one in the same message row.
+//
+// Errors are non-fatal — best-effort. On error the empty string is
+// returned; the caller falls back to "leave old reaction in place"
+// rather than dropping the visual cue.
 //
 // reactionType must be a Feishu Emoji type. The built-in emojis
 // (THumbs, SMILE, etc.) are exposed as constants on the SDK's
 // larkim package; for arbitrary unicode emoji we pass them as a
 // string via larkim.NewEmoji builder.
-//
-// v0.2: we pass the emoji string directly via larkim.Emoji builder.
-// If the SDK rejects it, callers should fall back to a built-in
-// alias (THumbs, Clap, etc.).
-func (a *Adapter) AddReaction(ctx context.Context, messageID, reactionType string) error {
+func (a *Adapter) AddReaction(ctx context.Context, messageID, reactionType string) (string, error) {
 	if a.larkClient == nil || a.larkClient.Im == nil || a.larkClient.Im.V1 == nil || a.larkClient.Im.V1.MessageReaction == nil {
-		return errors.New("feishu: REST client not initialized")
+		return "", errors.New("feishu: REST client not initialized")
 	}
 	body := larkim.NewCreateMessageReactionReqBodyBuilder().
 		ReactionType(larkim.NewEmojiBuilder().EmojiType(reactionType).Build()).
@@ -281,14 +287,53 @@ func (a *Adapter) AddReaction(ctx context.Context, messageID, reactionType strin
 		Build()
 	resp, err := a.larkClient.Im.V1.MessageReaction.Create(ctx, req)
 	if err != nil {
-		return fmt.Errorf("feishu: add reaction: %w", err)
+		return "", fmt.Errorf("feishu: add reaction: %w", err)
 	}
 	if resp == nil || !resp.Success() {
 		code := 0
 		if resp != nil {
 			code = resp.Code
 		}
-		return fmt.Errorf("feishu: add reaction failed with code %d", code)
+		return "", fmt.Errorf("feishu: add reaction failed with code %d", code)
+	}
+	var rid string
+	if resp.Data != nil && resp.Data.ReactionId != nil {
+		rid = *resp.Data.ReactionId
+	}
+	return rid, nil
+}
+
+// DeleteReaction removes a reaction by its ID. Used by
+// MessageReceipt to swap the state emoji (⏳ → 🔄 → ✅) — Feishu
+// has no UpdateReaction API, so we delete the old one and create a
+// new one in the same message row. The user always sees ONE
+// reaction emoji per user message.
+//
+// Errors are non-fatal — best-effort. The user is better off seeing
+// a stale emoji (Waiting when actually Executing) than seeing an
+// error overlay. On failure the caller can fall back to leaving the
+// old reaction in place.
+func (a *Adapter) DeleteReaction(ctx context.Context, messageID, reactionID string) error {
+	if a.larkClient == nil || a.larkClient.Im == nil || a.larkClient.Im.V1 == nil || a.larkClient.Im.V1.MessageReaction == nil {
+		return errors.New("feishu: REST client not initialized")
+	}
+	if strings.TrimSpace(reactionID) == "" {
+		return errors.New("feishu: reaction_id is required")
+	}
+	req := larkim.NewDeleteMessageReactionReqBuilder().
+		MessageId(messageID).
+		ReactionId(reactionID).
+		Build()
+	resp, err := a.larkClient.Im.V1.MessageReaction.Delete(ctx, req)
+	if err != nil {
+		return fmt.Errorf("feishu: delete reaction: %w", err)
+	}
+	if resp == nil || !resp.Success() {
+		code := 0
+		if resp != nil {
+			code = resp.Code
+		}
+		return fmt.Errorf("feishu: delete reaction failed with code %d", code)
 	}
 	return nil
 }

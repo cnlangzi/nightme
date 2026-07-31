@@ -17,19 +17,25 @@ import (
 //
 // Two visual tracks update in sync:
 //
-//  1. A reply text message (one line, updated via SendMessage /
-//     a future MessageUpdate API). This carries the long-form text
-//     including the event count and timestamp.
-//  2. Reaction emojis added to the user message. We accumulate
-//     rather than switch — each state adds a new emoji. This is
-//     simpler than delete-and-re-add and survives Feishu's
-//     reaction_id bookkeeping.
+//  1. A reply text message (one line, updated via
+//     im.message.update). This carries the long-form text
+//     including the event count and timestamp. The user always
+//     sees exactly ONE reply line per user message — there is no
+//     "stack of status messages" mode.
+//  2. A single reaction emoji on the user message. Feishu does
+//     not expose an "update reaction" API; we swap by deleting
+//     the old emoji and creating the new one. The user always
+//     sees exactly ONE reaction emoji (⏳ / 🔄 / ✅) per user
+//     message — there is no "row of growing emojis" mode.
 //
 // Visual result on the user message:
 //
-//	👀 ← typing indicator (added once at creation)
-//	⏳ 🔄 ✅ ← reaction row, growing as the message progresses
-//	⏳ 等待中 ← reply text (updates in place)
+//	🔄 ← single reaction emoji, swapped on every state change
+//	⏳ 等待中 ← reply text, updated in place
+//
+// The reaction row at the bottom of the Feishu message shows one
+// emoji at a time. Heartbeat ticks change the text but not the
+// emoji — only state transitions swap the emoji.
 //
 // The "Other" option for AskUserQuestion is rendered in the reply
 // text too — see F-24 §7 for the full card layout. For v0.2 we
@@ -42,14 +48,21 @@ type MessageReceipt struct {
 	bot        *Adapter
 	logger     *slog.Logger
 
-	mu             sync.Mutex
-	state          ReceiptState
-	eventCount     int
-	lastEventAt    time.Time
-	forwardedAt    time.Time
-	completedAt    time.Time
-	receivedAt     time.Time
-	reactionsAdded map[string]bool // emoji -> already added (idempotent)
+	mu          sync.Mutex
+	state       ReceiptState
+	eventCount  int
+	lastEventAt time.Time
+	forwardedAt time.Time
+	completedAt time.Time
+	receivedAt  time.Time
+
+	// currentReaction is the emoji currently rendered on the user
+	// message; currentReactionID is the Feishu-side ID needed to
+	// delete it. On every state transition we delete the old
+	// reaction and create the new one in the same message row.
+	// The user always sees exactly ONE reaction emoji.
+	currentReaction   string
+	currentReactionID string
 }
 
 // ReceiptState is the lifecycle state of a MessageReceipt.
@@ -117,18 +130,25 @@ func (s ReceiptState) Emoji() string {
 // chatID is the chat where the message lives (open_id / chat_id).
 func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID string) (*MessageReceipt, error) {
 	r := &MessageReceipt{
-		chatID:         chatID,
-		userMsgID:      userMsgID,
-		bot:            bot,
-		logger:         slog.Default(),
-		receivedAt:     time.Now(),
-		reactionsAdded: make(map[string]bool),
-		state:          StateWaiting,
+		chatID:     chatID,
+		userMsgID:  userMsgID,
+		bot:        bot,
+		logger:     slog.Default(),
+		receivedAt: time.Now(),
+		state:      StateWaiting,
 	}
 
-	// 1. Add the ⏳ reaction to the user message.
-	if err := r.addReaction(ctx, StateWaiting.Emoji()); err != nil {
+	// 1. Add the ⏳ reaction to the user message. Capture the
+	//    reaction ID so we can delete it on the next state
+	//    transition (Feishu has no UpdateReaction API).
+	rid, err := bot.AddReaction(ctx, userMsgID, StateWaiting.Emoji())
+	if err != nil {
 		r.logger.Warn("feishu receipt: initial reaction failed", "err", err)
+	} else {
+		r.mu.Lock()
+		r.currentReaction = StateWaiting.Emoji()
+		r.currentReactionID = rid
+		r.mu.Unlock()
 	}
 
 	// 2. Post the reply text message ("⏳ 等待中") and capture the
@@ -141,7 +161,9 @@ func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID stri
 		r.logger.Warn("feishu receipt: initial reply failed", "err", err)
 		return r, fmt.Errorf("create receipt: %w", err)
 	}
+	r.mu.Lock()
 	r.replyMsgID = msgID
+	r.mu.Unlock()
 
 	return r, nil
 }
@@ -204,62 +226,66 @@ func (r *MessageReceipt) State() ReceiptState {
 // renderLocked pushes the current state emoji (reaction) and text
 // (reply) to Feishu. Caller must hold r.mu.
 //
-// Reaction strategy: ACCUMULATE, never delete. Each state adds its
-// emoji (⏳ → 🔄 → ✅) and the user sees the progression in the
-// reaction row. This avoids the reaction_id bookkeeping that
-// delete-then-add would require.
+// Reaction strategy: SWAP, never accumulate. The previous reaction
+// (if any) is deleted and the new state emoji (⏳ / 🔄 / ✅) is
+// added in its place. Feishu has no UpdateReaction API, so the swap
+// is Delete + Create. The user always sees exactly ONE reaction
+// emoji per user message.
+//
+// Heartbeat ticks do NOT swap reactions — only state transitions
+// do. Heartbeat updates the reply text in place.
 //
 // Reply text strategy: edit-in-place via im.message.update. The
 // initial reply was posted by NewMessageReceipt and the ID is in
-// r.replyMsgID. Each subsequent state transitions updates the same
-// message — the user always sees ONE reply line per user message.
-// Falls back to a fresh message if update fails (e.g. message older
-// than 48h, or update quota exhausted).
+// r.replyMsgID. Heartbeat ticks and state transitions both update
+// the same message — the user always sees ONE reply line per user
+// message. Falls back to a fresh message if update fails (e.g.
+// message older than 48h, or update quota exhausted).
 func (r *MessageReceipt) renderLocked(ctx context.Context) error {
+	// 1. Swap reaction if the state emoji changed.
 	emoji := r.state.Emoji()
-	if err := r.addReaction(ctx, emoji); err != nil {
-		r.logger.Warn("feishu receipt: reaction update failed",
-			"err", err, "state", r.state)
-	}
-
-	text := r.state.String(r)
-
-	// Try in-place update first; on failure, post a fresh message
-	// and adopt its ID as the new reply target. This means the
-	// fallback degrades gracefully without losing the receipt.
-	if r.replyMsgID != "" {
-		if err := r.bot.UpdateMessage(ctx, r.replyMsgID, text); err == nil {
-			return nil
+	if emoji != r.currentReaction {
+		// Delete the old reaction (if any). Best-effort: failure
+		// here is logged but does not block — leaving a stale
+		// emoji is preferable to surfacing an error to the user.
+		if r.currentReactionID != "" {
+			if err := r.bot.DeleteReaction(ctx, r.userMsgID, r.currentReactionID); err != nil {
+				r.logger.Warn("feishu receipt: delete old reaction failed",
+					"err", err, "old_emoji", r.currentReaction)
+			}
+		}
+		// Add the new reaction and remember its ID for the next
+		// swap. A failed Create leaves the user without a state
+		// indicator on this message; other receipts on the same
+		// session still work because they have their own reactions.
+		newID, err := r.bot.AddReaction(ctx, r.userMsgID, emoji)
+		if err != nil {
+			r.logger.Warn("feishu receipt: add new reaction failed",
+				"err", err, "emoji", emoji, "state", r.state)
 		} else {
-			r.logger.Warn("feishu receipt: update reply failed, posting fresh",
-				"err", err, "state", r.state)
+			r.currentReaction = emoji
+			r.currentReactionID = newID
 		}
 	}
 
-	msgID, err := r.bot.SendMessageText(ctx, r.chatID, text)
-	if err != nil {
+	// 2. Update the reply text in place.
+	text := r.state.String(r)
+	if r.replyMsgID != "" {
+		if updateErr := r.bot.UpdateMessage(ctx, r.replyMsgID, text); updateErr == nil {
+			return nil
+		} else {
+			r.logger.Warn("feishu receipt: update reply failed, posting fresh",
+				"err", updateErr, "state", r.state)
+		}
+	}
+
+	msgID, sendErr := r.bot.SendMessageText(ctx, r.chatID, text)
+	if sendErr != nil {
 		r.logger.Warn("feishu receipt: fresh reply failed",
-			"err", err, "state", r.state)
-		return err
+			"err", sendErr, "state", r.state)
+		return sendErr
 	}
 	r.replyMsgID = msgID
-	return nil
-}
-
-// addReaction is idempotent: we track which emojis have been added
-// and skip duplicate calls. This protects against repeated
-// Heartbeat() invocations adding the same 🔄 multiple times.
-func (r *MessageReceipt) addReaction(ctx context.Context, emoji string) error {
-	if emoji == "" {
-		return nil
-	}
-	if r.reactionsAdded[emoji] {
-		return nil
-	}
-	if err := r.bot.AddReaction(ctx, r.userMsgID, emoji); err != nil {
-		return err
-	}
-	r.reactionsAdded[emoji] = true
 	return nil
 }
 

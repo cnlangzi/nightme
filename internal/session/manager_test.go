@@ -23,7 +23,7 @@ type fakeAgent struct {
 	pid     int
 }
 
-func (f *fakeAgent) Name() string  { return f.name }
+func (f *fakeAgent) Name() string     { return f.name }
 func (f *fakeAgent) Mode() agent.Mode { return f.mode }
 func (f *fakeAgent) Detect() error {
 	if f.detectF != nil {
@@ -40,14 +40,14 @@ func (f *fakeAgent) Start(context.Context, agent.StartConfig) (agent.AgentSessio
 // slice is drained. SendText / SendPermission / Close are no-ops
 // sufficient for the tests.
 type fakeAgentSession struct {
-	mu        sync.Mutex
-	events    []agent.AgentEvent
-	channel   chan agent.AgentEvent
-	started   bool
-	closed    bool
-	sendErr   error
-	closeErr  error
-	pid       int
+	mu       sync.Mutex
+	events   []agent.AgentEvent
+	channel  chan agent.AgentEvent
+	started  bool
+	closed   bool
+	sendErr  error
+	closeErr error
+	pid      int
 }
 
 func (s *fakeAgentSession) ensureStarted() {
@@ -71,9 +71,9 @@ func (s *fakeAgentSession) Events() <-chan agent.AgentEvent {
 	return s.channel
 }
 
-func (s *fakeAgentSession) SendText(string) error     { return s.sendErr }
+func (s *fakeAgentSession) SendText(string) error       { return s.sendErr }
 func (s *fakeAgentSession) SendPermission(string) error { return s.sendErr }
-func (s *fakeAgentSession) PID() int                  { return s.pid }
+func (s *fakeAgentSession) PID() int                    { return s.pid }
 func (s *fakeAgentSession) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -217,8 +217,8 @@ func TestListEmptyAndPopulated(t *testing.T) {
 func TestKill(t *testing.T) {
 	reg := agent.New()
 	reg.Register(&fakeAgent{
-		name:   "claude",
-		mode:   agent.ModePTY,
+		name: "claude",
+		mode: agent.ModePTY,
 		events: []agent.AgentEvent{ // keep alive; no EventDone
 			{Kind: agent.EventText, Text: "still going"},
 		},

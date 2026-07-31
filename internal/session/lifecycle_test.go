@@ -95,10 +95,10 @@ func TestCreateOrUpdate_RejectsActiveSession(t *testing.T) {
 func TestCreateOrUpdate_ValidationErrors(t *testing.T) {
 	mgr := NewMemoryManager(agent.New(), nil, nil)
 	cases := []struct {
-		name     string
-		chatID   string
+		name      string
+		chatID    string
 		workspace string
-		agent    string
+		agent     string
 	}{
 		{"no chat", "", "/tmp", "claude"},
 		{"no workspace", "c", "", "claude"},

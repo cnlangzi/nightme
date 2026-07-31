@@ -30,6 +30,7 @@
 | F-19 | PTY Mode Byte Pipe（Bridge 的 PTY 实现细节）| [feat/F-19-cli-bridge.md](./feat/F-19-cli-bridge.md) | M1 |
 | F-20 | Command Gateway（slash command 路由 + /cwd /run /kill /help）| [feat/F-20-gateway.md](./feat/F-20-gateway.md) | M2 |
 | F-21 | Agent Communication Modes（ACP / SDK / PTY 三层降级）| [feat/F-21-agent-modes.md](./feat/F-21-agent-modes.md) | M1 arch / M2 partial |
+| F-22 | Feishu One-Click App Registration（QR 扫码授权 onboarding）| [feat/F-22-feishu-onclick-registration.md](./feat/F-22-feishu-onclick-registration.md) | M2 |
 
 ## 2. 后续功能（v0.2+）
 
@@ -74,6 +75,7 @@
 | F-19 | ✅ | ✅ | ⏳ | ⏳ | M2 |
 | F-20 | ✅ | ✅ | ⏳ | ⏳ | M2 |
 | F-21 | ✅ | ✅ | ⏳ | ⏳ | M1+M2 |
+| F-22 | ✅ | ✅ | ⏳ | ⏳ | M2 |
 
 **全部 ✅ 后**，nightme v1.0.0 可发布。
 

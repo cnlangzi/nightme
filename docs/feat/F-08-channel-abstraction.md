@@ -2,8 +2,8 @@
 
 > **Status**: designed (v0.1)
 > **Milestone**: M2 (Feishu implementation)
-> **Depends on**: (none — interface)
-> **Related docs**: SPEC.md §1.1 (Channel Adapter 组件), §4 (并发模型)
+> **Depends on**: F-22 (Feishu One-Click App Registration) — for credentials
+> **Related docs**: SPEC.md §1.1 (Channel Adapter 组件), §4 (并发模型), [F-22-feishu-onclick-registration.md](./F-22-feishu-onclick-registration.md)
 
 ## 1. Description
 

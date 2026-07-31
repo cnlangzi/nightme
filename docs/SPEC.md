@@ -44,7 +44,7 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 
 | 组件 | 职责 |
 |------|------|
-| **Channel Adapter** | 把 IM 协议（飞书 WebSocket / WhatsApp webhook 等）抽象成统一接口；把 IM 消息收上来、把 nightme 输出推回去 |
+| **Channel Adapter** | 把 IM 协议（飞书 WebSocket / WhatsApp webhook 等）抽象成统一接口；把 IM 消息收上来、把 nightme 输出推回去。飞书凭证获取走 [F-22 QR 扫码授权](./feat/F-22-feishu-onclick-registration.md) |
 | **Gateway** | Slash command 路由器：判断每条消息是系统命令还是普通文本；系统命令命中表后执行 / 不命中透传给 SessionManager，普通文本也透传给 SessionManager |
 | **Session Manager** | 维护 chat_id ↔ session 的绑定；管理 session 的创建、查询、销毁；**每个 session 绑定一个 workspace**（session.Workspace 字段，session 创建时确定，生命周期内不变） |
 | **Bridge** | nightme 与底层 AI Coding CLI 之间的通信抽象；提供统一的 `AgentSession` 接口（Events / SendText / SendPermission / Close）；**有三种实现模式**：ACP（标准化，优先）、SDK（vendor-specific，如 Claude Code Agent SDK）、PTY（透明透传，兑底）。Session Manager 只跟 Bridge 接口交互，不关心具体模式。 |
@@ -228,6 +228,7 @@ nightme 从 `~/.config/nightme/config.yaml` 读取配置。
 
 - **Channel 鉴权**：依赖 IM 平台原生鉴权（飞书 appSecret / verification token）
 - **单用户假设**：MVP 不做设备配对、多用户隔离
+- **Onboarding**：飞书凭证优先通过 [F-22 QR 扫码授权](./feat/F-22-feishu-onclick-registration.md)（OAuth 2.0 Device Authorization Grant）获得，避免手动复制 app_id/app_secret。详见 F-22。
 - **进程隔离**：nightme 不接管用户已有进程；只能 spawn 自己创建的进程
 - **网络出站**：仅连 IM 平台的长连接 endpoint，无其他出口
 - **本地 IPC**：仅 listen `127.0.0.1`，不暴露 `0.0.0.0`

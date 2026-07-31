@@ -135,9 +135,19 @@ func translate(ev streamEvent, events chan<- agent.AgentEvent, askHandler askHan
 				if block.Text == "" {
 					continue
 				}
-				events <- agent.AgentEvent{
-					Kind: agent.EventText,
-					Text: block.Text,
+				// TEXT-FALLBACK (F-24 §5.3): when AskUserQuestion
+				// isn't exposed as a tool_use, Claude Code falls back
+				// to rendering a markdown question with "please pick
+				// one". Detect that pattern and emit EventPermission
+				// instead of EventText so the channel renders a
+				// proper interactive card.
+				if q := detectAskInText(block.Text); q != nil && askHandler != nil {
+					emitAskFromText(*q, events, logger)
+				} else {
+					events <- agent.AgentEvent{
+						Kind: agent.EventText,
+						Text: block.Text,
+					}
 				}
 
 			case "thinking":

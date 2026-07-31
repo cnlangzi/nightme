@@ -101,6 +101,11 @@ type Session struct {
 
 	// cancel terminates the per-session readPump goroutine.
 	cancel context.CancelFunc
+
+	// inputBuffer queues user messages arriving while the agent is
+	// busy (F-25). Lazily created by EnsureInputBuffer; never
+	// serialised / persisted (per spec: in-memory only, restart loses).
+	inputBuffer *InputBuffer
 }
 
 // Status returns the current lifecycle status. It acquires the
@@ -224,4 +229,55 @@ func (s *Session) SendText(text string) error {
 		return errors.New("session: no live agent")
 	}
 	return as.SendText(text)
+}
+
+// EnsureInputBuffer lazily constructs and returns the per-session
+// InputBuffer. The first call wires up the onFlush hook to call
+// SendText on the live agent; subsequent calls return the existing
+// buffer.
+//
+// The buffer is in-memory only. If the session is reloaded from
+// disk after a nightme restart, a fresh empty buffer is created —
+// any pending messages from before the restart are silently lost
+// (per F-25 spec: "重启全丢，user retry").
+func (s *Session) EnsureInputBuffer() *InputBuffer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inputBuffer != nil {
+		return s.inputBuffer
+	}
+	hook := func(combined string, _ []string) error {
+		s.mu.RLock()
+		as := s.agentSession
+		s.mu.RUnlock()
+		if as == nil {
+			return errors.New("session: no live agent for flush")
+		}
+		return as.SendText(combined)
+	}
+	s.inputBuffer = NewInputBuffer(hook, 50, 100*1024)
+	return s.inputBuffer
+}
+
+// InputBuffer returns the existing buffer or nil if EnsureInputBuffer
+// has not been called. Read-only access for state inspection
+// (e.g. /status command).
+func (s *Session) InputBuffer() *InputBuffer {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.inputBuffer
+}
+
+// QueueUserMessage is the F-25 entry point for IM-arriving messages.
+// The session decides whether to dispatch immediately (state=Idle)
+// or buffer (state=Busy). The caller does not need to know.
+//
+// userMsgID is propagated through the buffer so the channel layer
+// can update the corresponding MessageReceipt on flush.
+func (s *Session) QueueUserMessage(content, userMsgID string) error {
+	if content == "" {
+		return nil
+	}
+	buf := s.EnsureInputBuffer()
+	return buf.Add(content, userMsgID)
 }

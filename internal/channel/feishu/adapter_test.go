@@ -54,7 +54,7 @@ func TestSendLongMessage_SplitsAtNewline(t *testing.T) {
 	text := strings.Repeat("a", 2000) + "\n" + strings.Repeat("b", 2000)
 
 	var sent []string
-	a.sendFunc = func(_ context.Context, chatID, msgType, content string) error {
+	a.sendFunc = func(_ context.Context, chatID, msgType, content string) (string, error) {
 		if chatID != "oc_test" {
 			t.Errorf("chatID = %q, want oc_test", chatID)
 		}
@@ -68,7 +68,7 @@ func TestSendLongMessage_SplitsAtNewline(t *testing.T) {
 			t.Fatalf("decode content: %v", err)
 		}
 		sent = append(sent, payload.Text)
-		return nil
+		return "", nil
 	}
 
 	if err := a.SendLongMessage(context.Background(), "oc_test", text); err != nil {

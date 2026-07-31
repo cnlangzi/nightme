@@ -131,7 +131,11 @@ func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID stri
 		r.logger.Warn("feishu receipt: initial reaction failed", "err", err)
 	}
 
-	// 2. Post the reply text message ("⏳ 等待中").
+	// 2. Post the reply text message ("⏳ 等待中") and capture the
+	//    returned message ID — subsequent state transitions edit
+	//    this message in place via UpdateMessage so the user sees
+	//    exactly one reply line per user message (F-25 spec:
+	//    "永远只有一行").
 	msgID, err := bot.SendMessageText(ctx, chatID, StateWaiting.String(r))
 	if err != nil {
 		r.logger.Warn("feishu receipt: initial reply failed", "err", err)
@@ -205,12 +209,12 @@ func (r *MessageReceipt) State() ReceiptState {
 // reaction row. This avoids the reaction_id bookkeeping that
 // delete-then-add would require.
 //
-// Reply text strategy: best-effort SendMessageText. We don't yet
-// have Feishu MessageUpdate wired up (lark-oapi exposes it; deferred
-// to a follow-up because each SendMessageText creates a new message).
-// For v0.2 the reply text grows as a stack of messages, which is
-// ugly. The honest fix is MessageUpdate. We log a TODO when this
-// branch fires.
+// Reply text strategy: edit-in-place via im.message.update. The
+// initial reply was posted by NewMessageReceipt and the ID is in
+// r.replyMsgID. Each subsequent state transitions updates the same
+// message — the user always sees ONE reply line per user message.
+// Falls back to a fresh message if update fails (e.g. message older
+// than 48h, or update quota exhausted).
 func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	emoji := r.state.Emoji()
 	if err := r.addReaction(ctx, emoji); err != nil {
@@ -219,15 +223,26 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	}
 
 	text := r.state.String(r)
-	// TODO(F-25): wire im.message.update for in-place reply edits.
-	// For now, post a new message each time. Users see a thread of
-	// status lines which is ugly but functional. Follow-up commit
-	// will replace this with a single card that we patch.
-	if _, err := r.bot.SendMessageText(ctx, r.chatID, text); err != nil {
-		r.logger.Warn("feishu receipt: reply text update failed",
+
+	// Try in-place update first; on failure, post a fresh message
+	// and adopt its ID as the new reply target. This means the
+	// fallback degrades gracefully without losing the receipt.
+	if r.replyMsgID != "" {
+		if err := r.bot.UpdateMessage(ctx, r.replyMsgID, text); err == nil {
+			return nil
+		} else {
+			r.logger.Warn("feishu receipt: update reply failed, posting fresh",
+				"err", err, "state", r.state)
+		}
+	}
+
+	msgID, err := r.bot.SendMessageText(ctx, r.chatID, text)
+	if err != nil {
+		r.logger.Warn("feishu receipt: fresh reply failed",
 			"err", err, "state", r.state)
 		return err
 	}
+	r.replyMsgID = msgID
 	return nil
 }
 
@@ -248,16 +263,4 @@ func (r *MessageReceipt) addReaction(ctx context.Context, emoji string) error {
 	return nil
 }
 
-// SendMessageText posts a new text message. We use the public
-// SendMessage (not the internal sendContent) so the test surface
-// stays consistent.
-func (a *Adapter) SendMessageText(ctx context.Context, chatID, text string) (string, error) {
-	if err := a.SendMessage(ctx, chatID, text); err != nil {
-		return "", err
-	}
-	// SendMessage does not currently expose the returned message ID
-	// through the public Channel API. We return "" so callers can
-	// detect the gap (and the receipt layer can fall back to
-	// "no-edit-available" mode if needed).
-	return "", nil
-}
+// SendMessageText posts a new text message. Implemented in adapter.go.

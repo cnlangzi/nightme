@@ -35,6 +35,18 @@ type CreateRequest struct {
 
 	// Args are appended to the agent's own default arguments.
 	Args []string
+
+	// OnUserMessage is the F-25 integration hook. Called for each
+	// user message arriving from the IM channel BEFORE the agent
+	// sees it. The hook decides whether to dispatch immediately
+	// (state=Idle, via agentSession.SendText) or buffer (state=Busy,
+	// via InputBuffer). On idle dispatch the hook returns nil; on
+	// buffer the hook returns nil too and the buffer flushes
+	// later (Claude result event triggers flush).
+	//
+	// Optional — when nil, the manager calls SendText directly with
+	// no buffering (legacy v0.1 behaviour).
+	OnUserMessage func(content, userMsgID string) error
 }
 
 // Manager owns the in-memory session table and the goroutines that
@@ -193,6 +205,34 @@ func (m *MemoryManager) Create(ctx context.Context, req CreateRequest) (*Session
 	m.sessions[sess.ID] = sess
 	m.chatIndex[req.ChatID] = sess.ID
 	m.mu.Unlock()
+
+	// F-25: pre-warm the InputBuffer so the readPump can route
+	// events into the right state from the very first tick. The
+	// buffer's onFlush hook calls agentSession.SendText — the
+	// channel layer doesn't need to know about the dispatch path.
+	if req.OnUserMessage != nil {
+		// Caller-supplied hook: we wire it so the channel layer
+		// can post-process every dispatch (e.g. update receipt
+		// state). The default flush callback in EnsureInputBuffer
+		// already calls SendText; the hook here is called BEFORE
+		// SendText to let the caller inspect/modify the content.
+		buf := sess.EnsureInputBuffer()
+		buf.onFlush = func(combined string, userMsgIDs []string) error {
+			if req.OnUserMessage != nil {
+				// Use the first userMsgID as the representative
+				// id; the channel layer can iterate receipts in
+				// its own bookkeeping if needed.
+				repID := ""
+				if len(userMsgIDs) > 0 {
+					repID = userMsgIDs[0]
+				}
+				_ = req.OnUserMessage(combined, repID)
+			}
+			return sess.SendText(combined)
+		}
+	} else {
+		sess.EnsureInputBuffer()
+	}
 
 	if err := m.upsertEntry(sess, registry.StatusRunning, 0); err != nil {
 		// Persistence is best-effort for Create: the agent is
@@ -456,6 +496,14 @@ func exitCodeOr(s *Session, fallback int) int {
 // The pump owns the transition from StatusRunning → StatusExited when
 // it observes EventDone; Kill and natural termination therefore
 // produce the same final state.
+//
+// F-25 integration: the pump also drives the InputBuffer state
+// machine. Any "agent is working" event (text/tool/permission) flips
+// the buffer to StateBusy; a terminal event (done/error) flips it
+// back to StateIdle AND flushes the buffer. This means the channel
+// layer doesn't need to know about the agent's internal state — it
+// just calls QueueUserMessage and the manager figures out dispatch
+// vs buffer.
 func (m *MemoryManager) readPump(s *Session, ctx context.Context) {
 	// Snapshot the agent handle under the per-session lock so Kill
 	// (which swaps it for nil) does not race with this goroutine.
@@ -469,13 +517,36 @@ func (m *MemoryManager) readPump(s *Session, ctx context.Context) {
 		if m.callback != nil {
 			m.callback(s, ev)
 		}
+		// F-25 buffer state tracking. We treat any non-terminal
+		// event as "agent is working" (BUSY) so user messages that
+		// arrive during this period get buffered. We do NOT touch
+		// the buffer when ev is a system/init event since it
+		// doesn't indicate meaningful work yet.
+		if ev.Kind != agent.EventDone && ev.Kind != agent.EventError {
+			if buf := s.InputBuffer(); buf != nil {
+				buf.SetState(StateBusy)
+			}
+		}
 		if ev.Kind == agent.EventDone || ev.Kind == agent.EventError {
+			// Flush buffer BEFORE marking exited so any
+			// queued messages reach the agent before it
+			// shuts down (or before the channel reports
+			// the session as ended to the user).
+			if buf := s.InputBuffer(); buf != nil {
+				buf.SetState(StateIdle)
+				_ = buf.OnTurnEnded() // best-effort; logged inside buffer
+			}
 			m.markExited(s, terminalExitCode(ev))
 			return
 		}
 	}
 
 	// Channel closed without a terminal event — treat as exit.
+	// Flush any pending buffer (the session is going away; user
+	// will see the queued messages lost on next retry).
+	if buf := s.InputBuffer(); buf != nil {
+		buf.SetState(StateIdle)
+	}
 	m.markExited(s, -1)
 }
 

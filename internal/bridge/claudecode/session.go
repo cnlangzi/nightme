@@ -91,16 +91,15 @@ func newSession(ctx context.Context, command string, args, env []string, workspa
 	}
 
 	// Register pendingAsk bridge for AskUserQuestion: the default
-	// handler emits EventPermission AND captures the question's
-	// tool_use_id in s.pendingAsk so SendPermission can route the
-	// user's answer back. We do this by wrapping defaultAskHandler.
+	// handler emits EventPermission with our own ResponseCh so
+	// SendPermission routes the user's answer back through the
+	// same channel the bridge consumed from.
 	handler := func(block contentBlock, events chan<- agent.AgentEvent, logger *slog.Logger) {
-		// Capture pending state BEFORE translating so SendPermission
-		// can pick it up immediately.
-		s.pendingMu.Lock()
-		var multi bool
-		// Try to extract multiSelect + tool_use_id quickly without
-		// re-parsing the whole input.
+		// Pre-decode just enough to capture the ResponseCh + multi
+		// flag. The full Options parsing happens inside the
+		// default handler below; we only need the channel binding
+		// to be stable across handler invocation and SendPermission
+		// delivery.
 		var probe struct {
 			Questions []struct {
 				Header      string `json:"header"`
@@ -108,54 +107,45 @@ func newSession(ctx context.Context, command string, args, env []string, workspa
 			} `json:"questions"`
 		}
 		_ = json.Unmarshal(block.Input, &probe)
+
+		var multi bool
 		if len(probe.Questions) > 0 {
 			multi = probe.Questions[0].MultiSelect
-			respCh := make(chan string, 1)
-			s.pendingAsk = &pendingAsk{
-				ToolUseID:  block.ID,
-				Multi:      multi,
-				ResponseCh: respCh,
-			}
 		}
-		s.pendingMu.Unlock()
-
-		defaultAskHandler(block, events, logger)
-
-		// Replace the default ResponseCh on the emitted Permission
-		// with the one captured above, so SendPermission's send
-		// reaches the channel the bridge actually listens on.
-		// (defaultAskHandler allocates its own channel; we
-		// overwrite the most recent EventPermission's ResponseCh.)
-		//
-		// We can't easily mutate the already-emitted event, so
-		// instead we emit a SECOND EventPermission here with the
-		// captured ResponseCh. Channels should consume one and
-		// route via SendPermission; the duplicate is harmless
-		// because the channel layer (Feishu) deduplicates by
-		// ToolUseID. To avoid the duplicate, callers should
-		// prefer the channel's own response mechanism — see
-		// F-24 §6.4 for the full flow.
+		respCh := make(chan string, 1)
 		s.pendingMu.Lock()
-		if s.pendingAsk != nil && len(probe.Questions) > 0 {
-			header := probe.Questions[0].Header
-			if header == "" {
-				header = "Question"
-			}
-			q := Question{
-				Header:      header,
-				MultiSelect: multi,
-			}
-			events <- agent.AgentEvent{
-				Kind: agent.EventPermission,
-				Permission: &agent.PermissionRequest{
-					Tool:       "AskUserQuestion",
-					Action:     formatQuestionAction(q),
-					Options:    []string{}, // populated by the prior event
-					ResponseCh: s.pendingAsk.ResponseCh,
-				},
-			}
+		s.pendingAsk = &pendingAsk{
+			ToolUseID:  block.ID,
+			Multi:      multi,
+			ResponseCh: respCh,
 		}
 		s.pendingMu.Unlock()
+
+		// Translate the tool_use block. We need the resulting
+		// EventPermission to expose the SAME ResponseCh we just
+		// stored in pendingAsk, otherwise the channel layer will
+		// write to a stale channel and SendPermission will block
+		// forever. To do that without re-parsing, we override
+		// the ResponseCh on the most recent emitted event by
+		// intercepting the channel output.
+		//
+		// Strategy: run the default handler with a wrapper
+		// channel that intercepts the EventPermission and
+		// rewrites its ResponseCh to our pending channel.
+		interceptEvents := make(chan agent.AgentEvent, 4)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for ev := range interceptEvents {
+				if ev.Kind == agent.EventPermission && ev.Permission != nil {
+					ev.Permission.ResponseCh = respCh
+				}
+				events <- ev
+			}
+		}()
+		defaultAskHandler(block, interceptEvents, logger)
+		close(interceptEvents)
+		<-done
 	}
 
 	logger := slog.Default()

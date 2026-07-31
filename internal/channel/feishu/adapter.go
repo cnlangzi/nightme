@@ -26,7 +26,7 @@ const maxMessageBytes = 3800
 
 // sendMessageFunc is kept behind the adapter so unit tests can exercise the
 // channel without making an HTTP request to Feishu.
-type sendMessageFunc func(ctx context.Context, chatID, msgType, content string) error
+type sendMessageFunc func(ctx context.Context, chatID, msgType, content string) (string, error)
 
 // Adapter is the Feishu implementation of channel.Channel.
 //
@@ -224,10 +224,25 @@ func (a *Adapter) Stop(ctx context.Context) error {
 // Incoming returns the adapter's normalized message stream.
 func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 
-// SendMessage sends one text message to chatID.
+// SendMessage sends one text message to chatID and returns the
+// created message ID. The Channel interface in
+// internal/channel.Channel accepts (ctx, chatID, text) -> error
+// for backwards compat, so the public wrapper drops the message
+// ID on error and uses a hidden return-path for callers that need
+// the ID (see SendMessageText for the receipt code path).
 func (a *Adapter) SendMessage(ctx context.Context, chatID, text string) error {
+	_, err := a.SendMessageText(ctx, chatID, text)
+	return err
+}
+
+// SendMessageText is the message-ID-returning variant of SendMessage.
+// Used by MessageReceipt (F-25) so the reply text line can be edited
+// in place via UpdateMessage on subsequent state transitions.
+//
+// Returns (messageID, error). On error, messageID is "".
+func (a *Adapter) SendMessageText(ctx context.Context, chatID, text string) (string, error) {
 	if strings.TrimSpace(chatID) == "" {
-		return errors.New("feishu: chat_id is required")
+		return "", errors.New("feishu: chat_id is required")
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -236,7 +251,7 @@ func (a *Adapter) SendMessage(ctx context.Context, chatID, text string) error {
 		Text string `json:"text"`
 	}{Text: text})
 	if err != nil {
-		return fmt.Errorf("feishu: encode text: %w", err)
+		return "", fmt.Errorf("feishu: encode text: %w", err)
 	}
 	return a.sendContent(ctx, chatID, larkim.MsgTypeText, string(content))
 }
@@ -278,6 +293,52 @@ func (a *Adapter) AddReaction(ctx context.Context, messageID, reactionType strin
 	return nil
 }
 
+// UpdateMessage edits an existing text message's content in-place.
+// Used by MessageReceipt to keep the reply line single-message
+// across heartbeat ticks (per F-25 spec: "永远只有一行").
+//
+// Feishu restrictions (per official docs):
+//   - Only text and post (rich-text) message types can be updated
+//   - Messages older than 48h may not be editable
+//   - Each message can be updated at most 20 times
+//
+// Errors are non-fatal — the receipt falls back to a fresh message
+// on update failure.
+func (a *Adapter) UpdateMessage(ctx context.Context, messageID, text string) error {
+	if a.larkClient == nil || a.larkClient.Im == nil || a.larkClient.Im.V1 == nil || a.larkClient.Im.V1.Message == nil {
+		return errors.New("feishu: REST client not initialized")
+	}
+	if strings.TrimSpace(messageID) == "" {
+		return errors.New("feishu: message_id is required")
+	}
+	content, err := json.Marshal(struct {
+		Text string `json:"text"`
+	}{Text: text})
+	if err != nil {
+		return fmt.Errorf("feishu: encode text: %w", err)
+	}
+	body := larkim.NewUpdateMessageReqBodyBuilder().
+		MsgType(larkim.MsgTypeText).
+		Content(string(content)).
+		Build()
+	req := larkim.NewUpdateMessageReqBuilder().
+		MessageId(messageID).
+		Body(body).
+		Build()
+	resp, err := a.larkClient.Im.V1.Message.Update(ctx, req)
+	if err != nil {
+		return fmt.Errorf("feishu: update message: %w", err)
+	}
+	if resp == nil || !resp.Success() {
+		code := 0
+		if resp != nil {
+			code = resp.Code
+		}
+		return fmt.Errorf("feishu: update message failed with code %d", code)
+	}
+	return nil
+}
+
 // SendLongMessage splits text at newline boundaries where possible and sends
 // each resulting chunk. The 3.8 KiB limit leaves room below Feishu's request
 // limit for protocol overhead.
@@ -297,9 +358,13 @@ func (a *Adapter) SendLongMessage(ctx context.Context, chatID, text string) erro
 	return nil
 }
 
-// sendContent sends an arbitrary Feishu message type. Renderer uses this for
-// interactive permission cards while the public Channel API remains text-only.
-func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content string) error {
+// sendContent sends an arbitrary Feishu message type and returns the
+// created message ID. Renderer uses this for interactive permission
+// cards while the public Channel API remains text-only.
+//
+// Returns "" + error on failure. Empty message ID on success is
+// possible if the API omits it (defensive — should not happen).
+func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content string) (string, error) {
 	a.mu.RLock()
 	send := a.sendFunc
 	if send == nil && a.larkClient != nil {
@@ -307,14 +372,14 @@ func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content stri
 	}
 	a.mu.RUnlock()
 	if send == nil {
-		return errors.New("feishu: REST client is nil")
+		return "", errors.New("feishu: REST client is nil")
 	}
 	return send(ctx, chatID, msgType, content)
 }
 
-func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content string) error {
+func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content string) (string, error) {
 	if a.larkClient == nil || a.larkClient.Im == nil || a.larkClient.Im.V1 == nil || a.larkClient.Im.V1.Message == nil {
-		return errors.New("feishu: REST client is nil")
+		return "", errors.New("feishu: REST client is nil")
 	}
 	body := &larkim.CreateMessageReqBody{
 		ReceiveId: &chatID,
@@ -327,15 +392,19 @@ func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content stri
 		Build()
 	resp, err := a.larkClient.Im.V1.Message.Create(ctx, req)
 	if err != nil {
-		return fmt.Errorf("feishu: create message: %w", err)
+		return "", fmt.Errorf("feishu: create message: %w", err)
 	}
 	if resp == nil {
-		return errors.New("feishu: create message returned nil response")
+		return "", errors.New("feishu: create message returned nil response")
 	}
 	if !resp.Success() {
-		return fmt.Errorf("feishu: create message failed with code %d", resp.Code)
+		return "", fmt.Errorf("feishu: create message failed with code %d", resp.Code)
 	}
-	return nil
+	var msgID string
+	if resp.Data != nil && resp.Data.MessageId != nil {
+		msgID = *resp.Data.MessageId
+	}
+	return msgID, nil
 }
 
 // handleMessage is registered with the SDK dispatcher for im.message.receive_v1.

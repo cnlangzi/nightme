@@ -71,7 +71,8 @@ func (r *Renderer) renderPermission(ctx context.Context, chatID string, req *age
 	if err != nil {
 		return err
 	}
-	return r.adapter.sendContent(ctx, chatID, interactiveMessageType, content)
+	_, err = r.adapter.sendContent(ctx, chatID, interactiveMessageType, content)
+	return err
 }
 
 // permissionCard returns the v1 interactive-card JSON accepted by the Feishu

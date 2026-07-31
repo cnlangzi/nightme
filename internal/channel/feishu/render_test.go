@@ -18,9 +18,9 @@ type renderedMessage struct {
 
 func captureRenderedMessages(a *Adapter) *[]renderedMessage {
 	messages := make([]renderedMessage, 0, 1)
-	a.sendFunc = func(_ context.Context, chatID, msgType, content string) error {
+	a.sendFunc = func(_ context.Context, chatID, msgType, content string) (string, error) {
 		messages = append(messages, renderedMessage{chatID: chatID, msgType: msgType, content: content})
-		return nil
+		return "", nil
 	}
 	return &messages
 }

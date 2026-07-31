@@ -281,6 +281,74 @@ func TestBuildRunAgentRegistry_UsesArgsAndEnv(t *testing.T) {
 	}
 }
 
+// TestRun_CleanupFlagKillsSessions verifies that --cleanup=true
+// routes shutdown through killAllSessions (so each session sees
+// Manager.Kill) instead of the default detach path.
+func TestRun_CleanupFlagKillsSessions(t *testing.T) {
+	cfg := runTestConfig()
+	ch := newFakeRunChannel()
+	mgr := &fakeRunManager{sessions: []*session.Session{
+		{ID: "s_one"},
+		{ID: "s_two"},
+	}}
+	signals := make(chan os.Signal, 1)
+	go func() {
+		<-ch.started
+		signals <- syscall.SIGINT
+	}()
+
+	cmd := newRunCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	deps := withCleanup(runTestDeps(cfg, ch, mgr, signals), true)
+	if err := runRunWith(cmd, deps); err != nil {
+		t.Fatalf("runRunWith: %v", err)
+	}
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.detached) != 0 {
+		t.Errorf("detached = %v, want none under --cleanup", mgr.detached)
+	}
+	if len(mgr.killed) != 2 {
+		t.Errorf("killed = %v, want both sessions", mgr.killed)
+	}
+}
+
+// TestRun_DefaultDetachesSessions pins the v0.1 behavior so a
+// future refactor cannot silently switch shutdown to kill.
+func TestRun_DefaultDetachesSessions(t *testing.T) {
+	cfg := runTestConfig()
+	ch := newFakeRunChannel()
+	mgr := &fakeRunManager{sessions: []*session.Session{
+		{ID: "s_one"},
+	}}
+	signals := make(chan os.Signal, 1)
+	go func() {
+		<-ch.started
+		signals <- syscall.SIGINT
+	}()
+
+	cmd := newRunCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	deps := runTestDeps(cfg, ch, mgr, signals)
+	if err := runRunWith(cmd, deps); err != nil {
+		t.Fatalf("runRunWith: %v", err)
+	}
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.killed) != 0 {
+		t.Errorf("killed = %v, want none (default is detach)", mgr.killed)
+	}
+	if len(mgr.detached) != 1 {
+		t.Errorf("detached = %v, want one", mgr.detached)
+	}
+}
+
 // Keep the compile-time contract visible to this package's tests without
 // depending on an implementation-specific manager method set.
 var _ session.Manager = (*fakeRunManager)(nil)

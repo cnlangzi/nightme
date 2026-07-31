@@ -34,6 +34,7 @@ type runDeps struct {
 	newManager   func(*agent.Registry, *registry.File, session.EventCallback) session.Manager
 	newGateway   func(session.Manager, *agent.Registry, gateway.Responder) gateway.Gateway
 	signals      <-chan os.Signal
+	cleanup      bool
 }
 
 func defaultRunDeps() runDeps {
@@ -57,23 +58,39 @@ func defaultRunDeps() runDeps {
 
 // newRunCmd builds the long-running Feishu daemon command.
 func newRunCmd() *cobra.Command {
-	return &cobra.Command{
+	var cleanup bool
+	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Start the Feishu daemon",
 		Long: "run starts the Feishu WebSocket channel and serves a Gateway " +
 			"router on top of it. Slash commands (/cwd, /run, /kill, /help) " +
 			"drive session lifecycle; plain text is forwarded to the live " +
-			"agent behind the chat's session.",
+			"agent behind the chat's session.\n\n" +
+			"By default the daemon detaches session CLIs on shutdown so a " +
+			"later `nightme run` (or /run) can resume them. Pass --cleanup " +
+			"to instead Kill() every session on SIGINT/SIGTERM — useful for " +
+			"CI or one-shot runs.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runRun(cmd)
+			return runRun(cmd, cleanup)
 		},
 	}
+	cmd.Flags().BoolVar(&cleanup, "cleanup", false,
+		"Kill every session CLI on shutdown instead of detaching them")
+	return cmd
 }
 
 // runRun is the cobra entrypoint. The split makes the daemon easy to drive
 // with fake channels and managers in unit tests.
-func runRun(cmd *cobra.Command) error {
-	return runRunWith(cmd, defaultRunDeps())
+func runRun(cmd *cobra.Command, cleanup bool) error {
+	return runRunWith(cmd, withCleanup(defaultRunDeps(), cleanup))
+}
+
+// withCleanup returns deps with the cleanup flag applied. Exported
+// to tests so they can drive both shutdown paths without parsing
+// cobra flags.
+func withCleanup(deps runDeps, cleanup bool) runDeps {
+	deps.cleanup = cleanup
+	return deps
 }
 
 // runRunWith installs signal handling when the caller did not provide a
@@ -209,22 +226,22 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 
 	incoming := ch.Incoming()
 	if incoming == nil {
-		return shutdownRun(out, ch, mgr)
+		return shutdownRun(out, ch, mgr, deps.cleanup)
 	}
 	for {
 		attachments.Sweep(ctx)
 
 		select {
 		case <-ctx.Done():
-			return shutdownRun(out, ch, mgr)
+			return shutdownRun(out, ch, mgr, deps.cleanup)
 		case sig, ok := <-sigCh:
 			if ok && sig != nil {
 				fmt.Fprintf(out, "[nightme] received %s\n", sig)
 			}
-			return shutdownRun(out, ch, mgr)
+			return shutdownRun(out, ch, mgr, deps.cleanup)
 		case msg, ok := <-incoming:
 			if !ok {
-				return shutdownRun(out, ch, mgr)
+				return shutdownRun(out, ch, mgr, deps.cleanup)
 			}
 			fmt.Fprintf(out, "received: %s\n", msg.Text)
 			handleCtx := gateway.WithGateway(ctx, gw)
@@ -349,10 +366,11 @@ func (s *sessionAttachments) pump(ctx context.Context, chatID string, events <-c
 	}
 }
 
-// shutdownRun stops the channel first, then marks every known session
-// detached. It never calls Manager.Kill: the v0.1 policy leaves CLI children
-// alive across a daemon restart.
-func shutdownRun(out io.Writer, ch channel.Channel, mgr session.Manager) error {
+// shutdownRun stops the channel first, then either detaches or
+// kills every known session depending on cleanup. The default
+// policy is detach (matches v0.1 behavior); --cleanup opts into
+// the kill-everything path used by CI / one-shot scripts.
+func shutdownRun(out io.Writer, ch channel.Channel, mgr session.Manager, cleanup bool) error {
 	_ = out // retained in the signature for a future shutdown status line
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -367,9 +385,16 @@ func shutdownRun(out io.Writer, ch channel.Channel, mgr session.Manager) error {
 		return firstErr
 	}
 
-	markErr := markSessionsDetached(mgr)
-	if markErr != nil && firstErr == nil {
-		firstErr = fmt.Errorf("run: detach sessions: %w", markErr)
+	if cleanup {
+		killErr := killAllSessions(mgr)
+		if killErr != nil && firstErr == nil {
+			firstErr = fmt.Errorf("run: kill sessions: %w", killErr)
+		}
+	} else {
+		markErr := markSessionsDetached(mgr)
+		if markErr != nil && firstErr == nil {
+			firstErr = fmt.Errorf("run: detach sessions: %w", markErr)
+		}
 	}
 	if err := mgr.Persist(); err != nil && firstErr == nil {
 		firstErr = fmt.Errorf("run: persist sessions: %w", err)
@@ -402,4 +427,23 @@ func markSessionsDetached(mgr session.Manager) error {
 		}
 	}
 	return nil
+}
+
+// killAllSessions terminates every session via the manager's Kill
+// helper. We collect non-fatal errors and return them joined so a
+// single rogue process does not mask the rest. Already-exited
+// sessions are skipped (Kill is idempotent).
+func killAllSessions(mgr session.Manager) error {
+	var firstErr error
+	for _, sess := range mgr.List() {
+		if sess == nil {
+			continue
+		}
+		if err := mgr.Kill(sess.ID); err != nil && !errors.Is(err, session.ErrSessionNotFound) {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("kill %s: %w", sess.ID, err)
+			}
+		}
+	}
+	return firstErr
 }

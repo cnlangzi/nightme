@@ -17,8 +17,8 @@ import (
 // dispatch. Keeping the dependencies explicit makes the handlers
 // trivial to unit-test with a fake session manager.
 type handlerContext struct {
-	manager  session.Manager
-	agents   *agent.Registry
+	manager   session.Manager
+	agents    *agent.Registry
 	responder Responder
 }
 

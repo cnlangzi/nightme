@@ -36,7 +36,7 @@ func TestProvider_Interface(t *testing.T) {
 // and cannot be imported here without an import cycle.
 type feishuAuthStub struct{ name string }
 
-func (f *feishuAuthStub) Name() string                    { return f.name }
+func (f *feishuAuthStub) Name() string                                  { return f.name }
 func (f *feishuAuthStub) Login(_ context.Context) (*Credentials, error) { return nil, nil }
 
 // TestProvider_Name_And_Login verifies the fake behaves as the

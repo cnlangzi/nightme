@@ -548,9 +548,9 @@ func TestRegistry_RepeatHandleDoesNotFail(t *testing.T) {
 // /run handler can surface a clear "binary not found" message.
 type detectorFakeAgent struct{}
 
-func (d *detectorFakeAgent) Name() string                       { return "claude" }
-func (d *detectorFakeAgent) Mode() agent.Mode                   { return agent.ModePTY }
-func (d *detectorFakeAgent) Detect() error                      { return errors.New("binary not found") }
+func (d *detectorFakeAgent) Name() string     { return "claude" }
+func (d *detectorFakeAgent) Mode() agent.Mode { return agent.ModePTY }
+func (d *detectorFakeAgent) Detect() error    { return errors.New("binary not found") }
 func (d *detectorFakeAgent) Start(context.Context, agent.StartConfig) (agent.AgentSession, error) {
 	return nil, errors.New("should not reach Start when Detect fails")
 }

@@ -62,7 +62,7 @@ func (f *fakeBridge) Close() error {
 	return nil
 }
 
-func (f *fakeBridge) PID() int             { return 4242 }
+func (f *fakeBridge) PID() int               { return 4242 }
 func (f *fakeBridge) Setsize(int, int) error { return nil }
 
 // push feeds bytes into the bridge as if the child had written them.

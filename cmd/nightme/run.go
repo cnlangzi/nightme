@@ -177,7 +177,24 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	}
 
 	// Responder pushes chat-side replies through the channel.
-	responder := channelResponder{ch: ch}
+	// If the channel is a Feishu adapter, we also wire the
+	// F-25 Renderer (receipts + reactions) and route user messages
+	// through the session's InputBuffer so concurrent messages are
+	// queued while a turn is busy.
+	var renderer *feishu.Renderer
+	if feishuCh, ok := ch.(*feishu.Adapter); ok {
+		renderer = feishu.NewRenderer(feishuCh)
+	}
+	responder := channelResponder{ch: ch, renderer: renderer}
+	if renderer != nil {
+		responder.userMessageFn = func(chatID, userMsgID, content string) error {
+			sess, err := mgr.GetByChat(chatID)
+			if err != nil {
+				return fmt.Errorf("no session for chat: %w", err)
+			}
+			return sess.QueueUserMessage(content, userMsgID)
+		}
+	}
 
 	// Build the gateway now that the manager exists. The fallback
 	// forwards non-slash text to the chat's session via SendText.
@@ -189,6 +206,13 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// Wrap the gateway's Handle() so the fallback we pass in
 	// (closing over mgr) sees the same logic. We replace the
 	// default fallback with one that forwards to the live session.
+	//
+	// F-25 integration: the fallback routes through the
+	// channelResponder.SendUserMessage path, which (when the renderer
+	// is wired) creates a MessageReceipt, queues the message via the
+	// session's InputBuffer, and flips the receipt to Executing on
+	// dispatch. This is what makes concurrent user messages buffer
+	// correctly while Claude is busy.
 	fallback := func(ctx context.Context, msg *gateway.Message) error {
 		// Forwarding is best-effort. If the chat has no /cwd or
 		// the agent is not running, we still send a hint so the
@@ -199,6 +223,11 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		}
 		if sess.Status() != session.StatusRunning {
 			return responder.Reply(ctx, msg.ChatID, "CLI not running, send /run <agent> to start")
+		}
+		// Renderer path: creates receipt + queues via InputBuffer.
+		// Falls back to legacy SendText path when no renderer.
+		if responder.renderer != nil {
+			return responder.SendUserMessage(ctx, msg.ChatID, msg.SenderID+":"+msg.Time.UTC().Format(time.RFC3339Nano), msg.Text)
 		}
 		return sess.SendText(msg.Text + "\n")
 	}
@@ -225,7 +254,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// Spawn per-session pumps so live agent events are rendered
 	// back to the chat. We (re)attach every time the session
 	// table changes by polling on each incoming message.
-	attachments := newSessionAttachments(mgr, ch)
+	attachments := newSessionAttachments(mgr, ch, renderer)
 	attachments.logger = logger
 
 	incoming := ch.Incoming()
@@ -264,8 +293,17 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 // channelResponder adapts a channel.Channel to the gateway.Responder
 // interface so the gateway handlers can push replies without taking
 // a hard dependency on the channel package.
+//
+// renderer is optional — when set, channelResponder dispatches user
+// messages through Renderer.SendUserMessage + Renderer.MarkExecuting,
+// wiring the F-25 receipt lifecycle. When nil (non-Feishu channels
+// or tests), it falls back to the plain SendLongMessage path.
 type channelResponder struct {
-	ch channel.Channel
+	ch       channel.Channel
+	renderer *feishu.Renderer
+	// userMessageFn lets the responder route user messages into
+	// the session queue (F-25). nil = plain SendText fallback.
+	userMessageFn func(chatID, userMsgID, content string) error
 }
 
 func (r channelResponder) Reply(ctx context.Context, chatID, text string) error {
@@ -275,22 +313,69 @@ func (r channelResponder) Reply(ctx context.Context, chatID, text string) error 
 	return r.ch.SendLongMessage(ctx, chatID, text)
 }
 
+// SendUserMessage is the F-25 entry point used by the gateway to
+// hand a user message to the agent. It creates a MessageReceipt
+// (⏳ emoji + reply), routes the content through the session
+// InputBuffer (idle=bypass / busy=queue), and on dispatch flips
+// the receipt to Executing.
+//
+// When renderer or userMessageFn is nil, this is a no-op (the
+// caller should fall back to plain SendLongMessage). We do NOT
+// silently drop the message — that would surprise users.
+func (r channelResponder) SendUserMessage(ctx context.Context, chatID, userMsgID, content string) error {
+	if r.renderer == nil || r.userMessageFn == nil {
+		// No renderer wired — best-effort fall-through: just send
+		// the text so the user isn't left without feedback. The
+		// legacy SendLongMessage path remains available for
+		// channels that don't support reactions (Telegram etc.).
+		if r.ch != nil {
+			return r.ch.SendLongMessage(ctx, chatID, content)
+		}
+		return nil
+	}
+	// Create the receipt first so the user sees ⏳ immediately,
+	// then dispatch via the session (which decides immediate send
+	// vs buffer based on InputBuffer state).
+	_, err := r.renderer.SendUserMessage(ctx, chatID, userMsgID, content)
+	if err != nil {
+		// Don't fail the user's message; log and fall back.
+		return r.userMessageFn(chatID, userMsgID, content)
+	}
+	if err := r.userMessageFn(chatID, userMsgID, content); err != nil {
+		// Dispatch failed — keep the receipt in Waiting so the
+		// user can /flush. The receipt's note already says "⏳
+		// 等待中" which is honest.
+		return err
+	}
+	// Dispatch succeeded → mark the receipt as Executing so the
+	// user sees 🔄 + heartbeat counter.
+	_ = r.renderer.MarkExecuting(ctx, userMsgID)
+	return nil
+}
+
 // sessionAttachments routes AgentEvents from every live session
 // back to the corresponding chat via the channel renderer. It
 // tracks which sessions it has already attached to so each new
 // agent gets exactly one pump.
+//
+// When a Feishu Renderer is available, the pump delegates to it
+// (which drives the F-25 receipt lifecycle — see Renderer.RenderEvent).
+// Otherwise the pump falls back to direct SendMessage calls (the
+// v0.1 behaviour, kept for non-Feishu channels).
 type sessionAttachments struct {
 	mgr      session.Manager
 	ch       channel.Channel
+	renderer *feishu.Renderer
 	mu       sync.Mutex
 	attached map[string]struct{}
 	logger   *slog.Logger
 }
 
-func newSessionAttachments(mgr session.Manager, ch channel.Channel) *sessionAttachments {
+func newSessionAttachments(mgr session.Manager, ch channel.Channel, renderer *feishu.Renderer) *sessionAttachments {
 	return &sessionAttachments{
 		mgr:      mgr,
 		ch:       ch,
+		renderer: renderer,
 		attached: make(map[string]struct{}),
 	}
 }
@@ -341,9 +426,21 @@ func (s *sessionAttachments) pump(ctx context.Context, chatID string, events <-c
 			if s.ch == nil {
 				continue
 			}
-			// Render incrementally through the channel adapter's
-			// public API. PTY mode yields EventText most often; the
-			// handler turns those into SendMessage calls.
+			// Prefer the Feishu Renderer when available — it drives
+			// the F-25 receipt lifecycle (heartbeat ticks,
+			// state transitions). Otherwise fall back to direct
+			// SendMessage for non-Feishu channels.
+			if s.renderer != nil {
+				if err := s.renderer.RenderEvent(ctx, chatID, ev); err != nil {
+					if s.logger != nil {
+						s.logger.Warn("renderer failed",
+							"chat_id", chatID,
+							"event_kind", ev.Kind.String(),
+							"err", err)
+					}
+				}
+				continue
+			}
 			switch ev.Kind {
 			case agent.EventText:
 				_ = s.ch.SendLongMessage(ctx, chatID, ev.Text)

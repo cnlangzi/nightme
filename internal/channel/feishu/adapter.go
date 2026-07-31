@@ -241,6 +241,43 @@ func (a *Adapter) SendMessage(ctx context.Context, chatID, text string) error {
 	return a.sendContent(ctx, chatID, larkim.MsgTypeText, string(content))
 }
 
+// AddReaction adds a reaction emoji to an existing message. Used by
+// MessageReceipt for the F-25 dual-track status display (see
+// receipt.go). Errors are non-fatal — best-effort.
+//
+// reactionType must be a Feishu Emoji type. The built-in emojis
+// (THumbs, SMILE, etc.) are exposed as constants on the SDK's
+// larkim package; for arbitrary unicode emoji we pass them as a
+// string via larkim.NewEmoji builder.
+//
+// v0.2: we pass the emoji string directly via larkim.Emoji builder.
+// If the SDK rejects it, callers should fall back to a built-in
+// alias (THumbs, Clap, etc.).
+func (a *Adapter) AddReaction(ctx context.Context, messageID, reactionType string) error {
+	if a.larkClient == nil || a.larkClient.Im == nil || a.larkClient.Im.V1 == nil || a.larkClient.Im.V1.MessageReaction == nil {
+		return errors.New("feishu: REST client not initialized")
+	}
+	body := larkim.NewCreateMessageReactionReqBodyBuilder().
+		ReactionType(larkim.NewEmojiBuilder().EmojiType(reactionType).Build()).
+		Build()
+	req := larkim.NewCreateMessageReactionReqBuilder().
+		MessageId(messageID).
+		Body(body).
+		Build()
+	resp, err := a.larkClient.Im.V1.MessageReaction.Create(ctx, req)
+	if err != nil {
+		return fmt.Errorf("feishu: add reaction: %w", err)
+	}
+	if resp == nil || !resp.Success() {
+		code := 0
+		if resp != nil {
+			code = resp.Code
+		}
+		return fmt.Errorf("feishu: add reaction failed with code %d", code)
+	}
+	return nil
+}
+
 // SendLongMessage splits text at newline boundaries where possible and sends
 // each resulting chunk. The 3.8 KiB limit leaves room below Feishu's request
 // limit for protocol overhead.

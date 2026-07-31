@@ -1,0 +1,53 @@
+# nightme example configuration
+# Copy to ~/.config/nightme/config.yaml and edit.
+
+feishu:
+  # App credentials from https://open.feishu.cn/app
+  app_id: "cli_xxxxxxxxxxxxxxxx"
+  app_secret: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  # Optional — leave blank if your app is not event-subscribed via HTTP.
+  verification_token: ""
+  encrypt_key: ""
+
+agent:
+  # Default agent name. Used when /run does not specify one.
+  default: "claude"
+
+  # Per-agent spawn recipes. Names must match the registered agent's
+  # Name() (e.g. "claude", "codex", "opencode").
+  agents:
+    claude:
+      command: "claude"
+      args: []
+      env: {}
+
+    codex:
+      command: "codex"
+      args: ["--acp"]
+      env: {}
+
+    opencode:
+      command: "opencode"
+      args: []
+      env: {}
+
+session:
+  # Initial PTY size for new sessions.
+  default_pty_cols: 80
+  default_pty_rows: 24
+
+  # Aggregator tunables.
+  output_chunk_size: 4096        # bytes
+  output_flush_interval_ms: 200  # milliseconds
+
+logging:
+  # One of debug, info, warn, error (case-insensitive).
+  level: "info"
+  # Empty -> stdout. Set to a path for file logging.
+  file: ""
+
+paths:
+  # Root for registry.json, sessions.json, per-session scratch.
+  data_dir: "~/.local/share/nightme"
+  registry_file: "registry.json"
+  sessions_file: "sessions.json"

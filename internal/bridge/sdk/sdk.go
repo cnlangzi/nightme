@@ -1,50 +1,58 @@
-// Package sdk hosts vendor-specific SDK adapters (e.g. the Claude
-// Code Agent SDK). The package exists in v0.1 only to lay down the
-// agent.Agent surface and reserve the directory; full implementation
-// arrives in v0.2 — see docs/feat/F-21-agent-modes.md §5.2 and
-// PLAN.md §3.3 (commit 18).
+// Package sdk contains adapters for vendor SDKs that expose a native
+// structured agent session. Claude Code's official Agent SDK currently ships
+// only Python and TypeScript bindings, so the Go adapter reports a precise
+// fallback error until an official Go binding is available.
 package sdk
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os/exec"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// ErrNotImplemented is the v0.1 sentinel returned by every Start
-// call in this package.
-var ErrNotImplemented = errors.New("bridge/sdk: not implemented in v0.1, scheduled for v0.2")
+// ErrNotImplemented indicates that the vendor SDK is unavailable for this
+// language. Callers should use the PTY adapter for the same CLI instead.
+var ErrNotImplemented = errors.New("bridge/sdk: Claude Code Agent SDK has no official Go binding; use PTY")
 
-// Agent is the SDK backend descriptor. It implements agent.Agent
-// but its Start method always returns ErrNotImplemented in v0.1.
+// Agent describes an SDK-backed vendor agent. command is retained for
+// capability detection and for the eventual CLI fallback configuration.
 type Agent struct {
-	name string
-	SDK  string // SDK identifier (e.g. "claude-code") — reserved for v0.2.
+	name    string
+	command string
+	args    []string
 }
 
-// New constructs an SDK-backed agent descriptor.
-func New(name, sdkID string) *Agent {
-	return &Agent{name: name, SDK: sdkID}
+// New constructs an SDK agent. The optional args preserve compatibility with
+// the v0.1 two-argument constructor while allowing registry entries to retain
+// vendor-specific launch arguments.
+func New(name, command string, args ...[]string) *Agent {
+	a := &Agent{name: name, command: command}
+	if len(args) > 0 {
+		a.args = append([]string(nil), args[0]...)
+	}
+	return a
 }
 
-// Name returns the registry key.
 func (a *Agent) Name() string { return a.name }
 
-// Mode reports ModeSDK so the SessionManager routes through the SDK
-// backend (when implemented).
 func (a *Agent) Mode() agent.Mode { return agent.ModeSDK }
 
-// Detect is a no-op for SDK adapters — the SDK is a Go library, not
-// an external binary, so there is nothing to resolve on PATH.
-func (a *Agent) Detect() error { return nil }
-
-// Start is unimplemented in v0.1. Future work: construct the
-// vendor's SDK client (e.g. claudecode.NewClient), open a session,
-// and wrap it in an AgentSession.
-func (a *Agent) Start(context.Context, agent.StartConfig) (agent.AgentSession, error) {
-	return nil, ErrNotImplemented
+// Detect verifies that the configured CLI is present. The SDK itself is not a
+// Go package, but checking the CLI gives the user a useful configuration error
+// before Start returns the SDK availability sentinel.
+func (a *Agent) Detect() error {
+	if a.command == "" {
+		return errors.New("bridge/sdk: empty Claude Code command")
+	}
+	_, err := exec.LookPath(a.command)
+	return err
 }
 
-// Compile-time guarantee that *Agent satisfies agent.Agent.
+func (a *Agent) Start(context.Context, agent.StartConfig) (agent.AgentSession, error) {
+	return nil, fmt.Errorf("%w: configured command %q", ErrNotImplemented, a.command)
+}
+
 var _ agent.Agent = (*Agent)(nil)

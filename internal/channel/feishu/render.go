@@ -164,5 +164,3 @@ func cardOption(content string) string {
 	}
 	return ""
 }
-
-var _ = cardOption

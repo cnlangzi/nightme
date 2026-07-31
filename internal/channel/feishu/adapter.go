@@ -41,10 +41,12 @@ type Adapter struct {
 	cancel     context.CancelFunc
 
 	mu             sync.RWMutex
+	publishMu      sync.Mutex
 	done           chan struct{}
 	started        bool
 	stopped        bool
 	incomingClosed bool
+	stopDone       chan struct{}
 	wsDone         chan struct{}
 
 	// These hooks have production defaults and are intentionally kept as
@@ -154,13 +156,24 @@ func (a *Adapter) Stop(ctx context.Context) error {
 
 	a.mu.Lock()
 	if a.stopped {
+		stopDone := a.stopDone
 		a.mu.Unlock()
+		if stopDone != nil {
+			select {
+			case <-stopDone:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
 		return nil
 	}
 	a.stopped = true
-	if a.done != nil {
-		close(a.done)
+	if a.done == nil {
+		a.done = make(chan struct{})
 	}
+	close(a.done)
+	stopDone := make(chan struct{})
+	a.stopDone = stopDone
 	cancel := a.cancel
 	closeWS := a.wsClose
 	if closeWS == nil && a.client != nil {
@@ -168,6 +181,7 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	}
 	wsDone := a.wsDone
 	a.mu.Unlock()
+	defer close(stopDone)
 
 	if cancel != nil {
 		cancel()
@@ -176,6 +190,7 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		closeWS()
 	}
 
+	var waitErr error
 	// Wait only when the SDK loop is already on its way out. The v3 SDK's
 	// Start method intentionally blocks after Close, so waiting unconditionally
 	// here would make a graceful daemon shutdown hang forever.
@@ -186,21 +201,24 @@ func (a *Adapter) Stop(ctx context.Context) error {
 			select {
 			case <-wsDone:
 			case <-ctx.Done():
-				return ctx.Err()
+				waitErr = ctx.Err()
 			default:
 			}
 		}
 	}
 
-	// A handler that was already publishing holds RLock. Taking the write
-	// lock here makes closing incoming safe even when Stop races an event.
+	// Stop publishing before closing the channel. A handler can be blocked on
+	// a full incoming buffer; closing done above makes it leave that send.
+	a.publishMu.Lock()
+	a.publishMu.Unlock()
+
 	a.mu.Lock()
 	if !a.incomingClosed && a.incoming != nil {
 		close(a.incoming)
 		a.incomingClosed = true
 	}
 	a.mu.Unlock()
-	return nil
+	return waitErr
 }
 
 // Incoming returns the adapter's normalized message stream.
@@ -304,18 +322,31 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 		ctx = context.Background()
 	}
 
+	// Block here (outside the RW lock) so concurrent Stop closes the
+	// done channel and unblocks this send without contending for the
+	// same lock Stop acquires to close `incoming`.
 	a.mu.RLock()
 	if a.stopped || a.incoming == nil {
 		a.mu.RUnlock()
 		return nil
 	}
 	done := a.done
+	in := a.incoming
+	a.mu.RUnlock()
+
+	a.publishMu.Lock()
+	defer a.publishMu.Unlock()
+	a.mu.RLock()
+	if a.stopped || a.incoming == nil {
+		a.mu.RUnlock()
+		return nil
+	}
+	a.mu.RUnlock()
 	select {
-	case a.incoming <- msg:
+	case in <- msg:
 	case <-ctx.Done():
 	case <-done:
 	}
-	a.mu.RUnlock()
 	return nil
 }
 
@@ -351,12 +382,9 @@ func messageText(content string) string {
 	if err := json.Unmarshal([]byte(content), &payload); err == nil && payload.Text != "" {
 		return payload.Text
 	}
-	var plain string
-	if err := json.Unmarshal([]byte(content), &plain); err == nil {
-		return plain
-	}
-	// Unsupported or malformed message content is still useful to the
-	// daemon in v0.1, so preserve it instead of silently dropping it.
+	// The EventMessage.Content field is a JSON string; if it is not the
+	// structured `{text: ...}` shape (e.g. image / post), preserve the
+	// raw text so downstream consumers can decide.
 	return content
 }
 
@@ -433,4 +461,3 @@ func splitLongMessage(text string, maxBytes int) []string {
 }
 
 var _ channel.Channel = (*Adapter)(nil)
-var _ = larkim.MsgTypeText

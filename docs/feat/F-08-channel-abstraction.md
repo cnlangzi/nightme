@@ -3,7 +3,7 @@
 > **Status**: designed (v0.1)
 > **Milestone**: M2 (Feishu implementation)
 > **Depends on**: (none — interface)
-> **Related docs**: `architecture.md` §3.1
+> **Related docs**: SPEC.md §4.3 (Channel interface)
 
 ## 1. Description
 

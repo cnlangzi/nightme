@@ -1,9 +1,9 @@
-# nightme — Implementation Brief
+# nightme — Implementation Plan (PLAN)
 
 > **状态**：v1.0
 > **作者**：🦞 虾哥（PM/Architect）
 > **日期**：2026-07-31
-> **依赖**：`SPEC.md`、`architecture.md`、`cli-bridge.md`、`FEATURES.md`
+> **依赖**：`SPEC.md`、`FEATURES.md`、`feat/F-XX-*.md`
 
 本文档回答：**怎么把 nightme 从 0 写到能跑通的最小闭环，分几个里程碑，第一个 PR 怎么拆 commit**。
 
@@ -13,7 +13,7 @@
 
 ```
 M0 (本轮对话)  ──  docs only, no code yet
-  SPEC + FEATURES + architecture + cli-bridge + IMPLEMENTATION (本文)
+  SPEC + FEATURES + feat/* + PLAN (本文)
   验收: 4 个 md 文件 commit，Devin review 通过
 
 M1 (下一个 session)  ──  "Local PTY Echo"（本地能跑，无 Channel）
@@ -69,9 +69,8 @@ nightme/
 ├── docs/
 │   ├── SPEC.md                 (v1.0)
 │   ├── FEATURES.md             (v1.0)
-│   ├── architecture.md         (v1.0)
-│   ├── cli-bridge.md           (v1.0)
-│   └── IMPLEMENTATION.md       (v1.0, 本文件)
+│   ├── PLAN.md                 (v1.0, 本文件)
+│   └── feat/                   (19 个 F-XX 详细设计)
 ├── configs/
 │   └── nightme.example.yaml
 ├── cmd/
@@ -338,10 +337,10 @@ commit 18: docs: e2e manual test guide
 
 **当前会话（M0）即将结束**。已交付：
 - ✅ `docs/SPEC.md` v1.0
-- ✅ `docs/architecture.md` v1.0
-- ✅ `docs/cli-bridge.md` v1.0
+- ✅ `docs/SPEC.md` v1.0（含 architecture）
 - ✅ `docs/FEATURES.md` v1.0
-- ✅ `docs/IMPLEMENTATION.md` v1.0（本文）
+- ✅ `docs/feat/F-01..F-19` v1.0
+- ✅ `docs/PLAN.md` v1.0（本文）
 
 **等 Devin 确认后开始 M1**。M1 的触发词：
 - "开始 M1" / "go" / "开干"

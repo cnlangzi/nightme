@@ -3,7 +3,7 @@
 > **Status**: designed (v0.1)
 > **Milestone**: M1 (used by M2)
 > **Depends on**: F-01 (Session)
-> **Related docs**: `architecture.md` §4.3, §6
+> **Related docs**: SPEC.md §4.4 (lifecycle), §4.6 (registry)
 
 ## 1. Description
 

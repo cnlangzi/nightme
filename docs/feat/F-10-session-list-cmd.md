@@ -3,7 +3,7 @@
 > **Status**: designed (v0.1)
 > **Milestone**: M3 (CLI tools)
 > **Depends on**: F-05 (Registry)
-> **Related docs**: `IMPLEMENTATION.md` §2.4
+> **Related docs**: [PLAN.md](../PLAN.md) §2.4
 
 ## 1. Description
 

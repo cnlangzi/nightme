@@ -7,6 +7,7 @@
 > **更新日志**：
 > - v1.0 — 锁定 6 项关键决策（Q1-Q6），明确 Chat↔Session 1:1 绑定模型
 > - v1.0r — 重命名 PRD → SPEC，功能列表抽取到 FEATURES.md
+> - v1.0s — 合并 architecture.md 入 SPEC.md，cli-bridge.md 转入 feat/，IMPLEMENTATION.md → PLAN.md
 
 ---
 
@@ -93,79 +94,404 @@
 
 ---
 
-## 4. 功能需求
+## 4. Architecture
 
-完整功能列表（F-1 ~ F-18）见 [`FEATURES.md`](./FEATURES.md)。
+### 4.1 模块概览
 
-> 本 SPEC 只保留高层产品定位 + 技术栈 + 决策；逐项功能描述 + 验收标准独立维护，便于后续按需追加。
+```
+nightme/
+├── cmd/nightme/main.go              # 入口
+├── internal/
+│   ├── config/                       # YAML 解析 + 默认值
+│   ├── channel/                      # Channel interface + 实现
+│   │   ├── channel.go                #   interface 定义
+│   │   └── feishu/                   #   飞书 adapter（lark-oapi）
+│   ├── agent/                        # Agent interface + 实现
+│   │   ├── agent.go                  #   interface 定义
+│   │   └── claude/                   #   Claude Code adapter
+│   ├── session/                      # Session 生命周期 + chat↔workspace 绑定
+│   │   ├── manager.go                #   SessionManager（registry）
+│   │   ├── session.go                #   Session 数据结构
+│   │   └── router.go                 #   chat_id → session 路由
+│   ├── pty/                          # PTY bridge 封装
+│   │   ├── bridge.go                 #   aymanbagabas/go-pty 封装
+│   │   └── aggregator.go             #   200ms / 4KB 聚合
+│   ├── registry/                     # 进程注册表
+│   │   └── registry.go               #   JSON 持久化
+│   └── ipc/                          # 本地 HTTP API（CLI 管理命令用）
+│       └── server.go
+├── docs/
+│   ├── SPEC.md                       # 本文件
+│   ├── FEATURES.md
+│   ├── PLAN.md
+│   └── feat/                         # 18 个 F-XX 详细设计
+├── go.mod
+├── go.sum
+├── README.md
+└── configs/
+    └── nightme.example.yaml
+```
+
+### 4.2 核心数据流
+
+**用户发送消息（Channel → PTY）**：
+```
+飞书消息事件
+  ↓ lark-oapi websocket
+[Channel adapter: feishu]
+  ↓ (chat_id, text)
+[Router.Lookup(chat_id)] → session_id (或 "new" 触发器)
+  ↓
+[SessionManager.Get(session_id)] → Session
+  ↓
+[Bridge.Write(text)] → PTY stdin → Claude Code
+```
+
+**CLI 输出（PTY → Channel）**：
+```
+Claude Code stdout/stderr
+  ↓
+[Bridge.Read()] (字节流)
+  ↓ ANSI 处理（详见 feat/F-19-cli-bridge.md）
+[Aggregator] (200ms / 4KB)
+  ↓
+[Channel adapter: feishu.SendLongMessage(chat_id, text)]
+  ↓
+用户飞书收到消息
+```
+
+**新 Chat 触发 Session 创建**：
+```
+用户在 DM 首条消息: "workspace: /home/devin/code/bailing"
+  ↓
+[Router.Lookup] → 命中 "new"（该 chat_id 没有 session）
+  ↓
+[SessionManager.Create(chat_id, workspace, agent)]
+  - 验证 workspace 路径存在
+  - 选择 agent（默认 claude）
+  - spawn PTY: exec.CommandContext("claude")，cmd.Dir = workspace
+  - 注册 pid → session_id 到 registry
+  - 写 chat_id → session_id 到 session map（JSON）
+  ↓
+[Bridge.Read goroutine] 启动（持续推 PTY 输出到该 chat）
+  ↓
+[Channel.SendMessage(chat_id, "Session started in {workspace}")]
+```
+
+### 4.3 接口契约
+
+**`Channel` interface** (`internal/channel/channel.go`)：
+```go
+type Message struct {
+    ChatID   string
+    Text     string
+    SenderID string
+    Time     time.Time
+}
+
+type Channel interface {
+    Start(ctx context.Context) error
+    Stop(ctx context.Context) error
+    SendMessage(ctx context.Context, chatID string, text string) error
+    SendLongMessage(ctx context.Context, chatID string, text string) error
+    Incoming() <-chan Message
+}
+```
+
+**`Agent` interface** (`internal/agent/agent.go`)：
+```go
+type Agent interface {
+    Name() string
+    Command() string
+    Args() []string
+    Env() []string
+    Detect() error
+}
+```
+
+**`Session` 数据结构** (`internal/session/session.go`)：
+```go
+type Session struct {
+    ID        string            // uuid
+    ChatID    string            // IM chat_id
+    Workspace string            // 绝对路径
+    Agent     string            // agent.Name()
+    PID       int               // Claude Code 进程 pid
+    StartedAt time.Time
+    LastInput time.Time         // 用于 idle 检测（v0.2）
+
+    bridge    pty.Bridge        // PTY bridge 句柄
+    cancel    context.CancelFunc
+}
+```
+
+**`Bridge` interface** (`internal/pty/bridge.go`)：
+```go
+type Bridge interface {
+    Read(p []byte) (n int, err error)
+    Write(p []byte) (n int, err error)
+    Setsize(cols, rows int) error
+    PID() int
+    Close() error
+}
+```
+
+详细设计见各 `feat/F-XX-*.md`。
+
+### 4.4 Session 生命周期
+
+```
+                    workspace: <path>
+    [无 session] ────────────────────────► [pending] (验证 workspace)
+                                              │
+                                              │  workspace 存在 + agent 可执行
+                                              ▼
+                                          [running] (PTY alive)
+                                              │
+                                              │  CLI exit / PTY 关闭 / 用户 kill
+                                              ▼
+                                          [exited] (保留在 registry)
+```
+
+**关键事件处理**：
+
+| 事件 | 处理 |
+|------|------|
+| CLI 正常 exit (code 0) | session 进入 `exited`，通知用户 "session ended" |
+| CLI 异常 exit (code != 0) | 同上，附加 exit code |
+| PTY read 返回 EOF | session 进入 `exited` |
+| 用户发送 `/kill` (v0.2) | bridge.Close() → SIGTERM → 等 5s → SIGKILL |
+| nightme SIGTERM | 默认不 kill session CLI（保留后台跑） |
+| nightme 重启 | 读 session map，重新 attach 到已有 PTY（如进程还活着） |
+
+详细策略见 [`feat/F-06-process-cleanup.md`](./feat/F-06-process-cleanup.md)。
+
+### 4.5 并发模型
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    main goroutine                        │
+│  - signal handling (SIGTERM/SIGINT)                      │
+│  - 启动 Channel.Start()                                  │
+│  - 启动 SessionManager                                   │
+│  - 启动 IPC server                                       │
+└─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│  per-session goroutines (fan-out)                        │
+│                                                          │
+│  per session:                                            │
+│    readPump:   bridge.Read() → aggregator → outputStream │
+│    writePump:  inputStream chan → bridge.Write()         │
+│    watch:      <-session.done → cleanup()                │
+└─────────────────────────────────────────────────────────┘
+
+Channel goroutines:
+  feishu.websocketLoop  → chan Message → router
+  feishu.sendLoop       ← chan sendReq
+```
+
+**同步原语**：
+- `SessionManager.sessions`: `sync.RWMutex` 保护的 `map[string]*Session`
+- 每个 Session 内部：`chan []byte` 用于 input/output stream，buffered 64KB
+- 无跨 session 共享状态 → 不需要全局锁
+
+### 4.6 进程注册与归属
+
+**注册文件**：`~/.local/share/nightme/registry.json`（0600 权限）
+
+```json
+{
+  "version": 1,
+  "sessions": {
+    "s_01HF8...": {
+      "chat_id": "oc_xxxxx",
+      "workspace": "/home/devin/code/bailing",
+      "agent": "claude",
+      "pid": 12345,
+      "ppid": 6789,
+      "started_at": "2026-07-31T10:30:00+08:00"
+    }
+  }
+}
+```
+
+**归属判定**：
+- nightme 启动的 PTY 子进程**一定**满足：
+  - `pid > 0` 且已写入 registry
+  - `ppid == os.Getpid()`（双保险）
+- 启动后立即 `cmd.Start()` 同步返回，记录 PID → fsync 写 registry
+- 中途 PTY 死亡 → registry 删除记录（不保留 zombie）
+
+**清理策略**：
+
+| 触发 | 行为 |
+|------|------|
+| nightme SIGTERM | 默认：**不 kill**，session 标记 "detached" |
+| nightme SIGTERM + `--cleanup` | kill 所有 session CLI（SIGTERM → 5s → SIGKILL） |
+| nightme crash | 子进程变孤儿，依赖 OS 进程组清理 |
+
+**默认 "不 kill" 是有意设计**：用户手机断网、nightme 重启，CLI 进程继续工作。
+
+详细 schema 见 [`feat/F-05-process-registry.md`](./feat/F-05-process-registry.md)。
+
+### 4.7 配置
+
+`~/.config/nightme/config.yaml`：
+
+```yaml
+feishu:
+  app_id: "cli_xxxx"
+  app_secret: "***"
+  verification_token: "tok_xxxx"   # 可选
+  encrypt_key: "enc_xxxx"          # 可选
+
+agent:
+  default: "claude"
+  claude:
+    command: "claude"
+    # args: []
+    # env: {}
+
+session:
+  default_pty_cols: 120
+  default_pty_rows: 40
+  output_chunk_size: 4096
+  output_flush_interval_ms: 200
+
+logging:
+  level: "info"
+  file: "~/.local/share/nightme/nightme.log"
+
+paths:
+  data_dir: "~/.local/share/nightme"
+  registry_file: "~/.local/share/nightme/registry.json"
+  sessions_file: "~/.local/share/nightme/sessions.json"
+```
+
+**环境变量覆盖**：所有配置项支持 `NIGHTME_<SECTION>_<KEY>` 大写覆写。
+
+### 4.8 IPC（本地管理）
+
+`nightme list` / `nightme kill <sid>` 等命令通过 **本地 HTTP** 跟主进程通信：
+
+```
+$ nightme list
+curl http://127.0.0.1:7823/v1/sessions
+```
+
+监听 `127.0.0.1:7823`，仅本机访问，无鉴权（MVP 单用户）。详细见 [`feat/F-10-session-list-cmd.md`](./feat/F-10-session-list-cmd.md)。
+
+### 4.9 失败模式 & 错误处理
+
+| 场景 | 行为 |
+|------|------|
+| workspace 路径不存在 | 拒绝创建 session，提示用户 |
+| `claude` 不在 PATH | 创建失败，提示 "claude binary not found" |
+| PTY 启动后立刻 exit | 注册后立刻取消，registry 删除记录 |
+| 飞书 WebSocket 断连 | SDK 自动重连（指数退避） |
+| 飞书发消息频率超限 | Channel adapter 内部 token bucket 限速 |
+| 用户发消息但 chat 无 session | 提示 "please start with 'workspace: <path>'" |
+| Session CLI 卡死 | v0.1 不处理；v0.2 加 idle timeout |
+| nightme 内存爆 | 依赖 Go GC；v0.2 加 resource limit |
+
+### 4.10 文件权限与安全
+
+- **config + log + registry**：`chmod 600`
+- **PTY 子进程**：默认 inherit 父进程环境变量，**不** 注入额外 token
+- **网络出站**：仅连飞书 WebSocket + 长连接 API endpoint
+- **本地 IPC**：`127.0.0.1` only，**不**监听 `0.0.0.0`
+- **日志脱敏**：app_secret / API key 一律 redact
+
+### 4.11 测试策略
+
+| 层 | 测试方式 |
+|----|----------|
+| Channel interface | mock 实现，单测 Router 行为 |
+| PTY bridge | 集成测试：spawn `/bin/echo hello` 验证 Read |
+| Session lifecycle | table-driven：Create / Send / Exit / Cleanup |
+| Process registry | tmpdir 下跑，读 JSON 验证 schema |
+| 飞书 adapter | mock 飞书 SDK（接口化后），不依赖真实 app_id |
+| E2E | 手动：飞书消息 → nightme → 本地 claude → 飞书回包 |
+
+**E2E 自动化 v0.1 不做**：依赖真实飞书 app + claude CLI。
+
+### 4.12 与现有项目的关系
+
+| 现有项目 | 关系 |
+|----------|------|
+| pangolin (~/code/pangolin) | **不引用**，独立项目 |
+| OpenClaw | **不引用**，PR/issue 流程可以用 gtw plugin |
+| chrome-use | 无关系 |
+| gfwproxy | 无关系 |
+
+nightme 是**全新独立项目**，不依赖任何现有代码。
 
 ---
 
-## 5. 非功能需求 (NFR)
+## 5. 功能需求
+
+完整功能列表（F-1 ~ F-19）见 [`FEATURES.md`](./FEATURES.md)。
+
+详细设计见 [`feat/`](./feat/) 目录下的 19 份独立设计文档。
+
+---
+
+## 6. 非功能需求 (NFR)
 
 | ID | 指标 |
 |----|------|
 | N-1 | **延迟**：用户发消息 → CLI 收到输入 < 200ms |
-| N-2 | **吞吐**：CLI 输出回推到 Channel，端到端延迟 < 1s（普通文本块） |
+| N-2 | **吞吐**：CLI 输出回推到 Channel，端到端延迟 < 1s |
 | N-3 | **资源占用**：单个 session PTY 空闲时 CPU ≈ 0；内存 ≈ 5-10MB |
-| N-4 | **崩溃隔离**：单个 session PTY 死亡不影响其他 session，也不影响 nightme 主进程 |
-| N-5 | **可观测**：每个 session 有结构化日志（sid / agent / ws / 输入 / 输出大小 / 错误） |
-| N-6 | **可移植**：单二进制，macOS / Linux 双平台，**不依赖** systemd / launchd |
+| N-4 | **崩溃隔离**：单个 session PTY 死亡不影响其他 session |
+| N-5 | **可观测**：每个 session 有结构化日志 |
+| N-6 | **可移植**：单二进制，macOS / Linux 双平台 |
 
 ---
 
-## 6. 技术栈（已锁定）
+## 7. 技术栈（已锁定）
 
 | 层 | 选型 | 备选 | 理由 |
 |----|------|------|------|
-| 主语言 | **Go 1.22+** | Rust / Node.js | 单二进制、creack/pty 成熟、跨平台编译简单 |
-| PTY | **`github.com/aymanbagabas/go-pty`** | creack/pty | API 干净，跨平台抽象好，charm 生态背书 |
+| 主语言 | **Go 1.22+** | Rust / Node.js | 单二进制、跨平台编译简单 |
+| PTY | **`github.com/aymanbagabas/go-pty`** | creack/pty | API 干净，跨平台抽象好 |
 | Channel | **飞书官方 Go SDK**（lark-oapi）| 自实现 webhook | 文档全，长连接稳定 |
 | HTTP API | **net/http + chi** | gin | minimal |
-| 持久化 | **JSON 文件**（registry + session map）| SQLite | MVP 不需要 DB |
+| 持久化 | **JSON 文件** | SQLite | MVP 不需要 DB |
 | 配置 | **YAML** | env | 直观 |
-| 日志 | **`log/slog`**（标准库）| zap / zerolog | stdlib 够用，避免多余依赖 |
-
-**为什么不选 Node.js**：node-pty 在 macOS 上偶发崩溃 + native rebuild 麻烦。
-**为什么不选 Rust**：std::process + portable-pty 写起来 boilerplate 多，minimal 原则下不值。
-**为什么不选 creack/pty**：aymanbagabas API 更现代、resize 简单、跨平台边界更清晰。
+| 日志 | **`log/slog`**（标准库）| zap / zerolog | stdlib 够用 |
 
 ---
 
-## 7. 已锁定的关键决策
+## 8. 已锁定的关键决策
 
 | # | 决策 | 结论 |
 |---|------|------|
 | **Q1** | 技术栈 | **Go 1.22+** |
-| **Q2** | MVP Channel 范围 | **只飞书**，通过 `Channel` interface 抽象，预留扩展位 |
+| **Q2** | MVP Channel 范围 | **只飞书**，通过 `Channel` interface 抽象 |
 | **Q3** | 第一版 Agent | **只 Claude Code**，通过 `Agent` interface 抽象 |
-| **Q4** | Session 路由模型 | **Chat ↔ Session 1:1**（A 方案）。每个 IM Chat 锁一个项目，不支持 `/attach` 切换；切项目 = 新开 DM |
-| **Q5** | CLI 进程 spawn 方式 | **自己 PTY**，用 `aymanbagabas/go-pty`，不依赖 tmux/zellij |
-| **Q6** | 鉴权 | **单用户独占假设**，不需要设备配对。飞书 appSecret 即唯一凭证 |
-
-**Q4 关键论证**：Devin 原话："如果在一个 Session 一直切换的话，我们会搞不清楚他的上下文"。Chat↔Session 1:1 把"项目上下文"固化到 IM chat 本身，飞书侧 DM 列表天然成为项目列表，零认知负担。
+| **Q4** | Session 路由模型 | **Chat ↔ Session 1:1** |
+| **Q5** | CLI 进程 spawn 方式 | **自己 PTY**（aymanbagabas/go-pty）|
+| **Q6** | 鉴权 | **单用户独占假设**，不需要设备配对 |
 
 ---
 
-## 8. 范围外（明确不做）
+## 9. 范围外（明确不做）
 
-- ❌ **不做 LLM 编排**：不调任何 LLM，不做 task decomposition
+- ❌ **不做 LLM 编排**
 - ❌ **不做 code review / agent quality scoring**
-- ❌ **不接管用户已有的 shell / terminal multiplexer**：用户可以同时开着自己的 tmux，nightme 不动它
-- ❌ **不做 multi-user RBAC**：单用户场景
-- ❌ **不做云端 SaaS**：nightme 始终跑在用户电脑上，**没有云端组件**
+- ❌ **不接管用户已有的 shell / terminal multiplexer**
+- ❌ **不做 multi-user RBAC**
+- ❌ **不做云端 SaaS**
 - ❌ **不写底层 AI Coding Agent 的 prompt / system message**
 
 ---
 
-## 9. 下一步
+## 10. 下一步
 
 SPEC 已锁定。下一步：
 
-1. ✅ 本 SPEC 冻结
-2. ⏭ 写 `docs/architecture.md`（PTY 桥、Session lifecycle、process registry schema、Channel/Agent interface）
-3. ⏭ 写 `docs/cli-bridge.md`（byte pipe 协议 + ANSI 处理策略 + 重连/崩溃恢复）
-4. ⏭ 出 **Implementation Brief**（milestone 拆分 + 第一个 PR 的 commit 计划）
-5. ⏭ 动代码（先 docs 后 code 原则）
-
-预期 Implementation Brief 完成时间：本轮对话内。
+1. ✅ 本 SPEC 冻结（含 architecture）
+2. ⏭ 按 [`PLAN.md`](./PLAN.md) 实施：M1 → M2 → M3
+3. ⏭ 每个 F-XX 详细设计按需迭代

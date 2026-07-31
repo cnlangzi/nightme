@@ -3,7 +3,7 @@
 > **Status**: designed (v0.1)
 > **Milestone**: M2 (Feishu integration)
 > **Depends on**: F-04 (PTY), F-07 (Workspace binding), F-08 (Channel), F-09 (Agent)
-> **Related docs**: `architecture.md` §2.3, §4
+> **Related docs**: SPEC.md §4.2 (数据流), §4.4 (lifecycle)
 
 ## 1. Description
 
@@ -93,4 +93,4 @@ Channel.SendMessage(chatID, body)  // 把第一条输入送进 PTY
 
 - 是否支持 `~` 展开（`workspace: ~/code/bailing`）？倾向：是，但先 expand 再 stat
 - 是否允许 workspace = `file://...`？倾向 v0.1 不支持，留给后续
-- 首条消息 body 是否作为第一条 stdin 输入？倾向：是（参考 cli-bridge.md §2.1）
+- 首条消息 body 是否作为第一条 stdin 输入？倾向：是（参考 [F-19](./F-19-cli-bridge.md) §2.1）

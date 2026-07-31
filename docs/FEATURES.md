@@ -3,7 +3,7 @@
 > **状态**：v1.0
 > **作者**：🦞 虾哥（PM/Architect）
 > **日期**：2026-07-31
-> **依赖**：`SPEC.md`、`architecture.md`、`cli-bridge.md`
+> **依赖**：`SPEC.md`
 > **详细设计**：`feat/F-XX-*.md`（每个 feature 一份独立设计文档）
 
 本文档是 nightme 的**功能索引**。每项功能的设计细节（接口、实现、edge cases、测试计划）见 [`feat/`](./feat/) 目录下的独立文档。
@@ -24,6 +24,7 @@
 | F-08 | Channel 抽象（interface + 飞书实现）| [feat/F-08-channel-abstraction.md](./feat/F-08-channel-abstraction.md) | M2 |
 | F-09 | Agent 抽象（interface + Claude 实现）| [feat/F-09-agent-abstraction.md](./feat/F-09-agent-abstraction.md) | M1 |
 | F-10 | Session 列表命令（`nightme list` / `kill`）| [feat/F-10-session-list-cmd.md](./feat/F-10-session-list-cmd.md) | M3 |
+| F-19 | CLI Bridge Protocol（PTY↔Channel byte pipe）| [feat/F-19-cli-bridge.md](./feat/F-19-cli-bridge.md) | M1 |
 
 ## 2. 后续功能（v0.2+）
 
@@ -37,6 +38,8 @@
 | F-16 | Web TTY UI（xterm.js + WebSocket）| [feat/F-16-web-tty-ui.md](./feat/F-16-web-tty-ui.md) | v0.2 |
 | F-17 | 健康检查 / 心跳 | [feat/F-17-health-check.md](./feat/F-17-health-check.md) | v0.2 |
 | F-18 | Token / API key 注入 | [feat/F-18-secret-injection.md](./feat/F-18-secret-injection.md) | v0.2 |
+
+> **F-19 编号说明**：cli-bridge 在早期版本是独立顶层文档；按"feature 都在 feat/"原则，作为基础设施类 feature 加入，编号 19 跟在 MVP 功能后面。v0.2+ 功能保持原编号。
 
 > **注意**：v0.2+ 功能的设计文档目前是 stub，仅记录设计方向和 open questions。详细设计在 v0.2 设计阶段补全。
 
@@ -61,6 +64,7 @@
 | F-08 | ✅ | ✅ | ⏳ | ⏳ | M2 |
 | F-09 | ✅ | ✅ | ⏳ | ⏳ | M2 |
 | F-10 | ✅ | ✅ | ⏳ | ⏳ | M3 |
+| F-19 | ✅ | ✅ | ⏳ | ⏳ | M2 |
 
 **全部 ✅ 后**，nightme v1.0.0 可发布。
 

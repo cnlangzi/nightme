@@ -3,7 +3,7 @@
 > **Status**: designed (v0.1)
 > **Milestone**: M1 (used by M2)
 > **Depends on**: (none — interface)
-> **Related docs**: `architecture.md` §3.2
+> **Related docs**: SPEC.md §4.3 (Agent interface)
 
 ## 1. Description
 

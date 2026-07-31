@@ -1,9 +1,10 @@
-# nightme — CLI Bridge Protocol
+# F-19: CLI Bridge Protocol (PTY ↔ Channel Byte Pipe)
 
-> **状态**：v1.0
-> **作者**：🦞 虾哥（PM/Architect）
-> **日期**：2026-07-31
-> **依赖**：`SPEC.md`、`architecture.md`、`FEATURES.md`
+> **Status**: designed (v0.1)
+> **Milestone**: M1 (built first, used by M2)
+> **Depends on**: F-04 (PTY), F-08 (Channel)
+> **Used by**: F-02 (input), F-03 (output), F-06 (cleanup), F-18 (password filter)
+> **Related docs**: SPEC.md §4 Architecture, FEATURES.md
 
 本文档回答：**nightme 怎么把 Claude Code 的 TTY 字节流搬到飞书、再把飞书的字节流搬回 TTY**。
 
@@ -358,6 +359,6 @@ func TestAggregator_FlushOnSize(t *testing.T) {
 
 ## 9. 下一步
 
-1. ✅ 本 cli-bridge.md 完成
+1. ✅ 本 F-19 完成
 2. ⏭ 出 **Implementation Brief**（milestone + 第一个 PR commit 计划）
 3. ⏭ 动代码：`go mod init` + 目录骨架 + 第一段能跑的代码（local PTY echo）

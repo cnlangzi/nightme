@@ -3,7 +3,7 @@
 > **Status**: designed (v0.1)
 > **Milestone**: M1 (used by M2)
 > **Depends on**: (none — foundation)
-> **Related docs**: `architecture.md` §3.4
+> **Related docs**: SPEC.md §4.3 (Bridge interface)
 
 ## 1. Description
 

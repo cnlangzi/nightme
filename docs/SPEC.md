@@ -46,7 +46,7 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 | 组件 | 职责 |
 |------|------|
 | **Channel Adapter** | 把 IM 协议（飞书 WebSocket / WhatsApp webhook 等）抽象成统一接口；把 IM 消息收上来、把 nightme 输出推回去 |
-| **Gateway** | Slash command 路由器：判断每条消息是系统命令还是普通文本；系统命令命中表后执行 / 不命中报错，普通文本透传给 SessionManager |
+| **Gateway** | Slash command 路由器：判断每条消息是系统命令还是普通文本；系统命令命中表后执行 / 不命中透传给 SessionManager，普通文本也透传给 SessionManager |
 | **Session Manager** | 维护 chat_id ↔ session 的绑定；管理 session 的创建、查询、销毁；**每个 session 绑定一个 workspace**（session.Workspace 字段，session 创建时确定，生命周期内不变） |
 | **PTY Bridge** | 在 pseudo-terminal 中 spawn AI Coding CLI；提供读 / 写 / resize 三个能力；一个 session 一个 PTY，cwd = session.Workspace |
 | **Process Registry** | 记录 nightme 启动的所有进程（pid + chat_id + workspace + 启动时间）；用于查询、重启恢复、清理 |

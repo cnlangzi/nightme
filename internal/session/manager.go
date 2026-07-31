@@ -178,13 +178,13 @@ func (m *MemoryManager) Create(ctx context.Context, req CreateRequest) (*Session
 
 	now := m.now()
 	sess := &Session{
-		ID:           m.newID(),
-		ChatID:       req.ChatID,
-		Workspace:    req.Workspace,
-		Agent:        req.Agent,
-		Args:         append([]string(nil), req.Args...),
-		StartedAt:    now,
-		LastRunAt:    now,
+		ID:        m.newID(),
+		ChatID:    req.ChatID,
+		Workspace: req.Workspace,
+		Agent:     req.Agent,
+		Args:      append([]string(nil), req.Args...),
+		StartedAt: now,
+		LastRunAt: now,
 	}
 	sess.setLifecycle(StatusRunning, agentSession, 0, nil)
 	m.sessions[sess.ID] = sess
@@ -291,9 +291,39 @@ func (m *MemoryManager) Kill(sid string) error {
 	return nil
 }
 
+// MarkDetached releases the manager's live handle for sid without closing the
+// underlying agent. This is the daemon shutdown policy: the CLI may continue
+// running after nightme exits and the registry records the detached state.
+// Already-exited sessions are left unchanged.
+func (m *MemoryManager) MarkDetached(sid string) error {
+	m.mu.RLock()
+	s, ok := m.sessions[sid]
+	m.mu.RUnlock()
+	if !ok {
+		return ErrSessionNotFound
+	}
+
+	s.mu.Lock()
+	if s.status == StatusExited {
+		s.mu.Unlock()
+		return nil
+	}
+	pid := s.PID
+	s.status = StatusDetached
+	s.agentSession = nil
+	cancel := s.cancel
+	s.cancel = nil
+	s.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	return m.upsertEntry(s, registry.StatusDetached, pid)
+}
+
 // Restore reads persisted entries from the registry and rebuilds the
-// in-memory session table. Each entry becomes a Session whose
-// metadata is restored verbatim; the lifecycle is mapped as:
+// in-memory session table. Each entry's metadata is restored verbatim; the
+// lifecycle is mapped as:
 //
 //	StatusRunning  -> StatusDetached (PID may be dead after restart)
 //	StatusDetached -> StatusDetached

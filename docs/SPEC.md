@@ -67,14 +67,20 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 IM 消息事件
   → Channel Adapter 解码为统一 Message{chat_id, text}
   → Gateway 判断 text 是否以 / 开头
-      ├─ 是 slash command → 查命令表
-      │       ├─ 命中 → 执行（创建 / kill session / help 等）
-      │       └─ 不命中 → 回复 "unknown command"
-      └─ 否（普通文本）→ 透传给 Session Manager
-              → Router 查 chat_id → session
-              → Session 把 text 写入 PTY stdin
-              → CLI 收到输入
+      ├─ 否（普通文本）→ 透传给 Session Manager
+      │       → Router 查 chat_id → session
+      │       → Session 把 text 写入 PTY stdin
+      │       → CLI 收到输入
+      └─ 是 slash command → 查 nightme 命令表
+              ├─ 命中（/cwd /kill /help）→ nightme 执行
+              │       ├─ 成功 → 回复用户
+              │       └─ 参数错 → 回复 usage error（属 nightme namespace）
+              └─ 未命中（如 /clear /compact /init）→ 透传
+                      → Session Manager 写入 PTY stdin
+                      → CLI / Agent 自己处理这个命令
 ```
+
+**核心规则**：nightme 只拦截 session 管理类命令（/cwd /kill /help）。其他 slash 命令属于 agent 的 namespace，nightme **透传**而不是拒绝——避免破坏 agent 自身的 slash command UX。
 
 ### 2.2 CLI 输出 → 用户
 

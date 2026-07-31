@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"os"
+	"log/slog"
 	"runtime/debug"
 
 	"github.com/spf13/cobra"
@@ -10,19 +10,11 @@ import (
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
 )
 
-// panicMsg is the single source of truth for the panic-recovery
-// banner.
 const panicMsg = "[nightme] internal panic recovered"
 
-// Recover wraps rootCmd so a panic anywhere inside cobra's Run
-// pipeline is captured, logged with a stack trace, and converted
-// to nmerrors.CodeGenericError. Run returns the CodedError as a
-// regular RunE error so the existing Execute() flow handles the
-// exit code without further branching.
-//
-// Recover is idempotent: calling it twice on the same root only
-// installs one panic guard.
-func Recover(rootCmd *cobra.Command) {
+// Recover installs an idempotent panic guard. The optional logger keeps
+// existing callers source-compatible while allowing runtime error tracking.
+func Recover(rootCmd *cobra.Command, loggers ...*slog.Logger) {
 	if rootCmd == nil {
 		return
 	}
@@ -33,22 +25,17 @@ func Recover(rootCmd *cobra.Command) {
 		rootCmd.Annotations = map[string]string{}
 	}
 	rootCmd.Annotations[panicGuardKey] = "1"
-
-	// Guard the entire RunE chain. Wrapping rather than replacing
-	// preserves existing command logic and lets tests still call
-	// newRootCmd() without the panic guard when they prefer.
+	logger := loggerFromContext(rootCmd.Context())
+	if len(loggers) > 0 && loggers[0] != nil {
+		logger = loggers[0]
+	}
 	prevRunE := rootCmd.RunE
 	rootCmd.RunE = func(cmd *cobra.Command, args []string) (err error) {
 		defer func() {
 			if r := recover(); r != nil {
 				stack := debug.Stack()
-				fmt.Fprintf(os.Stderr, "%s: %v\n", panicMsg, r)
-				fmt.Fprintf(os.Stderr, "%s\n", stack)
-				err = nmerrors.Wrap(
-					nmerrors.CodeGenericError,
-					fmt.Sprintf("panic: %v", r),
-					nil,
-				)
+				logger.Error("panic recovered", "err", r, "stack", string(stack))
+				err = nmerrors.Wrap(nmerrors.CodeGenericError, fmt.Sprintf("panic: %v", r), nil)
 			}
 		}()
 		if prevRunE != nil {
@@ -58,6 +45,4 @@ func Recover(rootCmd *cobra.Command) {
 	}
 }
 
-// panicGuardKey is the cobra.Annotations key used to detect prior
-// Recover() calls. Kept short to avoid Annotation bloat.
 const panicGuardKey = "nightme.panic-guard"

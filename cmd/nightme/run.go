@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -139,7 +140,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	if out == nil {
 		out = io.Discard
 	}
-
+	logger := loggerFromContext(ctx)
 	cfg, err := deps.loadConfig()
 	if err != nil {
 		return fmt.Errorf("run: load config: %w", err)
@@ -215,33 +216,36 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	}
 
 	if err := ch.Start(ctx); err != nil {
+		logger.Error("channel disconnected", "reason", err)
 		return fmt.Errorf("run: start Feishu channel: %w", err)
 	}
+	logger.Info("channel connected", "channel", "feishu")
 	fmt.Fprintln(out, "Feishu WebSocket connected")
 
 	// Spawn per-session pumps so live agent events are rendered
 	// back to the chat. We (re)attach every time the session
 	// table changes by polling on each incoming message.
 	attachments := newSessionAttachments(mgr, ch)
+	attachments.logger = logger
 
 	incoming := ch.Incoming()
 	if incoming == nil {
-		return shutdownRun(out, ch, mgr, deps.cleanup)
+		return shutdownRun(out, ch, mgr, deps.cleanup, logger)
 	}
 	for {
 		attachments.Sweep(ctx)
 
 		select {
 		case <-ctx.Done():
-			return shutdownRun(out, ch, mgr, deps.cleanup)
+			return shutdownRun(out, ch, mgr, deps.cleanup, logger)
 		case sig, ok := <-sigCh:
 			if ok && sig != nil {
 				fmt.Fprintf(out, "[nightme] received %s\n", sig)
 			}
-			return shutdownRun(out, ch, mgr, deps.cleanup)
+			return shutdownRun(out, ch, mgr, deps.cleanup, logger)
 		case msg, ok := <-incoming:
 			if !ok {
-				return shutdownRun(out, ch, mgr, deps.cleanup)
+				return shutdownRun(out, ch, mgr, deps.cleanup, logger)
 			}
 			fmt.Fprintf(out, "received: %s\n", msg.Text)
 			handleCtx := gateway.WithGateway(ctx, gw)
@@ -280,6 +284,7 @@ type sessionAttachments struct {
 	ch       channel.Channel
 	mu       sync.Mutex
 	attached map[string]struct{}
+	logger   *slog.Logger
 }
 
 func newSessionAttachments(mgr session.Manager, ch channel.Channel) *sessionAttachments {
@@ -313,6 +318,9 @@ func (s *sessionAttachments) Sweep(ctx context.Context) {
 			continue
 		}
 		s.attached[sess.ID] = struct{}{}
+		if s.logger != nil {
+			s.logger.Info("session created", "chat_id", sess.ChatID, "workspace", sess.Workspace, "agent", sess.Agent)
+		}
 		chatID := sess.ChatID
 		go s.pump(ctx, chatID, events)
 	}
@@ -370,8 +378,12 @@ func (s *sessionAttachments) pump(ctx context.Context, chatID string, events <-c
 // kills every known session depending on cleanup. The default
 // policy is detach (matches v0.1 behavior); --cleanup opts into
 // the kill-everything path used by CI / one-shot scripts.
-func shutdownRun(out io.Writer, ch channel.Channel, mgr session.Manager, cleanup bool) error {
+func shutdownRun(out io.Writer, ch channel.Channel, mgr session.Manager, cleanup bool, loggers ...*slog.Logger) error {
 	_ = out // retained in the signature for a future shutdown status line
+	var logger *slog.Logger
+	if len(loggers) > 0 {
+		logger = loggers[0]
+	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -386,7 +398,7 @@ func shutdownRun(out io.Writer, ch channel.Channel, mgr session.Manager, cleanup
 	}
 
 	if cleanup {
-		killErr := killAllSessions(mgr)
+		killErr := killAllSessions(mgr, logger)
 		if killErr != nil && firstErr == nil {
 			firstErr = fmt.Errorf("run: kill sessions: %w", killErr)
 		}
@@ -433,7 +445,7 @@ func markSessionsDetached(mgr session.Manager) error {
 // helper. We collect non-fatal errors and return them joined so a
 // single rogue process does not mask the rest. Already-exited
 // sessions are skipped (Kill is idempotent).
-func killAllSessions(mgr session.Manager) error {
+func killAllSessions(mgr session.Manager, logger *slog.Logger) error {
 	var firstErr error
 	for _, sess := range mgr.List() {
 		if sess == nil {
@@ -443,6 +455,8 @@ func killAllSessions(mgr session.Manager) error {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("kill %s: %w", sess.ID, err)
 			}
+		} else if logger != nil {
+			logger.Info("session killed", "chat_id", sess.ChatID, "pid", sess.PID)
 		}
 	}
 	return firstErr

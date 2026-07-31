@@ -35,6 +35,14 @@ const (
 	// pipe bytes. No structured events; ANSI / spinner / progress
 	// indicators appear as raw text in the IM channel.
 	ModePTY
+
+	// ModeJSONIO is the v0.2 mode used by Claude Code. It spawns the
+	// CLI with --input-format stream-json --output-format stream-json
+	// and parses line-delimited JSON events from stdout. Provides
+	// structured events (text, tool_use, tool_result, AskUserQuestion,
+	// result) without requiring an ACP / SDK implementation. See
+	// docs/feat/F-24-claudecode-bridge.md.
+	ModeJSONIO
 )
 
 // String renders a Mode for logs and error messages.
@@ -46,6 +54,8 @@ func (m Mode) String() string {
 		return "sdk"
 	case ModePTY:
 		return "pty"
+	case ModeJSONIO:
+		return "json-io"
 	default:
 		return fmt.Sprintf("mode(%d)", int(m))
 	}

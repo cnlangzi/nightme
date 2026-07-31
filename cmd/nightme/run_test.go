@@ -263,7 +263,7 @@ func TestBuildRunAgentRegistry_UsesModes(t *testing.T) {
 	}
 	reg := buildRunAgentRegistry(cfg)
 	for name, want := range map[string]agent.Mode{
-		"claude":   agent.ModeSDK,
+		"claude":   agent.ModeJSONIO,
 		"codex":    agent.ModeACP,
 		"opencode": agent.ModeACP,
 		"custom":   agent.ModePTY,

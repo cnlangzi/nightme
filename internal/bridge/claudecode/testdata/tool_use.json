@@ -1,0 +1,1 @@
+{"type":"assistant","message":{"id":"msg_2","role":"assistant","content":[{"type":"tool_use","id":"toolu_001","name":"Read","input":{"file_path":"/tmp/foo.py"}}]},"model":"claude-sonnet-4-5","session_id":"s_test_001","uuid":"uuid_2"}

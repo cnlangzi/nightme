@@ -1,0 +1,1 @@
+{"type":"result","subtype":"success","session_id":"s_test_001","duration_ms":12345,"result":"完成","usage":{"input_tokens":100,"output_tokens":200},"modelUsage":{"claude-sonnet-4-5":{"inputTokens":100,"outputTokens":200,"costUSD":0.001}},"uuid":"uuid_5"}

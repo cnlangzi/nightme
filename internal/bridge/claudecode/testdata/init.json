@@ -1,0 +1,1 @@
+{"type":"system","subtype":"init","session_id":"s_test_001","cwd":"/tmp","tools":["Task","Bash","Edit","Read","Write","WebFetch","WebSearch"],"mcp_servers":[],"model":"claude-sonnet-4-5","permissionMode":"bypassPermissions"}

@@ -38,7 +38,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agent/acpagent"
 	"github.com/cnlangzi/nightme/internal/agent/ptyagent"
-	"github.com/cnlangzi/nightme/internal/bridge/sdk"
+	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/session"
 )
@@ -173,7 +173,9 @@ func configuredAgent(name string, entry config.AgentEntry) agent.Agent {
 	args := append([]string(nil), entry.Args...)
 	switch name {
 	case "claude":
-		return sdk.New(name, entry.Command, args)
+		// v0.2: Claude Code uses the dedicated JSON-IO bridge instead
+		// of the SDK sentinel. See docs/feat/F-24-claudecode-bridge.md.
+		return claudecode.New(name, entry.Command, args)
 	case "codex", "opencode":
 		if name == "opencode" && len(args) == 0 {
 			args = []string{"acp"}

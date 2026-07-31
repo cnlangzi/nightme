@@ -149,24 +149,10 @@ func (m *MemoryManager) Create(ctx context.Context, req CreateRequest) (*Session
 	if req.Agent == "" {
 		return nil, errors.New("session: Agent is required")
 	}
-	if m.agents == nil {
-		return nil, errors.New("session: agent registry is nil")
-	}
 
-	a, err := m.agents.Get(req.Agent)
+	agentSession, pid, err := m.startAgent(ctx, req.Agent, req.Workspace, req.Args)
 	if err != nil {
-		return nil, fmt.Errorf("session: %w", err)
-	}
-	if err := a.Detect(); err != nil {
-		return nil, fmt.Errorf("session: detect %s: %w", req.Agent, err)
-	}
-
-	agentSession, err := a.Start(ctx, agent.StartConfig{
-		Workspace: req.Workspace,
-		Args:      req.Args,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("session: start %s: %w", req.Agent, err)
+		return nil, err
 	}
 
 	m.mu.Lock()
@@ -186,7 +172,7 @@ func (m *MemoryManager) Create(ctx context.Context, req CreateRequest) (*Session
 		StartedAt: now,
 		LastRunAt: now,
 	}
-	sess.setLifecycle(StatusRunning, agentSession, 0, nil)
+	sess.setLifecycle(StatusRunning, agentSession, pid, nil)
 	m.sessions[sess.ID] = sess
 	m.chatIndex[req.ChatID] = sess.ID
 	m.mu.Unlock()

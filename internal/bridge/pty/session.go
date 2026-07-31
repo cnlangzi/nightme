@@ -42,6 +42,16 @@ func (s *ptySession) Start() {
 // callers can `for ev := range session.Events()` to drain.
 func (s *ptySession) Events() <-chan agent.AgentEvent { return s.events }
 
+// PID returns the child process PID recorded by the underlying
+// Bridge. May be 0 if the child has not been started yet (which
+// should not happen for the v0.1 PTY backend).
+func (s *ptySession) PID() int {
+	if s.bridge == nil {
+		return 0
+	}
+	return s.bridge.PID()
+}
+
 // SendText writes raw user input to the PTY stdin. The bytes go in
 // unmodified — newline normalization is the Channel adapter's job
 // (see F-19 §4.2).

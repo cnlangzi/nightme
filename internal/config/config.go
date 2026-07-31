@@ -132,6 +132,56 @@ func LoadDefault() (*Config, error) {
 	return Load(DefaultPath())
 }
 
+// SaveDefault writes cfg atomically to DefaultPath(). Directories
+// are created as needed (0700); the file is chmod 0600 (N-7).
+func SaveDefault(c *Config) error {
+	return Save(c, DefaultPath())
+}
+
+// Save writes cfg atomically to path. Same temp-file+rename pattern
+// as the registry: a corrupted temp cannot leave a half-written
+// config.yaml on disk.
+func Save(c *Config, path string) error {
+	if path == "" {
+		return fmt.Errorf("config: empty path")
+	}
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("config: marshal: %w", err)
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("config: mkdir %s: %w", dir, err)
+	}
+
+	tmp, err := os.CreateTemp(dir, ".config-*.yaml.tmp")
+	if err != nil {
+		return fmt.Errorf("config: create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("config: write temp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("config: fsync temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("config: close temp: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("config: rename: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("config: chmod: %w", err)
+	}
+	return nil
+}
+
 // Load reads a YAML file from path and returns a populated Config.
 // Missing file is not an error — defaults are returned. A malformed
 // file is an error.

@@ -18,6 +18,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -185,4 +186,31 @@ func (s *Session) setCancel(cancel context.CancelFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cancel = cancel
+}
+
+// Events exposes the underlying AgentSession's event channel to
+// external consumers (CLI tools, tests). Returns nil when the
+// session has no live agent handle (e.g. StatusExited). Callers
+// must respect the agent.AgentSession contract: the channel closes
+// after the terminal EventDone / EventError.
+func (s *Session) Events() <-chan agent.AgentEvent {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.agentSession == nil {
+		return nil
+	}
+	return s.agentSession.Events()
+}
+
+// SendText proxies to the underlying AgentSession. Returns an error
+// when the session has no live agent handle; callers should check
+// Status() before invoking SendText.
+func (s *Session) SendText(text string) error {
+	s.mu.RLock()
+	as := s.agentSession
+	s.mu.RUnlock()
+	if as == nil {
+		return errors.New("session: no live agent")
+	}
+	return as.SendText(text)
 }

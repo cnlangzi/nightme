@@ -27,7 +27,7 @@
 | F-08 | Channel 抽象（interface + 飞书实现）| [feat/F-08-channel-abstraction.md](./feat/F-08-channel-abstraction.md) | M2 |
 | F-09 | Agent 抽象（interface + Claude 实现）| [feat/F-09-agent-abstraction.md](./feat/F-09-agent-abstraction.md) | M1 |
 | F-10 | Session 列表命令（`nightme list` / `kill`）| [feat/F-10-session-list-cmd.md](./feat/F-10-session-list-cmd.md) | M3 |
-| F-19 | CLI Bridge Protocol（PTY↔Channel byte pipe）| [feat/F-19-cli-bridge.md](./feat/F-19-cli-bridge.md) | M1 |
+| F-19 | PTY Mode Byte Pipe（Bridge 的 PTY 实现细节）| [feat/F-19-cli-bridge.md](./feat/F-19-cli-bridge.md) | M1 |
 | F-20 | Command Gateway（slash command 路由 + /cwd /run /kill /help）| [feat/F-20-gateway.md](./feat/F-20-gateway.md) | M2 |
 | F-21 | Agent Communication Modes（ACP / SDK / PTY 三层降级）| [feat/F-21-agent-modes.md](./feat/F-21-agent-modes.md) | M1 arch / M2 partial |
 

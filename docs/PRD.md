@@ -111,7 +111,7 @@ nightme **只控制自己启动的进程**。用户的 bash / zsh / vscode / 其
 - F-08 Channel 抽象（飞书 MVP）
 - F-09 Agent 抽象（Claude Code MVP）
 - F-10 Session 列表命令
-- F-19 CLI Bridge Protocol（byte pipe 协议）
+- F-19 PTY Mode Byte Pipe（Bridge 的 PTY 实现；ACP/SDK 见 F-21）
 - F-20 Command Gateway（slash command 路由）
 
 **v0.2+ 后续**：F-11 ~ F-17（多 Channel、附件、resize、Web UI、健康检查等；F-18 已取消，见 §4.1）

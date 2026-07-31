@@ -1,9 +1,9 @@
-# F-04: PTY Simulation
+# F-04: PTY Simulation (Bridge PTY Backend)
 
 > **Status**: designed (v0.1)
 > **Milestone**: M1 (used by M2)
 > **Depends on**: (none — foundation)
-> **Related docs**: SPEC.md §1.1 (PTY Bridge 组件), §4 (并发模型)
+> **Related docs**: SPEC.md §1.1 (Bridge 组件), [F-19-cli-bridge.md](./F-19-cli-bridge.md) (PTY byte pipe), [F-21-agent-modes.md](./F-21-agent-modes.md) (Bridge 三层模式), §4 (并发模型)
 
 ## 1. Description
 

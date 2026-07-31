@@ -1,12 +1,14 @@
-# F-19: CLI Bridge Protocol (PTY ↔ Channel Byte Pipe)
+# F-19: PTY Mode Byte Pipe (Bridge PTY Implementation)
 
 > **Status**: designed (v0.1)
 > **Milestone**: M1 (built first, used by M2)
 > **Depends on**: F-04 (PTY), F-08 (Channel)
 > **Used by**: F-02 (input), F-03 (output), F-06 (cleanup)
-> **Related docs**: SPEC.md §1, §4 (架构 + 并发模型), FEATURES.md
+> **Related docs**: SPEC.md §1.1 (Bridge 组件), [F-21-agent-modes.md](./F-21-agent-modes.md) (Bridge 三层模式), FEATURES.md
 
-本文档回答：**nightme 怎么把 Claude Code 的 TTY 字节流搬到飞书、再把飞书的字节流搬回 TTY**。
+本文档回答：**nightme 的 Bridge 在 PTY 模式下怎么把 CLI 的 TTY 字节流搬到飞书、再把飞书的字节流搬回 TTY**。
+
+> **范围**：F-19 只覆盖 PTY 模式。Bridge 还有 ACP 和 SDK 两种模式（见 F-21），不在本文档范围。
 
 ---
 

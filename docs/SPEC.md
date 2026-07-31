@@ -28,16 +28,15 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 │  nightme (single binary on user's laptop)                   │
 │                                                              │
 │  ┌────────────┐  ┌──────────┐  ┌────────────────┐  ┌───────┐ │
-│  │ Channel    │→ │ Gateway  │→ │ Session Manager│  │ PTY   │ │
-│  │ Adapter    │  │ (slash   │←→│ (+ Workspace:  │←→│ Bridge│ │
-│  │            │  │  cmd)    │  │  session.ws)   │  │       │ │
-│  └────────────┘  └──────────┘  └────────┬───────┘  └───┬───┘ │
+│  │ Channel    │→ │ Gateway  │→ │ Session Manager│  │Bridge │ │
+│  │ Adapter    │  │ (slash   │←→│ (+ Workspace:  │←→│ (ACP  │ │
+│  │            │  │  cmd)    │  │  session.ws)   │  │ /SDK  │ │
+│  └────────────┘  └──────────┘  └────────┬───────┘  │ /PTY) │ │
 │                                          │              │     │
 │                                          ▼              ▼     │
 │                                   (session 状态)   Claude / │
 │                                                  Codex /    │
 │                                                  OpenCode   │
-│                                                  (PTY)      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -48,7 +47,7 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 | **Channel Adapter** | 把 IM 协议（飞书 WebSocket / WhatsApp webhook 等）抽象成统一接口；把 IM 消息收上来、把 nightme 输出推回去 |
 | **Gateway** | Slash command 路由器：判断每条消息是系统命令还是普通文本；系统命令命中表后执行 / 不命中透传给 SessionManager，普通文本也透传给 SessionManager |
 | **Session Manager** | 维护 chat_id ↔ session 的绑定；管理 session 的创建、查询、销毁；**每个 session 绑定一个 workspace**（session.Workspace 字段，session 创建时确定，生命周期内不变） |
-| **PTY Bridge** | 在 pseudo-terminal 中 spawn AI Coding CLI；提供读 / 写 / resize 三个能力；一个 session 一个 PTY，cwd = session.Workspace |
+| **Bridge** | nightme 与底层 AI Coding CLI 之间的通信抽象；提供统一的 `AgentSession` 接口（Events / SendText / SendPermission / Close）；**有三种实现模式**：ACP（标准化，优先）、SDK（vendor-specific，如 Claude Code Agent SDK）、PTY（透明透传，兑底）。Session Manager 只跟 Bridge 接口交互，不关心具体模式。 |
 | **Process Registry** | 记录 nightme 启动的所有进程（pid + chat_id + workspace + 启动时间）；用于查询、重启恢复、清理 |
 
 > **Workspace 不再是独立组件**：原"Workspace Mapper"是 Session Manager 的子功能——每个 session 自带 workspace 字段，查找 chat_id 对应 workspace = `session.Workspace`，无需独立映射表。
@@ -86,7 +85,7 @@ IM 消息事件
 
 ```
 CLI stdout/stderr
-  → PTY Bridge 读取字节流
+  → Bridge 读取事件流（ACP/SDK 模式）或字节流（PTY 模式）
   → Aggregator 按窗口聚合（200ms / 4KB）
   → Channel Adapter 推送（>4KB 自动分段）
   → IM 用户收到消息
@@ -101,7 +100,7 @@ CLI stdout/stderr
   → Gateway 查 commands 表 → 命中
   → cwd handler 验证 path + agent
   → Session Manager 创建 session（chat_id, workspace, agent）
-  → PTY Bridge spawn CLI（cwd = workspace）
+  → Bridge 启动 CLI（cwd = workspace；模式取决于 agent 配置）
   → Process Registry 记录 PID
   → Gateway 回复 "Session started in {workspace}"
 ```

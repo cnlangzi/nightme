@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,7 +15,7 @@ import (
 func TestQueueUserMessage_IdleState_DispatchesDirectly(t *testing.T) {
 	sess := &Session{ID: "s1", ChatID: "chat1"}
 
-	var sent atomic.Int32
+	var sent int32
 	as := &fakeAgentSession{}
 	sess.mu.Lock()
 	sess.agentSession = as
@@ -150,5 +149,4 @@ func TestReadPumpDrivesBufferState(t *testing.T) {
 // (defined in manager_test.go) compiles.
 var _ agent.AgentSession = (*fakeAgentSession)(nil)
 var _ = sync.Mutex{}
-var _ = atomic.Int32{}
 var _ context.Context = context.Background()

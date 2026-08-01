@@ -32,6 +32,13 @@ func TestDefaultAddons_ContainsRequiredScopes(t *testing.T) {
 	wantScopes := []string{
 		"im:message:send_as_bot",
 		"im:message:receive_v1",
+		"im:message.reactions:write_only",
+		"im:message:readonly",
+		"im:message.group_at_msg:readonly",
+		"im:message.p2p_msg:readonly",
+		"im:resource",
+		"im:chat:read",
+		"im:chat.members:bot_access",
 	}
 	for _, want := range wantScopes {
 		if !containsString(addons.Scopes.Tenant, want) {
@@ -44,6 +51,14 @@ func TestDefaultAddons_ContainsRequiredScopes(t *testing.T) {
 	for _, want := range wantEvents {
 		if !containsString(addons.Events.Items.Tenant, want) {
 			t.Errorf("DefaultAddons missing tenant event %q (have %v)", want, addons.Events.Items.Tenant)
+		}
+	}
+	wantCallbacks := []string{
+		"card.action.trigger",
+	}
+	for _, want := range wantCallbacks {
+		if !containsString(addons.Callbacks.Items, want) {
+			t.Errorf("DefaultAddons missing callback %q (have %v)", want, addons.Callbacks.Items)
 		}
 	}
 }

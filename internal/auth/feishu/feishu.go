@@ -139,15 +139,42 @@ func (f *FeishuAuth) printQRCode(info *registration.QRCodeInfo) {
 	_ = RenderASCII(info.URL, f.out, false)
 }
 
-// DefaultAddons returns the minimum scope + event set nightme needs
-// to send and receive messages. Callers may override at construction.
+// DefaultAddons returns the scope + event + callback set nightme
+// asks for at QR-code registration time. Callers may override at
+// construction.
 //
-// The reaction scope is required for F-25 MessageReceipt (⏳/🔄/✅
-// emoji reactions on the user's incoming message); the reaction
-// *event* subscription is intentionally absent — nightme does not
-// design user-driven reactions as input (see
-// docs/feat/F-25-message-receipt.md for the rationale), so we
-// silently drop im.message.reaction.created_v1 events.
+// Scope rationale (covers all v0.2 + near-term v0.3 use cases):
+//
+//	im:message:send_as_bot             send text / interactive / image / file
+//	                                  (msg_type discriminator on the send
+//	                                  endpoint; one scope covers all)
+//	im:message:receive_v1              receive message events (the SDK
+//	                                  binds this name to both the scope
+//	                                  and the event)
+//	im:message.reactions:write_only    ⏳/🔄/✅ receipts on incoming msgs
+//	im:message.group_at_msg:readonly   bot triggered by @-mention in groups
+//	im:message.p2p_msg:readonly        bot triggered in 1:1 chats
+//	im:message:readonly                fetch historical messages AND
+//	                                  download inbound attachment
+//	                                  resources via F-14 passthrough
+//	im:resource                        upload images/files for sending
+//	im:chat:read                       read chat metadata
+//	im:chat.members:bot_access         read member list of chats bot is in
+//
+// Callbacks:
+//
+//	card.action.trigger                receive interactive-card button
+//	                                  clicks; without this our permission
+//	                                  card buttons are inert.
+//
+// Events:
+//
+//	im.message.receive_v1              the canonical message-receive event
+//
+// The reaction *event* subscription is intentionally absent — nightme
+// does not design user-driven reactions as input (see
+// docs/feat/F-25-message-receipt.md), so the dispatcher swallows
+// im.message.reaction.created_v1 events.
 func DefaultAddons() *registration.AppAddons {
 	preset := false
 	return &registration.AppAddons{
@@ -156,7 +183,13 @@ func DefaultAddons() *registration.AppAddons {
 			Tenant: []string{
 				"im:message:send_as_bot",
 				"im:message.reactions:write_only",
+				"im:message:readonly",
 				"im:message:receive_v1",
+				"im:message.group_at_msg:readonly",
+				"im:message.p2p_msg:readonly",
+				"im:resource",
+				"im:chat:read",
+				"im:chat.members:bot_access",
 			},
 		},
 		Events: registration.AppAddonsEvents{
@@ -164,6 +197,11 @@ func DefaultAddons() *registration.AppAddons {
 				Tenant: []string{
 					"im.message.receive_v1",
 				},
+			},
+		},
+		Callbacks: registration.AppAddonsCallbacks{
+			Items: []string{
+				"card.action.trigger",
 			},
 		},
 	}

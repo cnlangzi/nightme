@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkcallback "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
@@ -80,6 +81,12 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		cfg.Feishu.EncryptKey,
 	).
 		OnP2MessageReceiveV1(a.handleMessage).
+		// Interactive-card button clicks (e.g. permission card Allow/Deny).
+		// Required by the card.action.trigger callback registered in
+		// DefaultAddons; without this handler registration the bot
+		// would log "no handler for card.action.trigger" and the user
+		// clicks would be lost.
+		OnP2CardActionTrigger(a.handleCardAction).
 		// User-driven reactions on bot messages are not a designed
 		// input channel (no /react command, no ack/cancel UX). Swallow
 		// the event so the SDK doesn't log "not found handler". The
@@ -111,6 +118,15 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 
 // Name returns the stable channel name used by the daemon.
 func (a *Adapter) Name() string { return "feishu" }
+
+// DownloadAttachments is a convenience wrapper for callers that
+// hold an *Adapter and don't want to dig out the lark client.
+// See the package-level DownloadAttachments for semantics.
+func (a *Adapter) DownloadAttachments(ctx context.Context,
+	messageID string, atts []channel.Attachment, sessionID string,
+) DownloadResult {
+	return DownloadAttachments(ctx, a.larkClient, messageID, atts, sessionID)
+}
 
 // Start starts the Feishu WebSocket receive loop. The SDK itself handles
 // reconnects; this method only owns the lifetime context and goroutine.
@@ -473,12 +489,16 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	}
 	content := stringValue(message.Content)
 	chatType := normalizeChatType(stringValue(message.ChatType))
+	msgType := stringValue(message.MessageType)
+	text, attachments := extractAttachments(msgType, content)
 	msg := channel.Message{
-		ChatID:   chatID,
-		Text:     messageText(content),
-		SenderID: senderID(event),
-		Time:     messageTime(message.CreateTime),
-		ChatType: chatType,
+		ChatID:      chatID,
+		Text:        text,
+		SenderID:    senderID(event),
+		Time:        messageTime(message.CreateTime),
+		ChatType:    chatType,
+		MessageID:   stringValue(message.MessageId),
+		Attachments: attachments,
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -515,6 +535,40 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 // onMessage is a descriptive alias useful to tests and future event handlers.
 func (a *Adapter) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
 	return a.handleMessage(ctx, event)
+}
+
+// handleCardAction is the entry point for the card.action.trigger
+// callback. It is wired in via OnP2CardActionTrigger at construction
+// and paired with the matching callback registration in
+// DefaultAddons.
+//
+// v0.2 scope: the handler returns a Toast acknowledging the click.
+// The actual click-value → permission-decision routing (e.g. updating
+// the SessionManager's pending permission state for Allow/Deny) is
+// wired in a follow-up; for now we surface a user-visible ack so the
+// button doesn't look broken. The full click-value decoding is
+// documented inline so the next commit has a clear seam.
+func (a *Adapter) handleCardAction(ctx context.Context, event *larkcallback.CardActionTriggerEvent) (*larkcallback.CardActionTriggerResponse, error) {
+	if event == nil || event.Event == nil {
+		return &larkcallback.CardActionTriggerResponse{}, nil
+	}
+	req := event.Event
+	choice := "unknown"
+	if req.Action != nil {
+		if req.Action.Option != "" {
+			choice = req.Action.Option
+		} else if req.Action.Name != "" {
+			choice = req.Action.Name
+		}
+	}
+	log.Printf("feishu: card action received chat=%s action=%s",
+		req.Context.OpenChatID, choice)
+	return &larkcallback.CardActionTriggerResponse{
+		Toast: &larkcallback.Toast{
+			Type:    "info",
+			Content: "Recorded: " + choice,
+		},
+	}, nil
 }
 
 func senderID(event *larkim.P2MessageReceiveV1) string {

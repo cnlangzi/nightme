@@ -71,6 +71,24 @@ as closely as a pre-1.0 project can.
   package>.NewAgent(name, command, args, env))`. The `nightme
   agents` CLI subcommand moves to `cmd/nightme/agents_cmd.go` to
   avoid the file-name collision.
+- Feishu scope + callback expansion: `DefaultAddons()` now asks
+  for the full interaction set the bot will need:
+  - Tenant scopes: `im:message:send_as_bot`, `im:message.receive_v1`,
+    `im:message.reactions:write_only`, `im:message:readonly`,
+    `im:message.group_at_msg:readonly`, `im:message.p2p_msg:readonly`,
+    `im:resource` (upload images/files), `im:chat:read`,
+    `im:chat.members:bot_access`
+  - Events: `im.message.receive_v1`
+  - Callbacks: `card.action.trigger` — required for interactive
+    card button clicks (permission card Allow/Deny was previously
+    inert — no handler was registered)
+  - `OnP2CardActionTrigger(handler)` wired in the WebSocket
+    dispatcher with a stub `handleCardAction` that returns an
+    info toast; full click-value → permission-decision routing is
+    a follow-up. The reaction event subscription is still absent
+    (intentional per F-25 docs).
+  - `TestDefaultAddons_ContainsRequiredScopes` extended to lock
+    in every scope + the callback name.
 
 ## [0.2.0] - 2026-08-01
 

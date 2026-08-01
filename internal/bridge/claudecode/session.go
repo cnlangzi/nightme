@@ -159,16 +159,15 @@ func newSession(ctx context.Context, command string, args, env []string, workspa
 		_ = drainStderr(stderr, logger)
 	}()
 
-	// watchdog: when cmd exits, send EventDone if not already sent
-	// (pumpStream sends EventDone on result event; if the process
-	// crashes without emitting result, the watchdog closes the
-	// stream).
-	go func() {
-		_ = cmd.Wait()
-		// Best-effort: if pumpStream hasn't already emitted
-		// EventDone, this closure signals via closed channel.
-		// The events channel will be closed by Close().
-	}()
+	// NOTE: an earlier revision of this code spawned a watchdog
+	// goroutine that called cmd.Wait() and was supposed to close
+	// the events channel on process exit. The body was a no-op
+	// (the comment said "events channel will be closed by Close()")
+	// so the goroutine only existed to call cmd.Wait() — which is
+	// also called from Close(), creating a documented data race
+	// against the Wait field of exec.Cmd. pumpStream is the real
+	// watchdog: it sends EventDone on EOF, and Close() is the
+	// single owner of cmd.Wait(). Remove the redundant goroutine.
 
 	return s, nil
 }

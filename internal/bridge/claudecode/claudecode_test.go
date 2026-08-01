@@ -3,6 +3,8 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -712,6 +714,156 @@ func TestPumpStream_MultiMessageBurst(t *testing.T) {
 			dones++
 		}
 	}
+	if replays != messages {
+		t.Errorf("replay events = %d, want %d", replays, messages)
+	}
+	if assistants != messages {
+		t.Errorf("assistant events = %d, want %d", assistants, messages)
+	}
+	if results != messages {
+		t.Errorf("EventResult count = %d, want %d", results, messages)
+	}
+	if dones != messages {
+		t.Errorf("EventDone count = %d, want %d", dones, messages)
+	}
+}
+
+// claudeMockScript is the path to a sh wrapper that absorbs the
+// bridge's args (--print, --input-format stream-json, ...) and
+// runs the Python mock. The bridge's DefaultArgs are flagged
+// for the real claude binary; Python would reject them as
+// unknown options, so we round-trip through sh.
+const claudeMockScript = "../../testdata/claude_mock.sh"
+
+// claudeMockCommand returns the argv that spawns the mock. The
+// bridge passes DefaultArgs (--print, --input-format stream-json,
+// ...) which the underlying Python interpreter rejects as
+// unknown options. The sh wrapper around the Python mock absorbs
+// those args via shebang semantics so the bridge can pass them
+// unchanged.
+func claudeMockCommand(t *testing.T) (string, []string) {
+	t.Helper()
+	// Resolve the mock script to an absolute path so the
+	// bridge's exec.LookPath doesn't fail when starting
+	// from the test's working directory.
+	abs, err := filepath.Abs(claudeMockScript)
+	if err != nil {
+		t.Fatalf("resolve mock script %q: %v", claudeMockScript, err)
+	}
+	if _, err := os.Stat(abs); err != nil {
+		t.Skipf("claude mock script not present at %s: %v (skipping integration test)", abs, err)
+	}
+	return abs, nil
+}
+
+// TestClaudeCodeBridge_RealSubprocess drives the claudecode bridge
+// through a real subprocess (a Python mock that mimics the Claude
+// Code CLI's stream-json surface) and verifies that three
+// back-to-back SendText calls produce the expected event trio
+// per message. With the pre-fix eviction code the third SendText
+// would deadlock; with the post-fix code all three messages
+// flow through the bridge's read path and reach the Events
+// channel.
+//
+// The mock is a Python script (not sh -c) so the test exercises
+// a real OS subprocess with all the pipe / fd / buffering
+// semantics that the production Claude Code session uses.
+// Failure modes the test catches:
+//   - The bridge writes the wrong stream-json envelope shape
+//     (the mock would fail to extract text and emit "empty").
+//   - The bridge fails to multiplex concurrent SendText calls
+//     onto the child's stdin pipe (one of the writes would block).
+//   - The bridge's pumpStream drops frames between messages
+//     (the per-message event count would be wrong).
+func TestClaudeCodeBridge_RealSubprocess(t *testing.T) {
+	cmd, args := claudeMockCommand(t)
+
+	// Bump the default slog level so the bridge's drainStderr
+	// surfaces the mock's stderr (the mock logs each step at
+	// its own stderr; the bridge forwards them via slog.Debug).
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr,
+		&slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	a := New("mock-claude", cmd, args)
+	sess, err := a.Start(context.Background(), agent.StartConfig{
+		Workspace:      t.TempDir(),
+		PermissionMode: PermissionBypass,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	if pid := sess.PID(); pid <= 0 {
+		t.Fatalf("PID = %d, want > 0 (mock child should be running)", pid)
+	}
+
+	// Three messages back-to-back. The bridge's writeLine
+	// serializes the writes via stdinMu so each envelope lands
+	// atomically on the child's stdin.
+	const messages = 3
+	for i := 0; i < messages; i++ {
+		text := fmt.Sprintf("hello-%d", i)
+		if err := sess.SendText(text); err != nil {
+			t.Fatalf("SendText[%d] (%q): %v", i, text, err)
+		}
+	}
+
+	// Collect events. Per message we expect:
+	//   - 1 "[你] [replay] hello-N" EventText (the user echo)
+	//   - 1 "got: hello-N"     EventText (assistant response)
+	//   - 1 EventResult (final assistant text)
+	//   - 1 EventDone  (terminal)
+	// Total: 4 * messages.
+	//
+	// The loop drains every event from the channel until either
+	// the channel closes (pumpStream hit EOF) or the deadline
+	// trips. Counting only the categories we care about avoids
+	// the trap of `replays == messages && dones < messages` —
+	// the && would short-circuit as soon as replays reached 3
+	// even when EventDone for the third message was still in
+	// the channel buffer.
+	var replays, assistants, results, dones int
+	deadline := time.After(5 * time.Second)
+drain:
+	for {
+		// Fast-path exit: once we've seen the expected number of
+		// every event kind on the closed channel, the bridge's
+		// pumpStream hasn't hit EOF yet (the mock is a long-
+		// lived process waiting for stdin) so we must break out
+		// ourselves. The explicit check here also proves the
+		// counts add up before the loop's deadline-fallback
+		// ever fires.
+		if replays >= messages && assistants >= messages &&
+			results >= messages && dones >= messages {
+			break drain
+		}
+		select {
+		case ev, ok := <-sess.Events():
+			if !ok {
+				break drain
+			}
+			switch ev.Kind {
+			case agent.EventText:
+				switch {
+				case strings.HasPrefix(ev.Text, "[你] [replay] "):
+					replays++
+				case strings.HasPrefix(ev.Text, "got: "):
+					assistants++
+				}
+			case agent.EventResult:
+				results++
+			case agent.EventDone:
+				dones++
+			}
+		case <-deadline:
+			t.Fatalf("deadline reached with replays=%d assistants=%d results=%d dones=%d (want all %d)",
+				replays, assistants, results, dones, messages)
+		}
+	}
+
 	if replays != messages {
 		t.Errorf("replay events = %d, want %d", replays, messages)
 	}

@@ -26,6 +26,13 @@ as closely as a pre-1.0 project can.
   the loop continues.
 - `nightme version` subcommand: REPL-friendly sibling of `--version`
   (Cobra only registers `--version` as a flag, not a verb).
+- Cold-start fallback: `nightme run` and `nightme agents` now seed
+  the agent registry with `claude` / `codex` / `opencode` defaults
+  when the user's `config.yaml` ships an empty `agent.agents` map.
+  Fixes the post-`nightme auth login feishu` flow where the config
+  had Feishu credentials but no agents, surfacing as `/run claude`
+  in Feishu returning "unknown agent: claude". Explicit user config
+  is still respected as-is (no per-key merging).
 
 ## [0.2.0] - 2026-08-01
 

@@ -298,6 +298,66 @@ func mustAgent(reg *agent.Registry, name string) agent.Agent {
 	return a
 }
 
+// TestBuildRunAgentRegistry_DefaultsWhenEmpty verifies the fallback
+// path: when cfg.Agent.Agents is empty (the common cold-start case
+// after `nightme auth login feishu`), the registry is seeded with
+// defaultAgentEntries() so /run claude / codex / opencode all work
+// out of the box. Without this, /run in Feishu would surface
+// "unknown agent: claude" for a fresh install.
+func TestBuildRunAgentRegistry_DefaultsWhenEmpty(t *testing.T) {
+	cases := []struct {
+		name    string
+		entries map[string]config.AgentEntry
+	}{
+		{"nil map", nil},
+		{"empty map", map[string]config.AgentEntry{}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := &config.Config{Agent: config.AgentConfig{Agents: c.entries}}
+			reg := buildRunAgentRegistry(cfg)
+
+			for _, want := range []string{"claude", "codex", "opencode"} {
+				if _, err := reg.Get(want); err != nil {
+					t.Errorf("Get(%s) after empty-config fallback: %v", want, err)
+				}
+			}
+			// Mode dispatch should still work — defaults use the
+			// same configuredAgent() path as user-configured entries.
+			if got := mustAgent(reg, "claude").Mode(); got != agent.ModeJSONIO {
+				t.Errorf("claude mode = %s, want jsonio", got)
+			}
+			if got := mustAgent(reg, "codex").Mode(); got != agent.ModeACP {
+				t.Errorf("codex mode = %s, want acp", got)
+			}
+		})
+	}
+}
+
+// TestBuildRunAgentRegistry_ExplicitAgentsWins ensures user config
+// is not overwritten by defaults. A user-supplied entry for "claude"
+// should replace the default one (e.g. pointing at a custom binary
+// path). Defaults only kick in when the agents map is completely
+// empty — partial user config is respected as-is.
+func TestBuildRunAgentRegistry_ExplicitAgentsWins(t *testing.T) {
+	cfg := &config.Config{
+		Agent: config.AgentConfig{Agents: map[string]config.AgentEntry{
+			"claude": {Command: "/custom/path/claude"},
+		}},
+	}
+	reg := buildRunAgentRegistry(cfg)
+
+	a := mustAgent(reg, "claude")
+	if a.Command() != "/custom/path/claude" {
+		t.Errorf("claude command = %q, want /custom/path/claude", a.Command())
+	}
+	// User has only "claude"; codex/opencode are absent because
+	// the fallback is all-or-nothing (no per-key merging).
+	if _, err := reg.Get("codex"); err == nil {
+		t.Errorf("codex should NOT be present when user supplied partial config")
+	}
+}
+
 func TestRun_CleanupFlagKillsSessions(t *testing.T) {
 	cfg := runTestConfig()
 	ch := newFakeRunChannel()

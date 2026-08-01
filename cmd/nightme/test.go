@@ -134,17 +134,50 @@ func validateTestRequest(f testCmdFlags) error {
 	return nil
 }
 
+// defaultAgentEntries is the fallback registry used when the user's
+// config has no agents (empty map or nil). The three shipped entries
+// match the dispatch in configuredAgent() so /run claude/codex/opencode
+// work out of the box for a fresh install.
+//
+// Keeping the set narrow (no extras) means a user who genuinely wants
+// an empty registry can still achieve it by deleting the default
+// agents from this file — but the more common "I haven't configured
+// anything yet" path now boots successfully.
+func defaultAgentEntries() map[string]config.AgentEntry {
+	return map[string]config.AgentEntry{
+		"claude": {
+			Command: "claude",
+		},
+		"codex": {
+			Command: "codex-acp",
+		},
+		"opencode": {
+			Command: "opencode",
+			Args:    []string{"acp"},
+		},
+	}
+}
+
 // buildAgentRegistry seeds an agent.Registry from cfg.Agent.Agents. The
 // built-in agents use their v0.2 protocol adapters: Claude uses the SDK
 // adapter, while Codex and OpenCode use ACP. Unknown configured names remain
 // PTY agents for backwards compatibility. If the requested agent is not in
 // the registry, an existing bare path is still registered as PTY.
+//
+// When cfg.Agent.Agents is empty (the common cold-start case after
+// `nightme auth login feishu`), buildAgentRegistry falls back to
+// defaultAgentEntries() so /run <name> works without manual config
+// editing.
 func buildAgentRegistry(cfg *config.Config, requested string) *agent.Registry {
 	reg := agent.New()
 	if cfg == nil {
 		return reg
 	}
-	for name, entry := range cfg.Agent.Agents {
+	entries := cfg.Agent.Agents
+	if len(entries) == 0 {
+		entries = defaultAgentEntries()
+	}
+	for name, entry := range entries {
 		if entry.Command == "" {
 			continue
 		}

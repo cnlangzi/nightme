@@ -78,10 +78,13 @@ func runREPLInteractive(root *cobra.Command, logger *slog.Logger) error {
 	}
 
 	rl, err := readline.NewEx(&readline.Config{
-		Prompt:               "nightme> ",
-		InterruptPrompt:      "^C",
-		HistorySearchFold:    true,
-		FuncFilterInputRune:  filterREPLInput,
+		Prompt:            "nightme> ",
+		InterruptPrompt:   "^C",
+		HistorySearchFold: true,
+		// No FuncFilterInputRune: chzyer/readline handles arrow
+		// keys (\x1b[A / \x1b[B) and Ctrl-C at its own level; an
+		// overzealous filter on our side would drop the leading
+		// ESC of those sequences and break navigation.
 	})
 	if err != nil {
 		return fmt.Errorf("readline init: %w", err)
@@ -115,21 +118,6 @@ func runREPLInteractive(root *cobra.Command, logger *slog.Logger) error {
 			return nil
 		}
 	}
-}
-
-// filterREPLInput blocks control characters that have no business
-// in a slash command (Ctrl-A, Ctrl-B, etc.). Ctrl-C / Ctrl-D are
-// handled by readline itself; we only need to filter the rest so
-// pasted binary data doesn't break the terminal. The second return
-// value is readline's "should accept" flag — false drops the rune.
-func filterREPLInput(r rune) (rune, bool) {
-	if r == 0 {
-		return 0, false
-	}
-	if r < 32 && r != '\t' && r != '\n' && r != '\r' {
-		return 0, false
-	}
-	return r, true
 }
 
 // dispatchREPLLine is the per-line core shared between the

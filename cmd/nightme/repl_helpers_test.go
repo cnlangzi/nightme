@@ -14,40 +14,6 @@ import (
 // buffer and is discarded when the session ends (per Devin:
 // "history in memory is enough").
 
-// TestFilterREPLInput_BlocksControlChars guards the rune filter that
-// readline applies to every input char. Printable runes must pass
-// through; control chars (except \t \n \r) must be filtered out.
-func TestFilterREPLInput_BlocksControlChars(t *testing.T) {
-	cases := []struct {
-		in      rune
-		allowed bool
-	}{
-		{'a', true},
-		{'/', true},
-		{'-', true},
-		{'\t', true},  // tab allowed (whitespace)
-		{'\n', true},  // newline (handled by readline itself)
-		{'\r', true},  // CR allowed
-		{0x00, false}, // null
-		{0x01, false}, // Ctrl-A
-		{0x07, false}, // bell
-		{0x1f, false}, // unit separator
-	}
-	for _, c := range cases {
-		r, ok := filterREPLInput(c.in)
-		if ok != c.allowed {
-			t.Errorf("filterREPLInput(%#x) ok = %v, want %v", c.in, ok, c.allowed)
-		}
-		if !ok {
-			if r != 0 {
-				t.Errorf("filterREPLInput(%#x) replacement = %#x, want 0", c.in, r)
-			}
-		} else if r != c.in {
-			t.Errorf("filterREPLInput(%#x) returned %#x, want %#x", c.in, r, c.in)
-		}
-	}
-}
-
 // TestDispatchREPLLine_ExitReturnsDone exercises the helper that
 // runREPLWith and runREPLInteractive both share. exit/quit must
 // signal the caller to stop; empty lines must signal continue; a

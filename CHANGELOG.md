@@ -32,6 +32,13 @@ as closely as a pre-1.0 project can.
   `runREPLWith` path so they don't need a TTY; the readline and
   scanner paths share `dispatchREPLLine`. New dep:
   `github.com/chzyer/readline`.
+- REPL arrow-key fix: removed an overzealous `FuncFilterInputRune`
+  that was dropping ESC (0x1b) bytes. Arrow keys arrive at the
+  terminal as the escape sequence `\x1b[A` / `\x1b[B`; the filter
+  silently ate the leading ESC so readline never saw the sequence.
+  Removing the filter restores ↑/↓ navigation. The earlier
+  TestFilterREPLInput_BlocksControlChars is removed with the
+  filter.
 - `nightme version` subcommand: REPL-friendly sibling of `--version`
   (Cobra only registers `--version` as a flag, not a verb).
 - Cold-start fallback: `nightme run` and `nightme agents` now seed

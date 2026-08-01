@@ -7,6 +7,14 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
+// init registers Claude Code as the only built-in agent shipped with
+// nightme v0.2.x. The binary name and arguments match the upstream
+// Claude Code CLI; user config can override the command path but
+// loses the dedicated JSON-IO bridge (it falls back to PTY).
+func init() {
+	agent.Builtins.Register(New("claude", "claude", nil))
+}
+
 // Agent is the agent.Agent descriptor for Claude Code. It returns
 // agent.ModeJSONIO and spawns a stream-json session on Start.
 //

@@ -33,6 +33,17 @@ as closely as a pre-1.0 project can.
   had Feishu credentials but no agents, surfacing as `/run claude`
   in Feishu returning "unknown agent: claude". Explicit user config
   is still respected as-is (no per-key merging).
+- Agent registration pattern: replaced the name-based dispatch in
+  `configuredAgent()` with a self-registration model. Each agent
+  package's `init()` registers itself into `agent.Builtins`; the
+  binary blank-imports the packages it ships. `cmd/nightme/main.go`
+  blank-imports `internal/bridge/claudecode` (the only v0.2.x
+  built-in). No defaults table, no name-based switch, no fallback
+  for names that aren't registered — if `/run <name>` doesn't
+  resolve, the user gets "unknown agent" instead of a misleading
+  half-implementation. User config can still add new agents (always
+  via ptyagent) or override the built-in `claude` to point at a
+  custom binary (which drops the dedicated JSON-IO bridge).
 
 ## [0.2.0] - 2026-08-01
 

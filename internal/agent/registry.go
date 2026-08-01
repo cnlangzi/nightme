@@ -4,6 +4,16 @@ package agent
 
 import "sync"
 
+// Builtins is the package-level registry of agents that ship with
+// the nightme binary. Each agent package's init() registers itself
+// here, so whatever is implemented is what /run will dispatch to —
+// no name-based switch in user code, no defaults table to drift out
+// of sync with the source.
+//
+// There is no fallback: if a name is not in Builtins and the user
+// has not configured it, /run <name> returns "unknown agent".
+var Builtins = New()
+
 // Registry is a thread-safe map of Agent instances keyed by Name().
 //
 // The zero value is not usable; create one with New().

@@ -7,6 +7,12 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/logging"
+
+	// Register built-in agents. The blank import triggers each
+	// agent package's init(), which adds the agent to
+	// internal/agent.Builtins. Adding a new agent = new package
+	// + blank import here; no dispatch table to keep in sync.
+	_ "github.com/cnlangzi/nightme/internal/bridge/claudecode"
 )
 
 func main() {

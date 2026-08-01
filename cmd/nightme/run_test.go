@@ -251,60 +251,12 @@ func TestRun_GracefulShutdown(t *testing.T) {
 	}
 }
 
-func TestBuildRunAgentRegistry_UsesModes(t *testing.T) {
-	cfg := &config.Config{
-		Agent: config.AgentConfig{Agents: map[string]config.AgentEntry{
-			"claude":   {Command: "/bin/echo", Args: []string{"--flag"}},
-			"codex":    {Command: "/bin/echo"},
-			"opencode": {Command: "/bin/echo"},
-			"custom":   {Command: "/bin/echo", Args: []string{"--custom"}, Env: map[string]string{"Z": "last", "A": "first"}},
-		}},
-		Session: config.SessionConfig{DefaultPtyCols: 100, DefaultPtyRows: 40},
-	}
-	reg := buildRunAgentRegistry(cfg)
-	for name, want := range map[string]agent.Mode{
-		"claude":   agent.ModeJSONIO,
-		"codex":    agent.ModeACP,
-		"opencode": agent.ModeACP,
-		"custom":   agent.ModePTY,
-	} {
-		a, err := reg.Get(name)
-		if err != nil {
-			t.Fatalf("Get(%s): %v", name, err)
-		}
-		if got := a.Mode(); got != want {
-			t.Errorf("%s mode = %s, want %s", name, got, want)
-		}
-	}
-
-	custom, ok := mustAgent(reg, "custom").(*ptyagent.Agent)
-	if !ok {
-		t.Fatalf("custom agent type = %T, want *ptyagent.Agent", mustAgent(reg, "custom"))
-	}
-	args := custom.Args()
-	if len(args) != 1 || args[0] != "--custom" {
-		t.Errorf("custom args = %v", args)
-	}
-	if custom.Cols != 100 || custom.Rows != 40 {
-		t.Errorf("custom PTY size = %dx%d, want 100x40", custom.Cols, custom.Rows)
-	}
-}
-
-func mustAgent(reg *agent.Registry, name string) agent.Agent {
-	a, err := reg.Get(name)
-	if err != nil {
-		panic(err)
-	}
-	return a
-}
-
-// TestBuildRunAgentRegistry_DefaultsWhenEmpty verifies the fallback
-// path: when cfg.Agent.Agents is empty (the common cold-start case
-// after `nightme auth login feishu`), the registry is seeded with
-// defaultAgentEntries() so /run claude / codex / opencode all work
-// out of the box. Without this, /run in Feishu would surface
-// "unknown agent: claude" for a fresh install.
-func TestBuildRunAgentRegistry_DefaultsWhenEmpty(t *testing.T) {
+// TestBuildRunAgentRegistry_HasBuiltinsOnly is the architectural
+// guard: an empty config (or no config) must yield exactly the
+// agents registered via init() in their respective packages. v0.2.x
+// ships only `claude`; adding a new built-in is a new package +
+// blank import in cmd/nightme/main.go, never a name in a switch.
+func TestBuildRunAgentRegistry_HasBuiltinsOnly(t *testing.T) {
 	cases := []struct {
 		name    string
 		entries map[string]config.AgentEntry
@@ -317,29 +269,57 @@ func TestBuildRunAgentRegistry_DefaultsWhenEmpty(t *testing.T) {
 			cfg := &config.Config{Agent: config.AgentConfig{Agents: c.entries}}
 			reg := buildRunAgentRegistry(cfg)
 
-			for _, want := range []string{"claude", "codex", "opencode"} {
-				if _, err := reg.Get(want); err != nil {
-					t.Errorf("Get(%s) after empty-config fallback: %v", want, err)
+			names := make(map[string]bool)
+			for _, a := range reg.List() {
+				names[a.Name()] = true
+			}
+			if !names["claude"] {
+				t.Errorf("claude missing from registry: %v", names)
+			}
+			for _, unwanted := range []string{"codex", "opencode"} {
+				if names[unwanted] {
+					t.Errorf("%s should not be auto-registered (no Builtins entry, no user config)", unwanted)
 				}
-			}
-			// Mode dispatch should still work — defaults use the
-			// same configuredAgent() path as user-configured entries.
-			if got := mustAgent(reg, "claude").Mode(); got != agent.ModeJSONIO {
-				t.Errorf("claude mode = %s, want jsonio", got)
-			}
-			if got := mustAgent(reg, "codex").Mode(); got != agent.ModeACP {
-				t.Errorf("codex mode = %s, want acp", got)
 			}
 		})
 	}
 }
 
-// TestBuildRunAgentRegistry_ExplicitAgentsWins ensures user config
-// is not overwritten by defaults. A user-supplied entry for "claude"
-// should replace the default one (e.g. pointing at a custom binary
-// path). Defaults only kick in when the agents map is completely
-// empty — partial user config is respected as-is.
-func TestBuildRunAgentRegistry_ExplicitAgentsWins(t *testing.T) {
+// TestBuildRunAgentRegistry_UserConfigRegistered verifies that any
+// agent named in cfg.Agent.Agents becomes available, regardless of
+// whether it has a Builtins entry. User-configured agents always
+// land in ptyagent — the safe default for arbitrary CLIs.
+func TestBuildRunAgentRegistry_UserConfigRegistered(t *testing.T) {
+	cfg := &config.Config{
+		Agent: config.AgentConfig{Agents: map[string]config.AgentEntry{
+			"custom": {Command: "/bin/echo", Args: []string{"--custom"}, Env: map[string]string{"Z": "last", "A": "first"}},
+		}},
+		Session: config.SessionConfig{DefaultPtyCols: 100, DefaultPtyRows: 40},
+	}
+	reg := buildRunAgentRegistry(cfg)
+
+	custom, ok := mustAgent(reg, "custom").(*ptyagent.Agent)
+	if !ok {
+		t.Fatalf("custom agent type = %T, want *ptyagent.Agent", mustAgent(reg, "custom"))
+	}
+	if got := custom.Mode(); got != agent.ModePTY {
+		t.Errorf("custom mode = %s, want pty", got)
+	}
+	args := custom.Args()
+	if len(args) != 1 || args[0] != "--custom" {
+		t.Errorf("custom args = %v", args)
+	}
+	if custom.Cols != 100 || custom.Rows != 40 {
+		t.Errorf("custom PTY size = %dx%d, want 100x40", custom.Cols, custom.Rows)
+	}
+}
+
+// TestBuildRunAgentRegistry_UserConfigOverridesBuiltin covers the
+// override path: a user entry whose name matches a built-in (e.g.
+// `claude`) replaces the built-in. The user's command path wins
+// but the new instance is always a ptyagent — overriding loses the
+// dedicated bridge features (documented in the init() comment).
+func TestBuildRunAgentRegistry_UserConfigOverridesBuiltin(t *testing.T) {
 	cfg := &config.Config{
 		Agent: config.AgentConfig{Agents: map[string]config.AgentEntry{
 			"claude": {Command: "/custom/path/claude"},
@@ -351,11 +331,31 @@ func TestBuildRunAgentRegistry_ExplicitAgentsWins(t *testing.T) {
 	if a.Command() != "/custom/path/claude" {
 		t.Errorf("claude command = %q, want /custom/path/claude", a.Command())
 	}
-	// User has only "claude"; codex/opencode are absent because
-	// the fallback is all-or-nothing (no per-key merging).
-	if _, err := reg.Get("codex"); err == nil {
-		t.Errorf("codex should NOT be present when user supplied partial config")
+	if got := a.Mode(); got != agent.ModePTY {
+		t.Errorf("claude mode after override = %s, want pty", got)
 	}
+}
+
+// TestBuildRunAgentRegistry_UnknownByDefault guards the no-fallback
+// invariant: a name neither in Builtins nor in cfg.Agent.Agents must
+// produce ErrUnknownAgent. This is the architectural difference from
+// the v0.2.0 config-driven approach — "I haven't configured it" no
+// longer means "give me claude / codex / opencode".
+func TestBuildRunAgentRegistry_UnknownByDefault(t *testing.T) {
+	reg := buildRunAgentRegistry(&config.Config{})
+	for _, name := range []string{"codex", "opencode", "my-agent"} {
+		if _, err := reg.Get(name); !errors.Is(err, agent.ErrUnknownAgent) {
+			t.Errorf("Get(%s) = %v, want ErrUnknownAgent", name, err)
+		}
+	}
+}
+
+func mustAgent(reg *agent.Registry, name string) agent.Agent {
+	a, err := reg.Get(name)
+	if err != nil {
+		panic(err)
+	}
+	return a
 }
 
 func TestRun_CleanupFlagKillsSessions(t *testing.T) {

@@ -36,9 +36,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/agent/acpagent"
 	"github.com/cnlangzi/nightme/internal/agent/ptyagent"
-	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/session"
 )
@@ -134,59 +132,32 @@ func validateTestRequest(f testCmdFlags) error {
 	return nil
 }
 
-// defaultAgentEntries is the fallback registry used when the user's
-// config has no agents (empty map or nil). The three shipped entries
-// match the dispatch in configuredAgent() so /run claude/codex/opencode
-// work out of the box for a fresh install.
+// buildAgentRegistry seeds an agent.Registry for nightme run / nightme
+// test / nightme agents. The dispatch is:
 //
-// Keeping the set narrow (no extras) means a user who genuinely wants
-// an empty registry can still achieve it by deleting the default
-// agents from this file — but the more common "I haven't configured
-// anything yet" path now boots successfully.
-func defaultAgentEntries() map[string]config.AgentEntry {
-	return map[string]config.AgentEntry{
-		"claude": {
-			Command: "claude",
-		},
-		"codex": {
-			Command: "codex-acp",
-		},
-		"opencode": {
-			Command: "opencode",
-			Args:    []string{"acp"},
-		},
-	}
-}
-
-// buildAgentRegistry seeds an agent.Registry from cfg.Agent.Agents. The
-// built-in agents use their v0.2 protocol adapters: Claude uses the SDK
-// adapter, while Codex and OpenCode use ACP. Unknown configured names remain
-// PTY agents for backwards compatibility. If the requested agent is not in
-// the registry, an existing bare path is still registered as PTY.
-//
-// When cfg.Agent.Agents is empty (the common cold-start case after
-// `nightme auth login feishu`), buildAgentRegistry falls back to
-// defaultAgentEntries() so /run <name> works without manual config
-// editing.
+//  1. Start with agent.Builtins (claude is the only v0.2.x built-in
+//     — each agent package registers itself via init()).
+//  2. Layer cfg.Agent.Agents on top. A name matching a built-in
+//     replaces the built-in (custom binary path); an unknown name
+//     becomes a PTY agent (the safe default for user-supplied CLIs).
+//  3. If --agent /some/binary was passed, auto-register that bare
+//     path so a typo surfaces as "agent not found" instead of a
+//     confusing exec error.
 func buildAgentRegistry(cfg *config.Config, requested string) *agent.Registry {
 	reg := agent.New()
-	if cfg == nil {
-		return reg
+	for _, a := range agent.Builtins.List() {
+		reg.Register(a)
 	}
-	entries := cfg.Agent.Agents
-	if len(entries) == 0 {
-		entries = defaultAgentEntries()
-	}
-	for name, entry := range entries {
-		if entry.Command == "" {
-			continue
+	if cfg != nil {
+		for name, entry := range cfg.Agent.Agents {
+			if entry.Command == "" {
+				continue
+			}
+			a := ptyagent.New(name, entry.Command, append([]string(nil), entry.Args...), configuredAgentEnv(entry.Env))
+			a.Cols = cfg.Session.DefaultPtyCols
+			a.Rows = cfg.Session.DefaultPtyRows
+			reg.Register(a)
 		}
-		configured := configuredAgent(name, entry)
-		if pty, ok := configured.(*ptyagent.Agent); ok {
-			pty.Cols = cfg.Session.DefaultPtyCols
-			pty.Rows = cfg.Session.DefaultPtyRows
-		}
-		reg.Register(configured)
 	}
 	if _, err := reg.Get(requested); err != nil {
 		// Auto-register a bare-path agent when the user passed
@@ -200,23 +171,6 @@ func buildAgentRegistry(cfg *config.Config, requested string) *agent.Registry {
 		}
 	}
 	return reg
-}
-
-func configuredAgent(name string, entry config.AgentEntry) agent.Agent {
-	args := append([]string(nil), entry.Args...)
-	switch name {
-	case "claude":
-		// v0.2: Claude Code uses the dedicated JSON-IO bridge instead
-		// of the SDK sentinel. See docs/feat/F-24-claudecode-bridge.md.
-		return claudecode.New(name, entry.Command, args)
-	case "codex", "opencode":
-		if name == "opencode" && len(args) == 0 {
-			args = []string{"acp"}
-		}
-		return acpagent.New(name, entry.Command, args)
-	default:
-		return ptyagent.New(name, entry.Command, args, configuredAgentEnv(entry.Env))
-	}
 }
 
 func configuredAgentEnv(env map[string]string) []string {

@@ -82,6 +82,12 @@ func (h *handlerContext) cwd(ctx context.Context, msg *Message, args []string) (
 		if home, err := os.UserHomeDir(); err == nil {
 			path = filepath.Join(home, strings.TrimPrefix(path, "~"))
 		}
+	} else if !filepath.IsAbs(path) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return h.reply(ctx, msg.ChatID, fmt.Sprintf("/cwd: resolve home directory: %v", err)), nil
+		}
+		path = filepath.Join(home, path)
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {

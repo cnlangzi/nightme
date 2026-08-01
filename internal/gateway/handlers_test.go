@@ -100,6 +100,28 @@ func TestCwdHandler_NewSession(t *testing.T) {
 	}
 }
 
+func TestCwdHandler_RelativePathUsesHome(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "code", "nightme")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create workspace: %v", err)
+	}
+	t.Setenv("HOME", home)
+	gw, mgr, _ := newTestStack(t)
+
+	ctx := WithGateway(context.Background(), gw)
+	if err := gw.Handle(ctx, &Message{ChatID: "oc_chat", Text: "/cwd code/nightme"}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	sess, err := mgr.GetByChat("oc_chat")
+	if err != nil {
+		t.Fatalf("GetByChat: %v", err)
+	}
+	if sess.Workspace != dir {
+		t.Errorf("workspace = %q, want home-relative path %q", sess.Workspace, dir)
+	}
+}
+
 // TestCwdHandler_RejectsActiveSession confirms the spec rule: a
 // running session cannot have its workspace changed under it.
 func TestCwdHandler_RejectsActiveSession(t *testing.T) {
@@ -573,11 +595,11 @@ func TestRegistry_RepeatHandleDoesNotFail(t *testing.T) {
 // /run handler can surface a clear "binary not found" message.
 type detectorFakeAgent struct{}
 
-func (d *detectorFakeAgent) Name() string        { return "claude" }
-func (d *detectorFakeAgent) Mode() agent.Mode    { return agent.ModePTY }
-func (d *detectorFakeAgent) Command() string     { return "claude" }
-func (d *detectorFakeAgent) Args() []string      { return nil }
-func (d *detectorFakeAgent) Detect() error       { return errors.New("binary not found") }
+func (d *detectorFakeAgent) Name() string     { return "claude" }
+func (d *detectorFakeAgent) Mode() agent.Mode { return agent.ModePTY }
+func (d *detectorFakeAgent) Command() string  { return "claude" }
+func (d *detectorFakeAgent) Args() []string   { return nil }
+func (d *detectorFakeAgent) Detect() error    { return errors.New("binary not found") }
 func (d *detectorFakeAgent) Start(context.Context, agent.StartConfig) (agent.AgentSession, error) {
 	return nil, errors.New("should not reach Start when Detect fails")
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,6 +51,13 @@ type Adapter struct {
 	stopDone       chan struct{}
 	wsDone         chan struct{}
 
+	// logger is the structured-log target for outgoing-message
+	// traces. Each send / reaction / update emits an info-level
+	// line so the CLI surface shows both halves of a conversation
+	// (the inbound "received:" line is logged by the channel
+	// pump). Defaults to slog.Default(); settable via SetLogger.
+	logger *slog.Logger
+
 	// These hooks have production defaults and are intentionally kept as
 	// fields so tests can replace the network boundary with a small function.
 	wsStart  func(context.Context) error
@@ -74,6 +82,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		incoming: make(chan channel.Message, 128),
 		cfg:      cfg,
 		done:     make(chan struct{}),
+		logger:   slog.Default(),
 	}
 
 	handler := larkdispatcher.NewEventDispatcher(
@@ -255,6 +264,47 @@ func (a *Adapter) Stop(ctx context.Context) error {
 // Incoming returns the adapter's normalized message stream.
 func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 
+// SetLogger swaps the structured logger used for outgoing-message
+// traces. Pass nil to fall back to slog.Default().
+func (a *Adapter) SetLogger(l *slog.Logger) {
+	if l == nil {
+		l = slog.Default()
+	}
+	a.mu.Lock()
+	a.logger = l
+	a.mu.Unlock()
+}
+
+// logOutgoing emits one info-level line per outgoing Feishu call so
+// the CLI surface shows both halves of the conversation. The
+// inbound "received: …" line is printed by the channel pump in
+// cmd/nightme/run.go; without this trace the user sees their own
+// inputs but not what the bot sent back.
+//
+// `kind` is one of "send_text", "add_reaction", "delete_reaction",
+// "update_message", "send_card". `target` is the chat ID for text
+// sends and the message ID for reactions / updates. `id` is the
+// created resource ID (message ID, reaction ID) or "" if not
+// applicable. err is non-nil for failed calls.
+func (a *Adapter) logOutgoing(kind, target, id string, err error) {
+	a.mu.RLock()
+	logger := a.logger
+	a.mu.RUnlock()
+	if logger == nil {
+		return
+	}
+	attrs := []slog.Attr{
+		slog.String("kind", kind),
+		slog.String("target", target),
+		slog.String("id", id),
+	}
+	if err != nil {
+		logger.LogAttrs(context.Background(), slog.LevelWarn, "feishu: outgoing failed", append(attrs, slog.String("err", err.Error()))...)
+		return
+	}
+	logger.LogAttrs(context.Background(), slog.LevelInfo, "feishu: outgoing", attrs...)
+}
+
 // SendMessage sends one text message to chatID and returns the
 // created message ID. The Channel interface in
 // internal/channel.Channel accepts (ctx, chatID, text) -> error
@@ -284,7 +334,9 @@ func (a *Adapter) SendMessageText(ctx context.Context, chatID, text string) (str
 	if err != nil {
 		return "", fmt.Errorf("feishu: encode text: %w", err)
 	}
-	return a.sendContent(ctx, chatID, larkim.MsgTypeText, string(content))
+	msgID, err := a.sendContent(ctx, chatID, larkim.MsgTypeText, string(content))
+	a.logOutgoing("send_text", chatID, msgID, err)
+	return msgID, err
 }
 
 // AddReaction adds a reaction emoji to an existing message and
@@ -331,6 +383,7 @@ func (a *Adapter) AddReaction(ctx context.Context, messageID, reactionType strin
 	if resp.Data != nil && resp.Data.ReactionId != nil {
 		rid = *resp.Data.ReactionId
 	}
+	a.logOutgoing("add_reaction", messageID, rid, nil)
 	return rid, nil
 }
 
@@ -357,15 +410,20 @@ func (a *Adapter) DeleteReaction(ctx context.Context, messageID, reactionID stri
 		Build()
 	resp, err := a.larkClient.Im.V1.MessageReaction.Delete(ctx, req)
 	if err != nil {
-		return fmt.Errorf("feishu: delete reaction: %w", err)
+		err = fmt.Errorf("feishu: delete reaction: %w", err)
+		a.logOutgoing("delete_reaction", messageID, reactionID, err)
+		return err
 	}
 	if resp == nil || !resp.Success() {
 		code := 0
 		if resp != nil {
 			code = resp.Code
 		}
-		return fmt.Errorf("feishu: delete reaction failed with code %d", code)
+		err = fmt.Errorf("feishu: delete reaction failed with code %d", code)
+		a.logOutgoing("delete_reaction", messageID, reactionID, err)
+		return err
 	}
+	a.logOutgoing("delete_reaction", messageID, reactionID, nil)
 	return nil
 }
 
@@ -403,15 +461,20 @@ func (a *Adapter) UpdateMessage(ctx context.Context, messageID, text string) err
 		Build()
 	resp, err := a.larkClient.Im.V1.Message.Update(ctx, req)
 	if err != nil {
-		return fmt.Errorf("feishu: update message: %w", err)
+		err = fmt.Errorf("feishu: update message: %w", err)
+		a.logOutgoing("update_message", messageID, "", err)
+		return err
 	}
 	if resp == nil || !resp.Success() {
 		code := 0
 		if resp != nil {
 			code = resp.Code
 		}
-		return fmt.Errorf("feishu: update message failed with code %d", code)
+		err = fmt.Errorf("feishu: update message failed with code %d", code)
+		a.logOutgoing("update_message", messageID, "", err)
+		return err
 	}
+	a.logOutgoing("update_message", messageID, "", nil)
 	return nil
 }
 

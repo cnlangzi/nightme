@@ -267,6 +267,16 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	logger.Info("channel connected", "channel", "feishu")
 	fmt.Fprintln(out, "Feishu WebSocket connected")
 
+	// Route outgoing Feishu messages through the same structured
+	// logger so the CLI surface shows both halves of every
+	// conversation (the inbound "received:" line is logged below
+	// by the channel pump). Without this, the user sees only the
+	// messages they sent to nightme and not the replies / cards /
+	// reactions nightme sent back.
+	if fa, ok := ch.(*feishu.Adapter); ok {
+		fa.SetLogger(logger)
+	}
+
 	// Spawn per-session pumps so live agent events are rendered
 	// back to the chat. We (re)attach every time the session
 	// table changes by polling on each incoming message.

@@ -95,6 +95,15 @@ as closely as a pre-1.0 project can.
   context. This removes the misleading "Session ended (exit 0)"
   string that was being sent to users when the pump hit the
   fallback.
+- Outgoing Feishu trace: `*Adapter` now logs every Send / Add /
+  Delete / Update reaction call at info level via the same
+  structured logger the run-time uses. `cmd/nightme/run.go` wires
+  the adapter's logger right after `ch.Start`. Combined with the
+  existing inbound "received: …" line in the channel pump, the
+  CLI surface now shows both halves of every conversation — the
+  user sees their own message AND the reply / reaction / card the
+  bot sent back, instead of only the inbound side. Failed calls
+  upgrade to warn-level and include the error.
 - `nightme version` subcommand: REPL-friendly sibling of `--version`
   (Cobra only registers `--version` as a flag, not a verb).
 - Cold-start fallback: `nightme run` and `nightme agents` now seed

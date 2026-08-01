@@ -50,6 +50,20 @@ type Adapter struct {
 	cfg        *config.Config
 	cancel     context.CancelFunc
 
+	// mu is the adapter's state mutex. It guards:
+	//   - receipts and receiptsByUserMsgID (concurrent writers:
+	//     dispatchLoop's SendUserMessage and pumpOutbound's
+	//     receiptFor are independent goroutines per chat)
+	//   - stopped, incomingClosed (Stop vs incoming handlers)
+	//   - logger (SetLogger vs logInbound / logOutgoing readers)
+	//
+	// Locking discipline: NEVER call a method that takes mu.RLock
+	// (logInbound, logOutgoing, MarkExecuting, the receiptFor
+	// lookup) while holding mu.Lock. Go's sync.RWMutex is not
+	// reentrant — the holder-with-RLock-request pattern is a
+	// self-deadlock. See SendUserMessage for the eviction path,
+	// which captures the old receipt under the lock and only
+	// calls SetCompleted after releasing.
 	mu             sync.RWMutex
 	publishMu      sync.Mutex
 	done           chan struct{}
@@ -355,17 +369,31 @@ func (a *Adapter) SendUserMessage(ctx context.Context, chatID, userMsgID, conten
 	}
 
 	receipt := NewMessageReceiptForReply(chatID, userMsgID, msgID, a)
+	// Evict any prior receipt for this chat (a follow-up user
+	// message arrived while a previous turn was still in-flight).
+	// The new message becomes the active one.
+	//
+	// Capture the old receipt under the lock, then call
+	// SetCompleted AFTER releasing. SetCompleted → renderLocked →
+	// UpdateMessage → logOutgoing needs mu.RLock; holding mu.Lock
+	// while requesting it is a self-deadlock (Go's sync.RWMutex is
+	// not reentrant). The old receipt stays out of the indexes
+	// once we drop the lock, so any concurrent lookup sees only
+	// the new receipt and the old SetCompleted runs to completion
+	// without interleaving with the new turn's writes.
+	var oldToComplete *MessageReceipt
 	a.mu.Lock()
-	// Evict any prior receipt for this chat (e.g. a follow-up
-	// user message arrived while a previous turn was still
-	// in-flight). The new message becomes the active one.
 	if old, ok := a.receipts[chatID]; ok && old != nil && old != receipt {
-		_ = old.SetCompleted(ctx)
+		oldToComplete = old
 		delete(a.receiptsByUserMsgID, old.userMsgID)
 	}
 	a.receipts[chatID] = receipt
 	a.receiptsByUserMsgID[userMsgID] = receipt
 	a.mu.Unlock()
+
+	if oldToComplete != nil {
+		_ = oldToComplete.SetCompleted(ctx)
+	}
 
 	return receipt, nil
 }

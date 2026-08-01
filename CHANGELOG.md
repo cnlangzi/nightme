@@ -6,6 +6,27 @@ as closely as a pre-1.0 project can.
 
 ## [Unreleased] — v0.3 architecture refactor (Stage 3 landed — v0.3 internally feature-complete)
 
+- **SendUserMessage eviction deadlock (fix)**: when a follow-up
+  user message arrived while the previous turn was still
+  in-flight (the old receipt in `StateExecuting`, not yet
+  `StateCompleted`), the eviction path called `old.SetCompleted`
+  while holding `a.mu.Lock`. `SetCompleted` → `renderLocked` →
+  `Adapter.UpdateMessage` → `logOutgoing` needs `a.mu.RLock`, and
+  Go's `sync.RWMutex` is not reentrant — the dispatchLoop
+  goroutine self-deadlocked for 5+ minutes, blocking every later
+  inbound message (`feishu: incoming` simply stopped appearing).
+  Fix: capture the old receipt under the lock, drop the lock,
+  then call `SetCompleted`. The new receipt is in the indexes
+  before the eviction runs, so the old turn's events cannot
+  interleave with the new turn's writes. `TestSendUserMessage_
+  EvictionDoesNotDeadlock` covers the regression and times out
+  against the pre-fix code.
+- **Concurrency model documentation (no code change)**: a
+  comment on `Adapter.mu` now spells out the locking discipline
+  — guard `receipts`, `receiptsByUserMsgID`, `stopped`,
+  `incomingClosed`, and `logger`; never call a method that takes
+  `mu.RLock` while holding `mu.Lock`. The deadlock above is the
+  documented consequence of breaking that rule.
 - **CLI log surface (fix)**: the structured logger now tees every
   line to the persisted log file **plus stdout and stderr**, so
   the terminal shows the same trace the file captures and `nightme

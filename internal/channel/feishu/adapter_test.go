@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -91,6 +92,85 @@ func TestSendLongMessage_SplitsAtNewline(t *testing.T) {
 	}
 	if !strings.HasSuffix(sent[0], "\n") {
 		t.Error("first chunk did not end at the newline boundary")
+	}
+}
+
+func TestSendUserMessage_EvictionDoesNotDeadlock(t *testing.T) {
+	// Before the fix: SendUserMessage held a.mu.Lock while calling
+	// old.SetCompleted(ctx). SetCompleted → renderLocked →
+	// adapter.UpdateMessage → logOutgoing needs a.mu.RLock, and
+	// Go's sync.RWMutex is not reentrant — the eviction self-
+	// deadlocked the dispatchLoop goroutine, blocking every later
+	// inbound message. Reproduce the path here: leave the old
+	// receipt in StateExecuting (the prefix that triggers the
+	// renderLocked branch) and call SendUserMessage again. The
+	// goroutine must return within the deadline.
+	a := testAdapter(t)
+	chatID := "oc_chat"
+
+	// Replace sendFunc so SendMessageText succeeds without the
+	// lark SDK actually hitting Feishu.
+	var replies int
+	a.sendFunc = func(_ context.Context, _, _, _ string) (string, error) {
+		replies++
+		return fmt.Sprintf("reply-%d", replies), nil
+	}
+
+	// Register an old receipt in StateExecuting. SetCompleted
+	// short-circuits when state is already Completed, so the
+	// deadlock only repros when the old turn is still in-flight.
+	old := NewMessageReceiptForReply(chatID, "msg-old", "reply-old", a)
+	old.state = StateExecuting
+	a.mu.Lock()
+	a.receipts[chatID] = old
+	a.receiptsByUserMsgID["msg-old"] = old
+	a.mu.Unlock()
+
+	// Kick SendUserMessage for a new message in a goroutine. The
+	// pre-fix code locked here for 5+ minutes against itself.
+	type result struct {
+		receipt *MessageReceipt
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		r, err := a.SendUserMessage(context.Background(), chatID, "msg-new", "⏳ 等待中")
+		done <- result{r, err}
+	}()
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("SendUserMessage: %v", r.err)
+		}
+		if r.receipt == nil {
+			t.Fatal("nil receipt returned")
+		}
+		// The new receipt is the active one for this chat.
+		a.mu.RLock()
+		got := a.receipts[chatID]
+		byUser := a.receiptsByUserMsgID["msg-new"]
+		oldStill := a.receiptsByUserMsgID["msg-old"]
+		a.mu.RUnlock()
+		if got != r.receipt {
+			t.Errorf("chat receipt not updated: got %p, want %p", got, r.receipt)
+		}
+		if byUser != r.receipt {
+			t.Errorf("userMsgID index not updated")
+		}
+		if oldStill != nil {
+			t.Errorf("old receipt still in userMsgID index: %p", oldStill)
+		}
+		// The old receipt was promoted to StateCompleted by the
+		// eviction — SetCompleted runs after the lock release.
+		old.mu.Lock()
+		state := old.state
+		old.mu.Unlock()
+		if state != StateCompleted {
+			t.Errorf("old receipt state = %v, want StateCompleted", state)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SendUserMessage deadlocked: old.SetCompleted → renderLocked → logOutgoing blocked on a.mu.RLock while holding a.mu.Lock")
 	}
 }
 

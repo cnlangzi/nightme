@@ -10,7 +10,9 @@ import (
 // Message is a normalized incoming message from a channel.
 //
 // Channel adapters strip protocol-specific markup before publishing a Message;
-// Raw payload support can be added without changing the daemon contract.
+// non-text payloads (image/file/audio/video) are downloaded into
+// Attachments before the message reaches the gateway. Raw payload
+// support can be added without changing the daemon contract.
 //
 // ChatType discriminates DM ("p2p") from group chat ("group"). Each
 // IM backend exposes this concept differently:
@@ -33,6 +35,74 @@ type Message struct {
 	// cleanly. Empty string means "unknown" (e.g. legacy callers
 	// that pre-date this field).
 	ChatType string
+
+	// MessageID is the channel-native identifier for this message
+	// (e.g. Feishu's om_xxx open_message_id). Required by the
+	// adapter download path — resource lookups are scoped to a
+	// specific message ID. Empty for backends that do not expose
+	// one.
+	MessageID string
+
+	// Attachments carries any non-text payloads (image, file, audio,
+	// video, post-embedded images). For text-only messages this is
+	// nil/empty. Each Attachment's LocalPath is populated by the
+	// channel adapter after download; Error holds the failure
+	// reason if the download was unsuccessful. See Attachment.
+	Attachments []Attachment
+}
+
+// Attachment is a single file/image/audio/video resource attached to
+// an incoming channel.Message.
+//
+// Lifecycle:
+//  1. Channel adapter extracts {Type, FileKey, FileName} from the
+//     raw message envelope (e.g. Feishu image/file/audio/media
+//     msg_type payloads).
+//  2. Channel adapter (or its delegate) downloads the binary to a
+//     local path under nightme's per-session inbox and sets
+//     LocalPath + Size. On failure it sets Error instead — the
+//     downstream code decides whether to surface that to the user.
+//
+// LocalPath is an absolute filesystem path. Callers must NOT assume
+// the file lives under the workspace — for v0.2 attachments live
+// under ~/.nightme/inbox/<session_id>/.
+//
+// Error is non-empty iff the download failed after all retries.
+// Best-effort semantics: the caller can choose to drop, surface, or
+// retry further.
+type Attachment struct {
+	// Type is the channel-native msg_type — Feishu values:
+	// "image", "file", "audio", "media" (video). Other backends
+	// may use their own vocabulary; downstream code only branches
+	// on Type for display purposes (e.g. "image" vs "file").
+	Type string
+
+	// FileKey is the channel-side resource identifier (Feishu
+	// image_key / file_key). Preserved for diagnostics and to allow
+	// future re-download attempts without re-extracting from the
+	// message envelope.
+	FileKey string
+
+	// FileName is the original filename when the channel exposes
+	// one (Feishu's file/audio/media msg_types carry file_name).
+	// Empty for bare image messages. Used as the on-disk filename;
+	// a synthesized fallback ("<type>_<filekey>") is used when
+	// empty.
+	FileName string
+
+	// LocalPath is the absolute filesystem path after successful
+	// download. Empty if the download failed (see Error) or has
+	// not been attempted yet.
+	LocalPath string
+
+	// Size is the byte length of the downloaded file. Zero if the
+	// download failed or has not been attempted.
+	Size int64
+
+	// Error is the failure reason after the download exhausted
+	// its retries. Empty on success. Best-effort callers should
+	// treat Error as a hard skip.
+	Error string
 }
 
 // Normalized chat type constants. Channel adapters should map their

@@ -138,6 +138,8 @@ Next: run `nightme run` to start the gateway.
 |------|------|------|
 | Scope (tenant) | `im:message:send_as_bot` | bot 发消息 |
 | Scope (tenant) | `im:message:receive_v1` (event) | 接收消息 |
+| Scope (tenant) | `im:message:readonly` | 下载消息资源 (F-14 接收图片/文件/音视频) |
+| Scope (tenant) | `im:message.reactions:write_only` | 在用户消息上加 reaction emoji (F-25 receipt) |
 | Scope (tenant) | `im:message.group_at_msg:readonly` | 群消息 @ 提及（v0.1 可选）|
 | Event | `im.message.receive_v1` | 收消息事件 |
 

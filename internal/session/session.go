@@ -240,9 +240,21 @@ func (s *Session) SendText(text string) error {
 	return as.SendText(text)
 }
 
+// SendBlocks proxies to the underlying AgentSession for structured
+// (rich-text) user input. Same nil-handle semantics as SendText.
+func (s *Session) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
+	s.mu.RLock()
+	as := s.agentSession
+	s.mu.RUnlock()
+	if as == nil {
+		return errors.New("session: no live agent")
+	}
+	return as.SendBlocks(ctx, blocks)
+}
+
 // EnsureInputBuffer lazily constructs and returns the per-session
 // InputBuffer. The first call wires up the onFlush hook to call
-// SendText on the live agent; subsequent calls return the existing
+// SendBlocks on the live agent; subsequent calls return the existing
 // buffer.
 //
 // The buffer is in-memory only. If the session is reloaded from
@@ -255,14 +267,14 @@ func (s *Session) EnsureInputBuffer() *InputBuffer {
 	if s.inputBuffer != nil {
 		return s.inputBuffer
 	}
-	hook := func(combined string, _ []string) error {
+	hook := func(blocks []agent.ContentBlock, _ []string) error {
 		s.mu.RLock()
 		as := s.agentSession
 		s.mu.RUnlock()
 		if as == nil {
 			return errors.New("session: no live agent for flush")
 		}
-		return as.SendText(combined)
+		return as.SendBlocks(context.Background(), blocks)
 	}
 	s.inputBuffer = NewInputBuffer(hook, 50, 100*1024)
 	return s.inputBuffer
@@ -281,12 +293,17 @@ func (s *Session) InputBuffer() *InputBuffer {
 // The session decides whether to dispatch immediately (state=Idle)
 // or buffer (state=Busy). The caller does not need to know.
 //
+// blocks is the structured user turn — text + optional image /
+// file attachments. The buffer stores blocks verbatim (not as
+// strings) so image references survive across the busy → idle
+// flush boundary without losing the attachment path.
+//
 // userMsgID is propagated through the buffer so the channel layer
 // can update the corresponding MessageReceipt on flush.
-func (s *Session) QueueUserMessage(content, userMsgID string) error {
-	if content == "" {
+func (s *Session) QueueUserMessage(blocks []agent.ContentBlock, userMsgID string) error {
+	if len(blocks) == 0 {
 		return nil
 	}
 	buf := s.EnsureInputBuffer()
-	return buf.Add(content, userMsgID)
+	return buf.Add(blocks, userMsgID)
 }

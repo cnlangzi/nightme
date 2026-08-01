@@ -9,9 +9,13 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
+func tb(s string) []agent.ContentBlock {
+	return []agent.ContentBlock{{Type: agent.ContentText, Text: s}}
+}
+
 // TestQueueUserMessage_IdleState_DispatchesDirectly verifies that a
 // user message arriving when the agent is idle goes straight to
-// SendText (no buffering).
+// SendBlocks (no buffering).
 func TestQueueUserMessage_IdleState_DispatchesDirectly(t *testing.T) {
 	sess := &Session{ID: "s1", ChatID: "chat1"}
 
@@ -21,16 +25,16 @@ func TestQueueUserMessage_IdleState_DispatchesDirectly(t *testing.T) {
 	sess.agentSession = as
 	sess.mu.Unlock()
 
-	// Wrap with a recording send hook. fakeAgentSession.SendText is
-	// a no-op; instead we observe via the buffer's flush hook by
-	// routing through EnsureInputBuffer's hook (which calls
-	// agentSession.SendText directly).
+	// Wrap with a recording send hook. fakeAgentSession.SendBlocks
+	// is a no-op; instead we observe via the buffer's flush hook
+	// by routing through EnsureInputBuffer's hook (which calls
+	// agentSession.SendBlocks directly).
 	buf := sess.EnsureInputBuffer()
 	_ = buf
 
-	// Direct dispatch: the SendText stub returns nil, so we just
+	// Direct dispatch: the SendBlocks stub returns nil, so we just
 	// verify no error and no buffering.
-	if err := sess.QueueUserMessage("hello", "msg1"); err != nil {
+	if err := sess.QueueUserMessage(tb("hello"), "msg1"); err != nil {
 		t.Fatalf("QueueUserMessage: %v", err)
 	}
 	if got := sess.InputBuffer().Pending(); got != 0 {
@@ -50,15 +54,15 @@ func TestQueueUserMessage_BusyState_Buffers(t *testing.T) {
 	sess.mu.Unlock()
 
 	// Initial: idle. First message goes through (no buffering).
-	sess.QueueUserMessage("first", "m1")
+	sess.QueueUserMessage(tb("first"), "m1")
 
 	// Now mark busy (simulating agent has started its turn).
 	buf := sess.EnsureInputBuffer()
 	buf.SetState(StateBusy)
 
 	// Two more messages arrive while busy.
-	sess.QueueUserMessage("second", "m2")
-	sess.QueueUserMessage("third", "m3")
+	sess.QueueUserMessage(tb("second"), "m2")
+	sess.QueueUserMessage(tb("third"), "m3")
 
 	if buf.Pending() != 2 {
 		t.Errorf("Pending = %d, want 2", buf.Pending())
@@ -88,10 +92,10 @@ func TestQueueUserMessage_BufferFull(t *testing.T) {
 
 	// Default maxMsgs = 50; fill it up.
 	for i := 0; i < 50; i++ {
-		_ = sess.QueueUserMessage("msg", "id")
+		_ = sess.QueueUserMessage(tb("msg"), "id")
 	}
 	// 51st should fail.
-	err := sess.QueueUserMessage("overflow", "id_over")
+	err := sess.QueueUserMessage(tb("overflow"), "id_over")
 	if err == nil {
 		t.Error("expected ErrBufferFull on 51st message")
 	}

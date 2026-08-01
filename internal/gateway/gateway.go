@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/channel"
 )
 
 // Message is the normalized shape that every channel adapter produces
@@ -27,6 +29,17 @@ type Message struct {
 	// (e.g. /cwd in a DM is fine; /sessions list is fine in
 	// either).
 	ChatType string
+
+	// MessageID is forwarded from channel.Message.MessageID. Used
+	// by the adapter layer to download message resources (image /
+	// file / audio / video); gateway commands do not consume it.
+	MessageID string
+
+	// Attachments is forwarded from channel.Message.Attachments.
+	// The fallback handler (session manager forwarding) joins Text
+	// with attachment local paths into a single user turn via
+	// buildForwardedText before dispatching to the agent.
+	Attachments []channel.Attachment
 }
 
 // Command is one nightme-level slash command. The Handler is

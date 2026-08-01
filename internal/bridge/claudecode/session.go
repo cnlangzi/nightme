@@ -3,6 +3,7 @@ package claudecode
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -181,15 +182,142 @@ func (s *session) PID() int { return s.pid }
 // SendText writes a user message to Claude Code's stdin in
 // stream-json format. Each call emits one user message; Claude Code
 // batches multiple user messages per turn until it sees a "result".
+//
+// SendText is a convenience wrapper around SendBlocks for the
+// text-only path. Implementations that need image / file
+// attachments must use SendBlocks directly.
 func (s *session) SendText(text string) error {
 	if text == "" {
 		return nil
 	}
+	return s.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: text},
+	})
+}
+
+// SendBlocks writes a structured user turn to Claude Code's stdin in
+// stream-json format. Each block is encoded into an Anthropic-API
+// content-array element:
+//
+//	{type:"text",    text:"..."}              for ContentText
+//	{type:"image",   source:{type:"base64",
+//	                         media_type:"image/png",
+//	                         data:"..."}}    for ContentImage (file base64-inlined)
+//	{type:"document",source:{type:"base64",
+//	                         media_type:"application/pdf",
+//	                         data:"..."}}    for ContentFile (PDF only)
+//
+// Non-image, non-PDF files fall back to a text-block annotation
+// "File: <path>" so the agent knows the file exists and can read it
+// via its file tools. (Anthropic API only supports images and PDFs
+// inline; other MIME types are accepted as text references.)
+//
+// Empty blocks slice is a no-op. Image/file blocks whose Path does
+// not exist are logged at warn level and dropped — sending a
+// half-broken content array is worse than silently degrading.
+func (s *session) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
+	if len(blocks) == 0 {
+		return nil
+	}
+	content := make([]map[string]any, 0, len(blocks))
+	for _, b := range blocks {
+		switch b.Type {
+		case agent.ContentText:
+			if b.Text == "" {
+				continue
+			}
+			content = append(content, map[string]any{
+				"type": "text",
+				"text": b.Text,
+			})
+
+		case agent.ContentImage:
+			if b.Path == "" {
+				continue
+			}
+			info, statErr := os.Stat(b.Path)
+			if statErr != nil {
+				slog.Default().Warn("claudecode: skip image block (stat failed)",
+					"path", b.Path, "err", statErr)
+				continue
+			}
+			if info.Size() > 5*1024*1024 {
+				// Anthropic API rejects base64 images > ~5 MB.
+				// Surface as a text annotation so the agent
+				// knows the file exists and can try to read it
+				// via its file tools (which may use the Files
+				// API for larger assets).
+				slog.Default().Warn("claudecode: image exceeds 5MB, falling back to text annotation",
+					"path", b.Path, "size", info.Size())
+				content = append(content, map[string]any{
+					"type": "text",
+					"text": fmt.Sprintf("Image (too large to inline, %d bytes): %s", info.Size(), b.Path),
+				})
+				continue
+			}
+			encoded, err := readFileAsBase64(b.Path)
+			if err != nil {
+				slog.Default().Warn("claudecode: skip image block (read/encode failed)",
+					"path", b.Path, "size", info.Size(), "err", err)
+				continue
+			}
+			slog.Default().Debug("claudecode: inline image",
+				"path", b.Path, "size", info.Size(), "media_type", b.MediaType)
+			content = append(content, map[string]any{
+				"type": "image",
+				"source": map[string]any{
+					"type":       "base64",
+					"media_type": b.MediaType,
+					"data":       encoded,
+				},
+			})
+
+		case agent.ContentFile:
+			if b.Path == "" {
+				continue
+			}
+			// Anthropic API inline file support is PDF-only. For
+			// PDFs we inline; for everything else we emit a
+			// text annotation so the agent can `Read` the file.
+			if b.MediaType == "application/pdf" {
+				encoded, err := readFileAsBase64(b.Path)
+				if err != nil {
+					slog.Default().Warn("claudecode: skip file block",
+						"path", b.Path, "err", err)
+					continue
+				}
+				content = append(content, map[string]any{
+					"type": "document",
+					"source": map[string]any{
+						"type":       "base64",
+						"media_type": "application/pdf",
+						"data":       encoded,
+					},
+				})
+			} else {
+				content = append(content, map[string]any{
+					"type": "text",
+					"text": fmt.Sprintf("File: %s", b.Path),
+				})
+			}
+
+		default:
+			// Unknown block type — drop with a warn rather than
+			// send malformed content.
+			slog.Default().Warn("claudecode: skip unknown block", "type", b.Type)
+		}
+	}
+	if len(content) == 0 {
+		// All blocks were dropped (empty / unreadable). Nothing
+		// to send — matches SendText's empty-input no-op.
+		return nil
+	}
+
 	msg := map[string]any{
 		"type": "user",
 		"message": map[string]any{
 			"role":    "user",
-			"content": text,
+			"content": content,
 		},
 	}
 	data, err := json.Marshal(msg)
@@ -197,6 +325,19 @@ func (s *session) SendText(text string) error {
 		return fmt.Errorf("claudecode: marshal user msg: %w", err)
 	}
 	return s.writeLine(data)
+}
+
+// readFileAsBase64 reads the file at path and returns its contents
+// base64-encoded. The Anthropic API accepts base64-inlined images
+// up to ~5 MB and PDFs up to ~32 MB; larger files would require a
+// different transport (file_id via Files API). Errors include the
+// path for log readability.
+func readFileAsBase64(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	return base64.StdEncoding.EncodeToString(data), nil
 }
 
 // SendPermission writes the user's answer to the most recent

@@ -187,12 +187,12 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	}
 	responder := channelResponder{ch: ch, renderer: renderer}
 	if renderer != nil {
-		responder.userMessageFn = func(chatID, userMsgID, content string) error {
+		responder.userMessageFn = func(chatID, userMsgID string, blocks []agent.ContentBlock) error {
 			sess, err := mgr.GetByChat(chatID)
 			if err != nil {
 				return fmt.Errorf("no session for chat: %w", err)
 			}
-			return sess.QueueUserMessage(content, userMsgID)
+			return sess.QueueUserMessage(blocks, userMsgID)
 		}
 	}
 
@@ -224,12 +224,28 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		if sess.Status() != session.StatusRunning {
 			return responder.Reply(ctx, msg.ChatID, "CLI not running, send /run <agent> to start")
 		}
+		// Compose the structured user turn: caption text + the
+		// successful attachment paths. Failed attachments are
+		// already filtered out by BuildBlocks. Empty when the
+		// message carried no text and all downloads failed (the
+		// dispatcher branch above drops the message entirely when
+		// AllFailed, so we never reach here in that case).
+		blocks := feishu.BuildBlocks(msg.Text, msg.Attachments)
+		// Stable, unique per Feishu message so the receipt/buffer
+		// correlation keys never collide. Feishu CreateTime is
+		// millisecond precision and two events from the same
+		// sender within 1ms would otherwise share the same
+		// composite ID and merge into a single ⏳→🔄→✅ cycle.
+		userMsgID := msg.MessageID
+		if userMsgID == "" {
+			userMsgID = msg.SenderID + ":" + msg.Time.UTC().Format(time.RFC3339Nano)
+		}
 		// Renderer path: creates receipt + queues via InputBuffer.
 		// Falls back to legacy SendText path when no renderer.
 		if responder.renderer != nil {
-			return responder.SendUserMessage(ctx, msg.ChatID, msg.SenderID+":"+msg.Time.UTC().Format(time.RFC3339Nano), msg.Text)
+			return responder.SendUserMessage(ctx, msg.ChatID, userMsgID, blocks)
 		}
-		return sess.SendText(msg.Text + "\n")
+		return sess.SendBlocks(ctx, blocks)
 	}
 	gw = gateway.New(fallback)
 	gateway.RegisterDefaultCommands(gw, mgr, agents, responder)
@@ -276,14 +292,59 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 			if !ok {
 				return shutdownRun(out, ch, mgr, deps.cleanup, logger)
 			}
-			fmt.Fprintf(out, "received: %s\n", msg.Text)
+			fmt.Fprintf(out, "received: %s (attachments=%d)\n", msg.Text, len(msg.Attachments))
+
+			// F-14 inbound attachment handling. If the channel
+			// message carries any non-text attachments, download
+			// them synchronously (with retries) before letting the
+			// gateway see the message. The Feishu adapter is the
+			// only one that produces attachments today; other
+			// channels fall through unchanged.
+			//
+			// Skip the download path entirely when there is no
+			// session bound to this chat — without a session the
+			// inbox directory cannot be created, every download
+			// would "fail" with the misleading ❌ message, and the
+			// user's caption would be silently dropped. Letting the
+			// gateway's fallback handle the un-bound case produces a
+			// correct "no workspace set" / "CLI not running" hint
+			// instead.
+			if len(msg.Attachments) > 0 {
+				if feishuCh, ok := ch.(*feishu.Adapter); ok {
+					sess, _ := mgr.GetByChat(msg.ChatID)
+					if sess != nil {
+						result := feishuCh.DownloadAttachments(ctx, msg.MessageID, msg.Attachments, sess.ID)
+						msg.Attachments = result.Atts
+
+						// All downloads failed: the inbound message
+						// would mislead the agent (caption without
+						// the image it referred to). Drop the
+						// forwarding and tell the user to resend.
+						if result.AllFailed {
+							_ = responder.Reply(ctx, msg.ChatID,
+								"❌ 文件下载失败 (重试 3 次后)\n请重新发送该消息。")
+							continue
+						}
+						// Partial failure: forward what's available
+						// and tell the user about the rest.
+						if len(result.FailureKeys) > 0 {
+							_ = responder.Reply(ctx, msg.ChatID,
+								fmt.Sprintf("⚠️ 部分文件下载失败: %s\n请重新发送未下载成功的文件。",
+									strings.Join(result.FailureKeys, ", ")))
+						}
+					}
+				}
+			}
+
 			handleCtx := gateway.WithGateway(ctx, gw)
 			if err := gw.Handle(handleCtx, &gateway.Message{
-				ChatID:   msg.ChatID,
-				Text:     msg.Text,
-				SenderID: msg.SenderID,
-				Time:     msg.Time,
-				ChatType: msg.ChatType,
+				ChatID:      msg.ChatID,
+				Text:        msg.Text,
+				SenderID:    msg.SenderID,
+				Time:        msg.Time,
+				ChatType:    msg.ChatType,
+				MessageID:   msg.MessageID,
+				Attachments: msg.Attachments,
 			}); err != nil {
 				fmt.Fprintf(out, "[nightme] gateway error: %v\n", err)
 			}
@@ -304,7 +365,7 @@ type channelResponder struct {
 	renderer *feishu.Renderer
 	// userMessageFn lets the responder route user messages into
 	// the session queue (F-25). nil = plain SendText fallback.
-	userMessageFn func(chatID, userMsgID, content string) error
+	userMessageFn func(chatID, userMsgID string, blocks []agent.ContentBlock) error
 }
 
 func (r channelResponder) Reply(ctx context.Context, chatID, text string) error {
@@ -316,33 +377,42 @@ func (r channelResponder) Reply(ctx context.Context, chatID, text string) error 
 
 // SendUserMessage is the F-25 entry point used by the gateway to
 // hand a user message to the agent. It creates a MessageReceipt
-// (⏳ emoji + reply), routes the content through the session
-// InputBuffer (idle=bypass / busy=queue), and on dispatch flips
-// the receipt to Executing.
+// (⏳ emoji + reply), routes the structured blocks through the
+// session InputBuffer (idle=bypass / busy=queue), and on dispatch
+// flips the receipt to Executing.
+//
+// The receipt's reply text is the user-facing caption only (built
+// from blocks via the renderer's own formatter). When the renderer
+// is unavailable, blocks are flattened to a single string for the
+// legacy SendLongMessage path.
 //
 // When renderer or userMessageFn is nil, this is a no-op (the
 // caller should fall back to plain SendLongMessage). We do NOT
 // silently drop the message — that would surprise users.
-func (r channelResponder) SendUserMessage(ctx context.Context, chatID, userMsgID, content string) error {
+func (r channelResponder) SendUserMessage(ctx context.Context, chatID, userMsgID string, blocks []agent.ContentBlock) error {
 	if r.renderer == nil || r.userMessageFn == nil {
-		// No renderer wired — best-effort fall-through: just send
-		// the text so the user isn't left without feedback. The
-		// legacy SendLongMessage path remains available for
-		// channels that don't support reactions (Telegram etc.).
+		// No renderer wired — best-effort fall-through: flatten
+		// the blocks to a single string and send via the channel
+		// so the user isn't left without feedback. The legacy
+		// SendLongMessage path remains available for channels
+		// that don't support reactions (Telegram etc.).
 		if r.ch != nil {
-			return r.ch.SendLongMessage(ctx, chatID, content)
+			return r.ch.SendLongMessage(ctx, chatID, feishu.BuildForwardedTextFromBlocks(blocks))
 		}
 		return nil
 	}
 	// Create the receipt first so the user sees ⏳ immediately,
 	// then dispatch via the session (which decides immediate send
-	// vs buffer based on InputBuffer state).
-	_, err := r.renderer.SendUserMessage(ctx, chatID, userMsgID, content)
+	// vs buffer based on InputBuffer state). The receipt's reply
+	// text is the flattened block list so the user sees the
+	// attachment paths inline.
+	receiptText := feishu.BuildForwardedTextFromBlocks(blocks)
+	_, err := r.renderer.SendUserMessage(ctx, chatID, userMsgID, receiptText)
 	if err != nil {
 		// Don't fail the user's message; log and fall back.
-		return r.userMessageFn(chatID, userMsgID, content)
+		return r.userMessageFn(chatID, userMsgID, blocks)
 	}
-	if err := r.userMessageFn(chatID, userMsgID, content); err != nil {
+	if err := r.userMessageFn(chatID, userMsgID, blocks); err != nil {
 		// Dispatch failed — keep the receipt in Waiting so the
 		// user can /flush. The receipt's note already says "⏳
 		// 等待中" which is honest.

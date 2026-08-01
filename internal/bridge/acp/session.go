@@ -160,6 +160,13 @@ func (s *acpSession) PID() int {
 // SendText submits a prompt and returns after the JSON-RPC request is written.
 // The prompt response only marks completion of that turn; it does not end the
 // reusable ACP session, so it is deliberately consumed asynchronously.
+//
+// SendText is a convenience wrapper around SendBlocks for the
+// text-only path. Image / file attachments are not yet encoded into
+// ACP's content-block protocol here — Phase 2 will revisit when an
+// ACP-compatible agent (Codex, OpenCode) actually supports inline
+// images. Today those blocks degrade to "@<path>" text so the
+// agent can still read the file via its tools.
 func (s *acpSession) SendText(text string) error {
 	if s.sessionID == "" {
 		return errors.New("bridge/acp: session is not initialized")
@@ -167,6 +174,51 @@ func (s *acpSession) SendText(text string) error {
 	return s.rpc.requestAsync("session/prompt", promptParams{
 		SessionID: s.sessionID,
 		Prompt:    []contentBlock{{Type: "text", Text: text}},
+	})
+}
+
+// SendBlocks submits a structured prompt. ACP's content-block
+// protocol supports text + image + file natively; the bridge
+// translates agent.ContentBlock values into the wire shape. Today
+// only Text is exercised by production agents (Codex / OpenCode
+// have not yet landed), so the type-safe Path-based blocks are
+// preserved here for Phase 2.
+func (s *acpSession) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
+	if s.sessionID == "" {
+		return errors.New("bridge/acp: session is not initialized")
+	}
+	if len(blocks) == 0 {
+		return nil
+	}
+	out := make([]contentBlock, 0, len(blocks))
+	for _, b := range blocks {
+		switch b.Type {
+		case agent.ContentText:
+			if b.Text == "" {
+				continue
+			}
+			out = append(out, contentBlock{Type: "text", Text: b.Text})
+		case agent.ContentImage, agent.ContentFile:
+			// Phase 2: encode as proper ACP image/file blocks.
+			// For now, fall back to a "@<path>" annotation so the
+			// agent can read the file via its tools.
+			if b.Path == "" {
+				continue
+			}
+			out = append(out, contentBlock{
+				Type: "text",
+				Text: "@" + b.Path,
+			})
+		default:
+			continue
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return s.rpc.requestAsync("session/prompt", promptParams{
+		SessionID: s.sessionID,
+		Prompt:    out,
 	})
 }
 

@@ -5,41 +5,53 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
+
+// textBlock is a tiny constructor for the most common test
+// fixture — a single-text-block payload. Tests use it so they
+// don't have to repeat the struct literal every time.
+func textBlock(s string) []agent.ContentBlock {
+	return []agent.ContentBlock{{Type: agent.ContentText, Text: s}}
+}
 
 // --- Idle / Busy state tests ---
 
 func TestInputBuffer_IdleState_SendsImmediately(t *testing.T) {
-	var flushed []string
-	b := NewInputBuffer(func(content string, _ []string) error {
-		flushed = append(flushed, content)
+	var flushed [][]agent.ContentBlock
+	b := NewInputBuffer(func(blocks []agent.ContentBlock, _ []string) error {
+		flushed = append(flushed, blocks)
 		return nil
 	}, 50, 1024)
 
-	if err := b.Add("hello", "m1"); err != nil {
+	if err := b.Add(textBlock("hello"), "m1"); err != nil {
 		t.Fatalf("Add returned err: %v", err)
 	}
 	if got := b.Pending(); got != 0 {
 		t.Errorf("Pending = %d, want 0 (idle bypasses buffer)", got)
 	}
-	if len(flushed) != 1 || flushed[0] != "hello" {
-		t.Errorf("flushed = %v, want [hello]", flushed)
+	if len(flushed) != 1 {
+		t.Fatalf("flushed = %d, want 1", len(flushed))
+	}
+	if got := flushed[0]; len(got) != 1 || got[0].Type != agent.ContentText || got[0].Text != "hello" {
+		t.Errorf("flushed[0] = %+v, want [{ContentText, hello}]", got)
 	}
 }
 
 func TestInputBuffer_BusyState_Buffers(t *testing.T) {
 	var flushed atomic.Int32
-	b := NewInputBuffer(func(_ string, _ []string) error {
+	b := NewInputBuffer(func(_ []agent.ContentBlock, _ []string) error {
 		flushed.Add(1)
 		return nil
 	}, 50, 1024)
 
 	b.SetState(StateBusy)
 
-	if err := b.Add("first", "m1"); err != nil {
+	if err := b.Add(textBlock("first"), "m1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Add("second", "m2"); err != nil {
+	if err := b.Add(textBlock("second"), "m2"); err != nil {
 		t.Fatal(err)
 	}
 	if got := b.Pending(); got != 2 {
@@ -53,23 +65,23 @@ func TestInputBuffer_BusyState_Buffers(t *testing.T) {
 func TestInputBuffer_OnTurnEnded_FlushesCombined(t *testing.T) {
 	var captured struct {
 		mu       sync.Mutex
-		combined string
+		combined []agent.ContentBlock
 		ids      []string
 		calls    int
 	}
-	b := NewInputBuffer(func(content string, ids []string) error {
+	b := NewInputBuffer(func(blocks []agent.ContentBlock, ids []string) error {
 		captured.mu.Lock()
 		defer captured.mu.Unlock()
-		captured.combined = content
+		captured.combined = blocks
 		captured.ids = ids
 		captured.calls++
 		return nil
 	}, 50, 1024)
 
 	b.SetState(StateBusy)
-	b.Add("foo", "id_foo")
-	b.Add("bar", "id_bar")
-	b.Add("baz", "id_baz")
+	b.Add(textBlock("foo"), "id_foo")
+	b.Add(textBlock("bar"), "id_bar")
+	b.Add(textBlock("baz"), "id_baz")
 
 	if err := b.OnTurnEnded(); err != nil {
 		t.Fatalf("OnTurnEnded: %v", err)
@@ -77,8 +89,20 @@ func TestInputBuffer_OnTurnEnded_FlushesCombined(t *testing.T) {
 
 	captured.mu.Lock()
 	defer captured.mu.Unlock()
-	if captured.combined != "foo\nbar\nbaz" {
-		t.Errorf("combined = %q, want 'foo\\nbar\\nbaz'", captured.combined)
+	// The blocks slice is the concatenation of all three entries
+	// in order: foo, bar, baz.
+	want := []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "foo"},
+		{Type: agent.ContentText, Text: "bar"},
+		{Type: agent.ContentText, Text: "baz"},
+	}
+	if len(captured.combined) != len(want) {
+		t.Fatalf("combined length = %d, want %d", len(captured.combined), len(want))
+	}
+	for i, blk := range captured.combined {
+		if blk.Type != want[i].Type || blk.Text != want[i].Text {
+			t.Errorf("combined[%d] = %+v, want %+v", i, blk, want[i])
+		}
 	}
 	if len(captured.ids) != 3 || captured.ids[0] != "id_foo" {
 		t.Errorf("ids = %v", captured.ids)
@@ -93,7 +117,7 @@ func TestInputBuffer_OnTurnEnded_FlushesCombined(t *testing.T) {
 
 func TestInputBuffer_OnTurnEnded_EmptyBuffer_NoOp(t *testing.T) {
 	var calls atomic.Int32
-	b := NewInputBuffer(func(_ string, _ []string) error {
+	b := NewInputBuffer(func(_ []agent.ContentBlock, _ []string) error {
 		calls.Add(1)
 		return nil
 	}, 50, 1024)
@@ -110,12 +134,12 @@ func TestInputBuffer_OnTurnEnded_EmptyBuffer_NoOp(t *testing.T) {
 func TestInputBuffer_Flush_FailedHook_MessageLost(t *testing.T) {
 	// Per F-25 spec: onFlush failure is NOT retried. User re-sends.
 	// The buffer drains anyway (we cleared before invoking hook).
-	b := NewInputBuffer(func(_ string, _ []string) error {
+	b := NewInputBuffer(func(_ []agent.ContentBlock, _ []string) error {
 		return errors.New("simulated flush failure")
 	}, 50, 1024)
 
 	b.SetState(StateBusy)
-	b.Add("hello", "m1")
+	b.Add(textBlock("hello"), "m1")
 
 	err := b.OnTurnEnded()
 	if err == nil {
@@ -131,12 +155,12 @@ func TestInputBuffer_Flush_FailedHook_MessageLost(t *testing.T) {
 func TestInputBuffer_Flush_AfterIdleState_PassesThrough(t *testing.T) {
 	// Add while idle bypasses buffer; flush still works (no-op).
 	var calls atomic.Int32
-	b := NewInputBuffer(func(_ string, _ []string) error {
+	b := NewInputBuffer(func(_ []agent.ContentBlock, _ []string) error {
 		calls.Add(1)
 		return nil
 	}, 50, 1024)
 
-	b.Add("direct", "m1")
+	b.Add(textBlock("direct"), "m1")
 	if err := b.OnTurnEnded(); err != nil {
 		t.Fatal(err)
 	}
@@ -151,9 +175,9 @@ func TestInputBuffer_Clear_Discards(t *testing.T) {
 	b := NewInputBuffer(nil, 50, 1024)
 
 	b.SetState(StateBusy)
-	b.Add("a", "m1")
-	b.Add("b", "m2")
-	b.Add("c", "m3")
+	b.Add(textBlock("a"), "m1")
+	b.Add(textBlock("b"), "m2")
+	b.Add(textBlock("c"), "m3")
 
 	if n := b.Clear(); n != 3 {
 		t.Errorf("Clear returned %d, want 3", n)
@@ -181,13 +205,13 @@ func TestInputBuffer_MaxMsgs(t *testing.T) {
 	b := NewInputBuffer(nil, 2, 1024)
 	b.SetState(StateBusy)
 
-	if err := b.Add("a", "m1"); err != nil {
+	if err := b.Add(textBlock("a"), "m1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Add("b", "m2"); err != nil {
+	if err := b.Add(textBlock("b"), "m2"); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Add("c", "m3"); !errors.Is(err, ErrBufferFull) {
+	if err := b.Add(textBlock("c"), "m3"); !errors.Is(err, ErrBufferFull) {
 		t.Fatalf("expected ErrBufferFull, got %v", err)
 	}
 }
@@ -196,11 +220,11 @@ func TestInputBuffer_MaxBytes(t *testing.T) {
 	b := NewInputBuffer(nil, 100, 10) // 10-byte cap
 	b.SetState(StateBusy)
 
-	if err := b.Add("12345", "m1"); err != nil { // 5 bytes
+	if err := b.Add(textBlock("12345"), "m1"); err != nil { // 5 bytes
 		t.Fatal(err)
 	}
 	// 5 + 6 = 11 > 10 → should fail
-	if err := b.Add("678901", "m2"); !errors.Is(err, ErrBufferFull) {
+	if err := b.Add(textBlock("678901"), "m2"); !errors.Is(err, ErrBufferFull) {
 		t.Errorf("expected ErrBufferFull on byte overflow, got %v", err)
 	}
 }
@@ -216,7 +240,7 @@ func TestInputBuffer_ConcurrentAdd_NoRace(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_ = b.Add("msg", "id")
+			_ = b.Add(textBlock("msg"), "id")
 		}(i)
 	}
 	wg.Wait()
@@ -244,5 +268,36 @@ func TestSessionState_String(t *testing.T) {
 	}
 	if got := StateBusy.String(); got != "busy" {
 		t.Errorf("StateBusy.String = %q", got)
+	}
+}
+
+// --- Image / file block buffering ---
+
+func TestInputBuffer_ImageBlockPreservedThroughFlush(t *testing.T) {
+	// An image attachment must survive the busy→idle flush
+	// without losing the path. Verifies the v0.2 attachments
+	// contract.
+	var captured []agent.ContentBlock
+	b := NewInputBuffer(func(blocks []agent.ContentBlock, _ []string) error {
+		captured = blocks
+		return nil
+	}, 50, 1024)
+
+	b.SetState(StateBusy)
+	b.Add([]agent.ContentBlock{
+		{Type: agent.ContentText, Text: "看这张图"},
+		{Type: agent.ContentImage, Path: "/tmp/a.png", MediaType: "image/png"},
+	}, "id_img")
+	if err := b.OnTurnEnded(); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) != 2 {
+		t.Fatalf("captured length = %d, want 2", len(captured))
+	}
+	if captured[0].Type != agent.ContentText || captured[0].Text != "看这张图" {
+		t.Errorf("captured[0] = %+v, want text \"看这张图\"", captured[0])
+	}
+	if captured[1].Type != agent.ContentImage || captured[1].Path != "/tmp/a.png" {
+		t.Errorf("captured[1] = %+v, want image /tmp/a.png", captured[1])
 	}
 }

@@ -4,6 +4,10 @@
 package pty
 
 import (
+	"context"
+	"fmt"
+	"strings"
+
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
@@ -55,8 +59,54 @@ func (s *ptySession) PID() int {
 // SendText writes raw user input to the PTY stdin. The bytes go in
 // unmodified — newline normalization is the Channel adapter's job
 // (see F-19 §4.2).
+//
+// SendText is a convenience wrapper around SendBlocks for the
+// text-only path. Implementations that need image / file
+// attachments must use SendBlocks directly.
 func (s *ptySession) SendText(text string) error {
 	_, err := s.bridge.Write([]byte(text))
+	return err
+}
+
+// SendBlocks writes a structured user turn to the PTY stdin as a
+// single text payload. Block encoding for PTY mode:
+//
+//	ContentText   -> verbatim text + "\n"
+//	ContentImage  -> "@<path>\n"   (Claude Code TUI file-ref syntax)
+//	ContentFile   -> "@<path>\n"
+//
+// Blocks are concatenated so a single turn arrives atomically
+// (matching the single-write atomicity guarantee of the Claude Code
+// stream-json path).
+//
+// Empty blocks slice is a no-op. Image/file blocks with empty Path
+// are dropped (silent — no warn log since PTY mode is best-effort).
+func (s *ptySession) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
+	if len(blocks) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	for _, blk := range blocks {
+		switch blk.Type {
+		case agent.ContentText:
+			if blk.Text == "" {
+				continue
+			}
+			b.WriteString(blk.Text)
+			b.WriteString("\n")
+		case agent.ContentImage, agent.ContentFile:
+			if blk.Path == "" {
+				continue
+			}
+			fmt.Fprintf(&b, "@%s\n", blk.Path)
+		default:
+			continue
+		}
+	}
+	if b.Len() == 0 {
+		return nil
+	}
+	_, err := s.bridge.Write([]byte(b.String()))
 	return err
 }
 

@@ -74,6 +74,9 @@ func (s *fakeAgentSession) Events() <-chan agent.AgentEvent {
 }
 
 func (s *fakeAgentSession) SendText(string) error       { return s.sendErr }
+func (s *fakeAgentSession) SendBlocks(context.Context, []agent.ContentBlock) error {
+	return s.sendErr
+}
 func (s *fakeAgentSession) SendPermission(string) error { return s.sendErr }
 func (s *fakeAgentSession) PID() int                    { return s.pid }
 func (s *fakeAgentSession) Close() error {

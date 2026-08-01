@@ -239,8 +239,61 @@ type Agent interface {
 	Start(ctx context.Context, cfg StartConfig) (AgentSession, error)
 }
 
+// ContentBlockType discriminates the payload shape on a ContentBlock.
+type ContentBlockType string
+
+const (
+	// ContentText is a plain-text segment. Text field is set.
+	ContentText ContentBlockType = "text"
+
+	// ContentImage is an image the agent can see. Path (absolute
+	// filesystem path) and MediaType (MIME, e.g. "image/png") are
+	// set. Implementations that support vision (Claude Code
+	// stream-json in content-array mode) base64-encode and inline
+	// the image; implementations without vision fall back to
+	// emitting the path so the agent can read it with its file
+	// tools.
+	ContentImage ContentBlockType = "image"
+
+	// ContentFile is any non-image file the agent can read (PDF,
+	// source code, audio, video, etc.). Path is set; MediaType is
+	// optional (advisory only — implementations that stream the
+	// binary use it, others ignore it).
+	ContentFile ContentBlockType = "file"
+)
+
+// ContentBlock is one element of a structured user turn. A turn
+// contains zero or more blocks; implementations decide how to
+// express them (see AgentSession.SendBlocks).
+//
+// Exactly one of Text / (Path, MediaType) is meaningful per block,
+// based on Type:
+//
+//	ContentText  -> Text
+//	ContentImage -> Path + MediaType
+//	ContentFile  -> Path (+ optional MediaType)
+type ContentBlock struct {
+	Type ContentBlockType
+
+	// Text is the segment for ContentText blocks. Empty for other
+	// block types.
+	Text string
+
+	// Path is the absolute filesystem path for ContentImage /
+	// ContentFile blocks. Empty for ContentText. Implementations
+	// that stream the binary (e.g. Claude Code stream-json
+	// content-array) read from this path at send time.
+	Path string
+
+	// MediaType is the MIME type for ContentImage (required for
+	// vision-streaming implementations; e.g. "image/png",
+	// "image/jpeg") and advisory for ContentFile. Empty for
+	// ContentText.
+	MediaType string
+}
+
 // AgentSession is the live, per-session handle. Session Manager drives
-// it via the Events channel and the three control methods.
+// it via the Events channel and the control methods.
 type AgentSession interface {
 	// Events streams AgentEvent values until the session ends. The
 	// channel is closed by the implementation after EventDone or a
@@ -253,9 +306,36 @@ type AgentSession interface {
 	// /run reconnect logic and for the registry.
 	PID() int
 
-	// SendText delivers user input. In PTY mode it is written as bytes
-	// to the child's stdin; in ACP/SDK mode it is a structured prompt.
+	// SendText delivers plain-text user input. It is a convenience
+	// wrapper around SendBlocks with a single ContentText block.
+	// Implementations that support rich content MUST also implement
+	// SendBlocks; callers that need image/file attachments must
+	// use SendBlocks directly.
+	//
+	// In PTY mode the text is written as bytes to the child's
+	// stdin. In ACP / SDK / JSON-IO modes it is structured into a
+	// single-element content array.
 	SendText(text string) error
+
+	// SendBlocks delivers a structured user turn. Implementations
+	// decide how to render each block:
+	//
+	//   - PTY: each ContentText block is written verbatim; each
+	//     ContentImage / ContentFile block is rendered as the
+	//     agent's file-reference syntax (Claude Code TUI: "@<path>"
+	//     on its own line). Blocks are concatenated with "\n"
+	//     separators so a single turn arrives atomically.
+	//   - Claude Code stream-json: blocks are encoded into a
+	//     content-array with text and base64-inlined image blocks
+	//     (Anthropic API format).
+	//   - ACP / SDK: blocks are encoded into the protocol's
+	//     content-array shape.
+	//
+	// Implementations MUST handle an empty blocks slice as a no-op
+	// (returns nil). Image / file blocks whose Path does not exist
+	// are a per-implementation choice: most log a warning and drop
+	// the block; some return an error.
+	SendBlocks(ctx context.Context, blocks []ContentBlock) error
 
 	// SendPermission responds to the most recent EventPermission. The
 	// argument is the option string the user chose. Only meaningful in

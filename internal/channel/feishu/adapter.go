@@ -94,6 +94,12 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		// DefaultAddons in internal/auth/feishu/feishu.go.
 		OnP2MessageReactionCreatedV1(func(_ context.Context, _ *larkim.P2MessageReactionCreatedV1) error {
 			return nil
+		}).
+		// Pair with the created handler above so reaction removal
+		// (e.g. user un-clicks an emoji) doesn't generate spurious
+		// "not found handler" errors either.
+		OnP2MessageReactionDeletedV1(func(_ context.Context, _ *larkim.P2MessageReactionDeletedV1) error {
+			return nil
 		})
 
 	a.client = larkws.NewClient(

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/channel/feishu"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -232,7 +233,7 @@ func (m *MemoryManager) Create(ctx context.Context, req CreateRequest) (*Session
 		// already calls SendText; the hook here is called BEFORE
 		// SendText to let the caller inspect/modify the content.
 		buf := sess.EnsureInputBuffer()
-		buf.onFlush = func(combined string, userMsgIDs []string) error {
+		buf.onFlush = func(combined []agent.ContentBlock, userMsgIDs []string) error {
 			if req.OnUserMessage != nil {
 				// Use the first userMsgID as the representative
 				// id; the channel layer can iterate receipts in
@@ -241,9 +242,17 @@ func (m *MemoryManager) Create(ctx context.Context, req CreateRequest) (*Session
 				if len(userMsgIDs) > 0 {
 					repID = userMsgIDs[0]
 				}
-				_ = req.OnUserMessage(combined, repID)
+				// OnUserMessage is the channel-layer hook used
+				// by the F-25 Renderer to flip receipts from
+				// Waiting → Executing. The signature predates
+				// the blocks refactor and still takes a flat
+				// string; for compatibility we re-flatten the
+				// blocks here. The renderer doesn't care about
+				// attachments — only about the textual portion
+				// — so we use BuildForwardedText.
+				_ = req.OnUserMessage(feishu.BuildForwardedTextFromBlocks(combined), repID)
 			}
-			return sess.SendText(combined)
+			return sess.SendBlocks(context.Background(), combined)
 		}
 	} else {
 		sess.EnsureInputBuffer()

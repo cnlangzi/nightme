@@ -6,9 +6,10 @@
 //   - In-memory only (no persistence). A nightme restart drops the
 //     queue; the user notices via a startup message and re-sends.
 //
-//   - []string (no ID, no Status). The bridge layer maps message
-//     IDs to MessageReceipt instances separately; the buffer itself
-//     just holds raw text content.
+//   - []agent.ContentBlock — preserves text + image/file
+//     attachments across the busy → idle flush boundary. The
+//     bridge layer maps message IDs to MessageReceipt instances
+//     separately; the buffer itself just holds structured content.
 //
 //   - 3 states: IDLE / BUSY. Transitions come from the agent's
 //     stream-json events (assistant.message → BUSY, result → IDLE).
@@ -23,6 +24,8 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // SessionState is the busy/idle marker for the buffer's owner.
@@ -65,7 +68,7 @@ var ErrBufferFull = errors.New("session: input buffer full")
 //
 // Returns nil on success. Non-nil errors are logged but not retried —
 // the user re-sends.
-type FlushHook func(combined string, userMsgIDs []string) error
+type FlushHook func(combined []agent.ContentBlock, userMsgIDs []string) error
 
 // InputBuffer is the per-session in-memory queue of pending user
 // messages.
@@ -73,11 +76,11 @@ type FlushHook func(combined string, userMsgIDs []string) error
 // Lifecycle:
 //
 //	b := NewInputBuffer(FlushHook, 50, 102400)
-//	b.SetState(StateBusy)         // agent started a turn
-//	b.Add("hello", "msg_id_1")    // user message arrives
-//	b.Add("world", "msg_id_2")
-//	b.SetState(StateIdle)         // result event arrives
-//	b.OnTurnEnded()               // flushes "hello\nworld" via hook
+//	b.SetState(StateBusy)                   // agent started a turn
+//	b.Add(blocks, "msg_id_1")               // user message arrives
+//	b.Add(blocks, "msg_id_2")
+//	b.SetState(StateIdle)                   // result event arrives
+//	b.OnTurnEnded()                         // flushes via hook
 type InputBuffer struct {
 	mu       sync.Mutex
 	state    atomic.Int32 // SessionState (IDLE / BUSY)
@@ -88,12 +91,12 @@ type InputBuffer struct {
 	onFlush FlushHook
 }
 
-// bufferEntry couples a message's content with the originating
-// userMsgID so FlushHook can correlate. We do NOT store any other
-// metadata (no timestamp, no sender) — that lives in the channel
-// layer's MessageReceipt.
+// bufferEntry couples a structured user turn (text + attachments)
+// with the originating userMsgID so FlushHook can correlate. We do
+// NOT store any other metadata (no timestamp, no sender) — that
+// lives in the channel layer's MessageReceipt.
 type bufferEntry struct {
-	Content   string
+	Blocks    []agent.ContentBlock
 	UserMsgID string
 }
 
@@ -117,18 +120,25 @@ func NewInputBuffer(onFlush FlushHook, maxMsgs, maxBytes int) *InputBuffer {
 	}
 }
 
-// Add enqueues a user message. Behavior depends on current state:
+// Add enqueues a structured user turn. Behavior depends on current
+// state:
 //
-//   - StateIdle: the message is sent immediately via onFlush. The
+//   - StateIdle: the blocks are sent immediately via onFlush. The
 //     buffer stays empty. Returns nil on success or the hook's
 //     error (the caller surfaces it to the user).
 //
-//   - StateBusy: the message is appended to the queue. Returns
-//     ErrBufferFull if either limit is hit.
+//   - StateBusy: the blocks are appended to the queue. Returns
+//     ErrBufferFull if either limit is hit. The size estimate is
+//     the cumulative UTF-8 byte length of every block's Text +
+//     Path (MediaType is short and ignored); this is a coarse
+//     approximation that over-estimates for image blocks (which
+//     will be base64-inlined to a much larger wire form), but
+//     that over-estimation just makes ErrBufferFull trip sooner
+//     — a safe direction.
 //
 // Add is safe for concurrent callers (sync.Mutex).
-func (b *InputBuffer) Add(content, userMsgID string) error {
-	if content == "" {
+func (b *InputBuffer) Add(blocks []agent.ContentBlock, userMsgID string) error {
+	if len(blocks) == 0 {
 		return nil
 	}
 
@@ -142,7 +152,7 @@ func (b *InputBuffer) Add(content, userMsgID string) error {
 		if hook == nil {
 			return nil
 		}
-		return hook(content, []string{userMsgID})
+		return hook(blocks, []string{userMsgID})
 	}
 
 	// Busy: queue.
@@ -152,19 +162,31 @@ func (b *InputBuffer) Add(content, userMsgID string) error {
 	}
 	totalBytes := 0
 	for _, m := range b.messages {
-		totalBytes += len(m.Content)
+		totalBytes += blockBytes(m.Blocks)
 	}
-	if totalBytes+len(content) > b.maxBytes {
+	if totalBytes+blockBytes(blocks) > b.maxBytes {
 		b.mu.Unlock()
 		return ErrBufferFull
 	}
 
 	b.messages = append(b.messages, bufferEntry{
-		Content:   content,
+		Blocks:    blocks,
 		UserMsgID: userMsgID,
 	})
 	b.mu.Unlock()
 	return nil
+}
+
+// blockBytes returns an approximate byte size for a slice of
+// ContentBlocks: sum of Text lengths + Path lengths. Used only
+// for buffer-full accounting; the actual wire size after encoding
+// (e.g. base64 expansion of images) is larger.
+func blockBytes(blocks []agent.ContentBlock) int {
+	n := 0
+	for _, b := range blocks {
+		n += len(b.Text) + len(b.Path)
+	}
+	return n
 }
 
 // SetState transitions the buffer's owner between IDLE and BUSY.
@@ -188,8 +210,9 @@ func (b *InputBuffer) State() SessionState {
 }
 
 // OnTurnEnded flushes the buffer. Called by the bridge after
-// receiving a `result` event. Combines all buffered messages with
-// newline separators and invokes onFlush once.
+// receiving a `result` event. Concatenates all buffered blocks
+// (across all queued messages) into a single ordered slice and
+// invokes onFlush once.
 //
 // OnTurnEnded is a no-op when the buffer is empty.
 //
@@ -209,14 +232,13 @@ func (b *InputBuffer) OnTurnEnded() error {
 	hook := b.onFlush
 	b.mu.Unlock()
 
-	// Build combined payload.
-	var combined string
+	// Concatenate all blocks across entries into a single ordered
+	// slice — the bridge receives one structured user turn that
+	// spans every queued Feishu message.
+	var combined []agent.ContentBlock
 	var userMsgIDs []string
-	for i, e := range entries {
-		if i > 0 {
-			combined += "\n"
-		}
-		combined += e.Content
+	for _, e := range entries {
+		combined = append(combined, e.Blocks...)
 		userMsgIDs = append(userMsgIDs, e.UserMsgID)
 	}
 

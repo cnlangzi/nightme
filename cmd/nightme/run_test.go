@@ -16,6 +16,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	gatewaycmd "github.com/cnlangzi/nightme/internal/gateway/cmd"
 	"github.com/cnlangzi/nightme/internal/registry"
 	"github.com/cnlangzi/nightme/internal/session"
 )
@@ -60,6 +61,8 @@ func (f *fakeRunChannel) Stop(context.Context) error {
 func (f *fakeRunChannel) SendMessage(context.Context, string, string) error     { return nil }
 func (f *fakeRunChannel) SendLongMessage(context.Context, string, string) error { return nil }
 func (f *fakeRunChannel) Incoming() <-chan channel.Message                      { return f.incoming }
+func (f *fakeRunChannel) Name() string                                           { return "fake" }
+func (f *fakeRunChannel) Send(ctx context.Context, msg gateway.OutboundMessage) error { return nil }
 
 func (f *fakeRunChannel) counts() (int, int) {
 	f.mu.Lock()
@@ -139,9 +142,9 @@ func runTestDeps(cfg *config.Config, ch *fakeRunChannel, mgr *fakeRunManager, si
 		buildAgents: func(*config.Config) *agent.Registry { return agent.New() },
 		newChannel:  func(*config.Config) (channel.Channel, error) { return ch, nil },
 		newManager:  func(*agent.Registry, *registry.File, session.EventCallback) session.Manager { return mgr },
-		newGateway: func(mgr session.Manager, reg *agent.Registry, resp gateway.Responder) gateway.Gateway {
+		newGateway: func(mgr session.Manager, reg *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
 			gw := gateway.New(nil)
-			gateway.RegisterDefaultCommands(gw, mgr, reg, resp)
+			gatewaycmd.RegisterDefaultCommands(gw, mgr, reg, resp)
 			return gw
 		},
 		signals: signals,
@@ -473,6 +476,10 @@ func (r *recordingChannel) SendLongMessage(ctx context.Context, chatID, text str
 	return r.SendMessage(ctx, chatID, text)
 }
 
+func (r *recordingChannel) Send(ctx context.Context, msg gateway.OutboundMessage) error {
+	return r.SendMessage(ctx, msg.ChatID, msg.Text)
+}
+
 func (r *recordingChannel) lastReply() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -508,9 +515,9 @@ func integrationDeps(t *testing.T, ch *recordingChannel, signals <-chan os.Signa
 		newManager: func(agents *agent.Registry, reg *registry.File, cb session.EventCallback) session.Manager {
 			return mgr
 		},
-		newGateway: func(mgr session.Manager, reg *agent.Registry, resp gateway.Responder) gateway.Gateway {
+		newGateway: func(mgr session.Manager, reg *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
 			gw := gateway.New(nil)
-			gateway.RegisterDefaultCommands(gw, mgr, reg, resp)
+			gatewaycmd.RegisterDefaultCommands(gw, mgr, reg, resp)
 			return gw
 		},
 		signals: signals,

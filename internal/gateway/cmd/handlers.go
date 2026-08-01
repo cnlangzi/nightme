@@ -1,4 +1,4 @@
-package gateway
+package cmd
 
 import (
 	"context"
@@ -9,15 +9,48 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/session"
 )
+
+// SessionManager is the abstract surface the gateway handlers depend
+// on. Defined here (in the gateway package, not session) so that
+// gateway doesn't import session — that import would create a
+// cycle because session pulls in channel/feishu which pulls in
+// channel which pulls in gateway. Concrete implementations
+// (internal/session.MemoryManager) satisfy this interface implicitly.
+
+// Session is the abstract handle returned by SessionManager. The
+// concrete type lives in internal/session; gateway only needs the
+// fields it touches (Agent, AgentName, ChatID, Workspace) so we
+// re-export *session.Session as the interface type.
+//
+// We use the concrete pointer (rather than a method-only interface)
+// because session.Session exposes its fields directly, not as
+// methods. Adding accessor methods to session.Session would
+// require touching every test and call site; the interface escape
+// hatch below is the smallest Stage-1-compatible change.
+type Session = *session.Session
+
+// SessionManager is the abstract surface the gateway handlers depend
+// on. Defined here (in the gateway package, not session) so that
+// gateway doesn't import session — that import would create a
+// cycle because session pulls in channel/feishu which pulls in
+// channel which pulls in gateway. Concrete implementations
+// (internal/session.MemoryManager) satisfy this interface implicitly.
+type SessionManager interface {
+	GetByChat(chatID string) (Session, error)
+	CreateOrUpdate(chatID, chatType, workspace, agentName string, args []string) (Session, error)
+	Run(ctx context.Context, chatID, agentName string, extra []string) (Session, error)
+	KillByChat(chatID string) error
+}
 
 // handlerContext is the dependency bag the gateway handlers close
 // over. It is built once at daemon startup and shared by every
 // dispatch. Keeping the dependencies explicit makes the handlers
 // trivial to unit-test with a fake session manager.
 type handlerContext struct {
-	manager   session.Manager
+	manager   SessionManager
 	agents    *agent.Registry
 	responder Responder
 }
@@ -33,31 +66,31 @@ type Responder interface {
 // RegisterDefaultCommands wires the four v0.1 slash commands into
 // gw. /help is always last so /help's list enumerates the commands
 // registered so far.
-func RegisterDefaultCommands(gw Gateway, mgr session.Manager, agents *agent.Registry, resp Responder) {
+func RegisterDefaultCommands(gw gateway.Gateway, mgr SessionManager, agents *agent.Registry, resp Responder) {
 	hc := &handlerContext{manager: mgr, agents: agents, responder: resp}
-	gw.Register(Command{
+	gw.Register(gateway.Command{
 		Name:        "cwd",
 		Aliases:     []string{"workspace", "ws"},
 		Description: "Set workspace (session-level)",
 		Handler:     hc.cwd,
 	})
-	gw.Register(Command{
+	gw.Register(gateway.Command{
 		Name:        "run",
 		Description: "Ensure CLI running (spawn or attach)",
 		Handler:     hc.run,
 	})
-	gw.Register(Command{
+	gw.Register(gateway.Command{
 		Name:        "kill",
 		Description: "Stop current CLI (keep session)",
 		Handler:     hc.kill,
 	})
-	gw.Register(Command{
+	gw.Register(gateway.Command{
 		Name:        "help",
 		Aliases:     []string{"?"},
 		Description: "Show this help",
 		Handler:     hc.help,
 	})
-	gw.Register(Command{
+	gw.Register(gateway.Command{
 		Name:        "agents",
 		Description: "List registered agents",
 		Handler:     hc.listAgents,
@@ -69,7 +102,7 @@ func RegisterDefaultCommands(gw Gateway, mgr session.Manager, agents *agent.Regi
 // it validates the directory and binds the chat to a session with
 // that workspace. An already-running session is rejected on the
 // bind path so the user explicitly /kill first.
-func (h *handlerContext) cwd(ctx context.Context, msg *Message, args []string) (*CommandResult, error) {
+func (h *handlerContext) cwd(ctx context.Context, msg *gateway.InboundMessage, args []string) (*gateway.CommandResult, error) {
 	if len(args) == 0 {
 		existing, err := h.manager.GetByChat(msg.ChatID)
 		if err != nil || existing == nil {
@@ -123,7 +156,7 @@ func (h *handlerContext) cwd(ctx context.Context, msg *Message, args []string) (
 		agentName = "claude"
 	}
 
-	sess, err := h.manager.CreateOrUpdate(msg.ChatID, msg.ChatType, abs, agentName, nil)
+	sess, err := h.manager.CreateOrUpdate(msg.ChatID, string(msg.ChatType), abs, agentName, nil)
 	if err != nil {
 		if errors.Is(err, session.ErrChatAlreadyBound) {
 			return h.reply(ctx, msg.ChatID, "session already active, /kill first"), nil
@@ -138,7 +171,7 @@ func (h *handlerContext) cwd(ctx context.Context, msg *Message, args []string) (
 // run handles `/run <agent> [args...]`. It is a no-op when the
 // session already has a live CLI; otherwise it spawns one in the
 // session's workspace.
-func (h *handlerContext) run(ctx context.Context, msg *Message, args []string) (*CommandResult, error) {
+func (h *handlerContext) run(ctx context.Context, msg *gateway.InboundMessage, args []string) (*gateway.CommandResult, error) {
 	if len(args) == 0 {
 		return h.reply(ctx, msg.ChatID, "usage: /run <agent> [args...]"), nil
 	}
@@ -172,12 +205,12 @@ func (h *handlerContext) run(ctx context.Context, msg *Message, args []string) (
 	if err := h.trySendReply(ctx, msg.ChatID, text); err != nil {
 		return nil, err
 	}
-	return &CommandResult{Consumed: true, Reply: text}, nil
+	return &gateway.CommandResult{Consumed: true, Reply: text}, nil
 }
 
 // kill handles `/kill`. The session record is preserved so the
 // user can /run again to restart.
-func (h *handlerContext) kill(ctx context.Context, msg *Message, _ []string) (*CommandResult, error) {
+func (h *handlerContext) kill(ctx context.Context, msg *gateway.InboundMessage, _ []string) (*gateway.CommandResult, error) {
 	if err := h.manager.KillByChat(msg.ChatID); err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
 			return h.reply(ctx, msg.ChatID, "no session to kill"), nil
@@ -187,7 +220,7 @@ func (h *handlerContext) kill(ctx context.Context, msg *Message, _ []string) (*C
 	if err := h.trySendReply(ctx, msg.ChatID, "session killed"); err != nil {
 		return nil, err
 	}
-	return &CommandResult{Consumed: true, Reply: "session killed"}, nil
+	return &gateway.CommandResult{Consumed: true, Reply: "session killed"}, nil
 }
 
 // agents handles `/agents`. It renders the registered agent set as
@@ -202,12 +235,12 @@ func (h *handlerContext) kill(ctx context.Context, msg *Message, _ []string) (*C
 //	• opencode  — opencode acp
 //
 //	Use /run [name]. Omit name to use the configured default.
-func (h *handlerContext) listAgents(ctx context.Context, msg *Message, _ []string) (*CommandResult, error) {
+func (h *handlerContext) listAgents(ctx context.Context, msg *gateway.InboundMessage, _ []string) (*gateway.CommandResult, error) {
 	text := renderAgents(h.agents)
 	if err := h.trySendReply(ctx, msg.ChatID, text); err != nil {
 		return nil, err
 	}
-	return &CommandResult{Consumed: true, Reply: text}, nil
+	return &gateway.CommandResult{Consumed: true, Reply: text}, nil
 }
 
 // renderAgents builds the IM-friendly agent list. Returns the empty
@@ -244,7 +277,7 @@ func renderAgents(reg *agent.Registry) string {
 }
 
 // help handles `/help`. It renders the registered commands.
-func (h *handlerContext) help(ctx context.Context, msg *Message, _ []string) (*CommandResult, error) {
+func (h *handlerContext) help(ctx context.Context, msg *gateway.InboundMessage, _ []string) (*gateway.CommandResult, error) {
 	gw, ok := gwFromContext(ctx)
 	if !ok {
 		return h.reply(ctx, msg.ChatID, "help: gateway unavailable"), nil
@@ -254,12 +287,12 @@ func (h *handlerContext) help(ctx context.Context, msg *Message, _ []string) (*C
 	if err := h.trySendReply(ctx, msg.ChatID, text); err != nil {
 		return nil, err
 	}
-	return &CommandResult{Consumed: true, Reply: text}, nil
+	return &gateway.CommandResult{Consumed: true, Reply: text}, nil
 }
 
 // renderHelp builds the multi-line help body. Exposed so tests can
 // assert the layout without constructing a Gateway.
-func renderHelp(cmds []Command) string {
+func renderHelp(cmds []gateway.Command) string {
 	var b strings.Builder
 	b.WriteString("Available commands:\n")
 	for _, c := range cmds {
@@ -279,12 +312,12 @@ func renderHelp(cmds []Command) string {
 }
 
 // reply pushes the text through the responder (so the user sees
-// it in their IM) and returns a CommandResult the Gateway can
+// it in their IM) and returns a gateway.CommandResult the Gateway can
 // ignore. A nil responder degrades to a no-op so unit tests that
 // only care about Reply text can skip the responder.
-func (h *handlerContext) reply(ctx context.Context, chatID, text string) *CommandResult {
+func (h *handlerContext) reply(ctx context.Context, chatID, text string) *gateway.CommandResult {
 	_ = h.trySendReply(ctx, chatID, text)
-	return &CommandResult{Reply: text, Consumed: true}
+	return &gateway.CommandResult{Reply: text, Consumed: true}
 }
 
 // trySendReply is best-effort: if the responder is nil (tests) we
@@ -299,18 +332,18 @@ func (h *handlerContext) trySendReply(ctx context.Context, chatID, text string) 
 // gwFromContext extracts the Gateway from the context. The daemon
 // is expected to install it via WithGateway before serving the
 // chat loop. When missing, /help degrades gracefully.
-func gwFromContext(ctx context.Context) (Gateway, bool) {
+func gwFromContext(ctx context.Context) (gateway.Gateway, bool) {
 	if ctx == nil {
 		return nil, false
 	}
-	gw, ok := ctx.Value(gatewayKey{}).(Gateway)
+	gw, ok := ctx.Value(gatewayKey{}).(gateway.Gateway)
 	return gw, ok
 }
 
 // WithGateway installs gw into ctx so handlers that need it
 // (currently just /help) can recover it without taking it as a
 // closure.
-func WithGateway(ctx context.Context, gw Gateway) context.Context {
+func WithGateway(ctx context.Context, gw gateway.Gateway) context.Context {
 	return context.WithValue(ctx, gatewayKey{}, gw)
 }
 

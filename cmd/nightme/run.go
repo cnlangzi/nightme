@@ -21,6 +21,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel/feishu"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	gatewaycmd "github.com/cnlangzi/nightme/internal/gateway/cmd"
 	"github.com/cnlangzi/nightme/internal/registry"
 	"github.com/cnlangzi/nightme/internal/session"
 )
@@ -33,7 +34,7 @@ type runDeps struct {
 	buildAgents  func(*config.Config) *agent.Registry
 	newChannel   func(*config.Config) (channel.Channel, error)
 	newManager   func(*agent.Registry, *registry.File, session.EventCallback) session.Manager
-	newGateway   func(session.Manager, *agent.Registry, gateway.Responder) gateway.Gateway
+	newGateway   func(session.Manager, *agent.Registry, gatewaycmd.Responder) gateway.Gateway
 	signals      <-chan os.Signal
 	cleanup      bool
 }
@@ -49,9 +50,9 @@ func defaultRunDeps() runDeps {
 		newManager: func(agents *agent.Registry, reg *registry.File, cb session.EventCallback) session.Manager {
 			return session.NewMemoryManager(agents, reg, cb)
 		},
-		newGateway: func(mgr session.Manager, agents *agent.Registry, resp gateway.Responder) gateway.Gateway {
+		newGateway: func(mgr session.Manager, agents *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
 			gw := gateway.New(nil)
-			gateway.RegisterDefaultCommands(gw, mgr, agents, resp)
+			gatewaycmd.RegisterDefaultCommands(gw, mgr, agents, resp)
 			return gw
 		},
 	}
@@ -213,7 +214,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// session's InputBuffer, and flips the receipt to Executing on
 	// dispatch. This is what makes concurrent user messages buffer
 	// correctly while Claude is busy.
-	fallback := func(ctx context.Context, msg *gateway.Message) error {
+	fallback := func(ctx context.Context, msg *gateway.InboundMessage) error {
 		// Forwarding is best-effort. If the chat has no /cwd or
 		// the agent is not running, we still send a hint so the
 		// user is not left wondering.
@@ -238,7 +239,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		// composite ID and merge into a single ⏳→🔄→✅ cycle.
 		userMsgID := msg.MessageID
 		if userMsgID == "" {
-			userMsgID = msg.SenderID + ":" + msg.Time.UTC().Format(time.RFC3339Nano)
+			userMsgID = msg.UserID + ":" + msg.Time.UTC().Format(time.RFC3339Nano)
 		}
 		// Renderer path: creates receipt + queues via InputBuffer.
 		// Falls back to legacy SendText path when no renderer.
@@ -248,7 +249,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		return sess.SendBlocks(ctx, blocks)
 	}
 	gw = gateway.New(fallback)
-	gateway.RegisterDefaultCommands(gw, mgr, agents, responder)
+	gatewaycmd.RegisterDefaultCommands(gw, mgr, agents, responder)
 
 	// Reinstall the EventCallback now that the channel is alive.
 	// The MemoryManager's callback is fixed at construction time
@@ -346,11 +347,11 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 				}
 			}
 
-			handleCtx := gateway.WithGateway(ctx, gw)
-			if err := gw.Handle(handleCtx, &gateway.Message{
+			handleCtx := gatewaycmd.WithGateway(ctx, gw)
+			if _, err := gw.Handle(handleCtx, &gateway.InboundMessage{
 				ChatID:      msg.ChatID,
 				Text:        msg.Text,
-				SenderID:    msg.SenderID,
+				UserID:    msg.UserID,
 				Time:        msg.Time,
 				ChatType:    msg.ChatType,
 				MessageID:   msg.MessageID,
@@ -382,7 +383,7 @@ func (r channelResponder) Reply(ctx context.Context, chatID, text string) error 
 	if r.ch == nil {
 		return nil
 	}
-	return r.ch.SendLongMessage(ctx, chatID, text)
+	return r.ch.Send(ctx, gateway.OutboundMessage{ChatID: chatID, Kind: gateway.OutText, Text: text})
 }
 
 // SendUserMessage is the F-25 entry point used by the gateway to
@@ -407,7 +408,11 @@ func (r channelResponder) SendUserMessage(ctx context.Context, chatID, userMsgID
 		// SendLongMessage path remains available for channels
 		// that don't support reactions (Telegram etc.).
 		if r.ch != nil {
-			return r.ch.SendLongMessage(ctx, chatID, feishu.BuildForwardedTextFromBlocks(blocks))
+			return r.ch.Send(ctx, gateway.OutboundMessage{
+				ChatID: chatID,
+				Kind:   gateway.OutText,
+				Text:   feishu.BuildForwardedTextFromBlocks(blocks),
+			})
 		}
 		return nil
 	}

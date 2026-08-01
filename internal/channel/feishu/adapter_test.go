@@ -114,7 +114,7 @@ func TestIncoming_ReceivesEvent(t *testing.T) {
 	}
 	select {
 	case got := <-a.Incoming():
-		if got.ChatID != chatID || got.Text != "hello" || got.SenderID != senderID {
+		if got.ChatID != chatID || got.Text != "hello" || got.UserID != senderID {
 			t.Fatalf("message = %+v, want chat/text/sender", got)
 		}
 		if !got.Time.Equal(time.UnixMilli(1720000000123)) {

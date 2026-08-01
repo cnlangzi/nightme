@@ -1,6 +1,10 @@
 package channel
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/cnlangzi/nightme/internal/gateway"
+)
 
 // TestMessage_IsDM covers the chat-type discriminator. The Session
 // Manager uses this to decide whether a chat should host a workspace
@@ -20,8 +24,8 @@ func TestMessage_IsDM(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := Message{ChatType: tc.chatType}
-			if got := m.IsDM(); got != tc.want {
+			m := Message{ChatType: gateway.ChatType(tc.chatType)}
+			if got := IsDM(m); got != tc.want {
 				t.Errorf("IsDM() with ChatType=%q = %v, want %v", tc.chatType, got, tc.want)
 			}
 		})

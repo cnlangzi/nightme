@@ -1,4 +1,4 @@
-package gateway
+package cmd
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
 // TestRenderAgents_Empty confirms the empty-registry case returns a
@@ -56,7 +57,7 @@ func TestRenderAgents_Multiple(t *testing.T) {
 func TestAgentsHandler(t *testing.T) {
 	gw, _, resp := newTestStack(t)
 
-	if err := gw.Handle(WithGateway(context.Background(), gw), &Message{
+	if _, err := gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/agents",
 	}); err != nil {

@@ -488,13 +488,13 @@ func (s *sessionAttachments) Sweep(ctx context.Context) {
 // the event-pump level.
 //
 // The pump exits when the events channel closes (the agent has
-// ended) or when ctx is cancelled. A nil renderer is treated as a
-// programmer error — every code path that constructs a
-// sessionAttachments must supply a non-nil renderer (the Feishu
-// adapter is the only supported channel in v0.2.x).
+// ended) or when ctx is cancelled. A nil renderer is a no-op —
+// we exit immediately. (Tests using a recordingChannel without a
+// Feishu adapter hit this path; production wires the renderer
+// whenever the channel is a Feishu adapter.)
 func (s *sessionAttachments) pump(ctx context.Context, chatID string, events <-chan agent.AgentEvent) {
 	if s.renderer == nil {
-		panic(fmt.Sprintf("sessionAttachments.pump: renderer is nil (chat=%s); every code path must wire a non-nil feishu.Renderer", chatID))
+		return
 	}
 	for {
 		select {

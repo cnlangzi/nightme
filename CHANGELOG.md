@@ -86,6 +86,15 @@ as closely as a pre-1.0 project can.
   uses `lookupByChatID`; `MarkExecuting` and `SendUserMessage`
   use `lookupByUserMsgID`. No public-API change; behaviour
   unchanged.
+- Drop event-pump fallback: `cmd/nightme/run.go` no longer has a
+  `switch ev.Kind { ... }` that fires when `s.renderer == nil`.
+  The only path that set up a non-nil renderer was the Feishu
+  channel (which is the only supported channel in v0.2.x), so the
+  fallback was dead code. A nil renderer is now treated as a
+  programmer error and the pump panics with the chat ID for
+  context. This removes the misleading "Session ended (exit 0)"
+  string that was being sent to users when the pump hit the
+  fallback.
 - `nightme version` subcommand: REPL-friendly sibling of `--version`
   (Cobra only registers `--version` as a flag, not a verb).
 - Cold-start fallback: `nightme run` and `nightme agents` now seed

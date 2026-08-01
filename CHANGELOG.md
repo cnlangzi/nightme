@@ -4,9 +4,36 @@ All notable changes to nightme are documented here. nightme
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 as closely as a pre-1.0 project can.
 
-## [Unreleased]
+## [Unreleased] — v0.3 architecture refactor (Stage 1 landed)
+
+- **Stage 1 (behaviour-preserving)**: abstract message types + thin
+  Channel interface. See `docs/feat/F-26-gateway-hub.md` for the
+  full design.
+- NEW: `internal/gateway/messages.go` — `InboundMessage`,
+  `OutboundMessage`, `Attachment`, `OutboundKind`, `ChatType`,
+  `ActionPayload`, `Card`, `Reaction`, `AgentEventEnvelope`.
+- NEW: `internal/gateway/gateway.go` — `Gateway` interface
+  (`Register` / `Handle` / `ListCommands`), `Command`,
+  `CommandResult`, `FallbackHandler`.
+- NEW: `internal/gateway/cmd/` subpackage — `RegisterDefaultCommands`
+  and the four slash-command handlers (`/cwd`, `/run`, `/kill`,
+  `/help`, `/agents`). Moved out of the gateway package so
+  handlers can import session without creating a cycle
+  (session → channel/feishu → channel → gateway).
+- CHANGED: `Channel` interface gains `Name() string` and
+  `Send(ctx, OutboundMessage) error`; legacy `SendMessage` /
+  `SendLongMessage` remain as helper methods. `channel.Message`
+  and `channel.Attachment` are now type aliases for
+  `gateway.InboundMessage` and `gateway.Attachment`.
+- CHANGED: Feishu adapter implements `Channel.Send` by
+  dispatching per `OutboundKind`. Rolling-log receipt path
+  is NOT yet migrated (Stage 3); OutToolStart /
+  OutToolEnd / OutThinking / OutTyping are dropped for now.
+- Verified: `go test -race -count=1 ./...` green across all 17
+  packages; `go build ./cmd/nightme` exit 0.
 
 ### Added
+- `nightme agents [--json]`: list the registered agent set the daemon
 - `nightme agents [--json]`: list the registered agent set the daemon
   would dispatch `/run` to, with name / command / args columns.
   Backed by the same `buildRunAgentRegistry` path used by `nightme test`

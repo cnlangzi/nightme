@@ -66,6 +66,12 @@ as closely as a pre-1.0 project can.
   instead of the useless template `✅ Read done`. Bridges without
   `Output` still fall back to "name done" so existing agents stay
   working.
+- Compat shim: `Renderer.MarkExecuting(ctx, userMsgID)` re-added
+  so the pre-existing `cmd/nightme/run.go` wiring (added in
+  `26611ec`, broken since the receipt refactor) compiles again.
+  Looks up the receipt by userMsgID and delegates to
+  `receipt.SetExecuting`. No new behaviour — just unblocks
+  `make dev`.
 - `nightme version` subcommand: REPL-friendly sibling of `--version`
   (Cobra only registers `--version` as a flag, not a verb).
 - Cold-start fallback: `nightme run` and `nightme agents` now seed

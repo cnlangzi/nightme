@@ -102,6 +102,38 @@ func (r *Renderer) SendUserMessage(ctx context.Context, chatID, userMsgID, conte
 	return receipt, nil
 }
 
+// MarkExecuting is a compatibility shim for the F-25 receipt
+// lifecycle. It looks up the receipt that owns userMsgID and
+// transitions it from Waiting to Executing (the F-25 dual-track
+// swap: ⏳ → 🔄). Returned error is informational — callers
+// typically ignore it (the receipt stays usable even if the mark
+// fails).
+//
+// MarkExecuting is a sibling of the older F-25 API that the
+// gateway still calls. New callers should call receipt.SetExecuting
+// directly when they already hold the *MessageReceipt handle.
+func (r *Renderer) MarkExecuting(ctx context.Context, userMsgID string) error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	var receipt *MessageReceipt
+	for _, rec := range r.receipts {
+		if rec != nil && rec.userMsgID == userMsgID {
+			receipt = rec
+			break
+		}
+	}
+	r.mu.Unlock()
+	if receipt == nil {
+		// Caller asked to mark a receipt that doesn't exist
+		// (likely an orphan or a chat that was force-closed).
+		// Not an error — the receipt was already removed.
+		return nil
+	}
+	return receipt.SetExecuting(ctx)
+}
+
 // Render / RenderEvent forwards one AgentEvent from a session pump
 // to the chat's active receipt. The receipt's Append method adds
 // the event to the rolling log and updates the reply message in

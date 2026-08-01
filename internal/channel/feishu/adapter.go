@@ -14,19 +14,25 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/cnlangzi/nightme/internal/gateway"
-
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcallback "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
+	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
 const maxMessageBytes = 3800
+
+// interactiveMessageType is the Feishu msg_type for v1 interactive
+// cards (permission requests, multi-choice polls, etc.). Used by
+// Channel.Send (OutCard kind) and CardActionTrigger callback
+// parsing in handleCardAction.
+const interactiveMessageType = "interactive"
 
 // sendMessageFunc is kept behind the adapter so unit tests can exercise the
 // channel without making an HTTP request to Feishu.
@@ -60,6 +66,21 @@ type Adapter struct {
 	// pump). Defaults to slog.Default(); settable via SetLogger.
 	logger *slog.Logger
 
+	// Stage 3: rolling-log receipt state lives on the adapter
+	// (Channel.Send is the display strategy). The map is keyed by
+	// chatID; one receipt per chat at a time. When the gateway's
+	// per-session pump emits the first OutText for a chat that
+	// doesn't have an active receipt, we lazily create one (this
+	// covers the case where the user message is forwarded via
+	// the gateway's fallback but the renderer path is gone).
+	receipts map[string]*MessageReceipt
+
+	// receiptsByUserMsgID is the secondary index that lets
+	// MarkExecuting and incoming card-action callbacks find the
+	// receipt from the Feishu user message id. Same lifecycle
+	// rules as receipts (delete together when SetCompleted).
+	receiptsByUserMsgID map[string]*MessageReceipt
+
 	// These hooks have production defaults and are intentionally kept as
 	// fields so tests can replace the network boundary with a small function.
 	wsStart  func(context.Context) error
@@ -81,7 +102,9 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	}
 
 	a := &Adapter{
-		incoming: make(chan channel.Message, 128),
+		incoming:             make(chan channel.Message, 128),
+		receipts:             make(map[string]*MessageReceipt),
+		receiptsByUserMsgID:  make(map[string]*MessageReceipt),
 		cfg:      cfg,
 		done:     make(chan struct{}),
 		logger:   slog.Default(),
@@ -287,11 +310,142 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //
 // Errors from the underlying API are logged and returned; the
 // Gateway treats Send as fire-and-ack (no retry).
+// SendUserMessage is the F-25 entry point used by the gateway's
+// fallback handler to hand a user message to the agent. It creates
+// a MessageReceipt (⏳ emoji + reply) and returns the receipt so
+// the caller can drive state via MarkExecuting (on dispatch) and
+// SetCompleted (on agent done). The reply text is the user's caption
+// (rendered via BuildForwardedTextFromBlocks so attachment paths
+// are visible).
+//
+// Attachments are NOT downloaded here — that happens earlier in
+// the channel pump (downloadAttachments) before SendUserMessage is
+// called. The blocks the caller passes should already carry
+// LocalPath for any attachments.
+func (a *Adapter) SendUserMessage(ctx context.Context, chatID, userMsgID, content string) (*MessageReceipt, error) {
+	if a == nil {
+		return nil, errors.New("feishu: nil adapter")
+	}
+	if strings.TrimSpace(chatID) == "" {
+		return nil, errors.New("feishu: chat_id is required")
+	}
+	if strings.TrimSpace(userMsgID) == "" {
+		return nil, errors.New("feishu: user_msg_id is required")
+	}
+
+	// Idempotent: a duplicate userMsgID reuses the existing
+	// receipt (handles retries / dup events).
+	a.mu.Lock()
+	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
+		a.mu.Unlock()
+		return existing, nil
+	}
+	a.mu.Unlock()
+
+	// New message: post the initial ⏳ receipt reply and register
+	// the receipt. The reaction swap and the receipt body come
+	// later via Send.
+	replyText := content
+	if replyText == "" {
+		replyText = "⏳ 等待中"
+	}
+	msgID, err := a.SendMessageText(ctx, chatID, replyText)
+	if err != nil {
+		return nil, fmt.Errorf("feishu: post initial receipt: %w", err)
+	}
+
+	receipt := NewMessageReceiptForReply(chatID, userMsgID, msgID)
+	a.mu.Lock()
+	// Evict any prior receipt for this chat (e.g. a follow-up
+	// user message arrived while a previous turn was still
+	// in-flight). The new message becomes the active one.
+	if old, ok := a.receipts[chatID]; ok && old != nil && old != receipt {
+		_ = old.SetCompleted(ctx)
+		delete(a.receiptsByUserMsgID, old.userMsgID)
+	}
+	a.receipts[chatID] = receipt
+	a.receiptsByUserMsgID[userMsgID] = receipt
+	a.mu.Unlock()
+
+	return receipt, nil
+}
+
+// MarkExecuting is the F-25 receipt lifecycle hook the gateway
+// calls once the session dispatches the user message to the agent.
+// Flips the receipt's reaction emoji from ⏳ to 🔄 and writes
+// the "🔄 ⏳ N · HH:MM:SS" header so the user sees the session
+// is alive.
+//
+// Falls back to a no-op when the receipt has already moved on
+// (e.g. a /kill arrived before dispatch) so callers don't have
+// to coordinate locking.
+func (a *Adapter) MarkExecuting(ctx context.Context, userMsgID string) error {
+	a.mu.RLock()
+	receipt, ok := a.receiptsByUserMsgID[userMsgID]
+	a.mu.RUnlock()
+	if !ok || receipt == nil {
+		return nil
+	}
+	return receipt.SetExecuting(ctx)
+}
+
+// receiptFor returns the active receipt for chatID, lazily
+// creating one if the gateway's pumpOutbound emitted an OutText
+// without a prior SendUserMessage (e.g. agent turn started from a
+// startup). The first event in that case seeds the receipt with a
+// ⏳ header; subsequent events roll in via Append.
+func (a *Adapter) receiptFor(ctx context.Context, chatID string) *MessageReceipt {
+	a.mu.Lock()
+	if r, ok := a.receipts[chatID]; ok && r != nil {
+		a.mu.Unlock()
+		return r
+	}
+	a.mu.Unlock()
+
+	// Cold start: post a ⏳ reply, register a receipt, return.
+	msgID, err := a.SendMessageText(ctx, chatID, "⏳ 等待中")
+	if err != nil {
+		a.logger.Warn("feishu: cold-start receipt reply failed",
+			"err", err, "chat_id", chatID)
+		return nil
+	}
+	// Synthetic userMsgID (we don't have one) — the gateway's
+	// pumpOutbound ignores it. Use the chatID + a timestamp suffix
+	// so consecutive cold starts don't collide.
+	receipt := NewMessageReceiptForReply(chatID, chatID+":"+time.Now().UTC().Format(time.RFC3339Nano), msgID)
+	a.mu.Lock()
+	a.receipts[chatID] = receipt
+	a.receiptsByUserMsgID[receipt.userMsgID] = receipt
+	a.mu.Unlock()
+	return receipt
+}
+
 func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 	switch msg.Kind {
 	case gateway.OutText:
-		_, err := a.SendMessageText(ctx, msg.ChatID, msg.Text)
-		return err
+		// Folded into the active receipt's rolling log. The
+		// Feishu reply is the single message the user sees; we
+		// edit it in place via UpdateMessage on each event.
+		receipt := a.receiptFor(ctx, msg.ChatID)
+		if receipt == nil {
+			// receiptFor's SendMessageText failed. Try a direct
+			// send as a last resort so the user sees the text.
+			return a.sendRawOutText(ctx, msg.ChatID, msg.Text)
+		}
+		return receipt.Append(ctx, agent.AgentEvent{
+			Kind: agent.EventText,
+			Text: msg.Text,
+		})
+
+	case gateway.OutThinking:
+		receipt := a.receiptFor(ctx, msg.ChatID)
+		if receipt == nil {
+			return nil
+		}
+		return receipt.Append(ctx, agent.AgentEvent{
+			Kind: agent.EventText,
+			Text: msg.Text,
+		})
 
 	case gateway.OutReaction:
 		if msg.Reaction == nil || msg.Reaction.EmojiType == "" {
@@ -325,15 +479,65 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content)
 		return err
 
-	case gateway.OutToolStart, gateway.OutToolEnd, gateway.OutThinking, gateway.OutTyping:
-		// Stage 1: not yet routed through the receipt. Stage 3
-		// migrates the Feishu receipt-rendering logic here so each
-		// event appends to the same rolling-log message. For now
-		// we drop these kinds silently; the Gateway still emits them
-		// to its structured log so we know they happened.
+	case gateway.OutToolStart:
+		receipt := a.receiptFor(ctx, msg.ChatID)
+		if receipt == nil {
+			return nil
+		}
+		return receipt.Append(ctx, agent.AgentEvent{
+			Kind:      agent.EventToolStart,
+			ToolStart: &agent.ToolStartEvent{Name: toolName(msg), Args: toolArgs(msg)},
+		})
+
+	case gateway.OutToolEnd:
+		receipt := a.receiptFor(ctx, msg.ChatID)
+		if receipt == nil {
+			return nil
+		}
+		return receipt.Append(ctx, agent.AgentEvent{
+			Kind:    agent.EventToolEnd,
+			ToolEnd: &agent.ToolEndEvent{Name: toolName(msg), Output: toolOutput(msg)},
+		})
+
+	case gateway.OutTyping:
+		// No native Feishu equivalent (typing indicators come from
+		// the OpenAPI, not the bot's message API). Silently drop.
 		return nil
 	}
 	return fmt.Errorf("feishu: unsupported outbound kind %v", msg.Kind)
+}
+
+// sendRawOutText is the last-resort fallback when a receipt
+// can't be created (e.g. the channel.post text API failed). Sends
+// the text as a new standalone message so the user still sees
+// something.
+func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error {
+	_, err := a.SendMessageText(ctx, chatID, text)
+	return err
+}
+
+// toolName / toolArgs / toolOutput pull the well-known fields from
+// OutboundMessage.Meta. The translator fills these so the receiver
+// doesn't have to parse the formatted text.
+func toolName(m gateway.OutboundMessage) string {
+	if n, _ := m.Meta["tool_name"].(string); n != "" {
+		return n
+	}
+	return "tool"
+}
+
+func toolArgs(m gateway.OutboundMessage) string {
+	if a, _ := m.Meta["args"].(string); a != "" {
+		return a
+	}
+	return ""
+}
+
+func toolOutput(m gateway.OutboundMessage) string {
+	if o, _ := m.Meta["output"].(string); o != "" {
+		return o
+	}
+	return ""
 }
 
 // buildInteractiveCard renders a v1 Feishu card from an abstract

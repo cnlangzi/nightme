@@ -177,23 +177,18 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	}
 
 	// Responder pushes chat-side replies through the channel.
-	// If the channel is a Feishu adapter, we also wire the
-	// F-25 Renderer (receipts + reactions) and route user messages
-	// through the session's InputBuffer so concurrent messages are
-	// queued while a turn is busy.
-	var renderer *feishu.Renderer
-	if feishuCh, ok := ch.(*feishu.Adapter); ok {
-		renderer = feishu.NewRenderer(feishuCh)
-	}
-	responder := channelResponder{ch: ch, renderer: renderer}
-	if renderer != nil {
-		responder.userMessageFn = func(chatID, userMsgID string, blocks []agent.ContentBlock) error {
-			sess, err := mgr.GetByChat(chatID)
-			if err != nil {
-				return fmt.Errorf("no session for chat: %w", err)
-			}
-			return sess.QueueUserMessage(blocks, userMsgID)
+	// Stage 3: the Feishu adapter owns the rolling-log receipt
+	// logic (Channel.Send is the display strategy). The runtime
+	// just hands user messages to the adapter and lets the
+	// session queue them; the gateway's pumpOutbound then routes
+	// every event through the same receipt.
+	responder := channelResponder{ch: ch}
+	responder.userMessageFn = func(chatID, userMsgID string, blocks []agent.ContentBlock) error {
+		sess, err := mgr.GetByChat(chatID)
+		if err != nil {
+			return fmt.Errorf("no session for chat: %w", err)
 		}
+		return sess.QueueUserMessage(blocks, userMsgID)
 	}
 
 	// Build the gateway now that the manager exists. The fallback
@@ -240,12 +235,10 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		if userMsgID == "" {
 			userMsgID = msg.UserID + ":" + msg.Time.UTC().Format(time.RFC3339Nano)
 		}
-		// Renderer path: creates receipt + queues via InputBuffer.
-		// Falls back to legacy SendText path when no renderer.
-		if responder.renderer != nil {
-			return responder.SendUserMessage(ctx, msg.ChatID, userMsgID, blocks)
-		}
-		return sess.SendBlocks(ctx, blocks)
+		// Stage 3: route through responder.SendUserMessage which
+		// creates the Feishu receipt (when channel is a Feishu
+		// adapter) or falls back to a flat OutText send.
+		return responder.SendUserMessage(ctx, msg.ChatID, userMsgID, blocks)
 	}
 	gw = gateway.New(fallback)
 	gatewaycmd.RegisterDefaultCommands(gw, mgr, agents, responder)
@@ -281,17 +274,30 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// back to the chat. We (re)attach every time the session
 	// table changes by polling on each incoming message.
 
-	// Stage 2: drive the gateway's own dispatch runtime. The
-	// gateway now owns the per-channel inbound pump (reads from
-	// ch.Incoming() and routes through gw.Handle) and the
-	// per-session outbound pump (reads from the sweeper's
-	// OutboundSource list and dispatches AgentEvent → OutboundMessage
-	// → Channel.Send). The Feishu-specific rolling-log receipt path
-	// is bypassed by the sweeper's filter (hasRenderer +
-	// isFeishuSession), so we don't double-send during the
-	// Stage-2 / Stage-3 transition.
+	// Stage 3: drive the gateway's dispatch runtime. The gateway
+	// owns the per-channel inbound pump and the per-session
+	// outbound pump; the Feishu adapter's Channel.Send is the
+	// rolling-log display strategy. No filter needed — every
+	// channel goes through the gateway.
 	gwImpl := gw.(*gateway.Router)
 	gwImpl.AttachChannels(ch)
+	gwImpl.AttachSweeper(func() []gateway.OutboundSource {
+		var out []gateway.OutboundSource
+		for _, sess := range mgr.List() {
+			if sess == nil || sess.ChatID == "" {
+				continue
+			}
+			if sess.Status() != session.StatusRunning {
+				continue
+			}
+			out = append(out, gateway.OutboundSource{
+				SessionID: sess.ID,
+				ChatID:    sess.ChatID,
+				Events:    sess.Events(),
+			})
+		}
+		return out
+	})
 	if err := gwImpl.Start(ctx); err != nil {
 		return fmt.Errorf("run: start gateway: %w", err)
 	}
@@ -319,8 +325,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 // wiring the F-25 receipt lifecycle. When nil (non-Feishu channels
 // or tests), it falls back to the plain SendLongMessage path.
 type channelResponder struct {
-	ch       channel.Channel
-	renderer *feishu.Renderer
+	ch channel.Channel
 	// userMessageFn lets the responder route user messages into
 	// the session queue (F-25). nil = plain SendText fallback.
 	userMessageFn func(chatID, userMsgID string, blocks []agent.ContentBlock) error
@@ -348,41 +353,33 @@ func (r channelResponder) Reply(ctx context.Context, chatID, text string) error 
 // caller should fall back to plain SendLongMessage). We do NOT
 // silently drop the message — that would surprise users.
 func (r channelResponder) SendUserMessage(ctx context.Context, chatID, userMsgID string, blocks []agent.ContentBlock) error {
-	if r.renderer == nil || r.userMessageFn == nil {
-		// No renderer wired — best-effort fall-through: flatten
-		// the blocks to a single string and send via the channel
-		// so the user isn't left without feedback. The legacy
-		// SendLongMessage path remains available for channels
-		// that don't support reactions (Telegram etc.).
-		if r.ch != nil {
-			return r.ch.Send(ctx, gateway.OutboundMessage{
-				ChatID: chatID,
-				Kind:   gateway.OutText,
-				Text:   feishu.BuildForwardedTextFromBlocks(blocks),
-			})
-		}
+	if r.ch == nil {
 		return nil
 	}
-	// Create the receipt first so the user sees ⏳ immediately,
-	// then dispatch via the session (which decides immediate send
-	// vs buffer based on InputBuffer state). The receipt's reply
-	// text is the flattened block list so the user sees the
-	// attachment paths inline.
+	// Stage 3: if the channel is a Feishu adapter, use the receipt
+	// flow (adapter.SendUserMessage creates the rolling-log
+	// receipt and posts the ⏳ reply). Otherwise fall back to a
+	// flat OutText send.
+	feishuCh, isFeishu := r.ch.(*feishu.Adapter)
+	if !isFeishu {
+		return r.ch.Send(ctx, gateway.OutboundMessage{
+			ChatID: chatID,
+			Kind:   gateway.OutText,
+			Text:   feishu.BuildForwardedTextFromBlocks(blocks),
+		})
+	}
 	receiptText := feishu.BuildForwardedTextFromBlocks(blocks)
-	_, err := r.renderer.SendUserMessage(ctx, chatID, userMsgID, receiptText)
-	if err != nil {
+	if _, err := feishuCh.SendUserMessage(ctx, chatID, userMsgID, receiptText); err != nil {
 		// Don't fail the user's message; log and fall back.
 		return r.userMessageFn(chatID, userMsgID, blocks)
 	}
 	if err := r.userMessageFn(chatID, userMsgID, blocks); err != nil {
 		// Dispatch failed — keep the receipt in Waiting so the
-		// user can /flush. The receipt's note already says "⏳
-		// 等待中" which is honest.
+		// user can /flush.
 		return err
 	}
-	// Dispatch succeeded → mark the receipt as Executing so the
-	// user sees 🔄 + heartbeat counter.
-	_ = r.renderer.MarkExecuting(ctx, userMsgID)
+	// Dispatch succeeded → mark the receipt as Executing.
+	_ = feishuCh.MarkExecuting(ctx, userMsgID)
 	return nil
 }
 

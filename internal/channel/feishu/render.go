@@ -40,19 +40,73 @@ const interactiveMessageType = "interactive"
 //   - The receipts map (chatID -> *MessageReceipt) so events from
 //     the session pump find the right receipt without carrying the
 //     userMsgID around.
+//   - The userMsgIndex map (userMsgID -> *MessageReceipt) so legacy
+//     callers that still pass userMsgID (the F-25 gateway path)
+//     can do an O(1) lookup without scanning the chatID map. The
+//     two indexes are kept in sync by every mutator (Send /
+//     installReceipt / evict).
 type Renderer struct {
 	adapter *Adapter
 
-	mu       sync.Mutex
-	receipts map[string]*MessageReceipt // chatID -> latest active receipt
+	mu            sync.Mutex
+	receipts      map[string]*MessageReceipt // chatID -> latest active receipt
+	userMsgIndex  map[string]*MessageReceipt // userMsgID -> receipt (legacy F-25 lookup)
 }
 
 // NewRenderer constructs an event renderer backed by adapter.
 func NewRenderer(adapter *Adapter) *Renderer {
 	return &Renderer{
-		adapter:  adapter,
-		receipts: make(map[string]*MessageReceipt),
+		adapter:     adapter,
+		receipts:    make(map[string]*MessageReceipt),
+		userMsgIndex: make(map[string]*MessageReceipt),
 	}
+}
+
+// installReceipt atomically registers receipt in both indexes. If
+// a previous active receipt exists for the same chat, it is marked
+// Completed and evicted from the userMsgID index (the chatID slot
+// is overwritten below). ctx is used for the prior receipt's
+// SetCompleted call; it must be a real context (not Background)
+// so cancellation propagates correctly.
+//
+// On duplicate userMsgID the existing receipt is returned unchanged
+// — installReceipt is idempotent.
+func (r *Renderer) installReceipt(ctx context.Context, receipt *MessageReceipt) *MessageReceipt {
+	if receipt == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if existing, ok := r.userMsgIndex[receipt.userMsgID]; ok && existing != nil {
+		return existing
+	}
+	if old, ok := r.receipts[receipt.chatID]; ok && old != nil && old != receipt {
+		// Mark the prior receipt terminal so the user can tell the
+		// earlier turn is done. Best-effort: a failure here does
+		// not block the new receipt's registration.
+		_ = old.SetCompleted(ctx)
+		delete(r.userMsgIndex, old.userMsgID)
+	}
+	r.receipts[receipt.chatID] = receipt
+	r.userMsgIndex[receipt.userMsgID] = receipt
+	return nil
+}
+
+// lookupByUserMsgID returns the receipt owning userMsgID, or nil if
+// none. Acquires r.mu internally; callers must not hold it.
+func (r *Renderer) lookupByUserMsgID(userMsgID string) *MessageReceipt {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.userMsgIndex[userMsgID]
+}
+
+// lookupByChatID returns the latest active receipt for chatID, or
+// nil. Acquires r.mu internally.
+func (r *Renderer) lookupByChatID(chatID string) *MessageReceipt {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.receipts[chatID]
 }
 
 // SendUserMessage is the F-25 entry point for IM-arriving messages.
@@ -73,32 +127,21 @@ func (r *Renderer) SendUserMessage(ctx context.Context, chatID, userMsgID, conte
 	if userMsgID == "" {
 		return nil, errors.New("feishu: userMsgID is required")
 	}
-
-	r.mu.Lock()
-	if existing, ok := r.receipts[chatID]; ok && existing != nil && existing.userMsgID == userMsgID {
-		r.mu.Unlock()
+	if existing := r.lookupByUserMsgID(userMsgID); existing != nil {
 		return existing, nil
 	}
-	// A new user message arrived for a chat with a still-active
-	// receipt — close the old one so the user can tell the
-	// earlier turn is done.
-	if old, ok := r.receipts[chatID]; ok && old != nil {
-		_ = old.SetCompleted(ctx)
-	}
-	r.mu.Unlock()
 
 	receipt, err := NewMessageReceipt(ctx, r.adapter, chatID, userMsgID)
 	if err != nil {
 		return nil, err
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	// Re-check after lock — another goroutine may have raced us.
-	if existing, ok := r.receipts[chatID]; ok && existing != nil && existing.userMsgID == userMsgID {
-		return existing, nil
-	}
-	r.receipts[chatID] = receipt
+	// installReceipt handles the eviction of the prior chat
+	// receipt and the duplicate-userMsgID race in one atomic
+	// critical section, so we don't have to re-check anything
+	// here. The returned receipt is the same one we created
+	// (installReceipt is idempotent on userMsgID).
+	_ = r.installReceipt(ctx, receipt)
 	return receipt, nil
 }
 
@@ -116,15 +159,7 @@ func (r *Renderer) MarkExecuting(ctx context.Context, userMsgID string) error {
 	if r == nil {
 		return nil
 	}
-	r.mu.Lock()
-	var receipt *MessageReceipt
-	for _, rec := range r.receipts {
-		if rec != nil && rec.userMsgID == userMsgID {
-			receipt = rec
-			break
-		}
-	}
-	r.mu.Unlock()
+	receipt := r.lookupByUserMsgID(userMsgID)
 	if receipt == nil {
 		// Caller asked to mark a receipt that doesn't exist
 		// (likely an orphan or a chat that was force-closed).
@@ -163,9 +198,7 @@ func (r *Renderer) RenderEvent(ctx context.Context, chatID string, ev agent.Agen
 		return r.renderPermission(ctx, chatID, ev.Permission)
 	}
 
-	r.mu.Lock()
-	receipt := r.receipts[chatID]
-	r.mu.Unlock()
+	receipt := r.lookupByChatID(chatID)
 	if receipt == nil {
 		// No active receipt for this chat — nothing to append to.
 		// Common during boot or after a chat was force-closed.

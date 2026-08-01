@@ -474,3 +474,114 @@ func (c receiptSwapSendCall) msgTypeCheck() string {
 	}
 	return "text"
 }
+// TestRender_MarkExecuting_LegacyPath is the compat shim test: the
+// gateway still calls Renderer.MarkExecuting(ctx, userMsgID). The
+// shim must route through lookupByUserMsgID to the receipt.
+func TestRender_MarkExecuting_LegacyPath(t *testing.T) {
+	mock := &renderedMock{}
+	r := &Renderer{
+		adapter:      nil,
+		receipts:     make(map[string]*MessageReceipt),
+		userMsgIndex: make(map[string]*MessageReceipt),
+	}
+	r.receipts["oc_chat"] = &MessageReceipt{
+		chatID:     "oc_chat",
+		userMsgID:  "um_test",
+		replyMsgID: "reply_id",
+		bot:        mock,
+		logger:     discardLogger(),
+		state:      StateWaiting,
+	}
+	r.userMsgIndex["um_test"] = r.receipts["oc_chat"]
+
+	if err := r.MarkExecuting(context.Background(), "um_test"); err != nil {
+		t.Fatalf("MarkExecuting: %v", err)
+	}
+	got := r.userMsgIndex["um_test"]
+	if got.State() != StateExecuting {
+		t.Errorf("state = %s, want Executing", got.State())
+	}
+	// Reaction swap should have fired once (Waiting -> Executing).
+	if len(mock.added) != 1 || mock.added[0].Emoji != StateExecuting.Emoji() {
+		t.Errorf("AddReaction calls = %+v, want one Executing-emoji", mock.added)
+	}
+
+	// Mark on an unknown userMsgID is a silent no-op.
+	if err := r.MarkExecuting(context.Background(), "um_missing"); err != nil {
+		t.Errorf("MarkExecuting on unknown userMsgID returned %v, want nil", err)
+	}
+}
+
+// TestRender_InstallReceipt_EvictsPrior verifies that creating a
+// new receipt for an active chat evicts the old receipt from the
+// userMsgID index (so a stale MarkExecuting call can't reach it).
+func TestRender_InstallReceipt_EvictsPrior(t *testing.T) {
+	a := testAdapter(t)
+	r := NewRenderer(a)
+
+	old := &MessageReceipt{
+		chatID:    "oc_chat",
+		userMsgID: "um_old",
+		bot:       a,
+		logger:    discardLogger(),
+		state:     StateExecuting,
+	}
+	r.installReceipt(context.Background(), old)
+	if r.userMsgIndex["um_old"] == nil {
+		t.Fatalf("installReceipt did not index old receipt")
+	}
+
+	// New user message for the same chat arrives → new receipt
+	// evicts the old one from the userMsgID index.
+	fresh := &MessageReceipt{
+		chatID:    "oc_chat",
+		userMsgID: "um_new",
+		bot:       a,
+		logger:    discardLogger(),
+		state:     StateWaiting,
+	}
+	r.installReceipt(context.Background(), fresh)
+
+	if r.userMsgIndex["um_old"] != nil {
+		t.Errorf("old receipt still indexed after eviction: %p", r.userMsgIndex["um_old"])
+	}
+	if r.userMsgIndex["um_new"] == nil {
+		t.Errorf("new receipt not indexed after installReceipt")
+	}
+	// Old receipt's chatID slot is overwritten by the new one.
+	if got := r.receipts["oc_chat"]; got != fresh {
+		t.Errorf("chatID slot = %p, want new receipt %p", got, fresh)
+	}
+}
+
+// TestRender_InstallReceipt_Idempotent verifies duplicate
+// userMsgIDs don't double-register.
+func TestRender_InstallReceipt_Idempotent(t *testing.T) {
+	a := testAdapter(t)
+	r := NewRenderer(a)
+
+	r1 := &MessageReceipt{
+		chatID:    "oc_chat",
+		userMsgID: "um_dup",
+		bot:       a,
+		logger:    discardLogger(),
+		state:     StateWaiting,
+	}
+	if got := r.installReceipt(context.Background(), r1); got != nil {
+		t.Errorf("first install returned %v, want nil", got)
+	}
+
+	r2 := &MessageReceipt{
+		chatID:    "oc_chat",
+		userMsgID: "um_dup",
+		bot:       a,
+		logger:    discardLogger(),
+		state:     StateWaiting,
+	}
+	if got := r.installReceipt(context.Background(), r2); got != r1 {
+		t.Errorf("duplicate install returned %p, want original %p", got, r1)
+	}
+	if r.userMsgIndex["um_dup"] != r1 {
+		t.Errorf("index swapped to the duplicate instead of keeping the original")
+	}
+}

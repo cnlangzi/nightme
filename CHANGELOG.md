@@ -72,6 +72,20 @@ as closely as a pre-1.0 project can.
   Looks up the receipt by userMsgID and delegates to
   `receipt.SetExecuting`. No new behaviour — just unblocks
   `make dev`.
+- Renderer index refactor: `Renderer` now keeps two indexes in
+  lockstep — `receipts` (chatID -> latest active receipt, used by
+  the event pump) and `userMsgIndex` (userMsgID -> receipt, used
+  by the legacy F-25 gateway path). Three helpers centralize the
+  lock-and-lookup logic that was duplicated across
+  `SendUserMessage` and `MarkExecuting`:
+  `installReceipt(ctx, *MessageReceipt)` registers a new receipt
+  atomically, evicts the prior chat's receipt (calling
+  `SetCompleted` on it), and is idempotent on duplicate userMsgID;
+  `lookupByUserMsgID(userMsgID)` and `lookupByChatID(chatID)`
+  give O(1) receipt access with proper locking. `RenderEvent`
+  uses `lookupByChatID`; `MarkExecuting` and `SendUserMessage`
+  use `lookupByUserMsgID`. No public-API change; behaviour
+  unchanged.
 - `nightme version` subcommand: REPL-friendly sibling of `--version`
   (Cobra only registers `--version` as a flag, not a verb).
 - Cold-start fallback: `nightme run` and `nightme agents` now seed

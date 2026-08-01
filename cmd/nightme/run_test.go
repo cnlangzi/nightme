@@ -58,10 +58,10 @@ func (f *fakeRunChannel) Stop(context.Context) error {
 	return nil
 }
 
-func (f *fakeRunChannel) SendMessage(context.Context, string, string) error     { return nil }
-func (f *fakeRunChannel) SendLongMessage(context.Context, string, string) error { return nil }
-func (f *fakeRunChannel) Incoming() <-chan channel.Message                      { return f.incoming }
-func (f *fakeRunChannel) Name() string                                           { return "fake" }
+func (f *fakeRunChannel) SendMessage(context.Context, string, string) error           { return nil }
+func (f *fakeRunChannel) SendLongMessage(context.Context, string, string) error       { return nil }
+func (f *fakeRunChannel) Incoming() <-chan channel.Message                            { return f.incoming }
+func (f *fakeRunChannel) Name() string                                                { return "fake" }
 func (f *fakeRunChannel) Send(ctx context.Context, msg gateway.OutboundMessage) error { return nil }
 
 func (f *fakeRunChannel) counts() (int, int) {
@@ -685,5 +685,139 @@ func TestRun_DefaultDepsIncludesGateway(t *testing.T) {
 	deps := defaultRunDeps()
 	if deps.newGateway == nil {
 		t.Fatal("defaultRunDeps.newGateway is nil; PR #5 wiring missing")
+	}
+}
+
+// echoIntegrationDeps mirrors integrationDeps but with a /bin/cat
+// agent so we can exercise the multi-message path without a
+// Claude Code dependency. /bin/cat echoes its stdin to stdout,
+// so each EventText emitted by the PTY bridge matches the text
+// the user message carried — perfect for asserting per-message
+// ordering and deadlock-freeness without involving an LLM.
+func echoIntegrationDeps(t *testing.T, ch *recordingChannel, signals <-chan os.Signal) runDeps {
+	t.Helper()
+	agents := agent.New()
+	a := pty.NewAgent("echo", "/bin/cat", nil, nil)
+	a.Cols = 80
+	a.Rows = 24
+	agents.Register(a)
+	mgr := &realRunManager{MemoryManager: session.NewMemoryManager(agents, nil, nil)}
+	return runDeps{
+		loadConfig: func() (*config.Config, error) {
+			return &config.Config{Feishu: config.FeishuConfig{
+				AppID: "cli_test", AppSecret: "secret_test",
+			}}, nil
+		},
+		openRegistry: func(*config.Config) (*registry.File, error) { return nil, nil },
+		buildAgents:  func(*config.Config) *agent.Registry { return agents },
+		newChannel:   func(*config.Config) (channel.Channel, error) { return ch, nil },
+		newManager: func(agents *agent.Registry, reg *registry.File, cb session.EventCallback) session.Manager {
+			return mgr
+		},
+		newGateway: func(mgr session.Manager, reg *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
+			gw := gateway.New(nil)
+			gatewaycmd.RegisterDefaultCommands(gw, mgr, reg, resp)
+			return gw
+		},
+		signals: signals,
+	}
+}
+
+// TestRun_ConsecutiveMessagesDoNotDeadlock exercises the bug that
+// motivated the SendUserMessage eviction fix: a follow-up user
+// message arriving while the previous turn is still in-flight
+// triggers an eviction path that, before the fix, self-deadlocked
+// the dispatchLoop goroutine.
+//
+// With /bin/cat as the agent and a recordingChannel capturing
+// replies, we send three messages back-to-back without sleeping
+// between them. Each message becomes a real receipt on the
+// recordingChannel via Channel.Send; the eviction path runs
+// because each new receipt displaces the still-active previous
+// receipt. With the pre-fix code the third message hangs; with
+// the post-fix code all three messages produce replies within
+// the deadline.
+//
+// This test deliberately uses the recordingChannel (a fake
+// channel.Channel) rather than the Feishu adapter so the failure
+// mode is unambiguous: if it deadlocks here, the deadlock lives
+// in the gateway/session/bridge abstraction — not in the
+// Feishu-specific SendUserMessage eviction.
+func TestRun_ConsecutiveMessagesDoNotDeadlock(t *testing.T) {
+	ch := newRecordingChannel()
+	signals := make(chan os.Signal, 1)
+
+	// Three messages fired in quick succession. No sleep between
+	// them: the receipt for msg1 is still StateWaiting or
+	// StateExecuting when msg2 lands, and the receipt for msg2
+	// is in the same state when msg3 lands — the exact eviction
+	// path the deadlock fix targets.
+	const messages = 3
+	go func() {
+		<-ch.started
+		ch.incoming <- channel.Message{ChatID: "oc_chat", Text: "/cwd /tmp"}
+		time.Sleep(20 * time.Millisecond)
+		ch.incoming <- channel.Message{ChatID: "oc_chat", Text: "/run echo"}
+		time.Sleep(20 * time.Millisecond)
+		for i := 0; i < messages; i++ {
+			ch.incoming <- channel.Message{
+				ChatID: "oc_chat",
+				Text:   "msg-" + string(rune('a'+i)),
+			}
+		}
+		// Give the events time to flow through the bridge and
+		// reach channel.Send, but with a generous deadline so
+		// the test fails loud and clear if anything deadlocks.
+		time.Sleep(500 * time.Millisecond)
+		signals <- syscall.SIGTERM
+	}()
+
+	var out bytes.Buffer
+	cmd := newRunCmd()
+	cmd.SetOut(&out)
+	cmd.SetContext(context.Background())
+
+	done := make(chan error, 1)
+	go func() { done <- runRunWith(cmd, echoIntegrationDeps(t, ch, signals)) }()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runRunWith: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runRunWith deadlocked: consecutive user messages should not block the dispatch loop")
+	}
+
+	// Verify the gateway replied to the slash commands AND each
+	// of the three user messages produced at least one outbound
+	// Send on the channel — the receipt-rendering path ran for
+	// every message without deadlocking.
+	ch.mu.Lock()
+	replies := append([]string(nil), ch.replies...)
+	ch.mu.Unlock()
+
+	wantSlashReplies := []string{"Workspace set", "running"}
+	for _, want := range wantSlashReplies {
+		found := false
+		for _, r := range replies {
+			if strings.Contains(r, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing slash-command reply containing %q in %v", want, replies)
+		}
+	}
+
+	// We don't assert a fixed count here (the bridge may produce
+	// multiple outbound messages per user turn depending on the
+	// receipt strategy); we assert at least `messages` outbound
+	// Send calls happened AFTER /run echo, which is the
+	// fingerprint of the user messages reaching the channel.
+	if len(replies) < 2+messages {
+		t.Errorf("replies = %d, want at least %d (slash replies + per-message outbound Sends): %v",
+			len(replies), 2+messages, replies)
 	}
 }

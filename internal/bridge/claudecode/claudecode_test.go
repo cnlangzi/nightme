@@ -630,3 +630,98 @@ func countSeq(got []string, seq ...string) int {
 	}
 	return n
 }
+
+// streamFromString runs pumpStream against an in-memory stream and
+// collects the AgentEvents it emits. Used by tests that want to
+// drive pumpStream with multi-event input that no single fixture
+// covers — e.g. several user messages in a row, each emitting
+// replay + assistant + result, to verify the parser doesn't
+// drop frames under burst input.
+func streamFromString(stream string) []agent.AgentEvent {
+	events := make(chan agent.AgentEvent, 64)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		pumpStream(strings.NewReader(stream), events, nil, nil)
+		close(events)
+	}()
+	var got []agent.AgentEvent
+	for ev := range events {
+		got = append(got, ev)
+	}
+	wg.Wait()
+	return got
+}
+
+// TestPumpStream_MultiMessageBurst exercises pumpStream with a
+// burst of stream-json envelopes: three user turns back-to-back,
+// each consisting of one user-role echo + one assistant text +
+// one terminal result. The parser must produce nine events
+// (three of each kind) without dropping or duplicating any.
+//
+// This is the parser-side companion to
+// TestRun_ConsecutiveMessagesDoNotDeadlock (gateway) and
+// TestSendUserMessage_EvictionDoesNotDeadlock (Feishu adapter):
+// the burst arrives at the bridge through pumpStream, the parser
+// translates each event, and the AgentEvents flow to the session
+// manager. A regression in the parser's state machine that
+// causes it to drop events between user turns would surface here
+// as a count mismatch, even if the bridge's stdin write side
+// were healthy.
+func TestPumpStream_MultiMessageBurst(t *testing.T) {
+	const messages = 3
+	lines := make([]string, 0, messages*3)
+	for i := 0; i < messages; i++ {
+		text := "hello-" + string(rune('a'+i))
+		lines = append(lines,
+			`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[replay] `+text+`"}]}}`,
+			`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"got: `+text+`"}]}}`,
+			`{"type":"result","subtype":"success","is_error":false,"duration_ms":1,"duration_api_ms":1,"num_turns":1,"result":"done"}`,
+		)
+	}
+	stream := strings.Join(lines, "\n") + "\n"
+
+	evs := streamFromString(stream)
+	// Each result event in Claude Code's stream-json emits both
+	// an EventResult (for the final assistant text) and an
+	// EventDone (terminal). So per user turn we get four
+	// AgentEvents: replay + assistant + result + done. Total
+	// across `messages` turns is 4 * messages.
+	wantEvents := messages * 4
+	if len(evs) != wantEvents {
+		t.Fatalf("events = %d, want %d (replay + assistant + result + done per message)", len(evs), wantEvents)
+	}
+
+	var replays, assistants, results, dones int
+	for _, ev := range evs {
+		switch ev.Kind {
+		case agent.EventText:
+			// The bridge prefixes user-role events with "[你] "
+			// before forwarding to the channel; assistant text
+			// goes through unprefixed.
+			switch {
+			case strings.HasPrefix(ev.Text, "[你] [replay] "):
+				replays++
+			case strings.HasPrefix(ev.Text, "got: "):
+				assistants++
+			}
+		case agent.EventResult:
+			results++
+		case agent.EventDone:
+			dones++
+		}
+	}
+	if replays != messages {
+		t.Errorf("replay events = %d, want %d", replays, messages)
+	}
+	if assistants != messages {
+		t.Errorf("assistant events = %d, want %d", assistants, messages)
+	}
+	if results != messages {
+		t.Errorf("EventResult count = %d, want %d", results, messages)
+	}
+	if dones != messages {
+		t.Errorf("EventDone count = %d, want %d", dones, messages)
+	}
+}

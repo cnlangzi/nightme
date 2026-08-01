@@ -71,7 +71,7 @@ func TestReceiptState_String(t *testing.T) {
 	}
 	// First two don't need a receipt (zero time fallback).
 	for _, c := range cases {
-		got := c.state.String(nil)
+		got := c.state.headerLine(nil)
 		if got != c.expect {
 			t.Errorf("%v.String(nil) = %q, want %q", c.state, got, c.expect)
 		}
@@ -83,10 +83,10 @@ func TestReceiptState_String(t *testing.T) {
 		lastEventAt: now,
 		completedAt: now,
 	}
-	if got := StateExecuting.String(r); got != "🔄 ⏳ 47 · 14:35:20" {
+	if got := StateExecuting.headerLine(r); got != "🔄 ⏳ 47 · 14:35:20" {
 		t.Errorf("Executing with ts = %q, want '🔄 ⏳ 47 · 14:35:20'", got)
 	}
-	if got := StateCompleted.String(r); got != "✅ 已完成 14:35:20" {
+	if got := StateCompleted.headerLine(r); got != "✅ 已完成 14:35:20" {
 		t.Errorf("Completed with ts = %q, want '✅ 已完成 14:35:20'", got)
 	}
 }
@@ -131,7 +131,7 @@ func TestReceiptLifecycle_Renderings(t *testing.T) {
 	if r.State() != StateWaiting {
 		t.Errorf("initial State = %v, want StateWaiting", r.State())
 	}
-	if got := r.state.String(r); got != "⏳ 等待中" {
+	if got := r.state.headerLine(r); got != "⏳ 等待中" {
 		t.Errorf("Waiting.String = %q", got)
 	}
 
@@ -139,21 +139,21 @@ func TestReceiptLifecycle_Renderings(t *testing.T) {
 	r.state = StateExecuting
 	r.eventCount = 1
 	r.lastEventAt = parseTime(t, "2026-08-01T14:35:01+08:00")
-	if got := r.state.String(r); got != "🔄 ⏳ 1 · 14:35:01" {
+	if got := r.state.headerLine(r); got != "🔄 ⏳ 1 · 14:35:01" {
 		t.Errorf("Executing.String = %q", got)
 	}
 
 	// Heartbeat tick
 	r.eventCount = 47
 	r.lastEventAt = parseTime(t, "2026-08-01T14:35:20+08:00")
-	if got := r.state.String(r); got != "🔄 ⏳ 47 · 14:35:20" {
+	if got := r.state.headerLine(r); got != "🔄 ⏳ 47 · 14:35:20" {
 		t.Errorf("Executing after heartbeat = %q", got)
 	}
 
 	// State 3: Completed
 	r.state = StateCompleted
 	r.completedAt = parseTime(t, "2026-08-01T14:35:30+08:00")
-	if got := r.state.String(r); got != "✅ 已完成 14:35:30" {
+	if got := r.state.headerLine(r); got != "✅ 已完成 14:35:30" {
 		t.Errorf("Completed.String = %q", got)
 	}
 }
@@ -174,7 +174,7 @@ func TestReceiptStringContainsEmoji(t *testing.T) {
 			lastEventAt: parseTime(t, "2026-08-01T14:35:00+08:00"),
 			completedAt: parseTime(t, "2026-08-01T14:35:00+08:00"),
 		}
-		got := c.state.String(r)
+		got := c.state.headerLine(r)
 		if !strings.Contains(got, c.emoji) {
 			t.Errorf("%v string %q does not contain emoji %q", c.state, got, c.emoji)
 		}

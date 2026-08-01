@@ -483,9 +483,19 @@ func (s *sessionAttachments) Sweep(ctx context.Context) {
 }
 
 // pump drains events for one session and renders them through the
-// channel. It exits when the events channel closes (the agent has
-// ended) or when ctx is cancelled.
+// renderer. The renderer owns the rolling-log reply message on
+// Feishu (see feishu.Renderer); the channel adapter is unused at
+// the event-pump level.
+//
+// The pump exits when the events channel closes (the agent has
+// ended) or when ctx is cancelled. A nil renderer is treated as a
+// programmer error — every code path that constructs a
+// sessionAttachments must supply a non-nil renderer (the Feishu
+// adapter is the only supported channel in v0.2.x).
 func (s *sessionAttachments) pump(ctx context.Context, chatID string, events <-chan agent.AgentEvent) {
+	if s.renderer == nil {
+		panic(fmt.Sprintf("sessionAttachments.pump: renderer is nil (chat=%s); every code path must wire a non-nil feishu.Renderer", chatID))
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -494,48 +504,12 @@ func (s *sessionAttachments) pump(ctx context.Context, chatID string, events <-c
 			if !ok {
 				return
 			}
-			if s.ch == nil {
-				continue
-			}
-			// Prefer the Feishu Renderer when available — it drives
-			// the F-25 receipt lifecycle (heartbeat ticks,
-			// state transitions). Otherwise fall back to direct
-			// SendMessage for non-Feishu channels.
-			if s.renderer != nil {
-				if err := s.renderer.RenderEvent(ctx, chatID, ev); err != nil {
-					if s.logger != nil {
-						s.logger.Warn("renderer failed",
-							"chat_id", chatID,
-							"event_kind", ev.Kind.String(),
-							"err", err)
-					}
-				}
-				continue
-			}
-			switch ev.Kind {
-			case agent.EventText:
-				_ = s.ch.SendLongMessage(ctx, chatID, ev.Text)
-			case agent.EventToolStart:
-				name := "tool"
-				if ev.ToolStart != nil && ev.ToolStart.Name != "" {
-					name = ev.ToolStart.Name
-				}
-				_ = s.ch.SendMessage(ctx, chatID, "🔧 "+name+"...")
-			case agent.EventToolEnd:
-				name := "tool"
-				if ev.ToolEnd != nil && ev.ToolEnd.Name != "" {
-					name = ev.ToolEnd.Name
-				}
-				_ = s.ch.SendMessage(ctx, chatID, "✅ "+name+" done")
-			case agent.EventDone:
-				code := 0
-				if ev.Done != nil {
-					code = ev.Done.ExitCode
-				}
-				_ = s.ch.SendMessage(ctx, chatID, fmt.Sprintf("Session ended (exit %d)", code))
-			case agent.EventError:
-				if ev.Error != nil && ev.Error.Err != nil {
-					_ = s.ch.SendMessage(ctx, chatID, "Error: "+ev.Error.Err.Error())
+			if err := s.renderer.RenderEvent(ctx, chatID, ev); err != nil {
+				if s.logger != nil {
+					s.logger.Warn("renderer failed",
+						"chat_id", chatID,
+						"event_kind", ev.Kind.String(),
+						"err", err)
 				}
 			}
 		}

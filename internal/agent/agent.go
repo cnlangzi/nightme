@@ -152,7 +152,17 @@ type ToolEndEvent struct {
 	// Name mirrors the tool name for symmetry with ToolStartEvent.
 	Name string
 
-	// Err is non-nil when the tool failed.
+	// Output is a short textual summary of the tool's result, suitable
+	// for the renderer to surface in the rolling log. Bridges should
+	// populate this from the tool's stdout / structured result /
+	// response payload. The renderer truncates to perEntryMaxBytes
+	// before display, so bridges may pass large payloads verbatim
+	// without pre-truncating.
+	Output string
+
+	// Err is non-nil when the tool failed. When Err is set, Output
+	// typically holds nothing (the failure path bypasses the
+	// payload); channels may use either field for display.
 	Err error
 }
 

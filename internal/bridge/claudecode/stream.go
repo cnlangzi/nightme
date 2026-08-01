@@ -58,6 +58,11 @@ type contentBlock struct {
 
 	// tool_result (in user-role message)
 	ToolUseID string          `json:"tool_use_id,omitempty"`
+	// Content is the tool's result payload. In Claude Code's
+	// stream-json schema this can be a plain JSON string OR a
+	// nested array of content blocks (multi-modal). We accept it
+	// as RawMessage and stringify at emit time so the renderer
+	// can surface a single-line summary in the rolling log.
 	Content   json.RawMessage `json:"content,omitempty"`
 	IsError   bool            `json:"is_error,omitempty"`
 }
@@ -192,16 +197,10 @@ func translate(ev streamEvent, events chan<- agent.AgentEvent, askHandler askHan
 			events <- agent.AgentEvent{
 				Kind: agent.EventToolEnd,
 				ToolEnd: &agent.ToolEndEvent{
-					Name: block.Name,
-					Err:  nil,
+					Name:   block.Name,
+					Output: stringifyToolResult(block.Content),
 				},
 			}
-			// Note: the ToolStartEvent emitted at tool_use time did
-			// not carry a Name for AskUserQuestion (it was intercepted
-			// before reaching the tool flow). For real tools the
-			// EventToolStart.Name matches block.Name, which is the
-			// best we can do without a separate ToolUseID→Name map.
-			_ = block
 		}
 
 	case "result":
@@ -254,6 +253,52 @@ func extractModel(ev streamEvent) string {
 	}
 	_ = json.Unmarshal(ev.Raw, &probe)
 	return probe.Model
+}
+
+// stringifyToolResult flattens a tool_result's content payload to a
+// single-line string for the rolling-log display. Claude Code emits
+// the content as either a JSON string (the common case) or a JSON
+// array of content blocks (multi-modal). We accept both shapes and
+// return a single-line summary that the renderer truncates to its
+// own per-entry budget.
+//
+// The function is best-effort: malformed payloads return a JSON dump
+// rather than an empty string, so the user at least sees that
+// *something* came back.
+func stringifyToolResult(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// Case 1: content is a plain JSON string.
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return strings.TrimSpace(s)
+	}
+	// Case 2: content is an array of content blocks. Flatten
+	// each block's text (or a short representation of non-text
+	// blocks) with a newline separator.
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		var out strings.Builder
+		for i, b := range blocks {
+			if i > 0 {
+				out.WriteString(" | ")
+			}
+			switch b.Type {
+			case "text":
+				out.WriteString(b.Text)
+			default:
+				out.WriteString("[" + b.Type + "]")
+			}
+		}
+		return out.String()
+	}
+	// Case 3: neither shape — return a compact JSON dump. The
+	// renderer will truncate; the user sees something useful.
+	return string(raw)
 }
 
 // truncateForLog caps a string for log lines so a runaway line does

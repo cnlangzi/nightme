@@ -234,8 +234,41 @@ func TestRender_ToolStart(t *testing.T) {
 }
 
 // TestRender_ToolEnd_Success verifies a successful tool result
-// appends a ✅ entry.
+// appends a ✅ entry that includes the tool's output so the user
+// can tell what the agent actually did.
 func TestRender_ToolEnd_Success(t *testing.T) {
+	r, mock := newRendererWithMock()
+
+	if err := r.RenderEvent(context.Background(), "oc_chat", agent.AgentEvent{
+		Kind: agent.EventToolEnd,
+		ToolEnd: &agent.ToolEndEvent{
+			Name:   "Read",
+			Output: "47 lines, handler at L42",
+		},
+	}); err != nil {
+		t.Fatalf("RenderEvent: %v", err)
+	}
+
+	texts := mock.updatedTexts()
+	if len(texts) != 1 {
+		t.Fatalf("UpdateMessage calls = %d, want 1", len(texts))
+	}
+	got := texts[0]
+	if !strings.Contains(got, "✅") {
+		t.Errorf("tool-end log missing ✅: %q", got)
+	}
+	if !strings.Contains(got, "Read") {
+		t.Errorf("tool-end log missing tool name: %q", got)
+	}
+	if !strings.Contains(got, "47 lines") {
+		t.Errorf("tool-end log missing the output summary — user sees only a useless template: %q", got)
+	}
+}
+
+// TestRender_ToolEnd_NoOutput verifies the legacy fallback when the
+// bridge forgets to populate Output. We still render a useful
+// "Read done" line — just not as informative as the Output path.
+func TestRender_ToolEnd_NoOutput(t *testing.T) {
 	r, mock := newRendererWithMock()
 
 	if err := r.RenderEvent(context.Background(), "oc_chat", agent.AgentEvent{
@@ -249,8 +282,8 @@ func TestRender_ToolEnd_Success(t *testing.T) {
 	if len(texts) != 1 {
 		t.Fatalf("UpdateMessage calls = %d, want 1", len(texts))
 	}
-	if !strings.Contains(texts[0], "✅") || !strings.Contains(texts[0], "Read done") {
-		t.Errorf("tool-end log = %q, want ✅ Read done", texts[0])
+	if !strings.Contains(texts[0], "Read done") {
+		t.Errorf("tool-end fallback = %q, want 'Read done'", texts[0])
 	}
 }
 

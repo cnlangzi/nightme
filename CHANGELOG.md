@@ -58,6 +58,14 @@ as closely as a pre-1.0 project can.
   transition the receipt to terminal state. `MessageReceipt.bot`
   is now an unexported `receiptBot` interface so unit tests can
   drive the receipt lifecycle without a real lark client.
+- Tool-end output surfacing: `ToolEndEvent` gains an `Output`
+  field. The claudecode bridge now stringifies the `tool_result`
+  content from stream-json and populates `Output` (was previously
+  dropped). The Feishu renderer shows the output as a short summary
+  on the ✅ line (e.g. `✅ Read → 47 lines, handler at L42`)
+  instead of the useless template `✅ Read done`. Bridges without
+  `Output` still fall back to "name done" so existing agents stay
+  working.
 - `nightme version` subcommand: REPL-friendly sibling of `--version`
   (Cobra only registers `--version` as a flag, not a verb).
 - Cold-start fallback: `nightme run` and `nightme agents` now seed

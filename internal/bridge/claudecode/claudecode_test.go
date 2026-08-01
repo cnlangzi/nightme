@@ -119,6 +119,65 @@ func TestPumpStream_ToolResult(t *testing.T) {
 	if evs[0].Kind != agent.EventToolEnd {
 		t.Errorf("event kind = %v, want EventToolEnd", evs[0].Kind)
 	}
+	// Output must carry the tool_result content so the renderer
+	// can show "tool → result" instead of a blank "tool done".
+	if evs[0].ToolEnd.Output == "" {
+		t.Errorf("ToolEnd.Output is empty; renderer would show a useless 'tool done' line")
+	}
+	if !strings.Contains(evs[0].ToolEnd.Output, "print") {
+		t.Errorf("ToolEnd.Output = %q, want it to contain the tool result text", evs[0].ToolEnd.Output)
+	}
+}
+
+// TestStringifyToolResult covers the three payload shapes Claude
+// Code emits for tool_result.content: a plain JSON string, an
+// array of content blocks (multi-modal), and a non-string non-array
+// payload (defensive).
+func TestStringifyToolResult(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "plain string",
+			raw:  `"hello world"`,
+			want: "hello world",
+		},
+		{
+			name: "string with surrounding whitespace",
+			raw:  `"\n  multi\n  line\n"`,
+			want: "multi\n  line",
+		},
+		{
+			name: "array of text blocks",
+			raw:  `[{"type":"text","text":"first"},{"type":"text","text":"second"}]`,
+			want: "first | second",
+		},
+		{
+			name: "array mixing text and image blocks",
+			raw:  `[{"type":"text","text":"caption"},{"type":"image","source":{}}]`,
+			want: "caption | [image]",
+		},
+		{
+			name: "empty content",
+			raw:  `""`,
+			want: "",
+		},
+		{
+			name: "unknown shape falls back to raw JSON",
+			raw:  `{"foo":42}`,
+			want: `{"foo":42}`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := stringifyToolResult(json.RawMessage(c.raw))
+			if got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
 }
 
 func TestPumpStream_AskUserQuestion(t *testing.T) {

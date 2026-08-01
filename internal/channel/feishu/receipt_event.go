@@ -70,15 +70,23 @@ func eventToEntry(ev agent.AgentEvent, now time.Time) (LogEntry, bool) {
 			return LogEntry{}, false
 		}
 		icon := "✅"
-		suffix := "done"
+		var body string
 		if ae.ToolEnd.Err != nil {
 			icon = "❌"
-			suffix = "failed: " + ae.ToolEnd.Err.Error()
+			body = fmt.Sprintf("%s failed: %s", ae.ToolEnd.Name, ae.ToolEnd.Err.Error())
+		} else if ae.ToolEnd.Output != "" {
+			// Result is the most useful signal for the user — show
+			// a short summary so they can tell what the agent
+			// actually did (e.g. "Read /tmp/main.go → 47 lines").
+			body = fmt.Sprintf("%s → %s", ae.ToolEnd.Name, ae.ToolEnd.Output)
+		} else {
+			// Fallback when the bridge forgot to populate Output.
+			body = ae.ToolEnd.Name + " done"
 		}
 		return LogEntry{
 			Time:  now,
 			Icon:  icon,
-			Text:  truncateForLog(fmt.Sprintf("%s %s", ae.ToolEnd.Name, suffix), perEntryMaxBytes),
+			Text:  truncateForLog(body, perEntryMaxBytes),
 			Kind:  "tool_end",
 		}, true
 

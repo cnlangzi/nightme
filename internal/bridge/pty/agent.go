@@ -1,19 +1,18 @@
-// Package ptyagent implements agent.Agent for CLI tools that expose
-// no structured protocol — they are spawned inside a PTY and the
-// bytes are forwarded as AgentEvents.
+// Package pty also provides the Agent wrapper that turns a CLI
+// command into an agent.Agent backed by the PTY transport defined
+// in this package. The wrapper is the safe fallback for any binary
+// that does not yet speak ACP / SDK / JSON-IO — bytes flow through
+// the PTY as EventText and the session manager drives them.
 //
-// This is the v0.1 fallback for any AI Coding CLI that does not yet
-// implement ACP. Claude Code is registered as ModePTY in M2 for the
-// same reason; v0.2 introduces a dedicated SDK adapter (see
-// docs/feat/F-21-agent-modes.md §5.3).
-package ptyagent
+// Lives in bridge/pty/ (not in a separate agent package) so the
+// whole PTY story is one tree. See docs/feat/F-21-agent-modes.md §5.3.
+package pty
 
 import (
 	"context"
 	"os/exec"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/bridge/pty"
 )
 
 // Agent is a thin descriptor for one CLI wrapped in PTY mode.
@@ -32,14 +31,15 @@ type Agent struct {
 	Rows int
 }
 
-// New constructs an Agent. name is the registry key, command is the
-// CLI binary (resolved via PATH at Start time). args are appended
-// after the binary at Start time; env entries are KEY=VALUE strings
-// merged into the child environment.
+// NewAgent constructs the Agent descriptor for a CLI driven through
+// the PTY bridge. name is the registry key, command is the CLI
+// binary (resolved via PATH at Start time). args are appended after
+// the binary at Start time; env entries are KEY=VALUE strings merged
+// into the child environment.
 //
 // Both args and env are defensively copied; callers may mutate their
 // input slices after the call returns.
-func New(name, command string, args, env []string) *Agent {
+func NewAgent(name, command string, args, env []string) *Agent {
 	return &Agent{
 		name:    name,
 		command: command,
@@ -103,12 +103,12 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSe
 	// propagates to the child process via gopty.CmdContext.
 	_ = ctx
 
-	bridge, err := pty.New(cfg.Workspace, a.command, args, env, cols, rows)
+	bridge, err := NewBridge(cfg.Workspace, a.command, args, env, cols, rows)
 	if err != nil {
 		return nil, err
 	}
 
-	session := pty.NewPtySession(bridge)
+	session := NewPtySession(bridge)
 	session.Start()
 	return session, nil
 }

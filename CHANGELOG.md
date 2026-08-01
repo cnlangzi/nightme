@@ -44,6 +44,18 @@ as closely as a pre-1.0 project can.
   half-implementation. User config can still add new agents (always
   via ptyagent) or override the built-in `claude` to point at a
   custom binary (which drops the dedicated JSON-IO bridge).
+- Package restructure: `internal/agent/` is now pure abstraction
+  (`agent.go` + `registry.go` only); per-agent implementations live
+  in their respective bridge packages (`internal/bridge/pty/`,
+  `internal/bridge/acp/`). The standalone `internal/agent/ptyagent/`
+  and `internal/agent/acpagent/` packages are gone — their code
+  moved into the bridge packages alongside the protocol and the
+  AgentSession implementation. `internal/bridge/sdk/` is removed
+  (stub only, never wired). `cmd/nightme/agents.go` becomes the
+  registration table: each line is `agent.Builtins.Register(<bridge
+  package>.NewAgent(name, command, args, env))`. The `nightme
+  agents` CLI subcommand moves to `cmd/nightme/agents_cmd.go` to
+  avoid the file-name collision.
 
 ## [0.2.0] - 2026-08-01
 

@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/agent/ptyagent"
+	"github.com/cnlangzi/nightme/internal/bridge/pty"
 	"github.com/cnlangzi/nightme/internal/session"
 )
 
@@ -57,7 +57,7 @@ func (e errorResponder) Reply(context.Context, string, string) error { return e.
 func ptyAgentRegistry(t *testing.T) *agent.Registry {
 	t.Helper()
 	reg := agent.New()
-	a := ptyagent.New("claude", "/bin/echo", nil, nil)
+	a := pty.NewAgent("claude", "/bin/echo", nil, nil)
 	a.Cols = 80
 	a.Rows = 24
 	reg.Register(a)

@@ -36,7 +36,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/agent/ptyagent"
+	"github.com/cnlangzi/nightme/internal/bridge/pty"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/session"
 )
@@ -153,7 +153,7 @@ func buildAgentRegistry(cfg *config.Config, requested string) *agent.Registry {
 			if entry.Command == "" {
 				continue
 			}
-			a := ptyagent.New(name, entry.Command, append([]string(nil), entry.Args...), configuredAgentEnv(entry.Env))
+			a := pty.NewAgent(name, entry.Command, append([]string(nil), entry.Args...), configuredAgentEnv(entry.Env))
 			a.Cols = cfg.Session.DefaultPtyCols
 			a.Rows = cfg.Session.DefaultPtyRows
 			reg.Register(a)
@@ -166,7 +166,7 @@ func buildAgentRegistry(cfg *config.Config, requested string) *agent.Registry {
 		// confusing exec error.
 		if requested != "" {
 			if _, statErr := os.Stat(requested); statErr == nil {
-				reg.Register(ptyagent.New(requested, filepath.Base(requested), nil, nil))
+				reg.Register(pty.NewAgent(requested, filepath.Base(requested), nil, nil))
 			}
 		}
 	}

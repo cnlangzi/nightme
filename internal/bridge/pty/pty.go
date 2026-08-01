@@ -31,7 +31,7 @@ type ptyBridge struct {
 // env is appended to os.Environ() for the child process. cols / rows
 // set the initial TTY size. Returns a Bridge for byte I/O plus a
 // PID() helper.
-func New(workspace, command string, args []string, env []string, cols, rows int) (Bridge, error) {
+func NewBridge(workspace, command string, args []string, env []string, cols, rows int) (Bridge, error) {
 	ptmx, err := gopty.New()
 	if err != nil {
 		return nil, err

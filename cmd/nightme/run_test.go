@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/agent/ptyagent"
+	"github.com/cnlangzi/nightme/internal/bridge/pty"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
@@ -288,7 +288,7 @@ func TestBuildRunAgentRegistry_HasBuiltinsOnly(t *testing.T) {
 // TestBuildRunAgentRegistry_UserConfigRegistered verifies that any
 // agent named in cfg.Agent.Agents becomes available, regardless of
 // whether it has a Builtins entry. User-configured agents always
-// land in ptyagent — the safe default for arbitrary CLIs.
+// land in pty (bridge/pty.NewAgent) — the safe default for arbitrary CLIs.
 func TestBuildRunAgentRegistry_UserConfigRegistered(t *testing.T) {
 	cfg := &config.Config{
 		Agent: config.AgentConfig{Agents: map[string]config.AgentEntry{
@@ -298,9 +298,9 @@ func TestBuildRunAgentRegistry_UserConfigRegistered(t *testing.T) {
 	}
 	reg := buildRunAgentRegistry(cfg)
 
-	custom, ok := mustAgent(reg, "custom").(*ptyagent.Agent)
+	custom, ok := mustAgent(reg, "custom").(*pty.Agent)
 	if !ok {
-		t.Fatalf("custom agent type = %T, want *ptyagent.Agent", mustAgent(reg, "custom"))
+		t.Fatalf("custom agent type = %T, want *pty.Agent", mustAgent(reg, "custom"))
 	}
 	if got := custom.Mode(); got != agent.ModePTY {
 		t.Errorf("custom mode = %s, want pty", got)
@@ -317,7 +317,7 @@ func TestBuildRunAgentRegistry_UserConfigRegistered(t *testing.T) {
 // TestBuildRunAgentRegistry_UserConfigOverridesBuiltin covers the
 // override path: a user entry whose name matches a built-in (e.g.
 // `claude`) replaces the built-in. The user's command path wins
-// but the new instance is always a ptyagent — overriding loses the
+// but the new instance is always a pty (PTY bridge) — overriding loses the
 // dedicated bridge features (documented in the init() comment).
 func TestBuildRunAgentRegistry_UserConfigOverridesBuiltin(t *testing.T) {
 	cfg := &config.Config{
@@ -491,7 +491,7 @@ func integrationDeps(t *testing.T, ch *recordingChannel, signals <-chan os.Signa
 	// /bin/cat blocks on stdin so the spawned agent stays alive
 	// without producing output, which keeps the reply ordering
 	// deterministic.
-	a := ptyagent.New("claude", "/bin/cat", nil, nil)
+	a := pty.NewAgent("claude", "/bin/cat", nil, nil)
 	a.Cols = 80
 	a.Rows = 24
 	agents.Register(a)

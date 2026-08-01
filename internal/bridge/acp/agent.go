@@ -1,14 +1,17 @@
-// Package acpagent implements agent.Agent for CLIs that speak the Agent
-// Client Protocol over their stdio stream. PTY remains the physical carrier;
+// Package acp also provides the Agent wrapper that turns a CLI
+// command into an agent.Agent backed by the Agent Client Protocol
+// defined in this package. PTY remains the physical carrier;
 // ACP supplies the structured request and event layer above it.
-package acpagent
+//
+// Lives in bridge/acp/ (not in a separate agent package) so the
+// whole ACP story is one tree. See docs/feat/F-21-agent-modes.md §5.3.
+package acp
 
 import (
 	"context"
 	"os/exec"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/bridge/acp"
 	"github.com/cnlangzi/nightme/internal/bridge/pty"
 )
 
@@ -22,9 +25,13 @@ type Agent struct {
 	rows    int
 }
 
-// New constructs an ACP agent descriptor. args are the command's protocol
-// flags, such as the ACP server flag supported by a specific CLI.
-func New(name, command string, args []string) *Agent {
+// NewAgent constructs an ACP agent descriptor. args are the
+// command's protocol flags, such as the ACP server flag supported by
+// a specific CLI.
+//
+// The agent stores args defensively; callers may mutate their input
+// slice after the call returns.
+func NewAgent(name, command string, args []string) *Agent {
 	return &Agent{name: name, command: command, args: append([]string(nil), args...)}
 }
 
@@ -60,11 +67,11 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSe
 		rows = 24
 	}
 
-	bridge, err := pty.New(cfg.Workspace, a.command, args, env, cols, rows)
+	bridge, err := pty.NewBridge(cfg.Workspace, a.command, args, env, cols, rows)
 	if err != nil {
 		return nil, err
 	}
-	session, err := acp.NewSession(ctx, bridge, a.name, acp.WithWorkspace(cfg.Workspace))
+	session, err := NewSession(ctx, bridge, a.name, WithWorkspace(cfg.Workspace))
 	if err != nil {
 		_ = bridge.Close()
 		return nil, err

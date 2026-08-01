@@ -17,7 +17,7 @@ func TestSpawnEcho(t *testing.T) {
 		t.Skip("PTY semantics differ on Windows; skip unix-only smoke test")
 	}
 
-	b, err := New(t.TempDir(), "/bin/echo", []string{"hello"}, nil, 80, 24)
+	b, err := NewBridge(t.TempDir(), "/bin/echo", []string{"hello"}, nil, 80, 24)
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestSetsize(t *testing.T) {
 		t.Skip("PTY semantics differ on Windows; skip unix-only smoke test")
 	}
 
-	b, err := New(t.TempDir(), "/bin/sleep", []string{"0.2"}, nil, 80, 24)
+	b, err := NewBridge(t.TempDir(), "/bin/sleep", []string{"0.2"}, nil, 80, 24)
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestClose(t *testing.T) {
 		t.Skip("PTY semantics differ on Windows; skip unix-only smoke test")
 	}
 
-	b, err := New(t.TempDir(), "/bin/sleep", []string{"0.2"}, nil, 80, 24)
+	b, err := NewBridge(t.TempDir(), "/bin/sleep", []string{"0.2"}, nil, 80, 24)
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestPID(t *testing.T) {
 		t.Skip("PTY semantics differ on Windows; skip unix-only smoke test")
 	}
 
-	b, err := New(t.TempDir(), "/bin/sleep", []string{"0.2"}, nil, 80, 24)
+	b, err := NewBridge(t.TempDir(), "/bin/sleep", []string{"0.2"}, nil, 80, 24)
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}

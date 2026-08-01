@@ -1,4 +1,4 @@
-package ptyagent
+package pty
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 // TestAgentName verifies the Name field is surfaced through the
 // interface.
 func TestAgentName(t *testing.T) {
-	a := New("claude", "claude", nil, nil)
+	a := NewAgent("claude", "claude", nil, nil)
 	if got := a.Name(); got != "claude" {
 		t.Fatalf("Name() = %q, want claude", got)
 	}
@@ -22,7 +22,7 @@ func TestAgentName(t *testing.T) {
 // TestAgentMode verifies PTY agents report ModePTY so the
 // SessionManager routes them through the PTY backend.
 func TestAgentMode(t *testing.T) {
-	a := New("claude", "claude", nil, nil)
+	a := NewAgent("claude", "claude", nil, nil)
 	if got := a.Mode(); got != agent.ModePTY {
 		t.Fatalf("Mode() = %s, want pty", got)
 	}
@@ -36,14 +36,13 @@ func TestAgentDetect(t *testing.T) {
 		t.Skip("skip unix-only smoke test on windows")
 	}
 
-	a := New("echo", "/bin/echo", nil, nil)
+	a := NewAgent("echo", "/bin/echo", nil, nil)
 	if err := a.Detect(); err != nil {
-		t.Fatalf("Detect(/bin/echo) returned error: %v", err)
+		t.Fatalf("Detect(/bin/echo) = %v", err)
 	}
 
-	a = New("definitely-not-installed-xyz", "/nope/binary", nil, nil)
-	if err := a.Detect(); err == nil {
-		t.Fatalf("Detect(invalid) returned nil error, want non-nil")
+	if err := NewAgent("missing", "/no/such/pty-agent", nil, nil).Detect(); err == nil {
+		t.Fatal("Detect(missing) = nil, want error")
 	}
 }
 
@@ -56,7 +55,7 @@ func TestAgentStartEndToEnd(t *testing.T) {
 		t.Skip("skip unix-only smoke test on windows")
 	}
 
-	a := New("echo", "/bin/echo", nil, nil)
+	a := NewAgent("echo", "/bin/echo", nil, nil)
 	sess, err := a.Start(context.Background(), agent.StartConfig{
 		Workspace: t.TempDir(),
 		Args:      []string{"hello"},
@@ -66,10 +65,6 @@ func TestAgentStartEndToEnd(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sess.Close() })
 
-	// Drain events until we find the "hello" payload. The session's
-	// readLoop only terminates when Close() unblocks the underlying
-	// Read; we drive it with a short timeout so the test does not
-	// depend on PTY EOF semantics.
 	deadline := time.After(2 * time.Second)
 	gotHello := false
 drain:
@@ -81,8 +76,6 @@ drain:
 			}
 			if ev.Kind == agent.EventText && contains(ev.Text, "hello") {
 				gotHello = true
-			}
-			if ev.Kind == agent.EventDone {
 				break drain
 			}
 		case <-deadline:
@@ -90,44 +83,37 @@ drain:
 		}
 	}
 	if !gotHello {
-		t.Fatalf("never observed a text event containing %q", "hello")
+		t.Errorf("did not observe 'hello' in events before deadline")
 	}
 }
 
-// TestAgentStartRejectsBadWorkspace confirms that an unresolvable
-// workspace path surfaces as an error rather than a nil session.
-func TestAgentStartBadWorkspace(t *testing.T) {
+// TestAgentStart_MissingBinary checks the Start path when the
+// configured binary does not resolve.
+func TestAgentStart_MissingBinary(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skip unix-only smoke test on windows")
 	}
-
-	a := New("echo", "/bin/echo", nil, nil)
-	// /this/path/definitely/does/not/exist is not a valid Cwd; the
-	// underlying PTY spawn must return an error.
-	_, err := a.Start(context.Background(), agent.StartConfig{
-		Workspace: "/this/path/definitely/does/not/exist",
-	})
+	a := NewAgent("missing", "/no/such/binary", nil, nil)
+	_, err := a.Start(context.Background(), agent.StartConfig{Workspace: t.TempDir()})
 	if err == nil {
-		t.Fatalf("Start with bad workspace returned nil error")
+		t.Fatal("Start on missing binary returned nil error")
 	}
-	if !errors.Is(err, err) {
-		// Errors.Is(err, err) is always true; we just want to
-		// confirm err is non-nil and not an interface-conformance
-		// quirk.
-		t.Fatalf("unexpected err type: %v", err)
+	if !errors.Is(err, err) { // any non-nil satisfies this; document the surface.
+		t.Fatalf("unexpected error type: %v", err)
 	}
 }
 
-// contains is a tiny substring helper to avoid importing strings just
-// for one call.
-func contains(haystack, needle string) bool {
-	if len(needle) == 0 {
-		return true
-	}
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return true
+// contains is a tiny helper kept local so the test does not pull in
+// strings for one call site.
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && indexOf(s, sub) >= 0
+}
+
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
 		}
 	}
-	return false
+	return -1
 }

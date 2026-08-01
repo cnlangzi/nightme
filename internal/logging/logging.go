@@ -65,7 +65,15 @@ func New(cfg *config.Config) (*slog.Logger, error) {
 	if err != nil {
 		return nil, fmt.Errorf("logging: open %s: %w", path, err)
 	}
-	handler := &closeableHandler{Handler: slog.NewJSONHandler(f, &slog.HandlerOptions{Level: level}), file: f}
+	// Tee log lines to the file AND stderr so the CLI surface
+	// shows the same trace the persisted log captures. Without
+	// the stderr sink the user has to tail the log file to see
+	// what nightme is doing — useful for debugging which stage
+	// dropped a message but painful during a live session. Stderr
+	// matches the lark SDK's existing CLI output (which already
+	// lands in the terminal via the default Go logger).
+	sink := io.MultiWriter(f, os.Stderr)
+	handler := &closeableHandler{Handler: slog.NewJSONHandler(sink, &slog.HandlerOptions{Level: level}), file: f}
 	return slog.New(handler), nil
 }
 

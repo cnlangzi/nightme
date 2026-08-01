@@ -1,9 +1,13 @@
 package feishu
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -123,6 +127,73 @@ func TestIncoming_ReceivesEvent(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for incoming message")
 	}
+}
+
+func TestHandleMessage_LogsInbound(t *testing.T) {
+	// Capture slog.Default output so the test sees what the
+	// adapter writes via logInbound. logInbound reads
+	// a.logger (defaulted to slog.Default in NewAdapter).
+	var (
+		mu  sync.Mutex
+		buf bytes.Buffer
+	)
+	prev := slog.Default()
+	both := io.MultiWriter(&safeWriter{w: &buf, mu: &mu}, io.Discard)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(both, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	a := testAdapter(t)
+	chatID := "oc_chat"
+	senderID := "ou_sender"
+	content := `{"text":"trace me"}`
+	messageType := larkim.MsgTypeText
+	created := "1720000000123"
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{SenderId: &larkim.UserId{OpenId: &senderID}},
+			Message: &larkim.EventMessage{
+				ChatId:      &chatID,
+				Content:     &content,
+				MessageType: &messageType,
+				CreateTime:  &created,
+			},
+		},
+	}
+
+	if err := a.handleMessage(context.Background(), event); err != nil {
+		t.Fatalf("handleMessage: %v", err)
+	}
+
+	// Drain the incoming channel so the publish goroutine — if
+	// any — completes and flushes the log line.
+	select {
+	case <-a.Incoming():
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for incoming message")
+	}
+
+	mu.Lock()
+	out := buf.String()
+	mu.Unlock()
+	if !strings.Contains(out, "feishu: incoming") {
+		t.Errorf("expected feishu: incoming log line, got %q", out)
+	}
+	if !strings.Contains(out, "trace me") {
+		t.Errorf("expected log line to carry the message text, got %q", out)
+	}
+}
+
+// safeWriter serializes writes so the test goroutine and the
+// adapter's logger do not race on the shared buffer.
+type safeWriter struct {
+	mu *sync.Mutex
+	w  *bytes.Buffer
+}
+
+func (s *safeWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 func TestAdapter_StopClosesIncoming(t *testing.T) {

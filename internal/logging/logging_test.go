@@ -1,7 +1,9 @@
 package logging
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,6 +75,61 @@ func TestLogger_DefaultPath(t *testing.T) {
 	path := filepath.Join(dir, ".local", "share", "nightme", "nightme.log")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("default log: %v", err)
+	}
+}
+
+func TestLogger_TeesToStderr(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "nightme.log")
+
+	// Replace os.Stderr with a pipe so we can capture what the
+	// MultiWriter writes to the second sink. Restore on exit.
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	t.Cleanup(func() {
+		os.Stderr = origStderr
+		_ = r.Close()
+		_ = w.Close()
+	})
+
+	lg, err := New(&config.Config{Logging: config.LoggingConfig{File: logPath}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	lg.Info("tee-me", "kind", "double-sink")
+
+	// Close the writer so the read on the consumer side completes.
+	_ = w.Close()
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	stderrContent := buf.String()
+
+	// Both sinks must contain the message — file for persistence,
+	// stderr for the CLI surface.
+	fileContent, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if !strings.Contains(string(fileContent), "tee-me") {
+		t.Errorf("file missing log line: %q", fileContent)
+	}
+	if !strings.Contains(stderrContent, "tee-me") {
+		t.Errorf("stderr missing log line: %q", stderrContent)
+	}
+	// Both sinks share the JSON format the parser already validates.
+	var record map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stderrContent)), &record); err != nil {
+		t.Fatalf("stderr not valid JSON: %v: %q", err, stderrContent)
+	}
+	if record["msg"] != "tee-me" {
+		t.Errorf("stderr msg = %v, want tee-me", record["msg"])
 	}
 }
 

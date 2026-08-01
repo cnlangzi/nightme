@@ -34,6 +34,7 @@
 | F-23 | Heartbeat & Streaming Status（event-driven tick + 进程级 DEAD 检测）| [feat/F-23-heartbeat.md](./feat/F-23-heartbeat.md) | v0.2 |
 | F-24 | Claude Code Bridge（JSON-IO + auto-accept + AskUserQuestion）| [feat/F-24-claudecode-bridge.md](./feat/F-24-claudecode-bridge.md) | v0.2 |
 | F-25 | Input Buffer & Message Status（双轨 Reaction+Reply + 3 状态）| [feat/F-25-input-buffer.md](./feat/F-25-input-buffer.md) | v0.2 |
+| F-26 | Gateway Hub Architecture（Gateway = 中枢、Channel = 薄 I/O、抽象消息类型）| [feat/F-26-gateway-hub.md](./feat/F-26-gateway-hub.md) | v0.3 |
 
 ## 2. 后续功能（v0.2+）
 

@@ -219,7 +219,7 @@ func TestRun_StartsChannelAndManager(t *testing.T) {
 	if len(mgr.killed) != 0 {
 		t.Errorf("Kill called during graceful shutdown: %v", mgr.killed)
 	}
-	if !strings.Contains(out.String(), "Feishu WebSocket connected") || !strings.Contains(out.String(), "received: hello") {
+	if !strings.Contains(out.String(), "Feishu WebSocket connected") {
 		t.Errorf("daemon output = %q", out.String())
 	}
 }

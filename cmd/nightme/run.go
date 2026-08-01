@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -281,86 +280,34 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// Spawn per-session pumps so live agent events are rendered
 	// back to the chat. We (re)attach every time the session
 	// table changes by polling on each incoming message.
-	attachments := newSessionAttachments(mgr, ch, renderer)
-	attachments.logger = logger
 
-	incoming := ch.Incoming()
-	if incoming == nil {
-		return shutdownRun(out, ch, mgr, deps.cleanup, logger)
+	// Stage 2: drive the gateway's own dispatch runtime. The
+	// gateway now owns the per-channel inbound pump (reads from
+	// ch.Incoming() and routes through gw.Handle) and the
+	// per-session outbound pump (reads from the sweeper's
+	// OutboundSource list and dispatches AgentEvent → OutboundMessage
+	// → Channel.Send). The Feishu-specific rolling-log receipt path
+	// is bypassed by the sweeper's filter (hasRenderer +
+	// isFeishuSession), so we don't double-send during the
+	// Stage-2 / Stage-3 transition.
+	gwImpl := gw.(*gateway.Router)
+	gwImpl.AttachChannels(ch)
+	if err := gwImpl.Start(ctx); err != nil {
+		return fmt.Errorf("run: start gateway: %w", err)
 	}
-	for {
-		attachments.Sweep(ctx)
+	defer func() { _ = gwImpl.Stop(context.Background()) }()
 
-		select {
-		case <-ctx.Done():
-			return shutdownRun(out, ch, mgr, deps.cleanup, logger)
-		case sig, ok := <-sigCh:
-			if ok && sig != nil {
-				fmt.Fprintf(out, "[nightme] received %s\n", sig)
-			}
-			return shutdownRun(out, ch, mgr, deps.cleanup, logger)
-		case msg, ok := <-incoming:
-			if !ok {
-				return shutdownRun(out, ch, mgr, deps.cleanup, logger)
-			}
-			fmt.Fprintf(out, "received: %s (attachments=%d)\n", msg.Text, len(msg.Attachments))
-
-			// F-14 inbound attachment handling. If the channel
-			// message carries any non-text attachments, download
-			// them synchronously (with retries) before letting the
-			// gateway see the message. The Feishu adapter is the
-			// only one that produces attachments today; other
-			// channels fall through unchanged.
-			//
-			// Skip the download path entirely when there is no
-			// session bound to this chat — without a session the
-			// inbox directory cannot be created, every download
-			// would "fail" with the misleading ❌ message, and the
-			// user's caption would be silently dropped. Letting the
-			// gateway's fallback handle the un-bound case produces a
-			// correct "no workspace set" / "CLI not running" hint
-			// instead.
-			if len(msg.Attachments) > 0 {
-				if feishuCh, ok := ch.(*feishu.Adapter); ok {
-					sess, _ := mgr.GetByChat(msg.ChatID)
-					if sess != nil {
-						result := feishuCh.DownloadAttachments(ctx, msg.MessageID, msg.Attachments, sess.ID)
-						msg.Attachments = result.Atts
-
-						// All downloads failed: the inbound message
-						// would mislead the agent (caption without
-						// the image it referred to). Drop the
-						// forwarding and tell the user to resend.
-						if result.AllFailed {
-							_ = responder.Reply(ctx, msg.ChatID,
-								"❌ 文件下载失败 (重试 3 次后)\n请重新发送该消息。")
-							continue
-						}
-						// Partial failure: forward what's available
-						// and tell the user about the rest.
-						if len(result.FailureKeys) > 0 {
-							_ = responder.Reply(ctx, msg.ChatID,
-								fmt.Sprintf("⚠️ 部分文件下载失败: %s\n请重新发送未下载成功的文件。",
-									strings.Join(result.FailureKeys, ", ")))
-						}
-					}
-				}
-			}
-
-			handleCtx := gatewaycmd.WithGateway(ctx, gw)
-			if _, err := gw.Handle(handleCtx, &gateway.InboundMessage{
-				ChatID:      msg.ChatID,
-				Text:        msg.Text,
-				UserID:    msg.UserID,
-				Time:        msg.Time,
-				ChatType:    msg.ChatType,
-				MessageID:   msg.MessageID,
-				Attachments: msg.Attachments,
-			}); err != nil {
-				fmt.Fprintf(out, "[nightme] gateway error: %v\n", err)
-			}
+	// Block on signal or context cancellation. All the per-channel
+	// and per-session goroutines are owned by the gateway and
+	// exit on ctx.Done(); we only need to wait here.
+	select {
+	case <-ctx.Done():
+	case sig, ok := <-sigCh:
+		if ok && sig != nil {
+			fmt.Fprintf(out, "[nightme] received %s\n", sig)
 		}
 	}
+	return shutdownRun(out, ch, mgr, deps.cleanup, logger)
 }
 
 // channelResponder adapts a channel.Channel to the gateway.Responder
@@ -437,98 +384,6 @@ func (r channelResponder) SendUserMessage(ctx context.Context, chatID, userMsgID
 	// user sees 🔄 + heartbeat counter.
 	_ = r.renderer.MarkExecuting(ctx, userMsgID)
 	return nil
-}
-
-// sessionAttachments routes AgentEvents from every live session
-// back to the corresponding chat via the channel renderer. It
-// tracks which sessions it has already attached to so each new
-// agent gets exactly one pump.
-//
-// When a Feishu Renderer is available, the pump delegates to it
-// (which drives the F-25 receipt lifecycle — see Renderer.RenderEvent).
-// Otherwise the pump falls back to direct SendMessage calls (the
-// v0.1 behaviour, kept for non-Feishu channels).
-type sessionAttachments struct {
-	mgr      session.Manager
-	ch       channel.Channel
-	renderer *feishu.Renderer
-	mu       sync.Mutex
-	attached map[string]struct{}
-	logger   *slog.Logger
-}
-
-func newSessionAttachments(mgr session.Manager, ch channel.Channel, renderer *feishu.Renderer) *sessionAttachments {
-	return &sessionAttachments{
-		mgr:      mgr,
-		ch:       ch,
-		renderer: renderer,
-		attached: make(map[string]struct{}),
-	}
-}
-
-// Sweep inspects the session table and starts a pump goroutine for
-// every session that has a live agent but no attached pump yet.
-func (s *sessionAttachments) Sweep(ctx context.Context) {
-	if s.mgr == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, sess := range s.mgr.List() {
-		if sess == nil || sess.ChatID == "" {
-			continue
-		}
-		if sess.Status() != session.StatusRunning {
-			continue
-		}
-		if _, ok := s.attached[sess.ID]; ok {
-			continue
-		}
-		events := sess.Events()
-		if events == nil {
-			continue
-		}
-		s.attached[sess.ID] = struct{}{}
-		if s.logger != nil {
-			s.logger.Info("session created", "chat_id", sess.ChatID, "workspace", sess.Workspace, "agent", sess.Agent)
-		}
-		chatID := sess.ChatID
-		go s.pump(ctx, chatID, events)
-	}
-}
-
-// pump drains events for one session and renders them through the
-// renderer. The renderer owns the rolling-log reply message on
-// Feishu (see feishu.Renderer); the channel adapter is unused at
-// the event-pump level.
-//
-// The pump exits when the events channel closes (the agent has
-// ended) or when ctx is cancelled. A nil renderer is a no-op —
-// we exit immediately. (Tests using a recordingChannel without a
-// Feishu adapter hit this path; production wires the renderer
-// whenever the channel is a Feishu adapter.)
-func (s *sessionAttachments) pump(ctx context.Context, chatID string, events <-chan agent.AgentEvent) {
-	if s.renderer == nil {
-		return
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case ev, ok := <-events:
-			if !ok {
-				return
-			}
-			if err := s.renderer.RenderEvent(ctx, chatID, ev); err != nil {
-				if s.logger != nil {
-					s.logger.Warn("renderer failed",
-						"chat_id", chatID,
-						"event_kind", ev.Kind.String(),
-						"err", err)
-				}
-			}
-		}
-	}
 }
 
 // shutdownRun stops the channel first, then either detaches or

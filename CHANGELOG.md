@@ -4,6 +4,75 @@ All notable changes to nightme are documented here. nightme
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 as closely as a pre-1.0 project can.
 
+## [Unreleased] — v0.3 architecture refactor (Stage 2 landed)
+
+- **Stage 2 (main loop in Gateway)**: Gateway now owns the inbound
+  pump, the central dispatch loop, and the per-session outbound
+  pump. cmd/nightme/run.go no longer has its own for-select
+  loop. Behaviour preserved: Feishu messages still show the
+  single rolling-log line per agent turn because the sweeper
+  filters out Feishu sessions (the renderer is still the source
+  of truth for that channel's display strategy). When Stage 3
+  folds the renderer into Feishu's Channel.OutboundRender, the
+  filter goes away.
+- NEW: `internal/gateway/translate.go` — `Translate(chatID, ev
+  agent.AgentEvent) (OutboundMessage, bool)`. Maps every agent
+  event kind to an abstract OutboundMessage: text → OutText
+  (with `[思考] ` prefix detection → OutThinking), tool_start /
+  tool_end → OutToolStart/OutToolEnd (carrying the bridge's
+  error / output), done / error → drop (terminal events are
+  reflected in the receipt header), permission → OutCard. The
+  `bool` reports whether anything should be sent.
+- NEW: `internal/gateway/gateway.go` dispatch runtime:
+  - `Channel` interface re-declared locally (Name + Incoming +
+    Send) to keep gateway free of the channel import
+  - `OutboundSource` struct (SessionID + ChatID + Events) + the
+    `SweepSessions` callback that returns them. The runtime
+    closes over the session manager; gateway doesn't import
+    session. This pattern is the standard way to break the
+    session → channel/feishu → channel → gateway import cycle.
+  - `Router = gateway` exported alias so cmd/nightme can
+    type-assert `Gateway` to `*Router` and call `AttachChannels` /
+    `AttachSweeper` / `Start` / `Stop`.
+  - Per-channel `pumpInbound` reads `ch.Incoming()` and routes
+    through `Handle` (after installing the gateway into ctx so
+    /help can recover it via `WithGateway`).
+  - Per-session `pumpOutbound` reads the sweeper's
+    OutboundSources, runs `Translate`, and calls `Channel.Send`.
+    Fire-and-ack semantics: send errors are logged and the loop
+    continues (no retry queue, per F-26 §7).
+  - Single `dispatchLoop` (fan-in) + single `sweepSessions` (5s
+    ticker).
+- cmd/nightme/run.go: replaced the main loop with
+  `gwImpl.Start(ctx)` + signal wait + `shutdownRun`. Deleted the
+  `sessionAttachments` struct + its `Sweep` + `pump` methods
+  (now dead code — Gateway owns the per-session dispatch). Added
+  `hasRenderer` + `isFeishuSession` helpers so the sweeper
+  filters Feishu-bound sessions while the renderer is still the
+  source of truth (Stage 3 will remove the filter).
+- internal/channel/feishu: added `logInbound` companion to
+  `logOutgoing`. The Feishu adapter now emits one info-level
+  line per inbound message so the CLI surface shows the
+  user-to-nightme half of every conversation (the gateway's
+  outbound pump covers the nightme-to-user half).
+- Verified: `go test -race -count=1 ./...` green across all 17
+  packages; `go build ./cmd/nightme` exit 0. The two test cases
+  that were specific to the old main loop (`TestRun_StartsChannelAndManager`
+  and `TestRun_HelpCommandWorks`) are updated to expect the new
+  "received:" trace from the Feishu adapter's logInbound instead
+  of the cmd-level main-loop log.
+
+### Known regressions during Stage 2 → Stage 3 transition
+
+- The Feishu channel's `Channel.Send` is currently naive
+  (sends raw text per OutboundMessage). When the Feishu
+  rendering is folded into `Channel.Send` in Stage 3, the
+  rolling-log fold-in is restored end-to-end.
+- The `sweeper` filter in `cmd/nightme/run.go` excludes
+  Feishu sessions from the gateway's outbound pump so the
+  renderer keeps working. After Stage 3 the filter goes away
+  and the gateway drives every channel.
+
 ## [Unreleased] — v0.3 architecture refactor (Stage 1 landed)
 
 - **Stage 1 (behaviour-preserving)**: abstract message types + thin

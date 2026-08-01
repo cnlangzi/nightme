@@ -430,6 +430,25 @@ func (a *Adapter) logOutgoing(kind, target, id string, err error) {
 	logger.LogAttrs(context.Background(), slog.LevelInfo, "feishu: outgoing", attrs...)
 }
 
+// logInbound emits one info-level line per inbound Feishu
+// message so the CLI surface shows the user message that
+// triggered the handler. Companion to logOutgoing (which traces
+// the bot side of the conversation).
+func (a *Adapter) logInbound(msg channel.Message) {
+	a.mu.RLock()
+	logger := a.logger
+	a.mu.RUnlock()
+	if logger == nil {
+		return
+	}
+	logger.LogAttrs(context.Background(), slog.LevelInfo, "feishu: incoming",
+		slog.String("chat_id", msg.ChatID),
+		slog.String("message_id", msg.MessageID),
+		slog.String("text", msg.Text),
+		slog.Int("attachments", len(msg.Attachments)),
+	)
+}
+
 // SendMessage sends one text message to chatID and returns the
 // created message ID. The Channel interface in
 // internal/channel.Channel accepts (ctx, chatID, text) -> error

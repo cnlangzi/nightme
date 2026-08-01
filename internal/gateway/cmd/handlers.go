@@ -336,7 +336,7 @@ func gwFromContext(ctx context.Context) (gateway.Gateway, bool) {
 	if ctx == nil {
 		return nil, false
 	}
-	gw, ok := ctx.Value(gatewayKey{}).(gateway.Gateway)
+	gw, ok := ctx.Value(gateway.GatewayKey{}).(gateway.Gateway)
 	return gw, ok
 }
 
@@ -344,7 +344,5 @@ func gwFromContext(ctx context.Context) (gateway.Gateway, bool) {
 // (currently just /help) can recover it without taking it as a
 // closure.
 func WithGateway(ctx context.Context, gw gateway.Gateway) context.Context {
-	return context.WithValue(ctx, gatewayKey{}, gw)
+	return gateway.WithGateway(ctx, gw)
 }
-
-type gatewayKey struct{}

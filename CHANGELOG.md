@@ -17,6 +17,15 @@ as closely as a pre-1.0 project can.
 - `Agent` interface gains `Command()` and `Args()` getters so the
   registry exposes its spawn recipe without callers having to type-
   switch on the concrete agent packages.
+- REPL mode: bare `nightme` (no args) now enters an interactive shell
+  with a banner, `nightme> ` prompt, and dispatch of each line to the
+  existing cobra command tree. Built on `bufio.Scanner` (zero new
+  deps); reads history / tab completion are deferred to v0.3+ if a
+  daily-driver REPL turns out to be needed. `exit` / `quit` / Ctrl-D
+  leave the shell; an unknown command surfaces an inline error and
+  the loop continues.
+- `nightme version` subcommand: REPL-friendly sibling of `--version`
+  (Cobra only registers `--version` as a flag, not a verb).
 
 ## [0.2.0] - 2026-08-01
 

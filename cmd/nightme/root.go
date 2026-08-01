@@ -48,11 +48,25 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newAgentsCmd())
 	root.AddCommand(newAuthCmd())
 	root.AddCommand(newRunCmd())
+	root.AddCommand(newVersionCmd())
 	return root
 }
 
 func Execute(logger *slog.Logger) {
 	root := newRootCmd()
+	// Bare invocation (no args) routes into the REPL instead of
+	// silently exiting. Anything else flows through the existing
+	// cobra path unchanged.
+	if len(os.Args) == 1 {
+		root.SetContext(withLogger(context.Background(), logger))
+		Recover(root, logger)
+		if err := runREPL(root, logger); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(nmerrors.ExitCode(err))
+		}
+		return
+	}
+
 	root.SetContext(withLogger(context.Background(), logger))
 	Recover(root, logger)
 	if logger != nil {

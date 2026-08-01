@@ -15,16 +15,24 @@ import (
 	"unicode/utf8"
 
 	lark "github.com/larksuite/oapi-sdk-go/v3"
-	larkcallback "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	larkcallback "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
+	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
 const maxMessageBytes = 3800
+
+// interactiveMessageType is the Feishu msg_type for v1 interactive
+// cards (permission requests, multi-choice polls, etc.). Used by
+// Channel.Send (OutCard kind) and CardActionTrigger callback
+// parsing in handleCardAction.
+const interactiveMessageType = "interactive"
 
 // sendMessageFunc is kept behind the adapter so unit tests can exercise the
 // channel without making an HTTP request to Feishu.
@@ -58,6 +66,21 @@ type Adapter struct {
 	// pump). Defaults to slog.Default(); settable via SetLogger.
 	logger *slog.Logger
 
+	// Stage 3: rolling-log receipt state lives on the adapter
+	// (Channel.Send is the display strategy). The map is keyed by
+	// chatID; one receipt per chat at a time. When the gateway's
+	// per-session pump emits the first OutText for a chat that
+	// doesn't have an active receipt, we lazily create one (this
+	// covers the case where the user message is forwarded via
+	// the gateway's fallback but the renderer path is gone).
+	receipts map[string]*MessageReceipt
+
+	// receiptsByUserMsgID is the secondary index that lets
+	// MarkExecuting and incoming card-action callbacks find the
+	// receipt from the Feishu user message id. Same lifecycle
+	// rules as receipts (delete together when SetCompleted).
+	receiptsByUserMsgID map[string]*MessageReceipt
+
 	// These hooks have production defaults and are intentionally kept as
 	// fields so tests can replace the network boundary with a small function.
 	wsStart  func(context.Context) error
@@ -79,10 +102,12 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	}
 
 	a := &Adapter{
-		incoming: make(chan channel.Message, 128),
-		cfg:      cfg,
-		done:     make(chan struct{}),
-		logger:   slog.Default(),
+		incoming:            make(chan channel.Message, 128),
+		receipts:            make(map[string]*MessageReceipt),
+		receiptsByUserMsgID: make(map[string]*MessageReceipt),
+		cfg:                 cfg,
+		done:                make(chan struct{}),
+		logger:              slog.Default(),
 	}
 
 	handler := larkdispatcher.NewEventDispatcher(
@@ -264,6 +289,434 @@ func (a *Adapter) Stop(ctx context.Context) error {
 // Incoming returns the adapter's normalized message stream.
 func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 
+// Send implements the v0.3 channel.Channel interface. It dispatches
+// each OutboundKind to the corresponding Feishu API call:
+//
+//	OutText              → CreateMessage (msg_type=text)
+//	OutToolStart/End     → folded into the per-chat receipt via the
+//	                       existing AddReaction / UpdateMessage flow;
+//	                       this path is taken by the Feishu channel's
+//	                       display strategy (Stage 3 migrates the
+//	                       receipt-rendering logic here). Stage 1's
+//	                       Send handles OutText directly so the
+//	                       existing /help / /run fallback paths keep
+//	                       working.
+//	OutReaction          → AddReaction on Meta["message_id"]
+//	OutReactionRemoved   → DeleteReaction on Meta["reaction_id"]
+//	OutCard              → send interactive card via sendContent
+//	OutThinking          → dropped (no native Feishu equivalent;
+//	                       future: a sub-message indicator)
+//	OutTyping            → dropped (no native Feishu equivalent)
+//
+// Errors from the underlying API are logged and returned; the
+// Gateway treats Send as fire-and-ack (no retry).
+// SendUserMessage is the F-25 entry point used by the gateway's
+// fallback handler to hand a user message to the agent. It creates
+// a MessageReceipt (⏳ emoji + reply) and returns the receipt so
+// the caller can drive state via MarkExecuting (on dispatch) and
+// SetCompleted (on agent done). The reply text is the user's caption
+// (rendered via BuildForwardedTextFromBlocks so attachment paths
+// are visible).
+//
+// Attachments are NOT downloaded here — that happens earlier in
+// the channel pump (downloadAttachments) before SendUserMessage is
+// called. The blocks the caller passes should already carry
+// LocalPath for any attachments.
+func (a *Adapter) SendUserMessage(ctx context.Context, chatID, userMsgID, content string) (*MessageReceipt, error) {
+	if a == nil {
+		return nil, errors.New("feishu: nil adapter")
+	}
+	if strings.TrimSpace(chatID) == "" {
+		return nil, errors.New("feishu: chat_id is required")
+	}
+	if strings.TrimSpace(userMsgID) == "" {
+		return nil, errors.New("feishu: user_msg_id is required")
+	}
+
+	// Idempotent: a duplicate userMsgID reuses the existing
+	// receipt (handles retries / dup events).
+	a.mu.Lock()
+	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
+		a.mu.Unlock()
+		return existing, nil
+	}
+	a.mu.Unlock()
+
+	// New message: post the initial ⏳ receipt reply and register
+	// the receipt. The reaction swap and the receipt body come
+	// later via Send.
+	replyText := content
+	if replyText == "" {
+		replyText = "⏳ 等待中"
+	}
+	msgID, err := a.SendMessageText(ctx, chatID, replyText)
+	if err != nil {
+		return nil, fmt.Errorf("feishu: post initial receipt: %w", err)
+	}
+
+	receipt := NewMessageReceiptForReply(chatID, userMsgID, msgID, a)
+	a.mu.Lock()
+	// Evict any prior receipt for this chat (e.g. a follow-up
+	// user message arrived while a previous turn was still
+	// in-flight). The new message becomes the active one.
+	if old, ok := a.receipts[chatID]; ok && old != nil && old != receipt {
+		_ = old.SetCompleted(ctx)
+		delete(a.receiptsByUserMsgID, old.userMsgID)
+	}
+	a.receipts[chatID] = receipt
+	a.receiptsByUserMsgID[userMsgID] = receipt
+	a.mu.Unlock()
+
+	return receipt, nil
+}
+
+// MarkExecuting is the F-25 receipt lifecycle hook the gateway
+// calls once the session dispatches the user message to the agent.
+// Flips the receipt's reaction emoji from ⏳ to 🔄 and writes
+// the "🔄 ⏳ N · HH:MM:SS" header so the user sees the session
+// is alive.
+//
+// Falls back to a no-op when the receipt has already moved on
+// (e.g. a /kill arrived before dispatch) so callers don't have
+// to coordinate locking.
+func (a *Adapter) MarkExecuting(ctx context.Context, userMsgID string) error {
+	a.mu.RLock()
+	receipt, ok := a.receiptsByUserMsgID[userMsgID]
+	a.mu.RUnlock()
+	if !ok || receipt == nil {
+		return nil
+	}
+	return receipt.SetExecuting(ctx)
+}
+
+// receiptFor returns the active receipt for chatID, lazily
+// creating one if the gateway's pumpOutbound emitted an OutText
+// without a prior SendUserMessage (e.g. agent turn started from a
+// startup). The first event in that case seeds the receipt with a
+// ⏳ header; subsequent events roll in via Append.
+func (a *Adapter) receiptFor(ctx context.Context, chatID string) *MessageReceipt {
+	a.mu.Lock()
+	if r, ok := a.receipts[chatID]; ok && r != nil {
+		a.mu.Unlock()
+		return r
+	}
+	a.mu.Unlock()
+
+	// Cold start: post a ⏳ reply, register a receipt, return.
+	msgID, err := a.SendMessageText(ctx, chatID, "⏳ 等待中")
+	if err != nil {
+		a.logger.Warn("feishu: cold-start receipt reply failed",
+			"err", err, "chat_id", chatID)
+		return nil
+	}
+	// Synthetic userMsgID (we don't have one) — the gateway's
+	// pumpOutbound ignores it. Use the chatID + a timestamp suffix
+	// so consecutive cold starts don't collide.
+	receipt := NewMessageReceiptForReply(chatID, chatID+":"+time.Now().UTC().Format(time.RFC3339Nano), msgID, a)
+	a.mu.Lock()
+	a.receipts[chatID] = receipt
+	a.receiptsByUserMsgID[receipt.userMsgID] = receipt
+	a.mu.Unlock()
+	return receipt
+}
+
+func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
+	switch msg.Kind {
+	case gateway.OutText:
+		// Folded into the active receipt's rolling log. The
+		// Feishu reply is the single message the user sees; we
+		// edit it in place via UpdateMessage on each event.
+		receipt := a.receiptFor(ctx, msg.ChatID)
+		if receipt == nil {
+			// receiptFor's SendMessageText failed. Try a direct
+			// send as a last resort so the user sees the text.
+			return a.sendRawOutText(ctx, msg.ChatID, msg.Text)
+		}
+		return receipt.Append(ctx, agent.AgentEvent{
+			Kind: agent.EventText,
+			Text: msg.Text,
+		})
+
+	case gateway.OutThinking:
+		receipt := a.receiptFor(ctx, msg.ChatID)
+		if receipt == nil {
+			return nil
+		}
+		return receipt.Append(ctx, agent.AgentEvent{
+			Kind: agent.EventText,
+			Text: msg.Text,
+		})
+
+	case gateway.OutReaction:
+		if msg.Reaction == nil || msg.Reaction.EmojiType == "" {
+			return errors.New("feishu: OutReaction missing emoji_type")
+		}
+		messageID, _ := msg.Meta["message_id"].(string)
+		if messageID == "" {
+			return errors.New("feishu: OutReaction missing message_id in Meta")
+		}
+		_, err := a.AddReaction(ctx, messageID, msg.Reaction.EmojiType)
+		return err
+
+	case gateway.OutReactionRemoved:
+		if msg.Reaction == nil || msg.Reaction.ReactionID == "" {
+			return errors.New("feishu: OutReactionRemoved missing reaction_id")
+		}
+		messageID, _ := msg.Meta["message_id"].(string)
+		if messageID == "" {
+			return errors.New("feishu: OutReactionRemoved missing message_id in Meta")
+		}
+		return a.DeleteReaction(ctx, messageID, msg.Reaction.ReactionID)
+
+	case gateway.OutCard:
+		if msg.Card == nil {
+			return errors.New("feishu: OutCard missing card payload")
+		}
+		if msg.Card.RequestID == "" {
+			msg.Card.RequestID = fmt.Sprintf("%s:%d", msg.ChatID, time.Now().UnixNano())
+		}
+		content, err := buildInteractiveCard(msg.Card)
+		if err != nil {
+			return err
+		}
+		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content)
+		return err
+
+	case gateway.OutToolStart:
+		receipt := a.receiptFor(ctx, msg.ChatID)
+		if receipt == nil {
+			return nil
+		}
+		return receipt.Append(ctx, agent.AgentEvent{
+			Kind:      agent.EventToolStart,
+			ToolStart: &agent.ToolStartEvent{Name: toolName(msg), Args: toolArgs(msg)},
+		})
+
+	case gateway.OutToolEnd:
+		receipt := a.receiptFor(ctx, msg.ChatID)
+		if receipt == nil {
+			return nil
+		}
+		return receipt.Append(ctx, agent.AgentEvent{
+			Kind:    agent.EventToolEnd,
+			ToolEnd: &agent.ToolEndEvent{Name: toolName(msg), Output: toolOutput(msg)},
+		})
+
+	case gateway.OutTyping:
+		// No native Feishu equivalent (typing indicators come from
+		// the OpenAPI, not the bot's message API). Silently drop.
+		return nil
+
+	case gateway.OutResult:
+		receipt := a.receiptFor(ctx, msg.ChatID)
+		if receipt == nil {
+			// receipt creation failed — degrade to a standalone
+			// message so the user still sees the final reply
+			// instead of a silent drop.
+			if msg.Text != "" {
+				return a.sendRawOutText(ctx, msg.ChatID, msg.Text)
+			}
+			return nil
+		}
+		return receipt.Append(ctx, agent.AgentEvent{
+			Kind: agent.EventResult,
+			Result: &agent.ResultEvent{
+				Text:       msg.Text,
+				DurationMs: durationMs(msg),
+				IsError:    isErrorOut(msg),
+				Subtype:    subtypeOut(msg),
+			},
+		})
+
+	case gateway.OutUsage:
+		receipt := a.receiptFor(ctx, msg.ChatID)
+		if receipt == nil {
+			return nil
+		}
+		return receipt.Append(ctx, agent.AgentEvent{
+			Kind:  agent.EventUsage,
+			Usage: usageFromMeta(msg),
+		})
+
+	case gateway.OutCompaction:
+		receipt := a.receiptFor(ctx, msg.ChatID)
+		if receipt == nil {
+			return nil
+		}
+		return receipt.Append(ctx, agent.AgentEvent{
+			Kind:       agent.EventCompaction,
+			Compaction: &agent.CompactionEvent{Subtype: metaString(msg, "subtype")},
+		})
+
+	case gateway.OutInit:
+		receipt := a.receiptFor(ctx, msg.ChatID)
+		if receipt == nil {
+			return nil
+		}
+		return receipt.Append(ctx, agent.AgentEvent{
+			Kind: agent.EventInit,
+			Init: &agent.InitEvent{
+				SessionID: metaString(msg, "session_id"),
+				Model:     metaString(msg, "model"),
+			},
+		})
+	}
+	return fmt.Errorf("feishu: unsupported outbound kind %v", msg.Kind)
+}
+
+// sendRawOutText is the last-resort fallback when a receipt
+// can't be created (e.g. the channel.post text API failed). Sends
+// the text as a new standalone message so the user still sees
+// something.
+func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error {
+	_, err := a.SendMessageText(ctx, chatID, text)
+	return err
+}
+
+// toolName / toolArgs / toolOutput pull the well-known fields from
+// OutboundMessage.Meta. The translator fills these so the receiver
+// doesn't have to parse the formatted text.
+func toolName(m gateway.OutboundMessage) string {
+	if n, _ := m.Meta["tool_name"].(string); n != "" {
+		return n
+	}
+	return "tool"
+}
+
+func toolArgs(m gateway.OutboundMessage) string {
+	if a, _ := m.Meta["args"].(string); a != "" {
+		return a
+	}
+	return ""
+}
+
+func toolOutput(m gateway.OutboundMessage) string {
+	if o, _ := m.Meta["output"].(string); o != "" {
+		return o
+	}
+	return ""
+}
+
+// metaString / metaInt / metaFloat / metaBool pull well-known typed
+// fields from OutboundMessage.Meta. The translator (gateway/translate.go)
+// is the single producer of these keys; receivers tolerate any key
+// being absent / wrong-typed by returning the zero value rather than
+// erroring. Mirrors the existing toolName / toolArgs / toolOutput
+// helpers.
+func metaString(m gateway.OutboundMessage, key string) string {
+	if v, ok := m.Meta[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func metaInt(m gateway.OutboundMessage, key string) int {
+	switch v := m.Meta[key].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		// JSON numbers decode to float64 by default. Coerce when
+		// the value is integral so we don't silently truncate
+		// large token counts.
+		return int(v)
+	}
+	return 0
+}
+
+func metaFloat(m gateway.OutboundMessage, key string) float64 {
+	if v, ok := m.Meta[key].(float64); ok {
+		return v
+	}
+	return 0
+}
+
+func metaBool(m gateway.OutboundMessage, key string) bool {
+	if v, ok := m.Meta[key].(bool); ok {
+		return v
+	}
+	return false
+}
+
+// durationMs / isErrorOut / subtypeOut / usageFromMeta are the
+// OutResult / OutUsage payload reconstruction helpers. They read the
+// same keys the translator writes (see gateway/translate.go).
+func durationMs(m gateway.OutboundMessage) int64 {
+	return int64(metaInt(m, "duration_ms"))
+}
+
+func isErrorOut(m gateway.OutboundMessage) bool {
+	return metaBool(m, "is_error")
+}
+
+func subtypeOut(m gateway.OutboundMessage) string {
+	return metaString(m, "subtype")
+}
+
+func usageFromMeta(m gateway.OutboundMessage) *agent.UsageEvent {
+	return &agent.UsageEvent{
+		InputTokens:              metaInt(m, "input_tokens"),
+		OutputTokens:             metaInt(m, "output_tokens"),
+		CacheCreationInputTokens: metaInt(m, "cache_creation_input_tokens"),
+		CacheReadInputTokens:     metaInt(m, "cache_read_input_tokens"),
+		CostUSD:                  metaFloat(m, "cost_usd"),
+	}
+}
+
+// buildInteractiveCard renders a v1 Feishu card from an abstract
+// Card. Each option becomes a primary button whose value carries
+// the request_id so the inbound Action carries it back. Stage 3
+// will move the F-25 permission-card logic here.
+func buildInteractiveCard(c *gateway.Card) (string, error) {
+	if c.RequestID == "" {
+		return "", errors.New("feishu: card missing request_id")
+	}
+	options := c.Options
+	if len(options) == 0 {
+		options = []string{"Allow", "Deny"}
+	}
+	headerJSON, _ := json.Marshal(map[string]any{
+		"title":    map[string]any{"tag": "plain_text", "content": c.Title},
+		"template": "blue",
+	})
+	body := c.Title
+	if c.Body != "" {
+		body = c.Body
+	}
+	actions := make([]map[string]any, 0, len(options))
+	for _, opt := range options {
+		v, _ := json.Marshal(map[string]string{
+			"request_id": c.RequestID,
+			"option":     opt,
+		})
+		actions = append(actions, map[string]any{
+			"tag":   "button",
+			"text":  map[string]any{"tag": "plain_text", "content": opt},
+			"type":  "primary",
+			"value": map[string]any{"key": string(v)},
+		})
+	}
+	card := map[string]any{
+		"config": map[string]any{"wide_screen_mode": true},
+		"header": json.RawMessage(headerJSON),
+		"elements": []map[string]any{
+			{"tag": "div", "text": map[string]any{"tag": "lark_md", "content": body}},
+			{"tag": "action", "actions": actions},
+		},
+	}
+	b, err := json.Marshal(card)
+	if err != nil {
+		return "", err
+	}
+	envelope := map[string]any{"card": json.RawMessage(b)}
+	eb, err := json.Marshal(envelope)
+	if err != nil {
+		return "", err
+	}
+	return string(eb), nil
+}
+
 // SetLogger swaps the structured logger used for outgoing-message
 // traces. Pass nil to fall back to slog.Default().
 func (a *Adapter) SetLogger(l *slog.Logger) {
@@ -303,6 +756,25 @@ func (a *Adapter) logOutgoing(kind, target, id string, err error) {
 		return
 	}
 	logger.LogAttrs(context.Background(), slog.LevelInfo, "feishu: outgoing", attrs...)
+}
+
+// logInbound emits one info-level line per inbound Feishu
+// message so the CLI surface shows the user message that
+// triggered the handler. Companion to logOutgoing (which traces
+// the bot side of the conversation).
+func (a *Adapter) logInbound(msg channel.Message) {
+	a.mu.RLock()
+	logger := a.logger
+	a.mu.RUnlock()
+	if logger == nil {
+		return
+	}
+	logger.LogAttrs(context.Background(), slog.LevelInfo, "feishu: incoming",
+		slog.String("chat_id", msg.ChatID),
+		slog.String("message_id", msg.MessageID),
+		slog.String("text", msg.Text),
+		slog.Int("attachments", len(msg.Attachments)),
+	)
 }
 
 // SendMessage sends one text message to chatID and returns the
@@ -563,9 +1035,9 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	msg := channel.Message{
 		ChatID:      chatID,
 		Text:        text,
-		SenderID:    senderID(event),
+		UserID:      senderID(event),
 		Time:        messageTime(message.CreateTime),
-		ChatType:    chatType,
+		ChatType:    gateway.ChatType(chatType),
 		MessageID:   stringValue(message.MessageId),
 		Attachments: attachments,
 	}

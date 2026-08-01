@@ -71,11 +71,17 @@ func TestPumpStream_Init(t *testing.T) {
 	if len(evs) != 1 {
 		t.Fatalf("got %d events, want 1", len(evs))
 	}
-	if evs[0].Kind != agent.EventText {
-		t.Errorf("event kind = %v, want EventText", evs[0].Kind)
+	if evs[0].Kind != agent.EventInit {
+		t.Errorf("event kind = %v, want EventInit", evs[0].Kind)
 	}
-	if !strings.Contains(evs[0].Text, "session initialized") {
-		t.Errorf("text = %q, want to contain 'session initialized'", evs[0].Text)
+	if evs[0].Init == nil {
+		t.Fatal("Init payload is nil")
+	}
+	if evs[0].Init.SessionID != "s_test_001" {
+		t.Errorf("SessionID = %q, want 's_test_001'", evs[0].Init.SessionID)
+	}
+	if evs[0].Init.Model != "claude-sonnet-4-5" {
+		t.Errorf("Model = %q, want 'claude-sonnet-4-5'", evs[0].Init.Model)
 	}
 }
 
@@ -215,15 +221,163 @@ func TestPumpStream_AskUserQuestion(t *testing.T) {
 }
 
 func TestPumpStream_Result(t *testing.T) {
+	// result.json fixture carries result/usage/duration_ms/subtype.
+	// Expect three events in order: EventResult (final reply) →
+	// EventUsage (token usage) → EventDone (terminal).
 	evs := streamFromFixture(t, "result.json", nil)
+	if len(evs) != 3 {
+		t.Fatalf("got %d events, want 3 (Result + Usage + Done)", len(evs))
+	}
+	// EventResult
+	if evs[0].Kind != agent.EventResult {
+		t.Errorf("evs[0].Kind = %v, want EventResult", evs[0].Kind)
+	}
+	if evs[0].Result == nil || evs[0].Result.Text != "完成" {
+		t.Errorf("evs[0].Result = %+v, want Text '完成'", evs[0].Result)
+	}
+	if evs[0].Result.DurationMs != 12345 {
+		t.Errorf("DurationMs = %d, want 12345", evs[0].Result.DurationMs)
+	}
+	if evs[0].Result.Subtype != "success" {
+		t.Errorf("Subtype = %q, want 'success'", evs[0].Result.Subtype)
+	}
+	if evs[0].Result.IsError {
+		t.Error("IsError = true, want false")
+	}
+	// EventUsage
+	if evs[1].Kind != agent.EventUsage {
+		t.Errorf("evs[1].Kind = %v, want EventUsage", evs[1].Kind)
+	}
+	if evs[1].Usage == nil {
+		t.Fatal("Usage payload is nil")
+	}
+	if evs[1].Usage.InputTokens != 100 {
+		t.Errorf("InputTokens = %d, want 100", evs[1].Usage.InputTokens)
+	}
+	if evs[1].Usage.OutputTokens != 200 {
+		t.Errorf("OutputTokens = %d, want 200", evs[1].Usage.OutputTokens)
+	}
+	if evs[1].Usage.CostUSD != 0.001 {
+		t.Errorf("CostUSD = %f, want 0.001", evs[1].Usage.CostUSD)
+	}
+	// EventDone
+	if evs[2].Kind != agent.EventDone {
+		t.Errorf("evs[2].Kind = %v, want EventDone", evs[2].Kind)
+	}
+	if evs[2].Done == nil || evs[2].Done.ExitCode != 0 {
+		t.Errorf("done = %+v, want ExitCode 0", evs[2].Done)
+	}
+}
+
+func TestPumpStream_Result_EmptyText_NoResultEvent(t *testing.T) {
+	// When the result has no text AND is_error=false, EventResult is
+	// dropped (nothing to surface). EventUsage + EventDone still fire
+	// if usage is present.
+	input := `{"type":"result","subtype":"success","usage":{"input_tokens":50,"output_tokens":25},"session_id":"s_test_001"}` + "\n"
+	events := make(chan agent.AgentEvent, 4)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		pumpStream(strings.NewReader(input), events, nil, nil)
+		close(events)
+	}()
+	var got []agent.AgentEvent
+	for ev := range events {
+		got = append(got, ev)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d events, want 2 (Usage + Done, no Result)", len(got))
+	}
+	if got[0].Kind != agent.EventUsage {
+		t.Errorf("got[0].Kind = %v, want EventUsage", got[0].Kind)
+	}
+	if got[1].Kind != agent.EventDone {
+		t.Errorf("got[1].Kind = %v, want EventDone", got[1].Kind)
+	}
+}
+
+func TestPumpStream_Result_EmptyUsage_NoUsageEvent(t *testing.T) {
+	// When usage is absent / all-zero, EventUsage is dropped (nothing
+	// meaningful to surface). EventResult + EventDone still fire.
+	input := `{"type":"result","subtype":"success","result":"done","session_id":"s_test_001"}` + "\n"
+	events := make(chan agent.AgentEvent, 4)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		pumpStream(strings.NewReader(input), events, nil, nil)
+		close(events)
+	}()
+	var got []agent.AgentEvent
+	for ev := range events {
+		got = append(got, ev)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d events, want 2 (Result + Done, no Usage)", len(got))
+	}
+	if got[0].Kind != agent.EventResult {
+		t.Errorf("got[0].Kind = %v, want EventResult", got[0].Kind)
+	}
+	if got[1].Kind != agent.EventDone {
+		t.Errorf("got[1].Kind = %v, want EventDone", got[1].Kind)
+	}
+}
+
+func TestPumpStream_Compact(t *testing.T) {
+	// subtype:"compact" is a MID-TURN compaction. Emit EventCompaction
+	// and DO NOT emit EventDone — subsequent events continue the turn.
+	evs := streamFromFixture(t, "compact.json", nil)
 	if len(evs) != 1 {
 		t.Fatalf("got %d events, want 1", len(evs))
 	}
-	if evs[0].Kind != agent.EventDone {
-		t.Errorf("event kind = %v, want EventDone", evs[0].Kind)
+	if evs[0].Kind != agent.EventCompaction {
+		t.Errorf("event kind = %v, want EventCompaction", evs[0].Kind)
 	}
-	if evs[0].Done == nil || evs[0].Done.ExitCode != 0 {
-		t.Errorf("done = %+v, want ExitCode 0", evs[0].Done)
+	if evs[0].Compaction == nil {
+		t.Fatal("Compaction payload is nil")
+	}
+	if evs[0].Compaction.Subtype != "compact" {
+		t.Errorf("Subtype = %q, want 'compact'", evs[0].Compaction.Subtype)
+	}
+}
+
+func TestPumpStream_Compaction(t *testing.T) {
+	// Older CLI used subtype:"compaction" — same handling as "compact".
+	evs := streamFromFixture(t, "compaction.json", nil)
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want 1", len(evs))
+	}
+	if evs[0].Kind != agent.EventCompaction {
+		t.Errorf("event kind = %v, want EventCompaction", evs[0].Kind)
+	}
+	if evs[0].Compaction.Subtype != "compaction" {
+		t.Errorf("Subtype = %q, want 'compaction'", evs[0].Compaction.Subtype)
+	}
+}
+
+func TestPumpStream_ControlRequest(t *testing.T) {
+	// control_request is not implemented under bypassPermissions —
+	// it's only logged at debug. The bridge emits zero events; the
+	// channel pump simply drains the empty stream.
+	evs := streamFromFixture(t, "control_request.json", nil)
+	if len(evs) != 0 {
+		t.Fatalf("got %d events, want 0 (control_request is logged-only)", len(evs))
+	}
+}
+
+func TestPumpStream_ReplayUserMessage(t *testing.T) {
+	// --replay-user-messages echoes user-role text blocks back so the
+	// channel can render "[你] <text>" alongside agent activity.
+	evs := streamFromFixture(t, "user_replay.json", nil)
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want 1", len(evs))
+	}
+	if evs[0].Kind != agent.EventText {
+		t.Errorf("event kind = %v, want EventText", evs[0].Kind)
+	}
+	if evs[0].Text != "[你] hello" {
+		t.Errorf("text = %q, want '[你] hello'", evs[0].Text)
 	}
 }
 
@@ -396,4 +550,83 @@ func TestNewSession_EmptyWorkspace(t *testing.T) {
 	if !strings.Contains(err.Error(), "workspace") {
 		t.Errorf("err = %v, want to mention 'workspace'", err)
 	}
+}
+
+// --- buildArgs unit tests (no process spawn) ---
+
+func TestAgent_BuildArgs_Default(t *testing.T) {
+	// Empty cfg.PermissionMode falls back to bypassPermissions,
+	// which is the placeholder value baked into DefaultArgs — the
+	// net result should match DefaultArgs + extras + cfg.Args.
+	got := buildArgs(nil, agent.StartConfig{Args: []string{"--resume", "abc"}})
+	if !containsSeq(got, "--replay-user-messages") {
+		t.Error("missing --replay-user-messages")
+	}
+	if !containsSeq(got, "--permission-mode", PermissionBypass) {
+		t.Errorf("--permission-mode placeholder not rewritten; got=%v", got)
+	}
+	if !containsSeq(got, "--resume", "abc") {
+		t.Error("cfg.Args not appended at the tail")
+	}
+}
+
+func TestAgent_BuildArgs_OverridesPermissionMode(t *testing.T) {
+	got := buildArgs(nil, agent.StartConfig{PermissionMode: "default"})
+	if !containsSeq(got, "--permission-mode", "default") {
+		t.Errorf("PermissionMode override did not land in args; got=%v", got)
+	}
+	// And the placeholder bypassPermissions should NOT appear twice.
+	if countSeq(got, "--permission-mode") != 1 {
+		t.Errorf("expected exactly one --permission-mode flag; got %d in %v", countSeq(got, "--permission-mode"), got)
+	}
+}
+
+func TestAgent_BuildArgs_Auto(t *testing.T) {
+	got := buildArgs(nil, agent.StartConfig{PermissionMode: PermissionAuto})
+	if !containsSeq(got, "--permission-mode", PermissionAuto) {
+		t.Errorf("PermissionAuto override did not land in args; got=%v", got)
+	}
+}
+
+// containsSeq returns true when seq appears as a contiguous subsequence
+// of got. Used by buildArgs tests to assert flag presence / ordering.
+func containsSeq(got []string, seq ...string) bool {
+	if len(seq) == 0 || len(got) < len(seq) {
+		return len(seq) == 0
+	}
+	for i := 0; i+len(seq) <= len(got); i++ {
+		match := true
+		for j := range seq {
+			if got[i+j] != seq[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+// countSeq counts how many positions in got start with the contiguous
+// sequence seq. Used to assert "exactly one" flag occurrences.
+func countSeq(got []string, seq ...string) int {
+	if len(seq) == 0 {
+		return 0
+	}
+	n := 0
+	for i := 0; i+len(seq) <= len(got); i++ {
+		match := true
+		for j := range seq {
+			if got[i+j] != seq[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			n++
+		}
+	}
+	return n
 }

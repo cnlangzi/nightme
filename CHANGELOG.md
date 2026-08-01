@@ -4,9 +4,108 @@ All notable changes to nightme are documented here. nightme
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 as closely as a pre-1.0 project can.
 
-## [Unreleased]
+## [Unreleased] — v0.3 architecture refactor (Stage 3 landed — v0.3 internally feature-complete)
+
+- **Stage 3 (Feishu display strategy in Channel.Send)**: the
+  rolling-log receipt logic that lived in
+  `internal/channel/feishu/render.go` is now inside the Feishu
+  adapter's `Channel.Send`. Each `OutboundKind` is dispatched:
+  - `OutText` / `OutThinking` / `OutToolStart` / `OutToolEnd` →
+    append to the active receipt's rolling log and edit the
+    reply in place via `UpdateMessage` (FIFO eviction still
+    applies). Cold-start (`receiptFor`) lazily creates a receipt
+    when the gateway's outbound pump emits an OutText without a
+    prior `SendUserMessage` (e.g. agent turn started from a
+    startup, not a user message).
+  - `OutReaction` / `OutReactionRemoved` → swap the reaction
+    emoji on the user message (delegated to the existing
+    AddReaction / DeleteReaction methods).
+  - `OutCard` → `sendContent` with the v1 interactive envelope
+    (request_id flows through the gateway's translate +
+    OutboundMessage.Card.RequestID).
+  - `OutTyping` → silently drop (Feishu has no bot-side typing
+    API).
+- The `feishu.Renderer` is GONE. The runtime's
+  `channelResponder` type-asserts the channel to
+  `*feishu.Adapter` and calls `adapter.SendUserMessage` /
+  `adapter.MarkExecuting` directly. The sweeper in
+  `cmd/nightme/run.go` no longer filters Feishu sessions —
+  every channel goes through the gateway.
+- New adapter methods: `SendUserMessage(ctx, chatID, userMsgID,
+  content) (*MessageReceipt, error)` creates the receipt and
+  posts the initial ⏳ reply; `MarkExecuting(ctx, userMsgID)
+  error` flips ⏳ → 🔄; `receiptFor(ctx, chatID)` lazily creates
+  a receipt for the gateway's outbound pump.
+- New constructor: `NewMessageReceiptForReply(chatID,
+  userMsgID, replyMsgID)` for cases where the caller already
+  posted the reply (the adapter's own SendUserMessage path).
+- Removed: `internal/channel/feishu/render.go` (was the
+  Renderer struct + its sweep / pump / install helpers) and
+  `render_test.go` (was 587 lines of Renderer-only coverage). The
+  14+ unit tests that exercised RenderEvent-on-the-renderer are
+  replaced by Channel.Send tests in `feishu/adapter_test.go` /
+  a new `rolling_log_test.go` (rolled into the same package).
+- Verified: `go test -race -count=1 ./...` green across all 17
+  packages; `go build ./cmd/nightme` exit 0. Behaviour
+  preserved end-to-end: Feishu messages still show the single
+  rolling-log line per agent turn (the gateway's outbound
+  pump now drives this; the renderer is gone). All previously
+  gateway-test coverage (`TestRender_*`, `TestGateway_*`) is
+  preserved as `TestAdapter_*` / `TestReceipt_*` tests.
+
+### Architecture after Stage 3
+
+The full message flow is now:
+
+  user → Channel.Incoming() (Feishu WS)
+       → Gateway.pumpInbound → Gateway.dispatchLoop
+       → Gateway.Handle (slash command or fallback)
+       → fallback: Channel.Send(OutboundMessage) — channel-
+         specific display strategy. For Feishu, that means
+         `SendUserMessage` creates a receipt, queues via the
+         session's InputBuffer, and marks it Executing on
+         dispatch.
+
+  agent events → Session.Events()
+              → Gateway.sweepSessions (5s tick) + per-session
+                pumpOutbound
+              → translate.AgentEvent → OutboundMessage
+              → Channel.Send — Feishu's Send folds each
+                event into the active receipt's rolling log
+                (header + entries) via UpdateMessage; the
+                receipt's reaction emoji is swapped on state
+                transitions.
+
+## [Unreleased] — v0.3 architecture refactor (Stage 1 landed)
+
+- **Stage 1 (behaviour-preserving)**: abstract message types + thin
+  Channel interface. See `docs/feat/F-26-gateway-hub.md` for the
+  full design.
+- NEW: `internal/gateway/messages.go` — `InboundMessage`,
+  `OutboundMessage`, `Attachment`, `OutboundKind`, `ChatType`,
+  `ActionPayload`, `Card`, `Reaction`, `AgentEventEnvelope`.
+- NEW: `internal/gateway/gateway.go` — `Gateway` interface
+  (`Register` / `Handle` / `ListCommands`), `Command`,
+  `CommandResult`, `FallbackHandler`.
+- NEW: `internal/gateway/cmd/` subpackage — `RegisterDefaultCommands`
+  and the four slash-command handlers (`/cwd`, `/run`, `/kill`,
+  `/help`, `/agents`). Moved out of the gateway package so
+  handlers can import session without creating a cycle
+  (session → channel/feishu → channel → gateway).
+- CHANGED: `Channel` interface gains `Name() string` and
+  `Send(ctx, OutboundMessage) error`; legacy `SendMessage` /
+  `SendLongMessage` remain as helper methods. `channel.Message`
+  and `channel.Attachment` are now type aliases for
+  `gateway.InboundMessage` and `gateway.Attachment`.
+- CHANGED: Feishu adapter implements `Channel.Send` by
+  dispatching per `OutboundKind`. Rolling-log receipt path
+  is NOT yet migrated (Stage 3); OutToolStart /
+  OutToolEnd / OutThinking / OutTyping are dropped for now.
+- Verified: `go test -race -count=1 ./...` green across all 17
+  packages; `go build ./cmd/nightme` exit 0.
 
 ### Added
+- `nightme agents [--json]`: list the registered agent set the daemon
 - `nightme agents [--json]`: list the registered agent set the daemon
   would dispatch `/run` to, with name / command / args columns.
   Backed by the same `buildRunAgentRegistry` path used by `nightme test`

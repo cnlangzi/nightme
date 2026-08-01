@@ -61,15 +61,48 @@ func (a *Agent) Detect() error {
 // agent's defaults (DefaultArgs + a.args). cfg.Env is appended to
 // os.Environ() for the child.
 //
+// cfg.PermissionMode overrides the --permission-mode flag baked into
+// DefaultArgs. Empty string falls back to PermissionBypass (preserves
+// v0.1 behaviour). Unknown values are forwarded as-is — Claude Code
+// itself validates the set of legal modes.
+//
 // On Start success, the returned session has an active process; the
 // caller must Close() it when done.
 func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSession, error) {
-	args := append([]string(nil), DefaultArgs...)
-	args = append(args, a.args...)
-	args = append(args, cfg.Args...)
+	args := buildArgs(a.args, cfg)
 
 	env := append([]string(nil), cfg.Env...)
 	env = append(env, a.command) // ensure command name is in env (defensive)
 
 	return newSession(ctx, a.command, args, env, cfg.Workspace)
+}
+
+// buildArgs concatenates DefaultArgs + extraArgs + cfg.Args, rewriting
+// the --permission-mode placeholder baked into DefaultArgs with the
+// effective mode from cfg.PermissionMode (PermissionBypass when empty).
+//
+// Extracted as a package-private helper so tests can assert on the
+// produced argv without spawning a process. Mirrors the contract of
+// Agent.Start exactly.
+func buildArgs(extraArgs []string, cfg agent.StartConfig) []string {
+	mode := cfg.PermissionMode
+	if mode == "" {
+		mode = PermissionBypass
+	}
+
+	// Walk DefaultArgs; when we see "--permission-mode" the next
+	// element is the placeholder — replace it with the effective
+	// mode instead of copying the placeholder verbatim.
+	out := make([]string, 0, len(DefaultArgs)+len(extraArgs)+len(cfg.Args))
+	for i := 0; i < len(DefaultArgs); i++ {
+		if DefaultArgs[i] == "--permission-mode" && i+1 < len(DefaultArgs) {
+			out = append(out, "--permission-mode", mode)
+			i++ // skip the placeholder value
+			continue
+		}
+		out = append(out, DefaultArgs[i])
+	}
+	out = append(out, extraArgs...)
+	out = append(out, cfg.Args...)
+	return out
 }

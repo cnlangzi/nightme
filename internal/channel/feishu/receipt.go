@@ -253,6 +253,36 @@ func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID stri
 	return r, nil
 }
 
+// NewMessageReceiptForReply wraps an already-posted reply message
+// (the caller is responsible for sending the initial text and
+// adding the ⏳ reaction). The returned receipt is registered in
+// the adapter's indexes so subsequent Append calls update the
+// same reply. Use this when the adapter owns the full lifecycle
+// (Stage 3): the gateway's fallback calls adapter.SendUserMessage
+// which posts the reply and constructs the receipt in one place.
+//
+// bot is the adapter (or any receiptBot implementation) used by
+// renderLocked to swap reactions and edit the reply text in place.
+// Stage 3 callers pass `a`; passing nil will panic on the first
+// Append, since renderLocked calls r.bot.AddReaction directly.
+// (Earlier versions left bot=nil under the assumption that "callers
+// go through the adapter methods" — but renderLocked does not, and
+// the synthetic cold-start path (adapter.receiptFor) constructs a
+// receipt via this function before any event has reached the
+// adapter's Send switch. See CHANGELOG v0.3 Stage 3 + the
+// `recover renderLocked panic` follow-up.)
+func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receiptBot) *MessageReceipt {
+	return &MessageReceipt{
+		chatID:     chatID,
+		userMsgID:  userMsgID,
+		replyMsgID: replyMsgID,
+		bot:        bot,
+		logger:     slog.Default(),
+		receivedAt: time.Now(),
+		state:      StateWaiting,
+	}
+}
+
 // SetExecuting transitions Waiting → Executing. Adds the 🔄
 // reaction and writes the header with the initial event count.
 // First-call only; subsequent SetExecuting calls are idempotent

@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -18,9 +17,11 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
+	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/channel/feishu"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	gatewaycmd "github.com/cnlangzi/nightme/internal/gateway/cmd"
 	"github.com/cnlangzi/nightme/internal/registry"
 	"github.com/cnlangzi/nightme/internal/session"
 )
@@ -28,14 +29,15 @@ import (
 // runDeps contains the construction seams for the daemon. The production
 // command uses the defaults below; tests replace them with in-process fakes.
 type runDeps struct {
-	loadConfig   func() (*config.Config, error)
-	openRegistry func(*config.Config) (*registry.File, error)
-	buildAgents  func(*config.Config) *agent.Registry
-	newChannel   func(*config.Config) (channel.Channel, error)
-	newManager   func(*agent.Registry, *registry.File, session.EventCallback) session.Manager
-	newGateway   func(session.Manager, *agent.Registry, gateway.Responder) gateway.Gateway
-	signals      <-chan os.Signal
-	cleanup      bool
+	loadConfig     func() (*config.Config, error)
+	openRegistry   func(*config.Config) (*registry.File, error)
+	buildAgents    func(*config.Config) *agent.Registry
+	newChannel     func(*config.Config) (channel.Channel, error)
+	newManager     func(*agent.Registry, *registry.File, session.EventCallback) session.Manager
+	newGateway     func(session.Manager, *agent.Registry, gatewaycmd.Responder) gateway.Gateway
+	signals        <-chan os.Signal
+	cleanup        bool
+	skipFeishuAuth bool
 }
 
 func defaultRunDeps() runDeps {
@@ -49,9 +51,9 @@ func defaultRunDeps() runDeps {
 		newManager: func(agents *agent.Registry, reg *registry.File, cb session.EventCallback) session.Manager {
 			return session.NewMemoryManager(agents, reg, cb)
 		},
-		newGateway: func(mgr session.Manager, agents *agent.Registry, resp gateway.Responder) gateway.Gateway {
+		newGateway: func(mgr session.Manager, agents *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
 			gw := gateway.New(nil)
-			gateway.RegisterDefaultCommands(gw, mgr, agents, resp)
+			gatewaycmd.RegisterDefaultCommands(gw, mgr, agents, resp)
 			return gw
 		},
 	}
@@ -60,6 +62,7 @@ func defaultRunDeps() runDeps {
 // newRunCmd builds the long-running Feishu daemon command.
 func newRunCmd() *cobra.Command {
 	var cleanup bool
+	var channelName string
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Start the Feishu daemon",
@@ -70,20 +73,30 @@ func newRunCmd() *cobra.Command {
 			"By default the daemon detaches session CLIs on shutdown so a " +
 			"later `nightme run` (or /run) can resume them. Pass --cleanup " +
 			"to instead Kill() every session on SIGINT/SIGTERM — useful for " +
-			"CI or one-shot runs.",
+			"CI or one-shot runs.\n\n" +
+			"Pass --channel=echo to run the daemon with the echo channel " +
+			"(a no-network stub that prints outbound messages to stdout). " +
+			"Useful for smoke tests and for exercising the v0.3 hub-and-" +
+			"spoke architecture without Feishu credentials.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runRun(cmd, cleanup)
+			return runRun(cmd, cleanup, channelName)
 		},
 	}
 	cmd.Flags().BoolVar(&cleanup, "cleanup", false,
 		"Kill every session CLI on shutdown instead of detaching them")
+	cmd.Flags().StringVar(&channelName, "channel", "feishu",
+		"Channel implementation: feishu (default) or echo (smoke test)")
 	return cmd
 }
 
 // runRun is the cobra entrypoint. The split makes the daemon easy to drive
 // with fake channels and managers in unit tests.
-func runRun(cmd *cobra.Command, cleanup bool) error {
-	return runRunWith(cmd, withCleanup(defaultRunDeps(), cleanup))
+func runRun(cmd *cobra.Command, cleanup bool, channelName string) error {
+	if channelName != "" && channelName != "feishu" && channelName != "echo" {
+		return fmt.Errorf("run: unknown channel %q (want feishu or echo)", channelName)
+	}
+	deps := withChannel(defaultRunDeps(), channelName)
+	return runRunWith(cmd, withCleanup(deps, cleanup))
 }
 
 // withCleanup returns deps with the cleanup flag applied. Exported
@@ -91,6 +104,25 @@ func runRun(cmd *cobra.Command, cleanup bool) error {
 // cobra flags.
 func withCleanup(deps runDeps, cleanup bool) runDeps {
 	deps.cleanup = cleanup
+	return deps
+}
+
+// withChannel overrides defaultRunDeps.newChannel based on the
+// --channel flag. The default ("feishu") is unchanged; "echo"
+// swaps in the no-network stub for smoke tests.
+func withChannel(deps runDeps, channelName string) runDeps {
+	switch channelName {
+	case "feishu", "":
+		// default — feishu.NewAdapter
+	case "echo":
+		deps.skipFeishuAuth = true
+		deps.newChannel = func(*config.Config) (channel.Channel, error) {
+			return echo.New("echo", os.Stdout), nil
+		}
+	default:
+		// Unknown: leave defaultRunDeps to fail with the existing
+		// Feishu credential check, so the user sees a clear error.
+	}
 	return deps
 }
 
@@ -148,10 +180,9 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	if cfg == nil {
 		return errors.New("run: load config: returned nil config")
 	}
-	if strings.TrimSpace(cfg.Feishu.AppID) == "" || strings.TrimSpace(cfg.Feishu.AppSecret) == "" {
+	if !deps.skipFeishuAuth && (strings.TrimSpace(cfg.Feishu.AppID) == "" || strings.TrimSpace(cfg.Feishu.AppSecret) == "") {
 		return errors.New("run: Feishu credentials are not configured; run `nightme auth login feishu`")
 	}
-
 	reg, err := deps.openRegistry(cfg)
 	if err != nil {
 		return fmt.Errorf("run: open registry: %w", err)
@@ -177,23 +208,18 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	}
 
 	// Responder pushes chat-side replies through the channel.
-	// If the channel is a Feishu adapter, we also wire the
-	// F-25 Renderer (receipts + reactions) and route user messages
-	// through the session's InputBuffer so concurrent messages are
-	// queued while a turn is busy.
-	var renderer *feishu.Renderer
-	if feishuCh, ok := ch.(*feishu.Adapter); ok {
-		renderer = feishu.NewRenderer(feishuCh)
-	}
-	responder := channelResponder{ch: ch, renderer: renderer}
-	if renderer != nil {
-		responder.userMessageFn = func(chatID, userMsgID string, blocks []agent.ContentBlock) error {
-			sess, err := mgr.GetByChat(chatID)
-			if err != nil {
-				return fmt.Errorf("no session for chat: %w", err)
-			}
-			return sess.QueueUserMessage(blocks, userMsgID)
+	// Stage 3: the Feishu adapter owns the rolling-log receipt
+	// logic (Channel.Send is the display strategy). The runtime
+	// just hands user messages to the adapter and lets the
+	// session queue them; the gateway's pumpOutbound then routes
+	// every event through the same receipt.
+	responder := channelResponder{ch: ch}
+	responder.userMessageFn = func(chatID, userMsgID string, blocks []agent.ContentBlock) error {
+		sess, err := mgr.GetByChat(chatID)
+		if err != nil {
+			return fmt.Errorf("no session for chat: %w", err)
 		}
+		return sess.QueueUserMessage(blocks, userMsgID)
 	}
 
 	// Build the gateway now that the manager exists. The fallback
@@ -213,7 +239,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// session's InputBuffer, and flips the receipt to Executing on
 	// dispatch. This is what makes concurrent user messages buffer
 	// correctly while Claude is busy.
-	fallback := func(ctx context.Context, msg *gateway.Message) error {
+	fallback := func(ctx context.Context, msg *gateway.InboundMessage) error {
 		// Forwarding is best-effort. If the chat has no /cwd or
 		// the agent is not running, we still send a hint so the
 		// user is not left wondering.
@@ -238,17 +264,15 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		// composite ID and merge into a single ⏳→🔄→✅ cycle.
 		userMsgID := msg.MessageID
 		if userMsgID == "" {
-			userMsgID = msg.SenderID + ":" + msg.Time.UTC().Format(time.RFC3339Nano)
+			userMsgID = msg.UserID + ":" + msg.Time.UTC().Format(time.RFC3339Nano)
 		}
-		// Renderer path: creates receipt + queues via InputBuffer.
-		// Falls back to legacy SendText path when no renderer.
-		if responder.renderer != nil {
-			return responder.SendUserMessage(ctx, msg.ChatID, userMsgID, blocks)
-		}
-		return sess.SendBlocks(ctx, blocks)
+		// Stage 3: route through responder.SendUserMessage which
+		// creates the Feishu receipt (when channel is a Feishu
+		// adapter) or falls back to a flat OutText send.
+		return responder.SendUserMessage(ctx, msg.ChatID, userMsgID, blocks)
 	}
 	gw = gateway.New(fallback)
-	gateway.RegisterDefaultCommands(gw, mgr, agents, responder)
+	gatewaycmd.RegisterDefaultCommands(gw, mgr, agents, responder)
 
 	// Reinstall the EventCallback now that the channel is alive.
 	// The MemoryManager's callback is fixed at construction time
@@ -280,86 +304,47 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// Spawn per-session pumps so live agent events are rendered
 	// back to the chat. We (re)attach every time the session
 	// table changes by polling on each incoming message.
-	attachments := newSessionAttachments(mgr, ch, renderer)
-	attachments.logger = logger
 
-	incoming := ch.Incoming()
-	if incoming == nil {
-		return shutdownRun(out, ch, mgr, deps.cleanup, logger)
+	// Stage 3: drive the gateway's dispatch runtime. The gateway
+	// owns the per-channel inbound pump and the per-session
+	// outbound pump; the Feishu adapter's Channel.Send is the
+	// rolling-log display strategy. No filter needed — every
+	// channel goes through the gateway.
+	gwImpl := gw.(*gateway.Router)
+	gwImpl.AttachChannels(ch)
+	gwImpl.AttachSweeper(func() []gateway.OutboundSource {
+		var out []gateway.OutboundSource
+		for _, sess := range mgr.List() {
+			if sess == nil || sess.ChatID == "" {
+				continue
+			}
+			if sess.Status() != session.StatusRunning {
+				continue
+			}
+			out = append(out, gateway.OutboundSource{
+				SessionID: sess.ID,
+				ChatID:    sess.ChatID,
+				Events:    sess.Events(),
+			})
+		}
+		return out
+	})
+	if err := gwImpl.Start(ctx); err != nil {
+		return fmt.Errorf("run: start gateway: %w", err)
 	}
-	for {
-		attachments.Sweep(ctx)
+	defer func() { _ = gwImpl.Stop(context.Background()) }()
 
-		select {
-		case <-ctx.Done():
-			return shutdownRun(out, ch, mgr, deps.cleanup, logger)
-		case sig, ok := <-sigCh:
-			if ok && sig != nil {
-				fmt.Fprintf(out, "[nightme] received %s\n", sig)
-			}
-			return shutdownRun(out, ch, mgr, deps.cleanup, logger)
-		case msg, ok := <-incoming:
-			if !ok {
-				return shutdownRun(out, ch, mgr, deps.cleanup, logger)
-			}
-			fmt.Fprintf(out, "received: %s (attachments=%d)\n", msg.Text, len(msg.Attachments))
-
-			// F-14 inbound attachment handling. If the channel
-			// message carries any non-text attachments, download
-			// them synchronously (with retries) before letting the
-			// gateway see the message. The Feishu adapter is the
-			// only one that produces attachments today; other
-			// channels fall through unchanged.
-			//
-			// Skip the download path entirely when there is no
-			// session bound to this chat — without a session the
-			// inbox directory cannot be created, every download
-			// would "fail" with the misleading ❌ message, and the
-			// user's caption would be silently dropped. Letting the
-			// gateway's fallback handle the un-bound case produces a
-			// correct "no workspace set" / "CLI not running" hint
-			// instead.
-			if len(msg.Attachments) > 0 {
-				if feishuCh, ok := ch.(*feishu.Adapter); ok {
-					sess, _ := mgr.GetByChat(msg.ChatID)
-					if sess != nil {
-						result := feishuCh.DownloadAttachments(ctx, msg.MessageID, msg.Attachments, sess.ID)
-						msg.Attachments = result.Atts
-
-						// All downloads failed: the inbound message
-						// would mislead the agent (caption without
-						// the image it referred to). Drop the
-						// forwarding and tell the user to resend.
-						if result.AllFailed {
-							_ = responder.Reply(ctx, msg.ChatID,
-								"❌ 文件下载失败 (重试 3 次后)\n请重新发送该消息。")
-							continue
-						}
-						// Partial failure: forward what's available
-						// and tell the user about the rest.
-						if len(result.FailureKeys) > 0 {
-							_ = responder.Reply(ctx, msg.ChatID,
-								fmt.Sprintf("⚠️ 部分文件下载失败: %s\n请重新发送未下载成功的文件。",
-									strings.Join(result.FailureKeys, ", ")))
-						}
-					}
-				}
-			}
-
-			handleCtx := gateway.WithGateway(ctx, gw)
-			if err := gw.Handle(handleCtx, &gateway.Message{
-				ChatID:      msg.ChatID,
-				Text:        msg.Text,
-				SenderID:    msg.SenderID,
-				Time:        msg.Time,
-				ChatType:    msg.ChatType,
-				MessageID:   msg.MessageID,
-				Attachments: msg.Attachments,
-			}); err != nil {
-				fmt.Fprintf(out, "[nightme] gateway error: %v\n", err)
-			}
+	// Block on signal or context cancellation. All the per-channel
+	// and per-session goroutines are owned by the gateway and
+	// exit on ctx.Done(); we only need to wait here.
+	select {
+	case <-ctx.Done():
+	case sig, ok := <-sigCh:
+		if ok && sig != nil {
+			fmt.Fprintf(out, "[nightme] received %s\n", sig)
 		}
 	}
+	return shutdownRun(out, ch, mgr, deps.cleanup, logger)
 }
 
 // channelResponder adapts a channel.Channel to the gateway.Responder
@@ -371,8 +356,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 // wiring the F-25 receipt lifecycle. When nil (non-Feishu channels
 // or tests), it falls back to the plain SendLongMessage path.
 type channelResponder struct {
-	ch       channel.Channel
-	renderer *feishu.Renderer
+	ch channel.Channel
 	// userMessageFn lets the responder route user messages into
 	// the session queue (F-25). nil = plain SendText fallback.
 	userMessageFn func(chatID, userMsgID string, blocks []agent.ContentBlock) error
@@ -382,7 +366,7 @@ func (r channelResponder) Reply(ctx context.Context, chatID, text string) error 
 	if r.ch == nil {
 		return nil
 	}
-	return r.ch.SendLongMessage(ctx, chatID, text)
+	return r.ch.Send(ctx, gateway.OutboundMessage{ChatID: chatID, Kind: gateway.OutText, Text: text})
 }
 
 // SendUserMessage is the F-25 entry point used by the gateway to
@@ -400,130 +384,34 @@ func (r channelResponder) Reply(ctx context.Context, chatID, text string) error 
 // caller should fall back to plain SendLongMessage). We do NOT
 // silently drop the message — that would surprise users.
 func (r channelResponder) SendUserMessage(ctx context.Context, chatID, userMsgID string, blocks []agent.ContentBlock) error {
-	if r.renderer == nil || r.userMessageFn == nil {
-		// No renderer wired — best-effort fall-through: flatten
-		// the blocks to a single string and send via the channel
-		// so the user isn't left without feedback. The legacy
-		// SendLongMessage path remains available for channels
-		// that don't support reactions (Telegram etc.).
-		if r.ch != nil {
-			return r.ch.SendLongMessage(ctx, chatID, feishu.BuildForwardedTextFromBlocks(blocks))
-		}
+	if r.ch == nil {
 		return nil
 	}
-	// Create the receipt first so the user sees ⏳ immediately,
-	// then dispatch via the session (which decides immediate send
-	// vs buffer based on InputBuffer state). The receipt's reply
-	// text is the flattened block list so the user sees the
-	// attachment paths inline.
+	// Stage 3: if the channel is a Feishu adapter, use the receipt
+	// flow (adapter.SendUserMessage creates the rolling-log
+	// receipt and posts the ⏳ reply). Otherwise fall back to a
+	// flat OutText send.
+	feishuCh, isFeishu := r.ch.(*feishu.Adapter)
+	if !isFeishu {
+		return r.ch.Send(ctx, gateway.OutboundMessage{
+			ChatID: chatID,
+			Kind:   gateway.OutText,
+			Text:   feishu.BuildForwardedTextFromBlocks(blocks),
+		})
+	}
 	receiptText := feishu.BuildForwardedTextFromBlocks(blocks)
-	_, err := r.renderer.SendUserMessage(ctx, chatID, userMsgID, receiptText)
-	if err != nil {
+	if _, err := feishuCh.SendUserMessage(ctx, chatID, userMsgID, receiptText); err != nil {
 		// Don't fail the user's message; log and fall back.
 		return r.userMessageFn(chatID, userMsgID, blocks)
 	}
 	if err := r.userMessageFn(chatID, userMsgID, blocks); err != nil {
 		// Dispatch failed — keep the receipt in Waiting so the
-		// user can /flush. The receipt's note already says "⏳
-		// 等待中" which is honest.
+		// user can /flush.
 		return err
 	}
-	// Dispatch succeeded → mark the receipt as Executing so the
-	// user sees 🔄 + heartbeat counter.
-	_ = r.renderer.MarkExecuting(ctx, userMsgID)
+	// Dispatch succeeded → mark the receipt as Executing.
+	_ = feishuCh.MarkExecuting(ctx, userMsgID)
 	return nil
-}
-
-// sessionAttachments routes AgentEvents from every live session
-// back to the corresponding chat via the channel renderer. It
-// tracks which sessions it has already attached to so each new
-// agent gets exactly one pump.
-//
-// When a Feishu Renderer is available, the pump delegates to it
-// (which drives the F-25 receipt lifecycle — see Renderer.RenderEvent).
-// Otherwise the pump falls back to direct SendMessage calls (the
-// v0.1 behaviour, kept for non-Feishu channels).
-type sessionAttachments struct {
-	mgr      session.Manager
-	ch       channel.Channel
-	renderer *feishu.Renderer
-	mu       sync.Mutex
-	attached map[string]struct{}
-	logger   *slog.Logger
-}
-
-func newSessionAttachments(mgr session.Manager, ch channel.Channel, renderer *feishu.Renderer) *sessionAttachments {
-	return &sessionAttachments{
-		mgr:      mgr,
-		ch:       ch,
-		renderer: renderer,
-		attached: make(map[string]struct{}),
-	}
-}
-
-// Sweep inspects the session table and starts a pump goroutine for
-// every session that has a live agent but no attached pump yet.
-func (s *sessionAttachments) Sweep(ctx context.Context) {
-	if s.mgr == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, sess := range s.mgr.List() {
-		if sess == nil || sess.ChatID == "" {
-			continue
-		}
-		if sess.Status() != session.StatusRunning {
-			continue
-		}
-		if _, ok := s.attached[sess.ID]; ok {
-			continue
-		}
-		events := sess.Events()
-		if events == nil {
-			continue
-		}
-		s.attached[sess.ID] = struct{}{}
-		if s.logger != nil {
-			s.logger.Info("session created", "chat_id", sess.ChatID, "workspace", sess.Workspace, "agent", sess.Agent)
-		}
-		chatID := sess.ChatID
-		go s.pump(ctx, chatID, events)
-	}
-}
-
-// pump drains events for one session and renders them through the
-// renderer. The renderer owns the rolling-log reply message on
-// Feishu (see feishu.Renderer); the channel adapter is unused at
-// the event-pump level.
-//
-// The pump exits when the events channel closes (the agent has
-// ended) or when ctx is cancelled. A nil renderer is a no-op —
-// we exit immediately. (Tests using a recordingChannel without a
-// Feishu adapter hit this path; production wires the renderer
-// whenever the channel is a Feishu adapter.)
-func (s *sessionAttachments) pump(ctx context.Context, chatID string, events <-chan agent.AgentEvent) {
-	if s.renderer == nil {
-		return
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case ev, ok := <-events:
-			if !ok {
-				return
-			}
-			if err := s.renderer.RenderEvent(ctx, chatID, ev); err != nil {
-				if s.logger != nil {
-					s.logger.Warn("renderer failed",
-						"chat_id", chatID,
-						"event_kind", ev.Kind.String(),
-						"err", err)
-				}
-			}
-		}
-	}
 }
 
 // shutdownRun stops the channel first, then either detaches or

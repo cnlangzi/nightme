@@ -113,9 +113,108 @@ func eventToEntry(ev agent.AgentEvent, now time.Time) (LogEntry, bool) {
 		// per-event entry needed — the header shows the timestamp.
 		return LogEntry{}, false
 
+	case agent.EventResult:
+		// Final assistant reply — distinct icon (📝) so the user
+		// can tell the "delivered answer" from rolling-log EventText
+		// entries (💬). Skip when empty AND not in error state so
+		// pure zero-length results don't pad the log.
+		if ae.Result == nil {
+			return LogEntry{}, false
+		}
+		text := ae.Result.Text
+		if strings.TrimSpace(text) == "" && !ae.Result.IsError {
+			return LogEntry{}, false
+		}
+		icon := "📝"
+		if ae.Result.IsError {
+			icon = "⚠️"
+		}
+		return LogEntry{
+			Time: now,
+			Icon: icon,
+			Text: truncateForLog(text, perEntryMaxBytes),
+			Kind: "result",
+		}, true
+
+	case agent.EventUsage:
+		// Footer-style entry. Format carries cache stats + cost
+		// when present so the user can spot cache misses / cost
+		// anomalies at a glance.
+		if ae.Usage == nil {
+			return LogEntry{}, false
+		}
+		body := formatUsageText(ae.Usage)
+		if body == "" {
+			return LogEntry{}, false
+		}
+		return LogEntry{
+			Time: now,
+			Icon: "📊",
+			Text: truncateForLog(body, perEntryMaxBytes),
+			Kind: "usage",
+		}, true
+
+	case agent.EventCompaction:
+		// Mid-turn context compaction — surface the same icon as
+		// Claude Code's own spinner (✶) so users recognize the
+		// pattern from the CLI.
+		return LogEntry{
+			Time: now,
+			Icon: "✶",
+			Text: "Compacting conversation…",
+			Kind: "compaction",
+		}, true
+
+	case agent.EventInit:
+		// Session bootstrap — surface session_id + model so users
+		// can confirm the session they're talking to. Skip when
+		// SessionID is empty (defensive; the bridge always emits
+		// one but third-party bridges may not).
+		if ae.Init == nil || ae.Init.SessionID == "" {
+			return LogEntry{}, false
+		}
+		return LogEntry{
+			Time: now,
+			Icon: "🆔",
+			Text: truncateForLog(
+				fmt.Sprintf("session %s · model %s", ae.Init.SessionID, ae.Init.Model),
+				perEntryMaxBytes,
+			),
+			Kind: "init",
+		}, true
+
 	default:
 		return LogEntry{}, false
 	}
+}
+
+// formatUsageText renders a UsageEvent as a single log line. Returns
+// "" when all counts are zero so the caller can drop the entry
+// entirely (mirrors the zero-count guard in stream.go::decodeUsage).
+//
+// Shape (v0.3): "<total> tokens (in <n> · out <n>[ · cache read <n>][ · cache create <n>][ · $X.XXXX])"
+//
+// Cost is shown with 4 decimal places to match Claude Code's own
+// reporting. Cache stats are omitted when zero so the common case
+// stays short ("1.2k tokens (in 800 · out 400)").
+func formatUsageText(u *agent.UsageEvent) string {
+	total := u.InputTokens + u.OutputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+	if total == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d tokens (in %d · out %d", total, u.InputTokens, u.OutputTokens)
+	if u.CacheReadInputTokens > 0 {
+		fmt.Fprintf(&b, " · cache read %d", u.CacheReadInputTokens)
+	}
+	if u.CacheCreationInputTokens > 0 {
+		fmt.Fprintf(&b, " · cache create %d", u.CacheCreationInputTokens)
+	}
+	if u.CostUSD > 0 {
+		fmt.Fprintf(&b, " · $%.4f", u.CostUSD)
+	}
+	b.WriteByte(')')
+	return b.String()
 }
 
 // truncateForLog returns s clipped to max bytes with an ellipsis

@@ -1,6 +1,7 @@
 package feishu
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/channel"
@@ -310,7 +311,7 @@ func TestBuildForwardedText_SkipsFailedDownloads(t *testing.T) {
 	// notification for them via the Reply path).
 	got := BuildForwardedText("caption", []channel.Attachment{
 		{Type: "image", LocalPath: "/tmp/ok.png"},
-		{Type: "image", FileKey: "img_fail", LocalPath: "", Error: "network"},
+		{Type: "image", FileKey: "img_fail", LocalPath: "", Error: errors.New("network")},
 	})
 	want := "caption\nattachment (image): /tmp/ok.png"
 	if got != want {
@@ -325,7 +326,7 @@ func TestBuildForwardedText_AllFailedProducesCaptionOnly(t *testing.T) {
 	// the agent should at least see the caption rather than an
 	// empty string.
 	got := BuildForwardedText("just caption", []channel.Attachment{
-		{Type: "image", LocalPath: "", Error: "fail"},
+		{Type: "image", LocalPath: "", Error: errors.New("fail")},
 	})
 	if got != "just caption" {
 		t.Errorf("BuildForwardedText = %q, want %q", got, "just caption")
@@ -334,7 +335,7 @@ func TestBuildForwardedText_AllFailedProducesCaptionOnly(t *testing.T) {
 
 func TestBuildForwardedText_EmptyTextAllFailed(t *testing.T) {
 	got := BuildForwardedText("", []channel.Attachment{
-		{Type: "image", LocalPath: "", Error: "fail"},
+		{Type: "image", LocalPath: "", Error: errors.New("fail")},
 	})
 	if got != "" {
 		t.Errorf("BuildForwardedText = %q, want empty", got)

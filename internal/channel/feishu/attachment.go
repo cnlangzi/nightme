@@ -316,7 +316,7 @@ func DownloadAttachments(ctx context.Context, c *lark.Client,
 		keys := make([]string, 0, len(atts))
 		for i, a := range atts {
 			results[i] = a
-			results[i].Error = err.Error()
+			results[i].Error = err
 			if a.FileKey != "" {
 				keys = append(keys, a.FileKey)
 			}
@@ -333,7 +333,7 @@ func DownloadAttachments(ctx context.Context, c *lark.Client,
 	failedKeys := make([]string, 0)
 	for i, a := range atts {
 		results[i] = downloadOneWithRetry(ctx, c, messageID, a, dir)
-		if results[i].Error != "" && results[i].FileKey != "" {
+		if results[i].Error != nil && results[i].FileKey != "" {
 			failedKeys = append(failedKeys, results[i].FileKey)
 		}
 	}
@@ -366,13 +366,13 @@ func downloadOneWithRetry(ctx context.Context, c *lark.Client,
 		// doesn't leave us waiting on retries.
 		select {
 		case <-ctx.Done():
-			att.Error = ctx.Err().Error()
+			att.Error = ctx.Err()
 			return att
 		case <-time.After(backoff):
 		}
 		backoff = nextBackoff(backoff)
 	}
-	att.Error = lastErr.Error()
+	att.Error = lastErr
 	return att
 }
 

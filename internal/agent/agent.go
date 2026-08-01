@@ -86,6 +86,32 @@ const (
 
 	// EventError carries an unrecoverable error during the session.
 	EventError
+
+	// EventResult is the assistant's final reply for the turn. In
+	// Claude Code stream-json this is the value of `result` on the
+	// result event — distinct from EventText (which is mid-stream
+	// assistant text). Channels typically render it with a different
+	// icon than the rolling-log entries.
+	EventResult
+
+	// EventUsage carries the turn's token usage. Bridges populate it
+	// from `result.usage` (Claude Code: input_tokens / output_tokens
+	// / cache_creation_input_tokens / cache_read_input_tokens) and
+	// optionally the per-model costUSD from `result.modelUsage`.
+	// Channels use it for "N tokens · $X" footers.
+	EventUsage
+
+	// EventCompaction signals a mid-turn context compaction. Bridges
+	// emit it when the agent's stream-json result carries
+	// subtype "compact" or "compaction" — these are NOT turn-end
+	// signals; subsequent assistant / tool events continue the same
+	// turn. Channels typically surface a brief "Compacting…" indicator.
+	EventCompaction
+
+	// EventInit carries session bootstrap data (session_id + model)
+	// from the agent's system/init event. Channels use it to surface
+	// "session <id> · model <name>" in the receipt header.
+	EventInit
 )
 
 // String renders an EventKind for logs.
@@ -103,6 +129,14 @@ func (k EventKind) String() string {
 		return "done"
 	case EventError:
 		return "error"
+	case EventResult:
+		return "result"
+	case EventUsage:
+		return "usage"
+	case EventCompaction:
+		return "compaction"
+	case EventInit:
+		return "init"
 	default:
 		return fmt.Sprintf("event(%d)", int(k))
 	}
@@ -179,6 +213,87 @@ type ErrorEvent struct {
 	Err error
 }
 
+// ResultEvent is the payload for EventResult — the assistant's final
+// reply for the turn. Bridges populate Text from the stream-json
+// result event's `result` field; DurationMs / IsError / Subtype are
+// pass-through metadata for the channel to surface alongside the text
+// (e.g. "📝 <text> (12.3s)").
+type ResultEvent struct {
+	// Text is the final assistant reply. May be empty when the turn
+	// ended with an error; channels typically still emit an EventResult
+	// so the header line can flip to an error state.
+	Text string
+
+	// DurationMs is the wall-clock duration of the turn in
+	// milliseconds (Claude Code: result.duration_ms).
+	DurationMs int64
+
+	// IsError is true when the turn ended abnormally (Claude Code:
+	// result.is_error). When set, channels typically render the
+	// ResultEvent with an error icon.
+	IsError bool
+
+	// Subtype is the result event's subtype (Claude Code: e.g.
+	// "success", "error_max_turns", "compact", "compaction"). Bridges
+	// already convert "compact" / "compaction" into EventCompaction
+	// before the ResultEvent, so any Subtype seen here is a real
+	// terminal subtype.
+	Subtype string
+}
+
+// UsageEvent is the payload for EventUsage — the turn's token usage
+// statistics. All four counts default to zero when missing; channels
+// decide how to surface (e.g. "1.2k tokens (in 800 · out 400) · $0.012").
+//
+// CostUSD is optional; bridges populate it from
+// `result.modelUsage[<model>].costUSD` when present. Zero means
+// "unknown / not reported" — channels must NOT render "$0.00".
+type UsageEvent struct {
+	// InputTokens is the non-cached input token count.
+	InputTokens int
+
+	// OutputTokens is the generated output token count.
+	OutputTokens int
+
+	// CacheCreationInputTokens is the input tokens that wrote to
+	// the prompt cache this turn (Claude Code:
+	// cache_creation_input_tokens).
+	CacheCreationInputTokens int
+
+	// CacheReadInputTokens is the input tokens served from the
+	// prompt cache this turn (Claude Code:
+	// cache_read_input_tokens).
+	CacheReadInputTokens int
+
+	// CostUSD is the optional per-turn cost in USD; 0 when unknown.
+	CostUSD float64
+}
+
+// CompactionEvent is the payload for EventCompaction — a mid-turn
+// context-compaction signal from the agent. After this event the turn
+// continues (the agent may emit more tool_use / assistant text blocks);
+// bridges MUST NOT emit EventDone for compaction events.
+type CompactionEvent struct {
+	// Subtype is the result event's subtype — either "compact" (newer
+	// Claude Code CLI) or "compaction" (older). Channels use it only
+	// for debugging; the user-facing icon / text is the same.
+	Subtype string
+}
+
+// InitEvent is the payload for EventInit — session bootstrap data
+// from the agent's system/init event. Bridges populate it from the
+// stream-json system event (session_id + model). Channels use it to
+// surface "session <id> · model <name>" in the receipt header.
+type InitEvent struct {
+	// SessionID is the agent's opaque session id. Used for `--resume`
+	// on subsequent runs; channels may surface it for debugging.
+	SessionID string
+
+	// Model is the model the agent selected (Claude Code:
+	// system/init.model).
+	Model string
+}
+
 // AgentEvent is the wire format on the AgentSession.Events() channel.
 //
 // Exactly one payload field is meaningful per Kind:
@@ -189,6 +304,10 @@ type ErrorEvent struct {
 //	EventToolEnd    -> ToolEnd
 //	EventDone       -> Done
 //	EventError      -> Error
+//	EventResult     -> Result
+//	EventUsage      -> Usage
+//	EventCompaction -> Compaction
+//	EventInit       -> Init
 type AgentEvent struct {
 	Kind EventKind
 
@@ -200,6 +319,10 @@ type AgentEvent struct {
 	ToolEnd    *ToolEndEvent
 	Done       *DoneEvent
 	Error      *ErrorEvent
+	Result     *ResultEvent
+	Usage      *UsageEvent
+	Compaction *CompactionEvent
+	Init       *InitEvent
 }
 
 // StartConfig is the per-session configuration handed to Agent.Start.
@@ -217,6 +340,15 @@ type StartConfig struct {
 	// typically empty; users configure ANTHROPIC_API_KEY etc. in
 	// their shell.
 	Env []string
+
+	// PermissionMode is an agent-specific permission-mode override.
+	// Empty string means "use the agent's default". Bridges that
+	// support a `--permission-mode` flag (Claude Code) translate this
+	// into the corresponding CLI value; bridges that don't support
+	// the knob silently ignore it. v0.3 ships only the Claude Code
+	// bridge; the field is here so future agents can also opt in
+	// without changing the Start signature.
+	PermissionMode string
 }
 
 // Agent is the static description of a CLI wrapper plus a factory for

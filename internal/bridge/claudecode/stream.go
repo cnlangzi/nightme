@@ -151,11 +151,22 @@ func translate(ev streamEvent, events chan<- agent.AgentEvent, askHandler askHan
 				}
 
 			case "thinking":
-				// thinking blocks are intentionally NOT surfaced as
-				// text — the channel can render them via EventText
-				// separately if desired. We do not currently emit
-				// anything for thinking to keep the channel UI
-				// focused on user-facing content.
+				// Thinking blocks are surfaced as EventText with a
+				// "[思考] " prefix so the channel layer (Feishu
+				// Renderer) can render them as a 💭 entry in the
+				// per-message activity log. The prefix lets the
+				// renderer tell thinking from a final reply and
+				// from a system-init blurb ("session initialized
+				// (model: …)") which already carries its own
+				// context. Empty blocks (Claude Code can emit a
+				// zero-length thinking delta) are skipped.
+				if strings.TrimSpace(block.Thinking) == "" {
+					continue
+				}
+				events <- agent.AgentEvent{
+					Kind: agent.EventText,
+					Text: "[思考] " + block.Thinking,
+				}
 
 			case "tool_use":
 				handleToolUse(block, events, askHandler, logger)

@@ -1,3 +1,19 @@
+// Package feishu — F-25 Renderer, v0.3 single-message rolling-log
+// integration. The renderer owns one MessageReceipt per active chat
+// (keyed by chatID). Every agent event the session pump routes
+// here is appended to that receipt's log, which the receipt
+// re-renders to Feishu as a single in-place updated message. The
+// user sees ONE reply per user message, not one per event.
+//
+// The Renderer's responsibilities:
+//
+//   - SendUserMessage creates a fresh receipt when an IM message
+//     arrives (called from the gateway's fallback path).
+//   - RenderEvent forwards one AgentEvent from a session pump to
+//     the receipt's Append, which adds it to the rolling log and
+//     updates the reply message in place.
+//   - renderPermission renders permission requests as a separate
+//     interactive card (not part of the log).
 package feishu
 
 import (
@@ -6,25 +22,29 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
+// interactiveMessageType is the Feishu msg_type for v1 interactive
+// cards. Used by renderPermission and verified by the render test.
 const interactiveMessageType = "interactive"
 
 // Renderer maps structured AgentEvents to Feishu messages AND drives
 // the per-user-message MessageReceipt lifecycle (F-25 §6).
 //
 // One Renderer per chat. It owns:
-//   - The Feishu adapter (for SendMessage / UpdateMessage / AddReaction)
-//   - The receipts map (userMsgID -> *MessageReceipt) so EventDone
-//     can mark every still-open receipt as Completed.
+//
+//   - The Feishu adapter (for SendMessage / UpdateMessage /
+//     AddReaction).
+//   - The receipts map (chatID -> *MessageReceipt) so events from
+//     the session pump find the right receipt without carrying the
+//     userMsgID around.
 type Renderer struct {
 	adapter *Adapter
 
 	mu       sync.Mutex
-	receipts map[string]*MessageReceipt // userMsgID -> receipt
+	receipts map[string]*MessageReceipt // chatID -> latest active receipt
 }
 
 // NewRenderer constructs an event renderer backed by adapter.
@@ -37,26 +57,33 @@ func NewRenderer(adapter *Adapter) *Renderer {
 
 // SendUserMessage is the F-25 entry point for IM-arriving messages.
 // It creates a MessageReceipt (post reply, add ⏳ reaction) and
-// returns the receipt so the caller can later drive state via the
-// returned handle.
+// returns it so the caller can drive state via the returned handle.
 //
-// The caller is expected to invoke MessageReceipt.SetExecuting on
-// dispatch (so the receipt transitions to 🔄) and Heartbeat on each
-// subsequent agent event. EventDone triggers SetCompleted on every
-// open receipt automatically via the AgentEvent pump.
+// When the chat already has an active receipt (e.g. a previous
+// user message is still in flight), that receipt is marked
+// Completed before the new one takes over — the old reply message
+// keeps its terminal state in Feishu, and the new user message gets
+// a fresh receipt.
 //
-// userMsgID is the Feishu message ID of the user's incoming message.
-// If the renderer has already seen this userMsgID, the existing
-// receipt is returned (idempotent — handles retries / dup events).
+// userMsgID is the Feishu message ID of the user's incoming
+// message. If a receipt already exists for that exact userMsgID
+// (e.g. a duplicate event arrived), the existing one is returned
+// (idempotent — handles retries / dup events).
 func (r *Renderer) SendUserMessage(ctx context.Context, chatID, userMsgID, content string) (*MessageReceipt, error) {
 	if userMsgID == "" {
 		return nil, errors.New("feishu: userMsgID is required")
 	}
 
 	r.mu.Lock()
-	if existing, ok := r.receipts[userMsgID]; ok {
+	if existing, ok := r.receipts[chatID]; ok && existing != nil && existing.userMsgID == userMsgID {
 		r.mu.Unlock()
 		return existing, nil
+	}
+	// A new user message arrived for a chat with a still-active
+	// receipt — close the old one so the user can tell the
+	// earlier turn is done.
+	if old, ok := r.receipts[chatID]; ok && old != nil {
+		_ = old.SetCompleted(ctx)
 	}
 	r.mu.Unlock()
 
@@ -66,212 +93,138 @@ func (r *Renderer) SendUserMessage(ctx context.Context, chatID, userMsgID, conte
 	}
 
 	r.mu.Lock()
-	// Double-check after lock — another goroutine may have raced.
-	if existing, ok := r.receipts[userMsgID]; ok {
-		r.mu.Unlock()
+	defer r.mu.Unlock()
+	// Re-check after lock — another goroutine may have raced us.
+	if existing, ok := r.receipts[chatID]; ok && existing != nil && existing.userMsgID == userMsgID {
 		return existing, nil
 	}
-	r.receipts[userMsgID] = receipt
-	r.mu.Unlock()
-
+	r.receipts[chatID] = receipt
 	return receipt, nil
 }
 
-// RenderEvent handles the F-25 EventPump integration:
-//   - EventText / EventToolStart / EventToolEnd: heartbeat every
-//     active receipt (so the "🔄 ⏳ N · HH:MM:SS" counter ticks)
-//   - EventDone: mark every active receipt as Completed
-//   - EventError: same as EventDone (terminal)
+// Render / RenderEvent forwards one AgentEvent from a session pump
+// to the chat's active receipt. The receipt's Append method adds
+// the event to the rolling log and updates the reply message in
+// place — no new Feishu messages are sent.
 //
-// RenderEvent also surfaces the structured content via SendMessage
-// / sendContent for the user to actually see Claude's output.
+// Events without an active receipt (e.g. orphan events after the
+// user message disappeared) are logged at debug and otherwise
+// dropped.
 //
-// Alias for Render kept for legacy callers.
+// Render is an alias kept for legacy callers.
 func (r *Renderer) Render(ctx context.Context, chatID string, ev agent.AgentEvent) error {
 	return r.RenderEvent(ctx, chatID, ev)
 }
 
 func (r *Renderer) RenderEvent(ctx context.Context, chatID string, ev agent.AgentEvent) error {
-	if r == nil || r.adapter == nil {
-		return errors.New("feishu: renderer has no adapter")
+	if r == nil {
+		return errors.New("feishu: renderer is nil")
 	}
 
-	switch ev.Kind {
-	case agent.EventText:
-		r.heartbeatAll(ctx)
-		return r.adapter.SendLongMessage(ctx, chatID, ev.Text)
-
-	case agent.EventToolStart:
-		r.heartbeatAll(ctx)
-		name := "tool"
-		if ev.ToolStart != nil && ev.ToolStart.Name != "" {
-			name = ev.ToolStart.Name
+	// Permission requests are rendered as a separate interactive
+	// card — they bypass the rolling log entirely. The adapter is
+	// only required for this path.
+	if ev.Kind == agent.EventPermission {
+		if r.adapter == nil {
+			return errors.New("feishu: renderer has no adapter (needed for permission cards)")
 		}
-		return r.adapter.SendMessage(ctx, chatID, "🔧 "+name+"...")
-
-	case agent.EventToolEnd:
-		r.heartbeatAll(ctx)
-		name := "tool"
-		if ev.ToolEnd != nil && ev.ToolEnd.Name != "" {
-			name = ev.ToolEnd.Name
-		}
-		if ev.ToolEnd != nil && ev.ToolEnd.Err != nil {
-			return r.adapter.SendMessage(ctx, chatID, fmt.Sprintf("❌ %s failed: %v", name, ev.ToolEnd.Err))
-		}
-		return r.adapter.SendMessage(ctx, chatID, "✅ "+name+" done")
-
-	case agent.EventPermission:
 		return r.renderPermission(ctx, chatID, ev.Permission)
-
-	case agent.EventDone:
-		r.completeAll(ctx)
-		code := 0
-		if ev.Done != nil {
-			code = ev.Done.ExitCode
-		}
-		return r.adapter.SendMessage(ctx, chatID, fmt.Sprintf("Session ended (exit %d)", code))
-
-	case agent.EventError:
-		r.completeAll(ctx)
-		if ev.Error == nil || ev.Error.Err == nil {
-			return r.adapter.SendMessage(ctx, chatID, "Error: unknown error")
-		}
-		return r.adapter.SendMessage(ctx, chatID, "Error: "+ev.Error.Err.Error())
-
-	default:
-		return fmt.Errorf("feishu: unsupported agent event kind %d", ev.Kind)
 	}
-}
 
-// heartbeatAll calls Heartbeat on every active receipt. Best-effort:
-// any per-receipt error is logged but does not abort the pump.
-func (r *Renderer) heartbeatAll(ctx context.Context) {
 	r.mu.Lock()
-	receipts := make([]*MessageReceipt, 0, len(r.receipts))
-	for _, rec := range r.receipts {
-		receipts = append(receipts, rec)
-	}
+	receipt := r.receipts[chatID]
 	r.mu.Unlock()
-
-	for _, rec := range receipts {
-		_ = rec.Heartbeat(ctx)
-	}
-}
-
-// completeAll marks every active receipt as Completed. Receipts are
-// removed from the map after completion to keep memory bounded —
-// a chat with thousands of messages shouldn't accumulate thousands
-// of completed receipts.
-func (r *Renderer) completeAll(ctx context.Context) {
-	r.mu.Lock()
-	receipts := make([]*MessageReceipt, 0, len(r.receipts))
-	for _, rec := range r.receipts {
-		receipts = append(receipts, rec)
-	}
-	r.receipts = make(map[string]*MessageReceipt) // clear
-	r.mu.Unlock()
-
-	for _, rec := range receipts {
-		_ = rec.SetCompleted(ctx)
-	}
-}
-
-// MarkExecuting transitions a specific receipt (by userMsgID) from
-// Waiting to Executing. Called when a user message is actually
-// dispatched (either idle bypass or buffer flush).
-func (r *Renderer) MarkExecuting(ctx context.Context, userMsgID string) error {
-	if userMsgID == "" {
+	if receipt == nil {
+		// No active receipt for this chat — nothing to append to.
+		// Common during boot or after a chat was force-closed.
 		return nil
 	}
-	r.mu.Lock()
-	rec, ok := r.receipts[userMsgID]
-	r.mu.Unlock()
-	if !ok {
-		return nil // unknown receipt — no-op
-	}
-	return rec.SetExecuting(ctx)
+	return receipt.Append(ctx, ev)
 }
 
-// PendingReceipts returns the count of receipts still being tracked
-// (for /status).
-func (r *Renderer) PendingReceipts() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.receipts)
-}
-
-// heartbeatAllTimeout is the per-receipt Heartbeat context timeout.
-// Short — heartbeat is non-critical, must not block the pump.
-const heartbeatAllTimeout = 2 * time.Second
-
+// renderPermission emits the F-25 interactive permission card and
+// stores the resulting message ID on the receipt so the user's
+// click is routed back to the right session. The rolling log is
+// not used here — the card is its own message.
 func (r *Renderer) renderPermission(ctx context.Context, chatID string, req *agent.PermissionRequest) error {
+	if req == nil {
+		return errors.New("feishu: nil permission event")
+	}
 	content, err := permissionCard(req)
 	if err != nil {
 		return err
 	}
-	_, err = r.adapter.sendContent(ctx, chatID, interactiveMessageType, content)
-	return err
+	if _, err := r.adapter.sendContent(ctx, chatID, interactiveMessageType, content); err != nil {
+		return err
+	}
+	return nil
 }
 
-// permissionCard returns the v1 interactive-card JSON accepted by the Feishu
-// IM API. Button callback routing is intentionally left to the Gateway in a
-// later milestone; the card still carries the selected option in its value.
+// permissionCard returns the v1 interactive-card JSON accepted by
+// the Feishu IM API. Button callback routing is intentionally left
+// to the Gateway in a follow-up — for v0.2 the card carries the
+// selected option in its value, which the callback handler will
+// surface back to the agent via SendPermission.
 func permissionCard(req *agent.PermissionRequest) (string, error) {
-	tool := "unknown tool"
-	action := "The agent requested permission to continue."
-	options := []string{"reject"}
-	if req != nil {
-		if req.Tool != "" {
-			tool = req.Tool
-		}
-		if req.Action != "" {
-			action = req.Action
-		}
-		if len(req.Options) > 0 {
-			options = append([]string(nil), req.Options...)
-		}
+	if req == nil {
+		return "", errors.New("permission card: nil request")
 	}
-
-	buttons := make([]map[string]any, 0, len(options))
-	for i, option := range options {
-		buttonType := "default"
-		if i == 0 {
-			buttonType = "primary"
-		}
-		buttons = append(buttons, map[string]any{
-			"tag":  "button",
-			"type": buttonType,
-			"text": map[string]string{
-				"tag":     "plain_text",
-				"content": option,
-			},
-			"value": map[string]string{"option": option},
+	if req.Tool == "" && req.Action == "" {
+		return "", errors.New("permission card: missing tool / action")
+	}
+	options := req.Options
+	if len(options) == 0 {
+		options = []string{"Allow", "Deny"}
+	}
+	// Build the v1 interactive card: a header line, the
+	// permission question as the body, and one button per option.
+	// Button value carries both the tool name and the option so the
+	// click handler can route the response back to the right
+	// permission request.
+	headerJSON, _ := json.Marshal(map[string]any{
+		"title":    map[string]any{"tag": "plain_text", "content": "Permission needed"},
+		"template": "blue",
+	})
+	body := req.Tool
+	if req.Action != "" {
+		body = req.Tool + " — " + req.Action
+	}
+	elements := []map[string]any{
+		{
+			"tag":  "div",
+			"text": map[string]any{"tag": "lark_md", "content": body},
+		},
+	}
+	actions := make([]map[string]any, 0, len(options))
+	for _, opt := range options {
+		v, _ := json.Marshal(map[string]string{
+			"tool":   req.Tool,
+			"action": req.Action,
+			"option": opt,
+		})
+		actions = append(actions, map[string]any{
+			"tag":   "button",
+			"text":  map[string]any{"tag": "plain_text", "content": opt},
+			"type":  "primary",
+			"value": map[string]any{"key": string(v)},
 		})
 	}
-
+	elements = append(elements, map[string]any{"tag": "action", "actions": actions})
 	card := map[string]any{
-		"config": map[string]any{"wide_screen_mode": true},
-		"header": map[string]any{
-			"template": "orange",
-			"title": map[string]string{
-				"tag":     "plain_text",
-				"content": "Permission required",
-			},
-		},
-		"elements": []any{
-			map[string]any{
-				"tag":     "markdown",
-				"content": fmt.Sprintf("**%s**\n\n%s", tool, action),
-			},
-			map[string]any{
-				"tag":     "action",
-				"actions": buttons,
-			},
-		},
+		"config":   map[string]any{"wide_screen_mode": true},
+		"header":   json.RawMessage(headerJSON),
+		"elements": elements,
 	}
 	b, err := json.Marshal(card)
 	if err != nil {
+		return "", fmt.Errorf("permission card: marshal: %w", err)
+	}
+	// Feishu's "interactive" message type wraps the card payload
+	// under a "card" key in the content envelope.
+	envelope := map[string]any{"card": json.RawMessage(b)}
+	eb, err := json.Marshal(envelope)
+	if err != nil {
 		return "", err
 	}
-	return string(b), nil
+	return string(eb), nil
 }

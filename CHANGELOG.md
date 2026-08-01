@@ -39,6 +39,25 @@ as closely as a pre-1.0 project can.
   Removing the filter restores ↑/↓ navigation. The earlier
   TestFilterREPLInput_BlocksControlChars is removed with the
   filter.
+- Single rolling-log receipt (F-25 §6 v0.3): every user message
+  gets exactly ONE reply in chat that grows over the agent's
+  lifetime. The reply starts as "⏳ 等待中", then appends every
+  event (💭 thinking, 🔧 tool call, ✅ tool done, 💬 final reply)
+  in order. When the message exceeds ~3.5 KiB, oldest entries are
+  dropped from the front (FIFO) and a "…(前 N 条已省略)" marker is
+  prepended. The reaction emoji (⏳ / 🔄 / ✅) on the user message
+  is unchanged — the lifecycle signal stays at F-25's swap-on-
+  state-change semantics, the reply message is the work log.
+  EventText no longer triggers a separate Feishu message; the
+  Renderer forwards every event into the receipt's `Append`,
+  which updates the same reply message in place via UpdateMessage.
+  Claudecode's stream-json now surfaces thinking blocks as
+  EventText with a "[思考] " prefix so the user can see what the
+  agent is doing; the Renderer renders thinking as 💭 and final
+  replies as 💬 on the same prefix. EventDone / EventError
+  transition the receipt to terminal state. `MessageReceipt.bot`
+  is now an unexported `receiptBot` interface so unit tests can
+  drive the receipt lifecycle without a real lark client.
 - `nightme version` subcommand: REPL-friendly sibling of `--version`
   (Cobra only registers `--version` as a flag, not a verb).
 - Cold-start fallback: `nightme run` and `nightme agents` now seed

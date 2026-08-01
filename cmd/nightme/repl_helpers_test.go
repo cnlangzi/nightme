@@ -8,26 +8,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// TestNightmeDataDir_CreatesDir verifies the history directory is
-// created (mode 0700) on demand and lives under ~/.local/share/nightme.
-func TestNightmeDataDir_CreatesDir(t *testing.T) {
-	// Point HOME at a tempdir so we do not touch the user's real
-	// ~/.local/share. UserHomeDir() honors $HOME on unix.
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-
-	dir, err := nightmeDataDir()
-	if err != nil {
-		t.Fatalf("nightmeDataDir: %v", err)
-	}
-	if !strings.HasSuffix(dir, "/.local/share/nightme") {
-		t.Errorf("dir = %q, want suffix /.local/share/nightme", dir)
-	}
-	// Second call should also succeed (idempotent MkdirAll).
-	if _, err := nightmeDataDir(); err != nil {
-		t.Errorf("second nightmeDataDir: %v", err)
-	}
-}
+// TestNightmeDataDir_Obsoleted was removed when the REPL switched to
+// in-memory history — the helper that created ~/.local/share/nightme
+// is no longer needed. History now lives only in the readline ring
+// buffer and is discarded when the session ends (per Devin:
+// "history in memory is enough").
 
 // TestFilterREPLInput_BlocksControlChars guards the rune filter that
 // readline applies to every input char. Printable runes must pass

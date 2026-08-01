@@ -8,8 +8,7 @@
 //
 // Design notes (per the doc-only v0.2 spec we sketched with Devin):
 //   - Production uses chzyer/readline for line editing and history
-//     (↑/↓ navigate, persistent across sessions in
-//     ~/.local/share/nightme/repl_history).
+//     (↑/↓ navigate, in-memory only — no on-disk persistence).
 //   - Tests use a scanner-based path (runREPLWith) that injects an
 //     io.Reader so the existing 9 unit tests stay simple and
 //     independent of TTY.
@@ -24,8 +23,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/chzyer/readline"
@@ -68,9 +65,9 @@ func runREPL(root *cobra.Command, logger *slog.Logger) error {
 }
 
 // runREPLInteractive drives the REPL with chzyer/readline so the user
-// gets ↑/↓ history navigation, in-line editing, and history
-// persisted across sessions. History is loaded from and saved to
-// ~/.local/share/nightme/repl_history.
+// gets ↑/↓ history navigation, in-line editing, and Ctrl-C handling.
+// History is held in memory only — no on-disk persistence (per
+// Devin's explicit ask: "history in memory is enough").
 //
 // Errors from readline (other than user-initiated EOF / interrupt)
 // bubble up; the caller (Execute) prints them and exits with the
@@ -80,20 +77,14 @@ func runREPLInteractive(root *cobra.Command, logger *slog.Logger) error {
 		logger.Info("repl started")
 	}
 
-	cfg, err := readlineConfig()
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:               "nightme> ",
+		InterruptPrompt:      "^C",
+		HistorySearchFold:    true,
+		FuncFilterInputRune:  filterREPLInput,
+	})
 	if err != nil {
-		return err
-	}
-
-	rl, err := readline.NewEx(cfg)
-	if err != nil {
-		// History file may be unwritable (e.g. read-only home).
-		// Fall back to an in-memory readline so the user can still
-		// edit lines and navigate within the session.
-		rl, err = readline.New("nightme> ")
-		if err != nil {
-			return fmt.Errorf("readline init: %w", err)
-		}
+		return fmt.Errorf("readline init: %w", err)
 	}
 	defer func() { _ = rl.Close() }()
 
@@ -124,40 +115,6 @@ func runREPLInteractive(root *cobra.Command, logger *slog.Logger) error {
 			return nil
 		}
 	}
-}
-
-// readlineConfig builds the readline.Config. History path lives in
-// the same directory the logging package uses for its default log
-// file. We mkdir the parent (0700) so the file can be created even
-// on a fresh install.
-func readlineConfig() (*readline.Config, error) {
-	historyPath := ""
-	if dir, derr := nightmeDataDir(); derr == nil {
-		historyPath = filepath.Join(dir, "repl_history")
-	}
-	return &readline.Config{
-		Prompt:                "nightme> ",
-		HistoryFile:           historyPath,
-		DisableAutoSaveHistory: false,
-		InterruptPrompt:       "^C",
-		HistorySearchFold:     true,
-		FuncFilterInputRune:   filterREPLInput,
-	}, nil
-}
-
-// nightmeDataDir returns ~/.local/share/nightme, creating it 0700
-// if missing. Falls back to the empty string on UserHomeDir failure;
-// readline handles the empty path gracefully (no persistence).
-func nightmeDataDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	dir := filepath.Join(home, ".local", "share", "nightme")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
-	return dir, nil
 }
 
 // filterREPLInput blocks control characters that have no business

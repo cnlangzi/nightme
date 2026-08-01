@@ -25,12 +25,13 @@ as closely as a pre-1.0 project can.
   leave the shell; an unknown command surfaces an inline error and
   the loop continues.
 - REPL history: production path uses `chzyer/readline` so ↑/↓
-  navigate previously-typed commands, with history persisted to
-  `~/.local/share/nightme/repl_history` across sessions. Ctrl-C at
-  the prompt cancels the current line (no longer exits the shell).
-  Tests stay on the scanner-based `runREPLWith` path so they don't
-  need a TTY; the readline and scanner paths share
-  `dispatchREPLLine`. New dep: `github.com/chzyer/readline`.
+  navigate previously-typed commands. History is held in memory
+  only (per Devin: "in memory is enough") — no on-disk persistence,
+  no history file. Ctrl-C at the prompt cancels the current line
+  (no longer exits the shell). Tests stay on the scanner-based
+  `runREPLWith` path so they don't need a TTY; the readline and
+  scanner paths share `dispatchREPLLine`. New dep:
+  `github.com/chzyer/readline`.
 - `nightme version` subcommand: REPL-friendly sibling of `--version`
   (Cobra only registers `--version` as a flag, not a verb).
 - Cold-start fallback: `nightme run` and `nightme agents` now seed

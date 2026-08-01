@@ -453,17 +453,47 @@ func (r *MessageReceipt) formatLocked() string {
 	return b.String()
 }
 
-// renderLocked pushes the current state emoji (reaction) and the
-// rendered log (reply text) to Feishu. Caller must hold r.mu.
+// formatEntry produces the body for a single-entry "reply" message.
+// Caller must hold r.mu. Used by the per-event update strategy
+// where each agent event ships as its own message rather than as
+// an in-place update of a rolling log card. The state header is
+// omitted because each event carries its own context; the chat
+// surface is the sequence of messages, not a single card.
+func (r *MessageReceipt) formatEntry(e LogEntry) string {
+	if e.Text == "" && e.Icon == "" {
+		return ""
+	}
+	var b strings.Builder
+	if e.Icon != "" {
+		b.WriteString(e.Icon)
+		b.WriteByte(' ')
+	}
+	b.WriteString(e.Text)
+	return b.String()
+}
+
+// renderLocked pushes the current state emoji (reaction) and the latest
+// entry to Feishu. Caller must hold r.mu.
 //
 // Reaction strategy: SWAP, never accumulate. The previous reaction
 // (if any) is deleted and the new state emoji is added in its place.
 // Feishu has no UpdateReaction API, so the swap is Delete + Create.
 // The user always sees exactly ONE reaction emoji per user message.
 //
-// Reply text strategy: edit-in-place via im.message.update. Falls
-// back to a fresh message if update fails (e.g. message older than
-// 48h, or update quota exhausted).
+// Reply text strategy: PER-EVENT FRESH MESSAGE. Each agent event
+// ships as its own im.message.create rather than as an in-place
+// update of a rolling-log card. The pre-refactor design collapsed
+// every event into a single message that was updated N times; the
+// new design emits N messages so the chat surface mirrors the
+// event stream one-for-one. The initial ⏳ card (posted by
+// SendUserMessage) is preserved as the receipt's "I'm thinking"
+// indicator; events after that point arrive as new messages.
+//
+// The receipt's rolling-log buffer (entries / evicted) is kept for
+// audit trails and future replay support but is no longer
+// rendered into a single card body. r.replyMsgID is updated to the
+// latest shipped message so the receipt can still address its
+// surface if a future feature needs to.
 func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	// 1. Swap reaction if the state emoji changed.
 	emoji := r.state.Emoji()
@@ -484,22 +514,25 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 		}
 	}
 
-	// 2. Update the reply text in place.
-	text := r.formatLocked()
-	if r.replyMsgID != "" {
-		err := r.bot.UpdateMessage(ctx, r.replyMsgID, text)
-		if err == nil {
-			return nil
-		}
-		r.logger.Warn("feishu receipt: update reply failed, posting fresh",
-			"err", err, "state", r.state)
+	// 2. Send the latest entry as a fresh message. We emit one
+	// message per agent event rather than updating an existing
+	// card in place — the chat surface is now the event stream,
+	// not a single rolling-log card. Skip empty entries (header
+	// transitions without text, etc.) so we don't post empty
+	// messages.
+	if len(r.entries) == 0 {
+		return nil
 	}
-
-	msgID, sendErr := r.bot.SendMessageText(ctx, r.chatID, text)
-	if sendErr != nil {
-		r.logger.Warn("feishu receipt: fresh reply failed",
-			"err", sendErr, "state", r.state)
-		return sendErr
+	latest := r.entries[len(r.entries)-1]
+	text := r.formatEntry(latest)
+	if text == "" {
+		return nil
+	}
+	msgID, err := r.bot.SendMessageText(ctx, r.chatID, text)
+	if err != nil {
+		r.logger.Warn("feishu receipt: ship entry failed",
+			"err", err, "state", r.state, "icon", latest.Icon, "text", truncateForLog(latest.Text, 80))
+		return fmt.Errorf("feishu receipt: ship entry: %w", err)
 	}
 	r.replyMsgID = msgID
 	return nil

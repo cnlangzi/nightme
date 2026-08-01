@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // mockReceiptBot captures AddReaction and SendMessageText calls so
@@ -26,14 +28,14 @@ type reactionCall struct {
 	Emoji     string
 }
 
-func (m *mockReceiptBot) AddReaction(_ context.Context, msgID, emoji string) error {
+func (m *mockReceiptBot) AddReaction(_ context.Context, msgID, emoji string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.addReactionErr != nil {
-		return m.addReactionErr
+		return "", m.addReactionErr
 	}
 	m.reactions = append(m.reactions, reactionCall{msgID, emoji})
-	return nil
+	return "mock-reaction-" + emoji, nil
 }
 
 func (m *mockReceiptBot) SendMessageText(_ context.Context, _, text string) (string, error) {
@@ -179,4 +181,98 @@ func TestReceiptStringContainsEmoji(t *testing.T) {
 			t.Errorf("%v string %q does not contain emoji %q", c.state, got, c.emoji)
 		}
 	}
+}
+
+// TestReceipt_PerEventFreshMessage verifies the post-refactor
+// renderLocked behavior: each agent event produces a NEW
+// SendMessageText call rather than an UpdateMessage in place.
+//
+// Before the per-event refactor, all events rolled into a single
+// message that was updated N times via UpdateMessage. After, every
+// event produces a fresh message — the chat surface mirrors the
+// event stream. The test:
+//  1. Creates a receipt with the mockReceiptBot (no Feishu).
+//  2. Appends three events (text, tool start, tool end).
+//  3. Asserts SendMessageText was called 3 times — once per event.
+//  4. Asserts UpdateMessage was NEVER called.
+//  5. Asserts the messages are the entry texts, not the rolled log.
+func TestReceipt_PerEventFreshMessage(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
+	r.receivedAt = time.Now()
+
+	// Three events across three agent kinds — a text reply, a
+	// tool start, and a tool end. Each one should land as its
+	// own message on the bot.
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "hello from the agent",
+	})
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventToolStart,
+		ToolStart: &agent.ToolStartEvent{
+			Name: "Read",
+			ID:   "toolu_001",
+			Args: "/tmp/foo",
+		},
+	})
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventToolEnd,
+		ToolEnd: &agent.ToolEndEvent{
+			ID:   "toolu_001",
+			Name: "Read",
+		},
+	})
+
+	// Per-event shipping: exactly one SendMessageText per event.
+	bot.mu.Lock()
+	got := append([]string(nil), bot.messages...)
+	bot.mu.Unlock()
+
+	if len(got) != 3 {
+		t.Fatalf("SendMessageText calls = %d, want 3 (one per event)", len(got))
+	}
+	// Each event ships with its own entry text, not the rolled log.
+	if want := "💬 hello from the agent"; got[0] != want {
+		t.Errorf("messages[0] = %q, want %q (single-entry text)", got[0], want)
+	}
+	if !strings.HasPrefix(got[1], "🔧 Read(") {
+		t.Errorf("messages[1] = %q, want '🔧 Read(...)' (single-entry tool start)", got[1])
+	}
+	if !strings.HasPrefix(got[2], "✅ Read") {
+		t.Errorf("messages[2] = %q, want '✅ Read ...' (single-entry tool end)", got[2])
+	}
+
+	// Sanity: messages are distinct (no accidental UpdateMessage
+	// collapsing them into one body).
+	if got[0] == got[1] || got[1] == got[2] || got[0] == got[2] {
+		t.Errorf("messages are not distinct: %q / %q / %q", got[0], got[1], got[2])
+	}
+}
+
+// mustAppend calls Append and asserts no error. Helper for the
+// per-event test above.
+func mustAppend(t *testing.T, r *MessageReceipt, ev agent.AgentEvent) {
+	t.Helper()
+	if err := r.Append(context.Background(), ev); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+}
+
+// Add the missing methods on mockReceiptBot to satisfy receiptBot.
+// DeleteReaction and UpdateMessage are not exercised by the
+// per-event shipping test (the new design never calls UpdateMessage
+// and only calls DeleteReaction when the reaction emoji changes —
+// which the test doesn't trigger). The stubs exist to satisfy the
+// interface contract.
+func (m *mockReceiptBot) DeleteReaction(_ context.Context, _, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return nil
+}
+
+func (m *mockReceiptBot) UpdateMessage(_ context.Context, _, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return nil
 }

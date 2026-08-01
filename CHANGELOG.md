@@ -6,6 +6,18 @@ as closely as a pre-1.0 project can.
 
 ## [Unreleased]
 
+### Added
+- `nightme agents [--json]`: list the registered agent set the daemon
+  would dispatch `/run` to, with name / command / args columns.
+  Backed by the same `buildRunAgentRegistry` path used by `nightme test`
+  and `nightme run`, so the names here are exactly what `/run <name>`
+  accepts.
+- `/agents` gateway slash command: same data, formatted for IM
+  (bullet list per agent + a `/run` usage hint).
+- `Agent` interface gains `Command()` and `Args()` getters so the
+  registry exposes its spawn recipe without callers having to type-
+  switch on the concrete agent packages.
+
 ## [0.2.0] - 2026-08-01
 
 Second public release. Closes out the F-21 (JSON-IO + ACP/SDK/PTY per-agent bridges), F-23 (heartbeat), F-24 (Claude Code bridge), and F-25 (input buffer + dual-track receipts) milestones and ships a deterministic streaming status surface (event-driven, no clock-based guessing).

@@ -57,7 +57,7 @@ func (e errorResponder) Reply(context.Context, string, string) error { return e.
 func ptyAgentRegistry(t *testing.T) *agent.Registry {
 	t.Helper()
 	reg := agent.New()
-	a := ptyagent.New("claude", "/bin/echo")
+	a := ptyagent.New("claude", "/bin/echo", nil, nil)
 	a.Cols = 80
 	a.Rows = 24
 	reg.Register(a)
@@ -548,9 +548,11 @@ func TestRegistry_RepeatHandleDoesNotFail(t *testing.T) {
 // /run handler can surface a clear "binary not found" message.
 type detectorFakeAgent struct{}
 
-func (d *detectorFakeAgent) Name() string     { return "claude" }
-func (d *detectorFakeAgent) Mode() agent.Mode { return agent.ModePTY }
-func (d *detectorFakeAgent) Detect() error    { return errors.New("binary not found") }
+func (d *detectorFakeAgent) Name() string        { return "claude" }
+func (d *detectorFakeAgent) Mode() agent.Mode    { return agent.ModePTY }
+func (d *detectorFakeAgent) Command() string     { return "claude" }
+func (d *detectorFakeAgent) Args() []string      { return nil }
+func (d *detectorFakeAgent) Detect() error       { return errors.New("binary not found") }
 func (d *detectorFakeAgent) Start(context.Context, agent.StartConfig) (agent.AgentSession, error) {
 	return nil, errors.New("should not reach Start when Detect fails")
 }

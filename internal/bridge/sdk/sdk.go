@@ -40,6 +40,15 @@ func (a *Agent) Name() string { return a.name }
 
 func (a *Agent) Mode() agent.Mode { return agent.ModeSDK }
 
+// Command returns the configured CLI binary. Surfaced by `nightme agents`.
+func (a *Agent) Command() string { return a.command }
+
+// Args returns a defensive copy of the constructor args. Callers may
+// not mutate the returned slice.
+func (a *Agent) Args() []string {
+	return append([]string(nil), a.args...)
+}
+
 // Detect verifies that the configured CLI is present. The SDK itself is not a
 // Go package, but checking the CLI gives the user a useful configuration error
 // before Start returns the SDK availability sentinel.

@@ -32,6 +32,16 @@ func (a *Agent) Name() string { return a.name }
 
 func (a *Agent) Mode() agent.Mode { return agent.ModeACP }
 
+// Command returns the CLI binary the agent wraps. Surfaced by
+// `nightme agents` so users can see what /run would spawn.
+func (a *Agent) Command() string { return a.command }
+
+// Args returns a defensive copy of the spawn recipe's default argv.
+// Callers may not mutate the returned slice.
+func (a *Agent) Args() []string {
+	return append([]string(nil), a.args...)
+}
+
 func (a *Agent) Detect() error {
 	_, err := exec.LookPath(a.command)
 	return err

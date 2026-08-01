@@ -36,6 +36,16 @@ func (a *Agent) Name() string { return a.name }
 // Mode reports the JSON-IO mode (introduced for v0.2).
 func (a *Agent) Mode() agent.Mode { return agent.ModeJSONIO }
 
+// Command returns the configured CLI binary (typically "claude").
+// Surfaced by `nightme agents` so users can see what /run would spawn.
+func (a *Agent) Command() string { return a.command }
+
+// Args returns a defensive copy of the constructor args. Callers may
+// not mutate the returned slice.
+func (a *Agent) Args() []string {
+	return append([]string(nil), a.args...)
+}
+
 // Detect verifies the `claude` binary resolves on PATH. Call before Start
 // to surface a friendly "claude not installed" error rather than a
 // confusing exec failure.

@@ -162,7 +162,7 @@ func buildAgentRegistry(cfg *config.Config, requested string) *agent.Registry {
 		// confusing exec error.
 		if requested != "" {
 			if _, statErr := os.Stat(requested); statErr == nil {
-				reg.Register(ptyagent.New(requested, filepath.Base(requested)))
+				reg.Register(ptyagent.New(requested, filepath.Base(requested), nil, nil))
 			}
 		}
 	}
@@ -182,10 +182,7 @@ func configuredAgent(name string, entry config.AgentEntry) agent.Agent {
 		}
 		return acpagent.New(name, entry.Command, args)
 	default:
-		a := ptyagent.New(name, entry.Command)
-		a.Args = args
-		a.Env = configuredAgentEnv(entry.Env)
-		return a
+		return ptyagent.New(name, entry.Command, args, configuredAgentEnv(entry.Env))
 	}
 }
 

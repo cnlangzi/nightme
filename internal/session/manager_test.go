@@ -25,6 +25,8 @@ type fakeAgent struct {
 
 func (f *fakeAgent) Name() string     { return f.name }
 func (f *fakeAgent) Mode() agent.Mode { return f.mode }
+func (f *fakeAgent) Command() string  { return "" }
+func (f *fakeAgent) Args() []string   { return nil }
 func (f *fakeAgent) Detect() error {
 	if f.detectF != nil {
 		return f.detectF()

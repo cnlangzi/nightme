@@ -57,6 +57,11 @@ func RegisterDefaultCommands(gw Gateway, mgr session.Manager, agents *agent.Regi
 		Description: "Show this help",
 		Handler:     hc.help,
 	})
+	gw.Register(Command{
+		Name:        "agents",
+		Description: "List registered agents",
+		Handler:     hc.listAgents,
+	})
 }
 
 // cwd handles `/cwd <path>`. It accepts the path, validates it is
@@ -172,6 +177,59 @@ func (h *handlerContext) kill(ctx context.Context, msg *Message, _ []string) (*C
 		return nil, err
 	}
 	return &CommandResult{Consumed: true, Reply: "session killed"}, nil
+}
+
+// agents handles `/agents`. It renders the registered agent set as
+// a short IM-friendly list (one bullet per agent) so the user can
+// answer "/run with what name?" without leaving the chat.
+//
+// Format:
+//
+//	Registered agents:
+//	• claude    — claude
+//	• codex     — codex-acp
+//	• opencode  — opencode acp
+//
+//	Use /run [name]. Omit name to use the configured default.
+func (h *handlerContext) listAgents(ctx context.Context, msg *Message, _ []string) (*CommandResult, error) {
+	text := renderAgents(h.agents)
+	if err := h.trySendReply(ctx, msg.ChatID, text); err != nil {
+		return nil, err
+	}
+	return &CommandResult{Consumed: true, Reply: text}, nil
+}
+
+// renderAgents builds the IM-friendly agent list. Returns the empty
+// message when the registry is nil (defensive — tests sometimes
+// construct handlerContext without a registry).
+func renderAgents(reg *agent.Registry) string {
+	if reg == nil {
+		return "no agents registered"
+	}
+	agents := reg.List()
+	if len(agents) == 0 {
+		return "no agents registered"
+	}
+	var b strings.Builder
+	b.WriteString("Registered agents:\n")
+	for _, a := range agents {
+		if a == nil {
+			continue
+		}
+		name := a.Name()
+		cmd := a.Command()
+		args := a.Args()
+		fmt.Fprintf(&b, "\u2022 %s", name)
+		if cmd != "" {
+			fmt.Fprintf(&b, " \u2014 %s", cmd)
+		}
+		if len(args) > 0 {
+			fmt.Fprintf(&b, " %s", strings.Join(args, " "))
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("\nUse /run [name]. Omit name to use the configured default.")
+	return b.String()
 }
 
 // help handles `/help`. It renders the registered commands.

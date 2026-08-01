@@ -219,6 +219,16 @@ type Agent interface {
 	// Mode tells the Bridge which backend to instantiate.
 	Mode() Mode
 
+	// Command is the spawn recipe's executable: the CLI binary name
+	// (resolved via PATH at Start time) or an absolute path. Surfaced
+	// by `nightme agents` so users can see what /run would spawn.
+	Command() string
+
+	// Args returns a defensive copy of the spawn recipe's default
+	// argv (after the binary). Callers may not mutate the returned
+	// slice; per-session overrides arrive separately via StartConfig.
+	Args() []string
+
 	// Detect verifies the agent is runnable (binary on PATH, SDK
 	// available, etc.). Called before Start; an error aborts session
 	// creation with a clear "X not found" message to the user.

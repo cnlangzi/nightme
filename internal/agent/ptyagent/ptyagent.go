@@ -22,9 +22,9 @@ import (
 // calling Start.
 type Agent struct {
 	name    string
-	Command string
-	Args    []string
-	Env     []string
+	command string
+	args    []string
+	env     []string
 
 	// Cols and Rows set the initial PTY size. Zero values fall back
 	// to 80x24, matching config.SessionConfig defaults.
@@ -33,9 +33,19 @@ type Agent struct {
 }
 
 // New constructs an Agent. name is the registry key, command is the
-// CLI binary (resolved via PATH at Start time).
-func New(name, command string) *Agent {
-	return &Agent{name: name, Command: command}
+// CLI binary (resolved via PATH at Start time). args are appended
+// after the binary at Start time; env entries are KEY=VALUE strings
+// merged into the child environment.
+//
+// Both args and env are defensively copied; callers may mutate their
+// input slices after the call returns.
+func New(name, command string, args, env []string) *Agent {
+	return &Agent{
+		name:    name,
+		command: command,
+		args:    append([]string(nil), args...),
+		env:     append([]string(nil), env...),
+	}
 }
 
 // Name returns the agent identifier used in the registry and config.
@@ -45,11 +55,21 @@ func (a *Agent) Name() string { return a.name }
 // backend.
 func (a *Agent) Mode() agent.Mode { return agent.ModePTY }
 
+// Command returns the CLI binary the agent wraps. Surfaced by
+// `nightme agents` so users can see what /run would spawn.
+func (a *Agent) Command() string { return a.command }
+
+// Args returns a defensive copy of the spawn recipe's default argv.
+// Callers may not mutate the returned slice.
+func (a *Agent) Args() []string {
+	return append([]string(nil), a.args...)
+}
+
 // Detect verifies the underlying CLI binary is on PATH. Callers
 // should invoke this before Start to produce a friendly "X not found"
 // error rather than letting Start fail deep inside the PTY layer.
 func (a *Agent) Detect() error {
-	_, err := exec.LookPath(a.Command)
+	_, err := exec.LookPath(a.command)
 	return err
 }
 
@@ -71,11 +91,11 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSe
 	}
 
 	// arg order: agent defaults, then user overrides (user wins).
-	args := append([]string(nil), a.Args...)
+	args := append([]string(nil), a.args...)
 	args = append(args, cfg.Args...)
 
 	// env order: agent defaults, then per-session overrides (cfg wins).
-	env := append([]string(nil), a.Env...)
+	env := append([]string(nil), a.env...)
 	env = append(env, cfg.Env...)
 
 	// ctx is currently unused — Start blocks synchronously. The
@@ -83,7 +103,7 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSe
 	// propagates to the child process via gopty.CmdContext.
 	_ = ctx
 
-	bridge, err := pty.New(cfg.Workspace, a.Command, args, env, cols, rows)
+	bridge, err := pty.New(cfg.Workspace, a.command, args, env, cols, rows)
 	if err != nil {
 		return nil, err
 	}

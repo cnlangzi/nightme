@@ -13,7 +13,7 @@ import (
 // TestAgentName verifies the Name field is surfaced through the
 // interface.
 func TestAgentName(t *testing.T) {
-	a := New("claude", "claude")
+	a := New("claude", "claude", nil, nil)
 	if got := a.Name(); got != "claude" {
 		t.Fatalf("Name() = %q, want claude", got)
 	}
@@ -22,7 +22,7 @@ func TestAgentName(t *testing.T) {
 // TestAgentMode verifies PTY agents report ModePTY so the
 // SessionManager routes them through the PTY backend.
 func TestAgentMode(t *testing.T) {
-	a := New("claude", "claude")
+	a := New("claude", "claude", nil, nil)
 	if got := a.Mode(); got != agent.ModePTY {
 		t.Fatalf("Mode() = %s, want pty", got)
 	}
@@ -36,12 +36,12 @@ func TestAgentDetect(t *testing.T) {
 		t.Skip("skip unix-only smoke test on windows")
 	}
 
-	a := New("echo", "/bin/echo")
+	a := New("echo", "/bin/echo", nil, nil)
 	if err := a.Detect(); err != nil {
 		t.Fatalf("Detect(/bin/echo) returned error: %v", err)
 	}
 
-	a = New("definitely-not-installed-xyz", "/nope/binary")
+	a = New("definitely-not-installed-xyz", "/nope/binary", nil, nil)
 	if err := a.Detect(); err == nil {
 		t.Fatalf("Detect(invalid) returned nil error, want non-nil")
 	}
@@ -56,7 +56,7 @@ func TestAgentStartEndToEnd(t *testing.T) {
 		t.Skip("skip unix-only smoke test on windows")
 	}
 
-	a := New("echo", "/bin/echo")
+	a := New("echo", "/bin/echo", nil, nil)
 	sess, err := a.Start(context.Background(), agent.StartConfig{
 		Workspace: t.TempDir(),
 		Args:      []string{"hello"},
@@ -101,7 +101,7 @@ func TestAgentStartBadWorkspace(t *testing.T) {
 		t.Skip("skip unix-only smoke test on windows")
 	}
 
-	a := New("echo", "/bin/echo")
+	a := New("echo", "/bin/echo", nil, nil)
 	// /this/path/definitely/does/not/exist is not a valid Cwd; the
 	// underlying PTY spawn must return an error.
 	_, err := a.Start(context.Background(), agent.StartConfig{

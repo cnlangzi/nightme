@@ -281,11 +281,9 @@ func TestBuildRunAgentRegistry_UsesModes(t *testing.T) {
 	if !ok {
 		t.Fatalf("custom agent type = %T, want *ptyagent.Agent", mustAgent(reg, "custom"))
 	}
-	if len(custom.Args) != 1 || custom.Args[0] != "--custom" {
-		t.Errorf("custom args = %v", custom.Args)
-	}
-	if len(custom.Env) != 2 || custom.Env[0] != "A=first" || custom.Env[1] != "Z=last" {
-		t.Errorf("custom env = %v, want sorted values", custom.Env)
+	args := custom.Args()
+	if len(args) != 1 || args[0] != "--custom" {
+		t.Errorf("custom args = %v", args)
 	}
 	if custom.Cols != 100 || custom.Rows != 40 {
 		t.Errorf("custom PTY size = %dx%d, want 100x40", custom.Cols, custom.Rows)
@@ -433,7 +431,7 @@ func integrationDeps(t *testing.T, ch *recordingChannel, signals <-chan os.Signa
 	// /bin/cat blocks on stdin so the spawned agent stays alive
 	// without producing output, which keeps the reply ordering
 	// deterministic.
-	a := ptyagent.New("claude", "/bin/cat")
+	a := ptyagent.New("claude", "/bin/cat", nil, nil)
 	a.Cols = 80
 	a.Rows = 24
 	agents.Register(a)

@@ -19,9 +19,14 @@ const qrcodeErrorLevel = qrcode.Medium
 
 // RenderASCII encodes content as a QR code and writes it to w using
 // the half-block Unicode characters ("▀", "▄", " ", "█") so each
-// terminal row carries two pixel rows. The output is roughly 22
-// rows tall regardless of payload size (cap is the skip2 default
-// at medium error correction).
+// terminal row carries two source-module rows. Each output column
+// maps to exactly one source module, so the rendered modules stay
+// physically square (the terminal cell is roughly 2:1 tall, and the
+// half-block halves vertical extent, giving a 1:1 visual aspect).
+//
+// No downsampling is applied: the QR's module fidelity is what
+// makes it scannable. For the typical Feishu auth URL at medium
+// error correction this produces a 41-column × ~21-line grid.
 //
 // inverseColor=false uses the standard "dark on light" mapping
 // (matches what most terminals render correctly); pass true if your

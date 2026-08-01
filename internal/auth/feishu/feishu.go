@@ -32,9 +32,11 @@ type FeishuAuthOptions struct {
 	// DefaultAddons.
 	Addons *registration.AppAddons
 
-	// AppPreset pre-fills the app's name/avatar on the consent
-	// page; nil means an empty preset (the user types whatever
-	// they want).
+	// AppPreset pre-fills the app's name/description/avatar on the
+	// consent page; nil means use DefaultAppPreset (the nightme
+	// brand default — "NightMe" / "Sleep tight, code all night.").
+	// The user can still edit the fields on the consent page
+	// before submitting; the final values are whatever they enter.
 	AppPreset *registration.AppPreset
 
 	// ExistingAppID set with CreateOnly or as update-mode: asks
@@ -58,14 +60,18 @@ type FeishuAuth struct {
 }
 
 // NewFeishuAuth returns a ready-to-Login Provider. opts.Addons is
-// defaulted to DefaultAddons(); opts.Out falls back to os.Stdout.
+// defaulted to DefaultAddons(); opts.AppPreset is defaulted to
+// DefaultAppPreset(); opts.Out falls back to os.Stdout.
 //
-// AppPreset is left nil when opts.AppPreset is nil. ExistingAppID
-// and CreateOnly pass through unchanged.
+// ExistingAppID and CreateOnly pass through unchanged.
 func NewFeishuAuth(opts FeishuAuthOptions) *FeishuAuth {
 	addons := opts.Addons
 	if addons == nil {
 		addons = DefaultAddons()
+	}
+	preset := opts.AppPreset
+	if preset == nil {
+		preset = DefaultAppPreset()
 	}
 	out := opts.Out
 	if out == nil {
@@ -74,7 +80,7 @@ func NewFeishuAuth(opts FeishuAuthOptions) *FeishuAuth {
 	return &FeishuAuth{
 		opts:   opts,
 		addons: addons,
-		preset: opts.AppPreset,
+		preset: preset,
 		out:    out,
 	}
 }
@@ -100,7 +106,7 @@ func (f *FeishuAuth) Login(ctx context.Context) (*auth.Credentials, error) {
 			f.printQRCode(info)
 		},
 		OnStatusChange: func(info *registration.StatusChangeInfo) {
-			fmt.Fprintf(f.out, "status: %s\n", info.Status)
+			f.printStatus(info)
 		},
 	}
 
@@ -130,6 +136,12 @@ func (f *FeishuAuth) Login(ctx context.Context) (*auth.Credentials, error) {
 
 // printQRCode renders the QR for the user. The QR itself is the
 // thing humans visually compare to a screenshot — get it right.
+//
+// The trailing "Waiting for you to scan…" line tells the user what
+// the next step is. We intentionally do not show it inside the
+// OnStatusChange callback: the SDK calls OnStatusChange on every
+// poll cycle while waiting, so printing there would spam the
+// terminal once a second for ten minutes.
 func (f *FeishuAuth) printQRCode(info *registration.QRCodeInfo) {
 	fmt.Fprintf(f.out, "Scan this QR code with Feishu mobile, or open this URL:\n%s\n(expires in %d seconds)\n\n",
 		info.URL, info.ExpireIn)
@@ -137,6 +149,38 @@ func (f *FeishuAuth) printQRCode(info *registration.QRCodeInfo) {
 	// the user to do, and registration.RegisterApp will still
 	// block on the polling loop.
 	_ = RenderASCII(info.URL, f.out, false)
+	fmt.Fprintln(f.out, "Waiting for you to scan and confirm in Feishu...")
+}
+
+// printStatus translates the SDK's raw status codes into messages a
+// human running a CLI actually cares about. "polling" is suppressed
+// entirely — the "Waiting…" line printed alongside the QR already
+// conveys that, and printing on every poll would spam the terminal.
+func (f *FeishuAuth) printStatus(info *registration.StatusChangeInfo) {
+	switch info.Status {
+	case registration.StatusPolling:
+		// Silent: covered by the "Waiting…" line in printQRCode.
+	case registration.StatusSlowDown:
+		fmt.Fprintln(f.out, "Server asked us to slow polling; backing off...")
+	case registration.StatusDomainSwitched:
+		fmt.Fprintln(f.out, "Switched to Lark international domain.")
+	default:
+		// Unknown status: surface it so a future SDK addition is
+		// visible to the operator instead of silently swallowed.
+		fmt.Fprintf(f.out, "Auth flow status: %s\n", info.Status)
+	}
+}
+
+// DefaultAppPreset returns the brand default pre-fill for the
+// consent page: the app name "NightMe" with the tagline
+// "Sleep tight, code all night.". Callers can override any field
+// at construction time via FeishuAuthOptions.AppPreset; the user
+// can still edit them on the consent page before submitting.
+func DefaultAppPreset() *registration.AppPreset {
+	return &registration.AppPreset{
+		Name: "NightMe",
+		Desc: "Sleep tight, code all night.",
+	}
 }
 
 // DefaultAddons returns the scope + event + callback set nightme

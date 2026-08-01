@@ -93,9 +93,9 @@ func TestReceiptState_String(t *testing.T) {
 
 func TestReceiptState_Emoji(t *testing.T) {
 	cases := map[ReceiptState]string{
-		StateWaiting:   "⏳",
-		StateExecuting: "🔄",
-		StateCompleted: "✅",
+		StateWaiting:   "OK",
+		StateExecuting: "OnIt",
+		StateCompleted: "PARTY",
 	}
 	for s, want := range cases {
 		if got := s.Emoji(); got != want {

@@ -141,6 +141,13 @@ func (f *FeishuAuth) printQRCode(info *registration.QRCodeInfo) {
 
 // DefaultAddons returns the minimum scope + event set nightme needs
 // to send and receive messages. Callers may override at construction.
+//
+// The reaction scope is required for F-25 MessageReceipt (⏳/🔄/✅
+// emoji reactions on the user's incoming message); the reaction
+// *event* subscription is intentionally absent — nightme does not
+// design user-driven reactions as input (see
+// docs/feat/F-25-message-receipt.md for the rationale), so we
+// silently drop im.message.reaction.created_v1 events.
 func DefaultAddons() *registration.AppAddons {
 	preset := false
 	return &registration.AppAddons{
@@ -148,6 +155,7 @@ func DefaultAddons() *registration.AppAddons {
 		Scopes: registration.AppAddonsScopes{
 			Tenant: []string{
 				"im:message:send_as_bot",
+				"im:message.reactions:write_only",
 				"im:message:receive_v1",
 			},
 		},

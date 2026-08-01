@@ -153,8 +153,8 @@ Next: run `nightme run` to start the gateway.
 > **历史**：F-22 v1.0 设计稿（已过时）使用 `channels.feishu.accounts.main.{...}` 嵌套结构。后续根据 Devin 反馈（2026-07-31）改为顶层字段，因为 v0.1 single-account 场景下两种写法等价，且顶层结构更简单、不牵动 Config 其他调用点。
 
 **Manual 模式 fallback**：
-- config 里已有 `appId` / `appSecret` → `nightme auth login` 报错 "already configured, use --force to overwrite"
-- `--force` flag：覆盖现有配置
+- config 里已有 `appId` / `appSecret` → `nightme auth login feishu` **直接覆盖**（rebind 即 login，无 `--force` flag）。这是升级 scope（如新增 `im:message.reactions:write_only`）的标准操作流程。
+- 无需 `--force`，登录动作本身就是强制重新绑定。
 
 ## 4. Edge cases
 
@@ -163,13 +163,14 @@ Next: run `nightme run` to start the gateway.
 | 用户在 10 分钟内没扫码 | context timeout → 报错 "auth timeout" |
 | QR 扫描后飞书显示"权限不足" | 飞书返回 error code → nightme 提示用户检查企业权限 |
 | 凭证写到 config 失败（disk full / permission） | 保留 in-memory credential，提示用户手动复制到 config |
-| config 已有 appId | 报错 "already configured"（除非 `--force`）|
+| config 已有 appId | **直接覆盖**（login 即 rebind），无需 `--force` |
 | 用户选了不存在的 tenant | 飞书返回 error，nightme 透传 |
 | Lark (international) vs Feishu (国内) | 自动检测 `tenant_brand`，用对应 `LarkDomain` 或 `Domain`（SDK 自动处理）|
 | 注册时网络断 | ctx timeout → 报错，下次重试无需重新写 config |
 | 用户想看当前凭证 | `nightme auth status feishu` → 显示当前 app_id（不显示 secret）|
 | 用户想撤销 app | 文档说明需要去飞书开放平台手动撤销 + 删 config |
 | `--update` 模式 | 用 `Options.AppID` 走 update flow，重新授权现有 app |
+| 升级 scope（如新增 reaction scope） | 重新跑 `nightme auth login feishu`，飞书重新创建 app，新凭证覆盖 config |
 
 ## 5. 验收流程（v0.1 演示）
 
@@ -190,7 +191,7 @@ Next: run `nightme run` to start the gateway.
 - `TestFeishuAuth_LoginTimeout` 模拟 context cancel → 验证返回 error
 - `TestFeishuAuth_LoginError` 模拟飞书返回 error code → 验证 error wrapping
 - `TestWriteCredentials_Atomic` 验证 config 写入是原子的 + 0600 权限
-- `TestWriteCredentials_AlreadyExists` 验证不覆盖（除非 --force）
+- `TestAuthLogin_AlwaysRebinds` 验证重新 login 时无条件覆盖现有凭证（无 `--force` flag）
 
 **集成测试**（需要 mock registration.RegisterApp）：
 - `TestAuthCommand_Success` 模拟整个 QR flow → config 写入正确

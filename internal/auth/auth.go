@@ -55,11 +55,6 @@ type Credentials struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// ErrAlreadyConfigured is returned by the CLI when Config already
-// holds credentials for the channel and the caller did not pass
-// --force. Callers should wrap with %s for context.
-var ErrAlreadyConfigured = errors.New("credentials already configured")
-
 // ErrAuthTimeout wraps the upstream context-deadline-exceeded path.
 // Providers return this (or wrap ctx.Err()) when the user took too
 // long to scan / confirm.

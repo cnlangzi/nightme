@@ -127,8 +127,8 @@ func buildTestReceipt(t *testing.T) (*MessageReceipt, *mockReceiptAdapter) {
 }
 
 // TestReactionSwap_WaitingToExecuting verifies the new F-25 swap
-// behaviour: a state transition from Waiting (⏳) to Executing
-// (🔄) deletes the old reaction and creates the new one. The user
+// behaviour: a state transition from Waiting (OK) to Executing
+// (OnIt) deletes the old reaction and creates the new one. The user
 // sees exactly ONE reaction emoji after the swap.
 func TestReactionSwap_WaitingToExecuting(t *testing.T) {
 	mock := &mockReceiptAdapter{}
@@ -143,8 +143,8 @@ func TestReactionSwap_WaitingToExecuting(t *testing.T) {
 
 	// Drive the swap directly using the mock to assert the API
 	// surface without needing a full *Adapter.
-	// 1. Add ⏳ (initial reaction)
-	rid1, err := mock.AddReaction(context.Background(), "user_msg_1", "⏳")
+	// 1. Add OK (initial reaction)
+	rid1, err := mock.AddReaction(context.Background(), "user_msg_1", "OK")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,11 +152,11 @@ func TestReactionSwap_WaitingToExecuting(t *testing.T) {
 		t.Fatal("expected non-empty reaction ID")
 	}
 
-	// 2. State change: delete ⏳ + add 🔄
+	// 2. State change: delete OK + add OnIt
 	if err := mock.DeleteReaction(context.Background(), "user_msg_1", rid1); err != nil {
 		t.Fatal(err)
 	}
-	rid2, err := mock.AddReaction(context.Background(), "user_msg_1", "🔄")
+	rid2, err := mock.AddReaction(context.Background(), "user_msg_1", "OnIt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,8 @@ func TestReactionSwap_WaitingToExecuting(t *testing.T) {
 		t.Error("new reaction ID should differ from old")
 	}
 
-	// 3. Update reply text in place
+	// 3. Update reply text in place (the reply text uses unicode
+	//    ⏳/🔄/✅ — those are textual content, not reaction types).
 	if err := mock.UpdateMessage(context.Background(), "new_msg_id", "🔄 ⏳ 1 · 14:35:20"); err != nil {
 		t.Fatal(err)
 	}
@@ -179,11 +180,11 @@ func TestReactionSwap_WaitingToExecuting(t *testing.T) {
 	if len(mock.updated) != 1 {
 		t.Errorf("updated = %d, want 1", len(mock.updated))
 	}
-	if mock.added[0].Emoji != "⏳" {
-		t.Errorf("first add emoji = %q, want '⏳'", mock.added[0].Emoji)
+	if mock.added[0].Emoji != "OK" {
+		t.Errorf("first add emoji = %q, want 'OK'", mock.added[0].Emoji)
 	}
-	if mock.added[1].Emoji != "🔄" {
-		t.Errorf("second add emoji = %q, want '🔄'", mock.added[1].Emoji)
+	if mock.added[1].Emoji != "OnIt" {
+		t.Errorf("second add emoji = %q, want 'OnIt'", mock.added[1].Emoji)
 	}
 	if mock.deleted[0] != "user_msg_1:"+rid1 {
 		t.Errorf("deleted wrong ID: %q", mock.deleted[0])
@@ -199,8 +200,8 @@ func TestReactionSwap_HeartbeatDoesNotSwapReaction(t *testing.T) {
 		chatID:            "chat1",
 		userMsgID:         "user_msg_1",
 		state:             StateExecuting,
-		currentReaction:   "🔄",
-		currentReactionID: "rid_🔄_1",
+		currentReaction:   "OnIt",
+		currentReactionID: "rid_OnIt_1",
 		replyMsgID:        "reply_msg_id",
 	}
 	// We can't call renderLocked without *Adapter. Instead
@@ -241,7 +242,7 @@ func TestReactionSwap_AddFailureDoesNotPersistID(t *testing.T) {
 	mock := &mockReceiptAdapter{
 		addErr: errors.New("simulated add failure"),
 	}
-	rid, err := mock.AddReaction(context.Background(), "user_msg_1", "✅")
+	rid, err := mock.AddReaction(context.Background(), "user_msg_1", "PARTY")
 	if err == nil {
 		t.Fatal("expected add error")
 	}
@@ -254,7 +255,7 @@ func TestReactionSwap_SameStateIsNoOp(t *testing.T) {
 	// Heartbeat with same state emoji should not call
 	// AddReaction / DeleteReaction. The renderLocked guard
 	// `emoji != r.currentReaction` short-circuits.
-	emoji := "🔄"
+	emoji := "OnIt"
 	currentReaction := emoji
 	if emoji == currentReaction {
 		// Pass — short-circuit. Nothing to assert directly,

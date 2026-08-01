@@ -64,13 +64,18 @@ func RegisterDefaultCommands(gw Gateway, mgr session.Manager, agents *agent.Regi
 	})
 }
 
-// cwd handles `/cwd <path>`. It accepts the path, validates it is
-// an existing directory, then binds the chat to a session with
-// that workspace. An already-running session is rejected so the
-// user explicitly /kill first.
+// cwd handles `/cwd [path]`. With no path it returns the current
+// session's workspace (or a hint when none is bound). With a path
+// it validates the directory and binds the chat to a session with
+// that workspace. An already-running session is rejected on the
+// bind path so the user explicitly /kill first.
 func (h *handlerContext) cwd(ctx context.Context, msg *Message, args []string) (*CommandResult, error) {
 	if len(args) == 0 {
-		return h.reply(ctx, msg.ChatID, "usage: /cwd <path>"), nil
+		existing, err := h.manager.GetByChat(msg.ChatID)
+		if err != nil || existing == nil {
+			return h.reply(ctx, msg.ChatID, "no workspace set. Send /cwd <path> to bind one."), nil
+		}
+		return h.reply(ctx, msg.ChatID, fmt.Sprintf("current workspace: %s", existing.Workspace)), nil
 	}
 	path := args[0]
 	if strings.HasPrefix(path, "~") {

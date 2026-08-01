@@ -2,8 +2,10 @@
 //
 // The flow is:
 //  1. Load config from DefaultPath.
-//  2. If Feishu.AppID is already set, abort with auth.ErrAlreadyConfigured
-//     unless --force is passed.
+//  2. Always re-bind: re-running login unconditionally overwrites
+//     any existing Feishu credentials. The verb IS the rebind — no
+//     --force flag, no "already configured" guard. (See F-22 §4
+//     for the rationale.)
 //  3. Construct a FeishuAuth Provider and call Login with a 10-minute
 //     deadline (see F-22 §4 for the chosen timeout).
 //  4. Persist credentials via config.SaveDefault (atomic write + 0600).
@@ -16,7 +18,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -30,7 +31,6 @@ import (
 // loginCmdFlags captures the few flags the login command accepts.
 type loginCmdFlags struct {
 	timeout time.Duration
-	force   bool
 }
 
 // newAuthLoginCmd returns the parent `nightme auth login` command.
@@ -42,7 +42,9 @@ func newAuthLoginCmd() *cobra.Command {
 		Use:   "login",
 		Short: "Run an interactive channel auth flow",
 		Long: "login runs an interactive authentication flow for the\n" +
-			"named channel. Today only `feishu` is implemented.",
+			"named channel. Today only `feishu` is implemented.\n\n" +
+			"Re-running login unconditionally rebinds the channel —\n" +
+			"the existing app_id / app_secret are overwritten.",
 	}
 	parent.AddCommand(newAuthLoginFeishuCmd(&f))
 	return parent
@@ -58,13 +60,14 @@ func newAuthLoginFeishuCmd(f *loginCmdFlags) *cobra.Command {
 		Long: "login feishu runs Feishu's device-authorization flow:\n" +
 			"a QR code is printed in the terminal for scanning with the\n" +
 			"Feishu mobile app, then credentials are saved to the\n" +
-			"config file (atomic write, chmod 0600).",
+			"config file (atomic write, chmod 0600).\n\n" +
+			"Re-running this command rebinds the channel — any existing\n" +
+			"app_id / app_secret in config.yaml is overwritten.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runAuthLoginFeishu(cmd, f)
 		},
 	}
 	cmd.Flags().DurationVar(&f.timeout, "timeout", 10*time.Minute, "abort the flow after this duration")
-	cmd.Flags().BoolVar(&f.force, "force", false, "overwrite existing Feishu credentials")
 	return cmd
 }
 
@@ -87,10 +90,6 @@ func runAuthLoginWith(cmd *cobra.Command, f *loginCmdFlags, provider auth.Provid
 	cfg, err := config.LoadDefault()
 	if err != nil {
 		return fmt.Errorf("auth login: load config: %w", err)
-	}
-
-	if cfg.Feishu.AppID != "" && !f.force {
-		return fmt.Errorf("auth login: %w (--force to overwrite)", auth.ErrAlreadyConfigured)
 	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), f.timeout)
@@ -132,10 +131,4 @@ func runAuthLoginWith(cmd *cobra.Command, f *loginCmdFlags, provider auth.Provid
 // site in runAuthLoginFeishu without conditional compilation.
 func defaultFeishuProvider(_ *loginCmdFlags) auth.Provider {
 	return feishu.NewFeishuAuth(feishu.FeishuAuthOptions{})
-}
-
-// isAlreadyConfigured returns true if err wraps auth.ErrAlreadyConfigured.
-// Used by tests; uses errors.Is so wrapped errors still match.
-func isAlreadyConfigured(err error) bool {
-	return errors.Is(err, auth.ErrAlreadyConfigured)
 }

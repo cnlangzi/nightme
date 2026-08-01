@@ -93,10 +93,10 @@ func TestCredentials_JSON(t *testing.T) {
 	}
 }
 
-// TestErrors_AreDistinct makes sure the three sentinel errors stay
+// TestErrors_AreDistinct makes sure the sentinel errors stay
 // distinct so errors.Is matching keeps working in callers.
 func TestErrors_AreDistinct(t *testing.T) {
-	sentinels := []error{ErrAlreadyConfigured, ErrAuthTimeout, ErrAuthFailed}
+	sentinels := []error{ErrAuthTimeout, ErrAuthFailed}
 	for i, a := range sentinels {
 		for j, b := range sentinels {
 			if i == j {

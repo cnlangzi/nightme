@@ -107,16 +107,25 @@ func (s ReceiptState) String(receipt *MessageReceipt) string {
 	return ""
 }
 
-// Emoji returns the reaction emoji for a state. Used by the
-// ReactionAdd side of the dual-track.
+// Emoji returns the Feishu reaction emoji_type for a state. Used by
+// the ReactionAdd side of the dual-track.
+//
+// The identifiers are Feishu predefined emoji_type values — NOT raw
+// unicode. Passing unicode like "⏳" to the reaction API fails with
+// code 99992354 ("data not found") because the reaction service
+// only recognizes the predefined set (THUMBSUP / OK / OnIt /
+// PARTY / …, full list at
+// https://open.feishu.cn/document/server-docs/im-v1/message-reaction/emojis-introduce).
+// The reply-text unicode (in String() above) is unaffected — that
+// path sends text, not reactions.
 func (s ReceiptState) Emoji() string {
 	switch s {
 	case StateWaiting:
-		return "⏳"
+		return "OK"
 	case StateExecuting:
-		return "🔄"
+		return "OnIt"
 	case StateCompleted:
-		return "✅"
+		return "PARTY"
 	}
 	return ""
 }

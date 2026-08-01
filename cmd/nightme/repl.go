@@ -7,15 +7,14 @@
 // over.
 //
 // Design notes (per the doc-only v0.2 spec we sketched with Devin):
-//   - 0 deps: bufio.Scanner is enough; we trade fancy readline
-//     features (history, tab completion) for a hot-fix-friendly
-//     patch. Add chzyer/readline later when REPL becomes a daily
-//     driver.
-//   - blocking commands (run, test) work; first Ctrl-C ends the
-//     session and returns to the prompt. Hitting Ctrl-C a second
-//     time exits the REPL (test.go has a force-exit on second
-//     signal).
-//   - Ctrl-D (EOF on stdin) cleanly exits. Same for "exit" / "quit".
+//   - Production uses chzyer/readline for line editing and history
+//     (↑/↓ navigate, persistent across sessions in
+//     ~/.local/share/nightme/repl_history).
+//   - Tests use a scanner-based path (runREPLWith) that injects an
+//     io.Reader so the existing 9 unit tests stay simple and
+//     independent of TTY.
+//   - runREPL is the production entry; runREPLWith is the testable
+//     core. Both share dispatchREPLLine for command execution.
 package main
 
 import (
@@ -26,8 +25,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/chzyer/readline"
 	"github.com/spf13/cobra"
 
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
@@ -54,52 +55,173 @@ Common:
 Shell:
   exit / quit     leave shell
   Ctrl-D          leave shell
-  Ctrl-C at prompt exits the REPL
+  Ctrl-C at prompt cancels the current line
 
 nightme> `
 
 // runREPL is the no-args entry point invoked from Execute(). It
 // blocks until the user exits via EOF, "exit"/"quit", or a fatal
-// read error.
-//
-// root is the already-constructed cobra root command. logger is the
-// global slog logger (for the "command started" line and any
-// internal errors); all user-visible output (banner, prompt,
-// dispatched command stdout) goes to root.OutOrStdout() so tests
-// can capture it via root.SetOut(&buf).
-//
-// runREPL never returns a non-nil error for ordinary user mistakes
-// (unknown command, syntax error). It only returns an error when
-// stdin itself becomes unreadable, so the caller can propagate.
+// read error. Production path uses chzyer/readline for line editing
+// and persistent history.
 func runREPL(root *cobra.Command, logger *slog.Logger) error {
-	return runREPLWith(root, logger, os.Stdin)
+	return runREPLInteractive(root, logger)
 }
 
-// runREPLWith is the testable core. It separates I/O from the loop
-// so unit tests can drive the REPL with a strings.Reader and
-// capture output via root.SetOut(&buf).
+// runREPLInteractive drives the REPL with chzyer/readline so the user
+// gets ↑/↓ history navigation, in-line editing, and history
+// persisted across sessions. History is loaded from and saved to
+// ~/.local/share/nightme/repl_history.
 //
-// Output always flows through root.OutOrStdout(): banner, prompt,
-// and dispatched command stdout all share the same writer. This is
-// the same writer a leaf command would use (Cobra walks up to the
-// root when the leaf has no own outWriter), so the REPL and a
-// dispatched command never produce split output.
-func runREPLWith(root *cobra.Command, logger *slog.Logger, in io.Reader) error {
+// Errors from readline (other than user-initiated EOF / interrupt)
+// bubble up; the caller (Execute) prints them and exits with the
+// appropriate error code.
+func runREPLInteractive(root *cobra.Command, logger *slog.Logger) error {
 	if logger != nil {
 		logger.Info("repl started")
 	}
 
-	out := root.OutOrStdout()
-	if out == nil {
-		out = os.Stdout
+	cfg, err := readlineConfig()
+	if err != nil {
+		return err
+	}
+
+	rl, err := readline.NewEx(cfg)
+	if err != nil {
+		// History file may be unwritable (e.g. read-only home).
+		// Fall back to an in-memory readline so the user can still
+		// edit lines and navigate within the session.
+		rl, err = readline.New("nightme> ")
+		if err != nil {
+			return fmt.Errorf("readline init: %w", err)
+		}
+	}
+	defer func() { _ = rl.Close() }()
+
+	out := rl.Stdout()
+	fmt.Fprintf(out, replBanner, version.Version, version.GitCommit, version.BuildDate)
+
+	for {
+		line, err := rl.Readline()
+		switch {
+		case errors.Is(err, readline.ErrInterrupt):
+			// Ctrl-C at the prompt cancels the current line and
+			// stays in the REPL. We don't print anything — the
+			// terminal already echoed ^C.
+			continue
+		case errors.Is(err, io.EOF):
+			// Ctrl-D — clean exit.
+			fmt.Fprintln(out)
+			return nil
+		case err != nil:
+			return err
+		}
+
+		done, err := dispatchREPLLine(root, logger, line, out)
+		if err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
+	}
+}
+
+// readlineConfig builds the readline.Config. History path lives in
+// the same directory the logging package uses for its default log
+// file. We mkdir the parent (0700) so the file can be created even
+// on a fresh install.
+func readlineConfig() (*readline.Config, error) {
+	historyPath := ""
+	if dir, derr := nightmeDataDir(); derr == nil {
+		historyPath = filepath.Join(dir, "repl_history")
+	}
+	return &readline.Config{
+		Prompt:                "nightme> ",
+		HistoryFile:           historyPath,
+		DisableAutoSaveHistory: false,
+		InterruptPrompt:       "^C",
+		HistorySearchFold:     true,
+		FuncFilterInputRune:   filterREPLInput,
+	}, nil
+}
+
+// nightmeDataDir returns ~/.local/share/nightme, creating it 0700
+// if missing. Falls back to the empty string on UserHomeDir failure;
+// readline handles the empty path gracefully (no persistence).
+func nightmeDataDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(home, ".local", "share", "nightme")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// filterREPLInput blocks control characters that have no business
+// in a slash command (Ctrl-A, Ctrl-B, etc.). Ctrl-C / Ctrl-D are
+// handled by readline itself; we only need to filter the rest so
+// pasted binary data doesn't break the terminal. The second return
+// value is readline's "should accept" flag — false drops the rune.
+func filterREPLInput(r rune) (rune, bool) {
+	if r == 0 {
+		return 0, false
+	}
+	if r < 32 && r != '\t' && r != '\n' && r != '\r' {
+		return 0, false
+	}
+	return r, true
+}
+
+// dispatchREPLLine is the per-line core shared between the
+// production (readline) path and the test (scanner) path. Returns
+// done=true when the user typed exit/quit; otherwise dispatches and
+// returns done=false so the outer loop can read another line.
+func dispatchREPLLine(root *cobra.Command, logger *slog.Logger, line string, out io.Writer) (bool, error) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		fmt.Fprint(out, "nightme> ")
+		return false, nil
+	}
+	if line == "exit" || line == "quit" {
+		fmt.Fprintln(out, "bye")
+		return true, nil
+	}
+
+	tokens := strings.Fields(line)
+	root.SetArgs(tokens)
+	root.SetContext(withLogger(context.Background(), logger))
+	// Route command output (cobra leaf's OutOrStdout) through the
+	// REPL's writer so the banner / prompt / dispatch all share
+	// the same destination. Tests inject a bytes.Buffer here.
+	root.SetOut(out)
+	root.SetErr(out)
+
+	if err := root.Execute(); err != nil {
+		code := nmerrors.ExitCode(err)
+		fmt.Fprintf(out, "Error: %v (exit %d)\n", err, code)
+	}
+	fmt.Fprint(out, "nightme> ")
+	return false, nil
+}
+
+// runREPLWith is the testable core. It uses bufio.Scanner on the
+// supplied io.Reader so unit tests can drive the REPL without a TTY.
+// Behavior matches runREPLInteractive for the cases the tests cover:
+// EOF exits, exit/quit says "bye", unknown commands print "Error:".
+//
+// readline-specific behavior (↑/↓ history, line editing) is
+// exercised in interactive testing; this path is the contract.
+func runREPLWith(root *cobra.Command, logger *slog.Logger, in io.Reader, out io.Writer) error {
+	if logger != nil {
+		logger.Info("repl started")
 	}
 
 	fmt.Fprintf(out, replBanner, version.Version, version.GitCommit, version.BuildDate)
 
 	scanner := bufio.NewScanner(in)
-	// Allow long lines (e.g. pasting a big command). 64 KiB is a
-	// conservative ceiling; anything larger is almost certainly
-	// accidental.
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	for {
@@ -108,38 +230,18 @@ func runREPLWith(root *cobra.Command, logger *slog.Logger, in io.Reader) error {
 				fmt.Fprintln(out, "Error:", err)
 				return err
 			}
-			// Clean EOF — print a newline so the shell prompt
-			// starts on its own line.
+			// Clean EOF — newline so the host prompt starts on
+			// its own line.
 			fmt.Fprintln(out)
 			return nil
 		}
 
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			fmt.Fprint(out, "nightme> ")
-			continue
+		done, err := dispatchREPLLine(root, logger, scanner.Text(), out)
+		if err != nil {
+			return err
 		}
-		if line == "exit" || line == "quit" {
-			fmt.Fprintln(out, "bye")
+		if done {
 			return nil
 		}
-
-		tokens := strings.Fields(line)
-		// Reset args and context for every iteration so a previous
-		// dispatch does not leak state.
-		root.SetArgs(tokens)
-		root.SetContext(withLogger(context.Background(), logger))
-
-		if err := root.Execute(); err != nil {
-			// Root has SilenceErrors:true so cobra itself is quiet.
-			// Surface the error inline so the user can correct
-			// the typo without leaving the REPL.
-			code := nmerrors.ExitCode(err)
-			fmt.Fprintf(out, "Error: %v (exit %d)\n", err, code)
-		}
-		// Re-print the prompt after each command. Using a fresh
-		// line keeps the output readable when a command prints
-		// without a trailing newline.
-		fmt.Fprint(out, "nightme> ")
 	}
 }

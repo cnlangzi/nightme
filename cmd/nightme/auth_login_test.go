@@ -102,77 +102,44 @@ func TestAuthLogin_Success(t *testing.T) {
 	}
 }
 
-// TestAuthLogin_AlreadyConfigured guards the "respect existing
-// credentials unless --force" rule. Without --force an existing
-// app_id must surface auth.ErrAlreadyConfigured.
-func TestAuthLogin_AlreadyConfigured(t *testing.T) {
+// TestAuthLogin_AlwaysRebinds asserts the rebind contract: running
+// login on a config that already holds Feishu credentials
+// unconditionally overwrites them. There is no --force flag, no
+// "already configured" guard — `nightme auth login feishu` IS the
+// rebind operation. This is what makes bumping the requested scopes
+// (e.g. adding im:message.reactions:write_only) a single command.
+func TestAuthLogin_AlwaysRebinds(t *testing.T) {
 	_ = withTempConfig(t)
 
-	// Seed config with an existing app_id.
 	cfg, err := config.LoadDefault()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Feishu.AppID = "existing-cli-id"
-	cfg.Feishu.AppSecret = "existing-secret"
+	cfg.Feishu.AppID = "old-cli-id"
+	cfg.Feishu.AppSecret = "old-secret"
 	if err := config.Save(cfg, os.Getenv("NIGHTME_CONFIG")); err != nil {
 		t.Fatal(err)
 	}
 
-	// Provider must never be called — if it is, the test fails
-	// because credentials were wiped.
 	prov := &fakeAuthProvider{
-		creds: &auth.Credentials{AppID: "NEW", AppSecret: "NEW"},
+		creds: &auth.Credentials{AppID: "new-cli-id", AppSecret: "new-secret"},
 	}
 
-	cmd := newAuthLoginFeishuCmd(&loginCmdFlags{timeout: 5 * time.Second})
+	flags := &loginCmdFlags{timeout: 5 * time.Second}
+	cmd := newAuthLoginFeishuCmd(flags)
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetContext(context.Background())
-	err = runAuthLoginWith(cmd, &loginCmdFlags{timeout: 5 * time.Second}, prov)
-	if err == nil {
-		t.Fatal("runAuthLoginWith: expected error, got nil")
-	}
-	if !isAlreadyConfigured(err) {
-		t.Errorf("error chain missing ErrAlreadyConfigured: %v", err)
-	}
-
-	// Existing credentials must NOT be overwritten.
-	cfg2, _ := config.LoadDefault()
-	if cfg2.Feishu.AppID != "existing-cli-id" {
-		t.Errorf("AppID overwritten: got %q, want existing-cli-id", cfg2.Feishu.AppID)
-	}
-	if cfg2.Feishu.AppSecret != "existing-secret" {
-		t.Errorf("AppSecret overwritten: got %q", cfg2.Feishu.AppSecret)
-	}
-}
-
-// TestAuthLogin_ForceOverwrite complements the test above: with
-// --force=true the existing credentials ARE replaced. This is the
-// only test that proves the flag actually works end-to-end.
-func TestAuthLogin_ForceOverwrite(t *testing.T) {
-	_ = withTempConfig(t)
-
-	cfg, _ := config.LoadDefault()
-	cfg.Feishu.AppID = "old"
-	cfg.Feishu.AppSecret = "old"
-	_ = config.Save(cfg, os.Getenv("NIGHTME_CONFIG"))
-
-	prov := &fakeAuthProvider{
-		creds: &auth.Credentials{AppID: "new", AppSecret: "new"},
-	}
-
-	cmd := newAuthLoginFeishuCmd(&loginCmdFlags{timeout: 5 * time.Second, force: true})
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetContext(context.Background())
-	if err := runAuthLoginWith(cmd, &loginCmdFlags{timeout: 5 * time.Second, force: true}, prov); err != nil {
+	if err := runAuthLoginWith(cmd, flags, prov); err != nil {
 		t.Fatalf("runAuthLoginWith: %v", err)
 	}
 
 	cfg2, _ := config.LoadDefault()
-	if cfg2.Feishu.AppID != "new" {
-		t.Errorf("AppID = %q, want new (force did not overwrite)", cfg2.Feishu.AppID)
+	if cfg2.Feishu.AppID != "new-cli-id" {
+		t.Errorf("AppID = %q, want new-cli-id (rebind did not overwrite)", cfg2.Feishu.AppID)
+	}
+	if cfg2.Feishu.AppSecret != "new-secret" {
+		t.Errorf("AppSecret = %q, want new-secret", cfg2.Feishu.AppSecret)
 	}
 }
 

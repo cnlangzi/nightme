@@ -33,7 +33,7 @@ func TestREPL_EOF(t *testing.T) {
 	root := newTestRoot()
 	var buf bytes.Buffer
 	captureREPLIO(root, &buf)
-	if err := runREPLWith(root, nil, strings.NewReader("")); err != nil {
+	if err := runREPLWith(root, nil, strings.NewReader(""), &buf); err != nil {
 		t.Fatalf("runREPLWith: %v", err)
 	}
 	out := buf.String()
@@ -54,7 +54,7 @@ func TestREPL_Exit(t *testing.T) {
 	root := newTestRoot()
 	var buf bytes.Buffer
 	captureREPLIO(root, &buf)
-	if err := runREPLWith(root, nil, strings.NewReader("exit\n")); err != nil {
+	if err := runREPLWith(root, nil, strings.NewReader("exit\n"), &buf); err != nil {
 		t.Fatalf("runREPLWith: %v", err)
 	}
 	if !strings.Contains(buf.String(), "bye") {
@@ -67,7 +67,7 @@ func TestREPL_Quit(t *testing.T) {
 	root := newTestRoot()
 	var buf bytes.Buffer
 	captureREPLIO(root, &buf)
-	if err := runREPLWith(root, nil, strings.NewReader("quit\n")); err != nil {
+	if err := runREPLWith(root, nil, strings.NewReader("quit\n"), &buf); err != nil {
 		t.Fatalf("runREPLWith: %v", err)
 	}
 	if !strings.Contains(buf.String(), "bye") {
@@ -82,7 +82,7 @@ func TestREPL_EmptyLine_Noop(t *testing.T) {
 	var buf bytes.Buffer
 	captureREPLIO(root, &buf)
 	in := strings.NewReader("\n\n")
-	if err := runREPLWith(root, nil, in); err != nil {
+	if err := runREPLWith(root, nil, in, &buf); err != nil {
 		t.Fatalf("runREPLWith: %v", err)
 	}
 	count := strings.Count(buf.String(), "nightme> ")
@@ -101,7 +101,7 @@ func TestREPL_TrimWhitespace(t *testing.T) {
 	root := newTestRoot()
 	var buf bytes.Buffer
 	captureREPLIO(root, &buf)
-	if err := runREPLWith(root, nil, strings.NewReader("   version   \n")); err != nil {
+	if err := runREPLWith(root, nil, strings.NewReader("   version   \n"), &buf); err != nil {
 		t.Fatalf("runREPLWith: %v", err)
 	}
 	if !strings.Contains(buf.String(), "nightme version") {
@@ -116,7 +116,7 @@ func TestREPL_UnknownCommand(t *testing.T) {
 	var buf bytes.Buffer
 	captureREPLIO(root, &buf)
 	in := strings.NewReader("not-a-real-command\nexit\n")
-	if err := runREPLWith(root, nil, in); err != nil {
+	if err := runREPLWith(root, nil, in, &buf); err != nil {
 		t.Fatalf("runREPLWith: %v", err)
 	}
 	out := buf.String()
@@ -135,7 +135,7 @@ func TestREPL_DispatchesVersion(t *testing.T) {
 	root := newTestRoot()
 	var buf bytes.Buffer
 	captureREPLIO(root, &buf)
-	if err := runREPLWith(root, nil, strings.NewReader("version\n")); err != nil {
+	if err := runREPLWith(root, nil, strings.NewReader("version\n"), &buf); err != nil {
 		t.Fatalf("runREPLWith: %v", err)
 	}
 	if !strings.Contains(buf.String(), "nightme version") {
@@ -150,7 +150,7 @@ func TestREPL_BannerHasVersion(t *testing.T) {
 	root := newTestRoot()
 	var buf bytes.Buffer
 	captureREPLIO(root, &buf)
-	if err := runREPLWith(root, nil, strings.NewReader("")); err != nil {
+	if err := runREPLWith(root, nil, strings.NewReader(""), &buf); err != nil {
 		t.Fatalf("runREPLWith: %v", err)
 	}
 	if strings.Contains(buf.String(), "%!s(MISSING)") {
@@ -165,7 +165,7 @@ func TestREPL_PromptAfterCommand(t *testing.T) {
 	var buf bytes.Buffer
 	captureREPLIO(root, &buf)
 	in := strings.NewReader("version\nexit\n")
-	if err := runREPLWith(root, nil, in); err != nil {
+	if err := runREPLWith(root, nil, in, &buf); err != nil {
 		t.Fatalf("runREPLWith: %v", err)
 	}
 	// We expect: banner prompt + version output + re-prompt + bye.

@@ -131,16 +131,41 @@ func TestCwdHandler_RejectsActiveSession(t *testing.T) {
 	}
 }
 
-// TestCwdHandler_MissingPath checks the usage error.
-func TestCwdHandler_MissingPath(t *testing.T) {
+// TestCwdHandler_NoArgs_NoSession responds with the "no workspace set"
+// hint when /cwd is called without arguments and no session is bound.
+func TestCwdHandler_NoArgs_NoSession(t *testing.T) {
 	gw, _, resp := newTestStack(t)
 
 	_ = gw.Handle(WithGateway(context.Background(), gw), &Message{
 		ChatID: "oc_chat",
 		Text:   "/cwd",
 	})
-	if !strings.Contains(resp.last(), "usage") {
-		t.Errorf("reply = %q, want usage", resp.last())
+	if !strings.Contains(resp.last(), "no workspace set") {
+		t.Errorf("reply = %q, want no-workspace-set hint", resp.last())
+	}
+}
+
+// TestCwdHandler_NoArgs_WithSession returns the current workspace when
+// /cwd is called without arguments on a chat that already has a bound
+// session.
+func TestCwdHandler_NoArgs_WithSession(t *testing.T) {
+	dir := t.TempDir()
+	gw, mgr, resp := newTestStack(t)
+
+	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
+		t.Fatalf("CreateOrUpdate: %v", err)
+	}
+
+	_ = gw.Handle(WithGateway(context.Background(), gw), &Message{
+		ChatID: "oc_chat",
+		Text:   "/cwd",
+	})
+	reply := resp.last()
+	if !strings.Contains(reply, dir) {
+		t.Errorf("reply = %q, missing workspace %q", reply, dir)
+	}
+	if !strings.Contains(reply, "workspace") {
+		t.Errorf("reply = %q, want workspace-related text", reply)
 	}
 }
 

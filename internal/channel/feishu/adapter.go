@@ -78,7 +78,16 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	handler := larkdispatcher.NewEventDispatcher(
 		cfg.Feishu.VerificationToken,
 		cfg.Feishu.EncryptKey,
-	).OnP2MessageReceiveV1(a.handleMessage)
+	).
+		OnP2MessageReceiveV1(a.handleMessage).
+		// User-driven reactions on bot messages are not a designed
+		// input channel (no /react command, no ack/cancel UX). Swallow
+		// the event so the SDK doesn't log "not found handler". The
+		// reaction event subscription is intentionally absent from
+		// DefaultAddons in internal/auth/feishu/feishu.go.
+		OnP2MessageReactionCreatedV1(func(_ context.Context, _ *larkim.P2MessageReactionCreatedV1) error {
+			return nil
+		})
 
 	a.client = larkws.NewClient(
 		cfg.Feishu.AppID,

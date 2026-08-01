@@ -26,10 +26,23 @@ type streamEvent struct {
 	Message   *assistantMsg `json:"message,omitempty"`
 	SessionID string        `json:"session_id,omitempty"`
 
+	// model appears at the top level on system/init and result events
+	// (assistant.message.model is the same field on assistant events).
+	// extractModel probes both spots; the top-level field is the
+	// authoritative source for init events.
+	Model string `json:"model,omitempty"`
+
 	// result fields
 	Result     string `json:"result,omitempty"`
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	IsError    bool   `json:"is_error,omitempty"`
+
+	// result.usage / result.modelUsage — kept as RawMessage so the
+	// decoder is permissive (extra keys / unexpected shapes are dropped
+	// silently). decodeUsage / decodeCostUSD shape them into
+	// agent.UsageEvent when translate() emits EventUsage.
+	Usage      json.RawMessage `json:"usage,omitempty"`
+	ModelUsage json.RawMessage `json:"modelUsage,omitempty"`
 
 	// permissive extras
 	Raw json.RawMessage `json:"-"`
@@ -122,12 +135,18 @@ func pumpStream(r io.Reader, events chan<- agent.AgentEvent, askHandler askHandl
 func translate(ev streamEvent, events chan<- agent.AgentEvent, askHandler askHandlerFunc, logger *slog.Logger) {
 	switch ev.Type {
 	case "system":
-		// system/init is informational; we surface it via EventText
-		// so the channel can echo a "session initialized" indicator.
-		// Other subtypes (e.g. status, hook) are ignored.
+		// system/init is informational; we surface it via EventInit
+		// so the channel can echo a "session <id> · model <name>"
+		// header AND have access to SessionID for /resume. Other
+		// subtypes (e.g. status, hook_progress) are ignored.
 		if ev.Subtype == "init" {
-			msg := fmt.Sprintf("session initialized (model: %s)", extractModel(ev))
-			events <- agent.AgentEvent{Kind: agent.EventText, Text: msg}
+			events <- agent.AgentEvent{
+				Kind: agent.EventInit,
+				Init: &agent.InitEvent{
+					SessionID: ev.SessionID,
+					Model:     extractModel(ev),
+				},
+			}
 		}
 
 	case "assistant":
@@ -185,28 +204,105 @@ func translate(ev streamEvent, events chan<- agent.AgentEvent, askHandler askHan
 		}
 
 	case "user":
-		// user-role messages in stream-json carry tool_result blocks
-		// (echoed back so the model sees its own tool calls).
+		// user-role messages in stream-json carry two shapes:
+		//
+		//   (a) tool_result blocks — echoed back so the model sees
+		//       its own tool calls. Surface as EventToolEnd with the
+		//       tool_use_id stored on the ID field so start/end can
+		//       be correlated.
+		//
+		//   (b) plain text blocks — only emitted when Claude Code is
+		//       started with --replay-user-messages. Each becomes an
+		//       EventText with a "[你] " prefix so the channel can
+		//       render the user's own input distinctly from the
+		//       assistant's replies.
 		if ev.Message == nil {
 			return
 		}
 		for _, block := range ev.Message.Content {
-			if block.Type != "tool_result" {
-				continue
-			}
-			events <- agent.AgentEvent{
-				Kind: agent.EventToolEnd,
-				ToolEnd: &agent.ToolEndEvent{
-					Name:   block.Name,
-					Output: stringifyToolResult(block.Content),
-				},
+			switch block.Type {
+			case "tool_result":
+				events <- agent.AgentEvent{
+					Kind: agent.EventToolEnd,
+					ToolEnd: &agent.ToolEndEvent{
+						ID:     block.ToolUseID,
+						Name:   block.Name,
+						Output: stringifyToolResult(block.Content),
+					},
+				}
+			case "text":
+				if block.Text == "" {
+					continue
+				}
+				events <- agent.AgentEvent{
+					Kind: agent.EventText,
+					Text: "[你] " + block.Text,
+				}
 			}
 		}
 
 	case "result":
+		// A result event has four sub-shapes — handled in order:
+		//
+		//   1. subtype "compact" / "compaction" — MID-TURN context
+		//      compaction. NOT a turn end: subsequent assistant /
+		//      tool events continue the same turn. Emit
+		//      EventCompaction and return without EventDone.
+		//
+		//   2. final assistant reply — text lives in ev.Result. Emit
+		//      EventResult with the text + duration + error flag +
+		//      subtype so the channel can render the final reply
+		//      distinctly from rolling-log EventText entries. Empty
+		//      Result + IsError=true still emits (so the header can
+		//      flip to an error state).
+		//
+		//   3. token usage — ev.Usage / ev.ModelUsage. Emit
+		//      EventUsage so channels can render "N tokens · $X"
+		//      footers.
+		//
+		//   4. terminal — EventDone{ExitCode: 0}. ExitCode stays
+		//      zero on the wire; IsError travels on the
+		//      EventResult payload instead.
+		if ev.Subtype == "compact" || ev.Subtype == "compaction" {
+			events <- agent.AgentEvent{
+				Kind:       agent.EventCompaction,
+				Compaction: &agent.CompactionEvent{Subtype: ev.Subtype},
+			}
+			return
+		}
+		if ev.Result != "" || ev.IsError {
+			events <- agent.AgentEvent{
+				Kind: agent.EventResult,
+				Result: &agent.ResultEvent{
+					Text:       ev.Result,
+					DurationMs: ev.DurationMs,
+					IsError:    ev.IsError,
+					Subtype:    ev.Subtype,
+				},
+			}
+		}
+		if u := decodeUsage(ev.Usage); u != nil {
+			u.CostUSD = decodeCostUSD(ev.ModelUsage)
+			events <- agent.AgentEvent{
+				Kind:  agent.EventUsage,
+				Usage: u,
+			}
+		}
 		events <- agent.AgentEvent{
 			Kind: agent.EventDone,
 			Done: &agent.DoneEvent{ExitCode: 0},
+		}
+
+	case "control_request":
+		// Claude Code emits control_request (subtype: can_use_tool)
+		// when started with --permission-prompt-tool stdio. We
+		// currently spawn with --permission-mode bypassPermissions,
+		// which bypasses this path entirely — so a control_request
+		// reaching us is unexpected. Log at debug for visibility
+		// without taking action; the future stdio-permission mode
+		// will hook this case to emit EventPermission.
+		if logger != nil {
+			logger.Debug("claudecode: control_request received (unhandled under bypassPermissions)")
 		}
 
 	default:
@@ -243,11 +339,21 @@ func handleToolUse(block contentBlock, events chan<- agent.AgentEvent, askHandle
 // extractModel pulls the model name out of a system/init event. The
 // field is not consistently located across Claude Code versions; we
 // try the most likely spots and fall back to "".
+//
+// Order of precedence:
+//
+//  1. ev.Model — top-level field on system/init and result events.
+//  2. ev.Message.Model — nested field on assistant events.
+//  3. (legacy) probe ev.Raw for a top-level "model" key. This path
+//     is dead under json.Unmarshal because Raw is json:"-"; kept
+//     for documentation purposes only.
 func extractModel(ev streamEvent) string {
+	if ev.Model != "" {
+		return ev.Model
+	}
 	if ev.Message != nil && ev.Message.Model != "" {
 		return ev.Message.Model
 	}
-	// Some versions put model inside the raw event payload.
 	var probe struct {
 		Model string `json:"model"`
 	}
@@ -308,6 +414,69 @@ func truncateForLog(s string, max int) string {
 		return s
 	}
 	return s[:max] + "…"
+}
+
+// decodeUsage parses the result.usage payload into an agent.UsageEvent.
+// Returns nil when the payload is empty or malformed — bridges that
+// fail to extract usage should NOT emit EventUsage (channels render
+// nothing in that case). The decoder is intentionally permissive:
+// zero / unknown counts default to zero rather than erroring out.
+//
+// Claude Code schema:
+//
+//	{"input_tokens": N, "output_tokens": N,
+//	 "cache_creation_input_tokens": N, "cache_read_input_tokens": N}
+func decodeUsage(raw json.RawMessage) *agent.UsageEvent {
+	if len(raw) == 0 {
+		return nil
+	}
+	var u struct {
+		InputTokens              int64 `json:"input_tokens"`
+		OutputTokens             int64 `json:"output_tokens"`
+		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	}
+	if err := json.Unmarshal(raw, &u); err != nil {
+		return nil
+	}
+	if u.InputTokens == 0 && u.OutputTokens == 0 &&
+		u.CacheCreationInputTokens == 0 && u.CacheReadInputTokens == 0 {
+		// All zero is indistinguishable from "absent" — don't emit
+		// a meaningless EventUsage.
+		return nil
+	}
+	return &agent.UsageEvent{
+		InputTokens:              int(u.InputTokens),
+		OutputTokens:             int(u.OutputTokens),
+		CacheCreationInputTokens: int(u.CacheCreationInputTokens),
+		CacheReadInputTokens:     int(u.CacheReadInputTokens),
+	}
+}
+
+// decodeCostUSD parses the result.modelUsage payload and returns the
+// first non-zero costUSD across all per-model entries. Returns 0 when
+// absent / unparseable / all-zero — channels MUST treat 0 as
+// "unknown" and not render a "$0.00" line.
+//
+// Claude Code schema (shape may grow over time):
+//
+//	{"claude-sonnet-4-5": {"costUSD": 0.012, ...}, ...}
+func decodeCostUSD(raw json.RawMessage) float64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var m map[string]struct {
+		CostUSD float64 `json:"costUSD"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return 0
+	}
+	for _, v := range m {
+		if v.CostUSD > 0 {
+			return v.CostUSD
+		}
+	}
+	return 0
 }
 
 // strings.HasPrefix shim so we don't import strings just for one call.

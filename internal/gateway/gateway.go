@@ -21,6 +21,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -105,9 +106,10 @@ type gateway struct {
 	channels       []Channel
 	channelCh      chan InboundMessage
 	stopCh         chan struct{}
+	stopOnce       sync.Once
 	wg             sync.WaitGroup
 	attached       map[string]struct{} // SessionID -> already-has-a-pump
-	chatToChan     map[string]Channel // ChatID -> the channel that owns the chat
+	chatToChan     map[string]Channel  // ChatID -> the channel that owns the chat
 	defaultChannel Channel             // fallback channel for chats we haven't seen yet
 	sweeper        SweepSessions
 }
@@ -152,8 +154,16 @@ func (g *gateway) AttachChannels(channels ...Channel) {
 // Register stores cmd. Names and aliases are case-folded on insert.
 func (g *gateway) Register(cmd Command) (replaced bool) {
 	name := strings.ToLower(cmd.Name)
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if _, exists := g.cmds[name]; exists {
 		return true
+	}
+	for _, a := range cmd.Aliases {
+		alias := strings.ToLower(a)
+		if _, exists := g.cmds[alias]; exists {
+			return true
+		}
 	}
 	for _, a := range cmd.Aliases {
 		g.cmds[strings.ToLower(a)] = cmd
@@ -185,7 +195,7 @@ func (g *gateway) Handle(ctx context.Context, msg *InboundMessage) (*CommandResu
 	g.mu.RLock()
 	cmd, ok := g.cmds[strings.ToLower(name)]
 	g.mu.RUnlock()
-	if !ok {
+	if !ok || cmd.Handler == nil {
 		if g.fb != nil {
 			return &CommandResult{}, g.fb(ctx, msg)
 		}
@@ -231,6 +241,10 @@ func (g *gateway) Start(ctx context.Context) error {
 	g.mu.Unlock()
 
 	if len(chans) == 0 {
+		g.mu.Lock()
+		g.stopCh = nil
+		g.channelCh = nil
+		g.mu.Unlock()
 		return errors.New("gateway: no channels attached")
 	}
 
@@ -257,12 +271,7 @@ func (g *gateway) Stop(ctx context.Context) error {
 	if stopCh == nil {
 		return nil
 	}
-	select {
-	case <-stopCh:
-		// already closed
-	default:
-		close(stopCh)
-	}
+	g.stopOnce.Do(func() { close(stopCh) })
 	done := make(chan struct{})
 	go func() { g.wg.Wait(); close(done) }()
 	select {
@@ -319,7 +328,13 @@ func (g *gateway) dispatchLoop(ctx context.Context) {
 			// Install the Gateway into ctx so handlers that need
 			// to look it up (currently just /help) can recover it
 			// without taking it as a closure.
-			_, _ = g.Handle(withGateway(ctx, g), &msg)
+			result, err := g.Handle(withGateway(ctx, g), &msg)
+			if err != nil {
+				log.Printf("gateway: dispatch %s failed: %v", msg.ChatID, err)
+			}
+			if result == nil {
+				continue
+			}
 		}
 	}
 }
@@ -376,14 +391,19 @@ func (g *gateway) sweepOnce(ctx context.Context) {
 		}
 
 		g.wg.Add(1)
-		go g.pumpOutbound(ctx, ch, src.ChatID, src.Events)
+		go g.pumpOutbound(ctx, ch, src.SessionID, src.ChatID, src.Events)
 	}
 }
 
 // pumpOutbound reads AgentEvent from the session's events channel,
 // translates via Translate, and dispatches to the right Channel.
-func (g *gateway) pumpOutbound(ctx context.Context, ch Channel, chatID string, events <-chan agent.AgentEvent) {
+func (g *gateway) pumpOutbound(ctx context.Context, ch Channel, sessionID, chatID string, events <-chan agent.AgentEvent) {
 	defer g.wg.Done()
+	defer func() {
+		g.mu.Lock()
+		delete(g.attached, sessionID)
+		g.mu.Unlock()
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -400,8 +420,11 @@ func (g *gateway) pumpOutbound(ctx context.Context, ch Channel, chatID string, e
 			}
 			if err := ch.Send(ctx, msg); err != nil {
 				// Fire-and-ack: log and continue. Retry queue is
-				// explicitly out of scope for v0.3.
-				_ = err
+				// explicitly out of scope for v0.3 — failures
+				// surface via the channel's own error reporting
+				// (Feishu's UpdateMessage / AddReaction paths log
+				// their own failures at warn level).
+				log.Printf("gateway: channel send failed (chat=%s, kind=%s): %v", chatID, msg.Kind, err)
 			}
 		}
 	}

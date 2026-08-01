@@ -27,14 +27,6 @@ const (
 	ChatTypeOther  ChatType = "other"   // channel-private; Gateway doesn't branch on this
 )
 
-// Normalized chat type constants. Channel adapters should map their
-// native values onto these.
-const (
-	ChatTypeP2PConst    = "p2p"
-	ChatTypeGroupConst  = "group"
-	ChatTypeThreadConst = "thread"
-)
-
 // InboundMessage is the abstract shape of "a message arriving from
 // some Channel". Channels parse their native event into this shape
 // before publishing on Channel.Incoming(); Gateway reads this and
@@ -170,6 +162,25 @@ const (
 	OutCard
 	// OutTyping sends a transient typing indicator.
 	OutTyping
+	// OutResult is the assistant's final reply for the turn. Sourced
+	// from agent.EventResult (Claude Code: result.Result). Channels
+	// render it with a distinct icon (e.g. 📝) so users can tell
+	// "the final answer" from rolling-log entries.
+	OutResult
+	// OutUsage carries the turn's token usage / cost. Sourced from
+	// agent.EventUsage (Claude Code: result.usage /
+	// result.modelUsage). Channels typically render it as a footer
+	// line ("1.2k tokens · $0.012") or append it to the receipt's
+	// terminal header.
+	OutUsage
+	// OutCompaction signals a mid-turn context compaction. NOT a
+	// turn end — the agent continues. Channels briefly surface
+	// "Compacting…" so users know why the agent paused.
+	OutCompaction
+	// OutInit carries session bootstrap data (session_id + model)
+	// from the agent's system/init event. Channels use it to render
+	// "session <id> · model <name>" in the receipt header.
+	OutInit
 )
 
 // String renders OutboundKind for log lines.
@@ -191,6 +202,14 @@ func (k OutboundKind) String() string {
 		return "card"
 	case OutTyping:
 		return "typing"
+	case OutResult:
+		return "result"
+	case OutUsage:
+		return "usage"
+	case OutCompaction:
+		return "compaction"
+	case OutInit:
+		return "init"
 	}
 	return "unknown"
 }

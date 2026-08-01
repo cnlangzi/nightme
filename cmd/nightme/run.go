@@ -17,6 +17,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
+	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/channel/feishu"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
@@ -28,14 +29,15 @@ import (
 // runDeps contains the construction seams for the daemon. The production
 // command uses the defaults below; tests replace them with in-process fakes.
 type runDeps struct {
-	loadConfig   func() (*config.Config, error)
-	openRegistry func(*config.Config) (*registry.File, error)
-	buildAgents  func(*config.Config) *agent.Registry
-	newChannel   func(*config.Config) (channel.Channel, error)
-	newManager   func(*agent.Registry, *registry.File, session.EventCallback) session.Manager
-	newGateway   func(session.Manager, *agent.Registry, gatewaycmd.Responder) gateway.Gateway
-	signals      <-chan os.Signal
-	cleanup      bool
+	loadConfig     func() (*config.Config, error)
+	openRegistry   func(*config.Config) (*registry.File, error)
+	buildAgents    func(*config.Config) *agent.Registry
+	newChannel     func(*config.Config) (channel.Channel, error)
+	newManager     func(*agent.Registry, *registry.File, session.EventCallback) session.Manager
+	newGateway     func(session.Manager, *agent.Registry, gatewaycmd.Responder) gateway.Gateway
+	signals        <-chan os.Signal
+	cleanup        bool
+	skipFeishuAuth bool
 }
 
 func defaultRunDeps() runDeps {
@@ -60,6 +62,7 @@ func defaultRunDeps() runDeps {
 // newRunCmd builds the long-running Feishu daemon command.
 func newRunCmd() *cobra.Command {
 	var cleanup bool
+	var channelName string
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Start the Feishu daemon",
@@ -70,20 +73,30 @@ func newRunCmd() *cobra.Command {
 			"By default the daemon detaches session CLIs on shutdown so a " +
 			"later `nightme run` (or /run) can resume them. Pass --cleanup " +
 			"to instead Kill() every session on SIGINT/SIGTERM — useful for " +
-			"CI or one-shot runs.",
+			"CI or one-shot runs.\n\n" +
+			"Pass --channel=echo to run the daemon with the echo channel " +
+			"(a no-network stub that prints outbound messages to stdout). " +
+			"Useful for smoke tests and for exercising the v0.3 hub-and-" +
+			"spoke architecture without Feishu credentials.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runRun(cmd, cleanup)
+			return runRun(cmd, cleanup, channelName)
 		},
 	}
 	cmd.Flags().BoolVar(&cleanup, "cleanup", false,
 		"Kill every session CLI on shutdown instead of detaching them")
+	cmd.Flags().StringVar(&channelName, "channel", "feishu",
+		"Channel implementation: feishu (default) or echo (smoke test)")
 	return cmd
 }
 
 // runRun is the cobra entrypoint. The split makes the daemon easy to drive
 // with fake channels and managers in unit tests.
-func runRun(cmd *cobra.Command, cleanup bool) error {
-	return runRunWith(cmd, withCleanup(defaultRunDeps(), cleanup))
+func runRun(cmd *cobra.Command, cleanup bool, channelName string) error {
+	if channelName != "" && channelName != "feishu" && channelName != "echo" {
+		return fmt.Errorf("run: unknown channel %q (want feishu or echo)", channelName)
+	}
+	deps := withChannel(defaultRunDeps(), channelName)
+	return runRunWith(cmd, withCleanup(deps, cleanup))
 }
 
 // withCleanup returns deps with the cleanup flag applied. Exported
@@ -91,6 +104,25 @@ func runRun(cmd *cobra.Command, cleanup bool) error {
 // cobra flags.
 func withCleanup(deps runDeps, cleanup bool) runDeps {
 	deps.cleanup = cleanup
+	return deps
+}
+
+// withChannel overrides defaultRunDeps.newChannel based on the
+// --channel flag. The default ("feishu") is unchanged; "echo"
+// swaps in the no-network stub for smoke tests.
+func withChannel(deps runDeps, channelName string) runDeps {
+	switch channelName {
+	case "feishu", "":
+		// default — feishu.NewAdapter
+	case "echo":
+		deps.skipFeishuAuth = true
+		deps.newChannel = func(*config.Config) (channel.Channel, error) {
+			return echo.New("echo", os.Stdout), nil
+		}
+	default:
+		// Unknown: leave defaultRunDeps to fail with the existing
+		// Feishu credential check, so the user sees a clear error.
+	}
 	return deps
 }
 
@@ -148,10 +180,9 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	if cfg == nil {
 		return errors.New("run: load config: returned nil config")
 	}
-	if strings.TrimSpace(cfg.Feishu.AppID) == "" || strings.TrimSpace(cfg.Feishu.AppSecret) == "" {
+	if !deps.skipFeishuAuth && (strings.TrimSpace(cfg.Feishu.AppID) == "" || strings.TrimSpace(cfg.Feishu.AppSecret) == "") {
 		return errors.New("run: Feishu credentials are not configured; run `nightme auth login feishu`")
 	}
-
 	reg, err := deps.openRegistry(cfg)
 	if err != nil {
 		return fmt.Errorf("run: open registry: %w", err)

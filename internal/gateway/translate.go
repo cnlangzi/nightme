@@ -36,8 +36,8 @@ const thinkingPrefix = "[思考] "
 //
 //   - (msg, true)  → Channel should send msg
 //   - (zero, false) → Channel should drop (e.g. terminal events that
-//                      have no user-facing content; the receipt
-//                      already reflects the final state)
+//     have no user-facing content; the receipt
+//     already reflects the final state)
 //
 // Terminal events (Done, Error) are NOT emitted as separate
 // OutboundMessages; the receipt's terminal header carries that
@@ -95,16 +95,13 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 			name = "tool"
 		}
 		var text string
-		var iconKind OutboundKind = OutToolEnd
 		if ev.ToolEnd.Err != nil {
-			iconKind = OutToolEnd
 			text = fmt.Sprintf("%s failed: %s", name, ev.ToolEnd.Err.Error())
 		} else if ev.ToolEnd.Output != "" {
 			text = fmt.Sprintf("%s → %s", name, ev.ToolEnd.Output)
 		} else {
 			text = name + " done"
 		}
-		_ = iconKind
 		return OutboundMessage{
 			ChatID: chatID,
 			Kind:   OutToolEnd,
@@ -141,6 +138,114 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		// emoji and edits the header line. We don't emit a separate
 		// OutboundMessage for them here.
 		return OutboundMessage{}, false
+
+	case agent.EventResult:
+		// Final assistant reply (Claude Code: result.Result).
+		// Distinct from EventText so channels can render it with a
+		// dedicated icon (📝) instead of as a rolling-log entry.
+		// We emit even when Text is empty AND IsError is true so
+		// the channel can flip its header to an error state.
+		if ev.Result == nil {
+			return OutboundMessage{}, false
+		}
+		if ev.Result.Text == "" && !ev.Result.IsError {
+			return OutboundMessage{}, false
+		}
+		return OutboundMessage{
+			ChatID: chatID,
+			Kind:   OutResult,
+			Text:   ev.Result.Text,
+			Meta: map[string]any{
+				"duration_ms": ev.Result.DurationMs,
+				"is_error":    ev.Result.IsError,
+				"subtype":     ev.Result.Subtype,
+			},
+		}, true
+
+	case agent.EventUsage:
+		// Per-turn token usage (Claude Code: result.usage +
+		// result.modelUsage). Channels render it as a footer line.
+		if ev.Usage == nil {
+			return OutboundMessage{}, false
+		}
+		return OutboundMessage{
+			ChatID: chatID,
+			Kind:   OutUsage,
+			Text:   formatUsageSummary(ev.Usage),
+			Meta: map[string]any{
+				"input_tokens":                ev.Usage.InputTokens,
+				"output_tokens":               ev.Usage.OutputTokens,
+				"cache_creation_input_tokens": ev.Usage.CacheCreationInputTokens,
+				"cache_read_input_tokens":     ev.Usage.CacheReadInputTokens,
+				"cost_usd":                    ev.Usage.CostUSD,
+			},
+		}, true
+
+	case agent.EventCompaction:
+		// Mid-turn context compaction — NOT a turn end. Channels
+		// surface "✶ Compacting conversation…" briefly so users
+		// know why the agent paused.
+		text := "✶ Compacting conversation…"
+		var subtype string
+		if ev.Compaction != nil {
+			subtype = ev.Compaction.Subtype
+		}
+		return OutboundMessage{
+			ChatID: chatID,
+			Kind:   OutCompaction,
+			Text:   text,
+			Meta:   map[string]any{"subtype": subtype},
+		}, true
+
+	case agent.EventInit:
+		// Session bootstrap (Claude Code: system/init). Carries
+		// session_id + model; channels surface them in the receipt
+		// header so users can identify the session for /resume.
+		if ev.Init == nil {
+			return OutboundMessage{}, false
+		}
+		return OutboundMessage{
+			ChatID: chatID,
+			Kind:   OutInit,
+			Text:   fmt.Sprintf("session initialized (model: %s)", ev.Init.Model),
+			Meta: map[string]any{
+				"session_id": ev.Init.SessionID,
+				"model":      ev.Init.Model,
+			},
+		}, true
 	}
 	return OutboundMessage{}, false
+}
+
+// formatUsageSummary renders a one-line usage summary suitable for
+// log lines / footer text. Returns "" when all counts are zero
+// (caller decides whether to drop the OutboundMessage).
+//
+// Shape (v0.3): "<N> tokens[ · $X.XXXX]" — the context-window
+// percentage requires a model-aware denominator that we don't carry
+// yet; v0.4 will add ContextWindow to UsageEvent and extend this.
+func formatUsageSummary(u *agent.UsageEvent) string {
+	total := u.InputTokens + u.OutputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+	if total == 0 {
+		return ""
+	}
+	if u.CostUSD > 0 {
+		return fmt.Sprintf("%s tokens · $%.4f", humanTokens(total), u.CostUSD)
+	}
+	return fmt.Sprintf("%s tokens", humanTokens(total))
+}
+
+// humanTokens renders a token count with k-suffix rounding. Mirrors
+// the conventions used in Claude Code's own CLI output ("1.2k",
+// "12k"). Values < 1000 are returned verbatim so small counts stay
+// precise.
+func humanTokens(n int) string {
+	switch {
+	case n < 1000:
+		return fmt.Sprintf("%d", n)
+	case n < 10000:
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	default:
+		return fmt.Sprintf("%dk", n/1000)
+	}
 }

@@ -31,14 +31,26 @@ func TestDefaultAddons_ContainsRequiredScopes(t *testing.T) {
 	}
 	wantScopes := []string{
 		"im:message:send_as_bot",
+		"im:message:update",
 		"im:message:receive_v1",
 		"im:message.reactions:write_only",
+		"im:message.reactions:read",
 		"im:message:readonly",
 		"im:message.group_at_msg:readonly",
 		"im:message.p2p_msg:readonly",
+		"im:message.pins:read",
+		"im:message.pins:write_only",
+		"im:message:recall",
+		"im:message:send_multi_users",
+		"im:message:send_sys_msg",
 		"im:resource",
 		"im:chat:read",
+		"im:chat:update",
 		"im:chat.members:bot_access",
+		"contact:contact.base:readonly",
+		"cardkit:card:write",
+		"cardkit:card:read",
+		"application:application:self_manage",
 	}
 	for _, want := range wantScopes {
 		if !containsString(addons.Scopes.Tenant, want) {

@@ -73,11 +73,20 @@ as closely as a pre-1.0 project can.
   avoid the file-name collision.
 - Feishu scope + callback expansion: `DefaultAddons()` now asks
   for the full interaction set the bot will need:
-  - Tenant scopes: `im:message:send_as_bot`, `im:message.receive_v1`,
-    `im:message.reactions:write_only`, `im:message:readonly`,
+  - Tenant scopes: `im:message:send_as_bot`, `im:message:update`,
+    `im:message:receive_v1`, `im:message.reactions:write_only`,
+    `im:message.reactions:read`, `im:message:readonly`,
     `im:message.group_at_msg:readonly`, `im:message.p2p_msg:readonly`,
-    `im:resource` (upload images/files), `im:chat:read`,
-    `im:chat.members:bot_access`
+    `im:message.pins:read`, `im:message.pins:write_only`,
+    `im:message:recall`, `im:message:send_multi_users`,
+    `im:message:send_sys_msg`, `im:resource`, `im:chat:read`,
+    `im:chat:update`, `im:chat.members:bot_access`,
+    `contact:contact.base:readonly`, `cardkit:card:write`,
+    `cardkit:card:read`, `application:application:self_manage`.
+    Mirrors `larksuite/openclaw-lark`'s `REQUIRED_APP_SCOPES`
+    minus Docx/Base/Calendar/Task (nightme has no feature for
+    those yet) so a fresh install can grow features without
+    forcing a re-authorize round.
   - Events: `im.message.receive_v1`
   - Callbacks: `card.action.trigger` — required for interactive
     card button clicks (permission card Allow/Deny was previously

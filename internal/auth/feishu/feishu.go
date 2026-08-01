@@ -146,20 +146,37 @@ func (f *FeishuAuth) printQRCode(info *registration.QRCodeInfo) {
 // Scope rationale (covers all v0.2 + near-term v0.3 use cases):
 //
 //	im:message:send_as_bot             send text / interactive / image / file
-//	                                  (msg_type discriminator on the send
-//	                                  endpoint; one scope covers all)
-//	im:message:receive_v1              receive message events (the SDK
-//	                                  binds this name to both the scope
-//	                                  and the event)
+//	im:message:update                  update / edit already-sent messages
+//	                                  (UpdateMessage in adapter)
+//	im:message:receive_v1              receive message events
 //	im:message.reactions:write_only    ⏳/🔄/✅ receipts on incoming msgs
+//	im:message.reactions:read          read existing reactions (counterpart)
+//	im:message:readonly                fetch historical messages AND
+//	                                  download inbound attachment resources
+//	                                  via F-14 passthrough
 //	im:message.group_at_msg:readonly   bot triggered by @-mention in groups
 //	im:message.p2p_msg:readonly        bot triggered in 1:1 chats
-//	im:message:readonly                fetch historical messages AND
-//	                                  download inbound attachment
-//	                                  resources via F-14 passthrough
+//	im:message.pins:read               read pinned-message state
+//	im:message.pins:write_only         pin / unpin messages
+//	im:message:recall                  recall bot-sent messages
+//	im:message:send_multi_users        batch DM for notifications
+//	im:message:send_sys_msg            system notifications
 //	im:resource                        upload images/files for sending
 //	im:chat:read                       read chat metadata
+//	im:chat:update                     modify chat settings (name / topic)
 //	im:chat.members:bot_access         read member list of chats bot is in
+//	contact:contact.base:readonly      look up user basics (name, avatar)
+//	cardkit:card:write                 create / update interactive cards
+//	cardkit:card:read                  read card state (for sync handlers)
+//	application:application:self_manage
+//	                                  self-permission introspection
+//	                                  (diagnostic foundation)
+//
+// The set intentionally mirrors larksuite/openclaw-lark's
+// REQUIRED_APP_SCOPES (the official Lark/Feishu OpenClaw plugin)
+// minus Docx/Base/Calendar/Task scopes that nightme does not yet
+// implement. Adding everything at install time avoids forcing a
+// re-authorize round the next time a feature lands.
 //
 // Callbacks:
 //
@@ -181,15 +198,37 @@ func DefaultAddons() *registration.AppAddons {
 		Preset: &preset,
 		Scopes: registration.AppAddonsScopes{
 			Tenant: []string{
+				// Core message send / receive / update.
 				"im:message:send_as_bot",
-				"im:message.reactions:write_only",
-				"im:message:readonly",
+				"im:message:update",
 				"im:message:receive_v1",
+				// Receipts (F-25).
+				"im:message.reactions:write_only",
+				"im:message.reactions:read",
+				// History + attachment passthrough (F-14).
+				"im:message:readonly",
+				// Group / 1:1 triggers.
 				"im:message.group_at_msg:readonly",
 				"im:message.p2p_msg:readonly",
+				// Future messaging features (v0.3+).
+				"im:message.pins:read",
+				"im:message.pins:write_only",
+				"im:message:recall",
+				"im:message:send_multi_users",
+				"im:message:send_sys_msg",
+				// Media upload + chat metadata.
 				"im:resource",
 				"im:chat:read",
+				"im:chat:update",
 				"im:chat.members:bot_access",
+				// User lookup (sender display name, etc.).
+				"contact:contact.base:readonly",
+				// Interactive cards (permission flow + status cards).
+				"cardkit:card:write",
+				"cardkit:card:read",
+				// Diagnostics foundation: introspect the app's own
+				// granted scopes via /application/v6/applications.
+				"application:application:self_manage",
 			},
 		},
 		Events: registration.AppAddonsEvents{

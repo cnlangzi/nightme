@@ -65,7 +65,22 @@ func New(cfg *config.Config) (*slog.Logger, error) {
 	if err != nil {
 		return nil, fmt.Errorf("logging: open %s: %w", path, err)
 	}
-	handler := &closeableHandler{Handler: slog.NewJSONHandler(f, &slog.HandlerOptions{Level: level}), file: f}
+	// Tee log lines to the file, stdout, and stderr so the CLI
+	// surface shows the same trace the persisted log captures,
+	// irrespective of which stream the user redirects. Without
+	// the stdout/sderr sinks the user has to tail the log file
+	// to see what nightme is doing — useful for debugging which
+	// stage dropped a message but painful during a live session.
+	//
+	// Three sinks is defensive: stderr matches the lark SDK's
+	// existing CLI output and systemd/journald capture it by
+	// default; stdout is the conventional user-requested sink;
+	// combined they survive `> log.txt` and `2> log.txt`
+	// redirections without losing the trace. The cost is one
+	// extra write per log line — negligible at nightme's log
+	// volume (single-digit messages per minute).
+	sink := io.MultiWriter(f, os.Stdout, os.Stderr)
+	handler := &closeableHandler{Handler: slog.NewJSONHandler(sink, &slog.HandlerOptions{Level: level}), file: f}
 	return slog.New(handler), nil
 }
 

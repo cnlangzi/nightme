@@ -1,7 +1,9 @@
 package logging
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,6 +75,81 @@ func TestLogger_DefaultPath(t *testing.T) {
 	path := filepath.Join(dir, ".local", "share", "nightme", "nightme.log")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("default log: %v", err)
+	}
+}
+
+func TestLogger_TeesToStdoutAndStderr(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "nightme.log")
+
+	// Replace os.Stdout and os.Stderr with pipes so we can capture
+	// what the MultiWriter writes to each sink. Restore on exit.
+	origStdout := os.Stdout
+	origStderr := os.Stderr
+	rOut, wOut, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stdout: %v", err)
+	}
+	rErr, wErr, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stderr: %v", err)
+	}
+	os.Stdout = wOut
+	os.Stderr = wErr
+	t.Cleanup(func() {
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+		_ = rOut.Close()
+		_ = wOut.Close()
+		_ = rErr.Close()
+		_ = wErr.Close()
+	})
+
+	lg, err := New(&config.Config{Logging: config.LoggingConfig{File: logPath}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	lg.Info("tee-me", "kind", "triple-sink")
+
+	// Close the writers so the reads on the consumer side complete.
+	_ = wOut.Close()
+	_ = wErr.Close()
+
+	var outBuf, errBuf bytes.Buffer
+	if _, err := io.Copy(&outBuf, rOut); err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	if _, err := io.Copy(&errBuf, rErr); err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	stdoutContent := outBuf.String()
+	stderrContent := errBuf.String()
+
+	// All three sinks must contain the message — file for persistence,
+	// stdout and stderr for the CLI surface (different consumers
+	// may redirect only one of them).
+	fileContent, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if !strings.Contains(string(fileContent), "tee-me") {
+		t.Errorf("file missing log line: %q", fileContent)
+	}
+	if !strings.Contains(stdoutContent, "tee-me") {
+		t.Errorf("stdout missing log line: %q", stdoutContent)
+	}
+	if !strings.Contains(stderrContent, "tee-me") {
+		t.Errorf("stderr missing log line: %q", stderrContent)
+	}
+	// Both sinks share the JSON format the parser already validates.
+	for name, content := range map[string]string{"stdout": stdoutContent, "stderr": stderrContent} {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(content)), &record); err != nil {
+			t.Fatalf("%s not valid JSON: %v: %q", name, err, content)
+		}
+		if record["msg"] != "tee-me" {
+			t.Errorf("%s msg = %v, want tee-me", name, record["msg"])
+		}
 	}
 }
 

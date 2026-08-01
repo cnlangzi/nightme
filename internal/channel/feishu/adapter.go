@@ -59,11 +59,11 @@ type Adapter struct {
 	stopDone       chan struct{}
 	wsDone         chan struct{}
 
-	// logger is the structured-log target for outgoing-message
-	// traces. Each send / reaction / update emits an info-level
-	// line so the CLI surface shows both halves of a conversation
-	// (the inbound "received:" line is logged by the channel
-	// pump). Defaults to slog.Default(); settable via SetLogger.
+	// logger is the structured-log target for both inbound and
+	// outgoing message traces. handleMessage emits one info
+	// line per inbound via logInbound; every send / reaction /
+	// update emits another via logOutgoing. Defaults to
+	// slog.Default(); settable via SetLogger.
 	logger *slog.Logger
 
 	// Stage 3: rolling-log receipt state lives on the adapter
@@ -730,9 +730,9 @@ func (a *Adapter) SetLogger(l *slog.Logger) {
 
 // logOutgoing emits one info-level line per outgoing Feishu call so
 // the CLI surface shows both halves of the conversation. The
-// inbound "received: …" line is printed by the channel pump in
-// cmd/nightme/run.go; without this trace the user sees their own
-// inputs but not what the bot sent back.
+// inbound "received: …" line is emitted by handleMessage via
+// logInbound; without this trace the user sees their own inputs
+// but not what the bot sent back.
 //
 // `kind` is one of "send_text", "add_reaction", "delete_reaction",
 // "update_message", "send_card". `target` is the chat ID for text
@@ -1041,6 +1041,11 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 		MessageID:   stringValue(message.MessageId),
 		Attachments: attachments,
 	}
+	// Trace every inbound message before the publish lock so the
+	// CLI surface shows the user message that triggered the
+	// handler even if the channel send is cancelled or timed out.
+	// Companion to logOutgoing (the bot side of the conversation).
+	a.logInbound(msg)
 	if ctx == nil {
 		ctx = context.Background()
 	}

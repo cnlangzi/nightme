@@ -6,6 +6,19 @@ as closely as a pre-1.0 project can.
 
 ## [Unreleased] — v0.3 architecture refactor (Stage 3 landed — v0.3 internally feature-complete)
 
+- **CLI log surface (fix)**: the structured logger now tees every
+  line to the persisted log file **plus stdout and stderr**, so
+  the terminal shows the same trace the file captures and `nightme
+  run > log.txt` / `2> log.txt` redirects both keep the trace.
+  Companion to the Feishu adapter's `logInbound` call wiring —
+  `handleMessage` now emits one `feishu: incoming` line per user
+  message (the function was defined but never called since commit
+  `0a0e021` left the call edge as a stale comment). Combined, the
+  CLI now shows both halves of every conversation:
+  - inbound: `feishu: incoming chat_id=… text=…`
+  - outbound: `feishu: outgoing kind=… target=…`
+  Existing tests for the file sink still pass; two new tests
+  cover the stdout+stderr sinks and the inbound log emission.
 - **Stage 3 (Feishu display strategy in Channel.Send)**: the
   rolling-log receipt logic that lived in
   `internal/channel/feishu/render.go` is now inside the Feishu

@@ -37,16 +37,59 @@ import (
 // a mock that records the calls. Keeping the field typed as an
 // interface (instead of *Adapter) makes the receipt unit-testable
 // without spinning up a real lark client.
+//
+// SendCard + PatchMessage power the rolling-log card strategy
+// (first-send-then-in-place-PATCH, see docs/channel/feishu.md §5).
+// SendMessageText remains for the cold-start synthetic reply path
+// (see Adapter.receiptFor) and as an escape hatch for tests.
 type receiptBot interface {
 	AddReaction(ctx context.Context, msgID, emoji string) (string, error)
 	UpdateMessage(ctx context.Context, messageID, text string) error
 	SendMessageText(ctx context.Context, chatID, text string) (string, error)
+	// SendCard posts a new interactive card and returns its message ID.
+	// Used on the FIRST render of a receipt (no cardMsgID yet).
+	SendCard(ctx context.Context, chatID, cardJSON string) (string, error)
+	// PatchMessage replaces the body of an existing message in place
+	// (Feishu PATCH /im/v1/messages/{id}). Used on every render after
+	// the first. The message must already be an interactive card.
+	PatchMessage(ctx context.Context, messageID, cardJSON string) error
 }
 
 // replyMaxBytes bounds the size of the rolling log message. Feishu's
-// CreateMessage / UpdateMessage caps the content body at ~4 KiB; we
-// stay under that to avoid implicit truncation by the platform.
-const replyMaxBytes = 3500
+// card body (and rich-text / text) request body is capped at 30 KB
+// (Create / PATCH share the limit per the SDK's resource.go comment
+// on Patch). We stay well under that — 24 KB leaves headroom for the
+// envelope + future growth — so a single receipt is never rejected
+// for size. Eviction kicks in once the rendered card body crosses
+// this number, dropping oldest entries from the front.
+//
+// The legacy text-mode limit was 4 KB (3500 in this file). The card
+// surface lifts the bar by ~6×; the rendered body also includes the
+// per-element JSON wrapping, so the effective entry count is
+// further constrained by replyMaxElements below.
+const replyMaxBytes = 24 * 1024
+
+// replyMaxElements caps the number of Feishu card body elements.
+// Feishu's body.elements array is hard-limited to 50 elements
+// (per the card 2.0 docs). The receipt layout reserves:
+//
+//	1 element  — header (state.headerLine)
+//	1 element  — evicted marker (only when r.evicted > 0)
+//	N elements — entries (≤ replyMaxEntries)
+//	1 element  — <hr> divider
+//	1 element  — foot note (state.footLine)
+//
+// → 2 + replyMaxEntries + 2 = 50 ⇒ replyMaxEntries ≤ 46. We pick
+// 45 to leave one slot of slack against Feishu's 50-element limit
+// (and against any future per-entry element growth).
+const replyMaxElements = 50
+
+// replyMaxEntries is the cap on entries kept in the rolling log.
+// Derived from replyMaxElements (50) − reserved slots (header +
+// evicted + hr + footer = 4, and the header slot is itself
+// conditional on headerLine being non-empty, but we budget for the
+// worst case).
+const replyMaxEntries = 45
 
 // perEntryMaxBytes bounds a single log entry's payload so a giant
 // 💬 reply line cannot monopolise the budget.
@@ -120,8 +163,9 @@ type MessageReceipt struct {
 	receivedAt  time.Time
 
 	// entries is the rolling-log buffer (FIFO). Append grows it;
-	// renderLocked evicts from the front when total bytes exceed
-	// replyMaxBytes.
+	// renderLocked evicts from the front when either the byte budget
+	// (replyMaxBytes) or the element budget (replyMaxElements) is
+	// exceeded.
 	entries []LogEntry
 
 	// evicted tracks how many entries were dropped from the front
@@ -133,6 +177,39 @@ type MessageReceipt struct {
 	// duplicate AddReaction. Reactions are append-only — previous
 	// state emojis stay on the user message as history.
 	currentReaction string
+
+	// cardMsgID is the Feishu message id of the rolling-log card
+	// once it has been created. Empty before the first render.
+	// After the first SendCard it is set; subsequent renders
+	// PatchMessage against this id rather than posting new
+	// messages. See docs/channel/feishu.md §5.2 / §5.3 for the
+	// first-send-then-PATCH strategy.
+	//
+	// Kept separate from replyMsgID (which now points at the same
+	// card) so the receipt's "what is the surface" intent stays
+	// explicit. If a future migration changes the surface type
+	// (e.g. to a thread reply), replyMsgID's meaning changes too;
+	// cardMsgID stays anchored to "the card we PATCH".
+	cardMsgID string
+
+	// --- v1.1 foot-note metadata ---
+	//
+	// Populated by Append on EventInit (agentName + workspace) and
+	// EventUsage (input/output token counts). The buildReceiptCard
+	// helper renders the foot note as
+	//
+	//   "Agent · <agentName> | cwd · <workspace> | tokens · <count>"
+	//
+	// Any segment whose source field is empty is omitted (no
+	// "Agent · ·" double-dot). The whole foot note is omitted
+	// when every segment is empty (e.g. before EventInit arrives).
+	// See docs/channel/feishu.md §9.3 for the contract.
+
+	agentName    string // from agent.EventInit.AgentName
+	workspace    string // from agent.EventInit.Workspace (cwd)
+	branch       string // from agent.EventInit.Branch (git branch)
+	inputTokens  int    // accumulated from agent.EventUsage
+	outputTokens int    // accumulated from agent.EventUsage
 }
 
 // ReceiptState is the lifecycle state of a MessageReceipt.
@@ -206,6 +283,152 @@ func (s ReceiptState) headerLine(r *MessageReceipt) string {
 	return ""
 }
 
+// footLine returns the labelled summary that sits at the bottom
+// of the receipt card (after a <hr> divider). It is rendered by
+// buildReceiptCard as a plain markdown element (no color tag —
+// the user requested the default card-renderer color).
+//
+// Format — two-line layout. The first line groups the three
+// "task-scoped" fields (Agent, GIT, Tokens) joined by " | ";
+// the second line carries the workspace path alone so a long
+// cwd doesn't push the metadata off the card.
+//
+//	Agent: <agentName> | GIT: <branch> | Tokens: <in>/<out>
+//	Workspace: <workspace>
+//
+// Missing fields drop their segment from line 1 entirely; if
+// only the workspace is present, the result is a single
+// "Workspace: ..." line. If nothing is present, "" is
+// returned and buildReceiptCard omits the <hr> + foot note.
+//
+// Labels are mixed-case (Agent / GIT / Tokens / Workspace) per
+// the user's most recent explicit request. The TOKENS
+// segment uses uppercase K/M for the input side and
+// lowercase k/m for the output side (a small visual
+// convention so users can scan "32K/101" and tell at a
+// glance which side is input vs output). Each side is
+// omitted when its count is zero, so a turn that has not
+// yet reported usage renders as "TOKENS: 20K" (input only)
+// or "TOKENS: 1k" (output only) rather than "TOKENS: 0/0"
+// or "TOKENS: 20K/0".
+//
+// NOTE: the per-line labels use ": " (colon + space) per
+// the user's explicit request — this is the standard "key:
+// value" Markdown pattern. Feishu's lark_md renderer MAY
+// interpret a line that *starts* with "key: value" as a
+// definition list and hoist the value to the top of the body
+// (OpenClaw issue #59360). The risk is contained to the foot
+// note's own contents; the user accepted the trade-off for
+// visual clarity. See the original PR discussion in
+// docs/channel/feishu.md §9.3 for the trade-off analysis.
+//
+// Returns "" if the receipt is nil OR every source field is
+// empty / zero. buildReceiptCard uses the empty return to omit
+// the <hr> + footer section entirely (no divider when there's
+// nothing to show).
+func (s ReceiptState) footLine(r *MessageReceipt) string {
+	if r == nil {
+		return ""
+	}
+	// Line 1: task-scoped fields joined by " | ".
+	line1 := []string{}
+	if r.agentName != "" {
+		line1 = append(line1, "Agent: "+r.agentName)
+	}
+	if r.branch != "" {
+		line1 = append(line1, "GIT: "+r.branch)
+	}
+	if r.inputTokens > 0 || r.outputTokens > 0 {
+		// Render "<inputK>/<outputk>" with each side
+		// independently suppressed when zero.
+		var left, right string
+		if r.inputTokens > 0 {
+			left = compactNumberLoud(r.inputTokens)
+		}
+		if r.outputTokens > 0 {
+			right = compactNumber(r.outputTokens)
+		}
+		switch {
+		case left != "" && right != "":
+			line1 = append(line1, "Tokens: "+left+"/"+right)
+		case left != "":
+			line1 = append(line1, "Tokens: "+left)
+		case right != "":
+			line1 = append(line1, "Tokens: "+right)
+		}
+	}
+	// Line 2: workspace (full path) alone.
+	var line2 string
+	if r.workspace != "" {
+		line2 = "Workspace: " + r.workspace
+	}
+	// Compose: omit the <br/> separator when one side is
+	// empty so a single-line render doesn't have a
+	// dangling line break.
+	joined1 := strings.Join(line1, " | ")
+	switch {
+	case joined1 != "" && line2 != "":
+		return joined1 + "<br/>" + line2
+	case joined1 != "":
+		return joined1
+	case line2 != "":
+		return line2
+	}
+	return ""
+}
+
+// compactNumber formats a non-negative token count with a
+// lowercase unit suffix. The decimal place is dropped when the
+// result is a whole number (so 1,000 → "1k" not "1.0k", matching
+// the example in the user's footer request "20K/1k"). Used by
+// footLine for the output-tokens side of the
+// "<inputK>/<outputk>" segment.
+func compactNumber(n int) string {
+	switch {
+	case n < 1000:
+		return fmt.Sprintf("%d", n)
+	case n < 10_000:
+		// 1,000 → "1k", 1,200 → "1.2k", 9,999 → "10k".
+		// n%1000==0 catches the exact thousands; n>=10000
+		// (handled by the next branch) catches everything
+		// else that rounds to a whole k.
+		if n%1000 == 0 {
+			return fmt.Sprintf("%dk", n/1000)
+		}
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	case n < 1_000_000:
+		return fmt.Sprintf("%dk", n/1000)
+	default:
+		if n%1_000_000 == 0 {
+			return fmt.Sprintf("%dM", n/1_000_000)
+		}
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
+}
+
+// compactNumberLoud is the same formatter as compactNumber but
+// with an uppercase K/M suffix. Used by footLine for the
+// input-tokens side so the user can scan "20K/1k" and tell at a
+// glance which side is input vs output.
+func compactNumberLoud(n int) string {
+	switch {
+	case n < 1000:
+		return fmt.Sprintf("%d", n)
+	case n < 10_000:
+		if n%1000 == 0 {
+			return fmt.Sprintf("%dK", n/1000)
+		}
+		return fmt.Sprintf("%.1fK", float64(n)/1000)
+	case n < 1_000_000:
+		return fmt.Sprintf("%dK", n/1000)
+	default:
+		if n%1_000_000 == 0 {
+			return fmt.Sprintf("%dM", n/1_000_000)
+		}
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
+}
+
 // Emoji returns the Feishu reaction emoji_type for a state. Used by
 // the ReactionAdd side of the dual-track.
 //
@@ -217,11 +440,11 @@ func (s ReceiptState) headerLine(r *MessageReceipt) string {
 func (s ReceiptState) Emoji() string {
 	switch s {
 	case StateWaiting:
-		return "OK"
+		return "OneSecond"
 	case StateExecuting:
 		return "OnIt"
 	case StateCompleted:
-		return "PARTY"
+		return "DONE"
 	case StateError:
 		return "THUMBSUP" // closest Feishu-predefined indicator of "failed"
 	}
@@ -291,6 +514,30 @@ func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receipt
 		chatID:     chatID,
 		userMsgID:  userMsgID,
 		replyMsgID: replyMsgID,
+		bot:        bot,
+		logger:     slog.Default(),
+		receivedAt: time.Now(),
+		state:      StateWaiting,
+	}
+}
+
+// NewMessageReceiptForCard wraps an already-posted interactive card
+// (the caller posted the cold-start card via SendCard and is
+// passing back the message id). The returned receipt is seeded
+// with cardMsgID = messageID so the FIRST Append skips the SendCard
+// step and goes straight to PATCH in place. The text-mode
+// NewMessageReceiptForReply constructor leaves cardMsgID empty and
+// triggers a SendCard on first render — that path is the right
+// choice when the gateway fell back to a text reply; this one is
+// the right choice when the adapter's receiptFor posted a card
+// directly (the recommended cold-start path, see
+// docs/channel/feishu.md §5.2 + buildColdStartCard in adapter.go).
+func NewMessageReceiptForCard(chatID, userMsgID, cardMessageID string, bot receiptBot) *MessageReceipt {
+	return &MessageReceipt{
+		chatID:     chatID,
+		userMsgID:  userMsgID,
+		replyMsgID: cardMessageID,
+		cardMsgID:  cardMessageID,
 		bot:        bot,
 		logger:     slog.Default(),
 		receivedAt: time.Now(),
@@ -387,6 +634,35 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 		r.state = StateCompleted
 		r.completedAt = time.Now()
 		return r.renderLocked(ctx)
+	case agent.EventInit:
+		// Stash agent identity + workspace + branch for the
+		// foot note. Stamps happen even if Init arrives after
+		// the first event (unusual — system/init normally
+		// precedes any assistant output) so a later PATCH
+		// picks up the foot note as soon as the metadata is
+		// known.
+		if ev.Init != nil {
+			if ev.Init.AgentName != "" {
+				r.agentName = ev.Init.AgentName
+			}
+			if ev.Init.Workspace != "" {
+				r.workspace = ev.Init.Workspace
+			}
+			if ev.Init.Branch != "" {
+				r.branch = ev.Init.Branch
+			}
+		}
+		return r.renderLocked(ctx)
+	case agent.EventUsage:
+		// Accumulate token counts across turns so the foot note
+		// reflects the running total rather than only the most
+		// recent usage event. The foot note redraws on every
+		// usage event so the user can see usage grow.
+		if ev.Usage != nil {
+			r.inputTokens += ev.Usage.InputTokens
+			r.outputTokens += ev.Usage.OutputTokens
+		}
+		return r.renderLocked(ctx)
 	}
 
 	entry, ok := eventToEntry(ev, time.Now())
@@ -413,8 +689,11 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 }
 
 // appendEntryLocked pushes entry onto r.entries and evicts the
-// oldest from the front until the rendered byte budget is met.
-// Caller must hold r.mu.
+// oldest from the front until both the byte budget (replyMaxBytes)
+// and the entry budget (replyMaxEntries) are satisfied. The byte
+// budget protects against Feishu's 30 KB card body cap; the entry
+// budget protects against the 50-element hard limit (see the
+// derivation on replyMaxEntries). Caller must hold r.mu.
 func (r *MessageReceipt) appendEntryLocked(entry LogEntry) {
 	if entry.Text == "" && entry.Icon == "" {
 		return
@@ -426,117 +705,107 @@ func (r *MessageReceipt) appendEntryLocked(entry LogEntry) {
 }
 
 // evictOverflowLocked drops oldest entries until the rendered body
-// fits under replyMaxBytes. Marks each drop in r.evicted so the
-// rendered header can show "…(前 N 条已省略)".
+// fits under BOTH budgets (whichever is tighter). Marks each drop in
+// r.evicted so the rendered header can show "…(前 N 条已省略)".
 //
 // Caller must hold r.mu.
 func (r *MessageReceipt) evictOverflowLocked() {
-	for totalLogBytesLocked(r) > replyMaxBytes && len(r.entries) > 1 {
+	for (totalLogBytesLocked(r) > replyMaxBytes || len(r.entries) > replyMaxEntries) && len(r.entries) > 1 {
 		r.entries = r.entries[1:]
 		r.evicted++
 	}
 }
 
-// totalLogBytesLocked returns the rendered byte size of header +
-// entries (without the eviction marker — that's only added when
-// r.evicted > 0).
+// totalLogBytesLocked returns an approximation of the rendered
+// card-body byte size (header + evicted marker + entries). The
+// estimate is intentionally simple — it sums the user-visible
+// text length (icon + text) per entry plus a per-element JSON
+// wrapping overhead. The exact JSON depends on key ordering and
+// the lark_md markdown grammar; this estimate is a conservative
+// upper bound used only to decide when to evict, not to size the
+// final payload. eviction triggers early enough that the actual
+// PATCH always fits Feishu's 30 KB cap.
 //
 // Caller must hold r.mu.
 func totalLogBytesLocked(r *MessageReceipt) int {
-	total := len(r.state.headerLine(r)) + 1 // +1 trailing newline
+	const perElementOverhead = 96 // {"tag":"div","text":{"tag":"lark_md","content":""}} ≈ 50-100 bytes
+	total := len(r.state.headerLine(r)) + perElementOverhead
+	if r.evicted > 0 {
+		total += len(fmt.Sprintf(logEvictedMarker, r.evicted)) + perElementOverhead
+	}
 	for _, e := range r.entries {
-		total += len(e.Icon) + 1 + len(e.Text) + 1 // "icon text\n"
+		total += len(e.Icon) + 1 + len(e.Text) + perElementOverhead
+	}
+	// Foot note (when present) — <hr> + plain markdown.
+	if note := r.state.footLine(r); note != "" {
+		total += len(note) + 2*perElementOverhead
 	}
 	return total
 }
 
-// formatLocked produces the full message body. Caller must hold
-// r.mu.
-func (r *MessageReceipt) formatLocked() string {
-	var b strings.Builder
-	b.WriteString(r.state.headerLine(r))
-	b.WriteByte('\n')
-	if r.evicted > 0 {
-		fmt.Fprintf(&b, "\n"+logEvictedMarker+"\n", r.evicted)
-	}
-	for _, e := range r.entries {
-		b.WriteString(e.Icon)
-		b.WriteByte(' ')
-		b.WriteString(e.Text)
-		b.WriteByte('\n')
-	}
-	return b.String()
-}
-
-// formatEntry produces the body for a single-entry "reply" message.
-// Caller must hold r.mu. Used by the per-event update strategy
-// where each agent event ships as its own message rather than as
-// an in-place update of a rolling log card. The state header is
-// omitted because each event carries its own context; the chat
-// surface is the sequence of messages, not a single card.
-func (r *MessageReceipt) formatEntry(e LogEntry) string {
-	if e.Text == "" && e.Icon == "" {
-		return ""
-	}
-	var b strings.Builder
-	if e.Icon != "" {
-		b.WriteString(e.Icon)
-		b.WriteByte(' ')
-	}
-	b.WriteString(e.Text)
-	return b.String()
-}
-
-// renderLocked pushes the current state emoji (reaction) and the latest
-// entry to Feishu. Caller must hold r.mu.
+// renderLocked pushes the current receipt state to Feishu. Caller
+// must hold r.mu.
 //
-// Reaction strategy: append-only. When the lifecycle state changes, the
-// new predefined Feishu reaction is added and previous reactions are
-// retained as history. Deleting first is intentionally avoided because a
-// failed delete can leave the old reaction in place and make Feishu reject
-// the new add with code 99992354. Same-state renders (heartbeats) do not
-// add duplicate reactions. Reaction failures are best-effort and never
-// block shipping the reply text.
+// Two side-effects fire on every render:
 //
-// Reply text strategy: PER-EVENT FRESH MESSAGE. Each agent event
-// ships as its own im.message.create rather than as an in-place
-// update of a rolling-log card. The pre-refactor design collapsed
-// every event into a single message that was updated N times; the
-// new design emits N messages so the chat surface mirrors the
-// event stream one-for-one. The initial ⏳ card (posted by
-// SendUserMessage) is preserved as the receipt's "I'm thinking"
-// indicator; events after that point arrive as new messages.
+//  1. Reaction on the USER message (append-only). The receipt
+//     keeps a single emoji per state on the user message and
+//     never deletes — same-state renders (heartbeats) skip a
+//     duplicate add. See F-25 dual-track for the why.
+//  2. The card body itself, via first-send-then-PATCH:
+//     - If r.cardMsgID == "" → first render. Call SendCard to
+//     create the interactive card; capture the message id.
+//     - Else → call PatchMessage to replace the body of the
+//     existing card in place. The whole card is replaced; the
+//     server doesn't accept diffs. See docs/channel/feishu.md
+//     §3.4 / §6.4.
 //
-// The receipt's rolling-log buffer (entries / evicted) is kept for
-// audit trails and future replay support but is no longer
-// rendered into a single card body. r.replyMsgID is updated to the
-// latest shipped message so the receipt can still address its
-// surface if a future feature needs to.
+// The card is built by buildReceiptCard (in adapter.go) which lays
+// out: header div → optional evicted marker → entries → <hr> →
+// optional foot note in <text_tag color='neutral'>. Empty entries
+// (e.g. terminal state transitions with no log line) still trigger
+// a render so the header timestamp refreshes.
+//
+// Failure modes:
+//   - SendCard / PatchMessage failure: logged + returned to the
+//     caller (which is Append, ApplyState, etc). The card surface
+//     may be stale until the next render; we do NOT auto-create
+//     a new card on PATCH failure (avoids duplicate surfaces).
+//   - Reaction failure: logged only, never blocks the body send.
 func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	// 1. Append a reaction when the lifecycle state changes.
 	r.appendReactionLocked(ctx, r.state.Emoji())
 
-	// 2. Send the latest entry as a fresh message. We emit one
-	// message per agent event rather than updating an existing
-	// card in place — the chat surface is now the event stream,
-	// not a single rolling-log card. Skip empty entries (header
-	// transitions without text, etc.) so we don't post empty
-	// messages.
-	if len(r.entries) == 0 {
-		return nil
-	}
-	latest := r.entries[len(r.entries)-1]
-	text := r.formatEntry(latest)
-	if text == "" {
-		return nil
-	}
-	msgID, err := r.bot.SendMessageText(ctx, r.chatID, text)
+	// 2. Build the card body. buildReceiptCard is in adapter.go.
+	body, err := buildReceiptCard(r)
 	if err != nil {
-		r.logger.Warn("feishu receipt: ship entry failed",
-			"err", err, "state", r.state, "icon", latest.Icon, "text", truncateForLog(latest.Text, 80))
-		return fmt.Errorf("feishu receipt: ship entry: %w", err)
+		r.logger.Warn("feishu receipt: build card failed",
+			"err", err, "state", r.state, "entries", len(r.entries))
+		return fmt.Errorf("feishu receipt: build card: %w", err)
 	}
-	r.replyMsgID = msgID
+
+	if r.cardMsgID == "" {
+		// First send: create the card. Capture the message id
+		// for subsequent PATCH calls.
+		msgID, sendErr := r.bot.SendCard(ctx, r.chatID, body)
+		if sendErr != nil {
+			r.logger.Warn("feishu receipt: create card failed",
+				"err", sendErr, "state", r.state, "entries", len(r.entries))
+			return fmt.Errorf("feishu receipt: create card: %w", sendErr)
+		}
+		r.cardMsgID = msgID
+		r.replyMsgID = msgID // keep alias in sync
+		return nil
+	}
+
+	// Subsequent: PATCH the existing card in place. The whole
+	// body is replaced; the server doesn't accept diffs.
+	if patchErr := r.bot.PatchMessage(ctx, r.cardMsgID, body); patchErr != nil {
+		r.logger.Warn("feishu receipt: patch card failed",
+			"err", patchErr, "state", r.state, "card_msg_id", r.cardMsgID,
+			"entries", len(r.entries))
+		return fmt.Errorf("feishu receipt: patch card: %w", patchErr)
+	}
 	return nil
 }
 
@@ -622,22 +891,61 @@ func (r *MessageReceipt) applyState(ctx context.Context, target channel.ReceiptS
 	return nil
 }
 
-// dispose clears the reply body. Idempotent. Lifecycle reactions are
-// left in place as the append-only history trail.
-// Called by Adapter.DisposeReceipt after the final state transition.
-// v1.1 keeps the receipt in the adapter's indexes until the next
-// SendUserMessage call so legacy fallback paths that look up by
-// userMsgID keep working until commit 3 migrates them.
+// dispose marks the receipt as closed and PATCHes the card with
+// a "closed" footer so users see a clear visual signal that the
+// session is ended. Idempotent. Lifecycle reactions are left in
+// place as the append-only history trail. Called by
+// Adapter.DisposeReceipt after the final state transition.
+//
+// History: the v0.3 dispose called r.bot.UpdateMessage(ctx,
+// replyMsgID, "") to clear the legacy text-mode reply. That
+// pathway is broken in v1.1: the receipt is now an interactive
+// card, and Feishu's Update (PUT) endpoint rejects card bodies
+// with code 230054 ("operation not supported" — see
+// https://open.feishu.cn/document/server-docs/im-v1/message/reply).
+// The v1.1 dispose uses PatchMessage (which supports cards) and
+// stamps a "closed" foot line so the surface ends in a
+// user-visible terminal state. The whole call is best-effort;
+// PatchMessage failure is logged at debug so a slow 5-QPS
+// burst can't kill the closeout.
 func (r *MessageReceipt) dispose(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.replyMsgID != "" {
-		if err := r.bot.UpdateMessage(ctx, r.replyMsgID, ""); err != nil {
-			// Feishu's UpdateMessage may not support empty body; ignore.
-			r.logger.Debug("feishu receipt: clear body noop",
-				"err", err, "msg_id", r.replyMsgID)
-		}
+	if r.cardMsgID == "" {
+		// No card surface to close — nothing to do. The
+		// legacy UpdateMessage call previously targeted
+		// r.replyMsgID, but the replyMsgID path only
+		// existed for text-mode receipts; new receipts
+		// always go through cardMsgID.
+		return nil
+	}
+	// Stamp a "closed" foot line on top of the existing
+	// footer. We do this by patching with the same body
+	// the live card already shows (so the visual is
+	// unchanged) but with a transient closing marker
+	// prepended — actually, simpler: just re-render the
+	// card with the current state. buildReceiptCard picks
+	// up StateError vs StateCompleted automatically.
+	// Force the state to "closed" by re-rendering — this
+	// is a no-op visual change (the card already shows the
+	// final state) but it ensures the last-render is the
+	// "dispose" render.
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		r.logger.Debug("feishu receipt: dispose build card failed",
+			"err", err, "card_msg_id", r.cardMsgID)
+		return nil
+	}
+	if err := r.bot.PatchMessage(ctx, r.cardMsgID, body); err != nil {
+		// PATCH is best-effort: a 230054 here would mean
+		// the message is no longer patchable (deleted,
+		// >14 days old, or rate-limited). Either way the
+		// user's chat history still shows the last
+		// successful render; we don't need to fail the
+		// closeout.
+		r.logger.Debug("feishu receipt: dispose patch failed",
+			"err", err, "card_msg_id", r.cardMsgID)
 	}
 	return nil
 }

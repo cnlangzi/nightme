@@ -181,6 +181,20 @@ const (
 	// from the agent's system/init event. Channels use it to render
 	// "session <id> · model <name>" in the receipt header.
 	OutInit
+	// OutCommandReply is a one-shot plain-text message sent in
+	// response to a system-level slash command (e.g. /cwd, /run,
+	// /help, /kill, /agents) or to a runtime error that needs to
+	// surface to the user without the rolling-log card path.
+	//
+	// Distinct from OutText: OutText is the agent's stream of
+	// intermediate / final replies and goes through the receipt
+	// (F-25 rolling-log card → PATCH in place). OutCommandReply
+	// bypasses the receipt entirely so the user sees a standalone
+	// text message, not a new card. The Feishu adapter implements
+	// this with a plain SendMessageText call (no ReplyTo threading,
+	// no in-place update). See docs/channel/feishu.md §5 for the
+	// full rationale.
+	OutCommandReply
 )
 
 // String renders OutboundKind for log lines.
@@ -210,6 +224,8 @@ func (k OutboundKind) String() string {
 		return "compaction"
 	case OutInit:
 		return "init"
+	case OutCommandReply:
+		return "command_reply"
 	}
 	return "unknown"
 }

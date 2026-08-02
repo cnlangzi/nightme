@@ -351,7 +351,12 @@ func (r channelResponder) Reply(ctx context.Context, chatID, text string) error 
 	if r.ch == nil {
 		return nil
 	}
-	return r.ch.Send(ctx, gateway.OutboundMessage{ChatID: chatID, Kind: gateway.OutText, Text: text})
+	// Slash-command / runtime-error replies use OutCommandReply
+	// so the Feishu adapter sends a plain text message instead
+	// of routing through the receipt rolling-log card. No
+	// ReplyTo, no in-place update, no receipt creation. See
+	// internal/gateway/messages.go for the kind definition.
+	return r.ch.Send(ctx, gateway.OutboundMessage{ChatID: chatID, Kind: gateway.OutCommandReply, Text: text})
 }
 
 // SendUserMessage is the F-25 entry point used by the gateway to

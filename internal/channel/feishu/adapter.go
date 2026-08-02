@@ -2,6 +2,7 @@
 package feishu
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -37,6 +38,14 @@ const interactiveMessageType = "interactive"
 // sendMessageFunc is kept behind the adapter so unit tests can exercise the
 // channel without making an HTTP request to Feishu.
 type sendMessageFunc func(ctx context.Context, chatID, msgType, content string) (string, error)
+
+// updateMessageFunc is the in-place update boundary (Feishu PATCH
+// /im/v1/messages/{id}). Kept behind a function field so unit tests
+// can replace the network call with a small in-memory stub. PATCH
+// is the SDK's *Patch* method (NOT *Update* — Update only supports
+// text/rich-text messages; see receipt.go and docs/channel/feishu.md
+// §3.4 for the rationale).
+type updateMessageFunc func(ctx context.Context, messageID, content string) error
 
 // Adapter is the Feishu implementation of channel.Channel.
 //
@@ -97,9 +106,10 @@ type Adapter struct {
 
 	// These hooks have production defaults and are intentionally kept as
 	// fields so tests can replace the network boundary with a small function.
-	wsStart  func(context.Context) error
-	wsClose  func()
-	sendFunc sendMessageFunc
+	wsStart    func(context.Context) error
+	wsClose    func()
+	sendFunc   sendMessageFunc
+	updateFunc updateMessageFunc
 }
 
 // NewAdapter constructs a Feishu adapter and validates the credentials needed
@@ -167,6 +177,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	a.wsStart = a.client.Start
 	a.wsClose = a.client.Close
 	a.sendFunc = a.sendViaLark
+	a.updateFunc = a.updateViaLark
 	return a, nil
 }
 
@@ -487,7 +498,8 @@ func (a *Adapter) DisposeReceipt(ctx context.Context, receipt channel.Receipt) e
 // creating one if the gateway's pumpOutbound emitted an OutText
 // without a prior SendUserMessage (e.g. agent turn started from a
 // startup). The first event in that case seeds the receipt with a
-// ⏳ header; subsequent events roll in via Append.
+// ⏳ header card; subsequent events roll in via Append and PATCH
+// the same card in place.
 func (a *Adapter) receiptFor(ctx context.Context, chatID string) *MessageReceipt {
 	a.mu.Lock()
 	if r, ok := a.receipts[chatID]; ok && r != nil {
@@ -496,17 +508,28 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID string) *MessageReceipt
 	}
 	a.mu.Unlock()
 
-	// Cold start: post a ⏳ reply, register a receipt, return.
-	msgID, err := a.SendMessageText(ctx, chatID, "⏳ 等待中")
+	// Cold start: post a minimal ⏳ card so the user sees a card
+	// surface (not a bare text message) from the very first
+	// visible event. Build the body via buildColdStartCard (Card
+	// 2.0 shape) and route through SendCard so the receipt's
+	// cardMsgID is set on the FIRST render — no "text then card"
+	// transition. See docs/channel/feishu.md §5.2.
+	cardBody, err := buildColdStartCard()
 	if err != nil {
-		a.logger.Warn("feishu: cold-start receipt reply failed",
+		a.logger.Warn("feishu: cold-start card build failed",
+			"err", err, "chat_id", chatID)
+		return nil
+	}
+	msgID, err := a.SendCard(ctx, chatID, cardBody)
+	if err != nil {
+		a.logger.Warn("feishu: cold-start receipt card failed",
 			"err", err, "chat_id", chatID)
 		return nil
 	}
 	// Synthetic userMsgID (we don't have one) — the gateway's
 	// pumpOutbound ignores it. Use the chatID + a timestamp suffix
 	// so consecutive cold starts don't collide.
-	receipt := NewMessageReceiptForReply(chatID, chatID+":"+time.Now().UTC().Format(time.RFC3339Nano), msgID, a)
+	receipt := NewMessageReceiptForCard(chatID, chatID+":"+time.Now().UTC().Format(time.RFC3339Nano), msgID, a)
 	a.mu.Lock()
 	a.receipts[chatID] = receipt
 	a.receiptsByUserMsgID[receipt.userMsgID] = receipt
@@ -647,13 +670,33 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if receipt == nil {
 			return nil
 		}
+		// Forward agent identity + workspace so the receipt
+		// card's foot note can render
+		// "Agent | cwd | tokens" (see docs/channel/feishu.md
+		// §9.3 + the footLine composer in receipt.go).
 		return receipt.Append(ctx, agent.AgentEvent{
 			Kind: agent.EventInit,
 			Init: &agent.InitEvent{
 				SessionID: metaString(msg, "session_id"),
 				Model:     metaString(msg, "model"),
+				AgentName: metaString(msg, "agent_name"),
+				Workspace: metaString(msg, "workspace"),
+				Branch:    metaString(msg, "branch"),
 			},
 		})
+
+	case gateway.OutCommandReply:
+		// Slash command response (or runtime error reply). Plain
+		// text, no receipt, no ReplyTo threading, no in-place
+		// update — the user sees a standalone message. The
+		// Feishu SendMessageText path uses msg_type: "text" so
+		// the message renders as a normal chat bubble, not an
+		// interactive card.
+		if msg.Text == "" {
+			return errors.New("feishu: OutCommandReply missing text")
+		}
+		_, err := a.SendMessageText(ctx, msg.ChatID, msg.Text)
+		return err
 	}
 	return fmt.Errorf("feishu: unsupported outbound kind %v", msg.Kind)
 }
@@ -758,10 +801,29 @@ func usageFromMeta(m gateway.OutboundMessage) *agent.UsageEvent {
 	}
 }
 
-// buildInteractiveCard renders a v1 Feishu card from an abstract
-// Card. Each option becomes a primary button whose value carries
-// the request_id so the inbound Action carries it back. Stage 3
-// will move the F-25 permission-card logic here.
+// buildInteractiveCard renders a Feishu Card 2.0 permission card
+// from an abstract gateway.Card. Each option becomes a primary
+// button whose value carries the request_id so the inbound Action
+// carries it back.
+//
+// Card 2.0 shape (https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/card-json-v2-structure):
+//
+//	{
+//	  "schema": "2.0",
+//	  "config": { "width_mode": "fill" },
+//	  "header": { "title": {...}, "template": "blue" },
+//	  "body":   { "elements": [ ... ] }
+//	}
+//
+// Returned string is the card JSON itself — NOT wrapped in
+// {"card": ...}. The wrapper is wrong: Feishu reads this string as
+// the value of the `content` field in the create_message / patch
+// request body, and `content` is the card object directly (no extra
+// `card` key). The pre-migration code did wrap in {"card": ...},
+// which Feishu silently accepted as a no-op for some configurations
+// but rendered as blank/garbage for the receipt card (the user
+// reported "feishu上没看到起效果" until we aligned with the Card
+// 2.0 envelope).
 func buildInteractiveCard(c *gateway.Card) (string, error) {
 	if c.RequestID == "" {
 		return "", errors.New("feishu: card missing request_id")
@@ -770,10 +832,6 @@ func buildInteractiveCard(c *gateway.Card) (string, error) {
 	if len(options) == 0 {
 		options = []string{"Allow", "Deny"}
 	}
-	headerJSON, _ := json.Marshal(map[string]any{
-		"title":    map[string]any{"tag": "plain_text", "content": c.Title},
-		"template": "blue",
-	})
 	body := c.Title
 	if c.Body != "" {
 		body = c.Body
@@ -792,23 +850,160 @@ func buildInteractiveCard(c *gateway.Card) (string, error) {
 		})
 	}
 	card := map[string]any{
-		"config": map[string]any{"wide_screen_mode": true},
-		"header": json.RawMessage(headerJSON),
-		"elements": []map[string]any{
-			{"tag": "div", "text": map[string]any{"tag": "lark_md", "content": body}},
-			{"tag": "action", "actions": actions},
+		"schema": "2.0",
+		"config": map[string]any{"width_mode": "fill"},
+		"header": map[string]any{
+			"title":    map[string]any{"tag": "plain_text", "content": c.Title},
+			"template": "blue",
+		},
+		"body": map[string]any{
+			"elements": []map[string]any{
+				{"tag": "markdown", "content": body},
+				{"tag": "action", "actions": actions},
+			},
 		},
 	}
-	b, err := json.Marshal(card)
+	b, err := encodeCardJSON(card)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("feishu: encode permission card: %w", err)
 	}
-	envelope := map[string]any{"card": json.RawMessage(b)}
-	eb, err := json.Marshal(envelope)
+	return string(b), nil
+}
+
+// encodeCardJSON serialises a card map to JSON with HTMLEscape
+// disabled. Go's default json.Marshal escapes "<" and ">" as <
+// and > (HTMLEscape=true) which clutters the wire payload with
+// unnecessary escapes. Card bodies legitimately contain "<text_tag
+// color='neutral'>..." inline HTML — keeping the literal form is
+// both shorter and matches the examples in Feishu's official
+// documentation.
+func encodeCardJSON(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	// json.Encoder.Encode appends a trailing newline; Feishu's
+	// API doesn't care, but trimming keeps the on-the-wire bytes
+	// identical to what the previous json.Marshal produced.
+	out := buf.Bytes()
+	if n := len(out); n > 0 && out[n-1] == '\n' {
+		out = out[:n-1]
+	}
+	return out, nil
+}
+
+// buildReceiptCard renders the rolling-log receipt as a Feishu
+// Card 2.0 interactive card. Layout (top → bottom):
+//
+//  1. Header markdown — state.headerLine(r) (e.g. "⏳ 等待中",
+//     "🔄 ⏳ N · HH:MM:SS", "✅ 已完成 HH:MM:SS").
+//  2. Evicted marker — only when r.evicted > 0; rendered as
+//     <text_tag color='neutral'> so it visually de-emphasises.
+//  3. Entries — each r.entries[i] as a markdown element
+//     "{Icon} {Text}". The log is FIFO; eviction is handled in the
+//     receipt itself (see receipt.go: evictOverflowLocked).
+//  4. <hr> divider — separates the log from the foot note.
+//  5. Foot note — state.footLine(r) wrapped in <text_tag color='neutral'>.
+//     Omitted entirely when footLine is empty (no hr, no footer).
+//
+// Returned string is the card JSON itself — NOT wrapped in
+// {"card": ...}. See buildInteractiveCard for the rationale (Feishu
+// reads the string as the value of `content`; the card object IS
+// the content; no extra wrapper).
+//
+// Foot note content uses U+00B7 (·) as the separator — NEVER ": " —
+// so Feishu's lark_md renderer doesn't parse it as a Markdown
+// definition list and hoist the first value into the body
+// (OpenClaw issue #59360). For footLine specifically the current
+// state.String() never contains a key/value pair, so the pitfall
+// only matters once a future PR adds agent identity fields
+// (see docs/channel/feishu.md §9.4).
+func buildReceiptCard(r *MessageReceipt) (string, error) {
+	if r == nil {
+		return "", errors.New("feishu: receipt is nil")
+	}
+
+	// Pre-size elements: 1 (header) + 1 (evicted, optional) +
+	// len(entries) + 2 (hr + footer, when footLine is non-empty).
+	// The evictOverflowLocked on the receipt side keeps entries
+	// within Feishu's 50-element limit; this is the second line of
+	// defence.
+	headerLine := r.state.headerLine(r)
+	elements := make([]map[string]any, 0, 3+len(r.entries))
+	if headerLine != "" {
+		elements = append(elements, map[string]any{
+			"tag":     "markdown",
+			"content": headerLine,
+		})
+	}
+	if r.evicted > 0 {
+		elements = append(elements, map[string]any{
+			"tag":     "markdown",
+			"content": fmt.Sprintf("…(前 %d 条已省略)", r.evicted),
+		})
+	}
+	for i := range r.entries {
+		e := r.entries[i]
+		if e.Icon == "" && e.Text == "" {
+			continue
+		}
+		content := e.Icon
+		if e.Text != "" {
+			if content != "" {
+				content += " "
+			}
+			content += e.Text
+		}
+		elements = append(elements, map[string]any{
+			"tag":     "markdown",
+			"content": content,
+		})
+	}
+	if note := r.state.footLine(r); note != "" {
+		elements = append(elements, map[string]any{"tag": "hr"})
+		elements = append(elements, map[string]any{
+			"tag":     "markdown",
+			"content": note,
+		})
+	}
+
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{"width_mode": "fill"},
+		"body":   map[string]any{"elements": elements},
+	}
+	b, err := encodeCardJSON(card)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("feishu: encode receipt card: %w", err)
 	}
-	return string(eb), nil
+	return string(b), nil
+}
+
+// buildColdStartCard renders the minimal "⏳ 等待中" receipt used
+// by Adapter.receiptFor when the gateway's pumpOutbound emits an
+// OutText without a prior SendUserMessage (i.e. the agent turn
+// started before the user message — a startup edge case). The
+// returned card is posted via SendCard and the resulting message id
+// seeds the receipt's cardMsgID so subsequent events PATCH the same
+// surface in place. See docs/channel/feishu.md §5.2 for the
+// first-send-then-PATCH strategy.
+func buildColdStartCard() (string, error) {
+	card := map[string]any{
+		"schema": "2.0",
+		"config": map[string]any{"width_mode": "fill"},
+		"body": map[string]any{
+			"elements": []map[string]any{
+				{"tag": "markdown", "content": "⏳ 等待中"},
+			},
+		},
+	}
+	b, err := encodeCardJSON(card)
+	if err != nil {
+		return "", fmt.Errorf("feishu: encode cold-start card: %w", err)
+	}
+	return string(b), nil
 }
 
 // SetLogger swaps the structured logger used for outgoing-message
@@ -1104,6 +1299,84 @@ func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content stri
 		msgID = *resp.Data.MessageId
 	}
 	return msgID, nil
+}
+
+// SendCard posts an interactive card and returns the created message
+// ID. The content must be a JSON-serialized card envelope
+// ({"card": {...}}) — see buildInteractiveCard / buildReceiptCard
+// for the producers. Used by the receipt FSM for the first-send step
+// (receipt.renderLocked → SendCard → later PatchMessage cycles).
+func (a *Adapter) SendCard(ctx context.Context, chatID, content string) (string, error) {
+	if strings.TrimSpace(chatID) == "" {
+		return "", errors.New("feishu: chat_id is required")
+	}
+	if strings.TrimSpace(content) == "" {
+		return "", errors.New("feishu: card content is required")
+	}
+	msgID, err := a.sendContent(ctx, chatID, larkim.MsgTypeInteractive, content)
+	a.logOutgoing("send_card", chatID, msgID, err)
+	return msgID, err
+}
+
+// PatchMessage replaces the entire body of an existing message with
+// the supplied content (Feishu PATCH /im/v1/messages/{id}). For
+// interactive cards content is the card envelope; for text/rich-text
+// messages it's the standard {"text": "..."} or {"post": ...} shape.
+//
+// IMPORTANT: This is the SDK's *Patch* endpoint, NOT *Update*. The
+// Update method only supports text/rich-text messages; Patch is the
+// only one that handles interactive cards. Confusing the two is the
+// single most common pitfall here — see docs/channel/feishu.md §3.4
+// and §6.3.
+//
+// Returns "" on success (PATCH has no useful body). The
+// receipt's renderLocked is the only caller today; it ignores the
+// return value other than nil/non-nil.
+func (a *Adapter) PatchMessage(ctx context.Context, messageID, content string) error {
+	if strings.TrimSpace(messageID) == "" {
+		return errors.New("feishu: message_id is required")
+	}
+	if strings.TrimSpace(content) == "" {
+		return errors.New("feishu: card content is required")
+	}
+	a.mu.RLock()
+	update := a.updateFunc
+	a.mu.RUnlock()
+	if update == nil {
+		return errors.New("feishu: update client is nil")
+	}
+	err := update(ctx, messageID, content)
+	a.logOutgoing("patch_message", "", messageID, err)
+	return err
+}
+
+// updateViaLark is the production implementation of the PATCH dispatch
+// (wired in by NewAdapter as a.updateFunc). Builds a PatchMessageReq
+// and calls larkClient.Im.V1.Message.Patch (the PATCH endpoint). The
+// body must already be the JSON-encoded card envelope (or text/post
+// envelope) the API expects.
+func (a *Adapter) updateViaLark(ctx context.Context, messageID, content string) error {
+	if a.larkClient == nil || a.larkClient.Im == nil || a.larkClient.Im.V1 == nil || a.larkClient.Im.V1.Message == nil {
+		return errors.New("feishu: REST client is nil")
+	}
+	body := larkim.NewPatchMessageReqBodyBuilder().
+		Content(content).
+		Build()
+	req := larkim.NewPatchMessageReqBuilder().
+		MessageId(messageID).
+		Body(body).
+		Build()
+	resp, err := a.larkClient.Im.V1.Message.Patch(ctx, req)
+	if err != nil {
+		return fmt.Errorf("feishu: patch message: %w", err)
+	}
+	if resp == nil {
+		return errors.New("feishu: patch message returned nil response")
+	}
+	if !resp.Success() {
+		return fmt.Errorf("feishu: patch message failed with code %d", resp.Code)
+	}
+	return nil
 }
 
 // handleMessage is registered with the SDK dispatcher for im.message.receive_v1.

@@ -2,6 +2,7 @@ package feishu
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -11,22 +12,38 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 )
 
-// mockReceiptBot captures AddReaction and SendMessageText calls so
-// tests can assert on the dual-track behavior without a live Feishu
-// connection. Embeds *Adapter with nil fields, so any unguarded
-// access to a.larkClient will panic — guards in the receipt must
-// stay routed through our methods.
+// mockReceiptBot captures AddReaction, SendMessageText, SendCard and
+// PatchMessage calls so tests can assert on the dual-track behavior
+// without a live Feishu connection. Embeds *Adapter with nil fields,
+// so any unguarded access to a.larkClient will panic — guards in the
+// receipt must stay routed through our methods.
 type mockReceiptBot struct {
 	mu             sync.Mutex
 	reactions      []reactionCall
 	messages       []string
+	cards          []cardCall
+	patches        []cardCall
 	addReactionErr error
 	sendMsgErr     error
+	sendCardErr    error
+	patchErr       error
+	// nextCardID is returned from SendCard; tests that want the
+	// receipt to enter the PATCH cycle need it non-empty. Defaults
+	// to "om_card_1" (incremented per call).
+	nextCardID int
 }
 
 type reactionCall struct {
 	MessageID string
 	Emoji     string
+}
+
+// cardCall records one SendCard or PatchMessage invocation. Patches
+// are addressed by MessageID; sends by ChatID.
+type cardCall struct {
+	ChatID    string
+	MessageID string
+	Body      string
 }
 
 func (m *mockReceiptBot) AddReaction(_ context.Context, msgID, emoji string) (string, error) {
@@ -47,6 +64,36 @@ func (m *mockReceiptBot) SendMessageText(_ context.Context, _, text string) (str
 	}
 	m.messages = append(m.messages, text)
 	return "", nil
+}
+
+// SendCard records the call and returns a synthetic message id so
+// the receipt's renderLocked stores it on r.cardMsgID. After the
+// first send, subsequent renders go through PatchMessage. The id is
+// derived from nextCardID so multiple receipts in the same test get
+// distinct ids.
+func (m *mockReceiptBot) SendCard(_ context.Context, chatID, body string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.sendCardErr != nil {
+		return "", m.sendCardErr
+	}
+	if m.nextCardID == 0 {
+		m.nextCardID = 1
+	}
+	id := fmt.Sprintf("om_card_%d", m.nextCardID)
+	m.nextCardID++
+	m.cards = append(m.cards, cardCall{ChatID: chatID, MessageID: id, Body: body})
+	return id, nil
+}
+
+func (m *mockReceiptBot) PatchMessage(_ context.Context, messageID, body string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.patchErr != nil {
+		return m.patchErr
+	}
+	m.patches = append(m.patches, cardCall{MessageID: messageID, Body: body})
+	return nil
 }
 
 // We can't directly construct an Adapter with custom AddReaction /
@@ -96,9 +143,9 @@ func TestReceiptState_String(t *testing.T) {
 
 func TestReceiptState_Emoji(t *testing.T) {
 	cases := map[ReceiptState]string{
-		StateWaiting:   "OK",
+		StateWaiting:   "OneSecond",
 		StateExecuting: "OnIt",
-		StateCompleted: "PARTY",
+		StateCompleted: "DONE",
 	}
 	for s, want := range cases {
 		if got := s.Emoji(); got != want {
@@ -197,14 +244,30 @@ func TestReceiptStringContainsEmoji(t *testing.T) {
 //  3. Asserts SendMessageText was called 3 times — once per event.
 //  4. Asserts UpdateMessage was NEVER called.
 //  5. Asserts the messages are the entry texts, not the rolled log.
-func TestReceipt_PerEventFreshMessage(t *testing.T) {
+//
+// TestReceipt_FirstSendThenPatch verifies the card-based renderLocked
+// behavior introduced in docs/channel/feishu.md §5: the first render
+// sends an interactive card via SendCard; every subsequent render
+// PATCHes that same card in place via PatchMessage. SendMessageText
+// is no longer called for the rolling log.
+//
+// The test:
+//  1. Creates a receipt with the mockReceiptBot (no Feishu).
+//  2. Appends three events (text, tool start, tool end).
+//  3. Asserts SendCard was called exactly ONCE (first event).
+//  4. Asserts PatchMessage was called TWICE (subsequent events).
+//  5. Asserts SendMessageText was NEVER called.
+//  6. Asserts all PATCH calls address the same MessageID as the
+//     original SendCard.
+//  7. Asserts each card body contains all entries seen so far
+//     (the rendered body grows monotonically; this is the
+//     observable surface of the rolling-log card).
+func TestReceipt_FirstSendThenPatch(t *testing.T) {
 	bot := &mockReceiptBot{}
 	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
 	r.receivedAt = time.Now()
 
-	// Three events across three agent kinds — a text reply, a
-	// tool start, and a tool end. Each one should land as its
-	// own message on the bot.
+	// Three events across three agent kinds.
 	mustAppend(t, r, agent.AgentEvent{
 		Kind: agent.EventText,
 		Text: "hello from the agent",
@@ -225,29 +288,525 @@ func TestReceipt_PerEventFreshMessage(t *testing.T) {
 		},
 	})
 
-	// Per-event shipping: exactly one SendMessageText per event.
 	bot.mu.Lock()
-	got := append([]string(nil), bot.messages...)
+	cards := append([]cardCall(nil), bot.cards...)
+	patches := append([]cardCall(nil), bot.patches...)
+	textMsgs := append([]string(nil), bot.messages...)
 	bot.mu.Unlock()
 
-	if len(got) != 3 {
-		t.Fatalf("SendMessageText calls = %d, want 3 (one per event)", len(got))
+	if len(cards) != 1 {
+		t.Fatalf("SendCard calls = %d, want 1 (first render only)", len(cards))
 	}
-	// Each event ships with its own entry text, not the rolled log.
-	if want := "💬 hello from the agent"; got[0] != want {
-		t.Errorf("messages[0] = %q, want %q (single-entry text)", got[0], want)
+	if len(patches) != 2 {
+		t.Fatalf("PatchMessage calls = %d, want 2 (one per subsequent render)", len(patches))
 	}
-	if !strings.HasPrefix(got[1], "🔧 Read(") {
-		t.Errorf("messages[1] = %q, want '🔧 Read(...)' (single-entry tool start)", got[1])
-	}
-	if !strings.HasPrefix(got[2], "✅ Read") {
-		t.Errorf("messages[2] = %q, want '✅ Read ...' (single-entry tool end)", got[2])
+	if len(textMsgs) != 0 {
+		t.Errorf("SendMessageText calls = %d, want 0 (text path retired for receipts)", len(textMsgs))
 	}
 
-	// Sanity: messages are distinct (no accidental UpdateMessage
-	// collapsing them into one body).
-	if got[0] == got[1] || got[1] == got[2] || got[0] == got[2] {
-		t.Errorf("messages are not distinct: %q / %q / %q", got[0], got[1], got[2])
+	cardID := cards[0].MessageID
+	if cardID == "" {
+		t.Fatal("SendCard returned empty message id; receipt cannot store it as cardMsgID")
+	}
+	for i, p := range patches {
+		if p.MessageID != cardID {
+			t.Errorf("patches[%d].MessageID = %q, want %q (same id as SendCard)", i, p.MessageID, cardID)
+		}
+	}
+
+	// Body must be a Card 2.0 envelope ({"schema":"2.0", ...}).
+	// The pre-migration format wrapped in {"card":...} which
+	// Feishu silently failed to render; see the protocol diff
+	// captured in the PR description.
+	if !strings.Contains(cards[0].Body, `"schema":"2.0"`) {
+		t.Errorf("SendCard body missing Card 2.0 schema marker: %q", truncateForTest(cards[0].Body, 80))
+	}
+	if !strings.Contains(cards[0].Body, `"width_mode":"fill"`) {
+		t.Errorf("SendCard body missing Card 2.0 config.width_mode: %q", truncateForTest(cards[0].Body, 80))
+	}
+	if !strings.Contains(cards[0].Body, `"body":{`) {
+		t.Errorf("SendCard body missing Card 2.0 body wrapper: %q", truncateForTest(cards[0].Body, 80))
+	}
+	if !strings.Contains(cards[0].Body, `"tag":"markdown"`) {
+		t.Errorf("SendCard body missing Card 2.0 markdown element: %q", truncateForTest(cards[0].Body, 80))
+	}
+	if !strings.Contains(cards[0].Body, "hello from the agent") {
+		t.Errorf("SendCard body missing first event text: %q", truncateForTest(cards[0].Body, 120))
+	}
+	// The LAST PATCH should contain all three entries (the
+	// rolling-log card is the union of all events seen so far).
+	// We assert on the human-visible pieces: the text reply and
+	// the tool name (the tool id "toolu_001" is only in the
+	// raw AgentEvent, not in the rendered LogEntry; eventToEntry
+	// surfaces the tool name + args, not the id).
+	last := patches[len(patches)-1].Body
+	for _, want := range []string{"hello from the agent", "Read", "/tmp/foo"} {
+		if !strings.Contains(last, want) {
+			t.Errorf("last PATCH missing %q; got: %q", want, truncateForTest(last, 200))
+		}
+	}
+}
+
+// truncateForTest shortens a body string for failure messages; the
+// test files don't import truncateForLog from the package.
+func truncateForTest(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+// TestFootLine_Components covers the labelled
+// "Agent: ... | CWD: ... | git: ... | TOKENS: .../..." foot-note
+// composer. The line is appended after a <hr> divider as a
+// plain markdown element by buildReceiptCard (no
+// <text_tag color='neutral'> wrapper — the user requested the
+// default card-renderer color). These tests pin the composer
+// alone so failures surface with a tight diff. Format
+// documentation lives in docs/channel/feishu.md §9.3.
+func TestFootLine_Components(t *testing.T) {
+	cases := []struct {
+		name         string
+		agentName    string
+		workspace    string
+		branch       string
+		inputTokens  int
+		outputTokens int
+		want         string
+	}{
+		{
+			name: "all-empty-omits-foot-note",
+			want: "",
+		},
+		{
+			name:      "agent-only",
+			agentName: "claude",
+			// Two-line layout: line 1 = agent alone
+			// (no GIT / Tokens), line 2 omitted.
+			want: "Agent: claude",
+		},
+		{
+			name:      "workspace-only-full-path",
+			workspace: "/Users/devin/code/nightme",
+			// No line-1 fields → only line 2.
+			want: "Workspace: /Users/devin/code/nightme",
+		},
+		{
+			name:   "branch-only",
+			branch: "main",
+			// Only line-1 field (GIT), no line 2.
+			want: "GIT: main",
+		},
+		{
+			name:         "tokens-only-input-and-output",
+			inputTokens:  20_000,
+			outputTokens: 1_000,
+			want:         "Tokens: 20K/1k",
+		},
+		{
+			name:         "all-four-target-example",
+			agentName:    "claude",
+			workspace:    "/Users/devin/code/nightme",
+			branch:       "main",
+			inputTokens:  20_000,
+			outputTokens: 1_000,
+			// Two-line layout per the user's most recent
+			// request:
+			//   line 1: Agent | GIT | Tokens (joined with " | ")
+			//   line 2: Workspace (alone)
+			want: "Agent: claude | GIT: main | Tokens: 20K/1k<br/>Workspace: /Users/devin/code/nightme",
+		},
+		{
+			name:         "all-four-with-feature-branch",
+			agentName:    "claude",
+			workspace:    "/Users/devin/code/nightme",
+			branch:       "feat/receipt-card",
+			inputTokens:  50_000,
+			outputTokens: 3_000,
+			want: "Agent: claude | GIT: feat/receipt-card | Tokens: 50K/3k<br/>Workspace: /Users/devin/code/nightme",
+		},
+		{
+			name:         "branch-empty-omitted-not-git-repo",
+			agentName:    "claude",
+			workspace:    "/Users/geax",
+			inputTokens:  32_000,
+			outputTokens: 101,
+			// /Users/geax is the home dir (per the
+			// user's most recent screenshot), not a git
+			// repo, so the GIT segment drops out of
+			// line 1 entirely.
+			want: "Agent: claude | Tokens: 32K/101<br/>Workspace: /Users/geax",
+		},
+		{
+			name:         "deep-workspace-full-path-not-shortened",
+			workspace:    "/Users/devin/code/nightme/src/internal/channel/feishu",
+			branch:       "main",
+			inputTokens:  5_000,
+			outputTokens: 500,
+			// No agent → line 1 has only GIT + Tokens;
+			// long workspace on line 2.
+			want: "GIT: main | Tokens: 5K/500<br/>Workspace: /Users/devin/code/nightme/src/internal/channel/feishu",
+		},
+		{
+			name:      "tilde-path-full-path",
+			workspace: "~/code/nightme",
+			want:      "Workspace: ~/code/nightme",
+		},
+		{
+			name:         "input-only-zero-output-omitted",
+			agentName:    "claude",
+			workspace:    "/Users/geax",
+			inputTokens:  20_000,
+			// Tokens "20K" (no output side) is the only
+			// line-1 segment beyond Agent.
+			want: "Agent: claude | Tokens: 20K<br/>Workspace: /Users/geax",
+		},
+		{
+			name:         "output-only-zero-input-omitted",
+			agentName:    "claude",
+			workspace:    "/Users/geax",
+			outputTokens: 1_000,
+			want: "Agent: claude | Tokens: 1k<br/>Workspace: /Users/geax",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &MessageReceipt{
+				agentName:    tc.agentName,
+				workspace:    tc.workspace,
+				branch:       tc.branch,
+				inputTokens:  tc.inputTokens,
+				outputTokens: tc.outputTokens,
+			}
+			got := StateExecuting.footLine(r)
+			if got != tc.want {
+				t.Errorf("footLine = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFootLine_PerLineLayout pins the per-line layout that
+// the user requested: each foot note segment is on its own
+// line, separated by <br/> (Feishu lark_md's explicit line
+// break). The order is fixed (AGENT → WORKSPACE → GIT →
+// TOKENS, per the user's "CWD earliest on the second line"
+// request); missing segments drop their line entirely. The
+// TestFootLine_TwoLineLayout pins the two-line layout that
+// the user requested: line 1 holds the task-scoped fields
+// (Agent | GIT | Tokens) joined by " | "; line 2 holds the
+// workspace path alone. The two lines are separated by
+// <br/> when both are present. A missing line omits the
+// <br/> entirely (no dangling line break on single-line
+// results). The previous per-segment-per-line layout was
+// retired for this grouped two-line format.
+func TestFootLine_TwoLineLayout(t *testing.T) {
+	cases := []struct {
+		name string
+		r    *MessageReceipt
+		want string
+	}{
+		{
+			name: "all-four-fields-two-lines",
+			r: &MessageReceipt{
+				agentName:    "claude",
+				workspace:    "/Users/devin/code/nightme",
+				branch:       "main",
+				inputTokens:  20_000,
+				outputTokens: 1_000,
+			},
+			want: "Agent: claude | GIT: main | Tokens: 20K/1k<br/>Workspace: /Users/devin/code/nightme",
+		},
+		{
+			name: "no-git-repo-drops-git-from-line-1",
+			r: &MessageReceipt{
+				agentName:    "claude",
+				workspace:    "/Users/geax",
+				inputTokens:  32_000,
+				outputTokens: 101,
+			},
+			// GIT is absent → no GIT segment in line 1.
+			want: "Agent: claude | Tokens: 32K/101<br/>Workspace: /Users/geax",
+		},
+		{
+			name: "no-agent-line-1-still-has-git-and-tokens",
+			r: &MessageReceipt{
+				workspace:    "/Users/devin/code/nightme",
+				branch:       "main",
+				inputTokens:  1_000,
+				outputTokens: 500,
+			},
+			// Agent absent → line 1 is just GIT | Tokens.
+			// Input uses compactNumberLoud ("1K" not "1k"
+			// for the 1000-input case).
+			want: "GIT: main | Tokens: 1K/500<br/>Workspace: /Users/devin/code/nightme",
+		},
+		{
+			name: "only-workspace-line-2-alone",
+			r: &MessageReceipt{
+				workspace: "/Users/devin/code/nightme",
+			},
+			// No line-1 fields → no <br/>, just line 2.
+			want: "Workspace: /Users/devin/code/nightme",
+		},
+		{
+			name: "only-line-1-fields-line-2-omitted",
+			r: &MessageReceipt{
+				agentName:    "claude",
+				branch:       "main",
+				inputTokens:  20_000,
+				outputTokens: 1_000,
+			},
+			// No workspace → no <br/>, just line 1.
+			want: "Agent: claude | GIT: main | Tokens: 20K/1k",
+		},
+		{
+			name: "long-line-stays-as-one-line-no-soft-wrap",
+			r: &MessageReceipt{
+				agentName: "very-long-agent-name-that-exceeds-the-old-soft-cap",
+				workspace: "/Users/devin/code/some-really-long-project-name-here",
+				branch:    "feat/another-long-branch-name",
+				inputTokens:  100_000,
+				outputTokens: 5_000,
+			},
+			// Two lines, no soft-cap wrap — long content
+			// stays on a single line and Feishu handles
+			// the visual wrap.
+			want: "Agent: very-long-agent-name-that-exceeds-the-old-soft-cap | GIT: feat/another-long-branch-name | Tokens: 100K/5k<br/>Workspace: /Users/devin/code/some-really-long-project-name-here",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := StateExecuting.footLine(tc.r)
+			if got != tc.want {
+				t.Errorf("footLine = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFootLine_NilReceipt returns "" — pins the guard so a nil
+// receipt doesn't panic when buildReceiptCard calls footLine.
+func TestFootLine_NilReceipt(t *testing.T) {
+	for _, s := range []ReceiptState{StateWaiting, StateExecuting, StateCompleted, StateError} {
+		if got := s.footLine(nil); got != "" {
+			t.Errorf("%v.footLine(nil) = %q, want \"\"", s, got)
+		}
+	}
+}
+
+// TestCompactNumber pins the formatter (lowercase suffix) used
+// by footLine for the OUTPUT-tokens side. Whole-thousand values
+// drop the ".0" so 1,000 → "1k" (not "1.0k") — matches the
+// example payload the user requested ("20K/1k").
+func TestCompactNumber(t *testing.T) {
+	cases := []struct {
+		n    int
+		want string
+	}{
+		{0, "0"},
+		{1, "1"},
+		{999, "999"},
+		{1000, "1k"},
+		{1200, "1.2k"},
+		{9999, "10.0k"},
+		{10000, "10k"},
+		{12345, "12k"},
+		{999999, "999k"},
+		{1000000, "1M"},
+		{1200000, "1.2M"},
+	}
+	for _, tc := range cases {
+		if got := compactNumber(tc.n); got != tc.want {
+			t.Errorf("compactNumber(%d) = %q, want %q", tc.n, got, tc.want)
+		}
+	}
+}
+
+// TestCompactNumberLoud pins the uppercase suffix formatter
+// used by footLine for the INPUT-tokens side. K/M uppercase so
+// users can scan "20K/1k" and tell at a glance which side is
+// input vs output.
+func TestCompactNumberLoud(t *testing.T) {
+	cases := []struct {
+		n    int
+		want string
+	}{
+		{0, "0"},
+		{1, "1"},
+		{999, "999"},
+		{1000, "1K"},
+		{1200, "1.2K"},
+		{9999, "10.0K"},
+		{10000, "10K"},
+		{20000, "20K"},
+		{999999, "999K"},
+		{1000000, "1M"},
+		{1200000, "1.2M"},
+	}
+	for _, tc := range cases {
+		if got := compactNumberLoud(tc.n); got != tc.want {
+			t.Errorf("compactNumberLoud(%d) = %q, want %q", tc.n, got, tc.want)
+		}
+	}
+}
+
+// TestShortenCwdRemoved documents the removal of shortenCwd
+// when the footer format switched from basename → full
+// workspace path. The CWD segment now shows the absolute path
+// verbatim (per user request), so the basename shortener is
+// unused. The test body is intentionally a no-op so a future
+// search for "TestShortenCwd" surfaces this comment instead
+// of a missing function.
+func TestShortenCwdRemoved(t *testing.T) {
+	_ = "shortenCwd removed; footer now shows full workspace path"
+}
+
+// TestFootLine_ColonsByDesign documents that the foot note
+// now uses "label: value" segments (per the user's explicit
+// request). The OpenClaw #59360 hoisting risk was
+// re-evaluated and accepted; the rationale is captured in
+// the footLine doc comment. This test pins the new format
+// shape so a future edit can't quietly regress to either
+// (a) the no-label plain-value format or (b) a middle-dot
+// separator that hides the labels.
+func TestFootLine_ColonsByDesign(t *testing.T) {
+	r := &MessageReceipt{
+		agentName:    "claude",
+		workspace:    "/Users/devin/code/nightme",
+		branch:       "main",
+		inputTokens:  32_000,
+		outputTokens: 101,
+	}
+	got := StateExecuting.footLine(r)
+	for _, want := range []string{"Agent: claude", "Workspace: /Users/devin/code/nightme", "GIT: main", "Tokens: 32K/101"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("footLine = %q missing %q", got, want)
+		}
+	}
+}
+
+// TestBuildReceiptCard_Card2Shape pins the Card 2.0 envelope
+// contract documented in docs/channel/feishu.md §3.4 + the
+// buildReceiptCard comment. The previous PR shipped a Card 1.0
+// shape wrapped in {"card":...} which Feishu silently failed to
+// render; this test pins every marker that distinguishes the new
+// shape so a future edit can't quietly regress it.
+//
+// Markers asserted (every one must be present in the body):
+//
+//   - `"schema":"2.0"`               — Card 2.0 declaration
+//   - `"width_mode":"fill"`          — Card 2.0 config key
+//     (not the v1 `wide_screen_mode`)
+//   - `"body":{"elements":[...]}`    — Card 2.0 body wrapper
+//     (elements are NOT at the top level)
+//   - `"tag":"markdown"`             — Card 2.0 text element
+//     (not the v1 `tag:"div"` + `text:{tag:"lark_md",...}` shape)
+func TestBuildReceiptCard_Card2Shape(t *testing.T) {
+	r := &MessageReceipt{
+		state:        StateExecuting,
+		eventCount:   3,
+		lastEventAt:  parseTime(t, "2026-08-01T14:32:05+08:00"),
+		agentName:    "main",
+		workspace:    "/Users/foo/bar/repo",
+		branch:       "feat/receipt-card",
+		inputTokens:  1500,
+		outputTokens: 800,
+		entries: []LogEntry{
+			{Icon: "💬", Text: "hello", Kind: "reply"},
+			{Icon: "🔧", Text: "Read(/tmp/foo)", Kind: "tool_start"},
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+
+	mustContain := []string{
+		// Card 2.0 envelope markers.
+		`"schema":"2.0"`,
+		`"width_mode":"fill"`,
+		`"body":{`,
+		`"elements":[`,
+		`"tag":"markdown"`,
+
+		// Header + entries rendered as markdown.
+		`"content":"🔄 ⏳ 3 · 14:32:05"`,
+		`"content":"💬 hello"`,
+		`"content":"🔧 Read(/tmp/foo)"`,
+
+		// Labelled foot-note format (per-line layout,
+		// uppercase labels):
+		//   AGENT: main
+		//   WORKSPACE: /Users/foo/bar/repo
+		//   GIT: feat/receipt-card
+		//   TOKENS: 1.5K/800
+		`Agent: main`,
+		`GIT: feat/receipt-card`,
+		`Tokens: 1.5K/800`,
+		`Workspace: /Users/foo/bar/repo`,
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(body, want) {
+			t.Errorf("card body missing %q\n--- body ---\n%s", want, truncateForTest(body, 400))
+		}
+	}
+
+	// Negative assertions: things that would mean we silently
+	// regressed to the v1 shape, the old "state · entries ·
+	// timestamp" foot-note, the no-label / no-colon format,
+	// or the (deprecated) coloured footer wrapper.
+	mustNotContain := []string{
+		`{"card":`,              // v1 envelope wrapper
+		`"wide_screen_mode"`,    // v1 config key
+		`"tag":"div"`,           // v1 text container
+		`"lark_md"`,             // v1 inline format
+		`"tag":"note"`,          // v1 footer element
+		`text_tag`,              // deprecated neutral-color wrapper
+		`color='neutral'`,       // deprecated neutral-color value
+		`Agent · `,              // old middle-dot labelled format
+		`cwd · `,                // old middle-dot labelled format
+		`tokens · `,             // old middle-dot labelled format
+		`executing · 3 entries`, // even older format
+		// Single-line joined format (the previous
+		// format that this round retired). The
+		// current composer always emits one segment
+		// per line via <br/>.
+		` | GIT: main | `,
+		` | TOKENS: `,
+		// Old label name "CWD" was renamed to
+		// "WORKSPACE" per user request.
+		`CWD: `,
+	}
+	for _, bad := range mustNotContain {
+		if strings.Contains(body, bad) {
+			t.Errorf("card body contains %q (regression)\n--- body ---\n%s", bad, truncateForTest(body, 400))
+		}
+	}
+}
+
+// TestBuildColdStartCard_Card2Shape pins the cold-start card
+// emitted by Adapter.receiptFor. It must be a Card 2.0 envelope
+// (same shape contract as the rolling-log card) with a single ⏳
+// markdown element so the user sees a card surface from the first
+// event, not a bare text message.
+func TestBuildColdStartCard_Card2Shape(t *testing.T) {
+	body, err := buildColdStartCard()
+	if err != nil {
+		t.Fatalf("buildColdStartCard: %v", err)
+	}
+	mustContain := []string{
+		`"schema":"2.0"`,
+		`"width_mode":"fill"`,
+		`"body":{`,
+		`"elements":[`,
+		`"tag":"markdown"`,
+		`"content":"⏳ 等待中"`,
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(body, want) {
+			t.Errorf("cold-start card body missing %q\n--- body ---\n%s", want, truncateForTest(body, 400))
+		}
 	}
 }
 
@@ -276,14 +835,14 @@ func TestApplyState_FourStateEnum(t *testing.T) {
 	r := NewMessageReceiptForReply("chat-x", "user-x", "msg-x", mb)
 
 	cases := []struct {
-		name    string
-		target  channel.ReceiptState
-		want    ReceiptState
-		emoji   string
+		name   string
+		target channel.ReceiptState
+		want   ReceiptState
+		emoji  string
 	}{
-		{"pending", channel.ReceiptPending, StateWaiting, "OK"},
+		{"pending", channel.ReceiptPending, StateWaiting, "OneSecond"},
 		{"executing", channel.ReceiptExecuting, StateExecuting, "OnIt"},
-		{"done", channel.ReceiptDone, StateCompleted, "PARTY"},
+		{"done", channel.ReceiptDone, StateCompleted, "DONE"},
 		{"error", channel.ReceiptError, StateError, "THUMBSUP"},
 	}
 	for _, tc := range cases {

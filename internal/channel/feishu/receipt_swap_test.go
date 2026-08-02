@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -11,16 +12,25 @@ import (
 )
 
 // mockReceiptAdapter records AddReaction / UpdateMessage /
-// SendMessageText calls for the append-only reaction tests.
+// SendMessageText / SendCard / PatchMessage calls for the
+// append-only reaction tests.
 type mockReceiptAdapter struct {
 	mu sync.Mutex
 
 	added     []receiptReactionCall
 	updated   []receiptUpdateCall
 	sentText  []receiptSendCall
+	sentCard  []receiptCardSendCall
+	patched   []receiptCardPatchCall
 	addErr    error
 	updateErr error
 	sendErr   error
+	cardErr   error
+	patchErr  error
+	// nextCardID is the synthetic id returned by SendCard so the
+	// receipt's renderLocked can store it as r.cardMsgID. Bump per
+	// call to keep ids distinct across receipts in the same test.
+	nextCardID int
 }
 
 type receiptReactionCall struct{ MessageID, Emoji string }
@@ -33,6 +43,22 @@ type receiptUpdateCall struct {
 type receiptSendCall struct {
 	ChatID string
 	Text   string
+}
+
+// receiptCardSendCall records a SendCard call. Body is the full
+// card JSON envelope; CardMessageID is the id the adapter returns
+// (synthesized by the mock).
+type receiptCardSendCall struct {
+	ChatID        string
+	Body          string
+	CardMessageID string
+}
+
+// receiptCardPatchCall records a PatchMessage call. CardMessageID
+// is the addressee; Body is the replacement card JSON envelope.
+type receiptCardPatchCall struct {
+	CardMessageID string
+	Body          string
 }
 
 func (m *mockReceiptAdapter) snapshotAdded() []receiptReactionCall {
@@ -48,6 +74,22 @@ func (m *mockReceiptAdapter) snapshotSentText() []receiptSendCall {
 	defer m.mu.Unlock()
 	out := make([]receiptSendCall, len(m.sentText))
 	copy(out, m.sentText)
+	return out
+}
+
+func (m *mockReceiptAdapter) snapshotSentCards() []receiptCardSendCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]receiptCardSendCall, len(m.sentCard))
+	copy(out, m.sentCard)
+	return out
+}
+
+func (m *mockReceiptAdapter) snapshotPatched() []receiptCardPatchCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]receiptCardPatchCall, len(m.patched))
+	copy(out, m.patched)
 	return out
 }
 
@@ -78,6 +120,35 @@ func (m *mockReceiptAdapter) SendMessageText(_ context.Context, chatID, text str
 	return "new-message-id", nil
 }
 
+func (m *mockReceiptAdapter) SendCard(_ context.Context, chatID, body string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cardErr != nil {
+		return "", m.cardErr
+	}
+	if m.nextCardID == 0 {
+		m.nextCardID = 1
+	}
+	id := fmt.Sprintf("card-msg-%d", m.nextCardID)
+	m.nextCardID++
+	m.sentCard = append(m.sentCard, receiptCardSendCall{
+		ChatID:        chatID,
+		Body:          body,
+		CardMessageID: id,
+	})
+	return id, nil
+}
+
+func (m *mockReceiptAdapter) PatchMessage(_ context.Context, messageID, body string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.patched = append(m.patched, receiptCardPatchCall{
+		CardMessageID: messageID,
+		Body:          body,
+	})
+	return m.patchErr
+}
+
 func newAppendOnlyReceipt(bot receiptBot) *MessageReceipt {
 	return NewMessageReceiptForReply("chat1", "user-message-1", "reply-message-1", bot)
 }
@@ -103,7 +174,7 @@ func TestReactionAppendOnly_FullLifecycleAddsEachStateOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"OK", "OnIt", "PARTY"}
+	want := []string{"OneSecond", "OnIt", "DONE"}
 	added := bot.snapshotAdded()
 	if len(added) != len(want) {
 		t.Fatalf("added %d reactions, want %d", len(added), len(want))
@@ -132,6 +203,12 @@ func TestReactionAppendOnly_SameStateSkipsDuplicate(t *testing.T) {
 	}
 }
 
+// TestReactionAppendOnly_AddFailureKeepsReplyShipping verifies that
+// the card path still proceeds when the reaction add fails. The
+// failure is non-fatal: appendReactionLocked logs and returns;
+// renderLocked then builds + ships the card (SendCard on the first
+// render, PatchMessage on subsequent). The currentReaction field
+// stays empty so a later successful render can retry the emoji.
 func TestReactionAppendOnly_AddFailureKeepsReplyShipping(t *testing.T) {
 	bot := &mockReceiptAdapter{addErr: errors.New("simulated add failure")}
 	r := newAppendOnlyReceipt(bot)
@@ -146,8 +223,13 @@ func TestReactionAppendOnly_AddFailureKeepsReplyShipping(t *testing.T) {
 	if r.currentReaction != "" {
 		t.Fatalf("currentReaction = %q after failed add, want empty (retryable)", r.currentReaction)
 	}
-	if got := len(bot.snapshotSentText()); got != 1 {
-		t.Fatalf("shipped %d replies after failed add, want 1", got)
+	// The card path replaces the legacy SendMessageText "reply".
+	// After the migration (docs/channel/feishu.md §5) the rolling
+	// log surface is an interactive card sent via SendCard on the
+	// first render, so assert that the card went out — NOT that
+	// a text message was shipped.
+	if got := len(bot.snapshotSentCards()); got != 1 {
+		t.Fatalf("shipped %d cards after failed add, want 1 (reaction failure is non-fatal)", got)
 	}
 }
 
@@ -163,7 +245,7 @@ func TestReactionAppendOnly_ApplyStateAppendsWithoutDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{"OnIt", "PARTY"}
+	want := []string{"OnIt", "DONE"}
 	added := bot.snapshotAdded()
 	if len(added) != len(want) {
 		t.Fatalf("added %d reactions, want %d", len(added), len(want))

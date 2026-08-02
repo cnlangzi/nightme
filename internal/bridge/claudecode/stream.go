@@ -94,7 +94,12 @@ type contentBlock struct {
 // otherwise they fall through to EventPermission with a default set of
 // options. See ask.go for the dual-path (tool_use + text fallback)
 // detection logic.
-func pumpStream(r io.Reader, events chan<- agent.AgentEvent, askHandler askHandlerFunc, logger *slog.Logger) {
+//
+// agentName + workspace are stamped onto the EventInit payload by
+// translate (so channel-layer receipts can render the "Agent ·
+// name | cwd · path" foot note). They are immutable for the
+// session's lifetime and don't need a mutex.
+func pumpStream(r io.Reader, events chan<- agent.AgentEvent, askHandler askHandlerFunc, agentName, workspace, branch string, logger *slog.Logger) {
 	scanner := bufio.NewScanner(r)
 	// Allow long lines (Claude Code may emit large content blocks).
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -115,7 +120,7 @@ func pumpStream(r io.Reader, events chan<- agent.AgentEvent, askHandler askHandl
 			continue
 		}
 
-		translate(ev, events, askHandler, logger)
+		translate(ev, events, askHandler, agentName, workspace, branch, logger)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -132,7 +137,11 @@ func pumpStream(r io.Reader, events chan<- agent.AgentEvent, askHandler askHandl
 // translate converts one streamEvent into AgentEvent(s) on events.
 // Returns nothing — events that don't map to AgentEvent (e.g. unknown
 // type) are silently dropped (logged at debug).
-func translate(ev streamEvent, events chan<- agent.AgentEvent, askHandler askHandlerFunc, logger *slog.Logger) {
+//
+// agentName + workspace are stamped onto the EventInit payload so
+// channel-layer receipts can render the "Agent · name | cwd · path"
+// foot note. Both are immutable for the session's lifetime.
+func translate(ev streamEvent, events chan<- agent.AgentEvent, askHandler askHandlerFunc, agentName, workspace, branch string, logger *slog.Logger) {
 	switch ev.Type {
 	case "system":
 		// system/init is informational; we surface it via EventInit
@@ -145,6 +154,9 @@ func translate(ev streamEvent, events chan<- agent.AgentEvent, askHandler askHan
 				Init: &agent.InitEvent{
 					SessionID: ev.SessionID,
 					Model:     extractModel(ev),
+					AgentName: agentName,
+					Workspace: workspace,
+					Branch:    branch,
 				},
 			}
 		}

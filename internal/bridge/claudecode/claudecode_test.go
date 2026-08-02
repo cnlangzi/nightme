@@ -55,7 +55,7 @@ func streamFromFixture(t *testing.T, name string, askHandler askHandlerFunc) []a
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pumpStream(strings.NewReader(string(data)), events, askHandler, nil)
+		pumpStream(strings.NewReader(string(data)), events, askHandler, "claude", "/tmp", "main", nil)
 		close(events)
 	}()
 	var got []agent.AgentEvent
@@ -281,7 +281,7 @@ func TestPumpStream_Result_EmptyText_NoResultEvent(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pumpStream(strings.NewReader(input), events, nil, nil)
+		pumpStream(strings.NewReader(input), events, nil, "claude", "/tmp", "main", nil)
 		close(events)
 	}()
 	var got []agent.AgentEvent
@@ -308,7 +308,7 @@ func TestPumpStream_Result_EmptyUsage_NoUsageEvent(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pumpStream(strings.NewReader(input), events, nil, nil)
+		pumpStream(strings.NewReader(input), events, nil, "claude", "/tmp", "main", nil)
 		close(events)
 	}()
 	var got []agent.AgentEvent
@@ -390,7 +390,7 @@ func TestPumpStream_InvalidJSON_Skipped(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pumpStream(strings.NewReader(input), events, nil, nil)
+		pumpStream(strings.NewReader(input), events, nil, "claude", "/tmp", "main", nil)
 		close(events)
 	}()
 	var got []agent.AgentEvent
@@ -545,7 +545,7 @@ func TestSession_SendText_NoProcess(t *testing.T) {
 }
 
 func TestNewSession_EmptyWorkspace(t *testing.T) {
-	_, err := newSession(context.Background(), "echo", nil, nil, "")
+	_, err := newSession(context.Background(), "echo", "echo", nil, nil, "")
 	if err == nil {
 		t.Fatal("newSession with empty workspace should fail")
 	}
@@ -645,7 +645,7 @@ func streamFromString(stream string) []agent.AgentEvent {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pumpStream(strings.NewReader(stream), events, nil, nil)
+		pumpStream(strings.NewReader(stream), events, nil, "claude", "/tmp", "main", nil)
 		close(events)
 	}()
 	var got []agent.AgentEvent

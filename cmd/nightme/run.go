@@ -34,7 +34,7 @@ type runDeps struct {
 	buildAgents    func(*config.Config) *agent.Registry
 	newChannel     func(*config.Config) (channel.Channel, error)
 	newManager     func(*agent.Registry, *registry.File, session.EventCallback) session.Manager
-	newGateway     func(session.Manager, *agent.Registry, gatewaycmd.Responder) gateway.Gateway
+	newGateway     func(gatewaycmd.SessionManager, *agent.Registry, gatewaycmd.Responder) gateway.Gateway
 	signals        <-chan os.Signal
 	cleanup        bool
 	skipFeishuAuth bool
@@ -51,7 +51,7 @@ func defaultRunDeps() runDeps {
 		newManager: func(agents *agent.Registry, reg *registry.File, cb session.EventCallback) session.Manager {
 			return session.NewMemoryManager(agents, reg, cb)
 		},
-		newGateway: func(mgr session.Manager, agents *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
+		newGateway: func(mgr gatewaycmd.SessionManager, agents *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
 			gw := gateway.New(nil)
 			gatewaycmd.RegisterDefaultCommands(gw, mgr, agents, resp)
 			return gw
@@ -207,6 +207,13 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		return errors.New("run: session manager is nil")
 	}
 
+	// v1.1 chat binding bridge (F-26 §6 commit 2): the session
+	// manager is chat-id-agnostic; this coordinator gives the
+	// gateway handlers the legacy chatID-keyed view they expect.
+	// Commit 3 moves the bindings table into the Gateway itself.
+	coordinator := newChatCoordinator(mgr)
+	_ = coordinator // used by RegisterDefaultCommands below
+
 	// Responder pushes chat-side replies through the channel.
 	// Stage 3: the Feishu adapter owns the rolling-log receipt
 	// logic (Channel.Send is the display strategy). The runtime
@@ -215,7 +222,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// every event through the same receipt.
 	responder := channelResponder{ch: ch}
 	responder.userMessageFn = func(chatID, userMsgID string, blocks []agent.ContentBlock) error {
-		sess, err := mgr.GetByChat(chatID)
+		sess, err := coordinator.GetByChat(chatID)
 		if err != nil {
 			return fmt.Errorf("no session for chat: %w", err)
 		}
@@ -224,14 +231,16 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 
 	// Build the gateway now that the manager exists. The fallback
 	// forwards non-slash text to the chat's session via SendText.
-	gw := deps.newGateway(mgr, agents, responder)
+// v1.1: the coordinator (not the raw manager) is what the
+// gateway handlers depend on for chatID-keyed semantics.
+	gw := deps.newGateway(coordinator, agents, responder)
 	if gw == nil {
 		return errors.New("run: gateway is nil")
 	}
 
 	// Wrap the gateway's Handle() so the fallback we pass in
-	// (closing over mgr) sees the same logic. We replace the
-	// default fallback with one that forwards to the live session.
+	// (closing over coordinator) sees the same logic. We replace
+	// the default fallback with one that forwards to the live session.
 	//
 	// F-25 integration: the fallback routes through the
 	// channelResponder.SendUserMessage path, which (when the renderer
@@ -243,7 +252,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		// Forwarding is best-effort. If the chat has no /cwd or
 		// the agent is not running, we still send a hint so the
 		// user is not left wondering.
-		sess, err := mgr.GetByChat(msg.ChatID)
+		sess, err := coordinator.GetByChat(msg.ChatID)
 		if err != nil {
 			return responder.Reply(ctx, msg.ChatID, "no workspace set, send /cwd <path> first")
 		}
@@ -272,7 +281,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		return responder.SendUserMessage(ctx, msg.ChatID, userMsgID, blocks)
 	}
 	gw = gateway.New(fallback)
-	gatewaycmd.RegisterDefaultCommands(gw, mgr, agents, responder)
+	gatewaycmd.RegisterDefaultCommands(gw, coordinator, agents, responder)
 
 	// Reinstall the EventCallback now that the channel is alive.
 	// The MemoryManager's callback is fixed at construction time
@@ -315,8 +324,11 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	gwImpl.AttachChannels(ch)
 	gwImpl.AttachSweeper(func() []gateway.OutboundSource {
 		var out []gateway.OutboundSource
-		for _, sess := range mgr.List() {
-			if sess == nil || sess.ChatID == "" {
+		// v1.1: iterate bindings (chatID → sessionID) rather than
+		// pulling chat_id off each session. Session is chat-agnostic.
+		for _, b := range coordinator.ListBindings() {
+			sess, err := mgr.Get(b.SessionID)
+			if err != nil || sess == nil {
 				continue
 			}
 			if sess.Status() != session.StatusRunning {
@@ -324,7 +336,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 			}
 			out = append(out, gateway.OutboundSource{
 				SessionID: sess.ID,
-				ChatID:    sess.ChatID,
+				ChatID:    b.ChatID,
 				Events:    sess.Events(),
 			})
 		}
@@ -497,7 +509,7 @@ func killAllSessions(mgr session.Manager, logger *slog.Logger) error {
 				firstErr = fmt.Errorf("kill %s: %w", sess.ID, err)
 			}
 		} else if logger != nil {
-			logger.Info("session killed", "chat_id", sess.ChatID, "pid", sess.PID)
+			logger.Info("session killed", "session_id", sess.ID, "pid", sess.PID)
 		}
 	}
 	return firstErr

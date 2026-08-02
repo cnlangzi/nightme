@@ -1,15 +1,25 @@
-// Package session is the Session Manager: the central registry of
-// active nightme sessions keyed by both session ID and chat ID.
+// Package session is the Session Manager: a pure-process factory
+// for nightme sessions.
 //
-// A Session wraps one agent.AgentSession (PTY / ACP / SDK) and the
-// metadata needed to identify it from a chat (chat_id, workspace,
+// In v1.1 (see docs/feat/F-26-gateway-hub.md §5 and §6 commit 2)
+// the package is a pure domain object — it knows nothing about
+// chat_id, channel, receipt, or binding. It exposes only
+// session-ID-keyed operations; the chat → session binding lives in
+// the Gateway (commit 3) or, in this commit, in a thin runtime
+// bridge in cmd/nightme.
+//
+// A Session wraps one agent.AgentSession (PTY / ACP / SDK / JSON-IO)
+// and the metadata needed to spawn / introspect it (workspace,
 // agent name, args, pid). The Manager owns the lifecycle:
 //
 //   - Create    — register a new session and spawn its agent
-//   - GetByChat — resolve chat_id → Session
 //   - Get       — resolve session ID → Session
 //   - List      — snapshot all sessions
 //   - Kill      — terminate the agent and mark exited
+//   - Restore   — rehydrate in-memory state from the registry
+//   - Persist   — flush every session to the registry
+//   - MarkDetached — release the live handle without killing the
+//                    child process (default shutdown policy)
 //
 // Persistence lives in the registry.File added in PR #1; the
 // MemoryManager here is the in-memory companion that drives event
@@ -46,35 +56,25 @@ const (
 	StatusExited Status = "exited"
 )
 
-// Session is the in-memory representation of one chat → agent
-// binding. Fields are exported so M2 callers (Gateway handlers) can
-// render them in user-facing messages; the agentSession / cancel
-// fields are unexported because the Manager owns them.
+// Session is the in-memory representation of one agent process.
+// Fields are exported so v1.1 callers (Gateway handlers, status
+// commands) can render them in user-facing messages; the
+// agentSession / cancel fields are unexported because the Manager
+// owns them.
+//
+// v1.1: Session no longer carries ChatID / ChatType. The chat →
+// session binding is owned by the Gateway (see F-26 §2.4).
 //
 // The mutable fields (Status, PID, ExitCode, the unexported
 // agentSession, cancel) are guarded by mu. Callers that read or
 // write them MUST take mu via Snapshot / SetLifecycle. The metadata
-// fields (ID, ChatID, Workspace, Agent, Args, StartedAt, LastRunAt)
-// are immutable after Create returns.
+// fields (ID, Workspace, Agent, Args, StartedAt, LastRunAt) are
+// immutable after Create returns.
 type Session struct {
 	mu sync.RWMutex
 
-	// ID is the unique session identifier. v0.1 generates a random
-	// short ID; M3 may switch to UUIDs.
+	// ID is the unique session identifier.
 	ID string
-
-	// ChatID is the IM chat identifier — the natural key used by
-	// GetByChat. One chat maps to at most one Session (Q4 / SPEC §9).
-	ChatID string
-
-	// ChatType mirrors channel.Message.ChatType at create time:
-	// "p2p" for DMs, "group" for group chats, "" for unknown.
-	// DMs are a special case — the bot ↔ user relationship is 1:1
-	// so a DM has at most one session, and that session is treated
-	// as a single "control plane" (users typically issue /cwd +
-	// /run from a DM and watch replies there). Group chats each
-	// have their own session keyed by chat_id.
-	ChatType string
 
 	// Workspace is the directory the agent operates in. It is bound
 	// at creation time and never changes for the lifetime of the
@@ -148,9 +148,10 @@ func (s *Session) ExitCode() *int {
 // Snapshot returns an immutable copy of the session's user-visible
 // state. Callers can read every field without holding the lock.
 // Internal handles (agentSession / cancel) are deliberately omitted.
+//
+// v1.1: no ChatID / ChatType fields (binding is Gateway's).
 type Snapshot struct {
 	ID        string
-	ChatID    string
 	Workspace string
 	Agent     string
 	Args      []string
@@ -167,7 +168,6 @@ func (s *Session) Snapshot() Snapshot {
 	defer s.mu.RUnlock()
 	return Snapshot{
 		ID:        s.ID,
-		ChatID:    s.ChatID,
 		Workspace: s.Workspace,
 		Agent:     s.Agent,
 		Args:      append([]string(nil), s.Args...),

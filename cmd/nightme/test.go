@@ -97,7 +97,6 @@ func runTest(cmd *cobra.Command, f testCmdFlags) error {
 	}
 
 	sess, err := mgr.Create(context.Background(), session.CreateRequest{
-		ChatID:    "cli:test",
 		Workspace: f.workspace,
 		Agent:     f.agentName,
 		Args:      f.args,

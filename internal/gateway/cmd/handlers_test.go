@@ -67,13 +67,108 @@ func ptyAgentRegistry(t *testing.T) *agent.Registry {
 
 // newTestStack wires a fresh Gateway + Manager + Responder so each
 // test starts from a clean slate.
-func newTestStack(t *testing.T) (gateway.Gateway, *session.MemoryManager, *fakeResponder) {
+func newTestStack(t *testing.T) (gateway.Gateway, *testCoordinator, *fakeResponder) {
 	t.Helper()
 	resp := &fakeResponder{}
-	mgr := session.NewMemoryManager(ptyAgentRegistry(t), nil, nil)
+	agents := ptyAgentRegistry(t)
+	mgr := session.NewMemoryManager(agents, nil, nil)
+	co := newTestCoordinator(mgr)
 	gw := gateway.New(nil)
-	RegisterDefaultCommands(gw, mgr, ptyAgentRegistry(t), resp)
-	return gw, mgr, resp
+	RegisterDefaultCommands(gw, co, agents, resp)
+	return gw, co, resp
+}
+
+// testCoordinator is a minimal in-test SessionManager implementation
+// that gives the gateway handlers a chatID-keyed view of sessions.
+// It mirrors cmd/nightme's chatCoordinator but is local to the
+// gateway/cmd test package (which cannot import cmd/nightme due to
+// the internal/ → cmd layering).
+type testCoordinator struct {
+	mu       sync.Mutex
+	bindings map[string]string // chatID → sessionID
+	mgr      *session.MemoryManager
+}
+
+func newTestCoordinator(mgr *session.MemoryManager) *testCoordinator {
+	return &testCoordinator{
+		bindings: make(map[string]string),
+		mgr:      mgr,
+	}
+}
+
+func (c *testCoordinator) GetByChat(chatID string) (*session.Session, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	sid, ok := c.bindings[chatID]
+	if !ok {
+		return nil, session.ErrSessionNotFound
+	}
+	return c.mgr.Get(sid)
+}
+
+func (c *testCoordinator) CreateOrUpdate(chatID, _, workspace, agentName string, args []string) (*session.Session, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if sid, ok := c.bindings[chatID]; ok {
+		sess, err := c.mgr.Get(sid)
+		if err != nil {
+			delete(c.bindings, chatID)
+		} else if sess.Status() == session.StatusRunning {
+			return nil, ErrChatAlreadyBound
+		}
+	}
+	// /cwd registers a session record without spawning (StatusDetached);
+	// /run spawns the agent.
+	sess, err := c.mgr.Register(context.Background(), session.CreateRequest{
+		Workspace: workspace,
+		Agent:     agentName,
+		Args:      args,
+	})
+	if err != nil {
+		return nil, err
+	}
+	c.bindings[chatID] = sess.ID
+	return sess, nil
+}
+
+func (c *testCoordinator) Run(ctx context.Context, chatID, agentName string, extra []string) (*session.Session, error) {
+	c.mu.Lock()
+	sid, ok := c.bindings[chatID]
+	c.mu.Unlock()
+	if !ok {
+		return nil, session.ErrSessionNotFound
+	}
+	sess, err := c.mgr.Get(sid)
+	if err != nil {
+		return nil, err
+	}
+	if sess.Status() == session.StatusRunning {
+		return sess, nil
+	}
+	newSess, err := c.mgr.Create(ctx, session.CreateRequest{
+		Workspace: sess.Workspace,
+		Agent:     agentName,
+		Args:      extra,
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Rebind to the freshly-spawned session so subsequent /cwd
+	// calls see the running state and reject.
+	c.mu.Lock()
+	c.bindings[chatID] = newSess.ID
+	c.mu.Unlock()
+	return newSess, nil
+}
+
+func (c *testCoordinator) KillByChat(chatID string) error {
+	c.mu.Lock()
+	sid, ok := c.bindings[chatID]
+	c.mu.Unlock()
+	if !ok {
+		return session.ErrSessionNotFound
+	}
+	return c.mgr.Kill(sid)
 }
 
 // TestCwdHandler_NewSession covers the happy path: /cwd on a chat
@@ -448,11 +543,12 @@ func TestRunHandler_DetectFailure(t *testing.T) {
 	reg := agent.New()
 	reg.Register(&detectorFakeAgent{})
 	mgr := session.NewMemoryManager(reg, nil, nil)
+	co := newTestCoordinator(mgr)
 	resp := &fakeResponder{}
 	gw := gateway.New(nil)
-	RegisterDefaultCommands(gw, mgr, reg, resp)
+	RegisterDefaultCommands(gw, co, reg, resp)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
+	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
@@ -505,10 +601,11 @@ func TestRunHandler_ResponderErrorPropagates(t *testing.T) {
 	want := errors.New("responder down")
 	reg := ptyAgentRegistry(t)
 	mgr := session.NewMemoryManager(reg, nil, nil)
+	co := newTestCoordinator(mgr)
 	gw := gateway.New(nil)
-	RegisterDefaultCommands(gw, mgr, reg, errorResponder{err: want})
+	RegisterDefaultCommands(gw, co, reg, errorResponder{err: want})
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
+	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	_, err := gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
@@ -524,8 +621,9 @@ func TestRunHandler_ResponderErrorPropagates(t *testing.T) {
 // every default command.
 func TestRegistry_AllCommandsListed(t *testing.T) {
 	mgr := session.NewMemoryManager(ptyAgentRegistry(t), nil, nil)
+	co := newTestCoordinator(mgr)
 	gw := gateway.New(nil)
-	RegisterDefaultCommands(gw, mgr, ptyAgentRegistry(t), nil)
+	RegisterDefaultCommands(gw, co, ptyAgentRegistry(t), nil)
 
 	cmds := gw.ListCommands()
 	names := make(map[string]bool)
@@ -544,10 +642,11 @@ func TestRegistry_AllCommandsListed(t *testing.T) {
 func TestRunHandler_NilResponderWhenNil(t *testing.T) {
 	dir := t.TempDir()
 	mgr := session.NewMemoryManager(ptyAgentRegistry(t), nil, nil)
+	co := newTestCoordinator(mgr)
 	gw := gateway.New(nil)
-	RegisterDefaultCommands(gw, mgr, ptyAgentRegistry(t), nil)
+	RegisterDefaultCommands(gw, co, ptyAgentRegistry(t), nil)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
+	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	if _, err := gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{

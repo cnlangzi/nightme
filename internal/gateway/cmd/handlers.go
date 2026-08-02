@@ -13,6 +13,16 @@ import (
 	"github.com/cnlangzi/nightme/internal/session"
 )
 
+// ErrChatAlreadyBound is returned by SessionManager.CreateOrUpdate
+// when a session is already running for the requested chat. The
+// caller (typically /cwd) must /kill first.
+//
+// v1.1: this error used to live in internal/session alongside
+// ErrSessionNotFound. It moved here because the chat-binding
+// concept is no longer the session Manager's concern — see F-26
+// §6 commit 2.
+var ErrChatAlreadyBound = errors.New("session: chat already bound to an existing session")
+
 // SessionManager is the abstract surface the gateway handlers depend
 // on. Defined here (in the gateway package, not session) so that
 // gateway doesn't import session — that import would create a
@@ -158,7 +168,7 @@ func (h *handlerContext) cwd(ctx context.Context, msg *gateway.InboundMessage, a
 
 	sess, err := h.manager.CreateOrUpdate(msg.ChatID, string(msg.ChatType), abs, agentName, nil)
 	if err != nil {
-		if errors.Is(err, session.ErrChatAlreadyBound) {
+		if errors.Is(err, ErrChatAlreadyBound) {
 			return h.reply(ctx, msg.ChatID, "session already active, /kill first"), nil
 		}
 		return h.reply(ctx, msg.ChatID, fmt.Sprintf("/cwd: %v", err)), nil

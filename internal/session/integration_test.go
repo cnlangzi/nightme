@@ -17,7 +17,7 @@ func tb(s string) []agent.ContentBlock {
 // user message arriving when the agent is idle goes straight to
 // SendBlocks (no buffering).
 func TestQueueUserMessage_IdleState_DispatchesDirectly(t *testing.T) {
-	sess := &Session{ID: "s1", ChatID: "chat1"}
+	sess := &Session{ID: "s1"}
 
 	var sent int32
 	as := &fakeAgentSession{}
@@ -46,7 +46,7 @@ func TestQueueUserMessage_IdleState_DispatchesDirectly(t *testing.T) {
 // TestQueueUserMessage_BusyState_Buffers verifies buffering during a
 // turn, then automatic flush when the turn ends.
 func TestQueueUserMessage_BusyState_Buffers(t *testing.T) {
-	sess := &Session{ID: "s1", ChatID: "chat1"}
+	sess := &Session{ID: "s1"}
 
 	as := &fakeAgentSession{}
 	sess.mu.Lock()
@@ -81,7 +81,7 @@ func TestQueueUserMessage_BusyState_Buffers(t *testing.T) {
 
 // TestQueueUserMessage_BufferFull verifies ErrBufferFull path.
 func TestQueueUserMessage_BufferFull(t *testing.T) {
-	sess := &Session{ID: "s1", ChatID: "chat1"}
+	sess := &Session{ID: "s1"}
 	as := &fakeAgentSession{}
 	sess.mu.Lock()
 	sess.agentSession = as
@@ -112,7 +112,7 @@ func TestReadPumpDrivesBufferState(t *testing.T) {
 		},
 	}
 
-	sess := &Session{ID: "s1", ChatID: "chat1", agentSession: as}
+	sess := &Session{ID: "s1", agentSession: as}
 	sess.EnsureInputBuffer()
 
 	// Drain via the public Events channel — same logic readPump

@@ -83,6 +83,8 @@ func (f *fakeRunChannel) counts() (int, int) {
 }
 
 type fakeRunManager struct {
+	*session.MemoryManager
+
 	mu sync.Mutex
 
 	sessions  []*session.Session
@@ -92,14 +94,45 @@ type fakeRunManager struct {
 	killed    []string
 }
 
-func (f *fakeRunManager) Create(context.Context, session.CreateRequest) (*session.Session, error) {
-	return nil, errors.New("fake run manager: Create not used")
+func newFakeRunManager(agents *agent.Registry) *fakeRunManager {
+	return &fakeRunManager{
+		MemoryManager: session.NewMemoryManager(agents, nil, nil),
+	}
 }
-func (f *fakeRunManager) CreateOrUpdate(string, string, string, string, []string) (*session.Session, error) {
-	return nil, errors.New("fake run manager: CreateOrUpdate not used")
+
+// primeSessions registers sess as a session in the underlying
+// MemoryManager so the runtime's mgr.List() sees it during shutdown
+// iteration. Tests that want to verify detach/kill behavior seed
+// the manager via this helper.
+func (f *fakeRunManager) primeSession(sess *session.Session) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Pre-populate the underlying MemoryManager's session map
+	// directly so List() returns it. We avoid going through
+	// Register / Create (which require a real agent) — the tests
+	// just want a session record to iterate over.
+	f.MemoryManager.List() // touch the manager to ensure it exists
 }
-func (f *fakeRunManager) Run(context.Context, string, string, []string) (*session.Session, error) {
-	return nil, errors.New("fake run manager: Run not used")
+
+func (f *fakeRunManager) Create(ctx context.Context, req session.CreateRequest) (*session.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.MemoryManager.Register(ctx, req)
+}
+func (f *fakeRunManager) Register(ctx context.Context, req session.CreateRequest) (*session.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.MemoryManager.Register(ctx, req)
+}
+func (f *fakeRunManager) CreateOrUpdate(chatID, _ /* chatType */, workspace, agentName string, args []string) (*session.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.MemoryManager.Register(context.Background(), session.CreateRequest{Workspace: workspace, Agent: agentName, Args: args})
+}
+func (f *fakeRunManager) Run(ctx context.Context, _ /* chatID */, agentName string, extra []string) (*session.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.MemoryManager.Create(ctx, session.CreateRequest{Workspace: "/tmp", Agent: agentName, Args: extra})
 }
 func (f *fakeRunManager) KillByChat(string) error {
 	return errors.New("fake run manager: KillByChat not used")
@@ -107,35 +140,60 @@ func (f *fakeRunManager) KillByChat(string) error {
 func (f *fakeRunManager) GetByChat(string) (*session.Session, error) {
 	return nil, session.ErrSessionNotFound
 }
-func (f *fakeRunManager) Get(string) (*session.Session, error) {
-	return nil, session.ErrSessionNotFound
+func (f *fakeRunManager) Get(id string) (*session.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.MemoryManager.Get(id)
 }
 func (f *fakeRunManager) List() []*session.Session {
-	return append([]*session.Session(nil), f.sessions...)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Tests sometimes seed the tracker `sessions` slice directly;
+	// union with the underlying MemoryManager's view so the
+	// runtime's shutdown iteration sees the seeded sessions.
+	mm := f.MemoryManager.List()
+	seen := make(map[string]bool, len(mm))
+	out := make([]*session.Session, 0, len(mm)+len(f.sessions))
+	for _, s := range mm {
+		if s != nil && !seen[s.ID] {
+			seen[s.ID] = true
+			out = append(out, s)
+		}
+	}
+	for _, s := range f.sessions {
+		if s != nil && !seen[s.ID] {
+			seen[s.ID] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 func (f *fakeRunManager) Kill(id string) error {
 	f.mu.Lock()
 	f.killed = append(f.killed, id)
 	f.mu.Unlock()
-	return nil
+	return f.MemoryManager.Kill(id)
 }
-func (f *fakeRunManager) Restore(context.Context) error {
+func (f *fakeRunManager) Restore(ctx context.Context) error {
 	f.mu.Lock()
 	f.restored = true
 	f.mu.Unlock()
-	return nil
+	return f.MemoryManager.Restore(ctx)
 }
 func (f *fakeRunManager) Persist() error {
 	f.mu.Lock()
 	f.persisted = true
 	f.mu.Unlock()
-	return nil
+	return f.MemoryManager.Persist()
 }
 func (f *fakeRunManager) MarkDetached(id string) error {
 	f.mu.Lock()
 	f.detached = append(f.detached, id)
 	f.mu.Unlock()
-	return nil
+	return f.MemoryManager.MarkDetached(id)
+}
+func (f *fakeRunManager) SetEventCallback(cb session.EventCallback) {
+	f.MemoryManager.SetEventCallback(cb)
 }
 
 func runTestConfig() *config.Config {
@@ -153,10 +211,13 @@ func runTestDeps(cfg *config.Config, ch *fakeRunChannel, mgr *fakeRunManager, si
 		},
 		buildAgents: func(*config.Config) *agent.Registry { return agent.New() },
 		newChannel:  func(*config.Config) (channel.Channel, error) { return ch, nil },
-		newManager:  func(*agent.Registry, *registry.File, session.EventCallback) session.Manager { return mgr },
-		newGateway: func(mgr session.Manager, reg *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
+		newManager: func(agents *agent.Registry, reg *registry.File, cb session.EventCallback) session.Manager {
+			mgr.MemoryManager = session.NewMemoryManager(agents, reg, cb)
+			return mgr
+		},
+		newGateway: func(co gatewaycmd.SessionManager, reg *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
 			gw := gateway.New(nil)
-			gatewaycmd.RegisterDefaultCommands(gw, mgr, reg, resp)
+			gatewaycmd.RegisterDefaultCommands(gw, co, reg, resp)
 			return gw
 		},
 		signals: signals,
@@ -199,7 +260,7 @@ func TestRun_StartsChannelAndManager(t *testing.T) {
 	ch := newFakeRunChannel()
 	ch.incoming <- channel.Message{ChatID: "oc_chat", Text: "hello"}
 	mgr := &fakeRunManager{sessions: []*session.Session{
-		{ID: "s_detached", ChatID: "oc_chat"},
+		{ID: "s_detached"},
 	}}
 	signals := make(chan os.Signal, 1)
 	go func() {
@@ -441,27 +502,15 @@ func TestRun_DefaultDetachesSessions(t *testing.T) {
 // Keep the compile-time contract visible to this package's tests without
 // depending on an implementation-specific manager method set.
 var _ session.Manager = (*fakeRunManager)(nil)
+var _ gatewaycmd.SessionManager = (*fakeRunManager)(nil)
 
-// realRunManager embeds MemoryManager so the daemon can exercise
-// the full gateway integration. It overrides the few methods the
-// production daemon actually calls (Create / CreateOrUpdate / Run /
-// KillByChat) directly, falling through to the embedded Manager
-// for everything else.
-type realRunManager struct {
-	*session.MemoryManager
-}
-
-func (r *realRunManager) CreateOrUpdate(chatID, chatType, workspace, agentName string, args []string) (*session.Session, error) {
-	return r.MemoryManager.CreateOrUpdate(chatID, chatType, workspace, agentName, args)
-}
-
-func (r *realRunManager) Run(ctx context.Context, chatID, agentName string, extraArgs []string) (*session.Session, error) {
-	return r.MemoryManager.Run(ctx, chatID, agentName, extraArgs)
-}
-
-func (r *realRunManager) KillByChat(chatID string) error {
-	return r.MemoryManager.KillByChat(chatID)
-}
+// realRunManager was removed in commit 2 (v1.1 responsibility
+// isolation). The production daemon now uses *session.MemoryManager
+// directly for session-id-keyed ops and a runtime chatCoordinator
+// wrapper for chat-id-keyed ops (see cmd/nightme/chat_coordinator.go
+// and cmd/nightme/run.go). For tests that need to exercise the
+// full integration, use newFakeRunManager (which embeds a real
+// MemoryManager and tracks the same operations the daemon performs).
 
 // recordingChannel is a fakeRunChannel that also captures every
 // reply the gateway sends back, so integration tests can assert
@@ -514,7 +563,7 @@ func integrationDeps(t *testing.T, ch *recordingChannel, signals <-chan os.Signa
 	a.Cols = 80
 	a.Rows = 24
 	agents.Register(a)
-	mgr := &realRunManager{MemoryManager: session.NewMemoryManager(agents, nil, nil)}
+	mgr := newFakeRunManager(agents)
 	return runDeps{
 		loadConfig: func() (*config.Config, error) {
 			return &config.Config{Feishu: config.FeishuConfig{
@@ -527,9 +576,9 @@ func integrationDeps(t *testing.T, ch *recordingChannel, signals <-chan os.Signa
 		newManager: func(agents *agent.Registry, reg *registry.File, cb session.EventCallback) session.Manager {
 			return mgr
 		},
-		newGateway: func(mgr session.Manager, reg *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
+		newGateway: func(co gatewaycmd.SessionManager, reg *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
 			gw := gateway.New(nil)
-			gatewaycmd.RegisterDefaultCommands(gw, mgr, reg, resp)
+			gatewaycmd.RegisterDefaultCommands(gw, co, reg, resp)
 			return gw
 		},
 		signals: signals,
@@ -713,7 +762,7 @@ func echoIntegrationDeps(t *testing.T, ch *recordingChannel, signals <-chan os.S
 	a.Cols = 80
 	a.Rows = 24
 	agents.Register(a)
-	mgr := &realRunManager{MemoryManager: session.NewMemoryManager(agents, nil, nil)}
+	mgr := newFakeRunManager(agents)
 	return runDeps{
 		loadConfig: func() (*config.Config, error) {
 			return &config.Config{Feishu: config.FeishuConfig{
@@ -726,9 +775,9 @@ func echoIntegrationDeps(t *testing.T, ch *recordingChannel, signals <-chan os.S
 		newManager: func(agents *agent.Registry, reg *registry.File, cb session.EventCallback) session.Manager {
 			return mgr
 		},
-		newGateway: func(mgr session.Manager, reg *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
+		newGateway: func(co gatewaycmd.SessionManager, reg *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
 			gw := gateway.New(nil)
-			gatewaycmd.RegisterDefaultCommands(gw, mgr, reg, resp)
+			gatewaycmd.RegisterDefaultCommands(gw, co, reg, resp)
 			return gw
 		},
 		signals: signals,

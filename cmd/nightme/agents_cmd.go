@@ -19,7 +19,7 @@
 // Design notes:
 //   - Header + rows are column-aligned to a fixed width; long args
 //     are truncated so the output stays readable on a 120-col terminal.
-//   - The "(default: X)" footer comes from cfg.Agent.Default, falling
+//   - The "(default: X)" footer comes from cfg.Primary, falling
 //     back to the v0.1 hard-coded "claude" if unset.
 //   - Registry build reuses buildRunAgentRegistry so the CLI view
 //     matches what the daemon would actually see at startup.
@@ -80,7 +80,7 @@ func runAgents(cmd *cobra.Command, f agentsCmdFlags) error {
 
 	reg := buildRunAgentRegistry(cfg)
 	rows := collectAgents(reg)
-	defaultName := cfg.Agent.Default
+	defaultName := cfg.Primary
 	if defaultName == "" {
 		defaultName = "claude"
 	}

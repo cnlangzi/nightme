@@ -535,14 +535,177 @@ Claude Code 在 v0.1 走 PTY。v0.2 切 JSON-IO 后：
 
 ---
 
+## 4.6 v1.2: ChatSession 重构
+
+> **状态**：**已落地**（2026-08-02；commits 5/6/7/8a/8b/8c/9 + F-30）
+> **目标 session 数**：3-5 sessions
+> **预估代码量**：~1500 行 Go（包含 schema 改造 + 状态机迁移 + 测试）— 实际 ~3700 行
+> **关键交付**：F-27 ChatSession + F-28 `/use` + F-29 AgentSession 池；向后迁移 v0.x 持久化数据
+
+### 4.6.1 目标
+
+把 v1.1 单层 `Session` 模型重构为 v1.2 双层 `ChatSession` + `AgentSession` 模型：
+
+1. **ChatSession**：per chat 持久化会话上下文，跨 daemon 重启
+2. **AgentSession**：per `(agent, cwd)` 1:1 唯一，池化在 ChatSession 下
+3. **`/use <agent>`**：lazy switch，复用或 spawn，**永不重启进程**
+4. **`/cwd`**：只改 activeCwd，不触发 spawn / kill
+5. **`/kill`**：清空整个 ChatSession pool
+6. **删除 `/run`**：被 `/use` 完全替代
+
+### 4.6.2 范围
+
+**In scope**：
+- 持久化 schema 改造（v1.x → v1.2 双表）
+- `Session` 类型拆分为 `ChatSession` + `AgentSession`
+- Gateway handler 重写：`/cwd` / `/use` / `/kill`（**无 `/default`** — Q-A 已确认全局 only）
+- v1.x registry 自动迁移到 v1.2
+- 测试（unit + integration + E2E 飞书）
+- SPEC / PRD / FEATURES 草案 → **已锁定**（commit `docs(plan): v1.2 实施计划` + 本 commit）
+
+**Out of scope**（明确不做）：
+- 多 AgentSession 并行协作（v0.4+）
+- 跨 chat 共享 ChatSession
+- AgentSession 跨 ChatSession 共享
+- LRU eviction（v0.4+）
+- `/default` 命令（Q-A 已确认全局 only，不需要 per-chat command）
+
+### 4.6.3 文件结构（v1.2 新增 / 修改）
+
+```
+internal/
+├── chatsession/                   # NEW
+│   ├── chatsession.go             # ChatSession struct + lifecycle
+│   ├── lookup.go                  # LookupActiveAgentSession (resolution logic)
+│   ├── restore.go                 # Restore from registry
+│   └── *_test.go
+├── agentsession/                  # NEW (replaces internal/session/session.go)
+│   ├── agentsession.go            # AgentSession struct + bridge integration
+│   ├── pool.go                    # (concept, but logic lives in chatsession)
+│   ├── spawn.go                   # Spawn / Respawn / Kill
+│   └── *_test.go
+├── session/                       # SHRINK: only InputBuffer FSM (F-25) remains here
+│   ├── inputbuffer.go             # moved ownership → chatsession callsite
+│   └── ...
+├── registry/                      # MODIFIED
+│   ├── chat_session_entry.go      # NEW (split from v1.x SessionEntry)
+│   ├── agent_session_entry.go     # NEW
+│   ├── migrate_v1_to_v2.go        # NEW (auto-migration on startup)
+│   ├── registry.go                # MODIFIED (two-file persistence)
+│   └── *_test.go
+├── gateway/                       # MODIFIED
+│   ├── handlers/
+│   │   ├── cwd.go                 # SIMPLIFIED (no spawn trigger)
+│   │   ├── use.go                 # NEW (replaces run.go)
+│   │   ├── kill.go                # MODIFIED (kills entire pool)
+│   │   ├── default.go             # NEW (Q-A decision pending)
+│   │   └── run.go                 # DELETED
+│   └── ...
+└── ...
+```
+
+### 4.6.4 v1.2 Commit 拆分（不分子 PR）
+
+> **Devin 明确指示**：分步 commit，但不分 PR（一次直推 main）
+
+按 docs-first → code 顺序：
+
+| # | Commit | 内容 | 类型 | 风险 | 状态 |
+|---|--------|------|------|------|------|
+| 1 | `docs(prd): v1.2 ChatSession 设计哲学` | PRD.md §4.3/§4.6/§5 更新 | docs | Low | ✅ `a9689c1` |
+| 2 | `docs(spec): v1.2 两层 Session 架构` | SPEC.md 架构重写 + schema 草案 | docs | Low | ✅ `55df6dc` |
+| 3 | `docs(features): v1.2 F-27/28/29` | FEATURES.md + feat/F-27/28/29 | docs | Low | ✅ `b2d11f1` |
+| 4 | `docs(plan): v1.2 实施计划` | PLAN.md §4.6 | docs | Low | ✅ `c439d2a` |
+| 5 | `refactor(registry): split SessionEntry → ChatSessionEntry + AgentSessionEntry` | schema 拆分 + 迁移 | code | Medium | ✅ `97539be` |
+| 6 | `feat(chatsession): ChatSession struct + lifecycle` | 新建 ChatSession + LookupActiveAgentSession | code | Medium | ✅ `7138d2a` |
+| 7 | `refactor(agentsession): AgentSession pool + spawn/reuse/respawn` | 新建 AgentSession + pool ops | code | Medium | ✅ `14dfb4f` |
+| 8a | `refactor(gateway): handlers for /cwd /use /kill (no /run)` | handlers 重写 | code | High | ✅ `9930489` |
+| 8b | `feat(run): v1.2 ChatSession-based daemon` | run_v12.go 完整 daemon | code | High | ✅ `9dca227` |
+| 8c | `feat(8c): readPump lifecycle + EventHandler + v1.x migration` | readPump + handler + 迁移钩子 | code | High | ✅ `0d43fe1` |
+| 9 | `refactor(inputbuffer): ownership moves to ChatSession` | InputBuffer FSM 迁移 | code | Medium | ✅ `b6915ba` |
+| F-30 | `feat(cli): nightme config 交互模式` | config command + F-30 doc | code | Medium | ✅ `66a0237` + `cecdb4f` |
+| Q-A | `refactor(chatsession): 移除 /default + SetDefaultAgent` | Q-A 简化 | code | Low | ✅ `d2cb438` |
+| Q-Config | `refactor(config): top-level primary + agents list` | config schema 重构 | code | Medium | ✅ `91707ec` + `b327d2b` + `9e996e4` |
+| 10 | `test(integration): /use reuse + pool survive /kill + restart` | 集成测试 | test | Low | ⏳ (unit-level 已覆盖) |
+| 11 | `test(e2e): 飞书 DM 三态切换 (claude→codex→claude)` | E2E 测试 | test | Low | ⏳ (deferred to v0.4 release gate) |
+| 12 | `docs: v1.2 锁定 + release notes` | SPEC/FEATURES/PRD 状态从"草案"改"锁定" | docs | Low | ✅ (本 commit) |
+
+### 4.6.5 验收标准（v1.2）
+
+**单元测试**：
+- ChatSession SetActiveCwd / SetActiveAgent 纯状态变更（不触发 spawn/kill）
+- LookupActiveAgentSession 三个分支（exact / default fallback / spawn）
+- AgentSession pool `(chatSessionId, agent, cwd)` 唯一索引
+- KillAll 清空 pool + activeAS=nil
+- 并发 `/use` + readPump event（`go test -race`）
+
+**集成测试**：
+- /use claude → /use codex → /use claude：第一次和第三次 PID 一致
+- /kill → 下一条消息：新 PID，pool 空
+- daemon 重启：AgentSession status=Detached，respawn on lookup
+- v1.x registry 自动迁移：单个 v1 SessionEntry → ChatSessionEntry + AgentSessionEntry
+
+**E2E（飞书 DM）**：
+- /cwd → /use claude → "fix bug X" → 看到 claude 输出
+- /use codex → "review this code" → 看到 codex 输出
+- /use claude → 继续 → claude 进程是第一次那个 PID（对话上下文保留）
+- /cwd /other/path → /use codex → pool 中 (codex, /original) 仍在
+- /use claude → 切回时 spawn 新 (claude, /other/path)
+- 切换过程中 Receipt FSM 不受影响（⏳ → 🔄 → ✅ 正常流转）
+
+**资源占用**：
+- 单 ChatSession 5 个 AgentSession：RSS < 50MB
+- 5 个 ChatSession 各 3 个 AgentSession：RSS < 100MB
+
+### 4.6.6 风险 & 备选
+
+| 风险 | 影响 | 缓解 |
+|------|------|------|
+| v1.x registry 迁移失败 | 用户启动失败 | 迁移前自动备份 `sessions.v1.json.bak`；失败回滚 |
+| Pool 无限增长 | 内存泄漏 | v1.2 不加 LRU（监控；v0.4+ 加） |
+| /use 切换时老 AgentSession 事件丢失 | 用户体验下降 | 文档化（PRD §4.3 已说明"过时的不管"） |
+| 并发 /use + readPump race | 事件丢失 / panic | 严格 poolMu RWMutex；`go test -race` 覆盖 |
+| Bridge 在 respawn 时复用问题 | 进程崩溃 | 每次 respawn 创建新 Bridge；老 Bridge 关闭 |
+
+**备选方案**（如 v1.2 失败回退）：
+- 回退到 v1.1 单层 Session（保留 commit 5 schema 拆分，因为不破坏 v1.1 runtime）
+- 不实现 pool，回退到 v1.x 单 chat 单 session（需要回退 commit 7/8/9）
+
+### 4.6.7 与 v0.x 的兼容
+
+**不兼容点**（v1.2 是 breaking change）：
+- `/run` 命令删除
+- `Session` 类型不存在（被 ChatSession + AgentSession 替代）
+- Registry 文件从单文件变双文件（但内容等价）
+
+**兼容路径**：
+- v1.x → v1.2 升级：自动迁移；无需手动操作
+- v1.2 → v1.x 回退：不可逆（v1.x 不识别双表）；但 v1.2 部署后再回退 v1.x 不推荐
+
+### 4.6.8 决策确认
+
+| 决策 | 影响 | 状态 |
+|------|------|------|
+| **Q-A**: Primary Agent 设置粒度 | 仅全局 `primary` config (YAML)；ChatSession.primaryAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已锁定 (2026-08-02) |
+| **Q-B**: `(activeAgent, activeCwd)` lookup 行为 | 只看 `(activeAgent, activeCwd)`：命中 Running 复用，否则 spawn；**无运行时 fallback** | ✅ 已锁定 (2026-08-02) |
+| **Q-C**: ChatSession.ID 来源 | 影响 ChatSessionEntry schema | 倾向 derived from chatId |
+| **Q-D**: /kill 时 InputBuffer 队列消息处理（drop / persist）| 影响 ChatSession.KillAll 行为 | 倾向 drop |
+| **Q-E**: AgentSessionEntry 持久化是否包括 Bridge 类型 | 影响 registry schema | 倾向包括 |
+| **Q-F**: ChatSession 持久化位置（单文件 / 双文件 / SQLite）| 影响 registry 复杂度 | 倾向双 JSON 文件 |
+
+---
+
 ## 5. 时间预估（虾哥节奏）
 
 | Milestone | 预估 session 数 | 预估代码量 | 关键交付 |
 |-----------|----------------|------------|---------|
 | M0 | ✅ 已完成 | 0 行 Go，~2700 行 spec | docs |
-| M1 | 2-3 sessions | ~1000 行 Go | Bridge 抽象 + PTY backend + Session + Registry |
-| M2 | 3-4 sessions | ~1800 行 Go | Gateway + ACP backend + Channel + 飞书 round-trip |
-| M3 | 1-2 sessions | ~400 行 Go + docs | hardening + CI + v0.1 release |
+| M1 | ✅ 已完成 | ~1000 行 Go | Bridge 抽象 + PTY backend + Session + Registry |
+| M2 | ✅ 已完成 | ~1800 行 Go | Gateway + ACP backend + Channel + 飞书 round-trip |
+| M3 | ✅ 已完成 | ~400 行 Go + docs | hardening + CI + v0.1 release |
+| v0.2 | ✅ 已完成 | ~1200 行 Go | F-23 heartbeat + F-24 claudecode-bridge |
+| v0.3 (v1.1) | ✅ 已完成 | ~800 行 Go | F-25 + F-26 职责隔离架构 |
+| **v1.2** | **3-5 sessions** | **~1500 行 Go** | **F-27 + F-28 + F-29** |
 | v0.2 | 2-3 sessions | ~1200 行 Go | F-23 heartbeat + F-24 claudecode-bridge |
 
 每个 session 内：
@@ -581,6 +744,14 @@ M1 的第一个 PR：
 ## 8. 文档变更日志
 
 - **v1.0** — 初始版本（基于早期 PRD/SPEC 设计）
+- **v2.2** — **v1.2 设计加入**：
+  - Session → ChatSession + AgentSession 双层模型
+  - `/run` 删除，`/use <agent>` 替代
+  - AgentSession 池化（per ChatSession `(agent, cwd)` 1:1）
+  - `/cwd` 只改 activeCwd，不触发 spawn
+  - `/kill` 清空整个 pool
+  - Registry 双表拆分（ChatSessionEntry + AgentSessionEntry）
+  - InputBuffer FSM 迁移到 ChatSession 级
 - **v2.1** — v0.2 设计加入：
   - F-23 heartbeat 取代 F-17（event-driven tick + 进程级 DEAD + 用户主权）
   - F-24 claudecode-bridge（JSON-IO + AskUserQuestion 双路兼容）

@@ -95,7 +95,7 @@ type Adapter struct {
 	// per-session pump emits the first OutText for a chat that
 	// doesn't have an active receipt, we lazily create one (this
 	// covers the case where the user message is forwarded via
-	// the gateway's fallback but the renderer path is gone).
+	// the gateway's messageDispatcher but the renderer path is gone).
 	receipts map[string]*MessageReceipt
 
 	// receiptsByUserMsgID is the secondary index that lets
@@ -324,7 +324,7 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	                       display strategy (Stage 3 migrates the
 //	                       receipt-rendering logic here). Stage 1's
 //	                       Send handles OutText directly so the
-//	                       existing /help / /run fallback paths keep
+//	                       existing /help / /use paths keep
 //	                       working.
 //	OutReaction          → AddReaction on Meta["message_id"]
 //	OutReactionRemoved   → DeleteReaction on Meta["reaction_id"]
@@ -336,7 +336,7 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 // Errors from the underlying API are logged and returned; the
 // Gateway treats Send as fire-and-ack (no retry).
 // SendUserMessage is the F-25 entry point used by the gateway's
-// fallback handler to hand a user message to the agent. It creates
+// messageDispatcher to hand a user message to the agent. It creates
 // a MessageReceipt (⏳ emoji + reply) and returns the receipt so
 // the caller can drive state via MarkExecuting (on dispatch) and
 // SetCompleted (on agent done). The reply text is the user's caption
@@ -438,8 +438,8 @@ func (a *Adapter) MarkExecuting(ctx context.Context, userMsgID string) error {
 //
 // Commit 1 of the v1.1 refactor (see docs/feat/F-26-gateway-hub.md
 // §6). Existing SendUserMessage / MarkExecuting continue to work
-// for the legacy fallback path in cmd/nightme/run.go until commit
-// 3 migrates it.
+// for the legacy cmd/nightme/run.go path; the v1.2 daemon uses
+// the inboundDispatcher + messageDispatcher instead.
 
 // CreateReceipt creates a new Feishu receipt for an incoming user
 // message and returns the opaque channel.Receipt handle. The
@@ -701,7 +701,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 	return fmt.Errorf("feishu: unsupported outbound kind %v", msg.Kind)
 }
 
-// sendRawOutText is the last-resort fallback when a receipt
+// sendRawOutText is the degraded send path used when a receipt
 // can't be created (e.g. the channel.post text API failed). Sends
 // the text as a new standalone message so the user still sees
 // something.

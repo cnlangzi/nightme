@@ -310,7 +310,7 @@ If you see references to `SendMessage` / `SendLongMessage` in older docs, they r
 | 用户撤回消息 | v0.1 忽略；v1.1 receipt 已 dispose，UI 已更新 |
 | 飞书 appSecret 错误 | Start() 返回 error，nightme 启动失败 |
 | 飞书权限被回收 | WebSocket 收到权限错误事件 → Channel.Send 返回 error → 日志告警 |
-| CreateReceipt 失败 | Gateway 跳过 receipt 簿记，走纯 Send(OutboundMessage) fallback |
+| CreateReceipt 失败 | Gateway 跳过 receipt 簿记，走 degraded send 路径（纯 Send(OutboundMessage)） |
 | UpdateReceipt 失败 | Channel 内部 log warn；Gateway 不重试（fire-and-ack）|
 | DisposeReceipt 失败 | Channel 内部 log warn；Gateway 已从 receipts map 删除条目 |
 | 用户在 receipt 已 Done 后再发同 userMsgID 的 receipt（如重发）| Gateway 视为新 receipt，不与旧 receipt 关联（userMsgID 应当唯一）|
@@ -340,8 +340,8 @@ If you see references to `SendMessage` / `SendLongMessage` in older docs, they r
 
 ### 7.2 Integration
 
-- mock Channel → Gateway → fake Session: verify `CreateReceipt` 在 fallback 路径被调用，`UpdateReceipt(executing)` 在 dispatch 立即时被调用
-- mock Channel → Gateway → fake Session with Busy buffer: verify `UpdateReceipt(executing)` 在 `onFlush` 钩子被调用（**不**在 fallback 路径调用）
+- mock Channel → Gateway → fake Session: verify `CreateReceipt` 在 messageDispatcher 路径被调用，`UpdateReceipt(executing)` 在 dispatch 立即时被调用
+- mock Channel → Gateway → fake Session with Busy buffer: verify `UpdateReceipt(executing)` 在 `onFlush` 钩子被调用（**不**在 messageDispatcher 路径调用）
 - mock Channel → Gateway → fake Session with EventError: verify `UpdateReceipt(error)` + `DisposeReceipt` 在 EventCallback 中被调用
 
 ### 7.3 E2E（M2+）

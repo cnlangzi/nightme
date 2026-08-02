@@ -236,7 +236,7 @@ func TestCwdHandler_NewSession(t *testing.T) {
 	gw, _, resp := newTestStack(t)
 
 	ctx := WithGateway(context.Background(), gw)
-	if _, err := gw.Handle(ctx, &gateway.InboundMessage{ChatID: "oc_chat", Text: "/cwd " + dir}); err != nil {
+	if _, err := gw.DispatchInbound(ctx, &gateway.InboundMessage{ChatID: "oc_chat", Text: "/cwd " + dir}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if !strings.Contains(resp.last(), "Workspace set") {
@@ -264,7 +264,7 @@ func TestCwdHandler_RelativePathUsesHome(t *testing.T) {
 	gw, _, _ := newTestStack(t)
 
 	ctx := WithGateway(context.Background(), gw)
-	if _, err := gw.Handle(ctx, &gateway.InboundMessage{ChatID: "oc_chat", Text: "/cwd code/nightme"}); err != nil {
+	if _, err := gw.DispatchInbound(ctx, &gateway.InboundMessage{ChatID: "oc_chat", Text: "/cwd code/nightme"}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	sess, err := gw.LookupSessionByChat("oc_chat")
@@ -290,7 +290,7 @@ func TestCwdHandler_RejectsActiveSession(t *testing.T) {
 	}
 
 	other := t.TempDir()
-	if _, err := gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	if _, err := gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/cwd " + other,
 	}); err != nil {
@@ -312,7 +312,7 @@ func TestCwdHandler_RejectsActiveSession(t *testing.T) {
 func TestCwdHandler_NoArgs_NoSession(t *testing.T) {
 	gw, _, resp := newTestStack(t)
 
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/cwd",
 	})
@@ -332,7 +332,7 @@ func TestCwdHandler_NoArgs_WithSession(t *testing.T) {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/cwd",
 	})
@@ -349,7 +349,7 @@ func TestCwdHandler_NoArgs_WithSession(t *testing.T) {
 func TestCwdHandler_NonexistentPath(t *testing.T) {
 	gw, _, resp := newTestStack(t)
 
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/cwd /this/does/not/exist",
 	})
@@ -369,7 +369,7 @@ func TestCwdHandler_RejectsFile(t *testing.T) {
 
 	gw, _, resp := newTestStack(t)
 
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/cwd " + file,
 	})
@@ -383,7 +383,7 @@ func TestCwdHandler_RejectsFile(t *testing.T) {
 func TestRunHandler_NoWorkspace(t *testing.T) {
 	gw, _, resp := newTestStack(t)
 
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/run claude",
 	})
@@ -401,7 +401,7 @@ func TestRunHandler_Success(t *testing.T) {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/run claude",
 	})
@@ -437,7 +437,7 @@ func TestRunHandler_AlreadyRunning(t *testing.T) {
 
 	// Reset and call /run again.
 	resp.replies = nil
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/run claude",
 	})
@@ -454,7 +454,7 @@ func TestRunHandler_UnknownAgent(t *testing.T) {
 	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/run mystery",
 	})
@@ -471,7 +471,7 @@ func TestRunHandler_MissingArgs(t *testing.T) {
 	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/run",
 	})
@@ -492,7 +492,7 @@ func TestKillHandler(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/kill",
 	})
@@ -510,7 +510,7 @@ func TestKillHandler(t *testing.T) {
 func TestKillHandler_NoSession(t *testing.T) {
 	gw, _, resp := newTestStack(t)
 
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/kill",
 	})
@@ -523,7 +523,7 @@ func TestKillHandler_NoSession(t *testing.T) {
 func TestHelpHandler(t *testing.T) {
 	gw, _, resp := newTestStack(t)
 
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/help",
 	})
@@ -540,7 +540,7 @@ func TestHelpHandler(t *testing.T) {
 func TestHelpHandler_NoGateway(t *testing.T) {
 	gw, _, resp := newTestStack(t)
 
-	_, _ = gw.Handle(context.Background(), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(context.Background(), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/help",
 	})
@@ -553,7 +553,7 @@ func TestHelpHandler_NoGateway(t *testing.T) {
 func TestRegistry_HelpAlias(t *testing.T) {
 	gw, _, resp := newTestStack(t)
 
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/?",
 	})
@@ -567,7 +567,7 @@ func TestRegistry_CwdAlias(t *testing.T) {
 	dir := t.TempDir()
 	gw, _, resp := newTestStack(t)
 
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/workspace " + dir,
 	})
@@ -585,7 +585,7 @@ func TestRunHandler_ExtraArgsForwarded(t *testing.T) {
 	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/run claude --opus --fast",
 	})
@@ -611,7 +611,7 @@ func TestRunHandler_DetectFailure(t *testing.T) {
 	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/run claude",
 	})
@@ -629,7 +629,7 @@ func TestCwdHandler_TildeExpands(t *testing.T) {
 	}
 	gw, _, resp := newTestStack(t)
 
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/cwd ~",
 	})
@@ -669,7 +669,7 @@ func TestRunHandler_ResponderErrorPropagates(t *testing.T) {
 	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
-	_, err := gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, err := gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/run claude",
 	})
@@ -712,7 +712,7 @@ func TestRunHandler_NilResponderWhenNil(t *testing.T) {
 	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
-	if _, err := gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	if _, err := gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/run claude",
 	}); err != nil {
@@ -729,7 +729,7 @@ func TestHelpHandler_TextReturnedInResult(t *testing.T) {
 	// We can't observe Handle()'s return value directly via the
 	// Gateway interface, but the responder captured the reply and
 	// we can assert it matches the expected body.
-	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/help",
 	})
@@ -743,7 +743,7 @@ func TestHelpHandler_TextReturnedInResult(t *testing.T) {
 func TestRegistry_RepeatHandleDoesNotFail(t *testing.T) {
 	gw, _, resp := newTestStack(t)
 	for i := 0; i < 3; i++ {
-		_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+		_, _ = gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 			ChatID: "oc_chat",
 			Text:   "/help",
 		})

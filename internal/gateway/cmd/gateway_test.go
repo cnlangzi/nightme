@@ -122,7 +122,7 @@ func TestGateway_RegisterAndHandle(t *testing.T) {
 		},
 	})
 
-	_, err := g.Handle(context.Background(), &gateway.InboundMessage{
+	_, err := g.DispatchInbound(context.Background(), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/ping",
 		Time:   time.Now(),
@@ -148,7 +148,7 @@ func TestGateway_RegisterAliases(t *testing.T) {
 	})
 
 	for _, input := range []string{"/cwd /tmp", "/workspace /tmp", "/ws /tmp", "/CWD /tmp"} {
-		if _, err := g.Handle(context.Background(), &gateway.InboundMessage{ChatID: "oc_chat", Text: input}); err != nil {
+		if _, err := g.DispatchInbound(context.Background(), &gateway.InboundMessage{ChatID: "oc_chat", Text: input}); err != nil {
 			t.Fatalf("Handle(%q): %v", input, err)
 		}
 	}
@@ -171,11 +171,11 @@ func TestGateway_UnmatchedCommandPassesToFallback(t *testing.T) {
 	})
 
 	// Unknown /-command flows to fallback.
-	if _, err := g.Handle(context.Background(), &gateway.InboundMessage{ChatID: "oc_chat", Text: "/clear"}); err != nil {
+	if _, err := g.DispatchInbound(context.Background(), &gateway.InboundMessage{ChatID: "oc_chat", Text: "/clear"}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	// Plain text also flows to fallback.
-	if _, err := g.Handle(context.Background(), &gateway.InboundMessage{ChatID: "oc_chat", Text: "hello"}); err != nil {
+	if _, err := g.DispatchInbound(context.Background(), &gateway.InboundMessage{ChatID: "oc_chat", Text: "hello"}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if got := atomic.LoadInt32(&fb); got != 2 {
@@ -185,7 +185,7 @@ func TestGateway_UnmatchedCommandPassesToFallback(t *testing.T) {
 
 func TestGateway_NonNilMsg(t *testing.T) {
 	g := gateway.New(nil, nil)
-	if _, err := g.Handle(context.Background(), nil); err == nil {
+	if _, err := g.DispatchInbound(context.Background(), nil); err == nil {
 		t.Errorf("Handle(nil) err = nil, want non-nil")
 	}
 }
@@ -211,7 +211,7 @@ func TestGateway_RegisterReplacement(t *testing.T) {
 
 	// First-wins semantics: the original handler must still be invoked
 	// even though the second Register signalled a collision.
-	if _, err := g.Handle(context.Background(), &gateway.InboundMessage{Text: "/foo"}); err != nil {
+	if _, err := g.DispatchInbound(context.Background(), &gateway.InboundMessage{Text: "/foo"}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if reply != "first" {
@@ -247,7 +247,7 @@ func TestGateway_HandlerErrorPropagates(t *testing.T) {
 			return nil, want
 		},
 	})
-	_, err := g.Handle(context.Background(), &gateway.InboundMessage{Text: "/fail"})
+	_, err := g.DispatchInbound(context.Background(), &gateway.InboundMessage{Text: "/fail"})
 	if !errors.Is(err, want) {
 		t.Errorf("Handle error = %v, want %v", err, want)
 	}
@@ -258,7 +258,7 @@ func TestGateway_FallbackErrorPropagates(t *testing.T) {
 	g := gateway.New(func(ctx context.Context, msg *gateway.InboundMessage) error {
 		return want
 	}, nil)
-	_, err := g.Handle(context.Background(), &gateway.InboundMessage{Text: "hello"})
+	_, err := g.DispatchInbound(context.Background(), &gateway.InboundMessage{Text: "hello"})
 	if !errors.Is(err, want) {
 		t.Errorf("Handle fallback error = %v, want %v", err, want)
 	}
@@ -267,10 +267,10 @@ func TestGateway_FallbackErrorPropagates(t *testing.T) {
 func TestGateway_NilFallbackDropsUnmatched(t *testing.T) {
 	g := gateway.New(nil, nil)
 	// No panic; unmatched messages are silently dropped.
-	if _, err := g.Handle(context.Background(), &gateway.InboundMessage{Text: "/unknown"}); err != nil {
+	if _, err := g.DispatchInbound(context.Background(), &gateway.InboundMessage{Text: "/unknown"}); err != nil {
 		t.Errorf("Handle unmatched = %v, want nil", err)
 	}
-	if _, err := g.Handle(context.Background(), &gateway.InboundMessage{Text: "hello"}); err != nil {
+	if _, err := g.DispatchInbound(context.Background(), &gateway.InboundMessage{Text: "hello"}); err != nil {
 		t.Errorf("Handle plain text = %v, want nil", err)
 	}
 }
@@ -309,7 +309,7 @@ func TestGateway_HandlePreservesMessageFields(t *testing.T) {
 		},
 	})
 	now := time.Now()
-	if _, err := g.Handle(context.Background(), &gateway.InboundMessage{
+	if _, err := g.DispatchInbound(context.Background(), &gateway.InboundMessage{
 		ChatID:   "oc_a",
 		Text:     "/echo",
 		UserID: "ou_a",
@@ -335,7 +335,7 @@ func TestGateway_HandlerArgsArePassed(t *testing.T) {
 			return &gateway.CommandResult{Consumed: true}, nil
 		},
 	})
-	if _, err := g.Handle(context.Background(), &gateway.InboundMessage{Text: "/run /bin/echo --flag"}); err != nil {
+	if _, err := g.DispatchInbound(context.Background(), &gateway.InboundMessage{Text: "/run /bin/echo --flag"}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
 	if len(gotArgs) != 2 || gotArgs[0] != "/bin/echo" || gotArgs[1] != "--flag" {
@@ -390,7 +390,7 @@ func TestGateway_UnmatchedReturnsNoError(t *testing.T) {
 	g.Register(gateway.Command{Name: "help", Handler: func(context.Context, *gateway.InboundMessage, []string) (*gateway.CommandResult, error) {
 		return &gateway.CommandResult{Consumed: true}, nil
 	}})
-	if _, err := g.Handle(context.Background(), &gateway.InboundMessage{Text: "/clear"}); err != nil {
+	if _, err := g.DispatchInbound(context.Background(), &gateway.InboundMessage{Text: "/clear"}); err != nil {
 		t.Errorf("Handle unmatched = %v, want nil", err)
 	}
 }

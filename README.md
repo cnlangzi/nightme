@@ -2,22 +2,21 @@
 
 > Sleep tight, code all night.
 
-![Status](https://img.shields.io/badge/status-v0.1.0-blue)
+![Status](https://img.shields.io/badge/status-development-blue)
 ![Go](https://img.shields.io/badge/go-1.22%2B-00ADD8)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 nightme is a single-process daemon that bridges AI Coding CLIs
-(Claude Code / Codex / OpenCode) to IM channels (Feishu / WhatsApp /
-Web UI), so you can drop "write X for me" into a chat at night and
-collect the result in the morning.
+(Claude Code / Codex / OpenCode) to IM channels (Feishu /
+WhatsApp / Web UI), so you can drop "write X for me" into a chat
+at night and collect the result in the morning.
 
-> **Status**: v0.1.0 — M3 done. The Feishu round-trip is in place
-> with structured logging, panic recovery, and CI. See
-> [`docs/PLAN.md`](./docs/PLAN.md) for the roadmap.
-
-## Screenshot
-
-_Coming in v0.2 — see [#X](https://github.com/cnlangzi/nightme/issues)._
+> **Status**: current development version (locked 2026-08-02). One
+> snapshot on `main`; there is no versioned release ladder. What
+> is committed is what users build and run. See
+> [`docs/SPEC.md`](./docs/SPEC.md) for architecture and
+> [`MIGRATION.md`](./MIGRATION.md) for breaking changes from earlier
+> snapshots.
 
 ## Install
 
@@ -25,7 +24,7 @@ Requires Go 1.22+ and `GOPROXY` configured for the proxy you use
 (`https://goproxy.cn,direct` works on mainland China).
 
 ```bash
-go install github.com/cnlangzi/nightme/cmd/nightme@v0.1.0
+go install github.com/cnlangzi/nightme/cmd/nightme@latest
 ```
 
 Or build from source:
@@ -38,28 +37,33 @@ go build -o bin/nightme ./cmd/nightme
 
 ## Quick Start
 
-### 1. Local Bridge smoke test
+### 1. Pick your primary agent
+
+```bash
+./bin/nightme config
+```
+
+Two-level menu:
+- `[1] Agents` — merge built-in agents (claude, codex, opencode)
+  with your `cfg.Agents` entries, pick one as primary.
+
+This writes `primary: <name>` back to `config.yaml`.
+
+### 2. Local Bridge smoke test
 
 ```bash
 ./bin/nightme test --workspace /tmp --agent /bin/echo --args hello
 ```
 
-The `test` command forwards stdin to the agent and writes agent
-output to stdout. Send `SIGINT` (Ctrl+C) to **detach** (the child
-CLI survives), or pass `--cleanup` to **kill** it instead:
+`test` forwards stdin to the agent and writes agent output to
+stdout. Send `SIGINT` (Ctrl+C) to **detach** (the child CLI
+survives), or pass `--cleanup` to **kill** it instead:
 
 ```bash
 ./bin/nightme test --cleanup --workspace /tmp --agent /bin/echo --args hello
 ```
 
-Inspect persisted sessions:
-
-```bash
-./bin/nightme list           # human-readable table
-./bin/nightme list --json    # machine-readable
-```
-
-### 2. Feishu channel
+### 3. Feishu channel (the real workflow)
 
 ```bash
 # (Optional) Copy and edit the example config
@@ -76,107 +80,149 @@ In a 1:1 Feishu chat with the bot:
 
 ```text
 /cwd /tmp             # bind this chat to a workspace
-/run claude           # spawn the CLI in that workspace
-hello                 # plain text flows to the agent
-/kill                 # stop the CLI (session preserved)
+/use claude           # pick primary agent (lazy spawn; first run)
+/hello                # plain text flows to the agent
+/use codex            # switch agent; pool preserved (no restart)
+/kill                 # clear pool; next message respawns
 /help                 # list every nightme command
 ```
 
+Key behaviour (current dev):
+- **/cwd** only sets workspace — no spawn.
+- **/use** is lazy: pool has `(claude, /tmp)` → reuse; else spawn.
+- **/kill** clears the AgentSession pool (activeCwd/activeAgent
+  survive); the next message respawns.
+- **Switching agent via `/use` keeps the old CLI alive** in the
+  pool — switching back is instant, no respawn.
+- **`/run` is deleted.** Use `/cwd` + `/use` instead.
+
 `nightme run` defaults to detaching session CLIs on shutdown
-(default keeps state across daemon restarts). Pass `--cleanup` to
-kill them all on `SIGINT`/`SIGTERM` — convenient for CI or
-one-shot scripts:
+(keeps state across daemon restarts). Pass `--cleanup` to kill
+them all on `SIGINT`/`SIGTERM`:
 
 ```bash
 ./bin/nightme run --cleanup
 ```
 
-## Features (v0.1.0)
+Echo channel (no Feishu credentials needed, smoke-test the
+daemon):
 
-| Feature | Status | Description |
-|---------|--------|-------------|
-| F-19 PTY backend | ✅ | PTY-backed byte pipe for any CLI |
-| F-21 Agent modes | 🟡 stubs | ACP / PTY (SDK stub in v0.2) |
-| F-22 Feishu auth | ✅ | One-click QR registration |
-| F-08 Feishu channel | ✅ | WebSocket adapter + IM rendering |
-| F-20 Gateway | ✅ | Slash router (`/cwd /run /kill /help`) |
-| F-05 Process registry | ✅ | JSON persistence (mode 0600) |
-| F-10 Session list | ✅ | `nightme list` CLI |
-| F-23 Panic recovery | ✅ | Recover → CodeGenericError |
-| F-24 Structured log | ✅ | slog + secret redaction |
-| F-25 `--cleanup` | ✅ | Kill vs detach on shutdown |
+```bash
+./bin/nightme run --channel=echo
+```
+
+Inspect persisted chat sessions:
+
+```bash
+./bin/nightme list
+```
+
+## Features
+
+| Feature | Doc | Summary |
+|---------|-----|---------|
+| **F-27 ChatSession** | [docs/feat/F-27-chatsession.md](./docs/feat/F-27-chatsession.md) | Per-chat session context + AgentSession pool |
+| **F-28 `/use <agent>`** | [docs/feat/F-28-use-command.md](./docs/feat/F-28-use-command.md) | Lazy agent switch (reuse or spawn) |
+| **F-29 AgentSession pool** | [docs/feat/F-29-agent-session-pool.md](./docs/feat/F-29-agent-session-pool.md) | `(agent, cwd)` 1:1 pool, no restart on switch |
+| **F-30 `nightme config`** | [docs/feat/F-30-interactive-config.md](./docs/feat/F-30-interactive-config.md) | Interactive menu for setting `primary` |
+| **ChatSession → AgentSession** | [docs/feat/F-26-gateway-hub.md](./docs/feat/F-26-gateway-hub.md) | Responsibility isolation across channel/gateway/session |
+| **Feishu channel** | [docs/feat/F-08-channel-abstraction.md](./docs/feat/F-08-channel-abstraction.md) | WebSocket adapter + IM rendering |
+| **PTY bridge** | [docs/feat/F-19-cli-bridge.md](./docs/feat/F-19-cli-bridge.md) | PTY-backed byte pipe for any CLI |
+| **Feishu one-click auth** | [docs/feat/F-22-feishu-onclick-registration.md](./docs/feat/F-22-feishu-onclick-registration.md) | QR-code onboarding |
+| **Rolling-log receipt** | [docs/feat/F-25-input-buffer.md](./docs/feat/F-25-input-buffer.md) (v1.x) | Per-user-message single receipt card |
+| **`nightme test`** | [docs/feat/F-19-cli-bridge.md](./docs/feat/F-19-cli-bridge.md) | Local smoke test (PTY passthrough) |
+| **`nightme list`** | [docs/feat/F-10-session-list-cmd.md](./docs/feat/F-10-session-list-cmd.md) | List persisted chat sessions |
 
 ## Architecture
 
-nightme is a thin pipeline. Each message walks three layers:
-
 ```
-┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-│  Channel    │ →  │  Gateway    │ →  │  Session    │
-│  (Feishu)   │ ←  │  (router)   │ ←  │  + Bridge   │
-└─────────────┘    └─────────────┘    └─────────────┘
-                                          ↓
-                                     Agent CLI (PTY)
+┌─────────────┐    ┌─────────────┐    ┌──────────────────────┐
+│  Channel    │ →  │  Gateway    │ →  │  ChatSession (per chat) │
+│  (Feishu)   │ ←  │  (router)   │ ←  │  ├─ AgentSession pool  │
+└─────────────┘    └─────────────┘    │  │  (agent, cwd) 1:1    │
+                                     │  ├─ InputBuffer FSM     │
+                                     │  ├─ readPump             │
+                                     │  └─ EventHandler         │
+                                     │           ↓              │
+                                     │  AgentSession → Bridge   │
+                                     │     (PTY / ACP / SDK)    │
+                                     │           ↓              │
+                                     │       Agent CLI          │
+                                     └──────────────────────┘
 ```
 
-- **Channel** owns the transport (Feishu WebSocket today; adapter
-  pattern so WhatsApp / Web TTY can drop in).
-- **Gateway** routes inbound messages: slash commands are handled
-  in-process; everything else is forwarded to the live session.
-- **Session** binds a chat to a workspace and an AgentSession
-  handle. The handle is owned by a Bridge (PTY today; ACP tomorrow).
-- **Registry** persists the session table as JSON (mode 0600,
-  atomic rename).
+- **Channel** owns transport (Feishu WebSocket; adapter pattern).
+- **Gateway** routes inbound: slash commands handled in-process;
+  everything else forwarded to the ChatSession's active AgentSession.
+- **ChatSession** is the per-chat context. Owns the AgentSession pool
+  (`(agent, cwd)` 1:1 unique) and the InputBuffer FSM.
+- **AgentSession** is the per-CLI-process handle; one per `(agent, cwd)`
+  pair, kept alive across `/use` switches.
+- **Registry** persists `chat_sessions.json` + `agent_sessions.json`
+  (mode 0600, atomic rename).
 
-See [`docs/SPEC.md`](./docs/SPEC.md) for the long form and
-[`docs/PRD.md`](./docs/PRD.md) for the product framing.
+See [`docs/SPEC.md` §1](./docs/SPEC.md) for the full
+responsibility table.
 
 ## Configuration
 
 nightme reads YAML from `~/.config/nightme/config.yaml` (or
-`$NIGHTME_CONFIG` if set). Every field can be overridden by a
-`NIGHTME_<SECTION>_<KEY>` environment variable. See
-[`configs/nightme.example.yaml`](./configs/nightme.example.yaml)
-for the full schema and [`docs/SPEC.md` §6](./docs/SPEC.md) for
-the resolution rules.
+`$NIGHTME_CONFIG` if set). Env-var override:
+`NIGHTME_<SECTION>_<KEY>` (e.g. `NIGHTME_PRIMARY`).
 
-Logs are written to `~/.local/share/nightme/nightme.log` (mode
-0600) as JSON; any attribute whose key contains `secret`,
-`token`, or `password` is automatically rewritten to
-`***REDACTED***`.
+```yaml
+primary: cc                              # global default agent
+agents:                                  # list (each entry = name/bridge/command)
+  - name: cc
+    bridge: claude
+    command: "claude --dangerously-skip-permissions"
+  - name: claude
+    bridge: claude
+    command: claude
+```
+
+See [`configs/nightme.example.yaml`](./configs/nightme.example.yaml)
+for the full schema.
+
+Logs go to `~/.local/share/nightme/nightme.log` (mode 0600) as
+JSON; attributes whose key contains `secret`, `token`, or
+`password` are auto-redacted to `***REDACTED***`.
 
 ## Development
 
 ```bash
-go test -race ./...      # race-tested, ~219 tests
+go test -race ./...      # race-tested, ~20 packages
 go vet ./...             # 0 warnings required by CI
 go build ./...           # must succeed for CI
 ```
 
 CI runs on GitHub Actions (`.github/workflows/ci.yml`) for every
-push and pull request. Coverage artifacts are uploaded on pushes
-to `main`.
+push and pull request.
 
 ### Project layout
 
 ```
-cmd/nightme/              # cobra CLI (test, list, auth, run)
-configs/                  # example YAML config
-docs/                     # PRD / SPEC / FEATURES / PLAN / feat/*
+cmd/nightme/                       # cobra CLI (test, list, auth, run, config)
+configs/                           # example YAML config
+docs/                               # PRD / SPEC / FEATURES / PLAN / feat/*
 internal/
-  agent/                  # Agent / AgentSession / Event interfaces + registry
-    ptyagent/             #   PTY-mode agent (default for v0.1)
-  auth/                   # Provider interface + Feishu one-click flow
-  bridge/                 # Bridge abstraction (ACP / SDK / PTY)
-    acp/  pty/  sdk/      #   three backend implementations
-  channel/                # Channel interface and Feishu adapter/renderer
-    feishu/               #   WebSocket receive + IM message rendering
-  config/                 # YAML loader + NIGHTME_* env overrides
-  errors/                 # CodedError + ExitCode (M3)
-  gateway/                # Slash command router + 4 default handlers
-  logging/                # slog + secret redaction (M3)
-  registry/               # JSON-backed process registry (0600, atomic writes)
-  session/                # Session + MemoryManager + Restore / Persist
+  agent/                            # Agent / AgentSession / Event interfaces
+  auth/                             # Provider + Feishu one-click
+  bridge/                           # Bridge abstraction (PTY / ACP / SDK)
+    acp/  pty/  sdk/
+  channel/                          # Channel interface + Feishu adapter
+    feishu/                         #   WebSocket receive + IM rendering
+  chatsession/                      # *** v1.2 (NEW) ***
+                                    # ChatSession + AgentSession + Manager
+                                    # Spawner + InputBuffer + readPump
+  config/                           # YAML loader + env overrides
+  errors/                           # CodedError + ExitCode
+  gateway/                          # Slash router + binding + receipt FSM
+  logging/                          # slog + secret redaction
+  registry/                         # JSON-backed chat_sessions.json +
+                                    # agent_sessions.json (0600, atomic)
+  session/                          # *** legacy v1.x (used by gateway
+                                    # BindingEntry shims; pending cleanup) ***
 ```
 
 ### Exit codes
@@ -201,10 +247,11 @@ internal/
 | [`docs/PRD.md`](./docs/PRD.md) | Product definition — what / why / for whom |
 | [`docs/SPEC.md`](./docs/SPEC.md) | Technical architecture — components, data flow, NFRs |
 | [`docs/FEATURES.md`](./docs/FEATURES.md) | Feature index — every F-XX in one table |
-| [`docs/PLAN.md`](./docs/PLAN.md) | Implementation roadmap — M0 → M1 → M2 → M3 |
-| [`docs/feat/`](./docs/feat/) | Per-feature design docs (F-01, F-04, F-05, F-10, …) |
+| [`docs/PLAN.md`](./docs/PLAN.md) | Implementation roadmap |
+| [`docs/feat/`](./docs/feat/) | Per-feature design docs |
 | [`docs/E2E_TESTING.md`](./docs/E2E_TESTING.md) | Manual Feishu round-trip + troubleshooting |
-| [`CHANGELOG.md`](./CHANGELOG.md) | Version history |
+| [`CHANGELOG.md`](./CHANGELOG.md) | Current snapshot (single Unreleased section) |
+| [`MIGRATION.md`](./MIGRATION.md) | Breaking changes between earlier snapshots |
 
 ## License
 

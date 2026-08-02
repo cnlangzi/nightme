@@ -46,18 +46,3 @@ type AgentSessionEntry struct {
 // AgentSessionFileVersion is the on-disk format version for
 // agent_sessions.json.
 const AgentSessionFileVersion = 1
-
-// AgentSessionsFile is the on-disk container for agent_sessions.json.
-type AgentSessionsFile struct {
-	Version       int                          `json:"version"`
-	AgentSessions map[string]*AgentSessionEntry `json:"agentSessions"`
-}
-
-// NewAgentSessionsFile returns an empty container at the current
-// schema version.
-func NewAgentSessionsFile() *AgentSessionsFile {
-	return &AgentSessionsFile{
-		Version:       AgentSessionFileVersion,
-		AgentSessions: make(map[string]*AgentSessionEntry),
-	}
-}

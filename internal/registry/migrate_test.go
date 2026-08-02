@@ -176,30 +176,12 @@ func TestV1RegistryHasData(t *testing.T) {
 	}
 }
 
-// TestNewChatSessionsFile verifies the container is initialized at
-// the current schema version with an empty map (not nil).
-func TestNewChatSessionsFile(t *testing.T) {
-	f := NewChatSessionsFile()
-	if f.Version != ChatSessionFileVersion {
-		t.Fatalf("expected version=%d, got %d", ChatSessionFileVersion, f.Version)
+// TestVersionConstants verifies the schema versions are sane.
+func TestVersionConstants(t *testing.T) {
+	if ChatSessionFileVersion < 1 {
+		t.Fatalf("ChatSessionFileVersion should be >= 1, got %d", ChatSessionFileVersion)
 	}
-	if f.ChatSessions == nil {
-		t.Fatalf("ChatSessions should be non-nil")
-	}
-	if len(f.ChatSessions) != 0 {
-		t.Fatalf("expected empty map, got %d entries", len(f.ChatSessions))
-	}
-}
-
-func TestNewAgentSessionsFile(t *testing.T) {
-	f := NewAgentSessionsFile()
-	if f.Version != AgentSessionFileVersion {
-		t.Fatalf("expected version=%d, got %d", AgentSessionFileVersion, f.Version)
-	}
-	if f.AgentSessions == nil {
-		t.Fatalf("AgentSessions should be non-nil")
-	}
-	if len(f.AgentSessions) != 0 {
-		t.Fatalf("expected empty map, got %d entries", len(f.AgentSessions))
+	if AgentSessionFileVersion < 1 {
+		t.Fatalf("AgentSessionFileVersion should be >= 1, got %d", AgentSessionFileVersion)
 	}
 }

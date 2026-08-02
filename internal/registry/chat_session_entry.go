@@ -54,18 +54,3 @@ type ChatSessionEntry struct {
 // breaking way (existing migration logic should handle older
 // versions).
 const ChatSessionFileVersion = 1
-
-// ChatSessionsFile is the on-disk container for chat_sessions.json.
-type ChatSessionsFile struct {
-	Version      int                          `json:"version"`
-	ChatSessions map[string]*ChatSessionEntry `json:"chatSessions"`
-}
-
-// NewChatSessionsFile returns an empty container at the current
-// schema version.
-func NewChatSessionsFile() *ChatSessionsFile {
-	return &ChatSessionsFile{
-		Version:      ChatSessionFileVersion,
-		ChatSessions: make(map[string]*ChatSessionEntry),
-	}
-}

@@ -785,6 +785,72 @@ func TestBuildReceiptCard_Card2Shape(t *testing.T) {
 	}
 }
 
+// TestBuildReceiptCard_FooterOpenClawStyle pins the footer
+// visual styling that matches the OpenClaw Lark plugin
+// (openclaw-lark src/card/builder.ts::buildFooter). Two
+// invariants:
+//
+//  1. The footer markdown element carries text_size:
+//     "notation" so the foot note renders in the standard
+//     Card 2.0 footnote size (small, dim, well-separated
+//     from the rolling log body). OpenClaw applies this to
+//     the footer + reasoning panel + tool use panels.
+//  2. When the receipt state is StateError, the footer
+//     content is wrapped in <font color='red'>...</font>
+//     so a failed session's footer is visually distinct.
+//     OpenClaw's buildFooter wraps the i18n copies in red
+//     when isError is true. On a non-error state the
+//     content is plain (no color tag).
+func TestBuildReceiptCard_FooterOpenClawStyle(t *testing.T) {
+	t.Run("notation-text-size-on-normal-state", func(t *testing.T) {
+		r := &MessageReceipt{
+			state:      StateCompleted,
+			agentName:  "claude",
+			workspace:  "/Users/devin/code/nightme",
+			branch:     "main",
+			eventCount: 1,
+		}
+		body, err := buildReceiptCard(r)
+		if err != nil {
+			t.Fatalf("buildReceiptCard: %v", err)
+		}
+		// text_size: "notation" must appear on the footer
+		// element. We assert on the substring rather than
+		// parsing the JSON to keep the test robust to
+		// whitespace / key-order changes.
+		if !strings.Contains(body, `"text_size":"notation"`) {
+			t.Errorf("card body missing OpenClaw-style text_size:notation footer\n--- body ---\n%s", truncateForTest(body, 400))
+		}
+		// No red color tag on a successful state.
+		if strings.Contains(body, "color='red'") {
+			t.Errorf("card body has unexpected red color on a non-error state\n--- body ---\n%s", truncateForTest(body, 400))
+		}
+	})
+
+	t.Run("red-color-on-error-state", func(t *testing.T) {
+		r := &MessageReceipt{
+			state:      StateError,
+			agentName:  "claude",
+			workspace:  "/Users/devin/code/nightme",
+			branch:     "main",
+			eventCount: 1,
+		}
+		body, err := buildReceiptCard(r)
+		if err != nil {
+			t.Fatalf("buildReceiptCard: %v", err)
+		}
+		// On error, the footer's text is wrapped in red.
+		// OpenClaw's buildFooter does the same on isError.
+		if !strings.Contains(body, `<font color='red'>`) {
+			t.Errorf("card body missing OpenClaw-style red color wrapper on error state\n--- body ---\n%s", truncateForTest(body, 400))
+		}
+		// text_size: "notation" still applies on error.
+		if !strings.Contains(body, `"text_size":"notation"`) {
+			t.Errorf("card body missing text_size:notation on error state\n--- body ---\n%s", truncateForTest(body, 400))
+		}
+	})
+}
+
 // TestBuildColdStartCard_Card2Shape pins the cold-start card
 // emitted by Adapter.receiptFor. It must be a Card 2.0 envelope
 // (same shape contract as the rolling-log card) with a single ⏳

@@ -963,9 +963,24 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 	}
 	if note := r.state.footLine(r); note != "" {
 		elements = append(elements, map[string]any{"tag": "hr"})
+		// Footer styling matches the OpenClaw Lark plugin
+		// (openclaw-lark src/card/builder.ts::buildFooter):
+		//   - text_size: "notation" gives the foot note a
+		//     compact, dim visual weight (the standard
+		//     Card 2.0 size for footnotes / status lines).
+		//   - On error, the content is wrapped in
+		//     <font color='red'>...</font> so a failed
+		//     session's footer is visually distinct from
+		//     a successful one. OpenClaw wraps the i18n
+		//     copies in red when isError is true.
+		footerContent := note
+		if r.state == StateError {
+			footerContent = "<font color='red'>" + note + "</font>"
+		}
 		elements = append(elements, map[string]any{
-			"tag":     "markdown",
-			"content": note,
+			"tag":       "markdown",
+			"content":   footerContent,
+			"text_size": "notation",
 		})
 	}
 

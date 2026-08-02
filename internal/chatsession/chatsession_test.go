@@ -132,7 +132,13 @@ func TestLookupActiveAgentSession_SpawnWhenMissing(t *testing.T) {
 
 func TestLookupActiveAgentSession_ReusesPoolEntry(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").WithPersistence(csFile, asFile)
+	// commit fix-6 followup: pool-hit only reuses if the entry is
+	// still effectively running (StatusRunning + non-nil Handle).
+	// Without a Spawner, the AgentSession stays Detached between
+	// lookups, so we wire a Spawner to make the test deterministic.
+	cs := New("oc_xxx", "p2p", "claude").
+		WithPersistence(csFile, asFile).
+		WithSpawner(newFakeSpawner())
 	cs.SetActiveCwd("/code/bailing")
 	cs.SetActiveAgent("claude")
 

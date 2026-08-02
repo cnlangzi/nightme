@@ -124,6 +124,16 @@ func (m *Manager) RestoreFromRegistry() error {
 		return nil
 	}
 
+	// Index persisted AgentSession entries by chatSessionId so we
+	// can populate each ChatSession's pool after we create it.
+	agentsByCS := make(map[string][]*AgentSession)
+	if m.asFile != nil {
+		for _, aEntry := range m.asFile.List() {
+			as := FromAgentSessionEntry(aEntry)
+			agentsByCS[aEntry.ChatSessionID] = append(agentsByCS[aEntry.ChatSessionID], as)
+		}
+	}
+
 	for _, entry := range m.csFile.List() {
 		cs := New(entry.ChatID, entry.ChatType, entry.DefaultAgent).
 			WithSpawner(m.spawner).
@@ -131,6 +141,21 @@ func (m *Manager) RestoreFromRegistry() error {
 		cs.activeCwd = entry.ActiveCwd
 		cs.activeAgent = entry.ActiveAgent
 		cs.lastInteractionAt = entry.LastInteractionAt
+		// commit fix-6: clear activeAS on restore. The persisted
+		// activeAgentSessionId points at an AgentSession whose
+		// handle is in-memory only (lost on restart). Leaving the
+		// pointer set would cause SendBlocks (called by the default
+		// FlushHook) to return ErrNotRunning and silently drop user
+		// messages. The next LookupActiveAgentSession will spawn
+		// fresh and re-populate activeAS.
+		cs.activeAS = nil
+		// Seed the pool from the agent_sessions.json entries that
+		// belong to this ChatSession. FromAgentSessionEntry has
+		// already demoted any StatusRunning to StatusDetached, so
+		// LookupActiveAgentSession will re-spawn on the next call.
+		for _, as := range agentsByCS[entry.ID] {
+			cs.pool[agentCwdKey{Agent: as.Agent, Cwd: as.Cwd}] = as
+		}
 		m.sessions[entry.ChatID] = cs
 	}
 	return nil

@@ -389,7 +389,10 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 		if effective == "" {
 			return nil, ErrNoActiveAgent
 		}
-		if as, ok := cs.pool[agentCwdKey{Agent: effective, Cwd: cs.activeCwd}]; ok {
+		// commit fix-6: pool hit only returns if the entry is still
+		// Running. A Demoted entry (process state unknown after
+		// restart) falls through to the spawn path below.
+		if as, ok := cs.pool[agentCwdKey{Agent: effective, Cwd: cs.activeCwd}]; ok && as.Status() == StatusRunning && as.Handle() != nil {
 			cs.activeAS = as
 			return as, nil
 		}
@@ -422,7 +425,7 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	}
 
 	// Path 1: post-/use. No default fallback. The user wants THIS agent.
-	if as, ok := cs.pool[agentCwdKey{Agent: cs.activeAgent, Cwd: cs.activeCwd}]; ok {
+	if as, ok := cs.pool[agentCwdKey{Agent: cs.activeAgent, Cwd: cs.activeCwd}]; ok && as.Status() == StatusRunning && as.Handle() != nil {
 		cs.activeAS = as
 		return as, nil
 	}

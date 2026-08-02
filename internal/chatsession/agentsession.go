@@ -95,8 +95,12 @@ func NewAgentSession(id, chatSessionID, agent, cwd string, args []string) *Agent
 }
 
 // FromAgentSessionEntry reconstructs an AgentSession from persisted
-// data. Process is not running (status is whatever the entry
-// recorded; typically Detached or Exited on restart).
+// data. Process is not running on restart — the in-memory handle
+// is lost (we don't persist it), so we mark anything persisted as
+// StatusRunning as StatusDetached to force a re-spawn on next
+// LookupActiveAgentSession. This prevents the "spawned but
+// handle=nil" silent-drop bug where SendBlocks returns
+// ErrNotRunning and the default FlushHook ignores it.
 func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 	if e == nil {
 		return nil
@@ -109,9 +113,17 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 		args:          append([]string(nil), e.Args...),
 		createdAt:     e.CreatedAt,
 		lastRunAt:     e.LastRunAt,
-		stat:          e.Status,
 	}
-	as.pid.Store(int32(e.PID))
+	// commit fix-6: any persisted "running" agent is actually dead
+	// after daemon restart (the process handle is in-memory only).
+	// Demote to Detached so the next LookupActiveAgentSession will
+	// re-spawn. Persisted PID is also stale; clear it.
+	status := e.Status
+	if status == StatusRunning {
+		status = StatusDetached
+	}
+	as.stat = status
+	as.pid.Store(0)
 	if e.ExitCode != nil {
 		as.exitCodeMu.Lock()
 		as.exitCode = e.ExitCode

@@ -9,28 +9,31 @@ feishu:
   verification_token: ""
   encrypt_key: ""
 
-agent:
-  # Default agent name. Used when /run does not specify one.
+agents:
+  # Global default agent name (v1.2). Must match one of the recipe
+  # names below. Used when a new ChatSession is created (snapshot
+  # into ChatSession.defaultAgent) and as the fallback during
+  # LookupActiveAgentSession (Q-B).
   default: "claude"
 
-  # Per-agent spawn recipes. Names must match the registered agent's
-  # Name() (e.g. "claude", "codex", "opencode").
-  agents:
-    claude:
-      command: "claude"
-      args: []
-      env: {}
+  # Per-agent spawn recipes. Each top-level key under `agents:`
+  # (other than `default`) is a recipe; names must match the
+  # registered agent's Name() (e.g. "claude", "codex", "opencode").
+  claude:
+    command: "claude"
+    args: []
+    env: {}
 
-    codex:
-      # Codex ships ACP through the official adapter binary.
-      command: "codex-acp"
-      args: []
-      env: {}
+  codex:
+    # Codex ships ACP through the official adapter binary.
+    command: "codex-acp"
+    args: []
+    env: {}
 
-    opencode:
-      command: "opencode"
-      args: ["acp"]
-      env: {}
+  opencode:
+    command: "opencode"
+    args: ["acp"]
+    env: {}
 
 session:
   # Initial PTY size for new sessions.

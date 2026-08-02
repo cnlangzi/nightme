@@ -26,7 +26,7 @@ import (
 // YAML deserialization; the struct itself is the public API.
 type Config struct {
 	Feishu  FeishuConfig  `yaml:"feishu"`
-	Agent   AgentConfig   `yaml:"agent"`
+	Agents  AgentsConfig  `yaml:"agents"`
 	Session SessionConfig `yaml:"session"`
 	Logging LoggingConfig `yaml:"logging"`
 	Paths   PathsConfig   `yaml:"paths"`
@@ -41,17 +41,40 @@ type FeishuConfig struct {
 	EncryptKey        string `yaml:"encrypt_key"`
 }
 
-// AgentConfig declares the default agent and the per-agent spawn
-// recipes used by the Bridge.
-type AgentConfig struct {
-	// Default is the agent name used when the user does not specify
-	// one (e.g. in `/run` without an argument).
+// AgentsConfig declares the global default agent (v1.2 Q-A) and
+// the per-agent spawn recipes used by the Bridge.
+//
+// YAML shape (v1.2, post-rename):
+//
+//	agents:
+//	  default: claude                 # global default (any registered agent name)
+//	  claude:                         # inline recipe (sibling of default)
+//	    command: claude
+//	    args: []
+//	    env: {}
+//	  codex:
+//	    command: codex-acp
+//	    ...
+//
+// The inline map (yaml:",inline") captures every top-level key under
+// `agents` except `default` — those become AgentEntry entries.
+//
+// `default` must be one of the registered agent names (validation
+// happens at registry population time, not here).
+type AgentsConfig struct {
+	// Default is the global default agent name. v1.2 (Q-A): the
+	// only user-facing Default; ChatSession.defaultAgent is a
+	// snapshot of this value at ChatSession creation time.
 	Default string `yaml:"default"`
 
-	// Agents maps agent name -> spawn recipe. Names must match
+	// Recipes maps agent name -> spawn recipe. Names must match
 	// agent.Agent.Name() values; names not in the registry trigger
 	// errors at session-create time.
-	Agents map[string]AgentEntry `yaml:"agents"`
+	//
+	// Inline: every sibling key under `agents:` other than
+	// `default` lands here. The previous v1.x schema had this under
+	// a nested `agents:` key; v1.2 flattens it.
+	Recipes map[string]AgentEntry `yaml:",inline"`
 }
 
 // AgentEntry is the spawn recipe for one CLI.
@@ -211,8 +234,8 @@ func Load(path string) (*Config, error) {
 // applyDefaults populates zero-valued fields with the shipped
 // defaults. It does not overwrite non-zero values.
 func applyDefaults(c *Config) {
-	if c.Agent.Default == "" {
-		c.Agent.Default = "claude"
+	if c.Agents.Default == "" {
+		c.Agents.Default = "claude"
 	}
 	if c.Session.DefaultPtyCols == 0 {
 		c.Session.DefaultPtyCols = 80
@@ -257,7 +280,7 @@ func applyEnvOverrides(c *Config) {
 		c.Feishu.EncryptKey = v
 	}
 	if v := os.Getenv("NIGHTME_AGENT_DEFAULT"); v != "" {
-		c.Agent.Default = v
+		c.Agents.Default = v
 	}
 	if v := os.Getenv("NIGHTME_LOGGING_LEVEL"); v != "" {
 		c.Logging.Level = v

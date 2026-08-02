@@ -11,7 +11,7 @@
 //	nightme test --workspace /tmp/foo --agent /bin/echo --args hello
 //
 // Design notes (docs/feat/F-19-cli-bridge.md, F-10 §1):
-//   - The agent registry is populated from cfg.Agent.Agents. Agents
+//   - The agent registry is populated from cfg.Agents.Recipes. Agents
 //     whose command resolves on PATH are registered as PTY. Agents
 //     not in the registry are auto-registered when their command
 //     resolves to an existing file (handy for `--agent /bin/echo`).
@@ -136,7 +136,7 @@ func validateTestRequest(f testCmdFlags) error {
 //
 //  1. Start with agent.Builtins (claude is the only v0.2.x built-in
 //     — each agent package registers itself via init()).
-//  2. Layer cfg.Agent.Agents on top. A name matching a built-in
+//  2. Layer cfg.Agents.Recipes on top. A name matching a built-in
 //     replaces the built-in (custom binary path); an unknown name
 //     becomes a PTY agent (the safe default for user-supplied CLIs).
 //  3. If --agent /some/binary was passed, auto-register that bare
@@ -148,7 +148,7 @@ func buildAgentRegistry(cfg *config.Config, requested string) *agent.Registry {
 		reg.Register(a)
 	}
 	if cfg != nil {
-		for name, entry := range cfg.Agent.Agents {
+		for name, entry := range cfg.Agents.Recipes {
 			if entry.Command == "" {
 				continue
 			}

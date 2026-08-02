@@ -19,17 +19,17 @@ func TestLoadExample(t *testing.T) {
 		t.Fatalf("Load(example) error: %v", err)
 	}
 
-	if cfg.Agent.Default != "claude" {
-		t.Errorf("Agent.Default = %q, want claude", cfg.Agent.Default)
+	if cfg.Agents.Default != "claude" {
+		t.Errorf("Agents.Default = %q, want claude", cfg.Agents.Default)
 	}
-	if cfg.Agent.Agents["claude"].Command != "claude" {
-		t.Errorf("Agent.Agents[claude].Command = %q, want claude", cfg.Agent.Agents["claude"].Command)
+	if cfg.Agents.Recipes["claude"].Command != "claude" {
+		t.Errorf("Agents.Recipes[claude].Command = %q, want claude", cfg.Agents.Recipes["claude"].Command)
 	}
-	if got := cfg.Agent.Agents["codex"].Command; got != "codex-acp" {
-		t.Errorf("Agent.Agents[codex].Command = %q, want codex-acp", got)
+	if got := cfg.Agents.Recipes["codex"].Command; got != "codex-acp" {
+		t.Errorf("Agents.Recipes[codex].Command = %q, want codex-acp", got)
 	}
-	if got := cfg.Agent.Agents["opencode"].Args; len(got) != 1 || got[0] != "acp" {
-		t.Errorf("Agent.Agents[opencode].Args = %v, want [acp]", got)
+	if got := cfg.Agents.Recipes["opencode"].Args; len(got) != 1 || got[0] != "acp" {
+		t.Errorf("Agents.Recipes[opencode].Args = %v, want [acp]", got)
 	}
 	if cfg.Session.DefaultPtyCols != 80 {
 		t.Errorf("Session.DefaultPtyCols = %d, want 80", cfg.Session.DefaultPtyCols)
@@ -58,8 +58,8 @@ func TestDefaults(t *testing.T) {
 		t.Fatalf("Load(\"\") error: %v", err)
 	}
 
-	if cfg.Agent.Default != "claude" {
-		t.Errorf("default Agent.Default = %q, want claude", cfg.Agent.Default)
+	if cfg.Agents.Default != "claude" {
+		t.Errorf("default Agents.Default = %q, want claude", cfg.Agents.Default)
 	}
 	if cfg.Session.DefaultPtyCols != 80 {
 		t.Errorf("default Session.DefaultPtyCols = %d, want 80", cfg.Session.DefaultPtyCols)
@@ -108,8 +108,8 @@ func TestEnvOverride(t *testing.T) {
 		t.Fatalf("Load(\"\") error: %v", err)
 	}
 
-	if cfg.Agent.Default != "codex" {
-		t.Errorf("Agent.Default = %q, want codex", cfg.Agent.Default)
+	if cfg.Agents.Default != "codex" {
+		t.Errorf("Agents.Default = %q, want codex", cfg.Agents.Default)
 	}
 	if cfg.Feishu.AppID != "cli_override" {
 		t.Errorf("Feishu.AppID = %q, want cli_override", cfg.Feishu.AppID)
@@ -138,8 +138,8 @@ func TestMissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(missing) returned error: %v (want nil — defaults only)", err)
 	}
-	if cfg.Agent.Default != "claude" {
-		t.Errorf("Agent.Default = %q, want claude (default for missing file)", cfg.Agent.Default)
+	if cfg.Agents.Default != "claude" {
+		t.Errorf("Agents.Default = %q, want claude (default for missing file)", cfg.Agents.Default)
 	}
 }
 

@@ -340,7 +340,7 @@ func TestBuildRunAgentRegistry_HasBuiltinsOnly(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			cfg := &config.Config{Agent: config.AgentConfig{Agents: c.entries}}
+			cfg := &config.Config{Agents: config.AgentsConfig{Recipes: c.entries}}
 			reg := buildRunAgentRegistry(cfg)
 
 			names := make(map[string]bool)
@@ -360,12 +360,12 @@ func TestBuildRunAgentRegistry_HasBuiltinsOnly(t *testing.T) {
 }
 
 // TestBuildRunAgentRegistry_UserConfigRegistered verifies that any
-// agent named in cfg.Agent.Agents becomes available, regardless of
+// agent named in cfg.Agents.Recipes becomes available, regardless of
 // whether it has a Builtins entry. User-configured agents always
 // land in pty (bridge/pty.NewAgent) — the safe default for arbitrary CLIs.
 func TestBuildRunAgentRegistry_UserConfigRegistered(t *testing.T) {
 	cfg := &config.Config{
-		Agent: config.AgentConfig{Agents: map[string]config.AgentEntry{
+		Agents: config.AgentsConfig{Recipes: map[string]config.AgentEntry{
 			"custom": {Command: "/bin/echo", Args: []string{"--custom"}, Env: map[string]string{"Z": "last", "A": "first"}},
 		}},
 		Session: config.SessionConfig{DefaultPtyCols: 100, DefaultPtyRows: 40},
@@ -395,7 +395,7 @@ func TestBuildRunAgentRegistry_UserConfigRegistered(t *testing.T) {
 // dedicated bridge features (documented in the init() comment).
 func TestBuildRunAgentRegistry_UserConfigOverridesBuiltin(t *testing.T) {
 	cfg := &config.Config{
-		Agent: config.AgentConfig{Agents: map[string]config.AgentEntry{
+		Agents: config.AgentsConfig{Recipes: map[string]config.AgentEntry{
 			"claude": {Command: "/custom/path/claude"},
 		}},
 	}
@@ -411,7 +411,7 @@ func TestBuildRunAgentRegistry_UserConfigOverridesBuiltin(t *testing.T) {
 }
 
 // TestBuildRunAgentRegistry_UnknownByDefault guards the no-fallback
-// invariant: a name neither in Builtins nor in cfg.Agent.Agents must
+// invariant: a name neither in Builtins nor in cfg.Agents.Recipes must
 // produce ErrUnknownAgent. This is the architectural difference from
 // the v0.2.0 config-driven approach — "I haven't configured it" no
 // longer means "give me claude / codex / opencode".

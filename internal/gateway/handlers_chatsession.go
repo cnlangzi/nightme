@@ -34,8 +34,13 @@ import (
 // bool since Register is append-only and we want a fresh handler
 // pointing at this runtime's mgr).
 func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel Channel, globalDefault string) {
+	// Command names are stored WITHOUT the leading slash. The
+	// Gateway strips the slash in ParseCommand before lookup
+	// (see internal/gateway/parser.go), so g.cmds["cwd"] is the
+	// correct key. Registering as "/cwd" silently breaks routing
+	// — fix: register without slash (commit 4119e2c-fix-2).
 	gw.Register(Command{
-		Name: "/cwd",
+		Name: "cwd",
 		Description: "Set workspace for this chat: /cwd <absolute-path>",
 		Handler: func(ctx context.Context, msg *InboundMessage, args []string) (*CommandResult, error) {
 			return handleCwd(ctx, mgr, channel, msg, args, globalDefault)
@@ -43,7 +48,7 @@ func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel C
 	})
 
 	gw.Register(Command{
-		Name: "/use",
+		Name: "use",
 		Description: "Switch active agent: /use <agent-name> (lazy spawn; reuse pool if present)",
 		Handler: func(ctx context.Context, msg *InboundMessage, args []string) (*CommandResult, error) {
 			return handleUse(ctx, mgr, channel, msg, args, globalDefault)
@@ -51,7 +56,7 @@ func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel C
 	})
 
 	gw.Register(Command{
-		Name: "/kill",
+		Name: "kill",
 		Description: "Kill every AgentSession in this chat's pool; next message respawns",
 		Handler: func(ctx context.Context, msg *InboundMessage, args []string) (*CommandResult, error) {
 			return handleKill(ctx, mgr, channel, msg)

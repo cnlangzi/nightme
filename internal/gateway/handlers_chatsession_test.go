@@ -290,7 +290,10 @@ func TestRegisterChatSessionCommands_RegistersAllThree(t *testing.T) {
 	gw := New(nil, nil)
 	RegisterChatSessionCommands(gw, mgr, ch, "claude")
 
-	for _, name := range []string{"/cwd", "/use", "/kill"} {
+	// Command.Name is stored without the leading slash (Gateway strips
+// it in ParseCommand). The user-facing slash stays in the chat
+// message text — see TestParseCommand_StripsLeadingSlash.
+for _, name := range []string{"cwd", "use", "kill"} {
 		found := false
 		for _, c := range gw.ListCommands() {
 			if c.Name == name {

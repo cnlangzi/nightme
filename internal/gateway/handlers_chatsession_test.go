@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -145,17 +147,20 @@ func (testSpawner) Spawn(_ context.Context, name, cwd string, args []string) (ag
 // --- Tests ---
 
 func TestHandleCwd_SetsActiveCwd(t *testing.T) {
-	mgr, ch := newTestManager(t, false)
-	msg := &InboundMessage{ChatID: "oc_xxx", ChatType: ChatTypeP2P, Text: "/cwd /code/bailing"}
+	// Use a real (temp) directory so the existence check passes.
+	dir := t.TempDir()
 
-	res, err := handleCwd(context.Background(), mgr, ch, msg, []string{"/code/bailing"}, "claude")
+	mgr, ch := newTestManager(t, false)
+	msg := &InboundMessage{ChatID: "oc_xxx", ChatType: ChatTypeP2P, Text: "/cwd " + dir}
+
+	res, err := handleCwd(context.Background(), mgr, ch, msg, []string{dir}, "claude")
 	if err != nil {
 		t.Fatalf("handleCwd: %v", err)
 	}
 	if !res.Consumed {
 		t.Fatalf("expected Consumed=true")
 	}
-	if !strings.Contains(ch.LastText(), "Workspace set to /code/bailing") {
+	if !strings.Contains(ch.LastText(), "Workspace set to "+dir) {
 		t.Fatalf("reply: %q", ch.LastText())
 	}
 
@@ -163,8 +168,106 @@ func TestHandleCwd_SetsActiveCwd(t *testing.T) {
 	if cs == nil {
 		t.Fatalf("ChatSession should exist")
 	}
-	if cs.ActiveCwd() != "/code/bailing" {
-		t.Fatalf("ActiveCwd: %q", cs.ActiveCwd())
+	if cs.ActiveCwd() != dir {
+		t.Fatalf("ActiveCwd: %q, want %q", cs.ActiveCwd(), dir)
+	}
+}
+
+// TestHandleCwd_PathResolution covers commit fix-4:
+//   - "~" / "~/" expand to $HOME
+//   - relative paths are $HOME-relative (not daemon-cwd-relative)
+//   - absolute paths pass through
+//   - non-existent paths are rejected at /cwd time (not at spawn time)
+func TestHandleCwd_PathResolution(t *testing.T) {
+	dir := t.TempDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+
+	mgr, ch := newTestManager(t, false)
+
+	cases := []struct {
+		name        string
+		input       string
+		wantResolved string
+	}{
+		{"absolute path", dir, dir},
+		{"tilde alone", "~", home},
+		{"tilde slash", "~/", home},
+		{"tilde with subpath", "~/code", filepath.Join(home, "code")},
+		{"relative is HOME-relative", "code", filepath.Join(home, "code")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Use a fresh chat per case to avoid state bleed.
+			chatID := "oc_" + tc.name
+			msg := &InboundMessage{ChatID: chatID, ChatType: ChatTypeP2P}
+
+			res, err := handleCwd(context.Background(), mgr, ch, msg, []string{tc.input}, "claude")
+			if err != nil {
+				t.Fatalf("handleCwd: %v", err)
+			}
+			if !res.Consumed {
+				t.Fatalf("expected Consumed=true")
+			}
+			if !strings.Contains(ch.LastText(), "Workspace set to "+tc.wantResolved) {
+				t.Fatalf("input %q: reply %q, want resolved to %q", tc.input, ch.LastText(), tc.wantResolved)
+			}
+
+			cs := mgr.Get(chatID)
+			if cs == nil || cs.ActiveCwd() != tc.wantResolved {
+				t.Fatalf("input %q: ActiveCwd=%q, want %q", tc.input, cs.ActiveCwd(), tc.wantResolved)
+			}
+		})
+	}
+}
+
+// TestHandleCwd_RejectsNonExistentPath verifies the existence check
+// from commit fix-4 (issue observed 2026-08-02: /cwd silently set a
+// non-existent path, then spawn failed with a confusing error).
+func TestHandleCwd_RejectsNonExistentPath(t *testing.T) {
+	mgr, ch := newTestManager(t, false)
+	missing := "/this/path/definitely/does/not/exist/xyz123"
+	msg := &InboundMessage{ChatID: "oc_xxx", ChatType: ChatTypeP2P}
+
+	res, err := handleCwd(context.Background(), mgr, ch, msg, []string{missing}, "claude")
+	if err != nil {
+		t.Fatalf("handleCwd: %v", err)
+	}
+	if !res.Consumed {
+		t.Fatalf("expected Consumed=true")
+	}
+	if !strings.Contains(ch.LastText(), "Path does not exist") {
+		t.Fatalf("reply should mention 'Path does not exist': %q", ch.LastText())
+	}
+	// ChatSession should NOT have been created (no state mutation
+	// on rejection).
+	if mgr.Get("oc_xxx") != nil {
+		t.Fatalf("ChatSession should not exist after rejected /cwd")
+	}
+}
+
+// TestHandleCwd_RejectsFileNotDirectory verifies the directory check.
+func TestHandleCwd_RejectsFileNotDirectory(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "regular_file.txt")
+	if err := os.WriteFile(file, []byte("not a dir"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	mgr, ch := newTestManager(t, false)
+	msg := &InboundMessage{ChatID: "oc_xxx", ChatType: ChatTypeP2P}
+
+	res, err := handleCwd(context.Background(), mgr, ch, msg, []string{file}, "claude")
+	if err != nil {
+		t.Fatalf("handleCwd: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("expected Consumed=true, got %v", res)
+	}
+	if !strings.Contains(ch.LastText(), "Not a directory") {
+		t.Fatalf("reply should mention 'Not a directory': %q", ch.LastText())
 	}
 }
 

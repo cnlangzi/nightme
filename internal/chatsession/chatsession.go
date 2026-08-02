@@ -353,21 +353,28 @@ func (cs *ChatSession) LookupInPool(agent, cwd string) (*AgentSession, error) {
 	return as, nil
 }
 
-// LookupActiveAgentSession resolves the active AgentSession per the
-// Q-B fallback order:
+// LookupActiveAgentSession resolves the active AgentSession.
 //
-//  1. pool[(activeAgent, activeCwd)] if present → return it
-//     (regardless of status; caller decides respawn)
-//  2. pool[(defaultAgent, activeCwd)] if present → return it
-//     (fallback; activeAgent not mutated)
-//  3. spawn a new AgentSession with (activeAgent, activeCwd) and
-//     add it to the pool
+// Two paths, depending on whether /use has been called:
 //
-// Returns ErrNoActiveCwd if activeCwd is empty.
+//  0. activeAgent is empty (user has /cwd'd but not /use'd):
+//     — effectiveAgent := defaultAgent (chat's primary snapshot)
+//     — exact: pool[(effectiveAgent, activeCwd)] if hit → return
+//     — spawn: effectiveAgent if miss → return
+//     This is the "first message after /cwd" path.
 //
-// In commit 6 (this commit), step 3 only creates the AgentSession
-// data structure and adds it to the pool; it does NOT fork a child
-// process. Actual fork-exec lands in commit 7.
+//  1. activeAgent is set (user has /use'd explicitly):
+//     — exact: pool[(activeAgent, activeCwd)] if hit → return
+//     — miss: NO default fallback. The user explicitly chose this
+//       agent; spawning (defaultAgent, cwd) instead would silently
+//       override their choice. Spawn (activeAgent, cwd).
+//
+// Returns ErrNoActiveCwd if activeCwd is empty. Returns
+// ErrNoActiveAgent if both activeAgent and defaultAgent are empty.
+//
+// The pre-step (path 0) is commit fix-3; the explicit-/use no-
+// fallback rule is the Q-B interpretation consistent with /use
+// semantics (commit fix-3 follow-up).
 func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -376,32 +383,59 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 		return nil, ErrNoActiveCwd
 	}
 
-	// Step 1: exact match.
+	if cs.activeAgent == "" {
+		// Path 0: pre-/use. Promote defaultAgent to effective.
+		effective := cs.defaultAgent
+		if effective == "" {
+			return nil, ErrNoActiveAgent
+		}
+		if as, ok := cs.pool[agentCwdKey{Agent: effective, Cwd: cs.activeCwd}]; ok {
+			cs.activeAS = as
+			return as, nil
+		}
+		newAS := NewAgentSession(
+			newAgentSessionID(),
+			cs.ID,
+			effective,
+			cs.activeCwd,
+			nil,
+		)
+		cs.pool[agentCwdKey{Agent: effective, Cwd: cs.activeCwd}] = newAS
+		cs.activeAS = newAS
+		if cs.asFile != nil {
+			_ = cs.asFile.Upsert(newAS.Entry())
+		}
+		if cs.spawner != nil {
+			spawner := cs.spawner
+			cs.mu.Unlock()
+			spawnErr := newAS.Spawn(context.Background(), spawner)
+			cs.mu.Lock()
+			if spawnErr != nil {
+				return newAS, fmt.Errorf("chatsession: spawn failed (effective=%q, cwd=%q): %w", effective, cs.activeCwd, spawnErr)
+			}
+			if cs.asFile != nil {
+				_ = cs.asFile.Upsert(newAS.Entry())
+			}
+		}
+		cs.persistChatEntryLocked()
+		return newAS, nil
+	}
+
+	// Path 1: post-/use. No default fallback. The user wants THIS agent.
 	if as, ok := cs.pool[agentCwdKey{Agent: cs.activeAgent, Cwd: cs.activeCwd}]; ok {
 		cs.activeAS = as
 		return as, nil
 	}
 
-	// Step 2: default fallback.
-	if cs.defaultAgent != "" && cs.defaultAgent != cs.activeAgent {
-		if as, ok := cs.pool[agentCwdKey{Agent: cs.defaultAgent, Cwd: cs.activeCwd}]; ok {
-			cs.activeAS = as
-			return as, nil
-		}
-	}
-
-	// Step 3: spawn new (commit 6: data-only; commit 7: real fork).
 	newAS := NewAgentSession(
 		newAgentSessionID(),
 		cs.ID,
 		cs.activeAgent,
 		cs.activeCwd,
-		nil, // args — populated by spawn layer
+		nil,
 	)
 	cs.pool[agentCwdKey{Agent: cs.activeAgent, Cwd: cs.activeCwd}] = newAS
 	cs.activeAS = newAS
-
-	// Persist the new AgentSession entry.
 	if cs.asFile != nil {
 		_ = cs.asFile.Upsert(newAS.Entry())
 	}

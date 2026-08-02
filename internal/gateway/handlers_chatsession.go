@@ -18,6 +18,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -87,26 +88,70 @@ func RegisterChatSessionRuntime(gw Gateway, mgr *chatsession.Manager, channel Ch
 // handleCwd validates the path, sets it as the chat's activeCwd,
 // and replies with the resolved absolute path. Does NOT spawn.
 //
-//   /cwd <path>           → set activeCwd = <path>
+// Path resolution rules (commit fix-4):
+//
+//   - Leading "~" or "~/" → expand to $HOME
+//   - Relative path (no leading "/" or "~") → prepend $HOME
+//     (matches shell semantics where `cd code` from `~` works;
+//     safer than resolving against daemon's cwd, which is wherever
+//     the operator happened to invoke `go run`)
+//   - Absolute path → unchanged
+//
+//   /cwd <path>           → set activeCwd = <resolved-abs-path>
 //   /cwd (no arg)         → reply "Usage: /cwd <path>"
-//   /cwd /nonexistent     → reply "no such directory"
-//   /cwd ~               → ~ expanded (or rejected if no home)
+//   /cwd /nonexistent     → reply "Path does not exist: ..."
+//   /cwd ~                → $HOME (absolute)
+//   /cwd ~/foo            → $HOME/foo
+//   /cwd foo              → $HOME/foo  (relative path = $HOME-relative)
+//
+// Existence check: we reject non-existent paths at /cwd time so
+// the agent doesn't fail later with a confusing spawn error
+// (commit fix-4 followup to the bug observed 2026-08-02 where
+// `/cwd code/nightme` silently resolved to /home/devin/code/
+// nightme/code/nightme and the subsequent spawn failed).
 func handleCwd(ctx context.Context, mgr *chatsession.Manager, channel Channel, msg *InboundMessage, args []string, globalDefault string) (*CommandResult, error) {
 	if len(args) < 1 {
-		return reply(ctx, channel, msg.ChatID, "Usage: /cwd <absolute-path>"), nil
+		return reply(ctx, channel, msg.ChatID, "Usage: /cwd <path>"), nil
 	}
 
 	raw := strings.TrimSpace(args[0])
 	if raw == "" {
-		return reply(ctx, channel, msg.ChatID, "Usage: /cwd <absolute-path>"), nil
+		return reply(ctx, channel, msg.ChatID, "Usage: /cwd <path>"), nil
 	}
 
-	// Path validation: must be absolute. We don't require the
-	// directory to exist (offline machines may have a deferred
-	// mount); we DO reject ~ that doesn't expand (e.g., HOME unset).
-	abs, err := filepath.Abs(raw)
+	// 1. ~ expansion
+	expanded, err := expandTilde(raw)
+	if err != nil {
+		return reply(ctx, channel, msg.ChatID, fmt.Sprintf("Cannot expand ~: %v", err)), nil
+	}
+
+	// 2. Relative paths are $HOME-relative (not daemon-cwd-relative).
+	if !filepath.IsAbs(expanded) {
+		home, herr := os.UserHomeDir()
+		if herr != nil {
+			return reply(ctx, channel, msg.ChatID, fmt.Sprintf("Cannot resolve relative path: HOME unset: %v", herr)), nil
+		}
+		expanded = filepath.Join(home, expanded)
+	}
+
+	abs, err := filepath.Abs(expanded)
 	if err != nil {
 		return reply(ctx, channel, msg.ChatID, fmt.Sprintf("Invalid path: %v", err)), nil
+	}
+
+	// 3. Existence + directory check. We reject non-existent
+	// paths and file (non-directory) paths at /cwd time so the
+	// user sees a clear error here, not a confusing spawn failure
+	// later.
+	info, err := os.Stat(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return reply(ctx, channel, msg.ChatID, fmt.Sprintf("Path does not exist: %s (resolved from %q)", abs, raw)), nil
+		}
+		return reply(ctx, channel, msg.ChatID, fmt.Sprintf("Cannot stat %s: %v", abs, err)), nil
+	}
+	if !info.IsDir() {
+		return reply(ctx, channel, msg.ChatID, fmt.Sprintf("Not a directory: %s", abs)), nil
 	}
 
 	cs := mgr.GetOrCreate(msg.ChatID, chatTypeFromMessage(msg), globalDefault)
@@ -115,6 +160,29 @@ func handleCwd(ctx context.Context, mgr *chatsession.Manager, channel Channel, m
 	}
 
 	return reply(ctx, channel, msg.ChatID, fmt.Sprintf("Workspace set to %s", abs)), nil
+}
+
+// expandTilde expands a leading "~" or "~/" to the user's home
+// directory. "~" alone becomes $HOME; "~/foo" becomes $HOME/foo.
+// Returns the input unchanged if it doesn't start with "~".
+//
+// Errors only on `os.UserHomeDir` failure (HOME unset in some
+// pathological containers); otherwise pure string manipulation.
+func expandTilde(path string) (string, error) {
+	if path == "" {
+		return path, nil
+	}
+	if path == "~" {
+		return os.UserHomeDir()
+	}
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, path[2:]), nil
+	}
+	return path, nil
 }
 
 // handleUse sets the chat's activeAgent and triggers a lazy

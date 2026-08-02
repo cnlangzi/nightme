@@ -147,39 +147,34 @@ func TestLookupActiveAgentSession_ReusesPoolEntry(t *testing.T) {
 	}
 }
 
-func TestLookupActiveAgentSession_FallbackToDefault(t *testing.T) {
+// TestLookupActiveAgentSession_NoDefaultFallbackAfterUse documents the
+// commit fix-3 follow-up behavior: when /use is explicit (activeAgent
+// set), the lookup does NOT fallback to (defaultAgent, cwd) even if
+// that entry exists. The user wants the agent they explicitly picked.
+func TestLookupActiveAgentSession_NoDefaultFallbackAfterUse(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs := New("oc_xxx", "p2p", "claude").WithPersistence(csFile, asFile)
-	cs.SetActiveCwd("/code/bailing")
-	cs.SetActiveAgent("codex") // not in pool yet
 
-	// Pre-seed pool with (claude, /code/bailing).
-	as, _ := cs.LookupActiveAgentSession()
-	if as.Agent != "codex" {
-		t.Fatalf("first lookup should spawn codex (exact match miss), got %q", as.Agent)
+	cs.SetActiveCwd("/code/bailing")
+	cs.SetActiveAgent("claude")
+	claudeAS, _ := cs.LookupActiveAgentSession() // spawns (claude, cwd)
+	if claudeAS.Agent != "claude" {
+		t.Fatalf("first spawn: got %q, want claude", claudeAS.Agent)
 	}
 
-	// Now switch activeAgent to codex — wait, codex is already active.
-	// Let me reset: make activeAgent be something else, default be claude.
-	cs2 := New("oc_yyy", "p2p", "claude").WithPersistence(csFile, asFile)
-	cs2.SetActiveCwd("/code/bailing")
-	// Pre-pool (claude, /code/bailing) directly.
-	pre := NewAgentSession("as_pre", cs2.ID, "claude", "/code/bailing", nil)
-	cs2.mu.Lock()
-	cs2.pool[agentCwdKey{Agent: "claude", Cwd: "/code/bailing"}] = pre
-	cs2.mu.Unlock()
-
-	cs2.SetActiveAgent("codex") // codex not in pool
-	got, err := cs2.LookupActiveAgentSession()
+	// Now /use codex. (claude, cwd) is in the pool; (codex, cwd) is not.
+	// Per commit fix-3 follow-up: NO fallback to (defaultAgent=claude, cwd).
+	// We must spawn codex.
+	cs.SetActiveAgent("codex")
+	codexAS, err := cs.LookupActiveAgentSession()
 	if err != nil {
 		t.Fatalf("LookupActiveAgentSession: %v", err)
 	}
-	// Step 2 (fallback) should hit (claude, /code/bailing).
-	if got.ID != "as_pre" {
-		t.Fatalf("expected fallback to claude pre-seeded, got %s", got.ID)
+	if codexAS.Agent != "codex" {
+		t.Fatalf("after /use codex: got %q, want codex (no fallback to claude)", codexAS.Agent)
 	}
-	if len(cs2.Pool()) != 1 {
-		t.Fatalf("fallback should NOT spawn; pool size=%d", len(cs2.Pool()))
+	if len(cs.Pool()) != 2 {
+		t.Fatalf("expected pool size 2 (claude + codex), got %d", len(cs.Pool()))
 	}
 }
 

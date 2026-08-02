@@ -1,13 +1,15 @@
 # nightme — Feature Index
 
-> **状态**：v1.0
+> **状态**：v1.1（职责隔离架构已落地；产品语义未变）
 > **作者**：🦞 虾哥（PM/Architect）
-> **日期**：2026-07-31
+> **日期**：2026-08-02
 > **关联文档**：
 > - 产品定位 → [`PRD.md`](./PRD.md)
-> - 技术架构 → [`SPEC.md`](./SPEC.md)
+> - 技术架构 → [`SPEC.md`](./SPEC.md) v1.1
 > - 实施计划 → [`PLAN.md`](./PLAN.md)
 > - 每个 feature 的详细设计 → [`feat/`](./feat/)
+
+> **v1.1 架构变更摘要**：Channel / Session 互不知道；Gateway 是 binding + receipt FSM owner。详见 [SPEC §0](./SPEC.md) 和 [F-26 §13](./feat/F-26-gateway-hub.md)。
 
 本文档是 nightme 的**功能索引**。每项功能的设计细节（接口、实现、edge cases、测试计划）见 [`feat/`](./feat/) 目录下的独立文档。
 
@@ -24,17 +26,17 @@
 | F-05 | 进程注册（JSON registry）| [feat/F-05-process-registry.md](./feat/F-05-process-registry.md) | M1 |
 | F-06 | 进程清理（默认 detach，--cleanup kill）| [feat/F-06-process-cleanup.md](./feat/F-06-process-cleanup.md) | M3 |
 | F-07 | Workspace 绑定（cwd 校验 + 路径展开）| [feat/F-07-workspace-binding.md](./feat/F-07-workspace-binding.md) | M1 |
-| F-08 | Channel 抽象（interface + 飞书实现）| [feat/F-08-channel-abstraction.md](./feat/F-08-channel-abstraction.md) | M2 |
+| F-08 | Channel 抽象（interface + 飞书实现 + receipt lifecycle 渲染）| [feat/F-08-channel-abstraction.md](./feat/F-08-channel-abstraction.md) | M2 / v0.3 receipt |
 | F-09 | Agent 抽象（interface + mode 选择）| [feat/F-09-agent-abstraction.md](./feat/F-09-agent-abstraction.md) | M1 |
 | F-10 | Session 列表命令（`nightme list` / `kill`）| [feat/F-10-session-list-cmd.md](./feat/F-10-session-list-cmd.md) | M3 |
 | F-19 | PTY Mode Byte Pipe（Bridge 的 PTY 实现细节）| [feat/F-19-cli-bridge.md](./feat/F-19-cli-bridge.md) | M1 |
-| F-20 | Command Gateway（slash command 路由 + /cwd /run /kill /help）| [feat/F-20-gateway.md](./feat/F-20-gateway.md) | M2 |
+| F-20 | Command Gateway + Binding 表 + Run 决策 + Receipt FSM owner | [feat/F-20-gateway.md](./feat/F-20-gateway.md) | M2 / v0.3 增强 |
 | F-21 | Agent Communication Modes（ACP / SDK / PTY / JSON-IO 四层降级）| [feat/F-21-agent-modes.md](./feat/F-21-agent-modes.md) | M1 arch / M2 partial / v0.2 JSON-IO |
 | F-22 | Feishu One-Click App Registration（QR 扫码授权 onboarding）| [feat/F-22-feishu-onclick-registration.md](./feat/F-22-feishu-onclick-registration.md) | M2 |
-| F-23 | Heartbeat & Streaming Status（event-driven tick + 进程级 DEAD 检测）| [feat/F-23-heartbeat.md](./feat/F-23-heartbeat.md) | v0.2 |
+| F-23 | Heartbeat & Streaming Status（Channel-driven ticker）| [feat/F-23-heartbeat.md](./feat/F-23-heartbeat.md) | v0.2 / v0.3 迁移 |
 | F-24 | Claude Code Bridge（JSON-IO + auto-accept + AskUserQuestion）| [feat/F-24-claudecode-bridge.md](./feat/F-24-claudecode-bridge.md) | v0.2 |
-| F-25 | Input Buffer & Message Status（双轨 Reaction+Reply + 3 状态）| [feat/F-25-input-buffer.md](./feat/F-25-input-buffer.md) | v0.2 |
-| F-26 | Gateway Hub Architecture（Gateway = 中枢、Channel = 薄 I/O、抽象消息类型）| [feat/F-26-gateway-hub.md](./feat/F-26-gateway-hub.md) | v0.3 |
+| F-25 | Input Buffer（FSM only；receipt 由 Gateway + Channel 联合管理）| [feat/F-25-input-buffer.md](./feat/F-25-input-buffer.md) | v0.2 / v0.3 瘦身 |
+| F-26 | Gateway Hub & Responsibility Isolation（v1.1 职责隔离权威参考）| [feat/F-26-gateway-hub.md](./feat/F-26-gateway-hub.md) | v0.3 |
 
 ## 2. 后续功能（v0.2+）
 

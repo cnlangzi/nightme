@@ -132,15 +132,6 @@ func (cs *ChatSession) SetActiveAgent(agent string) error {
 	return nil
 }
 
-// SetDefaultAgent is REMOVED in v1.2 (Q-A simplification): the only
-// user-facing Default is the global `defaults.agent` config. The
-// `defaultAgent` field is captured at New() time and never mutated
-// post-construction. Use New(chatID, chatType, globalDefault) to
-// pass the current global default.
-//
-// (kept as a comment placeholder so PR reviewers see the explicit
-// removal; delete on next doc pass)
-
 // ActiveCwd returns the current active workspace.
 func (cs *ChatSession) ActiveCwd() string {
 	cs.mu.RLock()

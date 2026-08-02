@@ -260,18 +260,8 @@ func mustAppend(t *testing.T, r *MessageReceipt, ev agent.AgentEvent) {
 	}
 }
 
-// Add the missing methods on mockReceiptBot to satisfy receiptBot.
-// DeleteReaction and UpdateMessage are not exercised by the
-// per-event shipping test (the new design never calls UpdateMessage
-// and only calls DeleteReaction when the reaction emoji changes —
-// which the test doesn't trigger). The stubs exist to satisfy the
-// interface contract.
-func (m *mockReceiptBot) DeleteReaction(_ context.Context, _, _ string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return nil
-}
-
+// UpdateMessage satisfies receiptBot. The per-event shipping path
+// does not call it; the stub exists for the interface contract.
 func (m *mockReceiptBot) UpdateMessage(_ context.Context, _, _ string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

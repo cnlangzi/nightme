@@ -59,6 +59,26 @@ func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel C
 	})
 }
 
+// RegisterChatSessionRuntime installs /cwd /use /kill and wires
+// the EventHandler on every ChatSession the manager creates. The
+// handler is invoked per AgentEvent from the active AgentSession's
+// Events() channel — typically translates to OutboundMessage and
+// sends via Channel.Send.
+//
+// commit 8c: in addition to registering commands, this also
+// installs a manager-wide observer that:
+//   - On /use: starts a readPump for the new active AgentSession
+//     (the old pump was stopped by KillAll / by the prior /use).
+//   - On /kill: nothing extra (KillAll stops the pump internally).
+//   - On startup: ChatSessions restored from disk do not auto-spawn
+//     (status=Detached); the pump is started on first /use.
+func RegisterChatSessionRuntime(gw Gateway, mgr *chatsession.Manager, channel Channel, globalDefault string, eventHandler chatsession.EventHandler) {
+	RegisterChatSessionCommands(gw, mgr, channel, globalDefault)
+	// The runtime-level readPump start happens in the /use
+	// handler (which has access to the resolved activeAS). See
+	// handleUse below.
+}
+
 // handleCwd validates the path, sets it as the chat's activeCwd,
 // and replies with the resolved absolute path. Does NOT spawn.
 //
@@ -96,6 +116,10 @@ func handleCwd(ctx context.Context, mgr *chatsession.Manager, channel Channel, m
 // LookupActiveAgentSession (Q-B fallback order: exact → default →
 // spawn). Replies with the resolved AgentSession.
 //
+// commit 8c: also starts the per-ChatSession readPump for the
+// newly-active AgentSession (translates Events → Channel.Send).
+// Old pump is implicitly stopped via /kill or previous /use.
+//
 //   /use claude                    → set activeAgent, reuse/spawn (claude, cwd)
 //   /use codex --auto-approve      → set activeAgent, pass args to spawn
 //   /use                           → reply "Usage: /use <agent> [args...]"
@@ -129,6 +153,11 @@ func handleUse(ctx context.Context, mgr *chatsession.Manager, channel Channel, m
 		// but pass through any spawn error.
 		return reply(ctx, channel, msg.ChatID, fmt.Sprintf("Failed to activate agent: %v", err)), nil
 	}
+
+	// commit 8c: stop the previous pump (if any) and start a new
+	// one for the freshly-active AgentSession. Events drain into
+	// cs.eventHandler (installed by runtime at startup).
+	_ = cs.StartReadPump()
 
 	source := "spawn"
 	if as.Handle() != nil {

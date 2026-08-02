@@ -67,6 +67,22 @@ type ChatSession struct {
 	// created via ensureBuffer() so tests that don't dispatch
 	// messages don't pay for it.
 	inputBuffer *InputBuffer
+
+	// commit 8c: per-ChatSession readPump controller. Only one
+	// pump is active at a time (the active AgentSession's pump);
+	// /use swaps the pump by StopReadPump + StartReadPump.
+	pumpMu      sync.Mutex
+	pump        EventPumpState
+	pumpRunning atomic.Bool // true while a pump goroutine is alive
+
+	// eventHandler is the runtime-installed EventHandler invoked
+	// for each event drained from the active AgentSession. Set
+	// once at startup (or first dispatch); persists across /use.
+	eventHandler EventHandler
+
+	// exitObserver is the runtime-installed callback fired when
+	// an active AgentSession's process exits. nil = no observer.
+	exitObserver AgentExitObserver
 }
 
 // New creates a fresh ChatSession in memory. The caller is
@@ -284,6 +300,19 @@ func (cs *ChatSession) SetFlushHook(h FlushHook) {
 	cs.ensureBuffer().SetFlushHook(h)
 }
 
+// SetEventHandler installs the per-event callback. The runtime
+// typically installs this once at first message dispatch; the
+// handler closes over (channel, ctx, etc.) and translates each
+// AgentEvent to a channel.Send call.
+//
+// commit 8c: the handler persists across /use (we want outbound
+// translation to follow the new active AgentSession naturally).
+func (cs *ChatSession) SetEventHandler(h EventHandler) {
+	cs.mu.Lock()
+	cs.eventHandler = h
+	cs.mu.Unlock()
+}
+
 // BufferClear discards queued messages without sending. Returns
 // the number cleared.
 func (cs *ChatSession) BufferClear() int {
@@ -392,6 +421,12 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 
 	cs.persistChatEntryLocked()
 
+	// commit 8c: readPump is NOT auto-started here. The runtime
+	// (cmd/nightme) explicitly calls cs.StartReadPump() after
+	// the spawn resolves, typically from the /use handler or first
+	// message dispatch. Tests that don't go through the runtime
+	// are unaffected (no leak).
+
 	return newAS, nil
 }
 
@@ -402,11 +437,26 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 //
 // v1.2 commit 6: this is a data-only operation — no actual signal
 // is sent (commit 7 will wire SIGTERM).
+//
+// commit 8c: also stops the readPump + clears the InputBuffer
+// (queued messages are lost on /kill — user must re-send).
 func (cs *ChatSession) KillAll() error {
+	// commit 8c: stop the readPump FIRST so the goroutine exits
+	// before we tear down the pool (avoids "events draining into
+	// a nil pool" races).
+	cs.StopReadPump()
+
 	cs.mu.Lock()
 	cs.pool = make(map[agentCwdKey]*AgentSession)
 	cs.activeAS = nil
 	cs.mu.Unlock()
+
+	// commit 8c: discard queued user messages. They can't reach
+	// a child process now (no agent), and we don't want stale
+	// messages flushed on next spawn.
+	if cs.inputBuffer != nil {
+		cs.inputBuffer.Clear()
+	}
 
 	if cs.asFile != nil {
 		// Best-effort: clear all entries owned by this ChatSession.

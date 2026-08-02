@@ -191,6 +191,17 @@ func runDaemon_v12(ctx context.Context, out io.Writer, deps runDeps_v12, sigCh <
 		WithSpawner(spawner).
 		WithPersistence(csFile, asFile)
 
+	// commit 8c: migrate v1.1 registry.json → backup (v1.bak).
+	// Per PLAN §4.6.7: v1.x → v1.2 is NOT a transparent migration
+	// (v1.1 didn't persist chat_id). We archive the old file
+	// and start fresh.
+	v1Legacy := filepath.Join(filepath.Dir(cfg.Paths.DataDir), "registry.json")
+	if count, err := registry.MigrateV1ToV2(v1Legacy); err != nil {
+		logger.Warn("v1.x migration failed", "err", err)
+	} else if count > 0 {
+		logger.Info("archived v1.x registry", "entries", count, "backup", v1Legacy+".v1.bak")
+	}
+
 	// Restore from disk (per-chat ChatSession + per-AgentSession
 	// metadata; processes not running).
 	if err := mgr.RestoreFromRegistry(); err != nil {
@@ -211,6 +222,15 @@ func runDaemon_v12(ctx context.Context, out io.Writer, deps runDeps_v12, sigCh <
 
 	// Build the v1.2 router wiring.
 	fallback := v12Fallback(mgr, ch, cfg.Primary, logger)
+
+	// commit 8c: install EventHandler on every ChatSession. The
+	// handler translates AgentEvent → OutboundMessage + sends via
+	// the channel. Pre-install on existing chats (restored from
+	// disk); new chats get it via /use or first message dispatch.
+	eventHandler := v12EventHandler(ch, logger)
+	for _, cs := range mgr.List() {
+		cs.SetEventHandler(eventHandler)
+	}
 
 	gw := gateway.New(fallback, nil)
 	gateway.RegisterChatSessionCommands(gw, mgr, ch, cfg.Primary)
@@ -316,14 +336,39 @@ func v12Fallback(mgr *chatsession.Manager, ch channel.Channel, primary string, l
 // Detached (no process), so this is a no-op for restored
 // sessions — readPumps are started lazily on first /use + send.
 //
-// Kept as a no-op stub for commit 8b; commit 8c (later) will
-// implement active readPump management per ChatSession.
+// commit 8c: this is a placeholder. The runtime's actual readPump
+// start happens in handleUse (gateway package) and on first
+// message dispatch in v12Fallback.
 func v12EnsureReadPumps(mgr *chatsession.Manager, ch channel.Channel, primary string, logger *slog.Logger) {
-	// no-op for now; deferred to commit 8c.
+	// no-op for commit 8c.
 	_ = mgr
 	_ = ch
 	_ = primary
 	_ = logger
+}
+
+// v12EventHandler returns the per-event callback installed on
+// every ChatSession by the runtime. The callback translates
+// AgentEvent → OutboundMessage and dispatches via the channel.
+//
+// commit 8c: chatID is passed by ChatSession's readPump directly
+// (the ChatSession knows its own ChatID); the handler doesn't
+// need to look it up.
+func v12EventHandler(ch channel.Channel, logger *slog.Logger) chatsession.EventHandler {
+	return func(chatID string, s *chatsession.AgentSession, ev agent.AgentEvent) {
+		// Translate the AgentEvent to an OutboundMessage.
+		out, ok := gateway.Translate(chatID, ev)
+		if !ok {
+			return
+		}
+		out.ReplyTo = "" // commit 8c: ReplyTo is set by Channel layer (Receipt FSM)
+		if err := ch.Send(context.Background(), out); err != nil && logger != nil {
+			logger.Warn("channel send failed",
+				"chat_id", chatID,
+				"agent_session_id", s.ID,
+				"err", err)
+		}
+	}
 }
 
 // v12Responder adapts a channel.Channel for v1.2 outbound

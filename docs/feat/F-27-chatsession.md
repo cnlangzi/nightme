@@ -37,7 +37,7 @@ type ChatSession struct {
     // captured at New() time from global config and never mutated).
     ActiveCwd       string              // /cwd sets; immutable per AgentSession
     ActiveAgent     string              // /use sets; immutable per AgentSession
-    DefaultAgent    string              // snapshot of config.defaults.agent at New(); read-only
+    DefaultAgent    string              // snapshot of config.Agents.Default at New(); read-only
 
     // AgentSession pool (per-ChatSession unique on (agent, cwd))
     poolMu          sync.RWMutex

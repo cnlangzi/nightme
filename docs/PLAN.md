@@ -686,7 +686,7 @@ internal/
 
 | 决策 | 影响 | 状态 |
 |------|------|------|
-| **Q-A**: Default Agent 设置粒度 | 仅全局 `defaults.agent` config；ChatSession.defaultAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已确认 (2026-08-02) |
+| **Q-A**: Default Agent 设置粒度 | 仅全局 `agents.default` config (YAML)；ChatSession.defaultAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已确认 (2026-08-02) |
 | **Q-B**: `(activeAgent, activeCwd)` 不在 pool 时 fallback 顺序 | 影响 LookupActiveAgentSession 逻辑 | 待 Devin |
 | **Q-C**: ChatSession.ID 来源 | 影响 ChatSessionEntry schema | 倾向 derived from chatId |
 | **Q-D**: /kill 时 InputBuffer 队列消息处理（drop / persist）| 影响 ChatSession.KillAll 行为 | 倾向 drop |

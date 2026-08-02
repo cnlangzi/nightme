@@ -112,6 +112,6 @@
 
 | 决策 | 现状 | 状态 |
 |------|------|------|
-| Q-A: Default Agent 设置粒度 | 全局 only (`config.yaml` 的 `defaults.agent`)；ChatSession.defaultAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已确认 (2026-08-02) |
+| Q-A: Default Agent 设置粒度 | 全局 only (`config.yaml` 的 `agents.default`)；ChatSession.defaultAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已确认 (2026-08-02) |
 | Q-B: `(activeAgent, activeCwd)` 不在 pool 时的 fallback 顺序 | exact → `(defaultAgent, activeCwd)` → spawn `(activeAgent, activeCwd)` | 待 Devin 确认 |
 | `ChatSession.defaultAgent` 字段持久化位置 | `ChatSessionEntry.defaultAgent` (snapshot，写时不变) | ✅ 已确认 |

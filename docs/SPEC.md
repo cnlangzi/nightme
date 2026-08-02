@@ -432,7 +432,20 @@ nightme 用 Go 的 goroutine 实现并发，结构如下：
 - `chat_sessions.chatId` UNIQUE（保证 1 chat = 1 ChatSession）
 - `agent_sessions.(chatSessionId, agent, cwd)` UNIQUE（保证 pool 内 (agent, cwd) 1:1；不同 ChatSession 各自独立）
 
-**Q-A 锁定 (2026-08-02)**：Default 仅全局 config (`defaults.agent`)；ChatSession.defaultAgent 是创建时的 snapshot，不可变。**无 `/default` 命令**。
+**Q-A 锁定 (2026-08-02)**：Default 仅全局 config (`agents.default` in YAML)；ChatSession.defaultAgent 是创建时的 snapshot，不可变。**无 `/default` 命令**。
+
+```yaml
+# config.yaml (v1.2)
+agents:
+  default: claude              # global default
+  claude:                      # recipe inline (sibling of default)
+    command: claude
+    args: []
+    env: {}
+  codex:
+    command: codex-acp
+    ...
+```
 
 ---
 

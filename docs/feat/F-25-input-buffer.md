@@ -1,13 +1,30 @@
 # F-25: Input Buffer & Message Status
 
-> **Status**: implemented (v1.1 — InputBuffer 不再持有 receipt；onFlush 钩子由 Gateway 注入)
+> **Status**: ⚠️ **STALE** (describes v1.x per-`Session` InputBuffer; v1.2
+> moved InputBuffer to per-`ChatSession` under
+> [`internal/chatsession/input_buffer.go`](../../internal/chatsession/input_buffer.go).
+> The rolling-log receipt-card UX described here is **not currently
+> re-implemented in the v1.2 daemon** — v1.2 sends plain `OutText`
+> replies, not receipt cards. See [`MIGRATION.md`](../../MIGRATION.md)
+> § "Receipt card UX changed" and [`CHANGELOG.md`](../../CHANGELOG.md)
+> § "Known gaps (deferred)" for status.)
+>
+> This doc is **preserved for historical reference**. For v1.2
+> InputBuffer semantics, see:
+> - [`F-27-chatsession.md`](./F-27-chatsession.md) §5 (InputBuffer
+>   FSM ownership + default FlushHook contract)
+> - [`F-28-use-command.md`](./F-28-use-command.md) §3 (cross-`/use`
+>   buffer-survives invariant)
+> - [`internal/chatsession/input_buffer.go`](../../internal/chatsession/input_buffer.go)
+>   for the canonical implementation.
+>
 > **Milestone**: v0.2 (input buffer FSM), v0.3 (hook relocation to Gateway)
 > **Depends on**: F-08 (channel abstraction, receipt API), F-23 (heartbeat), F-24 (claudecode bridge)
 > **Related**: [`SPEC.md`](../SPEC.md) v1.1 §1.2, §2.4; [`F-26-gateway-hub.md`](./F-26-gateway-hub.md) §2.4; [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md) §3
 
 ---
 
-## 1. Description
+## 1. Description (v1.x — for historical reference only)
 
 Claude Code turn 执行中（BUSY）时，用户可能继续发消息。这些消息需要：
 

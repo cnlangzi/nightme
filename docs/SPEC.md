@@ -515,7 +515,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 
 ## 11. 下一步
 
-技术规范 v1.2 **已落地**（commits 5/6/7/8a/8b/8c/9，`fix/cwd_session` 分支）：
+技术规范已落地（commits 5/6/7/8a/8b/8c/9 + 后续 fix，`fix/cwd_session` 分支）：
 
 - ✅ ChatSession / AgentSession 数据结构 + I/O（commits 5/6）
 - ✅ Spawner 抽象 + AgentSession 真实 fork-exec（commit 7）
@@ -523,11 +523,60 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 - ✅ v1.2 daemon 切换到 `chatsession.Manager`（commits 8b/8c）
 - ✅ InputBuffer FSM ownership 移到 ChatSession（commit 9）
 - ✅ Config schema `primary` + `agents` list + `nightme config` 交互模式（F-30）
+- ✅ FlushHook 默认转发到 active AgentSession（commit `4119e2c`）
+- ✅ Command names 不带前导斜杠（commit `d54a4c1`）
+- ✅ User / ops docs：README / CHANGELOG / MIGRATION（commits `2ccc443` / `dc75493`）
 
-剩余（v0.4 backlog）：
+剩余（backlog）：
 - ⏭ 真实 E2E 飞书 DM round-trip test
-- ⏭ 删除 `internal/session/` v1.1 MemoryManager（内部仍使用，需要 gateway 重构后清理）
-- ⏭ nightme v0.4.0 release tag
+- ⏭ 删除 `internal/session/` v1.1 MemoryManager（仍被 `internal/gateway/cmd/handlers.go` BindingEntry shim 使用）
+- ⏭ 重新实现 v1.x 的 rolling-log receipt card UX（v1.2 目前发 plain `OutText`）
+
+---
+
+## 11.1 Daemon startup flow
+
+`nightme run` 启动顺序（见 `cmd/nightme/run_v12.go`）：
+
+```
+1. loadConfig()                       # ~/.config/nightme/config.yaml
+2. openChatSessions() / openAgentSessions()   # chat_sessions.json / agent_sessions.json
+3. buildAgents(cfg)                   # cfg.Agents → agent.Registry
+4. MigrateV1ToV2(v1RegistryPath)     # 备份 registry.json → .v1.bak (idempotent)
+5. spawner := NewRegistrySpawner(agents)
+6. mgr := NewManager().WithSpawner(spawner).WithPersistence(csFile, asFile)
+7. mgr.RestoreFromRegistry()          # 重建内存中 ChatSession 池 (AgentSession 状态=Detached)
+8. ch.Start()                         # Feishu WebSocket / echo channel
+9. gw := gateway.New(v12Fallback(mgr, ch, cfg.Primary), nil)
+10. RegisterChatSessionCommands(gw, mgr, ch, cfg.Primary)
+11. for each cs in mgr.List(): cs.SetEventHandler(v12EventHandler(ch, logger))
+12. gwImpl.AttachChannels(ch) + gwImpl.Start()
+13. block on signal / ctx.Done()
+14. shutdownRun_v12: stop channel + (cleanup? KillAll : detach)
+```
+
+**关键不变量**：
+- Step 11 的 `SetEventHandler` 在所有 ChatSession 上一次性安装；handler 跨 `/use` 持久。
+- Step 4-7 在没有 v1.x 数据时无操作（idempotent）。
+- Step 7 后所有 AgentSession 是 `Detached`（无进程）。用户第一次发消息 → `LookupActiveAgentSession` → Spawner spawn。
+
+---
+
+## 11.2 Restart semantics
+
+Daemon 重启后（用户发送 SIGINT 然后再启 `nightme run`）：
+
+| 数据 | 行为 |
+|---|---|
+| `cfg.Primary` | 重新读取配置。**不影响已存在的 ChatSession.defaultAgent**（Q-A snapshot）。 |
+| `chat_sessions.json` | 全量恢复为 in-memory ChatSession。`activeCwd`、`activeAgent`、`defaultAgent` 复原。 |
+| `agent_sessions.json` | 恢复为 in-memory AgentSession，**全部 `Status=Detached`，PID=0**。 |
+| v1.x `registry.json` | 备份为 `.v1.bak`，不恢复数据（见 MIGRATION.md）。 |
+
+**用户感知**：
+- 第一次发消息会卡 ~100ms-2s（Spawner 重新 fork）。后续消息即时。
+- 已 `/cwd` 但从未 `/use` 的 chat：发消息时 Spawner 触发 `/use` 等价的 lazy spawn（不是 `/use` 显式命令）。
+- 显式 `/use` 过的 chat：第一次发消息触发 lazy spawn（因为没有运行中的进程）。
 
 ---
 

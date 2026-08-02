@@ -8,6 +8,7 @@
 package chatsession
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -54,6 +55,11 @@ type ChatSession struct {
 	// Persistence handles (optional — nil means no persistence).
 	csFile *registry.ChatSessionFile
 	asFile *registry.AgentSessionFile
+
+	// spawner is used by LookupActiveAgentSession to fork new
+	// children on miss. nil means no spawn (test-friendly default;
+	// production wires a registrySpawner at runtime).
+	spawner Spawner
 }
 
 // New creates a fresh ChatSession in memory. The caller is
@@ -83,6 +89,23 @@ func (cs *ChatSession) WithPersistence(csFile *registry.ChatSessionFile, asFile 
 	cs.asFile = asFile
 	cs.mu.Unlock()
 	return cs
+}
+
+// WithSpawner attaches a Spawner used by LookupActiveAgentSession
+// to fork child processes. nil means no spawn (lookup returns
+// AgentSession with status=Detached, no process running).
+func (cs *ChatSession) WithSpawner(spawner Spawner) *ChatSession {
+	cs.mu.Lock()
+	cs.spawner = spawner
+	cs.mu.Unlock()
+	return cs
+}
+
+// Spawner returns the configured Spawner (nil if none).
+func (cs *ChatSession) Spawner() Spawner {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.spawner
 }
 
 // deriveIDFromChatID produces a deterministic ID from the chat ID
@@ -238,6 +261,36 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	if cs.asFile != nil {
 		_ = cs.asFile.Upsert(newAS.Entry())
 	}
+
+	// commit 7: actually fork the child via the configured Spawner.
+	// If no Spawner is set (test-friendly default), the
+	// AgentSession stays in status=Detached with no process — the
+	// caller can still see it in the pool, but SendBlocks will
+	// return ErrNotRunning until a Spawner is wired in.
+	if cs.spawner != nil {
+		// Spawn outside of the poolMu write-lock; release it
+		// temporarily to avoid recursive-lock surprises. The
+		// spawner.Spawn call is non-trivial (forks a child) so
+		// holding cs.mu for the duration would block all
+		// ChatSession operations. We re-acquire mu for the
+		// subsequent persistence + activeAS assignment.
+		spawner := cs.spawner
+		cs.mu.Unlock()
+		spawnErr := newAS.Spawn(context.Background(), spawner)
+		cs.mu.Lock()
+
+		if spawnErr != nil {
+			// Spawn failed; keep the entry in the pool but mark
+			// detached so /use retry can re-attempt. Caller will
+			// see an error from LookupActiveAgentSession.
+			return newAS, fmt.Errorf("chatsession: spawn failed: %w", spawnErr)
+		}
+		// Refresh registry entry with updated PID/Status.
+		if cs.asFile != nil {
+			_ = cs.asFile.Upsert(newAS.Entry())
+		}
+	}
+
 	cs.persistChatEntryLocked()
 
 	return newAS, nil

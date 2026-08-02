@@ -1,39 +1,33 @@
 # nightme example configuration
 # Copy to ~/.config/nightme/config.yaml and edit.
 
+# Primary (default) agent name. Used when no /use <name> is given.
+primary: claude
+
+# Custom agents. Each entry can either extend a built-in (same name
+# replaces the built-in) or add a brand-new agent. Bridge is the
+# Bridge backend type (claude / codex / opencode); Command is the
+# full command line including any flags.
+agents:
+  - name: claude
+    bridge: claude
+    command: "claude --dangerously-skip-permissions"
+
+  - name: codex
+    bridge: codex
+    command: codex-acp
+
+  - name: opencode
+    bridge: opencode
+    command: "opencode acp"
+
 feishu:
   # App credentials from https://open.feishu.cn/app
   app_id: "cli_xxxxxxxxxxxxxxxx"
-  app_secret: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  app_secret: "xxxxxx…xxxx"
   # Optional — leave blank if your app is not event-subscribed via HTTP.
   verification_token: ""
   encrypt_key: ""
-
-agents:
-  # Global default agent name (v1.2). Must match one of the recipe
-  # names below. Used when a new ChatSession is created (snapshot
-  # into ChatSession.defaultAgent) and as the fallback during
-  # LookupActiveAgentSession (Q-B).
-  default: "claude"
-
-  # Per-agent spawn recipes. Each top-level key under `agents:`
-  # (other than `default`) is a recipe; names must match the
-  # registered agent's Name() (e.g. "claude", "codex", "opencode").
-  claude:
-    command: "claude"
-    args: []
-    env: {}
-
-  codex:
-    # Codex ships ACP through the official adapter binary.
-    command: "codex-acp"
-    args: []
-    env: {}
-
-  opencode:
-    command: "opencode"
-    args: ["acp"]
-    env: {}
 
 session:
   # Initial PTY size for new sessions.

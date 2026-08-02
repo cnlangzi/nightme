@@ -333,14 +333,14 @@ func TestRun_GracefulShutdown(t *testing.T) {
 func TestBuildRunAgentRegistry_HasBuiltinsOnly(t *testing.T) {
 	cases := []struct {
 		name    string
-		entries map[string]config.AgentEntry
+		entries []config.AgentEntry
 	}{
-		{"nil map", nil},
-		{"empty map", map[string]config.AgentEntry{}},
+		{"nil slice", nil},
+		{"empty slice", []config.AgentEntry{}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			cfg := &config.Config{Agents: config.AgentsConfig{Recipes: c.entries}}
+			cfg := &config.Config{Agents: c.entries}
 			reg := buildRunAgentRegistry(cfg)
 
 			names := make(map[string]bool)
@@ -365,9 +365,9 @@ func TestBuildRunAgentRegistry_HasBuiltinsOnly(t *testing.T) {
 // land in pty (bridge/pty.NewAgent) — the safe default for arbitrary CLIs.
 func TestBuildRunAgentRegistry_UserConfigRegistered(t *testing.T) {
 	cfg := &config.Config{
-		Agents: config.AgentsConfig{Recipes: map[string]config.AgentEntry{
-			"custom": {Command: "/bin/echo", Args: []string{"--custom"}, Env: map[string]string{"Z": "last", "A": "first"}},
-		}},
+		Agents: []config.AgentEntry{
+			{Name: "custom", Command: "/bin/echo --custom"},
+		},
 		Session: config.SessionConfig{DefaultPtyCols: 100, DefaultPtyRows: 40},
 	}
 	reg := buildRunAgentRegistry(cfg)
@@ -395,9 +395,9 @@ func TestBuildRunAgentRegistry_UserConfigRegistered(t *testing.T) {
 // dedicated bridge features (documented in the init() comment).
 func TestBuildRunAgentRegistry_UserConfigOverridesBuiltin(t *testing.T) {
 	cfg := &config.Config{
-		Agents: config.AgentsConfig{Recipes: map[string]config.AgentEntry{
-			"claude": {Command: "/custom/path/claude"},
-		}},
+		Agents: []config.AgentEntry{
+			{Name: "claude", Command: "/custom/path/claude"},
+		},
 	}
 	reg := buildRunAgentRegistry(cfg)
 
@@ -411,7 +411,7 @@ func TestBuildRunAgentRegistry_UserConfigOverridesBuiltin(t *testing.T) {
 }
 
 // TestBuildRunAgentRegistry_UnknownByDefault guards the no-fallback
-// invariant: a name neither in Builtins nor in cfg.Agents.Recipes must
+// invariant: a name neither in Builtins nor in cfg.Agents must
 // produce ErrUnknownAgent. This is the architectural difference from
 // the v0.2.0 config-driven approach — "I haven't configured it" no
 // longer means "give me claude / codex / opencode".

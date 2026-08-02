@@ -24,9 +24,28 @@ import (
 
 // Config is the root of the on-disk configuration. Field tags drive
 // YAML deserialization; the struct itself is the public API.
+//
+// v1.2 schema (post interactive-config refactor):
+//
+//	primary: cc                      # global default agent (top-level)
+//	agents:                          # list of available agents (top-level)
+//	  - name: cc
+//	    bridge: claude
+//	    command: "claude --dangerously-skip-permissions"
+//	  - name: codex
+//	    bridge: codex
+//	    command: codex-acp
+//	feishu: ...
+//	session: ...
+//	logging: ...
+//	paths: ...
+//
+// User-configured `agents:` entries override built-in agents with the
+// same name (merge happens at runtime, not parse time).
 type Config struct {
 	Feishu  FeishuConfig  `yaml:"feishu"`
-	Agents  AgentsConfig  `yaml:"agents"`
+	Primary string        `yaml:"primary"`
+	Agents  []AgentEntry  `yaml:"agents"`
 	Session SessionConfig `yaml:"session"`
 	Logging LoggingConfig `yaml:"logging"`
 	Paths   PathsConfig   `yaml:"paths"`
@@ -41,55 +60,37 @@ type FeishuConfig struct {
 	EncryptKey        string `yaml:"encrypt_key"`
 }
 
-// AgentsConfig declares the global default agent (v1.2 Q-A) and
-// the per-agent spawn recipes used by the Bridge.
+// AgentsConfig is REMOVED in v1.2 (post interactive-config refactor).
+// The global default + recipes are now top-level fields on Config:
+//   - Config.Primary  (was AgentsConfig.Default)
+//   - Config.Agents   (was AgentsConfig.Recipes; was a map[string]AgentEntry
+//     with yaml:",inline"; now a flat list of AgentEntry)
 //
-// YAML shape (v1.2, post-rename):
-//
-//	agents:
-//	  default: claude                 # global default (any registered agent name)
-//	  claude:                         # inline recipe (sibling of default)
-//	    command: claude
-//	    args: []
-//	    env: {}
-//	  codex:
-//	    command: codex-acp
-//	    ...
-//
-// The inline map (yaml:",inline") captures every top-level key under
-// `agents` except `default` — those become AgentEntry entries.
-//
-// `default` must be one of the registered agent names (validation
-// happens at registry population time, not here).
-type AgentsConfig struct {
-	// Default is the global default agent name. v1.2 (Q-A): the
-	// only user-facing Default; ChatSession.defaultAgent is a
-	// snapshot of this value at ChatSession creation time.
-	Default string `yaml:"default"`
-
-	// Recipes maps agent name -> spawn recipe. Names must match
-	// agent.Agent.Name() values; names not in the registry trigger
-	// errors at session-create time.
-	//
-	// Inline: every sibling key under `agents:` other than
-	// `default` lands here. The previous v1.x schema had this under
-	// a nested `agents:` key; v1.2 flattens it.
-	Recipes map[string]AgentEntry `yaml:",inline"`
-}
+// Kept as a comment placeholder so PR reviewers see the explicit
+// removal. Delete on next doc pass.
 
 // AgentEntry is the spawn recipe for one CLI.
+//
+// v1.2: minimal schema — only name, bridge, command. The `command`
+// field is the full command line (binary + args) as a single string,
+// e.g. "claude --dangerously-skip-permissions". Args / Env from the
+// previous schema were removed; users put extras in the command
+// string or rely on the inherited shell environment.
 type AgentEntry struct {
-	// Command is the executable name (resolved via PATH) or an
-	// absolute path.
+	// Name is the agent identifier used at spawn time and in
+	// `nightme agents` listings.
+	Name string `yaml:"name"`
+
+	// Bridge selects the Bridge backend (claude / codex / opencode).
+	// Names match agent.Agent.Name() values; names not registered
+	// trigger errors at session-create time.
+	Bridge string `yaml:"bridge"`
+
+	// Command is the full command line (executable + args). Parsed
+	// with shell-style splitting at spawn time, e.g.
+	// `"claude --dangerously-skip-permissions"` becomes
+	// []string{"claude", "--dangerously-skip-permissions"}.
 	Command string `yaml:"command"`
-
-	// Args is appended after the agent's own defaults. v0.1 typically
-	// empty.
-	Args []string `yaml:"args"`
-
-	// Env is merged into the child process environment. v0.1
-	// typically empty.
-	Env map[string]string `yaml:"env"`
 }
 
 // SessionConfig holds runtime tunables for the Session Manager.
@@ -234,8 +235,8 @@ func Load(path string) (*Config, error) {
 // applyDefaults populates zero-valued fields with the shipped
 // defaults. It does not overwrite non-zero values.
 func applyDefaults(c *Config) {
-	if c.Agents.Default == "" {
-		c.Agents.Default = "claude"
+	if c.Primary == "" {
+		c.Primary = "claude"
 	}
 	if c.Session.DefaultPtyCols == 0 {
 		c.Session.DefaultPtyCols = 80
@@ -279,8 +280,8 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("NIGHTME_FEISHU_ENCRYPT_KEY"); v != "" {
 		c.Feishu.EncryptKey = v
 	}
-	if v := os.Getenv("NIGHTME_AGENT_DEFAULT"); v != "" {
-		c.Agents.Default = v
+	if v := os.Getenv("NIGHTME_PRIMARY"); v != "" {
+		c.Primary = v
 	}
 	if v := os.Getenv("NIGHTME_LOGGING_LEVEL"); v != "" {
 		c.Logging.Level = v

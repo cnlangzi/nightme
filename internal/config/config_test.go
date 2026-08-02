@@ -19,17 +19,29 @@ func TestLoadExample(t *testing.T) {
 		t.Fatalf("Load(example) error: %v", err)
 	}
 
-	if cfg.Agents.Default != "claude" {
-		t.Errorf("Agents.Default = %q, want claude", cfg.Agents.Default)
+	if cfg.Primary != "claude" {
+		t.Errorf("Primary = %q, want claude", cfg.Primary)
 	}
-	if cfg.Agents.Recipes["claude"].Command != "claude" {
-		t.Errorf("Agents.Recipes[claude].Command = %q, want claude", cfg.Agents.Recipes["claude"].Command)
+	// v1.2: cfg.Agents is a list. Lookup by name.
+	var claude, codex, opencode *AgentEntry
+	for i := range cfg.Agents {
+		switch cfg.Agents[i].Name {
+		case "claude":
+			claude = &cfg.Agents[i]
+		case "codex":
+			codex = &cfg.Agents[i]
+		case "opencode":
+			opencode = &cfg.Agents[i]
+		}
 	}
-	if got := cfg.Agents.Recipes["codex"].Command; got != "codex-acp" {
-		t.Errorf("Agents.Recipes[codex].Command = %q, want codex-acp", got)
+	if claude == nil || claude.Command != "claude --dangerously-skip-permissions" {
+		t.Errorf("claude entry: %+v, want Command=\"claude --dangerously-skip-permissions\"", claude)
 	}
-	if got := cfg.Agents.Recipes["opencode"].Args; len(got) != 1 || got[0] != "acp" {
-		t.Errorf("Agents.Recipes[opencode].Args = %v, want [acp]", got)
+	if codex == nil || codex.Command != "codex-acp" {
+		t.Errorf("codex entry: %+v, want Command=\"codex-acp\"", codex)
+	}
+	if opencode == nil || opencode.Command != "opencode acp" {
+		t.Errorf("opencode entry: %+v, want Command=\"opencode acp\"", opencode)
 	}
 	if cfg.Session.DefaultPtyCols != 80 {
 		t.Errorf("Session.DefaultPtyCols = %d, want 80", cfg.Session.DefaultPtyCols)
@@ -58,8 +70,8 @@ func TestDefaults(t *testing.T) {
 		t.Fatalf("Load(\"\") error: %v", err)
 	}
 
-	if cfg.Agents.Default != "claude" {
-		t.Errorf("default Agents.Default = %q, want claude", cfg.Agents.Default)
+	if cfg.Primary != "claude" {
+		t.Errorf("default Primary = %q, want claude", cfg.Primary)
 	}
 	if cfg.Session.DefaultPtyCols != 80 {
 		t.Errorf("default Session.DefaultPtyCols = %d, want 80", cfg.Session.DefaultPtyCols)
@@ -96,7 +108,7 @@ func TestDefaults(t *testing.T) {
 
 func TestEnvOverride(t *testing.T) {
 	// Save and restore the environment around this test.
-	t.Setenv("NIGHTME_AGENT_DEFAULT", "codex")
+	t.Setenv("NIGHTME_PRIMARY", "codex")
 	t.Setenv("NIGHTME_FEISHU_APP_ID", "cli_override")
 	t.Setenv("NIGHTME_LOGGING_LEVEL", "debug")
 	t.Setenv("NIGHTME_SESSION_DEFAULT_PTY_COLS", "120")
@@ -108,8 +120,8 @@ func TestEnvOverride(t *testing.T) {
 		t.Fatalf("Load(\"\") error: %v", err)
 	}
 
-	if cfg.Agents.Default != "codex" {
-		t.Errorf("Agents.Default = %q, want codex", cfg.Agents.Default)
+	if cfg.Primary != "codex" {
+		t.Errorf("Primary = %q, want codex", cfg.Primary)
 	}
 	if cfg.Feishu.AppID != "cli_override" {
 		t.Errorf("Feishu.AppID = %q, want cli_override", cfg.Feishu.AppID)
@@ -138,8 +150,8 @@ func TestMissingFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load(missing) returned error: %v (want nil — defaults only)", err)
 	}
-	if cfg.Agents.Default != "claude" {
-		t.Errorf("Agents.Default = %q, want claude (default for missing file)", cfg.Agents.Default)
+	if cfg.Primary != "claude" {
+		t.Errorf("Primary = %q, want claude (default for missing file)", cfg.Primary)
 	}
 }
 

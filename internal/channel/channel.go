@@ -21,6 +21,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/receipt"
 )
 
 // Message is an alias for gateway.InboundMessage. Kept as a type alias
@@ -32,6 +33,22 @@ type Message = gateway.InboundMessage
 // Message: channel adapters populate this struct, downstream code
 // reads it, and there is one definition to keep in sync.
 type Attachment = gateway.Attachment
+
+// Re-exports from internal/receipt. Channel implementations depend
+// on these types; placing them in their own package breaks the
+// cycle (gateway imports them for the FSM contract; channel
+// imports them for the rendering interface). See F-26 §6 commit 3.
+type (
+	Receipt      = receipt.Receipt
+	ReceiptState = receipt.ReceiptState
+)
+
+const (
+	ReceiptPending   = receipt.ReceiptPending
+	ReceiptExecuting = receipt.ReceiptExecuting
+	ReceiptDone      = receipt.ReceiptDone
+	ReceiptError     = receipt.ReceiptError
+)
 
 // Normalized chat type constants. Channel adapters should map their
 // native values onto these.
@@ -46,53 +63,6 @@ const (
 // receiver) keep working without depending on the gateway package
 // for the method itself.
 func IsDM(m Message) bool { return m.IsDM() }
-
-// Receipt is an opaque handle returned by CreateReceipt and passed to
-// UpdateReceipt / DisposeReceipt. Each Channel implementation returns
-// its own concrete type (Feishu: *feishu.MessageReceipt; echo:
-// *echo.echoReceipt). Gateway treats Receipt as a token — it never
-// reads or writes fields, only threads the value between calls.
-//
-// See docs/feat/F-08-channel-abstraction.md §2 and
-// docs/feat/F-26-gateway-hub.md §2.4 for the v1.1 responsibility
-// split: Channel owns the receipt OBJECT (its backend-specific
-// message ids / reaction ids), Gateway owns the receipt STATE
-// (Pending / Executing / Done / Error).
-type Receipt interface{}
-
-// ReceiptState is the cross-channel state enum. Gateway is the only
-// code that decides when to transition; Channel only renders.
-//
-// State semantics:
-//
-//   - Pending:   the user message has been received and is either
-//                queued in InputBuffer (Busy) or about to dispatch
-//                (Idle). Rendered as ⏳ by Feishu, "[pending]" by
-//                echo.
-//   - Executing: the user message has been dispatched to the agent
-//                and the agent is processing it. Rendered as 🔄.
-//   - Done:      the agent finished processing this user message
-//                and emitted a result event. Rendered as ✅.
-//   - Error:     dispatch or processing failed; user may retry.
-//                Rendered as ❌.
-type ReceiptState int
-
-const (
-	// ReceiptPending is the initial state after CreateReceipt.
-	ReceiptPending ReceiptState = iota
-
-	// ReceiptExecuting means the user message has been sent to the
-	// agent and the agent is processing it.
-	ReceiptExecuting
-
-	// ReceiptDone means the agent has finished processing this user
-	// message and the final result has been emitted.
-	ReceiptDone
-
-	// ReceiptError means dispatch or processing failed. The user
-	// should retry; nightme does not auto-retry receipt failures.
-	ReceiptError
-)
 
 // Channel is the lifecycle and messaging contract implemented by each IM
 // adapter. In v0.3 it is intentionally thin: connection management,

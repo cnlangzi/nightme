@@ -215,10 +215,8 @@ func runTestDeps(cfg *config.Config, ch *fakeRunChannel, mgr *fakeRunManager, si
 			mgr.MemoryManager = session.NewMemoryManager(agents, reg, cb)
 			return mgr
 		},
-		newGateway: func(co gatewaycmd.SessionManager, reg *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
-			gw := gateway.New(nil)
-			gatewaycmd.RegisterDefaultCommands(gw, co, reg, resp)
-			return gw
+		newGateway: func(gw gateway.Gateway, reg *agent.Registry, resp gatewaycmd.Responder) {
+			gatewaycmd.RegisterDefaultCommands(gw, reg, resp)
 		},
 		signals: signals,
 	}
@@ -502,7 +500,6 @@ func TestRun_DefaultDetachesSessions(t *testing.T) {
 // Keep the compile-time contract visible to this package's tests without
 // depending on an implementation-specific manager method set.
 var _ session.Manager = (*fakeRunManager)(nil)
-var _ gatewaycmd.SessionManager = (*fakeRunManager)(nil)
 
 // realRunManager was removed in commit 2 (v1.1 responsibility
 // isolation). The production daemon now uses *session.MemoryManager
@@ -576,10 +573,8 @@ func integrationDeps(t *testing.T, ch *recordingChannel, signals <-chan os.Signa
 		newManager: func(agents *agent.Registry, reg *registry.File, cb session.EventCallback) session.Manager {
 			return mgr
 		},
-		newGateway: func(co gatewaycmd.SessionManager, reg *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
-			gw := gateway.New(nil)
-			gatewaycmd.RegisterDefaultCommands(gw, co, reg, resp)
-			return gw
+		newGateway: func(gw gateway.Gateway, reg *agent.Registry, resp gatewaycmd.Responder) {
+			gatewaycmd.RegisterDefaultCommands(gw, reg, resp)
 		},
 		signals: signals,
 	}
@@ -775,10 +770,8 @@ func echoIntegrationDeps(t *testing.T, ch *recordingChannel, signals <-chan os.S
 		newManager: func(agents *agent.Registry, reg *registry.File, cb session.EventCallback) session.Manager {
 			return mgr
 		},
-		newGateway: func(co gatewaycmd.SessionManager, reg *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
-			gw := gateway.New(nil)
-			gatewaycmd.RegisterDefaultCommands(gw, co, reg, resp)
-			return gw
+		newGateway: func(gw gateway.Gateway, reg *agent.Registry, resp gatewaycmd.Responder) {
+			gatewaycmd.RegisterDefaultCommands(gw, reg, resp)
 		},
 		signals: signals,
 	}

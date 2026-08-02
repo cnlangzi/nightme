@@ -2,20 +2,20 @@
 // registered by nightme, or to a fallback handler (typically the
 // session manager forwarding text to the live agent). See
 // docs/feat/F-20-gateway.md for the original router design and
-// docs/feat/F-26-gateway-hub.md for the Stage-1 hub-and-spoke
-// extension.
+// docs/feat/F-26-gateway-hub.md for the Stage-3 responsibility-
+// isolation spec.
 //
-// Stage 2 (this file) makes Gateway a real dispatcher: Start()
-// launches a goroutine per Channel (reads InboundMessage → Handle)
-// and a goroutine per discovered Session (reads AgentEvent →
-// OutboundMessage → Channel.Send).
+// v1.1 (commit 3 + 4): the Gateway owns the chat → session binding
+// table and the per-userMessage receipt FSM. Channel is the dumb
+// renderer that paints receipt state transitions; Session is the
+// pure-process factory; Gateway sits between them and drives the
+// lifecycle. See F-26 §2 for the full picture.
 //
-// The session manager is NOT imported by gateway — instead, the
-// runtime provides a SweepSessions callback that returns the
-// currently-running sessions as OutboundSources. The runtime
-// (cmd/nightme) has access to both gateway and session, so it
-// bridges them. This pattern keeps gateway free of the
-// session → channel/feishu → channel → gateway import cycle.
+// Imports: gateway imports session (v1.1). The session package
+// does NOT import gateway (verified), so this direction is cycle-
+// free. channel also imports gateway for the abstract message
+// types (InboundMessage / OutboundMessage); session does not, so
+// gateway's new session dep doesn't create a new cycle.
 package gateway
 
 import (
@@ -28,6 +28,8 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/receipt"
+	"github.com/cnlangzi/nightme/internal/session"
 )
 
 // Channel is the abstract surface the Gateway needs from any IM
@@ -36,10 +38,18 @@ import (
 // package imports gateway for the abstract types, so gateway
 // cannot import channel in turn. The mirror is kept in sync
 // manually (and the test suite enforces the implementation match).
+//
+// v1.1: extended with the receipt lifecycle methods. Gateway
+// drives the FSM; Channel renders the state transitions in its
+// native UI.
 type Channel interface {
 	Name() string
 	Incoming() <-chan InboundMessage
 	Send(ctx context.Context, msg OutboundMessage) error
+
+	CreateReceipt(ctx context.Context, chatID, userMsgID string, blocks []agent.ContentBlock) (receipt.Receipt, error)
+	UpdateReceipt(ctx context.Context, receipt receipt.Receipt, state receipt.ReceiptState) error
+	DisposeReceipt(ctx context.Context, receipt receipt.Receipt) error
 }
 
 // Command is one nightme-level slash command.
@@ -79,10 +89,38 @@ type OutboundSource struct {
 type SweepSessions func() []OutboundSource
 
 // Gateway is the public contract for the slash-command router.
+//
+// v1.1: the interface adds binding-table operations (Bind / Rebind /
+// LookupByChat / LookupSessionByChat / SpawnAgent / ListBindings /
+// RestoreBindings) and the receipt FSM (CreateReceipt /
+// UpdateReceipt / DisposeReceipt). cmd/nightme wires the session
+// manager at construction time; handler code uses the binding +
+// receipt surface instead of the v0.x chat-keyed SessionManager
+// interface that was deleted from gateway/cmd.
 type Gateway interface {
 	Register(cmd Command) (replaced bool)
 	Handle(ctx context.Context, msg *InboundMessage) (*CommandResult, error)
 	ListCommands() []Command
+
+	// v1.1 binding table (commit 3):
+	Bind(chatID, chatType, sessionID, workspace, agent string) *BindingEntry
+	LookupByChat(chatID string) *BindingEntry
+	LookupSessionByChat(chatID string) (*session.Session, error)
+	SpawnAgent(ctx context.Context, chatID, agentName string, args []string) (*session.Session, error)
+	ListBindings() []BindingEntry
+
+	// v1.1 receipt FSM (commit 3):
+	CreateReceipt(ctx context.Context, chatID, userMsgID string, blocks []agent.ContentBlock) (receipt.Receipt, error)
+	UpdateReceipt(ctx context.Context, userMsgID string, state receipt.ReceiptState) error
+	DisposeReceipt(ctx context.Context, userMsgID string) error
+
+	// OnSessionEvent is the v1.1 single-consumer event handler.
+	// Wired by the runtime into MemoryManager.SetEventCallback at
+	// startup; the manager invokes it once per AgentEvent from
+	// inside readPump. Translates, sends, and flips receipts.
+	// (Defined on the interface so cmd/nightme can wire it
+	// without a type-assertion back to *Router.)
+	OnSessionEvent(s *session.Session, ev agent.AgentEvent)
 }
 
 // Router is the exported alias of the runtime-internal
@@ -96,32 +134,65 @@ type Router = gateway
 // gateway is the concrete implementation + dispatch runtime. (It
 // carries the method set; Router is just an alias so external
 // packages can type-assert.)
+//
+// v1.1 fields (commits 3 + 4): the Gateway owns the chat → session
+// binding table (BindingEntry) and the per-userMessage receipt
+// FSM (receiptEntry). These were previously split across the
+// cmd/nightme runtime chatCoordinator (bindings) and the
+// session.InputBuffer receipts map (receipts). See F-26 §2.
 type gateway struct {
 	mu    sync.RWMutex
 	cmds  map[string]Command
 	order []string
 	fb    FallbackHandler
 
-	// Stage 2 runtime state. fields below are read/written under mu.
+	// Session factory + lookup. Set at construction time by the
+	// runtime (cmd/nightme). Used by LookupSessionByChat and
+	// SpawnAgent. The Gateway does not own the manager — it
+	// borrows it for the chat-binding semantic.
+	mgr session.Manager
+
+	// Stage 2 / v1.1 dispatch state. fields below are read/written under mu.
 	channels       []Channel
 	channelCh      chan InboundMessage
 	stopCh         chan struct{}
 	stopOnce       sync.Once
 	wg             sync.WaitGroup
-	attached       map[string]struct{} // SessionID -> already-has-a-pump
+	attached       map[string]struct{} // SessionID -> already-has-a-pump (commit 4 will remove)
 	chatToChan     map[string]Channel  // ChatID -> the channel that owns the chat
 	defaultChannel Channel             // fallback channel for chats we haven't seen yet
-	sweeper        SweepSessions
+	sweeper        SweepSessions       // commit 4 will remove
+
+	// v1.1 binding table (chat_id → session_id). Owned by Gateway.
+	bindings map[string]*BindingEntry
+
+	// v1.1 receipt FSM bookkeeping (userMsgID → receipt state).
+	// Owned by Gateway; Channel renders transitions.
+	receipts map[string]*receiptEntry
+
+	// eventCallback is the optional runtime-installed callback.
+	// When set, OnSessionEvent delegates to it. When nil,
+	// OnSessionEvent does the default translate + send + receipt
+	// flip work (used by the runtime's startup wiring where the
+	// runtime simply passes gw.OnSessionEvent as the callback —
+	// the indirection here is for tests).
+	eventCallback func(s *session.Session, ev agent.AgentEvent)
 }
 
 // New constructs a Gateway. The optional fallback handler is invoked
-// when no command matches the inbound message.
-func New(fallback FallbackHandler) Gateway {
+// when no command matches the inbound message. mgr is the session
+// factory Gateway uses to look up sessions by ID and to spawn
+// agents; passing nil disables those operations (cmd / run / kill
+// won't work, but a debug-only Gateway stays operational).
+func New(fallback FallbackHandler, mgr session.Manager) Gateway {
 	return &gateway{
 		cmds:       make(map[string]Command),
 		fb:         fallback,
 		attached:   make(map[string]struct{}),
 		chatToChan: make(map[string]Channel),
+		bindings:   make(map[string]*BindingEntry),
+		receipts:   make(map[string]*receiptEntry),
+		mgr:        mgr,
 	}
 }
 
@@ -454,3 +525,295 @@ type GatewayKey struct{}
 // and gwFromContext is identical (no duplicate struct declaration
 // in the cmd subpackage).
 type contextKey = GatewayKey
+
+// --- v1.1 binding table (commit 3) ----------------------------------
+
+// Bind registers the binding (chatID → sessionID). Called by the
+// /cwd handler after it creates a fresh session via
+// MemoryManager.Register. ChatType / Workspace / Agent are
+// denormalized onto the row so subsequent /cwd replies don't have
+// to re-query the session.
+func (g *gateway) Bind(chatID, chatType, sessionID, workspace, agent string) *BindingEntry {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	b := &BindingEntry{
+		ChatID:    chatID,
+		ChatType:  chatType,
+		SessionID: sessionID,
+		Workspace: workspace,
+		Agent:     agent,
+	}
+	g.bindings[chatID] = b
+	return b
+}
+
+// LookupByChat returns the binding for chatID, or nil.
+func (g *gateway) LookupByChat(chatID string) *BindingEntry {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.bindings[chatID]
+}
+
+// LookupSessionByChat returns the session bound to chatID. Returns
+// session.ErrSessionNotFound when chatID has no binding; callers
+// can distinguish "no binding" (binding == nil) from "binding
+// points at missing session" (binding != nil + error).
+func (g *gateway) LookupSessionByChat(chatID string) (*session.Session, error) {
+	if g.mgr == nil {
+		return nil, errors.New("gateway: no session manager wired")
+	}
+	b := g.LookupByChat(chatID)
+	if b == nil {
+		return nil, session.ErrSessionNotFound
+	}
+	return g.mgr.Get(b.SessionID)
+}
+
+// SpawnAgent spawns an agent in the chat's bound workspace and
+// updates the binding to point at the new session ID. Used by the
+// /run handler. If a session is already running for chatID, this
+// is a no-op (returns the existing session).
+func (g *gateway) SpawnAgent(ctx context.Context, chatID, agentName string, args []string) (*session.Session, error) {
+	if g.mgr == nil {
+		return nil, errors.New("gateway: no session manager wired")
+	}
+	b := g.LookupByChat(chatID)
+	if b == nil {
+		return nil, session.ErrSessionNotFound
+	}
+	sess, err := g.mgr.Get(b.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	if sess.Status() == session.StatusRunning {
+		return sess, nil
+	}
+	newSess, err := g.mgr.Create(ctx, session.CreateRequest{
+		Workspace: b.Workspace,
+		Agent:     agentName,
+		Args:      args,
+	})
+	if err != nil {
+		return nil, err
+	}
+	g.mu.Lock()
+	b.SessionID = newSess.ID
+	b.Agent = agentName
+	g.mu.Unlock()
+	return newSess, nil
+}
+
+// ListBindings returns a snapshot of every binding in unspecified
+// order. The slice is freshly allocated.
+func (g *gateway) ListBindings() []BindingEntry {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	out := make([]BindingEntry, 0, len(g.bindings))
+	for _, b := range g.bindings {
+		out = append(out, *b)
+	}
+	return out
+}
+
+// RestoreBindings populates the binding table from a snapshot
+// (typically loaded from the registry at startup). Replaces any
+// existing entries.
+func (g *gateway) RestoreBindings(entries []BindingEntry) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.bindings = make(map[string]*BindingEntry, len(entries))
+	for i := range entries {
+		e := entries[i]
+		g.bindings[e.ChatID] = &e
+	}
+}
+
+// Unbind removes the binding for chatID without affecting the
+// underlying session. Reserved for v0.4 multi-session; not used
+// by current handlers.
+func (g *gateway) Unbind(chatID string) {
+	g.mu.Lock()
+	delete(g.bindings, chatID)
+	g.mu.Unlock()
+}
+
+// --- v1.1 receipt FSM (commit 3) -------------------------------------
+
+// CreateReceipt creates a receipt for chatID/userMsgID with the given
+// blocks, stores it in the receipts map, and returns the channel's
+// opaque Receipt handle. If CreateReceipt fails (e.g., the channel
+// can't reach the IM backend) the entry is still stored so a
+// subsequent UpdateReceipt / DisposeReceipt on a different code
+// path doesn't panic; callers should still treat err != nil as a
+// signal to skip receipt bookkeeping for that userMsgID.
+func (g *gateway) CreateReceipt(ctx context.Context, chatID, userMsgID string, blocks []agent.ContentBlock) (receipt.Receipt, error) {
+	ch := g.resolveChannel(chatID)
+	if ch == nil {
+		return nil, errors.New("gateway: no channel for chat " + chatID)
+	}
+	rcpt, err := ch.CreateReceipt(ctx, chatID, userMsgID, blocks)
+	if err != nil {
+		return nil, err
+	}
+	g.mu.Lock()
+	binding := g.bindings[chatID]
+	var sessionID string
+	if binding != nil {
+		sessionID = binding.SessionID
+	}
+	g.receipts[userMsgID] = &receiptEntry{
+		chatID:    chatID,
+		sessionID: sessionID,
+		receipt:   rcpt,
+		state:     receipt.ReceiptPending,
+	}
+	g.mu.Unlock()
+	return rcpt, nil
+}
+
+// UpdateReceipt transitions the receipt for userMsgID to state.
+// The receipt must already have been created via CreateReceipt.
+// Returns nil if the receipt doesn't exist (caller may have given
+// up on bookkeeping for that message — Gateway is best-effort).
+func (g *gateway) UpdateReceipt(ctx context.Context, userMsgID string, state receipt.ReceiptState) error {
+	g.mu.RLock()
+	entry := g.receipts[userMsgID]
+	g.mu.RUnlock()
+	if entry == nil {
+		return nil
+	}
+	ch := g.resolveChannel(entry.chatID)
+	if ch == nil {
+		return nil
+	}
+	entry.mu.Lock()
+	entry.state = state
+	entry.mu.Unlock()
+	return ch.UpdateReceipt(ctx, entry.receipt, state)
+}
+
+// DisposeReceipt removes the receipt from the receipts map and
+// asks the channel to clean up. Idempotent.
+func (g *gateway) DisposeReceipt(ctx context.Context, userMsgID string) error {
+	g.mu.Lock()
+	entry := g.receipts[userMsgID]
+	if entry != nil {
+		delete(g.receipts, userMsgID)
+	}
+	g.mu.Unlock()
+	if entry == nil {
+		return nil
+	}
+	ch := g.resolveChannel(entry.chatID)
+	if ch == nil {
+		return nil
+	}
+	return ch.DisposeReceipt(ctx, entry.receipt)
+}
+
+// resolveChannel returns the channel that owns chatID, falling back
+// to the default channel for chats we haven't seen yet.
+func (g *gateway) resolveChannel(chatID string) Channel {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if ch, ok := g.chatToChan[chatID]; ok && ch != nil {
+		return ch
+	}
+	return g.defaultChannel
+}
+
+// SetEventCallback is the v1.1 single-consumer wiring point. The
+// runtime (cmd/nightme) calls this with gw.OnSessionEvent at
+// startup; the MemoryManager's readPump invokes the callback once
+// per AgentEvent (the only consumer of session.Events()).
+func (g *gateway) SetEventCallback(cb func(s *session.Session, ev agent.AgentEvent)) {
+	// No-op when the gateway already routes events via its own
+	// OnSessionEvent method; the runtime wires gw.OnSessionEvent
+	// directly into mgr.SetEventCallback. This method exists for
+	// tests / alternate runtimes that want to install a custom
+	// callback without depending on the gateway's default.
+	if cb == nil {
+		g.mu.Lock()
+		g.eventCallback = nil
+		g.mu.Unlock()
+		return
+	}
+	g.mu.Lock()
+	g.eventCallback = cb
+	g.mu.Unlock()
+}
+
+// OnSessionEvent is the v1.1 single-consumer event handler. The
+// runtime wires this into MemoryManager.EventCallback at startup;
+// the manager invokes it once per AgentEvent from inside readPump
+// (the only consumer of session.Events()). Translates the event,
+// dispatches the OutboundMessage, and (for terminal events) flips
+// any still-open receipts to Done / Error and disposes them.
+func (g *gateway) OnSessionEvent(s *session.Session, ev agent.AgentEvent) {
+	g.mu.RLock()
+	cb := g.eventCallback
+	g.mu.RUnlock()
+	if cb != nil {
+		cb(s, ev)
+		return
+	}
+	g.translateAndSend(s, ev)
+}
+
+// translateAndSend does the actual work: look up the chat for the
+// session, translate the event, send to the channel, and (for
+// terminal events) flip receipts. This is the body of
+// OnSessionEvent when no runtime-installed callback is present
+// (the default).
+func (g *gateway) translateAndSend(s *session.Session, ev agent.AgentEvent) {
+	chatID := g.lookupChatBySession(s.ID)
+	if chatID == "" {
+		// Orphan event — the session has no binding. Drop silently
+		// (the runtime probably just shut down and a stray event
+		// arrived).
+		return
+	}
+	ch := g.resolveChannel(chatID)
+	if ch == nil {
+		return
+	}
+
+	if out, send := Translate(chatID, ev); send {
+		if err := ch.Send(context.Background(), out); err != nil {
+			log.Printf("gateway: send failed (chat=%s, kind=%s): %v", chatID, out.Kind, err)
+		}
+	}
+
+	if ev.Kind == agent.EventDone || ev.Kind == agent.EventError {
+		target := receipt.ReceiptDone
+		if ev.Kind == agent.EventError {
+			target = receipt.ReceiptError
+		}
+		g.mu.RLock()
+		var toDispose []string
+		for umid, entry := range g.receipts {
+			if entry.sessionID == s.ID {
+				toDispose = append(toDispose, umid)
+			}
+		}
+		g.mu.RUnlock()
+		for _, umid := range toDispose {
+			_ = g.UpdateReceipt(context.Background(), umid, target)
+			_ = g.DisposeReceipt(context.Background(), umid)
+		}
+	}
+}
+
+// lookupChatBySession finds the chatID whose binding points at
+// sessionID. Linear scan — bindings are O(chats) which is fine at
+// v0.3 scale (1 DM + maybe a few groups).
+func (g *gateway) lookupChatBySession(sid string) string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	for chatID, b := range g.bindings {
+		if b.SessionID == sid {
+			return chatID
+		}
+	}
+	return ""
+}

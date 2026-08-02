@@ -49,6 +49,10 @@ Instead, the `MemoryManager` takes an `EventCallback(s *Session, ev AgentEvent)`
 
 The `Receipt` is an **opaque type**. Gateway holds it as `channel.Receipt` (interface); the concrete type is `*feishu.MessageReceipt` or `*echo.messageReceipt` (or future channels' types). Gateway treats it as a token — never reads or writes fields.
 
+**v1.1 模型：receipt 按 `userMsgID` 索引**（不在 chatID）。一个用户消息 = 一个 receipt。多 receipt/chat 可共存（buffered batch），每个 receipt 镇定到自己的用户消息。
+
+**外发路径：1 request : n response 扇出**。Gateway 在转发每个 agent event 时，查询该 session 绑定的所有 receipt，为每个 receipt 发一条 `OutboundMessage{ReplyTo: receipt.userMsgID}`。Channel 据此决定怎么镇定（已有 receipt 就 in-place edit，无 receipt 就 ReplyMessage 创建新卡）。
+
 ```
 Gateway code (pseudocode):
 
@@ -77,23 +81,48 @@ func (g *Gateway) onFallback(ctx, msg) error {
     return nil
 }
 
-func (g *Gateway) onSessionEvent(s *Session, ev AgentEvent) {
-    out := Translate(s.ChatID_or_lookup_from_binding, ev)  // → OutboundMessage
-    g.channel.Send(ctx, out)
+// v1.1 outbound: 1 request : n response fan-out.
+func (g *Gateway) translateAndSend(s *Session, ev AgentEvent) {
+    chatID := g.lookupChatBySession(s.ID)
+    ch := g.resolveChannel(chatID)
+    out, send := Translate(chatID, ev)
+    if !send { return }
 
-    if ev.Kind == EventResult || ev.Kind == EventError {
-        // Find receipts bound to this session; close all that's still open.
-        for userMsgID, entry := range g.receipts {
-            if entry.sessionID != s.ID { continue }
-            if ev.Kind == EventError {
-                g.channel.UpdateReceipt(ctx, entry.receipt, ReceiptError)
-            } else {
-                g.channel.UpdateReceipt(ctx, entry.receipt, ReceiptDone)
-            }
-            g.channel.DisposeReceipt(ctx, entry.receipt)
-            delete(g.receipts, userMsgID)
+    enrichOutboundMeta(out, s)   // OutInit.Meta 注入 agent_name / workspace / provider
+
+    targets := g.receiptsForSession(s.ID)
+    if len(targets) == 0 {
+        // Orphan event (session 不绑任何 receipt)。以 plain text 发出。
+        out.ReplyTo = ""
+        ch.Send(ctx, out)
+    } else {
+        for _, umid := range targets {
+            fanout := out
+            fanout.ReplyTo = umid    // 同一 event、不同镇定
+            ch.Send(ctx, fanout)
         }
     }
+
+    if ev.Kind == EventResult || ev.Kind == EventError {
+        for umid, entry := range g.receipts {
+            if entry.sessionID != s.ID { continue }
+            target := ReceiptDone
+            if ev.Kind == EventError { target = ReceiptError }
+            g.channel.UpdateReceipt(ctx, entry.receipt, target)
+            _ = g.channel.DisposeReceipt(ctx, entry.receipt)
+            delete(g.receipts, umid)
+        }
+    }
+}
+
+// receiptsForSession — 扇出列表 (1 agent turn 可能绑 N 个 receipt,
+// 每个 userMsgID 在 buffered batch 中都是一个独立 receipt)
+func (g *Gateway) receiptsForSession(sid string) []string {
+    var ids []string
+    for umid, entry := range g.receipts {
+        if entry.sessionID == sid { ids = append(ids, umid) }
+    }
+    return ids
 }
 
 // InputBuffer.onFlush installed by Gateway on session creation:
@@ -107,6 +136,67 @@ func (g *Gateway) onInputBufferFlush(s *Session, blocks []ContentBlock, userMsgI
     }
     return s.SendBlocks(ctx, blocks)
 }
+
+// Channel adapter — 1 request : n response 分发 (Feishu 实现)
+func (a *Adapter) Send(ctx context.Context, msg OutboundMessage) error {
+    if msg.ReplyTo == "" {
+        // “真正无镇”—— plain text，不进任何 card
+        return a.sendPlainText(ctx, msg.ChatID, msg.Text)
+    }
+    receipt := a.receiptFor(msg.ReplyTo)   // 按 userMsgID 查
+    if receipt == nil {
+        // cold-start：该 userMsgID 还没 receipt → ReplyMessage 创建镇定到该用户消息的新卡
+        receipt = a.coldStartReceipt(ctx, msg)
+        if receipt == nil { return nil }
+    }
+    return a.appendToReceipt(ctx, receipt, msg)   // UpdateMessage in place
+}}
+
+---
+
+### 2.5 OutboundMessage.ReplyTo contract (v1.1)
+
+Gateway 的事件路由遵循 **1 request : n response**：每个用户发起的会话都有一个 `userMsgID`；Gateway 在转发 agent event 时总是带上它（`OutboundMessage.ReplyTo` 字段）。Channel 根据这个字段决定镇定点。
+
+```go
+// internal/gateway/messages.go
+type OutboundMessage struct {
+    ChatID  string
+    Kind    OutboundKind
+    Text    string
+    Card    *Card
+    Reaction *Reaction
+    ReplyTo string      // v1.1: userMsgID 镇定；"" 表示"真正无镇"
+    Meta    map[string]any
+}
+```
+
+**ReplyTo 语义表**：
+
+| ReplyTo | Gateway 如何发出 | Channel 渲染逻辑 |
+|---|---|---|
+| `""` | 孤儿事件（session 不绑任何 receipt） | plain text，不进任何 card |
+| `userMsgID` | 扇出（buffered batch 为每个 bound receipt 发一条） | reply-in-thread：有 receipt → in-place edit；无 receipt → cold-start ReplyMessage |
+
+**Fan-out 路径**（buffered batch 示例：3 个 userMsgID 绑定同一个 session）：
+
+```
+Agent emit EventText → Translate 出 1 个 OutboundMessage（ReplyTo 未填）
+             ↓
+gateway.receiptsForSession(s.ID) → [userMsgID_a, userMsgID_b, userMsgID_c]
+             ↓
+同 1 个 OutboundMessage 拷贝 3 份，每份 ReplyTo 设为不同 userMsgID
+             ↓
+3 次 channel.Send — 每张 reply card 同步 in-place edit
+```
+
+**Channel 严格二分**（无 fallback 路径）：
+
+- ReplyTo 非空 → 必须镇定到该 userMsgID（用 ReplyMessage API 或已有 receipt）
+- ReplyTo 空 → plain text，不创建 receipt，不进任何 card
+
+这个二分设计是为了防止 v0.3 的"跨用户消息折叠"bug——一个聊天下 fallback 路径与 agent event 路径被强制隔开。
+
 ```
 
 ---
@@ -160,6 +250,43 @@ const (
 - `BuildForwardedText(blocks)` — channel takes blocks directly in `CreateReceipt`
 - `ReceiptHandle` exposed fields — gateway never reads; pure opaque
 - `ChatID` on receipt — channel knows the chat it created the receipt in
+
+### 3.2 Channel.Send dispatch (v1.1)
+
+`Channel.Send(OutboundMessage)` 是路由分发点。根据 `OutboundMessage.Kind` 和 `ReplyTo` 字段分发：
+
+```go
+// internal/channel/feishu/adapter.go — Send dispatcher
+func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
+    switch msg.Kind {
+    case gateway.OutReaction, OutReactionRemoved, OutCard, OutTyping:
+        // 全局 kinds — ReplyTo 无意义（reaction / card / typing 是 chat-全局）
+        return a.sendGlobal(ctx, msg)
+    default:
+        // agent-event-bearing kinds — 必须镇定到 ReplyTo
+        return a.sendAnchored(ctx, msg)
+    }
+}
+
+func (a *Adapter) sendAnchored(ctx context.Context, msg gateway.OutboundMessage) error {
+    if msg.ReplyTo == "" {
+        return a.sendUnanchored(ctx, msg)   // 孤儿事件：plain text / drop
+    }
+    receipt := a.receiptFor(msg.ReplyTo)
+    if receipt == nil {
+        receipt = a.coldStartReceipt(ctx, msg)   // ReplyMessage 创建镇定卡
+        if receipt == nil { return nil }
+    }
+    return a.appendToReceipt(ctx, receipt, msg)   // UpdateMessage in place
+}
+```
+
+**关键性质**：
+
+1. **二分路径**：ReplyTo 空/非空 是唯一决定渲染路径的字段。Channel **不做** “找不到 receipt 就丢到共享 card” 这种 fallback。
+2. **冷启动**：当一个 agent event 到达时该 userMsgID 还没有 receipt（理论上不应该发生——Gateway.fallback 总是先 CreateReceipt，但边缘情况下 cold-start 是 defensive）。`coldStartReceipt` 调用 Feishu `ReplyMessage` API 发布初始 card 并注册 receipt。
+3. **Receipt 按 userMsgID 索引**：多 receipt/chat 共存 (buffered batch)。Eviction 逻辑从 v0.3 中删除（不适用多 receipt 模型）；各 receipt 独立 lifecycle。
+4. **Orphan event 降级**：Receipt-only kinds (OutInit / OutUsage / OutCompaction) 在 ReplyTo 空时静默 drop——这些只对 receipt card 有意义，plain text 发送是无意义的。用户-facing kinds (OutText / OutThinking / OutResult / OutToolStart / OutToolEnd) 在 ReplyTo 空时降级为 plain text。
 
 ---
 
@@ -428,5 +555,6 @@ Each commit is its own PR. Commits 3-4 should ship together — a half-done refa
 
 ## 13. Change log
 
+- **2026-08-02** — v1.1.2 (this commit): §2.4 receipt data flow 重写为 1 request : n response 扇出模型 (gateway.receiptsForSession → N 条 OutboundMessage，各带不同 ReplyTo)。新增 §2.5 OutboundMessage.ReplyTo contract 表 + fan-out 示例 + Channel 严格二分语义。新增 §3.2 Channel.Send dispatch 三分枝 (global / anchored-with-receipt / cold-start / orphan-plain-text)。
 - **2026-08-02** — v1.1 final: responsibility isolation locked. SPEC.md bumped to v1.1. This doc rewritten to be the authoritative reference (was previously Stage 2 design notes).
 - **2026-08-01** — Stage 2 design sketched (Gateway becomes central hub). Replaced by v1.1.

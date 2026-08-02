@@ -115,59 +115,69 @@ const (
 
 ### 4.2 Feishu 实现（`internal/channel/feishu/receipt.go`）
 
+Receipt 按 `userMsgID` 索引（不在 chatID）。一个用户消息 = 一张镇定到自己的 reply card = 一个 `MessageReceipt`。多 receipt 在同一 chat 可共存（buffered batch）。reply card 用 Feishu `ReplyMessage` API 发布，body 是 rolling-log 单卡（header + entries + 可选 footer），agent events 追加进去并 in-place `UpdateMessage` 刷新。
+
 ```go
 type MessageReceipt struct {
-    UserMsgID  string    // 飞书 user message ID（reaction target）
-    ReplyMsgID string    // 飞书 receipt message ID
-    ReactionID string    // current reaction handle
+    chatID      string                // 该 receipt 属于哪个 chat
+    userMsgID   string                // Feishu user message ID（reaction target + ReplyMessage anchor）
+    replyMsgID  string                // Feishu reply message ID（UpdateMessage target）
+    ReactionID  string                // current reaction handle
 
-    currentEmoji ReactionEmoji  // ⏳ / 🔄 / ✅ / ❌
-    mu           sync.Mutex     // protect concurrent UpdateReceipt calls
+    state      ReceiptState           // 本地 enum，Gateway FSM 同步
+    mu         sync.Mutex             // 并发保护 state / entries / footer
+
+    receivedAt time.Time              // receipt 创建时间（header 时间戳）
+    forwardedAt time.Time             // EnterExecuting 时间戳
+    lastEventAt time.Time             // 最近 event 时间戳（header 递增）
+    completedAt time.Time             // EnterDone/Error 时间戳
+    eventCount int                    // agent events 累计计数（header ⏳ N）
+    evicted    int                    // FIFO 驱逐计数
+
+    entries    []LogEntry             // rolling log（FIFO）
+    footer     string                 // session-attribution 行（Agent / cwd / tokens）；可由 Channel 用 SetFooter 写入
+
+    currentReaction   string
+    currentReactionID string
 }
 
-type ReactionEmoji string
-const (
-    EmojiWaiting   ReactionEmoji = "⏳"
-    EmojiExecuting ReactionEmoji = "🔄"
-    EmojiCompleted ReactionEmoji = "✅"
-    EmojiError     ReactionEmoji = "❌"
-)
+// Append：agent event → receipt 内部 LogEntry → formatLocked → UpdateMessage(in place)
+// renderLocked（被 Append / SetExecuting / SetCompleted 调）：
+//   1. swap reaction emoji（if emoji changed）
+//   2. UpdateMessage(replyMsgID, formatLocked()) — body 携带 header + entries + footer
+//   3. UpdateMessage 失败则 fallback SendMessageText（会丢失镇；但 receipt 状态保留）
 
-// CreateReceipt → ReplyMessage + AddReaction(⏳)
-func (a *Adapter) CreateReceipt(ctx, chatID, userMsgID string, blocks []agent.ContentBlock) (channel.Receipt, error) {
-    text := buildReceiptText(blocks)
-    replyMsgID, err := a.bot.ReplyMessage(ctx, chatID, userMsgID, text)
-    if err != nil { return nil, err }
-    reactionID, _ := a.bot.AddReaction(ctx, chatID, userMsgID, EmojiWaiting)
-    return &MessageReceipt{
-        UserMsgID: userMsgID, ReplyMsgID: replyMsgID,
-        ReactionID: reactionID, currentEmoji: EmojiWaiting,
-    }, nil
-}
-
-// UpdateReceipt swaps reaction according to state.
-func (a *Adapter) UpdateReceipt(ctx, receipt channel.Receipt, state channel.ReceiptState) error {
-    r := receipt.(*MessageReceipt)
-    r.mu.Lock()
-    defer r.mu.Unlock()
-    target := emojiForState(state)
-    if r.currentEmoji == target { return nil }  // idempotent
-    // delete old + add new
-    if r.ReactionID != "" {
-        _ = a.bot.DeleteReaction(ctx, chatIDOf(r), r.UserMsgID, r.ReactionID)
-    }
-    newID, err := a.bot.AddReaction(ctx, chatIDOf(r), r.UserMsgID, target)
-    if err == nil { r.ReactionID = newID; r.currentEmoji = target }
-    return err
-}
-
-// DisposeReceipt → DeleteMessage(replyMsgID)
-func (a *Adapter) DisposeReceipt(ctx, receipt channel.Receipt) error {
-    r := receipt.(*MessageReceipt)
-    if r.ReplyMsgID == "" { return nil }
-    return a.bot.DeleteMessage(ctx, r.ReplyMsgID)
-}
+// SetFooter(footer)：写 footer 字符串。下一轮 Append / renderLocked 会 in-place 画出 footer。
 ```
+
+**Receipt 渲染模型**（rolling-log 单卡，可选 footer）：
+
+```
+Reply to 用户: /run claude                ← Feishu ReplyMessage 原生 UI
+─────────────────────────────────────────
+🔄 ⏳ 5 · 14:32:05                        ← header（state emoji + event 计数 + 时间戳）
+💭 I'll explore the workspace...          ← LogEntry（带 icon）
+🔧 Read(/tmp/foo)                        ← ToolStart entry
+✅ Read → 47 lines                        ← ToolEnd entry
+💬 Here's what I found…                  ← Text entry（agent 最终回复可能占多行）
+─────────────────────────────────────────
+Agent: claude | cwd: ~/code/nightme | tokens: 12.3K / 4.5K   ← footer (可选)
+─────────────────────────────────────────
+✅ 已完成 14:32:18                        ← terminal header
+```
+
+**Footer 语义**（v1.1）：nightme **不跟踪** token / session metadata 本身——这些由 agent 的 internal session context 提供，Channel 从 `OutboundMessage` 的 Meta 里读。Footer 只负责渲染 caller 提供的字符串。
+
+### 4.3 OutboundMessage.ReplyTo — 1 request : n response 镇定机制
+
+Gateway 的事件路由是 **1 request : n response**。每个用户发起的会话都有一个 `userMsgID`；Gateway 转发每个 agent event 到 Channel 时，都带上该 event 对应的 userMsgID（OutboundMessage.ReplyTo 字段）。Channel 据此决定怎么渲染：
+
+| ReplyTo | Channel 行为 |
+|---------|------|
+| `""` (空) | **plain text**：`SendMessageText` 发一条独立消息；不进任何 receipt。这是“真正无镇”的唯一 case（启动提示等）。 |
+| `userMsgID` | **reply-in-thread**：`ReplyMessage(chatID, userMsgID, text)` 创建镇定到该用户消息的 reply card；已有 receipt 就 Append + UpdateMessage in-place，没有就 cold-start 创建新 receipt 并 reply。 |
+
+Channel 严格遵守该二分语义——**不尝试 fallback**（如“找不到 receipt 就丢进共享 card”这种设计是 v0.3 bug 的根源）。
 
 ### 4.3 Echo 实现（`internal/channel/echo/echo.go`）
 

@@ -238,33 +238,33 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// F-25 integration: the fallback routes through the
 	// channelResponder.SendUserMessage path, which (when the renderer
 	// v1.1 (commits 3 + 4): the fallback drives the receipt FSM:
-//  1. Look up the session via gateway.LookupSessionByChat.
-//  2. Build the receipt via gateway.CreateReceipt.
-//  3. Queue to session.InputBuffer (decides dispatch vs buffer).
-//  4. UpdateReceipt(Executing) on immediate dispatch (Idle path).
-//     On the Busy path the InputBuffer.onFlush hook (installed
-//     below) flips queued receipts to Executing when the buffer
-//     actually flushes.
+	//  1. Look up the session via gateway.LookupSessionByChat.
+	//  2. Build the receipt via gateway.CreateReceipt.
+	//  3. Queue to session.InputBuffer (decides dispatch vs buffer).
+	//  4. UpdateReceipt(Executing) on immediate dispatch (Idle path).
+	//     On the Busy path the InputBuffer.onFlush hook (installed
+	//     below) flips queued receipts to Executing when the buffer
+	//     actually flushes.
 	fallback := func(ctx context.Context, msg *gateway.InboundMessage) error {
-		sess, err := gw.LookupSessionByChat(msg.ChatID)
-		if err != nil {
-			return responder.Reply(ctx, msg.ChatID, "no workspace set, send /cwd <path> first")
-		}
-		if sess.Status() != session.StatusRunning {
-			return responder.Reply(ctx, msg.ChatID, "CLI not running, send /run <agent> to start")
-		}
-
-		blocks := feishu.BuildBlocks(msg.Text, msg.Attachments)
 		userMsgID := msg.MessageID
 		if userMsgID == "" {
 			userMsgID = msg.UserID + ":" + msg.Time.UTC().Format(time.RFC3339Nano)
 		}
+		sess, err := gw.LookupSessionByChat(msg.ChatID)
+		if err != nil {
+			return responder.Reply(ctx, msg.ChatID, userMsgID, "no workspace set, send /cwd <path> first")
+		}
+		if sess.Status() != session.StatusRunning {
+			return responder.Reply(ctx, msg.ChatID, userMsgID, "CLI not running, send /run <agent> to start")
+		}
+
+		blocks := feishu.BuildBlocks(msg.Text, msg.Attachments)
 
 		if _, err := gw.CreateReceipt(ctx, msg.ChatID, userMsgID, blocks); err != nil {
 			// Receipt creation failed (channel offline?) — fall
 			// back to a plain OutText send so the message isn't
 			// silently dropped.
-			return responder.Reply(ctx, msg.ChatID, msg.Text)
+			return responder.Reply(ctx, msg.ChatID, userMsgID, msg.Text)
 		}
 
 		// Queue to session.InputBuffer. The buffer decides
@@ -347,11 +347,16 @@ type channelResponder struct {
 	userMessageFn func(chatID, userMsgID string, blocks []agent.ContentBlock) error
 }
 
-func (r channelResponder) Reply(ctx context.Context, chatID, text string) error {
+func (r channelResponder) Reply(ctx context.Context, chatID, userMsgID, text string) error {
 	if r.ch == nil {
 		return nil
 	}
-	return r.ch.Send(ctx, gateway.OutboundMessage{ChatID: chatID, Kind: gateway.OutText, Text: text})
+	return r.ch.Send(ctx, gateway.OutboundMessage{
+		ChatID:  chatID,
+		Kind:    gateway.OutText,
+		Text:    text,
+		ReplyTo: userMsgID,
+	})
 }
 
 // SendUserMessage is the F-25 entry point used by the gateway to

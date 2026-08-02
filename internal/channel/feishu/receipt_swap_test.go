@@ -51,6 +51,14 @@ func (m *mockReceiptAdapter) snapshotSentText() []receiptSendCall {
 	return out
 }
 
+func (m *mockReceiptAdapter) snapshotUpdated() []receiptUpdateCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]receiptUpdateCall, len(m.updated))
+	copy(out, m.updated)
+	return out
+}
+
 func (m *mockReceiptAdapter) AddReaction(_ context.Context, msgID, emoji string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -76,6 +84,14 @@ func (m *mockReceiptAdapter) SendMessageText(_ context.Context, chatID, text str
 	}
 	m.sentText = append(m.sentText, receiptSendCall{chatID, text})
 	return "new-message-id", nil
+}
+
+// ReplyMessage satisfies the v1.1.2 receiptBot contract
+// (ReplyMessage was added when per-userMsgID receipts took over).
+// The append-only-reactions test doesn't exercise the reply path,
+// so the stub just returns a synthetic id.
+func (m *mockReceiptAdapter) ReplyMessage(_ context.Context, _, userMsgID, _ string) (string, error) {
+	return "reply-message-for-" + userMsgID, nil
 }
 
 func newAppendOnlyReceipt(bot receiptBot) *MessageReceipt {
@@ -133,6 +149,11 @@ func TestReactionAppendOnly_SameStateSkipsDuplicate(t *testing.T) {
 }
 
 func TestReactionAppendOnly_AddFailureKeepsReplyShipping(t *testing.T) {
+	// The append-only-reactions contract: an AddReaction failure must
+	// NOT block shipping the reply text. With the v1.1.2 rolling-log
+	// strategy the body lands via UpdateMessage (in place) rather than
+	// SendMessageText (per-event fresh); assert against the rolling
+	// path instead so the test stays valid for the merged design.
 	bot := &mockReceiptAdapter{addErr: errors.New("simulated add failure")}
 	r := newAppendOnlyReceipt(bot)
 
@@ -146,8 +167,12 @@ func TestReactionAppendOnly_AddFailureKeepsReplyShipping(t *testing.T) {
 	if r.currentReaction != "" {
 		t.Fatalf("currentReaction = %q after failed add, want empty (retryable)", r.currentReaction)
 	}
-	if got := len(bot.snapshotSentText()); got != 1 {
-		t.Fatalf("shipped %d replies after failed add, want 1", got)
+	// Either an UpdateMessage (in-place edit) OR a fallback
+	// SendMessageText (UpdateMessage failure path) counts as
+	// "reply shipped". With a healthy bot the body lands via
+	// UpdateMessage on the seeded replyMsgID.
+	if got := len(bot.snapshotUpdated()) + len(bot.snapshotSentText()); got == 0 {
+		t.Fatalf("shipped 0 replies after failed add, want >= 1 (UpdateMessage or fallback SendMessageText)")
 	}
 }
 

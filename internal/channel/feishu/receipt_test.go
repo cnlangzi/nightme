@@ -11,17 +11,32 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 )
 
-// mockReceiptBot captures AddReaction and SendMessageText calls so
-// tests can assert on the dual-track behavior without a live Feishu
-// connection. Embeds *Adapter with nil fields, so any unguarded
-// access to a.larkClient will panic — guards in the receipt must
-// stay routed through our methods.
+// mockReceiptBot captures AddReaction, SendMessageText, ReplyMessage,
+// and UpdateMessage calls so tests can assert on the dual-track
+// behavior without a live Feishu connection. Embeds *Adapter with nil
+// fields, so any unguarded access to a.larkClient will panic — guards
+// in the receipt must stay routed through our methods.
 type mockReceiptBot struct {
 	mu             sync.Mutex
 	reactions      []reactionCall
 	messages       []string
+	replies        []replyCall
+	updates        []updateCall
 	addReactionErr error
 	sendMsgErr     error
+	replyErr       error
+	updateErr      error
+}
+
+type replyCall struct {
+	ChatID    string
+	UserMsgID string
+	Text      string
+}
+
+type updateCall struct {
+	MessageID string
+	Text      string
 }
 
 type reactionCall struct {
@@ -47,6 +62,23 @@ func (m *mockReceiptBot) SendMessageText(_ context.Context, _, text string) (str
 	}
 	m.messages = append(m.messages, text)
 	return "", nil
+}
+
+func (m *mockReceiptBot) ReplyMessage(_ context.Context, chatID, userMsgID, text string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.replyErr != nil {
+		return "", m.replyErr
+	}
+	m.replies = append(m.replies, replyCall{ChatID: chatID, UserMsgID: userMsgID, Text: text})
+	return "mock-reply-msg-id", nil
+}
+
+func (m *mockReceiptBot) UpdateMessage(_ context.Context, msgID, text string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.updates = append(m.updates, updateCall{MessageID: msgID, Text: text})
+	return m.updateErr
 }
 
 // We can't directly construct an Adapter with custom AddReaction /
@@ -184,31 +216,41 @@ func TestReceiptStringContainsEmoji(t *testing.T) {
 	}
 }
 
-// TestReceipt_PerEventFreshMessage verifies the post-refactor
-// renderLocked behavior: each agent event produces a NEW
-// SendMessageText call rather than an UpdateMessage in place.
+// TestReceipt_RollingLogInPlaceUpdate verifies the canonical F-25
+// v1.1 behavior: one user message → ONE Feishu reply card, edited
+// in place via UpdateMessage as agent events append to the rolling
+// log. The pre-fix design (commit dd91e44) shipped one fresh
+// message per event; the canonical design collapses them all into
+// one card.
 //
-// Before the per-event refactor, all events rolled into a single
-// message that was updated N times via UpdateMessage. After, every
-// event produces a fresh message — the chat surface mirrors the
-// event stream. The test:
-//  1. Creates a receipt with the mockReceiptBot (no Feishu).
+// The test:
+//  1. Creates a receipt with the mockReceiptBot (no live Feishu).
 //  2. Appends three events (text, tool start, tool end).
-//  3. Asserts SendMessageText was called 3 times — once per event.
-//  4. Asserts UpdateMessage was NEVER called.
-//  5. Asserts the messages are the entry texts, not the rolled log.
-func TestReceipt_PerEventFreshMessage(t *testing.T) {
+//  3. Asserts UpdateMessage was called once per event (the same
+//     message id every time — the in-place edit).
+//  4. Asserts SendMessageText / ReplyMessage were NEVER called by
+//     Append (the initial post is the caller's responsibility, not
+//     Append's).
+//  5. Asserts the updated bodies grow — each edit carries the full
+//     rolled log so far (header + every entry appended to date).
+func TestReceipt_RollingLogInPlaceUpdate(t *testing.T) {
 	bot := &mockReceiptBot{}
+	// NewMessageReceiptForReply already sets replyMsgID = "om_initial",
+	// so the first Append will UpdateMessage that message in place.
 	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
 	r.receivedAt = time.Now()
 
 	// Three events across three agent kinds — a text reply, a
-	// tool start, and a tool end. Each one should land as its
-	// own message on the bot.
+	// tool start, and a tool end. Each one rolls into the same
+	// reply card via UpdateMessage.
 	mustAppend(t, r, agent.AgentEvent{
 		Kind: agent.EventText,
 		Text: "hello from the agent",
 	})
+	// The receipt throttles UpdateMessage (Feishu per-message
+	// quota is 5/sec — see renderLocked). Space the events out
+	// past the cooldown so each one paints the body.
+	time.Sleep(minBodyUpdateInterval + 10*time.Millisecond)
 	mustAppend(t, r, agent.AgentEvent{
 		Kind: agent.EventToolStart,
 		ToolStart: &agent.ToolStartEvent{
@@ -217,6 +259,7 @@ func TestReceipt_PerEventFreshMessage(t *testing.T) {
 			Args: "/tmp/foo",
 		},
 	})
+	time.Sleep(minBodyUpdateInterval + 10*time.Millisecond)
 	mustAppend(t, r, agent.AgentEvent{
 		Kind: agent.EventToolEnd,
 		ToolEnd: &agent.ToolEndEvent{
@@ -225,47 +268,159 @@ func TestReceipt_PerEventFreshMessage(t *testing.T) {
 		},
 	})
 
-	// Per-event shipping: exactly one SendMessageText per event.
+	// In-place edit: one UpdateMessage per event, all on the same
+	// message id.
 	bot.mu.Lock()
-	got := append([]string(nil), bot.messages...)
+	updates := append([]updateCall(nil), bot.updates...)
+	messages := append([]string(nil), bot.messages...)
+	replies := append([]replyCall(nil), bot.replies...)
 	bot.mu.Unlock()
 
-	if len(got) != 3 {
-		t.Fatalf("SendMessageText calls = %d, want 3 (one per event)", len(got))
+	if len(updates) != 3 {
+		t.Fatalf("UpdateMessage calls = %d, want 3 (one per event)", len(updates))
 	}
-	// Each event ships with its own entry text, not the rolled log.
-	if want := "💬 hello from the agent"; got[0] != want {
-		t.Errorf("messages[0] = %q, want %q (single-entry text)", got[0], want)
-	}
-	if !strings.HasPrefix(got[1], "🔧 Read(") {
-		t.Errorf("messages[1] = %q, want '🔧 Read(...)' (single-entry tool start)", got[1])
-	}
-	if !strings.HasPrefix(got[2], "✅ Read") {
-		t.Errorf("messages[2] = %q, want '✅ Read ...' (single-entry tool end)", got[2])
+	for i, u := range updates {
+		if u.MessageID != "om_initial" {
+			t.Errorf("updates[%d].MessageID = %q, want %q (in-place edit, same id)",
+				i, u.MessageID, "om_initial")
+		}
 	}
 
-	// Sanity: messages are distinct (no accidental UpdateMessage
-	// collapsing them into one body).
-	if got[0] == got[1] || got[1] == got[2] || got[0] == got[2] {
-		t.Errorf("messages are not distinct: %q / %q / %q", got[0], got[1], got[2])
+	// Append never posts fresh messages or replies — that is the
+	// caller's job (SendUserMessage / CreateReceipt).
+	if len(messages) != 0 {
+		t.Errorf("SendMessageText calls = %d, want 0 (Append edits, doesn't post)",
+			len(messages))
+	}
+	if len(replies) != 0 {
+		t.Errorf("ReplyMessage calls = %d, want 0 (Append edits, doesn't reply)",
+			len(replies))
+	}
+
+	// Each updated body grows — last body is the longest, and every
+	// body contains the header line + every entry appended up to
+	// that point. We don't assert exact strings (the receipt
+	// renderer owns that contract), only the growth pattern.
+	for i := 1; i < len(updates); i++ {
+		if len(updates[i].Text) < len(updates[i-1].Text) {
+			t.Errorf("updates body shrank from %d bytes to %d bytes — entries should accumulate",
+				len(updates[i-1].Text), len(updates[i].Text))
+		}
+	}
+
+	// Sanity: the final body contains all three event entries.
+	final := updates[len(updates)-1].Text
+	for _, want := range []string{"💬 hello from the agent", "🔧 Read(", "✅ Read"} {
+		if !strings.Contains(final, want) {
+			t.Errorf("final body missing %q — full log should include every event", want)
+		}
+	}
+}
+
+// TestReceipt_FooterRenders verifies SetFooter renders the
+// caller-supplied session-attribution line at the bottom of the
+// reply body, separated by a horizontal rule from the rolling
+// log entries. The receipt does NOT compose the footer — that is
+// the adapter's job (nightme doesn't track tokens or session
+// metadata itself; the caller forwards the agent's values).
+func TestReceipt_FooterRenders(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
+	r.receivedAt = time.Now()
+
+	r.SetFooter("Agent: claude | cwd: ~/code/nightme | tokens: 8.8K / 4.5K")
+
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "body line",
+	})
+
+	bot.mu.Lock()
+	updates := append([]updateCall(nil), bot.updates...)
+	bot.mu.Unlock()
+
+	if len(updates) == 0 {
+		t.Fatal("no UpdateMessage calls; Append should have rendered the body")
+	}
+	body := updates[len(updates)-1].Text
+	if !strings.Contains(body, "─────────") {
+		t.Errorf("body missing footer separator ─────────\nbody = %q", body)
+	}
+	if !strings.Contains(body, "Agent: claude | cwd: ~/code/nightme | tokens: 8.8K / 4.5K") {
+		t.Errorf("body missing footer text\nbody = %q", body)
+	}
+	// Footer must come AFTER every entry in the body.
+	sep := strings.Index(body, "─────────")
+	bodyEnd := strings.Index(body, "💬 body line")
+	if sep < bodyEnd {
+		t.Errorf("footer separator appeared at offset %d, before body line at offset %d (must come after entries)",
+			sep, bodyEnd)
+	}
+}
+
+// TestReceipt_FooterEmpty verifies that an unset footer produces
+// no separator line — important so receipts without session
+// attribution don't render a dangling rule.
+func TestReceipt_FooterEmpty(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
+	r.receivedAt = time.Now()
+
+	mustAppend(t, r, agent.AgentEvent{Kind: agent.EventText, Text: "body line"})
+
+	bot.mu.Lock()
+	updates := append([]updateCall(nil), bot.updates...)
+	bot.mu.Unlock()
+
+	if len(updates) == 0 {
+		t.Fatal("no UpdateMessage calls; Append should have rendered the body")
+	}
+	body := updates[len(updates)-1].Text
+	if strings.Contains(body, "─────────") {
+		t.Errorf("body contains footer separator despite no footer set\nbody = %q", body)
+	}
+}
+
+// TestReceipt_FooterReplace verifies that a later SetFooter call
+// replaces the earlier footer wholesale — the receipt is a pure
+// renderer, so the caller (adapter) is responsible for composing
+// the latest values. The receipt does not merge or track history.
+func TestReceipt_FooterReplace(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
+	r.receivedAt = time.Now()
+
+	r.SetFooter("first footer")
+	mustAppend(t, r, agent.AgentEvent{Kind: agent.EventText, Text: "first"})
+
+	// The receipt throttles UpdateMessage (Feishu per-message
+	// quota is 5/sec — see renderLocked) so the second footer
+	// must wait out the cooldown before its body update lands.
+	time.Sleep(minBodyUpdateInterval + 10*time.Millisecond)
+
+	r.SetFooter("second footer")
+	mustAppend(t, r, agent.AgentEvent{Kind: agent.EventText, Text: "second"})
+
+	bot.mu.Lock()
+	updates := append([]updateCall(nil), bot.updates...)
+	bot.mu.Unlock()
+
+	last := updates[len(updates)-1].Text
+	if !strings.Contains(last, "second footer") {
+		t.Errorf("footer not refreshed\nbody = %q", last)
+	}
+	if strings.Contains(last, "first footer") {
+		t.Errorf("stale footer still rendering\nbody = %q", last)
 	}
 }
 
 // mustAppend calls Append and asserts no error. Helper for the
-// per-event test above.
+// rolling-log test above.
 func mustAppend(t *testing.T, r *MessageReceipt, ev agent.AgentEvent) {
 	t.Helper()
 	if err := r.Append(context.Background(), ev); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-}
-
-// UpdateMessage satisfies receiptBot. The per-event shipping path
-// does not call it; the stub exists for the interface contract.
-func (m *mockReceiptBot) UpdateMessage(_ context.Context, _, _ string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return nil
 }
 
 // --- v1.1 tests for applyState / dispose ---
@@ -276,10 +431,10 @@ func TestApplyState_FourStateEnum(t *testing.T) {
 	r := NewMessageReceiptForReply("chat-x", "user-x", "msg-x", mb)
 
 	cases := []struct {
-		name    string
-		target  channel.ReceiptState
-		want    ReceiptState
-		emoji   string
+		name   string
+		target channel.ReceiptState
+		want   ReceiptState
+		emoji  string
 	}{
 		{"pending", channel.ReceiptPending, StateWaiting, "OK"},
 		{"executing", channel.ReceiptExecuting, StateExecuting, "OnIt"},
@@ -348,5 +503,101 @@ func TestReceiptStateString_IncludesError(t *testing.T) {
 func TestReceiptStateEmoji_Error(t *testing.T) {
 	if got := StateError.Emoji(); got == "" {
 		t.Fatal("StateError.Emoji() returned empty, want a Feishu predefined emoji")
+	}
+}
+
+// TestReceipt_ThinkingAggregation covers the F-25 / F-26 design
+// where consecutive EventText-with-thinking-prefix events from
+// the same Claude Code turn are merged into a single LogEntry so
+// Feishu's native code-block auto-collapse ("N 行代码 >" expand
+// button) kicks in. formatLocked wraps the merged text in ```
+// fences so the chat surface shows one collapsed thinking block
+// rather than N separate 💭 lines.
+func TestReceipt_ThinkingAggregation(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
+	r.receivedAt = time.Now()
+
+	// Three consecutive thinking events from Claude Code. Append
+	// should merge them into ONE LogEntry rather than three.
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "[思考] planning step 1",
+	})
+	// Wait out the body-update throttle so the next merge
+	// triggers an UpdateMessage that the body assertion can
+	// read. The entries state is correct regardless (verified
+	// below), but the formatLocked body check needs the latest
+	// write to have happened.
+	time.Sleep(minBodyUpdateInterval + 10*time.Millisecond)
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "[思考] checking workspace",
+	})
+	time.Sleep(minBodyUpdateInterval + 10*time.Millisecond)
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "[思考] ready to answer",
+	})
+
+	// One LogEntry, not three. The merged text carries all
+	// three thinking segments separated by a horizontal rule.
+	r.mu.Lock()
+	entryCount := len(r.entries)
+	var merged string
+	if entryCount > 0 {
+		merged = r.entries[0].Text
+	}
+	r.mu.Unlock()
+	if entryCount != 1 {
+		t.Fatalf("entries = %d, want 1 (thinking aggregation collapsed 3 events into 1 entry)", entryCount)
+	}
+	for _, want := range []string{"planning step 1", "checking workspace", "ready to answer"} {
+		if !strings.Contains(merged, want) {
+			t.Errorf("merged thinking missing %q\ntext = %q", want, merged)
+		}
+	}
+	if !strings.Contains(merged, "\n---\n") {
+		t.Errorf("merged thinking should use --- separators\ntext = %q", merged)
+	}
+
+	// formatLocked wraps the thinking entry in ``` fences so
+	// Feishu auto-collapses the block.
+	bot.mu.Lock()
+	updates := append([]updateCall(nil), bot.updates...)
+	bot.mu.Unlock()
+	if len(updates) == 0 {
+		t.Fatal("no UpdateMessage calls; Append should have rendered the body")
+	}
+	last := updates[len(updates)-1].Text
+	if !strings.Contains(last, "```\nplanning step 1\n---\nchecking workspace\n---\nready to answer\n```") {
+		t.Errorf("body should wrap merged thinking in code-block fences\nbody = %q", last)
+	}
+}
+
+// TestReceipt_ThinkingAndReply_NoMerge verifies the aggregation
+// doesn't cross event boundaries: a thinking block followed by a
+// reply text produces two separate LogEntries (the reply has a
+// different Kind).
+func TestReceipt_ThinkingAndReply_NoMerge(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
+	r.receivedAt = time.Now()
+
+	mustAppend(t, r, agent.AgentEvent{Kind: agent.EventText, Text: "[思考] planning"})
+	mustAppend(t, r, agent.AgentEvent{Kind: agent.EventText, Text: "Hi! How can I help?"})
+
+	r.mu.Lock()
+	entryCount := len(r.entries)
+	kinds := make([]string, entryCount)
+	for i, e := range r.entries {
+		kinds[i] = e.Kind
+	}
+	r.mu.Unlock()
+	if entryCount != 2 {
+		t.Fatalf("entries = %d, want 2 (thinking + reply shouldn't merge)", entryCount)
+	}
+	if kinds[0] != "thinking" || kinds[1] != "reply" {
+		t.Errorf("entry kinds = %v, want [thinking reply]", kinds)
 	}
 }

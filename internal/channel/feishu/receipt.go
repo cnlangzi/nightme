@@ -1,6 +1,8 @@
-// Package feishu — F-25 MessageReceipt with the v0.3 rolling-log
-// format. Each user message gets one reply in chat that grows over
-// the agent's lifetime:
+// Package feishu — F-25 MessageReceipt with the rolling-log
+// single-card format (v1.1 canonical design; reverted from a brief
+// per-event-fresh-message detour in commit dd91e44). Each user
+// message gets ONE reply in chat that grows over the agent's
+// lifetime:
 //
 //	⏳ 等待中
 //
@@ -10,14 +12,75 @@
 //	💬 Here's the API handler I found at line 42:
 //	    <reply text — may span multiple lines>
 //
+//	─────────
+//	Agent: claude | cwd: ~/code/nightme | tokens: 8.8K / 4.5K
+//
 //	✅ 已完成 10:11:11
 //
 // All events (thinking, tool call, tool result, final reply) append
-// to the log. If the log grows past replyMaxBytes, oldest entries
-// are evicted from the front (FIFO) and a "…(前 N 条已省略)" prefix
-// is shown. The receipt's reaction emoji (⏳ / 🔄 / ✅) is append-only
-// per state transition — it shows the lifecycle trail, the log shows
-// the work.
+// to the log. The receipt's reply card is posted via the Feishu
+// ReplyMessage API so the chat surface shows a "Reply to <user>:
+// <preview>" header above the body — Feishu's native pair-the-
+// message visual cue. The card body is then edited in place via
+// im.message.update as the log grows.
+//
+// If the log grows past replyMaxBytes, oldest entries are evicted
+// from the front (FIFO) and a "…(前 N 条已省略)" prefix is shown.
+// The receipt's reaction emoji (⏳ / 🔄 / ✅ / ❌) is APPEND-ONLY
+// per state transition — each new state adds an emoji on top of
+// the previous trail. We do not delete the old one because a
+// failed delete leaves the old reaction in place and Feishu
+// rejects the next add with code 99992354. Same-state renders
+// (heartbeats) skip the duplicate add.
+//
+// The footer line ("─────────" + session attribution) is a single
+// string supplied by the caller via SetFooter. nightme does NOT
+// track tokens or session metadata itself — those come from the
+// agent's internal session context (via the gateway's event
+// stream) and the caller composes the footer. This keeps the
+// receipt a pure renderer and the chat surface free of
+// nightme-internal state that has to be kept in sync with the
+// agent's own accounting.
+// Package feishu — F-25 MessageReceipt with the rolling-log
+// single-card format (v1.1 canonical design; reverted from a brief
+// per-event-fresh-message detour in commit dd91e44). Each user
+// message gets ONE reply in chat that grows over the agent's
+// lifetime:
+//
+//	⏳ 等待中
+//
+//	💭 I'll explore the workspace...
+//	🔧 codegraph_explore(/repo/api)
+//	✅ codegraph_explore done
+//	💬 Here's the API handler I found at line 42:
+//	    <reply text — may span multiple lines>
+//
+//	─────────
+//	Agent: claude | cwd: ~/code/nightme | tokens: 8.8K / 4.5K
+//
+//	✅ 已完成 10:11:11
+//
+// All events (thinking, tool call, tool result, final reply) append
+// to the log. The receipt's reply card is posted via the Feishu
+// ReplyMessage API so the chat surface shows a "Reply to <user>:
+// <preview>" header above the body — Feishu's native pair-the-
+// message visual cue. The card body is then edited in place via
+// im.message.update as the log grows.
+//
+// If the log grows past replyMaxBytes, oldest entries are evicted
+// from the front (FIFO) and a "…(前 N 条已省略)" prefix is shown.
+// The receipt's reaction emoji (⏳ / 🔄 / ✅ / ❌) is append-only
+// per state transition — each new state adds an emoji on top of
+// the previous trail (see note above).
+//
+// The footer line ("─────────" + session attribution) is a single
+// string supplied by the caller via SetFooter. nightme does NOT
+// track tokens or session metadata itself — those come from the
+// agent's internal session context (via the gateway's event
+// stream) and the caller composes the footer. This keeps the
+// receipt a pure renderer and the chat surface free of
+// nightme-internal state that has to be kept in sync with the
+// agent's own accounting.
 package feishu
 
 import (
@@ -37,10 +100,19 @@ import (
 // a mock that records the calls. Keeping the field typed as an
 // interface (instead of *Adapter) makes the receipt unit-testable
 // without spinning up a real lark client.
+//
+// ReplyMessage creates a Feishu reply anchored to userMsgID — Feishu
+// renders a "Reply to <user>: <preview>" UI above the body, which
+// is the visual cue users rely on to pair a bot reply with the
+// triggering user message. NewMessageReceipt posts via ReplyMessage
+// (when userMsgID is known, the CreateReceipt path) and falls back
+// to SendMessageText only when no userMsgID is available (the
+// cold-start synthetic-userMsgID path in Adapter.receiptFor).
 type receiptBot interface {
 	AddReaction(ctx context.Context, msgID, emoji string) (string, error)
 	UpdateMessage(ctx context.Context, messageID, text string) error
 	SendMessageText(ctx context.Context, chatID, text string) (string, error)
+	ReplyMessage(ctx context.Context, chatID, userMsgID, text string) (string, error)
 }
 
 // replyMaxBytes bounds the size of the rolling log message. Feishu's
@@ -51,6 +123,13 @@ const replyMaxBytes = 3500
 // perEntryMaxBytes bounds a single log entry's payload so a giant
 // 💬 reply line cannot monopolise the budget.
 const perEntryMaxBytes = 600
+
+// minBodyUpdateInterval is the per-receipt cooldown between
+// UpdateMessage calls. Feishu's per-message update quota (code
+// 230001) is 5/sec burst; rapid event bursts (5 events in ~4s)
+// would otherwise hit the limit and silently drop the terminal
+// state update. Terminal transitions bypass this cooldown.
+const minBodyUpdateInterval = 300 * time.Millisecond
 
 // logEvictedMarker is the marker prepended when FIFO eviction has
 // trimmed entries from the front of the log.
@@ -82,19 +161,21 @@ type LogEntry struct {
 }
 
 // MessageReceipt is the per-user-message rolling-log display (F-25
-// spec §6, v0.3 update). One receipt owns ONE Feishu reply message
-// (the replyMsgID) and ONE reaction emoji on the user message. The
-// reply message is updated in place via im.message.update as the log
-// grows.
+// spec §6, v1.1). One receipt owns ONE Feishu reply message
+// (the replyMsgID, posted via ReplyMessage so the chat shows the
+// "Reply to <user>: <preview>" header above the body) and ONE
+// reaction emoji on the user message. The reply message is updated
+// in place via im.message.update as the log grows.
 //
 // Two visual tracks update in sync:
 //
-//  1. The reply text — a multi-line rolling log (header + entries).
-//     Always ONE message per user message; the message grows over
-//     the agent's lifetime. When it exceeds replyMaxBytes, oldest
-//     entries are dropped from the front.
-//  2. A single reaction emoji on the user message — ⏳ / 🔄 / ✅.
-//     Swapped on lifecycle transitions (F-25 dual-track).
+//  1. The reply text — a multi-line rolling log (header + entries
+//     + optional footer). Always ONE message per user message;
+//     the message grows over the agent's lifetime. When it
+//     exceeds replyMaxBytes, oldest entries are dropped from the
+//     front.
+//  2. A single reaction emoji on the user message — ⏳ / 🔄 / ✅ /
+//     ❌. Swapped on lifecycle transitions (F-25 dual-track).
 //
 // Visual result on the user message:
 //
@@ -103,7 +184,16 @@ type LogEntry struct {
 //	🔧 codegraph_explore(/repo/api)
 //	✅ codegraph_explore done
 //	💬 Here's what I found…  ← all appended to one reply message
+//	─────────
+//	Agent: claude | cwd: ~/code/nightme | tokens: 8.8K / 4.5K
 //	✅ 已完成 10:11:11
+//
+// The footer line is a single string set by the caller via
+// SetFooter. The receipt does NOT compose the line — that is the
+// adapter's job (the agent's events carry the raw values; the
+// adapter formats them). Keeping the receipt ignorant of token
+// semantics means nightme doesn't maintain duplicate state for
+// values the agent already tracks in its own session context.
 type MessageReceipt struct {
 	chatID     string
 	userMsgID  string
@@ -119,6 +209,22 @@ type MessageReceipt struct {
 	completedAt time.Time
 	receivedAt  time.Time
 
+	// lastBodyUpdate tracks the last successful Feishu
+	// UpdateMessage call on the reply card. renderLocked uses
+	// this to throttle body updates so we don't exceed the
+	// Feishu per-message update quota (code 230001 — "更新消息
+	// 频率过快", 5/sec burst). Terminal transitions (Done /
+	// Error) bypass the throttle so the user always sees the
+	// final state.
+	lastBodyUpdate time.Time
+
+	// lastBodyText is the body hash from the last successful
+	// UpdateMessage. renderLocked skips the call when formatLocked()
+	// hasn't changed since the last write — this is the
+	// strongest dedup, since it catches the heartbeat / no-op
+	// transitions without per-event bookkeeping.
+	lastBodyText string
+
 	// entries is the rolling-log buffer (FIFO). Append grows it;
 	// renderLocked evicts from the front when total bytes exceed
 	// replyMaxBytes.
@@ -133,6 +239,18 @@ type MessageReceipt struct {
 	// duplicate AddReaction. Reactions are append-only — previous
 	// state emojis stay on the user message as history.
 	currentReaction string
+
+	// footer is the session-attribution line rendered at the
+	// bottom of the reply body (below the rolling log entries,
+	// above the terminal state header). The receipt does NOT
+	// compose this string — the caller (Feishu adapter) builds
+	// the line from agent events (OutInit for static session
+	// context, OutUsage for token counts) and stamps the result
+	// onto the receipt via SetFooter. This keeps the receipt
+	// package ignorant of session/usage semantics: nightme
+	// doesn't track tokens itself, it just relays whatever the
+	// agent's internal session context reports.
+	footer string
 }
 
 // ReceiptState is the lifecycle state of a MessageReceipt.
@@ -374,13 +492,17 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 	// entry (the header itself signals completion), and we want
 	// to short-circuit out before eventToEntry's "skip"
 	// branches swallow them.
+	var lastEntry *LogEntry
+	if len(r.entries) > 0 {
+		lastEntry = &r.entries[len(r.entries)-1]
+	}
 	switch ev.Kind {
 	case agent.EventDone:
 		r.state = StateCompleted
 		r.completedAt = time.Now()
 		return r.renderLocked(ctx)
 	case agent.EventError:
-		entry, _ := eventToEntry(ev, time.Now())
+		entry, _ := eventToEntry(ev, time.Now(), lastEntry)
 		if entry.Text != "" || entry.Icon != "" {
 			r.appendEntryLocked(entry)
 		}
@@ -389,11 +511,26 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 		return r.renderLocked(ctx)
 	}
 
-	entry, ok := eventToEntry(ev, time.Now())
+	entry, ok := eventToEntry(ev, time.Now(), lastEntry)
 	if !ok {
 		// Unknown / unhandled event kind — keep going but don't
 		// touch the log.
 		return nil
+	}
+
+	// Thinking aggregation: merge consecutive thinking entries
+	// into the previous one (separated by a horizontal rule) so
+	// Feishu's native code-block auto-collapse kicks in when the
+	// merged block crosses the 4-line threshold. The receipt
+	// itself doesn't render markdown — formatLocked wraps the
+	// merged text in ``` fences at render time.
+	if entry.Kind == "thinking" && len(r.entries) > 0 &&
+		r.entries[len(r.entries)-1].Kind == "thinking" {
+		last := &r.entries[len(r.entries)-1]
+		last.Text = last.Text + "\n---\n" + entry.Text
+		r.eventCount++
+		r.lastEventAt = time.Now()
+		return r.renderLocked(ctx)
 	}
 
 	if entry.Text != "" || entry.Icon != "" {
@@ -452,6 +589,13 @@ func totalLogBytesLocked(r *MessageReceipt) int {
 
 // formatLocked produces the full message body. Caller must hold
 // r.mu.
+//
+// Thinking entries are rendered as markdown ``` code blocks.
+// Feishu auto-collapses any code block longer than a few lines
+// and shows an "N 行代码 >" expand button — so consecutive
+// thinking events Append has merged into a single entry render
+// here as a single collapsed block the user can expand on demand.
+// All other entries render inline (icon + text on one line).
 func (r *MessageReceipt) formatLocked() string {
 	var b strings.Builder
 	b.WriteString(r.state.headerLine(r))
@@ -460,35 +604,51 @@ func (r *MessageReceipt) formatLocked() string {
 		fmt.Fprintf(&b, "\n"+logEvictedMarker+"\n", r.evicted)
 	}
 	for _, e := range r.entries {
+		if e.Kind == "thinking" {
+			b.WriteString(e.Icon)
+			b.WriteString("\n```\n")
+			b.WriteString(e.Text)
+			b.WriteString("\n```\n")
+			continue
+		}
 		b.WriteString(e.Icon)
 		b.WriteByte(' ')
 		b.WriteString(e.Text)
 		b.WriteByte('\n')
 	}
+	if r.footer != "" {
+		fmt.Fprintf(&b, "\n─────────\n%s\n", r.footer)
+	}
 	return b.String()
 }
 
-// formatEntry produces the body for a single-entry "reply" message.
-// Caller must hold r.mu. Used by the per-event update strategy
-// where each agent event ships as its own message rather than as
-// an in-place update of a rolling log card. The state header is
-// omitted because each event carries its own context; the chat
-// surface is the sequence of messages, not a single card.
-func (r *MessageReceipt) formatEntry(e LogEntry) string {
-	if e.Text == "" && e.Icon == "" {
-		return ""
-	}
-	var b strings.Builder
-	if e.Icon != "" {
-		b.WriteString(e.Icon)
-		b.WriteByte(' ')
-	}
-	b.WriteString(e.Text)
-	return b.String()
+// SetFooter stores the session-attribution line rendered at the
+// bottom of the reply body. The caller (typically the Feishu
+// adapter composing the line from OutInit + OutUsage events)
+// owns the format. Empty string drops the footer entirely so
+// receipts without session attribution don't render a dangling
+// separator.
+//
+// SetFooter is safe to call concurrently; the receipt does NOT
+// re-render the chat surface automatically — the next Append /
+// applyState triggers the UpdateMessage that paints the new
+// footer in place.
+func (r *MessageReceipt) SetFooter(footer string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.footer = footer
 }
 
-// renderLocked pushes the current state emoji (reaction) and the latest
-// entry to Feishu. Caller must hold r.mu.
+// Footer returns the current footer string (empty when unset).
+// Used by tests; not part of the channel.Channel interface.
+func (r *MessageReceipt) Footer() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.footer
+}
+
+// renderLocked pushes the current state emoji (reaction) and the
+// rendered log (reply text) to Feishu. Caller must hold r.mu.
 //
 // Reaction strategy: append-only. When the lifecycle state changes, the
 // new predefined Feishu reaction is added and previous reactions are
@@ -498,45 +658,58 @@ func (r *MessageReceipt) formatEntry(e LogEntry) string {
 // add duplicate reactions. Reaction failures are best-effort and never
 // block shipping the reply text.
 //
-// Reply text strategy: PER-EVENT FRESH MESSAGE. Each agent event
-// ships as its own im.message.create rather than as an in-place
-// update of a rolling-log card. The pre-refactor design collapsed
-// every event into a single message that was updated N times; the
-// new design emits N messages so the chat surface mirrors the
-// event stream one-for-one. The initial ⏳ card (posted by
-// SendUserMessage) is preserved as the receipt's "I'm thinking"
-// indicator; events after that point arrive as new messages.
-//
-// The receipt's rolling-log buffer (entries / evicted) is kept for
-// audit trails and future replay support but is no longer
-// rendered into a single card body. r.replyMsgID is updated to the
-// latest shipped message so the receipt can still address its
-// surface if a future feature needs to.
+// Reply text strategy: edit-in-place via im.message.update. Falls
+// back to a fresh message if update fails (e.g. message older than
+// 48h, or update quota exhausted). One user message → ONE
+// Feishu reply card; the card body grows over the agent's
+// lifetime as the rolling-log entries append.
 func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	// 1. Append a reaction when the lifecycle state changes.
 	r.appendReactionLocked(ctx, r.state.Emoji())
 
-	// 2. Send the latest entry as a fresh message. We emit one
-	// message per agent event rather than updating an existing
-	// card in place — the chat surface is now the event stream,
-	// not a single rolling-log card. Skip empty entries (header
-	// transitions without text, etc.) so we don't post empty
-	// messages.
-	if len(r.entries) == 0 {
+	// 2. Update the reply text in place. Throttled + deduped so
+	// rapid event bursts don't exceed Feishu's per-message
+	// update quota (code 230001 — "更新消息频率过快", 5/sec
+	// burst). Terminal transitions (Done / Error) bypass the
+	// throttle so the user always sees the final state.
+	text := r.formatLocked()
+	if text == r.lastBodyText {
+		// Body unchanged — nothing to write. Skipping the
+		// call entirely is the strongest dedup; it covers
+		// every repeat-renderLocked case (heartbeat, no-op
+		// transitions, idempotent state writes).
 		return nil
 	}
-	latest := r.entries[len(r.entries)-1]
-	text := r.formatEntry(latest)
-	if text == "" {
+	isTerminal := r.state == StateCompleted || r.state == StateError
+	if !isTerminal && !r.lastBodyUpdate.IsZero() &&
+		time.Since(r.lastBodyUpdate) < minBodyUpdateInterval {
+		// Throttle: skip this update; the last write is
+		// recent enough that another one would just hit the
+		// rate limit. The next renderLocked (after another
+		// event arrives past the interval, or at terminal
+		// time) writes the full body.
 		return nil
 	}
-	msgID, err := r.bot.SendMessageText(ctx, r.chatID, text)
-	if err != nil {
-		r.logger.Warn("feishu receipt: ship entry failed",
-			"err", err, "state", r.state, "icon", latest.Icon, "text", truncateForLog(latest.Text, 80))
-		return fmt.Errorf("feishu receipt: ship entry: %w", err)
+	if r.replyMsgID != "" {
+		err := r.bot.UpdateMessage(ctx, r.replyMsgID, text)
+		if err == nil {
+			r.lastBodyText = text
+			r.lastBodyUpdate = time.Now()
+			return nil
+		}
+		r.logger.Warn("feishu receipt: update reply failed, posting fresh",
+			"err", err, "state", r.state)
+	}
+
+	msgID, sendErr := r.bot.SendMessageText(ctx, r.chatID, text)
+	if sendErr != nil {
+		r.logger.Warn("feishu receipt: fresh reply failed",
+			"err", sendErr, "state", r.state)
+		return sendErr
 	}
 	r.replyMsgID = msgID
+	r.lastBodyText = text
+	r.lastBodyUpdate = time.Now()
 	return nil
 }
 
@@ -632,12 +805,24 @@ func (r *MessageReceipt) dispose(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.replyMsgID != "" {
-		if err := r.bot.UpdateMessage(ctx, r.replyMsgID, ""); err != nil {
-			// Feishu's UpdateMessage may not support empty body; ignore.
-			r.logger.Debug("feishu receipt: clear body noop",
-				"err", err, "msg_id", r.replyMsgID)
-		}
-	}
+// The reply card (rolling log + footer) and the append-only
+	// reaction trail are PRESERVED on the Feishu side — they
+	// are the user's permanent record of the conversation turn.
+	// dispose only tears down our internal handles so the adapter
+	// can GC the receipt object.
+//
+// Previous designs called UpdateMessage("") here to "clean up"
+	// the chat surface, but that interacted badly with the
+	// rate-limit-throttled body updates: if the terminal
+	// UpdateMessage had been rate-limited away, the dispose
+	// would still strip the body, leaving the user with a
+	// partially-rendered receipt. Keeping the Feishu-side
+	// state as the source of truth avoids that divergence.
+//
+// Reactions are append-only per main's fix(feishu): append-only
+// receipt reactions (#4) — there is no currentReactionID to
+// clear here; the trail accumulates across the receipt's
+// lifetime.
+	r.replyMsgID = ""
 	return nil
 }

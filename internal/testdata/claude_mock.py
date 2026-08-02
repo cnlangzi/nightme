@@ -2,9 +2,14 @@
 """Mock Claude Code CLI that mimics stream-json output.
 
 Reads one JSON envelope per line from stdin and emits:
-  1. A user-role echo event (simulates --replay-user-messages)
-  2. An assistant text event (the agent's response)
-  3. A terminal result event (signals turn completion)
+  1. An assistant text event (the agent's response)
+  2. A terminal result event (signals turn completion)
+
+The mock no longer emits a user-role echo event (which used to
+simulate --replay-user-messages). DefaultArgs dropped that flag
+in the F-25 v1.1 rolling-log fix — the chat surface pairs each
+receipt with its user message via Feishu's ReplyMessage API, so
+the channel doesn't need to re-render the user's text.
 
 Logs each step to stderr so the test can capture the bridge's
 normal-flow transcripts. Exit cleanly on stdin EOF.
@@ -34,17 +39,7 @@ def log(msg: str) -> None:
 def emit(envelope: str) -> None:
     text = extract_text(envelope)
     log(f"got envelope, text={text!r}")
-    # 1. user-role echo
-    sys.stdout.write(json.dumps({
-        "type": "user",
-        "message": {
-            "role": "user",
-            "content": [{"type": "text", "text": "[replay] " + text}],
-        },
-    }) + "\n")
-    sys.stdout.flush()
-    log("emitted user replay")
-    # 2. assistant text
+    # 1. assistant text
     sys.stdout.write(json.dumps({
         "type": "assistant",
         "message": {
@@ -54,7 +49,7 @@ def emit(envelope: str) -> None:
     }) + "\n")
     sys.stdout.flush()
     log("emitted assistant")
-    # 3. terminal result
+    # 2. terminal result
     sys.stdout.write(json.dumps({
         "type": "result",
         "subtype": "success",

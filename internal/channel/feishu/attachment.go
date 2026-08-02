@@ -205,8 +205,8 @@ func extractAttachments(msgType, content string) (text string, attachments []cha
 		// (inline video) is ignored for v0.2 — extracting it
 		// requires a more careful walk and Phase 2 will revisit.
 		var p struct {
-			Title    string                       `json:"title"`
-			Content  [][]map[string]any           `json:"content"`
+			Title   string             `json:"title"`
+			Content [][]map[string]any `json:"content"`
 		}
 		if err := json.Unmarshal([]byte(content), &p); err != nil {
 			return messageText(content), nil
@@ -322,10 +322,10 @@ func DownloadAttachments(ctx context.Context, c *lark.Client,
 			}
 		}
 		return DownloadResult{
-			Atts:          results,
+			Atts:           results,
 			HasAttachments: true,
-			AllFailed:     true,
-			FailureKeys:   keys,
+			AllFailed:      true,
+			FailureKeys:    keys,
 		}
 	}
 
@@ -339,10 +339,10 @@ func DownloadAttachments(ctx context.Context, c *lark.Client,
 	}
 
 	return DownloadResult{
-		Atts:          results,
+		Atts:           results,
 		HasAttachments: true,
-		AllFailed:     len(failedKeys) == len(atts),
-		FailureKeys:   failedKeys,
+		AllFailed:      len(failedKeys) == len(atts),
+		FailureKeys:    failedKeys,
 	}
 }
 

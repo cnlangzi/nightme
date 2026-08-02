@@ -560,9 +560,14 @@ func TestAgent_BuildArgs_Default(t *testing.T) {
 	// Empty cfg.PermissionMode falls back to bypassPermissions,
 	// which is the placeholder value baked into DefaultArgs — the
 	// net result should match DefaultArgs + extras + cfg.Args.
+	//
+	// --replay-user-messages was removed from DefaultArgs as part
+	// of the F-25 v1.1 rolling-log fix: the chat surface pairs
+	// each receipt with its user message via Feishu's ReplyMessage
+	// API, so the channel doesn't need to re-render user text.
 	got := buildArgs(nil, agent.StartConfig{Args: []string{"--resume", "abc"}})
-	if !containsSeq(got, "--replay-user-messages") {
-		t.Error("missing --replay-user-messages")
+	if containsSeq(got, "--replay-user-messages") {
+		t.Error("DefaultArgs should not contain --replay-user-messages (removed for F-25 v1.1)")
 	}
 	if !containsSeq(got, "--permission-mode", PermissionBypass) {
 		t.Errorf("--permission-mode placeholder not rewritten; got=%v", got)
@@ -811,18 +816,18 @@ func TestClaudeCodeBridge_RealSubprocess(t *testing.T) {
 		}
 	}
 
-	// Collect events. Per message we expect:
-	//   - 1 "[你] [replay] hello-N" EventText (the user echo)
+	// Collect events. Per message we expect (post F-25 v1.1 rolling-
+	// log fix; --replay-user-messages was removed from DefaultArgs):
 	//   - 1 "got: hello-N"     EventText (assistant response)
 	//   - 1 EventResult (final assistant text)
 	//   - 1 EventDone  (terminal)
-	// Total: 4 * messages.
+	// Total: 3 * messages.
 	//
 	// The loop drains every event from the channel until either
 	// the channel closes (pumpStream hit EOF) or the deadline
 	// trips. Counting only the categories we care about avoids
-	// the trap of `replays == messages && dones < messages` —
-	// the && would short-circuit as soon as replays reached 3
+	// the trap of `assistants == messages && dones < messages` —
+	// the && would short-circuit as soon as assistants reached 3
 	// even when EventDone for the third message was still in
 	// the channel buffer.
 	var replays, assistants, results, dones int
@@ -836,7 +841,7 @@ drain:
 		// ourselves. The explicit check here also proves the
 		// counts add up before the loop's deadline-fallback
 		// ever fires.
-		if replays >= messages && assistants >= messages &&
+		if assistants >= messages &&
 			results >= messages && dones >= messages {
 			break drain
 		}
@@ -859,13 +864,13 @@ drain:
 				dones++
 			}
 		case <-deadline:
-			t.Fatalf("deadline reached with replays=%d assistants=%d results=%d dones=%d (want all %d)",
+			t.Fatalf("deadline reached with replays=%d assistants=%d results=%d dones=%d (want assistants/results/dones == %d, replays == 0)",
 				replays, assistants, results, dones, messages)
 		}
 	}
 
-	if replays != messages {
-		t.Errorf("replay events = %d, want %d", replays, messages)
+	if replays != 0 {
+		t.Errorf("replay events = %d, want 0 (--replay-user-messages removed from DefaultArgs)", replays)
 	}
 	if assistants != messages {
 		t.Errorf("assistant events = %d, want %d", assistants, messages)

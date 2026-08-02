@@ -45,5 +45,4 @@ data/
 .claude/
 .codegraph/
 graphify-out/
-nightme/
-nightme
+/nightme/

@@ -151,6 +151,8 @@ fallback(ctx, msg)
 
 ### 2.2 CLI 输出 → 用户（Outbound）
 
+**核心语义：1 request : n response**。每个用户发起的对话都携带 `userMsgID`；Gateway 为每个 event 携带这个 userMsgID 转发到 Channel，Channel 据此决定把响应镇在哪个用户消息的 reply card 上。ReplyTo == "" 是仅有的“真正无镇”的 case（启动提示、内部日志），走 plain text。
+
 ```
 Claude Code 进程 (PTY child, cwd = session.Workspace)
   ↓ stdout 是 stream-json 行
@@ -166,18 +168,36 @@ session.MemoryManager.readPump (单消费者)
   ├ EventDone/Error → SetState(Idle) + OnTurnEnded() + markExited
   └ EventDone → onFlush 钩子（Gateway 注入）→ 翻 queued receipt 到 Executing
   ↓
-Gateway.EventCallback(s, ev)
-  ├ Translate(chat_id, ev) → OutboundMessage (抽象 wire format)
-  ├ OutResult/EventError → gateway.receipts 反查 userMsgID
+Gateway.translateAndSend(s, ev)         // EventCallback 驱动
+  ├ Translate(chat_id, ev) → OutboundMessage（抽象 wire format，ReplyTo 未填）
+  ├ enrichOutboundMeta(out, s)          // 注入 OutInit.Meta 的 agent_name / workspace / provider
+  ├ receiptsForSession(s.ID) → [userMsgID1, userMsgID2, ...]   // 该 session 绑定的所有 receipt
+  ├ if len(targets) > 0:
+  │   for _, umid := range targets:
+  │     out.ReplyTo = umid             // 1 request : n response 扇出
+  │     channel.Send(ctx, out)
+  ├ else (孤儿事件：session 不绑任何 receipt):
+  │   out.ReplyTo = ""                  // 无镇，Channel 当 plain text 处理
+  │   channel.Send(ctx, out)
+  ├ EventResult → gateway.receipts 反查 userMsgID（与扇出同路径）
   │   ├ 找到 rcpt → ch.UpdateReceipt(Done|Error) + ch.DisposeReceipt(rcpt)
   │   └ 找不到（agent 主动说话无对应 userMsg）→ 不处理
-  └ channel.Send(ctx, OutboundMessage{ChatID, Kind, Text, ...})
-      ├ Feishu: append 到 rolling-log message (FIFO evict) / OutCard 渲染 / OutInit 更新 receipt header
+  └ channel.Send(ctx, OutboundMessage{ChatID, Kind, Text, ReplyTo, ...})
+      ├ Feishu (ReplyTo != ""):
+      │   ├ 该 userMsgID 有 receipt → append to rolling-log + UpdateMessage in place
+      │   └ 无 receipt → coldStartReceipt: ReplyMessage API 创建镇到 userMsgID 的新卡
+      ├ Feishu (ReplyTo == ""):
+      │   └ plain text SendMessageText，不进任何 card
       ├ echo: 打印到 stdout
       └ future channels: 各自 native UI
 ```
 
 **单消费者修正（v0.3 修复点）**：`session.Events()` chan 是单消费者——只有 session 的 readPump 读。Gateway 通过 `Manager.EventCallback` 接收事件，**不**起 pumpOutbound goroutine 去读 Events()（v0.2.x 实现里两个 reader 抢同一个 chan 是 bug）。Gateway 仍可有 sweepSessions ticker 做心跳 + 新 session 检测，但不再需要 pump goroutine。
+
+**1 request : n response 梅出示例**（buffered batch：3 条用户消息被 flush 为 1 个 agent turn）：
+- session 绑定 receipts: [userMsgID_a, userMsgID_b, userMsgID_c]
+- agent emit 一个 EventText → Translate 出 1 个 OutboundMessage → 梅出 3 个 OutboundMessage（各带不同 ReplyTo）
+- Channel 为每个 userMsgID 路由到对应的 receipt；3 张 reply card 同时 in-place edit
 
 ### 2.3 用户用 slash command 创建 Session
 
@@ -212,7 +232,9 @@ handler.run(ctx, msg, args)
 
 **为什么 Run 归 Gateway**：Gateway 拥有绑定关系、知道 chat 是否已有 session、决定何时 spawn。Manager 只暴露纯 factory `Create(workspace, agent, args)`。
 
-### 2.4 Receipt 生命周期（v1.1 新增小节）
+### 2.4 Receipt 生命周期（v1.1）
+
+**关键设计**：receipt 按 `userMsgID` 索引（**不是** chatID）。多 receipt/chat 可共存（buffered batch 场景），每个 receipt 镇定到自己的用户消息。
 
 ```
    ch.CreateReceipt(chat_id, user_msg_id, blocks)         [Gateway 调 channel]
@@ -234,9 +256,30 @@ handler.run(ctx, msg, args)
                                                        delete(receipts, userMsgID)
 ```
 
+**v1.1 Receipt 渲染细节**：
+
+1. **ReplyCard = 镇到 userMsgID 的单条 Feishu reply message**。Feishu 原生渲染 “Reply to <user>: <preview>” header。
+2. **Rolling-log 单卡**。一个用户消息 = 一张 reply card，body 是 header + entries，agent events 追加进去。超 `replyMaxBytes` 时 FIFO 驱逐（“…(前 N 条已省略)”）。
+3. **Reaction emoji 双轨**：⏳→🔄→✅/❌ 在 user message 上 swap（1 个永远不多）。
+4. **OutboundMessage.ReplyTo**：Gateway 为每个 agent event 梅出 N 条 OutboundMessage（每个 bound receipt 一条），各带不同的 `userMsgID`。ReplyTo == "" 表示“真正无镇”（启动提示等），Channel 走 plain text。
+5. **Footer**（可选）：`─────────\nAgent: <name> | cwd: <path> | tokens: <in>K / <out>K`。Footer 由 Channel 在 OutInit / OutUsage 时组合（nightme 不跟踪 token 本身，只转发 agent EventUsage.Meta）。
+
+**多 receipt 同 chat 共存示例**：
+
+```
+User: /run claude     → userMsgID_1 → receipt_1 (⏳)
+User: /cwd code/...   → userMsgID_2 → receipt_2 (⏳)  ← 不 evict receipt_1
+User: hi              → userMsgID_3 → receipt_3 (⏳)  ← 不 evict receipt_1/2
+                                ↓
+              InputBuffer flush (msg_1+2+3 合并) → 3 个 receipt 同帧 翻 Executing
+              agent emit events → 梅出到 3 个 receipt → 3 张 reply card 同步 in-place edit
+              EventDone → 3 个 receipt 同帧 翻 Done
+```
+
 **关键属性**：
 - **Gateway 是 FSM 状态转移时机 owner**——它决定什么时候 UpdateReceipt
 - **Channel 是 FSM 状态视觉 owner**——它决定 ⏳/🔄/✅/❌ 在自家 UI 上长什么样（Feishu swap reaction / echo 打印 / web data-attribute）
+- **Channel 也是 receipt 渲染 owner**——Rolling-log、footer、reply-in-thread 镇定 都是 Channel 的职责
 - **Session 完全不知道 receipt 存在**——InputBuffer FSM 只管 idle/busy
 - **Receipt 数据是 channel 私有的**——Gateway 持 opaque `Receipt` 句柄，不解引用
 
@@ -428,8 +471,9 @@ nightme 是**全新独立项目**，不依赖任何现有代码。
 技术规范 v1.1 已锁定。下一步：
 
 1. ✅ SPEC v1.1（含职责隔离）冻结
-2. ⏭ 按 [`PLAN.md`](./PLAN.md) 实施：M1 → M2 → M3 → v0.3 refactor（commit 1-6 见 F-26 §13）
-3. ⏭ 每个 F-XX 详细设计按需迭代
+2. ✅ v1.1.2（本文档）：§2.2 outbound 路径补 OutboundMessage.ReplyTo 契约 + 1 request : n response 扇出；§2.4 Receipt 生命周期补 per-userMsgID 索引 + rolling-log 单卡 + Footer + ReplyTo 镇定语义
+3. ⏭ 按 [`PLAN.md`](./PLAN.md) 实施：M1 → M2 → M3 → v0.3 refactor（commit 1-6 见 F-26 §13）
+4. ⏭ 每个 F-XX 详细设计按需迭代
 
 ---
 

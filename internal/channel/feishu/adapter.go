@@ -956,6 +956,40 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 			}
 			content += e.Text
 		}
+		// Thinking entries are rendered as a collapsible
+		// panel (collapsed by default) so the long
+		// reasoning text doesn't push the final answer
+		// off the visible card surface. Mirrors the
+		// OpenClaw Lark plugin's reasoning panel
+		// (openclaw-lark src/card/builder.ts — see the
+		// reasoning section in buildCompleteCard).
+		if e.Kind == "thinking" {
+			elements = append(elements, map[string]any{
+				"tag":       "collapsible_panel",
+				"expanded":  false,
+				"header": map[string]any{
+					"title": map[string]any{
+						"tag":     "markdown",
+						"content": "💭 思考",
+					},
+					"vertical_align": "center",
+				},
+				"border": map[string]any{
+					"color":        "grey",
+					"corner_radius": "5px",
+				},
+				"vertical_spacing": "8px",
+				"padding":          "8px 8px 8px 8px",
+				"elements": []map[string]any{
+					{
+						"tag":       "markdown",
+						"content":   e.Text,
+						"text_size": "notation",
+					},
+				},
+			})
+			continue
+		}
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
 			"content": content,

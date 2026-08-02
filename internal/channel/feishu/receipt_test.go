@@ -851,6 +851,88 @@ func TestBuildReceiptCard_FooterOpenClawStyle(t *testing.T) {
 	})
 }
 
+// TestBuildReceiptCard_ThinkingCollapsiblePanel pins the
+// collapsible_panel rendering for thinking entries. Mirrors
+// the OpenClaw Lark plugin's reasoning panel
+// (openclaw-lark src/card/builder.ts — reasoning section).
+//
+// Invariants:
+//  1. Thinking entries (Kind == "thinking") render as a
+//     collapsible_panel element with expanded: false (the
+//     user clicks to expand, so the long reasoning text
+//     doesn't push the final answer off the card surface).
+//  2. The panel header is a markdown element titled "💭 思考".
+//  3. The panel's inner elements are a single markdown
+//     element with the thinking text and text_size:
+//     "notation" (small / dim visual weight).
+//  4. Non-thinking entries (e.g. tool calls, final reply)
+//     still render as plain markdown elements — no
+//     collapsible_panel wrapping.
+func TestBuildReceiptCard_ThinkingCollapsiblePanel(t *testing.T) {
+	r := &MessageReceipt{
+		state:        StateExecuting,
+		eventCount:   3,
+		lastEventAt:  parseTime(t, "2026-08-01T14:32:05+08:00"),
+		agentName:    "claude",
+		workspace:    "/Users/devin/code/nightme",
+		branch:       "main",
+		inputTokens:  20_000,
+		outputTokens: 1_000,
+		entries: []LogEntry{
+			{
+				Icon:  "💭",
+				Text:  "The user said hi — I should respond briefly and friendly. No need to invoke any skills or tools.",
+				Kind:  "thinking",
+			},
+			{
+				Icon:  "🔧",
+				Text:  "Read(/tmp/foo)",
+				Kind:  "tool_start",
+			},
+			{
+				Icon:  "💬",
+				Text:  "Hi! How can I help you today?",
+				Kind:  "reply",
+			},
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+
+	// (1) The thinking entry becomes a collapsible_panel.
+	if !strings.Contains(body, `"tag":"collapsible_panel"`) {
+		t.Errorf("card body missing collapsible_panel for thinking entry\n--- body ---\n%s", truncateForTest(body, 400))
+	}
+	// (2) The panel is collapsed by default.
+	if !strings.Contains(body, `"expanded":false`) {
+		t.Errorf("collapsible_panel not collapsed by default (expanded:false)\n--- body ---\n%s", truncateForTest(body, 400))
+	}
+	// (3) The panel header is "💭 思考".
+	if !strings.Contains(body, `"content":"💭 思考"`) {
+		t.Errorf("collapsible_panel header missing \"💭 思考\"\n--- body ---\n%s", truncateForTest(body, 400))
+	}
+	// (4) The thinking text is inside a notation-sized
+	// markdown element (the inner element of the panel).
+	// We assert the thinking text appears + that an
+	// inner text_size:notation is present.
+	if !strings.Contains(body, "should respond briefly and friendly") {
+		t.Errorf("collapsible_panel missing thinking text body\n--- body ---\n%s", truncateForTest(body, 400))
+	}
+
+	// (5) Non-thinking entries (tool_start, reply) are
+	// still plain markdown — no collapsible_panel around
+	// them. The two non-thinking entries should produce
+	// two markdown elements WITHOUT the 💭 header.
+	if !strings.Contains(body, `"content":"🔧 Read(/tmp/foo)"`) {
+		t.Errorf("non-thinking tool_start entry missing plain markdown\n--- body ---\n%s", truncateForTest(body, 400))
+	}
+	if !strings.Contains(body, `"content":"💬 Hi! How can I help you today?"`) {
+		t.Errorf("non-thinking reply entry missing plain markdown\n--- body ---\n%s", truncateForTest(body, 400))
+	}
+}
+
 // TestBuildColdStartCard_Card2Shape pins the cold-start card
 // emitted by Adapter.receiptFor. It must be a Card 2.0 envelope
 // (same shape contract as the rolling-log card) with a single ⏳

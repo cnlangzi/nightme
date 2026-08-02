@@ -70,14 +70,14 @@ type contentBlock struct {
 	Input json.RawMessage `json:"input,omitempty"`
 
 	// tool_result (in user-role message)
-	ToolUseID string          `json:"tool_use_id,omitempty"`
+	ToolUseID string `json:"tool_use_id,omitempty"`
 	// Content is the tool's result payload. In Claude Code's
 	// stream-json schema this can be a plain JSON string OR a
 	// nested array of content blocks (multi-modal). We accept it
 	// as RawMessage and stringify at emit time so the renderer
 	// can surface a single-line summary in the rolling log.
-	Content   json.RawMessage `json:"content,omitempty"`
-	IsError   bool            `json:"is_error,omitempty"`
+	Content json.RawMessage `json:"content,omitempty"`
+	IsError bool            `json:"is_error,omitempty"`
 }
 
 // pumpStream reads one JSON event per line from r and translates each
@@ -212,10 +212,18 @@ func translate(ev streamEvent, events chan<- agent.AgentEvent, askHandler askHan
 		//       be correlated.
 		//
 		//   (b) plain text blocks — only emitted when Claude Code is
-		//       started with --replay-user-messages. Each becomes an
-		//       EventText with a "[你] " prefix so the channel can
-		//       render the user's own input distinctly from the
-		//       assistant's replies.
+		//       started with --replay-user-messages, OR by a
+		//       third-party bridge that mimics the same shape. Each
+		//       becomes an EventText with a "[你] " prefix so the
+		//       channel can render the user's own input distinctly
+		//       from the assistant's replies.
+		//
+		//       DefaultArgs no longer passes --replay-user-messages
+		//       to Claude Code (F-25 v1.1 rolling-log fix), so this
+		//       branch is currently unreachable for the upstream
+		//       Claude Code. We keep the parser for defensive
+		//       compatibility with legacy sessions / future protocol
+		//       revisions.
 		if ev.Message == nil {
 			return
 		}

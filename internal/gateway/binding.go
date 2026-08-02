@@ -16,24 +16,20 @@ package gateway
 import (
 	"sync"
 
+	"github.com/cnlangzi/nightme/internal/registry"
 	"github.com/cnlangzi/nightme/internal/receipt"
 )
 
-// BindingEntry is the v1.1 chat → session binding. Persisted via
-// registry.File in commit 5 (registry two-table split).
+// BindingEntry is the v1.1 chat → session binding. The canonical
+// definition lives in internal/registry (the persistence layer);
+// gateway re-exports it so handlers / runtime see one type.
 //
 // ChatID is the natural key. ChatType is metadata (p2p / group /
 // thread) carried for /status replies. SessionID is the FK into
 // the session manager's session table. Workspace and Agent are
 // denormalized for /cwd reply ("Workspace set to <ws>") and /run
 // reply ("Started: <agent>") without re-querying the session.
-type BindingEntry struct {
-	ChatID    string
-	ChatType  string
-	SessionID string
-	Workspace string
-	Agent     string
-}
+type BindingEntry = registry.BindingEntry
 
 // receiptEntry is the v1.1 per-userMessage receipt FSM bookkeeping.
 //

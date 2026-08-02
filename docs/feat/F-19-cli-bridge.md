@@ -1,10 +1,12 @@
 # F-19: PTY Mode Byte Pipe (Bridge PTY Implementation)
 
-> **Status**: designed (v0.1)
-> **Milestone**: M1 (built first, used by M2)
+> **Status**: implemented (v0.1 PTY; v0.2 JSON-IO for Claude Code 见 F-24; v1.1 bridge interface 未变)
+> **Milestone**: M1 (built first, used by M2); v0.3 (单消费者修复走 EventCallback)
 > **Depends on**: F-04 (PTY), F-08 (Channel)
 > **Used by**: F-02 (input), F-03 (output), F-06 (cleanup)
-> **Related docs**: SPEC.md §1.1 (Bridge 组件), [F-21-agent-modes.md](./F-21-agent-modes.md) (Bridge 三层模式), FEATURES.md
+> **Related docs**: SPEC.md v1.1 §1.1 (Bridge 组件), [F-21-agent-modes.md](./F-21-agent-modes.md) (Bridge 四层模式), [F-26-gateway-hub.md §2.3](./F-26-gateway-hub.md) (single-consumer), FEATURES.md
+
+> **v1.1 修订**：bridge 接口未变（仍是 `agent.AgentSession.Events() <-chan AgentEvent`）。但 Events() chan 现在**只有 session.readPump 一个消费者**——v0.2.x 的双消费者 race 是 bug，已通过 [F-26 §6 commit 4](./F-26-gateway-hub.md) 修复。Bridge 包代码不需要任何改动，只是调用方用法变了。
 
 本文档回答：**nightme 的 Bridge 在 PTY 模式下怎么把 CLI 的 TTY 字节流搬到飞书、再把飞书的字节流搬回 TTY**。
 
@@ -197,11 +199,11 @@ Claude Code crash → PTY EOF → bridge.Read() returns io.EOF
   ↓
 Session.readPump 退出
   ↓
-SessionManager.MarkExited(session_id)
+MemoryManager.readPump 标记 sess.Status → Exited + EventDone 事件
   ↓
-Channel.SendMessage(chat_id, "Session ended (exit code: {code})")
+Manager.EventCallback 触发 → Gateway.OnSessionEvent → Translate → channel.Send(OutboundMessage{Kind: OutText, Text: "Session ended (exit code: {code})"})
   ↓
-registry.Delete(session_id)
+registry.UpsertSession(StatusExited)
 ```
 
 ### 5.2 Channel 断连（飞书）

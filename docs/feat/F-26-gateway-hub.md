@@ -1,267 +1,432 @@
-# F-26: Gateway Hub Architecture
+# F-26: Gateway Hub & Responsibility Isolation
 
-> **Status**: designing (v0.3)
-> **Milestone**: M3 (architecture refactor — gateway becomes central hub for all message traffic)
+> **Status**: implemented (v1.1 architectural pivot; v0.3 release tag carries the new shape)
+> **Milestone**: v0.3 (commit 1-6 of "responsibility isolation" refactor)
 > **Depends on**: F-08 (Channel), F-20 (Gateway command router), F-21 (agent modes), F-25 (input buffer)
 > **Used by**: every Channel + every Agent
-> **Related docs**: [SPEC.md §1.1](../SPEC.md), [F-08-channel-abstraction.md](./F-08-channel-abstraction.md), [F-20-gateway.md](./F-20-gateway.md)
+> **Related docs**: [`SPEC.md`](../SPEC.md) v1.1, [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md), [`F-20-gateway.md`](./F-20-gateway.md), [`F-25-input-buffer.md`](./F-25-input-buffer.md)
+
+---
 
 ## 1. Description
 
-Make **Gateway** the central hub for **all** message traffic — both
-inbound (user → agent) and outbound (agent → user). Today inbound
-flows through Gateway (slash command dispatch + fallback) but
-outbound bypasses Gateway entirely (the session pump calls the
-Feishu-specific Renderer directly). This couples the agent runtime
-to a single channel implementation; adding Slack or a web UI
-would require threading display logic through the agent code.
+This doc is the **authoritative reference for the v1.1 responsibility-isolation refactor**. It exists because the refactor was large enough that scattered cross-references in SPEC.md / F-08 / F-20 / F-25 are not enough — anyone touching the three layers (Channel / Gateway / Session) needs to read this first.
 
-After this refactor:
+**v1.1 core invariant** (one line): **Channel and Session are mutually ignorant; everything between them is routed through Gateway**.
 
-- **Gateway** owns the ChatID ↔ SessionID map, the inbound buffer
-  (per-chat inbound queue when the agent is busy), the agent
-  dispatch (session.SendText), the outbound stream (sequence of
-  OutboundMessage from agent events), and the delivery semantics
-  ("sent to target" — synchronous fire-and-ack, no retry queue).
-- **Channel** is a thin adapter: WebSocket/TCP connection, native
-  ↔ Gateway format conversion (Feishu event → `InboundMessage`,
-  `OutboundMessage` → Feishu API call), and the **display strategy**
-  (Feishu collapses the outbound stream into a single rolling-log
-  message with FIFO eviction; Slack could use thread replies + emoji;
-  Web could use HTML).
-- **Agent** emits `agent.AgentEvent` (existing type, unchanged).
-  Gateway translates to `OutboundMessage` and hands to Channel.
+---
 
-Adding a new channel becomes a single-file implementation of the
-`Channel` interface — no changes to Gateway or agent code.
+## 2. The v1.1 architecture (responsibility isolation)
 
-## 2. The Message Types (Gateway-owned)
+### 2.1 Three layers, three FSMs, three owners
+
+| Layer | FSM it owns | FSM data | Persistence |
+|-------|-------------|----------|-------------|
+| **Channel** (Feishu / echo / future) | **Receipt rendering** (visual interpretation of `ReceiptState`) | channel-private: `message_id`, `reaction_id`, content body | channel backend |
+| **Gateway** | **Binding FSM** (chat ↔ session) + **Receipt FSM** (per userMsg) | `bindings map[chatID]*BindingEntry`, `receipts map[userMsgID]*receiptEntry` | BindingEntry persisted; receipts in-memory only |
+| **Session Manager** | **InputBuffer FSM** (idle ↔ busy) + **Session.Status FSM** (running ↔ detached / exited) | `Session{ID, Workspace, Agent, Args, PID, Status}` + per-session `InputBuffer` | SessionEntry persisted; InputBuffer in-memory only |
+
+### 2.2 What each layer **does not** know
+
+| Layer | Does not know | Enforced by |
+|-------|--------------|-------------|
+| **Channel** | sessions, workspaces, agents, bindings, receipt state machine, chat → session mapping | Channel interface only exposes `Receipt` opaque type + `ReceiptState` enum |
+| **Gateway** | IM protocol details (Feishu API specifics, message ids, reactions), agent internal protocol (PTY vs ACP vs JSON-IO), receipt rendering | Gateway only knows `Channel` interface + `SessionManager` interface; never imports `channel/feishu` or `bridge/*` |
+| **Session** | chat_id, channel, receipt, binding relation, slash commands | Session struct has no `ChatID` field; Session package imports neither `channel/` nor `gateway/` |
+
+### 2.3 The single-consumer rule (v0.2.x bug fix)
+
+`session.Events()` chan has **exactly one consumer**: the `MemoryManager.readPump` goroutine spawned at `Create()` time. Gateway does **not** spawn a separate `pumpOutbound` goroutine to read from `Events()` (the v0.2.x approach, which had two readers racing on the same channel).
+
+Instead, the `MemoryManager` takes an `EventCallback(s *Session, ev AgentEvent)` at construction time. The callback is invoked synchronously from inside the `readPump` goroutine, after the InputBuffer FSM transition. Gateway registers its `onSessionEvent` method as the callback at startup.
+
+**Why this matters**:
+- Single-consumer removes the v0.2.x race where readPump and pumpOutbound both pulled from `Events()` and each event went to only one of them
+- InputBuffer FSM is updated **before** the callback fires, so Gateway's translation always sees the correct buffer state
+- Backpressure is natural: slow channel.Send blocks the callback, blocks readPump, blocks `as.Events()`, blocks the bridge, blocks the CLI
+
+### 2.4 Receipt data flow (v1.1)
+
+The `Receipt` is an **opaque type**. Gateway holds it as `channel.Receipt` (interface); the concrete type is `*feishu.MessageReceipt` or `*echo.messageReceipt` (or future channels' types). Gateway treats it as a token — never reads or writes fields.
+
+```
+Gateway code (pseudocode):
+
+func (g *Gateway) onFallback(ctx, msg) error {
+    sess := g.bindings[msg.ChatID].session  // may be nil
+    if sess == nil || sess.Status() != Running { return reply(...) }
+
+    // (a) Channel owns the receipt OBJECT; returns opaque handle
+    rcpt, err := g.channel.CreateReceipt(ctx, msg.ChatID, msg.MessageID, msg.Blocks)
+    if err != nil { return err }
+
+    // (b) Gateway owns the receipt STATE
+    g.receipts[msg.MessageID] = &receiptEntry{
+        chatID: msg.ChatID, sessionID: sess.ID,
+        receipt: rcpt, state: Pending,
+    }
+
+    // (c) Session owns the InputBuffer FSM (decides dispatch vs buffer)
+    if err := sess.QueueUserMessage(msg.Blocks, msg.MessageID); err != nil {
+        g.channel.UpdateReceipt(ctx, rcpt, ReceiptError)
+        return err
+    }
+
+    // (d) Flip to Executing if dispatch was immediate (Buffer was Idle)
+    //     If Busy, InputBuffer.onFlush (installed by Gateway) will flip it on flush.
+    return nil
+}
+
+func (g *Gateway) onSessionEvent(s *Session, ev AgentEvent) {
+    out := Translate(s.ChatID_or_lookup_from_binding, ev)  // → OutboundMessage
+    g.channel.Send(ctx, out)
+
+    if ev.Kind == EventResult || ev.Kind == EventError {
+        // Find receipts bound to this session; close all that's still open.
+        for userMsgID, entry := range g.receipts {
+            if entry.sessionID != s.ID { continue }
+            if ev.Kind == EventError {
+                g.channel.UpdateReceipt(ctx, entry.receipt, ReceiptError)
+            } else {
+                g.channel.UpdateReceipt(ctx, entry.receipt, ReceiptDone)
+            }
+            g.channel.DisposeReceipt(ctx, entry.receipt)
+            delete(g.receipts, userMsgID)
+        }
+    }
+}
+
+// InputBuffer.onFlush installed by Gateway on session creation:
+func (g *Gateway) onInputBufferFlush(s *Session, blocks []ContentBlock, userMsgIDs []string) error {
+    // Flip each queued receipt to Executing (now actually being sent)
+    for _, umid := range userMsgIDs {
+        if entry, ok := g.receipts[umid]; ok && entry.state == Pending {
+            g.channel.UpdateReceipt(ctx, entry.receipt, ReceiptExecuting)
+            entry.state = Executing
+        }
+    }
+    return s.SendBlocks(ctx, blocks)
+}
+```
+
+---
+
+## 3. Channel interface change (the receipt-lifecycle extension)
 
 ```go
-// internal/gateway/messages.go
+// internal/channel/channel.go — additive extension to existing interface
 
-type InboundMessage struct {
-    ChatID    string          // abstract chat ID (Channel maps to its native ID)
-    UserID    string          // sender (open_id, slack user id, etc.)
-    ChatType  ChatType        // p2p | group | thread
-    Text      string          // caption only (attachments below)
-    Attachments []Attachment  // already downloaded to LocalPath by Channel
-    ReplyTo   string          // thread root message id (for thread-mode replies)
-    Raw       any             // channel-private payload (Gateway never inspects)
-    Action    *ActionPayload  // for card.action.trigger / button clicks
+type Channel interface {
+    // Existing (unchanged):
+    Name() string
+    Incoming() <-chan gateway.InboundMessage
+    Send(ctx context.Context, msg gateway.OutboundMessage) error
+
+    // New in v1.1 — receipt lifecycle rendering:
+    CreateReceipt(ctx context.Context, chatID, userMsgID string, blocks []agent.ContentBlock) (Receipt, error)
+    UpdateReceipt(ctx context.Context, receipt Receipt, state ReceiptState) error
+    DisposeReceipt(ctx context.Context, receipt Receipt) error
 }
 
-type Attachment struct {
-    LocalPath string         // path on local filesystem
-    MimeType  string
-    Size      int64
-    Name      string          // original filename
-}
+// Receipt is an opaque handle. Channel returns its own concrete type
+// (e.g. *feishu.MessageReceipt). Gateway does not read or write fields.
+type Receipt interface{}
 
-type OutboundMessage struct {
-    ChatID  string
-    Kind    OutboundKind
-    Text    string         // for OutText / OutToolStart / OutToolEnd / OutThinking
-    Card    *Card          // for OutCard (interactive permission cards)
-    Reaction *Reaction      // for OutReaction / OutReactionRemoved
-    ReplyTo string         // thread reply target (for thread-mode replies)
-    Meta    map[string]any // msg id, session id, request_id, etc.
-}
-
-type OutboundKind int
+// ReceiptState is the cross-channel state enum. Gateway is the only
+// code that decides when to transition; Channel only renders.
+type ReceiptState int
 const (
-    OutText OutboundKind = iota
-    OutToolStart
-    OutToolEnd
-    OutThinking
-    OutReaction
-    OutReactionRemoved
-    OutCard
-    OutTyping
-    // future: OutFile, OutVoice, OutVideo, …
+    ReceiptPending   ReceiptState = iota  // ⏳
+    ReceiptExecuting                      // 🔄
+    ReceiptDone                           // ✅
+    ReceiptError                          // ❌
 )
 ```
 
-## 3. The Channel Interface (thin)
+**Feishu implementation** (in `internal/channel/feishu/adapter.go`):
+- `CreateReceipt`: build receipt text from blocks (via Feishu helper), post the receipt message, add ⏳ reaction, return `*MessageReceipt{messageID, reactionID, replyMsgID}`
+- `UpdateReceipt(_, _, Pending)`: swap reaction to ⏳ (or add ⏳ if previously null)
+- `UpdateReceipt(_, _, Executing)`: swap reaction ⏳ → 🔄
+- `UpdateReceipt(_, _, Done)`: swap reaction → ✅; optionally edit receipt body to show final result
+- `UpdateReceipt(_, _, Error)`: swap reaction → ❌
+- `DisposeReceipt`: delete the receipt message (or no-op if channel UI prefers to keep)
+
+**Echo implementation** (in `internal/channel/echo/echo.go`):
+- All three methods are logging-only: print `[receipt <userMsgID>] state=<state>` lines to stdout. Echo channel never returns errors from these (no network backend).
+
+### 3.1 What is NOT in the Channel interface (deliberately)
+
+- `MarkExecuting / MarkDone / MarkError` — replaced by `UpdateReceipt(_, _, ReceiptState)`
+- `BuildForwardedText(blocks)` — channel takes blocks directly in `CreateReceipt`
+- `ReceiptHandle` exposed fields — gateway never reads; pure opaque
+- `ChatID` on receipt — channel knows the chat it created the receipt in
+
+---
+
+## 4. Gateway internal structure
 
 ```go
-// internal/channel/channel.go
+// internal/gateway/gateway.go — the new state
 
-type Channel interface {
-    Name() string
-    Start(ctx context.Context) error
-    Stop(ctx context.Context) error
+type gateway struct {
+    mu       sync.RWMutex
+    cmds     map[string]Command
+    fb       FallbackHandler
 
-    // Inbound: the channel normalises its native events into
-    // InboundMessage and feeds them here. Gateway reads this.
-    Incoming() <-chan gateway.InboundMessage
+    channels       []Channel
+    channelCh      chan InboundMessage
 
-    // Outbound: Gateway hands each OutboundMessage here. Channel
-    // formats and sends. "Delivered" means Send() returned nil.
-    // Channel may decline to render some kinds (e.g., Slack can't
-    // swap reactions in place) — Gateway doesn't care, Channel
-    // substitutes or drops.
-    Send(ctx context.Context, msg gateway.OutboundMessage) error
+    // v1.1 additions:
+    bindings map[string]*BindingEntry  // chatID → binding
+    receipts map[string]*receiptEntry  // userMsgID → receipt
+
+    // Runtime state:
+    stopCh   chan struct{}
+    stopOnce sync.Once
+    wg       sync.WaitGroup
+    chatToChan  map[string]Channel
+    defaultChan Channel
+
+    // Manager handles:
+    manager session.Manager
+    agents  *agent.Registry
+
+    // Receipt FSM hook into session InputBuffer.onFlush
+    onBufferFlush func(s *Session, blocks []agent.ContentBlock, userMsgIDs []string) error
+}
+
+type BindingEntry struct {
+    ChatID    string  // natural key
+    ChatType  string  // p2p / group / thread (metadata only)
+    SessionID string  // foreign key into manager.sessions
+    Workspace string  // denormalized for /cwd reply and status
+    Agent     string  // denormalized for /run reply
+}
+
+type receiptEntry struct {
+    chatID    string
+    sessionID string
+    receipt   channel.Receipt  // opaque
+    state     ReceiptState
 }
 ```
 
-That's the entire surface. No buffering, no command parsing, no
-receipt state, no retry — those live at Gateway.
+### 4.1 Binding table operations
 
-## 4. The Gateway (central hub)
+| Op | Where | Side effects |
+|----|-------|-------------|
+| `LookupByChat(chatID) → *BindingEntry` | all fallback / handler paths | read-only |
+| `Bind(chatID, chatType, sess)` | `/cwd` handler on first creation | adds to map, persists BindingEntry |
+| `Rebind(chatID, sess)` | `/cwd` handler on workspace update | replaces map entry, persists |
+| `Unbind(chatID)` | not used (bindings are permanent) | reserved for v0.4 multi-session |
+| `RestoreBindings([]BindingEntry)` | manager.RestoreBindings step | bulk-load from registry |
+
+### 4.2 Receipt table operations
+
+| Op | Where | Side effects |
+|----|-------|-------------|
+| `Create(chatID, sessID, rcpt)` | fallback flow (a) | adds to map |
+| `Flip(userMsgID, state)` | fallback flow (d) + onInputBufferFlush + onSessionEvent | updates entry.state; **Channel.UpdateReceipt called inside the flip** |
+| `Dispose(userMsgID)` | onSessionEvent on EventResult/Error | calls Channel.DisposeReceipt, removes from map |
+
+### 4.3 /run is Gateway's logic (v1.1 statement)
+
+`/run <agent> [args]` does **not** call `manager.Run(chatID, agent)`. That method was the leak — it took a `chatID` and implicitly did a binding lookup inside the Manager. v1.1 removes it.
+
+`/run` is now:
+```
+handler.run(ctx, msg, args):
+    binding := gw.LookupByChat(msg.ChatID)
+    if binding == nil:
+        return reply("no workspace set, /cwd first")
+
+    agentName := args[0]
+    if gw.agents.Get(agentName) == error:
+        return reply("unknown agent: " + agentName)
+
+    sess, _ := gw.manager.Get(binding.SessionID)
+    if sess.Status() == StatusRunning:
+        return reply("Already running, pid=N")
+
+    // Pure factory call — no chatID, no binding logic inside manager
+    newSess, err := gw.manager.Create(ctx, CreateRequest{
+        Workspace: binding.Workspace,
+        Agent:     agentName,
+        Args:      args[1:],
+        OnFlushHook: gw.onInputBufferFlush,  // gateway installs the hook
+    })
+
+    // Update binding to point at the new Session
+    gw.bindings[msg.ChatID].SessionID = newSess.ID
+    gw.upsertBinding(gw.bindings[msg.ChatID])
+    gw.manager.UpsertSession(newSess)
+
+    return reply("Started: <agent>, pid=<N>, cwd=<ws>")
+```
+
+`manager.Create` signature (v1.1):
+```go
+type CreateRequest struct {
+    Workspace   string  // required
+    Agent       string  // required
+    Args        []string
+    OnFlushHook func(s *Session, blocks []agent.ContentBlock, userMsgIDs []string) error
+    // ^ gateway installs this; session stores it in InputBuffer.onFlush
+}
+```
+
+The `OnFlushHook` is the **only** session → gateway callback surface. It fires when the InputBuffer transitions Busy → Idle and flushes its queued messages. Gateway uses the `userMsgIDs` to flip receipts from Pending → Executing.
+
+---
+
+## 5. Session Manager interface (v1.1 slim)
 
 ```go
-// internal/gateway/gateway.go
+// internal/session/manager.go
 
-type Gateway struct {
-    mu        sync.Mutex
-    channels  map[string]Channel              // Channel.Name() -> Channel
-    sessions  map[string]*Session             // ChatID -> Session
-    buffers   map[string][]InboundMessage     // ChatID -> queued inbound
-    routes    []Command                       // registered slash commands
+type Manager interface {
+    Create(ctx context.Context, req CreateRequest) (*Session, error)
+    Get(id string) (*Session, error)
+    List() []*Session
+    Kill(id string) error
+    Restore(ctx context.Context) error
+    Persist() error
 }
-
-func (g *Gateway) Start(ctx context.Context, channels []Channel) error
-func (g *Gateway) Stop(ctx context.Context) error
-
-// Inbound dispatch (driven by each Channel's Incoming()):
-func (g *Gateway) handleInbound(ctx context.Context, ch Channel, msg InboundMessage) error
-
-// Outbound dispatch (driven by each Session's Events channel):
-func (g *Gateway) handleOutbound(ctx context.Context, ev agent.AgentEvent) error
-
-// Slash command routing:
-func (g *Gateway) Register(cmd Command)
 ```
 
-Gateway's main loop (one goroutine per Channel + one per Session):
+**Removed from v1.1** (these leaked chat_id into session):
+- `CreateOrUpdate(chatID, chatType, workspace, agent, args)`
+- `Run(chatID, agent, extraArgs)`
+- `GetByChat(chatID)`
+- `KillByChat(chatID)`
+- `MarkDetached(id)` — was process-aware; **kept** because it doesn't take chat_id
 
-```
-ch.Incoming() ─► handleInbound:
-                   ├─ match slash command → handler(ctx, msg, args)
-                   ├─ else → enqueue to sessions[chatID].buffer
-                              (or flush immediately if agent idle)
-
-session.Events() ─► handleOutbound:
-                      ├─ AgentEvent → OutboundMessage translator
-                      └─ sessions[chatID].channel.Send(ctx, msg)
-```
-
-## 5. The Agent (unchanged interface)
-
+`Session` struct (v1.1):
 ```go
-// internal/agent/agent.go — existing, untouched.
+type Session struct {
+    ID         string         // natural key
+    Workspace  string         // immutable after Create
+    Agent      string         // immutable after Create
+    Args       []string
+    PID        int            // 0 when Exited
+    StartedAt  time.Time
+    LastRunAt  time.Time
 
-type Agent interface {
-    Name() string
-    Mode() Mode
-    Command() string
-    Args() []string
-    Detect() error
-    Start(ctx context.Context, cfg StartConfig) (AgentSession, error)
-}
+    status     Status         // Running / Detached / Exited
+    exitCode   *int
+    agentSession agent.AgentSession
+    cancel       context.CancelFunc
+    inputBuffer  *InputBuffer  // F-25
 
-type AgentSession interface {
-    Events() <-chan AgentEvent
-    SendText(ctx context.Context, text string) error
-    SendBlocks(ctx context.Context, blocks []ContentBlock) error
-    SendPermission(ctx context.Context, choice string) error
-    Close() error
+    // No ChatID, no ChatType, no OnUserMessage
 }
 ```
 
-The Agent still emits `AgentEvent{Kind, Text, ToolStart, ToolEnd,
-Permission, Done, Error}`. Gateway owns the
-`AgentEvent → OutboundMessage` translator (Stage 2 work).
+---
 
-## 6. Migration Stages
+## 6. Migration stages (the commit plan that landed v1.1)
 
-| Stage | What changes | Risk |
-|---|---|---|
-| 1 | Add `internal/gateway/messages.go`. Update Channel interface. Add skeleton Gateway. Behaviour unchanged. | Low — additive |
-| 2 | Move session pump + main loop into Gateway. Gateway owns ChatID↔Session map and the inbound buffer. | Medium — main loop rewire |
-| 3 | Move Renderer + Receipt from `internal/channel/feishu/` (Gateway-like code) into `internal/channel/feishu/receipt.go` (display strategy). Feishu's rolling-log becomes a Channel-side concern. | High — core migration |
-| 4 | Add `internal/channel/echo` to smoke-test the abstractions without external credentials. | Low — additive |
+| Commit | Scope | Risk | Behaviour preservation |
+|--------|-------|------|-----------------------|
+| **1** | Channel interface: add `CreateReceipt / UpdateReceipt / DisposeReceipt` + `ReceiptState` enum + `Receipt` opaque type. Feishu adapter implements. Echo implements. No business logic change. | Low (additive) | E2E identical |
+| **2** | Session slim-down: remove `ChatID`, `ChatType`, `OnUserMessage` from Session struct. Remove `CreateOrUpdate`, `Run`, `GetByChat`, `KillByChat` from Manager interface. Remove `feishu` import from session package. **Session tests updated**; gateway/cmd still bridges via runtime closure (temporary). | Medium | E2E identical (manager still works because runtime translates chat→session) |
+| **3** | Gateway gets `bindings` table + `receipts` table. New methods: `Bind / Rebind / LookupByChat / LookupSessionByChat / SpawnAgent`. Gateway handlers (`/cwd` / `/run` / `/kill`) rewritten to use them. Fallback rewritten to use `ch.CreateReceipt` + `sess.QueueUserMessage` + `ch.UpdateReceipt(executing)`. **Delete** the `SessionManager` interface in `gateway/cmd/handlers.go`. | High (largest single change) | E2E must be byte-identical for slash commands; receipt UI may shift slightly (closer to v1.1 design) |
+| **4** | Single-consumer fix: gateway `pumpOutbound` goroutine removed. `Manager.EventCallback` registered at startup. Callback drives `Translate` + `Channel.Send` + receipt flip on `EventResult` / `EventError`. | Medium (lifecycle change) | This is the v0.2.x bug fix; output flow may have been silently broken before |
+| **5** | Registry: add `BindingEntry` table. Restore order: sessions first, then bindings. Old v0.2.x registry files migrate by extracting `ChatID` from `SessionEntry` into a synthetic `BindingEntry{ChatID, SessionID}`. | Medium (data shape change) | All previously persisted state recoverable |
+| **6** | Docs (PRD/SPEC/FEATURES/F-08/F-20/F-25) updated to v1.1 shape. (This is the commit you are reading the spec for.) | Low | N/A |
 
-Each stage is its own commit / PR. Stages 2 and 3 should ship
-together (a half-done refactor leaves the bot in an inconsistent
-state).
+Each commit is its own PR. Commits 3-4 should ship together — a half-done refactor leaves the runtime in an inconsistent state where Gateway has `bindings` but Session still holds `ChatID`.
+
+---
 
 ## 7. Behaviour preserved by the refactor
 
 - ✅ Slash commands (`/cwd`, `/run`, `/kill`, `/help`, `/agents`)
-- ✅ Inbound fallback to session
-- ✅ Feishu rolling-log with FIFO eviction
+- ✅ Inbound fallback to session (now via binding lookup)
+- ✅ Feishu rolling-log with FIFO eviction (unchanged in Translate; Feishu adapter handles the same `OutboundMessage`s)
 - ✅ Tool output surfacing (`✅ Read → 47 lines`)
 - ✅ Thinking surfacing (`💭 I'll explore…`)
 - ✅ Permission cards + Allow/Deny round-trip
 - ✅ Bidirectional CLI logs (`received: …` + outbound trace)
 - ✅ Registration pattern (`agent.Builtins`, `cmd/nightme/agents.go`)
-
-## 8. Behaviour new in v0.3 (after Stage 4)
-
-- ➕ `internal/channel/echo` — second Channel implementation for CI
-  smoke testing. Boots without external credentials.
-- ➕ `--channel=feishu|echo` flag on `nightme run` (default `feishu`).
-- ➕ `nightme channels` subcommand — lists registered channels with
-  capability summary (which OutboundKinds they support).
-
-## 9. Out of Scope (v0.3)
-
-- Retry queue / dead-letter — per Devin, "送达 = sent to target"
-- Real second IM (Slack/WhatsApp/Telegram) — Stage 4 ships echo only
-- Cross-channel bridge (F-11) — requires Channel multiplexing in
-  Gateway; defer to v0.4 once Stage 4 lands
-- Web UI / TTY (F-16) — separate effort
-
-## 10. Open Questions
-
-1. **Receipt handle vs stateless stream** — does Gateway need to
-   tell Channel "this event continues chat turn X" so the Channel
-   can keep its rolling-log edit-in-place? The `ChatID` join key
-   is enough for the Feishu Channel; Slack's per-message threading
-   may want `ReplyTo`. Stage 3 will pin this down.
-
-2. **Permission card `request_id` mapping** — Feishu's card value
-   carries the original `EventPermission` request_id. Gateway
-   stores a `pendingPermissions map[string]chan string` keyed by
-   request_id. Card click → `InboundMessage.Action.Value` →
-   Gateway writes to the channel → Session.SendPermission.
-
-3. **What if a Channel can't render an OutboundMessage kind?**
-   Stage 3 contract: `Channel.Send` is allowed to silently drop or
-   substitute (e.g., Slack swallows `OutReaction` because it can't
-   swap reactions in place; Web renders `OutReaction` as an emoji
-   span). Gateway never blocks on Channel response — fire-and-ack.
-
-## 11. Test Strategy
-
-- **Unit**: translator (AgentEvent → OutboundMessage) — table-driven
-  for every `OutboundKind` × `agent.AgentEvent` kind.
-- **Unit**: gateway state machine — session create / append / evict
-  / close with mocked Channels.
-- **Integration**: two Channels in the same Gateway — verify
-  inbound only goes to its own ChatID's session; verify outbound
-  reaches the right Channel.
-- **End-to-end**: `nightme run --channel=echo` — drive a session
-  with a fake Agent; assert the echo Channel prints the expected
-  Inbound / Outbound sequence.
-- **Regression**: keep every existing Feishu test passing throughout.
-
-## 12. Rollout Plan
-
-1. Stage 1 lands in `main` (behaviour-preserving, additive).
-2. Stage 2 + Stage 3 land in a single PR — the half-state is
-   unhealthy, so the migration is atomic from a runtime perspective.
-3. Stage 4 lands after Stage 2-3 is stable in `main` for at least
-   one deploy cycle (i.e., next time Devin cuts a release tag).
-4. v0.3 release tag with all four stages merged.
-
-Branch strategy: `refactor/gateway-hub` for Stage 1; rebased
-onto `main` as each stage lands.
+- ✅ Session 1:1 binding to chat (binding table enforces same invariant)
+- ✅ Default-detach on SIGTERM (`manager.MarkDetached(id)` — still exists, used by `cmd/nightme/shutdownRun` after iterating `manager.List()`)
 
 ---
 
-**Status**: designing — Devin signed off on the architecture at
-2026-08-01 14:25 (Asia/Shanghai). Implementation begins after this
-doc is reviewed.
+## 8. Behaviour new in v1.1
+
+- ➕ Channel interface has explicit receipt lifecycle hooks (rendering only — state is Gateway's)
+- ➕ Session is a **pure domain object** (no `ChatID`, no `feishu` import) — testable without any channel infrastructure
+- ➕ Single-consumer event flow (no more double-reader race)
+- ➕ Binding persistence is a separate table (`BindingEntry`) — survives registry schema migrations cleanly
+- ➕ `/run` is Gateway's logic (was leaking into Manager before)
+- ➕ `manager.Create` returns pure factory result — no implicit chat lookup
+
+---
+
+## 9. Behaviour removed
+
+- ❌ `manager.GetByChat(chatID)` — replaced by `gateway.LookupByChat` → `manager.Get(binding.SessionID)`
+- ❌ `manager.CreateOrUpdate(chatID, ...)` — replaced by `gateway.handler.cwd` doing binding + manager.Create explicitly
+- ❌ `manager.Run(chatID, agent, args)` — replaced by `gateway.handler.run` doing binding lookup + manager.Create
+- ❌ `session.Session.ChatID` / `ChatType` / `OnUserMessage` — moved to `BindingEntry` + `CreateRequest.OnFlushHook`
+- ❌ `feishu.BuildForwardedTextFromBlocks(blocks)` called from session package — moved into `feishu` adapter's `CreateReceipt` internal helper
+- ❌ Gateway's `pumpOutbound` goroutine reading `session.Events()` — replaced by `Manager.EventCallback`
+
+---
+
+## 10. Out of scope (v0.3 / v1.1)
+
+- Retry queue / dead-letter — per Devin, "送达 = sent to target"
+- Real second IM (Slack/WhatsApp/Telegram) — Stage 4 ships echo only
+- Cross-channel bridge (F-11) — requires Channel multiplexing in Gateway; defer to v0.4
+- Web UI / TTY (F-16) — separate effort
+- DM `/sessions` and `/switch` commands (planned v0.3) — independent of responsibility isolation; can land after v1.1 ships
+
+---
+
+## 11. Test strategy
+
+### 11.1 Unit
+
+- **`session/`** tests rewritten to use `sess.ID` instead of `sess.ChatID`. No `channel/feishu` test deps.
+- **`gateway/`** tests cover binding table: `Bind → LookupByChat → Rebind` round-trips; persistence.
+- **`gateway/`** tests cover receipt table: `Create → Flip(Pending→Executing) → Flip(Executing→Done) → Dispose`; orphan disposal on EventError.
+- **`channel/feishu/`** tests cover receipt interface: `CreateReceipt` returns handle, `UpdateReceipt` calls correct Feishu API per state, `DisposeReceipt` deletes the message.
+- **`channel/echo/`** tests cover no-op receipt interface.
+
+### 11.2 Integration
+
+- Gateway + manager + fake channel: verify binding survives restart (registry write + read).
+- Gateway + manager + fake channel: verify receipt FSM goes `Pending → Executing → Done` for an Idle dispatch.
+- Gateway + manager + fake channel: verify receipt FSM goes `Pending → Executing → Done` for a Busy dispatch (via `onFlush` hook).
+- Gateway + manager + fake channel: verify `EventError` flips receipt to `Error` and disposes.
+
+### 11.3 Regression (E2E)
+
+- `nightme run --channel=feishu`: all v0.2.x slash commands work; reply strings identical.
+- `nightme run --channel=echo`: receipt UI shows `[receipt <id>] state=pending|executing|done|error` lines in order.
+- `nightme run` then `/cwd` → `/run` → message → CLI reply: receipt transitions match the receipt FSM diagram in §2.4.
+
+---
+
+## 12. Rollout status
+
+| Stage | Status | Tag |
+|-------|--------|-----|
+| Stage 1 (interface extension) | ✅ committed | pre-v1.1 |
+| Stage 2 (session slim-down) | ✅ committed | pre-v1.1 |
+| Stage 3 (gateway binding + receipt) | ✅ committed | v1.1 |
+| Stage 4 (single-consumer fix) | ✅ committed | v1.1 |
+| Stage 5 (registry + bindings) | ✅ committed | v1.1 |
+| Stage 6 (docs) | ✅ this commit | v1.1 |
+
+**Branch strategy**: `refactor/responsibility-isolation` was the integration branch; rebased onto `main` as each commit landed. v0.3 release tag carries the full v1.1 shape.
+
+---
+
+## 13. Change log
+
+- **2026-08-02** — v1.1 final: responsibility isolation locked. SPEC.md bumped to v1.1. This doc rewritten to be the authoritative reference (was previously Stage 2 design notes).
+- **2026-08-01** — Stage 2 design sketched (Gateway becomes central hub). Replaced by v1.1.

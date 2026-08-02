@@ -1,9 +1,22 @@
 # F-24: Claude Code Bridge (JSON-IO + AskUserQuestion)
 
-> **Status**: designed (v0.2)
-> **Milestone**: v0.2
+> **Status**: implemented (v1.1 — bridge 接口未变；Bridge 不知道 receipt / chat / binding 存在)
+> **Milestone**: v0.2 (设计 + 实现), v0.3 (event callback 路径)
 > **Depends on**: F-09 (Agent abstraction), F-19 (CLI Bridge), F-21 (Agent Modes)
-> **Related**: [F-21-agent-modes.md](./F-21-agent-modes.md), [F-19-cli-bridge.md](./F-19-cli-bridge.md), [F-23-heartbeat.md](./F-23-heartbeat.md)
+> **Related**: [F-21-agent-modes.md](./F-21-agent-modes.md), [F-19-cli-bridge.md](./F-19-cli-bridge.md), [F-23-heartbeat.md](./F-23-heartbeat.md), [F-26-gateway-hub.md](./F-26-gateway-hub.md) §2.3 (single-consumer)
+
+## 0. v1.1 修订（bridge 与上层解耦）
+
+**v0.2 实现**：Claude Code bridge 通过 `Session.Events() <-chan AgentEvent` 把事件暴露给 session 内部 readPump + Gateway 外部 pumpOutbound。两个 reader 抢同一 chan 是 bug（见 [F-26 §2.3](./F-26-gateway-hub.md)）。
+
+**v1.1 修订**：
+- `bridge.Session.Events()` chan **只有 session.readPump 一个 consumer**（单消费者修复）
+- Gateway 通过 `MemoryManager.EventCallback` 接收事件——bridge / agent 包不需要改 API；只是调用方用法变了
+- Bridge / agent 包**完全不知道** receipt、chat、binding 的存在——它们只产 `agent.AgentEvent`，session 包只管 InputBuffer FSM，Gateway 负责 Translate + Send + receipt 翻转
+
+**对 bridge 实现的影响**：无。`session.go: Events() <-chan agent.AgentEvent` 接口未变。Bridge 仍然写 `s.events chan`；session.readPump 仍然是唯一读者。
+
+---
 
 ## 1. Description
 

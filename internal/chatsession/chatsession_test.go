@@ -374,9 +374,6 @@ func TestEmptyCwdRejected(t *testing.T) {
 	if err := cs.SetActiveAgent(""); err == nil {
 		t.Fatalf("expected error for empty agent")
 	}
-	if err := cs.SetDefaultAgent(""); err == nil {
-		t.Fatalf("expected error for empty default agent")
-	}
 }
 
 // Sanity: ChatSession.ID is derived; ChatSession.CreatedAt is set.

@@ -58,6 +58,11 @@ type ChatSession struct {
 
 // New creates a fresh ChatSession in memory. The caller is
 // responsible for persisting via Persist().
+//
+// defaultAgent is the global Default snapshot at creation time
+// (from config.yaml `defaults.agent`). v1.2 (Q-A simplification)
+// does not expose a /default command; the only user-facing Default
+// is the global one.
 func New(chatID, chatType, defaultAgent string) *ChatSession {
 	return &ChatSession{
 		ID:               deriveIDFromChatID(chatID),
@@ -127,19 +132,14 @@ func (cs *ChatSession) SetActiveAgent(agent string) error {
 	return nil
 }
 
-// SetDefaultAgent sets the per-chat default agent. Used as fallback
-// during LookupActiveAgentSession when (activeAgent, activeCwd) is
-// not in pool.
-func (cs *ChatSession) SetDefaultAgent(agent string) error {
-	if agent == "" {
-		return errors.New("chatsession: empty default agent")
-	}
-	cs.mu.Lock()
-	cs.defaultAgent = agent
-	cs.mu.Unlock()
-	cs.persistChatEntry()
-	return nil
-}
+// SetDefaultAgent is REMOVED in v1.2 (Q-A simplification): the only
+// user-facing Default is the global `defaults.agent` config. The
+// `defaultAgent` field is captured at New() time and never mutated
+// post-construction. Use New(chatID, chatType, globalDefault) to
+// pass the current global default.
+//
+// (kept as a comment placeholder so PR reviewers see the explicit
+// removal; delete on next doc pass)
 
 // ActiveCwd returns the current active workspace.
 func (cs *ChatSession) ActiveCwd() string {
@@ -155,7 +155,9 @@ func (cs *ChatSession) ActiveAgent() string {
 	return cs.activeAgent
 }
 
-// DefaultAgent returns the per-chat default agent (or "").
+// DefaultAgent returns the per-chat default agent (snapshot of
+// global Default at ChatSession creation). v1.2 (Q-A) does not
+// allow post-creation mutation; the field is read-only.
 func (cs *ChatSession) DefaultAgent() string {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()

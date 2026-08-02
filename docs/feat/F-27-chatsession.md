@@ -29,14 +29,15 @@ The split exists because v1.2 needs:
 // internal/chatsession/chatsession.go
 
 type ChatSession struct {
-    ID              string              // UUID v7, natural key
+    ID              string              // derived from chatID; natural key
     ChatID          string              // unique — gateway.bindings[ChatID] → this
     ChatType        string              // p2p | group | topic_group | ""
 
-    // Active routing state (mutated by /cwd /use /default)
+    // Active routing state (mutated by /cwd /use; defaultAgent is
+    // captured at New() time from global config and never mutated).
     ActiveCwd       string              // /cwd sets; immutable per AgentSession
     ActiveAgent     string              // /use sets; immutable per AgentSession
-    DefaultAgent    string              // /default sets (per-chat) OR from config
+    DefaultAgent    string              // snapshot of config.defaults.agent at New(); read-only
 
     // AgentSession pool (per-ChatSession unique on (agent, cwd))
     poolMu          sync.RWMutex
@@ -76,7 +77,7 @@ type ChatSessionEntry struct {
     ChatType            string    `json:"chatType"`
     ActiveCwd           string    `json:"activeCwd"`            // empty → not yet /cwd'd
     ActiveAgent         string    `json:"activeAgent"`          // empty → not yet /use'd
-    DefaultAgent        string    `json:"defaultAgent"`         // optional
+    DefaultAgent        string    `json:"defaultAgent"`         // snapshot of global Default at creation; read-only
     AgentSessionIDs     []string  `json:"agentSessionIds"`      // pool index
     ActiveAgentSessionID *string   `json:"activeAgentSessionId"` // null → no active
     CreatedAt           time.Time `json:"createdAt"`
@@ -175,7 +176,8 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 | `/cwd <path>` | Validate → `chatSession.SetActiveCwd(abs)` | Updates `activeCwd`; pool untouched; next message triggers `LookupActiveAgentSession()` |
 | `/use <agent>` | Validate → `chatSession.SetActiveAgent(name)` → `LookupActiveAgentSession()` | May spawn new AgentSession if `(agent, activeCwd)` not in pool |
 | `/kill` | `chatSession.KillAll()` | Kills every AgentSession in pool; clears `activeAS`; old receipts dispose |
-| `/default <agent>` | `chatSession.SetDefaultAgent(name)` | Persists to ChatSessionEntry; only affects future fallback resolution |
+
+**No `/default` command** (Q-A simplification, 2026-08-02): the only user-facing Default is the global `defaults.agent` config. The `defaultAgent` field on ChatSession is captured at `New()` time (snapshot of global Default) and never mutated post-construction. Future feature: per-chat Default via config (not command) — out of scope for v1.2.
 
 ### 3.5 SetActiveCwd / SetActiveAgent (state mutations)
 

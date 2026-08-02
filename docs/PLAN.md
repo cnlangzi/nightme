@@ -558,7 +558,7 @@ Claude Code 在 v0.1 走 PTY。v0.2 切 JSON-IO 后：
 **In scope**：
 - 持久化 schema 改造（v1.x → v1.2 双表）
 - `Session` 类型拆分为 `ChatSession` + `AgentSession`
-- Gateway handler 重写：`/cwd` / `/use` / `/kill` / `/default`
+- Gateway handler 重写：`/cwd` / `/use` / `/kill`（**无 `/default`** — Q-A 已确认全局 only）
 - v1.x registry 自动迁移到 v1.2
 - 测试（unit + integration + E2E 飞书）
 - SPEC / PRD / FEATURES 草案 → 锁定
@@ -568,7 +568,7 @@ Claude Code 在 v0.1 走 PTY。v0.2 切 JSON-IO 后：
 - 跨 chat 共享 ChatSession
 - AgentSession 跨 ChatSession 共享
 - LRU eviction（v0.4+）
-- /default 命令（Q-A 决策后再决定）
+- `/default` 命令（Q-A 已确认全局 only，不需要 per-chat command）
 
 ### 4.6.3 文件结构（v1.2 新增 / 修改）
 
@@ -682,13 +682,13 @@ internal/
 - v1.x → v1.2 升级：自动迁移；无需手动操作
 - v1.2 → v1.x 回退：不可逆（v1.x 不识别双表）；但 v1.2 部署后再回退 v1.x 不推荐
 
-### 4.6.8 决策待确认
+### 4.6.8 决策确认
 
 | 决策 | 影响 | 状态 |
 |------|------|------|
-| **Q-A**: Default Agent 设置粒度（全局 / per ChatSession / 两者）| 影响 /default 命令是否需要 + config schema | 待 Devin |
+| **Q-A**: Default Agent 设置粒度 | 仅全局 `defaults.agent` config；ChatSession.defaultAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已确认 (2026-08-02) |
 | **Q-B**: `(activeAgent, activeCwd)` 不在 pool 时 fallback 顺序 | 影响 LookupActiveAgentSession 逻辑 | 待 Devin |
-| **Q-C**: ChatSession.ID 来源（UUID 生成 vs derived from chatId）| 影响 ChatSessionEntry schema | 倾向 derived from chatId |
+| **Q-C**: ChatSession.ID 来源 | 影响 ChatSessionEntry schema | 倾向 derived from chatId |
 | **Q-D**: /kill 时 InputBuffer 队列消息处理（drop / persist）| 影响 ChatSession.KillAll 行为 | 倾向 drop |
 | **Q-E**: AgentSessionEntry 持久化是否包括 Bridge 类型 | 影响 registry schema | 倾向包括 |
 | **Q-F**: ChatSession 持久化位置（单文件 / 双文件 / SQLite）| 影响 registry 复杂度 | 倾向双 JSON 文件 |

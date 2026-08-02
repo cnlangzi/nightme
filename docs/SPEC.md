@@ -407,7 +407,7 @@ nightme 用 Go 的 goroutine 实现并发，结构如下：
       "chatType":             "p2p",
       "activeCwd":            "/code/bailing",
       "activeAgent":          "claude",
-      "defaultAgent":         "claude",          // 可空
+      "defaultAgent":         "claude",          // snapshot of global Default at creation; read-only
       "agentSessionIds":      ["as_1", "as_2"],
       "activeAgentSessionId": "as_1",            // 引用 pool 中某项; null 表示未激活
       "createdAt":            "...",
@@ -431,6 +431,8 @@ nightme 用 Go 的 goroutine 实现并发，结构如下：
 **唯一约束**：
 - `chat_sessions.chatId` UNIQUE（保证 1 chat = 1 ChatSession）
 - `agent_sessions.(chatSessionId, agent, cwd)` UNIQUE（保证 pool 内 (agent, cwd) 1:1；不同 ChatSession 各自独立）
+
+**Q-A 锁定 (2026-08-02)**：Default 仅全局 config (`defaults.agent`)；ChatSession.defaultAgent 是创建时的 snapshot，不可变。**无 `/default` 命令**。
 
 ---
 
@@ -475,8 +477,10 @@ nightme 用 Go 的 goroutine 实现并发，结构如下：
 | **Q14** | `session.Events()` 单消费者 | **readPump only**；ChatSession 通过 EventCallback 接收 |
 | **Q15** | `/cwd` / `/use` 对 AgentSession 的影响 | **不杀任何 AgentSession**；pool 保留老 entry，切回能复用 |
 
-**待确认（草案状态）**：
-- **Q-A** Default Agent 设置粒度（全局 config / per ChatSession 命令 / 两者）
+**已确认（2026-08-02）**：
+- **Q-A** ✅ Default 仅全局 config (`defaults.agent`)；ChatSession.defaultAgent 是创建时 snapshot，不可变。**无 `/default` 命令**。
+
+**仍待确认**：
 - **Q-B** `(activeAgent, activeCwd)` 不在 pool 时的 fallback 顺序
 
 ---

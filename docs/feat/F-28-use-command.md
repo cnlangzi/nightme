@@ -309,7 +309,7 @@ This is a thin wrapper around `Gateway.handleUse` with explicit `chatId` instead
 - **Q-F**: Should `/use` without activeCwd auto-default to a workspace (e.g., `~/.openclaw/workspace`)? (Lean: no, require explicit `/cwd`)
 - **Q-G**: When extraArgs provided but AgentSession already exists, silently drop or warn? (Lean: warn in reply "args ignored, agent already running")
 - **Q-H**: /use reply format — single line vs multi-line status (pid, cwd, agent, uptime)? (Lean: multi-line for diagnostic clarity)
-- **Q-I**: Should `/use` support `default` keyword to reset activeAgent to defaultAgent? (Lean: yes, `/use default`)
+- **Q-I**: Should `/use` support `default` keyword to reset activeAgent to defaultAgent? (Lean: no — Q-A simplified to global Default only; per-chat default not exposed via command)
 
 ---
 

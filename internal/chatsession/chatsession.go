@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -60,6 +61,12 @@ type ChatSession struct {
 	// children on miss. nil means no spawn (test-friendly default;
 	// production wires a registrySpawner at runtime).
 	spawner Spawner
+
+	// inputBuffer is the per-ChatSession FSM that queues user
+	// messages while the active AgentSession is Busy. Lazily
+	// created via ensureBuffer() so tests that don't dispatch
+	// messages don't pay for it.
+	inputBuffer *InputBuffer
 }
 
 // New creates a fresh ChatSession in memory. The caller is
@@ -194,6 +201,98 @@ func (cs *ChatSession) ActiveAgentSession() *AgentSession {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.activeAS
+}
+
+// --- InputBuffer FSM (commit 9) ----------------------------------------
+
+// ensureBuffer lazily creates the InputBuffer on first use. Called
+// from QueueUserMessage / SetBusy / SetIdle / OnTurnEnded so tests
+// that don't dispatch messages don't allocate the FSM.
+//
+// Construction starts with nil flush hook; the runtime wires it
+// via SetFlushHook before any user message arrives.
+func (cs *ChatSession) ensureBuffer() *InputBuffer {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.inputBuffer == nil {
+		cs.inputBuffer = NewInputBuffer(nil, 50, 100*1024)
+	}
+	return cs.inputBuffer
+}
+
+// flushHookLocked is no longer used (the FlushHook is now wired
+// via SetFlushHook after construction). Kept as a comment marker
+// so PR reviewers see the explicit removal. Delete on next doc
+// pass.
+
+// QueueUserMessage enqueues a structured user turn. Idle: flush
+// immediately via the hook. Busy: queue. Behavior mirrors v1.1's
+// InputBuffer.Add but is owned by ChatSession.
+func (cs *ChatSession) QueueUserMessage(blocks []agent.ContentBlock, userMsgID string) error {
+	return cs.ensureBuffer().Add(blocks, userMsgID)
+}
+
+// SetBusy marks the FSM as busy (agent is processing a turn).
+// Called by the runtime event pump on non-terminal events.
+func (cs *ChatSession) SetBusy() {
+	cs.ensureBuffer().SetState(StateBusy)
+}
+
+// SetIdle marks the FSM as idle and flushes queued messages
+// (typically called together by the runtime on EventDone / Error).
+func (cs *ChatSession) SetIdle() {
+	cs.ensureBuffer().SetState(StateIdle)
+}
+
+// OnTurnEnded flushes the buffer. Call after SetIdle() when the
+// active AgentSession's turn ends.
+func (cs *ChatSession) OnTurnEnded() error {
+	return cs.ensureBuffer().OnTurnEnded()
+}
+
+// BufferPending returns the current queue size (0 if no
+// InputBuffer yet).
+func (cs *ChatSession) BufferPending() int {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.inputBuffer == nil {
+		return 0
+	}
+	return cs.inputBuffer.Pending()
+}
+
+// BufferState returns the current FSM state (StateIdle if no
+// InputBuffer yet).
+func (cs *ChatSession) BufferState() SessionState {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.inputBuffer == nil {
+		return StateIdle
+	}
+	return cs.inputBuffer.State()
+}
+
+// SetFlushHook installs (or replaces) the runtime-provided flush
+// hook. The hook receives (combined blocks, userMsgIDs) and is
+// expected to SendBlocks on the active AgentSession.
+//
+// Switching hooks (e.g., on /use) is supported: the runtime calls
+// SetFlushHook with a fresh closure pointing at the new active
+// AgentSession; queued messages flush to the new target on the
+// next OnTurnEnded.
+func (cs *ChatSession) SetFlushHook(h FlushHook) {
+	cs.ensureBuffer().SetFlushHook(h)
+}
+
+// BufferClear discards queued messages without sending. Returns
+// the number cleared.
+func (cs *ChatSession) BufferClear() int {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if cs.inputBuffer == nil {
+		return 0
+	}
+	return cs.inputBuffer.Clear()
 }
 
 // LookupInPool returns the AgentSession matching (agent, cwd) if

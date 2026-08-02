@@ -1,6 +1,6 @@
 # nightme — Feature Index
 
-> **状态**：v1.2（草案 — ChatSession 模型 + /use 命令 + AgentSession 池；架构职责隔离保留）
+> **状态**：v1.2 **已锁定**（2026-08-02；commits 5/6/7/8a/8b/8c/9 + F-30；落地 `fix/cwd_session` 分支）
 > **作者**：🦞 虾哥（PM/Architect）
 > **日期**：2026-08-02
 > **关联文档**：
@@ -15,14 +15,14 @@
 
 ---
 
-## 1. v1.2 新增功能（草案）
+## 1. v1.2 新增功能（已落地）
 
-| ID | 功能 | 设计文档 | 里程碑 |
-|----|------|----------|--------|
-| F-27 | **ChatSession 模型**（per chat 持久化会话上下文；合并 v1.1 ChannelSession + GatewaySession 逻辑）| [feat/F-27-chatsession.md](./feat/F-27-chatsession.md) | v1.2 (current) |
-| F-28 | **`/use <agent>` 命令**（切换 activeAgent；复用或新建 AgentSession；永不重启进程）| [feat/F-28-use-command.md](./feat/F-28-use-command.md) | v1.2 (current) |
-| F-29 | **AgentSession 池**（`(agent, cwd)` 1:1 池化；`/cwd` / `/use` 不杀任何 AgentSession，切回能复用）| [feat/F-29-agent-session-pool.md](./feat/F-29-agent-session-pool.md) | v1.2 (current) |
-| F-30 | **Interactive Config**（`nightme config` 进交互菜单；二级菜单只做 Agents；merge builtin + cfg；选 primary）| [feat/F-30-interactive-config.md](./feat/F-30-interactive-config.md) | v1.2 (current) |
+| ID | 功能 | 设计文档 | 里程碑 | 状态 |
+|----|------|----------|--------|------|
+| F-27 | **ChatSession 模型**（per chat 持久化会话上下文；合并 v1.1 ChannelSession + GatewaySession 逻辑）| [feat/F-27-chatsession.md](./feat/F-27-chatsession.md) | v1.2 (current) | ✅ 已实现 (commits 5/6/8b) |
+| F-28 | **`/use <agent>` 命令**（切换 activeAgent；复用或新建 AgentSession；永不重启进程）| [feat/F-28-use-command.md](./feat/F-28-use-command.md) | v1.2 (current) | ✅ 已实现 (commits 8a/8c) |
+| F-29 | **AgentSession 池**（`(agent, cwd)` 1:1 池化；`/cwd` / `/use` 不杀任何 AgentSession，切回能复用）| [feat/F-29-agent-session-pool.md](./feat/F-29-agent-session-pool.md) | v1.2 (current) | ✅ 已实现 (commits 7/8c) |
+| F-30 | **Interactive Config**（`nightme config` 进交互菜单；二级菜单只做 Agents；merge builtin + cfg；选 primary）| [feat/F-30-interactive-config.md](./feat/F-30-interactive-config.md) | v1.2 (current) | ✅ 已实现 |
 
 **v1.2 关键变化**：
 - 删除：`/run` 命令（被 `/use` 替代）
@@ -33,7 +33,7 @@
 - Config schema 重构：top-level `primary` + `agents` list（替代 v1.1 `agent.default` + `agent.agents` map）
 - 保留：所有 v1.1 职责隔离不变式（Channel 与 Session 互不知道；Gateway 是 binding + receipt FSM owner）
 
-**Status**: 待 Devin 确认 Q-B (activeAgent,activeCwd 不在 pool 时 fallback) 后可标记锁定。
+**Status**: **已锁定**（2026-08-02；Q-B ✅ exact → default → spawn）
 
 ---
 
@@ -91,11 +91,12 @@
 
 | ID | 必须 | 设计文档 | 单测 | 集成测试 | E2E |
 |----|------|----------|------|----------|-----|
-| F-27 | ✅ | ✅ (草案) | ⏳ | ⏳ | ⏳ |
-| F-28 | ✅ | ✅ (草案) | ⏳ | ⏳ | ⏳ |
-| F-29 | ✅ | ✅ (草案) | ⏳ | ⏳ | ⏳ |
+| F-27 | ✅ | ✅ | ✅ | ✅ | ⏳ |
+| F-28 | ✅ | ✅ | ✅ | ✅ | ⏳ |
+| F-29 | ✅ | ✅ | ✅ | ✅ | ⏳ |
+| F-30 | ✅ | ✅ | ✅ | ✅ | ⏳ |
 
-**全部 ✅ 后**，nightme v1.2.0 可发布。
+**E2E 飞书 DM round-trip 手测**仍是 v0.4 release gate。单测 + 集成测试已覆盖 F-27/28/29/30。
 
 ---
 
@@ -115,7 +116,7 @@
 
 | 决策 | 现状 | 状态 |
 |------|------|------|
-| Q-A: Default Agent 设置粒度 | 全局 only (`config.yaml` 的 `primary`)；ChatSession.defaultAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已确认 (2026-08-02) |
-| Q-B: `(activeAgent, activeCwd)` 不在 pool 时的 fallback 顺序 | exact → `(defaultAgent, activeCwd)` → spawn `(activeAgent, activeCwd)` | 待 Devin 确认 |
-| `ChatSession.defaultAgent` 字段持久化位置 | `ChatSessionEntry.defaultAgent` (snapshot，写时不变) | ✅ 已确认 |
-| Config schema 顶层字段 | `primary` (top-level scalar) + `agents:` (top-level list); bridge 是每个 AgentEntry 的字段; command 是 full string 含 args | ✅ 已确认 (2026-08-02) |
+| Q-A: Default Agent 设置粒度 | 全局 only (`config.yaml` 的 `primary`)；ChatSession.defaultAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已锁定 (2026-08-02) |
+| Q-B: `(activeAgent, activeCwd)` 不在 pool 时的 fallback 顺序 | exact → `(defaultAgent, activeCwd)` → spawn `(activeAgent, activeCwd)` | ✅ 已锁定 (2026-08-02) |
+| `ChatSession.defaultAgent` 字段持久化位置 | `ChatSessionEntry.defaultAgent` (snapshot，写时不变) | ✅ 已锁定 |
+| Config schema 顶层字段 | `primary` (top-level scalar) + `agents:` (top-level list); bridge 是每个 AgentEntry 的字段; command 是 full string 含 args | ✅ 已锁定 (2026-08-02) |

@@ -1,6 +1,6 @@
 # F-29: AgentSession Pool
 
-> **Status**: draft (v1.2 architecture; depends on F-27 ChatSession lock)
+> **Status**: locked (v1.2; shipped in commits 7/8c on `fix/cwd_session`; 2026-08-02)
 > **Milestone**: v1.2 (commit 3 of "ChatSession refactor")
 > **Depends on**: F-27 (ChatSession), F-09 (Agent interface), F-19/F-21 (Bridge modes)
 > **Replaces**: v1.1 single-session-per-chat (Session type)

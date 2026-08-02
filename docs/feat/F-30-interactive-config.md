@@ -1,6 +1,6 @@
 # F-30: Interactive Config Command
 
-> **Status**: implemented (v1.2; first shipped with the config schema rename)
+> **Status**: locked (v1.2; shipped in commit `nightme config` on `fix/cwd_session`; 2026-08-02)
 > **Milestone**: v1.2
 > **Depends on**: F-08 (config loading), F-09 (Agent registry), F-20 (slash command pattern)
 > **Used by**: end users (manual setup)

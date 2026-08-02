@@ -537,9 +537,9 @@ Claude Code 在 v0.1 走 PTY。v0.2 切 JSON-IO 后：
 
 ## 4.6 v1.2: ChatSession 重构
 
-> **状态**：草案（待 Devin 确认 PRD/SPEC/FEATURES 草案 + Q-A/Q-B）
+> **状态**：**已落地**（2026-08-02；commits 5/6/7/8a/8b/8c/9 + F-30）
 > **目标 session 数**：3-5 sessions
-> **预估代码量**：~1500 行 Go（包含 schema 改造 + 状态机迁移 + 测试）
+> **预估代码量**：~1500 行 Go（包含 schema 改造 + 状态机迁移 + 测试）— 实际 ~3700 行
 > **关键交付**：F-27 ChatSession + F-28 `/use` + F-29 AgentSession 池；向后迁移 v0.x 持久化数据
 
 ### 4.6.1 目标
@@ -561,7 +561,7 @@ Claude Code 在 v0.1 走 PTY。v0.2 切 JSON-IO 后：
 - Gateway handler 重写：`/cwd` / `/use` / `/kill`（**无 `/default`** — Q-A 已确认全局 only）
 - v1.x registry 自动迁移到 v1.2
 - 测试（unit + integration + E2E 飞书）
-- SPEC / PRD / FEATURES 草案 → 锁定
+- SPEC / PRD / FEATURES 草案 → **已锁定**（commit `docs(plan): v1.2 实施计划` + 本 commit）
 
 **Out of scope**（明确不做）：
 - 多 AgentSession 并行协作（v0.4+）
@@ -610,25 +610,25 @@ internal/
 
 按 docs-first → code 顺序：
 
-| # | Commit | 内容 | 类型 | 风险 |
-|---|--------|------|------|------|
-| 1 | `docs(prd): v1.2 ChatSession 设计哲学` | PRD.md §4.3/§4.6/§5 更新 | docs | Low |
-| 2 | `docs(spec): v1.2 两层 Session 架构` | SPEC.md 架构重写 + schema 草案 | docs | Low |
-| 3 | `docs(features): v1.2 F-27/28/29` | FEATURES.md + feat/F-27/28/29 | docs | Low |
-| 4 | `docs(plan): v1.2 实施计划` | PLAN.md §4.6 | docs | Low |
-| 5 | `refactor(registry): split SessionEntry → ChatSessionEntry + AgentSessionEntry` | schema 拆分 + 迁移 | code | Medium |
-| 6 | `feat(chatsession): ChatSession struct + lifecycle` | 新建 ChatSession + LookupActiveAgentSession | code | Medium |
-| 7 | `refactor(agentsession): AgentSession pool + spawn/reuse/respawn` | 新建 AgentSession + pool ops | code | Medium |
-| 8 | `refactor(gateway): handlers for /cwd /use /kill (no /run)` | handlers 重写 | code | High |
-| 9 | `refactor(inputbuffer): ownership moves to ChatSession` | InputBuffer FSM 迁移 | code | Medium |
-| 10 | `test(integration): /use reuse + pool survive /kill + restart` | 集成测试 | test | Low |
-| 11 | `test(e2e): 飞书 DM 三态切换 (claude→codex→claude)` | E2E 测试 | test | Low |
-| 12 | `docs: v1.2 锁定 + release notes` | SPEC/FEATURES/PRD 状态从"草案"改"锁定" | docs | Low |
-
-**关键 commit 顺序约束**：
-- commit 5-9 必须连续推送（不能拆 PR）；半完成状态 runtime 不一致
-- commit 5 落地后 commit 6-9 立刻跟上
-- commit 10-11 测试可与 5-9 交错（不同 package）
+| # | Commit | 内容 | 类型 | 风险 | 状态 |
+|---|--------|------|------|------|------|
+| 1 | `docs(prd): v1.2 ChatSession 设计哲学` | PRD.md §4.3/§4.6/§5 更新 | docs | Low | ✅ `a9689c1` |
+| 2 | `docs(spec): v1.2 两层 Session 架构` | SPEC.md 架构重写 + schema 草案 | docs | Low | ✅ `55df6dc` |
+| 3 | `docs(features): v1.2 F-27/28/29` | FEATURES.md + feat/F-27/28/29 | docs | Low | ✅ `b2d11f1` |
+| 4 | `docs(plan): v1.2 实施计划` | PLAN.md §4.6 | docs | Low | ✅ `c439d2a` |
+| 5 | `refactor(registry): split SessionEntry → ChatSessionEntry + AgentSessionEntry` | schema 拆分 + 迁移 | code | Medium | ✅ `97539be` |
+| 6 | `feat(chatsession): ChatSession struct + lifecycle` | 新建 ChatSession + LookupActiveAgentSession | code | Medium | ✅ `7138d2a` |
+| 7 | `refactor(agentsession): AgentSession pool + spawn/reuse/respawn` | 新建 AgentSession + pool ops | code | Medium | ✅ `14dfb4f` |
+| 8a | `refactor(gateway): handlers for /cwd /use /kill (no /run)` | handlers 重写 | code | High | ✅ `9930489` |
+| 8b | `feat(run): v1.2 ChatSession-based daemon` | run_v12.go 完整 daemon | code | High | ✅ `9dca227` |
+| 8c | `feat(8c): readPump lifecycle + EventHandler + v1.x migration` | readPump + handler + 迁移钩子 | code | High | ✅ `0d43fe1` |
+| 9 | `refactor(inputbuffer): ownership moves to ChatSession` | InputBuffer FSM 迁移 | code | Medium | ✅ `b6915ba` |
+| F-30 | `feat(cli): nightme config 交互模式` | config command + F-30 doc | code | Medium | ✅ `66a0237` + `cecdb4f` |
+| Q-A | `refactor(chatsession): 移除 /default + SetDefaultAgent` | Q-A 简化 | code | Low | ✅ `d2cb438` |
+| Q-Config | `refactor(config): top-level primary + agents list` | config schema 重构 | code | Medium | ✅ `91707ec` + `b327d2b` + `9e996e4` |
+| 10 | `test(integration): /use reuse + pool survive /kill + restart` | 集成测试 | test | Low | ⏳ (unit-level 已覆盖) |
+| 11 | `test(e2e): 飞书 DM 三态切换 (claude→codex→claude)` | E2E 测试 | test | Low | ⏳ (deferred to v0.4 release gate) |
+| 12 | `docs: v1.2 锁定 + release notes` | SPEC/FEATURES/PRD 状态从"草案"改"锁定" | docs | Low | ✅ (本 commit) |
 
 ### 4.6.5 验收标准（v1.2）
 
@@ -686,7 +686,7 @@ internal/
 
 | 决策 | 影响 | 状态 |
 |------|------|------|
-| **Q-A**: Default Agent 设置粒度 | 仅全局 `agents.default` config (YAML)；ChatSession.defaultAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已确认 (2026-08-02) |
+| **Q-A**: Default Agent 设置粒度 | 仅全局 `agents.default` config (YAML)；ChatSession.defaultAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已锁定 (2026-08-02) |
 | **Q-B**: `(activeAgent, activeCwd)` 不在 pool 时 fallback 顺序 | 影响 LookupActiveAgentSession 逻辑 | 待 Devin |
 | **Q-C**: ChatSession.ID 来源 | 影响 ChatSessionEntry schema | 倾向 derived from chatId |
 | **Q-D**: /kill 时 InputBuffer 队列消息处理（drop / persist）| 影响 ChatSession.KillAll 行为 | 倾向 drop |

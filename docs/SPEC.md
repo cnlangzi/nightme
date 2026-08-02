@@ -1,6 +1,6 @@
 # nightme — Technical Specification (SPEC)
 
-> **状态**：v1.2（**草案 — 待 Devin 确认 Q1/Q2**；架构重写自 v1.1 职责隔离）
+> **状态**：v1.2 **已锁定**（2026-08-02；架构重写自 v1.1 职责隔离；Q-A ✅ + Q-B ✅ + Q-Default ✅ 均已确认并落地）
 > **作者**：🦞 虾哥（PM/Architect）
 > **日期**：2026-08-02
 > **文档层级**：技术级（**不含实现细节 / 代码**）
@@ -10,10 +10,6 @@
 > - 每个 feature 的详细实现（含代码）→ [`feat/`](./feat/)
 > - 实施计划 → [`PLAN.md`](./PLAN.md)
 > - 职责隔离架构 v1.1 → [`feat/F-26-gateway-hub.md`](./feat/F-26-gateway-hub.md)
-
-> **⚠️ 草案 — 待 Devin 确认**：
-> - **Q1**：Default Agent 的设置粒度（全局 config / per ChatSession 命令 / 两者）
-> - **Q2**：`(activeAgent, activeCwd)` 不在 pool 时的 fallback 顺序
 
 ---
 
@@ -397,7 +393,7 @@ nightme 用 Go 的 goroutine 实现并发，结构如下：
 | 配置 | **YAML** | env | 直观 |
 | 日志 | **`log/slog`**（标准库）| zap / zerolog | stdlib 够用 |
 
-**v1.2 持久化 schema 草案**：
+**v1.2 持久化 schema（已落地）**：
 
 ```jsonc
 {
@@ -503,11 +499,11 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 | **Q14** | `session.Events()` 单消费者 | **readPump only**；ChatSession 通过 EventCallback 接收 |
 | **Q15** | `/cwd` / `/use` 对 AgentSession 的影响 | **不杀任何 AgentSession**；pool 保留老 entry，切回能复用 |
 
-**已确认（2026-08-02）**：
-- **Q-A** ✅ Default 仅全局 config (`defaults.agent`)；ChatSession.defaultAgent 是创建时 snapshot，不可变。**无 `/default` 命令**。
+**已确认（2026-08-02，PRD v1.2 锁定）**：
+- **Q-A** ✅ Default 仅全局 config (`agents.default` → `agents.primary`)；ChatSession.defaultAgent 是创建时 snapshot，不可变。**无 `/default` 命令**。
+- **Q-B** ✅ `(activeAgent, activeCwd)` 不在 pool 时 fallback 顺序 = **exact → `(defaultAgent, activeCwd)` → spawn `(activeAgent, activeCwd)`**（activeAgent 是用户真实意图，避免偷换）
 
-**仍待确认**：
-- **Q-B** `(activeAgent, activeCwd)` 不在 pool 时的 fallback 顺序
+**Q-A 锁定补充**：config schema 顶层 `primary` + `agents` list（`nightme config` 交互菜单生成）。
 
 ---
 
@@ -519,12 +515,19 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 
 ## 11. 下一步
 
-技术规范 v1.2 已起草。下一步：
+技术规范 v1.2 **已落地**（commits 5/6/7/8a/8b/8c/9，`fix/cwd_session` 分支）：
 
-1. ⏭ Devin review PRD/SPEC v1.2 草案
-2. ⏭ 确认 Q-A / Q-B（Default Agent 设置 + fallback 顺序）
-3. ⏭ 按 [`PLAN.md`](./PLAN.md) v1.2 实施：F-27 → F-28 → F-29
-4. ⏭ 每个 F-XX 详细设计按需迭代
+- ✅ ChatSession / AgentSession 数据结构 + I/O（commits 5/6）
+- ✅ Spawner 抽象 + AgentSession 真实 fork-exec（commit 7）
+- ✅ Manager + `/cwd` `/use` `/kill` handlers（commit 8a）
+- ✅ v1.2 daemon 切换到 `chatsession.Manager`（commits 8b/8c）
+- ✅ InputBuffer FSM ownership 移到 ChatSession（commit 9）
+- ✅ Config schema `primary` + `agents` list + `nightme config` 交互模式（F-30）
+
+剩余（v0.4 backlog）：
+- ⏭ 真实 E2E 飞书 DM round-trip test
+- ⏭ 删除 `internal/session/` v1.1 MemoryManager（内部仍使用，需要 gateway 重构后清理）
+- ⏭ nightme v0.4.0 release tag
 
 ---
 

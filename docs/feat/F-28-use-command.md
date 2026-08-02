@@ -1,6 +1,6 @@
 # F-28: `/use <agent>` Command
 
-> **Status**: draft (v1.2 architecture; depends on F-27 ChatSession lock)
+> **Status**: locked (v1.2; shipped in commits 8a/8c on `fix/cwd_session`; 2026-08-02)
 > **Milestone**: v1.2 (commit 2 of "ChatSession refactor")
 > **Depends on**: F-27 (ChatSession), F-09 (Agent interface), F-29 (AgentSession pool)
 > **Replaces**: v1.1 `/run <agent>` (see F-20 for original design)

@@ -1,6 +1,6 @@
 # F-27: ChatSession Model
 
-> **Status**: draft (v1.2 architecture; depends on PRD/SPEC v1.2 lock)
+> **Status**: locked (v1.2; shipped in commits 5/6/8b/8c on `fix/cwd_session`; 2026-08-02)
 > **Milestone**: v1.2 (commit 1 of "ChatSession refactor")
 > **Depends on**: F-26 (v1.1 responsibility isolation), F-08 (Channel), F-20 (Gateway)
 > **Replaces**: v1.1 `Session` (see F-01/F-07 for original design)

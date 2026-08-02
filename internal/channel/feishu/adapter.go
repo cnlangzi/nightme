@@ -962,17 +962,35 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 		// off the visible card surface. Mirrors the
 		// OpenClaw Lark plugin's reasoning panel
 		// (openclaw-lark src/card/builder.ts — see the
-		// reasoning section in buildCompleteCard).
+		// reasoning section in buildCompleteCard). The
+		// icon + i18n_content + icon_position +
+		// icon_expanded_angle fields are copied verbatim
+		// from OpenClaw; they're not strictly required
+		// by the schema but the Feishu client uses
+		// `icon` to drive the click-to-expand affordance
+		// and the panel renders as a flat (non-collapse)
+		// block when it's missing.
 		if e.Kind == "thinking" {
 			elements = append(elements, map[string]any{
-				"tag":       "collapsible_panel",
-				"expanded":  false,
+				"tag":      "collapsible_panel",
+				"expanded": false,
 				"header": map[string]any{
 					"title": map[string]any{
 						"tag":     "markdown",
 						"content": "💭 思考",
+						"i18n_content": map[string]any{
+							"zh_cn": "💭 思考",
+							"en_us": "💭 Thought",
+						},
 					},
 					"vertical_align": "center",
+					"icon": map[string]any{
+						"tag":   "standard_icon",
+						"token": "down-small-ccm_outlined",
+						"size":  "16px 16px",
+					},
+					"icon_position":       "follow_text",
+					"icon_expanded_angle": -180,
 				},
 				"border": map[string]any{
 					"color":        "grey",

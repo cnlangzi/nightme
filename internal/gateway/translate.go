@@ -201,17 +201,30 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		// Session bootstrap (Claude Code: system/init). Carries
 		// session_id + model; channels surface them in the receipt
 		// header so users can identify the session for /resume.
+		// agent_name + workspace are forwarded too so the Feishu
+		// receipt card's foot note can render
+		// "Agent | cwd | tokens" (see docs/channel/feishu.md §9.3).
 		if ev.Init == nil {
 			return OutboundMessage{}, false
+		}
+		meta := map[string]any{
+			"session_id": ev.Init.SessionID,
+			"model":      ev.Init.Model,
+		}
+		if ev.Init.AgentName != "" {
+			meta["agent_name"] = ev.Init.AgentName
+		}
+		if ev.Init.Workspace != "" {
+			meta["workspace"] = ev.Init.Workspace
+		}
+		if ev.Init.Branch != "" {
+			meta["branch"] = ev.Init.Branch
 		}
 		return OutboundMessage{
 			ChatID: chatID,
 			Kind:   OutInit,
 			Text:   fmt.Sprintf("session initialized (model: %s)", ev.Init.Model),
-			Meta: map[string]any{
-				"session_id": ev.Init.SessionID,
-				"model":      ev.Init.Model,
-			},
+			Meta:   meta,
 		}, true
 	}
 	return OutboundMessage{}, false

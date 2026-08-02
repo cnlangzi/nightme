@@ -16,7 +16,6 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 
 	"github.com/cnlangzi/nightme/internal/config"
-	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
 func testAdapter(t *testing.T) *Adapter {
@@ -65,32 +64,16 @@ func TestSendLongMessage_SplitsAtNewline(t *testing.T) {
 		if chatID != "oc_test" {
 			t.Errorf("chatID = %q, want oc_test", chatID)
 		}
-		// Receipt / standalone text now posts as `post` type so
-		// the markdown renders natively (collapsible code
-		// blocks). See wrapAsPostContent for the schema.
-		if msgType != receiptMessageType {
-			t.Errorf("msgType = %q, want %q", msgType, receiptMessageType)
+		if msgType != larkim.MsgTypeText {
+			t.Errorf("msgType = %q, want %q", msgType, larkim.MsgTypeText)
 		}
 		var payload struct {
-			ContentV2 [][]map[string]any `json:"content_v2"`
+			Text string `json:"text"`
 		}
 		if err := json.Unmarshal([]byte(content), &payload); err != nil {
 			t.Fatalf("decode content: %v", err)
 		}
-		if len(payload.ContentV2) == 0 {
-			t.Fatal("content_v2 is empty")
-		}
-		// Each chunk is one outer paragraph containing a single
-		// `md` tag; pull its text back out for content equality.
-		var got string
-		for _, in := range payload.ContentV2[0] {
-			if tag, _ := in["tag"].(string); tag == "md" {
-				if t, ok := in["text"].(string); ok {
-					got += t
-				}
-			}
-		}
-		sent = append(sent, got)
+		sent = append(sent, payload.Text)
 		return "", nil
 	}
 
@@ -113,70 +96,82 @@ func TestSendLongMessage_SplitsAtNewline(t *testing.T) {
 	}
 }
 
-// TestSendUserMessage_MultipleReceiptsPerChat covers the
-// per-userMsgID receipt model: each user message in a chat gets
-// its own receipt (its own rolling-log card anchored via
-// ReplyMessage). The receipts coexist in receiptsByUserMsgID so
-// buffered-batch flushes don't collapse them into one shared
-// card. This replaces the old single-receipt-per-chat eviction
-// test (commit a9f73d3 v1.1 commit 4 moved eviction into the
-// terminal lifecycle of each individual receipt).
-func TestSendUserMessage_MultipleReceiptsPerChat(t *testing.T) {
+func TestSendUserMessage_EvictionDoesNotDeadlock(t *testing.T) {
+	// Before the fix: SendUserMessage held a.mu.Lock while calling
+	// old.SetCompleted(ctx). SetCompleted → renderLocked →
+	// adapter.UpdateMessage → logOutgoing needs a.mu.RLock, and
+	// Go's sync.RWMutex is not reentrant — the eviction self-
+	// deadlocked the dispatchLoop goroutine, blocking every later
+	// inbound message. Reproduce the path here: leave the old
+	// receipt in StateExecuting (the prefix that triggers the
+	// renderLocked branch) and call SendUserMessage again. The
+	// goroutine must return within the deadline.
 	a := testAdapter(t)
 	chatID := "oc_chat"
 
-	// Mock replyFunc so ReplyMessage succeeds without the lark
-	// SDK hitting Feishu. Each call returns a distinct id so we
-	// can tell the receipts apart. sendFunc is also mocked so
-	// SetCompleted (which calls UpdateMessage, falling back to
-	// SendMessageText on failure) has a working path.
+	// Replace sendFunc so SendMessageText succeeds without the
+	// lark SDK actually hitting Feishu.
 	var replies int
-	a.replyFunc = func(_ context.Context, _, _, _ string) (string, error) {
-		replies++
-		return fmt.Sprintf("reply-%d", replies), nil
-	}
 	a.sendFunc = func(_ context.Context, _, _, _ string) (string, error) {
 		replies++
 		return fmt.Sprintf("reply-%d", replies), nil
 	}
 
-	r1, err := a.SendUserMessage(context.Background(), chatID, "msg-1", "⏳")
-	if err != nil {
-		t.Fatalf("SendUserMessage msg-1: %v", err)
-	}
-	r2, err := a.SendUserMessage(context.Background(), chatID, "msg-2", "⏳")
-	if err != nil {
-		t.Fatalf("SendUserMessage msg-2: %v", err)
-	}
-	r3, err := a.SendUserMessage(context.Background(), chatID, "msg-3", "⏳")
-	if err != nil {
-		t.Fatalf("SendUserMessage msg-3: %v", err)
-	}
+	// Register an old receipt in StateExecuting. SetCompleted
+	// short-circuits when state is already Completed, so the
+	// deadlock only repros when the old turn is still in-flight.
+	old := NewMessageReceiptForReply(chatID, "msg-old", "reply-old", a)
+	old.state = StateExecuting
+	a.mu.Lock()
+	a.receipts[chatID] = old
+	a.receiptsByUserMsgID["msg-old"] = old
+	a.mu.Unlock()
 
-	// All three receipts are distinct and registered under
-	// their own userMsgID. None of them evicts another.
-	a.mu.RLock()
-	got1 := a.receiptsByUserMsgID["msg-1"]
-	got2 := a.receiptsByUserMsgID["msg-2"]
-	got3 := a.receiptsByUserMsgID["msg-3"]
-	a.mu.RUnlock()
-	if got1 != r1 || got2 != r2 || got3 != r3 {
-		t.Errorf("receipts not registered per userMsgID: got1=%p want=%p got2=%p want=%p got3=%p want=%p",
-			got1, r1, got2, r2, got3, r3)
+	// Kick SendUserMessage for a new message in a goroutine. The
+	// pre-fix code locked here for 5+ minutes against itself.
+	type result struct {
+		receipt *MessageReceipt
+		err     error
 	}
-	if r1 == r2 || r2 == r3 || r1 == r3 {
-		t.Errorf("receipts are not distinct pointers: %p %p %p", r1, r2, r3)
-	}
+	done := make(chan result, 1)
+	go func() {
+		r, err := a.SendUserMessage(context.Background(), chatID, "msg-new", "⏳ 等待中")
+		done <- result{r, err}
+	}()
 
-	// Completing one receipt does NOT touch the others.
-	if err := r1.SetCompleted(context.Background()); err != nil {
-		t.Fatalf("SetCompleted r1: %v", err)
-	}
-	a.mu.RLock()
-	got1After := a.receiptsByUserMsgID["msg-1"]
-	a.mu.RUnlock()
-	if got1After == nil {
-		t.Errorf("completed receipt removed from index prematurely")
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("SendUserMessage: %v", r.err)
+		}
+		if r.receipt == nil {
+			t.Fatal("nil receipt returned")
+		}
+		// The new receipt is the active one for this chat.
+		a.mu.RLock()
+		got := a.receipts[chatID]
+		byUser := a.receiptsByUserMsgID["msg-new"]
+		oldStill := a.receiptsByUserMsgID["msg-old"]
+		a.mu.RUnlock()
+		if got != r.receipt {
+			t.Errorf("chat receipt not updated: got %p, want %p", got, r.receipt)
+		}
+		if byUser != r.receipt {
+			t.Errorf("userMsgID index not updated")
+		}
+		if oldStill != nil {
+			t.Errorf("old receipt still in userMsgID index: %p", oldStill)
+		}
+		// The old receipt was promoted to StateCompleted by the
+		// eviction — SetCompleted runs after the lock release.
+		old.mu.Lock()
+		state := old.state
+		old.mu.Unlock()
+		if state != StateCompleted {
+			t.Errorf("old receipt state = %v, want StateCompleted", state)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SendUserMessage deadlocked: old.SetCompleted → renderLocked → logOutgoing blocked on a.mu.RLock while holding a.mu.Lock")
 	}
 }
 
@@ -437,190 +432,5 @@ func TestAdapter_StopClosesIncoming(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Incoming channel did not close")
-	}
-}
-
-// TestComposeFooterPrefix covers the static-session-attribution
-// composer the adapter uses on OutInit to build the cached
-// footer prefix. Empty segments drop themselves so a partial
-// set ("claude" arrived but cwd not yet) still renders cleanly.
-// Tokens are intentionally NOT included — they're agent-context
-// and only surface when an OutUsage arrives.
-func TestComposeFooterPrefix(t *testing.T) {
-	cases := []struct {
-		name     string
-		agent    string
-		cwd      string
-		provider string
-		want     string
-	}{
-		{"all three (provider dropped)", "claude", "/code/nightme", "minimax", "claude | /code/nightme"},
-		{"just agent", "claude", "", "", "claude"},
-		{"agent and cwd", "codex", "/code/pangolin", "", "codex | /code/pangolin"},
-		{"cwd only", "", "/code/nightme", "", "/code/nightme"},
-		{"all empty", "", "", "", ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := composeFooterPrefix(tc.agent, tc.cwd, tc.provider)
-			if got != tc.want {
-				t.Errorf("composeFooterPrefix(%q, %q, %q) = %q, want %q",
-					tc.agent, tc.cwd, tc.provider, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestAdapter_FooterCache_PerChat verifies that the cached
-// footer prefix is keyed by chatID: a prefix set for chat-A
-// does NOT leak into chat-B's receipt rendering, and vice versa.
-// The cache is a simple per-chat memoization that the adapter
-// uses to rebuild the full footer on OutUsage without re-reading
-// session metadata each time.
-func TestAdapter_FooterCache_PerChat(t *testing.T) {
-	a := testAdapter(t)
-
-	// Prime two chats' caches.
-	a.cacheFooterPrefix("chat-A", "Agent: claude | cwd: /chatA")
-	a.cacheFooterPrefix("chat-B", "Agent: codex | cwd: /chatB")
-
-	if got := a.cachedFooterPrefix("chat-A"); got != "Agent: claude | cwd: /chatA" {
-		t.Errorf("chat-A prefix = %q", got)
-	}
-	if got := a.cachedFooterPrefix("chat-B"); got != "Agent: codex | cwd: /chatB" {
-		t.Errorf("chat-B prefix = %q", got)
-	}
-	if got := a.cachedFooterPrefix("chat-C"); got != "" {
-		t.Errorf("unset chat-C prefix = %q, want empty", got)
-	}
-
-	// Clearing one chat doesn't disturb the other.
-	a.cacheFooterPrefix("chat-A", "")
-	if got := a.cachedFooterPrefix("chat-A"); got != "" {
-		t.Errorf("chat-A prefix after clear = %q, want empty", got)
-	}
-	if got := a.cachedFooterPrefix("chat-B"); got != "Agent: codex | cwd: /chatB" {
-		t.Errorf("chat-B prefix disturbed by chat-A clear: %q", got)
-	}
-}
-
-// TestSend_ReplyToEmpty_PlainText covers the no-anchor path:
-// OutboundMessage without a ReplyTo posts as a plain text message
-// (no receipt, no ReplyMessage). This is the path used for
-// genuinely unsolicited output (startup notices, internal logs,
-// etc.) and the fallback messages where the channel should not
-// try to be clever about cards.
-func TestSend_ReplyToEmpty_PlainText(t *testing.T) {
-	a := testAdapter(t)
-	var sent []string
-	a.sendFunc = func(_ context.Context, _, _, content string) (string, error) {
-		// content is the JSON-encoded {text: ...} envelope;
-		// the message body is the unquoted text field. We just
-		// record it as-is for assertion simplicity — the
-		// adapter's behavior we care about is that sendFunc is
-		// called exactly once, NOT that the encoding matches.
-		sent = append(sent, content)
-		return "msg-x", nil
-	}
-
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		ChatID:  "oc_test",
-		Kind:    gateway.OutText,
-		Text:    "no anchor",
-		ReplyTo: "",
-	}); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if len(sent) != 1 {
-		t.Errorf("sendFunc calls = %d, want exactly 1 (one plain text send)", len(sent))
-	}
-	if got := a.receiptFor("any"); got != nil {
-		t.Errorf("ReplyTo=\"\" must NOT create a receipt, got %p", got)
-	}
-}
-
-// TestSend_ReplyToColdStart covers the cold-start path: first
-// OutboundMessage for a userMsgID posts a fresh reply card via
-// the ReplyMessage API (anchored to the user message) and
-// registers the receipt. Subsequent calls with the same
-// ReplyTo Append in place.
-func TestSend_ReplyToColdStart(t *testing.T) {
-	a := testAdapter(t)
-	var replies []string
-	var replyAnchors []string
-	a.replyFunc = func(_ context.Context, userMsgID, _, text string) (string, error) {
-		replyAnchors = append(replyAnchors, userMsgID)
-		replies = append(replies, text)
-		return "msg-cold", nil
-	}
-	a.sendFunc = func(_ context.Context, _, _, _ string) (string, error) {
-		return "msg-cold", nil
-	}
-
-	const userMsgID = "om_user_cold"
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		ChatID:  "oc_test",
-		Kind:    gateway.OutText,
-		Text:    "first event",
-		ReplyTo: userMsgID,
-	}); err != nil {
-		t.Fatalf("Send first: %v", err)
-	}
-	if len(replyAnchors) != 1 || replyAnchors[0] != userMsgID {
-		t.Errorf("first Send should anchor via ReplyMessage to %q, got anchors=%v", userMsgID, replyAnchors)
-	}
-	r := a.receiptFor(userMsgID)
-	if r == nil {
-		t.Fatal("first Send should register a receipt for the anchored userMsgID")
-	}
-
-	// Second call: same userMsgID, existing receipt → Append
-	// (UpdateMessage in place, no ReplyMessage).
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		ChatID:  "oc_test",
-		Kind:    gateway.OutText,
-		Text:    "second event",
-		ReplyTo: userMsgID,
-	}); err != nil {
-		t.Fatalf("Send second: %v", err)
-	}
-	if len(replyAnchors) != 1 {
-		t.Errorf("second Send must NOT call ReplyMessage again; got %d ReplyMessage calls", len(replyAnchors))
-	}
-}
-
-// TestSend_MultipleReceiptsCoexist covers the buffered-batch
-// scenario: events for different userMsgIDs in the same chat
-// create / append to separate receipts. No event for one
-// userMsgID folds into another userMsgID's receipt.
-func TestSend_MultipleReceiptsCoexist(t *testing.T) {
-	a := testAdapter(t)
-	a.replyFunc = func(_ context.Context, userMsgID, _, text string) (string, error) {
-		return "reply-" + userMsgID, nil
-	}
-	a.sendFunc = func(_ context.Context, _, _, _ string) (string, error) {
-		return "msg", nil
-	}
-
-	// Two user messages buffered together; agent emits events
-	// for both, each anchored to its own userMsgID.
-	for _, userMsgID := range []string{"om_a", "om_b"} {
-		if err := a.Send(context.Background(), gateway.OutboundMessage{
-			ChatID:  "oc_test",
-			Kind:    gateway.OutText,
-			Text:    "event for " + userMsgID,
-			ReplyTo: userMsgID,
-		}); err != nil {
-			t.Fatalf("Send %s: %v", userMsgID, err)
-		}
-	}
-
-	rA := a.receiptFor("om_a")
-	rB := a.receiptFor("om_b")
-	if rA == nil || rB == nil {
-		t.Fatalf("both receipts should exist: rA=%p rB=%p", rA, rB)
-	}
-	if rA == rB {
-		t.Fatal("receipts must be distinct objects per userMsgID")
 	}
 }

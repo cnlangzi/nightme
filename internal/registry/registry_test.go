@@ -292,7 +292,7 @@ func TestCorruptedFile(t *testing.T) {
 	}
 
 	// The original file should be gone (or empty until we write).
-	// Upsert should now write a fresh, valid JSON file.
+	// Upsert should now write a fresh, valid JSON file at v3.
 	if err := f.Upsert(sampleEntry("sess-1")); err != nil {
 		t.Fatalf("Upsert after corruption: %v", err)
 	}
@@ -300,11 +300,14 @@ func TestCorruptedFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var roundTrip map[string]Entry
+	var roundTrip onDisk
 	if err := json.Unmarshal(raw, &roundTrip); err != nil {
 		t.Errorf("post-upsert JSON invalid: %v", err)
 	}
-	if _, ok := roundTrip["sess-1"]; !ok {
+	if roundTrip.Version != Version {
+		t.Errorf("post-upsert version = %d, want %d", roundTrip.Version, Version)
+	}
+	if _, ok := roundTrip.Sessions["sess-1"]; !ok {
 		t.Errorf("post-upsert entry missing from on-disk JSON")
 	}
 }
@@ -340,4 +343,193 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(buf[pos:])
+}
+
+// --- v0.2.x → v1.1 migration tests (commit 5) ---
+
+// TestMigrateLegacyToV3 verifies the on-Open migration:
+// v0.2.x files (no "version" key) are loaded, every SessionEntry's
+// ChatID is extracted into a BindingEntry, and the entries'
+// ChatID fields are blanked.
+func TestMigrateLegacyToV3(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+
+	// Hand-craft a v0.2.x file: flat map[string]Entry keyed by
+	// session_id, with ChatID populated on each entry.
+	legacy := map[string]Entry{
+		"s_alpha": {
+			SessionID: "s_alpha",
+			ChatID:    "oc_chat_42",
+			Workspace: "/tmp/a",
+			Agent:     "claude",
+			Status:    StatusRunning,
+		},
+		"s_beta": {
+			SessionID: "s_beta",
+			ChatID:    "oc_chat_99",
+			Workspace: "/tmp/b",
+			Agent:     "codex",
+			Status:    StatusDetached,
+		},
+	}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+
+	f, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open legacy: %v", err)
+	}
+
+	// SessionEntry ChatID fields must be blank after migration.
+	bind, _ := f.Get("s_alpha")
+	if bind.ChatID != "" {
+		t.Errorf("after migration: s_alpha.ChatID = %q, want \"\"", bind.ChatID)
+	}
+	bind, _ = f.Get("s_beta")
+	if bind.ChatID != "" {
+		t.Errorf("after migration: s_beta.ChatID = %q, want \"\"", bind.ChatID)
+	}
+
+	// Binding table has both entries.
+	if got, ok := f.GetBinding("oc_chat_42"); !ok || got.SessionID != "s_alpha" || got.Workspace != "/tmp/a" {
+		t.Errorf("binding oc_chat_42 = %+v (ok=%v), want sessionID=s_alpha", got, ok)
+	}
+	if got, ok := f.GetBinding("oc_chat_99"); !ok || got.SessionID != "s_beta" {
+		t.Errorf("binding oc_chat_99 = %+v (ok=%v), want sessionID=s_beta", got, ok)
+	}
+
+	// ListBindings returns both.
+	if got := f.ListBindings(); len(got) != 2 {
+		t.Errorf("ListBindings = %d, want 2", len(got))
+	}
+
+	// GetByChat still works after migration (used by legacy code).
+	if e, ok := f.GetByChat("oc_chat_42"); !ok || e.SessionID != "s_alpha" {
+		t.Errorf("GetByChat after migration: ok=%v e=%+v", ok, e)
+	}
+
+	// Dirty flag set; next write rewrites in v3.
+	if !f.dirty {
+		t.Error("expected dirty flag after legacy migration")
+	}
+}
+
+// TestMigratePersistsOnWrite verifies that after Open migrates a
+// legacy file in-memory, the next Upsert writes it out at v3.
+func TestMigratePersistsOnWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+
+	legacy := map[string]Entry{
+		"s_x": {
+			SessionID: "s_x",
+			ChatID:    "oc_chat_x",
+			Workspace: "/x",
+			Agent:     "claude",
+			Status:    StatusRunning,
+		},
+	}
+	data, _ := json.Marshal(legacy)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+
+	f, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// Trigger a write via UpsertBinding.
+	if err := f.UpsertBinding(BindingEntry{
+		ChatID:    "oc_chat_x",
+		ChatType:  "p2p",
+		SessionID: "s_x",
+		Workspace: "/x",
+		Agent:     "claude",
+	}); err != nil {
+		t.Fatalf("UpsertBinding: %v", err)
+	}
+
+	// File is now v3.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v3 onDisk
+	if err := json.Unmarshal(raw, &v3); err != nil {
+		t.Fatalf("post-write parse: %v", err)
+	}
+	if v3.Version != Version {
+		t.Errorf("post-write version = %d, want %d", v3.Version, Version)
+	}
+	if len(v3.Sessions) != 1 || len(v3.Bindings) != 1 {
+		t.Errorf("post-write shape: sessions=%d bindings=%d, want 1/1", len(v3.Sessions), len(v3.Bindings))
+	}
+	if v3.Sessions["s_x"].ChatID != "" {
+		t.Errorf("post-write: s_x.ChatID = %q, want \"\"", v3.Sessions["s_x"].ChatID)
+	}
+}
+
+// TestBindingTableRoundTrip covers the binding upsert/get/list/
+// delete flow without any session involvement.
+func TestBindingTableRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	f, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	b1 := BindingEntry{ChatID: "oc_chat_1", ChatType: "p2p", SessionID: "s_1", Workspace: "/a", Agent: "claude"}
+	b2 := BindingEntry{ChatID: "oc_chat_2", ChatType: "group", SessionID: "s_2", Workspace: "/b", Agent: "codex"}
+	if err := f.UpsertBinding(b1); err != nil {
+		t.Fatalf("UpsertBinding b1: %v", err)
+	}
+	if err := f.UpsertBinding(b2); err != nil {
+		t.Fatalf("UpsertBinding b2: %v", err)
+	}
+
+	got, ok := f.GetBinding("oc_chat_1")
+	if !ok || got.Workspace != "/a" {
+		t.Errorf("GetBinding: %+v (ok=%v)", got, ok)
+	}
+
+	list := f.ListBindings()
+	if len(list) != 2 {
+		t.Errorf("ListBindings = %d, want 2", len(list))
+	}
+
+	if err := f.DeleteBinding("oc_chat_1"); err != nil {
+		t.Fatalf("DeleteBinding: %v", err)
+	}
+	if _, ok := f.GetBinding("oc_chat_1"); ok {
+		t.Error("after Delete: still present")
+	}
+	if got := f.ListBindings(); len(got) != 1 {
+		t.Errorf("after Delete: ListBindings = %d, want 1", len(got))
+	}
+}
+
+// TestDeleteSessionCascadesToBinding verifies that deleting a
+// session entry also removes any binding pointing at it (orphan
+// bindings are useless).
+func TestDeleteSessionCascadesToBinding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.json")
+	f, _ := Open(path)
+	if err := f.Upsert(sampleEntry("s_x")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := f.UpsertBinding(BindingEntry{ChatID: "oc_chat_x", SessionID: "s_x"}); err != nil {
+		t.Fatalf("UpsertBinding: %v", err)
+	}
+
+	if err := f.Delete("s_x"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, ok := f.GetBinding("oc_chat_x"); ok {
+		t.Error("binding survived session delete (orphan)")
+	}
 }

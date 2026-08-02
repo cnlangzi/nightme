@@ -287,6 +287,23 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	deps.newGateway(gw, agents, responder)
 	mgr.SetEventCallback(gw.OnSessionEvent)
 
+	// Wire the binding persistence hook (commit 5): every Bind /
+	// SpawnAgent / Unbind call triggers a registry write so the
+	// binding survives restarts. nil disables persistence.
+	if reg != nil {
+		gw.SetBindingPersister(func(b gateway.BindingEntry, added bool) {
+			var err error
+			if added {
+				err = reg.UpsertBinding(b)
+			} else {
+				err = reg.DeleteBinding(b.ChatID)
+			}
+			if err != nil {
+				logger.Warn("binding persist", "err", err, "chat_id", b.ChatID, "added", added)
+			}
+		})
+	}
+
 	// Install the InputBuffer.onFlush hook so queued receipts flip
 	// to Executing when the buffer actually flushes. This is the
 	// F-25 integration: the session knows nothing about receipts
@@ -297,8 +314,15 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// type-assertion below matches the freshly-built instance.)
 	_ = gw
 
+	// Restore order: sessions first, then bindings. The bindings
+	// table can reference session IDs in the sessions table (via
+	// the denormalized Workspace / Agent fields), so the sessions
+	// restore must land before the bindings restore. v1.1 (commit 5).
 	if err := mgr.Restore(ctx); err != nil {
 		return fmt.Errorf("run: restore sessions: %w", err)
+	}
+	if reg != nil {
+		gw.RestoreBindings(reg.ListBindings())
 	}
 
 	if err := ch.Start(ctx); err != nil {

@@ -25,7 +25,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/receipt"
@@ -108,6 +107,7 @@ type Gateway interface {
 	LookupSessionByChat(chatID string) (*session.Session, error)
 	SpawnAgent(ctx context.Context, chatID, agentName string, args []string) (*session.Session, error)
 	ListBindings() []BindingEntry
+	RestoreBindings(entries []BindingEntry)
 
 	// v1.1 receipt FSM (commit 3):
 	CreateReceipt(ctx context.Context, chatID, userMsgID string, blocks []agent.ContentBlock) (receipt.Receipt, error)
@@ -121,6 +121,13 @@ type Gateway interface {
 	// (Defined on the interface so cmd/nightme can wire it
 	// without a type-assertion back to *Router.)
 	OnSessionEvent(s *session.Session, ev agent.AgentEvent)
+
+	// SetBindingPersister installs the callback invoked every time
+	// a binding is created, replaced, or removed (Bind / SpawnAgent
+	// / Unbind). The runtime installs a callback that writes to
+	// the registry so the binding survives restarts. nil disables
+	// persistence (tests that don't care about disk state).
+	SetBindingPersister(fn func(BindingEntry, bool))
 }
 
 // Router is the exported alias of the runtime-internal
@@ -177,6 +184,12 @@ type gateway struct {
 	// runtime simply passes gw.OnSessionEvent as the callback —
 	// the indirection here is for tests).
 	eventCallback func(s *session.Session, ev agent.AgentEvent)
+
+	// bindingPersister is invoked by Bind / SpawnAgent / Unbind
+	// after the in-memory binding map changes. The runtime
+	// installs a callback that writes to the registry so the
+	// binding survives restarts. nil = no persistence (tests).
+	bindingPersister func(BindingEntry, bool)
 }
 
 // New constructs a Gateway. The optional fallback handler is invoked
@@ -327,9 +340,6 @@ func (g *gateway) Start(ctx context.Context) error {
 	g.wg.Add(1)
 	go g.dispatchLoop(ctx)
 
-	g.wg.Add(1)
-	go g.sweepSessions(ctx)
-
 	return nil
 }
 
@@ -410,97 +420,6 @@ func (g *gateway) dispatchLoop(ctx context.Context) {
 	}
 }
 
-// sweepSessions polls the SweepSessions callback and attaches a
-// new outbound pump to every OutboundSource the runtime has not
-// reported yet.
-func (g *gateway) sweepSessions(ctx context.Context) {
-	defer g.wg.Done()
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-g.stopCh:
-			return
-		case <-ticker.C:
-			g.sweepOnce(ctx)
-		}
-	}
-}
-
-// sweepOnce walks the runtime's OutboundSource list and attaches
-// a pump to every source we haven't seen yet.
-func (g *gateway) sweepOnce(ctx context.Context) {
-	g.mu.RLock()
-	sweeper := g.sweeper
-	if sweeper == nil {
-		g.mu.RUnlock()
-		return
-	}
-	g.mu.RUnlock()
-
-	for _, src := range sweeper() {
-		if src.SessionID == "" || src.ChatID == "" || src.Events == nil {
-			continue
-		}
-
-		g.mu.Lock()
-		if _, ok := g.attached[src.SessionID]; ok {
-			g.mu.Unlock()
-			continue
-		}
-		g.attached[src.SessionID] = struct{}{}
-		ch := g.chatToChan[src.ChatID]
-		if ch == nil {
-			ch = g.defaultChannel
-		}
-		g.mu.Unlock()
-
-		if ch == nil {
-			continue
-		}
-
-		g.wg.Add(1)
-		go g.pumpOutbound(ctx, ch, src.SessionID, src.ChatID, src.Events)
-	}
-}
-
-// pumpOutbound reads AgentEvent from the session's events channel,
-// translates via Translate, and dispatches to the right Channel.
-func (g *gateway) pumpOutbound(ctx context.Context, ch Channel, sessionID, chatID string, events <-chan agent.AgentEvent) {
-	defer g.wg.Done()
-	defer func() {
-		g.mu.Lock()
-		delete(g.attached, sessionID)
-		g.mu.Unlock()
-	}()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-g.stopCh:
-			return
-		case ev, ok := <-events:
-			if !ok {
-				return
-			}
-			msg, send := Translate(chatID, ev)
-			if !send {
-				continue
-			}
-			if err := ch.Send(ctx, msg); err != nil {
-				// Fire-and-ack: log and continue. Retry queue is
-				// explicitly out of scope for v0.3 — failures
-				// surface via the channel's own error reporting
-				// (Feishu's UpdateMessage / AddReaction paths log
-				// their own failures at warn level).
-				log.Printf("gateway: channel send failed (chat=%s, kind=%s): %v", chatID, msg.Kind, err)
-			}
-		}
-	}
-}
-
 // withGateway installs gw into ctx so handlers that need it
 // (currently just /help) can recover it without taking it as a
 // closure. Exported as WithGateway so external runtimes (cmd/nightme,
@@ -535,7 +454,6 @@ type contextKey = GatewayKey
 // to re-query the session.
 func (g *gateway) Bind(chatID, chatType, sessionID, workspace, agent string) *BindingEntry {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	b := &BindingEntry{
 		ChatID:    chatID,
 		ChatType:  chatType,
@@ -544,6 +462,9 @@ func (g *gateway) Bind(chatID, chatType, sessionID, workspace, agent string) *Bi
 		Agent:     agent,
 	}
 	g.bindings[chatID] = b
+	g.mu.Unlock()
+
+	g.notifyBindingPersister(*b, true)
 	return b
 }
 
@@ -600,6 +521,8 @@ func (g *gateway) SpawnAgent(ctx context.Context, chatID, agentName string, args
 	b.SessionID = newSess.ID
 	b.Agent = agentName
 	g.mu.Unlock()
+
+	g.notifyBindingPersister(*b, true)
 	return newSess, nil
 }
 
@@ -635,6 +558,28 @@ func (g *gateway) Unbind(chatID string) {
 	g.mu.Lock()
 	delete(g.bindings, chatID)
 	g.mu.Unlock()
+	g.notifyBindingPersister(BindingEntry{ChatID: chatID}, false)
+}
+
+// SetBindingPersister installs the callback invoked every time a
+// binding is created, replaced, or removed. The runtime installs a
+// callback that writes to the registry (commit 5). nil disables
+// persistence.
+func (g *gateway) SetBindingPersister(fn func(BindingEntry, bool)) {
+	g.mu.Lock()
+	g.bindingPersister = fn
+	g.mu.Unlock()
+}
+
+// notifyBindingPersister invokes the persister callback outside the
+// gateway lock. caller must NOT hold g.mu.
+func (g *gateway) notifyBindingPersister(b BindingEntry, added bool) {
+	g.mu.RLock()
+	fn := g.bindingPersister
+	g.mu.RUnlock()
+	if fn != nil {
+		fn(b, added)
+	}
 }
 
 // --- v1.1 receipt FSM (commit 3) -------------------------------------

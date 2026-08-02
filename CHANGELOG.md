@@ -6,6 +6,130 @@ as closely as a pre-1.0 project can.
 
 ## [Unreleased] — v0.3 architecture refactor (Stage 3 landed — v0.3 internally feature-complete)
 
+- **Feishu reply card rolling-log single message (fix / revert)**:
+  commit `dd91e44 refactor(feishu): ship each receipt event as a
+  fresh message` shipped each agent event as its own Feishu
+  message (4–5 messages per simple user turn). The chat surface
+  diverged from F-25 v1.1 spec ("永远只有一行 note + 一个
+  reaction emoji"). This fix restores the canonical rolling-log
+  design:
+  - `MessageReceipt.renderLocked` calls `UpdateMessage` on the
+    same reply message id every event. One user message → ONE
+    Feishu reply card; the card body grows over the agent's
+    lifetime and FIFO-evicts from the front when it overflows
+    `replyMaxBytes`.
+  - `Adapter.SendUserMessage` now posts the initial ⏳ receipt
+    via Feishu's `ReplyMessage` API (anchored to the user
+    message id) instead of `SendMessageText`. Feishu renders a
+    native "Reply to <user>: <preview>" header above the body
+    so users pair each bot reply with its triggering user
+    message — replaces the old "I render the user text myself"
+    pattern that `--replay-user-messages` enabled.
+  - Structured receipt footer (`Agent: <name> | cwd: <path> |
+    tokens: <in>K / <out>K`):
+    - `MessageReceipt.SetFooter(string)` accepts a single
+      caller-composed string; the receipt renders it verbatim
+      below a "─────────" separator. The receipt does NOT track
+      tokens or session metadata itself — nightme relays the
+      agent's internal session context, the adapter formats it.
+    - The Feishu adapter maintains a per-chat cache of the
+      static session-attribution prefix ("Agent: <name> | cwd:
+      <path> | Provider: <p>") set on `OutInit`, then refreshes
+      the dynamic tokens segment on `OutUsage` by reading the
+      latest input/output counts from `EventUsage.Meta` (the
+      gateway forwards them unchanged; the adapter does not
+      compute or aggregate anything itself).
+    - The gateway's `translateAndSend` enriches `OutInit.Meta`
+      with `agent_name` (from `session.Agent`) and `workspace`
+      (from `session.Workspace`) before the channel sees the
+      event. The translator's `Translate` function stays pure;
+      enrichment happens in the gateway so the channel layer
+      doesn't need session access.
+    - Workspace is `~`-shortened (leading `$HOME` replaced with
+      `~`) so the footer matches the user's shell-prompt form.
+  - New `Adapter.ReplyMessage(...)` and `Adapter.replyFunc` /
+    `replyViaLark` so tests can mock the reply path the same
+    way `sendFunc` mocks `sendContent`.
+  - Receipt bot interface gains `ReplyMessage`; the mock
+    implementations in `receipt_test.go` track reply vs update
+    vs send calls separately.
+  - `formatEntry` (per-event single message body) removed; the
+    receipt now exclusively uses `formatLocked` for the card
+    body.
+  - `TestReceipt_PerEventFreshMessage` replaced by
+    `TestReceipt_RollingLogInPlaceUpdate` (asserts 1 message-id
+    edited N times, not N fresh messages). Plus
+    `TestReceipt_FooterRenders` / `TestReceipt_FooterEmpty` /
+    `TestReceipt_FooterReplace` cover the simple-string footer
+    contract. `TestComposeFooterPrefix` covers the adapter's
+    prefix composer (all-empty, partial, full cases);
+    `TestAdapter_FooterCache_PerChat` covers the per-chat
+    memoization. New `internal/gateway/enrich_test.go` covers
+    `enrichOutboundMeta` (init-only enrichment, preserves
+    existing meta keys, nil safety).
+
+- **Per-userMsgID receipt model (1 request : n response)**:
+  the previous per-chat receipt model collapsed every agent event
+  for a chat into a single rolling card regardless of which user
+  message triggered it (see pre-fix screenshots: /run, /cwd, hi,
+  /run all folded into one "(Edited)" card). The new model keys
+  receipts by `userMsgID`; multiple receipts coexist in one chat
+  for buffered-batch turns, each anchored to its own user message
+  via the Feishu ReplyMessage API. OutboundMessage carries the
+  anchor as `ReplyTo`; the gateway's `translateAndSend` fans out
+  one OutboundMessage per receipt bound to the agent session.
+  - `Adapter.receipts` map dropped; `receiptsByUserMsgID` is the
+    sole index. Per-chat eviction removed — each receipt's
+    terminal lifecycle (SetCompleted / SetError on EventDone /
+    EventError) tears it down independently.
+  - `Adapter.receiptFor(chatID)` lazy cold-start dropped — that
+    was the bug source. When `ReplyTo` is empty the message goes
+    out as plain text (`SendMessageText`), never folded into any
+    card. When `ReplyTo` is set but no receipt exists yet,
+    `coldStartReceipt` posts via `ReplyMessage` and registers the
+    new receipt keyed by that userMsgID.
+  - `Adapter.Send` routes per `Kind`: reaction / card / typing
+    stay global (no anchor); agent-event kinds (`OutText`,
+    `OutThinking`, `OutToolStart`/`End`, `OutResult`,
+    `OutUsage`, `OutInit`, `OutCompaction`) go through the
+    `sendAnchored → appendToReceipt` path.
+  - `gateway.translateAndSend` calls `receiptsForSession(s.ID)`
+    and emits one `OutboundMessage{ReplyTo: userMsgID}` per bound
+    receipt. Orphan events (no bound receipt) ship with
+    `ReplyTo: ""` so they render as plain text.
+  - `Responder.Reply(ctx, chatID, userMsgID, text)` — `userMsgID`
+    added to the signature so the fallback path
+    ("no workspace set", "CLI not running") anchors each reply to
+    its triggering user message. `responder.SendUserMessage` was
+    already passing userMsgID; the fallback handler now does the
+    same.
+  - Test refactors: `TestSendUserMessage_MultipleReceiptsPerChat`
+    replaces `TestSendUserMessage_EvictionDoesNotDeadlock` (the
+    eviction logic is gone — receipts coexist, not evict). New
+    `TestSend_ReplyToEmpty_PlainText` /
+    `TestSend_ReplyToColdStart` /
+    `TestSend_MultipleReceiptsCoexist` cover the three Send
+    branches; `TestReceiptsForSession_FanOut` covers the
+    gateway-side fan-out.
+
+- **Claude Code bridge: drop `--replay-user-messages`**:
+  the flag echoes every user-role event back on stdout, which
+  the channel would surface as a "[你] <text>" line in the chat
+  (see the pre-fix screenshots: "hi" + "hi" bot echo + "[你] hi"
+  user replay were three messages for what should be one). The
+  rolling-log fix above makes that line redundant — Feishu's
+  ReplyMessage "Reply to" header already pairs the bot reply
+  with its user message. The flag is removed from
+  `internal/bridge/claudecode/permissions.go`'s `DefaultArgs`;
+  the package doc notes the rationale. The stream parser still
+  accepts user-role text blocks defensively (renamed test
+  `TestPumpStream_UserRoleTextBlock`) for legacy sessions and
+  future protocol revisions; third-party bridges that emit the
+  same shape continue to be parsed. `claude_mock.py` no longer
+  emits the user replay event, and
+  `TestClaudeCodeBridge_RealSubprocess` asserts
+  `replays == 0` instead of `replays == messages`.
+
 - **SendUserMessage eviction deadlock (fix)**: when a follow-up
   user message arrived while the previous turn was still
   in-flight (the old receipt in `StateExecuting`, not yet

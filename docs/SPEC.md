@@ -72,7 +72,7 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 │  │  ───────────────── │←→│  ─────────────────  │           │
 │  │  activeCwd          │  │  (claude, /A) 进程   │           │
 │  │  activeAgent        │  │  (codex,  /A) 进程   │           │
-│  │  defaultAgent       │  │  (claude, /B) 进程   │           │
+│  │  primaryAgent       │  │  (claude, /B) 进程   │           │
 │  │  InputBuffer FSM    │  │  (codex,  /B) 进程   │           │
 │  │  (idle ↔ busy)      │  │                      │           │
 │  │  Receipt FSM        │  │  1:1 with (agent,cwd)│           │
@@ -88,10 +88,10 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 |------|------|------------|
 | **Channel Adapter** | IM 协议编解码；`Send(OutboundMessage)` 渲染；**渲染** receipt state（pending/executing/done/error）的 UI 表现 | ChatSession、AgentSession、workspace、agent、binding、receipt state 机 |
 | **Gateway** | 中枢 orchestrator：slash command 路由、binding 表（chat_id ↔ ChatSession）、receipt 簿记（userMsgID ↔ Receipt + state）、ChatSession 生命周期、Channel↔ChatSession↔AgentSession 跨层调度 | IM 协议细节、agent 内部协议、PTY/ACP 细节 |
-| **ChatSession** | per chat 的会话上下文（持久化）：activeCwd / activeAgent / defaultAgent / InputBuffer FSM / Receipt FSM（数据）/ AgentSession 池索引 | chat_id 之外没有"自己是谁"；Channel 协议细节；agent 内部协议 |
+| **ChatSession** | per chat 的会话上下文（持久化）：activeCwd / activeAgent / primaryAgent / InputBuffer FSM / Receipt FSM（数据）/ AgentSession 池索引 | chat_id 之外没有"自己是谁"；Channel 协议细节；agent 内部协议 |
 | **AgentSession** | CLI 进程句柄；`(agent, cwd)` 1:1 唯一标识（immutable）；events() chan；sendText/sendBlocks；close | chat_id、ChatSession、binding、receipt、slash command |
 | **Bridge** | nightme 与底层 AI Coding CLI 之间的通信抽象；`AgentSession` 接口（Events / SendText / SendBlocks / SendPermission / Close）；四种模式（ACP / SDK / PTY / JSON-IO） | chat、binding、receipt、ChatSession |
-| **Process Registry** | JSON 持久化层。两类 entry：`ChatSessionEntry`（chat_id ↔ ChatSession 绑定 + activeCwd/activeAgent/defaultAgent + AgentSession 索引）+ `AgentSessionEntry`（agent + cwd + pid + status）| 运行时语义；只持久化 |
+| **Process Registry** | JSON 持久化层。两类 entry：`ChatSessionEntry`（chat_id ↔ ChatSession 绑定 + activeCwd/activeAgent/primaryAgent + AgentSession 索引）+ `AgentSessionEntry`（agent + cwd + pid + status）| 运行时语义；只持久化 |
 
 ### 1.2 三状态机，三个 owner（v1.2）
 
@@ -106,7 +106,7 @@ v1.2 核心架构不变式——任何状态机都**只有一个** owner，跨�
 | **ChatSession.ActiveAgentSession**（per ChatSession）| ChatSession | 引用 pool 中的某个 AgentSession | 引用在 ChatSessionEntry |
 
 **三个核心 FSM 的耦合点**（全部经过 Gateway）：
-- **Inbound 流**：Channel → Gateway.pumpInbound → dispatchLoop → Handle → 命中 `/cwd` `/use` `/kill` 走 binding → 走 ChatSession；未命中走 fallback → `ch.CreateReceipt` + `chatSession.QueueUserMessage` + `chatSession.LookupActiveAgentSession` + `agentSession.SendBlocks` + `ch.UpdateReceipt(executing)`
+- **Inbound 流**：Channel → Gateway.pumpInbound → dispatchLoop → DispatchInbound (inboundDispatcher) → 命中 `/cwd` `/use` `/kill` 走 slashCommandDispatcher → 走 ChatSession；未命中走 messageDispatcher → `ch.CreateReceipt` + `chatSession.QueueUserMessage` + `chatSession.LookupActiveAgentSession` + `agentSession.SendBlocks` + `ch.UpdateReceipt(executing)`
 - **Outbound 流**：`agentSession.Events()` → session 的 readPump（**单消费者**） → ChatSession.EventCallback → Gateway.translateAndSend → Channel.Send → 渲染
 - **切 AgentSession**：`/use` 触发 → ChatSession.LookupActiveAgentSession 重新解析 → 切换 ChatSession.EventCallback 目标 → 老 AgentSession 的事件不再消费
 
@@ -144,10 +144,10 @@ Gateway.dispatchLoop
      ├ ParseCommand(msg.Text)
      │   ├ 命中 (/cwd /use /kill /help /agents) → handler(msg)
      │   │   └ handler 走 gateway.bindings → chatSession.xxx → reply via channel.Send
-     │   └ 未命中 / 普通文本 → fallback(ctx, msg)
-     └ handler 或 fallback 走 Receipt Lifecycle（见 §2.4）
+     │   └ 未命中 / 普通文本 → messageDispatcher(ctx, msg)
+     └ slashCommandDispatcher 或 messageDispatcher 走 Receipt Lifecycle（见 §2.4）
 
-fallback(ctx, msg)
+messageDispatcher(ctx, msg)
   ├ gateway.bindings[msg.chat_id] 查 ChatSession
   │   ├ nil → channel.Send("no chat session, /cwd first")
   │   └ Status != Ready → channel.Send("not ready, /cwd + /use first")
@@ -243,8 +243,7 @@ handler.use(ctx, msg, args)
   ├ chatSession.SetActiveAgent(agentName)   ← 仅改 activeAgent
   ├ agentSession = chatSession.LookupActiveAgentSession()
   │   ├ pool[(activeAgent, activeCwd)] 命中 → 复用 (不重启进程)
-  │   ├ pool[(defaultAgent, activeCwd)] 命中 → 用 fallback（仅此条用 default）
-  │   └ 都没有 → spawn 新 AgentSession(agentName, activeCwd)
+  │   └ miss → spawn 新 AgentSession(agentName, activeCwd)
   ├ chatSession.SetActiveAgentSession(agentSession)
   ├ registry.Upsert(ChatSessionEntry + AgentSessionEntry)
   └ ch.Send("Now using <agent>, pid=<N>, cwd=<ws>")
@@ -403,7 +402,7 @@ nightme 用 Go 的 goroutine 实现并发，结构如下：
       "chatType":             "p2p",
       "activeCwd":            "/code/bailing",
       "activeAgent":          "claude",
-      "defaultAgent":         "claude",          // snapshot of global Default at creation; read-only
+      "primaryAgent":         "claude",          // snapshot of cfg.Primary at creation; read-only
       "agentSessionIds":      ["as_1", "as_2"],
       "activeAgentSessionId": "as_1",            // 引用 pool 中某项; null 表示未激活
       "createdAt":            "...",
@@ -443,7 +442,7 @@ agents:                        # top-level: list of available agents
 
 User-configured `agents:` entries override built-ins of the same name (merge happens at runtime, not parse time).
 
-**Q-A 锁定 (2026-08-02)**：Default 仅全局 config (YAML `primary`)；ChatSession.defaultAgent 是创建时的 snapshot，不可变。**无 `/default` 命令**。**`nightme config` 交互模式**用于选择 primary（见 F-30）。
+**Q-A 锁定 (2026-08-02)**：Primary Agent 仅全局 config（YAML `primary`）；ChatSession.primaryAgent 是创建时的 snapshot，不可变。**无 `/default` 命令**。**`nightme config` 交互模式**用于选择 primary（见 F-30）。
 
 ```yaml
 # 旧的 v1.x schema (仅用于历史参考, v1.2 已废弃)
@@ -460,7 +459,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 
 ## 6. 配置
 
-[v1.1 不变，新增 `defaults.agent` 字段用于 fallback]
+[v1.1 不变，新增 `primary` 字段承载 Primary Agent]
 
 ---
 
@@ -500,8 +499,8 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 | **Q15** | `/cwd` / `/use` 对 AgentSession 的影响 | **不杀任何 AgentSession**；pool 保留老 entry，切回能复用 |
 
 **已确认（2026-08-02，PRD v1.2 锁定）**：
-- **Q-A** ✅ Default 仅全局 config (`agents.default` → `agents.primary`)；ChatSession.defaultAgent 是创建时 snapshot，不可变。**无 `/default` 命令**。
-- **Q-B** ✅ `(activeAgent, activeCwd)` 不在 pool 时 fallback 顺序 = **exact → `(defaultAgent, activeCwd)` → spawn `(activeAgent, activeCwd)`**（activeAgent 是用户真实意图，避免偷换）
+- **Q-A** ✅ Primary Agent 仅全局 config（顶层 `primary`，与 `agents:` list 并列）；ChatSession.primaryAgent 是创建时 snapshot，不可变。**无 `/default` 命令**。
+- **Q-B** ✅ LookupActiveAgentSession 只看 `(activeAgent, activeCwd)`：命中 Running 复用，否则 spawn `(activeAgent, activeCwd)`。**没有运行时 fallback**：ChatSession 始终持有一个有效的 activeAgent（创建/恢复时被 `cfg.Primary` 一次性填入），用户用 `/use` 显式覆盖，lookup 不再做降级判断。
 
 **Q-A 锁定补充**：config schema 顶层 `primary` + `agents` list（`nightme config` 交互菜单生成）。
 
@@ -547,7 +546,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 6. mgr := NewManager().WithSpawner(spawner).WithPersistence(csFile, asFile)
 7. mgr.RestoreFromRegistry()          # 重建内存中 ChatSession 池 (AgentSession 状态=Detached)
 8. ch.Start()                         # Feishu WebSocket / echo channel
-9. gw := gateway.New(v12Fallback(mgr, ch, cfg.Primary), nil)
+9. gw := gateway.New(v12MessageDispatcher(mgr, ch, cfg.Primary), nil)
 10. RegisterChatSessionCommands(gw, mgr, ch, cfg.Primary)
 11. for each cs in mgr.List(): cs.SetEventHandler(v12EventHandler(ch, logger))
 12. gwImpl.AttachChannels(ch) + gwImpl.Start()
@@ -568,8 +567,8 @@ Daemon 重启后（用户发送 SIGINT 然后再启 `nightme run`）：
 
 | 数据 | 行为 |
 |---|---|
-| `cfg.Primary` | 重新读取配置。**不影响已存在的 ChatSession.defaultAgent**（Q-A snapshot）。 |
-| `chat_sessions.json` | 全量恢复为 in-memory ChatSession。`activeCwd`、`activeAgent`、`defaultAgent` 复原。 |
+| `cfg.Primary` | 重新读取配置。**不影响已存在的 ChatSession.primaryAgent**（Q-A snapshot）。 |
+| `chat_sessions.json` | 全量恢复为 in-memory ChatSession。`activeCwd`、`activeAgent`、`primaryAgent` 复原。 |
 | `agent_sessions.json` | 恢复为 in-memory AgentSession，**全部 `Status=Detached`，PID=0**。 |
 | v1.x `registry.json` | 备份为 `.v1.bak`，不恢复数据（见 MIGRATION.md）。 |
 

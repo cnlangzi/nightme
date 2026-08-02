@@ -686,8 +686,8 @@ internal/
 
 | 决策 | 影响 | 状态 |
 |------|------|------|
-| **Q-A**: Default Agent 设置粒度 | 仅全局 `agents.default` config (YAML)；ChatSession.defaultAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已锁定 (2026-08-02) |
-| **Q-B**: `(activeAgent, activeCwd)` 不在 pool 时 fallback 顺序 | 影响 LookupActiveAgentSession 逻辑 | 待 Devin |
+| **Q-A**: Primary Agent 设置粒度 | 仅全局 `primary` config (YAML)；ChatSession.primaryAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已锁定 (2026-08-02) |
+| **Q-B**: `(activeAgent, activeCwd)` lookup 行为 | 只看 `(activeAgent, activeCwd)`：命中 Running 复用，否则 spawn；**无运行时 fallback** | ✅ 已锁定 (2026-08-02) |
 | **Q-C**: ChatSession.ID 来源 | 影响 ChatSessionEntry schema | 倾向 derived from chatId |
 | **Q-D**: /kill 时 InputBuffer 队列消息处理（drop / persist）| 影响 ChatSession.KillAll 行为 | 倾向 drop |
 | **Q-E**: AgentSessionEntry 持久化是否包括 Bridge 类型 | 影响 registry schema | 倾向包括 |

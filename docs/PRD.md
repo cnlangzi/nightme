@@ -202,4 +202,4 @@ nightme v1.2 发布时，以下场景必须能跑通：
 - **v1.0**：锁定 6 项关键决策 + Chat↔Session 1:1 模型 + Minimal MVP 范围
 - **v1.0r**：从 SPEC.md 分离，独立维护产品级文档
 - **v1.2**：Chat=Session 1:1 → **Chat=ChatSession** 模型；新增 AgentSession 池 + `/use` 命令；产品语义锁定，架构在 SPEC v1.2
-  - **状态**：**已锁定**（2026-08-02；Q-A ✅ 全局 Default only；Q-B ✅ exact → default fallback → spawn；落地 commits 5/6/7/8a/8b/8c/9）
+  - **状态**：**已锁定**（2026-08-02；Q-A ✅ 全局 Primary only；Q-B ✅ lookup 只看 `(activeAgent, activeCwd)`，无运行时 fallback；落地 commits 5/6/7/8a/8b/8c/9）

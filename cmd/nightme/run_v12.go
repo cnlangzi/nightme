@@ -282,7 +282,7 @@ func runDaemon_v12(ctx context.Context, out io.Writer, deps runDeps_v12, sigCh <
 	}
 
 	// Build the v1.2 router wiring.
-	fallback := v12Fallback(mgr, ch, cfg.Primary, logger)
+	messageDispatcher := v12MessageDispatcher(mgr, ch, cfg.Primary, logger)
 
 	// commit 8c: install EventHandler on every ChatSession. The
 	// handler translates AgentEvent → OutboundMessage + sends via
@@ -293,7 +293,7 @@ func runDaemon_v12(ctx context.Context, out io.Writer, deps runDeps_v12, sigCh <
 		cs.SetEventHandler(eventHandler)
 	}
 
-	gw := gateway.New(fallback, nil)
+	gw := gateway.New(messageDispatcher, nil)
 	gateway.RegisterChatSessionCommands(gw, mgr, ch, cfg.Primary)
 
 	// Attach channels + start the gateway.
@@ -327,9 +327,10 @@ func runDaemon_v12(ctx context.Context, out io.Writer, deps runDeps_v12, sigCh <
 	return shutdownRun_v12(out, ch, mgr, csFile, asFile, deps.cleanup, logger)
 }
 
-// v12Fallback returns the no-command fallback handler. It is
-// invoked when no slash command matches; it routes the inbound
-// message to the chat's active AgentSession via the InputBuffer.
+// v12MessageDispatcher is the runtime-injected messageDispatcher
+// for the v1.2 inboundDispatcher. It is invoked when no slash
+// command matches; it routes the inbound message to the chat's
+// active AgentSession via the InputBuffer.
 //
 // Flow (mirrors v1.1 fallback with ChatSession primitives):
 //
@@ -338,7 +339,7 @@ func runDaemon_v12(ctx context.Context, out io.Writer, deps runDeps_v12, sigCh <
 //  3. cs.QueueUserMessage(blocks, userMsgID) (Idle → flush now;
 //     Busy → queue)
 //  4. SetBusy on first event (drive FSM)
-func v12Fallback(mgr *chatsession.Manager, ch channel.Channel, primary string, logger *slog.Logger) func(context.Context, *gateway.InboundMessage) error {
+func v12MessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary string, logger *slog.Logger) func(context.Context, *gateway.InboundMessage) error {
 	return func(ctx context.Context, msg *gateway.InboundMessage) error {
 		if msg == nil {
 			return nil
@@ -373,7 +374,7 @@ func v12Fallback(mgr *chatsession.Manager, ch channel.Channel, primary string, l
 		// emits events on Events() but no one consumes them — the
 		// user sees "hi" go in but no reply ever comes back.
 		// handleUse also calls StartReadPump, but the FIRST message
-		// (before any /use) only goes through v12Fallback, so we
+		// (before any /use) only goes through v12MessageDispatcher, so we
 		// need to start the pump here too. StartReadPump is
 		// idempotent — it stops any existing pump first, so calling
 		// it again from handleUse is a no-op.
@@ -403,7 +404,7 @@ func v12Fallback(mgr *chatsession.Manager, ch channel.Channel, primary string, l
 //
 // commit 8c: this is a placeholder. The runtime's actual readPump
 // start happens in handleUse (gateway package) and on first
-// message dispatch in v12Fallback.
+// message dispatch in v12MessageDispatcher.
 func v12EnsureReadPumps(mgr *chatsession.Manager, ch channel.Channel, primary string, logger *slog.Logger) {
 	// no-op for commit 8c.
 	_ = mgr

@@ -116,9 +116,9 @@
 
 | 决策 | 现状 | 状态 |
 |------|------|------|
-| Q-A: Default Agent 设置粒度 | 全局 only (`config.yaml` 的 `primary`)；ChatSession.defaultAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已锁定 (2026-08-02) |
-| Q-B: `(activeAgent, activeCwd)` 不在 pool 时的 fallback 顺序 | exact → `(defaultAgent, activeCwd)` → spawn `(activeAgent, activeCwd)` | ✅ 已锁定 (2026-08-02) |
-| `ChatSession.defaultAgent` 字段持久化位置 | `ChatSessionEntry.defaultAgent` (snapshot，写时不变) | ✅ 已锁定 |
+| Q-A: Primary Agent 设置粒度 | 全局 only (`config.yaml` 的 `primary`)；ChatSession.primaryAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已锁定 (2026-08-02) |
+| Q-B: `(activeAgent, activeCwd)` lookup 行为 | 只看 `(activeAgent, activeCwd)`：命中 Running 复用，否则 spawn；**无运行时 fallback** | ✅ 已锁定 (2026-08-02) |
+| `ChatSession.primaryAgent` 字段持久化位置 | `ChatSessionEntry.primaryAgent` (snapshot，写时不变) | ✅ 已锁定 |
 | Config schema 顶层字段 | `primary` (top-level scalar) + `agents:` (top-level list); bridge 是每个 AgentEntry 的字段; command 是 full string 含 args | ✅ 已锁定 (2026-08-02) |
 
 ---
@@ -133,7 +133,7 @@ are tracked here (not in a TODO file) so they don't get lost.
 |------|-------------|--------|----------|
 | **E2E 飞书 DM round-trip** | Manual smoke test only; unit + integration cover F-27/28/29/30. Real Feishu WS + multi-turn send/receive not automated. | Release gate (PR `feat/air-dashboard-realization` and any future "this is production-ready" claim) | `docs/E2E_TESTING.md` (manual checklist) |
 | **`internal/session/MemoryManager` cleanup** | v1.x `session.MemoryManager` still used by `internal/gateway/cmd/handlers.go` (binding helpers, type alias `Session = *session.Session`). Needs `internal/gateway/cmd` to switch to `chatsession.ChatSession` (drop binding table — bindings now live in `Manager`). | Cleans up the last v1.x runtime residue; reduces gateway surface area; unlocks removal of `cmd/nightme/run.go` entirely | `docs/PLAN.md` §4.6.8 |
-| **Rolling-log receipt card UX (v1.x)** | v1.1 had: one user message → ONE Feishu receipt card; ⏳/🔄/✅/❌ reaction emoji + rolling body. v1.2 sends plain `OutText` replies (no card). | Chat UX regression vs v1.1; users may want the receipt back. Plan: implement receipt FSM in v12Fallback (call `ch.CreateReceipt` from Feishu adapter) | `docs/feat/F-25-input-buffer.md` (stale) + `CHANGELOG.md` "Known gaps" |
+| **Rolling-log receipt card UX (v1.x)** | v1.1 had: one user message → ONE Feishu receipt card; ⏳/🔄/✅/❌ reaction emoji + rolling body. v1.2 sends plain `OutText` replies (no card). | Chat UX regression vs v1.1; users may want the receipt back. Plan: implement receipt FSM in v12MessageDispatcher (call `ch.CreateReceipt` from Feishu adapter) | `docs/feat/F-25-input-buffer.md` (stale) + `CHANGELOG.md` "Known gaps" |
 | **Exit observer wiring** | `ChatSession.SetAgentExitObserver` + `StartObserveClose` exist; the runtime does not register an observer. readPump's natural exit is currently sufficient. | Reserved API for future work (respawn on death, /kill auto-reply, log user-visible "agent died" message). | `docs/feat/F-27-chatsession.md` §5.1.5 |
 | **`nightme config` second-tier menu** | Currently only the `Agents` submenu exists. Future: `Feishu`, `Session`, `Logging`, `Paths` submenus for the same interactive workflow. | Each submenu is a small independent feature; defer until users ask. | `docs/feat/F-30-interactive-config.md` §8 |
 | **Command string quoting** | `Command: "claude --dangerously-skip-permissions"` is split via `strings.Fields`. Paths with spaces are not supported. | If a binary path has spaces, the spawn breaks. Not common (binaries live in `$PATH`); defer. | `MIGRATION.md` §"Config schema" |

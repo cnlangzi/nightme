@@ -33,11 +33,11 @@ type ChatSession struct {
     ChatID          string              // unique — gateway.bindings[ChatID] → this
     ChatType        string              // p2p | group | topic_group | ""
 
-    // Active routing state (mutated by /cwd /use; defaultAgent is
+    // Active routing state (mutated by /cwd /use; primaryAgent is
     // captured at New() time from global config and never mutated).
     ActiveCwd       string              // /cwd sets; immutable per AgentSession
     ActiveAgent     string              // /use sets; immutable per AgentSession
-    DefaultAgent    string              // snapshot of config.Agents.Default at New(); read-only
+    PrimaryAgent    string              // snapshot of cfg.Primary at New(); read-only
 
     // AgentSession pool (per-ChatSession unique on (agent, cwd))
     poolMu          sync.RWMutex
@@ -77,7 +77,7 @@ type ChatSessionEntry struct {
     ChatType            string    `json:"chatType"`
     ActiveCwd           string    `json:"activeCwd"`            // empty → not yet /cwd'd
     ActiveAgent         string    `json:"activeAgent"`          // empty → not yet /use'd
-    DefaultAgent        string    `json:"defaultAgent"`         // snapshot of global Default at creation; read-only
+    PrimaryAgent        string    `json:"primaryAgent"`         // snapshot of cfg.Primary at creation; read-only
     AgentSessionIDs     []string  `json:"agentSessionIds"`      // pool index
     ActiveAgentSessionID *string   `json:"activeAgentSessionId"` // null → no active
     CreatedAt           time.Time `json:"createdAt"`
@@ -106,7 +106,7 @@ Gateway.handler.cwd  (or first inbound msg if binding missing):
 nightme run (startup):
   1. registry.LoadAll() → []ChatSessionEntry, []AgentSessionEntry
   2. For each ChatSessionEntry:
-     ├─ new ChatSession (id, chatId, chatType, activeCwd, activeAgent, defaultAgent)
+     ├─ new ChatSession (id, chatId, chatType, activeCwd, activeAgent, primaryAgent)
      ├─ For each agentSessionID:
      │   └─ new AgentSession (id, agent, cwd, status=Detached, pid=0)
      │       └─ chatSession.pool[(agent,cwd)] = agentSession
@@ -122,14 +122,15 @@ nightme run (startup):
 // LookupActiveAgentSession is the ONLY entry point for resolving
 // "which AgentSession should this message go to".
 //
-// Order (Q-B draft; pending Devin confirmation):
-//   1. pool[(activeAgent, activeCwd)]  — exact match
-//   2. pool[(defaultAgent, activeCwd)] — fallback to per-chat default
-//   3. spawn new (activeAgent, activeCwd)  — last resort
+// Logic (single path — no runtime fallback):
+//   - ChatSession always carries an effective activeAgent:
+//       · at construction, activeAgent is seeded from cfg.Primary
+//       · /use overwrites activeAgent
+//   - Resolve pool[(activeAgent, activeCwd)]:
+//       · hit (StatusRunning) → reuse, register callback, return
+//       · miss (or non-Running) → spawn (activeAgent, activeCwd)
 //
-// If spawned, callback is registered; chatSession.activeAS updated.
-//
-// Returns nil only if activeCwd is empty (ChatSession never /cwd'd).
+// Returns ErrNoActiveCwd if activeCwd is empty (user has not /cwd'd yet).
 func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
     cs.poolMu.Lock()
     defer cs.poolMu.Unlock()
@@ -149,17 +150,10 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
         return as, nil
     }
 
-    // Fallback to default agent at activeCwd
-    if cs.DefaultAgent != "" && cs.DefaultAgent != cs.ActiveAgent {
-        defKey := agentCwdKey{Agent: cs.DefaultAgent, Cwd: cs.ActiveCwd}
-        if as, ok := cs.pool[defKey]; ok {
-            // ... same respawn + register logic
-            cs.activeAS = as
-            return as, nil
-        }
-    }
-
-    // Last resort: spawn (activeAgent, activeCwd)
+    // Miss: spawn (activeAgent, activeCwd). No fallback to any
+    // "default" agent — chatSession.activeAgent is the only
+    // authority (seeded from cfg.Primary at New() time, /use
+    // overrides it).
     as := SpawnAgentSession(cs.ActiveAgent, cs.ActiveCwd)
     cs.pool[key] = as
     as.RegisterEventCallback(cs.eventCallback)
@@ -177,7 +171,7 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 | `/use <agent>` | Validate → `chatSession.SetActiveAgent(name)` → `LookupActiveAgentSession()` | May spawn new AgentSession if `(agent, activeCwd)` not in pool |
 | `/kill` | `chatSession.KillAll()` | Kills every AgentSession in pool; clears `activeAS`; old receipts dispose |
 
-**No `/default` command** (Q-A simplification, 2026-08-02): the only user-facing Default is the global `defaults.agent` config. The `defaultAgent` field on ChatSession is captured at `New()` time (snapshot of global Default) and never mutated post-construction. Future feature: per-chat Default via config (not command) — out of scope for v1.2.
+**No `/default` command** (Q-A simplification, 2026-08-02): the only user-facing Primary Agent is the global `primary` config. The `primaryAgent` field on ChatSession is captured at `New()` time (snapshot of `cfg.Primary`) and never mutated post-construction. Future feature: per-chat Primary via config (not command) — out of scope for v1.2.
 
 ### 3.5 SetActiveCwd / SetActiveAgent (state mutations)
 
@@ -383,17 +377,17 @@ for future work (e.g., respawn on death, /kill auto-reply).
 
 ---
 
-## 5.2 Default Agent snapshot (Q-A semantics)
+## 5.2 Primary Agent snapshot (Q-A semantics)
 
-`ChatSession.defaultAgent` is captured **once** at creation time
+`ChatSession.primaryAgent` is captured **once** at creation time
 from `cfg.Primary` (via `chatsession.NewManager.GetOrCreate`).
 Subsequent edits to `cfg.Primary` do **not** propagate to existing
 ChatSessions — the snapshot is read-only.
 
 For most use cases this is the right behaviour: a chat that
-already started with `defaultAgent=claude` keeps using `claude`
+already started with `primaryAgent=claude` keeps using `claude`
 even if the operator later sets `primary: codex` in
-`config.yaml`. To force a new chat onto the new default, the
+`config.yaml`. To force a new chat onto the new Primary, the
 user simply opens a fresh chat.
 
 ---
@@ -411,7 +405,7 @@ user simply opens a fresh chat.
       "chatType": "p2p",
       "activeCwd": "/code/bailing",
       "activeAgent": "claude",
-      "defaultAgent": "claude",
+      "primaryAgent": "claude",
       "agentSessionIds": ["as_1", "as_2"],
       "activeAgentSessionId": "as_1",
       "createdAt": "2026-08-02T...",
@@ -456,7 +450,7 @@ user simply opens a fresh chat.
 ### 7.1 Unit
 
 - `SetActiveCwd` / `SetActiveAgent` — pure state mutation, no spawn/kill
-- `LookupActiveAgentSession()` resolution order (3 cases: exact, default fallback, spawn)
+- `LookupActiveAgentSession()` resolution (single path: hit → reuse, miss → spawn `(activeAgent, activeCwd)`; no runtime fallback to any "default" agent)
 - `KillAll()` — all AgentSessions killed, activeAS=nil, pool emptied
 - `Restore()` from ChatSessionEntry + AgentSessionEntry — detached state, no process
 - Concurrent `/use` + activeAS read — race-free (uses sync.RWMutex)
@@ -488,7 +482,7 @@ user simply opens a fresh chat.
 ## 9. Open questions (draft)
 
 - **Q-A**: Default Agent setting granularity — global config only? per ChatSession command? both? (Lean: both)
-- **Q-B**: Fallback order when `(activeAgent, activeCwd)` not in pool — exact → default → spawn? (Lean: exact → default → spawn)
+- **Q-B** (closed 2026-08-03): lookup only resolves `(activeAgent, activeCwd)`. No runtime fallback. activeAgent is seeded from `cfg.Primary` at ChatSession creation and only mutated by `/use`.
 - **Q-C**: Should `chatSession.SetActiveCwd` log to user "activeCwd changed, next message will spawn new AgentSession"? (Lean: yes, ephemeral info message)
 - **Q-D**: When `/kill` clears pool, should queued InputBuffer messages be persisted or dropped? (Lean: dropped; user explicitly killed)
 - **Q-E**: ChatSession.ID is generated once or derived from chatId? (Lean: derived from chatId for 1:1 invariant enforcement)

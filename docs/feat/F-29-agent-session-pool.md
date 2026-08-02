@@ -138,8 +138,7 @@ Future v0.4+ may add LRU eviction if pool grows unbounded.
 ```
 LookupActiveAgentSession():
   1. pool[(activeAgent, activeCwd)] miss
-  2. check default fallback (Q-B: optional)
-  3. if miss too:
+  2. spawn (activeAgent, activeCwd) — no runtime fallback to any "default" agent
      a. Generate AgentSession.ID (UUID v7)
      b. Create Bridge (PTY/ACP/SDK/JSON-IO based on agent config)
      c. agentSession := &AgentSession{
@@ -292,7 +291,7 @@ T8: codex_AS.readPump picks events from codex.events → callback → cs.activeA
 ```
 T0: User A sends "hi"
 T1: User B sends /use codex
-T2: handler.fallback ("hi") acquires poolMu.Lock
+T2: messageDispatcher branch ("hi") acquires poolMu.Lock
 T3: LookupActiveAgentSession → resolves (claude, activeCwd) → cs.activeAS = claude_AS
 T4: poolMu.Unlock
 T5: "hi" dispatched to claude_AS
@@ -416,7 +415,7 @@ oc_bbb        /code/nightme        *         claude       22222  running
 
 - **LRU eviction** (v0.4+)
 - **Cross-chat AgentSession sharing** (明确不做 — 每个 chat 独立进程池)
-- **Pool rebalancing** (auto-promote fallback to active)
+- **Pool rebalancing** (auto-promote another entry to active)
 - **AgentSession snapshot/restore** (PTY process state cannot be snapshotted; only metadata persists)
 - **Hot attach** to existing detached AgentSession's process (always respawn)
 

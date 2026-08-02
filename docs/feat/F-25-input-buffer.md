@@ -79,11 +79,11 @@ Claude Code turn 执行中（BUSY）时，用户可能继续发消息。这些�
 
 | From | To | Trigger | 由谁驱动 |
 |------|-----|---------|---------|
-| (none) | Pending | `ch.CreateReceipt(...)` | Gateway.fallback (a) |
-| Pending | Executing | `sess.QueueUserMessage` 且 Buffer Idle | Gateway.fallback (d) |
+| (none) | Pending | `ch.CreateReceipt(...)` | Gateway messageDispatcher (a) |
+| Pending | Executing | `sess.QueueUserMessage` 且 Buffer Idle | Gateway messageDispatcher (d) |
 | Pending | Executing | `InputBuffer.onFlush` (queued msgs 实际 dispatch 时) | Gateway.onInputBufferFlush |
 | Executing | Done | Claude `result` event | Gateway.OnSessionEvent |
-| Executing | Error | Agent error / dispatch error / panic | Gateway.OnSessionEvent + fallback err path |
+| Executing | Error | Agent error / dispatch error / panic | Gateway.OnSessionEvent + degraded send err path |
 | Done / Error | (none) | `ch.DisposeReceipt(rcpt)` + `delete(receipts, userMsgID)` | Gateway |
 
 **不存在其他状态**。

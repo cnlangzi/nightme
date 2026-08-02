@@ -205,7 +205,7 @@ state: activeAgent=claude, pool has (claude, /code/A) status=Exited (PID died)
 T0: User A sends "hello"
 T1: User B sends "/use codex"
 T2: handler.cwd processing
-T3: handler.fallback processing ("hello")
+T3: messageDispatcher branch processing ("hello")
 T4: Both reach ChatSession; serialized via poolMu
 ```
 
@@ -264,7 +264,7 @@ T4: Both reach ChatSession; serialized via poolMu
 ### 7.1 Unit
 
 - `handleUse` with various (activeAgent, pool) combinations
-- LookupActiveAgentSession() — exact match, default fallback, spawn, respawn on exited
+- LookupActiveAgentSession() — exact match → reuse, miss → spawn `(activeAgent, activeCwd)`, respawn on exited; no runtime fallback to any "default" agent
 - /use with no activeCwd → error reply
 - /use with unknown agent → error reply
 - /use when already on that agent → noop
@@ -309,7 +309,7 @@ This is a thin wrapper around `Gateway.handleUse` with explicit `chatId` instead
 - **Q-F**: Should `/use` without activeCwd auto-default to a workspace (e.g., `~/.openclaw/workspace`)? (Lean: no, require explicit `/cwd`)
 - **Q-G**: When extraArgs provided but AgentSession already exists, silently drop or warn? (Lean: warn in reply "args ignored, agent already running")
 - **Q-H**: /use reply format — single line vs multi-line status (pid, cwd, agent, uptime)? (Lean: multi-line for diagnostic clarity)
-- **Q-I**: Should `/use` support `default` keyword to reset activeAgent to defaultAgent? (Lean: no — Q-A simplified to global Default only; per-chat default not exposed via command)
+- **Q-I**: Should `/use` support a keyword to reset activeAgent to primaryAgent? (Lean: no — Q-A simplified to global Primary only; per-chat Primary not exposed via command)
 
 ---
 

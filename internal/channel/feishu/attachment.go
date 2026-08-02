@@ -585,9 +585,9 @@ func BuildBlocks(text string, atts []channel.Attachment) []agent.ContentBlock {
 //
 // New code should call BuildBlocks and feed the result into
 // session.SendBlocks / session.QueueUserMessage. This wrapper is
-// kept for tests + the run.go fallback path that still wants a
-// pre-formatted string (e.g. when the legacy PTY bridge is in
-// use).
+// kept for tests + the v1.1 legacy PTY bridge path that still
+// wants a pre-formatted string. The v1.2 daemon uses
+// BuildBlocks + QueueUserMessage instead.
 func BuildForwardedText(text string, atts []channel.Attachment) string {
 	var b strings.Builder
 	if text != "" {

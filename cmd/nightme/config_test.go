@@ -90,11 +90,14 @@ func TestMergeAgents_UserConfigOverridesBuiltin(t *testing.T) {
 // TestConfigAgentsMenu_PickAndSave exercises the full menu loop
 // with a fake stdin and asserts the config file is updated.
 func TestConfigAgentsMenu_PickAndSave(t *testing.T) {
-	// Use a temp HOME so config.SaveDefault writes there.
+	// Use a temp HOME so config.SaveDefault writes there. Also pin
+	// NIGHTME_CONFIG to the same path so the test is robust against
+	// CI runners that have NIGHTME_CONFIG exported in the env (which
+	// would otherwise redirect SaveDefault to a different file).
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
-
 	cfgPath := filepath.Join(tmp, ".config", "nightme", "config.yaml")
+	t.Setenv("NIGHTME_CONFIG", cfgPath)
 
 	// Seed the file with cfg.Primary=claude + a user config entry.
 	seed := &config.Config{
@@ -156,6 +159,7 @@ func TestConfigAgentsMenu_CancelWithQ(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	cfgPath := filepath.Join(tmp, ".config", "nightme", "config.yaml")
+	t.Setenv("NIGHTME_CONFIG", cfgPath)
 
 	cfg, err := config.Load(cfgPath) // defaults: Primary=claude
 	if err != nil {

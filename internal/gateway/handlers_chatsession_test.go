@@ -178,11 +178,33 @@ func TestHandleCwd_SetsActiveCwd(t *testing.T) {
 //   - relative paths are $HOME-relative (not daemon-cwd-relative)
 //   - absolute paths pass through
 //   - non-existent paths are rejected at /cwd time (not at spawn time)
+//
+// Uses paths that exist on the test runner (`/tmp` is universally
+// available; t.TempDir() for an absolute path case). The earlier
+// version used `~/code` which broke on CI runners where $HOME/code
+// doesn't exist.
 func TestHandleCwd_PathResolution(t *testing.T) {
 	dir := t.TempDir()
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatalf("UserHomeDir: %v", err)
+	}
+
+	// `tmpdir` is an actual subdirectory inside `dir` so the
+	// tilde-with-subpath and relative-path tests resolve to a path
+	// that exists on every CI runner. We pre-create the
+	// subdirectory so the existence check passes.
+	tmpdir := "tmpdir"
+	realSubdir := filepath.Join(dir, tmpdir)
+	if err := os.Mkdir(realSubdir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	homeStyleSubdir := filepath.Join(home, tmpdir)
+	if err := os.Mkdir(homeStyleSubdir, 0o755); err != nil {
+		// HOME may not be writable (e.g., some CI containers); skip
+		// the HOME-relative subpath tests in that case rather than
+		// fail.
+		t.Skipf("HOME not writable: %v", err)
 	}
 
 	mgr, ch := newTestManager(t, false)
@@ -195,8 +217,8 @@ func TestHandleCwd_PathResolution(t *testing.T) {
 		{"absolute path", dir, dir},
 		{"tilde alone", "~", home},
 		{"tilde slash", "~/", home},
-		{"tilde with subpath", "~/code", filepath.Join(home, "code")},
-		{"relative is HOME-relative", "code", filepath.Join(home, "code")},
+		{"tilde with subpath", "~/" + tmpdir, homeStyleSubdir},
+		{"relative is HOME-relative", tmpdir, homeStyleSubdir},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/channel"
 )
 
 // mockReceiptBot captures AddReaction and SendMessageText calls so
@@ -275,4 +276,87 @@ func (m *mockReceiptBot) UpdateMessage(_ context.Context, _, _ string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return nil
+}
+
+// --- v1.1 tests for applyState / dispose ---
+
+func TestApplyState_FourStateEnum(t *testing.T) {
+	mb := &mockReceiptBot{}
+	mb.reactions = nil
+	r := NewMessageReceiptForReply("chat-x", "user-x", "msg-x", mb)
+
+	cases := []struct {
+		name    string
+		target  channel.ReceiptState
+		want    ReceiptState
+		emoji   string
+	}{
+		{"pending", channel.ReceiptPending, StateWaiting, "OK"},
+		{"executing", channel.ReceiptExecuting, StateExecuting, "OnIt"},
+		{"done", channel.ReceiptDone, StateCompleted, "PARTY"},
+		{"error", channel.ReceiptError, StateError, "THUMBSUP"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := r.applyState(context.Background(), tc.target); err != nil {
+				t.Fatalf("applyState(%s) err = %v", tc.name, err)
+			}
+			if r.State() != tc.want {
+				t.Fatalf("after applyState(%s): state = %s, want %s", tc.name, r.State(), tc.want)
+			}
+		})
+	}
+}
+
+func TestApplyState_Idempotent(t *testing.T) {
+	mb := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("c", "u", "m", mb)
+
+	if err := r.applyState(context.Background(), channel.ReceiptExecuting); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	before := len(mb.reactions)
+	if err := r.applyState(context.Background(), channel.ReceiptExecuting); err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	if len(mb.reactions) != before {
+		t.Fatalf("idempotent transition caused extra reactions: before=%d after=%d", before, len(mb.reactions))
+	}
+}
+
+func TestApplyState_UnknownState(t *testing.T) {
+	mb := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("c", "u", "m", mb)
+
+	if err := r.applyState(context.Background(), channel.ReceiptState(99)); err == nil {
+		t.Fatal("expected error for unknown ReceiptState")
+	}
+}
+
+func TestDispose_Idempotent(t *testing.T) {
+	mb := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("c", "u", "m", mb)
+
+	// Set up a reaction so dispose has work to do.
+	if err := r.applyState(context.Background(), channel.ReceiptExecuting); err != nil {
+		t.Fatalf("seed apply: %v", err)
+	}
+	if err := r.dispose(context.Background()); err != nil {
+		t.Fatalf("first dispose: %v", err)
+	}
+	if err := r.dispose(context.Background()); err != nil {
+		t.Fatalf("second dispose: %v", err)
+	}
+}
+
+func TestReceiptStateString_IncludesError(t *testing.T) {
+	if got := StateError.String(); got != "error" {
+		t.Fatalf("StateError.String() = %q, want %q", got, "error")
+	}
+}
+
+func TestReceiptStateEmoji_Error(t *testing.T) {
+	if got := StateError.Emoji(); got == "" {
+		t.Fatal("StateError.Emoji() returned empty, want a Feishu predefined emoji")
+	}
 }

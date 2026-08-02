@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/channel"
 )
 
 // receiptBot is the minimal Feishu surface the receipt depends
@@ -136,6 +137,15 @@ type MessageReceipt struct {
 }
 
 // ReceiptState is the lifecycle state of a MessageReceipt.
+//
+// StateWaiting / StateExecuting / StateCompleted predate the v1.1
+// four-state cross-channel enum (channel.ReceiptState). They remain
+// in use because the existing adapter-internal paths
+// (SendUserMessage / MarkExecuting / SetExecuting / SetCompleted /
+// Append) flow through them; the new v1.1 path
+// (channel.CreateReceipt → channel.UpdateReceipt) translates the
+// cross-channel ReceiptState into one of these via applyState
+// (see bottom of this file).
 type ReceiptState int
 
 const (
@@ -150,6 +160,10 @@ const (
 	// StateCompleted means Claude's result event has been received.
 	// The receipt is terminal and no further updates happen.
 	StateCompleted
+
+	// StateError means dispatch or processing failed (v1.1). The
+	// receipt is terminal and the user should retry.
+	StateError
 )
 
 // String renders the state as a short human label. Mostly useful for
@@ -162,6 +176,8 @@ func (s ReceiptState) String() string {
 		return "executing"
 	case StateCompleted:
 		return "completed"
+	case StateError:
+		return "error"
 	}
 	return "unknown"
 }
@@ -207,6 +223,8 @@ func (s ReceiptState) Emoji() string {
 		return "OnIt"
 	case StateCompleted:
 		return "PARTY"
+	case StateError:
+		return "THUMBSUP" // closest Feishu-predefined indicator of "failed"
 	}
 	return ""
 }
@@ -535,5 +553,113 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 		return fmt.Errorf("feishu receipt: ship entry: %w", err)
 	}
 	r.replyMsgID = msgID
+	return nil
+}
+
+// --- v1.1 unified state machine ---
+//
+// applyState and dispose are the v1.1 receipt lifecycle entry
+// points used by Adapter.UpdateReceipt / Adapter.DisposeReceipt.
+// Gateway is the only caller; receipts flow as opaque
+// channel.Receipt handles.
+
+// applyState transitions the receipt to the cross-channel state
+// `target`. Idempotent for the same target. Translates the
+// cross-channel ReceiptState enum into the legacy internal
+// ReceiptState + reaction-swap action.
+//
+// For Pending / Executing / Done the rendered behavior matches
+// the legacy SetExecuting / SetCompleted / SetCompleted-equivalent
+// paths. For Error (new in v1.1) we flip to StateError and swap
+// the reaction emoji; no further event updates are accepted.
+func (r *MessageReceipt) applyState(ctx context.Context, target channel.ReceiptState) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var targetInternal ReceiptState
+	switch target {
+	case channel.ReceiptPending:
+		targetInternal = StateWaiting
+	case channel.ReceiptExecuting:
+		targetInternal = StateExecuting
+		// Bookkeeping mirrors SetExecuting so the ⌚ timestamp in
+		// any subsequent header render is populated.
+		if r.state == StateWaiting {
+			r.forwardedAt = time.Now()
+			r.eventCount = 1
+			r.lastEventAt = r.forwardedAt
+		}
+	case channel.ReceiptDone:
+		targetInternal = StateCompleted
+		if r.state != StateCompleted {
+			r.completedAt = time.Now()
+		}
+	case channel.ReceiptError:
+		targetInternal = StateError
+		if r.state != StateCompleted && r.state != StateError {
+			r.completedAt = time.Now()
+		}
+	default:
+		return fmt.Errorf("feishu receipt: unknown ReceiptState %d", target)
+	}
+
+	// Idempotent: already in this state, no work.
+	if r.state == targetInternal {
+		return nil
+	}
+
+	// StateError is terminal — once entered, ignore further
+	// transitions to non-Done states (Done is allowed after Error
+	// for partial recovery; ignore everything else).
+	r.state = targetInternal
+
+	// Swap reaction (best-effort). Feishu's reaction API errors
+	// don't fail the lifecycle transition.
+	emoji := targetInternal.Emoji()
+	if emoji != r.currentReaction {
+		if r.currentReactionID != "" {
+			if err := r.bot.DeleteReaction(ctx, r.userMsgID, r.currentReactionID); err != nil {
+				r.logger.Warn("feishu receipt: delete old reaction failed",
+					"err", err, "old_emoji", r.currentReaction)
+			}
+		}
+		newID, err := r.bot.AddReaction(ctx, r.userMsgID, emoji)
+		if err != nil {
+			r.logger.Warn("feishu receipt: add new reaction failed",
+				"err", err, "emoji", emoji, "state", targetInternal)
+		} else {
+			r.currentReaction = emoji
+			r.currentReactionID = newID
+		}
+	}
+
+	r.logger.Debug("feishu receipt: state transition",
+		"from", "?", "to", targetInternal, "user_msg_id", r.userMsgID)
+	return nil
+}
+
+// dispose deletes the receipt's reply message + reaction. Idempotent.
+// Called by Adapter.DisposeReceipt after the final state transition.
+// v1.1 keeps the receipt in the adapter's indexes until the next
+// SendUserMessage call so legacy fallback paths that look up by
+// userMsgID keep working until commit 3 migrates them.
+func (r *MessageReceipt) dispose(ctx context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.replyMsgID != "" {
+		if err := r.bot.UpdateMessage(ctx, r.replyMsgID, ""); err != nil {
+			// Feishu's UpdateMessage may not support empty body; ignore.
+			r.logger.Debug("feishu receipt: clear body noop",
+				"err", err, "msg_id", r.replyMsgID)
+		}
+	}
+	if r.currentReactionID != "" {
+		if err := r.bot.DeleteReaction(ctx, r.userMsgID, r.currentReactionID); err != nil {
+			r.logger.Warn("feishu receipt: dispose delete reaction failed",
+				"err", err, "msg_id", r.userMsgID)
+		}
+		r.currentReactionID = ""
+	}
 	return nil
 }

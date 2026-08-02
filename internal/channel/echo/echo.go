@@ -21,6 +21,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/gateway"
 )
@@ -67,6 +68,92 @@ func (c *Channel) Stop(ctx context.Context) error { return nil }
 func (c *Channel) Incoming() <-chan channel.Message {
 	return make(chan channel.Message)
 }
+
+// --- v1.1 receipt lifecycle stubs ---
+//
+// CreateReceipt / UpdateReceipt / DisposeReceipt are logging-only
+// stubs. They let the Gateway exercise the v1.1 receipt FSM in
+// tests / smoke runs without a real IM backend. Echo never
+// returns errors from these methods (no network).
+//
+// Tests asserting the receipt FSM can read the recorded entries
+// from the Channel's record map.
+
+type echoReceipt struct {
+	chatID   string
+	userMsg  string
+	blocks   []agent.ContentBlock
+	state    channel.ReceiptState
+}
+
+// CreateReceipt records the receipt and prints a one-line
+// "echo: receipt created" log. Returns the opaque receipt handle.
+func (c *Channel) CreateReceipt(ctx context.Context, chatID, userMsgID string, blocks []agent.ContentBlock) (channel.Receipt, error) {
+	rcpt := &echoReceipt{chatID: chatID, userMsg: userMsgID, blocks: blocks, state: channel.ReceiptPending}
+	c.mu.Lock()
+	c.recorded = append(c.recorded, gateway.OutboundMessage{ChatID: chatID, Kind: gateway.OutText, Text: fmt.Sprintf("[receipt %s] created (state=pending, chat=%s)", userMsgID, chatID)})
+	c.mu.Unlock()
+	if c.out != nil {
+		fmt.Fprintf(c.out, "[receipt %s] created (state=pending, chat=%s)\n", userMsgID, chatID)
+	}
+	return channel.Receipt(rcpt), nil
+}
+
+// UpdateReceipt records the state transition and prints a log line.
+// Idempotent for the same state.
+func (c *Channel) UpdateReceipt(ctx context.Context, receipt channel.Receipt, state channel.ReceiptState) error {
+	if receipt == nil {
+		return nil
+	}
+	r, ok := receipt.(*echoReceipt)
+	if !ok {
+		return fmt.Errorf("echo: receipt is not *echoReceipt: %T", receipt)
+	}
+	r.state = state
+	if c.out != nil {
+		fmt.Fprintf(c.out, "[receipt %s] state=%s\n", r.userMsg, stateName(state))
+	}
+	c.mu.Lock()
+	c.recorded = append(c.recorded, gateway.OutboundMessage{ChatID: r.chatID, Kind: gateway.OutText, Text: fmt.Sprintf("[receipt %s] state=%s", r.userMsg, stateName(state))})
+	c.mu.Unlock()
+	return nil
+}
+
+// DisposeReceipt records the dispose and prints a log line.
+// Idempotent.
+func (c *Channel) DisposeReceipt(ctx context.Context, receipt channel.Receipt) error {
+	if receipt == nil {
+		return nil
+	}
+	r, ok := receipt.(*echoReceipt)
+	if !ok {
+		return fmt.Errorf("echo: receipt is not *echoReceipt: %T", receipt)
+	}
+	if c.out != nil {
+		fmt.Fprintf(c.out, "[receipt %s] disposed\n", r.userMsg)
+	}
+	return nil
+}
+
+// stateName renders a ReceiptState as a short human label for log
+// lines. Kept private to the echo package.
+func stateName(s channel.ReceiptState) string {
+	switch s {
+	case channel.ReceiptPending:
+		return "pending"
+	case channel.ReceiptExecuting:
+		return "executing"
+	case channel.ReceiptDone:
+		return "done"
+	case channel.ReceiptError:
+		return "error"
+	}
+	return "unknown"
+}
+
+// var _ block ensures echo.Channel satisfies channel.Channel at
+// compile time.
+var _ channel.Channel = (*Channel)(nil)
 
 // Send implements channel.Channel. Writes a one-line log and
 // records the message for test assertions.

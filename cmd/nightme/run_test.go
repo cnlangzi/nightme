@@ -64,6 +64,18 @@ func (f *fakeRunChannel) Incoming() <-chan channel.Message                      
 func (f *fakeRunChannel) Name() string                                                { return "fake" }
 func (f *fakeRunChannel) Send(ctx context.Context, msg gateway.OutboundMessage) error { return nil }
 
+// v1.1 receipt lifecycle stubs — no-op for tests that don't
+// exercise the receipt FSM.
+func (f *fakeRunChannel) CreateReceipt(context.Context, string, string, []agent.ContentBlock) (channel.Receipt, error) {
+	return nil, nil
+}
+func (f *fakeRunChannel) UpdateReceipt(context.Context, channel.Receipt, channel.ReceiptState) error {
+	return nil
+}
+func (f *fakeRunChannel) DisposeReceipt(context.Context, channel.Receipt) error {
+	return nil
+}
+
 func (f *fakeRunChannel) counts() (int, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

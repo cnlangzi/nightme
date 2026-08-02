@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
@@ -143,4 +145,74 @@ func TestEcho_AutoHandlesNewKinds(t *testing.T) {
 			t.Errorf("rec[%d].Kind = %s, want %s", i, rec[i].Kind, tc.kind)
 		}
 	}
+}
+
+// --- v1.1 receipt lifecycle tests ---
+
+func TestEcho_CreateReceiptReturnsHandle(t *testing.T) {
+	var buf bytes.Buffer
+	c := New("echo", &buf)
+	ctx := context.Background()
+
+	blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: "hello"}}
+	rcpt, err := c.CreateReceipt(ctx, "chat-1", "user-msg-1", blocks)
+	if err != nil {
+		t.Fatalf("CreateReceipt err: %v", err)
+	}
+	if rcpt == nil {
+		t.Fatal("CreateReceipt returned nil receipt")
+	}
+	if !strings.Contains(buf.String(), "created (state=pending") {
+		t.Errorf("missing pending log; buf = %q", buf.String())
+	}
+}
+
+func TestEcho_UpdateReceiptTransitionsState(t *testing.T) {
+	var buf bytes.Buffer
+	c := New("echo", &buf)
+	ctx := context.Background()
+
+	rcpt, err := c.CreateReceipt(ctx, "chat-1", "u-1", []agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}})
+	if err != nil {
+		t.Fatalf("CreateReceipt: %v", err)
+	}
+	for _, st := range []channel.ReceiptState{channel.ReceiptExecuting, channel.ReceiptDone, channel.ReceiptError} {
+		if err := c.UpdateReceipt(ctx, rcpt, st); err != nil {
+			t.Fatalf("UpdateReceipt(%d) err: %v", st, err)
+		}
+	}
+	out := buf.String()
+	for _, want := range []string{"state=executing", "state=done", "state=error"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in log; got %q", want, out)
+		}
+	}
+}
+
+func TestEcho_DisposeReceiptLogs(t *testing.T) {
+	var buf bytes.Buffer
+	c := New("echo", &buf)
+	ctx := context.Background()
+
+	rcpt, _ := c.CreateReceipt(ctx, "c", "u", nil)
+	if err := c.DisposeReceipt(ctx, rcpt); err != nil {
+		t.Fatalf("DisposeReceipt err: %v", err)
+	}
+	if !strings.Contains(buf.String(), "disposed") {
+		t.Errorf("missing dispose log; got %q", buf.String())
+	}
+}
+
+func TestEcho_UpdateReceiptNilIsNoop(t *testing.T) {
+	c := New("echo", nil)
+	if err := c.UpdateReceipt(context.Background(), nil, channel.ReceiptDone); err != nil {
+		t.Errorf("UpdateReceipt(nil) err = %v, want nil", err)
+	}
+	if err := c.DisposeReceipt(context.Background(), nil); err != nil {
+		t.Errorf("DisposeReceipt(nil) err = %v, want nil", err)
+	}
+}
+
+func TestEcho_SatisfiesChannelInterface(t *testing.T) {
+	var _ channel.Channel = New("echo", nil)
 }

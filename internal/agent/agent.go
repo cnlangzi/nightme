@@ -281,9 +281,11 @@ type CompactionEvent struct {
 }
 
 // InitEvent is the payload for EventInit — session bootstrap data
-// from the agent's system/init event. Bridges populate it from the
-// stream-json system event (session_id + model). Channels use it to
-// surface "session <id> · model <name>" in the receipt header.
+// from the agent's system/init event. Bridges populate the
+// agent-specific fields (AgentName, Workspace) from their own start
+// config; the stream-json system event provides SessionID + Model.
+// Channels use this payload to surface the receipt card's foot
+// note (Agent · name | cwd · workspace | tokens · count).
 type InitEvent struct {
 	// SessionID is the agent's opaque session id. Used for `--resume`
 	// on subsequent runs; channels may surface it for debugging.
@@ -292,6 +294,27 @@ type InitEvent struct {
 	// Model is the model the agent selected (Claude Code:
 	// system/init.model).
 	Model string
+
+	// AgentName is the human-friendly name of the running agent
+	// (registry key, e.g. "claude" or a binding alias like "main").
+	// Bridges populate this from Agent.Name() at start time; it is
+	// stable for the lifetime of the session.
+	AgentName string
+
+	// Workspace is the absolute path of the working directory the
+	// agent process is running in. Bridges populate this from
+	// StartConfig.Workspace. Channels surface it as "cwd" in the
+	// receipt foot note.
+	Workspace string
+
+	// Branch is the git branch of the workspace, captured at
+	// session start by running `git -C workspace symbolic-ref
+	// --short HEAD`. Empty when the workspace is not a git
+	// repo or git is unavailable; the receipt's foot note
+	// omits the branch segment in that case. Channels surface
+	// it as the third "branch" segment of the
+	// "Agent | repo | branch | tokens" foot note.
+	Branch string
 }
 
 // AgentEvent is the wire format on the AgentSession.Events() channel.

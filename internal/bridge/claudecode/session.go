@@ -28,6 +28,16 @@ type session struct {
 	events  chan agent.AgentEvent
 	pid     int
 
+	// agentName + workspace + branch are captured at session start
+	// so the translate goroutine can stamp them onto the EventInit
+	// payload (consumed by channel-layer receipt rendering for
+	// the "Agent | repo | branch | tokens" foot note). All
+	// three are immutable for the session's lifetime so no
+	// mutex is needed.
+	agentName string
+	workspace string
+	branch    string
+
 	// pendingAsk is set when an AskUserQuestion EventPermission is
 	// emitted; SendPermission reads from it (matching ResponseCh).
 	// nil means "no pending question".
@@ -51,10 +61,23 @@ type pendingAsk struct {
 // newSession spawns `claude` with args + env, then starts the JSON
 // event pump goroutine. The returned AgentSession is ready for
 // SendText / Events immediately on success.
-func newSession(ctx context.Context, command string, args, env []string, workspace string) (agent.AgentSession, error) {
+//
+// agentName + workspace + branch are stamped onto every EventInit
+// emitted by the pump so channel-layer receipts can render the
+// "Agent | repo | branch | tokens" foot note. The values are
+// stable for the session's lifetime (set once at start).
+//
+// branch is captured by running `git -C workspace symbolic-ref
+// --short HEAD` (or the equivalent rev-parse). Failure is
+// non-fatal — the branch is just left empty and the receipt's
+// foot note omits that segment. We run this BEFORE spawning the
+// child so a slow `git` invocation doesn't block receipt init.
+func newSession(ctx context.Context, agentName, command string, args, env []string, workspace string) (agent.AgentSession, error) {
 	if workspace == "" {
 		return nil, fmt.Errorf("claudecode: workspace is required")
 	}
+
+	branch := detectBranch(workspace)
 
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = workspace
@@ -84,11 +107,14 @@ func newSession(ctx context.Context, command string, args, env []string, workspa
 	}
 
 	s := &session{
-		cmd:    cmd,
-		stdin:  bufio.NewWriter(stdin),
-		events: make(chan agent.AgentEvent, 64),
-		pid:    cmd.Process.Pid,
-		closed: make(chan struct{}),
+		cmd:       cmd,
+		stdin:     bufio.NewWriter(stdin),
+		events:    make(chan agent.AgentEvent, 64),
+		pid:       cmd.Process.Pid,
+		agentName: agentName,
+		workspace: workspace,
+		branch:    branch,
+		closed:    make(chan struct{}),
 	}
 
 	// Register pendingAsk bridge for AskUserQuestion: the default
@@ -150,7 +176,7 @@ func newSession(ctx context.Context, command string, args, env []string, workspa
 	}
 
 	logger := slog.Default()
-	go pumpStream(stdout, s.events, handler, logger)
+	go pumpStream(stdout, s.events, handler, s.agentName, s.workspace, s.branch, logger)
 
 	// stderr drainer — Claude Code logs to stderr; we discard
 	// rather than surface (the channel layer can subscribe via
@@ -509,4 +535,42 @@ func trimSpace(s string) string {
 		end--
 	}
 	return s[start:end]
+}
+
+// detectBranch returns the current git branch for workspace, or
+// "" if the workspace is not a git repo / git is unavailable / the
+// command errors out. Uses `git -C ws symbolic-ref --short HEAD`
+// which is the most direct way to read the current branch without
+// invoking rev-parse heuristics. stderr is discarded — non-git
+// directories simply produce "" without surfacing an error to the
+// user (the foot note just omits the branch segment).
+func detectBranch(workspace string) string {
+	if workspace == "" {
+		return ""
+	}
+	// Bound the command to a short window so a slow / hung
+	// git invocation never blocks receipt init. 1 second is
+	// generous for a local file lookup; if git can't answer
+	// in that window we'd rather show no branch than block
+	// receipt rendering.
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git",
+		"-C", workspace,
+		"symbolic-ref", "--short", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	branch := trimSpace(string(out))
+	// `git symbolic-ref --short HEAD` on a detached HEAD prints
+	// nothing to stdout (and exits non-zero); the err path
+	// above catches that. As a defensive fallback, also handle
+	// the literal "HEAD" output that rev-parse emits on a
+	// detached checkout — we don't want it showing up in the
+	// foot note.
+	if branch == "" || branch == "HEAD" {
+		return ""
+	}
+	return branch
 }

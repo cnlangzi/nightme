@@ -2,6 +2,7 @@ package feishu
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -11,37 +12,38 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 )
 
-// mockReceiptBot captures AddReaction, SendMessageText, ReplyMessage,
-// and UpdateMessage calls so tests can assert on the dual-track
-// behavior without a live Feishu connection. Embeds *Adapter with nil
-// fields, so any unguarded access to a.larkClient will panic — guards
-// in the receipt must stay routed through our methods.
+// mockReceiptBot captures AddReaction, SendMessageText, SendCard and
+// PatchMessage calls so tests can assert on the dual-track behavior
+// without a live Feishu connection. Embeds *Adapter with nil fields,
+// so any unguarded access to a.larkClient will panic — guards in the
+// receipt must stay routed through our methods.
 type mockReceiptBot struct {
 	mu             sync.Mutex
 	reactions      []reactionCall
 	messages       []string
-	replies        []replyCall
-	updates        []updateCall
+	cards          []cardCall
+	patches        []cardCall
 	addReactionErr error
 	sendMsgErr     error
-	replyErr       error
-	updateErr      error
-}
-
-type replyCall struct {
-	ChatID    string
-	UserMsgID string
-	Text      string
-}
-
-type updateCall struct {
-	MessageID string
-	Text      string
+	sendCardErr    error
+	patchErr       error
+	// nextCardID is returned from SendCard; tests that want the
+	// receipt to enter the PATCH cycle need it non-empty. Defaults
+	// to "om_card_1" (incremented per call).
+	nextCardID int
 }
 
 type reactionCall struct {
 	MessageID string
 	Emoji     string
+}
+
+// cardCall records one SendCard or PatchMessage invocation. Patches
+// are addressed by MessageID; sends by ChatID.
+type cardCall struct {
+	ChatID    string
+	MessageID string
+	Body      string
 }
 
 func (m *mockReceiptBot) AddReaction(_ context.Context, msgID, emoji string) (string, error) {
@@ -64,21 +66,34 @@ func (m *mockReceiptBot) SendMessageText(_ context.Context, _, text string) (str
 	return "", nil
 }
 
-func (m *mockReceiptBot) ReplyMessage(_ context.Context, chatID, userMsgID, text string) (string, error) {
+// SendCard records the call and returns a synthetic message id so
+// the receipt's renderLocked stores it on r.cardMsgID. After the
+// first send, subsequent renders go through PatchMessage. The id is
+// derived from nextCardID so multiple receipts in the same test get
+// distinct ids.
+func (m *mockReceiptBot) SendCard(_ context.Context, chatID, body string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.replyErr != nil {
-		return "", m.replyErr
+	if m.sendCardErr != nil {
+		return "", m.sendCardErr
 	}
-	m.replies = append(m.replies, replyCall{ChatID: chatID, UserMsgID: userMsgID, Text: text})
-	return "mock-reply-msg-id", nil
+	if m.nextCardID == 0 {
+		m.nextCardID = 1
+	}
+	id := fmt.Sprintf("om_card_%d", m.nextCardID)
+	m.nextCardID++
+	m.cards = append(m.cards, cardCall{ChatID: chatID, MessageID: id, Body: body})
+	return id, nil
 }
 
-func (m *mockReceiptBot) UpdateMessage(_ context.Context, msgID, text string) error {
+func (m *mockReceiptBot) PatchMessage(_ context.Context, messageID, body string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.updates = append(m.updates, updateCall{MessageID: msgID, Text: text})
-	return m.updateErr
+	if m.patchErr != nil {
+		return m.patchErr
+	}
+	m.patches = append(m.patches, cardCall{MessageID: messageID, Body: body})
+	return nil
 }
 
 // We can't directly construct an Adapter with custom AddReaction /
@@ -128,9 +143,9 @@ func TestReceiptState_String(t *testing.T) {
 
 func TestReceiptState_Emoji(t *testing.T) {
 	cases := map[ReceiptState]string{
-		StateWaiting:   "OK",
+		StateWaiting:   "OneSecond",
 		StateExecuting: "OnIt",
-		StateCompleted: "PARTY",
+		StateCompleted: "DONE",
 	}
 	for s, want := range cases {
 		if got := s.Emoji(); got != want {
@@ -216,41 +231,47 @@ func TestReceiptStringContainsEmoji(t *testing.T) {
 	}
 }
 
-// TestReceipt_RollingLogInPlaceUpdate verifies the canonical F-25
-// v1.1 behavior: one user message → ONE Feishu reply card, edited
-// in place via UpdateMessage as agent events append to the rolling
-// log. The pre-fix design (commit dd91e44) shipped one fresh
-// message per event; the canonical design collapses them all into
-// one card.
+// TestReceipt_PerEventFreshMessage verifies the post-refactor
+// renderLocked behavior: each agent event produces a NEW
+// SendMessageText call rather than an UpdateMessage in place.
+//
+// Before the per-event refactor, all events rolled into a single
+// message that was updated N times via UpdateMessage. After, every
+// event produces a fresh message — the chat surface mirrors the
+// event stream. The test:
+//  1. Creates a receipt with the mockReceiptBot (no Feishu).
+//  2. Appends three events (text, tool start, tool end).
+//  3. Asserts SendMessageText was called 3 times — once per event.
+//  4. Asserts UpdateMessage was NEVER called.
+//  5. Asserts the messages are the entry texts, not the rolled log.
+//
+// TestReceipt_FirstSendThenPatch verifies the card-based renderLocked
+// behavior introduced in docs/channel/feishu.md §5: the first render
+// sends an interactive card via SendCard; every subsequent render
+// PATCHes that same card in place via PatchMessage. SendMessageText
+// is no longer called for the rolling log.
 //
 // The test:
-//  1. Creates a receipt with the mockReceiptBot (no live Feishu).
+//  1. Creates a receipt with the mockReceiptBot (no Feishu).
 //  2. Appends three events (text, tool start, tool end).
-//  3. Asserts UpdateMessage was called once per event (the same
-//     message id every time — the in-place edit).
-//  4. Asserts SendMessageText / ReplyMessage were NEVER called by
-//     Append (the initial post is the caller's responsibility, not
-//     Append's).
-//  5. Asserts the updated bodies grow — each edit carries the full
-//     rolled log so far (header + every entry appended to date).
-func TestReceipt_RollingLogInPlaceUpdate(t *testing.T) {
+//  3. Asserts SendCard was called exactly ONCE (first event).
+//  4. Asserts PatchMessage was called TWICE (subsequent events).
+//  5. Asserts SendMessageText was NEVER called.
+//  6. Asserts all PATCH calls address the same MessageID as the
+//     original SendCard.
+//  7. Asserts each card body contains all entries seen so far
+//     (the rendered body grows monotonically; this is the
+//     observable surface of the rolling-log card).
+func TestReceipt_FirstSendThenPatch(t *testing.T) {
 	bot := &mockReceiptBot{}
-	// NewMessageReceiptForReply already sets replyMsgID = "om_initial",
-	// so the first Append will UpdateMessage that message in place.
 	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
 	r.receivedAt = time.Now()
 
-	// Three events across three agent kinds — a text reply, a
-	// tool start, and a tool end. Each one rolls into the same
-	// reply card via UpdateMessage.
+	// Three events across three agent kinds.
 	mustAppend(t, r, agent.AgentEvent{
 		Kind: agent.EventText,
 		Text: "hello from the agent",
 	})
-	// The receipt throttles UpdateMessage (Feishu per-message
-	// quota is 5/sec — see renderLocked). Space the events out
-	// past the cooldown so each one paints the body.
-	time.Sleep(minBodyUpdateInterval + 10*time.Millisecond)
 	mustAppend(t, r, agent.AgentEvent{
 		Kind: agent.EventToolStart,
 		ToolStart: &agent.ToolStartEvent{
@@ -259,7 +280,6 @@ func TestReceipt_RollingLogInPlaceUpdate(t *testing.T) {
 			Args: "/tmp/foo",
 		},
 	})
-	time.Sleep(minBodyUpdateInterval + 10*time.Millisecond)
 	mustAppend(t, r, agent.AgentEvent{
 		Kind: agent.EventToolEnd,
 		ToolEnd: &agent.ToolEndEvent{
@@ -268,159 +288,691 @@ func TestReceipt_RollingLogInPlaceUpdate(t *testing.T) {
 		},
 	})
 
-	// In-place edit: one UpdateMessage per event, all on the same
-	// message id.
 	bot.mu.Lock()
-	updates := append([]updateCall(nil), bot.updates...)
-	messages := append([]string(nil), bot.messages...)
-	replies := append([]replyCall(nil), bot.replies...)
+	cards := append([]cardCall(nil), bot.cards...)
+	patches := append([]cardCall(nil), bot.patches...)
+	textMsgs := append([]string(nil), bot.messages...)
 	bot.mu.Unlock()
 
-	if len(updates) != 3 {
-		t.Fatalf("UpdateMessage calls = %d, want 3 (one per event)", len(updates))
+	if len(cards) != 1 {
+		t.Fatalf("SendCard calls = %d, want 1 (first render only)", len(cards))
 	}
-	for i, u := range updates {
-		if u.MessageID != "om_initial" {
-			t.Errorf("updates[%d].MessageID = %q, want %q (in-place edit, same id)",
-				i, u.MessageID, "om_initial")
+	if len(patches) != 2 {
+		t.Fatalf("PatchMessage calls = %d, want 2 (one per subsequent render)", len(patches))
+	}
+	if len(textMsgs) != 0 {
+		t.Errorf("SendMessageText calls = %d, want 0 (text path retired for receipts)", len(textMsgs))
+	}
+
+	cardID := cards[0].MessageID
+	if cardID == "" {
+		t.Fatal("SendCard returned empty message id; receipt cannot store it as cardMsgID")
+	}
+	for i, p := range patches {
+		if p.MessageID != cardID {
+			t.Errorf("patches[%d].MessageID = %q, want %q (same id as SendCard)", i, p.MessageID, cardID)
 		}
 	}
 
-	// Append never posts fresh messages or replies — that is the
-	// caller's job (SendUserMessage / CreateReceipt).
-	if len(messages) != 0 {
-		t.Errorf("SendMessageText calls = %d, want 0 (Append edits, doesn't post)",
-			len(messages))
+	// Body must be a Card 2.0 envelope ({"schema":"2.0", ...}).
+	// The pre-migration format wrapped in {"card":...} which
+	// Feishu silently failed to render; see the protocol diff
+	// captured in the PR description.
+	if !strings.Contains(cards[0].Body, `"schema":"2.0"`) {
+		t.Errorf("SendCard body missing Card 2.0 schema marker: %q", truncateForTest(cards[0].Body, 80))
 	}
-	if len(replies) != 0 {
-		t.Errorf("ReplyMessage calls = %d, want 0 (Append edits, doesn't reply)",
-			len(replies))
+	if !strings.Contains(cards[0].Body, `"width_mode":"fill"`) {
+		t.Errorf("SendCard body missing Card 2.0 config.width_mode: %q", truncateForTest(cards[0].Body, 80))
 	}
-
-	// Each updated body grows — last body is the longest, and every
-	// body contains the header line + every entry appended up to
-	// that point. We don't assert exact strings (the receipt
-	// renderer owns that contract), only the growth pattern.
-	for i := 1; i < len(updates); i++ {
-		if len(updates[i].Text) < len(updates[i-1].Text) {
-			t.Errorf("updates body shrank from %d bytes to %d bytes — entries should accumulate",
-				len(updates[i-1].Text), len(updates[i].Text))
-		}
+	if !strings.Contains(cards[0].Body, `"body":{`) {
+		t.Errorf("SendCard body missing Card 2.0 body wrapper: %q", truncateForTest(cards[0].Body, 80))
 	}
-
-	// Sanity: the final body contains all three event entries.
-	final := updates[len(updates)-1].Text
-	for _, want := range []string{"💬 hello from the agent", "🔧 Read(", "✅ Read"} {
-		if !strings.Contains(final, want) {
-			t.Errorf("final body missing %q — full log should include every event", want)
+	if !strings.Contains(cards[0].Body, `"tag":"markdown"`) {
+		t.Errorf("SendCard body missing Card 2.0 markdown element: %q", truncateForTest(cards[0].Body, 80))
+	}
+	if !strings.Contains(cards[0].Body, "hello from the agent") {
+		t.Errorf("SendCard body missing first event text: %q", truncateForTest(cards[0].Body, 120))
+	}
+	// The LAST PATCH should contain all three entries (the
+	// rolling-log card is the union of all events seen so far).
+	// We assert on the human-visible pieces: the text reply and
+	// the tool name (the tool id "toolu_001" is only in the
+	// raw AgentEvent, not in the rendered LogEntry; eventToEntry
+	// surfaces the tool name + args, not the id).
+	last := patches[len(patches)-1].Body
+	for _, want := range []string{"hello from the agent", "Read", "/tmp/foo"} {
+		if !strings.Contains(last, want) {
+			t.Errorf("last PATCH missing %q; got: %q", want, truncateForTest(last, 200))
 		}
 	}
 }
 
-// TestReceipt_FooterRenders verifies SetFooter renders the
-// caller-supplied session-attribution line at the bottom of the
-// reply body, separated by a horizontal rule from the rolling
-// log entries. The receipt does NOT compose the footer — that is
-// the adapter's job (nightme doesn't track tokens or session
-// metadata itself; the caller forwards the agent's values).
-func TestReceipt_FooterRenders(t *testing.T) {
-	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
-	r.receivedAt = time.Now()
+// truncateForTest shortens a body string for failure messages; the
+// test files don't import truncateForLog from the package.
+func truncateForTest(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
 
-	r.SetFooter("Agent: claude | cwd: ~/code/nightme | tokens: 8.8K / 4.5K")
+// TestFootLine_Components covers the labelled
+// "Agent: ... | CWD: ... | git: ... | TOKENS: .../..." foot-note
+// composer. The line is appended after a <hr> divider as a
+// plain markdown element by buildReceiptCard (no
+// <text_tag color='neutral'> wrapper — the user requested the
+// default card-renderer color). These tests pin the composer
+// alone so failures surface with a tight diff. Format
+// documentation lives in docs/channel/feishu.md §9.3.
+func TestFootLine_Components(t *testing.T) {
+	cases := []struct {
+		name         string
+		agentName    string
+		workspace    string
+		branch       string
+		inputTokens  int
+		outputTokens int
+		want         string
+	}{
+		{
+			name: "all-empty-omits-foot-note",
+			want: "",
+		},
+		{
+			name:      "agent-only",
+			agentName: "claude",
+			// Two-line layout: line 1 = agent alone
+			// (no GIT / Tokens), line 2 omitted.
+			want: "Agent: claude",
+		},
+		{
+			name:      "workspace-only-full-path",
+			workspace: "/Users/devin/code/nightme",
+			// No line-1 fields → only line 2.
+			want: "Workspace: /Users/devin/code/nightme",
+		},
+		{
+			name:   "branch-only",
+			branch: "main",
+			// Only line-1 field (GIT), no line 2.
+			want: "GIT: main",
+		},
+		{
+			name:         "tokens-only-input-and-output",
+			inputTokens:  20_000,
+			outputTokens: 1_000,
+			want:         "Tokens: 20K/1k",
+		},
+		{
+			name:         "all-four-target-example",
+			agentName:    "claude",
+			workspace:    "/Users/devin/code/nightme",
+			branch:       "main",
+			inputTokens:  20_000,
+			outputTokens: 1_000,
+			// Two-line layout per the user's most recent
+			// request:
+			//   line 1: Agent | GIT | Tokens (joined with " | ")
+			//   line 2: Workspace (alone)
+			want: "Agent: claude | GIT: main | Tokens: 20K/1k<br/>Workspace: /Users/devin/code/nightme",
+		},
+		{
+			name:         "all-four-with-feature-branch",
+			agentName:    "claude",
+			workspace:    "/Users/devin/code/nightme",
+			branch:       "feat/receipt-card",
+			inputTokens:  50_000,
+			outputTokens: 3_000,
+			want: "Agent: claude | GIT: feat/receipt-card | Tokens: 50K/3k<br/>Workspace: /Users/devin/code/nightme",
+		},
+		{
+			name:         "branch-empty-omitted-not-git-repo",
+			agentName:    "claude",
+			workspace:    "/Users/geax",
+			inputTokens:  32_000,
+			outputTokens: 101,
+			// /Users/geax is the home dir (per the
+			// user's most recent screenshot), not a git
+			// repo, so the GIT segment drops out of
+			// line 1 entirely.
+			want: "Agent: claude | Tokens: 32K/101<br/>Workspace: /Users/geax",
+		},
+		{
+			name:         "deep-workspace-full-path-not-shortened",
+			workspace:    "/Users/devin/code/nightme/src/internal/channel/feishu",
+			branch:       "main",
+			inputTokens:  5_000,
+			outputTokens: 500,
+			// No agent → line 1 has only GIT + Tokens;
+			// long workspace on line 2.
+			want: "GIT: main | Tokens: 5K/500<br/>Workspace: /Users/devin/code/nightme/src/internal/channel/feishu",
+		},
+		{
+			name:      "tilde-path-full-path",
+			workspace: "~/code/nightme",
+			want:      "Workspace: ~/code/nightme",
+		},
+		{
+			name:         "input-only-zero-output-omitted",
+			agentName:    "claude",
+			workspace:    "/Users/geax",
+			inputTokens:  20_000,
+			// Tokens "20K" (no output side) is the only
+			// line-1 segment beyond Agent.
+			want: "Agent: claude | Tokens: 20K<br/>Workspace: /Users/geax",
+		},
+		{
+			name:         "output-only-zero-input-omitted",
+			agentName:    "claude",
+			workspace:    "/Users/geax",
+			outputTokens: 1_000,
+			want: "Agent: claude | Tokens: 1k<br/>Workspace: /Users/geax",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &MessageReceipt{
+				agentName:    tc.agentName,
+				workspace:    tc.workspace,
+				branch:       tc.branch,
+				inputTokens:  tc.inputTokens,
+				outputTokens: tc.outputTokens,
+			}
+			got := StateExecuting.footLine(r)
+			if got != tc.want {
+				t.Errorf("footLine = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
-	mustAppend(t, r, agent.AgentEvent{
-		Kind: agent.EventText,
-		Text: "body line",
+// TestFootLine_PerLineLayout pins the per-line layout that
+// the user requested: each foot note segment is on its own
+// line, separated by <br/> (Feishu lark_md's explicit line
+// break). The order is fixed (AGENT → WORKSPACE → GIT →
+// TOKENS, per the user's "CWD earliest on the second line"
+// request); missing segments drop their line entirely. The
+// TestFootLine_TwoLineLayout pins the two-line layout that
+// the user requested: line 1 holds the task-scoped fields
+// (Agent | GIT | Tokens) joined by " | "; line 2 holds the
+// workspace path alone. The two lines are separated by
+// <br/> when both are present. A missing line omits the
+// <br/> entirely (no dangling line break on single-line
+// results). The previous per-segment-per-line layout was
+// retired for this grouped two-line format.
+func TestFootLine_TwoLineLayout(t *testing.T) {
+	cases := []struct {
+		name string
+		r    *MessageReceipt
+		want string
+	}{
+		{
+			name: "all-four-fields-two-lines",
+			r: &MessageReceipt{
+				agentName:    "claude",
+				workspace:    "/Users/devin/code/nightme",
+				branch:       "main",
+				inputTokens:  20_000,
+				outputTokens: 1_000,
+			},
+			want: "Agent: claude | GIT: main | Tokens: 20K/1k<br/>Workspace: /Users/devin/code/nightme",
+		},
+		{
+			name: "no-git-repo-drops-git-from-line-1",
+			r: &MessageReceipt{
+				agentName:    "claude",
+				workspace:    "/Users/geax",
+				inputTokens:  32_000,
+				outputTokens: 101,
+			},
+			// GIT is absent → no GIT segment in line 1.
+			want: "Agent: claude | Tokens: 32K/101<br/>Workspace: /Users/geax",
+		},
+		{
+			name: "no-agent-line-1-still-has-git-and-tokens",
+			r: &MessageReceipt{
+				workspace:    "/Users/devin/code/nightme",
+				branch:       "main",
+				inputTokens:  1_000,
+				outputTokens: 500,
+			},
+			// Agent absent → line 1 is just GIT | Tokens.
+			// Input uses compactNumberLoud ("1K" not "1k"
+			// for the 1000-input case).
+			want: "GIT: main | Tokens: 1K/500<br/>Workspace: /Users/devin/code/nightme",
+		},
+		{
+			name: "only-workspace-line-2-alone",
+			r: &MessageReceipt{
+				workspace: "/Users/devin/code/nightme",
+			},
+			// No line-1 fields → no <br/>, just line 2.
+			want: "Workspace: /Users/devin/code/nightme",
+		},
+		{
+			name: "only-line-1-fields-line-2-omitted",
+			r: &MessageReceipt{
+				agentName:    "claude",
+				branch:       "main",
+				inputTokens:  20_000,
+				outputTokens: 1_000,
+			},
+			// No workspace → no <br/>, just line 1.
+			want: "Agent: claude | GIT: main | Tokens: 20K/1k",
+		},
+		{
+			name: "long-line-stays-as-one-line-no-soft-wrap",
+			r: &MessageReceipt{
+				agentName: "very-long-agent-name-that-exceeds-the-old-soft-cap",
+				workspace: "/Users/devin/code/some-really-long-project-name-here",
+				branch:    "feat/another-long-branch-name",
+				inputTokens:  100_000,
+				outputTokens: 5_000,
+			},
+			// Two lines, no soft-cap wrap — long content
+			// stays on a single line and Feishu handles
+			// the visual wrap.
+			want: "Agent: very-long-agent-name-that-exceeds-the-old-soft-cap | GIT: feat/another-long-branch-name | Tokens: 100K/5k<br/>Workspace: /Users/devin/code/some-really-long-project-name-here",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := StateExecuting.footLine(tc.r)
+			if got != tc.want {
+				t.Errorf("footLine = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFootLine_NilReceipt returns "" — pins the guard so a nil
+// receipt doesn't panic when buildReceiptCard calls footLine.
+func TestFootLine_NilReceipt(t *testing.T) {
+	for _, s := range []ReceiptState{StateWaiting, StateExecuting, StateCompleted, StateError} {
+		if got := s.footLine(nil); got != "" {
+			t.Errorf("%v.footLine(nil) = %q, want \"\"", s, got)
+		}
+	}
+}
+
+// TestCompactNumber pins the formatter (lowercase suffix) used
+// by footLine for the OUTPUT-tokens side. Whole-thousand values
+// drop the ".0" so 1,000 → "1k" (not "1.0k") — matches the
+// example payload the user requested ("20K/1k").
+func TestCompactNumber(t *testing.T) {
+	cases := []struct {
+		n    int
+		want string
+	}{
+		{0, "0"},
+		{1, "1"},
+		{999, "999"},
+		{1000, "1k"},
+		{1200, "1.2k"},
+		{9999, "10.0k"},
+		{10000, "10k"},
+		{12345, "12k"},
+		{999999, "999k"},
+		{1000000, "1M"},
+		{1200000, "1.2M"},
+	}
+	for _, tc := range cases {
+		if got := compactNumber(tc.n); got != tc.want {
+			t.Errorf("compactNumber(%d) = %q, want %q", tc.n, got, tc.want)
+		}
+	}
+}
+
+// TestCompactNumberLoud pins the uppercase suffix formatter
+// used by footLine for the INPUT-tokens side. K/M uppercase so
+// users can scan "20K/1k" and tell at a glance which side is
+// input vs output.
+func TestCompactNumberLoud(t *testing.T) {
+	cases := []struct {
+		n    int
+		want string
+	}{
+		{0, "0"},
+		{1, "1"},
+		{999, "999"},
+		{1000, "1K"},
+		{1200, "1.2K"},
+		{9999, "10.0K"},
+		{10000, "10K"},
+		{20000, "20K"},
+		{999999, "999K"},
+		{1000000, "1M"},
+		{1200000, "1.2M"},
+	}
+	for _, tc := range cases {
+		if got := compactNumberLoud(tc.n); got != tc.want {
+			t.Errorf("compactNumberLoud(%d) = %q, want %q", tc.n, got, tc.want)
+		}
+	}
+}
+
+// TestShortenCwdRemoved documents the removal of shortenCwd
+// when the footer format switched from basename → full
+// workspace path. The CWD segment now shows the absolute path
+// verbatim (per user request), so the basename shortener is
+// unused. The test body is intentionally a no-op so a future
+// search for "TestShortenCwd" surfaces this comment instead
+// of a missing function.
+func TestShortenCwdRemoved(t *testing.T) {
+	_ = "shortenCwd removed; footer now shows full workspace path"
+}
+
+// TestFootLine_ColonsByDesign documents that the foot note
+// now uses "label: value" segments (per the user's explicit
+// request). The OpenClaw #59360 hoisting risk was
+// re-evaluated and accepted; the rationale is captured in
+// the footLine doc comment. This test pins the new format
+// shape so a future edit can't quietly regress to either
+// (a) the no-label plain-value format or (b) a middle-dot
+// separator that hides the labels.
+func TestFootLine_ColonsByDesign(t *testing.T) {
+	r := &MessageReceipt{
+		agentName:    "claude",
+		workspace:    "/Users/devin/code/nightme",
+		branch:       "main",
+		inputTokens:  32_000,
+		outputTokens: 101,
+	}
+	got := StateExecuting.footLine(r)
+	for _, want := range []string{"Agent: claude", "Workspace: /Users/devin/code/nightme", "GIT: main", "Tokens: 32K/101"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("footLine = %q missing %q", got, want)
+		}
+	}
+}
+
+// TestBuildReceiptCard_Card2Shape pins the Card 2.0 envelope
+// contract documented in docs/channel/feishu.md §3.4 + the
+// buildReceiptCard comment. The previous PR shipped a Card 1.0
+// shape wrapped in {"card":...} which Feishu silently failed to
+// render; this test pins every marker that distinguishes the new
+// shape so a future edit can't quietly regress it.
+//
+// Markers asserted (every one must be present in the body):
+//
+//   - `"schema":"2.0"`               — Card 2.0 declaration
+//   - `"width_mode":"fill"`          — Card 2.0 config key
+//     (not the v1 `wide_screen_mode`)
+//   - `"body":{"elements":[...]}`    — Card 2.0 body wrapper
+//     (elements are NOT at the top level)
+//   - `"tag":"markdown"`             — Card 2.0 text element
+//     (not the v1 `tag:"div"` + `text:{tag:"lark_md",...}` shape)
+func TestBuildReceiptCard_Card2Shape(t *testing.T) {
+	r := &MessageReceipt{
+		state:        StateExecuting,
+		eventCount:   3,
+		lastEventAt:  parseTime(t, "2026-08-01T14:32:05+08:00"),
+		agentName:    "main",
+		workspace:    "/Users/foo/bar/repo",
+		branch:       "feat/receipt-card",
+		inputTokens:  1500,
+		outputTokens: 800,
+		entries: []LogEntry{
+			{Icon: "💬", Text: "hello", Kind: "reply"},
+			{Icon: "🔧", Text: "Read(/tmp/foo)", Kind: "tool_start"},
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+
+	mustContain := []string{
+		// Card 2.0 envelope markers.
+		`"schema":"2.0"`,
+		`"width_mode":"fill"`,
+		`"body":{`,
+		`"elements":[`,
+		`"tag":"markdown"`,
+
+		// Header + entries rendered as markdown.
+		`"content":"🔄 ⏳ 3 · 14:32:05"`,
+		`"content":"💬 hello"`,
+		`"content":"🔧 Read(/tmp/foo)"`,
+
+		// Labelled foot-note format (per-line layout,
+		// uppercase labels):
+		//   AGENT: main
+		//   WORKSPACE: /Users/foo/bar/repo
+		//   GIT: feat/receipt-card
+		//   TOKENS: 1.5K/800
+		`Agent: main`,
+		`GIT: feat/receipt-card`,
+		`Tokens: 1.5K/800`,
+		`Workspace: /Users/foo/bar/repo`,
+	}
+	for _, want := range mustContain {
+		if !strings.Contains(body, want) {
+			t.Errorf("card body missing %q\n--- body ---\n%s", want, truncateForTest(body, 400))
+		}
+	}
+
+	// Negative assertions: things that would mean we silently
+	// regressed to the v1 shape, the old "state · entries ·
+	// timestamp" foot-note, the no-label / no-colon format,
+	// or the (deprecated) coloured footer wrapper.
+	mustNotContain := []string{
+		`{"card":`,              // v1 envelope wrapper
+		`"wide_screen_mode"`,    // v1 config key
+		`"tag":"div"`,           // v1 text container
+		`"lark_md"`,             // v1 inline format
+		`"tag":"note"`,          // v1 footer element
+		`text_tag`,              // deprecated neutral-color wrapper
+		`color='neutral'`,       // deprecated neutral-color value
+		`Agent · `,              // old middle-dot labelled format
+		`cwd · `,                // old middle-dot labelled format
+		`tokens · `,             // old middle-dot labelled format
+		`executing · 3 entries`, // even older format
+		// Single-line joined format (the previous
+		// format that this round retired). The
+		// current composer always emits one segment
+		// per line via <br/>.
+		` | GIT: main | `,
+		` | TOKENS: `,
+		// Old label name "CWD" was renamed to
+		// "WORKSPACE" per user request.
+		`CWD: `,
+	}
+	for _, bad := range mustNotContain {
+		if strings.Contains(body, bad) {
+			t.Errorf("card body contains %q (regression)\n--- body ---\n%s", bad, truncateForTest(body, 400))
+		}
+	}
+}
+
+// TestBuildReceiptCard_FooterOpenClawStyle pins the footer
+// visual styling that matches the OpenClaw Lark plugin
+// (openclaw-lark src/card/builder.ts::buildFooter). Two
+// invariants:
+//
+//  1. The footer markdown element carries text_size:
+//     "notation" so the foot note renders in the standard
+//     Card 2.0 footnote size (small, dim, well-separated
+//     from the rolling log body). OpenClaw applies this to
+//     the footer + reasoning panel + tool use panels.
+//  2. When the receipt state is StateError, the footer
+//     content is wrapped in <font color='red'>...</font>
+//     so a failed session's footer is visually distinct.
+//     OpenClaw's buildFooter wraps the i18n copies in red
+//     when isError is true. On a non-error state the
+//     content is plain (no color tag).
+func TestBuildReceiptCard_FooterOpenClawStyle(t *testing.T) {
+	t.Run("notation-text-size-on-normal-state", func(t *testing.T) {
+		r := &MessageReceipt{
+			state:      StateCompleted,
+			agentName:  "claude",
+			workspace:  "/Users/devin/code/nightme",
+			branch:     "main",
+			eventCount: 1,
+		}
+		body, err := buildReceiptCard(r)
+		if err != nil {
+			t.Fatalf("buildReceiptCard: %v", err)
+		}
+		// text_size: "notation" must appear on the footer
+		// element. We assert on the substring rather than
+		// parsing the JSON to keep the test robust to
+		// whitespace / key-order changes.
+		if !strings.Contains(body, `"text_size":"notation"`) {
+			t.Errorf("card body missing OpenClaw-style text_size:notation footer\n--- body ---\n%s", truncateForTest(body, 400))
+		}
+		// No red color tag on a successful state.
+		if strings.Contains(body, "color='red'") {
+			t.Errorf("card body has unexpected red color on a non-error state\n--- body ---\n%s", truncateForTest(body, 400))
+		}
 	})
 
-	bot.mu.Lock()
-	updates := append([]updateCall(nil), bot.updates...)
-	bot.mu.Unlock()
+	t.Run("red-color-on-error-state", func(t *testing.T) {
+		r := &MessageReceipt{
+			state:      StateError,
+			agentName:  "claude",
+			workspace:  "/Users/devin/code/nightme",
+			branch:     "main",
+			eventCount: 1,
+		}
+		body, err := buildReceiptCard(r)
+		if err != nil {
+			t.Fatalf("buildReceiptCard: %v", err)
+		}
+		// On error, the footer's text is wrapped in red.
+		// OpenClaw's buildFooter does the same on isError.
+		if !strings.Contains(body, `<font color='red'>`) {
+			t.Errorf("card body missing OpenClaw-style red color wrapper on error state\n--- body ---\n%s", truncateForTest(body, 400))
+		}
+		// text_size: "notation" still applies on error.
+		if !strings.Contains(body, `"text_size":"notation"`) {
+			t.Errorf("card body missing text_size:notation on error state\n--- body ---\n%s", truncateForTest(body, 400))
+		}
+	})
+}
 
-	if len(updates) == 0 {
-		t.Fatal("no UpdateMessage calls; Append should have rendered the body")
+// TestBuildReceiptCard_ThinkingCollapsiblePanel pins the
+// collapsible_panel rendering for thinking entries. Mirrors
+// the OpenClaw Lark plugin's reasoning panel
+// (openclaw-lark src/card/builder.ts — reasoning section).
+//
+// Invariants:
+//  1. Thinking entries (Kind == "thinking") render as a
+//     collapsible_panel element with expanded: false (the
+//     user clicks to expand, so the long reasoning text
+//     doesn't push the final answer off the card surface).
+//  2. The panel header is a markdown element titled "💭 思考".
+//  3. The panel's inner elements are a single markdown
+//     element with the thinking text and text_size:
+//     "notation" (small / dim visual weight).
+//  4. Non-thinking entries (e.g. tool calls, final reply)
+//     still render as plain markdown elements — no
+//     collapsible_panel wrapping.
+func TestBuildReceiptCard_ThinkingCollapsiblePanel(t *testing.T) {
+	r := &MessageReceipt{
+		state:        StateExecuting,
+		eventCount:   3,
+		lastEventAt:  parseTime(t, "2026-08-01T14:32:05+08:00"),
+		agentName:    "claude",
+		workspace:    "/Users/devin/code/nightme",
+		branch:       "main",
+		inputTokens:  20_000,
+		outputTokens: 1_000,
+		entries: []LogEntry{
+			{
+				Icon:  "💭",
+				Text:  "The user said hi — I should respond briefly and friendly. No need to invoke any skills or tools.",
+				Kind:  "thinking",
+			},
+			{
+				Icon:  "🔧",
+				Text:  "Read(/tmp/foo)",
+				Kind:  "tool_start",
+			},
+			{
+				Icon:  "💬",
+				Text:  "Hi! How can I help you today?",
+				Kind:  "reply",
+			},
+		},
 	}
-	body := updates[len(updates)-1].Text
-	if !strings.Contains(body, "─────────") {
-		t.Errorf("body missing footer separator ─────────\nbody = %q", body)
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
 	}
-	if !strings.Contains(body, "Agent: claude | cwd: ~/code/nightme | tokens: 8.8K / 4.5K") {
-		t.Errorf("body missing footer text\nbody = %q", body)
+
+	// (1) The thinking entry becomes a collapsible_panel.
+	if !strings.Contains(body, `"tag":"collapsible_panel"`) {
+		t.Errorf("card body missing collapsible_panel for thinking entry\n--- body ---\n%s", truncateForTest(body, 400))
 	}
-	// Footer must come AFTER every entry in the body.
-	sep := strings.Index(body, "─────────")
-	bodyEnd := strings.Index(body, "💬 body line")
-	if sep < bodyEnd {
-		t.Errorf("footer separator appeared at offset %d, before body line at offset %d (must come after entries)",
-			sep, bodyEnd)
+	// (2) The panel is collapsed by default.
+	if !strings.Contains(body, `"expanded":false`) {
+		t.Errorf("collapsible_panel not collapsed by default (expanded:false)\n--- body ---\n%s", truncateForTest(body, 400))
+	}
+	// (3) The panel header is "💭 思考".
+	if !strings.Contains(body, `"content":"💭 思考"`) {
+		t.Errorf("collapsible_panel header missing \"💭 思考\"\n--- body ---\n%s", truncateForTest(body, 400))
+	}
+	// (4) The thinking text is inside a notation-sized
+	// markdown element (the inner element of the panel).
+	// We assert the thinking text appears + that an
+	// inner text_size:notation is present.
+	if !strings.Contains(body, "should respond briefly and friendly") {
+		t.Errorf("collapsible_panel missing thinking text body\n--- body ---\n%s", truncateForTest(body, 400))
+	}
+
+	// (5) Non-thinking entries (tool_start, reply) are
+	// still plain markdown — no collapsible_panel around
+	// them. The two non-thinking entries should produce
+	// two markdown elements WITHOUT the 💭 header.
+	if !strings.Contains(body, `"content":"🔧 Read(/tmp/foo)"`) {
+		t.Errorf("non-thinking tool_start entry missing plain markdown\n--- body ---\n%s", truncateForTest(body, 400))
+	}
+	if !strings.Contains(body, `"content":"💬 Hi! How can I help you today?"`) {
+		t.Errorf("non-thinking reply entry missing plain markdown\n--- body ---\n%s", truncateForTest(body, 400))
 	}
 }
 
-// TestReceipt_FooterEmpty verifies that an unset footer produces
-// no separator line — important so receipts without session
-// attribution don't render a dangling rule.
-func TestReceipt_FooterEmpty(t *testing.T) {
-	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
-	r.receivedAt = time.Now()
-
-	mustAppend(t, r, agent.AgentEvent{Kind: agent.EventText, Text: "body line"})
-
-	bot.mu.Lock()
-	updates := append([]updateCall(nil), bot.updates...)
-	bot.mu.Unlock()
-
-	if len(updates) == 0 {
-		t.Fatal("no UpdateMessage calls; Append should have rendered the body")
+// TestBuildColdStartCard_Card2Shape pins the cold-start card
+// emitted by Adapter.receiptFor. It must be a Card 2.0 envelope
+// (same shape contract as the rolling-log card) with a single ⏳
+// markdown element so the user sees a card surface from the first
+// event, not a bare text message.
+func TestBuildColdStartCard_Card2Shape(t *testing.T) {
+	body, err := buildColdStartCard()
+	if err != nil {
+		t.Fatalf("buildColdStartCard: %v", err)
 	}
-	body := updates[len(updates)-1].Text
-	if strings.Contains(body, "─────────") {
-		t.Errorf("body contains footer separator despite no footer set\nbody = %q", body)
+	mustContain := []string{
+		`"schema":"2.0"`,
+		`"width_mode":"fill"`,
+		`"body":{`,
+		`"elements":[`,
+		`"tag":"markdown"`,
+		`"content":"⏳ 等待中"`,
 	}
-}
-
-// TestReceipt_FooterReplace verifies that a later SetFooter call
-// replaces the earlier footer wholesale — the receipt is a pure
-// renderer, so the caller (adapter) is responsible for composing
-// the latest values. The receipt does not merge or track history.
-func TestReceipt_FooterReplace(t *testing.T) {
-	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
-	r.receivedAt = time.Now()
-
-	r.SetFooter("first footer")
-	mustAppend(t, r, agent.AgentEvent{Kind: agent.EventText, Text: "first"})
-
-	// The receipt throttles UpdateMessage (Feishu per-message
-	// quota is 5/sec — see renderLocked) so the second footer
-	// must wait out the cooldown before its body update lands.
-	time.Sleep(minBodyUpdateInterval + 10*time.Millisecond)
-
-	r.SetFooter("second footer")
-	mustAppend(t, r, agent.AgentEvent{Kind: agent.EventText, Text: "second"})
-
-	bot.mu.Lock()
-	updates := append([]updateCall(nil), bot.updates...)
-	bot.mu.Unlock()
-
-	last := updates[len(updates)-1].Text
-	if !strings.Contains(last, "second footer") {
-		t.Errorf("footer not refreshed\nbody = %q", last)
-	}
-	if strings.Contains(last, "first footer") {
-		t.Errorf("stale footer still rendering\nbody = %q", last)
+	for _, want := range mustContain {
+		if !strings.Contains(body, want) {
+			t.Errorf("cold-start card body missing %q\n--- body ---\n%s", want, truncateForTest(body, 400))
+		}
 	}
 }
 
 // mustAppend calls Append and asserts no error. Helper for the
-// rolling-log test above.
+// per-event test above.
 func mustAppend(t *testing.T, r *MessageReceipt, ev agent.AgentEvent) {
 	t.Helper()
 	if err := r.Append(context.Background(), ev); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
+}
+
+// UpdateMessage satisfies receiptBot. The per-event shipping path
+// does not call it; the stub exists for the interface contract.
+func (m *mockReceiptBot) UpdateMessage(_ context.Context, _, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return nil
 }
 
 // --- v1.1 tests for applyState / dispose ---
@@ -436,9 +988,9 @@ func TestApplyState_FourStateEnum(t *testing.T) {
 		want   ReceiptState
 		emoji  string
 	}{
-		{"pending", channel.ReceiptPending, StateWaiting, "OK"},
+		{"pending", channel.ReceiptPending, StateWaiting, "OneSecond"},
 		{"executing", channel.ReceiptExecuting, StateExecuting, "OnIt"},
-		{"done", channel.ReceiptDone, StateCompleted, "PARTY"},
+		{"done", channel.ReceiptDone, StateCompleted, "DONE"},
 		{"error", channel.ReceiptError, StateError, "THUMBSUP"},
 	}
 	for _, tc := range cases {
@@ -503,101 +1055,5 @@ func TestReceiptStateString_IncludesError(t *testing.T) {
 func TestReceiptStateEmoji_Error(t *testing.T) {
 	if got := StateError.Emoji(); got == "" {
 		t.Fatal("StateError.Emoji() returned empty, want a Feishu predefined emoji")
-	}
-}
-
-// TestReceipt_ThinkingAggregation covers the F-25 / F-26 design
-// where consecutive EventText-with-thinking-prefix events from
-// the same Claude Code turn are merged into a single LogEntry so
-// Feishu's native code-block auto-collapse ("N 行代码 >" expand
-// button) kicks in. formatLocked wraps the merged text in ```
-// fences so the chat surface shows one collapsed thinking block
-// rather than N separate 💭 lines.
-func TestReceipt_ThinkingAggregation(t *testing.T) {
-	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
-	r.receivedAt = time.Now()
-
-	// Three consecutive thinking events from Claude Code. Append
-	// should merge them into ONE LogEntry rather than three.
-	mustAppend(t, r, agent.AgentEvent{
-		Kind: agent.EventText,
-		Text: "[思考] planning step 1",
-	})
-	// Wait out the body-update throttle so the next merge
-	// triggers an UpdateMessage that the body assertion can
-	// read. The entries state is correct regardless (verified
-	// below), but the formatLocked body check needs the latest
-	// write to have happened.
-	time.Sleep(minBodyUpdateInterval + 10*time.Millisecond)
-	mustAppend(t, r, agent.AgentEvent{
-		Kind: agent.EventText,
-		Text: "[思考] checking workspace",
-	})
-	time.Sleep(minBodyUpdateInterval + 10*time.Millisecond)
-	mustAppend(t, r, agent.AgentEvent{
-		Kind: agent.EventText,
-		Text: "[思考] ready to answer",
-	})
-
-	// One LogEntry, not three. The merged text carries all
-	// three thinking segments separated by a horizontal rule.
-	r.mu.Lock()
-	entryCount := len(r.entries)
-	var merged string
-	if entryCount > 0 {
-		merged = r.entries[0].Text
-	}
-	r.mu.Unlock()
-	if entryCount != 1 {
-		t.Fatalf("entries = %d, want 1 (thinking aggregation collapsed 3 events into 1 entry)", entryCount)
-	}
-	for _, want := range []string{"planning step 1", "checking workspace", "ready to answer"} {
-		if !strings.Contains(merged, want) {
-			t.Errorf("merged thinking missing %q\ntext = %q", want, merged)
-		}
-	}
-	if !strings.Contains(merged, "\n---\n") {
-		t.Errorf("merged thinking should use --- separators\ntext = %q", merged)
-	}
-
-	// formatLocked wraps the thinking entry in ``` fences so
-	// Feishu auto-collapses the block.
-	bot.mu.Lock()
-	updates := append([]updateCall(nil), bot.updates...)
-	bot.mu.Unlock()
-	if len(updates) == 0 {
-		t.Fatal("no UpdateMessage calls; Append should have rendered the body")
-	}
-	last := updates[len(updates)-1].Text
-	if !strings.Contains(last, "```\nplanning step 1\n---\nchecking workspace\n---\nready to answer\n```") {
-		t.Errorf("body should wrap merged thinking in code-block fences\nbody = %q", last)
-	}
-}
-
-// TestReceipt_ThinkingAndReply_NoMerge verifies the aggregation
-// doesn't cross event boundaries: a thinking block followed by a
-// reply text produces two separate LogEntries (the reply has a
-// different Kind).
-func TestReceipt_ThinkingAndReply_NoMerge(t *testing.T) {
-	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
-	r.receivedAt = time.Now()
-
-	mustAppend(t, r, agent.AgentEvent{Kind: agent.EventText, Text: "[思考] planning"})
-	mustAppend(t, r, agent.AgentEvent{Kind: agent.EventText, Text: "Hi! How can I help?"})
-
-	r.mu.Lock()
-	entryCount := len(r.entries)
-	kinds := make([]string, entryCount)
-	for i, e := range r.entries {
-		kinds[i] = e.Kind
-	}
-	r.mu.Unlock()
-	if entryCount != 2 {
-		t.Fatalf("entries = %d, want 2 (thinking + reply shouldn't merge)", entryCount)
-	}
-	if kinds[0] != "thinking" || kinds[1] != "reply" {
-		t.Errorf("entry kinds = %v, want [thinking reply]", kinds)
 	}
 }

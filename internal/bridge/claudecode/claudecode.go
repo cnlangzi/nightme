@@ -74,7 +74,7 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSe
 	env := append([]string(nil), cfg.Env...)
 	env = append(env, a.command) // ensure command name is in env (defensive)
 
-	return newSession(ctx, a.command, args, env, cfg.Workspace)
+	return newSession(ctx, a.name, a.command, args, env, cfg.Workspace)
 }
 
 // buildArgs concatenates DefaultArgs + extraArgs + cfg.Args, rewriting

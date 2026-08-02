@@ -257,6 +257,147 @@ When `/use` switches active:
 
 ---
 
+## 5.1 Runtime contracts (seams between ChatSession and the runtime)
+
+ChatSession is pure data + FSM; it knows nothing about agents,
+channels, or the gateway. The runtime injects three pieces of
+behaviour that make the FSMs come alive.
+
+### 5.1.1 Spawner (lazy fork-exec seam)
+
+`Spawner` is the only way a ChatSession brings a new AgentSession
+to life (Step 3 of `LookupActiveAgentSession`). It is
+**injected** via `ChatSession.WithSpawner(s)`; the runtime wires
+the production implementation.
+
+```go
+// internal/chatsession/spawn.go
+
+type Spawner interface {
+    Spawn(ctx context.Context, agentName, cwd string, args []string) (agent.AgentSession, error)
+}
+```
+
+**Production** (`registrySpawner`): wraps `agent.Registry.Get →
+Detect → Start`. Returns the live bridge-level handle.
+
+**Test** (`fakeSpawner`): returns a `fakeAgentSession` without
+forking — used by `internal/chatsession/spawn_test.go` and the
+flush-hook tests.
+
+Dependency direction: `chatsession → agent.AgentSession` (via the
+return type). `chatsession` does **not** import `agent.Registry`
+directly; the runtime does and adapts.
+
+See [`docs/feat/F-29-agent-session-pool.md`](./F-29-agent-session-pool.md)
+§3.1 for the production wiring.
+
+### 5.1.2 Default FlushHook (queued-message forwarder)
+
+`ChatSession.ensureBuffer` installs a **default** FlushHook on the
+InputBuffer at construction time:
+
+```go
+func (cs *ChatSession) defaultFlushHookLocked() FlushHook {
+    return func(combined []agent.ContentBlock, userMsgIDs []string) error {
+        as := cs.activeAS
+        if as == nil || as.Handle() == nil {
+            return ErrNotRunning
+        }
+        return as.SendBlocks(context.Background(), combined)
+    }
+}
+```
+
+**Contract**: every queued user message reaches the currently
+active AgentSession's `SendBlocks`. Without this hook (commit 9
+left it nil), Idle-flushed messages were silently dropped — a
+critical bug fixed in `4119e2c`.
+
+The runtime can override via `SetFlushHook` (e.g., to add
+receipt-card side effects before forwarding).
+
+### 5.1.3 EventHandler (per-event translation seam)
+
+`EventHandler` is invoked by the per-ChatSession readPump for
+each event drained from the active AgentSession's `Events()`
+channel:
+
+```go
+// internal/chatsession/readpump.go
+
+type EventHandler func(chatID string, s *AgentSession, ev agent.AgentEvent)
+```
+
+**Install**: `cs.SetEventHandler(h)` once per ChatSession at
+runtime startup. The handler **persists across `/use`** — only
+the pump restarts, not the handler.
+
+**Runtime typical implementation** (see
+`cmd/nightme/run_v12.go::v12EventHandler`):
+
+```go
+return func(chatID string, s *AgentSession, ev agent.AgentEvent) {
+    out, ok := gateway.Translate(chatID, ev)
+    if !ok { return }
+    out.ReplyTo = ""  // ReplyTo wired by channel-layer receipt FSM
+    _ = ch.Send(context.Background(), out)
+}
+```
+
+### 5.1.4 ReadPump lifecycle (commit 8c)
+
+Each ChatSession has at most **one** active readPump goroutine
+(`internal/chatsession/readpump.go`). Lifecycle:
+
+- **`StartReadPump()`** — start pump for `cs.activeAS`. Captures
+  `cs.eventHandler` at start time. Stops any existing pump first.
+  Returns `ErrNoActiveAgentSession` if no active AS yet.
+- **`StopReadPump()`** — signal `stop`, wait for `done`.
+  Idempotent. Called by `KillAll` (commit 8c).
+- **`HasPump()`** — atomic bool, true while the pump goroutine is
+  alive. Reads `false` after natural exit (channel close from
+  process death) as well as explicit stop.
+- **`runReadPump`** (internal) — the goroutine body. Drains
+  `as.Events()` with a `select` on `stop` + `evCh`. For each
+  event: invoke handler, then drive FSM (non-terminal →
+  `SetBusy`; `EventDone` / `EventError` → `SetIdle` +
+  `OnTurnEnded`).
+
+**Trigger points** (where the runtime calls `StartReadPump`):
+- After `/use` resolves the new active AgentSession
+  (`internal/gateway/handlers_chatsession.go::handleUse`).
+
+**Why not auto-start on spawn?** LookupActiveAgentSession does
+**not** auto-start the pump — keeps ChatSession unit-testable
+without leaking goroutines (commit 8c).
+
+### 5.1.5 Exit observer (process death notification)
+
+`StartObserveClose` launches a goroutine that drains an
+AgentSession's events channel to detect close. When the channel
+closes (process died), the registered `AgentExitObserver`
+fires. Currently the runtime does not wire an observer — the
+readPump's natural exit is sufficient. The API is reserved
+for future work (e.g., respawn on death, /kill auto-reply).
+
+---
+
+## 5.2 Default Agent snapshot (Q-A semantics)
+
+`ChatSession.defaultAgent` is captured **once** at creation time
+from `cfg.Primary` (via `chatsession.NewManager.GetOrCreate`).
+Subsequent edits to `cfg.Primary` do **not** propagate to existing
+ChatSessions — the snapshot is read-only.
+
+For most use cases this is the right behaviour: a chat that
+already started with `defaultAgent=claude` keeps using `claude`
+even if the operator later sets `primary: codex` in
+`config.yaml`. To force a new chat onto the new default, the
+user simply opens a fresh chat.
+
+---
+
 ## 6. Registry schema (v1.2)
 
 ```jsonc

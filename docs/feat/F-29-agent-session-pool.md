@@ -234,6 +234,27 @@ Each AgentSession owns one Bridge. Bridge choices (F-21):
 
 **Bridge uniqueness**: One Bridge per AgentSession. Switching agent (different `agent` field) creates new Bridge. Same agent + same cwd reuses existing AgentSession → existing Bridge.
 
+### 5.1 Spawner wiring (production)
+
+The runtime wires `chatsession.NewRegistrySpawner(reg)` into
+`chatsession.Manager.WithSpawner(...)`. The Spawner is then
+passed to every ChatSession created via `Manager.GetOrCreate`:
+
+```go
+// cmd/nightme/run_v12.go (excerpt)
+
+spawner := chatsession.NewRegistrySpawner(agents)
+mgr := chatsession.NewManager().
+    WithSpawner(spawner).
+    WithPersistence(csFile, asFile)
+
+cs := mgr.GetOrCreate(chatID, chatType, cfg.Primary)
+// cs already has spawner inherited via Manager.GetOrCreate path
+```
+
+See [`F-27` §5.1.1](./F-27-chatsession.md) for the Spawner
+contract and test substitution.
+
 ---
 
 ## 6. Concurrency model
@@ -320,47 +341,35 @@ T8: poolMu.Unlock
 }
 ```
 
-**Migration from v1.1**:
+**Migration from v1.1** (archive only — no transparent data lift):
 
 ```go
-// internal/registry/migrate_v1_to_v2.go
+// internal/registry/migrate.go
 
-func MigrateV1ToV2(v1Entries []SessionEntryV1) ([]ChatSessionEntry, []AgentSessionEntry) {
-    var chatSessions []ChatSessionEntry
-    var agentSessions []AgentSessionEntry
-
-    for _, v1 := range v1Entries {
-        // 1:1 mapping: each v1 Session → ChatSession + AgentSession
-        cs := ChatSessionEntry{
-            ID:        deriveChatSessionID(v1.ChatID),
-            ChatID:    v1.ChatID,
-            ChatType:  "p2p",  // v1 only had p2p
-            ActiveCwd: v1.Workspace,
-            ActiveAgent: v1.Agent,
-            DefaultAgent: v1.Agent,  // promote v1's agent to default
-            AgentSessionIDs: []string{v1.SessionID},  // reuse v1 ID
-            ActiveAgentSessionID: &v1.SessionID,
-            CreatedAt: v1.StartedAt,
-            LastInteractionAt: v1.LastRunAt,
-        }
-        as := AgentSessionEntry{
-            ID:            v1.SessionID,  // preserve ID for log continuity
-            ChatSessionID: cs.ID,
-            Agent:         v1.Agent,
-            Cwd:           v1.Workspace,
-            PID:           v1.PID,
-            Status:        v1.Status,  // running | detached | exited
-            Args:          v1.Args,
-            CreatedAt:     v1.StartedAt,
-            LastRunAt:     v1.LastRunAt,
-        }
-        chatSessions = append(chatSessions, cs)
-        agentSessions = append(agentSessions, as)
-    }
-
-    return chatSessions, agentSessions
-}
+func MigrateV1ToV2(v1RegistryPath string) (int, error)
 ```
+
+v1.1 did not persist `chat_id` on its session records (the binding
+was in-memory only — see `internal/gateway/binding.go` v1.x), so
+the chat → session mapping cannot be reconstructed from disk
+alone. **The current dev does not transparently migrate v1.x data
+to v1.2 entries.** The startup flow (`cmd/nightme/run_v12.go`)
+calls `MigrateV1ToV2(v1RegistryPath)` which:
+
+1. Reads `registry.json` if present.
+2. Copies it to `registry.json.v1.bak` (idempotent; existing
+   backup is preserved).
+3. Does **not** write any v1.2 entries — the v1.x data is
+   archived only.
+4. The runtime starts with an empty `chat_sessions.json` and
+   `agent_sessions.json`.
+
+**Action required after upgrade**: re-issue `/cwd` for each chat.
+The `MigrateV1ToV2` backup file is kept on disk for forensic
+recovery only — delete it once you're confident you don't need it.
+
+See [`MIGRATION.md`](../../MIGRATION.md) for the full upgrade
+guide.
 
 ---
 

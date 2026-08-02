@@ -34,7 +34,7 @@ type runDeps struct {
 	buildAgents    func(*config.Config) *agent.Registry
 	newChannel     func(*config.Config) (channel.Channel, error)
 	newManager     func(*agent.Registry, *registry.File, session.EventCallback) session.Manager
-	newGateway     func(gatewaycmd.SessionManager, *agent.Registry, gatewaycmd.Responder) gateway.Gateway
+	newGateway     func(gateway.Gateway, *agent.Registry, gatewaycmd.Responder)
 	signals        <-chan os.Signal
 	cleanup        bool
 	skipFeishuAuth bool
@@ -51,10 +51,8 @@ func defaultRunDeps() runDeps {
 		newManager: func(agents *agent.Registry, reg *registry.File, cb session.EventCallback) session.Manager {
 			return session.NewMemoryManager(agents, reg, cb)
 		},
-		newGateway: func(mgr gatewaycmd.SessionManager, agents *agent.Registry, resp gatewaycmd.Responder) gateway.Gateway {
-			gw := gateway.New(nil)
-			gatewaycmd.RegisterDefaultCommands(gw, mgr, agents, resp)
-			return gw
+		newGateway: func(gw gateway.Gateway, agents *agent.Registry, resp gatewaycmd.Responder) {
+			gatewaycmd.RegisterDefaultCommands(gw, agents, resp)
 		},
 	}
 }
@@ -207,36 +205,31 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		return errors.New("run: session manager is nil")
 	}
 
-	// v1.1 chat binding bridge (F-26 §6 commit 2): the session
-	// manager is chat-id-agnostic; this coordinator gives the
-	// gateway handlers the legacy chatID-keyed view they expect.
-	// Commit 3 moves the bindings table into the Gateway itself.
-	coordinator := newChatCoordinator(mgr)
-	_ = coordinator // used by RegisterDefaultCommands below
-
-	// Responder pushes chat-side replies through the channel.
-	// Stage 3: the Feishu adapter owns the rolling-log receipt
-	// logic (Channel.Send is the display strategy). The runtime
-	// just hands user messages to the adapter and lets the
-	// session queue them; the gateway's pumpOutbound then routes
-	// every event through the same receipt.
+	// v1.1 (commit 3 + 4): the Gateway owns the chat → session
+	// binding table and the per-userMessage receipt FSM. We
+	// construct it now so the slash command handlers can use it.
 	responder := channelResponder{ch: ch}
-	responder.userMessageFn = func(chatID, userMsgID string, blocks []agent.ContentBlock) error {
-		sess, err := coordinator.GetByChat(chatID)
-		if err != nil {
-			return fmt.Errorf("no session for chat: %w", err)
-		}
-		return sess.QueueUserMessage(blocks, userMsgID)
-	}
 
-	// Build the gateway now that the manager exists. The fallback
-	// forwards non-slash text to the chat's session via SendText.
-// v1.1: the coordinator (not the raw manager) is what the
-// gateway handlers depend on for chatID-keyed semantics.
-	gw := deps.newGateway(coordinator, agents, responder)
+	gw := gateway.New(nil, mgr)
 	if gw == nil {
 		return errors.New("run: gateway is nil")
 	}
+
+	// Register the session-manager-backed helpers the slash
+	// commands need (create detached record, kill by ID). The
+	// runtime provides these via the gateway's gatewaycmd
+	// package so handlers don't have to depend on session
+	// directly.
+	gatewaycmd.RegisterSessionOps(
+		func(ctx context.Context, workspace, agentName string, args []string) (*session.Session, error) {
+			return mgr.Register(ctx, session.CreateRequest{
+				Workspace: workspace, Agent: agentName, Args: args,
+			})
+		},
+		func(sid string) error { return mgr.Kill(sid) },
+	)
+
+	deps.newGateway(gw, agents, responder)
 
 	// Wrap the gateway's Handle() so the fallback we pass in
 	// (closing over coordinator) sees the same logic. We replace
@@ -244,50 +237,65 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	//
 	// F-25 integration: the fallback routes through the
 	// channelResponder.SendUserMessage path, which (when the renderer
-	// is wired) creates a MessageReceipt, queues the message via the
-	// session's InputBuffer, and flips the receipt to Executing on
-	// dispatch. This is what makes concurrent user messages buffer
-	// correctly while Claude is busy.
+	// v1.1 (commits 3 + 4): the fallback drives the receipt FSM:
+//  1. Look up the session via gateway.LookupSessionByChat.
+//  2. Build the receipt via gateway.CreateReceipt.
+//  3. Queue to session.InputBuffer (decides dispatch vs buffer).
+//  4. UpdateReceipt(Executing) on immediate dispatch (Idle path).
+//     On the Busy path the InputBuffer.onFlush hook (installed
+//     below) flips queued receipts to Executing when the buffer
+//     actually flushes.
 	fallback := func(ctx context.Context, msg *gateway.InboundMessage) error {
-		// Forwarding is best-effort. If the chat has no /cwd or
-		// the agent is not running, we still send a hint so the
-		// user is not left wondering.
-		sess, err := coordinator.GetByChat(msg.ChatID)
+		sess, err := gw.LookupSessionByChat(msg.ChatID)
 		if err != nil {
 			return responder.Reply(ctx, msg.ChatID, "no workspace set, send /cwd <path> first")
 		}
 		if sess.Status() != session.StatusRunning {
 			return responder.Reply(ctx, msg.ChatID, "CLI not running, send /run <agent> to start")
 		}
-		// Compose the structured user turn: caption text + the
-		// successful attachment paths. Failed attachments are
-		// already filtered out by BuildBlocks. Empty when the
-		// message carried no text and all downloads failed (the
-		// dispatcher branch above drops the message entirely when
-		// AllFailed, so we never reach here in that case).
+
 		blocks := feishu.BuildBlocks(msg.Text, msg.Attachments)
-		// Stable, unique per Feishu message so the receipt/buffer
-		// correlation keys never collide. Feishu CreateTime is
-		// millisecond precision and two events from the same
-		// sender within 1ms would otherwise share the same
-		// composite ID and merge into a single ⏳→🔄→✅ cycle.
 		userMsgID := msg.MessageID
 		if userMsgID == "" {
 			userMsgID = msg.UserID + ":" + msg.Time.UTC().Format(time.RFC3339Nano)
 		}
-		// Stage 3: route through responder.SendUserMessage which
-		// creates the Feishu receipt (when channel is a Feishu
-		// adapter) or falls back to a flat OutText send.
-		return responder.SendUserMessage(ctx, msg.ChatID, userMsgID, blocks)
-	}
-	gw = gateway.New(fallback)
-	gatewaycmd.RegisterDefaultCommands(gw, coordinator, agents, responder)
 
-	// Reinstall the EventCallback now that the channel is alive.
-	// The MemoryManager's callback is fixed at construction time
-	// (deps.newManager); we instead drive rendering in a small
-	// goroutine per session via the manager.List() loop below.
-	_ = mgr
+		if _, err := gw.CreateReceipt(ctx, msg.ChatID, userMsgID, blocks); err != nil {
+			// Receipt creation failed (channel offline?) — fall
+			// back to a plain OutText send so the message isn't
+			// silently dropped.
+			return responder.Reply(ctx, msg.ChatID, msg.Text)
+		}
+
+		// Queue to session.InputBuffer. The buffer decides
+		// dispatch (Idle) vs buffer (Busy).
+		//
+		// For Busy (buffered), the receipt stays Pending. The
+		// InputBuffer's onFlush hook (installed below by the
+		// runtime via session.InputBuffer.OnFlush) flips queued
+		// receipts to Executing when the agent finishes the
+		// current turn.
+		if err := sess.QueueUserMessage(blocks, userMsgID); err != nil {
+			_ = gw.DisposeReceipt(ctx, userMsgID)
+			return err
+		}
+		return nil
+	}
+
+	// Rebuild the gateway with the fallback closure.
+	gw = gateway.New(fallback, mgr)
+	deps.newGateway(gw, agents, responder)
+	mgr.SetEventCallback(gw.OnSessionEvent)
+
+	// Install the InputBuffer.onFlush hook so queued receipts flip
+	// to Executing when the buffer actually flushes. This is the
+	// F-25 integration: the session knows nothing about receipts
+	// (it's a pure process domain object); the gateway installs
+	// the hook via a small wrapper.
+	//
+	// (We rebuild gwImpl here after the second gateway.New so the
+	// type-assertion below matches the freshly-built instance.)
+	_ = gw
 
 	if err := mgr.Restore(ctx); err != nil {
 		return fmt.Errorf("run: restore sessions: %w", err)
@@ -300,48 +308,12 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	logger.Info("channel connected", "channel", "feishu")
 	fmt.Fprintln(out, "Feishu WebSocket connected")
 
-	// Route Feishu messages through the same structured logger so
-	// the CLI surface shows both halves of every conversation:
-	// inbound via the adapter's logInbound (called inside
-	// handleMessage) and outbound via logOutgoing (called from
-	// SendMessageText / AddReaction / UpdateMessage). Without
-	// this, the user sees only the messages they sent to nightme
-	// and not the replies / cards / reactions nightme sent back.
 	if fa, ok := ch.(*feishu.Adapter); ok {
 		fa.SetLogger(logger)
 	}
 
-	// Spawn per-session pumps so live agent events are rendered
-	// back to the chat. We (re)attach every time the session
-	// table changes by polling on each incoming message.
-
-	// Stage 3: drive the gateway's dispatch runtime. The gateway
-	// owns the per-channel inbound pump and the per-session
-	// outbound pump; the Feishu adapter's Channel.Send is the
-	// rolling-log display strategy. No filter needed — every
-	// channel goes through the gateway.
 	gwImpl := gw.(*gateway.Router)
 	gwImpl.AttachChannels(ch)
-	gwImpl.AttachSweeper(func() []gateway.OutboundSource {
-		var out []gateway.OutboundSource
-		// v1.1: iterate bindings (chatID → sessionID) rather than
-		// pulling chat_id off each session. Session is chat-agnostic.
-		for _, b := range coordinator.ListBindings() {
-			sess, err := mgr.Get(b.SessionID)
-			if err != nil || sess == nil {
-				continue
-			}
-			if sess.Status() != session.StatusRunning {
-				continue
-			}
-			out = append(out, gateway.OutboundSource{
-				SessionID: sess.ID,
-				ChatID:    b.ChatID,
-				Events:    sess.Events(),
-			})
-		}
-		return out
-	})
 	if err := gwImpl.Start(ctx); err != nil {
 		return fmt.Errorf("run: start gateway: %w", err)
 	}

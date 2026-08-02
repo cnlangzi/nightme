@@ -112,7 +112,7 @@ func TestParseCommand_MultilineTruncates(t *testing.T) {
 
 func TestGateway_RegisterAndHandle(t *testing.T) {
 	var called int32
-	g := gateway.New(nil)
+	g := gateway.New(nil, nil)
 	g.Register(gateway.Command{
 		Name:        "ping",
 		Description: "pong",
@@ -137,7 +137,7 @@ func TestGateway_RegisterAndHandle(t *testing.T) {
 
 func TestGateway_RegisterAliases(t *testing.T) {
 	var calls int32
-	g := gateway.New(nil)
+	g := gateway.New(nil, nil)
 	g.Register(gateway.Command{
 		Name:    "cwd",
 		Aliases: []string{"workspace", "ws"},
@@ -162,7 +162,7 @@ func TestGateway_UnmatchedCommandPassesToFallback(t *testing.T) {
 	g := gateway.New(func(ctx context.Context, msg *gateway.InboundMessage) error {
 		atomic.AddInt32(&fb, 1)
 		return nil
-	})
+	}, nil)
 	g.Register(gateway.Command{
 		Name: "help",
 		Handler: func(ctx context.Context, msg *gateway.InboundMessage, args []string) (*gateway.CommandResult, error) {
@@ -184,14 +184,14 @@ func TestGateway_UnmatchedCommandPassesToFallback(t *testing.T) {
 }
 
 func TestGateway_NonNilMsg(t *testing.T) {
-	g := gateway.New(nil)
+	g := gateway.New(nil, nil)
 	if _, err := g.Handle(context.Background(), nil); err == nil {
 		t.Errorf("Handle(nil) err = nil, want non-nil")
 	}
 }
 
 func TestGateway_RegisterReplacement(t *testing.T) {
-	g := gateway.New(nil)
+	g := gateway.New(nil, nil)
 	var reply string
 	first := gateway.Command{Name: "foo", Handler: func(context.Context, *gateway.InboundMessage, []string) (*gateway.CommandResult, error) {
 		reply = "first"
@@ -220,7 +220,7 @@ func TestGateway_RegisterReplacement(t *testing.T) {
 }
 
 func TestGateway_ListCommands_StableOrder(t *testing.T) {
-	g := gateway.New(nil)
+	g := gateway.New(nil, nil)
 	g.Register(gateway.Command{Name: "zeta"})
 	g.Register(gateway.Command{Name: "alpha"})
 	g.Register(gateway.Command{Name: "mu"})
@@ -240,7 +240,7 @@ func TestGateway_ListCommands_StableOrder(t *testing.T) {
 
 func TestGateway_HandlerErrorPropagates(t *testing.T) {
 	want := errors.New("boom")
-	g := gateway.New(nil)
+	g := gateway.New(nil, nil)
 	g.Register(gateway.Command{
 		Name: "fail",
 		Handler: func(ctx context.Context, msg *gateway.InboundMessage, args []string) (*gateway.CommandResult, error) {
@@ -255,7 +255,9 @@ func TestGateway_HandlerErrorPropagates(t *testing.T) {
 
 func TestGateway_FallbackErrorPropagates(t *testing.T) {
 	want := errors.New("fb boom")
-	g := gateway.New(func(ctx context.Context, msg *gateway.InboundMessage) error { return want })
+	g := gateway.New(func(ctx context.Context, msg *gateway.InboundMessage) error {
+		return want
+	}, nil)
 	_, err := g.Handle(context.Background(), &gateway.InboundMessage{Text: "hello"})
 	if !errors.Is(err, want) {
 		t.Errorf("Handle fallback error = %v, want %v", err, want)
@@ -263,7 +265,7 @@ func TestGateway_FallbackErrorPropagates(t *testing.T) {
 }
 
 func TestGateway_NilFallbackDropsUnmatched(t *testing.T) {
-	g := gateway.New(nil)
+	g := gateway.New(nil, nil)
 	// No panic; unmatched messages are silently dropped.
 	if _, err := g.Handle(context.Background(), &gateway.InboundMessage{Text: "/unknown"}); err != nil {
 		t.Errorf("Handle unmatched = %v, want nil", err)
@@ -274,7 +276,7 @@ func TestGateway_NilFallbackDropsUnmatched(t *testing.T) {
 }
 
 func TestGateway_RegisterIgnoresEmptyAlias(t *testing.T) {
-	g := gateway.New(nil)
+	g := gateway.New(nil, nil)
 	replaced := g.Register(gateway.Command{Name: "foo", Aliases: []string{""}})
 	if replaced {
 		t.Errorf("empty alias should not be a replacement")
@@ -288,7 +290,7 @@ func TestGateway_RegisterIgnoresEmptyAlias(t *testing.T) {
 }
 
 func TestGateway_DescriptionPreserved(t *testing.T) {
-	g := gateway.New(nil)
+	g := gateway.New(nil, nil)
 	g.Register(gateway.Command{Name: "foo", Description: "do foo"})
 	cmds := g.(gateway.Gateway).ListCommands()
 	if len(cmds) != 1 || cmds[0].Description != "do foo" {
@@ -297,7 +299,7 @@ func TestGateway_DescriptionPreserved(t *testing.T) {
 }
 
 func TestGateway_HandlePreservesMessageFields(t *testing.T) {
-	g := gateway.New(nil)
+	g := gateway.New(nil, nil)
 	var captured *gateway.InboundMessage
 	g.Register(gateway.Command{
 		Name: "echo",
@@ -324,7 +326,7 @@ func TestGateway_HandlePreservesMessageFields(t *testing.T) {
 }
 
 func TestGateway_HandlerArgsArePassed(t *testing.T) {
-	g := gateway.New(nil)
+	g := gateway.New(nil, nil)
 	var gotArgs []string
 	g.Register(gateway.Command{
 		Name: "run",
@@ -346,7 +348,7 @@ func TestGateway_RegisterConcurrent(t *testing.T) {
 	if !testing.Short() {
 		t.Skip("skip in non-short mode (covered by -race runner)")
 	}
-	g := gateway.New(nil)
+	g := gateway.New(nil, nil)
 	done := make(chan struct{})
 	for i := 0; i < 16; i++ {
 		go func(i int) {
@@ -384,7 +386,7 @@ func TestParseCommand_TabSeparators(t *testing.T) {
 }
 
 func TestGateway_UnmatchedReturnsNoError(t *testing.T) {
-	g := gateway.New(nil)
+	g := gateway.New(nil, nil)
 	g.Register(gateway.Command{Name: "help", Handler: func(context.Context, *gateway.InboundMessage, []string) (*gateway.CommandResult, error) {
 		return &gateway.CommandResult{Consumed: true}, nil
 	}})

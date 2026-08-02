@@ -1,3 +1,14 @@
+// Package cmd hosts the slash-command handlers that power nightme.
+//
+// v1.1 (F-26 §6 commit 3): the legacy SessionManager interface has
+// been removed. Handlers depend on gateway.Gateway directly:
+//   - /cwd:    lookup-or-bind via Gateway.LookupByChat + manager.Register
+//   - /run:    spawn via Gateway.SpawnAgent
+//   - /kill:   manager.Kill(binding.SessionID)
+//
+// The gateway's binding table is the source of truth for chat →
+// session. Cmd/nightme (the runtime) sets up the manager and
+// registers the default commands at startup.
 package cmd
 
 import (
@@ -13,74 +24,57 @@ import (
 	"github.com/cnlangzi/nightme/internal/session"
 )
 
-// ErrChatAlreadyBound is returned by SessionManager.CreateOrUpdate
-// when a session is already running for the requested chat. The
-// caller (typically /cwd) must /kill first.
-//
-// v1.1: this error used to live in internal/session alongside
-// ErrSessionNotFound. It moved here because the chat-binding
-// concept is no longer the session Manager's concern — see F-26
-// §6 commit 2.
+// ErrChatAlreadyBound is returned by /cwd when a session is already
+// running for the requested chat. /kill first.
 var ErrChatAlreadyBound = errors.New("session: chat already bound to an existing session")
 
-// SessionManager is the abstract surface the gateway handlers depend
-// on. Defined here (in the gateway package, not session) so that
-// gateway doesn't import session — that import would create a
-// cycle because session pulls in channel/feishu which pulls in
-// channel which pulls in gateway. Concrete implementations
-// (internal/session.MemoryManager) satisfy this interface implicitly.
-
-// Session is the abstract handle returned by SessionManager. The
-// concrete type lives in internal/session; gateway only needs the
-// fields it touches (Agent, AgentName, ChatID, Workspace) so we
-// re-export *session.Session as the interface type.
-//
-// We use the concrete pointer (rather than a method-only interface)
-// because session.Session exposes its fields directly, not as
-// methods. Adding accessor methods to session.Session would
-// require touching every test and call site; the interface escape
-// hatch below is the smallest Stage-1-compatible change.
+// Session is the abstract handle returned by
+// gateway.LookupSessionByChat — concrete type *session.Session.
 type Session = *session.Session
 
-// SessionManager is the abstract surface the gateway handlers depend
-// on. Defined here (in the gateway package, not session) so that
-// gateway doesn't import session — that import would create a
-// cycle because session pulls in channel/feishu which pulls in
-// channel which pulls in gateway. Concrete implementations
-// (internal/session.MemoryManager) satisfy this interface implicitly.
-type SessionManager interface {
-	GetByChat(chatID string) (Session, error)
-	CreateOrUpdate(chatID, chatType, workspace, agentName string, args []string) (Session, error)
-	Run(ctx context.Context, chatID, agentName string, extra []string) (Session, error)
-	KillByChat(chatID string) error
-}
-
-// handlerContext is the dependency bag the gateway handlers close
-// over. It is built once at daemon startup and shared by every
-// dispatch. Keeping the dependencies explicit makes the handlers
-// trivial to unit-test with a fake session manager.
-type handlerContext struct {
-	manager   SessionManager
-	agents    *agent.Registry
-	responder Responder
-}
-
-// Responder is the channel-side equivalent of a chat reply. The
-// gateway handlers do not call the channel adapter directly — they
-// go through this interface so tests can assert what was sent
-// without spinning up a full IM client.
+// Responder is the surface handlers use to push replies back to
+// the user. Channel adapters implement it via the runtime's
+// channelResponder wrapper.
 type Responder interface {
 	Reply(ctx context.Context, chatID, text string) error
 }
 
-// RegisterDefaultCommands wires the four v0.1 slash commands into
-// gw. /help is always last so /help's list enumerates the commands
-// registered so far.
-func RegisterDefaultCommands(gw gateway.Gateway, mgr SessionManager, agents *agent.Registry, resp Responder) {
-	hc := &handlerContext{manager: mgr, agents: agents, responder: resp}
+// handlerContext bundles the dependencies every handler closes
+// over. Built once at runtime startup and shared by every
+// dispatch.
+type handlerContext struct {
+	gw        gateway.Gateway
+	agents    *agent.Registry
+	responder Responder
+}
+
+// handler returns a bound gateway.Command handler that closes over
+// the handlerContext's dependencies. Every command on the
+// registry follows this pattern.
+func (hc *handlerContext) reply(ctx context.Context, chatID, text string) *gateway.CommandResult {
+	_ = hc.trySendReply(ctx, chatID, text)
+	return &gateway.CommandResult{Reply: text, Consumed: true}
+}
+
+// trySendReply is best-effort: nil responder degrades to a no-op so
+// tests can skip it.
+func (hc *handlerContext) trySendReply(ctx context.Context, chatID, text string) error {
+	if hc.responder == nil {
+		return nil
+	}
+	return hc.responder.Reply(ctx, chatID, text)
+}
+
+// RegisterDefaultCommands wires the nightme slash command set onto
+// gw: /cwd, /run, /kill, /help, /agents.
+//
+// gw must already have its binding table wired (use New(fallback, mgr)
+// at construction time) — commands consult gw.LookupByChat.
+func RegisterDefaultCommands(gw gateway.Gateway, agents *agent.Registry, responder Responder) {
+	hc := &handlerContext{gw: gw, agents: agents, responder: responder}
 	gw.Register(gateway.Command{
 		Name:        "cwd",
-		Aliases:     []string{"workspace", "ws"},
+		Aliases:     []string{"workspace"},
 		Description: "Set workspace (session-level)",
 		Handler:     hc.cwd,
 	})
@@ -112,13 +106,16 @@ func RegisterDefaultCommands(gw gateway.Gateway, mgr SessionManager, agents *age
 // it validates the directory and binds the chat to a session with
 // that workspace. An already-running session is rejected on the
 // bind path so the user explicitly /kill first.
+//
+// v1.1: this handler goes through Gateway.LookupByChat and
+// Gateway.SpawnAgent, NOT a separate SessionManager interface.
 func (h *handlerContext) cwd(ctx context.Context, msg *gateway.InboundMessage, args []string) (*gateway.CommandResult, error) {
 	if len(args) == 0 {
-		existing, err := h.manager.GetByChat(msg.ChatID)
-		if err != nil || existing == nil {
+		binding := h.gw.LookupByChat(msg.ChatID)
+		if binding == nil {
 			return h.reply(ctx, msg.ChatID, "no workspace set. Send /cwd <path> to bind one."), nil
 		}
-		return h.reply(ctx, msg.ChatID, fmt.Sprintf("current workspace: %s", existing.Workspace)), nil
+		return h.reply(ctx, msg.ChatID, fmt.Sprintf("current workspace: %s", binding.Workspace)), nil
 	}
 	path := args[0]
 	if strings.HasPrefix(path, "~") {
@@ -144,12 +141,20 @@ func (h *handlerContext) cwd(ctx context.Context, msg *gateway.InboundMessage, a
 		return h.reply(ctx, msg.ChatID, fmt.Sprintf("/cwd: not a directory: %s", abs)), nil
 	}
 
-	// Use the existing agent name if a session is already bound,
-	// otherwise fall back to the first registered agent so the
-	// record is meaningful for /run.
+	// Reject if a session is already running for this chat.
+	if binding := h.gw.LookupByChat(msg.ChatID); binding != nil {
+		if sess, err := h.gw.LookupSessionByChat(msg.ChatID); err == nil && sess != nil {
+			if sess.Status() == session.StatusRunning {
+				return h.reply(ctx, msg.ChatID, "session already active, /kill first"), nil
+			}
+		}
+	}
+
+	// Pick the agent name: existing binding's agent, else the
+	// first registered agent, else the legacy default "claude".
 	agentName := ""
-	if existing, err := h.manager.GetByChat(msg.ChatID); err == nil && existing != nil {
-		agentName = existing.Agent
+	if binding := h.gw.LookupByChat(msg.ChatID); binding != nil && binding.Agent != "" {
+		agentName = binding.Agent
 	}
 	if agentName == "" && h.agents != nil {
 		for _, a := range h.agents.List() {
@@ -160,27 +165,25 @@ func (h *handlerContext) cwd(ctx context.Context, msg *gateway.InboundMessage, a
 		}
 	}
 	if agentName == "" {
-		// No agents registered — nightme is essentially unconfigured.
-		// We still record the workspace so /run can fill in the agent
-		// name later (see /run handler).
 		agentName = "claude"
 	}
 
-	sess, err := h.manager.CreateOrUpdate(msg.ChatID, string(msg.ChatType), abs, agentName, nil)
+	// Register a fresh session record (StatusDetached). The
+	// runtime provides the manager-backed helper via
+	// RegisterSessionOps (set up by cmd/nightme at startup).
+	sess, err := h.createRegisteredSession(ctx, abs, agentName, nil)
 	if err != nil {
-		if errors.Is(err, ErrChatAlreadyBound) {
-			return h.reply(ctx, msg.ChatID, "session already active, /kill first"), nil
-		}
 		return h.reply(ctx, msg.ChatID, fmt.Sprintf("/cwd: %v", err)), nil
 	}
-	_ = sess // session registered; reply is the same regardless of ID
+	h.gw.Bind(msg.ChatID, string(msg.ChatType), sess.ID, abs, agentName)
+
 	return h.reply(ctx, msg.ChatID,
 		fmt.Sprintf("Workspace set to %s. Send /run <agent> to start CLI.", abs)), nil
 }
 
 // run handles `/run <agent> [args...]`. It is a no-op when the
-// session already has a live CLI; otherwise it spawns one in the
-// session's workspace.
+// session already has a live CLI; otherwise it spawns one via
+// Gateway.SpawnAgent.
 func (h *handlerContext) run(ctx context.Context, msg *gateway.InboundMessage, args []string) (*gateway.CommandResult, error) {
 	if len(args) == 0 {
 		return h.reply(ctx, msg.ChatID, "usage: /run <agent> [args...]"), nil
@@ -188,15 +191,13 @@ func (h *handlerContext) run(ctx context.Context, msg *gateway.InboundMessage, a
 	agentName := args[0]
 	extra := args[1:]
 
-	// Reject unknown agents before checking workspace so the user
-	// gets the most actionable error first.
 	if h.agents != nil {
 		if _, err := h.agents.Get(agentName); err != nil {
 			return h.reply(ctx, msg.ChatID, fmt.Sprintf("unknown agent: %s", agentName)), nil
 		}
 	}
 
-	sess, err := h.manager.Run(ctx, msg.ChatID, agentName, extra)
+	sess, err := h.gw.SpawnAgent(ctx, msg.ChatID, agentName, extra)
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
 			return h.reply(ctx, msg.ChatID, "no workspace set, send /cwd <path> first"), nil
@@ -207,9 +208,6 @@ func (h *handlerContext) run(ctx context.Context, msg *gateway.InboundMessage, a
 		return h.reply(ctx, msg.ChatID, fmt.Sprintf("/run: %v", err)), nil
 	}
 
-	// "Already running" is the safe default reply; the spec just
-	// wants the user to see their CLI is alive. Producers can
-	// /kill first if they want a "Started:" confirmation.
 	snap := sess.Snapshot()
 	text := fmt.Sprintf("Already running (pid=%d). Connected.", snap.PID)
 	if err := h.trySendReply(ctx, msg.ChatID, text); err != nil {
@@ -221,10 +219,14 @@ func (h *handlerContext) run(ctx context.Context, msg *gateway.InboundMessage, a
 // kill handles `/kill`. The session record is preserved so the
 // user can /run again to restart.
 func (h *handlerContext) kill(ctx context.Context, msg *gateway.InboundMessage, _ []string) (*gateway.CommandResult, error) {
-	if err := h.manager.KillByChat(msg.ChatID); err != nil {
+	sess, err := h.gw.LookupSessionByChat(msg.ChatID)
+	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
 			return h.reply(ctx, msg.ChatID, "no session to kill"), nil
 		}
+		return h.reply(ctx, msg.ChatID, fmt.Sprintf("/kill: %v", err)), nil
+	}
+	if err := h.killSessionByID(sess.ID); err != nil {
 		return h.reply(ctx, msg.ChatID, fmt.Sprintf("/kill: %v", err)), nil
 	}
 	if err := h.trySendReply(ctx, msg.ChatID, "session killed"); err != nil {
@@ -233,18 +235,7 @@ func (h *handlerContext) kill(ctx context.Context, msg *gateway.InboundMessage, 
 	return &gateway.CommandResult{Consumed: true, Reply: "session killed"}, nil
 }
 
-// agents handles `/agents`. It renders the registered agent set as
-// a short IM-friendly list (one bullet per agent) so the user can
-// answer "/run with what name?" without leaving the chat.
-//
-// Format:
-//
-//	Registered agents:
-//	• claude    — claude
-//	• codex     — codex-acp
-//	• opencode  — opencode acp
-//
-//	Use /run [name]. Omit name to use the configured default.
+// agents handles `/agents`.
 func (h *handlerContext) listAgents(ctx context.Context, msg *gateway.InboundMessage, _ []string) (*gateway.CommandResult, error) {
 	text := renderAgents(h.agents)
 	if err := h.trySendReply(ctx, msg.ChatID, text); err != nil {
@@ -253,9 +244,21 @@ func (h *handlerContext) listAgents(ctx context.Context, msg *gateway.InboundMes
 	return &gateway.CommandResult{Consumed: true, Reply: text}, nil
 }
 
-// renderAgents builds the IM-friendly agent list. Returns the empty
-// message when the registry is nil (defensive — tests sometimes
-// construct handlerContext without a registry).
+// help handles `/help`.
+func (h *handlerContext) help(ctx context.Context, msg *gateway.InboundMessage, _ []string) (*gateway.CommandResult, error) {
+	gw, ok := gwFromContext(ctx)
+	if !ok {
+		return h.reply(ctx, msg.ChatID, "help: gateway unavailable"), nil
+	}
+	text := renderHelp(gw.ListCommands())
+	if err := h.trySendReply(ctx, msg.ChatID, text); err != nil {
+		return nil, err
+	}
+	return &gateway.CommandResult{Consumed: true, Reply: text}, nil
+}
+
+// renderAgents + renderHelp + helper functions.
+
 func renderAgents(reg *agent.Registry) string {
 	if reg == nil {
 		return "no agents registered"
@@ -273,9 +276,9 @@ func renderAgents(reg *agent.Registry) string {
 		name := a.Name()
 		cmd := a.Command()
 		args := a.Args()
-		fmt.Fprintf(&b, "\u2022 %s", name)
+		fmt.Fprintf(&b, "• %s", name)
 		if cmd != "" {
-			fmt.Fprintf(&b, " \u2014 %s", cmd)
+			fmt.Fprintf(&b, " — %s", cmd)
 		}
 		if len(args) > 0 {
 			fmt.Fprintf(&b, " %s", strings.Join(args, " "))
@@ -286,22 +289,6 @@ func renderAgents(reg *agent.Registry) string {
 	return b.String()
 }
 
-// help handles `/help`. It renders the registered commands.
-func (h *handlerContext) help(ctx context.Context, msg *gateway.InboundMessage, _ []string) (*gateway.CommandResult, error) {
-	gw, ok := gwFromContext(ctx)
-	if !ok {
-		return h.reply(ctx, msg.ChatID, "help: gateway unavailable"), nil
-	}
-	cmds := gw.ListCommands()
-	text := renderHelp(cmds)
-	if err := h.trySendReply(ctx, msg.ChatID, text); err != nil {
-		return nil, err
-	}
-	return &gateway.CommandResult{Consumed: true, Reply: text}, nil
-}
-
-// renderHelp builds the multi-line help body. Exposed so tests can
-// assert the layout without constructing a Gateway.
 func renderHelp(cmds []gateway.Command) string {
 	var b strings.Builder
 	b.WriteString("Available commands:\n")
@@ -321,27 +308,9 @@ func renderHelp(cmds []gateway.Command) string {
 	return b.String()
 }
 
-// reply pushes the text through the responder (so the user sees
-// it in their IM) and returns a gateway.CommandResult the Gateway can
-// ignore. A nil responder degrades to a no-op so unit tests that
-// only care about Reply text can skip the responder.
-func (h *handlerContext) reply(ctx context.Context, chatID, text string) *gateway.CommandResult {
-	_ = h.trySendReply(ctx, chatID, text)
-	return &gateway.CommandResult{Reply: text, Consumed: true}
-}
-
-// trySendReply is best-effort: if the responder is nil (tests) we
-// just return nil so the handler can still return its text.
-func (h *handlerContext) trySendReply(ctx context.Context, chatID, text string) error {
-	if h.responder == nil {
-		return nil
-	}
-	return h.responder.Reply(ctx, chatID, text)
-}
-
 // gwFromContext extracts the Gateway from the context. The daemon
 // is expected to install it via WithGateway before serving the
-// chat loop. When missing, /help degrades gracefully.
+// chat loop.
 func gwFromContext(ctx context.Context) (gateway.Gateway, bool) {
 	if ctx == nil {
 		return nil, false
@@ -355,4 +324,37 @@ func gwFromContext(ctx context.Context) (gateway.Gateway, bool) {
 // closure.
 func WithGateway(ctx context.Context, gw gateway.Gateway) context.Context {
 	return gateway.WithGateway(ctx, gw)
+}
+
+// createRegisteredSession and killSessionByID are the v1.1 thin
+// shims over the session.Manager — they exist so the handlers
+// don't have to depend on session.Manager directly. The runtime
+// registers them via RegisterSessionOps at startup.
+type sessionOps struct {
+	createRegistered func(ctx context.Context, workspace, agentName string, args []string) (*session.Session, error)
+	killByID         func(sid string) error
+}
+
+var globalSessionOps sessionOps
+
+// RegisterSessionOps lets the runtime inject the manager-backed
+// helpers the slash commands need (register a detached session,
+// kill by ID). Called once at startup; idempotent on subsequent
+// calls.
+func RegisterSessionOps(create func(ctx context.Context, workspace, agentName string, args []string) (*session.Session, error), kill func(sid string) error) {
+	globalSessionOps = sessionOps{createRegistered: create, killByID: kill}
+}
+
+func (h *handlerContext) createRegisteredSession(ctx context.Context, workspace, agentName string, args []string) (*session.Session, error) {
+	if globalSessionOps.createRegistered == nil {
+		return nil, errors.New("session ops not registered (runtime bug)")
+	}
+	return globalSessionOps.createRegistered(ctx, workspace, agentName, args)
+}
+
+func (h *handlerContext) killSessionByID(sid string) error {
+	if globalSessionOps.killByID == nil {
+		return errors.New("session ops not registered (runtime bug)")
+	}
+	return globalSessionOps.killByID(sid)
 }

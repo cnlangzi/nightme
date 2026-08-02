@@ -67,71 +67,78 @@ func ptyAgentRegistry(t *testing.T) *agent.Registry {
 
 // newTestStack wires a fresh Gateway + Manager + Responder so each
 // test starts from a clean slate.
+//
+// v1.1 (commit 3): the testCoordinator is no longer passed to
+// RegisterDefaultCommands — the gateway owns binding lookups via
+// its own Bind/LookupByChat/SpawnAgent methods. RegisterSessionOps
+// installs the manager-backed helpers the slash commands need
+// (register a detached record, kill by ID).
 func newTestStack(t *testing.T) (gateway.Gateway, *testCoordinator, *fakeResponder) {
 	t.Helper()
 	resp := &fakeResponder{}
 	agents := ptyAgentRegistry(t)
 	mgr := session.NewMemoryManager(agents, nil, nil)
-	co := newTestCoordinator(mgr)
-	gw := gateway.New(nil)
-	RegisterDefaultCommands(gw, co, agents, resp)
+	gw := gateway.New(nil, mgr)
+	co := newTestCoordinator(gw, mgr)
+	RegisterDefaultCommands(gw, agents, resp)
+	RegisterSessionOps(co.Register, co.KillByID)
 	return gw, co, resp
 }
 
-// testCoordinator is a minimal in-test SessionManager implementation
-// that gives the gateway handlers a chatID-keyed view of sessions.
-// It mirrors cmd/nightme's chatCoordinator but is local to the
-// gateway/cmd test package (which cannot import cmd/nightme due to
-// the internal/ → cmd layering).
+// testCoordinator is the v1.1 test helper that maintains a
+// chatID → sessionID binding map. It mirrors the runtime's bridge
+// (the gateway itself in v1.1 production) — tests use the helper
+// to bind / spawn / kill sessions without going through the
+// handlers under test.
+//
+// v1.1: the legacy GetByChat / CreateOrUpdate / Run / KillByChat
+// methods are kept as aliases for the existing tests; new test
+// helpers (Bind / Spawn / LookupByChat / Register / KillByID)
+// exercise the gateway binding API directly.
 type testCoordinator struct {
 	mu       sync.Mutex
 	bindings map[string]string // chatID → sessionID
 	mgr      *session.MemoryManager
+	gw       gateway.Gateway
 }
 
-func newTestCoordinator(mgr *session.MemoryManager) *testCoordinator {
+func newTestCoordinator(gw gateway.Gateway, mgr *session.MemoryManager) *testCoordinator {
 	return &testCoordinator{
 		bindings: make(map[string]string),
 		mgr:      mgr,
+		gw:       gw,
 	}
 }
 
-func (c *testCoordinator) GetByChat(chatID string) (*session.Session, error) {
+// Bind creates a detached session record + writes the chat → session
+// binding via the gateway. Mirrors the runtime /cwd path.
+func (c *testCoordinator) Bind(chatID, chatType, workspace, agentName string, args []string) (*session.Session, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	sid, ok := c.bindings[chatID]
-	if !ok {
-		return nil, session.ErrSessionNotFound
-	}
-	return c.mgr.Get(sid)
-}
-
-func (c *testCoordinator) CreateOrUpdate(chatID, _, workspace, agentName string, args []string) (*session.Session, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if sid, ok := c.bindings[chatID]; ok {
 		sess, err := c.mgr.Get(sid)
-		if err != nil {
-			delete(c.bindings, chatID)
-		} else if sess.Status() == session.StatusRunning {
+		if err == nil && sess.Status() == session.StatusRunning {
+			c.mu.Unlock()
 			return nil, ErrChatAlreadyBound
 		}
+		delete(c.bindings, chatID)
 	}
-	// /cwd registers a session record without spawning (StatusDetached);
-	// /run spawns the agent.
+	c.mu.Unlock()
 	sess, err := c.mgr.Register(context.Background(), session.CreateRequest{
-		Workspace: workspace,
-		Agent:     agentName,
-		Args:      args,
+		Workspace: workspace, Agent: agentName, Args: args,
 	})
 	if err != nil {
 		return nil, err
 	}
+	c.mu.Lock()
 	c.bindings[chatID] = sess.ID
+	c.mu.Unlock()
+	c.gw.Bind(chatID, chatType, sess.ID, workspace, agentName)
 	return sess, nil
 }
 
-func (c *testCoordinator) Run(ctx context.Context, chatID, agentName string, extra []string) (*session.Session, error) {
+// Spawn spawns an agent + updates the binding. Mirrors the runtime
+// /run path.
+func (c *testCoordinator) Spawn(ctx context.Context, chatID, agentName string, extra []string) (*session.Session, error) {
 	c.mu.Lock()
 	sid, ok := c.bindings[chatID]
 	c.mu.Unlock()
@@ -146,21 +153,30 @@ func (c *testCoordinator) Run(ctx context.Context, chatID, agentName string, ext
 		return sess, nil
 	}
 	newSess, err := c.mgr.Create(ctx, session.CreateRequest{
-		Workspace: sess.Workspace,
-		Agent:     agentName,
-		Args:      extra,
+		Workspace: sess.Workspace, Agent: agentName, Args: extra,
 	})
 	if err != nil {
 		return nil, err
 	}
-	// Rebind to the freshly-spawned session so subsequent /cwd
-	// calls see the running state and reject.
 	c.mu.Lock()
 	c.bindings[chatID] = newSess.ID
 	c.mu.Unlock()
+	c.gw.SpawnAgent(ctx, chatID, agentName, extra)
 	return newSess, nil
 }
 
+// LookupByChat returns the session bound to chatID.
+func (c *testCoordinator) LookupByChat(chatID string) (*session.Session, error) {
+	c.mu.Lock()
+	sid, ok := c.bindings[chatID]
+	c.mu.Unlock()
+	if !ok {
+		return nil, session.ErrSessionNotFound
+	}
+	return c.mgr.Get(sid)
+}
+
+// KillByChat kills the agent bound to chatID; binding is preserved.
 func (c *testCoordinator) KillByChat(chatID string) error {
 	c.mu.Lock()
 	sid, ok := c.bindings[chatID]
@@ -171,11 +187,51 @@ func (c *testCoordinator) KillByChat(chatID string) error {
 	return c.mgr.Kill(sid)
 }
 
+// GetByChat / CreateOrUpdate / Run are v0.x aliases kept for
+// existing tests that haven't been migrated to the new helpers.
+func (c *testCoordinator) GetByChat(chatID string) (*session.Session, error) {
+	return c.LookupByChat(chatID)
+}
+func (c *testCoordinator) CreateOrUpdate(chatID, chatType, workspace, agentName string, args []string) (*session.Session, error) {
+	return c.Bind(chatID, chatType, workspace, agentName, args)
+}
+func (c *testCoordinator) Run(ctx context.Context, chatID, agentName string, extra []string) (*session.Session, error) {
+	return c.Spawn(ctx, chatID, agentName, extra)
+}
+
+// Register is the session-ops hook the runtime uses for /cwd.
+// Returns a fresh session record (StatusDetached) WITHOUT
+// touching the binding map; the calling handler then calls
+// Gateway.Bind to associate the chat with the session.
+func (c *testCoordinator) Register(ctx context.Context, workspace, agentName string, args []string) (*session.Session, error) {
+	return c.mgr.Register(ctx, session.CreateRequest{
+		Workspace: workspace, Agent: agentName, Args: args,
+	})
+}
+
+// KillByID is the bridge function injected via RegisterSessionOps.
+// It looks up the chatID for sid then kills.
+func (c *testCoordinator) KillByID(sid string) error {
+	c.mu.Lock()
+	var chatID string
+	for k, v := range c.bindings {
+		if v == sid {
+			chatID = k
+			break
+		}
+	}
+	c.mu.Unlock()
+	if chatID == "" {
+		return c.mgr.Kill(sid)
+	}
+	return c.KillByChat(chatID)
+}
+
 // TestCwdHandler_NewSession covers the happy path: /cwd on a chat
 // that has no prior session creates a detached record.
 func TestCwdHandler_NewSession(t *testing.T) {
 	dir := t.TempDir()
-	gw, mgr, resp := newTestStack(t)
+	gw, _, resp := newTestStack(t)
 
 	ctx := WithGateway(context.Background(), gw)
 	if _, err := gw.Handle(ctx, &gateway.InboundMessage{ChatID: "oc_chat", Text: "/cwd " + dir}); err != nil {
@@ -187,7 +243,7 @@ func TestCwdHandler_NewSession(t *testing.T) {
 	if !strings.Contains(resp.last(), dir) {
 		t.Errorf("reply %q missing workspace path %q", resp.last(), dir)
 	}
-	sess, err := mgr.GetByChat("oc_chat")
+	sess, err := gw.LookupSessionByChat("oc_chat")
 	if err != nil {
 		t.Fatalf("GetByChat: %v", err)
 	}
@@ -203,13 +259,13 @@ func TestCwdHandler_RelativePathUsesHome(t *testing.T) {
 		t.Fatalf("create workspace: %v", err)
 	}
 	t.Setenv("HOME", home)
-	gw, mgr, _ := newTestStack(t)
+	gw, _, _ := newTestStack(t)
 
 	ctx := WithGateway(context.Background(), gw)
 	if _, err := gw.Handle(ctx, &gateway.InboundMessage{ChatID: "oc_chat", Text: "/cwd code/nightme"}); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	sess, err := mgr.GetByChat("oc_chat")
+	sess, err := gw.LookupSessionByChat("oc_chat")
 	if err != nil {
 		t.Fatalf("GetByChat: %v", err)
 	}
@@ -222,12 +278,12 @@ func TestCwdHandler_RelativePathUsesHome(t *testing.T) {
 // running session cannot have its workspace changed under it.
 func TestCwdHandler_RejectsActiveSession(t *testing.T) {
 	dir := t.TempDir()
-	gw, mgr, resp := newTestStack(t)
+	gw, co, resp := newTestStack(t)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
+	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
-	if _, err := mgr.Run(context.Background(), "oc_chat", "claude", nil); err != nil {
+	if _, err := co.Spawn(context.Background(), "oc_chat", "claude", nil); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -243,7 +299,7 @@ func TestCwdHandler_RejectsActiveSession(t *testing.T) {
 	}
 
 	// Workspace must be unchanged.
-	sess, _ := mgr.GetByChat("oc_chat")
+	sess, _ := gw.LookupSessionByChat("oc_chat")
 	if sess.Workspace != dir {
 		t.Errorf("workspace mutated to %q, want %q", sess.Workspace, dir)
 	}
@@ -268,9 +324,9 @@ func TestCwdHandler_NoArgs_NoSession(t *testing.T) {
 // session.
 func TestCwdHandler_NoArgs_WithSession(t *testing.T) {
 	dir := t.TempDir()
-	gw, mgr, resp := newTestStack(t)
+	gw, co, resp := newTestStack(t)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
+	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 
@@ -337,9 +393,9 @@ func TestRunHandler_NoWorkspace(t *testing.T) {
 // TestRunHandler_Success starts a fresh agent.
 func TestRunHandler_Success(t *testing.T) {
 	dir := t.TempDir()
-	gw, mgr, resp := newTestStack(t)
+	gw, co, resp := newTestStack(t)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
+	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 
@@ -348,7 +404,7 @@ func TestRunHandler_Success(t *testing.T) {
 		Text:   "/run claude",
 	})
 
-	sess, _ := mgr.GetByChat("oc_chat")
+	sess, _ := gw.LookupSessionByChat("oc_chat")
 	if sess == nil {
 		t.Fatalf("session vanished")
 	}
@@ -368,12 +424,12 @@ func TestRunHandler_Success(t *testing.T) {
 // already running.
 func TestRunHandler_AlreadyRunning(t *testing.T) {
 	dir := t.TempDir()
-	gw, mgr, resp := newTestStack(t)
+	gw, co, resp := newTestStack(t)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
+	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
-	if _, err := mgr.Run(context.Background(), "oc_chat", "claude", nil); err != nil {
+	if _, err := co.Spawn(context.Background(), "oc_chat", "claude", nil); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -391,9 +447,9 @@ func TestRunHandler_AlreadyRunning(t *testing.T) {
 // TestRunHandler_UnknownAgent returns the agent-unknown error.
 func TestRunHandler_UnknownAgent(t *testing.T) {
 	dir := t.TempDir()
-	gw, mgr, resp := newTestStack(t)
+	gw, co, resp := newTestStack(t)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
+	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
@@ -408,9 +464,9 @@ func TestRunHandler_UnknownAgent(t *testing.T) {
 // TestRunHandler_MissingArgs returns the usage hint.
 func TestRunHandler_MissingArgs(t *testing.T) {
 	dir := t.TempDir()
-	gw, mgr, resp := newTestStack(t)
+	gw, co, resp := newTestStack(t)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
+	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
@@ -425,12 +481,12 @@ func TestRunHandler_MissingArgs(t *testing.T) {
 // TestKillHandler stops the live CLI.
 func TestKillHandler(t *testing.T) {
 	dir := t.TempDir()
-	gw, mgr, resp := newTestStack(t)
+	gw, co, resp := newTestStack(t)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
+	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
-	if _, err := mgr.Run(context.Background(), "oc_chat", "claude", nil); err != nil {
+	if _, err := co.Spawn(context.Background(), "oc_chat", "claude", nil); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -442,7 +498,7 @@ func TestKillHandler(t *testing.T) {
 		t.Errorf("reply = %q, want 'killed' feedback", resp.last())
 	}
 
-	sess, _ := mgr.GetByChat("oc_chat")
+	sess, _ := gw.LookupSessionByChat("oc_chat")
 	if sess.Status() != session.StatusExited {
 		t.Errorf("status = %s, want exited", sess.Status())
 	}
@@ -522,16 +578,16 @@ func TestRegistry_CwdAlias(t *testing.T) {
 // extended with the user-supplied args.
 func TestRunHandler_ExtraArgsForwarded(t *testing.T) {
 	dir := t.TempDir()
-	gw, mgr, _ := newTestStack(t)
+	gw, co, _ := newTestStack(t)
 
-	if _, err := mgr.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
+	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
 	}
 	_, _ = gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/run claude --opus --fast",
 	})
-	sess, _ := mgr.GetByChat("oc_chat")
+	sess, _ := gw.LookupSessionByChat("oc_chat")
 	if got := sess.Snapshot().Args; len(got) != 2 || got[0] != "--opus" || got[1] != "--fast" {
 		t.Errorf("args = %v, want [--opus --fast]", got)
 	}
@@ -543,10 +599,12 @@ func TestRunHandler_DetectFailure(t *testing.T) {
 	reg := agent.New()
 	reg.Register(&detectorFakeAgent{})
 	mgr := session.NewMemoryManager(reg, nil, nil)
-	co := newTestCoordinator(mgr)
+	gw := gateway.New(nil, mgr)
+	co := newTestCoordinator(gw, mgr)
 	resp := &fakeResponder{}
-	gw := gateway.New(nil)
-	RegisterDefaultCommands(gw, co, reg, resp)
+	
+	RegisterDefaultCommands(gw, reg, resp)
+	RegisterSessionOps(co.Register, co.KillByID)
 
 	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
@@ -601,9 +659,10 @@ func TestRunHandler_ResponderErrorPropagates(t *testing.T) {
 	want := errors.New("responder down")
 	reg := ptyAgentRegistry(t)
 	mgr := session.NewMemoryManager(reg, nil, nil)
-	co := newTestCoordinator(mgr)
-	gw := gateway.New(nil)
-	RegisterDefaultCommands(gw, co, reg, errorResponder{err: want})
+	gw := gateway.New(nil, mgr)
+	co := newTestCoordinator(gw, mgr)
+	RegisterDefaultCommands(gw, reg, errorResponder{err: want})
+	RegisterSessionOps(co.Register, co.KillByID)
 
 	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)
@@ -621,9 +680,10 @@ func TestRunHandler_ResponderErrorPropagates(t *testing.T) {
 // every default command.
 func TestRegistry_AllCommandsListed(t *testing.T) {
 	mgr := session.NewMemoryManager(ptyAgentRegistry(t), nil, nil)
-	co := newTestCoordinator(mgr)
-	gw := gateway.New(nil)
-	RegisterDefaultCommands(gw, co, ptyAgentRegistry(t), nil)
+	gw := gateway.New(nil, mgr)
+	RegisterDefaultCommands(gw, ptyAgentRegistry(t), nil)
+	co := newTestCoordinator(gw, mgr)
+	RegisterSessionOps(co.Register, co.KillByID)
 
 	cmds := gw.ListCommands()
 	names := make(map[string]bool)
@@ -642,9 +702,10 @@ func TestRegistry_AllCommandsListed(t *testing.T) {
 func TestRunHandler_NilResponderWhenNil(t *testing.T) {
 	dir := t.TempDir()
 	mgr := session.NewMemoryManager(ptyAgentRegistry(t), nil, nil)
-	co := newTestCoordinator(mgr)
-	gw := gateway.New(nil)
-	RegisterDefaultCommands(gw, co, ptyAgentRegistry(t), nil)
+	gw := gateway.New(nil, mgr)
+	RegisterDefaultCommands(gw, ptyAgentRegistry(t), nil)
+	co := newTestCoordinator(gw, mgr)
+	RegisterSessionOps(co.Register, co.KillByID)
 
 	if _, err := co.CreateOrUpdate("oc_chat", "group", dir, "claude", nil); err != nil {
 		t.Fatalf("CreateOrUpdate: %v", err)

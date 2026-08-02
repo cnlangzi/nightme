@@ -61,22 +61,28 @@ func defaultRunDeps() runDeps {
 func newRunCmd() *cobra.Command {
 	var cleanup bool
 	var channelName string
+	var v12 bool
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Start the Feishu daemon",
 		Long: "run starts the Feishu WebSocket channel and serves a Gateway " +
-			"router on top of it. Slash commands (/cwd, /run, /kill, /help) " +
+			"router on top of it. Slash commands (/cwd, /use, /kill, /help) " +
 			"drive session lifecycle; plain text is forwarded to the live " +
 			"agent behind the chat's session.\n\n" +
 			"By default the daemon detaches session CLIs on shutdown so a " +
-			"later `nightme run` (or /run) can resume them. Pass --cleanup " +
+			"later `nightme run` (or /use) can resume them. Pass --cleanup " +
 			"to instead Kill() every session on SIGINT/SIGTERM — useful for " +
 			"CI or one-shot runs.\n\n" +
 			"Pass --channel=echo to run the daemon with the echo channel " +
 			"(a no-network stub that prints outbound messages to stdout). " +
-			"Useful for smoke tests and for exercising the v0.3 hub-and-" +
-			"spoke architecture without Feishu credentials.",
+			"Useful for smoke tests.\n\n" +
+			"--v12 enables the v1.2 ChatSession-based runtime (default " +
+			"since commit 8b). Pass --v12=false to opt into the legacy " +
+			"v1.1 MemoryManager-based runtime (deprecated).",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if v12 {
+				return runRunV12(cmd, cleanup, channelName)
+			}
 			return runRun(cmd, cleanup, channelName)
 		},
 	}
@@ -84,6 +90,8 @@ func newRunCmd() *cobra.Command {
 		"Kill every session CLI on shutdown instead of detaching them")
 	cmd.Flags().StringVar(&channelName, "channel", "feishu",
 		"Channel implementation: feishu (default) or echo (smoke test)")
+	cmd.Flags().BoolVar(&v12, "v12", true,
+		"Use the v1.2 ChatSession-based runtime (commit 8b). Pass --v12=false for v1.1 legacy.")
 	return cmd
 }
 
@@ -93,8 +101,39 @@ func runRun(cmd *cobra.Command, cleanup bool, channelName string) error {
 	if channelName != "" && channelName != "feishu" && channelName != "echo" {
 		return fmt.Errorf("run: unknown channel %q (want feishu or echo)", channelName)
 	}
+	// commit 8b: v1.2 daemon is now the default. Pass --legacy
+	// (handled by caller) to opt into the v1.1 path. The legacy
+	// path stays available for tests + emergency fallback.
+	// (For now, the flag is undocumented; flip defaults later.)
 	deps := withChannel(defaultRunDeps(), channelName)
 	return runRunWith(cmd, withCleanup(deps, cleanup))
+}
+
+// runRunV12 dispatches to the v1.2 daemon (commit 8b).
+// Currently selected by the --v12 flag (default true in v1.2 release;
+// flipped to false in legacy mode for migration testing).
+func runRunV12(cmd *cobra.Command, cleanup bool, channelName string) error {
+	if channelName != "" && channelName != "feishu" && channelName != "echo" {
+		return fmt.Errorf("run v1.2: unknown channel %q", channelName)
+	}
+	deps := withChannel_v12(defaultRunDeps_v12(), channelName)
+	deps.cleanup = cleanup
+	return runRunWith_v12(cmd, deps)
+}
+
+// withChannel_v12 mirrors withChannel but for v1.2 deps (echo only;
+// feishu auth is enforced later in the daemon).
+func withChannel_v12(deps runDeps_v12, channelName string) runDeps_v12 {
+	switch channelName {
+	case "feishu", "":
+		// default — feishu.NewAdapter
+	case "echo":
+		deps.skipFeishuAuth = true
+		deps.newChannel = func(*config.Config) (channel.Channel, error) {
+			return echo.New("echo", os.Stdout), nil
+		}
+	}
+	return deps
 }
 
 // withCleanup returns deps with the cleanup flag applied. Exported

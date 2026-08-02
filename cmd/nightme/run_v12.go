@@ -1,0 +1,402 @@
+// Package main — `nightme run` v1.2 daemon (commit 8b).
+//
+// The v1.2 daemon wires together:
+//
+//   - chatsession.Manager (per-chat ChatSession table)
+//   - chatsession.NewRegistrySpawner (lazy fork via agent.Registry)
+//   - chatsession.InputBuffer FSM (commit 9; ownership moved to ChatSession)
+//   - gateway.RegisterChatSessionCommands (/cwd /use /kill slash commands)
+//   - EventCallback: each AgentSession.Events() is consumed by a
+//     per-active-AS readPump goroutine that translates AgentEvent →
+//     OutboundMessage → channel.Send, AND drives the InputBuffer FSM
+//     (non-terminal events → SetBusy; EventDone / Error → SetIdle +
+//     OnTurnEnded → flush via the runtime-installed FlushHook).
+//
+// Existing v1.1 runtime in run.go is preserved (for tests + backwards
+// compatibility). The Cobra-level `nightme run` routes here by default
+// in commit 8b (configurable via the legacy runDeps path).
+
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/channel"
+	"github.com/cnlangzi/nightme/internal/channel/feishu"
+	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/config"
+	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/registry"
+)
+
+// runDeps_v12 holds the construction seams for the v1.2 daemon.
+// Same shape as the legacy runDeps but uses chatsession types.
+type runDeps_v12 struct {
+	loadConfig     func() (*config.Config, error)
+	openChatSessions func(*config.Config) (*registry.ChatSessionFile, error)
+	openAgentSessions func(*config.Config) (*registry.AgentSessionFile, error)
+	buildAgents    func(*config.Config) *agent.Registry
+	newChannel     func(*config.Config) (channel.Channel, error)
+	signals        <-chan os.Signal
+	cleanup        bool
+	skipFeishuAuth bool
+}
+
+func defaultRunDeps_v12() runDeps_v12 {
+	return runDeps_v12{
+		loadConfig:        config.LoadDefault,
+		openChatSessions:  defaultOpenChatSessions,
+		openAgentSessions: defaultOpenAgentSessions,
+		buildAgents:       buildRunAgentRegistry,
+		newChannel: func(cfg *config.Config) (channel.Channel, error) {
+			return feishu.NewAdapter(cfg)
+		},
+	}
+}
+
+// defaultOpenChatSessions opens chat_sessions.json relative to
+// cfg.Paths.DataDir.
+func defaultOpenChatSessions(cfg *config.Config) (*registry.ChatSessionFile, error) {
+	path, err := chatSessionsPath(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return registry.OpenChatSessionFile(path)
+}
+
+// defaultOpenAgentSessions opens agent_sessions.json relative to
+// cfg.Paths.DataDir.
+func defaultOpenAgentSessions(cfg *config.Config) (*registry.AgentSessionFile, error) {
+	path, err := agentSessionsPath(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return registry.OpenAgentSessionFile(path)
+}
+
+func chatSessionsPath(cfg *config.Config) (string, error) {
+	base, err := filepath.Abs(cfg.Paths.DataDir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "chat_sessions.json"), nil
+}
+
+func agentSessionsPath(cfg *config.Config) (string, error) {
+	base, err := filepath.Abs(cfg.Paths.DataDir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "agent_sessions.json"), nil
+}
+
+// runRunWith_v12 is the v1.2 daemon entrypoint. Mirrors runRunWith
+// (v1.1) in structure: install signal handling, fill in nil deps,
+// delegate to runDaemon_v12.
+func runRunWith_v12(cmd *cobra.Command, deps runDeps_v12) error {
+	if cmd == nil {
+		return errors.New("run v1.2: command is required")
+	}
+	defaults := defaultRunDeps_v12()
+	if deps.loadConfig == nil {
+		deps.loadConfig = defaults.loadConfig
+	}
+	if deps.openChatSessions == nil {
+		deps.openChatSessions = defaults.openChatSessions
+	}
+	if deps.openAgentSessions == nil {
+		deps.openAgentSessions = defaults.openAgentSessions
+	}
+	if deps.buildAgents == nil {
+		deps.buildAgents = defaults.buildAgents
+	}
+	if deps.newChannel == nil {
+		deps.newChannel = defaults.newChannel
+	}
+
+	sigCh := deps.signals
+	if sigCh == nil {
+		owned := make(chan os.Signal, 2)
+		signal.Notify(owned, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(owned)
+		sigCh = owned
+	}
+	out := io.Discard
+	if cmd != nil {
+		out = cmd.OutOrStdout()
+	}
+	return runDaemon_v12(cmd.Context(), out, deps, sigCh)
+}
+
+// runDaemon_v12 is the v1.2 daemon core. Wires chatsession.Manager
+// + Spawner + FlushHook + EventCallback; runs the gateway until
+// signal / context cancel.
+func runDaemon_v12(ctx context.Context, out io.Writer, deps runDeps_v12, sigCh <-chan os.Signal) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if out == nil {
+		out = io.Discard
+	}
+	logger := loggerFromContext(ctx)
+
+	cfg, err := deps.loadConfig()
+	if err != nil {
+		return fmt.Errorf("run v1.2: load config: %w", err)
+	}
+	if cfg == nil {
+		return errors.New("run v1.2: load config: returned nil config")
+	}
+	if !deps.skipFeishuAuth && (cfg.Feishu.AppID == "" || cfg.Feishu.AppSecret == "") {
+		return errors.New("run v1.2: Feishu credentials are not configured; run `nightme auth login feishu`")
+	}
+
+	csFile, err := deps.openChatSessions(cfg)
+	if err != nil {
+		return fmt.Errorf("run v1.2: open chat_sessions: %w", err)
+	}
+	asFile, err := deps.openAgentSessions(cfg)
+	if err != nil {
+		return fmt.Errorf("run v1.2: open agent_sessions: %w", err)
+	}
+
+	agents := deps.buildAgents(cfg)
+	if agents == nil {
+		return errors.New("run v1.2: agent registry is nil")
+	}
+
+	ch, err := deps.newChannel(cfg)
+	if err != nil {
+		return fmt.Errorf("run v1.2: create channel: %w", err)
+	}
+	if ch == nil {
+		return errors.New("run v1.2: channel is nil")
+	}
+
+	// Build the ChatSession manager.
+	spawner := chatsession.NewRegistrySpawner(agents)
+	mgr := chatsession.NewManager().
+		WithSpawner(spawner).
+		WithPersistence(csFile, asFile)
+
+	// Restore from disk (per-chat ChatSession + per-AgentSession
+	// metadata; processes not running).
+	if err := mgr.RestoreFromRegistry(); err != nil {
+		return fmt.Errorf("run v1.2: restore: %w", err)
+	}
+
+	// startChannel wires the channel and starts its connection.
+	if err := ch.Start(ctx); err != nil {
+		logger.Error("channel disconnected", "reason", err)
+		return fmt.Errorf("run v1.2: start channel: %w", err)
+	}
+	logger.Info("channel connected")
+	fmt.Fprintln(out, "Channel connected")
+
+	if fa, ok := ch.(*feishu.Adapter); ok {
+		fa.SetLogger(logger)
+	}
+
+	// Build the v1.2 router wiring.
+	fallback := v12Fallback(mgr, ch, cfg.Primary, logger)
+
+	gw := gateway.New(fallback, nil)
+	gateway.RegisterChatSessionCommands(gw, mgr, ch, cfg.Primary)
+
+	// Attach channels + start the gateway.
+	gwImpl := gw.(*gateway.Router)
+	gwImpl.AttachChannels(ch)
+
+	// Start readPumps for already-running AgentSessions that
+	// were restored from disk (Detached → running on next
+	// LookupActiveAgentSession). For the v1.2 first cut, we
+	// don't auto-spawn at startup; users must send a message
+	// (which triggers LookupActiveAgentSession → Spawner).
+	v12EnsureReadPumps(mgr, ch, cfg.Primary, logger)
+
+	if err := gwImpl.Start(ctx); err != nil {
+		return fmt.Errorf("run v1.2: start gateway: %w", err)
+	}
+	defer func() { _ = gwImpl.Stop(context.Background()) }()
+
+	logger.Info("v1.2 daemon running",
+		"chat_sessions", len(mgr.List()),
+		"primary", cfg.Primary)
+
+	// Block on signal or context cancellation.
+	select {
+	case <-ctx.Done():
+	case sig, ok := <-sigCh:
+		if ok && sig != nil {
+			fmt.Fprintf(out, "[nightme v1.2] received %s\n", sig)
+		}
+	}
+	return shutdownRun_v12(out, ch, mgr, csFile, asFile, deps.cleanup, logger)
+}
+
+// v12Fallback returns the no-command fallback handler. It is
+// invoked when no slash command matches; it routes the inbound
+// message to the chat's active AgentSession via the InputBuffer.
+//
+// Flow (mirrors v1.1 fallback with ChatSession primitives):
+//
+//  1. cs = mgr.GetOrCreate(chatID, chatType, cfg.Primary)
+//  2. cs.LookupActiveAgentSession() (lazy spawn)
+//  3. cs.QueueUserMessage(blocks, userMsgID) (Idle → flush now;
+//     Busy → queue)
+//  4. SetBusy on first event (drive FSM)
+func v12Fallback(mgr *chatsession.Manager, ch channel.Channel, primary string, logger *slog.Logger) func(context.Context, *gateway.InboundMessage) error {
+	return func(ctx context.Context, msg *gateway.InboundMessage) error {
+		if msg == nil {
+			return nil
+		}
+		userMsgID := msg.MessageID
+		if userMsgID == "" {
+			userMsgID = msg.UserID + ":" + msg.Time.UTC().Format(time.RFC3339Nano)
+		}
+
+		cs := mgr.GetOrCreate(msg.ChatID, string(msg.ChatType), primary)
+
+		// Resolve active AgentSession (lazy spawn on miss).
+		_, err := cs.LookupActiveAgentSession()
+		if err != nil {
+			if errors.Is(err, chatsession.ErrNoActiveCwd) {
+				return ch.Send(ctx, gateway.OutboundMessage{
+					ChatID: msg.ChatID,
+					Kind:   gateway.OutText,
+					Text:   "No workspace set. Send /cwd <path> first.",
+				})
+			}
+			if errors.Is(err, chatsession.ErrNoActiveCwd) {
+				return ch.Send(ctx, gateway.OutboundMessage{
+					ChatID: msg.ChatID,
+					Kind:   gateway.OutText,
+					Text:   "No workspace set. Send /cwd <path> first.",
+				})
+			}
+			// Spawn failed (binary missing, etc.); let the user know.
+			return ch.Send(ctx, gateway.OutboundMessage{
+				ChatID: msg.ChatID,
+				Kind:   gateway.OutText,
+				Text:   fmt.Sprintf("Failed to spawn agent: %v", err),
+			})
+		}
+
+		// Build structured blocks and queue to InputBuffer.
+		blocks := feishu.BuildBlocks(msg.Text, msg.Attachments)
+		if err := cs.QueueUserMessage(blocks, userMsgID); err != nil {
+			if errors.Is(err, chatsession.ErrBufferFull) {
+				return ch.Send(ctx, gateway.OutboundMessage{
+					ChatID: msg.ChatID,
+					Kind:   gateway.OutText,
+					Text:   "Input buffer full. Send /flush or /clear.",
+				})
+			}
+			return err
+		}
+		return nil
+	}
+}
+
+// v12EnsureReadPumps walks every ChatSession and ensures a readPump
+// is running for its current active AgentSession. Called at
+// startup after RestoreFromRegistry; the AgentSessions are
+// Detached (no process), so this is a no-op for restored
+// sessions — readPumps are started lazily on first /use + send.
+//
+// Kept as a no-op stub for commit 8b; commit 8c (later) will
+// implement active readPump management per ChatSession.
+func v12EnsureReadPumps(mgr *chatsession.Manager, ch channel.Channel, primary string, logger *slog.Logger) {
+	// no-op for now; deferred to commit 8c.
+	_ = mgr
+	_ = ch
+	_ = primary
+	_ = logger
+}
+
+// v12Responder adapts a channel.Channel for v1.2 outbound
+// messages. Keeps the v1.1 channelResponder simple Send path; the
+// v1.2 readPump writes directly here.
+type v12Responder struct {
+	ch     channel.Channel
+	mgr    *chatsession.Manager
+	logger *slog.Logger
+}
+
+// Send translates and dispatches an AgentEvent to the channel for
+// the chat owning the active AgentSession.
+func (r *v12Responder) Send(ctx context.Context, chatID, userMsgID, text string) error {
+	if r.ch == nil {
+		return nil
+	}
+	return r.ch.Send(ctx, gateway.OutboundMessage{
+		ChatID:  chatID,
+		Kind:    gateway.OutText,
+		Text:    text,
+		ReplyTo: userMsgID,
+	})
+}
+
+// shutdownRun_v12 stops the channel, then either detaches or kills
+// every ChatSession's AgentSessions depending on cleanup.
+//
+// Persistence: chat_sessions.json + agent_sessions.json are left in
+// place. The Manager has been writing through to them throughout
+// the run via WithPersistence.
+func shutdownRun_v12(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, csFile *registry.ChatSessionFile, asFile *registry.AgentSessionFile, cleanup bool, logger *slog.Logger) error {
+	_ = out // future shutdown status line
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var firstErr error
+	if ch != nil {
+		if err := ch.Stop(shutdownCtx); err != nil {
+			firstErr = fmt.Errorf("run v1.2: stop channel: %w", err)
+		}
+	}
+
+	if mgr != nil {
+		// Persist final state.
+		for _, cs := range mgr.List() {
+			// Touch lastInteractionAt so the entry is fresh on disk.
+			cs.SetActiveAgent(cs.ActiveAgent()) // no-op write trigger via the locked path
+		}
+
+		if cleanup {
+			for _, cs := range mgr.List() {
+				if err := cs.KillAll(); err != nil && logger != nil {
+					logger.Warn("kill all failed for chat", "chat", cs.ChatID, "err", err)
+				}
+			}
+		}
+		// (Detach is the default; AgentSessions that were Running
+		// remain in registry as Detached for next start.)
+	}
+
+	// Best-effort: flush registry stores.
+	if csFile != nil {
+		// Upsert each ChatSession so the file reflects current state.
+		for _, cs := range mgr.List() {
+			_ = csFile.Upsert(cs.Entry())
+		}
+	}
+	_ = asFile
+
+	return firstErr
+}

@@ -360,13 +360,6 @@ func v12Fallback(mgr *chatsession.Manager, ch channel.Channel, primary string, l
 					Text:   "No workspace set. Send /cwd <path> first.",
 				})
 			}
-			if errors.Is(err, chatsession.ErrNoActiveCwd) {
-				return ch.Send(ctx, gateway.OutboundMessage{
-					ChatID: msg.ChatID,
-					Kind:   gateway.OutText,
-					Text:   "No workspace set. Send /cwd <path> first.",
-				})
-			}
 			// Spawn failed (binary missing, etc.); let the user know.
 			return ch.Send(ctx, gateway.OutboundMessage{
 				ChatID: msg.ChatID,

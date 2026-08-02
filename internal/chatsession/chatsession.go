@@ -225,21 +225,37 @@ func (cs *ChatSession) ActiveAgentSession() *AgentSession {
 // from QueueUserMessage / SetBusy / SetIdle / OnTurnEnded so tests
 // that don't dispatch messages don't allocate the FSM.
 //
-// Construction starts with nil flush hook; the runtime wires it
-// via SetFlushHook before any user message arrives.
+// Construction installs a default FlushHook that sends queued
+// blocks to cs.activeAS (current active AgentSession). The runtime
+// can override via SetFlushHook if it needs receipts or other
+// side effects.
+//
+// commit 9+ fix: without a hook, QueueUserMessage on an Idle
+// buffer silently drops the message (InputBuffer.Add returns nil
+// without forwarding). The default hook closes that gap: any
+// ChatSession with an active AgentSession will route user messages
+// to the agent.
 func (cs *ChatSession) ensureBuffer() *InputBuffer {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	if cs.inputBuffer == nil {
-		cs.inputBuffer = NewInputBuffer(nil, 50, 100*1024)
+		cs.inputBuffer = NewInputBuffer(cs.defaultFlushHookLocked(), 50, 100*1024)
 	}
 	return cs.inputBuffer
 }
 
-// flushHookLocked is no longer used (the FlushHook is now wired
-// via SetFlushHook after construction). Kept as a comment marker
-// so PR reviewers see the explicit removal. Delete on next doc
-// pass.
+// defaultFlushHookLocked returns the built-in FlushHook that
+// forwards user blocks to the current active AgentSession. Caller
+// must hold cs.mu (Lock).
+func (cs *ChatSession) defaultFlushHookLocked() FlushHook {
+	return func(combined []agent.ContentBlock, userMsgIDs []string) error {
+		as := cs.activeAS
+		if as == nil || as.Handle() == nil {
+			return ErrNotRunning
+		}
+		return as.SendBlocks(context.Background(), combined)
+	}
+}
 
 // QueueUserMessage enqueues a structured user turn. Idle: flush
 // immediately via the hook. Busy: queue. Behavior mirrors v1.1's

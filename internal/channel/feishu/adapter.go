@@ -953,16 +953,10 @@ func (a *Adapter) AddReaction(ctx context.Context, messageID, reactionType strin
 	return rid, nil
 }
 
-// DeleteReaction removes a reaction by its ID. Used by
-// MessageReceipt to swap the state emoji (⏳ → 🔄 → ✅) — Feishu
-// has no UpdateReaction API, so we delete the old one and create a
-// new one in the same message row. The user always sees ONE
-// reaction emoji per user message.
-//
-// Errors are non-fatal — best-effort. The user is better off seeing
-// a stale emoji (Waiting when actually Executing) than seeing an
-// error overlay. On failure the caller can fall back to leaving the
-// old reaction in place.
+// DeleteReaction removes a reaction by its ID. Used by the adapter's
+// OutReactionRemoved send path (Meta["reaction_id"]). Receipts no
+// longer delete reactions — they append lifecycle emojis instead —
+// but the public method stays for other adapter consumers.
 func (a *Adapter) DeleteReaction(ctx context.Context, messageID, reactionID string) error {
 	if a.larkClient == nil || a.larkClient.Im == nil || a.larkClient.Im.V1 == nil || a.larkClient.Im.V1.MessageReaction == nil {
 		return errors.New("feishu: REST client not initialized")

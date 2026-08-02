@@ -5,260 +5,189 @@ import (
 	"errors"
 	"sync"
 	"testing"
+
+	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/channel"
 )
 
-// mockReceiptAdapter is a stand-in for *Adapter covering the three
-// receipt-related calls (AddReaction, DeleteReaction, UpdateMessage,
-// SendMessageText). Tests record the calls so we can assert on the
-// F-25 dual-track swap behaviour.
+// mockReceiptAdapter records AddReaction / UpdateMessage /
+// SendMessageText calls for the append-only reaction tests.
 type mockReceiptAdapter struct {
 	mu sync.Mutex
 
-	added     []receiptSwapCall       // emoji additions
-	deleted   []string                // reaction IDs deleted
-	updated   []receiptSwapUpdateCall // (msgID, text) updates
-	sentText  []receiptSwapSendCall   // new-message sends
-	addErr    error                   // returned by AddReaction (nil = ok)
-	deleteErr error                   // returned by DeleteReaction (nil = ok)
-	updateErr error                   // returned by UpdateMessage (nil = ok)
-	sendErr   error                   // returned by SendMessageText (nil = ok)
-
-	nextReactionID int // auto-incremented, returned from AddReaction
+	added     []receiptReactionCall
+	updated   []receiptUpdateCall
+	sentText  []receiptSendCall
+	addErr    error
+	updateErr error
+	sendErr   error
 }
 
-type receiptSwapCall struct{ MessageID, Emoji string }
+type receiptReactionCall struct{ MessageID, Emoji string }
 
-type receiptSwapUpdateCall struct {
+type receiptUpdateCall struct {
 	MessageID string
 	Text      string
 }
 
-type receiptSwapSendCall struct {
+type receiptSendCall struct {
 	ChatID string
 	Text   string
+}
+
+func (m *mockReceiptAdapter) snapshotAdded() []receiptReactionCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]receiptReactionCall, len(m.added))
+	copy(out, m.added)
+	return out
+}
+
+func (m *mockReceiptAdapter) snapshotSentText() []receiptSendCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]receiptSendCall, len(m.sentText))
+	copy(out, m.sentText)
+	return out
 }
 
 func (m *mockReceiptAdapter) AddReaction(_ context.Context, msgID, emoji string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.added = append(m.added, receiptSwapCall{msgID, emoji})
 	if m.addErr != nil {
 		return "", m.addErr
 	}
-	m.nextReactionID++
-	return "rid_" + emoji + "_" + itoa(m.nextReactionID), nil
-}
-
-func (m *mockReceiptAdapter) DeleteReaction(_ context.Context, msgID, rid string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.deleted = append(m.deleted, msgID+":"+rid)
-	if m.deleteErr != nil {
-		return m.deleteErr
-	}
-	return nil
+	m.added = append(m.added, receiptReactionCall{msgID, emoji})
+	return "reaction-id", nil
 }
 
 func (m *mockReceiptAdapter) UpdateMessage(_ context.Context, msgID, text string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.updated = append(m.updated, receiptSwapUpdateCall{msgID, text})
-	if m.updateErr != nil {
-		return m.updateErr
-	}
-	return nil
+	m.updated = append(m.updated, receiptUpdateCall{msgID, text})
+	return m.updateErr
 }
 
 func (m *mockReceiptAdapter) SendMessageText(_ context.Context, chatID, text string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.sentText = append(m.sentText, receiptSwapSendCall{chatID, text})
 	if m.sendErr != nil {
 		return "", m.sendErr
 	}
-	return "new_msg_id", nil
+	m.sentText = append(m.sentText, receiptSendCall{chatID, text})
+	return "new-message-id", nil
 }
 
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b [12]byte
-	pos := len(b)
-	for n > 0 {
-		pos--
-		b[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(b[pos:])
+func newAppendOnlyReceipt(bot receiptBot) *MessageReceipt {
+	return NewMessageReceiptForReply("chat1", "user-message-1", "reply-message-1", bot)
 }
 
-// Helper: build a receipt via the normal constructor but using a
-// mock adapter. Returns the mock + receipt for assertions.
-func buildTestReceipt(t *testing.T) (*MessageReceipt, *mockReceiptAdapter) {
-	t.Helper()
-	mock := &mockReceiptAdapter{}
-	// We can't use NewMessageReceipt directly because it requires
-	// *Adapter. Instead, build the receipt struct manually with
-	// the bot field set to nil — but renderLocked calls bot.* so
-	// we need a real Adapter OR we test via the exposed bot
-	// interface. For now we use an unsafe-cast approach: the
-	// renderLocked path calls r.bot.AddReaction etc. We bypass
-	// NewMessageReceipt and just construct the receipt with a
-	// mock that implements the same surface via a tiny wrapper.
-	//
-	// The cleanest approach is to type-assert in tests by
-	// defining a minimal interface that the receipt uses and
-	// mocking it. But the receipt currently calls *Adapter
-	// methods directly. So we add a small wrapper type that
-	// satisfies the same calls. For simplicity here, the
-	// tests use a minimal mock via the receipt's renderLocked
-	// path which is unexported; the integration tests below
-	// use the unexported helper.
-	r := &MessageReceipt{
-		chatID:    "chat1",
-		userMsgID: "user_msg_1",
-		bot:       nil, // direct calls to bot.* will panic — we
-		// test via the unexported renderLocked only on the
-		// adapter-mock path below.
-		state: StateWaiting,
-	}
-	return r, mock
-}
+func TestReactionAppendOnly_FullLifecycleAddsEachStateOnce(t *testing.T) {
+	ctx := context.Background()
+	bot := &mockReceiptAdapter{}
+	r := newAppendOnlyReceipt(bot)
 
-// TestReactionSwap_WaitingToExecuting verifies the new F-25 swap
-// behaviour: a state transition from Waiting (OK) to Executing
-// (OnIt) deletes the old reaction and creates the new one. The user
-// sees exactly ONE reaction emoji after the swap.
-func TestReactionSwap_WaitingToExecuting(t *testing.T) {
-	mock := &mockReceiptAdapter{}
-
-	r := &MessageReceipt{
-		chatID:    "chat1",
-		userMsgID: "user_msg_1",
-		bot:       nil, // see TestReactionSwapWithAdapter for real wiring
-		state:     StateWaiting,
-	}
-	_ = r
-
-	// Drive the swap directly using the mock to assert the API
-	// surface without needing a full *Adapter.
-	// 1. Add OK (initial reaction)
-	rid1, err := mock.AddReaction(context.Background(), "user_msg_1", "OK")
-	if err != nil {
+	// Mirror the production seed: NewMessageReceipt posts the OK
+	// reaction before the receipt is returned.
+	if _, err := bot.AddReaction(ctx, r.userMsgID, StateWaiting.Emoji()); err != nil {
 		t.Fatal(err)
 	}
-	if rid1 == "" {
-		t.Fatal("expected non-empty reaction ID")
-	}
+	r.mu.Lock()
+	r.currentReaction = StateWaiting.Emoji()
+	r.mu.Unlock()
 
-	// 2. State change: delete OK + add OnIt
-	if err := mock.DeleteReaction(context.Background(), "user_msg_1", rid1); err != nil {
+	if err := r.SetExecuting(ctx); err != nil {
 		t.Fatal(err)
 	}
-	rid2, err := mock.AddReaction(context.Background(), "user_msg_1", "OnIt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rid2 == rid1 {
-		t.Error("new reaction ID should differ from old")
-	}
-
-	// 3. Update reply text in place (the reply text uses unicode
-	//    ⏳/🔄/✅ — those are textual content, not reaction types).
-	if err := mock.UpdateMessage(context.Background(), "new_msg_id", "🔄 ⏳ 1 · 14:35:20"); err != nil {
+	if err := r.SetCompleted(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	// Assertions: 1 add + 1 delete + 1 add + 1 update.
-	if len(mock.added) != 2 {
-		t.Errorf("added = %d, want 2", len(mock.added))
+	want := []string{"OK", "OnIt", "PARTY"}
+	added := bot.snapshotAdded()
+	if len(added) != len(want) {
+		t.Fatalf("added %d reactions, want %d", len(added), len(want))
 	}
-	if len(mock.deleted) != 1 {
-		t.Errorf("deleted = %d, want 1", len(mock.deleted))
-	}
-	if len(mock.updated) != 1 {
-		t.Errorf("updated = %d, want 1", len(mock.updated))
-	}
-	if mock.added[0].Emoji != "OK" {
-		t.Errorf("first add emoji = %q, want 'OK'", mock.added[0].Emoji)
-	}
-	if mock.added[1].Emoji != "OnIt" {
-		t.Errorf("second add emoji = %q, want 'OnIt'", mock.added[1].Emoji)
-	}
-	if mock.deleted[0] != "user_msg_1:"+rid1 {
-		t.Errorf("deleted wrong ID: %q", mock.deleted[0])
+	for i, emoji := range want {
+		if added[i].MessageID != r.userMsgID || added[i].Emoji != emoji {
+			t.Errorf("added[%d] = %+v, want message %q emoji %q", i, added[i], r.userMsgID, emoji)
+		}
 	}
 }
 
-func TestReactionSwap_HeartbeatDoesNotSwapReaction(t *testing.T) {
-	// Heartbeat should ONLY call UpdateMessage (text only).
-	// It must NOT touch reactions — the emoji only changes on
-	// state transitions, not on every event.
-	mock := &mockReceiptAdapter{}
-	r := &MessageReceipt{
-		chatID:            "chat1",
-		userMsgID:         "user_msg_1",
-		state:             StateExecuting,
-		currentReaction:   "OnIt",
-		currentReactionID: "rid_OnIt_1",
-		replyMsgID:        "reply_msg_id",
-	}
-	// We can't call renderLocked without *Adapter. Instead
-	// verify the helper invariants: heartbeat is pure text update.
-	if err := mock.UpdateMessage(context.Background(), "reply_msg_id", "🔄 ⏳ 2 · 14:35:20"); err != nil {
+func TestReactionAppendOnly_SameStateSkipsDuplicate(t *testing.T) {
+	ctx := context.Background()
+	bot := &mockReceiptAdapter{}
+	r := newAppendOnlyReceipt(bot)
+
+	if err := r.SetExecuting(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(mock.added) != 0 {
-		t.Errorf("heartbeat added %d reactions, want 0", len(mock.added))
-	}
-	if len(mock.deleted) != 0 {
-		t.Errorf("heartbeat deleted %d reactions, want 0", len(mock.deleted))
-	}
-	if len(mock.updated) != 1 {
-		t.Errorf("heartbeat updates = %d, want 1", len(mock.updated))
-	}
-	_ = r
-}
-
-func TestReactionSwap_DeleteFailureLeavesStaleReaction(t *testing.T) {
-	// When DeleteReaction fails, the receipt keeps the old
-	// reaction ID so the next swap attempt still has a chance.
-	// (The swap retries the delete on the next transition.)
-	mock := &mockReceiptAdapter{
-		deleteErr: errors.New("simulated delete failure"),
+	if err := r.Heartbeat(ctx); err != nil {
+		t.Fatal(err)
 	}
 
-	_ = mock.DeleteReaction(context.Background(), "user_msg_1", "old_rid")
-	if len(mock.deleted) != 1 {
-		t.Errorf("delete attempted %d times, want 1", len(mock.deleted))
+	if got := len(bot.snapshotAdded()); got != 1 {
+		t.Errorf("added %d reactions, want 1 (heartbeat must not re-add OnIt)", got)
 	}
 }
 
-func TestReactionSwap_AddFailureDoesNotPersistID(t *testing.T) {
-	// When AddReaction fails, we must NOT save the returned
-	// (empty) ID as currentReactionID — otherwise the next swap
-	// would try to delete "" which the API rejects.
-	mock := &mockReceiptAdapter{
-		addErr: errors.New("simulated add failure"),
+func TestReactionAppendOnly_AddFailureKeepsReplyShipping(t *testing.T) {
+	bot := &mockReceiptAdapter{addErr: errors.New("simulated add failure")}
+	r := newAppendOnlyReceipt(bot)
+
+	if err := r.Append(context.Background(), agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "still ship this",
+	}); err != nil {
+		t.Fatal(err)
 	}
-	rid, err := mock.AddReaction(context.Background(), "user_msg_1", "PARTY")
-	if err == nil {
-		t.Fatal("expected add error")
+
+	if r.currentReaction != "" {
+		t.Fatalf("currentReaction = %q after failed add, want empty (retryable)", r.currentReaction)
 	}
-	if rid != "" {
-		t.Errorf("expected empty rid on failure, got %q", rid)
+	if got := len(bot.snapshotSentText()); got != 1 {
+		t.Fatalf("shipped %d replies after failed add, want 1", got)
 	}
 }
 
-func TestReactionSwap_SameStateIsNoOp(t *testing.T) {
-	// Heartbeat with same state emoji should not call
-	// AddReaction / DeleteReaction. The renderLocked guard
-	// `emoji != r.currentReaction` short-circuits.
-	emoji := "OnIt"
-	currentReaction := emoji
-	if emoji == currentReaction {
-		// Pass — short-circuit. Nothing to assert directly,
-		// the surrounding renderLocked implementation honors this.
+func TestReactionAppendOnly_ApplyStateAppendsWithoutDelete(t *testing.T) {
+	ctx := context.Background()
+	bot := &mockReceiptAdapter{}
+	r := newAppendOnlyReceipt(bot)
+
+	if err := r.applyState(ctx, channel.ReceiptExecuting); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.applyState(ctx, channel.ReceiptDone); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"OnIt", "PARTY"}
+	added := bot.snapshotAdded()
+	if len(added) != len(want) {
+		t.Fatalf("added %d reactions, want %d", len(added), len(want))
+	}
+	for i, emoji := range want {
+		if added[i].Emoji != emoji {
+			t.Errorf("added[%d].Emoji = %q, want %q", i, added[i].Emoji, emoji)
+		}
+	}
+}
+
+func TestReactionAppendOnly_DisposeLeavesReactions(t *testing.T) {
+	ctx := context.Background()
+	bot := &mockReceiptAdapter{}
+	r := newAppendOnlyReceipt(bot)
+
+	if err := r.applyState(ctx, channel.ReceiptExecuting); err != nil {
+		t.Fatal(err)
+	}
+	before := len(bot.snapshotAdded())
+	if err := r.dispose(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(bot.snapshotAdded()); got != before {
+		t.Fatalf("dispose changed reaction count: before=%d after=%d", before, got)
 	}
 }

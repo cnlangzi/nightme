@@ -20,12 +20,14 @@ import (
 type fakeResponder struct {
 	mu      sync.Mutex
 	replies []string
+	anchors []string
 }
 
-func (r *fakeResponder) Reply(_ context.Context, _, text string) error {
+func (r *fakeResponder) Reply(_ context.Context, _, userMsgID, text string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.replies = append(r.replies, text)
+	r.anchors = append(r.anchors, userMsgID)
 	return nil
 }
 
@@ -50,7 +52,7 @@ func (r *fakeResponder) all() []string {
 // handler-side error propagation can be asserted.
 type errorResponder struct{ err error }
 
-func (e errorResponder) Reply(context.Context, string, string) error { return e.err }
+func (e errorResponder) Reply(context.Context, string, string, string) error { return e.err }
 
 // ptyAgentRegistry returns a registry with one PTY-mode "claude" agent
 // that resolves to /bin/echo. /bin/echo is universally available so

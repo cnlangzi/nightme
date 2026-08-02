@@ -34,9 +34,12 @@ type Session = *session.Session
 
 // Responder is the surface handlers use to push replies back to
 // the user. Channel adapters implement it via the runtime's
-// channelResponder wrapper.
+// channelResponder wrapper. userMsgID anchors the reply to the
+// triggering user message via the Feishu ReplyMessage API so the
+// chat surface shows the native "Reply to <user>: <preview>"
+// header above the body. "" means no anchor (plain text).
 type Responder interface {
-	Reply(ctx context.Context, chatID, text string) error
+	Reply(ctx context.Context, chatID, userMsgID, text string) error
 }
 
 // handlerContext bundles the dependencies every handler closes
@@ -57,12 +60,24 @@ func (hc *handlerContext) reply(ctx context.Context, chatID, text string) *gatew
 }
 
 // trySendReply is best-effort: nil responder degrades to a no-op so
-// tests can skip it.
+// tests can skip it. userMsgID="" means no anchor (plain text).
 func (hc *handlerContext) trySendReply(ctx context.Context, chatID, text string) error {
 	if hc.responder == nil {
 		return nil
 	}
-	return hc.responder.Reply(ctx, chatID, text)
+	return hc.responder.Reply(ctx, chatID, "", text)
+}
+
+// trySendReplyAnchored is the ReplyTo-aware variant used when the
+// caller knows which userMsgID the reply anchors to. The user
+// message id is passed through to the Feishu ReplyMessage API so
+// the chat surface shows the native "Reply to <user>: <preview>"
+// header above the body.
+func (hc *handlerContext) trySendReplyAnchored(ctx context.Context, chatID, userMsgID, text string) error {
+	if hc.responder == nil {
+		return nil
+	}
+	return hc.responder.Reply(ctx, chatID, userMsgID, text)
 }
 
 // RegisterDefaultCommands wires the nightme slash command set onto

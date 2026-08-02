@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,9 +35,74 @@ const maxMessageBytes = 3800
 // parsing in handleCardAction.
 const interactiveMessageType = "interactive"
 
+// receiptMessageType is the Feishu msg_type we use for receipt
+// reply cards and standalone text messages. We deliberately use
+// the `post` type (rich text) instead of `text` so we can carry a
+// `content_v2` body with an `md` tag — Feishu then renders the
+// markdown natively, including collapsible code blocks (the
+// "N 行代码 >" expand button that Feishu auto-adds when a
+// markdown code fence crosses ~4 lines). With `msg_type=text`,
+// the markdown is treated as literal characters and the ``` code
+// fences never collapse.
+//
+// Feishu IM message Content schema reference:
+// https://open.larkoffice.com/document/server-docs/im-v1/message-content-description/message_content
+// — see the "Rich text post" section under msg_type=post.
+const receiptMessageType = "post"
+
+// wrapAsPostContent serialises a markdown body as a `post` type
+// message Content using the modern content_v2 / md-tag format.
+//
+// The result is a JSON string suitable for larkim.CreateMessageReq /
+// UpdateMessageReq / ReplyMessageReq's Body.Content field. Feishu
+// will render the markdown natively (code fences collapse when
+// long, bold/italic/lists render as expected, etc.).
+//
+// Layout choice: one outer paragraph containing a single `md`
+// tag with the whole body. Splitting into many paragraphs would
+// be wasteful for our rolling-log structure — the receipt already
+// uses blank lines and ``` fences as its own separators.
+//
+// Marshal failure (e.g. unencoded NULs in body) falls back to
+// wrapping the body in a Go string literal with safe defaults
+// so a failed encode doesn't drop the user's reply entirely.
+// This path is essentially unreachable in practice because the
+// body is rendered from receipt entries (UTF-8 already sanitised
+// at Append time).
+func wrapAsPostContent(body string) string {
+	content := map[string]any{
+		"content_v2": [][]map[string]any{{
+			{"tag": "md", "text": body},
+		}},
+	}
+	b, err := json.Marshal(content)
+	if err != nil {
+		// Defensive fallback: produce a plain post body that
+		// still surfaces the text, just without markdown
+		// rendering. The receiver gets a readable message
+		// rather than a dropped send.
+		fb := map[string]any{
+			"content": [][]map[string]any{{
+				{"tag": "text", "text": body},
+			}},
+		}
+		if bb, err2 := json.Marshal(fb); err2 == nil {
+			return string(bb)
+		}
+		return `{"content":[[{"tag":"text","text":"(unrenderable body)"}]]}`
+	}
+	return string(b)
+}
+
 // sendMessageFunc is kept behind the adapter so unit tests can exercise the
 // channel without making an HTTP request to Feishu.
 type sendMessageFunc func(ctx context.Context, chatID, msgType, content string) (string, error)
+
+// replyMessageFunc is the ReplyMessage variant of sendMessageFunc.
+// Takes the userMsgID being replied to (Feishu puts the reply in
+// the thread rooted at that message), the msg_type, and the
+// encoded content body. Returns the new message id on success.
+type replyMessageFunc func(ctx context.Context, userMsgID, msgType, content string) (string, error)
 
 // Adapter is the Feishu implementation of channel.Channel.
 //
@@ -80,26 +146,32 @@ type Adapter struct {
 	// slog.Default(); settable via SetLogger.
 	logger *slog.Logger
 
-	// Stage 3: rolling-log receipt state lives on the adapter
-	// (Channel.Send is the display strategy). The map is keyed by
-	// chatID; one receipt per chat at a time. When the gateway's
-	// per-session pump emits the first OutText for a chat that
-	// doesn't have an active receipt, we lazily create one (this
-	// covers the case where the user message is forwarded via
-	// the gateway's fallback but the renderer path is gone).
-	receipts map[string]*MessageReceipt
-
-	// receiptsByUserMsgID is the secondary index that lets
-	// MarkExecuting and incoming card-action callbacks find the
-	// receipt from the Feishu user message id. Same lifecycle
-	// rules as receipts (delete together when SetCompleted).
+	// receiptsByUserMsgID is the SOLE receipt index. One receipt
+	// per user message; multiple receipts coexist per chat when
+	// the gateway's InputBuffer batches several user messages
+	// into one agent turn. Adapter.Send looks up the receipt
+	// for an OutboundMessage by its ReplyTo (userMsgID); a
+	// missing receipt triggers cold-start creation via the
+	// Feishu ReplyMessage API so the new card is anchored to
+	// the same user message.
 	receiptsByUserMsgID map[string]*MessageReceipt
+
+	// receiptFooters caches the static session-attribution prefix
+	// per chat ("Agent: <name> | cwd: <path> | Provider: <p>")
+	// so we can re-compose the full footer on every OutUsage
+	// without re-reading the session metadata. nightme does not
+	// track tokens itself — the cache only remembers the
+	// session-level parts the gateway injected; the dynamic
+	// tokens segment is rebuilt from EventUsage.Meta on each
+	// usage event and concatenated onto the cached prefix.
+	receiptFooters map[string]string
 
 	// These hooks have production defaults and are intentionally kept as
 	// fields so tests can replace the network boundary with a small function.
-	wsStart  func(context.Context) error
-	wsClose  func()
-	sendFunc sendMessageFunc
+	wsStart   func(context.Context) error
+	wsClose   func()
+	sendFunc  sendMessageFunc
+	replyFunc replyMessageFunc
 }
 
 // NewAdapter constructs a Feishu adapter and validates the credentials needed
@@ -117,8 +189,8 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 
 	a := &Adapter{
 		incoming:            make(chan channel.Message, 128),
-		receipts:            make(map[string]*MessageReceipt),
 		receiptsByUserMsgID: make(map[string]*MessageReceipt),
+		receiptFooters:      make(map[string]string),
 		cfg:                 cfg,
 		done:                make(chan struct{}),
 		logger:              slog.Default(),
@@ -167,6 +239,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	a.wsStart = a.client.Start
 	a.wsClose = a.client.Close
 	a.sendFunc = a.sendViaLark
+	a.replyFunc = a.replyViaLark
 	return a, nil
 }
 
@@ -357,15 +430,19 @@ func (a *Adapter) SendUserMessage(ctx context.Context, chatID, userMsgID, conten
 	a.mu.Unlock()
 
 	// New message: post the initial ⏳ receipt reply and register
-	// the receipt. The reaction swap and the receipt body come
+	// the receipt. The reply is posted via ReplyMessage (not
+	// SendMessageText) so Feishu shows the native "Reply to
+	// <user>: <preview>" header above the body — that visual
+	// pairing is how users know which user message the bot is
+	// answering. The reaction swap and the receipt body come
 	// later via Send.
 	replyText := content
 	if replyText == "" {
 		replyText = "⏳ 等待中"
 	}
-	msgID, err := a.SendMessageText(ctx, chatID, replyText)
+	msgID, err := a.ReplyMessage(ctx, chatID, userMsgID, replyText)
 	if err != nil {
-		return nil, fmt.Errorf("feishu: post initial receipt: %w", err)
+		return nil, fmt.Errorf("feishu: post initial receipt reply: %w", err)
 	}
 
 	receipt := NewMessageReceiptForReply(chatID, userMsgID, msgID, a)
@@ -381,19 +458,21 @@ func (a *Adapter) SendUserMessage(ctx context.Context, chatID, userMsgID, conten
 	// once we drop the lock, so any concurrent lookup sees only
 	// the new receipt and the old SetCompleted runs to completion
 	// without interleaving with the new turn's writes.
-	var oldToComplete *MessageReceipt
+	//
+	// v0.3.1: the receipt model switched from per-chat to
+	// per-userMsgID. Multiple receipts can coexist in one chat
+	// (buffered batch flushes several user messages as one
+	// agent turn; each user message gets its own ReplyCard).
+	// Eviction across user messages is no longer the right
+	// semantic — instead, the receipt's terminal lifecycle
+	// (SetCompleted / SetError on EventDone / EventError) tears
+	// down each receipt independently. The receipt stays in
+	// the index for the duration of its user message's turn
+	// and is removed when the gateway disposes it (see
+	// DisposeReceipt below).
 	a.mu.Lock()
-	if old, ok := a.receipts[chatID]; ok && old != nil && old != receipt {
-		oldToComplete = old
-		delete(a.receiptsByUserMsgID, old.userMsgID)
-	}
-	a.receipts[chatID] = receipt
 	a.receiptsByUserMsgID[userMsgID] = receipt
 	a.mu.Unlock()
-
-	if oldToComplete != nil {
-		_ = oldToComplete.SetCompleted(ctx)
-	}
 
 	return receipt, nil
 }
@@ -435,6 +514,13 @@ func (a *Adapter) MarkExecuting(ctx context.Context, userMsgID string) error {
 // initial state is Pending (⏳). blocks is the structured user
 // turn; the receipt body is rendered via BuildForwardedTextFromBlocks
 // so attachment paths are visible to the user.
+//
+// The receipt's reply card is posted via Feishu's ReplyMessage
+// API (anchored to userMsgID) so the chat surface shows the
+// native "Reply to <user>: <preview>" header above the body —
+// the pairing cue users rely on. Subsequent agent events edit
+// that single card in place via UpdateMessage; the user always
+// sees exactly one receipt reply per user message (F-25 v1.1).
 //
 // On error the caller (Gateway) skips receipt bookkeeping and
 // falls back to a plain Send.
@@ -483,64 +569,64 @@ func (a *Adapter) DisposeReceipt(ctx context.Context, receipt channel.Receipt) e
 	return r.dispose(ctx)
 }
 
-// receiptFor returns the active receipt for chatID, lazily
-// creating one if the gateway's pumpOutbound emitted an OutText
-// without a prior SendUserMessage (e.g. agent turn started from a
-// startup). The first event in that case seeds the receipt with a
-// ⏳ header; subsequent events roll in via Append.
-func (a *Adapter) receiptFor(ctx context.Context, chatID string) *MessageReceipt {
-	a.mu.Lock()
-	if r, ok := a.receipts[chatID]; ok && r != nil {
-		a.mu.Unlock()
-		return r
-	}
-	a.mu.Unlock()
-
-	// Cold start: post a ⏳ reply, register a receipt, return.
-	msgID, err := a.SendMessageText(ctx, chatID, "⏳ 等待中")
-	if err != nil {
-		a.logger.Warn("feishu: cold-start receipt reply failed",
-			"err", err, "chat_id", chatID)
-		return nil
-	}
-	// Synthetic userMsgID (we don't have one) — the gateway's
-	// pumpOutbound ignores it. Use the chatID + a timestamp suffix
-	// so consecutive cold starts don't collide.
-	receipt := NewMessageReceiptForReply(chatID, chatID+":"+time.Now().UTC().Format(time.RFC3339Nano), msgID, a)
-	a.mu.Lock()
-	a.receipts[chatID] = receipt
-	a.receiptsByUserMsgID[receipt.userMsgID] = receipt
-	a.mu.Unlock()
-	return receipt
+// receiptFor returns the receipt for the given userMsgID. Returns
+// nil if no receipt has been created yet for that user message
+// (the caller is expected to create one via the cold-start path
+// in Send when ReplyTo is set but no receipt exists yet).
+//
+// Receipts are keyed by userMsgID (not chatID) so multiple
+// receipts can coexist per chat — the gateway's InputBuffer may
+// flush N user messages as one agent turn, and each user message
+// gets its own ReplyCard anchored to its own userMsgID via the
+// ReplyMessage API.
+func (a *Adapter) receiptFor(userMsgID string) *MessageReceipt {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.receiptsByUserMsgID[userMsgID]
 }
 
+// Send implements the v0.3.1 channel.Channel interface. Each
+// OutboundMessage is dispatched based on (1) whether it's anchored
+// to a user message via ReplyTo and (2) its Kind.
+//
+// Anchoring semantics:
+//
+//	msg.ReplyTo == ""  → no anchor; the message goes out as a
+//	                     plain text (or card / reaction) without
+//	                     any receipt or rolling log. Use for
+//	                     genuinely unsolicited output (startup
+//	                     notices, /run previews, etc.).
+//
+//	msg.ReplyTo != ""  → anchor to that user message via
+//	                     Feishu's ReplyMessage API. If a
+//	                     receipt already exists for that
+//	                     userMsgID, append this event to its
+//	                     rolling log (UpdateMessage in place).
+//	                     Otherwise cold-start a new receipt
+//	                     whose reply card is anchored to the
+//	                     same user message.
+//
+// All agent-event-bearing kinds (OutText / OutThinking /
+// OutToolStart / OutToolEnd / OutResult / OutUsage / OutInit /
+// OutCompaction) route through the receipt. Reaction / Card /
+// Typing kinds are channel-global (not anchored to a single
+// user message) so they ignore ReplyTo.
 func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 	switch msg.Kind {
-	case gateway.OutText:
-		// Folded into the active receipt's rolling log. The
-		// Feishu reply is the single message the user sees; we
-		// edit it in place via UpdateMessage on each event.
-		receipt := a.receiptFor(ctx, msg.ChatID)
-		if receipt == nil {
-			// receiptFor's SendMessageText failed. Try a direct
-			// send as a last resort so the user sees the text.
-			return a.sendRawOutText(ctx, msg.ChatID, msg.Text)
-		}
-		return receipt.Append(ctx, agent.AgentEvent{
-			Kind: agent.EventText,
-			Text: msg.Text,
-		})
+	case gateway.OutReaction, gateway.OutReactionRemoved, gateway.OutCard, gateway.OutTyping:
+		// Channel-global kinds — ReplyTo is not meaningful.
+		return a.sendGlobal(ctx, msg)
 
-	case gateway.OutThinking:
-		receipt := a.receiptFor(ctx, msg.ChatID)
-		if receipt == nil {
-			return nil
-		}
-		return receipt.Append(ctx, agent.AgentEvent{
-			Kind: agent.EventText,
-			Text: msg.Text,
-		})
+	default:
+		// Agent-event-bearing kinds — must anchor to ReplyTo.
+		return a.sendAnchored(ctx, msg)
+	}
+}
 
+// sendGlobal handles kinds that don't carry a user-message
+// anchor: reactions, cards, typing. ReplyTo is ignored.
+func (a *Adapter) sendGlobal(ctx context.Context, msg gateway.OutboundMessage) error {
+	switch msg.Kind {
 	case gateway.OutReaction:
 		if msg.Reaction == nil || msg.Reaction.EmojiType == "" {
 			return errors.New("feishu: OutReaction missing emoji_type")
@@ -576,42 +662,144 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content)
 		return err
 
-	case gateway.OutToolStart:
-		receipt := a.receiptFor(ctx, msg.ChatID)
-		if receipt == nil {
+	case gateway.OutTyping:
+		// No native Feishu equivalent. Silently drop.
+		return nil
+	}
+	return fmt.Errorf("feishu: unsupported global kind %v", msg.Kind)
+}
+
+// sendAnchored handles kinds that carry agent events to be
+// rendered on a receipt reply card. Anchors to msg.ReplyTo via
+// the receipt index; cold-starts a new receipt (via ReplyMessage)
+// when none exists yet for that userMsgID.
+//
+// Drops to a plain text message when ReplyTo is empty AND the
+// caller wants the event surfaced to the user anyway (e.g.
+// OutText with no anchor). Receipt-only kinds (OutInit, OutUsage,
+// OutCompaction) silently drop when ReplyTo is empty — they're
+// meaningless without a card to render on.
+func (a *Adapter) sendAnchored(ctx context.Context, msg gateway.OutboundMessage) error {
+	if msg.ReplyTo == "" {
+		return a.sendUnanchored(ctx, msg)
+	}
+	receipt := a.receiptFor(msg.ReplyTo)
+	if receipt == nil {
+		newReceipt, err := a.coldStartReceipt(ctx, msg)
+		if err != nil {
+			return err
+		}
+		if newReceipt == nil {
 			return nil
 		}
+		receipt = newReceipt
+	}
+	return a.appendToReceipt(ctx, receipt, msg)
+}
+
+// sendUnanchored handles the rare case where an agent-event-
+// bearing kind arrives without a ReplyTo anchor. Receipt-only
+// kinds (OutInit / OutUsage / OutCompaction) silently drop; user-
+// facing kinds (OutText / OutThinking / OutToolStart / OutToolEnd
+// / OutResult) degrade to a plain text message so the user still
+// sees the event.
+func (a *Adapter) sendUnanchored(ctx context.Context, msg gateway.OutboundMessage) error {
+	switch msg.Kind {
+	case gateway.OutInit, gateway.OutUsage, gateway.OutCompaction:
+		// Card-only metadata — meaningless without a receipt.
+		return nil
+	}
+	if msg.Text != "" {
+		return a.sendPlainText(ctx, msg.ChatID, msg.Text)
+	}
+	return nil
+}
+
+// sendPlainText is the no-anchor fallback: post msg.Text as a
+// fresh standalone message via SendMessageText. Used by the
+// fallback handler ("no workspace set", etc.) when ReplyTo is
+// empty or the receipt path is unavailable.
+func (a *Adapter) sendPlainText(ctx context.Context, chatID, text string) error {
+	_, err := a.SendMessageText(ctx, chatID, text)
+	return err
+}
+
+// coldStartReceipt creates a new receipt for msg.ReplyTo (no
+// prior receipt exists). Posts the initial receipt reply via
+// the Feishu ReplyMessage API so the card is anchored to the
+// same user message. Returns nil receipt + nil error when the
+// kind has no useful initial body (OutInit / OutUsage /
+// OutCompaction) so the caller doesn't try to render an empty
+// card.
+func (a *Adapter) coldStartReceipt(ctx context.Context, msg gateway.OutboundMessage) (*MessageReceipt, error) {
+	body, ok := initialReceiptBody(msg)
+	if !ok {
+		return nil, nil
+	}
+	replyMsgID, err := a.ReplyMessage(ctx, msg.ChatID, msg.ReplyTo, body)
+	if err != nil {
+		a.logger.Warn("feishu: cold-start receipt reply failed",
+			"err", err, "user_msg_id", msg.ReplyTo, "kind", msg.Kind)
+		return nil, err
+	}
+	receipt := NewMessageReceiptForReply(msg.ChatID, msg.ReplyTo, replyMsgID, a)
+	a.mu.Lock()
+	a.receiptsByUserMsgID[msg.ReplyTo] = receipt
+	a.mu.Unlock()
+	return receipt, nil
+}
+
+// initialReceiptBody returns the text to post as the initial
+// receipt reply card on cold start. Returns (_, false) for
+// kinds whose initial body would be empty (OutInit, OutUsage,
+// OutCompaction) — those events are only meaningful once the
+// receipt is already established by a prior text-bearing event.
+//
+// The returned body is the same string that would land in the
+// rolling log via Append, so cold start + subsequent Appends
+// render identically to warm-start Appends.
+func initialReceiptBody(msg gateway.OutboundMessage) (string, bool) {
+	switch msg.Kind {
+	case gateway.OutText, gateway.OutThinking, gateway.OutResult:
+		if msg.Text == "" {
+			return "", false
+		}
+		return msg.Text, true
+	case gateway.OutToolStart, gateway.OutToolEnd:
+		if msg.Text == "" {
+			return "", false
+		}
+		return msg.Text, true
+	default:
+		return "", false
+	}
+}
+
+// appendToReceipt converts the OutboundMessage into an AgentEvent
+// and routes it to the receipt's rolling log. OutInit / OutUsage
+// also stamp footer metadata before the Append so the receipt
+// re-renders with the latest session context + token counts.
+func (a *Adapter) appendToReceipt(ctx context.Context, receipt *MessageReceipt, msg gateway.OutboundMessage) error {
+	switch msg.Kind {
+	case gateway.OutText:
+		return receipt.Append(ctx, agent.AgentEvent{Kind: agent.EventText, Text: msg.Text})
+
+	case gateway.OutThinking:
+		return receipt.Append(ctx, agent.AgentEvent{Kind: agent.EventText, Text: msg.Text})
+
+	case gateway.OutToolStart:
 		return receipt.Append(ctx, agent.AgentEvent{
 			Kind:      agent.EventToolStart,
 			ToolStart: &agent.ToolStartEvent{Name: toolName(msg), Args: toolArgs(msg)},
 		})
 
 	case gateway.OutToolEnd:
-		receipt := a.receiptFor(ctx, msg.ChatID)
-		if receipt == nil {
-			return nil
-		}
 		return receipt.Append(ctx, agent.AgentEvent{
 			Kind:    agent.EventToolEnd,
 			ToolEnd: &agent.ToolEndEvent{Name: toolName(msg), Output: toolOutput(msg)},
 		})
 
-	case gateway.OutTyping:
-		// No native Feishu equivalent (typing indicators come from
-		// the OpenAPI, not the bot's message API). Silently drop.
-		return nil
-
 	case gateway.OutResult:
-		receipt := a.receiptFor(ctx, msg.ChatID)
-		if receipt == nil {
-			// receipt creation failed — degrade to a standalone
-			// message so the user still sees the final reply
-			// instead of a silent drop.
-			if msg.Text != "" {
-				return a.sendRawOutText(ctx, msg.ChatID, msg.Text)
-			}
-			return nil
-		}
 		return receipt.Append(ctx, agent.AgentEvent{
 			Kind: agent.EventResult,
 			Result: &agent.ResultEvent{
@@ -623,30 +811,43 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		})
 
 	case gateway.OutUsage:
-		receipt := a.receiptFor(ctx, msg.ChatID)
-		if receipt == nil {
-			return nil
+		// Re-compose the footer with the latest token counts
+		// from the agent's EventUsage.Meta. nightme does not
+		// track tokens itself; the values are relayed
+		// straight from the gateway's translateAndSend. The
+		// static session-attribution prefix is cached on the
+		// adapter (set on OutInit) — we only refresh the
+		// dynamic tokens segment here. Labels are dropped
+		// from the rendered footer (the user reads the
+		// "<in> / <out>" pair as in/out tokens from
+		// position).
+		if prefix := a.cachedFooterPrefix(msg.ChatID); prefix != "" {
+			if in, out := metaInt(msg, "input_tokens"), metaInt(msg, "output_tokens"); in > 0 || out > 0 {
+				receipt.SetFooter(prefix + " | " + humanTokens(in) + " / " + humanTokens(out))
+			}
 		}
 		return receipt.Append(ctx, agent.AgentEvent{
 			Kind:  agent.EventUsage,
 			Usage: usageFromMeta(msg),
 		})
 
-	case gateway.OutCompaction:
-		receipt := a.receiptFor(ctx, msg.ChatID)
-		if receipt == nil {
-			return nil
-		}
-		return receipt.Append(ctx, agent.AgentEvent{
-			Kind:       agent.EventCompaction,
-			Compaction: &agent.CompactionEvent{Subtype: metaString(msg, "subtype")},
-		})
-
 	case gateway.OutInit:
-		receipt := a.receiptFor(ctx, msg.ChatID)
-		if receipt == nil {
-			return nil
-		}
+		// Compose the static session-attribution prefix
+		// ("Agent: <name> | cwd: <path> | Provider: <p>") and
+		// cache it on the adapter so OutUsage can refresh the
+		// dynamic tokens segment without re-reading session
+		// metadata. Empty segments drop themselves so a
+		// partial set still renders cleanly. Tokens are NOT
+		// included here — they're agent-context, owned by the
+		// agent's own session, and only surface when an
+		// OutUsage arrives.
+		prefix := composeFooterPrefix(
+			metaString(msg, "agent_name"),
+			shortenWorkspace(metaString(msg, "workspace")),
+			metaString(msg, "provider"),
+		)
+		a.cacheFooterPrefix(msg.ChatID, prefix)
+		receipt.SetFooter(prefix)
 		return receipt.Append(ctx, agent.AgentEvent{
 			Kind: agent.EventInit,
 			Init: &agent.InitEvent{
@@ -654,17 +855,14 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 				Model:     metaString(msg, "model"),
 			},
 		})
-	}
-	return fmt.Errorf("feishu: unsupported outbound kind %v", msg.Kind)
-}
 
-// sendRawOutText is the last-resort fallback when a receipt
-// can't be created (e.g. the channel.post text API failed). Sends
-// the text as a new standalone message so the user still sees
-// something.
-func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error {
-	_, err := a.SendMessageText(ctx, chatID, text)
-	return err
+	case gateway.OutCompaction:
+		return receipt.Append(ctx, agent.AgentEvent{
+			Kind:       agent.EventCompaction,
+			Compaction: &agent.CompactionEvent{Subtype: metaString(msg, "subtype")},
+		})
+	}
+	return fmt.Errorf("feishu: unsupported anchored kind %v", msg.Kind)
 }
 
 // toolName / toolArgs / toolOutput pull the well-known fields from
@@ -882,9 +1080,91 @@ func (a *Adapter) SendMessage(ctx context.Context, chatID, text string) error {
 	return err
 }
 
+// ReplyMessage creates a new Feishu reply anchored to userMsgID and
+// returns the created message ID. Feishu renders a "Reply to
+// <user>: <preview>" header above the body — the native pairing
+// cue users rely on to associate a bot reply with the triggering
+// user message.
+//
+// Used by SendUserMessage (the CreateReceipt path) so every
+// receipt's reply card is visually paired with its user message.
+// Falls back to SendMessageText when userMsgID is empty (defensive;
+// the cold-start path in receiptFor uses a synthetic userMsgID and
+// shouldn't reach here in practice).
+//
+// Body is wrapped as `post` type with content_v2 + `md` tag so
+// Feishu renders the markdown natively. See wrapAsPostContent.
+//
+// Returns (messageID, error). On error, messageID is "".
+func (a *Adapter) ReplyMessage(ctx context.Context, chatID, userMsgID, text string) (string, error) {
+	if strings.TrimSpace(chatID) == "" {
+		return "", errors.New("feishu: chat_id is required")
+	}
+	if strings.TrimSpace(userMsgID) == "" {
+		return "", errors.New("feishu: user_msg_id is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	content := wrapAsPostContent(text)
+	msgID, err := a.replyContent(ctx, userMsgID, receiptMessageType, content)
+	a.logOutgoing("reply_message", userMsgID, msgID, err)
+	return msgID, err
+}
+
+// replyContent dispatches to a.replyFunc when set (test mock) or
+// a.replyViaLark (production). Mirrors sendContent's contract for
+// the ReplyMessage API.
+func (a *Adapter) replyContent(ctx context.Context, userMsgID, msgType, content string) (string, error) {
+	a.mu.RLock()
+	reply := a.replyFunc
+	if reply == nil && a.larkClient != nil {
+		reply = a.replyViaLark
+	}
+	a.mu.RUnlock()
+	if reply == nil {
+		return "", errors.New("feishu: REST client is nil")
+	}
+	return reply(ctx, userMsgID, msgType, content)
+}
+
+func (a *Adapter) replyViaLark(ctx context.Context, userMsgID, msgType, content string) (string, error) {
+	if a.larkClient == nil || a.larkClient.Im == nil || a.larkClient.Im.V1 == nil || a.larkClient.Im.V1.Message == nil {
+		return "", errors.New("feishu: REST client is nil")
+	}
+	body := larkim.NewReplyMessageReqBodyBuilder().
+		MsgType(msgType).
+		Content(content).
+		Build()
+	req := larkim.NewReplyMessageReqBuilder().
+		MessageId(userMsgID).
+		Body(body).
+		Build()
+	resp, err := a.larkClient.Im.V1.Message.Reply(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("feishu: reply message: %w", err)
+	}
+	if resp == nil {
+		return "", errors.New("feishu: reply message returned nil response")
+	}
+	if !resp.Success() {
+		return "", fmt.Errorf("feishu: reply message failed with code %d", resp.Code)
+	}
+	var msgID string
+	if resp.Data != nil && resp.Data.MessageId != nil {
+		msgID = *resp.Data.MessageId
+	}
+	return msgID, nil
+}
+
 // SendMessageText is the message-ID-returning variant of SendMessage.
 // Used by MessageReceipt (F-25) so the reply text line can be edited
 // in place via UpdateMessage on subsequent state transitions.
+//
+// The body is wrapped as a `post` type message with content_v2 +
+// `md` tag so Feishu renders the markdown natively (collapsible
+// code fences for thinking, headers / lists / etc.). See
+// wrapAsPostContent for the schema details.
 //
 // Returns (messageID, error). On error, messageID is "".
 func (a *Adapter) SendMessageText(ctx context.Context, chatID, text string) (string, error) {
@@ -894,13 +1174,8 @@ func (a *Adapter) SendMessageText(ctx context.Context, chatID, text string) (str
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	content, err := json.Marshal(struct {
-		Text string `json:"text"`
-	}{Text: text})
-	if err != nil {
-		return "", fmt.Errorf("feishu: encode text: %w", err)
-	}
-	msgID, err := a.sendContent(ctx, chatID, larkim.MsgTypeText, string(content))
+	content := wrapAsPostContent(text)
+	msgID, err := a.sendContent(ctx, chatID, receiptMessageType, content)
 	a.logOutgoing("send_text", chatID, msgID, err)
 	return msgID, err
 }
@@ -993,9 +1268,11 @@ func (a *Adapter) DeleteReaction(ctx context.Context, messageID, reactionID stri
 	return nil
 }
 
-// UpdateMessage edits an existing text message's content in-place.
-// Used by MessageReceipt to keep the reply line single-message
-// across heartbeat ticks (per F-25 spec: "永远只有一行").
+// UpdateMessage edits an existing post-type message's content
+// in-place. Used by MessageReceipt to keep the reply line as a
+// single message across heartbeat ticks (per F-25 spec: "永远只有
+// 一行"). The receipt is created as a `post` type via ReplyMessage
+// (see wrapAsPostContent); updates must match.
 //
 // Feishu restrictions (per official docs):
 //   - Only text and post (rich-text) message types can be updated
@@ -1011,15 +1288,10 @@ func (a *Adapter) UpdateMessage(ctx context.Context, messageID, text string) err
 	if strings.TrimSpace(messageID) == "" {
 		return errors.New("feishu: message_id is required")
 	}
-	content, err := json.Marshal(struct {
-		Text string `json:"text"`
-	}{Text: text})
-	if err != nil {
-		return fmt.Errorf("feishu: encode text: %w", err)
-	}
+	content := wrapAsPostContent(text)
 	body := larkim.NewUpdateMessageReqBodyBuilder().
-		MsgType(larkim.MsgTypeText).
-		Content(string(content)).
+		MsgType(receiptMessageType).
+		Content(content).
 		Build()
 	req := larkim.NewUpdateMessageReqBuilder().
 		MessageId(messageID).
@@ -1276,6 +1548,106 @@ func stringValue(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+// shortenWorkspace renders a workspace path in the form users see
+// in their shell prompt — leading $HOME is replaced with "~". The
+// gateway forwards the session's Workspace verbatim (the
+// canonical absolute path stored on Session.Workspace), so this
+// is purely a display affordance for the receipt footer.
+//
+// Defensive: returns path unchanged when $HOME is unset or path
+// doesn't start with it. Doesn't try to handle non-canonical
+// representations (symlinks, "./" prefixes, etc.) — the receipt
+// shows the path the session was actually given, just in shorter
+// form.
+func shortenWorkspace(path string) string {
+	if path == "" {
+		return ""
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		return path
+	}
+	if path == home {
+		return "~"
+	}
+	if strings.HasPrefix(path, home+"/") {
+		return "~" + path[len(home):]
+	}
+	return path
+}
+
+// composeFooterPrefix builds the static session-attribution
+// portion of the receipt footer. Empty segments drop themselves
+// so a partial set ("claude" arrived but cwd not yet) still
+// renders cleanly. Tokens are NOT included — they're
+// agent-context and only surface when an OutUsage arrives.
+//
+// Shape (labels omitted — users recognize the segments from
+// position: agent name first, cwd second):
+//
+//	<name> | <cwd>
+//
+// Provider was dropped from the footer; the agent name already
+// disambiguates the session context, and the provider-level
+// routing is internal to the agent bridge.
+//
+// Returns "" when both segments are empty (no footer at all),
+// so the caller can skip the SetFooter call entirely.
+func composeFooterPrefix(agent, cwd, provider string) string {
+	var parts []string
+	if agent != "" {
+		parts = append(parts, agent)
+	}
+	if cwd != "" {
+		parts = append(parts, cwd)
+	}
+	_ = provider // deprecated — see doc comment above
+	return strings.Join(parts, " | ")
+}
+
+// cachedFooterPrefix returns the per-chat static footer prefix
+// (set on the most recent OutInit). Empty when none has arrived
+// yet for this chat. Thread-safe.
+func (a *Adapter) cachedFooterPrefix(chatID string) string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.receiptFooters[chatID]
+}
+
+// cacheFooterPrefix stores the per-chat static footer prefix.
+// Called from OutInit; later OutUsage events read it back via
+// cachedFooterPrefix to rebuild the full footer with fresh
+// token counts. Thread-safe.
+func (a *Adapter) cacheFooterPrefix(chatID, prefix string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if prefix == "" {
+		delete(a.receiptFooters, chatID)
+		return
+	}
+	a.receiptFooters[chatID] = prefix
+}
+
+// humanTokens renders a token count with k-suffix rounding
+// ("12.3K", "1K"). Mirrors the convention used in Claude Code's
+// own CLI output so the footer line matches what users see in
+// the terminal. Values < 1000 are returned verbatim so small
+// counts stay precise.
+//
+// Local to the adapter because the receipt package is purely a
+// renderer; the formatting decision (k-suffix thresholds) is
+// the adapter's choice.
+func humanTokens(n int) string {
+	switch {
+	case n < 1000:
+		return strconv.Itoa(n)
+	case n < 10000:
+		return fmt.Sprintf("%.1fK", float64(n)/1000)
+	default:
+		return strconv.Itoa(n/1000) + "K"
+	}
 }
 
 func splitLongMessage(text string, maxBytes int) []string {

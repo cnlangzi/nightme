@@ -761,10 +761,29 @@ func (g *gateway) OnSessionEvent(s *session.Session, ev agent.AgentEvent) {
 }
 
 // translateAndSend does the actual work: look up the chat for the
-// session, translate the event, send to the channel, and (for
-// terminal events) flip receipts. This is the body of
-// OnSessionEvent when no runtime-installed callback is present
-// (the default).
+// session, translate the event, fan out to every receipt bound
+// to this session, and (for terminal events) flip those receipts
+// to Done/Error. This is the body of OnSessionEvent when no
+// runtime-installed callback is present (the default).
+//
+// Receipt fan-out (1 request : n response per user message, plus
+// the buffered-batch case where one agent turn answers n user
+// messages): each bound receipt gets its own OutboundMessage
+// carrying ReplyTo=<its userMsgID>. The channel then anchors
+// each one to its user message via ReplyMessage and appends the
+// event to that receipt's rolling log. Orphan events (no bound
+// receipt, e.g. session already torn down) fall back to a plain
+// text message with ReplyTo="" — the channel sends it without
+// any anchoring, which is the right behavior for genuine
+// unsolicited output.
+//
+// OutboundMessage.Meta is enriched with session-level metadata
+// before the channel sees it — agent name, workspace, and (when
+// available) the upstream provider. Channels like Feishu use
+// these to render the receipt footer (Agent / cwd / Provider /
+// tokens). The enrichment is a no-op for events whose Meta the
+// translator doesn't initialize (Text / ToolStart / etc.) — we
+// only touch OutInit where the enrichment is meaningful.
 func (g *gateway) translateAndSend(s *session.Session, ev agent.AgentEvent) {
 	chatID := g.lookupChatBySession(s.ID)
 	if chatID == "" {
@@ -778,9 +797,29 @@ func (g *gateway) translateAndSend(s *session.Session, ev agent.AgentEvent) {
 		return
 	}
 
-	if out, send := Translate(chatID, ev); send {
-		if err := ch.Send(context.Background(), out); err != nil {
-			log.Printf("gateway: send failed (chat=%s, kind=%s): %v", chatID, out.Kind, err)
+	out, send := Translate(chatID, ev)
+	if send {
+		enrichOutboundMeta(out, s)
+		targets := g.receiptsForSession(s.ID)
+		if len(targets) == 0 {
+			// No bound receipt (orphan event). Send as plain
+			// text — no anchor, no rolling-log card.
+			out.ReplyTo = ""
+			if err := ch.Send(context.Background(), out); err != nil {
+				log.Printf("gateway: send failed (chat=%s, kind=%s, no anchor): %v", chatID, out.Kind, err)
+			}
+		} else {
+			for _, userMsgID := range targets {
+				// Each bound receipt gets its own OutboundMessage
+				// anchored to its userMsgID. Same body, N
+				// deliveries — each receipt card independently
+				// edits in place.
+				fanout := out
+				fanout.ReplyTo = userMsgID
+				if err := ch.Send(context.Background(), fanout); err != nil {
+					log.Printf("gateway: send failed (chat=%s, kind=%s, anchor=%s): %v", chatID, out.Kind, userMsgID, err)
+				}
+			}
 		}
 	}
 
@@ -804,6 +843,31 @@ func (g *gateway) translateAndSend(s *session.Session, ev agent.AgentEvent) {
 	}
 }
 
+// receiptsForSession returns the userMsgIDs of every receipt
+// currently bound to the given session. The result is the fan-out
+// list for translateAndSend: an agent event for this session
+// becomes one OutboundMessage per entry, each anchored to its
+// own userMsgID. Linear scan over the receipts map; the typical
+// case is 1 (no buffer) or up to a handful (buffered batch).
+//
+// Callers MUST treat the returned slice as a snapshot — receipt
+// mutations can invalidate it concurrently. The translateAndSend
+// loop copies each userMsgID into a per-iteration OutboundMessage
+// before sending, so concurrent Create/Dispose during the fan-out
+// is safe (a stale userMsgID just sends to a receipt that no
+// longer exists; the channel handles that as a plain text).
+func (g *gateway) receiptsForSession(sid string) []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	var ids []string
+	for umid, entry := range g.receipts {
+		if entry.sessionID == sid {
+			ids = append(ids, umid)
+		}
+	}
+	return ids
+}
+
 // lookupChatBySession finds the chatID whose binding points at
 // sessionID. Linear scan — bindings are O(chats) which is fine at
 // v0.3 scale (1 DM + maybe a few groups).
@@ -816,4 +880,34 @@ func (g *gateway) lookupChatBySession(sid string) string {
 		}
 	}
 	return ""
+}
+
+// enrichOutboundMeta layers session-level metadata onto the
+// OutboundMessage's Meta map. Currently the only consumer is
+// OutInit (channels read agent_name / workspace / provider to
+// render the receipt footer); other kinds pass through
+// untouched. Extending to other kinds is a single switch case.
+//
+// Keys written:
+//   - agent_name : session.Agent (registry name, e.g. "claude")
+//   - workspace  : session.Workspace (cwd, may be absolute or "~"-relative)
+//   - provider   : session's upstream LLM provider when the
+//     runtime injects it; empty for now (the
+//     OpenClaw wrapper is the future injection point)
+//
+// Writes are no-ops when the session field is empty so the
+// receipt's footer composer skips those segments.
+func enrichOutboundMeta(out OutboundMessage, s *session.Session) {
+	if out.Meta == nil || s == nil {
+		return
+	}
+	switch out.Kind {
+	case OutInit:
+		if _, ok := out.Meta["agent_name"]; !ok && s.Agent != "" {
+			out.Meta["agent_name"] = s.Agent
+		}
+		if _, ok := out.Meta["workspace"]; !ok && s.Workspace != "" {
+			out.Meta["workspace"] = s.Workspace
+		}
+	}
 }

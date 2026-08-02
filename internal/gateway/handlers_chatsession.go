@@ -26,15 +26,16 @@ import (
 )
 
 // RegisterChatSessionCommands installs /cwd, /use, /kill on gw,
-// wired to mgr. globalDefault is the cfg.Primary snapshot that
-// becomes ChatSession.defaultAgent on creation. channel is used to
+// wired to mgr. globalPrimary is the cfg.Primary snapshot that
+// becomes ChatSession.primaryAgent (and seeds activeAgent) on
+// creation. channel is used to
 // reply to the user.
 //
 // Replaces any prior registrations of the same names on gw
 // (Gateway returns replaced=true in that case, but we ignore the
 // bool since Register is append-only and we want a fresh handler
 // pointing at this runtime's mgr).
-func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel Channel, globalDefault string) {
+func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel Channel, globalPrimary string) {
 	// Command names are stored WITHOUT the leading slash. The
 	// Gateway strips the slash in ParseCommand before lookup
 	// (see internal/gateway/parser.go), so g.cmds["cwd"] is the
@@ -44,7 +45,7 @@ func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel C
 		Name: "cwd",
 		Description: "Set workspace for this chat: /cwd <absolute-path>",
 		Handler: func(ctx context.Context, msg *InboundMessage, args []string) (*CommandResult, error) {
-			return handleCwd(ctx, mgr, channel, msg, args, globalDefault)
+			return handleCwd(ctx, mgr, channel, msg, args, globalPrimary)
 		},
 	})
 
@@ -52,7 +53,7 @@ func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel C
 		Name: "use",
 		Description: "Switch active agent: /use <agent-name> (lazy spawn; reuse pool if present)",
 		Handler: func(ctx context.Context, msg *InboundMessage, args []string) (*CommandResult, error) {
-			return handleUse(ctx, mgr, channel, msg, args, globalDefault)
+			return handleUse(ctx, mgr, channel, msg, args, globalPrimary)
 		},
 	})
 
@@ -78,8 +79,8 @@ func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel C
 //   - On /kill: nothing extra (KillAll stops the pump internally).
 //   - On startup: ChatSessions restored from disk do not auto-spawn
 //     (status=Detached); the pump is started on first /use.
-func RegisterChatSessionRuntime(gw Gateway, mgr *chatsession.Manager, channel Channel, globalDefault string, eventHandler chatsession.EventHandler) {
-	RegisterChatSessionCommands(gw, mgr, channel, globalDefault)
+func RegisterChatSessionRuntime(gw Gateway, mgr *chatsession.Manager, channel Channel, globalPrimary string, eventHandler chatsession.EventHandler) {
+	RegisterChatSessionCommands(gw, mgr, channel, globalPrimary)
 	// The runtime-level readPump start happens in the /use
 	// handler (which has access to the resolved activeAS). See
 	// handleUse below.
@@ -109,7 +110,7 @@ func RegisterChatSessionRuntime(gw Gateway, mgr *chatsession.Manager, channel Ch
 // (commit fix-4 followup to the bug observed 2026-08-02 where
 // `/cwd code/nightme` silently resolved to /home/devin/code/
 // nightme/code/nightme and the subsequent spawn failed).
-func handleCwd(ctx context.Context, mgr *chatsession.Manager, channel Channel, msg *InboundMessage, args []string, globalDefault string) (*CommandResult, error) {
+func handleCwd(ctx context.Context, mgr *chatsession.Manager, channel Channel, msg *InboundMessage, args []string, globalPrimary string) (*CommandResult, error) {
 	if len(args) < 1 {
 		return reply(ctx, channel, msg.ChatID, "Usage: /cwd <path>"), nil
 	}
@@ -154,7 +155,7 @@ func handleCwd(ctx context.Context, mgr *chatsession.Manager, channel Channel, m
 		return reply(ctx, channel, msg.ChatID, fmt.Sprintf("Not a directory: %s", abs)), nil
 	}
 
-	cs := mgr.GetOrCreate(msg.ChatID, chatTypeFromMessage(msg), globalDefault)
+	cs := mgr.GetOrCreate(msg.ChatID, chatTypeFromMessage(msg), globalPrimary)
 	if err := cs.SetActiveCwd(abs); err != nil {
 		return reply(ctx, channel, msg.ChatID, fmt.Sprintf("SetActiveCwd failed: %v", err)), nil
 	}
@@ -198,7 +199,7 @@ func expandTilde(path string) (string, error) {
 //   /use                           → reply "Usage: /use <agent> [args...]"
 //   /use (no activeCwd yet)        → reply "send /cwd <path> first"
 //   /use unknown-agent             → reply "unknown agent"
-func handleUse(ctx context.Context, mgr *chatsession.Manager, channel Channel, msg *InboundMessage, args []string, globalDefault string) (*CommandResult, error) {
+func handleUse(ctx context.Context, mgr *chatsession.Manager, channel Channel, msg *InboundMessage, args []string, globalPrimary string) (*CommandResult, error) {
 	if len(args) < 1 {
 		return reply(ctx, channel, msg.ChatID, "Usage: /use <agent> [args...]"), nil
 	}
@@ -208,7 +209,7 @@ func handleUse(ctx context.Context, mgr *chatsession.Manager, channel Channel, m
 		return reply(ctx, channel, msg.ChatID, "Usage: /use <agent> [args...]"), nil
 	}
 
-	cs := mgr.GetOrCreate(msg.ChatID, chatTypeFromMessage(msg), globalDefault)
+	cs := mgr.GetOrCreate(msg.ChatID, chatTypeFromMessage(msg), globalPrimary)
 
 	if cs.ActiveCwd() == "" {
 		return reply(ctx, channel, msg.ChatID, "No active workspace. Send /cwd <path> first."), nil

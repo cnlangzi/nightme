@@ -14,8 +14,8 @@ func TestManager_GetOrCreate_New(t *testing.T) {
 	if cs.ChatID != "oc_xxx" {
 		t.Fatalf("ChatID: %q", cs.ChatID)
 	}
-	if cs.DefaultAgent() != "claude" {
-		t.Fatalf("DefaultAgent: %q", cs.DefaultAgent())
+	if cs.PrimaryAgent() != "claude" {
+		t.Fatalf("PrimaryAgent: %q", cs.PrimaryAgent())
 	}
 	if mgr.Get("oc_xxx") != cs {
 		t.Fatalf("Get should return the same instance")
@@ -29,10 +29,10 @@ func TestManager_GetOrCreate_ReturnsSameOnRepeat(t *testing.T) {
 	if a != b {
 		t.Fatalf("GetOrCreate should return same instance; got different pointers")
 	}
-	// DefaultAgent snapshot is captured at first creation; subsequent
-	// GetOrCreate with different defaultAgent does NOT mutate.
-	if a.DefaultAgent() != "claude" {
-		t.Fatalf("DefaultAgent mutated: got %q, want claude (first-create wins)", a.DefaultAgent())
+	// PrimaryAgent snapshot is captured at first creation; subsequent
+	// GetOrCreate with different primaryAgent does NOT mutate.
+	if a.PrimaryAgent() != "claude" {
+		t.Fatalf("PrimaryAgent mutated: got %q, want claude (first-create wins)", a.PrimaryAgent())
 	}
 }
 

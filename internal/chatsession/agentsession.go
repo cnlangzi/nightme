@@ -245,12 +245,12 @@ type agentCwdKey struct {
 var ErrAgentNotFound = errors.New("chatsession: agent not in pool")
 
 // ErrNoActiveAgent is returned by LookupActiveAgentSession when
-// neither cs.activeAgent (set via /use) nor cs.defaultAgent
-// (snapshot of cfg.Primary at creation) is set. The runtime
-// must configure defaultAgent on ChatSession construction
-// (chatsession.NewManager.GetOrCreate takes it as a parameter);
-// an empty defaultAgent indicates a misconfigured daemon.
-var ErrNoActiveAgent = errors.New("chatsession: no activeAgent and no defaultAgent")
+// cs.activeAgent is empty. The runtime seeds activeAgent from
+// cfg.Primary at ChatSession construction (via
+// chatsession.NewManager.GetOrCreate); an empty primary at
+// construction indicates a misconfigured daemon (no global default
+// set in config.yaml).
+var ErrNoActiveAgent = errors.New("chatsession: activeAgent is empty (cfg.Primary snapshot was empty at construction)")
 
 // ErrNotRunning is returned by SendText/SendBlocks/Close when called
 // before Spawn() succeeds.

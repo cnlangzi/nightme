@@ -64,10 +64,12 @@ func (m *Manager) WithPersistence(csFile *registry.ChatSessionFile, asFile *regi
 }
 
 // GetOrCreate returns the ChatSession for chatID+chatType, creating
-// it if missing. defaultAgent is the global primary snapshot from
-// config (e.g., cfg.Primary); ChatSession.defaultAgent is captured
-// here and never mutated post-creation (Q-A simplification).
-func (m *Manager) GetOrCreate(chatID, chatType, defaultAgent string) *ChatSession {
+// it if missing. primaryAgent is the cfg.Primary snapshot from
+// config; ChatSession.primaryAgent is captured here and never
+// mutated post-creation (Q-A: no /default command, no per-chat
+// override). It also seeds activeAgent so the runtime always has
+// an effective agent to dispatch to.
+func (m *Manager) GetOrCreate(chatID, chatType, primaryAgent string) *ChatSession {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -75,7 +77,7 @@ func (m *Manager) GetOrCreate(chatID, chatType, defaultAgent string) *ChatSessio
 		return cs
 	}
 
-	cs := New(chatID, chatType, defaultAgent).
+	cs := New(chatID, chatType, primaryAgent).
 		WithSpawner(m.spawner).
 		WithPersistence(m.csFile, m.asFile)
 	m.sessions[chatID] = cs
@@ -135,7 +137,7 @@ func (m *Manager) RestoreFromRegistry() error {
 	}
 
 	for _, entry := range m.csFile.List() {
-		cs := New(entry.ChatID, entry.ChatType, entry.DefaultAgent).
+		cs := New(entry.ChatID, entry.ChatType, entry.PrimaryAgent).
 			WithSpawner(m.spawner).
 			WithPersistence(m.csFile, m.asFile)
 		cs.activeCwd = entry.ActiveCwd

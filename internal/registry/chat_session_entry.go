@@ -8,7 +8,10 @@
 // docs/feat/F-27-chatsession.md for the full model.
 package registry
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ChatSessionEntry is the persisted form of one ChatSession.
 //
@@ -28,8 +31,12 @@ import "time"
 //	                       exists but user has not yet /cwd'd.
 //	ActiveAgent          — agent name currently selected; "" → not yet
 //	                       /use'd. Immutable per AgentSession.
-//	DefaultAgent         — per-chat default agent (overrides global
-//	                       defaults.agent from config). Optional.
+//	                       At construction, seeded from cfg.Primary
+//	                       (snapshot, see PrimaryAgent).
+//	PrimaryAgent         — snapshot of cfg.Primary at ChatSession
+//	                       creation time. Read-only post-construction
+//	                       (Q-A: no per-chat override). Init-time
+//	                       seeds ActiveAgent.
 //	AgentSessionIDs      — pool index (in-order; unordered semantics).
 //	ActiveAgentSessionID — pointer into AgentSessionIDs[]; nil → no
 //	                       active AgentSession (need /cwd + /use).
@@ -42,15 +49,41 @@ type ChatSessionEntry struct {
 	ChatType             string    `json:"chatType"`
 	ActiveCwd            string    `json:"activeCwd"`
 	ActiveAgent          string    `json:"activeAgent"`
-	DefaultAgent         string    `json:"defaultAgent,omitempty"`
+	PrimaryAgent         string    `json:"primaryAgent,omitempty"`
 	AgentSessionIDs      []string  `json:"agentSessionIds"`
 	ActiveAgentSessionID *string   `json:"activeAgentSessionId,omitempty"`
 	CreatedAt            time.Time `json:"createdAt"`
 	LastInteractionAt    time.Time `json:"lastInteractionAt"`
 }
 
+// UnmarshalJSON reads a ChatSessionEntry, transparently migrating
+// from the legacy field name `defaultAgent` (v1.2-early naming)
+// to the canonical `primaryAgent` (v1.2-final). Old chat_sessions.json
+// files written before the rename still carry `defaultAgent`; we
+// copy it into PrimaryAgent on read. New writes only emit
+// `primaryAgent`. Migration is one-shot and runs at first read.
+//
+// On write the canonical field is used; no migration file is left
+// behind. Subsequent reads see only the canonical field.
+func (e *ChatSessionEntry) UnmarshalJSON(data []byte) error {
+	type alias ChatSessionEntry
+	aux := struct {
+		*alias
+		LegacyDefaultAgent string `json:"defaultAgent,omitempty"`
+	}{
+		alias: (*alias)(e),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if e.PrimaryAgent == "" && aux.LegacyDefaultAgent != "" {
+		e.PrimaryAgent = aux.LegacyDefaultAgent
+	}
+	return nil
+}
+
 // ChatSessionFileVersion is the on-disk format version for
-// chat_sessions.json. Increment when the schema changes in a
-// breaking way (existing migration logic should handle older
-// versions).
+// chat_sessions.json. The PrimaryAgent rename (v1.2-final) is
+// transparent via UnmarshalJSON migration, so the on-disk
+// envelope version stays at 1.
 const ChatSessionFileVersion = 1

@@ -26,7 +26,7 @@ import (
 // ChatSession owns a pool of AgentSessions keyed by (agent, cwd);
 // the active one (or nil) is tracked in activeAS.
 //
-// Concurrency: state fields (activeCwd, activeAgent, defaultAgent,
+// Concurrency: state fields (activeCwd, activeAgent, primaryAgent,
 // pool, activeAS) are guarded by mu. Reads take RLock; writes take
 // Lock. /use / /cwd take RLock for the mutation + Lock for the
 // pool mutation when an AgentSession is added.
@@ -37,10 +37,16 @@ type ChatSession struct {
 
 	mu sync.RWMutex
 
-	// Active routing state (mutable via /cwd /use /default).
+	// Active routing state. activeAgent is mutable via /use;
+	// activeCwd via /cwd. primaryAgent is the cfg.Primary snapshot
+	// at ChatSession construction; read-only post-construction
+	// (Q-A: no /default command, no per-chat override).
+	//
+	// At New() time activeAgent is seeded from primaryAgent so the
+	// runtime never sees an empty activeAgent on a fresh chat.
 	activeCwd    string
 	activeAgent  string
-	defaultAgent string
+	primaryAgent string
 
 	// Pool of AgentSessions keyed by (agent, cwd).
 	pool map[agentCwdKey]*AgentSession
@@ -88,16 +94,18 @@ type ChatSession struct {
 // New creates a fresh ChatSession in memory. The caller is
 // responsible for persisting via Persist().
 //
-// defaultAgent is the global Default snapshot at creation time
-// (from config.yaml `defaults.agent`). v1.2 (Q-A simplification)
-// does not expose a /default command; the only user-facing Default
-// is the global one.
-func New(chatID, chatType, defaultAgent string) *ChatSession {
+// primaryAgent is the cfg.Primary snapshot at creation time. It
+// seeds activeAgent so the runtime always has an effective agent
+// to dispatch to (no runtime fallback: the lookup only ever reads
+// activeAgent). The snapshot itself is read-only post-construction
+// (Q-A: no /default command, no per-chat override).
+func New(chatID, chatType, primaryAgent string) *ChatSession {
 	return &ChatSession{
 		ID:               deriveIDFromChatID(chatID),
 		ChatID:           chatID,
 		ChatType:         chatType,
-		defaultAgent:     defaultAgent,
+		activeAgent:      primaryAgent, // init seed
+		primaryAgent:     primaryAgent, // historical snapshot, read-only
 		pool:             make(map[agentCwdKey]*AgentSession),
 		createdAt:        time.Now(),
 		lastInteractionAt: time.Now(),
@@ -192,13 +200,15 @@ func (cs *ChatSession) ActiveAgent() string {
 	return cs.activeAgent
 }
 
-// DefaultAgent returns the per-chat default agent (snapshot of
-// global Default at ChatSession creation). v1.2 (Q-A) does not
-// allow post-creation mutation; the field is read-only.
-func (cs *ChatSession) DefaultAgent() string {
+// PrimaryAgent returns the per-chat primary agent (snapshot of
+// cfg.Primary at ChatSession creation). v1.2 (Q-A) does not
+// allow post-creation mutation; the field is read-only. The
+// activeAgent is seeded from this value at construction; /use
+// overrides activeAgent but does NOT mutate primaryAgent.
+func (cs *ChatSession) PrimaryAgent() string {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return cs.defaultAgent
+	return cs.primaryAgent
 }
 
 // Pool returns a snapshot of all AgentSessions in the pool.
@@ -355,26 +365,20 @@ func (cs *ChatSession) LookupInPool(agent, cwd string) (*AgentSession, error) {
 
 // LookupActiveAgentSession resolves the active AgentSession.
 //
-// Two paths, depending on whether /use has been called:
+// Single-path resolution (no runtime fallback):
 //
-//  0. activeAgent is empty (user has /cwd'd but not /use'd):
-//     — effectiveAgent := defaultAgent (chat's primary snapshot)
-//     — exact: pool[(effectiveAgent, activeCwd)] if hit → return
-//     — spawn: effectiveAgent if miss → return
-//     This is the "first message after /cwd" path.
-//
-//  1. activeAgent is set (user has /use'd explicitly):
-//     — exact: pool[(activeAgent, activeCwd)] if hit → return
-//     — miss: NO default fallback. The user explicitly chose this
-//       agent; spawning (defaultAgent, cwd) instead would silently
-//       override their choice. Spawn (activeAgent, cwd).
+//   - activeAgent is always non-empty for a ChatSession constructed
+//     by Manager.GetOrCreate (init-time seed from cfg.Primary
+//     snapshot). The runtime never needs to choose between two
+//     agents at lookup time.
+//   - Resolve pool[(activeAgent, activeCwd)]:
+//     · hit (StatusRunning) → reuse
+//     · miss (or non-Running, e.g. Detached after daemon restart,
+//       or Exited after CLI died) → spawn (activeAgent, activeCwd)
 //
 // Returns ErrNoActiveCwd if activeCwd is empty. Returns
-// ErrNoActiveAgent if both activeAgent and defaultAgent are empty.
-//
-// The pre-step (path 0) is commit fix-3; the explicit-/use no-
-// fallback rule is the Q-B interpretation consistent with /use
-// semantics (commit fix-3 follow-up).
+// ErrNoActiveAgent if activeAgent is empty (misconfigured daemon —
+// cfg.Primary snapshot was empty at ChatSession creation).
 func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -384,47 +388,17 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	}
 
 	if cs.activeAgent == "" {
-		// Path 0: pre-/use. Promote defaultAgent to effective.
-		effective := cs.defaultAgent
-		if effective == "" {
-			return nil, ErrNoActiveAgent
-		}
-		// commit fix-6: pool hit only returns if the entry is still
-		// Running. A Demoted entry (process state unknown after
-		// restart) falls through to the spawn path below.
-		if as, ok := cs.pool[agentCwdKey{Agent: effective, Cwd: cs.activeCwd}]; ok && as.Status() == StatusRunning && as.Handle() != nil {
-			cs.activeAS = as
-			return as, nil
-		}
-		newAS := NewAgentSession(
-			newAgentSessionID(),
-			cs.ID,
-			effective,
-			cs.activeCwd,
-			nil,
-		)
-		cs.pool[agentCwdKey{Agent: effective, Cwd: cs.activeCwd}] = newAS
-		cs.activeAS = newAS
-		if cs.asFile != nil {
-			_ = cs.asFile.Upsert(newAS.Entry())
-		}
-		if cs.spawner != nil {
-			spawner := cs.spawner
-			cs.mu.Unlock()
-			spawnErr := newAS.Spawn(context.Background(), spawner)
-			cs.mu.Lock()
-			if spawnErr != nil {
-				return newAS, fmt.Errorf("chatsession: spawn failed (effective=%q, cwd=%q): %w", effective, cs.activeCwd, spawnErr)
-			}
-			if cs.asFile != nil {
-				_ = cs.asFile.Upsert(newAS.Entry())
-			}
-		}
-		cs.persistChatEntryLocked()
-		return newAS, nil
+		// Misconfigured: Manager.GetOrCreate should have seeded
+		// activeAgent from cfg.Primary at construction. An empty
+		// primary at construction means the daemon has no global
+		// default configured; the runtime cannot choose an agent.
+		return nil, ErrNoActiveAgent
 	}
 
-	// Path 1: post-/use. No default fallback. The user wants THIS agent.
+	// commit fix-6: pool hit only returns if the entry is still
+	// Running. A Detached entry (process state unknown after
+	// restart) or Exited entry (CLI died) falls through to the
+	// spawn path below.
 	if as, ok := cs.pool[agentCwdKey{Agent: cs.activeAgent, Cwd: cs.activeCwd}]; ok && as.Status() == StatusRunning && as.Handle() != nil {
 		cs.activeAS = as
 		return as, nil
@@ -449,12 +423,9 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	// caller can still see it in the pool, but SendBlocks will
 	// return ErrNotRunning until a Spawner is wired in.
 	if cs.spawner != nil {
-		// Spawn outside of the poolMu write-lock; release it
-		// temporarily to avoid recursive-lock surprises. The
-		// spawner.Spawn call is non-trivial (forks a child) so
-		// holding cs.mu for the duration would block all
-		// ChatSession operations. We re-acquire mu for the
-		// subsequent persistence + activeAS assignment.
+		// Spawn outside of cs.mu to avoid holding the write lock
+		// across a fork+exec. We re-acquire mu for the subsequent
+		// persistence + activeAS assignment.
 		spawner := cs.spawner
 		cs.mu.Unlock()
 		spawnErr := newAS.Spawn(context.Background(), spawner)
@@ -462,9 +433,9 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 
 		if spawnErr != nil {
 			// Spawn failed; keep the entry in the pool but mark
-			// detached so /use retry can re-attempt. Caller will
-			// see an error from LookupActiveAgentSession.
-			return newAS, fmt.Errorf("chatsession: spawn failed: %w", spawnErr)
+			// detached so the next lookup can re-attempt. Caller
+			// will see an error from LookupActiveAgentSession.
+			return newAS, fmt.Errorf("chatsession: spawn failed (activeAgent=%q, cwd=%q): %w", cs.activeAgent, cs.activeCwd, spawnErr)
 		}
 		// Refresh registry entry with updated PID/Status.
 		if cs.asFile != nil {
@@ -560,7 +531,7 @@ func (cs *ChatSession) entryLocked() *registry.ChatSessionEntry {
 		ChatType:             cs.ChatType,
 		ActiveCwd:            cs.activeCwd,
 		ActiveAgent:          cs.activeAgent,
-		DefaultAgent:         cs.defaultAgent,
+		PrimaryAgent:         cs.primaryAgent,
 		AgentSessionIDs:      agentIDs,
 		ActiveAgentSessionID: activeASID,
 		CreatedAt:            cs.createdAt,

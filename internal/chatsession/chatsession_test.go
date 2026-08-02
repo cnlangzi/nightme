@@ -36,11 +36,11 @@ func TestNewAndBasics(t *testing.T) {
 	if cs.ActiveCwd() != "" {
 		t.Fatalf("initial ActiveCwd should be empty")
 	}
-	if cs.ActiveAgent() != "" {
-		t.Fatalf("initial ActiveAgent should be empty")
+	if cs.ActiveAgent() != "claude" {
+		t.Fatalf("initial ActiveAgent should be seeded from PrimaryAgent; got %q", cs.ActiveAgent())
 	}
-	if cs.DefaultAgent() != "claude" {
-		t.Fatalf("DefaultAgent: got %q", cs.DefaultAgent())
+	if cs.PrimaryAgent() != "claude" {
+		t.Fatalf("PrimaryAgent: got %q", cs.PrimaryAgent())
 	}
 	if cs.Pool() == nil {
 		t.Fatalf("Pool should be non-nil empty slice")
@@ -153,11 +153,12 @@ func TestLookupActiveAgentSession_ReusesPoolEntry(t *testing.T) {
 	}
 }
 
-// TestLookupActiveAgentSession_NoDefaultFallbackAfterUse documents the
-// commit fix-3 follow-up behavior: when /use is explicit (activeAgent
-// set), the lookup does NOT fallback to (defaultAgent, cwd) even if
-// that entry exists. The user wants the agent they explicitly picked.
-func TestLookupActiveAgentSession_NoDefaultFallbackAfterUse(t *testing.T) {
+// TestLookupActiveAgentSession_UseOverrides covers the v1.2-final
+// single-path semantics: after /use codex, the lookup resolves
+// (codex, cwd), not whatever cfg.Primary seeded as initial
+// activeAgent. The pool entry for the seeded agent (claude, cwd)
+// stays; the new entry is spawned alongside it.
+func TestLookupActiveAgentSession_UseOverrides(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs := New("oc_xxx", "p2p", "claude").WithPersistence(csFile, asFile)
 
@@ -168,16 +169,15 @@ func TestLookupActiveAgentSession_NoDefaultFallbackAfterUse(t *testing.T) {
 		t.Fatalf("first spawn: got %q, want claude", claudeAS.Agent)
 	}
 
-	// Now /use codex. (claude, cwd) is in the pool; (codex, cwd) is not.
-	// Per commit fix-3 follow-up: NO fallback to (defaultAgent=claude, cwd).
-	// We must spawn codex.
+	// /use codex. (claude, cwd) is in the pool; (codex, cwd) is not.
+	// Lookup must spawn codex (not reuse the seeded claude entry).
 	cs.SetActiveAgent("codex")
 	codexAS, err := cs.LookupActiveAgentSession()
 	if err != nil {
 		t.Fatalf("LookupActiveAgentSession: %v", err)
 	}
 	if codexAS.Agent != "codex" {
-		t.Fatalf("after /use codex: got %q, want codex (no fallback to claude)", codexAS.Agent)
+		t.Fatalf("after /use codex: got %q, want codex", codexAS.Agent)
 	}
 	if len(cs.Pool()) != 2 {
 		t.Fatalf("expected pool size 2 (claude + codex), got %d", len(cs.Pool()))

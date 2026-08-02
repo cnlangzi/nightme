@@ -368,6 +368,17 @@ func v12Fallback(mgr *chatsession.Manager, ch channel.Channel, primary string, l
 			})
 		}
 
+		// commit fix-5: start a readPump for the freshly-active
+		// AgentSession. Without this, the spawned claude process
+		// emits events on Events() but no one consumes them — the
+		// user sees "hi" go in but no reply ever comes back.
+		// handleUse also calls StartReadPump, but the FIRST message
+		// (before any /use) only goes through v12Fallback, so we
+		// need to start the pump here too. StartReadPump is
+		// idempotent — it stops any existing pump first, so calling
+		// it again from handleUse is a no-op.
+		_ = cs.StartReadPump()
+
 		// Build structured blocks and queue to InputBuffer.
 		blocks := feishu.BuildBlocks(msg.Text, msg.Attachments)
 		if err := cs.QueueUserMessage(blocks, userMsgID); err != nil {

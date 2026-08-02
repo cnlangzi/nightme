@@ -34,6 +34,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
+	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/channel/feishu"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/config"
@@ -100,6 +101,66 @@ func agentSessionsPath(cfg *config.Config) (string, error) {
 		return "", err
 	}
 	return filepath.Join(base, "agent_sessions.json"), nil
+}
+
+// newRunCmd builds the long-running Feishu daemon command (v1.2).
+//
+// v1.2 only: there is no `--v12` flag anymore. The v1.1
+// MemoryManager-based daemon (cmd/nightme/run.go, deleted in commit
+// 13) was retained as an escape hatch during the 8b/8c transition;
+// with v1.2 locked and runtime integration verified, it has been
+// removed entirely.
+func newRunCmd() *cobra.Command {
+	var cleanup bool
+	var channelName string
+	cmd := &cobra.Command{
+		Use:   "run",
+		Short: "Start the Feishu daemon (v1.2 ChatSession-based runtime)",
+		Long: "run starts the Feishu WebSocket channel and serves a Gateway " +
+			"router on top of it. Slash commands (/cwd, /use, /kill, /help) " +
+			"drive session lifecycle; plain text is forwarded to the live " +
+			"agent behind the chat's active AgentSession.\n\n" +
+			"By default the daemon detaches session CLIs on shutdown so a " +
+			"later `nightme run` (or /use) can resume them. Pass --cleanup " +
+			"to instead Kill() every session on SIGINT/SIGTERM — useful for " +
+			"CI or one-shot runs.\n\n" +
+			"Pass --channel=echo to run the daemon with the echo channel " +
+			"(a no-network stub that prints outbound messages to stdout). " +
+			"Useful for smoke tests.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runRunV12(cmd, cleanup, channelName)
+		},
+	}
+	cmd.Flags().BoolVar(&cleanup, "cleanup", false,
+		"Kill every session CLI on shutdown instead of detaching them")
+	cmd.Flags().StringVar(&channelName, "channel", "feishu",
+		"Channel implementation: feishu (default) or echo (smoke test)")
+	return cmd
+}
+
+// runRunV12 dispatches to the v1.2 daemon. No flag needed; v1.2 is
+// the only runtime (commit 13 deleted the v1.1 fallback).
+func runRunV12(cmd *cobra.Command, cleanup bool, channelName string) error {
+	if channelName != "" && channelName != "feishu" && channelName != "echo" {
+		return fmt.Errorf("run: unknown channel %q (want feishu or echo)", channelName)
+	}
+	deps := withChannel_v12(defaultRunDeps_v12(), channelName)
+	deps.cleanup = cleanup
+	return runRunWith_v12(cmd, deps)
+}
+
+// withChannel_v12 mirrors the legacy withChannel but for v1.2 deps.
+func withChannel_v12(deps runDeps_v12, channelName string) runDeps_v12 {
+	switch channelName {
+	case "feishu", "":
+		// default — feishu.NewAdapter
+	case "echo":
+		deps.skipFeishuAuth = true
+		deps.newChannel = func(*config.Config) (channel.Channel, error) {
+			return echo.New("echo", os.Stdout), nil
+		}
+	}
+	return deps
 }
 
 // runRunWith_v12 is the v1.2 daemon entrypoint. Mirrors runRunWith

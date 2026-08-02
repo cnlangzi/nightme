@@ -240,7 +240,7 @@ The runtime wires `chatsession.NewRegistrySpawner(reg)` into
 passed to every ChatSession created via `Manager.GetOrCreate`:
 
 ```go
-// cmd/nightme/run_v12.go (excerpt)
+// cmd/nightme/run.go (excerpt)
 
 spawner := chatsession.NewRegistrySpawner(agents)
 mgr := chatsession.NewManager().
@@ -352,7 +352,7 @@ v1.1 did not persist `chat_id` on its session records (the binding
 was in-memory only — see `internal/gateway/binding.go` v1.x), so
 the chat → session mapping cannot be reconstructed from disk
 alone. **The current dev does not transparently migrate v1.x data
-to v1.2 entries.** The startup flow (`cmd/nightme/run_v12.go`)
+to v1.2 entries.** The startup flow (`cmd/nightme/run.go`)
 calls `MigrateV1ToV2(v1RegistryPath)` which:
 
 1. Reads `registry.json` if present.

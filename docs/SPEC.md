@@ -535,7 +535,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 
 ## 11.1 Daemon startup flow
 
-`nightme run` 启动顺序（见 `cmd/nightme/run_v12.go`）：
+`nightme run` 启动顺序（见 `cmd/nightme/run.go`）：
 
 ```
 1. loadConfig()                       # ~/.config/nightme/config.yaml
@@ -546,12 +546,12 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 6. mgr := NewManager().WithSpawner(spawner).WithPersistence(csFile, asFile)
 7. mgr.RestoreFromRegistry()          # 重建内存中 ChatSession 池 (AgentSession 状态=Detached)
 8. ch.Start()                         # Feishu WebSocket / echo channel
-9. gw := gateway.New(v12MessageDispatcher(mgr, ch, cfg.Primary), nil)
+9. gw := gateway.New(newMessageDispatcher(mgr, ch, cfg.Primary), nil)
 10. RegisterChatSessionCommands(gw, mgr, ch, cfg.Primary)
-11. for each cs in mgr.List(): cs.SetEventHandler(v12EventHandler(ch, logger))
+11. for each cs in mgr.List(): cs.SetEventHandler(newEventHandler(ch, logger))
 12. gwImpl.AttachChannels(ch) + gwImpl.Start()
 13. block on signal / ctx.Done()
-14. shutdownRun_v12: stop channel + (cleanup? KillAll : detach)
+14. shutdownRun: stop channel + (cleanup? KillAll : detach)
 ```
 
 **关键不变量**：

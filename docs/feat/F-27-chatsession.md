@@ -328,7 +328,7 @@ runtime startup. The handler **persists across `/use`** — only
 the pump restarts, not the handler.
 
 **Runtime typical implementation** (see
-`cmd/nightme/run_v12.go::v12EventHandler`):
+`cmd/nightme/run.go::newEventHandler`):
 
 ```go
 return func(chatID string, s *AgentSession, ev agent.AgentEvent) {

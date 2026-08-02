@@ -7,7 +7,7 @@
 //   - cmd/nightme/chat_coordinator.go (bindingRow + bindingSnapshot)
 //   - cmd/nightme/run.go inline (receiptEntry from the legacy
 //     v1.1 runtime; v1.2 daemon uses the inboundDispatcher +
-//     messageDispatcher wiring in cmd/nightme/run_v12.go)
+//     messageDispatcher wiring in cmd/nightme/run.go)
 //
 // The migration into Gateway makes them available to handler code
 // (gateway/cmd/handlers.go) without crossing the runtime boundary.

@@ -88,7 +88,7 @@ on its session records (the binding was in-memory only — see
 `internal/gateway/binding.go` v1.x), so the chat → session
 mapping cannot be reconstructed from disk alone.
 
-On startup, `cmd/nightme/run_v12.go` runs
+On startup, `cmd/nightme/run.go` runs
 `registry.MigrateV1ToV2(v1RegistryPath)` which:
 1. Reads `registry.json` if present.
 2. Copies it to `registry.json.v1.bak` (idempotent; existing

@@ -16,10 +16,14 @@ profile.cov
 
 # Dependency directories
 vendor/
+.serena/
 
 # Go workspace
 go.work
 go.work.sum
+
+
+.claude/worktrees/
 
 # Environment
 .env

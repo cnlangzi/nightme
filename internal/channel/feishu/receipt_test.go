@@ -423,15 +423,6 @@ func mustAppend(t *testing.T, r *MessageReceipt, ev agent.AgentEvent) {
 	}
 }
 
-// Add the missing methods on mockReceiptBot to satisfy receiptBot.
-// DeleteReaction is exercised by the reaction-swap tests; the stub
-// stays so the rolling-log tests don't need to know about reactions.
-func (m *mockReceiptBot) DeleteReaction(_ context.Context, _, _ string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return nil
-}
-
 // --- v1.1 tests for applyState / dispose ---
 
 func TestApplyState_FourStateEnum(t *testing.T) {

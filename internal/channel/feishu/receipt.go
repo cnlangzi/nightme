@@ -26,8 +26,12 @@
 //
 // If the log grows past replyMaxBytes, oldest entries are evicted
 // from the front (FIFO) and a "…(前 N 条已省略)" prefix is shown.
-// The receipt's reaction emoji (⏳ / 🔄 / ✅ / ❌) still swaps
-// per F-25 spec — it shows the lifecycle, the log shows the work.
+// The receipt's reaction emoji (⏳ / 🔄 / ✅ / ❌) is APPEND-ONLY
+// per state transition — each new state adds an emoji on top of
+// the previous trail. We do not delete the old one because a
+// failed delete leaves the old reaction in place and Feishu
+// rejects the next add with code 99992354. Same-state renders
+// (heartbeats) skip the duplicate add.
 //
 // The footer line ("─────────" + session attribution) is a single
 // string supplied by the caller via SetFooter. nightme does NOT
@@ -65,8 +69,9 @@
 //
 // If the log grows past replyMaxBytes, oldest entries are evicted
 // from the front (FIFO) and a "…(前 N 条已省略)" prefix is shown.
-// The receipt's reaction emoji (⏳ / 🔄 / ✅ / ❌) still swaps
-// per F-25 spec — it shows the lifecycle, the log shows the work.
+// The receipt's reaction emoji (⏳ / 🔄 / ✅ / ❌) is append-only
+// per state transition — each new state adds an emoji on top of
+// the previous trail (see note above).
 //
 // The footer line ("─────────" + session attribution) is a single
 // string supplied by the caller via SetFooter. nightme does NOT
@@ -105,7 +110,6 @@ import (
 // cold-start synthetic-userMsgID path in Adapter.receiptFor).
 type receiptBot interface {
 	AddReaction(ctx context.Context, msgID, emoji string) (string, error)
-	DeleteReaction(ctx context.Context, msgID, reactionID string) error
 	UpdateMessage(ctx context.Context, messageID, text string) error
 	SendMessageText(ctx context.Context, chatID, text string) (string, error)
 	ReplyMessage(ctx context.Context, chatID, userMsgID, text string) (string, error)
@@ -230,12 +234,11 @@ type MessageReceipt struct {
 	// across the receipt's lifetime. Surfaced via logEvictedMarker.
 	evicted int
 
-	// currentReaction / currentReactionID implement the F-25
-	// swap-on-state-change reaction strategy. Reaction is the
-	// lifecycle indicator (lifecycle); the reply log is the work
-	// indicator.
-	currentReaction   string
-	currentReactionID string
+	// currentReaction tracks the last successfully-added lifecycle
+	// reaction emoji so same-state renders (heartbeats) skip a
+	// duplicate AddReaction. Reactions are append-only — previous
+	// state emojis stay on the user message as history.
+	currentReaction string
 
 	// footer is the session-attribution line rendered at the
 	// bottom of the reply body (below the rolling log entries,
@@ -357,16 +360,14 @@ func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID stri
 		state:      StateWaiting,
 	}
 
-	// 1. Add the ⏳ reaction to the user message. Capture the
-	//    reaction ID so we can delete it on the next state
-	//    transition (Feishu has no UpdateReaction API).
-	rid, err := bot.AddReaction(ctx, userMsgID, StateWaiting.Emoji())
+	// 1. Add the initial lifecycle reaction. Reactions are append-only;
+	//    the returned ID is not needed because receipts never delete them.
+	_, err := bot.AddReaction(ctx, userMsgID, StateWaiting.Emoji())
 	if err != nil {
 		r.logger.Warn("feishu receipt: initial reaction failed", "err", err)
 	} else {
 		r.mu.Lock()
 		r.currentReaction = StateWaiting.Emoji()
-		r.currentReactionID = rid
 		r.mu.Unlock()
 	}
 
@@ -394,7 +395,7 @@ func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID stri
 // which posts the reply and constructs the receipt in one place.
 //
 // bot is the adapter (or any receiptBot implementation) used by
-// renderLocked to swap reactions and edit the reply text in place.
+// renderLocked to append reactions and ship reply text.
 // Stage 3 callers pass `a`; passing nil will panic on the first
 // Append, since renderLocked calls r.bot.AddReaction directly.
 // (Earlier versions left bot=nil under the assumption that "callers
@@ -649,10 +650,13 @@ func (r *MessageReceipt) Footer() string {
 // renderLocked pushes the current state emoji (reaction) and the
 // rendered log (reply text) to Feishu. Caller must hold r.mu.
 //
-// Reaction strategy: SWAP, never accumulate. The previous reaction
-// (if any) is deleted and the new state emoji is added in its place.
-// Feishu has no UpdateReaction API, so the swap is Delete + Create.
-// The user always sees exactly ONE reaction emoji per user message.
+// Reaction strategy: append-only. When the lifecycle state changes, the
+// new predefined Feishu reaction is added and previous reactions are
+// retained as history. Deleting first is intentionally avoided because a
+// failed delete can leave the old reaction in place and make Feishu reject
+// the new add with code 99992354. Same-state renders (heartbeats) do not
+// add duplicate reactions. Reaction failures are best-effort and never
+// block shipping the reply text.
 //
 // Reply text strategy: edit-in-place via im.message.update. Falls
 // back to a fresh message if update fails (e.g. message older than
@@ -660,24 +664,8 @@ func (r *MessageReceipt) Footer() string {
 // Feishu reply card; the card body grows over the agent's
 // lifetime as the rolling-log entries append.
 func (r *MessageReceipt) renderLocked(ctx context.Context) error {
-	// 1. Swap reaction if the state emoji changed.
-	emoji := r.state.Emoji()
-	if emoji != r.currentReaction {
-		if r.currentReactionID != "" {
-			if err := r.bot.DeleteReaction(ctx, r.userMsgID, r.currentReactionID); err != nil {
-				r.logger.Warn("feishu receipt: delete old reaction failed",
-					"err", err, "old_emoji", r.currentReaction)
-			}
-		}
-		newID, err := r.bot.AddReaction(ctx, r.userMsgID, emoji)
-		if err != nil {
-			r.logger.Warn("feishu receipt: add new reaction failed",
-				"err", err, "emoji", emoji, "state", r.state)
-		} else {
-			r.currentReaction = emoji
-			r.currentReactionID = newID
-		}
-	}
+	// 1. Append a reaction when the lifecycle state changes.
+	r.appendReactionLocked(ctx, r.state.Emoji())
 
 	// 2. Update the reply text in place. Throttled + deduped so
 	// rapid event bursts don't exceed Feishu's per-message
@@ -725,6 +713,22 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	return nil
 }
 
+// appendReactionLocked adds emoji when it differs from the last
+// successful add. Caller must hold r.mu. Failures are logged and
+// never returned — currentReaction stays unchanged so a later
+// render can retry.
+func (r *MessageReceipt) appendReactionLocked(ctx context.Context, emoji string) {
+	if emoji == "" || emoji == r.currentReaction {
+		return
+	}
+	if _, err := r.bot.AddReaction(ctx, r.userMsgID, emoji); err != nil {
+		r.logger.Warn("feishu receipt: add reaction failed",
+			"err", err, "emoji", emoji, "state", r.state)
+		return
+	}
+	r.currentReaction = emoji
+}
+
 // --- v1.1 unified state machine ---
 //
 // applyState and dispose are the v1.1 receipt lifecycle entry
@@ -735,11 +739,11 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 // applyState transitions the receipt to the cross-channel state
 // `target`. Idempotent for the same target. Translates the
 // cross-channel ReceiptState enum into the legacy internal
-// ReceiptState + reaction-swap action.
+// ReceiptState + append-only reaction action.
 //
 // For Pending / Executing / Done the rendered behavior matches
 // the legacy SetExecuting / SetCompleted / SetCompleted-equivalent
-// paths. For Error (new in v1.1) we flip to StateError and swap
+// paths. For Error (new in v1.1) we flip to StateError and append
 // the reaction emoji; no further event updates are accepted.
 func (r *MessageReceipt) applyState(ctx context.Context, target channel.ReceiptState) error {
 	r.mu.Lock()
@@ -782,32 +786,17 @@ func (r *MessageReceipt) applyState(ctx context.Context, target channel.ReceiptS
 	// for partial recovery; ignore everything else).
 	r.state = targetInternal
 
-	// Swap reaction (best-effort). Feishu's reaction API errors
+	// Append reaction (best-effort). Feishu's reaction API errors
 	// don't fail the lifecycle transition.
-	emoji := targetInternal.Emoji()
-	if emoji != r.currentReaction {
-		if r.currentReactionID != "" {
-			if err := r.bot.DeleteReaction(ctx, r.userMsgID, r.currentReactionID); err != nil {
-				r.logger.Warn("feishu receipt: delete old reaction failed",
-					"err", err, "old_emoji", r.currentReaction)
-			}
-		}
-		newID, err := r.bot.AddReaction(ctx, r.userMsgID, emoji)
-		if err != nil {
-			r.logger.Warn("feishu receipt: add new reaction failed",
-				"err", err, "emoji", emoji, "state", targetInternal)
-		} else {
-			r.currentReaction = emoji
-			r.currentReactionID = newID
-		}
-	}
+	r.appendReactionLocked(ctx, targetInternal.Emoji())
 
 	r.logger.Debug("feishu receipt: state transition",
 		"from", "?", "to", targetInternal, "user_msg_id", r.userMsgID)
 	return nil
 }
 
-// dispose deletes the receipt's reply message + reaction. Idempotent.
+// dispose clears the reply body. Idempotent. Lifecycle reactions are
+// left in place as the append-only history trail.
 // Called by Adapter.DisposeReceipt after the final state transition.
 // v1.1 keeps the receipt in the adapter's indexes until the next
 // SendUserMessage call so legacy fallback paths that look up by
@@ -816,21 +805,24 @@ func (r *MessageReceipt) dispose(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// The reply card (rolling log + footer) and the ✅/❌ reaction
-	// on the user message are PRESERVED on the Feishu side — they
+// The reply card (rolling log + footer) and the append-only
+	// reaction trail are PRESERVED on the Feishu side — they
 	// are the user's permanent record of the conversation turn.
 	// dispose only tears down our internal handles so the adapter
 	// can GC the receipt object.
-	//
-	// Previous designs called UpdateMessage("") + DeleteReaction
-	// here to "clean up" the chat surface, but that interacted
-	// badly with the rate-limit-throttled body updates: if the
-	// terminal UpdateMessage had been rate-limited away, the
-	// dispose would still strip the reaction, leaving the user
-	// with a 🔄 reaction and a body without the terminal header.
-	// Keeping the Feishu-side state as the source of truth avoids
-	// that divergence.
+//
+// Previous designs called UpdateMessage("") here to "clean up"
+	// the chat surface, but that interacted badly with the
+	// rate-limit-throttled body updates: if the terminal
+	// UpdateMessage had been rate-limited away, the dispose
+	// would still strip the body, leaving the user with a
+	// partially-rendered receipt. Keeping the Feishu-side
+	// state as the source of truth avoids that divergence.
+//
+// Reactions are append-only per main's fix(feishu): append-only
+// receipt reactions (#4) — there is no currentReactionID to
+// clear here; the trail accumulates across the receipt's
+// lifetime.
 	r.replyMsgID = ""
-	r.currentReactionID = ""
 	return nil
 }

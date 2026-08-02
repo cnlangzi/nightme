@@ -627,7 +627,7 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 		r.completedAt = time.Now()
 		return r.renderLocked(ctx)
 	case agent.EventError:
-		entry, _ := eventToEntry(ev, time.Now())
+		entry, _ := eventToEntry(ev, time.Now(), r.lastEntryLocked())
 		if entry.Text != "" || entry.Icon != "" {
 			r.appendEntryLocked(entry)
 		}
@@ -665,7 +665,7 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 		return r.renderLocked(ctx)
 	}
 
-	entry, ok := eventToEntry(ev, time.Now())
+	entry, ok := eventToEntry(ev, time.Now(), r.lastEntryLocked())
 	if !ok {
 		// Unknown / unhandled event kind — keep going but don't
 		// touch the log.
@@ -694,6 +694,19 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 // budget protects against Feishu's 30 KB card body cap; the entry
 // budget protects against the 50-element hard limit (see the
 // derivation on replyMaxEntries). Caller must hold r.mu.
+// lastEntryLocked returns the most recently appended LogEntry,
+// or nil when the buffer is empty. Used by eventToEntry's
+// de-duplication pass: the final assistant text is emitted
+// twice (streamed EventText + EventResult's text field), and
+// skipping the duplicate keeps the rolling log clean. Caller
+// MUST hold r.mu.
+func (r *MessageReceipt) lastEntryLocked() *LogEntry {
+	if len(r.entries) == 0 {
+		return nil
+	}
+	return &r.entries[len(r.entries)-1]
+}
+
 func (r *MessageReceipt) appendEntryLocked(entry LogEntry) {
 	if entry.Text == "" && entry.Icon == "" {
 		return

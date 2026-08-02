@@ -248,10 +248,10 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	fallback := func(ctx context.Context, msg *gateway.InboundMessage) error {
 		sess, err := gw.LookupSessionByChat(msg.ChatID)
 		if err != nil {
-			return responder.Reply(ctx, msg.ChatID, "no workspace set, send /cwd <path> first")
+			return responder.Reply(ctx, msg.ChatID, "", "no workspace set, send /cwd <path> first")
 		}
 		if sess.Status() != session.StatusRunning {
-			return responder.Reply(ctx, msg.ChatID, "CLI not running, send /run <agent> to start")
+			return responder.Reply(ctx, msg.ChatID, "", "CLI not running, send /run <agent> to start")
 		}
 
 		blocks := feishu.BuildBlocks(msg.Text, msg.Attachments)
@@ -264,7 +264,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 			// Receipt creation failed (channel offline?) — fall
 			// back to a plain OutText send so the message isn't
 			// silently dropped.
-			return responder.Reply(ctx, msg.ChatID, msg.Text)
+			return responder.Reply(ctx, msg.ChatID, userMsgID, msg.Text)
 		}
 
 		// Queue to session.InputBuffer. The buffer decides
@@ -347,7 +347,7 @@ type channelResponder struct {
 	userMessageFn func(chatID, userMsgID string, blocks []agent.ContentBlock) error
 }
 
-func (r channelResponder) Reply(ctx context.Context, chatID, text string) error {
+func (r channelResponder) Reply(ctx context.Context, chatID, userMsgID, text string) error {
 	if r.ch == nil {
 		return nil
 	}
@@ -356,6 +356,14 @@ func (r channelResponder) Reply(ctx context.Context, chatID, text string) error 
 	// of routing through the receipt rolling-log card. No
 	// ReplyTo, no in-place update, no receipt creation. See
 	// internal/gateway/messages.go for the kind definition.
+	//
+	// The userMsgID arg threads the user message we couldn't
+	// reach (e.g. the receipt was never created on the
+	// "no workspace set" / "CLI not running" fallbacks). The
+	// Responder interface carries it for parity with the
+	// successful CreateReceipt path; OutCommandReply itself
+	// doesn't thread it.
+	_ = userMsgID
 	return r.ch.Send(ctx, gateway.OutboundMessage{ChatID: chatID, Kind: gateway.OutCommandReply, Text: text})
 }
 

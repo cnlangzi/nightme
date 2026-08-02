@@ -1,6 +1,7 @@
 # Binaries
 /bin/
 /dist/
+/nightme
 *.exe
 *.exe~
 *.dll
@@ -45,5 +46,3 @@ data/
 .claude/
 .codegraph/
 graphify-out/
-nightme/
-nightme

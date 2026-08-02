@@ -640,9 +640,6 @@ func (r *MessageReceipt) applyState(ctx context.Context, target channel.ReceiptS
 
 // dispose deletes the receipt's reply message + reaction. Idempotent.
 // Called by Adapter.DisposeReceipt after the final state transition.
-// v1.1 keeps the receipt in the adapter's indexes until the next
-// SendUserMessage call so legacy fallback paths that look up by
-// userMsgID keep working until commit 3 migrates them.
 func (r *MessageReceipt) dispose(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

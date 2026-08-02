@@ -2,14 +2,14 @@
 // registered by nightme, or to a fallback handler (typically the
 // session manager forwarding text to the live agent). See
 // docs/feat/F-20-gateway.md for the original router design and
-// docs/feat/F-26-gateway-hub.md for the Stage-3 responsibility-
+// docs/feat/F-26-gateway-hub.md for the v1.1 responsibility-
 // isolation spec.
 //
-// v1.1 (commit 3 + 4): the Gateway owns the chat → session binding
-// table and the per-userMessage receipt FSM. Channel is the dumb
-// renderer that paints receipt state transitions; Session is the
-// pure-process factory; Gateway sits between them and drives the
-// lifecycle. See F-26 §2 for the full picture.
+// v1.1: the Gateway owns the chat → session binding table and the
+// per-userMessage receipt FSM. Channel is the dumb renderer that
+// paints receipt state transitions; Session is the pure-process
+// factory; Gateway sits between them and drives the lifecycle.
+// See F-26 §2 for the full picture.
 //
 // Imports: gateway imports session (v1.1). The session package
 // does NOT import gateway (verified), so this direction is cycle-
@@ -68,24 +68,6 @@ type CommandResult struct {
 // FallbackHandler is invoked when the Gateway decides the message is
 // not a nightme command.
 type FallbackHandler func(ctx context.Context, msg *InboundMessage) error
-
-// OutboundSource is one running session's outbound event stream.
-// The runtime (typically cmd/nightme) provides these to the
-// Gateway via the SweepSessions callback. Each source maps a chat
-// to a single event channel; the Gateway attaches one outbound
-// pump per source.
-type OutboundSource struct {
-	SessionID string
-	ChatID    string
-	Events    <-chan agent.AgentEvent
-}
-
-// SweepSessions returns the currently-running OutboundSources. The
-// Gateway polls this on a ticker (every 5s) to discover new
-// sessions the /run command creates between sweeps. Returning nil
-// or an empty slice is fine — the Gateway simply has nothing to
-// attach.
-type SweepSessions func() []OutboundSource
 
 // Gateway is the public contract for the slash-command router.
 //
@@ -165,10 +147,8 @@ type gateway struct {
 	stopCh         chan struct{}
 	stopOnce       sync.Once
 	wg             sync.WaitGroup
-	attached       map[string]struct{} // SessionID -> already-has-a-pump (commit 4 will remove)
 	chatToChan     map[string]Channel  // ChatID -> the channel that owns the chat
 	defaultChannel Channel             // fallback channel for chats we haven't seen yet
-	sweeper        SweepSessions       // commit 4 will remove
 
 	// v1.1 binding table (chat_id → session_id). Owned by Gateway.
 	bindings map[string]*BindingEntry
@@ -201,21 +181,11 @@ func New(fallback FallbackHandler, mgr session.Manager) Gateway {
 	return &gateway{
 		cmds:       make(map[string]Command),
 		fb:         fallback,
-		attached:   make(map[string]struct{}),
 		chatToChan: make(map[string]Channel),
 		bindings:   make(map[string]*BindingEntry),
 		receipts:   make(map[string]*receiptEntry),
 		mgr:        mgr,
 	}
-}
-
-// AttachSweeper registers the callback the Gateway uses to discover
-// running sessions. Required before Start. The callback is invoked
-// every 5s; it should be cheap and non-blocking.
-func (g *gateway) AttachSweeper(s SweepSessions) {
-	g.mu.Lock()
-	g.sweeper = s
-	g.mu.Unlock()
 }
 
 // AttachChannels registers the channels the gateway will read from

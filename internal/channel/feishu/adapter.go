@@ -760,8 +760,7 @@ func usageFromMeta(m gateway.OutboundMessage) *agent.UsageEvent {
 
 // buildInteractiveCard renders a v1 Feishu card from an abstract
 // Card. Each option becomes a primary button whose value carries
-// the request_id so the inbound Action carries it back. Stage 3
-// will move the F-25 permission-card logic here.
+// the request_id so the inbound Action carries it back.
 func buildInteractiveCard(c *gateway.Card) (string, error) {
 	if c.RequestID == "" {
 		return "", errors.New("feishu: card missing request_id")

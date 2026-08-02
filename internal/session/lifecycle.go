@@ -41,8 +41,10 @@ func (m *MemoryManager) startAgent(ctx context.Context, agentName, workspace str
 // upsertEntry is implemented in manager.go; this file exists to
 // host helpers that historically belonged to the chat-keyed
 // lifecycle methods (CreateOrUpdate / Run / KillByChat). Those
-// methods now live in the runtime bridge (cmd/nightme) per F-26
-// §6 commit 2; they will move to the Gateway in commit 3.
+// methods lived in cmd/nightme's runtime bridge (commit 2
+// transition) and then moved into the Gateway itself (commit 3).
+// See internal/gateway/gateway.go for the current binding
+// implementation.
 //
 // The remaining helpers (startAgent) are session-package-internal
 // and have no chat_id awareness, which is exactly what v1.1 asks

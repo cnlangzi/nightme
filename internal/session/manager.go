@@ -53,9 +53,9 @@ type CreateRequest struct {
 // v1.1: the Manager is a pure-process factory. It knows nothing
 // about chat IDs, channels, receipts, or bindings. Chat-keyed
 // operations (CreateOrUpdate, Run, GetByChat, KillByChat) lived
-// here in v0.x but have been removed — they are temporarily
-// implemented in cmd/nightme (the runtime bridge) and will move
-// into the Gateway itself in commit 3 (see F-26 §6).
+// here in v0.x but were removed by F-26 §6 commits 2 + 3. The
+// binding table is now owned by the Gateway itself
+// (see internal/gateway/gateway.go).
 type Manager interface {
 	// Register creates a session record WITHOUT spawning the
 	// agent. The returned session has Status == StatusDetached;

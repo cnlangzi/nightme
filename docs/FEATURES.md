@@ -22,15 +22,18 @@
 | F-27 | **ChatSession 模型**（per chat 持久化会话上下文；合并 v1.1 ChannelSession + GatewaySession 逻辑）| [feat/F-27-chatsession.md](./feat/F-27-chatsession.md) | v1.2 (current) |
 | F-28 | **`/use <agent>` 命令**（切换 activeAgent；复用或新建 AgentSession；永不重启进程）| [feat/F-28-use-command.md](./feat/F-28-use-command.md) | v1.2 (current) |
 | F-29 | **AgentSession 池**（`(agent, cwd)` 1:1 池化；`/cwd` / `/use` 不杀任何 AgentSession，切回能复用）| [feat/F-29-agent-session-pool.md](./feat/F-29-agent-session-pool.md) | v1.2 (current) |
+| F-30 | **Interactive Config**（`nightme config` 进交互菜单；二级菜单只做 Agents；merge builtin + cfg；选 primary）| [feat/F-30-interactive-config.md](./feat/F-30-interactive-config.md) | v1.2 (current) |
 
 **v1.2 关键变化**：
 - 删除：`/run` 命令（被 `/use` 替代）
 - 删除：`Session` 类型（被 ChatSession + AgentSession 替代）
 - 删除：`CreateOrUpdate(chatID, ...)` / `Run(chatID, agent, args)` / `GetByChat` / `KillByChat`（v1.1 已删除，v1.2 不重新引入）
 - 新增：`/use <agent>` 切换命令
+- 新增：`nightme config` 交互模式（顶层菜单 + Agents 子菜单）
+- Config schema 重构：top-level `primary` + `agents` list（替代 v1.1 `agent.default` + `agent.agents` map）
 - 保留：所有 v1.1 职责隔离不变式（Channel 与 Session 互不知道；Gateway 是 binding + receipt FSM owner）
 
-**Status**: 待 Devin 确认 Q-A (Default Agent 设置) / Q-B (activeAgent,activeCwd 不在 pool 时 fallback) 后可标记锁定。
+**Status**: 待 Devin 确认 Q-B (activeAgent,activeCwd 不在 pool 时 fallback) 后可标记锁定。
 
 ---
 
@@ -112,6 +115,7 @@
 
 | 决策 | 现状 | 状态 |
 |------|------|------|
-| Q-A: Default Agent 设置粒度 | 全局 only (`config.yaml` 的 `agents.default`)；ChatSession.defaultAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已确认 (2026-08-02) |
+| Q-A: Default Agent 设置粒度 | 全局 only (`config.yaml` 的 `primary`)；ChatSession.defaultAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已确认 (2026-08-02) |
 | Q-B: `(activeAgent, activeCwd)` 不在 pool 时的 fallback 顺序 | exact → `(defaultAgent, activeCwd)` → spawn `(activeAgent, activeCwd)` | 待 Devin 确认 |
 | `ChatSession.defaultAgent` 字段持久化位置 | `ChatSessionEntry.defaultAgent` (snapshot，写时不变) | ✅ 已确认 |
+| Config schema 顶层字段 | `primary` (top-level scalar) + `agents:` (top-level list); bridge 是每个 AgentEntry 的字段; command 是 full string 含 args | ✅ 已确认 (2026-08-02) |

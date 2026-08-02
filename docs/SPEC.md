@@ -432,19 +432,32 @@ nightme 用 Go 的 goroutine 实现并发，结构如下：
 - `chat_sessions.chatId` UNIQUE（保证 1 chat = 1 ChatSession）
 - `agent_sessions.(chatSessionId, agent, cwd)` UNIQUE（保证 pool 内 (agent, cwd) 1:1；不同 ChatSession 各自独立）
 
-**Q-A 锁定 (2026-08-02)**：Default 仅全局 config (`agents.default` in YAML)；ChatSession.defaultAgent 是创建时的 snapshot，不可变。**无 `/default` 命令**。
+**Config schema (config.yaml) v1.2 (2026-08-02)**：
 
 ```yaml
-# config.yaml (v1.2)
-agents:
-  default: claude              # global default
-  claude:                      # recipe inline (sibling of default)
-    command: claude
-    args: []
-    env: {}
-  codex:
-    command: codex-acp
-    ...
+primary: cc                    # top-level: global default agent
+agents:                        # top-level: list of available agents
+  - name: cc                  # user-defined name (overrides builtin of same name)
+    bridge: claude             # bridge backend type
+    command: "claude --dangerously-skip-permissions"  # full command line (binary + args)
+  - name: claude              # builtin claude override (custom binary path)
+    bridge: claude
+    command: /custom/path/claude
+```
+
+User-configured `agents:` entries override built-ins of the same name (merge happens at runtime, not parse time).
+
+**Q-A 锁定 (2026-08-02)**：Default 仅全局 config (YAML `primary`)；ChatSession.defaultAgent 是创建时的 snapshot，不可变。**无 `/default` 命令**。**`nightme config` 交互模式**用于选择 primary（见 F-30）。
+
+```yaml
+# 旧的 v1.x schema (仅用于历史参考, v1.2 已废弃)
+# agent:
+#   default: claude
+#   agents:
+#     claude:
+#       command: claude
+#       args: []
+#       env: {}
 ```
 
 ---

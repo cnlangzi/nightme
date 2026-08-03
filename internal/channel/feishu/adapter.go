@@ -564,24 +564,24 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 			Text: msg.Text,
 		})
 
-	case gateway.OutReaction:
+	case gateway.OutMessageState:
 		if msg.Reaction == nil || msg.Reaction.EmojiType == "" {
-			return errors.New("feishu: OutReaction missing emoji_type")
+			return errors.New("feishu: OutMessageState missing emoji_type")
 		}
 		messageID, _ := msg.Meta["message_id"].(string)
 		if messageID == "" {
-			return errors.New("feishu: OutReaction missing message_id in Meta")
+			return errors.New("feishu: OutMessageState missing message_id in Meta")
 		}
 		_, err := a.AddReaction(ctx, messageID, msg.Reaction.EmojiType)
 		return err
 
-	case gateway.OutReactionRemoved:
+	case gateway.OutMessageStateRemoved:
 		if msg.Reaction == nil || msg.Reaction.ReactionID == "" {
-			return errors.New("feishu: OutReactionRemoved missing reaction_id")
+			return errors.New("feishu: OutMessageStateRemoved missing reaction_id")
 		}
 		messageID, _ := msg.Meta["message_id"].(string)
 		if messageID == "" {
-			return errors.New("feishu: OutReactionRemoved missing message_id in Meta")
+			return errors.New("feishu: OutMessageStateRemoved missing message_id in Meta")
 		}
 		return a.DeleteReaction(ctx, messageID, msg.Reaction.ReactionID)
 

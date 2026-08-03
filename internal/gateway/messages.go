@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/receipt"
 )
 
 // ChatType discriminates inbound message origins. The exact
@@ -154,10 +155,20 @@ const (
 	OutToolEnd
 	// OutThinking surfaces the agent's reasoning.
 	OutThinking
-	// OutReaction adds a reaction emoji to an existing message.
-	OutReaction
-	// OutReactionRemoved removes a reaction by id.
-	OutReactionRemoved
+	// OutMessageState is a MessageState change event for an inbound
+	// user message (F-31). Triggered by ChatSession lifecycle;
+	// Channel renders it as platform-native progress indicator
+	// (Feishu: AddReaction with state-specific emoji_type; Slack:
+	// reactions.add; etc.).
+	//
+	// Distinct from receipt lifecycle: this tracks the MESSAGE's
+	// progress through the system, not the response's rendering.
+	// See docs/feat/F-31-message-state.md and SPEC §2.5.
+	OutMessageState
+	// OutMessageStateRemoved removes a message state marker. Not
+	// used in v1.3 (append-only); reserved for channels that
+	// support mutable state markers (e.g. Web UI).
+	OutMessageStateRemoved
 	// OutCard sends an interactive card (permission request, etc.).
 	OutCard
 	// OutTyping sends a transient typing indicator.
@@ -208,10 +219,10 @@ func (k OutboundKind) String() string {
 		return "tool_end"
 	case OutThinking:
 		return "thinking"
-	case OutReaction:
-		return "reaction"
-	case OutReactionRemoved:
-		return "reaction_removed"
+	case OutMessageState:
+		return "message_state"
+	case OutMessageStateRemoved:
+		return "message_state_removed"
 	case OutCard:
 		return "card"
 	case OutTyping:
@@ -246,17 +257,23 @@ type OutboundMessage struct {
 	Text string
 	// Card carries the interactive card payload for OutCard.
 	Card *Card
-	// Reaction carries the emoji + target for OutReaction /
-	// OutReactionRemoved.
+	// Reaction carries the emoji + target for the legacy reaction
+	// events. v1.3 (F-31) introduces MessageState (preferred path);
+	// Reaction is retained temporarily for backward compatibility
+	// and will be removed once all channel adapters migrate to
+	// MessageState.
 	Reaction *Reaction
+	// MessageState carries the payload for OutMessageState /
+	// OutMessageStateRemoved kinds (F-31). Channel reads from this
+	// field directly OR from Meta["message_id"] + Meta["state"].
+	MessageState *MessageStatePayload
 	// ReplyTo carries the channel-native root message id when the
 	// agent wants to reply in a thread.
 	ReplyTo string
 	// Meta carries opaque per-kind payload the Channel may need:
-	//   OutReaction / OutReactionRemoved: Meta.MessageID is the
-	//     target message to react on.
-	//   OutReactionRemoved: Meta.ReactionID is the reaction to
-	//     delete.
+	//   OutMessageState: Meta.MessageID is the target user message;
+	//     Meta.State is the receipt.MessageState value.
+	//   (legacy) Reaction / ReactionRemoved: see Reaction struct.
 	//   OutCard: Meta.RequestID is the correlation token the user
 	//     click carries back in InboundMessage.Action.RequestID.
 	//   OutToolStart: Meta.ToolName / Meta.Args.
@@ -280,7 +297,17 @@ type Card struct {
 	RequestID string
 }
 
-// Reaction carries an emoji add/remove.
+// MessageStatePayload is the OutboundMessage payload for
+// OutMessageState / OutMessageStateRemoved kinds (F-31). It is a
+// redundant carrier for the same data available in
+// Meta["message_id"] + Meta["state"]; channels can read from
+// either location based on preference.
+
+// Reaction is the legacy payload for the (deprecated)
+// OutReaction / OutReactionRemoved kinds. v1.3 channels should
+// migrate to MessageStatePayload instead. This type remains
+// temporarily for backward compatibility and will be removed
+// once all channel adapters use MessageState.
 type Reaction struct {
 	// EmojiType is the channel-native identifier of the emoji.
 	EmojiType string
@@ -288,6 +315,19 @@ type Reaction struct {
 	// previous AddReaction call. Required for OutReactionRemoved.
 	// Empty for OutReaction.
 	ReactionID string
+}
+//
+// v1.3: State is the canonical abstract value; Emoji is optional
+// channel-specific override (most channels ignore it and map
+// State → emoji internally).
+type MessageStatePayload struct {
+	// State is the abstract MessageState value (received /
+	// forwarded / done / error).
+	State receipt.MessageState
+	// Emoji is an optional channel-native emoji override. Most
+	// channels ignore this and map State → emoji via their own
+	// table (e.g. Feishu: StateReceived → "OneSecond").
+	Emoji string
 }
 
 // AgentEventEnvelope carries the agent-side metadata alongside an

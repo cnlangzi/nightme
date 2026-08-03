@@ -9,6 +9,12 @@
 // for InboundMessage / OutboundMessage types, gateway imports
 // channel for Receipt). Moving them here breaks the cycle and
 // keeps the contract in a neutral package.
+//
+// v1.3 (F-31): adds MessageState — a parallel concept that
+// tracks the inbound user message's progress through the
+// system (vs ReceiptState which tracks the response's
+// rendering lifecycle). The two are independent — both keyed
+// by userMsgID, but different owners, triggers, and semantics.
 package receipt
 
 // Receipt is an opaque handle. Each Channel returns its own
@@ -51,3 +57,57 @@ const (
 	// should retry; nightme does not auto-retry receipt failures.
 	ReceiptError
 )
+
+// MessageState is the lifecycle stage of one inbound user message
+// within nightme's processing pipeline. It answers "where is this
+// message in the system right now?" so channels can render a
+// user-visible progress indicator.
+//
+// v1.3 (F-31): independent of ReceiptState. Both are keyed by
+// userMsgID but have different owners, triggers, and semantics:
+//
+//   - MessageState is owned by ChatSession (lifecycle events)
+//   - ReceiptState is owned by Gateway (response rendering FSM)
+//
+// Scope: only produced for plain user messages, NOT slash commands.
+// See docs/feat/F-31-message-state.md and SPEC §2.5.
+type MessageState int
+
+const (
+	// StateReceived: ChatSession has accepted the message but not
+	// yet dispatched it to an AgentSession. Triggered on
+	// ChatSession.GetOrCreate.
+	StateReceived MessageState = iota
+
+	// StateForwarded: the message has been dispatched to an
+	// AgentSession (lazy spawn succeeded; blocks enqueued or
+	// sent to PTY stdin). Triggered on successful
+	// LookupActiveAgentSession.
+	StateForwarded
+
+	// StateDone: the AgentSession has finished processing this
+	// message (EventDone arrived on the readPump). Triggered by
+	// ChatSession.runReadPump on EventDone.
+	StateDone
+
+	// StateError: the AgentSession reported an error for this
+	// message (EventError arrived). Triggered by
+	// ChatSession.runReadPump on EventError.
+	StateError
+)
+
+// String renders MessageState as a short human label, primarily
+// for log lines and test diagnostics.
+func (s MessageState) String() string {
+	switch s {
+	case StateReceived:
+		return "received"
+	case StateForwarded:
+		return "forwarded"
+	case StateDone:
+		return "done"
+	case StateError:
+		return "error"
+	}
+	return "unknown"
+}

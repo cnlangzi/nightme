@@ -155,6 +155,20 @@ type Gateway interface {
 	// (Defined on the interface so cmd/nightme can wire it
 	// without a type-assertion back to *Router.)
 	OnSessionEvent(s *session.Session, ev agent.AgentEvent)
+
+	// OnMessageState is the v1.3 (F-31) ChatSession-callback
+	// entry point. The runtime (cmd/nightme) wires gw.OnMessageState
+	// into every ChatSession at startup via SetMessageStateHandler.
+	// ChatSession calls it on lifecycle events (received /
+	// forwarded / done / error); Gateway translates to
+	// OutboundMessage{Kind: OutMessageState} and forwards to the
+	// appropriate channel via resolveChannel + Send.
+	//
+	// Decoupled from OnSessionEvent: agent events flow through
+	// OnSessionEvent; message lifecycle events flow through
+	// OnMessageState. Both end up at Channel.Send but carry
+	// different semantics.
+	OnMessageState(chatID, userMsgID string, state receipt.MessageState)
 }
 
 // Router is the exported alias of the runtime-internal
@@ -827,6 +841,47 @@ func (g *gateway) OnSessionEvent(s *session.Session, ev agent.AgentEvent) {
 		return
 	}
 	g.translateAndSend(s, ev)
+}
+
+// OnMessageState is the v1.3 (F-31) ChatSession-callback entry
+// point. Wired into every ChatSession at startup via
+// SetMessageStateHandler. Translates the abstract lifecycle event
+// to OutboundMessage{Kind: OutMessageState} and forwards via the
+// channel that owns chatID.
+//
+// Failure semantics (per F-31 §9):
+//   - No channel for chatID: silent drop (debug log only).
+//   - Channel.Send error: log warn, never block caller.
+//     ChatSession lifecycle is unaffected by render failures.
+//   - Handler called with empty chatID or userMsgID: silent drop.
+//
+// Concurrency: callable from any goroutine. resolveChannel takes
+// RLock on g.mu briefly; Send runs synchronously per the caller's
+// context (background ctx is used internally because ChatSession
+// doesn't currently pass a cancellable ctx to emitMessageState).
+func (g *gateway) OnMessageState(chatID, userMsgID string, state receipt.MessageState) {
+	if chatID == "" || userMsgID == "" {
+		return
+	}
+	ch := g.resolveChannel(chatID)
+	if ch == nil {
+		log.Printf("gateway: OnMessageState no channel for chat=%s, dropping", chatID)
+		return
+	}
+	out := OutboundMessage{
+		Kind:   OutMessageState,
+		ChatID: chatID,
+		Meta: map[string]any{
+			"message_id": userMsgID,
+			"state":      state,
+		},
+		MessageState: &MessageStatePayload{
+			State: state,
+		},
+	}
+	if err := ch.Send(context.Background(), out); err != nil {
+		log.Printf("gateway: MessageState send failed (chat=%s, state=%s): %v", chatID, state, err)
+	}
 }
 
 // translateAndSend does the actual work: look up the chat for the

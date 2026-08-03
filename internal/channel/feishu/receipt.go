@@ -429,27 +429,16 @@ func compactNumberLoud(n int) string {
 	}
 }
 
-// Emoji returns the Feishu reaction emoji_type for a state. Used by
-// the ReactionAdd side of the dual-track.
+// Emoji (deprecated in v1.3 F-31) was the feishu-side reaction
+// emoji mapping for receipt-card lifecycle states. The function is
+// removed: reaction handling moved to MessageState FSM (see
+// mapStateToFeishuEmoji in adapter.go). Receipt FSM now only
+// drives the card body, not reactions.
 //
-// The identifiers are Feishu predefined emoji_type values — NOT raw
-// unicode. Passing unicode like "⏳" to the reaction API fails with
-// code 99992354 ("data not found") because the reaction service
-// only recognizes the predefined set (THUMBSUP / OK / OnIt /
-// PARTY / …).
-func (s ReceiptState) Emoji() string {
-	switch s {
-	case StateWaiting:
-		return "OneSecond"
-	case StateExecuting:
-		return "OnIt"
-	case StateCompleted:
-		return "DONE"
-	case StateError:
-		return "THUMBSUP" // closest Feishu-predefined indicator of "failed"
-	}
-	return ""
-}
+// The identifiers that used to live here (OneSecond / OnIt / DONE /
+// THUMBSUP) match the v1.3 MessageState → emoji mapping verbatim,
+// but the trigger states (Received / Forwarded / Done) are owned
+// by ChatSession, not MessageReceipt.
 
 // NewMessageReceipt creates a receipt and emits the initial state
 // (Waiting). The reply text message and the ⏳ reaction are posted

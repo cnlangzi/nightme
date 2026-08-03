@@ -141,19 +141,6 @@ func TestReceiptState_String(t *testing.T) {
 	}
 }
 
-func TestReceiptState_Emoji(t *testing.T) {
-	cases := map[ReceiptState]string{
-		StateWaiting:   "OneSecond",
-		StateExecuting: "OnIt",
-		StateCompleted: "DONE",
-	}
-	for s, want := range cases {
-		if got := s.Emoji(); got != want {
-			t.Errorf("%d.Emoji() = %q, want %q", s, got, want)
-		}
-	}
-}
-
 // --- time helpers ---
 
 type timeParseResult = time.Time
@@ -1052,8 +1039,8 @@ func TestReceiptStateString_IncludesError(t *testing.T) {
 	}
 }
 
-func TestReceiptStateEmoji_Error(t *testing.T) {
-	if got := StateError.Emoji(); got == "" {
-		t.Fatal("StateError.Emoji() returned empty, want a Feishu predefined emoji")
-	}
-}
+// TestReceiptStateEmoji_Error was removed in v1.3 (F-31):
+// ReceiptState.Emoji() was deleted when reaction handling moved
+// to MessageState FSM (mapStateToFeishuEmoji in adapter.go).
+// StateError's reaction emoji (THUMBSUP) is now tested via
+// TestMapStateToFeishuEmoji in message_state_test.go.

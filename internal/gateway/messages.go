@@ -303,17 +303,19 @@ type Card struct {
 // Meta["message_id"] + Meta["state"]; channels can read from
 // either location based on preference.
 
-// Reaction is the legacy payload for the (deprecated)
-// OutReaction / OutReactionRemoved kinds. v1.3 channels should
-// migrate to MessageStatePayload instead. This type remains
-// temporarily for backward compatibility and will be removed
-// once all channel adapters use MessageState.
+// Reaction is the legacy payload for the (deprecated) reaction
+// kinds renamed to OutMessageState / OutMessageStateRemoved in
+// v1.3 (F-31). v1.3 channels should migrate to
+// MessageStatePayload instead. This type remains temporarily for
+// backward compatibility with code paths that still reference
+// the legacy field and will be removed once all references are
+// cleaned up.
 type Reaction struct {
 	// EmojiType is the channel-native identifier of the emoji.
 	EmojiType string
 	// ReactionID is the channel-native reaction id returned by a
-	// previous AddReaction call. Required for OutReactionRemoved.
-	// Empty for OutReaction.
+	// previous AddReaction call. Required for the legacy "removed"
+	// kind.
 	ReactionID string
 }
 //

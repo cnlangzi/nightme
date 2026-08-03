@@ -332,15 +332,18 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //
 //	OutText              → CreateMessage (msg_type=text)
 //	OutToolStart/End     → folded into the per-chat receipt via the
-//	                       existing AddReaction / UpdateMessage flow;
+//	                       existing UpdateMessage flow (card PATCH);
 //	                       this path is taken by the Feishu channel's
 //	                       display strategy (Stage 3 migrates the
 //	                       receipt-rendering logic here). Stage 1's
 //	                       Send handles OutText directly so the
 //	                       existing /help / /use paths keep
 //	                       working.
-//	OutReaction          → AddReaction on Meta["message_id"]
-//	OutReactionRemoved   → DeleteReaction on Meta["reaction_id"]
+//	OutMessageState      → AddReaction on Meta["message_id"] with
+//	                       state-specific emoji_type (F-31 §8.3).
+//	                       Idempotency via a.messageStates map.
+//	OutMessageStateRemoved → DeleteReaction on Meta["reaction_id"]
+//	                       (reserved; v1.3 uses append-only)
 //	OutCard              → send interactive card via sendContent
 //	OutThinking          → dropped (no native Feishu equivalent;
 //	                       future: a sub-message indicator)

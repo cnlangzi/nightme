@@ -23,7 +23,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -83,22 +82,6 @@ func defaultOpenAgentSessions(cfg *config.Config) (*registry.AgentSessionFile, e
 		return nil, err
 	}
 	return registry.OpenAgentSessionFile(path)
-}
-
-func chatSessionsPath(cfg *config.Config) (string, error) {
-	base, err := filepath.Abs(cfg.Paths.DataDir)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(base, "chat_sessions.json"), nil
-}
-
-func agentSessionsPath(cfg *config.Config) (string, error) {
-	base, err := filepath.Abs(cfg.Paths.DataDir)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(base, "agent_sessions.json"), nil
 }
 
 // newRunCmd builds the long-running Feishu daemon command.
@@ -234,6 +217,12 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		return fmt.Errorf("run: open agent_sessions: %w", err)
 	}
 
+	// Tidy up the obsolete v0.1 registry.json (the v1.2 daemon
+	// no longer reads it). Best-effort.
+	if err := removeLegacyRegistryFile(cfg); err != nil {
+		logger.Warn("remove legacy registry.json", "err", err)
+	}
+
 	agents := deps.buildAgents(cfg)
 	if agents == nil {
 		return errors.New("run: agent registry is nil")
@@ -252,16 +241,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	mgr := chatsession.NewManager().
 		WithSpawner(spawner).
 		WithPersistence(csFile, asFile)
-
-	// Migrate any pre-v1.2 registry.json to a .v1.bak archive.
-	// v1.x did not persist chat_id and is not transparent; we
-	// archive the old file and start fresh.
-	v1Legacy := filepath.Join(filepath.Dir(cfg.Paths.DataDir), "registry.json")
-	if count, err := registry.MigrateV1ToV2(v1Legacy); err != nil {
-		logger.Warn("v1.x migration failed", "err", err)
-	} else if count > 0 {
-		logger.Info("archived v1.x registry", "entries", count, "backup", v1Legacy+".v1.bak")
-	}
 
 	// Restore from disk (per-chat ChatSession + per-AgentSession
 	// metadata; processes not running).
@@ -289,7 +268,10 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// translates AgentEvent → OutboundMessage + sends via the
 	// channel. Pre-install on existing chats (restored from
 	// disk); new chats get it via /use or first message dispatch.
-	eventHandler := newEventHandler(ch, logger)
+	// The handler also captures EventInit.SessionID → AgentSession
+	// resume id (so `nightme list` can show it and a later respawn
+	// can replay `--resume <id>` to the bridge).
+	eventHandler := newEventHandler(ch, mgr, logger)
 	for _, cs := range mgr.List() {
 		cs.SetEventHandler(eventHandler)
 	}
@@ -470,8 +452,29 @@ func ensureReadPumps(mgr *chatsession.Manager, ch channel.Channel, primary strin
 //
 // v1.3 (SPEC §2.2): 1 turn : 1 anchor. Receipt rendering and
 // FSM are Channel-internal; Gateway only knows about userMsgID.
-func newEventHandler(ch channel.Channel, logger *slog.Logger) chatsession.EventHandler {
+func newEventHandler(ch channel.Channel, mgr *chatsession.Manager, logger *slog.Logger) chatsession.EventHandler {
 	return func(chatID string, s *chatsession.AgentSession, ev agent.AgentEvent, userMsgID string) {
+		// Capture the agent's own session id from EventInit so the
+		// next respawn can replay `--resume <id>`. We persist
+		// immediately (rather than waiting for the next status
+		// transition) so a daemon crash after this event still
+		// remembers the id. The capture is idempotent.
+		//
+		// Guard: only overwrite an existing (non-empty) ResumeID when
+		// the new id is non-empty. Some bridges re-emit EventInit
+		// after a child restart with a blank SessionID; we don't
+		// want to wipe a previously-captured id in that case.
+		if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.SessionID != "" {
+			s.SetResumeID(ev.Init.SessionID)
+			if mgr != nil {
+				if err := mgr.PersistAgentSession(s); err != nil && logger != nil {
+					logger.Warn("persist agent session (init) failed",
+						"chat_id", chatID,
+						"agent_session_id", s.ID,
+						"err", err)
+				}
+			}
+		}
 		// Translate the AgentEvent to an OutboundMessage.
 		out, ok := gateway.Translate(chatID, ev)
 		if !ok {

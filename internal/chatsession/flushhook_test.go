@@ -69,7 +69,7 @@ type spawnerRecording struct {
 	idx      int
 }
 
-func (s *spawnerRecording) Spawn(_ context.Context, _, _ string, _ []string) (agent.AgentSession, error) {
+func (s *spawnerRecording) Spawn(_ context.Context, _, _ string, _ []string, _ string) (agent.AgentSession, error) {
 	as := newRecordingAgentSession(42000 + s.idx)
 	s.sessions = append(s.sessions, as)
 	s.idx++

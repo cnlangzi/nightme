@@ -595,6 +595,55 @@ func TestAgent_BuildArgs_Auto(t *testing.T) {
 	}
 }
 
+// TestAgent_BuildArgs_ResumeIDAppended asserts that cfg.ResumeID, when
+// non-empty, lands at the tail of argv as `--resume <id>` so the
+// bridge can resume the previous Claude Code session.
+func TestAgent_BuildArgs_ResumeIDAppended(t *testing.T) {
+	got := buildArgs(nil, agent.StartConfig{ResumeID: "sess-xyz-123"})
+	if !containsSeq(got, "--resume", "sess-xyz-123") {
+		t.Errorf("--resume <id> not appended at tail; got=%v", got)
+	}
+	// Should appear AFTER user-supplied cfg.Args.
+	indexOfResume := indexOfSeq(got, "--resume")
+	if indexOfResume <= 0 || indexOfResume >= len(got)-1 {
+		t.Errorf("--resume missing the resume-id argument; got=%v", got)
+	}
+}
+
+// TestAgent_BuildArgs_EmptyResumeID asserts that an empty ResumeID
+// does NOT add a `--resume ""` to the argv (which would be a no-op
+// or, worse, ambiguous).
+func TestAgent_BuildArgs_EmptyResumeID(t *testing.T) {
+	got := buildArgs(nil, agent.StartConfig{ResumeID: ""})
+	for _, s := range got {
+		if s == "--resume" {
+			t.Errorf("empty ResumeID should not add --resume flag; got=%v", got)
+		}
+	}
+}
+
+// indexOfSeq returns the first index in got where seq starts as a
+// contiguous subsequence, or -1 if not found. Used by buildArgs
+// tests to assert position-relative ordering.
+func indexOfSeq(got []string, seq ...string) int {
+	if len(seq) == 0 || len(got) < len(seq) {
+		return -1
+	}
+	for i := 0; i+len(seq) <= len(got); i++ {
+		match := true
+		for j := range seq {
+			if got[i+j] != seq[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return i
+		}
+	}
+	return -1
+}
+
 // containsSeq returns true when seq appears as a contiguous subsequence
 // of got. Used by buildArgs tests to assert flag presence / ordering.
 func containsSeq(got []string, seq ...string) bool {

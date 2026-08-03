@@ -17,7 +17,7 @@ func TestMapStateToFeishuEmoji(t *testing.T) {
 		state receipt.MessageState
 		want  string
 	}{
-		{receipt.StateReceived, "OK"},          // 👌 standard feishu reaction
+		{receipt.StateReceived, "OneSecond"},   // ⏳
 		{receipt.StateForwarded, "OnIt"},        // 🔄
 		{receipt.StateDone, "DONE"},            // ✅
 		{receipt.StateError, "THUMBSUP"},       // ❌ closest predefined

@@ -1263,18 +1263,13 @@ func (a *Adapter) SendMessageText(ctx context.Context, chatID, text string) (str
 //
 // Must use Feishu predefined emoji_type identifiers (not raw
 // unicode) — passing unicode to the reaction API returns
-// 99992354 "data not found". Furthermore, only reactions that
-// appear in Feishu's standard picker (THUMBSUP / OK / OnIt /
-// DONE / Applaud / Heart / Smile / PARTY etc.) are rendered in
-// the chat UI. Custom emoji_type values like OneSecond are
-// accepted by the API but invisible in the UI — use them at
-// your own risk.
+// 99992354 "data not found".
 //
 // Returns "" for unknown states (forward-compatible silent drop).
 func mapStateToFeishuEmoji(state receipt.MessageState) string {
 	switch state {
 	case receipt.StateReceived:
-		return "OK" // 👌 — visible standard "received" indicator
+		return "OneSecond" // ⏳
 	case receipt.StateForwarded:
 		return "OnIt" // 🔄
 	case receipt.StateDone:

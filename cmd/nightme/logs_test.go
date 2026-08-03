@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -151,7 +152,7 @@ func TestFollowLog_ScansNewLines(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var buf bytes.Buffer
+	var buf safeBuffer
 	done := make(chan struct{})
 	go func() {
 		_ = followLog(ctx, &buf, path)
@@ -185,6 +186,28 @@ func TestFollowLog_ScansNewLines(t *testing.T) {
 	if !strings.Contains(buf.String(), "appended-1") || !strings.Contains(buf.String(), "appended-2") {
 		t.Fatalf("missing appended lines; got %q", buf.String())
 	}
+}
+
+// safeBuffer wraps bytes.Buffer with a mutex so the test can
+// write to it from followLog's goroutine while polling via
+// String() from the test goroutine. The production followLog
+// writes via io.Writer; this lets us reuse it without forcing
+// the production code to lock around an io.Writer it doesn't own.
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *safeBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *safeBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
 }
 
 func TestRunLogs_NoFileIsHelpful(t *testing.T) {

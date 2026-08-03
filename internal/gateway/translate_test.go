@@ -122,6 +122,28 @@ func TestTranslate_EventUsage_NilDropped(t *testing.T) {
 	}
 }
 
+func TestTranslate_EventToolEnd_CarriesArgs(t *testing.T) {
+	// F-34: ToolEndEvent.Args flows through the Gateway into
+	// OutboundMessage.Meta["args"] so channel renderers can
+	// produce type-aware thread-reply summaries without
+	// re-parsing the tool_result content.
+	in := agent.AgentEvent{
+		Kind: agent.EventToolEnd,
+		ToolEnd: &agent.ToolEndEvent{
+			Name:   "Read",
+			Args:   "/foo.go",
+			Output: "47 lines",
+		},
+	}
+	msg, ok := Translate("chat1", in)
+	if !ok || msg.Kind != OutToolEnd {
+		t.Fatalf("got (%v, %v), want (OutToolEnd, true)", msg.Kind, ok)
+	}
+	if got := msg.Meta["args"]; got != "/foo.go" {
+		t.Errorf("Meta[args] = %v, want /foo.go", got)
+	}
+}
+
 func TestTranslate_EventCompaction(t *testing.T) {
 	in := agent.AgentEvent{
 		Kind:       agent.EventCompaction,

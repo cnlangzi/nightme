@@ -547,17 +547,177 @@ type patchCall struct {
 	MessageID string
 }
 
-// TestSend_OutThinking_AppendsWithPrefix — v1.3.x (§13.1 bug fix).
-// The Gateway's translate.go strips [思考] when emitting OutThinking.
-// The adapter must re-prepend it before calling receipt.Append so
-// receipt_event.go's HasPrefix detection can tag the entry as
-// "thinking" (and buildReceiptCard wraps it in collapsible_panel).
-func TestSend_OutThinking_AppendsWithPrefix(t *testing.T) {
+// TestSend_OutThinking_PostsToThread — F-34. OutThinking is
+// routed to a Feishu thread reply (rootID = msg.ReplyTo) with
+// the body "💭 <text>". The receipt card no longer carries the
+// thinking entry.
+func TestSend_OutThinking_PostsToThread(t *testing.T) {
 	a := testAdapter(t)
-	chatID := "oc_test"
-	userMsgID := "om_user_1"
 
-	// Stub out the network boundary so we don't hit Feishu.
+	var captured struct {
+		ChatID  string
+		MsgType string
+		RootID  string
+		Text    string
+	}
+	a.sendFunc = func(_ context.Context, chatID, msgType, content, rootID string) (string, error) {
+		captured.ChatID = chatID
+		captured.MsgType = msgType
+		captured.RootID = rootID
+		var payload struct {
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal([]byte(content), &payload)
+		captured.Text = payload.Text
+		return "om_text_test", nil
+	}
+
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind:    gateway.OutThinking,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user_1",
+		Text:    "let me think",
+	}); err != nil {
+		t.Fatalf("Send(OutThinking): %v", err)
+	}
+	if captured.RootID != "om_user_1" {
+		t.Errorf("rootID = %q, want om_user_1 (must thread to user message)", captured.RootID)
+	}
+	if captured.MsgType != larkim.MsgTypeText {
+		t.Errorf("msgType = %q, want %q", captured.MsgType, larkim.MsgTypeText)
+	}
+	if captured.Text != "💭 let me think" {
+		t.Errorf("body = %q, want %q", captured.Text, "💭 let me think")
+	}
+}
+
+// TestSend_OutToolStart_PostsToThread — F-34. OutToolStart is
+// routed to a thread reply with the body "🔧 name(args)".
+func TestSend_OutToolStart_PostsToThread(t *testing.T) {
+	a := testAdapter(t)
+
+	var captured struct {
+		RootID string
+		Text   string
+	}
+	a.sendFunc = func(_ context.Context, _, msgType, content, rootID string) (string, error) {
+		if msgType != larkim.MsgTypeText {
+			t.Errorf("msgType = %q, want %q", msgType, larkim.MsgTypeText)
+		}
+		captured.RootID = rootID
+		var payload struct {
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal([]byte(content), &payload)
+		captured.Text = payload.Text
+		return "om_text_test", nil
+	}
+
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind:    gateway.OutToolStart,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user_1",
+		Text:    "Read(/foo.go)",
+		Meta: map[string]any{
+			"tool_name": "Read",
+			"args":      "/foo.go",
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutToolStart): %v", err)
+	}
+	if captured.RootID != "om_user_1" {
+		t.Errorf("rootID = %q, want om_user_1", captured.RootID)
+	}
+	if captured.Text != "🔧 Read(/foo.go)" {
+		t.Errorf("body = %q, want %q", captured.Text, "🔧 Read(/foo.go)")
+	}
+}
+
+// TestSend_OutToolEnd_PostsToThread — F-34. OutToolEnd is routed
+// to a thread reply with a type-aware one-line summary.
+func TestSend_OutToolEnd_PostsToThread(t *testing.T) {
+	a := testAdapter(t)
+
+	var captured struct {
+		RootID string
+		Text   string
+	}
+	a.sendFunc = func(_ context.Context, _, _, content, rootID string) (string, error) {
+		captured.RootID = rootID
+		var payload struct {
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal([]byte(content), &payload)
+		captured.Text = payload.Text
+		return "om_text_test", nil
+	}
+
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind:    gateway.OutToolEnd,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user_1",
+		Text:    "Read /foo.go → 47 lines",
+		Meta: map[string]any{
+			"tool_name": "Read",
+			"args":      "/foo.go",
+			"output":    "line1\nline2",
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutToolEnd): %v", err)
+	}
+	if captured.RootID != "om_user_1" {
+		t.Errorf("rootID = %q, want om_user_1", captured.RootID)
+	}
+	want := summarizeToolEnd("Read", "/foo.go", "line1\nline2", nil)
+	if captured.Text != want {
+		t.Errorf("body = %q, want %q (from summarizeToolEnd)", captured.Text, want)
+	}
+	if !strings.Contains(captured.Text, "📄 Read") {
+		t.Errorf("body = %q, want it to start with the Read icon", captured.Text)
+	}
+}
+
+// TestSend_OutCompaction_PostsToThread — F-34. OutCompaction
+// is routed to a thread reply with "✶ Compacting conversation…".
+func TestSend_OutCompaction_PostsToThread(t *testing.T) {
+	a := testAdapter(t)
+
+	var captured struct {
+		RootID string
+		Text   string
+	}
+	a.sendFunc = func(_ context.Context, _, _, content, rootID string) (string, error) {
+		captured.RootID = rootID
+		var payload struct {
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal([]byte(content), &payload)
+		captured.Text = payload.Text
+		return "om_text_test", nil
+	}
+
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind:    gateway.OutCompaction,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user_1",
+	}); err != nil {
+		t.Fatalf("Send(OutCompaction): %v", err)
+	}
+	if captured.RootID != "om_user_1" {
+		t.Errorf("rootID = %q, want om_user_1", captured.RootID)
+	}
+	if captured.Text != "✶ Compacting conversation…" {
+		t.Errorf("body = %q, want %q", captured.Text, "✶ Compacting conversation…")
+	}
+}
+
+// TestSend_OutText_FoldsIntoReceipt — F-34 regression guard.
+// OutText / OutResult / OutInit / OutUsage must still fold into
+// the receipt card (unchanged behavior).
+func TestSend_OutText_FoldsIntoReceipt(t *testing.T) {
+	a := testAdapter(t)
+	userMsgID := "om_user_out"
+
 	var cards int
 	a.sendFunc = func(_ context.Context, _, _, _, _ string) (string, error) {
 		cards++
@@ -565,48 +725,50 @@ func TestSend_OutThinking_AppendsWithPrefix(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	// Cold-create a real receipt first via the production path.
+	// Warm up the receipt.
 	if err := a.Send(t.Context(), gateway.OutboundMessage{
 		Kind:    gateway.OutText,
-		ChatID:  chatID,
+		ChatID:  "oc_test",
 		ReplyTo: userMsgID,
 		Text:    "warmup",
 	}); err != nil {
 		t.Fatalf("Send(OutText warmup): %v", err)
 	}
 
-	// Now dispatch OutThinking through Send. Since a real receipt
-	// exists, the dispatcher will call receipt.Append.
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutThinking,
-		ChatID:  chatID,
-		ReplyTo: userMsgID,
-		Text:    "let me think about this",
-	}); err != nil {
-		t.Fatalf("Send(OutThinking): %v", err)
+	for _, kind := range []gateway.OutboundKind{
+		gateway.OutResult,
+		gateway.OutUsage,
+		gateway.OutInit,
+	} {
+		if err := a.Send(t.Context(), gateway.OutboundMessage{
+			Kind:    kind,
+			ChatID:  "oc_test",
+			ReplyTo: userMsgID,
+			Text:    "x",
+			Meta: map[string]any{
+				"session_id":    "s_1",
+				"model":         "claude-sonnet-4-5",
+				"agent_name":    "claude",
+				"workspace":     "/tmp",
+				"branch":        "main",
+				"input_tokens":  10,
+				"output_tokens": 5,
+			},
+		}); err != nil {
+			t.Fatalf("Send(%v): %v", kind, err)
+		}
 	}
 
-	// Inspect the receipt's entries — the most recent one should
-	// carry the [思考] prefix and Kind="thinking".
 	a.mu.RLock()
 	rcpt := a.receiptsByUserMsgID[userMsgID]
 	a.mu.RUnlock()
 	if rcpt == nil {
-		t.Fatalf("no receipt registered for userMsgID=%s", userMsgID)
+		t.Fatalf("receipt not registered for %s", userMsgID)
 	}
 	rcpt.mu.Lock()
+	defer rcpt.mu.Unlock()
 	if len(rcpt.entries) == 0 {
-		rcpt.mu.Unlock()
-		t.Fatalf("receipt has no entries")
-	}
-	last := rcpt.entries[len(rcpt.entries)-1]
-	rcpt.mu.Unlock()
-
-	if last.Text != "let me think about this" {
-		t.Errorf("latest entry Text=%q, want %q (eventToEntry strips the prefix; the Kind field carries the signal)", last.Text, "let me think about this")
-	}
-	if last.Kind != "thinking" {
-		t.Errorf("latest entry Kind=%q, want %q (HasPrefix detection must fire after prefix re-prepended)", last.Kind, "thinking")
+		t.Fatalf("receipt has no entries; OutText/OutResult/OutInit/OutUsage should fold in")
 	}
 }
 

@@ -319,14 +319,17 @@ func TestReceipt_FirstSendThenPatch(t *testing.T) {
 	if !strings.Contains(cards[0].Body, "hello from the agent") {
 		t.Errorf("SendCard body missing first event text: %q", truncateForTest(cards[0].Body, 120))
 	}
-	// The LAST PATCH should contain all three entries (the
-	// rolling-log card is the union of all events seen so far).
-	// We assert on the human-visible pieces: the text reply and
-	// the tool name (the tool id "toolu_001" is only in the
-	// raw AgentEvent, not in the rendered LogEntry; eventToEntry
-	// surfaces the tool name + args, not the id).
+	// The LAST PATCH should contain all reply entries seen so
+	// far (the rolling-log card is the union of reply/result
+	// events). Per F-34, tool_start / tool_end no longer surface
+	// in the receipt card — the adapter routes them to Feishu
+	// thread replies (Adapter.Send → postThreadReply). We assert
+	// on the visible reply text only. eventCount drives the
+	// header line ("🔄 ⏳ 3 · HH:MM:SS"), which is also asserted
+	// implicitly via the PATCH count above (each subsequent
+	// event must PATCH to refresh the timestamp).
 	last := patches[len(patches)-1].Body
-	for _, want := range []string{"hello from the agent", "Read", "/tmp/foo"} {
+	for _, want := range []string{"hello from the agent"} {
 		if !strings.Contains(last, want) {
 			t.Errorf("last PATCH missing %q; got: %q", want, truncateForTest(last, 200))
 		}
@@ -409,7 +412,7 @@ func TestFootLine_Components(t *testing.T) {
 			branch:       "feat/receipt-card",
 			inputTokens:  50_000,
 			outputTokens: 3_000,
-			want: "Agent: claude | GIT: feat/receipt-card | Tokens: 50K/3k<br/>Workspace: /Users/devin/code/nightme",
+			want:         "Agent: claude | GIT: feat/receipt-card | Tokens: 50K/3k<br/>Workspace: /Users/devin/code/nightme",
 		},
 		{
 			name:         "branch-empty-omitted-not-git-repo",
@@ -439,10 +442,10 @@ func TestFootLine_Components(t *testing.T) {
 			want:      "Workspace: ~/code/nightme",
 		},
 		{
-			name:         "input-only-zero-output-omitted",
-			agentName:    "claude",
-			workspace:    "/Users/geax",
-			inputTokens:  20_000,
+			name:        "input-only-zero-output-omitted",
+			agentName:   "claude",
+			workspace:   "/Users/geax",
+			inputTokens: 20_000,
 			// Tokens "20K" (no output side) is the only
 			// line-1 segment beyond Agent.
 			want: "Agent: claude | Tokens: 20K<br/>Workspace: /Users/geax",
@@ -452,7 +455,7 @@ func TestFootLine_Components(t *testing.T) {
 			agentName:    "claude",
 			workspace:    "/Users/geax",
 			outputTokens: 1_000,
-			want: "Agent: claude | Tokens: 1k<br/>Workspace: /Users/geax",
+			want:         "Agent: claude | Tokens: 1k<br/>Workspace: /Users/geax",
 		},
 	}
 	for _, tc := range cases {
@@ -549,9 +552,9 @@ func TestFootLine_TwoLineLayout(t *testing.T) {
 		{
 			name: "long-line-stays-as-one-line-no-soft-wrap",
 			r: &MessageReceipt{
-				agentName: "very-long-agent-name-that-exceeds-the-old-soft-cap",
-				workspace: "/Users/devin/code/some-really-long-project-name-here",
-				branch:    "feat/another-long-branch-name",
+				agentName:    "very-long-agent-name-that-exceeds-the-old-soft-cap",
+				workspace:    "/Users/devin/code/some-really-long-project-name-here",
+				branch:       "feat/another-long-branch-name",
 				inputTokens:  100_000,
 				outputTokens: 5_000,
 			},
@@ -700,7 +703,6 @@ func TestBuildReceiptCard_Card2Shape(t *testing.T) {
 		outputTokens: 800,
 		entries: []LogEntry{
 			{Icon: "💬", Text: "hello", Kind: "reply"},
-			{Icon: "🔧", Text: "Read(/tmp/foo)", Kind: "tool_start"},
 		},
 	}
 	body, err := buildReceiptCard(r)
@@ -716,10 +718,9 @@ func TestBuildReceiptCard_Card2Shape(t *testing.T) {
 		`"elements":[`,
 		`"tag":"markdown"`,
 
-		// Header + entries rendered as markdown.
+		// Header + reply entry rendered as markdown.
 		`"content":"🔄 ⏳ 3 · 14:32:05"`,
 		`"content":"💬 hello"`,
-		`"content":"🔧 Read(/tmp/foo)"`,
 
 		// Labelled foot-note format (per-line layout,
 		// uppercase labels):
@@ -837,23 +838,22 @@ func TestBuildReceiptCard_FooterOpenClawStyle(t *testing.T) {
 	})
 }
 
-// TestBuildReceiptCard_ThinkingCollapsiblePanel pins the
-// collapsible_panel rendering for thinking entries. Mirrors
-// the OpenClaw Lark plugin's reasoning panel
-// (openclaw-lark src/card/builder.ts — reasoning section).
+// TestBuildReceiptCard_ThinkingCollapsiblePanel pins the F-34
+// contract: thinking entries (along with tool_start / tool_end /
+// compaction) are NO LONGER carried in the receipt card. The
+// adapter routes them to Feishu thread replies; eventToEntry
+// returns (_, false) so the receipt only sees OutText / OutResult
+// / OutInit / OutUsage-derived entries. The card body must not
+// contain a collapsible_panel element.
 //
 // Invariants:
-//  1. Thinking entries (Kind == "thinking") render as a
-//     collapsible_panel element with expanded: false (the
-//     user clicks to expand, so the long reasoning text
-//     doesn't push the final answer off the card surface).
-//  2. The panel header is a markdown element titled "💭 思考".
-//  3. The panel's inner elements are a single markdown
-//     element with the thinking text and text_size:
-//     "notation" (small / dim visual weight).
-//  4. Non-thinking entries (e.g. tool calls, final reply)
-//     still render as plain markdown elements — no
-//     collapsible_panel wrapping.
+//  1. No collapsible_panel element appears, even when the
+//     supplied entries list contains a thinking-shaped one.
+//     (F-34: this is the regression guard — pre-F-34 the
+//     receipt card rendered collapsible_panel for thinking
+//     entries; that was retired because 30+ panels hit
+//     Feishu's 50-element limit.)
+//  2. Only the reply entry is rendered into the card body.
 func TestBuildReceiptCard_ThinkingCollapsiblePanel(t *testing.T) {
 	r := &MessageReceipt{
 		state:        StateExecuting,
@@ -866,19 +866,19 @@ func TestBuildReceiptCard_ThinkingCollapsiblePanel(t *testing.T) {
 		outputTokens: 1_000,
 		entries: []LogEntry{
 			{
-				Icon:  "💭",
-				Text:  "The user said hi — I should respond briefly and friendly. No need to invoke any skills or tools.",
-				Kind:  "thinking",
+				Icon: "💭",
+				Text: "The user said hi — I should respond briefly and friendly. No need to invoke any skills or tools.",
+				Kind: "thinking",
 			},
 			{
-				Icon:  "🔧",
-				Text:  "Read(/tmp/foo)",
-				Kind:  "tool_start",
+				Icon: "🔧",
+				Text: "Read(/tmp/foo)",
+				Kind: "tool_start",
 			},
 			{
-				Icon:  "💬",
-				Text:  "Hi! How can I help you today?",
-				Kind:  "reply",
+				Icon: "💬",
+				Text: "Hi! How can I help you today?",
+				Kind: "reply",
 			},
 		},
 	}
@@ -887,35 +887,20 @@ func TestBuildReceiptCard_ThinkingCollapsiblePanel(t *testing.T) {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
 
-	// (1) The thinking entry becomes a collapsible_panel.
-	if !strings.Contains(body, `"tag":"collapsible_panel"`) {
-		t.Errorf("card body missing collapsible_panel for thinking entry\n--- body ---\n%s", truncateForTest(body, 400))
+	// F-34: thinking entries (and tool_start / tool_end /
+	// compaction) are NO LONGER carried in the receipt card;
+	// the adapter routes them to thread replies. The card
+	// body must not contain a collapsible_panel element.
+	if strings.Contains(body, `"tag":"collapsible_panel"`) {
+		t.Errorf("card body contains collapsible_panel; F-34 retired collapsible_panel rendering for thinking entries\n--- body ---\n%s", truncateForTest(body, 400))
 	}
-	// (2) The panel is collapsed by default.
-	if !strings.Contains(body, `"expanded":false`) {
-		t.Errorf("collapsible_panel not collapsed by default (expanded:false)\n--- body ---\n%s", truncateForTest(body, 400))
+	// The thinking entry text must NOT surface in the card.
+	if strings.Contains(body, "should respond briefly and friendly") {
+		t.Errorf("card body leaked thinking text; F-34 dropped it from the receipt\n--- body ---\n%s", truncateForTest(body, 400))
 	}
-	// (3) The panel header is "💭 思考".
-	if !strings.Contains(body, `"content":"💭 思考"`) {
-		t.Errorf("collapsible_panel header missing \"💭 思考\"\n--- body ---\n%s", truncateForTest(body, 400))
-	}
-	// (4) The thinking text is inside a notation-sized
-	// markdown element (the inner element of the panel).
-	// We assert the thinking text appears + that an
-	// inner text_size:notation is present.
-	if !strings.Contains(body, "should respond briefly and friendly") {
-		t.Errorf("collapsible_panel missing thinking text body\n--- body ---\n%s", truncateForTest(body, 400))
-	}
-
-	// (5) Non-thinking entries (tool_start, reply) are
-	// still plain markdown — no collapsible_panel around
-	// them. The two non-thinking entries should produce
-	// two markdown elements WITHOUT the 💭 header.
-	if !strings.Contains(body, `"content":"🔧 Read(/tmp/foo)"`) {
-		t.Errorf("non-thinking tool_start entry missing plain markdown\n--- body ---\n%s", truncateForTest(body, 400))
-	}
+	// The reply entry survives (it's a real OutText-derived entry).
 	if !strings.Contains(body, `"content":"💬 Hi! How can I help you today?"`) {
-		t.Errorf("non-thinking reply entry missing plain markdown\n--- body ---\n%s", truncateForTest(body, 400))
+		t.Errorf("reply entry missing from card body\n--- body ---\n%s", truncateForTest(body, 400))
 	}
 }
 
@@ -961,11 +946,10 @@ func (m *mockReceiptBot) UpdateMessage(_ context.Context, _, _ string) error {
 	return nil
 }
 
-
-// --- v1.3.x: buildReceiptCard emits collapsible_panel for tool entries ---
-// See docs/channel/feishu.md §13.6 / §13.9 / §15.3. ToolStart and
-// ToolEnd both tag Kind="tool" so each becomes its own
-// collapsible_panel; final result stays flat.
+// --- F-34: buildReceiptCard no longer wraps tool entries in
+// collapsible_panel. tool_start / tool_end are routed to thread
+// replies; only OutText / OutResult / OutInit / OutUsage-derived
+// entries land in the card body. ---
 
 func TestBuildReceiptCard_ToolFolded(t *testing.T) {
 	r := &MessageReceipt{
@@ -983,47 +967,14 @@ func TestBuildReceiptCard_ToolFolded(t *testing.T) {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
 
-	// Count collapsible_panel tags. The tool entries should both be
-	// wrapped (one panel per entry); the final result must stay flat.
-	panelCount := strings.Count(body, `"tag":"collapsible_panel"`)
-	if panelCount < 2 {
-		t.Errorf("collapsible_panel count = %d, want >= 2 (tool_start + tool_end should each fold)", panelCount)
+	// F-34: tool entries are no longer collapsed into
+	// collapsible_panel; they go to thread replies. The card
+	// body should still render the result entry flat, and
+	// there should be no collapsible_panel at all.
+	if strings.Contains(body, `"tag":"collapsible_panel"`) {
+		t.Errorf("card body contains collapsible_panel; F-34 retired collapsible_panel for tool entries\n--- body ---\n%s", truncateForTest(body, 400))
 	}
-
-	// Default-expanded: false for all panels.
-	if !strings.Contains(body, `"expanded":false`) {
-		t.Errorf("collapsible_panel not collapsed by default\n--- body ---\n%s", truncateForTest(body, 400))
-	}
-
-	// Tool header content uses e.Icon + e.Text.
-	if !strings.Contains(body, `"content":"🔧 Read(/a.py)"`) {
-		t.Errorf("tool_start panel header missing 🔧 Read(/a.py)\n--- body ---\n%s", truncateForTest(body, 400))
-	}
-	if !strings.Contains(body, `"content":"✅ Read → 47 lines"`) {
-		t.Errorf("tool_end panel header missing ✅ Read → 47 lines\n--- body ---\n%s", truncateForTest(body, 400))
-	}
-
-	// The final 📝 result must be a plain markdown element, not
-	// wrapped in a panel.
 	if !strings.Contains(body, `"content":"📝 final answer here"`) {
 		t.Errorf("final result missing as plain markdown\n--- body ---\n%s", truncateForTest(body, 400))
-	}
-}
-
-func TestBuildReceiptCard_ToolFailureHasErrorIcon(t *testing.T) {
-	r := &MessageReceipt{
-		state:       StateError,
-		eventCount:  1,
-		lastEventAt: parseTime(t, "2026-08-01T14:32:05+08:00"),
-		entries: []LogEntry{
-			{Icon: "❌", Text: "Read failed: permission denied", Kind: "tool"},
-		},
-	}
-	body, err := buildReceiptCard(r)
-	if err != nil {
-		t.Fatalf("buildReceiptCard: %v", err)
-	}
-	if !strings.Contains(body, `"content":"❌ Read failed: permission denied"`) {
-		t.Errorf("tool failure panel header missing ❌ + failure reason\n--- body ---\n%s", truncateForTest(body, 400))
 	}
 }

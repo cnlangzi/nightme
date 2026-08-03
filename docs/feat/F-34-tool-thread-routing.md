@@ -145,6 +145,8 @@ Feishu adapter 包内 `summarize_tool.go` 提供 `summarizeToolEnd(name, args, o
 
 → `MessageReceipt.entries` 收窄到只装 OutText / OutResult / OutInit / OutUsage 派生的 entry。Card body 元素数通常 ≤ 5，**50 element 上限永远不破**。
 
+**Silent PATCH（实现细节）**：`MessageReceipt.Append` 对 `EventToolStart` / `EventToolEnd` / `EventCompaction` 这三类返回 `(_, false)` 的 kind **不**写 entries，但**仍然**触发 `renderLocked`，同步 bump `eventCount` + `lastEventAt` 并 PATCH card。理由：thinking/tool/compaction 现在走 thread reply，main chat 的 card header（`🔄 ⏳ N · HH:MM:SS`）必须反映 agent 仍 busy，否则 header 会冻结在 tool 之前的时刻。PATCH 频率：每个 tool event 一次（≈ 50/min 在 hot agent 上，远低于 Feishu 1000/min rate limit）。
+
 ### 2.5 不变式
 
 - **OutboundMessage 不动**：无新 Kind，无 Meta 字段约定（Meta 只承载数据载荷 output / err / args，不承载 routing hint）

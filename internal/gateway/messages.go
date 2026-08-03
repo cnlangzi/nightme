@@ -319,7 +319,7 @@ type Reaction struct {
 	// kind.
 	ReactionID string
 }
-//
+
 // v1.3: State is the canonical abstract value; Emoji is optional
 // channel-specific override (most channels ignore it and map
 // State → emoji internally).

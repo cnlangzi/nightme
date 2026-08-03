@@ -366,7 +366,6 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 // Errors from the underlying API are logged and returned; the
 // Gateway treats Send as fire-and-ack (no retry).
 
-
 // --- v1.1 receipt lifecycle API (channel.Channel contract) ---
 //
 // receiptFor returns the receipt for (chatID, userMsgID), lazily
@@ -453,21 +452,11 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		})
 
 	case gateway.OutThinking:
-		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
-		if receipt == nil {
-			return nil
-		}
-		// v1.3.x (§13.1 bug fix): the Gateway's translate.go
-		// strips the [思考] prefix before emitting OutThinking,
-		// but the receipt's eventToEntry detects thinking entries
-		// by checking HasPrefix(text, thinkingPrefix). Without the
-		// prefix the Kind="thinking" branch never fires and the
-		// collapsible_panel rendering for thinking is dead code.
-		// Prepending the prefix here restores the detection.
-		return receipt.Append(ctx, agent.AgentEvent{
-			Kind: agent.EventText,
-			Text: thinkingPrefix + msg.Text,
-		})
+		// F-34: thinking is posted to the user message thread as
+		// a 💭 line so the main chat stays focused on the final
+		// answer. Falls back to a top-level send if ReplyTo is
+		// empty (orphan event, e.g. startup init).
+		return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text)
 
 	case gateway.OutMessageState:
 		// F-31: read abstract state from Meta, map to feishu
@@ -552,24 +541,22 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		return err
 
 	case gateway.OutToolStart:
-		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
-		if receipt == nil {
-			return nil
-		}
-		return receipt.Append(ctx, agent.AgentEvent{
-			Kind:      agent.EventToolStart,
-			ToolStart: &agent.ToolStartEvent{Name: toolName(msg), Args: toolArgs(msg)},
-		})
+		// F-34: tool_start is posted to the user message
+		// thread as a "🔧 name(args)" line. The receipt card
+		// no longer carries tool entries.
+		body := "🔧 " + formatToolStart(toolName(msg), toolArgs(msg))
+		return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body)
 
 	case gateway.OutToolEnd:
-		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
-		if receipt == nil {
-			return nil
+		// F-34: tool_end is posted to the user message thread
+		// with a type-aware one-line summary. The receipt card
+		// no longer carries tool entries.
+		var toolErr error
+		if e, ok := msg.Meta["err"].(error); ok {
+			toolErr = e
 		}
-		return receipt.Append(ctx, agent.AgentEvent{
-			Kind:    agent.EventToolEnd,
-			ToolEnd: &agent.ToolEndEvent{Name: toolName(msg), Output: toolOutput(msg)},
-		})
+		body := summarizeToolEnd(toolName(msg), toolArgs(msg), toolOutput(msg), toolErr)
+		return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body)
 
 	case gateway.OutTyping:
 		// No native Feishu equivalent (typing indicators come from
@@ -608,14 +595,10 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		})
 
 	case gateway.OutCompaction:
-		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
-		if receipt == nil {
-			return nil
-		}
-		return receipt.Append(ctx, agent.AgentEvent{
-			Kind:       agent.EventCompaction,
-			Compaction: &agent.CompactionEvent{Subtype: metaString(msg, "subtype")},
-		})
+		// F-34: compaction is posted to the thread as a single
+		// "✶ Compacting conversation…" line.
+		return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo,
+			"✶ Compacting conversation…")
 
 	case gateway.OutInit:
 		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
@@ -669,6 +652,28 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 	// message remains a top-level text bubble (legacy behavior).
 	_, err := a.SendMessageText(ctx, chatID, text, "")
 	return err
+}
+
+// postThreadReply posts body as a thread reply anchored at rootID.
+// rootID = msg.ReplyTo = currentTurnUserMsgID. When rootID is empty
+// (orphan event, e.g. startup EventInit) the helper falls back to a
+// top-level text send via sendRawOutText so the user still sees the
+// message.
+func (a *Adapter) postThreadReply(ctx context.Context, chatID, rootID, body string) error {
+	if rootID == "" {
+		return a.sendRawOutText(ctx, chatID, body)
+	}
+	_, err := a.SendMessageText(ctx, chatID, body, rootID)
+	return err
+}
+
+// formatToolStart renders the tool_start thread body. When args is
+// non-empty the format is "name(args)"; otherwise just "name".
+func formatToolStart(name, args string) string {
+	if args == "" {
+		return name
+	}
+	return name + "(" + args + ")"
 }
 
 // toolName / toolArgs / toolOutput pull the well-known fields from
@@ -910,6 +915,20 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 		if e.Icon == "" && e.Text == "" {
 			continue
 		}
+		// F-34: thinking / tool_start / tool_end / compaction
+		// entries are no longer rendered into the receipt card;
+		// the adapter routes them to Feishu thread replies
+		// (Adapter.Send → postThreadReply). eventToEntry returns
+		// (_, false) for them so they normally never reach this
+		// loop. This guard is a defensive backstop: if a future
+		// bridge or a buggy caller appends one of these Kinds
+		// directly to r.entries (e.g. when constructing fixtures
+		// in tests), the card body still hides it instead of
+		// leaking thinking/tool content into the rolling log.
+		switch e.Kind {
+		case "thinking", "tool_start", "tool_end", "compaction":
+			continue
+		}
 		content := e.Icon
 		if e.Text != "" {
 			if content != "" {
@@ -917,99 +936,13 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 			}
 			content += e.Text
 		}
-		// Thinking entries are rendered as a collapsible
-		// panel (collapsed by default) so the long
-		// reasoning text doesn't push the final answer
-		// off the visible card surface. Mirrors the
-		// OpenClaw Lark plugin's reasoning panel
-		// (openclaw-lark src/card/builder.ts — see the
-		// reasoning section in buildCompleteCard). The
-		// icon + i18n_content + icon_position +
-		// icon_expanded_angle fields are copied verbatim
-		// from OpenClaw; they're not strictly required
-		// by the schema but the Feishu client uses
-		// `icon` to drive the click-to-expand affordance
-		// and the panel renders as a flat (non-collapse)
-		// block when it's missing.
-		if e.Kind == "thinking" {
-			elements = append(elements, map[string]any{
-				"tag":      "collapsible_panel",
-				"expanded": false,
-				"header": map[string]any{
-					"title": map[string]any{
-						"tag":     "markdown",
-						"content": "💭 思考",
-						"i18n_content": map[string]any{
-							"zh_cn": "💭 思考",
-							"en_us": "💭 Thought",
-						},
-					},
-					"vertical_align": "center",
-					"icon": map[string]any{
-						"tag":   "standard_icon",
-						"token": "down-small-ccm_outlined",
-						"size":  "16px 16px",
-					},
-					"icon_position":       "follow_text",
-					"icon_expanded_angle": -180,
-				},
-				"border": map[string]any{
-					"color":        "grey",
-					"corner_radius": "5px",
-				},
-				"vertical_spacing": "8px",
-				"padding":          "8px 8px 8px 8px",
-				"elements": []map[string]any{
-					{
-						"tag":       "markdown",
-						"content":   e.Text,
-						"text_size": "notation",
-					},
-				},
-			})
-			continue
-		}
-		// v1.3.x (§13.6 / §13.9): tool_start and tool_end both
-		// emit Kind="tool" so they collapse into collapsible
-		// panels. Panel header shows e.Icon (🔧 / ✅ / ❌) +
-		// e.Text (already pre-formatted as
-		// "tool_name(args)" or "tool_name → output" /
-		// "tool_name failed: err" by eventToEntry). Body
-		// holds the same e.Text for users who expand.
-		if e.Kind == "tool" {
-			elements = append(elements, map[string]any{
-				"tag":      "collapsible_panel",
-				"expanded": false,
-				"header": map[string]any{
-					"title": map[string]any{
-						"tag":     "markdown",
-						"content": e.Icon + " " + e.Text,
-					},
-					"vertical_align": "center",
-					"icon": map[string]any{
-						"tag":   "standard_icon",
-						"token": "down-small-ccm_outlined",
-						"size":  "16px 16px",
-					},
-					"icon_position":       "follow_text",
-					"icon_expanded_angle": -180,
-				},
-				"border": map[string]any{
-					"color":        "grey",
-					"corner_radius": "5px",
-				},
-				"vertical_spacing": "8px",
-				"padding":          "8px 8px 8px 8px",
-				"elements": []map[string]any{
-					{
-						"tag":       "markdown",
-						"content":   e.Text,
-						"text_size": "notation",
-					},
-				},
-			})
-			continue
-		}
+		// The collapse branches (collapsible_panel) were retired
+		// — collapsed panels hit Feishu's 50-element limit, and
+		// surfacing 30+ panels pushed the final answer off the
+		// card. Channel now routes those kinds to Feishu thread
+		// replies. The receipt card carries the rolling reply
+		// (OutText / OutResult) plus metadata (OutInit / OutUsage)
+		// only.
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
 			"content": content,
@@ -1619,11 +1552,11 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	hasMention := computeHasMention(message, botOpenID)
 	text = stripMentionPrefix(text, message.Mentions, botOpenID)
 	msg := channel.Message{
-		ChatID:      chatID,
-		Text:        text,
-		UserID:      senderID(event),
-		Time:        messageTime(message.CreateTime),
-		MessageID:   stringValue(message.MessageId),
+		ChatID:    chatID,
+		Text:      text,
+		UserID:    senderID(event),
+		Time:      messageTime(message.CreateTime),
+		MessageID: stringValue(message.MessageId),
 		// F-33 §13.11 / D3: ReplyTo = Feishu message.ParentId. The
 		// thread-top-level RootId is intentionally not surfaced to
 		// nightme — we only track point-to-point reply relationships.
@@ -1633,7 +1566,7 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 		ReplyTo:     stringValue(message.ParentId),
 		Attachments: attachments,
 		// F-watch: see docs/channel/feishu.md §6.10 + SPEC §3.1.1.
-		HasMention:  hasMention,
+		HasMention: hasMention,
 	}
 	// Trace every inbound message before the publish lock so the
 	// CLI surface shows the user message that triggered the

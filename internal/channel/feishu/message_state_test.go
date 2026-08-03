@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
 // TestMapStateToFeishuEmoji verifies the canonical F-31 §8.3
@@ -17,11 +17,11 @@ func TestMapStateToFeishuEmoji(t *testing.T) {
 		state agent.MessageState
 		want  string
 	}{
-		{agent.StateReceived, "OneSecond"},   // ⏳
-		{agent.StateForwarded, "OnIt"},        // 🔄
-		{agent.StateDone, "DONE"},            // ✅
-		{agent.StateError, "THUMBSUP"},       // ❌ closest predefined
-		{agent.MessageState(99), ""},         // unknown → silent drop
+		{agent.StateReceived, "OneSecond"}, // ⏳
+		{agent.StateForwarded, "OnIt"},     // 🔄
+		{agent.StateDone, "DONE"},          // ✅
+		{agent.StateError, "THUMBSUP"},     // ❌ closest predefined
+		{agent.MessageState(99), ""},       // unknown → silent drop
 	}
 	for _, tc := range cases {
 		got := mapStateToFeishuEmoji(tc.state)

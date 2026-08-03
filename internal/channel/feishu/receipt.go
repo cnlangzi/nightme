@@ -669,6 +669,27 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 
 	entry, ok := eventToEntry(ev, time.Now(), r.lastEntryLocked())
 	if !ok {
+		// F-34: eventToEntry returns (_, false) for kinds the
+		// receipt card no longer carries (thinking / tool_start /
+		// tool_end / compaction / permission). The adapter
+		// routes those to Feishu thread replies. We still
+		// PATCH the receipt card so the header timestamp
+		// reflects the latest activity — without this, the
+		// user sees a frozen "🔄 ⏳ 1 · 14:32:00" line while
+		// the agent is clearly busy running tools. Render
+		// without appending an entry; bump eventCount + lastEventAt
+		// so renderLocked's body-diff gate actually issues a PATCH.
+		_ = entry
+		switch ev.Kind {
+		case agent.EventToolStart, agent.EventToolEnd, agent.EventCompaction:
+			r.eventCount++
+			r.lastEventAt = time.Now()
+			if r.state == StateWaiting {
+				r.state = StateExecuting
+				r.forwardedAt = r.lastEventAt
+			}
+			return r.renderLocked(ctx)
+		}
 		// Unknown / unhandled event kind — keep going but don't
 		// touch the log.
 		return nil

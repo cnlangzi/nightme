@@ -108,6 +108,7 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 			Text:   text,
 			Meta: map[string]any{
 				"tool_name": name,
+				"args":      ev.ToolEnd.Args,
 				"output":    ev.ToolEnd.Output,
 				"err":       ev.ToolEnd.Err,
 			},

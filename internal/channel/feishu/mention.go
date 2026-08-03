@@ -7,7 +7,8 @@
 //     like "@_user_1" or "@_all" with metadata in
 //     message.Mentions[].Key. When the user @-s the bot, the
 //     message text typically starts with "@_user_1 " (placeholder
-//     + space), which breaks gateway.ParseCommand (which requires
+//
+//   - space), which breaks gateway.ParseCommand (which requires
 //     HasPrefix "/").
 //
 //   - We strip leading @bot_key / @_all placeholders from text so
@@ -114,8 +115,8 @@ func (a *Adapter) lookupBotOpenID(ctx context.Context) (string, error) {
 // couldn't reach the SDK" from "SDK responded but no identity".
 // They are not user-visible; logs only.
 var (
-	errBotClientUnavailable     = botClientUnavailableErr{}
-	errBotIdentityUnavailable  = botIdentityUnavailableErr{}
+	errBotClientUnavailable   = botClientUnavailableErr{}
+	errBotIdentityUnavailable = botIdentityUnavailableErr{}
 )
 
 type botClientUnavailableErr struct{}

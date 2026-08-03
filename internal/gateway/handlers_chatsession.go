@@ -42,7 +42,7 @@ func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel C
 	// correct key. Registering as "/cwd" silently breaks routing
 	// — fix: register without slash (commit 4119e2c-fix-2).
 	gw.Register(Command{
-		Name: "cwd",
+		Name:        "cwd",
 		Description: "Set workspace for this chat: /cwd <absolute-path>",
 		Handler: func(ctx context.Context, msg *InboundMessage, args []string) (*CommandResult, error) {
 			return handleCwd(ctx, mgr, channel, msg, args, globalPrimary)
@@ -50,7 +50,7 @@ func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel C
 	})
 
 	gw.Register(Command{
-		Name: "use",
+		Name:        "use",
 		Description: "Switch active agent: /use <agent-name> (lazy spawn; reuse pool if present)",
 		Handler: func(ctx context.Context, msg *InboundMessage, args []string) (*CommandResult, error) {
 			return handleUse(ctx, mgr, channel, msg, args, globalPrimary)
@@ -58,7 +58,7 @@ func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel C
 	})
 
 	gw.Register(Command{
-		Name: "kill",
+		Name:        "kill",
 		Description: "Kill every AgentSession in this chat's pool; next message respawns",
 		Handler: func(ctx context.Context, msg *InboundMessage, args []string) (*CommandResult, error) {
 			return handleKill(ctx, mgr, channel, msg)
@@ -69,7 +69,7 @@ func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel C
 	// does not touch activeCwd / activeAgent / pool. DM chats:
 	// state is persisted but the gate is a no-op.
 	gw.Register(Command{
-		Name: "watch",
+		Name:        "watch",
 		Description: "Toggle per-chat message-watch mode: /watch on | /watch off",
 		Handler: func(ctx context.Context, msg *InboundMessage, args []string) (*CommandResult, error) {
 			return handleWatch(ctx, mgr, channel, msg, args, globalPrimary)
@@ -103,18 +103,20 @@ func RegisterChatSessionRuntime(gw Gateway, mgr *chatsession.Manager, channel Ch
 // Path resolution rules (commit fix-4):
 //
 //   - Leading "~" or "~/" → expand to $HOME
+//
 //   - Relative path (no leading "/" or "~") → prepend $HOME
 //     (matches shell semantics where `cd code` from `~` works;
 //     safer than resolving against daemon's cwd, which is wherever
 //     the operator happened to invoke `go run`)
+//
 //   - Absolute path → unchanged
 //
-//   /cwd <path>           → set activeCwd = <resolved-abs-path>
-//   /cwd (no arg)         → reply "Usage: /cwd <path>"
-//   /cwd /nonexistent     → reply "Path does not exist: ..."
-//   /cwd ~                → $HOME (absolute)
-//   /cwd ~/foo            → $HOME/foo
-//   /cwd foo              → $HOME/foo  (relative path = $HOME-relative)
+//     /cwd <path>           → set activeCwd = <resolved-abs-path>
+//     /cwd (no arg)         → reply "Usage: /cwd <path>"
+//     /cwd /nonexistent     → reply "Path does not exist: ..."
+//     /cwd ~                → $HOME (absolute)
+//     /cwd ~/foo            → $HOME/foo
+//     /cwd foo              → $HOME/foo  (relative path = $HOME-relative)
 //
 // Existence check: we reject non-existent paths at /cwd time so
 // the agent doesn't fail later with a confusing spawn error
@@ -211,11 +213,11 @@ func expandTilde(path string) (string, error) {
 // newly-active AgentSession (translates Events → Channel.Send).
 // Old pump is implicitly stopped via /kill or previous /use.
 //
-//   /use claude                    → set activeAgent, reuse/spawn (claude, cwd)
-//   /use codex --auto-approve      → set activeAgent, pass args to spawn
-//   /use                           → reply "Usage: /use <agent> [args...]"
-//   /use (no activeCwd yet)        → reply "send /cwd <path> first"
-//   /use unknown-agent             → reply "unknown agent"
+//	/use claude                    → set activeAgent, reuse/spawn (claude, cwd)
+//	/use codex --auto-approve      → set activeAgent, pass args to spawn
+//	/use                           → reply "Usage: /use <agent> [args...]"
+//	/use (no activeCwd yet)        → reply "send /cwd <path> first"
+//	/use unknown-agent             → reply "unknown agent"
 func handleUse(ctx context.Context, mgr *chatsession.Manager, channel Channel, msg *InboundMessage, args []string, globalPrimary string) (*CommandResult, error) {
 	if len(args) < 1 {
 		return reply(ctx, channel, msg.ChatID, "Usage: /use <agent> [args...]"), nil

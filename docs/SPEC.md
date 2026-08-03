@@ -146,6 +146,24 @@ v1.3 在 v1.2 架构上做**职责再切分**——核心变化是**删除 Gatew
 
 **详细落地**：见 [`feat/F-34-tool-thread-routing.md`](./feat/F-34-tool-thread-routing.md) + [`channel/feishu.md`](./channel/feishu.md) §13.12。
 
+### 0.4 文档变更摘要（v1.3.x 抽象/具体边界规范，2026-08-04）
+
+**背景**：F-34 review 揭示 `OutboundMessage.Meta["tool_name"]` / `["args"]` / `["output"]` / `["err"]` 是隐式协议 —— Gateway（抽象层） hardcode 了 Feishu adapter（具体层）需要的字段名，本质上是把 concrete 实现细节 leak 进 abstract 层。同类违反在 `OutboundMessage.Meta` 的其他字段（`is_error` / `subtype` / `state` / `message_id` 等）以小范围存在。
+
+**新增规范**：§1.4 「抽象 / 具体 边界规范」作为新的不变式类型—— 跨层通信的架构纪律，位阶高于现有 §1.3 的具体不变式。
+
+**核心原则**（一句话）：
+> 抽象层只承载泛化统一的概念。底层具体实现的细节不得直接引入抽象层。如果某项具体信息确实需要进入抽象层，必须先在 boundary 处归一化（normalize）为泛化形式后才能跨越边界。这是软件工程中多态的核心思路。
+
+**F-34 review 落地的归一化路径**：
+- `OutboundMessage.Meta["args"]` / `["tool_name"]` 等隐式 key → 升级到 `OutboundMessage.Tool *ToolInfo` typed field
+- `ToolInfo.Args string` —— bridge（claudecode / pi / pty）把各自的 native representation 归一化成 string，Gateway / Channel 只见到 generic primitive
+- Channel 拿到 string 后 parse 出 typed 视图（用于类型感知渲染），parse 逻辑属于 Channel 自治
+
+**保守范围**：只迁移 tool info 这一组字段。其他 Feishu-specific Meta 字段（`is_error` / `subtype` / `duration_ms` / `state` / `message_id` / `reaction_id`）保留原状，留 follow-up PR 清理，避免 F-34 PR 范围失控。
+
+**详细落地**：见 §1.4 + commit `921c862`（typed ToolInfo 升级）。
+
 ---
 
 ## 1. 架构总览
@@ -263,6 +281,119 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 - **OutToolEnd 类型感知摘要 = Channel 职责**：bridge 层把 `ToolEndEvent.Args` 填好（同一 message 的 tool_use block 拿）；Channel 层（Feishu adapter）按 tool name 生成单行摘要（"📄 Read /foo.go → 1234 lines"），不 dump 原始 output。摘要算法属于 Channel 自治（Feishu 用 emoji + 行数；Slack 可用 Block Kit；Web 可用折叠 div）
 - **Routing 决策不写进 OutboundMessage.Meta**：Meta 只承载数据载荷（output / err / args），**不**承载 routing hint。Channel 看到 Kind 后自决。
 - **F-thread-route 不构成"thread 概念侵入 nightme 数据模型"**：Channel 自管的 thread 是 Feishu SDK API 调用层面的细节（`POST /im/v1/messages/{rootID}/reply`）；nightme 仍然只见 `OutboundMessage.ReplyTo = currentTurnUserMsgID`，跟 F-33 不变式完全兼容
+
+### 1.4 抽象 / 具体 边界规范（v1.3.x 强制，多态的核心思路）
+
+跨层通信的架构纪律。本节是一切不变式之上的元原则——其它不变式违反时，几乎都是这条先破了。
+
+**规则（一句话）**：
+> 抽象层只承载泛化统一的概念。底层具体实现的细节不得直接引入抽象层。如果某项具体信息确实需要进入抽象层，必须先在 boundary 处归一化（normalize）为泛化形式后才能跨越边界。这是软件工程中多态的核心思路。
+
+**为什么**：每条跨层 hardcoded implicit 协议都是一次 leak。一旦 leak，后续 review 容易"基于现状优化"（typed struct、helper）导致边界进一步塌陷。设计上能站得住的唯一办法是：每条跨层数据要么是 generic primitive（string / int / error），要么 boundary 把它 normalize 成 generic primitive。
+
+**三层边界 + 各自的归一化义务**：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Concrete (bridge / Channel SDK)                              │
+│   claudecode stream-json  ·  pi typed map  ·  Feishu API    │
+└───────────────────────┬─────────────────────────────────────┘
+                        │ ← 归一化边界 #1: bridge → agent
+                        │   bridge 把 native representation
+                        │   转成 human-readable string
+                        ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Abstract (agent / Gateway)                                    │
+│   agent.AgentEvent  ·  gateway.OutboundMessage             │
+│   只见到 generic type：string / int / float64 / error /    │
+│   typed struct with generic field names                     │
+└───────────────────────┬─────────────────────────────────────┘
+                        │ ← 归一化边界 #2: Gateway → Channel
+                        │   typed field (ToolInfo) 替代
+                        │   Meta map 的 implicit key
+                        ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Concrete (Channel adapter)                                   │
+│   Feishu  ·  Slack  ·  Web  ·  ...                          │
+│   Channel 自管渲染，可 parse ToolInfo.Args 字符串为 typed    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**规则的具体落地**：
+
+1. **抽象层的字段名必须 generic**：禁止用 `file_path` / `command` / `content` 这种 bridge-specific schema 名字。任何 tool 都有 `Name/Args/Output/Err`，这是 generic 概念。
+2. **抽象层的字段类型首选 primitive**：`string` / `int` / `float64` / `error`。**不要**为了"类型安全"在抽象层引入 typed struct / enum——那等于在抽象层 hardcode 一种 concrete 的 shape。
+3. **bridge 是归一化边界 #1**：claudecode 用 raw JSON string 表达 args；pi 可能用 typed map → 也归一化成 string；pty 可能 raw bytes → 也归一化成 string。Gateway / Channel 只见到 string，不关心 bridge 内部 schema。
+4. **Channel 拿到 string 后自己 parse**：如果 Channel 想做类型感知渲染（"Read /foo.go → 1234 lines"），它 parse `ToolInfo.Args` 字符串。但 parse 逻辑属于 Channel 自治，不进 Gateway / agent。
+5. **禁止 `OutboundMessage.Meta["key"] = "concrete-specific-value"` 的隐式协议**：Meta 是 per-kind 的 opaque data container，但**不能**用作 concrete-specific 字段的 transport。generic 数据必须走 typed field（`Tool *ToolInfo` / `Card *Card` / `MessageState *MessageStatePayload`）。
+6. **数值类除外**：`CostUSD` / `*Tokens` 保留 typed numeric——任何 agent 都有 token / cost 概念，不需要 string 化。
+
+**反例（F-34 review 修正前）**：
+
+```go
+// ❌ 反例: Gateway 的 translate 把 bridge-specific 字段名写进 Meta
+case agent.EventToolEnd:
+    return OutboundMessage{
+        Meta: map[string]any{
+            "tool_name": name,  // Feishu adapter 用的隐式 key
+            "args":      ev.ToolEnd.Args,
+            "output":    ev.ToolEnd.Output,
+            "err":       ev.ToolEnd.Err,
+        },
+    }
+```
+
+```go
+// ❌ 反例: Channel 从 Meta 隐式 key 读 concrete 数据
+func toolName(m gateway.OutboundMessage) string {
+    if n, _ := m.Meta["tool_name"].(string); n != "" {
+        return n
+    }
+    return "tool"
+}
+```
+
+**正例（F-34 review 修正后）**：
+
+```go
+// ✅ 正例: Gateway translate 用 typed field 归一化 tool 概念
+case agent.EventToolEnd:
+    return OutboundMessage{
+        Tool: &ToolInfo{
+            Name:   name,
+            Args:   ev.ToolEnd.Args,   // bridge 自决 representation
+            Output: ev.ToolEnd.Output,
+            Err:    ev.ToolEnd.Err,
+        },
+    }
+```
+
+```go
+// ✅ 正例: Channel 直接读 typed field
+func toolName(m gateway.OutboundMessage) string {
+    if m.Tool != nil && m.Tool.Name != "" {
+        return m.Tool.Name
+    }
+    return "tool"
+}
+```
+
+**违反这条规则时的征兆**（review 时用作 checklist）：
+- 抽象层 struct 里出现 `Meta map[string]any` 字段且 producer / consumer 各自 hardcode key 名
+- 抽象层 field 名字含具体 schema（`file_path` / `command` / `pid` 等）
+- 抽象层 field 类型是 `*SomeConcreteBridgeStruct`（concrete 类型漏到抽象层）
+- Gateway / agent 包 import 了 channel 包（直接依赖关系）
+- 文档里出现"key 由 Channel X 约定"——这等于承认 implicit 协议存在
+
+**例外与升级路径**：
+
+如果某个 concrete 实现真的需要向抽象层暴露一项数据（且无法在 boundary 归一化），按以下顺序升级：
+1. 先问：能否不暴露？channel 自治自己读 SDK 不行吗？
+2. 再问：能否在 boundary normalize 成 primitive？
+3. 再问：能否抽成 typed struct（generic 字段名）？
+4. 最后：扩展抽象层字段，并在 §1.3 不变式里明文记一条。
+
+升级路径 #4 是最后一根稻草。F-34 review 把 `Meta["args"]` 升级到 `OutboundMessage.Tool *ToolInfo` 就是走的路径 #3（typed struct），不在抽象层暴露 schema。
 
 ---
 

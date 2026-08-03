@@ -133,7 +133,7 @@ func TestListTextFormat(t *testing.T) {
 	printListTable(&buf, rows)
 	out := buf.String()
 
-	for _, want := range []string{"SID", "CHAT", "AGENT", "WORKSPACE", "PID", "STATUS", "RESUME", "STARTED"} {
+	for _, want := range []string{"CHAT", "AGENT", "WORKSPACE", "PID", "STATUS", "STARTED", "SID", "RESUME"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table missing header %q\n%s", want, out)
 		}
@@ -174,7 +174,7 @@ func TestListEmptyAlwaysPrintsHeader(t *testing.T) {
 	var buf bytes.Buffer
 	printListTable(&buf, nil)
 	out := buf.String()
-	for _, want := range []string{"SID", "AGENT", "STATUS"} {
+	for _, want := range []string{"CHAT", "AGENT", "STATUS"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("empty table missing header %q", want)
 		}

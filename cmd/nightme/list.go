@@ -282,21 +282,21 @@ const (
 // unambiguous "registry is empty" instead of "did the command run?".
 func printListTable(w io.Writer, rows []listRow) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "SID\tCHAT\tAGENT\tWORKSPACE\tPID\tSTATUS\tRESUME\tSTARTED")
+	fmt.Fprintln(tw, "CHAT\tAGENT\tWORKSPACE\tPID\tSTATUS\tSTARTED\tSID\tRESUME")
 	if len(rows) == 0 {
 		tw.Flush()
 		return
 	}
 	for _, r := range rows {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			r.AgentSessionID,
 			r.ChatID,
 			truncate(r.Agent, colAgent),
 			truncate(r.Cwd, colWorkspace),
 			pidCell(r.PID),
 			statusCell(r.Status, r.ExitCode),
-			resumeCell(r.ResumeID),
 			startCell(r.LastRunAt),
+			r.AgentSessionID,
+			resumeCell(r.ResumeID),
 		)
 	}
 	tw.Flush()

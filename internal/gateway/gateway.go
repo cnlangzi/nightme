@@ -37,11 +37,9 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/receipt"
-	"github.com/cnlangzi/nightme/internal/session"
 )
 
 // Channel is the abstract surface the Gateway needs from any IM
@@ -136,25 +134,20 @@ type Gateway interface {
 
 	ListCommands() []Command
 
-	// v1.1 binding table (commit 3):
+	// v1.2 binding table (commit 3):
 	Bind(chatID, chatType, sessionID, workspace, agent string) *BindingEntry
 	LookupByChat(chatID string) *BindingEntry
-	LookupSessionByChat(chatID string) (*session.Session, error)
-	SpawnAgent(ctx context.Context, chatID, agentName string, args []string) (*session.Session, error)
 	ListBindings() []BindingEntry
 
-	// v1.1 receipt FSM (commit 3):
+	// v1.2 receipt FSM (commit 3):
 	CreateReceipt(ctx context.Context, chatID, userMsgID string, blocks []agent.ContentBlock) (receipt.Receipt, error)
 	UpdateReceipt(ctx context.Context, userMsgID string, state receipt.ReceiptState) error
 	DisposeReceipt(ctx context.Context, userMsgID string) error
 
-	// OnSessionEvent is the v1.1 single-consumer event handler.
-	// Wired by the runtime into MemoryManager.SetEventCallback at
-	// startup; the manager invokes it once per AgentEvent from
-	// inside readPump. Translates, sends, and flips receipts.
-	// (Defined on the interface so cmd/nightme can wire it
-	// without a type-assertion back to *Router.)
-	OnSessionEvent(s *session.Session, ev agent.AgentEvent)
+	// Lifecycle
+	AttachChannels(channels ...Channel)
+	Start(ctx context.Context) error
+	Stop(ctx context.Context) error
 }
 
 // Router is the exported alias of the runtime-internal
@@ -183,37 +176,21 @@ type gateway struct {
 	// nil, such messages are silently dropped.
 	messageDispatcher MessageDispatcher
 
-	// Session factory + lookup. Set at construction time by the
-	// runtime (cmd/nightme). Used by LookupSessionByChat and
-	// SpawnAgent. The Gateway does not own the manager — it
-	// borrows it for the chat-binding semantic.
-	mgr session.Manager
-
-	// Stage 2 / v1.1 dispatch state. fields below are read/written under mu.
+	// Stage 2 / v1.2 dispatch state. fields below are read/written under mu.
 	channels       []Channel
 	channelCh      chan InboundMessage
 	stopCh         chan struct{}
 	stopOnce       sync.Once
 	wg             sync.WaitGroup
-	attached       map[string]struct{} // SessionID -> already-has-a-pump (commit 4 will remove)
-	chatToChan     map[string]Channel  // ChatID -> the channel that owns the chat
-	defaultChannel Channel             // fallback channel for chats we haven't seen yet
-	sweeper        SweepSessions       // commit 4 will remove
+	chatToChan     map[string]Channel // ChatID -> the channel that owns the chat
+	defaultChannel Channel            // fallback channel for chats we haven't seen yet
 
-	// v1.1 binding table (chat_id → session_id). Owned by Gateway.
+	// v1.2 binding table (chat_id → session_id). Owned by Gateway.
 	bindings map[string]*BindingEntry
 
-	// v1.1 receipt FSM bookkeeping (userMsgID → receipt state).
+	// v1.2 receipt FSM bookkeeping (userMsgID → receipt state).
 	// Owned by Gateway; Channel renders transitions.
 	receipts map[string]*receiptEntry
-
-	// eventCallback is the optional runtime-installed callback.
-	// When set, OnSessionEvent delegates to it. When nil,
-	// OnSessionEvent does the default translate + send + receipt
-	// flip work (used by the runtime's startup wiring where the
-	// runtime simply passes gw.OnSessionEvent as the callback —
-	// the indirection here is for tests).
-	eventCallback func(s *session.Session, ev agent.AgentEvent)
 }
 
 // New constructs a Gateway (the inboundDispatcher).
@@ -222,34 +199,22 @@ type gateway struct {
 // messageDispatcher branch (default, non-slash-command inbound).
 // Pass nil to drop such messages (debug-only Gateway).
 //
-// mgr is the session factory Gateway uses to look up sessions by
-// ID and to spawn agents; passing nil disables those operations
-// (cmd / run / kill won't work, but a debug-only Gateway stays
-// operational).
-func New(messageDispatcher MessageDispatcher, mgr session.Manager) Gateway {
+// v1.2 runtime closes over *chatsession.Manager via the
+// messageDispatcher closure; the Gateway itself no longer holds a
+// session manager reference. ChatSession lifecycle is owned by
+// the runtime + the chatsession package.
+func New(messageDispatcher MessageDispatcher) Gateway {
 	return &gateway{
 		cmds:              make(map[string]Command),
 		messageDispatcher: messageDispatcher,
-		attached:          make(map[string]struct{}),
 		chatToChan:        make(map[string]Channel),
 		bindings:          make(map[string]*BindingEntry),
 		receipts:          make(map[string]*receiptEntry),
-		mgr:               mgr,
 	}
 }
 
-// AttachSweeper registers the callback the Gateway uses to discover
-// running sessions. Required before Start. The callback is invoked
-// every 5s; it should be cheap and non-blocking.
-func (g *gateway) AttachSweeper(s SweepSessions) {
-	g.mu.Lock()
-	g.sweeper = s
-	g.mu.Unlock()
-}
-
 // AttachChannels registers the channels the gateway will read from
-// and dispatch to. In Stage 2 only one channel is supported per
-// Gateway; multi-channel (F-11) will be a separate commit.
+// and dispatch to. Multi-channel is supported.
 func (g *gateway) AttachChannels(channels ...Channel) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -479,59 +444,16 @@ func (g *gateway) dispatchLoop(ctx context.Context) {
 	}
 }
 
-// sweepSessions polls the SweepSessions callback and attaches a
-// new outbound pump to every OutboundSource the runtime has not
-// reported yet.
+// sweepSessions is a no-op in v1.2: the v1.2 runtime installs one
+// readPump per active AgentSession directly via the chatsession
+// EventHandler surface; the Gateway no longer needs to poll a
+// sweeper to discover new sources. Kept as a stub so the dispatch
+// goroutine continues to compile.
 func (g *gateway) sweepSessions(ctx context.Context) {
 	defer g.wg.Done()
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-g.stopCh:
-			return
-		case <-ticker.C:
-			g.sweepOnce(ctx)
-		}
-	}
-}
-
-// sweepOnce walks the runtime's OutboundSource list and attaches
-// a pump to every source we haven't seen yet.
-func (g *gateway) sweepOnce(ctx context.Context) {
-	g.mu.RLock()
-	sweeper := g.sweeper
-	if sweeper == nil {
-		g.mu.RUnlock()
-		return
-	}
-	g.mu.RUnlock()
-
-	for _, src := range sweeper() {
-		if src.SessionID == "" || src.ChatID == "" || src.Events == nil {
-			continue
-		}
-
-		g.mu.Lock()
-		if _, ok := g.attached[src.SessionID]; ok {
-			g.mu.Unlock()
-			continue
-		}
-		g.attached[src.SessionID] = struct{}{}
-		ch := g.chatToChan[src.ChatID]
-		if ch == nil {
-			ch = g.defaultChannel
-		}
-		g.mu.Unlock()
-
-		if ch == nil {
-			continue
-		}
-
-		g.wg.Add(1)
-		go g.pumpOutbound(ctx, ch, src.SessionID, src.ChatID, src.Events)
+	select {
+	case <-ctx.Done():
+	case <-g.stopCh:
 	}
 }
 
@@ -539,11 +461,6 @@ func (g *gateway) sweepOnce(ctx context.Context) {
 // translates via Translate, and dispatches to the right Channel.
 func (g *gateway) pumpOutbound(ctx context.Context, ch Channel, sessionID, chatID string, events <-chan agent.AgentEvent) {
 	defer g.wg.Done()
-	defer func() {
-		g.mu.Lock()
-		delete(g.attached, sessionID)
-		g.mu.Unlock()
-	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -621,55 +538,6 @@ func (g *gateway) LookupByChat(chatID string) *BindingEntry {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return g.bindings[chatID]
-}
-
-// LookupSessionByChat returns the session bound to chatID. Returns
-// session.ErrSessionNotFound when chatID has no binding; callers
-// can distinguish "no binding" (binding == nil) from "binding
-// points at missing session" (binding != nil + error).
-func (g *gateway) LookupSessionByChat(chatID string) (*session.Session, error) {
-	if g.mgr == nil {
-		return nil, errors.New("gateway: no session manager wired")
-	}
-	b := g.LookupByChat(chatID)
-	if b == nil {
-		return nil, session.ErrSessionNotFound
-	}
-	return g.mgr.Get(b.SessionID)
-}
-
-// SpawnAgent spawns an agent in the chat's bound workspace and
-// updates the binding to point at the new session ID. Used by the
-// /run handler. If a session is already running for chatID, this
-// is a no-op (returns the existing session).
-func (g *gateway) SpawnAgent(ctx context.Context, chatID, agentName string, args []string) (*session.Session, error) {
-	if g.mgr == nil {
-		return nil, errors.New("gateway: no session manager wired")
-	}
-	b := g.LookupByChat(chatID)
-	if b == nil {
-		return nil, session.ErrSessionNotFound
-	}
-	sess, err := g.mgr.Get(b.SessionID)
-	if err != nil {
-		return nil, err
-	}
-	if sess.Status() == session.StatusRunning {
-		return sess, nil
-	}
-	newSess, err := g.mgr.Create(ctx, session.CreateRequest{
-		Workspace: b.Workspace,
-		Agent:     agentName,
-		Args:      args,
-	})
-	if err != nil {
-		return nil, err
-	}
-	g.mu.Lock()
-	b.SessionID = newSess.ID
-	b.Agent = agentName
-	g.mu.Unlock()
-	return newSess, nil
 }
 
 // ListBindings returns a snapshot of every binding in unspecified
@@ -791,76 +659,17 @@ func (g *gateway) resolveChannel(chatID string) Channel {
 	return g.defaultChannel
 }
 
-// SetEventCallback is the v1.1 single-consumer wiring point. The
-// runtime (cmd/nightme) calls this with gw.OnSessionEvent at
-// startup; the MemoryManager's readPump invokes the callback once
-// per AgentEvent (the only consumer of session.Events()).
-func (g *gateway) SetEventCallback(cb func(s *session.Session, ev agent.AgentEvent)) {
-	// No-op when the gateway already routes events via its own
-	// OnSessionEvent method; the runtime wires gw.OnSessionEvent
-	// directly into mgr.SetEventCallback. This method exists for
-	// tests / alternate runtimes that want to install a custom
-	// callback without depending on the gateway's default.
-	if cb == nil {
-		g.mu.Lock()
-		g.eventCallback = nil
-		g.mu.Unlock()
-		return
-	}
-	g.mu.Lock()
-	g.eventCallback = cb
-	g.mu.Unlock()
-}
-
-// OnSessionEvent is the v1.1 single-consumer event handler. The
-// runtime wires this into MemoryManager.EventCallback at startup;
-// the manager invokes it once per AgentEvent from inside readPump
-// (the only consumer of session.Events()). Translates the event,
-// dispatches the OutboundMessage, and (for terminal events) flips
-// any still-open receipts to Done / Error and disposes them.
-func (g *gateway) OnSessionEvent(s *session.Session, ev agent.AgentEvent) {
-	g.mu.RLock()
-	cb := g.eventCallback
-	g.mu.RUnlock()
-	if cb != nil {
-		cb(s, ev)
-		return
-	}
-	g.translateAndSend(s, ev)
-}
-
-// translateAndSend does the actual work: look up the chat for the
-// session, translate the event, fan out to every receipt bound
-// to this session, and (for terminal events) flip those receipts
-// to Done/Error. This is the body of OnSessionEvent when no
-// runtime-installed callback is present (the default).
+// translateAndSend does the work the v1.2 runtime drives
+// indirectly: look up the chat for a session ID, translate the
+// event, and (for terminal events) flip any still-open receipts
+// to Done / Error and dispose them.
 //
 // Receipt fan-out (1 request : n response per user message, plus
 // the buffered-batch case where one agent turn answers n user
 // messages): each bound receipt gets its own OutboundMessage
-// carrying ReplyTo=<its userMsgID>. The channel then anchors
-// each one to its user message via ReplyMessage and appends the
-// event to that receipt's rolling log. Orphan events (no bound
-// receipt, e.g. session already torn down) fall back to a plain
-// text message with ReplyTo="" — the channel sends it without
-// any anchoring, which is the right behavior for genuine
-// unsolicited output.
-//
-// OutboundMessage.Meta is enriched with session-level metadata
-// before the channel sees it — agent name, workspace, and (when
-// available) the upstream provider. Channels like Feishu use
-// these to render the receipt footer (Agent / cwd / Provider /
-// tokens). The enrichment is a no-op for events whose Meta the
-// translator doesn't initialize (Text / ToolStart / etc.) — we
-// only touch OutInit where the enrichment is meaningful.
-func (g *gateway) translateAndSend(s *session.Session, ev agent.AgentEvent) {
-	chatID := g.lookupChatBySession(s.ID)
-	if chatID == "" {
-		// Orphan event — the session has no binding. Drop silently
-		// (the runtime probably just shut down and a stray event
-		// arrived).
-		return
-	}
+// carrying ReplyTo=<its userMsgID>. Orphan events fall back to a
+// plain text message with ReplyTo="".
+func (g *gateway) translateAndSend(sessionID, chatID string, ev agent.AgentEvent) {
 	ch := g.resolveChannel(chatID)
 	if ch == nil {
 		return
@@ -868,21 +677,14 @@ func (g *gateway) translateAndSend(s *session.Session, ev agent.AgentEvent) {
 
 	out, send := Translate(chatID, ev)
 	if send {
-		enrichOutboundMeta(out, s)
-		targets := g.receiptsForSession(s.ID)
+		targets := g.receiptsForSession(sessionID)
 		if len(targets) == 0 {
-			// No bound receipt (orphan event). Send as plain
-			// text — no anchor, no rolling-log card.
 			out.ReplyTo = ""
 			if err := ch.Send(context.Background(), out); err != nil {
 				log.Printf("gateway: send failed (chat=%s, kind=%s, no anchor): %v", chatID, out.Kind, err)
 			}
 		} else {
 			for _, userMsgID := range targets {
-				// Each bound receipt gets its own OutboundMessage
-				// anchored to its userMsgID. Same body, N
-				// deliveries — each receipt card independently
-				// edits in place.
 				fanout := out
 				fanout.ReplyTo = userMsgID
 				if err := ch.Send(context.Background(), fanout); err != nil {
@@ -900,7 +702,7 @@ func (g *gateway) translateAndSend(s *session.Session, ev agent.AgentEvent) {
 		g.mu.RLock()
 		var toDispose []string
 		for umid, entry := range g.receipts {
-			if entry.sessionID == s.ID {
+			if entry.sessionID == sessionID {
 				toDispose = append(toDispose, umid)
 			}
 		}
@@ -913,18 +715,10 @@ func (g *gateway) translateAndSend(s *session.Session, ev agent.AgentEvent) {
 }
 
 // receiptsForSession returns the userMsgIDs of every receipt
-// currently bound to the given session. The result is the fan-out
-// list for translateAndSend: an agent event for this session
-// becomes one OutboundMessage per entry, each anchored to its
-// own userMsgID. Linear scan over the receipts map; the typical
-// case is 1 (no buffer) or up to a handful (buffered batch).
-//
-// Callers MUST treat the returned slice as a snapshot — receipt
-// mutations can invalidate it concurrently. The translateAndSend
-// loop copies each userMsgID into a per-iteration OutboundMessage
-// before sending, so concurrent Create/Dispose during the fan-out
-// is safe (a stale userMsgID just sends to a receipt that no
-// longer exists; the channel handles that as a plain text).
+// currently bound to the given session. Linear scan; v1.2 keeps
+// the receipts map keyed by userMsgID with the sessionID as a
+// secondary key so the runtime can flush all receipts when a
+// session terminates.
 func (g *gateway) receiptsForSession(sid string) []string {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
@@ -935,48 +729,4 @@ func (g *gateway) receiptsForSession(sid string) []string {
 		}
 	}
 	return ids
-}
-
-// lookupChatBySession finds the chatID whose binding points at
-// sessionID. Linear scan — bindings are O(chats) which is fine at
-// v0.3 scale (1 DM + maybe a few groups).
-func (g *gateway) lookupChatBySession(sid string) string {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	for chatID, b := range g.bindings {
-		if b.SessionID == sid {
-			return chatID
-		}
-	}
-	return ""
-}
-
-// enrichOutboundMeta layers session-level metadata onto the
-// OutboundMessage's Meta map. Currently the only consumer is
-// OutInit (channels read agent_name / workspace / provider to
-// render the receipt footer); other kinds pass through
-// untouched. Extending to other kinds is a single switch case.
-//
-// Keys written:
-//   - agent_name : session.Agent (registry name, e.g. "claude")
-//   - workspace  : session.Workspace (cwd, may be absolute or "~"-relative)
-//   - provider   : session's upstream LLM provider when the
-//     runtime injects it; empty for now (the
-//     OpenClaw wrapper is the future injection point)
-//
-// Writes are no-ops when the session field is empty so the
-// receipt's footer composer skips those segments.
-func enrichOutboundMeta(out OutboundMessage, s *session.Session) {
-	if out.Meta == nil || s == nil {
-		return
-	}
-	switch out.Kind {
-	case OutInit:
-		if _, ok := out.Meta["agent_name"]; !ok && s.Agent != "" {
-			out.Meta["agent_name"] = s.Agent
-		}
-		if _, ok := out.Meta["workspace"]; !ok && s.Workspace != "" {
-			out.Meta["workspace"] = s.Workspace
-		}
-	}
 }

@@ -412,7 +412,7 @@ func TestHandleKill_ClearsPool(t *testing.T) {
 
 func TestRegisterChatSessionCommands_RegistersAllThree(t *testing.T) {
 	mgr, ch := newTestManager(t, false)
-	gw := New(nil, nil)
+	gw := New(nil)
 	RegisterChatSessionCommands(gw, mgr, ch, "claude")
 
 	// Command.Name is stored without the leading slash (Gateway strips

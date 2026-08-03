@@ -50,6 +50,7 @@ type runDeps struct {
 	signals        <-chan os.Signal
 	cleanup        bool
 	skipFeishuAuth bool
+	onReady        func()
 }
 
 func defaultRunDeps() runDeps {
@@ -138,6 +139,15 @@ func runRun(cmd *cobra.Command, cleanup bool, channelName string) error {
 	deps := withChannel(defaultRunDeps(), channelName)
 	deps.cleanup = cleanup
 	return runRunWith(cmd, deps)
+}
+
+// withCleanup configures whether the daemon kills every session
+// CLI on shutdown (true) or detaches them so a later restart can
+// resume them (false). Exposed for tests; production wires this
+// from the --cleanup flag via runRun.
+func withCleanup(deps runDeps, cleanup bool) runDeps {
+	deps.cleanup = cleanup
+	return deps
 }
 
 // withChannel configures the runtime channel implementation
@@ -284,7 +294,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		cs.SetEventHandler(eventHandler)
 	}
 
-	gw := gateway.New(messageDispatcher, nil)
+	gw := gateway.New(messageDispatcher)
 	gateway.RegisterChatSessionCommands(gw, mgr, ch, cfg.Primary)
 
 	// Attach channels + start the gateway.
@@ -302,6 +312,10 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		return fmt.Errorf("run: start gateway: %w", err)
 	}
 	defer func() { _ = gwImpl.Stop(context.Background()) }()
+
+	if deps.onReady != nil {
+		deps.onReady()
+	}
 
 	logger.Info("daemon running",
 		"chat_sessions", len(mgr.List()),

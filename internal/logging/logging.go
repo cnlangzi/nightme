@@ -39,6 +39,15 @@ func resolvePath(cfg *config.Config) (string, error) {
 	return p, nil
 }
 
+// Path returns the resolved log file path for cfg, honoring an
+// explicit Logging.File and falling back to the XDG-style default
+// at $HOME/.local/share/nightme/nightme.log. Exposed so companion
+// commands (notably `nightme logs`) can locate the same file the
+// logger writes to without duplicating the resolution logic.
+func Path(cfg *config.Config) (string, error) {
+	return resolvePath(cfg)
+}
+
 type closeableHandler struct {
 	slog.Handler
 	file *os.File

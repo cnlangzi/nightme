@@ -47,6 +47,7 @@ Common:
   test ...        spawn CLI in PTY (Ctrl-C to end)
   start           start daemon in the background
   status          show daemon status
+  logs [--lines N] tail daemon log (Ctrl-C to exit follow)
   restart         gracefully replace daemon
   stop            gracefully stop daemon
   help            full command list

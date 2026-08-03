@@ -38,7 +38,7 @@ func newRootCmd() *cobra.Command {
 			"CLIs (Claude Code / Codex / OpenCode) to IM channels (Feishu /\n" +
 			"WhatsApp / Web UI). v0.1 ships the Local Bridge test mode —\n" +
 			"use `nightme test` to spawn an agent in a PTY and `nightme list`\n" +
-			"to inspect persisted sessions. See docs/SPEC.md and PLAN.md.",
+			"to inspect persisted sessions. See docs/SPEC.md.",
 		SilenceUsage: true, SilenceErrors: true,
 	}
 	root.SetVersionTemplate(version.String() + "\n")

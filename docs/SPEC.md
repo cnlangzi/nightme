@@ -8,7 +8,6 @@
 > - 产品定位 → [`PRD.md`](./PRD.md) v1.2
 > - 功能索引 → [`FEATURES.md`](./FEATURES.md)
 > - 每个 feature 的详细实现（含代码）→ [`feat/`](./feat/)
-> - 实施计划 → [`PLAN.md`](./PLAN.md)
 > - 职责隔离架构 v1.1 → [`feat/F-26-gateway-hub.md`](./feat/F-26-gateway-hub.md)
 
 ---

@@ -247,7 +247,6 @@ internal/
 | [`docs/PRD.md`](./docs/PRD.md) | Product definition — what / why / for whom |
 | [`docs/SPEC.md`](./docs/SPEC.md) | Technical architecture — components, data flow, NFRs |
 | [`docs/FEATURES.md`](./docs/FEATURES.md) | Feature index — every F-XX in one table |
-| [`docs/PLAN.md`](./docs/PLAN.md) | Implementation roadmap |
 | [`docs/feat/`](./docs/feat/) | Per-feature design docs |
 | [`docs/E2E_TESTING.md`](./docs/E2E_TESTING.md) | Manual Feishu round-trip + troubleshooting |
 | [`CHANGELOG.md`](./CHANGELOG.md) | Current snapshot (single Unreleased section) |

@@ -6,7 +6,6 @@
 > **关联文档**：
 > - 产品定位 → [`PRD.md`](./PRD.md) **v1.2**
 > - 技术架构 → [`SPEC.md`](./SPEC.md) **v1.2**
-> - 实施计划 → [`PLAN.md`](./PLAN.md)
 > - 每个 feature 的详细设计 → [`feat/`](./feat/)
 
 > **v1.2 架构变更摘要**：v1.1 三层（Channel Adapter / Gateway / Session Manager）→ v1.2 两层（Channel Adapter / Gateway + **ChatSession** + **AgentSession**）。ChatSession 合并了 v1.1 ChannelSession + GatewaySession 的逻辑中枢；AgentSession 取代 v1.1 Session，以 `(agent, cwd)` 1:1 唯一标识。详见 [SPEC §0](./SPEC.md) 和 [F-27](./feat/F-27-chatsession.md) / [F-28](./feat/F-28-use-command.md) / [F-29](./feat/F-29-agent-session-pool.md)。
@@ -132,7 +131,7 @@ are tracked here (not in a TODO file) so they don't get lost.
 | Item | Description | Impact | Tracking |
 |------|-------------|--------|----------|
 | **E2E 飞书 DM round-trip** | Manual smoke test only; unit + integration cover F-27/28/29/30. Real Feishu WS + multi-turn send/receive not automated. | Release gate (PR `feat/air-dashboard-realization` and any future "this is production-ready" claim) | `docs/E2E_TESTING.md` (manual checklist) |
-| **`internal/session/MemoryManager` cleanup** | v1.x `session.MemoryManager` still used by `internal/gateway/cmd/handlers.go` (binding helpers, type alias `Session = *session.Session`). Needs `internal/gateway/cmd` to switch to `chatsession.ChatSession` (drop binding table — bindings now live in `Manager`). | Cleans up the last v1.x runtime residue; reduces gateway surface area; unlocks removal of `cmd/nightme/run.go` entirely | `docs/PLAN.md` §4.6.8 |
+| **`internal/session/MemoryManager` cleanup** | v1.x `session.MemoryManager` still used by `internal/gateway/cmd/handlers.go` (binding helpers, type alias `Session = *session.Session`). Needs `internal/gateway/cmd` to switch to `chatsession.ChatSession` (drop binding table — bindings now live in `Manager`). | Cleans up the last v1.x runtime residue; reduces gateway surface area; unlocks removal of `cmd/nightme/run.go` entirely | see git history |
 | **Rolling-log receipt card UX (v1.x → v1.3)** | ✅ **Resolved in v1.3**: one user message → ONE Feishu receipt card (cold-create + PATCH per turn); reactions ⏳/🔄/✅ by `MessageState` FSM (separate concern); content by `OutboundMessage{ReplyTo: userMsgID}`. Gateway no longer holds receipt FSM (SPEC §0.1). | Aligned with original v1.1 intent. See [`F-25-rolling-log.md`](./feat/F-25-rolling-log.md). |
 | **MessageState (reaction lifecycle)** | ✅ Done in v1.3 (F-31, branch `fix/inboud_buffer`). 4 states (`StateReceived` ⏳ / `StateForwarded` 🔄 / `StateDone` ✅ / `StateError` ❌) emit from ChatSession lifecycle, route through Gateway → Channel.Send → feishu.AddReaction. The "reaction emoji" half of the v1.x UX is restored. The "rolling-log card body" half is still TBD (separate Receipt FSM work). | Tracks message lifecycle visually | `docs/feat/F-31-message-state.md` |
 | **Exit observer wiring** | `ChatSession.SetAgentExitObserver` + `StartObserveClose` exist; the runtime does not register an observer. readPump's natural exit is currently sufficient. | Reserved API for future work (respawn on death, /kill auto-reply, log user-visible "agent died" message). | `docs/feat/F-27-chatsession.md` §5.1.5 |
@@ -148,7 +147,7 @@ are tracked here (not in a TODO file) so they don't get lost.
 | `docs/PRD.md` | ✅ locked 2026-08-02 |
 | `docs/SPEC.md` | ✅ locked 2026-08-02 |
 | `docs/FEATURES.md` | ✅ locked 2026-08-02 |
-| `docs/PLAN.md` §4.6 | ✅ all 12 commits landed + cleanup commit 13 |
+| git history | ✅ all v1.x commits landed |
 | `docs/feat/F-27-chatsession.md` | ✅ includes runtime contracts (Spawner / FlushHook / Manager / EventHandler) |
 | `docs/feat/F-28-use-command.md` | ✅ |
 | `docs/feat/F-29-agent-session-pool.md` | ✅ includes Spawner production wiring + corrected v1.1 migration story |

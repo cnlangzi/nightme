@@ -36,6 +36,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/receipt"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -291,6 +292,16 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	gwImpl := gw.(*gateway.Router)
 	gwImpl.AttachChannels(ch)
 
+	// F-31: wire gw.OnMessageState into every ChatSession via the
+	// Manager.onCreate hook. This covers both restored chats (from
+	// mgr.List()) and chats created later via mgr.GetOrCreate().
+	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
+		cs.SetMessageStateHandler(gwImpl.OnMessageState)
+	})
+	for _, cs := range mgr.List() {
+		cs.SetMessageStateHandler(gwImpl.OnMessageState)
+	}
+
 	// Start readPumps for already-running AgentSessions that
 	// were restored from disk (Detached → running on next
 	// LookupActiveAgentSession). The daemon does NOT auto-spawn
@@ -343,6 +354,11 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 
 		cs := mgr.GetOrCreate(msg.ChatID, string(msg.ChatType), primary)
 
+		// F-31: ChatSession has accepted the message. Emit
+		// StateReceived synchronously so the channel can render
+		// ⏳ even before spawn resolves (FastAck UX).
+		cs.EmitMessageState(userMsgID, receipt.StateReceived)
+
 		// Resolve active AgentSession (lazy spawn on miss).
 		_, err := cs.LookupActiveAgentSession()
 		if err != nil {
@@ -371,6 +387,12 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 		// idempotent — it stops any existing pump first, so calling
 		// it again from handleUse is a no-op.
 		_ = cs.StartReadPump()
+
+		// F-31: dispatch successful — message has reached the
+		// AgentSession. Emit StateForwarded so the channel flips
+		// ⏳ → 🔄. (Emitted before QueueUserMessage so the visual
+		// transition is visible even if queueing is slow.)
+		cs.EmitMessageState(userMsgID, receipt.StateForwarded)
 
 		// Build structured blocks and queue to InputBuffer.
 		blocks := feishu.BuildBlocks(msg.Text, msg.Attachments)

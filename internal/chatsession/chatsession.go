@@ -389,13 +389,15 @@ func (cs *ChatSession) SetMessageStateHandler(h func(chatID, userMsgID string, s
 	cs.mu.Unlock()
 }
 
-// emitMessageState fires the onMessageState callback for a single
-// userMsgID. Internal — callers are ChatSession lifecycle hooks
-// and dispatchMessage. No-op if no handler is installed.
+// EmitMessageState fires the onMessageState callback for a single
+// userMsgID. Public entry point for external lifecycle triggers
+// (e.g. dispatchMessage in cmd/nightme calling cs.EmitMessageState
+// (userMsgID, StateReceived) before spawn). Internal lifecycle
+// hooks call this too. No-op if no handler is installed.
 //
 // Caller MUST NOT hold cs.mu (handler is invoked synchronously and
 // may call back into ChatSession methods).
-func (cs *ChatSession) emitMessageState(userMsgID string, state receipt.MessageState) {
+func (cs *ChatSession) EmitMessageState(userMsgID string, state receipt.MessageState) {
 	cs.mu.RLock()
 	h := cs.onMessageState
 	chatID := cs.ChatID

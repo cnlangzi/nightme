@@ -1090,15 +1090,75 @@ ChatSession.onAgentEvent
 - Registry 兼容(Go JSON unmarshal 默认容忍未知字段,无需迁移)
 - 验收清单 16 项
 
+### 13.12 🎯 设计决策反转 (2026-08-04 Devin 拍板):折叠 → Thread Reply
+
+**背景**:§13.6 拍板的折叠方案(OutThinking / OutToolStart / OutToolEnd 在 receipt card body 里走 `collapsible_panel`)实机上视觉体验差,详尽分析 + 新方案设计见 [`docs/feat/F-34-tool-thread-routing.md`](../feat/F-34-tool-thread-routing.md) §1。
+
+**新决议**:OutThinking / OutToolStart / OutToolEnd / OutCompaction 从 receipt card body 里抽出,作为独立 thread reply 投递到 user message 的 Feishu thread;receipt card 收窄到只承载最终答复(OutText / OutResult)+ 元数据(OutInit / OutUsage)。
+
+**Receipt card 视觉对比**:
+
+旧(折叠方案):card body 含 30+ collapsible_panel,Feishu 50 element 上限频繁撞破,最终回答被挤到屏外。
+
+新(thread 方案):card body 只含 header + 最终回答 + footer(≤5 element);user message 下方出现 "X replies" 指示器,click 后进入 thread 看 💭🔧✅ 流。
+
+**OutToolEnd 类型感知摘要**(不再 dump 原始 output 到 thread,改为按 tool name 生成单行摘要):
+
+```
+Read       -> 1 lines 截断
+Write      -> 5678 bytes
+Edit       -> applied
+Bash       -> 3 lines (cmd 截断 80 字符)
+Grep       -> 12 matches across 5 files
+Glob       -> 8 files
+WebFetch   -> 4321 chars fetched
+WebSearch  -> 10 results
+(default)  -> 截断到 200 chars
+(err != nil) -> failed: err.message
+```
+
+**架构不变式保留**:OutboundMessage 不动(无新 Kind)、Gateway 不动、ChatSession 不动、`currentTurnUserMsgID` 单数锚点保留、F-33 thread 概念不进 nightme 数据模型不变式保留。
+
+**与 §13.10 (reply-in-thread) 的关系**:§13.10 修了"ReplyTo 未投递为 root_id";§13.12 走得更远——除 receipt card 之外的其他 OutboundKind 也不进 main chat,只进 thread。
+
+**§13.1 bug 不再需要修**:旧决议下 thinkingPrefix 剥除是 bug(导致 collapsible_panel 死代码)。新方案下 Gateway 不再剥,adapter 直接拿 `msg.Text` 加 💭 前缀发 thread。
+
+**实施步骤总览**(详见 F-34 §3.1):
+
+1. **Bridge contract 扩展**:`agent.ToolEndEvent.Args string` 字段;claudecode bridge 从同 message `tool_use` block 拿 args 填入
+2. **Feishu adapter `Send` 分流**:thinking/tool/compaction → `postThreadReply`;text/result/init/usage → `receiptFor.Append`
+3. **`summarize_tool.go` 新文件**:`summarizeToolEnd` + `countLines` + `truncate` + `countUniqueFiles` helpers
+4. **Receipt card 瘦身**:`buildReceiptCard` 删 `Kind="thinking"` / `Kind="tool"` collapsible_panel 分支
+5. **`eventToEntry` 收窄**:对 thinking/tool/compaction 返回 `(_, false)`
+6. **测试改造**:删 thinking/tool entry assertion;新增 `TestSend_Out*_PostsToThread` + `TestSummarizeToolEnd`
+
+**Backlog**:OutThinking 多 chunk 聚合(streaming 模式,最后一段更新)、Web UI / Slack 适配各 channel 自治决定。
+
 ## 14. 变更日志
 
 - **2026-08-03** - 加入 §11-§13: Feishu msg_type 全集参考、OutboundKind → Feishu 渲染映射表、审计结果(1 bug + 4 澄清)。基于 `internal/channel/feishu/*` 与 `internal/gateway/*` 现状。
 - **2026-08-03(同日增量)** - 加入 §13.6-§13.9:Devin 拍板 Thinking/ToolStart/ToolEnd 全部折叠;列出 3 个 UX 折叠粒度方案(per-event / aggregate-paired / category-aggregate)+ 4 个待确认问题。等 Devin 决定后启动 PR。
 - **2026-08-03(同日再增量)** - 加入 §13.10:Devin 发现 `OutboundMessage.ReplyTo` 字段被消费在内部 receipt map 但**从未投递为 Feishu `root_id`**,所有 bot 回复都是顶层消息,与用户消息无视觉连接。SDK 字段 `larkim.CreateMessageReqBody.RootId` 已存在但代码没用。F-26 v1.1 设计文档 `ReplyTo 非空 → 必须镇定到该 userMsgID(用 ReplyMessage API 或已有 receipt)` 在 v1.3 refactor 中丢失。提供 A/B/C 三种修复范围(最小/中等/完整)+ 4 个待确认问题。
 - **2026-08-03(同日三增量)** - 加入 §13.11(F-33 决策记录):D1 ChatType 不进 Gateway + D2 topic_group 不特殊处理 + D3 `ReplyTo = ParentId`(RootId 不进 nightme)+ D4 任何 Channel 都不引入 thread 概念。落地 chatID 数据模型系统性清理,关闭 inbound 方向 ReplyTo 接线缺失。详见 [`docs/feat/F-33-simplify-chatid-data-model.md`](../feat/F-33-simplify-chatid-data-model.md)。
+- **2026-08-04** - 加入 §13.12(F-thread-route 决策反转):折叠方案(§13.6-§13.9)实机验证失败,反转决策 → OutThinking / OutToolStart / OutToolEnd / OutCompaction 作为独立 thread reply 投递;receipt card 收窄到只承载最终答复 + 元数据;OutToolEnd 走类型感知摘要(`summarize_tool.go`)。新建 [`docs/feat/F-34-tool-thread-routing.md`](../feat/F-34-tool-thread-routing.md) 作为本 feature 的权威文档。`docs/SPEC.md` §0.3 同步加变更摘要;§15 实施计划待修订(下个 commit)。
 - **v0.3 ~ v1.3** - 早期章节(背景、OpenClaw 调研、迁移方案、已知坑等)保留;参见章节顶部 Status 行。
 
-## 15. v1.3.x 实施计划:折叠 + reply-in-thread
+## 15. v1.3.x 实施计划
+
+### 15.0 状态(2026-08-04 F-thread-route 反转后)
+
+⚠️ **本节已被 §13.12 + [`docs/feat/F-34-tool-thread-routing.md`](../feat/F-34-tool-thread-routing.md) 反转**。
+
+- 原 §15 目标"折叠 + reply-in-thread" → 折叠方案被 §13.12 推翻
+- §13.1 修复不再需要(thinkingPrefix 不再被 strip)
+- §13.10 reply-in-thread 部分保留(§13.12 复用其基础设施 `sendViaLarkReply` + `SendMessageText` 的 rootID 参数)
+- 新实施计划见 F-34 §3.1 文件级变更清单
+
+历史保留:§15.1 ~ §15.5 描述折叠方案的旧实施细节,作为决策记录。
+
+---
+
+## 15. v1.3.x 实施计划:折叠 + reply-in-thread(已被反转,见 §15.0)
 
 **目标**: 修 §13.1(OutThinking 折叠死代码)+ §13.10(ReplyTo 未投递为 root_id),实现 Devin 拍板的折叠设计 + reply-in-thread。
 

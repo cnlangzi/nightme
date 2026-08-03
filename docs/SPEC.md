@@ -106,6 +106,48 @@ v1.3 在 v1.2 架构上做**职责再切分**——核心变化是**删除 Gatew
 
 ---
 
+## 0.3 文档变更摘要（v1.3.x F-thread-route 增量，2026-08-04）
+
+**背景**：v1.3 §13.6 拍板的折叠方案（OutThinking / OutToolStart / OutToolEnd 在 receipt card body 里用 `collapsible_panel` 平铺折叠）在实机上验证失败 —— agent turn 调 10 个工具 = 30 个 panel，Feishu 50 element 上限被频繁撞破；用户首要看到的"最终回答"被挤到 card 末尾甚至消失。
+
+**F-thread-route 反转**：Channel 自治范围内重新决策 —— 这三类 OutboundKind **不进 receipt card**，作为独立 thread reply 投递到 user message 的 Feishu thread。Receipt card 收窄到只承载最终答复（OutText / OutResult）+ 元数据（OutInit / OutUsage）。
+
+**核心变化**：
+
+1. **Channel.Send dispatcher 按 Kind 分流**
+   - `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCompaction` → 直接 POST 到 Feishu thread（rootID = userMsgID），每 event = 一条 thread reply
+   - `OutText` / `OutResult` / `OutInit` / `OutUsage` → 继续 fold 进 receipt card（不变）
+   - `OutMessageState` → 仍然挂在 user msg 的 reaction 上（不变）
+   - `OutCard`（权限请求等）→ 仍然发到 thread，跟 OutToolEnd 一样是 thread reply（不变）
+
+2. **OutToolEnd 类型感知摘要（"决断处理"）**
+   - Bridge 层给 `ToolEndEvent.Args` 字段填 args（在同一 message 的 tool_use block 拿）
+   - Channel 层 `summarizeToolEnd(name, args, output, err)` 按 tool 类型生成单行摘要（不 dump 原始 output）
+   - 默认走字节截断（向后兼容未知 tool）
+
+3. **Receipt card 瘦身**
+   - 删 `buildReceiptCard` 的 `Kind="thinking"` / `Kind="tool"` collapsible_panel 分支
+   - 删 `eventToEntry` 对 EventText-with-thinking-prefix / EventToolStart / EventToolEnd / EventCompaction 的 entry 生成（这些走 thread）
+   - 50 element 上限不再是个问题
+
+4. **F-08 / F-25 文档同步**
+   - F-25 §3 Channel Implementation Contract 表更新 —— OutThinking / OutToolStart / OutToolEnd 不再进 receipt
+   - F-08 §4 加 "Channel autonomous routing examples" —— Feishu 选 thread 是 Channel 自治的具体例子
+
+**不变式**：
+- OutboundMessage 不动（无新 Kind，无删 Kind）
+- Gateway 不动（不持有 thread 概念、不感知 channel 分流）
+- ChatSession 不动（`currentTurnUserMsgID` 单数锚点不变）
+- 1 turn : 1 anchor 不变式保留（所有 event 仍 anchor 到同一个 userMsgID）
+- 抽象归抽象 / 具体归具体原则保留（thread 路由是 Feishu 自治决定）
+- `OutboundMessage.ReplyTo = currentTurnUserMsgID` 契约不变（thread 路由用它作 Feishu `root_id`）
+
+**为什么不叫 v2.0**：v1.3 的核心不变式（职责隔离、Binding FSM owner、MessageState 独立、Receipt 自治）全部保留。F-thread-route 是 Channel 自治范围内的渲染细节变化，不影响 nightme 数据模型与 Gateway 契约。
+
+**详细落地**：见 [`feat/F-34-tool-thread-routing.md`](./feat/F-34-tool-thread-routing.md) + [`channel/feishu.md`](./channel/feishu.md) §13.12。
+
+---
+
 ## 1. 架构总览
 
 nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以下**逻辑组件**组成：
@@ -214,6 +256,13 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 - **drop 决策留在 Gateway**：channel 不读 `cs.WatchMode()`，gateway dispatcher 入口统一 gate `!HasMention && WatchMode != All`
 - **不续接 Thread**：nightme 不主动追踪 / 创建 thread 上下文，不维护 thread 树；Feishu 端 thread 视觉由 Channel 自治
 - **任何 Channel 都不引入 thread 概念**：nightme 数据模型永远不引入 thread 字段（`thread_ts` / `message_thread_id` / `is_threaded` / `thread_id` 等）。Channel 自管 thread 渲染细节（Feishu reply API path 参数 / Slack block kit / Telegram forum mode），但只通过 `OutboundMessage` 暴露能力，不污染 Gateway / ChatSession / Registry 数据模型
+
+**v1.3.x 新增（F-thread-route 落地）**：
+
+- **Channel 按 OutboundKind 自决渲染目标**：Channel 拿到 `OutboundMessage{Kind, ReplyTo, Text, Meta}` 后，**可以**按 `Kind` 自决 routing（thread reply / receipt card / reaction / ...），无需 Gateway 指示。F-thread-route 案例：Feishu adapter 把 `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCompaction` 投到 thread；`OutText` / `OutResult` / `OutInit` / `OutUsage` 投到 receipt card。**不动 OutboundMessage 契约 / Gateway / ChatSession**
+- **OutToolEnd 类型感知摘要 = Channel 职责**：bridge 层把 `ToolEndEvent.Args` 填好（同一 message 的 tool_use block 拿）；Channel 层（Feishu adapter）按 tool name 生成单行摘要（"📄 Read /foo.go → 1234 lines"），不 dump 原始 output。摘要算法属于 Channel 自治（Feishu 用 emoji + 行数；Slack 可用 Block Kit；Web 可用折叠 div）
+- **Routing 决策不写进 OutboundMessage.Meta**：Meta 只承载数据载荷（output / err / args），**不**承载 routing hint。Channel 看到 Kind 后自决。
+- **F-thread-route 不构成"thread 概念侵入 nightme 数据模型"**：Channel 自管的 thread 是 Feishu SDK API 调用层面的细节（`POST /im/v1/messages/{rootID}/reply`）；nightme 仍然只见 `OutboundMessage.ReplyTo = currentTurnUserMsgID`，跟 F-33 不变式完全兼容
 
 ---
 
@@ -777,6 +826,17 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
   - `internal/auth/feishu/feishu_test.go` 加 case
   - `cmd/nightme/auth_login.go` 移除 `--group-messages` flag 设计（默认开启）
   - 详纸面设计见 [`docs/SPEC.md`](./SPEC.md) §3.1.1 + [`docs/feat/F-08-channel-abstraction.md`](./feat/F-08-channel-abstraction.md)
+- ⏭ **F-thread-route（OutThinking/Tool → Feishu thread + 类型感知摘要）**：
+  - 反转 v1.3 §13.6/§13.7/§13.9 折叠决议（collapsible_panel 实机验证失败）
+  - `internal/agent/agent.go` `ToolEndEvent` 加 `Args string` 字段
+  - `internal/bridge/claudecode/stream.go` 解析 `tool_result` 时从同 message 的 `tool_use` block 拿 args 填进 `ToolEndEvent.Args`
+  - `internal/channel/feishu/adapter.go` `Send` dispatcher 按 Kind 分流：thinking/tool/compaction → thread；text/result/init/usage → receipt card
+  - `internal/channel/feishu/summarize_tool.go` 新文件：`summarizeToolEnd` + `countLines` + `truncate` helper
+  - `internal/channel/feishu/receipt_event.go` `eventToEntry` 对 thinking/tool/compaction 返回 `(_, false)`（不进 receipt）
+  - `internal/channel/feishu/adapter.go` `buildReceiptCard` 删 collapsible_panel 分支（`Kind=="thinking"` / `Kind=="tool"`）
+  - `internal/channel/feishu/receipt_event_test.go` 删 thinking/tool assertion；新增 `TestSend_Out*_PostsToThread` + `TestSummarizeToolEnd`
+  - `docs/channel/feishu.md` §13.12 决策反转记录 + §15 实施计划修订
+  - 详见 [`docs/feat/F-34-tool-thread-routing.md`](./feat/F-34-tool-thread-routing.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §13.12
 
 ---
 

@@ -191,6 +191,11 @@ type MessageReceipt struct {
 	// cardMsgID stays anchored to "the card we PATCH".
 	cardMsgID string
 
+	// Feishu limits message updates to roughly five per second.
+	// Skip duplicate bodies and pace real PATCH requests.
+	lastBody      string
+	lastBodyPatch time.Time
+
 	// --- v1.1 foot-note metadata ---
 	//
 	// Populated by Append on EventInit (agentName + workspace) and
@@ -795,7 +800,26 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 		}
 		r.cardMsgID = msgID
 		r.replyMsgID = msgID // keep alias in sync
+		r.lastBody = body
+		r.lastBodyPatch = time.Now()
 		return nil
+	}
+
+	// Skip PATCHes when the body is identical to the previous render
+	// (common when rapid events don't actually change the card) and
+	// pace the real PATCHes below Feishu's message-update rate limit.
+	if body == r.lastBody {
+		return nil
+	}
+	const minPatchInterval = 300 * time.Millisecond
+	if wait := minPatchInterval - time.Since(r.lastBodyPatch); wait > 0 {
+		t := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return ctx.Err()
+		case <-t.C:
+		}
 	}
 
 	// Subsequent: PATCH the existing card in place. The whole
@@ -806,6 +830,8 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 			"entries", len(r.entries))
 		return fmt.Errorf("feishu receipt: patch card: %w", patchErr)
 	}
+	r.lastBody = body
+	r.lastBodyPatch = time.Now()
 	return nil
 }
 

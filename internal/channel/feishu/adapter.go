@@ -603,9 +603,15 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// Idempotency: skip if we already rendered this state for
 		// this userMsgID. Tracks last-rendered state to avoid
 		// duplicate AddReaction calls on retries / heartbeats.
+		//
+		// v1.3.1 fix: use the comma-ok form to distinguish "no
+		// entry yet" (first emit) from "previous state is
+		// StateReceived" (which is the zero value of MessageState
+		// and was incorrectly treated as "already rendered",
+		// silently dropping every first StateReceived emit).
 		a.mu.Lock()
-		prev := a.messageStates[messageID]
-		skip := prev == state
+		prev, hasPrev := a.messageStates[messageID]
+		skip := hasPrev && prev == state
 		if !skip {
 			a.messageStates[messageID] = state
 		}

@@ -115,17 +115,14 @@ func TestSend_OutMessageState_TracksStateIdempotency(t *testing.T) {
 	})
 	// After failure, messageStates should not be marked (revert).
 	a.mu.RLock()
-	tracked := a.messageStates["om_msg_1"]
+	_, hasPrev := a.messageStates["om_msg_1"]
 	a.mu.RUnlock()
-	if tracked != receipt.MessageState(0) {
-		t.Errorf("after failed AddReaction, messageStates[om_msg_1] = %v; want zero value (revert)", tracked)
+	if hasPrev {
+		t.Errorf("after failed AddReaction, messageStates should be reverted (no entry); got hasPrev=true")
 	}
 
-	// Now inject a stub larkClient to make AddReaction succeed.
-	// We can't easily mock the larkClient struct (deep nesting),
-	// so we test the messageStates update directly via an internal
-	// helper. This proves the idempotency bookkeeping works
-	// independent of the network call.
+	// Pre-populate messageStates with StateReceived (simulating a
+	// successful prior render).
 	a.mu.Lock()
 	a.messageStates["om_msg_1"] = receipt.StateReceived
 	a.mu.Unlock()
@@ -145,6 +142,54 @@ func TestSend_OutMessageState_TracksStateIdempotency(t *testing.T) {
 	})
 	if err != nil {
 		t.Errorf("idempotent re-emit should be no-op; got err = %v", err)
+	}
+}
+
+// TestSend_OutMessageState_FirstReceivedNotSkipped is a
+// regression test for v1.3.1: previously, the idempotency check
+// used `prev := messageStates[messageID]` which returned the zero
+// value (StateReceived) for an unseen messageID, causing every
+// first StateReceived emit to be silently skipped. The fix uses
+// the comma-ok form to distinguish "no entry" from "prev ==
+// StateReceived".
+func TestSend_OutMessageState_FirstReceivedNotSkipped(t *testing.T) {
+	a := testAdapter(t)
+	ctx := context.Background()
+
+	// Inject a stub larkClient that always succeeds so the
+	// idempotency decision is observable via messageStates.
+	// (We can't easily mock the real larkClient because of deep
+	// struct nesting; track via messageStates side-effect which
+	// is set BEFORE AddReaction is called.)
+	a.mu.Lock()
+	// Pre-condition: messageStates has NO entry for this msgID.
+	delete(a.messageStates, "om_msg_first")
+	a.mu.Unlock()
+
+	// Send StateReceived. Even though larkClient is nil and
+	// AddReaction will fail, the messageStates update happens
+	// BEFORE AddReaction is called (and reverts on failure). So
+	// after the call, messageStates should NOT have an entry
+	// (revert due to nil larkClient). The point is: the Send
+	// dispatcher MUST have attempted AddReaction, not skipped it.
+	//
+	// We assert by checking that Send returned an error (i.e.
+	// AddReaction was attempted, and failed because larkClient is
+	// nil). If the bug were still present, Send would return nil
+	// (skip path), falsely indicating success.
+	err := a.Send(ctx, gateway.OutboundMessage{
+		Kind:   gateway.OutMessageState,
+		ChatID: "oc_chat",
+		Meta: map[string]any{
+			"message_id": "om_msg_first",
+			"state":      receipt.StateReceived,
+		},
+	})
+	// larkClient is nil → AddReaction returns "feishu: REST client
+	// not initialized". If we got nil err, the buggy skip path
+	// would have hidden the attempt.
+	if err == nil {
+		t.Fatalf("Send should attempt AddReaction and fail (nil larkClient); got nil err — likely the skip bug")
 	}
 }
 

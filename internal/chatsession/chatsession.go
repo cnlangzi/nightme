@@ -47,6 +47,16 @@ type ChatSession struct {
 	activeAgent  string
 	primaryAgent string
 
+	// F-watch §3.1.1: per-chat message-watch mode. Default
+	// WatchModeMention (only @ bot or @_all messages are
+	// processed); /watch on switches to WatchModeAll. See
+	// docs/SPEC.md §3.1.1 + docs/channel/feishu.md §6.10/§6.11.
+	// DM chats always behave as if WatchMode==WatchModeAll
+	// (every DM message is "addressed to bot"); the gate logic in
+	// gateway.Handle enforces that — this field is only consulted
+	// for group chats via the channel-supplied HasMention bool.
+	watchMode WatchMode
+
 	// Pool of AgentSessions keyed by (agent, cwd).
 	pool map[agentCwdKey]*AgentSession
 
@@ -129,6 +139,7 @@ func New(chatID, primaryAgent string) *ChatSession {
 		activeAgent:      primaryAgent, // init seed
 		primaryAgent:     primaryAgent, // historical snapshot, read-only
 		pool:             make(map[agentCwdKey]*AgentSession),
+		watchMode:        WatchModeMention, // F-watch default
 		createdAt:        time.Now(),
 		lastInteractionAt: time.Now(),
 	}
@@ -194,6 +205,24 @@ func (cs *ChatSession) SetActiveCwd(cwd string) error {
 	return nil
 }
 
+// SetWatchMode changes the per-chat message-watch mode. Persists to
+// registry on success so it survives daemon restart. No spawn /
+// kill / event side-effects — purely a routing-state mutation.
+//
+// F-watch §3.1.1: a no-op in DM chats at the gateway layer (DM
+// messages always pass HasMention=true), but the mode value is
+// still written to keep /watch semantics consistent across chat
+// types — switching from group to DM and back preserves the
+// user's last-set preference.
+func (cs *ChatSession) SetWatchMode(mode WatchMode) error {
+	cs.mu.Lock()
+	cs.watchMode = mode
+	cs.lastInteractionAt = time.Now()
+	cs.mu.Unlock()
+	cs.persistChatEntry()
+	return nil
+}
+
 // SetActiveAgent changes the active agent name. Does NOT spawn or
 // kill; caller must invoke LookupActiveAgentSession to materialize.
 func (cs *ChatSession) SetActiveAgent(agent string) error {
@@ -226,6 +255,16 @@ func (cs *ChatSession) ActiveAgent() string {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.activeAgent
+}
+
+// WatchMode returns the current per-chat message-watch mode.
+// Default value when never set is WatchModeMention (set in New
+// when the registry has no persisted value). See
+// docs/SPEC.md §3.1.1 + docs/channel/feishu.md §6.11.
+func (cs *ChatSession) WatchMode() WatchMode {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.watchMode
 }
 
 // PrimaryAgent returns the per-chat primary agent (snapshot of
@@ -670,6 +709,7 @@ func (cs *ChatSession) entryLocked() *registry.ChatSessionEntry {
 		ActiveAgentSessionID: activeASID,
 		CreatedAt:            cs.createdAt,
 		LastInteractionAt:    cs.lastInteractionAt,
+		WatchMode:            cs.watchMode,
 	}
 }
 

@@ -63,6 +63,43 @@ v1.3 在 v1.2 架构上做**职责再切分**——核心变化是**删除 Gatew
 - **抽象归抽象**：Gateway = 路由器，不假设任何 Channel 渲染细节
 - **具体归具体**：Channel = 渲染器，自管 receipt 生命周期，自选存储形态
 - Channel 接口永远不暴露 receipt / receipt map / receipt FSM / 任何渲染状态
+
+## 0.2 文档变更摘要（v1.3 → v1.3.x F-watch 增量）
+
+**背景**：v1.3 在 F-33 之后，ChatType 从 nightme 数据模型中删除；群聊 “只 @ 才收”的默认行为由飞书 `im:message.group_at_msg:readonly` scope 决定，用户无法 opt-out。 F-watch 让 nightme 侧接管这个决定权。
+
+**增量变化**：
+
+1. **新增 `WatchMode` per-chat 状态**
+   - `ChatSession.WatchMode`：`WatchModeMention`（默认，只 @ 收）/ `WatchModeAll`（`/watch on`，全收）
+   - `ChatSessionEntry.WatchMode` 持久化字段（Go JSON 容忍缺失）
+   - setter `ChatSession.SetWatchMode` + getter `ChatSession.WatchMode()`
+
+2. **新增 `Message.HasMention bool` 字段**
+   - Channel adapter 计算：DM 永远 true；group 含 bot/@_all 时 true
+   - Gateway dispatcher 在 `Handle` 入口做 gate：`!HasMention && WatchMode != All → drop`
+   - 详细职责划分：Channel 不知道 ChatSession；ChatSession 不知道 chat type；双方都只读 `HasMention` 这一个 bit
+
+3. **Channel adapter mention strip**
+   - 构造 `Message.Text` 前，strip 开头的 `@bot_key ` 或 `@_all ` mention 前缀 + 末尾空格
+   - 还原为 nightme 支持的纯文本格式，让 `/watch on` 能被 `ParseCommand` 正确解析
+   - 只 strip 开头；中段 mention 不动
+
+4. **飞书 `DefaultAddons()` 变更**
+   - 始终包含 `im:message.group_msg`（不带 `:readonly`）：bot 默认接收全群消息
+   - 由 `WatchMode` 在 nightme 侧决定 drop 还是 pass
+   - **不**走 CLI flag opt-in —— 默认就是“飞书送全，nightme 决定要不要处理”
+
+5. **新增 `/watch on|off` slash command**
+   - Gateway dispatcher 入口与 `/cwd` `/use` `/kill` 同源
+   - 三种调用：`/watch on`、`/watch off`、`/watch`（无参 = 显示状态）
+   - DM 下为 no-op（DM 永远 `HasMention=true`，不走 gate）
+
+**v1.3 不变式依然保持**：
+- Gateway 不持有 chat type
+- Channel 不 import `internal/chatsession`
+- `WatchMode` 状态只挂在 ChatSession
+- Channel adapter 只通过 `Message.HasMention` 与 Gateway 交流 chat type / mention 信息
 - Gateway 对 Channel 内部状态一无所知，只通过 `OutboundMessage` 交流
 
 **为什么不叫 v2.0**：v1.2 的核心架构不变式（Binding FSM owner、ChatSession 三层状态、单消费者事件流、`agentSession.Events()` 单读者、InputBuffer FSM owner）**全部保留**。v1.3 是"职责再切分"的延续——把已经过度渗入 Gateway 的 Receipt 概念撤回 Channel 自治域。
@@ -169,6 +206,12 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 - **Channel 自管 chat 语义**：Channel 知道 chat 类型（DM / group / topic）、知道 thread 渲染，但只通过 `OutboundMessage` 暴露渲染能力，不污染 Gateway / ChatSession / Registry 数据模型
 - **`InboundMessage.ReplyTo = message.ParentId`**（Feishu 语义下）：thread 顶层 `RootId` 不进 nightme；`ReplyTo` 字段统一语义 = "被 reply 的那条 message_id"
 - **`OutboundMessage.ReplyTo = currentTurnUserMsgID`**：bot reply 永远 anchor 到 user 当前 message_id，不爬 thread 树
+
+**v1.3.x 新增（F-watch 落地）**：
+
+- **`Message.HasMention` 由 Channel 计算，Gateway 不重复算**：channel adapter 读 `message.Mentions` + `chat_type` + `GetBotIdentity()` 拿 bot open_id 算 `HasMention`（DM 永远 true；group 含 bot/@_all 时 true）；Gateway 只 trust 这个 bool
+- **`ChatSession.WatchMode` 决定 group 内非 mention 消息是否 drop**：默认 `WatchModeMention`（drop），`/watch on` 切 `WatchModeAll`（pass）；DM 下 `/watch` 为 no-op
+- **drop 决策留在 Gateway**：channel 不读 `cs.WatchMode()`，gateway dispatcher 入口统一 gate `!HasMention && WatchMode != All`
 - **不续接 Thread**：nightme 不主动追踪 / 创建 thread 上下文，不维护 thread 树；Feishu 端 thread 视觉由 Channel 自治
 - **任何 Channel 都不引入 thread 概念**：nightme 数据模型永远不引入 thread 字段（`thread_ts` / `message_thread_id` / `is_threaded` / `thread_id` 等）。Channel 自管 thread 渲染细节（Feishu reply API path 参数 / Slack block kit / Telegram forum mode），但只通过 `OutboundMessage` 暴露能力，不污染 Gateway / ChatSession / Registry 数据模型
 
@@ -180,8 +223,9 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 
 ```
 IM 消息事件
-  → Channel Adapter 解码为统一 InboundMessage{chat_id, user_id, text, attachments, message_id, reply_to, time}
+  → Channel Adapter 解码为统一 InboundMessage{chat_id, user_id, text, attachments, message_id, reply_to, time, has_mention}
       ├─ reply_to = message.ParentId（F-33：Feishu 原生 parent_id，thread 顶层 RootId 不进 nightme）
+      ├─ has_mention（F-watch：DM 永远 true；group 含 bot/@_all 时 true；由 channel adapter 根据 Mentions + chat_type + GetBotIdentity 计算）
       ├─ 异步下载 attachments 到本地路径
       └─ publish 到 ch.Incoming()
 
@@ -191,9 +235,13 @@ Gateway.pumpInbound (per-channel)
 Gateway.dispatchLoop
   └ Handle(ctx, msg)
      ├ ParseCommand(msg.Text)
-     │   ├ 命中 (/cwd /use /kill /help /agents) → handler(msg)
+     │   ├ 命中 (/cwd /use /kill /watch /help /agents) → handler(msg)
      │   │   └ handler 走 gateway.bindings → chatSession.xxx → reply via channel.Send
      │   └ 未命中 / 普通文本 → messageDispatcher(ctx, msg)
+     ├ F-watch gate(F-watch 位置:Handle 入口在 dispatchLoop → slashCommandDispatcher 前)
+     │   ├ msg.HasMention == true → pass-through(原有路径)
+     │   ├ msg.HasMention == false 且 cs.WatchMode() == WatchModeAll → pass-through
+     │   └ msg.HasMention == false 且 cs.WatchMode() == WatchModeMention(默认) → drop(F-watch:不发 ack,静默跳过)
      └ slashCommandDispatcher 走 handler；messageDispatcher 走 ChatSession（详见 §2.2）
 
 messageDispatcher(ctx, msg)
@@ -466,6 +514,44 @@ ChatSession 分**三层状态**——但**三层状态的所有权清晰分离**
 
 **注册兼容性** —— `ChatSessionEntry.ChatType` 字段删除后,旧 `chat_sessions.json` 文件中残留的 `chatType` 字段被 Go JSON unmarshal 默认容忍,不破坏加载;数据不再被使用,无需迁移脚本。
 
+#### 3.1.1 WatchMode：per-chat 群消息全收开关
+
+**问题**：nightme bot 加到飞书群后,默认只接收 @ bot 的消息（飞书 `im:message.group_at_msg:readonly` 行为）。如果用户想让 bot "听全群",得在飞书后台手动勾选 `im:message.group_msg` 权限 + 自己处理噪声。
+
+**方案**：per-chat `WatchMode` 字段,默认 `WatchModeMention`(只 @ 收),`/watch on` 切到 `WatchModeAll`(全收)。
+
+| 模式 | 含义 | 触发 |
+|------|------|------|
+| `WatchModeMention`（默认）| 只在 @ bot 或 @_all 时处理 | channel `HasMention == true` |
+| `WatchModeAll` | 处理 chat 内所有消息,无论是否 @ | `cs.WatchMode() == WatchModeAll` |
+
+**Channel 自管 chat 语义的不变式保留**：
+- `WatchMode` 字段挂在 `ChatSession`,**不**在 `Message` / `OutboundMessage` / Channel interface
+- Channel adapter 只暴露 **`HasMention bool`** 给 `Message`（含 bot 或 @_all 为 true；**DM 永远为 true**）
+- Gateway dispatcher 拿 `HasMention` + `cs.WatchMode()` 做 gate,**不**读 chat type
+- Chat type（DM/group/topic_group）**不**进 nightme 数据模型
+
+**DM 不受 `WatchMode` 影响的锁定不变式**：
+- DM 消息在 channel adapter 里永远被设为 `HasMention=true`（每条 DM 都是 "addressed to bot"）
+- 因此 gateway gate `!HasMention && WatchMode != All` 对 DM 永远为 false → DM 永远不 drop
+- `WatchMode` 字段在 DM 下被写入仅为保留用户偏好，切回 group 后生效
+- 这条不变式由两层测试锁死：
+  - `internal/channel/feishu/mention_test.go::TestComputeHasMention_DMInvariant`
+  - `internal/gateway/dispatch_watch_test.go::TestDispatchInbound_WatchModeGate_DMInvariant`
+
+**Slash command**：`/watch on` / `/watch off` / `/watch`(无参 = 显示状态)。 handler 由 Gateway dispatcher 处理,跟 `/cwd` `/use` `/kill` 同一路径。
+
+**持久化**：`ChatSessionEntry.WatchMode` 字段(默认 `WatchModeMention`)。Go JSON unmarshal 容忍缺失字段,旧 `chat_sessions.json` 无 `watchMode` 字段时安全 fallback 到默认。
+
+**飞书 scope 配合**：`DefaultAddons()` 始终包含 `im:message.group_msg`(不带 `:readonly`)——bot 默认接收所有群消息,由 `WatchMode` 在 nightme 侧 gate。**不**走 CLI flag opt-in,默认就是"飞书送全,nightme 决定要不要处理"。
+
+**职责边界**：
+- Channel adapter: 计算 `HasMention`(`message.Mentions` + `chat_type` + `GetBotIdentity()` 拿 bot open_id)
+- Gateway dispatcher: 检查 `HasMention` + `WatchMode` 决定 drop 或 pass
+- ChatSession: 持有 `WatchMode` 状态 + 提供 setter
+
+**详细落地**：见 [`feat/F-08-channel-abstraction.md`](./feat/F-08-channel-abstraction.md) §Message 字段 + [`channel/feishu.md`](./channel/feishu.md) §6.7 mention strip。
+
 ### 3.2 状态转换触发器（v1.2）
 
 | From | 触发 | To | 由谁驱动 |
@@ -633,6 +719,12 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 | **Q14** | `session.Events()` 单消费者 | **readPump only**；ChatSession 通过 EventCallback 接收 |
 | **Q15** | `/cwd` / `/use` 对 AgentSession 的影响 | **不杀任何 AgentSession**；pool 保留老 entry，切回能复用 |
 
+**已确认（2026-08-03，F-watch 锁定）**：
+- **Q-W1** ✅ 新增 `/watch on|off` slash command 控制 per-chat `WatchMode`：`WatchModeMention`（默认，只 @ 收）/ `WatchModeAll`（全收）；由 Gateway dispatcher 在 `Handle` 入口 gate
+- **Q-W2** ✅ `Message.HasMention` 由 channel adapter 计算（DM 永远 true；group 看 `Mentions` + bot open_id）；Gateway 不重复计算
+- **Q-W3** ✅ Feishu `DefaultAddons()` **始终包含** `im:message.group_msg`（不带 `:readonly`）：bot 默认接收全群消息，由 `WatchMode` 在 nightme 侧 gate。**不**走 CLI flag opt-in
+- **Q-W4** ✅ Channel adapter 在构造 `Message` 前 strip 开头 `@bot_key ` / `@_all ` mention 前缀（还原为 nightme 支持的纯文本格式，让 `/watch on` 能被 `ParseCommand` 正确解析）
+
 **已确认（2026-08-02，PRD v1.2 锁定）**：
 - **Q-A** ✅ Primary Agent 仅全局 config（顶层 `primary`，与 `agents:` list 并列）；ChatSession.primaryAgent 是创建时 snapshot，不可变。**无 `/default` 命令**。
 - **Q-B** ✅ LookupActiveAgentSession 只看 `(activeAgent, activeCwd)`：命中 Running 复用，否则 spawn `(activeAgent, activeCwd)`。**没有运行时 fallback**：ChatSession 始终持有一个有效的 activeAgent（创建/恢复时被 `cfg.Primary` 一次性填入），用户用 `/use` 显式覆盖，lookup 不再做降级判断。
@@ -674,6 +766,17 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
   - `cmd/nightme/run.go` `newEventHandler` 设 `out.ReplyTo = cs.currentTurnUserMsgID`
 - ✅ done in v1.3: docs/feat/F-25-rolling-log.md renamed from F-25-input-buffer.md; F-26-gateway-hub.md + F-08-channel-abstraction.md + F-31-message-state.md + docs/channel/feishu.md updated with v1.3 annotations
 - ⏭ **F-33（chatID 数据模型简化）**：删 Gateway ChatType 抽象 + topic_group 不特殊处理 + InboundMessage.ReplyTo = message.ParentId。详见 [`docs/feat/F-33-simplify-chatid-data-model.md`](./feat/F-33-simplify-chatid-data-model.md)
+- ⏭ **F-watch（WatchMode per-chat 群消息全收 + mention strip）**：
+  - `internal/channel/channel.go` `Message.HasMention bool` 字段 + 接口扩展
+  - `internal/channel/feishu/adapter.go::handleMessage` 加 mention strip + `HasMention` 计算
+  - `internal/chatsession/chat_session.go` `WatchMode` 类型 + getter/setter
+  - `internal/chatsession/registry.go` `ChatSessionEntry.WatchMode` 字段
+  - `internal/gateway/handlers_watch.go` 新文件：`handleWatch` + `/watch` 注册
+  - `internal/gateway/gateway.go::Handle` 入口加 `HasMention` gate
+  - `internal/auth/feishu/feishu.go::DefaultAddons` 加 `im:message.group_msg`
+  - `internal/auth/feishu/feishu_test.go` 加 case
+  - `cmd/nightme/auth_login.go` 移除 `--group-messages` flag 设计（默认开启）
+  - 详纸面设计见 [`docs/SPEC.md`](./SPEC.md) §3.1.1 + [`docs/feat/F-08-channel-abstraction.md`](./feat/F-08-channel-abstraction.md)
 
 ---
 

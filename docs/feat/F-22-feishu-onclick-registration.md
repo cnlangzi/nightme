@@ -140,8 +140,11 @@ Next: run `nightme run` to start the gateway.
 | Scope (tenant) | `im:message:receive_v1` (event) | 接收消息 |
 | Scope (tenant) | `im:message:readonly` | 下载消息资源 (F-14 接收图片/文件/音视频) |
 | Scope (tenant) | `im:message.reactions:write_only` | 在用户消息上加 reaction emoji (F-25 receipt) |
-| Scope (tenant) | `im:message.group_at_msg:readonly` | 群消息 @ 提及（v0.1 可选）|
+| Scope (tenant) | `im:message.group_at_msg:readonly` | 群消息 @ 提及（为 Feishu 侧 server-side filter 保留）|
+| Scope (tenant) | `im:message.group_msg`（**F-watch，默认包含**） | 接收群聊全部消息；由 nightme 侧 `WatchMode` gate 决定处理还是 drop。**不带 `:readonly`** —— bot 需要回复到群里 |
 | Event | `im.message.receive_v1` | 收消息事件 |
+
+> **F-watch 决策记录**：原本考虑过提供 `--group-messages` CLI flag 让用户 opt-in，Devin 拍板：默认始终包含 `im:message.group_msg`，需 opt-out 时用 `/watch off`。理由：用户加 bot 到群 = 期望 bot 能听，不应被隐式 intercept 调到次路径。
 
 **Credentials 持久化**：
 - 写入 `~/.config/nightme/config.yaml` 的 `feishu.app_id` / `feishu.app_secret` 顶层字段（v0.1 single-account）
@@ -173,6 +176,7 @@ Next: run `nightme run` to start the gateway.
 | 用户想撤销 app | 文档说明需要去飞书开放平台手动撤销 + 删 config |
 | `--update` 模式 | 用 `Options.AppID` 走 update flow，重新授权现有 app |
 | 升级 scope（如新增 reaction scope） | 重新跑 `nightme auth login feishu`，飞书重新创建 app，新凭证覆盖 config |
+| DM 中 `/watch` 为 no-op | DM chat_type 下 `HasMention` 永远 true，`/watch on/off` 状态正常写入但不影响消息处理 —— DM 消息全收，与模式无关 |
 
 ## 5. 验收流程（v0.1 演示）
 

@@ -199,6 +199,14 @@ func DefaultAppPreset() *registration.AppPreset {
 //	                                  download inbound attachment resources
 //	                                  via F-14 passthrough
 //	im:message.group_at_msg:readonly   bot triggered by @-mention in groups
+//	                                  (F-watch: kept alongside group_msg;
+//                                   per-chat gate in nightme decides
+//	                                   drop or pass; see SPEC §3.1.1)
+//	im:message.group_msg               F-watch: receive ALL group messages
+//	                                  (not just @-mentions). Default-on at
+//	                                  install time; ChatSession.WatchMode
+//	                                  gates processing. NOT :readonly
+//	                                  because bot needs to reply.
 //	im:message.p2p_msg:readonly        bot triggered in 1:1 chats
 //	im:message.pins:read               read pinned-message state
 //	im:message.pins:write_only         pin / unpin messages
@@ -221,6 +229,14 @@ func DefaultAppPreset() *registration.AppPreset {
 // minus Docx/Base/Calendar/Task scopes that nightme does not yet
 // implement. Adding everything at install time avoids forcing a
 // re-authorize round the next time a feature lands.
+//
+// F-watch (2026-08-03): `im:message.group_msg` is included by
+// default. Decision record: Devin rejected an opt-in CLI flag
+// (`--group-messages`) in favour of "default-on, opt-out per chat
+// via `/watch off`". Users who want the bot to never see
+// non-mention group messages run `/watch off` once per chat; the
+// feishu platform still delivers them but nightme drops them at
+// the dispatcher gate (docs/SPEC.md §3.1.1).
 //
 // Callbacks:
 //
@@ -251,8 +267,10 @@ func DefaultAddons() *registration.AppAddons {
 				"im:message.reactions:read",
 				// History + attachment passthrough (F-14).
 				"im:message:readonly",
-				// Group / 1:1 triggers.
+				// Group triggers: at-only + all (F-watch).
 				"im:message.group_at_msg:readonly",
+				"im:message.group_msg",
+				// 1:1 triggers.
 				"im:message.p2p_msg:readonly",
 				// Future messaging features (v0.3+).
 				"im:message.pins:read",

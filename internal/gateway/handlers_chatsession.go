@@ -64,6 +64,17 @@ func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel C
 			return handleKill(ctx, mgr, channel, msg)
 		},
 	})
+
+	// F-watch §3.1.1: per-chat message-watch toggle. State-only;
+	// does not touch activeCwd / activeAgent / pool. DM chats:
+	// state is persisted but the gate is a no-op.
+	gw.Register(Command{
+		Name: "watch",
+		Description: "Toggle per-chat message-watch mode: /watch on | /watch off",
+		Handler: func(ctx context.Context, msg *InboundMessage, args []string) (*CommandResult, error) {
+			return handleWatch(ctx, mgr, channel, msg, args, globalPrimary)
+		},
+	})
 }
 
 // RegisterChatSessionRuntime installs /cwd /use /kill and wires

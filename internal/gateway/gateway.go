@@ -41,6 +41,7 @@ import (
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
 // Channel is the abstract surface the Gateway needs from any IM
@@ -70,6 +71,12 @@ type Command struct {
 type CommandResult struct {
 	Reply    string
 	Consumed bool
+	// Dropped indicates the gateway intentionally did not forward
+	// the inbound to the messageDispatcher (e.g. F-watch per-chat
+	// gate). Distinct from Consumed=true (a slash command ran) so
+	// log lines can distinguish "the slash command replied" vs
+	// "the message was silently dropped".
+	Dropped bool
 }
 
 // MessageDispatcher is the runtime-injected handler for the
@@ -128,6 +135,12 @@ type Gateway interface {
 	//     Command), or
 	//   - the MessageDispatcher injected at construction time
 	//     (default branch for plain text).
+	//
+	// F-watch: non-slash-command messages are subject to the
+	// per-chat WatchMode gate; messages with HasMention==false
+	// and a WatchMode != WatchModeAll are dropped at this layer
+	// before reaching the MessageDispatcher. Slash commands
+	// bypass the gate.
 	DispatchInbound(ctx context.Context, msg *InboundMessage) (*CommandResult, error)
 
 	ListCommands() []Command
@@ -160,6 +173,26 @@ type Gateway interface {
 // handle that also owns the per-channel / per-session goroutines.
 type Router = gateway
 
+// WithWatchModeResolver installs the per-chat WatchMode lookup
+// function used by the F-watch gate in DispatchInbound. The
+// runtime (cmd/nightme/run.go) wires this after constructing
+// the chatsession.Manager so the gateway can ask "what's the
+// WatchMode for chat X?" without importing the chatsession
+// package directly.
+//
+// Signature:
+//   - (mode, true)  when the chat has a known mode
+//   - (zero, false) when there is no ChatSession yet
+//
+// A nil resolver disables the gate entirely (current behaviour
+// for tests and for runtimes that don't wire it).
+func (g *gateway) WithWatchModeResolver(resolver func(chatID string) (chatsession.WatchMode, bool)) *gateway {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.watchModeResolver = resolver
+	return g
+}
+
 // gateway is the concrete implementation + dispatch runtime. (It
 // carries the method set; Router is just an alias so external
 // packages can type-assert.)
@@ -188,6 +221,13 @@ type gateway struct {
 
 	// v1.2 binding table (chat_id → session_id). Owned by Gateway.
 	bindings map[string]*BindingEntry
+
+	// F-watch §3.1.1: per-chat WatchMode resolver. Returns
+	// (mode, true) when the chat has a known mode; (zero, false)
+	// when there is no ChatSession yet or resolver is unset.
+	// Wired by cmd/nightme/run.go via WithWatchModeResolver.
+	// Reading is concurrent-safe; updating takes mu.
+	watchModeResolver func(chatID string) (chatsession.WatchMode, bool)
 }
 
 // New constructs a Gateway (the inboundDispatcher).
@@ -264,21 +304,95 @@ func (g *gateway) DispatchInbound(ctx context.Context, msg *InboundMessage) (*Co
 		return nil, errors.New("gateway: nil message")
 	}
 	name, args, err := ParseCommand(strings.TrimSpace(msg.Text))
-	if err != nil {
-		// Parse failure (e.g. "/" with no command): treat as plain
-		// message and forward to the messageDispatcher branch.
+
+	// F-watch §3.1.1: per-chat message-watch gate (single entry,
+	// both branches below). Slash commands ALWAYS pass the gate
+	// — `/watch on` must work even from non-mention group
+	// messages, otherwise users can't opt back in once they've
+	// opted out. Only the plain-text / unrecognised-slash paths
+	// consult the gate.
+	//
+	// Drop condition: HasMention==false (group, no bot/@_all)
+	// AND chat is configured to drop non-mention messages.
+	//
+	// DM chats always pass: HasMention is set to true by the
+	// channel adapter for every DM (every DM is implicitly
+	// addressed to the bot). WatchMode is consulted but irrelevant.
+	gateAndDispatch := func() (*CommandResult, error) {
+		if dropped, _ := g.applyWatchModeGate(msg); dropped {
+			return &CommandResult{Consumed: true, Dropped: true}, nil
+		}
 		return g.dispatchMessage(ctx, msg)
 	}
-	if name == "" {
-		return g.dispatchMessage(ctx, msg)
+
+	if err != nil || name == "" {
+		return gateAndDispatch()
 	}
+
 	g.mu.RLock()
 	cmd, ok := g.cmds[strings.ToLower(name)]
 	g.mu.RUnlock()
 	if !ok || cmd.Handler == nil {
-		return g.dispatchMessage(ctx, msg)
+		return gateAndDispatch()
 	}
 	return g.dispatchSlashCommand(ctx, msg, name, args, cmd)
+}
+
+// applyWatchModeGate runs the F-watch §3.1.1 per-chat gate for
+// one message. Returns (dropped=true) when the message should be
+// silently discarded; (false) when it should proceed to the
+// runtime message dispatcher.
+//
+// The gate NEVER fires for slash commands — callers must invoke
+// this only for plain-text / unrecognised-slash paths. The two
+// callers in DispatchInbound respect that.
+//
+// DM invariant: the channel adapter is contractually required to
+// set HasMention=true for every DM message (see
+// computeHasMention's chat_type == "p2p" branch). Therefore DM
+// chats never reach this function with HasMention=false and
+// WatchMode is effectively a no-op for them.
+func (g *gateway) applyWatchModeGate(msg *InboundMessage) (bool, bool) {
+	if msg.HasMention {
+		return false, true // pass (mention, regardless of mode)
+	}
+	if !g.shouldDropForWatchMode(msg.ChatID) {
+		return false, true // pass (no preference to enforce)
+	}
+	log.Printf("gateway: drop non-mention message (WatchMode != All) chat_id=%s message_id=%s",
+		msg.ChatID, msg.MessageID)
+	return true, true
+}
+
+// shouldDropForWatchMode returns true when the chat (if any) is
+// configured to drop non-mention messages. A nil / missing
+// ChatSession returns false (no preference to enforce — the
+// downstream dispatcher will reply with "send /cwd first" as
+// before).
+//
+// DM invariant: DM chats NEVER reach this function with
+// HasMention=false. The channel adapter is contractually
+// required to set HasMention=true for every DM message (see
+// computeHasMention in internal/channel/feishu/mention.go —
+// the chat_type == "p2p" branch returns true unconditionally).
+// Therefore, even with WatchMode=WatchModeMention, DM messages
+// always pass the gate. /watch on/off has no observable effect
+// in DM chats — the state is still persisted so a future
+// chat-type switch (group) preserves the user's preference.
+//
+// The check is intentionally a method on *gateway* (rather than
+// inlined at every callsite) so future changes (e.g. caching the
+// WatchMode lookup) happen in one place. See
+// docs/SPEC.md §3.1.1 + docs/channel/feishu.md §6.11.
+func (g *gateway) shouldDropForWatchMode(chatID string) bool {
+	if g.watchModeResolver == nil {
+		return false
+	}
+	mode, ok := g.watchModeResolver(chatID)
+	if !ok {
+		return false
+	}
+	return mode != chatsession.WatchModeAll
 }
 
 // dispatchSlashCommand runs the registered Command.Handler for a

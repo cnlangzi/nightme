@@ -101,7 +101,7 @@ func TestOnMessageState_AllStatesPassThrough(t *testing.T) {
 func newWiredRouter(t *testing.T) (*Router, *fakeChannel) {
 	t.Helper()
 	ch := &fakeChannel{}
-	gw := New(nil, nil).(*Router)
+	gw := New(nil).(*Router)
 	gw.AttachChannels(ch)
 	// Resolve-channel path uses g.chatToChan populated by pumpInbound
 	// in production; for tests, seed it directly.

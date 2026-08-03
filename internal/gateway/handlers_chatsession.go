@@ -160,7 +160,13 @@ func handleCwd(ctx context.Context, mgr *chatsession.Manager, channel Channel, m
 		return reply(ctx, channel, msg.ChatID, fmt.Sprintf("SetActiveCwd failed: %v", err)), nil
 	}
 
-	return reply(ctx, channel, msg.ChatID, fmt.Sprintf("Workspace set to %s", abs)), nil
+	activeAgent := cs.ActiveAgent()
+	if activeAgent == "" {
+		activeAgent = globalPrimary
+	}
+	return reply(ctx, channel, msg.ChatID, fmt.Sprintf(
+		"Workspace set to %s.\nSession is ready (active agent: %s). Send any message to chat with it, or /use <agent> to switch. /use is optional — plain text is forwarded to the active agent automatically.",
+		abs, activeAgent)), nil
 }
 
 // expandTilde expands a leading "~" or "~/" to the user's home

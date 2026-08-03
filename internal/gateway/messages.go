@@ -15,17 +15,12 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// ChatType discriminates inbound message origins. The exact
-// semantics (DM vs group vs thread) are channel-specific; we keep
-// the set small and let Channel translate its native taxonomy.
-type ChatType string
-
-const (
-	ChatTypeP2P    ChatType = "p2p"     // 1:1 DM
-	ChatTypeGroup  ChatType = "group"   // group chat
-	ChatTypeThread ChatType = "thread"  // Feishu topic_group / Slack thread
-	ChatTypeOther  ChatType = "other"   // channel-private; Gateway doesn't branch on this
-)
+// ChatType was removed in F-33. The Gateway never sees chat types;
+// ChatSession / BindingEntry / registry schema carry no ChatType
+// field. Channel adapters may classify chats internally (see
+// internal/channel.ChatTypeP2P/ChatTypeGroup) but only their
+// rendering decisions are exposed to the wider system, never the
+// classification itself. See docs/SPEC.md section 3.1 and docs/feat/F-33.
 
 // InboundMessage is the abstract shape of "a message arriving from
 // some Channel". Channels parse their native event into this shape
@@ -34,8 +29,6 @@ const (
 type InboundMessage struct {
 	ChatID string
 	UserID string
-	// ChatType drives Gateway's buffer / threading policy.
-	ChatType ChatType
 	// Text is the caption / message body.
 	Text string
 	// Attachments is the unified attachment shape. Channels are
@@ -43,8 +36,17 @@ type InboundMessage struct {
 	// file and exposing it here.
 	Attachments []Attachment
 	// ReplyTo is the channel-native message id that this inbound
-	// message is a reply to (Feishu root_id, Slack thread_ts, ...).
-	// Empty when not a reply.
+	// message is a reply to. For Feishu, this is the SDK's
+	// `parent_id` field (F-33 D3) -- the message the user directly
+	// replied to. Thread-top-level `RootId` is intentionally not
+	// surfaced: nightme only tracks point-to-point reply
+	// relationships. Empty when the inbound message is not a reply.
+	//
+	// Other channels map their native reply-target identifier onto
+	// this same field (Slack message_ts, Telegram message_id, ...);
+	// the field name stays stable but the semantics are
+	// channel-specific. No Channel introduces a thread concept into
+	// nightme data model (F-33 D4).
 	ReplyTo string
 	// MessageID is the channel-native message id of this inbound
 	// message itself.
@@ -57,20 +59,6 @@ type InboundMessage struct {
 	// Raw carries the channel-native payload for handlers that
 	// genuinely need it.
 	Raw any
-}
-
-// IsDM returns true for private / 1-on-1 chats. Session Manager
-// uses this to decide whether the chat should host a workspace
-// (DMs are treated as a single auxiliary "control plane" — see
-// docs/SPEC.md §3 for the full rationale).
-func (m InboundMessage) IsDM() bool {
-	switch m.ChatType {
-	case ChatTypeP2P:
-		return true
-	case "":
-		return false
-	}
-	return false
 }
 
 // Attachment is the unified inbound attachment shape. Channels are

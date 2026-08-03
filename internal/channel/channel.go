@@ -40,19 +40,28 @@ type Message = gateway.InboundMessage
 // reads it, and there is one definition to keep in sync.
 type Attachment = gateway.Attachment
 
-// Normalized chat type constants. Channel adapters should map their
-// native values onto these.
+// Normalized chat type constants. Channel adapters may use these
+// internally for chat-type classification, but **no Channel
+// introduces a thread concept into nightme data model** (F-33):
+//   - ChatTypeThread was removed; thread is a Feishu-side rendering
+//     concern that Channel handles without a separate constant.
+//   - nightme Gateway / ChatSession / Registry never see ChatType
+//     (the field was removed in v1.3.x; see SPEC §3.1).
+//
+// Channel adapters should map their native chat_type onto one of
+// the two values below, or treat unknown types as not-supported.
 const (
-	ChatTypeP2P    = "p2p"         // 1-on-1 DM (Feishu) / private (Telegram) / im (Slack)
-	ChatTypeGroup  = "group"       // group chat (Feishu / Telegram / Slack channel)
-	ChatTypeThread = "topic_group" // Feishu topic group; mapped to "thread" elsewhere
+	ChatTypeP2P   = "p2p"   // 1-on-1 DM (Feishu) / private (Telegram) / im (Slack)
+	ChatTypeGroup = "group" // group chat (Feishu / Telegram / Slack channel)
 )
 
-// IsDM is the channel-package free function that delegates to
-// InboundMessage.IsDM. Provided so legacy callers (channel.Message
-// receiver) keep working without depending on the gateway package
-// for the method itself.
-func IsDM(m Message) bool { return m.IsDM() }
+// IsDM was removed in F-33 (D1). Chat type classification is no
+// longer exposed via this channel-package helper; if a caller
+// needs to distinguish DM from group, derive it from the chat id
+// shape (e.g. presence of a leading @ for 1-on-1 DMs in some
+// channels, or a Channel-specific mapping) rather than relying on
+// a removed field. The IsDM helper was the last remaining user of
+// InboundMessage.IsDM() which itself was removed in the same PR.
 
 // Channel is the lifecycle and messaging contract implemented by each IM
 // adapter. v1.3 intentionally minimal:

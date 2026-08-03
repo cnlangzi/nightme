@@ -135,7 +135,7 @@ func TestInputBuffer_SetFlushHook_RebindsTarget(t *testing.T) {
 
 func TestChatSession_QueueUserMessage_IdleFlushed(t *testing.T) {
 	hook := &trackingFlushHook{}
-	cs := New("oc_xxx", "p2p", "claude")
+	cs := New("oc_xxx", "claude")
 	cs.SetFlushHook(hook.hook)
 
 	cs.SetActiveCwd("/x")
@@ -155,7 +155,7 @@ func TestChatSession_QueueUserMessage_IdleFlushed(t *testing.T) {
 
 func TestChatSession_QueueUserMessage_BusyQueued(t *testing.T) {
 	hook := &trackingFlushHook{}
-	cs := New("oc_xxx", "p2p", "claude")
+	cs := New("oc_xxx", "claude")
 	cs.SetFlushHook(hook.hook)
 
 	cs.SetBusy()
@@ -191,7 +191,7 @@ func TestChatSession_BufferSurvivesAgentSwitch(t *testing.T) {
 	// AgentSession via /use must NOT reset the InputBuffer FSM.
 	// Queued messages must flush to the new active AgentSession.
 	hook := &trackingFlushHook{}
-	cs := New("oc_xxx", "p2p", "claude")
+	cs := New("oc_xxx", "claude")
 	cs.SetFlushHook(hook.hook)
 	cs.SetActiveCwd("/x")
 	cs.SetActiveAgent("claude")
@@ -246,7 +246,7 @@ func TestChatSession_BufferSurvivesAgentSwitch(t *testing.T) {
 
 func TestChatSession_KillAllClearsBuffer(t *testing.T) {
 	hook := &trackingFlushHook{}
-	cs := New("oc_xxx", "p2p", "claude")
+	cs := New("oc_xxx", "claude")
 	cs.SetFlushHook(hook.hook)
 
 	cs.SetBusy()
@@ -267,7 +267,7 @@ func TestChatSession_KillAllClearsBuffer(t *testing.T) {
 }
 
 func TestChatSession_BufferClearAfterKill(t *testing.T) {
-	cs := New("oc_xxx", "p2p", "claude")
+	cs := New("oc_xxx", "claude")
 	cs.SetBusy()
 	_ = cs.QueueUserMessage(
 		[]agent.ContentBlock{{Type: agent.ContentText, Text: "x"}}, "m1")
@@ -283,7 +283,7 @@ func TestChatSession_BufferClearAfterKill(t *testing.T) {
 func TestChatSession_LazyBufferAllocation(t *testing.T) {
 	// A ChatSession that never dispatches messages should not
 	// allocate an InputBuffer.
-	cs := New("oc_xxx", "p2p", "claude")
+	cs := New("oc_xxx", "claude")
 	if cs.BufferPending() != 0 {
 		t.Fatalf("BufferPending should report 0 before any dispatch")
 	}

@@ -26,7 +26,12 @@ import (
 // Field semantics:
 //
 //	ChatID               — IM channel chat identifier; UNIQUE.
-//	ChatType             — "p2p" | "group" | "topic_group" | "" (legacy).
+//	                       Chat type classification is no longer
+//	                       carried on this struct (F-33 D1): nightme
+//	                       treats all chats as opaque string IDs.
+//	                       Old files written before F-33 contain a
+//	                       `chatType` field; json.Unmarshal tolerates
+//	                       unknown fields and the field is ignored.
 //	ActiveCwd            — workspace currently bound; "" → ChatSession
 //	                       exists but user has not yet /cwd'd.
 //	ActiveAgent          — agent name currently selected; "" → not yet
@@ -46,7 +51,6 @@ import (
 type ChatSessionEntry struct {
 	ID                   string    `json:"id"`
 	ChatID               string    `json:"chatId"`
-	ChatType             string    `json:"chatType"`
 	ActiveCwd            string    `json:"activeCwd"`
 	ActiveAgent          string    `json:"activeAgent"`
 	PrimaryAgent         string    `json:"primaryAgent,omitempty"`

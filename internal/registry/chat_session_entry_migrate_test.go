@@ -71,7 +71,6 @@ func TestChatSessionEntry_RoundTrip_NoLegacyField(t *testing.T) {
 	e := ChatSessionEntry{
 		ID:           "cs_x",
 		ChatID:       "oc_x",
-		ChatType:     "p2p",
 		ActiveCwd:    "/code/x",
 		ActiveAgent:  "claude",
 		PrimaryAgent: "claude",

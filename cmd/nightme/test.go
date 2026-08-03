@@ -23,7 +23,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -38,8 +37,8 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/pty"
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/config"
-	"github.com/cnlangzi/nightme/internal/session"
 )
 
 // testCmdFlags captures every flag the test subcommand accepts.
@@ -85,32 +84,34 @@ func runTest(cmd *cobra.Command, f testCmdFlags) error {
 	if err != nil {
 		return err
 	}
-	reg, err := openRegistry(cfg)
-	if err != nil {
-		return fmt.Errorf("test: open registry: %w", err)
-	}
+	// v1.2 chatsession does not need the legacy registry.File —
+	// the spawner is enough to bring up a child and forward
+	// bytes. We retain the loadConfig call so the future
+	// persistence wiring (csFile / asFile) can be added here
+	// without changing the test's public surface.
 
 	agentReg := buildAgentRegistry(cfg, f.agentName)
 
-	mgr := session.NewMemoryManager(agentReg, reg, nil)
-	if err := mgr.Restore(context.Background()); err != nil {
-		return fmt.Errorf("test: restore: %w", err)
-	}
+	spawner := chatsession.NewRegistrySpawner(agentReg)
+	mgr := chatsession.NewManager().WithSpawner(spawner)
 
-	sess, err := mgr.Create(context.Background(), session.CreateRequest{
-		Workspace: f.workspace,
-		Agent:     f.agentName,
-		Args:      f.args,
-	})
+	cs := mgr.GetOrCreate("test:"+f.agentName, "p2p", f.agentName)
+	if err := cs.SetActiveCwd(f.workspace); err != nil {
+		return fmt.Errorf("test: set cwd: %w", err)
+	}
+	if err := cs.SetActiveAgent(f.agentName); err != nil {
+		return fmt.Errorf("test: set agent: %w", err)
+	}
+	as, err := cs.LookupActiveAgentSession()
 	if err != nil {
-		return fmt.Errorf("test: create: %w", err)
+		return fmt.Errorf("test: spawn: %w", err)
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(),
 		"[nightme] session %s started in %s (agent=%s, args=%v)\n",
-		sess.ID, f.workspace, f.agentName, f.args)
+		as.ID, f.workspace, f.agentName, f.args)
 
-	return pumpIO(cmd, mgr, sess)
+	return pumpIO(cmd, as)
 }
 
 // validateTestRequest catches workspace existence up front so the
@@ -148,7 +149,7 @@ func buildAgentRegistry(cfg *config.Config, requested string) *agent.Registry {
 	for _, a := range agent.Builtins.List() {
 		reg.Register(a)
 	}
-	if cfg != nil {
+	if cfg != nil && len(cfg.Agents) > 0 {
 		for _, entry := range cfg.Agents {
 			if entry.Name == "" || entry.Command == "" {
 				continue
@@ -202,15 +203,19 @@ func buildRunAgentRegistry(cfg *config.Config) *agent.Registry {
 	return buildAgentRegistry(cfg, "")
 }
 
-// pumpIO bridges stdin ↔ session and stdout. It returns when the
-// session terminates naturally or a signal forces shutdown.
-func pumpIO(cmd *cobra.Command, mgr session.Manager, sess *session.Session) error {
+// pumpIO bridges stdin ↔ agent and stdout. It returns when the
+// agent session terminates naturally or a signal forces shutdown.
+func pumpIO(cmd *cobra.Command, as *chatsession.AgentSession) error {
 	out := cmd.OutOrStdout()
 
 	stop := make(chan struct{})
 	go func() {
 		defer close(stop)
-		for ev := range sess.Events() {
+		events := as.Events()
+		if events == nil {
+			return
+		}
+		for ev := range events {
 			switch ev.Kind {
 			case agent.EventText:
 				_, _ = io.WriteString(out, ev.Text)
@@ -235,7 +240,7 @@ func pumpIO(cmd *cobra.Command, mgr session.Manager, sess *session.Session) erro
 		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		for scanner.Scan() {
 			line := scanner.Text() + "\n"
-			if err := sess.SendText(line); err != nil {
+			if err := as.SendText(line); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "send: %v\n", err)
 				return
 			}
@@ -245,15 +250,13 @@ func pumpIO(cmd *cobra.Command, mgr session.Manager, sess *session.Session) erro
 	select {
 	case sig := <-sigCh:
 		fmt.Fprintf(cmd.ErrOrStderr(), "[nightme] received %s\n", sig)
-		if err := mgr.Kill(sess.ID); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "kill: %v\n", err)
-		}
+		_ = as.Close()
 	case <-stop:
 		// Session ended naturally; the events goroutine has
 		// drained and the channel closed.
 	}
 
-	// Wait for any in-flight I/O to flush before persisting. A
+	// Wait for any in-flight I/O to flush before exiting. A
 	// second signal force-exits.
 	select {
 	case <-stop:
@@ -261,6 +264,5 @@ func pumpIO(cmd *cobra.Command, mgr session.Manager, sess *session.Session) erro
 	case <-sigCh:
 		os.Exit(130)
 	}
-	_ = mgr.Persist()
 	return nil
 }

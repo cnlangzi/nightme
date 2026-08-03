@@ -141,10 +141,11 @@ func runRun(cmd *cobra.Command, cleanup bool, channelName string) error {
 	return runRunWith(cmd, deps)
 }
 
-// withCleanup configures whether the runtime kills every session
+// withCleanup configures whether the daemon kills every session
 // CLI on shutdown (true) or detaches them so a later restart can
-// resume them (false). Exposed for tests; production wires this
-// from the --cleanup flag via runRun.
+// resume them (false). Exposed as a helper so the runtime seam
+// stays consistent with v1.1 callers that may still construct
+// runDeps directly (e.g. lifecycle tests).
 func withCleanup(deps runDeps, cleanup bool) runDeps {
 	deps.cleanup = cleanup
 	return deps
@@ -294,7 +295,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		cs.SetEventHandler(eventHandler)
 	}
 
-	gw := gateway.New(messageDispatcher, nil)
+	gw := gateway.New(messageDispatcher)
 	gateway.RegisterChatSessionCommands(gw, mgr, ch, cfg.Primary)
 
 	// Attach channels + start the gateway.

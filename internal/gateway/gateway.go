@@ -860,12 +860,15 @@ func (g *gateway) OnSessionEvent(s *session.Session, ev agent.AgentEvent) {
 // context (background ctx is used internally because ChatSession
 // doesn't currently pass a cancellable ctx to emitMessageState).
 func (g *gateway) OnMessageState(chatID, userMsgID string, state receipt.MessageState) {
+	log.Printf("F31 Gateway.OnMessageState chat=%s user=%s state=%s -> translate to OutMessageState",
+		chatID, userMsgID, state)
 	if chatID == "" || userMsgID == "" {
+		log.Printf("F31 Gateway.OnMessageState: empty chatID/userMsgID, dropping")
 		return
 	}
 	ch := g.resolveChannel(chatID)
 	if ch == nil {
-		log.Printf("gateway: OnMessageState no channel for chat=%s, dropping", chatID)
+		log.Printf("F31 Gateway.OnMessageState: no channel for chat=%s, dropping", chatID)
 		return
 	}
 	out := OutboundMessage{
@@ -880,7 +883,11 @@ func (g *gateway) OnMessageState(chatID, userMsgID string, state receipt.Message
 		},
 	}
 	if err := ch.Send(context.Background(), out); err != nil {
-		log.Printf("gateway: MessageState send failed (chat=%s, state=%s): %v", chatID, state, err)
+		log.Printf("F31 Gateway.OnMessageState: ch.Send failed (chat=%s, state=%s, user=%s): %v",
+			chatID, state, userMsgID, err)
+	} else {
+		log.Printf("F31 Gateway.OnMessageState: ch.Send OK (chat=%s, state=%s, user=%s)",
+			chatID, state, userMsgID)
 	}
 }
 

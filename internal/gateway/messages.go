@@ -59,6 +59,20 @@ type InboundMessage struct {
 	// Raw carries the channel-native payload for handlers that
 	// genuinely need it.
 	Raw any
+	// HasMention is set by the channel adapter during decode.
+	// Semantics: "the original message addressed bot or @_all".
+	//
+	//   - DM (chat_type=p2p): always true (every DM message is
+	//     implicitly addressed to the bot).
+	//   - group/topic_group: true iff Mentions contains bot's own
+	//     open_id or @_all.
+	//   - unknown/empty chat_type: defaults to true (safe fallback;
+	//     dropping is a worse failure than over-processing).
+	//
+	// The Gateway dispatcher uses this with ChatSession.WatchMode
+	// to drop non-mention group messages when WatchMode ==
+	// WatchModeMention (default). See docs/SPEC.md §3.1.1.
+	HasMention bool
 }
 
 // Attachment is the unified inbound attachment shape. Channels are

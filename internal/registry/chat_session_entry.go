@@ -48,6 +48,11 @@ import (
 //	CreatedAt            — when ChatSession was first bound.
 //	LastInteractionAt    — last user message; used for idle expiry
 //	                       decisions (future).
+//	WatchMode            — F-watch per-chat message-watch mode.
+//	                       0 = WatchModeMention (default; safe),
+//	                       1 = WatchModeAll. Persisted as int; old
+//	                       chat_sessions.json files lacking the
+//	                       field decode to zero == WatchModeMention.
 type ChatSessionEntry struct {
 	ID                   string    `json:"id"`
 	ChatID               string    `json:"chatId"`
@@ -58,6 +63,7 @@ type ChatSessionEntry struct {
 	ActiveAgentSessionID *string   `json:"activeAgentSessionId,omitempty"`
 	CreatedAt            time.Time `json:"createdAt"`
 	LastInteractionAt    time.Time `json:"lastInteractionAt"`
+	WatchMode            WatchMode `json:"watchMode,omitempty"`
 }
 
 // UnmarshalJSON reads a ChatSessionEntry, transparently migrating

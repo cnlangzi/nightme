@@ -283,6 +283,19 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	gwImpl := gw.(*gateway.Router)
 	gwImpl.AttachChannels(ch)
 
+	// F-watch §3.1.1: install the per-chat WatchMode resolver so
+	// the dispatcher can drop non-mention group messages when the
+	// chat's mode is WatchModeMention (default). The resolver
+	// consults the manager directly — no extra state, the registry
+	// (chat_sessions.json) is the single source of truth.
+	gwImpl.WithWatchModeResolver(func(chatID string) (chatsession.WatchMode, bool) {
+		cs := mgr.Get(chatID)
+		if cs == nil {
+			return 0, false
+		}
+		return cs.WatchMode(), true
+	})
+
 	// F-31: wire gw.OnMessageState into every ChatSession via the
 	// Manager.onCreate hook. This covers both restored chats (from
 	// mgr.List()) and chats created later via mgr.GetOrCreate().

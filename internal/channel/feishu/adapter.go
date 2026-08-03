@@ -128,6 +128,15 @@ type Adapter struct {
 	wsClose    func()
 	sendFunc   sendMessageFunc
 	updateFunc updateMessageFunc
+
+	// F-watch §6.10: lazy-cached bot open_id for mention strip /
+	// HasMention detection. Populated on first inbound by
+	// fetchBotOpenID via SDK GetBotIdentity (which itself caches
+	// 30min). Empty string = identity fetch not yet succeeded or
+	// failed; computeHasMention falls back to false in that case
+	// (safe: drop a few messages rather than attribute wrong).
+	botOpenID     string
+	botOpenIDOnce sync.Once
 }
 
 // NewAdapter constructs a Feishu adapter and validates the credentials needed
@@ -1600,6 +1609,15 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	content := stringValue(message.Content)
 	msgType := stringValue(message.MessageType)
 	text, attachments := extractAttachments(msgType, content)
+	// F-watch §6.10: strip leading @bot/@_all mention prefix from
+	// text so slash commands like `/watch on` parse correctly
+	// (ParseCommand requires HasPrefix "/"). computeHasMention
+	// returns the original-message semantic ("did this message
+	// address the bot") which Gateway dispatcher combines with
+	// ChatSession.WatchMode() to drop non-mention group messages.
+	botOpenID := a.fetchBotOpenID(ctx)
+	hasMention := computeHasMention(message, botOpenID)
+	text = stripMentionPrefix(text, message.Mentions, botOpenID)
 	msg := channel.Message{
 		ChatID:      chatID,
 		Text:        text,
@@ -1614,6 +1632,8 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 		// new line in an existing thread.
 		ReplyTo:     stringValue(message.ParentId),
 		Attachments: attachments,
+		// F-watch: see docs/channel/feishu.md §6.10 + SPEC §3.1.1.
+		HasMention:  hasMention,
 	}
 	// Trace every inbound message before the publish lock so the
 	// CLI surface shows the user message that triggered the

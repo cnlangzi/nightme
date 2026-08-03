@@ -182,6 +182,8 @@ If you see references to `SendMessage` / `SendLongMessage` in older docs, they r
 | Channel.Send PATCH 失败（Feishu 429 / 230020）| Channel 内部 log warn；下次事件重试；最终一致性 |
 | 用户在 receipt 已 Done 后再发同 userMsgID 的消息（重发）| Channel 按新消息处理；旧 receipt 保留终态不动，新消息触发新 turn 的新 anchor |
 | Receipt handle race（两个 goroutine 同时 PATCH 同一 receipt）| Channel 内部负责 lock（Feishu MessageReceipt 有 mu）；Gateway 不持有锁 |
+| Mention prefix（`@_user_N `）导致 slash command 解析失败 | Channel adapter 在构造 `Message.Text` 前 strip 开头的 `@bot_key ` / `@_all ` mention 前缀；中段 mention 不动（F-watch）|
+| Group 里用户未 @ bot 的消息 | `Message.HasMention = false`；Gateway dispatcher 根据 `ChatSession.WatchMode()` 决定 drop（`WatchModeMention`）或 pass（`WatchModeAll`）。DM 下 `HasMention` 永远为 true，gate 为 no-op（F-watch）|
 
 ---
 
@@ -238,5 +240,6 @@ If you see references to `SendMessage` / `SendLongMessage` in older docs, they r
 ## 10. Change log
 
 - **2026-08-03** — v1.3 (SPEC §0.1): remove `CreateReceipt / UpdateReceipt / DisposeReceipt` from Channel interface; remove `Receipt` / `ReceiptState` from `internal/receipt/receipt.go`. Receipt object is now entirely Channel-internal. Gateway stamps `OutboundMessage.ReplyTo = currentTurnUserMsgID`; Channel routes by userMsgID. Doc rewritten to reflect the 5-method interface and "abstract stays abstract, concrete stays concrete" principle.
+- **2026-08-03 (F-watch 增量)** — `InboundMessage.HasMention bool` 字段添加。Channel adapter 在 decode 时根据 `chat_type` + `Mentions` + `GetBotIdentity()` 计算；DM 永远 true；group 含 bot/@_all 时 true。Gateway dispatcher 入口根据 `cs.WatchMode()` 决定是否 drop 非 mention 群消息。Channel 不读 `WatchMode`，保持“不变式"。
 - **2026-08-02** — v1.1: add `CreateReceipt / UpdateReceipt / DisposeReceipt` + `ReceiptState` + `Receipt` opaque type. Channel becomes a pure renderer; receipt FSM state lives at Gateway. (Superseded by v1.3.)
 - **2026-07-31** — v0.1: original `SendMessage / SendLongMessage` interface. Replaced by `Send(OutboundMessage)` in v0.3 (kept for historical reference).

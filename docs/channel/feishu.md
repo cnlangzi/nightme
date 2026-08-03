@@ -1,18 +1,18 @@
-# Feishu Channel — 调研与迁移规划
+# Feishu Channel - 调研与迁移规划
 
 > **Status**: design + implementation reference (v1.3; Channel-autonomous rendering per SPEC §0.1)
 > **Scope**: nightme 内部 Feishu/Lark IM 适配器 (`internal/channel/feishu/*`)
-> **目的**: 描述 Feishu 侧 rolling-log card 实现策略 —— 收到 `OutboundMessage{ReplyTo: userMsgID}` 时如何 cold-create / PATCH / 终态 card。
+> **目的**: 描述 Feishu 侧 rolling-log card 实现策略 -- 收到 `OutboundMessage{ReplyTo: userMsgID}` 时如何 cold-create / PATCH / 终态 card。
 > **Related docs**:
-> - [F-08-channel-abstraction.md](../feat/F-08-channel-abstraction.md) — 5-method Channel interface(v1.3 缩水)
-> - [F-25-rolling-log.md](../feat/F-25-rolling-log.md) — rolling-log UX 整体协议
-> - [F-26-gateway-hub.md](../feat/F-26-gateway-hub.md) — v1.1 Gateway ↔ Channel 边界(历史,v1.3 改)
-> - [F-22-feishu-onclick-registration.md](../feat/F-22-feishu-onclick-registration.md) — app 鉴权
-> - [F-31-message-state.md](../feat/F-31-message-state.md) — progress indicator(独立于 receipt)
+> - [F-08-channel-abstraction.md](../feat/F-08-channel-abstraction.md) - 5-method Channel interface(v1.3 缩水)
+> - [F-25-rolling-log.md](../feat/F-25-rolling-log.md) - rolling-log UX 整体协议
+> - [F-26-gateway-hub.md](../feat/F-26-gateway-hub.md) - v1.1 Gateway ↔ Channel 边界(历史,v1.3 改)
+> - [F-22-feishu-onclick-registration.md](../feat/F-22-feishu-onclick-registration.md) - app 鉴权
+> - [F-31-message-state.md](../feat/F-31-message-state.md) - progress indicator(独立于 receipt)
 > **官方文档**:
-> - [Create JSON message content](https://open.feishu.cn/document/server-docs/im-v1/message-content-description/create_json) — 顶层卡片信封
-> - [Card JSON 2.0 components](https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/card-json-v2-components/component-json-v2-overview) — 组件列表(`div` / `markdown` / `hr` / `note` 等)
-> - [Update sent message card (PATCH)](https://open.feishu.cn/document/server-docs/im-v1/message-card/patch) — 卡片原地更新 API
+> - [Create JSON message content](https://open.feishu.cn/document/server-docs/im-v1/message-content-description/create_json) - 顶层卡片信封
+> - [Card JSON 2.0 components](https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/card-json-v2-components/component-json-v2-overview) - 组件列表(`div` / `markdown` / `hr` / `note` 等)
+> - [Update sent message card (PATCH)](https://open.feishu.cn/document/server-docs/im-v1/message-card/patch) - 卡片原地更新 API
 
 ## 1. 背景:为什么从 text 切到 card
 
@@ -22,10 +22,10 @@
 - 没有 footer / 没有按钮 / 表格需要 markdown hack 才能近似
 
 切到 interactive card 可以:
-1. **footer 行** — 展示 `Agent · X | Model · Y | Provider · Z` 这类元数据(对齐 OpenClaw 风格,见 §2)
-2. **按钮 / action** — 一键确认、二次确认、复制 session id 等交互
-3. **结构化展示** — 工具调用折叠为 `collapsible_panel`、长输出折叠、表格、彩色状态等
-4. **原地更新** — 用 PATCH API 改一张卡,而不是发 N 条消息,降低噪音
+1. **footer 行** - 展示 `Agent · X | Model · Y | Provider · Z` 这类元数据(对齐 OpenClaw 风格,见 §2)
+2. **按钮 / action** - 一键确认、二次确认、复制 session id 等交互
+3. **结构化展示** - 工具调用折叠为 `collapsible_panel`、长输出折叠、表格、彩色状态等
+4. **原地更新** - 用 PATCH API 改一张卡,而不是发 N 条消息,降低噪音
 
 ## 2. OpenClaw 的"card note footer" 调研
 
@@ -58,14 +58,14 @@ Agent: main | Model: glm-5 | Provider: tencentcodingplan
   ```
   即:`<hr>` + 灰色 markdown。这是 v2 card 风格。
 
-### 2.3 OpenClaw issue #59360 — root cause
+### 2.3 OpenClaw issue #59360 - root cause
 
 - **Title**: "Feishu card message footer causes agent name to appear at message start (Markdown definition list parsing)"
 - **现象**: Feishu 的 Markdown 渲染器把 `Agent: main | Model: ... | Provider: ...` 解析成 **Markdown 定义列表**(`key: value`),把第一项的 value(`main`)hoisting 到消息开头
 - **结果**: 用户看到的卡片正文最上面突然多一行 `main`(agent 名),footer 反而被解读成普通段落
 - **复现**: 发送任意包含 `Key: value | Key2: value2` 的灰色 markdown 卡片即可触发
 - **关闭状态**: closed as not planned, 2026-07-20
-- **未合并修复**: [PR #84122](https://github.com/openclaw/openclaw/pull/84122) — 把 `Agent: ` 改成 `Agent · `(中点),让渲染器认不出是定义列表
+- **未合并修复**: [PR #84122](https://github.com/openclaw/openclaw/pull/84122) - 把 `Agent: ` 改成 `Agent · `(中点),让渲染器认不出是定义列表
   - 描述: "Feishu's card markdown renderer parses 'Agent: name' as definition-list syntax and hoists the agent name to the top of the rendered message. Switch the key/value separator from ': ' to ' · ' so the footer stays in the footer."
 
 ### 2.4 我们的截图
@@ -77,7 +77,7 @@ Agent: main | Model: glm-5 | Provider: tencentcodingplan
 Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 ```
 
-—— 与 OpenClaw 的 card note footer 一致,但 nightme 当前的 text 路径**不会**输出这种卡片(没 hr、没灰色),所以截图来自**别的工具**(可能是 OpenClaw/同款渲染)。**这个 bug 在 nightme 切到 card 之前不会触发**;切换后必须规避(见 §6)。
+-- 与 OpenClaw 的 card note footer 一致,但 nightme 当前的 text 路径**不会**输出这种卡片(没 hr、没灰色),所以截图来自**别的工具**(可能是 OpenClaw/同款渲染)。**这个 bug 在 nightme 切到 card 之前不会触发**;切换后必须规避(见 §6)。
 
 ## 3. Feishu 卡片 schema 摘要
 
@@ -101,7 +101,7 @@ Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 | **v1 `note` element** | `{ "tag": "note", "elements": [{ "tag": "plain_text", "content": "..." }] }` | Card v1,大多数场景可用;Card 2.0 官方组件列表里**没有**该 tag |
 | **v2 neutral markdown + `<hr>`** | `elements.push({tag:"hr"}); elements.push({tag:"markdown", content:"<text_tag color='neutral'>...</text_tag>"});` | OpenClaw / 主流 v2 实践,**推荐** |
 
-**重要**: Feishu `lark_md` **不支持** `<font color='grey'>`。Feishu 官方允许的 inline 颜色用 `<text_tag color='...'>`,允许值:`neutral`、`blue`、`turquoise`、`lime`、`orange`、`violet`、`indigo`、`wathet`、`green`、`yellow`、`red`、`purple`、`carmine`。`neutral` 视觉上接近灰色。OpenClaw `send.ts:768` 写的 `<font color='grey'>` 实际渲染靠 Feishu 容错 —— 本项目**严格用 `<text_tag color='neutral'>`**。
+**重要**: Feishu `lark_md` **不支持** `<font color='grey'>`。Feishu 官方允许的 inline 颜色用 `<text_tag color='...'>`,允许值:`neutral`、`blue`、`turquoise`、`lime`、`orange`、`violet`、`indigo`、`wathet`、`green`、`yellow`、`red`、`purple`、`carmine`。`neutral` 视觉上接近灰色。OpenClaw `send.ts:768` 写的 `<font color='grey'>` 实际渲染靠 Feishu 容错 -- 本项目**严格用 `<text_tag color='neutral'>`**。
 
 参考: `gcmsg/openclaw-feishu/src/menu.ts` 用前者(纯 v1),`openclaw/openclaw/extensions/feishu/src/send.ts:768` 用后者(纯 v2)。
 
@@ -119,11 +119,11 @@ Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 
 ### 3.4 更新策略
 
-`PATCH /im/v1/messages/{message_id}` **整体替换** `card` 字段 —— 不能只改一个 element。所以 nightme 的"原地编辑 receipt"语义就是:**每次状态变化都重新构建完整 card body 然后 PATCH**。
+`PATCH /im/v1/messages/{message_id}` **整体替换** `card` 字段 -- 不能只改一个 element。所以 nightme 的"原地编辑 receipt"语义就是:**每次状态变化都重新构建完整 card body 然后 PATCH**。
 
 **SDK 提醒**: `lark-oapi-go/v3` 提供两个不同的方法,**`Update` 只能改文本/富文本,不能改卡片**;**卡片必须用 `Patch`**。两个方法对应不同的 HTTP method:
-- `Update` (PUT `/open-apis/im/v1/messages/:id`) — 仅文本/富文本。SDK 注释: "当前仅支持编辑文本和富文本消息"
-- `Patch` (PATCH `/open-apis/im/v1/messages/:id`) — 卡片/富文本都支持,5 QPS 频控,30 KB body 上限
+- `Update` (PUT `/open-apis/im/v1/messages/:id`) - 仅文本/富文本。SDK 注释: "当前仅支持编辑文本和富文本消息"
+- `Patch` (PATCH `/open-apis/im/v1/messages/:id`) - 卡片/富文本都支持,5 QPS 频控,30 KB body 上限
 
 `update_multi` 不是独立接口,是 card `config` 里的一个 flag(`"update_multi": true`),让卡变成"共享卡"在所有接收方同步更新。nightme 单聊场景不启用。
 
@@ -184,7 +184,7 @@ type MessageReceipt struct {
 }
 ```
 
-**本期不**新增 `agentName` / `provider` / `model` 字段 —— foot note 全部从已有 state 字段组装(state.String() + eventCount + lastEventAt)。这样不需要触动 `agent.InitEvent` / `gateway/translate.go` / `OutboundMessage.Meta` 任何上游。
+**本期不**新增 `agentName` / `provider` / `model` 字段 -- foot note 全部从已有 state 字段组装(state.String() + eventCount + lastEventAt)。这样不需要触动 `agent.InitEvent` / `gateway/translate.go` / `OutboundMessage.Meta` 任何上游。
 
 `renderLocked` 替换为新的 card-first 策略:
 - 第一次:`sendContent(chatID, MsgTypeInteractive, buildReceiptCard(r))` 拿到 messageID
@@ -200,7 +200,7 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
     if r.evicted > 0 {
         elements = append(elements, map[string]any{
             "tag":     "markdown",
-            "content": fmt.Sprintf("<text_tag color='neutral'>…(前 %d 条已省略)</text_tag>", r.evicted),
+            "content": fmt.Sprintf("<text_tag color='neutral'>...(前 %d 条已省略)</text_tag>", r.evicted),
         })
     }
     for _, e := range r.entries {
@@ -250,18 +250,18 @@ func (a *Adapter) UpdateMessage(ctx context.Context, messageID, content string) 
 func (a *Adapter) SendCard(ctx context.Context, chatID, content string) (string, error)
 ```
 
-`UpdateMessage` 调 `larkClient.Im.V1.Message.Patch(...)`(注意是 **Patch**,不是 Update —— Update 只能改文本)。`SendCard` 是 `sendContent(chatID, larkim.MsgTypeInteractive, content)` 的薄包装。
+`UpdateMessage` 调 `larkClient.Im.V1.Message.Patch(...)`(注意是 **Patch**,不是 Update -- Update 只能改文本)。`SendCard` 是 `sendContent(chatID, larkim.MsgTypeInteractive, content)` 的薄包装。
 
-PATCH 失败时不降级为新消息 —— 简单实现,日志告警即可;下次 `renderLocked` 仍然 PATCH 同一个 messageID。
+PATCH 失败时不降级为新消息 -- 简单实现,日志告警即可;下次 `renderLocked` 仍然 PATCH 同一个 messageID。
 
 ### 5.5 迁移步骤(本期)
 
-1. **Phase 1 — adapter 层支持**: 加 `SendCard` / `UpdateMessage`(内部调 Patch),`buildReceiptCard` + `footLine` 静态实现
-2. **Phase 2 — receipt 切换**: `renderLocked` 改为 first-send-then-PATCH;`MessageReceipt` 加 `cardMsgID`;`evictOverflowLocked` 扩展为字节+元素双约束
-3. **Phase 3 — 测试更新**: `mockReceiptBot` 加 SendCard / PatchMessage stubs;`TestReceipt_PerEventFreshMessage` 改为断言 PATCH 行为;新增 `TestFootLine_*` / `TestBuildReceiptCard_*` 系列
-4. **Phase 4 — 文档收尾**: 在 §11 记录本期落地状态;把"未做"留给 follow-up issue
+1. **Phase 1 - adapter 层支持**: 加 `SendCard` / `UpdateMessage`(内部调 Patch),`buildReceiptCard` + `footLine` 静态实现
+2. **Phase 2 - receipt 切换**: `renderLocked` 改为 first-send-then-PATCH;`MessageReceipt` 加 `cardMsgID`;`evictOverflowLocked` 扩展为字节+元素双约束
+3. **Phase 3 - 测试更新**: `mockReceiptBot` 加 SendCard / PatchMessage stubs;`TestReceipt_PerEventFreshMessage` 改为断言 PATCH 行为;新增 `TestFootLine_*` / `TestBuildReceiptCard_*` 系列
+4. **Phase 4 - 文档收尾**: 在 §11 记录本期落地状态;把"未做"留给 follow-up issue
 
-**OutInit / `agent_name` / `provider` 透传** —— **DEFERRED**(见 §9.4)。当后续 PR 加这三个字段时,`buildReceiptCard` 只需要把它们 append 到 `footLine` 后面,不需要再次动 receipt / adapter 主体。
+**OutInit / `agent_name` / `provider` 透传** -- **DEFERRED**(见 §9.4)。当后续 PR 加这三个字段时,`buildReceiptCard` 只需要把它们 append 到 `footLine` 后面,不需要再次动 receipt / adapter 主体。
 
 ## 6. 已知坑(从 OpenClaw 学到)
 
@@ -273,7 +273,7 @@ PATCH 失败时不降级为新消息 —— 简单实现,日志告警即可;下�
 
 ### 6.2 `<text_tag color='neutral'>` 而非 `<font color='grey'>`
 
-Feishu `lark_md` **不支持** `<font color='grey'>`。**严格用 `<text_tag color='neutral'>`**(允许值: `neutral`, `blue`, `turquoise`, `lime`, `orange`, `violet`, `indigo`, `wathet`, `green`, `yellow`, `red`, `purple`, `carmine`)。OpenClaw `send.ts:768` 写的 `<font color='grey'>` 靠 Feishu 容错 —— 本项目不依赖容错。
+Feishu `lark_md` **不支持** `<font color='grey'>`。**严格用 `<text_tag color='neutral'>`**(允许值: `neutral`, `blue`, `turquoise`, `lime`, `orange`, `violet`, `indigo`, `wathet`, `green`, `yellow`, `red`, `purple`, `carmine`)。OpenClaw `send.ts:768` 写的 `<font color='grey'>` 靠 Feishu 容错 -- 本项目不依赖容错。
 
 ### 6.3 SDK: Patch ≠ Update
 
@@ -287,9 +287,9 @@ Feishu `lark_md` **不支持** `<font color='grey'>`。**严格用 `<text_tag co
 
 `F-23-heartbeat.md` 当前实现是周期性重新 `SendMessageText` 同一 header。切到 card 后,心跳 = 周期性 PATCH 同一张卡的 card body(刷新 header 时间戳 + foot note)。频率/阈值不变。
 
-### 6.6 MessageState 与 Card 共存（v1.3 重构）
+### 6.6 MessageState 与 Card 共存(v1.3 重构)
 
-**v1.3 变更**：MessageState（reaction emoji 轨道）与 Receipt（card body 轨道）解耦为两个独立的 channel 实现。
+**v1.3 变更**:MessageState(reaction emoji 轨道)与 Receipt(card body 轨道)解耦为两个独立的 channel 实现。
 
 #### 6.6.1 两个轨道
 
@@ -306,7 +306,7 @@ Feishu `lark_md` **不支持** `<font color='grey'>`。**严格用 `<text_tag co
 #### 6.6.2 MessageState 渲染实现
 
 ```go
-// internal/channel/feishu/adapter.go — Send dispatcher 新增 case
+// internal/channel/feishu/adapter.go - Send dispatcher 新增 case
 case gateway.OutMessageState:
     messageID, _ := msg.Meta["message_id"].(string)
     if messageID == "" {
@@ -326,14 +326,14 @@ case gateway.OutMessageState:
 
 #### 6.6.3 state → emoji_type 映射
 
-| `MessageState` | emoji_type（飞书预定义） | 用户视觉 |
+| `MessageState` | emoji_type(飞书预定义) | 用户视觉 |
 |---|---|---|
 | `StateReceived` | `OneSecond` | ⏳ |
 | `StateForwarded` | `OnIt` | 🔄 |
 | `StateDone` | `DONE` | ✅ |
 | `StateError` | `THUMBSUP` | ❌ (closest 预定义 indicator) |
 
-**重要**：必须用飞书预定义 `emoji_type` 标识符,不是 unicode。传 unicode `⏳` 给飞书 reaction API 返回 `99992354 data not found`(reaction service 只识别预定义集合)。
+**重要**:必须用飞书预定义 `emoji_type` 标识符,不是 unicode。传 unicode `⏳` 给飞书 reaction API 返回 `99992354 data not found`(reaction service 只识别预定义集合)。
 
 #### 6.6.4 内部 idempotency
 
@@ -359,16 +359,93 @@ Feishu card body 上限 **30 KB**(Create 和 PATCH 相同)。本期 `replyMaxByt
 
 ### 6.9 `note` 元素的 v2 兼容性
 
-Card 2.0 官方组件列表**没有 `tag: "note"`**。我们走 v2 风格(`<hr>` + 中性色 markdown),**不要**用 v1 的 `note` 元素。
+Card 2.0 官方组件列表**没有 `tag: "note"`**。我们走 v2 风格（`<hr>` + 中性色 markdown），**不要**用 v1 的 `note` 元素。
+
+### 6.10 Mention 前缀 strip（F-watch 增量）
+
+**问题**：飞书群聊里，@ bot 后的消息文本以 `@_user_N ` 开头的占位符表示 mention（Feishu SDK 中以 `Mentions[].Key` 形式出现在 `message.Content` 里）。如：
+
+```
+@_user_1 /cwd /tmp
+```
+
+`ParseCommand` 要求 `strings.HasPrefix(trimmed, "/")`（`internal/gateway/parser.go:36`），这条文本会以 `@` 开头，被判为 `ErrParseFailure` → slash command **拦截失败**。
+
+**方案**：`handleMessage` 构造 `channel.Message` 前，strip 开头的 mention 前缀。
+
+| 场景 | Text 原始 | Text strip 后 | HasMention |
+|------|----------|--------------|------------|
+| 群聊 @ bot | `@_user_1 /watch on` | `/watch on` | `true` |
+| 群聊 @_all | `@_all /cwd /a` | `/cwd /a` | `true` |
+| 群聊多个 mention 开头 | `@_all @_user_1 hello` | `hello` | `true` |
+| 群聊无 mention | `hello bot` | `hello bot` | `false` |
+| 群聊 mention 在中段 | `look at this @_user_1 bug` | `look at this @_user_1 bug`（不剥）| `true` |
+| DM | `hello` | `hello` | `true`（DM 永远 true）|
+
+**实现位置**：`internal/channel/feishu/adapter.go::handleMessage`，`extractAttachments` 之后、构造 `channel.Message` 之前。
+
+```go
+text, hasMention := stripAndDetectMention(
+    text, message.Mentions, a.getBotOpenIDCached(), stringValue(message.ChatType),
+)
+```
+
+**strip 规则**：
+1. 只剥**开头**连续出现的 mention 前缀（循环跳过中间的非 mention 文本，例如 `@_all @bot hello` → `hello`）
+2. 中段的 mention 不动（保留用户原始语义）
+3. 前缀必须是 mention + 至少一个空白字符（空格 / Tab / 全角空格 / `\u00A0`），避免误删正文中以 `@` 开头的单词（但正文中以 `@_user_N` 开头的字串不会被误判，因为正文中不会出现在最前面）
+4. `@_all` 始终 strip（无需 bot open_id）
+
+**`hasMention` 计算**：
+- DM（`chat_type == "p2p"`）→ **永远 `true`**
+- group/topic_group → `mentions` 列表中含 bot open_id 或 `@_all` 时 `true`
+- `chat_type` 为空 / 未知 → 默认 `true`（安全 fallback，宁可多处理）
+
+> **DM 不变式（锁死）**：DM 消息 `HasMention` 必须永远是 `true`。这是 F-watch 的核心不变式 ——只有这条不变式成立，gateway dispatcher 才能放心地 drop 非 mention 群消息而不误伤 DM。由 `TestComputeHasMention_DMInvariant` （adapter 层）+ `TestDispatchInbound_WatchModeGate_DMInvariant`（gateway 层）两个测试锁死，任一 regressed 都会被 CI 拦住。
+
+**bot open_id 获取**：调 SDK `a.larkClient.GetBotIdentity(ctx)`（`channel/channel.go:152`），30 分钟 TTL cache 由 SDK 内部管理。第一次消息进来 cache miss → 同步 fetch；后续命中 cache，零延迟。fetch 失败 → 记 log，`HasMention` 退化为 `false`（保守策略：DM/group 都当 group 处理）。
+
+**ChatSession 侧接入**：`/watch on` / `/watch off` 控制 `ChatSession.WatchMode()`；Gateway dispatcher 拿 `Message.HasMention` + `cs.WatchMode()` 决定 drop 或 pass。Channel adapter **不读** `ChatSession` —— 详细职责划分见 `docs/SPEC.md §3.1.1`。
+
+**测试覆盖**：
+- 群消息 @bot / @_all → strip + HasMention=true
+- 群消息无 mention → 不 strip + HasMention=false
+- 群消息多 mention 串前 → 全剥
+- 群消息 mention 中段 → 不动
+- DM → 不 strip + HasMention=true（不调 bot identity）
+- bot identity cache miss + fetch 失败 → fallback 到 HasMention=false + log warn
+
+### 6.11 WatchMode per-chat 群消息全收（F-watch 增量）
+
+**背景**：飞书默认 `im:message.group_at_msg:readonly` 只让 bot 收 @ 自己的消息。nightme F-watch 反转：bot 默认收全群（需要 `im:message.group_msg` scope，默认在 `DefaultAddons()` 里），由 `ChatSession.WatchMode` 在 nightme 侧决定要不要处理。
+
+**实现位置**：
+- `internal/chatsession/chat_session.go`：`WatchMode` 类型 + getter / setter
+- `internal/gateway/handlers_watch.go`：`/watch on|off` slash command handler
+- `internal/gateway/gateway.go::Handle`：`HasMention` + `WatchMode` gate
+
+**`/watch` slash command**：
+
+| 调用 | 行为 |
+|------|------|
+| `/watch on` | `ChatSession.WatchMode = WatchModeAll`；持久化；reply "watching all messages in this chat" |
+| `/watch off` | `ChatSession.WatchMode = WatchModeMention`；持久化；reply "watching mentions only (default)" |
+| `/watch`（无参）| 显示当前 mode + 简短说明 |
+
+**DM 为 no-op**：DM 下 `HasMention` 永远为 true，gate 永不触发；运行 `/watch on/off` 状态正常写入但不影响消息处理（DM 全收）。文档在 `docs/feat/F-22-feishu-onclick-registration.md` §4 Edge cases 说明。
+
+**飞书 scope 默认开启**：`DefaultAddons()` 始终包含 `im:message.group_msg`（不带 `:readonly` —— bot 需要回复到群里）。**不**走 CLI flag opt-in，由 Devin 拍板（2026-08-03）。
+
+**详细设计**：见 `docs/SPEC.md §3.1.1` + §9 Q-W1/Q-W2/Q-W3/Q-W4。
 
 ## 7. 验收 / 测试(本期 minimal scope)
 
 - 单元: `buildReceiptCard` 产出合法 JSON,`elements` 末尾是 `<hr>` + `<text_tag color='neutral'>` foot note;`footLine` 为空时整段省略
 - 单元: `footLine` 在 `state=executing, eventCount=5, lastEventAt=14:32:05` → `"executing · 5 entries · 14:32:05"`;`eventCount=0` 时不渲染 `0 entries`
 - 单元: `MessageReceipt.renderLocked` 第一次调 → `SendCard`;之后 → `PatchMessage` 同一个 messageID;**不再**调 `SendMessageText`
-- 单元: 元素数 = 60 entries → 47 entries + `…(前 N 条已省略)` 标记
+- 单元: 元素数 = 60 entries → 47 entries + `...(前 N 条已省略)` 标记
 - 单元: 字节数 = 收到超大 entries → 驱逐最老直到 < 24 KiB
-- 单元: 回归 `mockReceiptBot.AddReaction` 不变（v1.3 后,reaction 由 MessageState FSM 触发,仍走 userMsgID,但已从 MessageReceipt 解耦到 Adapter 顶层）
+- 单元: 回归 `mockReceiptBot.AddReaction` 不变(v1.3 后,reaction 由 MessageState FSM 触发,仍走 userMsgID,但已从 MessageReceipt 解耦到 Adapter 顶层)
 - 集成: 端到端: user message → 一张 receipt card(后续 agent event 不再发新消息,而是 PATCH);最终状态 `✅` 出现在 header;foot note 随状态变化
 - 回归: permission card (`OutCard`) 不受影响,继续走原 `buildInteractiveCard`
 - 回归: heartbeat (`F-23`) 行为对齐,只是底层从 SendMessageText 变为 PATCH
@@ -386,8 +463,8 @@ Card 2.0 官方组件列表**没有 `tag: "note"`**。我们走 v2 风格(`<hr>`
 - 飞书 PATCH card: https://open.feishu.cn/document/server-docs/im-v1/message-card/patch
 - 飞书 markdown 内联标签规范: https://open.feishu.cn/document/common-capabilities/message-card/message-cards-content/using-markdown-tags
 - 飞书 lark_md 元素 / 行长度 / 字符限制: https://open.larkoffice.com/document/server-docs/im-v1/message-card/message-card-content/message-card-text-element
-- [`docs/feat/F-31-message-state.md`](../feat/F-31-message-state.md) — v1.3 MessageState 抽象事件,本文件 §6.6 是其 feishu-specific 实现补充
-- [`docs/SPEC.md`](../SPEC.md) §2.5 — MessageState 架构概述
+- [`docs/feat/F-31-message-state.md`](../feat/F-31-message-state.md) - v1.3 MessageState 抽象事件,本文件 §6.6 是其 feishu-specific 实现补充
+- [`docs/SPEC.md`](../SPEC.md) §2.5 - MessageState 架构概述
 
 ## 9. Implementation plan(本期落地,minimal scope)
 
@@ -488,8 +565,8 @@ func (a *Adapter) UpdateMessage(ctx context.Context, messageID, content string) 
 | `update_multi` 共享卡 | 仅当 `config.update_multi = true` 创建时启用 | Feishu card 文档 |
 
 **本期防御**:
-- `replyMaxBytes = 24 KB` —— 留 6 KB 头空间
-- entries 上限 = 47 —— 留 3 元素给 header/hr/footer
+- `replyMaxBytes = 24 KB` -- 留 6 KB 头空间
+- entries 上限 = 47 -- 留 3 元素给 header/hr/footer
 - 5 QPS 频控靠 receipt 单线程 `renderLocked`(已串行)+ 实际 agent event 频率远低于 5/s,不主动限流
 
 **超出限制时的降级**: `PatchMessage` 失败 → 记录日志 + 下次 render 仍 PATCH 同一 messageID;不重发新消息以避免重复 receipt。**已知风险**: 持续失败 → 卡片一直不更新,直到 receipt 销毁。后续可加重试/降级到"再发新卡"。
@@ -511,13 +588,13 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 | `share_chat` | `{"chat_id":"oc_xxx"}` | 分享群名片 | ❌ 未用 | 否 |
 | `share_user` | `{"user_id":"ou_xxx"}` | 分享个人名片 | ❌ 未用 | 否 |
 
-**独立 reaction API**(`POST /im/v1/messages/{id}/reactions`,body 用预定义 `emoji_type`):nightme 用于 `OutMessageState`。**append-only** —— 每次 AddReaction 加新 emoji,通道不删老的。unicode emoji 直接返回 `99992354 data not found`,必须用飞书预定义名(OneSecond/OnIt/DONE/THUMBSUP 等)。
+**独立 reaction API**(`POST /im/v1/messages/{id}/reactions`,body 用预定义 `emoji_type`):nightme 用于 `OutMessageState`。**append-only** -- 每次 AddReaction 加新 emoji,通道不删老的。unicode emoji 直接返回 `99992354 data not found`,必须用飞书预定义名(OneSecond/OnIt/DONE/THUMBSUP 等)。
 
 ### 11.1 选型约束(为什么不用 `post` 走 receipt)
 
 `post` 富文本支持 `md` 标签原生渲染 CommonMark+GFM,**看起来比塞进 card body 简单**。但和 rolling-log UX **根本冲突**:
 
-- `post` 是**整体替换语义** —— 每次发新 `post` 消息,飞书会渲染成新气泡,无法原地编辑
+- `post` 是**整体替换语义** -- 每次发新 `post` 消息,飞书会渲染成新气泡,无法原地编辑
 - 飞书没有 `PATCH post` 接口;`Update` / `Patch` 只对 `text` 和 `interactive` 生效
 - receipt 的核心 UX 是**一张可原地更新的卡片承载整轮事件**;`post` 实现不了 PATCH-in-place
 
@@ -528,7 +605,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 | 用法 | openclaw-lark | nightme |
 |------|---------------|---------|
 | 文本 | `post` + `tag:"md"`(CommonMark+GFM) | `interactive` card body(`markdown` element) |
-| 思考 | `collapsible_panel` + `text_size:"notation"` + 双语 `i18n_content` | `collapsible_panel` —— **但 §13.1 bug 导致永远走不到这条分支** |
+| 思考 | `collapsible_panel` + `text_size:"notation"` + 双语 `i18n_content` | `collapsible_panel` -- **但 §13.1 bug 导致永远走不到这条分支** |
 | 工具 | `collapsible_panel` 折叠工具步骤 | `div` + `markdown` 平铺 + emoji 图标 |
 | footer | `<hr>` + `<text_tag color='neutral'>`(中点 `·`,非冒号) | 同上 |
 | 卡片样式 | Card 2.0 + `update_multi:true` + 双语 | Card 2.0(单语,**未启用 update_multi**) |
@@ -547,20 +624,20 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 | `OutToolEnd` | `EventToolEnd` | 工具结束(成功/失败) | **`collapsible_panel` + `✅` / `❌` 折叠**(§13.6 设计决策,与 Start 合并 or 独立待定 §13.9) | `interactive` PATCH | ✅ |
 | `OutResult` | `EventResult` | 最终回复 | card body `markdown` + `📝` 图标(text 经 `truncateForLog` 限 600 字节) | `interactive` PATCH | ✅ |
 | `OutUsage` | `EventUsage` | token 用量 | card body `markdown` + `"1.2k tokens · $0.012"`(无图标) | `interactive` PATCH | ✅ |
-| `OutCompaction` | `EventCompaction` | 中途压缩 | card body `markdown` + `✶ Compacting conversation…` | `interactive` PATCH | ✅ |
+| `OutCompaction` | `EventCompaction` | 中途压缩 | card body `markdown` + `✶ Compacting conversation...` | `interactive` PATCH | ✅ |
 | `OutInit` | `EventInit` | 会话初始化 | card body `markdown` + `session initialized (model: X)`,**Meta 字段(session_id/agent_name/workspace/branch)未渲染**(见 §13.2) | `interactive` PATCH | ✅ |
 | `OutCard` | `EventPermission` | 权限请求 | `buildInteractiveCard` → header(title,template:blue) + markdown body + action buttons(value 携带 request_id) | `interactive` Create | ❌(独立气泡) |
-| `OutMessageState` | ChatSession lifecycle | 消息进度变化 | `AddReaction(userMsgID, emoji_type)` —— 走 `messageStates` map 做 idempotency | reaction API | ❌(标在用户消息上) |
+| `OutMessageState` | ChatSession lifecycle | 消息进度变化 | `AddReaction(userMsgID, emoji_type)` -- 走 `messageStates` map 做 idempotency | reaction API | ❌(标在用户消息上) |
 | `OutMessageStateRemoved` | (reserved) | 撤销进度标记 | `DeleteReaction`(v1.3 未用,append-only) | reaction API | ❌ |
-| `OutTyping` | (orphan) | typing 指示 | **silent drop**(飞书 bot 无原生 typing API) | — | ❌ |
-| `OutCommandReply` | (slash cmd / runtime error) | `/cwd` `/use` `/kill` `/help` `/agents` 等 | `SendMessageText` —— 独立 text 消息,**绕过** receipt | `text` Create | ❌ |
+| `OutTyping` | (orphan) | typing 指示 | **silent drop**(飞书 bot 无原生 typing API) | - | ❌ |
+| `OutCommandReply` | (slash cmd / runtime error) | `/cwd` `/use` `/kill` `/help` `/agents` 等 | `SendMessageText` -- 独立 text 消息,**绕过** receipt | `text` Create | ❌ |
 
 ### 12.1 映射决策的"为什么"
 
-- **receipt card 路径覆盖 8 种** —— 选 `interactive` 是为了 PATCH-in-place(对抗 chat spam);选 markdown element 是为了渲染表格/代码块/超链接(后续会用)
-- **MessageState 单独走 reaction** —— append-only emoji 是飞书最轻量、最稳定的进度表达;走 reaction API 不挤占 card body 预算
-- **OutCard 走独立 card(非 receipt)** —— 权限卡是单轮交互,需要按钮 + callback,不适合进 rolling log
-- **OutCommandReply 走纯文本 `text`** —— 命令反馈是"短而独立"语义,绕过 receipt 让用户看到干净气泡(参见 F-08 §4 "Channel is dumb" contract: command reply 不属于滚动日志)
+- **receipt card 路径覆盖 8 种** -- 选 `interactive` 是为了 PATCH-in-place(对抗 chat spam);选 markdown element 是为了渲染表格/代码块/超链接(后续会用)
+- **MessageState 单独走 reaction** -- append-only emoji 是飞书最轻量、最稳定的进度表达;走 reaction API 不挤占 card body 预算
+- **OutCard 走独立 card(非 receipt)** -- 权限卡是单轮交互,需要按钮 + callback,不适合进 rolling log
+- **OutCommandReply 走纯文本 `text`** -- 命令反馈是"短而独立"语义,绕过 receipt 让用户看到干净气泡(参见 F-08 §4 "Channel is dumb" contract: command reply 不属于滚动日志)
 
 ### 12.2 未来扩展槽位(不实现,但留位)
 
@@ -624,7 +701,7 @@ if e.Kind == "thinking" {  // ← 永远不会为真
 
 - **A. Adapter 补回前缀**(最小侵入,1 行):adapter 在 append 前 `Text: "[思考] " + msg.Text`,`receipt_event.go` 的现有 detection 即可 catch。**代价**:`truncateForLog` 走 thinking 分支时拿到的是剥后的正文(已是 adapter 写死的常量);prefix 是个识别 sentinel,不影响正文渲染
 - **B. agent 包加 `EventThinking` 枚举值** + receipt 直接 case;`translate.go` 改发 `EventThinking`,adapter 也直接转发。**代价**:跨 5 个文件动(agent / translate / adapter / receipt / receipt_event);但语义最清晰
-- **C. receipt 加 `appendThinkingLocked`,adapter 走专用路径** —— 与 B 类似,但不污染 agent 层
+- **C. receipt 加 `appendThinkingLocked`,adapter 走专用路径** -- 与 B 类似,但不污染 agent 层
 
 **附议**(无论选哪种方案):`receipt_event.go:40-53` 加注释明确 "prefix MUST be present;Gateway/Caller 负责保证"。否则后人改 transport 又踩一遍。
 
@@ -663,13 +740,13 @@ Claude Code `result.Result` 经常 1~3 KB;600 字节会切掉大部分正文,用
 - (b) `OutResult` 单独放宽到 2048 或 4096(更好,但需要在 `receipt_event.go` 区分 EventText 来自 OutText 还是 OutResult;当前 EventKind 没有 `EventResult` payload 区别)
 - (c) 给 OutResult 单独建 receipt 字段 `resultFullText`,默认不显示,折叠面板"展开全文"
 
-### 13.4 ℹ️ 未来关注: 没有 OutboundAttachment kind
+### 13.4 i️ 未来关注: 没有 OutboundAttachment kind
 
 `InboundMessage.Attachments` 存在(incoming 图片/文件),但 `OutboundKind` **没有对应反向类型**。如果 agent 未来通过工具生成图片/文件,目前**无投递路径**。
 
 MVP 不阻塞(Claude Code 不生成媒体),但 Channel 抽象层对外非对称。建议下一份抽象文档(Gateway hub)补 `OutboundAttachment` 类型,把 §12.2 表里的"未来扩展"沉淀进代码契约。
 
-### 13.5 ℹ️ 已知接受: `OutCard` RequestID 临时生成
+### 13.5 i️ 已知接受: `OutCard` RequestID 临时生成
 
 `adapter.go:530-533` 用 `fmt.Sprintf("%s:%d", msg.ChatID, time.Now().UnixNano())` 拼 RequestID:
 
@@ -686,8 +763,8 @@ MVP 不阻塞(Claude Code 不生成媒体),但 Channel 抽象层对外非对称�
 **采用方案**: §13.7 方案 1(per-event) + Q2=a + Q3=全部折叠 + Q4=a。
 
 **实施要点**:
-1. 修 §13.1 bug(adapter 补回 `[思考] ` 前缀)—— `receipt_event.go` 的现有 detection 即可 catch
-2. `receipt_event.go` 给 `tool_start` / `tool_end` 标新 `Kind="tool"`(或分别 `Kind="tool_start"` / `Kind="tool_end"` —— 二者皆可,前者更简单)
+1. 修 §13.1 bug(adapter 补回 `[思考] ` 前缀)-- `receipt_event.go` 的现有 detection 即可 catch
+2. `receipt_event.go` 给 `tool_start` / `tool_end` 标新 `Kind="tool"`(或分别 `Kind="tool_start"` / `Kind="tool_end"` -- 二者皆可,前者更简单)
 3. `buildReceiptCard` 新增 `Kind="tool"` 折叠分支:header 为 `🔧 tool_name(args)` / `✅ tool_name → output` / `❌ tool_name failed: err`,body 为 entry 文本
 4. 折叠默认 `expanded: false`(所有 thinking / tool 默认折叠)
 5. 最终回复(📝)、OutUsage、OutCompaction、OutInit 保持平铺 `markdown` element
@@ -695,7 +772,7 @@ MVP 不阻塞(Claude Code 不生成媒体),但 Channel 抽象层对外非对称�
 **结论**: `OutThinking` / `OutToolStart` / `OutToolEnd` 在 card body 里**全部走 `collapsible_panel`**,默认折叠。最终回复(📝)、token 用量(OutUsage)、compaction(OutCompaction)、init(OutInit)保持平铺(`markdown` element)。
 
 **理由**:
-- Thinking / Tool 调用是"agent 在做什么"的中间过程,对用户阅读最终结果**不是关键** —— 折叠才能让卡片聚焦答案
+- Thinking / Tool 调用是"agent 在做什么"的中间过程,对用户阅读最终结果**不是关键** -- 折叠才能让卡片聚焦答案
 - 平铺会让 agent 调 10 次工具的卡变成"工具清单 + 答案尾巴",最终答案被挤到屏幕外(§13.1 已记录的实际问题)
 - 与 openclaw-lark `buildCompleteCard` 的 `toolUseSteps` `collapsible_panel` 模式一致(§11.2)
 
@@ -775,7 +852,7 @@ MVP 不阻塞(Claude Code 不生成媒体),但 Channel 抽象层对外非对称�
 - **优点**: 卡片扁平、阅读体验更好;agent turn 调 N 个工具只占 N 个 panel 而非 2N
 - **缺点**:
   - 需要 receipt 维护"当前 thinking panel / 当前 tool pair"指针(类似流式 buffer)
-  - Start 来时建面板,End 来时把结果 fold 进同一面板 —— **跨 event 状态机变复杂**
+  - Start 来时建面板,End 来时把结果 fold 进同一面板 -- **跨 event 状态机变复杂**
   - 工具面板关闭/开启时 `expanded` 状态需保留(用户展开后面板又来一个 event,PATCH 卡片时要不要把它默认折叠回去?)
 
 **方案 3: 类别聚合(category-aggregate,推荐)**
@@ -799,7 +876,7 @@ MVP 不阻塞(Claude Code 不生成媒体),但 Channel 抽象层对外非对称�
 - **优点**: 最扁平;阅读体验最好;openclaw-lark 的 `toolUseSteps` 默认就是这种
 - **缺点**:
   - 需要在 `MessageReceipt` 加 `thinkingPanel` + `toolsPanel` 两个聚合 buffer
-  - **不能并入现有 `entries []LogEntry` 模型** —— 现有模型是 FIFO list,聚合需要 map/set 或 lazy 渲染
+  - **不能并入现有 `entries []LogEntry` 模型** -- 现有模型是 FIFO list,聚合需要 map/set 或 lazy 渲染
   - 增量 PATCH 时聚合面板的文本变化较大(每来一个 event 都触发完整重渲染整个面板内容)→ PATCH 字节膨胀,QPS 风险
 
 ### 13.8 实施建议(已决议采用)
@@ -809,12 +886,12 @@ MVP 不阻塞(Claude Code 不生成媒体),但 Channel 抽象层对外非对称�
 1. 修 §13.1 bug(adapter 补回 `[思考] ` 前缀)
 2. `receipt_event.go` 给 `tool_start` / `tool_end` 标 `Kind="tool"`(统一,无需区分 start/end)
 3. `buildReceiptCard` 新增 `Kind="tool"` 折叠分支(同 thinking 的 `collapsible_panel` 结构)
-4. **不**加 `card.tool_fold` 配置开关——所有 entry 统一折叠行为,保持简洁(可在未来 PR 加)
+4. **不**加 `card.tool_fold` 配置开关--所有 entry 统一折叠行为,保持简洁(可在未来 PR 加)
 
 **`truncateForLog` 限额考虑**:
-- `OutResult` / `OutToolEnd` 的 output 可能超过 `perEntryMaxBytes=600` —— 折叠面板展开后用户能看到完整内容,但默认折叠时只显示 icon + header
+- `OutResult` / `OutToolEnd` 的 output 可能超过 `perEntryMaxBytes=600` -- 折叠面板展开后用户能看到完整内容,但默认折叠时只显示 icon + header
 - 折叠 panel 的 body 内容建议也走 `truncateForLog` 与现有逻辑一致
-- **不在本 PR 解决 §13.3**(OutResult 限额拓宽) —— 是独立 PR
+- **不在本 PR 解决 §13.3**(OutResult 限额拓宽) -- 是独立 PR
 
 **测试覆盖**:
 - `receipt_test.go` 加例:append 一连串 EventText(thinking + normal) + EventToolStart/End,验证生成的 card JSON 元素数组顺序 + 每 entry 的 `collapsible_panel` 结构
@@ -831,7 +908,7 @@ MVP 不阻塞(Claude Code 不生成媒体),但 Channel 抽象层对外非对称�
 | **Q1 折叠粒度** | 方案 1(per-event) | 每个 entry 一个 panel;不改 receipt 状态机 |
 | **Q2 header 内容** | (a) 静态 `🔧 tool_name(args)` / `✅ tool_name → output` | 简单、不加耗时(耗时属 §13.3 backlog) |
 | **Q3 默认折叠** | **全部折叠**(thinking + tool_start + tool_end) | 卡片聚焦最终回复 |
-| **Q4 Start+End 合并?** | (a) 独立 panel | Start panel `🔧 Read(/a.py)`,End panel `✅ Read done` —— 与 entry 一一对应,不改 receipt 结构 |
+| **Q4 Start+End 合并?** | (a) 独立 panel | Start panel `🔧 Read(/a.py)`,End panel `✅ Read done` -- 与 entry 一一对应,不改 receipt 结构 |
 
 ### 13.10 🐛 Bug:`OutboundMessage.ReplyTo` 没有被作为 Feishu `root_id` 投递
 
@@ -841,12 +918,12 @@ MVP 不阻塞(Claude Code 不生成媒体),但 Channel 抽象层对外非对称�
 
 **证据链**:
 
-1. `internal/chatsession/readpump.go:198` —— `readpump` 读 `cs.currentTurnUserMsgID` 并以 `userMsgID` 参数调用 gateway 的 event handler
+1. `internal/chatsession/readpump.go:198` -- `readpump` 读 `cs.currentTurnUserMsgID` 并以 `userMsgID` 参数调用 gateway 的 event handler
 2. gateway 的 event handler 把它写到 `OutboundMessage.ReplyTo`(参考 `internal/gateway/binding.go:8` 与 `messages.go:48`)
-3. `internal/channel/feishu/adapter.go:424/436/525/535/550/571/581/591` —— 8 处都只调用 `a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)`,**只用 `ReplyTo` 查 `receiptsByUserMsgID` map**
+3. `internal/channel/feishu/adapter.go:424/436/525/535/550/571/581/591` -- 8 处都只调用 `a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)`,**只用 `ReplyTo` 查 `receiptsByUserMsgID` map**
 4. `sendViaLark` (`adapter.go:1295-1324`) 构造的 `CreateMessageReqBody` 只有 `ReceiveId / MsgType / Content`,**没有 `RootId` 字段**
 5. `larkim.NewCreateMessageReqBuilder` SDK 调用 `Message.Create`(顶层创建 API,非 Reply)
-6. `PatchMessage` (`adapter.go:1387`) PATCH `/im/v1/messages/{id}` 也不传 root_id —— PATCH 会**保留**被 PATCH 消息的原始 root_id,但因为原始 create 没设,结果依然无 root_id
+6. `PatchMessage` (`adapter.go:1387`) PATCH `/im/v1/messages/{id}` 也不传 root_id -- PATCH 会**保留**被 PATCH 消息的原始 root_id,但因为原始 create 没设,结果依然无 root_id
 7. `larkim.CreateMessageReqBody.RootId` 字段在 SDK 中存在(`oapi-sdk-go/v3@v3.5.3/service/im/v1/model.go:2125`),**SDK 完全支持,代码没用而已**
 8. `larkim.ReplyMessageReq{RootId?, ReplyInThread, ...}` **也存在**(`model.go:11385+`),是专门回复的 endpoint
 
@@ -895,7 +972,7 @@ if rootID != "" {
 }
 ```
 
-PATCH 路径不动 —— Feishu 的 PATCH 接口会自动保留被 PATCH 消息的原始 `root_id`。
+PATCH 路径不动 -- Feishu 的 PATCH 接口会自动保留被 PATCH 消息的原始 `root_id`。
 
 **与 §13.6(折叠设计)的关系**: 这是独立的两件事,但**建议合并到同一份 PR**:
 1. §13.6 修折叠渲染(per-event / 聚合 / 配对 三选一)
@@ -915,7 +992,7 @@ PATCH 路径不动 —— Feishu 的 PATCH 接口会自动保留被 PATCH 消息
 
 ### 13.11 决策记录(2026-08-03,F-33):ChatID 数据模型简化
 
-**Devin 原话**(2026-08-03 21:08):"我们是不续接任何 Thread,最多就是点对点的 ReplyTo" — chatID 数据模型做一次系统性清理。
+**Devin 原话**(2026-08-03 21:08):"我们是不续接任何 Thread,最多就是点对点的 ReplyTo" - chatID 数据模型做一次系统性清理。
 
 #### 13.11.1 三个核心决策
 
@@ -1015,11 +1092,11 @@ ChatSession.onAgentEvent
 
 ## 14. 变更日志
 
-- **2026-08-03** — 加入 §11-§13: Feishu msg_type 全集参考、OutboundKind → Feishu 渲染映射表、审计结果(1 bug + 4 澄清)。基于 `internal/channel/feishu/*` 与 `internal/gateway/*` 现状。
-- **2026-08-03(同日增量)** — 加入 §13.6-§13.9:Devin 拍板 Thinking/ToolStart/ToolEnd 全部折叠;列出 3 个 UX 折叠粒度方案(per-event / aggregate-paired / category-aggregate)+ 4 个待确认问题。等 Devin 决定后启动 PR。
-- **2026-08-03(同日再增量)** — 加入 §13.10:Devin 发现 `OutboundMessage.ReplyTo` 字段被消费在内部 receipt map 但**从未投递为 Feishu `root_id`**,所有 bot 回复都是顶层消息,与用户消息无视觉连接。SDK 字段 `larkim.CreateMessageReqBody.RootId` 已存在但代码没用。F-26 v1.1 设计文档 `ReplyTo 非空 → 必须镇定到该 userMsgID(用 ReplyMessage API 或已有 receipt)` 在 v1.3 refactor 中丢失。提供 A/B/C 三种修复范围(最小/中等/完整)+ 4 个待确认问题。
-- **2026-08-03(同日三增量)** — 加入 §13.11(F-33 决策记录):D1 ChatType 不进 Gateway + D2 topic_group 不特殊处理 + D3 `ReplyTo = ParentId`(RootId 不进 nightme)+ D4 任何 Channel 都不引入 thread 概念。落地 chatID 数据模型系统性清理,关闭 inbound 方向 ReplyTo 接线缺失。详见 [`docs/feat/F-33-simplify-chatid-data-model.md`](../feat/F-33-simplify-chatid-data-model.md)。
-- **v0.3 ~ v1.3** — 早期章节(背景、OpenClaw 调研、迁移方案、已知坑等)保留;参见章节顶部 Status 行。
+- **2026-08-03** - 加入 §11-§13: Feishu msg_type 全集参考、OutboundKind → Feishu 渲染映射表、审计结果(1 bug + 4 澄清)。基于 `internal/channel/feishu/*` 与 `internal/gateway/*` 现状。
+- **2026-08-03(同日增量)** - 加入 §13.6-§13.9:Devin 拍板 Thinking/ToolStart/ToolEnd 全部折叠;列出 3 个 UX 折叠粒度方案(per-event / aggregate-paired / category-aggregate)+ 4 个待确认问题。等 Devin 决定后启动 PR。
+- **2026-08-03(同日再增量)** - 加入 §13.10:Devin 发现 `OutboundMessage.ReplyTo` 字段被消费在内部 receipt map 但**从未投递为 Feishu `root_id`**,所有 bot 回复都是顶层消息,与用户消息无视觉连接。SDK 字段 `larkim.CreateMessageReqBody.RootId` 已存在但代码没用。F-26 v1.1 设计文档 `ReplyTo 非空 → 必须镇定到该 userMsgID(用 ReplyMessage API 或已有 receipt)` 在 v1.3 refactor 中丢失。提供 A/B/C 三种修复范围(最小/中等/完整)+ 4 个待确认问题。
+- **2026-08-03(同日三增量)** - 加入 §13.11(F-33 决策记录):D1 ChatType 不进 Gateway + D2 topic_group 不特殊处理 + D3 `ReplyTo = ParentId`(RootId 不进 nightme)+ D4 任何 Channel 都不引入 thread 概念。落地 chatID 数据模型系统性清理,关闭 inbound 方向 ReplyTo 接线缺失。详见 [`docs/feat/F-33-simplify-chatid-data-model.md`](../feat/F-33-simplify-chatid-data-model.md)。
+- **v0.3 ~ v1.3** - 早期章节(背景、OpenClaw 调研、迁移方案、已知坑等)保留;参见章节顶部 Status 行。
 
 ## 15. v1.3.x 实施计划:折叠 + reply-in-thread
 
@@ -1062,7 +1139,7 @@ func (a *Adapter) SendCard(ctx context.Context, chatID, content, rootID string) 
 
 **`sendViaLark` dispatch 到 Reply / Create(SDK 修正版)**:
 
-最初计划是设 `body.RootId = &rootID`(SDK 字段 `larkim.CreateMessageReqBody.RootId`,参考 `oapi-sdk-go/v3@v3.5.3/service/im/v1/model.go:2125`)。**修正**: `CreateMessageReqBody` **没有** `RootId` 字段——只有 `ReplyMessageResp` 数据结构有 `RootId`(响应体)。真正能设 root_id 的 API 是 `POST /im/v1/messages/{message_id}/reply`(path 参数即 root_id),所以 `sendViaLark` 拆成两条:
+最初计划是设 `body.RootId = &rootID`(SDK 字段 `larkim.CreateMessageReqBody.RootId`,参考 `oapi-sdk-go/v3@v3.5.3/service/im/v1/model.go:2125`)。**修正**: `CreateMessageReqBody` **没有** `RootId` 字段--只有 `ReplyMessageResp` 数据结构有 `RootId`(响应体)。真正能设 root_id 的 API 是 `POST /im/v1/messages/{message_id}/reply`(path 参数即 root_id),所以 `sendViaLark` 拆成两条:
 
 ```go
 func (a *Adapter) sendViaLark(ctx, chatID, msgType, content, rootID string) (string, error) {
@@ -1132,7 +1209,7 @@ msgID, err := a.SendCard(ctx, chatID, cardBody, userMsgID)  // ← userMsgID 作
 
 **Cold-start 工具函数 `buildColdStartCard`** 不变(body 一样,只换调用 API)。
 
-**PatchMessage 路径**: **不动** —— Feishu PATCH `/im/v1/messages/{id}` 自动保留被 PATCH 消息的原始 root_id,无需在 PATCH body 里重复传。
+**PatchMessage 路径**: **不动** -- Feishu PATCH `/im/v1/messages/{id}` 自动保留被 PATCH 消息的原始 root_id,无需在 PATCH body 里重复传。
 
 ### 15.3 §13.6 折叠修复细节
 
@@ -1213,7 +1290,7 @@ if e.Kind == "tool" {
             "vertical_align": "center",
             "icon": map[string]any{
                 "tag":   "standard_icon",
-                "token": "down-s…ined",
+                "token": "down-s...ined",
                 "size":  "16px 16px",
             },
             "icon_position":       "follow_text",
@@ -1327,12 +1404,12 @@ return msgID, err
 `isFeishuTerminalMessageCode(err)` 检测 230011/231003: 格式兼容 `"code NNNNN"` 和 `"code:NNNNN"`,加 `*larkcore.CodeError` unwrap 防御 SDK 未来变化。
 
 **测试覆盖**:
-- `TestSendViaLark_TerminalCodeFallsBackToCreate` — 230011 和 231003 都触发 fallback
-- `TestSendViaLark_NonTerminalErrorPropagates` — 230020 和 transport error 不触发 fallback,原错误向上传
-- `TestIsFeishuTerminalMessageCode` — 6 case 单测
+- `TestSendViaLark_TerminalCodeFallsBackToCreate` - 230011 和 231003 都触发 fallback
+- `TestSendViaLark_NonTerminalErrorPropagates` - 230020 和 transport error 不触发 fallback,原错误向上传
+- `TestIsFeishuTerminalMessageCode` - 6 case 单测
 
 **与 openclaw-lark 的差异**(值得记录):
-- **不做 cache**: openclaw-lark 把 message_id 存进 30min TTL map;我们只在 sendContent 这一层做单次 fallback。开销更小,但未来如果出现“同一 dead root_id 被反复请求”的场景,需补上 cache。
+- **不做 cache**: openclaw-lark 把 message_id 存进 30min TTL map;我们只在 sendContent 这一层做单次 fallback。开销更小,但未来如果出现"同一 dead root_id 被反复请求"的场景,需补上 cache。
 - **不打 sentinel error 类型**: openclaw-lark 抛 `MessageUnavailableError`;我们走标准 error + log warn,上层 gateway 不需特判。
 
 **后续优化(backlog)**:

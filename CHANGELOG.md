@@ -118,6 +118,25 @@ spawn will fail at runtime. See
   type): replaced by `internal/chatsession/AgentSession`.
 - `internal/session/manager.go::MemoryManager`: replaced by
   `internal/chatsession/manager.go::Manager`.
+- **ChatType field removed from data model** (F-33): ChatSession,
+  BindingEntry, ChatSessionEntry, and `gateway.InboundMessage` no
+  longer carry chat-type classification. The Gateway treats all
+  chats as opaque string IDs; channel adapters classify chats
+  internally for rendering decisions only. The `channel.ChatTypeThread`
+  constant is dropped as well — Feishu `topic_group` (thread)
+  messages flow through the same path as `p2p` / `group`. Pre-F-33
+  `chat_sessions.json` files continue to load transparently (the
+  `chatType` JSON field is silently ignored). The `/status`
+  command no longer shows a DM/Group label. See
+  [`docs/feat/F-33-simplify-chatid-data-model.md`](./docs/feat/F-33-simplify-chatid-data-model.md).
+- **`InboundMessage.ReplyTo` was always empty** in pre-F-33 builds:
+  F-33 wires the field from `event.Message.ParentId` (Feishu SDK's
+  native parent_id). The thread-top-level `RootId` is intentionally
+  not surfaced — nightme data model never carries a thread concept.
+  The wire-up is currently metadata-only (no dispatch logic
+  consumes `InboundMessage.ReplyTo` yet); future "reply context
+  pull" features can rely on it. Outbound `ReplyTo` semantics are
+  unchanged (still `currentTurnUserMsgID` per §13.10).
 
 ### Bug fixes
 

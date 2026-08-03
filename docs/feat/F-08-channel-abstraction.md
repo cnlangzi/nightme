@@ -1,9 +1,9 @@
 # F-08: Channel Abstraction
 
-> **Status**: implemented (v1.1 — receipt-lifecycle extension landed)
-> **Milestone**: M2 (Feishu implementation), v0.3 (interface extension for receipts)
+> **Status**: implemented; v1.3 shrinks to 5 methods (receipt-lifecycle API removed — see SPEC §0.1)
+> **Milestone**: M2 (Feishu implementation), v0.3 (interface extension), v1.3 (interface shrink)
 > **Depends on**: F-22 (Feishu One-Click App Registration) — for credentials
-> **Related docs**: [`SPEC.md`](../SPEC.md) v1.1 §1.1, §1.2, §2.4; [`F-26-gateway-hub.md`](./F-26-gateway-hub.md) §3
+> **Related docs**: [`SPEC.md`](../SPEC.md) v1.3 §1.3, §2.4; [`F-26-gateway-hub.md`](./F-26-gateway-hub.md) (v1.1 historical); [`F-25-rolling-log.md`](./F-25-rolling-log.md)
 
 ---
 
@@ -11,13 +11,14 @@
 
 定义 `Channel` interface 让 nightme 支持多种 IM backend。MVP 仅实现飞书（lark-oapi-go），但 interface 设计保证后续接入 WhatsApp / Telegram / Slack / Web UI 无需改动核心逻辑。
 
-**v1.1 职责再定义**：Channel 是**纯渲染器**（dumb renderer）。它做三件事：
+**v1.3 职责再定义**：Channel 是**纯渲染器**（dumb renderer）。它做两件事：
 
 1. **IM 协议编解码** — 把 native event 解码成 `InboundMessage`；把 `OutboundMessage` 编码成 native API 调用
-2. **`Send(OutboundMessage)` 通用渲染** — 文本 / tool_start / tool_end / thinking / card / reaction 等所有 `OutboundKind` 的视觉表达
-3. **Receipt 生命周期渲染** — `CreateReceipt / UpdateReceipt / DisposeReceipt`，按 `ReceiptState` 切视觉（pending ⏳ / executing 🔄 / done ✅ / error ❌）
+2. **`Send(OutboundMessage)` 通用渲染** — 文本 / tool_start / tool_end / thinking / card / reaction 等所有 `OutboundKind` 的视觉表达 + 自管 receipt 生命周期（card / thread / DOM 节点）
 
-**Channel 不知道**：sessions、workspaces、agents、bindings、receipt 状态机本身、slash commands。状态机的"什么时候转移"是 Gateway 的事。
+**Channel 不知道**：sessions、workspaces、agents、bindings、slash commands、receipt 状态机的任何细节。v1.3 起 Gateway 完全不持有 receipt —— Channel 在内部按 `OutboundMessage.ReplyTo = userMsgID` 路由到自己的 receipt 对象，自己决定怎么 cold-create / PATCH / 终态。
+
+**v1.3 接口瘦身**：Channel interface 从 8 个方法（v1.1 含 `CreateReceipt / UpdateReceipt / DisposeReceipt` + `ReceiptState` enum）缩减到 **5 个方法**（`Name / Start / Stop / Send / Incoming`）。Receipt FSM 整体从 Gateway 撤回，详见 SPEC §0.1 与 [`F-25-rolling-log.md`](./F-25-rolling-log.md)。
 
 ---
 
@@ -78,69 +79,13 @@ type Channel interface {
     // Incoming returns the channel's normalized message stream.
     Incoming() <-chan Message
 
-    // --- v1.1 additions: receipt lifecycle RENDERING ---
-
-    // CreateReceipt creates a new channel-native receipt for an incoming
-    // user message. Returns an opaque Receipt handle (channel-private
-    // concrete type) that Gateway holds for the lifetime of the user
-    // message's receipt FSM.
-    //
-    // The channel decides how to render the initial state (typically
-    // Pending → ⏳). The blocks parameter is the structured user turn
-    // (text + optional image/file attachments); the channel formats
-    // these into its native UI (Feishu: receipt text message + reaction;
-    // echo: log line).
-    //
-    // Errors propagate to Gateway, which will skip receipt tracking and
-    // fall back to plain Send for that user message.
-    CreateReceipt(ctx context.Context, chatID, userMsgID string, blocks []agent.ContentBlock) (Receipt, error)
-
-    // UpdateReceipt transitions the receipt to the given state. The
-    // channel renders the state in its native UI:
-    //
-    //   ReceiptPending   → ⏳  (or keep current emoji if already Pending)
-    //   ReceiptExecuting → 🔄  (swap reaction or append indicator)
-    //   ReceiptDone      → ✅  (swap reaction, optionally edit body)
-    //   ReceiptError     → ❌  (swap reaction)
-    //
-    // Gateway is the ONLY caller; channels should not assume any
-    // particular transition order. UpdateReceipt is idempotent for the
-    // same state (channel may short-circuit).
-    UpdateReceipt(ctx context.Context, receipt Receipt, state ReceiptState) error
-
-    // DisposeReceipt cleans up the receipt (Feishu: delete the receipt
-    // message; echo: log a dispose line; web: remove the element).
-    // Called after the final UpdateReceipt(Done|Error).
-    DisposeReceipt(ctx context.Context, receipt Receipt) error
+    // v1.3 (SPEC §0.1): receipt lifecycle methods are GONE from
+    // the Channel interface. Receipt is now entirely Channel-
+    // internal. Send() handles all rendering — including receipt
+    // creation / PATCH / terminal state — by routing each
+    // OutboundMessage via its ReplyTo=userMsgID field to Channel's
+    // own per-userMsgID receipt (card / thread / DOM node).
 }
-
-// Receipt is an opaque handle. Each Channel returns its own concrete
-// type (Feishu: *MessageReceipt; echo: *echoReceipt). Gateway treats
-// it as a token and never reads or writes fields.
-type Receipt interface{}
-
-// ReceiptState is the cross-channel state enum. Gateway decides when
-// to transition; Channel only renders.
-type ReceiptState int
-
-const (
-    // ReceiptPending is the initial state after CreateReceipt. The user
-    // message is in the system but not yet dispatched to the agent
-    // (either queued in InputBuffer or being dispatched).
-    ReceiptPending ReceiptState = iota
-
-    // ReceiptExecuting means the user message has been sent to the
-    // agent's PTY stdin and the agent is processing it.
-    ReceiptExecuting
-
-    // ReceiptDone means the agent has finished processing this user
-    // message and the final result has been emitted.
-    ReceiptDone
-
-    // ReceiptError means the agent (or the dispatch path) failed for
-    // this user message; the user should retry.
-    ReceiptError
-)
 
 // Compile-time check
 var _ Channel = (*feishu.Adapter)(nil)
@@ -157,15 +102,14 @@ var _ Channel = (*echo.Channel)(nil)
 - `internal/channel/echo/echo.go` — no-network stub（receipt 是 log 行）
 - `internal/channel/mock/mock.go` — 测试用 mock
 
-**架构**：
+**架构**（v1.3）：
 ```
-┌──────────────────────────────────────────────────────────┐
-│ Channel interface (channel.go)                            │
-│   - Name / Start / Stop                                   │
-│   - Incoming() <-chan Message                            │
-│   - Send(OutboundMessage) error                          │
-│   - CreateReceipt / UpdateReceipt / DisposeReceipt       │
-└──────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│ Channel interface (channel.go) — 5 methods             │
+│   - Name / Start / Stop                                 │
+│   - Incoming() <-chan Message                           │
+│   - Send(OutboundMessage) error   ← 所有渲染走这里       │
+└─────────────────────────────────────────────────────────┘
         ↑ implements
         │
 ┌────────────────────┐  ┌────────────────┐
@@ -173,98 +117,22 @@ var _ Channel = (*echo.Channel)(nil)
 │ (receipt.go)       │  │ (no-network    │
 │ - lark NewClient   │  │  stub)         │
 │ - WebSocket 长连接 │  │                │
-│ - MessageReceipt   │  │ echoReceipt    │
-│   {messageID,      │  │  {userMsgID}   │
-│    reactionID,     │  │                │
-│    replyMsgID}     │  │ log only       │
+│ - MessageReceipt   │  │ log only       │
+│   {replyMsgID,     │  │ (no receipt    │
+│    cardMsgID,      │  │  object)       │
+│    entries,        │  │                │
+│    state, tokens}  │  │                │
+│ receiptsByUserMsgID│ │                │
 └────────────────────┘  └────────────────┘
 ```
 
-### 3.1 Feishu receipt rendering details
+**v1.3 关键变化**:Receipt object 完全 Channel 私有。`feishu.Adapter` 通过 `receiptsByUserMsgID[userMsgID]` 维护自己的 receipt 簿记(不再是 per-chat map)。`echo.Channel` 不维护任何 receipt —— 它的 `Send` 直接 log 一行即可。`Gateway` 完全不知道这些。
 
-`internal/channel/feishu/receipt.go` 的实现（v1.1）：
+**实现参考**:
+- Feishu: [`internal/channel/feishu/adapter.go`](../../internal/channel/feishu/adapter.go) §6 (`Send` 分发) + [`internal/channel/feishu/receipt.go`](../../internal/channel/feishu/receipt.go) (rolling-log 状态机)
+- Echo: [`internal/channel/echo/echo.go`](../../internal/channel/echo/echo.go) (`Send` 一行 log)
 
-```go
-type MessageReceipt struct {
-    UserMsgID  string
-    ReplyMsgID string  // the receipt message nightme posted
-    ReactionID string  // current reaction handle
-    currentEmoji ReactionEmoji
-    mu          sync.Mutex
-}
-
-// CreateReceipt posts the receipt message and adds ⏳ reaction.
-func (a *Adapter) CreateReceipt(ctx, chatID, userMsgID string, blocks []agent.ContentBlock) (Receipt, error) {
-    text := buildReceiptText(blocks)  // Feishu-flavored formatter, may include image refs
-    replyMsgID, err := a.bot.ReplyMessage(ctx, chatID, userMsgID, text)
-    if err != nil { return nil, err }
-
-    reactionID, err := a.bot.AddReaction(ctx, chatID, userMsgID, EmojiWaiting)
-    if err != nil {
-        // Reaction failed; the receipt message is still useful — return without reaction.
-        log.Printf("receipt: reaction add failed: %v", err)
-    }
-
-    return &MessageReceipt{
-        UserMsgID: userMsgID,
-        ReplyMsgID: replyMsgID,
-        ReactionID: reactionID,
-        currentEmoji: EmojiWaiting,
-    }, nil
-}
-
-// UpdateReceipt swaps reaction according to state.
-func (a *Adapter) UpdateReceipt(ctx, receipt Receipt, state ReceiptState) error {
-    r := receipt.(*MessageReceipt)
-    r.mu.Lock()
-    defer r.mu.Unlock()
-
-    target := emojiForState(state)
-    if r.currentEmoji == target { return nil }  // idempotent
-
-    // Delete old reaction (if any).
-    if r.currentEmoji != "" && r.ReactionID != "" {
-        _ = a.bot.DeleteReaction(ctx, r.UserMsgID, r.ReactionID)
-    }
-    // Add new reaction (track new id).
-    newID, err := a.bot.AddReaction(ctx, chatIDOf(r), r.UserMsgID, target)
-    if err == nil {
-        r.ReactionID = newID
-        r.currentEmoji = target
-    }
-    return err  // best-effort; Gateway doesn't retry on receipt update failure
-}
-
-// DisposeReceipt deletes the receipt message entirely.
-func (a *Adapter) DisposeReceipt(ctx, receipt Receipt) error {
-    r := receipt.(*MessageReceipt)
-    if r.ReplyMsgID == "" { return nil }
-    return a.bot.DeleteMessage(ctx, r.ReplyMsgID)
-}
-```
-
-### 3.2 Echo receipt (no-network stub)
-
-```go
-type echoReceipt struct{ userMsgID string }
-
-func (c *Channel) CreateReceipt(ctx, chatID, userMsgID string, blocks []agent.ContentBlock) (Receipt, error) {
-    fmt.Fprintf(c.out, "[receipt %s] created (state=pending, chat=%s)\n", userMsgID, chatID)
-    return &echoReceipt{userMsgID: userMsgID}, nil
-}
-
-func (c *Channel) UpdateReceipt(ctx, receipt Receipt, state ReceiptState) error {
-    fmt.Fprintf(c.out, "[receipt %s] state=%s\n", receipt.(*echoReceipt).userMsgID, stateName(state))
-    return nil
-}
-
-func (c *Channel) DisposeReceipt(ctx, receipt Receipt) error {
-    fmt.Fprintf(c.out, "[receipt %s] disposed\n", receipt.(*echoReceipt).userMsgID)
-    return nil
-}
-```
-
----
+**完整 v1.3 协议契约 + 各 Channel 实现策略**:见 [`F-25-rolling-log.md`](./F-25-rolling-log.md) §3.
 
 ## 4. The "Channel is dumb" contract
 
@@ -272,22 +140,22 @@ This section makes the responsibility split concrete. Channel **MUST NOT** do an
 
 | ❌ Don't | ✅ Instead |
 |---------|-----------|
-| Track whether a user message has been dispatched | Gateway flips `Pending → Executing` via `UpdateReceipt` |
-| Decide whether to queue vs send | Session.InputBuffer decides; Gateway observes and flips state accordingly |
+| Track whether a user message has been dispatched | **N/A in v1.3** — Gateway no longer tracks receipts at all. Channel renders progress via `OutMessageState` (separate concern, see F-31) |
+| Decide whether to queue vs send | ChatSession.InputBuffer decides; Gateway observes and calls `cs.QueueUserMessage` |
 | Lookup session or workspace | Gateway does binding lookup, hands Channel only `chatID` + `userMsgID` + `blocks` |
 | Format receipt text from blocks using shared utils | Channel takes `[]agent.ContentBlock` directly; Channel formats internally |
-| Call Session or Manager | Channel never imports `session/` |
+| Call Session or Manager | Channel never imports `chatsession/` |
+| **v1.3: Maintain an opaque `Receipt` handle for Gateway** | **Receipt handle is gone** — Channel owns its receipt objects internally; Gateway only sees `OutboundMessage.ReplyTo = userMsgID` |
 
 Channel **MUST**:
 
 | ✅ Do |
 |------|
 | Render `OutboundMessage` kinds (text/tool_start/tool_end/thinking/card/...) in native UI |
-| Render `ReceiptState` transitions visually (emoji + body changes) |
-| Manage its own internal receipt handles (Feishu message ids / reaction ids) |
-| Return opaque `Receipt` tokens (no public fields) |
-| Handle `DisposeReceipt` as a cleanup (delete message, remove element) |
-| Fail gracefully on `UpdateReceipt` errors (log + continue) — receipt UI must not block the agent event stream |
+| Route `OutboundMessage{ReplyTo: userMsgID}` to its own per-userMsgID receipt (cold-create if missing; PATCH if exists) |
+| Manage its own internal receipt state (Feishu: message IDs, cardMsgID, entries; Slack: thread map; Web: DOM nodes) — fully Channel-private |
+| Render `OutMessageState` events as platform-native progress indicators (Feishu: AddReaction; Slack: emoji shortcode; Web: DOM class) |
+| Fail gracefully on `Send` errors (log warn; continue) — receipt UI must not block the agent event stream |
 
 ---
 
@@ -306,57 +174,55 @@ If you see references to `SendMessage` / `SendLongMessage` in older docs, they r
 | 飞书 WebSocket 断连 | lark-oapi SDK 自动重连（指数退避）；期间 Channel.Send 阻塞 / 失败 → Gateway 不重试，log warn |
 | 飞书 QPS 限流（单聊 5 QPS）| 内部 token bucket；超限排队 |
 | Channel.Incoming channel 满 | sendLoop 丢弃最早消息 + warn（已实现）|
-| 用户发图片 / 文件 | Channel adapter 下载到本地路径，blocks 包含 ContentImage/ContentFile；Channel.CreateReceipt 自己决定是否把路径写到 receipt 文本里 |
-| 用户撤回消息 | v0.1 忽略；v1.1 receipt 已 dispose，UI 已更新 |
+| 用户发图片 / 文件 | Channel adapter 下载到本地路径，blocks 包含 ContentImage/ContentFile；Channel.Send 第一个 OutboundMessage 时 cold-create receipt，把 attachment path 写到 receipt 文本里 |
+| 用户撤回消息 | v0.1 忽略；v1.3 receipt 状态保留在 Channel 内部，撤回不会触发额外清理 |
 | 飞书 appSecret 错误 | Start() 返回 error，nightme 启动失败 |
 | 飞书权限被回收 | WebSocket 收到权限错误事件 → Channel.Send 返回 error → 日志告警 |
-| CreateReceipt 失败 | Gateway 跳过 receipt 簿记，走 degraded send 路径（纯 Send(OutboundMessage)） |
-| UpdateReceipt 失败 | Channel 内部 log warn；Gateway 不重试（fire-and-ack）|
-| DisposeReceipt 失败 | Channel 内部 log warn；Gateway 已从 receipts map 删除条目 |
-| 用户在 receipt 已 Done 后再发同 userMsgID 的 receipt（如重发）| Gateway 视为新 receipt，不与旧 receipt 关联（userMsgID 应当唯一）|
-| Receipt handle race（两个 goroutine 同时 UpdateReceipt 同一 receipt）| Channel 内部负责 lock（Feishu MessageReceipt 有 mu）；Gateway 不持有锁 |
+| Channel.Send cold-start receipt 失败 | Channel 内部 log warn；下次 OutboundMessage 再试；永远不向上传播（Gateway 不持有 receipt） |
+| Channel.Send PATCH 失败（Feishu 429 / 230020）| Channel 内部 log warn；下次事件重试；最终一致性 |
+| 用户在 receipt 已 Done 后再发同 userMsgID 的消息（重发）| Channel 按新消息处理；旧 receipt 保留终态不动，新消息触发新 turn 的新 anchor |
+| Receipt handle race（两个 goroutine 同时 PATCH 同一 receipt）| Channel 内部负责 lock（Feishu MessageReceipt 有 mu）；Gateway 不持有锁 |
 
 ---
 
-## 7. Test plan
+## 7. Test plan (v1.3)
 
 ### 7.1 Unit
 
 **Channel interface**:
-- mock Channel 实现满足 interface（compile-time check）
-- `Receipt` 接口是空接口：测试用 `mockReceipt` struct 通过编译
+- mock Channel 实现满足 5-method interface（compile-time check via `var _ Channel = (*mock.Channel)(nil)`）
+- Feishu adapter `MessageReceipt` 内部状态机测试：`Append(EventText)` / `Append(EventDone)` 路径
+- Echo adapter: `Send` 写出预期的 log 行
 
-**Feishu receipt**:
-- `CreateReceipt` post receipt message + add reaction, returns handle
-- `UpdateReceipt(_, _, Executing)` deletes ⏳ reaction + adds 🔄 reaction
-- `UpdateReceipt(_, _, Done)` swaps to ✅; idempotent
-- `DisposeReceipt` deletes receipt message
-- 失败路径：reaction API 失败 → return error（不阻塞）
+**Feishu rolling-log**:
+- 第一个 `OutboundMessage{ReplyTo: userMsgID}` 触发 cold-start card 创建
+- 后续同 userMsgID 的事件 PATCH 同一张 card
+- `OutMessageState{StateDone}` 走 `AddReaction` 路径，不动 card body
+- 失败路径：cold-start 失败 → 下次 Send 重试；PATCH 失败 → log warn + 继续
 
-**Echo receipt**:
-- 三个调用都是 log 行
-- UpdateReceipt 顺序：`pending → executing → done` 三行 log
-- DisposeReceipt 后 receipt 不再被引用
+**Echo**:
+- 每个 `Send` 写出 log 行
+- 多次 `Send` 累加在 `recorded` slice
 
 ### 7.2 Integration
 
-- mock Channel → Gateway → fake Session: verify `CreateReceipt` 在 messageDispatcher 路径被调用，`UpdateReceipt(executing)` 在 dispatch 立即时被调用
-- mock Channel → Gateway → fake Session with Busy buffer: verify `UpdateReceipt(executing)` 在 `onFlush` 钩子被调用（**不**在 messageDispatcher 路径调用）
-- mock Channel → Gateway → fake Session with EventError: verify `UpdateReceipt(error)` + `DisposeReceipt` 在 EventCallback 中被调用
+- fake Channel + Gateway: 验证 `OutboundMessage.ReplyTo` 等于 `cs.currentTurnUserMsgID`
+- fake Channel + ChatSession: 发 2 条消息 → 第一个 turn 的 receipt 完成前第二条入队 → 第二个 turn anchor 到第二条
+- fake Channel + MessageState: 验证 `OutMessageState` 事件按预期顺序到达 (`StateReceived` → `StateForwarded` → `StateDone`)
 
 ### 7.3 E2E（M2+）
 
-- 飞书 DM 发消息 → receipt message 出现 + ⏳ reaction → CLI 处理中变 🔄 → 完成变 ✅ → receipt message 删除（或保留，看 UX 决策）
-- 飞书 DM 发多条消息（buffer busy 期间）→ 所有 receipt 保持 ⏳ 直到 flush → 一起变 🔄 → 一起变 ✅
-- `nightme run --channel=echo` → `[receipt <id>] state=pending/executing/done` log 行按顺序出现
+- 飞书 DM 发消息 → ⏳ reaction → 🔄 → 一张 card 持续 PATCH → ✅ reaction；card 最终内容包含全部 event 内容
+- 飞书 DM 连发 3 条（在 turn 进行中）→ ⏳ 3 次 reaction；只有最后一条得 ✅；3 条合并一个 turn，card 只一张
+- `nightme run --channel=echo` → 每条 event 一行 log，全部 ReplyTo=userMsgID
 
 ---
 
-## 8. Open questions
+## 8. Open questions (v1.3)
 
-- Receipt 完成后是否删除 receipt message 还是保留？v1.1 决策：**保留**（✅ emoji + 内容即终态），用户可滚动 DM 看历史；`DisposeReceipt` 只在 `nightme stop` / 异常退出路径清理。
-- 群聊多人 → 一个 userMsgID 对应一个 receipt，但 receipt message 是在群里发的；多人各自看到自己的 reaction。是否需要 per-user receipt？v1.1 决策：no，每个 user message 一个 receipt（sender 不区分）。
-- 飞书 reaction emoji 顺序（添加时间 vs 类别）：v1.1 切换（删旧加新）而非累积，UI 一致。
+- Receipt card 完成后是否保留还是删除？v1.3 决策：**保留**。Card body 是最终内容 + ✅ emoji 即终态，用户可滚动 DM 看历史。Channel 内部不主动删除。
+- 群聊多人 → 一个 userMsgID 对应一个 receipt，但 receipt card 在群里发；多人各自看到自己的 reaction。v1.3 与 v1.1 一致：每个 user message 一个 anchor，sender 不区分。
+- 飞书 reaction emoji 累积 vs 切换：v1.3 由 `MessageState` FSM 处理（append-only ⏳ → 🔄 → ✅），不再是 receipt FSM 切换。
 
 ---
 
@@ -371,5 +237,6 @@ If you see references to `SendMessage` / `SendLongMessage` in older docs, they r
 
 ## 10. Change log
 
-- **2026-08-02** — v1.1: add `CreateReceipt / UpdateReceipt / DisposeReceipt` + `ReceiptState` + `Receipt` opaque type. Channel becomes a pure renderer; receipt FSM state lives at Gateway. Doc rewritten to match.
+- **2026-08-03** — v1.3 (SPEC §0.1): remove `CreateReceipt / UpdateReceipt / DisposeReceipt` from Channel interface; remove `Receipt` / `ReceiptState` from `internal/receipt/receipt.go`. Receipt object is now entirely Channel-internal. Gateway stamps `OutboundMessage.ReplyTo = currentTurnUserMsgID`; Channel routes by userMsgID. Doc rewritten to reflect the 5-method interface and "abstract stays abstract, concrete stays concrete" principle.
+- **2026-08-02** — v1.1: add `CreateReceipt / UpdateReceipt / DisposeReceipt` + `ReceiptState` + `Receipt` opaque type. Channel becomes a pure renderer; receipt FSM state lives at Gateway. (Superseded by v1.3.)
 - **2026-07-31** — v0.1: original `SendMessage / SendLongMessage` interface. Replaced by `Send(OutboundMessage)` in v0.3 (kept for historical reference).

@@ -1,14 +1,13 @@
 # nightme — Technical Specification (SPEC)
 
-> **状态**：v1.2 **已锁定**（2026-08-02；架构重写自 v1.1 职责隔离；Q-A ✅ + Q-B ✅ + Q-Default ✅ 均已确认并落地）
+> **状态**：v1.3 SPEC **已落地 docs**（2026-08-03；代码改动 backlog §11）。v1.2 架构不变式全部保留，v1.3 是职责再切分——Gateway 端 Receipt FSM 移除，Channel 自治渲染
 > **作者**：🦞 虾哥（PM/Architect）
-> **日期**：2026-08-02
+> **日期**：2026-08-03（v1.3）；2026-08-02（v1.2）
 > **文档层级**：技术级（**不含实现细节 / 代码**）
 > **关联文档**：
 > - 产品定位 → [`PRD.md`](./PRD.md) v1.2
 > - 功能索引 → [`FEATURES.md`](./FEATURES.md)
 > - 每个 feature 的详细实现（含代码）→ [`feat/`](./feat/)
-> - 实施计划 → [`PLAN.md`](./PLAN.md)
 > - 职责隔离架构 v1.1 → [`feat/F-26-gateway-hub.md`](./feat/F-26-gateway-hub.md)
 
 ---
@@ -39,6 +38,37 @@ v1.2 在 v1.1 锁定的职责隔离架构上做**结构重组**——不变的�
 
 ---
 
+## 0.1 文档变更摘要（v1.2 → v1.3）
+
+v1.3 在 v1.2 架构上做**职责再切分**——核心变化是**删除 Gateway 端的 Receipt 抽象**，让"抽象归抽象、具体归具体"：
+
+1. **Receipt FSM 从 Gateway 端移除**
+   - Gateway 不再持有 `receipts[userMsgID]` map
+   - `Channel.CreateReceipt / UpdateReceipt / DisposeReceipt` 接口方法从 `Channel` 接口移除
+   - `internal/receipt/` 整个包删除(v1.2 仅保留 `MessageState` 一个 enum;v1.3 把它搬到 `internal/agent/` 因为所有 layer 都已依赖 agent)
+
+2. **outbound 路由改为 userMsgID-driven**
+   - EventHandler 在每个 `OutboundMessage` 上设 `out.ReplyTo = cs.currentTurnUserMsgID`
+   - Channel.Send 拿 `ReplyTo` 当路由 key，自行 material 化（receipt card / thread / DOM 节点）
+   - Gateway 只负责"把消息送到对的 Channel"，Channel 决定怎么渲染、怎么存、怎么 PATCH
+
+3. **`currentTurnUserMsgIDs []string` → `currentTurnUserMsgID string`**
+   - 一个 turn 一个锚点（single）
+   - buffered batch 时锚到这一批的最后一条 userMsgID
+   - 1 turn : 1 anchor, n events（无需 fanout 多 receipt）
+
+4. **MessageState 与 Receipt 真正解耦** — v1.2 末尾已加注释；v1.3 把 Receipt 整个删了，MessageState 真正独立运作，不再有"两个 owner 都说自己拥有 receipt"的歧义
+
+**不变式**：
+- **抽象归抽象**：Gateway = 路由器，不假设任何 Channel 渲染细节
+- **具体归具体**：Channel = 渲染器，自管 receipt 生命周期，自选存储形态
+- Channel 接口永远不暴露 receipt / receipt map / receipt FSM / 任何渲染状态
+- Gateway 对 Channel 内部状态一无所知，只通过 `OutboundMessage` 交流
+
+**为什么不叫 v2.0**：v1.2 的核心架构不变式（Binding FSM owner、ChatSession 三层状态、单消费者事件流、`agentSession.Events()` 单读者、InputBuffer FSM owner）**全部保留**。v1.3 是"职责再切分"的延续——把已经过度渗入 Gateway 的 Receipt 概念撤回 Channel 自治域。
+
+---
+
 ## 1. 架构总览
 
 nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以下**逻辑组件**组成：
@@ -46,10 +76,11 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Channel Adapter (Feishu / WhatsApp / Web UI / Echo ...)   │
-│   │  ↑ reply / 渲染 receipt state / Send(OutboundMessage)  │
+│   │  ↑ 自管 receipt card / thread / DOM 节点              │
+│   │  ↑ Send(OutboundMessage) → 拿 ReplyTo=userMsgID 路由  │
 │   │  user text / file / voice                               │
 └────────────────┬────────────────────────────────────────────┘
-                 │  InboundMessage / OutboundMessage / Receipt API
+                 │  InboundMessage / OutboundMessage（带 ReplyTo）
                  ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  nightme (single binary on user's laptop)                   │
@@ -57,14 +88,14 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 │  ┌─────────────────────────────────────────────────────┐    │
 │  │  Gateway  ← 中枢 orchestrator                       │    │
 │  │  • chat_id ↔ ChatSession 绑定 (Binding FSM)         │    │
-│  │  • userMsgID ↔ receipt 簿记 (Receipt FSM)            │    │
+│  │  • outbound 路由 (stamp ReplyTo=userMsgID 送到 Channel)│    │
 │  │  • slash command 路由 (/cwd /use /kill /help /agents)│    │
 │  │  • ChatSession 生命周期管理 (Create / Restore)       │    │
 │  │  • Channel ↔ ChatSession ↔ AgentSession 跨层调度     │    │
 │  └──────────┬────────────────────────┬─────────────────┘    │
 │             │                        │                       │
-│   spawn /   │                        │  attachment /         │
-│   reuse /   │                        │  receipt handle       │
+│   spawn /   │                        │                       │
+│   reuse /   │                        │                       │
 │   kill      │                        │                       │
 │             ▼                        ▼                       │
 │  ┌─────────────────────┐  ┌─────────────────────┐           │
@@ -75,8 +106,8 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 │  │  primaryAgent       │  │  (claude, /B) 进程   │           │
 │  │  InputBuffer FSM    │  │  (codex,  /B) 进程   │           │
 │  │  (idle ↔ busy)      │  │                      │           │
-│  │  Receipt FSM        │  │  1:1 with (agent,cwd)│           │
-│  │  (per userMsgID)    │  │  immutable 标识       │           │
+│  │  currentTurnUserMsgID│ │  1:1 with (agent,cwd)│           │
+│  │  (单数, 跟踪变量)   │  │  immutable 标识       │           │
 │  └─────────────────────┘  └─────────────────────┘           │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
@@ -86,45 +117,51 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 
 | 组件 | 职责 | 它**不知道** |
 |------|------|------------|
-| **Channel Adapter** | IM 协议编解码；`Send(OutboundMessage)` 渲染；**渲染** receipt state（pending/executing/done/error）的 UI 表现 | ChatSession、AgentSession、workspace、agent、binding、receipt state 机 |
-| **Gateway** | 中枢 orchestrator：slash command 路由、binding 表（chat_id ↔ ChatSession）、receipt 簿记（userMsgID ↔ Receipt + state）、ChatSession 生命周期、Channel↔ChatSession↔AgentSession 跨层调度 | IM 协议细节、agent 内部协议、PTY/ACP 细节 |
-| **ChatSession** | per chat 的会话上下文（持久化）：activeCwd / activeAgent / primaryAgent / InputBuffer FSM / Receipt FSM（数据）/ AgentSession 池索引 | chat_id 之外没有"自己是谁"；Channel 协议细节；agent 内部协议 |
-| **AgentSession** | CLI 进程句柄；`(agent, cwd)` 1:1 唯一标识（immutable）；events() chan；sendText/sendBlocks；close | chat_id、ChatSession、binding、receipt、slash command |
-| **Bridge** | nightme 与底层 AI Coding CLI 之间的通信抽象；`AgentSession` 接口（Events / SendText / SendBlocks / SendPermission / Close）；四种模式（ACP / SDK / PTY / JSON-IO） | chat、binding、receipt、ChatSession |
+| **Channel Adapter** | IM 协议编解码；`Send(OutboundMessage)` 渲染；**自管** receipt card / thread / DOM 节点的完整生命周期（含 cold-create / PATCH / 终态） | ChatSession、AgentSession、workspace、agent、binding、任何渲染状态 |
+| **Gateway** | 中枢 orchestrator：slash command 路由、binding 表（chat_id ↔ ChatSession）、ChatSession 生命周期、Channel↔ChatSession↔AgentSession 跨层调度、outbound 路由（stamp `ReplyTo=userMsgID` 送到对应 Channel） | IM 协议细节、agent 内部协议、PTY/ACP 细节、Channel 内部渲染状态 |
+| **ChatSession** | per chat 的会话上下文（持久化）：activeCwd / activeAgent / primaryAgent / InputBuffer FSM / `currentTurnUserMsgID` 跟踪 / AgentSession 池索引 | chat_id 之外没有"自己是谁"；Channel 协议细节；agent 内部协议；receipt 渲染 |
+| **AgentSession** | CLI 进程句柄；`(agent, cwd)` 1:1 唯一标识（immutable）；events() chan；sendText/sendBlocks；close | chat_id、ChatSession、binding、Channel、slash command |
+| **Bridge** | nightme 与底层 AI Coding CLI 之间的通信抽象；`AgentSession` 接口（Events / SendText / SendBlocks / SendPermission / Close）；四种模式（ACP / SDK / PTY / JSON-IO） | chat、binding、ChatSession、Channel |
 | **Process Registry** | JSON 持久化层。两类 entry：`ChatSessionEntry`（chat_id ↔ ChatSession 绑定 + activeCwd/activeAgent/primaryAgent + AgentSession 索引）+ `AgentSessionEntry`（agent + cwd + pid + status）| 运行时语义；只持久化 |
 
 ### 1.2 三状态机，三个 owner（v1.2）
 
-v1.2 核心架构不变式——任何状态机都**只有一个** owner，跨层状态机之间**没有循环依赖**：
+v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨层状态机之间**没有循环依赖**：
 
 | 状态机 | Owner | 状态空间 | 持久？ |
 |--------|-------|----------|--------|
 | **Binding FSM**（chat ↔ ChatSession）| Gateway | 1:1 绑定，永不删 | 是（ChatSessionEntry）|
-| **Receipt FSM**（per userMsg）| Gateway | `pending → executing → done/error` | 否（重启丢）|
 | **InputBuffer FSM**（per ChatSession）| ChatSession | `idle ↔ busy` | 否（重启丢）|
 | **MessageState FSM**（per userMsg）| ChatSession | `received → forwarded → done / error` | 否（重启丢）|
 | **AgentSession.Status**（per AgentSession）| AgentSession | `running → detached / exited` | 是（AgentSessionEntry）|
 | **ChatSession.ActiveAgentSession**（per ChatSession）| ChatSession | 引用 pool 中的某个 AgentSession | 引用在 ChatSessionEntry |
 
-**三个核心 FSM 的耦合点**（全部经过 Gateway）：
-- **Inbound 流**：Channel → Gateway.pumpInbound → dispatchLoop → DispatchInbound (inboundDispatcher) → 命中 `/cwd` `/use` `/kill` 走 slashCommandDispatcher → 走 ChatSession；未命中走 messageDispatcher → `ch.CreateReceipt` + `chatSession.QueueUserMessage` + `chatSession.LookupActiveAgentSession` + `agentSession.SendBlocks` + `ch.UpdateReceipt(executing)`
-- **Outbound 流**：`agentSession.Events()` → session 的 readPump（**单消费者**） → ChatSession.EventCallback → Gateway.translateAndSend → Channel.Send → 渲染
+**非 FSM 跟踪变量（v1.3 新增）**：
+
+| 变量 | Owner | 语义 |
+|------|-------|------|
+| **`currentTurnUserMsgID`**（per ChatSession）| ChatSession | 当前 turn 的单一 userMsgID 锚点。buffered batch 时锚到最后一条。所有 outbound event 的 `OutboundMessage.ReplyTo` = currentTurnUserMsgID |
+
+**核心 FSM / 跟踪变量的耦合点**（全部经过 Gateway）：
+- **Inbound 流**：Channel → Gateway.pumpInbound → dispatchLoop → DispatchInbound (inboundDispatcher) → 命中 `/cwd` `/use` `/kill` 走 slashCommandDispatcher → 走 ChatSession；未命中走 messageDispatcher → `cs.emitMessageState(Received)` + `chatSession.QueueUserMessage` + `chatSession.LookupActiveAgentSession`（lazy spawn）+ `agentSession.SendBlocks` + `cs.emitMessageState(Forwarded)`
+- **Outbound 流**：`agentSession.Events()` → session 的 readPump（**单消费者**） → ChatSession.EventCallback → 设 `out.ReplyTo = cs.currentTurnUserMsgID` → `channel.Send` → Channel 内部按 ReplyTo 路由到对应 receipt（card / thread / DOM 节点） → PATCH
 - **切 AgentSession**：`/use` 触发 → ChatSession.LookupActiveAgentSession 重新解析 → 切换 ChatSession.EventCallback 目标 → 老 AgentSession 的事件不再消费
 
-### 1.3 不变式（v1.2 强制）
+### 1.3 不变式（v1.3 强制）
 
 - **`ChatSession` 不 import `channel/feishu`**（事实上根本不 import `channel/` 包）
 - **`AgentSession` 不 import `channel/` 也不 import `ChatSession`**（纯进程句柄）
 - **Gateway 不 import `channel/feishu`**（只 import `channel.Channel` interface）
 - **`ChatSession` 不知道 Channel**（只持有 Gateway 注入的 callback）
 - **`AgentSession` 知道自己的 `(agent, cwd)` immutable 标识**
-- **Channel 接口不暴露 ChatSession、AgentSession、binding、receipt map**——只暴露 `Receipt` opaque 类型 + `ReceiptState` enum
+- **Channel 接口不暴露 ChatSession、AgentSession、binding、任何 receipt 概念**——Channel 自管渲染状态（receipt card / thread / DOM 节点），Gateway 一概不知。`Channel` interface 5 个方法：`Name / Start / Stop / Incoming / Send`
 - **`agentSession.Events()` chan 的唯一消费者是 session 自己的 readPump**；ChatSession 通过 `ChatSession.EventCallback` 接收事件，**不直接读 chan**（沿用 v1.1 修复）
 - **ChatSession 内 `(agent, cwd)` 唯一索引**（不是全局唯一；不同 ChatSession 可有独立 `(claude, /path/A)` AgentSession）
 - **`/use` 不重启进程**：永远复用 pool 中的现有 AgentSession，找不到才 spawn 新进程
 - **`/cwd` 不重启任何 AgentSession**：永远只改 activeCwd，老 AgentSession 保留在 pool
-- **Receipt FSM 跨 `/use` / `/cwd` 不变**：receipt 按 userMsgID 索引，与 active AgentSession 死活解耦
-- **MessageState 与 Receipt 解耦**（v1.3 新增）：两者都按 userMsgID 索引，但语义、Owner、触发点完全独立。MessageState 由 ChatSession lifecycle 触发，Receipt FSM 由 Gateway 主动创建；一个失败不影响另一个
+- **`currentTurnUserMsgID` 单数**：一个 turn 一个 userMsgID 锚点；buffered batch 时锚到最后一条；outbound event 的 `ReplyTo` 必等于此
+- **抽象归抽象 / 具体归具体**：Gateway = 路由器（不假设任何 Channel 渲染细节）；Channel = 渲染器（自管 receipt 生命周期，自选存储形态：per-chat map / per-thread map / DOM 节点 / ...）
+- **outbound 路由唯一耦合点**：`EventHandler` 在每个 `OutboundMessage` 上设 `out.ReplyTo = cs.currentTurnUserMsgID`。Channel 据此 key 路由。Gateway 不需要知道 Channel 内部 receipt 怎么存
 
 ---
 
@@ -147,35 +184,38 @@ Gateway.dispatchLoop
      │   ├ 命中 (/cwd /use /kill /help /agents) → handler(msg)
      │   │   └ handler 走 gateway.bindings → chatSession.xxx → reply via channel.Send
      │   └ 未命中 / 普通文本 → messageDispatcher(ctx, msg)
-     └ slashCommandDispatcher 或 messageDispatcher 走 Receipt Lifecycle（见 §2.4）
+     └ slashCommandDispatcher 走 handler；messageDispatcher 走 ChatSession（详见 §2.2）
 
 messageDispatcher(ctx, msg)
   ├ gateway.bindings[msg.chat_id] 查 ChatSession
   │   ├ nil → channel.Send("no chat session, /cwd first")
   │   └ Status != Ready → channel.Send("not ready, /cwd + /use first")
-  ├ (0) cs.emitMessageState(msg.MessageID, StateReceived)   ← 新增（v1.3）：触发 MessageState(Received) 事件
-  ├ (a) receipt = ch.CreateReceipt(ctx, chat_id, msg.MessageID, msg.Blocks)
-  ├ (b) gateway.receipts[msg.MessageID] = {chatId, chatSessionId, receipt, state: Pending}
+  ├ (0) cs.emitMessageState(msg.MessageID, StateReceived)   ← F-31: 触发 MessageState(Received) 事件
+  ├ (a) chatSession.LookupActiveAgentSession() (lazy spawn on miss)
+  ├ (b) cs.emitMessageState(msg.MessageID, StateForwarded)   ← F-31: dispatch 成功后触发
   ├ (c) chatSession.QueueUserMessage(msg.Blocks, msg.MessageID)
   │       InputBuffer FSM:
   │         ├ Idle → 立即 SendBlocks(blocks) → return (dispatched=true)
+  │         │   └ onFlush 钩子（ChatSession.defaultFlushHookLocked）触发:
+  │         │       ├ cs.currentTurnUserMsgID = msg.MessageID(单数)
+  │         │       └ agentSession.SendBlocks(combined)
   │         └ Busy → 入队 → return (dispatched=false)
-  ├ (d) 如果 dispatched → ch.UpdateReceipt(receipt, Executing) → state: Executing
-  ├ (e) cs.emitMessageState(msg.MessageID, StateForwarded)   ← 新增（v1.3）：dispatch 成功后触发
   └ 如果 queued (Busy):
-        receipt 保持 Pending
-        chatSession.InputBuffer.onFlush 钩子（Gateway 注入）会在 EventDone 触发 flush 时:
+        cs.currentTurnUserMsgID 不变(仍是上一 turn 的值)
+        onFlush 钩子在 EventDone 触发 flush 时:
           ├ onFlush(blocks, userMsgIDs)
-          │   ├ 对每个 userMsgID → ch.UpdateReceipt(receipt, Executing) → state: Executing
+          │   ├ cs.currentTurnUserMsgID = userMsgIDs[len-1](最后一条)
           │   └ agentSession.SendBlocks(combined)
           └
 
-**v1.3 新增**：MessageState 事件由 ChatSession 在 lifecycle 各点 emit（步骤 0、e），由 Gateway 的 `OnMessageState` 回调翻译为 `OutboundMessage{Kind: OutMessageState}` 并通过 Channel.Send 转发。详见 §2.5。
+**v1.3 变化**：去掉 receipt lifecycle 步骤(Gateway 不再调 `ch.CreateReceipt / UpdateReceipt / DisposeReceipt`)。Channel 在收到第一个带 `ReplyTo=userMsgID` 的 OutboundMessage 时,自行决定 cold-create / 复用 receipt card / thread / DOM 节点。详见 §2.2。
+
+**MessageState 事件**由 ChatSession 在 lifecycle 各点 emit(步骤 0、b),由 Gateway 的 `OnMessageState` 回调翻译为 `OutboundMessage{Kind: OutMessageState}` 并通过 Channel.Send 转发。详见 §2.5。
 ```
 
 ### 2.2 CLI 输出 → 用户（Outbound）
 
-**核心语义：1 request : n response**。每个用户发起的对话都携带 `userMsgID`；Gateway 为每个 event 携带这个 userMsgID 转发到 Channel，Channel 据此决定把响应镇在哪个用户消息的 reply card 上。ReplyTo == "" 是仅有的"真正无镇"的 case（启动提示、内部日志），走 plain text。
+**核心语义：1 turn : 1 anchor, n events**。每个 agent turn 由 ChatSession 锚定到单一 `currentTurnUserMsgID`（buffered batch 时锚到最后一条 userMsgID）；EventHandler 在每个 OutboundMessage 上设 `out.ReplyTo = currentTurnUserMsgID`；Channel 据此路由到对应 receipt（card / thread / DOM 节点）。`ReplyTo == ""` 是仅有的"无锚" case（启动期 EventInit、系统日志、内部事件），Channel 走 plain text / 跳过。
 
 ```
 Claude Code 进程 (PTY child, cwd = chatSession.activeCwd)
@@ -189,36 +229,35 @@ agentSession.readPump (单消费者)
   ├ for ev := range as.Events()
   ├ ChatSession.EventCallback(s, ev)   ← ChatSession 在这里注册的回调（**不另起 pump**）
   ├ InputBuffer.SetState(Busy)
-  ├ EventDone/Error → SetState(Idle) + OnTurnEnded()
-  └ EventDone → onFlush 钩子（ChatSession 注入）→ 翻 queued receipt 到 Executing
+  ├ EventDone/Error → SetState(Idle) + OnTurnEnded() + 翻 queued 消息出去
+  └ EventDone/Error → cs.emitMessageStateForCurrentTurn(StateDone|StateError)
   ↓
 ChatSession.onAgentEvent(s, ev)        // EventCallback 驱动
   ├ InputBuffer.SetState(Busy)
-  ├ Gateway.translateAndSend(chatId, ev)  ← 把 AgentEvent 转 OutboundMessage + 扇出到 receipts
-  └ EventResult/Error → ChatSession.notifyResult(userMsgID) → 翻 receipt 到 Done/Error
+  ├ out, send := gateway.Translate(chatID, ev)
+  ├ out.ReplyTo = cs.currentTurnUserMsgID    ← **关键耦合点**（唯一关联信息）
+  └ if send: channel.Send(ctx, out)
   ↓
-Gateway.translateAndSend(chatId, ev)
-  ├ Translate(chat_id, ev) → OutboundMessage（抽象 wire format，ReplyTo 未填）
-  ├ enrichOutboundMeta(out, s)          // 注入 OutInit.Meta 的 agent_name / workspace / provider
-  ├ receiptsForChatSession(chatId) → [userMsgID1, userMsgID2, ...]
-  ├ if len(targets) > 0:
-  │   for _, umid := range targets:
-  │     out.ReplyTo = umid
-  │     channel.Send(ctx, out)
-  ├ else (孤儿事件):
-  │   out.ReplyTo = ""
-  │   channel.Send(ctx, out)
-  └ EventResult → gateway.receipts 反查 userMsgID
-      ├ 找到 rcpt → ch.UpdateReceipt(Done|Error) + ch.DisposeReceipt
-      └ 找不到 → 不处理
+channel.Send(ctx, OutboundMessage)
+  ├ 看 msg.ReplyTo（userMsgID）
+  ├ 内部按 userMsgID 查自己的 receipt:
+  │   ├ 命中 → PATCH / 更新（receipt card 追加内容、thread 发新回复、DOM 节点 in-place 编辑）
+  │   └ miss → cold-create 一个新 receipt（userMsgID 作为 key），然后追加
+  ├ (OutMessageState case) → AddReaction on Meta["message_id"] → 用户消息挂 ⏳/🔄/✅/❌
+  └ (OutCard case) → 发交互卡片（permission prompt 等）
 ```
 
-**关键变更（v1.2）**：`ChatSession.EventCallback` 是当前 **active AgentSession** 的唯一消费者。当 `/use` 切换 active 时，ChatSession 重新注册 callback 到新的 AgentSession，老 AgentSession 的 `Events()` 不再被消费（但进程可继续跑、产出事件被丢弃——符合 PRD §4.3 的"过时的不管"语义）。
+**关键不变量（v1.3）**：
+- `ChatSession.EventCallback` 是当前 **active AgentSession** 的唯一消费者。当 `/use` 切换 active 时，ChatSession 重新注册 callback 到新的 AgentSession，老 AgentSession 的 `Events()` 不再被消费（但进程可继续跑、产出事件被丢弃——符合 PRD §4.3 的"过时的不管"语义）
+- Gateway **永不** 持有 receipt / receipt map / receipt FSM——Channel 自治
+- `out.ReplyTo = cs.currentTurnUserMsgID` 是 Gateway → Channel 的**唯一关联信息**——Channel 拿这个 key 路由，内部的存储形态（map / DOM / thread）自己选
 
-**1 request : n response 扇出示例**（buffered batch：3 条用户消息被 flush 为 1 个 agent turn）：
-- ChatSession 绑定 receipts: [userMsgID_a, userMsgID_b, userMsgID_c]
-- agent emit 一个 EventText → Translate 出 1 个 OutboundMessage → 扇出 3 个 OutboundMessage（各带不同 ReplyTo）
-- Channel 为每个 userMsgID 路由到对应的 receipt；3 张 reply card 同时 in-place edit
+**1 turn : 1 anchor 示例**（buffered batch：3 条用户消息被 flush 为 1 个 agent turn）：
+- ChatSession 的 InputBuffer 攒着 [userMsgID_a, userMsgID_b, userMsgID_c]
+- 上一 turn 的 EventDone 触发 onFlush → `cs.currentTurnUserMsgID = msg_c`（最后一条）
+- agent 看到 stdin 是 3 条合并输入，产出 N 个 event
+- 每个 event 都 PATCH msg_c 对应的那张 receipt card（F-25 rolling-log）
+- msg_a / msg_b 自身的 MessageState(Done) 仍然触发（走 §2.5 的 MessageState 路径）
 
 ### 2.3 用户用 slash command 管理 ChatSession
 
@@ -275,34 +314,31 @@ handler.kill(ctx, msg, args)
 
 **关键变化（v1.2）**：`/kill` = "清空 ChatSession 的所有 AgentSession 上下文，重启新的"。下次消息触发 spawn 新 AgentSession。
 
-### 2.4 Receipt 生命周期（v1.2）
+### 2.4 Receipt 渲染（Channel 自治，v1.3）
 
-**关键设计**：receipt 按 `userMsgID` 索引（**不是** chatID 也不是 AgentSession）。多 receipt/chat 可共存（buffered batch 场景），每个 receipt 镇定到自己的用户消息。
+> **v1.3 起本章不再包含 Gateway 端 FSM 描述**——Receipt FSM 从 Gateway 移除后，receipt 的生命周期完全由 Channel 自治。Gateway 不知道 Receipt 是什么、有几个、存哪里。
 
-**与 v1.1 的关键差异**：
-- Receipt FSM 不再与"AgentSession 死活"绑定
-- `/use` / `/cwd` 切换不改变 receipt 状态机（继续 pending → executing → done）
-- 老 AgentSession 死掉时其 in-flight receipt 仍按 FSM 推进（实际无新事件推进，自然衰减到 done 或永久卡住——前者正常后者需要 cleanup）
+**Channel 自治范围内的渲染行为**（仅作协议描述，**不是 Gateway 责任**）：
 
-```
-   ch.CreateReceipt(chat_id, user_msg_id, blocks)         [Gateway 调 channel]
-        ↓
-   Pending (⏳)  ─── ch.UpdateReceipt(Executing) ────►  Executing (🔄)
-       │                  ▲                              │
-       │ queued           │ immediate                    │ gateway.receipts 反查
-       │ (Buffer Busy)    │ (Buffer Idle)                │ userMsgID on EventResult
-       │                  │                              │
-       │           onFlush 钩子触发 ─────────────────────┤
-       │           (ChatSession.InputBuffer.Busy → Idle) │
-       │                                                ▼
-       └─→ ch.DisposeReceipt (cancel path / err)       ch.UpdateReceipt(Done|Error)
-                                                            ↓
-                                                       Done (✅) / Error (❌)
-                                                            ↓
-                                                       ch.DisposeReceipt(rcpt)
-                                                            ↓
-                                                       delete(receipts, userMsgID)
-```
+- 每个 Channel 在收到第一个 `OutboundMessage{ReplyTo: userMsgID}` 时，自行决定如何"开张"：
+  - **Feishu**：cold-create 一张 interactive card 作为 userMsg 的 reply；记下 cardMsgID 供后续 PATCH
+  - **Slack**：在 userMsg 关联的 thread 下发第一条回复
+  - **Web**：在 chat DOM 中插入一个 receipt block，带 `data-user-msg-id` 标记
+
+- 每个 Channel 在收到后续 `OutboundMessage{ReplyTo: userMsgID}` 时，按自己定义的渲染规则 PATCH 对应 receipt：
+  - Feishu：`UpdateMessage(cardMsgID, body)` in-place 编辑 card
+  - Slack：thread 内发新回复 / 编辑已有回复
+  - Web：更新 DOM block 的内容
+
+- 每个 Channel 在收到 `OutMessageState` 时，按状态映射 emoji：
+  - StateReceived/Forwarded/Done/Error → ⏳ / 🔄 / ✅ / ❌
+
+**Gateway 视角**：
+- Gateway 只发 `OutboundMessage{ReplyTo: userMsgID, Kind: OutText|ToolStart|...}`
+- Gateway **不知道** Channel 内部有没有 receipt、存了多少、是否要清理
+- Channel 内部状态（Feishu 的 entries / tokens / agentName / state / ...）完全 Channel 私有
+
+**实现细节**：见 [`feat/F-25-rolling-log.md`](./feat/F-25-rolling-log.md)（v1.3 重命名为"rolling-log"，强调是 Channel 实现细节）。原 F-26 gateway-hub §6 中描述的 Gateway 端 Receipt FSM 代码路径全部删除。
 
 ---
 
@@ -376,15 +412,6 @@ OutboundMessage{
 | `ChatSession.runReadPump` 收到 `EventError` | `StateError` | agent 出错 |
 
 **Scope 强约束**：MessageState **只对普通用户消息触发**。Slash command（`/cwd` `/use` `/kill` 等）不产生 MessageState —— 控制平面有 `OutCommandReply` 作为反馈。
-
-#### 2.5.5 与 Receipt 的关系
-
-| 概念 | 跟踪什么 | Owner |
-|---|---|---|
-| **MessageState** | 消息在系统里的处理进度 | ChatSession |
-| **Receipt** | agent 响应的渲染载体（FSM） | Gateway |
-
-两者**完全独立**：都按 `userMsgID` 索引，但语义、Owner、触发点都不同。MessageState 不是 Receipt 的渲染轨道；Receipt 是否实现不影响 MessageState 工作。
 
 详见 [`feat/F-31-message-state.md`](./feat/F-31-message-state.md)。
 
@@ -619,7 +646,15 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 剩余（backlog）：
 - ⏭ 真实 E2E 飞书 DM round-trip test
 - ⏭ 删除 `internal/session/` v1.1 MemoryManager（仍被 `internal/gateway/cmd/handlers.go` BindingEntry shim 使用）
-- ⏭ 重新实现 v1.x 的 rolling-log receipt card UX（v1.2 目前发 plain `OutText`）
+- ⏭ **v1.3 SPEC 落地代码改动**：
+  - ✅ done: `internal/receipt/` 包删除;`MessageState` 移到 `internal/agent/`
+  - `internal/channel/channel.go` 删 `CreateReceipt / UpdateReceipt / DisposeReceipt` 三个方法
+  - `internal/gateway/gateway.go` 删 `receipts` map + `CreateReceipt / UpdateReceipt / DisposeReceipt` 方法 + 死代码 `translateAndSend` / `receiptsForSession`
+  - `internal/channel/feishu/adapter.go` `Send` 路由改 userMsgID-driven（`msg.ReplyTo` 查 `receiptsByUserMsgID`，miss 时 cold-create）
+  - `internal/chatsession/chatsession.go` `currentTurnUserMsgIDs []string` → `currentTurnUserMsgID string`
+  - `internal/chatsession/readpump.go` `emitMessageStateForCurrentTurn` 改用单一 ID
+  - `cmd/nightme/run.go` `newEventHandler` 设 `out.ReplyTo = cs.currentTurnUserMsgID`
+- ✅ done in v1.3: docs/feat/F-25-rolling-log.md renamed from F-25-input-buffer.md; F-26-gateway-hub.md + F-08-channel-abstraction.md + F-31-message-state.md + docs/channel/feishu.md updated with v1.3 annotations
 
 ---
 

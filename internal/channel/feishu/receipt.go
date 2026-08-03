@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/channel"
 )
 
 // receiptBot is the minimal Feishu surface the receipt depends
@@ -191,6 +190,11 @@ type MessageReceipt struct {
 	// (e.g. to a thread reply), replyMsgID's meaning changes too;
 	// cardMsgID stays anchored to "the card we PATCH".
 	cardMsgID string
+
+	// Feishu limits message updates to roughly five per second.
+	// Skip duplicate bodies and pace real PATCH requests.
+	lastBody      string
+	lastBodyPatch time.Time
 
 	// --- v1.1 foot-note metadata ---
 	//
@@ -796,7 +800,26 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 		}
 		r.cardMsgID = msgID
 		r.replyMsgID = msgID // keep alias in sync
+		r.lastBody = body
+		r.lastBodyPatch = time.Now()
 		return nil
+	}
+
+	// Skip PATCHes when the body is identical to the previous render
+	// (common when rapid events don't actually change the card) and
+	// pace the real PATCHes below Feishu's message-update rate limit.
+	if body == r.lastBody {
+		return nil
+	}
+	const minPatchInterval = 300 * time.Millisecond
+	if wait := minPatchInterval - time.Since(r.lastBodyPatch); wait > 0 {
+		t := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return ctx.Err()
+		case <-t.C:
+		}
 	}
 
 	// Subsequent: PATCH the existing card in place. The whole
@@ -807,6 +830,8 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 			"entries", len(r.entries))
 		return fmt.Errorf("feishu receipt: patch card: %w", patchErr)
 	}
+	r.lastBody = body
+	r.lastBodyPatch = time.Now()
 	return nil
 }
 
@@ -817,124 +842,3 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 
 // --- v1.1 unified state machine ---
 //
-// applyState and dispose are the v1.1 receipt lifecycle entry
-// points used by Adapter.UpdateReceipt / Adapter.DisposeReceipt.
-// Gateway is the only caller; receipts flow as opaque
-// channel.Receipt handles.
-
-// applyState transitions the receipt to the cross-channel state
-// `target`. Idempotent for the same target. Translates the
-// cross-channel ReceiptState enum into the legacy internal
-// ReceiptState + append-only reaction action.
-//
-// For Pending / Executing / Done the rendered behavior matches
-// the legacy SetExecuting / SetCompleted / SetCompleted-equivalent
-// paths. For Error (new in v1.1) we flip to StateError and append
-// the reaction emoji; no further event updates are accepted.
-func (r *MessageReceipt) applyState(ctx context.Context, target channel.ReceiptState) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	var targetInternal ReceiptState
-	switch target {
-	case channel.ReceiptPending:
-		targetInternal = StateWaiting
-	case channel.ReceiptExecuting:
-		targetInternal = StateExecuting
-		// Bookkeeping mirrors SetExecuting so the ⌚ timestamp in
-		// any subsequent header render is populated.
-		if r.state == StateWaiting {
-			r.forwardedAt = time.Now()
-			r.eventCount = 1
-			r.lastEventAt = r.forwardedAt
-		}
-	case channel.ReceiptDone:
-		targetInternal = StateCompleted
-		if r.state != StateCompleted {
-			r.completedAt = time.Now()
-		}
-	case channel.ReceiptError:
-		targetInternal = StateError
-		if r.state != StateCompleted && r.state != StateError {
-			r.completedAt = time.Now()
-		}
-	default:
-		return fmt.Errorf("feishu receipt: unknown ReceiptState %d", target)
-	}
-
-	// Idempotent: already in this state, no work.
-	if r.state == targetInternal {
-		return nil
-	}
-
-	// StateError is terminal — once entered, ignore further
-	// transitions to non-Done states (Done is allowed after Error
-	// for partial recovery; ignore everything else).
-	r.state = targetInternal
-
-	// v1.3 (F-31): reaction append removed — handled by
-	// MessageState FSM via Adapter.Send dispatcher.
-
-	r.logger.Debug("feishu receipt: state transition",
-		"from", "?", "to", targetInternal, "user_msg_id", r.userMsgID)
-	return nil
-}
-
-// dispose marks the receipt as closed and PATCHes the card with
-// a "closed" footer so users see a clear visual signal that the
-// session is ended. Idempotent. Lifecycle reactions are left in
-// place as the append-only history trail. Called by
-// Adapter.DisposeReceipt after the final state transition.
-//
-// History: the v0.3 dispose called r.bot.UpdateMessage(ctx,
-// replyMsgID, "") to clear the legacy text-mode reply. That
-// pathway is broken in v1.1: the receipt is now an interactive
-// card, and Feishu's Update (PUT) endpoint rejects card bodies
-// with code 230054 ("operation not supported" — see
-// https://open.feishu.cn/document/server-docs/im-v1/message/reply).
-// The v1.1 dispose uses PatchMessage (which supports cards) and
-// stamps a "closed" foot line so the surface ends in a
-// user-visible terminal state. The whole call is best-effort;
-// PatchMessage failure is logged at debug so a slow 5-QPS
-// burst can't kill the closeout.
-func (r *MessageReceipt) dispose(ctx context.Context) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.cardMsgID == "" {
-		// No card surface to close — nothing to do. The
-		// legacy UpdateMessage call previously targeted
-		// r.replyMsgID, but the replyMsgID path only
-		// existed for text-mode receipts; new receipts
-		// always go through cardMsgID.
-		return nil
-	}
-	// Stamp a "closed" foot line on top of the existing
-	// footer. We do this by patching with the same body
-	// the live card already shows (so the visual is
-	// unchanged) but with a transient closing marker
-	// prepended — actually, simpler: just re-render the
-	// card with the current state. buildReceiptCard picks
-	// up StateError vs StateCompleted automatically.
-	// Force the state to "closed" by re-rendering — this
-	// is a no-op visual change (the card already shows the
-	// final state) but it ensures the last-render is the
-	// "dispose" render.
-	body, err := buildReceiptCard(r)
-	if err != nil {
-		r.logger.Debug("feishu receipt: dispose build card failed",
-			"err", err, "card_msg_id", r.cardMsgID)
-		return nil
-	}
-	if err := r.bot.PatchMessage(ctx, r.cardMsgID, body); err != nil {
-		// PATCH is best-effort: a 230054 here would mean
-		// the message is no longer patchable (deleted,
-		// >14 days old, or rate-limited). Either way the
-		// user's chat history still shows the last
-		// successful render; we don't need to fail the
-		// closeout.
-		r.logger.Debug("feishu receipt: dispose patch failed",
-			"err", err, "card_msg_id", r.cardMsgID)
-	}
-	return nil
-}

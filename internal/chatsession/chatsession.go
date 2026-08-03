@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/receipt"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -89,19 +88,27 @@ type ChatSession struct {
 
 	// onMessageState is the runtime-installed callback fired when
 	// this ChatSession's message lifecycle advances (F-31). Set
-	// once at startup. Reads from currentTurnUserMsgIDs (mutated
-	// by FlushHook) so EventDone/Error can fan out to all user
-	// messages in the just-completed turn.
+	// once at startup. Reads from currentTurnUserMsgID (mutated
+	// by FlushHook) so EventDone/Error can emit the terminal
+	// MessageState for the anchor user message.
 	//
 	// nil = no observer; emitMessageState becomes a no-op.
-	onMessageState func(chatID, userMsgID string, state receipt.MessageState)
+	onMessageState func(chatID, userMsgID string, state agent.MessageState)
 
-	// currentTurnUserMsgIDs tracks the user messages currently
-	// being processed by the active AgentSession. Updated by
+	// currentTurnUserMsgID is the single anchor for the in-flight
+	// (or just-completed) agent turn. Updated by
 	// defaultFlushHookLocked when InputBuffer flushes; consumed
-	// by runReadPump on EventDone/Error to emit MessageState
-	// events for each. Empty when no turn is in flight.
-	currentTurnUserMsgIDs []string
+	// by the outbound EventHandler to stamp
+	// OutboundMessage.ReplyTo, and by runReadPump on
+	// EventDone/Error to emit MessageState(Done/Error) for
+	// the anchor user message. Empty when no turn is in flight.
+	//
+	// v1.3 (SPEC §0.1): single userMsgID per turn (was a slice
+	// in v1.2/F-31). Buffered batch flushes anchor to the LAST
+	// userMsgID in the batch (one card / thread / DOM node per
+	// turn; the other user messages in the batch still receive
+	// their own MessageState fan-out per design choice).
+	currentTurnUserMsgID string
 
 	// exitObserver is the runtime-installed callback fired when
 	// an active AgentSession's process exits. nil = no observer.
@@ -197,6 +204,12 @@ func (cs *ChatSession) SetActiveAgent(agent string) error {
 	}
 	cs.mu.Lock()
 	cs.activeAgent = agent
+	// /use switches the AgentSession; the previous turn's anchor
+	// must NOT survive or the new AS's events would be stamped
+	// with the OLD userMsgID (channel routes them to the old
+	// receipt card). Clear under the same lock as activeAgent
+	// write so the two are atomic relative to readPump reads.
+	cs.currentTurnUserMsgID = ""
 	cs.lastInteractionAt = time.Now()
 	cs.mu.Unlock()
 	cs.persistChatEntry()
@@ -275,16 +288,41 @@ func (cs *ChatSession) ensureBuffer() *InputBuffer {
 // forwards user blocks to the current active AgentSession. Caller
 // must hold cs.mu (Lock).
 //
-// v1.3 (F-31): also captures userMsgIDs into currentTurnUserMsgIDs
-// so runReadPump can emit MessageState(Done/Error) for each message
-// when the AgentSession finishes the turn. Without this capture
-// there would be no way to correlate terminal AgentEvents back to
-// the specific user messages that triggered the turn (especially
-// in buffered-batch case where N userMsgIDs share one agent turn).
+// v1.3 (SPEC §2.2): captures the LAST userMsgID into
+// currentTurnUserMsgID — the single anchor for the entire turn.
+// All outbound events from this turn carry ReplyTo=anchor; Channel
+// PATCHes the same receipt card / thread / DOM node. Earlier
+// userMsgIDs in the buffered batch are still tracked separately
+// for MessageState fan-out (see emitMessageStateForCurrentTurn —
+// that one still iterates the full batch for honest per-message
+// progress feedback).
 func (cs *ChatSession) defaultFlushHookLocked() FlushHook {
 	return func(combined []agent.ContentBlock, userMsgIDs []string) error {
-		cs.currentTurnUserMsgIDs = append([]string(nil), userMsgIDs...)
+		// Anchor = last userMsgID in the batch. A 1-message
+		// turn anchors to itself; a buffered batch anchors to
+		// the most recent user message (matches ChatGPT-style
+		// "submit all → reply on last" UX).
+		//
+		// IMPORTANT: the closure body runs WITHOUT cs.mu held
+		// (InputBuffer.OnTurnEnded releases its b.mu before
+		// invoking the hook). We must acquire cs.mu here to
+		// synchronize with the read side in runReadPump. Writing
+		// without the lock is a data race; the race detector
+		// catches it under buffered-batch + concurrent event
+		// drain.
+		if n := len(userMsgIDs); n > 0 {
+			cs.mu.Lock()
+			cs.currentTurnUserMsgID = userMsgIDs[n-1]
+			as := cs.activeAS
+			cs.mu.Unlock()
+			if as == nil || as.Handle() == nil {
+				return ErrNotRunning
+			}
+			return as.SendBlocks(context.Background(), combined)
+		}
+		cs.mu.RLock()
 		as := cs.activeAS
+		cs.mu.RUnlock()
 		if as == nil || as.Handle() == nil {
 			return ErrNotRunning
 		}
@@ -383,7 +421,7 @@ func (cs *ChatSession) SetEventHandler(h EventHandler) {
 // Scope constraint: MessageState events are NOT produced for slash
 // commands (/cwd /use /kill etc.); those go through different
 // paths that don't reach QueueUserMessage. See F-31 §3.2.
-func (cs *ChatSession) SetMessageStateHandler(h func(chatID, userMsgID string, state receipt.MessageState)) {
+func (cs *ChatSession) SetMessageStateHandler(h func(chatID, userMsgID string, state agent.MessageState)) {
 	cs.mu.Lock()
 	cs.onMessageState = h
 	cs.mu.Unlock()
@@ -397,7 +435,7 @@ func (cs *ChatSession) SetMessageStateHandler(h func(chatID, userMsgID string, s
 //
 // Caller MUST NOT hold cs.mu (handler is invoked synchronously and
 // may call back into ChatSession methods).
-func (cs *ChatSession) EmitMessageState(userMsgID string, state receipt.MessageState) {
+func (cs *ChatSession) EmitMessageState(userMsgID string, state agent.MessageState) {
 	cs.mu.RLock()
 	h := cs.onMessageState
 	chatID := cs.ChatID
@@ -408,26 +446,33 @@ func (cs *ChatSession) EmitMessageState(userMsgID string, state receipt.MessageS
 	h(chatID, userMsgID, state)
 }
 
-// emitMessageStateForCurrentTurn fires onMessageState for every
-// userMsgID in currentTurnUserMsgIDs. Called from runReadPump on
-// terminal agent events (EventDone/Error) so all messages in the
-// just-completed turn receive their final state event.
+// emitMessageStateForCurrentTurn fires onMessageState for the
+// single currentTurnUserMsgID. Called from runReadPump on terminal
+// agent events (EventDone/Error) so the anchor user message
+// receives its final state event.
 //
-// Clears currentTurnUserMsgIDs after emission so a subsequent turn
-// (e.g. OnTurnEnded flushing queued messages) starts fresh.
-func (cs *ChatSession) emitMessageStateForCurrentTurn(state receipt.MessageState) {
+// v1.3 (SPEC §2.5): terminal MessageState fires for the anchor
+// only. Earlier userMsgIDs in a buffered batch keep their own
+// MessageState at StateForwarded until they themselves anchor a
+// future turn — a deliberate UX choice to keep the per-message
+// progress indicator honest. Channel rendering of forward-only
+// reactions (🔄 without ✅) is acceptable for buffered-batch
+// intermediate messages; if a fan-out is later preferred,
+// re-introduce the slice here.
+//
+// Clears currentTurnUserMsgID after emission so a subsequent
+// turn (e.g. OnTurnEnded flushing queued messages) starts fresh.
+func (cs *ChatSession) emitMessageStateForCurrentTurn(state agent.MessageState) {
 	cs.mu.Lock()
-	ids := cs.currentTurnUserMsgIDs
-	cs.currentTurnUserMsgIDs = nil
+	id := cs.currentTurnUserMsgID
+	cs.currentTurnUserMsgID = ""
 	h := cs.onMessageState
 	chatID := cs.ChatID
 	cs.mu.Unlock()
-	if h == nil || len(ids) == 0 {
+	if h == nil || id == "" {
 		return
 	}
-	for _, umid := range ids {
-		h(chatID, umid, state)
-	}
+	h(chatID, id, state)
 }
 
 // BufferClear discards queued messages without sending. Returns
@@ -564,6 +609,7 @@ func (cs *ChatSession) KillAll() error {
 	cs.mu.Lock()
 	cs.pool = make(map[agentCwdKey]*AgentSession)
 	cs.activeAS = nil
+	cs.currentTurnUserMsgID = ""
 	cs.mu.Unlock()
 
 	// commit 8c: discard queued user messages. They can't reach

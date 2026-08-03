@@ -17,11 +17,13 @@
 // and docs/feat/F-26-gateway-hub.md for the Stage-3
 // responsibility-isolation spec.
 //
-// v1.1 (commit 3 + 4): the Gateway owns the chat → session binding
-// table and the per-userMessage receipt FSM. Channel is the dumb
-// renderer that paints receipt state transitions; Session is the
-// pure-process factory; Gateway sits between them and drives the
-// lifecycle. See F-26 §2 for the full picture.
+// v1.3 (SPEC §0.1): the per-userMessage receipt FSM and all
+// associated bookkeeping have been removed from Gateway. The
+// receipt OBJECT is now entirely Channel-internal (each Channel
+// picks its own state shape and storage form). Gateway's outbound
+// flow simply stamps `OutboundMessage.ReplyTo = currentTurnUserMsgID`
+// and lets each Channel route by that userMsgID. See SPEC §2.2 /
+// §2.4 for the new shape.
 //
 // Imports: gateway imports session (v1.1). The session package
 // does NOT import gateway (verified), so this direction is cycle-
@@ -39,7 +41,6 @@ import (
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/receipt"
 )
 
 // Channel is the abstract surface the Gateway needs from any IM
@@ -49,17 +50,12 @@ import (
 // cannot import channel in turn. The mirror is kept in sync
 // manually (and the test suite enforces the implementation match).
 //
-// v1.1: extended with the receipt lifecycle methods. Gateway
-// drives the FSM; Channel renders the state transitions in its
-// native UI.
+// v1.3: only the 4 lifecycle/messaging methods. The receipt FSM
+// API has been removed — receipts are Channel-internal.
 type Channel interface {
 	Name() string
 	Incoming() <-chan InboundMessage
 	Send(ctx context.Context, msg OutboundMessage) error
-
-	CreateReceipt(ctx context.Context, chatID, userMsgID string, blocks []agent.ContentBlock) (receipt.Receipt, error)
-	UpdateReceipt(ctx context.Context, receipt receipt.Receipt, state receipt.ReceiptState) error
-	DisposeReceipt(ctx context.Context, receipt receipt.Receipt) error
 }
 
 // Command is one nightme-level slash command.
@@ -113,13 +109,15 @@ type SweepSessions func() []OutboundSource
 
 // Gateway is the public contract for the slash-command router.
 //
-// v1.1: the interface adds binding-table operations (Bind / Rebind /
-// LookupByChat / LookupSessionByChat / SpawnAgent / ListBindings /
-// RestoreBindings) and the receipt FSM (CreateReceipt /
-// UpdateReceipt / DisposeReceipt). cmd/nightme wires the session
-// manager at construction time; handler code uses the binding +
-// receipt surface instead of the v0.x chat-keyed SessionManager
-// interface that was deleted from gateway/cmd.
+// v1.2: the interface carries binding-table operations (Bind /
+// LookupByChat / ListBindings). cmd/nightme wires the session
+// manager at construction time; handler code uses the binding
+// surface instead of the v0.x chat-keyed SessionManager interface.
+//
+// v1.3: the receipt FSM API (CreateReceipt / UpdateReceipt /
+// DisposeReceipt) has been removed. Outbound events are routed
+// by stamping msg.ReplyTo = currentTurnUserMsgID; each Channel
+// looks up its own receipt by that userMsgID.
 type Gateway interface {
 	Register(cmd Command) (replaced bool)
 
@@ -139,11 +137,6 @@ type Gateway interface {
 	LookupByChat(chatID string) *BindingEntry
 	ListBindings() []BindingEntry
 
-	// v1.2 receipt FSM (commit 3):
-	CreateReceipt(ctx context.Context, chatID, userMsgID string, blocks []agent.ContentBlock) (receipt.Receipt, error)
-	UpdateReceipt(ctx context.Context, userMsgID string, state receipt.ReceiptState) error
-	DisposeReceipt(ctx context.Context, userMsgID string) error
-
 	// OnMessageState is the v1.3 (F-31) ChatSession-callback
 	// entry point. The runtime (cmd/nightme) wires gw.OnMessageState
 	// into every ChatSession at startup via SetMessageStateHandler.
@@ -151,7 +144,7 @@ type Gateway interface {
 	// forwarded / done / error); Gateway translates to
 	// OutboundMessage{Kind: OutMessageState} and forwards to the
 	// appropriate channel via resolveChannel + Send.
-	OnMessageState(chatID, userMsgID string, state receipt.MessageState)
+	OnMessageState(chatID, userMsgID string, state agent.MessageState)
 
 	// Lifecycle
 	AttachChannels(channels ...Channel)
@@ -171,11 +164,10 @@ type Router = gateway
 // carries the method set; Router is just an alias so external
 // packages can type-assert.)
 //
-// v1.1 fields (commits 3 + 4): the Gateway owns the chat → session
-// binding table (BindingEntry) and the per-userMessage receipt
-// FSM (receiptEntry). These were previously split across the
-// cmd/nightme runtime chatCoordinator (bindings) and the
-// session.InputBuffer receipts map (receipts). See F-26 §2.
+// v1.3: the per-userMessage receipt bookkeeping
+// (`receipts map[string]*receiptEntry`) has been removed. Gateway
+// no longer knows about receipts at all — only the binding table
+// (chat → ChatSession) remains.
 type gateway struct {
 	mu    sync.RWMutex
 	cmds  map[string]Command
@@ -196,10 +188,6 @@ type gateway struct {
 
 	// v1.2 binding table (chat_id → session_id). Owned by Gateway.
 	bindings map[string]*BindingEntry
-
-	// v1.2 receipt FSM bookkeeping (userMsgID → receipt state).
-	// Owned by Gateway; Channel renders transitions.
-	receipts map[string]*receiptEntry
 }
 
 // New constructs a Gateway (the inboundDispatcher).
@@ -218,7 +206,6 @@ func New(messageDispatcher MessageDispatcher) Gateway {
 		messageDispatcher: messageDispatcher,
 		chatToChan:        make(map[string]Channel),
 		bindings:          make(map[string]*BindingEntry),
-		receipts:          make(map[string]*receiptEntry),
 	}
 }
 
@@ -583,80 +570,6 @@ func (g *gateway) Unbind(chatID string) {
 	g.mu.Unlock()
 }
 
-// --- v1.1 receipt FSM (commit 3) -------------------------------------
-
-// CreateReceipt creates a receipt for chatID/userMsgID with the given
-// blocks, stores it in the receipts map, and returns the channel's
-// opaque Receipt handle. If CreateReceipt fails (e.g., the channel
-// can't reach the IM backend) the entry is still stored so a
-// subsequent UpdateReceipt / DisposeReceipt on a different code
-// path doesn't panic; callers should still treat err != nil as a
-// signal to skip receipt bookkeeping for that userMsgID.
-func (g *gateway) CreateReceipt(ctx context.Context, chatID, userMsgID string, blocks []agent.ContentBlock) (receipt.Receipt, error) {
-	ch := g.resolveChannel(chatID)
-	if ch == nil {
-		return nil, errors.New("gateway: no channel for chat " + chatID)
-	}
-	rcpt, err := ch.CreateReceipt(ctx, chatID, userMsgID, blocks)
-	if err != nil {
-		return nil, err
-	}
-	g.mu.Lock()
-	binding := g.bindings[chatID]
-	var sessionID string
-	if binding != nil {
-		sessionID = binding.SessionID
-	}
-	g.receipts[userMsgID] = &receiptEntry{
-		chatID:    chatID,
-		sessionID: sessionID,
-		receipt:   rcpt,
-		state:     receipt.ReceiptPending,
-	}
-	g.mu.Unlock()
-	return rcpt, nil
-}
-
-// UpdateReceipt transitions the receipt for userMsgID to state.
-// The receipt must already have been created via CreateReceipt.
-// Returns nil if the receipt doesn't exist (caller may have given
-// up on bookkeeping for that message — Gateway is best-effort).
-func (g *gateway) UpdateReceipt(ctx context.Context, userMsgID string, state receipt.ReceiptState) error {
-	g.mu.RLock()
-	entry := g.receipts[userMsgID]
-	g.mu.RUnlock()
-	if entry == nil {
-		return nil
-	}
-	ch := g.resolveChannel(entry.chatID)
-	if ch == nil {
-		return nil
-	}
-	entry.mu.Lock()
-	entry.state = state
-	entry.mu.Unlock()
-	return ch.UpdateReceipt(ctx, entry.receipt, state)
-}
-
-// DisposeReceipt removes the receipt from the receipts map and
-// asks the channel to clean up. Idempotent.
-func (g *gateway) DisposeReceipt(ctx context.Context, userMsgID string) error {
-	g.mu.Lock()
-	entry := g.receipts[userMsgID]
-	if entry != nil {
-		delete(g.receipts, userMsgID)
-	}
-	g.mu.Unlock()
-	if entry == nil {
-		return nil
-	}
-	ch := g.resolveChannel(entry.chatID)
-	if ch == nil {
-		return nil
-	}
-	return ch.DisposeReceipt(ctx, entry.receipt)
-}
-
 // resolveChannel returns the channel that owns chatID, falling back
 // to the default channel for chats we haven't seen yet.
 func (g *gateway) resolveChannel(chatID string) Channel {
@@ -684,7 +597,7 @@ func (g *gateway) resolveChannel(chatID string) Channel {
 // RLock on g.mu briefly; Send runs synchronously per the caller's
 // context (background ctx is used internally because ChatSession
 // doesn't currently pass a cancellable ctx to emitMessageState).
-func (g *gateway) OnMessageState(chatID, userMsgID string, state receipt.MessageState) {
+func (g *gateway) OnMessageState(chatID, userMsgID string, state agent.MessageState) {
 	if chatID == "" || userMsgID == "" {
 		return
 	}
@@ -709,74 +622,3 @@ func (g *gateway) OnMessageState(chatID, userMsgID string, state receipt.Message
 	}
 }
 
-// translateAndSend does the work the v1.2 runtime drives
-// indirectly: look up the chat for a session ID, translate the
-// event, and (for terminal events) flip any still-open receipts
-// to Done / Error and dispose them.
-//
-// Receipt fan-out (1 request : n response per user message, plus
-// the buffered-batch case where one agent turn answers n user
-// messages): each bound receipt gets its own OutboundMessage
-// carrying ReplyTo=<its userMsgID>. Orphan events fall back to a
-// plain text message with ReplyTo="".
-func (g *gateway) translateAndSend(sessionID, chatID string, ev agent.AgentEvent) {
-	ch := g.resolveChannel(chatID)
-	if ch == nil {
-		return
-	}
-
-	out, send := Translate(chatID, ev)
-	if send {
-		targets := g.receiptsForSession(sessionID)
-		if len(targets) == 0 {
-			out.ReplyTo = ""
-			if err := ch.Send(context.Background(), out); err != nil {
-				log.Printf("gateway: send failed (chat=%s, kind=%s, no anchor): %v", chatID, out.Kind, err)
-			}
-		} else {
-			for _, userMsgID := range targets {
-				fanout := out
-				fanout.ReplyTo = userMsgID
-				if err := ch.Send(context.Background(), fanout); err != nil {
-					log.Printf("gateway: send failed (chat=%s, kind=%s, anchor=%s): %v", chatID, out.Kind, userMsgID, err)
-				}
-			}
-		}
-	}
-
-	if ev.Kind == agent.EventDone || ev.Kind == agent.EventError {
-		target := receipt.ReceiptDone
-		if ev.Kind == agent.EventError {
-			target = receipt.ReceiptError
-		}
-		g.mu.RLock()
-		var toDispose []string
-		for umid, entry := range g.receipts {
-			if entry.sessionID == sessionID {
-				toDispose = append(toDispose, umid)
-			}
-		}
-		g.mu.RUnlock()
-		for _, umid := range toDispose {
-			_ = g.UpdateReceipt(context.Background(), umid, target)
-			_ = g.DisposeReceipt(context.Background(), umid)
-		}
-	}
-}
-
-// receiptsForSession returns the userMsgIDs of every receipt
-// currently bound to the given session. Linear scan; v1.2 keeps
-// the receipts map keyed by userMsgID with the sessionID as a
-// secondary key so the runtime can flush all receipts when a
-// session terminates.
-func (g *gateway) receiptsForSession(sid string) []string {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	var ids []string
-	for umid, entry := range g.receipts {
-		if entry.sessionID == sid {
-			ids = append(ids, umid)
-		}
-	}
-	return ids
-}

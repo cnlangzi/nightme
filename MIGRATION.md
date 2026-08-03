@@ -121,7 +121,7 @@ package) for any reason, note:
 The `internal/session/` package still exists in the codebase for
 the v1.x `internal/gateway/cmd/handlers.go` binding helpers
 (`Session = *session.Session` type alias). Cleanup of those
-helpers is **pending** — tracked in `docs/PLAN.md` §4.6.8.
+helpers is **pending** — no separate tracking doc; see git history.
 
 ---
 

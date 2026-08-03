@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"fmt"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -387,4 +390,99 @@ func TestCreatedAtAndID(t *testing.T) {
 		t.Fatalf("CreatedAt outside expected range: %v (before=%v after=%v)",
 			cs.CreatedAt(), before, after)
 	}
+}
+// TestSetActiveAgent_ClearsStaleAnchor verifies the v1.3 fix:
+// when /use switches the active agent mid-flight, the previous
+// turn's anchor (currentTurnUserMsgID) MUST be cleared so the
+// new AS's events don't get stamped with the OLD userMsgID and
+// routed to the OLD receipt card.
+func TestSetActiveAgent_ClearsStaleAnchor(t *testing.T) {
+	cs := New("oc_chat", "p2p", "claude")
+
+	cs.mu.Lock()
+	cs.currentTurnUserMsgID = "om_msg_old_turn"
+	cs.mu.Unlock()
+
+	if err := cs.SetActiveAgent("codex"); err != nil {
+		t.Fatalf("SetActiveAgent: %v", err)
+	}
+
+	cs.mu.RLock()
+	got := cs.currentTurnUserMsgID
+	cs.mu.RUnlock()
+	if got != "" {
+		t.Errorf("SetActiveAgent did not clear currentTurnUserMsgID: got %q", got)
+	}
+}
+
+// TestKillAll_ClearsStaleAnchor mirrors the above for /kill: when
+// the active AS pool is torn down, the in-flight anchor must be
+// cleared so the next /spawn's events start fresh.
+func TestKillAll_ClearsStaleAnchor(t *testing.T) {
+	cs := New("oc_chat", "p2p", "claude")
+	cs.WithSpawner(&spySpawner{})
+
+	cs.mu.Lock()
+	cs.currentTurnUserMsgID = "om_msg_killed_turn"
+	cs.mu.Unlock()
+
+	if err := cs.KillAll(); err != nil {
+		t.Fatalf("KillAll: %v", err)
+	}
+
+	cs.mu.RLock()
+	got := cs.currentTurnUserMsgID
+	cs.mu.RUnlock()
+	if got != "" {
+		t.Errorf("KillAll did not clear currentTurnUserMsgID: got %q", got)
+	}
+}
+
+// TestDefaultFlushHook_AnchorWriteIsRaceFree exercises the v1.3
+// concurrent-write fix: the flush hook closure runs WITHOUT cs.mu
+// held (InputBuffer releases its own lock before invoking the
+// hook), so the closure must acquire cs.mu when writing
+// currentTurnUserMsgID. The runReadPump goroutine reads it under
+// RLock — racing between them is what the race detector catches.
+//
+// We launch N concurrent flushes and N concurrent reads. If the
+// fix is in place (Lock inside the closure), no data race. If
+// not, -race trips immediately.
+func TestDefaultFlushHook_AnchorWriteIsRaceFree(t *testing.T) {
+	cs := New("oc_chat", "p2p", "claude")
+	cs.WithSpawner(&spySpawner{})
+
+	cs.mu.Lock()
+	cs.activeAS = newActiveAgentNoop()
+	hook := cs.defaultFlushHookLocked()
+	cs.mu.Unlock()
+
+	const N = 64
+	var wg sync.WaitGroup
+
+	// Writers: each invokes the hook with its own userMsgID.
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_ = hook([]agent.ContentBlock{{Text: "x"}}, []string{
+				fmt.Sprintf("om_writer_%d", i),
+			})
+		}(i)
+	}
+
+	// Readers: drain currentTurnUserMsgID under RLock.
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 16; j++ {
+				cs.mu.RLock()
+				_ = cs.currentTurnUserMsgID
+				cs.mu.RUnlock()
+			}
+		}()
+	}
+
+	wg.Wait()
 }

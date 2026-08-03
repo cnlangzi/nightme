@@ -142,7 +142,7 @@ spawn will fail at runtime. See
 - **`internal/session/` v1.x residue** — `MemoryManager` is still
   referenced by `internal/gateway/cmd/handlers.go` (v1.x binding
   helpers). Cleanup pending — tracked in
-  [`docs/PLAN.md`](./docs/PLAN.md) §4.6.8.
+  (No separate tracking doc; see git history.)
 
 ---
 

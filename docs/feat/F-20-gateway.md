@@ -324,7 +324,7 @@ messageDispatcher(ctx, msg)
   │       └ err == nil → g.receipts[userMsgID] = {chatID, sess.ID, rcpt, Pending}
   │
   ├ (c) err := sess.QueueUserMessage(blocks, userMsgID)
-  │       InputBuffer FSM 决定 dispatch (Idle) 或 buffer (Busy)
+  │       InputBuffer FSM (see F-27 §5) 决定 dispatch (Idle) 或 buffer (Busy)
   │       ├ Idle → 立即 SendBlocks(blocks)
   │       │   └ 立即 → ch.UpdateReceipt(rcpt, Executing) → state: Executing
   │       └ Busy → 入队
@@ -472,7 +472,7 @@ nightme 只拦截**表 4** 列出的 5 个命令。其他所有以 `/` 开头的
 - **Channel interface**（receipt API 形状）：见 [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md) §2, §3
 - **Session 数据模型**（不带 ChatID 的纯域）：见 [`F-01-session-create.md`](./F-01-session-create.md)
 - **Registry 两张表**（SessionEntry + BindingEntry）：见 [`F-05-process-registry.md`](./F-05-process-registry.md)
-- **InputBuffer FSM**（Gateway 注入 onFlush 钩子）：见 [`F-25-input-buffer.md`](./F-25-input-buffer.md) §5
+- **InputBuffer FSM (see F-27 §5)**（Gateway 注入 onFlush 钩子）：见 [`F-25-rolling-log.md`](./F-25-rolling-log.md) §5
 - **完整 v1.1 架构**：见 [`F-26-gateway-hub.md`](./F-26-gateway-hub.md)
 
 ---

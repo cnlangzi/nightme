@@ -4,7 +4,7 @@
 // splits that into ChatSessionEntry + AgentSessionEntry in two
 // separate files (chat_sessions.json, agent_sessions.json).
 //
-// Design decision (per docs/PLAN.md §4.6.7):
+// Design decision (v1.2 migration rationale; see commit history):
 //
 //	v1.x → v1.2 is NOT a transparent migration. v1.1 did not
 //	persist chat_id (the binding was in-memory only; see

@@ -7,12 +7,10 @@
 
 ## 1. Overview
 
-nightme 的文档按**内容性质**分 5 层，每层职责单一、不重叠：
+nightme 的文档按**内容性质**分 4 层，每层职责单一、不重叠：
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Layer 5: PLAN.md          ← 实施计划（什么顺序、怎么拆 PR）│
-├─────────────────────────────────────────────────────────────┤
 │  Layer 4: feat/F-XX-*      ← 每个 feature 的实现（含代码）  │
 ├─────────────────────────────────────────────────────────────┤
 │  Layer 3: FEATURES.md      ← 功能索引（每个 feature 一句话）│
@@ -25,7 +23,7 @@ nightme 的文档按**内容性质**分 5 层，每层职责单一、不重叠�
 
 **自上而下**：从抽象到具体，从产品到实现。
 **阅读顺序**：新 contributor 从 PRD 开始读，按需往下钻。
-**更新顺序**：业务/产品变更改 PRD → 架构变更改 SPEC → 新功能改 FEATURES + 新 feat/ → 实施计划改 PLAN。
+**更新顺序**：业务/产品变更改 PRD → 架构变更改 SPEC → 新功能改 FEATURES + 新 feat/。
 
 ---
 
@@ -37,7 +35,6 @@ nightme 的文档按**内容性质**分 5 层，每层职责单一、不重叠�
 | **SPEC** | `SPEC.md` | 架构总览、组件、数据流、Session 生命周期、并发模型、技术栈、NFR、安全、技术决策 | Go 代码、JSON schema、YAML 配置、具体函数签名 |
 | **FEATURES** | `FEATURES.md` | F-XX 功能列表（含状态、设计文档链接、release checklist） | 详细设计、代码、edge cases |
 | **feat/** | `feat/F-XX-name.md` | 单个 feature 的详细设计：接口、struct、实现、edge cases、测试 | 跨 feature 的架构描述、产品定位 |
-| **PLAN** | `PLAN.md` | M0-M3 里程碑、commit 拆分、验收标准、文件结构 | 产品决策、架构设计、代码 |
 
 ---
 
@@ -74,7 +71,6 @@ Q1: 这是关于产品的（用户、场景、价值、范围），还是关于�
 **特例**：
 - **CLI 命令的使用方法 / 安装步骤**：放仓库根 `README.md`，不放 docs/
 - **某个 feature 的命名 / 编号变更**：改 `FEATURES.md` 即可，不动 SPEC/PRD
-- **新里程碑或 commit 计划变更**：改 `PLAN.md`
 - **已合并到 feat/ 的代码示例被 SPEC 引用**：SPEC 里只描述概念 + 链接到 feat/，不重复代码
 
 ---
@@ -83,7 +79,7 @@ Q1: 这是关于产品的（用户、场景、价值、范围），还是关于�
 
 ### 4.1 顶层文档
 
-- 全大写 + `.md` 后缀：`PRD.md`、`SPEC.md`、`FEATURES.md`、`PLAN.md`
+- 全大写 + `.md` 后缀：`PRD.md`、`SPEC.md`、`FEATURES.md`
 - 不带日期 / 版本号（版本号在文档内部的"更新日志"维护）
 
 ### 4.2 Feature 文档
@@ -123,8 +119,6 @@ PRD.md  ──► SPEC.md
             └────► FEATURES.md
                           │
                           └────► feat/F-XX
-                                        │
-                                        └────► PLAN.md
 
 （feat/ 可以反向引用 SPEC 和 FEATURES，但不能引用 PRD 的产品哲学细节）
 ```
@@ -132,7 +126,7 @@ PRD.md  ──► SPEC.md
 **禁止**：
 - PRD.md 引用 feat/（PRD 不应该知道实现细节）
 - SPEC.md 引用 feat/ 的代码（SPEC 应该描述概念，链接到 feat/ 看细节）
-- PLAN.md 引用 PRD（PLAN 假设产品定位已经冻结）
+
 
 ---
 
@@ -146,7 +140,7 @@ PRD.md  ──► SPEC.md
 | 架构变更 / 换技术栈 / 新增组件 | SPEC.md |
 | 新增 feature | FEATURES.md + 新 feat/F-XX |
 | 已有 feature 设计调整 | feat/F-XX |
-| 里程碑 / commit 计划变更 | PLAN.md |
+
 | 跨多个 feature 的设计变更 | SPEC.md + 对应 feat/ 都改 |
 
 ### 6.2 每次改动的 checklist
@@ -182,8 +176,6 @@ docs: <简短描述>
 ❌ **feat/F-XX.md 里讨论产品哲学**
 → 哲学在 PRD.md，feat/ 只谈实现
 
-❌ **PLAN.md 里设计架构**
-→ PLAN 假设 SPEC 已经定稿，只谈实施
 
 ❌ **每个 feature 一个独立的架构章节**
 → 架构在 SPEC.md 集中描述，feat/ 引用即可
@@ -198,7 +190,6 @@ docs/
 ├── PRD.md                 ← Layer 1: 产品
 ├── SPEC.md                ← Layer 2: 技术架构
 ├── FEATURES.md            ← Layer 3: 功能索引
-├── PLAN.md                ← Layer 5: 实施计划
 └── feat/                  ← Layer 4: 每个 feature 的实现
     ├── F-01-session-create.md
     ├── F-02-message-passthrough.md
@@ -225,3 +216,4 @@ docs/
 ## 10. 变更历史
 
 - **v1.0**：建立 5 层文档结构 + 命名约定 + 决策树
+- **v1.3**：移除 Layer 5 (PLAN.md,已删);当前 4 层

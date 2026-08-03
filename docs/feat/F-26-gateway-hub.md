@@ -1,10 +1,42 @@
 # F-26: Gateway Hub & Responsibility Isolation
 
-> **Status**: implemented (v1.1 architectural pivot; v0.3 release tag carries the new shape)
+> **Status**: ⚠️ **SUPERSEDED in v1.3** — see amendment below
 > **Milestone**: v0.3 (commit 1-6 of "responsibility isolation" refactor)
-> **Depends on**: F-08 (Channel), F-20 (Gateway command router), F-21 (agent modes), F-25 (input buffer)
+> **Depends on**: F-08 (Channel), F-20 (Gateway command router), F-21 (agent modes), F-25 (rolling-log / input buffer)
 > **Used by**: every Channel + every Agent
-> **Related docs**: [`SPEC.md`](../SPEC.md) v1.1, [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md), [`F-20-gateway.md`](./F-20-gateway.md), [`F-25-input-buffer.md`](./F-25-input-buffer.md)
+> **Related docs**: [`SPEC.md`](../SPEC.md) v1.3 §0.1, [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md), [`F-20-gateway.md`](./F-20-gateway.md), [`F-25-rolling-log.md`](./F-25-rolling-log.md)
+
+> ## ⚠️ v1.3 amendment (2026-08-03)
+>
+> The original v1.1 design (this doc) had Gateway owning the **Receipt FSM** (per-userMsg `pending → executing → done/error`) and the Channel interface carrying `CreateReceipt / UpdateReceipt / DisposeReceipt` + `ReceiptState` enum. **v1.3 removes all of this.**
+>
+> Per SPEC §0.1 ("abstract stays abstract, concrete stays concrete"):
+>
+> - Gateway no longer owns any receipt FSM. The `receipts map[userMsgID]*receiptEntry` is gone.
+> - `Channel` interface is now 5 methods: `Name / Start / Stop / Send / Incoming`. The three receipt-lifecycle methods are gone.
+> - Each Channel owns its own receipt OBJECT internally (Feishu: `*MessageReceipt`; Slack: thread map; Web: DOM). Gateway sees none of it.
+> - The `Receipt` opaque type and `ReceiptState` enum from `internal/receipt/receipt.go` are deleted. Only `MessageState` remains (independent concern for progress emoji).
+> - Outbound routing: Gateway stamps `OutboundMessage.ReplyTo = currentTurnUserMsgID` (single anchor per turn). Channel looks up its own receipt by that userMsgID.
+>
+> **What this doc still describes accurately (v1.3)**:
+>
+> - §1 "responsibility isolation" principle (still true — Gateway is a router, Channel renders)
+> - §2.1 "Channel owns Receipt rendering" — accurate; just the Receipt object is now entirely Channel-private (no opaque handle crosses the boundary)
+> - §2.2 "what each layer does not know" — strengthened; Gateway knows even less about Channel internals
+> - §2.3 "single-consumer rule" — still true; the EventCallback pattern is preserved
+> - §3.1 "what is NOT in the Channel interface" — accurate (and the receipt lifecycle API is also gone now)
+>
+> **What is now WRONG / removed in v1.3**:
+>
+> - §2.1 "Gateway owns Receipt FSM" row — removed
+> - §2.2 Channel interface "exposes `Receipt` opaque type + `ReceiptState` enum" — removed; channel exposes 5 methods only
+> - §2.4 "Receipt data flow (v1.1)" — describes dead code; see [`F-25-rolling-log.md`](./F-25-rolling-log.md) §3 for the v1.3 replacement
+> - §2.5 "OutboundMessage.ReplyTo contract (v1.1)" — fanout model replaced by 1:1 anchor (SPEC §2.2)
+> - §3 "Channel interface change (the receipt-lifecycle extension)" — entire section describes removed API
+> - §4.2 "Receipt table operations" — describes removed Gateway methods
+> - §5 migration stages — receipt-lifecycle commits (3, 4, 6) superseded; see git log for the v1.3 removal commits
+>
+> **Migration pointer**: For the v1.3 outbound flow, see [`SPEC.md`](../SPEC.md) §2.2 + §2.4 and [`F-25-rolling-log.md`](./F-25-rolling-log.md).
 
 ---
 

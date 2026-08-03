@@ -36,7 +36,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
-	"github.com/cnlangzi/nightme/internal/receipt"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -371,7 +370,7 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 		// F-31: ChatSession has accepted the message. Emit
 		// StateReceived synchronously so the channel can render
 		// ⏳ even before spawn resolves (FastAck UX).
-		cs.EmitMessageState(userMsgID, receipt.StateReceived)
+		cs.EmitMessageState(userMsgID, agent.StateReceived)
 
 		// Resolve active AgentSession (lazy spawn on miss).
 		_, err := cs.LookupActiveAgentSession()
@@ -406,7 +405,7 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 		// AgentSession. Emit StateForwarded so the channel flips
 		// ⏳ → 🔄. (Emitted before QueueUserMessage so the visual
 		// transition is visible even if queueing is slow.)
-		cs.EmitMessageState(userMsgID, receipt.StateForwarded)
+		cs.EmitMessageState(userMsgID, agent.StateForwarded)
 
 		// Build structured blocks and queue to InputBuffer.
 		blocks := feishu.BuildBlocks(msg.Text, msg.Attachments)
@@ -448,17 +447,32 @@ func ensureReadPumps(mgr *chatsession.Manager, ch channel.Channel, primary strin
 // chatID is passed by ChatSession's readPump directly (the
 // ChatSession knows its own ChatID); the handler doesn't need
 // to look it up.
+//
+// userMsgID is the current turn's single anchor (passed by
+// readPump from cs.currentTurnUserMsgID). The handler stamps it
+// onto OutboundMessage.ReplyTo so each Channel can route the
+// event to its own per-userMsgID receipt (card / thread / DOM
+// node). Empty when the event has no anchor (startup EventInit
+// etc.) — Channel falls back to plain text in that case.
+//
+// v1.3 (SPEC §2.2): 1 turn : 1 anchor. Receipt rendering and
+// FSM are Channel-internal; Gateway only knows about userMsgID.
 func newEventHandler(ch channel.Channel, logger *slog.Logger) chatsession.EventHandler {
-	return func(chatID string, s *chatsession.AgentSession, ev agent.AgentEvent) {
+	return func(chatID string, s *chatsession.AgentSession, ev agent.AgentEvent, userMsgID string) {
 		// Translate the AgentEvent to an OutboundMessage.
 		out, ok := gateway.Translate(chatID, ev)
 		if !ok {
 			return
 		}
-		out.ReplyTo = "" // commit 8c: ReplyTo is set by Channel layer (Receipt FSM)
+		// Stamp the current turn's anchor so the Channel can
+		// route to the right per-userMsgID receipt. ReplyTo
+		// stays empty for orphan events (EventInit at startup,
+		// internal logs) — Channel renders those as plain text.
+		out.ReplyTo = userMsgID
 		if err := ch.Send(context.Background(), out); err != nil && logger != nil {
 			logger.Warn("channel send failed",
 				"chat_id", chatID,
+				"user_msg_id", userMsgID,
 				"agent_session_id", s.ID,
 				"err", err)
 		}

@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/receipt"
 )
 
 // captureHandler records every callback invocation for assertions.
@@ -19,10 +18,10 @@ type captureHandler struct {
 
 type messageStateCall struct {
 	chatID, userMsgID string
-	state             receipt.MessageState
+	state             agent.MessageState
 }
 
-func (c *captureHandler) handler(chatID, userMsgID string, state receipt.MessageState) {
+func (c *captureHandler) handler(chatID, userMsgID string, state agent.MessageState) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls = append(c.calls, messageStateCall{chatID, userMsgID, state})
@@ -44,18 +43,18 @@ func TestEmitMessageState_HandlerInvoked(t *testing.T) {
 	cap := &captureHandler{}
 	cs.SetMessageStateHandler(cap.handler)
 
-	cs.EmitMessageState("om_msg_1", receipt.StateReceived)
-	cs.EmitMessageState("om_msg_2", receipt.StateForwarded)
-	cs.EmitMessageState("om_msg_3", receipt.StateDone)
+	cs.EmitMessageState("om_msg_1", agent.StateReceived)
+	cs.EmitMessageState("om_msg_2", agent.StateForwarded)
+	cs.EmitMessageState("om_msg_3", agent.StateDone)
 
 	got := cap.snapshot()
 	if len(got) != 3 {
 		t.Fatalf("captured %d calls; want 3", len(got))
 	}
 	want := []messageStateCall{
-		{"oc_chat", "om_msg_1", receipt.StateReceived},
-		{"oc_chat", "om_msg_2", receipt.StateForwarded},
-		{"oc_chat", "om_msg_3", receipt.StateDone},
+		{"oc_chat", "om_msg_1", agent.StateReceived},
+		{"oc_chat", "om_msg_2", agent.StateForwarded},
+		{"oc_chat", "om_msg_3", agent.StateDone},
 	}
 	for i, w := range want {
 		if got[i] != w {
@@ -69,7 +68,7 @@ func TestEmitMessageState_HandlerInvoked(t *testing.T) {
 func TestEmitMessageState_NoHandlerIsNoop(t *testing.T) {
 	cs := New("oc_chat", "p2p", "claude")
 	// No SetMessageStateHandler call.
-	cs.EmitMessageState("om_msg", receipt.StateReceived)
+	cs.EmitMessageState("om_msg", agent.StateReceived)
 	// If we got here without panic, success.
 }
 
@@ -79,61 +78,66 @@ func TestSetMessageStateHandler_NilClears(t *testing.T) {
 	cs := New("oc_chat", "p2p", "claude")
 	cap := &captureHandler{}
 	cs.SetMessageStateHandler(cap.handler)
-	cs.EmitMessageState("om_1", receipt.StateReceived)
+	cs.EmitMessageState("om_1", agent.StateReceived)
 	cs.SetMessageStateHandler(nil)
-	cs.EmitMessageState("om_2", receipt.StateDone)
+	cs.EmitMessageState("om_2", agent.StateDone)
 
 	if got := len(cap.snapshot()); got != 1 {
 		t.Fatalf("captured %d calls after nil-clear; want 1 (only the first emit)", got)
 	}
 }
 
-// TestEmitMessageStateForCurrentTurn_FansOut verifies that
+// TestEmitMessageStateForCurrentTurn_AnchorOnly verifies that
 // emitMessageStateForCurrentTurn (called from runReadPump on
-// EventDone/Error) emits once per userMsgID in
-// currentTurnUserMsgIDs, then clears the slice.
-func TestEmitMessageStateForCurrentTurn_FansOut(t *testing.T) {
+// EventDone/Error) emits exactly once for the anchor
+// currentTurnUserMsgID, then clears the string.
+//
+// v1.3 (SPEC §2.5): terminal MessageState fires for the anchor
+// only. Earlier userMsgIDs in a buffered batch keep their own
+// MessageState at StateForwarded until they themselves anchor a
+// future turn — see chatsession.go docstring on
+// emitMessageStateForCurrentTurn.
+func TestEmitMessageStateForCurrentTurn_AnchorOnly(t *testing.T) {
 	cs := New("oc_chat", "p2p", "claude")
 	cap := &captureHandler{}
 	cs.SetMessageStateHandler(cap.handler)
 
-	// Simulate InputBuffer flush tracking 2 userMsgIDs.
+	// Simulate InputBuffer flush tracking the anchor userMsgID
+	// (in v1.3, currentTurnUserMsgID is a single string; the
+	// FlushHook already captured the last userMsgID of the batch).
 	cs.mu.Lock()
-	cs.currentTurnUserMsgIDs = []string{"om_a", "om_b"}
+	cs.currentTurnUserMsgID = "om_b"
 	cs.mu.Unlock()
 
-	cs.emitMessageStateForCurrentTurn(receipt.StateDone)
+	cs.emitMessageStateForCurrentTurn(agent.StateDone)
 
 	got := cap.snapshot()
-	if len(got) != 2 {
-		t.Fatalf("captured %d calls; want 2 (one per userMsgID)", len(got))
+	if len(got) != 1 {
+		t.Fatalf("captured %d calls; want 1 (anchor only)", len(got))
 	}
-	if got[0] != (messageStateCall{"oc_chat", "om_a", receipt.StateDone}) {
-		t.Errorf("call[0] = %+v; want om_a/Done", got[0])
-	}
-	if got[1] != (messageStateCall{"oc_chat", "om_b", receipt.StateDone}) {
-		t.Errorf("call[1] = %+v; want om_b/Done", got[1])
+	if got[0] != (messageStateCall{"oc_chat", "om_b", agent.StateDone}) {
+		t.Errorf("call[0] = %+v; want om_b/Done", got[0])
 	}
 
-	// currentTurnUserMsgIDs must be cleared so the next flush
+	// currentTurnUserMsgID must be cleared so the next flush
 	// starts fresh.
 	cs.mu.RLock()
-	remaining := cs.currentTurnUserMsgIDs
+	remaining := cs.currentTurnUserMsgID
 	cs.mu.RUnlock()
 	if len(remaining) != 0 {
-		t.Errorf("currentTurnUserMsgIDs not cleared: %v", remaining)
+		t.Errorf("currentTurnUserMsgID not cleared: %q", remaining)
 	}
 
-	// Subsequent call with empty currentTurnUserMsgIDs → no-op.
-	cs.emitMessageStateForCurrentTurn(receipt.StateError)
-	if got := len(cap.snapshot()); got != 2 {
-		t.Errorf("captured %d calls; want 2 (no-op after clear)", got)
+	// Subsequent call with empty currentTurnUserMsgID → no-op.
+	cs.emitMessageStateForCurrentTurn(agent.StateError)
+	if got := len(cap.snapshot()); got != 1 {
+		t.Errorf("captured %d calls; want 1 (no-op after clear)", got)
 	}
 }
 
 // TestDefaultFlushHook_TracksUserMsgIDs verifies that
 // defaultFlushHookLocked captures the userMsgIDs into
-// currentTurnUserMsgIDs (F-31 design: runReadPump needs this to
+// currentTurnUserMsgID (F-31 design: runReadPump needs this to
 // know which messages to mark Done/Error after the turn ends).
 func TestDefaultFlushHook_TracksUserMsgIDs(t *testing.T) {
 	cs := New("oc_chat", "p2p", "claude")
@@ -151,17 +155,14 @@ func TestDefaultFlushHook_TracksUserMsgIDs(t *testing.T) {
 	_ = hook([]agent.ContentBlock{{Text: "hi"}}, []string{"om_x", "om_y"})
 
 	cs.mu.RLock()
-	tracked := append([]string(nil), cs.currentTurnUserMsgIDs...)
+	tracked := cs.currentTurnUserMsgID
 	cs.mu.RUnlock()
 
-	want := []string{"om_x", "om_y"}
-	if len(tracked) != len(want) {
-		t.Fatalf("tracked %d userMsgIDs; want %d (%v)", len(tracked), len(want), tracked)
-	}
-	for i, w := range want {
-		if tracked[i] != w {
-			t.Errorf("tracked[%d] = %q; want %q", i, tracked[i], w)
-		}
+	// v1.3: currentTurnUserMsgID is a single string (the last
+	// userMsgID in the flush batch), not a slice.
+	want := "om_y"
+	if tracked != want {
+		t.Errorf("tracked = %q; want %q", tracked, want)
 	}
 }
 

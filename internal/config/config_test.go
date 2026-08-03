@@ -58,8 +58,8 @@ func TestLoadExample(t *testing.T) {
 	if cfg.Logging.Level != "info" {
 		t.Errorf("Logging.Level = %q, want info", cfg.Logging.Level)
 	}
-	if cfg.Paths.RegistryFile != "registry.json" {
-		t.Errorf("Paths.RegistryFile = %q, want registry.json", cfg.Paths.RegistryFile)
+	if cfg.Paths.DataDir == "" {
+		t.Errorf("Paths.DataDir should not be empty")
 	}
 }
 
@@ -87,12 +87,6 @@ func TestDefaults(t *testing.T) {
 	}
 	if cfg.Logging.Level != "info" {
 		t.Errorf("default Logging.Level = %q, want info", cfg.Logging.Level)
-	}
-	if cfg.Paths.RegistryFile != "registry.json" {
-		t.Errorf("default Paths.RegistryFile = %q, want registry.json", cfg.Paths.RegistryFile)
-	}
-	if cfg.Paths.SessionsFile != "sessions.json" {
-		t.Errorf("default Paths.SessionsFile = %q, want sessions.json", cfg.Paths.SessionsFile)
 	}
 
 	// DataDir should have ~ expanded to the real home directory.

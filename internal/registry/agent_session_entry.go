@@ -27,6 +27,11 @@ import "time"
 //	PID           — OS process ID; 0 when not running (Detached or Exited).
 //	Status        — running | detached | exited (mirrors registry.Status).
 //	Args          — spawn arguments; preserved for respawn.
+//	ResumeID      — agent's own session id (e.g. Claude Code's
+//	               `system/init.session_id`); persisted so a future
+//	               respawn can pass `--resume <id>` back to the agent.
+//	               Empty if the agent has no resume semantics (ACP / Pi
+//	               / PTY) or has not yet emitted its init event.
 //	CreatedAt     — first spawn time.
 //	LastRunAt     — last event time or status change.
 //	ExitCode      — exit code when Status == exited; nil otherwise.
@@ -38,6 +43,7 @@ type AgentSessionEntry struct {
 	PID           int       `json:"pid"`
 	Status        Status    `json:"status"`
 	Args          []string  `json:"args,omitempty"`
+	ResumeID      string    `json:"resumeId,omitempty"`
 	CreatedAt     time.Time `json:"createdAt"`
 	LastRunAt     time.Time `json:"lastRunAt"`
 	ExitCode      *int      `json:"exitCode,omitempty"`

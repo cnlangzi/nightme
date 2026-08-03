@@ -13,69 +13,136 @@ import (
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
-// listFixture creates a registry on disk with a fixed set of entries
-// and returns its path. Used by the table-format and JSON tests.
-func listFixture(t *testing.T) string {
+// listFixture creates a v1.2 pair of on-disk stores (chat_sessions.json
+// + agent_sessions.json) and seeds them with a running Claude session
+// and a detached Codex session. Exited rows are added by callers via
+// addExitedToFixture. The returned *registry.AgentSessionFile lets
+// callers assert on-disk side effects after the loader runs.
+func listFixture(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessionFile, *registry.AgentSessionEntry, *registry.AgentSessionEntry) {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "registry.json")
-	file, err := registry.Open(path)
+	csFile, err := registry.OpenChatSessionFile(filepath.Join(dir, "chat_sessions.json"))
 	if err != nil {
-		t.Fatalf("registry.Open: %v", err)
+		t.Fatalf("OpenChatSessionFile: %v", err)
 	}
+	asFile, err := registry.OpenAgentSessionFile(filepath.Join(dir, "agent_sessions.json"))
+	if err != nil {
+		t.Fatalf("OpenAgentSessionFile: %v", err)
+	}
+
 	now := time.Date(2026, 7, 31, 10, 30, 0, 0, time.UTC)
-	code := 0
-	if err := file.Upsert(registry.Entry{
-		SessionID: "s_01ABC",
-		ChatID:    "oc_run",
-		Workspace: "/home/devin/code/bailing",
-		Agent:     "claude",
-		PID:       12345,
-		StartedAt: now,
-		LastRunAt: now,
-		Status:    registry.StatusRunning,
-	}); err != nil {
-		t.Fatalf("Upsert running: %v", err)
+
+	// ChatSession #1 (Claude, running).
+	cs1 := &registry.ChatSessionEntry{
+		ID:            "cs_oc_run",
+		ChatID:        "oc_run",
+		ChatType:      "p2p",
+		ActiveCwd:     "/home/devin/code/bailing",
+		ActiveAgent:   "claude",
+		PrimaryAgent:  "claude",
+		AgentSessionIDs: []string{"as_run_1"},
+		CreatedAt:     now,
+		LastInteractionAt: now,
 	}
-	if err := file.Upsert(registry.Entry{
-		SessionID: "s_02DEF",
-		ChatID:    "oc_exited",
-		Workspace: "/tmp/test",
-		Agent:     "codex",
-		PID:       0,
-		StartedAt: now.Add(-time.Hour),
-		LastRunAt: now.Add(-30 * time.Minute),
-		Status:    registry.StatusExited,
-		ExitCode:  &code,
+	if err := csFile.Upsert(cs1); err != nil {
+		t.Fatalf("Upsert cs1: %v", err)
+	}
+
+	// AgentSession #1 (running, with a ResumeID).
+	asRun := &registry.AgentSessionEntry{
+		ID:            "as_run_1",
+		ChatSessionID: cs1.ID,
+		Agent:         "claude",
+		Cwd:           cs1.ActiveCwd,
+		PID:           12345,
+		Status:        registry.StatusRunning,
+		ResumeID:      "sess-claude-abc",
+		CreatedAt:     now,
+		LastRunAt:     now,
+	}
+	if err := asFile.Upsert(asRun); err != nil {
+		t.Fatalf("Upsert asRun: %v", err)
+	}
+
+	// ChatSession #2 (Codex, detached).
+	cs2 := &registry.ChatSessionEntry{
+		ID:            "cs_oc_det",
+		ChatID:        "oc_det",
+		ChatType:      "p2p",
+		ActiveCwd:     "/home/devin/code/nightme",
+		ActiveAgent:   "codex",
+		PrimaryAgent:  "codex",
+		AgentSessionIDs: []string{"as_det_1"},
+		CreatedAt:     now.Add(-time.Hour),
+		LastInteractionAt: now.Add(-30 * time.Minute),
+	}
+	if err := csFile.Upsert(cs2); err != nil {
+		t.Fatalf("Upsert cs2: %v", err)
+	}
+
+	// AgentSession #2 (detached, no ResumeID).
+	asDet := &registry.AgentSessionEntry{
+		ID:            "as_det_1",
+		ChatSessionID: cs2.ID,
+		Agent:         "codex",
+		Cwd:           cs2.ActiveCwd,
+		Status:        registry.StatusDetached,
+		CreatedAt:     now.Add(-time.Hour),
+		LastRunAt:     now.Add(-30 * time.Minute),
+	}
+	if err := asFile.Upsert(asDet); err != nil {
+		t.Fatalf("Upsert asDet: %v", err)
+	}
+
+	return csFile, asFile, asRun, asDet
+}
+
+// addExitedToFixture adds an exited AgentSession to the fixture so
+// callers can verify GC behaviour. chatSessionID is the parent
+// ChatSession's ID (not the ChatID), e.g. "cs_oc_run".
+func addExitedToFixture(t *testing.T, asFile *registry.AgentSessionFile, id, chatSessionID, cwd string) {
+	t.Helper()
+	now := time.Now()
+	code := 0
+	if err := asFile.Upsert(&registry.AgentSessionEntry{
+		ID:            id,
+		ChatSessionID: chatSessionID,
+		Agent:         "codex",
+		Cwd:           cwd,
+		Status:        registry.StatusExited,
+		ExitCode:      &code,
+		CreatedAt:     now.Add(-2 * time.Hour),
+		LastRunAt:     now.Add(-time.Hour),
 	}); err != nil {
 		t.Fatalf("Upsert exited: %v", err)
 	}
-	return path
 }
 
 // TestListTextFormat exercises the default table renderer against a
-// populated registry. Verifies the header is present, every entry
-// appears on its own line, and the exited row uses "-" for PID and
-// includes the exit code in the status column.
+// populated v1.2 store. Verifies the header is present, every alive
+// row appears, and the resume column shows the captured id.
 func TestListTextFormat(t *testing.T) {
-	path := listFixture(t)
+	csFile, asFile, asRun, asDet := listFixture(t)
 
-	entries, err := loadEntries(path)
+	rows, _, err := loadListRows(csFile, asFile, false, false)
 	if err != nil {
-		t.Fatalf("loadEntries: %v", err)
+		t.Fatalf("loadListRows: %v", err)
 	}
 
 	var buf bytes.Buffer
-	printListTable(&buf, entries)
+	printListTable(&buf, rows)
 	out := buf.String()
 
-	for _, want := range []string{"SID", "AGENT", "WORKSPACE", "PID", "STATUS", "STARTED"} {
+	for _, want := range []string{"SID", "CHAT", "AGENT", "WORKSPACE", "PID", "STATUS", "RESUME", "STARTED"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table missing header %q\n%s", want, out)
 		}
 	}
-	if !strings.Contains(out, "s_01ABC") {
+	if !strings.Contains(out, asRun.ID) {
 		t.Errorf("table missing running session ID\n%s", out)
+	}
+	if !strings.Contains(out, "oc_run") {
+		t.Errorf("table missing chat ID\n%s", out)
 	}
 	if !strings.Contains(out, "claude") {
 		t.Errorf("table missing running agent\n%s", out)
@@ -86,11 +153,18 @@ func TestListTextFormat(t *testing.T) {
 	if !strings.Contains(out, "running") {
 		t.Errorf("table missing running status\n%s", out)
 	}
-	if !strings.Contains(out, "-") {
-		t.Errorf("table missing '-' placeholder for exited PID\n%s", out)
+	if !strings.Contains(out, asRun.ResumeID) {
+		t.Errorf("table missing resume id for Claude session\n%s", out)
 	}
-	if !strings.Contains(out, "exited(0)") {
-		t.Errorf("table missing 'exited(0)' status\n%s", out)
+	if !strings.Contains(out, asDet.ID) {
+		t.Errorf("table missing detached session ID\n%s", out)
+	}
+	if !strings.Contains(out, "detached") {
+		t.Errorf("table missing detached status\n%s", out)
+	}
+	// Detached row has no resume id → "-" placeholder.
+	if !strings.Contains(out, "-") {
+		t.Errorf("table missing '-' placeholder for empty resume id\n%s", out)
 	}
 }
 
@@ -105,55 +179,44 @@ func TestListEmptyAlwaysPrintsHeader(t *testing.T) {
 			t.Errorf("empty table missing header %q", want)
 		}
 	}
-	if strings.Contains(out, "s_") {
+	if strings.Contains(out, "as_") {
 		t.Errorf("empty table unexpectedly contains a session ID: %q", out)
 	}
 }
 
 // TestListJSONFormat verifies the --json output is a valid JSON
-// array of registry entries and round-trips losslessly.
+// array of joined rows and contains the resume id payload.
 func TestListJSONFormat(t *testing.T) {
-	path := listFixture(t)
-	entries, err := loadEntries(path)
+	csFile, asFile, asRun, _ := listFixture(t)
+
+	rows, _, err := loadListRows(csFile, asFile, false, false)
 	if err != nil {
-		t.Fatalf("loadEntries: %v", err)
+		t.Fatalf("loadListRows: %v", err)
 	}
 
 	var buf bytes.Buffer
-	if err := printListJSON(&buf, entries); err != nil {
+	if err := printListJSON(&buf, rows); err != nil {
 		t.Fatalf("printListJSON: %v", err)
 	}
 	if !strings.HasPrefix(strings.TrimSpace(buf.String()), "[") {
 		t.Errorf("JSON output is not an array: %s", buf.String())
 	}
-	for _, want := range []string{`"session_id"`, `"chat_id"`, `"workspace"`, `"status"`} {
+	for _, want := range []string{
+		`"agentSessionId"`, `"chatId"`, `"cwd"`, `"status"`, `"resumeId"`,
+	} {
 		if !strings.Contains(buf.String(), want) {
 			t.Errorf("JSON output missing %q\n%s", want, buf.String())
 		}
 	}
-}
-
-// loadEntries opens the registry at path and returns a fresh entry
-// list. Tests use this instead of poking the public Open API
-// directly so the path is the only thing they need to know about.
-func loadEntries(path string) ([]registry.Entry, error) {
-	file, err := registry.Open(path)
-	if err != nil {
-		return nil, err
+	if !strings.Contains(buf.String(), asRun.ResumeID) {
+		t.Errorf("JSON output missing resume id value\n%s", buf.String())
 	}
-	return file.List(), nil
 }
 
 // TestListCmdJSONFlag wires the --json flag through cobra and verifies
 // it toggles the JSON renderer. The command is invoked in-process; we
 // only need the flag plumbing, not a real session manager.
 func TestListCmdJSONFlag(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "registry.json")
-	if _, err := registry.Open(path); err != nil {
-		t.Fatalf("seed registry: %v", err)
-	}
-
 	cmd := newListCmd()
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
@@ -187,6 +250,41 @@ func TestListCmdMissingJSONFlag(t *testing.T) {
 	}
 }
 
+// TestListCmdAllFlag covers the --all flag and exercises the "show
+// exited + skip GC" path.
+func TestListCmdAllFlag(t *testing.T) {
+	cmd := newListCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.ParseFlags([]string{"--all"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	f, err := cmd.Flags().GetBool("all")
+	if err != nil {
+		t.Fatalf("GetBool(all): %v", err)
+	}
+	if !f {
+		t.Errorf("--all did not set the flag")
+	}
+}
+
+// TestListCmdKeepExitedFlag covers --keep-exited.
+func TestListCmdKeepExitedFlag(t *testing.T) {
+	cmd := newListCmd()
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.ParseFlags([]string{"--keep-exited"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	f, err := cmd.Flags().GetBool("keep-exited")
+	if err != nil {
+		t.Fatalf("GetBool(keep-exited): %v", err)
+	}
+	if !f {
+		t.Errorf("--keep-exited did not set the flag")
+	}
+}
+
 // TestNewRootCmdHasSubcommands guards against accidentally dropping
 // `test` or `list` from the root command. Users would notice but
 // tests catch regressions cheaply.
@@ -205,55 +303,37 @@ func TestNewRootCmdHasSubcommands(t *testing.T) {
 	}
 }
 
-// TestListCmdWorkspaceRequired ensures cobra enforces the required
-// --workspace flag. We invoke the test command (which shares the
-// same flag pattern as list would if list ever grew workspace
-// filters) by directly testing the test subcommand's flag plumbing.
-func TestTestCmdFlagsRequired(t *testing.T) {
-	cmd := newTestCmd()
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	if err := cmd.ParseFlags([]string{"--workspace", "/tmp", "--agent", "claude"}); err != nil {
-		t.Fatalf("ParseFlags full: %v", err)
-	}
-	ws, _ := cmd.Flags().GetString("workspace")
-	ag, _ := cmd.Flags().GetString("agent")
-	if ws != "/tmp" || ag != "claude" {
-		t.Errorf("flags = (%q,%q), want (/tmp,claude)", ws, ag)
-	}
-}
-
-// TestRegistryPathResolvesRelative ensures cfg.Paths.RegistryFile is
+// TestChatSessionsPathResolvesRelative ensures chatSessionsPath is
 // joined under DataDir when it is not absolute.
-func TestRegistryPathResolvesRelative(t *testing.T) {
+func TestChatSessionsPathResolvesRelative(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{}
 	cfg.Paths.DataDir = dir
-	cfg.Paths.RegistryFile = "registry.json"
 
-	got, err := registryPath(cfg)
+	got, err := chatSessionsPath(cfg)
 	if err != nil {
-		t.Fatalf("registryPath: %v", err)
+		t.Fatalf("chatSessionsPath: %v", err)
 	}
-	want := filepath.Join(dir, "registry.json")
+	want := filepath.Join(dir, "chat_sessions.json")
 	if got != want {
-		t.Errorf("registryPath = %q, want %q", got, want)
+		t.Errorf("chatSessionsPath = %q, want %q", got, want)
 	}
 }
 
-// TestRegistryPathAbsolute ensures an absolute path is returned
-// verbatim without touching DataDir.
-func TestRegistryPathAbsolute(t *testing.T) {
+// TestAgentSessionsPathResolvesRelative ensures agentSessionsPath is
+// joined under DataDir when it is not absolute.
+func TestAgentSessionsPathResolvesRelative(t *testing.T) {
+	dir := t.TempDir()
 	cfg := &config.Config{}
-	cfg.Paths.DataDir = "/should/not/be/used"
-	cfg.Paths.RegistryFile = "/var/lib/nightme/registry.json"
+	cfg.Paths.DataDir = dir
 
-	got, err := registryPath(cfg)
+	got, err := agentSessionsPath(cfg)
 	if err != nil {
-		t.Fatalf("registryPath: %v", err)
+		t.Fatalf("agentSessionsPath: %v", err)
 	}
-	if got != "/var/lib/nightme/registry.json" {
-		t.Errorf("registryPath = %q, want absolute verbatim", got)
+	want := filepath.Join(dir, "agent_sessions.json")
+	if got != want {
+		t.Errorf("agentSessionsPath = %q, want %q", got, want)
 	}
 }
 

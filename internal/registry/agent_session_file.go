@@ -118,6 +118,31 @@ func (f *AgentSessionFile) Delete(id string) error {
 	return f.writeLocked()
 }
 
+// DeleteMany removes every id present in the store and persists the
+// result in a single write. Ids absent from the store are silently
+// skipped. Useful for batch GC (e.g. `nightme list` cleaning up
+// exited sessions) where calling Delete in a loop would rewrite
+// the file N times.
+func (f *AgentSessionFile) DeleteMany(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	changed := false
+	for _, id := range ids {
+		if _, ok := f.entries[id]; ok {
+			delete(f.entries, id)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return f.writeLocked()
+}
+
 // writeLocked serializes f.entries to disk. Caller must hold f.mu.
 // Atomic write (temp + fsync + rename + chmod 0600).
 func (f *AgentSessionFile) writeLocked() error {

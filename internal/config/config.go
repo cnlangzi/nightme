@@ -122,15 +122,10 @@ type LoggingConfig struct {
 
 // PathsConfig holds filesystem locations for runtime state.
 type PathsConfig struct {
-	// DataDir is the root for registry.json, sessions.json, and
-	// per-session scratch.
+	// DataDir is the root for the v1.2 persistence stores
+	// (chat_sessions.json, agent_sessions.json) and per-session
+	// scratch.
 	DataDir string `yaml:"data_dir"`
-
-	// RegistryFile is the JSON file backing the process registry.
-	RegistryFile string `yaml:"registry_file"`
-
-	// SessionsFile is the JSON file backing session persistence.
-	SessionsFile string `yaml:"sessions_file"`
 }
 
 // DefaultPath is the conventional location of the nightme config
@@ -256,12 +251,6 @@ func applyDefaults(c *Config) {
 	if c.Paths.DataDir == "" {
 		c.Paths.DataDir = "~/.local/share/nightme"
 	}
-	if c.Paths.RegistryFile == "" {
-		c.Paths.RegistryFile = "registry.json"
-	}
-	if c.Paths.SessionsFile == "" {
-		c.Paths.SessionsFile = "sessions.json"
-	}
 }
 
 // applyEnvOverrides looks at every NIGHTME_<SECTION>_<KEY> variable
@@ -292,12 +281,6 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("NIGHTME_PATHS_DATA_DIR"); v != "" {
 		c.Paths.DataDir = v
 	}
-	if v := os.Getenv("NIGHTME_PATHS_REGISTRY_FILE"); v != "" {
-		c.Paths.RegistryFile = v
-	}
-	if v := os.Getenv("NIGHTME_PATHS_SESSIONS_FILE"); v != "" {
-		c.Paths.SessionsFile = v
-	}
 
 	// Numeric session overrides — only set when the variable parses.
 	if v := os.Getenv("NIGHTME_SESSION_DEFAULT_PTY_COLS"); v != "" {
@@ -326,8 +309,6 @@ func applyEnvOverrides(c *Config) {
 // home directory. Other path fields are left untouched.
 func expandHomePaths(c *Config) {
 	c.Paths.DataDir = expandHome(c.Paths.DataDir)
-	c.Paths.RegistryFile = expandHome(c.Paths.RegistryFile)
-	c.Paths.SessionsFile = expandHome(c.Paths.SessionsFile)
 	c.Logging.File = expandHome(c.Logging.File)
 }
 

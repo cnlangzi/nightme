@@ -87,7 +87,7 @@ type fakeSpawnerAdapter struct {
 	f *fakeSpawner
 }
 
-func (s *fakeSpawnerAdapter) Spawn(_ context.Context, name, cwd string, args []string) (agent.AgentSession, error) {
+func (s *fakeSpawnerAdapter) Spawn(_ context.Context, name, cwd string, args []string, _ string) (agent.AgentSession, error) {
 	return s.f.SpawnChatsession(name, cwd, args)
 }
 
@@ -122,7 +122,7 @@ func newTestManager(t *testing.T, withSpawner bool) (*chatsession.Manager, *fake
 // testSpawner wraps fakeAgentSession spawning into the chatsession.Spawner interface.
 type testSpawner struct{}
 
-func (testSpawner) Spawn(_ context.Context, name, cwd string, args []string) (agent.AgentSession, error) {
+func (testSpawner) Spawn(_ context.Context, name, cwd string, args []string, _ string) (agent.AgentSession, error) {
 	static := newFakeAgentSession(30000 + len(name))
 	return static, nil
 }

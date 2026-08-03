@@ -116,6 +116,24 @@ func (m *Manager) Get(chatID string) *ChatSession {
 	return m.sessions[chatID]
 }
 
+// PersistAgentSession writes the entry for as to the manager's
+// agent_sessions.json store. Idempotent; safe to call from event
+// handlers (no daemon locks held). Used to durably save the
+// agent's resume id the first time it surfaces via EventInit, so
+// the next respawn can replay `--resume <id>`.
+func (m *Manager) PersistAgentSession(as *AgentSession) error {
+	if as == nil {
+		return nil
+	}
+	m.mu.RLock()
+	asFile := m.asFile
+	m.mu.RUnlock()
+	if asFile == nil {
+		return nil
+	}
+	return asFile.Upsert(as.Entry())
+}
+
 // List returns a snapshot of all ChatSessions (freshly allocated
 // slice; callers may mutate).
 func (m *Manager) List() []*ChatSession {

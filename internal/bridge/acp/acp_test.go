@@ -62,6 +62,78 @@ func TestAcpSession_SendText_EncodesCorrectly(t *testing.T) {
 	}
 }
 
+// TestNewSession_EmitsInit asserts that NewSession synthesizes a
+// single EventInit on the events channel carrying the ACP session
+// id, so the runtime can capture the resume id uniformly with
+// Claude Code / Pi. The EventInit is emitted before NewSession
+// returns, so the first event on Events() is the init.
+func TestNewSession_EmitsInit(t *testing.T) {
+	client, server := net.Pipe()
+	bridge := &mockBridge{Conn: client, pid: 42}
+	defer server.Close()
+
+	serverReader := bufio.NewReader(server)
+	go func() {
+		initialize := readRPCForTest(t, serverReader)
+		writeRPCForTest(t, server, rpcMessage{JSONRPC: jsonRPCVersion, ID: initialize.ID, Result: json.RawMessage(`{"protocolVersion":1}`)})
+		newSession := readRPCForTest(t, serverReader)
+		writeRPCForTest(t, server, rpcMessage{JSONRPC: jsonRPCVersion, ID: newSession.ID, Result: json.RawMessage(`{"sessionId":"sess-acp-abc"}`)})
+	}()
+
+	session, err := NewSession(context.Background(), bridge, "codex", WithWorkspace("/tmp/ws"))
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	defer session.Close()
+
+	select {
+	case ev := <-session.Events():
+		if ev.Kind != agent.EventInit {
+			t.Fatalf("first event kind = %v, want EventInit", ev.Kind)
+		}
+		if ev.Init == nil {
+			t.Fatalf("EventInit.Init is nil")
+		}
+		if ev.Init.SessionID != "sess-acp-abc" {
+			t.Errorf("Init.SessionID = %q, want %q", ev.Init.SessionID, "sess-acp-abc")
+		}
+		if ev.Init.AgentName != "codex" {
+			t.Errorf("Init.AgentName = %q, want %q", ev.Init.AgentName, "codex")
+		}
+		if ev.Init.Workspace != "/tmp/ws" {
+			t.Errorf("Init.Workspace = %q, want %q", ev.Init.Workspace, "/tmp/ws")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for EventInit")
+	}
+}
+
+// TestNewSession_NoSessionID_NoInit asserts that when the
+// session/new response has no sessionId, NewSession returns an
+// error and emits no EventInit.
+func TestNewSession_NoSessionID_NoInit(t *testing.T) {
+	client, server := net.Pipe()
+	bridge := &mockBridge{Conn: client, pid: 42}
+	defer server.Close()
+
+	serverReader := bufio.NewReader(server)
+	go func() {
+		initialize := readRPCForTest(t, serverReader)
+		writeRPCForTest(t, server, rpcMessage{JSONRPC: jsonRPCVersion, ID: initialize.ID, Result: json.RawMessage(`{"protocolVersion":1}`)})
+		newSession := readRPCForTest(t, serverReader)
+		// Response has neither sessionId nor session_id.
+		writeRPCForTest(t, server, rpcMessage{JSONRPC: jsonRPCVersion, ID: newSession.ID, Result: json.RawMessage(`{}`)})
+	}()
+
+	session, err := NewSession(context.Background(), bridge, "codex", WithWorkspace("/tmp/ws"))
+	if err == nil {
+		t.Fatal("NewSession() error = nil, want non-nil")
+	}
+	if session != nil {
+		t.Errorf("session = %+v, want nil", session)
+	}
+}
+
 func TestAcpSession_ParseMessageChunkEvent(t *testing.T) {
 	s := testSession()
 	s.handleMethod(rpcMessage{Method: "message_chunk", Params: json.RawMessage(`{"text":"hello"}`)})

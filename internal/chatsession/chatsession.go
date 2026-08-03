@@ -540,14 +540,28 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 		return as, nil
 	}
 
-	newAS := NewAgentSession(
-		newAgentSessionID(),
-		cs.ID,
-		cs.activeAgent,
-		cs.activeCwd,
-		nil,
-	)
-	cs.pool[agentCwdKey{Agent: cs.activeAgent, Cwd: cs.activeCwd}] = newAS
+	// Reuse a non-Running pool entry (Detached after daemon restart,
+	// or Exited after CLI died) when one exists for this (agent,
+	// cwd) tuple. The existing entry preserves identity and
+	// — critically — the captured ResumeID from the prior run, so
+	// the next Spawn replays `--resume <id>` to the bridge. Creating
+	// a fresh entry here would discard the resume id and force a
+	// brand-new agent session after every daemon restart.
+	newAS, hadPrior := cs.pool[agentCwdKey{Agent: cs.activeAgent, Cwd: cs.activeCwd}]
+	if !hadPrior {
+		newAS = NewAgentSession(
+			newAgentSessionID(),
+			cs.ID,
+			cs.activeAgent,
+			cs.activeCwd,
+			nil,
+		)
+		cs.pool[agentCwdKey{Agent: cs.activeAgent, Cwd: cs.activeCwd}] = newAS
+	}
+	// If hadPrior, the entry's ID + ResumeID + Args are preserved
+	// from the prior construction or RestoreFromRegistry. Spawn
+	// will fork a new process and SetRunning will clear the stale
+	// exit code and flip stat back to Running.
 	cs.activeAS = newAS
 	if cs.asFile != nil {
 		_ = cs.asFile.Upsert(newAS.Entry())

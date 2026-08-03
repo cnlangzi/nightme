@@ -154,3 +154,66 @@ func TestRestoreFromRegistry_ThenLookupTriggersSpawn(t *testing.T) {
 		t.Fatalf("SendBlocks post-respawn: %v", err)
 	}
 }
+
+// TestRestoreFromRegistry_PreservesResumeIDOnRespawn is the
+// regression test for the resume-id-loss bug: after a daemon
+// restart, a Detached AgentSession restored from disk must keep
+// its captured ResumeID so the next Spawn replays `--resume <id>`
+// to the bridge. The pre-fix LookupActiveAgentSession created a
+// fresh AgentSession on the spawn path, which discarded the
+// restored entry (and its ResumeID), forcing every restart to
+// start a brand-new agent session.
+func TestRestoreFromRegistry_PreservesResumeIDOnRespawn(t *testing.T) {
+	csFile, asFile := newTestStores(t)
+
+	const chatID = "oc_xxx"
+	const csID = "cs_xxx"
+	asID := "as_with_resume"
+	if err := asFile.Upsert(&registry.AgentSessionEntry{
+		ID:            asID,
+		ChatSessionID: csID,
+		Agent:         "claude",
+		Cwd:           "/code/bailing",
+		Status:        registry.StatusDetached,
+		ResumeID:      "sess-from-prior-run",
+	}); err != nil {
+		t.Fatalf("Upsert AS: %v", err)
+	}
+	csIDCopy := csID
+	if err := csFile.Upsert(&registry.ChatSessionEntry{
+		ID:                csID,
+		ChatID:            chatID,
+		ChatType:          "p2p",
+		ActiveCwd:         "/code/bailing",
+		ActiveAgent:       "claude",
+		PrimaryAgent:      "claude",
+		AgentSessionIDs:   []string{asID},
+		ActiveAgentSessionID: &csIDCopy,
+	}); err != nil {
+		t.Fatalf("Upsert CS: %v", err)
+	}
+
+	spawner := newFakeSpawner()
+	mgr := NewManager().
+		WithPersistence(csFile, asFile).
+		WithSpawner(spawner)
+	if err := mgr.RestoreFromRegistry(); err != nil {
+		t.Fatalf("RestoreFromRegistry: %v", err)
+	}
+
+	cs := mgr.Get(chatID)
+	as, err := cs.LookupActiveAgentSession()
+	if err != nil {
+		t.Fatalf("LookupActiveAgentSession: %v", err)
+	}
+	if as.ID != asID {
+		t.Errorf("respawn replaced the pool entry: got ID %q, want %q (ResumeID round-trip depends on identity continuity)",
+			as.ID, asID)
+	}
+	if got := as.ResumeID(); got != "sess-from-prior-run" {
+		t.Errorf("in-memory ResumeID lost on respawn: got %q, want %q", got, "sess-from-prior-run")
+	}
+	if got := spawner.lastResumeID; got != "sess-from-prior-run" {
+		t.Errorf("Spawner did not receive the resume id: got %q, want %q", got, "sess-from-prior-run")
+	}
+}

@@ -396,6 +396,14 @@ type StartConfig struct {
 	// bridge; the field is here so future agents can also opt in
 	// without changing the Start signature.
 	PermissionMode string
+
+	// ResumeID is the agent's own session id, captured from the
+	// previous run's init event (e.g. Claude Code's
+	// `system/init.session_id`). Bridges that support resume (Claude
+	// Code) translate this into their native flag (e.g. `--resume
+	// <id>`); bridges that don't (ACP / Pi / PTY) silently ignore it.
+	// Empty means "no --resume; start a fresh session".
+	ResumeID string
 }
 
 // Agent is the static description of a CLI wrapper plus a factory for

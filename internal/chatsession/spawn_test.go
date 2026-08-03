@@ -316,7 +316,7 @@ func TestAgentSession_RespawnPassesResumeID(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	spawner := newFakeSpawner()
 
-	cs := New("oc_1", "p2p", "claude").
+	cs := New("oc_1", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 	if err := cs.SetActiveCwd("/x"); err != nil {

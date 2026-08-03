@@ -36,7 +36,6 @@ func listFixture(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessio
 	cs1 := &registry.ChatSessionEntry{
 		ID:            "cs_oc_run",
 		ChatID:        "oc_run",
-		ChatType:      "p2p",
 		ActiveCwd:     "/home/devin/code/bailing",
 		ActiveAgent:   "claude",
 		PrimaryAgent:  "claude",
@@ -68,7 +67,6 @@ func listFixture(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessio
 	cs2 := &registry.ChatSessionEntry{
 		ID:            "cs_oc_det",
 		ChatID:        "oc_det",
-		ChatType:      "p2p",
 		ActiveCwd:     "/home/devin/code/nightme",
 		ActiveAgent:   "codex",
 		PrimaryAgent:  "codex",

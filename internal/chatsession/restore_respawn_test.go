@@ -179,14 +179,13 @@ func TestRestoreFromRegistry_PreservesResumeIDOnRespawn(t *testing.T) {
 	}
 	csIDCopy := csID
 	if err := csFile.Upsert(&registry.ChatSessionEntry{
-		ID:                csID,
-		ChatID:            chatID,
-		ChatType:          "p2p",
-		ActiveCwd:         "/code/bailing",
-		ActiveAgent:       "claude",
-		PrimaryAgent:      "claude",
-		AgentSessionIDs:   []string{asID},
-		ActiveAgentSessionID: &csIDCopy,
+		ID:                     csID,
+		ChatID:                 chatID,
+		ActiveCwd:              "/code/bailing",
+		ActiveAgent:            "claude",
+		PrimaryAgent:           "claude",
+		AgentSessionIDs:        []string{asID},
+		ActiveAgentSessionID:   &csIDCopy,
 	}); err != nil {
 		t.Fatalf("Upsert CS: %v", err)
 	}

@@ -16,7 +16,7 @@ import (
 
 func TestRootLifecycleCommandSurface(t *testing.T) {
 	root := newRootCmd()
-	for _, name := range []string{"start", "status", "stop", "restart"} {
+	for _, name := range []string{"start", "status", "stop", "restart", "logs"} {
 		cmd, _, err := root.Find([]string{name})
 		if err != nil || cmd == root || cmd.Name() != name {
 			t.Fatalf("command %q not registered: cmd=%v err=%v", name, cmd, err)

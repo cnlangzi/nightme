@@ -17,6 +17,13 @@ import (
 // every thinking block before emitting EventText. The renderer
 // uses this to render thinking as 💭 and a final reply as 💬 even
 // though both arrive as the same EventKind.
+//
+// CONTRACT (v1.3.x): the prefix MUST be present on the EventText
+// the receipt receives for thinking entries. The Gateway's
+// translate.go strips this prefix when it emits OutThinking; the
+// feishu adapter's OutThinking handler re-prepends it before
+// calling receipt.Append so receipt_event.go's HasPrefix detection
+// continues to fire. See docs/channel/feishu.md §13.1 / §15.3.
 const thinkingPrefix = "[思考] "
 
 // eventToEntry converts one agent.AgentEvent into a LogEntry
@@ -69,7 +76,11 @@ func eventToEntry(ev agent.AgentEvent, now time.Time, lastEntry *LogEntry) (LogE
 			Time: now,
 			Icon: "🔧",
 			Text: truncateForLog(text, perEntryMaxBytes),
-			Kind: "tool_start",
+			// v1.3.x (§13.6 / §13.9): collapse tool_start/tool_end
+			// under a single "tool" Kind so buildReceiptCard wraps
+			// each in a collapsible_panel. Start+End stay as two
+			// separate entries (independent panels).
+			Kind: "tool",
 		}, true
 
 	case agent.EventToolEnd:
@@ -94,7 +105,8 @@ func eventToEntry(ev agent.AgentEvent, now time.Time, lastEntry *LogEntry) (LogE
 			Time: now,
 			Icon: icon,
 			Text: truncateForLog(body, perEntryMaxBytes),
-			Kind: "tool_end",
+			// v1.3.x (§13.6 / §13.9): see EventToolStart above.
+			Kind: "tool",
 		}, true
 
 	case agent.EventError:

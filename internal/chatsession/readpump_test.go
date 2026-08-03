@@ -33,7 +33,7 @@ func (h *trackingEventHandler) Calls() int {
 }
 
 func TestChatSession_ReadPump_StartStopRequiresSpawn(t *testing.T) {
-	cs := New("oc_xxx", "p2p", "claude")
+	cs := New("oc_xxx", "claude")
 	cs.SetActiveCwd("/x")
 	cs.SetActiveAgent("claude")
 
@@ -49,7 +49,7 @@ func TestChatSession_ReadPump_StartStopRequiresSpawn(t *testing.T) {
 func TestChatSession_ReadPump_StartAfterSpawn(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
@@ -89,7 +89,7 @@ func TestChatSession_ReadPump_StartAfterSpawn(t *testing.T) {
 func TestChatSession_ReadPump_DriveFSM_BusyOnFirstEvent(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
@@ -115,7 +115,7 @@ func TestChatSession_ReadPump_DriveFSM_BusyOnFirstEvent(t *testing.T) {
 func TestChatSession_ReadPump_DriveFSM_IdleOnDone(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
@@ -146,7 +146,7 @@ func TestChatSession_ReadPump_DriveFSM_IdleOnDone(t *testing.T) {
 func TestChatSession_ReadPump_StopIsIdempotent(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
@@ -168,7 +168,7 @@ func TestChatSession_ReadPump_StopIsIdempotent(t *testing.T) {
 func TestChatSession_KillAll_StopsReadPump(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
@@ -193,7 +193,7 @@ func TestChatSession_KillAll_StopsReadPump(t *testing.T) {
 func TestChatSession_KillAll_ClearsBuffer(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
@@ -224,7 +224,7 @@ func TestChatSession_SetEventHandler_PersistsAcrossUse(t *testing.T) {
 	// needed). /use only restarts the pump.
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
@@ -265,7 +265,7 @@ func TestChatSession_SetEventHandler_PersistsAcrossUse(t *testing.T) {
 func TestChatSession_SetAgentExitObserver(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 

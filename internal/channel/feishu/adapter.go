@@ -1598,7 +1598,6 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 		return nil
 	}
 	content := stringValue(message.Content)
-	chatType := normalizeChatType(stringValue(message.ChatType))
 	msgType := stringValue(message.MessageType)
 	text, attachments := extractAttachments(msgType, content)
 	msg := channel.Message{
@@ -1606,8 +1605,14 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 		Text:        text,
 		UserID:      senderID(event),
 		Time:        messageTime(message.CreateTime),
-		ChatType:    gateway.ChatType(chatType),
 		MessageID:   stringValue(message.MessageId),
+		// F-33 §13.11 / D3: ReplyTo = Feishu message.ParentId. The
+		// thread-top-level RootId is intentionally not surfaced to
+		// nightme — we only track point-to-point reply relationships.
+		// Empty for top-level messages (ParentId == "") and for
+		// topic-group thread-root messages where the user started a
+		// new line in an existing thread.
+		ReplyTo:     stringValue(message.ParentId),
 		Attachments: attachments,
 	}
 	// Trace every inbound message before the publish lock so the
@@ -1719,23 +1724,15 @@ func messageText(content string) string {
 	return content
 }
 
-// normalizeChatType maps a Feishu chat_type value to the channel-
-// neutral constants in internal/channel. Feishu sends "p2p" for
-// 1-on-1 DM, "group" for normal groups, and "topic_group" for
-// topic groups. Unknown values pass through unchanged so future
-// Feishu additions don't silently misclassify.
-func normalizeChatType(raw string) string {
-	switch raw {
-	case "p2p":
-		return channel.ChatTypeP2P
-	case "group":
-		return channel.ChatTypeGroup
-	case "topic_group":
-		return channel.ChatTypeThread
-	default:
-		return raw
-	}
-}
+// normalizeChatType was removed in F-33 (D1+D2). Feishu's native
+// chat_type values (p2p / group / topic_group) no longer flow into
+// the nightme data model: ChatSession, BindingEntry, and the
+// registry schema no longer carry a ChatType field. topic_group
+// (Feishu threads) is intentionally treated identically to plain
+// groups — both share the same chat_id space (oc_xxx) and the
+// thread is a Feishu-side rendering detail handled by the adapter
+// via the Reply API path parameter. See docs/SPEC.md §3.1 and
+// docs/channel/feishu.md §13.11.
 
 func messageTime(value *string) time.Time {
 	if value != nil {

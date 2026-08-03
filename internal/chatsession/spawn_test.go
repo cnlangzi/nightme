@@ -131,7 +131,7 @@ func (s *fakeSpawner) Get(name, cwd string) *fakeAgentSession {
 
 func TestAgentSession_SpawnViaSpawner(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(newFakeSpawner())
 
@@ -156,7 +156,7 @@ func TestAgentSession_SpawnViaSpawner(t *testing.T) {
 func TestAgentSession_SpawnIsIdempotent(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
@@ -180,7 +180,7 @@ func TestAgentSession_SpawnFailureLeavesDetached(t *testing.T) {
 		return nil, errors.New("spawn boom")
 	}
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
@@ -201,7 +201,7 @@ func TestAgentSession_SpawnFailureLeavesDetached(t *testing.T) {
 
 func TestAgentSession_NoSpawnerLeavesDetached(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile)
 	// no WithSpawner
 
@@ -230,7 +230,7 @@ func TestAgentSession_SendTextBeforeSpawn(t *testing.T) {
 func TestAgentSession_SendTextAfterSpawn(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
@@ -246,7 +246,7 @@ func TestAgentSession_SendTextAfterSpawn(t *testing.T) {
 func TestAgentSession_ObserveCloseTransitionsToExited(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 

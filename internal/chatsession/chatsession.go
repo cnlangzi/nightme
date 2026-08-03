@@ -31,9 +31,8 @@ import (
 // Lock. /use / /cwd take RLock for the mutation + Lock for the
 // pool mutation when an AgentSession is added.
 type ChatSession struct {
-	ID       string
-	ChatID   string
-	ChatType string
+	ID     string
+	ChatID string
 
 	mu sync.RWMutex
 
@@ -123,11 +122,10 @@ type ChatSession struct {
 // to dispatch to (no runtime fallback: the lookup only ever reads
 // activeAgent). The snapshot itself is read-only post-construction
 // (Q-A: no /default command, no per-chat override).
-func New(chatID, chatType, primaryAgent string) *ChatSession {
+func New(chatID, primaryAgent string) *ChatSession {
 	return &ChatSession{
 		ID:               deriveIDFromChatID(chatID),
 		ChatID:           chatID,
-		ChatType:         chatType,
 		activeAgent:      primaryAgent, // init seed
 		primaryAgent:     primaryAgent, // historical snapshot, read-only
 		pool:             make(map[agentCwdKey]*AgentSession),
@@ -665,7 +663,6 @@ func (cs *ChatSession) entryLocked() *registry.ChatSessionEntry {
 	return &registry.ChatSessionEntry{
 		ID:                   cs.ID,
 		ChatID:               cs.ChatID,
-		ChatType:             cs.ChatType,
 		ActiveCwd:            cs.activeCwd,
 		ActiveAgent:          cs.activeAgent,
 		PrimaryAgent:         cs.primaryAgent,

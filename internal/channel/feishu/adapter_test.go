@@ -187,6 +187,85 @@ func TestHandleMessage_LogsInbound(t *testing.T) {
 	}
 }
 
+// TestHandleMessage_ReplyToFromParentId verifies the F-33 D3
+// invariant: InboundMessage.ReplyTo is wired from
+// event.Message.ParentId. When the user replies in a thread the
+// SDK surfaces ParentId pointing at the directly replied-to
+// message; nightme's channel.Message.ReplyTo must carry that same
+// id. Top-level messages (ParentId == "") must produce an empty
+// ReplyTo so dispatch treats them as fresh turns.
+//
+// Thread-top-level RootId is intentionally not surfaced (F-33 D3):
+// even if the SDK populates RootId, nightme data model does not
+// see it.
+func TestHandleMessage_ReplyToFromParentId(t *testing.T) {
+	cases := []struct {
+		name        string
+		parentID    string // event.Message.ParentId (empty for top-level)
+		rootID      string // event.Message.RootId (must NOT surface)
+		wantReplyTo string // expected InboundMessage.ReplyTo
+	}{
+		{
+			name:        "reply in thread carries ParentId",
+			parentID:    "om_target_message",
+			rootID:      "om_thread_root",
+			wantReplyTo: "om_target_message",
+		},
+		{
+			name:        "top-level message has empty ReplyTo",
+			parentID:    "",
+			rootID:      "",
+			wantReplyTo: "",
+		},
+		{
+			name:        "thread-root message has empty ReplyTo",
+			parentID:    "",
+			rootID:      "om_thread_root",
+			wantReplyTo: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := testAdapter(t)
+
+			chatID := "oc_chat"
+			senderID := "ou_sender"
+			content := `{"text":"hello"}`
+			messageType := larkim.MsgTypeText
+			created := "1720000000123"
+			messageID := "om_new"
+			event := &larkim.P2MessageReceiveV1{
+				Event: &larkim.P2MessageReceiveV1Data{
+					Sender: &larkim.EventSender{SenderId: &larkim.UserId{OpenId: &senderID}},
+					Message: &larkim.EventMessage{
+						ChatId:      &chatID,
+						ParentId:    &tc.parentID,
+						RootId:      &tc.rootID,
+						Content:     &content,
+						MessageType: &messageType,
+						CreateTime:  &created,
+						MessageId:   &messageID,
+					},
+				},
+			}
+
+			if err := a.handleMessage(context.Background(), event); err != nil {
+				t.Fatalf("handleMessage: %v", err)
+			}
+
+			select {
+			case got := <-a.Incoming():
+				if got.ReplyTo != tc.wantReplyTo {
+					t.Errorf("ReplyTo = %q, want %q", got.ReplyTo, tc.wantReplyTo)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for incoming message")
+			}
+		})
+	}
+}
+
 // safeWriter serializes writes so the test goroutine and the
 // adapter's logger do not race on the shared buffer.
 type safeWriter struct {

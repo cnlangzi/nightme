@@ -39,7 +39,7 @@ func (c *captureHandler) snapshot() []messageStateCall {
 // fires the registered handler with the correct (chatID, userMsgID,
 // state) triple. No-op when no handler installed.
 func TestEmitMessageState_HandlerInvoked(t *testing.T) {
-	cs := New("oc_chat", "p2p", "claude")
+	cs := New("oc_chat", "claude")
 	cap := &captureHandler{}
 	cs.SetMessageStateHandler(cap.handler)
 
@@ -66,7 +66,7 @@ func TestEmitMessageState_HandlerInvoked(t *testing.T) {
 // TestEmitMessageState_NoHandlerIsNoop confirms EmitMessageState is
 // safe to call without a registered handler — must not panic.
 func TestEmitMessageState_NoHandlerIsNoop(t *testing.T) {
-	cs := New("oc_chat", "p2p", "claude")
+	cs := New("oc_chat", "claude")
 	// No SetMessageStateHandler call.
 	cs.EmitMessageState("om_msg", agent.StateReceived)
 	// If we got here without panic, success.
@@ -75,7 +75,7 @@ func TestEmitMessageState_NoHandlerIsNoop(t *testing.T) {
 // TestSetMessageStateHandler_NilClears confirms passing nil clears
 // the handler (subsequent emits become no-ops).
 func TestSetMessageStateHandler_NilClears(t *testing.T) {
-	cs := New("oc_chat", "p2p", "claude")
+	cs := New("oc_chat", "claude")
 	cap := &captureHandler{}
 	cs.SetMessageStateHandler(cap.handler)
 	cs.EmitMessageState("om_1", agent.StateReceived)
@@ -98,7 +98,7 @@ func TestSetMessageStateHandler_NilClears(t *testing.T) {
 // future turn — see chatsession.go docstring on
 // emitMessageStateForCurrentTurn.
 func TestEmitMessageStateForCurrentTurn_AnchorOnly(t *testing.T) {
-	cs := New("oc_chat", "p2p", "claude")
+	cs := New("oc_chat", "claude")
 	cap := &captureHandler{}
 	cs.SetMessageStateHandler(cap.handler)
 
@@ -140,7 +140,7 @@ func TestEmitMessageStateForCurrentTurn_AnchorOnly(t *testing.T) {
 // currentTurnUserMsgID (F-31 design: runReadPump needs this to
 // know which messages to mark Done/Error after the turn ends).
 func TestDefaultFlushHook_TracksUserMsgIDs(t *testing.T) {
-	cs := New("oc_chat", "p2p", "claude")
+	cs := New("oc_chat", "claude")
 	cs.WithSpawner(&spySpawner{})
 
 	cs.mu.Lock()

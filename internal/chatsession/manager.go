@@ -81,13 +81,15 @@ func (m *Manager) WithOnCreate(fn func(*ChatSession)) *Manager {
 	return m
 }
 
-// GetOrCreate returns the ChatSession for chatID+chatType, creating
-// it if missing. primaryAgent is the cfg.Primary snapshot from
-// config; ChatSession.primaryAgent is captured here and never
-// mutated post-creation (Q-A: no /default command, no per-chat
-// override). It also seeds activeAgent so the runtime always has
-// an effective agent to dispatch to.
-func (m *Manager) GetOrCreate(chatID, chatType, primaryAgent string) *ChatSession {
+// GetOrCreate returns the ChatSession for chatID, creating it if
+// missing. The chatType parameter was removed in F-33 (D1); nightme
+// no longer carries chat-type at the binding layer. primaryAgent
+// is the cfg.Primary snapshot from config; ChatSession.primaryAgent
+// is captured here and never mutated post-creation (Q-A: no
+// /default command, no per-chat override). It also seeds
+// activeAgent so the runtime always has an effective agent to
+// dispatch to.
+func (m *Manager) GetOrCreate(chatID, primaryAgent string) *ChatSession {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -95,7 +97,7 @@ func (m *Manager) GetOrCreate(chatID, chatType, primaryAgent string) *ChatSessio
 		return cs
 	}
 
-	cs := New(chatID, chatType, primaryAgent).
+	cs := New(chatID, primaryAgent).
 		WithSpawner(m.spawner).
 		WithPersistence(m.csFile, m.asFile)
 	m.sessions[chatID] = cs
@@ -162,7 +164,7 @@ func (m *Manager) RestoreFromRegistry() error {
 	}
 
 	for _, entry := range m.csFile.List() {
-		cs := New(entry.ChatID, entry.ChatType, entry.PrimaryAgent).
+		cs := New(entry.ChatID, entry.PrimaryAgent).
 			WithSpawner(m.spawner).
 			WithPersistence(m.csFile, m.asFile)
 		cs.activeCwd = entry.ActiveCwd

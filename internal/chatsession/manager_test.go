@@ -7,7 +7,7 @@ import (
 
 func TestManager_GetOrCreate_New(t *testing.T) {
 	mgr := NewManager()
-	cs := mgr.GetOrCreate("oc_xxx", "p2p", "claude")
+	cs := mgr.GetOrCreate("oc_xxx", "claude")
 	if cs == nil {
 		t.Fatalf("GetOrCreate returned nil")
 	}
@@ -24,8 +24,8 @@ func TestManager_GetOrCreate_New(t *testing.T) {
 
 func TestManager_GetOrCreate_ReturnsSameOnRepeat(t *testing.T) {
 	mgr := NewManager()
-	a := mgr.GetOrCreate("oc_xxx", "p2p", "claude")
-	b := mgr.GetOrCreate("oc_xxx", "p2p", "codex")
+	a := mgr.GetOrCreate("oc_xxx", "claude")
+	b := mgr.GetOrCreate("oc_xxx", "codex")
 	if a != b {
 		t.Fatalf("GetOrCreate should return same instance; got different pointers")
 	}
@@ -45,9 +45,9 @@ func TestManager_GetMissing(t *testing.T) {
 
 func TestManager_List(t *testing.T) {
 	mgr := NewManager()
-	a := mgr.GetOrCreate("a", "p2p", "claude")
-	b := mgr.GetOrCreate("b", "p2p", "claude")
-	c := mgr.GetOrCreate("c", "p2p", "claude")
+	a := mgr.GetOrCreate("a", "claude")
+	b := mgr.GetOrCreate("b", "claude")
+	c := mgr.GetOrCreate("c", "claude")
 
 	list := mgr.List()
 	if len(list) != 3 {
@@ -65,7 +65,7 @@ func TestManager_List(t *testing.T) {
 func TestManager_WithSpawner(t *testing.T) {
 	spawner := newFakeSpawner()
 	mgr := NewManager().WithSpawner(spawner)
-	cs := mgr.GetOrCreate("oc_xxx", "p2p", "claude")
+	cs := mgr.GetOrCreate("oc_xxx", "claude")
 	if cs.Spawner() == nil {
 		t.Fatalf("spawner should be wired after WithSpawner")
 	}
@@ -89,7 +89,7 @@ func TestManager_PoolAfterKillCanRespawn(t *testing.T) {
 		WithSpawner(spawner).
 		WithPersistence(csFile, asFile)
 
-	cs := mgr.GetOrCreate("oc_xxx", "p2p", "claude")
+	cs := mgr.GetOrCreate("oc_xxx", "claude")
 	cs.SetActiveCwd("/code/bailing")
 	cs.SetActiveAgent("claude")
 

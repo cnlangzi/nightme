@@ -155,7 +155,7 @@ func handleCwd(ctx context.Context, mgr *chatsession.Manager, channel Channel, m
 		return reply(ctx, channel, msg.ChatID, fmt.Sprintf("Not a directory: %s", abs)), nil
 	}
 
-	cs := mgr.GetOrCreate(msg.ChatID, chatTypeFromMessage(msg), globalPrimary)
+	cs := mgr.GetOrCreate(msg.ChatID, globalPrimary)
 	if err := cs.SetActiveCwd(abs); err != nil {
 		return reply(ctx, channel, msg.ChatID, fmt.Sprintf("SetActiveCwd failed: %v", err)), nil
 	}
@@ -215,7 +215,7 @@ func handleUse(ctx context.Context, mgr *chatsession.Manager, channel Channel, m
 		return reply(ctx, channel, msg.ChatID, "Usage: /use <agent> [args...]"), nil
 	}
 
-	cs := mgr.GetOrCreate(msg.ChatID, chatTypeFromMessage(msg), globalPrimary)
+	cs := mgr.GetOrCreate(msg.ChatID, globalPrimary)
 
 	if cs.ActiveCwd() == "" {
 		return reply(ctx, channel, msg.ChatID, "No active workspace. Send /cwd <path> first."), nil
@@ -273,11 +273,8 @@ func reply(ctx context.Context, channel Channel, chatID, text string) *CommandRe
 	return &CommandResult{Consumed: true}
 }
 
-// chatTypeFromMessage extracts chat_type from the InboundMessage.
-// Falls back to "p2p" when unknown (current Feishu reality).
-func chatTypeFromMessage(msg *InboundMessage) string {
-	if msg == nil || string(msg.ChatType) == "" {
-		return "p2p"
-	}
-	return string(msg.ChatType)
-}
+// chatTypeFromMessage was removed in F-33 (D1). ChatSession no
+// longer carries a ChatType; the field is absent from
+// InboundMessage entirely. Callers that previously extracted
+// chatType should pass an empty string (or restructure the call
+// chain to not need a chatType).

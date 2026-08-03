@@ -913,11 +913,112 @@ PATCH 路径不动 —— Feishu 的 PATCH 接口会自动保留被 PATCH 消息
 
 **✅ 决议(2026-08-03,Devin "按你的建议修改")**: 采用 **方案 B**,同步 thread OutCard 与 OutCommandReply。**不**实现 `reply_in_thread` 模式(属未来 P2)。
 
+### 13.11 决策记录(2026-08-03,F-33):ChatID 数据模型简化
+
+**Devin 原话**(2026-08-03 21:08):"我们是不续接任何 Thread,最多就是点对点的 ReplyTo" — chatID 数据模型做一次系统性清理。
+
+#### 13.11.1 三个核心决策
+
+**D1: ChatType 不进 Gateway**
+- 删除 `internal/gateway/messages.go:18-27` 的 `ChatType` 类型 + 4 个常量(`ChatTypeP2P/Group/Thread/Other`)
+- 删除 `InboundMessage.ChatType` 字段 + `IsDM()` 方法
+- 删除 `BindingEntry.ChatType` / `ChatSession.ChatType` / `ChatSessionEntry.ChatType` 持久化字段
+- `/status` 命令不再展示 "DM/Group" 标签
+- Gateway 只看 `chat_id string`,假设所有 chat 同质
+
+**D2: topic_group 不特殊处理**
+- Feishu `chat_type == "topic_group"` 的消息**完全不分支**,跟普通 group 走相同路径
+- 原因:Feishu SDK `EventMessage.ChatId` 在 topic_group 下跟 group **同构**(都是 `oc_xxx`),thread 是消息级逻辑分组,不是 chat 级
+- binding 表 `gateway.bindings[chat_id]` 天然兼容,topic_group 在 nightme 内部就是"group,thread 在外面"
+- 适配器 `internal/channel/channel.go` 删 `ChatTypeThread` 常量;保留 `ChatTypeP2P/Group`(Channel 包私有)
+
+**D3: ReplyTo = ParentId,RootId 不进 nightme**
+- Inbound `msg.ReplyTo = message.ParentId`(Feishu 原生 `parent_id`)
+- Outbound `msg.ReplyTo = currentTurnUserMsgID`(不变,§13.10 已落地)
+- **`RootId` 整个项目永远不读、不存、不传**(`grep -rn "\.RootId" internal/` 应为 0 命中)
+
+**D4: 任何 Channel 都不引入 thread 概念**(Devin 2026-08-03 21:11 拍板,B 选项)
+- Slack `thread_ts` / Telegram `message_thread_id` / Discord thread 等**不进 nightme 数据模型**
+- 仅 Channel 内部渲染时使用(thread 视觉由 Channel 自治)
+- 如未来 Slack thread 等场景需要支持,在 Channel 包内自治实现,**不动 nightme 数据模型**
+
+#### 13.11.2 语义统一:ReplyTo = "被 reply 的那条 message_id"
+
+| 方向 | 值 | 含义 |
+|------|-----|------|
+| Inbound `msg.ReplyTo` | `message.ParentId` | user 在 Feishu 端 @ 的那条 message_id;top-level 消息(没 @)则 `ParentId == ""` → `ReplyTo == ""` |
+| Outbound `msg.ReplyTo` | `currentTurnUserMsgID` | user 当前这条 message_id(不是 thread 顶层,也不是 user @ 的目标) |
+
+两个 `ReplyTo` 是**同一个字段,不同方向**,语义统一为 "reply 关系中的被 reply 方"。
+
+#### 13.11.3 当前 inbound bug:`msg.ReplyTo` 永远是空字符串
+
+`handleMessage`(`internal/channel/feishu/adapter.go:1593-1617`)构造 `channel.Message` 时**不读 `event.Message.RootId`,也不读 `event.Message.ParentId`**:
+```go
+msg := channel.Message{
+    ChatID:      chatID,                        // ✅ 已填
+    Text:        text,
+    UserID:      senderID(event),
+    Time:        messageTime(message.CreateTime),
+    ChatType:    gateway.ChatType(chatType),    // ❌ D1 移除
+    MessageID:   stringValue(message.MessageId),
+    // ReplyTo 字段永远不存在 ❌ D3 需要新增 wire
+    Attachments: attachments,
+}
+```
+
+**修复**:加 `ReplyTo: stringValue(message.ParentId)`,删 `ChatType: gateway.ChatType(chatType)`。
+
+#### 13.11.4 数据流影响
+
+**Inbound**(改动):
+```
+Feishu SDK event(EventMessage{ChatId, ChatType, MessageId, ParentId, RootId, ...})
+  └─ handleMessage
+     ├─ msg = channel.Message{
+     │    ChatID:    chatID,                   // 不变
+     │    MessageID: message.MessageId,        // 不变
+     │    ReplyTo:   message.ParentId,         // ← 新增 wire (D3)
+     │    Text/Attachments/UserID/Time: 不变,
+     │    // ChatType 字段删除                  // ← D1 移除
+     │  }
+     └─ publish a.incoming → Gateway.dispatchLoop → bindings[msg.ChatID]
+```
+
+**Outbound**(无变化,§13.10 已落地):
+```
+ChatSession.onAgentEvent
+  ├─ out.ReplyTo = cs.currentTurnUserMsgID     // 不变
+  └─ channel.Send → sendViaLarkReply(POST /im/v1/messages/{rootID}/reply)
+     rootID = msg.ReplyTo = user 当前 message_id
+     ↓
+     Feishu 端把 reply 视觉放到 user 当前 message 附近
+```
+
+#### 13.11.5 跟 §13.10 的关系
+
+§13.10 修了 **outbound**(bot reply 用 `msg.ReplyTo` 作 Feishu root_id 投递)。
+§13.11(D3)修了 **inbound**(wire `msg.ReplyTo = message.ParentId`)。
+两条合起来构成完整 reply-in-thread 数据流闭环:
+- inbound 方向:user reply 的目标(`ParentId`)被记录
+- outbound 方向:bot reply 永远 anchor 到 user 当前 message(`currentTurnUserMsgID`)
+
+不引入 thread 树,不爬 RootId,Feishu 端 thread 视觉由 Channel 自治。
+
+#### 13.11.6 实施细节
+
+详见 [`docs/feat/F-33-simplify-chatid-data-model.md`](../feat/F-33-simplify-chatid-data-model.md),包括:
+- 12 处代码改动清单(Channel → Gateway → ChatSession → Registry)
+- Test 改动 + 新增 `TestHandleMessage_ReplyToFromParentId`
+- Registry 兼容(Go JSON unmarshal 默认容忍未知字段,无需迁移)
+- 验收清单 16 项
+
 ## 14. 变更日志
 
 - **2026-08-03** — 加入 §11-§13: Feishu msg_type 全集参考、OutboundKind → Feishu 渲染映射表、审计结果(1 bug + 4 澄清)。基于 `internal/channel/feishu/*` 与 `internal/gateway/*` 现状。
 - **2026-08-03(同日增量)** — 加入 §13.6-§13.9:Devin 拍板 Thinking/ToolStart/ToolEnd 全部折叠;列出 3 个 UX 折叠粒度方案(per-event / aggregate-paired / category-aggregate)+ 4 个待确认问题。等 Devin 决定后启动 PR。
 - **2026-08-03(同日再增量)** — 加入 §13.10:Devin 发现 `OutboundMessage.ReplyTo` 字段被消费在内部 receipt map 但**从未投递为 Feishu `root_id`**,所有 bot 回复都是顶层消息,与用户消息无视觉连接。SDK 字段 `larkim.CreateMessageReqBody.RootId` 已存在但代码没用。F-26 v1.1 设计文档 `ReplyTo 非空 → 必须镇定到该 userMsgID(用 ReplyMessage API 或已有 receipt)` 在 v1.3 refactor 中丢失。提供 A/B/C 三种修复范围(最小/中等/完整)+ 4 个待确认问题。
+- **2026-08-03(同日三增量)** — 加入 §13.11(F-33 决策记录):D1 ChatType 不进 Gateway + D2 topic_group 不特殊处理 + D3 `ReplyTo = ParentId`(RootId 不进 nightme)+ D4 任何 Channel 都不引入 thread 概念。落地 chatID 数据模型系统性清理,关闭 inbound 方向 ReplyTo 接线缺失。详见 [`docs/feat/F-33-simplify-chatid-data-model.md`](../feat/F-33-simplify-chatid-data-model.md)。
 - **v0.3 ~ v1.3** — 早期章节(背景、OpenClaw 调研、迁移方案、已知坑等)保留;参见章节顶部 Status 行。
 
 ## 15. v1.3.x 实施计划:折叠 + reply-in-thread

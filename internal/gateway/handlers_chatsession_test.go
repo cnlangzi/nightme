@@ -10,14 +10,12 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/receipt"
 )
 
 // fakeChannel records every Send call; safe for concurrent use.
 type fakeChannel struct {
-	mu      sync.Mutex
-	sends   []OutboundMessage
-	receipts []string
+	mu    sync.Mutex
+	sends []OutboundMessage
 }
 
 func (c *fakeChannel) Name() string { return "fake" }
@@ -29,21 +27,6 @@ func (c *fakeChannel) Send(_ context.Context, m OutboundMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.sends = append(c.sends, m)
-	return nil
-}
-
-func (c *fakeChannel) CreateReceipt(_ context.Context, _ string, userMsgID string, _ []agent.ContentBlock) (receipt.Receipt, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.receipts = append(c.receipts, userMsgID)
-	return receipt.Receipt("rcpt_" + userMsgID), nil
-}
-
-func (c *fakeChannel) UpdateReceipt(_ context.Context, _ receipt.Receipt, _ receipt.ReceiptState) error {
-	return nil
-}
-
-func (c *fakeChannel) DisposeReceipt(_ context.Context, _ receipt.Receipt) error {
 	return nil
 }
 

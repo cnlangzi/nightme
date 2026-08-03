@@ -102,6 +102,7 @@ v1.2 核心架构不变式——任何状态机都**只有一个** owner，跨�
 | **Binding FSM**（chat ↔ ChatSession）| Gateway | 1:1 绑定，永不删 | 是（ChatSessionEntry）|
 | **Receipt FSM**（per userMsg）| Gateway | `pending → executing → done/error` | 否（重启丢）|
 | **InputBuffer FSM**（per ChatSession）| ChatSession | `idle ↔ busy` | 否（重启丢）|
+| **MessageState FSM**（per userMsg）| ChatSession | `received → forwarded → done / error` | 否（重启丢）|
 | **AgentSession.Status**（per AgentSession）| AgentSession | `running → detached / exited` | 是（AgentSessionEntry）|
 | **ChatSession.ActiveAgentSession**（per ChatSession）| ChatSession | 引用 pool 中的某个 AgentSession | 引用在 ChatSessionEntry |
 
@@ -123,6 +124,7 @@ v1.2 核心架构不变式——任何状态机都**只有一个** owner，跨�
 - **`/use` 不重启进程**：永远复用 pool 中的现有 AgentSession，找不到才 spawn 新进程
 - **`/cwd` 不重启任何 AgentSession**：永远只改 activeCwd，老 AgentSession 保留在 pool
 - **Receipt FSM 跨 `/use` / `/cwd` 不变**：receipt 按 userMsgID 索引，与 active AgentSession 死活解耦
+- **MessageState 与 Receipt 解耦**（v1.3 新增）：两者都按 userMsgID 索引，但语义、Owner、触发点完全独立。MessageState 由 ChatSession lifecycle 触发，Receipt FSM 由 Gateway 主动创建；一个失败不影响另一个
 
 ---
 
@@ -151,6 +153,7 @@ messageDispatcher(ctx, msg)
   ├ gateway.bindings[msg.chat_id] 查 ChatSession
   │   ├ nil → channel.Send("no chat session, /cwd first")
   │   └ Status != Ready → channel.Send("not ready, /cwd + /use first")
+  ├ (0) cs.emitMessageState(msg.MessageID, StateReceived)   ← 新增（v1.3）：触发 MessageState(Received) 事件
   ├ (a) receipt = ch.CreateReceipt(ctx, chat_id, msg.MessageID, msg.Blocks)
   ├ (b) gateway.receipts[msg.MessageID] = {chatId, chatSessionId, receipt, state: Pending}
   ├ (c) chatSession.QueueUserMessage(msg.Blocks, msg.MessageID)
@@ -158,6 +161,7 @@ messageDispatcher(ctx, msg)
   │         ├ Idle → 立即 SendBlocks(blocks) → return (dispatched=true)
   │         └ Busy → 入队 → return (dispatched=false)
   ├ (d) 如果 dispatched → ch.UpdateReceipt(receipt, Executing) → state: Executing
+  ├ (e) cs.emitMessageState(msg.MessageID, StateForwarded)   ← 新增（v1.3）：dispatch 成功后触发
   └ 如果 queued (Busy):
         receipt 保持 Pending
         chatSession.InputBuffer.onFlush 钩子（Gateway 注入）会在 EventDone 触发 flush 时:
@@ -165,6 +169,8 @@ messageDispatcher(ctx, msg)
           │   ├ 对每个 userMsgID → ch.UpdateReceipt(receipt, Executing) → state: Executing
           │   └ agentSession.SendBlocks(combined)
           └
+
+**v1.3 新增**：MessageState 事件由 ChatSession 在 lifecycle 各点 emit（步骤 0、e），由 Gateway 的 `OnMessageState` 回调翻译为 `OutboundMessage{Kind: OutMessageState}` 并通过 Channel.Send 转发。详见 §2.5。
 ```
 
 ### 2.2 CLI 输出 → 用户（Outbound）
@@ -297,6 +303,90 @@ handler.kill(ctx, msg, args)
                                                             ↓
                                                        delete(receipts, userMsgID)
 ```
+
+---
+
+### 2.5 Message Lifecycle Tracking（v1.3 新增）
+
+**核心问题**：用户在 IM 里发了一条消息，怎么知道系统处理到哪一步了？—— `MessageState` 是这个问题的答案。
+
+#### 2.5.1 概念
+
+**`MessageState` = 消息的生命周期阶段属性**。回答 3 个问题：
+
+1. ChatSession 收到消息没有？ → `StateReceived`
+2. 消息转给 AgentSession 了没有？ → `StateForwarded`
+3. AgentSession 执行完成了没有？ → `StateDone` (+ `StateError` 可选)
+
+每条普通用户消息在系统里流转时，对应 `MessageState` 事件被 emit；Channel 把它渲染成平台原生视觉表达（Feishu reaction emoji，Slack emoji 短码，Web UI DOM 元素）。
+
+#### 2.5.2 4 层事件流
+
+```
+[1] ChatSession / AgentSession
+        │  emit MessageState event (state + userMsgID)
+        │  via callback mechanism
+        ▼
+[2] Gateway
+        │  接 OnMessageState callback
+        │  翻译成 OutboundMessage{Kind: OutMessageState, Meta: {message_id, state}}
+        │  通过 Channel.Send 提交
+        ▼
+[3] Channel (feishu adapter / future slack / future web ...)
+        │  在 Send dispatcher 看到 OutMessageState case
+        │  state → 平台原生视觉表达
+        │  Feishu: AddReaction(userMsgID, emoji_type)
+        ▼
+[4] Platform SDK (Feishu / Slack / DOM)
+        ▼
+    用户看到视觉反馈（emoji / icon / progress bar）
+```
+
+**每层职责**：
+
+| 层 | 知道什么 | 不知道什么 |
+|---|---|---|
+| ChatSession / AgentSession | "现在消息进入 X 状态了" | 怎么传输、谁接收、长什么样 |
+| Gateway | OutboundMessage wire format；Channel interface | emoji 是什么、平台细节 |
+| Channel (feishu / future) | state → emoji_type 映射；平台 SDK | 事件从哪来、谁 emit |
+| Platform SDK | 平台原生 API | — |
+
+#### 2.5.3 抽象事件契约
+
+**`OutboundKind.OutMessageState`** — 新增枚举值，承载 message state 变化事件。
+
+```go
+OutboundMessage{
+    Kind: OutMessageState,
+    ChatID: chatID,
+    Meta: map[string]any{
+        "message_id": userMsgID,           // 必填：标记哪条用户消息
+        "state":      receipt.MessageState, // 必填：状态值
+    },
+}
+```
+
+#### 2.5.4 触发点
+
+| 触发时机 | 状态 | 说明 |
+|---|---|---|
+| `ChatSession.GetOrCreate(chatID)` 成功后 | `StateReceived` | 消息首次进 ChatSession |
+| `ChatSession.LookupActiveAgentSession()` 成功 | `StateForwarded` | spawn 成功或命中 running pool |
+| `ChatSession.runReadPump` 收到 `EventDone` | `StateDone` | agent 处理完 |
+| `ChatSession.runReadPump` 收到 `EventError` | `StateError` | agent 出错 |
+
+**Scope 强约束**：MessageState **只对普通用户消息触发**。Slash command（`/cwd` `/use` `/kill` 等）不产生 MessageState —— 控制平面有 `OutCommandReply` 作为反馈。
+
+#### 2.5.5 与 Receipt 的关系
+
+| 概念 | 跟踪什么 | Owner |
+|---|---|---|
+| **MessageState** | 消息在系统里的处理进度 | ChatSession |
+| **Receipt** | agent 响应的渲染载体（FSM） | Gateway |
+
+两者**完全独立**：都按 `userMsgID` 索引，但语义、Owner、触发点都不同。MessageState 不是 Receipt 的渲染轨道；Receipt 是否实现不影响 MessageState 工作。
+
+详见 [`feat/F-31-message-state.md`](./feat/F-31-message-state.md)。
 
 ---
 

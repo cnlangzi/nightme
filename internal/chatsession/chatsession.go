@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/receipt"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -85,6 +86,22 @@ type ChatSession struct {
 	// for each event drained from the active AgentSession. Set
 	// once at startup (or first dispatch); persists across /use.
 	eventHandler EventHandler
+
+	// onMessageState is the runtime-installed callback fired when
+	// this ChatSession's message lifecycle advances (F-31). Set
+	// once at startup. Reads from currentTurnUserMsgIDs (mutated
+	// by FlushHook) so EventDone/Error can fan out to all user
+	// messages in the just-completed turn.
+	//
+	// nil = no observer; emitMessageState becomes a no-op.
+	onMessageState func(chatID, userMsgID string, state receipt.MessageState)
+
+	// currentTurnUserMsgIDs tracks the user messages currently
+	// being processed by the active AgentSession. Updated by
+	// defaultFlushHookLocked when InputBuffer flushes; consumed
+	// by runReadPump on EventDone/Error to emit MessageState
+	// events for each. Empty when no turn is in flight.
+	currentTurnUserMsgIDs []string
 
 	// exitObserver is the runtime-installed callback fired when
 	// an active AgentSession's process exits. nil = no observer.
@@ -257,8 +274,16 @@ func (cs *ChatSession) ensureBuffer() *InputBuffer {
 // defaultFlushHookLocked returns the built-in FlushHook that
 // forwards user blocks to the current active AgentSession. Caller
 // must hold cs.mu (Lock).
+//
+// v1.3 (F-31): also captures userMsgIDs into currentTurnUserMsgIDs
+// so runReadPump can emit MessageState(Done/Error) for each message
+// when the AgentSession finishes the turn. Without this capture
+// there would be no way to correlate terminal AgentEvents back to
+// the specific user messages that triggered the turn (especially
+// in buffered-batch case where N userMsgIDs share one agent turn).
 func (cs *ChatSession) defaultFlushHookLocked() FlushHook {
 	return func(combined []agent.ContentBlock, userMsgIDs []string) error {
+		cs.currentTurnUserMsgIDs = append([]string(nil), userMsgIDs...)
 		as := cs.activeAS
 		if as == nil || as.Handle() == nil {
 			return ErrNotRunning
@@ -337,6 +362,72 @@ func (cs *ChatSession) SetEventHandler(h EventHandler) {
 	cs.mu.Lock()
 	cs.eventHandler = h
 	cs.mu.Unlock()
+}
+
+// SetMessageStateHandler installs the callback fired when this
+// ChatSession's message lifecycle advances (F-31). The runtime
+// (cmd/nightme) wires gw.OnMessageState into every ChatSession at
+// startup; ChatSession calls it on:
+//
+//   - StateReceived: ChatSession accepts a user message for
+//     dispatch (called from dispatchMessage before spawn work).
+//   - StateForwarded: message dispatched to AgentSession
+//     (called from dispatchMessage after LookupActiveAgentSession
+//     success).
+//   - StateDone: active AgentSession emitted EventDone for the
+//     messages in the just-completed turn.
+//   - StateError: active AgentSession emitted EventError.
+//
+// nil clears the handler (emitMessageState becomes a no-op).
+//
+// Scope constraint: MessageState events are NOT produced for slash
+// commands (/cwd /use /kill etc.); those go through different
+// paths that don't reach QueueUserMessage. See F-31 §3.2.
+func (cs *ChatSession) SetMessageStateHandler(h func(chatID, userMsgID string, state receipt.MessageState)) {
+	cs.mu.Lock()
+	cs.onMessageState = h
+	cs.mu.Unlock()
+}
+
+// EmitMessageState fires the onMessageState callback for a single
+// userMsgID. Public entry point for external lifecycle triggers
+// (e.g. dispatchMessage in cmd/nightme calling cs.EmitMessageState
+// (userMsgID, StateReceived) before spawn). Internal lifecycle
+// hooks call this too. No-op if no handler is installed.
+//
+// Caller MUST NOT hold cs.mu (handler is invoked synchronously and
+// may call back into ChatSession methods).
+func (cs *ChatSession) EmitMessageState(userMsgID string, state receipt.MessageState) {
+	cs.mu.RLock()
+	h := cs.onMessageState
+	chatID := cs.ChatID
+	cs.mu.RUnlock()
+	if h == nil {
+		return
+	}
+	h(chatID, userMsgID, state)
+}
+
+// emitMessageStateForCurrentTurn fires onMessageState for every
+// userMsgID in currentTurnUserMsgIDs. Called from runReadPump on
+// terminal agent events (EventDone/Error) so all messages in the
+// just-completed turn receive their final state event.
+//
+// Clears currentTurnUserMsgIDs after emission so a subsequent turn
+// (e.g. OnTurnEnded flushing queued messages) starts fresh.
+func (cs *ChatSession) emitMessageStateForCurrentTurn(state receipt.MessageState) {
+	cs.mu.Lock()
+	ids := cs.currentTurnUserMsgIDs
+	cs.currentTurnUserMsgIDs = nil
+	h := cs.onMessageState
+	chatID := cs.ChatID
+	cs.mu.Unlock()
+	if h == nil || len(ids) == 0 {
+		return
+	}
+	for _, umid := range ids {
+		h(chatID, umid, state)
+	}
 }
 
 // BufferClear discards queued messages without sending. Returns

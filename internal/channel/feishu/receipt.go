@@ -172,11 +172,11 @@ type MessageReceipt struct {
 	// across the receipt's lifetime. Surfaced via logEvictedMarker.
 	evicted int
 
-	// currentReaction tracks the last successfully-added lifecycle
-	// reaction emoji so same-state renders (heartbeats) skip a
-	// duplicate AddReaction. Reactions are append-only — previous
-	// state emojis stay on the user message as history.
-	currentReaction string
+	// v1.3 (F-31): currentReaction removed. Reaction idempotency
+	// tracking moved to Adapter-level messageStates map (per
+	// userMsgID, not per receipt). MessageReceipt is now purely
+	// about the card body; reaction lifecycle is owned by
+	// MessageState FSM.
 
 	// cardMsgID is the Feishu message id of the rolling-log card
 	// once it has been created. Empty before the first render.
@@ -429,27 +429,16 @@ func compactNumberLoud(n int) string {
 	}
 }
 
-// Emoji returns the Feishu reaction emoji_type for a state. Used by
-// the ReactionAdd side of the dual-track.
+// Emoji (deprecated in v1.3 F-31) was the feishu-side reaction
+// emoji mapping for receipt-card lifecycle states. The function is
+// removed: reaction handling moved to MessageState FSM (see
+// mapStateToFeishuEmoji in adapter.go). Receipt FSM now only
+// drives the card body, not reactions.
 //
-// The identifiers are Feishu predefined emoji_type values — NOT raw
-// unicode. Passing unicode like "⏳" to the reaction API fails with
-// code 99992354 ("data not found") because the reaction service
-// only recognizes the predefined set (THUMBSUP / OK / OnIt /
-// PARTY / …).
-func (s ReceiptState) Emoji() string {
-	switch s {
-	case StateWaiting:
-		return "OneSecond"
-	case StateExecuting:
-		return "OnIt"
-	case StateCompleted:
-		return "DONE"
-	case StateError:
-		return "THUMBSUP" // closest Feishu-predefined indicator of "failed"
-	}
-	return ""
-}
+// The identifiers that used to live here (OneSecond / OnIt / DONE /
+// THUMBSUP) match the v1.3 MessageState → emoji mapping verbatim,
+// but the trigger states (Received / Forwarded / Done) are owned
+// by ChatSession, not MessageReceipt.
 
 // NewMessageReceipt creates a receipt and emits the initial state
 // (Waiting). The reply text message and the ⏳ reaction are posted
@@ -465,20 +454,15 @@ func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID stri
 		state:      StateWaiting,
 	}
 
-	// 1. Add the initial lifecycle reaction. Reactions are append-only;
-	//    the returned ID is not needed because receipts never delete them.
-	_, err := bot.AddReaction(ctx, userMsgID, StateWaiting.Emoji())
-	if err != nil {
-		r.logger.Warn("feishu receipt: initial reaction failed", "err", err)
-	} else {
-		r.mu.Lock()
-		r.currentReaction = StateWaiting.Emoji()
-		r.mu.Unlock()
-	}
-
-	// 2. Post the reply with just the header line. Subsequent
-	//    events Append entries and re-render this message in
-	//    place. Capture the returned message ID for edits.
+	// v1.3 (F-31): initial reaction is NO LONGER added here.
+	// MessageState FSM owns user-message reaction lifecycle; receipt
+	// only handles the reply message (card body). ChatSession.emitMessageState
+	// will fire MessageState(Received) → Gateway.OnMessageState →
+	// Adapter.Send → AddReaction("OneSecond") on userMsgID.
+	//
+	// Post the reply with just the header line. Subsequent events
+	// Append entries and re-render this message in place. Capture
+	// the returned message ID for edits.
 	msgID, err := bot.SendMessageText(ctx, chatID, r.state.headerLine(r))
 	if err != nil {
 		r.logger.Warn("feishu receipt: initial reply failed", "err", err)
@@ -500,13 +484,14 @@ func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID stri
 // which posts the reply and constructs the receipt in one place.
 //
 // bot is the adapter (or any receiptBot implementation) used by
-// renderLocked to append reactions and ship reply text.
-// Stage 3 callers pass `a`; passing nil will panic on the first
-// Append, since renderLocked calls r.bot.AddReaction directly.
-// (Earlier versions left bot=nil under the assumption that "callers
-// go through the adapter methods" — but renderLocked does not, and
-// the synthetic cold-start path (adapter.receiptFor) constructs a
-// receipt via this function before any event has reached the
+// renderLocked to ship reply text (SendCard on first render,
+// PatchMessage on subsequent). Stage 3 callers pass `a`; passing
+// nil will panic on the first Append, since renderLocked calls
+// r.bot.SendCard / PatchMessage directly.
+//
+// v1.3 (F-31): renderLocked no longer calls AddReaction. Reaction
+// lifecycle is owned by MessageState FSM and routed through
+// Adapter.Send dispatcher (mapStateToFeishuEmoji).
 // adapter's Send switch. See CHANGELOG v0.3 Stage 3 + the
 // `recover renderLocked panic` follow-up.)
 func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receiptBot) *MessageReceipt {
@@ -786,10 +771,13 @@ func totalLogBytesLocked(r *MessageReceipt) int {
 //     a new card on PATCH failure (avoids duplicate surfaces).
 //   - Reaction failure: logged only, never blocks the body send.
 func (r *MessageReceipt) renderLocked(ctx context.Context) error {
-	// 1. Append a reaction when the lifecycle state changes.
-	r.appendReactionLocked(ctx, r.state.Emoji())
+	// v1.3 (F-31): reaction handling moved out of MessageReceipt.
+	// MessageState FSM owns user-message reaction lifecycle; this
+	// receipt only renders the card body. ChatSession emits
+	// MessageState events that flow through Gateway.OnMessageState
+	// → Adapter.Send → AddReaction on userMsgID.
 
-	// 2. Build the card body. buildReceiptCard is in adapter.go.
+	// 1. Build the card body. buildReceiptCard is in adapter.go.
 	body, err := buildReceiptCard(r)
 	if err != nil {
 		r.logger.Warn("feishu receipt: build card failed",
@@ -822,21 +810,10 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	return nil
 }
 
-// appendReactionLocked adds emoji when it differs from the last
-// successful add. Caller must hold r.mu. Failures are logged and
-// never returned — currentReaction stays unchanged so a later
-// render can retry.
-func (r *MessageReceipt) appendReactionLocked(ctx context.Context, emoji string) {
-	if emoji == "" || emoji == r.currentReaction {
-		return
-	}
-	if _, err := r.bot.AddReaction(ctx, r.userMsgID, emoji); err != nil {
-		r.logger.Warn("feishu receipt: add reaction failed",
-			"err", err, "emoji", emoji, "state", r.state)
-		return
-	}
-	r.currentReaction = emoji
-}
+// appendReactionLocked was removed in v1.3 (F-31). Reaction
+// lifecycle is now owned by MessageState FSM, not receipt FSM.
+// Adapter.Send handles OutMessageState events directly via
+// mapStateToFeishuEmoji + AddReaction; see adapter.go §6.6.
 
 // --- v1.1 unified state machine ---
 //
@@ -895,9 +872,8 @@ func (r *MessageReceipt) applyState(ctx context.Context, target channel.ReceiptS
 	// for partial recovery; ignore everything else).
 	r.state = targetInternal
 
-	// Append reaction (best-effort). Feishu's reaction API errors
-	// don't fail the lifecycle transition.
-	r.appendReactionLocked(ctx, targetInternal.Emoji())
+	// v1.3 (F-31): reaction append removed — handled by
+	// MessageState FSM via Adapter.Send dispatcher.
 
 	r.logger.Debug("feishu receipt: state transition",
 		"from", "?", "to", targetInternal, "user_msg_id", r.userMsgID)

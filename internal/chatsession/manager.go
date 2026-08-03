@@ -35,6 +35,13 @@ type Manager struct {
 	// persistence (both optional, nil means in-memory only)
 	csFile *registry.ChatSessionFile
 	asFile *registry.AgentSessionFile
+
+	// onCreate fires once for every newly-created ChatSession,
+	// before GetOrCreate returns. Used by the runtime to wire
+	// per-ChatSession handlers (e.g. SetMessageStateHandler in
+	// F-31) without requiring the runtime to enumerate sessions
+	// after startup. nil = no callback.
+	onCreate func(*ChatSession)
 }
 
 // NewManager creates an empty Manager. Both spawner and persistence
@@ -63,6 +70,17 @@ func (m *Manager) WithPersistence(csFile *registry.ChatSessionFile, asFile *regi
 	return m
 }
 
+// WithOnCreate registers a callback fired on every newly-created
+// ChatSession before GetOrCreate returns. Restored sessions
+// (RestoreFromRegistry) also fire this callback so the runtime
+// can wire per-ChatSession handlers uniformly.
+func (m *Manager) WithOnCreate(fn func(*ChatSession)) *Manager {
+	m.mu.Lock()
+	m.onCreate = fn
+	m.mu.Unlock()
+	return m
+}
+
 // GetOrCreate returns the ChatSession for chatID+chatType, creating
 // it if missing. primaryAgent is the cfg.Primary snapshot from
 // config; ChatSession.primaryAgent is captured here and never
@@ -81,6 +99,13 @@ func (m *Manager) GetOrCreate(chatID, chatType, primaryAgent string) *ChatSessio
 		WithSpawner(m.spawner).
 		WithPersistence(m.csFile, m.asFile)
 	m.sessions[chatID] = cs
+
+	// Fire onCreate callback before releasing the lock so the
+	// callback's own locks see consistent state. Callback is
+	// allowed to call back into the ChatSession safely.
+	if m.onCreate != nil {
+		m.onCreate(cs)
+	}
 	return cs
 }
 
@@ -159,6 +184,12 @@ func (m *Manager) RestoreFromRegistry() error {
 			cs.pool[agentCwdKey{Agent: as.Agent, Cwd: as.Cwd}] = as
 		}
 		m.sessions[entry.ChatID] = cs
+
+		// Fire onCreate so the runtime can wire per-ChatSession
+		// handlers uniformly across fresh + restored chats.
+		if m.onCreate != nil {
+			m.onCreate(cs)
+		}
 	}
 	return nil
 }

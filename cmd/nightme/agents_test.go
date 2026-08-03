@@ -32,13 +32,14 @@ func TestPrintAgentsTable_Basic(t *testing.T) {
 		{Name: "claude", Command: "claude"},
 		{Name: "codex", Command: "codex-acp"},
 		{Name: "opencode", Command: "opencode", Args: []string{"acp"}},
+		{Name: "pi", Command: "pi", Args: []string{"--mode", "rpc"}},
 	}
 
 	var buf bytes.Buffer
 	printAgentsTable(&buf, rows, "claude")
 
 	out := buf.String()
-	for _, want := range []string{"claude", "codex", "opencode", "codex-acp", "acp", "(default: claude)"} {
+	for _, want := range []string{"claude", "codex", "opencode", "codex-acp", "acp", "pi", "--mode rpc", "(default: claude)"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table missing %q\n%s", want, out)
 		}

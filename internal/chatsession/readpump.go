@@ -195,9 +195,9 @@ func (cs *ChatSession) runReadPump(as *AgentSession, h EventHandler, stop, done 
 				return
 			}
 			if h != nil {
-								cs.mu.RLock()
-					userMsgID := cs.currentTurnUserMsgID
-					cs.mu.RUnlock()
+				cs.mu.RLock()
+				userMsgID := cs.currentTurnUserMsgID
+				cs.mu.RUnlock()
 				h(cs.ChatID, as, ev, userMsgID)
 			}
 			// FSM driving + MessageState emission (F-31).

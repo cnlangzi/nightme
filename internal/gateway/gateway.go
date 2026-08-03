@@ -199,10 +199,10 @@ type gateway struct {
 // messageDispatcher branch (default, non-slash-command inbound).
 // Pass nil to drop such messages (debug-only Gateway).
 //
-// v1.2 runtime closes over *chatsession.Manager via the messageDispatcher
-// closure; the Gateway itself no longer holds a session manager
-// reference. ChatSession lifecycle is owned by the runtime + the
-// chatsession package.
+// v1.2 runtime closes over *chatsession.Manager via the
+// messageDispatcher closure; the Gateway itself no longer holds a
+// session manager reference. ChatSession lifecycle is owned by
+// the runtime + the chatsession package.
 func New(messageDispatcher MessageDispatcher) Gateway {
 	return &gateway{
 		cmds:              make(map[string]Command),

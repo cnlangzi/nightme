@@ -143,9 +143,8 @@ func runRun(cmd *cobra.Command, cleanup bool, channelName string) error {
 
 // withCleanup configures whether the daemon kills every session
 // CLI on shutdown (true) or detaches them so a later restart can
-// resume them (false). Exposed as a helper so the runtime seam
-// stays consistent with v1.1 callers that may still construct
-// runDeps directly (e.g. lifecycle tests).
+// resume them (false). Exposed for tests; production wires this
+// from the --cleanup flag via runRun.
 func withCleanup(deps runDeps, cleanup bool) runDeps {
 	deps.cleanup = cleanup
 	return deps

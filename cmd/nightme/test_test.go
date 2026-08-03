@@ -133,7 +133,7 @@ func TestListTextFormat(t *testing.T) {
 	printListTable(&buf, rows)
 	out := buf.String()
 
-	for _, want := range []string{"CHAT", "AGENT", "WORKSPACE", "PID", "STATUS", "STARTED", "SID", "RESUME"} {
+	for _, want := range []string{"CHAT", "AGENT", "PID", "STATUS", "WORKSPACE", "STARTED", "SID", "RESUME"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table missing header %q\n%s", want, out)
 		}

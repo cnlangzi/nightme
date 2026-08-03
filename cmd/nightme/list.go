@@ -17,8 +17,10 @@
 //	  `--keep-exited` skips the auto-GC step even when --all is not set.
 //
 // Design notes:
-//   - Header + rows are column-aligned to a fixed width; long values
-//     are truncated so the output stays readable on a 120-col terminal.
+//   - Header + rows are column-aligned via tabwriter. No field is
+//     truncated: every value (chat id, agent name, workspace path,
+//     agent session id, resume id) is printed verbatim so operators
+//     can copy-paste any id directly into follow-up commands.
 //   - The chat column resolves AgentSessionEntry.ChatSessionID to
 //     ChatSessionEntry.ChatID; if the chat has been deleted (orphan),
 //     the column renders `(orphan)` and the row is still shown so
@@ -263,18 +265,18 @@ func loadListRows(
 	return rows, len(toGC), nil
 }
 
-// listColumn widths match the format spec. SID / CHAT / RESUME
-// are shown unmangled so operators can copy them (the resume id
-// is the literal arg to `claude --resume <id>`). AGENT / WORKSPACE
-// are truncated since they are display-only fields.
+// listColumn widths hint tabwriter's minimum column padding. None
+// of the fields are truncated — every value is printed verbatim
+// so operators can copy-paste any id (chat, cwd, agent session id,
+// resume id) directly into follow-up commands.
 const (
-	colSID       = 32 // unmangled: full agent session id
-	colChat      = 24 // unmangled: full chat id
+	colChat      = 24
 	colAgent     = 10
-	colWorkspace = 28
 	colPID       = 8
 	colStatus    = 10
-	colResume    = 36 // unmangled: full agent-resume id (UUID-shaped)
+	colWorkspace = 48
+	colSID       = 32
+	colResume    = 36
 )
 
 // printListTable writes the human-readable table to w. The header is
@@ -282,7 +284,7 @@ const (
 // unambiguous "registry is empty" instead of "did the command run?".
 func printListTable(w io.Writer, rows []listRow) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "CHAT\tAGENT\tWORKSPACE\tPID\tSTATUS\tSTARTED\tSID\tRESUME")
+	fmt.Fprintln(tw, "CHAT\tAGENT\tPID\tSTATUS\tWORKSPACE\tSTARTED\tSID\tRESUME")
 	if len(rows) == 0 {
 		tw.Flush()
 		return
@@ -290,10 +292,10 @@ func printListTable(w io.Writer, rows []listRow) {
 	for _, r := range rows {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			r.ChatID,
-			truncate(r.Agent, colAgent),
-			truncate(r.Cwd, colWorkspace),
+			r.Agent,
 			pidCell(r.PID),
 			statusCell(r.Status, r.ExitCode),
+			r.Cwd,
 			startCell(r.LastRunAt),
 			r.AgentSessionID,
 			resumeCell(r.ResumeID),
@@ -340,21 +342,6 @@ func startCell(t time.Time) string {
 	}
 	return t.Local().Format("15:04:05")
 }
-
-// truncate shortens s to at most n runes, appending an ellipsis when
-// it does not fit. The result is intended for fixed-width columns so
-// no escaping is performed.
-func truncate(s string, n int) string {
-	if n <= 1 {
-		return s
-	}
-	runes := []rune(s)
-	if len(runes) <= n {
-		return s
-	}
-	return string(runes[:n-1]) + "…"
-}
-
 // printListJSON serializes rows to w. The output is the raw array
 // (not wrapped in an envelope) so `jq '.[]'` works directly.
 func printListJSON(w io.Writer, rows []listRow) error {
@@ -362,3 +349,4 @@ func printListJSON(w io.Writer, rows []listRow) error {
 	enc.SetIndent("", "  ")
 	return enc.Encode(rows)
 }
+

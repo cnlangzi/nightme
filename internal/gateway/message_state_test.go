@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cnlangzi/nightme/internal/receipt"
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // TestOnMessageState_TranslatesToOutbound verifies that
@@ -13,7 +13,7 @@ import (
 // the resolved channel's Send.
 func TestOnMessageState_TranslatesToOutbound(t *testing.T) {
 	gw, ch := newWiredRouter(t)
-	gw.OnMessageState("oc_chat", "om_user_msg", receipt.StateReceived)
+	gw.OnMessageState("oc_chat", "om_user_msg", agent.StateReceived)
 
 	if len(ch.sends) != 1 {
 		t.Fatalf("got %d sends; want 1", len(ch.sends))
@@ -28,14 +28,14 @@ func TestOnMessageState_TranslatesToOutbound(t *testing.T) {
 	if id, _ := got.Meta["message_id"].(string); id != "om_user_msg" {
 		t.Errorf("Meta[message_id] = %v; want om_user_msg", got.Meta["message_id"])
 	}
-	st, ok := got.Meta["state"].(receipt.MessageState)
+	st, ok := got.Meta["state"].(agent.MessageState)
 	if !ok {
-		t.Fatalf("Meta[state] type = %T; want receipt.MessageState", got.Meta["state"])
+		t.Fatalf("Meta[state] type = %T; want agent.MessageState", got.Meta["state"])
 	}
-	if st != receipt.StateReceived {
+	if st != agent.StateReceived {
 		t.Errorf("Meta[state] = %v; want StateReceived", st)
 	}
-	if got.MessageState == nil || got.MessageState.State != receipt.StateReceived {
+	if got.MessageState == nil || got.MessageState.State != agent.StateReceived {
 		t.Errorf("MessageState payload missing or wrong: %+v", got.MessageState)
 	}
 }
@@ -49,7 +49,7 @@ func TestOnMessageState_NoChannelDrops(t *testing.T) {
 	gw.mu.Lock()
 	gw.defaultChannel = nil
 	gw.mu.Unlock()
-	gw.OnMessageState("oc_unknown", "om_msg", receipt.StateReceived)
+	gw.OnMessageState("oc_unknown", "om_msg", agent.StateReceived)
 	if len(ch.sends) != 0 {
 		t.Errorf("got %d sends; want 0 (no channel registered)", len(ch.sends))
 	}
@@ -59,8 +59,8 @@ func TestOnMessageState_NoChannelDrops(t *testing.T) {
 // userMsgID is a silent drop (defensive against malformed events).
 func TestOnMessageState_EmptyIDsDrops(t *testing.T) {
 	gw, ch := newWiredRouter(t)
-	gw.OnMessageState("", "om_msg", receipt.StateReceived)
-	gw.OnMessageState("oc_chat", "", receipt.StateReceived)
+	gw.OnMessageState("", "om_msg", agent.StateReceived)
+	gw.OnMessageState("oc_chat", "", agent.StateReceived)
 	if len(ch.sends) != 0 {
 		t.Errorf("got %d sends; want 0 (empty chat/user ID)", len(ch.sends))
 	}
@@ -70,11 +70,11 @@ func TestOnMessageState_EmptyIDsDrops(t *testing.T) {
 // MessageState value passes through to Channel.Send unchanged.
 func TestOnMessageState_AllStatesPassThrough(t *testing.T) {
 	gw, ch := newWiredRouter(t)
-	states := []receipt.MessageState{
-		receipt.StateReceived,
-		receipt.StateForwarded,
-		receipt.StateDone,
-		receipt.StateError,
+	states := []agent.MessageState{
+		agent.StateReceived,
+		agent.StateForwarded,
+		agent.StateDone,
+		agent.StateError,
 	}
 	for i, s := range states {
 		gw.OnMessageState("oc_chat", "om_"+string(rune('a'+i)), s)
@@ -87,7 +87,7 @@ func TestOnMessageState_AllStatesPassThrough(t *testing.T) {
 		if got.Kind != OutMessageState {
 			t.Errorf("sends[%d].Kind = %v; want OutMessageState", i, got.Kind)
 		}
-		st, _ := got.Meta["state"].(receipt.MessageState)
+		st, _ := got.Meta["state"].(agent.MessageState)
 		if st != s {
 			t.Errorf("sends[%d].Meta[state] = %v; want %v", i, st, s)
 		}

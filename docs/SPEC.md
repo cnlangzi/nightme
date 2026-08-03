@@ -46,7 +46,7 @@ v1.3 在 v1.2 架构上做**职责再切分**——核心变化是**删除 Gatew
 1. **Receipt FSM 从 Gateway 端移除**
    - Gateway 不再持有 `receipts[userMsgID]` map
    - `Channel.CreateReceipt / UpdateReceipt / DisposeReceipt` 接口方法从 `Channel` 接口移除
-   - `internal/receipt/receipt.go` 中 `Receipt` interface + `ReceiptState` enum 删掉（保留 `MessageState`）
+   - `internal/receipt/` 整个包删除(v1.2 仅保留 `MessageState` 一个 enum;v1.3 把它搬到 `internal/agent/` 因为所有 layer 都已依赖 agent)
 
 2. **outbound 路由改为 userMsgID-driven**
    - EventHandler 在每个 `OutboundMessage` 上设 `out.ReplyTo = cs.currentTurnUserMsgID`
@@ -648,7 +648,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 - ⏭ 真实 E2E 飞书 DM round-trip test
 - ⏭ 删除 `internal/session/` v1.1 MemoryManager（仍被 `internal/gateway/cmd/handlers.go` BindingEntry shim 使用）
 - ⏭ **v1.3 SPEC 落地代码改动**：
-  - `internal/receipt/receipt.go` 删 `Receipt` interface + `ReceiptState` enum（保留 `MessageState`）
+  - ✅ done: `internal/receipt/` 包删除;`MessageState` 移到 `internal/agent/`
   - `internal/channel/channel.go` 删 `CreateReceipt / UpdateReceipt / DisposeReceipt` 三个方法
   - `internal/gateway/gateway.go` 删 `receipts` map + `CreateReceipt / UpdateReceipt / DisposeReceipt` 方法 + 死代码 `translateAndSend` / `receiptsForSession`
   - `internal/channel/feishu/adapter.go` `Send` 路由改 userMsgID-driven（`msg.ReplyTo` 查 `receiptsByUserMsgID`，miss 时 cold-create）

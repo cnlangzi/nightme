@@ -1,35 +1,29 @@
-// Package receipt defines the MessageState enum used by
-// ChatSession lifecycle and Channel rendering.
-//
-// v1.3 history (see SPEC §0.1): previously this package also
-// defined Receipt (opaque handle) and ReceiptState (cross-channel
-// FSM). Both have been removed — Gateway no longer owns any
-// receipt FSM, and the receipt OBJECT is now entirely Channel-
-// internal (Feishu: *feishu.MessageReceipt; echo: *echo.echoReceipt;
-// future Slack / Web: their own types). Each Channel picks its
-// own state shape; Gateway sees none of it.
-//
-// What remains here is MessageState — a parallel concept that
-// tracks the inbound user message's progress through the system.
-// Independent of any Channel's receipt implementation.
-package receipt
+package agent
 
 // MessageState is the lifecycle stage of one inbound user message
 // within nightme's processing pipeline. It answers "where is this
 // message in the system right now?" so channels can render a
 // user-visible progress indicator.
 //
-// Owner: ChatSession (per-userMsg).
-// Trigger: ChatSession lifecycle events (received / forwarded /
-// done / error). See SPEC §2.5 for full semantics.
+// Owner: ChatSession (per-userMsg). Trigger: ChatSession
+// lifecycle events (received / forwarded / done / error). See
+// SPEC §2.5 for full semantics and the rationale for keeping
+// MessageState independent from any Channel's receipt object.
 //
-// Scope: only produced for plain user messages, NOT slash commands.
-// See docs/feat/F-31-message-state.md.
+// Scope: only produced for plain user messages, NOT slash
+// commands. See docs/feat/F-31-message-state.md.
+//
+// History: this type used to live in its own package
+// `internal/receipt/` alongside a now-removed Receipt FSM and
+// ReceiptState enum (v1.2 Gateway-owned design). v1.3 collapses
+// the package to just this one enum; we moved it into `agent`
+// (the package every other layer already imports) so there is
+// no new dependency edge and no import cycle.
 type MessageState int
 
 const (
-	// StateReceived: ChatSession has accepted the message but not
-	// yet dispatched it to an AgentSession. Triggered on
+	// StateReceived: ChatSession has accepted the message but
+	// not yet dispatched it to an AgentSession. Triggered on
 	// ChatSession.GetOrCreate.
 	StateReceived MessageState = iota
 

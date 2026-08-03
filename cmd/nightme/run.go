@@ -36,7 +36,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
-	"github.com/cnlangzi/nightme/internal/receipt"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -371,7 +370,7 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 		// F-31: ChatSession has accepted the message. Emit
 		// StateReceived synchronously so the channel can render
 		// ⏳ even before spawn resolves (FastAck UX).
-		cs.EmitMessageState(userMsgID, receipt.StateReceived)
+		cs.EmitMessageState(userMsgID, agent.StateReceived)
 
 		// Resolve active AgentSession (lazy spawn on miss).
 		_, err := cs.LookupActiveAgentSession()
@@ -406,7 +405,7 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 		// AgentSession. Emit StateForwarded so the channel flips
 		// ⏳ → 🔄. (Emitted before QueueUserMessage so the visual
 		// transition is visible even if queueing is slow.)
-		cs.EmitMessageState(userMsgID, receipt.StateForwarded)
+		cs.EmitMessageState(userMsgID, agent.StateForwarded)
 
 		// Build structured blocks and queue to InputBuffer.
 		blocks := feishu.BuildBlocks(msg.Text, msg.Attachments)

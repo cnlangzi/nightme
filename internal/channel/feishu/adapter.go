@@ -25,7 +25,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
-	"github.com/cnlangzi/nightme/internal/receipt"
 )
 
 const maxMessageBytes = 3800
@@ -114,7 +113,7 @@ type Adapter struct {
 	// Concurrency: reads/writes go through a.mu (same lock as
 	// receipts). Same lifecycle — entries persist for the
 	// ChatSession lifetime and are evicted only on adapter stop.
-	messageStates map[string]receipt.MessageState
+	messageStates map[string]agent.MessageState
 
 	// These hooks have production defaults and are intentionally kept as
 	// fields so tests can replace the network boundary with a small function.
@@ -140,7 +139,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	a := &Adapter{
 		incoming:            make(chan channel.Message, 128),
 		receiptsByUserMsgID: make(map[string]*MessageReceipt),
-		messageStates:       make(map[string]receipt.MessageState),
+		messageStates:       make(map[string]agent.MessageState),
 		cfg:                 cfg,
 		done:                make(chan struct{}),
 		logger:              slog.Default(),
@@ -454,7 +453,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if !ok {
 			return errors.New("feishu: OutMessageState missing state in Meta")
 		}
-		state, ok := stateRaw.(receipt.MessageState)
+		state, ok := stateRaw.(agent.MessageState)
 		if !ok {
 			return fmt.Errorf("feishu: OutMessageState state has unexpected type %T", stateRaw)
 		}
@@ -1122,15 +1121,15 @@ func (a *Adapter) SendMessageText(ctx context.Context, chatID, text string) (str
 // 99992354 "data not found".
 //
 // Returns "" for unknown states (forward-compatible silent drop).
-func mapStateToFeishuEmoji(state receipt.MessageState) string {
+func mapStateToFeishuEmoji(state agent.MessageState) string {
 	switch state {
-	case receipt.StateReceived:
+	case agent.StateReceived:
 		return "OneSecond" // ⏳
-	case receipt.StateForwarded:
+	case agent.StateForwarded:
 		return "OnIt" // 🔄
-	case receipt.StateDone:
+	case agent.StateDone:
 		return "DONE" // ✅
-	case receipt.StateError:
+	case agent.StateError:
 		return "THUMBSUP" // closest predefined indicator of "failed"
 	}
 	return ""

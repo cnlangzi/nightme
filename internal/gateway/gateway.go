@@ -41,7 +41,6 @@ import (
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/receipt"
 )
 
 // Channel is the abstract surface the Gateway needs from any IM
@@ -145,7 +144,7 @@ type Gateway interface {
 	// forwarded / done / error); Gateway translates to
 	// OutboundMessage{Kind: OutMessageState} and forwards to the
 	// appropriate channel via resolveChannel + Send.
-	OnMessageState(chatID, userMsgID string, state receipt.MessageState)
+	OnMessageState(chatID, userMsgID string, state agent.MessageState)
 
 	// Lifecycle
 	AttachChannels(channels ...Channel)
@@ -598,7 +597,7 @@ func (g *gateway) resolveChannel(chatID string) Channel {
 // RLock on g.mu briefly; Send runs synchronously per the caller's
 // context (background ctx is used internally because ChatSession
 // doesn't currently pass a cancellable ctx to emitMessageState).
-func (g *gateway) OnMessageState(chatID, userMsgID string, state receipt.MessageState) {
+func (g *gateway) OnMessageState(chatID, userMsgID string, state agent.MessageState) {
 	if chatID == "" || userMsgID == "" {
 		return
 	}

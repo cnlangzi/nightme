@@ -7,21 +7,21 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/gateway"
-	"github.com/cnlangzi/nightme/internal/receipt"
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // TestMapStateToFeishuEmoji verifies the canonical F-31 §8.3
 // mapping table. Pure function, no IO required.
 func TestMapStateToFeishuEmoji(t *testing.T) {
 	cases := []struct {
-		state receipt.MessageState
+		state agent.MessageState
 		want  string
 	}{
-		{receipt.StateReceived, "OneSecond"},   // ⏳
-		{receipt.StateForwarded, "OnIt"},        // 🔄
-		{receipt.StateDone, "DONE"},            // ✅
-		{receipt.StateError, "THUMBSUP"},       // ❌ closest predefined
-		{receipt.MessageState(99), ""},         // unknown → silent drop
+		{agent.StateReceived, "OneSecond"},   // ⏳
+		{agent.StateForwarded, "OnIt"},        // 🔄
+		{agent.StateDone, "DONE"},            // ✅
+		{agent.StateError, "THUMBSUP"},       // ❌ closest predefined
+		{agent.MessageState(99), ""},         // unknown → silent drop
 	}
 	for _, tc := range cases {
 		got := mapStateToFeishuEmoji(tc.state)
@@ -42,7 +42,7 @@ func TestSend_OutMessageState_MissingMeta(t *testing.T) {
 		Kind:   gateway.OutMessageState,
 		ChatID: "oc_chat",
 		Meta: map[string]any{
-			"state": receipt.StateReceived,
+			"state": agent.StateReceived,
 		},
 	})
 	if err == nil || !strings.Contains(err.Error(), "message_id") {
@@ -61,7 +61,7 @@ func TestSend_OutMessageState_MissingMeta(t *testing.T) {
 		t.Errorf("missing state: got %v; want error mentioning state", err)
 	}
 
-	// Wrong state type (string instead of receipt.MessageState).
+	// Wrong state type (string instead of agent.MessageState).
 	err = a.Send(context.Background(), gateway.OutboundMessage{
 		Kind:   gateway.OutMessageState,
 		ChatID: "oc_chat",
@@ -86,7 +86,7 @@ func TestSend_OutMessageState_UnknownStateDrops(t *testing.T) {
 		ChatID: "oc_chat",
 		Meta: map[string]any{
 			"message_id": "om_user_msg",
-			"state":      receipt.MessageState(42), // unknown
+			"state":      agent.MessageState(42), // unknown
 		},
 	})
 	if err != nil {
@@ -110,7 +110,7 @@ func TestSend_OutMessageState_TracksStateIdempotency(t *testing.T) {
 		ChatID: "oc_chat",
 		Meta: map[string]any{
 			"message_id": "om_msg_1",
-			"state":      receipt.StateReceived,
+			"state":      agent.StateReceived,
 		},
 	})
 	// After failure, messageStates should not be marked (revert).
@@ -124,7 +124,7 @@ func TestSend_OutMessageState_TracksStateIdempotency(t *testing.T) {
 	// Pre-populate messageStates with StateReceived (simulating a
 	// successful prior render).
 	a.mu.Lock()
-	a.messageStates["om_msg_1"] = receipt.StateReceived
+	a.messageStates["om_msg_1"] = agent.StateReceived
 	a.mu.Unlock()
 
 	// Second emit with same state: should be short-circuited
@@ -137,7 +137,7 @@ func TestSend_OutMessageState_TracksStateIdempotency(t *testing.T) {
 		ChatID: "oc_chat",
 		Meta: map[string]any{
 			"message_id": "om_msg_1",
-			"state":      receipt.StateReceived,
+			"state":      agent.StateReceived,
 		},
 	})
 	if err != nil {
@@ -182,7 +182,7 @@ func TestSend_OutMessageState_FirstReceivedNotSkipped(t *testing.T) {
 		ChatID: "oc_chat",
 		Meta: map[string]any{
 			"message_id": "om_msg_first",
-			"state":      receipt.StateReceived,
+			"state":      agent.StateReceived,
 		},
 	})
 	// larkClient is nil → AddReaction returns "feishu: REST client

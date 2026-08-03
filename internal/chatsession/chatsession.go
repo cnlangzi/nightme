@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/receipt"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -94,7 +93,7 @@ type ChatSession struct {
 	// MessageState for the anchor user message.
 	//
 	// nil = no observer; emitMessageState becomes a no-op.
-	onMessageState func(chatID, userMsgID string, state receipt.MessageState)
+	onMessageState func(chatID, userMsgID string, state agent.MessageState)
 
 	// currentTurnUserMsgID is the single anchor for the in-flight
 	// (or just-completed) agent turn. Updated by
@@ -422,7 +421,7 @@ func (cs *ChatSession) SetEventHandler(h EventHandler) {
 // Scope constraint: MessageState events are NOT produced for slash
 // commands (/cwd /use /kill etc.); those go through different
 // paths that don't reach QueueUserMessage. See F-31 §3.2.
-func (cs *ChatSession) SetMessageStateHandler(h func(chatID, userMsgID string, state receipt.MessageState)) {
+func (cs *ChatSession) SetMessageStateHandler(h func(chatID, userMsgID string, state agent.MessageState)) {
 	cs.mu.Lock()
 	cs.onMessageState = h
 	cs.mu.Unlock()
@@ -436,7 +435,7 @@ func (cs *ChatSession) SetMessageStateHandler(h func(chatID, userMsgID string, s
 //
 // Caller MUST NOT hold cs.mu (handler is invoked synchronously and
 // may call back into ChatSession methods).
-func (cs *ChatSession) EmitMessageState(userMsgID string, state receipt.MessageState) {
+func (cs *ChatSession) EmitMessageState(userMsgID string, state agent.MessageState) {
 	cs.mu.RLock()
 	h := cs.onMessageState
 	chatID := cs.ChatID
@@ -463,7 +462,7 @@ func (cs *ChatSession) EmitMessageState(userMsgID string, state receipt.MessageS
 //
 // Clears currentTurnUserMsgID after emission so a subsequent
 // turn (e.g. OnTurnEnded flushing queued messages) starts fresh.
-func (cs *ChatSession) emitMessageStateForCurrentTurn(state receipt.MessageState) {
+func (cs *ChatSession) emitMessageStateForCurrentTurn(state agent.MessageState) {
 	cs.mu.Lock()
 	id := cs.currentTurnUserMsgID
 	cs.currentTurnUserMsgID = ""

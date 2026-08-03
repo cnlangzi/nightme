@@ -29,7 +29,7 @@ func newTestStores(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSess
 }
 
 func TestNewAndBasics(t *testing.T) {
-	cs := New("oc_xxx", "p2p", "claude")
+	cs := New("oc_xxx", "claude")
 	if cs.ChatID != "oc_xxx" {
 		t.Fatalf("ChatID: got %q", cs.ChatID)
 	}
@@ -58,7 +58,7 @@ func TestNewAndBasics(t *testing.T) {
 
 func TestSetActiveCwdDoesNotSpawn(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").WithPersistence(csFile, asFile)
+	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
 
 	if err := cs.SetActiveCwd("/code/bailing"); err != nil {
 		t.Fatalf("SetActiveCwd: %v", err)
@@ -74,7 +74,7 @@ func TestSetActiveCwdDoesNotSpawn(t *testing.T) {
 
 func TestSetActiveAgentDoesNotSpawn(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").WithPersistence(csFile, asFile)
+	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
 
 	cs.SetActiveCwd("/code/bailing")
 	if err := cs.SetActiveAgent("claude"); err != nil {
@@ -89,7 +89,7 @@ func TestSetActiveAgentDoesNotSpawn(t *testing.T) {
 }
 
 func TestLookupActiveAgentSession_RequiresCwd(t *testing.T) {
-	cs := New("oc_xxx", "p2p", "claude")
+	cs := New("oc_xxx", "claude")
 	_, err := cs.LookupActiveAgentSession()
 	if err != ErrNoActiveCwd {
 		t.Fatalf("expected ErrNoActiveCwd, got %v", err)
@@ -98,7 +98,7 @@ func TestLookupActiveAgentSession_RequiresCwd(t *testing.T) {
 
 func TestLookupActiveAgentSession_SpawnWhenMissing(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").WithPersistence(csFile, asFile)
+	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
 
 	cs.SetActiveCwd("/code/bailing")
 	cs.SetActiveAgent("claude")
@@ -139,7 +139,7 @@ func TestLookupActiveAgentSession_ReusesPoolEntry(t *testing.T) {
 	// still effectively running (StatusRunning + non-nil Handle).
 	// Without a Spawner, the AgentSession stays Detached between
 	// lookups, so we wire a Spawner to make the test deterministic.
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(newFakeSpawner())
 	cs.SetActiveCwd("/code/bailing")
@@ -163,7 +163,7 @@ func TestLookupActiveAgentSession_ReusesPoolEntry(t *testing.T) {
 // stays; the new entry is spawned alongside it.
 func TestLookupActiveAgentSession_UseOverrides(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").WithPersistence(csFile, asFile)
+	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
 
 	cs.SetActiveCwd("/code/bailing")
 	cs.SetActiveAgent("claude")
@@ -189,7 +189,7 @@ func TestLookupActiveAgentSession_UseOverrides(t *testing.T) {
 
 func TestLookupActiveAgentSession_SpawnWhenDefaultAlsoMiss(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").WithPersistence(csFile, asFile)
+	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
 	cs.SetActiveCwd("/code/bailing")
 	cs.SetActiveAgent("codex") // active != default
 
@@ -209,7 +209,7 @@ func TestLookupActiveAgentSession_SpawnWhenDefaultAlsoMiss(t *testing.T) {
 
 func TestKillAllClearsPool(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").WithPersistence(csFile, asFile)
+	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
 	cs.SetActiveCwd("/code/bailing")
 	cs.SetActiveAgent("claude")
 	cs.LookupActiveAgentSession() // spawns claude
@@ -259,7 +259,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	cs := New("oc_xxx", "p2p", "claude").WithPersistence(csFile, asFile)
+	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
 	cs.SetActiveCwd("/code/bailing")
 	cs.SetActiveAgent("claude")
 	cs.LookupActiveAgentSession()
@@ -304,13 +304,13 @@ func TestPersistenceRoundTrip(t *testing.T) {
 }
 
 func TestChatIDDerivationDeterministic(t *testing.T) {
-	a := New("oc_abc", "p2p", "claude")
-	b := New("oc_abc", "p2p", "codex")
+	a := New("oc_abc", "claude")
+	b := New("oc_abc", "codex")
 	if a.ID != b.ID {
 		t.Fatalf("ID should be deterministic by chatID: %s vs %s", a.ID, b.ID)
 	}
 
-	c := New("oc_xyz", "p2p", "claude")
+	c := New("oc_xyz", "claude")
 	if c.ID == a.ID {
 		t.Fatalf("different chatID should give different ID")
 	}
@@ -344,7 +344,7 @@ func TestAgentSessionStatusTransitions(t *testing.T) {
 
 func TestChatSessionConcurrentSetAndLookup(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").WithPersistence(csFile, asFile)
+	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
 	cs.SetActiveCwd("/code/bailing")
 	cs.SetActiveAgent("claude")
 
@@ -371,7 +371,7 @@ func TestChatSessionConcurrentSetAndLookup(t *testing.T) {
 }
 
 func TestEmptyCwdRejected(t *testing.T) {
-	cs := New("oc_xxx", "p2p", "claude")
+	cs := New("oc_xxx", "claude")
 	if err := cs.SetActiveCwd(""); err == nil {
 		t.Fatalf("expected error for empty cwd")
 	}
@@ -383,7 +383,7 @@ func TestEmptyCwdRejected(t *testing.T) {
 // Sanity: ChatSession.ID is derived; ChatSession.CreatedAt is set.
 func TestCreatedAtAndID(t *testing.T) {
 	before := time.Now()
-	cs := New("oc_xxx", "p2p", "claude")
+	cs := New("oc_xxx", "claude")
 	after := time.Now()
 
 	if cs.CreatedAt().Before(before) || cs.CreatedAt().After(after) {
@@ -397,7 +397,7 @@ func TestCreatedAtAndID(t *testing.T) {
 // new AS's events don't get stamped with the OLD userMsgID and
 // routed to the OLD receipt card.
 func TestSetActiveAgent_ClearsStaleAnchor(t *testing.T) {
-	cs := New("oc_chat", "p2p", "claude")
+	cs := New("oc_chat", "claude")
 
 	cs.mu.Lock()
 	cs.currentTurnUserMsgID = "om_msg_old_turn"
@@ -419,7 +419,7 @@ func TestSetActiveAgent_ClearsStaleAnchor(t *testing.T) {
 // the active AS pool is torn down, the in-flight anchor must be
 // cleared so the next /spawn's events start fresh.
 func TestKillAll_ClearsStaleAnchor(t *testing.T) {
-	cs := New("oc_chat", "p2p", "claude")
+	cs := New("oc_chat", "claude")
 	cs.WithSpawner(&spySpawner{})
 
 	cs.mu.Lock()
@@ -449,7 +449,7 @@ func TestKillAll_ClearsStaleAnchor(t *testing.T) {
 // fix is in place (Lock inside the closure), no data race. If
 // not, -race trips immediately.
 func TestDefaultFlushHook_AnchorWriteIsRaceFree(t *testing.T) {
-	cs := New("oc_chat", "p2p", "claude")
+	cs := New("oc_chat", "claude")
 	cs.WithSpawner(&spySpawner{})
 
 	cs.mu.Lock()

@@ -134,7 +134,7 @@ func TestHandleCwd_SetsActiveCwd(t *testing.T) {
 	dir := t.TempDir()
 
 	mgr, ch := newTestManager(t, false)
-	msg := &InboundMessage{ChatID: "oc_xxx", ChatType: ChatTypeP2P, Text: "/cwd " + dir}
+	msg := &InboundMessage{ChatID: "oc_xxx", Text: "/cwd " + dir}
 
 	res, err := handleCwd(context.Background(), mgr, ch, msg, []string{dir}, "claude")
 	if err != nil {
@@ -207,7 +207,7 @@ func TestHandleCwd_PathResolution(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Use a fresh chat per case to avoid state bleed.
 			chatID := "oc_" + tc.name
-			msg := &InboundMessage{ChatID: chatID, ChatType: ChatTypeP2P}
+			msg := &InboundMessage{ChatID: chatID}
 
 			res, err := handleCwd(context.Background(), mgr, ch, msg, []string{tc.input}, "claude")
 			if err != nil {
@@ -234,7 +234,7 @@ func TestHandleCwd_PathResolution(t *testing.T) {
 func TestHandleCwd_RejectsNonExistentPath(t *testing.T) {
 	mgr, ch := newTestManager(t, false)
 	missing := "/this/path/definitely/does/not/exist/xyz123"
-	msg := &InboundMessage{ChatID: "oc_xxx", ChatType: ChatTypeP2P}
+	msg := &InboundMessage{ChatID: "oc_xxx"}
 
 	res, err := handleCwd(context.Background(), mgr, ch, msg, []string{missing}, "claude")
 	if err != nil {
@@ -262,7 +262,7 @@ func TestHandleCwd_RejectsFileNotDirectory(t *testing.T) {
 	}
 
 	mgr, ch := newTestManager(t, false)
-	msg := &InboundMessage{ChatID: "oc_xxx", ChatType: ChatTypeP2P}
+	msg := &InboundMessage{ChatID: "oc_xxx"}
 
 	res, err := handleCwd(context.Background(), mgr, ch, msg, []string{file}, "claude")
 	if err != nil {
@@ -293,7 +293,7 @@ func TestHandleCwd_NoArg_RepliesUsage(t *testing.T) {
 func TestHandleUse_NoActiveCwd_RepliesError(t *testing.T) {
 	mgr, ch := newTestManager(t, true)
 	res, err := handleUse(context.Background(), mgr, ch,
-		&InboundMessage{ChatID: "oc_xxx", ChatType: ChatTypeP2P},
+		&InboundMessage{ChatID: "oc_xxx"},
 		[]string{"claude"}, "claude")
 	if err != nil {
 		t.Fatalf("handleUse: %v", err)
@@ -308,11 +308,11 @@ func TestHandleUse_NoActiveCwd_RepliesError(t *testing.T) {
 
 func TestHandleUse_LazySpawn(t *testing.T) {
 	mgr, ch := newTestManager(t, true)
-	cs := mgr.GetOrCreate("oc_xxx", "p2p", "claude")
+	cs := mgr.GetOrCreate("oc_xxx", "claude")
 	cs.SetActiveCwd("/code/bailing")
 
 	res, err := handleUse(context.Background(), mgr, ch,
-		&InboundMessage{ChatID: "oc_xxx", ChatType: ChatTypeP2P},
+		&InboundMessage{ChatID: "oc_xxx"},
 		[]string{"claude"}, "claude")
 	if err != nil {
 		t.Fatalf("handleUse: %v", err)
@@ -333,7 +333,7 @@ func TestHandleUse_LazySpawn(t *testing.T) {
 func TestHandleUse_NoArg_RepliesUsage(t *testing.T) {
 	mgr, ch := newTestManager(t, false)
 	res, err := handleUse(context.Background(), mgr, ch,
-		&InboundMessage{ChatID: "oc_xxx", ChatType: ChatTypeP2P},
+		&InboundMessage{ChatID: "oc_xxx"},
 		nil, "claude")
 	if err != nil {
 		t.Fatalf("handleUse: %v", err)
@@ -349,7 +349,7 @@ func TestHandleUse_NoArg_RepliesUsage(t *testing.T) {
 func TestHandleKill_NoChatSession_RepliesCalmly(t *testing.T) {
 	mgr, ch := newTestManager(t, false)
 	res, err := handleKill(context.Background(), mgr, ch,
-		&InboundMessage{ChatID: "oc_unknown", ChatType: ChatTypeP2P})
+		&InboundMessage{ChatID: "oc_unknown"})
 	if err != nil {
 		t.Fatalf("handleKill: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestHandleKill_NoChatSession_RepliesCalmly(t *testing.T) {
 
 func TestHandleKill_ClearsPool(t *testing.T) {
 	mgr, ch := newTestManager(t, true)
-	cs := mgr.GetOrCreate("oc_xxx", "p2p", "claude")
+	cs := mgr.GetOrCreate("oc_xxx", "claude")
 	cs.SetActiveCwd("/code/bailing")
 	cs.SetActiveAgent("claude")
 	cs.LookupActiveAgentSession() // spawn
@@ -374,7 +374,7 @@ func TestHandleKill_ClearsPool(t *testing.T) {
 	}
 
 	res, err := handleKill(context.Background(), mgr, ch,
-		&InboundMessage{ChatID: "oc_xxx", ChatType: ChatTypeP2P})
+		&InboundMessage{ChatID: "oc_xxx"})
 	if err != nil {
 		t.Fatalf("handleKill: %v", err)
 	}

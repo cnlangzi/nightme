@@ -36,7 +36,6 @@ func TestRestoreFromRegistry_DemotesRunningToDetached(t *testing.T) {
 	csEntry := &registry.ChatSessionEntry{
 		ID:                   csID,
 		ChatID:               chatID,
-		ChatType:             "p2p",
 		ActiveCwd:            "/code/bailing",
 		ActiveAgent:          "claude",
 		PrimaryAgent:         "claude",
@@ -112,7 +111,6 @@ func TestRestoreFromRegistry_ThenLookupTriggersSpawn(t *testing.T) {
 	csEntry := &registry.ChatSessionEntry{
 		ID:                   csID,
 		ChatID:               chatID,
-		ChatType:             "p2p",
 		ActiveCwd:            "/code/bailing",
 		ActiveAgent:          "claude",
 		PrimaryAgent:         "claude",

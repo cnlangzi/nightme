@@ -12,7 +12,7 @@ import (
 // directly, with no fallback path.
 func TestNew_PrimaryAgentSeedsActiveAgent(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile)
 
 	if cs.ActiveAgent() != "claude" {
@@ -29,7 +29,7 @@ func TestNew_PrimaryAgentSeedsActiveAgent(t *testing.T) {
 // LookupActiveAgentSession fails with ErrNoActiveAgent.
 func TestNew_EmptyPrimaryAgent_ActiveAgentEmpty(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "").
+	cs := New("oc_xxx", "").
 		WithPersistence(csFile, asFile)
 
 	if cs.ActiveAgent() != "" {
@@ -53,7 +53,7 @@ func TestNew_EmptyPrimaryAgent_ActiveAgentEmpty(t *testing.T) {
 func TestLookupActiveAgentSession_UseOverridesPrimary(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "p2p", "claude").
+	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 

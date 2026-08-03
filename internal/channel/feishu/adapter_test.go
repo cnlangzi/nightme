@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -61,7 +62,7 @@ func TestSendLongMessage_SplitsAtNewline(t *testing.T) {
 	text := strings.Repeat("a", 2000) + "\n" + strings.Repeat("b", 2000)
 
 	var sent []string
-	a.sendFunc = func(_ context.Context, chatID, msgType, content string) (string, error) {
+	a.sendFunc = func(_ context.Context, chatID, msgType, content, rootID string) (string, error) {
 		if chatID != "oc_test" {
 			t.Errorf("chatID = %q, want oc_test", chatID)
 		}
@@ -183,6 +184,85 @@ func TestHandleMessage_LogsInbound(t *testing.T) {
 	}
 	if !strings.Contains(out, "trace me") {
 		t.Errorf("expected log line to carry the message text, got %q", out)
+	}
+}
+
+// TestHandleMessage_ReplyToFromParentId verifies the F-33 D3
+// invariant: InboundMessage.ReplyTo is wired from
+// event.Message.ParentId. When the user replies in a thread the
+// SDK surfaces ParentId pointing at the directly replied-to
+// message; nightme's channel.Message.ReplyTo must carry that same
+// id. Top-level messages (ParentId == "") must produce an empty
+// ReplyTo so dispatch treats them as fresh turns.
+//
+// Thread-top-level RootId is intentionally not surfaced (F-33 D3):
+// even if the SDK populates RootId, nightme data model does not
+// see it.
+func TestHandleMessage_ReplyToFromParentId(t *testing.T) {
+	cases := []struct {
+		name        string
+		parentID    string // event.Message.ParentId (empty for top-level)
+		rootID      string // event.Message.RootId (must NOT surface)
+		wantReplyTo string // expected InboundMessage.ReplyTo
+	}{
+		{
+			name:        "reply in thread carries ParentId",
+			parentID:    "om_target_message",
+			rootID:      "om_thread_root",
+			wantReplyTo: "om_target_message",
+		},
+		{
+			name:        "top-level message has empty ReplyTo",
+			parentID:    "",
+			rootID:      "",
+			wantReplyTo: "",
+		},
+		{
+			name:        "thread-root message has empty ReplyTo",
+			parentID:    "",
+			rootID:      "om_thread_root",
+			wantReplyTo: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := testAdapter(t)
+
+			chatID := "oc_chat"
+			senderID := "ou_sender"
+			content := `{"text":"hello"}`
+			messageType := larkim.MsgTypeText
+			created := "1720000000123"
+			messageID := "om_new"
+			event := &larkim.P2MessageReceiveV1{
+				Event: &larkim.P2MessageReceiveV1Data{
+					Sender: &larkim.EventSender{SenderId: &larkim.UserId{OpenId: &senderID}},
+					Message: &larkim.EventMessage{
+						ChatId:      &chatID,
+						ParentId:    &tc.parentID,
+						RootId:      &tc.rootID,
+						Content:     &content,
+						MessageType: &messageType,
+						CreateTime:  &created,
+						MessageId:   &messageID,
+					},
+				},
+			}
+
+			if err := a.handleMessage(context.Background(), event); err != nil {
+				t.Fatalf("handleMessage: %v", err)
+			}
+
+			select {
+			case got := <-a.Incoming():
+				if got.ReplyTo != tc.wantReplyTo {
+					t.Errorf("ReplyTo = %q, want %q", got.ReplyTo, tc.wantReplyTo)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for incoming message")
+			}
+		})
 	}
 }
 
@@ -374,7 +454,7 @@ func TestSend_RoutesByUserMsgID_NotChatID(t *testing.T) {
 	// Mock: SendCard / SendMessageText return synthetic message IDs;
 	// PatchMessage is a no-op recorder.
 	var cards int
-	a.sendFunc = func(_ context.Context, _, _, _ string) (string, error) {
+	a.sendFunc = func(_ context.Context, _, _, _, _ string) (string, error) {
 		cards++
 		return fmt.Sprintf("om_card_%d", cards), nil
 	}
@@ -465,4 +545,334 @@ func TestSend_RoutesByUserMsgID_NotChatID(t *testing.T) {
 
 type patchCall struct {
 	MessageID string
+}
+
+// TestSend_OutThinking_AppendsWithPrefix — v1.3.x (§13.1 bug fix).
+// The Gateway's translate.go strips [思考] when emitting OutThinking.
+// The adapter must re-prepend it before calling receipt.Append so
+// receipt_event.go's HasPrefix detection can tag the entry as
+// "thinking" (and buildReceiptCard wraps it in collapsible_panel).
+func TestSend_OutThinking_AppendsWithPrefix(t *testing.T) {
+	a := testAdapter(t)
+	chatID := "oc_test"
+	userMsgID := "om_user_1"
+
+	// Stub out the network boundary so we don't hit Feishu.
+	var cards int
+	a.sendFunc = func(_ context.Context, _, _, _, _ string) (string, error) {
+		cards++
+		return fmt.Sprintf("om_card_%d", cards), nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	// Cold-create a real receipt first via the production path.
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind:    gateway.OutText,
+		ChatID:  chatID,
+		ReplyTo: userMsgID,
+		Text:    "warmup",
+	}); err != nil {
+		t.Fatalf("Send(OutText warmup): %v", err)
+	}
+
+	// Now dispatch OutThinking through Send. Since a real receipt
+	// exists, the dispatcher will call receipt.Append.
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind:    gateway.OutThinking,
+		ChatID:  chatID,
+		ReplyTo: userMsgID,
+		Text:    "let me think about this",
+	}); err != nil {
+		t.Fatalf("Send(OutThinking): %v", err)
+	}
+
+	// Inspect the receipt's entries — the most recent one should
+	// carry the [思考] prefix and Kind="thinking".
+	a.mu.RLock()
+	rcpt := a.receiptsByUserMsgID[userMsgID]
+	a.mu.RUnlock()
+	if rcpt == nil {
+		t.Fatalf("no receipt registered for userMsgID=%s", userMsgID)
+	}
+	rcpt.mu.Lock()
+	if len(rcpt.entries) == 0 {
+		rcpt.mu.Unlock()
+		t.Fatalf("receipt has no entries")
+	}
+	last := rcpt.entries[len(rcpt.entries)-1]
+	rcpt.mu.Unlock()
+
+	if last.Text != "let me think about this" {
+		t.Errorf("latest entry Text=%q, want %q (eventToEntry strips the prefix; the Kind field carries the signal)", last.Text, "let me think about this")
+	}
+	if last.Kind != "thinking" {
+		t.Errorf("latest entry Kind=%q, want %q (HasPrefix detection must fire after prefix re-prepended)", last.Kind, "thinking")
+	}
+}
+
+// TestSend_OutCard_PassesReplyTo — v1.3.x (§13.10). OutCard (permission
+// request) must thread to the user's message via Feishu root_id.
+func TestSend_OutCard_PassesReplyTo(t *testing.T) {
+	a := testAdapter(t)
+
+	var captured struct {
+		ChatID  string
+		MsgType string
+		RootID  string
+	}
+	a.sendFunc = func(_ context.Context, chatID, msgType, _, rootID string) (string, error) {
+		captured.ChatID = chatID
+		captured.MsgType = msgType
+		captured.RootID = rootID
+		return "om_card_test", nil
+	}
+
+	card := &gateway.Card{
+		Title: "Permission needed",
+		Body:  "Allow Bash?",
+		Options: []string{
+			"allow", "deny",
+		},
+	}
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind:    gateway.OutCard,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user_1",
+		Card:    card,
+	}); err != nil {
+		t.Fatalf("Send(OutCard): %v", err)
+	}
+
+	if captured.RootID != "om_user_1" {
+		t.Errorf("sendFunc.RootID = %q, want %q", captured.RootID, "om_user_1")
+	}
+	if captured.MsgType != "interactive" {
+		t.Errorf("sendFunc.MsgType = %q, want %q", captured.MsgType, "interactive")
+	}
+	if captured.ChatID != "oc_test" {
+		t.Errorf("sendFunc.ChatID = %q, want %q", captured.ChatID, "oc_test")
+	}
+}
+
+// TestSend_OutCommandReply_PassesReplyTo — v1.3.x (§13.10). Slash
+// command replies must thread to the user's /command message.
+func TestSend_OutCommandReply_PassesReplyTo(t *testing.T) {
+	a := testAdapter(t)
+
+	var captured struct {
+		ChatID string
+		Text   string
+		RootID string
+	}
+	a.sendFunc = func(_ context.Context, chatID, _, content, rootID string) (string, error) {
+		captured.ChatID = chatID
+		// content is JSON-encoded text payload; extract for assertion
+		var payload struct {
+			Text string `json:"text"`
+		}
+		_ = json.Unmarshal([]byte(content), &payload)
+		captured.Text = payload.Text
+		captured.RootID = rootID
+		return "om_text_test", nil
+	}
+
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind:    gateway.OutCommandReply,
+		ChatID:  "oc_test",
+		ReplyTo: "om_cmd_1",
+		Text:    "available agents: main, codegraph",
+	}); err != nil {
+		t.Fatalf("Send(OutCommandReply): %v", err)
+	}
+
+	if captured.RootID != "om_cmd_1" {
+		t.Errorf("sendFunc.RootID = %q, want %q (slash command reply must thread)", captured.RootID, "om_cmd_1")
+	}
+	if captured.Text != "available agents: main, codegraph" {
+		t.Errorf("sendFunc.Text = %q, want %q", captured.Text, "available agents: main, codegraph")
+	}
+}
+
+// TestSendViaLark_RootIdSet — v1.3.x (§13.10). When rootID is non-empty,
+// sendViaLark must dispatch to Message.Reply (which uses path :message_id
+// as the Feishu root_id) instead of Message.Create. PatchMessage preserves
+// the thread across subsequent in-place updates.
+func TestSendViaLark_RootIdSet(t *testing.T) {
+	a := testAdapter(t)
+	// Minimal larkClient stand-in: assert we don't crash when rootID is
+	// non-empty; the full integration is exercised by E2E tests against
+	// a real Feishu bot. Here we just verify the sendContent → sendFunc
+	// plumbing passes rootID end-to-end.
+
+	var gotRoot string
+	a.sendFunc = func(_ context.Context, _, _, _, rootID string) (string, error) {
+		gotRoot = rootID
+		return "om_msg_test", nil
+	}
+
+	if _, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "om_user_42"); err != nil {
+		t.Fatalf("sendContent with rootID: %v", err)
+	}
+	if gotRoot != "om_user_42" {
+		t.Errorf("sendFunc received rootID=%q, want %q", gotRoot, "om_user_42")
+	}
+
+	// Empty rootID: still flows through sendFunc with "".
+	gotRoot = ""
+	if _, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, ""); err != nil {
+		t.Fatalf("sendContent without rootID: %v", err)
+	}
+	if gotRoot != "" {
+		t.Errorf("sendFunc received rootID=%q, want empty", gotRoot)
+	}
+}
+
+// receiptFor2 was removed: OutThinking test now drives a real
+// receipt via the Send dispatcher itself (OutText warmup primes
+// receiptsByUserMsgID).
+
+// TestSendViaLark_TerminalCodeFallsBackToCreate — v1.3.x
+// (openclaw-lark pattern from src/core/message-unavailable.ts).
+// When the Reply API returns 230011 (recalled) or 231003
+// (deleted), the target user message is permanently invalid;
+// we fall back to the Create path so the user still sees a
+// top-level message instead of a hard drop.
+func TestSendViaLark_TerminalCodeFallsBackToCreate(t *testing.T) {
+	a := testAdapter(t)
+
+	var replyCalls, createCalls int
+	a.sendFunc = func(_ context.Context, _, _, _, rootID string) (string, error) {
+		if rootID != "" {
+			replyCalls++
+			return "", errors.New("feishu: reply message failed with code 230011")
+		}
+		createCalls++
+		return "om_created", nil
+	}
+
+	if _, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "om_user_42"); err != nil {
+		t.Fatalf("sendContent: %v", err)
+	}
+	if replyCalls != 1 {
+		t.Errorf("Reply attempted = %d, want 1", replyCalls)
+	}
+	if createCalls != 1 {
+		t.Errorf("Create fallback = %d, want 1 (fallback must fire on 230011)", createCalls)
+	}
+
+	// 231003 (deleted) must also trigger the fallback.
+	replyCalls, createCalls = 0, 0
+	a.sendFunc = func(_ context.Context, _, _, _, rootID string) (string, error) {
+		if rootID != "" {
+			replyCalls++
+			return "", errors.New("feishu: reply message failed with code 231003")
+		}
+		createCalls++
+		return "om_created", nil
+	}
+	if _, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "om_user_42"); err != nil {
+		t.Fatalf("sendContent: %v", err)
+	}
+	if replyCalls != 1 || createCalls != 1 {
+		t.Errorf("230011 path: reply=%d create=%d, want 1/1", replyCalls, createCalls)
+	}
+}
+
+// TestSendViaLark_NonTerminalErrorPropagates — when Reply fails
+// with a non-terminal code (e.g., 230020 invalid-param, or a
+// transport error), we MUST propagate the error so the agent
+// can react. Falling back to Create on every error would silently
+// degrade threading for transient issues.
+func TestSendViaLark_NonTerminalErrorPropagates(t *testing.T) {
+	a := testAdapter(t)
+
+	var replyCalls, createCalls int
+	a.sendFunc = func(_ context.Context, _, _, _, rootID string) (string, error) {
+		if rootID != "" {
+			replyCalls++
+			return "", errors.New("feishu: reply message failed with code 230020")
+		}
+		createCalls++
+		return "om_created", nil
+	}
+
+	_, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "om_user_42")
+	if err == nil {
+		t.Fatalf("sendContent: want error (230020 must propagate), got nil")
+	}
+	if replyCalls != 1 {
+		t.Errorf("Reply attempted = %d, want 1", replyCalls)
+	}
+	if createCalls != 0 {
+		t.Errorf("Create fallback fired on non-terminal error: createCalls=%d, want 0", createCalls)
+	}
+
+	// Transport errors also must propagate, not silently fall back.
+	replyCalls, createCalls = 0, 0
+	a.sendFunc = func(_ context.Context, _, _, _, rootID string) (string, error) {
+		if rootID != "" {
+			replyCalls++
+			return "", errors.New("feishu: reply message: connection reset by peer")
+		}
+		createCalls++
+		return "om_created", nil
+	}
+	_, err = a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "om_user_42")
+	if err == nil {
+		t.Fatalf("transport error: want error, got nil")
+	}
+	if createCalls != 0 {
+		t.Errorf("transport error triggered Create fallback: createCalls=%d", createCalls)
+	}
+}
+
+// TestSendViaLark_NoRootIDSkipsReply — the no-rootID (top-level)
+// path must never attempt Reply, even if Reply would have
+// succeeded (which is a degenerate case — Reply without a real
+// rootID would fail server-side, but we should never call it).
+func TestSendViaLark_NoRootIDSkipsReply(t *testing.T) {
+	a := testAdapter(t)
+
+	var replyCalls, createCalls int
+	a.sendFunc = func(_ context.Context, _, _, _, rootID string) (string, error) {
+		if rootID != "" {
+			replyCalls++
+		}
+		createCalls++
+		return "om_created", nil
+	}
+
+	if _, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, ""); err != nil {
+		t.Fatalf("sendContent: %v", err)
+	}
+	if replyCalls != 0 {
+		t.Errorf("Reply invoked with empty rootID: replyCalls=%d, want 0", replyCalls)
+	}
+	if createCalls != 1 {
+		t.Errorf("Create invoked = %d, want 1", createCalls)
+	}
+}
+
+// TestIsFeishuTerminalMessageCode — direct unit test for the
+// terminal-code detector that gates the fallback.
+func TestIsFeishuTerminalMessageCode(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"230011 recalled", errors.New("feishu: reply message failed with code 230011"), true},
+		{"231003 deleted", errors.New("feishu: reply message failed with code 231003"), true},
+		{"230020 invalid-param (NOT terminal)", errors.New("feishu: reply message failed with code 230020"), false},
+		{"transport error (NOT terminal)", errors.New("feishu: reply message: connection reset"), false},
+		{"unrelated", errors.New("some other error"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isFeishuTerminalMessageCode(tc.err); got != tc.want {
+				t.Errorf("isFeishuTerminalMessageCode(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
 }

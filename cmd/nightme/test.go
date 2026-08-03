@@ -95,7 +95,7 @@ func runTest(cmd *cobra.Command, f testCmdFlags) error {
 	spawner := chatsession.NewRegistrySpawner(agentReg)
 	mgr := chatsession.NewManager().WithSpawner(spawner)
 
-	cs := mgr.GetOrCreate("test:"+f.agentName, "p2p", f.agentName)
+	cs := mgr.GetOrCreate("test:"+f.agentName, f.agentName)
 	if err := cs.SetActiveCwd(f.workspace); err != nil {
 		return fmt.Errorf("test: set cwd: %w", err)
 	}

@@ -332,7 +332,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 //
 // Flow:
 //
-//  1. cs = mgr.GetOrCreate(chatID, chatType, cfg.Primary)
+//  1. cs = mgr.GetOrCreate(chatID, cfg.Primary)   // F-33: chatType removed
 //  2. cs.LookupActiveAgentSession() (lazy spawn)
 //  3. cs.QueueUserMessage(blocks, userMsgID) (Idle → flush now;
 //     Busy → queue)
@@ -347,7 +347,7 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 			userMsgID = msg.UserID + ":" + msg.Time.UTC().Format(time.RFC3339Nano)
 		}
 
-		cs := mgr.GetOrCreate(msg.ChatID, string(msg.ChatType), primary)
+		cs := mgr.GetOrCreate(msg.ChatID, primary)
 
 		// F-31: ChatSession has accepted the message. Emit
 		// StateReceived synchronously so the channel can render

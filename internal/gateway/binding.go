@@ -16,14 +16,19 @@ package gateway
 // BindingEntry is the v1.1 chat → session binding. Persisted via
 // registry.File in commit 5 (registry two-table split).
 //
-// ChatID is the natural key. ChatType is metadata (p2p / group /
-// thread) carried for /status replies. SessionID is the FK into
-// the session manager's session table. Workspace and Agent are
-// denormalized for /cwd reply ("Workspace set to <ws>") and /run
-// reply ("Started: <agent>") without re-querying the session.
+// ChatID is the natural key. ChatType was removed in F-33 (D1):
+// nightme no longer carries chat-type classification at the
+// binding layer; Channel owns that internally. SessionID is the
+// FK into the session manager's session table. Workspace and Agent
+// are denormalized for /cwd reply ("Workspace set to <ws>") and
+// /use reply ("Now using <agent>, pid=<N>, cwd=<ws>") without
+// re-querying the session.
+//
+// Backward-compat: pre-F-33 registry files contain a `chatType`
+// JSON field; Go's json.Unmarshal tolerates unknown fields, so old
+// files continue to load. The field is simply ignored.
 type BindingEntry struct {
 	ChatID    string
-	ChatType  string
 	SessionID string
 	Workspace string
 	Agent     string

@@ -132,8 +132,8 @@ type Gateway interface {
 
 	ListCommands() []Command
 
-	// v1.2 binding table (commit 3):
-	Bind(chatID, chatType, sessionID, workspace, agent string) *BindingEntry
+	// v1.2 binding table (commit 3); chatType removed in F-33 (D1):
+	Bind(chatID, sessionID, workspace, agent string) *BindingEntry
 	LookupByChat(chatID string) *BindingEntry
 	ListBindings() []BindingEntry
 
@@ -512,15 +512,15 @@ type contextKey = GatewayKey
 
 // Bind registers the binding (chatID → sessionID). Called by the
 // /cwd handler after it creates a fresh session via
-// MemoryManager.Register. ChatType / Workspace / Agent are
-// denormalized onto the row so subsequent /cwd replies don't have
-// to re-query the session.
-func (g *gateway) Bind(chatID, chatType, sessionID, workspace, agent string) *BindingEntry {
+// MemoryManager.Register. Workspace / Agent are denormalized onto
+// the row so subsequent /cwd replies don't have to re-query the
+// session. The chatType argument was removed in F-33 (D1); nightme
+// no longer carries chat-type at the binding layer.
+func (g *gateway) Bind(chatID, sessionID, workspace, agent string) *BindingEntry {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	b := &BindingEntry{
 		ChatID:    chatID,
-		ChatType:  chatType,
 		SessionID: sessionID,
 		Workspace: workspace,
 		Agent:     agent,

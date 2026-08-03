@@ -493,3 +493,848 @@ func (a *Adapter) UpdateMessage(ctx context.Context, messageID, content string) 
 - 5 QPS 频控靠 receipt 单线程 `renderLocked`(已串行)+ 实际 agent event 频率远低于 5/s,不主动限流
 
 **超出限制时的降级**: `PatchMessage` 失败 → 记录日志 + 下次 render 仍 PATCH 同一 messageID;不重发新消息以避免重复 receipt。**已知风险**: 持续失败 → 卡片一直不更新,直到 receipt 销毁。后续可加重试/降级到"再发新卡"。
+
+## 11. Feishu msg_type 全集(参考)
+
+Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https://open.feishu.cn/document/server-docs/im-v1/message-content-description/create_json))。`internal/channel/feishu/adapter.go` 走 `sendContent(chatID, msgType, content)` 任意 msg_type 都通;**当前 nightme 只用到 2 种**(`text` + `interactive`),其余 9 种是未来扩展的候选。
+
+| `msg_type` | `content` 结构 | 用途 | nightme 现状 | 未来是否用 |
+|------------|----------------|------|--------------|------------|
+| `text` | `{"text":"..."}` | 纯文本(支持 `<at>` / 超链接 / 4 种 inline 样式) | ✅ `OutCommandReply` | 是 |
+| `post` | `{"zh_cn":{"title","content":[[{tag,...}]]}}` | 富文本。tag: `text/a/at/img/media/emotion/hr/code_block`/`md`(CommonMark+GFM 表格/任务列表/删除线) | ❌ 未用 | 视情况(见 §12) |
+| `image` | `{"image_key":"img_xxx"}` | 图片(先 [`upload_image`](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/image/create) 拿 key) | ❌ 未用 | 预留(见 §12.2) |
+| `file` | `{"file_key":"file_xxx"}` | 文件(先 [`upload_file`](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/file/create)) | ❌ 未用 | 预留 |
+| `audio` | `{"file_key":"file_xxx"}` | 音频 | ❌ 未用 | 暂不 |
+| `media` | `{"file_key":"...","image_key":"..."}` | 视频(mp4) | ❌ 未用 | 暂不 |
+| `sticker` | `{"emoji_type":"SMILE"}` | 表情包(预定义 emoji_type) | ❌ 未用 | 暂不 |
+| `interactive` | `{"schema":"2.0","config","header?","body":{"elements":[...]}}` | 交互卡片(Card 2.0) | ✅ **所有 receipt card + 权限卡** | 长期主路径 |
+| `share_chat` | `{"chat_id":"oc_xxx"}` | 分享群名片 | ❌ 未用 | 否 |
+| `share_user` | `{"user_id":"ou_xxx"}` | 分享个人名片 | ❌ 未用 | 否 |
+
+**独立 reaction API**(`POST /im/v1/messages/{id}/reactions`,body 用预定义 `emoji_type`):nightme 用于 `OutMessageState`。**append-only** —— 每次 AddReaction 加新 emoji,通道不删老的。unicode emoji 直接返回 `99992354 data not found`,必须用飞书预定义名(OneSecond/OnIt/DONE/THUMBSUP 等)。
+
+### 11.1 选型约束(为什么不用 `post` 走 receipt)
+
+`post` 富文本支持 `md` 标签原生渲染 CommonMark+GFM,**看起来比塞进 card body 简单**。但和 rolling-log UX **根本冲突**:
+
+- `post` 是**整体替换语义** —— 每次发新 `post` 消息,飞书会渲染成新气泡,无法原地编辑
+- 飞书没有 `PATCH post` 接口;`Update` / `Patch` 只对 `text` 和 `interactive` 生效
+- receipt 的核心 UX 是**一张可原地更新的卡片承载整轮事件**;`post` 实现不了 PATCH-in-place
+
+→ 结论:**文本类(OutText/OutTool/OutResult/...)继续走 `interactive` card**,**不切 `post` `md` 标签**。`post` 留作未来"一次性富文本消息"的载体(比如 help / changelog 推送,见 §12.2)。
+
+### 11.2 与 OpenClaw 官方插件(openclaw-lark)的对比
+
+| 用法 | openclaw-lark | nightme |
+|------|---------------|---------|
+| 文本 | `post` + `tag:"md"`(CommonMark+GFM) | `interactive` card body(`markdown` element) |
+| 思考 | `collapsible_panel` + `text_size:"notation"` + 双语 `i18n_content` | `collapsible_panel` —— **但 §13.1 bug 导致永远走不到这条分支** |
+| 工具 | `collapsible_panel` 折叠工具步骤 | `div` + `markdown` 平铺 + emoji 图标 |
+| footer | `<hr>` + `<text_tag color='neutral'>`(中点 `·`,非冒号) | 同上 |
+| 卡片样式 | Card 2.0 + `update_multi:true` + 双语 | Card 2.0(单语,**未启用 update_multi**) |
+
+→ nightme 的 card body 渲染器比 openclaw-lark **更简单**(无折叠工具、无 i18n),但**少了 thinking 的折叠能力**(死代码 bug,见 §13.1)。
+
+## 12. OutboundKind → Feishu 渲染映射表(当前状态)
+
+每行 = 一个 `gateway.OutboundKind`(定义见 [`internal/gateway/messages.go`](../../internal/gateway/messages.go)),描述 adapter 怎么渲染。`Receipt` 列指是否进 rolling-log card 路径。
+
+| OutboundKind | 源 AgentEvent | 触发点 | Feishu 渲染 | msg_type / API | Receipt? |
+|--------------|---------------|--------|-------------|----------------|----------|
+| `OutText` | `EventText`(无前缀) | agent 流式文本 | card body `markdown` element + `💬` 图标 | `interactive` PATCH | ✅ |
+| `OutThinking` | `EventText`(带 `[思考] ` 前缀,Gateway 已剥) | agent reasoning | **`collapsible_panel` + `💭` 折叠**(§13.6 设计决策;§13.1 bug 待修) | `interactive` PATCH | ✅ |
+| `OutToolStart` | `EventToolStart` | 工具开始 | **`collapsible_panel` + `🔧` 折叠**(§13.6 设计决策,粒度待定 §13.7) | `interactive` PATCH | ✅ |
+| `OutToolEnd` | `EventToolEnd` | 工具结束(成功/失败) | **`collapsible_panel` + `✅` / `❌` 折叠**(§13.6 设计决策,与 Start 合并 or 独立待定 §13.9) | `interactive` PATCH | ✅ |
+| `OutResult` | `EventResult` | 最终回复 | card body `markdown` + `📝` 图标(text 经 `truncateForLog` 限 600 字节) | `interactive` PATCH | ✅ |
+| `OutUsage` | `EventUsage` | token 用量 | card body `markdown` + `"1.2k tokens · $0.012"`(无图标) | `interactive` PATCH | ✅ |
+| `OutCompaction` | `EventCompaction` | 中途压缩 | card body `markdown` + `✶ Compacting conversation…` | `interactive` PATCH | ✅ |
+| `OutInit` | `EventInit` | 会话初始化 | card body `markdown` + `session initialized (model: X)`,**Meta 字段(session_id/agent_name/workspace/branch)未渲染**(见 §13.2) | `interactive` PATCH | ✅ |
+| `OutCard` | `EventPermission` | 权限请求 | `buildInteractiveCard` → header(title,template:blue) + markdown body + action buttons(value 携带 request_id) | `interactive` Create | ❌(独立气泡) |
+| `OutMessageState` | ChatSession lifecycle | 消息进度变化 | `AddReaction(userMsgID, emoji_type)` —— 走 `messageStates` map 做 idempotency | reaction API | ❌(标在用户消息上) |
+| `OutMessageStateRemoved` | (reserved) | 撤销进度标记 | `DeleteReaction`(v1.3 未用,append-only) | reaction API | ❌ |
+| `OutTyping` | (orphan) | typing 指示 | **silent drop**(飞书 bot 无原生 typing API) | — | ❌ |
+| `OutCommandReply` | (slash cmd / runtime error) | `/cwd` `/use` `/kill` `/help` `/agents` 等 | `SendMessageText` —— 独立 text 消息,**绕过** receipt | `text` Create | ❌ |
+
+### 12.1 映射决策的"为什么"
+
+- **receipt card 路径覆盖 8 种** —— 选 `interactive` 是为了 PATCH-in-place(对抗 chat spam);选 markdown element 是为了渲染表格/代码块/超链接(后续会用)
+- **MessageState 单独走 reaction** —— append-only emoji 是飞书最轻量、最稳定的进度表达;走 reaction API 不挤占 card body 预算
+- **OutCard 走独立 card(非 receipt)** —— 权限卡是单轮交互,需要按钮 + callback,不适合进 rolling log
+- **OutCommandReply 走纯文本 `text`** —— 命令反馈是"短而独立"语义,绕过 receipt 让用户看到干净气泡(参见 F-08 §4 "Channel is dumb" contract: command reply 不属于滚动日志)
+
+### 12.2 未来扩展槽位(不实现,但留位)
+
+| 未来需求 | 候选 msg_type | 候选 OutboundKind | 备注 |
+|----------|---------------|-------------------|------|
+| agent 生成图片 | `image`(先 upload 拿 image_key) | 新加 `OutAttachment{Type: "image", FileKey, FileName}` | 不并入 receipt card(打散 PATCH),走独立 Create |
+| agent 生成文件 | `file` | `OutAttachment{Type: "file", ...}` | 同上 |
+| help / changelog 推送 | `post` + `tag:"md"` | 复用 `OutCommandReply` 或新增 `OutPost` | 一次性富文本 |
+| bot 自定义表情包 | `sticker` | 复用 `OutMessageState` 或新增 | 仅 DM 可用 |
+
+## 13. 2026-08-03 审计结果
+
+### 13.1 🐛 Bug: `OutThinking` 的 `collapsible_panel` 折叠分支是死代码
+
+**证据链**(可逐行复现):
+
+```go
+// internal/gateway/translate.go:54-58
+if strings.HasPrefix(text, thinkingPrefix) {  // "[思考] "
+    return OutboundMessage{
+        Kind:   OutThinking,
+        Text:   strings.TrimPrefix(text, thinkingPrefix),  // ← 前缀在这里被剥掉
+    }, true
+}
+```
+
+```go
+// internal/channel/feishu/adapter.go:435-441
+case gateway.OutThinking:
+    receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
+    if receipt == nil { return nil }
+    return receipt.Append(ctx, agent.AgentEvent{
+        Kind: agent.EventText,
+        Text: msg.Text,  // ← 没有前缀
+    })
+```
+
+```go
+// internal/channel/feishu/receipt_event.go:45
+case agent.EventText:
+    text := strings.TrimSpace(ae.Text)
+    if text == "" { return LogEntry{}, false }
+    if strings.HasPrefix(text, thinkingPrefix) {  // ← 永远 false(前缀在 Gateway 被剥了)
+        return LogEntry{ ..., Kind: "thinking" }, true
+    }
+    return LogEntry{ Icon: "💬", ..., Kind: "reply" }, true
+```
+
+```go
+// internal/channel/feishu/adapter.go buildReceiptCard (注释声称的折叠面板分支)
+if e.Kind == "thinking" {  // ← 永远不会为真
+    elements = append(elements, map[string]any{
+        "tag": "collapsible_panel", ...
+    })
+}
+```
+
+**后果**: 长 thinking 直接平铺在 card body 里,挤掉最终回答的可见空间。这与 `buildReceiptCard` 注释 + §9.3 foot note 引用的设计意图完全相反。
+
+**修复方案**(选其一,推荐 A):
+
+- **A. Adapter 补回前缀**(最小侵入,1 行):adapter 在 append 前 `Text: "[思考] " + msg.Text`,`receipt_event.go` 的现有 detection 即可 catch。**代价**:`truncateForLog` 走 thinking 分支时拿到的是剥后的正文(已是 adapter 写死的常量);prefix 是个识别 sentinel,不影响正文渲染
+- **B. agent 包加 `EventThinking` 枚举值** + receipt 直接 case;`translate.go` 改发 `EventThinking`,adapter 也直接转发。**代价**:跨 5 个文件动(agent / translate / adapter / receipt / receipt_event);但语义最清晰
+- **C. receipt 加 `appendThinkingLocked`,adapter 走专用路径** —— 与 B 类似,但不污染 agent 层
+
+**附议**(无论选哪种方案):`receipt_event.go:40-53` 加注释明确 "prefix MUST be present;Gateway/Caller 负责保证"。否则后人改 transport 又踩一遍。
+
+### 13.2 ⚠️ 待澄清: `OutInit` 的 Meta 字段全部丢失
+
+`translate.go:144-156` 把以下字段写到 Meta:
+
+```go
+Meta: {
+    "session_id": ev.Init.SessionID,
+    "model":      ev.Init.Model,
+    "agent_name": ev.Init.AgentName,  // 新加
+    "workspace":  ev.Init.Workspace,  // 新加
+    "branch":     ev.Init.Branch,     // 新加
+}
+```
+
+`adapter.go:600-616` 也读到了 `agent.InitEvent` 字段里。但:
+
+- `MessageReceipt` 结构体没有存这些字段
+- `buildReceiptCard.footLine()` 只拼 `state + N entries + HH:MM:SS`,**session_id / model / agent_name / workspace / branch 全部丢失**
+
+→ `OutInit` 在 card 上**只有 `state.String()` 变化时会通过 PATCH 触发一次 render**;Meta 携带的元数据**无任何视觉表达**。文档 §9.4 已标记 deferred(目标:"下次 PR 接入 foot note 模板")。
+
+**建议**:Devin 拍板是否在下一份 PR 落地 foot note 扩展(`executing · 5 entries · 14:32:05 | Agent · main · cwd · /repo | Model · claude-sonnet-4-5 | Branch · main`),否则 OutInit 的 5 个 Meta 字段是**纯传输浪费**。
+
+### 13.3 ⚠️ 待澄清: `OutResult` 的 `truncateForLog` 600 字节限额
+
+`receipt_event.go:49` 对 thinking 用 `truncateForLog(text, perEntryMaxBytes=600)`。`OutResult` 走的也是同一个 `eventToEntry` 路径(EventText 分支),**最终回答也限 600 字节**。
+
+Claude Code `result.Result` 经常 1~3 KB;600 字节会切掉大部分正文,用户得到"看一半"体验。
+
+**建议**:Devin 拍板:
+
+- (a) 维持 600 字节统一限额(简单一致,但 OutResult 体验差)
+- (b) `OutResult` 单独放宽到 2048 或 4096(更好,但需要在 `receipt_event.go` 区分 EventText 来自 OutText 还是 OutResult;当前 EventKind 没有 `EventResult` payload 区别)
+- (c) 给 OutResult 单独建 receipt 字段 `resultFullText`,默认不显示,折叠面板"展开全文"
+
+### 13.4 ℹ️ 未来关注: 没有 OutboundAttachment kind
+
+`InboundMessage.Attachments` 存在(incoming 图片/文件),但 `OutboundKind` **没有对应反向类型**。如果 agent 未来通过工具生成图片/文件,目前**无投递路径**。
+
+MVP 不阻塞(Claude Code 不生成媒体),但 Channel 抽象层对外非对称。建议下一份抽象文档(Gateway hub)补 `OutboundAttachment` 类型,把 §12.2 表里的"未来扩展"沉淀进代码契约。
+
+### 13.5 ℹ️ 已知接受: `OutCard` RequestID 临时生成
+
+`adapter.go:530-533` 用 `fmt.Sprintf("%s:%d", msg.ChatID, time.Now().UnixNano())` 拼 RequestID:
+
+- 同 chatID 同 ns 内理论可重复(纳秒精度在某些平台受限于时钟粒度)
+- chatID 前缀降低了碰撞面
+- 实际场景:同一 chat 用户不可能在 1ns 内连点 2 次不同权限
+
+→ **接受现状**,但建议加注释解释 chatID 前缀的意图 + "碰撞面已被 chatID 限定"。
+
+### 13.6 🎯 设计决策(2026-08-03 Devin 拍板): Thinking + Tool Start/End 全部折叠
+
+**决策状态:已决议 (DECIDED 2026-08-03,Devin "按你的建议修改")**
+
+**采用方案**: §13.7 方案 1(per-event) + Q2=a + Q3=全部折叠 + Q4=a。
+
+**实施要点**:
+1. 修 §13.1 bug(adapter 补回 `[思考] ` 前缀)—— `receipt_event.go` 的现有 detection 即可 catch
+2. `receipt_event.go` 给 `tool_start` / `tool_end` 标新 `Kind="tool"`(或分别 `Kind="tool_start"` / `Kind="tool_end"` —— 二者皆可,前者更简单)
+3. `buildReceiptCard` 新增 `Kind="tool"` 折叠分支:header 为 `🔧 tool_name(args)` / `✅ tool_name → output` / `❌ tool_name failed: err`,body 为 entry 文本
+4. 折叠默认 `expanded: false`(所有 thinking / tool 默认折叠)
+5. 最终回复(📝)、OutUsage、OutCompaction、OutInit 保持平铺 `markdown` element
+
+**结论**: `OutThinking` / `OutToolStart` / `OutToolEnd` 在 card body 里**全部走 `collapsible_panel`**,默认折叠。最终回复(📝)、token 用量(OutUsage)、compaction(OutCompaction)、init(OutInit)保持平铺(`markdown` element)。
+
+**理由**:
+- Thinking / Tool 调用是"agent 在做什么"的中间过程,对用户阅读最终结果**不是关键** —— 折叠才能让卡片聚焦答案
+- 平铺会让 agent 调 10 次工具的卡变成"工具清单 + 答案尾巴",最终答案被挤到屏幕外(§13.1 已记录的实际问题)
+- 与 openclaw-lark `buildCompleteCard` 的 `toolUseSteps` `collapsible_panel` 模式一致(§11.2)
+
+### 13.7 ✅ 已决议: UX 折叠粒度(方案 1,per-event)
+
+**决策状态:已决议 (2026-08-03)。选方案 1(per-event)。**
+
+详见 §13.6 决策摘要。理由:与现有 thinking 折叠逻辑一致(每 entry 一个 panel),改动最小;先解决"折不折"问题,聚合(方案 2 / 3)留给下一代重构。
+
+**未选择方案**:
+- 方案 2(aggregate-paired):需维护 Start→End 配对状态机,跨 event 状态复杂度增加
+- 方案 3(category-aggregate):需新增聚合 buffer,PATCH 字节膨胀,QPS 风险
+
+→ 方案 2 / 3 作为 backlog(§15 future work),不在本 PR scope。
+
+**Per-event 形态**:
+
+```
+💭 [panel: 💭 思考] (折叠)
+   让我看一下代码...
+
+🔧 [panel: 🔧 Read(/a.py)] (折叠)
+   Read(/a.py)
+
+✅ [panel: ✅ Read done] (折叠)
+   Read → opened file, 47 lines
+
+🔧 [panel: 🔧 Bash(git status)] (折叠)
+   Bash(git status)
+
+✅ [panel: ✅ Bash done] (折叠)
+   Bash → on branch main, clean
+
+📝 最终回复 (平铺)
+   API handler 在 /api/v1/foo.py:42
+```
+
+每个 entry 一个 panel,header 用 entry 的 icon + name + args/output。
+
+**方案 1: 每个 entry 一个折叠面板(per-event)**
+
+```
+💭 [面板标题: 💭 思考] (折叠)
+   让我看一下...
+
+🔧 [面板标题: 🔧 Read(/a.py)] (折叠)
+   Read(/a.py)
+
+✅ [面板标题: ✅ Read done] (折叠)
+   Read done
+
+💬 最终回答 (平铺)
+```
+
+- **优点**: 与现有 thinking 折叠逻辑一致;不需要 Start→End 配对
+- **缺点**: 一个 agent turn 调 10 个工具 = 30 个 panel,卡片嵌套很深
+
+**方案 2: 同类聚合 + 配对(aggregate-paired)**
+
+把 Thinking 聚合成 1 个面板(顺序追加),Tool Start+End 配对聚合成 1 个面板:
+
+```
+💭 [面板标题: 💭 思考 (3 段)] (折叠)
+   让我看一下...
+   然后再...
+   嗯...
+
+🔧 [面板标题: 🔧 Read(/a.py)] (折叠)
+   ✅ done
+
+🔧 [面板标题: 🔧 Bash(git status)] (折叠)
+   ✅ done
+
+💬 最终回答 (平铺)
+```
+
+- **优点**: 卡片扁平、阅读体验更好;agent turn 调 N 个工具只占 N 个 panel 而非 2N
+- **缺点**:
+  - 需要 receipt 维护"当前 thinking panel / 当前 tool pair"指针(类似流式 buffer)
+  - Start 来时建面板,End 来时把结果 fold 进同一面板 —— **跨 event 状态机变复杂**
+  - 工具面板关闭/开启时 `expanded` 状态需保留(用户展开后面板又来一个 event,PATCH 卡片时要不要把它默认折叠回去?)
+
+**方案 3: 类别聚合(category-aggregate,推荐)**
+
+把所有 Thinking 聚合成 1 个面板,**所有 Tool 调用** 聚合成 **1 个面板**(内置子结构:每个 tool 一行):
+
+```
+💭 [面板标题: 💭 思考] (折叠)
+   <全部 thinking 文本>
+
+🛠 [面板标题: 🔧 工具调用 (5 次)] (折叠)
+   Read(/a.py) → done
+   Bash(git status) → done
+   Edit(/a/b.py) → done
+   Read(/a/c.py) → done
+   Bash(make test) → done
+
+💬 最终回答 (平铺)
+```
+
+- **优点**: 最扁平;阅读体验最好;openclaw-lark 的 `toolUseSteps` 默认就是这种
+- **缺点**:
+  - 需要在 `MessageReceipt` 加 `thinkingPanel` + `toolsPanel` 两个聚合 buffer
+  - **不能并入现有 `entries []LogEntry` 模型** —— 现有模型是 FIFO list,聚合需要 map/set 或 lazy 渲染
+  - 增量 PATCH 时聚合面板的文本变化较大(每来一个 event 都触发完整重渲染整个面板内容)→ PATCH 字节膨胀,QPS 风险
+
+### 13.8 实施建议(已决议采用)
+
+**首版实施步骤**(§13.6 / §13.7 / §13.9 决议后):
+
+1. 修 §13.1 bug(adapter 补回 `[思考] ` 前缀)
+2. `receipt_event.go` 给 `tool_start` / `tool_end` 标 `Kind="tool"`(统一,无需区分 start/end)
+3. `buildReceiptCard` 新增 `Kind="tool"` 折叠分支(同 thinking 的 `collapsible_panel` 结构)
+4. **不**加 `card.tool_fold` 配置开关——所有 entry 统一折叠行为,保持简洁(可在未来 PR 加)
+
+**`truncateForLog` 限额考虑**:
+- `OutResult` / `OutToolEnd` 的 output 可能超过 `perEntryMaxBytes=600` —— 折叠面板展开后用户能看到完整内容,但默认折叠时只显示 icon + header
+- 折叠 panel 的 body 内容建议也走 `truncateForLog` 与现有逻辑一致
+- **不在本 PR 解决 §13.3**(OutResult 限额拓宽) —— 是独立 PR
+
+**测试覆盖**:
+- `receipt_test.go` 加例:append 一连串 EventText(thinking + normal) + EventToolStart/End,验证生成的 card JSON 元素数组顺序 + 每 entry 的 `collapsible_panel` 结构
+- `adapter_test.go` 加例:Verify `Send(OutboundMessage{ReplyTo: "user_123", Kind: OutThinking})` 走到 receipt.Append 时 prefix 已加回
+
+**未来可演进到方案 3**:等 next-gen rolling-log 重构时再做聚合;当前 v1.3 不动 receipt 渲染结构,只解决"折叠 or 不折叠"的开关。
+
+### 13.9 ✅ 已决议(2026-08-03):4 个 UX 细节
+
+**决策状态:全部已决议,采用我推荐的组合**。
+
+| 问题 | 决议 | 备注 |
+|------|------|------|
+| **Q1 折叠粒度** | 方案 1(per-event) | 每个 entry 一个 panel;不改 receipt 状态机 |
+| **Q2 header 内容** | (a) 静态 `🔧 tool_name(args)` / `✅ tool_name → output` | 简单、不加耗时(耗时属 §13.3 backlog) |
+| **Q3 默认折叠** | **全部折叠**(thinking + tool_start + tool_end) | 卡片聚焦最终回复 |
+| **Q4 Start+End 合并?** | (a) 独立 panel | Start panel `🔧 Read(/a.py)`,End panel `✅ Read done` —— 与 entry 一一对应,不改 receipt 结构 |
+
+### 13.10 🐛 Bug:`OutboundMessage.ReplyTo` 没有被作为 Feishu `root_id` 投递
+
+**Devin 原话(2026-08-03 17:04)**:"我们现在回复的不是 Reply in Thread 的方式,看不出来我这条回复回的是哪个消息,reply_to 没有真正用到对不对?"
+
+**调查结论**:**对,ReplyTo 字段被消费在内部(用作 receipt map 查找 key),但从来没有被投递到 Feishu API**。bot 的所有回复都是顶层消息,看不到与用户消息的连接。
+
+**证据链**:
+
+1. `internal/chatsession/readpump.go:198` —— `readpump` 读 `cs.currentTurnUserMsgID` 并以 `userMsgID` 参数调用 gateway 的 event handler
+2. gateway 的 event handler 把它写到 `OutboundMessage.ReplyTo`(参考 `internal/gateway/binding.go:8` 与 `messages.go:48`)
+3. `internal/channel/feishu/adapter.go:424/436/525/535/550/571/581/591` —— 8 处都只调用 `a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)`,**只用 `ReplyTo` 查 `receiptsByUserMsgID` map**
+4. `sendViaLark` (`adapter.go:1295-1324`) 构造的 `CreateMessageReqBody` 只有 `ReceiveId / MsgType / Content`,**没有 `RootId` 字段**
+5. `larkim.NewCreateMessageReqBuilder` SDK 调用 `Message.Create`(顶层创建 API,非 Reply)
+6. `PatchMessage` (`adapter.go:1387`) PATCH `/im/v1/messages/{id}` 也不传 root_id —— PATCH 会**保留**被 PATCH 消息的原始 root_id,但因为原始 create 没设,结果依然无 root_id
+7. `larkim.CreateMessageReqBody.RootId` 字段在 SDK 中存在(`oapi-sdk-go/v3@v3.5.3/service/im/v1/model.go:2125`),**SDK 完全支持,代码没用而已**
+8. `larkim.ReplyMessageReq{RootId?, ReplyInThread, ...}` **也存在**(`model.go:11385+`),是专门回复的 endpoint
+
+**与历史设计的关系**: `docs/feat/F-26-gateway-hub.md:223-225`(已被 v1.3 标 SUPERSEDED,但语义依然适用)写过:
+
+> ReplyTo 非空 → 必须镇定到该 userMsgID(**用 ReplyMessage API 或已有 receipt**)
+
+v1.3 refactor(`a38fa5b refactor(gateway): Remove Gateway-side Receipt FSM`)把 receipt FSM 从 Gateway 搬到 Channel,但**没有把这条 reply-in-thread 约束带过去**。结果:docs 写过、SDK 支持、当前实现忘了。
+
+**当前 UX 问题**:
+
+| 场景 | 用户看到的 | 应该看到的 |
+|------|-----------|-----------|
+| 用户发消息 → agent 处理 5s | `user_msg` → `bot_card`(漂浮,无连接) | `user_msg` ⤓ `bot_card`(回复线连接) |
+| 用户连发 3 条 | 3 条 user_msg + 1 张 bot_card(飘在最后一条下面,但看不出回的是哪条) | 3 条 user_msg 各带 ⏳→🔄,最后一条 ⤓ bot_card |
+| 用户发 `/help` | `user_msg`(/help) → bot_msg(help text,无连接) | `user_msg`(/help) ⤓ bot_msg |
+| 权限请求 | `user_msg`(task) → bot_card(权限,无连接) | `user_msg`(task) ⤓ bot_card(权限) |
+| 同一 turn 多次 PATCH | bot_card 自己更新 | bot_card 自己更新(root_id 由 Feishu 保留,无需重复传) |
+
+**修复方案**(Devin 拍板范围):
+
+| 范围 | 改哪些 | 影响 |
+|------|--------|------|
+| **A. 最小:只 thread receipt card** | `receiptFor()` 冷启动走 `CreateMessage{RootId: userMsgID}` | receipt card 与 user_msg 视觉连接;slash command / 权限卡仍漂浮 |
+| **B. 中等:thread 所有 SendContent 调用** | `sendContent` / `SendCard` / `sendMessageText` 都接 `rootID` 参数;adapter.Send 在 `msg.ReplyTo != ""` 时透传 | 所有 bot 回复都有视觉连接;`OutCommandReply` 注释里的 "no ReplyTo threading" 需要同步更新 |
+| **C. 完整:thread + 可选 reply_in_thread** | 同 B,外加支持 `reply_in_thread: true`(把整个 receipt 移入 thread) | 用户可配 "thread 模式" 还是 "main chat 模式" |
+
+**SDK 调用细节**(方案 B / C 落地):
+
+```go
+// sendViaLark 当前:
+body := &larkim.CreateMessageReqBody{
+    ReceiveId: &chatID,
+    MsgType:   &msgType,
+    Content:   &content,
+}
+
+// 改后:
+body := &larkim.CreateMessageReqBody{
+    ReceiveId: &chatID,
+    MsgType:   &msgType,
+    Content:   &content,
+}
+if rootID != "" {
+    body.RootId = &rootID  // SDK 字段,直接用
+}
+```
+
+PATCH 路径不动 —— Feishu 的 PATCH 接口会自动保留被 PATCH 消息的原始 `root_id`。
+
+**与 §13.6(折叠设计)的关系**: 这是独立的两件事,但**建议合并到同一份 PR**:
+1. §13.6 修折叠渲染(per-event / 聚合 / 配对 三选一)
+2. §13.10 修 reply-in-thread(`root_id` 投递)
+3. 一并加测试(冷启动 receipt card 后,Feishu 端能看到 root_id)
+
+**待 Devin 拍板(开 PR 前)**:
+
+1. **修复范围**:A / B / C?
+2. **OutCommandReply 同步 thread**?(B/C 方案下,slash command 的回复会变 threaded;`adapter.go:608-619` 注释需要更新)
+3. **OutCard(权限卡)同步 thread**?(B/C 方案下,权限请求与用户原消息连接)
+4. **`reply_in_thread` 模式是否需要**?(C 方案专属;默认 false 走 main chat,保持 discoverable;用户可选 true 移入 thread)
+
+**附议**: 落地后 `adapter.go:608-619` 的 "no ReplyTo threading" 注释需要更新;`docs/feat/F-26-gateway-hub.md:223` 已经描述了这条约束,可以作为权威参考,无需修改 F-26(它是 v1.1 文档,已 superseded,但语义对 v1.3 仍生效)。
+
+**✅ 决议(2026-08-03,Devin "按你的建议修改")**: 采用 **方案 B**,同步 thread OutCard 与 OutCommandReply。**不**实现 `reply_in_thread` 模式(属未来 P2)。
+
+### 13.11 决策记录(2026-08-03,F-33):ChatID 数据模型简化
+
+**Devin 原话**(2026-08-03 21:08):"我们是不续接任何 Thread,最多就是点对点的 ReplyTo" — chatID 数据模型做一次系统性清理。
+
+#### 13.11.1 三个核心决策
+
+**D1: ChatType 不进 Gateway**
+- 删除 `internal/gateway/messages.go:18-27` 的 `ChatType` 类型 + 4 个常量(`ChatTypeP2P/Group/Thread/Other`)
+- 删除 `InboundMessage.ChatType` 字段 + `IsDM()` 方法
+- 删除 `BindingEntry.ChatType` / `ChatSession.ChatType` / `ChatSessionEntry.ChatType` 持久化字段
+- `/status` 命令不再展示 "DM/Group" 标签
+- Gateway 只看 `chat_id string`,假设所有 chat 同质
+
+**D2: topic_group 不特殊处理**
+- Feishu `chat_type == "topic_group"` 的消息**完全不分支**,跟普通 group 走相同路径
+- 原因:Feishu SDK `EventMessage.ChatId` 在 topic_group 下跟 group **同构**(都是 `oc_xxx`),thread 是消息级逻辑分组,不是 chat 级
+- binding 表 `gateway.bindings[chat_id]` 天然兼容,topic_group 在 nightme 内部就是"group,thread 在外面"
+- 适配器 `internal/channel/channel.go` 删 `ChatTypeThread` 常量;保留 `ChatTypeP2P/Group`(Channel 包私有)
+
+**D3: ReplyTo = ParentId,RootId 不进 nightme**
+- Inbound `msg.ReplyTo = message.ParentId`(Feishu 原生 `parent_id`)
+- Outbound `msg.ReplyTo = currentTurnUserMsgID`(不变,§13.10 已落地)
+- **`RootId` 整个项目永远不读、不存、不传**(`grep -rn "\.RootId" internal/` 应为 0 命中)
+
+**D4: 任何 Channel 都不引入 thread 概念**(Devin 2026-08-03 21:11 拍板,B 选项)
+- Slack `thread_ts` / Telegram `message_thread_id` / Discord thread 等**不进 nightme 数据模型**
+- 仅 Channel 内部渲染时使用(thread 视觉由 Channel 自治)
+- 如未来 Slack thread 等场景需要支持,在 Channel 包内自治实现,**不动 nightme 数据模型**
+
+#### 13.11.2 语义统一:ReplyTo = "被 reply 的那条 message_id"
+
+| 方向 | 值 | 含义 |
+|------|-----|------|
+| Inbound `msg.ReplyTo` | `message.ParentId` | user 在 Feishu 端 @ 的那条 message_id;top-level 消息(没 @)则 `ParentId == ""` → `ReplyTo == ""` |
+| Outbound `msg.ReplyTo` | `currentTurnUserMsgID` | user 当前这条 message_id(不是 thread 顶层,也不是 user @ 的目标) |
+
+两个 `ReplyTo` 是**同一个字段,不同方向**,语义统一为 "reply 关系中的被 reply 方"。
+
+#### 13.11.3 当前 inbound bug:`msg.ReplyTo` 永远是空字符串
+
+`handleMessage`(`internal/channel/feishu/adapter.go:1593-1617`)构造 `channel.Message` 时**不读 `event.Message.RootId`,也不读 `event.Message.ParentId`**:
+```go
+msg := channel.Message{
+    ChatID:      chatID,                        // ✅ 已填
+    Text:        text,
+    UserID:      senderID(event),
+    Time:        messageTime(message.CreateTime),
+    ChatType:    gateway.ChatType(chatType),    // ❌ D1 移除
+    MessageID:   stringValue(message.MessageId),
+    // ReplyTo 字段永远不存在 ❌ D3 需要新增 wire
+    Attachments: attachments,
+}
+```
+
+**修复**:加 `ReplyTo: stringValue(message.ParentId)`,删 `ChatType: gateway.ChatType(chatType)`。
+
+#### 13.11.4 数据流影响
+
+**Inbound**(改动):
+```
+Feishu SDK event(EventMessage{ChatId, ChatType, MessageId, ParentId, RootId, ...})
+  └─ handleMessage
+     ├─ msg = channel.Message{
+     │    ChatID:    chatID,                   // 不变
+     │    MessageID: message.MessageId,        // 不变
+     │    ReplyTo:   message.ParentId,         // ← 新增 wire (D3)
+     │    Text/Attachments/UserID/Time: 不变,
+     │    // ChatType 字段删除                  // ← D1 移除
+     │  }
+     └─ publish a.incoming → Gateway.dispatchLoop → bindings[msg.ChatID]
+```
+
+**Outbound**(无变化,§13.10 已落地):
+```
+ChatSession.onAgentEvent
+  ├─ out.ReplyTo = cs.currentTurnUserMsgID     // 不变
+  └─ channel.Send → sendViaLarkReply(POST /im/v1/messages/{rootID}/reply)
+     rootID = msg.ReplyTo = user 当前 message_id
+     ↓
+     Feishu 端把 reply 视觉放到 user 当前 message 附近
+```
+
+#### 13.11.5 跟 §13.10 的关系
+
+§13.10 修了 **outbound**(bot reply 用 `msg.ReplyTo` 作 Feishu root_id 投递)。
+§13.11(D3)修了 **inbound**(wire `msg.ReplyTo = message.ParentId`)。
+两条合起来构成完整 reply-in-thread 数据流闭环:
+- inbound 方向:user reply 的目标(`ParentId`)被记录
+- outbound 方向:bot reply 永远 anchor 到 user 当前 message(`currentTurnUserMsgID`)
+
+不引入 thread 树,不爬 RootId,Feishu 端 thread 视觉由 Channel 自治。
+
+#### 13.11.6 实施细节
+
+详见 [`docs/feat/F-33-simplify-chatid-data-model.md`](../feat/F-33-simplify-chatid-data-model.md),包括:
+- 12 处代码改动清单(Channel → Gateway → ChatSession → Registry)
+- Test 改动 + 新增 `TestHandleMessage_ReplyToFromParentId`
+- Registry 兼容(Go JSON unmarshal 默认容忍未知字段,无需迁移)
+- 验收清单 16 项
+
+## 14. 变更日志
+
+- **2026-08-03** — 加入 §11-§13: Feishu msg_type 全集参考、OutboundKind → Feishu 渲染映射表、审计结果(1 bug + 4 澄清)。基于 `internal/channel/feishu/*` 与 `internal/gateway/*` 现状。
+- **2026-08-03(同日增量)** — 加入 §13.6-§13.9:Devin 拍板 Thinking/ToolStart/ToolEnd 全部折叠;列出 3 个 UX 折叠粒度方案(per-event / aggregate-paired / category-aggregate)+ 4 个待确认问题。等 Devin 决定后启动 PR。
+- **2026-08-03(同日再增量)** — 加入 §13.10:Devin 发现 `OutboundMessage.ReplyTo` 字段被消费在内部 receipt map 但**从未投递为 Feishu `root_id`**,所有 bot 回复都是顶层消息,与用户消息无视觉连接。SDK 字段 `larkim.CreateMessageReqBody.RootId` 已存在但代码没用。F-26 v1.1 设计文档 `ReplyTo 非空 → 必须镇定到该 userMsgID(用 ReplyMessage API 或已有 receipt)` 在 v1.3 refactor 中丢失。提供 A/B/C 三种修复范围(最小/中等/完整)+ 4 个待确认问题。
+- **2026-08-03(同日三增量)** — 加入 §13.11(F-33 决策记录):D1 ChatType 不进 Gateway + D2 topic_group 不特殊处理 + D3 `ReplyTo = ParentId`(RootId 不进 nightme)+ D4 任何 Channel 都不引入 thread 概念。落地 chatID 数据模型系统性清理,关闭 inbound 方向 ReplyTo 接线缺失。详见 [`docs/feat/F-33-simplify-chatid-data-model.md`](../feat/F-33-simplify-chatid-data-model.md)。
+- **v0.3 ~ v1.3** — 早期章节(背景、OpenClaw 调研、迁移方案、已知坑等)保留;参见章节顶部 Status 行。
+
+## 15. v1.3.x 实施计划:折叠 + reply-in-thread
+
+**目标**: 修 §13.1(OutThinking 折叠死代码)+ §13.10(ReplyTo 未投递为 root_id),实现 Devin 拍板的折叠设计 + reply-in-thread。
+
+**变更范围**: 仅 `internal/channel/feishu/*`;Gateway / Chatsession / agent 包**不动**。
+
+### 15.1 文件级变更清单
+
+| 文件 | 变更 | 说明 |
+|------|------|------|
+| `internal/channel/feishu/adapter.go` | 1. `OutThinking` case 补回 `[思考] ` 前缀<br>2. `SendContent` / `SendCard` / `sendMessageText` 加 `rootID` 参数<br>3. `sendViaLark` 设 `body.RootId`<br>4. adapter.Send 在 `msg.ReplyTo != ""` 时透传 rootID<br>5. 删除 `OutCommandReply` 注释里的 "no ReplyTo threading"<br>6. `OutCard` case 也透传 rootID | §15.2 详情 |
+| `internal/channel/feishu/receipt_event.go` | 1. `EventToolStart` / `EventToolEnd` 新增 `Kind="tool"` 输出<br>2. 加注释:`thinkingPrefix` MUST be present | §15.3 详情 |
+| `internal/channel/feishu/adapter.go` (`buildReceiptCard`) | 新增 `Kind="tool"` 折叠分支(header + body 同 thinking 结构) | §15.3 详情 |
+| `internal/channel/feishu/receipt_test.go` | 加测试用例 | §15.4 详情 |
+| `internal/channel/feishu/adapter_test.go` | 加测试用例 | §15.4 详情 |
+| `docs/channel/feishu.md` | §11-§15 已落地 | 本节 |
+
+### 15.2 §13.10 修复细节(reply-in-thread)
+
+**`sendContent` 加 `rootID` 参数**:
+
+```go
+// 现有签名:
+func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content string) (string, error)
+// 改后:
+func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content, rootID string) (string, error)
+```
+
+**`SendCard` 透传 rootID**:
+
+```go
+// 现有:
+func (a *Adapter) SendCard(ctx context.Context, chatID, content string) (string, error)
+// 改后:
+func (a *Adapter) SendCard(ctx context.Context, chatID, content, rootID string) (string, error)
+```
+
+**`SendMessageText` 透传 rootID**: 同样模式。`OutCommandReply` 路径的调用从 `SendMessageText(ctx, chatID, text)` 改成 `SendMessageText(ctx, chatID, text, msg.ReplyTo)`。
+
+**`sendViaLark` dispatch 到 Reply / Create(SDK 修正版)**:
+
+最初计划是设 `body.RootId = &rootID`(SDK 字段 `larkim.CreateMessageReqBody.RootId`,参考 `oapi-sdk-go/v3@v3.5.3/service/im/v1/model.go:2125`)。**修正**: `CreateMessageReqBody` **没有** `RootId` 字段——只有 `ReplyMessageResp` 数据结构有 `RootId`(响应体)。真正能设 root_id 的 API 是 `POST /im/v1/messages/{message_id}/reply`(path 参数即 root_id),所以 `sendViaLark` 拆成两条:
+
+```go
+func (a *Adapter) sendViaLark(ctx, chatID, msgType, content, rootID string) (string, error) {
+    if rootID != "" {
+        return a.sendViaLarkReply(ctx, rootID, msgType, content)
+    }
+    return a.sendViaLarkCreate(ctx, chatID, msgType, content)
+}
+
+// sendViaLarkReply: POST /im/v1/messages/{rootID}/reply
+// sendViaLarkCreate: POST /im/v1/messages  (top-level)
+```
+
+两者都是 `sendViaLark` 的实现细节;`sendContent` 只通过 `sendFunc` 函数字段(可被测试 mock)调用,不需要知道 API 拆分。
+
+**Terminal-code fallback**(`sendContent` 包装):
+
+```go
+func (a *Adapter) sendContent(ctx, chatID, msgType, content, rootID string) (string, error) {
+    // ... get send from a.sendFunc or a.sendViaLark ...
+    msgID, err := send(ctx, chatID, msgType, content, rootID)
+    if err != nil && rootID != "" && isFeishuTerminalMessageCode(err) {
+        // v1.3.x (§13.10 fallback): the target user message was
+        // recalled (230011) or deleted (231003). The Reply
+        // endpoint is permanently invalid for that root_id;
+        // retry as top-level Create so the user still sees a
+        // message. Mirrors openclaw-lark's
+        // runWithMessageUnavailableGuard (src/core/message-unavailable.ts).
+        a.logger.Warn("feishu: reply target unavailable, falling back to top-level",
+            "root_id", rootID, "msg_type", msgType, "err", err)
+        return send(ctx, chatID, msgType, content, "")
+    }
+    return msgID, err
+}
+```
+
+`isFeishuTerminalMessageCode(err)` 检测 Feishu 错误码 230011 / 231003(两者表示 user message 被发起人撤回/删除,root_id 永远不可用)。格式兼容 `"code NNNNN"` 和 `"code:NNNNN"` 两种形态,加 `*larkcore.CodeError` unwrap 防御。
+
+**`sendFunc` / `updateFunc` 字段类型更新**:
+
+```go
+type sendMessageFunc func(ctx context.Context, chatID, msgType, content, rootID string) (string, error)
+type updateMessageFunc func(ctx context.Context, messageID, content string) error  // PATCH 不变
+```
+
+**Adapter.Send dispatcher 透传**:
+
+```go
+case gateway.OutCard:
+    // ...
+    content, err := buildInteractiveCard(msg.Card)
+    if err != nil { return err }
+    _, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, msg.ReplyTo)  // ← 加 ReplyTo
+    return err
+
+case gateway.OutCommandReply:
+    // ...
+    _, err := a.SendMessageText(ctx, msg.ChatID, msg.Text, msg.ReplyTo)  // ← 加 ReplyTo
+    return err
+```
+
+**Receipt cold-start 路径**(在 `receiptFor` 内):
+
+```go
+msgID, err := a.SendCard(ctx, chatID, cardBody, userMsgID)  // ← userMsgID 作为 rootID
+```
+
+**Cold-start 工具函数 `buildColdStartCard`** 不变(body 一样,只换调用 API)。
+
+**PatchMessage 路径**: **不动** —— Feishu PATCH `/im/v1/messages/{id}` 自动保留被 PATCH 消息的原始 root_id,无需在 PATCH body 里重复传。
+
+### 15.3 §13.6 折叠修复细节
+
+**Adapter `OutThinking` case 补回前缀**:
+
+```go
+// 现有:
+case gateway.OutThinking:
+    receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
+    if receipt == nil { return nil }
+    return receipt.Append(ctx, agent.AgentEvent{
+        Kind: agent.EventText,
+        Text: msg.Text,
+    })
+
+// 改后:
+case gateway.OutThinking:
+    receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
+    if receipt == nil { return nil }
+    return receipt.Append(ctx, agent.AgentEvent{
+        Kind: agent.EventText,
+        Text: thinkingPrefix + msg.Text,  // ← 补回前缀,让 receipt_event.go 的 detection catch
+    })
+```
+
+**`receipt_event.go` 给 tool 标 Kind**:
+
+```go
+case agent.EventToolStart:
+    if ev.ToolStart == nil { return LogEntry{}, false }
+    name := ev.ToolStart.Name
+    if name == "" { name = "tool" }
+    text := name
+    if ev.ToolStart.Args != "" {
+        text = name + "(" + ev.ToolStart.Args + ")"
+    }
+    return LogEntry{
+        Time: now,
+        Icon: "🔧",
+        Text: truncateForLog(text, perEntryMaxBytes),
+        Kind: "tool",  // ← 新增,触发 buildReceiptCard 折叠
+    }, true
+
+case agent.EventToolEnd:
+    if ev.ToolEnd == nil { return LogEntry{}, false }
+    name := ev.ToolEnd.Name
+    if name == "" { name = "tool" }
+    var text string
+    if ev.ToolEnd.Err != nil {
+        text = fmt.Sprintf("%s failed: %s", name, ev.ToolEnd.Err.Error())
+    } else if ev.ToolEnd.Output != "" {
+        text = fmt.Sprintf("%s → %s", name, ev.ToolEnd.Output)
+    } else {
+        text = name + " done"
+    }
+    icon := "✅"
+    if ev.ToolEnd.Err != nil { icon = "❌" }
+    return LogEntry{
+        Time: now,
+        Icon: icon,
+        Text: truncateForLog(text, perEntryMaxBytes),
+        Kind: "tool",  // ← 新增
+    }, true
+```
+
+**`buildReceiptCard` 新增 `Kind="tool"` 折叠分支**(紧跟现有 `Kind="thinking"` 分支):
+
+```go
+if e.Kind == "tool" {
+    elements = append(elements, map[string]any{
+        "tag":      "collapsible_panel",
+        "expanded": false,
+        "header": map[string]any{
+            "title": map[string]any{
+                "tag":     "markdown",
+                "content": e.Icon + " " + e.Text,  // 复用 e.Text 作为 header 短描述
+            },
+            "vertical_align": "center",
+            "icon": map[string]any{
+                "tag":   "standard_icon",
+                "token": "down-s…ined",
+                "size":  "16px 16px",
+            },
+            "icon_position":       "follow_text",
+            "icon_expanded_angle": -180,
+        },
+        "border": map[string]any{
+            "color":        "grey",
+            "corner_radius": "5px",
+        },
+        "vertical_spacing": "8px",
+        "padding":          "8px 8px 8px 8px",
+        "elements": []map[string]any{
+            {
+                "tag":       "markdown",
+                "content":   e.Text,
+                "text_size": "notation",
+            },
+        },
+    })
+    continue
+}
+```
+
+**Panel header 文案规则**(由 `receipt_event.go` 在生成 entry 时决定):
+- Tool Start: `🔧 tool_name(args)` → `Icon="🔧"`, `Text="Read(/a.py)"`
+- Tool End (成功): `✅ tool_name → output_first_line`(`output` 完整在 body)
+- Tool End (失败): `❌ tool_name failed: err`
+
+**简化策略**:`receipt_event.go` 把 icon + name + 短描述拼成 `Icon + Text`,`buildReceiptCard` 直接用 `e.Icon + " " + e.Text` 作为 header title,`e.Text` 整段作为展开 body。**不新增字段**,改动最小。
+
+### 15.4 测试计划
+
+**`receipt_event_test.go` 新增**:
+
+| 用例 | 验证 |
+|------|------|
+| `TestEventToEntry_ToolStart_KindTool` | `EventToolStart{Name:"Read", Args:"/a.py"}` → entry `Kind="tool"`, `Icon="🔧"`, `Text="Read(/a.py)"` |
+| `TestEventToEntry_ToolEnd_Success_KindTool` | `EventToolEnd{Name:"Read", Output:"47 lines"}` → entry `Kind="tool"`, `Icon="✅"`, `Text="Read → 47 lines"` |
+| `TestEventToEntry_ToolEnd_Failure_KindTool` | `EventToolEnd{Err: errors.New("perm denied")}` → entry `Kind="tool"`, `Icon="❌"`, `Text="Read failed: perm denied"` |
+| `TestEventToEntry_ThinkingPrefix_DetectsThinking` | `EventText{Text:"[思考] hello"}` → entry `Kind="thinking"`(已存在,确认 prefix detection 仍然 work) |
+
+**`receipt_test.go` 新增**:
+
+| 用例 | 验证 |
+|------|------|
+| `TestReceipt_BuildCard_FoldedEntries` | append thinking + tool_start + tool_end + reply → 生成的 card JSON 包含 3 个 `collapsible_panel`(前 3 个)+ 1 个平铺 `markdown`(reply) |
+| `TestReceipt_BuildCard_AllCollapsed` | 默认 `expanded: false`(思考 + 工具全部折叠) |
+| `TestReceipt_BuildCard_NoFoldedForUsage` | `EventUsage` / `EventCompaction` / `EventInit` / `EventResult` 不走折叠分支 |
+
+**`adapter_test.go` 新增**:
+
+| 用例 | 验证 |
+|------|------|
+| `TestAdapter_Send_OutThinking_AppendsWithPrefix` | `Send(OutboundMessage{Kind: OutThinking, Text: "reasoning"})` 走到 receipt.Append 时,`event.Text == "[思考] reasoning"` |
+| `TestAdapter_Send_OutCard_PassesReplyTo` | `Send(OutboundMessage{Kind: OutCard, ReplyTo: "user_123", Card: ...})` → `sendContent` 收到的 `rootID == "user_123"` |
+| `TestAdapter_Send_OutCommandReply_PassesReplyTo` | `Send(OutboundMessage{Kind: OutCommandReply, ReplyTo: "user_123", Text: "..."})` → `SendMessageText` 收到的 `rootID == "user_123"` |
+| `TestAdapter_ReceiptFor_ColdStartPassesUserMsgID` | 冷启动 receipt 时,`SendCard` 收到的 `rootID == msg.ReplyTo` |
+
+**`sendViaLark` 单元测试**(可能已有 mock,需补充):
+
+| 用例 | 验证 |
+|------|------|
+| `TestSendViaLark_RootIdSet` | mock `sendFunc` 记录调用 `rootID`,验证传入非空 |
+| `TestSendViaLark_NoRootId` | 调用时 `rootID == ""` → mock 收到 `rootID=""`(top-level Create) |
+| `TestSendViaLark_TerminalCodeFallsBackToCreate` | Reply mock 返回 `"...code 230011"` → sendContent 自动重试 mock `rootID=""`,应收到 `om_created` |
+| `TestSendViaLark_NonTerminalErrorPropagates` | Reply mock 返回 `"...code 230020"` 或 transport error → sendContent 不重试,原错误传递 |
+| `TestSendViaLark_NoRootIDSkipsReply` | `rootID == ""` 路径下 mock 只收 Create 调用 |
+| `TestIsFeishuTerminalMessageCode` | 6 case 单测: 230011 / 231003 → true,230020 / transport / unrelated / nil → false |
+
+### 15.5 验收
+
+| 项 | 状态 |
+|----|------|
+| go build | 必过 |
+| go test ./... | 必过(含新增测试) |
+| go vet | 必过 |
+| golangci-lint | 必过 |
+| E2E: 飞书 DM round-trip | **必跑**(Feishu 测试号 + 真实消息往返,验证 root_id 在 Feishu 端可见) |
+| 视觉截图: receipt card 折叠态 | **推荐**(折叠 + 展开两态) |
+
+### 15.6 不在本 PR scope(backlog)
+
+- §13.2 OutInit Meta 字段渲染(foot note 扩展)
+- §13.3 OutResult 限额放宽(600→2048 或折叠展开全文)
+- §13.10 方案 C `reply_in_thread` 模式(用户可配)
+- §13.7 方案 2 / 方案 3(工具调用聚合)
+- §13.4 OutboundAttachment kind(agent 生成图片/文件)
+
+### 15.7 §13.10 Fallback:Reply target unavailable(2026-08-03 增量)
+
+**问题**: Reply API 在 user message 被撤回(230011)或删除(231003)时**永久失败**。Pre-fix 行为:Create API 不读 root_id,OutCard / OutCommandReply 在 msg.ReplyTo 是 dead message id 时仍然能发出(只是没视觉连接)。Post-fix v1.3.x 把所有 reply 路径都迁到 Message.Reply,**会硬失败**。
+
+**openclaw-lark 模式**(src/core/message-unavailable.ts):用 `runWithMessageUnavailableGuard` 包装每次 API 调用,识别 230011/231003 后:
+1. 把 message_id 加入 30 分钟 TTL 的 unavailability cache
+2. 后续该 message_id 的所有 API 调用 fast-fail,避免日志 spam
+3. 抛 `MessageUnavailableError` 给上游决定如何处理(abort / fallback / retry)
+
+**nightme v1.3.x 简化版**(已落地):
+
+只在 `sendContent` 加一层 fallback:**仅当 Reply 失败且错误码是 230011/231003 时**,retry 一次不带 rootID 的 Create,然后日志 warn。**不做**全局 cache(per-turn retry storm 在我们的 hot path 里基本不会发生,加了反而增复杂度)。
+
+```go
+msgID, err := send(ctx, chatID, msgType, content, rootID)
+if err != nil && rootID != "" && isFeishuTerminalMessageCode(err) {
+    a.logger.Warn("feishu: reply target unavailable, falling back to top-level", ...)
+    return send(ctx, chatID, msgType, content, "")
+}
+return msgID, err
+```
+
+`isFeishuTerminalMessageCode(err)` 检测 230011/231003: 格式兼容 `"code NNNNN"` 和 `"code:NNNNN"`,加 `*larkcore.CodeError` unwrap 防御 SDK 未来变化。
+
+**测试覆盖**:
+- `TestSendViaLark_TerminalCodeFallsBackToCreate` — 230011 和 231003 都触发 fallback
+- `TestSendViaLark_NonTerminalErrorPropagates` — 230020 和 transport error 不触发 fallback,原错误向上传
+- `TestIsFeishuTerminalMessageCode` — 6 case 单测
+
+**与 openclaw-lark 的差异**(值得记录):
+- **不做 cache**: openclaw-lark 把 message_id 存进 30min TTL map;我们只在 sendContent 这一层做单次 fallback。开销更小,但未来如果出现“同一 dead root_id 被反复请求”的场景,需补上 cache。
+- **不打 sentinel error 类型**: openclaw-lark 抛 `MessageUnavailableError`;我们走标准 error + log warn,上层 gateway 不需特判。
+
+**后续优化(backlog)**:
+- 加 30min TTL cache(若 230011 触发频次超过预期)
+- 上层 Chatsession 接收 230011 / 231003 时,emit MessageState=error 并中断 turn(避免 agent 继续发无主回复)

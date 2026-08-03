@@ -9,11 +9,18 @@
 // their native UI (Feishu collapses the stream into a rolling-log message;
 // Slack could post per-event thread replies; Web could render HTML).
 //
-// In v1.1 (see docs/feat/F-08-channel-abstraction.md §2 and
-// docs/feat/F-26-gateway-hub.md §2.4) Channel additionally owns the
-// receipt OBJECT (its backend-native message / reaction handles) and
-// renders the receipt STATE (Pending / Executing / Done / Error). The
-// STATE itself is decided by Gateway; Channel only paints transitions.
+// v1.3 (SPEC §0.1): the receipt lifecycle interface methods
+// (CreateReceipt / UpdateReceipt / DisposeReceipt) have been removed.
+// The receipt OBJECT is now entirely Channel-internal — Gateway does
+// not see it. Each Channel decides its own state shape and storage
+// form (Feishu: *MessageReceipt with append/PATCH; Slack: thread map;
+// Web: DOM nodes). Gateway routes outbound events by stamping
+// msg.ReplyTo = currentTurnUserMsgID; Channel looks up its own
+// receipt by userMsgID.
+//
+// "Abstract stays abstract, concrete stays concrete": Gateway knows
+// only the five lifecycle/messaging methods below. Receipt shape is
+// each Channel's private affair.
 package channel
 
 import (
@@ -21,7 +28,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/gateway"
-	"github.com/cnlangzi/nightme/internal/receipt"
 )
 
 // Message is an alias for gateway.InboundMessage. Kept as a type alias
@@ -33,22 +39,6 @@ type Message = gateway.InboundMessage
 // Message: channel adapters populate this struct, downstream code
 // reads it, and there is one definition to keep in sync.
 type Attachment = gateway.Attachment
-
-// Re-exports from internal/receipt. Channel implementations depend
-// on these types; placing them in their own package breaks the
-// cycle (gateway imports them for the FSM contract; channel
-// imports them for the rendering interface). See F-26 §6 commit 3.
-type (
-	Receipt      = receipt.Receipt
-	ReceiptState = receipt.ReceiptState
-)
-
-const (
-	ReceiptPending   = receipt.ReceiptPending
-	ReceiptExecuting = receipt.ReceiptExecuting
-	ReceiptDone      = receipt.ReceiptDone
-	ReceiptError     = receipt.ReceiptError
-)
 
 // Normalized chat type constants. Channel adapters should map their
 // native values onto these.
@@ -65,14 +55,17 @@ const (
 func IsDM(m Message) bool { return m.IsDM() }
 
 // Channel is the lifecycle and messaging contract implemented by each IM
-// adapter. In v0.3 it is intentionally thin: connection management,
-// format conversion, and per-Channel display strategy. Heavy logic
-// (routing, buffering, retry) lives at the Gateway.
+// adapter. v1.3 intentionally minimal:
 //
-// In v1.1 the interface also includes receipt lifecycle RENDERING
-// (CreateReceipt / UpdateReceipt / DisposeReceipt). Gateway drives
-// the FSM and decides when transitions happen; Channel paints the
-// visual representation in its native UI.
+//   - 5 methods (Name / Start / Stop / Send / Incoming)
+//   - No receipt FSM API (Gateway does not own receipt state)
+//   - No receipt handle type (Channel owns its own receipt objects)
+//
+// Heavy logic (routing, buffering, the userMsgID anchor) lives at
+// the Gateway. Channel implementations translate OutboundMessage
+// (which carries msg.ReplyTo = userMsgID) into their native UI and
+// decide internally how to find / create / patch the receipt for
+// that userMsgID.
 //
 // Compile-time assertions live alongside the concrete implementations
 // (internal/channel/feishu/adapter.go, internal/channel/echo/echo.go).
@@ -95,46 +88,23 @@ type Channel interface {
 	// as fire-and-ack and does not retry. The Channel may silently
 	// drop OutboundMessage kinds its UI cannot represent (e.g. Slack
 	// cannot swap reactions in place) without surfacing an error.
+	//
+	// For OutText / OutToolStart / OutToolEnd / OutThinking kinds:
+	// the Channel is expected to route by msg.ReplyTo (userMsgID) to
+	// find its existing receipt (card / thread / DOM node) and patch
+	// it in place; if no receipt exists for that userMsgID yet,
+	// cold-create one before patching. This is what makes F-25
+	// rolling-log UX work without Gateway knowing the receipt shape.
 	Send(ctx context.Context, msg gateway.OutboundMessage) error
 
 	// Incoming returns the channel's normalized message stream.
 	Incoming() <-chan Message
-
-	// --- v1.1 additions: receipt lifecycle RENDERING ---
-	//
-	// Gateway is the only caller; Channels do not assume any
-	// particular transition order. UpdateReceipt is idempotent for
-	// the same state (Channel may short-circuit).
-
-	// CreateReceipt creates a new channel-native receipt for an
-	// incoming user message and returns an opaque Receipt handle
-	// that Gateway holds for the lifetime of the user message's
-	// receipt FSM.
-	//
-	// The channel decides how to render the initial state (typically
-	// Pending → ⏳). blocks is the structured user turn (text +
-	// optional image/file attachments); the channel formats these
-	// into its native UI (Feishu: receipt text message + ⏳
-	// reaction; echo: log line).
-	//
-	// Errors propagate to Gateway, which will skip receipt
-	// bookkeeping and fall back to plain Send for that user
-	// message.
-	CreateReceipt(ctx context.Context, chatID, userMsgID string, blocks []agent.ContentBlock) (Receipt, error)
-
-	// UpdateReceipt transitions the receipt to the given state. The
-	// channel renders the state in its native UI:
-	//
-	//   ReceiptPending   → ⏳  (or keep current emoji if already Pending)
-	//   ReceiptExecuting → 🔄  (swap reaction or append indicator)
-	//   ReceiptDone      → ✅  (swap reaction, optionally edit body)
-	//   ReceiptError     → ❌  (swap reaction)
-	//
-	// Idempotent for the same state — channels may short-circuit.
-	UpdateReceipt(ctx context.Context, receipt Receipt, state ReceiptState) error
-
-	// DisposeReceipt cleans up the receipt (Feishu: delete the
-	// receipt message; echo: log a dispose line; web: remove the
-	// element). Called after the final UpdateReceipt(Done|Error).
-	DisposeReceipt(ctx context.Context, receipt Receipt) error
 }
+
+// Compile-time guard: the agent package is referenced in this file
+// only via type aliases above (kept for back-compat with v0.x
+// callers). If a future cleanup removes the agent import, replace
+// this with the actual reference (e.g. a public helper that uses
+// agent.ContentBlock). Until then, ensure the import is not
+// tree-shaken by referencing it indirectly:
+var _ = agent.ContentText

@@ -2,7 +2,7 @@
 
 > **Status**: implemented (v0.2 — receive only; v1.1 数据结构升级为 blocks)
 > **Milestone**: v0.2
-> **Related**: [`SPEC.md`](../SPEC.md) v1.1 §2.1; [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md); [`F-25-input-buffer.md`](./F-25-input-buffer.md); [`F-20-gateway.md`](./F-20-gateway.md) §5
+> **Related**: [`SPEC.md`](../SPEC.md) v1.1 §2.1; [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md); [`F-25-rolling-log.md`](./F-25-rolling-log.md); [`F-20-gateway.md`](./F-20-gateway.md) §5
 
 ---
 
@@ -52,11 +52,15 @@ Gateway.pumpInbound → dispatchLoop → DispatchInbound (inboundDispatcher) →
        ├── 成功的 attachments 转为 ContentImage / ContentFile blocks
        └── 失败的 attachments 丢弃（前面已通知 user）
 
-  → messageDispatcher(a) ch.CreateReceipt(ctx, msg.ChatID, msg.MessageID, blocks)
-  → messageDispatcher(b) receipts[userMsgID] = {..., state: Pending}
-  → messageDispatcher(c) session.QueueUserMessage(blocks, userMsgID)
-       ├── Idle → 立即 SendBlocks(blocks) → ch.UpdateReceipt(executing)
-       └── Busy → 入队 → onFlush 钩子触发时批量 SendBlocks + UpdateReceipt
+  → messageDispatcher(a) ChatSession.QueueUserMessage(blocks, msg.MessageID)
+       ├── Idle → 立即 SendBlocks(blocks) → ChatSession.currentTurnUserMsgID = msg.MessageID
+       └── Busy → 入队 → onFlush 钩子触发时批量 SendBlocks(currentTurnUserMsgID = last userMsgID)
+  → messageDispatcher(b) cs.emitMessageState(msg.MessageID, StateReceived)   ← F-31
+  → messageDispatcher(c) cs.emitMessageState(msg.MessageID, StateForwarded)  ← F-31
+
+**v1.3 关键变化**:
+- ❌ v1.1: Gateway 调 `ch.CreateReceipt` + `receipts[userMsgID]` 簿记
+- ✅ v1.3: Gateway **完全不持有 receipt** — Channel 在收到第一个带 `ReplyTo=userMsgID` 的 `OutboundMessage` 时自己 cold-create receipt (card / thread / DOM)。Receipt 是 Channel 内部状态。
 ```
 
 **关键 v1.1 变化**（相对 v0.2 文档）：
@@ -177,8 +181,8 @@ type ContentBlock struct {
 ## 9. Cross-references
 
 - **ContentBlock 类型定义**：见 [`internal/agent/agent.go`](../../internal/agent/agent.go) §ContentBlock
-- **Receipt FSM（blocks 怎么变成 receipt）**：见 [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md) §4
-- **InputBuffer blocks 入队**：见 [`F-25-input-buffer.md`](./F-25-input-buffer.md) §5
+- **Receipt card 内容(blocks 怎么渲染到 receipt)**:见 [`F-25-rolling-log.md`](./F-25-rolling-log.md) §3.1 (Feishu 实现)
+- **InputBuffer blocks 入队**：见 [`F-25-rolling-log.md`](./F-25-rolling-log.md) §5
 - **Claude Code bridge 怎么 encoding blocks**：见 [`F-24-claudecode-bridge.md`](./F-24-claudecode-bridge.md)
 
 ---

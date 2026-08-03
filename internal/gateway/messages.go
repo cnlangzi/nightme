@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/receipt"
 )
 
 // ChatType discriminates inbound message origins. The exact
@@ -272,7 +271,7 @@ type OutboundMessage struct {
 	ReplyTo string
 	// Meta carries opaque per-kind payload the Channel may need:
 	//   OutMessageState: Meta.MessageID is the target user message;
-	//     Meta.State is the receipt.MessageState value.
+	//     Meta.State is the agent.MessageState value.
 	//   (legacy) Reaction / ReactionRemoved: see Reaction struct.
 	//   OutCard: Meta.RequestID is the correlation token the user
 	//     click carries back in InboundMessage.Action.RequestID.
@@ -325,7 +324,7 @@ type Reaction struct {
 type MessageStatePayload struct {
 	// State is the abstract MessageState value (received /
 	// forwarded / done / error).
-	State receipt.MessageState
+	State agent.MessageState
 	// Emoji is an optional channel-native emoji override. Most
 	// channels ignore this and map State → emoji via their own
 	// table (e.g. Feishu: StateReceived → "OneSecond").

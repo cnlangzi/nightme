@@ -129,7 +129,7 @@ Inspect persisted chat sessions:
 | **Feishu channel** | [docs/feat/F-08-channel-abstraction.md](./docs/feat/F-08-channel-abstraction.md) | WebSocket adapter + IM rendering |
 | **PTY bridge** | [docs/feat/F-19-cli-bridge.md](./docs/feat/F-19-cli-bridge.md) | PTY-backed byte pipe for any CLI |
 | **Feishu one-click auth** | [docs/feat/F-22-feishu-onclick-registration.md](./docs/feat/F-22-feishu-onclick-registration.md) | QR-code onboarding |
-| **Rolling-log receipt** | [docs/feat/F-25-input-buffer.md](./docs/feat/F-25-input-buffer.md) (v1.x) | Per-user-message single receipt card |
+| **Rolling-log receipt** | [docs/feat/F-25-rolling-log.md](./docs/feat/F-25-rolling-log.md) (v1.3; Channel-autonomous) | Per-turn single receipt card PATCHed in place |
 | **`nightme test`** | [docs/feat/F-19-cli-bridge.md](./docs/feat/F-19-cli-bridge.md) | Local smoke test (PTY passthrough) |
 | **`nightme list`** | [docs/feat/F-10-session-list-cmd.md](./docs/feat/F-10-session-list-cmd.md) | List persisted chat sessions |
 
@@ -247,7 +247,6 @@ internal/
 | [`docs/PRD.md`](./docs/PRD.md) | Product definition — what / why / for whom |
 | [`docs/SPEC.md`](./docs/SPEC.md) | Technical architecture — components, data flow, NFRs |
 | [`docs/FEATURES.md`](./docs/FEATURES.md) | Feature index — every F-XX in one table |
-| [`docs/PLAN.md`](./docs/PLAN.md) | Implementation roadmap |
 | [`docs/feat/`](./docs/feat/) | Per-feature design docs |
 | [`docs/E2E_TESTING.md`](./docs/E2E_TESTING.md) | Manual Feishu round-trip + troubleshooting |
 | [`CHANGELOG.md`](./CHANGELOG.md) | Current snapshot (single Unreleased section) |

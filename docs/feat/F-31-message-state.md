@@ -1,10 +1,10 @@
 # F-31: MessageState — 消息生命周期进度跟踪
 
-> **Status**: locked (v1.3 draft; pending PR)
+> **Status**: locked (v1.3; shipped in commit a6113d9)
 > **Milestone**: v1.3
 > **Depends on**: F-08 (Channel abstraction), F-26 (Gateway), F-27 (ChatSession), F-29 (AgentSession pool)
 > **Used by**: end users (visual feedback), ChatSession lifecycle
-> **Related docs**: [`SPEC.md`](../SPEC.md) v1.3 §2.5, [`F-26-gateway-hub.md`](./F-26-gateway-hub.md), [`channel/feishu.md`](../channel/feishu.md) §6.6
+> **Related docs**: [`SPEC.md`](../SPEC.md) v1.3 §2.5, [`F-26-gateway-hub.md`](./F-26-gateway-hub.md), [`channel/feishu.md`](../channel/feishu.md) §6.6, [`F-25-rolling-log.md`](./F-25-rolling-log.md)
 
 ---
 
@@ -27,10 +27,12 @@
 v1.2 的 "reaction" 概念混在 feishu 实现里：
 
 - `internal/channel/feishu/receipt.go` 内部维护 `currentReaction` / `appendReactionLocked`，直接调飞书 SDK
-- 抽象层 `OutboundKind.OutReaction` 定义了但**没有调用方**（dead code）
+- 抽象层 `OutboundKind.OutReaction` 定义了但**没有调用方**（dead code；v1.3 已删除）
 - 跨 channel 实现（Slack / Web UI）需要重新实现 FSM + idempotency + 状态映射
 
 这违反了 nightme 的职责隔离原则：**抽象架构功能被泄漏到具体 channel 实现里**。
+
+**v1.3 状态**：本 F-31 设计已落地（commit a6113d9）。`MessageState` FSM 由 ChatSession 拥有（lifecycle 触发），Gateway 转发为 `OutboundMessage{Kind: OutMessageState}`，Channel 通过 `Send` 派发到原生 API（Feishu: AddReaction; Slack: emoji shortcode; Web: DOM 元素）。Receipt FSM 完全独立处理（见 [`F-25-rolling-log.md`](./F-25-rolling-log.md)）—— v1.3 起 Receipt 概念本身从 Gateway 移除，MessageState 真正独立。
 
 ### 2.2 设计目标
 
@@ -40,20 +42,22 @@ v1.2 的 "reaction" 概念混在 feishu 实现里：
 4. **可观测**：所有 MessageState 事件可被 logging / tracing 看到
 5. **跨平台**：不同 channel 用各自的视觉表达承载同一抽象
 
-### 2.3 与 Receipt 的关系（关键澄清）
+### 2.3 与 Receipt 的关系（v1.3 真正独立）
 
-| 概念 | 跟踪什么 | Owner | Scope |
+v1.2 末注释中预想的 "MessageState 与 Receipt 两者完全独立"在 v1.3 才真正成立 —— v1.3 起 **Gateway 不再持有 Receipt 概念**（见 SPEC §0.1 与 [`F-25-rolling-log.md`](./F-25-rolling-log.md)），MessageState 不再需要与 Receipt FSM 共存。
+
+| 概念 | 跟踪什么 | Owner | 渲染载体 |
 |---|---|---|---|
-| **MessageState** | 消息在系统里的处理进度 | ChatSession | 每条普通 message |
-| **Receipt** | agent 响应的渲染载体（FSM） | Gateway | 每条普通 message（有响应时） |
+| **MessageState** | 消息在系统里的处理进度 | ChatSession | Channel 自己（Feishu: reaction emoji）|
+| **Rolling-log receipt** | agent 响应的内容卡片 | Channel 内部 | Channel 自己（Feishu: card PATCH）|
 
-两者**完全独立**：
+两者的语义、owner、触发点、渲染都**完全独立**：
 - 共同点：都按 `userMsgID` 索引
-- 不同点：MessageState 跟踪消息本身；Receipt 跟踪响应渲染
-- 触发点：MessageState 由 ChatSession lifecycle 触发；Receipt 由 Gateway 主动创建
-- 互不依赖：一个失败不影响另一个
+- 不同点：MessageState 跟踪消息本身进度；rolling-log 跟踪响应内容增长
+- 触发点：MessageState 由 ChatSession lifecycle 触发（`cs.emitMessageState`）；rolling-log 由 `OutboundMessage{ReplyTo: userMsgID}` 在 Channel.Send 内部触发 cold-create / PATCH
+- 互不依赖：任一失败不影响另一个
 
-MessageState **不是** Receipt 的渲染轨道。Receipt 是否实现（v1.2 当前未实现 v1.x 的 rolling-log card）不影响 MessageState 工作。
+详细协议见 [`F-25-rolling-log.md`](./F-25-rolling-log.md) §6。
 
 ---
 

@@ -18,7 +18,7 @@ type trackingEventHandler struct {
 	lastKind string
 }
 
-func (h *trackingEventHandler) handler(chatID string, _ *AgentSession, ev agent.AgentEvent) {
+func (h *trackingEventHandler) handler(chatID string, _ *AgentSession, ev agent.AgentEvent, _ string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.calls++

@@ -32,7 +32,6 @@ import (
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/receipt"
 )
 
 // EventHandler is invoked by ChatSession for every AgentEvent from
@@ -42,9 +41,20 @@ import (
 // chatID is the owning ChatSession's ChatID (closure-free; the
 // runtime can use it directly without looking up the manager).
 //
+// userMsgID is the current turn's single userMsgID anchor (the
+// last userMsgID that triggered the active agent turn). The
+// runtime stamps it into OutboundMessage.ReplyTo so each Channel
+// can route the event to its own per-userMsgID receipt (card /
+// thread / DOM node). Empty when the event has no anchor (e.g.
+// startup EventInit with no user message yet).
+//
+// v1.3 (SPEC §2.2): 1 turn : 1 userMsgID, no fanout. The
+// ChatSession tracks the anchor via currentTurnUserMsgID and
+// passes it to the handler here.
+//
 // Implementations MUST be non-blocking or short (events drain
 // through a buffered channel; long handlers stall the pump).
-type EventHandler func(chatID string, s *AgentSession, ev agent.AgentEvent)
+type EventHandler func(chatID string, s *AgentSession, ev agent.AgentEvent, userMsgID string)
 
 // EventPumpState tracks the current readPump goroutine for one
 // ChatSession. Accessed only under pumpMu (read or write).
@@ -148,7 +158,7 @@ func (cs *ChatSession) HasPump() bool {
 //
 // v1.3 (F-31): on terminal events (EventDone/EventError), emit
 // MessageState(Done/Error) for every userMsgID in the just-
-// completed turn (tracked via currentTurnUserMsgIDs). Emit BEFORE
+// completed turn (tracked via currentTurnUserMsgID). Emit BEFORE
 // SetIdle + OnTurnEnded so the next flush (if any queued messages
 // remain) doesn't overwrite the userMsgIDs we just consumed.
 func (cs *ChatSession) runReadPump(as *AgentSession, h EventHandler, stop, done chan struct{}) {
@@ -184,16 +194,19 @@ func (cs *ChatSession) runReadPump(as *AgentSession, h EventHandler, stop, done 
 				return
 			}
 			if h != nil {
-				h(cs.ChatID, as, ev)
+				cs.mu.RLock()
+				userMsgID := cs.currentTurnUserMsgID
+				cs.mu.RUnlock()
+				h(cs.ChatID, as, ev, userMsgID)
 			}
 			// FSM driving + MessageState emission (F-31).
 			switch ev.Kind {
 			case agent.EventDone:
-				cs.emitMessageStateForCurrentTurn(receipt.StateDone)
+				cs.emitMessageStateForCurrentTurn(agent.StateDone)
 				cs.SetIdle()
 				_ = cs.OnTurnEnded()
 			case agent.EventError:
-				cs.emitMessageStateForCurrentTurn(receipt.StateError)
+				cs.emitMessageStateForCurrentTurn(agent.StateError)
 				cs.SetIdle()
 				_ = cs.OnTurnEnded()
 			default:

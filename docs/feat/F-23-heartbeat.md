@@ -4,13 +4,13 @@
 > **Milestone**: v0.2 (设计), v0.3 (实现迁到 Channel)
 > **Depends on**: F-03 (output push), F-08 (channel abstraction, receipt API), F-22 (feishu adapter)
 > **Supersedes**: F-17 (v0.2 stub — heartbeat 设计收敛后并入本文)
-> **Related**: [F-08-channel-abstraction.md](./F-08-channel-abstraction.md) §4 (receipt rendering); [F-25-input-buffer.md](./F-25-input-buffer.md) §6 (v1.1 修订)
+> **Related**: [F-08-channel-abstraction.md](./F-08-channel-abstraction.md) §4 (receipt rendering); [F-25-rolling-log.md](./F-25-rolling-log.md) §6 (v1.1 修订)
 
 ## 0. v1.1 修订（heartbeat 归属变更）
 
 **v0.2 设计**：InputBuffer 持有 receipts map，heartbeat 由 InputBuffer 内的 receipt.Heartbeat() 驱动（每收到一个 agent event 调一次）。
 
-**v1.1 修订**：receipt 不属于 InputBuffer（v1.1 InputBuffer 不知道 receipt 存在——见 [F-25 §5](./F-25-input-buffer.md)）。heartbeat 现在由 **Channel 实现的 receipt 内部**驱动：
+**v1.1 修订**：receipt 不属于 InputBuffer（v1.1 InputBuffer 不知道 receipt 存在——见 [F-25 §5](./F-25-rolling-log.md)）。heartbeat 现在由 **Channel 实现的 receipt 内部**驱动：
 
 - Feishu adapter 的 `MessageReceipt` 持有独立 goroutine，按 heartbeat 节奏调 `bot.UpdateMessage(replyMsgID, "🔄 ⏳ N · HH:MM:SS")`
 - ticker 只在 `currentEmoji == EmojiExecuting` 时跑；切到 Done/Error 时停

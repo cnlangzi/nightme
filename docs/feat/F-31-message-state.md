@@ -355,7 +355,7 @@ func (g *gateway) OnMessageState(chatID, userMsgID string, state receipt.Message
 
 | MessageState | emoji_type（飞书预定义） | 用户视觉 |
 |---|---|---|
-| `StateReceived` | `OneSecond` | ⏳ |
+| `StateReceived` | `OK` | 👌 |
 | `StateForwarded` | `OnIt` | 🔄 |
 | `StateDone` | `DONE` | ✅ |
 | `StateError` | `THUMBSUP` | ❌ (closest 预定义) |
@@ -436,7 +436,7 @@ case gateway.OutMessageState:
 
 | Channel | 测试 |
 |---|---|
-| Feishu | `TestFeishu_OutMessageState_OneSecond` / `_OnIt` / `_DONE` 各映射 |
+| Feishu | `TestFeishu_OutMessageState_OK` / `_OnIt` / `_DONE` 各映射 |
 | Feishu | `TestFeishu_OutMessageState_Idempotency` 同 state 不重复 AddReaction |
 | Feishu | `TestFeishu_OutMessageState_AddReactionFailure` log warn 不阻塞 |
 | Feishu | `TestFeishu_OutMessageState_MissingMeta` error return |

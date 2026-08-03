@@ -328,7 +328,7 @@ case gateway.OutMessageState:
 
 | `MessageState` | emoji_type（飞书预定义） | 用户视觉 |
 |---|---|---|
-| `StateReceived` | `OneSecond` | ⏳ |
+| `StateReceived` | `OK` | 👌 |
 | `StateForwarded` | `OnIt` | 🔄 |
 | `StateDone` | `DONE` | ✅ |
 | `StateError` | `THUMBSUP` | ❌ (closest 预定义 indicator) |

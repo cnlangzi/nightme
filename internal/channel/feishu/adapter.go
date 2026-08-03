@@ -25,6 +25,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/receipt"
 )
 
 const maxMessageBytes = 3800
@@ -104,6 +105,17 @@ type Adapter struct {
 	// rules as receipts (delete together when SetCompleted).
 	receiptsByUserMsgID map[string]*MessageReceipt
 
+	// messageStates tracks the last successfully-rendered
+	// MessageState per user message id, so same-state emits
+	// (heartbeats, retries) skip a duplicate AddReaction. v1.3
+	// (F-31) replaces the per-receipt currentReaction field which
+	// was removed when MessageReceipt stopped owning reactions.
+	//
+	// Concurrency: reads/writes go through a.mu (same lock as
+	// receipts). Same lifecycle — entries persist for the
+	// ChatSession lifetime and are evicted only on adapter stop.
+	messageStates map[string]receipt.MessageState
+
 	// These hooks have production defaults and are intentionally kept as
 	// fields so tests can replace the network boundary with a small function.
 	wsStart    func(context.Context) error
@@ -129,6 +141,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		incoming:            make(chan channel.Message, 128),
 		receipts:            make(map[string]*MessageReceipt),
 		receiptsByUserMsgID: make(map[string]*MessageReceipt),
+		messageStates:       make(map[string]receipt.MessageState),
 		cfg:                 cfg,
 		done:                make(chan struct{}),
 		logger:              slog.Default(),
@@ -319,15 +332,18 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //
 //	OutText              → CreateMessage (msg_type=text)
 //	OutToolStart/End     → folded into the per-chat receipt via the
-//	                       existing AddReaction / UpdateMessage flow;
+//	                       existing UpdateMessage flow (card PATCH);
 //	                       this path is taken by the Feishu channel's
 //	                       display strategy (Stage 3 migrates the
 //	                       receipt-rendering logic here). Stage 1's
 //	                       Send handles OutText directly so the
 //	                       existing /help / /use paths keep
 //	                       working.
-//	OutReaction          → AddReaction on Meta["message_id"]
-//	OutReactionRemoved   → DeleteReaction on Meta["reaction_id"]
+//	OutMessageState      → AddReaction on Meta["message_id"] with
+//	                       state-specific emoji_type (F-31 §8.3).
+//	                       Idempotency via a.messageStates map.
+//	OutMessageStateRemoved → DeleteReaction on Meta["reaction_id"]
+//	                       (reserved; v1.3 uses append-only)
 //	OutCard              → send interactive card via sendContent
 //	OutThinking          → dropped (no native Feishu equivalent;
 //	                       future: a sub-message indicator)
@@ -564,26 +580,70 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 			Text: msg.Text,
 		})
 
-	case gateway.OutReaction:
-		if msg.Reaction == nil || msg.Reaction.EmojiType == "" {
-			return errors.New("feishu: OutReaction missing emoji_type")
-		}
+	case gateway.OutMessageState:
+		// F-31: read abstract state from Meta, map to feishu
+		// emoji_type internally. Channel decides how to render.
 		messageID, _ := msg.Meta["message_id"].(string)
 		if messageID == "" {
-			return errors.New("feishu: OutReaction missing message_id in Meta")
+			return errors.New("feishu: OutMessageState missing message_id in Meta")
 		}
-		_, err := a.AddReaction(ctx, messageID, msg.Reaction.EmojiType)
-		return err
+		stateRaw, ok := msg.Meta["state"]
+		if !ok {
+			return errors.New("feishu: OutMessageState missing state in Meta")
+		}
+		state, ok := stateRaw.(receipt.MessageState)
+		if !ok {
+			return fmt.Errorf("feishu: OutMessageState state has unexpected type %T", stateRaw)
+		}
+		emoji := mapStateToFeishuEmoji(state)
+		if emoji == "" {
+			// Unknown state: silent drop (forward-compatible).
+			return nil
+		}
+		// Idempotency: skip if we already rendered this state for
+		// this userMsgID. Tracks last-rendered state to avoid
+		// duplicate AddReaction calls on retries / heartbeats.
+		//
+		// v1.3.1 fix: use the comma-ok form to distinguish "no
+		// entry yet" (first emit) from "previous state is
+		// StateReceived" (which is the zero value of MessageState
+		// and was incorrectly treated as "already rendered",
+		// silently dropping every first StateReceived emit).
+		a.mu.Lock()
+		prev, hasPrev := a.messageStates[messageID]
+		skip := hasPrev && prev == state
+		if !skip {
+			a.messageStates[messageID] = state
+		}
+		a.mu.Unlock()
+		if skip {
+			return nil
+		}
+		if _, err := a.AddReaction(ctx, messageID, emoji); err != nil {
+			a.mu.Lock()
+			// Revert on failure so a later retry can re-add.
+			if a.messageStates[messageID] == state {
+				delete(a.messageStates, messageID)
+			}
+			a.mu.Unlock()
+			a.logger.Warn("feishu: OutMessageState add reaction failed",
+				"err", err, "emoji", emoji, "user_msg_id", messageID)
+			return err
+		}
+		return nil
 
-	case gateway.OutReactionRemoved:
-		if msg.Reaction == nil || msg.Reaction.ReactionID == "" {
-			return errors.New("feishu: OutReactionRemoved missing reaction_id")
-		}
+	case gateway.OutMessageStateRemoved:
+		// v1.3: not used (append-only reactions). Reserved for
+		// future when channels need mutable state markers.
 		messageID, _ := msg.Meta["message_id"].(string)
 		if messageID == "" {
-			return errors.New("feishu: OutReactionRemoved missing message_id in Meta")
+			return errors.New("feishu: OutMessageStateRemoved missing message_id in Meta")
 		}
-		return a.DeleteReaction(ctx, messageID, msg.Reaction.ReactionID)
+		reactionID, _ := msg.Meta["reaction_id"].(string)
+		if reactionID == "" {
+			return errors.New("feishu: OutMessageStateRemoved missing reaction_id in Meta")
+		}
+		return a.DeleteReaction(ctx, messageID, reactionID)
 
 	case gateway.OutCard:
 		if msg.Card == nil {
@@ -1181,6 +1241,38 @@ func (a *Adapter) SendMessageText(ctx context.Context, chatID, text string) (str
 // returned; the caller falls back to "leave old reaction in place"
 // rather than dropping the visual cue.
 //
+// mapStateToFeishuEmoji converts an abstract MessageState value
+// to the corresponding Feishu predefined emoji_type identifier.
+// F-31 §8.1 contract: Channel owns the state → visual mapping.
+//
+// Must use Feishu predefined emoji_type identifiers (not raw
+// unicode) — passing unicode to the reaction API returns
+// 99992354 "data not found".
+//
+// Returns "" for unknown states (forward-compatible silent drop).
+// mapStateToFeishuEmoji converts an abstract MessageState value
+// to the corresponding Feishu predefined emoji_type identifier.
+// F-31 §8.1 contract: Channel owns the state → visual mapping.
+//
+// Must use Feishu predefined emoji_type identifiers (not raw
+// unicode) — passing unicode to the reaction API returns
+// 99992354 "data not found".
+//
+// Returns "" for unknown states (forward-compatible silent drop).
+func mapStateToFeishuEmoji(state receipt.MessageState) string {
+	switch state {
+	case receipt.StateReceived:
+		return "OneSecond" // ⏳
+	case receipt.StateForwarded:
+		return "OnIt" // 🔄
+	case receipt.StateDone:
+		return "DONE" // ✅
+	case receipt.StateError:
+		return "THUMBSUP" // closest predefined indicator of "failed"
+	}
+	return ""
+}
+
 // reactionType must be a Feishu Emoji type. The built-in emojis
 // (THumbs, SMILE, etc.) are exposed as constants on the SDK's
 // larkim package; for arbitrary unicode emoji we pass them as a

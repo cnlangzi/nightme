@@ -32,6 +32,7 @@ import (
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/receipt"
 )
 
 // EventHandler is invoked by ChatSession for every AgentEvent from
@@ -144,6 +145,12 @@ func (cs *ChatSession) HasPump() bool {
 // Event order: handler runs BEFORE FSM transition, so the handler
 // can observe "agent is going idle" via ev.Kind. (Most handlers
 // don't care; this is for completeness.)
+//
+// v1.3 (F-31): on terminal events (EventDone/EventError), emit
+// MessageState(Done/Error) for every userMsgID in the just-
+// completed turn (tracked via currentTurnUserMsgIDs). Emit BEFORE
+// SetIdle + OnTurnEnded so the next flush (if any queued messages
+// remain) doesn't overwrite the userMsgIDs we just consumed.
 func (cs *ChatSession) runReadPump(as *AgentSession, h EventHandler, stop, done chan struct{}) {
 	defer func() {
 		cs.pumpRunning.Store(false)
@@ -179,9 +186,14 @@ func (cs *ChatSession) runReadPump(as *AgentSession, h EventHandler, stop, done 
 			if h != nil {
 				h(cs.ChatID, as, ev)
 			}
-			// FSM driving.
+			// FSM driving + MessageState emission (F-31).
 			switch ev.Kind {
-			case agent.EventDone, agent.EventError:
+			case agent.EventDone:
+				cs.emitMessageStateForCurrentTurn(receipt.StateDone)
+				cs.SetIdle()
+				_ = cs.OnTurnEnded()
+			case agent.EventError:
+				cs.emitMessageStateForCurrentTurn(receipt.StateError)
 				cs.SetIdle()
 				_ = cs.OnTurnEnded()
 			default:

@@ -159,15 +159,27 @@ func (a *Adapter) Send(ctx context.Context, msg OutboundMessage) error {
 Gateway 的事件路由遵循 **1 request : n response**：每个用户发起的会话都有一个 `userMsgID`；Gateway 在转发 agent event 时总是带上它（`OutboundMessage.ReplyTo` 字段）。Channel 根据这个字段决定镇定点。
 
 ```go
-// internal/gateway/messages.go
+// internal/gateway/messages.go — v1.3 update
 type OutboundMessage struct {
     ChatID  string
     Kind    OutboundKind
     Text    string
     Card    *Card
+    // MessageState 承载 OutMessageState kind 的 payload（v1.3 新增）。
+    // 详见 docs/feat/F-31-message-state.md。
+    MessageState *MessageStatePayload
+    // Reaction 保留向后兼容但 v1.3 后 OutMessageState 不再使用此字段。
     Reaction *Reaction
     ReplyTo string      // v1.1: userMsgID 镇定；"" 表示"真正无镇"
     Meta    map[string]any
+}
+
+// MessageStatePayload 是 OutMessageState kind 的负载。
+// Channel 从 Meta["message_id"] + Meta["state"] 也能读出相同信息；
+// 这个 struct 是方便直接访问的冗余载体。
+type MessageStatePayload struct {
+    State receipt.MessageState  // 状态值
+    Emoji string                // 可选：channel-specific 显式 emoji（override 推导）
 }
 ```
 
@@ -234,12 +246,14 @@ const (
 ```
 
 **Feishu implementation** (in `internal/channel/feishu/adapter.go`):
-- `CreateReceipt`: build receipt text from blocks (via Feishu helper), post the receipt message, add ⏳ reaction, return `*MessageReceipt{messageID, reactionID, replyMsgID}`
-- `UpdateReceipt(_, _, Pending)`: swap reaction to ⏳ (or add ⏳ if previously null)
-- `UpdateReceipt(_, _, Executing)`: swap reaction ⏳ → 🔄
-- `UpdateReceipt(_, _, Done)`: swap reaction → ✅; optionally edit receipt body to show final result
-- `UpdateReceipt(_, _, Error)`: swap reaction → ❌
+- `CreateReceipt`: build receipt text from blocks (via Feishu helper), post the receipt message, return `*MessageReceipt{messageID, replyMsgID}`. **v1.3 变更**：不再 add ⏳ reaction — reaction 由 MessageState FSM 负责（详见 F-31），与 Receipt 解耦。
+- `UpdateReceipt(_, _, Pending)`: 仅更新 receipt 内部 state，不操作 reaction
+- `UpdateReceipt(_, _, Executing)`: 仅更新 receipt 内部 state + PATCH card body（event count / timestamp）
+- `UpdateReceipt(_, _, Done)`: 仅更新 receipt 内部 state + PATCH card body 为最终结果
+- `UpdateReceipt(_, _, Error)`: 仅更新 receipt 内部 state + PATCH card body 为错误态
 - `DisposeReceipt`: delete the receipt message (or no-op if channel UI prefers to keep)
+
+**Reaction 触发转移（v1.3）**：v1.x 的 "CreateReceipt add ⏳ reaction / UpdateReceipt swap reaction" 全部下放给 MessageState FSM（详见 F-31）。Receipt FSM 不再触发任何 reaction — MessageState 与 Receipt 解耦后,两者走各自的 Channel.Send dispatcher 路径。
 
 **Echo implementation** (in `internal/channel/echo/echo.go`):
 - All three methods are logging-only: print `[receipt <userMsgID>] state=<state>` lines to stdout. Echo channel never returns errors from these (no network backend).
@@ -259,8 +273,8 @@ const (
 // internal/channel/feishu/adapter.go — Send dispatcher
 func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
     switch msg.Kind {
-    case gateway.OutReaction, OutReactionRemoved, OutCard, OutTyping:
-        // 全局 kinds — ReplyTo 无意义（reaction / card / typing 是 chat-全局）
+    case gateway.OutMessageState, gateway.OutMessageStateRemoved, OutCard, OutTyping:
+        // 全局 kinds — ReplyTo 无意义（message state / card / typing 是 chat-全局）
         return a.sendGlobal(ctx, msg)
     default:
         // agent-event-bearing kinds — 必须镇定到 ReplyTo
@@ -307,6 +321,13 @@ type gateway struct {
     bindings map[string]*BindingEntry  // chatID → binding
     receipts map[string]*receiptEntry  // userMsgID → receipt
 
+    // v1.3 additions: MessageState event hook.
+    // Registered into ChatSession via SetMessageStateHandler at startup.
+    // ChatSession calls onMessageState(chatID, userMsgID, state) at
+    // lifecycle events; we translate to OutboundMessage and forward
+    // via Channel.Send. See docs/feat/F-31-message-state.md.
+    onMessageState func(chatID, userMsgID string, state receipt.MessageState)
+
     // Runtime state:
     stopCh   chan struct{}
     stopOnce sync.Once
@@ -320,6 +341,36 @@ type gateway struct {
 
     // Receipt FSM hook into session InputBuffer.onFlush
     onBufferFlush func(s *Session, blocks []agent.ContentBlock, userMsgIDs []string) error
+}
+
+// OnMessageState is the v1.3 ChatSession-callback entry point. The
+// runtime (cmd/nightme) wires gw.OnMessageState into every ChatSession
+// at startup via SetMessageStateHandler. ChatSession calls it on
+// lifecycle events (received / forwarded / done / error); Gateway
+// translates to OutboundMessage{Kind: OutMessageState} and forwards
+// to the appropriate channel via resolveChannel + Send.
+func (g *gateway) OnMessageState(chatID, userMsgID string, state receipt.MessageState) {
+    g.mu.RLock()
+    ch := g.chatToChan[chatID]
+    if ch == nil {
+        ch = g.defaultChannel
+    }
+    g.mu.RUnlock()
+    if ch == nil {
+        return
+    }
+    out := OutboundMessage{
+        Kind:   OutMessageState,
+        ChatID: chatID,
+        Meta: map[string]any{
+            "message_id": userMsgID,
+            "state":      state,
+        },
+    }
+    if err := ch.Send(context.Background(), out); err != nil {
+        // Fire-and-ack: log warn, never block ChatSession lifecycle.
+        log.Printf("gateway: MessageState send failed (chat=%s, state=%s): %v", chatID, state, err)
+    }
 }
 
 type BindingEntry struct {

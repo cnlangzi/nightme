@@ -287,9 +287,67 @@ Feishu `lark_md` **不支持** `<font color='grey'>`。**严格用 `<text_tag co
 
 `F-23-heartbeat.md` 当前实现是周期性重新 `SendMessageText` 同一 header。切到 card 后,心跳 = 周期性 PATCH 同一张卡的 card body(刷新 header 时间戳 + foot note)。频率/阈值不变。
 
-### 6.6 reaction 与 card 共存
+### 6.6 MessageState 与 Card 共存（v1.3 重构）
 
-Feishu message 可以同时有 reaction + card content。`appendReactionLocked` 不变,继续在 **userMsgID** 上加 emoji(不是 card messageID)。`currentReaction` 仍按 state 去重。
+**v1.3 变更**：MessageState（reaction emoji 轨道）与 Receipt（card body 轨道）解耦为两个独立的 channel 实现。
+
+#### 6.6.1 两个轨道
+
+| 轨道 | 源 | 抽象事件 | 渲染目标 | Feishu 实现 |
+|---|---|---|---|---|
+| **MessageState** | ChatSession lifecycle | `OutboundMessage{Kind: OutMessageState, Meta: {message_id, state}}` | **userMsgID** | `AddReaction(userMsgID, emoji_type)` |
+| **Card Body** | Receipt FSM (v1.x 没实现,v1.3 仍是 backlog) | `Channel.UpdateReceipt / DisposeReceipt` | replyMsgID | `SendCard / PatchMessage` |
+
+两者**完全独立**:
+- 一个失败不影响另一个 (MessageState 渲染失败仅 log warn,不阻塞 card body)
+- 都按 userMsgID / chatID 索引,但服务不同语义
+- 详见 [`docs/feat/F-31-message-state.md`](../feat/F-31-message-state.md) 与 `SPEC.md §2.5`
+
+#### 6.6.2 MessageState 渲染实现
+
+```go
+// internal/channel/feishu/adapter.go — Send dispatcher 新增 case
+case gateway.OutMessageState:
+    messageID, _ := msg.Meta["message_id"].(string)
+    if messageID == "" {
+        return errors.New("feishu: OutMessageState missing message_id")
+    }
+    state, ok := msg.Meta["state"].(receipt.MessageState)
+    if !ok {
+        return errors.New("feishu: OutMessageState missing state")
+    }
+    emoji := mapStateToFeishuEmoji(state)
+    if emoji == "" {
+        return nil    // 未知 state 静默 drop
+    }
+    _, err := a.AddReaction(ctx, messageID, emoji)
+    return err
+```
+
+#### 6.6.3 state → emoji_type 映射
+
+| `MessageState` | emoji_type（飞书预定义） | 用户视觉 |
+|---|---|---|
+| `StateReceived` | `OneSecond` | ⏳ |
+| `StateForwarded` | `OnIt` | 🔄 |
+| `StateDone` | `DONE` | ✅ |
+| `StateError` | `THUMBSUP` | ❌ (closest 预定义 indicator) |
+
+**重要**：必须用飞书预定义 `emoji_type` 标识符,不是 unicode。传 unicode `⏳` 给飞书 reaction API 返回 `99992354 data not found`(reaction service 只识别预定义集合)。
+
+#### 6.6.4 内部 idempotency
+
+`Adapter` 维护 `messageStates map[string]receipt.MessageState`(userMsgID → 上次渲染的 state)。同 state 跳过 AddReaction 调用,避免网络抖动。
+
+#### 6.6.5 append-only 语义
+
+飞书 reaction API 是 append-only:每次 AddReaction 加新 emoji,不删老 emoji。这意味着 ⏳ → 🔄 → ✅ 在用户消息上**堆叠**为 3 个 emoji,形成完整状态轨迹。这是飞书平台特性,channel adapter 不主动删。
+
+如果未来需要删,实现 `OutMessageStateRemoved` 事件 + `DeleteReaction(msgID, reactionID)` 路径(参考 adapter.Send 中 OutReactionRemoved case 实现)。
+
+#### 6.6.6 渲染失败
+
+`AddReaction` 失败时 log warn,返回 error 由 caller(`gateway.OnMessageState`)处理。**永不阻塞** ChatSession lifecycle 或消息处理主流程。
 
 ### 6.7 30 KB body 限制(本期放宽)
 
@@ -310,7 +368,7 @@ Card 2.0 官方组件列表**没有 `tag: "note"`**。我们走 v2 风格(`<hr>`
 - 单元: `MessageReceipt.renderLocked` 第一次调 → `SendCard`;之后 → `PatchMessage` 同一个 messageID;**不再**调 `SendMessageText`
 - 单元: 元素数 = 60 entries → 47 entries + `…(前 N 条已省略)` 标记
 - 单元: 字节数 = 收到超大 entries → 驱逐最老直到 < 24 KiB
-- 单元: 回归 `mockReceiptBot` / `mockReceiptBot.AddReaction` 不变(reaction 仍走 userMsgID)
+- 单元: 回归 `mockReceiptBot.AddReaction` 不变（v1.3 后,reaction 由 MessageState FSM 触发,仍走 userMsgID,但已从 MessageReceipt 解耦到 Adapter 顶层）
 - 集成: 端到端: user message → 一张 receipt card(后续 agent event 不再发新消息,而是 PATCH);最终状态 `✅` 出现在 header;foot note 随状态变化
 - 回归: permission card (`OutCard`) 不受影响,继续走原 `buildInteractiveCard`
 - 回归: heartbeat (`F-23`) 行为对齐,只是底层从 SendMessageText 变为 PATCH
@@ -328,6 +386,8 @@ Card 2.0 官方组件列表**没有 `tag: "note"`**。我们走 v2 风格(`<hr>`
 - 飞书 PATCH card: https://open.feishu.cn/document/server-docs/im-v1/message-card/patch
 - 飞书 markdown 内联标签规范: https://open.feishu.cn/document/common-capabilities/message-card/message-cards-content/using-markdown-tags
 - 飞书 lark_md 元素 / 行长度 / 字符限制: https://open.larkoffice.com/document/server-docs/im-v1/message-card/message-card-content/message-card-text-element
+- [`docs/feat/F-31-message-state.md`](../feat/F-31-message-state.md) — v1.3 MessageState 抽象事件,本文件 §6.6 是其 feishu-specific 实现补充
+- [`docs/SPEC.md`](../SPEC.md) §2.5 — MessageState 架构概述
 
 ## 9. Implementation plan(本期落地,minimal scope)
 

@@ -597,8 +597,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		emoji := mapStateToFeishuEmoji(state)
 		if emoji == "" {
-			a.logger.Info("F31 feishu.Send OutMessageState",
-				"user", messageID, "state", state.String(), "emoji", "<unknown> SKIP")
+			// Unknown state: silent drop (forward-compatible).
 			return nil
 		}
 		// Idempotency: skip if we already rendered this state for
@@ -618,25 +617,19 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		a.mu.Unlock()
 		if skip {
-			a.logger.Info("F31 feishu.Send OutMessageState SKIP (idempotent)",
-				"user", messageID, "state", state.String(), "emoji", emoji,
-				"prev_state", prev.String(), "hasPrev", hasPrev)
 			return nil
 		}
-		rid, err := a.AddReaction(ctx, messageID, emoji)
-		if err != nil {
+		if _, err := a.AddReaction(ctx, messageID, emoji); err != nil {
 			a.mu.Lock()
 			// Revert on failure so a later retry can re-add.
 			if a.messageStates[messageID] == state {
 				delete(a.messageStates, messageID)
 			}
 			a.mu.Unlock()
-			a.logger.Warn("F31 feishu.Send OutMessageState AddReaction FAIL",
-				"user", messageID, "state", state.String(), "emoji", emoji, "err", err)
+			a.logger.Warn("feishu: OutMessageState add reaction failed",
+				"err", err, "emoji", emoji, "user_msg_id", messageID)
 			return err
 		}
-		a.logger.Info("F31 feishu.Send OutMessageState AddReaction OK",
-			"user", messageID, "state", state.String(), "emoji", emoji, "reaction_id", rid)
 		return nil
 
 	case gateway.OutMessageStateRemoved:

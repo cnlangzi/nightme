@@ -11,7 +11,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -404,12 +403,8 @@ func (cs *ChatSession) EmitMessageState(userMsgID string, state receipt.MessageS
 	chatID := cs.ChatID
 	cs.mu.RUnlock()
 	if h == nil {
-		log.Printf("F31 EmitMessageState chat=%s user=%s state=%s handler=NIL (no-op)",
-			chatID, userMsgID, state)
 		return
 	}
-	log.Printf("F31 EmitMessageState chat=%s user=%s state=%s handler=present -> calling",
-		chatID, userMsgID, state)
 	h(chatID, userMsgID, state)
 }
 

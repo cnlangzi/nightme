@@ -89,6 +89,13 @@ type Adapter struct {
 	stopDone       chan struct{}
 	wsDone         chan struct{}
 
+	// threadReplyLimiter enforces Feishu's 5 QPS per-user /
+	// per-group bot API limit on thread replies. Without this
+	// gate, a hot agent (10 tool/sec) overruns the limit and
+	// Feishu returns 230020 / HTTP 429 for some replies,
+	// leaving the thread with gaps. See postThreadReply.
+	threadReplyLimiter *threadReplyLimiter
+
 	// logger is the structured-log target for both inbound and
 	// outgoing message traces. handleMessage emits one info
 	// line per inbound via logInbound; every send / reaction /
@@ -156,6 +163,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		incoming:            make(chan channel.Message, 128),
 		receiptsByUserMsgID: make(map[string]*MessageReceipt),
 		messageStates:       make(map[string]agent.MessageState),
+		threadReplyLimiter:  newThreadReplyLimiter(200*time.Millisecond, 800*time.Millisecond),
 		cfg:                 cfg,
 		done:                make(chan struct{}),
 		logger:              slog.Default(),
@@ -456,7 +464,18 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// a 💭 line so the main chat stays focused on the final
 		// answer. Falls back to a top-level send if ReplyTo is
 		// empty (orphan event, e.g. startup init).
-		return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text)
+		//
+		// F-34 review P1-3: also Touch the receipt so the main
+		// chat's receipt card header keeps ticking while the
+		// agent thinks. Without this the "🔄 ⏳ N · HH:MM:SS"
+		// line freezes between visible events.
+		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text); err != nil {
+			return err
+		}
+		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
+			_ = r.Touch(ctx)
+		}
+		return nil
 
 	case gateway.OutMessageState:
 		// F-31: read abstract state from Meta, map to feishu
@@ -545,7 +564,15 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// thread as a "🔧 name(args)" line. The receipt card
 		// no longer carries tool entries.
 		body := "🔧 " + formatToolStart(toolName(msg), toolArgs(msg))
-		return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body)
+		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body); err != nil {
+			return err
+		}
+		// F-34 review P1-3: Touch the receipt so the header
+		// keeps ticking while tools run.
+		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
+			_ = r.Touch(ctx)
+		}
+		return nil
 
 	case gateway.OutToolEnd:
 		// F-34: tool_end is posted to the user message thread
@@ -556,7 +583,15 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 			toolErr = e
 		}
 		body := summarizeToolEnd(toolName(msg), toolArgs(msg), toolOutput(msg), toolErr)
-		return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body)
+		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body); err != nil {
+			return err
+		}
+		// F-34 review P1-3: Touch the receipt so the header
+		// keeps ticking while tools run.
+		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
+			_ = r.Touch(ctx)
+		}
+		return nil
 
 	case gateway.OutTyping:
 		// No native Feishu equivalent (typing indicators come from
@@ -597,8 +632,16 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 	case gateway.OutCompaction:
 		// F-34: compaction is posted to the thread as a single
 		// "✶ Compacting conversation…" line.
-		return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo,
-			"✶ Compacting conversation…")
+		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo,
+			"✶ Compacting conversation…"); err != nil {
+			return err
+		}
+		// F-34 review P1-3: Touch the receipt so the header
+		// keeps ticking during compaction.
+		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
+			_ = r.Touch(ctx)
+		}
+		return nil
 
 	case gateway.OutInit:
 		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
@@ -660,11 +703,87 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 // top-level text send via sendRawOutText so the user still sees the
 // message.
 func (a *Adapter) postThreadReply(ctx context.Context, chatID, rootID, body string) error {
+	// P1-4 (F-34 review): Feishu's bot API caps at 5 QPS per
+	// user / per group. A hot agent running 10+ tools per turn
+	// would otherwise overrun the limit and Feishu would drop
+	// some replies, leaving the thread with gaps. The limiter
+	// sleeps up to maxWait per call; if the wait would exceed
+	// maxWait (the chat is already saturated) we return an
+	// error so the caller can log + move on rather than block
+	// the pump indefinitely.
+	if a.threadReplyLimiter != nil {
+		if err := a.threadReplyLimiter.Wait(ctx, chatID); err != nil {
+			a.logger.Warn("feishu: thread reply rate-limited",
+				"chat_id", chatID, "err", err)
+			return err
+		}
+	}
 	if rootID == "" {
 		return a.sendRawOutText(ctx, chatID, body)
 	}
 	_, err := a.SendMessageText(ctx, chatID, body, rootID)
 	return err
+}
+
+// threadReplyLimiter is a per-key (chatID) simple next-allowed-send
+// gate. Wait blocks until the slot opens or the caller's ctx is
+// cancelled, then reserves the next slot for the same key. If the
+// requested wait would exceed maxWait (the chat is already
+// saturated beyond recoverability), Wait returns an error
+// immediately so the caller can drop the message and continue.
+//
+// The limiter is intentionally simple — a single shared mutex
+// guards the map of next-send times. Hot-path throughput is
+// dominated by the network round-trip (~100ms), not the lock
+// acquisition (~10ns), so contention is a non-issue. Replace
+// with golang.org/x/time/rate if multi-channel adapters are
+// ever introduced.
+type threadReplyLimiter struct {
+	mu       sync.Mutex
+	nextSend map[string]time.Time
+	interval time.Duration // 200ms = 5 QPS
+	maxWait  time.Duration // hard cap on per-call wait
+}
+
+func newThreadReplyLimiter(interval, maxWait time.Duration) *threadReplyLimiter {
+	return &threadReplyLimiter{
+		nextSend: make(map[string]time.Time),
+		interval: interval,
+		maxWait:  maxWait,
+	}
+}
+
+// Wait blocks until the slot for key is open, then reserves the
+// next slot. Returns ctx.Err() if ctx is cancelled while waiting,
+// or an error if the wait would exceed maxWait (caller should
+// drop the message rather than stall).
+func (l *threadReplyLimiter) Wait(ctx context.Context, key string) error {
+	if l == nil || l.interval <= 0 {
+		return nil
+	}
+	l.mu.Lock()
+	due, ok := l.nextSend[key]
+	var wait time.Duration
+	if !ok || !time.Now().Before(due) {
+		l.nextSend[key] = time.Now().Add(l.interval)
+		l.mu.Unlock()
+		return nil
+	}
+	wait = time.Until(due)
+	l.nextSend[key] = due.Add(l.interval)
+	l.mu.Unlock()
+
+	if wait > l.maxWait {
+		return fmt.Errorf("feishu: thread reply rate limit exceeded (wait %dms > cap %dms)", wait.Milliseconds(), l.maxWait.Milliseconds())
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // formatToolStart renders the tool_start thread body. When args is

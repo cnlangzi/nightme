@@ -682,13 +682,7 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 		_ = entry
 		switch ev.Kind {
 		case agent.EventToolStart, agent.EventToolEnd, agent.EventCompaction:
-			r.eventCount++
-			r.lastEventAt = time.Now()
-			if r.state == StateWaiting {
-				r.state = StateExecuting
-				r.forwardedAt = r.lastEventAt
-			}
-			return r.renderLocked(ctx)
+			return r.touchAndRenderLocked(ctx)
 		}
 		// Unknown / unhandled event kind — keep going but don't
 		// touch the log.
@@ -717,6 +711,46 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 // budget protects against Feishu's 30 KB card body cap; the entry
 // budget protects against the 50-element hard limit (see the
 // derivation on replyMaxEntries). Caller must hold r.mu.
+// touchAndRenderLocked bumps the receipt's "last seen" markers
+// (eventCount, lastEventAt) without appending a LogEntry, then
+// PATCHes the card so the header timestamp stays live. Used by
+// the F-34 thread-routed OutboundKinds (thinking / tool_start /
+// tool_end / compaction) where the user-visible summary goes to
+// the thread but the receipt card still needs to refresh.
+//
+// Caller MUST hold r.mu.
+func (r *MessageReceipt) touchAndRenderLocked(ctx context.Context) error {
+	r.eventCount++
+	r.lastEventAt = time.Now()
+	if r.state == StateWaiting {
+		r.state = StateExecuting
+		r.forwardedAt = r.lastEventAt
+	}
+	return r.renderLocked(ctx)
+}
+
+// Touch bumps the receipt's last-seen markers and PATCHes the
+// card. Used by Adapter.Send after a thread-routed OutboundKind
+// (thinking / tool_start / tool_end / compaction) so the main
+// chat's receipt card header doesn't freeze while the agent is
+// busy running tools. Safe to call when no receipt exists for
+// (chatID, userMsgID) — Touch is a no-op in that case.
+//
+// Concurrent with other Append / SetExecuting / etc. calls; all
+// mutations go through r.mu.
+func (r *MessageReceipt) Touch(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state == StateCompleted {
+		// Late event after completion — drop silently. Same
+		// policy as Append for post-completion events.
+		return nil
+	}
+	return r.touchAndRenderLocked(ctx)
+}
 // lastEntryLocked returns the most recently appended LogEntry,
 // or nil when the buffer is empty. Used by eventToEntry's
 // de-duplication pass: the final assistant text is emitted

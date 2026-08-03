@@ -978,3 +978,66 @@ func TestBuildReceiptCard_ToolFolded(t *testing.T) {
 		t.Errorf("final result missing as plain markdown\n--- body ---\n%s", truncateForTest(body, 400))
 	}
 }
+
+// TestReceipt_Touch_BumpsCountersAndRenders — F-34 review P1-3
+// regression guard. Touch() must bump eventCount + lastEventAt
+// and PATCH the card without appending a LogEntry. The header
+// line in the next render must reflect the new event count and
+// a fresh timestamp, and the entries slice must remain empty.
+func TestReceipt_Touch_BumpsCountersAndRenders(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForCard("oc_chat", "om_user", "om_card", bot)
+	// Anchor lastEventAt to one hour ago so the test is robust
+	// against the system clock (time.Now in Touch must advance
+	// past the anchor regardless of the wall clock at run time).
+	r.lastEventAt = time.Now().Add(-time.Hour)
+	r.eventCount = 3
+
+	if err := r.Touch(context.Background()); err != nil {
+		t.Fatalf("Touch: %v", err)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.eventCount != 4 {
+		t.Errorf("eventCount = %d, want 4", r.eventCount)
+	}
+	if !r.lastEventAt.After(time.Now().Add(-time.Minute)) {
+		t.Errorf("lastEventAt did not advance: %v", r.lastEventAt)
+	}
+	if len(r.entries) != 0 {
+		t.Errorf("entries = %d, want 0 (Touch must not append)", len(r.entries))
+	}
+
+	bot.mu.Lock()
+	defer bot.mu.Unlock()
+	if len(bot.patches) != 1 {
+		t.Errorf("patches = %d, want 1 (Touch must PATCH once)", len(bot.patches))
+	}
+}
+
+// TestReceipt_Touch_NilSafe — Touch on a nil receiver is a no-op
+// (used by Adapter.Send where receiptFor may return nil for
+// orphan events).
+func TestReceipt_Touch_NilSafe(t *testing.T) {
+	var r *MessageReceipt
+	if err := r.Touch(context.Background()); err != nil {
+		t.Errorf("nil Touch: %v", err)
+	}
+}
+
+// TestReceipt_Touch_DropsAfterCompletion — Touch after SetCompleted
+// is a silent no-op (matches Append's late-event policy).
+func TestReceipt_Touch_DropsAfterCompletion(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForCard("oc_chat", "om_user", "om_card", bot)
+	r.state = StateCompleted
+	if err := r.Touch(context.Background()); err != nil {
+		t.Fatalf("Touch: %v", err)
+	}
+	bot.mu.Lock()
+	defer bot.mu.Unlock()
+	if len(bot.patches) != 0 {
+		t.Errorf("patches = %d, want 0 (Touch after completion must drop)", len(bot.patches))
+	}
+}

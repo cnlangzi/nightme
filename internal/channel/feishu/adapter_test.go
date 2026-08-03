@@ -551,24 +551,29 @@ type patchCall struct {
 // routed to a Feishu thread reply (rootID = msg.ReplyTo) with
 // the body "💭 <text>". The receipt card no longer carries the
 // thinking entry.
+//
+// F-34 review P1-3: Adapter.Send also Touch()es the receipt so
+// the main chat card header keeps ticking. This triggers the
+// cold-start card creation (one send_card) followed by a silent
+// PATCH. The test captures all outgoing sends and asserts on the
+// text reply; the card + PATCH are accepted as observable
+// side-effects, not tested here (covered by TestReceipt_*).
 func TestSend_OutThinking_PostsToThread(t *testing.T) {
 	a := testAdapter(t)
 
-	var captured struct {
+	type captured struct {
 		ChatID  string
 		MsgType string
 		RootID  string
 		Text    string
 	}
+	var sends []captured
 	a.sendFunc = func(_ context.Context, chatID, msgType, content, rootID string) (string, error) {
-		captured.ChatID = chatID
-		captured.MsgType = msgType
-		captured.RootID = rootID
 		var payload struct {
 			Text string `json:"text"`
 		}
 		_ = json.Unmarshal([]byte(content), &payload)
-		captured.Text = payload.Text
+		sends = append(sends, captured{chatID, msgType, rootID, payload.Text})
 		return "om_text_test", nil
 	}
 
@@ -580,36 +585,45 @@ func TestSend_OutThinking_PostsToThread(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Send(OutThinking): %v", err)
 	}
-	if captured.RootID != "om_user_1" {
-		t.Errorf("rootID = %q, want om_user_1 (must thread to user message)", captured.RootID)
+
+	// Find the text reply (skip the cold-start card created by Touch).
+	var textReply *captured
+	for i := range sends {
+		if sends[i].MsgType == larkim.MsgTypeText {
+			textReply = &sends[i]
+			break
+		}
 	}
-	if captured.MsgType != larkim.MsgTypeText {
-		t.Errorf("msgType = %q, want %q", captured.MsgType, larkim.MsgTypeText)
+	if textReply == nil {
+		t.Fatalf("no text reply found in sends: %+v", sends)
 	}
-	if captured.Text != "💭 let me think" {
-		t.Errorf("body = %q, want %q", captured.Text, "💭 let me think")
+	if textReply.RootID != "om_user_1" {
+		t.Errorf("rootID = %q, want om_user_1 (must thread to user message)", textReply.RootID)
+	}
+	if textReply.Text != "💭 let me think" {
+		t.Errorf("body = %q, want %q", textReply.Text, "💭 let me think")
 	}
 }
 
 // TestSend_OutToolStart_PostsToThread — F-34. OutToolStart is
 // routed to a thread reply with the body "🔧 name(args)".
+// F-34 review P1-3: also Touch()es the receipt (cold-start
+// card + silent PATCH side-effect).
 func TestSend_OutToolStart_PostsToThread(t *testing.T) {
 	a := testAdapter(t)
 
-	var captured struct {
-		RootID string
-		Text   string
+	type captured struct {
+		MsgType string
+		RootID  string
+		Text    string
 	}
+	var sends []captured
 	a.sendFunc = func(_ context.Context, _, msgType, content, rootID string) (string, error) {
-		if msgType != larkim.MsgTypeText {
-			t.Errorf("msgType = %q, want %q", msgType, larkim.MsgTypeText)
-		}
-		captured.RootID = rootID
 		var payload struct {
 			Text string `json:"text"`
 		}
 		_ = json.Unmarshal([]byte(content), &payload)
-		captured.Text = payload.Text
+		sends = append(sends, captured{msgType, rootID, payload.Text})
 		return "om_text_test", nil
 	}
 
@@ -625,30 +639,43 @@ func TestSend_OutToolStart_PostsToThread(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Send(OutToolStart): %v", err)
 	}
-	if captured.RootID != "om_user_1" {
-		t.Errorf("rootID = %q, want om_user_1", captured.RootID)
+	var textReply *captured
+	for i := range sends {
+		if sends[i].MsgType == larkim.MsgTypeText {
+			textReply = &sends[i]
+			break
+		}
 	}
-	if captured.Text != "🔧 Read(/foo.go)" {
-		t.Errorf("body = %q, want %q", captured.Text, "🔧 Read(/foo.go)")
+	if textReply == nil {
+		t.Fatalf("no text reply in sends: %+v", sends)
+	}
+	if textReply.RootID != "om_user_1" {
+		t.Errorf("rootID = %q, want om_user_1", textReply.RootID)
+	}
+	if textReply.Text != "🔧 Read(/foo.go)" {
+		t.Errorf("body = %q, want %q", textReply.Text, "🔧 Read(/foo.go)")
 	}
 }
 
 // TestSend_OutToolEnd_PostsToThread — F-34. OutToolEnd is routed
 // to a thread reply with a type-aware one-line summary.
+// F-34 review P1-3: also Touch()es the receipt (cold-start
+// card + silent PATCH side-effect).
 func TestSend_OutToolEnd_PostsToThread(t *testing.T) {
 	a := testAdapter(t)
 
-	var captured struct {
-		RootID string
-		Text   string
+	type captured struct {
+		MsgType string
+		RootID  string
+		Text    string
 	}
-	a.sendFunc = func(_ context.Context, _, _, content, rootID string) (string, error) {
-		captured.RootID = rootID
+	var sends []captured
+	a.sendFunc = func(_ context.Context, _, msgType, content, rootID string) (string, error) {
 		var payload struct {
 			Text string `json:"text"`
 		}
 		_ = json.Unmarshal([]byte(content), &payload)
-		captured.Text = payload.Text
+		sends = append(sends, captured{msgType, rootID, payload.Text})
 		return "om_text_test", nil
 	}
 
@@ -665,34 +692,46 @@ func TestSend_OutToolEnd_PostsToThread(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Send(OutToolEnd): %v", err)
 	}
-	if captured.RootID != "om_user_1" {
-		t.Errorf("rootID = %q, want om_user_1", captured.RootID)
+	var textReply *captured
+	for i := range sends {
+		if sends[i].MsgType == larkim.MsgTypeText {
+			textReply = &sends[i]
+			break
+		}
+	}
+	if textReply == nil {
+		t.Fatalf("no text reply in sends: %+v", sends)
+	}
+	if textReply.RootID != "om_user_1" {
+		t.Errorf("rootID = %q, want om_user_1", textReply.RootID)
 	}
 	want := summarizeToolEnd("Read", "/foo.go", "line1\nline2", nil)
-	if captured.Text != want {
-		t.Errorf("body = %q, want %q (from summarizeToolEnd)", captured.Text, want)
+	if textReply.Text != want {
+		t.Errorf("body = %q, want %q (from summarizeToolEnd)", textReply.Text, want)
 	}
-	if !strings.Contains(captured.Text, "📄 Read") {
-		t.Errorf("body = %q, want it to start with the Read icon", captured.Text)
+	if !strings.Contains(textReply.Text, "📄 Read") {
+		t.Errorf("body = %q, want it to start with the Read icon", textReply.Text)
 	}
 }
 
 // TestSend_OutCompaction_PostsToThread — F-34. OutCompaction
 // is routed to a thread reply with "✶ Compacting conversation…".
+// F-34 review P1-3: also Touch()es the receipt.
 func TestSend_OutCompaction_PostsToThread(t *testing.T) {
 	a := testAdapter(t)
 
-	var captured struct {
-		RootID string
-		Text   string
+	type captured struct {
+		MsgType string
+		RootID  string
+		Text    string
 	}
-	a.sendFunc = func(_ context.Context, _, _, content, rootID string) (string, error) {
-		captured.RootID = rootID
+	var sends []captured
+	a.sendFunc = func(_ context.Context, _, msgType, content, rootID string) (string, error) {
 		var payload struct {
 			Text string `json:"text"`
 		}
 		_ = json.Unmarshal([]byte(content), &payload)
-		captured.Text = payload.Text
+		sends = append(sends, captured{msgType, rootID, payload.Text})
 		return "om_text_test", nil
 	}
 
@@ -703,11 +742,21 @@ func TestSend_OutCompaction_PostsToThread(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Send(OutCompaction): %v", err)
 	}
-	if captured.RootID != "om_user_1" {
-		t.Errorf("rootID = %q, want om_user_1", captured.RootID)
+	var textReply *captured
+	for i := range sends {
+		if sends[i].MsgType == larkim.MsgTypeText {
+			textReply = &sends[i]
+			break
+		}
 	}
-	if captured.Text != "✶ Compacting conversation…" {
-		t.Errorf("body = %q, want %q", captured.Text, "✶ Compacting conversation…")
+	if textReply == nil {
+		t.Fatalf("no text reply in sends: %+v", sends)
+	}
+	if textReply.RootID != "om_user_1" {
+		t.Errorf("rootID = %q, want om_user_1", textReply.RootID)
+	}
+	if textReply.Text != "✶ Compacting conversation…" {
+		t.Errorf("body = %q, want %q", textReply.Text, "✶ Compacting conversation…")
 	}
 }
 

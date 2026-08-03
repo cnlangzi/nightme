@@ -186,6 +186,11 @@ type ToolEndEvent struct {
 	// Name mirrors the tool name for symmetry with ToolStartEvent.
 	Name string
 
+	// Args are the raw or structured arguments passed to the tool.
+	// Bridges populate this from the corresponding tool_use block;
+	// it may be empty if the bridge couldn't correlate the result.
+	Args string
+
 	// Output is a short textual summary of the tool's result, suitable
 	// for the renderer to surface in the rolling log. Bridges should
 	// populate this from the tool's stdout / structured result /

@@ -137,6 +137,34 @@ func TestPumpStream_ToolResult(t *testing.T) {
 	}
 }
 
+func TestPumpStream_ToolResultArgsCorrelatedInSameMessage(t *testing.T) {
+	input := `{"type":"user","message":{"role":"user","content":[{"type":"tool_use","id":"toolu_001","name":"Read","input":{"file_path":"/tmp/foo.go"}},{"type":"tool_result","tool_use_id":"toolu_001","name":"Read","content":"line 1\nline 2"}]}}` + "\n"
+	evs := streamFromString(input)
+	if len(evs) != 2 {
+		t.Fatalf("got %d events, want 2", len(evs))
+	}
+	if evs[1].Kind != agent.EventToolEnd || evs[1].ToolEnd == nil {
+		t.Fatalf("event = %+v, want EventToolEnd", evs[1])
+	}
+	if evs[1].ToolEnd.Args != `{"file_path":"/tmp/foo.go"}` {
+		t.Errorf("Args = %q, want raw tool_use input", evs[1].ToolEnd.Args)
+	}
+}
+
+func TestPumpStream_ToolResultArgsMissingMatch(t *testing.T) {
+	input := `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_missing","name":"Read","content":"line 1"}]}}` + "\n"
+	evs := streamFromString(input)
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want 1", len(evs))
+	}
+	if evs[0].ToolEnd == nil {
+		t.Fatal("ToolEnd is nil")
+	}
+	if evs[0].ToolEnd.Args != "" {
+		t.Errorf("Args = %q, want empty for unmatched tool_result", evs[0].ToolEnd.Args)
+	}
+}
+
 // TestStringifyToolResult covers the three payload shapes Claude
 // Code emits for tool_result.content: a plain JSON string, an
 // array of content blocks (multi-modal), and a non-string non-array

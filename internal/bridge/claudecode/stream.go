@@ -239,14 +239,23 @@ func translate(ev streamEvent, events chan<- agent.AgentEvent, askHandler askHan
 		if ev.Message == nil {
 			return
 		}
+		toolUseArgs := make(map[string]string)
+		for _, block := range ev.Message.Content {
+			if block.Type == "tool_use" {
+				toolUseArgs[block.ID] = string(block.Input)
+			}
+		}
 		for _, block := range ev.Message.Content {
 			switch block.Type {
+			case "tool_use":
+				handleToolUse(block, events, askHandler, logger)
 			case "tool_result":
 				events <- agent.AgentEvent{
 					Kind: agent.EventToolEnd,
 					ToolEnd: &agent.ToolEndEvent{
 						ID:     block.ToolUseID,
 						Name:   block.Name,
+						Args:   toolUseArgs[block.ToolUseID],
 						Output: stringifyToolResult(block.Content),
 					},
 				}

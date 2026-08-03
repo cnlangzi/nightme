@@ -201,11 +201,35 @@ type ToolEndEvent struct {
 }
 
 // DoneEvent is the terminal payload for a clean session end.
+//
+// EventDone carries two related but distinct lifecycle signals:
+//
+//   - For one-shot bridges (Claude Code stream-json, PTY) EventDone
+//     means "the process is done; no more events will follow."
+//     The bridge closes the events channel after emitting EventDone.
+//   - For long-lived bridges (Pi --mode rpc) EventDone means
+//     "the current turn settled; the process is still alive and
+//     may produce more events on the next user turn." The events
+//     channel stays open until process exit or Close().
+//
+// Channels and the ChatSession read pump can therefore rely on
+// "channel closed" as the universal "session is over" signal and
+// use the Reason field (when non-empty) to disambiguate turn-end
+// from process-end.
 type DoneEvent struct {
 	// ExitCode follows Unix convention: 0 = success, non-zero = error.
 	// -1 indicates an abnormal termination (e.g. PTY EOF without a
 	// child exit code).
 	ExitCode int
+
+	// Reason is an optional, bridge-defined tag describing why
+	// EventDone was emitted. Empty string means "use the bridge
+	// default" (process exit for one-shot bridges). Bridges that
+	// multiplex turns over a single process set Reason to
+	// "settled" (or another agreed value) so callers can tell a
+	// turn-end EventDone from a process-end one. See
+	// docs/feat/F-32-pi-rpc-bridge.md §3.
+	Reason string
 }
 
 // ErrorEvent carries an unrecoverable error from the session.
@@ -461,8 +485,15 @@ type ContentBlock struct {
 // it via the Events channel and the control methods.
 type AgentSession interface {
 	// Events streams AgentEvent values until the session ends. The
-	// channel is closed by the implementation after EventDone or a
-	// terminal EventError.
+	// channel is closed by the implementation only when the
+	// underlying process (or transport) terminates -- NOT after
+	// every EventDone. Long-lived bridges that multiplex many
+	// turns over a single process (e.g. Pi --mode rpc) emit
+	// EventDone at the end of each turn and keep the channel
+	// open until process exit or Close(). Channels and ChatSession
+	// rely on the channel being closed as the universal
+	// "session is over" signal; DoneEvent.Reason disambiguates
+	// turn-end from process-end.
 	Events() <-chan AgentEvent
 
 	// PID returns the OS process id of the underlying child, or 0

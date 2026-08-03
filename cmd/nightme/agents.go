@@ -18,6 +18,7 @@ package main
 import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
+	"github.com/cnlangzi/nightme/internal/bridge/pi"
 	"github.com/cnlangzi/nightme/internal/bridge/pty"
 )
 
@@ -26,6 +27,14 @@ func init() {
 	// config can override the command path but the override drops
 	// back to PTY (loses AskUserQuestion, structured events).
 	agent.Builtins.Register(claudecode.New("claude", "claude", nil))
+
+	// pi — the long-lived `pi --mode rpc` JSONL bridge. The agent
+	// driver is the @earendil-works/pi-coding-agent CLI; see
+	// docs/feat/F-32-pi-rpc-bridge.md for wire details and the
+	// F-32 MVP scope. User config can override the command path;
+	// the structured bridge only works for builtin registration,
+	// not for the PTY fallback in buildAgentRegistry.
+	agent.Builtins.Register(pi.New("pi", "pi", nil))
 
 	// bash — example PTY-backed entry. Shows the registration
 	// shape for any binary the user might want to launch without

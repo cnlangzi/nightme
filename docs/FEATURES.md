@@ -24,6 +24,12 @@
 | F-29 | **AgentSession 池**（`(agent, cwd)` 1:1 池化；`/cwd` / `/use` 不杀任何 AgentSession，切回能复用）| [feat/F-29-agent-session-pool.md](./feat/F-29-agent-session-pool.md) | v1.2 (current) | ✅ 已实现 (commits 7/8c) |
 | F-30 | **Interactive Config**（`nightme config` 进交互菜单；二级菜单只做 Agents；merge builtin + cfg；选 primary）| [feat/F-30-interactive-config.md](./feat/F-30-interactive-config.md) | v1.2 (current) | ✅ 已实现 |
 
+## 1b. v1.3 新增功能（设计阶段）
+
+| ID | 功能 | 设计文档 | 里程碑 | 状态 |
+|----|------|----------|--------|------|
+| F-32 | **Pi Coding Agent Bridge (`pi --mode rpc`)** — 真实 stdio pipes 长驻 JSONL；首期仅做 `get_state` + `prompt` + `agent_settled` turn 终态；不打通 Extension UI 飞书闭环；不实现 `/abort` | [feat/F-32-pi-rpc-bridge.md](./feat/F-32-pi-rpc-bridge.md) | v1.3 | 📝 设计阶段（文档评审中）|
+
 **v1.2 关键变化**：
 - 删除：`/run` 命令（被 `/use` 替代）
 - 删除：`Session` 类型（被 ChatSession + AgentSession 替代）

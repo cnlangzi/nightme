@@ -6,8 +6,12 @@ primary: claude
 
 # Custom agents. Each entry can either extend a built-in (same name
 # replaces the built-in) or add a brand-new agent. Bridge is the
-# Bridge backend type (claude / codex / opencode); Command is the
-# full command line including any flags.
+# Bridge backend type (claude / codex / opencode / pi); Command is
+# the full command line including any flags. The Pi entry assumes
+# the @earendil-works/pi-coding-agent CLI is on PATH (install with
+# `npm install -g @earendil-works/pi-coding-agent`); the F-32 bridge
+# is registered as a builtin, so the structured RPC events are
+# available whether you set `pi` here or use the builtin default.
 agents:
   - name: claude
     bridge: claude
@@ -20,6 +24,10 @@ agents:
   - name: opencode
     bridge: opencode
     command: "opencode acp"
+
+  - name: pi
+    bridge: pi
+    command: "pi"
 
 feishu:
   # App credentials from https://open.feishu.cn/app

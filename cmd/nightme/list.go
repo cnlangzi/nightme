@@ -264,12 +264,13 @@ func loadListRows(
 }
 
 // listColumn widths match the format spec. The CHAT + RESUME columns
-// are sized to be readable on a 120-col terminal; long values are
-// truncated to fit.
+// are sized to be readable on a 120-col terminal; SID and CHAT are
+// shown unmangled so operators can copy them. AGENT / WORKSPACE are
+// truncated since they are display-only fields.
 const (
-	colSID       = 16
-	colChat      = 14
-	colAgent     = 8
+	colSID       = 32 // unmangled: full agent session id
+	colChat      = 24 // unmangled: full chat id
+	colAgent     = 10
 	colWorkspace = 28
 	colPID       = 8
 	colStatus    = 10
@@ -288,8 +289,8 @@ func printListTable(w io.Writer, rows []listRow) {
 	}
 	for _, r := range rows {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			truncate(r.AgentSessionID, colSID),
-			truncate(r.ChatID, colChat),
+			r.AgentSessionID,
+			r.ChatID,
 			truncate(r.Agent, colAgent),
 			truncate(r.Cwd, colWorkspace),
 			pidCell(r.PID),

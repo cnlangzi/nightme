@@ -263,10 +263,10 @@ func loadListRows(
 	return rows, len(toGC), nil
 }
 
-// listColumn widths match the format spec. The CHAT + RESUME columns
-// are sized to be readable on a 120-col terminal; SID and CHAT are
-// shown unmangled so operators can copy them. AGENT / WORKSPACE are
-// truncated since they are display-only fields.
+// listColumn widths match the format spec. SID / CHAT / RESUME
+// are shown unmangled so operators can copy them (the resume id
+// is the literal arg to `claude --resume <id>`). AGENT / WORKSPACE
+// are truncated since they are display-only fields.
 const (
 	colSID       = 32 // unmangled: full agent session id
 	colChat      = 24 // unmangled: full chat id
@@ -274,7 +274,7 @@ const (
 	colWorkspace = 28
 	colPID       = 8
 	colStatus    = 10
-	colResume    = 16
+	colResume    = 36 // unmangled: full agent-resume id (UUID-shaped)
 )
 
 // printListTable writes the human-readable table to w. The header is
@@ -320,14 +320,15 @@ func statusCell(s registry.Status, code *int) string {
 	return string(s)
 }
 
-// resumeCell renders the agent's resume id (truncated), or "-" when
-// the agent has no resume semantics (ACP / Pi / PTY) or the id has
-// not yet been captured.
+// resumeCell renders the agent's resume id, or "-" when the
+// agent has no resume semantics (ACP / Pi / PTY) or the id has
+// not yet been captured. We intentionally do NOT truncate the
+// resume id — operators copy-paste it into `claude --resume <id>`.
 func resumeCell(id string) string {
 	if id == "" {
 		return "-"
 	}
-	return truncate(id, colResume)
+	return id
 }
 
 // startCell formats a timestamp as HH:MM:SS (24h, local time). We keep

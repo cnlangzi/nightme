@@ -163,6 +163,15 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 - **抽象归抽象 / 具体归具体**：Gateway = 路由器（不假设任何 Channel 渲染细节）；Channel = 渲染器（自管 receipt 生命周期，自选存储形态：per-chat map / per-thread map / DOM 节点 / ...）
 - **outbound 路由唯一耦合点**：`EventHandler` 在每个 `OutboundMessage` 上设 `out.ReplyTo = cs.currentTurnUserMsgID`。Channel 据此 key 路由。Gateway 不需要知道 Channel 内部 receipt 怎么存
 
+**v1.3.x 新增（F-33 落地）**：
+
+- **Gateway 不持有 ChatType**：Gateway 只见 `chat_id string`，假设所有 chat 同质；`InboundMessage` / `BindingEntry` / `ChatSession` / registry schema 都不带 `ChatType` 字段
+- **Channel 自管 chat 语义**：Channel 知道 chat 类型（DM / group / topic）、知道 thread 渲染，但只通过 `OutboundMessage` 暴露渲染能力，不污染 Gateway / ChatSession / Registry 数据模型
+- **`InboundMessage.ReplyTo = message.ParentId`**（Feishu 语义下）：thread 顶层 `RootId` 不进 nightme；`ReplyTo` 字段统一语义 = "被 reply 的那条 message_id"
+- **`OutboundMessage.ReplyTo = currentTurnUserMsgID`**：bot reply 永远 anchor 到 user 当前 message_id，不爬 thread 树
+- **不续接 Thread**：nightme 不主动追踪 / 创建 thread 上下文，不维护 thread 树；Feishu 端 thread 视觉由 Channel 自治
+- **任何 Channel 都不引入 thread 概念**：nightme 数据模型永远不引入 thread 字段（`thread_ts` / `message_thread_id` / `is_threaded` / `thread_id` 等）。Channel 自管 thread 渲染细节（Feishu reply API path 参数 / Slack block kit / Telegram forum mode），但只通过 `OutboundMessage` 暴露能力，不污染 Gateway / ChatSession / Registry 数据模型
+
 ---
 
 ## 2. 数据流（概念）
@@ -171,7 +180,8 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 
 ```
 IM 消息事件
-  → Channel Adapter 解码为统一 InboundMessage{chat_id, user_id, chat_type, text, attachments, message_id, time}
+  → Channel Adapter 解码为统一 InboundMessage{chat_id, user_id, text, attachments, message_id, reply_to, time}
+      ├─ reply_to = message.ParentId（F-33：Feishu 原生 parent_id，thread 顶层 RootId 不进 nightme）
       ├─ 异步下载 attachments 到本地路径
       └─ publish 到 ch.Incoming()
 
@@ -443,9 +453,18 @@ ChatSession 分**三层状态**——但**三层状态的所有权清晰分离**
 - **AgentSession 不永生**：进程死掉就 status=exited；但 ChatSession 池里仍然引用它（pool 标记 `[exited]`）
 - **/kill 清空 pool**：所有 AgentSession 被杀 + 池清空
 
-### 3.1 DM vs Group Chat（Chat Type 语义）
+### 3.1 Chat 类型语义（F-33 重写）
 
-[v1.1 不变]
+**ChatID 唯一** —— nightme 数据模型只有 `chat_id string`,不持有 chat 类型分类。所有 chat 在 Gateway / ChatSession / Registry 视角下**完全同质**。
+
+**Channel 自管 chat 语义** —— Channel adapter 知道 chat 类型(DM / group / topic),但只通过 `OutboundMessage` 暴露渲染能力:
+- Feishu 原生 chat_type:`p2p` / `group` / `topic_group`
+- Channel 内部归一化只覆盖 DM / Group / NotSupported 三态(F-33 移除 `ChatTypeThread` 常量)
+- topic_group(Feishu thread)**不特殊处理**:消息跟普通 group 走完全相同路径,thread 视觉由 Feishu 端决定
+
+**任何 Channel 都不引入 thread 概念** —— Slack `thread_ts`、Telegram `message_thread_id`、Discord thread 等不进 nightme 数据模型,仅 Channel 内部渲染时使用。如未来 Slack thread 等场景需要支持,在 Channel 包内自治实现,**不动 nightme 数据模型**。
+
+**注册兼容性** —— `ChatSessionEntry.ChatType` 字段删除后,旧 `chat_sessions.json` 文件中残留的 `chatType` 字段被 Go JSON unmarshal 默认容忍,不破坏加载;数据不再被使用,无需迁移脚本。
 
 ### 3.2 状态转换触发器（v1.2）
 
@@ -515,8 +534,7 @@ nightme 用 Go 的 goroutine 实现并发，结构如下：
 {
   "chat_sessions": {
     "<chatSessionId>": {
-      "chatId":               "oc_xxx",          // UNIQUE 索引 (1 chat = 1 ChatSession)
-      "chatType":             "p2p",
+      "chatId":               "oc_xxx",          // UNIQUE 索引 (1 chat = 1 ChatSession); nightme 不持有 chat 类型
       "activeCwd":            "/code/bailing",
       "activeAgent":          "claude",
       "primaryAgent":         "claude",          // snapshot of cfg.Primary at creation; read-only
@@ -655,6 +673,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
   - `internal/chatsession/readpump.go` `emitMessageStateForCurrentTurn` 改用单一 ID
   - `cmd/nightme/run.go` `newEventHandler` 设 `out.ReplyTo = cs.currentTurnUserMsgID`
 - ✅ done in v1.3: docs/feat/F-25-rolling-log.md renamed from F-25-input-buffer.md; F-26-gateway-hub.md + F-08-channel-abstraction.md + F-31-message-state.md + docs/channel/feishu.md updated with v1.3 annotations
+- ⏭ **F-33（chatID 数据模型简化）**：删 Gateway ChatType 抽象 + topic_group 不特殊处理 + InboundMessage.ReplyTo = message.ParentId。详见 [`docs/feat/F-33-simplify-chatid-data-model.md`](./feat/F-33-simplify-chatid-data-model.md)
 
 ---
 

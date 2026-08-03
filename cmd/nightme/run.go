@@ -448,17 +448,32 @@ func ensureReadPumps(mgr *chatsession.Manager, ch channel.Channel, primary strin
 // chatID is passed by ChatSession's readPump directly (the
 // ChatSession knows its own ChatID); the handler doesn't need
 // to look it up.
+//
+// userMsgID is the current turn's single anchor (passed by
+// readPump from cs.currentTurnUserMsgID). The handler stamps it
+// onto OutboundMessage.ReplyTo so each Channel can route the
+// event to its own per-userMsgID receipt (card / thread / DOM
+// node). Empty when the event has no anchor (startup EventInit
+// etc.) — Channel falls back to plain text in that case.
+//
+// v1.3 (SPEC §2.2): 1 turn : 1 anchor. Receipt rendering and
+// FSM are Channel-internal; Gateway only knows about userMsgID.
 func newEventHandler(ch channel.Channel, logger *slog.Logger) chatsession.EventHandler {
-	return func(chatID string, s *chatsession.AgentSession, ev agent.AgentEvent) {
+	return func(chatID string, s *chatsession.AgentSession, ev agent.AgentEvent, userMsgID string) {
 		// Translate the AgentEvent to an OutboundMessage.
 		out, ok := gateway.Translate(chatID, ev)
 		if !ok {
 			return
 		}
-		out.ReplyTo = "" // commit 8c: ReplyTo is set by Channel layer (Receipt FSM)
+		// Stamp the current turn's anchor so the Channel can
+		// route to the right per-userMsgID receipt. ReplyTo
+		// stays empty for orphan events (EventInit at startup,
+		// internal logs) — Channel renders those as plain text.
+		out.ReplyTo = userMsgID
 		if err := ch.Send(context.Background(), out); err != nil && logger != nil {
 			logger.Warn("channel send failed",
 				"chat_id", chatID,
+				"user_msg_id", userMsgID,
 				"agent_session_id", s.ID,
 				"err", err)
 		}

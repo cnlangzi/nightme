@@ -333,7 +333,7 @@ handler.kill(ctx, msg, _)
 
 - **完整的 binding + Run 逻辑**：见 [`F-20-gateway.md`](./F-20-gateway.md) §4
 - **Registry 两张表 schema**：见 [`F-05-process-registry.md`](./F-05-process-registry.md) §3
-- **InputBuffer onFlush hook**：见 [`F-25-input-buffer.md`](./F-25-input-buffer.md) §5.1
+- **InputBuffer onFlush hook**：见 [`F-25-rolling-log.md`](./F-25-rolling-log.md) §5.1
 - **Cleanup / detach 策略**：见 [`F-06-process-cleanup.md`](./F-06-process-cleanup.md)
 - **完整 v1.1 架构**：见 [`F-26-gateway-hub.md`](./F-26-gateway-hub.md) §5
 

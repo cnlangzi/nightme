@@ -129,7 +129,7 @@ Inspect persisted chat sessions:
 | **Feishu channel** | [docs/feat/F-08-channel-abstraction.md](./docs/feat/F-08-channel-abstraction.md) | WebSocket adapter + IM rendering |
 | **PTY bridge** | [docs/feat/F-19-cli-bridge.md](./docs/feat/F-19-cli-bridge.md) | PTY-backed byte pipe for any CLI |
 | **Feishu one-click auth** | [docs/feat/F-22-feishu-onclick-registration.md](./docs/feat/F-22-feishu-onclick-registration.md) | QR-code onboarding |
-| **Rolling-log receipt** | [docs/feat/F-25-input-buffer.md](./docs/feat/F-25-input-buffer.md) (v1.x) | Per-user-message single receipt card |
+| **Rolling-log receipt** | [docs/feat/F-25-rolling-log.md](./docs/feat/F-25-rolling-log.md) (v1.3; Channel-autonomous) | Per-turn single receipt card PATCHed in place |
 | **`nightme test`** | [docs/feat/F-19-cli-bridge.md](./docs/feat/F-19-cli-bridge.md) | Local smoke test (PTY passthrough) |
 | **`nightme list`** | [docs/feat/F-10-session-list-cmd.md](./docs/feat/F-10-session-list-cmd.md) | List persisted chat sessions |
 

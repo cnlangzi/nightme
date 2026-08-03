@@ -429,7 +429,7 @@ commit B: docs(feat): F-24 claudecode-bridge spec
   - 含 4 个触发条件 / JSON-IO schema / AskUserQuestion 双路兼容
 
 commit B2: docs(feat): F-25 input-buffer spec
-  - docs/feat/F-25-input-buffer.md
+  - docs/feat/F-25-rolling-log.md
   - 3 状态 + 双轨 Reaction/Reply + 纯内存 buffer
 
 commit C: feat(heartbeat): event-driven tick + ProcessProbe

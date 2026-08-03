@@ -1,14 +1,14 @@
 # Feishu Channel — 调研与迁移规划
 
-> **Status**: design → implementation plan (v0.x; minimal scope — 详见 §9)
+> **Status**: design + implementation reference (v1.3; Channel-autonomous rendering per SPEC §0.1)
 > **Scope**: nightme 内部 Feishu/Lark IM 适配器 (`internal/channel/feishu/*`)
-> **目的**: 把 receipt 从 `msg_type: "text"` 切到 `msg_type: "interactive"`,支持更丰富的卡片体验。本期不引入新元数据(agent_name / provider 透传**延期**),卡片内容用现有 receipt 状态(state + entries)。
+> **目的**: 描述 Feishu 侧 rolling-log card 实现策略 —— 收到 `OutboundMessage{ReplyTo: userMsgID}` 时如何 cold-create / PATCH / 终态 card。
 > **Related docs**:
-> - [F-08-channel-abstraction.md](../feat/F-08-channel-abstraction.md) — Channel interface 与 v1.1 receipt FSM
-> - [F-25-input-buffer.md](../feat/F-25-input-buffer.md) — receipt 触发源
-> - [F-26-gateway-hub.md](../feat/F-26-gateway-hub.md) — Gateway ↔ Channel 边界
+> - [F-08-channel-abstraction.md](../feat/F-08-channel-abstraction.md) — 5-method Channel interface(v1.3 缩水)
+> - [F-25-rolling-log.md](../feat/F-25-rolling-log.md) — rolling-log UX 整体协议
+> - [F-26-gateway-hub.md](../feat/F-26-gateway-hub.md) — v1.1 Gateway ↔ Channel 边界(历史,v1.3 改)
 > - [F-22-feishu-onclick-registration.md](../feat/F-22-feishu-onclick-registration.md) — app 鉴权
-> - [F-23-heartbeat.md](../feat/F-23-heartbeat.md) — receipt 心跳
+> - [F-31-message-state.md](../feat/F-31-message-state.md) — progress indicator(独立于 receipt)
 > **官方文档**:
 > - [Create JSON message content](https://open.feishu.cn/document/server-docs/im-v1/message-content-description/create_json) — 顶层卡片信封
 > - [Card JSON 2.0 components](https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/card-json-v2-components/component-json-v2-overview) — 组件列表(`div` / `markdown` / `hr` / `note` 等)
@@ -296,7 +296,7 @@ Feishu `lark_md` **不支持** `<font color='grey'>`。**严格用 `<text_tag co
 | 轨道 | 源 | 抽象事件 | 渲染目标 | Feishu 实现 |
 |---|---|---|---|---|
 | **MessageState** | ChatSession lifecycle | `OutboundMessage{Kind: OutMessageState, Meta: {message_id, state}}` | **userMsgID** | `AddReaction(userMsgID, emoji_type)` |
-| **Card Body** | Receipt FSM (v1.x 没实现,v1.3 仍是 backlog) | `Channel.UpdateReceipt / DisposeReceipt` | replyMsgID | `SendCard / PatchMessage` |
+| **Card Body** | Rolling-log receipt (v1.3 实现;Channel 自治) | `OutboundMessage{ReplyTo: userMsgID}` → Channel.Send → 内部 cold-create / PATCH | replyMsgID / cardMsgID | `SendCard / PatchMessage` |
 
 两者**完全独立**:
 - 一个失败不影响另一个 (MessageState 渲染失败仅 log warn,不阻塞 card body)

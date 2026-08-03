@@ -655,7 +655,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
   - `internal/chatsession/chatsession.go` `currentTurnUserMsgIDs []string` → `currentTurnUserMsgID string`
   - `internal/chatsession/readpump.go` `emitMessageStateForCurrentTurn` 改用单一 ID
   - `cmd/nightme/run.go` `newEventHandler` 设 `out.ReplyTo = cs.currentTurnUserMsgID`
-- ⏭ 同步更新 `docs/feat/F-26-gateway-hub.md` / `docs/feat/F-25-input-buffer.md` 中描述 Receipt FSM 的段落（后者重命名为 `F-25-rolling-log.md`，强调 Channel 实现细节主导）
+- ✅ done in v1.3: docs/feat/F-25-rolling-log.md renamed from F-25-input-buffer.md; F-26-gateway-hub.md + F-08-channel-abstraction.md + F-31-message-state.md + docs/channel/feishu.md updated with v1.3 annotations
 
 ---
 

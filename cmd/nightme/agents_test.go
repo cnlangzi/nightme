@@ -46,9 +46,10 @@ func TestPrintAgentsTable_Basic(t *testing.T) {
 	}
 }
 
-// TestPrintAgentsTable_LongArgsTruncated verifies that an absurdly
-// long argv gets ellipsized to keep the right-hand columns aligned.
-func TestPrintAgentsTable_LongArgsTruncated(t *testing.T) {
+// TestPrintAgentsTable_LongArgsNotTruncated verifies that an
+// absurdly long argv is printed verbatim — operators need to be
+// able to copy-paste the command line back to the shell.
+func TestPrintAgentsTable_LongArgsNotTruncated(t *testing.T) {
 	rows := []agentRow{
 		{
 			Name:    "verbose",
@@ -61,8 +62,11 @@ func TestPrintAgentsTable_LongArgsTruncated(t *testing.T) {
 	printAgentsTable(&buf, rows, "")
 
 	out := buf.String()
-	if !strings.Contains(out, "…") {
-		t.Errorf("long args should be truncated with ellipsis: %q", out)
+	if !strings.Contains(out, "--long-flag-with-many-dashes") {
+		t.Errorf("long args should be printed verbatim: %q", out)
+	}
+	if strings.Contains(out, "…") {
+		t.Errorf("args should not be ellipsized: %q", out)
 	}
 	// Footer must be suppressed when defaultName is empty.
 	if strings.Contains(out, "(default:") {

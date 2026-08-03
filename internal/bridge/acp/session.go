@@ -25,8 +25,21 @@ type acpSession struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// agentName and workspace are captured at NewSession for the
+	// EventInit payload. ACP does not currently tell the runtime
+	// about its session id through the channel — we synthesize one
+	// here so the rest of the runtime can capture the resume id
+	// uniformly (other bridges do this via the bridge's own init
+	// event).
+	agentName string
+	workspace string
+
 	sessionID string
 	events    chan agent.AgentEvent
+
+	// initSent guards the synthesized EventInit. We emit at most
+	// once per session, after the first successful session/new.
+	initSent bool
 
 	permissionMu sync.Mutex
 	permissions  []permissionCall
@@ -78,11 +91,12 @@ func NewSession(ctx context.Context, bridge Bridge, agentName string, options ..
 
 	parentCtx, cancel := context.WithCancel(ctx)
 	s := &acpSession{
-		bridge: bridge,
-		rpc:    newRPCClient(bridge),
-		ctx:    parentCtx,
-		cancel: cancel,
-		events: make(chan agent.AgentEvent, eventBufferSize),
+		bridge:    bridge,
+		rpc:       newRPCClient(bridge),
+		ctx:       parentCtx,
+		cancel:    cancel,
+		agentName: agentName,
+		events:    make(chan agent.AgentEvent, eventBufferSize),
 	}
 	go s.readPump()
 	go func() {
@@ -123,6 +137,7 @@ func NewSession(ctx context.Context, bridge Bridge, agentName string, options ..
 		_ = s.Close()
 		return nil, fmt.Errorf("bridge/acp: session/new: %w", err)
 	}
+	s.workspace = config.Workspace
 	if err := s.setSessionID(result); err != nil {
 		_ = s.Close()
 		return nil, err
@@ -145,7 +160,38 @@ func (s *acpSession) setSessionID(result json.RawMessage) error {
 	if s.sessionID == "" {
 		return errors.New("bridge/acp: session/new response has no sessionId")
 	}
+	// Synthesize an EventInit so the runtime can capture the resume
+	// id uniformly with Claude Code / Pi. Idempotent via initSent.
+	s.emitInit()
 	return nil
+}
+
+// emitInit publishes a single EventInit on s.events carrying the
+// ACP session id so the runtime can persist it as the AgentSession's
+// resume id. Safe to call from setSessionID; emits are non-blocking
+// with a ctx.Done fallback to avoid wedging the new-session path.
+func (s *acpSession) emitInit() {
+	if s.initSent {
+		return
+	}
+	s.initSent = true
+	ev := agent.AgentEvent{
+		Kind: agent.EventInit,
+		Init: &agent.InitEvent{
+			SessionID: s.sessionID,
+			AgentName: s.agentName,
+			Workspace: s.workspace,
+		},
+	}
+	select {
+	case s.events <- ev:
+	case <-s.ctx.Done():
+	default:
+		// events buffer is full — drop. The runtime will treat a
+		// missing resume id as "no resume", which is the safe
+		// default; the next init/emit cycle still has initSent=true
+		// so we don't busy-loop.
+	}
 }
 
 func (s *acpSession) Events() <-chan agent.AgentEvent { return s.events }

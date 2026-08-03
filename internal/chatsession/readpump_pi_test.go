@@ -65,7 +65,7 @@ func (a *longLivedFakeAS) push(ev agent.AgentEvent) {
 // fakeSpawnerLS is a Spawner that returns our longLivedFakeAS.
 type fakeSpawnerLS struct{ as agent.AgentSession }
 
-func (f fakeSpawnerLS) Spawn(_ context.Context, _, _ string, _ []string) (agent.AgentSession, error) {
+func (f fakeSpawnerLS) Spawn(_ context.Context, _, _ string, _ []string, _ string) (agent.AgentSession, error) {
 	return f.as, nil
 }
 

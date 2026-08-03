@@ -17,8 +17,9 @@
 // `--json` swaps the table for a JSON array (one element per agent).
 //
 // Design notes:
-//   - Header + rows are column-aligned to a fixed width; long args
-//     are truncated so the output stays readable on a 120-col terminal.
+//   - Header + rows are column-aligned via tabwriter. No field is
+//     truncated: every value (NAME, COMMAND, ARGS) is printed
+//     verbatim so operators can copy-paste the command line.
 //   - The "(default: X)" footer comes from cfg.Primary, falling
 //     back to the v0.1 hard-coded "claude" if unset.
 //   - Registry build reuses buildRunAgentRegistry so the CLI view
@@ -111,9 +112,9 @@ func collectAgents(reg *agent.Registry) []agentRow {
 	return rows
 }
 
-// agentsColumn widths match the format spec decided with Devin: NAME,
-// COMMAND, ARGS. Long values are truncated to keep the right-hand
-// columns aligned.
+// agentsColumn widths hint tabwriter's minimum column padding. None
+// of the fields are truncated — every value (NAME, COMMAND, ARGS)
+// is printed verbatim so operators can copy-paste the command line.
 const (
 	colAgentName    = 10
 	colAgentCommand = 18
@@ -133,9 +134,9 @@ func printAgentsTable(w io.Writer, rows []agentRow, defaultName string) {
 	}
 	for _, r := range rows {
 		fmt.Fprintf(tw, "%s\t%s\t%s\n",
-			truncate(r.Name, colAgentName),
-			truncate(r.Command, colAgentCommand),
-			truncate(quoteArgs(r.Args), colAgentArgs),
+			r.Name,
+			r.Command,
+			quoteArgs(r.Args),
 		)
 	}
 	tw.Flush()

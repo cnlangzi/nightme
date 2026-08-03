@@ -23,14 +23,21 @@ import (
 //
 //   - Look up the agent by name (e.g., via agent.Registry).
 //   - Run Detect to verify the binary exists / SDK is available.
-//   - Call Start(ctx, StartConfig{Workspace: cwd, Args: args}) to
-//     fork the child and obtain a live agent.AgentSession.
+//   - Call Start(ctx, StartConfig{Workspace: cwd, Args: args,
+//     ResumeID: resumeID}) to fork the child and obtain a live
+//     agent.AgentSession.
+//
+// The resumeID is the agent's own session id from the previous run
+// (e.g. Claude Code's `system/init.session_id`); bridges that
+// support resume (Claude Code) translate it into their native flag
+// (`--resume <id>`); bridges that don't (ACP / Pi / PTY) ignore it.
+// Empty means "no --resume; start a fresh session".
 //
 // Spawn returns the live bridge-level handle. The caller (typically
 // ChatSession.LookupActiveAgentSession) wraps it in an AgentSession
 // and stores it in the pool.
 type Spawner interface {
-	Spawn(ctx context.Context, agentName, cwd string, args []string) (agent.AgentSession, error)
+	Spawn(ctx context.Context, agentName, cwd string, args []string, resumeID string) (agent.AgentSession, error)
 }
 
 // ErrSpawnerNotSet is returned by ChatSession.LookupActiveAgentSession
@@ -55,7 +62,7 @@ func NewRegistrySpawner(reg *agent.Registry) Spawner {
 	return &registrySpawner{agents: reg}
 }
 
-func (s *registrySpawner) Spawn(ctx context.Context, agentName, cwd string, args []string) (agent.AgentSession, error) {
+func (s *registrySpawner) Spawn(ctx context.Context, agentName, cwd string, args []string, resumeID string) (agent.AgentSession, error) {
 	if s.agents == nil {
 		return nil, errors.New("registrySpawner: nil registry")
 	}
@@ -66,5 +73,5 @@ func (s *registrySpawner) Spawn(ctx context.Context, agentName, cwd string, args
 	if err := a.Detect(); err != nil {
 		return nil, err
 	}
-	return a.Start(ctx, agent.StartConfig{Workspace: cwd, Args: args})
+	return a.Start(ctx, agent.StartConfig{Workspace: cwd, Args: args, ResumeID: resumeID})
 }

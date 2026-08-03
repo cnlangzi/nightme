@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/registry"
+
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
@@ -90,10 +92,11 @@ func (f *fakeAgentSession) FinishEvent() {
 // without forking. The test can PushEvent / FinishEvent to drive
 // lifecycle transitions.
 type fakeSpawner struct {
-	mu      sync.Mutex
-	fakes   map[spawnKey]*fakeAgentSession
-	calls   int
-	spawnFn func(name, cwd string) (agent.AgentSession, error) // optional override
+	mu           sync.Mutex
+	fakes        map[spawnKey]*fakeAgentSession
+	calls        int
+	lastResumeID string
+	spawnFn      func(name, cwd string) (agent.AgentSession, error) // optional override
 }
 
 type spawnKey struct {
@@ -105,10 +108,11 @@ func newFakeSpawner() *fakeSpawner {
 	return &fakeSpawner{fakes: make(map[spawnKey]*fakeAgentSession)}
 }
 
-func (s *fakeSpawner) Spawn(ctx context.Context, name, cwd string, args []string) (agent.AgentSession, error) {
+func (s *fakeSpawner) Spawn(ctx context.Context, name, cwd string, args []string, resumeID string) (agent.AgentSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
+	s.lastResumeID = resumeID
 	if s.spawnFn != nil {
 		return s.spawnFn(name, cwd)
 	}
@@ -274,5 +278,134 @@ func TestAgentSession_ObserveCloseTransitionsToExited(t *testing.T) {
 	}
 	if as.PID() != 0 {
 		t.Fatalf("PID should be cleared on exit, got %d", as.PID())
+	}
+}
+
+// TestAgentSession_ResumeIDRoundTrip asserts that SetResumeID is
+// idempotent, accessible via ResumeID(), and survives a round-trip
+// through the Entry-derived registry form.
+func TestAgentSession_ResumeIDRoundTrip(t *testing.T) {
+	as := NewAgentSession("as_1", "cs_1", "claude", "/x", nil)
+
+	if got := as.ResumeID(); got != "" {
+		t.Errorf("initial ResumeID = %q, want empty", got)
+	}
+
+	as.SetResumeID("sess-abc")
+	if got := as.ResumeID(); got != "sess-abc" {
+		t.Errorf("after set: ResumeID = %q, want %q", got, "sess-abc")
+	}
+
+	entry := as.Entry()
+	if entry.ResumeID != "sess-abc" {
+		t.Errorf("Entry().ResumeID = %q, want %q", entry.ResumeID, "sess-abc")
+	}
+
+	// Round-trip through FromAgentSessionEntry.
+	restored := FromAgentSessionEntry(entry)
+	if got := restored.ResumeID(); got != "sess-abc" {
+		t.Errorf("after FromAgentSessionEntry: ResumeID = %q, want %q", got, "sess-abc")
+	}
+}
+
+// TestAgentSession_RespawnPassesResumeID asserts that after the
+// AgentSession captures a resume id (via SetResumeID), a subsequent
+// spawn calls the Spawner with that resume id so the bridge can
+// resume the previous session.
+func TestAgentSession_RespawnPassesResumeID(t *testing.T) {
+	csFile, asFile := newTestStores(t)
+	spawner := newFakeSpawner()
+
+	cs := New("oc_1", "claude").
+		WithPersistence(csFile, asFile).
+		WithSpawner(spawner)
+	if err := cs.SetActiveCwd("/x"); err != nil {
+		t.Fatalf("SetActiveCwd: %v", err)
+	}
+	if err := cs.SetActiveAgent("claude"); err != nil {
+		t.Fatalf("SetActiveAgent: %v", err)
+	}
+
+	as, err := cs.LookupActiveAgentSession()
+	if err != nil {
+		t.Fatalf("first Lookup: %v", err)
+	}
+	if as.ResumeID() != "" {
+		t.Errorf("fresh AgentSession should not have a resume id")
+	}
+
+	// Capture a resume id (simulating EventInit being handled).
+	as.SetResumeID("sess-resume-1")
+
+	// Simulate the process exiting; the next spawn should observe
+	// the saved resume id.
+	as.SetExited(0)
+
+	// Spawn again — but the in-memory AgentSession has its resume
+	// id cleared on SetExited? No: SetExited only flips status and
+	// pid; the resume id is preserved so a subsequent respawn can
+	// forward it. (RestoreFromRegistry does NOT demote resume id.)
+	if got := as.ResumeID(); got != "sess-resume-1" {
+		t.Errorf("resume id should survive SetExited; got %q", got)
+	}
+
+	// Clear the in-memory handle so Spawn goes through the spawner.
+	as = NewAgentSession(as.ID, as.ChatSessionID, as.Agent, as.Cwd, as.Args())
+	as.SetResumeID("sess-resume-1")
+	if err := as.Spawn(context.Background(), spawner); err != nil {
+		t.Fatalf("respawn: %v", err)
+	}
+
+	if got := spawner.lastResumeID; got != "sess-resume-1" {
+		t.Errorf("Spawn received resumeID = %q, want %q", got, "sess-resume-1")
+	}
+}
+
+// TestAgentSession_EmptyResumeIDPassesEmpty asserts that the Spawner
+// receives an empty resume id (no `--resume`) when the AgentSession
+// has no captured id.
+func TestAgentSession_EmptyResumeIDPassesEmpty(t *testing.T) {
+	as := NewAgentSession("as_1", "cs_1", "claude", "/x", nil)
+	spawner := newFakeSpawner()
+	if err := as.Spawn(context.Background(), spawner); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if got := spawner.lastResumeID; got != "" {
+		t.Errorf("Spawn received resumeID = %q, want empty", got)
+	}
+}
+
+// TestAgentSession_ResumeIDRestoreFromRegistry asserts that a
+// persisted AgentSessionEntry with a ResumeID is correctly restored
+// by FromAgentSessionEntry. This is the path that survives a daemon
+// restart — the resume id must round-trip so the next respawn can
+// replay `--resume <id>`.
+func TestAgentSession_ResumeIDRestoreFromRegistry(t *testing.T) {
+	now := time.Now()
+	e := &registry.AgentSessionEntry{
+		ID:            "as_1",
+		ChatSessionID: "cs_1",
+		Agent:         "claude",
+		Cwd:           "/x",
+		PID:           0,
+		Status:        registry.StatusDetached,
+		ResumeID:      "sess-round-trip-xyz",
+		CreatedAt:     now,
+		LastRunAt:     now,
+	}
+	as := FromAgentSessionEntry(e)
+	if as == nil {
+		t.Fatal("FromAgentSessionEntry returned nil")
+	}
+	if got := as.ResumeID(); got != "sess-round-trip-xyz" {
+		t.Errorf("ResumeID = %q, want %q", got, "sess-round-trip-xyz")
+	}
+	// And the next spawn forwards the resume id to the spawner.
+	spawner := newFakeSpawner()
+	if err := as.Spawn(context.Background(), spawner); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if got := spawner.lastResumeID; got != "sess-round-trip-xyz" {
+		t.Errorf("Spawn received resumeID = %q, want %q", got, "sess-round-trip-xyz")
 	}
 }

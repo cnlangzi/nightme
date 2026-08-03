@@ -66,6 +66,10 @@ func (a *Agent) Detect() error {
 // v0.1 behaviour). Unknown values are forwarded as-is — Claude Code
 // itself validates the set of legal modes.
 //
+// cfg.ResumeID, when non-empty, is appended as `--resume <id>` after
+// cfg.Args so the child resumes the previous Claude Code session.
+// Empty means "no --resume; start a fresh session".
+//
 // On Start success, the returned session has an active process; the
 // caller must Close() it when done.
 func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSession, error) {
@@ -80,6 +84,8 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSe
 // buildArgs concatenates DefaultArgs + extraArgs + cfg.Args, rewriting
 // the --permission-mode placeholder baked into DefaultArgs with the
 // effective mode from cfg.PermissionMode (PermissionBypass when empty).
+// When cfg.ResumeID is non-empty, `--resume <id>` is appended last so
+// user-supplied cfg.Args are visible to the user before the resume flag.
 //
 // Extracted as a package-private helper so tests can assert on the
 // produced argv without spawning a process. Mirrors the contract of
@@ -93,7 +99,7 @@ func buildArgs(extraArgs []string, cfg agent.StartConfig) []string {
 	// Walk DefaultArgs; when we see "--permission-mode" the next
 	// element is the placeholder — replace it with the effective
 	// mode instead of copying the placeholder verbatim.
-	out := make([]string, 0, len(DefaultArgs)+len(extraArgs)+len(cfg.Args))
+	out := make([]string, 0, len(DefaultArgs)+len(extraArgs)+len(cfg.Args)+2)
 	for i := 0; i < len(DefaultArgs); i++ {
 		if DefaultArgs[i] == "--permission-mode" && i+1 < len(DefaultArgs) {
 			out = append(out, "--permission-mode", mode)
@@ -104,5 +110,8 @@ func buildArgs(extraArgs []string, cfg agent.StartConfig) []string {
 	}
 	out = append(out, extraArgs...)
 	out = append(out, cfg.Args...)
+	if cfg.ResumeID != "" {
+		out = append(out, "--resume", cfg.ResumeID)
+	}
 	return out
 }

@@ -170,7 +170,7 @@ func TestDefaultFlushHook_TracksUserMsgIDs(t *testing.T) {
 // fork a process.
 type spySpawner struct{}
 
-func (s *spySpawner) Spawn(_ context.Context, _ string, _ string, _ []string) (agent.AgentSession, error) {
+func (s *spySpawner) Spawn(_ context.Context, _ string, _ string, _ []string, _ string) (agent.AgentSession, error) {
 	return nil, errors.New("spySpawner: not implemented")
 }
 

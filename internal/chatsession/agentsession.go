@@ -64,6 +64,15 @@ type AgentSession struct {
 	exitCodeMu sync.RWMutex
 	exitCode   *int
 
+	// Agent-session-resume id (e.g. Claude Code's
+	// `system/init.session_id`). Captured from EventInit on the
+	// first run; persisted via Entry; replayed on the next Spawn as
+	// `--resume <id>` (Claude Code currently translates this; other
+	// bridges ignore it). Empty when the agent has no resume
+	// semantics or has not yet emitted its init event.
+	resumeIDMu sync.RWMutex
+	resumeID   string
+
 	// handle is the bridge-level live session (returned by
 	// agent.Start). nil until Spawn succeeds. Committed to the
 	// caller (readPump) only after SetRunning is called.
@@ -113,6 +122,7 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 		args:          append([]string(nil), e.Args...),
 		createdAt:     e.CreatedAt,
 		lastRunAt:     e.LastRunAt,
+		resumeID:      e.ResumeID,
 	}
 	// commit fix-6: any persisted "running" agent is actually dead
 	// after daemon restart (the process handle is in-memory only).
@@ -173,6 +183,26 @@ func (as *AgentSession) ExitCode() *int {
 	return &v
 }
 
+// ResumeID returns the agent's own session id (e.g. Claude Code's
+// `system/init.session_id`) captured on the last run. Empty when
+// the agent has no resume semantics or has not yet emitted its
+// init event.
+func (as *AgentSession) ResumeID() string {
+	as.resumeIDMu.RLock()
+	defer as.resumeIDMu.RUnlock()
+	return as.resumeID
+}
+
+// SetResumeID records the agent's own session id. Called by the
+// runtime's EventHandler when it receives an EventInit with a
+// non-empty SessionID. Safe to call concurrently with Spawn /
+// SetRunning / SetExited.
+func (as *AgentSession) SetResumeID(id string) {
+	as.resumeIDMu.Lock()
+	as.resumeID = id
+	as.resumeIDMu.Unlock()
+}
+
 // SetRunning marks the AgentSession as running with the given PID.
 // Bumps LastRunAt.
 func (as *AgentSession) SetRunning(pid int) {
@@ -228,6 +258,7 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 		PID:           as.PID(),
 		Status:        as.Status(),
 		Args:          as.Args(),
+		ResumeID:      as.ResumeID(),
 		CreatedAt:     as.createdAt,
 		LastRunAt:     as.lastRunAt,
 		ExitCode:      ec,
@@ -276,7 +307,7 @@ func (as *AgentSession) Spawn(ctx context.Context, spawner Spawner) error {
 		return nil // already running
 	}
 
-	handle, err := spawner.Spawn(ctx, as.Agent, as.Cwd, as.args)
+	handle, err := spawner.Spawn(ctx, as.Agent, as.Cwd, as.args, as.ResumeID())
 	if err != nil {
 		return fmt.Errorf("chatsession: spawn %s at %s: %w", as.Agent, as.Cwd, err)
 	}

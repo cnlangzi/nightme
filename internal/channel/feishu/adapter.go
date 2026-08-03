@@ -561,9 +561,15 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 
 	case gateway.OutToolStart:
 		// F-34: tool_start is posted to the user message
-		// thread as a "🔧 name(args)" line. The receipt card
-		// no longer carries tool entries.
-		body := "🔧 " + formatToolStart(toolName(msg), toolArgs(msg))
+		// thread as the "call" line (`● Tool(args)`), matching
+		// Claude Code's terminal UX. The receipt card no
+		// longer carries tool entries.
+		//
+		// Two-line UX: OutToolStart posts `● Tool(args)`;
+		// OutToolEnd posts the matching `⎿  …` result line.
+		// The user sees the call appear immediately and the
+		// result land in the same thread when the tool returns.
+		body := formatToolStartCall(toolName(msg), toolArgs(msg))
 		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body); err != nil {
 			return err
 		}
@@ -576,13 +582,15 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 
 	case gateway.OutToolEnd:
 		// F-34: tool_end is posted to the user message thread
-		// with a type-aware one-line summary. The receipt card
-		// no longer carries tool entries.
+		// as the "result" line (`⎿  summary`), the second half
+		// of Claude Code's two-line UX. Args are NOT included
+		// here — they live on the preceding call line from
+		// OutToolStart.
 		var toolErr error
 		if msg.Tool != nil {
 			toolErr = msg.Tool.Err
 		}
-		body := summarizeToolEnd(toolName(msg), toolArgs(msg), toolOutput(msg), toolErr)
+		body := summarizeToolResult(toolName(msg), toolOutput(msg), toolErr)
 		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body); err != nil {
 			return err
 		}
@@ -784,15 +792,6 @@ func (l *threadReplyLimiter) Wait(ctx context.Context, key string) error {
 	case <-t.C:
 		return nil
 	}
-}
-
-// formatToolStart renders the tool_start thread body. When args is
-// non-empty the format is "name(args)"; otherwise just "name".
-func formatToolStart(name, args string) string {
-	if args == "" {
-		return name
-	}
-	return name + "(" + args + ")"
 }
 
 // toolName / toolArgs / toolOutput read from OutboundMessage.Tool

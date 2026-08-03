@@ -302,17 +302,17 @@ type OutboundMessage struct {
 // generic concepts that any tool has — name, args, output, error
 // — without prescribing how each bridge represents them. Fields:
 //
-//   Name    — the tool's registered name (e.g. "Read", "Bash").
-//             Set on both Start and End.
-//   Args    — the tool's input, in whatever representation the
-//             bridge chose. Set on both Start and End. Gateway
-//             does NOT parse this string; channels that want
-//             type-aware rendering (e.g. summarising tool output)
-//             parse it themselves.
-//   Output  — the tool's result text. Only set on End; empty on
-//             Start.
-//   Err     — the tool's error (if any). Only set on End; nil on
-//             Start.
+//	Name    — the tool's registered name (e.g. "Read", "Bash").
+//	          Set on both Start and End.
+//	Args    — the tool's input, in whatever representation the
+//	          bridge chose. Set on both Start and End. Gateway
+//	          does NOT parse this string; channels that want
+//	          type-aware rendering (e.g. summarising tool output)
+//	          parse it themselves.
+//	Output  — the tool's result text. Only set on End; empty on
+//	          Start.
+//	Err     — the tool's error (if any). Only set on End; nil on
+//	          Start.
 //
 // ToolInfo deliberately avoids naming fields after any specific
 // bridge's schema (no `file_path`, `command`, `content`, etc.) —

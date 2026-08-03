@@ -651,8 +651,8 @@ func TestSend_OutToolStart_PostsToThread(t *testing.T) {
 	if textReply.RootID != "om_user_1" {
 		t.Errorf("rootID = %q, want om_user_1", textReply.RootID)
 	}
-	if textReply.Text != "🔧 Read(/foo.go)" {
-		t.Errorf("body = %q, want %q", textReply.Text, "🔧 Read(/foo.go)")
+	if textReply.Text != "● Read(/foo.go)" {
+		t.Errorf("body = %q, want %q (Claude Code-style call line)", textReply.Text, "● Read(/foo.go)")
 	}
 }
 
@@ -703,12 +703,12 @@ func TestSend_OutToolEnd_PostsToThread(t *testing.T) {
 	if textReply.RootID != "om_user_1" {
 		t.Errorf("rootID = %q, want om_user_1", textReply.RootID)
 	}
-	want := summarizeToolEnd("Read", "/foo.go", "line1\nline2", nil)
+	want := summarizeToolResult("Read", "line1\nline2", nil)
 	if textReply.Text != want {
-		t.Errorf("body = %q, want %q (from summarizeToolEnd)", textReply.Text, want)
+		t.Errorf("body = %q, want %q (from summarizeToolResult)", textReply.Text, want)
 	}
-	if !strings.Contains(textReply.Text, "📄 Read") {
-		t.Errorf("body = %q, want it to start with the Read icon", textReply.Text)
+	if !strings.Contains(textReply.Text, "⎿  📄 Read") {
+		t.Errorf("body = %q, want it to start with ⎿  📄 Read (Claude Code-style result line)", textReply.Text)
 	}
 }
 

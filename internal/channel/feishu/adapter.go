@@ -579,8 +579,8 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// with a type-aware one-line summary. The receipt card
 		// no longer carries tool entries.
 		var toolErr error
-		if e, ok := msg.Meta["err"].(error); ok {
-			toolErr = e
+		if msg.Tool != nil {
+			toolErr = msg.Tool.Err
 		}
 		body := summarizeToolEnd(toolName(msg), toolArgs(msg), toolOutput(msg), toolErr)
 		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body); err != nil {
@@ -795,26 +795,28 @@ func formatToolStart(name, args string) string {
 	return name + "(" + args + ")"
 }
 
-// toolName / toolArgs / toolOutput pull the well-known fields from
-// OutboundMessage.Meta. The translator fills these so the receiver
-// doesn't have to parse the formatted text.
+// toolName / toolArgs / toolOutput read from OutboundMessage.Tool
+// (the typed ToolInfo). The gateway now transports the unified
+// tool concept via the Tool field; Meta is no longer the carrier
+// for tool data. See gateway/messages.go ToolInfo docs and
+// gateway/translate.go for the producer side.
 func toolName(m gateway.OutboundMessage) string {
-	if n, _ := m.Meta["tool_name"].(string); n != "" {
-		return n
+	if m.Tool != nil && m.Tool.Name != "" {
+		return m.Tool.Name
 	}
 	return "tool"
 }
 
 func toolArgs(m gateway.OutboundMessage) string {
-	if a, _ := m.Meta["args"].(string); a != "" {
-		return a
+	if m.Tool != nil {
+		return m.Tool.Args
 	}
 	return ""
 }
 
 func toolOutput(m gateway.OutboundMessage) string {
-	if o, _ := m.Meta["output"].(string); o != "" {
-		return o
+	if m.Tool != nil {
+		return m.Tool.Output
 	}
 	return ""
 }

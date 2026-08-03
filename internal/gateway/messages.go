@@ -252,12 +252,24 @@ func (k OutboundKind) String() string {
 type OutboundMessage struct {
 	ChatID string
 	Kind   OutboundKind
-	// Text carries the rendered body for OutText / OutToolStart /
-	// OutToolEnd / OutThinking. Channels are expected to truncate
-	// for their own UI limits; Gateway does not pre-truncate.
+	// Text carries the rendered body for OutText / OutThinking.
+	// Channels are expected to truncate for their own UI limits;
+	// Gateway does not pre-truncate. OutToolStart / OutToolEnd
+	// carry their content in the Tool field, not Text — see
+	// ToolInfo for the rationale (gateway transports the unified
+	// tool concept; channel decides how to render it).
 	Text string
 	// Card carries the interactive card payload for OutCard.
 	Card *Card
+	// Tool carries the typed payload for OutToolStart / OutToolEnd.
+	// nil for other Kinds. Gateway populates this from
+	// AgentEvent.ToolStart / ToolEnd in translate(); channels
+	// read it directly instead of mining Meta for per-tool
+	// fields. The Args string is whatever representation the
+	// bridge chose (claudecode emits raw JSON; other bridges
+	// may use typed maps serialised to string). Gateway does not
+	// parse the Args content — that's channel territory.
+	Tool *ToolInfo
 	// Reaction carries the emoji + target for the legacy reaction
 	// events. v1.3 (F-31) introduces MessageState (preferred path);
 	// Reaction is retained temporarily for backward compatibility
@@ -277,10 +289,40 @@ type OutboundMessage struct {
 	//   (legacy) Reaction / ReactionRemoved: see Reaction struct.
 	//   OutCard: Meta.RequestID is the correlation token the user
 	//     click carries back in InboundMessage.Action.RequestID.
-	//   OutToolStart: Meta.ToolName / Meta.Args.
-	//   OutToolEnd: Meta.ToolName / Meta.Output / Meta.Err.
 	//   OutTyping: Channel-specific (usually empty).
+	//
+	// OutToolStart / OutToolEnd no longer use Meta for tool data;
+	// see Tool / ToolInfo. Meta is reserved for legacy / channel-
+	// specific per-kind fields.
 	Meta map[string]any
+}
+
+// ToolInfo is the typed payload for OutboundMessage.Tool,
+// representing a tool call (start or end). It captures the
+// generic concepts that any tool has — name, args, output, error
+// — without prescribing how each bridge represents them. Fields:
+//
+//   Name    — the tool's registered name (e.g. "Read", "Bash").
+//             Set on both Start and End.
+//   Args    — the tool's input, in whatever representation the
+//             bridge chose. Set on both Start and End. Gateway
+//             does NOT parse this string; channels that want
+//             type-aware rendering (e.g. summarising tool output)
+//             parse it themselves.
+//   Output  — the tool's result text. Only set on End; empty on
+//             Start.
+//   Err     — the tool's error (if any). Only set on End; nil on
+//             Start.
+//
+// ToolInfo deliberately avoids naming fields after any specific
+// bridge's schema (no `file_path`, `command`, `content`, etc.) —
+// those are tool-specific details that the channel layer
+// (with its own per-tool heuristics) handles.
+type ToolInfo struct {
+	Name   string
+	Args   string
+	Output string
+	Err    error
 }
 
 // Card is an interactive permission card or any other card that

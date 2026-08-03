@@ -123,10 +123,11 @@ func TestTranslate_EventUsage_NilDropped(t *testing.T) {
 }
 
 func TestTranslate_EventToolEnd_CarriesArgs(t *testing.T) {
-	// F-34: ToolEndEvent.Args flows through the Gateway into
-	// OutboundMessage.Meta["args"] so channel renderers can
-	// produce type-aware thread-reply summaries without
-	// re-parsing the tool_result content.
+	// F-34 review fix (architecture feedback 2026-08-04):
+	// ToolEndEvent.Args flows through the Gateway into
+	// OutboundMessage.Tool.Args (typed ToolInfo) so channel
+	// renderers can produce type-aware thread-reply summaries
+	// without mining Meta for implicit per-tool keys.
 	in := agent.AgentEvent{
 		Kind: agent.EventToolEnd,
 		ToolEnd: &agent.ToolEndEvent{
@@ -139,8 +140,17 @@ func TestTranslate_EventToolEnd_CarriesArgs(t *testing.T) {
 	if !ok || msg.Kind != OutToolEnd {
 		t.Fatalf("got (%v, %v), want (OutToolEnd, true)", msg.Kind, ok)
 	}
-	if got := msg.Meta["args"]; got != "/foo.go" {
-		t.Errorf("Meta[args] = %v, want /foo.go", got)
+	if msg.Tool == nil {
+		t.Fatal("msg.Tool is nil; Gateway should populate the unified ToolInfo")
+	}
+	if msg.Tool.Name != "Read" {
+		t.Errorf("Tool.Name = %q, want %q", msg.Tool.Name, "Read")
+	}
+	if msg.Tool.Args != "/foo.go" {
+		t.Errorf("Tool.Args = %q, want %q", msg.Tool.Args, "/foo.go")
+	}
+	if msg.Tool.Output != "47 lines" {
+		t.Errorf("Tool.Output = %q, want %q", msg.Tool.Output, "47 lines")
 	}
 }
 

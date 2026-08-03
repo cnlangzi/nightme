@@ -631,10 +631,9 @@ func TestSend_OutToolStart_PostsToThread(t *testing.T) {
 		Kind:    gateway.OutToolStart,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
-		Text:    "Read(/foo.go)",
-		Meta: map[string]any{
-			"tool_name": "Read",
-			"args":      "/foo.go",
+		Tool: &gateway.ToolInfo{
+			Name: "Read",
+			Args: "/foo.go",
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutToolStart): %v", err)
@@ -683,11 +682,10 @@ func TestSend_OutToolEnd_PostsToThread(t *testing.T) {
 		Kind:    gateway.OutToolEnd,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
-		Text:    "Read /foo.go → 47 lines",
-		Meta: map[string]any{
-			"tool_name": "Read",
-			"args":      "/foo.go",
-			"output":    "line1\nline2",
+		Tool: &gateway.ToolInfo{
+			Name:   "Read",
+			Args:   "/foo.go",
+			Output: "line1\nline2",
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutToolEnd): %v", err)

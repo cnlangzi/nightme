@@ -72,17 +72,19 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		if name == "" {
 			name = "tool"
 		}
-		text := name
-		if ev.ToolStart.Args != "" {
-			text = name + "(" + ev.ToolStart.Args + ")"
-		}
+		// Gateway only transports the unified ToolInfo —
+		// channel decides how to render "🔧 name(args)" or its
+		// own equivalent. Gateway does NOT pre-format Text
+		// (removed) or stash per-tool fields in Meta (those were
+		// Feishu-specific implicit keys leaking into the
+		// abstract layer; see F-34 review P0-2 / Devin
+		// architecture feedback 2026-08-04).
 		return OutboundMessage{
 			ChatID: chatID,
 			Kind:   OutToolStart,
-			Text:   text,
-			Meta: map[string]any{
-				"tool_name": name,
-				"args":      ev.ToolStart.Args,
+			Tool: &ToolInfo{
+				Name: name,
+				Args: ev.ToolStart.Args,
 			},
 		}, true
 
@@ -94,23 +96,17 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		if name == "" {
 			name = "tool"
 		}
-		var text string
-		if ev.ToolEnd.Err != nil {
-			text = fmt.Sprintf("%s failed: %s", name, ev.ToolEnd.Err.Error())
-		} else if ev.ToolEnd.Output != "" {
-			text = fmt.Sprintf("%s → %s", name, ev.ToolEnd.Output)
-		} else {
-			text = name + " done"
-		}
+		// Same as EventToolStart above — ToolInfo carries the
+		// generic fields; gateway does not format Text or use
+		// Meta for tool data.
 		return OutboundMessage{
 			ChatID: chatID,
 			Kind:   OutToolEnd,
-			Text:   text,
-			Meta: map[string]any{
-				"tool_name": name,
-				"args":      ev.ToolEnd.Args,
-				"output":    ev.ToolEnd.Output,
-				"err":       ev.ToolEnd.Err,
+			Tool: &ToolInfo{
+				Name:   name,
+				Args:   ev.ToolEnd.Args,
+				Output: ev.ToolEnd.Output,
+				Err:    ev.ToolEnd.Err,
 			},
 		}, true
 

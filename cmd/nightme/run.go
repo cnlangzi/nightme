@@ -350,7 +350,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 //
 // Flow:
 //
-//  1. cs = mgr.GetOrCreate(chatID, chatType, cfg.Primary)
+//  1. cs = mgr.GetOrCreate(chatID, cfg.Primary)   // F-33: chatType removed
 //  2. cs.LookupActiveAgentSession() (lazy spawn)
 //  3. cs.QueueUserMessage(blocks, userMsgID) (Idle → flush now;
 //     Busy → queue)

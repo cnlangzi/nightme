@@ -45,7 +45,10 @@ Common:
   auth status     show channel credentials
   auth login      QR Feishu registration
   test ...        spawn CLI in PTY (Ctrl-C to end)
-  run             start daemon (Ctrl-C to end)
+  start           start daemon in the background
+  status          show daemon status
+  restart         gracefully replace daemon
+  stop            gracefully stop daemon
   help            full command list
   version         version info
 

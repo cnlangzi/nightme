@@ -183,8 +183,8 @@ func TestHandleMessage_LogsInbound(t *testing.T) {
 		t.Errorf("expected feishu: incoming log line, got %q", out)
 	}
 	if !strings.Contains(out, "trace me") {
-			t.Errorf("expected log line to carry the message text, got %q", out)
-		}
+		t.Errorf("expected log line to carry the message text, got %q", out)
+	}
 }
 
 // TestHandleMessage_ReplyToFromParentId verifies the F-33 D3

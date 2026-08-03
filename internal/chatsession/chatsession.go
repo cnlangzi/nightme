@@ -205,6 +205,12 @@ func (cs *ChatSession) SetActiveAgent(agent string) error {
 	}
 	cs.mu.Lock()
 	cs.activeAgent = agent
+	// /use switches the AgentSession; the previous turn's anchor
+	// must NOT survive or the new AS's events would be stamped
+	// with the OLD userMsgID (channel routes them to the old
+	// receipt card). Clear under the same lock as activeAgent
+	// write so the two are atomic relative to readPump reads.
+	cs.currentTurnUserMsgID = ""
 	cs.lastInteractionAt = time.Now()
 	cs.mu.Unlock()
 	cs.persistChatEntry()
@@ -297,10 +303,27 @@ func (cs *ChatSession) defaultFlushHookLocked() FlushHook {
 		// turn anchors to itself; a buffered batch anchors to
 		// the most recent user message (matches ChatGPT-style
 		// "submit all → reply on last" UX).
+		//
+		// IMPORTANT: the closure body runs WITHOUT cs.mu held
+		// (InputBuffer.OnTurnEnded releases its b.mu before
+		// invoking the hook). We must acquire cs.mu here to
+		// synchronize with the read side in runReadPump. Writing
+		// without the lock is a data race; the race detector
+		// catches it under buffered-batch + concurrent event
+		// drain.
 		if n := len(userMsgIDs); n > 0 {
+			cs.mu.Lock()
 			cs.currentTurnUserMsgID = userMsgIDs[n-1]
+			as := cs.activeAS
+			cs.mu.Unlock()
+			if as == nil || as.Handle() == nil {
+				return ErrNotRunning
+			}
+			return as.SendBlocks(context.Background(), combined)
 		}
+		cs.mu.RLock()
 		as := cs.activeAS
+		cs.mu.RUnlock()
 		if as == nil || as.Handle() == nil {
 			return ErrNotRunning
 		}
@@ -587,6 +610,7 @@ func (cs *ChatSession) KillAll() error {
 	cs.mu.Lock()
 	cs.pool = make(map[agentCwdKey]*AgentSession)
 	cs.activeAS = nil
+	cs.currentTurnUserMsgID = ""
 	cs.mu.Unlock()
 
 	// commit 8c: discard queued user messages. They can't reach

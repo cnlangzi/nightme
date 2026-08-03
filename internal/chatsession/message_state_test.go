@@ -126,7 +126,7 @@ func TestEmitMessageStateForCurrentTurn_AnchorOnly(t *testing.T) {
 	remaining := cs.currentTurnUserMsgID
 	cs.mu.RUnlock()
 	if len(remaining) != 0 {
-		t.Errorf("currentTurnUserMsgIDs not cleared: %v", remaining)
+		t.Errorf("currentTurnUserMsgID not cleared: %q", remaining)
 	}
 
 	// Subsequent call with empty currentTurnUserMsgID → no-op.

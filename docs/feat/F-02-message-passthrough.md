@@ -22,7 +22,7 @@ slash command 分支由 [F-20 Gateway](./F-20-gateway.md) 负责（包括 `/cwd`
 ## 2. Interface
 
 ```go
-// Session.WriteText 是 fallback 路径（普通文本走这里）
+// Session.WriteText 是 messageDispatcher 主路径（普通文本走这里）
 func (s *Session) WriteText(text string) error {
     normalized := normalizeInput(text)
     _, err := s.bridge.Write([]byte(normalized))
@@ -45,7 +45,7 @@ func normalizeInput(text string) string {
 **文件**：
 - `internal/session/session.go` — `Session.WriteText()` 方法
 - `internal/channel/feishu/feishu.go` — Incoming handler（不含命令解析）
-- `internal/gateway/gateway.go` — fallback handler（未命中命令时调 Session.WriteText）
+- `internal/gateway/gateway.go` — messageDispatcher（未命中 slash command 时调 ChatSession.QueueUserMessage）
 
 **完整流程**：
 ```
@@ -58,7 +58,7 @@ Router.Lookup(chatID) → *Session
   ↓
 session.Gateway.Handle(msg)
   ├─ text 以 "/" 开头 → 走命令路由（[F-20](./F-20-gateway.md)）
-  └─ text 不是 "/" 开头 → fallback:
+  └─ text 不是 "/" 开头 → messageDispatcher:
       session.WriteText(text) → normalizeInput → bridge.Write
                                           ↓
                                     PTY master → PTY slave → claude stdin
@@ -90,7 +90,7 @@ session.Gateway.Handle(msg)
 - `normalizeInput("hello\n")` → `"hello\n"`
 
 **集成测试**：
-- Gateway.Handle(普通文本) → fallback 触发 → bridge.Write 被调
+- Gateway.DispatchInbound(普通文本) → messageDispatcher 触发 → bridge.Write 被调
 
 **E2E（M2）**：
 - 创建 session（/cwd）后，飞书 DM 发 "hello" → claude 收到 stdin
@@ -99,4 +99,4 @@ session.Gateway.Handle(msg)
 ## 6. Open questions
 
 - 是否需要支持 Ctrl+C / Ctrl+D 等控制字符？倾向：飞书用户极少需要，v0.1 不支持
-- session 未创建时的 fallback 行为：当前设计"提示用户"，但这等于 Gateway 在做 SessionManager 的事情。是否应让 SessionManager 报错？
+- session 未创建时的 messageDispatcher 行为：当前设计"提示用户"，但这等于 Gateway 在做 SessionManager 的事情。是否应让 SessionManager 报错？

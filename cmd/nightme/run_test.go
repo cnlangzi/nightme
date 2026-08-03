@@ -223,7 +223,7 @@ func runTestDeps(cfg *config.Config, ch *fakeRunChannel, mgr *fakeRunManager, si
 }
 
 func TestRun_RequiresConfig(t *testing.T) {
-	cmd := newRunCmd()
+	cmd := newRuntimeTestCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetContext(context.Background())
 	deps := runDeps{loadConfig: func() (*config.Config, error) {
@@ -237,7 +237,7 @@ func TestRun_RequiresConfig(t *testing.T) {
 }
 
 func TestRun_RequiresFeishuCredentials(t *testing.T) {
-	cmd := newRunCmd()
+	cmd := newRuntimeTestCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetContext(context.Background())
 	deps := runDeps{
@@ -268,7 +268,7 @@ func TestRun_StartsChannelAndManager(t *testing.T) {
 	}()
 
 	var out bytes.Buffer
-	cmd := newRunCmd()
+	cmd := newRuntimeTestCmd()
 	cmd.SetOut(&out)
 	cmd.SetContext(context.Background())
 	if err := runRunWith(cmd, runTestDeps(cfg, ch, mgr, signals)); err != nil {
@@ -308,7 +308,7 @@ func TestRun_GracefulShutdown(t *testing.T) {
 		signals <- syscall.SIGINT
 	}()
 
-	cmd := newRunCmd()
+	cmd := newRuntimeTestCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetContext(context.Background())
 	if err := runRunWith(cmd, runTestDeps(cfg, ch, mgr, signals)); err != nil {
@@ -333,14 +333,14 @@ func TestRun_GracefulShutdown(t *testing.T) {
 func TestBuildRunAgentRegistry_HasBuiltinsOnly(t *testing.T) {
 	cases := []struct {
 		name    string
-		entries map[string]config.AgentEntry
+		entries []config.AgentEntry
 	}{
-		{"nil map", nil},
-		{"empty map", map[string]config.AgentEntry{}},
+		{"nil slice", nil},
+		{"empty slice", []config.AgentEntry{}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			cfg := &config.Config{Agent: config.AgentConfig{Agents: c.entries}}
+			cfg := &config.Config{Agents: c.entries}
 			reg := buildRunAgentRegistry(cfg)
 
 			names := make(map[string]bool)
@@ -360,14 +360,14 @@ func TestBuildRunAgentRegistry_HasBuiltinsOnly(t *testing.T) {
 }
 
 // TestBuildRunAgentRegistry_UserConfigRegistered verifies that any
-// agent named in cfg.Agent.Agents becomes available, regardless of
+// agent named in cfg.Agents becomes available, regardless of
 // whether it has a Builtins entry. User-configured agents always
 // land in pty (bridge/pty.NewAgent) — the safe default for arbitrary CLIs.
 func TestBuildRunAgentRegistry_UserConfigRegistered(t *testing.T) {
 	cfg := &config.Config{
-		Agent: config.AgentConfig{Agents: map[string]config.AgentEntry{
-			"custom": {Command: "/bin/echo", Args: []string{"--custom"}, Env: map[string]string{"Z": "last", "A": "first"}},
-		}},
+		Agents: []config.AgentEntry{
+			{Name: "custom", Command: "/bin/echo --custom"},
+		},
 		Session: config.SessionConfig{DefaultPtyCols: 100, DefaultPtyRows: 40},
 	}
 	reg := buildRunAgentRegistry(cfg)
@@ -378,10 +378,6 @@ func TestBuildRunAgentRegistry_UserConfigRegistered(t *testing.T) {
 	}
 	if got := custom.Mode(); got != agent.ModePTY {
 		t.Errorf("custom mode = %s, want pty", got)
-	}
-	args := custom.Args()
-	if len(args) != 1 || args[0] != "--custom" {
-		t.Errorf("custom args = %v", args)
 	}
 	if custom.Cols != 100 || custom.Rows != 40 {
 		t.Errorf("custom PTY size = %dx%d, want 100x40", custom.Cols, custom.Rows)
@@ -395,9 +391,9 @@ func TestBuildRunAgentRegistry_UserConfigRegistered(t *testing.T) {
 // dedicated bridge features (documented in the init() comment).
 func TestBuildRunAgentRegistry_UserConfigOverridesBuiltin(t *testing.T) {
 	cfg := &config.Config{
-		Agent: config.AgentConfig{Agents: map[string]config.AgentEntry{
-			"claude": {Command: "/custom/path/claude"},
-		}},
+		Agents: []config.AgentEntry{
+			{Name: "claude", Command: "/custom/path/claude"},
+		},
 	}
 	reg := buildRunAgentRegistry(cfg)
 
@@ -445,7 +441,7 @@ func TestRun_CleanupFlagKillsSessions(t *testing.T) {
 		signals <- syscall.SIGINT
 	}()
 
-	cmd := newRunCmd()
+	cmd := newRuntimeTestCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetContext(context.Background())
 
@@ -478,7 +474,7 @@ func TestRun_DefaultDetachesSessions(t *testing.T) {
 		signals <- syscall.SIGINT
 	}()
 
-	cmd := newRunCmd()
+	cmd := newRuntimeTestCmd()
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetContext(context.Background())
 
@@ -594,7 +590,7 @@ func TestRun_IntegratesGateway_Cwd(t *testing.T) {
 	}()
 
 	var out bytes.Buffer
-	cmd := newRunCmd()
+	cmd := newRuntimeTestCmd()
 	cmd.SetOut(&out)
 	cmd.SetContext(context.Background())
 	if err := runRunWith(cmd, integrationDeps(t, ch, signals)); err != nil {
@@ -624,7 +620,7 @@ func TestRun_GatewayRoundTrip(t *testing.T) {
 	}()
 
 	var out bytes.Buffer
-	cmd := newRunCmd()
+	cmd := newRuntimeTestCmd()
 	cmd.SetOut(&out)
 	cmd.SetContext(context.Background())
 	if err := runRunWith(cmd, integrationDeps(t, ch, signals)); err != nil {
@@ -666,7 +662,7 @@ func TestRun_NonSlashMessagePassthrough(t *testing.T) {
 	}()
 
 	var out bytes.Buffer
-	cmd := newRunCmd()
+	cmd := newRuntimeTestCmd()
 	cmd.SetOut(&out)
 	cmd.SetContext(context.Background())
 	if err := runRunWith(cmd, integrationDeps(t, ch, signals)); err != nil {
@@ -693,7 +689,7 @@ func TestRun_UnrecognizedSlashRoutesFallback(t *testing.T) {
 	}()
 
 	var out bytes.Buffer
-	cmd := newRunCmd()
+	cmd := newRuntimeTestCmd()
 	cmd.SetOut(&out)
 	cmd.SetContext(context.Background())
 	if err := runRunWith(cmd, integrationDeps(t, ch, signals)); err != nil {
@@ -719,7 +715,7 @@ func TestRun_HelpCommandWorks(t *testing.T) {
 	}()
 
 	var out bytes.Buffer
-	cmd := newRunCmd()
+	cmd := newRuntimeTestCmd()
 	cmd.SetOut(&out)
 	cmd.SetContext(context.Background())
 	if err := runRunWith(cmd, integrationDeps(t, ch, signals)); err != nil {
@@ -827,7 +823,7 @@ func TestRun_ConsecutiveMessagesDoNotDeadlock(t *testing.T) {
 	}()
 
 	var out bytes.Buffer
-	cmd := newRunCmd()
+	cmd := newRuntimeTestCmd()
 	cmd.SetOut(&out)
 	cmd.SetContext(context.Background())
 

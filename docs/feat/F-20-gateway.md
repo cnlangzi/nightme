@@ -50,7 +50,7 @@ type CommandResult struct {
     Consumed bool
 }
 
-type FallbackHandler func(ctx context.Context, msg *InboundMessage) error
+type MessageDispatcher func(ctx context.Context, msg *InboundMessage) error
 
 // Gateway is the public contract exposed by the gateway package.
 type Gateway interface {
@@ -58,7 +58,7 @@ type Gateway interface {
     Register(cmd Command) bool
 
     // Handle dispatches one inbound message through the command table,
-    // calling the fallback handler when no command matches.
+    // calling the MessageDispatcher when no command matches.
     Handle(ctx context.Context, msg *InboundMessage) (*CommandResult, error)
 
     ListCommands() []Command
@@ -142,21 +142,21 @@ Gateway.dispatchLoop (single goroutine)
      ├ ParseCommand(msg.Text)
      │   ├ 命中表 (/cwd /run /kill /help /agents) → handler(msg)
      │   │   └ handler 内部走 gateway.bindings → manager.Create/Run/Kill → ch.Send
-     │   └ 未命中 / 普通文本 → fallback(msg)
-     └ handler 或 fallback 走 Receipt FSM（见 §5）
+     │   └ 未命中 / 普通文本 → messageDispatcher(msg)
+     └ handler 或 messageDispatcher 走 Receipt FSM（见 §5）
 ```
 
 **关键设计决策**：
 - **未命中命令透传，不拒绝**——避免跟 agent 的 slash commands 冲突
 - **`/` 前缀不等于 nightme 命令**——nightme 的责任范围**只限于 session 管理**
 - **slash command 命中后，即使参数错误也由 nightme 报错**——因为这个命令确实属于 nightme 的 namespace
-- **v1.1：所有跨层协调（CreateReceipt + QueueUserMessage + UpdateReceipt）在 Gateway.fallback 里**，不再在 channel adapter 里
+- **v1.1：所有跨层协调（CreateReceipt + QueueUserMessage + UpdateReceipt）在 Gateway 皂 messageDispatcher 里**，不再在 channel adapter 里
 
 **Parser 行为**：
 - `/cmd` → name="cmd", args=[]
 - `/cmd arg1 arg2` → name="cmd", args=["arg1", "arg2"]
 - `/cmd "arg with space"` → v0.2+ 支持
-- 解析失败的输入（如纯 `/` 后无字符）→ 视为普通文本，走 fallback
+- 解析失败的输入（如纯 `/` 后无字符）→ 视为普通文本，走 messageDispatcher
 
 ---
 
@@ -306,10 +306,10 @@ handler.listAgents(ctx, msg, _)
 
 ---
 
-## 5. Fallback 流 + Receipt FSM（v1.1 核心）
+## 5. MessageDispatcher 流 + Receipt FSM（v1.1 核心）
 
 ```
-Gateway.fallback(ctx, msg)
+messageDispatcher(ctx, msg)
   ├ binding := gateway.LookupByChat(msg.ChatID)
   │   ├ nil → ch.Send(OutText "no workspace, /cwd first")
   │   └ sess := manager.Get(binding.SessionID)
@@ -320,7 +320,7 @@ Gateway.fallback(ctx, msg)
   ├ blocks := msg.Blocks  // 或由 channel 在 InboundMessage 里直接给
   │
   ├ (a) rcpt, err := g.channel.CreateReceipt(ctx, msg.ChatID, userMsgID, blocks)
-  │       ├ err != nil → log warn + ch.Send(OutText msg.Text) → return  // fallback path without receipt
+  │       ├ err != nil → log warn + ch.Send(OutText msg.Text) → return  // degraded send path (no receipt)
   │       └ err == nil → g.receipts[userMsgID] = {chatID, sess.ID, rcpt, Pending}
   │
   ├ (c) err := sess.QueueUserMessage(blocks, userMsgID)
@@ -395,7 +395,7 @@ nightme 只拦截**表 4** 列出的 5 个命令。其他所有以 `/` 开头的
 | `/kill` 后 binding 保留，user 再 `/run` | 正常 spawn（Session record 复用）|
 | nightme 重启后，binding 恢复 + session 标 Detached + PID 活着 | `/run` 时 sess.Status == Detached → spawn 新 CLI（覆盖旧 PID，旧 CLI 变孤儿）|
 | nightme 重启后，binding 恢复 + session 标 Detached + PID 死了 | `/run` 时 spawn 新 CLI |
-| CreateReceipt 失败（飞书 API 错）| log warn + ch.Send(OutText msg.Text) fallback |
+| CreateReceipt 失败（飞书 API 错）| log warn + ch.Send(OutText msg.Text)（degraded send 路径） |
 | UpdateReceipt 失败 | Channel 内部 log；Gateway 不重试 |
 | DisposeReceipt 失败 | Channel 内部 log；Gateway 已从 receipts 删除 |
 | 多 channel 同时发同一 userMsgID | userMsgID 不唯一（应当 IM 原生唯一）→ 后到的覆盖前面，receipt map 替换 |
@@ -439,8 +439,8 @@ nightme 只拦截**表 4** 列出的 5 个命令。其他所有以 `/` 开头的
 
 - Gateway + MemoryManager + mock Channel: `/cwd` → binding.Upsert → registry.Upsert x2
 - Gateway + MemoryManager + mock Channel: `/run` → manager.Create → binding.SessionID 更新
-- Gateway + MemoryManager + mock Channel: fallback (Idle) → CreateReceipt → UpdateReceipt(Executing)
-- Gateway + MemoryManager + mock Channel: fallback (Busy) → CreateReceipt → queued → onFlush → UpdateReceipt(Executing) × N
+- Gateway + MemoryManager + mock Channel: messageDispatcher (Idle) → CreateReceipt → UpdateReceipt(Executing)
+- Gateway + MemoryManager + mock Channel: messageDispatcher (Busy) → CreateReceipt → queued → onFlush → UpdateReceipt(Executing) × N
 - Gateway + MemoryManager + mock Channel: EventResult → 反查 receipts → UpdateReceipt(Done) + DisposeReceipt
 
 ### 8.3 E2E（M2+）

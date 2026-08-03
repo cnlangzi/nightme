@@ -42,7 +42,7 @@ Feishu inbound
        └── returns DownloadResult {Atts, AllFailed, FailureKeys}
   → channel.Adapter.handleMessage 将 InboundMessage 推入 ch.Incoming()
 
-Gateway.pumpInbound → dispatchLoop → fallback(ctx, msg)
+Gateway.pumpInbound → dispatchLoop → DispatchInbound (inboundDispatcher) → messageDispatcher
   ├── AllFailed? → ch.Send(OutText ❌ notification) + drop → skip receipt
   ├── partial?   → ch.Send(OutText ⚠️ notification) + 继续
   └── ok?        → 继续
@@ -52,9 +52,9 @@ Gateway.pumpInbound → dispatchLoop → fallback(ctx, msg)
        ├── 成功的 attachments 转为 ContentImage / ContentFile blocks
        └── 失败的 attachments 丢弃（前面已通知 user）
 
-  → gateway.fallback(a) ch.CreateReceipt(ctx, msg.ChatID, msg.MessageID, blocks)
-  → gateway.fallback(b) receipts[userMsgID] = {..., state: Pending}
-  → gateway.fallback(c) session.QueueUserMessage(blocks, userMsgID)
+  → messageDispatcher(a) ch.CreateReceipt(ctx, msg.ChatID, msg.MessageID, blocks)
+  → messageDispatcher(b) receipts[userMsgID] = {..., state: Pending}
+  → messageDispatcher(c) session.QueueUserMessage(blocks, userMsgID)
        ├── Idle → 立即 SendBlocks(blocks) → ch.UpdateReceipt(executing)
        └── Busy → 入队 → onFlush 钩子触发时批量 SendBlocks + UpdateReceipt
 ```
@@ -153,8 +153,8 @@ type ContentBlock struct {
 - `DownloadAttachments` retry 逻辑（mock 网络）
 
 **集成测试**：
-- mock Channel adapter → 3 个 attachment（2 ok + 1 fail）→ 验证 fallback 收到 2 个 ContentBlock + 1 个 partial warning
-- mock Channel adapter → 3 个 attachment（全部 fail）→ 验证 fallback 不创建 receipt
+- mock Channel adapter → 3 个 attachment（2 ok + 1 fail）→ 验证 messageDispatcher 收到 2 个 ContentBlock + 1 个 partial warning
+- mock Channel adapter → 3 个 attachment（全部 fail）→ 验证 messageDispatcher 不创建 receipt
 
 **手动 E2E**：
 - 飞书发 1 image + caption → Claude Code 看到 caption + image（via stream-json content-array）

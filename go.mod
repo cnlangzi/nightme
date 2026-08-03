@@ -8,6 +8,7 @@ require (
 	github.com/larksuite/oapi-sdk-go/v3 v3.9.9
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/spf13/cobra v1.9.1
+	golang.org/x/sys v0.44.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -19,5 +20,4 @@ require (
 	github.com/spf13/pflag v1.0.7 // indirect
 	github.com/u-root/u-root v0.16.0 // indirect
 	golang.org/x/crypto v0.51.0 // indirect
-	golang.org/x/sys v0.44.0 // indirect
 )

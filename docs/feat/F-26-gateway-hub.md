@@ -284,7 +284,7 @@ func (a *Adapter) sendAnchored(ctx context.Context, msg gateway.OutboundMessage)
 **关键性质**：
 
 1. **二分路径**：ReplyTo 空/非空 是唯一决定渲染路径的字段。Channel **不做** “找不到 receipt 就丢到共享 card” 这种 fallback。
-2. **冷启动**：当一个 agent event 到达时该 userMsgID 还没有 receipt（理论上不应该发生——Gateway.fallback 总是先 CreateReceipt，但边缘情况下 cold-start 是 defensive）。`coldStartReceipt` 调用 Feishu `ReplyMessage` API 发布初始 card 并注册 receipt。
+2. **冷启动**：当一个 agent event 到达时该 userMsgID 还没有 receipt（理论上不应该发生——Gateway messageDispatcher 总是先 CreateReceipt，但边缘情况下 cold-start 是 defensive）。`coldStartReceipt` 调用 Feishu `ReplyMessage` API 发布初始 card 并注册 receipt。
 3. **Receipt 按 userMsgID 索引**：多 receipt/chat 共存 (buffered batch)。Eviction 逻辑从 v0.3 中删除（不适用多 receipt 模型）；各 receipt 独立 lifecycle。
 4. **Orphan event 降级**：Receipt-only kinds (OutInit / OutUsage / OutCompaction) 在 ReplyTo 空时静默 drop——这些只对 receipt card 有意义，plain text 发送是无意义的。用户-facing kinds (OutText / OutThinking / OutResult / OutToolStart / OutToolEnd) 在 ReplyTo 空时降级为 plain text。
 

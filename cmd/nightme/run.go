@@ -38,6 +38,7 @@ type runDeps struct {
 	signals        <-chan os.Signal
 	cleanup        bool
 	skipFeishuAuth bool
+	onReady        func()
 }
 
 func defaultRunDeps() runDeps {
@@ -57,8 +58,8 @@ func defaultRunDeps() runDeps {
 	}
 }
 
-// newRunCmd builds the long-running Feishu daemon command.
-func newRunCmd() *cobra.Command {
+// newRuntimeTestCmd exposes the in-process daemon runtime to unit tests.
+func newRuntimeTestCmd() *cobra.Command {
 	var cleanup bool
 	var channelName string
 	cmd := &cobra.Command{
@@ -318,6 +319,10 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		return fmt.Errorf("run: start gateway: %w", err)
 	}
 	defer func() { _ = gwImpl.Stop(context.Background()) }()
+
+	if deps.onReady != nil {
+		deps.onReady()
+	}
 
 	// Block on signal or context cancellation. All the per-channel
 	// and per-session goroutines are owned by the gateway and

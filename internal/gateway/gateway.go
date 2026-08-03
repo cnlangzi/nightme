@@ -1,9 +1,21 @@
-// Package gateway routes incoming chat messages to slash commands
-// registered by nightme, or to a fallback handler (typically the
-// session manager forwarding text to the live agent). See
-// docs/feat/F-20-gateway.md for the original router design and
-// docs/feat/F-26-gateway-hub.md for the Stage-3 responsibility-
-// isolation spec.
+// Package gateway routes incoming chat messages. It is the
+// inboundDispatcher for every InboundMessage produced by a
+// Channel: each message flows in via pumpInbound → dispatchLoop →
+// DispatchInbound, which branches to either the
+// slashCommandDispatcher (when the message text is a registered
+// slash command) or the messageDispatcher (default branch; for
+// plain text the runtime injects a MessageDispatcher that routes
+// to ChatSession + Agent).
+//
+// Three layers, named to match the v1.2 mental model:
+//
+//   inboundDispatcher        (this package; Gateway interface)
+//     ├─ slashCommandDispatcher  (dispatchSlashCommand; inline)
+//     └─ messageDispatcher       (runtime-injected MessageDispatcher)
+//
+// See docs/feat/F-20-gateway.md for the original router design
+// and docs/feat/F-26-gateway-hub.md for the Stage-3
+// responsibility-isolation spec.
 //
 // v1.1 (commit 3 + 4): the Gateway owns the chat → session binding
 // table and the per-userMessage receipt FSM. Channel is the dumb
@@ -66,9 +78,22 @@ type CommandResult struct {
 	Consumed bool
 }
 
-// FallbackHandler is invoked when the Gateway decides the message is
-// not a nightme command.
-type FallbackHandler func(ctx context.Context, msg *InboundMessage) error
+// MessageDispatcher is the runtime-injected handler for the
+// messageDispatcher branch of the inboundDispatcher.
+//
+// When DispatchInbound parses an inbound message and decides it is
+// NOT a registered slash command (i.e., plain text, attachments,
+// or an unrecognised "/foo"), it forwards the message to the
+// MessageDispatcher. The runtime (cmd/nightme) wires the
+// production implementation, which is responsible for:
+//   - looking up or creating the ChatSession for the chat,
+//   - resolving the active AgentSession,
+//   - queueing the user turn into the InputBuffer FSM,
+//   - bookkeeping receipts.
+//
+// A nil MessageDispatcher means messages that don't match a
+// slash command are silently dropped (debug / test wiring).
+type MessageDispatcher func(ctx context.Context, msg *InboundMessage) error
 
 // OutboundSource is one running session's outbound event stream.
 // The runtime (typically cmd/nightme) provides these to the
@@ -99,7 +124,16 @@ type SweepSessions func() []OutboundSource
 // interface that was deleted from gateway/cmd.
 type Gateway interface {
 	Register(cmd Command) (replaced bool)
-	Handle(ctx context.Context, msg *InboundMessage) (*CommandResult, error)
+
+	// DispatchInbound is the inboundDispatcher entry point: every
+	// InboundMessage produced by an attached Channel flows through
+	// here. It parses the message text and branches to either
+	//   - dispatchSlashCommand (when the text matches a registered
+	//     Command), or
+	//   - the MessageDispatcher injected at construction time
+	//     (default branch for plain text).
+	DispatchInbound(ctx context.Context, msg *InboundMessage) (*CommandResult, error)
+
 	ListCommands() []Command
 
 	// v1.1 binding table (commit 3):
@@ -144,7 +178,10 @@ type gateway struct {
 	mu    sync.RWMutex
 	cmds  map[string]Command
 	order []string
-	fb    FallbackHandler
+	// messageDispatcher is the runtime-injected handler for the
+	// messageDispatcher branch (non-slash-command inbound). When
+	// nil, such messages are silently dropped.
+	messageDispatcher MessageDispatcher
 
 	// Session factory + lookup. Set at construction time by the
 	// runtime (cmd/nightme). Used by LookupSessionByChat and
@@ -179,20 +216,25 @@ type gateway struct {
 	eventCallback func(s *session.Session, ev agent.AgentEvent)
 }
 
-// New constructs a Gateway. The optional fallback handler is invoked
-// when no command matches the inbound message. mgr is the session
-// factory Gateway uses to look up sessions by ID and to spawn
-// agents; passing nil disables those operations (cmd / run / kill
-// won't work, but a debug-only Gateway stays operational).
-func New(fallback FallbackHandler, mgr session.Manager) Gateway {
+// New constructs a Gateway (the inboundDispatcher).
+//
+// messageDispatcher is the runtime-injected handler for the
+// messageDispatcher branch (default, non-slash-command inbound).
+// Pass nil to drop such messages (debug-only Gateway).
+//
+// mgr is the session factory Gateway uses to look up sessions by
+// ID and to spawn agents; passing nil disables those operations
+// (cmd / run / kill won't work, but a debug-only Gateway stays
+// operational).
+func New(messageDispatcher MessageDispatcher, mgr session.Manager) Gateway {
 	return &gateway{
-		cmds:       make(map[string]Command),
-		fb:         fallback,
-		attached:   make(map[string]struct{}),
-		chatToChan: make(map[string]Channel),
-		bindings:   make(map[string]*BindingEntry),
-		receipts:   make(map[string]*receiptEntry),
-		mgr:        mgr,
+		cmds:              make(map[string]Command),
+		messageDispatcher: messageDispatcher,
+		attached:          make(map[string]struct{}),
+		chatToChan:        make(map[string]Channel),
+		bindings:          make(map[string]*BindingEntry),
+		receipts:          make(map[string]*receiptEntry),
+		mgr:               mgr,
 	}
 }
 
@@ -244,35 +286,62 @@ func (g *gateway) Register(cmd Command) (replaced bool) {
 	return false
 }
 
-// Handle implements the Gateway interface.
-func (g *gateway) Handle(ctx context.Context, msg *InboundMessage) (*CommandResult, error) {
+// DispatchInbound is the inboundDispatcher entry point (implements
+// the Gateway interface). Every InboundMessage from an attached
+// Channel flows through here. It parses the message text and
+// branches to one of:
+//
+//   - dispatchSlashCommand(ctx, msg, name, args) when the text is a
+//     recognised slash command; or
+//   - the runtime-injected MessageDispatcher for plain text,
+//     attachments, or unrecognised "/foo".
+//
+// Either branch may produce a CommandResult; the caller
+// (dispatchLoop) does not interpret it further.
+func (g *gateway) DispatchInbound(ctx context.Context, msg *InboundMessage) (*CommandResult, error) {
 	if msg == nil {
 		return nil, errors.New("gateway: nil message")
 	}
 	name, args, err := ParseCommand(strings.TrimSpace(msg.Text))
-	matched := err == nil
 	if err != nil {
-		if g.fb != nil {
-			return &CommandResult{}, g.fb(ctx, msg)
-		}
-		return &CommandResult{}, nil
+		// Parse failure (e.g. "/" with no command): treat as plain
+		// message and forward to the messageDispatcher branch.
+		return g.dispatchMessage(ctx, msg)
 	}
-	if !matched {
-		if g.fb != nil {
-			return &CommandResult{}, g.fb(ctx, msg)
-		}
-		return &CommandResult{Consumed: false}, nil
+	if name == "" {
+		return g.dispatchMessage(ctx, msg)
 	}
 	g.mu.RLock()
 	cmd, ok := g.cmds[strings.ToLower(name)]
 	g.mu.RUnlock()
 	if !ok || cmd.Handler == nil {
-		if g.fb != nil {
-			return &CommandResult{}, g.fb(ctx, msg)
-		}
+		return g.dispatchMessage(ctx, msg)
+	}
+	return g.dispatchSlashCommand(ctx, msg, name, args, cmd)
+}
+
+// dispatchSlashCommand runs the registered Command.Handler for a
+// recognised slash command. This is the slashCommandDispatcher
+// branch of the inboundDispatcher.
+func (g *gateway) dispatchSlashCommand(ctx context.Context, msg *InboundMessage, name string, args []string, cmd Command) (*CommandResult, error) {
+	if cmd.Handler == nil {
 		return &CommandResult{Consumed: false}, nil
 	}
 	return cmd.Handler(ctx, msg, args)
+}
+
+// dispatchMessage forwards a non-slash-command inbound message to
+// the runtime-injected MessageDispatcher. This is the
+// messageDispatcher branch of the inboundDispatcher. A nil
+// MessageDispatcher silently drops the message.
+func (g *gateway) dispatchMessage(ctx context.Context, msg *InboundMessage) (*CommandResult, error) {
+	if g.messageDispatcher == nil {
+		return &CommandResult{Consumed: false}, nil
+	}
+	if err := g.messageDispatcher(ctx, msg); err != nil {
+		return &CommandResult{}, err
+	}
+	return &CommandResult{}, nil
 }
 
 // ListCommands returns the registered commands in
@@ -399,7 +468,7 @@ func (g *gateway) dispatchLoop(ctx context.Context) {
 			// Install the Gateway into ctx so handlers that need
 			// to look it up (currently just /help) can recover it
 			// without taking it as a closure.
-			result, err := g.Handle(withGateway(ctx, g), &msg)
+			result, err := g.DispatchInbound(withGateway(ctx, g), &msg)
 			if err != nil {
 				log.Printf("gateway: dispatch %s failed: %v", msg.ChatID, err)
 			}

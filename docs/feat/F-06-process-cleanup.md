@@ -92,7 +92,7 @@ agents := buildRegistry(cfg)
 mgr := session.NewMemoryManager(agents, reg, /* EventCallback */ gw.OnSessionEvent)
 mgr.Restore(ctx)            // 从 registry.sessions 重建 in-memory 表
   ↓
-gw := gateway.New(fallback)
+gw := gateway.New(messageDispatcher)
 gw.RestoreBindings(reg.ListBindings())  // 从 registry.bindings 重建 binding 表
   ↓
 ch.Start(ctx)  // Feishu WS 连上

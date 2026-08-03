@@ -57,7 +57,7 @@ func TestRenderAgents_Multiple(t *testing.T) {
 func TestAgentsHandler(t *testing.T) {
 	gw, _, resp := newTestStack(t)
 
-	if _, err := gw.Handle(WithGateway(context.Background(), gw), &gateway.InboundMessage{
+	if _, err := gw.DispatchInbound(WithGateway(context.Background(), gw), &gateway.InboundMessage{
 		ChatID: "oc_chat",
 		Text:   "/agents",
 	}); err != nil {

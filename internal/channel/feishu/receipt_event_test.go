@@ -169,3 +169,96 @@ func TestEventToEntry_Done_Dropped(t *testing.T) {
 		t.Error("EventDone should drop")
 	}
 }
+
+// --- v1.3.x: Kind="tool" tagging for collapsible_panel rendering ---
+// See docs/channel/feishu.md §13.6 / §13.9. Without these tags,
+// buildReceiptCard wouldn't fold tool entries; thinking entries
+// were already supported but had a separate bug (§13.1) that the
+// adapter-level fix in TestSend_OutThinking_AppendsWithPrefix covers.
+
+func TestEventToEntry_ToolStart_KindTool(t *testing.T) {
+	ev := agent.AgentEvent{
+		Kind: agent.EventToolStart,
+		ToolStart: &agent.ToolStartEvent{
+			Name: "Read",
+			Args: "/a.py",
+		},
+	}
+	e, ok := eventToEntry(ev, at(), nil)
+	if !ok {
+		t.Fatalf("eventToEntry dropped EventToolStart")
+	}
+	if e.Kind != "tool" {
+		t.Errorf("Kind=%q, want %q (must trigger collapsible_panel)", e.Kind, "tool")
+	}
+	if e.Icon != "🔧" {
+		t.Errorf("Icon=%q, want 🔧", e.Icon)
+	}
+	if e.Text != "Read(/a.py)" {
+		t.Errorf("Text=%q, want %q", e.Text, "Read(/a.py)")
+	}
+}
+
+func TestEventToEntry_ToolEnd_Success_KindTool(t *testing.T) {
+	ev := agent.AgentEvent{
+		Kind: agent.EventToolEnd,
+		ToolEnd: &agent.ToolEndEvent{
+			Name:   "Read",
+			Output: "47 lines",
+		},
+	}
+	e, ok := eventToEntry(ev, at(), nil)
+	if !ok {
+		t.Fatalf("eventToEntry dropped EventToolEnd")
+	}
+	if e.Kind != "tool" {
+		t.Errorf("Kind=%q, want %q", e.Kind, "tool")
+	}
+	if e.Icon != "✅" {
+		t.Errorf("Icon=%q, want ✅", e.Icon)
+	}
+	if e.Text != "Read → 47 lines" {
+		t.Errorf("Text=%q, want %q", e.Text, "Read → 47 lines")
+	}
+}
+
+func TestEventToEntry_ToolEnd_Failure_KindTool(t *testing.T) {
+	ev := agent.AgentEvent{
+		Kind: agent.EventToolEnd,
+		ToolEnd: &agent.ToolEndEvent{
+			Name: "Read",
+			Err:  stringError("permission denied"),
+		},
+	}
+	e, ok := eventToEntry(ev, at(), nil)
+	if !ok {
+		t.Fatalf("eventToEntry dropped EventToolEnd")
+	}
+	if e.Kind != "tool" {
+		t.Errorf("Kind=%q, want %q", e.Kind, "tool")
+	}
+	if e.Icon != "❌" {
+		t.Errorf("Icon=%q, want ❌", e.Icon)
+	}
+	if !strings.Contains(e.Text, "Read failed: permission denied") {
+		t.Errorf("Text=%q, want to contain 'Read failed: permission denied'", e.Text)
+	}
+}
+
+func TestEventToEntry_ToolStart_Empty_Dropped(t *testing.T) {
+	// Empty name still drops the entry (preserves pre-v1.3 behavior).
+	ev := agent.AgentEvent{
+		Kind:      agent.EventToolStart,
+		ToolStart: &agent.ToolStartEvent{},
+	}
+	if _, ok := eventToEntry(ev, at(), nil); ok {
+		t.Errorf("EventToolStart with empty name should be dropped, was kept")
+	}
+}
+
+// stringError is a tiny adapter so we can pass a string as error
+// without importing "errors" into the test file (which already has
+// its own scope).
+type stringError string
+
+func (s stringError) Error() string { return string(s) }

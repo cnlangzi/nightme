@@ -55,7 +55,7 @@ func (m *mockReceiptBot) AddReaction(_ context.Context, msgID, emoji string) (st
 	return "mock-reaction-" + emoji, nil
 }
 
-func (m *mockReceiptBot) SendMessageText(_ context.Context, _, text string) (string, error) {
+func (m *mockReceiptBot) SendMessageText(_ context.Context, _, text, _ string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.sendMsgErr != nil {
@@ -70,7 +70,7 @@ func (m *mockReceiptBot) SendMessageText(_ context.Context, _, text string) (str
 // first send, subsequent renders go through PatchMessage. The id is
 // derived from nextCardID so multiple receipts in the same test get
 // distinct ids.
-func (m *mockReceiptBot) SendCard(_ context.Context, chatID, body string) (string, error) {
+func (m *mockReceiptBot) SendCard(_ context.Context, chatID, body, _ string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.sendCardErr != nil {
@@ -959,4 +959,71 @@ func (m *mockReceiptBot) UpdateMessage(_ context.Context, _, _ string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return nil
+}
+
+
+// --- v1.3.x: buildReceiptCard emits collapsible_panel for tool entries ---
+// See docs/channel/feishu.md §13.6 / §13.9 / §15.3. ToolStart and
+// ToolEnd both tag Kind="tool" so each becomes its own
+// collapsible_panel; final result stays flat.
+
+func TestBuildReceiptCard_ToolFolded(t *testing.T) {
+	r := &MessageReceipt{
+		state:       StateExecuting,
+		eventCount:  3,
+		lastEventAt: parseTime(t, "2026-08-01T14:32:05+08:00"),
+		entries: []LogEntry{
+			{Icon: "🔧", Text: "Read(/a.py)", Kind: "tool"},
+			{Icon: "✅", Text: "Read → 47 lines", Kind: "tool"},
+			{Icon: "📝", Text: "final answer here", Kind: "result"},
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+
+	// Count collapsible_panel tags. The tool entries should both be
+	// wrapped (one panel per entry); the final result must stay flat.
+	panelCount := strings.Count(body, `"tag":"collapsible_panel"`)
+	if panelCount < 2 {
+		t.Errorf("collapsible_panel count = %d, want >= 2 (tool_start + tool_end should each fold)", panelCount)
+	}
+
+	// Default-expanded: false for all panels.
+	if !strings.Contains(body, `"expanded":false`) {
+		t.Errorf("collapsible_panel not collapsed by default\n--- body ---\n%s", truncateForTest(body, 400))
+	}
+
+	// Tool header content uses e.Icon + e.Text.
+	if !strings.Contains(body, `"content":"🔧 Read(/a.py)"`) {
+		t.Errorf("tool_start panel header missing 🔧 Read(/a.py)\n--- body ---\n%s", truncateForTest(body, 400))
+	}
+	if !strings.Contains(body, `"content":"✅ Read → 47 lines"`) {
+		t.Errorf("tool_end panel header missing ✅ Read → 47 lines\n--- body ---\n%s", truncateForTest(body, 400))
+	}
+
+	// The final 📝 result must be a plain markdown element, not
+	// wrapped in a panel.
+	if !strings.Contains(body, `"content":"📝 final answer here"`) {
+		t.Errorf("final result missing as plain markdown\n--- body ---\n%s", truncateForTest(body, 400))
+	}
+}
+
+func TestBuildReceiptCard_ToolFailureHasErrorIcon(t *testing.T) {
+	r := &MessageReceipt{
+		state:       StateError,
+		eventCount:  1,
+		lastEventAt: parseTime(t, "2026-08-01T14:32:05+08:00"),
+		entries: []LogEntry{
+			{Icon: "❌", Text: "Read failed: permission denied", Kind: "tool"},
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	if !strings.Contains(body, `"content":"❌ Read failed: permission denied"`) {
+		t.Errorf("tool failure panel header missing ❌ + failure reason\n--- body ---\n%s", truncateForTest(body, 400))
+	}
 }

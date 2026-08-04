@@ -33,15 +33,8 @@ const thinkingPrefix = "[思考] "
 // (e.g. late events after completion, permission requests — those
 // have their own dedicated renderer path).
 //
-// lastEntry is the most recently appended LogEntry (nil when
-// eventToEntry is called for the first Append of this receipt).
-// It's used for de-duplication: Claude Code's stream-json emits
-// the final assistant text twice (once as streamed EventText,
-// once again as the EventResult's text field), and skipping the
-// duplicate keeps the rolling log free of repeated lines.
-//
 // Caller does NOT hold r.mu; eventToEntry is pure.
-func eventToEntry(ev agent.AgentEvent, now time.Time, lastEntry *LogEntry) (LogEntry, bool) {
+func eventToEntry(ev agent.AgentEvent, now time.Time) (LogEntry, bool) {
 	ae := ev
 
 	switch ae.Kind {
@@ -167,11 +160,18 @@ func formatUsageText(u *agent.UsageEvent) string {
 // function; the unit is "characters" regardless of which const was
 // passed. For Chinese / emoji content (where 1 char = 3-4 bytes),
 // the cap now correctly counts chars rather than bytes.
+//
+// F-39 follow-up: also used by sendResultAsReply (result_render.go
+// calls it for the OutResult envelope defense) so the rolling-log
+// truncation policy and the result-card truncation policy stay in
+// sync. Single source of truth.
 func truncateForLog(s string, max int) string {
-	if max <= 3 {
-		// Pathological: caller asked for so few chars that the
-		// ellipsis alone wouldn't fit. Return a single "…" so
-		// something still renders.
+	if max <= 0 {
+		// No room for any content (not even the ellipsis).
+		return ""
+	}
+	if max == 1 {
+		// Only the ellipsis fits.
 		return "…"
 	}
 	// Fast path: every UTF-8 rune is 1-4 bytes. If the byte

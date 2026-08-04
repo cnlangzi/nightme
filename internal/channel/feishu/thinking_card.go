@@ -52,6 +52,10 @@ func buildThinkingCard(body string) (string, error) {
 		return "", errors.New("feishu: thinking body is empty")
 	}
 
+	// Sanitize markdown so we don't ship non-HTTP links (230001 invalid
+	// href) or un-newlined code fences (lark_md parses as inline code).
+	// Mirrors the OutResult surface; see card_sanitize.go doc.
+	body = SanitizeCardMarkdown(body)
 	chunks := splitMarkdownForDivs(body, divTextCharLimit)
 
 	elements := make([]map[string]any, 0, len(chunks))

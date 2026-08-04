@@ -752,25 +752,22 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if msg.Result == nil {
 			return errors.New("feishu: OutResult missing Result payload")
 		}
-		text := msg.Result.Text
+		text := strings.TrimSpace(msg.Result.Text)
 		if text == "" && !msg.Result.IsError {
 			return nil
 		}
-		// Close the rolling-log receipt card so its footer flips to ✅
-		// (the receipt stops receiving further patches for this turn).
-		// Done BEFORE the result reply so the user sees the log end before
-		// the answer card; matches SDK call order with visual order.
-		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
-			_ = r.SetCompleted(ctx)
-		}
-		if msg.Result.IsError {
+		// Icon prefix only when there's actual error text — without it
+		// the user would see a meaningless bare-emoji standalone message.
+		if msg.Result.IsError && text != "" {
 			text = "❌ " + text
 		}
 		// F-39: deliver the full result as an independent reply anchored at
-		// userMsgID rather than folding into the receipt card. Eliminates
-		// the long-result dedup bug (receipt_event.go) and aligns with
-		// cc-connect / openclaw-lark's "complete answer card" pattern.
-		return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text, false)
+		// userMsgID. We deliberately do NOT call receipt.SetCompleted here —
+		// the receipt stays StateExecuting so subsequent OutUsage / OutInit /
+		// TaskList can still update the footer (token counts, agent name,
+		// task checklist). EventDone / EventError is the terminal signal that
+		// flips state to StateCompleted and collapses the rolling log.
+		return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text)
 
 	case gateway.OutUsage:
 		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
@@ -905,9 +902,9 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 // OutResult from Claude Code this is a guard for adversarial input, not
 // a hot path.
 //
-// replyOnly (F-37): true keeps the result OUT of the main chat (only in the
-// thread panel); false keeps it visible inline. OutResult defaults to false
-// — the final answer is the primary deliverable.
+// Always renders as ReplyInThreadAndChat (reply_in_thread omitted) so
+// the result card is visible inline in the main chat — matching the
+// F-37 §13.13 surface-table mapping for the final answer.
 //
 // RATE-LIMIT / RETRY layering:
 //   - layer 1: F-35 global limiter (`a.limiter.Wait`) inside sendContent;
@@ -915,7 +912,7 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 //   - layer 2: F-36 transient retry wraps sendContent; transient network
 //     errors get exponential backoff. Final hit returns to caller for log.
 func (a *Adapter) sendResultAsReply(
-	ctx context.Context, chatID, userMsgID, text string, replyOnly bool,
+	ctx context.Context, chatID, userMsgID, text string,
 ) error {
 	if strings.TrimSpace(chatID) == "" {
 		return errors.New("feishu: chat_id is required")
@@ -962,7 +959,7 @@ func (a *Adapter) sendResultAsReply(
 		}
 	}
 
-	_, err = a.sendContent(ctx, chatID, msgType, body, userMsgID, replyOnly)
+	_, err = a.sendContent(ctx, chatID, msgType, body, userMsgID, false)
 	return err
 }
 
@@ -1155,6 +1152,11 @@ func buildInteractiveCard(c *gateway.Card) (string, error) {
 	if c.Body != "" {
 		body = c.Body
 	}
+	// Sanitize the permission card body markdown. Permission card titles
+	// are plain_text (escaped by SDK) and don't need it, but the body
+	// uses lark_md rendering and shares the OutResult / OutThinking
+	// surface protections (URL / fence / image / heading).
+	body = SanitizeCardMarkdown(body)
 	actions := make([]map[string]any, 0, len(options))
 	for _, opt := range options {
 		v, _ := json.Marshal(map[string]string{

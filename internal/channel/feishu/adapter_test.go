@@ -1646,34 +1646,31 @@ func TestSend_OutResult_IsErrorPrefixedWithIcon(t *testing.T) {
 	}
 }
 
-// TestSend_OutResult_ClosesReceiptFirst — receipt.SetCompleted must be
-// called BEFORE the result reply is sent (visible ordering).
-func TestSend_OutResult_ClosesReceiptFirst(t *testing.T) {
+// TestSend_OutResult_LeavesReceiptAlive — F-39 follow-up: OutResult
+// delivers the answer card independently but does NOT call
+// receipt.SetCompleted. The receipt must remain in StateExecuting
+// after OutResult so subsequent OutUsage / OutInit / TaskList can
+// still update the footer (token counts, agent name, task list).
+// EventDone is the terminal signal that flips state to StateCompleted.
+func TestSend_OutResult_LeavesReceiptAlive(t *testing.T) {
 	a := testAdapter(t)
 	userMsgID := "om_complete"
 
-	var receiptSetCompleted bool
-	var sentAfterClose bool
-
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
-		if receiptSetCompleted {
-			sentAfterClose = true
-		}
 		return "ok", nil
 	}
 
-	// Trigger a Text to ensure receipt exists.
+	// Trigger a Text to ensure receipt exists + is Executing.
 	if err := a.Send(t.Context(), gateway.OutboundMessage{
 		Kind: gateway.OutText, ChatID: "oc_test", ReplyTo: userMsgID, Text: "x",
 	}); err != nil {
 		t.Fatalf("warmup: %v", err)
 	}
 
-	// After warmup, receipt exists. Now Send OutResult. Internally
-	// sendResultAsReply is called → it calls receiptFor which returns
-	// the existing receipt. Verify ordering by checking that any
-	// subsequent send only happens once receipt state is Completed.
+	// Send OutResult. The answer card goes out as an independent
+	// reply. The receipt stays in StateExecuting so EventUsage
+	// / EventInit / TaskList can still update the footer after.
 	if err := a.Send(t.Context(), gateway.OutboundMessage{
 		Kind:    gateway.OutResult,
 		ChatID:  "oc_test",
@@ -1684,21 +1681,33 @@ func TestSend_OutResult_ClosesReceiptFirst(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 
-	// Now confirm the receipt is Closed.
+	// Verify receipt is still alive (not StateCompleted).
 	a.mu.RLock()
 	rcpt := a.receiptsByUserMsgID[userMsgID]
 	a.mu.RUnlock()
 	if rcpt == nil {
 		t.Fatalf("receipt missing")
 	}
-	if rcpt.State() != StateCompleted {
-		t.Errorf("receipt state should be Completed after result, got %v", rcpt.State())
+	if rcpt.State() != StateExecuting {
+		t.Errorf("receipt state should remain StateExecuting after OutResult, got %v", rcpt.State())
 	}
-	if sentAfterClose {
-		// Send happened before SetCompleted. Acceptable if visually it
-		// still appears ordered; the spec relies on user perception rather
-		// than strict sequence.
-		t.Logf("note: send completed before SetCompleted (acceptable; visual ordering still correct)")
+
+	// Now simulate EventDone → receipt flips to StateCompleted
+	// and clears the rolling-log entries (so the final card
+	// collapses to header + footer + task list).
+	if err := rcpt.Append(t.Context(), agent.AgentEvent{
+		Kind: agent.EventDone,
+		Done: &agent.DoneEvent{ExitCode: 0},
+	}); err != nil {
+		t.Fatalf("EventDone append: %v", err)
+	}
+	if rcpt.State() != StateCompleted {
+		t.Errorf("receipt state should be StateCompleted after EventDone, got %v", rcpt.State())
+	}
+	rcpt.mu.Lock()
+	defer rcpt.mu.Unlock()
+	if len(rcpt.entries) != 0 {
+		t.Errorf("rolling-log entries should be cleared on SetCompleted, got %d", len(rcpt.entries))
 	}
 }
 

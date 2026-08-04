@@ -20,7 +20,7 @@ func at() time.Time { return time.Unix(1700000000, 0).UTC() }
 // new-kind coverage without becoming a kitchen-sink suite.
 
 func TestEventToEntry_Text(t *testing.T) {
-	e, ok := eventToEntry(agent.AgentEvent{Kind: agent.EventText, Text: "hello"}, at(), nil)
+	e, ok := eventToEntry(agent.AgentEvent{Kind: agent.EventText, Text: "hello"}, at())
 	if !ok || e.Icon != "💬" || e.Text != "hello" || e.Kind != "reply" {
 		t.Errorf("got %+v ok=%v, want 💬 hello/reply", e, ok)
 	}
@@ -30,7 +30,7 @@ func TestEventToEntry_Text_ThinkingPrefix(t *testing.T) {
 	// F-34: thinking events no longer fold into the receipt card
 	// (the adapter routes them to a Feishu thread reply instead),
 	// so eventToEntry returns (_, false) for the prefixed text.
-	_, ok := eventToEntry(agent.AgentEvent{Kind: agent.EventText, Text: "[思考] step 1"}, at(), nil)
+	_, ok := eventToEntry(agent.AgentEvent{Kind: agent.EventText, Text: "[思考] step 1"}, at())
 	if ok {
 		t.Error("EventText with [思考] prefix should be dropped (F-34 routes it to a thread reply)")
 	}
@@ -46,7 +46,7 @@ func TestEventToEntry_Result_Dropped(t *testing.T) {
 	_, ok := eventToEntry(agent.AgentEvent{
 		Kind:   agent.EventResult,
 		Result: &agent.ResultEvent{Text: "完成", Subtype: "success"},
-	}, at(), nil)
+	}, at())
 	if ok {
 		t.Error("EventResult must NOT produce a receipt entry (F-39 reverse)")
 	}
@@ -58,7 +58,7 @@ func TestEventToEntry_Result_Error_Dropped(t *testing.T) {
 	_, ok := eventToEntry(agent.AgentEvent{
 		Kind:   agent.EventResult,
 		Result: &agent.ResultEvent{Text: "max turns exceeded", IsError: true},
-	}, at(), nil)
+	}, at())
 	if ok {
 		t.Error("EventResult (even IsError) must NOT produce a receipt entry (F-39 reverse)")
 	}
@@ -68,7 +68,7 @@ func TestEventToEntry_Result_EmptyDropped(t *testing.T) {
 	_, ok := eventToEntry(agent.AgentEvent{
 		Kind:   agent.EventResult,
 		Result: &agent.ResultEvent{Text: "", IsError: false},
-	}, at(), nil)
+	}, at())
 	if ok {
 		t.Error("Empty Result + !IsError should drop")
 	}
@@ -89,7 +89,7 @@ func TestEventToEntry_Usage(t *testing.T) {
 			CacheCreationInputTokens: 100,
 			CostUSD:                  0.0123,
 		},
-	}, at(), nil)
+	}, at())
 	if ok {
 		t.Error("EventUsage must NOT produce a rolling-log entry (footer carries the numbers)")
 	}
@@ -103,7 +103,7 @@ func TestEventToEntry_Usage_NoCost(t *testing.T) {
 	_, ok := eventToEntry(agent.AgentEvent{
 		Kind:  agent.EventUsage,
 		Usage: &agent.UsageEvent{InputTokens: 100, OutputTokens: 50},
-	}, at(), nil)
+	}, at())
 	if ok {
 		t.Error("EventUsage must NOT produce a rolling-log entry regardless of CostUSD")
 	}
@@ -116,7 +116,7 @@ func TestEventToEntry_Usage_ZeroDropped(t *testing.T) {
 	_, ok := eventToEntry(agent.AgentEvent{
 		Kind:  agent.EventUsage,
 		Usage: &agent.UsageEvent{},
-	}, at(), nil)
+	}, at())
 	if ok {
 		t.Error("All-zero Usage should drop")
 	}
@@ -128,7 +128,7 @@ func TestEventToEntry_Compaction(t *testing.T) {
 	_, ok := eventToEntry(agent.AgentEvent{
 		Kind:       agent.EventCompaction,
 		Compaction: &agent.CompactionEvent{Subtype: "compact"},
-	}, at(), nil)
+	}, at())
 	if ok {
 		t.Error("EventCompaction should be dropped (F-34 routes it to a thread reply)")
 	}
@@ -142,7 +142,7 @@ func TestEventToEntry_Init(t *testing.T) {
 	_, ok := eventToEntry(agent.AgentEvent{
 		Kind: agent.EventInit,
 		Init: &agent.InitEvent{SessionID: "s_001", Model: "claude-sonnet-4-5"},
-	}, at(), nil)
+	}, at())
 	if ok {
 		t.Error("EventInit must NOT produce a rolling-log entry (footer carries the same info)")
 	}
@@ -152,7 +152,7 @@ func TestEventToEntry_Init_NoSessionID_Dropped(t *testing.T) {
 	_, ok := eventToEntry(agent.AgentEvent{
 		Kind: agent.EventInit,
 		Init: &agent.InitEvent{SessionID: "", Model: "claude-sonnet-4-5"},
-	}, at(), nil)
+	}, at())
 	if ok {
 		t.Error("Init with empty SessionID should drop")
 	}
@@ -161,7 +161,7 @@ func TestEventToEntry_Init_NoSessionID_Dropped(t *testing.T) {
 func TestEventToEntry_Done_Dropped(t *testing.T) {
 	// EventDone is reflected in the receipt's terminal header — no
 	// per-event entry needed.
-	_, ok := eventToEntry(agent.AgentEvent{Kind: agent.EventDone, Done: &agent.DoneEvent{}}, at(), nil)
+	_, ok := eventToEntry(agent.AgentEvent{Kind: agent.EventDone, Done: &agent.DoneEvent{}}, at())
 	if ok {
 		t.Error("EventDone should drop")
 	}
@@ -180,7 +180,7 @@ func TestEventToEntry_ToolStart_Dropped(t *testing.T) {
 			Args: "/a.py",
 		},
 	}
-	if _, ok := eventToEntry(ev, at(), nil); ok {
+	if _, ok := eventToEntry(ev, at()); ok {
 		t.Error("EventToolStart should be dropped from the receipt card (F-34 routes it to a thread reply)")
 	}
 }
@@ -193,7 +193,7 @@ func TestEventToEntry_ToolEnd_Dropped(t *testing.T) {
 			Output: "47 lines",
 		},
 	}
-	if _, ok := eventToEntry(ev, at(), nil); ok {
+	if _, ok := eventToEntry(ev, at()); ok {
 		t.Error("EventToolEnd should be dropped from the receipt card (F-34 routes it to a thread reply)")
 	}
 }

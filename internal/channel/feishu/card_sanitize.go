@@ -106,20 +106,29 @@ func isValidFeishuHref(u string) bool {
 // Fence newline
 // ---------------------------------------------------------------------------
 
-// preprocessFeishuMarkdown ensures every ``` triple is preceded by a
-// newline character. Without this, lark_md parses ``` as opening/closing
-// inline code and breaks the surrounding paragraph into inline code spans.
+// preprocessFeishuMarkdown ensures every OPENING ``` fence is preceded
+// by a newline character. Without this, lark_md parses ``` as inline code
+// and breaks the surrounding paragraph into inline code spans.
+//
+// Only opening fences (even-indexed ```) need the newline; injecting one
+// before a closing fence would add a spurious trailing newline into the
+// code block's body. (cc-connect's implementation has the same bug;
+// F-39 follow-up fixes it.)
 //
 // Reasonable to run last in the pipeline so the newline compression step
 // earlier doesn't strip it.
-//
-// Mirrors cc-connect `feishu.go:3017-3031` preprocessFeishuMarkdown.
 func preprocessFeishuMarkdown(md string) string {
 	var b strings.Builder
 	b.Grow(len(md) + 32)
+	fenceCount := 0 // counts ``` occurrences; even = opening, odd = closing
 	for i := 0; i < len(md); i++ {
-		if i > 0 && md[i] == '`' && i+2 < len(md) && md[i+1] == '`' && md[i+2] == '`' && md[i-1] != '\n' {
-			b.WriteByte('\n')
+		if i > 0 && md[i] == '`' && i+2 < len(md) && md[i+1] == '`' && md[i+2] == '`' {
+			if fenceCount%2 == 0 && md[i-1] != '\n' {
+				// Opening fence without a leading newline — inject one
+				// so lark_md parses it as a code block, not inline code.
+				b.WriteByte('\n')
+			}
+			fenceCount++
 		}
 		b.WriteByte(md[i])
 	}

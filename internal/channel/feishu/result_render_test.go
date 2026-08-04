@@ -115,7 +115,10 @@ func TestCountMarkdownTables_NoTrailingPipe(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildPostMdJSON_Shape(t *testing.T) {
-	out := buildPostMdJSON("hello")
+	out, err := buildPostMdJSON("hello")
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
 	var envelope struct {
 		ZHCn struct {
 			Content [][]map[string]any `json:"content"`

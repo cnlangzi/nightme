@@ -31,7 +31,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"unicode/utf8"
 
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
@@ -108,7 +107,7 @@ func countMarkdownTables(s string) int {
 // Used as fallback when Card 2.0's 5-table hard limit kicks in.
 //
 // Mirrors cc-connect `feishu.go:3000-3015` buildPostMdJSON.
-func buildPostMdJSON(content string) string {
+func buildPostMdJSON(content string) (string, error) {
 	post := map[string]any{
 		"zh_cn": map[string]any{
 			"content": [][]map[string]any{
@@ -118,8 +117,11 @@ func buildPostMdJSON(content string) string {
 			},
 		},
 	}
-	b, _ := json.Marshal(post)
-	return string(b)
+	b, err := json.Marshal(post)
+	if err != nil {
+		return "", fmt.Errorf("feishu: encode post body: %w", err)
+	}
+	return string(b), nil
 }
 
 // buildResultCardJSON renders the Final Result Reply as Card 2.0 with one or
@@ -169,7 +171,11 @@ func buildResultPayload(sanitized string) (msgType string, body string, err erro
 		return larkim.MsgTypeText, string(b), nil
 	}
 	if countMarkdownTables(sanitized) > resultCardTableLimit {
-		return larkim.MsgTypePost, buildPostMdJSON(sanitized), nil
+		body, err := buildPostMdJSON(sanitized)
+		if err != nil {
+			return "", "", err
+		}
+		return larkim.MsgTypePost, body, nil
 	}
 	body, err = buildResultCardJSON(sanitized)
 	if err != nil {
@@ -178,24 +184,9 @@ func buildResultPayload(sanitized string) (msgType string, body string, err erro
 	return larkim.MsgTypeInteractive, body, nil
 }
 
-// truncateRunes returns s clipped to at most maxRunes runes with a trailing
-// "…" (single ellipsis, 1 rune) when truncation occurred. UTF-8 safe (cuts
-// only at rune boundaries). Used when 28 KB envelope is still exceeded even
-// after the perResultMaxBytes cap.
+// truncateRunes is a thin alias for truncateForLog (receipt_event.go)
+// kept for caller-clarity in the result_render surface. Single
+// source of truth — see receipt_event.go's truncateForLog doc.
 func truncateRunes(s string, maxRunes int) string {
-	if maxRunes <= 1 {
-		if maxRunes == 1 {
-			return "…"
-		}
-		return ""
-	}
-	// Fast path: ASCII-only short input.
-	if len(s) <= maxRunes && utf8.RuneCountInString(s) == len(s) {
-		return s
-	}
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	return string(runes[:maxRunes-1]) + "…"
+	return truncateForLog(s, maxRunes)
 }

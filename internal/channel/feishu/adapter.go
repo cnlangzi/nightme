@@ -1967,7 +1967,31 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	}
 	content := stringValue(message.Content)
 	msgType := stringValue(message.MessageType)
-	text, attachments := extractAttachments(msgType, content)
+	text, attachments, blocks := extractAttachments(msgType, content)
+	// F-14 visibility: trace the inbound attachment shape BEFORE any
+	// download is attempted. With logging.level=debug this surfaces
+	// (a) what extractAttachments decoded (msg_type, file_keys),
+	// (b) whether LocalPath is empty (would mean DownloadAttachments
+	// has not run). Pairs with the dispatcher-level "blocks built"
+	// trace to pinpoint whether an image was lost at the channel
+	// boundary or further downstream.
+	a.mu.RLock()
+	logger := a.logger
+	a.mu.RUnlock()
+	if logger != nil && len(attachments) > 0 {
+		types := make([]string, 0, len(attachments))
+		keys := make([]string, 0, len(attachments))
+		for _, att := range attachments {
+			types = append(types, att.Type)
+			keys = append(keys, att.FileKey)
+		}
+		logger.Debug("feishu: attachments extracted",
+			"msg_type", msgType,
+			"count", len(attachments),
+			"types", types,
+			"file_keys", keys,
+		)
+	}
 	// F-watch §6.10: strip leading @bot/@_all mention prefix from
 	// text so slash commands like `/watch on` parse correctly
 	// (ParseCommand requires HasPrefix "/"). computeHasMention
@@ -1977,20 +2001,69 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	botOpenID := a.fetchBotOpenID(ctx)
 	hasMention := computeHasMention(message, botOpenID)
 	text = stripMentionPrefix(text, message.Mentions, botOpenID)
+	messageID := stringValue(message.MessageId)
+
+	// F-14 v1.4a: synchronously download attachments before publish
+	// so LocalPath is populated when downstream code reads it. The
+	// inbox dir is keyed by chatID (per-chat isolation; stable
+	// across AgentSession re-spawns within the same chat). AllFailed
+	// aborts the message entirely with a user-facing notification;
+	// partial failures emit a warning but continue with the rest.
+	if len(attachments) > 0 {
+		result := a.DownloadAttachments(ctx, messageID, attachments, chatID)
+		if result.AllFailed {
+			if logger != nil {
+				logger.Info("feishu: all attachments failed to download; dropping message",
+					"message_id", messageID,
+					"failed_count", len(result.FailureKeys),
+					"failure_keys", result.FailureKeys,
+				)
+			}
+			_ = a.SendMessage(ctx, chatID,
+				fmt.Sprintf("❌ %d attachment(s) failed to download, please retry",
+					len(result.FailureKeys)))
+			return nil
+		}
+		if len(result.FailureKeys) > 0 {
+			if logger != nil {
+				logger.Info("feishu: partial attachment download failure; sending the rest",
+					"message_id", messageID,
+					"failed_count", len(result.FailureKeys),
+					"failed_keys", result.FailureKeys,
+					"succeeded_count", len(result.Atts)-len(result.FailureKeys),
+				)
+			}
+			_ = a.SendMessage(ctx, chatID,
+				fmt.Sprintf("⚠️ %d of %d attachment(s) failed to download; sending the rest",
+					len(result.FailureKeys), len(attachments)))
+		}
+		attachments = result.Atts
+		// F-14 v1.4b: back-fill LocalPath into post rich-text image
+		// blocks whose Path currently holds a FileKey placeholder.
+		if blocks != nil {
+			blocks = resolveBlocks(blocks, attachments)
+		}
+	}
+
 	msg := channel.Message{
 		ChatID:    chatID,
 		Text:      text,
 		UserID:    senderID(event),
 		Time:      messageTime(message.CreateTime),
-		MessageID: stringValue(message.MessageId),
+		MessageID: messageID,
 		// F-33 §13.11 / D3: ReplyTo = Feishu message.ParentId. The
 		// thread-top-level RootId is intentionally not surfaced to
 		// nightme — we only track point-to-point reply relationships.
 		// Empty for top-level messages (ParentId == "") and for
 		// topic-group thread-root messages where the user started a
 		// new line in an existing thread.
-		ReplyTo:     stringValue(message.ParentId),
+		ReplyTo: stringValue(message.ParentId),
+		// F-14 v1.4a: Attachments[i].LocalPath is now populated
+		// before publish (DownloadAttachments runs synchronously above).
 		Attachments: attachments,
+		// F-14 v1.4b: ordered rich-text blocks for post messages;
+		// nil for single-resource msg_types (legacy BuildBlocks path).
+		Blocks: blocks,
 		// F-watch: see docs/channel/feishu.md §6.10 + SPEC §3.1.1.
 		HasMention: hasMention,
 	}

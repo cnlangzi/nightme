@@ -26,6 +26,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,8 +101,9 @@ func inboxDirForSession(sessionID string) (string, error) {
 	return dir, nil
 }
 
-// extractAttachments parses a Feishu message envelope into its text
-// and attachment components, normalized to channel.Attachment.
+// extractAttachments parses a Feishu message envelope into its
+// text, attachment components, and (for rich-text messages) an
+// ordered block slice that preserves paragraph-internal node order.
 //
 // msgType is the Feishu msg_type discriminator ("text", "image",
 // "file", "audio", "media", "post", "sticker", "interactive", …).
@@ -109,38 +111,50 @@ func inboxDirForSession(sessionID string) (string, error) {
 //
 // Returns:
 //
-//   - text: the textual portion of the message. Empty if the
-//     message carries no text (e.g. a bare image).
-//   - attachments: one Attachment per non-text resource. Empty for
-//     text-only and sticker messages.
+//   - text: the textual portion of the message, joined across all
+//     paragraphs. Empty for msg_types that carry no text (image,
+//     file, audio, media, sticker) AND for post rich-text messages
+//     where text nodes are folded into Blocks (the post path uses
+//     Blocks as source-of-truth). The dispatcher uses msg.Text only
+//     on the legacy single-resource path (msg.Blocks == nil).
+//   - atts: one channel.Attachment per non-text resource. Empty
+//     for text-only and sticker messages. Used as the download
+//     candidate list (Feishu SDK file_key / image_key goes in
+//     FileKey; LocalPath is empty here, filled by DownloadAttachments).
+//   - blocks: ordered []agent.ContentBlock for post rich-text
+//     messages ONLY. Each Feishu paragraph node becomes one block
+//     in source order — `tag:"text"` and `tag:"a"` map to
+//     ContentText, `tag:"img"` maps to ContentImage with FileKey
+//     in Path (placeholder until resolveBlocks back-fills LocalPath).
+//     Non-post msg_types return nil here.
 //
 // The function never errors — unrecognized msg_types fall back to
 // messageText(content) for the Text field, matching the legacy
 // behaviour (raw JSON passed through unchanged).
-func extractAttachments(msgType, content string) (text string, attachments []channel.Attachment) {
+func extractAttachments(msgType, content string) (text string, attachments []channel.Attachment, blocks []agent.ContentBlock) {
 	if msgType == "" {
 		// Backwards compat: legacy callers that do not populate
 		// message_type fall through to the old text-only path.
-		return messageText(content), nil
+		return messageText(content), nil, nil
 	}
 
 	switch msgType {
 	case larkim.MsgTypeText:
-		return messageText(content), nil
+		return messageText(content), nil, nil
 
 	case larkim.MsgTypeImage:
 		var p struct {
 			ImageKey string `json:"image_key"`
 		}
 		if err := json.Unmarshal([]byte(content), &p); err != nil || p.ImageKey == "" {
-			return "", nil
+			return "", nil, nil
 		}
 		return "", []channel.Attachment{{
 			Type:    "image",
 			FileKey: p.ImageKey,
 			// No file_name for bare image messages — synthesize
 			// a stable fallback at download time.
-		}}
+		}}, nil
 
 	case larkim.MsgTypeFile:
 		var p struct {
@@ -148,13 +162,13 @@ func extractAttachments(msgType, content string) (text string, attachments []cha
 			FileName string `json:"file_name"`
 		}
 		if err := json.Unmarshal([]byte(content), &p); err != nil || p.FileKey == "" {
-			return "", nil
+			return "", nil, nil
 		}
 		return "", []channel.Attachment{{
 			Type:     "file",
 			FileKey:  p.FileKey,
 			FileName: p.FileName,
-		}}
+		}}, nil
 
 	case larkim.MsgTypeAudio:
 		var p struct {
@@ -162,7 +176,7 @@ func extractAttachments(msgType, content string) (text string, attachments []cha
 			FileName string `json:"file_name"`
 		}
 		if err := json.Unmarshal([]byte(content), &p); err != nil || p.FileKey == "" {
-			return "", nil
+			return "", nil, nil
 		}
 		name := p.FileName
 		if name == "" {
@@ -172,7 +186,7 @@ func extractAttachments(msgType, content string) (text string, attachments []cha
 			Type:     "audio",
 			FileKey:  p.FileKey,
 			FileName: name,
-		}}
+		}}, nil
 
 	case larkim.MsgTypeMedia:
 		// Video: file_key for the video + image_key for the cover.
@@ -186,7 +200,7 @@ func extractAttachments(msgType, content string) (text string, attachments []cha
 			FileName string `json:"file_name"`
 		}
 		if err := json.Unmarshal([]byte(content), &p); err != nil {
-			return "", nil
+			return "", nil, nil
 		}
 		var atts []channel.Attachment
 		if p.FileKey != "" {
@@ -196,27 +210,48 @@ func extractAttachments(msgType, content string) (text string, attachments []cha
 				FileName: p.FileName,
 			})
 		}
-		return "", atts
+		return "", atts, nil
 
 	case larkim.MsgTypePost:
 		// Rich text: {"title":..., "content":[[{tag:..., ...}, ...]]}.
-		// We collect tag:"text" into the Text field (joined with \n
-		// per paragraph) and tag:"img" into Attachments. tag:"media"
-		// (inline video) is ignored for v0.2 — extracting it
-		// requires a more careful walk and Phase 2 will revisit.
+		// v1.4b: paragraph-internal ordering is preserved end-to-end.
+		// We walk paragraphs in source order; within each paragraph,
+		// we walk nodes in source order, emitting one ContentBlock
+		// per node (text → ContentText, img → ContentImage with
+		// FileKey placeholder). attachements[] collects image/file
+		// resources for DownloadAttachments to resolve later.
+		// Paragraphs are separated by ContentText("\n") so a multi-
+		// paragraph message renders as a multi-line text with image
+		// blocks interleaved at their original positions.
 		var p struct {
 			Title   string             `json:"title"`
 			Content [][]map[string]any `json:"content"`
 		}
 		if err := json.Unmarshal([]byte(content), &p); err != nil {
-			return messageText(content), nil
+			return messageText(content), nil, nil
 		}
 		var (
-			paras   []string
-			imgKeys []string
+			atts     []channel.Attachment
+			fileKeys []string // parallel to atts for index-based lookup
 		)
-		for _, para := range p.Content {
-			var line strings.Builder
+		blocks = make([]agent.ContentBlock, 0)
+		emitText := func(s string) {
+			s = stripAny(s)
+			if s == "" {
+				return
+			}
+			blocks = append(blocks, agent.ContentBlock{
+				Type: agent.ContentText,
+				Text: s,
+			})
+		}
+		for paraIdx, para := range p.Content {
+			if paraIdx > 0 {
+				// Paragraph separator — single newline. The user
+				// pressed Enter between paragraphs in Feishu; that
+				// visual break should survive into the agent turn.
+				emitText("\n")
+			}
 			for _, node := range para {
 				tag, _ := node["tag"].(string)
 				switch tag {
@@ -226,38 +261,49 @@ func extractAttachments(msgType, content string) (text string, attachments []cha
 					// include it so the agent sees what the user
 					// actually wrote ("see [link]"), not just
 					// "see ".
-					if t := strings.TrimSpace(stripAny(node["text"])); t != "" {
-						if line.Len() > 0 {
-							line.WriteString(" ")
-						}
-						line.WriteString(t)
+					if t, _ := node["text"].(string); t != "" {
+						emitText(t)
 					}
 				case "img":
-					if k, _ := node["image_key"].(string); k != "" {
-						imgKeys = append(imgKeys, k)
+					k, _ := node["image_key"].(string)
+					if k == "" {
+						continue
 					}
+					idx := len(atts)
+					atts = append(atts, channel.Attachment{Type: "image", FileKey: k})
+					fileKeys = append(fileKeys, k)
+					blocks = append(blocks, agent.ContentBlock{
+						Type: agent.ContentImage,
+						Path: k, // placeholder; resolveBlocks back-fills LocalPath
+					})
+					_ = idx
+				case "media":
+					// tag:"media" (inline video) — out of scope for
+					// v1.4 (F-14). The video key is intentionally
+					// dropped to avoid misrepresenting the user's
+					// payload. A future PR will extend resolveBlocks
+					// and ContentFile handling.
+				case "at", "emotion":
+					// Mentions and reactions don't carry payload
+					// the agent needs to act on. Silent skip.
 				}
 			}
-			if line.Len() > 0 {
-				paras = append(paras, line.String())
-			}
 		}
-		var atts []channel.Attachment
-		for _, k := range imgKeys {
-			atts = append(atts, channel.Attachment{Type: "image", FileKey: k})
-		}
-		return strings.Join(paras, "\n"), atts
+		// For post messages, Text is intentionally "": the source of
+		// truth is Blocks, which the messageDispatcher picks up via
+		// msg.Blocks != nil.
+		return "", atts, blocks
 
 	case larkim.MsgTypeSticker:
 		// Feishu blocks the resource download for sticker msg_type.
 		// Silent skip — no attachment, no error, no forwarding.
-		return "", nil
+		return "", nil, nil
 
 	default:
 		// Unknown msg_type (interactive, share_chat, share_user, …)
 		// carries no extractable file content in v0.2. Preserve
 		// the raw payload in Text for forward compatibility.
-		return messageText(content), nil
+		return messageText(content), nil, nil
 	}
 }
 
@@ -547,6 +593,7 @@ func imageMediaType(path string) string {
 // probe for "nothing to send".
 func BuildBlocks(text string, atts []channel.Attachment) []agent.ContentBlock {
 	var blocks []agent.ContentBlock
+	skippedEmptyPath := 0
 	if text != "" {
 		blocks = append(blocks, agent.ContentBlock{
 			Type: agent.ContentText,
@@ -555,6 +602,14 @@ func BuildBlocks(text string, atts []channel.Attachment) []agent.ContentBlock {
 	}
 	for _, a := range atts {
 		if a.LocalPath == "" {
+			// F-14 silent-skip diagnostic: surface upstream-vs-bridge
+			// split. If skippedEmptyPath > 0 then either DownloadAttachments
+			// was never called (handleMessage bug) or it failed for all
+			// entries (AllFailed branch). Caller is expected to have
+			// produced a user-facing notification in the failure case.
+			skippedEmptyPath++
+			slog.Default().Debug("feishu: attachment skipped (empty LocalPath)",
+				"type", a.Type, "file_key", a.FileKey, "error", a.Error)
 			continue
 		}
 		switch a.Type {
@@ -575,6 +630,12 @@ func BuildBlocks(text string, atts []channel.Attachment) []agent.ContentBlock {
 			})
 		}
 	}
+	slog.Default().Debug("feishu: BuildBlocks",
+		"text_len", len(text),
+		"attachments_in", len(atts),
+		"blocks_out", len(blocks),
+		"skipped_empty_path", skippedEmptyPath,
+	)
 	return blocks
 }
 
@@ -637,4 +698,56 @@ func BuildForwardedTextFromBlocks(blocks []agent.ContentBlock) string {
 		}
 	}
 	return b.String()
+}
+
+// resolveBlocks back-fills LocalPath into image / file blocks whose
+// Path currently holds a Feishu file_key placeholder (set by
+// extractAttachments for post rich-text messages). The input blocks
+// were produced in source order; resolveBlocks preserves that order
+// and only mutates Path on blocks whose placeholder file_key matches
+// a successful download.
+//
+// Behaviour:
+//
+//   - Image blocks whose FileKey placeholder matches a successful
+//     download get LocalPath filled in (Path = localPath). On
+//     download failure, the block is omitted (the surrounding text
+//     context still flows through — see F-14 §5).
+//   - Text blocks are preserved verbatim.
+//   - Returns a fresh slice; does not mutate the input.
+//
+// ats must be the same slice that extractAttachments produced (so
+// file_keys align). Caller is responsible for producing the
+// user-facing notification when ats has any failures; this function
+// silently drops failed-image blocks without notice.
+func resolveBlocks(blocks []agent.ContentBlock, ats []channel.Attachment) []agent.ContentBlock {
+	// Build a file_key → LocalPath index from ats. Failed entries
+	// have LocalPath == "" and are intentionally absent from the
+	// index so the corresponding image block is dropped below.
+	keyToPath := make(map[string]string, len(ats))
+	for _, a := range ats {
+		if a.FileKey == "" || a.LocalPath == "" {
+			continue
+		}
+		keyToPath[a.FileKey] = a.LocalPath
+	}
+	out := make([]agent.ContentBlock, 0, len(blocks))
+	for _, blk := range blocks {
+		switch blk.Type {
+		case agent.ContentText:
+			out = append(out, blk)
+		case agent.ContentImage, agent.ContentFile:
+			if path, ok := keyToPath[blk.Path]; ok {
+				blk.Path = path
+				if blk.Type == agent.ContentImage {
+					blk.MediaType = imageMediaType(path)
+				}
+				out = append(out, blk)
+			}
+			// else: failed download; drop. Text context preserved.
+		default:
+			out = append(out, blk)
+		}
+	}
+	return out
 }

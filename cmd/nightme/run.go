@@ -405,7 +405,40 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 		cs.EmitMessageState(userMsgID, agent.StateForwarded)
 
 		// Build structured blocks and queue to InputBuffer.
-		blocks := feishu.BuildBlocks(msg.Text, msg.Attachments)
+		// F-14 v1.4b: post rich-text messages arrive with
+		// msg.Blocks already populated (ordered by Feishu paragraph)
+		// and LocalPath back-filled. Prefer msg.Blocks when non-nil;
+		// otherwise fall back to the legacy BuildBlocks(msg.Text,
+		// msg.Attachments) shape (single-resource msg_types).
+		var blocks []agent.ContentBlock
+		var blocksPath string
+		if len(msg.Blocks) > 0 {
+			blocks = msg.Blocks
+			blocksPath = "ordered_blocks"
+		} else {
+			blocks = feishu.BuildBlocks(msg.Text, msg.Attachments)
+			blocksPath = "legacy_build_blocks"
+		}
+		// F-14 visibility: before queuing, trace what the agent will
+		// actually receive. Specifically: if blocks only contains
+		// ContentText (no ContentImage/File), the build layer dropped
+		// the attachments — most likely DownloadAttachments was not
+		// called upstream. With logging.level=debug this line shows the
+		// block types + total length so we can pinpoint the loss layer.
+		if logger != nil {
+			types := make([]string, 0, len(blocks))
+			for _, b := range blocks {
+				types = append(types, string(b.Type))
+			}
+			logger.Debug("dispatcher: blocks built for queue",
+				"chat_id", msg.ChatID,
+				"user_msg_id", userMsgID,
+				"path", blocksPath,
+				"inbound_attachments", len(msg.Attachments),
+				"block_count", len(blocks),
+				"block_types", types,
+			)
+		}
 		if err := cs.QueueUserMessage(blocks, userMsgID); err != nil {
 			if errors.Is(err, chatsession.ErrBufferFull) {
 				return ch.Send(ctx, gateway.OutboundMessage{

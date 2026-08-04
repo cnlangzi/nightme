@@ -427,6 +427,15 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 - **Routing 决策不写进 OutboundMessage.Meta**：Meta 只承载数据载荷（output / err / args），**不**承载 routing hint。Channel 看到 Kind 后自决。
 - **F-thread-route 不构成"thread 概念侵入 nightme 数据模型"**：Channel 自管的 thread 是 Feishu SDK API 调用层面的细节（`POST /im/v1/messages/{rootID}/reply`）；nightme 仍然只见 `OutboundMessage.ReplyTo = currentTurnUserMsgID`，跟 F-33 不变式完全兼容
 
+**v1.4 新增（F-14 post rich-text ordering 落地）**：
+
+- **`[]agent.ContentBlock` 是有序 composite**：单一 `ContentText` block 的 `Text` 字段仍是 String，但**承载组合能力的是整个 slice**——`Type ∈ {text, image, file}` 的元素按用户视角的顺序排列。这是对应 Anthropic API `content[]` heterogeneous array 的 1:1 数据结构,不能用 String-with-placeholder 替代（解析歧义 + 类型丢失 + 协议弱化）
+- **`InboundMessage.Blocks` 仅 post 富文本非空**：`msg_type=post` 时 `extractAttachments` 返回 `Blocks=ordered-slice`,`Text=""`；其他 msg_types 走 legacy `BuildBlocks(text, atts)` 路径,`Blocks=nil`。`Attachments` 持下载候选 file_key 列表,`Blocks` 持用户视角的有序 turn 形态——两者职责清晰,不冗余
+- **`blocks` 顺序 end-to-end 保留**:从 `extractAttachments`(Feishu adapter) → `resolveBlocks`(下载后回填 Path) → `InboundMessage.Blocks` → `messageDispatcher` 选 `msg.Blocks` → `ChatSession.QueueUserMessage(blocks)` → `AgentSession.SendBlocks(blocks)` → bridge 编码到 `content[]` 数组,**每个层都不重排**。任何"先 text 后 image"的拍扁都是顺序 bug
+- **path 字段在抽象层只持本地路径**:`ContentBlock.Path` 永远是绝对文件系统路径,**不**存 base64 / 不存 file_key / 不存 URL。base64 inflate 严格限制在 bridge 边界(`bridge/claudecode/session.go::SendBlocks` 的 `readFileAsBase64`)。这是 §1.4 "boundary normalize" 的具体落地:抽象层只持 primitive generic,concrete 编码细节留在具体实现层
+- **失败 block omit,不放 placeholder**:post 富文本里某张图下载失败时,`resolveBlocks` 把对应 `ContentImage` block 从 slice 中剔除,**不**用占位符替换(避免 Claude 把"半截 array"误读为"用户传了 3 张图但其中 1 张是 placeholder")。text 上下文保留
+- **legacy `BuildBlocks` 顺序契约**:单资源消息(text+image/file)走 legacy 路径,blocks 顺序固定为 `[ContentText(caption)?, ContentImage×N, ContentFile×M]`。这条契约隐式被 v1.1 单测覆盖,新 channel 实现应遵循
+
 ### 1.4 抽象 / 具体 边界规范（v1.3.x 强制，多态的核心思路）
 
 跨层通信的架构纪律。本节是一切不变式之上的元原则——其它不变式违反时，几乎都是这条先破了。
@@ -569,10 +578,15 @@ return receipt.Append(ctx, agent.AgentEvent{
 
 ```
 IM 消息事件
-  → Channel Adapter 解码为统一 InboundMessage{chat_id, user_id, text, attachments, message_id, reply_to, time, has_mention}
+  → Channel Adapter 解码为统一 InboundMessage{chat_id, user_id, text, attachments, blocks, message_id, reply_to, time, has_mention}
       ├─ reply_to = message.ParentId（F-33：Feishu 原生 parent_id，thread 顶层 RootId 不进 nightme）
       ├─ has_mention（F-watch：DM 永远 true；group 含 bot/@_all 时 true；由 channel adapter 根据 Mentions + chat_type + GetBotIdentity 计算）
-      ├─ 异步下载 attachments 到本地路径
+      ├─ **同步下载 attachments 到本地路径**（F-14 v1.4a：publish 前必须填 LocalPath）
+      │     ├─ 全失败 → ch.Send("❌ N attachments failed…") + return（不进 ch.Incoming，Agent 看不到这条）
+      │     ├─ 部分失败 → ch.Send("⚠️ K of N failed; sending the rest") + 继续
+      │     └─ 全部成功 → 静默继续
+      ├─ **post 富文本**：`extractAttachments` 产出有序 `[]agent.ContentBlock`（blocks），image 节点占位 file_key → 下载后 resolve 回填 LocalPath（F-14 v1.4b）
+      │     - 单资源消息（image/file/audio/media）：`blocks == nil`，走 legacy `BuildBlocks(text, atts)`
       └─ publish 到 ch.Incoming()
 
 Gateway.pumpInbound (per-channel)
@@ -597,7 +611,10 @@ messageDispatcher(ctx, msg)
   ├ (0) cs.emitMessageState(msg.MessageID, StateReceived)   ← F-31: 触发 MessageState(Received) 事件
   ├ (a) chatSession.LookupActiveAgentSession() (lazy spawn on miss)
   ├ (b) cs.emitMessageState(msg.MessageID, StateForwarded)   ← F-31: dispatch 成功后触发
-  ├ (c) chatSession.QueueUserMessage(msg.Blocks, msg.MessageID)
+  ├ (c) **blocks 路径选择**（F-14 v1.4b）：
+  │     ├─ msg.Blocks != nil（post path）   → blocks = msg.Blocks    ← 顺序由 Feishu paragraph 决定
+  │     └─ else（legacy single-resource）   → blocks = feishu.BuildBlocks(msg.Text, msg.Attachments)
+  ├ (d) chatSession.QueueUserMessage(blocks, msg.MessageID)
   │       InputBuffer FSM:
   │         ├ Idle → 立即 SendBlocks(blocks) → return (dispatched=true)
   │         │   └ onFlush 钩子（ChatSession.defaultFlushHookLocked）触发:
@@ -611,6 +628,11 @@ messageDispatcher(ctx, msg)
           │   ├ cs.currentTurnUserMsgID = userMsgIDs[len-1](最后一条)
           │   └ agentSession.SendBlocks(combined)
           └
+
+**v1.4 变化**（F-14）：
+- **v1.4a**：`Channel Adapter` 在 `handleMessage` 内**同步**调 `DownloadAttachments`，确保 `InboundMessage.Attachments[i].LocalPath` 在 publish 前已填好。v1.1–v1.3 该函数未被生产代码调用过（仅单测），导致所有 attachment 在 `BuildBlocks` 的 `LocalPath == ""` 分支被静默 skip。
+- **v1.4b**：`post` 富文本按 paragraph node 顺序产出 `[]agent.ContentBlock`（`msg.Blocks`），`messageDispatcher` 优先使用，非 post 走 legacy `BuildBlocks(text, atts)`。单资源消息（image/file/audio/media）的 Text + Attachments 模型不变。
+- 全失败 → Channel 自决发一条文本通知用户 + drop（不进 ch.Incoming）；部分失败 → 通知用户 + 继续把成功的部分转给 Agent（失败节点从 blocks 中 omit）。
 
 **v1.3 变化**：去掉 receipt lifecycle 步骤(Gateway 不再调 `ch.CreateReceipt / UpdateReceipt / DisposeReceipt`)。Channel 在收到第一个带 `ReplyTo=userMsgID` 的 OutboundMessage 时,自行决定 cold-create / 复用 receipt card / thread / DOM 节点。详见 §2.2。
 

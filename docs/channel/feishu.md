@@ -1475,3 +1475,209 @@ return msgID, err
 **后续优化(backlog)**:
 - 加 30min TTL cache(若 230011 触发频次超过预期)
 - 上层 Chatsession 接收 230011 / 231003 时,emit MessageState=error 并中断 turn(避免 agent 继续发无主回复)
+
+## 16. Rate Limit 控制(F-35,2026-08-04)
+
+### 16.1 问题
+
+nightme 的 feishu adapter hot path 完全同步 —— readPump → `EventCallback` → `channel.Send` → SDK call,无 backpressure、无重试(除 230011/231003 fallback)。**agent turn 内 receipt PATCH storm**(一个 turn 5-20 次 PATCH)+ 多 chat 并发 → 飞书触发 `230001` / `230020` 限流码 → event 丢失。
+
+### 16.2 方案:feishu 包内全局 token bucket
+
+在 `internal/channel/feishu/ratelimit.go` 落地一个 **单桶** token bucket(无 per-op-kind 分桶),覆盖所有 5 类出口 API(send / reply / patch / reaction / upload)。每个 SDK call 前 `a.limiter.Wait(ctx)`,**预防**触发限流,而不是事后补救。
+
+**为什么不分多桶**:所有 5 类 API 文档限速完全相同(1000 QPM / 50 QPS per app),且 nightme 热路径受 per-user 5 QPS 约束,单桶足够。
+
+**为什么 burst=1**:飞书硬上限是绝对值,不留弹性 —— 宁可慢一点,也不要触发 230001。
+
+**为什么 lazy refill**:不启后台 goroutine,token refill 在 `Wait()` 调用时按 elapsed 时间计算。零 goroutine 泄漏风险。
+
+### 16.3 实测飞书限频(2026-08-04 查 open.feishu.cn)
+
+| API | App QPS | App QPM | Per-resource |
+|---|---|---|---|
+| Send / Reply message | 50 | 1000 | **5 QPS per user** + **5 QPS per group**(群内机器人共享) |
+| PATCH message | 50 | 1000 | **5 QPS per message_id** |
+| Delete / AddReaction / Upload | 50 | 1000 | — |
+
+nightme 热路径被 **per-user 5 QPS** 约束 —— 单 chat PATCH storm 受 per-message_id 5 QPS 限制(由 `renderLocked` mutex 天然满足),多 chat 并发受 per-user 5 QPS 限制。
+
+### 16.4 配置
+
+```yaml
+# config.yaml
+feishu:
+  rate_limit:           # 可选;不填 = StrictDefault
+    rate_per_sec: 5     # 每秒补充令牌数(默认 5,贴 per-user 硬限)
+    burst: 1            # 桶容量(默认 1,无突发)
+```
+
+**StrictDefault** (`internal/channel/feishu/ratelimit.go`)：
+
+```go
+var StrictDefault = config.FeishuRateLimitConfig{
+    RatePerSec: 5,  // per-user 硬限
+    Burst:      1,  // 无突发
+}
+```
+
+**调高的代价**:rate_per_sec > 5 → 单 chat PATCH storm 可能短暂触顶 per-user 限流;burst > 1 → 启动期或空闲后突发达 N 个调用,可能触顶。
+
+### 16.5 接入点
+
+`internal/channel/feishu/adapter.go` 4 个底出口,每个 SDK call 前都过 `Wait`：
+
+| 函数 | 加 Wait 的位置 |
+|---|---|
+| `sendViaLarkCreate` | `a.limiter.Wait(ctx)` 在 `client.Im.V1.Message.Create(...)` 之前 |
+| `sendViaLarkReply` | 同上,在 `Message.Reply(...)` 之前 |
+| `updateViaLark` | 在 `Message.Patch(...)` 之前 |
+| `AddReaction` | 在 `MessageReaction.Create(...)` 之前 |
+
+**`sendContent` 包装层不动**:rootID fallback 路径(230011 → top-level Create)第二次走 `sendViaLarkCreate` 仍会经 Wait,**单桶自动覆盖**。
+
+**`GetBotIdentity` 不走 limiter**:启动期低频,且不走 IM 配额。
+
+**Heartbeat PATCH 也走 `updateViaLark`** → 自动经 Wait。30 min 一次,远低于 5 QPS,**不需特判**。
+
+### 16.6 与现有组件的边界
+
+- **不改 `Channel` 接口契约**(`Send` 仍 fire-and-ack)
+- **不与 Layer 1 重试耦合**(retry 在 sendContent 外层,limiter 在 SDK call 内层;二者正交)
+- **不影响 per-message_id 5 QPS**(`renderLocked` mutex 天然满足)
+
+### 16.7 监控埋点
+
+Wait 阻塞 > 100ms 时记 debug log:
+
+```go
+l.logger.Debug("feishu rate limit blocked",
+    "wait_ms", waitDur.Milliseconds(),
+    "tokens", l.tokens,
+)
+```
+
+不记 INFO —— 频繁触发说明配置需调整,但 hot path 日志噪音太大。
+
+### 16.8 测试
+
+`ratelimit_test.go` 6 个单测:
+
+| 用例 | 验证 |
+|---|---|
+| `TestNewLimiter_StrictDefault` | cfg=nil → RatePerSec=5, Burst=1 |
+| `TestLimiter_ConfigOverride` | cfg={RatePerSec:10, Burst:2} → 应用生效 |
+| `TestLimiter_InitialBurst` | 初始 tokens=1;连续 2 次 acquire:第一次立即成功,第二次 wait ≥ 200ms |
+| `TestLimiter_Refill` | fakeClock.Advance(200ms) → tokens 重填 |
+| `TestLimiter_ContextCancel` | Wait 阻塞中 ctx.Done() 立即返回 |
+| `TestLimiter_LongRunNoOvershoot` | fakeClock 跑 10s,acquire 51 次(5/s × 10 + initial burst),等待总和符合配置 |
+
+`adapter_test.go` 集成测试:
+- `TestAdapter_RateLimit_PATCHStormThrottled`:配 StrictDefault;mock sendFunc 记录 timestamp;触发 20 个连续 OutText → mock 收到的 timestamp 间隔 ≥ 200ms
+
+### 16.9 详细规格
+
+详见 [`docs/feat/F-35-ratelimit.md`](../feat/F-35-ratelimit.md)。
+
+### 16.10 与 receipt PATCH storm 的 UX 权衡
+
+Receipt PATCH storm（一个 agent turn 内 receipt 被 PATCH 多次）受 F-35 limiter 串行化。**测算**：
+
+- 每个 PATCH 过 `Wait()`，等待 ~200ms（5 QPS）
+- 10 events 的 PATCH storm 总耗时 ≈ 1.8s
+- 用户视觉：receipt 卡片内容更新稍慢（动画可见），但绝不触顶飞书限流
+
+如果未来需要更激进的 PATCH 频率，可考虑:
+- 提高 `feishu.rate_limit.rate_per_sec`（牺牲限流保护）
+- 改 PATCH 为事件合并（多个 event 攒成一次 PATCH，独立 feature）
+
+**当前选择**：保守 5 QPS，**不暴露** override（避免误调高触发 230001）。
+
+---
+
+## 17. Transient Retry(F-36,2026-08-04)
+
+### 17.1 与 F-35 的关系
+
+F-35 是"事前预防"（防 230001 限流），F-36 是"事后补救"（防 transient 网络抖动）。两者正交：
+
+```
+sendContent(ctx, chatID, msgType, content, rootID)
+  └ WithTransientRetryMsg (F-36 外层)
+    └ send() ───┐
+                ├ limiter.Wait (F-35 内层)
+                └ SDK call
+```
+
+每次 retry 都重新过 F-35 limiter：单次 retry 至少等 200ms (5 QPS)。3 次 retry 总耗时 ≈ 1.5s（500ms + 1s backoff + 200ms × 3 limiter wait）。
+
+### 17.2 错误分类（IsTransient）
+
+| 类别 | 例子 | 处理 |
+|---|---|---|
+| **Transient**（重试） | `net.Error.Timeout()` / `io.EOF` / `syscall.ECONNRESET,EPIPE` / "connection reset" / "broken pipe" / "i/o timeout" / "TLS handshake timeout" / "connection refused" / "no such host" | 指数退避重试 |
+| **Permanent**（不重试） | 230011 / 231003（terminal → fallback）/ 230001（rate-limit → limiter 应已防住）/ 其他飞书永久错误码 | 立即返回 |
+
+### 17.3 DefaultRetryConfig
+
+```go
+MaxAttempts:    3,                  // initial + 2 retries
+InitialBackoff: 500ms,
+MaxBackoff:     5s,
+JitterPercent:  0.25,               // ±25% 防 thundering herd
+```
+
+零 / 负值由 `RetryConfig.normalize()` 静默回退到默认值。
+
+### 17.4 接入点
+
+4 个 SDK call 出口都包 retry：
+
+| 函数 | Op 名 | 备注 |
+|---|---|---|
+| `sendContent` 主路径 | `"send"` | 含 rootID fallback 也走 retry |
+| `sendContent` fallback | `"send_top_level"` | fallback 后仍走 retry 救活瞬时失败 |
+| `updateViaLark` | `"patch_message"` | 拆 `patchMessageOnce` 给 retry 调 |
+| `AddReaction` | `"add_reaction"` | 拆 `addReactionOnce` 给 retry 调 |
+
+### 17.5 ctx cancel 优先
+
+`ctx.Done()` 在 retry backoff / limiter wait 任何等待点都立即返回 `ctx.Err()`。daemon shutdown 不被 retry 阻塞。
+
+### 17.6 降级日志
+
+每次降级事件（retry exhausted / ctx cancel / fallback top-level / limiter wait cancel）emit warn 级结构化日志：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `degradation` | string | 事件类型（见下） |
+| `op` | string | `"send"` / `"send_top_level"` / `"patch_message"` / `"add_reaction"` |
+| `attempts` | int | 已尝试次数 |
+| `total_wait_ms` | int | 累计等待毫秒 |
+| `final_err` | string | 最终错误 |
+| `ctx_err` | string | ctx 取消时填 |
+| `chat_id` | string | call-site |
+| `message_id` | string | call-site |
+| `root_id` | string | call-site |
+| `msg_type` | string | call-site |
+| `reaction_type` | string | call-site |
+
+**事件类型**：
+- `retry_exhausted` — retry 3 次都失败
+- `ctx_cancel_during_wait` — retry 中 ctx 被 cancel
+- `ctx_cancel_at_entry` — entry 时 ctx 已 cancel
+- `fallback_to_top_level` — 230011/231003 触发 rootID fallback
+- `limiter_wait_cancelled` — limiter.Wait 中 ctx 被 cancel
+
+**grep 模式**（post-analysis）：
+
+```bash
+grep 'feishu degradation' /var/log/nightme.log
+grep '"degradation":"retry_exhausted"' /var/log/nightme.log   # 最严重
+grep '"degradation":"ctx_cancel_during_wait"' /var/log/nightme.log  # daemon shutdown
+grep '"degradation":"fallback_to_top_level"' /var/log/nightme.log   # user 撤回过原消息
+```
+
+### 17.7 详细规格
+
+详见 [`docs/feat/F-36-transient-retry.md`](../feat/F-36-transient-retry.md)。

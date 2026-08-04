@@ -1025,6 +1025,8 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
   - `internal/channel/feishu/receipt_event_test.go` 删 thinking/tool assertion；新增 `TestSend_Out*_PostsToThread` + `TestSummarizeToolEnd`
   - `docs/channel/feishu.md` §13.12 决策反转记录 + §15 实施计划修订
   - 详见 [`docs/feat/F-35-tool-thread-routing.md`](./feat/F-35-tool-thread-routing.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §13.12
+- ⏭ **F-35（feishu 全局限速器）**：`internal/channel/feishu/ratelimit.go` 单桶 token bucket(5 QPS / burst 1 / lazy refill)，4 个底出口(`sendViaLarkCreate` / `sendViaLarkReply` / `updateViaLark` / `AddReaction`)SDK call 前 `Wait()`。`internal/config/config.go::FeishuConfig` 加 `RateLimit` 字段。详见 [`docs/feat/F-35-ratelimit.md`](./feat/F-35-ratelimit.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §16。
+- ⏭ **F-36（feishu transient retry + 降级日志）**：`internal/channel/feishu/retry.go` 指数退避重试(3 次尝试 / 500ms→5s / ±25% jitter)，包裹 `sendContent` / `updateViaLark` / `AddReaction`。所有降级路径(retry exhausted / ctx cancel / fallback top-level)emit warn 级结构化日志。详见 [`docs/feat/F-36-transient-retry.md`](./feat/F-36-transient-retry.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §17。
 
 ---
 

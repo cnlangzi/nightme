@@ -202,6 +202,47 @@ type OutboundMessage struct {
 
 ---
 
+### 0.6 文档变更摘要（v1.3.x F-think 增量，2026-08-04）
+
+**背景**：F-thread-route 把 OutThinking / OutToolStart / OutToolEnd / OutCompaction 投到飞书 thread。OutThinking 当前用 plain text（`postThreadReply`）渲染，代码块 / 列表 / 加粗全部丢失；同时用户没有 per-chat 控制 thinking 是否显示的开关。F-think 同时解决这两点：
+
+**增量变化**：
+
+1. **OutThinking → 飞书 lark_md card**
+   - 新 helper：`internal/channel/feishu/thinking_card.go` 的 `buildThinkingCard` + `postThreadMarkdownReply`
+   - 把 OutThinking 包成 `Card 2.0 interactive` + 单/多 `lark_md` div elements
+   - 长内容走 F-37 `splitMarkdownForDivs` 自动按 lark_md div 硬限切分，保留 code block 原子性
+   - 其他 OutboundKind（OutToolStart / OutToolEnd / OutCompaction）继续走 plain text `postThreadReply`（它们本身就是单行摘要，markdown 化没意义）
+
+2. **新增 `ThinkMode` per-chat 状态**
+   - `ChatSession.ThinkMode`：`ThinkModeShow`（默认，forward OutThinking）/ `ThinkModeHide`（EventHandler gate 丢弃 OutThinking）
+   - `ChatSessionEntry.ThinkMode` 持久化字段（Go JSON 容忍缺失）
+   - setter `ChatSession.SetThinkMode` + getter `ChatSession.ThinkMode()`
+
+3. **新增 `/think on|off` slash command**
+   - 三种调用：`/think on`、`/think off`、`/think`（无参 = 显示状态）
+   - 在 Gateway dispatcher 与 `/cwd` `/use` `/kill` `/watch` `/new` 同源
+   - 接受别名：`show`/`hide`（语义更准确）
+
+4. **新增 runtime EventHandler gate**
+   - 位置：`cmd/nightme/run.go::newEventHandler`，在 Translate + ReplyTo 戳印完成后、`ch.Send` 之前
+   - 当 `cs.ThinkMode() == ThinkModeHide && out.Kind == OutThinking` → 静默丢弃 + debug log
+   - 其他 OutboundKind 不受影响（OutText / OutResult / OutToolStart / OutToolEnd / OutCompaction / OutInit / OutUsage 全部照旧）
+   - 失败开放：ChatSession lookup miss 时仍投递（不静默丢数据）
+
+**v1.3.x 不变式保留**：
+- `ChatSession` 不 import `channel/feishu`（不变）
+- Channel 接口不暴露 ThinkMode / ChatSession（不变）
+- `OutboundMessage` 字段不变（markdown 是 Feishu 渲染层决定，抽象契约仍是 primitive string）
+- 抽象归抽象 / 具体归具体原则保留（markdown 渲染是 Channel 自决）
+- §1.4 边界规范：thinking content 跨层仍是 string primitive；Feishu 自决是否包装成 lark_md
+
+**为什么不叫 v2.0**：v1.3 核心不变式全部保留。F-think 是：(a) 一个新 per-chat toggle（镜像 F-watch 的模式），(b) 一个 OutThinking 渲染升级（不引入新 Kind、不动 Gateway / ChatSession）。两件事都在 v1.3.x 范畴内。
+
+**详细落地**：见 `internal/registry/think_mode.go` + `internal/chatsession/thinkmode.go` + `internal/gateway/handlers_think.go` + `cmd/nightme/run.go::newEventHandler` + `internal/channel/feishu/thinking_card.go`。
+
+---
+
 ## 1. 架构总览
 
 nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以下**逻辑组件**组成：
@@ -787,6 +828,48 @@ ChatSession 分**三层状态**——但**三层状态的所有权清晰分离**
 - ChatSession: 持有 `WatchMode` 状态 + 提供 setter
 
 **详细落地**：见 [`feat/F-08-channel-abstraction.md`](./feat/F-08-channel-abstraction.md) §Message 字段 + [`channel/feishu.md`](./channel/feishu.md) §6.7 mention strip。
+
+### 3.1.2 ThinkMode：per-chat thinking 内容显示开关（F-think）
+
+**问题**：F-thread-route 把 OutThinking 投到飞书 thread 后用户无法关闭 —— 既不能选择 plain text vs markdown，也不能选择看 vs 不看。F-think 让 nightme 侧接管这两个决定权。
+
+**方案**：per-chat `ThinkMode` 字段，默认 `ThinkModeShow`（runtime 投递 OutThinking，由 Feishu adapter 渲染成 lark_md card），`/think off` 切到 `ThinkModeHide`（runtime 在 EventHandler gate 丢弃 OutThinking）。
+
+| 模式 | 含义 | 触发 |
+|------|------|------|
+| `ThinkModeShow`（默认）| OutThinking 投递到 Channel，渲染为飞书 lark_md thread card | `/think on` |
+| `ThinkModeHide` | EventHandler gate 静默丢弃 OutThinking，其他 OutboundKind 不受影响 | `/think off` |
+
+**渲染细节（F-think §3.1.2.1）**：当 `ThinkMode=Show` 且 ChatType=Feishu，OutThinking 由 `internal/channel/feishu/thinking_card.go` 渲染：
+
+```
+buildThinkingCard("💭 <text>")  →  Card 2.0 JSON
+  { config: {wide_screen_mode: true},
+    elements: [{tag:"div", text:{tag:"lark_md", content:"💭 <text>"}}] }
+```
+
+长内容（> 1000 runes）自动按 F-37 `splitMarkdownForDivs` 切多 div，code block 整块保留。Echo / Web 等其他 Channel 仍可自由决定如何渲染 `OutboundMessage.Text`（不动抽象契约）。
+
+**Channel 自管 chat 语义的不变式保留**：
+- `ThinkMode` 字段挂在 `ChatSession`，**不**在 `Message` / `OutboundMessage` / Channel interface
+- Channel adapter 不知道 `ThinkMode`，由 runtime EventHandler 在出站前决定
+- Chat type（DM/group/topic_group）**不**进 nightme 数据模型（沿用 F-33 不变式）
+- `OutboundMessage` schema 不变：`Text string` 仍是 primitive，Channel 自决 markdown 化
+
+**DM 不受 `ThinkMode` 影响的不变式**：
+- DM chat 下 `/think off` 仍按 Hide 处理 OutThinking —— 与 `/watch off` 不同（`/watch` 在 DM 下因 HasMention 恒为 true 而永远不丢消息，`/think` 是 Outbound 维度，与 HasMention 解耦）
+- `ThinkMode` 字段在 DM 下被写入仅为保留用户偏好
+
+**Slash command**：`/think on` / `/think off` / `/think`（无参 = 显示状态）。handler 由 Gateway dispatcher 处理,跟 `/cwd` `/use` `/kill` `/watch` `/new` 同一路径。接受别名：`show`/`hide`。
+
+**持久化**：`ChatSessionEntry.ThinkMode` 字段（默认 `ThinkModeShow`）。Go JSON unmarshal 容忍缺失字段，旧 `chat_sessions.json` 无 `thinkMode` 字段时安全 fallback 到默认（与 WatchMode 设计完全镜像，但默认值方向相反 —— WatchMode 是"安全 = 少收"= Mention 默认；ThinkMode 是"安全 = 不动现有行为"= Show 默认）。
+
+**职责边界**：
+- ChatSession：持有 `ThinkMode` 状态 + 提供 setter
+- runtime EventHandler（`cmd/nightme/run.go::newEventHandler`）：gate 决策点，读 `cs.ThinkMode()`
+- Channel adapter：照常处理到达的 OutboundMessage，不感知 ThinkMode
+
+**详细落地**：见 [`internal/gateway/handlers_think.go`](./internal/gateway/handlers_think.go) + [`cmd/nightme/run.go::newEventHandler`](./cmd/nightme/run.go) + [`internal/channel/feishu/thinking_card.go`](./internal/channel/feishu/thinking_card.go)。
 
 ### 3.2 状态转换触发器（v1.2）
 

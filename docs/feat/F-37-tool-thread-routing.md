@@ -86,14 +86,14 @@ Feishu adapter 在 `Send` dispatcher 按 Kind 自决 routing。
 > "ReplyInThreadAndChat" 在 SDK body 上**就是 `reply_in_thread` 字段省略**——即 0 字节差异化。
 > "ReplyInThread" 在 SDK body 上**就是 `reply_in_thread: true` 28 字节**——nightme F-37 选的路径。
 
-按 OutboundKind 映射：
+按 OutboundKind 映射（2026-08-04 ops 实机确认）：
 
 | OutboundKind | 飞书 reply 形态 | nightme 实际行为 |
 |---|---|---|
 | `OutThinking` | **ReplyInThread** | 纯文本 `💭 <text>`（每 event 一条）|
 | `OutToolStart` | **ReplyInThread** | 纯文本 `● <name>(<args>)`（每 event 一条）|
 | `OutToolEnd` | **ReplyInThread** | 纯文本 `⎿  <summary>`（类型感知摘要）|
-| `OutCompaction` | **ReplyInThread** | 纯文本 `✶ Compacting conversation…` |
+| `OutCompaction` | **ReplyInThreadAndChat** | 纯文本 `✶ Compacting conversation…`（main chat 可见，ops 决策 2026-08-04：brief marker 是 informative 不是 noise）|
 | `OutText` / `OutResult` / `OutInit` / `OutUsage` | n/a（PATCH in place 不走 reply API） | 进 receipt card body |
 | `OutMessageState` | n/a | AddReaction ⏳/🔄/✅/❌ 在 user msg 上 |
 | `OutCard`（permission card） | **ReplyInThreadAndChat** | 进 main chat 内联回复 |

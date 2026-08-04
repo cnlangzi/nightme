@@ -760,14 +760,20 @@ func TestSend_OutCompaction_PostsToThread(t *testing.T) {
 }
 
 // TestSend_ThreadOnlyEvents_PassReplyInThreadTrue — F-37.
-// OutThinking / OutToolStart / OutToolEnd / OutCompaction are the
-// "agent progress stream" kinds that would otherwise flood the
-// user's main chat. Each must thread the reply AND set
-// reply_in_thread=true so the message body stays out of the main
-// chat (only the thread panel collects the 💭/●/⎿/✶ lines; the
-// main chat shows just a "X replies" indicator).
+// OutThinking / OutToolStart / OutToolEnd are the "agent progress
+// stream" kinds that would otherwise flood the user's main chat.
+// Each must thread the reply AND set reply_in_thread=true so the
+// message body stays out of the main chat (only the thread panel
+// collects the 💭/●/⎿ lines; the main chat shows just a
+// "X replies" indicator).
 //
-// One table-driven test that exercises all four kinds so a future
+// Note: OutCompaction was originally in this set but moved to
+// ReplyInThreadAndChat on 2026-08-04 (ops decision: a brief
+// "✶ Compacting…" line in main chat is informative, not noise).
+// It's now covered by TestSend_ChatVisibleEvents_PassReplyInThreadFalse
+// → t.Run("OutCompaction", …).
+//
+// One table-driven test that exercises the three kinds so a future
 // regression in any one of them flags here. Each kind produces its
 // own cold-start card + PATCH side-effect via Touch; we filter to
 // the text reply (msg_type=text) the same way the existing per-kind
@@ -804,13 +810,6 @@ func TestSend_ThreadOnlyEvents_PassReplyInThreadTrue(t *testing.T) {
 			// summarizeToolResult("Read", "x\ny", nil) → "⎿  📄 Read → 2 lines"
 			// We don't hard-code the line — assert via prefix below.
 			want: "",
-		},
-		{
-			name: "OutCompaction",
-			msg: gateway.OutboundMessage{
-				Kind: gateway.OutCompaction, ChatID: "oc_t", ReplyTo: "om_user_t",
-			},
-			want: "✶ Compacting conversation…",
 		},
 	}
 
@@ -963,6 +962,43 @@ func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
 		}
 		if threadOnly != 0 {
 			t.Errorf("OutCommandReply was threaded %d times, want 0", threadOnly)
+		}
+	})
+
+	// OutCompaction moved here from
+	// TestSend_ThreadOnlyEvents_PassReplyInThreadTrue on
+	// 2026-08-04 (ops: a brief "✶ Compacting…" line in main chat
+	// is informative, not noise). Same wire shape as
+	// OutCommandReply: text body, reply API, reply_in_thread
+	// omitted.
+	t.Run("OutCompaction", func(t *testing.T) {
+		a := testAdapter(t)
+		var threadOnly int
+		var chatVisible int
+		a.sendFunc = func(_ context.Context, _, msgTypeRaw, _, rootID string, replyInThread bool) (string, error) {
+			if msgTypeRaw == larkim.MsgTypeText && rootID == "om_user_compact" {
+				if replyInThread {
+					threadOnly++
+				} else {
+					chatVisible++
+				}
+			}
+			return "om_text_compact", nil
+		}
+
+		err := a.Send(t.Context(), gateway.OutboundMessage{
+			Kind:    gateway.OutCompaction,
+			ChatID:  "oc_test",
+			ReplyTo: "om_user_compact",
+		})
+		if err != nil {
+			t.Fatalf("Send(OutCompaction): %v", err)
+		}
+		if chatVisible == 0 {
+			t.Errorf("OutCompaction reply_in_thread flag was true (threaded), want false — compaction marker should be visible in main chat")
+		}
+		if threadOnly != 0 {
+			t.Errorf("OutCompaction was threaded %d times, want 0", threadOnly)
 		}
 	})
 }

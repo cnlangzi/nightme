@@ -1002,11 +1002,11 @@ PATCH 路径不动 -- Feishu 的 PATCH 接口会自动保留被 PATCH 消息的�
 | **ReplyInThreadAndChat** | **字段省略**（SDK `omitempty` nil 指针）| **正文内联** | **同一份正文** | `""` |
 | **ReplyInThread** | `true` | **"X replies" 灰条**（无正文）| **正文** | `omt_xxx`（首次分配，后续复用）|
 
-按 OutboundKind 拆分（与上表路径一致）：
+按 OutboundKind 拆分（与上表路径一致，2026-08-04 ops 实机确认）：
 
-- **ReplyInThread (`reply_in_thread=true`)** — `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCompaction`：agent 进度流，绝不污染 main chat
-- **ReplyInThread + Also send it to chat (字段省略)** — receipt 冷启动卡 / `OutCard` (permission) / `OutCommandReply`：用户首要看到的答案 / 不可漏看的权限请求 / slash 命令回应，必须 main chat 可见
-- **Reply** (顶级 Create) — nightme **不**走此形态（fallback 路径 230011/231003 才退化到此，详见 §15.2）
+- **ReplyInThread (`reply_in_thread=true`)** — `OutThinking` / `OutToolStart` / `OutToolEnd`：agent 进度流，绝不污染 main chat
+- **ReplyInThreadAndChat (字段省略)** — receipt 冷启动卡 / `OutCard` (permission) / `OutCommandReply` / `OutCompaction`：用户首要看到的答案 / 不可漏看的权限请求 / slash 命令回应 / brief 进度 marker，必须 main chat 可见
+- **ReplyInChat (顶级 Create)** — nightme **不**走此形态（fallback 路径 230011/231003 才退化到此，详见 §15.2）
 
 实现：`sendMessageFunc` / `sendContent` / `sendViaLarkReply` / `SendMessageText` / `SendCard` / `postThreadReply` 全链路加一个尾部 `replyInThread bool` 参数；`sendViaLarkReply` 内部 `larkim.NewReplyMessageReqBodyBuilder()` 仅在 `true` 时调 `.ReplyInThread(true)`（**不能简化成** `.ReplyInThread(replyInThread)`，否则 false 路径多 28 字节破坏 pre-F-37 idempotency cache）。详见 `docs/feat/F-37-tool-thread-routing.md` §2.1 + §7.5 实机验证 + adapter.go。
 

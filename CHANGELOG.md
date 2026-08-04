@@ -187,13 +187,15 @@ spawn will fail at runtime. See
 
 `sendMessageFunc` / `sendContent` / `sendViaLarkReply` / `SendMessageText` / `SendCard` / `postThreadReply` 全链路加尾部 `replyInThread bool` 参数。`sendViaLarkReply` 内部 `larkim.NewReplyMessageReqBodyBuilder()` **仅在 `true` 时**调 `.ReplyInThread(true)` (false 路径靠 `omitempty` 字段省略保留 recorder log / idempotency cache 字节级兼容；**严禁**简化成 `.ReplyInThread(replyInThread)` 否则 false 路径多 28 字节破坏兼容性)。
 
-按 OutboundKind 路径拆分：
+按 OutboundKind 路径拆分（2026-08-04 ops 实机确认）：
 
-- `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCompaction` → **ReplyInThread** (agent 进度只进 thread panel,main chat 仅显示 "X replies" 指示器)
-- receipt 冷启动卡 / `OutCard` (permission) / `OutCommandReply` → **ReplyInThreadAndChat** (必须 main chat 可见)
+- `OutThinking` / `OutToolStart` / `OutToolEnd` → **ReplyInThread** (agent 进度只进 thread panel,main chat 仅显示 "X replies" 指示器)
+- `OutCompaction` / receipt 冷启动卡 / `OutCard` (permission) / `OutCommandReply` → **ReplyInThreadAndChat** (必须 main chat 可见)
 - 顶级 Create (ReplyInChat) 形态 → nightme **不**走 (fallback 230011/231003 才退化)
 
-测试：`TestSend_ThreadOnlyEvents_PassReplyInThreadTrue` (4 kinds × ReplyInThread) + `TestSend_ChatVisibleEvents_PassReplyInThreadFalse` (3 paths × ReplyInThreadAndChat) + `cmd/_probe/send_one` 实机飞书群验证。详见 `docs/feat/F-37-tool-thread-routing.md` §7.5。
+> Kinds 命名 ops 用 past tense (`OutToolStarted/Ended/Think`)，但 nightme enum 实际是 present tense (`OutToolStart/OutToolEnd/OutThinking`)。**不**改 enum 名（会牵动 Gateway 抽象层多个包），只按 enum 行为归属。
+
+测试：`TestSend_ThreadOnlyEvents_PassReplyInThreadTrue` (3 kinds × ReplyInThread: OutThinking/OutToolStart/OutToolEnd) + `TestSend_ChatVisibleEvents_PassReplyInThreadFalse` (4 paths × ReplyInThreadAndChat: ReceiptColdStart/OutCard/OutCommandReply/OutCompaction) + `cmd/_probe/send_one` 实机飞书群验证。详见 `docs/feat/F-37-tool-thread-routing.md` §7.5。
 
 ---
 

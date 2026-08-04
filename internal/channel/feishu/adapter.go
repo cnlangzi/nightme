@@ -675,13 +675,16 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		})
 
 	case gateway.OutCompaction:
-		// F-34: compaction is posted to the thread as a single
-		// "✶ Compacting conversation…" line.
-		//
-		// F-37: replyOnly=true — compaction marker belongs in the
-		// thread, not the main chat.
+		// Compaction marker is a one-shot, low-frequency event
+		// (not a stream like tool calls). Per ops decision
+		// 2026-08-04: "OutToolStart/End/OutThinking use
+		// ReplyInThread; everything else uses
+		// ReplyInThreadAndChat" — OutCompaction falls in
+		// 'everything else', so it stays visible in the main
+		// chat (replyOnly=false). A brief "✶ Compacting…" line
+		// in main chat is informative, not noise.
 		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo,
-			"✶ Compacting conversation…", true); err != nil {
+			"✶ Compacting conversation…", false); err != nil {
 			return err
 		}
 		// F-34 review P1-3: Touch the receipt so the header

@@ -481,10 +481,18 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		})
 
 	case gateway.OutThinking:
-		// F-34: thinking is posted to the user message thread as
-		// a 💭 line so the main chat stays focused on the final
-		// answer. Falls back to a top-level send if ReplyTo is
-		// empty (orphan event, e.g. startup init).
+		// F-34: thinking is posted to the user message thread so
+		// the main chat stays focused on the final answer. Falls
+		// back to a top-level send if ReplyTo is empty (orphan
+		// event, e.g. startup init).
+		//
+		// F-think §3.1.2: thinking is rendered as a Feishu
+		// Card 2.0 with lark_md content (via
+		// postThreadMarkdownReply) so code blocks / lists /
+		// emphasis survive the round-trip. Plain text would
+		// collapse to raw markdown source in the chat. Long
+		// bodies are split into multiple div elements by
+		// F-37's splitMarkdownForDivs inside buildThinkingCard.
 		//
 		// F-34 review P1-3: also Touch the receipt so the main
 		// chat's receipt card header keeps ticking while the
@@ -494,7 +502,13 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// F-37: replyOnly=true keeps the 💭 line OUT of the main
 		// chat — it lives only in the thread so the receipt card
 		// (the pinned final answer) stays the main visible item.
-		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text, true); err != nil {
+		//
+		// Runtime gate (cmd/nightme/run.go::newEventHandler):
+		// when the chat has /think off, OutThinking is dropped
+		// before reaching this case. This case therefore assumes
+		// the chat wants thinking rendered — see docs/SPEC.md
+		// §3.1.2.
+		if err := a.postThreadMarkdownReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text, true); err != nil {
 			return err
 		}
 		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {

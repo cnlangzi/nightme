@@ -45,6 +45,7 @@ func (a *longLivedFakeAS) SendBlocks(context.Context, []agent.ContentBlock) erro
 	return nil
 }
 func (a *longLivedFakeAS) SendPermission(string) error { return nil }
+func (a *longLivedFakeAS) New(context.Context) error   { return nil }
 func (a *longLivedFakeAS) Close() error {
 	a.closeMu.Lock()
 	defer a.closeMu.Unlock()

@@ -45,6 +45,7 @@ func (r *recordingAgentSession) SendBlocks(_ context.Context, blocks []agent.Con
 	return nil
 }
 func (r *recordingAgentSession) SendPermission(_ string) error  { return nil }
+func (r *recordingAgentSession) New(_ context.Context) error    { return nil }
 func (r *recordingAgentSession) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

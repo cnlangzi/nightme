@@ -29,7 +29,8 @@
 |----|------|----------|--------|------|
 | F-32 | **Pi Coding Agent Bridge (`pi --mode rpc`)** — 真实 stdio pipes 长驻 JSONL；首期仅做 `get_state` + `prompt` + `agent_settled` turn 终态；不打通 Extension UI 飞书闭环；不实现 `/abort` | [feat/F-32-pi-rpc-bridge.md](./feat/F-32-pi-rpc-bridge.md) | v1.3 | 📝 设计阶段（文档评审中）|
 | F-33 | **ChatID 数据模型简化**（删 ChatType 抽象 + topic_group 不特殊处理 + ReplyTo = ParentId）| [feat/F-33-simplify-chatid-data-model.md](./feat/F-33-simplify-chatid-data-model.md) | v1.3.x | ✅ Docs 完成（代码 backlog）|
-| F-34 | **OutThinking / OutToolStart / OutToolEnd → Feishu thread reply + 类型感知摘要**（反转 §13.6 折叠方案）| [feat/F-34-tool-thread-routing.md](./feat/F-34-tool-thread-routing.md) | v1.3.x | 📝 Docs 完成（代码 backlog §3.1）|
+| F-34 | **`/new` slash command** — 不退进程重置 agent 对话上下文（对齐 claudecode `/clear` / pi 内置 `/new` / acp `session/new`）；可选 `/new <agent>` 精修粒度；清 InputBuffer | [feat/F-34-new-slash-command.md](./feat/F-34-new-slash-command.md) | v1.3.x | ✅ 已实现（Phase 3 review 完成）|
+| F-35 | **OutThinking / OutToolStart / OutToolEnd → Feishu thread reply + 类型感知摘要**（反转 §13.6 折叠方案；含 §1.4 抽象/具体边界规范的最终落地——OutboundMessage 100% typed，Meta + Reaction 死代码删除）| [feat/F-35-tool-thread-routing.md](./feat/F-35-tool-thread-routing.md) | v1.3.x | ✅ 已实现（9 commits / PR #31；review-clean）|
 
 **v1.2 关键变化**：
 - 删除：`/run` 命令（被 `/use` 替代）

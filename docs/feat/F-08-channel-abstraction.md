@@ -20,7 +20,7 @@
 
 **v1.3 接口瘦身**：Channel interface 从 8 个方法（v1.1 含 `CreateReceipt / UpdateReceipt / DisposeReceipt` + `ReceiptState` enum）缩减到 **5 个方法**（`Name / Start / Stop / Send / Incoming`）。Receipt FSM 整体从 Gateway 撤回，详见 SPEC §0.1 与 [`F-25-rolling-log.md`](./F-25-rolling-log.md)。
 
-**v1.3.x 扩展**:Channel 按 `OutboundKind` 自决 routing（Feishu 选 thread + 类型感知摘要，详见 [`F-34-tool-thread-routing.md`](./F-34-tool-thread-routing.md) + [`channel/feishu.md` §13.12](../channel/feishu.md)）。这是 "concrete stays concrete" 原则的具体落地：Gateway 只发 `OutboundMessage{Kind, ReplyTo, ...}`；Channel 看到 Kind 后自决 thread reply / receipt card / reaction。
+**v1.3.x 扩展**:Channel 按 `OutboundKind` 自决 routing（Feishu 选 thread + 类型感知摘要，详见 [`F-35-tool-thread-routing.md`](./F-35-tool-thread-routing.md) + [`channel/feishu.md` §13.12](../channel/feishu.md)）。这是 "concrete stays concrete" 原则的具体落地：Gateway 只发 `OutboundMessage{Kind, ReplyTo, ...}`；Channel 看到 Kind 后自决 thread reply / receipt card / reaction。
 
 ---
 
@@ -159,7 +159,7 @@ Channel **MUST**:
 | Manage its own internal receipt state (Feishu: message IDs, cardMsgID, entries; Slack: thread map; Web: DOM nodes) — fully Channel-private |
 | Render `OutMessageState` events as platform-native progress indicators (Feishu: AddReaction; Slack: emoji shortcode; Web: DOM class) |
 | Fail gracefully on `Send` errors (log warn; continue) — receipt UI must not block the agent event stream |
-| **v1.3.x: 自决按 OutboundKind 分流**（thread reply / receipt card / reaction / ...）— 自治范围内的渲染决策。例：Feishu 选 thinking/tool/compaction → thread reply（详见 [`F-34-tool-thread-routing.md`](./F-34-tool-thread-routing.md)）|
+| **v1.3.x: 自决按 OutboundKind 分流**（thread reply / receipt card / reaction / ...）— 自治范围内的渲染决策。例：Feishu 选 thinking/tool/compaction → thread reply（详见 [`F-35-tool-thread-routing.md`](./F-35-tool-thread-routing.md)）|
 
 ---
 
@@ -188,7 +188,7 @@ If you see references to `SendMessage` / `SendLongMessage` in older docs, they r
 | Receipt handle race（两个 goroutine 同时 PATCH 同一 receipt）| Channel 内部负责 lock（Feishu MessageReceipt 有 mu）；Gateway 不持有锁 |
 | Mention prefix（`@_user_N `）导致 slash command 解析失败 | Channel adapter 在构造 `Message.Text` 前 strip 开头的 `@bot_key ` / `@_all ` mention 前缀；中段 mention 不动（F-watch）|
 | Group 里用户未 @ bot 的消息 | `Message.HasMention = false`；Gateway dispatcher 根据 `ChatSession.WatchMode()` 决定 drop（`WatchModeMention`）或 pass（`WatchModeAll`）。DM 下 `HasMention` 永远为 true，gate 为 no-op（F-watch）|
-| OutThinking / OutToolStart / OutToolEnd 太多元素挤占 receipt card | **v1.3.x F-thread-route**: Feishu 把这些 Kind 路由到独立 thread reply（rootID = userMsgID），receipt card 收窄到只承载最终答复；详见 [`F-34-tool-thread-routing.md`](./F-34-tool-thread-routing.md)。其他 Channel 自决（折叠 section / 子节点 / drop）|
+| OutThinking / OutToolStart / OutToolEnd 太多元素挤占 receipt card | **v1.3.x F-thread-route**: Feishu 把这些 Kind 路由到独立 thread reply（rootID = userMsgID），receipt card 收窄到只承载最终答复；详见 [`F-35-tool-thread-routing.md`](./F-35-tool-thread-routing.md)。其他 Channel 自决（折叠 section / 子节点 / drop）|
 
 ---
 
@@ -244,7 +244,7 @@ If you see references to `SendMessage` / `SendLongMessage` in older docs, they r
 
 ## 10. Change log
 
-- **2026-08-04** — v1.3.x F-thread-route (SPEC §0.3): Channel 按 OutboundKind 自决 routing。Feishu 选 thread reply + 类型感知摘要(`OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCompaction` → thread;`OutText` / `OutResult` / `OutInit` / `OutUsage` → receipt card;`OutMessageState` / `OutCard` → 不变)。§4 contract 表更新 —— Meta 只承载数据载荷,不承载 routing hint;Channel 看到 Kind 后自决。详见 [`F-34-tool-thread-routing.md`](./F-34-tool-thread-routing.md) + [`channel/feishu.md` §13.12](../channel/feishu.md)。
+- **2026-08-04** — v1.3.x F-thread-route (SPEC §0.3): Channel 按 OutboundKind 自决 routing。Feishu 选 thread reply + 类型感知摘要(`OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCompaction` → thread;`OutText` / `OutResult` / `OutInit` / `OutUsage` → receipt card;`OutMessageState` / `OutCard` → 不变)。§4 contract 表更新 —— Meta 只承载数据载荷,不承载 routing hint;Channel 看到 Kind 后自决。详见 [`F-35-tool-thread-routing.md`](./F-35-tool-thread-routing.md) + [`channel/feishu.md` §13.12](../channel/feishu.md)。
 - **2026-08-03** — v1.3 (SPEC §0.1): remove `CreateReceipt / UpdateReceipt / DisposeReceipt` from Channel interface; remove `Receipt` / `ReceiptState` from `internal/receipt/receipt.go`. Receipt object is now entirely Channel-internal. Gateway stamps `OutboundMessage.ReplyTo = currentTurnUserMsgID`; Channel routes by userMsgID. Doc rewritten to reflect the 5-method interface and "abstract stays abstract, concrete stays concrete" principle.
 - **2026-08-03 (F-watch 增量)** — `InboundMessage.HasMention bool` 字段添加。Channel adapter 在 decode 时根据 `chat_type` + `Mentions` + `GetBotIdentity()` 计算；DM 永远 true；group 含 bot/@_all 时 true。Gateway dispatcher 入口根据 `cs.WatchMode()` 决定是否 drop 非 mention 群消息。Channel 不读 `WatchMode`，保持“不变式"。
 - **2026-08-02** — v1.1: add `CreateReceipt / UpdateReceipt / DisposeReceipt` + `ReceiptState` + `Receipt` opaque type. Channel becomes a pure renderer; receipt FSM state lives at Gateway. (Superseded by v1.3.)

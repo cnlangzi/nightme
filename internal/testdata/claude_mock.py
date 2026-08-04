@@ -19,6 +19,17 @@ import sys
 
 
 def extract_text(envelope: str) -> str:
+    # User messages: {"content":"...string..."}  (F-34 /clear path)
+    needle = '"content":"'
+    idx = envelope.find(needle)
+    if idx >= 0:
+        start = idx + len(needle)
+        end = envelope.find('"', start)
+        if end < 0:
+            return "empty"
+        raw = envelope[start:end]
+        return raw.replace('\\"', '"').replace('\\\\', '\\')
+    # Assistant text: {"text":"..."}
     needle = '"text":"'
     idx = envelope.find(needle)
     if idx < 0:
@@ -39,6 +50,34 @@ def log(msg: str) -> None:
 def emit(envelope: str) -> None:
     text = extract_text(envelope)
     log(f"got envelope, text={text!r}")
+
+    # F-34: /clear is honored as a slash command by real claude-code
+    # in stream-json mode (verified 2026-08-04). When the bridge
+    # sends {"type":"user","message":{"role":"user","content":"/clear"}},
+    # the real CLI fires a SessionStart:clear hook and emits a new
+    # system/init with a fresh session_id. The mock simulates this
+    # contract so claudecode.New can be tested end-to-end.
+    if text == "/clear":
+        sys.stdout.write(json.dumps({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "sess-after-clear-mock",
+        }) + "\n")
+        sys.stdout.flush()
+        sys.stdout.write(json.dumps({
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 1,
+            "duration_api_ms": 1,
+            "num_turns": 0,
+            "result": "",
+            "session_id": "sess-after-clear-mock",
+        }) + "\n")
+        sys.stdout.flush()
+        log("emitted clear: new init + empty result")
+        return
+
     # 1. assistant text
     sys.stdout.write(json.dumps({
         "type": "assistant",

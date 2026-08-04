@@ -406,6 +406,60 @@ func (s *session) SendPermission(resp string) error {
 	return s.writeLine(data)
 }
 
+// New resets the conversation context on the running session without
+// terminating the underlying process. F-34 §3.2.1 + Phase 3 final
+// verification 2026-08-04 (live claude binary, stream-json mode):
+//
+// Claude Code DOES honor the `/clear` slash command when sent as a
+// `user`-typed message in stream-json mode. Empirically observed:
+//
+//   - Round 1 (memory plant): {"type":"user","message":{"role":"user",
+//     "content":"Remember 77777"}} → assistant returned "REMEMBERED"
+//   - Round 2 (recall):        → assistant returned "77777"
+//   - Round 3 (/clear):         {"type":"user","message":{"role":"user",
+//     "content":"/clear"}} → claude fired SessionStart:clear hook +
+//     generated a NEW session_id + emitted a fresh init event
+//   - Round 4 (recall):         → assistant returned "NONE"  ← memory cleared
+//
+// Other candidate paths were verified to NOT work:
+//   - {"type":"control","control":{"type":"clear"|"reset"|"rewind"|"compact"
+//     |"new_session"|"exit"}} are silently dropped (no new init,
+//     no new session_id, no memory change).
+//   - raw bytes "/clear\n" to stdin is malformed JSON and either
+//     errors or is dropped by the parser.
+//
+// Therefore: write a properly-structured user message whose content
+// is literally "/clear" via writeLine. In-process reset: process
+// stays alive, transport stays open, Events() stays open, PID stays
+// the same. The bridge emits a new `system/init` event with the
+// new session_id which the runtime picks up via SetResumeID
+// (cmd/nightme/run.go newEventHandler).
+func (s *session) New(ctx context.Context) error {
+	if s.closed == nil {
+		return fmt.Errorf("claudecode: session not initialized")
+	}
+	select {
+	case <-s.closed:
+		return fmt.Errorf("claudecode: session closed")
+	default:
+	}
+	// {"type":"user","message":{"role":"user","content":"/clear"}}
+	payload := []byte(`{"type":"user","message":{"role":"user","content":"/clear"}}`)
+	if err := s.writeLine(payload); err != nil {
+		return err
+	}
+	// F-34 review C3 (known limitation): writeLine returns before
+	// claude actually processes /clear and emits the fresh system/init.
+	// The /new handler therefore replies "Reset 1/1" to the user
+	// while the actual reset is still in flight (typically <100ms).
+	// In practice the user's next message latency is much larger
+	// than this window, so the impact is minimal. A proper fix would
+	// require piping an ack channel through pumpStream so the
+	// readPump signals "fresh init observed" — out of scope for
+	// this PR; documented as a follow-up.
+	return nil
+}
+
 // Close terminates the session: closes stdin (so the child sees EOF
 // and exits cleanly), waits briefly for graceful shutdown, then
 // SIGKILLs if necessary. Idempotent.

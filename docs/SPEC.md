@@ -224,6 +224,92 @@ type OutboundMessage struct {
 
 ---
 
+### 0.6 文档变更摘要（v1.3.x F-think 增量，2026-08-04）
+
+**背景**：F-thread-route 把 OutThinking / OutToolStart / OutToolEnd / OutCompaction 投到飞书 thread。OutThinking 当前用 plain text（`postThreadReply`）渲染，代码块 / 列表 / 加粗全部丢失；同时用户没有 per-chat 控制 thinking 是否显示的开关。F-think 同时解决这两点：
+
+**增量变化**：
+
+1. **OutThinking → 飞书 lark_md card**
+   - 新 helper：`internal/channel/feishu/thinking_card.go` 的 `buildThinkingCard` + `postThreadMarkdownReply`
+   - 把 OutThinking 包成 `Card 2.0 interactive` + 单/多 `lark_md` div elements
+   - 长内容走 F-37 `splitMarkdownForDivs` 自动按 lark_md div 硬限切分，保留 code block 原子性
+   - 其他 OutboundKind（OutToolStart / OutToolEnd / OutCompaction）继续走 plain text `postThreadReply`（它们本身就是单行摘要，markdown 化没意义）
+
+2. **新增 `ThinkMode` per-chat 状态**
+   - `ChatSession.ThinkMode`：`ThinkModeShow`（默认，forward OutThinking）/ `ThinkModeHide`（EventHandler gate 丢弃 OutThinking）
+   - `ChatSessionEntry.ThinkMode` 持久化字段（Go JSON 容忍缺失）
+   - setter `ChatSession.SetThinkMode` + getter `ChatSession.ThinkMode()`
+
+3. **新增 `/think on|off` slash command**
+   - 三种调用：`/think on`、`/think off`、`/think`（无参 = 显示状态）
+   - 在 Gateway dispatcher 与 `/cwd` `/use` `/kill` `/watch` `/new` 同源
+   - 接受别名：`show`/`hide`（语义更准确）
+
+4. **新增 runtime EventHandler gate**
+   - 位置：`cmd/nightme/run.go::newEventHandler`，在 Translate + ReplyTo 戳印完成后、`ch.Send` 之前
+   - 当 `cs.ThinkMode() == ThinkModeHide && out.Kind == OutThinking` → 静默丢弃 + debug log
+   - 其他 OutboundKind 不受影响（OutText / OutResult / OutToolStart / OutToolEnd / OutCompaction / OutInit / OutUsage 全部照旧）
+   - 失败开放：ChatSession lookup miss 时仍投递（不静默丢数据）
+
+**v1.3.x 不变式保留**：
+- `ChatSession` 不 import `channel/feishu`（不变）
+- Channel 接口不暴露 ThinkMode / ChatSession（不变）
+- `OutboundMessage` 字段不变（markdown 是 Feishu 渲染层决定，抽象契约仍是 primitive string）
+- 抽象归抽象 / 具体归具体原则保留（markdown 渲染是 Channel 自决）
+- §1.4 边界规范：thinking content 跨层仍是 string primitive；Feishu 自决是否包装成 lark_md
+
+**为什么不叫 v2.0**：v1.3 核心不变式全部保留。F-think 是：(a) 一个新 per-chat toggle（镜像 F-watch 的模式），(b) 一个 OutThinking 渲染升级（不引入新 Kind、不动 Gateway / ChatSession）。两件事都在 v1.3.x 范畴内。
+
+**详细落地**：见 `internal/registry/think_mode.go` + `internal/chatsession/thinkmode.go` + `internal/gateway/handlers_think.go` + `cmd/nightme/run.go::newEventHandler` + `internal/channel/feishu/thinking_card.go`。
+
+---
+
+### 0.7 文档变更摘要（v1.3.x F-38 增量，2026-08-04）
+
+**背景**：F-thread-route 把 `OutToolStart` / `OutToolEnd` 都投到飞书 thread，每个 tool 产生**两条**独立 thread reply（先 `● Tool(args)` 再 `⎿  …`）。一次 agent turn 调 10 个工具 = 20 条 thread reply，视觉噪声 + 限速成本都很高。同时用户没有 per-chat 开关控制工具调用是否显示——既不能选择 plain text vs 合并格式，也不能选择看 vs 不看。F-38 同时解决这两点。
+
+**增量变化**：
+
+1. **OutToolStart + OutToolEnd 合并为同一条 thread reply**
+   - 飞书 adapter 维护 per-turn `userMsgID → FIFO(startMsgID, startBody)` 缓冲（`toolEventBuf`）
+   - OutToolStart 发新 thread reply，记下 `startMsgID`
+   - OutToolEnd 用 `startMsgID` PATCH 同一 reply（飞书 `PUT /im/v1/messages/{id}` 支持 text 类型 thread reply 就地编辑）
+   - merged body = startBody + "\n" + resultBody；用户看到一条 thread reply 同时含 call + result
+   - 失败开放：orphan End（buffer miss）或 PATCH 失败 → 走原 `postThreadReply` fallback 发新 thread reply，不静默丢数据
+   - **不动** `OutboundMessage` 契约 / Gateway / ChatSession；完全是 Feishu adapter 自治的渲染细节
+
+2. **新增 `ToolsMode` per-chat 状态**
+   - `ChatSession.ToolsMode`：`ToolsModeHide`（默认，runtime 丢弃 `OutToolStart` 和 `OutToolEnd`）/ `ToolsModeShow`（runtime 透传，Feishu adapter 走合并路径）
+   - `ChatSessionEntry.ToolsMode` 持久化字段（Go JSON 容忍缺失）
+   - setter `ChatSession.SetToolsMode` + getter `ChatSession.ToolsMode()`
+
+3. **新增 `/tools on|off` slash command**
+   - 三种调用：`/tools on`、`/tools off`、`/tools`（无参 = 显示状态）
+   - 在 Gateway dispatcher 与 `/cwd` `/use` `/kill` `/watch` `/think` `/new` 同源
+   - 接受别名：`show`/`hide`（语义更准确）
+   - 默认值方向与 `/think` **相反**：`/think` 默认 Show（保留 F-thread-route 现有 UX），`/tools` 默认 Hide（quiet by default；用户主动 opt-in 看工具调用）
+
+4. **新增 runtime EventHandler gate**
+   - 位置：`cmd/nightme/run.go::newEventHandler`，紧跟现有 ThinkMode gate
+   - 当 `cs.ToolsMode() == ToolsModeHide && (out.Kind == OutToolStart || out.Kind == OutToolEnd)` → 静默丢弃 + info log
+   - 其他 OutboundKind 不受影响（OutText / OutResult / OutThinking / OutCompaction / OutInit / OutUsage 全部照旧）
+   - 失败开放：ChatSession lookup miss 时仍投递（不静默丢数据）
+   - 与 ThinkMode gate 正交：两个 gate 可独立配置
+
+**v1.3.x 不变式保留**：
+- `ChatSession` 不 import `channel/feishu`（不变）
+- Channel 接口不暴露 ToolsMode / ChatSession（不变；合并是 Feishu adapter 自治）
+- `OutboundMessage` 字段不变（合并是 Feishu 渲染层决定，抽象契约仍是 primitive ToolInfo）
+- 抽象归抽象 / 具体归具体原则保留（thread 合并是 Channel 自决）
+- §1.4 边界规范：tool 概念跨层仍是 typed ToolInfo；Feishu 自决是否合并
+
+**为什么不叫 v2.0**：v1.3 核心不变式全部保留。F-38 是：(a) 一个新 per-chat toggle（镜像 F-think 的模式，但默认方向相反），(b) 一个 OutToolStart/End 渲染升级（不引入新 Kind、不动 Gateway / ChatSession；纯 Channel 自治的 PATCH 合并）。两件事都在 v1.3.x 范畴内。
+
+**详细落地**：见 `internal/registry/tools_mode.go` + `internal/chatsession/toolsmode.go` + `internal/gateway/handlers_tools.go` + `cmd/nightme/run.go::newEventHandler` + `internal/channel/feishu/tool_thread_merge.go` + `internal/channel/feishu/adapter.go::Send`。
+
+---
+
 ## 1. 架构总览
 
 nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以下**逻辑组件**组成：
@@ -815,6 +901,98 @@ ChatSession 分**三层状态**——但**三层状态的所有权清晰分离**
 - ChatSession: 持有 `WatchMode` 状态 + 提供 setter
 
 **详细落地**：见 [`feat/F-08-channel-abstraction.md`](./feat/F-08-channel-abstraction.md) §Message 字段 + [`channel/feishu.md`](./channel/feishu.md) §6.7 mention strip。
+
+### 3.1.2 ThinkMode：per-chat thinking 内容显示开关（F-think）
+
+**问题**：F-thread-route 把 OutThinking 投到飞书 thread 后用户无法关闭 —— 既不能选择 plain text vs markdown，也不能选择看 vs 不看。F-think 让 nightme 侧接管这两个决定权。
+
+**方案**：per-chat `ThinkMode` 字段，默认 `ThinkModeShow`（runtime 投递 OutThinking，由 Feishu adapter 渲染成 lark_md card），`/think off` 切到 `ThinkModeHide`（runtime 在 EventHandler gate 丢弃 OutThinking）。
+
+| 模式 | 含义 | 触发 |
+|------|------|------|
+| `ThinkModeShow`（默认）| OutThinking 投递到 Channel，渲染为飞书 lark_md thread card | `/think on` |
+| `ThinkModeHide` | EventHandler gate 静默丢弃 OutThinking，其他 OutboundKind 不受影响 | `/think off` |
+
+**渲染细节（F-think §3.1.2.1）**：当 `ThinkMode=Show` 且 ChatType=Feishu，OutThinking 由 `internal/channel/feishu/thinking_card.go` 渲染：
+
+```
+buildThinkingCard("💭 <text>")  →  Card 2.0 JSON
+  { config: {wide_screen_mode: true},
+    elements: [{tag:"div", text:{tag:"lark_md", content:"💭 <text>"}}] }
+```
+
+长内容（> 1000 runes）自动按 F-37 `splitMarkdownForDivs` 切多 div，code block 整块保留。Echo / Web 等其他 Channel 仍可自由决定如何渲染 `OutboundMessage.Text`（不动抽象契约）。
+
+**Channel 自管 chat 语义的不变式保留**：
+- `ThinkMode` 字段挂在 `ChatSession`，**不**在 `Message` / `OutboundMessage` / Channel interface
+- Channel adapter 不知道 `ThinkMode`，由 runtime EventHandler 在出站前决定
+- Chat type（DM/group/topic_group）**不**进 nightme 数据模型（沿用 F-33 不变式）
+- `OutboundMessage` schema 不变：`Text string` 仍是 primitive，Channel 自决 markdown 化
+
+**DM 不受 `ThinkMode` 影响的不变式**：
+- DM chat 下 `/think off` 仍按 Hide 处理 OutThinking —— 与 `/watch off` 不同（`/watch` 在 DM 下因 HasMention 恒为 true 而永远不丢消息，`/think` 是 Outbound 维度，与 HasMention 解耦）
+- `ThinkMode` 字段在 DM 下被写入仅为保留用户偏好
+
+**Slash command**：`/think on` / `/think off` / `/think`（无参 = 显示状态）。handler 由 Gateway dispatcher 处理,跟 `/cwd` `/use` `/kill` `/watch` `/new` 同一路径。接受别名：`show`/`hide`。
+
+**持久化**：`ChatSessionEntry.ThinkMode` 字段（默认 `ThinkModeShow`）。Go JSON unmarshal 容忍缺失字段，旧 `chat_sessions.json` 无 `thinkMode` 字段时安全 fallback 到默认（与 WatchMode 设计完全镜像，但默认值方向相反 —— WatchMode 是"安全 = 少收"= Mention 默认；ThinkMode 是"安全 = 不动现有行为"= Show 默认）。
+
+**职责边界**：
+- ChatSession：持有 `ThinkMode` 状态 + 提供 setter
+- runtime EventHandler（`cmd/nightme/run.go::newEventHandler`）：gate 决策点，读 `cs.ThinkMode()`
+- Channel adapter：照常处理到达的 OutboundMessage，不感知 ThinkMode
+
+**详细落地**：见 [`internal/gateway/handlers_think.go`](./internal/gateway/handlers_think.go) + [`cmd/nightme/run.go::newEventHandler`](./cmd/nightme/run.go) + [`internal/channel/feishu/thinking_card.go`](./internal/channel/feishu/thinking_card.go)。
+
+### 3.1.3 ToolsMode：per-chat 工具调用显示开关 + 合并渲染（F-38）
+
+**问题**：F-thread-route 把 `OutToolStart` / `OutToolEnd` 都投到飞书 thread，每个 tool 产生**两条**独立 thread reply（先 `● Tool(args)` 再 `⎿  …`）。一次 agent turn 调 10 个工具 = 20 条 thread reply，视觉噪声 + 限速成本都很高。同时用户没有 per-chat 开关控制工具调用是否显示。F-38 同时解决这两点：(a) 合并渲染——每对 tool 是**一条** thread reply，不是两条；(b) per-chat toggle 控制工具调用是否可见。
+
+**方案**：per-chat `ToolsMode` 字段，默认 `ToolsModeHide`（runtime 丢弃 `OutToolStart` 和 `OutToolEnd`），`/tools on` 切到 `ToolsModeShow`（runtime 透传，Feishu adapter 走合并路径）。合并策略：在 Feishu adapter 内为每个 turn 维护 `userMsgID → FIFO(startMsgID, startBody)` 缓冲，OutToolStart 发新 thread reply 时记下 message_id，OutToolEnd 到达时用 PATCH 同一 reply 把 result 行追加进去。
+
+| 模式 | 含义 | 触发 |
+|------|------|------|
+| `ToolsModeHide`（默认）| EventHandler gate 静默丢弃 `OutToolStart` 和 `OutToolEnd`，其他 OutboundKind 不受影响 | `/tools off`（或 default） |
+| `ToolsModeShow` | Runtime 透传 `OutToolStart` / `OutToolEnd`；Feishu adapter 走合并路径——Start 发新 thread reply + 记下 msg_id，End 用 PATCH 同一 reply 追加 result 行 | `/tools on` |
+
+**渲染细节（F-38 §3.1.3.1）**：当 `ToolsMode=Show` 且 ChatType=Feishu，OutToolStart 和 OutToolEnd 由 `internal/channel/feishu/tool_thread_merge.go` 合并：
+
+```
+postThreadReplyWithID("● Bash(ls)")      →  message_id = om_xxx
+                                            (push FIFO: userMsgID → (om_xxx, "● Bash(ls)"))
+
+... tool returns ...
+
+mergeToolReply(om_xxx, "● Bash(ls)\n⎿  💻 Bash → 3 lines")
+                                            →  Feishu PATCH om_xxx with merged body
+```
+
+长工具名 / 长 args 走现有 `formatToolStartCall` 的 rune-safe truncate；长 result 由 `summarizeToolResult` 单行摘要（无 PII leak）。Echo / Web 等其他 Channel 仍可自由决定如何渲染 `OutboundMessage.Tool`（不动抽象契约）。
+
+**Channel 自管 chat 语义的不变式保留**：
+- `ToolsMode` 字段挂在 `ChatSession`，**不**在 `Message` / `OutboundMessage` / Channel interface
+- Channel adapter 不知道 `ToolsMode`，由 runtime EventHandler 在出站前决定
+- Chat type（DM/group/topic_group）**不**进 nightme 数据模型（沿用 F-33 不变式）
+- `OutboundMessage` schema 不变：`Tool *ToolInfo` 仍是 typed primitive，Channel 自决合并 vs 分开发
+- 合并 vs 分开发是 **Channel 自治**的渲染细节——`Gateway` 不持有"thread 怎么聚合"的决策
+
+**DM 不受 `ToolsMode` 影响的语义**：
+- DM chat 下 `/tools off` 仍按 Hide 处理 `OutToolStart` / `OutToolEnd` —— 与 `/watch off` 不同（`/watch` 在 DM 下因 HasMention 恒为 true 而永远不丢消息，`/tools` 是 Outbound 维度，与 HasMention 解耦）
+- `ToolsMode` 字段在 DM 下被写入仅为保留用户偏好
+
+**Slash command**：`/tools on` / `/tools off` / `/tools`（无参 = 显示状态）。handler 由 Gateway dispatcher 处理，跟 `/cwd` `/use` `/kill` `/watch` `/think` `/new` 同一路径。接受别名：`show`/`hide`。
+
+**默认方向（vs `/think`）**：`/think` 默认 Show（保留 F-thread-route 现有 UX —— 默认让用户看到 thinking）；`/tools` 默认 Hide（quiet by default —— 工具调用是 agent progress stream 中最吵的部分，多数用户不要；opt-in 才显示）。两者方向相反但都是"safe default"的不同解读。
+
+**持久化**：`ChatSessionEntry.ToolsMode` 字段（默认 `ToolsModeHide`）。Go JSON unmarshal 容忍缺失字段，旧 `chat_sessions.json` 无 `toolsMode` 字段时安全 fallback 到默认（与 WatchMode / ThinkMode 设计完全镜像）。
+
+**职责边界**：
+- ChatSession：持有 `ToolsMode` 状态 + 提供 setter
+- runtime EventHandler（`cmd/nightme/run.go::newEventHandler`）：gate 决策点，读 `cs.ToolsMode()`；仅对 `OutToolStart` / `OutToolEnd` 生效
+- Channel adapter：照常处理到达的 OutboundMessage，不感知 ToolsMode；Feishu 自决是否合并
+- 合并实现：Feishu adapter 自治（`internal/channel/feishu/tool_thread_merge.go`）；不动抽象层
+
+**详细落地**：见 [`internal/registry/tools_mode.go`](./internal/registry/tools_mode.go) + [`internal/chatsession/toolsmode.go`](./internal/chatsession/toolsmode.go) + [`internal/gateway/handlers_tools.go`](./internal/gateway/handlers_tools.go) + [`cmd/nightme/run.go::newEventHandler`](./cmd/nightme/run.go) + [`internal/channel/feishu/tool_thread_merge.go`](./internal/channel/feishu/tool_thread_merge.go) + [`internal/channel/feishu/adapter.go::Send`](./internal/channel/feishu/adapter.go)。
 
 ### 3.2 状态转换触发器（v1.2）
 

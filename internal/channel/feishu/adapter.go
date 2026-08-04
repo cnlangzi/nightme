@@ -63,6 +63,18 @@ type sendMessageFunc func(ctx context.Context, chatID, msgType, content, rootID 
 // §3.4 for the rationale).
 type updateMessageFunc func(ctx context.Context, messageID, content string) error
 
+// mergeTextMessageFunc is the F-38 §3.1.3 in-place update boundary
+// for the tool-merge path. Unlike updateMessageFunc (which goes via
+// SDK Patch + card envelope), mergeTextMessageFunc edits a *text*
+// thread reply in place via SDK Update + text envelope, so the two
+// paths cannot share the same hook.
+//
+// Kept behind a function field so tests can replace the network call
+// with a small in-memory stub without instantiating a larkClient.
+// See internal/channel/feishu/tool_thread_merge.go for the merge
+// flow.
+type mergeTextMessageFunc func(ctx context.Context, messageID, merged string) error
+
 // Adapter is the Feishu implementation of channel.Channel.
 //
 // The SDK's WebSocket Start method blocks for the lifetime of the connection,
@@ -143,12 +155,35 @@ type Adapter struct {
 	// ChatSession lifetime and are evicted only on adapter stop.
 	messageStates map[string]agent.MessageState
 
+	// toolEventBuf (F-38 §3.1.3) tracks in-flight OutToolStart
+	// thread replies so the matching OutToolEnd can PATCH the
+	// same message with the merged body (start line + result
+	// line) instead of posting a second thread reply. Keyed by
+	// userMsgID (= ReplyTo = currentTurnUserMsgID per SPEC §2.2);
+	// FIFO per userMsgID because stream-json's tool_use →
+	// tool_result pairs are strictly ordered. Lifecycle: entries
+	// are pushed on OutToolStart, popped on the matching
+	// OutToolEnd, and cleared on turn end (clearToolEvents) or
+	// adapter stop (clearAllToolEvents).
+	//
+	// Concurrency: reads/writes go through a.mu. Same lock as
+	// receipts / messageStates — adapter.Send is single-threaded
+	// per ChatSession (SPEC §1.3), so contention is non-issue.
+	toolEventBuf map[string][]toolEventEntry
+
 	// These hooks have production defaults and are intentionally kept as
 	// fields so tests can replace the network boundary with a small function.
 	wsStart    func(context.Context) error
 	wsClose    func()
 	sendFunc   sendMessageFunc
 	updateFunc updateMessageFunc
+	// mergeTextFunc (F-38 §3.1.3) is the hookable boundary for the
+	// tool-merge PATCH path. Wired in NewAdapter to
+	// mergeTextViaUpdate; tests can replace to inject stubs
+	// without instantiating a larkClient. Separate from
+	// updateFunc because the two update paths use different SDK
+	// methods (Update for text, Patch for cards).
+	mergeTextFunc mergeTextMessageFunc
 
 	// F-watch §6.10: lazy-cached bot open_id for mention strip /
 	// HasMention detection. Populated on first inbound by
@@ -227,6 +262,11 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	a.wsClose = a.client.Close
 	a.sendFunc = a.sendViaLark
 	a.updateFunc = a.updateViaLark
+	// F-38 §3.1.3: tool-merge PATCH path. mergeTextFunc defaults
+	// to mergeTextViaUpdate (a thin wrapper around UpdateMessage)
+	// so callers can mock via the field without instantiating a
+	// larkClient. Distinct from updateFunc (card PATCH).
+	a.mergeTextFunc = a.mergeTextViaUpdate
 
 	// F-35: 全局共享 token bucket（保守 5 QPS / burst 1）。
 	// 进程内单实例，覆盖所有 5 类飞书出口 API。
@@ -361,6 +401,15 @@ func (a *Adapter) Stop(ctx context.Context) error {
 		a.incomingClosed = true
 	}
 	a.mu.Unlock()
+
+	// F-38 §3.1.3: release all per-turn tool-merge state on
+	// shutdown. Any in-flight tool pairs (Start posted, End
+	// never arrived — agent crashed mid-turn) lose their PATCH
+	// target; the underlying thread replies remain posted and
+	// visible to the user (we just don't try to merge them
+	// after restart). Cheap; not on the hot path.
+	a.clearAllToolEvents()
+
 	return waitErr
 }
 
@@ -371,14 +420,14 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 // each OutboundKind to the corresponding Feishu API call:
 //
 //	OutText              → CreateMessage (msg_type=text)
-//	OutToolStart/End     → folded into the per-chat receipt via the
-//	                       existing UpdateMessage flow (card PATCH);
-//	                       this path is taken by the Feishu channel's
-//	                       display strategy (Stage 3 migrates the
-//	                       receipt-rendering logic here). Stage 1's
-//	                       Send handles OutText directly so the
-//	                       existing /help / /use paths keep
-//	                       working.
+//	OutToolStart/End     → F-34 thread-reply as the "● Tool(args)"
+//	                       / "⎿  …" Claude Code-style lines. F-38
+//	                       §3.1.3: each Start posts a fresh thread
+//	                       reply; the matching End PATCHes that same
+//	                       reply with start body + "\n" + result body
+//	                       (one thread reply per tool, not two).
+//	                       Orphan Ends + PATCH failures fall back to
+//	                       posting a fresh result thread reply.
 //	OutMessageState      → AddReaction on MessageState.MessageID
 //	                       with state-specific emoji_type (F-31 §8.3).
 //	                       Idempotency via a.messageStates map.
@@ -481,10 +530,18 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		})
 
 	case gateway.OutThinking:
-		// F-34: thinking is posted to the user message thread as
-		// a 💭 line so the main chat stays focused on the final
-		// answer. Falls back to a top-level send if ReplyTo is
-		// empty (orphan event, e.g. startup init).
+		// F-34: thinking is posted to the user message thread so
+		// the main chat stays focused on the final answer. Falls
+		// back to a top-level send if ReplyTo is empty (orphan
+		// event, e.g. startup init).
+		//
+		// F-think §3.1.2: thinking is rendered as a Feishu
+		// Card 2.0 with lark_md content (via
+		// postThreadMarkdownReply) so code blocks / lists /
+		// emphasis survive the round-trip. Plain text would
+		// collapse to raw markdown source in the chat. Long
+		// bodies are split into multiple div elements by
+		// F-37's splitMarkdownForDivs inside buildThinkingCard.
 		//
 		// F-34 review P1-3: also Touch the receipt so the main
 		// chat's receipt card header keeps ticking while the
@@ -494,7 +551,13 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// F-37: replyOnly=true keeps the 💭 line OUT of the main
 		// chat — it lives only in the thread so the receipt card
 		// (the pinned final answer) stays the main visible item.
-		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text, true); err != nil {
+		//
+		// Runtime gate (cmd/nightme/run.go::newEventHandler):
+		// when the chat has /think off, OutThinking is dropped
+		// before reaching this case. This case therefore assumes
+		// the chat wants thinking rendered — see docs/SPEC.md
+		// §3.1.2.
+		if err := a.postThreadMarkdownReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text, true); err != nil {
 			return err
 		}
 		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
@@ -592,16 +655,29 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// Claude Code's terminal UX. The receipt card no
 		// longer carries tool entries.
 		//
-		// Two-line UX: OutToolStart posts `● Tool(args)`;
-		// OutToolEnd posts the matching `⎿  …` result line.
-		// The user sees the call appear immediately and the
-		// result land in the same thread when the tool returns.
+		// F-38 §3.1.3: ONE-thread-reply UX. We post the call
+		// line here and remember its Feishu message_id. When
+		// the matching OutToolEnd arrives, we PATCH the same
+		// reply with the merged body (start body + newline +
+		// result body) instead of posting a second thread
+		// reply. See tool_thread_merge.go for the buffer
+		// mechanics.
+		//
+		// F-37: replyOnly=true — `● Tool(args)` lives in the
+		// thread, not the main chat. Receipt card stays the
+		// pinned answer.
 		body := formatToolStartCall(toolName(msg), toolArgs(msg))
-		// F-37: replyOnly=true — `● Tool(args)` lives in the thread,
-		// not the main chat. Receipt card stays the pinned answer.
-		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body, true); err != nil {
+		startMsgID, err := a.postThreadReplyWithID(ctx, msg.ChatID, msg.ReplyTo, body, true)
+		if err != nil {
 			return err
 		}
+		// F-38: remember the start msg_id so OutToolEnd can
+		// PATCH it. pushToolStart is a no-op when startMsgID is
+		// empty (orphan path — rootID was "" → sendRawOutText
+		// fallback → no msg_id to PATCH). On the next End the
+		// buffer miss will route through the fallback path
+		// below (postThreadReply as fresh thread reply).
+		a.pushToolStart(msg.ReplyTo, startMsgID, body)
 		// F-34 review P1-3: Touch the receipt so the header
 		// keeps ticking while tools run.
 		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
@@ -615,13 +691,49 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// of Claude Code's two-line UX. Args are NOT included
 		// here — they live on the preceding call line from
 		// OutToolStart.
+		//
+		// F-38 §3.1.3: instead of posting a fresh thread reply,
+		// try to PATCH the preceding OutToolStart's reply with
+		// the merged body. On hit, the user sees a single
+		// reply containing both call and result. On miss
+		// (orphan End — buffer empty) or PATCH failure, fall
+		// back to posting the result as a fresh thread reply
+		// so the data is never silently dropped.
 		var toolErr error
 		if msg.Tool != nil {
 			toolErr = msg.Tool.Err
 		}
-		body := summarizeToolResult(toolName(msg), toolOutput(msg), toolErr)
-		// F-37: replyOnly=true — `⎿  …` result line lives in the thread.
-		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body, true); err != nil {
+		resultBody := summarizeToolResult(toolName(msg), toolOutput(msg), toolErr)
+		entry, ok := a.popToolStart(msg.ReplyTo)
+		if ok {
+			merged := entry.startBody + "\n" + resultBody
+			// Wrap in transient retry (F-36) — PATCH can hit
+			// timeout / EOF just like Create; a transient
+			// blip shouldn't drop the merged result. After
+			// retry exhaustion the caller falls through to
+			// the fresh-thread-reply fallback below.
+			mergeErr := a.mergeToolReply(ctx, entry.startMsgID, merged)
+			if mergeErr == nil {
+				// F-34 review P1-3: Touch the receipt so the
+				// header keeps ticking while tools run.
+				if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
+					_ = r.Touch(ctx)
+				}
+				return nil
+			}
+			// PATCH failed (retry exhausted or non-transient).
+			// Log + fall through to fallback so the result
+			// isn't lost.
+			a.logger.Warn("feishu: tool merge PATCH failed, falling back to fresh thread reply",
+				"chat_id", msg.ChatID,
+				"user_msg_id", msg.ReplyTo,
+				"start_msg_id", entry.startMsgID,
+				"err", mergeErr)
+		}
+		// Fallback: post resultBody as a fresh thread reply.
+		// Same path as pre-F-38 behaviour; preserves visibility
+		// when the merge can't happen.
+		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, resultBody, true); err != nil {
 			return err
 		}
 		// F-34 review P1-3: Touch the receipt so the header
@@ -804,6 +916,38 @@ func (a *Adapter) postThreadReply(ctx context.Context, chatID, rootID, body stri
 	}
 	_, err := a.SendMessageText(ctx, chatID, body, rootID, replyOnly)
 	return err
+}
+
+// postThreadReplyWithID is the F-38 §3.1.3 sibling of
+// postThreadReply that returns the freshly-posted Feishu
+// message_id so the caller can PATCH it later (tool merge path).
+// On the orphan path (rootID == "") or any send failure, returns
+// ("", err) — empty message_id signals "nothing to PATCH" to
+// callers.
+//
+// Returns (msgID, err). err is non-nil only when the underlying
+// SDK call failed; the (msgID == "") case is a successful
+// fallback (sendRawOutText) and err is nil — caller decides
+// whether to pushToolStart based on msgID emptiness, not on err.
+//
+// Limiter ordering is identical to postThreadReply: Wait() FIRST,
+// then any work. Rationale same as the sibling helper (limiter
+// check is cheap; SDK call is expensive).
+func (a *Adapter) postThreadReplyWithID(ctx context.Context, chatID, rootID, body string, replyOnly bool) (string, error) {
+	if a.threadReplyLimiter != nil {
+		if err := a.threadReplyLimiter.Wait(ctx, chatID); err != nil {
+			a.logger.Warn("feishu: thread reply rate-limited",
+				"chat_id", chatID, "err", err)
+			return "", err
+		}
+	}
+	if rootID == "" {
+		// Orphan: sendRawOutText returns "" message_id and nil
+		// err on success — caller (pushToolStart) treats empty
+		// msgID as a no-op.
+		return "", a.sendRawOutText(ctx, chatID, body)
+	}
+	return a.SendMessageText(ctx, chatID, body, rootID, replyOnly)
 }
 
 // threadReplyLimiter is a per-key (chatID) simple next-allowed-send

@@ -57,6 +57,29 @@ type ChatSession struct {
 	// for group chats via the channel-supplied HasMention bool.
 	watchMode WatchMode
 
+	// F-think §3.1.2: per-chat thinking-content visibility. Default
+	// ThinkModeShow (runtime forwards OutThinking to the Channel,
+	// which renders it as a lark_md card in the user-message
+	// thread); /think off switches to ThinkModeHide (runtime
+	// drops OutThinking at the EventHandler gate). Unlike
+	// WatchMode this is chat-type-independent — DMs and group
+	// chats behave identically. See docs/SPEC.md §3.1.2.
+	thinkMode ThinkMode
+
+	// F-38 §3.1.3: per-chat tool-event visibility. Default
+	// ToolsModeHide (runtime drops OutToolStart and OutToolEnd at
+	// the EventHandler gate — tool spam is the loudest part of
+	// the agent progress stream and most users do not want it by
+	// default); /tools on switches to ToolsModeShow (Feishu
+	// adapter merges each pair into a single thread reply via
+	// PATCH on the same message_id). Like ThinkMode and unlike
+	// WatchMode, this is chat-type-independent — DMs and group
+	// chats behave identically. See docs/SPEC.md §3.1.3. The
+	// default direction is OPPOSITE of ThinkMode's: ThinkMode's
+	// zero value is Show (preserve existing F-thread-route UX);
+	// ToolsMode's zero value is Hide (quiet by default; opt in).
+	toolsMode agent.ToolsMode
+
 	// Pool of AgentSessions keyed by (agent, cwd).
 	pool map[agentCwdKey]*AgentSession
 
@@ -140,6 +163,8 @@ func New(chatID, primaryAgent string) *ChatSession {
 		primaryAgent:     primaryAgent, // historical snapshot, read-only
 		pool:             make(map[agentCwdKey]*AgentSession),
 		watchMode:        WatchModeMention, // F-watch default
+		thinkMode:        ThinkModeShow,    // F-think default
+		toolsMode:        agent.ToolsModeHide, // F-38 default (quiet by default)
 		createdAt:        time.Now(),
 		lastInteractionAt: time.Now(),
 	}
@@ -223,6 +248,30 @@ func (cs *ChatSession) SetWatchMode(mode WatchMode) error {
 	return nil
 }
 
+// SetThinkMode changes the per-chat thinking-content visibility.
+// Persists to registry on success so /think off survives daemon
+// restart. No spawn / kill / re-dispatch side effects.
+//
+// State semantics:
+//   - ThinkModeShow — runtime forwards every OutThinking event to
+//     the Channel (rendered as a lark_md card in the user-message
+//     thread; see internal/channel/feishu/thinking_card.go).
+//   - ThinkModeHide — runtime drops OutThinking events at the
+//     EventHandler gate (after Translate + ReplyTo stamping,
+//     before ch.Send). Other OutboundKinds are unaffected.
+//
+// Concurrency: same pattern as SetWatchMode — take ChatSession
+// mutex, write, persist, release. The lock is NOT held across
+// any channel.Send reply call.
+func (cs *ChatSession) SetThinkMode(mode ThinkMode) error {
+	cs.mu.Lock()
+	cs.thinkMode = mode
+	cs.lastInteractionAt = time.Now()
+	cs.mu.Unlock()
+	cs.persistChatEntry()
+	return nil
+}
+
 // SetActiveAgent changes the active agent name. Does NOT spawn or
 // kill; caller must invoke LookupActiveAgentSession to materialize.
 func (cs *ChatSession) SetActiveAgent(agent string) error {
@@ -265,6 +314,53 @@ func (cs *ChatSession) WatchMode() WatchMode {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.watchMode
+}
+
+// ThinkMode returns the current per-chat thinking-content
+// visibility. Default value when never set is ThinkModeShow
+// (set in New when the registry has no persisted value). See
+// docs/SPEC.md §3.1.2.
+func (cs *ChatSession) ThinkMode() ThinkMode {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.thinkMode
+}
+
+// SetToolsMode changes the per-chat tool-event visibility.
+// Persists to registry on success so /tools on survives daemon
+// restart. No spawn / kill / re-dispatch side effects.
+//
+// State semantics:
+//   - ToolsModeShow — runtime forwards OutToolStart / OutToolEnd
+//     to the Channel. Feishu adapter merges each pair into a
+//     single thread reply via PATCH on the start message_id (see
+//     internal/channel/feishu/tool_thread_merge.go).
+//   - ToolsModeHide — runtime drops OutToolStart and OutToolEnd
+//     at the EventHandler gate (after Translate + ReplyTo
+//     stamping, before ch.Send). Other OutboundKinds are
+//     unaffected.
+//
+// Concurrency: same pattern as SetWatchMode / SetThinkMode — take
+// ChatSession mutex, write, persist, release. The lock is NOT
+// held across any channel.Send reply call.
+func (cs *ChatSession) SetToolsMode(mode agent.ToolsMode) error {
+	cs.mu.Lock()
+	cs.toolsMode = mode
+	cs.lastInteractionAt = time.Now()
+	cs.mu.Unlock()
+	cs.persistChatEntry()
+	return nil
+}
+
+// ToolsMode returns the current per-chat tool-event visibility.
+// Default value when never set is ToolsModeHide (set in New when
+// the registry has no persisted value). Direction is OPPOSITE of
+// ThinkMode's default — see internal/agent/tools_mode.go doc
+// for the rationale. See docs/SPEC.md §3.1.3.
+func (cs *ChatSession) ToolsMode() agent.ToolsMode {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.toolsMode
 }
 
 // PrimaryAgent returns the per-chat primary agent (snapshot of
@@ -439,6 +535,16 @@ func (cs *ChatSession) SetEventHandler(h EventHandler) {
 	cs.mu.Unlock()
 }
 
+// EventHandler returns the installed outbound event handler, or
+// nil if none has been set. Exposed for tests that need to verify
+// runtime installation (e.g. RestoreFromRegistry regression
+// coverage in manager_test.go).
+func (cs *ChatSession) EventHandler() EventHandler {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.eventHandler
+}
+
 // SetMessageStateHandler installs the callback fired when this
 // ChatSession's message lifecycle advances (F-31). The runtime
 // (cmd/nightme) wires gw.OnMessageState into every ChatSession at
@@ -462,6 +568,15 @@ func (cs *ChatSession) SetMessageStateHandler(h func(chatID, userMsgID string, s
 	cs.mu.Lock()
 	cs.onMessageState = h
 	cs.mu.Unlock()
+}
+
+// MessageStateHandler returns the installed message-lifecycle
+// callback, or nil if none has been set. Exposed for tests; see
+// EventHandler() comment.
+func (cs *ChatSession) MessageStateHandler() func(chatID, userMsgID string, state agent.MessageState) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.onMessageState
 }
 
 // EmitMessageState fires the onMessageState callback for a single
@@ -864,6 +979,8 @@ func (cs *ChatSession) entryLocked() *registry.ChatSessionEntry {
 		CreatedAt:            cs.createdAt,
 		LastInteractionAt:    cs.lastInteractionAt,
 		WatchMode:            cs.watchMode,
+		ThinkMode:            cs.thinkMode,
+		ToolsMode:            cs.toolsMode,
 	}
 }
 

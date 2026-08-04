@@ -79,8 +79,8 @@ func TestBuildTaskChecklistChunks_LongListTruncates(t *testing.T) {
 	if !strings.Contains(last, "…") {
 		t.Errorf("last chunk missing truncation tail: %q", last)
 	}
-	if !strings.Contains(last, "项任务已省略") {
-		t.Errorf("last chunk missing '项任务已省略' suffix: %q", last)
+	if !strings.HasSuffix(strings.TrimSpace(last), "…") {
+		t.Errorf("last chunk missing trailing '…' suffix: %q", last)
 	}
 }
 

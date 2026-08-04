@@ -188,6 +188,8 @@ func (m *Manager) RestoreFromRegistry() error {
 		cs.activeCwd = entry.ActiveCwd
 		cs.activeAgent = entry.ActiveAgent
 		cs.watchMode = entry.WatchMode // F-watch: 0 == WatchModeMention (default, safe)
+		cs.thinkMode = entry.ThinkMode // F-think: 0 == ThinkModeShow (default; preserve F-thread-route behavior)
+		cs.toolsMode = entry.ToolsMode // F-38: 0 == ToolsModeHide (default; quiet by default)
 		cs.lastInteractionAt = entry.LastInteractionAt
 		// commit fix-6: clear activeAS on restore. The persisted
 		// activeAgentSessionId points at an AgentSession whose

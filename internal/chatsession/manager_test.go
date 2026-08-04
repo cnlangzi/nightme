@@ -2,7 +2,12 @@ package chatsession
 
 import (
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/registry"
 )
 
 func TestManager_GetOrCreate_New(t *testing.T) {
@@ -130,5 +135,181 @@ func TestManager_RestoreFromRegistry_NoPersistence(t *testing.T) {
 func TestManager_ErrNoActiveChatSessionMessage(t *testing.T) {
 	if !strings.Contains(ErrNoActiveChatSession.Error(), "/cwd") {
 		t.Fatalf("error message should mention /cwd: %v", ErrNoActiveChatSession)
+	}
+}
+
+// seedPersistedChatSession writes a minimal ChatSessionEntry to
+// the given store so RestoreFromRegistry has something to rebuild.
+// Used by the WithOnCreate regression tests below.
+func seedPersistedChatSession(t *testing.T, csFile *registry.ChatSessionFile, chatID, primary string) string {
+	t.Helper()
+	csID := "cs_" + chatID
+	entry := &registry.ChatSessionEntry{
+		ID:                csID,
+		ChatID:            chatID,
+		ActiveCwd:         "/code/bailing",
+		ActiveAgent:       primary,
+		PrimaryAgent:      primary,
+		AgentSessionIDs:   nil,
+		CreatedAt:         time.Now(),
+		LastInteractionAt: time.Now(),
+	}
+	if err := csFile.Upsert(entry); err != nil {
+		t.Fatalf("Upsert CS: %v", err)
+	}
+	return csID
+}
+
+// TestManager_RestoreFromRegistry_FiresOnCreate verifies that
+// RestoreFromRegistry invokes the WithOnCreate callback once per
+// restored ChatSession. Without this, runtime wiring (EventHandler,
+// MessageStateHandler) would silently miss every restored chat —
+// the exact failure mode that F-38 surfaced in production.
+//
+// Locking note: onCreate is fired while the Manager lock is held
+// (manager.go:108). Callers must NOT call mgr.Get / mgr.List from
+// inside the callback without care; this test uses the callback
+// only to record chatIDs, which is lock-safe.
+func TestManager_RestoreFromRegistry_FiresOnCreate(t *testing.T) {
+	csFile, _ := newTestStores(t)
+	seedPersistedChatSession(t, csFile, "oc_alpha", "claude")
+	seedPersistedChatSession(t, csFile, "oc_beta", "claude")
+
+	mgr := NewManager().WithPersistence(csFile, nil)
+
+	var (
+		mu       sync.Mutex
+		seenChat []string
+	)
+	mgr.WithOnCreate(func(cs *ChatSession) {
+		mu.Lock()
+		defer mu.Unlock()
+		seenChat = append(seenChat, cs.ChatID)
+	})
+
+	if err := mgr.RestoreFromRegistry(); err != nil {
+		t.Fatalf("RestoreFromRegistry: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seenChat) != 2 {
+		t.Fatalf("onCreate should fire for both restored chats; got %d calls: %v", len(seenChat), seenChat)
+	}
+	want := map[string]bool{"oc_alpha": true, "oc_beta": true}
+	for _, id := range seenChat {
+		if !want[id] {
+			t.Fatalf("unexpected chatID in onCreate: %q", id)
+		}
+	}
+}
+
+// TestManager_RestoreFromRegistry_WithOnCreateBefore_InstallsHandlers
+// is the happy-path regression for the F-38 bug: when
+// WithOnCreate is set BEFORE RestoreFromRegistry (the order
+// cmd/nightme/run.go must use), every restored ChatSession has
+// its EventHandler AND MessageStateHandler installed. Without
+// these, the readPump's `if h != nil` guard short-circuits and
+// all outgoing events vanish — no logs, no channel.Send, no
+// reactions.
+func TestManager_RestoreFromRegistry_WithOnCreateBefore_InstallsHandlers(t *testing.T) {
+	csFile, _ := newTestStores(t)
+	seedPersistedChatSession(t, csFile, "oc_alpha", "claude")
+	seedPersistedChatSession(t, csFile, "oc_beta", "claude")
+
+	mgr := NewManager().WithPersistence(csFile, nil)
+
+	// Mirror the production wiring in cmd/nightme/run.go:
+	// WithOnCreate goes BEFORE RestoreFromRegistry.
+	mgr.WithOnCreate(func(cs *ChatSession) {
+		cs.SetEventHandler(func(chatID string, _ *AgentSession, _ agent.AgentEvent, _ string) {
+			_ = chatID
+		})
+		cs.SetMessageStateHandler(func(_, _ string, _ agent.MessageState) {})
+	})
+
+	if err := mgr.RestoreFromRegistry(); err != nil {
+		t.Fatalf("RestoreFromRegistry: %v", err)
+	}
+
+	for _, cs := range mgr.List() {
+		if cs.EventHandler() == nil {
+			t.Errorf("%s: EventHandler is nil — runtime did not install it", cs.ChatID)
+		}
+		if cs.MessageStateHandler() == nil {
+			t.Errorf("%s: MessageStateHandler is nil — runtime did not install it", cs.ChatID)
+		}
+	}
+}
+
+// TestManager_RestoreFromRegistry_WithOnCreateAfter_MissesHandlers
+// is the negative regression: if a future refactor moves
+// WithOnCreate back to AFTER RestoreFromRegistry, this test fails
+// loudly so the silent-failure bug can't return. The fix is
+// documented in cmd/nightme/run.go's block comment around the
+// WithOnCreate call site.
+func TestManager_RestoreFromRegistry_WithOnCreateAfter_MissesHandlers(t *testing.T) {
+	csFile, _ := newTestStores(t)
+	seedPersistedChatSession(t, csFile, "oc_alpha", "claude")
+
+	mgr := NewManager().WithPersistence(csFile, nil)
+
+	// Restore FIRST (no handlers yet).
+	if err := mgr.RestoreFromRegistry(); err != nil {
+		t.Fatalf("RestoreFromRegistry: %v", err)
+	}
+
+	// Then register onCreate — too late for already-restored chats.
+	mgr.WithOnCreate(func(cs *ChatSession) {
+		cs.SetEventHandler(func(chatID string, _ *AgentSession, _ agent.AgentEvent, _ string) {
+			_ = chatID
+		})
+		cs.SetMessageStateHandler(func(_, _ string, _ agent.MessageState) {})
+	})
+
+	cs := mgr.Get("oc_alpha")
+	if cs == nil {
+		t.Fatalf("ChatSession not restored")
+	}
+	if cs.EventHandler() != nil {
+		t.Errorf("EventHandler unexpectedly non-nil — bug repro is no longer valid; restore this assertion's expectation")
+	}
+	if cs.MessageStateHandler() != nil {
+		t.Errorf("MessageStateHandler unexpectedly non-nil — bug repro is no longer valid; restore this assertion's expectation")
+	}
+}
+
+// TestManager_GetOrCreate_AfterRestore_FiresOnCreate verifies the
+// symmetric path: a freshly-created ChatSession via GetOrCreate
+// (post-Restore, e.g. first message in a brand new chat) also
+// fires onCreate, so handlers are installed uniformly across
+// restored + future chats.
+func TestManager_GetOrCreate_AfterRestore_FiresOnCreate(t *testing.T) {
+	mgr := NewManager()
+	var (
+		mu      sync.Mutex
+		seenIDs []string
+	)
+	mgr.WithOnCreate(func(cs *ChatSession) {
+		mu.Lock()
+		defer mu.Unlock()
+		seenIDs = append(seenIDs, cs.ChatID)
+	})
+
+	cs := mgr.GetOrCreate("oc_new", "claude")
+	if cs.EventHandler() != nil {
+		t.Fatalf("EventHandler unexpectedly set by test setup")
+	}
+
+	cs.SetEventHandler(func(string, *AgentSession, agent.AgentEvent, string) {})
+	cs.SetMessageStateHandler(func(string, string, agent.MessageState) {})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seenIDs) != 1 || seenIDs[0] != "oc_new" {
+		t.Fatalf("onCreate should fire once with ChatID=oc_new; got %v", seenIDs)
+	}
+	if cs.EventHandler() == nil {
+		t.Errorf("EventHandler should remain non-nil after onCreate ran")
 	}
 }

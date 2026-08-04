@@ -21,7 +21,6 @@
 package feishu
 
 import (
-	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -29,10 +28,11 @@ import (
 )
 
 // checklistMore is appended to the last visible line when the
-// input did not fit within the budget. The leading ellipsis
-// keeps the visual shape of a single todo row so the markdown
-// list stays well-formed.
-const checklistMore = "…%d 项任务已省略"
+// input did not fit within the budget. Pure ellipsis — no
+// label — keeps the visual shape of a single todo row and
+// avoids mixed-language suffixes (the user's locale may not be
+// the same as the source-code author).
+const checklistMore = "…"
 
 // checklistOverflowPlaceholder is the single-line fallback used
 // when the renderer has to drop every line to fit the budget.
@@ -118,11 +118,10 @@ func buildTaskChecklistChunks(items []agent.TaskItem) []string {
 		return nil
 	}
 	if omitted > 0 {
-		// Append the "more tasks" tail to the LAST visible line
-		// (not a new line) so the markdown list shape is
-		// preserved. The tail is plain text after the subject;
-		// Feishu's lark_md leaves it as an inline suffix.
-		chunks[len(chunks)-1] += " " + fmt.Sprintf(checklistMore, omitted)
+		// Append an inline "…" tail to the LAST visible line so
+		// the markdown list shape is preserved. Feishu lark_md
+		// leaves it as a plain inline suffix.
+		chunks[len(chunks)-1] += " " + checklistMore
 	}
 	return chunks
 }

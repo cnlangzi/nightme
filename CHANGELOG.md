@@ -11,6 +11,38 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### F-38: `/tools on|off` + per-tool thread-merge via PATCH
+
+**Slash command**: `/tools on | /tools off` (also accepts `show`/`hide` aliases; `/tools` with no args reports current mode).
+
+**State**: `ChatSession.ToolsMode` per-chat (`ToolsModeHide` default — opposite of `/think` which defaults to Show; rationale: tool spam is the loudest part of the agent stream and most users want it off by default), persisted as `ChatSessionEntry.ToolsMode` (JSON omitempty so old `chat_sessions.json` files decode to the safe Hide default).
+
+**Gate**: `cmd/nightme/run.go::newEventHandler` drops `OutToolStart` and `OutToolEnd` after Translate + ReplyTo stamping when `cs.ToolsMode() == ToolsModeHide`. Other OutboundKinds (`OutText` / `OutResult` / `OutThinking` / `OutCompaction` / `OutInit` / `OutUsage`) are unaffected. Independent of the existing ThinkMode gate.
+
+**Render upgrade** (Feishu only, `/tools on`): `internal/channel/feishu/tool_thread_merge.go` — each `OutToolStart` posts a fresh thread reply and remembers the Feishu message_id; the matching `OutToolEnd` PATCHes that same reply with the merged body (start body + newline + result body). Result: 10 tools in one agent turn = 10 thread replies (one per tool, call+result merged) instead of 20. Falls back to fresh reply on PATCH failure or orphan End (no silent data loss). Echo / other Channels unaffected — merge is Feishu-specific Channel rendering.
+
+**Abstraction boundary preserved**: `OutboundMessage.Tool` is still a typed `ToolInfo` primitive; merging is a Channel-internal rendering decision (Feishu-specific, via `PUT /im/v1/messages/{id}` text PATCH). No new `OutboundKind`, no Gateway / ChatSession schema changes; `OutboundMessage` shape 100% unchanged from F-think.
+
+**Files**: `internal/registry/tools_mode.go`, `internal/chatsession/toolsmode.go`, `internal/chatsession/chatsession.go`, `internal/chatsession/manager.go`, `internal/gateway/handlers_tools.go`, `internal/gateway/handlers_chatsession.go`, `cmd/nightme/run.go`, `internal/channel/feishu/tool_thread_merge.go`, `internal/channel/feishu/adapter.go`.
+
+**Docs**: see `docs/SPEC.md` §0.7 + §3.1.3 + `docs/feat/F-38-tool-merge-and-toggle.md`.
+
+### F-think: per-chat thinking-content visibility toggle + markdown rendering
+
+**Slash command**: `/think on | /think off` (also accepts `show`/`hide` aliases; `/think` with no args reports current mode).
+
+**State**: `ChatSession.ThinkMode` per-chat (`ThinkModeShow` default, `ThinkModeHide` opt-in), persisted as `ChatSessionEntry.ThinkMode` (JSON omitempty so old `chat_sessions.json` files decode to default).
+
+**Gate**: `cmd/nightme/run.go::newEventHandler` drops `OutThinking` after Translate + ReplyTo stamping when `cs.ThinkMode() == ThinkModeHide`. Other OutboundKinds are unaffected.
+
+**Render upgrade**: `internal/channel/feishu/thinking_card.go` — OutThinking now posts to the Feishu thread as a `Card 2.0` interactive card with `lark_md` content (via `postThreadMarkdownReply`). Long bodies split into multiple div elements via F-37 `splitMarkdownForDivs`, preserving code-block atomicity. Plain text `postThreadReply` is unchanged for OutToolStart / OutToolEnd / OutCompaction (those remain single-line summaries).
+
+**Abstraction boundary preserved**: `OutboundMessage.Text` is still a primitive string; markdown rendering is a Channel-internal decision (Feishu-specific). No new `OutboundKind`, no Gateway / ChatSession schema changes.
+
+**Files**: `internal/registry/think_mode.go`, `internal/chatsession/thinkmode.go`, `internal/chatsession/chatsession.go`, `internal/chatsession/manager.go`, `internal/gateway/handlers_think.go`, `internal/gateway/handlers_chatsession.go`, `cmd/nightme/run.go`, `internal/channel/feishu/thinking_card.go`, `internal/channel/feishu/adapter.go`.
+
+**Docs**: see `docs/SPEC.md` §0.6 + §3.1.2.
+
 ### Architecture: ChatSession + AgentSession (replaces v1.x Session)
 
 The v1.x model bound one chat to one CLI process. This snapshot

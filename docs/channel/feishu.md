@@ -283,10 +283,6 @@ Feishu `lark_md` **不支持** `<font color='grey'>`。**严格用 `<text_tag co
 
 `PATCH /im/v1/messages/{id}` 的 `card` 字段是**整个 card 对象**,不是 diff。要保留元素(折叠面板的展开状态等)需要在 client 端维护当前状态,然后每次 PATCH 把所有 elements 重新构建。本期 receipt 没有折叠面板,不受影响。
 
-### 6.5 心跳(Heartbeat)行为变化
-
-`F-23-heartbeat.md` 当前实现是周期性重新 `SendMessageText` 同一 header。切到 card 后,心跳 = 周期性 PATCH 同一张卡的 card body(刷新 header 时间戳 + foot note)。频率/阈值不变。
-
 ### 6.6 MessageState 与 Card 共存(v1.3 重构)
 
 **v1.3 变更**:MessageState(reaction emoji 轨道)与 Receipt(card body 轨道)解耦为两个独立的 channel 实现。
@@ -448,7 +444,6 @@ text, hasMention := stripAndDetectMention(
 - 单元: 回归 `mockReceiptBot.AddReaction` 不变(v1.3 后,reaction 由 MessageState FSM 触发,仍走 userMsgID,但已从 MessageReceipt 解耦到 Adapter 顶层)
 - 集成: 端到端: user message → 一张 receipt card(后续 agent event 不再发新消息,而是 PATCH);最终状态 `✅` 出现在 header;foot note 随状态变化
 - 回归: permission card (`OutCard`) 不受影响,继续走原 `buildInteractiveCard`
-- 回归: heartbeat (`F-23`) 行为对齐,只是底层从 SendMessageText 变为 PATCH
 
 ## 8. 参考资料
 
@@ -1828,8 +1823,6 @@ var StrictDefault = config.FeishuRateLimitConfig{
 **`sendContent` 包装层不动**:rootID fallback 路径(230011 → top-level Create)第二次走 `sendViaLarkCreate` 仍会经 Wait,**单桶自动覆盖**。
 
 **`GetBotIdentity` 不走 limiter**:启动期低频,且不走 IM 配额。
-
-**Heartbeat PATCH 也走 `updateViaLark`** → 自动经 Wait。30 min 一次,远低于 5 QPS,**不需特判**。
 
 ### 16.6 与现有组件的边界
 

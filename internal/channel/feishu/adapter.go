@@ -146,7 +146,7 @@ type Adapter struct {
 
 	// messageStates tracks the last successfully-rendered
 	// MessageState per user message id, so same-state emits
-	// (heartbeats, retries) skip a duplicate AddReaction. v1.3
+	// (retries) skip a duplicate AddReaction. v1.3
 	// (F-31) replaces the per-receipt currentReaction field which
 	// was removed when MessageReceipt stopped owning reactions.
 	//
@@ -584,7 +584,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		// Idempotency: skip if we already rendered this state for
 		// this userMsgID. Tracks last-rendered state to avoid
-		// duplicate AddReaction calls on retries / heartbeats.
+		// duplicate AddReaction calls on retries.
 		//
 		// v1.3.1 fix: use the comma-ok form to distinguish "no
 		// entry yet" (first emit) from "previous state is
@@ -1634,7 +1634,7 @@ func (a *Adapter) DeleteReaction(ctx context.Context, messageID, reactionID stri
 
 // UpdateMessage edits an existing text message's content in-place.
 // Used by MessageReceipt to keep the reply line single-message
-// across heartbeat ticks (per F-25 spec: "永远只有一行").
+// (per F-25 spec: "永远只有一行").
 //
 // Feishu restrictions (per official docs):
 //   - Only text and post (rich-text) message types can be updated

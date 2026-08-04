@@ -3,7 +3,7 @@
 > **Status**: implemented (v1.1 — bridge 接口未变；Bridge 不知道 receipt / chat / binding 存在)
 > **Milestone**: v0.2 (设计 + 实现), v0.3 (event callback 路径)
 > **Depends on**: F-09 (Agent abstraction), F-19 (CLI Bridge), F-21 (Agent Modes)
-> **Related**: [F-21-agent-modes.md](./F-21-agent-modes.md), [F-19-cli-bridge.md](./F-19-cli-bridge.md), [F-23-heartbeat.md](./F-23-heartbeat.md), [F-26-gateway-hub.md](./F-26-gateway-hub.md) §2.3 (single-consumer)
+> **Related**: [F-21-agent-modes.md](./F-21-agent-modes.md), [F-19-cli-bridge.md](./F-19-cli-bridge.md), [F-26-gateway-hub.md](./F-26-gateway-hub.md) §2.3 (single-consumer)
 
 ## 0. v1.1 修订（bridge 与上层解耦）
 

@@ -622,6 +622,8 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 | `OutThinking` | `EventText`(带 `[思考] ` 前缀,Gateway 已剥) | agent reasoning | **`collapsible_panel` + `💭` 折叠**(§13.6 设计决策;§13.1 bug 待修) | `interactive` PATCH | ✅ |
 | `OutToolStart` | `EventToolStart` | 工具开始 | **`collapsible_panel` + `🔧` 折叠**(§13.6 设计决策,粒度待定 §13.7) | `interactive` PATCH | ✅ |
 | `OutToolEnd` | `EventToolEnd` | 工具结束(成功/失败) | **`collapsible_panel` + `✅` / `❌` 折叠**(§13.6 设计决策,与 Start 合并 or 独立待定 §13.9) | `interactive` PATCH | ✅ |
+| `OutTaskCreate` | `EventTaskCreate` | Claude TaskCreate 成功结果 | 替换 receipt 内最新 typed task snapshot；单 markdown checklist element（§13.14 / §18） | `interactive` PATCH | ✅（独立 checklist block） |
+| `OutTaskUpdate` | `EventTaskUpdate` | Claude TaskUpdate / delete 成功结果 | 同上；空 snapshot 清除 checklist；不进入 tool thread | `interactive` PATCH | ✅（独立 checklist block） |
 | `OutResult` | `EventResult` | 最终回复 | card body `markdown` + `📝` 图标(text 经 `truncateForLog` 限 `perEntryMaxRunes=8000`; F-37 拆 ≤ 1000 chars/div) | `interactive` PATCH | ✅ |
 | `OutUsage` | `EventUsage` | token 用量 | card body `markdown` + `"1.2k tokens · $0.012"`(无图标) | `interactive` PATCH | ✅ |
 | `OutCompaction` | `EventCompaction` | 中途压缩 | card body `markdown` + `✶ Compacting conversation...` | `interactive` PATCH | ✅ |
@@ -1256,6 +1258,23 @@ WebSearch  -> 10 results
 
 `cmd/_probe/`(mock probe + 真实发送 CLI)曾保留在 working tree 一段时间,后于 `c52ad06` 删除——决策已落地,工具不再有保留价值。**当未来需要再跑验证时**:按本节 §13.13.3 重建 SDK 调用即可,无需还原工具源码。
 
+### 13.14 🎯 F-38 决策：TaskCreate / TaskUpdate → Receipt Checklist（2026-08-04）
+
+**背景**：Claude Code 的 `TaskCreate` / `TaskUpdate` 在 stream-json 中是普通 `tool_use` + `tool_result`。继续沿用 F-37 的 generic tool route 会在 thread 中产生 `● TaskCreate(...)` / `⎿ ...`，但无法表达任务清单。
+
+**决议**：
+
+1. Claude bridge 仅在 matching `tool_result` 确认成功后更新 provider-session task state；TaskCreate 使用 result 返回的真实 ID，禁止 subject hash。
+2. `EventTaskCreate / EventTaskUpdate` 与 `OutTaskCreate / OutTaskUpdate` 每次携带完整 typed snapshot。Gateway 不保存 task state，也不解析 Claude field。
+3. Feishu adapter 不把成功 task tool 投到 thread，而是调用当前 `ReplyTo=userMsgID` 的 receipt setter。
+4. Receipt card 在 answer entries 后、footer 前加入**一个** markdown checklist element。任务不是 rolling `LogEntry`，不会随着旧日志 eviction 单独丢失。
+5. checklist 状态视觉由 Feishu 自治：`⏳ pending` / `🔄 in progress` / `✅ completed`；in-progress 优先，completed 空间不足时优先省略。
+6. 结果无法确认、协议漂移或失败时不猜测状态：bridge warn + generic ToolEnd fallback。
+
+**架构边界**：Claude-native `subject / activeForm / taskId` 仅存在于 `bridge/claudecode`；跨层后只见 generic `TaskItem{ID, Subject, ActiveForm, Status}`。`ReplyTo=currentTurnUserMsgID` 仍是唯一关联信息，Channel 不回写旧 turn 的 receipt。
+
+**详细规格**：[`docs/feat/F-38-task-checklist.md`](../feat/F-38-task-checklist.md) + §18。
+
 ## 14. 变更日志
 
 - **2026-08-03** - 加入 §11-§13: Feishu msg_type 全集参考、OutboundKind → Feishu 渲染映射表、审计结果(1 bug + 4 澄清)。基于 `internal/channel/feishu/*` 与 `internal/gateway/*` 现状。
@@ -1263,6 +1282,7 @@ WebSearch  -> 10 results
 - **2026-08-03(同日再增量)** - 加入 §13.10:Devin 发现 `OutboundMessage.ReplyTo` 字段被消费在内部 receipt map 但**从未投递为 Feishu `root_id`**,所有 bot 回复都是顶层消息,与用户消息无视觉连接。SDK 字段 `larkim.CreateMessageReqBody.RootId` 已存在但代码没用。F-26 v1.1 设计文档 `ReplyTo 非空 → 必须镇定到该 userMsgID(用 ReplyMessage API 或已有 receipt)` 在 v1.3 refactor 中丢失。提供 A/B/C 三种修复范围(最小/中等/完整)+ 4 个待确认问题。
 - **2026-08-03(同日三增量)** - 加入 §13.11(F-33 决策记录):D1 ChatType 不进 Gateway + D2 topic_group 不特殊处理 + D3 `ReplyTo = ParentId`(RootId 不进 nightme)+ D4 任何 Channel 都不引入 thread 概念。落地 chatID 数据模型系统性清理,关闭 inbound 方向 ReplyTo 接线缺失。详见 [`docs/feat/F-33-simplify-chatid-data-model.md`](../feat/F-33-simplify-chatid-data-model.md)。
 - **2026-08-04** - 加入 §13.12(F-thread-route 决策反转):折叠方案(§13.6-§13.9)实机验证失败,反转决策 → OutThinking / OutToolStart / OutToolEnd / OutCompaction 作为独立 thread reply 投递;receipt card 收窄到只承载最终答复 + 元数据;OutToolEnd 走类型感知摘要(`summarize_tool.go`)。新建 [`docs/feat/F-37-tool-thread-routing.md`](../feat/F-37-tool-thread-routing.md) 作为本 feature 的权威文档。`docs/SPEC.md` §0.3 同步加变更摘要;§15 实施计划待修订(下个 commit)。
+- **2026-08-04(同日增量 F-38)** - 加入 §13.14 决策:Claude TaskCreate / TaskUpdate → Receipt Checklist。Bridge 在 `tool_result` 确认成功后发完整 typed task snapshot;Gateway 增加 `OutTaskCreate` / `OutTaskUpdate` 无状态透传;Feishu receipt 在 answer entries 后、footer 前加入单一 markdown checklist element,成功 task tool 不再投递到 thread。新建 [`docs/feat/F-38-task-checklist.md`](../feat/F-38-task-checklist.md) 作为权威设计。`docs/SPEC.md` §0.6 + §11 backlog 同步登记。
 - **v0.3 ~ v1.3** - 早期章节(背景、OpenClaw 调研、迁移方案、已知坑等)保留;参见章节顶部 Status 行。
 
 ## 15. v1.3.x 实施计划
@@ -1803,3 +1823,44 @@ grep '"degradation":"fallback_to_top_level"' /var/log/nightme.log   # user 撤�
 ### 17.7 详细规格
 
 详见 [`docs/feat/F-36-transient-retry.md`](../feat/F-36-transient-retry.md)。
+
+## 18. F-38 TaskCreate / TaskUpdate → Receipt Checklist（2026-08-04）
+
+### 18.1 背景
+
+Claude Code 的 `TaskCreate` / `TaskUpdate` 在 `--output-format stream-json` 中是普通 `tool_use`，结果在后续 `user.tool_result` 中。F-37 之后没有 task 概念；继续走 generic tool route 会在 Feishu thread 出现 `● TaskCreate(...)` / `⎿ ...`，丢失结构化任务清单。
+
+### 18.2 方案
+
+1. Claude bridge 仅在 `tool_result` 确认成功后更新 session-local task map/order，并发完整 typed snapshot。
+2. Gateway 增加 `OutTaskCreate` / `OutTaskUpdate` + `OutboundMessage.TaskList *agent.TaskListEvent`；不解析 Claude field，不保存 task state。
+3. Feishu adapter `Send` 新增两个 case：调用 `receiptFor(ctx, chatID, ReplyTo)` 后执行 `SetTaskList(snapshot)`；不调用 thread reply。
+4. receipt `MessageReceipt` 持有 `tasks []agent.TaskItem` 副本，独立于 rolling `LogEntry`。
+5. `buildReceiptCard` 在 answer entries 之后、footer 之前插入**一个** markdown checklist element。预算预留 + 50 element + 24KB 防御同时保留。
+6. checklist 视觉自治：in-progress 优先、pending 次之、completed 最后；in-progress 有 `ActiveForm` 时显示后缀；空间不足时优先省略 completed 并显示“另有 N 项任务”。
+
+### 18.3 接入点
+
+| 路径 | 文件 |
+|---|---|
+| Adapter dispatch | `internal/channel/feishu/adapter.go::Adapter.Send` 新增 `OutTaskCreate` / `OutTaskUpdate` 两个 case |
+| Receipt state | `internal/channel/feishu/receipt.go::MessageReceipt.tasks` + `SetTaskList` |
+| 渲染 | `internal/channel/feishu/receipt_task.go`（新文件）`buildTaskChecklist` 纯函数；`buildReceiptCard` 在 entries 循环后调用一次 |
+| 事件契约 | `internal/agent/agent.go`（typed task events）、`internal/gateway/messages.go`（OutboundKind + TaskList 字段）、`internal/gateway/translate.go`（两个 case） |
+| Bridge | `internal/bridge/claudecode/stream.go`（pending correlation + result dispatch）、`internal/bridge/claudecode/task.go`（provider-native 解析与 snapshot） |
+
+### 18.4 容量
+
+- 整个 checklist 限定在 `divTextCharLimit` 内，超过时按 in-progress → pending → completed 优先级裁剪，并显示 `…另有 N 项任务`。
+- `buildReceiptCard` 在 element reservation 中预留 checklist element，与 entries / footer / hr 一起受 50 element / 24KB 预算约束。
+- 同 snapshot 重复导致 `body` 不变，依赖现有 `renderLocked` body diff 跳过 PATCH。
+
+### 18.5 测试
+
+- Bridge 单元测试覆盖：tool_use 不提前发 event；TaskCreate success 提取真实 ID；多 create 聚合；TaskUpdate 改 status/subject/activeForm；deleted 移除；out-of-order 结果按 tool_use_id 关联；解析失败降级；pending record 清理。
+- Adapter / receipt 单元测试覆盖：cold-create + 后续 PATCH；glyph 与排序；activeForm；删除；空 snapshot 清空；重复 snapshot 去重；thread 不调用；element / byte 预算。
+- 实机：飞书群聊触发多个 TaskCreate/TaskUpdate，确认主 receipt 单卡 PATCH、thread 无任务工具噪音、最终答复优先。
+
+### 18.6 详细规格
+
+[`docs/feat/F-38-task-checklist.md`](../feat/F-38-task-checklist.md)。

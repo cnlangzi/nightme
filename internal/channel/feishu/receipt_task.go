@@ -1,0 +1,182 @@
+// F-38: task checklist rendering and budget accounting.
+//
+// buildTaskChecklistChunks turns the receipt's latest typed task
+// snapshot into one or more markdown chunks, each kept within
+// divTextCharLimit so the buildReceiptCard loop can map each
+// chunk to its own <markdown> card element. Multiple chunks
+// share the 50-element budget — Feishu's hard limit — so a long
+// list is still rendered correctly without truncation.
+//
+// Status glyphs and the in-progress / pending / completed display
+// order are a Feishu-local decision; other Channels are free to
+// pick their own ordering and presentation. The generic status
+// enum (agent.TaskStatus) is the only input the renderer reads.
+package feishu
+
+import (
+	"fmt"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/cnlangzi/nightme/internal/agent"
+)
+
+// checklistGlyph maps agent.TaskStatus to the prefix the receipt
+// renders. Kept as a const (not a switch) so other Feishu-specific
+// helpers can reference the same characters.
+const (
+	checklistGlyphPending    = "⏳ "
+	checklistGlyphInProgress = "🔄 "
+	checklistGlyphCompleted  = "✅ "
+)
+
+// checklistMore is the suffix appended to the LAST chunk when the
+// input did not fit within the budget. The leading ellipsis is
+// on purpose — the user can tell at a glance the list is
+// truncated.
+const checklistMore = "…另有 %d 项任务"
+
+// checklistBudgetRunes is the maximum total length of the
+// rendered checklist (rune count, summed across all chunks).
+// Picked to comfortably fit inside the Feishu 24 KB body budget
+// for the worst-case 1 task × 200 chars subject × CJK triple-byte
+// envelope, with plenty of slack for the icon and a few tasks.
+// Long task lists are truncated (in-progress first, then pending,
+// then completed).
+const checklistBudgetRunes = 4000
+
+// buildTaskChecklistChunks renders the receipt's tasks slice
+// into one or more markdown chunks suitable for Feishu <div>
+// elements. Each returned chunk is at most divTextCharLimit
+// runes; the caller maps each chunk to its own card element.
+//
+// The output is empty when the input is empty so the caller can
+// detect the "no checklist" state and skip the element entirely.
+// The total rune count across all chunks is guaranteed to fit
+// within checklistBudgetRunes.
+func buildTaskChecklistChunks(items []agent.TaskItem) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	// Stable partition by status so the user's eye lands on
+	// the currently-active task first. Within each bucket we
+	// keep the bridge-supplied order (the bridge has its own
+	// insertion-order tracking) for a deterministic render.
+	buckets := make(map[agent.TaskStatus][]int, 3)
+	for i, it := range items {
+		// Filter TaskDeleted defensively: the bridge is supposed
+		// to remove deleted tasks before emitting, but a corrupt
+		// snapshot must not produce a visible "deleted" row.
+		switch it.Status {
+		case agent.TaskInProgress, agent.TaskPending, agent.TaskCompleted:
+			buckets[it.Status] = append(buckets[it.Status], i)
+		}
+	}
+	order := append(append([]int{}, buckets[agent.TaskInProgress]...), buckets[agent.TaskPending]...)
+	order = append(order, buckets[agent.TaskCompleted]...)
+
+	// Render the visible lines in order. The line collector
+	// tracks how many bytes the budget has consumed; once the
+	// next line would push it past checklistBudgetRunes the
+	// remainder is dropped and a footer is appended to the last
+	// chunk.
+	lines := make([]string, 0, len(order))
+	total := 0
+	rendered := 0
+	for _, idx := range order {
+		line := renderTaskLine(items[idx])
+		cost := utf8.RuneCountInString(line) + 1 // +1 for the joining newline
+		if total+cost > checklistBudgetRunes {
+			break
+		}
+		lines = append(lines, line)
+		total += cost
+		rendered++
+	}
+	if rendered == 0 {
+		return []string{checklistGlyphPending + "(任务清单过长，已省略)"}
+	}
+	omitted := len(order) - rendered
+
+	// Join the rendered lines with newlines and split into
+	// per-element chunks that each respect divTextCharLimit.
+	// splitMarkdownForDivs already preserves code blocks / list
+	// atomicity; our checklist is a list of `⏳ / 🔄 / ✅ …`
+	// paragraphs and is trivially paragraph-safe.
+	joined := joinLines(lines)
+	chunks := splitMarkdownForDivs(joined, divTextCharLimit)
+	if len(chunks) == 0 {
+		// Defensive: splitMarkdownForDivs returns [] on empty
+		// input. joinLines never returns empty when lines is
+		// non-empty, so this branch is unreachable in practice.
+		return nil
+	}
+	if omitted > 0 {
+		// Append the "more tasks" footer to the LAST chunk so
+		// the truncation signal sits at the visual end of the
+		// checklist.
+		chunks[len(chunks)-1] += "\n" + fmt.Sprintf(checklistMore, omitted)
+	}
+	return chunks
+}
+
+// joinLines concatenates lines with newlines, trimming the
+// trailing newline so the output is paragraph-shaped (matches
+// splitMarkdownForDivs's expectations).
+func joinLines(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	// Two-pass string builder: pre-size the buffer to the
+	// exact total so we don't pay the O(n) grow cost on
+	// large checklists.
+	size := 0
+	for _, l := range lines {
+		size += len(l) + 1
+	}
+	buf := make([]byte, 0, size)
+	for i, l := range lines {
+		if i > 0 {
+			buf = append(buf, '\n')
+		}
+		buf = append(buf, l...)
+	}
+	return string(buf)
+}
+
+func renderTaskLine(it agent.TaskItem) string {
+	var glyph string
+	var suffix string
+	switch it.Status {
+	case agent.TaskInProgress:
+		glyph = checklistGlyphInProgress
+		if it.ActiveForm != "" {
+			suffix = " · " + it.ActiveForm
+		}
+	case agent.TaskCompleted:
+		glyph = checklistGlyphCompleted
+	default:
+		glyph = checklistGlyphPending
+	}
+	subject := strings.TrimSpace(it.Subject)
+	if subject == "" {
+		subject = it.ID
+	}
+	return glyph + subject + suffix
+}
+
+// renderTaskFallbackText joins the rendered checklist lines into
+// a single multi-line string for the cold-start-failure fallback
+// (a plain Feishu text bubble). The Feishu send path trims
+// excessively long bodies, so a 10–15 line list is the upper
+// practical bound before this fallback itself drops lines.
+func renderTaskFallbackText(list *agent.TaskListEvent) string {
+	if list == nil || len(list.Items) == 0 {
+		return "（无任务清单）"
+	}
+	chunks := buildTaskChecklistChunks(list.Items)
+	if len(chunks) == 0 {
+		return "（任务清单过长）"
+	}
+	return strings.Join(chunks, "\n")
+}

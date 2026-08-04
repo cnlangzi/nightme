@@ -733,6 +733,26 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		_, err := a.SendMessageText(ctx, msg.ChatID, msg.Text, msg.ReplyTo, false)
 		return err
+
+	case gateway.OutTaskCreate, gateway.OutTaskUpdate:
+		// F-38: replace the per-turn checklist in the current
+		// receipt. We never call postThreadReply for task tools —
+		// the bridge suppresses the generic ToolStart/ToolEnd pair
+		// on a confirmed success result so the user sees a single
+		// task element in the receipt rather than two thread lines
+		// per operation.
+		if msg.TaskList == nil {
+			return errors.New("feishu: OutTask*/TaskList payload is nil")
+		}
+		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
+		if receipt == nil {
+			// Cold-start failed (existing pattern for other Kinds).
+			// Degrade gracefully so the user still sees the
+			// checklist in the main chat as a standalone text
+			// bubble, even when no receipt card could be PATCHed.
+			return a.sendRawOutText(ctx, msg.ChatID, renderTaskFallbackText(msg.TaskList))
+		}
+		return receipt.SetTaskList(ctx, msg.TaskList)
 	}
 	return fmt.Errorf("feishu: unsupported outbound kind %v", msg.Kind)
 }
@@ -1064,6 +1084,23 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 			})
 		}
 	}
+	// F-38: task checklist — one markdown element per chunk
+	// rendered below the answer entries and above the footer
+	// divider. The bridge always sends the full snapshot, so we
+	// copy it verbatim and let buildTaskChecklistChunks handle
+	// glyph / ordering / truncation / div splitting. Omitted
+	// entirely when no tasks have been reported. Each chunk is
+	// already <= divTextCharLimit runes (the splitter's contract),
+	// so we may emit multiple elements from a single checklist
+	// when the list is long; the 50-element budget still applies
+	// across the whole card.
+	for _, chunk := range buildTaskChecklistChunks(r.tasks) {
+		elements = append(elements, map[string]any{
+			"tag":     "markdown",
+			"content": chunk,
+		})
+	}
+
 	if note := r.state.footLine(r); note != "" {
 		elements = append(elements, map[string]any{"tag": "hr"})
 		// Footer styling matches the OpenClaw Lark plugin

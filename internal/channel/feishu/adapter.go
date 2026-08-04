@@ -341,22 +341,19 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	a.health = &WSHealth{}
 
 	// F-41: active reconnect prober. The restarter closure forces
-	// ch.Stop() + sleep + ch.Start() on every 30s tick while the
-	// WS is disconnected, which effectively overrides the SDK's
-	// 2-minute default reconnectInterval. Self-stops when the SDK
-	// reports Connected=true (checked via Health() inside the tick).
+	// a SDK-level reconnection on every 30s tick while the WS is
+	// disconnected, which effectively overrides the SDK's 2-minute
+	// default reconnectInterval. Self-stops when the SDK reports
+	// Connected=true (checked via Health() inside the tick).
+	//
+	// IMPORTANT: this calls ReconnectSDK, NOT a.Stop() + a.Start().
+	// a.Stop latches a.stopped=true permanently; a.Start would then
+	// always fail with "feishu: adapter is stopped", making the
+	// prober kill the SDK once and never bring it back. ReconnectSDK
+	// manipulates the SDK goroutine directly without touching the
+	// latched state — see method doc for the full reasoning.
 	a.prober = newProber(a, func(ctx context.Context) error {
-		// Respect the prober's lifecycle context so daemon shutdown
-		// can interrupt an in-flight Stop+100ms+Start cycle.
-		if err := a.Stop(ctx); err != nil {
-			return err
-		}
-		select {
-		case <-time.After(defaultProberBackoff):
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-		return a.Start(ctx)
+		return a.ReconnectSDK(ctx)
 	})
 
 	return a, nil
@@ -413,6 +410,78 @@ func (a *Adapter) Start(ctx context.Context) error {
 		defer close(wsDone)
 		if err := start(runCtx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("Feishu WebSocket stopped: %v", err)
+		}
+	}()
+	return nil
+}
+
+// ReconnectSDK cancels the current SDK goroutine and spawns a new one
+// WITHOUT touching the latched a.stopped / a.incoming state. Used
+// exclusively by the F-41 active-reconnect prober.
+//
+// Why this exists: a.Stop latches a.stopped=true permanently; a.Start
+// bails on that flag ("feishu: adapter is stopped"). If the prober
+// called a.Stop + a.Start, the first tick would kill the SDK and
+// every subsequent tick's a.Start would fail — the prober would
+// never bring the WS back, defeating the whole feature.
+//
+// ReconnectSDK bypasses the latch by talking to the SDK directly:
+//
+//  1. Cancel a.cancel — the SDK's Start goroutine returns when
+//     runCtx is cancelled.
+//  2. Wait for a.wsDone — confirms the SDK goroutine exited.
+//  3. Re-create runCtx + a new wsDone and spawn a fresh SDK
+//     goroutine — same logic as Start but on a fresh context.
+//
+// a.incoming is never closed, so the gateway's pumpInbound keeps
+// blocking and starts receiving events again as soon as the SDK
+// reconnects. a.stopped is never set, so a future a.Stop (real
+// daemon shutdown) still works as before.
+//
+// The restarter runs on the prober's loop goroutine. a.client.Start
+// is blocking in the SDK, so the restarter spawns a new goroutine
+// to host it and returns immediately — the prober's tick is
+// non-blocking.
+func (a *Adapter) ReconnectSDK(ctx context.Context) error {
+	a.mu.Lock()
+	cancel := a.cancel
+	wsDone := a.wsDone
+	client := a.client
+	a.mu.Unlock()
+	if client == nil {
+		return errors.New("feishu: reconnectSDK: no client")
+	}
+	if cancel != nil {
+		cancel()
+	}
+	if wsDone != nil {
+		select {
+		case <-wsDone:
+		case <-time.After(2 * time.Second):
+			// Defensive: the SDK goroutine should exit promptly
+			// when runCtx is cancelled. 2s is a generous bound.
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	// Re-spawn the SDK loop with a fresh context.
+	runCtx, runCancel := context.WithCancel(context.Background())
+	newWsDone := make(chan struct{})
+	a.mu.Lock()
+	a.cancel = runCancel
+	a.wsDone = newWsDone
+	start := a.wsStart
+	if start == nil {
+		start = client.Start
+	}
+	a.mu.Unlock()
+	if start == nil {
+		return errors.New("feishu: reconnectSDK: no start func")
+	}
+	go func() {
+		defer close(newWsDone)
+		if err := start(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("feishu: reconnectSDK: %v", err)
 		}
 	}()
 	return nil

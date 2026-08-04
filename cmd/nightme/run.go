@@ -267,9 +267,10 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// server so `nightme health` can answer. The closure captures `fa`
 	// and is invoked on every "health" RPC; the closure itself is
 	// safe to call concurrently because WSHealth.Snapshot takes the
-	// read lock.
+	// read lock. (fa is captured by reference in the closure — the
+	// local `fa` in this scope is never reassigned after this point,
+	// so no `fa := fa` shadow is needed.)
 	if deps.registerHealth != nil && fa != nil {
-		fa := fa
 		deps.registerHealth(fa, func() (string, json.RawMessage, error) {
 			snap := fa.Health()
 			data, err := json.Marshal(snap)

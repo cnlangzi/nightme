@@ -535,6 +535,16 @@ func (cs *ChatSession) SetEventHandler(h EventHandler) {
 	cs.mu.Unlock()
 }
 
+// EventHandler returns the installed outbound event handler, or
+// nil if none has been set. Exposed for tests that need to verify
+// runtime installation (e.g. RestoreFromRegistry regression
+// coverage in manager_test.go).
+func (cs *ChatSession) EventHandler() EventHandler {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.eventHandler
+}
+
 // SetMessageStateHandler installs the callback fired when this
 // ChatSession's message lifecycle advances (F-31). The runtime
 // (cmd/nightme) wires gw.OnMessageState into every ChatSession at
@@ -558,6 +568,15 @@ func (cs *ChatSession) SetMessageStateHandler(h func(chatID, userMsgID string, s
 	cs.mu.Lock()
 	cs.onMessageState = h
 	cs.mu.Unlock()
+}
+
+// MessageStateHandler returns the installed message-lifecycle
+// callback, or nil if none has been set. Exposed for tests; see
+// EventHandler() comment.
+func (cs *ChatSession) MessageStateHandler() func(chatID, userMsgID string, state agent.MessageState) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.onMessageState
 }
 
 // EmitMessageState fires the onMessageState callback for a single

@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/registry"
 )
 
 // TestEventHandler_ThinkGate_ShowPassesThrough verifies the
@@ -435,5 +440,88 @@ func TestEventHandler_ToolsAndThinkGatesIndependent(t *testing.T) {
 	}
 	if got[0].Kind.String() != "tool_start" {
 		t.Errorf("forwarded event Kind = %q, want %q", got[0].Kind.String(), "tool_start")
+	}
+}
+// newWireTestStores opens a temp-dir pair of ChatSessionFile +
+// AgentSessionFile. Mirrors chatsession.newTestStores but lives in
+// cmd/nightme (cross-package helpers in test packages aren't
+// visible by default).
+func newWireTestStores(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessionFile) {
+	t.Helper()
+	dir := t.TempDir()
+	csFile, err := registry.OpenChatSessionFile(filepath.Join(dir, "chat_sessions.json"))
+	if err != nil {
+		t.Fatalf("OpenChatSessionFile: %v", err)
+	}
+	asFile, err := registry.OpenAgentSessionFile(filepath.Join(dir, "agent_sessions.json"))
+	if err != nil {
+		t.Fatalf("OpenAgentSessionFile: %v", err)
+	}
+	return csFile, asFile
+}
+
+// seedPersistedChatForWire writes one ChatSessionEntry so
+// RestoreFromRegistry has something to restore.
+func seedPersistedChatForWire(t *testing.T, csFile *registry.ChatSessionFile, chatID, primary string) {
+	t.Helper()
+	entry := &registry.ChatSessionEntry{
+		ID:                "cs_" + chatID,
+		ChatID:            chatID,
+		ActiveCwd:         "/code/bailing",
+		ActiveAgent:       primary,
+		PrimaryAgent:      primary,
+		CreatedAt:         time.Now(),
+		LastInteractionAt: time.Now(),
+	}
+	if err := csFile.Upsert(entry); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+}
+
+// TestWireRuntimeCallbacksAndRestore_InstallsHandlersOnRestoredChats
+// is the cmd/nightme-side regression for the F-38 silent-failure
+// bug: if WithOnCreate is set AFTER RestoreFromRegistry, every
+// restored ChatSession ends up with nil EventHandler and nil
+// MessageStateHandler. The Manager-level contract is covered in
+// chatsession/manager_test.go; this test pins the cmd/nightme
+// wiring that wraps both calls in wireRuntimeCallbacksAndRestore.
+func TestWireRuntimeCallbacksAndRestore_InstallsHandlersOnRestoredChats(t *testing.T) {
+	csFile, asFile := newWireTestStores(t)
+	seedPersistedChatForWire(t, csFile, "oc_alpha", "claude")
+	seedPersistedChatForWire(t, csFile, "oc_beta", "claude")
+
+	mgr := chatsession.NewManager().WithPersistence(csFile, asFile)
+	ch := echo.New("test", io.Discard)
+	gwImpl := gateway.New(func(_ context.Context, _ *gateway.InboundMessage) error { return nil }).(*gateway.Router)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	if err := wireRuntimeCallbacksAndRestore(mgr, ch, gwImpl, logger); err != nil {
+		t.Fatalf("wireRuntimeCallbacksAndRestore: %v", err)
+	}
+
+	for _, cs := range mgr.List() {
+		if cs.EventHandler() == nil {
+			t.Errorf("%s: EventHandler is nil — wiring regression", cs.ChatID)
+		}
+		if cs.MessageStateHandler() == nil {
+			t.Errorf("%s: MessageStateHandler is nil — wiring regression", cs.ChatID)
+		}
+	}
+}
+
+// TestWireRuntimeCallbacksAndRestore_NoPersistence verifies the
+// helper handles the cold-start path (no chat_sessions.json yet):
+// WithOnCreate is set, RestoreFromRegistry is a no-op, no error.
+func TestWireRuntimeCallbacksAndRestore_NoPersistence(t *testing.T) {
+	mgr := chatsession.NewManager() // no WithPersistence — csFile is nil
+	ch := echo.New("test", io.Discard)
+	gwImpl := gateway.New(func(_ context.Context, _ *gateway.InboundMessage) error { return nil }).(*gateway.Router)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	if err := wireRuntimeCallbacksAndRestore(mgr, ch, gwImpl, logger); err != nil {
+		t.Fatalf("wireRuntimeCallbacksAndRestore on cold start: %v", err)
+	}
+	if len(mgr.List()) != 0 {
+		t.Errorf("expected no restored chats; got %d", len(mgr.List()))
 	}
 }

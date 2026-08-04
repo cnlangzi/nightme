@@ -61,6 +61,22 @@ import (
 //	                       Persisted as int; old chat_sessions.json
 //	                       files lacking the field decode to zero
 //	                       == ThinkModeShow.
+//	ToolsMode            — F-38 per-chat tool-event visibility
+//	                       toggle. 0 = ToolsModeHide (default;
+//	                       runtime drops OutToolStart / OutToolEnd
+//	                       at EventHandler gate — tool spam is the
+//	                       loudest part of the agent stream and
+//	                       most users do not want it by default),
+//	                       1 = ToolsModeShow (Feishu adapter merges
+//	                       each pair into a single thread reply via
+//	                       PATCH on the same message_id). Persisted
+//	                       as int; old chat_sessions.json files
+//	                       lacking the field decode to zero ==
+//	                       ToolsModeHide. Direction is OPPOSITE of
+//	                       ThinkMode: ThinkMode's default is Show
+//	                       (preserve existing F-thread-route UX);
+//	                       ToolsMode's default is Hide (quiet by
+//	                       default; opt in to see tool calls).
 type ChatSessionEntry struct {
 	ID                   string    `json:"id"`
 	ChatID               string    `json:"chatId"`
@@ -73,6 +89,7 @@ type ChatSessionEntry struct {
 	LastInteractionAt    time.Time `json:"lastInteractionAt"`
 	WatchMode            WatchMode `json:"watchMode,omitempty"`
 	ThinkMode            ThinkMode `json:"thinkMode,omitempty"`
+	ToolsMode            ToolsMode `json:"toolsMode,omitempty"`
 }
 
 // UnmarshalJSON reads a ChatSessionEntry, transparently migrating

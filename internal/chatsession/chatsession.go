@@ -66,6 +66,20 @@ type ChatSession struct {
 	// chats behave identically. See docs/SPEC.md §3.1.2.
 	thinkMode ThinkMode
 
+	// F-38 §3.1.3: per-chat tool-event visibility. Default
+	// ToolsModeHide (runtime drops OutToolStart and OutToolEnd at
+	// the EventHandler gate — tool spam is the loudest part of
+	// the agent progress stream and most users do not want it by
+	// default); /tools on switches to ToolsModeShow (Feishu
+	// adapter merges each pair into a single thread reply via
+	// PATCH on the same message_id). Like ThinkMode and unlike
+	// WatchMode, this is chat-type-independent — DMs and group
+	// chats behave identically. See docs/SPEC.md §3.1.3. The
+	// default direction is OPPOSITE of ThinkMode's: ThinkMode's
+	// zero value is Show (preserve existing F-thread-route UX);
+	// ToolsMode's zero value is Hide (quiet by default; opt in).
+	toolsMode ToolsMode
+
 	// Pool of AgentSessions keyed by (agent, cwd).
 	pool map[agentCwdKey]*AgentSession
 
@@ -150,6 +164,7 @@ func New(chatID, primaryAgent string) *ChatSession {
 		pool:             make(map[agentCwdKey]*AgentSession),
 		watchMode:        WatchModeMention, // F-watch default
 		thinkMode:        ThinkModeShow,    // F-think default
+		toolsMode:        ToolsModeHide,    // F-38 default (quiet by default)
 		createdAt:        time.Now(),
 		lastInteractionAt: time.Now(),
 	}
@@ -309,6 +324,43 @@ func (cs *ChatSession) ThinkMode() ThinkMode {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.thinkMode
+}
+
+// SetToolsMode changes the per-chat tool-event visibility.
+// Persists to registry on success so /tools on survives daemon
+// restart. No spawn / kill / re-dispatch side effects.
+//
+// State semantics:
+//   - ToolsModeShow — runtime forwards OutToolStart / OutToolEnd
+//     to the Channel. Feishu adapter merges each pair into a
+//     single thread reply via PATCH on the start message_id (see
+//     internal/channel/feishu/tool_thread_merge.go).
+//   - ToolsModeHide — runtime drops OutToolStart and OutToolEnd
+//     at the EventHandler gate (after Translate + ReplyTo
+//     stamping, before ch.Send). Other OutboundKinds are
+//     unaffected.
+//
+// Concurrency: same pattern as SetWatchMode / SetThinkMode — take
+// ChatSession mutex, write, persist, release. The lock is NOT
+// held across any channel.Send reply call.
+func (cs *ChatSession) SetToolsMode(mode ToolsMode) error {
+	cs.mu.Lock()
+	cs.toolsMode = mode
+	cs.lastInteractionAt = time.Now()
+	cs.mu.Unlock()
+	cs.persistChatEntry()
+	return nil
+}
+
+// ToolsMode returns the current per-chat tool-event visibility.
+// Default value when never set is ToolsModeHide (set in New when
+// the registry has no persisted value). Direction is OPPOSITE of
+// ThinkMode's default — see internal/registry/tools_mode.go doc
+// for the rationale. See docs/SPEC.md §3.1.3.
+func (cs *ChatSession) ToolsMode() ToolsMode {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.toolsMode
 }
 
 // PrimaryAgent returns the per-chat primary agent (snapshot of
@@ -909,6 +961,7 @@ func (cs *ChatSession) entryLocked() *registry.ChatSessionEntry {
 		LastInteractionAt:    cs.lastInteractionAt,
 		WatchMode:            cs.watchMode,
 		ThinkMode:            cs.thinkMode,
+		ToolsMode:            cs.toolsMode,
 	}
 }
 

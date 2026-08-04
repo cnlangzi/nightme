@@ -150,6 +150,42 @@ v1.3 在 v1.2 架构上做**职责再切分**——核心变化是**删除 Gatew
 
 **背景**：F-34 review 揭示 `OutboundMessage.Meta["tool_name"]` / `["args"]` / `["output"]` / `["err"]` 是隐式协议 —— Gateway（抽象层） hardcode 了 Feishu adapter（具体层）需要的字段名，本质上是把 concrete 实现细节 leak 进 abstract 层。同类违反在 `OutboundMessage.Meta` 的其他字段（`is_error` / `subtype` / `state` / `message_id` 等）以小范围存在。
 
+### 0.5 文档变更摘要（v1.3.x Meta 彻底删除，2026-08-04）
+
+**背景**：§1.4 元原则落地后还残留着 Meta 黑盒——`Meta` 字段是 opaque data container，但 producer（gateway） 在里面塞了 11 个 implicit key（tool_name / args / output / err / state / message_id / reaction_id / session_id / model / agent_name / workspace / branch / input_tokens / output_tokens / cost_usd 等），consumer（feishu adapter）按名字读 + type assert。Channel 不知道 Meta 里有什么（type system 也不告诉你），但 producer / consumer 之间靠 hardcoded 字符串约定通信——最严重的 leak。
+
+**根因**：Meta 是 generic map，约定是字符串 key + `.(string) / .(int) / .(error)` 强转，编译期无法检查。F-34 review 把 tool 字段清掉后，Meta 里还有：
+- 死数据（OutResult 的 duration_ms / is_error / subtype，channel 实际 round-trip 重建成 `agent.ResultEvent` 再喂给 receipt.Append）
+- 冗余数据（OutMessageState 的 message_id / state，已有 `MessageState *MessageStatePayload` typed field 但内容不全）
+
+**清理**（commit 待定）：
+- **删 `Meta` 字段**——从 `OutboundMessage` 结构体移除
+- **删 `Reaction` 字段 + `Reaction` struct**——F-31 迁移后死代码，零 producer / 零 consumer
+- **新增 typed payload**：
+  - `Result *agent.ResultEvent`（OutResult）
+  - `Usage *UsageInfo`（OutUsage，5 个 token/cost 字段）
+  - `Init *agent.InitEvent`（OutInit，session_id / model / workspace / branch）
+  - `MessageStatePayload.MessageID` + `ReactionID`（扩展 typed field，OutMessageState / Removed）
+- **删 helper 函数**：metaString / metaInt / metaFloat / metaBool / durationMs / isErrorOut / subtypeOut / usageFromMeta（全部读 Meta 的 typed assertion + reverse rebuild）
+
+**结果**：`OutboundMessage` 100% typed：
+```go
+type OutboundMessage struct {
+    ChatID       string
+    Kind         OutboundKind
+    Text         string
+    Card         *Card
+    Tool         *ToolInfo
+    Result       *agent.ResultEvent
+    Usage        *UsageInfo
+    MessageState *MessageStatePayload
+    Init         *agent.InitEvent
+    ReplyTo      string
+}
+```
+
+任何 producer / consumer 之间的契约现在由 Go 类型系统强制保证。Meta 反面教材**不再是反例**——该字段已不存在。
+
 **新增规范**：§1.4 「抽象 / 具体 边界规范」作为新的不变式类型—— 跨层通信的架构纪律，位阶高于现有 §1.3 的具体不变式。
 
 **核心原则**（一句话）：
@@ -325,13 +361,15 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 2. **抽象层的字段类型首选 primitive**：`string` / `int` / `float64` / `error`。**不要**为了"类型安全"在抽象层引入 typed struct / enum——那等于在抽象层 hardcode 一种 concrete 的 shape。
 3. **bridge 是归一化边界 #1**：claudecode 用 raw JSON string 表达 args；pi 可能用 typed map → 也归一化成 string；pty 可能 raw bytes → 也归一化成 string。Gateway / Channel 只见到 string，不关心 bridge 内部 schema。
 4. **Channel 拿到 string 后自己 parse**：如果 Channel 想做类型感知渲染（"Read /foo.go → 1234 lines"），它 parse `ToolInfo.Args` 字符串。但 parse 逻辑属于 Channel 自治，不进 Gateway / agent。
-5. **禁止 `OutboundMessage.Meta["key"] = "concrete-specific-value"` 的隐式协议**：Meta 是 per-kind 的 opaque data container，但**不能**用作 concrete-specific 字段的 transport。generic 数据必须走 typed field（`Tool *ToolInfo` / `Card *Card` / `MessageState *MessageStatePayload`）。
-6. **数值类除外**：`CostUSD` / `*Tokens` 保留 typed numeric——任何 agent 都有 token / cost 概念，不需要 string 化。
+5. **禁止 `OutboundMessage` 上的 `Meta map[string]any`（已删除）**：Meta 是 opaque data container，consumer 不知道里面有什么，producer 也不知道 consumer 会读哪些 key。跨层契约只能走 typed field。`OutboundMessage` 当前 100% typed（§0.5），任何新增跨层数据必须走 typed struct / primitive，不能 re-introduce Meta。
+6. **数值类除外**：`CostUSD` / `*Tokens` 保留 typed numeric——任何 agent 都有 token / cost 概念，不需要 string 化（但**走 typed field，不走 Meta**）。
 
-**反例（F-34 review 修正前）**：
+**反例（2026-08-04 §1.4 终极落地）**：
+
+`OutboundMessage.Meta` 字段已被删除（§0.5）。Meta 原本持有 11 个 implicit key（tool_name / args / output / err / is_error / subtype / state / message_id / reaction_id / session_id / model / agent_name / workspace / branch / input_tokens / output_tokens / cost_usd），全部 hardcoded 隐式协议。下面是 GateWay translate 曾经的 v0.2 代码反例（已全部移除）：
 
 ```go
-// ❌ 反例: Gateway 的 translate 把 bridge-specific 字段名写进 Meta
+// ❌ 反例（已删除）: Gateway 的 translate 把 bridge-specific 字段名写进 Meta
 case agent.EventToolEnd:
     return OutboundMessage{
         Meta: map[string]any{
@@ -344,7 +382,7 @@ case agent.EventToolEnd:
 ```
 
 ```go
-// ❌ 反例: Channel 从 Meta 隐式 key 读 concrete 数据
+// ❌ 反例（已删除）: Channel 从 Meta 隐式 key 读 concrete 数据
 func toolName(m gateway.OutboundMessage) string {
     if n, _ := m.Meta["tool_name"].(string); n != "" {
         return n
@@ -353,7 +391,16 @@ func toolName(m gateway.OutboundMessage) string {
 }
 ```
 
-**正例（F-34 review 修正后）**：
+```go
+// ❌ 反例（已删除）: Channel 反向重建 typed event
+func durationMs(m gateway.OutboundMessage) int64 {
+    return int64(metaInt(m, "duration_ms"))
+}
+// 然后 receipt.Append(ctx, agent.AgentEvent{Result: &agent.ResultEvent{DurationMs: durationMs(msg), ...}})
+// ——Gateway 拆字段塞 Meta，Channel 从 Meta 读回来重建 typed event 再喂给 receipt，纯轮转。
+```
+
+**正例（最终状态）**：
 
 ```go
 // ✅ 正例: Gateway translate 用 typed field 归一化 tool 概念
@@ -361,7 +408,7 @@ case agent.EventToolEnd:
     return OutboundMessage{
         Tool: &ToolInfo{
             Name:   name,
-            Args:   ev.ToolEnd.Args,   // bridge 自决 representation
+            Args:   ev.ToolEnd.Args,
             Output: ev.ToolEnd.Output,
             Err:    ev.ToolEnd.Err,
         },
@@ -378,12 +425,21 @@ func toolName(m gateway.OutboundMessage) string {
 }
 ```
 
+```go
+// ✅ 正例: typed Result 直接传给 receipt.Append，零 round-trip
+return receipt.Append(ctx, agent.AgentEvent{
+    Kind:   agent.EventResult,
+    Result: msg.Result,  // *agent.ResultEvent directly, no Meta reconstruction
+})
+```
+
 **违反这条规则时的征兆**（review 时用作 checklist）：
-- 抽象层 struct 里出现 `Meta map[string]any` 字段且 producer / consumer 各自 hardcode key 名
+- 抽象层 struct 里出现 `Meta map[string]any` 字段且 producer / consumer 各自 hardcode key 名（**已修复**——Meta 删除）
 - 抽象层 field 名字含具体 schema（`file_path` / `command` / `pid` 等）
 - 抽象层 field 类型是 `*SomeConcreteBridgeStruct`（concrete 类型漏到抽象层）
 - Gateway / agent 包 import 了 channel 包（直接依赖关系）
 - 文档里出现"key 由 Channel X 约定"——这等于承认 implicit 协议存在
+- Gateway 把 typed event 拆字段塞 Meta / channel 又读 Meta 重建 typed event——纯轮转，无价值
 
 **例外与升级路径**：
 

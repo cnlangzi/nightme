@@ -9,8 +9,10 @@ import (
 
 // TestOnMessageState_TranslatesToOutbound verifies that
 // Gateway.OnMessageState produces the right OutboundMessage
-// (Kind, Meta, MessageStatePayload) and forwards it through
-// the resolved channel's Send.
+// (Kind, MessageStatePayload) and forwards it through
+// the resolved channel's Send. After §1.4 cleanup, the
+// message_id + state fields live in the typed MessageStatePayload
+// (not in Meta).
 func TestOnMessageState_TranslatesToOutbound(t *testing.T) {
 	gw, ch := newWiredRouter(t)
 	gw.OnMessageState("oc_chat", "om_user_msg", agent.StateReceived)
@@ -25,18 +27,14 @@ func TestOnMessageState_TranslatesToOutbound(t *testing.T) {
 	if got.ChatID != "oc_chat" {
 		t.Errorf("ChatID = %q; want oc_chat", got.ChatID)
 	}
-	if id, _ := got.Meta["message_id"].(string); id != "om_user_msg" {
-		t.Errorf("Meta[message_id] = %v; want om_user_msg", got.Meta["message_id"])
+	if got.MessageState == nil {
+		t.Fatalf("MessageState payload is nil; want typed transport")
 	}
-	st, ok := got.Meta["state"].(agent.MessageState)
-	if !ok {
-		t.Fatalf("Meta[state] type = %T; want agent.MessageState", got.Meta["state"])
+	if got.MessageState.MessageID != "om_user_msg" {
+		t.Errorf("MessageState.MessageID = %q; want om_user_msg", got.MessageState.MessageID)
 	}
-	if st != agent.StateReceived {
-		t.Errorf("Meta[state] = %v; want StateReceived", st)
-	}
-	if got.MessageState == nil || got.MessageState.State != agent.StateReceived {
-		t.Errorf("MessageState payload missing or wrong: %+v", got.MessageState)
+	if got.MessageState.State != agent.StateReceived {
+		t.Errorf("MessageState.State = %v; want StateReceived", got.MessageState.State)
 	}
 }
 
@@ -87,9 +85,8 @@ func TestOnMessageState_AllStatesPassThrough(t *testing.T) {
 		if got.Kind != OutMessageState {
 			t.Errorf("sends[%d].Kind = %v; want OutMessageState", i, got.Kind)
 		}
-		st, _ := got.Meta["state"].(agent.MessageState)
-		if st != s {
-			t.Errorf("sends[%d].Meta[state] = %v; want %v", i, st, s)
+		if got.MessageState == nil || got.MessageState.State != s {
+			t.Errorf("sends[%d].MessageState.State = %v; want %v", i, got.MessageState.State, s)
 		}
 	}
 }

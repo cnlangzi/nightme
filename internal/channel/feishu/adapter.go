@@ -361,10 +361,10 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	                       Send handles OutText directly so the
 //	                       existing /help / /use paths keep
 //	                       working.
-//	OutMessageState      → AddReaction on Meta["message_id"] with
-//	                       state-specific emoji_type (F-31 §8.3).
+//	OutMessageState      → AddReaction on MessageState.MessageID
+//	                       with state-specific emoji_type (F-31 §8.3).
 //	                       Idempotency via a.messageStates map.
-//	OutMessageStateRemoved → DeleteReaction on Meta["reaction_id"]
+//	OutMessageStateRemoved → DeleteReaction on MessageState.ReactionID
 //	                       (reserved; v1.3 uses append-only)
 //	OutCard              → send interactive card via sendContent
 //	OutThinking          → dropped (no native Feishu equivalent;
@@ -478,20 +478,17 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		return nil
 
 	case gateway.OutMessageState:
-		// F-31: read abstract state from Meta, map to feishu
-		// emoji_type internally. Channel decides how to render.
-		messageID, _ := msg.Meta["message_id"].(string)
-		if messageID == "" {
-			return errors.New("feishu: OutMessageState missing message_id in Meta")
+		// F-31: read abstract state from typed MessageStatePayload,
+		// map to feishu emoji_type internally. Channel decides
+		// how to render.
+		if msg.MessageState == nil {
+			return errors.New("feishu: OutMessageState missing MessageState payload")
 		}
-		stateRaw, ok := msg.Meta["state"]
-		if !ok {
-			return errors.New("feishu: OutMessageState missing state in Meta")
+		if msg.MessageState.MessageID == "" {
+			return errors.New("feishu: OutMessageState missing MessageID")
 		}
-		state, ok := stateRaw.(agent.MessageState)
-		if !ok {
-			return fmt.Errorf("feishu: OutMessageState state has unexpected type %T", stateRaw)
-		}
+		messageID := msg.MessageState.MessageID
+		state := msg.MessageState.State
 		emoji := mapStateToFeishuEmoji(state)
 		if emoji == "" {
 			// Unknown state: silent drop (forward-compatible).
@@ -532,15 +529,16 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 	case gateway.OutMessageStateRemoved:
 		// v1.3: not used (append-only reactions). Reserved for
 		// future when channels need mutable state markers.
-		messageID, _ := msg.Meta["message_id"].(string)
-		if messageID == "" {
-			return errors.New("feishu: OutMessageStateRemoved missing message_id in Meta")
+		if msg.MessageState == nil {
+			return errors.New("feishu: OutMessageStateRemoved missing MessageState payload")
 		}
-		reactionID, _ := msg.Meta["reaction_id"].(string)
-		if reactionID == "" {
-			return errors.New("feishu: OutMessageStateRemoved missing reaction_id in Meta")
+		if msg.MessageState.MessageID == "" {
+			return errors.New("feishu: OutMessageStateRemoved missing MessageID")
 		}
-		return a.DeleteReaction(ctx, messageID, reactionID)
+		if msg.MessageState.ReactionID == "" {
+			return errors.New("feishu: OutMessageStateRemoved missing ReactionID")
+		}
+		return a.DeleteReaction(ctx, msg.MessageState.MessageID, msg.MessageState.ReactionID)
 
 	case gateway.OutCard:
 		if msg.Card == nil {
@@ -617,14 +615,12 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 			}
 			return nil
 		}
+		if msg.Result == nil {
+			return errors.New("feishu: OutResult missing Result payload")
+		}
 		return receipt.Append(ctx, agent.AgentEvent{
-			Kind: agent.EventResult,
-			Result: &agent.ResultEvent{
-				Text:       msg.Text,
-				DurationMs: durationMs(msg),
-				IsError:    isErrorOut(msg),
-				Subtype:    subtypeOut(msg),
-			},
+			Kind:   agent.EventResult,
+			Result: msg.Result,
 		})
 
 	case gateway.OutUsage:
@@ -632,9 +628,18 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if receipt == nil {
 			return nil
 		}
+		if msg.Usage == nil {
+			return errors.New("feishu: OutUsage missing Usage payload")
+		}
 		return receipt.Append(ctx, agent.AgentEvent{
-			Kind:  agent.EventUsage,
-			Usage: usageFromMeta(msg),
+			Kind: agent.EventUsage,
+			Usage: &agent.UsageEvent{
+				InputTokens:              msg.Usage.InputTokens,
+				OutputTokens:             msg.Usage.OutputTokens,
+				CacheCreationInputTokens: msg.Usage.CacheCreationInputTokens,
+				CacheReadInputTokens:     msg.Usage.CacheReadInputTokens,
+				CostUSD:                  msg.Usage.CostUSD,
+			},
 		})
 
 	case gateway.OutCompaction:
@@ -660,15 +665,12 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// card's foot note can render
 		// "Agent | cwd | tokens" (see docs/channel/feishu.md
 		// §9.3 + the footLine composer in receipt.go).
+		if msg.Init == nil {
+			return errors.New("feishu: OutInit missing Init payload")
+		}
 		return receipt.Append(ctx, agent.AgentEvent{
 			Kind: agent.EventInit,
-			Init: &agent.InitEvent{
-				SessionID: metaString(msg, "session_id"),
-				Model:     metaString(msg, "model"),
-				AgentName: metaString(msg, "agent_name"),
-				Workspace: metaString(msg, "workspace"),
-				Branch:    metaString(msg, "branch"),
-			},
+			Init: msg.Init,
 		})
 
 	case gateway.OutCommandReply:
@@ -818,73 +820,6 @@ func toolOutput(m gateway.OutboundMessage) string {
 		return m.Tool.Output
 	}
 	return ""
-}
-
-// metaString / metaInt / metaFloat / metaBool pull well-known typed
-// fields from OutboundMessage.Meta. The translator (gateway/translate.go)
-// is the single producer of these keys; receivers tolerate any key
-// being absent / wrong-typed by returning the zero value rather than
-// erroring. Mirrors the existing toolName / toolArgs / toolOutput
-// helpers.
-func metaString(m gateway.OutboundMessage, key string) string {
-	if v, ok := m.Meta[key].(string); ok {
-		return v
-	}
-	return ""
-}
-
-func metaInt(m gateway.OutboundMessage, key string) int {
-	switch v := m.Meta[key].(type) {
-	case int:
-		return v
-	case int64:
-		return int(v)
-	case float64:
-		// JSON numbers decode to float64 by default. Coerce when
-		// the value is integral so we don't silently truncate
-		// large token counts.
-		return int(v)
-	}
-	return 0
-}
-
-func metaFloat(m gateway.OutboundMessage, key string) float64 {
-	if v, ok := m.Meta[key].(float64); ok {
-		return v
-	}
-	return 0
-}
-
-func metaBool(m gateway.OutboundMessage, key string) bool {
-	if v, ok := m.Meta[key].(bool); ok {
-		return v
-	}
-	return false
-}
-
-// durationMs / isErrorOut / subtypeOut / usageFromMeta are the
-// OutResult / OutUsage payload reconstruction helpers. They read the
-// same keys the translator writes (see gateway/translate.go).
-func durationMs(m gateway.OutboundMessage) int64 {
-	return int64(metaInt(m, "duration_ms"))
-}
-
-func isErrorOut(m gateway.OutboundMessage) bool {
-	return metaBool(m, "is_error")
-}
-
-func subtypeOut(m gateway.OutboundMessage) string {
-	return metaString(m, "subtype")
-}
-
-func usageFromMeta(m gateway.OutboundMessage) *agent.UsageEvent {
-	return &agent.UsageEvent{
-		InputTokens:              metaInt(m, "input_tokens"),
-		OutputTokens:             metaInt(m, "output_tokens"),
-		CacheCreationInputTokens: metaInt(m, "cache_creation_input_tokens"),
-		CacheReadInputTokens:     metaInt(m, "cache_read_input_tokens"),
-		CostUSD:                  metaFloat(m, "cost_usd"),
-	}
 }
 
 // buildInteractiveCard renders a Feishu Card 2.0 permission card
@@ -1308,7 +1243,7 @@ func (a *Adapter) AddReaction(ctx context.Context, messageID, reactionType strin
 }
 
 // DeleteReaction removes a reaction by its ID. Used by the adapter's
-// OutReactionRemoved send path (Meta["reaction_id"]). Receipts no
+// OutReactionRemoved send path (MessageState.ReactionID). Receipts no
 // longer delete reactions — they append lifecycle emojis instead —
 // but the public method stays for other adapter consumers.
 func (a *Adapter) DeleteReaction(ctx context.Context, messageID, reactionID string) error {

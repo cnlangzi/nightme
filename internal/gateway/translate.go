@@ -152,11 +152,7 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 			ChatID: chatID,
 			Kind:   OutResult,
 			Text:   ev.Result.Text,
-			Meta: map[string]any{
-				"duration_ms": ev.Result.DurationMs,
-				"is_error":    ev.Result.IsError,
-				"subtype":     ev.Result.Subtype,
-			},
+			Result: ev.Result,
 		}, true
 
 	case agent.EventUsage:
@@ -169,12 +165,12 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 			ChatID: chatID,
 			Kind:   OutUsage,
 			Text:   formatUsageSummary(ev.Usage),
-			Meta: map[string]any{
-				"input_tokens":                ev.Usage.InputTokens,
-				"output_tokens":               ev.Usage.OutputTokens,
-				"cache_creation_input_tokens": ev.Usage.CacheCreationInputTokens,
-				"cache_read_input_tokens":     ev.Usage.CacheReadInputTokens,
-				"cost_usd":                    ev.Usage.CostUSD,
+			Usage: &UsageInfo{
+				InputTokens:              ev.Usage.InputTokens,
+				OutputTokens:             ev.Usage.OutputTokens,
+				CacheCreationInputTokens: ev.Usage.CacheCreationInputTokens,
+				CacheReadInputTokens:     ev.Usage.CacheReadInputTokens,
+				CostUSD:                  ev.Usage.CostUSD,
 			},
 		}, true
 
@@ -182,16 +178,15 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		// Mid-turn context compaction — NOT a turn end. Channels
 		// surface "✶ Compacting conversation…" briefly so users
 		// know why the agent paused.
+		//
+		// The Subtype field is currently unused by any channel;
+		// if a future channel needs it, add it as a typed field
+		// on OutboundMessage rather than smuggling it through Meta.
 		text := "✶ Compacting conversation…"
-		var subtype string
-		if ev.Compaction != nil {
-			subtype = ev.Compaction.Subtype
-		}
 		return OutboundMessage{
 			ChatID: chatID,
 			Kind:   OutCompaction,
 			Text:   text,
-			Meta:   map[string]any{"subtype": subtype},
 		}, true
 
 	case agent.EventInit:
@@ -204,24 +199,11 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		if ev.Init == nil {
 			return OutboundMessage{}, false
 		}
-		meta := map[string]any{
-			"session_id": ev.Init.SessionID,
-			"model":      ev.Init.Model,
-		}
-		if ev.Init.AgentName != "" {
-			meta["agent_name"] = ev.Init.AgentName
-		}
-		if ev.Init.Workspace != "" {
-			meta["workspace"] = ev.Init.Workspace
-		}
-		if ev.Init.Branch != "" {
-			meta["branch"] = ev.Init.Branch
-		}
 		return OutboundMessage{
 			ChatID: chatID,
 			Kind:   OutInit,
 			Text:   fmt.Sprintf("session initialized (model: %s)", ev.Init.Model),
-			Meta:   meta,
+			Init:   ev.Init,
 		}, true
 	}
 	return OutboundMessage{}, false

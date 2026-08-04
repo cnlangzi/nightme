@@ -723,12 +723,9 @@ func (g *gateway) OnMessageState(chatID, userMsgID string, state agent.MessageSt
 	out := OutboundMessage{
 		Kind:   OutMessageState,
 		ChatID: chatID,
-		Meta: map[string]any{
-			"message_id": userMsgID,
-			"state":      state,
-		},
 		MessageState: &MessageStatePayload{
-			State: state,
+			State:     state,
+			MessageID: userMsgID,
 		},
 	}
 	if err := ch.Send(context.Background(), out); err != nil {

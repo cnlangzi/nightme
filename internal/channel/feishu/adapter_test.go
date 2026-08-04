@@ -16,6 +16,7 @@ import (
 	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
 )
@@ -787,21 +788,35 @@ func TestSend_OutText_FoldsIntoReceipt(t *testing.T) {
 		gateway.OutUsage,
 		gateway.OutInit,
 	} {
-		if err := a.Send(t.Context(), gateway.OutboundMessage{
+		msg := gateway.OutboundMessage{
 			Kind:    kind,
 			ChatID:  "oc_test",
 			ReplyTo: userMsgID,
 			Text:    "x",
-			Meta: map[string]any{
-				"session_id":    "s_1",
-				"model":         "claude-sonnet-4-5",
-				"agent_name":    "claude",
-				"workspace":     "/tmp",
-				"branch":        "main",
-				"input_tokens":  10,
-				"output_tokens": 5,
-			},
-		}); err != nil {
+		}
+		switch kind {
+		case gateway.OutResult:
+			msg.Result = &agent.ResultEvent{
+				Text:       "x",
+				DurationMs: 1234,
+				IsError:    false,
+				Subtype:    "success",
+			}
+		case gateway.OutUsage:
+			msg.Usage = &gateway.UsageInfo{
+				InputTokens:  10,
+				OutputTokens: 5,
+			}
+		case gateway.OutInit:
+			msg.Init = &agent.InitEvent{
+				SessionID: "s_1",
+				Model:     "claude-sonnet-4-5",
+				AgentName: "claude",
+				Workspace: "/tmp",
+				Branch:    "main",
+			}
+		}
+		if err := a.Send(t.Context(), msg); err != nil {
 			t.Fatalf("Send(%v): %v", kind, err)
 		}
 	}

@@ -59,11 +59,19 @@ func TestTranslate_EventResult(t *testing.T) {
 	if msg.Text != "完成" {
 		t.Errorf("Text = %q, want 完成", msg.Text)
 	}
-	if msg.Meta["duration_ms"] != int64(1234) {
-		t.Errorf("duration_ms = %v, want 1234", msg.Meta["duration_ms"])
+	// §1.4 cleanup: Result fields flow through the typed
+	// OutboundMessage.Result payload, not Meta.
+	if msg.Result == nil {
+		t.Fatal("msg.Result is nil; Gateway should populate the typed ResultEvent payload")
 	}
-	if msg.Meta["subtype"] != "success" {
-		t.Errorf("subtype = %v, want success", msg.Meta["subtype"])
+	if msg.Result.DurationMs != 1234 {
+		t.Errorf("Result.DurationMs = %v, want 1234", msg.Result.DurationMs)
+	}
+	if msg.Result.Subtype != "success" {
+		t.Errorf("Result.Subtype = %v, want success", msg.Result.Subtype)
+	}
+	if msg.Result.IsError {
+		t.Error("Result.IsError = true; want false")
 	}
 }
 
@@ -104,11 +112,16 @@ func TestTranslate_EventUsage(t *testing.T) {
 	if !ok || msg.Kind != OutUsage {
 		t.Fatalf("got (%v, %v), want (OutUsage, true)", msg.Kind, ok)
 	}
-	if msg.Meta["input_tokens"] != 100 {
-		t.Errorf("input_tokens = %v, want 100", msg.Meta["input_tokens"])
+	// §1.4 cleanup: token counts flow through the typed
+	// OutboundMessage.Usage payload, not Meta.
+	if msg.Usage == nil {
+		t.Fatal("msg.Usage is nil; Gateway should populate the typed UsageInfo payload")
 	}
-	if msg.Meta["cost_usd"] != 0.001 {
-		t.Errorf("cost_usd = %v, want 0.001", msg.Meta["cost_usd"])
+	if msg.Usage.InputTokens != 100 {
+		t.Errorf("Usage.InputTokens = %v, want 100", msg.Usage.InputTokens)
+	}
+	if msg.Usage.CostUSD != 0.001 {
+		t.Errorf("Usage.CostUSD = %v, want 0.001", msg.Usage.CostUSD)
 	}
 	// Text should mention token count.
 	if msg.Text == "" {
@@ -166,9 +179,6 @@ func TestTranslate_EventCompaction(t *testing.T) {
 	if msg.Text == "" {
 		t.Error("Text is empty; expected the Compacting… indicator")
 	}
-	if msg.Meta["subtype"] != "compact" {
-		t.Errorf("subtype = %v, want 'compact'", msg.Meta["subtype"])
-	}
 }
 
 func TestTranslate_EventInit(t *testing.T) {
@@ -180,11 +190,16 @@ func TestTranslate_EventInit(t *testing.T) {
 	if !ok || msg.Kind != OutInit {
 		t.Fatalf("got (%v, %v), want (OutInit, true)", msg.Kind, ok)
 	}
-	if msg.Meta["session_id"] != "s_001" {
-		t.Errorf("session_id = %v, want 's_001'", msg.Meta["session_id"])
+	// §1.4 cleanup: init fields flow through the typed
+	// OutboundMessage.Init payload, not Meta.
+	if msg.Init == nil {
+		t.Fatal("msg.Init is nil; Gateway should populate the typed InitEvent payload")
 	}
-	if msg.Meta["model"] != "claude-sonnet-4-5" {
-		t.Errorf("model = %v, want 'claude-sonnet-4-5'", msg.Meta["model"])
+	if msg.Init.SessionID != "s_001" {
+		t.Errorf("Init.SessionID = %v, want 's_001'", msg.Init.SessionID)
+	}
+	if msg.Init.Model != "claude-sonnet-4-5" {
+		t.Errorf("Init.Model = %v, want 'claude-sonnet-4-5'", msg.Init.Model)
 	}
 }
 

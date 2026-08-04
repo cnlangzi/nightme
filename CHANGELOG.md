@@ -177,10 +177,12 @@ spawn will fail at runtime. See
 
 **飞书 3 种 reply 形态 (实机群 Frtpilot-Xiage 验证，2026-08-04 子决议，关闭 §13.10 P2)**:
 
+> **作用域**：这三个名字（`ReplyInChat` / `ReplyInThreadAndChat` / `ReplyInThread`）是 **`channel/feishu` 自治**——不上升到 Gateway / OutboundMessage 抽象层。其他 channel（Web / Slack）应**各自**决定怎么渲染 OutThinking / OutTool*，不复制飞书的 thread 方案。
+
 | 形态 | 飞书 `reply_in_thread` 字段 | main chat 显示 | thread panel 显示 | `thread_id` 响应 |
 |---|---|---|---|---|
-| **Reply** (顶级 Create) | n/a | 独立气泡 | 不在 thread | `""` |
-| **ReplyInThread + Also send it to chat** | **字段省略** (`omitempty` nil) | **正文内联** | 同一份正文 | `""` |
+| **ReplyInChat** (顶级 Create) | n/a | 独立气泡 | 不在 thread | `""` |
+| **ReplyInThreadAndChat** | **字段省略** (`omitempty` nil) | **正文内联** | 同一份正文 | `""` |
 | **ReplyInThread** | `true` | **"X replies" 灰条** | **正文** | `omt_xxx` (首次分配，后续 reply-true 复用) |
 
 `sendMessageFunc` / `sendContent` / `sendViaLarkReply` / `SendMessageText` / `SendCard` / `postThreadReply` 全链路加尾部 `replyInThread bool` 参数。`sendViaLarkReply` 内部 `larkim.NewReplyMessageReqBodyBuilder()` **仅在 `true` 时**调 `.ReplyInThread(true)` (false 路径靠 `omitempty` 字段省略保留 recorder log / idempotency cache 字节级兼容；**严禁**简化成 `.ReplyInThread(replyInThread)` 否则 false 路径多 28 字节破坏兼容性)。
@@ -188,10 +190,10 @@ spawn will fail at runtime. See
 按 OutboundKind 路径拆分：
 
 - `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCompaction` → **ReplyInThread** (agent 进度只进 thread panel,main chat 仅显示 "X replies" 指示器)
-- receipt 冷启动卡 / `OutCard` (permission) / `OutCommandReply` → **ReplyInThread + Also send it to chat** (必须 main chat 可见)
-- 顶级 Create (Reply) 形态 → nightme **不**走 (fallback 230011/231003 才退化)
+- receipt 冷启动卡 / `OutCard` (permission) / `OutCommandReply` → **ReplyInThreadAndChat** (必须 main chat 可见)
+- 顶级 Create (ReplyInChat) 形态 → nightme **不**走 (fallback 230011/231003 才退化)
 
-测试：`TestSend_ThreadOnlyEvents_PassReplyInThreadTrue` (4 kinds × ReplyInThread) + `TestSend_ChatVisibleEvents_PassReplyInThreadFalse` (3 paths × ReplyInThread+Also send it to chat) + `cmd/_probe/send_one` 实机飞书群验证。详见 `docs/feat/F-37-tool-thread-routing.md` §7.5。
+测试：`TestSend_ThreadOnlyEvents_PassReplyInThreadTrue` (4 kinds × ReplyInThread) + `TestSend_ChatVisibleEvents_PassReplyInThreadFalse` (3 paths × ReplyInThreadAndChat) + `cmd/_probe/send_one` 实机飞书群验证。详见 `docs/feat/F-37-tool-thread-routing.md` §7.5。
 
 ---
 

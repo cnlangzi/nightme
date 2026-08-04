@@ -74,14 +74,16 @@ thread (click 指示器进入):
 Feishu adapter 在 `Send` dispatcher 按 Kind 自决 routing。  
 **飞书有 3 种 reply 形态（实机验证，2026-08-04）**：
 
+> **作用域声明**：本节三组合名（`ReplyInChat` / `ReplyInThreadAndChat` / `ReplyInThread`）是 **`channel/feishu` 自治范围内的渲染决策**（具体到飞书 thread UI 行为），**不**上升到 `gateway.OutboundMessage` / `OutboundKind` 抽象层——其他 channel（如未来 Web / Slack）应**各自**决定怎么渲染 OutThinking / OutTool*，不复制 Feishu 的 thread 方案（详见 `docs/feat/F-08-channel-abstraction.md` §4）。Gateway / ChatSession / OutboundMessage 契约不变（无新 Kind）。
+
 | 形态名 | Wire（HTTP body / path） | 飞书 main chat 看到 | 飞书 thread panel 看到 | 飞书响应里 `thread_id` |
 |---|---|---|---|---|
-| **Reply**（顶级 Create） | `POST /im/v1/messages` body `{receive_id, msg_type, content}`（**无** `root_id`） | 独立气泡（不挂任何 anchor 下） | 不在 thread panel（没有 thread 概念） | `""`（飞书不分配） |
-| **ReplyInThread + Also send it to chat** | `POST /messages/{om_M0}/reply` body `{msg_type, content}`（`reply_in_thread` **字段省略**） | **正文**（内联 reply，带回复箭头） | **同一份正文**（按时间序） | `""`（飞书不分配独立 thread，reply 只是 main chat 的一条内联消息） |
+| **ReplyInChat**（顶级 Create） | `POST /im/v1/messages` body `{receive_id, msg_type, content}`（**无** `root_id`） | 独立气泡（不挂任何 anchor 下） | 不在 thread panel（没有 thread 概念） | `""`（飞书不分配） |
+| **ReplyInThreadAndChat** | `POST /messages/{om_M0}/reply` body `{msg_type, content}`（`reply_in_thread` **字段省略**） | **正文**（内联 reply，带回复箭头） | **同一份正文**（按时间序） | `""`（飞书不分配独立 thread，reply 只是 main chat 的一条内联消息） |
 | **ReplyInThread** | `POST /messages/{om_M0}/reply` body `{msg_type, content, reply_in_thread: true}` | **"X replies" 灰条**（无正文） | **正文**（按时间序；多条 share 同一 thread） | `omt_xxx`（飞书**第一次** reply-true 时分配，之后同 root_id 复用） |
 
-> 命名约定：上表"形态名"来自 ops 确认（2026-08-04 实机飞书群 Frtpilot-Xiage 验证）。
-> "ReplyInThread + Also send it to chat" 在 SDK body 上**就是 `reply_in_thread` 字段省略**——即 0 字节差异化。
+> 命名约定：上表"形态名"是 **Feishu adapter 专属命名**（`channel/feishu` 自治范围内的渲染决策），**不**上升到 Gateway / OutboundMessage 抽象层级（其他 channel 如未来 Web / Slack 应各自决定怎么渲染）。来源：2026-08-04 实机飞书群 Frtpilot-Xiage ops 验证。
+> "ReplyInThreadAndChat" 在 SDK body 上**就是 `reply_in_thread` 字段省略**——即 0 字节差异化。
 > "ReplyInThread" 在 SDK body 上**就是 `reply_in_thread: true` 28 字节**——nightme F-37 选的路径。
 
 按 OutboundKind 映射：
@@ -94,15 +96,15 @@ Feishu adapter 在 `Send` dispatcher 按 Kind 自决 routing。
 | `OutCompaction` | **ReplyInThread** | 纯文本 `✶ Compacting conversation…` |
 | `OutText` / `OutResult` / `OutInit` / `OutUsage` | n/a（PATCH in place 不走 reply API） | 进 receipt card body |
 | `OutMessageState` | n/a | AddReaction ⏳/🔄/✅/❌ 在 user msg 上 |
-| `OutCard`（permission card） | **ReplyInThread + Also send it to chat** | 进 main chat 内联回复 |
-| `OutCommandReply`（slash 回应） | **ReplyInThread + Also send it to chat** | 进 main chat 内联回复 |
-| Receipt 冷启动卡 | **ReplyInThread + Also send it to chat** | 进 main chat 内联回复（PATCH in-place） |
-| 顶级 Create 形态 | **Reply** | nightme **不**用（fallback 路径 230011/231003 退化时才走顶级 Create，详见 §15.2） |
+| `OutCard`（permission card） | **ReplyInThreadAndChat** | 进 main chat 内联回复 |
+| `OutCommandReply`（slash 回应） | **ReplyInThreadAndChat** | 进 main chat 内联回复 |
+| Receipt 冷启动卡 | **ReplyInThreadAndChat** | 进 main chat 内联回复（PATCH in-place） |
+| 顶级 Create 形态 | **ReplyInChat** | nightme **不**用（fallback 路径 230011/231003 退化时才走顶级 Create，详见 §15.2） |
 
 **`reply_in_thread` 字段语义**（来自 `larkim.ReplyMessageReqBody.ReplyInThread *bool`，
 SDK 注释：「是否以话题形式回复；若群聊已经是话题模式，则自动回复该条消息所在的话题」）：
 
-- **字段省略**（`omitempty` nil 指针）→ bot 消息**在 main chat 内联显示 + 进 thread panel** = "ReplyInThread + Also send it to chat"
+- **字段省略**（`omitempty` nil 指针）→ bot 消息**在 main chat 内联显示 + 进 thread panel** = "ReplyInThreadAndChat"
 - `false`（显式设 false）→ **字节级与"字段省略"不同**（多 28 字节 `"reply_in_thread":false`），但**飞书 UI 行为完全一致**（与"省略"等价）
 - `true` → bot 消息**只在 thread 面板显示**，main chat 只看到 "X replies" 指示器 = "ReplyInThread"
 
@@ -619,8 +621,8 @@ nightme 数据模型不变式保留。
 
 | 发送 | 形态 | 飞书响应 | main chat UI 实际显示 |
 |---|---|---|---|
-| `[probe-A]` Create 顶级 (`oc_4a06da49bc0131ff14b381498e4fed9d`） | Reply | `message_id=om_xxx, parent_id="", root_id="", thread_id=""` | 独立气泡，不挂 M0 下 ✓ |
-| `[probe-B]` Reply to M0，省略 reply_in_thread | ReplyInThread + Also send it to chat | `parent_id=M0, root_id=M0, thread_id=""` | main chat 显示**正文内联**（带回复箭头），thread panel 也有 ✓ |
+| `[probe-A]` Create 顶级 (`oc_4a06da49bc0131ff14b381498e4fed9d`） | ReplyInChat | `message_id=om_xxx, parent_id="", root_id="", thread_id=""` | 独立气泡，不挂 M0 下 ✓ |
+| `[probe-B]` Reply to M0，省略 reply_in_thread | ReplyInThreadAndChat | `parent_id=M0, root_id=M0, thread_id=""` | main chat 显示**正文内联**（带回复箭头），thread panel 也有 ✓ |
 | `[probe-D]` Reply to M0, reply_in_thread=true | ReplyInThread | `parent_id=M0, root_id=M0, thread_id=omt_19141bf7110e1c89` | main chat 只显示 "X replies" 灰条，**正文只在线程里** ✓ |
 | `[probe-D2/D3/D4]` 续发 3 条 reply-true | ReplyInThread | 全部 `thread_id=omt_19141bf7110e1c89`（共享） | 4 条 D share 同一个 thread，main chat 看到 "4 replies" 灰条 |
 

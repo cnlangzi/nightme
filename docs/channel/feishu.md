@@ -993,11 +993,13 @@ PATCH 路径不动 -- Feishu 的 PATCH 接口会自动保留被 PATCH 消息的�
 **✅ 子决议(2026-08-04,F-37 落地)**: `reply_in_thread` 不再"P2 一刀切",而**按 OutboundKind 拆分**到飞书 3 种 reply 形态：
 
 > 飞书实机验证（2026-08-04, Frtpilot-Xiage 群）确认 3 种 reply 形态，命名来自 ops 现场观察：
+>
+> **作用域声明**：`ReplyInChat` / `ReplyInThreadAndChat` / `ReplyInThread` 这三个名字是 **`channel/feishu` 自治范围内的渲染决策**（具体到飞书 thread UI 行为），**不**上升到 `gateway.OutboundMessage` / `OutboundKind` 抽象层——其他 channel（如未来 Web / Slack）应**各自**决定怎么渲染 OutThinking / OutTool* ，不复制 Feishu 的 thread 方案（详见 `docs/feat/F-08-channel-abstraction.md` §4）。Gateway / ChatSession / OutboundMessage 契约不变。
 
 | 形态名 | `reply_in_thread` 字段 | main chat | thread panel | `thread_id` 响应 |
 |---|---|---|---|---|
-| **Reply** | n/a（顶级 Create，不走 reply API）| 独立气泡 | 不在 thread | `""` |
-| **ReplyInThread + Also send it to chat** | **字段省略**（SDK `omitempty` nil 指针）| **正文内联** | **同一份正文** | `""` |
+| **ReplyInChat** | n/a（顶级 Create，不走 reply API）| 独立气泡 | 不在 thread | `""` |
+| **ReplyInThreadAndChat** | **字段省略**（SDK `omitempty` nil 指针）| **正文内联** | **同一份正文** | `""` |
 | **ReplyInThread** | `true` | **"X replies" 灰条**（无正文）| **正文** | `omt_xxx`（首次分配，后续复用）|
 
 按 OutboundKind 拆分（与上表路径一致）：

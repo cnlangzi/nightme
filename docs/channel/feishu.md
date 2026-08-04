@@ -613,7 +613,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 
 | OutboundKind | 源 AgentEvent | 触发点 | Feishu 渲染 | msg_type / API | Receipt? |
 |--------------|---------------|--------|-------------|----------------|----------|
-| `OutText` | `EventText`(无前缀) | agent 流式文本 | card body `markdown` element + `💬` 图标 | `interactive` PATCH | ✅ |
+| `OutReply` | `EventText`(无前缀) | agent 对当前 turn 的 reply 流式 chunks(F-40 改名,原 `OutText`) | 默认 fold 进 receipt card body `markdown` element + `💬` 图标,**不截断**(F-40 删 600B truncate,buildReceiptCard 用 F-37 `splitMarkdownForDivs` 拆多 div);**超限改独立 reply**(F-40 §13.19):`runes > perEntryMaxRunes(8000)` 或 receipt `entries >= replyMaxEntries(45)` → 走 `sendReplyAsMessage` 投递 `MsgTypeText` / `MsgTypePost+md` / `MsgTypeInteractive` 3 段 dispatch,F-39 sanitize + envelope defense 复用 | `interactive` PATCH / `interactive` Create (超限) / `post` Create / `text` Create | ✅(默认 fold) / ❌(超限改独立 reply,锚同 userMsgID) |
 | `OutThinking` | `EventText`(带 `[思考] ` 前缀,Gateway 已剥) | agent reasoning | **`collapsible_panel` + `💭` 折叠**(§13.6 设计决策;§13.1 bug 待修) | `interactive` PATCH | ✅ |
 | `OutToolStart` | `EventToolStart` | 工具开始 | **`collapsible_panel` + `🔧` 折叠**(§13.6 设计决策,粒度待定 §13.7) | `interactive` PATCH | ✅ |
 | `OutToolEnd` | `EventToolEnd` | 工具结束(成功/失败) | **`collapsible_panel` + `✅` / `❌` 折叠**(§13.6 设计决策,与 Start 合并 or 独立待定 §13.9) | `interactive` PATCH | ✅ |
@@ -1355,6 +1355,8 @@ WebSearch  -> 10 results
 - **2026-08-04(同日增量 F-38)** - 加入 §13.14 决策:Claude TaskCreate / TaskUpdate → Receipt Checklist。Bridge 在 `tool_result` 确认成功后发完整 typed task snapshot;Gateway 增加 `OutTaskCreate` / `OutTaskUpdate` 无状态透传;Feishu receipt 在 answer entries 后、footer 前加入单一 markdown checklist element,成功 task tool 不再投递到 thread。新建 [`docs/feat/F-38-task-checklist.md`](../feat/F-38-task-checklist.md) 作为权威设计。`docs/SPEC.md` §0.6 + §11 backlog 同步登记。
 
 - **2026-08-04(同日增量)** - 加入 §13.14(F-38 tool-merge + `/tools` toggle):§13.12 的 OutToolStart + OutToolEnd 各自发一条 thread reply 的方案在 10 工具/turn 的 agent 上视觉噪声过大,反转 → OutToolEnd PATCH 同一 message_id 的 start reply(call + result 合并为一条);新增 `ChatSession.ToolsMode`(默认 Hide,quiet by default)+ `/tools on|off` slash command + runtime EventHandler gate。详见 [`docs/feat/F-38-tool-merge-and-toggle.md`](../feat/F-38-tool-merge-and-toggle.md) + `docs/SPEC.md` §0.7 + §3.1.3。
+- **2026-08-04(同日增量 F-39)** - 加入 §13.16(F-39 决策):OutResult 不再 fold 进 rolling-log receipt card(原 §13.3 F-37 方案 dedup 协调对长答复静默丢字),改为独立 reply 投递到 userMsgID;三段 dispatch(无 markdown → text;tables>5 → post+md;默认 → Card 2.0 multi-div via `splitMarkdownForDivs`)。新建 [`docs/feat/F-39-result-as-new-reply.md`](../feat/F-39-result-as-new-reply.md) 作为权威设计;`docs/SPEC.md` §0.8 + §11 backlog 同步登记;§12 映射表 OutResult 行更新。
+- **2026-08-04(同日增量 F-40)** - 加入 §13.19(F-40 决策):(a) `OutText` 改名 `OutReply`(语义更准确);(b) `eventToEntry(EventText)` 删 600B truncate → `buildReceiptCard` 用 F-37 `splitMarkdownForDivs` 拆多 div;(c) OutReply 超限改独立 reply(`runes > perEntryMaxRunes(8000)` 或 receipt `entries >= replyMaxEntries(45)` → `sendReplyAsMessage` 投递 ReplyInThreadAndChat);(d) 迟到 OutReply(receipt 已 StateCompleted)走独立 reply,保证完整回复链不丢。新建 [`docs/feat/F-40-outreply-overflow.md`](../feat/F-40-outreply-overflow.md) 作为权威设计;`docs/SPEC.md` §0.9 同步加变更摘要;§12 映射表 OutText → OutReply 行更新(含超限独立 reply 描述)。
 - **v0.3 ~ v1.3** - 早期章节(背景、OpenClaw 调研、迁移方案、已知坑等)保留;参见章节顶部 Status 行。
 
 ### 13.16 🎯 F-39 决策 (2026-08-04):OutResult → 独立 Reply(反转 §13.3 旧结构)
@@ -1472,6 +1474,91 @@ nightme 额外需要的:**lark_md 似乎需要 escape 某些字符以保证表�
 5. `internal/channel/feishu/reconnect_test.go` (NEW) ── 单元测试
 
 **详细设计**：见 [`docs/feat/F-41-active-reconnect.md`](../feat/F-41-active-reconnect.md)。SPEC §0.9。
+
+### 13.19 🎯 F-40 决策 (2026-08-04):OutReply 超限改独立 Reply + `OutText` → `OutReply` 改名
+
+**决策状态:已决议。**
+
+**背景**:F-39 修了 OutResult 路径(最终答复独立 reply,无 600 cap,无 dedup),但 **OutText 流式 chunks 仍在 receipt 内被 `truncateForLog(text, perEntryMaxBytes=600)` 截断**——长 reply 场景(代码示例、文档引用、Markdown 表格行)用户看到"N 条碎裂的'前 600 字 + …' 💬 行"。同时 `OutText` 这个名字泛指 "text payload",在 OutTaskCreate / OutResult / OutThinking 等专门名字后显得太弱。F-40 同时解决这两点。
+
+**新决议**:
+
+1. **`OutText` → `OutReply` 改名(语义更准确)**:
+   - `gateway.OutboundKind.OutText` 常量改名 `OutReply`
+   - 语义:这是 agent **对** user 当前 turn 的 reply 主体(流式 chunks),不是泛指 text
+   - 所有引用点统一改(常量定义 / 翻译路径 / Feishu adapter case / runtime responder)
+   - 不保留 `OutText` 别名(与 F-37 / F-38 / F-39 一致)
+
+2. **`eventToEntry(EventText)` 删 600 字节截断**:
+   - `LogEntry.Text` 保留完整 OutReply 文本
+   - `buildReceiptCard` 改用 F-37 `splitMarkdownForDivs(entry.Text, divTextCharLimit=1000)` 把长 entry 拆多 div
+   - code block / list 块保持 atomic(F-37 既有保证)
+
+3. **超限改独立 reply(`ReplyInThreadAndChat`)**:
+   - **长度规则**:`utf8.RuneCountInString(text) > perEntryMaxRunes (8000)` → 走独立 reply
+   - **数量规则**:receipt `len(entries) >= replyMaxEntries (45)` → 走独立 reply
+   - 任意一条命中 → 走新 helper `sendReplyAsMessage`
+
+4. **`sendReplyAsMessage` helper(平行 F-39 `sendResultAsReply`)**:
+   - 3 段 dispatch:无 markdown → `MsgTypeText`;tables > 5 → `MsgTypePost + tag:"md"`;默认 → `MsgTypeInteractive` Card 2.0 + 1/N `tag:"markdown"` div
+   - 复用 F-39 `SanitizeCardMarkdown` + `splitMarkdownForDivs` + `buildResultPayload` + `resultCardEnvelopeBudget` envelope defense
+   - 走 `sendContent(chatID, msgType, body, userMsgID, replyInThread=false)` = **ReplyInThreadAndChat**(字段省略 = main chat 可见正文 + thread 入口)
+   - **不加 icon 前缀**(OutReply 是 reply 流的延续,不是新独立条目)
+
+5. **迟到 OutReply(receipt 已 `StateCompleted`)走独立 reply**:
+   - 当前 `Append` 在 StateCompleted 时静默丢弃 → 用户收不到完整回复链
+   - F-40 在 `Adapter.Send(OutReply)` 入口检查,StateCompleted → 跳过 receipt,直接 `sendReplyAsMessage`
+   - 保证 agent 完整回复链不丢
+
+**视觉对比**:
+
+**改前**(1500 char OutReply chunk):
+```
+user_msg om_A
+  └ Receipt Card ⤓
+      💬 前 600 字 + …    ← 后 900 字 + markdown 全丢
+```
+
+**改后**(同 1500 char,fold 路径):
+```
+user_msg om_A
+  └ Receipt Card ⤓
+      💬 完整 1500 char (拆 2 个 div: ≤ 1000 + ≤ 500)
+```
+
+**改后**(12000 runes,超 `perEntryMaxRunes=8000`):
+```
+user_msg om_A
+  ├ Receipt Card ⤓ (rolling log)
+  │   ⏳ → 🔄 处理中 (无 OutReply entry)
+  └ OutReply Reply ⤓ (锚同 om_A, 独立 reply,完整 12000 char markdown)
+      [完整内容 via 3 段 dispatch]
+```
+
+**与 §13.16(F-39) / §13.12(F-37) / §13.14(F-38) 的平行关系**:
+- F-37:thinking / tool / compaction → thread-only reply
+- F-39:OutResult → main-chat-visible independent reply(ReplyInThreadAndChat)
+- **F-40:OutReply 超限 → main-chat-visible independent reply(ReplyInThreadAndChat,与 F-39 同形态)**
+
+**与 F-39 共享实现**:`sendReplyAsMessage` 与 `sendResultAsReply` 共享 3 段 dispatch / sanitize / envelope defense;**不新增 helper**(只新增顶层 wrapper + `isOverflowingReceipt` 判定)。
+
+**阈值常量复用**(不新增):
+- `perEntryMaxRunes = 8000`(F-39 既有,F-40 也用于长度上限)
+- `replyMaxEntries = 45`(F-25 既有,F-40 也用于数量上限)
+
+**架构不变式保留**:
+- `OutboundMessage` wire 字段全不变(仅 enum 改名)
+- Gateway 不动(`Translate` 仍产 `OutboundMessage{Kind: OutReply, Text}`)
+- ChatSession 不动(`currentTurnUserMsgID` 单数锚点保留)
+- `OutboundMessage.ReplyTo = currentTurnUserMsgID` 不变(独立 reply 也锚同 userMsgID)
+- §1.4 边界规范保留(OutReply 字段是 typed primitive string,Channel 自决 target)
+- 抽象归抽象 / 具体归具体原则保留(超限改独立 reply 是 Feishu 自治)
+- 1 turn : 1 anchor 不变式保留
+- F-25 rolling-log UX 不变
+- F-39 OutResult 决策不变
+- F-37 / F-38 / F-think / F-38-tool-merge 全部决策不变
+
+**详细设计**:见 [`docs/feat/F-40-outreply-overflow.md`](../feat/F-40-outreply-overflow.md)。SPEC §0.9。
 
 ## 15. v1.3.x 实施计划
 

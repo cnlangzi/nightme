@@ -154,6 +154,13 @@ type WSHealthSnapshot struct {
 	EventRing           []HealthEvent    `json:"event_ring"`
 	InboundRing         []InboundSample  `json:"inbound_ring"`
 	OutboundRing        []OutboundSample `json:"outbound_ring"`
+
+	// Prober is the F-41 active-reconnect prober state. When the WS
+	// is down, Active=true and ForceCount is incrementing every 30s
+	// (ticker tick). When Connected comes back, the prober self-stops
+	// and Active becomes false. Set by adapter.go from a *prober
+	// field; readers should treat this as advisory.
+	Prober ProberSnapshot `json:"prober"`
 }
 
 // --- Mutators (called from adapter callbacks and message handlers) ---

@@ -300,6 +300,32 @@ type OutboundMessage struct {
 
 **详细落地**：见 `internal/registry/think_mode.go` + `internal/chatsession/thinkmode.go` + `internal/gateway/handlers_think.go` + `cmd/nightme/run.go::newEventHandler` + `internal/channel/feishu/thinking_card.go`。
 
+## 0.9 文档变更摘要（v1.3.x F-41 增量，2026-08-05）
+
+**背景**：F-40 加了 WS lifecycle observability(`nightme health` + struct log + SDK callbacks),但没做主动恢复 ── SDK 默认 `reconnectInterval=2min` 让用户在断开后看到"无响应"的窗口太长。F-41 加 active recovery:30s ticker 在 `OnDisconnected` 触发后无脑 `Stop() + 100ms + Start()`,把重连节奏从 2min 压到 30s,持续到 `OnReconnected` 才停。
+
+**核心变化**：
+
+1. **prober goroutine** — `internal/channel/feishu/reconnect.go` (NEW)
+   - 30s ticker fire-and-forget,无 HTTP probe,无 tier,无 circuit breaker
+   - 每次 tick:`ch.Stop() → sleep 100ms → ch.Start()`,让 SDK 走 fresh connect 循环
+   - `prober.Stop()` 在 `OnReconnected` / `OnReady` 时调用,prober 退出
+   - 永不主动退出(除了 Connected 恢复或 daemon shutdown) ── 故意不引入"放弃重连"语义
+
+2. **SDK 行为变化** ── 不改 SDK 参数(保留 `autoReconnect=true`、`reconnectInterval=2min` 默认),只在外层周期性 kill+respawn SDK。SDK 自带 timer 作为兜底,prober 抢先 ── 两者并行运行。
+
+3. **健康度扩展** — `WSHealthSnapshot` 加 `Prober ProberSnapshot` 字段,`nightme health` 加 PROBER section 显示 active / interval / force_attempts / last_force_at / started_at。
+
+**不变式**：
+- `OutboundMessage` 契约不变 — prober 不影响 `channel.Send()`
+- daemoncontrol RPC 协议向后兼容 — `health` JSON 多了 `prober` 字段,旧 client 忽略
+- v1.3 不变式全部保留(职责隔离、Binding FSM owner、Receipt 自治)— F-41 是 Channel 自治范围内的事(WS 连接管理 = 飞书实现细节),不影响 nightme 数据模型与 Gateway 契约
+- §1.4 边界规范保留
+
+**为什么不叫 v2.0**：v1.3 核心不变式全部保留。F-41 是 Channel 自治范围内的渲染目标切换,从"被动等 SDK reconnect"到"主动周期性强制 SDK 重连",不影响 nightme 数据模型与 Gateway 契约。
+
+**详细落地**：见 [`docs/feat/F-41-active-reconnect.md`](./feat/F-41-active-reconnect.md) + `docs/channel/feishu.md` §13.18。
+
 ---
 
 ### 0.7 文档变更摘要（v1.3.x F-38 增量，2026-08-04）

@@ -11,6 +11,33 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### F-41: Active Reconnect — 30s forced Stop+Start (no HTTP probe, no tier)
+
+**Background**: F-40 added observability (`nightme health` + WSHealth struct + SDK lifecycle callbacks) so we can see when the Feishu WebSocket is down. F-41 closes the loop with **active recovery**: a 30s ticker that forces `ch.Stop() → 100ms → ch.Start()` whenever the SDK reports `OnDisconnected`, so the user-visible "no response" window drops from SDK's default 2min reconnectInterval to **30s**, and continues at 30s cadence for as long as the network stays down (no "give up after N tries" logic).
+
+**Mechanism**: each prober tick kills the SDK's internal reconnect goroutine and starts a fresh `Start()` cycle. This effectively overrides the SDK's 2min default without changing its parameters. The prober stops on `OnReconnected` / `OnReady`; otherwise it ticks forever. No HTTP probe, no circuit breaker, no tier escalation, no watchdog.
+
+**Files**: `internal/channel/feishu/reconnect.go` (NEW — prober struct, ticker, force-restart, snapshot), `internal/channel/feishu/reconnect_test.go` (NEW), `internal/channel/feishu/adapter.go` (wire SDK callbacks), `internal/channel/feishu/health.go` (add `Prober ProberSnapshot` to `WSHealthSnapshot`), `cmd/nightme/health.go` (new PROBER section).
+
+**Docs**: `docs/feat/F-41-active-reconnect.md` (canonical), `docs/SPEC.md §0.9`, `docs/channel/feishu.md §13.18`.
+
+**不变式**:
+- `OutboundMessage` 契约不变 — prober 不影响 `channel.Send()`
+- daemoncontrol RPC 协议向后兼容 — `health` JSON 多了 `prober` 字段,旧 client 忽略
+- prober 永不主动退出(Connected 恢复或 daemon shutdown 除外)— 故意不引入"放弃重连"语义
+- SDK 默认 `autoReconnect=true` 保留 — prober 跟 SDK reconnect timer **并行**,prober 抢先,SDK 兜底
+
+### F-40: WS reconnect observability + `nightme health` command
+
+**Background**: when a user reported "feishu消息nightme没收到" there was no signal we could read to distinguish WS down / SDK dead / reply path stuck. F-40 adds observability + a CLI command for first-stop diagnosis.
+
+**Changes**:
+- `internal/channel/feishu/health.go` (NEW): `WSHealth` struct + thread-safe ring buffers for `EventRing` (32 lifecycle events), `InboundRing` / `OutboundRing` (8 most recent successful samples). Updated by SDK `OnReady` / `OnError` / `OnDisconnected` / `OnReconnecting` / `OnReconnected` callbacks.
+- `internal/daemoncontrol/`: new `health` RPC command + `HealthProvider` interface + `GetHealth` client function. `cmd/nightme/run.go` wires the post-`newChannel` adapter into the server's health provider.
+- `cmd/nightme/health.go` (NEW): `nightme health [--json]` — human-readable or raw JSON status with `STATUS` / `LIVENESS` / `LAST ERROR` / `RECENT EVENTS` / `RECENT INBOUND` / `RECENT OUTBOUND` sections.
+
+**Tests**: 8 `WSHealth` unit tests, existing `./...` tests still pass.
+
 ### F-39: `OutResult` → independent reply (reverse F-37 §13.3)
 
 **Reverse-section proof**: Claude Code stream-json's `result.result` is byte-level equal to the last `assistant.event` content, so the previous dedup logic (`receipt_event.go:113-124`) silently swallowed the full final answer on any reply > 600 chars. F-39 reverses that path: `OutResult` no longer folds into the rolling-log receipt card, but is delivered as an **independent reply** anchored at `userMsgID` so the receipt card and the final answer become two separate surfaces.

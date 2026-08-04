@@ -94,6 +94,12 @@ type Adapter struct {
 	// sends. Read via Health() / Adapter.HealthSnapshot().
 	health *WSHealth
 
+	// prober is the F-41 active-reconnect prober. Started on
+	// OnDisconnected, stopped on OnReconnected / OnReady. The
+	// prober's snapshot is merged into WSHealthSnapshot.Prober
+	// for `nightme health` output.
+	prober *prober
+
 	// limiter 全局共享 token bucket（F-35）。所有出口 SDK call 前
 	// 都过 Wait()，预防触发飞书 230001 / 230020 限流错误码。
 	// 默认 5 QPS / burst 1（保守）。详见 docs/feat/F-35-ratelimit.md。
@@ -277,6 +283,17 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 			a.health.recordDisconnect(now)
 			a.logger.Warn("feishu: ws disconnected",
 				"app_id", cfg.Feishu.AppID)
+			// F-41: start the 30s prober that force-reconnects until
+			// the SDK reports OnReconnected. Started on every
+			// disconnect — the prober is self-stopping on reconnect
+			// and idempotent (Start is a no-op when already running).
+			if a.prober != nil {
+				if a.prober.Start() {
+					a.logger.Info("feishu: reconnect prober started",
+						"app_id", cfg.Feishu.AppID,
+						"interval", defaultProberInterval.String())
+				}
+			}
 		}),
 		larkws.WithOnReconnecting(func() {
 			now := time.Now()
@@ -292,6 +309,15 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 			a.logger.Info("feishu: ws reconnected",
 				"app_id", cfg.Feishu.AppID,
 				"reconnect_count", a.health.Snapshot().ReconnectCount)
+			// F-41: stop the prober — the WS is back, no more
+			// forced Stop+Start needed. Safe to call when the prober
+			// isn't running (no-op).
+			if a.prober != nil {
+				a.prober.Stop()
+				a.logger.Info("feishu: reconnect prober stopped",
+					"app_id", cfg.Feishu.AppID,
+					"force_attempts", a.prober.Snapshot().ForceCount)
+			}
 		}),
 	)
 	a.larkClient = lark.NewClient(cfg.Feishu.AppID, cfg.Feishu.AppSecret)
@@ -313,6 +339,20 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	// struct; the SDK callbacks wired above (WithOnReady / OnError /
 	// OnDisconnected / OnReconnecting / OnReconnected) update it.
 	a.health = &WSHealth{}
+
+	// F-41: active reconnect prober. The restarter closure forces
+	// ch.Stop() + sleep + ch.Start() on every 30s tick while the
+	// WS is disconnected, which effectively overrides the SDK's
+	// 2-minute default reconnectInterval. Self-stops when the SDK
+	// reports Connected=true (checked via Health() inside the tick).
+	a.prober = newProber(a, func() error {
+		if err := a.Stop(context.Background()); err != nil {
+			return err
+		}
+		time.Sleep(defaultProberBackoff)
+		return a.Start(context.Background())
+	})
+
 	return a, nil
 }
 
@@ -1457,7 +1497,14 @@ func (a *Adapter) Health() WSHealthSnapshot {
 	if a.health == nil {
 		return WSHealthSnapshot{}
 	}
-	return a.health.Snapshot()
+	snap := a.health.Snapshot()
+	// F-41: layer the prober snapshot on top. Snapshots are
+	// independent of WSHealth so we don't bake prober state into
+	// the health struct (avoids cross-coupling when one is reset).
+	if a.prober != nil {
+		snap.Prober = a.prober.Snapshot()
+	}
+	return snap
 }
 
 // logOutgoing emits one info-level line per outgoing Feishu call so

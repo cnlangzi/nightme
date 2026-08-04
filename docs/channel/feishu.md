@@ -1431,19 +1431,62 @@ nightme F-39 直接移植这些 helper 到 `card_sanitize.go`,不复造。
 
 nightme 额外需要的:**lark_md 似乎需要 escape 某些字符以保证表格渲染** —— 这个 cc-connect 没显式做,是 `optimizeMarkdownStyle` 的副作用之一。nightme 应在 F-39 后续 PR 视情况加 `escapeMarkdownTableChars` 之类。
 
+### 13.18 🎯 F-41 决策 (2026-08-05):Active Reconnect ── 30s 强制 Stop+Start
+
+**决策状态：已决议。**
+
+**背景**：F-40 加了 WS lifecycle observability(`nightme health` + struct log),但没做主动恢复 ── SDK 默认 `reconnectInterval=2min` 让用户在断开后看到"无响应"的窗口太长。F-41 加 active recovery。
+
+**新决议**：30s ticker 在 `OnDisconnected` 触发后无脑 `Stop() + 100ms + Start()`。把重连节奏从 2min 压到 30s,持续到 `OnReconnected` 才停。**无 HTTP probe、无 tier、无 circuit breaker、无 watchdog 升级** ── 故意简化。
+
+**机制**:
+- prober goroutine 在 `OnDisconnected` 启动,30s ticker
+- 每次 tick:`ch.Stop() → sleep 100ms → ch.Start()`,让 SDK 走 fresh connect 循环
+- `prober.Stop()` 在 `OnReconnected` / `OnReady` 时调用,prober 退出
+- 永不主动退出(除了 Connected 恢复或 daemon shutdown) ── 故意不引入"放弃重连"语义
+
+**为什么不需要 HTTP probe**:
+- SDK 重连很快(几十 ms 完成)。一次失败的 reconnect 代价小到可以忽略
+- 30s 一次的频率下,即使 100% 失败也只占总时间的 0.X%
+- 简化掉 HTTP probe ── 让 SDK 内部去试,我们只负责"每 30s 杀一次重来"
+
+**与 SDK 的交互**:
+- `Stop()` 关闭 socket + 取消 SDK 内部 goroutine(`larkws/client.go:344-352`)
+- `Start(ctx)` 重新拉 SDK connect 循环(`larkws/client.go:206-233`)
+- SDK 的 autoReconnect=true 仍然有效 ── 我们 Stop 之后如果网络短暂恢复,Start 期间 SDK 也能用 default 2min 兜底
+- 我们的 prober 跟 SDK reconnect timer **并行** ── 谁先连上谁赢
+
+**prober 状态机**:
+```
+(inactive)  ──── Start() on OnDisconnected ────►  (active)
+                                                  │
+                                                  │ ticker fires:
+                                                  │   Stop + 100ms + Start
+                                                  │   check Connected:
+                                                  │     yes → Stop() ──► (inactive)
+                                                  │     no  → continue ticker
+                                                  ▼
+                                              永远 ticker,直到 Connected
+```
+
+**实施要点**:
+1. `internal/channel/feishu/reconnect.go` (NEW) ── prober struct
+2. `internal/channel/feishu/adapter.go` ── wire SDK callbacks 到 prober
+3. `internal/channel/feishu/health.go` ── `WSHealthSnapshot.Prober` 字段
+4. `cmd/nightme/health.go` ── 新 PROBER section
+5. `internal/channel/feishu/reconnect_test.go` (NEW) ── 单元测试
+
+**详细设计**：见 [`docs/feat/F-41-active-reconnect.md`](../feat/F-41-active-reconnect.md)。SPEC §0.9。
+
 ## 15. v1.3.x 实施计划
 
-### 15.0 状态(2026-08-04 F-thread-route + F-38 反转后)
+### 15.0 状态(2026-08-05 F-40 + F-41 落地后)
 
-�️ **本节已被 §13.12(F-37 thread-route)+ §13.14(F-38 tool-merge)+ [`docs/feat/F-37-tool-thread-routing.md`](../feat/F-37-tool-thread-routing.md) + [`docs/feat/F-38-tool-merge-and-toggle.md`](../feat/F-38-tool-merge-and-toggle.md) 反转**。
-
-- 原 §15 目标"折叠 + reply-in-thread" → 折叠方案被 §13.12 推翻
-- §13.1 修复不再需要(thinkingPrefix 不再被 strip)
-- §13.10 reply-in-thread 部分保留(§13.12 复用其基础设施 `sendViaLarkReply` + `SendMessageText` 的 rootID 参数)
-- §13.12 的"每事件一条 reply"被 §13.14 进一步合并:`OutToolStart` + `OutToolEnd` → 一条 thread reply(Feishu `PUT /im/v1/messages/{id}` PATCH 同一 message_id)
-- §13.14 新增 `ChatSession.ToolsMode`(默认 Hide)+ `/tools on|off` slash command + runtime EventHandler gate
-- §13.16 反转 §13.3 OutResult→receipt 路径,改为独立 reply 投递;`splitMarkdownForDivs` 函数仍服务于新 helper `buildResultCardJSON`
-- 新实施计划见 F-37 §3.1 + F-38 §8 + F-39 §2 文件级变更清单
+- **F-41 active reconnect (commit 后续)** ── 30s ticker 周期性 `Stop()+Start()`,把 WS 断开到重连的最大等待从 SDK 默认 2min 压到 30s。prober goroutine 在 `OnDisconnected` 启动,`OnReconnected` 退出,无 HTTP probe / 无 tier / 无 circuit breaker。详见 §13.18 + F-41 design doc。
+- **F-40 observability (commit 85f5323, PR #41)** ── SDK `OnReady` / `OnError` / `OnDisconnected` / `OnReconnecting` / `OnReconnected` 五个 callback 接入 `WSHealth` struct,`nightme health` 命令通过 daemoncontrol unix-socket 调 `health` RPC 打印 STATUS / LIVENESS / LAST ERROR / RECENT EVENTS / RECENT INBOUND / RECENT OUTBOUND 六段。
+- **F-39 + F-39-follow-up (commit 5ab730b / ddb2cca, PR #39)** ── OutResult → 独立 reply(ReplyInThreadAndChat),`SetCompleted` 移到 EventDone 触发,`splitMarkdownForDivs` 复用,F-39 follow-up 修了 11 个 review 找出的 bug(dedup 参数、💬 entry 清空、SanitizeCardMarkdown 覆盖 OutThinking/OutCard、preprocessFeishuMarkdown 只在 opening fence 补 newline 等)。
+- **F-38 (commit b6c59c7)** ── OutToolStart + OutToolEnd 合并为同一条 thread reply,新增 `ChatSession.ToolsMode` + `/tools on|off` slash command + runtime EventHandler gate。
+- **F-thread-route (commit 098fdb7)** ── OutThinking / OutToolStart / OutToolEnd / OutCompaction 投飞书 thread reply(独立于 receipt card);receipt card 收窄到只承载最终答复 + 元数据。
 
 历史保留:§15.1 ~ §15.5 描述折叠方案的旧实施细节,作为决策记录。
 

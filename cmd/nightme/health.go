@@ -125,6 +125,31 @@ func writeHealthText(out io.Writer, payload daemoncontrol.HealthPayload) error {
 		fmt.Fprintf(tw, "  %s\tat %s\n", snap.LastError, snap.LastErrorAt.Format(time.RFC3339))
 	}
 
+	// Section 3.5: F-41 active-reconnect prober
+	// Always printed (even when inactive) so the user knows the
+	// feature exists. When active, prints the force-restart count
+	// and last attempt timestamp.
+	fmt.Fprintln(tw, "")
+	fmt.Fprintln(tw, "PROBER (F-41 active reconnect)")
+	if snap.Prober.Active {
+		fmt.Fprintf(tw, "  active:\t%s\n", "yes")
+	} else {
+		fmt.Fprintf(tw, "  active:\t%s\n", "no")
+	}
+	fmt.Fprintf(tw, "  interval:\t%s\n", snap.Prober.Interval)
+	fmt.Fprintf(tw, "  force_attempts:\t%d\n", snap.Prober.ForceCount)
+	if !snap.Prober.LastForceAt.IsZero() {
+		fmt.Fprintf(tw, "  last_force_at:\t%s ago\n", formatAge(snap.Prober.LastForceAt, now))
+	} else {
+		fmt.Fprintln(tw, "  last_force_at:\tnever")
+	}
+	if !snap.Prober.StartedAt.IsZero() {
+		fmt.Fprintf(tw, "  started_at:\t%s ago\n", formatAge(snap.Prober.StartedAt, now))
+	}
+	if snap.Prober.LastError != "" {
+		fmt.Fprintf(tw, "  last_error:\t%s\n", snap.Prober.LastError)
+	}
+
 	// Section 4: event ring (most recent first)
 	if len(snap.EventRing) > 0 {
 		fmt.Fprintln(tw, "")

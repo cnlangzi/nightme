@@ -41,7 +41,7 @@ func TestEcho_SendRecordsAndWrites(t *testing.T) {
 	ctx := context.Background()
 	if err := c.Send(ctx, gateway.OutboundMessage{
 		ChatID: "oc_test",
-		Kind:   gateway.OutText,
+		Kind:   gateway.OutReply,
 		Text:   "hello world",
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -57,7 +57,7 @@ func TestEcho_SendRecordsAndWrites(t *testing.T) {
 
 	// Writer: one line per message.
 	got := buf.String()
-	for _, want := range []string{"echo: text", "echo: tool_start", "hello world", "Read(/tmp)"} {
+	for _, want := range []string{"echo: reply", "echo: tool_start", "hello world", "Read(/tmp)"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output missing %q: %q", want, got)
 		}
@@ -68,8 +68,8 @@ func TestEcho_SendRecordsAndWrites(t *testing.T) {
 	if len(rec) != 2 {
 		t.Fatalf("Record len = %d, want 2", len(rec))
 	}
-	if rec[0].Kind != gateway.OutText || rec[0].Text != "hello world" {
-		t.Errorf("rec[0] = %+v, want OutText/hello world", rec[0])
+	if rec[0].Kind != gateway.OutReply || rec[0].Text != "hello world" {
+		t.Errorf("rec[0] = %+v, want OutReply/hello world", rec[0])
 	}
 	if rec[1].Kind != gateway.OutToolStart {
 		t.Errorf("rec[1].Kind = %s, want tool_start", rec[1].Kind)
@@ -79,7 +79,7 @@ func TestEcho_SendRecordsAndWrites(t *testing.T) {
 func TestEcho_SendWithNilWriterDoesNotPanic(t *testing.T) {
 	c := New("echo", nil)
 	if err := c.Send(context.Background(), gateway.OutboundMessage{
-		ChatID: "oc_x", Kind: gateway.OutText, Text: "x",
+		ChatID: "oc_x", Kind: gateway.OutReply, Text: "x",
 	}); err != nil {
 		t.Errorf("Send with nil writer err = %v, want nil", err)
 	}
@@ -90,7 +90,7 @@ func TestEcho_SendWithNilWriterDoesNotPanic(t *testing.T) {
 
 func TestEcho_RecordReturnsCopy(t *testing.T) {
 	c := New("echo", nil)
-	_ = c.Send(context.Background(), gateway.OutboundMessage{ChatID: "x", Kind: gateway.OutText})
+	_ = c.Send(context.Background(), gateway.OutboundMessage{ChatID: "x", Kind: gateway.OutReply})
 	rec := c.Record()
 	rec[0].Text = "mutated"
 	// Mutating the returned slice must not affect the Channel.

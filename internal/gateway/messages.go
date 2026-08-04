@@ -174,9 +174,16 @@ type ActionPayload struct {
 type OutboundKind int
 
 const (
-	// OutText is a plain-text message — the most common case for
-	// both final agent replies and intermediate status lines.
-	OutText OutboundKind = iota
+	// OutReply is a streaming reply chunk — the agent's reply to
+	// the user's current turn. Sourced from agent.EventText
+	// (without the [思考] thinking prefix; thinking has its own
+	// OutThinking kind). The most common case for both multi-
+	// chunk final replies and single-chunk status lines.
+	//
+	// F-40 rename from OutText: the new name better reflects that
+	// this is the agent's reply payload, not a generic "text".
+	// See docs/feat/F-40-outreply-overflow.md.
+	OutReply OutboundKind = iota
 	// OutToolStart announces a tool invocation.
 	OutToolStart
 	// OutToolEnd announces a tool's completion.
@@ -225,7 +232,7 @@ const (
 	// /help, /kill, /agents) or to a runtime error that needs to
 	// surface to the user without the rolling-log card path.
 	//
-	// Distinct from OutText: OutText is the agent's stream of
+	// Distinct from OutReply: OutReply is the agent's stream of
 	// intermediate / final replies and goes through the receipt
 	// (F-25 rolling-log card → PATCH in place). OutCommandReply
 	// bypasses the receipt entirely so the user sees a standalone
@@ -252,8 +259,8 @@ const (
 // String renders OutboundKind for log lines.
 func (k OutboundKind) String() string {
 	switch k {
-	case OutText:
-		return "text"
+	case OutReply:
+		return "reply"
 	case OutToolStart:
 		return "tool_start"
 	case OutToolEnd:
@@ -296,7 +303,7 @@ func (k OutboundKind) String() string {
 type OutboundMessage struct {
 	ChatID string
 	Kind   OutboundKind
-	// Text carries the rendered body for OutText / OutThinking.
+	// Text carries the rendered body for OutReply / OutThinking.
 	// Channels are expected to truncate for their own UI limits;
 	// Gateway does not pre-truncate. OutToolStart / OutToolEnd
 	// carry their content in the Tool field, not Text — see

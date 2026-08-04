@@ -42,7 +42,7 @@ const (
 
 	// ThinkModeHide: the runtime drops OutThinking events at the
 	// EventHandler gate (after Translate + ReplyTo stamping,
-	// before ch.Send). Other OutboundKinds — OutText, OutResult,
+	// before ch.Send). Other OutboundKinds — OutReply, OutResult,
 	// OutToolStart, OutToolEnd, OutCompaction, OutInit, OutUsage —
 	// are unaffected. State is persisted so /think off survives
 	// daemon restart.

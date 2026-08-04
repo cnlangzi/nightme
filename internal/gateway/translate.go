@@ -60,7 +60,7 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		}
 		return OutboundMessage{
 			ChatID: chatID,
-			Kind:   OutText,
+			Kind:   OutReply,
 			Text:   text,
 		}, true
 

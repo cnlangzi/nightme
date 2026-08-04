@@ -23,7 +23,7 @@ import (
 // (defined in internal/gateway/translate.go as thinkingPrefix).
 // EventText events whose text starts with that prefix become
 // OutThinking in the Translate layer; everything else stays
-// OutText.
+// OutReply.
 func TestEventHandler_ThinkGate_ShowPassesThrough(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
@@ -75,7 +75,7 @@ func TestEventHandler_ThinkGate_HideDropsOutThinking(t *testing.T) {
 
 // TestEventHandler_ThinkGate_HideDoesNotAffectOtherKinds verifies
 // /think off only gates OutThinking — final assistant replies
-// (EventText without the <thinking> prefix → OutText) and other
+// (EventText without the <thinking> prefix → OutReply) and other
 // kinds must still flow to the Channel.
 //
 // F-38 update: the test must opt the chat into /tools on so
@@ -99,7 +99,7 @@ func TestEventHandler_ThinkGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	h := newEventHandler(ch, cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
-	// (a) OutText — final assistant reply (no <thinking> prefix)
+	// (a) OutReply — final assistant reply (no <thinking> prefix)
 	h("oc_chat", as, agent.AgentEvent{
 		Kind: agent.EventText,
 		Text: "Here is your answer.",
@@ -122,7 +122,7 @@ func TestEventHandler_ThinkGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 
 	got := ch.Record()
 	if len(got) != 3 {
-		t.Fatalf("Hide mode forwarded %d non-thinking events; want 3 (OutText + OutResult + OutToolStart)", len(got))
+		t.Fatalf("Hide mode forwarded %d non-thinking events; want 3 (OutReply + OutResult + OutToolStart)", len(got))
 	}
 }
 
@@ -295,7 +295,7 @@ func TestEventHandler_ToolsGate_HideDropsBothToolKinds(t *testing.T) {
 
 // TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds verifies
 // /tools off only gates OutToolStart and OutToolEnd — final
-// assistant replies (OutText), typed Result events (OutResult),
+// assistant replies (OutReply), typed Result events (OutResult),
 // and OutThinking must still flow to the Channel. This guards
 // against accidentally widening the gate in a future refactor.
 func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
@@ -310,7 +310,7 @@ func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	h := newEventHandler(ch, cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_indep", "claude", "/tmp", nil)
 
-	// (a) OutText — final assistant reply (no <thinking> prefix)
+	// (a) OutReply — final assistant reply (no <thinking> prefix)
 	h("oc_chat_tools_indep", as, agent.AgentEvent{
 		Kind: agent.EventText,
 		Text: "Here is your answer.",
@@ -331,7 +331,7 @@ func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 
 	got := ch.Record()
 	if len(got) != 3 {
-		t.Fatalf("Hide mode forwarded %d non-tool events; want 3 (OutText + OutResult + OutThinking)", len(got))
+		t.Fatalf("Hide mode forwarded %d non-tool events; want 3 (OutReply + OutResult + OutThinking)", len(got))
 	}
 }
 

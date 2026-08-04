@@ -298,7 +298,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// uniformly across restored + future chats. Calling
 	// WithOnCreate after RestoreFromRegistry silently leaves the
 	// restored chats without handlers — no MessageState reactions
-	// (⏳/🔄), no OutText / OutResult / OutTool* forwarding to
+	// (⏳/🔄), no OutReply / OutResult / OutTool* forwarding to
 	// the channel. The user sees incoming messages arrive but no
 	// outgoing follow-up. Bug surfaced when the user restarted
 	// the daemon between F-38 implementation and first
@@ -402,14 +402,14 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 			if errors.Is(err, chatsession.ErrNoActiveCwd) {
 				return ch.Send(ctx, gateway.OutboundMessage{
 					ChatID: msg.ChatID,
-					Kind:   gateway.OutText,
+					Kind:   gateway.OutReply,
 					Text:   "No workspace set. Send /cwd <path> first.",
 				})
 			}
 			// Spawn failed (binary missing, etc.); let the user know.
 			return ch.Send(ctx, gateway.OutboundMessage{
 				ChatID: msg.ChatID,
-				Kind:   gateway.OutText,
+				Kind:   gateway.OutReply,
 				Text:   fmt.Sprintf("Failed to spawn agent: %v", err),
 			})
 		}
@@ -470,7 +470,7 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 			if errors.Is(err, chatsession.ErrBufferFull) {
 				return ch.Send(ctx, gateway.OutboundMessage{
 					ChatID: msg.ChatID,
-					Kind:   gateway.OutText,
+					Kind:   gateway.OutReply,
 					Text:   "Input buffer full. Send /flush or /clear.",
 				})
 			}
@@ -600,7 +600,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		// chat has /think off, drop OutThinking events here
 		// (after Translate + ReplyTo stamping, before ch.Send)
 		// so the Feishu adapter never sees them. Other
-		// OutboundKinds — OutText / OutResult / OutToolStart /
+		// OutboundKinds — OutReply / OutResult / OutToolStart /
 		// OutToolEnd / OutCompaction / OutInit / OutUsage —
 		// are unaffected.
 		//
@@ -625,7 +625,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		// has /tools off (default), drop OutToolStart and
 		// OutToolEnd events here (after Translate + ReplyTo
 		// stamping, before ch.Send) so the Feishu adapter never
-		// sees them. Other OutboundKinds — OutText / OutResult
+		// sees them. Other OutboundKinds — OutReply / OutResult
 		// / OutThinking / OutCompaction / OutInit / OutUsage —
 		// are unaffected. The merge rendering (PATCH on start
 		// message_id when /tools on) is a Feishu adapter
@@ -672,7 +672,7 @@ func (r *responder) Send(ctx context.Context, chatID, userMsgID, text string) er
 	}
 	return r.ch.Send(ctx, gateway.OutboundMessage{
 		ChatID:  chatID,
-		Kind:    gateway.OutText,
+		Kind:    gateway.OutReply,
 		Text:    text,
 		ReplyTo: userMsgID,
 	})

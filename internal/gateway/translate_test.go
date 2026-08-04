@@ -20,8 +20,8 @@ import (
 
 func TestTranslate_EventText(t *testing.T) {
 	msg, ok := Translate("chat1", agent.AgentEvent{Kind: agent.EventText, Text: "hello"})
-	if !ok || msg.Kind != OutText || msg.Text != "hello" {
-		t.Errorf("got (%v, %v) text=%q, want (OutText=true, hello)", msg.Kind, ok, msg.Text)
+	if !ok || msg.Kind != OutReply || msg.Text != "hello" {
+		t.Errorf("got (%v, %v) text=%q, want (OutReply=true, hello)", msg.Kind, ok, msg.Text)
 	}
 }
 

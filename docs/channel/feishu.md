@@ -624,7 +624,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 | `OutToolEnd` | `EventToolEnd` | 工具结束(成功/失败) | **`collapsible_panel` + `✅` / `❌` 折叠**(§13.6 设计决策,与 Start 合并 or 独立待定 §13.9) | `interactive` PATCH | ✅ |
 | `OutTaskCreate` | `EventTaskCreate` | Claude TaskCreate 成功结果 | 替换 receipt 内最新 typed task snapshot；单 markdown checklist element（§13.14 / §18） | `interactive` PATCH | ✅（独立 checklist block） |
 | `OutTaskUpdate` | `EventTaskUpdate` | Claude TaskUpdate / delete 成功结果 | 同上；空 snapshot 清除 checklist；不进入 tool thread | `interactive` PATCH | ✅（独立 checklist block） |
-| `OutResult` | `EventResult` | 最终回复 | card body `markdown` + `📝` 图标(text 经 `truncateForLog` 限 `perEntryMaxRunes=8000`; F-37 拆 ≤ 1000 chars/div) | `interactive` PATCH | ✅ |
+| `OutResult` | `EventResult` | 最终回复 | **独立 reply 到 userMsgID**(F-39 §13.16;不 fold 进 receipt card)— 三段 dispatch:无 markdown → `MsgTypeText`;tables>5 → `MsgTypePost+md`;默认 → `MsgTypeInteractive` Card 2.0 + 1/`N` `tag:"markdown"` div(F-37 `splitMarkdownForDivs` 拆 ≤ 1000 runes/div)。sanitize via [`card_sanitize.go`](#) (cc-connect 移植)。 | `interactive` Create (新 reply) / `post` Create / `text` Create | ❌ (独立气泡,锚同 userMsgID) |
 | `OutUsage` | `EventUsage` | token 用量 | card body `markdown` + `"1.2k tokens · $0.012"`(无图标) | `interactive` PATCH | ✅ |
 | `OutCompaction` | `EventCompaction` | 中途压缩 | card body `markdown` + `✶ Compacting conversation...` | `interactive` PATCH | ✅ |
 | `OutInit` | `EventInit` | 会话初始化 | card body `markdown` + `session initialized (model: X)`,**Meta 字段(session_id/agent_name/workspace/branch)未渲染**(见 §13.2) | `interactive` PATCH | ✅ |
@@ -746,6 +746,8 @@ Meta: {
 - 实现: `internal/channel/feishu/receipt_split.go` (new)
 - 设计: [`docs/feat/F-37-multi-div-content-split.md`](../feat/F-37-multi-div-content-split.md)
 - 配置: `perEntryMaxRunes = 8000` (从 600 B 上调)
+
+> **🔁 反转 (F-39, 2026-08-04)** — F-37 修"OutResult 进入 receipt card 被 600 B 截掉一半",但暴露了**更基础的 bug**:`OutResult` dedup 协调逻辑(`receipt_event.go:113-124`)对长答复(> 600 字)总是触发,导致完整最终答复整段静默丢失。F-39 反转 OutResult 路径——不再 fold 进 receipt,改为独立 reply 投递到 userMsgID。**`splitMarkdownForDivs` 函数仍服务于 `buildResultCardJSON`(F-39 新增 helper),只是不再被 receipt 调用**。详见 §13.16 + [`docs/feat/F-39-result-as-new-reply.md`](../feat/F-39-result-as-new-reply.md)。本节 (`§13.3`) backlog 由 F-37 + F-39 共同 resolve。
 
 ### 13.4 i️ 未来关注: 没有 OutboundAttachment kind
 
@@ -1187,7 +1189,7 @@ WebSearch  -> 10 results
 | `OutCompaction` | ReplyInThreadAndChat | **可见** | `✶ Compacting conversation…`(ops 决策 2026-08-04:brief marker 是 informative 不是 noise)|
 | `OutCard`(permission)| ReplyInThreadAndChat | 可见 | 必须 main chat 可视(discoverability > cleanliness)|
 | `OutCommandReply`(slash)| ReplyInThreadAndChat | 可见 | 用户在等回复 |
-| Receipt 冷启动卡 | ReplyInThreadAndChat | 可见 | receipt card 收窄到只承载 OutText / OutResult + 元数据 |
+| Receipt 冷启动卡 | ReplyInThreadAndChat | 可见 | receipt card 承载 OutText + 元数据(OutInit/OutUsage/TaskList)。**OutResult 不再 fold 进 receipt**(F-39 §13.16),独立 reply 走默认 replyOnly=false |
 
 > Kinds 命名 ops 用 past tense(`OutToolStarted/Ended/Think`),nightme enum 实际是 present tense(`OutToolStart/End/OutThinking`)。不**改 enum 名(牵动 Gateway 抽象层多个包),只按 enum 行为归属。
 
@@ -1360,6 +1362,75 @@ WebSearch  -> 10 results
 - **2026-08-04(同日增量)** - 加入 §13.14(F-38 tool-merge + `/tools` toggle):§13.12 的 OutToolStart + OutToolEnd 各自发一条 thread reply 的方案在 10 工具/turn 的 agent 上视觉噪声过大,反转 → OutToolEnd PATCH 同一 message_id 的 start reply(call + result 合并为一条);新增 `ChatSession.ToolsMode`(默认 Hide,quiet by default)+ `/tools on|off` slash command + runtime EventHandler gate。详见 [`docs/feat/F-38-tool-merge-and-toggle.md`](../feat/F-38-tool-merge-and-toggle.md) + `docs/SPEC.md` §0.7 + §3.1.3。
 - **v0.3 ~ v1.3** - 早期章节(背景、OpenClaw 调研、迁移方案、已知坑等)保留;参见章节顶部 Status 行。
 
+### 13.16 🎯 F-39 决策 (2026-08-04):OutResult → 独立 Reply(反转 §13.3 旧结构)
+
+**决策状态：已决议。**
+
+**背景**:§13.3 F-37 决议后,OutResult 进入 receipt card 体,带 dedup 协调逻辑(`receipt_event.go:113-124`)。实机验证发现 dedup 是次优解——Claude Code stream-json 的 `result.result` 与最后一条 `assistant.event` 内容字节级相等,经 `truncateForLog(text, 600)` 砍后两侧必撞,**长答复(> 600 字)的最终答复整段静默丢失**。Receipt 内只剩 N 条碎裂的"前 600 字 + …" 💬 行。
+
+**新决议**：OutResult 不再 fold 进 rolling-log receipt card，改为**独立 reply 投递到 userMsgID thread**。两个职责清晰分离:
+
+- **Receipt Card** 退化为"事件日志 + 元数据"(承载 OutText 流式 chunks + state header + 任务清单 + footer)
+- **Final Result Reply** 独立为"答案交付"(承载 OutResult 完整 markdown,无 600 cap,无 dedup)
+
+两者均锚定 userMsgID(ReplyInThreadAndChat),Feishu 端视觉上仍是同 userMsg 的两条 reply,跟 §13.12 thinking→thread + §13.14 tool-merge 平行。
+
+**三段 dispatch** (抄 cc-connect `platform/feishu/feishu.go::buildReplyContent` + openclaw-lark `card/builder.ts::buildCompleteCard`):
+
+```
+            ┌─ 无 markdown 指示符
+            │     → MsgTypeText (plain text bubble)
+            │
+sanitize    ├─ markdown 且 tables > 5
+  ↓         │     → MsgTypePost + tag:"md"
+content     │       (GFM 渲染,无 Card 2.0 表格硬限)
+            │
+            └─ markdown 且 tables ≤ 5
+                  → MsgTypeInteractive (Card 2.0)
+                    elements: [{tag:"markdown", content:<chunk>}, ...]
+                    split via F-37 splitMarkdownForDivs @ ≤ 1000 runes/div
+```
+
+**Markdown sanitize pipeline**(移植 cc-connect,见 §13.17):
+
+- URL sanitize — non-HTTP(S) link → plain text (避免 230001 invalid href)
+- Fence newline — ``` 前自动插 newline (lark_md 必须 newline 才渲染为 code block 而非 inline)
+- Image strip — 删 `![alt](not-img_xxx)`,只留 Feishu image_key
+- Heading demotion — H1 → H4, H2-H6 → H5 (lark_md heading 范围窄)
+- Code-block protect — ```block``` 在所有变换中保护不动
+
+**架构不变式保留**:
+- `OutboundMessage` 不变(无新 Kind,无删 Kind,无改 `Result` typed field)
+- Gateway 不动(`Translate` 仍产 OutboundMessage)
+- ChatSession 不动(`currentTurnUserMsgID` 单数锚点保留)
+- `ReplyTo = currentTurnUserMsgID` 不变(独立 reply 也锚同 userMsgID;Feishu 端视觉连接保留)
+- §1.4 边界规范保留(OutResult 字段是 typed `agent.ResultEvent`,Channel 自决 target)
+- 抽象归抽象 / 具体归具体原则保留(独立 reply target 是 Feishu 自治)
+
+**与 §13.12 / §13.14 (F-thread-route / F-38 tool-merge) 的平行关系**:F-thread-route 把 thinking/tool/compaction 投 thread,F-39 加 OutResult 也独立。reply 模式都是新发独立 reply(不再 fold 进 receipt)。
+
+**与 §13.3 (F-37) 的关系**:F-37 把单 entry 内容拆多 div 解决 600 B 截断,F-39 进一步消除 OutResult 进入 receipt 的整条路径。`splitMarkdownForDivs` 函数保留,服务于新 helper `buildResultCardJSON`。
+
+**实施要点**:
+
+1. `adapter.go::Send(OutResult)` 重写:先 `receipt.SetCompleted(ctx)` 关 receipt → 后 `sendResultAsReply` 独立发
+2. `receipt_event.go` 删 dedup 协调 + 删 `case agent.EventResult`(不再被 receipt 路径触发)
+3. 新文件 `internal/channel/feishu/card_sanitize.go`(移植 cc-connect sanitize pipeline)
+4. 新文件 `internal/channel/feishu/result_render.go`(三段 dispatch + `buildResultCardJSON` + `buildPostMdJSON` + `containsMarkdown` + `countMarkdownTables`)
+5. 新 helper `sendResultAsReply(ctx, chatID, userMsgID, text, replyOnly)`
+
+**详细设计**:见 [`docs/feat/F-39-result-as-new-reply.md`](../feat/F-39-result-as-new-reply.md)。SPEC §0.8。
+
+### 13.17 F-39 sanitize pipeline 来源(借鉴 cc-connect)
+
+**来源**:[cc-connect `platform/feishu/feishu.go`](https://github.com/chenhg5/cc-connect/blob/main/platform/feishu/feishu.go) 第 3017-3104、5978-6075 行。
+
+cc-connect 在每次发送 Card 2.0 markdown element 前都过这层 pipeline(openclaw-lark 在 `card/builder.ts::buildCompleteCard` 走类似的 `optimizeMarkdownStyle`,但实现略不同)。两者都不 escape markdown 特殊字符(`*` `_` `` ` `` `~` 等),信任 LLM 输出合法 markdown;它们只防御**「破坏 lark_md 渲染的边界情况」**——非 HTTP URL、空格 fence、非 Feishu image_key、超出 heading 范围。
+
+nightme F-39 直接移植这些 helper 到 `card_sanitize.go`,不复造。
+
+nightme 额外需要的:**lark_md 似乎需要 escape 某些字符以保证表格渲染** —— 这个 cc-connect 没显式做,是 `optimizeMarkdownStyle` 的副作用之一。nightme 应在 F-39 后续 PR 视情况加 `escapeMarkdownTableChars` 之类。
+
 ## 15. v1.3.x 实施计划
 
 ### 15.0 状态(2026-08-04 F-thread-route + F-38 反转后)
@@ -1371,7 +1442,8 @@ WebSearch  -> 10 results
 - §13.10 reply-in-thread 部分保留(§13.12 复用其基础设施 `sendViaLarkReply` + `SendMessageText` 的 rootID 参数)
 - §13.12 的"每事件一条 reply"被 §13.14 进一步合并:`OutToolStart` + `OutToolEnd` → 一条 thread reply(Feishu `PUT /im/v1/messages/{id}` PATCH 同一 message_id)
 - §13.14 新增 `ChatSession.ToolsMode`(默认 Hide)+ `/tools on|off` slash command + runtime EventHandler gate
-- 新实施计划见 F-37 §3.1 + F-38 §8 文件级变更清单
+- §13.16 反转 §13.3 OutResult→receipt 路径,改为独立 reply 投递;`splitMarkdownForDivs` 函数仍服务于新 helper `buildResultCardJSON`
+- 新实施计划见 F-37 §3.1 + F-38 §8 + F-39 §2 文件级变更清单
 
 历史保留:§15.1 ~ §15.5 描述折叠方案的旧实施细节,作为决策记录。
 

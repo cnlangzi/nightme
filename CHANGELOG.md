@@ -11,6 +11,35 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### F-39: `OutResult` → independent reply (reverse F-37 §13.3)
+
+**Reverse-section proof**: Claude Code stream-json's `result.result` is byte-level equal to the last `assistant.event` content, so the previous dedup logic (`receipt_event.go:113-124`) silently swallowed the full final answer on any reply > 600 chars. F-39 reverses that path: `OutResult` no longer folds into the rolling-log receipt card, but is delivered as an **independent reply** anchored at `userMsgID` so the receipt card and the final answer become two separate surfaces.
+
+**Three-stage dispatch** (ported from cc-connect `platform/feishu/feishu.go::buildReplyContent` + openclaw-lark `card/builder.ts::buildCompleteCard`):
+- no markdown indicators → `MsgTypeText` (plain text bubble)
+- markdown + tables > 5 → `MsgTypePost` + `tag:"md"` (GFM, no Card 2.0 5-table cap)
+- default → `MsgTypeInteractive` (Card 2.0) with one or more `tag:"markdown"` divs, split by `splitMarkdownForDivs` at ≤ 1000 runes/div
+
+**Markdown sanitize pipeline** (ported from cc-connect):
+- `sanitizeMarkdownURLs` — non-HTTP(S) link → plain text (avoids 230001 invalid href)
+- `preprocessFeishuMarkdown` — ensure ``` fence preceded by newline (lark_md renders as code block, not inline)
+- `stripInvalidFeishuCardImages` — drop `![alt](not-img_xxx)`, keep Feishu image keys
+- `optimizeFeishuCardMarkdown` — H1→H4, H2-H6→H5, code-block protect, newline compression
+
+**Envelope defense**: 28 KB hard cap on the rendered card body; OutResult over the cap is truncated via `truncateRunes` and re-built. The 30 KB Feishu envelope is the ceiling; cap leaves 2 KB headroom.
+
+**Files**: `internal/channel/feishu/{adapter.go::Send(OutResult),adapter.go::sendResultAsReceipt (new helper),card_sanitize.go (new),result_render.go (new),receipt_event.go (remove dedup + EventResult case)}`; tests `card_sanitize_test.go (new), result_render_test.go (new), adapter_test.go (TestSend_OutResult_*), receipt_event_test.go (TestEventToEntry_Result_Dropped)`.
+
+**Docs**: `docs/feat/F-39-result-as-new-reply.md` (canonical design); `docs/SPEC.md` §0.8; `docs/channel/feishu.md` §13.16 + §13.17 + §12 渲染表 + §13.3 反转注 + §15.0 状态汇总.
+
+**不变式**:
+- `OutboundMessage` 契约不变(`Kind: OutResult`, `Result *agent.ResultEvent` typed field)
+- Gateway 不动(`Translate` 仍产 OutboundMessage)
+- ChatSession 不动(`currentTurnUserMsgID` 单数锚点保留)
+- `ReplyTo = currentTurnUserMsgID` 不变(独立 reply 也锚同 userMsgID;Feishu 端视觉连接保留)
+- 抽象归抽象 / 具体归具体(独立 reply target 是 Feishu 自治)
+- §1.4 边界规范保留(OutResult 字段是 typed,Channel 自决 target)
+
 ### F-38: `/tools on|off` + per-tool thread-merge via PATCH
 
 **Slash command**: `/tools on | /tools off` (also accepts `show`/`hide` aliases; `/tools` with no args reports current mode).

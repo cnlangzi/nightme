@@ -22,6 +22,7 @@ package feishu
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -222,6 +223,14 @@ type MessageReceipt struct {
 	// evicted tracks how many entries were dropped from the front
 	// across the receipt's lifetime. Surfaced via logEvictedMarker.
 	evicted int
+
+	// tasks is the latest Claude task snapshot (F-38) for this
+	// turn. The bridge always sends the full snapshot, so we
+	// copy it verbatim on every event. The slice is rendered as
+	// a single markdown element below the answer entries and
+	// above the footer divider; it is not part of the rolling
+	// LogEntry history and is not subject to entry eviction.
+	tasks []agent.TaskItem
 
 	// v1.3 (F-31): currentReaction removed. Reaction idempotency
 	// tracking moved to Adapter-level messageStates map (per
@@ -612,6 +621,45 @@ func (r *MessageReceipt) SetExecuting(ctx context.Context) error {
 	r.forwardedAt = time.Now()
 	r.eventCount = 1
 	r.lastEventAt = r.forwardedAt
+	return r.renderLocked(ctx)
+}
+
+// SetTaskList replaces the per-turn task checklist (F-38) with a
+// fresh snapshot from the bridge. The slice is copied so subsequent
+// caller mutations to the underlying array cannot affect the
+// receipt. Empty lists (len(Items)==0) are accepted and clear
+// the checklist.
+//
+// Like Append, a SetTaskList after the receipt is completed is
+// dropped silently. The first SetTaskList on a Waiting receipt
+// promotes it to Executing so the header timestamp reflects
+// actual activity.
+func (r *MessageReceipt) SetTaskList(ctx context.Context, list *agent.TaskListEvent) error {
+	if r == nil {
+		return nil
+	}
+	if list == nil {
+		return errors.New("feishu receipt: SetTaskList called with nil TaskListEvent")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state == StateCompleted {
+		return nil
+	}
+	items := list.Items
+	if len(items) == 0 {
+		r.tasks = nil
+	} else {
+		copyItems := make([]agent.TaskItem, len(items))
+		copy(copyItems, items)
+		r.tasks = copyItems
+	}
+	r.eventCount++
+	r.lastEventAt = time.Now()
+	if r.state == StateWaiting {
+		r.state = StateExecuting
+		r.forwardedAt = r.lastEventAt
+	}
 	return r.renderLocked(ctx)
 }
 

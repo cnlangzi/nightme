@@ -176,6 +176,7 @@ type OutboundMessage struct {
     Text         string
     Card         *Card
     Tool         *ToolInfo
+    TaskList     *agent.TaskListEvent
     Result       *agent.ResultEvent
     Usage        *UsageInfo
     MessageState *MessageStatePayload
@@ -199,6 +200,27 @@ type OutboundMessage struct {
 **保守范围**：只迁移 tool info 这一组字段。其他 Feishu-specific Meta 字段（`is_error` / `subtype` / `duration_ms` / `state` / `message_id` / `reaction_id`）保留原状，留 follow-up PR 清理，避免 F-37 PR 范围失控。
 
 **详细落地**：见 §1.4 + commit `921c862`（typed ToolInfo 升级）。
+
+### 0.6 文档变更摘要（v1.3.x F-38 Task Checklist，2026-08-04）
+
+**背景**：Claude Code 的 `TaskCreate` / `TaskUpdate` 不是独立的 stream-json 顶层事件，而是普通 `tool_use` + `tool_result`。nightme 过去将其当作 OutToolStart / OutToolEnd 投到 Feishu thread，用户只能看到低层工具调用，看不到结构化任务进度。
+
+**核心变化**：
+
+1. **Bridge 在成功结果后归一化任务**：`tool_use` 阶段只缓存 pending operation；匹配的 `tool_result` 确认成功后，bridge 才用 provider 分配的真实 task ID 更新 session-local task map，并发出完整 `TaskListEvent` snapshot。
+2. **新增 typed task contract**：`agent.EventTaskCreate / EventTaskUpdate` → `gateway.OutTaskCreate / OutTaskUpdate`；`OutboundMessage.TaskList *agent.TaskListEvent` 承载 generic `ID / Subject / ActiveForm / Status`，禁止 Meta 和 Claude-specific field 泄漏。
+3. **Gateway 保持无状态**：只翻译 typed event 并由 runtime stamp `ReplyTo=currentTurnUserMsgID`；不保存任务、不解析 TaskCreate、也不决定 checklist UI。
+4. **Feishu receipt 自治渲染**：Channel 保存当前 receipt 的最新 snapshot，在最终答复 entries 后、footer 前渲染一个有界 markdown checklist element；成功的 task tool 不再重复进入 thread。
+
+**不变式**：
+
+- Channel interface、ChatSession、AgentSession、Registry schema 均不变。
+- `ReplyTo=currentTurnUserMsgID` 仍是唯一跨层关联信息；旧 receipt 不被跨 turn 回写。
+- Bridge 持有的是 provider-session 的规范化任务状态；receipt 只持有展示副本；Gateway 两者都不持有。
+- Task result 无法确认成功时不猜测状态，降级为普通 ToolEnd 并记录 warn。
+- Feishu checklist 只占一个 card element，最终答复优先，card 总元素继续受 50 上限保护。
+
+**详细落地**：见 [`feat/F-38-task-checklist.md`](./feat/F-38-task-checklist.md) + [`channel/feishu.md`](./channel/feishu.md) §13.14 / §18。
 
 ---
 
@@ -381,6 +403,7 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 - **`currentTurnUserMsgID` 单数**：一个 turn 一个 userMsgID 锚点；buffered batch 时锚到最后一条；outbound event 的 `ReplyTo` 必等于此
 - **抽象归抽象 / 具体归具体**：Gateway = 路由器（不假设任何 Channel 渲染细节）；Channel = 渲染器（自管 receipt 生命周期，自选存储形态：per-chat map / per-thread map / DOM 节点 / ...）
 - **outbound 路由唯一耦合点**：`EventHandler` 在每个 `OutboundMessage` 上设 `out.ReplyTo = cs.currentTurnUserMsgID`。Channel 据此 key 路由。Gateway 不需要知道 Channel 内部 receipt 怎么存
+- **Task checklist 三层状态隔离（F-38）**：Claude bridge 持有 provider-session 的规范化 task map/order，并在成功 tool_result 后发完整 snapshot；Gateway 无状态 typed 透传；Channel receipt 只保存当前 userMsgID 的展示副本。任何一层都不得反向读取另一层状态
 
 **v1.3.x 新增（F-33 落地）**：
 
@@ -449,6 +472,7 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 4. **Channel 拿到 string 后自己 parse**：如果 Channel 想做类型感知渲染（"Read /foo.go → 1234 lines"），它 parse `ToolInfo.Args` 字符串。但 parse 逻辑属于 Channel 自治，不进 Gateway / agent。
 5. **禁止 `OutboundMessage` 上的 `Meta map[string]any`（已删除）**：Meta 是 opaque data container，consumer 不知道里面有什么，producer 也不知道 consumer 会读哪些 key。跨层契约只能走 typed field。`OutboundMessage` 当前 100% typed（§0.5），任何新增跨层数据必须走 typed struct / primitive，不能 re-introduce Meta。
 6. **数值类除外**：`CostUSD` / `*Tokens` 保留 typed numeric——任何 agent 都有 token / cost 概念，不需要 string 化（但**走 typed field，不走 Meta**）。
+7. **任务概念必须先归一化**：`TaskCreate.subject` / `TaskUpdate.taskId` 等 Claude-native 字段只能存在于 `bridge/claudecode`。跨过 boundary 后统一为 `TaskListEvent{Items: []TaskItem{ID, Subject, ActiveForm, Status}}`；Gateway 只做 `EventTask* → OutTask*` typed 映射，Channel 自决 checkbox / glyph / DOM 渲染。
 
 **反例（2026-08-04 §1.4 终极落地）**：
 
@@ -616,6 +640,10 @@ ChatSession.onAgentEvent(s, ev)        // EventCallback 驱动
   ├ InputBuffer.SetState(Busy)
   ├ out, send := gateway.Translate(chatID, ev)
   ├ out.ReplyTo = cs.currentTurnUserMsgID    ← **关键耦合点**（唯一关联信息）
+  ├ (TaskCreate / TaskUpdate) bridge 在匹配 tool_result 确认成功后更新 session-local task map
+  │   ├ emit EventTaskCreate / EventTaskUpdate（每次携带完整 TaskListEvent snapshot）
+  │   ├ gateway.Translate → OutTaskCreate / OutTaskUpdate（typed TaskList payload）
+  │   └ Feishu Channel → 当前 ReplyTo 对应 receipt.SetTaskList → 原位 PATCH checklist
   └ if send: channel.Send(ctx, out)
   ↓
 channel.Send(ctx, OutboundMessage)
@@ -1206,7 +1234,8 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 - ⏭ **F-35（feishu 全局限速器）**：`internal/channel/feishu/ratelimit.go` 单桶 token bucket(5 QPS / burst 1 / lazy refill)，4 个底出口(`sendViaLarkCreate` / `sendViaLarkReply` / `updateViaLark` / `AddReaction`)SDK call 前 `Wait()`。`internal/config/config.go::FeishuConfig` 加 `RateLimit` 字段。详见 [`docs/feat/F-35-ratelimit.md`](./feat/F-35-ratelimit.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §16。
 - ⏭ **F-36（feishu transient retry + 降级日志）**：`internal/channel/feishu/retry.go` 指数退避重试(3 次尝试 / 500ms→5s / ±25% jitter)，包裹 `sendContent` / `updateViaLark` / `AddReaction`。所有降级路径(retry exhausted / ctx cancel / fallback top-level)emit warn 级结构化日志。详见 [`docs/feat/F-36-transient-retry.md`](./feat/F-36-transient-retry.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §17。
 - ⏭ **F-37（receipt 多 div 拆分）**：`internal/channel/feishu/receipt_split.go` `splitMarkdownForDivs` 把单 entry 内容按段落/语义边界拆成多个 `div` 元素，每 div ≤ 1000 chars（Feishu `div` text 硬限），绕过 600 B 截断 backlog，保留 `lark_md` 渲染。`buildReceiptCard` 多 div 路径、`totalLogBytesLocked` 估算修正、`perEntryMaxRunes = 8000`。详见 [`docs/feat/F-37-multi-div-content-split.md`](./feat/F-37-multi-div-content-split.md)。**resolve SPEC §13.3 `OutResult` 600 字节截断 backlog**。
-
+- 🚧 **F-38（Claude task checklist）**：Claude bridge 在 `TaskCreate` / `TaskUpdate` 的匹配 `tool_result` 确认成功后维护 task map/order，发完整 typed snapshot；Gateway 新增 `OutTaskCreate` / `OutTaskUpdate` 无状态透传；Feishu receipt 用单 markdown element 原位 PATCH 任务清单。详见 [`docs/feat/F-38-task-checklist.md`](./feat/F-38-task-checklist.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §13.14 / §18。
+- ✅ done: **F-38** 落地（docs-first；2026-08-04）。`internal/agent` + `internal/gateway` typed contract、`internal/bridge/claudecode/task.go` 解析、`internal/channel/feishu/receipt_task.go` 单 markdown element 渲染。`go test -race ./...` 全绿。
 ---
 
 ## 11.1 Daemon startup flow

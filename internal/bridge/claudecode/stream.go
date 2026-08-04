@@ -28,6 +28,53 @@ import (
 // (assistant branch → record args; user branch → read args).
 type streamState struct {
 	toolUseArgs map[string]string
+
+	// pendingTools is keyed by tool_use_id and records the most
+	// recent pending tool call we observed. We keep the full
+	// pendingTool (name + raw input JSON) rather than only the
+	// input string so that:
+	//   (a) the F-34 P0-2 type-aware summary still gets the
+	//       args (replacing the prior toolUseArgs map);
+	//   (b) the F-38 task tool parser can re-parse the input
+	//       after the matching tool_result lands, without
+	//       duplicating assistant/user branches.
+	//
+	// Entries are removed in the user/tool_result branch once
+	// the corresponding result has been processed. Bridges MUST
+	// NOT keep entries around between turns.
+	pendingTools map[string]pendingTool
+
+	// tasks is the provider-session-normalised task list. It is
+	// owned by the claudecode bridge (see task.go) and used to
+	// emit full TaskListEvent snapshots on EventTaskCreate /
+	// EventTaskUpdate. Map key is the provider-assigned task ID.
+	tasks     map[string]agent.TaskItem
+	taskOrder []string
+}
+
+// pendingTool records a tool_use block that has not yet been
+// matched with its tool_result. The Name + Input are needed both
+// for the generic tool summary (OutToolEnd.Args) and for the
+// F-38 task tool parser.
+type pendingTool struct {
+	Name  string
+	Input json.RawMessage
+}
+
+// resetTasksForNewTurn clears the bridge's task state so a new
+// turn (or resumed session) starts with an empty list. PumpStream
+// already creates a fresh streamState per session, but the
+// system/init event handler also calls this defensively so
+// resumed Claude sessions — where pumpStream may reuse state
+// across resumes — begin clean. Lives in stream.go to keep
+// all task-map mutation in one place; the body is small enough
+// to inline without a separate file hop.
+func resetTasksForNewTurn(state *streamState) {
+	if state == nil {
+		return
+	}
+	state.tasks = make(map[string]agent.TaskItem)
+	state.taskOrder = nil
 }
 
 // streamEvent is the on-the-wire JSON shape emitted by Claude Code in
@@ -134,7 +181,9 @@ func pumpStream(r io.Reader, events chan<- agent.AgentEvent, askHandler askHandl
 	// in user-message N can look up the args recorded when its
 	// matching tool_use was seen in assistant-message N-1.
 	state := &streamState{
-		toolUseArgs: make(map[string]string),
+		toolUseArgs:  make(map[string]string),
+		pendingTools: make(map[string]pendingTool),
+		tasks:        make(map[string]agent.TaskItem),
 	}
 
 	for scanner.Scan() {
@@ -182,6 +231,13 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		// header AND have access to SessionID for /resume. Other
 		// subtypes (e.g. status, hook_progress) are ignored.
 		if ev.Subtype == "init" {
+			// F-38: a fresh Claude session means a fresh task
+			// list. Clear any prior tasks so the next TaskCreate
+			// emits a clean snapshot rather than a stale union.
+			// pumpStream spawns a new streamState per session
+			// (cold path), so this is also a belt-and-braces guard
+			// for the resume path where streamState is reused.
+			resetTasksForNewTurn(state)
 			events <- agent.AgentEvent{
 				Kind: agent.EventInit,
 				Init: &agent.InitEvent{
@@ -243,11 +299,19 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 				// tool_result blocks arrive later in user-role
 				// messages. Record the raw input JSON here so
 				// the user-role handler can stamp it onto
-				// EventToolEnd.Args for the type-aware summary.
+				// EventToolEnd.Args for the type-aware summary
+				// (and so the F-38 task tool parser can re-parse
+				// the input after the result lands).
 				if state != nil {
+					inputCopy := make([]byte, len(block.Input))
+					copy(inputCopy, block.Input)
 					state.toolUseArgs[block.ID] = string(block.Input)
+					state.pendingTools[block.ID] = pendingTool{
+						Name:  block.Name,
+						Input: inputCopy,
+					}
 				}
-				handleToolUse(block, events, askHandler, logger)
+				handleToolUse(block, state, events, askHandler, logger)
 
 			default:
 				if logger != nil {
@@ -284,8 +348,21 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		for _, block := range ev.Message.Content {
 			switch block.Type {
 			case "tool_use":
-				handleToolUse(block, events, askHandler, logger)
+				handleToolUse(block, state, events, askHandler, logger)
 			case "tool_result":
+				// F-38: route the result through the task tool
+				// parser first. A successful task operation emits
+				// EventTaskCreate / EventTaskUpdate and suppresses
+				// the generic ToolEnd. A failure, unknown shape,
+				// or non-task tool falls through to the existing
+				// generic ToolEnd emission.
+				if handled, taskEv := applyTaskToolResult(state, block, logger); handled {
+					if taskEv != nil {
+						events <- *taskEv
+					}
+					continue
+				}
+
 				// F-34 review P0-2: look up the raw input
 				// JSON that the assistant-role message recorded
 				// when the matching tool_use block was seen.
@@ -388,10 +465,30 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 }
 
 // handleToolUse routes a tool_use block. AskUserQuestion is intercepted
-// via askHandler; other tools are emitted as EventToolStart.
-func handleToolUse(block contentBlock, events chan<- agent.AgentEvent, askHandler askHandlerFunc, logger *slog.Logger) {
+// via askHandler. Task tools (F-38) record their pending operation
+// on the streamState but DO NOT emit anything here — the matching
+// tool_result branch is the only place that emits EventTaskCreate /
+// EventTaskUpdate, after confirming the operation succeeded.
+// Other tools are emitted as EventToolStart.
+func handleToolUse(
+	block contentBlock,
+	_ *streamState,
+	events chan<- agent.AgentEvent,
+	askHandler askHandlerFunc,
+	logger *slog.Logger,
+) {
 	if block.Name == "AskUserQuestion" && askHandler != nil {
 		askHandler(block, events, logger)
+		return
+	}
+
+	// F-38: task tools intentionally do nothing here. The pending
+	// record (state.pendingTools[block.ID]) was already stored by
+	// the assistant/tool_use branch; the result is processed in
+	// the user/tool_result branch. Forwarding a generic ToolStart
+	// here would double the user-visible noise once the result
+	// also fails the parser / protocol drift fallback.
+	if isTaskToolName(block.Name) {
 		return
 	}
 

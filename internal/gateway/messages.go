@@ -207,6 +207,19 @@ const (
 	// no in-place update). See docs/channel/feishu.md §5 for the
 	// full rationale.
 	OutCommandReply
+
+	// OutTaskCreate carries the first confirmable task operation
+	// (e.g. Claude TaskCreate success). The payload holds the
+	// current full task snapshot so the receiving Channel can
+	// replace its checklist wholesale. Channels that don't render
+	// a checklist (e.g. a future Web / TUI) may drop the kind.
+	OutTaskCreate
+
+	// OutTaskUpdate carries subsequent confirmable task mutations
+	// (status change, edit, delete). The payload also holds the
+	// current full task snapshot, so an empty Items slice is a
+	// valid "clear the checklist" signal.
+	OutTaskUpdate
 )
 
 // String renders OutboundKind for log lines.
@@ -238,6 +251,10 @@ func (k OutboundKind) String() string {
 		return "init"
 	case OutCommandReply:
 		return "command_reply"
+	case OutTaskCreate:
+		return "task_create"
+	case OutTaskUpdate:
+		return "task_update"
 	}
 	return "unknown"
 }
@@ -270,6 +287,11 @@ type OutboundMessage struct {
 	// may use typed maps serialised to string). Gateway does not
 	// parse the Args content — that's channel territory.
 	Tool *ToolInfo
+	// TaskList carries the typed payload for OutTaskCreate /
+	// OutTaskUpdate. Every event carries a full snapshot of the
+	// current task list; an Items slice with length 0 is a valid
+	// "clear the checklist" signal. nil for other Kinds.
+	TaskList *agent.TaskListEvent
 	// Result carries the typed payload for OutResult. nil for
 	// other Kinds. Gateway populates from AgentEvent.Result; the
 	// channel reads directly instead of round-tripping the

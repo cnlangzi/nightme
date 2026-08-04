@@ -1,0 +1,1 @@
+{"type":"assistant","message":{"id":"msg_tc_2","role":"assistant","content":[{"type":"tool_use","id":"toolu_tc_2","name":"TaskCreate","input":{"subject":"Write tests"}}]},"model":"claude-sonnet-4-5","session_id":"s_task_001","uuid":"uuid_tc_2"}

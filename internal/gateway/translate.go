@@ -205,6 +205,34 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 			Text:   fmt.Sprintf("session initialized (model: %s)", ev.Init.Model),
 			Init:   ev.Init,
 		}, true
+
+	case agent.EventTaskCreate:
+		// F-38: full task snapshot replaces the per-turn checklist.
+		// The Feishu adapter writes it into the current receipt and
+		// PATCHes the card; other Channels may render or drop.
+		// The bridge MUST only emit this after a confirmed success
+		// result (see internal/bridge/claudecode/task.go).
+		if ev.TaskList == nil {
+			return OutboundMessage{}, false
+		}
+		return OutboundMessage{
+			ChatID:   chatID,
+			Kind:     OutTaskCreate,
+			TaskList: ev.TaskList,
+		}, true
+
+	case agent.EventTaskUpdate:
+		// F-38: subsequent mutations / deletions. Same snapshot
+		// semantics as EventTaskCreate; an empty Items slice is a
+		// valid "clear the checklist" signal (e.g. all tasks done).
+		if ev.TaskList == nil {
+			return OutboundMessage{}, false
+		}
+		return OutboundMessage{
+			ChatID:   chatID,
+			Kind:     OutTaskUpdate,
+			TaskList: ev.TaskList,
+		}, true
 	}
 	return OutboundMessage{}, false
 }

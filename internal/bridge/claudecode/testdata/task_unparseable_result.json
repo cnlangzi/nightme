@@ -1,0 +1,1 @@
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_tc_1","content":"some unexpected future result format","is_error":false}]}}

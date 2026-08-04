@@ -112,6 +112,18 @@ const (
 	// from the agent's system/init event. Channels use it to surface
 	// "session <id> · model <name>" in the receipt header.
 	EventInit
+
+	// EventTaskCreate signals the first confirmable task operation
+	// (e.g. Claude TaskCreate success). The payload carries the
+	// current full task snapshot, not a delta, so that any consumer
+	// can render a complete checklist without cross-event correlation.
+	EventTaskCreate
+
+	// EventTaskUpdate signals a confirmable task mutation after
+	// create (status change, edit, delete). The payload also carries
+	// the current full task snapshot so receipts can replace the
+	// checklist wholesale.
+	EventTaskUpdate
 )
 
 // String renders an EventKind for logs.
@@ -137,6 +149,10 @@ func (k EventKind) String() string {
 		return "compaction"
 	case EventInit:
 		return "init"
+	case EventTaskCreate:
+		return "task_create"
+	case EventTaskUpdate:
+		return "task_update"
 	default:
 		return fmt.Sprintf("event(%d)", int(k))
 	}
@@ -346,6 +362,74 @@ type InitEvent struct {
 	Branch string
 }
 
+// TaskStatus is the abstract lifecycle stage of a single task in
+// an agent's per-turn checklist. It is intentionally generic: any
+// agent that exposes a "task list" / "todo list" primitive has
+// at least pending / in_progress / completed semantics, and the
+// Gateway / Channel layers must never see provider-specific
+// status strings. Bridges normalise provider values into this
+// enum in bridge/* before emitting a typed task event.
+type TaskStatus int
+
+const (
+	// TaskPending is the default state for a freshly created task
+	// that has not started running.
+	TaskPending TaskStatus = iota
+	// TaskInProgress marks the task the agent is currently working
+	// on. The receipt may show an ActiveForm suffix ("... ·
+	// writing unit tests…") to give the user a live status hint.
+	TaskInProgress
+	// TaskCompleted marks a task the agent has finished. The
+	// receipt renders a struck-through / check-glyph variant; the
+	// task may still appear in the checklist as a historical row
+	// until the bridge removes it.
+	TaskCompleted
+	// TaskDeleted is a transient signal: the bridge parses a
+	// provider-native delete, removes the task from its session
+	// state, and re-emits a full snapshot where the deleted id is
+	// no longer present. The Gateway / Channel must not see a
+	// TaskItem with Status == TaskDeleted — by contract the
+	// snapshot's Items only contains the live tasks.
+	TaskDeleted
+)
+
+// String renders a TaskStatus for log lines.
+func (s TaskStatus) String() string {
+	switch s {
+	case TaskPending:
+		return "pending"
+	case TaskInProgress:
+		return "in_progress"
+	case TaskCompleted:
+		return "completed"
+	case TaskDeleted:
+		return "deleted"
+	}
+	return "task(unknown)"
+}
+
+// TaskItem is one row in the per-turn checklist. ID is the
+// provider-assigned stable identifier (e.g. Claude's `Task #1`);
+// bridges MUST populate it so follow-up updates can correlate by
+// ID. Subject is the user-visible label. ActiveForm is the
+// optional present-continuous phrase the agent emits while the
+// task is in progress.
+type TaskItem struct {
+	ID         string
+	Subject    string
+	ActiveForm string
+	Status     TaskStatus
+}
+
+// TaskListEvent is the typed payload for EventTaskCreate and
+// EventTaskUpdate. Items is the full current snapshot of the
+// provider session's task list (NOT a delta). An empty Items
+// slice is a valid "clear the checklist" signal — channels may
+// choose to render an empty section or hide it entirely.
+type TaskListEvent struct {
+	Items []TaskItem
+}
+
 // AgentEvent is the wire format on the AgentSession.Events() channel.
 //
 // Exactly one payload field is meaningful per Kind:
@@ -360,6 +444,8 @@ type InitEvent struct {
 //	EventUsage      -> Usage
 //	EventCompaction -> Compaction
 //	EventInit       -> Init
+//	EventTaskCreate -> TaskList
+//	EventTaskUpdate -> TaskList
 type AgentEvent struct {
 	Kind EventKind
 
@@ -375,6 +461,13 @@ type AgentEvent struct {
 	Usage      *UsageEvent
 	Compaction *CompactionEvent
 	Init       *InitEvent
+
+	// TaskList is the payload for EventTaskCreate / EventTaskUpdate.
+	// Every event carries a full snapshot of the current task list
+	// (not a delta) so consumers can replace the rendered checklist
+	// wholesale. An Items slice with length 0 is a valid "clear the
+	// checklist" signal.
+	TaskList *TaskListEvent
 }
 
 // StartConfig is the per-session configuration handed to Agent.Start.

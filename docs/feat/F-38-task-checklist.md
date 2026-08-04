@@ -183,13 +183,16 @@ No Channel interface, ChatSession, binding, registry, or receipt map API changes
 
 ### 5.1 Status mapping
 
-| Generic status | Feishu rendering |
-|---|---|
-| pending | `⏳ Subject` |
-| in progress | `🔄 Subject · ActiveForm` (suffix only when present) |
-| completed | `✅ Subject` |
+The Feishu receipt renders the task snapshot as a standard markdown todo list. Feishu's `lark_md` parses the leading `[ ]` / `[x]` as a checkbox, so the user sees a real interactive checklist. Display order is in-progress, pending, completed; order within each group follows bridge task order.
 
-Display order is in-progress, pending, completed; order within each group follows bridge task order.
+- [ ] `pending` — render as `- [ ] Subject` (open checkbox)
+  - [ ] Insert before `completed` rows; after `in_progress` rows
+- [ ] `in_progress` — render as `- [ ] Subject (ActiveForm)` (open checkbox + grey note)
+  - [ ] Suffix `(ActiveForm)` is appended only when the field is non-empty
+  - [ ] Insert FIRST in the checklist (highest visual priority)
+- [ ] `completed` — render as `- [x] Subject` (closed checkbox)
+  - [ ] Insert LAST in the checklist (lowest visual priority)
+- [ ] `deleted` — bridge-only; the receipt MUST NOT render any row with this status (defensive filter in `buildTaskChecklistChunks`)
 
 ### 5.2 Capacity
 

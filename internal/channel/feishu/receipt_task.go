@@ -7,10 +7,17 @@
 // share the 50-element budget — Feishu's hard limit — so a long
 // list is still rendered correctly without truncation.
 //
-// Status glyphs and the in-progress / pending / completed display
-// order are a Feishu-local decision; other Channels are free to
-// pick their own ordering and presentation. The generic status
-// enum (agent.TaskStatus) is the only input the renderer reads.
+// The renderer emits a standard markdown todo list so Feishu's
+// lark_md parser renders each row as a checkbox:
+//   - [ ]  → pending / in-progress task (open checkbox)
+//   - [x]  → completed task (checked checkbox)
+// In-progress rows also append the optional `ActiveForm` phrase
+// in a soft-grey suffix (Feishu `lark_md` ignores backticks in
+// the middle of a line, so plain parens are used). The
+// in-progress / pending / completed display order is a Feishu-
+// local decision; other Channels are free to pick their own
+// ordering and presentation. The generic status enum
+// (agent.TaskStatus) is the only input the renderer reads.
 package feishu
 
 import (
@@ -21,20 +28,18 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// checklistGlyph maps agent.TaskStatus to the prefix the receipt
-// renders. Kept as a const (not a switch) so other Feishu-specific
-// helpers can reference the same characters.
-const (
-	checklistGlyphPending    = "⏳ "
-	checklistGlyphInProgress = "🔄 "
-	checklistGlyphCompleted  = "✅ "
-)
+// checklistMore is appended to the last visible line when the
+// input did not fit within the budget. The leading ellipsis
+// keeps the visual shape of a single todo row so the markdown
+// list stays well-formed.
+const checklistMore = "…%d 项任务已省略"
 
-// checklistMore is the suffix appended to the LAST chunk when the
-// input did not fit within the budget. The leading ellipsis is
-// on purpose — the user can tell at a glance the list is
-// truncated.
-const checklistMore = "…另有 %d 项任务"
+// checklistOverflowPlaceholder is the single-line fallback used
+// when the renderer has to drop every line to fit the budget.
+// It is a single todo row so the user still sees a checkbox
+// block and the receipt body stays a well-formed markdown todo
+// list.
+const checklistOverflowPlaceholder = "- [ ] …"
 
 // checklistBudgetRunes is the maximum total length of the
 // rendered checklist (rune count, summed across all chunks).
@@ -94,15 +99,16 @@ func buildTaskChecklistChunks(items []agent.TaskItem) []string {
 		rendered++
 	}
 	if rendered == 0 {
-		return []string{checklistGlyphPending + "(任务清单过长，已省略)"}
+		return []string{checklistOverflowPlaceholder}
 	}
 	omitted := len(order) - rendered
 
 	// Join the rendered lines with newlines and split into
 	// per-element chunks that each respect divTextCharLimit.
 	// splitMarkdownForDivs already preserves code blocks / list
-	// atomicity; our checklist is a list of `⏳ / 🔄 / ✅ …`
-	// paragraphs and is trivially paragraph-safe.
+	// atomicity; our checklist is a list of `- [ ]` / `- [x]`
+	// task lines, all of which share the same list item shape
+	// and are trivially paragraph-safe to split.
 	joined := joinLines(lines)
 	chunks := splitMarkdownForDivs(joined, divTextCharLimit)
 	if len(chunks) == 0 {
@@ -112,10 +118,11 @@ func buildTaskChecklistChunks(items []agent.TaskItem) []string {
 		return nil
 	}
 	if omitted > 0 {
-		// Append the "more tasks" footer to the LAST chunk so
-		// the truncation signal sits at the visual end of the
-		// checklist.
-		chunks[len(chunks)-1] += "\n" + fmt.Sprintf(checklistMore, omitted)
+		// Append the "more tasks" tail to the LAST visible line
+		// (not a new line) so the markdown list shape is
+		// preserved. The tail is plain text after the subject;
+		// Feishu's lark_md leaves it as an inline suffix.
+		chunks[len(chunks)-1] += " " + fmt.Sprintf(checklistMore, omitted)
 	}
 	return chunks
 }
@@ -144,25 +151,28 @@ func joinLines(lines []string) string {
 	return string(buf)
 }
 
+// renderTaskLine builds one row of the markdown todo list. The
+// status enum decides only the checkbox state and the (optional)
+// activeForm suffix; the row shape is identical for every status
+// so the output reads as a single coherent list.
+//
+//   - pending      → - [ ] Subject
+//   - in_progress  → - [ ] Subject (ActiveForm)         (open checkbox + grey note)
+//   - completed    → - [x] Subject
 func renderTaskLine(it agent.TaskItem) string {
-	var glyph string
-	var suffix string
-	switch it.Status {
-	case agent.TaskInProgress:
-		glyph = checklistGlyphInProgress
-		if it.ActiveForm != "" {
-			suffix = " · " + it.ActiveForm
-		}
-	case agent.TaskCompleted:
-		glyph = checklistGlyphCompleted
-	default:
-		glyph = checklistGlyphPending
+	checkbox := "- [ ]"
+	if it.Status == agent.TaskCompleted {
+		checkbox = "- [x]"
 	}
 	subject := strings.TrimSpace(it.Subject)
 	if subject == "" {
 		subject = it.ID
 	}
-	return glyph + subject + suffix
+	line := checkbox + " " + subject
+	if it.Status == agent.TaskInProgress && it.ActiveForm != "" {
+		line += " (" + it.ActiveForm + ")"
+	}
+	return line
 }
 
 // renderTaskFallbackText joins the rendered checklist lines into

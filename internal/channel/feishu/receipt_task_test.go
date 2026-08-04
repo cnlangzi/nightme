@@ -1,5 +1,6 @@
 // F-38: task checklist renderer tests. Covers the in-progress
-// / pending / completed ordering, the activeForm suffix on
+// / pending / completed ordering, the markdown todo list
+// checkbox syntax (`- [ ]` / `- [x]`), the activeForm suffix on
 // in-progress rows, the truncation footer for long lists, and
 // the no-tasks case (must return nil so the caller skips the
 // element entirely).
@@ -15,7 +16,7 @@ import (
 // TestBuildTaskChecklistChunks_OrderingInProgressFirst asserts
 // the renderer emits in-progress rows before pending rows, and
 // pending rows before completed rows, with status-appropriate
-// glyphs.
+// checkbox states.
 func TestBuildTaskChecklistChunks_OrderingInProgressFirst(t *testing.T) {
 	items := []agent.TaskItem{
 		{ID: "1", Subject: "completed task", Status: agent.TaskCompleted},
@@ -37,20 +38,30 @@ func TestBuildTaskChecklistChunks_OrderingInProgressFirst(t *testing.T) {
 		t.Errorf("order wrong: in_progress=%d pending=%d completed=%d (want strict increasing)\n%s",
 			ip, pn, cn, rendered)
 	}
-	if !strings.Contains(rendered, "active task · writing") {
-		t.Errorf("in-progress line missing active form suffix: %q", rendered)
+	// Markdown todo list syntax:
+	//   - in_progress → "- [ ]" (open checkbox)
+	//   - pending     → "- [ ]" (open checkbox)
+	//   - completed   → "- [x]" (closed checkbox)
+	if !strings.Contains(rendered, "- [ ] active task (writing)") {
+		t.Errorf("in-progress line missing '- [ ]' checkbox + active form suffix: %q", rendered)
 	}
-	if !strings.Contains(rendered, "✅") {
-		t.Errorf("completed glyph missing: %q", rendered)
+	if !strings.Contains(rendered, "- [ ] pending task") {
+		t.Errorf("pending line missing '- [ ]' checkbox: %q", rendered)
 	}
-	if !strings.Contains(rendered, "⏳") {
-		t.Errorf("pending glyph missing: %q", rendered)
+	if !strings.Contains(rendered, "- [x] completed task") {
+		t.Errorf("completed line missing '- [x]' checkbox: %q", rendered)
+	}
+	// The legacy glyphs MUST NOT appear anymore.
+	for _, g := range []string{"⏳", "🔄", "✅"} {
+		if strings.Contains(rendered, g) {
+			t.Errorf("legacy glyph %q should not appear in todo list output: %q", g, rendered)
+		}
 	}
 }
 
 // TestBuildTaskChecklistChunks_LongListTruncates asserts a list
-// that exceeds checklistBudgetRunes is truncated with a "more
-// tasks" footer on the last chunk.
+// that exceeds checklistBudgetRunes is truncated with a "…N
+// 项任务已省略" tail appended to the LAST visible line.
 func TestBuildTaskChecklistChunks_LongListTruncates(t *testing.T) {
 	items := make([]agent.TaskItem, 80)
 	for i := range items {
@@ -65,8 +76,11 @@ func TestBuildTaskChecklistChunks_LongListTruncates(t *testing.T) {
 		t.Fatalf("expected at least one chunk, got 0")
 	}
 	last := chunks[len(chunks)-1]
-	if !strings.Contains(last, "另有") {
-		t.Errorf("last chunk missing truncation footer: %q", last)
+	if !strings.Contains(last, "…") {
+		t.Errorf("last chunk missing truncation tail: %q", last)
+	}
+	if !strings.Contains(last, "项任务已省略") {
+		t.Errorf("last chunk missing '项任务已省略' suffix: %q", last)
 	}
 }
 

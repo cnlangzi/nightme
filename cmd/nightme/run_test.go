@@ -72,12 +72,22 @@ func TestEventHandler_ThinkGate_HideDropsOutThinking(t *testing.T) {
 // /think off only gates OutThinking — final assistant replies
 // (EventText without the <thinking> prefix → OutText) and other
 // kinds must still flow to the Channel.
+//
+// F-38 update: the test must opt the chat into /tools on so
+// OutToolStart is not dropped by the new (orthogonal) ToolsMode
+// gate. The /think gate's contract — "Hide does not affect kinds
+// other than OutThinking" — is unaffected by the /tools gate; we
+// just need to make the /tools gate a no-op for this test by
+// flipping it on explicitly.
 func TestEventHandler_ThinkGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
 	cs := mgr.GetOrCreate("oc_chat", "claude")
 	if err := cs.SetThinkMode(chatsession.ThinkModeHide); err != nil {
 		t.Fatalf("SetThinkMode: %v", err)
+	}
+	if err := cs.SetToolsMode(chatsession.ToolsModeShow); err != nil {
+		t.Fatalf("SetToolsMode: %v", err)
 	}
 	logger := slog.Default()
 
@@ -99,7 +109,7 @@ func TestEventHandler_ThinkGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 		},
 	}, "om_user_1")
 
-	// (c) EventToolStart — OutToolStart
+	// (c) EventToolStart — OutToolStart (passes because /tools on)
 	h("oc_chat", as, agent.AgentEvent{
 		Kind:      agent.EventToolStart,
 		ToolStart: &agent.ToolStartEvent{Name: "Read", Args: "/tmp/foo"},
@@ -204,3 +214,226 @@ func TestEventHandler_ThinkGate_PersistsAcrossInvocations(t *testing.T) {
 // by go vet. (slog.Default() is the explicit user; this line is
 // a no-op for any future lint tooling that flags unused refs.)
 var _ = slog.Default
+
+// TestEventHandler_ToolsGate_ShowPassesThrough verifies the
+// /tools on path: ToolsMode=Show does NOT drop OutToolStart /
+// OutToolEnd events — the Feishu adapter must still see them so
+// it can merge each pair into a single thread reply.
+func TestEventHandler_ToolsGate_ShowPassesThrough(t *testing.T) {
+	ch := echo.New("test", io.Discard)
+	mgr := chatsession.NewManager()
+	cs := mgr.GetOrCreate("oc_chat_tools_show", "claude")
+	if err := cs.SetToolsMode(chatsession.ToolsModeShow); err != nil {
+		t.Fatalf("SetToolsMode: %v", err)
+	}
+	logger := slog.Default()
+
+	h := newEventHandler(ch, cs, mgr, logger)
+	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_show", "claude", "/tmp", nil)
+
+	// OutToolStart
+	h("oc_chat_tools_show", as, agent.AgentEvent{
+		Kind:      agent.EventToolStart,
+		ToolStart: &agent.ToolStartEvent{Name: "Read", Args: "/tmp/foo"},
+	}, "om_user_1")
+	// OutToolEnd
+	h("oc_chat_tools_show", as, agent.AgentEvent{
+		Kind:    agent.EventToolEnd,
+		ToolEnd: &agent.ToolEndEvent{Name: "Read", Output: "line1\nline2"},
+	}, "om_user_1")
+
+	got := ch.Record()
+	if len(got) != 2 {
+		t.Fatalf("Channel.Record len = %d, want 2 (Show mode passes both tool events)", len(got))
+	}
+	if got[0].Kind.String() != "tool_start" {
+		t.Errorf("first event Kind = %q, want %q", got[0].Kind.String(), "tool_start")
+	}
+	if got[1].Kind.String() != "tool_end" {
+		t.Errorf("second event Kind = %q, want %q", got[1].Kind.String(), "tool_end")
+	}
+}
+
+// TestEventHandler_ToolsGate_HideDropsBothToolKinds verifies the
+// core F-38 contract: /tools off (default) → EventHandler drops
+// BOTH OutToolStart and OutToolEnd before ch.Send. The Channel
+// never sees tool events, so no thread reply is posted (no rate-
+// limit consumption, no user-visible thread noise).
+func TestEventHandler_ToolsGate_HideDropsBothToolKinds(t *testing.T) {
+	ch := echo.New("test", io.Discard)
+	mgr := chatsession.NewManager()
+	cs := mgr.GetOrCreate("oc_chat_tools_hide", "claude")
+	// cs.ToolsMode is the default (ToolsModeHide) — no SetToolsMode
+	// call needed, but assert it explicitly so the test reads as a
+	// contract check.
+	if got := cs.ToolsMode(); got != chatsession.ToolsModeHide {
+		t.Fatalf("fresh ChatSession ToolsMode = %q, want ToolsModeHide (default)", got)
+	}
+	logger := slog.Default()
+
+	h := newEventHandler(ch, cs, mgr, logger)
+	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_hide", "claude", "/tmp", nil)
+
+	h("oc_chat_tools_hide", as, agent.AgentEvent{
+		Kind:      agent.EventToolStart,
+		ToolStart: &agent.ToolStartEvent{Name: "Read", Args: "/tmp/foo"},
+	}, "om_user_1")
+	h("oc_chat_tools_hide", as, agent.AgentEvent{
+		Kind:    agent.EventToolEnd,
+		ToolEnd: &agent.ToolEndEvent{Name: "Read", Output: "line1\nline2"},
+	}, "om_user_1")
+
+	if got := ch.Record(); len(got) != 0 {
+		t.Errorf("Hide mode dropped %d tool events; want 0. Recorded: %+v", len(got), got)
+	}
+}
+
+// TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds verifies
+// /tools off only gates OutToolStart and OutToolEnd — final
+// assistant replies (OutText), typed Result events (OutResult),
+// and OutThinking must still flow to the Channel. This guards
+// against accidentally widening the gate in a future refactor.
+func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
+	ch := echo.New("test", io.Discard)
+	mgr := chatsession.NewManager()
+	cs := mgr.GetOrCreate("oc_chat_tools_indep", "claude")
+	if got := cs.ToolsMode(); got != chatsession.ToolsModeHide {
+		t.Fatalf("fresh ChatSession ToolsMode = %q, want ToolsModeHide", got)
+	}
+	logger := slog.Default()
+
+	h := newEventHandler(ch, cs, mgr, logger)
+	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_indep", "claude", "/tmp", nil)
+
+	// (a) OutText — final assistant reply (no <thinking> prefix)
+	h("oc_chat_tools_indep", as, agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "Here is your answer.",
+	}, "om_user_1")
+
+	// (b) EventResult — typed Result event (OutResult)
+	h("oc_chat_tools_indep", as, agent.AgentEvent{
+		Kind:   agent.EventResult,
+		Result: &agent.ResultEvent{Text: "Final result text."},
+	}, "om_user_1")
+
+	// (c) OutThinking — must not be dropped by /tools off
+	// (ThinkMode is the orthogonal gate; default Show passes it)
+	h("oc_chat_tools_indep", as, agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "[思考] reasoning",
+	}, "om_user_1")
+
+	got := ch.Record()
+	if len(got) != 3 {
+		t.Fatalf("Hide mode forwarded %d non-tool events; want 3 (OutText + OutResult + OutThinking)", len(got))
+	}
+}
+
+// TestEventHandler_ToolsGate_PersistsAcrossInvocations verifies
+// the gate decision is read from ChatSession state on every
+// invocation — flipping the mode mid-flight takes effect for
+// subsequent events without re-installing the handler. Mirrors
+// TestEventHandler_ThinkGate_PersistsAcrossInvocations.
+func TestEventHandler_ToolsGate_PersistsAcrossInvocations(t *testing.T) {
+	ch := echo.New("test", io.Discard)
+	mgr := chatsession.NewManager()
+	cs := mgr.GetOrCreate("oc_chat_tools_persist", "claude")
+	logger := slog.Default()
+
+	h := newEventHandler(ch, cs, mgr, logger)
+	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_persist", "claude", "/tmp", nil)
+
+	toolStart := agent.AgentEvent{
+		Kind:      agent.EventToolStart,
+		ToolStart: &agent.ToolStartEvent{Name: "Read", Args: "/tmp/foo"},
+	}
+
+	// Phase 1: default Hide → dropped.
+	h("oc_chat_tools_persist", as, toolStart, "om_1")
+	if got := len(ch.Record()); got != 0 {
+		t.Fatalf("phase1 (Hide) forwarded %d events; want 0", got)
+	}
+
+	// Flip to Show mid-flight.
+	if err := cs.SetToolsMode(chatsession.ToolsModeShow); err != nil {
+		t.Fatalf("SetToolsMode: %v", err)
+	}
+
+	// Phase 2: Show → forwarded.
+	h("oc_chat_tools_persist", as, toolStart, "om_2")
+	if got := len(ch.Record()); got != 1 {
+		t.Errorf("phase2 (Show) total events = %d; want 1", got)
+	}
+
+	// Flip back to Hide.
+	if err := cs.SetToolsMode(chatsession.ToolsModeHide); err != nil {
+		t.Fatalf("SetToolsMode: %v", err)
+	}
+
+	// Phase 3: Hide → dropped again.
+	h("oc_chat_tools_persist", as, toolStart, "om_3")
+	if got := len(ch.Record()); got != 1 {
+		t.Errorf("phase3 (Hide again) total events = %d; want 1 (phase1 + phase3 dropped, phase2 kept)", got)
+	}
+}
+
+// TestEventHandler_ToolsAndThinkGatesIndependent verifies the
+// two per-chat gates (ThinkMode + ToolsMode) are independent:
+// setting ToolsMode must not flip ThinkMode, and vice versa.
+// Otherwise a /tools typo could silently change thinking
+// behaviour (or a /think typo could silently expose tool calls).
+func TestEventHandler_ToolsAndThinkGatesIndependent(t *testing.T) {
+	ch := echo.New("test", io.Discard)
+	mgr := chatsession.NewManager()
+	cs := mgr.GetOrCreate("oc_chat_both_gates", "claude")
+	logger := slog.Default()
+
+	h := newEventHandler(ch, cs, mgr, logger)
+	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_both_gates", "claude", "/tmp", nil)
+
+	// Flip both off.
+	if err := cs.SetToolsMode(chatsession.ToolsModeHide); err != nil {
+		t.Fatalf("SetToolsMode: %v", err)
+	}
+	if err := cs.SetThinkMode(chatsession.ThinkModeHide); err != nil {
+		t.Fatalf("SetThinkMode: %v", err)
+	}
+
+	// OutThinking → dropped (ThinkMode gate)
+	h("oc_chat_both_gates", as, agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "[思考] reasoning",
+	}, "om_user_1")
+
+	// OutToolStart → dropped (ToolsMode gate)
+	h("oc_chat_both_gates", as, agent.AgentEvent{
+		Kind:      agent.EventToolStart,
+		ToolStart: &agent.ToolStartEvent{Name: "Read", Args: "/tmp/foo"},
+	}, "om_user_1")
+
+	// Flip only /tools on.
+	if err := cs.SetToolsMode(chatsession.ToolsModeShow); err != nil {
+		t.Fatalf("SetToolsMode: %v", err)
+	}
+
+	// OutThinking → still dropped (ThinkMode gate unchanged)
+	h("oc_chat_both_gates", as, agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "[思考] more reasoning",
+	}, "om_user_2")
+
+	// OutToolStart → now forwarded (ToolsMode flipped to Show)
+	h("oc_chat_both_gates", as, agent.AgentEvent{
+		Kind:      agent.EventToolStart,
+		ToolStart: &agent.ToolStartEvent{Name: "Bash", Args: "ls"},
+	}, "om_user_2")
+
+	got := ch.Record()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 forwarded event (OutToolStart after /tools on); got %d: %+v", len(got), got)
+	}
+	if got[0].Kind.String() != "tool_start" {
+		t.Errorf("forwarded event Kind = %q, want %q", got[0].Kind.String(), "tool_start")
+	}
+}

@@ -529,6 +529,31 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 			}
 			return
 		}
+		// F-38 §3.1.3: per-chat tool-event gate. When the chat
+		// has /tools off (default), drop OutToolStart and
+		// OutToolEnd events here (after Translate + ReplyTo
+		// stamping, before ch.Send) so the Feishu adapter never
+		// sees them. Other OutboundKinds — OutText / OutResult
+		// / OutThinking / OutCompaction / OutInit / OutUsage —
+		// are unaffected. The merge rendering (PATCH on start
+		// message_id when /tools on) is a Feishu adapter
+		// concern; this gate just decides whether the event
+		// reaches the Channel at all.
+		//
+		// cs is captured in the closure (per-cs handler
+		// factory), so this lookup is a direct field read —
+		// same pattern as the ThinkMode gate above.
+		if (out.Kind == gateway.OutToolStart || out.Kind == gateway.OutToolEnd) &&
+			cs != nil && cs.ToolsMode() == chatsession.ToolsModeHide {
+			if logger != nil {
+				logger.Info("tools dropped",
+					"chat_id", chatID,
+					"user_msg_id", userMsgID,
+					"agent_session_id", s.ID,
+					"kind", out.Kind.String())
+			}
+			return
+		}
 		if err := ch.Send(context.Background(), out); err != nil && logger != nil {
 			logger.Warn("channel send failed",
 				"chat_id", chatID,

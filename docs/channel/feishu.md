@@ -1119,6 +1119,8 @@ ChatSession.onAgentEvent
 
 ### 13.12 🎯 设计决策反转 (2026-08-04 Devin 拍板):折叠 → Thread Reply
 
+> **后续**:F-38 §13.14 在 §13.12 基础上**进一步合并** `OutToolStart` + `OutToolEnd` 为**一条** thread reply(call + result 通过 PATCH 同一 message_id 合并)。§13.12 描述"每事件一条 reply";§13.14 后变成"每个 tool 一条 reply(Start + End 合并)"。OutThinking / OutCompaction 仍按 §13.12 各一条。
+
 **背景**:§13.6 拍板的折叠方案(OutThinking / OutToolStart / OutToolEnd 在 receipt card body 里走 `collapsible_panel`)实机上视觉体验差,详尽分析 + 新方案设计见 [`docs/feat/F-37-tool-thread-routing.md`](../feat/F-37-tool-thread-routing.md) §1。
 
 **新决议**:OutThinking / OutToolStart / OutToolEnd / OutCompaction 从 receipt card body 里抽出,作为独立 thread reply 投递到 user message 的 Feishu thread;receipt card 收窄到只承载最终答复(OutText / OutResult)+ 元数据(OutInit / OutUsage)。
@@ -1256,6 +1258,77 @@ WebSearch  -> 10 results
 
 `cmd/_probe/`(mock probe + 真实发送 CLI)曾保留在 working tree 一段时间,后于 `c52ad06` 删除——决策已落地,工具不再有保留价值。**当未来需要再跑验证时**:按本节 §13.13.3 重建 SDK 调用即可,无需还原工具源码。
 
+### 13.14 � F-38 tool-event merge + `/tools on|off` toggle (2026-08-04)
+
+**背景**:§13.12 反转后的方案仍然把每个 `OutToolStart` 和 `OutToolEnd` 当作**两条独立** thread reply 投递。Hot agent 一次 turn 调 10 个工具 = 20 条 thread reply,视觉噪声 + 限速成本都过大。同时用户没有 per-chat 开关控制工具调用是否显示。F-38 同时解决这两点:**(a) 合并渲染**——每对 tool 是**一条** thread reply(call + result 通过 PATCH 同一 message_id);**(b) per-chat toggle**——`/tools on|off` 控制可见性,默认 Hide(quiet by default)。
+
+**新决议**:
+
+1. **`OutToolStart` + `OutToolEnd` 合并为一条 thread reply**:
+   - Feishu adapter 维护 per-turn FIFO `toolEventBuf[userMsgID] → []toolEventEntry{startMsgID, startBody}`
+   - `OutToolStart` 通过 `postThreadReplyWithID(...)` 发新 thread reply,记下 message_id
+   - `OutToolEnd` 到达时 `popToolStart` 取 front entry,用 `mergeToolReply(startMsgID, startBody + "\n" + resultBody)` PATCH 同一 reply
+   - 用户看到:同一条 chat message 内 `● Bash(ls)` + `⎿  💻 Bash → 3 lines` 两行,而不是两条独立气泡
+   - 失败开放:orphan End(buffer miss)或 PATCH 失败 → fallback 到 `postThreadReply`(发新 reply),永不静默丢数据
+
+2. **`ToolsMode` per-chat 状态**:
+   - `ChatSession.ToolsMode`:`ToolsModeHide`(默认)/ `ToolsModeShow`
+   - 持久化为 `ChatSessionEntry.ToolsMode`(JSON omitempty;旧 `chat_sessions.json` 无该字段时零值 fallback 到 Hide)
+   - setter `ChatSession.SetToolsMode` + getter `ChatSession.ToolsMode()`
+
+3. **`/tools on|off` slash command**(镜像 `/think` 但默认方向相反):
+   - 三种调用:`/tools on`、`/tools off`、`/tools`(无参 = 显示状态)
+   - 接受别名 `show` / `hide`
+   - **默认 Hide**(vs `/think` 默认 Show)——理由:tool spam 是 agent stream 中最吵的部分,多数用户不要;opt-in 才显示
+
+4. **runtime EventHandler gate**(`cmd/nightme/run.go::newEventHandler`):
+   - 紧跟现有 ThinkMode gate
+   - 当 `cs.ToolsMode() == ToolsModeHide && (out.Kind == OutToolStart || out.Kind == OutToolEnd)` → 静默丢弃 + info log
+   - 其他 OutboundKind(`OutText` / `OutResult` / OutThinking / OutCompaction / OutInit / OutUsage`)不受影响
+   - 与 ThinkMode gate 正交:两个 gate 可独立配置
+
+**OutboundKind 路径拆分(F-38 thread-merge 设计)**:
+
+| Kind | 形态 | main chat | thread 表现 |
+|------|------|-----------|-------------|
+| `OutToolStart` | ReplyInThread + **merge-able** | 隐藏 | 发新 thread reply,记 `startMsgID`(后续 End 来 PATCH 这条) |
+| `OutToolEnd` | ReplyInThread + **merge** | 隐藏 | PATCH 同 `startMsgID`,body = startBody + "\n" + resultBody;miss / PATCH 失败时 fallback 发新 reply |
+| `OutThinking` | ReplyInThread(`postThreadMarkdownReply`,独立) | 隐藏 | lark_md card,**不**与 Tool 合并 |
+| `OutCompaction` | ReplyInThreadAndChat(独立) | 可见 | `✶ Compacting conversation…` |
+
+> 与 §13.12 的差异:§13.12 时代 `OutToolStart` + `OutToolEnd` 是两条独立 thread reply;F-38 后是**一条** reply(call + result 合并)。Feishu-specific 渲染细节,**不动** `OutboundMessage` schema / Gateway / ChatSession。
+
+**架构不变式保留**:
+- `OutboundMessage` shape 不变(无新 Kind、无新字段、`Tool *ToolInfo` 仍是 typed primitive)
+- `ChatSession` 不 import `channel/feishu`(不变)
+- Channel interface 不暴露 `ToolsMode` / 任何渲染细节(不变)
+- 合并 vs 分开发是 **Feishu 自治**的渲染决策(Echo / Slack / Web 各自决定,不复制飞书方案)
+- §1.4 边界规则:tool 概念跨层仍是 typed `ToolInfo`;Feishu 自决是否合并
+- 1 turn : 1 userMsgID(SPEC §2.2):FIFO buffer 由 tools-per-turn 自然界定,无需 turn-end 显式清理
+
+**Feishu API 约束**:
+- `PUT /im/v1/messages/{id}` 支持编辑 text / post 类型 thread reply
+- 单条消息最多 20 次编辑(agent 单 turn 工具数远低于此)
+- 编辑时间窗 24h(覆盖任何现实 tool latency)
+- msg_type 必须匹配(不能 text → card 或反之)
+
+**与 §13.12 的关系**:§13.12 反转了折叠→thread 决策,但仍按"每事件一条 reply"投递。F-38 在 §13.12 基础上**进一步**合并 OutToolStart+OutToolEnd 为一条 reply。OutThinking / OutCompaction 仍按 §13.12 各自一条 reply(它们之间没有 pair 关系)。
+
+**实施步骤**(详见 F-38 §8):
+
+1. **Foundation**:`internal/registry/tools_mode.go` + `internal/chatsession/toolsmode.go`;`ChatSession.toolsMode` + `SetToolsMode` / `ToolsMode()`;`Manager.RestoreFromRegistry` 恢复;`ChatSessionEntry.ToolsMode` JSON 字段
+2. **Slash command + gate**:`internal/gateway/handlers_tools.go`(镜像 `handleThink`);`RegisterChatSessionCommands` 注册;`cmd/nightme/run.go::newEventHandler` 在 ThinkMode gate 后加 ToolsMode gate
+3. **Feishu merge**:`internal/channel/feishu/tool_thread_merge.go`(`toolEventEntry` + `pushToolStart` / `popToolStart` / `clearToolEvents` / `clearAllToolEvents` / `mergeToolReply`);`Adapter.toolEventBuf` + `mergeTextFunc` hookable field;`postThreadReplyWithID` sibling helper;`OutToolStart` / `OutToolEnd` cases 重写;`Adapter.Stop` 调 `clearAllToolEvents`
+4. **Tests**:registry round-trip + missing-field + omitempty;chatsession type-alias + default-is-Hide;handlers / event handler gate + 独立性;Feishu FIFO + miss + empty msg_id + parallel tool_use + cross-turn isolation + PATCH failure fallback
+
+**Backlog**(F-38 out of scope):
+- Per-tool 粒度 toggle(目前只 binary on/off)
+- 跨 Channel 的合并标准(Echo / Slack / Web 各自决定)
+- Tool output preview(result line 永远是 `summarizeToolResult` 单行摘要,永不 dump 原文)
+- Auto-disable after N turns(用户 opt-out 总是显式)
+
+**详细设计**:见 [`docs/feat/F-38-tool-merge-and-toggle.md`](../feat/F-38-tool-merge-and-toggle.md) + `docs/SPEC.md` §0.7 + §3.1.3。
+
 ## 14. 变更日志
 
 - **2026-08-03** - 加入 §11-§13: Feishu msg_type 全集参考、OutboundKind → Feishu 渲染映射表、审计结果(1 bug + 4 澄清)。基于 `internal/channel/feishu/*` 与 `internal/gateway/*` 现状。
@@ -1263,18 +1336,21 @@ WebSearch  -> 10 results
 - **2026-08-03(同日再增量)** - 加入 §13.10:Devin 发现 `OutboundMessage.ReplyTo` 字段被消费在内部 receipt map 但**从未投递为 Feishu `root_id`**,所有 bot 回复都是顶层消息,与用户消息无视觉连接。SDK 字段 `larkim.CreateMessageReqBody.RootId` 已存在但代码没用。F-26 v1.1 设计文档 `ReplyTo 非空 → 必须镇定到该 userMsgID(用 ReplyMessage API 或已有 receipt)` 在 v1.3 refactor 中丢失。提供 A/B/C 三种修复范围(最小/中等/完整)+ 4 个待确认问题。
 - **2026-08-03(同日三增量)** - 加入 §13.11(F-33 决策记录):D1 ChatType 不进 Gateway + D2 topic_group 不特殊处理 + D3 `ReplyTo = ParentId`(RootId 不进 nightme)+ D4 任何 Channel 都不引入 thread 概念。落地 chatID 数据模型系统性清理,关闭 inbound 方向 ReplyTo 接线缺失。详见 [`docs/feat/F-33-simplify-chatid-data-model.md`](../feat/F-33-simplify-chatid-data-model.md)。
 - **2026-08-04** - 加入 §13.12(F-thread-route 决策反转):折叠方案(§13.6-§13.9)实机验证失败,反转决策 → OutThinking / OutToolStart / OutToolEnd / OutCompaction 作为独立 thread reply 投递;receipt card 收窄到只承载最终答复 + 元数据;OutToolEnd 走类型感知摘要(`summarize_tool.go`)。新建 [`docs/feat/F-37-tool-thread-routing.md`](../feat/F-37-tool-thread-routing.md) 作为本 feature 的权威文档。`docs/SPEC.md` §0.3 同步加变更摘要;§15 实施计划待修订(下个 commit)。
+- **2026-08-04(同日增量)** - 加入 §13.14(F-38 tool-merge + `/tools` toggle):§13.12 的 OutToolStart + OutToolEnd 各自发一条 thread reply 的方案在 10 工具/turn 的 agent 上视觉噪声过大,反转 → OutToolEnd PATCH 同一 message_id 的 start reply(call + result 合并为一条);新增 `ChatSession.ToolsMode`(默认 Hide,quiet by default)+ `/tools on|off` slash command + runtime EventHandler gate。详见 [`docs/feat/F-38-tool-merge-and-toggle.md`](../feat/F-38-tool-merge-and-toggle.md) + `docs/SPEC.md` §0.7 + §3.1.3。
 - **v0.3 ~ v1.3** - 早期章节(背景、OpenClaw 调研、迁移方案、已知坑等)保留;参见章节顶部 Status 行。
 
 ## 15. v1.3.x 实施计划
 
-### 15.0 状态(2026-08-04 F-thread-route 反转后)
+### 15.0 状态(2026-08-04 F-thread-route + F-38 反转后)
 
-⚠️ **本节已被 §13.12 + [`docs/feat/F-37-tool-thread-routing.md`](../feat/F-37-tool-thread-routing.md) 反转**。
+�️ **本节已被 §13.12(F-37 thread-route)+ §13.14(F-38 tool-merge)+ [`docs/feat/F-37-tool-thread-routing.md`](../feat/F-37-tool-thread-routing.md) + [`docs/feat/F-38-tool-merge-and-toggle.md`](../feat/F-38-tool-merge-and-toggle.md) 反转**。
 
 - 原 §15 目标"折叠 + reply-in-thread" → 折叠方案被 §13.12 推翻
 - §13.1 修复不再需要(thinkingPrefix 不再被 strip)
 - §13.10 reply-in-thread 部分保留(§13.12 复用其基础设施 `sendViaLarkReply` + `SendMessageText` 的 rootID 参数)
-- 新实施计划见 F-37 §3.1 文件级变更清单
+- §13.12 的"每事件一条 reply"被 §13.14 进一步合并:`OutToolStart` + `OutToolEnd` → 一条 thread reply(Feishu `PUT /im/v1/messages/{id}` PATCH 同一 message_id)
+- §13.14 新增 `ChatSession.ToolsMode`(默认 Hide)+ `/tools on|off` slash command + runtime EventHandler gate
+- 新实施计划见 F-37 §3.1 + F-38 §8 文件级变更清单
 
 历史保留:§15.1 ~ §15.5 描述折叠方案的旧实施细节,作为决策记录。
 

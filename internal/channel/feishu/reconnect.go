@@ -25,6 +25,7 @@
 package feishu
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,7 +51,13 @@ const (
 type prober struct {
 	adapter   *Adapter
 	cfg       proberConfig
-	restarter func() error // injected ch.Stop()+ch.Start() closure
+	restarter func(ctx context.Context) error
+
+	// isConnectedFn reports whether the WS is currently up. Read on
+	// every tick to decide whether to self-stop after a successful
+	// force-restart. Decoupled from the concrete Adapter type so
+	// tests can inject a mock without spinning up a real SDK.
+	isConnectedFn func() bool
 
 	// Lifecycle channels. Mutated only under lifeMu (Stop reassigns
 	// them after a successful stop). The loop captures them into
@@ -75,19 +82,31 @@ type prober struct {
 
 // newProber constructs a prober. The restarter closure is what the
 // ticker calls on each tick — typically a closure around
-// (*Adapter).Stop() + sleep + (*Adapter).Start(). Pass nil to use
-// the default no-op restarter (tests).
-func newProber(adapter *Adapter, restarter func() error) *prober {
+// (*Adapter).Stop() + sleep + (*Adapter).Start(). The closure
+// receives a context that the prober owns but does NOT cancel
+// across cycles — each Start keeps using the same context (so an
+// in-flight restarter interrupted by Stop1 will see ctx.Err on the
+// NEXT cycle too, which is fine because the next cycle's restarter
+// is a fresh call that should propagate it). Pass nil for both
+// closure and connected-fn in tests; tests should set the fields
+// directly after construction.
+func newProber(adapter *Adapter, restarter func(ctx context.Context) error) *prober {
 	if restarter == nil {
-		restarter = func() error { return nil }
+		restarter = func(context.Context) error { return nil }
 	}
-	return &prober{
+	p := &prober{
 		adapter:   adapter,
 		cfg:       proberConfig{Interval: defaultProberInterval, Backoff: defaultProberBackoff},
 		restarter: restarter,
 		stopCh:    make(chan struct{}),
 		doneCh:    make(chan struct{}),
 	}
+	// Default connected-check reads from the adapter. Tests
+	// overwrite isConnectedFn to a mock.
+	if adapter != nil {
+		p.isConnectedFn = func() bool { return adapter.Health().Connected }
+	}
+	return p
 }
 
 // Start spawns the ticker goroutine. Idempotent — a second call
@@ -175,7 +194,13 @@ func (p *prober) tick() {
 	p.forceCount.Add(1)
 	p.lastForceAt.Store(&now)
 
-	err := p.restarter()
+	// The restarter receives a fresh Background context. Cancellation
+	// happens via Stop's close(p.stopCh) which the SDK's Start/Stop
+	// methods don't use (their blocking calls are tied to the WS
+	// socket lifecycle, not the context). Daemon shutdown cancels
+	// the SDK via the existing a.cancel mechanism in the adapter,
+	// not via this restarter context.
+	err := p.restarter(context.Background())
 	if err != nil {
 		// Record the error but keep going. The prober never gives up.
 		msg := err.Error()
@@ -188,7 +213,7 @@ func (p *prober) tick() {
 	// OnReconnected callback will fire separately and emit the
 	// "feishu: ws reconnected" log. We don't depend on that
 	// callback here; checking Connected directly is enough.
-	if p.adapter != nil && p.adapter.Health().Connected {
+	if p.isConnectedFn != nil && p.isConnectedFn() {
 		// Self-stop: flip the started flag so the next Start works
 		// and signal the loop to exit. We do this through a separate
 		// channel so we don't deadlock on Stop's <-doneCh.

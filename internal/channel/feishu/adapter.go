@@ -345,12 +345,18 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	// WS is disconnected, which effectively overrides the SDK's
 	// 2-minute default reconnectInterval. Self-stops when the SDK
 	// reports Connected=true (checked via Health() inside the tick).
-	a.prober = newProber(a, func() error {
-		if err := a.Stop(context.Background()); err != nil {
+	a.prober = newProber(a, func(ctx context.Context) error {
+		// Respect the prober's lifecycle context so daemon shutdown
+		// can interrupt an in-flight Stop+100ms+Start cycle.
+		if err := a.Stop(ctx); err != nil {
 			return err
 		}
-		time.Sleep(defaultProberBackoff)
-		return a.Start(context.Background())
+		select {
+		case <-time.After(defaultProberBackoff):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return a.Start(ctx)
 	})
 
 	return a, nil

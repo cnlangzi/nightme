@@ -38,32 +38,29 @@ func TestEventToEntry_Text_ThinkingPrefix(t *testing.T) {
 
 // --- New kinds (P1 follow-up). ---
 
-func TestEventToEntry_Result(t *testing.T) {
-	e, ok := eventToEntry(agent.AgentEvent{
+// TestEventToEntry_Result_Dropped — F-39 reverse-section proof.
+// OutResult no longer folds into the rolling-log receipt card. Adapter.Send
+// rewrites it to sendResultAsReply (independent reply). eventToEntry
+// therefore drops EventResult into the default branch.
+func TestEventToEntry_Result_Dropped(t *testing.T) {
+	_, ok := eventToEntry(agent.AgentEvent{
 		Kind:   agent.EventResult,
 		Result: &agent.ResultEvent{Text: "完成", Subtype: "success"},
 	}, at(), nil)
-	if !ok {
-		t.Fatal("Result event should produce an entry")
-	}
-	if e.Icon != "📝" {
-		t.Errorf("Icon = %q, want 📝", e.Icon)
-	}
-	if e.Text != "完成" {
-		t.Errorf("Text = %q, want 完成", e.Text)
-	}
-	if e.Kind != "result" {
-		t.Errorf("Kind = %q, want 'result'", e.Kind)
+	if ok {
+		t.Error("EventResult must NOT produce a receipt entry (F-39 reverse)")
 	}
 }
 
-func TestEventToEntry_Result_Error(t *testing.T) {
-	e, ok := eventToEntry(agent.AgentEvent{
+// TestEventToEntry_Result_Error_Dropped — same; even error results bypass
+// the receipt card entirely now.
+func TestEventToEntry_Result_Error_Dropped(t *testing.T) {
+	_, ok := eventToEntry(agent.AgentEvent{
 		Kind:   agent.EventResult,
 		Result: &agent.ResultEvent{Text: "max turns exceeded", IsError: true},
 	}, at(), nil)
-	if !ok || e.Icon != "⚠️" {
-		t.Errorf("Error result should use ⚠️ icon; got %+v ok=%v", e, ok)
+	if ok {
+		t.Error("EventResult (even IsError) must NOT produce a receipt entry (F-39 reverse)")
 	}
 }
 

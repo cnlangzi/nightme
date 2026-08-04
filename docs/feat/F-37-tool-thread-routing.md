@@ -1,4 +1,4 @@
-# F-35: OutToolEnd + OutThinking → Thread Reply (with Type-Aware Summary)
+# F-37: OutToolEnd + OutThinking → Thread Reply (with Type-Aware Summary)
 
 > **Status**: ⏭ Planned (2026-08-04 Devin 拍板) · Docs-first · 代码改动 backlog
 >
@@ -193,7 +193,7 @@ type ToolEndEvent struct {
     // Args are the raw or structured arguments passed to the tool.
     // Bridges populate this from the corresponding tool_use block
     // (same message, ID-matched) so channel renderers can produce
-    // type-aware summaries (F-35 §2.3) without re-parsing the
+    // type-aware summaries (F-37 §2.3) without re-parsing the
     // tool_result content. May be empty if the bridge couldn't
     // correlate the result with a tool_use (defensive).
     Args string
@@ -319,27 +319,27 @@ case agent.EventText:
     text := strings.TrimSpace(ae.Text)
     if text == "" { return LogEntry{}, false }
     if strings.HasPrefix(text, thinkingPrefix) {
-        // F-35: thinking 走 thread，不再 fold 进 receipt
+        // F-37: thinking 走 thread，不再 fold 进 receipt
         return LogEntry{}, false
     }
     return LogEntry{Icon: "💬", Text: truncateForLog(text, perEntryMaxBytes), Kind: "reply"}, true
 
 case agent.EventToolStart:
-    // F-35: tool_start 走 thread
+    // F-37: tool_start 走 thread
     return LogEntry{}, false
 
 case agent.EventToolEnd:
-    // F-35: tool_end 走 thread (类型感知摘要)
+    // F-37: tool_end 走 thread (类型感知摘要)
     return LogEntry{}, false
 
 case agent.EventCompaction:
-    // F-35: compaction 走 thread
+    // F-37: compaction 走 thread
     return LogEntry{}, false
 ```
 
 **`Gateway.translate.go` 是否需要改**？
 
-`OutThinking` 当前由 Gateway 在 `Translate` 里把 `[思考] ` 前缀剥掉再 emit。**F-35 之后**：
+`OutThinking` 当前由 Gateway 在 `Translate` 里把 `[思考] ` 前缀剥掉再 emit。**F-37 之后**：
 
 - Gateway 不再剥前缀（adapter 不再依赖 receipt_event 的 prefix detection）
 - adapter 直接拿 `msg.Text` 当 thread body，加 `💭 ` 前缀即可
@@ -521,7 +521,7 @@ claudecode bridge 从同 message `tool_use` block 拿 args 填入。
 不动；`currentTurnUserMsgID` 单数锚点保留；F-33 thread 概念不进
 nightme 数据模型不变式保留。
 
-详见 [`docs/SPEC.md` §0.3](./SPEC.md) + [`docs/feat/F-35-tool-thread-routing.md`](./feat/F-35-tool-thread-routing.md) + [`docs/channel/feishu.md` §13.12](./channel/feishu.md)。
+详见 [`docs/SPEC.md` §0.3](./SPEC.md) + [`docs/channel/feishu.md` §13.12](./channel/feishu.md)。
 ```
 
 ---
@@ -584,4 +584,4 @@ nightme 数据模型不变式保留。
 
 ## 8. Change log
 
-- **2026-08-04** — F-35 草案（Devin 拍板反转 §13.6 折叠方案）。Docs 落地（SPEC §0.3 + 本 doc + channel/feishu §13.12 + F-25 §3 收窄 + F-08 §4 自治路由例子 + CHANGELOG）。代码改动 backlog §3.1。
+- **2026-08-04** — F-37 草案（Devin 拍板反转 §13.6 折叠方案）。Docs 落地（SPEC §0.3 + 本 doc + channel/feishu §13.12 + F-25 §3 收窄 + F-08 §4 自治路由例子 + CHANGELOG）。代码改动 backlog §3.1。

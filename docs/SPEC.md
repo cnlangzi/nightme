@@ -144,17 +144,17 @@ v1.3 在 v1.2 架构上做**职责再切分**——核心变化是**删除 Gatew
 
 **为什么不叫 v2.0**：v1.3 的核心不变式（职责隔离、Binding FSM owner、MessageState 独立、Receipt 自治）全部保留。F-thread-route 是 Channel 自治范围内的渲染细节变化，不影响 nightme 数据模型与 Gateway 契约。
 
-**详细落地**：见 [`feat/F-35-tool-thread-routing.md`](./feat/F-35-tool-thread-routing.md) + [`channel/feishu.md`](./channel/feishu.md) §13.12。
+**详细落地**：见 [`feat/F-37-tool-thread-routing.md`](./feat/F-37-tool-thread-routing.md) + [`channel/feishu.md`](./channel/feishu.md) §13.12。
 
 ### 0.4 文档变更摘要（v1.3.x 抽象/具体边界规范，2026-08-04）
 
-**背景**：F-35 review 揭示 `OutboundMessage.Meta["tool_name"]` / `["args"]` / `["output"]` / `["err"]` 是隐式协议 —— Gateway（抽象层） hardcode 了 Feishu adapter（具体层）需要的字段名，本质上是把 concrete 实现细节 leak 进 abstract 层。同类违反在 `OutboundMessage.Meta` 的其他字段（`is_error` / `subtype` / `state` / `message_id` 等）以小范围存在。
+**背景**：F-37 review 揭示 `OutboundMessage.Meta["tool_name"]` / `["args"]` / `["output"]` / `["err"]` 是隐式协议 —— Gateway（抽象层） hardcode 了 Feishu adapter（具体层）需要的字段名，本质上是把 concrete 实现细节 leak 进 abstract 层。同类违反在 `OutboundMessage.Meta` 的其他字段（`is_error` / `subtype` / `state` / `message_id` 等）以小范围存在。
 
 ### 0.5 文档变更摘要（v1.3.x Meta 彻底删除，2026-08-04）
 
 **背景**：§1.4 元原则落地后还残留着 Meta 黑盒——`Meta` 字段是 opaque data container，但 producer（gateway） 在里面塞了 11 个 implicit key（tool_name / args / output / err / state / message_id / reaction_id / session_id / model / agent_name / workspace / branch / input_tokens / output_tokens / cost_usd 等），consumer（feishu adapter）按名字读 + type assert。Channel 不知道 Meta 里有什么（type system 也不告诉你），但 producer / consumer 之间靠 hardcoded 字符串约定通信——最严重的 leak。
 
-**根因**：Meta 是 generic map，约定是字符串 key + `.(string) / .(int) / .(error)` 强转，编译期无法检查。F-35 review 把 tool 字段清掉后，Meta 里还有：
+**根因**：Meta 是 generic map，约定是字符串 key + `.(string) / .(int) / .(error)` 强转，编译期无法检查。F-37 review 把 tool 字段清掉后，Meta 里还有：
 - 死数据（OutResult 的 duration_ms / is_error / subtype，channel 实际 round-trip 重建成 `agent.ResultEvent` 再喂给 receipt.Append）
 - 冗余数据（OutMessageState 的 message_id / state，已有 `MessageState *MessageStatePayload` typed field 但内容不全）
 
@@ -191,12 +191,12 @@ type OutboundMessage struct {
 **核心原则**（一句话）：
 > 抽象层只承载泛化统一的概念。底层具体实现的细节不得直接引入抽象层。如果某项具体信息确实需要进入抽象层，必须先在 boundary 处归一化（normalize）为泛化形式后才能跨越边界。这是软件工程中多态的核心思路。
 
-**F-35 review 落地的归一化路径**：
+**F-37 review 落地的归一化路径**：
 - `OutboundMessage.Meta["args"]` / `["tool_name"]` 等隐式 key → 升级到 `OutboundMessage.Tool *ToolInfo` typed field
 - `ToolInfo.Args string` —— bridge（claudecode / pi / pty）把各自的 native representation 归一化成 string，Gateway / Channel 只见到 generic primitive
 - Channel 拿到 string 后 parse 出 typed 视图（用于类型感知渲染），parse 逻辑属于 Channel 自治
 
-**保守范围**：只迁移 tool info 这一组字段。其他 Feishu-specific Meta 字段（`is_error` / `subtype` / `duration_ms` / `state` / `message_id` / `reaction_id`）保留原状，留 follow-up PR 清理，避免 F-35 PR 范围失控。
+**保守范围**：只迁移 tool info 这一组字段。其他 Feishu-specific Meta 字段（`is_error` / `subtype` / `duration_ms` / `state` / `message_id` / `reaction_id`）保留原状，留 follow-up PR 清理，避免 F-37 PR 范围失控。
 
 **详细落地**：见 §1.4 + commit `921c862`（typed ToolInfo 升级）。
 
@@ -449,7 +449,7 @@ return receipt.Append(ctx, agent.AgentEvent{
 3. 再问：能否抽成 typed struct（generic 字段名）？
 4. 最后：扩展抽象层字段，并在 §1.3 不变式里明文记一条。
 
-升级路径 #4 是最后一根稻草。F-35 review 把 `Meta["args"]` 升级到 `OutboundMessage.Tool *ToolInfo` 就是走的路径 #3（typed struct），不在抽象层暴露 schema。
+升级路径 #4 是最后一根稻草。F-37 review 把 `Meta["args"]` 升级到 `OutboundMessage.Tool *ToolInfo` 就是走的路径 #3（typed struct），不在抽象层暴露 schema。
 
 ---
 
@@ -1024,7 +1024,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
   - `internal/channel/feishu/adapter.go` `buildReceiptCard` 删 collapsible_panel 分支（`Kind=="thinking"` / `Kind=="tool"`）
   - `internal/channel/feishu/receipt_event_test.go` 删 thinking/tool assertion；新增 `TestSend_Out*_PostsToThread` + `TestSummarizeToolEnd`
   - `docs/channel/feishu.md` §13.12 决策反转记录 + §15 实施计划修订
-  - 详见 [`docs/feat/F-35-tool-thread-routing.md`](./feat/F-35-tool-thread-routing.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §13.12
+  - 详见 [`docs/feat/F-37-tool-thread-routing.md`](./feat/F-37-tool-thread-routing.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §13.12
 - ⏭ **F-35（feishu 全局限速器）**：`internal/channel/feishu/ratelimit.go` 单桶 token bucket(5 QPS / burst 1 / lazy refill)，4 个底出口(`sendViaLarkCreate` / `sendViaLarkReply` / `updateViaLark` / `AddReaction`)SDK call 前 `Wait()`。`internal/config/config.go::FeishuConfig` 加 `RateLimit` 字段。详见 [`docs/feat/F-35-ratelimit.md`](./feat/F-35-ratelimit.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §16。
 - ⏭ **F-36（feishu transient retry + 降级日志）**：`internal/channel/feishu/retry.go` 指数退避重试(3 次尝试 / 500ms→5s / ±25% jitter)，包裹 `sendContent` / `updateViaLark` / `AddReaction`。所有降级路径(retry exhausted / ctx cancel / fallback top-level)emit warn 级结构化日志。详见 [`docs/feat/F-36-transient-retry.md`](./feat/F-36-transient-retry.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §17。
 

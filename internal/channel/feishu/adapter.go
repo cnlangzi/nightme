@@ -941,6 +941,10 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 		// and the panel renders as a flat (non-collapse)
 		// block when it's missing.
 		if e.Kind == "thinking" {
+			// Thinking text is capped at perEntryMaxBytes (600
+			// runes post-F-37) by eventToEntry, so the inner
+			// body is always ≤ divTextCharLimit and a single
+			// markdown element is enough.
 			elements = append(elements, map[string]any{
 				"tag":      "collapsible_panel",
 				"expanded": false,
@@ -986,6 +990,9 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 		// "tool_name failed: err" by eventToEntry). Body
 		// holds the same e.Text for users who expand.
 		if e.Kind == "tool" {
+			// Tool text is capped at perEntryMaxBytes (600 runes
+			// post-F-37) by eventToEntry, so a single inner
+			// element is enough.
 			elements = append(elements, map[string]any{
 				"tag":      "collapsible_panel",
 				"expanded": false,
@@ -1019,10 +1026,17 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 			})
 			continue
 		}
-		elements = append(elements, map[string]any{
-			"tag":     "markdown",
-			"content": content,
-		})
+		// F-37 multi-div content split: if the entry's text
+		// exceeds divTextCharLimit (Feishu hard limit), split
+		// at paragraph boundaries into multiple markdown elements
+		// so the full content renders without truncation.
+		chunks := splitMarkdownForDivs(content, divTextCharLimit)
+		for _, chunk := range chunks {
+			elements = append(elements, map[string]any{
+				"tag":     "markdown",
+				"content": chunk,
+			})
+		}
 	}
 	if note := r.state.footLine(r); note != "" {
 		elements = append(elements, map[string]any{"tag": "hr"})

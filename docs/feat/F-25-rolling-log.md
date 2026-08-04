@@ -16,7 +16,7 @@
 >
 > **Milestone**: v1.3 (Channel-autonomous)
 > **Depends on**: F-08 (channel abstraction), F-24 (claudecode bridge), F-31 (message state)
-> **Related**: [`SPEC.md`](../SPEC.md) v1.3 §2.2, §2.4; [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md); [`F-26-gateway-hub.md`](./F-26-gateway-hub.md)
+> **Related**: [`SPEC.md`](../SPEC.md) v1.3 §2.2, §2.4; [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md); [`F-26-gateway-hub.md`](./F-26-gateway-hub.md); [`F-37-multi-div-content-split.md`](./F-37-multi-div-content-split.md) — F-37 解决 `OutResult` 600 B 截断 backlog
 
 ---
 

@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
@@ -99,7 +100,46 @@ const replyMaxEntries = 45
 
 // perEntryMaxBytes bounds a single log entry's payload so a giant
 // 💬 reply line cannot monopolise the budget.
+//
+// F-37 (multi-div content split): the unit is now characters
+// (runes), not bytes — truncateForLog was changed to rune counting
+// in F-37 (see receipt_event.go). The const name is retained for
+// source-compatibility with thinking/tool/reply/error/compaction
+// callers that previously assumed a 600 B cap. For CJK / emoji
+// content the effective size is now larger (600 chars ≈ 1.8 KB for
+// Chinese) and totalLogBytesLocked accounts for the multi-byte
+// expansion. Callers that genuinely need a byte limit should use
+// a separate helper.
 const perEntryMaxBytes = 600
+
+// divTextCharLimit caps the text length of a single `div` element
+// in the receipt card body. This is the Feishu hard limit on
+// `div.text` (per docs/feishu.md §10) — the splitter uses this
+// as maxRunes so no div ever exceeds the server's accepted size.
+//
+// F-37 design: receipt entries may produce multiple `div` elements
+// when split, but each individual div stays under this limit.
+const divTextCharLimit = 1000
+
+// perEntryMaxRunes caps a single log entry's payload in runes
+// (not bytes) so a giant final reply can be preserved as multiple
+// divs instead of being truncated at 600 bytes.
+//
+// F-37 (multi-div content split): the splitter emits multiple
+// divs per entry when text exceeds divTextCharLimit. 8000 runes
+// is chosen so that:
+//
+//   - 中文 8000 chars × 3 B/char ≈ 24 KB — still under the 30 KB
+//     card body envelope (per SDK resource.go:1381)
+//   - 英文 8000 chars × 1 B/char ≈ 8 KB — well under the envelope
+//   - After maxRunes splitting at divTextCharLimit=1000 runes,
+//     a single entry produces up to 8 divs (Chinese) or 8 divs
+//     (English). Either way, well under the 50-element limit.
+//
+// Beyond 8000 runes, truncateForLog still kicks in (rare tail;
+// defensive). perEntryMaxBytes is a rune cap applied to other
+// event kinds (see its own comment for the unit history).
+const perEntryMaxRunes = 8000
 
 // logEvictedMarker is the marker prepended when FIFO eviction has
 // trimmed entries from the front of the log.
@@ -121,8 +161,11 @@ type LogEntry struct {
 	// one rendered line.
 	Icon string
 
-	// Text is the entry body, already truncated to
-	// perEntryMaxBytes.
+	// Text is the entry body, already truncated:
+	//   - thinking / tool / reply / error / compaction: perEntryMaxBytes (600 B)
+	//   - result (final reply): perEntryMaxRunes (8000 chars), F-37 multi-div
+	//     then splits this across multiple card divs when it exceeds
+	//     divTextCharLimit (1000 chars per div).
 	Text string
 
 	// Kind is one of "thinking" | "tool_start" | "tool_end" |
@@ -741,15 +784,35 @@ func (r *MessageReceipt) evictOverflowLocked() {
 // final payload. eviction triggers early enough that the actual
 // PATCH always fits Feishu's 30 KB cap.
 //
+// F-37: chunk count is computed from rune count (the splitter's
+// unit), not byte count, so CJK / emoji content is not
+// over-counted. Thinking and tool entries wrap in a
+// collapsible_panel element whose JSON adds ~250 B of header /
+// border / icon keys on top of the inner markdown elements.
+//
 // Caller must hold r.mu.
 func totalLogBytesLocked(r *MessageReceipt) int {
 	const perElementOverhead = 96 // {"tag":"div","text":{"tag":"lark_md","content":""}} ≈ 50-100 bytes
+	const perPanelOverhead = 250  // collapsible_panel header / border / icon / padding JSON
 	total := len(r.state.headerLine(r)) + perElementOverhead
 	if r.evicted > 0 {
 		total += len(fmt.Sprintf(logEvictedMarker, r.evicted)) + perElementOverhead
 	}
 	for _, e := range r.entries {
-		total += len(e.Icon) + 1 + len(e.Text) + perElementOverhead
+		// F-37: count runes (matches splitMarkdownForDivs's unit)
+		// so Chinese content is not over-estimated.
+		entryText := e.Icon + " " + e.Text
+		entryRunes := utf8.RuneCountInString(entryText)
+		chunks := 1
+		if entryRunes > divTextCharLimit {
+			chunks = (entryRunes + divTextCharLimit - 1) / divTextCharLimit
+		}
+		total += len(entryText) + chunks*perElementOverhead
+		// Thinking / tool entries wrap in a collapsible_panel;
+		// the panel JSON is independent of the inner content.
+		if e.Kind == "thinking" || e.Kind == "tool" {
+			total += perPanelOverhead
+		}
 	}
 	// Foot note (when present) — <hr> + plain markdown.
 	if note := r.state.footLine(r); note != "" {

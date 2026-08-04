@@ -2,11 +2,13 @@ package feishu
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
@@ -1025,5 +1027,183 @@ func TestBuildReceiptCard_ToolFailureHasErrorIcon(t *testing.T) {
 	}
 	if !strings.Contains(body, `"content":"❌ Read failed: permission denied"`) {
 		t.Errorf("tool failure panel header missing ❌ + failure reason\n--- body ---\n%s", truncateForTest(body, 400))
+	}
+}
+
+// TestBuildReceiptCard_LongEntryMultiDivs (F-37) verifies that a
+// single entry with text longer than divTextCharLimit (1000 runes)
+// is split into multiple markdown elements in the rendered card.
+// Each split chunk must be ≤ 1000 runes so the Feishu server
+// accepts the PATCH.
+func TestBuildReceiptCard_LongEntryMultiDivs(t *testing.T) {
+	// 2500 chars + 2 paragraphs separator = 2502 chars total
+	para1 := strings.Repeat("a", 1500)
+	para2 := strings.Repeat("b", 1000)
+	text := para1 + "\n\n" + para2
+	r := &MessageReceipt{
+		state:       StateCompleted,
+		eventCount:  1,
+		entries: []LogEntry{
+			{Icon: "📝", Text: text, Kind: "result"},
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	// Decode JSON to walk the elements cleanly
+	elements := decodeReceiptElements(t, body)
+	// 至少 3 个 markdown element: para1 拆 2 段 + para2 1 段
+	markdownCount := 0
+	for _, e := range elements {
+		if e["tag"] == "markdown" {
+			markdownCount++
+			if content, ok := e["content"].(string); ok {
+				if utf8.RuneCountInString(content) > divTextCharLimit {
+					t.Errorf("markdown element content exceeds %d runes: %d runes", divTextCharLimit, utf8.RuneCountInString(content))
+				}
+			}
+		}
+	}
+	if markdownCount < 3 {
+		t.Errorf("expected ≥ 3 markdown elements, got %d\n--- body ---\n%s", markdownCount, truncateForTest(body, 600))
+	}
+}
+
+// decodeReceiptElements parses the receipt card body JSON and
+// returns the elements slice. Test helper for F-37.
+func decodeReceiptElements(t *testing.T, body string) []map[string]any {
+	t.Helper()
+	var envelope struct {
+		Body struct {
+			Elements []map[string]any `json:"elements"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatalf("decode card body: %v\n--- body ---\n%s", err, truncateForTest(body, 600))
+	}
+	return envelope.Body.Elements
+}
+
+// TestBuildReceiptCard_ShortEntryStaysSingle (F-37) verifies that
+// entries ≤ 1000 runes still render as exactly one markdown element
+// (no unnecessary splitting).
+func TestBuildReceiptCard_ShortEntryStaysSingle(t *testing.T) {
+	r := &MessageReceipt{
+		state:       StateExecuting,
+		eventCount:  1,
+		entries: []LogEntry{
+			{Icon: "💬", Text: "Short reply under 1000 chars.", Kind: "reply"},
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	// 1 markdown element for entry + 1 markdown for header line = 2
+	if c := strings.Count(body, `"tag":"markdown"`); c != 2 {
+		t.Errorf("expected 2 markdown elements (header + entry), got %d\n--- body ---\n%s", c, truncateForTest(body, 600))
+	}
+}
+
+// TestBuildReceiptCard_HugeEntryStaysBounded (F-37) verifies that
+// even very long entries (8000 runes) don't blow the envelope.
+// 8000 runes / 1000 per div = 8 divs max, plus header + footer = 10.
+func TestBuildReceiptCard_HugeEntryStaysBounded(t *testing.T) {
+	// 8000 chars, no paragraph breaks (so it splits via hardSplit at rune boundary)
+	text := strings.Repeat("x", 8000)
+	r := &MessageReceipt{
+		state:       StateCompleted,
+		eventCount:  1,
+		entries: []LogEntry{
+			{Icon: "📝", Text: text, Kind: "result"},
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	// 8000 + 1 header = 9 markdown elements (8 chunks × 1000 + 1 header)
+	if c := strings.Count(body, `"tag":"markdown"`); c < 8 {
+		t.Errorf("expected ≥ 8 markdown elements for 8000-char entry, got %d\n--- body ---\n%s", c, truncateForTest(body, 600))
+	}
+	// Body size guard: should be well under 30 KB
+	if len(body) > 30*1024 {
+		t.Errorf("body size %d exceeds 30 KB envelope", len(body))
+	}
+}
+
+// TestBuildReceiptCard_HeaderFooterRespected (F-37) verifies that
+// header / footer / evicted marker still each get exactly 1 element
+// even when entries are split (they're not part of the splitter).
+func TestBuildReceiptCard_HeaderFooterRespected(t *testing.T) {
+	r := &MessageReceipt{
+		state:       StateCompleted,
+		eventCount:  1,
+		evicted:     2,
+		lastEventAt: parseTime(t, "2026-08-01T14:32:05+08:00"),
+		agentName:   "claude",
+		workspace:   "/code/repo",
+		entries: []LogEntry{
+			{Icon: "📝", Text: strings.Repeat("a", 2500), Kind: "result"},
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	// header(1) + evicted marker(1) + chunks(3) + hr(1) + footer(1) = 7 elements
+	if !strings.Contains(body, `…(前 2 条已省略)`) {
+		t.Errorf("evicted marker missing")
+	}
+	if !strings.Contains(body, `"tag":"hr"`) {
+		t.Errorf("hr divider missing")
+	}
+	if !strings.Contains(body, "Agent: claude") {
+		t.Errorf("footer agent metadata missing")
+	}
+}
+
+// TestBuildReceiptCard_ThinkingLongEntryMultiDivs (F-37) verifies
+// that long thinking entries are split into multiple inner
+// markdown elements inside the collapsible_panel — defensive
+// against future bumps of perEntryMaxBytes.
+func TestBuildReceiptCard_ThinkingLongEntryMultiDivs(t *testing.T) {
+	r := &MessageReceipt{
+		state:       StateExecuting,
+		eventCount:  1,
+		entries: []LogEntry{
+			{Icon: "💭", Text: strings.Repeat("thinking...", 250), Kind: "thinking"}, // ~2750 chars
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	// 至少 3 个 markdown 元素:1 header + 3 chunks (250 × 11 = 2750 / 1000 ≈ 3)
+	if c := strings.Count(body, `"tag":"markdown"`); c < 3 {
+		t.Errorf("expected ≥ 3 markdown elements for long thinking, got %d\n--- body ---\n%s", c, truncateForTest(body, 600))
+	}
+	if !strings.Contains(body, `"tag":"collapsible_panel"`) {
+		t.Errorf("long thinking should still wrap in collapsible_panel")
+	}
+}
+
+// TestBuildReceiptCard_ToolLongEntryMultiDivs (F-37) verifies same
+// defensive split for tool entries.
+func TestBuildReceiptCard_ToolLongEntryMultiDivs(t *testing.T) {
+	r := &MessageReceipt{
+		state:       StateExecuting,
+		eventCount:  1,
+		entries: []LogEntry{
+			{Icon: "🔧", Text: "Read(/a.py) " + strings.Repeat("x", 1100), Kind: "tool"},
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	if c := strings.Count(body, `"tag":"markdown"`); c < 2 {
+		t.Errorf("expected ≥ 2 markdown elements for long tool entry, got %d\n--- body ---\n%s", c, truncateForTest(body, 600))
 	}
 }

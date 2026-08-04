@@ -87,6 +87,19 @@ type Adapter struct {
 	cfg        *config.Config
 	cancel     context.CancelFunc
 
+	// health tracks the live WebSocket lifecycle for the
+	// `nightme health` subcommand. Updated from SDK OnReady /
+	// OnReconnecting / OnReconnected / OnDisconnected / OnError
+	// callbacks plus inbound event dispatch + successful outbound
+	// sends. Read via Health() / Adapter.HealthSnapshot().
+	health *WSHealth
+
+	// prober is the F-41 active-reconnect prober. Started on
+	// OnDisconnected, stopped on OnReconnected / OnReady. The
+	// prober's snapshot is merged into WSHealthSnapshot.Prober
+	// for `nightme health` output.
+	prober *prober
+
 	// limiter 全局共享 token bucket（F-35）。所有出口 SDK call 前
 	// 都过 Wait()，预防触发飞书 230001 / 230020 限流错误码。
 	// 默认 5 QPS / burst 1（保守）。详见 docs/feat/F-35-ratelimit.md。
@@ -249,11 +262,61 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		cfg.Feishu.AppSecret,
 		larkws.WithEventHandler(handler),
 		larkws.WithOnReady(func() {
-			log.Printf("Feishu WebSocket connected")
+			now := time.Now()
+			a.health.recordConnect(now)
+			a.logger.Info("feishu: ws connected",
+				"app_id", cfg.Feishu.AppID,
+				"reconnect_count", a.health.Snapshot().ReconnectCount)
 		}),
 		larkws.WithOnError(func(err error) {
-			if err != nil {
-				log.Printf("Feishu WebSocket error: %v", err)
+			if err == nil {
+				return
+			}
+			now := time.Now()
+			a.health.recordError(now, err.Error())
+			a.logger.Warn("feishu: ws error",
+				"app_id", cfg.Feishu.AppID,
+				"err", err.Error())
+		}),
+		larkws.WithOnDisconnected(func() {
+			now := time.Now()
+			a.health.recordDisconnect(now)
+			a.logger.Warn("feishu: ws disconnected",
+				"app_id", cfg.Feishu.AppID)
+			// F-41: start the 30s prober that force-reconnects until
+			// the SDK reports OnReconnected. Started on every
+			// disconnect — the prober is self-stopping on reconnect
+			// and idempotent (Start is a no-op when already running).
+			if a.prober != nil {
+				if a.prober.Start() {
+					a.logger.Info("feishu: reconnect prober started",
+						"app_id", cfg.Feishu.AppID,
+						"interval", defaultProberInterval.String())
+				}
+			}
+		}),
+		larkws.WithOnReconnecting(func() {
+			now := time.Now()
+			a.health.recordReconnecting(now, "")
+			snap := a.health.Snapshot()
+			a.logger.Warn("feishu: ws reconnecting",
+				"app_id", cfg.Feishu.AppID,
+				"reconnect_count", snap.ReconnectCount)
+		}),
+		larkws.WithOnReconnected(func() {
+			now := time.Now()
+			a.health.recordConnect(now)
+			a.logger.Info("feishu: ws reconnected",
+				"app_id", cfg.Feishu.AppID,
+				"reconnect_count", a.health.Snapshot().ReconnectCount)
+			// F-41: stop the prober — the WS is back, no more
+			// forced Stop+Start needed. Safe to call when the prober
+			// isn't running (no-op).
+			if a.prober != nil {
+				a.prober.Stop()
+				a.logger.Info("feishu: reconnect prober stopped",
+					"app_id", cfg.Feishu.AppID,
+					"force_attempts", a.prober.Snapshot().ForceCount)
 			}
 		}),
 	)
@@ -271,6 +334,28 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	// F-35: 全局共享 token bucket（保守 5 QPS / burst 1）。
 	// 进程内单实例，覆盖所有 5 类飞书出口 API。
 	a.limiter = NewLimiter(cfg.Feishu.RateLimit, slog.Default())
+
+	// F-40: WS lifecycle observability. Allocates the WSHealth
+	// struct; the SDK callbacks wired above (WithOnReady / OnError /
+	// OnDisconnected / OnReconnecting / OnReconnected) update it.
+	a.health = &WSHealth{}
+
+	// F-41: active reconnect prober. The restarter closure forces
+	// a SDK-level reconnection on every 30s tick while the WS is
+	// disconnected, which effectively overrides the SDK's 2-minute
+	// default reconnectInterval. Self-stops when the SDK reports
+	// Connected=true (checked via Health() inside the tick).
+	//
+	// IMPORTANT: this calls ReconnectSDK, NOT a.Stop() + a.Start().
+	// a.Stop latches a.stopped=true permanently; a.Start would then
+	// always fail with "feishu: adapter is stopped", making the
+	// prober kill the SDK once and never bring it back. ReconnectSDK
+	// manipulates the SDK goroutine directly without touching the
+	// latched state — see method doc for the full reasoning.
+	a.prober = newProber(a, func(ctx context.Context) error {
+		return a.ReconnectSDK(ctx)
+	})
+
 	return a, nil
 }
 
@@ -325,6 +410,78 @@ func (a *Adapter) Start(ctx context.Context) error {
 		defer close(wsDone)
 		if err := start(runCtx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("Feishu WebSocket stopped: %v", err)
+		}
+	}()
+	return nil
+}
+
+// ReconnectSDK cancels the current SDK goroutine and spawns a new one
+// WITHOUT touching the latched a.stopped / a.incoming state. Used
+// exclusively by the F-41 active-reconnect prober.
+//
+// Why this exists: a.Stop latches a.stopped=true permanently; a.Start
+// bails on that flag ("feishu: adapter is stopped"). If the prober
+// called a.Stop + a.Start, the first tick would kill the SDK and
+// every subsequent tick's a.Start would fail — the prober would
+// never bring the WS back, defeating the whole feature.
+//
+// ReconnectSDK bypasses the latch by talking to the SDK directly:
+//
+//  1. Cancel a.cancel — the SDK's Start goroutine returns when
+//     runCtx is cancelled.
+//  2. Wait for a.wsDone — confirms the SDK goroutine exited.
+//  3. Re-create runCtx + a new wsDone and spawn a fresh SDK
+//     goroutine — same logic as Start but on a fresh context.
+//
+// a.incoming is never closed, so the gateway's pumpInbound keeps
+// blocking and starts receiving events again as soon as the SDK
+// reconnects. a.stopped is never set, so a future a.Stop (real
+// daemon shutdown) still works as before.
+//
+// The restarter runs on the prober's loop goroutine. a.client.Start
+// is blocking in the SDK, so the restarter spawns a new goroutine
+// to host it and returns immediately — the prober's tick is
+// non-blocking.
+func (a *Adapter) ReconnectSDK(ctx context.Context) error {
+	a.mu.Lock()
+	cancel := a.cancel
+	wsDone := a.wsDone
+	client := a.client
+	a.mu.Unlock()
+	if client == nil {
+		return errors.New("feishu: reconnectSDK: no client")
+	}
+	if cancel != nil {
+		cancel()
+	}
+	if wsDone != nil {
+		select {
+		case <-wsDone:
+		case <-time.After(2 * time.Second):
+			// Defensive: the SDK goroutine should exit promptly
+			// when runCtx is cancelled. 2s is a generous bound.
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	// Re-spawn the SDK loop with a fresh context.
+	runCtx, runCancel := context.WithCancel(context.Background())
+	newWsDone := make(chan struct{})
+	a.mu.Lock()
+	a.cancel = runCancel
+	a.wsDone = newWsDone
+	start := a.wsStart
+	if start == nil {
+		start = client.Start
+	}
+	a.mu.Unlock()
+	if start == nil {
+		return errors.New("feishu: reconnectSDK: no start func")
+	}
+	go func() {
+		defer close(newWsDone)
+		if err := start(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("feishu: reconnectSDK: %v", err)
 		}
 	}()
 	return nil
@@ -1370,6 +1527,30 @@ func (a *Adapter) SetLogger(l *slog.Logger) {
 	a.mu.Unlock()
 }
 
+// Health returns a live snapshot of the WebSocket lifecycle state.
+// The snapshot is a copy (deep-enough for JSON marshaling), so
+// callers may mutate it freely without affecting the adapter's
+// internal state. nil-safe (returns a zero snapshot if the adapter
+// has no health — only happens in tests that bypass NewAdapter).
+//
+// Used by:
+//   - cmd/nightme/run.go to register with the daemoncontrol "health"
+//     RPC so `nightme health` can answer.
+//   - the daemoncontrol server's response handler.
+func (a *Adapter) Health() WSHealthSnapshot {
+	if a.health == nil {
+		return WSHealthSnapshot{}
+	}
+	snap := a.health.Snapshot()
+	// F-41: layer the prober snapshot on top. Snapshots are
+	// independent of WSHealth so we don't bake prober state into
+	// the health struct (avoids cross-coupling when one is reset).
+	if a.prober != nil {
+		snap.Prober = a.prober.Snapshot()
+	}
+	return snap
+}
+
 // logOutgoing emits one info-level line per outgoing Feishu call so
 // the CLI surface shows both halves of the conversation. The
 // inbound "received: …" line is emitted by handleMessage via
@@ -1384,6 +1565,7 @@ func (a *Adapter) SetLogger(l *slog.Logger) {
 func (a *Adapter) logOutgoing(kind, target, id string, err error) {
 	a.mu.RLock()
 	logger := a.logger
+	health := a.health
 	a.mu.RUnlock()
 	if logger == nil {
 		return
@@ -1394,8 +1576,18 @@ func (a *Adapter) logOutgoing(kind, target, id string, err error) {
 		slog.String("id", id),
 	}
 	if err != nil {
+		// F-40: surface failed sends on the health event ring so
+		// `nightme health` shows the recent degradation timeline.
+		if health != nil {
+			health.recordError(time.Now(), err.Error())
+		}
 		logger.LogAttrs(context.Background(), slog.LevelWarn, "feishu: outgoing failed", append(attrs, slog.String("err", err.Error()))...)
 		return
+	}
+	// F-40: stamp outbound liveness on success. Drives the
+	// "outbound stuck" detection (last_outbound_at > N seconds ago).
+	if health != nil {
+		health.recordOutbound(time.Now(), target, kind)
 	}
 	logger.LogAttrs(context.Background(), slog.LevelInfo, "feishu: outgoing", attrs...)
 }
@@ -2126,6 +2318,12 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	// handler even if the channel send is cancelled or timed out.
 	// Companion to logOutgoing (the bot side of the conversation).
 	a.logInbound(msg)
+	// F-40: stamp the inbound liveness signal for the
+	// `nightme health` command. Drives the "inbound stuck"
+	// detection (last_inbound_at > N seconds ago).
+	if a.health != nil {
+		a.health.recordInbound(time.Now(), chatID, msgType)
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

@@ -66,6 +66,11 @@ type Adapter struct {
 	cfg        *config.Config
 	cancel     context.CancelFunc
 
+	// limiter 全局共享 token bucket（F-35）。所有出口 SDK call 前
+	// 都过 Wait()，预防触发飞书 230001 / 230020 限流错误码。
+	// 默认 5 QPS / burst 1（保守）。详见 docs/feat/F-35-ratelimit.md。
+	limiter *Limiter
+
 	// mu is the adapter's state mutex. It guards:
 	//   - receipts and receiptsByUserMsgID (concurrent writers:
 	//     dispatchLoop's SendUserMessage and pumpOutbound's
@@ -205,6 +210,10 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	a.wsClose = a.client.Close
 	a.sendFunc = a.sendViaLark
 	a.updateFunc = a.updateViaLark
+
+	// F-35: 全局共享 token bucket（保守 5 QPS / burst 1）。
+	// 进程内单实例，覆盖所有 5 类飞书出口 API。
+	a.limiter = NewLimiter(cfg.Feishu.RateLimit, slog.Default())
 	return a, nil
 }
 
@@ -1228,6 +1237,29 @@ func (a *Adapter) AddReaction(ctx context.Context, messageID, reactionType strin
 	if a.larkClient == nil || a.larkClient.Im == nil || a.larkClient.Im.V1 == nil || a.larkClient.Im.V1.MessageReaction == nil {
 		return "", errors.New("feishu: REST client not initialized")
 	}
+	// F-35: 出口过限速器，预防触发飞书 230001。
+	if err := a.limiter.Wait(ctx); err != nil {
+		return "", err
+	}
+	// F-36: transient 错误（timeout/EOF）按指数退避重试。
+	// permanent 错误（含 reaction 不存在 / reaction 重复添加）立即返回。
+	return WithTransientRetryMsg(ctx, RetryOpts{
+		Op:     "add_reaction",
+		Cfg:    DefaultRetryConfig,
+		Logger: a.logger,
+		Attrs: []any{
+			"message_id", messageID,
+			"reaction_type", reactionType,
+		},
+	}, func() (string, error) {
+		return a.addReactionOnce(ctx, messageID, reactionType)
+	})
+}
+
+// addReactionOnce is the unwrapped AddReaction body — the F-36 retry
+// loop in AddReaction calls this so a transient failure re-executes
+// the whole SDK call (including the limiter wait).
+func (a *Adapter) addReactionOnce(ctx context.Context, messageID, reactionType string) (string, error) {
 	body := larkim.NewCreateMessageReactionReqBodyBuilder().
 		ReactionType(larkim.NewEmojiBuilder().EmojiType(reactionType).Build()).
 		Build()
@@ -1384,11 +1416,50 @@ func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content, roo
 	if send == nil {
 		return "", errors.New("feishu: REST client is nil")
 	}
-	msgID, err := send(ctx, chatID, msgType, content, rootID)
+
+	// Layer 1（retry.go）：transient 错误（timeout/EOF/reset）按
+	// 指数退避重试；permanent 错误（含 230011/231003 terminal）
+	// 立即返回。retry 与 F-35 limiter 正交：limiter 在 SDK call
+	// 内部防 230001，本层在 sendContent 外层防 transient。
+	msgID, err := WithTransientRetryMsg(ctx, RetryOpts{
+		Op:     "send",
+		Cfg:    DefaultRetryConfig,
+		Logger: a.logger,
+		Attrs: []any{
+			"chat_id", chatID,
+			"msg_type", msgType,
+			"root_id", rootID,
+		},
+	}, func() (string, error) {
+		return send(ctx, chatID, msgType, content, rootID)
+	})
+
+	// §15.2 fallback：Reply target unavailable（230011/231003），
+	// 重试一次不带 rootID 的 Create；fallback 也走 retry 救活
+	// 瞬时失败（target unavailable 与 transient 无关，但保留对称）。
 	if err != nil && rootID != "" && isFeishuTerminalMessageCode(err) {
-		a.logger.Warn("feishu: reply target unavailable, falling back to top-level",
-			"root_id", rootID, "msg_type", msgType, "err", err)
-		return send(ctx, chatID, msgType, content, "")
+		logDegradation(a.logger, degradationFallbackTopLevel, RetryOpts{
+			Op:     "send",
+			Logger: a.logger,
+			Attrs: []any{
+				"chat_id", chatID,
+				"msg_type", msgType,
+				"root_id", rootID,
+				"reason", "reply_target_unavailable",
+			},
+		}, 0, 0, err, nil)
+		return WithTransientRetryMsg(ctx, RetryOpts{
+			Op:     "send_top_level",
+			Cfg:    DefaultRetryConfig,
+			Logger: a.logger,
+			Attrs: []any{
+				"chat_id", chatID,
+				"msg_type", msgType,
+				"root_id", "", // fallback intentionally clears root_id
+			},
+		}, func() (string, error) {
+			return send(ctx, chatID, msgType, content, "")
+		})
 	}
 	return msgID, err
 }
@@ -1417,6 +1488,10 @@ func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content, roo
 // fails; callers inspect with isFeishuTerminalMessageCode to
 // decide whether to fall back to Create.
 func (a *Adapter) sendViaLarkReply(ctx context.Context, rootID, msgType, content string) (string, error) {
+	// F-35: 出口过限速器。
+	if err := a.limiter.Wait(ctx); err != nil {
+		return "", err
+	}
 	replyBody := larkim.NewReplyMessageReqBodyBuilder().
 		MsgType(msgType).
 		Content(content).
@@ -1445,6 +1520,10 @@ func (a *Adapter) sendViaLarkReply(ctx context.Context, rootID, msgType, content
 // Used both as the no-rootID path and as the fallback when Reply
 // fails on a recalled/deleted user message.
 func (a *Adapter) sendViaLarkCreate(ctx context.Context, chatID, msgType, content string) (string, error) {
+	// F-35: 出口过限速器。
+	if err := a.limiter.Wait(ctx); err != nil {
+		return "", err
+	}
 	body := &larkim.CreateMessageReqBody{
 		ReceiveId: &chatID,
 		MsgType:   &msgType,
@@ -1575,6 +1654,30 @@ func (a *Adapter) PatchMessage(ctx context.Context, messageID, content string) e
 func (a *Adapter) updateViaLark(ctx context.Context, messageID, content string) error {
 	if a.larkClient == nil || a.larkClient.Im == nil || a.larkClient.Im.V1 == nil || a.larkClient.Im.V1.Message == nil {
 		return errors.New("feishu: REST client is nil")
+	}
+	// F-36: transient 错误（timeout/EOF）按指数退避重试。
+	// PATCH 5/s per message_id 由 MessageReceipt.renderLocked
+	// mutex 天然满足；F-35 limiter 在 retry 内层守住全局
+	// 5/s per-user / per-group 桶。
+	return WithTransientRetry(ctx, RetryOpts{
+		Op:     "patch_message",
+		Cfg:    DefaultRetryConfig,
+		Logger: a.logger,
+		Attrs: []any{
+			"message_id", messageID,
+		},
+	}, func() error {
+		return a.patchMessageOnce(ctx, messageID, content)
+	})
+}
+
+// patchMessageOnce is the unwrapped PATCH body — F-36 retry loop
+// in updateViaLark calls this so a transient failure re-executes the
+// whole SDK call (including the F-35 limiter wait).
+func (a *Adapter) patchMessageOnce(ctx context.Context, messageID, content string) error {
+	// F-35: 出口过限速器。
+	if err := a.limiter.Wait(ctx); err != nil {
+		return err
 	}
 	body := larkim.NewPatchMessageReqBodyBuilder().
 		Content(content).

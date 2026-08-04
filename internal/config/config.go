@@ -58,6 +58,23 @@ type FeishuConfig struct {
 	AppSecret         string `yaml:"app_secret"`
 	VerificationToken string `yaml:"verification_token"`
 	EncryptKey        string `yaml:"encrypt_key"`
+
+	// RateLimit 控制 feishu 包内全局 token bucket（F-35）。
+	// 留空 = StrictDefault（保守，RatePerSec=5, Burst=1）。
+	// 调高 = 冒触顶飞书限流错误码 230001 / 230020 风险。
+	RateLimit *FeishuRateLimitConfig `yaml:"rate_limit,omitempty"`
+}
+
+// FeishuRateLimitConfig 是 feishu 包内全局 token bucket 的配置。
+//
+// RatePerSec：每秒补充令牌数（飞书侧：50 QPS per app + 5 QPS per user /
+//             group / message_id）。
+// Burst：桶容量（最大突发令牌数；1 = 无突发）。
+//
+// 详见 docs/feat/F-35-ratelimit.md。
+type FeishuRateLimitConfig struct {
+	RatePerSec float64 `yaml:"rate_per_sec"`
+	Burst      int     `yaml:"burst"`
 }
 
 // AgentsConfig is REMOVED in v1.2 (post interactive-config refactor).

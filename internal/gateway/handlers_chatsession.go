@@ -90,6 +90,24 @@ func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel C
 		},
 	})
 
+	// F-38 §3.1.3: per-chat tool-event visibility toggle.
+	// State-only; does not touch activeCwd / activeAgent / pool.
+	// The actual gate (drop OutToolStart / OutToolEnd vs
+	// pass-through) lives in the runtime's EventHandler closure.
+	// When /tools on, the Feishu adapter merges each tool pair
+	// (start + end) into a single thread reply via PATCH on the
+	// start message_id (see internal/channel/feishu/tool_thread_merge.go).
+	// When /tools off (default), OutToolStart and OutToolEnd are
+	// dropped silently — tool spam is the loudest part of the
+	// agent progress stream and most users do not want it.
+	gw.Register(Command{
+		Name:        "tools",
+		Description: "Toggle per-chat tool-call visibility: /tools on | /tools off",
+		Handler: func(ctx context.Context, msg *InboundMessage, args []string) (*CommandResult, error) {
+			return handleTools(ctx, mgr, channel, msg, args, globalPrimary)
+		},
+	})
+
 	// F-34 §4: reset conversation context. /new clears the
 	// conversation history on all AgentSessions in activeCwd;
 	// /new <agent> narrows to one. Pool identity is preserved;

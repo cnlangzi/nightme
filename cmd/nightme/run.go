@@ -242,12 +242,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		WithSpawner(spawner).
 		WithPersistence(csFile, asFile)
 
-	// Restore from disk (per-chat ChatSession + per-AgentSession
-	// metadata; processes not running).
-	if err := mgr.RestoreFromRegistry(); err != nil {
-		return fmt.Errorf("run: restore: %w", err)
-	}
-
 	// startChannel wires the channel and starts its connection.
 	if err := ch.Start(ctx); err != nil {
 		logger.Error("channel disconnected", "reason", err)
@@ -264,29 +258,34 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// messageDispatcher).
 	messageDispatcher := newMessageDispatcher(mgr, ch, cfg.Primary, logger)
 
-	// Install EventHandler on every ChatSession — both restored
-	// and post-startup. The handler translates AgentEvent →
-	// OutboundMessage + sends via the channel. It's also where
-	// F-think's /think off gate lives, so missing this install
-	// would silently make /think a no-op for any new chat.
+	// F-31 + F-think + F-38: install gw.OnMessageState AND the
+	// runtime's EventHandler into every ChatSession via the
+	// Manager.onCreate hook. Both callbacks MUST be installed in
+	// this single closure — separating them (one here, one in
+	// /use or newMessageDispatcher) is a silent-failure landmine
+	// because readpump fires only when eventHandler is non-nil.
 	//
-	// Per-cs factory: each ChatSession gets its own closure that
-	// captures `cs` directly, eliminating the per-event
-	// mgr.Get(chatID) round-trip the gate used to do. The factory
-	// is constructed once; the per-cs closures are cheap (just a
-	// captured pointer).
-	//
-	// F-31 message-state handler is installed in the same
-	// WithOnCreate block so restored + future chats share one
-	// installation site (no separate for-loop).
-	eventHandlerFactory := func(cs *chatsession.ChatSession) chatsession.EventHandler {
-		return newEventHandler(ch, cs, mgr, logger)
-	}
-	gw := gateway.New(messageDispatcher)
-	gateway.RegisterChatSessionCommands(gw, mgr, ch, cfg.Primary)
-
-	// Attach channels + start the gateway.
-	gwImpl := gw.(*gateway.Router)
+	// ORDER MATTERS: WithOnCreate MUST be called BEFORE
+	// RestoreFromRegistry. RestoreFromRegistry fires onCreate for
+	// every restored ChatSession so handlers are installed
+	// uniformly across restored + future chats. Calling
+	// WithOnCreate after RestoreFromRegistry silently leaves the
+	// restored chats without handlers — no MessageState reactions
+	// (⏳/🔄), no OutText / OutResult / OutTool* forwarding to
+	// the channel. The user sees incoming messages arrive but no
+	// outgoing follow-up. Bug surfaced when the user restarted
+	// the daemon between F-38 implementation and first
+	// interaction — fresh in-memory state from chat_sessions.json
+	// had no handlers installed because WithOnCreate was set
+	// after RestoreFromRegistry. This is a pre-existing bug from
+	// the /think refactor (commit 5725a90) that F-38 surfaced
+	// because F-38 added more dependency on the handlers actually
+	// being installed. The fix is in
+	// wireRuntimeCallbacksAndRestore (see below) which bundles
+	// WithOnCreate + RestoreFromRegistry so the order can't be
+	// inverted at the call site.
+	gwImpl := gateway.New(messageDispatcher).(*gateway.Router)
+	gateway.RegisterChatSessionCommands(gwImpl, mgr, ch, cfg.Primary)
 	gwImpl.AttachChannels(ch)
 
 	// F-watch §3.1.1: install the per-chat WatchMode resolver so
@@ -302,19 +301,12 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		return cs.WatchMode(), true
 	})
 
-	// F-31 + F-think: wire gw.OnMessageState AND the runtime's
-	// EventHandler into every ChatSession via the Manager.onCreate
-	// hook. This covers both restored chats (Manager fires
-	// onCreate for restored entries too, see RestoreFromRegistry)
-	// and chats created later via mgr.GetOrCreate(). Both callbacks
-	// MUST be installed in this single closure — separating them
-	// (one here, one in /use or newMessageDispatcher) is a
-	// silent-failure landmine because readpump fires only when
-	// eventHandler is non-nil.
-	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
-		cs.SetEventHandler(eventHandlerFactory(cs))
-		cs.SetMessageStateHandler(gwImpl.OnMessageState)
-	})
+	// WithOnCreate fires for both restored (RestoreFromRegistry)
+	// and future (GetOrCreate) ChatSessions. Place BEFORE
+	// RestoreFromRegistry so restored chats get their handlers.
+	if err := wireRuntimeCallbacksAndRestore(mgr, ch, gwImpl, logger); err != nil {
+		return fmt.Errorf("run: wire+restore: %w", err)
+	}
 
 	// Start readPumps for already-running AgentSessions that
 	// were restored from disk (Detached → running on next
@@ -432,6 +424,46 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 // is running for its current active AgentSession. Called at
 // startup after RestoreFromRegistry; the AgentSessions are
 // Detached (no process), so this is a no-op for restored
+// wireRuntimeCallbacksAndRestore installs the per-ChatSession
+// outbound handlers (EventHandler for AgentEvent → OutboundMessage
+// translation; MessageStateHandler for F-31 lifecycle reactions)
+// via Manager.WithOnCreate, then restores persisted ChatSessions
+// from disk. The two calls MUST happen in this order —
+// RestoreFromRegistry fires onCreate for every restored
+// ChatSession, so any callback registered after RestoreFromRegistry
+// silently misses every restored chat (outgoing events become
+// invisible: no logs, no channel.Send, no reactions).
+//
+// Bundling both calls in one helper makes the order impossible
+// to get wrong at the call site. See cmd/nightme/run_test.go
+// for the regression coverage that pins this contract.
+//
+// Bug history: F-think (commit 5725a90) introduced the
+// WithOnCreate wiring but called it AFTER RestoreFromRegistry —
+// the silent failure went unnoticed because MessageState
+// reactions are subtle (⏳/🔄/✅/❌ only). F-38 (which flipped
+// the default ToolsMode to Hide, deepening the handler's
+// runtime dependency on being actually installed) surfaced the
+// bug when the user restarted between F-38 implementation and
+// first interaction. Manager-level contract is covered in
+// chatsession/manager_test.go; this helper's test covers the
+// cmd/nightme/run.go wiring specifically.
+func wireRuntimeCallbacksAndRestore(
+	mgr *chatsession.Manager,
+	ch channel.Channel,
+	gwImpl *gateway.Router,
+	logger *slog.Logger,
+) error {
+	factory := func(cs *chatsession.ChatSession) chatsession.EventHandler {
+		return newEventHandler(ch, cs, mgr, logger)
+	}
+	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
+		cs.SetEventHandler(factory(cs))
+		cs.SetMessageStateHandler(gwImpl.OnMessageState)
+	})
+	return mgr.RestoreFromRegistry()
+}
+
 // sessions — readPumps are started lazily on first /use + send.
 //
 // The runtime's actual readPump start happens in handleUse
@@ -526,6 +558,31 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 					"chat_id", chatID,
 					"user_msg_id", userMsgID,
 					"agent_session_id", s.ID)
+			}
+			return
+		}
+		// F-38 §3.1.3: per-chat tool-event gate. When the chat
+		// has /tools off (default), drop OutToolStart and
+		// OutToolEnd events here (after Translate + ReplyTo
+		// stamping, before ch.Send) so the Feishu adapter never
+		// sees them. Other OutboundKinds — OutText / OutResult
+		// / OutThinking / OutCompaction / OutInit / OutUsage —
+		// are unaffected. The merge rendering (PATCH on start
+		// message_id when /tools on) is a Feishu adapter
+		// concern; this gate just decides whether the event
+		// reaches the Channel at all.
+		//
+		// cs is captured in the closure (per-cs handler
+		// factory), so this lookup is a direct field read —
+		// same pattern as the ThinkMode gate above.
+		if (out.Kind == gateway.OutToolStart || out.Kind == gateway.OutToolEnd) &&
+			cs != nil && cs.ToolsMode() == agent.ToolsModeHide {
+			if logger != nil {
+				logger.Info("tools dropped",
+					"chat_id", chatID,
+					"user_msg_id", userMsgID,
+					"agent_session_id", s.ID,
+					"kind", out.Kind.String())
 			}
 			return
 		}

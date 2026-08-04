@@ -82,10 +82,16 @@ func resolveBaseDir() (string, error) {
 	return defaultInboxBaseDir()
 }
 
-// inboxDirForSession returns the per-session inbox directory,
-// creating it on demand. sessionID should be the nightme session
-// ID (not chat_id) so concurrent sessions in different chats do not
-// stomp on each other's downloads.
+// inboxDirForSession returns the inbox directory for the given
+// isolation key (typically chatID for the Feishu adapter), creating
+// it on demand. The key forms the on-disk subdirectory under
+// InboxBaseDir; concurrent chats get distinct subdirs so they
+// never stomp on each other's downloads.
+//
+// Named "sessionID" for backwards compatibility with callers that
+// previously passed the nightme session ID; the Feishu adapter
+// passes chatID today, which gives per-chat isolation stable across
+// AgentSession re-spawns.
 func inboxDirForSession(sessionID string) (string, error) {
 	base, err := resolveBaseDir()
 	if err != nil {
@@ -230,13 +236,9 @@ func extractAttachments(msgType, content string) (text string, attachments []cha
 		if err := json.Unmarshal([]byte(content), &p); err != nil {
 			return messageText(content), nil, nil
 		}
-		var (
-			atts     []channel.Attachment
-			fileKeys []string // parallel to atts for index-based lookup
-		)
+		var atts []channel.Attachment
 		blocks = make([]agent.ContentBlock, 0)
 		emitText := func(s string) {
-			s = stripAny(s)
 			if s == "" {
 				return
 			}
@@ -269,14 +271,11 @@ func extractAttachments(msgType, content string) (text string, attachments []cha
 					if k == "" {
 						continue
 					}
-					idx := len(atts)
 					atts = append(atts, channel.Attachment{Type: "image", FileKey: k})
-					fileKeys = append(fileKeys, k)
 					blocks = append(blocks, agent.ContentBlock{
 						Type: agent.ContentImage,
 						Path: k, // placeholder; resolveBlocks back-fills LocalPath
 					})
-					_ = idx
 				case "media":
 					// tag:"media" (inline video) — out of scope for
 					// v1.4 (F-14). The video key is intentionally
@@ -344,9 +343,10 @@ type DownloadResult struct {
 // zero entries — the caller can treat this as a text-only message
 // and skip the failure-handling branch entirely.
 //
-// sessionID is the nightme session ID used for inbox path
-// isolation; pass "" to use a placeholder ("unknown") — callers
-// should normally have a real sessionID.
+// sessionID is the inbox isolation key (Feishu adapter passes
+// chatID; see inboxDirForSession for rationale). It is used purely
+// to construct the on-disk subdirectory and is opaque to this
+// function — empty values will be rejected by inboxDirForSession.
 func DownloadAttachments(ctx context.Context, c *lark.Client,
 	messageID string, atts []channel.Attachment, sessionID string,
 ) DownloadResult {

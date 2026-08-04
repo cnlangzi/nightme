@@ -78,7 +78,7 @@ type ChatSession struct {
 	// default direction is OPPOSITE of ThinkMode's: ThinkMode's
 	// zero value is Show (preserve existing F-thread-route UX);
 	// ToolsMode's zero value is Hide (quiet by default; opt in).
-	toolsMode ToolsMode
+	toolsMode agent.ToolsMode
 
 	// Pool of AgentSessions keyed by (agent, cwd).
 	pool map[agentCwdKey]*AgentSession
@@ -164,7 +164,7 @@ func New(chatID, primaryAgent string) *ChatSession {
 		pool:             make(map[agentCwdKey]*AgentSession),
 		watchMode:        WatchModeMention, // F-watch default
 		thinkMode:        ThinkModeShow,    // F-think default
-		toolsMode:        ToolsModeHide,    // F-38 default (quiet by default)
+		toolsMode:        agent.ToolsModeHide, // F-38 default (quiet by default)
 		createdAt:        time.Now(),
 		lastInteractionAt: time.Now(),
 	}
@@ -343,7 +343,7 @@ func (cs *ChatSession) ThinkMode() ThinkMode {
 // Concurrency: same pattern as SetWatchMode / SetThinkMode — take
 // ChatSession mutex, write, persist, release. The lock is NOT
 // held across any channel.Send reply call.
-func (cs *ChatSession) SetToolsMode(mode ToolsMode) error {
+func (cs *ChatSession) SetToolsMode(mode agent.ToolsMode) error {
 	cs.mu.Lock()
 	cs.toolsMode = mode
 	cs.lastInteractionAt = time.Now()
@@ -355,9 +355,9 @@ func (cs *ChatSession) SetToolsMode(mode ToolsMode) error {
 // ToolsMode returns the current per-chat tool-event visibility.
 // Default value when never set is ToolsModeHide (set in New when
 // the registry has no persisted value). Direction is OPPOSITE of
-// ThinkMode's default — see internal/registry/tools_mode.go doc
+// ThinkMode's default — see internal/agent/tools_mode.go doc
 // for the rationale. See docs/SPEC.md §3.1.3.
-func (cs *ChatSession) ToolsMode() ToolsMode {
+func (cs *ChatSession) ToolsMode() agent.ToolsMode {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.toolsMode

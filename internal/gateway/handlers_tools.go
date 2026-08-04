@@ -43,6 +43,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
@@ -67,7 +68,7 @@ func handleTools(ctx context.Context, mgr *chatsession.Manager, channel Channel,
 		)), nil
 	}
 
-	mode, ok := chatsession.ParseToolsMode(strings.TrimSpace(args[0]))
+	mode, ok := agent.ParseToolsMode(strings.TrimSpace(args[0]))
 	if !ok {
 		return reply(ctx, channel, msg.ChatID, fmt.Sprintf(
 			"Unknown tools mode %q. Usage: /tools on | /tools off",
@@ -80,7 +81,7 @@ func handleTools(ctx context.Context, mgr *chatsession.Manager, channel Channel,
 	}
 
 	replyText := fmt.Sprintf("Tools mode set to %s.", mode)
-	if mode == chatsession.ToolsModeShow {
+	if mode == agent.ToolsModeShow {
 		replyText += " Tool calls will appear in the message thread (one reply per tool, call + result merged)."
 	} else {
 		replyText += " Tool calls will be hidden; only the final answer will be shown."

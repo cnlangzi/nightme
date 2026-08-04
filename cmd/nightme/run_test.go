@@ -91,7 +91,7 @@ func TestEventHandler_ThinkGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	if err := cs.SetThinkMode(chatsession.ThinkModeHide); err != nil {
 		t.Fatalf("SetThinkMode: %v", err)
 	}
-	if err := cs.SetToolsMode(chatsession.ToolsModeShow); err != nil {
+	if err := cs.SetToolsMode(agent.ToolsModeShow); err != nil {
 		t.Fatalf("SetToolsMode: %v", err)
 	}
 	logger := slog.Default()
@@ -228,7 +228,7 @@ func TestEventHandler_ToolsGate_ShowPassesThrough(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
 	cs := mgr.GetOrCreate("oc_chat_tools_show", "claude")
-	if err := cs.SetToolsMode(chatsession.ToolsModeShow); err != nil {
+	if err := cs.SetToolsMode(agent.ToolsModeShow); err != nil {
 		t.Fatalf("SetToolsMode: %v", err)
 	}
 	logger := slog.Default()
@@ -271,7 +271,7 @@ func TestEventHandler_ToolsGate_HideDropsBothToolKinds(t *testing.T) {
 	// cs.ToolsMode is the default (ToolsModeHide) — no SetToolsMode
 	// call needed, but assert it explicitly so the test reads as a
 	// contract check.
-	if got := cs.ToolsMode(); got != chatsession.ToolsModeHide {
+	if got := cs.ToolsMode(); got != agent.ToolsModeHide {
 		t.Fatalf("fresh ChatSession ToolsMode = %q, want ToolsModeHide (default)", got)
 	}
 	logger := slog.Default()
@@ -302,7 +302,7 @@ func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
 	cs := mgr.GetOrCreate("oc_chat_tools_indep", "claude")
-	if got := cs.ToolsMode(); got != chatsession.ToolsModeHide {
+	if got := cs.ToolsMode(); got != agent.ToolsModeHide {
 		t.Fatalf("fresh ChatSession ToolsMode = %q, want ToolsModeHide", got)
 	}
 	logger := slog.Default()
@@ -361,7 +361,7 @@ func TestEventHandler_ToolsGate_PersistsAcrossInvocations(t *testing.T) {
 	}
 
 	// Flip to Show mid-flight.
-	if err := cs.SetToolsMode(chatsession.ToolsModeShow); err != nil {
+	if err := cs.SetToolsMode(agent.ToolsModeShow); err != nil {
 		t.Fatalf("SetToolsMode: %v", err)
 	}
 
@@ -372,7 +372,7 @@ func TestEventHandler_ToolsGate_PersistsAcrossInvocations(t *testing.T) {
 	}
 
 	// Flip back to Hide.
-	if err := cs.SetToolsMode(chatsession.ToolsModeHide); err != nil {
+	if err := cs.SetToolsMode(agent.ToolsModeHide); err != nil {
 		t.Fatalf("SetToolsMode: %v", err)
 	}
 
@@ -398,7 +398,7 @@ func TestEventHandler_ToolsAndThinkGatesIndependent(t *testing.T) {
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_both_gates", "claude", "/tmp", nil)
 
 	// Flip both off.
-	if err := cs.SetToolsMode(chatsession.ToolsModeHide); err != nil {
+	if err := cs.SetToolsMode(agent.ToolsModeHide); err != nil {
 		t.Fatalf("SetToolsMode: %v", err)
 	}
 	if err := cs.SetThinkMode(chatsession.ThinkModeHide); err != nil {
@@ -418,7 +418,7 @@ func TestEventHandler_ToolsAndThinkGatesIndependent(t *testing.T) {
 	}, "om_user_1")
 
 	// Flip only /tools on.
-	if err := cs.SetToolsMode(chatsession.ToolsModeShow); err != nil {
+	if err := cs.SetToolsMode(agent.ToolsModeShow); err != nil {
 		t.Fatalf("SetToolsMode: %v", err)
 	}
 

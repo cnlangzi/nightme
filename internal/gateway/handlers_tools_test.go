@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
@@ -37,7 +38,7 @@ func TestHandleTools_TogglesMode(t *testing.T) {
 		if cs == nil {
 			t.Fatal("expected ChatSession to exist after /tools on")
 		}
-		if cs.ToolsMode() != chatsession.ToolsModeShow {
+		if cs.ToolsMode() != agent.ToolsModeShow {
 			t.Errorf("ToolsMode = %q, want ToolsModeShow", cs.ToolsMode())
 		}
 		if !strings.Contains(ch.LastText(), "show") {
@@ -60,7 +61,7 @@ func TestHandleTools_TogglesMode(t *testing.T) {
 		if cs == nil {
 			t.Fatal("expected ChatSession to exist after /tools off")
 		}
-		if cs.ToolsMode() != chatsession.ToolsModeHide {
+		if cs.ToolsMode() != agent.ToolsModeHide {
 			t.Errorf("ToolsMode = %q, want ToolsModeHide", cs.ToolsMode())
 		}
 		if !strings.Contains(ch.LastText(), "hide") {
@@ -107,7 +108,7 @@ func TestHandleTools_TogglesMode(t *testing.T) {
 		if cs == nil {
 			t.Fatal("expected ChatSession to exist")
 		}
-		if cs.ToolsMode() != chatsession.ToolsModeHide {
+		if cs.ToolsMode() != agent.ToolsModeHide {
 			t.Errorf("unknown arg mutated ToolsMode to %q, want ToolsModeHide (unchanged)",
 				cs.ToolsMode())
 		}
@@ -132,12 +133,12 @@ func TestHandleTools_AcceptsShowHideAliases(t *testing.T) {
 		if cs == nil {
 			t.Fatalf("ChatSession missing after /tools %s", arg)
 		}
-		var want chatsession.ToolsMode
+		var want agent.ToolsMode
 		switch arg {
 		case "show":
-			want = chatsession.ToolsModeShow
+			want = agent.ToolsModeShow
 		case "hide":
-			want = chatsession.ToolsModeHide
+			want = agent.ToolsModeHide
 		}
 		if cs.ToolsMode() != want {
 			t.Errorf("after /tools %s: ToolsMode = %q, want %q", arg, cs.ToolsMode(), want)
@@ -168,7 +169,7 @@ func TestHandleTools_CreatesChatSession(t *testing.T) {
 		t.Errorf("PrimaryAgent after lazy create via /tools = %q, want %q",
 			cs.PrimaryAgent(), "claude")
 	}
-	if cs.ToolsMode() != chatsession.ToolsModeShow {
+	if cs.ToolsMode() != agent.ToolsModeShow {
 		t.Errorf("ToolsMode after lazy create via /tools on = %q, want ToolsModeShow",
 			cs.ToolsMode())
 	}
@@ -230,7 +231,7 @@ func TestHandleTools_DoesNotAffectWatchOrThink(t *testing.T) {
 		t.Errorf("/tools on flipped ThinkMode to %q, want ThinkModeHide (independent)",
 			cs.ThinkMode())
 	}
-	if cs.ToolsMode() != chatsession.ToolsModeShow {
+	if cs.ToolsMode() != agent.ToolsModeShow {
 		t.Errorf("ToolsMode after /tools on = %q, want ToolsModeShow",
 			cs.ToolsMode())
 	}
@@ -253,7 +254,7 @@ func TestHandleTools_DefaultIsHide(t *testing.T) {
 	if cs == nil {
 		t.Fatal("ChatSession missing")
 	}
-	if cs.ToolsMode() != chatsession.ToolsModeHide {
+	if cs.ToolsMode() != agent.ToolsModeHide {
 		t.Errorf("fresh ChatSession ToolsMode = %q, want ToolsModeHide (default)",
 			cs.ToolsMode())
 	}

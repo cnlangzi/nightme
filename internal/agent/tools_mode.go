@@ -8,7 +8,7 @@
 // The merge behaviour (a single thread reply carrying both the
 // `● Tool(args)` call line and the `⎿  …` result line via PATCH on
 // the same Feishu message_id) is a Channel-internal rendering
-// choice — see docs/channel/feishu.md §13.x and the merge helper
+// choice — see docs/channel/feishu.md §13.14 and the merge helper
 // in internal/channel/feishu/tool_thread_merge.go. The toggle is
 // a per-chat on/off; the rendering decision is the Feishu
 // adapter's.
@@ -20,13 +20,15 @@
 // default. Users who care opt in via /tools on. Mirrors WatchMode's
 // "default = safe / quiet" pattern (default = Mention, only @).
 //
-// Defined in package registry (not chatsession) so that
-// registry.ChatSessionEntry can carry it without an import cycle.
-// The chatsession package uses this type directly via the thin
-// alias in internal/chatsession/toolsmode.go.
+// Lives in package agent (the core type library — alongside
+// agent.MessageState, agent.AgentEvent) so registry.ChatSessionEntry
+// can persist it AND chatsession.ChatSession can hold it WITHOUT a
+// re-export indirection. Both packages already import agent, so
+// moving the enum here removes the registry↔chatsession split that
+// existed for ThinkMode / WatchMode / ToolsMode.
 //
 // See docs/SPEC.md §3.1.3 for the design rationale.
-package registry
+package agent
 
 // ToolsMode controls per-chat tool-event visibility. The enum is
 // ordered such that the zero value is the conservative default

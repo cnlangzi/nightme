@@ -576,7 +576,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		// factory), so this lookup is a direct field read —
 		// same pattern as the ThinkMode gate above.
 		if (out.Kind == gateway.OutToolStart || out.Kind == gateway.OutToolEnd) &&
-			cs != nil && cs.ToolsMode() == chatsession.ToolsModeHide {
+			cs != nil && cs.ToolsMode() == agent.ToolsModeHide {
 			if logger != nil {
 				logger.Info("tools dropped",
 					"chat_id", chatID,

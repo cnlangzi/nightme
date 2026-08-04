@@ -11,6 +11,8 @@ package registry
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // ChatSessionEntry is the persisted form of one ChatSession.
@@ -87,9 +89,9 @@ type ChatSessionEntry struct {
 	ActiveAgentSessionID *string   `json:"activeAgentSessionId,omitempty"`
 	CreatedAt            time.Time `json:"createdAt"`
 	LastInteractionAt    time.Time `json:"lastInteractionAt"`
-	WatchMode            WatchMode `json:"watchMode,omitempty"`
-	ThinkMode            ThinkMode `json:"thinkMode,omitempty"`
-	ToolsMode            ToolsMode `json:"toolsMode,omitempty"`
+	WatchMode            WatchMode        `json:"watchMode,omitempty"`
+	ThinkMode            ThinkMode        `json:"thinkMode,omitempty"`
+	ToolsMode            agent.ToolsMode  `json:"toolsMode,omitempty"`
 }
 
 // UnmarshalJSON reads a ChatSessionEntry, transparently migrating

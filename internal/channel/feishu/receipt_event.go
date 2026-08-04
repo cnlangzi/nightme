@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
@@ -160,10 +161,16 @@ func eventToEntry(ev agent.AgentEvent, now time.Time, lastEntry *LogEntry) (LogE
 		if ae.Result.IsError {
 			icon = "⚠️"
 		}
+		// F-37 multi-div content split: OutResult is the final
+		// reply, which can be 1-3 KB or more. The per-entry cap
+		// is bumped to perEntryMaxRunes (8000 runes ≈ 24 KB for
+		// Chinese / 8 KB for English) so buildReceiptCard can
+		// split it across multiple divs instead of truncating at
+		// 600 bytes. See docs/feat/F-37-multi-div-content-split.md.
 		return LogEntry{
 			Time: now,
 			Icon: icon,
-			Text: truncateForLog(text, perEntryMaxBytes),
+			Text: truncateForLog(text, perEntryMaxRunes),
 			Kind: "result",
 		}, true
 
@@ -231,27 +238,45 @@ func formatUsageText(u *agent.UsageEvent) string {
 	return b.String()
 }
 
-// truncateForLog returns s clipped to max bytes with an ellipsis
+// truncateForLog returns s clipped to max characters with an ellipsis
 // suffix when truncation occurred. The returned string is always
-// valid UTF-8 (we round at the last rune boundary inside the
-// budget so we never slice a multi-byte sequence).
+// valid UTF-8 — we round at the last rune boundary inside the budget
+// so we never slice a multi-byte sequence.
+//
+// F-37: this is rune-aware (was previously byte-based despite the
+// comment). `perEntryMaxBytes` and `perEntryMaxRunes` both call this
+// function; the unit is "characters" regardless of which const was
+// passed. For Chinese / emoji content (where 1 char = 3-4 bytes),
+// the cap now correctly counts chars rather than bytes.
 func truncateForLog(s string, max int) string {
 	if max <= 3 {
-		// Pathological: caller asked for so few bytes that the
+		// Pathological: caller asked for so few chars that the
 		// ellipsis alone wouldn't fit. Return a single "…" so
 		// something still renders.
 		return "…"
 	}
-	if len(s) <= max {
-		return s
-	}
-	// Leave room for the trailing "…" (3 bytes in UTF-8).
-	budget := max - 3
-	// Walk runes, not bytes, so we never split a codepoint.
-	for i := 0; i < len(s); i++ {
-		if i > budget {
-			return s[:i] + "…"
+	// Fast path: every UTF-8 rune is 1-4 bytes. If the byte
+	// length fits inside 4×max we know the rune count fits too
+	// without allocating a []rune slice. This skips the
+	// per-event allocation for the common no-truncation path
+	// (most events are well under 600 runes).
+	if len(s) <= max*4 {
+		// Cheap exact check: if the byte length is also <= max
+		// (ASCII case), we know the rune count <= max.
+		if len(s) <= max {
+			return s
+		}
+		// Still need a precise rune count for non-ASCII text
+		// whose byte length is > max but ≤ 4×max.
+		if utf8.RuneCountInString(s) <= max {
+			return s
 		}
 	}
-	return s
+	// Slow path: count runes and truncate.
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	// Leave room for the trailing "…" (1 rune).
+	return string(runes[:max-1]) + "…"
 }

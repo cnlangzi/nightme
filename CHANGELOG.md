@@ -11,6 +11,22 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### F-think: per-chat thinking-content visibility toggle + markdown rendering
+
+**Slash command**: `/think on | /think off` (also accepts `show`/`hide` aliases; `/think` with no args reports current mode).
+
+**State**: `ChatSession.ThinkMode` per-chat (`ThinkModeShow` default, `ThinkModeHide` opt-in), persisted as `ChatSessionEntry.ThinkMode` (JSON omitempty so old `chat_sessions.json` files decode to default).
+
+**Gate**: `cmd/nightme/run.go::newEventHandler` drops `OutThinking` after Translate + ReplyTo stamping when `cs.ThinkMode() == ThinkModeHide`. Other OutboundKinds are unaffected.
+
+**Render upgrade**: `internal/channel/feishu/thinking_card.go` — OutThinking now posts to the Feishu thread as a `Card 2.0` interactive card with `lark_md` content (via `postThreadMarkdownReply`). Long bodies split into multiple div elements via F-37 `splitMarkdownForDivs`, preserving code-block atomicity. Plain text `postThreadReply` is unchanged for OutToolStart / OutToolEnd / OutCompaction (those remain single-line summaries).
+
+**Abstraction boundary preserved**: `OutboundMessage.Text` is still a primitive string; markdown rendering is a Channel-internal decision (Feishu-specific). No new `OutboundKind`, no Gateway / ChatSession schema changes.
+
+**Files**: `internal/registry/think_mode.go`, `internal/chatsession/thinkmode.go`, `internal/chatsession/chatsession.go`, `internal/chatsession/manager.go`, `internal/gateway/handlers_think.go`, `internal/gateway/handlers_chatsession.go`, `cmd/nightme/run.go`, `internal/channel/feishu/thinking_card.go`, `internal/channel/feishu/adapter.go`.
+
+**Docs**: see `docs/SPEC.md` §0.6 + §3.1.2.
+
 ### Architecture: ChatSession + AgentSession (replaces v1.x Session)
 
 The v1.x model bound one chat to one CLI process. This snapshot

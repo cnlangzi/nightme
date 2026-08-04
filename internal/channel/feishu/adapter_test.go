@@ -548,34 +548,32 @@ type patchCall struct {
 	MessageID string
 }
 
-// TestSend_OutThinking_PostsToThread — F-34. OutThinking is
-// routed to a Feishu thread reply (rootID = msg.ReplyTo) with
-// the body "💭 <text>". The receipt card no longer carries the
-// thinking entry.
+// TestSend_OutThinking_PostsMarkdownCard — F-34 + F-think.
+// OutThinking is routed to a Feishu thread reply (rootID =
+// msg.ReplyTo) as an interactive card with a single (or
+// multi-div) lark_md body. Plain text thinking would lose all
+// markdown formatting in the chat.
 //
 // F-34 review P1-3: Adapter.Send also Touch()es the receipt so
 // the main chat card header keeps ticking. This triggers the
 // cold-start card creation (one send_card) followed by a silent
 // PATCH. The test captures all outgoing sends and asserts on the
-// text reply; the card + PATCH are accepted as observable
-// side-effects, not tested here (covered by TestReceipt_*).
-func TestSend_OutThinking_PostsToThread(t *testing.T) {
+// interactive card reply; the receipt's cold-start card + PATCH
+// are accepted as observable side-effects, not tested here
+// (covered by TestReceipt_*).
+func TestSend_OutThinking_PostsMarkdownCard(t *testing.T) {
 	a := testAdapter(t)
 
 	type captured struct {
 		ChatID  string
 		MsgType string
 		RootID  string
-		Text    string
+		Content string
 	}
 	var sends []captured
 	a.sendFunc = func(_ context.Context, chatID, msgType, content, rootID string, _ bool) (string, error) {
-		var payload struct {
-			Text string `json:"text"`
-		}
-		_ = json.Unmarshal([]byte(content), &payload)
-		sends = append(sends, captured{chatID, msgType, rootID, payload.Text})
-		return "om_text_test", nil
+		sends = append(sends, captured{chatID, msgType, rootID, content})
+		return "om_card_test", nil
 	}
 
 	if err := a.Send(t.Context(), gateway.OutboundMessage{
@@ -587,22 +585,56 @@ func TestSend_OutThinking_PostsToThread(t *testing.T) {
 		t.Fatalf("Send(OutThinking): %v", err)
 	}
 
-	// Find the text reply (skip the cold-start card created by Touch).
-	var textReply *captured
+	// Find the interactive-card reply (skip the cold-start card
+	// created by Touch on the receipt).
+	var cardReply *captured
 	for i := range sends {
-		if sends[i].MsgType == larkim.MsgTypeText {
-			textReply = &sends[i]
+		if sends[i].MsgType == larkim.MsgTypeInteractive {
+			cardReply = &sends[i]
 			break
 		}
 	}
-	if textReply == nil {
-		t.Fatalf("no text reply found in sends: %+v", sends)
+	if cardReply == nil {
+		t.Fatalf("no interactive card reply found in sends: %+v", sends)
 	}
-	if textReply.RootID != "om_user_1" {
-		t.Errorf("rootID = %q, want om_user_1 (must thread to user message)", textReply.RootID)
+	if cardReply.RootID != "om_user_1" {
+		t.Errorf("rootID = %q, want om_user_1 (must thread to user message)", cardReply.RootID)
 	}
-	if textReply.Text != "💭 let me think" {
-		t.Errorf("body = %q, want %q", textReply.Text, "💭 let me think")
+
+	// Card payload must be Card 2.0 with lark_md content that
+	// includes the 💭 prefix and the original thinking text.
+	var card struct {
+		Config   map[string]any `json:"config"`
+		Elements []struct {
+			Tag  string `json:"tag"`
+			Text struct {
+				Tag     string `json:"tag"`
+				Content string `json:"content"`
+			} `json:"text"`
+		} `json:"elements"`
+	}
+	if err := json.Unmarshal([]byte(cardReply.Content), &card); err != nil {
+		t.Fatalf("card payload is not valid JSON: %v\n%s", err, cardReply.Content)
+	}
+	if len(card.Elements) != 1 {
+		t.Fatalf("card.elements len = %d, want 1 (short thinking body stays single-div)", len(card.Elements))
+	}
+	if card.Elements[0].Text.Tag != "lark_md" {
+		t.Errorf("card.elements[0].text.tag = %q, want %q (markdown element)",
+			card.Elements[0].Text.Tag, "lark_md")
+	}
+	if card.Elements[0].Text.Content != "💭 let me think" {
+		t.Errorf("card.elements[0].text.content = %q, want %q",
+			card.Elements[0].Text.Content, "💭 let me think")
+	}
+
+	// Negative assertion: no plain-text reply must be emitted
+	// for OutThinking (the pre-F-think behaviour). OutThinking
+	// now goes through interactive cards exclusively.
+	for _, s := range sends {
+		if s.MsgType == larkim.MsgTypeText {
+			t.Errorf("OutThinking produced a plain-text reply: %+v (want interactive only)", s)
+		}
 	}
 }
 
@@ -776,13 +808,16 @@ func TestSend_OutCompaction_PostsToThread(t *testing.T) {
 // One table-driven test that exercises the three kinds so a future
 // regression in any one of them flags here. Each kind produces its
 // own cold-start card + PATCH side-effect via Touch; we filter to
-// the text reply (msg_type=text) the same way the existing per-kind
-// tests do, then assert on the captured replyInThread.
+// the text reply (msg_type=text) for OutToolStart / OutToolEnd the
+// same way the existing per-kind tests do, then assert on the
+// captured replyInThread. OutThinking is rendered as an interactive
+// lark_md card (F-think §3.1.2), so the assertion counts the
+// interactive reply instead and inspects its content for lark_md.
 func TestSend_ThreadOnlyEvents_PassReplyInThreadTrue(t *testing.T) {
 	type tc struct {
 		name string
 		msg  gateway.OutboundMessage
-		want string // expected thread reply body
+		want string // expected thread reply body (for text replies)
 	}
 	cases := []tc{
 		{
@@ -818,32 +853,91 @@ func TestSend_ThreadOnlyEvents_PassReplyInThreadTrue(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			a := testAdapter(t)
 
-			var threadOnly int
+			var threadOnlyText int
+			var threadOnlyCard int
 			var chatVisible int
 			var lastTextBody string
+			var cardBodies []string // capture ALL interactive payloads (Touch may add cold-start)
 			a.sendFunc = func(_ context.Context, _, msgType, content, rootID string, replyInThread bool) (string, error) {
-				var payload struct {
-					Text string `json:"text"`
-				}
-				_ = json.Unmarshal([]byte(content), &payload)
 				if msgType == larkim.MsgTypeText && rootID == "om_user_t" {
+					var payload struct {
+						Text string `json:"text"`
+					}
+					_ = json.Unmarshal([]byte(content), &payload)
 					lastTextBody = payload.Text
 					if replyInThread {
-						threadOnly++
+						threadOnlyText++
 					} else {
 						chatVisible++
 					}
 				}
-				// Cold-start card calls from Touch() also flow through here;
-				// we only count text replies (the ones we care about).
+				if msgType == larkim.MsgTypeInteractive && rootID == "om_user_t" {
+					cardBodies = append(cardBodies, content)
+					if replyInThread {
+						threadOnlyCard++
+					}
+				}
 				return "om_text_t", nil
 			}
 
 			if err := a.Send(t.Context(), c.msg); err != nil {
 				t.Fatalf("Send(%s): %v", c.name, err)
 			}
-			if threadOnly != 1 {
-				t.Errorf("%s: threaded text reply count = %d (reply_in_thread=true), want 1", c.name, threadOnly)
+			// OutThinking: thread-routed interactive card (F-think).
+			if c.name == "OutThinking" {
+				if threadOnlyCard != 1 {
+					t.Errorf("%s: threaded card count = %d (reply_in_thread=true), want 1", c.name, threadOnlyCard)
+				}
+				if threadOnlyText != 0 {
+					t.Errorf("%s: plain-text reply count = %d, want 0 (OutThinking uses interactive cards only)", c.name, threadOnlyText)
+				}
+				if chatVisible != 0 {
+					t.Errorf("%s: chat-visible text reply count = %d (reply_in_thread=false), want 0 — OutThinking must NEVER appear in main chat", c.name, chatVisible)
+				}
+				// Touch() also posts a cold-start receipt card
+				// through sendFunc; find the thinking card by its
+				// lark_md marker rather than relying on order.
+				var thinkingCard string
+				for _, body := range cardBodies {
+					if strings.Contains(body, "lark_md") {
+						thinkingCard = body
+						break
+					}
+				}
+				if thinkingCard == "" {
+					t.Fatalf("%s: no interactive card contained lark_md; got %d cards", c.name, len(cardBodies))
+				}
+				// The thinking card structure produced by
+				// buildThinkingCard is:
+				//   {config, elements: [{tag:"div", text:{tag:"lark_md", content}}]}
+				var card struct {
+					Config   map[string]any `json:"config"`
+					Elements []struct {
+						Tag  string `json:"tag"`
+						Text struct {
+							Tag     string `json:"tag"`
+							Content string `json:"content"`
+						} `json:"text"`
+					} `json:"elements"`
+				}
+				if err := json.Unmarshal([]byte(thinkingCard), &card); err != nil {
+					t.Fatalf("%s: thinking card JSON invalid: %v\n%s", c.name, err, thinkingCard)
+				}
+				if len(card.Elements) != 1 {
+					t.Fatalf("%s: elements len = %d, want 1", c.name, len(card.Elements))
+				}
+				if card.Elements[0].Text.Tag != "lark_md" {
+					t.Errorf("%s: elements[0].text.tag = %q, want %q",
+						c.name, card.Elements[0].Text.Tag, "lark_md")
+				}
+				if card.Elements[0].Text.Content != c.want {
+					t.Errorf("%s: elements[0].text.content = %q, want %q",
+						c.name, card.Elements[0].Text.Content, c.want)
+				}
+				return
+			}
+			if threadOnlyText != 1 {
+				t.Errorf("%s: threaded text reply count = %d (reply_in_thread=true), want 1", c.name, threadOnlyText)
 			}
 			if chatVisible != 0 {
 				t.Errorf("%s: chat-visible text reply count = %d (reply_in_thread=false), want 0 — main chat must NOT show the progress line", c.name, chatVisible)

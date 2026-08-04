@@ -63,7 +63,7 @@ func TestSendLongMessage_SplitsAtNewline(t *testing.T) {
 	text := strings.Repeat("a", 2000) + "\n" + strings.Repeat("b", 2000)
 
 	var sent []string
-	a.sendFunc = func(_ context.Context, chatID, msgType, content, rootID string) (string, error) {
+	a.sendFunc = func(_ context.Context, chatID, msgType, content, rootID string, _ bool) (string, error) {
 		if chatID != "oc_test" {
 			t.Errorf("chatID = %q, want oc_test", chatID)
 		}
@@ -455,7 +455,7 @@ func TestSend_RoutesByUserMsgID_NotChatID(t *testing.T) {
 	// Mock: SendCard / SendMessageText return synthetic message IDs;
 	// PatchMessage is a no-op recorder.
 	var cards int
-	a.sendFunc = func(_ context.Context, _, _, _, _ string) (string, error) {
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
 		cards++
 		return fmt.Sprintf("om_card_%d", cards), nil
 	}
@@ -569,7 +569,7 @@ func TestSend_OutThinking_PostsToThread(t *testing.T) {
 		Text    string
 	}
 	var sends []captured
-	a.sendFunc = func(_ context.Context, chatID, msgType, content, rootID string) (string, error) {
+	a.sendFunc = func(_ context.Context, chatID, msgType, content, rootID string, _ bool) (string, error) {
 		var payload struct {
 			Text string `json:"text"`
 		}
@@ -619,7 +619,7 @@ func TestSend_OutToolStart_PostsToThread(t *testing.T) {
 		Text    string
 	}
 	var sends []captured
-	a.sendFunc = func(_ context.Context, _, msgType, content, rootID string) (string, error) {
+	a.sendFunc = func(_ context.Context, _, msgType, content, rootID string, _ bool) (string, error) {
 		var payload struct {
 			Text string `json:"text"`
 		}
@@ -670,7 +670,7 @@ func TestSend_OutToolEnd_PostsToThread(t *testing.T) {
 		Text    string
 	}
 	var sends []captured
-	a.sendFunc = func(_ context.Context, _, msgType, content, rootID string) (string, error) {
+	a.sendFunc = func(_ context.Context, _, msgType, content, rootID string, _ bool) (string, error) {
 		var payload struct {
 			Text string `json:"text"`
 		}
@@ -725,7 +725,7 @@ func TestSend_OutCompaction_PostsToThread(t *testing.T) {
 		Text    string
 	}
 	var sends []captured
-	a.sendFunc = func(_ context.Context, _, msgType, content, rootID string) (string, error) {
+	a.sendFunc = func(_ context.Context, _, msgType, content, rootID string, _ bool) (string, error) {
 		var payload struct {
 			Text string `json:"text"`
 		}
@@ -759,6 +759,214 @@ func TestSend_OutCompaction_PostsToThread(t *testing.T) {
 	}
 }
 
+// TestSend_ThreadOnlyEvents_PassReplyInThreadTrue — F-37.
+// OutThinking / OutToolStart / OutToolEnd / OutCompaction are the
+// "agent progress stream" kinds that would otherwise flood the
+// user's main chat. Each must thread the reply AND set
+// reply_in_thread=true so the message body stays out of the main
+// chat (only the thread panel collects the 💭/●/⎿/✶ lines; the
+// main chat shows just a "X replies" indicator).
+//
+// One table-driven test that exercises all four kinds so a future
+// regression in any one of them flags here. Each kind produces its
+// own cold-start card + PATCH side-effect via Touch; we filter to
+// the text reply (msg_type=text) the same way the existing per-kind
+// tests do, then assert on the captured replyInThread.
+func TestSend_ThreadOnlyEvents_PassReplyInThreadTrue(t *testing.T) {
+	type tc struct {
+		name string
+		msg  gateway.OutboundMessage
+		want string // expected thread reply body
+	}
+	cases := []tc{
+		{
+			name: "OutThinking",
+			msg: gateway.OutboundMessage{
+				Kind: gateway.OutThinking, ChatID: "oc_t", ReplyTo: "om_user_t",
+				Text: "let me check…",
+			},
+			want: "💭 let me check…",
+		},
+		{
+			name: "OutToolStart",
+			msg: gateway.OutboundMessage{
+				Kind: gateway.OutToolStart, ChatID: "oc_t", ReplyTo: "om_user_t",
+				Tool: &gateway.ToolInfo{Name: "Read", Args: "/a.go"},
+			},
+			want: "● Read(/a.go)",
+		},
+		{
+			name: "OutToolEnd",
+			msg: gateway.OutboundMessage{
+				Kind: gateway.OutToolEnd, ChatID: "oc_t", ReplyTo: "om_user_t",
+				Tool: &gateway.ToolInfo{Name: "Read", Output: "x\ny"},
+			},
+			// summarizeToolResult("Read", "x\ny", nil) → "⎿  📄 Read → 2 lines"
+			// We don't hard-code the line — assert via prefix below.
+			want: "",
+		},
+		{
+			name: "OutCompaction",
+			msg: gateway.OutboundMessage{
+				Kind: gateway.OutCompaction, ChatID: "oc_t", ReplyTo: "om_user_t",
+			},
+			want: "✶ Compacting conversation…",
+		},
+	}
+
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			a := testAdapter(t)
+
+			var threadOnly int
+			var chatVisible int
+			var lastTextBody string
+			a.sendFunc = func(_ context.Context, _, msgType, content, rootID string, replyInThread bool) (string, error) {
+				var payload struct {
+					Text string `json:"text"`
+				}
+				_ = json.Unmarshal([]byte(content), &payload)
+				if msgType == larkim.MsgTypeText && rootID == "om_user_t" {
+					lastTextBody = payload.Text
+					if replyInThread {
+						threadOnly++
+					} else {
+						chatVisible++
+					}
+				}
+				// Cold-start card calls from Touch() also flow through here;
+				// we only count text replies (the ones we care about).
+				return "om_text_t", nil
+			}
+
+			if err := a.Send(t.Context(), c.msg); err != nil {
+				t.Fatalf("Send(%s): %v", c.name, err)
+			}
+			if threadOnly != 1 {
+				t.Errorf("%s: threaded text reply count = %d (reply_in_thread=true), want 1", c.name, threadOnly)
+			}
+			if chatVisible != 0 {
+				t.Errorf("%s: chat-visible text reply count = %d (reply_in_thread=false), want 0 — main chat must NOT show the progress line", c.name, chatVisible)
+			}
+			if c.want != "" && lastTextBody != c.want {
+				t.Errorf("%s: body = %q, want %q", c.name, lastTextBody, c.want)
+			}
+			if c.name == "OutToolEnd" && !strings.HasPrefix(lastTextBody, "⎿  📄 Read") {
+				t.Errorf("OutToolEnd: body = %q, want prefix %q", lastTextBody, "⎿  📄 Read")
+			}
+		})
+	}
+}
+
+// TestSend_ChatVisibleEvents_PassReplyInThreadFalse — F-37 negative.
+// The following paths must NOT set reply_in_thread=true (the
+// message must stay visible in the main chat):
+//
+//   - receipt cold-start card (the pinned answer card)
+//   - OutCard (permission card — discoverability > chat cleanliness)
+//   - OutCommandReply (slash command — user is waiting at the cursor)
+//
+// Without this guarantee, a future refactor that decides
+// "reply_in_thread=true everywhere" would silently hide the
+// receipt card behind a thread indicator, breaking the core UX.
+func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
+	t.Run("ReceiptColdStart", func(t *testing.T) {
+		a := testAdapter(t)
+		var threadOnly int
+		var chatVisible int
+		a.sendFunc = func(_ context.Context, _, _, _, rootID string, replyInThread bool) (string, error) {
+			if rootID == "om_user_cold" {
+				if replyInThread {
+					threadOnly++
+				} else {
+					chatVisible++
+				}
+			}
+			return "om_card_cold", nil
+		}
+
+		r := a.receiptFor(t.Context(), "oc_cold", "om_user_cold")
+		if r == nil {
+			t.Fatalf("receiptFor returned nil (cold-start card build or send failed)")
+		}
+		if chatVisible == 0 {
+			t.Errorf("cold-start card reply_in_thread flag was true (threaded), want false — receipt card must be visible in main chat")
+		}
+		if threadOnly != 0 {
+			t.Errorf("cold-start card was threaded %d times, want 0", threadOnly)
+		}
+	})
+
+	t.Run("OutCard", func(t *testing.T) {
+		a := testAdapter(t)
+		var threadOnly int
+		var chatVisible int
+		a.sendFunc = func(_ context.Context, _, msgTypeRaw, _, rootID string, replyInThread bool) (string, error) {
+			if msgTypeRaw == interactiveMessageType && rootID == "om_user_perm" {
+				if replyInThread {
+					threadOnly++
+				} else {
+					chatVisible++
+				}
+			}
+			return "om_card_perm", nil
+		}
+
+		err := a.Send(t.Context(), gateway.OutboundMessage{
+			Kind:    gateway.OutCard,
+			ChatID:  "oc_test",
+			ReplyTo: "om_user_perm",
+			Card: &gateway.Card{
+				RequestID: "req_perm",
+				Title:     "Permission?",
+				Options:   []string{"yes", "no"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Send(OutCard): %v", err)
+		}
+		if chatVisible == 0 {
+			t.Errorf("OutCard reply_in_thread flag was true (threaded), want false — permission card must be visible in main chat")
+		}
+		if threadOnly != 0 {
+			t.Errorf("OutCard was threaded %d times, want 0", threadOnly)
+		}
+	})
+
+	t.Run("OutCommandReply", func(t *testing.T) {
+		a := testAdapter(t)
+		var threadOnly int
+		var chatVisible int
+		a.sendFunc = func(_ context.Context, _, msgTypeRaw, _, rootID string, replyInThread bool) (string, error) {
+			if msgTypeRaw == larkim.MsgTypeText && rootID == "om_user_cmd" {
+				if replyInThread {
+					threadOnly++
+				} else {
+					chatVisible++
+				}
+			}
+			return "om_text_cmd", nil
+		}
+
+		err := a.Send(t.Context(), gateway.OutboundMessage{
+			Kind:    gateway.OutCommandReply,
+			ChatID:  "oc_test",
+			ReplyTo: "om_user_cmd",
+			Text:    "agent available",
+		})
+		if err != nil {
+			t.Fatalf("Send(OutCommandReply): %v", err)
+		}
+		if chatVisible == 0 {
+			t.Errorf("OutCommandReply reply_in_thread flag was true (threaded), want false — slash command result must be visible in main chat")
+		}
+		if threadOnly != 0 {
+			t.Errorf("OutCommandReply was threaded %d times, want 0", threadOnly)
+		}
+	})
+}
+
 // TestSend_OutText_FoldsIntoReceipt — F-34 regression guard.
 // OutText / OutResult / OutInit / OutUsage must still fold into
 // the receipt card (unchanged behavior).
@@ -767,7 +975,7 @@ func TestSend_OutText_FoldsIntoReceipt(t *testing.T) {
 	userMsgID := "om_user_out"
 
 	var cards int
-	a.sendFunc = func(_ context.Context, _, _, _, _ string) (string, error) {
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
 		cards++
 		return fmt.Sprintf("om_card_%d", cards), nil
 	}
@@ -844,7 +1052,7 @@ func TestSend_OutCard_PassesReplyTo(t *testing.T) {
 		MsgType string
 		RootID  string
 	}
-	a.sendFunc = func(_ context.Context, chatID, msgType, _, rootID string) (string, error) {
+	a.sendFunc = func(_ context.Context, chatID, msgType, _, rootID string, _ bool) (string, error) {
 		captured.ChatID = chatID
 		captured.MsgType = msgType
 		captured.RootID = rootID
@@ -888,7 +1096,7 @@ func TestSend_OutCommandReply_PassesReplyTo(t *testing.T) {
 		Text   string
 		RootID string
 	}
-	a.sendFunc = func(_ context.Context, chatID, _, content, rootID string) (string, error) {
+	a.sendFunc = func(_ context.Context, chatID, _, content, rootID string, _ bool) (string, error) {
 		captured.ChatID = chatID
 		// content is JSON-encoded text payload; extract for assertion
 		var payload struct {
@@ -929,12 +1137,12 @@ func TestSendViaLark_RootIdSet(t *testing.T) {
 	// plumbing passes rootID end-to-end.
 
 	var gotRoot string
-	a.sendFunc = func(_ context.Context, _, _, _, rootID string) (string, error) {
+	a.sendFunc = func(_ context.Context, _, _, _, rootID string, _ bool) (string, error) {
 		gotRoot = rootID
 		return "om_msg_test", nil
 	}
 
-	if _, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "om_user_42"); err != nil {
+	if _, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "om_user_42", false); err != nil {
 		t.Fatalf("sendContent with rootID: %v", err)
 	}
 	if gotRoot != "om_user_42" {
@@ -943,7 +1151,7 @@ func TestSendViaLark_RootIdSet(t *testing.T) {
 
 	// Empty rootID: still flows through sendFunc with "".
 	gotRoot = ""
-	if _, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, ""); err != nil {
+	if _, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "", false); err != nil {
 		t.Fatalf("sendContent without rootID: %v", err)
 	}
 	if gotRoot != "" {
@@ -965,7 +1173,7 @@ func TestSendViaLark_TerminalCodeFallsBackToCreate(t *testing.T) {
 	a := testAdapter(t)
 
 	var replyCalls, createCalls int
-	a.sendFunc = func(_ context.Context, _, _, _, rootID string) (string, error) {
+	a.sendFunc = func(_ context.Context, _, _, _, rootID string, _ bool) (string, error) {
 		if rootID != "" {
 			replyCalls++
 			return "", errors.New("feishu: reply message failed with code 230011")
@@ -974,7 +1182,7 @@ func TestSendViaLark_TerminalCodeFallsBackToCreate(t *testing.T) {
 		return "om_created", nil
 	}
 
-	if _, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "om_user_42"); err != nil {
+	if _, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "om_user_42", false); err != nil {
 		t.Fatalf("sendContent: %v", err)
 	}
 	if replyCalls != 1 {
@@ -986,7 +1194,7 @@ func TestSendViaLark_TerminalCodeFallsBackToCreate(t *testing.T) {
 
 	// 231003 (deleted) must also trigger the fallback.
 	replyCalls, createCalls = 0, 0
-	a.sendFunc = func(_ context.Context, _, _, _, rootID string) (string, error) {
+	a.sendFunc = func(_ context.Context, _, _, _, rootID string, _ bool) (string, error) {
 		if rootID != "" {
 			replyCalls++
 			return "", errors.New("feishu: reply message failed with code 231003")
@@ -994,7 +1202,7 @@ func TestSendViaLark_TerminalCodeFallsBackToCreate(t *testing.T) {
 		createCalls++
 		return "om_created", nil
 	}
-	if _, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "om_user_42"); err != nil {
+	if _, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "om_user_42", false); err != nil {
 		t.Fatalf("sendContent: %v", err)
 	}
 	if replyCalls != 1 || createCalls != 1 {
@@ -1011,7 +1219,7 @@ func TestSendViaLark_NonTerminalErrorPropagates(t *testing.T) {
 	a := testAdapter(t)
 
 	var replyCalls, createCalls int
-	a.sendFunc = func(_ context.Context, _, _, _, rootID string) (string, error) {
+	a.sendFunc = func(_ context.Context, _, _, _, rootID string, _ bool) (string, error) {
 		if rootID != "" {
 			replyCalls++
 			return "", errors.New("feishu: reply message failed with code 230020")
@@ -1020,7 +1228,7 @@ func TestSendViaLark_NonTerminalErrorPropagates(t *testing.T) {
 		return "om_created", nil
 	}
 
-	_, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "om_user_42")
+	_, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "om_user_42", false)
 	if err == nil {
 		t.Fatalf("sendContent: want error (230020 must propagate), got nil")
 	}
@@ -1033,7 +1241,7 @@ func TestSendViaLark_NonTerminalErrorPropagates(t *testing.T) {
 
 	// Transport errors also must propagate, not silently fall back.
 	replyCalls, createCalls = 0, 0
-	a.sendFunc = func(_ context.Context, _, _, _, rootID string) (string, error) {
+	a.sendFunc = func(_ context.Context, _, _, _, rootID string, _ bool) (string, error) {
 		if rootID != "" {
 			replyCalls++
 			return "", errors.New("feishu: reply message: connection reset by peer")
@@ -1041,7 +1249,7 @@ func TestSendViaLark_NonTerminalErrorPropagates(t *testing.T) {
 		createCalls++
 		return "om_created", nil
 	}
-	_, err = a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "om_user_42")
+	_, err = a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "om_user_42", false)
 	if err == nil {
 		t.Fatalf("transport error: want error, got nil")
 	}
@@ -1058,7 +1266,7 @@ func TestSendViaLark_NoRootIDSkipsReply(t *testing.T) {
 	a := testAdapter(t)
 
 	var replyCalls, createCalls int
-	a.sendFunc = func(_ context.Context, _, _, _, rootID string) (string, error) {
+	a.sendFunc = func(_ context.Context, _, _, _, rootID string, _ bool) (string, error) {
 		if rootID != "" {
 			replyCalls++
 		}
@@ -1066,7 +1274,7 @@ func TestSendViaLark_NoRootIDSkipsReply(t *testing.T) {
 		return "om_created", nil
 	}
 
-	if _, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, ""); err != nil {
+	if _, err := a.sendContent(t.Context(), "oc_test", "text", `{"text":"hi"}`, "", false); err != nil {
 		t.Fatalf("sendContent: %v", err)
 	}
 	if replyCalls != 0 {

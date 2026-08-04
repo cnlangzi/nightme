@@ -73,15 +73,23 @@ thread (click 指示器进入):
 
 Feishu adapter 在 `Send` dispatcher 按 Kind 自决 routing：
 
-| OutboundKind | Routing | 视觉形式 |
-|--------------|---------|---------|
-| `OutThinking` | **thread reply** | 纯文本 `💭 <text>`（每 event 一条）|
-| `OutToolStart` | **thread reply** | 纯文本 `🔧 <name>(<args>)`（每 event 一条）|
-| `OutToolEnd` | **thread reply** | 纯文本 `✅/❌ <summarized>`（类型感知摘要）|
-| `OutCompaction` | **thread reply** | 纯文本 `✶ Compacting conversation…` |
-| `OutText` / `OutResult` / `OutInit` / `OutUsage` | **receipt card** | 进 card body（PATCH in place）|
-| `OutMessageState` | reaction on user msg | AddReaction ⏳/🔄/✅/❌ |
-| `OutCard` | thread reply | permission 等交互卡（不变）|
+| OutboundKind | Routing | Feishu `reply_in_thread` | 视觉形式 |
+|--------------|---------|--------------------------|---------|
+| `OutThinking` | **thread reply** | **true**（thread-only）| 纯文本 `💭 <text>`（每 event 一条）|
+| `OutToolStart` | **thread reply** | **true**（thread-only）| 纯文本 `🔧 <name>(<args>)`（每 event 一条）|
+| `OutToolEnd` | **thread reply** | **true**（thread-only）| 纯文本 `✅/❌ <summarized>`（类型感知摘要）|
+| `OutCompaction` | **thread reply** | **true**（thread-only）| 纯文本 `✶ Compacting conversation…` |
+| `OutText` / `OutResult` / `OutInit` / `OutUsage` | **receipt card** | n/a（PATCH in place 不走 reply API）| 进 card body |
+| `OutMessageState` | reaction on user msg | n/a | AddReaction ⏳/🔄/✅/❌ |
+| `OutCard` (冷启动 receipt / permission card / slash command reply) | thread reply | **false**（默认 chat 可见）| 进 main chat 内联回复 |
+
+**`reply_in_thread` 字段语义**（来自 `larkim.ReplyMessageReqBody.ReplyInThread *bool`，
+SDK 注释：「是否以话题形式回复；若群聊已经是话题模式，则自动回复该条消息所在的话题」）：
+
+- `true`：bot 消息**只在 thread 面板显示**，main chat 只看到 "X replies" 指示器
+- `false`（默认，省略时）：bot 消息**在 main chat 内联显示**（同时进 thread 面板作为可点击 entry）
+
+F-37 把"中间过程"四条 path 显式设 `true`，让 main chat 干净只露 receipt card。
 
 **为什么这是 Channel 自治**：Gateway 仍然只 stamp `out.ReplyTo = cs.currentTurnUserMsgID`；OutboundMessage 契约不变。Channel 看到 Kind 后自决 routing 目标（thread vs card vs reaction）。完全符合 SPEC §1.3 "抽象归抽象 / 具体归具体" 不变式。
 
@@ -264,13 +272,14 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
     switch msg.Kind {
     case gateway.OutThinking:
         body := "💭 " + msg.Text
-        return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body)
+        // replyOnly=true: 💭 不进 main chat
+        return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body, true)
 
     case gateway.OutToolStart:
         name, _ := msg.Meta["tool_name"].(string)
         args, _ := msg.Meta["args"].(string)
-        body := "🔧 " + formatToolStart(name, args)  // "name" or "name(args)"
-        return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body)
+        body := "🔧 " + formatToolStart(name, args)
+        return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body, true)
 
     case gateway.OutToolEnd:
         name, _ := msg.Meta["tool_name"].(string)
@@ -278,11 +287,11 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
         output, _ := msg.Meta["output"].(string)
         err, _ := msg.Meta["err"].(error)
         body := summarizeToolEnd(name, args, output, err)
-        return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body)
+        return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body, true)
 
     case gateway.OutCompaction:
         return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo,
-            "✶ Compacting conversation…")
+            "✶ Compacting conversation…", true)
 
     case gateway.OutText, gateway.OutResult, gateway.OutInit, gateway.OutUsage:
         // 不变：fold into receipt card
@@ -293,12 +302,17 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
         return receipt.Append(ctx, /* translated event */)
 
     // OutMessageState / OutMessageStateRemoved / OutCard: 不变
+    //   - OutCard (permission card): reply_in_thread=false，权限卡必须 main chat 可见
+    //   - OutCommandReply: reply_in_thread=false，slash 回应必须 main chat 可见
     }
 }
 
 // postThreadReply 直接 POST 到 Feishu thread。
 // rootID = msg.ReplyTo = currentTurnUserMsgID。
-func (a *Adapter) postThreadReply(ctx context.Context, chatID, rootID, body string) error {
+// replyOnly=true: 内部 sendViaLarkReply 会设 body.reply_in_thread=true
+// （larkim.ReplyMessageReqBody.ReplyInThread field），让消息只在线程
+// 面板显示、main chat 只看见 "X replies" 指示器。
+func (a *Adapter) postThreadReply(ctx context.Context, chatID, rootID, body string, replyOnly bool) error {
     if rootID == "" {
         // Orphan event (startup EventInit etc.) — fall back to top-level
         return a.sendRawOutText(ctx, chatID, body)

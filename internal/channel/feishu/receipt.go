@@ -49,12 +49,14 @@ import (
 type receiptBot interface {
 	AddReaction(ctx context.Context, msgID, emoji string) (string, error)
 	UpdateMessage(ctx context.Context, messageID, text string) error
-	SendMessageText(ctx context.Context, chatID, text, rootID string) (string, error)
+	SendMessageText(ctx context.Context, chatID, text, rootID string, replyInThread bool) (string, error)
 	// SendCard posts a new interactive card and returns its message ID.
 	// Used on the FIRST render of a receipt (no cardMsgID yet).
 	// v1.3.x (§13.10): rootID is the user message id to thread
-	// the cold-start card to.
-	SendCard(ctx context.Context, chatID, cardJSON, rootID string) (string, error)
+	// the cold-start card to. F-37: replyInThread is forwarded but
+	// always false on the cold-start path (the receipt card must
+	// stay visible in the main chat as the pinned answer).
+	SendCard(ctx context.Context, chatID, cardJSON, rootID string, replyInThread bool) (string, error)
 	// PatchMessage replaces the body of an existing message in place
 	// (Feishu PATCH /im/v1/messages/{id}). Used on every render after
 	// the first. The message must already be an interactive card.
@@ -480,7 +482,10 @@ func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID stri
 	// receipt path that lives under Adapter.receiptFor uses SendCard
 	// directly with the same threading; this code path (synthetic
 	// text fallback) was the only place not yet threaded.
-	msgID, err := bot.SendMessageText(ctx, chatID, r.state.headerLine(r), userMsgID)
+	//
+	// F-37: replyInThread=false — the cold-start text bubble is the
+	// pinned answer preview and must stay visible in main chat.
+	msgID, err := bot.SendMessageText(ctx, chatID, r.state.headerLine(r), userMsgID, false)
 	if err != nil {
 		r.logger.Warn("feishu receipt: initial reply failed", "err", err)
 		return r, fmt.Errorf("create receipt: %w", err)
@@ -865,7 +870,11 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 		// card is rendered as a reply to the user's message. Once
 		// the card exists, PatchMessage preserves the thread across
 		// subsequent in-place edits.
-		msgID, sendErr := r.bot.SendCard(ctx, r.chatID, body, r.userMsgID)
+		//
+		// F-37: replyInThread=false — the cold-start card IS the
+		// main visible answer; thread-only would leave the main chat
+		// empty until the receipt PATCHes happen.
+		msgID, sendErr := r.bot.SendCard(ctx, r.chatID, body, r.userMsgID, false)
 		if sendErr != nil {
 			r.logger.Warn("feishu receipt: create card failed",
 				"err", sendErr, "state", r.state, "entries", len(r.entries))

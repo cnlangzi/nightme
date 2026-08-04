@@ -44,7 +44,16 @@ const interactiveMessageType = "interactive"
 // the message is a fresh top-level message in the chat. v1.3.x (§13.10)
 // forwards msg.ReplyTo here so all bot messages that have a user-side anchor
 // thread visually to the user's original message.
-type sendMessageFunc func(ctx context.Context, chatID, msgType, content, rootID string) (string, error)
+//
+// replyInThread controls the Feishu body field reply_in_thread (F-37). When
+// true, the message is rendered ONLY in the thread/topic (main chat shows
+// a "X replies" indicator with no body); when false (default) the message
+// appears inline in the main chat as a reply and is also collected in the
+// thread panel. Thread-only is used for the intermediate agent progress
+// stream (OutThinking / OutToolStart / OutToolEnd / OutCompaction) so the
+// main chat stays focused on the final answer. Create-endpoint calls
+// ignore this flag (the field has no equivalent there).
+type sendMessageFunc func(ctx context.Context, chatID, msgType, content, rootID string, replyInThread bool) (string, error)
 
 // updateMessageFunc is the in-place update boundary (Feishu PATCH
 // /im/v1/messages/{id}). Kept behind a function field so unit tests
@@ -428,7 +437,10 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
 		return nil
 	}
-	msgID, err := a.SendCard(ctx, chatID, cardBody, userMsgID)
+	// F-37: replyInThread=false — the cold-start card is the
+	// pinned main-chat answer; thread-only would leave the main
+	// chat empty until the receipt PATCHes happen.
+	msgID, err := a.SendCard(ctx, chatID, cardBody, userMsgID, false)
 	if err != nil {
 		a.logger.Warn("feishu: cold-start receipt card failed",
 			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
@@ -478,7 +490,11 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// chat's receipt card header keeps ticking while the
 		// agent thinks. Without this the "🔄 ⏳ N · HH:MM:SS"
 		// line freezes between visible events.
-		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text); err != nil {
+		//
+		// F-37: replyOnly=true keeps the 💭 line OUT of the main
+		// chat — it lives only in the thread so the receipt card
+		// (the pinned final answer) stays the main visible item.
+		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text, true); err != nil {
 			return err
 		}
 		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
@@ -563,7 +579,11 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// v1.3.x (§13.10): thread permission card to the user's message
 		// so the user sees a visual "reply" line connecting the
 		// permission request to the task that triggered it.
-		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, msg.ReplyTo)
+		//
+		// F-37: reply_in_thread stays false (default) for the
+		// permission card — discoverability matters more than chat
+		// cleanliness when a tool is blocked on user approval.
+		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, msg.ReplyTo, false)
 		return err
 
 	case gateway.OutToolStart:
@@ -577,7 +597,9 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// The user sees the call appear immediately and the
 		// result land in the same thread when the tool returns.
 		body := formatToolStartCall(toolName(msg), toolArgs(msg))
-		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body); err != nil {
+		// F-37: replyOnly=true — `● Tool(args)` lives in the thread,
+		// not the main chat. Receipt card stays the pinned answer.
+		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body, true); err != nil {
 			return err
 		}
 		// F-34 review P1-3: Touch the receipt so the header
@@ -598,7 +620,8 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 			toolErr = msg.Tool.Err
 		}
 		body := summarizeToolResult(toolName(msg), toolOutput(msg), toolErr)
-		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body); err != nil {
+		// F-37: replyOnly=true — `⎿  …` result line lives in the thread.
+		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body, true); err != nil {
 			return err
 		}
 		// F-34 review P1-3: Touch the receipt so the header
@@ -654,8 +677,11 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 	case gateway.OutCompaction:
 		// F-34: compaction is posted to the thread as a single
 		// "✶ Compacting conversation…" line.
+		//
+		// F-37: replyOnly=true — compaction marker belongs in the
+		// thread, not the main chat.
 		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo,
-			"✶ Compacting conversation…"); err != nil {
+			"✶ Compacting conversation…", true); err != nil {
 			return err
 		}
 		// F-34 review P1-3: Touch the receipt so the header
@@ -695,10 +721,14 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// reply to their command. msg.ReplyTo is empty for orphan
 		// replies (e.g. gateway startup logs); in that case the
 		// message stays top-level.
+		//
+		// F-37: slash-command replies stay visible in main chat
+		// (reply_in_thread=false) — the user fired the command and
+		// is waiting for the answer at the cursor.
 		if msg.Text == "" {
 			return errors.New("feishu: OutCommandReply missing text")
 		}
-		_, err := a.SendMessageText(ctx, msg.ChatID, msg.Text, msg.ReplyTo)
+		_, err := a.SendMessageText(ctx, msg.ChatID, msg.Text, msg.ReplyTo, false)
 		return err
 	}
 	return fmt.Errorf("feishu: unsupported outbound kind %v", msg.Kind)
@@ -712,7 +742,9 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 	// Empty rootID: this degraded path is hit when receipt cold-start
 	// failed and there's no userMsgID to thread to. The fallback
 	// message remains a top-level text bubble (legacy behavior).
-	_, err := a.SendMessageText(ctx, chatID, text, "")
+	// replyInThread stays false — Create path with empty rootID
+	// can't honor it anyway.
+	_, err := a.SendMessageText(ctx, chatID, text, "", false)
 	return err
 }
 
@@ -721,7 +753,14 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 // (orphan event, e.g. startup EventInit) the helper falls back to a
 // top-level text send via sendRawOutText so the user still sees the
 // message.
-func (a *Adapter) postThreadReply(ctx context.Context, chatID, rootID, body string) error {
+//
+// replyOnly (F-37) controls Feishu body field reply_in_thread. true
+// keeps the message OUT of the main chat (only the "X replies"
+// indicator is visible) so the agent progress stream doesn't pollute
+// the user's main view; false keeps the reply visible inline in the
+// main chat. OutThinking / OutToolStart / OutToolEnd / OutCompaction
+// pass true; receipt-card / outCard / slash-command replies pass false.
+func (a *Adapter) postThreadReply(ctx context.Context, chatID, rootID, body string, replyOnly bool) error {
 	// P1-4 (F-34 review): Feishu's bot API caps at 5 QPS per
 	// user / per group. A hot agent running 10+ tools per turn
 	// would otherwise overrun the limit and Feishu would drop
@@ -740,7 +779,7 @@ func (a *Adapter) postThreadReply(ctx context.Context, chatID, rootID, body stri
 	if rootID == "" {
 		return a.sendRawOutText(ctx, chatID, body)
 	}
-	_, err := a.SendMessageText(ctx, chatID, body, rootID)
+	_, err := a.SendMessageText(ctx, chatID, body, rootID, replyOnly)
 	return err
 }
 
@@ -1139,7 +1178,7 @@ func (a *Adapter) logInbound(msg channel.Message) {
 // ID on error and uses a hidden return-path for callers that need
 // the ID (see SendMessageText for the receipt code path).
 func (a *Adapter) SendMessage(ctx context.Context, chatID, text string) error {
-	_, err := a.SendMessageText(ctx, chatID, text, "")
+	_, err := a.SendMessageText(ctx, chatID, text, "", false)
 	return err
 }
 
@@ -1152,8 +1191,13 @@ func (a *Adapter) SendMessage(ctx context.Context, chatID, text string) error {
 // thread visually to the user's `/command` message. Empty rootID yields
 // a fresh top-level message (legacy behavior).
 //
+// replyInThread (F-37) is forwarded to the Reply body when rootID != "".
+// false = visible in main chat (default for slash commands and
+// receipt-cold-start); true = thread-only (used by postThreadReply for
+// the agent progress stream). Has no effect on the top-level Create path.
+//
 // Returns (messageID, error). On error, messageID is "".
-func (a *Adapter) SendMessageText(ctx context.Context, chatID, text, rootID string) (string, error) {
+func (a *Adapter) SendMessageText(ctx context.Context, chatID, text, rootID string, replyInThread bool) (string, error) {
 	if strings.TrimSpace(chatID) == "" {
 		return "", errors.New("feishu: chat_id is required")
 	}
@@ -1166,7 +1210,7 @@ func (a *Adapter) SendMessageText(ctx context.Context, chatID, text, rootID stri
 	if err != nil {
 		return "", fmt.Errorf("feishu: encode text: %w", err)
 	}
-	msgID, err := a.sendContent(ctx, chatID, larkim.MsgTypeText, string(content), rootID)
+	msgID, err := a.sendContent(ctx, chatID, larkim.MsgTypeText, string(content), rootID, replyInThread)
 	a.logOutgoing("send_text", chatID, msgID, err)
 	return msgID, err
 }
@@ -1387,6 +1431,11 @@ func (a *Adapter) SendLongMessage(ctx context.Context, chatID, text string) erro
 // the message is rendered as a reply to that user message; empty means
 // a fresh top-level message. See §15.2 of docs/channel/feishu.md.
 //
+// replyInThread (F-37) controls the Feishu body field reply_in_thread
+// when the Reply endpoint is selected (rootID != ""). It has no
+// effect on the top-level Create path. See postThreadReply for the
+// author-side policy that decides which callsites pass true.
+//
 // v1.3.x (§13.10 fallback): when the Reply endpoint returns a
 // terminal error code (230011 recalled / 231003 deleted), we retry
 // as a top-level Create so the user still sees a message. The
@@ -1395,7 +1444,7 @@ func (a *Adapter) SendLongMessage(ctx context.Context, chatID, text string) erro
 //
 // Returns "" + error on failure. Empty message ID on success is
 // possible if the API omits it (defensive — should not happen).
-func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content, rootID string) (string, error) {
+func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content, rootID string, replyInThread bool) (string, error) {
 	a.mu.RLock()
 	send := a.sendFunc
 	if send == nil && a.larkClient != nil {
@@ -1418,14 +1467,17 @@ func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content, roo
 			"chat_id", chatID,
 			"msg_type", msgType,
 			"root_id", rootID,
+			"reply_in_thread", replyInThread,
 		},
 	}, func() (string, error) {
-		return send(ctx, chatID, msgType, content, rootID)
+		return send(ctx, chatID, msgType, content, rootID, replyInThread)
 	})
 
 	// §15.2 fallback：Reply target unavailable（230011/231003），
 	// 重试一次不带 rootID 的 Create；fallback 也走 retry 救活
 	// 瞬时失败（target unavailable 与 transient 无关，但保留对称）。
+	// reply_in_thread 在 fallback path 没意义（Create 不接受），
+	// 退化时一律清掉。
 	if err != nil && rootID != "" && isFeishuTerminalMessageCode(err) {
 		logDegradation(a.logger, degradationFallbackTopLevel, RetryOpts{
 			Op:     "send",
@@ -1434,6 +1486,7 @@ func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content, roo
 				"chat_id", chatID,
 				"msg_type", msgType,
 				"root_id", rootID,
+				"reply_in_thread", replyInThread,
 				"reason", "reply_target_unavailable",
 			},
 		}, 0, 0, err, nil)
@@ -1447,13 +1500,13 @@ func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content, roo
 				"root_id", "", // fallback intentionally clears root_id
 			},
 		}, func() (string, error) {
-			return send(ctx, chatID, msgType, content, "")
+			return send(ctx, chatID, msgType, content, "", false)
 		})
 	}
 	return msgID, err
 }
 
-func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content, rootID string) (string, error) {
+func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content, rootID string, replyInThread bool) (string, error) {
 	if a.larkClient == nil || a.larkClient.Im == nil || a.larkClient.Im.V1 == nil || a.larkClient.Im.V1.Message == nil {
 		return "", errors.New("feishu: REST client is nil")
 	}
@@ -1465,7 +1518,7 @@ func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content, roo
 	// across subsequent in-place updates, so once Reply-creates the
 	// card the thread is locked in.
 	if rootID != "" {
-		return a.sendViaLarkReply(ctx, rootID, msgType, content)
+		return a.sendViaLarkReply(ctx, rootID, msgType, content, replyInThread)
 	}
 	return a.sendViaLarkCreate(ctx, chatID, msgType, content)
 }
@@ -1476,18 +1529,30 @@ func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content, roo
 // formatted error carrying the Feishu API code when the call
 // fails; callers inspect with isFeishuTerminalMessageCode to
 // decide whether to fall back to Create.
-func (a *Adapter) sendViaLarkReply(ctx context.Context, rootID, msgType, content string) (string, error) {
+//
+// replyInThread (F-37) controls the body field reply_in_thread.
+// true = thread/topic form only (main chat shows "X replies"
+// indicator without body); false (default) = visible in main chat
+// as an inline reply AND in thread panel. See postThreadReply /
+// F-37 §2.1 for which OutboundKind values pass true.
+func (a *Adapter) sendViaLarkReply(ctx context.Context, rootID, msgType, content string, replyInThread bool) (string, error) {
 	// F-35: 出口过限速器。
 	if err := a.limiter.Wait(ctx); err != nil {
 		return "", err
 	}
-	replyBody := larkim.NewReplyMessageReqBodyBuilder().
+	bodyBuilder := larkim.NewReplyMessageReqBodyBuilder().
 		MsgType(msgType).
-		Content(content).
-		Build()
+		Content(content)
+	if replyInThread {
+		// Field is omitempty — only set when true so the default
+		// payload stays byte-for-byte identical to pre-F-37 calls
+		// (preserves backward compat with the §13.10 recorder logs
+		// and any internal idempotency cache keyed on body hash).
+		bodyBuilder = bodyBuilder.ReplyInThread(true)
+	}
 	req := larkim.NewReplyMessageReqBuilder().
 		MessageId(rootID).
-		Body(replyBody).
+		Body(bodyBuilder.Build()).
 		Build()
 	resp, err := a.larkClient.Im.V1.Message.Reply(ctx, req)
 	if err != nil {
@@ -1507,7 +1572,8 @@ func (a *Adapter) sendViaLarkReply(ctx context.Context, rootID, msgType, content
 
 // sendViaLarkCreate invokes POST /im/v1/messages (top-level Create).
 // Used both as the no-rootID path and as the fallback when Reply
-// fails on a recalled/deleted user message.
+// fails on a recalled/deleted user message. replyInThread is unused
+// here (Create API does not accept reply_in_thread).
 func (a *Adapter) sendViaLarkCreate(ctx context.Context, chatID, msgType, content string) (string, error) {
 	// F-35: 出口过限速器。
 	if err := a.limiter.Wait(ctx); err != nil {
@@ -1591,14 +1657,21 @@ func isFeishuTerminalMessageCode(err error) bool {
 // card is rendered as a reply to the user's message; subsequent
 // PatchMessage calls preserve the thread automatically. See §15.2 of
 // docs/channel/feishu.md.
-func (a *Adapter) SendCard(ctx context.Context, chatID, content, rootID string) (string, error) {
+//
+// replyInThread (F-37) is accepted for symmetry with sendContent /
+// SendMessageText but is effectively a no-op for the receipt cold-start
+// path (the cold-start card MUST stay visible in the main chat —
+// chat-pinned visual answer is the whole point of the rolling log). It is
+// plumbed through so future callers (e.g. permission card as thread-only)
+// can opt in without a second signature change.
+func (a *Adapter) SendCard(ctx context.Context, chatID, content, rootID string, replyInThread bool) (string, error) {
 	if strings.TrimSpace(chatID) == "" {
 		return "", errors.New("feishu: chat_id is required")
 	}
 	if strings.TrimSpace(content) == "" {
 		return "", errors.New("feishu: card content is required")
 	}
-	msgID, err := a.sendContent(ctx, chatID, larkim.MsgTypeInteractive, content, rootID)
+	msgID, err := a.sendContent(ctx, chatID, larkim.MsgTypeInteractive, content, rootID, replyInThread)
 	a.logOutgoing("send_card", chatID, msgID, err)
 	return msgID, err
 }

@@ -55,7 +55,7 @@ func (m *mockReceiptBot) AddReaction(_ context.Context, msgID, emoji string) (st
 	return "mock-reaction-" + emoji, nil
 }
 
-func (m *mockReceiptBot) SendMessageText(_ context.Context, _, text, _ string) (string, error) {
+func (m *mockReceiptBot) SendMessageText(_ context.Context, _, text, _ string, _ bool) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.sendMsgErr != nil {
@@ -70,7 +70,7 @@ func (m *mockReceiptBot) SendMessageText(_ context.Context, _, text, _ string) (
 // first send, subsequent renders go through PatchMessage. The id is
 // derived from nextCardID so multiple receipts in the same test get
 // distinct ids.
-func (m *mockReceiptBot) SendCard(_ context.Context, chatID, body, _ string) (string, error) {
+func (m *mockReceiptBot) SendCard(_ context.Context, chatID, body, _ string, _ bool) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.sendCardErr != nil {

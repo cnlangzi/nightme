@@ -990,6 +990,15 @@ PATCH 路径不动 -- Feishu 的 PATCH 接口会自动保留被 PATCH 消息的�
 
 **✅ 决议(2026-08-03,Devin "按你的建议修改")**: 采用 **方案 B**,同步 thread OutCard 与 OutCommandReply。**不**实现 `reply_in_thread` 模式(属未来 P2)。
 
+**✅ 子决议(2026-08-04,F-37 落地)**: `reply_in_thread` 不再"P2 一刀切",而**按 OutboundKind 拆分**：
+
+- **thread-only (`reply_in_thread=true`)** — `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCompaction`：agent 进度流，绝不污染 main chat
+- **chat-visible (`reply_in_thread=false`,默认)** — receipt 冷启动卡 / `OutCard` (permission) / `OutCommandReply`：用户首要看到的答案 / 不可漏看的权限请求 / slash 命令回应，必须 main chat 可见
+
+实现：`sendMessageFunc` / `sendContent` / `sendViaLarkReply` / `SendMessageText` / `SendCard` / `postThreadReply` 全链路加一个尾部 `replyInThread bool` 参数；`sendViaLarkReply` 内部 `larkim.NewReplyMessageReqBodyBuilder()` 仅在 `true` 时调 `.ReplyInThread(true)`（omitempty 默认 false 保留向后兼容的 recorder log / idempotency cache 字节）。详见 `docs/feat/F-37-tool-thread-routing.md` §2.1 + adapter.go。
+
+**相关测试**：`adapter_test.go::TestSend_ThreadOnlyEvents_PassReplyInThreadTrue` (4 kinds × reply_in_thread=true) + `TestSend_ChatVisibleEvents_PassReplyInThreadFalse` (3 paths × reply_in_thread=false)。
+
 ### 13.11 决策记录(2026-08-03,F-33):ChatID 数据模型简化
 
 **Devin 原话**(2026-08-03 21:08):"我们是不续接任何 Thread,最多就是点对点的 ReplyTo" - chatID 数据模型做一次系统性清理。

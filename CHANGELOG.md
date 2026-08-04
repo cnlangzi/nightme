@@ -175,6 +175,8 @@ spawn will fail at runtime. See
 
 详见 [`docs/SPEC.md` §0.3](./docs/SPEC.md) + [`docs/feat/F-37-tool-thread-routing.md`](./docs/feat/F-37-tool-thread-routing.md) + [`docs/channel/feishu.md` §13.12](./docs/channel/feishu.md) + [`docs/feat/F-25-rolling-log.md` §3.1.1](./docs/feat/F-25-rolling-log.md) + [`docs/feat/F-08-channel-abstraction.md` §4](./docs/feat/F-08-channel-abstraction.md)。
 
+**`reply_in_thread=true` for thread-only kinds**(2026-08-04 子决议,关闭 §13.10 P2):`sendMessageFunc` / `sendContent` / `sendViaLarkReply` / `SendMessageText` / `SendCard` / `postThreadReply` 全链路加尾部 `replyInThread bool` 参数。`sendViaLarkReply` 内部 `larkim.NewReplyMessageReqBodyBuilder()` 仅在 `true` 时调 `.ReplyInThread(true)`(field `omitempty` 默认 false 保留 recorder log / idempotency cache 字节级兼容)。Path-by-path:`OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCompaction` → `true`(agent 进度只进 thread panel,main chat 仅显示 "X replies" 指示器);receipt 冷启动卡 / `OutCard` (permission) / `OutCommandReply` → `false`(必须 main chat 可见)。测试:`TestSend_ThreadOnlyEvents_PassReplyInThreadTrue` (4 kinds) + `TestSend_ChatVisibleEvents_PassReplyInThreadFalse` (3 paths)。
+
 ---
 
 ## Earlier snapshots (v1.x series, archived for reference)

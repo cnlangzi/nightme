@@ -546,6 +546,21 @@ type AgentSession interface {
 	// ACP/SDK modes; PTY mode writes it verbatim to stdin.
 	SendPermission(resp string) error
 
+	// New resets the conversation context on the running session.
+	// The underlying process (or transport, for long-lived bridges)
+	// stays alive. Events() stays open. PID stays the same.
+	// Subsequent SendText / SendBlocks operate on the fresh conversation.
+	//
+	// Bridge-specific implementations (F-34):
+	//   - claudecode: writeLine("/clear")       // stdin slash command
+	//   - pi:         send {"type":"new_session"} RPC
+	//   - acp:        send "session/new" JSON-RPC over the existing transport
+	//
+	// After New returns, the bridge MUST emit a fresh EventInit carrying
+	// the new SessionID; the runtime's existing eventHandler captures
+	// it via SetResumeID and persists (cmd/nightme/run.go newEventHandler).
+	New(ctx context.Context) error
+
 	// Close terminates the session and releases resources. Idempotent.
 	Close() error
 }
@@ -555,6 +570,15 @@ var (
 	// ErrUnknownAgent is returned by Registry.Get when no agent with
 	// the requested name has been registered.
 	ErrUnknownAgent = errors.New("agent: unknown agent")
+
+	// ErrRestartRequired is returned by AgentSession.New when the
+	// bridge cannot perform an in-place conversation reset (no
+	// protocol-level /clear or equivalent). The wrapper layer
+	// (chatsession.AgentSession.New) catches this sentinel and
+	// falls back to a kill-and-respawn via the configured Spawner.
+	// Returning nil here would be wrong: callers must distinguish
+	// "successfully reset in-place" from "needs full restart".
+	ErrRestartRequired = errors.New("agent: bridge requires restart for reset")
 )
 
 // sentinelErr is a small helper so tests can match errors with

@@ -85,7 +85,14 @@ type session struct {
 	turnActive bool
 
 	translator *translator
-	logger     *slog.Logger
+
+	// translatorMu serializes initSent reset + emitInit calls between
+	// the boot handshake (newSession) and F-34 reset (s.New). Both
+	// call paths can race if the user fires /new before the boot
+	// handshake completes; we hold this mutex across both so the
+	// initSent flag stays consistent.
+	translatorMu sync.Mutex
+	logger       *slog.Logger
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -217,10 +224,25 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 			return nil, fmt.Errorf("pi: decode get_state: %w", err)
 		}
 	}
-	for _, ev := range s.translator.emitInit(&state) {
+	// F-34 review C1: hold translatorMu across emitInit + deliver so
+	// a concurrent s.New cannot observe initSent=false between our
+	// reset and emit. Boot path runs before the bridge returns to
+	// callers, so contention is theoretical, but the symmetry with
+	// the reset path keeps the invariant obvious.
+	s.translatorMu.Lock()
+	s.deliverInitLocked(&state)
+	s.translatorMu.Unlock()
+	return s, nil
+}
+
+// deliverInitLocked emits the EventInit for `state` via deliver().
+// Caller MUST hold s.translatorMu so initSent's check-and-set is
+// atomic relative to translator.emitInit. Shared between the boot
+// handshake (newSession) and the F-34 reset path (New).
+func (s *session) deliverInitLocked(state *getStateResult) {
+	for _, ev := range s.translator.emitInit(state) {
 		s.deliver(ev)
 	}
-	return s, nil
 }
 
 // deliver pushes one AgentEvent onto the events channel. The
@@ -361,6 +383,121 @@ func (s *session) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) e
 // the method, so we return a clear error when it is called.
 func (s *session) SendPermission(_ string) error {
 	return errors.New("pi: SendPermission not supported in F-32 MVP (extension UI auto-cancelled)")
+}
+
+// New resets the conversation context on the running session without
+// terminating the underlying process. F-34 §3.2.2 + Phase 3 protocol
+// verification 2026-08-04:
+//
+// Per the official pi-coding-agent RPC spec (docs/rpc.md):
+//   - `new_session` RPC exists, request envelope: {"type":"new_session"}
+//   - Response carries only {"cancelled":bool}; NO new sessionId in data
+//   - NO `state_update` event is emitted afterwards
+//   - The ONLY way to learn the new sessionId is to call `get_state`
+//     again after `new_session` completes
+//
+// Implementation: send new_session, wait for response, then issue
+// get_state to retrieve the new sessionId, then push it into the
+// events channel as an EventInit so the runtime's eventHandler
+// captures it via SetResumeID (cmd/nightme/run.go newEventHandler).
+//
+// The process stays alive; the transport stays open; Events() stays
+// open; PID stays the same. Subsequent prompt submissions operate on
+// the fresh conversation.
+//
+// Timeout: each of the two RPC round-trips (new_session + get_state)
+// gets its own 10s deadline (F-34 Phase 3 review). The slash
+// command handler passes a Background ctx that would otherwise let
+// a hung pi server block /new forever; we previously shared a
+// single deadline across both calls, which left get_state starved
+// if new_session was slow.
+func (s *session) New(ctx context.Context) error {
+	select {
+	case <-s.closed:
+		return errors.New("pi: session closed")
+	default:
+	}
+
+	// 1. Send new_session and wait for response.
+	newCtx, newCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer newCancel()
+	respEnv, err := s.rpc.request(newCtx, "new_session", nil, "")
+	if err != nil {
+		return fmt.Errorf("pi: new_session: %w", err)
+	}
+	if !respEnv.Success {
+		return fmt.Errorf("pi: new_session rejected: %s", respEnv.Error)
+	}
+
+	// 2. Inspect data.cancelled (extension may veto the reset).
+	var cancelled struct {
+		Cancelled bool `json:"cancelled"`
+	}
+	if len(respEnv.Data) > 0 {
+		if err := json.Unmarshal(respEnv.Data, &cancelled); err != nil {
+			// Be lenient: a missing/odd payload should not fail the
+			// whole reset; the get_state call below is the source of
+			// truth for the new sessionId.
+			s.logger.Warn("pi: decode new_session data (continuing)",
+				slog.String("err", err.Error()))
+		}
+	}
+	if cancelled.Cancelled {
+		return errors.New("pi: new_session cancelled by extension")
+	}
+
+	// 3. Re-arm emitInit for the new session and fetch the new id
+	// via get_state. F-34 review C1: translatorMu must cover BOTH
+	// the initSent reset AND the subsequent emitInit call; otherwise
+	// the runtime sees a zero-sessionId init (or a stale init from
+	// the boot handshake) leak out between the reset and the
+	// emit. We hold the lock across reset+emit+deliver.
+	s.translatorMu.Lock()
+	s.translator.initSent = false
+	stateCtx, stateCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer stateCancel()
+	stateEnv, err := s.rpc.request(stateCtx, "get_state", map[string]any{}, "")
+	if err != nil {
+		s.translatorMu.Unlock()
+		return fmt.Errorf("pi: get_state after new_session: %w", err)
+	}
+	if !stateEnv.Success {
+		s.translatorMu.Unlock()
+		return fmt.Errorf("pi: get_state rejected: %s", stateEnv.Error)
+	}
+
+	var state getStateResult
+	if len(stateEnv.Data) > 0 {
+		if err := json.Unmarshal(stateEnv.Data, &state); err != nil {
+			s.translatorMu.Unlock()
+			return fmt.Errorf("pi: decode get_state: %w", err)
+		}
+	}
+
+	// F-34 review C2: refuse to commit the reset if pi has no
+	// sessionId in its state. emitInit would emit a zero-SessionID
+	// EventInit which runtime's eventHandler ignores (cmd/nightme/run.go
+	// guards on SessionID != ""), leaving the OLD ResumeID persisted
+	// in agent_sessions.json. Surface as a hard error so the caller
+	// knows the reset did not take effect.
+	if state.SessionID == "" {
+		s.translatorMu.Unlock()
+		return errors.New("pi: get_state returned empty sessionId after new_session")
+	}
+
+	// 4. Push the new EventInit into the events channel. deliver()
+	// is non-blocking; if the channel is full we drop with a warn
+	// (the next prompt from the user will fail visibly, but the
+	// process / transport is fine).
+	//
+	// Note (F-34 review C3): we hold translatorMu across deliver().
+	// deliver() may block up to 1s on a full channel, so a busy
+	// readPump holding the chan could delay /new by up to 1s. The
+	// alternative is to release the lock and accept a brief window
+	// where another caller sees initSent=false; we err on safety.
+	s.deliverInitLocked(&state)
+	s.translatorMu.Unlock()
+	return nil
 }
 
 // Close terminates the session: signals the child, waits for the

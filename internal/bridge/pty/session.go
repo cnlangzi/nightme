@@ -120,6 +120,15 @@ func (s *ptySession) SendPermission(resp string) error {
 	return err
 }
 
+// New signals that the PTY bridge cannot reset conversation context
+// in-place. PTY is a protocol-less byte pipe (F-34 §3.2 + product
+// clarification 2026-08-04: "pty 是删掉进程, 重启进程"). The wrapper
+// layer (chatsession.AgentSession.New) catches this sentinel and
+// falls back to kill-and-respawn via the configured Spawner.
+func (s *ptySession) New(ctx context.Context) error {
+	return agent.ErrRestartRequired
+}
+
 // Close terminates the session by closing the PTY. Idempotent.
 func (s *ptySession) Close() error {
 	if s.closed {

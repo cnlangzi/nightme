@@ -259,3 +259,18 @@ type extensionError struct {
 	Event         string `json:"event"`
 	Error         string `json:"error"`
 }
+
+// stateUpdate is emitted by pi after a new_session RPC, carrying the
+// new sessionId and (optionally) the new model selection. F-34 §3.2.2.
+//
+// Schema fields are best-effort: if pi adds or removes fields the
+// bridge will continue to compile (Go's json.Unmarshal silently
+// ignores unknown fields and leaves missing fields at the zero
+// value). The bridge only ever relies on SessionID for the runtime
+// ResumeID pipeline.
+type stateUpdate struct {
+	SessionID  string `json:"sessionId"`
+	ModelID    string `json:"modelId"`
+	ModelName  string `json:"modelName"`
+	SessionFile string `json:"sessionFile"`
+}

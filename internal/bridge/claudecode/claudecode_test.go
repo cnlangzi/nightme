@@ -931,3 +931,77 @@ drain:
 		t.Errorf("EventDone count = %d, want %d", dones, messages)
 	}
 }
+
+// TestSession_New_SendsClearUserMessage verifies F-34 §3.2.1 final
+// (live binary test 2026-08-04): claudecode.New writes a properly-
+// structured user-typed JSON envelope whose content is literally
+// "/clear". The mock recognizes this content and replies with a
+// fresh system/init event carrying a new session_id; the test
+// asserts the bridge surfaces that contract end-to-end.
+//
+// We don't mock the stdin pipe directly — the bridge runs against
+// the full mock CLI binary so writeLine → JSON-line → parser is
+// exercised end-to-end (F-34 §3.2.1 final).
+func TestSession_New_SendsClearUserMessage(t *testing.T) {
+	cmd, args := claudeMockCommand(t)
+
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr,
+		&slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	a := New("mock-claude", cmd, args)
+	sess, err := a.Start(context.Background(), agent.StartConfig{
+		Workspace:      t.TempDir(),
+		PermissionMode: PermissionBypass,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = sess.Close() })
+
+	// Drive sess.New(); the mock will respond with system/init +
+	// a terminal result.
+	if err := sess.New(context.Background()); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Drain events. Expect at least:
+	//   - 1 EventInit (session_id == "sess-after-clear-mock")
+	//   - 1 EventDone (terminal)
+	deadline := time.After(5 * time.Second)
+	var sawInit bool
+	var initSessionID string
+	var sawDone bool
+loop:
+	for {
+		select {
+		case ev, ok := <-sess.Events():
+			if !ok {
+				break loop
+			}
+			switch ev.Kind {
+			case agent.EventInit:
+				sawInit = true
+				if ev.Init != nil {
+					initSessionID = ev.Init.SessionID
+				}
+			case agent.EventDone:
+				sawDone = true
+			}
+			if sawInit && sawDone {
+				break loop
+			}
+		case <-deadline:
+			break loop
+		}
+	}
+
+	if !sawInit {
+		t.Fatalf("expected EventInit from mock's /clear handling")
+	}
+	if initSessionID != "sess-after-clear-mock" {
+		t.Fatalf("Init.SessionID = %q, want %q (mock's post-clear session id)",
+			initSessionID, "sess-after-clear-mock")
+	}
+}

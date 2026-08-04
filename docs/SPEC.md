@@ -766,6 +766,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
   - `cmd/nightme/run.go` `newEventHandler` 设 `out.ReplyTo = cs.currentTurnUserMsgID`
 - ✅ done in v1.3: docs/feat/F-25-rolling-log.md renamed from F-25-input-buffer.md; F-26-gateway-hub.md + F-08-channel-abstraction.md + F-31-message-state.md + docs/channel/feishu.md updated with v1.3 annotations
 - ⏭ **F-33（chatID 数据模型简化）**：删 Gateway ChatType 抽象 + topic_group 不特殊处理 + InboundMessage.ReplyTo = message.ParentId。详见 [`docs/feat/F-33-simplify-chatid-data-model.md`](./feat/F-33-simplify-chatid-data-model.md)
+- ⏭ **F-34（`/new` slash command）**：不退进程重置 agent 对话上下文；`/new` 清 activeCwd 下 pool 全部 AS；`/new <agent>` 清指定 AS；清 InputBuffer。详见 [`docs/feat/F-34-new-slash-command.md`](./feat/F-34-new-slash-command.md)
 - ⏭ **F-watch（WatchMode per-chat 群消息全收 + mention strip）**：
   - `internal/channel/channel.go` `Message.HasMention bool` 字段 + 接口扩展
   - `internal/channel/feishu/adapter.go::handleMessage` 加 mention strip + `HasMention` 计算

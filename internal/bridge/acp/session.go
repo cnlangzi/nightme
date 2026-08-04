@@ -294,6 +294,43 @@ func (s *acpSession) SendPermission(response string) error {
 	}, nil)
 }
 
+// New resets the conversation context on the running session without
+// terminating the underlying transport. F-34 §3.2.3: ACP's
+// `session/new` JSON-RPC creates a fresh session id on the same
+// transport; subsequent `session/prompt` calls route to the new
+// session. The transport process stays alive; Events() stays open;
+// PID stays the same.
+//
+// We reset s.initSent so emitInit fires again with the new sessionId,
+// letting the runtime's eventHandler capture it via SetResumeID
+// (cmd/nightme/run.go newEventHandler).
+func (s *acpSession) New(ctx context.Context) error {
+	if s.bridge == nil {
+		return errors.New("bridge/acp: nil transport")
+	}
+	startupCtx, cancel := context.WithTimeout(ctx, startupTimeout)
+	defer cancel()
+	result, err := s.rpc.request(startupCtx, "session/new", newSessionParams{
+		CWD:        s.workspace,
+		MCPServers: []any{},
+	})
+	if err != nil {
+		return fmt.Errorf("bridge/acp: session/new: %w", err)
+	}
+	// Re-arm initSent so emitInit fires again with the new id.
+	// We can't reuse the initSent guard as a one-shot across the
+	// session lifetime now that New can reset it; instead we use
+	// the existing permissionMu (which already serializes initSent
+	// writes through setSessionID/emitInit) as a memory barrier.
+	s.permissionMu.Lock()
+	s.initSent = false
+	s.permissionMu.Unlock()
+	if err := s.setSessionID(result); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *acpSession) Close() error {
 	var err error
 	s.closeOnce.Do(func() {

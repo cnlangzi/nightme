@@ -38,6 +38,15 @@ type Status struct {
 	LogPath         string    `json:"log_path,omitempty"`
 }
 
+// HealthPayload is the response body for the "health" RPC command.
+// Wraps a JSON-encoded WSHealthSnapshot as RawMessage so the wire
+// format stays loose-coupled: the daemoncontrol package doesn't
+// import channel/feishu (which would create an import cycle).
+type HealthPayload struct {
+	Channel string          `json:"channel"`
+	Health  json.RawMessage `json:"health"`
+}
+
 type Ready struct {
 	Ready bool `json:"ready"`
 }

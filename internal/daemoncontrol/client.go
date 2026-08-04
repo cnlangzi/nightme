@@ -48,6 +48,17 @@ func GetStatus(path string, timeout time.Duration) (Status, error) {
 	return status, nil
 }
 
+// GetHealth returns the live WS lifecycle snapshot from the running
+// daemon. The returned HealthPayload.Health is the raw JSON-encoded
+// WSHealthSnapshot (caller-side unmarshal). Used by `nightme health`.
+func GetHealth(path string, timeout time.Duration) (HealthPayload, error) {
+	var payload HealthPayload
+	if err := RequestSocket(path, "health", timeout, &payload); err != nil {
+		return HealthPayload{}, err
+	}
+	return payload, nil
+}
+
 func Stop(path string, timeout time.Duration) error {
 	return RequestSocket(path, "stop", timeout, nil)
 }

@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -50,6 +51,12 @@ type runDeps struct {
 	cleanup        bool
 	skipFeishuAuth bool
 	onReady        func()
+
+	// registerHealth, if non-nil, is called after the channel is
+	// constructed and started; the closure wires a closure returning
+	// the channel's live WS lifecycle snapshot into the daemoncontrol
+	// server's "health" RPC. See daemon_lifecycle.go's daemon child.
+	registerHealth func(ch channel.Channel, register func() (string, json.RawMessage, error))
 }
 
 func defaultRunDeps() runDeps {
@@ -250,8 +257,27 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	logger.Info("channel connected")
 	fmt.Fprintln(out, "Channel connected")
 
-	if fa, ok := ch.(*feishu.Adapter); ok {
+	var fa *feishu.Adapter
+	if f, ok := ch.(*feishu.Adapter); ok {
+		fa = f
 		fa.SetLogger(logger)
+	}
+
+	// F-40: register the WS lifecycle snapshot with the daemoncontrol
+	// server so `nightme health` can answer. The closure captures `fa`
+	// and is invoked on every "health" RPC; the closure itself is
+	// safe to call concurrently because WSHealth.Snapshot takes the
+	// read lock.
+	if deps.registerHealth != nil && fa != nil {
+		fa := fa
+		deps.registerHealth(fa, func() (string, json.RawMessage, error) {
+			snap := fa.Health()
+			data, err := json.Marshal(snap)
+			if err != nil {
+				return "", nil, fmt.Errorf("encode health snapshot: %w", err)
+			}
+			return ch.Name(), data, nil
+		})
 	}
 
 	// Build the router wiring (slashCommandDispatcher +

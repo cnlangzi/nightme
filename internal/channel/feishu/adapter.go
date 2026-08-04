@@ -87,6 +87,13 @@ type Adapter struct {
 	cfg        *config.Config
 	cancel     context.CancelFunc
 
+	// health tracks the live WebSocket lifecycle for the
+	// `nightme health` subcommand. Updated from SDK OnReady /
+	// OnReconnecting / OnReconnected / OnDisconnected / OnError
+	// callbacks plus inbound event dispatch + successful outbound
+	// sends. Read via Health() / Adapter.HealthSnapshot().
+	health *WSHealth
+
 	// limiter 全局共享 token bucket（F-35）。所有出口 SDK call 前
 	// 都过 Wait()，预防触发飞书 230001 / 230020 限流错误码。
 	// 默认 5 QPS / burst 1（保守）。详见 docs/feat/F-35-ratelimit.md。
@@ -249,12 +256,42 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		cfg.Feishu.AppSecret,
 		larkws.WithEventHandler(handler),
 		larkws.WithOnReady(func() {
-			log.Printf("Feishu WebSocket connected")
+			now := time.Now()
+			a.health.recordConnect(now)
+			a.logger.Info("feishu: ws connected",
+				"app_id", cfg.Feishu.AppID,
+				"reconnect_count", a.health.Snapshot().ReconnectCount)
 		}),
 		larkws.WithOnError(func(err error) {
-			if err != nil {
-				log.Printf("Feishu WebSocket error: %v", err)
+			if err == nil {
+				return
 			}
+			now := time.Now()
+			a.health.recordError(now, err.Error())
+			a.logger.Warn("feishu: ws error",
+				"app_id", cfg.Feishu.AppID,
+				"err", err.Error())
+		}),
+		larkws.WithOnDisconnected(func() {
+			now := time.Now()
+			a.health.recordDisconnect(now)
+			a.logger.Warn("feishu: ws disconnected",
+				"app_id", cfg.Feishu.AppID)
+		}),
+		larkws.WithOnReconnecting(func() {
+			now := time.Now()
+			a.health.recordReconnecting(now, "")
+			snap := a.health.Snapshot()
+			a.logger.Warn("feishu: ws reconnecting",
+				"app_id", cfg.Feishu.AppID,
+				"reconnect_count", snap.ReconnectCount)
+		}),
+		larkws.WithOnReconnected(func() {
+			now := time.Now()
+			a.health.recordConnect(now)
+			a.logger.Info("feishu: ws reconnected",
+				"app_id", cfg.Feishu.AppID,
+				"reconnect_count", a.health.Snapshot().ReconnectCount)
 		}),
 	)
 	a.larkClient = lark.NewClient(cfg.Feishu.AppID, cfg.Feishu.AppSecret)
@@ -271,6 +308,11 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 	// F-35: 全局共享 token bucket（保守 5 QPS / burst 1）。
 	// 进程内单实例，覆盖所有 5 类飞书出口 API。
 	a.limiter = NewLimiter(cfg.Feishu.RateLimit, slog.Default())
+
+	// F-40: WS lifecycle observability. Allocates the WSHealth
+	// struct; the SDK callbacks wired above (WithOnReady / OnError /
+	// OnDisconnected / OnReconnecting / OnReconnected) update it.
+	a.health = &WSHealth{}
 	return a, nil
 }
 
@@ -1401,6 +1443,23 @@ func (a *Adapter) SetLogger(l *slog.Logger) {
 	a.mu.Unlock()
 }
 
+// Health returns a live snapshot of the WebSocket lifecycle state.
+// The snapshot is a copy (deep-enough for JSON marshaling), so
+// callers may mutate it freely without affecting the adapter's
+// internal state. nil-safe (returns a zero snapshot if the adapter
+// has no health — only happens in tests that bypass NewAdapter).
+//
+// Used by:
+//   - cmd/nightme/run.go to register with the daemoncontrol "health"
+//     RPC so `nightme health` can answer.
+//   - the daemoncontrol server's response handler.
+func (a *Adapter) Health() WSHealthSnapshot {
+	if a.health == nil {
+		return WSHealthSnapshot{}
+	}
+	return a.health.Snapshot()
+}
+
 // logOutgoing emits one info-level line per outgoing Feishu call so
 // the CLI surface shows both halves of the conversation. The
 // inbound "received: …" line is emitted by handleMessage via
@@ -1415,6 +1474,7 @@ func (a *Adapter) SetLogger(l *slog.Logger) {
 func (a *Adapter) logOutgoing(kind, target, id string, err error) {
 	a.mu.RLock()
 	logger := a.logger
+	health := a.health
 	a.mu.RUnlock()
 	if logger == nil {
 		return
@@ -1425,8 +1485,18 @@ func (a *Adapter) logOutgoing(kind, target, id string, err error) {
 		slog.String("id", id),
 	}
 	if err != nil {
+		// F-40: surface failed sends on the health event ring so
+		// `nightme health` shows the recent degradation timeline.
+		if health != nil {
+			health.recordError(time.Now(), err.Error())
+		}
 		logger.LogAttrs(context.Background(), slog.LevelWarn, "feishu: outgoing failed", append(attrs, slog.String("err", err.Error()))...)
 		return
+	}
+	// F-40: stamp outbound liveness on success. Drives the
+	// "outbound stuck" detection (last_outbound_at > N seconds ago).
+	if health != nil {
+		health.recordOutbound(time.Now(), target, kind)
 	}
 	logger.LogAttrs(context.Background(), slog.LevelInfo, "feishu: outgoing", attrs...)
 }
@@ -2157,6 +2227,12 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	// handler even if the channel send is cancelled or timed out.
 	// Companion to logOutgoing (the bot side of the conversation).
 	a.logInbound(msg)
+	// F-40: stamp the inbound liveness signal for the
+	// `nightme health` command. Drives the "inbound stuck"
+	// detection (last_inbound_at > N seconds ago).
+	if a.health != nil {
+		a.health.recordInbound(time.Now(), chatID, msgType)
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

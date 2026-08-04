@@ -1,4 +1,4 @@
-// Package main — `nightme health` subcommand.
+// Package main — `nightme doctor` subcommand.
 //
 // Reads the live WebSocket lifecycle state from the running daemon
 // via the daemoncontrol "health" RPC, then prints a human-readable
@@ -9,8 +9,8 @@
 //
 // Usage:
 //
-//	nightme health             # human-readable text
-//	nightme health --json      # raw JSON for piping to jq etc.
+//	nightme doctor             # human-readable text
+//	nightme doctor --json      # raw JSON for piping to jq etc.
 package main
 
 import (
@@ -26,11 +26,11 @@ import (
 	"github.com/cnlangzi/nightme/internal/daemoncontrol"
 )
 
-func newHealthCmd() *cobra.Command {
+func newDoctorCmd() *cobra.Command {
 	var jsonOut bool
 	cmd := &cobra.Command{
-		Use:   "health",
-		Short: "Show live WebSocket lifecycle state of the running daemon",
+		Use:   "doctor",
+		Short: "Diagnose the running daemon (WS state, reconnect health, inbound/outbound liveness)",
 		Long: `Print the current Feishu WebSocket connection state plus recent
 lifecycle events. Connects to the running daemon via its IPC socket
 (paths.Socket under cfg.Paths.DataDir) and asks for the "health"
@@ -44,17 +44,17 @@ Useful first-stop diagnostic for "feishu消息没收到" reports:
   - What's the most recent error?
 
 Examples:
-  nightme health
-  nightme health --json`,
+  nightme doctor
+  nightme doctor --json`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runHealth(cmd.OutOrStdout(), jsonOut)
+			return runDoctor(cmd.OutOrStdout(), jsonOut)
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "print raw JSON snapshot instead of formatted text")
 	return cmd
 }
 
-func runHealth(out io.Writer, jsonOut bool) error {
+func runDoctor(out io.Writer, jsonOut bool) error {
 	_, paths, err := loadLifecyclePaths()
 	if err != nil {
 		return err
@@ -64,15 +64,15 @@ func runHealth(out io.Writer, jsonOut bool) error {
 		return fmt.Errorf("daemon health RPC: %w", err)
 	}
 	if jsonOut {
-		return writeHealthJSON(out, payload)
+		return writeDoctorJSON(out, payload)
 	}
-	return writeHealthText(out, payload)
+	return writeDoctorText(out, payload)
 }
 
-// writeHealthJSON pretty-prints the raw payload. The Health field
+// writeDoctorJSON pretty-prints the raw payload. The Health field
 // is a json.RawMessage; we don't round-trip decode so the user sees
 // the field shape the daemon actually emitted.
-func writeHealthJSON(out io.Writer, payload daemoncontrol.HealthPayload) error {
+func writeDoctorJSON(out io.Writer, payload daemoncontrol.HealthPayload) error {
 	envelope := map[string]any{
 		"channel": payload.Channel,
 		"health":  json.RawMessage(payload.Health),
@@ -82,10 +82,10 @@ func writeHealthJSON(out io.Writer, payload daemoncontrol.HealthPayload) error {
 	return enc.Encode(envelope)
 }
 
-// writeHealthText prints a human-readable multi-line status with
+// writeDoctorText prints a human-readable multi-line status with
 // aligned columns. Lifted from cc-connect's health-display pattern
 // (one section per concern, blank line between sections).
-func writeHealthText(out io.Writer, payload daemoncontrol.HealthPayload) error {
+func writeDoctorText(out io.Writer, payload daemoncontrol.HealthPayload) error {
 	var snap feishu.WSHealthSnapshot
 	if err := json.Unmarshal(payload.Health, &snap); err != nil {
 		return fmt.Errorf("decode health snapshot: %w", err)

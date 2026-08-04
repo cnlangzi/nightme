@@ -1161,6 +1161,101 @@ WebSearch  -> 10 results
 
 **Backlog**:OutThinking 多 chunk 聚合(streaming 模式,最后一段更新)、Web UI / Slack 适配各 channel 自治决定。
 
+### 13.13 F-37 实机验证方法论(2026-08-04 群 Frtpilot-Xiage 落地)
+
+> 命名：3 组合是 **`channel/feishu` 自治**的渲染决策(具体到飞书 thread UI 行为),不上升到 `gateway.OutboundMessage` 抽象层。其他 channel(Web / Slack)应各自决定怎么渲染 OutThinking / OutTool*,不复制飞书的 thread 方案。
+
+**3 种飞书 reply 形态**(实机验证,2026-08-04):
+
+| 形态 | 飞书 `reply_in_thread` body 字段 | main chat 实际显示 | thread panel 实际显示 | 飞书响应 `thread_id` |
+|---|---|---|---|---|
+| **ReplyInChat** | n/a(顶级 Create) | 独立气泡(不挂 anchor 下) | 不在 thread | `""`(飞书不分配) |
+| **ReplyInThreadAndChat** | **字段省略**(`omitempty` nil 指针) | **正文**内联 reply(带回复箭头) | **同一份正文** | `""`(飞书不分配独立 thread)|
+| **ReplyInThread** | `true` | **"X replies" 灰条**(无正文)| **正文**(多条 share 同一 thread)| `omt_xxx`(首次分配,后续 reply-true 复用)|
+
+**OutboundKind 路径拆分**(F-37 thread-route 设计):
+
+| Kind | 形态 | main chat | 备注 |
+|---|---|---|---|
+| `OutToolStart` | ReplyInThread | 隐藏 | Claude Code-style `● name(args)` call 行 |
+| `OutToolEnd` | ReplyInThread | 隐藏 | Claude Code-style `⎿  …` result 行 |
+| `OutThinking` | ReplyInThread | 隐藏 | `💭 <text>` |
+| `OutCompaction` | ReplyInThreadAndChat | **可见** | `✶ Compacting conversation…`(ops 决策 2026-08-04:brief marker 是 informative 不是 noise)|
+| `OutCard`(permission)| ReplyInThreadAndChat | 可见 | 必须 main chat 可视(discoverability > cleanliness)|
+| `OutCommandReply`(slash)| ReplyInThreadAndChat | 可见 | 用户在等回复 |
+| Receipt 冷启动卡 | ReplyInThreadAndChat | 可见 | receipt card 收窄到只承载 OutText / OutResult + 元数据 |
+
+> Kinds 命名 ops 用 past tense(`OutToolStarted/Ended/Think`),nightme enum 实际是 present tense(`OutToolStart/End/OutThinking`)。不**改 enum 名(牵动 Gateway 抽象层多个包),只按 enum 行为归属。
+
+#### 13.13.1 实机验证方法(when to run)
+
+**何时需要再跑一遍**:
+- 升级 `larksuite/oapi-sdk-go` 跨 minor 版本(>= v3.10)
+- 飞书发布新 doc 关于 `reply_in_thread` 字段语义变更
+- nightme 引入新 OutboundKind(检查它的形态归属)
+- 用户报告"thread 行为不对"——验证 round-trip ID 关系
+
+**前 2 步准备**:
+1. **确认目标 chat 是群**(非 DM):DM 没有"X replies"指示器 UI,`reply_in_thread=true/false` 视觉差异看不出来。推荐用一个**活跃的** group chat(不是 nightly internal DM)。
+2. **取得锚点 user message id**:用户在那条群发任意一句话,得到 message_id(`om_xxx`)。或者用 nightme 已有的 `cs_oc_xxx` chat 里最近一条用户消息 id。
+
+#### 13.13.2 8 种验证组合(what to send)
+
+每组发**一条**消息,带**不同前缀**让你在飞书 UI 上一眼区分,**串行发,每发一条停下来目视确认**。8 组按顺序:
+
+| # | 组合 | wire 形态 | 预期 main chat | 预期 thread panel |
+|---|---|---|---|---|
+| 1 | A. 顶级 Create | `POST /im/v1/messages` (无 root_id) | 独立气泡 | 不在 thread |
+| 2 | B. Reply to anchor,字段省略 | `POST /messages/{om_M0}/reply` (无 reply_in_thread) | **正文**内联 + 线程入口 | 同一份正文 |
+| 3 | C. Reply to anchor,显式 false | 同上 + body `reply_in_thread:false` | 同 B(字节差 28B,UI 等价)| 同 B |
+| 4 | **D. Reply to anchor,`reply_in_thread:true`** | 同上 + body `reply_in_thread:true` | **"X replies" 灰条**(无正文)| **正文** + 首次给 `omt_xxx` |
+| 5 | E. Chain reply(reply to D 的 id) | `POST /messages/{D.id}/reply` (parent ≠ M0) | 内联 reply 到 D | thread 碎裂(独立 thread_id)|
+| 6 | F. 顶级 Create + raw `root_id` body | `POST /im/v1/messages` body `{..., root_id:om_M0}` | **当前 SDK 拒绝**(结构体无 `RootId` 字段) | — |
+| 7 | G1+G2. 两条 reply-true 续发 | `POST /messages/{om_M0}/reply` 两次 + `reply_in_thread:true` | 共享 "X replies" 灰条(数字累加)| 两条 share `omt_xxx` |
+| 8 | H. DM context(同 D) | 同 D | DM 没有 thread panel,UI 不可见差异 | — |
+
+#### 13.13.3 验证方法(how to send + what to capture)
+
+**用 larkim SDK 直接发**(无需 cmd/_probe/ 工具,工具已删;需要时按本节重建):
+
+1. 构造 `lark.Client` 用 `~/.config/nightme/config.yaml` 里的 `app_id` / `app_secret`(或从环境变量读)
+2. Create 顶级:`cli.Im.V1.Message.Create(ctx, NewCreateMessageReqBuilder().ReceiveIdType("chat_id").Body(&CreateMessageReqBody{ReceiveId:&chatID, MsgType:&MsgTypeText, Content:&json}).Build())`
+3. Reply 默认:`cli.Im.V1.Message.Reply(ctx, NewReplyMessageReqBuilder().MessageId(om_M0).Body(NewReplyMessageReqBodyBuilder().MsgType(MsgTypeText).Content(json).Build()).Build())` — **不**调 `.ReplyInThread(...)`
+4. Reply true:在 3 的 builder 链上**追加** `.ReplyInThread(true)`
+5. Reply false 显式:追加 `.ReplyInThread(false)`(与 3 字节差 28B)
+
+**每个响应打印**(从 `larkim.ReplyMessageResp.Data` / `CreateMessageResp.Data` 提取):
+- `message_id` —— 这条新消息的 id
+- `parent_id` —— 父消息(Reply API 时 = path 里的 message_id;Create 时空)
+- `root_id` —— 根消息(Reply API 时飞书沿 parent 链爬到根;Create 时**空字符串**)
+- `thread_id` —— thread 容器 id(ReplyInThread + true 首次分配 `omt_xxx`;其他情况空)
+
+**关键判读规则**:
+- B vs C:body 字节差 28B(多 `"reply_in_thread":false`),但飞书 UI 行为**完全等价**——这是 `omitempty` 的设计
+- B vs D:body 字节差 28B(多 `"reply_in_thread":true`),飞书 UI 行为**完全不同**——B 显正文,D 只显 "X replies"
+- D 续发 G1/G2:都 share `thread_id`(`omt_xxx` 同值),main chat 累加 1→2→3 replies
+- E (chain reply):飞书**会**沿 parent 链爬到根,`root_id` = M0;但 thread_id 是新分配的独立 id → thread 碎裂 → 验证"单数锚点"不变式不可妥协
+
+#### 13.13.4 注意事项(pitfalls)
+
+- **`SendMessageFunc` 注入点不要漏**:`internal/channel/feishu/adapter.go` 的 `sendMessageFunc` 是 6 参(含 `replyInThread bool`);**单测 mock 必须用同样签名**,否则编译挂
+- **绝对不要简化**:`if replyInThread { bodyBuilder.ReplyInThread(true) }` → 不能改成 `bodyBuilder.ReplyInThread(replyInThread)`,后者 false 路径会多 28 字节破坏 pre-F-37 idempotency cache 字节级 hash
+- **mock probe 不要相信**:mock server 假设 `root_id = message_id` 是错的(实机 Create 返回空),`thread_id` 总是有值也是错的(实机 false 形态返回空)。mock 只能验证 SDK 字节格式;实机才能验证 ID 关系
+- **DM 测不出 thread 视觉差异**:1-on-1 没有"X replies"指示器 UI,`reply_in_thread=true/false` 视觉合一。要测 thread 行为必须用群
+- **夜间飞书 API 有维护窗**:5 QPS 是 bot 限速,但飞书自身偶尔 5xx;持续失败时先 `GET /open-apis/health` 查服务端状态,别反复重试把单测打挂
+- **不要把回包 `thread_id` 当持久 ID**:`omt_xxx` 是飞书服务端分配的,跨会话不保证稳定;nightme 不存它(再次验证 F-33 thread 不进 nightme 数据模型)
+
+#### 13.13.5 历史与移除记录
+
+2026-08-04 在 Frtpilot-Xiage 群(`oc_4a06da49bc0131ff14b381498e4fed9d`)实机跑过一轮,得到关键发现:
+- 顶级 Create 不分配 thread_id(根/thread 都空,跟 mock 假设不同)
+- ReplyInThread+AndChat 也不分配 thread_id(只是 main chat 内联 reply)
+- ReplyInThread 才分配独立 thread_id(`omt_xxx`,首次分配后续复用)
+- 4 条 reply-true 全部 share 同一 `thread_id`(反向验证"单数锚点"设计对的)
+- 字节差异:字段省略 vs 显式 false = 28 字节(omitempty 决定)
+
+`cmd/_probe/`(mock probe + 真实发送 CLI)曾保留在 working tree 一段时间,后于 `c52ad06` 删除——决策已落地,工具不再有保留价值。**当未来需要再跑验证时**:按本节 §13.13.3 重建 SDK 调用即可,无需还原工具源码。
+
 ## 14. 变更日志
 
 - **2026-08-03** - 加入 §11-§13: Feishu msg_type 全集参考、OutboundKind → Feishu 渲染映射表、审计结果(1 bug + 4 澄清)。基于 `internal/channel/feishu/*` 与 `internal/gateway/*` 现状。

@@ -98,7 +98,7 @@ type Channel interface {
 	// drop OutboundMessage kinds its UI cannot represent (e.g. Slack
 	// cannot swap reactions in place) without surfacing an error.
 	//
-	// For OutText / OutToolStart / OutToolEnd / OutThinking kinds:
+	// For OutReply / OutToolStart / OutToolEnd / OutThinking kinds:
 	// the Channel is expected to route by msg.ReplyTo (userMsgID) to
 	// find its existing receipt (card / thread / DOM node) and patch
 	// it in place; if no receipt exists for that userMsgID yet,

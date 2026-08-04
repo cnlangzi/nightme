@@ -467,7 +467,7 @@ func TestSend_RoutesByUserMsgID_NotChatID(t *testing.T) {
 
 	// ---- Turn 1 ----
 	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind: gateway.OutText, ChatID: chatID, ReplyTo: "om_msg_1",
+		Kind: gateway.OutReply, ChatID: chatID, ReplyTo: "om_msg_1",
 		Text: "turn 1 hello",
 	}); err != nil {
 		t.Fatalf("turn 1 Send: %v", err)
@@ -492,7 +492,7 @@ func TestSend_RoutesByUserMsgID_NotChatID(t *testing.T) {
 
 	// ---- Turn 2 ----
 	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind: gateway.OutText, ChatID: chatID, ReplyTo: "om_msg_2",
+		Kind: gateway.OutReply, ChatID: chatID, ReplyTo: "om_msg_2",
 		Text: "turn 2 hello",
 	}); err != nil {
 		t.Fatalf("turn 2 Send: %v", err)
@@ -1091,7 +1091,7 @@ func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
 }
 
 // TestSend_OutText_FoldsIntoReceipt — F-34 regression guard.
-// OutText / OutResult / OutInit / OutUsage must still fold into
+// OutReply / OutResult / OutInit / OutUsage must still fold into
 // the receipt card (unchanged behavior).
 func TestSend_OutText_FoldsIntoReceipt(t *testing.T) {
 	a := testAdapter(t)
@@ -1106,12 +1106,12 @@ func TestSend_OutText_FoldsIntoReceipt(t *testing.T) {
 
 	// Warm up the receipt.
 	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutText,
+		Kind:    gateway.OutReply,
 		ChatID:  "oc_test",
 		ReplyTo: userMsgID,
 		Text:    "warmup",
 	}); err != nil {
-		t.Fatalf("Send(OutText warmup): %v", err)
+		t.Fatalf("Send(OutReply warmup): %v", err)
 	}
 
 	for _, kind := range []gateway.OutboundKind{
@@ -1161,7 +1161,7 @@ func TestSend_OutText_FoldsIntoReceipt(t *testing.T) {
 	rcpt.mu.Lock()
 	defer rcpt.mu.Unlock()
 	if len(rcpt.entries) == 0 {
-		t.Fatalf("receipt has no entries; OutText/OutResult/OutInit/OutUsage should fold in")
+		t.Fatalf("receipt has no entries; OutReply/OutResult/OutInit/OutUsage should fold in")
 	}
 }
 
@@ -1283,7 +1283,7 @@ func TestSendViaLark_RootIdSet(t *testing.T) {
 }
 
 // receiptFor2 was removed: OutThinking test now drives a real
-// receipt via the Send dispatcher itself (OutText warmup primes
+// receipt via the Send dispatcher itself (OutReply warmup primes
 // receiptsByUserMsgID).
 
 // TestSendViaLark_TerminalCodeFallsBackToCreate — v1.3.x
@@ -1453,10 +1453,10 @@ func TestSend_OutResult_GoesToNewReply_NotReceipt(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	// Pre-create the receipt via an OutText warmup so receiptFor lookup
+	// Pre-create the receipt via an OutReply warmup so receiptFor lookup
 	// has a real receipt to interact with.
 	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutText,
+		Kind:    gateway.OutReply,
 		ChatID:  "oc_test",
 		ReplyTo: userMsgID,
 		Text:    "streaming…",
@@ -1508,7 +1508,319 @@ func TestSend_OutResult_GoesToNewReply_NotReceipt(t *testing.T) {
 	}
 }
 
-// TestSend_OutResult_LongMarkdownUsesInteractiveCard — F-39 dispatch path 3.
+// --- F-40: OutReply fold / overflow routing ---
+
+// TestSend_OutReply_FoldsIntoReceipt_NoTruncate — F-40 default
+// fold path. Short replies must reach the receipt LogEntry
+// verbatim (no 600-byte truncation) and the receipt must NOT
+// trigger sendFunc for the fold path (no stand-alone reply).
+func TestSend_OutReply_FoldsIntoReceipt_NoTruncate(t *testing.T) {
+	a := testAdapter(t)
+	userMsgID := "om_user_fold"
+
+	var sends int
+	a.sendFunc = func(context.Context, string, string, string, string, bool) (string, error) {
+		sends++
+		return "om_xxx", nil
+	}
+	a.updateFunc = func(context.Context, string, string) error { return nil }
+
+	text1500 := strings.Repeat("y", 1500) // well under 8000 runes but well over old 600B cap
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind:    gateway.OutReply,
+		ChatID:  "oc_test",
+		ReplyTo: userMsgID,
+		Text:    text1500,
+	}); err != nil {
+		t.Fatalf("Send(OutReply): %v", err)
+	}
+
+	// The fold path itself doesn't call sendFunc after the
+	// initial cold-start (which DOES go through sendFunc via
+	// SendCard). Total sends = 1 (cold-start only). The fold
+	// event itself flows through receipt.Append → updateFunc.
+	if sends != 1 {
+		t.Errorf("fold path: expected exactly 1 sendFunc call (cold-start only), got %d", sends)
+	}
+
+	// Verify the full 1500-char text reached the LogEntry.
+	a.mu.RLock()
+	rcpt := a.receiptsByUserMsgID[userMsgID]
+	a.mu.RUnlock()
+	if rcpt == nil {
+		t.Fatal("receipt missing after OutReply fold")
+	}
+	rcpt.mu.Lock()
+	defer rcpt.mu.Unlock()
+	if len(rcpt.entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(rcpt.entries))
+	}
+	if rcpt.entries[0].Text != text1500 {
+		t.Errorf("reply text truncated: got %d chars, want %d",
+			len(rcpt.entries[0].Text), len(text1500))
+	}
+	if rcpt.entries[0].Kind != "reply" || rcpt.entries[0].Icon != "💬" {
+		t.Errorf("entry shape wrong: got (%q, %q), want (💬, reply)",
+			rcpt.entries[0].Icon, rcpt.entries[0].Kind)
+	}
+}
+
+// TestSend_OutReply_OverflowLength_AsReply — F-40 §1.2 length
+// rule. text rune count > perEntryMaxRunes (8000) must divert
+// to a stand-alone ReplyInThreadAndChat instead of folding into
+// the receipt. The receipt must NOT receive a new LogEntry.
+func TestSend_OutReply_OverflowLength_AsReply(t *testing.T) {
+	a := testAdapter(t)
+	userMsgID := "om_user_overflow_len"
+
+	var sends int
+	var gotMsgType, gotRootID string
+	a.sendFunc = func(_ context.Context, _, msgType, _, rootID string, replyInThread bool) (string, error) {
+		sends++
+		gotMsgType = msgType
+		gotRootID = rootID
+		return "om_overflow", nil
+	}
+	a.updateFunc = func(context.Context, string, string) error { return nil }
+
+	// Prime receipt with one short entry.
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: "first chunk",
+	}); err != nil {
+		t.Fatalf("warmup: %v", err)
+	}
+
+	// Now overflow: 9000 runes > perEntryMaxRunes (8000).
+	bigText := strings.Repeat("z", 9000)
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: bigText,
+	}); err != nil {
+		t.Fatalf("Send(overflow OutReply): %v", err)
+	}
+
+	// Overflow path: warmup triggers cold-start SendCard (1
+	// sendFunc), overflow triggers ReplyInThreadAndChat (1 more
+	// sendFunc). Total = 2.
+	if sends != 2 {
+		t.Errorf("expected exactly 2 sendFunc calls (cold-start + overflow), got %d", sends)
+	}
+	// Anchored at userMsgID via ReplyInThreadAndChat
+	// (replyInThread=false ⇒ rootID is set). The closure
+	// captures the LAST send's rootID; since overflow is the
+	// last call, this is the overflow reply's anchor.
+	if gotRootID != userMsgID {
+		t.Errorf("overflow reply must anchor at userMsgID %q, got %q", userMsgID, gotRootID)
+	}
+	// 3-segment dispatch returns interactive / post / text —
+	// the long text contains no markdown so it lands in text
+	// (no markdown indicators). Sanity-check the msgType family.
+	if gotMsgType != "interactive" && gotMsgType != "post" && gotMsgType != "text" {
+		t.Errorf("overflow reply msgType should be interactive/post/text, got %q", gotMsgType)
+	}
+
+	// Receipt should still hold only the warmup entry; the
+	// overflowed reply must NOT have appended a 9000-char entry.
+	a.mu.RLock()
+	rcpt := a.receiptsByUserMsgID[userMsgID]
+	a.mu.RUnlock()
+	if rcpt == nil {
+		t.Fatal("receipt missing after warmup")
+	}
+	rcpt.mu.Lock()
+	defer rcpt.mu.Unlock()
+	if len(rcpt.entries) != 1 {
+		t.Errorf("receipt should hold only the warmup entry; got %d entries (overflow must not fold)", len(rcpt.entries))
+	}
+}
+
+// TestSend_OutReply_OverflowQuantity_AsReply — F-40 §1.2 quantity
+// rule. Receipt already full (EntryCount >= replyMaxEntries = 45)
+// must divert a new reply to stand-alone ReplyInThreadAndChat
+// instead of FIFO-evicting the oldest entries.
+func TestSend_OutReply_OverflowQuantity_AsReply(t *testing.T) {
+	a := testAdapter(t)
+	userMsgID := "om_user_overflow_qty"
+
+	var sends int
+	a.sendFunc = func(context.Context, string, string, string, string, bool) (string, error) {
+		sends++
+		return "om_q", nil
+	}
+	a.updateFunc = func(context.Context, string, string) error { return nil }
+
+	// Prime receipt with one warmup send (drives cold-start
+	// through sendFunc), then inflate its entries directly to
+	// replyMaxEntries. Mutating the slice avoids driving 45
+	// sequential OutReply sends through the Append → renderLocked
+	// pipeline (which would do 45 PATCH storm calls) — we only
+	// care about the routing decision, not the appender path.
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: "warmup",
+	}); err != nil {
+		t.Fatalf("warmup: %v", err)
+	}
+	a.mu.RLock()
+	r := a.receiptsByUserMsgID[userMsgID]
+	a.mu.RUnlock()
+	if r == nil {
+		t.Fatal("receipt missing after warmup")
+	}
+	r.mu.Lock()
+	// First entry is the warmup; pad to replyMaxEntries total.
+	for len(r.entries) < replyMaxEntries {
+		r.entries = append(r.entries, LogEntry{Icon: "💬", Text: "x", Kind: "reply"})
+	}
+	r.mu.Unlock()
+
+	// A short reply (well below perEntryMaxRunes) but receipt is
+	// full → quantity overflow → divert to stand-alone reply.
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: "another",
+	}); err != nil {
+		t.Fatalf("Send(quantity overflow): %v", err)
+	}
+
+	if sends != 2 {
+		t.Errorf("expected exactly 2 sendFunc calls (warmup cold-start + quantity overflow reply), got %d", sends)
+	}
+
+	// The receipt must NOT have FIFO-evicted; all 45 original
+	// entries must still be present.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.entries) != replyMaxEntries {
+		t.Errorf("receipt entries changed: got %d, want %d (no FIFO evict on overflow route)",
+			len(r.entries), replyMaxEntries)
+	}
+}
+
+// TestSend_OutReply_AfterCompletion_AsReply — F-40 §1.5 late
+// reply. Once the receipt has reached StateCompleted (terminal),
+// further OutReply events must be delivered as stand-alone
+// replies rather than silently dropped (which is what the old
+// Append path did when state == StateCompleted).
+func TestSend_OutReply_AfterCompletion_AsReply(t *testing.T) {
+	a := testAdapter(t)
+	userMsgID := "om_user_late"
+
+	var sends int
+	var gotRootID string
+	a.sendFunc = func(_ context.Context, _, _, _, rootID string, _ bool) (string, error) {
+		sends++
+		gotRootID = rootID
+		return "om_late", nil
+	}
+	a.updateFunc = func(context.Context, string, string) error { return nil }
+
+	// Prime receipt then mark it completed via the lifecycle.
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: "warmup",
+	}); err != nil {
+		t.Fatalf("warmup: %v", err)
+	}
+	a.mu.RLock()
+	rcpt := a.receiptsByUserMsgID[userMsgID]
+	a.mu.RUnlock()
+	if err := rcpt.SetCompleted(t.Context()); err != nil {
+		t.Fatalf("SetCompleted: %v", err)
+	}
+
+	sendsBeforeLate := sends
+	// Late OutReply — must NOT be silently dropped.
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: "late reply",
+	}); err != nil {
+		t.Fatalf("Send(late OutReply): %v", err)
+	}
+
+	if sends != sendsBeforeLate+1 {
+		t.Errorf("late OutReply must trigger sendFunc; got %d → %d sends",
+			sendsBeforeLate, sends)
+	}
+	if gotRootID != userMsgID {
+		t.Errorf("late reply must anchor at userMsgID %q, got %q", userMsgID, gotRootID)
+	}
+}
+
+// TestSend_OutReply_NoReceiptFallback — when receiptFor fails
+// (SendCard cold-start errored), OutReply must degrade to
+// sendRawOutText (plain top-level bubble) so the user still sees
+// the reply. Mirrors the pre-F-40 fail-safe path.
+func TestSend_OutReply_NoReceiptFallback(t *testing.T) {
+	a := testAdapter(t)
+
+	// Force receiptFor to fail: pre-populate the map with a
+	// poisoned receipt whose SendCard returns an error. Adapter
+	// will return this receipt from receiptFor but our new
+	// logic treats receipt == nil OR SendCard failure as "fallback".
+	// Simpler approach: send with empty ReplyTo so receiptFor
+	// itself short-circuits to nil (it returns nil when userMsgID
+	// is empty), exercising the fallback path.
+	var sends int
+	var gotRootID string
+	a.sendFunc = func(_ context.Context, _, _, _, rootID string, _ bool) (string, error) {
+		sends++
+		gotRootID = rootID
+		return "om_fb", nil
+	}
+	a.updateFunc = func(context.Context, string, string) error { return nil }
+
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: "", Text: "orphan",
+	}); err != nil {
+		t.Fatalf("Send(no-receipt OutReply): %v", err)
+	}
+
+	// Orphan path uses sendRawOutText which routes through
+	// sendContent with empty rootID (top-level).
+	if sends != 1 {
+		t.Errorf("expected exactly 1 sendFunc call (fallback), got %d", sends)
+	}
+	if gotRootID != "" {
+		t.Errorf("orphan fallback must use top-level send (rootID=\"\"), got %q", gotRootID)
+	}
+}
+
+// TestSend_OutReply_NoIconPrefix_OnOverflow — F-40 §1.3 visual:
+// the stand-alone reply payload must NOT carry the 💬 icon
+// prefix. The icon is reserved for receipt entries; the stand-
+// alone path is a continuation of the reply stream and would
+// visually clash with the receipt siblings if it carried the
+// same prefix.
+func TestSend_OutReply_NoIconPrefix_OnOverflow(t *testing.T) {
+	a := testAdapter(t)
+	userMsgID := "om_user_noicon"
+
+	var capturedBody string
+	a.sendFunc = func(_ context.Context, _, _, body, rootID string, _ bool) (string, error) {
+		capturedBody = body
+		return "om_n", nil
+	}
+	a.updateFunc = func(context.Context, string, string) error { return nil }
+
+	// Prime receipt, then trigger overflow.
+	_ = a.Send(t.Context(), gateway.OutboundMessage{
+		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: "warmup",
+	})
+	bigText := strings.Repeat("w", 9000)
+	if err := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: bigText,
+	}); err != nil {
+		t.Fatalf("Send(overflow): %v", err)
+	}
+
+	if strings.Contains(capturedBody, "💬") {
+		t.Errorf("overflow reply body must not carry 💬 icon prefix; got: %s",
+			truncateForTest(capturedBody, 200))
+	}
+}
+
+// helper functions removed: newReceiptForTest / buildColdStartCardForTest
+// were left over from an earlier draft that inflated the receipt
+// via SendCard. The current TestSend_OutReply_OverflowQuantity
+// primes via a normal OutReply warmup then mutates r.entries
+// directly to avoid driving the SendCard → renderLocked pipeline.
+
 func TestSend_OutResult_LongMarkdownUsesInteractiveCard(t *testing.T) {
 	a := testAdapter(t)
 	var gotType string
@@ -1656,7 +1968,7 @@ func TestSend_OutResult_LeavesReceiptAlive(t *testing.T) {
 
 	// Trigger a Text to ensure receipt exists + is Executing.
 	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind: gateway.OutText, ChatID: "oc_test", ReplyTo: userMsgID, Text: "x",
+		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: "x",
 	}); err != nil {
 		t.Fatalf("warmup: %v", err)
 	}

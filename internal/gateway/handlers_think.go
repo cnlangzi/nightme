@@ -45,7 +45,7 @@ import (
 //	/think              → reply current mode + usage
 //	/think <other>      → reply usage hint (parse failure)
 //
-// Other OutboundKinds (OutText, OutResult, OutToolStart,
+// Other OutboundKinds (OutReply, OutResult, OutToolStart,
 // OutToolEnd, OutCompaction, OutInit, OutUsage) are not affected
 // by /think off — only OutThinking is gated.
 func handleThink(ctx context.Context, mgr *chatsession.Manager, channel Channel, msg *InboundMessage, args []string, globalPrimary string) (*CommandResult, error) {

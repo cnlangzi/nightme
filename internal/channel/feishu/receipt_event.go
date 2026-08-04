@@ -49,10 +49,18 @@ func eventToEntry(ev agent.AgentEvent, now time.Time) (LogEntry, bool) {
 			// reply instead (see Adapter.Send). Skip.
 			return LogEntry{}, false
 		}
+		// F-40: no longer truncate to perEntryMaxBytes (600). The
+		// full reply text flows into LogEntry.Text; buildReceiptCard
+		// splits long entries into multiple `div` elements via
+		// splitMarkdownForDivs (≤ divTextCharLimit runes each).
+		// Truly oversized replies (runes > perEntryMaxRunes) are
+		// diverted to a stand-alone ReplyInThreadAndChat by the
+		// Adapter.Send(OutReply) routing logic before this path is
+		// reached.
 		return LogEntry{
 			Time: now,
 			Icon: "💬",
-			Text: truncateForLog(text, perEntryMaxBytes),
+			Text: text,
 			Kind: "reply",
 		}, true
 

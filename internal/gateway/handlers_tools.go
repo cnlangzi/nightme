@@ -54,7 +54,7 @@ import (
 //	/tools              → reply current mode + usage
 //	/tools <other>      → reply usage hint (parse failure)
 //
-// Other OutboundKinds (OutText, OutResult, OutThinking, OutCompaction,
+// Other OutboundKinds (OutReply, OutResult, OutThinking, OutCompaction,
 // OutInit, OutUsage) are not affected by /tools off — only
 // OutToolStart and OutToolEnd are gated.
 func handleTools(ctx context.Context, mgr *chatsession.Manager, channel Channel, msg *InboundMessage, args []string, globalPrimary string) (*CommandResult, error) {

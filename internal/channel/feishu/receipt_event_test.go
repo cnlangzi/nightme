@@ -36,6 +36,32 @@ func TestEventToEntry_Text_ThinkingPrefix(t *testing.T) {
 	}
 }
 
+// TestEventToEntry_Text_NoTruncate — F-40 regression guard. Before
+// F-40, EventText entries were truncated to perEntryMaxBytes (600
+// bytes) at the eventToEntry boundary, which dropped everything
+// past 600 bytes for any chunk longer than that. F-40 removes
+// that truncation so the full reply text flows into LogEntry.Text
+// and buildReceiptCard splits long entries into multiple `div`
+// elements via splitMarkdownForDivs. This test pins the new
+// no-truncate behavior: a 1500-character reply must reach the
+// LogEntry verbatim. (Overflow above perEntryMaxRunes is handled
+// upstream in Adapter.Send via sendReplyAsMessage — that path is
+// covered separately by adapter_test.go.)
+func TestEventToEntry_Text_NoTruncate(t *testing.T) {
+	longText := strings.Repeat("a", 1500)
+	e, ok := eventToEntry(agent.AgentEvent{Kind: agent.EventText, Text: longText}, at())
+	if !ok {
+		t.Fatal("long EventText should produce a LogEntry (no truncation in eventToEntry)")
+	}
+	if e.Text != longText {
+		t.Errorf("long EventText truncated: got %d chars, want %d (full text)",
+			len(e.Text), len(longText))
+	}
+	if e.Icon != "💬" || e.Kind != "reply" {
+		t.Errorf("long EventText: got (%q, %q), want (💬, reply)", e.Icon, e.Kind)
+	}
+}
+
 // --- New kinds (P1 follow-up). ---
 
 // TestEventToEntry_Result_Dropped — F-39 reverse-section proof.

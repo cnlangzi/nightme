@@ -145,7 +145,7 @@ type Adapter struct {
 	// Stage 3: rolling-log receipt state lives on the adapter
 	// (Channel.Send is the display strategy). The map is keyed by
 	// chatID; one receipt per chat at a time. When the gateway's
-	// per-session pump emits the first OutText for a chat that
+	// per-session pump emits the first OutReply for a chat that
 	// doesn't have an active receipt, we lazily create one (this
 	// covers the case where the user message is forwarded via
 	// the gateway's messageDispatcher but the renderer path is gone).
@@ -576,7 +576,7 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 // Send implements the v0.3 channel.Channel interface. It dispatches
 // each OutboundKind to the corresponding Feishu API call:
 //
-//	OutText              → CreateMessage (msg_type=text)
+//	OutReply             → CreateMessage (msg_type=text)
 //	OutToolStart/End     → F-34 thread-reply as the "● Tool(args)"
 //	                       / "⎿  …" Claude Code-style lines. F-38
 //	                       §3.1.3: each Start posts a fresh thread
@@ -671,19 +671,74 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 
 func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 	switch msg.Kind {
-	case gateway.OutText:
-		// Folded into the active receipt's rolling log. The
-		// Feishu reply is the single message the user sees; we
-		// edit it in place via UpdateMessage on each event.
+	case gateway.OutReply:
+		// F-40: default fold path is the active receipt's
+		// rolling log. The Feishu reply is the single message the
+		// user sees; we edit it in place via UpdateMessage on
+		// each event. eventToEntry no longer truncates the text
+		// to 600 bytes — the full reply flows into LogEntry.Text
+		// and buildReceiptCard splits it into multiple `div`
+		// elements via splitMarkdownForDivs (≤ divTextCharLimit
+		// runes each).
+		//
+		// Three bail-out conditions route through
+		// sendReplyAsMessage instead of folding in:
+		//
+		//   1. receiptFor failed (cold-start SendCard errored) →
+		//      top-level plain text bubble via sendRawOutText so
+		//      the user at least sees the reply.
+		//   2. Receipt is already StateCompleted (EventDone /
+		//      EventError landed earlier) → late-arriving reply
+		//      must NOT be silently dropped; deliver as a
+		//      stand-alone ReplyInThreadAndChat.
+		//   3. Receipt would overflow (length: text runes >
+		//      perEntryMaxRunes; quantity: receipt EntryCount >=
+		//      replyMaxEntries) → divert to stand-alone reply so
+		//      the receipt card stays within Feishu's element /
+		//      envelope budgets instead of crowding them.
+		//
+		// All three bail-outs share the same surface: a new
+		// ReplyInThreadAndChat message anchored at the same
+		// userMsgID. The visual distinction between "fold into
+		// receipt" and "stand-alone reply" is invisible to the
+		// user — both render as Feishu messages under their
+		// original message — but the stand-alone variant owns
+		// its own message envelope and never crowds the rolling
+		// log.
+		text := msg.Text
+		if strings.TrimSpace(text) == "" {
+			// Empty reply: drop silently. Matches the
+			// pre-F-40 behavior (append with empty text did
+			// nothing useful) and avoids sending blank
+			// bubbles to the user.
+			return nil
+		}
+
 		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
 		if receipt == nil {
-			// receiptFor's SendMessageText failed. Try a direct
-			// send as a last resort so the user sees the text.
-			return a.sendRawOutText(ctx, msg.ChatID, msg.Text)
+			// receiptFor's SendCard failed — degrade to plain
+			// top-level send so the user sees the text.
+			return a.sendRawOutText(ctx, msg.ChatID, text)
 		}
+
+		// Late reply after completion: never silently drop.
+		if receipt.IsCompleted() {
+			return a.sendReplyAsMessage(ctx, msg.ChatID, msg.ReplyTo, text)
+		}
+
+		// Overflow guard: length or quantity. isOverflowingReceipt
+		// is read-only against the receipt (acquires r.mu
+		// internally via EntryCount / len helpers — caller does
+		// not hold the lock).
+		if a.isOverflowingReceipt(receipt, text) {
+			return a.sendReplyAsMessage(ctx, msg.ChatID, msg.ReplyTo, text)
+		}
+
+		// Normal fold: no truncation, buildReceiptCard splits
+		// internally if the entry crosses divTextCharLimit.
 		return receipt.Append(ctx, agent.AgentEvent{
 			Kind: agent.EventText,
-			Text: msg.Text,
+			Text: text,
 		})
 
 	case gateway.OutThinking:
@@ -1089,6 +1144,112 @@ func (a *Adapter) sendResultAsReply(
 	return err
 }
 
+// isOverflowingReceipt decides whether an OutReply should bypass
+// the receipt's rolling log and be sent as a stand-alone
+// ReplyInThreadAndChat instead. F-40 §1.2 — two triggers:
+//
+//   - length: text rune count exceeds perEntryMaxRunes (8000).
+//     Folding such a long entry would consume many `div`
+//     elements, threatening the 50-element card envelope budget
+//     and pushing the answer out of view.
+//
+//   - quantity: receipt already holds replyMaxEntries (45)
+//     entries. Folding another would trigger evictOverflowLocked
+//     FIFO eviction of older entries — visually noisy and
+//     semantically lossy. Diverting to a stand-alone reply
+//     preserves all previous entries while still delivering
+//     the new reply.
+//
+// Either trigger alone returns true (logical OR).
+//
+// Caller does NOT hold r.mu. The helper is read-only and
+// obtains its own snapshot via MessageReceipt.EntryCount which
+// takes r.mu internally.
+func (a *Adapter) isOverflowingReceipt(r *MessageReceipt, text string) bool {
+	if utf8.RuneCountInString(text) > perEntryMaxRunes {
+		return true
+	}
+	if r.EntryCount() >= replyMaxEntries {
+		return true
+	}
+	return false
+}
+
+// sendReplyAsMessage posts an OutReply that bypassed the receipt
+// (overflow length / overflow quantity / late after completion)
+// as a stand-alone ReplyInThreadAndChat anchored at userMsgID.
+//
+// F-40 §1.3-1.4 — sibling of sendResultAsReply (F-39). Shares:
+//   - 3-segment dispatch (text / post+md / card) via
+//     buildResultPayload from result_render.go
+//   - markdown sanitize pipeline via SanitizeCardMarkdown
+//     (card_sanitize.go)
+//   - 28 KB envelope defense via resultCardEnvelopeBudget
+//   - replyInThread=false wire (ReplyInThreadAndChat: main chat
+//     visible, thread panel mirrored)
+//
+// Differences from sendResultAsReply:
+//   - No `❌ ` prefix on errors: OutReply is a stream chunk,
+//     error variants are delivered as a separate OutboundMessage
+//     (Kind: OutError / EventError → fold path), so the
+//     stand-alone reply path never receives an error payload.
+//     Adding an icon would make the stand-alone reply visually
+//     different from its fold-context siblings, breaking the
+//     "this is the same reply, just delivered elsewhere" UX.
+//   - Orphan path (empty userMsgID) → top-level plain text via
+//     sendRawOutText, identical to sendResultAsReply's fallback.
+func (a *Adapter) sendReplyAsMessage(
+	ctx context.Context, chatID, userMsgID, text string,
+) error {
+	if strings.TrimSpace(chatID) == "" {
+		return errors.New("feishu: chat_id is required")
+	}
+	if strings.TrimSpace(text) == "" {
+		// Defensive: caller already filters empty replies.
+		return nil
+	}
+
+	// Orphan reply (no userMsgID) — top-level plain text
+	// bubble. Mirrors OutCommandReply + sendResultAsReply
+	// fallbacks: no anchor → no thread, just a plain bubble.
+	if userMsgID == "" {
+		return a.sendRawOutText(ctx, chatID, text)
+	}
+
+	// Apply markdown sanitize pipeline so the rendered output
+	// doesn't get rejected by Feishu (230001 invalid href) or
+	// break lark_md rendering on edge cases.
+	sanitized := SanitizeCardMarkdown(text)
+
+	// Hard cap to stay well under 30 KB envelope with margin
+	// for JSON envelope + future growth. Same budget as
+	// sendResultAsReply — the envelope is shared, so the cap
+	// is shared.
+	if len(sanitized) > perResultMaxBytes*4 {
+		sanitized = truncateRunes(sanitized, perResultMaxBytes)
+	}
+
+	msgType, body, err := buildResultPayload(sanitized)
+	if err != nil {
+		return err
+	}
+
+	// Envelope defensive cap.
+	if len(body) > resultCardEnvelopeBudget {
+		a.logger.Warn("feishu: reply overflow over envelope, truncating",
+			"chat_id", chatID, "user_msg_id", userMsgID,
+			"body_bytes", len(body))
+		truncated := truncateRunes(sanitized, resultCardEnvelopeBudget/3)
+		msgType, body, err = buildResultPayload(truncated)
+		if err != nil {
+			return err
+		}
+	}
+
+	_, err = a.sendContent(ctx, chatID, msgType, body, userMsgID, false)
+	return err
+}
+
 // postThreadReply posts body as a thread reply anchored at rootID.
 // rootID = msg.ReplyTo = currentTurnUserMsgID. When rootID is empty
 // (orphan event, e.g. startup EventInit) the helper falls back to a
@@ -1423,7 +1584,7 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 		// branches for `Kind == "thinking"` and `Kind == "tool"`
 		// (origin/main version) are intentionally absent on
 		// this branch: those kinds no longer reach the card
-		// surface. Only OutText / OutResult / OutInit / OutUsage
+		// surface. Only OutReply / OutResult / OutInit / OutUsage
 		// entries make it here.
 		//
 		// F-37 multi-div content split: if the entry's text
@@ -1493,7 +1654,7 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 
 // buildColdStartCard renders the minimal "⏳ 等待中" receipt used
 // by Adapter.receiptFor when the gateway's pumpOutbound emits an
-// OutText without a prior SendUserMessage (i.e. the agent turn
+// OutReply without a prior SendUserMessage (i.e. the agent turn
 // started before the user message — a startup edge case). The
 // returned card is posted via SendCard and the resulting message id
 // seeds the receipt's cardMsgID so subsequent events PATCH the same

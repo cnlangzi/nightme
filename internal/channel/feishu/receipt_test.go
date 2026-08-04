@@ -765,6 +765,67 @@ func TestBuildReceiptCard_Card2Shape(t *testing.T) {
 	}
 }
 
+// TestBuildReceiptCard_LongReply_SplitMultiDiv — F-40 regression
+// guard. Before F-40, eventToEntry truncated EventText to 600
+// bytes, so buildReceiptCard never had to deal with entries
+// long enough to cross divTextCharLimit (1000 runes). F-40
+// removes the truncation; long entries now flow into
+// buildReceiptCard which must split them via splitMarkdownForDivs
+// into multiple `div` elements so the Feishu hard limit on a
+// single div.text.content is respected without dropping content.
+//
+// This test pins that behaviour: a single 2500-char reply entry
+// (above divTextCharLimit = 1000 runes) must render as 3 separate
+// markdown elements, each containing a chunk of the original text.
+// The icon (💬) only attaches to the first chunk so the rolling-
+// log "💬 first line" visual is preserved.
+func TestBuildReceiptCard_LongReply_SplitMultiDiv(t *testing.T) {
+	longText := strings.Repeat("x", 2500)
+	r := &MessageReceipt{
+		state: StateExecuting,
+		entries: []LogEntry{
+			{Icon: "💬", Text: longText, Kind: "reply"},
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+
+	// Sanity: full text appears across the split chunks (the
+	// split reassembles the original string when you concatenate
+	// the per-element content; it does NOT drop bytes at the
+	// build layer). For a continuous run of one char, splitMarkdownForDivs
+	// uses hardSplitRunes which slices at rune boundaries — the
+	// original 2500-char run shows up as 1000 + 1000 + 500 x's
+	// across three elements, totaling 2500 x's in the rendered
+	// body. Count individual x's rather than checking for the
+	// contiguous 2500-char substring (which won't survive the
+	// split across element boundaries).
+	xCount := strings.Count(body, "x")
+	if xCount != len(longText) {
+		t.Errorf("long reply content lost in buildReceiptCard; got %d x's, want %d",
+			xCount, len(longText))
+	}
+
+	// Three markdown elements: 1000 + 1000 + 500. Counting
+	// occurrences of the markdown tag is the cheapest proxy; the
+	// envelope already contains 1 markdown tag for the headerLine
+	// (empty here since Executing state has no header), but for a
+	// single long entry we expect 3 distinct markdown elements.
+	tagCount := strings.Count(body, `"tag":"markdown"`)
+	if tagCount < 3 {
+		t.Errorf("expected ≥ 3 markdown elements (multi-div split), got %d in body:\n%s",
+			tagCount, truncateForTest(body, 400))
+	}
+
+	// Icon should appear once (in the first chunk header).
+	iconCount := strings.Count(body, "💬")
+	if iconCount != 1 {
+		t.Errorf("expected exactly 1 💬 icon (on first chunk), got %d", iconCount)
+	}
+}
+
 // TestBuildReceiptCard_FooterOpenClawStyle pins the footer
 // visual styling that matches the OpenClaw Lark plugin
 // (openclaw-lark src/card/builder.ts::buildFooter). Two
@@ -833,7 +894,7 @@ func TestBuildReceiptCard_FooterOpenClawStyle(t *testing.T) {
 // contract: thinking entries (along with tool_start / tool_end /
 // compaction) are NO LONGER carried in the receipt card. The
 // adapter routes them to Feishu thread replies; eventToEntry
-// returns (_, false) so the receipt only sees OutText / OutResult
+// returns (_, false) so the receipt only sees OutReply / OutResult
 // / OutInit / OutUsage-derived entries. The card body must not
 // contain a collapsible_panel element.
 //
@@ -887,7 +948,7 @@ func TestBuildReceiptCard_ThinkingCollapsiblePanel(t *testing.T) {
 	if strings.Contains(body, "should respond briefly and friendly") {
 		t.Errorf("card body leaked thinking text; F-34 dropped it from the receipt\n--- body ---\n%s", truncateForTest(body, 400))
 	}
-	// The reply entry survives (it's a real OutText-derived entry).
+	// The reply entry survives (it's a real OutReply-derived entry).
 	if !strings.Contains(body, `"content":"💬 Hi! How can I help you today?"`) {
 		t.Errorf("reply entry missing from card body\n--- body ---\n%s", truncateForTest(body, 400))
 	}
@@ -937,7 +998,7 @@ func (m *mockReceiptBot) UpdateMessage(_ context.Context, _, _ string) error {
 
 // --- F-34: buildReceiptCard no longer wraps tool entries in
 // collapsible_panel. tool_start / tool_end are routed to thread
-// replies; only OutText / OutResult / OutInit / OutUsage-derived
+// replies; only OutReply / OutResult / OutInit / OutUsage-derived
 // entries land in the card body. ---
 
 func TestBuildReceiptCard_ToolFolded(t *testing.T) {
@@ -1111,7 +1172,7 @@ func TestBuildReceiptCard_HeaderFooterRespected(t *testing.T) {
 // branch they are filtered out entirely, so we flip the
 // assertion: 1 markdown element (the StateExecuting header
 // line) but NO entry content + NO collapsible_panel. The
-// multi-div split machinery is exercised by the OutText /
+// multi-div split machinery is exercised by the OutReply /
 // OutResult long-content path instead — see F-37 §3.4.
 func TestBuildReceiptCard_ThinkingEntry_NotRendered(t *testing.T) {
 	r := &MessageReceipt{

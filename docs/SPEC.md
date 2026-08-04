@@ -261,6 +261,54 @@ type OutboundMessage struct {
 
 ---
 
+## 0.9 文档变更摘要（v1.3.x F-40 增量，2026-08-04）
+
+**背景**：F-39 修了 OutResult 路径（最终答复独立 reply，无 600 cap），但 **OutText 流式 chunks 仍在 receipt 内被 `truncateForLog(text, 600)` 截断**——长 reply 场景下用户看不到完整内容。同时 `OutText` 这个名字是泛指 "text payload"，在 F-37 / F-38 / F-39 加了一堆专门名字（OutTaskCreate / OutResult / OutThinking 等）后显得太弱。F-40 同时解决这两点：
+
+**增量变化**：
+
+1. **`OutText` → `OutReply` 改名（语义更准确）**
+   - `gateway.OutboundKind.OutText` 常量改名为 `OutReply`
+   - 语义：这是 agent **对** user 当前 turn 的 reply 主体（流式 chunks），不是泛指 "text"
+   - 所有引用点统一改：`messages.go` 常量定义 + `translate.go` 翻译路径 + `feishu/adapter.go::Send` case label + `cmd/nightme/run.go::responder.Send` Kind 字段值
+   - 不保留 `OutText` 别名（与 F-37 / F-38 / F-39 一致，直接改）
+
+2. **`eventToEntry(EventText)` 删 600 字节截断**
+   - 当前 `truncateForLog(text, perEntryMaxBytes=600)` 是 receipt 内 OutReply 内容丢失的元凶
+   - 删掉后 `LogEntry.Text` 保留完整 OutReply 文本
+   - `buildReceiptCard` 改用 F-37 `splitMarkdownForDivs(entry.Text, divTextCharLimit=1000)` 拆多 div（code block / list 块保持 atomic）
+
+3. **超限改独立 reply（`ReplyInThreadAndChat`）**
+   - 长度规则：`utf8.RuneCountInString(text) > perEntryMaxRunes (8000)` → 走独立 reply
+   - 数量规则：receipt `len(entries) >= replyMaxEntries (45)` → 走独立 reply
+   - 新 helper `sendReplyAsMessage` 平行 F-39 `sendResultAsReply`：复用 `SanitizeCardMarkdown` + `splitMarkdownForDivs` + `buildResultPayload` + 28KB envelope defense；走 `sendContent(chatID, msgType, body, userMsgID, replyInThread=false)` = ReplyInThreadAndChat；**不加 icon 前缀**（OutReply 是 reply 流的延续，不是新条目）
+
+4. **迟到 OutReply（receipt 已 StateCompleted）走独立 reply**
+   - 当前 `Append` 在 StateCompleted 时静默丢弃；F-40 改走独立 reply，保证 agent 完整回复链不丢
+
+**核心变化**：
+- `OutboundMessage{Kind: OutReply, Text, ReplyTo, ChatID}` wire format 之外字段全不变（仅 enum 改名）
+- 命名 + 截断 + 超限路由三件事在同一份 PR 解决
+- 与 F-39 OutResult 形成"独立 reply surface"模式一致性
+
+**不变式**：
+- `OutboundMessage` 字段不变（仅 `Kind` enum 改名 `OutText` → `OutReply`）
+- Gateway 不动（`Translate` 仍产 OutboundMessage）
+- ChatSession 不动（`currentTurnUserMsgID` 单数锚点保留）
+- `OutboundMessage.ReplyTo = currentTurnUserMsgID` 不变（独立 reply 也锚同 userMsgID；Feishu 端视觉连接保留）
+- §1.4 边界规范保留（OutReply 字段是 typed primitive string，Channel 自决 target）
+- 抽象归抽象 / 具体归具体原则保留（超限改独立 reply 是 Feishu 自治）
+- 1 turn : 1 anchor 不变式保留
+- F-25 rolling-log UX 不变（receipt card 仍是"事件日志 + 元数据"）
+- F-39 OutResult 决策不变（OutResult 不进 receipt）
+- F-37 / F-38 / F-think / F-38-tool-merge 全部决策不变
+
+**为什么不叫 v2.0**：v1.3 核心不变式（职责隔离、Binding FSM owner、Receipt 自治、抽象归抽象 / 具体归具体）全部保留。F-40 是 Channel 自治范围内的渲染策略调整（命名 + 截断 + 超限路由），不影响 nightme 数据模型与 Gateway 契约。
+
+**详细落地**：见 [`docs/feat/F-40-outreply-overflow.md`](./feat/F-40-outreply-overflow.md) + `docs/channel/feishu.md` §13.19。
+
+---
+
 ### 0.6 文档变更摘要（v1.3.x F-think 增量，2026-08-04）
 
 **背景**：F-thread-route 把 OutThinking / OutToolStart / OutToolEnd / OutCompaction 投到飞书 thread。OutThinking 当前用 plain text（`postThreadReply`）渲染，代码块 / 列表 / 加粗全部丢失；同时用户没有 per-chat 控制 thinking 是否显示的开关。F-think 同时解决这两点：

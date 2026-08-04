@@ -224,6 +224,43 @@ type OutboundMessage struct {
 
 ---
 
+## 0.8 文档变更摘要（v1.3.x F-39 增量，2026-08-04）
+
+**背景**：F-37 multi-div 把 OutResult 多 div 拆进 receipt,导致实机出现 `OutResult dedup` 静默丢长答复的 bug。Claude Code stream-json 的 `result.result` 与最后一条 `assistant.event` 内容字节级相等,经 `truncateForLog(text, 600)` 砍后两侧必撞 dedup。长答复(> 600 字)的最终答复整段静默丢失,只在 receipt 里看到 N 条碎裂的"前 600 字 + …" 💬 行,没有 📝 完整文本。
+
+**F-39 反转**：OutResult 不再 fold 进 rolling-log receipt card,改为独立 reply 投递到 userMsgID thread。两个职责清晰分离:
+- **Receipt card** 退化为"事件日志 + 元数据"(OutText chunks + state header + footer)
+- **Final Result Reply** 独立为"答案交付"(OutResult 完整文本,无 600 cap,无 dedup)
+
+**核心变化**：
+
+1. **`gateway/translate.go`** 不动(`OutboundMessage{Kind: OutResult, Result}` 契约保留)
+2. **`channel/feishu/adapter.go::Send(OutResult)`** 重写:`receipt.SetCompleted(ctx)` 关 receipt → `sendResultAsReply` helper 独立发
+3. **`channel/feishu/receipt_event.go`** 删 dedup 协调 + 删 `case agent.EventResult`(不再被 receipt 路径触发)
+4. **新文件**:
+   - `card_sanitize.go` — 移植 cc-connect `sanitizeMarkdownURLs / preprocessFeishuMarkdown / optimizeFeishuCardMarkdown / stripInvalidFeishuCardImages` pipeline(URL / fence / heading demotion / image strip)
+   - `result_render.go` — 三段 dispatch(text / post+md / card 2.0)+ `splitMarkdownForDivs` 复用 + 28 KB envelope 防御
+
+**核心 3 段 dispatch** (抄 cc-connect `buildReplyContent`):
+- 无 markdown 指示符 → `MsgTypeText`(plain text bubble)
+- markdown 存在且 tables > 5 → `MsgTypePost + tag:"md"`(GFM 兜底,无 Card 2.0 表格硬限)
+- 默认 → `MsgTypeInteractive` Card 2.0 + 单/多 `tag:"markdown"` div(用 F-37 `splitMarkdownForDivs` 拆 ≤ 1000 runes/div)
+
+**不变式**:
+- `OutboundMessage` 契约不变(无新 Kind,无删 Kind,无改 `Result` typed field)
+- Gateway 不动(`Translate` 仍产 OutboundMessage)
+- ChatSession 不动(`currentTurnUserMsgID` 单数锚点保留)
+- `ReplyTo = currentTurnUserMsgID` 不变(独立 reply 也锚同 userMsgID;Feishu 端视觉连接保留)
+- §1.4 边界规范保留(OutResult 字段是 typed `agent.ResultEvent`,Channel 自决 target)
+- 抽象归抽象 / 具体归具体原则保留(独立 reply target 是 Feishu 自治)
+- 1 turn : 1 anchor 不变式保留
+
+**为什么不叫 v2.0**:v1.3 核心不变式(职责隔离、Binding FSM owner、Receipt 自治)全部保留。F-39 是 Channel 自治范围内的渲染目标切换(从"fold into receipt card"到"independent reply"),不影响 nightme 数据模型与 Gateway 契约。
+
+**详细落地**：见 [`docs/feat/F-39-result-as-new-reply.md`](./feat/F-39-result-as-new-reply.md) + `docs/channel/feishu.md` §13.16。
+
+---
+
 ### 0.6 文档变更摘要（v1.3.x F-think 增量，2026-08-04）
 
 **背景**：F-thread-route 把 OutThinking / OutToolStart / OutToolEnd / OutCompaction 投到飞书 thread。OutThinking 当前用 plain text（`postThreadReply`）渲染，代码块 / 列表 / 加粗全部丢失；同时用户没有 per-chat 控制 thinking 是否显示的开关。F-think 同时解决这两点：

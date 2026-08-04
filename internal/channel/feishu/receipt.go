@@ -677,9 +677,15 @@ func (r *MessageReceipt) Heartbeat(ctx context.Context) error {
 	return r.renderLocked(ctx)
 }
 
-// SetCompleted transitions Executing → Completed. Adds the ✅
-// reaction and writes the final header. No new entry is appended —
-// the work log stays as-is and the header signals completion.
+// SetCompleted transitions Executing → Completed. The header flips to
+// ✅ and the rolling-log streaming text is cleared so the card collapses
+// to header + footer + task list — the answer text lives in the
+// independent reply (F-39 reverse-section proof). No new entry appended.
+//
+// Called from EventDone / EventError in Append; NOT from OutResult (which
+// was the F-39 mistake — early-terminal caused OutUsage / OutInit /
+// TaskList to be silently dropped because Append's StateCompleted guard
+// returned early).
 func (r *MessageReceipt) SetCompleted(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -688,6 +694,7 @@ func (r *MessageReceipt) SetCompleted(ctx context.Context) error {
 	}
 	r.state = StateCompleted
 	r.completedAt = time.Now()
+	r.entries = nil // collapse rolling-log; only metadata (header/footer/task list) survives
 	return r.renderLocked(ctx)
 }
 
@@ -721,11 +728,19 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 	// branches swallow them.
 	switch ev.Kind {
 	case agent.EventDone:
-		r.state = StateCompleted
-		r.completedAt = time.Now()
-		return r.renderLocked(ctx)
+		// SetCompleted inlined: Append holds r.mu, calling SetCompleted
+		// would self-deadlock (sync.Mutex is not reentrant).
+		if r.state != StateCompleted {
+			r.state = StateCompleted
+			r.completedAt = time.Now()
+			r.entries = nil // collapse rolling-log on terminal
+			if err := r.renderLocked(ctx); err != nil {
+				return err
+			}
+		}
+		return nil
 	case agent.EventError:
-		entry, _ := eventToEntry(ev, time.Now(), r.lastEntryLocked())
+		entry, _ := eventToEntry(ev, time.Now())
 		if entry.Text != "" || entry.Icon != "" {
 			r.appendEntryLocked(entry)
 		}
@@ -763,7 +778,7 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 		return r.renderLocked(ctx)
 	}
 
-	entry, ok := eventToEntry(ev, time.Now(), r.lastEntryLocked())
+	entry, ok := eventToEntry(ev, time.Now())
 	if !ok {
 		// F-34: eventToEntry returns (_, false) for kinds the
 		// receipt card no longer carries (thinking / tool_start /

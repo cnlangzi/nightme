@@ -749,23 +749,25 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		return nil
 
 	case gateway.OutResult:
-		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
-		if receipt == nil {
-			// receipt creation failed — degrade to a standalone
-			// message so the user still sees the final reply
-			// instead of a silent drop.
-			if msg.Text != "" {
-				return a.sendRawOutText(ctx, msg.ChatID, msg.Text)
-			}
-			return nil
-		}
 		if msg.Result == nil {
 			return errors.New("feishu: OutResult missing Result payload")
 		}
-		return receipt.Append(ctx, agent.AgentEvent{
-			Kind:   agent.EventResult,
-			Result: msg.Result,
-		})
+		text := strings.TrimSpace(msg.Result.Text)
+		if text == "" && !msg.Result.IsError {
+			return nil
+		}
+		// Icon prefix only when there's actual error text — without it
+		// the user would see a meaningless bare-emoji standalone message.
+		if msg.Result.IsError && text != "" {
+			text = "❌ " + text
+		}
+		// F-39: deliver the full result as an independent reply anchored at
+		// userMsgID. We deliberately do NOT call receipt.SetCompleted here —
+		// the receipt stays StateExecuting so subsequent OutUsage / OutInit /
+		// TaskList can still update the footer (token counts, agent name,
+		// task checklist). EventDone / EventError is the terminal signal that
+		// flips state to StateCompleted and collapses the rolling log.
+		return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text)
 
 	case gateway.OutUsage:
 		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
@@ -875,11 +877,89 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 // something.
 func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error {
 	// Empty rootID: this degraded path is hit when receipt cold-start
-	// failed and there's no userMsgID to thread to. The fallback
+	// failed and there's there's no userMsgID to thread to. The fallback
 	// message remains a top-level text bubble (legacy behavior).
 	// replyInThread stays false — Create path with empty rootID
 	// can't honor it anyway.
 	_, err := a.SendMessageText(ctx, chatID, text, "", false)
+	return err
+}
+
+// sendResultAsReply (F-39) posts the final agent result as a SEPARATE reply
+// anchored at userMsgID, independent from the rolling-log receipt card so
+// no dedup is needed. Always renders via Feishu's rich markdown surface
+// (Card 2.0 or Post+md or plain text) so code blocks, tables, lists, and
+// headers in Claude Code's stream-json output survive the round-trip.
+//
+// Dispatch (mirrors cc-connect `platform/feishu/feishu.go::buildReplyContent`):
+//   - no markdown indicators  → MsgTypeText (plain text bubble)
+//   - tables > resultCardTableLimit → MsgTypePost + tag:"md"
+//   - default                 → MsgTypeInteractive (Card 2.0)
+//
+// envelopeDefense (defensive ceiling below the 30 KB Card body envelope):
+// if the rendered body still exceeds resultCardEnvelopeBudget after the
+// perResultMaxBytes cap, the input text is truncated and re-built. For
+// OutResult from Claude Code this is a guard for adversarial input, not
+// a hot path.
+//
+// Always renders as ReplyInThreadAndChat (reply_in_thread omitted) so
+// the result card is visible inline in the main chat — matching the
+// F-37 §13.13 surface-table mapping for the final answer.
+//
+// RATE-LIMIT / RETRY layering:
+//   - layer 1: F-35 global limiter (`a.limiter.Wait`) inside sendContent;
+//     prevents the SDK hitting Feishu's 230001 / 230020 throttle codes.
+//   - layer 2: F-36 transient retry wraps sendContent; transient network
+//     errors get exponential backoff. Final hit returns to caller for log.
+func (a *Adapter) sendResultAsReply(
+	ctx context.Context, chatID, userMsgID, text string,
+) error {
+	if strings.TrimSpace(chatID) == "" {
+		return errors.New("feishu: chat_id is required")
+	}
+	if strings.TrimSpace(text) == "" {
+		// Defensive: caller already filters empty non-error results.
+		return nil
+	}
+
+	// Orphan result (no userMsgID) — top-level plain text bubble.
+	// Mirrors the OutCommandReply fallback: no anchor → no thread.
+	if userMsgID == "" {
+		return a.sendRawOutText(ctx, chatID, text)
+	}
+
+	// Apply markdown sanitize pipeline (URL / fence / image / heading /
+	// code-block protection) so the rendered output doesn't get rejected
+	// by Feishu (230001 invalid href) or break lark_md rendering on edge
+	// cases. See internal/channel/feishu/card_sanitize.go.
+	sanitized := SanitizeCardMarkdown(text)
+
+	// Hard cap to stay well under 30 KB envelope with margin for JSON
+	// envelope + future growth.
+	if len(sanitized) > perResultMaxBytes*4 { // byte budget (multi-byte safe)
+		sanitized = truncateRunes(sanitized, perResultMaxBytes)
+	}
+
+	msgType, body, err := buildResultPayload(sanitized)
+	if err != nil {
+		return err
+	}
+
+	// Envelope defensive cap. Adversarial input that survives the byte
+	// budget above (e.g., very wide ASCII tables or emojis) might still
+	// push the card body past 28 KB once envelope JSON wrapping is added.
+	if len(body) > resultCardEnvelopeBudget {
+		a.logger.Warn("feishu: result reply over envelope, truncating",
+			"chat_id", chatID, "user_msg_id", userMsgID,
+			"body_bytes", len(body))
+		truncated := truncateRunes(sanitized, resultCardEnvelopeBudget/3)
+		msgType, body, err = buildResultPayload(truncated)
+		if err != nil {
+			return err
+		}
+	}
+
+	_, err = a.sendContent(ctx, chatID, msgType, body, userMsgID, false)
 	return err
 }
 
@@ -1072,6 +1152,11 @@ func buildInteractiveCard(c *gateway.Card) (string, error) {
 	if c.Body != "" {
 		body = c.Body
 	}
+	// Sanitize the permission card body markdown. Permission card titles
+	// are plain_text (escaped by SDK) and don't need it, but the body
+	// uses lark_md rendering and shares the OutResult / OutThinking
+	// surface protections (URL / fence / image / heading).
+	body = SanitizeCardMarkdown(body)
 	actions := make([]map[string]any, 0, len(options))
 	for _, opt := range options {
 		v, _ := json.Marshal(map[string]string{

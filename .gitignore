@@ -46,3 +46,6 @@ data/
 .claude/
 .codegraph/
 graphify-out/
+
+# tokensave local index
+.tokensave/

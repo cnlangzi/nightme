@@ -1032,7 +1032,7 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 		// in tests), the card body still hides it instead of
 		// leaking thinking/tool content into the rolling log.
 		switch e.Kind {
-		case "thinking", "tool_start", "tool_end", "compaction":
+		case "thinking", "tool", "tool_start", "tool_end", "compaction":
 			continue
 		}
 		content := e.Icon
@@ -1042,17 +1042,27 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 			}
 			content += e.Text
 		}
-		// The collapse branches (collapsible_panel) were retired
-		// — collapsed panels hit Feishu's 50-element limit, and
-		// surfacing 30+ panels pushed the final answer off the
-		// card. Channel now routes those kinds to Feishu thread
-		// replies. The receipt card carries the rolling reply
-		// (OutText / OutResult) plus metadata (OutInit / OutUsage)
-		// only.
-		elements = append(elements, map[string]any{
-			"tag":     "markdown",
-			"content": content,
-		})
+		// F-37 thread-route: thinking/tool entries are NOT
+		// rendered here at all — they were routed to Feishu
+		// thread replies upstream. The old collapsible_panel
+		// branches for `Kind == "thinking"` and `Kind == "tool"`
+		// (origin/main version) are intentionally absent on
+		// this branch: those kinds no longer reach the card
+		// surface. Only OutText / OutResult / OutInit / OutUsage
+		// entries make it here.
+		//
+		// F-37 multi-div content split: if the entry's text
+		// exceeds divTextCharLimit (Feishu hard limit), split
+		// at paragraph boundaries into multiple markdown elements
+		// so the full content renders without truncation. See
+		// docs/feat/F-37-multi-div-content-split.md.
+		chunks := splitMarkdownForDivs(content, divTextCharLimit)
+		for _, chunk := range chunks {
+			elements = append(elements, map[string]any{
+				"tag":     "markdown",
+				"content": chunk,
+			})
+		}
 	}
 	if note := r.state.footLine(r); note != "" {
 		elements = append(elements, map[string]any{"tag": "hr"})

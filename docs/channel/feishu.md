@@ -622,7 +622,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 | `OutThinking` | `EventText`(带 `[思考] ` 前缀,Gateway 已剥) | agent reasoning | **`collapsible_panel` + `💭` 折叠**(§13.6 设计决策;§13.1 bug 待修) | `interactive` PATCH | ✅ |
 | `OutToolStart` | `EventToolStart` | 工具开始 | **`collapsible_panel` + `🔧` 折叠**(§13.6 设计决策,粒度待定 §13.7) | `interactive` PATCH | ✅ |
 | `OutToolEnd` | `EventToolEnd` | 工具结束(成功/失败) | **`collapsible_panel` + `✅` / `❌` 折叠**(§13.6 设计决策,与 Start 合并 or 独立待定 §13.9) | `interactive` PATCH | ✅ |
-| `OutResult` | `EventResult` | 最终回复 | card body `markdown` + `📝` 图标(text 经 `truncateForLog` 限 600 字节) | `interactive` PATCH | ✅ |
+| `OutResult` | `EventResult` | 最终回复 | card body `markdown` + `📝` 图标(text 经 `truncateForLog` 限 `perEntryMaxRunes=8000`; F-37 拆 ≤ 1000 chars/div) | `interactive` PATCH | ✅ |
 | `OutUsage` | `EventUsage` | token 用量 | card body `markdown` + `"1.2k tokens · $0.012"`(无图标) | `interactive` PATCH | ✅ |
 | `OutCompaction` | `EventCompaction` | 中途压缩 | card body `markdown` + `✶ Compacting conversation...` | `interactive` PATCH | ✅ |
 | `OutInit` | `EventInit` | 会话初始化 | card body `markdown` + `session initialized (model: X)`,**Meta 字段(session_id/agent_name/workspace/branch)未渲染**(见 §13.2) | `interactive` PATCH | ✅ |
@@ -728,17 +728,22 @@ Meta: {
 
 **建议**:Devin 拍板是否在下一份 PR 落地 foot note 扩展(`executing · 5 entries · 14:32:05 | Agent · main · cwd · /repo | Model · claude-sonnet-4-5 | Branch · main`),否则 OutInit 的 5 个 Meta 字段是**纯传输浪费**。
 
-### 13.3 ⚠️ 待澄清: `OutResult` 的 `truncateForLog` 600 字节限额
+### 13.3 ✅ 已决议(F-37, 2026-08-04): `OutResult` 600 字节截断 → 多 div 拆分解决
 
-`receipt_event.go:49` 对 thinking 用 `truncateForLog(text, perEntryMaxBytes=600)`。`OutResult` 走的也是同一个 `eventToEntry` 路径(EventText 分支),**最终回答也限 600 字节**。
+**决策状态**: 已决议。F-37 实现落地后,本节 backlog 自动 resolve。
 
-Claude Code `result.Result` 经常 1~3 KB;600 字节会切掉大部分正文,用户得到"看一半"体验。
+**旧方案**: `truncateForLog(text, perEntryMaxBytes=600)` 切最终回答,Claude Code 1-3 KB `result.Result` 被切掉一半,用户看到 "half answer" 体验。
 
-**建议**:Devin 拍板:
+**新方案**: `splitMarkdownForDivs` 把单个 entry 内容按段落/语义边界拆成多个 `div` 元素,每 div ≤ 1000 chars (Feishu `div` text 硬限),总内容受 30 KB card body envelope 约束:
+- 中文: 最多 ~9 divs ≈ 9 KB
+- 英文: 最多 ~26 divs ≈ 26 KB
 
-- (a) 维持 600 字节统一限额(简单一致,但 OutResult 体验差)
-- (b) `OutResult` 单独放宽到 2048 或 4096(更好,但需要在 `receipt_event.go` 区分 EventText 来自 OutText 还是 OutResult;当前 EventKind 没有 `EventResult` payload 区别)
-- (c) 给 OutResult 单独建 receipt 字段 `resultFullText`,默认不显示,折叠面板"展开全文"
+**lark_md 渲染保留** (对比 text fallback 方案),代码块/列表项不会被切坏 (`splitMarkdownForDivs` 守住边界)。
+
+**关联**:
+- 实现: `internal/channel/feishu/receipt_split.go` (new)
+- 设计: [`docs/feat/F-37-multi-div-content-split.md`](../feat/F-37-multi-div-content-split.md)
+- 配置: `perEntryMaxRunes = 8000` (从 600 B 上调)
 
 ### 13.4 i️ 未来关注: 没有 OutboundAttachment kind
 

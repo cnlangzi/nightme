@@ -1027,6 +1027,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
   - 详见 [`docs/feat/F-37-tool-thread-routing.md`](./feat/F-37-tool-thread-routing.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §13.12
 - ⏭ **F-35（feishu 全局限速器）**：`internal/channel/feishu/ratelimit.go` 单桶 token bucket(5 QPS / burst 1 / lazy refill)，4 个底出口(`sendViaLarkCreate` / `sendViaLarkReply` / `updateViaLark` / `AddReaction`)SDK call 前 `Wait()`。`internal/config/config.go::FeishuConfig` 加 `RateLimit` 字段。详见 [`docs/feat/F-35-ratelimit.md`](./feat/F-35-ratelimit.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §16。
 - ⏭ **F-36（feishu transient retry + 降级日志）**：`internal/channel/feishu/retry.go` 指数退避重试(3 次尝试 / 500ms→5s / ±25% jitter)，包裹 `sendContent` / `updateViaLark` / `AddReaction`。所有降级路径(retry exhausted / ctx cancel / fallback top-level)emit warn 级结构化日志。详见 [`docs/feat/F-36-transient-retry.md`](./feat/F-36-transient-retry.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §17。
+- ⏭ **F-37（receipt 多 div 拆分）**：`internal/channel/feishu/receipt_split.go` `splitMarkdownForDivs` 把单 entry 内容按段落/语义边界拆成多个 `div` 元素，每 div ≤ 1000 chars（Feishu `div` text 硬限），绕过 600 B 截断 backlog，保留 `lark_md` 渲染。`buildReceiptCard` 多 div 路径、`totalLogBytesLocked` 估算修正、`perEntryMaxRunes = 8000`。详见 [`docs/feat/F-37-multi-div-content-split.md`](./feat/F-37-multi-div-content-split.md)。**resolve SPEC §13.3 `OutResult` 600 字节截断 backlog**。
 
 ---
 

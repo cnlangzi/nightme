@@ -2,11 +2,13 @@ package feishu
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
@@ -1039,5 +1041,211 @@ func TestReceipt_Touch_DropsAfterCompletion(t *testing.T) {
 	defer bot.mu.Unlock()
 	if len(bot.patches) != 0 {
 		t.Errorf("patches = %d, want 0 (Touch after completion must drop)", len(bot.patches))
+	}
+}
+
+// TestBuildReceiptCard_LongEntryMultiDivs (F-37) verifies that a
+// single entry with text longer than divTextCharLimit (1000 runes)
+// is split into multiple markdown elements in the rendered card.
+// Each split chunk must be ≤ 1000 runes so the Feishu server
+// accepts the PATCH.
+func TestBuildReceiptCard_LongEntryMultiDivs(t *testing.T) {
+	// 2500 chars + 2 paragraphs separator = 2502 chars total
+	para1 := strings.Repeat("a", 1500)
+	para2 := strings.Repeat("b", 1000)
+	text := para1 + "\n\n" + para2
+	r := &MessageReceipt{
+		state:       StateCompleted,
+		eventCount:  1,
+		entries: []LogEntry{
+			{Icon: "📝", Text: text, Kind: "result"},
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	// Decode JSON to walk the elements cleanly
+	elements := decodeReceiptElements(t, body)
+	// 至少 3 个 markdown element: para1 拆 2 段 + para2 1 段
+	markdownCount := 0
+	for _, e := range elements {
+		if e["tag"] == "markdown" {
+			markdownCount++
+			if content, ok := e["content"].(string); ok {
+				if utf8.RuneCountInString(content) > divTextCharLimit {
+					t.Errorf("markdown element content exceeds %d runes: %d runes", divTextCharLimit, utf8.RuneCountInString(content))
+				}
+			}
+		}
+	}
+	if markdownCount < 3 {
+		t.Errorf("expected ≥ 3 markdown elements, got %d\n--- body ---\n%s", markdownCount, truncateForTest(body, 600))
+	}
+}
+
+// decodeReceiptElements parses the receipt card body JSON and
+// returns the elements slice. Test helper for F-37.
+func decodeReceiptElements(t *testing.T, body string) []map[string]any {
+	t.Helper()
+	var envelope struct {
+		Body struct {
+			Elements []map[string]any `json:"elements"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatalf("decode card body: %v\n--- body ---\n%s", err, truncateForTest(body, 600))
+	}
+	return envelope.Body.Elements
+}
+
+// TestBuildReceiptCard_ShortEntryStaysSingle (F-37) verifies that
+// entries ≤ 1000 runes still render as exactly one markdown element
+// (no unnecessary splitting).
+func TestBuildReceiptCard_ShortEntryStaysSingle(t *testing.T) {
+	r := &MessageReceipt{
+		state:       StateExecuting,
+		eventCount:  1,
+		entries: []LogEntry{
+			{Icon: "💬", Text: "Short reply under 1000 chars.", Kind: "reply"},
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	// 1 markdown element for entry + 1 markdown for header line = 2
+	if c := strings.Count(body, `"tag":"markdown"`); c != 2 {
+		t.Errorf("expected 2 markdown elements (header + entry), got %d\n--- body ---\n%s", c, truncateForTest(body, 600))
+	}
+}
+
+// TestBuildReceiptCard_HugeEntryStaysBounded (F-37) verifies that
+// even very long entries (8000 runes) don't blow the envelope.
+// 8000 runes / 1000 per div = 8 divs max, plus header + footer = 10.
+func TestBuildReceiptCard_HugeEntryStaysBounded(t *testing.T) {
+	// 8000 chars, no paragraph breaks (so it splits via hardSplit at rune boundary)
+	text := strings.Repeat("x", 8000)
+	r := &MessageReceipt{
+		state:       StateCompleted,
+		eventCount:  1,
+		entries: []LogEntry{
+			{Icon: "📝", Text: text, Kind: "result"},
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	// 8000 + 1 header = 9 markdown elements (8 chunks × 1000 + 1 header)
+	if c := strings.Count(body, `"tag":"markdown"`); c < 8 {
+		t.Errorf("expected ≥ 8 markdown elements for 8000-char entry, got %d\n--- body ---\n%s", c, truncateForTest(body, 600))
+	}
+	// Body size guard: should be well under 30 KB
+	if len(body) > 30*1024 {
+		t.Errorf("body size %d exceeds 30 KB envelope", len(body))
+	}
+}
+
+// TestBuildReceiptCard_HeaderFooterRespected (F-37) verifies that
+// header / footer / evicted marker still each get exactly 1 element
+// even when entries are split (they're not part of the splitter).
+func TestBuildReceiptCard_HeaderFooterRespected(t *testing.T) {
+	r := &MessageReceipt{
+		state:       StateCompleted,
+		eventCount:  1,
+		evicted:     2,
+		lastEventAt: parseTime(t, "2026-08-01T14:32:05+08:00"),
+		agentName:   "claude",
+		workspace:   "/code/repo",
+		entries: []LogEntry{
+			{Icon: "📝", Text: strings.Repeat("a", 2500), Kind: "result"},
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	// header(1) + evicted marker(1) + chunks(3) + hr(1) + footer(1) = 7 elements
+	if !strings.Contains(body, `…(前 2 条已省略)`) {
+		t.Errorf("evicted marker missing")
+	}
+	if !strings.Contains(body, `"tag":"hr"`) {
+		t.Errorf("hr divider missing")
+	}
+	if !strings.Contains(body, "Agent: claude") {
+		t.Errorf("footer agent metadata missing")
+	}
+}
+
+// TestBuildReceiptCard_ThinkingEntry_NotRendered (F-37 thread-route)
+// verifies that thinking entries are NOT rendered into the receipt
+// card body. They are routed to Feishu thread replies by
+// Adapter.Send instead. The defensive guard in buildReceiptCard
+// (adapter.go) is the backstop: even if a buggy caller or test
+// fixture appends a Kind="thinking" entry directly to
+// r.entries, the card body still hides it instead of leaking
+// thinking content into the rolling log.
+//
+// Note: This test was added in the F-37 multi-div branch
+// (origin/main) where thinking/tool entries WERE rendered with
+// collapsible_panel + multi-div split. On the F-37 thread-route
+// branch they are filtered out entirely, so we flip the
+// assertion: 1 markdown element (the StateExecuting header
+// line) but NO entry content + NO collapsible_panel. The
+// multi-div split machinery is exercised by the OutText /
+// OutResult long-content path instead — see F-37 §3.4.
+func TestBuildReceiptCard_ThinkingEntry_NotRendered(t *testing.T) {
+	r := &MessageReceipt{
+		state:       StateExecuting,
+		eventCount:  1,
+		entries: []LogEntry{
+			{Icon: "💭", Text: strings.Repeat("thinking...", 250), Kind: "thinking"}, // ~2750 chars
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	// 1 markdown element (the StateExecuting header) is OK.
+	// The thinking entry must contribute ZERO additional
+	// elements.
+	if c := strings.Count(body, `"tag":"markdown"`); c != 1 {
+		t.Errorf("expected 1 markdown (header only) for filtered thinking, got %d\n--- body ---\n%s", c, truncateForTest(body, 600))
+	}
+	if strings.Contains(body, `"tag":"collapsible_panel"`) {
+		t.Errorf("thinking entry should NOT wrap in collapsible_panel on the F-37 thread-route branch")
+	}
+	if strings.Contains(body, "thinking...") {
+		t.Errorf("thinking text leaked into the card body — should only be in the Feishu thread")
+	}
+}
+
+// TestBuildReceiptCard_ToolEntry_NotRendered (F-37 thread-route):
+// same defensive guard for tool_start / tool_end / tool entries.
+// The original test (origin/main's F-37 multi-div branch) expected
+// ≥ 2 markdown elements inside a collapsible_panel; the
+// thread-route design filters them out so the main chat stays
+// focused on the receipt card's final answer.
+func TestBuildReceiptCard_ToolEntry_NotRendered(t *testing.T) {
+	r := &MessageReceipt{
+		state:       StateExecuting,
+		eventCount:  1,
+		entries: []LogEntry{
+			{Icon: "🔧", Text: "Read(/a.py) " + strings.Repeat("x", 1100), Kind: "tool"},
+		},
+	}
+	body, err := buildReceiptCard(r)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+	if c := strings.Count(body, `"tag":"markdown"`); c != 1 {
+		t.Errorf("expected 1 markdown (header only) for filtered tool, got %d\n--- body ---\n%s", c, truncateForTest(body, 600))
+	}
+	if strings.Contains(body, `"tag":"collapsible_panel"`) {
+		t.Errorf("tool entry should NOT wrap in collapsible_panel on the F-37 thread-route branch")
+	}
+	if strings.Contains(body, "Read(/a.py)") {
+		t.Errorf("tool text leaked into the card body — should only be in the Feishu thread")
 	}
 }

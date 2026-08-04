@@ -1,8 +1,10 @@
 package feishu
 
 import (
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
@@ -196,5 +198,75 @@ func TestEventToEntry_ToolEnd_Dropped(t *testing.T) {
 	}
 	if _, ok := eventToEntry(ev, at(), nil); ok {
 		t.Error("EventToolEnd should be dropped from the receipt card (F-34 routes it to a thread reply)")
+	}
+}
+
+// stringError is a tiny adapter so we can pass a string as error
+// without importing "errors" into the test file (which already has
+// its own scope).
+type stringError string
+
+func (s stringError) Error() string { return string(s) }
+
+// TestTruncateForLog_RuneAware (F-37) verifies that truncateForLog
+// counts characters (runes), not bytes. Before F-37, the function
+// was byte-based despite its comment, which meant Chinese / emoji
+// content was capped at 1/3-1/4 the intended character count.
+func TestTruncateForLog_RuneAware(t *testing.T) {
+	// 8000 Chinese chars (24 KB) — should NOT be truncated at
+	// perEntryMaxRunes=8000 (rune-based) but WOULD be truncated
+	// under the old byte-based behavior.
+	text := strings.Repeat("中", 8000)
+	got := truncateForLog(text, perEntryMaxRunes)
+	if got != text {
+		t.Errorf("Chinese 8000 chars at cap = 8000: got truncated (len %d), want unchanged", len([]rune(got)))
+	}
+	// 8001 chars: should truncate to 7999 chars + "…"
+	text = strings.Repeat("中", 8001)
+	got = truncateForLog(text, perEntryMaxRunes)
+	if len([]rune(got)) != 8000 {
+		t.Errorf("Chinese 8001 chars at cap = 8000: got %d runes, want 8000", len([]rune(got)))
+	}
+}
+
+// TestTruncateForLog_EmojiRuneAware (F-37) verifies rune-aware
+// counting for 4-byte UTF-8 emoji (🎉 = 1 rune, 4 bytes).
+func TestTruncateForLog_EmojiRuneAware(t *testing.T) {
+	text := strings.Repeat("🎉", 8000)
+	got := truncateForLog(text, perEntryMaxRunes)
+	if got != text {
+		t.Errorf("Emoji 8000 chars at cap = 8000: got truncated (len %d), want unchanged", len([]rune(got)))
+	}
+}
+
+// TestTruncateForLog_ByteLimit (F-37) verifies that the byte limit
+// path still works for callers using perEntryMaxBytes=600.
+func TestTruncateForLog_ByteLimit(t *testing.T) {
+	// 600 ASCII chars: fits exactly
+	text := strings.Repeat("a", 600)
+	got := truncateForLog(text, perEntryMaxBytes)
+	if got != text {
+		t.Errorf("ASCII 600 chars at cap = 600: got truncated")
+	}
+	// 601 ASCII chars: truncate to 599 + "…"
+	text = strings.Repeat("a", 601)
+	got = truncateForLog(text, perEntryMaxBytes)
+	if len([]rune(got)) != 600 {
+		t.Errorf("ASCII 601 chars at cap = 600: got %d runes, want 600", len([]rune(got)))
+	}
+}
+
+// TestTruncateForLog_NoMidRune (F-37) verifies that the truncation
+// never splits a multi-byte UTF-8 rune.
+func TestTruncateForLog_NoMidRune(t *testing.T) {
+	// 50 Chinese chars (150 bytes) — leaving room for "…"
+	text := strings.Repeat("中", 50)
+	got := truncateForLog(text, 30)
+	// Should be 29 chars + "…" = 30 runes; must be valid UTF-8
+	if !utf8.ValidString(got) {
+		t.Errorf("truncateForLog produced invalid UTF-8: %x", []byte(got))
+	}
+	if len([]rune(got)) != 30 {
+		t.Errorf("got %d runes, want 30", len([]rune(got)))
 	}
 }

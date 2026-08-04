@@ -130,8 +130,8 @@ func TestClearAllToolEvents(t *testing.T) {
 // user sees a single thread reply containing both call and
 // result lines.
 //
-// Note: OutToolStart / OutToolEnd also Touch() the receipt card
-// (cold-start ⏳ card → PATCH in-place via updateFunc). That side
+// Note: OutToolStart / OutToolEnd also touch the receipt card
+// (cold-start card → PATCH in-place via updateFunc). That side
 // effect is unrelated to the merge path; we filter the
 // sendFunc counts to msg_type=text so the receipt's interactive
 // card Create doesn't pollute the count.
@@ -196,7 +196,7 @@ func TestMergeToolReply_PatchesSameMessage(t *testing.T) {
 // data loss.
 //
 // Note: filter to msg_type=text to exclude the receipt card's
-// interactive Create (Touch side effect).
+// interactive Create.
 func TestMergeToolReply_PATCHFailureFallsBackToFreshReply(t *testing.T) {
 	a := testAdapter(t)
 

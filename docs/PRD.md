@@ -152,7 +152,7 @@ v1.1 之前的 nightme 里"Session" = CLI 进程，session 死了就没了。v1.
 - **AgentSession 池**（F-29）：ChatSession 内 `(agent, cwd)` 1:1 池化；切换 cwd/agent 不杀进程
 
 **MVP（v0.1）已发布**：F-01 ~ F-10, F-19 ~ F-22。
-**v0.2 → v0.3 增量**：F-23（心跳）、F-24（Claude Code Bridge）、F-25（Input Buffer）、F-26（v1.1 职责隔离架构）。
+**v0.2 → v0.3 增量**：F-24（Claude Code Bridge）、F-25（Input Buffer）、F-26（v1.1 职责隔离架构）。
 
 **v1.2 范围外**（明确不做）：
 - 多 AgentSession 并行协作（v0.4+）

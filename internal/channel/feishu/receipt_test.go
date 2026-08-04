@@ -181,13 +181,6 @@ func TestReceiptLifecycle_Renderings(t *testing.T) {
 		t.Errorf("Executing.String = %q", got)
 	}
 
-	// Heartbeat tick
-	r.eventCount = 47
-	r.lastEventAt = parseTime(t, "2026-08-01T14:35:20+08:00")
-	if got := r.state.headerLine(r); got != "🔄 ⏳ 47 · 14:35:20" {
-		t.Errorf("Executing after heartbeat = %q", got)
-	}
-
 	// State 3: Completed
 	r.state = StateCompleted
 	r.completedAt = parseTime(t, "2026-08-01T14:35:30+08:00")

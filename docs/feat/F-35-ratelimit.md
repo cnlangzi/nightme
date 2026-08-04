@@ -17,7 +17,7 @@
 
 ## 0. 背景
 
-nightme 的飞书 adapter (`internal/channel/feishu/adapter.go`) 在每个 agent turn 中会向飞书发起多次 API 调用：冷启动一张 card、event 触发多次 PATCH、AddReaction 状态 emoji、heartbeat 周期 PATCH 等。**hot path 完全同步**——readPump → `EventCallback` → `channel.Send` → SDK call，无队列、无 backpressure、无重试。
+nightme 的飞书 adapter (`internal/channel/feishu/adapter.go`) 在每个 agent turn 中会向飞书发起多次 API 调用：冷启动一张 card、event 触发多次 PATCH、AddReaction 状态 emoji 等。**hot path 完全同步**——readPump → `EventCallback` → `channel.Send` → SDK call，无队列、无 backpressure、无重试。
 
 如果 daemon 同时跑多个 chat、或某个 receipt 的 PATCH storm 高频，飞书会触发 `230001` / `230020` 等限流错误码。这些错误**目前没有专属处理路径**——`sendContent` 只对 230011 / 231003（消息撤回/删除）做了 fallback，其他错误一律 log warn 返回 error，event 丢失。
 
@@ -252,8 +252,6 @@ if waitDur > 100*time.Millisecond {
 
 **`GetBotIdentity` 不走 limiter**：启动期低频，且不走 IM 配额。
 
-**Heartbeat PATCH 也走 `updateViaLark`** → 自动经 Wait。30 min 一次，远低于 5 QPS，**不需特判**。
-
 ---
 
 ## 6. 测试
@@ -285,7 +283,6 @@ if waitDur > 100*time.Millisecond {
 | `sendContent` rootID fallback（230011/231003） | 不变；fallback 第二次走 Create 仍经 Wait（单桶自动覆盖） |
 | `MessageReceipt.renderLocked` mutex | 不变；5 QPS / message_id 由它天然满足，不需 limiter 介入 |
 | Layer 1 `WithTransientRetry`（未来 PR） | 正交；retry 在 sendContent 外层，limiter 在 SDK call 内层，互不感知 |
-| Heartbeat goroutine（F-23） | 自动经 limiter；30 min 一次，无影响 |
 | Echo channel（test only） | 不走 feishu，无影响 |
 
 ---

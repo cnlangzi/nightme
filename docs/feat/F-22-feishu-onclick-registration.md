@@ -234,19 +234,6 @@ Next: run `nightme run` to start the gateway.
 
 PR #4 内部先做 F-22，再做 F-08（让 F-08 测试时用 F-22 拿到的真凭证）。
 
-## 8.5 v0.2 扩展：streaming + heartbeat 集成
-
-详见 [F-23-heartbeat.md](./F-23-heartbeat.md) 和 [F-24-claudecode-bridge.md](./F-24-claudecode-bridge.md)。
-
-**v0.2 新增的 Feishu adapter 能力**：
-
-1. **Card note update API**：`im.message.update` 同一行 note 替换（不增加元素）
-2. **Typing indicator**：在 user message 上加 1 个 "👀" reaction（不堆叠）
-3. **AskUserQuestion 卡片渲染**：第一项加 "(Recommended)" 高亮
-4. **/kill 按钮**：idle 30s 后在卡片上显示
-
-具体实现细节见 F-23 §7 和 F-24 §7。
-
 ## 9. 注意事项
 
 - **lark-oapi-go v3 必需**：v3 的 `registration` 是新增的，v1/v2 没有

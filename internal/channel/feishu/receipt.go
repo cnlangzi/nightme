@@ -663,20 +663,6 @@ func (r *MessageReceipt) SetTaskList(ctx context.Context, list *agent.TaskListEv
 	return r.renderLocked(ctx)
 }
 
-// Heartbeat refreshes the header timestamp so an inactive agent
-// (e.g. mid tool-call, no events for a few seconds) still shows a
-// ticking "🔄 ⏳ N · HH:MM:SS" line. No-op when not in Executing
-// state.
-func (r *MessageReceipt) Heartbeat(ctx context.Context) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.state != StateExecuting {
-		return nil
-	}
-	r.lastEventAt = time.Now()
-	return r.renderLocked(ctx)
-}
-
 // SetCompleted transitions Executing → Completed. The header flips to
 // ✅ and the rolling-log streaming text is cleared so the card collapses
 // to header + footer + task list — the answer text lives in the
@@ -951,8 +937,8 @@ func totalLogBytesLocked(r *MessageReceipt) int {
 //
 //  1. Reaction on the USER message (append-only). The receipt
 //     keeps a single emoji per state on the user message and
-//     never deletes — same-state renders (heartbeats) skip a
-//     duplicate add. See F-25 dual-track for the why.
+//     never deletes — same-state renders skip a duplicate add.
+//     See F-25 dual-track for the why.
 //  2. The card body itself, via first-send-then-PATCH:
 //     - If r.cardMsgID == "" → first render. Call SendCard to
 //     create the interactive card; capture the message id.

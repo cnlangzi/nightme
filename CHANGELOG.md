@@ -294,7 +294,7 @@ on SIGINT/SIGTERM; default detaches. See
 
 slog + JSON output, secret redaction, `Recover()` middleware
 maps panics → `CodeGenericError`, unified `ExitCode()` for CI
-scripts. See [`docs/feat/F-23-heartbeat.md`](./docs/feat/F-23-heartbeat.md).
+scripts.
 
 ---
 

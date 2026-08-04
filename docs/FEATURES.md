@@ -65,7 +65,6 @@
 | F-20 | Command Gateway + Binding 表 + Run 决策 + Receipt FSM owner | [feat/F-20-gateway.md](./feat/F-20-gateway.md) | M2 / v0.3 增强 |
 | F-21 | Agent Communication Modes（ACP / SDK / PTY / JSON-IO 四层降级）| [feat/F-21-agent-modes.md](./feat/F-21-agent-modes.md) | M1 arch / M2 partial / v0.2 JSON-IO |
 | F-22 | Feishu One-Click App Registration（QR 扫码授权 onboarding）| [feat/F-22-feishu-onclick-registration.md](./feat/F-22-feishu-onclick-registration.md) | M2 |
-| F-23 | Heartbeat & Streaming Status（Channel-driven ticker）| [feat/F-23-heartbeat.md](./feat/F-23-heartbeat.md) | v0.2 / v0.3 迁移 |
 | F-24 | Claude Code Bridge（JSON-IO + auto-accept + AskUserQuestion）| [feat/F-24-claudecode-bridge.md](./feat/F-24-claudecode-bridge.md) | v0.2 |
 | F-25 | Rolling-Log Receipt UX (Channel-Autonomous) | [feat/F-25-rolling-log.md](./feat/F-25-rolling-log.md) | v1.3 |
 | F-26 | Gateway Hub & Responsibility Isolation（v1.1 职责隔离权威参考）| [feat/F-26-gateway-hub.md](./feat/F-26-gateway-hub.md) | v0.3 |
@@ -84,7 +83,6 @@
 | F-14 | 图片 / 文件附件透传 | [feat/F-14-attachment-passthrough.md](./feat/F-14-attachment-passthrough.md) | v0.2 |
 | F-15 | Session 持久化（stdout 历史）| [feat/F-15-session-persistence.md](./feat/F-15-session-persistence.md) | v0.2 |
 | F-16 | Web TTY UI（xterm.js + WebSocket）| [feat/F-16-web-tty-ui.md](./feat/F-16-web-tty-ui.md) | v0.2 |
-| F-17 | ~~健康检查 / 心跳~~ | ~~[feat/F-17-health-check.md](./feat/F-17-health-check.md)~~ | **superseded by F-23** |
 | F-18 | ~~Token / API key 注入~~ | — | **cancelled** |
 
 [v1.2 不变]

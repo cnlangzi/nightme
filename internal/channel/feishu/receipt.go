@@ -680,6 +680,27 @@ func (r *MessageReceipt) State() ReceiptState {
 	return r.state
 }
 
+// IsCompleted reports whether the receipt has reached a terminal
+// state (Completed or Error). F-40: late-arriving OutReply events
+// (after the agent turn ended) check this to decide between fold-
+// into-receipt and bail out to a stand-alone reply via
+// sendReplyAsMessage. See docs/feat/F-40-outreply-overflow.md §1.5.
+func (r *MessageReceipt) IsCompleted() bool {
+	return r.State() == StateCompleted || r.State() == StateError
+}
+
+// EntryCount returns the number of rolling-log entries currently
+// held in the receipt. F-40: Adapter.Send(OutReply) calls this
+// from outside the Append critical section to decide whether the
+// receipt is full (entries >= replyMaxEntries) and the next reply
+// should be diverted to a stand-alone reply instead of folded in.
+// See docs/feat/F-40-outreply-overflow.md §1.2 isOverflowingReceipt.
+func (r *MessageReceipt) EntryCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.entries)
+}
+
 // Append ingests one agent event and re-renders the reply message.
 // All event kinds (thinking, tool_start, tool_end, text, done, error)
 // flow through here — the renderer never calls SendMessage

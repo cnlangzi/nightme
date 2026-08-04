@@ -363,6 +363,87 @@ func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBl
 	return h.SendBlocks(ctx, blocks)
 }
 
+// New delegates to the bridge AgentSession.New(). Returns ErrNotRunning
+// if the bridge handle is not currently attached (status is Detached
+// or Exited).
+//
+// F-34: resets the conversation context on the running session.
+// Three outcomes, in priority order:
+//
+//   - Bridge handles in-place reset (pi's new_session RPC, claude
+//     code's writeLine("/clear"), acp's session/new): New returns
+//     nil. AgentSession.ID / Cwd / pool membership are preserved;
+//     only the bridge's internal conversation state is cleared.
+//     The bridge is expected to emit a fresh EventInit carrying the
+//     new SessionID; the runtime's eventHandler (cmd/nightme/run.go
+//     newEventHandler) captures it via SetResumeID and persists.
+//
+//   - Bridge cannot do in-place reset (raw PTY bridge): bridge.New
+//     returns agent.ErrRestartRequired. The wrapper then kills the
+//     existing bridge handle and spawns a fresh one via spawner
+//     (with ResumeID="" so the new child starts with no --resume).
+//     ResumeID is explicitly cleared on the wrapper so persistence
+//     stays consistent.
+//
+//   - Bridge tried but failed (transient error): wrapped and
+//     propagated. InputBuffer is NOT cleared by the wrapper in this
+//     case (caller's responsibility).
+//
+// spawner may be nil when the bridge is known to handle in-place
+// reset; in that case agent.ErrRestartRequired from the bridge
+// surfaces as-is. ChatSession.NewActiveAgentSessions always passes
+// the chat's configured spawner.
+func (as *AgentSession) New(ctx context.Context, spawner Spawner) error {
+	as.handleMu.Lock()
+	defer as.handleMu.Unlock()
+
+	h := as.handle
+	if h == nil {
+		return ErrNotRunning
+	}
+
+	if err := h.New(ctx); !errors.Is(err, agent.ErrRestartRequired) {
+		// nil or real (non-restart) error: pass through.
+		return err
+	}
+
+	// Bridge cannot reset in-place. Fall back to kill + respawn via
+	// the Spawner. This path is taken by the raw PTY bridge today;
+	// claudecode / pi / acp all handle reset in-place and never
+	// return ErrRestartRequired.
+	if spawner == nil {
+		return agent.ErrRestartRequired
+	}
+
+	// Close the old handle before spawning the replacement so the
+	// underlying process / transport tears down cleanly. We swallow
+	// the close error — the new spawn below is the source of truth
+	// for "did reset succeed".
+	_ = h.Close()
+	as.handle = nil
+
+	newHandle, err := spawner.Spawn(ctx, as.Agent, as.Cwd, as.args, "")
+	if err != nil {
+		// F-34 Phase 3 review: previously this branch returned
+		// without updating status, leaving as.status=StatusRunning
+		// with the OLD PID and as.handle=nil. Subsequent
+		// LookupActiveAgentSession would see Running + nil handle
+		// and fail every SendBlocks with ErrNotRunning. Mark as
+		// Exited so the next user message lazy-spawns a fresh AS.
+		as.SetExited(-1)
+		as.SetResumeID("")
+		return fmt.Errorf("chatsession: restart %s at %s: %w", as.Agent, as.Cwd, err)
+	}
+	as.handle = newHandle
+	as.SetRunning(newHandle.PID())
+	// Explicitly clear ResumeID so a stale id never gets replayed on
+	// the next respawn (the new child will emit its own EventInit,
+	// and the runtime's eventHandler will SetResumeID via the normal
+	// path).
+	as.SetResumeID("")
+	return nil
+}
+
 // Close terminates the bridge child (sends shutdown signal to the
 // underlying bridge). Idempotent. Marks status=Exited on success.
 func (as *AgentSession) Close() error {

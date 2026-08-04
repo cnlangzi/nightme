@@ -180,6 +180,37 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		)
 		return nil, nil
 
+	case "state_update":
+		// Defensive: the official pi-coding-agent RPC spec (docs/rpc.md)
+		// does NOT list state_update as a server-emitted event. The
+		// F-34 reset path in pi/session.go New() does NOT rely on this
+		// case — it issues new_session + get_state synchronously and
+		// pushes the resulting EventInit through deliver().
+		//
+		// We keep this case so a future pi version that DOES emit
+		// state_update (informally) still surfaces the new sessionId
+		// to the runtime. Bypasses initSent for the same reason as
+		// the canonical path.
+		var ev stateUpdate
+		if err := json.Unmarshal(raw, &ev); err != nil {
+			return nil, err
+		}
+		if ev.SessionID == "" {
+			logger.Debug("pi state_update ignored (no sessionId)",
+				slog.String("raw", string(raw)))
+			return nil, nil
+		}
+		return []agent.AgentEvent{{
+			Kind: agent.EventInit,
+			Init: &agent.InitEvent{
+				SessionID: ev.SessionID,
+				Model:     modelDisplay(ev.ModelID, ev.ModelName),
+				AgentName: t.agentName,
+				Workspace: t.workspace,
+				Branch:    t.branch,
+			},
+		}}, nil
+
 	default:
 		// Unknown event. Drop silently with a debug log so a
 		// future Pi version can add events without breaking the

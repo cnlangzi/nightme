@@ -401,3 +401,47 @@ func TestTranslate_RejectsMalformed(t *testing.T) {
 // silence unused import warnings if all errors-typed helpers are
 // trimmed in future revisions.
 var _ = errors.New
+
+// TestTranslate_StateUpdate_EmitsEventInit verifies F-34 §3.2.2:
+// when pi emits state_update after a new_session RPC, the translator
+// surfaces an EventInit carrying the new sessionId. The runtime's
+// eventHandler (cmd/nightme/run.go newEventHandler) picks it up
+// via SetResumeID.
+func TestTranslate_StateUpdate_EmitsEventInit(t *testing.T) {
+	tr := newTestTranslator()
+	raw := []byte(`{"type":"state_update","sessionId":"new-sess-1","modelId":"m1","modelName":"M1"}`)
+	events, err := tr.translate(raw, nil)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].Kind != agent.EventInit {
+		t.Fatalf("Kind = %s, want EventInit", events[0].Kind)
+	}
+	if events[0].Init.SessionID != "new-sess-1" {
+		t.Errorf("SessionID = %q, want new-sess-1", events[0].Init.SessionID)
+	}
+	if !strings.Contains(events[0].Init.Model, "M1") {
+		t.Errorf("Model = %q, want to contain M1", events[0].Init.Model)
+	}
+	if events[0].Init.AgentName != "pi" {
+		t.Errorf("AgentName = %q, want pi", events[0].Init.AgentName)
+	}
+}
+
+// TestTranslate_StateUpdate_NoSessionID_Ignored verifies that
+// state_update events without a sessionId are silently dropped
+// (defensive: pi may emit various state_update flavors).
+func TestTranslate_StateUpdate_NoSessionID_Ignored(t *testing.T) {
+	tr := newTestTranslator()
+	raw := []byte(`{"type":"state_update","modelId":"m1"}`)
+	events, err := tr.translate(raw, nil)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events = %d, want 0", len(events))
+	}
+}

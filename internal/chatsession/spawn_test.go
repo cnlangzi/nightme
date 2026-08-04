@@ -55,6 +55,8 @@ func (f *fakeAgentSession) SendPermission(resp string) error {
 	return nil
 }
 
+func (f *fakeAgentSession) New(_ context.Context) error { return nil }
+
 func (f *fakeAgentSession) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

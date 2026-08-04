@@ -680,6 +680,146 @@ func (cs *ChatSession) KillAll() error {
 	return nil
 }
 
+// NewActiveAgentSessions resets the conversation context on the
+// AgentSessions associated with cs.ActiveCwd(). Filters the pool by
+// activeCwd, optionally narrowing further by agentName (when non-empty),
+// AND by Status == StatusRunning — only RUNNING sessions have a live
+// bridge handle and therefore have conversation context to reset.
+//
+// F-34 §3.4 + §6 Q-N4: this is the core batch primitive behind the
+// `/new` slash command. Behavior contract:
+//
+//   - Pool identity preserved: AgentSession.ID / Cwd / Agent / args
+//     are NOT touched. Only the underlying bridge's conversation
+//     state is reset (via AgentSession.New → bridge.New).
+//   - Serial execution: AgentSession.New calls are issued one at a
+//     time so stdin / RPC traffic does not interleave.
+//   - Status filter: ONLY StatusRunning entries are candidates.
+//     Exited / Detached entries are skipped SILENTLY (do not count
+//     as matched; do not trigger a lazy spawn just to clear
+//     conversation that does not exist). This was clarified by
+//     product on 2026-08-04: "如果没启动过的agentsession,则不需要
+//     去启动AgentSession.因为它本身就没启动,所以不需要New".
+//   - InputBuffer cleared: queued user messages are dropped before
+//     the function returns, regardless of how many bridges succeeded.
+//     This matches /kill semantics (F-34 §6 Q-N4).
+//   - currentTurnUserMsgID NOT cleared: the next user message after
+//     /new naturally opens a new turn + new anchor + cold-creates a
+//     new receipt (Channel-autonomous per v1.3 §2.4).
+//
+// Returns:
+//   - matched: pool entries that passed ALL filters (cwd + agentName +
+//     Status == Running). These are the entries that were attempted.
+//   - reset:   pool entries whose bridge.New succeeded.
+//   - firstErr: the first non-nil bridge.New error (other errors are
+//     counted into matched but not reset; callers report them in the
+//     reply via the returned error).
+func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName string) (matched, reset int, firstErr error) {
+	cs.mu.RLock()
+	cwd := cs.activeCwd
+	if cwd == "" {
+		cs.mu.RUnlock()
+		return 0, 0, nil
+	}
+	cs.mu.RUnlock()
+
+	// 1. Snapshot RUNNING targets only (no lock held across bridge calls).
+	cs.mu.RLock()
+	targets := make([]*AgentSession, 0)
+	for _, as := range cs.pool {
+		if as.Cwd != cwd {
+			continue
+		}
+		if agentName != "" && as.Agent != agentName {
+			continue
+		}
+		if as.Status() != StatusRunning {
+			// Not started → no conversation → skip silently.
+			// Do NOT trigger a lazy spawn here (F-34 §6 Q-N4 / product
+			// clarification 2026-08-04).
+			continue
+		}
+		targets = append(targets, as)
+	}
+	cs.mu.RUnlock()
+
+	// F-34 Phase 3 review #1: the queue must be cleared even when
+	// no Running targets matched (e.g. pool has entries but all are
+	// Detached/Exited, or /new <agent> with no <agent> in cwd).
+	// Otherwise the user's queued message stays stuck behind a
+	// dead session until they /kill or /cwd.
+	//
+	// Also covers the matched==0 path above (after the early-return).
+	if cs.inputBuffer != nil {
+		cs.inputBuffer.Clear()
+	}
+
+	if len(targets) == 0 {
+		return 0, 0, nil
+	}
+
+	// 2. Serial reset.
+	for _, as := range targets {
+		matched++
+		// Active AgentSession pump coordination (F-34 Phase 3 review):
+		//
+		// The readPump captures as.Events() ONCE before its loop, so
+		// a kill+respawn that swaps the bridge handle would orphan the
+		// pump on the old (now-closed) events chan. Worse, the pump's
+		// closing branch calls as.SetExited(0) which races with our
+		// SetRunning after the swap.
+		//
+		// Pump coordination: capture the activeAS identity and
+		// current handle under one RLock, then stop the pump (if
+		// this AS is the active one), call as.New, and restart the
+		// pump on the new handle. The handleChanged flag is
+		// needed because kill+respawn swaps the bridge handle (and
+		// its events chan); for in-place reset the chan is
+		// unchanged but the pump goroutine still needs to be
+		// restarted because StopReadPump signaled it to exit.
+		isActive := false
+		oldHandle := agent.AgentSession(nil)
+		cs.mu.RLock()
+		isActive = (as == cs.activeAS)
+		if isActive {
+			oldHandle = as.Handle()
+		}
+		cs.mu.RUnlock()
+		if isActive {
+			cs.StopReadPump()
+		}
+		err := as.New(ctx, cs.spawner)
+		handleChanged := isActive && (as.Handle() != oldHandle)
+		if isActive {
+			// Restart the pump regardless of in-place vs
+			// kill+respawn — StopReadPump signaled the prior
+			// goroutine to exit, so we must launch a new one.
+			_ = cs.StartReadPump()
+		}
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		reset++
+		// Persist after a successful kill+respawn so the registry
+		// stays in sync with the in-memory state. For in-place
+		// resets the bridge will also emit a fresh EventInit which
+		// the runtime's eventHandler captures via
+		// PersistAgentSession; for kill+respawn the new child hasn't
+		// started yet, so this Upsert captures the new PID +
+		// cleared ResumeID before any subsequent EventInit arrives
+		// (PTY's new child won't emit init at all, so this is the
+		// ONLY persistence opportunity for that path).
+		if handleChanged && cs.asFile != nil {
+			_ = cs.asFile.Upsert(as.Entry())
+		}
+	}
+
+	return matched, reset, firstErr
+}
+
 // Entry returns a snapshot of this ChatSession as a registry entry.
 func (cs *ChatSession) Entry() *registry.ChatSessionEntry {
 	cs.mu.RLock()

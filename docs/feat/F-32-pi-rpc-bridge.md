@@ -39,7 +39,8 @@ nightme 现有 FSM 假设"一个 AgentSession = 一个进程"；pi RPC 进程是
 - `extension_ui_request` → 飞书卡回复闭环：当前 feishu card action 只 toast，不发 decision；扩展 UI 表本身需要 keyed-by-id 的 request map，先把"两端之间加 channel"留到 v1.3.x。
 - `steer` / `follow_up`：复用现有 `InputBuffer` 在 `EventDone` 切 Idle 后 flush，避免给 pi 加双语义。
 - `set_model` / `set_thinking_level` / `cycle_*`：MVP 留给用户在 pi CLI flag 配置；后续按需开 `/use pi --model=…`。
-- `new_session` / `switch_session` / `fork` / `clone`：ChatSession 与 AgentSession pool 已经是 `(agent, cwd)` 维度，未要求 per-session switch；现有 `/use pi` + 换 cwd 已覆盖。
+- `switch_session` / `fork` / `clone`：ChatSession 与 AgentSession pool 已经是 `(agent, cwd)` 维度，未要求 per-session switch；现有 `/use pi` + 换 cwd 已覆盖。
+- ✅ **后续在 F-34 启用**：`new_session` —— F-34 让 `/new` 暴露给 IM 入口，bridge 实现为 `rpc.requestAsync("new_session", nil)`；F-32 当时 defer 的原因是没有 runtime 入口，现在补上。详见 [`F-34-new-slash-command.md`](./F-34-new-slash-command.md) §3.2.2。
 
 ## 2. Wire Protocol（来自 pi 官方 `docs/rpc.md`）
 

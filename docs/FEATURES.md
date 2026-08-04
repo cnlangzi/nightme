@@ -28,6 +28,7 @@
 | ID | 功能 | 设计文档 | 里程碑 | 状态 |
 |----|------|----------|--------|------|
 | F-32 | **Pi Coding Agent Bridge (`pi --mode rpc`)** — 真实 stdio pipes 长驻 JSONL；首期仅做 `get_state` + `prompt` + `agent_settled` turn 终态；不打通 Extension UI 飞书闭环；不实现 `/abort` | [feat/F-32-pi-rpc-bridge.md](./feat/F-32-pi-rpc-bridge.md) | v1.3 | 📝 设计阶段（文档评审中）|
+| F-34 | **`/new` slash command** — 不退进程重置 agent 对话上下文（对齐 claudecode `/clear` / pi 内置 `/new` / acp `session/new`）；可选 `/new <agent>` 精修粒度；清 InputBuffer | [feat/F-34-new-slash-command.md](./feat/F-34-new-slash-command.md) | v1.3.x | ✅ 已实现（Phase 3 review 完成）|
 
 **v1.2 关键变化**：
 - 删除：`/run` 命令（被 `/use` 替代）

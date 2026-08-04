@@ -75,6 +75,19 @@ func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel C
 			return handleWatch(ctx, mgr, channel, msg, args, globalPrimary)
 		},
 	})
+
+	// F-34 §4: reset conversation context. /new clears the
+	// conversation history on all AgentSessions in activeCwd;
+	// /new <agent> narrows to one. Pool identity is preserved;
+	// InputBuffer queued messages are dropped. Underlying CLI
+	// processes / transports stay alive.
+	gw.Register(Command{
+		Name: "new",
+		Description: "Reset conversation context. /new for all sessions in current workspace, /new <agent> for one.",
+		Handler: func(ctx context.Context, msg *InboundMessage, args []string) (*CommandResult, error) {
+			return handleNew(ctx, mgr, channel, msg, args, globalPrimary)
+		},
+	})
 }
 
 // RegisterChatSessionRuntime installs /cwd /use /kill and wires

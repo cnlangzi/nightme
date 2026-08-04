@@ -543,11 +543,6 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// bodies are split into multiple div elements by
 		// F-37's splitMarkdownForDivs inside buildThinkingCard.
 		//
-		// F-34 review P1-3: also Touch the receipt so the main
-		// chat's receipt card header keeps ticking while the
-		// agent thinks. Without this the "🔄 ⏳ N · HH:MM:SS"
-		// line freezes between visible events.
-		//
 		// F-37: replyOnly=true keeps the 💭 line OUT of the main
 		// chat — it lives only in the thread so the receipt card
 		// (the pinned final answer) stays the main visible item.
@@ -557,13 +552,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// before reaching this case. This case therefore assumes
 		// the chat wants thinking rendered — see docs/SPEC.md
 		// §3.1.2.
-		if err := a.postThreadMarkdownReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text, true); err != nil {
-			return err
-		}
-		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
-			_ = r.Touch(ctx)
-		}
-		return nil
+		return a.postThreadMarkdownReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text, true)
 
 	case gateway.OutMessageState:
 		// F-31: read abstract state from typed MessageStatePayload,
@@ -678,11 +667,6 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// buffer miss will route through the fallback path
 		// below (postThreadReply as fresh thread reply).
 		a.pushToolStart(msg.ReplyTo, startMsgID, body)
-		// F-34 review P1-3: Touch the receipt so the header
-		// keeps ticking while tools run.
-		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
-			_ = r.Touch(ctx)
-		}
 		return nil
 
 	case gateway.OutToolEnd:
@@ -714,11 +698,6 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 			// the fresh-thread-reply fallback below.
 			mergeErr := a.mergeToolReply(ctx, entry.startMsgID, merged)
 			if mergeErr == nil {
-				// F-34 review P1-3: Touch the receipt so the
-				// header keeps ticking while tools run.
-				if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
-					_ = r.Touch(ctx)
-				}
 				return nil
 			}
 			// PATCH failed (retry exhausted or non-transient).
@@ -735,11 +714,6 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// when the merge can't happen.
 		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, resultBody, true); err != nil {
 			return err
-		}
-		// F-34 review P1-3: Touch the receipt so the header
-		// keeps ticking while tools run.
-		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
-			_ = r.Touch(ctx)
 		}
 		return nil
 
@@ -800,11 +774,6 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo,
 			"✶ Compacting conversation…", false); err != nil {
 			return err
-		}
-		// F-34 review P1-3: Touch the receipt so the header
-		// keeps ticking during compaction.
-		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
-			_ = r.Touch(ctx)
 		}
 		return nil
 

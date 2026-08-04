@@ -208,11 +208,7 @@ type MessageReceipt struct {
 
 	mu          sync.Mutex
 	state       ReceiptState
-	eventCount  int
-	lastEventAt time.Time
-	forwardedAt time.Time
 	completedAt time.Time
-	receivedAt  time.Time
 
 	// entries is the rolling-log buffer (FIFO). Append grows it;
 	// renderLocked evicts from the front when either the byte budget
@@ -324,20 +320,22 @@ func (s ReceiptState) String() string {
 }
 
 // headerLine returns the single-line header that sits at the top of
-// the reply message. It carries the lifecycle state (with the live
-// clock for the executing case) and is the only thing users see
-// when the log is empty (e.g. right after receipt creation).
+// the reply message. It carries the lifecycle state.
+//
+// Executing state intentionally returns "": the previous
+// "🔄 ⏳ N · HH:MM:SS" line was driven by an auto-tick (Heartbeat)
+// that we removed in #40, and the ticking clock was misleading
+// once no events were flowing (it implied activity that did not
+// exist). The card body itself — log entries / task list / footer
+// — already conveys "we are working" once the first entry lands,
+// and the ⏳ / ✅ emoji reactions on the user message (managed by
+// MessageState FSM) carry the lifecycle markers.
 func (s ReceiptState) headerLine(r *MessageReceipt) string {
 	switch s {
 	case StateWaiting:
 		return "⏳ 等待中"
 	case StateExecuting:
-		if r == nil || r.lastEventAt.IsZero() {
-			return "🔄 处理中"
-		}
-		return fmt.Sprintf("🔄 ⏳ %d · %s",
-			r.eventCount,
-			r.lastEventAt.Format("15:04:05"))
+		return ""
 	case StateCompleted:
 		if r == nil || r.completedAt.IsZero() {
 			return "✅ 已完成"
@@ -511,12 +509,11 @@ func compactNumberLoud(n int) string {
 // header line; entries are appended as events arrive via Append.
 func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID string) (*MessageReceipt, error) {
 	r := &MessageReceipt{
-		chatID:     chatID,
-		userMsgID:  userMsgID,
-		bot:        bot,
-		logger:     slog.Default(),
-		receivedAt: time.Now(),
-		state:      StateWaiting,
+		chatID:    chatID,
+		userMsgID: userMsgID,
+		bot:       bot,
+		logger:    slog.Default(),
+		state:     StateWaiting,
 	}
 
 	// v1.3 (F-31): initial reaction is NO LONGER added here.
@@ -575,7 +572,6 @@ func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receipt
 		replyMsgID: replyMsgID,
 		bot:        bot,
 		logger:     slog.Default(),
-		receivedAt: time.Now(),
 		state:      StateWaiting,
 	}
 }
@@ -599,15 +595,15 @@ func NewMessageReceiptForCard(chatID, userMsgID, cardMessageID string, bot recei
 		cardMsgID:  cardMessageID,
 		bot:        bot,
 		logger:     slog.Default(),
-		receivedAt: time.Now(),
 		state:      StateWaiting,
 	}
 }
 
-// SetExecuting transitions Waiting → Executing. Adds the 🔄
-// reaction and writes the header with the initial event count.
-// First-call only; subsequent SetExecuting calls are idempotent
-// no-ops.
+// SetExecuting transitions Waiting → Executing. First-call only;
+// subsequent SetExecuting calls are idempotent no-ops. The card
+// header in Executing state is empty (see headerLine) so no header
+// rewrite is needed; renderLocked still fires so the reaction FSM
+// can pick up the state change in any downstream consumers.
 func (r *MessageReceipt) SetExecuting(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -618,9 +614,6 @@ func (r *MessageReceipt) SetExecuting(ctx context.Context) error {
 		return nil
 	}
 	r.state = StateExecuting
-	r.forwardedAt = time.Now()
-	r.eventCount = 1
-	r.lastEventAt = r.forwardedAt
 	return r.renderLocked(ctx)
 }
 
@@ -632,8 +625,7 @@ func (r *MessageReceipt) SetExecuting(ctx context.Context) error {
 //
 // Like Append, a SetTaskList after the receipt is completed is
 // dropped silently. The first SetTaskList on a Waiting receipt
-// promotes it to Executing so the header timestamp reflects
-// actual activity.
+// promotes it to Executing.
 func (r *MessageReceipt) SetTaskList(ctx context.Context, list *agent.TaskListEvent) error {
 	if r == nil {
 		return nil
@@ -654,11 +646,8 @@ func (r *MessageReceipt) SetTaskList(ctx context.Context, list *agent.TaskListEv
 		copy(copyItems, items)
 		r.tasks = copyItems
 	}
-	r.eventCount++
-	r.lastEventAt = time.Now()
 	if r.state == StateWaiting {
 		r.state = StateExecuting
-		r.forwardedAt = r.lastEventAt
 	}
 	return r.renderLocked(ctx)
 }
@@ -769,20 +758,11 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 		// F-34: eventToEntry returns (_, false) for kinds the
 		// receipt card no longer carries (thinking / tool_start /
 		// tool_end / compaction / permission). The adapter
-		// routes those to Feishu thread replies. We still
-		// PATCH the receipt card so the header timestamp
-		// reflects the latest activity — without this, the
-		// user sees a frozen "🔄 ⏳ 1 · 14:32:00" line while
-		// the agent is clearly busy running tools. Render
-		// without appending an entry; bump eventCount + lastEventAt
-		// so renderLocked's body-diff gate actually issues a PATCH.
+		// routes those to Feishu thread replies. Nothing in
+		// the card body needs to change, so no PATCH is
+		// issued — the receipt card stays as it was and the
+		// detail surfaces in the thread.
 		_ = entry
-		switch ev.Kind {
-		case agent.EventToolStart, agent.EventToolEnd, agent.EventCompaction:
-			return r.touchAndRenderLocked(ctx)
-		}
-		// Unknown / unhandled event kind — keep going but don't
-		// touch the log.
 		return nil
 	}
 
@@ -794,9 +774,6 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 	// receipt from Waiting → Executing.
 	if r.state == StateWaiting && (entry.Text != "" || entry.Icon != "") {
 		r.state = StateExecuting
-		r.forwardedAt = time.Now()
-		r.eventCount = 1
-		r.lastEventAt = r.forwardedAt
 	}
 
 	return r.renderLocked(ctx)
@@ -808,46 +785,6 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 // budget protects against Feishu's 30 KB card body cap; the entry
 // budget protects against the 50-element hard limit (see the
 // derivation on replyMaxEntries). Caller must hold r.mu.
-// touchAndRenderLocked bumps the receipt's "last seen" markers
-// (eventCount, lastEventAt) without appending a LogEntry, then
-// PATCHes the card so the header timestamp stays live. Used by
-// the F-34 thread-routed OutboundKinds (thinking / tool_start /
-// tool_end / compaction) where the user-visible summary goes to
-// the thread but the receipt card still needs to refresh.
-//
-// Caller MUST hold r.mu.
-func (r *MessageReceipt) touchAndRenderLocked(ctx context.Context) error {
-	r.eventCount++
-	r.lastEventAt = time.Now()
-	if r.state == StateWaiting {
-		r.state = StateExecuting
-		r.forwardedAt = r.lastEventAt
-	}
-	return r.renderLocked(ctx)
-}
-
-// Touch bumps the receipt's last-seen markers and PATCHes the
-// card. Used by Adapter.Send after a thread-routed OutboundKind
-// (thinking / tool_start / tool_end / compaction) so the main
-// chat's receipt card header doesn't freeze while the agent is
-// busy running tools. Safe to call when no receipt exists for
-// (chatID, userMsgID) — Touch is a no-op in that case.
-//
-// Concurrent with other Append / SetExecuting / etc. calls; all
-// mutations go through r.mu.
-func (r *MessageReceipt) Touch(ctx context.Context) error {
-	if r == nil {
-		return nil
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.state == StateCompleted {
-		// Late event after completion — drop silently. Same
-		// policy as Append for post-completion events.
-		return nil
-	}
-	return r.touchAndRenderLocked(ctx)
-}
 // lastEntryLocked returns the most recently appended LogEntry,
 // or nil when the buffer is empty. Used by eventToEntry's
 // de-duplication pass: the final assistant text is emitted
@@ -866,8 +803,6 @@ func (r *MessageReceipt) appendEntryLocked(entry LogEntry) {
 		return
 	}
 	r.entries = append(r.entries, entry)
-	r.eventCount++
-	r.lastEventAt = time.Now()
 	r.evictOverflowLocked()
 }
 
@@ -903,7 +838,10 @@ func (r *MessageReceipt) evictOverflowLocked() {
 func totalLogBytesLocked(r *MessageReceipt) int {
 	const perElementOverhead = 96 // {"tag":"div","text":{"tag":"lark_md","content":""}} ≈ 50-100 bytes
 	const perPanelOverhead = 250  // collapsible_panel header / border / icon / padding JSON
-	total := len(r.state.headerLine(r)) + perElementOverhead
+	total := 0
+	if hl := r.state.headerLine(r); hl != "" {
+		total += len(hl) + perElementOverhead
+	}
 	if r.evicted > 0 {
 		total += len(fmt.Sprintf(logEvictedMarker, r.evicted)) + perElementOverhead
 	}

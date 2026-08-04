@@ -554,13 +554,10 @@ type patchCall struct {
 // multi-div) lark_md body. Plain text thinking would lose all
 // markdown formatting in the chat.
 //
-// F-34 review P1-3: Adapter.Send also Touch()es the receipt so
-// the main chat card header keeps ticking. This triggers the
-// cold-start card creation (one send_card) followed by a silent
-// PATCH. The test captures all outgoing sends and asserts on the
-// interactive card reply; the receipt's cold-start card + PATCH
-// are accepted as observable side-effects, not tested here
-// (covered by TestReceipt_*).
+// The test captures all outgoing sends and asserts on the
+// interactive card reply; any receipt cold-start / PATCH side
+// effects are accepted as observable side-effects, not tested
+// here (covered by TestReceipt_*).
 func TestSend_OutThinking_PostsMarkdownCard(t *testing.T) {
 	a := testAdapter(t)
 
@@ -586,7 +583,7 @@ func TestSend_OutThinking_PostsMarkdownCard(t *testing.T) {
 	}
 
 	// Find the interactive-card reply (skip the cold-start card
-	// created by Touch on the receipt).
+	// created by the receipt).
 	var cardReply *captured
 	for i := range sends {
 		if sends[i].MsgType == larkim.MsgTypeInteractive {
@@ -640,8 +637,6 @@ func TestSend_OutThinking_PostsMarkdownCard(t *testing.T) {
 
 // TestSend_OutToolStart_PostsToThread — F-34. OutToolStart is
 // routed to a thread reply with the body "🔧 name(args)".
-// F-34 review P1-3: also Touch()es the receipt (cold-start
-// card + silent PATCH side-effect).
 func TestSend_OutToolStart_PostsToThread(t *testing.T) {
 	a := testAdapter(t)
 
@@ -691,8 +686,6 @@ func TestSend_OutToolStart_PostsToThread(t *testing.T) {
 
 // TestSend_OutToolEnd_PostsToThread — F-34. OutToolEnd is routed
 // to a thread reply with a type-aware one-line summary.
-// F-34 review P1-3: also Touch()es the receipt (cold-start
-// card + silent PATCH side-effect).
 func TestSend_OutToolEnd_PostsToThread(t *testing.T) {
 	a := testAdapter(t)
 
@@ -747,7 +740,6 @@ func TestSend_OutToolEnd_PostsToThread(t *testing.T) {
 
 // TestSend_OutCompaction_PostsToThread — F-34. OutCompaction
 // is routed to a thread reply with "✶ Compacting conversation…".
-// F-34 review P1-3: also Touch()es the receipt.
 func TestSend_OutCompaction_PostsToThread(t *testing.T) {
 	a := testAdapter(t)
 
@@ -807,9 +799,10 @@ func TestSend_OutCompaction_PostsToThread(t *testing.T) {
 //
 // One table-driven test that exercises the three kinds so a future
 // regression in any one of them flags here. Each kind produces its
-// own cold-start card + PATCH side-effect via Touch; we filter to
-// the text reply (msg_type=text) for OutToolStart / OutToolEnd the
-// same way the existing per-kind tests do, then assert on the
+// own cold-start card + PATCH side-effect via the receipt; we
+// filter to the text reply (msg_type=text) for OutToolStart /
+// OutToolEnd the same way the existing per-kind tests do, then
+// assert on the
 // captured replyInThread. OutThinking is rendered as an interactive
 // lark_md card (F-think §3.1.2), so the assertion counts the
 // interactive reply instead and inspects its content for lark_md.
@@ -857,7 +850,7 @@ func TestSend_ThreadOnlyEvents_PassReplyInThreadTrue(t *testing.T) {
 			var threadOnlyCard int
 			var chatVisible int
 			var lastTextBody string
-			var cardBodies []string // capture ALL interactive payloads (Touch may add cold-start)
+			var cardBodies []string // capture ALL interactive payloads (cold-start may add one)
 			a.sendFunc = func(_ context.Context, _, msgType, content, rootID string, replyInThread bool) (string, error) {
 				if msgType == larkim.MsgTypeText && rootID == "om_user_t" {
 					var payload struct {
@@ -894,9 +887,9 @@ func TestSend_ThreadOnlyEvents_PassReplyInThreadTrue(t *testing.T) {
 				if chatVisible != 0 {
 					t.Errorf("%s: chat-visible text reply count = %d (reply_in_thread=false), want 0 — OutThinking must NEVER appear in main chat", c.name, chatVisible)
 				}
-				// Touch() also posts a cold-start receipt card
-				// through sendFunc; find the thinking card by its
-				// lark_md marker rather than relying on order.
+				// The receipt also posts a cold-start card through sendFunc;
+				// find the thinking card by its lark_md marker
+				// rather than relying on order.
 				var thinkingCard string
 				for _, body := range cardBodies {
 					if strings.Contains(body, "lark_md") {

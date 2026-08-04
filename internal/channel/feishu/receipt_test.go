@@ -113,12 +113,11 @@ func TestReceiptState_String(t *testing.T) {
 
 	cases := []struct {
 		state  ReceiptState
-		count  int
 		ts     timeParseResult
 		expect string
 	}{
-		{StateWaiting, 0, zeroTime(), "⏳ 等待中"},
-		{StateExecuting, 0, zeroTime(), "🔄 处理中"},
+		{StateWaiting, zeroTime(), "⏳ 等待中"},
+		{StateExecuting, zeroTime(), ""},
 	}
 	// First two don't need a receipt (zero time fallback).
 	for _, c := range cases {
@@ -130,12 +129,12 @@ func TestReceiptState_String(t *testing.T) {
 
 	// With timestamps:
 	r := &MessageReceipt{
-		eventCount:  47,
-		lastEventAt: now,
 		completedAt: now,
 	}
-	if got := StateExecuting.headerLine(r); got != "🔄 ⏳ 47 · 14:35:20" {
-		t.Errorf("Executing with ts = %q, want '🔄 ⏳ 47 · 14:35:20'", got)
+	// Executing state is intentionally empty regardless of timestamps
+	// (no heartbeat display — see headerLine docs).
+	if got := StateExecuting.headerLine(r); got != "" {
+		t.Errorf("Executing with ts = %q, want ''", got)
 	}
 	if got := StateCompleted.headerLine(r); got != "✅ 已完成 14:35:20" {
 		t.Errorf("Completed with ts = %q, want '✅ 已完成 14:35:20'", got)
@@ -163,7 +162,7 @@ func TestReceiptLifecycle_Renderings(t *testing.T) {
 	// Manually drive a receipt through its three states and assert
 	// on the renderings. This is a pure-logic test; integration with
 	// the live Feishu API is in the E2E follow-up.
-	r := &MessageReceipt{receivedAt: parseTime(t, "2026-08-01T14:35:00+08:00")}
+	r := &MessageReceipt{}
 
 	// State 1: Waiting
 	if r.State() != StateWaiting {
@@ -173,12 +172,10 @@ func TestReceiptLifecycle_Renderings(t *testing.T) {
 		t.Errorf("Waiting.String = %q", got)
 	}
 
-	// State 2: Executing
+	// State 2: Executing — header is intentionally empty (no heartbeat).
 	r.state = StateExecuting
-	r.eventCount = 1
-	r.lastEventAt = parseTime(t, "2026-08-01T14:35:01+08:00")
-	if got := r.state.headerLine(r); got != "🔄 ⏳ 1 · 14:35:01" {
-		t.Errorf("Executing.String = %q", got)
+	if got := r.state.headerLine(r); got != "" {
+		t.Errorf("Executing.String = %q, want '' (no heartbeat display)", got)
 	}
 
 	// State 3: Completed
@@ -190,25 +187,31 @@ func TestReceiptLifecycle_Renderings(t *testing.T) {
 }
 
 func TestReceiptStringContainsEmoji(t *testing.T) {
-	// Sanity: every state string contains its identifying emoji so
-	// the user's eye can scan the receipt row.
+	// Sanity: Waiting + Completed state strings contain their
+	// identifying emoji so the user's eye can scan the receipt row.
+	// Executing state is intentionally empty (no heartbeat display);
+	// the in-progress emoji is conveyed via the user-message reaction
+	// (managed by MessageState FSM), not the card header.
 	for _, c := range []struct {
 		state ReceiptState
 		emoji string
 	}{
 		{StateWaiting, "⏳"},
-		{StateExecuting, "🔄"},
 		{StateCompleted, "✅"},
 	} {
 		r := &MessageReceipt{
-			eventCount:  1,
-			lastEventAt: parseTime(t, "2026-08-01T14:35:00+08:00"),
 			completedAt: parseTime(t, "2026-08-01T14:35:00+08:00"),
 		}
 		got := c.state.headerLine(r)
 		if !strings.Contains(got, c.emoji) {
 			t.Errorf("%v string %q does not contain emoji %q", c.state, got, c.emoji)
 		}
+	}
+
+	// Executing header is empty.
+	r := &MessageReceipt{}
+	if got := StateExecuting.headerLine(r); got != "" {
+		t.Errorf("Executing header = %q, want ''", got)
 	}
 }
 
@@ -234,7 +237,7 @@ func TestReceiptStringContainsEmoji(t *testing.T) {
 //
 // The test:
 //  1. Creates a receipt with the mockReceiptBot (no Feishu).
-//  2. Appends three events (text, tool start, tool end).
+//  2. Appends three text events (one initial + two more).
 //  3. Asserts SendCard was called exactly ONCE (first event).
 //  4. Asserts PatchMessage was called TWICE (subsequent events).
 //  5. Asserts SendMessageText was NEVER called.
@@ -243,30 +246,29 @@ func TestReceiptStringContainsEmoji(t *testing.T) {
 //  7. Asserts each card body contains all entries seen so far
 //     (the rendered body grows monotonically; this is the
 //     observable surface of the rolling-log card).
+//
+// Note: tool_start / tool_end / thinking events are filtered
+// (F-34 — they go to thread replies, not the receipt card), so
+// they don't trigger a PATCH on their own. With the heartbeat
+// feature removed (#40), there is no longer any reason to force
+// a PATCH between visible events. Only events that change the
+// card body (text / result / init / usage) trigger a render.
 func TestReceipt_FirstSendThenPatch(t *testing.T) {
 	bot := &mockReceiptBot{}
 	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
-	r.receivedAt = time.Now()
 
-	// Three events across three agent kinds.
+	// Three text events that all produce card-body entries.
 	mustAppend(t, r, agent.AgentEvent{
 		Kind: agent.EventText,
 		Text: "hello from the agent",
 	})
 	mustAppend(t, r, agent.AgentEvent{
-		Kind: agent.EventToolStart,
-		ToolStart: &agent.ToolStartEvent{
-			Name: "Read",
-			ID:   "toolu_001",
-			Args: "/tmp/foo",
-		},
+		Kind: agent.EventText,
+		Text: "second chunk of text",
 	})
 	mustAppend(t, r, agent.AgentEvent{
-		Kind: agent.EventToolEnd,
-		ToolEnd: &agent.ToolEndEvent{
-			ID:   "toolu_001",
-			Name: "Read",
-		},
+		Kind: agent.EventText,
+		Text: "third chunk of text",
 	})
 
 	bot.mu.Lock()
@@ -319,10 +321,7 @@ func TestReceipt_FirstSendThenPatch(t *testing.T) {
 	// events). Per F-34, tool_start / tool_end no longer surface
 	// in the receipt card — the adapter routes them to Feishu
 	// thread replies (Adapter.Send → postThreadReply). We assert
-	// on the visible reply text only. eventCount drives the
-	// header line ("🔄 ⏳ 3 · HH:MM:SS"), which is also asserted
-	// implicitly via the PATCH count above (each subsequent
-	// event must PATCH to refresh the timestamp).
+	// on the visible reply text only.
 	last := patches[len(patches)-1].Body
 	for _, want := range []string{"hello from the agent"} {
 		if !strings.Contains(last, want) {
@@ -689,8 +688,6 @@ func TestFootLine_ColonsByDesign(t *testing.T) {
 func TestBuildReceiptCard_Card2Shape(t *testing.T) {
 	r := &MessageReceipt{
 		state:        StateExecuting,
-		eventCount:   3,
-		lastEventAt:  parseTime(t, "2026-08-01T14:32:05+08:00"),
 		agentName:    "main",
 		workspace:    "/Users/foo/bar/repo",
 		branch:       "feat/receipt-card",
@@ -713,8 +710,9 @@ func TestBuildReceiptCard_Card2Shape(t *testing.T) {
 		`"elements":[`,
 		`"tag":"markdown"`,
 
-		// Header + reply entry rendered as markdown.
-		`"content":"🔄 ⏳ 3 · 14:32:05"`,
+		// Header line for Executing state is intentionally empty
+		// (no heartbeat display — see headerLine docs). Only the
+		// reply entry renders as markdown.
 		`"content":"💬 hello"`,
 
 		// Labelled foot-note format (per-line layout,
@@ -786,11 +784,10 @@ func TestBuildReceiptCard_Card2Shape(t *testing.T) {
 func TestBuildReceiptCard_FooterOpenClawStyle(t *testing.T) {
 	t.Run("notation-text-size-on-normal-state", func(t *testing.T) {
 		r := &MessageReceipt{
-			state:      StateCompleted,
-			agentName:  "claude",
-			workspace:  "/Users/devin/code/nightme",
-			branch:     "main",
-			eventCount: 1,
+			state:     StateCompleted,
+			agentName: "claude",
+			workspace: "/Users/devin/code/nightme",
+			branch:    "main",
 		}
 		body, err := buildReceiptCard(r)
 		if err != nil {
@@ -811,11 +808,10 @@ func TestBuildReceiptCard_FooterOpenClawStyle(t *testing.T) {
 
 	t.Run("red-color-on-error-state", func(t *testing.T) {
 		r := &MessageReceipt{
-			state:      StateError,
-			agentName:  "claude",
-			workspace:  "/Users/devin/code/nightme",
-			branch:     "main",
-			eventCount: 1,
+			state:     StateError,
+			agentName: "claude",
+			workspace: "/Users/devin/code/nightme",
+			branch:    "main",
 		}
 		body, err := buildReceiptCard(r)
 		if err != nil {
@@ -852,8 +848,6 @@ func TestBuildReceiptCard_FooterOpenClawStyle(t *testing.T) {
 func TestBuildReceiptCard_ThinkingCollapsiblePanel(t *testing.T) {
 	r := &MessageReceipt{
 		state:        StateExecuting,
-		eventCount:   3,
-		lastEventAt:  parseTime(t, "2026-08-01T14:32:05+08:00"),
 		agentName:    "claude",
 		workspace:    "/Users/devin/code/nightme",
 		branch:       "main",
@@ -948,9 +942,7 @@ func (m *mockReceiptBot) UpdateMessage(_ context.Context, _, _ string) error {
 
 func TestBuildReceiptCard_ToolFolded(t *testing.T) {
 	r := &MessageReceipt{
-		state:       StateExecuting,
-		eventCount:  3,
-		lastEventAt: parseTime(t, "2026-08-01T14:32:05+08:00"),
+		state: StateExecuting,
 		entries: []LogEntry{
 			{Icon: "🔧", Text: "Read(/a.py)", Kind: "tool"},
 			{Icon: "✅", Text: "Read → 47 lines", Kind: "tool"},
@@ -974,69 +966,6 @@ func TestBuildReceiptCard_ToolFolded(t *testing.T) {
 	}
 }
 
-// TestReceipt_Touch_BumpsCountersAndRenders — F-34 review P1-3
-// regression guard. Touch() must bump eventCount + lastEventAt
-// and PATCH the card without appending a LogEntry. The header
-// line in the next render must reflect the new event count and
-// a fresh timestamp, and the entries slice must remain empty.
-func TestReceipt_Touch_BumpsCountersAndRenders(t *testing.T) {
-	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForCard("oc_chat", "om_user", "om_card", bot)
-	// Anchor lastEventAt to one hour ago so the test is robust
-	// against the system clock (time.Now in Touch must advance
-	// past the anchor regardless of the wall clock at run time).
-	r.lastEventAt = time.Now().Add(-time.Hour)
-	r.eventCount = 3
-
-	if err := r.Touch(context.Background()); err != nil {
-		t.Fatalf("Touch: %v", err)
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.eventCount != 4 {
-		t.Errorf("eventCount = %d, want 4", r.eventCount)
-	}
-	if !r.lastEventAt.After(time.Now().Add(-time.Minute)) {
-		t.Errorf("lastEventAt did not advance: %v", r.lastEventAt)
-	}
-	if len(r.entries) != 0 {
-		t.Errorf("entries = %d, want 0 (Touch must not append)", len(r.entries))
-	}
-
-	bot.mu.Lock()
-	defer bot.mu.Unlock()
-	if len(bot.patches) != 1 {
-		t.Errorf("patches = %d, want 1 (Touch must PATCH once)", len(bot.patches))
-	}
-}
-
-// TestReceipt_Touch_NilSafe — Touch on a nil receiver is a no-op
-// (used by Adapter.Send where receiptFor may return nil for
-// orphan events).
-func TestReceipt_Touch_NilSafe(t *testing.T) {
-	var r *MessageReceipt
-	if err := r.Touch(context.Background()); err != nil {
-		t.Errorf("nil Touch: %v", err)
-	}
-}
-
-// TestReceipt_Touch_DropsAfterCompletion — Touch after SetCompleted
-// is a silent no-op (matches Append's late-event policy).
-func TestReceipt_Touch_DropsAfterCompletion(t *testing.T) {
-	bot := &mockReceiptBot{}
-	r := NewMessageReceiptForCard("oc_chat", "om_user", "om_card", bot)
-	r.state = StateCompleted
-	if err := r.Touch(context.Background()); err != nil {
-		t.Fatalf("Touch: %v", err)
-	}
-	bot.mu.Lock()
-	defer bot.mu.Unlock()
-	if len(bot.patches) != 0 {
-		t.Errorf("patches = %d, want 0 (Touch after completion must drop)", len(bot.patches))
-	}
-}
-
 // TestBuildReceiptCard_LongEntryMultiDivs (F-37) verifies that a
 // single entry with text longer than divTextCharLimit (1000 runes)
 // is split into multiple markdown elements in the rendered card.
@@ -1048,8 +977,7 @@ func TestBuildReceiptCard_LongEntryMultiDivs(t *testing.T) {
 	para2 := strings.Repeat("b", 1000)
 	text := para1 + "\n\n" + para2
 	r := &MessageReceipt{
-		state:       StateCompleted,
-		eventCount:  1,
+		state: StateCompleted,
 		entries: []LogEntry{
 			{Icon: "📝", Text: text, Kind: "result"},
 		},
@@ -1097,8 +1025,7 @@ func decodeReceiptElements(t *testing.T, body string) []map[string]any {
 // (no unnecessary splitting).
 func TestBuildReceiptCard_ShortEntryStaysSingle(t *testing.T) {
 	r := &MessageReceipt{
-		state:       StateExecuting,
-		eventCount:  1,
+		state: StateExecuting,
 		entries: []LogEntry{
 			{Icon: "💬", Text: "Short reply under 1000 chars.", Kind: "reply"},
 		},
@@ -1107,9 +1034,10 @@ func TestBuildReceiptCard_ShortEntryStaysSingle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
-	// 1 markdown element for entry + 1 markdown for header line = 2
-	if c := strings.Count(body, `"tag":"markdown"`); c != 2 {
-		t.Errorf("expected 2 markdown elements (header + entry), got %d\n--- body ---\n%s", c, truncateForTest(body, 600))
+	// 1 markdown element for entry only — Executing state header is
+	// empty (no heartbeat display), so no header markdown renders.
+	if c := strings.Count(body, `"tag":"markdown"`); c != 1 {
+		t.Errorf("expected 1 markdown element (entry only; no heartbeat header), got %d\n--- body ---\n%s", c, truncateForTest(body, 600))
 	}
 }
 
@@ -1120,8 +1048,7 @@ func TestBuildReceiptCard_HugeEntryStaysBounded(t *testing.T) {
 	// 8000 chars, no paragraph breaks (so it splits via hardSplit at rune boundary)
 	text := strings.Repeat("x", 8000)
 	r := &MessageReceipt{
-		state:       StateCompleted,
-		eventCount:  1,
+		state: StateCompleted,
 		entries: []LogEntry{
 			{Icon: "📝", Text: text, Kind: "result"},
 		},
@@ -1145,12 +1072,10 @@ func TestBuildReceiptCard_HugeEntryStaysBounded(t *testing.T) {
 // even when entries are split (they're not part of the splitter).
 func TestBuildReceiptCard_HeaderFooterRespected(t *testing.T) {
 	r := &MessageReceipt{
-		state:       StateCompleted,
-		eventCount:  1,
-		evicted:     2,
-		lastEventAt: parseTime(t, "2026-08-01T14:32:05+08:00"),
-		agentName:   "claude",
-		workspace:   "/code/repo",
+		state:     StateCompleted,
+		evicted:   2,
+		agentName: "claude",
+		workspace: "/code/repo",
 		entries: []LogEntry{
 			{Icon: "📝", Text: strings.Repeat("a", 2500), Kind: "result"},
 		},
@@ -1190,8 +1115,7 @@ func TestBuildReceiptCard_HeaderFooterRespected(t *testing.T) {
 // OutResult long-content path instead — see F-37 §3.4.
 func TestBuildReceiptCard_ThinkingEntry_NotRendered(t *testing.T) {
 	r := &MessageReceipt{
-		state:       StateExecuting,
-		eventCount:  1,
+		state: StateExecuting,
 		entries: []LogEntry{
 			{Icon: "💭", Text: strings.Repeat("thinking...", 250), Kind: "thinking"}, // ~2750 chars
 		},
@@ -1200,11 +1124,10 @@ func TestBuildReceiptCard_ThinkingEntry_NotRendered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
-	// 1 markdown element (the StateExecuting header) is OK.
-	// The thinking entry must contribute ZERO additional
-	// elements.
-	if c := strings.Count(body, `"tag":"markdown"`); c != 1 {
-		t.Errorf("expected 1 markdown (header only) for filtered thinking, got %d\n--- body ---\n%s", c, truncateForTest(body, 600))
+	// 0 markdown elements — Executing state header is empty (no
+	// heartbeat), and thinking entries are filtered (F-34).
+	if c := strings.Count(body, `"tag":"markdown"`); c != 0 {
+		t.Errorf("expected 0 markdown for filtered thinking (no header in Executing), got %d\n--- body ---\n%s", c, truncateForTest(body, 600))
 	}
 	if strings.Contains(body, `"tag":"collapsible_panel"`) {
 		t.Errorf("thinking entry should NOT wrap in collapsible_panel on the F-37 thread-route branch")
@@ -1222,8 +1145,7 @@ func TestBuildReceiptCard_ThinkingEntry_NotRendered(t *testing.T) {
 // focused on the receipt card's final answer.
 func TestBuildReceiptCard_ToolEntry_NotRendered(t *testing.T) {
 	r := &MessageReceipt{
-		state:       StateExecuting,
-		eventCount:  1,
+		state: StateExecuting,
 		entries: []LogEntry{
 			{Icon: "🔧", Text: "Read(/a.py) " + strings.Repeat("x", 1100), Kind: "tool"},
 		},
@@ -1232,8 +1154,8 @@ func TestBuildReceiptCard_ToolEntry_NotRendered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
-	if c := strings.Count(body, `"tag":"markdown"`); c != 1 {
-		t.Errorf("expected 1 markdown (header only) for filtered tool, got %d\n--- body ---\n%s", c, truncateForTest(body, 600))
+	if c := strings.Count(body, `"tag":"markdown"`); c != 0 {
+		t.Errorf("expected 0 markdown for filtered tool (no header in Executing), got %d\n--- body ---\n%s", c, truncateForTest(body, 600))
 	}
 	if strings.Contains(body, `"tag":"collapsible_panel"`) {
 		t.Errorf("tool entry should NOT wrap in collapsible_panel on the F-37 thread-route branch")

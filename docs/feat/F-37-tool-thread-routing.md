@@ -71,25 +71,44 @@ thread (click 指示器进入):
 
 ### 2.1 Channel 按 OutboundKind 分流
 
-Feishu adapter 在 `Send` dispatcher 按 Kind 自决 routing：
+Feishu adapter 在 `Send` dispatcher 按 Kind 自决 routing。  
+**飞书有 3 种 reply 形态（实机验证，2026-08-04）**：
 
-| OutboundKind | Routing | Feishu `reply_in_thread` | 视觉形式 |
-|--------------|---------|--------------------------|---------|
-| `OutThinking` | **thread reply** | **true**（thread-only）| 纯文本 `💭 <text>`（每 event 一条）|
-| `OutToolStart` | **thread reply** | **true**（thread-only）| 纯文本 `🔧 <name>(<args>)`（每 event 一条）|
-| `OutToolEnd` | **thread reply** | **true**（thread-only）| 纯文本 `✅/❌ <summarized>`（类型感知摘要）|
-| `OutCompaction` | **thread reply** | **true**（thread-only）| 纯文本 `✶ Compacting conversation…` |
-| `OutText` / `OutResult` / `OutInit` / `OutUsage` | **receipt card** | n/a（PATCH in place 不走 reply API）| 进 card body |
-| `OutMessageState` | reaction on user msg | n/a | AddReaction ⏳/🔄/✅/❌ |
-| `OutCard` (冷启动 receipt / permission card / slash command reply) | thread reply | **false**（默认 chat 可见）| 进 main chat 内联回复 |
+| 形态名 | Wire（HTTP body / path） | 飞书 main chat 看到 | 飞书 thread panel 看到 | 飞书响应里 `thread_id` |
+|---|---|---|---|---|
+| **Reply**（顶级 Create） | `POST /im/v1/messages` body `{receive_id, msg_type, content}`（**无** `root_id`） | 独立气泡（不挂任何 anchor 下） | 不在 thread panel（没有 thread 概念） | `""`（飞书不分配） |
+| **ReplyInThread + Also send it to chat** | `POST /messages/{om_M0}/reply` body `{msg_type, content}`（`reply_in_thread` **字段省略**） | **正文**（内联 reply，带回复箭头） | **同一份正文**（按时间序） | `""`（飞书不分配独立 thread，reply 只是 main chat 的一条内联消息） |
+| **ReplyInThread** | `POST /messages/{om_M0}/reply` body `{msg_type, content, reply_in_thread: true}` | **"X replies" 灰条**（无正文） | **正文**（按时间序；多条 share 同一 thread） | `omt_xxx`（飞书**第一次** reply-true 时分配，之后同 root_id 复用） |
+
+> 命名约定：上表"形态名"来自 ops 确认（2026-08-04 实机飞书群 Frtpilot-Xiage 验证）。
+> "ReplyInThread + Also send it to chat" 在 SDK body 上**就是 `reply_in_thread` 字段省略**——即 0 字节差异化。
+> "ReplyInThread" 在 SDK body 上**就是 `reply_in_thread: true` 28 字节**——nightme F-37 选的路径。
+
+按 OutboundKind 映射：
+
+| OutboundKind | 飞书 reply 形态 | nightme 实际行为 |
+|---|---|---|
+| `OutThinking` | **ReplyInThread** | 纯文本 `💭 <text>`（每 event 一条）|
+| `OutToolStart` | **ReplyInThread** | 纯文本 `● <name>(<args>)`（每 event 一条）|
+| `OutToolEnd` | **ReplyInThread** | 纯文本 `⎿  <summary>`（类型感知摘要）|
+| `OutCompaction` | **ReplyInThread** | 纯文本 `✶ Compacting conversation…` |
+| `OutText` / `OutResult` / `OutInit` / `OutUsage` | n/a（PATCH in place 不走 reply API） | 进 receipt card body |
+| `OutMessageState` | n/a | AddReaction ⏳/🔄/✅/❌ 在 user msg 上 |
+| `OutCard`（permission card） | **ReplyInThread + Also send it to chat** | 进 main chat 内联回复 |
+| `OutCommandReply`（slash 回应） | **ReplyInThread + Also send it to chat** | 进 main chat 内联回复 |
+| Receipt 冷启动卡 | **ReplyInThread + Also send it to chat** | 进 main chat 内联回复（PATCH in-place） |
+| 顶级 Create 形态 | **Reply** | nightme **不**用（fallback 路径 230011/231003 退化时才走顶级 Create，详见 §15.2） |
 
 **`reply_in_thread` 字段语义**（来自 `larkim.ReplyMessageReqBody.ReplyInThread *bool`，
 SDK 注释：「是否以话题形式回复；若群聊已经是话题模式，则自动回复该条消息所在的话题」）：
 
-- `true`：bot 消息**只在 thread 面板显示**，main chat 只看到 "X replies" 指示器
-- `false`（默认，省略时）：bot 消息**在 main chat 内联显示**（同时进 thread 面板作为可点击 entry）
+- **字段省略**（`omitempty` nil 指针）→ bot 消息**在 main chat 内联显示 + 进 thread panel** = "ReplyInThread + Also send it to chat"
+- `false`（显式设 false）→ **字节级与"字段省略"不同**（多 28 字节 `"reply_in_thread":false`），但**飞书 UI 行为完全一致**（与"省略"等价）
+- `true` → bot 消息**只在 thread 面板显示**，main chat 只看到 "X replies" 指示器 = "ReplyInThread"
 
-F-37 把"中间过程"四条 path 显式设 `true`，让 main chat 干净只露 receipt card。
+**F-37 选 ReplyInThread**（`true`）给四条中间过程 path，让 main chat 干净只露 receipt card。
+
+> **⚠️ 代码纪律**：`internal/channel/feishu/adapter.go` 的 `sendViaLarkReply` 必须保持 `if replyInThread { ... .ReplyInThread(true) }` 的写法，**不能简化成** `.ReplyInThread(replyInThread)`——后者在 false 路径会**多 28 字节** (`"reply_in_thread":false`)，破坏 pre-F-37 字节级 hash（recorder log / idempotency cache 失效）。`TestSend_ChatVisibleEvents_PassReplyInThreadFalse` 是这条约束的回归测试。
 
 **为什么这是 Channel 自治**：Gateway 仍然只 stamp `out.ReplyTo = cs.currentTurnUserMsgID`；OutboundMessage 契约不变。Channel 看到 Kind 后自决 routing 目标（thread vs card vs reaction）。完全符合 SPEC §1.3 "抽象归抽象 / 具体归具体" 不变式。
 
@@ -596,6 +615,28 @@ nightme 数据模型不变式保留。
 
 ---
 
+## 7.5 实机飞书群验证（2026-08-04，Frtpilot-Xiage）
+
+| 发送 | 形态 | 飞书响应 | main chat UI 实际显示 |
+|---|---|---|---|
+| `[probe-A]` Create 顶级 (`oc_4a06da49bc0131ff14b381498e4fed9d`） | Reply | `message_id=om_xxx, parent_id="", root_id="", thread_id=""` | 独立气泡，不挂 M0 下 ✓ |
+| `[probe-B]` Reply to M0，省略 reply_in_thread | ReplyInThread + Also send it to chat | `parent_id=M0, root_id=M0, thread_id=""` | main chat 显示**正文内联**（带回复箭头），thread panel 也有 ✓ |
+| `[probe-D]` Reply to M0, reply_in_thread=true | ReplyInThread | `parent_id=M0, root_id=M0, thread_id=omt_19141bf7110e1c89` | main chat 只显示 "X replies" 灰条，**正文只在线程里** ✓ |
+| `[probe-D2/D3/D4]` 续发 3 条 reply-true | ReplyInThread | 全部 `thread_id=omt_19141bf7110e1c89`（共享） | 4 条 D share 同一个 thread，main chat 看到 "4 replies" 灰条 |
+
+**关键发现**：
+
+1. **顶级 Create 不分配 thread_id**（飞书响应 `thread_id=""`）——这跟 mock 假设的"self-root"不同。
+2. **ReplyInThread + Also send it to chat 也不分配 thread_id**（B 响应 `thread_id=""`）——只是 main chat 的内联 reply。
+3. **ReplyInThread 才分配独立 thread_id**（D 响应 `thread_id=omt_19141bf7110e1c89`）——之后同 root_id 的 reply-true 复用此 thread。
+4. **msg.ReplyTo 必须始终是 M0**（当前用户消息 id）—— 4 条 D 全部 reply M0，**不**chain reply 到上一条 D；这反向验证 §13.10 / F-33 "单数锚点 currentTurnUserMsgID" 不变式**真的必要**（如果链式 reply，thread 碎裂成 N 个独立 "1 reply" 指示器，UI 不再汇总）。
+
+Probe 工具代码：`cmd/_probe/feishu_thread_probe.go`（mock 版）+ `cmd/_probe/send_one/main.go`（真实发送版）。决策落地后建议删除（保留实机飞书响应记录在本节即可）。
+
+---
+
 ## 8. Change log
 
-- **2026-08-04** — F-37 草案（Devin 拍板反转 §13.6 折叠方案）。Docs 落地（SPEC §0.3 + 本 doc + channel/feishu §13.12 + F-25 §3 收窄 + F-08 §4 自治路由例子 + CHANGELOG）。代码改动 backlog §3.1。
+- **2026-08-04 (a)** — F-37 草案（Devin 拍板反转 §13.6 折叠方案）。Docs 落地（SPEC §0.3 + 本 doc + channel/feishu §13.12 + F-25 §3 收窄 + F-08 §4 自治路由例子 + CHANGELOG）。代码改动 backlog §3.1。
+- **2026-08-04 (b)** — 实机飞书群（Frtpilot-Xiage）验证 "Reply / ReplyInThread+Also send it to chat / ReplyInThread" 三种形态；用 `cmd/_probe/send_one` 直接发 8 条组合消息，把命名固化进 §2.1 表格和 §7.5 实验记录；记录 `thread_id` 分配规则（顶级 / default-reply 不分配；reply-true 分配并复用）。
+- **2026-08-04 (c)** — `reply_in_thread` 字段"省略 vs 显式 false"字节差异（28B）发现：`TestSend_ChatVisibleEvents_PassReplyInThreadFalse` 单测 + 代码注释固化"if replyInThread { .ReplyInThread(true) }" 必须保持的纪律。

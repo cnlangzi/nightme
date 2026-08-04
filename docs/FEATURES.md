@@ -83,7 +83,6 @@
 | F-14 | 图片 / 文件附件透传 | [feat/F-14-attachment-passthrough.md](./feat/F-14-attachment-passthrough.md) | v0.2 |
 | F-15 | Session 持久化（stdout 历史）| [feat/F-15-session-persistence.md](./feat/F-15-session-persistence.md) | v0.2 |
 | F-16 | Web TTY UI（xterm.js + WebSocket）| [feat/F-16-web-tty-ui.md](./feat/F-16-web-tty-ui.md) | v0.2 |
-| F-17 | ~~健康检查 / 心跳~~ | ~~[feat/F-17-health-check.md](./feat/F-17-health-check.md)~~ | **superseded by F-23** |
 | F-18 | ~~Token / API key 注入~~ | — | **cancelled** |
 
 [v1.2 不变]

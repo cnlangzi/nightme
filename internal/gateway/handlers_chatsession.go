@@ -76,6 +76,20 @@ func RegisterChatSessionCommands(gw Gateway, mgr *chatsession.Manager, channel C
 		},
 	})
 
+	// F-think §3.1.2: per-chat thinking-content visibility toggle.
+	// State-only; does not touch activeCwd / activeAgent / pool.
+	// The actual gate (drop OutThinking vs pass-through) lives in
+	// the runtime's EventHandler closure. The Feishu adapter
+	// renders OutThinking as a lark_md card in the user-message
+	// thread when /think on (default).
+	gw.Register(Command{
+		Name:        "think",
+		Description: "Toggle per-chat thinking visibility: /think on | /think off",
+		Handler: func(ctx context.Context, msg *InboundMessage, args []string) (*CommandResult, error) {
+			return handleThink(ctx, mgr, channel, msg, args, globalPrimary)
+		},
+	})
+
 	// F-34 §4: reset conversation context. /new clears the
 	// conversation history on all AgentSessions in activeCwd;
 	// /new <agent> narrows to one. Pool identity is preserved;

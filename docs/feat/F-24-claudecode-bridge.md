@@ -105,6 +105,8 @@ claude \
 
 ### 3.2 stdin 格式（user message）
 
+**纯文本 turn**（最简形态）：
+
 ```json
 {
   "type": "user",
@@ -114,6 +116,59 @@ claude \
   }
 }
 ```
+
+**含附件 turn**（F-14 v1.4 落地后）：`content` 是 heterogeneous array，每个 element 单独表义，**顺序由调用方保证**（nightme 这边由 `[]agent.ContentBlock` slice 的下标 1:1 表达）：
+
+```json
+{
+  "type": "user",
+  "message": {
+    "role": "user",
+    "content": [
+      {"type": "text",    "text": "看一下这只"},
+      {"type": "image",   "source": {
+        "type":       "base64",
+        "media_type": "image/png",
+        "data":       "<base64 cat>"
+      }},
+      {"type": "text",    "text": "跟这只"},
+      {"type": "image",   "source": {
+        "type":       "base64",
+        "media_type": "image/jpeg",
+        "data":       "<base64 dog>"
+      }},
+      {"type": "text",    "text": "的区别"}
+    ]
+  }
+}
+```
+
+**PDF 文件**用 `type:"document"` 形态（Anthropic API 内联支持）：
+
+```json
+{"type": "document", "source": {
+  "type":       "base64",
+  "media_type": "application/pdf",
+  "data":       "<base64 pdf>"
+}}
+```
+
+**field 映射**（来自 `internal/bridge/claudecode/session.go::SendBlocks`,line 243-353）：
+
+| `agent.ContentBlock.Type` | JSON element | 降级条件 |
+|---------------------------|--------------|----------|
+| `ContentText` | `{"type":"text","text": block.Text}` | `Text == ""` → skip |
+| `ContentImage` | `{"type":"image","source":{"type":"base64","media_type": block.MediaType,"data": base64(file)}}` | size > 5 MiB → 文本注解；Path 为空 / os.Stat fail / base64 fail → skip |
+| `ContentFile` (PDF) | `{"type":"document","source":{"type":"base64","media_type":"application/pdf","data": base64(file)}}` | 失败 → skip |
+| `ContentFile` (其他 MIME) | `{"type":"text","text":"File: /path"}` | — |
+
+**关键不变量**：
+1. **`content[]` 数组顺序 = `[]ContentBlock` 顺序**（i → i，1:1 映射）
+2. **空 slice → noop**：`SendBlocks([])` 立即返回，不写 envelope
+3. **失败 block omit**：`content[]` 中不会插入 placeholder（避免 Claude 把"半截 array"误读为完整 turn）
+4. **base64 转换只在 bridge 边界**：`agent.ContentBlock.Path` 永远持绝对路径，bridge 在 SendBlocks 内做 `os.ReadFile → base64.StdEncoding.EncodeToString`（`internal/bridge/claudecode/session.go:360`）
+
+**为什么不用"text 里嵌 `[img:xxx]` 占位符"**:Anthropic API `content` 字段本身就是 heterogeneous array，placeholder 方案会引入解析歧义 + 类型丢失 + 协议弱化。slice 1:1 对应 wire 数组是天然选择。详见 `docs/feat/F-14-attachment-passthrough.md` §4.5。
 
 多轮对话：每条 user message 单独一行 JSON，连续写入 stdin。
 

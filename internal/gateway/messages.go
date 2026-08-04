@@ -34,7 +34,34 @@ type InboundMessage struct {
 	// Attachments is the unified attachment shape. Channels are
 	// responsible for downloading their native blob into a local
 	// file and exposing it here.
+	//
+	// Invariant (F-14 v1.4a): Attachments[i].LocalPath must be
+	// populated before this struct is published on ch.Incoming().
+	// A Channel that emits LocalPath == "" for non-failed downloads
+	// is a bug — the dispatcher silently drops those attachments at
+	// BuildBlocks. See WARN log "feishu: inbound attachments decoded
+	// with empty LocalPath" for the diagnostic.
 	Attachments []Attachment
+	// Blocks is the ordered user-visible turn shape, populated by
+	// Channel adapters for rich-text messages (Feishu msg_type=post)
+	// whose paragraph-internal ordering must be preserved through to
+	// the Agent. Non-post msg_types leave Blocks == nil; the
+	// dispatcher falls back to BuildBlocks(msg.Text, msg.Attachments)
+	// for those.
+	//
+	// For post messages: each Feishu paragraph node (`tag:"text"` /
+	// `tag:"img"` / `tag:"a"`) maps to one ContentBlock. Image blocks
+	// carry FileKey in their Path field as a pre-download placeholder;
+	// the post-download resolveBlocks step back-fills LocalPath.
+	// The order of blocks is the order the user saw in Feishu.
+	//
+	// Note: Blocks is the SOURCE OF TRUTH for post msg_types; Text
+	// is "" for those (extractAttachments folds text into Blocks).
+	// Attachments and Blocks are not redundant — Attachments carries
+	// the download candidates (binary sources keyed by FileKey);
+	// Blocks carries the user-visible turn shape (text + images
+	// interleaved).
+	Blocks []agent.ContentBlock
 	// ReplyTo is the channel-native message id that this inbound
 	// message is a reply to. For Feishu, this is the SDK's
 	// `parent_id` field (F-33 D3) -- the message the user directly

@@ -57,6 +57,15 @@ type ChatSession struct {
 	// for group chats via the channel-supplied HasMention bool.
 	watchMode WatchMode
 
+	// F-think §3.1.2: per-chat thinking-content visibility. Default
+	// ThinkModeShow (runtime forwards OutThinking to the Channel,
+	// which renders it as a lark_md card in the user-message
+	// thread); /think off switches to ThinkModeHide (runtime
+	// drops OutThinking at the EventHandler gate). Unlike
+	// WatchMode this is chat-type-independent — DMs and group
+	// chats behave identically. See docs/SPEC.md §3.1.2.
+	thinkMode ThinkMode
+
 	// Pool of AgentSessions keyed by (agent, cwd).
 	pool map[agentCwdKey]*AgentSession
 
@@ -140,6 +149,7 @@ func New(chatID, primaryAgent string) *ChatSession {
 		primaryAgent:     primaryAgent, // historical snapshot, read-only
 		pool:             make(map[agentCwdKey]*AgentSession),
 		watchMode:        WatchModeMention, // F-watch default
+		thinkMode:        ThinkModeShow,    // F-think default
 		createdAt:        time.Now(),
 		lastInteractionAt: time.Now(),
 	}
@@ -223,6 +233,30 @@ func (cs *ChatSession) SetWatchMode(mode WatchMode) error {
 	return nil
 }
 
+// SetThinkMode changes the per-chat thinking-content visibility.
+// Persists to registry on success so /think off survives daemon
+// restart. No spawn / kill / re-dispatch side effects.
+//
+// State semantics:
+//   - ThinkModeShow — runtime forwards every OutThinking event to
+//     the Channel (rendered as a lark_md card in the user-message
+//     thread; see internal/channel/feishu/thinking_card.go).
+//   - ThinkModeHide — runtime drops OutThinking events at the
+//     EventHandler gate (after Translate + ReplyTo stamping,
+//     before ch.Send). Other OutboundKinds are unaffected.
+//
+// Concurrency: same pattern as SetWatchMode — take ChatSession
+// mutex, write, persist, release. The lock is NOT held across
+// any channel.Send reply call.
+func (cs *ChatSession) SetThinkMode(mode ThinkMode) error {
+	cs.mu.Lock()
+	cs.thinkMode = mode
+	cs.lastInteractionAt = time.Now()
+	cs.mu.Unlock()
+	cs.persistChatEntry()
+	return nil
+}
+
 // SetActiveAgent changes the active agent name. Does NOT spawn or
 // kill; caller must invoke LookupActiveAgentSession to materialize.
 func (cs *ChatSession) SetActiveAgent(agent string) error {
@@ -265,6 +299,16 @@ func (cs *ChatSession) WatchMode() WatchMode {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.watchMode
+}
+
+// ThinkMode returns the current per-chat thinking-content
+// visibility. Default value when never set is ThinkModeShow
+// (set in New when the registry has no persisted value). See
+// docs/SPEC.md §3.1.2.
+func (cs *ChatSession) ThinkMode() ThinkMode {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.thinkMode
 }
 
 // PrimaryAgent returns the per-chat primary agent (snapshot of
@@ -864,6 +908,7 @@ func (cs *ChatSession) entryLocked() *registry.ChatSessionEntry {
 		CreatedAt:            cs.createdAt,
 		LastInteractionAt:    cs.lastInteractionAt,
 		WatchMode:            cs.watchMode,
+		ThinkMode:            cs.thinkMode,
 	}
 }
 

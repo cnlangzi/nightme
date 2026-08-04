@@ -53,6 +53,14 @@ import (
 //	                       1 = WatchModeAll. Persisted as int; old
 //	                       chat_sessions.json files lacking the
 //	                       field decode to zero == WatchModeMention.
+//	ThinkMode            — F-think per-chat thinking-content
+//	                       visibility toggle. 0 = ThinkModeShow
+//	                       (default; preserve F-thread-route
+//	                       behavior), 1 = ThinkModeHide (runtime
+//	                       drops OutThinking at EventHandler gate).
+//	                       Persisted as int; old chat_sessions.json
+//	                       files lacking the field decode to zero
+//	                       == ThinkModeShow.
 type ChatSessionEntry struct {
 	ID                   string    `json:"id"`
 	ChatID               string    `json:"chatId"`
@@ -64,6 +72,7 @@ type ChatSessionEntry struct {
 	CreatedAt            time.Time `json:"createdAt"`
 	LastInteractionAt    time.Time `json:"lastInteractionAt"`
 	WatchMode            WatchMode `json:"watchMode,omitempty"`
+	ThinkMode            ThinkMode `json:"thinkMode,omitempty"`
 }
 
 // UnmarshalJSON reads a ChatSessionEntry, transparently migrating

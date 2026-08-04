@@ -1242,10 +1242,11 @@ func (a *Adapter) AddReaction(ctx context.Context, messageID, reactionType strin
 	return rid, nil
 }
 
-// DeleteReaction removes a reaction by its ID. Used by the adapter's
-// OutReactionRemoved send path (MessageState.ReactionID). Receipts no
-// longer delete reactions — they append lifecycle emojis instead —
-// but the public method stays for other adapter consumers.
+// DeleteReaction removes a reaction by its ID. Used by the
+// OutMessageStateRemoved send path (MessageState.ReactionID).
+// Receipts no longer delete reactions — they append lifecycle
+// emojis instead — but the public method stays for other adapter
+// consumers.
 func (a *Adapter) DeleteReaction(ctx context.Context, messageID, reactionID string) error {
 	if a.larkClient == nil || a.larkClient.Im == nil || a.larkClient.Im.V1 == nil || a.larkClient.Im.V1.MessageReaction == nil {
 		return errors.New("feishu: REST client not initialized")

@@ -98,47 +98,6 @@ func eventToEntry(ev agent.AgentEvent, now time.Time, lastEntry *LogEntry) (LogE
 		// per-event entry needed — the header shows the timestamp.
 		return LogEntry{}, false
 
-	case agent.EventResult:
-		// Final assistant reply — distinct icon (📝) so the user
-		// can tell the "delivered answer" from rolling-log EventText
-		// entries (💬). Skip when empty AND not in error state so
-		// pure zero-length results don't pad the log.
-		if ae.Result == nil {
-			return LogEntry{}, false
-		}
-		text := ae.Result.Text
-		if strings.TrimSpace(text) == "" && !ae.Result.IsError {
-			return LogEntry{}, false
-		}
-		// De-duplicate: Claude Code's stream-json emits the
-		// final assistant text twice (once as the streamed
-		// EventText chunks, once as EventResult.Text). If the
-		// last entry was a non-thinking reply with identical
-		// text, drop the EventResult so the log doesn't show
-		// the same line twice. Error results (⚠️) bypass the
-		// dedup so the user always sees the failure summary.
-		if !ae.Result.IsError && lastEntry != nil &&
-			lastEntry.Kind == "reply" &&
-			lastEntry.Text == truncateForLog(text, perEntryMaxBytes) {
-			return LogEntry{}, false
-		}
-		icon := "📝"
-		if ae.Result.IsError {
-			icon = "⚠️"
-		}
-		// F-37 multi-div content split: OutResult is the final
-		// reply, which can be 1-3 KB or more. The per-entry cap
-		// is bumped to perEntryMaxRunes (8000 runes ≈ 24 KB for
-		// Chinese / 8 KB for English) so buildReceiptCard can
-		// split it across multiple divs instead of truncating at
-		// 600 bytes. See docs/feat/F-37-multi-div-content-split.md.
-		return LogEntry{
-			Time: now,
-			Icon: icon,
-			Text: truncateForLog(text, perEntryMaxRunes),
-			Kind: "result",
-		}, true
-
 	case agent.EventUsage:
 		// EventUsage is intentionally NOT rendered as a log
 		// entry — the same numbers live in the receipt footer

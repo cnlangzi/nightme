@@ -163,6 +163,40 @@ spawn will fail at runtime. See
   helpers). Cleanup pending — tracked in
   (No separate tracking doc; see git history.)
 
+### F-thread-route: OutThinking / OutToolStart / OutToolEnd → Feishu thread reply (2026-08-04)
+
+反转 v1.3 §13.6 折叠方案(实机验证失败:30 panel 撞破 50 element 上限、视觉噪声大于折叠收益、最终回答被挤掉)。新方案:Channel 按 OutboundKind 自决 routing——thinking/tool/compaction 直接 POST 到 Feishu thread(rootID = userMsgID),receipt card 收窄到只承载最终答复(OutText / OutResult)+ 元数据(OutInit / OutUsage)。
+
+**OutToolEnd 类型感知摘要**("decision 处理"):bridge 层把 `ToolEndEvent.Args` 填好;Channel 层 `summarizeToolEnd(name, args, output, err)` 按 tool name 生成单行摘要(`Read /foo.go → 1234 lines`),不 dump 原始 output 到 thread。Receipt card body 元素数从 ~30 降到 ≤5,50 element 上限永远不破。
+
+**Bridge 层 contract 扩展**:`agent.ToolEndEvent.Args string` 字段;claudecode bridge 从同 message `tool_use` block 拿 args 填入。
+
+**不变式**:OutboundMessage 不动(无新 Kind);Gateway 不动;ChatSession 不动;`currentTurnUserMsgID` 单数锚点保留;F-33 thread 概念不进 nightme 数据模型不变式保留;抽象归抽象 / 具体归具体 —— thread 路由是 Feishu 自治决定,Slack / Web 各自决定怎么渲染 thinking/tool。
+
+详见 [`docs/SPEC.md` §0.3](./docs/SPEC.md) + [`docs/feat/F-37-tool-thread-routing.md`](./docs/feat/F-37-tool-thread-routing.md) + [`docs/channel/feishu.md` §13.12](./docs/channel/feishu.md) + [`docs/feat/F-25-rolling-log.md` §3.1.1](./docs/feat/F-25-rolling-log.md) + [`docs/feat/F-08-channel-abstraction.md` §4](./docs/feat/F-08-channel-abstraction.md)。
+
+**飞书 3 种 reply 形态 (实机群 Frtpilot-Xiage 验证，2026-08-04 子决议，关闭 §13.10 P2)**:
+
+> **作用域**：这三个名字（`ReplyInChat` / `ReplyInThreadAndChat` / `ReplyInThread`）是 **`channel/feishu` 自治**——不上升到 Gateway / OutboundMessage 抽象层。其他 channel（Web / Slack）应**各自**决定怎么渲染 OutThinking / OutTool*，不复制飞书的 thread 方案。
+
+| 形态 | 飞书 `reply_in_thread` 字段 | main chat 显示 | thread panel 显示 | `thread_id` 响应 |
+|---|---|---|---|---|
+| **ReplyInChat** (顶级 Create) | n/a | 独立气泡 | 不在 thread | `""` |
+| **ReplyInThreadAndChat** | **字段省略** (`omitempty` nil) | **正文内联** | 同一份正文 | `""` |
+| **ReplyInThread** | `true` | **"X replies" 灰条** | **正文** | `omt_xxx` (首次分配，后续 reply-true 复用) |
+
+`sendMessageFunc` / `sendContent` / `sendViaLarkReply` / `SendMessageText` / `SendCard` / `postThreadReply` 全链路加尾部 `replyInThread bool` 参数。`sendViaLarkReply` 内部 `larkim.NewReplyMessageReqBodyBuilder()` **仅在 `true` 时**调 `.ReplyInThread(true)` (false 路径靠 `omitempty` 字段省略保留 recorder log / idempotency cache 字节级兼容；**严禁**简化成 `.ReplyInThread(replyInThread)` 否则 false 路径多 28 字节破坏兼容性)。
+
+按 OutboundKind 路径拆分（2026-08-04 ops 实机确认）：
+
+- `OutThinking` / `OutToolStart` / `OutToolEnd` → **ReplyInThread** (agent 进度只进 thread panel,main chat 仅显示 "X replies" 指示器)
+- `OutCompaction` / receipt 冷启动卡 / `OutCard` (permission) / `OutCommandReply` → **ReplyInThreadAndChat** (必须 main chat 可见)
+- 顶级 Create (ReplyInChat) 形态 → nightme **不**走 (fallback 230011/231003 才退化)
+
+> Kinds 命名 ops 用 past tense (`OutToolStarted/Ended/Think`)，但 nightme enum 实际是 present tense (`OutToolStart/OutToolEnd/OutThinking`)。**不**改 enum 名（会牵动 Gateway 抽象层多个包），只按 enum 行为归属。
+
+测试：`TestSend_ThreadOnlyEvents_PassReplyInThreadTrue` (3 kinds × ReplyInThread: OutThinking/OutToolStart/OutToolEnd) + `TestSend_ChatVisibleEvents_PassReplyInThreadFalse` (4 paths × ReplyInThreadAndChat: ReceiptColdStart/OutCard/OutCommandReply/OutCompaction) + `cmd/_probe/send_one` 实机飞书群验证。详见 `docs/feat/F-37-tool-thread-routing.md` §7.5。
+
 ---
 
 ## Earlier snapshots (v1.x series, archived for reference)

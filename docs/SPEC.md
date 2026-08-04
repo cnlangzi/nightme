@@ -106,6 +106,102 @@ v1.3 在 v1.2 架构上做**职责再切分**——核心变化是**删除 Gatew
 
 ---
 
+## 0.3 文档变更摘要（v1.3.x F-thread-route 增量，2026-08-04）
+
+**背景**：v1.3 §13.6 拍板的折叠方案（OutThinking / OutToolStart / OutToolEnd 在 receipt card body 里用 `collapsible_panel` 平铺折叠）在实机上验证失败 —— agent turn 调 10 个工具 = 30 个 panel，Feishu 50 element 上限被频繁撞破；用户首要看到的"最终回答"被挤到 card 末尾甚至消失。
+
+**F-thread-route 反转**：Channel 自治范围内重新决策 —— 这三类 OutboundKind **不进 receipt card**，作为独立 thread reply 投递到 user message 的 Feishu thread。Receipt card 收窄到只承载最终答复（OutText / OutResult）+ 元数据（OutInit / OutUsage）。
+
+**核心变化**：
+
+1. **Channel.Send dispatcher 按 Kind 分流**
+   - `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCompaction` → 直接 POST 到 Feishu thread（rootID = userMsgID），每 event = 一条 thread reply
+   - `OutText` / `OutResult` / `OutInit` / `OutUsage` → 继续 fold 进 receipt card（不变）
+   - `OutMessageState` → 仍然挂在 user msg 的 reaction 上（不变）
+   - `OutCard`（权限请求等）→ 仍然发到 thread，跟 OutToolEnd 一样是 thread reply（不变）
+
+2. **OutToolEnd 类型感知摘要（"决断处理"）**
+   - Bridge 层给 `ToolEndEvent.Args` 字段填 args（在同一 message 的 tool_use block 拿）
+   - Channel 层 `summarizeToolEnd(name, args, output, err)` 按 tool 类型生成单行摘要（不 dump 原始 output）
+   - 默认走字节截断（向后兼容未知 tool）
+
+3. **Receipt card 瘦身**
+   - 删 `buildReceiptCard` 的 `Kind="thinking"` / `Kind="tool"` collapsible_panel 分支
+   - 删 `eventToEntry` 对 EventText-with-thinking-prefix / EventToolStart / EventToolEnd / EventCompaction 的 entry 生成（这些走 thread）
+   - 50 element 上限不再是个问题
+
+4. **F-08 / F-25 文档同步**
+   - F-25 §3 Channel Implementation Contract 表更新 —— OutThinking / OutToolStart / OutToolEnd 不再进 receipt
+   - F-08 §4 加 "Channel autonomous routing examples" —— Feishu 选 thread 是 Channel 自治的具体例子
+
+**不变式**：
+- OutboundMessage 不动（无新 Kind，无删 Kind）
+- Gateway 不动（不持有 thread 概念、不感知 channel 分流）
+- ChatSession 不动（`currentTurnUserMsgID` 单数锚点不变）
+- 1 turn : 1 anchor 不变式保留（所有 event 仍 anchor 到同一个 userMsgID）
+- 抽象归抽象 / 具体归具体原则保留（thread 路由是 Feishu 自治决定）
+- `OutboundMessage.ReplyTo = currentTurnUserMsgID` 契约不变（thread 路由用它作 Feishu `root_id`）
+
+**为什么不叫 v2.0**：v1.3 的核心不变式（职责隔离、Binding FSM owner、MessageState 独立、Receipt 自治）全部保留。F-thread-route 是 Channel 自治范围内的渲染细节变化，不影响 nightme 数据模型与 Gateway 契约。
+
+**详细落地**：见 [`feat/F-37-tool-thread-routing.md`](./feat/F-37-tool-thread-routing.md) + [`channel/feishu.md`](./channel/feishu.md) §13.12。
+
+### 0.4 文档变更摘要（v1.3.x 抽象/具体边界规范，2026-08-04）
+
+**背景**：F-37 review 揭示 `OutboundMessage.Meta["tool_name"]` / `["args"]` / `["output"]` / `["err"]` 是隐式协议 —— Gateway（抽象层） hardcode 了 Feishu adapter（具体层）需要的字段名，本质上是把 concrete 实现细节 leak 进 abstract 层。同类违反在 `OutboundMessage.Meta` 的其他字段（`is_error` / `subtype` / `state` / `message_id` 等）以小范围存在。
+
+### 0.5 文档变更摘要（v1.3.x Meta 彻底删除，2026-08-04）
+
+**背景**：§1.4 元原则落地后还残留着 Meta 黑盒——`Meta` 字段是 opaque data container，但 producer（gateway） 在里面塞了 11 个 implicit key（tool_name / args / output / err / state / message_id / reaction_id / session_id / model / agent_name / workspace / branch / input_tokens / output_tokens / cost_usd 等），consumer（feishu adapter）按名字读 + type assert。Channel 不知道 Meta 里有什么（type system 也不告诉你），但 producer / consumer 之间靠 hardcoded 字符串约定通信——最严重的 leak。
+
+**根因**：Meta 是 generic map，约定是字符串 key + `.(string) / .(int) / .(error)` 强转，编译期无法检查。F-37 review 把 tool 字段清掉后，Meta 里还有：
+- 死数据（OutResult 的 duration_ms / is_error / subtype，channel 实际 round-trip 重建成 `agent.ResultEvent` 再喂给 receipt.Append）
+- 冗余数据（OutMessageState 的 message_id / state，已有 `MessageState *MessageStatePayload` typed field 但内容不全）
+
+**清理**（commit 待定）：
+- **删 `Meta` 字段**——从 `OutboundMessage` 结构体移除
+- **删 `Reaction` 字段 + `Reaction` struct**——F-31 迁移后死代码，零 producer / 零 consumer
+- **新增 typed payload**：
+  - `Result *agent.ResultEvent`（OutResult）
+  - `Usage *UsageInfo`（OutUsage，5 个 token/cost 字段）
+  - `Init *agent.InitEvent`（OutInit，session_id / model / workspace / branch）
+  - `MessageStatePayload.MessageID` + `ReactionID`（扩展 typed field，OutMessageState / Removed）
+- **删 helper 函数**：metaString / metaInt / metaFloat / metaBool / durationMs / isErrorOut / subtypeOut / usageFromMeta（全部读 Meta 的 typed assertion + reverse rebuild）
+
+**结果**：`OutboundMessage` 100% typed：
+```go
+type OutboundMessage struct {
+    ChatID       string
+    Kind         OutboundKind
+    Text         string
+    Card         *Card
+    Tool         *ToolInfo
+    Result       *agent.ResultEvent
+    Usage        *UsageInfo
+    MessageState *MessageStatePayload
+    Init         *agent.InitEvent
+    ReplyTo      string
+}
+```
+
+任何 producer / consumer 之间的契约现在由 Go 类型系统强制保证。Meta 反面教材**不再是反例**——该字段已不存在。
+
+**新增规范**：§1.4 「抽象 / 具体 边界规范」作为新的不变式类型—— 跨层通信的架构纪律，位阶高于现有 §1.3 的具体不变式。
+
+**核心原则**（一句话）：
+> 抽象层只承载泛化统一的概念。底层具体实现的细节不得直接引入抽象层。如果某项具体信息确实需要进入抽象层，必须先在 boundary 处归一化（normalize）为泛化形式后才能跨越边界。这是软件工程中多态的核心思路。
+
+**F-37 review 落地的归一化路径**：
+- `OutboundMessage.Meta["args"]` / `["tool_name"]` 等隐式 key → 升级到 `OutboundMessage.Tool *ToolInfo` typed field
+- `ToolInfo.Args string` —— bridge（claudecode / pi / pty）把各自的 native representation 归一化成 string，Gateway / Channel 只见到 generic primitive
+- Channel 拿到 string 后 parse 出 typed 视图（用于类型感知渲染），parse 逻辑属于 Channel 自治
+
+**保守范围**：只迁移 tool info 这一组字段。其他 Feishu-specific Meta 字段（`is_error` / `subtype` / `duration_ms` / `state` / `message_id` / `reaction_id`）保留原状，留 follow-up PR 清理，避免 F-37 PR 范围失控。
+
+**详细落地**：见 §1.4 + commit `921c862`（typed ToolInfo 升级）。
+
+---
+
 ## 1. 架构总览
 
 nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以下**逻辑组件**组成：
@@ -214,6 +310,146 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 - **drop 决策留在 Gateway**：channel 不读 `cs.WatchMode()`，gateway dispatcher 入口统一 gate `!HasMention && WatchMode != All`
 - **不续接 Thread**：nightme 不主动追踪 / 创建 thread 上下文，不维护 thread 树；Feishu 端 thread 视觉由 Channel 自治
 - **任何 Channel 都不引入 thread 概念**：nightme 数据模型永远不引入 thread 字段（`thread_ts` / `message_thread_id` / `is_threaded` / `thread_id` 等）。Channel 自管 thread 渲染细节（Feishu reply API path 参数 / Slack block kit / Telegram forum mode），但只通过 `OutboundMessage` 暴露能力，不污染 Gateway / ChatSession / Registry 数据模型
+
+**v1.3.x 新增（F-thread-route 落地）**：
+
+- **Channel 按 OutboundKind 自决渲染目标**：Channel 拿到 `OutboundMessage{Kind, ReplyTo, Text, Meta}` 后，**可以**按 `Kind` 自决 routing（thread reply / receipt card / reaction / ...），无需 Gateway 指示。F-thread-route 案例：Feishu adapter 把 `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCompaction` 投到 thread；`OutText` / `OutResult` / `OutInit` / `OutUsage` 投到 receipt card。**不动 OutboundMessage 契约 / Gateway / ChatSession**
+- **OutToolEnd 类型感知摘要 = Channel 职责**：bridge 层把 `ToolEndEvent.Args` 填好（同一 message 的 tool_use block 拿）；Channel 层（Feishu adapter）按 tool name 生成单行摘要（"📄 Read /foo.go → 1234 lines"），不 dump 原始 output。摘要算法属于 Channel 自治（Feishu 用 emoji + 行数；Slack 可用 Block Kit；Web 可用折叠 div）
+- **Routing 决策不写进 OutboundMessage.Meta**：Meta 只承载数据载荷（output / err / args），**不**承载 routing hint。Channel 看到 Kind 后自决。
+- **F-thread-route 不构成"thread 概念侵入 nightme 数据模型"**：Channel 自管的 thread 是 Feishu SDK API 调用层面的细节（`POST /im/v1/messages/{rootID}/reply`）；nightme 仍然只见 `OutboundMessage.ReplyTo = currentTurnUserMsgID`，跟 F-33 不变式完全兼容
+
+### 1.4 抽象 / 具体 边界规范（v1.3.x 强制，多态的核心思路）
+
+跨层通信的架构纪律。本节是一切不变式之上的元原则——其它不变式违反时，几乎都是这条先破了。
+
+**规则（一句话）**：
+> 抽象层只承载泛化统一的概念。底层具体实现的细节不得直接引入抽象层。如果某项具体信息确实需要进入抽象层，必须先在 boundary 处归一化（normalize）为泛化形式后才能跨越边界。这是软件工程中多态的核心思路。
+
+**为什么**：每条跨层 hardcoded implicit 协议都是一次 leak。一旦 leak，后续 review 容易"基于现状优化"（typed struct、helper）导致边界进一步塌陷。设计上能站得住的唯一办法是：每条跨层数据要么是 generic primitive（string / int / error），要么 boundary 把它 normalize 成 generic primitive。
+
+**三层边界 + 各自的归一化义务**：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Concrete (bridge / Channel SDK)                              │
+│   claudecode stream-json  ·  pi typed map  ·  Feishu API    │
+└───────────────────────┬─────────────────────────────────────┘
+                        │ ← 归一化边界 #1: bridge → agent
+                        │   bridge 把 native representation
+                        │   转成 human-readable string
+                        ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Abstract (agent / Gateway)                                    │
+│   agent.AgentEvent  ·  gateway.OutboundMessage             │
+│   只见到 generic type：string / int / float64 / error /    │
+│   typed struct with generic field names                     │
+└───────────────────────┬─────────────────────────────────────┘
+                        │ ← 归一化边界 #2: Gateway → Channel
+                        │   typed field (ToolInfo) 替代
+                        │   Meta map 的 implicit key
+                        ▼
+┌─────────────────────────────────────────────────────────────┐
+│ Concrete (Channel adapter)                                   │
+│   Feishu  ·  Slack  ·  Web  ·  ...                          │
+│   Channel 自管渲染，可 parse ToolInfo.Args 字符串为 typed    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**规则的具体落地**：
+
+1. **抽象层的字段名必须 generic**：禁止用 `file_path` / `command` / `content` 这种 bridge-specific schema 名字。任何 tool 都有 `Name/Args/Output/Err`，这是 generic 概念。
+2. **抽象层的字段类型首选 primitive**：`string` / `int` / `float64` / `error`。**不要**为了"类型安全"在抽象层引入 typed struct / enum——那等于在抽象层 hardcode 一种 concrete 的 shape。
+3. **bridge 是归一化边界 #1**：claudecode 用 raw JSON string 表达 args；pi 可能用 typed map → 也归一化成 string；pty 可能 raw bytes → 也归一化成 string。Gateway / Channel 只见到 string，不关心 bridge 内部 schema。
+4. **Channel 拿到 string 后自己 parse**：如果 Channel 想做类型感知渲染（"Read /foo.go → 1234 lines"），它 parse `ToolInfo.Args` 字符串。但 parse 逻辑属于 Channel 自治，不进 Gateway / agent。
+5. **禁止 `OutboundMessage` 上的 `Meta map[string]any`（已删除）**：Meta 是 opaque data container，consumer 不知道里面有什么，producer 也不知道 consumer 会读哪些 key。跨层契约只能走 typed field。`OutboundMessage` 当前 100% typed（§0.5），任何新增跨层数据必须走 typed struct / primitive，不能 re-introduce Meta。
+6. **数值类除外**：`CostUSD` / `*Tokens` 保留 typed numeric——任何 agent 都有 token / cost 概念，不需要 string 化（但**走 typed field，不走 Meta**）。
+
+**反例（2026-08-04 §1.4 终极落地）**：
+
+`OutboundMessage.Meta` 字段已被删除（§0.5）。Meta 原本持有 11 个 implicit key（tool_name / args / output / err / is_error / subtype / state / message_id / reaction_id / session_id / model / agent_name / workspace / branch / input_tokens / output_tokens / cost_usd），全部 hardcoded 隐式协议。下面是 GateWay translate 曾经的 v0.2 代码反例（已全部移除）：
+
+```go
+// ❌ 反例（已删除）: Gateway 的 translate 把 bridge-specific 字段名写进 Meta
+case agent.EventToolEnd:
+    return OutboundMessage{
+        Meta: map[string]any{
+            "tool_name": name,  // Feishu adapter 用的隐式 key
+            "args":      ev.ToolEnd.Args,
+            "output":    ev.ToolEnd.Output,
+            "err":       ev.ToolEnd.Err,
+        },
+    }
+```
+
+```go
+// ❌ 反例（已删除）: Channel 从 Meta 隐式 key 读 concrete 数据
+func toolName(m gateway.OutboundMessage) string {
+    if n, _ := m.Meta["tool_name"].(string); n != "" {
+        return n
+    }
+    return "tool"
+}
+```
+
+```go
+// ❌ 反例（已删除）: Channel 反向重建 typed event
+func durationMs(m gateway.OutboundMessage) int64 {
+    return int64(metaInt(m, "duration_ms"))
+}
+// 然后 receipt.Append(ctx, agent.AgentEvent{Result: &agent.ResultEvent{DurationMs: durationMs(msg), ...}})
+// ——Gateway 拆字段塞 Meta，Channel 从 Meta 读回来重建 typed event 再喂给 receipt，纯轮转。
+```
+
+**正例（最终状态）**：
+
+```go
+// ✅ 正例: Gateway translate 用 typed field 归一化 tool 概念
+case agent.EventToolEnd:
+    return OutboundMessage{
+        Tool: &ToolInfo{
+            Name:   name,
+            Args:   ev.ToolEnd.Args,
+            Output: ev.ToolEnd.Output,
+            Err:    ev.ToolEnd.Err,
+        },
+    }
+```
+
+```go
+// ✅ 正例: Channel 直接读 typed field
+func toolName(m gateway.OutboundMessage) string {
+    if m.Tool != nil && m.Tool.Name != "" {
+        return m.Tool.Name
+    }
+    return "tool"
+}
+```
+
+```go
+// ✅ 正例: typed Result 直接传给 receipt.Append，零 round-trip
+return receipt.Append(ctx, agent.AgentEvent{
+    Kind:   agent.EventResult,
+    Result: msg.Result,  // *agent.ResultEvent directly, no Meta reconstruction
+})
+```
+
+**违反这条规则时的征兆**（review 时用作 checklist）：
+- 抽象层 struct 里出现 `Meta map[string]any` 字段且 producer / consumer 各自 hardcode key 名（**已修复**——Meta 删除）
+- 抽象层 field 名字含具体 schema（`file_path` / `command` / `pid` 等）
+- 抽象层 field 类型是 `*SomeConcreteBridgeStruct`（concrete 类型漏到抽象层）
+- Gateway / agent 包 import 了 channel 包（直接依赖关系）
+- 文档里出现"key 由 Channel X 约定"——这等于承认 implicit 协议存在
+- Gateway 把 typed event 拆字段塞 Meta / channel 又读 Meta 重建 typed event——纯轮转，无价值
+
+**例外与升级路径**：
+
+如果某个 concrete 实现真的需要向抽象层暴露一项数据（且无法在 boundary 归一化），按以下顺序升级：
+1. 先问：能否不暴露？channel 自治自己读 SDK 不行吗？
+2. 再问：能否在 boundary normalize 成 primitive？
+3. 再问：能否抽成 typed struct（generic 字段名）？
+4. 最后：扩展抽象层字段，并在 §1.3 不变式里明文记一条。
+
+升级路径 #4 是最后一根稻草。F-37 review 把 `Meta["args"]` 升级到 `OutboundMessage.Tool *ToolInfo` 就是走的路径 #3（typed struct），不在抽象层暴露 schema。
 
 ---
 
@@ -778,6 +1014,17 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
   - `internal/auth/feishu/feishu_test.go` 加 case
   - `cmd/nightme/auth_login.go` 移除 `--group-messages` flag 设计（默认开启）
   - 详纸面设计见 [`docs/SPEC.md`](./SPEC.md) §3.1.1 + [`docs/feat/F-08-channel-abstraction.md`](./feat/F-08-channel-abstraction.md)
+- ⏭ **F-thread-route（OutThinking/Tool → Feishu thread + 类型感知摘要）**：
+  - 反转 v1.3 §13.6/§13.7/§13.9 折叠决议（collapsible_panel 实机验证失败）
+  - `internal/agent/agent.go` `ToolEndEvent` 加 `Args string` 字段
+  - `internal/bridge/claudecode/stream.go` 解析 `tool_result` 时从同 message 的 `tool_use` block 拿 args 填进 `ToolEndEvent.Args`
+  - `internal/channel/feishu/adapter.go` `Send` dispatcher 按 Kind 分流：thinking/tool/compaction → thread；text/result/init/usage → receipt card
+  - `internal/channel/feishu/summarize_tool.go` 新文件：`summarizeToolEnd` + `countLines` + `truncate` helper
+  - `internal/channel/feishu/receipt_event.go` `eventToEntry` 对 thinking/tool/compaction 返回 `(_, false)`（不进 receipt）
+  - `internal/channel/feishu/adapter.go` `buildReceiptCard` 删 collapsible_panel 分支（`Kind=="thinking"` / `Kind=="tool"`）
+  - `internal/channel/feishu/receipt_event_test.go` 删 thinking/tool assertion；新增 `TestSend_Out*_PostsToThread` + `TestSummarizeToolEnd`
+  - `docs/channel/feishu.md` §13.12 决策反转记录 + §15 实施计划修订
+  - 详见 [`docs/feat/F-37-tool-thread-routing.md`](./feat/F-37-tool-thread-routing.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §13.12
 - ⏭ **F-35（feishu 全局限速器）**：`internal/channel/feishu/ratelimit.go` 单桶 token bucket(5 QPS / burst 1 / lazy refill)，4 个底出口(`sendViaLarkCreate` / `sendViaLarkReply` / `updateViaLark` / `AddReaction`)SDK call 前 `Wait()`。`internal/config/config.go::FeishuConfig` 加 `RateLimit` 字段。详见 [`docs/feat/F-35-ratelimit.md`](./feat/F-35-ratelimit.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §16。
 - ⏭ **F-36（feishu transient retry + 降级日志）**：`internal/channel/feishu/retry.go` 指数退避重试(3 次尝试 / 500ms→5s / ±25% jitter)，包裹 `sendContent` / `updateViaLark` / `AddReaction`。所有降级路径(retry exhausted / ctx cancel / fallback top-level)emit warn 级结构化日志。详见 [`docs/feat/F-36-transient-retry.md`](./feat/F-36-transient-retry.md) + [`docs/channel/feishu.md`](./channel/feishu.md) §17。
 - ⏭ **F-37（receipt 多 div 拆分）**：`internal/channel/feishu/receipt_split.go` `splitMarkdownForDivs` 把单 entry 内容按段落/语义边界拆成多个 `div` 元素，每 div ≤ 1000 chars（Feishu `div` text 硬限），绕过 600 B 截断 backlog，保留 `lark_md` 渲染。`buildReceiptCard` 多 div 路径、`totalLogBytesLocked` 估算修正、`perEntryMaxRunes = 8000`。详见 [`docs/feat/F-37-multi-div-content-split.md`](./feat/F-37-multi-div-content-split.md)。**resolve SPEC §13.3 `OutResult` 600 字节截断 backlog**。

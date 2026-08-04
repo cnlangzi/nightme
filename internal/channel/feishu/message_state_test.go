@@ -2,76 +2,39 @@ package feishu
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
-	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
-// TestMapStateToFeishuEmoji verifies the canonical F-31 §8.3
-// mapping table. Pure function, no IO required.
-func TestMapStateToFeishuEmoji(t *testing.T) {
-	cases := []struct {
-		state agent.MessageState
-		want  string
-	}{
-		{agent.StateReceived, "OneSecond"},   // ⏳
-		{agent.StateForwarded, "OnIt"},        // 🔄
-		{agent.StateDone, "DONE"},            // ✅
-		{agent.StateError, "THUMBSUP"},       // ❌ closest predefined
-		{agent.MessageState(99), ""},         // unknown → silent drop
-	}
-	for _, tc := range cases {
-		got := mapStateToFeishuEmoji(tc.state)
-		if got != tc.want {
-			t.Errorf("mapStateToFeishuEmoji(%v) = %q; want %q", tc.state, got, tc.want)
-		}
-	}
-}
-
-// TestSend_OutMessageState_MissingMeta verifies Send returns a
-// descriptive error when the event payload lacks the required
-// Meta["message_id"] / Meta["state"] fields.
-func TestSend_OutMessageState_MissingMeta(t *testing.T) {
+// TestSend_OutMessageState_MissingPayload verifies that the Send
+// dispatcher returns a descriptive error when the event payload
+// lacks the required typed fields (§1.4 cleanup: was Meta, now
+// MessageState typed field).
+func TestSend_OutMessageState_MissingPayload(t *testing.T) {
 	a := testAdapter(t)
 
-	// Missing message_id.
+	// Missing MessageState payload entirely.
 	err := a.Send(context.Background(), gateway.OutboundMessage{
 		Kind:   gateway.OutMessageState,
 		ChatID: "oc_chat",
-		Meta: map[string]any{
-			"state": agent.StateReceived,
-		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "message_id") {
-		t.Errorf("missing message_id: got %v; want error mentioning message_id", err)
+	if err == nil || !strings.Contains(err.Error(), "MessageState") {
+		t.Errorf("missing payload: got %v; want error mentioning MessageState", err)
 	}
 
-	// Missing state.
+	// Missing MessageID.
 	err = a.Send(context.Background(), gateway.OutboundMessage{
 		Kind:   gateway.OutMessageState,
 		ChatID: "oc_chat",
-		Meta: map[string]any{
-			"message_id": "om_user_msg",
+		MessageState: &gateway.MessageStatePayload{
+			State: agent.StateReceived,
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "state") {
-		t.Errorf("missing state: got %v; want error mentioning state", err)
-	}
-
-	// Wrong state type (string instead of agent.MessageState).
-	err = a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:   gateway.OutMessageState,
-		ChatID: "oc_chat",
-		Meta: map[string]any{
-			"message_id": "om_user_msg",
-			"state":      "received", // wrong type
-		},
-	})
-	if err == nil || !strings.Contains(err.Error(), "unexpected type") {
-		t.Errorf("wrong state type: got %v; want error mentioning type", err)
+	if err == nil || !strings.Contains(err.Error(), "MessageID") {
+		t.Errorf("missing MessageID: got %v; want error mentioning MessageID", err)
 	}
 }
 
@@ -84,9 +47,9 @@ func TestSend_OutMessageState_UnknownStateDrops(t *testing.T) {
 	err := a.Send(context.Background(), gateway.OutboundMessage{
 		Kind:   gateway.OutMessageState,
 		ChatID: "oc_chat",
-		Meta: map[string]any{
-			"message_id": "om_user_msg",
-			"state":      agent.MessageState(42), // unknown
+		MessageState: &gateway.MessageStatePayload{
+			MessageID: "om_user_msg",
+			State:     agent.MessageState(42), // unknown
 		},
 	})
 	if err != nil {
@@ -108,9 +71,9 @@ func TestSend_OutMessageState_TracksStateIdempotency(t *testing.T) {
 	_ = a.Send(ctx, gateway.OutboundMessage{
 		Kind:   gateway.OutMessageState,
 		ChatID: "oc_chat",
-		Meta: map[string]any{
-			"message_id": "om_msg_1",
-			"state":      agent.StateReceived,
+		MessageState: &gateway.MessageStatePayload{
+			MessageID: "om_msg_1",
+			State:     agent.StateReceived,
 		},
 	})
 	// After failure, messageStates should not be marked (revert).
@@ -135,9 +98,9 @@ func TestSend_OutMessageState_TracksStateIdempotency(t *testing.T) {
 	err := a.Send(ctx, gateway.OutboundMessage{
 		Kind:   gateway.OutMessageState,
 		ChatID: "oc_chat",
-		Meta: map[string]any{
-			"message_id": "om_msg_1",
-			"state":      agent.StateReceived,
+		MessageState: &gateway.MessageStatePayload{
+			MessageID: "om_msg_1",
+			State:     agent.StateReceived,
 		},
 	})
 	if err != nil {
@@ -180,9 +143,9 @@ func TestSend_OutMessageState_FirstReceivedNotSkipped(t *testing.T) {
 	err := a.Send(ctx, gateway.OutboundMessage{
 		Kind:   gateway.OutMessageState,
 		ChatID: "oc_chat",
-		Meta: map[string]any{
-			"message_id": "om_msg_first",
-			"state":      agent.StateReceived,
+		MessageState: &gateway.MessageStatePayload{
+			MessageID: "om_msg_first",
+			State:     agent.StateReceived,
 		},
 	})
 	// larkClient is nil → AddReaction returns "feishu: REST client
@@ -192,6 +155,3 @@ func TestSend_OutMessageState_FirstReceivedNotSkipped(t *testing.T) {
 		t.Fatalf("Send should attempt AddReaction and fail (nil larkClient); got nil err — likely the skip bug")
 	}
 }
-
-// errIsUnused keeps the errors import live for future failure tests.
-var errIsUnused = errors.New("placeholder")

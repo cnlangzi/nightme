@@ -291,10 +291,11 @@ Adapter.Send(internal/channel/feishu/adapter.go)
 
 ## 8. 不做的事
 
-- 不实现 `reply_in_thread: true`(属未来 P2,见 `docs/channel/feishu.md` §13.10 决议)
 - 不维护 thread 树 / 不爬 thread / 不拉 thread 上下文
 - 不在 Gateway 里加 IsDM / ChatType / TopicGroup 任何分支
 - 不动 Outbound `msg.ReplyTo` 的赋值(已落地 §13.10,语义符合"点对点 ReplyTo")
+
+> **2026-08-04 更新**：原 §8 第一条 ("不实现 reply_in_thread:true") 在 F-37 子决议已落地 —— `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCompaction` 这四条 path 现在显式设 `reply_in_thread=true`，让中间过程只在线程面板可见。这一层仍然是 Channel (Feishu SDK) 自治决定，不进 nightme 数据模型；只是 SDK body 的字段，不破坏"不爬 thread / thread 不进 ChatSession"不变式。详见 `docs/feat/F-37-tool-thread-routing.md` §2.1 + `docs/channel/feishu.md` §13.10 子决议。
 - 不引入 forward-compat hook(彻底关 thread 概念入口)
 - **任何 Channel 都不引入 thread 概念**(Slack thread_ts / Telegram message_thread_id / Discord thread 等不进 nightme 数据模型,仅 Channel 内部渲染时使用)
 

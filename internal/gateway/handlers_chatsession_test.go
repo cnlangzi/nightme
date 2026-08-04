@@ -64,13 +64,13 @@ func newFakeAgentSession(pid int) *fakeAgentSession {
 }
 
 func (f *fakeAgentSession) Events() <-chan agent.AgentEvent { return f.events }
-func (f *fakeAgentSession) PID() int                      { return f.pid }
-func (f *fakeAgentSession) SendText(_ string) error       { return nil }
+func (f *fakeAgentSession) PID() int                        { return f.pid }
+func (f *fakeAgentSession) SendText(_ string) error         { return nil }
 func (f *fakeAgentSession) SendBlocks(_ context.Context, _ []agent.ContentBlock) error {
 	return nil
 }
-func (f *fakeAgentSession) SendPermission(_ string) error  { return nil }
-func (f *fakeAgentSession) New(_ context.Context) error    { return nil }
+func (f *fakeAgentSession) SendPermission(_ string) error { return nil }
+func (f *fakeAgentSession) New(_ context.Context) error     { return nil }
 func (f *fakeAgentSession) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -194,8 +194,8 @@ func TestHandleCwd_PathResolution(t *testing.T) {
 	mgr, ch := newTestManager(t, false)
 
 	cases := []struct {
-		name        string
-		input       string
+		name         string
+		input        string
 		wantResolved string
 	}{
 		{"absolute path", dir, dir},
@@ -400,9 +400,9 @@ func TestRegisterChatSessionCommands_RegistersAllThree(t *testing.T) {
 	RegisterChatSessionCommands(gw, mgr, ch, "claude")
 
 	// Command.Name is stored without the leading slash (Gateway strips
-// it in ParseCommand). The user-facing slash stays in the chat
-// message text — see TestParseCommand_StripsLeadingSlash.
-for _, name := range []string{"cwd", "use", "kill"} {
+	// it in ParseCommand). The user-facing slash stays in the chat
+	// message text — see TestParseCommand_StripsLeadingSlash.
+	for _, name := range []string{"cwd", "use", "kill"} {
 		found := false
 		for _, c := range gw.ListCommands() {
 			if c.Name == name {

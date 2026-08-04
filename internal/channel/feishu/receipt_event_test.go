@@ -27,9 +27,12 @@ func TestEventToEntry_Text(t *testing.T) {
 }
 
 func TestEventToEntry_Text_ThinkingPrefix(t *testing.T) {
-	e, ok := eventToEntry(agent.AgentEvent{Kind: agent.EventText, Text: "[思考] step 1"}, at(), nil)
-	if !ok || e.Icon != "💭" || !strings.Contains(e.Text, "step 1") {
-		t.Errorf("got %+v ok=%v, want 💭 'step 1'", e, ok)
+	// F-34: thinking events no longer fold into the receipt card
+	// (the adapter routes them to a Feishu thread reply instead),
+	// so eventToEntry returns (_, false) for the prefixed text.
+	_, ok := eventToEntry(agent.AgentEvent{Kind: agent.EventText, Text: "[思考] step 1"}, at(), nil)
+	if ok {
+		t.Error("EventText with [思考] prefix should be dropped (F-34 routes it to a thread reply)")
 	}
 }
 
@@ -123,18 +126,14 @@ func TestEventToEntry_Usage_ZeroDropped(t *testing.T) {
 }
 
 func TestEventToEntry_Compaction(t *testing.T) {
-	e, ok := eventToEntry(agent.AgentEvent{
+	// F-34: compaction is posted as a thread reply; the receipt
+	// card no longer carries it. eventToEntry returns (_, false).
+	_, ok := eventToEntry(agent.AgentEvent{
 		Kind:       agent.EventCompaction,
 		Compaction: &agent.CompactionEvent{Subtype: "compact"},
 	}, at(), nil)
-	if !ok {
-		t.Fatal("Compaction event should produce an entry")
-	}
-	if e.Icon != "✶" {
-		t.Errorf("Icon = %q, want ✶", e.Icon)
-	}
-	if !strings.Contains(e.Text, "Compacting") {
-		t.Errorf("Text = %q, want to contain 'Compacting'", e.Text)
+	if ok {
+		t.Error("EventCompaction should be dropped (F-34 routes it to a thread reply)")
 	}
 }
 
@@ -171,13 +170,12 @@ func TestEventToEntry_Done_Dropped(t *testing.T) {
 	}
 }
 
-// --- v1.3.x: Kind="tool" tagging for collapsible_panel rendering ---
-// See docs/channel/feishu.md §13.6 / §13.9. Without these tags,
-// buildReceiptCard wouldn't fold tool entries; thinking entries
-// were already supported but had a separate bug (§13.1) that the
-// adapter-level fix in TestSend_OutThinking_AppendsWithPrefix covers.
+// --- F-34: EventToolStart / EventToolEnd are dropped from the receipt card ---
+// See docs/feat/F-34-tool-thread-routing.md. The adapter routes these
+// events to a Feishu thread reply with a type-aware summary; the
+// receipt card no longer carries them.
 
-func TestEventToEntry_ToolStart_KindTool(t *testing.T) {
+func TestEventToEntry_ToolStart_Dropped(t *testing.T) {
 	ev := agent.AgentEvent{
 		Kind: agent.EventToolStart,
 		ToolStart: &agent.ToolStartEvent{
@@ -185,22 +183,12 @@ func TestEventToEntry_ToolStart_KindTool(t *testing.T) {
 			Args: "/a.py",
 		},
 	}
-	e, ok := eventToEntry(ev, at(), nil)
-	if !ok {
-		t.Fatalf("eventToEntry dropped EventToolStart")
-	}
-	if e.Kind != "tool" {
-		t.Errorf("Kind=%q, want %q (must trigger collapsible_panel)", e.Kind, "tool")
-	}
-	if e.Icon != "🔧" {
-		t.Errorf("Icon=%q, want 🔧", e.Icon)
-	}
-	if e.Text != "Read(/a.py)" {
-		t.Errorf("Text=%q, want %q", e.Text, "Read(/a.py)")
+	if _, ok := eventToEntry(ev, at(), nil); ok {
+		t.Error("EventToolStart should be dropped from the receipt card (F-34 routes it to a thread reply)")
 	}
 }
 
-func TestEventToEntry_ToolEnd_Success_KindTool(t *testing.T) {
+func TestEventToEntry_ToolEnd_Dropped(t *testing.T) {
 	ev := agent.AgentEvent{
 		Kind: agent.EventToolEnd,
 		ToolEnd: &agent.ToolEndEvent{
@@ -208,52 +196,8 @@ func TestEventToEntry_ToolEnd_Success_KindTool(t *testing.T) {
 			Output: "47 lines",
 		},
 	}
-	e, ok := eventToEntry(ev, at(), nil)
-	if !ok {
-		t.Fatalf("eventToEntry dropped EventToolEnd")
-	}
-	if e.Kind != "tool" {
-		t.Errorf("Kind=%q, want %q", e.Kind, "tool")
-	}
-	if e.Icon != "✅" {
-		t.Errorf("Icon=%q, want ✅", e.Icon)
-	}
-	if e.Text != "Read → 47 lines" {
-		t.Errorf("Text=%q, want %q", e.Text, "Read → 47 lines")
-	}
-}
-
-func TestEventToEntry_ToolEnd_Failure_KindTool(t *testing.T) {
-	ev := agent.AgentEvent{
-		Kind: agent.EventToolEnd,
-		ToolEnd: &agent.ToolEndEvent{
-			Name: "Read",
-			Err:  stringError("permission denied"),
-		},
-	}
-	e, ok := eventToEntry(ev, at(), nil)
-	if !ok {
-		t.Fatalf("eventToEntry dropped EventToolEnd")
-	}
-	if e.Kind != "tool" {
-		t.Errorf("Kind=%q, want %q", e.Kind, "tool")
-	}
-	if e.Icon != "❌" {
-		t.Errorf("Icon=%q, want ❌", e.Icon)
-	}
-	if !strings.Contains(e.Text, "Read failed: permission denied") {
-		t.Errorf("Text=%q, want to contain 'Read failed: permission denied'", e.Text)
-	}
-}
-
-func TestEventToEntry_ToolStart_Empty_Dropped(t *testing.T) {
-	// Empty name still drops the entry (preserves pre-v1.3 behavior).
-	ev := agent.AgentEvent{
-		Kind:      agent.EventToolStart,
-		ToolStart: &agent.ToolStartEvent{},
-	}
 	if _, ok := eventToEntry(ev, at(), nil); ok {
-		t.Errorf("EventToolStart with empty name should be dropped, was kept")
+		t.Error("EventToolEnd should be dropped from the receipt card (F-34 routes it to a thread reply)")
 	}
 }
 

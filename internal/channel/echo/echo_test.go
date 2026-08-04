@@ -50,7 +50,7 @@ func TestEcho_SendRecordsAndWrites(t *testing.T) {
 		ChatID: "oc_test",
 		Kind:   gateway.OutToolStart,
 		Text:   "Read(/tmp)",
-		Meta:   map[string]any{"tool_name": "Read"},
+		Tool:   &gateway.ToolInfo{Name: "Read", Args: "/tmp"},
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}

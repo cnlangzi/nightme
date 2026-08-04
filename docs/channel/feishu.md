@@ -995,6 +995,28 @@ PATCH 路径不动 -- Feishu 的 PATCH 接口会自动保留被 PATCH 消息的�
 
 **✅ 决议(2026-08-03,Devin "按你的建议修改")**: 采用 **方案 B**,同步 thread OutCard 与 OutCommandReply。**不**实现 `reply_in_thread` 模式(属未来 P2)。
 
+**✅ 子决议(2026-08-04,F-37 落地)**: `reply_in_thread` 不再"P2 一刀切",而**按 OutboundKind 拆分**到飞书 3 种 reply 形态：
+
+> 飞书实机验证（2026-08-04, Frtpilot-Xiage 群）确认 3 种 reply 形态，命名来自 ops 现场观察：
+>
+> **作用域声明**：`ReplyInChat` / `ReplyInThreadAndChat` / `ReplyInThread` 这三个名字是 **`channel/feishu` 自治范围内的渲染决策**（具体到飞书 thread UI 行为），**不**上升到 `gateway.OutboundMessage` / `OutboundKind` 抽象层——其他 channel（如未来 Web / Slack）应**各自**决定怎么渲染 OutThinking / OutTool* ，不复制 Feishu 的 thread 方案（详见 `docs/feat/F-08-channel-abstraction.md` §4）。Gateway / ChatSession / OutboundMessage 契约不变。
+
+| 形态名 | `reply_in_thread` 字段 | main chat | thread panel | `thread_id` 响应 |
+|---|---|---|---|---|
+| **ReplyInChat** | n/a（顶级 Create，不走 reply API）| 独立气泡 | 不在 thread | `""` |
+| **ReplyInThreadAndChat** | **字段省略**（SDK `omitempty` nil 指针）| **正文内联** | **同一份正文** | `""` |
+| **ReplyInThread** | `true` | **"X replies" 灰条**（无正文）| **正文** | `omt_xxx`（首次分配，后续复用）|
+
+按 OutboundKind 拆分（与上表路径一致，2026-08-04 ops 实机确认）：
+
+- **ReplyInThread (`reply_in_thread=true`)** — `OutThinking` / `OutToolStart` / `OutToolEnd`：agent 进度流，绝不污染 main chat
+- **ReplyInThreadAndChat (字段省略)** — receipt 冷启动卡 / `OutCard` (permission) / `OutCommandReply` / `OutCompaction`：用户首要看到的答案 / 不可漏看的权限请求 / slash 命令回应 / brief 进度 marker，必须 main chat 可见
+- **ReplyInChat (顶级 Create)** — nightme **不**走此形态（fallback 路径 230011/231003 才退化到此，详见 §15.2）
+
+实现：`sendMessageFunc` / `sendContent` / `sendViaLarkReply` / `SendMessageText` / `SendCard` / `postThreadReply` 全链路加一个尾部 `replyInThread bool` 参数；`sendViaLarkReply` 内部 `larkim.NewReplyMessageReqBodyBuilder()` 仅在 `true` 时调 `.ReplyInThread(true)`（**不能简化成** `.ReplyInThread(replyInThread)`，否则 false 路径多 28 字节破坏 pre-F-37 idempotency cache）。详见 `docs/feat/F-37-tool-thread-routing.md` §2.1 + §7.5 实机验证 + adapter.go。
+
+**相关测试**：`adapter_test.go::TestSend_ThreadOnlyEvents_PassReplyInThreadTrue` (4 kinds × ReplyInThread) + `TestSend_ChatVisibleEvents_PassReplyInThreadFalse` (3 paths × ReplyInThread+Also send it to chat)。
+
 ### 13.11 决策记录(2026-08-03,F-33):ChatID 数据模型简化
 
 **Devin 原话**(2026-08-03 21:08):"我们是不续接任何 Thread,最多就是点对点的 ReplyTo" - chatID 数据模型做一次系统性清理。
@@ -1095,15 +1117,170 @@ ChatSession.onAgentEvent
 - Registry 兼容(Go JSON unmarshal 默认容忍未知字段,无需迁移)
 - 验收清单 16 项
 
+### 13.12 🎯 设计决策反转 (2026-08-04 Devin 拍板):折叠 → Thread Reply
+
+**背景**:§13.6 拍板的折叠方案(OutThinking / OutToolStart / OutToolEnd 在 receipt card body 里走 `collapsible_panel`)实机上视觉体验差,详尽分析 + 新方案设计见 [`docs/feat/F-37-tool-thread-routing.md`](../feat/F-37-tool-thread-routing.md) §1。
+
+**新决议**:OutThinking / OutToolStart / OutToolEnd / OutCompaction 从 receipt card body 里抽出,作为独立 thread reply 投递到 user message 的 Feishu thread;receipt card 收窄到只承载最终答复(OutText / OutResult)+ 元数据(OutInit / OutUsage)。
+
+**Receipt card 视觉对比**:
+
+旧(折叠方案):card body 含 30+ collapsible_panel,Feishu 50 element 上限频繁撞破,最终回答被挤到屏外。
+
+新(thread 方案):card body 只含 header + 最终回答 + footer(≤5 element);user message 下方出现 "X replies" 指示器,click 后进入 thread 看 💭🔧✅ 流。
+
+**OutToolEnd 类型感知摘要**(不再 dump 原始 output 到 thread,改为按 tool name 生成单行摘要):
+
+```
+Read       -> 1 lines 截断
+Write      -> 5678 bytes
+Edit       -> applied
+Bash       -> 3 lines (cmd 截断 80 字符)
+Grep       -> 12 matches across 5 files
+Glob       -> 8 files
+WebFetch   -> 4321 chars fetched
+WebSearch  -> 10 results
+(default)  -> 截断到 200 chars
+(err != nil) -> failed: err.message
+```
+
+**架构不变式保留**:OutboundMessage 不动(无新 Kind)、Gateway 不动、ChatSession 不动、`currentTurnUserMsgID` 单数锚点保留、F-33 thread 概念不进 nightme 数据模型不变式保留。
+
+**与 §13.10 (reply-in-thread) 的关系**:§13.10 修了"ReplyTo 未投递为 root_id";§13.12 走得更远——除 receipt card 之外的其他 OutboundKind 也不进 main chat,只进 thread。
+
+**§13.1 bug 不再需要修**:旧决议下 thinkingPrefix 剥除是 bug(导致 collapsible_panel 死代码)。新方案下 Gateway 不再剥,adapter 直接拿 `msg.Text` 加 💭 前缀发 thread。
+
+**实施步骤总览**(详见 F-37 §3.1):
+
+1. **Bridge contract 扩展**:`agent.ToolEndEvent.Args string` 字段;claudecode bridge 从同 message `tool_use` block 拿 args 填入
+2. **Feishu adapter `Send` 分流**:thinking/tool/compaction → `postThreadReply`;text/result/init/usage → `receiptFor.Append`
+3. **`summarize_tool.go` 新文件**:`summarizeToolEnd` + `countLines` + `truncate` + `countUniqueFiles` helpers
+4. **Receipt card 瘦身**:`buildReceiptCard` 删 `Kind="thinking"` / `Kind="tool"` collapsible_panel 分支
+5. **`eventToEntry` 收窄**:对 thinking/tool/compaction 返回 `(_, false)`
+6. **测试改造**:删 thinking/tool entry assertion;新增 `TestSend_Out*_PostsToThread` + `TestSummarizeToolEnd`
+
+**Backlog**:OutThinking 多 chunk 聚合(streaming 模式,最后一段更新)、Web UI / Slack 适配各 channel 自治决定。
+
+### 13.13 F-37 实机验证方法论(2026-08-04 群 Frtpilot-Xiage 落地)
+
+> 命名：3 组合是 **`channel/feishu` 自治**的渲染决策(具体到飞书 thread UI 行为),不上升到 `gateway.OutboundMessage` 抽象层。其他 channel(Web / Slack)应各自决定怎么渲染 OutThinking / OutTool*,不复制飞书的 thread 方案。
+
+**3 种飞书 reply 形态**(实机验证,2026-08-04):
+
+| 形态 | 飞书 `reply_in_thread` body 字段 | main chat 实际显示 | thread panel 实际显示 | 飞书响应 `thread_id` |
+|---|---|---|---|---|
+| **ReplyInChat** | n/a(顶级 Create) | 独立气泡(不挂 anchor 下) | 不在 thread | `""`(飞书不分配) |
+| **ReplyInThreadAndChat** | **字段省略**(`omitempty` nil 指针) | **正文**内联 reply(带回复箭头) | **同一份正文** | `""`(飞书不分配独立 thread)|
+| **ReplyInThread** | `true` | **"X replies" 灰条**(无正文)| **正文**(多条 share 同一 thread)| `omt_xxx`(首次分配,后续 reply-true 复用)|
+
+**OutboundKind 路径拆分**(F-37 thread-route 设计):
+
+| Kind | 形态 | main chat | 备注 |
+|---|---|---|---|
+| `OutToolStart` | ReplyInThread | 隐藏 | Claude Code-style `● name(args)` call 行 |
+| `OutToolEnd` | ReplyInThread | 隐藏 | Claude Code-style `⎿  …` result 行 |
+| `OutThinking` | ReplyInThread | 隐藏 | `💭 <text>` |
+| `OutCompaction` | ReplyInThreadAndChat | **可见** | `✶ Compacting conversation…`(ops 决策 2026-08-04:brief marker 是 informative 不是 noise)|
+| `OutCard`(permission)| ReplyInThreadAndChat | 可见 | 必须 main chat 可视(discoverability > cleanliness)|
+| `OutCommandReply`(slash)| ReplyInThreadAndChat | 可见 | 用户在等回复 |
+| Receipt 冷启动卡 | ReplyInThreadAndChat | 可见 | receipt card 收窄到只承载 OutText / OutResult + 元数据 |
+
+> Kinds 命名 ops 用 past tense(`OutToolStarted/Ended/Think`),nightme enum 实际是 present tense(`OutToolStart/End/OutThinking`)。不**改 enum 名(牵动 Gateway 抽象层多个包),只按 enum 行为归属。
+
+#### 13.13.1 实机验证方法(when to run)
+
+**何时需要再跑一遍**:
+- 升级 `larksuite/oapi-sdk-go` 跨 minor 版本(>= v3.10)
+- 飞书发布新 doc 关于 `reply_in_thread` 字段语义变更
+- nightme 引入新 OutboundKind(检查它的形态归属)
+- 用户报告"thread 行为不对"——验证 round-trip ID 关系
+
+**前 2 步准备**:
+1. **确认目标 chat 是群**(非 DM):DM 没有"X replies"指示器 UI,`reply_in_thread=true/false` 视觉差异看不出来。推荐用一个**活跃的** group chat(不是 nightly internal DM)。
+2. **取得锚点 user message id**:用户在那条群发任意一句话,得到 message_id(`om_xxx`)。或者用 nightme 已有的 `cs_oc_xxx` chat 里最近一条用户消息 id。
+
+#### 13.13.2 8 种验证组合(what to send)
+
+每组发**一条**消息,带**不同前缀**让你在飞书 UI 上一眼区分,**串行发,每发一条停下来目视确认**。8 组按顺序:
+
+| # | 组合 | wire 形态 | 预期 main chat | 预期 thread panel |
+|---|---|---|---|---|
+| 1 | A. 顶级 Create | `POST /im/v1/messages` (无 root_id) | 独立气泡 | 不在 thread |
+| 2 | B. Reply to anchor,字段省略 | `POST /messages/{om_M0}/reply` (无 reply_in_thread) | **正文**内联 + 线程入口 | 同一份正文 |
+| 3 | C. Reply to anchor,显式 false | 同上 + body `reply_in_thread:false` | 同 B(字节差 28B,UI 等价)| 同 B |
+| 4 | **D. Reply to anchor,`reply_in_thread:true`** | 同上 + body `reply_in_thread:true` | **"X replies" 灰条**(无正文)| **正文** + 首次给 `omt_xxx` |
+| 5 | E. Chain reply(reply to D 的 id) | `POST /messages/{D.id}/reply` (parent ≠ M0) | 内联 reply 到 D | thread 碎裂(独立 thread_id)|
+| 6 | F. 顶级 Create + raw `root_id` body | `POST /im/v1/messages` body `{..., root_id:om_M0}` | **当前 SDK 拒绝**(结构体无 `RootId` 字段) | — |
+| 7 | G1+G2. 两条 reply-true 续发 | `POST /messages/{om_M0}/reply` 两次 + `reply_in_thread:true` | 共享 "X replies" 灰条(数字累加)| 两条 share `omt_xxx` |
+| 8 | H. DM context(同 D) | 同 D | DM 没有 thread panel,UI 不可见差异 | — |
+
+#### 13.13.3 验证方法(how to send + what to capture)
+
+**用 larkim SDK 直接发**(无需 cmd/_probe/ 工具,工具已删;需要时按本节重建):
+
+1. 构造 `lark.Client` 用 `~/.config/nightme/config.yaml` 里的 `app_id` / `app_secret`(或从环境变量读)
+2. Create 顶级:`cli.Im.V1.Message.Create(ctx, NewCreateMessageReqBuilder().ReceiveIdType("chat_id").Body(&CreateMessageReqBody{ReceiveId:&chatID, MsgType:&MsgTypeText, Content:&json}).Build())`
+3. Reply 默认:`cli.Im.V1.Message.Reply(ctx, NewReplyMessageReqBuilder().MessageId(om_M0).Body(NewReplyMessageReqBodyBuilder().MsgType(MsgTypeText).Content(json).Build()).Build())` — **不**调 `.ReplyInThread(...)`
+4. Reply true:在 3 的 builder 链上**追加** `.ReplyInThread(true)`
+5. Reply false 显式:追加 `.ReplyInThread(false)`(与 3 字节差 28B)
+
+**每个响应打印**(从 `larkim.ReplyMessageResp.Data` / `CreateMessageResp.Data` 提取):
+- `message_id` —— 这条新消息的 id
+- `parent_id` —— 父消息(Reply API 时 = path 里的 message_id;Create 时空)
+- `root_id` —— 根消息(Reply API 时飞书沿 parent 链爬到根;Create 时**空字符串**)
+- `thread_id` —— thread 容器 id(ReplyInThread + true 首次分配 `omt_xxx`;其他情况空)
+
+**关键判读规则**:
+- B vs C:body 字节差 28B(多 `"reply_in_thread":false`),但飞书 UI 行为**完全等价**——这是 `omitempty` 的设计
+- B vs D:body 字节差 28B(多 `"reply_in_thread":true`),飞书 UI 行为**完全不同**——B 显正文,D 只显 "X replies"
+- D 续发 G1/G2:都 share `thread_id`(`omt_xxx` 同值),main chat 累加 1→2→3 replies
+- E (chain reply):飞书**会**沿 parent 链爬到根,`root_id` = M0;但 thread_id 是新分配的独立 id → thread 碎裂 → 验证"单数锚点"不变式不可妥协
+
+#### 13.13.4 注意事项(pitfalls)
+
+- **`SendMessageFunc` 注入点不要漏**:`internal/channel/feishu/adapter.go` 的 `sendMessageFunc` 是 6 参(含 `replyInThread bool`);**单测 mock 必须用同样签名**,否则编译挂
+- **绝对不要简化**:`if replyInThread { bodyBuilder.ReplyInThread(true) }` → 不能改成 `bodyBuilder.ReplyInThread(replyInThread)`,后者 false 路径会多 28 字节破坏 pre-F-37 idempotency cache 字节级 hash
+- **mock probe 不要相信**:mock server 假设 `root_id = message_id` 是错的(实机 Create 返回空),`thread_id` 总是有值也是错的(实机 false 形态返回空)。mock 只能验证 SDK 字节格式;实机才能验证 ID 关系
+- **DM 测不出 thread 视觉差异**:1-on-1 没有"X replies"指示器 UI,`reply_in_thread=true/false` 视觉合一。要测 thread 行为必须用群
+- **夜间飞书 API 有维护窗**:5 QPS 是 bot 限速,但飞书自身偶尔 5xx;持续失败时先 `GET /open-apis/health` 查服务端状态,别反复重试把单测打挂
+- **不要把回包 `thread_id` 当持久 ID**:`omt_xxx` 是飞书服务端分配的,跨会话不保证稳定;nightme 不存它(再次验证 F-33 thread 不进 nightme 数据模型)
+
+#### 13.13.5 历史与移除记录
+
+2026-08-04 在 Frtpilot-Xiage 群(`oc_4a06da49bc0131ff14b381498e4fed9d`)实机跑过一轮,得到关键发现:
+- 顶级 Create 不分配 thread_id(根/thread 都空,跟 mock 假设不同)
+- ReplyInThread+AndChat 也不分配 thread_id(只是 main chat 内联 reply)
+- ReplyInThread 才分配独立 thread_id(`omt_xxx`,首次分配后续复用)
+- 4 条 reply-true 全部 share 同一 `thread_id`(反向验证"单数锚点"设计对的)
+- 字节差异:字段省略 vs 显式 false = 28 字节(omitempty 决定)
+
+`cmd/_probe/`(mock probe + 真实发送 CLI)曾保留在 working tree 一段时间,后于 `c52ad06` 删除——决策已落地,工具不再有保留价值。**当未来需要再跑验证时**:按本节 §13.13.3 重建 SDK 调用即可,无需还原工具源码。
+
 ## 14. 变更日志
 
 - **2026-08-03** - 加入 §11-§13: Feishu msg_type 全集参考、OutboundKind → Feishu 渲染映射表、审计结果(1 bug + 4 澄清)。基于 `internal/channel/feishu/*` 与 `internal/gateway/*` 现状。
 - **2026-08-03(同日增量)** - 加入 §13.6-§13.9:Devin 拍板 Thinking/ToolStart/ToolEnd 全部折叠;列出 3 个 UX 折叠粒度方案(per-event / aggregate-paired / category-aggregate)+ 4 个待确认问题。等 Devin 决定后启动 PR。
 - **2026-08-03(同日再增量)** - 加入 §13.10:Devin 发现 `OutboundMessage.ReplyTo` 字段被消费在内部 receipt map 但**从未投递为 Feishu `root_id`**,所有 bot 回复都是顶层消息,与用户消息无视觉连接。SDK 字段 `larkim.CreateMessageReqBody.RootId` 已存在但代码没用。F-26 v1.1 设计文档 `ReplyTo 非空 → 必须镇定到该 userMsgID(用 ReplyMessage API 或已有 receipt)` 在 v1.3 refactor 中丢失。提供 A/B/C 三种修复范围(最小/中等/完整)+ 4 个待确认问题。
 - **2026-08-03(同日三增量)** - 加入 §13.11(F-33 决策记录):D1 ChatType 不进 Gateway + D2 topic_group 不特殊处理 + D3 `ReplyTo = ParentId`(RootId 不进 nightme)+ D4 任何 Channel 都不引入 thread 概念。落地 chatID 数据模型系统性清理,关闭 inbound 方向 ReplyTo 接线缺失。详见 [`docs/feat/F-33-simplify-chatid-data-model.md`](../feat/F-33-simplify-chatid-data-model.md)。
+- **2026-08-04** - 加入 §13.12(F-thread-route 决策反转):折叠方案(§13.6-§13.9)实机验证失败,反转决策 → OutThinking / OutToolStart / OutToolEnd / OutCompaction 作为独立 thread reply 投递;receipt card 收窄到只承载最终答复 + 元数据;OutToolEnd 走类型感知摘要(`summarize_tool.go`)。新建 [`docs/feat/F-37-tool-thread-routing.md`](../feat/F-37-tool-thread-routing.md) 作为本 feature 的权威文档。`docs/SPEC.md` §0.3 同步加变更摘要;§15 实施计划待修订(下个 commit)。
 - **v0.3 ~ v1.3** - 早期章节(背景、OpenClaw 调研、迁移方案、已知坑等)保留;参见章节顶部 Status 行。
 
-## 15. v1.3.x 实施计划:折叠 + reply-in-thread
+## 15. v1.3.x 实施计划
+
+### 15.0 状态(2026-08-04 F-thread-route 反转后)
+
+⚠️ **本节已被 §13.12 + [`docs/feat/F-37-tool-thread-routing.md`](../feat/F-37-tool-thread-routing.md) 反转**。
+
+- 原 §15 目标"折叠 + reply-in-thread" → 折叠方案被 §13.12 推翻
+- §13.1 修复不再需要(thinkingPrefix 不再被 strip)
+- §13.10 reply-in-thread 部分保留(§13.12 复用其基础设施 `sendViaLarkReply` + `SendMessageText` 的 rootID 参数)
+- 新实施计划见 F-37 §3.1 文件级变更清单
+
+历史保留:§15.1 ~ §15.5 描述折叠方案的旧实施细节,作为决策记录。
+
+---
+
+## 15. v1.3.x 实施计划:折叠 + reply-in-thread(已被反转,见 §15.0)
 
 **目标**: 修 §13.1(OutThinking 折叠死代码)+ §13.10(ReplyTo 未投递为 root_id),实现 Devin 拍板的折叠设计 + reply-in-thread。
 
@@ -1421,7 +1598,7 @@ return msgID, err
 - 加 30min TTL cache(若 230011 触发频次超过预期)
 - 上层 Chatsession 接收 230011 / 231003 时,emit MessageState=error 并中断 turn(避免 agent 继续发无主回复)
 
-## 16. Rate Limit 控制(F-35,2026-08-04)
+## 16. Rate Limit 控制(F-37,2026-08-04)
 
 ### 16.1 问题
 
@@ -1526,7 +1703,7 @@ l.logger.Debug("feishu rate limit blocked",
 
 ### 16.10 与 receipt PATCH storm 的 UX 权衡
 
-Receipt PATCH storm（一个 agent turn 内 receipt 被 PATCH 多次）受 F-35 limiter 串行化。**测算**：
+Receipt PATCH storm（一个 agent turn 内 receipt 被 PATCH 多次）受 F-37 limiter 串行化。**测算**：
 
 - 每个 PATCH 过 `Wait()`，等待 ~200ms（5 QPS）
 - 10 events 的 PATCH storm 总耗时 ≈ 1.8s
@@ -1542,15 +1719,15 @@ Receipt PATCH storm（一个 agent turn 内 receipt 被 PATCH 多次）受 F-35 
 
 ## 17. Transient Retry(F-36,2026-08-04)
 
-### 17.1 与 F-35 的关系
+### 17.1 与 F-37 的关系
 
-F-35 是"事前预防"（防 230001 限流），F-36 是"事后补救"（防 transient 网络抖动）。两者正交：
+F-37 是"事前预防"（防 230001 限流），F-36 是"事后补救"（防 transient 网络抖动）。两者正交：
 
 ```
 sendContent(ctx, chatID, msgType, content, rootID)
   └ WithTransientRetryMsg (F-36 外层)
     └ send() ───┐
-                ├ limiter.Wait (F-35 内层)
+                ├ limiter.Wait (F-37 内层)
                 └ SDK call
 ```
 

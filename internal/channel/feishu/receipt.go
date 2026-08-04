@@ -50,12 +50,14 @@ import (
 type receiptBot interface {
 	AddReaction(ctx context.Context, msgID, emoji string) (string, error)
 	UpdateMessage(ctx context.Context, messageID, text string) error
-	SendMessageText(ctx context.Context, chatID, text, rootID string) (string, error)
+	SendMessageText(ctx context.Context, chatID, text, rootID string, replyInThread bool) (string, error)
 	// SendCard posts a new interactive card and returns its message ID.
 	// Used on the FIRST render of a receipt (no cardMsgID yet).
 	// v1.3.x (§13.10): rootID is the user message id to thread
-	// the cold-start card to.
-	SendCard(ctx context.Context, chatID, cardJSON, rootID string) (string, error)
+	// the cold-start card to. F-37: replyInThread is forwarded but
+	// always false on the cold-start path (the receipt card must
+	// stay visible in the main chat as the pinned answer).
+	SendCard(ctx context.Context, chatID, cardJSON, rootID string, replyInThread bool) (string, error)
 	// PatchMessage replaces the body of an existing message in place
 	// (Feishu PATCH /im/v1/messages/{id}). Used on every render after
 	// the first. The message must already be an interactive card.
@@ -523,7 +525,10 @@ func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID stri
 	// receipt path that lives under Adapter.receiptFor uses SendCard
 	// directly with the same threading; this code path (synthetic
 	// text fallback) was the only place not yet threaded.
-	msgID, err := bot.SendMessageText(ctx, chatID, r.state.headerLine(r), userMsgID)
+	//
+	// F-37: replyInThread=false — the cold-start text bubble is the
+	// pinned answer preview and must stay visible in main chat.
+	msgID, err := bot.SendMessageText(ctx, chatID, r.state.headerLine(r), userMsgID, false)
 	if err != nil {
 		r.logger.Warn("feishu receipt: initial reply failed", "err", err)
 		return r, fmt.Errorf("create receipt: %w", err)
@@ -712,6 +717,21 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 
 	entry, ok := eventToEntry(ev, time.Now(), r.lastEntryLocked())
 	if !ok {
+		// F-34: eventToEntry returns (_, false) for kinds the
+		// receipt card no longer carries (thinking / tool_start /
+		// tool_end / compaction / permission). The adapter
+		// routes those to Feishu thread replies. We still
+		// PATCH the receipt card so the header timestamp
+		// reflects the latest activity — without this, the
+		// user sees a frozen "🔄 ⏳ 1 · 14:32:00" line while
+		// the agent is clearly busy running tools. Render
+		// without appending an entry; bump eventCount + lastEventAt
+		// so renderLocked's body-diff gate actually issues a PATCH.
+		_ = entry
+		switch ev.Kind {
+		case agent.EventToolStart, agent.EventToolEnd, agent.EventCompaction:
+			return r.touchAndRenderLocked(ctx)
+		}
 		// Unknown / unhandled event kind — keep going but don't
 		// touch the log.
 		return nil
@@ -739,6 +759,46 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 // budget protects against Feishu's 30 KB card body cap; the entry
 // budget protects against the 50-element hard limit (see the
 // derivation on replyMaxEntries). Caller must hold r.mu.
+// touchAndRenderLocked bumps the receipt's "last seen" markers
+// (eventCount, lastEventAt) without appending a LogEntry, then
+// PATCHes the card so the header timestamp stays live. Used by
+// the F-34 thread-routed OutboundKinds (thinking / tool_start /
+// tool_end / compaction) where the user-visible summary goes to
+// the thread but the receipt card still needs to refresh.
+//
+// Caller MUST hold r.mu.
+func (r *MessageReceipt) touchAndRenderLocked(ctx context.Context) error {
+	r.eventCount++
+	r.lastEventAt = time.Now()
+	if r.state == StateWaiting {
+		r.state = StateExecuting
+		r.forwardedAt = r.lastEventAt
+	}
+	return r.renderLocked(ctx)
+}
+
+// Touch bumps the receipt's last-seen markers and PATCHes the
+// card. Used by Adapter.Send after a thread-routed OutboundKind
+// (thinking / tool_start / tool_end / compaction) so the main
+// chat's receipt card header doesn't freeze while the agent is
+// busy running tools. Safe to call when no receipt exists for
+// (chatID, userMsgID) — Touch is a no-op in that case.
+//
+// Concurrent with other Append / SetExecuting / etc. calls; all
+// mutations go through r.mu.
+func (r *MessageReceipt) Touch(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state == StateCompleted {
+		// Late event after completion — drop silently. Same
+		// policy as Append for post-completion events.
+		return nil
+	}
+	return r.touchAndRenderLocked(ctx)
+}
 // lastEntryLocked returns the most recently appended LogEntry,
 // or nil when the buffer is empty. Used by eventToEntry's
 // de-duplication pass: the final assistant text is emitted
@@ -873,7 +933,11 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 		// card is rendered as a reply to the user's message. Once
 		// the card exists, PatchMessage preserves the thread across
 		// subsequent in-place edits.
-		msgID, sendErr := r.bot.SendCard(ctx, r.chatID, body, r.userMsgID)
+		//
+		// F-37: replyInThread=false — the cold-start card IS the
+		// main visible answer; thread-only would leave the main chat
+		// empty until the receipt PATCHes happen.
+		msgID, sendErr := r.bot.SendCard(ctx, r.chatID, body, r.userMsgID, false)
 		if sendErr != nil {
 			r.logger.Warn("feishu receipt: create card failed",
 				"err", sendErr, "state", r.state, "entries", len(r.entries))

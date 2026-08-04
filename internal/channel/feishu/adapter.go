@@ -44,7 +44,16 @@ const interactiveMessageType = "interactive"
 // the message is a fresh top-level message in the chat. v1.3.x (§13.10)
 // forwards msg.ReplyTo here so all bot messages that have a user-side anchor
 // thread visually to the user's original message.
-type sendMessageFunc func(ctx context.Context, chatID, msgType, content, rootID string) (string, error)
+//
+// replyInThread controls the Feishu body field reply_in_thread (F-37). When
+// true, the message is rendered ONLY in the thread/topic (main chat shows
+// a "X replies" indicator with no body); when false (default) the message
+// appears inline in the main chat as a reply and is also collected in the
+// thread panel. Thread-only is used for the intermediate agent progress
+// stream (OutThinking / OutToolStart / OutToolEnd / OutCompaction) so the
+// main chat stays focused on the final answer. Create-endpoint calls
+// ignore this flag (the field has no equivalent there).
+type sendMessageFunc func(ctx context.Context, chatID, msgType, content, rootID string, replyInThread bool) (string, error)
 
 // updateMessageFunc is the in-place update boundary (Feishu PATCH
 // /im/v1/messages/{id}). Kept behind a function field so unit tests
@@ -93,6 +102,13 @@ type Adapter struct {
 	incomingClosed bool
 	stopDone       chan struct{}
 	wsDone         chan struct{}
+
+	// threadReplyLimiter enforces Feishu's 5 QPS per-user /
+	// per-group bot API limit on thread replies. Without this
+	// gate, a hot agent (10 tool/sec) overruns the limit and
+	// Feishu returns 230020 / HTTP 429 for some replies,
+	// leaving the thread with gaps. See postThreadReply.
+	threadReplyLimiter *threadReplyLimiter
 
 	// logger is the structured-log target for both inbound and
 	// outgoing message traces. handleMessage emits one info
@@ -161,6 +177,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		incoming:            make(chan channel.Message, 128),
 		receiptsByUserMsgID: make(map[string]*MessageReceipt),
 		messageStates:       make(map[string]agent.MessageState),
+		threadReplyLimiter:  newThreadReplyLimiter(200*time.Millisecond, 800*time.Millisecond),
 		cfg:                 cfg,
 		done:                make(chan struct{}),
 		logger:              slog.Default(),
@@ -362,10 +379,10 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	                       Send handles OutText directly so the
 //	                       existing /help / /use paths keep
 //	                       working.
-//	OutMessageState      → AddReaction on Meta["message_id"] with
-//	                       state-specific emoji_type (F-31 §8.3).
+//	OutMessageState      → AddReaction on MessageState.MessageID
+//	                       with state-specific emoji_type (F-31 §8.3).
 //	                       Idempotency via a.messageStates map.
-//	OutMessageStateRemoved → DeleteReaction on Meta["reaction_id"]
+//	OutMessageStateRemoved → DeleteReaction on MessageState.ReactionID
 //	                       (reserved; v1.3 uses append-only)
 //	OutCard              → send interactive card via sendContent
 //	OutThinking          → dropped (no native Feishu equivalent;
@@ -374,7 +391,6 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //
 // Errors from the underlying API are logged and returned; the
 // Gateway treats Send as fire-and-ack (no retry).
-
 
 // --- v1.1 receipt lifecycle API (channel.Channel contract) ---
 //
@@ -421,7 +437,10 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
 		return nil
 	}
-	msgID, err := a.SendCard(ctx, chatID, cardBody, userMsgID)
+	// F-37: replyInThread=false — the cold-start card is the
+	// pinned main-chat answer; thread-only would leave the main
+	// chat empty until the receipt PATCHes happen.
+	msgID, err := a.SendCard(ctx, chatID, cardBody, userMsgID, false)
 	if err != nil {
 		a.logger.Warn("feishu: cold-start receipt card failed",
 			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
@@ -462,37 +481,39 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		})
 
 	case gateway.OutThinking:
-		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
-		if receipt == nil {
-			return nil
+		// F-34: thinking is posted to the user message thread as
+		// a 💭 line so the main chat stays focused on the final
+		// answer. Falls back to a top-level send if ReplyTo is
+		// empty (orphan event, e.g. startup init).
+		//
+		// F-34 review P1-3: also Touch the receipt so the main
+		// chat's receipt card header keeps ticking while the
+		// agent thinks. Without this the "🔄 ⏳ N · HH:MM:SS"
+		// line freezes between visible events.
+		//
+		// F-37: replyOnly=true keeps the 💭 line OUT of the main
+		// chat — it lives only in the thread so the receipt card
+		// (the pinned final answer) stays the main visible item.
+		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text, true); err != nil {
+			return err
 		}
-		// v1.3.x (§13.1 bug fix): the Gateway's translate.go
-		// strips the [思考] prefix before emitting OutThinking,
-		// but the receipt's eventToEntry detects thinking entries
-		// by checking HasPrefix(text, thinkingPrefix). Without the
-		// prefix the Kind="thinking" branch never fires and the
-		// collapsible_panel rendering for thinking is dead code.
-		// Prepending the prefix here restores the detection.
-		return receipt.Append(ctx, agent.AgentEvent{
-			Kind: agent.EventText,
-			Text: thinkingPrefix + msg.Text,
-		})
+		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
+			_ = r.Touch(ctx)
+		}
+		return nil
 
 	case gateway.OutMessageState:
-		// F-31: read abstract state from Meta, map to feishu
-		// emoji_type internally. Channel decides how to render.
-		messageID, _ := msg.Meta["message_id"].(string)
-		if messageID == "" {
-			return errors.New("feishu: OutMessageState missing message_id in Meta")
+		// F-31: read abstract state from typed MessageStatePayload,
+		// map to feishu emoji_type internally. Channel decides
+		// how to render.
+		if msg.MessageState == nil {
+			return errors.New("feishu: OutMessageState missing MessageState payload")
 		}
-		stateRaw, ok := msg.Meta["state"]
-		if !ok {
-			return errors.New("feishu: OutMessageState missing state in Meta")
+		if msg.MessageState.MessageID == "" {
+			return errors.New("feishu: OutMessageState missing MessageID")
 		}
-		state, ok := stateRaw.(agent.MessageState)
-		if !ok {
-			return fmt.Errorf("feishu: OutMessageState state has unexpected type %T", stateRaw)
-		}
+		messageID := msg.MessageState.MessageID
+		state := msg.MessageState.State
 		emoji := mapStateToFeishuEmoji(state)
 		if emoji == "" {
 			// Unknown state: silent drop (forward-compatible).
@@ -533,15 +554,16 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 	case gateway.OutMessageStateRemoved:
 		// v1.3: not used (append-only reactions). Reserved for
 		// future when channels need mutable state markers.
-		messageID, _ := msg.Meta["message_id"].(string)
-		if messageID == "" {
-			return errors.New("feishu: OutMessageStateRemoved missing message_id in Meta")
+		if msg.MessageState == nil {
+			return errors.New("feishu: OutMessageStateRemoved missing MessageState payload")
 		}
-		reactionID, _ := msg.Meta["reaction_id"].(string)
-		if reactionID == "" {
-			return errors.New("feishu: OutMessageStateRemoved missing reaction_id in Meta")
+		if msg.MessageState.MessageID == "" {
+			return errors.New("feishu: OutMessageStateRemoved missing MessageID")
 		}
-		return a.DeleteReaction(ctx, messageID, reactionID)
+		if msg.MessageState.ReactionID == "" {
+			return errors.New("feishu: OutMessageStateRemoved missing ReactionID")
+		}
+		return a.DeleteReaction(ctx, msg.MessageState.MessageID, msg.MessageState.ReactionID)
 
 	case gateway.OutCard:
 		if msg.Card == nil {
@@ -557,28 +579,57 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// v1.3.x (§13.10): thread permission card to the user's message
 		// so the user sees a visual "reply" line connecting the
 		// permission request to the task that triggered it.
-		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, msg.ReplyTo)
+		//
+		// F-37: reply_in_thread stays false (default) for the
+		// permission card — discoverability matters more than chat
+		// cleanliness when a tool is blocked on user approval.
+		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, msg.ReplyTo, false)
 		return err
 
 	case gateway.OutToolStart:
-		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
-		if receipt == nil {
-			return nil
+		// F-34: tool_start is posted to the user message
+		// thread as the "call" line (`● Tool(args)`), matching
+		// Claude Code's terminal UX. The receipt card no
+		// longer carries tool entries.
+		//
+		// Two-line UX: OutToolStart posts `● Tool(args)`;
+		// OutToolEnd posts the matching `⎿  …` result line.
+		// The user sees the call appear immediately and the
+		// result land in the same thread when the tool returns.
+		body := formatToolStartCall(toolName(msg), toolArgs(msg))
+		// F-37: replyOnly=true — `● Tool(args)` lives in the thread,
+		// not the main chat. Receipt card stays the pinned answer.
+		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body, true); err != nil {
+			return err
 		}
-		return receipt.Append(ctx, agent.AgentEvent{
-			Kind:      agent.EventToolStart,
-			ToolStart: &agent.ToolStartEvent{Name: toolName(msg), Args: toolArgs(msg)},
-		})
+		// F-34 review P1-3: Touch the receipt so the header
+		// keeps ticking while tools run.
+		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
+			_ = r.Touch(ctx)
+		}
+		return nil
 
 	case gateway.OutToolEnd:
-		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
-		if receipt == nil {
-			return nil
+		// F-34: tool_end is posted to the user message thread
+		// as the "result" line (`⎿  summary`), the second half
+		// of Claude Code's two-line UX. Args are NOT included
+		// here — they live on the preceding call line from
+		// OutToolStart.
+		var toolErr error
+		if msg.Tool != nil {
+			toolErr = msg.Tool.Err
 		}
-		return receipt.Append(ctx, agent.AgentEvent{
-			Kind:    agent.EventToolEnd,
-			ToolEnd: &agent.ToolEndEvent{Name: toolName(msg), Output: toolOutput(msg)},
-		})
+		body := summarizeToolResult(toolName(msg), toolOutput(msg), toolErr)
+		// F-37: replyOnly=true — `⎿  …` result line lives in the thread.
+		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body, true); err != nil {
+			return err
+		}
+		// F-34 review P1-3: Touch the receipt so the header
+		// keeps ticking while tools run.
+		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
+			_ = r.Touch(ctx)
+		}
+		return nil
 
 	case gateway.OutTyping:
 		// No native Feishu equivalent (typing indicators come from
@@ -596,14 +647,12 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 			}
 			return nil
 		}
+		if msg.Result == nil {
+			return errors.New("feishu: OutResult missing Result payload")
+		}
 		return receipt.Append(ctx, agent.AgentEvent{
-			Kind: agent.EventResult,
-			Result: &agent.ResultEvent{
-				Text:       msg.Text,
-				DurationMs: durationMs(msg),
-				IsError:    isErrorOut(msg),
-				Subtype:    subtypeOut(msg),
-			},
+			Kind:   agent.EventResult,
+			Result: msg.Result,
 		})
 
 	case gateway.OutUsage:
@@ -611,20 +660,39 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if receipt == nil {
 			return nil
 		}
+		if msg.Usage == nil {
+			return errors.New("feishu: OutUsage missing Usage payload")
+		}
 		return receipt.Append(ctx, agent.AgentEvent{
-			Kind:  agent.EventUsage,
-			Usage: usageFromMeta(msg),
+			Kind: agent.EventUsage,
+			Usage: &agent.UsageEvent{
+				InputTokens:              msg.Usage.InputTokens,
+				OutputTokens:             msg.Usage.OutputTokens,
+				CacheCreationInputTokens: msg.Usage.CacheCreationInputTokens,
+				CacheReadInputTokens:     msg.Usage.CacheReadInputTokens,
+				CostUSD:                  msg.Usage.CostUSD,
+			},
 		})
 
 	case gateway.OutCompaction:
-		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
-		if receipt == nil {
-			return nil
+		// Compaction marker is a one-shot, low-frequency event
+		// (not a stream like tool calls). Per ops decision
+		// 2026-08-04: "OutToolStart/End/OutThinking use
+		// ReplyInThread; everything else uses
+		// ReplyInThreadAndChat" — OutCompaction falls in
+		// 'everything else', so it stays visible in the main
+		// chat (replyOnly=false). A brief "✶ Compacting…" line
+		// in main chat is informative, not noise.
+		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo,
+			"✶ Compacting conversation…", false); err != nil {
+			return err
 		}
-		return receipt.Append(ctx, agent.AgentEvent{
-			Kind:       agent.EventCompaction,
-			Compaction: &agent.CompactionEvent{Subtype: metaString(msg, "subtype")},
-		})
+		// F-34 review P1-3: Touch the receipt so the header
+		// keeps ticking during compaction.
+		if r := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo); r != nil {
+			_ = r.Touch(ctx)
+		}
+		return nil
 
 	case gateway.OutInit:
 		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
@@ -635,15 +703,12 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// card's foot note can render
 		// "Agent | cwd | tokens" (see docs/channel/feishu.md
 		// §9.3 + the footLine composer in receipt.go).
+		if msg.Init == nil {
+			return errors.New("feishu: OutInit missing Init payload")
+		}
 		return receipt.Append(ctx, agent.AgentEvent{
 			Kind: agent.EventInit,
-			Init: &agent.InitEvent{
-				SessionID: metaString(msg, "session_id"),
-				Model:     metaString(msg, "model"),
-				AgentName: metaString(msg, "agent_name"),
-				Workspace: metaString(msg, "workspace"),
-				Branch:    metaString(msg, "branch"),
-			},
+			Init: msg.Init,
 		})
 
 	case gateway.OutCommandReply:
@@ -659,10 +724,14 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// reply to their command. msg.ReplyTo is empty for orphan
 		// replies (e.g. gateway startup logs); in that case the
 		// message stays top-level.
+		//
+		// F-37: slash-command replies stay visible in main chat
+		// (reply_in_thread=false) — the user fired the command and
+		// is waiting for the answer at the cursor.
 		if msg.Text == "" {
 			return errors.New("feishu: OutCommandReply missing text")
 		}
-		_, err := a.SendMessageText(ctx, msg.ChatID, msg.Text, msg.ReplyTo)
+		_, err := a.SendMessageText(ctx, msg.ChatID, msg.Text, msg.ReplyTo, false)
 		return err
 	}
 	return fmt.Errorf("feishu: unsupported outbound kind %v", msg.Kind)
@@ -676,99 +745,132 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 	// Empty rootID: this degraded path is hit when receipt cold-start
 	// failed and there's no userMsgID to thread to. The fallback
 	// message remains a top-level text bubble (legacy behavior).
-	_, err := a.SendMessageText(ctx, chatID, text, "")
+	// replyInThread stays false — Create path with empty rootID
+	// can't honor it anyway.
+	_, err := a.SendMessageText(ctx, chatID, text, "", false)
 	return err
 }
 
-// toolName / toolArgs / toolOutput pull the well-known fields from
-// OutboundMessage.Meta. The translator fills these so the receiver
-// doesn't have to parse the formatted text.
+// postThreadReply posts body as a thread reply anchored at rootID.
+// rootID = msg.ReplyTo = currentTurnUserMsgID. When rootID is empty
+// (orphan event, e.g. startup EventInit) the helper falls back to a
+// top-level text send via sendRawOutText so the user still sees the
+// message.
+//
+// replyOnly (F-37) controls Feishu body field reply_in_thread. true
+// keeps the message OUT of the main chat (only the "X replies"
+// indicator is visible) so the agent progress stream doesn't pollute
+// the user's main view; false keeps the reply visible inline in the
+// main chat. OutThinking / OutToolStart / OutToolEnd / OutCompaction
+// pass true; receipt-card / outCard / slash-command replies pass false.
+func (a *Adapter) postThreadReply(ctx context.Context, chatID, rootID, body string, replyOnly bool) error {
+	// P1-4 (F-34 review): Feishu's bot API caps at 5 QPS per
+	// user / per group. A hot agent running 10+ tools per turn
+	// would otherwise overrun the limit and Feishu would drop
+	// some replies, leaving the thread with gaps. The limiter
+	// sleeps up to maxWait per call; if the wait would exceed
+	// maxWait (the chat is already saturated) we return an
+	// error so the caller can log + move on rather than block
+	// the pump indefinitely.
+	if a.threadReplyLimiter != nil {
+		if err := a.threadReplyLimiter.Wait(ctx, chatID); err != nil {
+			a.logger.Warn("feishu: thread reply rate-limited",
+				"chat_id", chatID, "err", err)
+			return err
+		}
+	}
+	if rootID == "" {
+		return a.sendRawOutText(ctx, chatID, body)
+	}
+	_, err := a.SendMessageText(ctx, chatID, body, rootID, replyOnly)
+	return err
+}
+
+// threadReplyLimiter is a per-key (chatID) simple next-allowed-send
+// gate. Wait blocks until the slot opens or the caller's ctx is
+// cancelled, then reserves the next slot for the same key. If the
+// requested wait would exceed maxWait (the chat is already
+// saturated beyond recoverability), Wait returns an error
+// immediately so the caller can drop the message and continue.
+//
+// The limiter is intentionally simple — a single shared mutex
+// guards the map of next-send times. Hot-path throughput is
+// dominated by the network round-trip (~100ms), not the lock
+// acquisition (~10ns), so contention is a non-issue. Replace
+// with golang.org/x/time/rate if multi-channel adapters are
+// ever introduced.
+type threadReplyLimiter struct {
+	mu       sync.Mutex
+	nextSend map[string]time.Time
+	interval time.Duration // 200ms = 5 QPS
+	maxWait  time.Duration // hard cap on per-call wait
+}
+
+func newThreadReplyLimiter(interval, maxWait time.Duration) *threadReplyLimiter {
+	return &threadReplyLimiter{
+		nextSend: make(map[string]time.Time),
+		interval: interval,
+		maxWait:  maxWait,
+	}
+}
+
+// Wait blocks until the slot for key is open, then reserves the
+// next slot. Returns ctx.Err() if ctx is cancelled while waiting,
+// or an error if the wait would exceed maxWait (caller should
+// drop the message rather than stall).
+func (l *threadReplyLimiter) Wait(ctx context.Context, key string) error {
+	if l == nil || l.interval <= 0 {
+		return nil
+	}
+	l.mu.Lock()
+	due, ok := l.nextSend[key]
+	var wait time.Duration
+	if !ok || !time.Now().Before(due) {
+		l.nextSend[key] = time.Now().Add(l.interval)
+		l.mu.Unlock()
+		return nil
+	}
+	wait = time.Until(due)
+	l.nextSend[key] = due.Add(l.interval)
+	l.mu.Unlock()
+
+	if wait > l.maxWait {
+		return fmt.Errorf("feishu: thread reply rate limit exceeded (wait %dms > cap %dms)", wait.Milliseconds(), l.maxWait.Milliseconds())
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// toolName / toolArgs / toolOutput read from OutboundMessage.Tool
+// (the typed ToolInfo). The gateway now transports the unified
+// tool concept via the Tool field; Meta is no longer the carrier
+// for tool data. See gateway/messages.go ToolInfo docs and
+// gateway/translate.go for the producer side.
 func toolName(m gateway.OutboundMessage) string {
-	if n, _ := m.Meta["tool_name"].(string); n != "" {
-		return n
+	if m.Tool != nil && m.Tool.Name != "" {
+		return m.Tool.Name
 	}
 	return "tool"
 }
 
 func toolArgs(m gateway.OutboundMessage) string {
-	if a, _ := m.Meta["args"].(string); a != "" {
-		return a
+	if m.Tool != nil {
+		return m.Tool.Args
 	}
 	return ""
 }
 
 func toolOutput(m gateway.OutboundMessage) string {
-	if o, _ := m.Meta["output"].(string); o != "" {
-		return o
+	if m.Tool != nil {
+		return m.Tool.Output
 	}
 	return ""
-}
-
-// metaString / metaInt / metaFloat / metaBool pull well-known typed
-// fields from OutboundMessage.Meta. The translator (gateway/translate.go)
-// is the single producer of these keys; receivers tolerate any key
-// being absent / wrong-typed by returning the zero value rather than
-// erroring. Mirrors the existing toolName / toolArgs / toolOutput
-// helpers.
-func metaString(m gateway.OutboundMessage, key string) string {
-	if v, ok := m.Meta[key].(string); ok {
-		return v
-	}
-	return ""
-}
-
-func metaInt(m gateway.OutboundMessage, key string) int {
-	switch v := m.Meta[key].(type) {
-	case int:
-		return v
-	case int64:
-		return int(v)
-	case float64:
-		// JSON numbers decode to float64 by default. Coerce when
-		// the value is integral so we don't silently truncate
-		// large token counts.
-		return int(v)
-	}
-	return 0
-}
-
-func metaFloat(m gateway.OutboundMessage, key string) float64 {
-	if v, ok := m.Meta[key].(float64); ok {
-		return v
-	}
-	return 0
-}
-
-func metaBool(m gateway.OutboundMessage, key string) bool {
-	if v, ok := m.Meta[key].(bool); ok {
-		return v
-	}
-	return false
-}
-
-// durationMs / isErrorOut / subtypeOut / usageFromMeta are the
-// OutResult / OutUsage payload reconstruction helpers. They read the
-// same keys the translator writes (see gateway/translate.go).
-func durationMs(m gateway.OutboundMessage) int64 {
-	return int64(metaInt(m, "duration_ms"))
-}
-
-func isErrorOut(m gateway.OutboundMessage) bool {
-	return metaBool(m, "is_error")
-}
-
-func subtypeOut(m gateway.OutboundMessage) string {
-	return metaString(m, "subtype")
-}
-
-func usageFromMeta(m gateway.OutboundMessage) *agent.UsageEvent {
-	return &agent.UsageEvent{
-		InputTokens:              metaInt(m, "input_tokens"),
-		OutputTokens:             metaInt(m, "output_tokens"),
-		CacheCreationInputTokens: metaInt(m, "cache_creation_input_tokens"),
-		CacheReadInputTokens:     metaInt(m, "cache_read_input_tokens"),
-		CostUSD:                  metaFloat(m, "cost_usd"),
-	}
 }
 
 // buildInteractiveCard renders a Feishu Card 2.0 permission card
@@ -919,6 +1021,20 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 		if e.Icon == "" && e.Text == "" {
 			continue
 		}
+		// F-34: thinking / tool_start / tool_end / compaction
+		// entries are no longer rendered into the receipt card;
+		// the adapter routes them to Feishu thread replies
+		// (Adapter.Send → postThreadReply). eventToEntry returns
+		// (_, false) for them so they normally never reach this
+		// loop. This guard is a defensive backstop: if a future
+		// bridge or a buggy caller appends one of these Kinds
+		// directly to r.entries (e.g. when constructing fixtures
+		// in tests), the card body still hides it instead of
+		// leaking thinking/tool content into the rolling log.
+		switch e.Kind {
+		case "thinking", "tool", "tool_start", "tool_end", "compaction":
+			continue
+		}
 		content := e.Icon
 		if e.Text != "" {
 			if content != "" {
@@ -926,110 +1042,20 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 			}
 			content += e.Text
 		}
-		// Thinking entries are rendered as a collapsible
-		// panel (collapsed by default) so the long
-		// reasoning text doesn't push the final answer
-		// off the visible card surface. Mirrors the
-		// OpenClaw Lark plugin's reasoning panel
-		// (openclaw-lark src/card/builder.ts — see the
-		// reasoning section in buildCompleteCard). The
-		// icon + i18n_content + icon_position +
-		// icon_expanded_angle fields are copied verbatim
-		// from OpenClaw; they're not strictly required
-		// by the schema but the Feishu client uses
-		// `icon` to drive the click-to-expand affordance
-		// and the panel renders as a flat (non-collapse)
-		// block when it's missing.
-		if e.Kind == "thinking" {
-			// Thinking text is capped at perEntryMaxBytes (600
-			// runes post-F-37) by eventToEntry, so the inner
-			// body is always ≤ divTextCharLimit and a single
-			// markdown element is enough.
-			elements = append(elements, map[string]any{
-				"tag":      "collapsible_panel",
-				"expanded": false,
-				"header": map[string]any{
-					"title": map[string]any{
-						"tag":     "markdown",
-						"content": "💭 思考",
-						"i18n_content": map[string]any{
-							"zh_cn": "💭 思考",
-							"en_us": "💭 Thought",
-						},
-					},
-					"vertical_align": "center",
-					"icon": map[string]any{
-						"tag":   "standard_icon",
-						"token": "down-small-ccm_outlined",
-						"size":  "16px 16px",
-					},
-					"icon_position":       "follow_text",
-					"icon_expanded_angle": -180,
-				},
-				"border": map[string]any{
-					"color":        "grey",
-					"corner_radius": "5px",
-				},
-				"vertical_spacing": "8px",
-				"padding":          "8px 8px 8px 8px",
-				"elements": []map[string]any{
-					{
-						"tag":       "markdown",
-						"content":   e.Text,
-						"text_size": "notation",
-					},
-				},
-			})
-			continue
-		}
-		// v1.3.x (§13.6 / §13.9): tool_start and tool_end both
-		// emit Kind="tool" so they collapse into collapsible
-		// panels. Panel header shows e.Icon (🔧 / ✅ / ❌) +
-		// e.Text (already pre-formatted as
-		// "tool_name(args)" or "tool_name → output" /
-		// "tool_name failed: err" by eventToEntry). Body
-		// holds the same e.Text for users who expand.
-		if e.Kind == "tool" {
-			// Tool text is capped at perEntryMaxBytes (600 runes
-			// post-F-37) by eventToEntry, so a single inner
-			// element is enough.
-			elements = append(elements, map[string]any{
-				"tag":      "collapsible_panel",
-				"expanded": false,
-				"header": map[string]any{
-					"title": map[string]any{
-						"tag":     "markdown",
-						"content": e.Icon + " " + e.Text,
-					},
-					"vertical_align": "center",
-					"icon": map[string]any{
-						"tag":   "standard_icon",
-						"token": "down-small-ccm_outlined",
-						"size":  "16px 16px",
-					},
-					"icon_position":       "follow_text",
-					"icon_expanded_angle": -180,
-				},
-				"border": map[string]any{
-					"color":        "grey",
-					"corner_radius": "5px",
-				},
-				"vertical_spacing": "8px",
-				"padding":          "8px 8px 8px 8px",
-				"elements": []map[string]any{
-					{
-						"tag":       "markdown",
-						"content":   e.Text,
-						"text_size": "notation",
-					},
-				},
-			})
-			continue
-		}
+		// F-37 thread-route: thinking/tool entries are NOT
+		// rendered here at all — they were routed to Feishu
+		// thread replies upstream. The old collapsible_panel
+		// branches for `Kind == "thinking"` and `Kind == "tool"`
+		// (origin/main version) are intentionally absent on
+		// this branch: those kinds no longer reach the card
+		// surface. Only OutText / OutResult / OutInit / OutUsage
+		// entries make it here.
+		//
 		// F-37 multi-div content split: if the entry's text
 		// exceeds divTextCharLimit (Feishu hard limit), split
 		// at paragraph boundaries into multiple markdown elements
-		// so the full content renders without truncation.
+		// so the full content renders without truncation. See
+		// docs/feat/F-37-multi-div-content-split.md.
 		chunks := splitMarkdownForDivs(content, divTextCharLimit)
 		for _, chunk := range chunks {
 			elements = append(elements, map[string]any{
@@ -1165,7 +1191,7 @@ func (a *Adapter) logInbound(msg channel.Message) {
 // ID on error and uses a hidden return-path for callers that need
 // the ID (see SendMessageText for the receipt code path).
 func (a *Adapter) SendMessage(ctx context.Context, chatID, text string) error {
-	_, err := a.SendMessageText(ctx, chatID, text, "")
+	_, err := a.SendMessageText(ctx, chatID, text, "", false)
 	return err
 }
 
@@ -1178,8 +1204,13 @@ func (a *Adapter) SendMessage(ctx context.Context, chatID, text string) error {
 // thread visually to the user's `/command` message. Empty rootID yields
 // a fresh top-level message (legacy behavior).
 //
+// replyInThread (F-37) is forwarded to the Reply body when rootID != "".
+// false = visible in main chat (default for slash commands and
+// receipt-cold-start); true = thread-only (used by postThreadReply for
+// the agent progress stream). Has no effect on the top-level Create path.
+//
 // Returns (messageID, error). On error, messageID is "".
-func (a *Adapter) SendMessageText(ctx context.Context, chatID, text, rootID string) (string, error) {
+func (a *Adapter) SendMessageText(ctx context.Context, chatID, text, rootID string, replyInThread bool) (string, error) {
 	if strings.TrimSpace(chatID) == "" {
 		return "", errors.New("feishu: chat_id is required")
 	}
@@ -1192,7 +1223,7 @@ func (a *Adapter) SendMessageText(ctx context.Context, chatID, text, rootID stri
 	if err != nil {
 		return "", fmt.Errorf("feishu: encode text: %w", err)
 	}
-	msgID, err := a.sendContent(ctx, chatID, larkim.MsgTypeText, string(content), rootID)
+	msgID, err := a.sendContent(ctx, chatID, larkim.MsgTypeText, string(content), rootID, replyInThread)
 	a.logOutgoing("send_text", chatID, msgID, err)
 	return msgID, err
 }
@@ -1300,10 +1331,11 @@ func (a *Adapter) addReactionOnce(ctx context.Context, messageID, reactionType s
 	return rid, nil
 }
 
-// DeleteReaction removes a reaction by its ID. Used by the adapter's
-// OutReactionRemoved send path (Meta["reaction_id"]). Receipts no
-// longer delete reactions — they append lifecycle emojis instead —
-// but the public method stays for other adapter consumers.
+// DeleteReaction removes a reaction by its ID. Used by the
+// OutMessageStateRemoved send path (MessageState.ReactionID).
+// Receipts no longer delete reactions — they append lifecycle
+// emojis instead — but the public method stays for other adapter
+// consumers.
 func (a *Adapter) DeleteReaction(ctx context.Context, messageID, reactionID string) error {
 	if a.larkClient == nil || a.larkClient.Im == nil || a.larkClient.Im.V1 == nil || a.larkClient.Im.V1.MessageReaction == nil {
 		return errors.New("feishu: REST client not initialized")
@@ -1412,6 +1444,11 @@ func (a *Adapter) SendLongMessage(ctx context.Context, chatID, text string) erro
 // the message is rendered as a reply to that user message; empty means
 // a fresh top-level message. See §15.2 of docs/channel/feishu.md.
 //
+// replyInThread (F-37) controls the Feishu body field reply_in_thread
+// when the Reply endpoint is selected (rootID != ""). It has no
+// effect on the top-level Create path. See postThreadReply for the
+// author-side policy that decides which callsites pass true.
+//
 // v1.3.x (§13.10 fallback): when the Reply endpoint returns a
 // terminal error code (230011 recalled / 231003 deleted), we retry
 // as a top-level Create so the user still sees a message. The
@@ -1420,7 +1457,7 @@ func (a *Adapter) SendLongMessage(ctx context.Context, chatID, text string) erro
 //
 // Returns "" + error on failure. Empty message ID on success is
 // possible if the API omits it (defensive — should not happen).
-func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content, rootID string) (string, error) {
+func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content, rootID string, replyInThread bool) (string, error) {
 	a.mu.RLock()
 	send := a.sendFunc
 	if send == nil && a.larkClient != nil {
@@ -1443,14 +1480,17 @@ func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content, roo
 			"chat_id", chatID,
 			"msg_type", msgType,
 			"root_id", rootID,
+			"reply_in_thread", replyInThread,
 		},
 	}, func() (string, error) {
-		return send(ctx, chatID, msgType, content, rootID)
+		return send(ctx, chatID, msgType, content, rootID, replyInThread)
 	})
 
 	// §15.2 fallback：Reply target unavailable（230011/231003），
 	// 重试一次不带 rootID 的 Create；fallback 也走 retry 救活
 	// 瞬时失败（target unavailable 与 transient 无关，但保留对称）。
+	// reply_in_thread 在 fallback path 没意义（Create 不接受），
+	// 退化时一律清掉。
 	if err != nil && rootID != "" && isFeishuTerminalMessageCode(err) {
 		logDegradation(a.logger, degradationFallbackTopLevel, RetryOpts{
 			Op:     "send",
@@ -1459,6 +1499,7 @@ func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content, roo
 				"chat_id", chatID,
 				"msg_type", msgType,
 				"root_id", rootID,
+				"reply_in_thread", replyInThread,
 				"reason", "reply_target_unavailable",
 			},
 		}, 0, 0, err, nil)
@@ -1472,13 +1513,13 @@ func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content, roo
 				"root_id", "", // fallback intentionally clears root_id
 			},
 		}, func() (string, error) {
-			return send(ctx, chatID, msgType, content, "")
+			return send(ctx, chatID, msgType, content, "", false)
 		})
 	}
 	return msgID, err
 }
 
-func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content, rootID string) (string, error) {
+func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content, rootID string, replyInThread bool) (string, error) {
 	if a.larkClient == nil || a.larkClient.Im == nil || a.larkClient.Im.V1 == nil || a.larkClient.Im.V1.Message == nil {
 		return "", errors.New("feishu: REST client is nil")
 	}
@@ -1490,7 +1531,7 @@ func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content, roo
 	// across subsequent in-place updates, so once Reply-creates the
 	// card the thread is locked in.
 	if rootID != "" {
-		return a.sendViaLarkReply(ctx, rootID, msgType, content)
+		return a.sendViaLarkReply(ctx, rootID, msgType, content, replyInThread)
 	}
 	return a.sendViaLarkCreate(ctx, chatID, msgType, content)
 }
@@ -1501,18 +1542,30 @@ func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content, roo
 // formatted error carrying the Feishu API code when the call
 // fails; callers inspect with isFeishuTerminalMessageCode to
 // decide whether to fall back to Create.
-func (a *Adapter) sendViaLarkReply(ctx context.Context, rootID, msgType, content string) (string, error) {
+//
+// replyInThread (F-37) controls the body field reply_in_thread.
+// true = thread/topic form only (main chat shows "X replies"
+// indicator without body); false (default) = visible in main chat
+// as an inline reply AND in thread panel. See postThreadReply /
+// F-37 §2.1 for which OutboundKind values pass true.
+func (a *Adapter) sendViaLarkReply(ctx context.Context, rootID, msgType, content string, replyInThread bool) (string, error) {
 	// F-35: 出口过限速器。
 	if err := a.limiter.Wait(ctx); err != nil {
 		return "", err
 	}
-	replyBody := larkim.NewReplyMessageReqBodyBuilder().
+	bodyBuilder := larkim.NewReplyMessageReqBodyBuilder().
 		MsgType(msgType).
-		Content(content).
-		Build()
+		Content(content)
+	if replyInThread {
+		// Field is omitempty — only set when true so the default
+		// payload stays byte-for-byte identical to pre-F-37 calls
+		// (preserves backward compat with the §13.10 recorder logs
+		// and any internal idempotency cache keyed on body hash).
+		bodyBuilder = bodyBuilder.ReplyInThread(true)
+	}
 	req := larkim.NewReplyMessageReqBuilder().
 		MessageId(rootID).
-		Body(replyBody).
+		Body(bodyBuilder.Build()).
 		Build()
 	resp, err := a.larkClient.Im.V1.Message.Reply(ctx, req)
 	if err != nil {
@@ -1532,7 +1585,8 @@ func (a *Adapter) sendViaLarkReply(ctx context.Context, rootID, msgType, content
 
 // sendViaLarkCreate invokes POST /im/v1/messages (top-level Create).
 // Used both as the no-rootID path and as the fallback when Reply
-// fails on a recalled/deleted user message.
+// fails on a recalled/deleted user message. replyInThread is unused
+// here (Create API does not accept reply_in_thread).
 func (a *Adapter) sendViaLarkCreate(ctx context.Context, chatID, msgType, content string) (string, error) {
 	// F-35: 出口过限速器。
 	if err := a.limiter.Wait(ctx); err != nil {
@@ -1616,14 +1670,21 @@ func isFeishuTerminalMessageCode(err error) bool {
 // card is rendered as a reply to the user's message; subsequent
 // PatchMessage calls preserve the thread automatically. See §15.2 of
 // docs/channel/feishu.md.
-func (a *Adapter) SendCard(ctx context.Context, chatID, content, rootID string) (string, error) {
+//
+// replyInThread (F-37) is accepted for symmetry with sendContent /
+// SendMessageText but is effectively a no-op for the receipt cold-start
+// path (the cold-start card MUST stay visible in the main chat —
+// chat-pinned visual answer is the whole point of the rolling log). It is
+// plumbed through so future callers (e.g. permission card as thread-only)
+// can opt in without a second signature change.
+func (a *Adapter) SendCard(ctx context.Context, chatID, content, rootID string, replyInThread bool) (string, error) {
 	if strings.TrimSpace(chatID) == "" {
 		return "", errors.New("feishu: chat_id is required")
 	}
 	if strings.TrimSpace(content) == "" {
 		return "", errors.New("feishu: card content is required")
 	}
-	msgID, err := a.sendContent(ctx, chatID, larkim.MsgTypeInteractive, content, rootID)
+	msgID, err := a.sendContent(ctx, chatID, larkim.MsgTypeInteractive, content, rootID, replyInThread)
 	a.logOutgoing("send_card", chatID, msgID, err)
 	return msgID, err
 }
@@ -1736,11 +1797,11 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	hasMention := computeHasMention(message, botOpenID)
 	text = stripMentionPrefix(text, message.Mentions, botOpenID)
 	msg := channel.Message{
-		ChatID:      chatID,
-		Text:        text,
-		UserID:      senderID(event),
-		Time:        messageTime(message.CreateTime),
-		MessageID:   stringValue(message.MessageId),
+		ChatID:    chatID,
+		Text:      text,
+		UserID:    senderID(event),
+		Time:      messageTime(message.CreateTime),
+		MessageID: stringValue(message.MessageId),
 		// F-33 §13.11 / D3: ReplyTo = Feishu message.ParentId. The
 		// thread-top-level RootId is intentionally not surfaced to
 		// nightme — we only track point-to-point reply relationships.
@@ -1750,7 +1811,7 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 		ReplyTo:     stringValue(message.ParentId),
 		Attachments: attachments,
 		// F-watch: see docs/channel/feishu.md §6.10 + SPEC §3.1.1.
-		HasMention:  hasMention,
+		HasMention: hasMention,
 	}
 	// Trace every inbound message before the publish lock so the
 	// CLI surface shows the user message that triggered the

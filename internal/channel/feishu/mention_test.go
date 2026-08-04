@@ -222,7 +222,7 @@ func TestComputeHasMention(t *testing.T) {
 			name:        "group with bot id unknown but @_all present",
 			chatType:    "group",
 			mentions:    []*larkim.MentionEvent{makeMention("@_all", "@_all")},
-			botOpenID:   "", // identity fetch failed
+			botOpenID:   "",   // identity fetch failed
 			wantMention: true, // @_all still detected
 		},
 		{
@@ -261,11 +261,11 @@ func TestComputeHasMention(t *testing.T) {
 // that DM messages are ALWAYS processed regardless of WatchMode.
 // The contract is:
 //
-//   For any DM message (chat_type == "p2p"), regardless of
-//   mentions / botOpenID / WatchMode setting, HasMention MUST be
-//   true. This is what lets the gateway dispatcher gate drop
-//   non-mention group messages without ever accidentally dropping
-//   a DM.
+//	For any DM message (chat_type == "p2p"), regardless of
+//	mentions / botOpenID / WatchMode setting, HasMention MUST be
+//	true. This is what lets the gateway dispatcher gate drop
+//	non-mention group messages without ever accidentally dropping
+//	a DM.
 //
 // If this test regresses, F-watch will start dropping DM messages
 // in chats that have WatchMode=WatchModeMention (the default).

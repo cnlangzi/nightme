@@ -137,6 +137,51 @@ func TestPumpStream_ToolResult(t *testing.T) {
 	}
 }
 
+// TestPumpStream_ToolResultArgsCorrelatedAcrossMessages — F-34
+// review P0-2 regression guard. Claude Code's stream-json emits
+// tool_use in assistant-role messages and the matching
+// tool_result in user-role messages, correlated by tool_use_id.
+// The args recorded on the tool_use block must survive into the
+// later tool_result handler so the Feishu adapter's type-aware
+// summary can render "Read /a/b.go" instead of "Read".
+func TestPumpStream_ToolResultArgsCorrelatedAcrossMessages(t *testing.T) {
+	// Real protocol: two separate messages, assistant then user.
+	assistant := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_001","name":"Read","input":{"file_path":"/tmp/foo.go"}}]}}` + "\n"
+	user := `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_001","name":"Read","content":"line 1\nline 2"}]}}` + "\n"
+	evs := streamFromString(assistant + user)
+	if len(evs) < 2 {
+		t.Fatalf("got %d events, want at least 2 (tool_use handleToolUse + tool_result EventToolEnd)", len(evs))
+	}
+	// Last event should be the tool_result EventToolEnd with args.
+	last := evs[len(evs)-1]
+	if last.Kind != agent.EventToolEnd || last.ToolEnd == nil {
+		t.Fatalf("last event = %+v, want EventToolEnd", last)
+	}
+	if last.ToolEnd.Args != `{"file_path":"/tmp/foo.go"}` {
+		t.Errorf("Args = %q, want raw tool_use input %q", last.ToolEnd.Args, `{"file_path":"/tmp/foo.go"}`)
+	}
+	if last.ToolEnd.ID != "toolu_001" {
+		t.Errorf("ID = %q, want %q", last.ToolEnd.ID, "toolu_001")
+	}
+	if last.ToolEnd.Name != "Read" {
+		t.Errorf("Name = %q, want %q", last.ToolEnd.Name, "Read")
+	}
+}
+
+func TestPumpStream_ToolResultArgsMissingMatch(t *testing.T) {
+	input := `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_missing","name":"Read","content":"line 1"}]}}` + "\n"
+	evs := streamFromString(input)
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want 1", len(evs))
+	}
+	if evs[0].ToolEnd == nil {
+		t.Fatal("ToolEnd is nil")
+	}
+	if evs[0].ToolEnd.Args != "" {
+		t.Errorf("Args = %q, want empty for unmatched tool_result", evs[0].ToolEnd.Args)
+	}
+}
+
 // TestStringifyToolResult covers the three payload shapes Claude
 // Code emits for tool_result.content: a plain JSON string, an
 // array of content blocks (multi-modal), and a non-string non-array

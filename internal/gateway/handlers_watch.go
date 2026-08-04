@@ -30,10 +30,10 @@ import (
 
 // handleWatch toggles ChatSession.WatchMode for the current chat.
 //
-//   /watch on           → set WatchModeAll, persist, reply "watching all"
-//   /watch off          → set WatchModeMention, persist, reply "watching mentions only"
-//   /watch              → reply current mode + usage
-//   /watch <other>      → reply usage hint (parse failure)
+//	/watch on           → set WatchModeAll, persist, reply "watching all"
+//	/watch off          → set WatchModeMention, persist, reply "watching mentions only"
+//	/watch              → reply current mode + usage
+//	/watch <other>      → reply usage hint (parse failure)
 //
 // The handler tolerates chats with no ChatSession yet
 // (mgr.GetOrCreate lazily creates one). No /cwd is required —

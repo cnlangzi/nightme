@@ -51,12 +51,10 @@ func eventToEntry(ev agent.AgentEvent, now time.Time, lastEntry *LogEntry) (LogE
 			return LogEntry{}, false
 		}
 		if strings.HasPrefix(text, thinkingPrefix) {
-			return LogEntry{
-				Time: now,
-				Icon: "💭",
-				Text: truncateForLog(strings.TrimPrefix(text, thinkingPrefix), perEntryMaxBytes),
-				Kind: "thinking",
-			}, true
+			// F-34: thinking no longer folds into the receipt
+			// card; the adapter routes it to a Feishu thread
+			// reply instead (see Adapter.Send). Skip.
+			return LogEntry{}, false
 		}
 		return LogEntry{
 			Time: now,
@@ -66,49 +64,16 @@ func eventToEntry(ev agent.AgentEvent, now time.Time, lastEntry *LogEntry) (LogE
 		}, true
 
 	case agent.EventToolStart:
-		if ae.ToolStart == nil || ae.ToolStart.Name == "" {
-			return LogEntry{}, false
-		}
-		text := ae.ToolStart.Name
-		if ae.ToolStart.Args != "" {
-			text = ae.ToolStart.Name + "(" + truncateForLog(ae.ToolStart.Args, perEntryMaxBytes-len(ae.ToolStart.Name)-2) + ")"
-		}
-		return LogEntry{
-			Time: now,
-			Icon: "🔧",
-			Text: truncateForLog(text, perEntryMaxBytes),
-			// v1.3.x (§13.6 / §13.9): collapse tool_start/tool_end
-			// under a single "tool" Kind so buildReceiptCard wraps
-			// each in a collapsible_panel. Start+End stay as two
-			// separate entries (independent panels).
-			Kind: "tool",
-		}, true
+		// F-34: tool_start is posted as a thread reply with a
+		// type-aware summary; the receipt card no longer carries
+		// it.
+		return LogEntry{}, false
 
 	case agent.EventToolEnd:
-		if ae.ToolEnd == nil || ae.ToolEnd.Name == "" {
-			return LogEntry{}, false
-		}
-		icon := "✅"
-		var body string
-		if ae.ToolEnd.Err != nil {
-			icon = "❌"
-			body = fmt.Sprintf("%s failed: %s", ae.ToolEnd.Name, ae.ToolEnd.Err.Error())
-		} else if ae.ToolEnd.Output != "" {
-			// Result is the most useful signal for the user — show
-			// a short summary so they can tell what the agent
-			// actually did (e.g. "Read /tmp/main.go → 47 lines").
-			body = fmt.Sprintf("%s → %s", ae.ToolEnd.Name, ae.ToolEnd.Output)
-		} else {
-			// Fallback when the bridge forgot to populate Output.
-			body = ae.ToolEnd.Name + " done"
-		}
-		return LogEntry{
-			Time: now,
-			Icon: icon,
-			Text: truncateForLog(body, perEntryMaxBytes),
-			// v1.3.x (§13.6 / §13.9): see EventToolStart above.
-			Kind: "tool",
-		}, true
+		// F-34: tool_end is posted as a thread reply with a
+		// type-aware summary (summarizeToolEnd); the receipt
+		// card no longer carries it.
+		return LogEntry{}, false
 
 	case agent.EventError:
 		msg := "unknown error"
@@ -186,15 +151,10 @@ func eventToEntry(ev agent.AgentEvent, now time.Time, lastEntry *LogEntry) (LogE
 		return LogEntry{}, false
 
 	case agent.EventCompaction:
-		// Mid-turn context compaction — surface the same icon as
-		// Claude Code's own spinner (✶) so users recognize the
-		// pattern from the CLI.
-		return LogEntry{
-			Time: now,
-			Icon: "✶",
-			Text: "Compacting conversation…",
-			Kind: "compaction",
-		}, true
+		// F-34: compaction is posted as a thread reply ("✶
+		// Compacting conversation…"). The receipt card no
+		// longer carries it.
+		return LogEntry{}, false
 
 	case agent.EventInit:
 		// EventInit is intentionally NOT rendered as a log

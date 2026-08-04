@@ -252,35 +252,80 @@ func (k OutboundKind) String() string {
 type OutboundMessage struct {
 	ChatID string
 	Kind   OutboundKind
-	// Text carries the rendered body for OutText / OutToolStart /
-	// OutToolEnd / OutThinking. Channels are expected to truncate
-	// for their own UI limits; Gateway does not pre-truncate.
+	// Text carries the rendered body for OutText / OutThinking.
+	// Channels are expected to truncate for their own UI limits;
+	// Gateway does not pre-truncate. OutToolStart / OutToolEnd
+	// carry their content in the Tool field, not Text — see
+	// ToolInfo for the rationale (gateway transports the unified
+	// tool concept; channel decides how to render it).
 	Text string
 	// Card carries the interactive card payload for OutCard.
 	Card *Card
-	// Reaction carries the emoji + target for the legacy reaction
-	// events. v1.3 (F-31) introduces MessageState (preferred path);
-	// Reaction is retained temporarily for backward compatibility
-	// and will be removed once all channel adapters migrate to
-	// MessageState.
-	Reaction *Reaction
+	// Tool carries the typed payload for OutToolStart / OutToolEnd.
+	// nil for other Kinds. Gateway populates this from
+	// AgentEvent.ToolStart / ToolEnd in translate(); channels
+	// read it directly instead of mining Meta for per-tool
+	// fields. The Args string is whatever representation the
+	// bridge chose (claudecode emits raw JSON; other bridges
+	// may use typed maps serialised to string). Gateway does not
+	// parse the Args content — that's channel territory.
+	Tool *ToolInfo
+	// Result carries the typed payload for OutResult. nil for
+	// other Kinds. Gateway populates from AgentEvent.Result; the
+	// channel reads directly instead of round-tripping the
+	// fields through Meta. Replaces the legacy
+	// Meta["duration_ms"] / ["is_error"] / ["subtype"] implicit
+	// protocol (removed in §1.4 cleanup).
+	Result *agent.ResultEvent
+	// Usage carries the typed payload for OutUsage. nil for other
+	// Kinds. Gateway populates from AgentEvent.Usage. Replaces
+	// the legacy Meta["input_tokens"] / ["output_tokens"] /
+	// ["cache_creation_input_tokens"] / ["cache_read_input_tokens"]
+	// / ["cost_usd"] implicit protocol (removed in §1.4 cleanup).
+	Usage *UsageInfo
 	// MessageState carries the payload for OutMessageState /
 	// OutMessageStateRemoved kinds (F-31). Channel reads from this
-	// field directly OR from Meta["message_id"] + Meta["state"].
+	// typed field directly. Replaces the legacy
+	// Meta["message_id"] / ["state"] / ["reaction_id"] implicit
+	// protocol (removed in §1.4 cleanup).
 	MessageState *MessageStatePayload
+	// Init carries the typed payload for OutInit. nil for other
+	// Kinds. Gateway populates from AgentEvent.Init. Replaces the
+	// legacy Meta["session_id"] / ["model"] / ["agent_name"] /
+	// ["workspace"] / ["branch"] implicit protocol (removed in
+	// §1.4 cleanup).
+	Init *agent.InitEvent
 	// ReplyTo carries the channel-native root message id when the
 	// agent wants to reply in a thread.
 	ReplyTo string
-	// Meta carries opaque per-kind payload the Channel may need:
-	//   OutMessageState: Meta.MessageID is the target user message;
-	//     Meta.State is the agent.MessageState value.
-	//   (legacy) Reaction / ReactionRemoved: see Reaction struct.
-	//   OutCard: Meta.RequestID is the correlation token the user
-	//     click carries back in InboundMessage.Action.RequestID.
-	//   OutToolStart: Meta.ToolName / Meta.Args.
-	//   OutToolEnd: Meta.ToolName / Meta.Output / Meta.Err.
-	//   OutTyping: Channel-specific (usually empty).
-	Meta map[string]any
+}
+
+// ToolInfo is the typed payload for OutboundMessage.Tool,
+// representing a tool call (start or end). It captures the
+// generic concepts that any tool has — name, args, output, error
+// — without prescribing how each bridge represents them. Fields:
+//
+//	Name    — the tool's registered name (e.g. "Read", "Bash").
+//	          Set on both Start and End.
+//	Args    — the tool's input, in whatever representation the
+//	          bridge chose. Set on both Start and End. Gateway
+//	          does NOT parse this string; channels that want
+//	          type-aware rendering (e.g. summarising tool output)
+//	          parse it themselves.
+//	Output  — the tool's result text. Only set on End; empty on
+//	          Start.
+//	Err     — the tool's error (if any). Only set on End; nil on
+//	          Start.
+//
+// ToolInfo deliberately avoids naming fields after any specific
+// bridge's schema (no `file_path`, `command`, `content`, etc.) —
+// those are tool-specific details that the channel layer
+// (with its own per-tool heuristics) handles.
+type ToolInfo struct {
+	Name   string
+	Args   string
+	Output string
+	Err    error
 }
 
 // Card is an interactive permission card or any other card that
@@ -299,38 +344,56 @@ type Card struct {
 }
 
 // MessageStatePayload is the OutboundMessage payload for
-// OutMessageState / OutMessageStateRemoved kinds (F-31). It is a
-// redundant carrier for the same data available in
-// Meta["message_id"] + Meta["state"]; channels can read from
-// either location based on preference.
-
-// Reaction is the legacy payload for the (deprecated) reaction
-// kinds renamed to OutMessageState / OutMessageStateRemoved in
-// v1.3 (F-31). v1.3 channels should migrate to
-// MessageStatePayload instead. This type remains temporarily for
-// backward compatibility with code paths that still reference
-// the legacy field and will be removed once all references are
-// cleaned up.
-type Reaction struct {
-	// EmojiType is the channel-native identifier of the emoji.
-	EmojiType string
-	// ReactionID is the channel-native reaction id returned by a
-	// previous AddReaction call. Required for the legacy "removed"
-	// kind.
-	ReactionID string
-}
-//
-// v1.3: State is the canonical abstract value; Emoji is optional
-// channel-specific override (most channels ignore it and map
-// State → emoji internally).
+// OutMessageState / OutMessageStateRemoved kinds (F-31). It is
+// the typed transport for the same data that v0.2 carried in
+// Meta["message_id"] / ["state"] / ["reaction_id"]; channels
+// read from this typed field directly. Replaces the legacy
+// Reaction struct + implicit Meta keys (removed in §1.4
+// cleanup).
 type MessageStatePayload struct {
 	// State is the abstract MessageState value (received /
 	// forwarded / done / error).
 	State agent.MessageState
+	// MessageID is the channel-native id of the message being
+	// reacted on (typically the user message that triggered the
+	// assistant turn). Required for both OutMessageState (target
+	// of AddReaction) and OutMessageStateRemoved (target of
+	// DeleteReaction).
+	MessageID string
+	// ReactionID is the channel-native reaction id returned by a
+	// prior AddReaction call. Required for OutMessageStateRemoved
+	// so the channel can target the right reaction row (Feishu
+	// has no UpdateReaction API). Empty for OutMessageState (the
+	// reaction has not been created yet at that point).
+	ReactionID string
 	// Emoji is an optional channel-native emoji override. Most
 	// channels ignore this and map State → emoji via their own
 	// table (e.g. Feishu: StateReceived → "OneSecond").
 	Emoji string
+}
+
+// UsageInfo is the OutboundMessage payload for OutUsage. It is
+// the typed transport for the token / cost counts that v0.2
+// carried in Meta["input_tokens"] / ["output_tokens"] /
+// ["cache_creation_input_tokens"] / ["cache_read_input_tokens"] /
+// ["cost_usd"]; channels read from this typed field directly.
+// Replaces the implicit Meta protocol (removed in §1.4 cleanup).
+type UsageInfo struct {
+	// InputTokens is the total input tokens consumed across the
+	// turn (prompt + cache reads + tool input).
+	InputTokens int
+	// OutputTokens is the total output tokens generated.
+	OutputTokens int
+	// CacheCreationInputTokens is the subset of input tokens
+	// that landed in a new cache entry (cache write).
+	CacheCreationInputTokens int
+	// CacheReadInputTokens is the subset of input tokens that hit
+	// an existing cache entry (cache read).
+	CacheReadInputTokens int
+	// CostUSD is the dollar cost of the turn as reported by the
+	// bridge (claudecode: result.total_cost_usd; other bridges
+	// may compute from model pricing).
+	CostUSD float64
 }
 
 // AgentEventEnvelope carries the agent-side metadata alongside an

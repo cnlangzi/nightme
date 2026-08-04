@@ -11,6 +11,25 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
+// streamState holds per-session scratch state that needs to
+// survive across translate() calls. The toolUseArgs map is
+// the only field for now — see F-34 review P0-2.
+//
+// Per Claude Code's stream-json protocol, tool_use blocks live
+// in assistant-role messages and tool_result blocks live in
+// user-role messages, correlated by tool_use_id. The args map
+// MUST be session-scoped (not per-message), so a tool_result in
+// user-message N can look up the args recorded when its matching
+// tool_use was seen in assistant-message N-1.
+//
+// streamState is owned by pumpStream (one per session) and
+// passed by pointer into each translate() call; translate MUST
+// NOT mutate it other than through the documented hooks
+// (assistant branch → record args; user branch → read args).
+type streamState struct {
+	toolUseArgs map[string]string
+}
+
 // streamEvent is the on-the-wire JSON shape emitted by Claude Code in
 // --output-format stream-json mode. Only the fields we consume are
 // modeled; unknown fields are ignored by the decoder (json.Unmarshal is
@@ -104,6 +123,20 @@ func pumpStream(r io.Reader, events chan<- agent.AgentEvent, askHandler askHandl
 	// Allow long lines (Claude Code may emit large content blocks).
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
+	// streamState holds per-session scratch state that needs to
+	// survive across translate() calls. The toolUseArgs map is
+	// the only field for now — see F-34 review P0-2.
+	//
+	// Per Claude Code's stream-json protocol, tool_use blocks
+	// live in assistant-role messages and tool_result blocks live
+	// in user-role messages, correlated by tool_use_id. The args
+	// map MUST be session-scoped, not per-message, so a tool_result
+	// in user-message N can look up the args recorded when its
+	// matching tool_use was seen in assistant-message N-1.
+	state := &streamState{
+		toolUseArgs: make(map[string]string),
+	}
+
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -120,7 +153,7 @@ func pumpStream(r io.Reader, events chan<- agent.AgentEvent, askHandler askHandl
 			continue
 		}
 
-		translate(ev, events, askHandler, agentName, workspace, branch, logger)
+		translate(ev, state, events, askHandler, agentName, workspace, branch, logger)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -141,7 +174,7 @@ func pumpStream(r io.Reader, events chan<- agent.AgentEvent, askHandler askHandl
 // agentName + workspace are stamped onto the EventInit payload so
 // channel-layer receipts can render the "Agent · name | cwd · path"
 // foot note. Both are immutable for the session's lifetime.
-func translate(ev streamEvent, events chan<- agent.AgentEvent, askHandler askHandlerFunc, agentName, workspace, branch string, logger *slog.Logger) {
+func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEvent, askHandler askHandlerFunc, agentName, workspace, branch string, logger *slog.Logger) {
 	switch ev.Type {
 	case "system":
 		// system/init is informational; we surface it via EventInit
@@ -205,6 +238,15 @@ func translate(ev streamEvent, events chan<- agent.AgentEvent, askHandler askHan
 				}
 
 			case "tool_use":
+				// F-34 review P0-2: tool_use blocks live in
+				// assistant-role messages; their matching
+				// tool_result blocks arrive later in user-role
+				// messages. Record the raw input JSON here so
+				// the user-role handler can stamp it onto
+				// EventToolEnd.Args for the type-aware summary.
+				if state != nil {
+					state.toolUseArgs[block.ID] = string(block.Input)
+				}
 				handleToolUse(block, events, askHandler, logger)
 
 			default:
@@ -241,12 +283,25 @@ func translate(ev streamEvent, events chan<- agent.AgentEvent, askHandler askHan
 		}
 		for _, block := range ev.Message.Content {
 			switch block.Type {
+			case "tool_use":
+				handleToolUse(block, events, askHandler, logger)
 			case "tool_result":
+				// F-34 review P0-2: look up the raw input
+				// JSON that the assistant-role message recorded
+				// when the matching tool_use block was seen.
+				// Without this correlation the Feishu adapter
+				// has no way to render "Read /a/b.go" — only
+				// "Read" with empty args.
+				var args string
+				if state != nil {
+					args = state.toolUseArgs[block.ToolUseID]
+				}
 				events <- agent.AgentEvent{
 					Kind: agent.EventToolEnd,
 					ToolEnd: &agent.ToolEndEvent{
 						ID:     block.ToolUseID,
 						Name:   block.Name,
+						Args:   args,
 						Output: stringifyToolResult(block.Content),
 					},
 				}

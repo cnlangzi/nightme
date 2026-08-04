@@ -9,9 +9,9 @@
 //
 // Three layers, named to match the v1.2 mental model:
 //
-//   inboundDispatcher        (this package; Gateway interface)
-//     ├─ slashCommandDispatcher  (dispatchSlashCommand; inline)
-//     └─ messageDispatcher       (runtime-injected MessageDispatcher)
+//	inboundDispatcher        (this package; Gateway interface)
+//	  ├─ slashCommandDispatcher  (dispatchSlashCommand; inline)
+//	  └─ messageDispatcher       (runtime-injected MessageDispatcher)
 //
 // See docs/feat/F-20-gateway.md for the original router design
 // and docs/feat/F-26-gateway-hub.md for the Stage-3
@@ -723,16 +723,12 @@ func (g *gateway) OnMessageState(chatID, userMsgID string, state agent.MessageSt
 	out := OutboundMessage{
 		Kind:   OutMessageState,
 		ChatID: chatID,
-		Meta: map[string]any{
-			"message_id": userMsgID,
-			"state":      state,
-		},
 		MessageState: &MessageStatePayload{
-			State: state,
+			State:     state,
+			MessageID: userMsgID,
 		},
 	}
 	if err := ch.Send(context.Background(), out); err != nil {
 		log.Printf("gateway: MessageState send failed (chat=%s, state=%s): %v", chatID, state, err)
 	}
 }
-

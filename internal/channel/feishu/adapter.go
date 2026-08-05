@@ -644,20 +644,30 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	                       Idempotency via a.messageStates map.
 //	OutMessageStateRemoved → DeleteReaction on MessageState.ReactionID
 //	                       (reserved; v1.3 uses append-only)
-//	OutCard              → ReplyInBoth (reply endpoint, reply_in_thread
-//	                       omitted) via sendContent — permission card
-//	                       stays visible in main chat with a "Reply
-//	                       to <sender>" header; no chunk-stream so
-//	                       the parent-thread gotcha doesn't apply.
+//	OutCard              → top-level Create via sendContent (PR #47's
+//	                       ReplyInChat — rootID="") with the 🔐 emoji
+//	                       prepended to the card title (channel
+//	                       decoration). F-44 revert #2: a permission
+//	                       card is a blocking UI element (user must
+//	                       click Allow/Deny) — it MUST stay visible
+//	                       in main chat regardless of whether the
+//	                       parent user message has a tool thread.
 //	OutTaskCreate/Update → Receipt card via SendCard (top-level
 //	                       Create on first send, PATCH in place after)
 //	                       — rolling-log task checklist, no anchor
 //	                       to userMsgID (F-44 follow-up: same
 //	                       parent-thread gotcha as OutReply/OutResult).
-//	OutCompaction        → ReplyInBoth (visible in main chat; brief
-//	                       "✶ Compacting…" line is informative, not noise).
-//	OutCommandReply      → ReplyInBoth (slash command result, threaded
-//	                       to the user's /command message).
+//	OutCompaction        → ReplyInBoth (low-frequency one-shot marker,
+//	                       brief "✶ Compacting…" line in main chat;
+//	                       thread-pull is acceptable since the
+//	                       marker is rare).
+//	OutCommandReply      → top-level Create via SendMessageText
+//	                       (PR #47's ReplyInChat — rootID="") with
+//	                       the ❯ emoji prepended to the text body
+//	                       (channel decoration). F-44 revert #2:
+//	                       slash-command replies are short status
+//	                       messages, anchoring them to the user
+//	                       message is unnecessary.
 //	OutThinking          → ReplyInThread (💭 line in side panel only).
 //	OutInit / OutUsage   → silent drop (F-44: footer design deferred).
 //	OutTyping            → dropped (no native Feishu equivalent).
@@ -1034,14 +1044,18 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if err != nil {
 			return err
 		}
-		// v1.3.x (§13.10): thread permission card to the user's message
-		// so the user sees a visual "reply" line connecting the
-		// permission request to the task that triggered it.
-		//
-		// F-37: reply_in_thread stays false (default) for the
-		// permission card — discoverability matters more than chat
-		// cleanliness when a tool is blocked on user approval.
-		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, msg.ReplyTo, false)
+		// F-44 follow-up: OutCard → ReplyInChat (top-level Create,
+		// no anchor). Same parent-thread rationale as OutReply /
+		// OutResult / OutTask*: any tool-using turn creates a
+		// thread on the user message, and ReplyInBoth would be
+		// pulled into the thread drawer. The permission card is
+		// a blocking UI element (user must click Allow/Deny) —
+		// it MUST stay visible in main chat. The "🔐" emoji is
+		// prepended to the card title by buildInteractiveCard so
+		// the user can scan the main chat and immediately see
+		// "this is a permission request" (same pattern as 💭 for
+		// OutThinking).
+		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, "", false)
 		return err
 
 	case gateway.OutToolStart:
@@ -1193,20 +1207,20 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// uses msg_type: "text" so the message renders as a normal
 		// chat bubble, not an interactive card.
 		//
-		// v1.3.x (§13.10): thread the reply to the user's
-		// /command message via msg.ReplyTo as Feishu root_id, so
-		// the user sees a visual "reply" line connecting the bot
-		// reply to their command. msg.ReplyTo is empty for orphan
-		// replies (e.g. gateway startup logs); in that case the
-		// message stays top-level.
-		//
-		// F-37: slash-command replies stay visible in main chat
-		// (reply_in_thread=false) — the user fired the command and
-		// is waiting for the answer at the cursor.
+		// F-44 follow-up: OutCommandReply → ReplyInChat (top-level
+		// Create, no anchor). Same parent-thread rationale as
+		// OutReply / OutResult / OutTask*. Slash-command replies
+		// are typically short status messages (e.g. "/help result",
+		// "/agents list"); anchoring them to the user message is
+		// unnecessary, and a thread-on-parent would pull them
+		// into the drawer. The "❯" emoji is prepended to the
+		// text body so the user can scan main chat and
+		// immediately see "this is a command response" (same
+		// pattern as 💭 for OutThinking).
 		if msg.Text == "" {
 			return errors.New("feishu: OutCommandReply missing text")
 		}
-		_, err := a.SendMessageText(ctx, msg.ChatID, msg.Text, msg.ReplyTo, false)
+		_, err := a.SendMessageText(ctx, msg.ChatID, "❯ "+msg.Text, "", false)
 		return err
 
 	case gateway.OutTaskCreate, gateway.OutTaskUpdate:
@@ -1605,6 +1619,16 @@ func toolOutput(m gateway.OutboundMessage) string {
 //	  "body":   { "elements": [ ... ] }
 //	}
 //
+// F-44 follow-up: the title is prefixed with a 🔐 emoji so the
+// user can scan main chat and immediately recognize the surface as
+// a permission request (same visual pattern as the 💭 prefix
+// OutThinking uses for reasoning, the ❯ prefix OutCommandReply
+// uses for slash-command responses). The emoji is the channel's
+// visual decoration — gateway.Card.Title is the original plain
+// title; we prepend here so the abstract gateway type stays
+// decoration-agnostic and other channels (e.g. CLI) can render
+// the same payload without the prefix.
+//
 // Returned string is the card JSON itself — NOT wrapped in
 // {"card": ...}. The wrapper is wrong: Feishu reads this string as
 // the value of the `content` field in the create_message / patch
@@ -1644,11 +1668,16 @@ func buildInteractiveCard(c *gateway.Card) (string, error) {
 			"value": map[string]any{"key": string(v)},
 		})
 	}
+	// F-44 follow-up: prepend 🔐 to the title (channel decoration).
+	title := c.Title
+	if title != "" {
+		title = "🔐 " + title
+	}
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{"width_mode": "fill"},
 		"header": map[string]any{
-			"title":    map[string]any{"tag": "plain_text", "content": c.Title},
+			"title":    map[string]any{"tag": "plain_text", "content": title},
 			"template": "blue",
 		},
 		"body": map[string]any{

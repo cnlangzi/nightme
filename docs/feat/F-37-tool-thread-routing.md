@@ -4,9 +4,11 @@
 >
 > **反转 v1.3 §13.6 / §13.7 / §13.9 折叠决议**。原计划把 OutThinking / OutToolStart / OutToolEnd 在 receipt card body 里用 `collapsible_panel` 折叠，实机上验证失败 —— agent turn 调 10 个工具 = 30 个 panel，Feishu 50 element 上限被频繁撞破；用户首要看到的"最终回答"被挤到 card 末尾甚至消失。
 >
+> **🟡 已演化（2026-08-05）**：F-37 落地后又被 F-44 简化 receipt（§2.2 / §3.1 视觉序列中 `OutInit` / `OutUsage` 进 receipt card 的描述已过时 —— F-44 后 silent drop，F-45 后 footer 走 `SessionContext` typed field，详见 `F-44 §13.21` + `F-45 §13.22`）。本文档保留折叠方案的反转论证 + 路由分流表作为历史决策参考。
+>
 > **Milestone**: v1.3.x (post-F-watch)
 > **Depends on**: F-08 (Channel interface), F-25 (rolling-log), F-33 (chatID 简化), §13.10 (reply-in-thread)
-> **Related**: [`SPEC.md`](../SPEC.md) §0.3 摘要 + §1.3 v1.3.x 新增（F-thread-route） + §11 backlog; [`channel/feishu.md`](../channel/feishu.md) §13.12; [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md) §4; [`F-25-rolling-log.md`](./F-25-rolling-log.md) §3 + §3.1.1
+> **Related**: [`SPEC.md`](../SPEC.md) §0.3 摘要 + §1.3 v1.3.x 新增（F-thread-route） + §11 backlog; [`channel/feishu.md`](../channel/feishu.md) §13.12; [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md) §4; [`F-25-rolling-log.md`](./F-25-rolling-log.md) §3 + §3.1.1; 后续演化: [`F-44`](./F-44-outreply-independent-and-task-receipt.md) + [`F-45`](./F-45-session-footer.md)
 
 ---
 

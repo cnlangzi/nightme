@@ -695,6 +695,11 @@ go test ./internal/channel/feishu/... -run TestSend_OutTask
 - EventHandler 在每次 emit 时戳印 `SessionMeta`
 - Channel 在 `sendReplyInThreadAndChat` / `sendResultAsReply` / `ensureReceiptForTask` 内部读 `msg.SessionMeta` 渲染 footer
 
+> **🟢 已兑现**：本节推迟项由 [`F-45-session-footer.md`](./F-45-session-footer.md) 落地。
+> 设计经过 §0.3 两轮迭代收敛到 `SessionContext *SessionContext` typed snapshot
+> （不是 3 个分散字段），runtime 在 `newEventHandler` 一次性 stamp 到 4 个 main-chat Kind。
+> 详见 `F-45 §1.3 / §1.5 / §2.2` + `SPEC.md §0.12` + `channel/feishu.md §13.22`。
+
 ### 6.2 Task receipt header 恢复（可选）
 
 - 如果 footer PR 决定给 task receipt 恢复 prompt state header（⏳/🔄/✅/❌），加 `promptHeaderLine` 回 `buildReceiptCard`

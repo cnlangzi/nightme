@@ -80,7 +80,7 @@ EventToolStart "Read(/a.py)"   → thread reply "🔧 Read(/a.py)"
 EventToolEnd   "..."           → thread reply "✅ Read /a.py → 1234 lines" (类型感知摘要)
 EventText "...然后..."          → PATCH card with "...然后..."
 EventResult   "📝 最终回复"      → PATCH card with final block
-EventUsage    "1.2k tokens"     → PATCH card with footer
+EventUsage    "1.2k tokens"     → PATCH card with footer    [F-44/F-45 后: silent drop;footer 改走 SessionContext typed field → 4 个 main-chat Kind 各自的末尾]
 EventDone                       → (no PATCH; gateway handles MessageState separately)
 ```
 

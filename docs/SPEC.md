@@ -504,6 +504,87 @@ type OutboundMessage struct {
 
 ---
 
+## 0.12 文档变更摘要（v1.3.x F-45 增量，2026-08-05）
+
+**背景**：兑现 F-44 §0.11 / §6.1 推迟的 footer 设计 —— 「每条 ReplyInThreadAndChat 都带 `🤖 Agent · Model · Tokens · Cost`」从草拟阶段收敛到 doc-first 实现。
+
+**核心变化**：
+
+1. **`AgentSession` 自管 metadata（runtime）**
+   - 加 `Model string` 字段：EventInit 时捕获（`s.SetModel(ev.Init.Model)`），持久化到 `AgentSessionEntry.Model`
+   - 加 `cumulativeUsage UsageInfo` + mutex + `cumulativeDirty bool`：EventUsage 时累加（`s.AccumulateUsage(ev.Usage)`），EventDone 时落盘（`s.PersistIfDirty(...)`）
+   - **仅 `/new` 清零**（`s.ResetCumulative()`），daemon 重启 / `/cwd` / `/use` / `/kill` / 进程崩溃一律保留
+   - 6 个新方法：`SetModel` / `Model` / `AccumulateUsage` / `ResetCumulative` / `CumulativeUsage` / `PersistIfDirty`
+
+2. **`OutboundMessage` 加 1 个 typed snapshot field**
+   - 新增 `SessionContext *SessionContext` 字段（不是 3 个分散字段），承载 `{Agent, Model, CumulativeUsage}`
+   - 设计收敛：所有 main-chat metadata 收拢到 1 个 atomic snapshot，扩展新字段只改 `SessionContext` 定义，不破 Channel 接口
+   - 仅在 4 个 main-chat Kind 上 stamp：`OutReply` / `OutResult` / `OutTaskCreate` / `OutTaskUpdate`
+   - 其他 Kind（thread / lifecycle / init+usage 自身）`SessionContext == nil`，Channel 跳过 footer
+
+3. **`OutboundMessage` 与 `agent` 包结构整理**
+   - `UsageInfo` 从 `internal/gateway/messages.go` 搬到 `internal/agent/agent.go`（紧挨 `UsageEvent`）—— 消除 `chatsession → gateway` 反向 import
+   - `gateway/messages.go` 保留 `type UsageInfo = agent.UsageInfo` alias 保 ABI 兼容
+   - 顺手修 `UsageInfo.InputTokens` 注释：原 "total input tokens consumed (prompt + cache reads + tool input)" 误导（实际只搬运裸 `input_tokens`），新注释 "non-cached input token count ... Cache hits are NOT included — see CacheReadInputTokens"
+
+4. **Footer 渲染规则（C 版，ASCII 箭头无 emoji）**
+   - 格式：`claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k · $0.087`
+   - `↓ in` = `InputTokens + CacheCreationInputTokens`（按原价/1.25x 计费部分）
+   - `↻ cached` = `CacheReadInputTokens`（按 0.1x 计费部分）
+   - `↑ out` = `OutputTokens`
+   - `Total` = 三者之和（4 个原始 token 字段全加）
+   - `$cost` 仅 `CostUSD > 0` 时显示
+   - 缩写：`<1000 raw` / `≥1k "X.Xk"` / `≥1M "X.XM"`
+   - 各 segment 在 0 / 空时省略（不显示 `0 in`）
+
+5. **Feishu adapter 改 3 case**
+   - `OutReply` → `sendReplyInThreadAndChat`：签名加 `ctx *SessionContext`，helper 内部拼 footer 到 text 末尾（`text + "\n\n" + footer`）
+   - `OutResult` → `sendResultAsReply`：同模式
+   - `OutTaskCreate` / `OutTaskUpdate` → receipt card：`buildReceiptCard(tasks, footer)` 新签名，footer 作为独立的 `hr + lark_md div` 追加到 checklist 末尾（占用 2 元素，50 上限远未撞破）
+   - 新文件 `internal/channel/feishu/usage_footer.go`：`formatSessionFooter` + `abbrevTokens` helpers
+
+6. **`/new` 清零 cumulative**
+   - `handleNew` 在调 `as.New(ctx)` 之后立即 `as.ResetCumulative()` + `mgr.PersistAgentSession(as)`
+   - 与 F-43 的 `clear ResumeID` 语义对称：「bridge 重置上下文」+「runtime 重置累计」
+
+7. **EventDone 触发持久化**
+   - `cmd/nightme/run.go::newEventHandler` 在 EventDone 处理路径调 `s.PersistIfDirty(...)`
+   - `dirty` 标志位防止空写（pure chat 不调 agent 时不写）
+   - 每个 turn 最多 1 次 `agent_sessions.json` 落盘
+
+**wire 形态**（`OutboundMessage` 加 1 字段）：
+
+```go
+type SessionContext struct {
+    Agent           string
+    Model           string
+    CumulativeUsage UsageInfo
+}
+
+type OutboundMessage struct {
+    // ... 既有字段 ...
+    SessionContext *SessionContext  // F-45: stamped on main-chat kinds
+}
+```
+
+**不变式**：
+- `OutboundMessage` 100% typed（§1.4 不变；新字段 typed 不破）
+- §1.3 ChatSession 不 import channel/feishu（不变）
+- §1.3 Channel 不 import chatsession（不变；Channel 通过 typed `SessionContext` 字段读 metadata）
+- 1 turn : 1 anchor 不变式保留（`ReplyTo = currentTurnUserMsgID` 仍是唯一 coordination key）
+- 抽象归抽象 / 具体归具体（footer 渲染细节由 Feishu adapter 自决，Slack / Web / Echo 各自决定）
+- bridges 协议零变化（仍发 EventInit / EventUsage，runtime 翻译）
+- OutboundKind 不增不减（`SessionContext` 是字段，不是新 Kind）
+- OutInit / OutUsage 仍是 silent drop（F-44 决策保留；footer 走 `SessionContext` 单独路径）
+- §1.4 抽象 / 具体 边界规范保留（metadata 是 typed primitive，Channel 自决渲染目标）
+- F-25 / F-31 / F-37 / F-38 / F-39 / F-40 / F-42 / F-43 / F-44 全部决策**保持成立**
+
+**为什么不叫 v2.0**：v1.3 核心不变式（职责隔离、Binding FSM owner、Receipt 自治、抽象归抽象 / 具体归具体、§1.4 边界规范）全部保留。F-45 是 runtime + Channel 自治范围内的「metadata 自描述 + footer 渲染」扩展，不影响 nightme 数据模型与 Gateway 核心契约。
+
+**详细落地**：见 [`docs/feat/F-45-session-footer.md`](./feat/F-45-session-footer.md) + `docs/channel/feishu.md` §13.22。
+
+---
+
 ### 0.7 文档变更摘要（v1.3.x F-38 增量，2026-08-04）
 
 **背景**：F-thread-route 把 `OutToolStart` / `OutToolEnd` 都投到飞书 thread，每个 tool 产生**两条**独立 thread reply（先 `● Tool(args)` 再 `⎿  …`）。一次 agent turn 调 10 个工具 = 20 条 thread reply，视觉噪声 + 限速成本都很高。同时用户没有 per-chat 开关控制工具调用是否显示——既不能选择 plain text vs 合并格式，也不能选择看 vs 不看。F-38 同时解决这两点。

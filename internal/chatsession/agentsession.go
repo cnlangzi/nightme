@@ -83,6 +83,24 @@ type AgentSession struct {
 	// close (last chan close → SetExited). Created in Spawn; nil
 	// before that.
 	handleEventsClosed chan struct{}
+
+	// F-45: model captured on first EventInit (e.g.
+	// "claude-opus-4-5-20250929"). SetModel is idempotent — empty
+	// incoming values do NOT overwrite a previously-captured model.
+	// Persisted via Entry → AgentSessionEntry.Model; restored on
+	// restart via FromAgentSessionEntry. Empty before the first
+	// EventInit lands.
+	modelMu sync.RWMutex
+	model   string
+
+	// F-45: per-AgentSession running total of token / cost stats.
+	// AccumulateUsage adds turn-level counts; ResetCumulative zeroes
+	// (called only by /new handler); PersistIfDirty writes the entry
+	// to disk when dirty. Persisted via Entry → AgentSessionEntry.
+	//CumulativeUsage; restored on restart from FromAgentSessionEntry.
+	cumulativeUsageMu sync.RWMutex
+	cumulativeUsage   agent.UsageInfo
+	cumulativeDirty   bool
 }
 
 // NewAgentSession creates a new AgentSession in memory. The pool
@@ -123,6 +141,15 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 		createdAt:     e.CreatedAt,
 		lastRunAt:     e.LastRunAt,
 		resumeID:      e.ResumeID,
+		model:         e.Model,
+	}
+	// F-45: restore cumulative token / cost stats. nil on legacy
+	// entries (zero-value default = "never ran", will start
+	// counting from first EventUsage). We copy the struct by value
+	// (not by pointer) so the in-memory state is decoupled from
+	// the persisted entry.
+	if e.CumulativeUsage != nil {
+		as.cumulativeUsage = *e.CumulativeUsage
 	}
 	// commit fix-6: any persisted "running" agent is actually dead
 	// after daemon restart (the process handle is in-memory only).
@@ -203,6 +230,105 @@ func (as *AgentSession) SetResumeID(id string) {
 	as.resumeIDMu.Unlock()
 }
 
+// --- F-45: model + cumulative usage API ----------------------------
+
+// SetModel records the agent's selected model (e.g. Claude Code:
+// system/init.model). Idempotent: an empty incoming value does NOT
+// overwrite a previously-captured model — bridges may re-emit
+// EventInit after a child restart with a blank Model and we don't
+// want to wipe the prior capture. Called by the runtime's
+// EventHandler closure on EventInit.
+//
+// Safe to call concurrently with Model() and other lifecycle
+// methods.
+func (as *AgentSession) SetModel(m string) {
+	if m == "" {
+		return
+	}
+	as.modelMu.Lock()
+	as.model = m
+	as.modelMu.Unlock()
+}
+
+// Model returns the captured model name. Empty before the first
+// EventInit lands or when the bridge does not report one.
+func (as *AgentSession) Model() string {
+	as.modelMu.RLock()
+	defer as.modelMu.RUnlock()
+	return as.model
+}
+
+// AccumulateUsage atomically adds u's per-turn counters to this
+// AgentSession's cumulative state and marks it dirty so the next
+// PersistIfDirty writes the entry. Called by the runtime's
+// EventHandler closure on every EventUsage arriving from the
+// bridge — typically once per turn. nil u is a no-op (defensive:
+// some bridges emit empty EventUsage as "no usage this turn").
+//
+// RWMutex lets concurrent footer rendering skip the lock when no
+// EventUsage is in flight; writers (one EventHandler closure) and
+// readers (footer rendering, future /cost) contend at turn-end
+// frequency which is human-paced (≤ 1/s).
+func (as *AgentSession) AccumulateUsage(u *agent.UsageEvent) {
+	if u == nil {
+		return
+	}
+	as.cumulativeUsageMu.Lock()
+	defer as.cumulativeUsageMu.Unlock()
+	as.cumulativeUsage.InputTokens += u.InputTokens
+	as.cumulativeUsage.OutputTokens += u.OutputTokens
+	as.cumulativeUsage.CacheCreationInputTokens += u.CacheCreationInputTokens
+	as.cumulativeUsage.CacheReadInputTokens += u.CacheReadInputTokens
+	as.cumulativeUsage.CostUSD += u.CostUSD
+	as.cumulativeDirty = true
+}
+
+// CumulativeUsage returns a snapshot of this AgentSession's
+// running totals. Safe to call from any goroutine; readers
+// (footer rendering, future /cost) get the consistent struct
+// copy under RLock without contending with EventUsage writers.
+func (as *AgentSession) CumulativeUsage() agent.UsageInfo {
+	as.cumulativeUsageMu.RLock()
+	defer as.cumulativeUsageMu.RUnlock()
+	return as.cumulativeUsage
+}
+
+// ResetCumulative zeroes the cumulative state and marks the entry
+// dirty for the next PersistIfDirty. Called only by /new handler
+// — /kill, /cwd, /use, daemon restart and process crash all leave
+// the cumulative intact (history is valuable to the user).
+//
+// The handle / pool / status are not touched — ResetCumulative is
+// purely "clear the counter and mark dirty"; the caller
+// (handleNew) is responsible for the surrounding PersistAgentSession.
+func (as *AgentSession) ResetCumulative() {
+	as.cumulativeUsageMu.Lock()
+	as.cumulativeUsage = agent.UsageInfo{}
+	as.cumulativeDirty = true
+	as.cumulativeUsageMu.Unlock()
+}
+
+// PersistIfDirty writes the AgentSession entry to disk when the
+// cumulative stats have changed since the last persist. The
+// runtime calls this on EventDone (turn end) so each turn costs
+// at most one file write; on clean state it is a no-op.
+//
+// persist is the registry callback (typically
+// Manager.PersistAgentSession). Returns nil when clean (no I/O).
+func (as *AgentSession) PersistIfDirty(persist func(*registry.AgentSessionEntry) error) error {
+	if persist == nil {
+		return nil
+	}
+	as.cumulativeUsageMu.Lock()
+	if !as.cumulativeDirty {
+		as.cumulativeUsageMu.Unlock()
+		return nil
+	}
+	as.cumulativeDirty = false
+	as.cumulativeUsageMu.Unlock()
+	return persist(as.Entry())
+}
+
 // SetRunning marks the AgentSession as running with the given PID.
 // Bumps LastRunAt.
 func (as *AgentSession) SetRunning(pid int) {
@@ -250,18 +376,29 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	}
 	as.exitCodeMu.RUnlock()
 
+	// F-45: snapshot cumulative stats under RLock so we publish a
+	// consistent copy. Always emit a non-nil pointer — the legacy
+	// "never ran" case is distinguishable only by zero-value
+	// counters inside, and omitempty would skip the field for
+	// "ran but all zero" which obscures the persisted state.
+	as.cumulativeUsageMu.RLock()
+	cum := as.cumulativeUsage
+	as.cumulativeUsageMu.RUnlock()
+
 	return &registry.AgentSessionEntry{
-		ID:            as.ID,
-		ChatSessionID: as.ChatSessionID,
-		Agent:         as.Agent,
-		Cwd:           as.Cwd,
-		PID:           as.PID(),
-		Status:        as.Status(),
-		Args:          as.Args(),
-		ResumeID:      as.ResumeID(),
-		CreatedAt:     as.createdAt,
-		LastRunAt:     as.lastRunAt,
-		ExitCode:      ec,
+		ID:              as.ID,
+		ChatSessionID:   as.ChatSessionID,
+		Agent:           as.Agent,
+		Cwd:             as.Cwd,
+		PID:             as.PID(),
+		Status:          as.Status(),
+		Args:            as.Args(),
+		ResumeID:        as.ResumeID(),
+		CreatedAt:       as.createdAt,
+		LastRunAt:       as.lastRunAt,
+		ExitCode:        ec,
+		Model:           as.Model(),
+		CumulativeUsage: &cum,
 	}
 }
 

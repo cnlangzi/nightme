@@ -709,7 +709,7 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 // OutMessageState{State: MessageForwarded} (the gateway just
 // forwarded the user message to the agent). The placeholder has
 // NO entries and NO tasks yet — the card body just shows the
-// "⏳ Typing..." markdown header line that buildReceiptCard
+// "⌨️ Typing..." markdown header line that buildReceiptCard
 // prepends when both lists are empty. Subsequent OutReply /
 // OutTask* events stream updates onto the same card via
 // AppendEntry / SetTaskList (each re-render replaces the
@@ -750,7 +750,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 
 	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
 	// No entries / no tasks — buildReceiptCard will render the
-	// "⏳ Typing..." placeholder header line.
+	// "⌨️ Typing..." placeholder header line.
 	transient.promptState = agent.PromptPending
 	transient.initializing = true
 
@@ -1094,7 +1094,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// F-44 lifecycle shift: when the gateway has just
 		// forwarded the user message to the agent
 		// (MessageForwarded), eagerly create a Typing-placeholder
-		// receipt so the user sees "⏳ Typing..." in main chat
+		// receipt so the user sees "⌨️ Typing..." in main chat
 		// before any OutReply / OutTask* event lands. Subsequent
 		// events stream updates onto the same card via
 		// AppendEntry / SetTaskList. The placeholder goes to
@@ -1915,7 +1915,7 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.TaskItem) (string, error
 
 	// Section 0 (placeholder header): when the receipt has no
 	// entries and no tasks yet, prepend a Typing indicator so the
-	// user sees "⏳ Typing..." immediately after MessageForwarded
+	// user sees "⌨️ Typing..." immediately after MessageForwarded
 	// fires. The header is removed as soon as the first entry or
 	// task arrives (the next renderLocked call sees a non-empty
 	// list and omits the header). This gives the user immediate
@@ -1924,7 +1924,7 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.TaskItem) (string, error
 	if len(entries) == 0 && len(tasks) == 0 {
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
-			"content": "⏳ Typing...",
+			"content": "⌨️ Typing...",
 		})
 	}
 

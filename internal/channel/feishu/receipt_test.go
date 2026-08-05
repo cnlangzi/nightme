@@ -136,8 +136,19 @@ func TestReceiptState_String(t *testing.T) {
 	if got := StateExecuting.headerLine(r); got != "" {
 		t.Errorf("Executing with ts = %q, want ''", got)
 	}
-	if got := StateCompleted.headerLine(r); got != "✅ 已完成 14:35:20" {
-		t.Errorf("Completed with ts = %q, want '✅ 已完成 14:35:20'", got)
+	if got := StateCompleted.headerLine(r); got != "✅ 14:35:20" {
+		t.Errorf("Completed with ts = %q, want '✅ 14:35:20'", got)
+	}
+	if got := StateError.headerLine(r); got != "❌ 14:35:20" {
+		t.Errorf("Error with ts = %q, want '❌ 14:35:20'", got)
+	}
+	// Terminal fallback: no timestamp → bare emoji, never empty.
+	empty := &MessageReceipt{}
+	if got := StateCompleted.headerLine(empty); got != "✅" {
+		t.Errorf("Completed without ts = %q, want '✅'", got)
+	}
+	if got := StateError.headerLine(empty); got != "❌" {
+		t.Errorf("Error without ts = %q, want '❌'", got)
 	}
 }
 
@@ -181,13 +192,19 @@ func TestReceiptLifecycle_Renderings(t *testing.T) {
 	// State 3: Completed
 	r.state = StateCompleted
 	r.completedAt = parseTime(t, "2026-08-01T14:35:30+08:00")
-	if got := r.state.headerLine(r); got != "✅ 已完成 14:35:30" {
-		t.Errorf("Completed.String = %q", got)
+	if got := r.state.headerLine(r); got != "✅ 14:35:30" {
+		t.Errorf("Completed.String = %q, want '✅ 14:35:30'", got)
+	}
+
+	// State 4: Error — parallel terminal header with ❌ + timestamp
+	r.state = StateError
+	if got := r.state.headerLine(r); got != "❌ 14:35:30" {
+		t.Errorf("Error.String = %q, want '❌ 14:35:30'", got)
 	}
 }
 
 func TestReceiptStringContainsEmoji(t *testing.T) {
-	// Sanity: Waiting + Completed state strings contain their
+	// Sanity: terminal + waiting state strings contain their
 	// identifying emoji so the user's eye can scan the receipt row.
 	// Executing state is intentionally empty (no heartbeat display);
 	// the in-progress emoji is conveyed via the user-message reaction
@@ -198,6 +215,7 @@ func TestReceiptStringContainsEmoji(t *testing.T) {
 	}{
 		{StateWaiting, "⏳"},
 		{StateCompleted, "✅"},
+		{StateError, "❌"},
 	} {
 		r := &MessageReceipt{
 			completedAt: parseTime(t, "2026-08-01T14:35:00+08:00"),

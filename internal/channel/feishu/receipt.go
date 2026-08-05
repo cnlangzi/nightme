@@ -335,13 +335,33 @@ func (s ReceiptState) headerLine(r *MessageReceipt) string {
 	case StateWaiting:
 		return "⏳ 等待中"
 	case StateExecuting:
+		// Intentionally empty: the in-progress signal is the
+		// F-31 user-message reaction (handled outside this
+		// receipt). No header row needed mid-turn.
 		return ""
 	case StateCompleted:
+		// F-42+ revision: terminal header is just `<icon>
+		// <time>`. The label "已完成" was dropped — the emoji
+		// already conveys "done" and a separate word crowds
+		// the top row. When the timestamp is unknown (rare
+		// for StateCompleted because SetCompleted always sets
+		// it) we fall back to the bare emoji so the row never
+		// collapses entirely.
 		if r == nil || r.completedAt.IsZero() {
-			return "✅ 已完成"
+			return "✅"
 		}
-		return fmt.Sprintf("✅ 已完成 %s",
-			r.completedAt.Format("15:04:05"))
+		return fmt.Sprintf("✅ %s", r.completedAt.Format("15:04:05"))
+	case StateError:
+		// F-42+ revision: parallel to StateCompleted — same
+		// icon-and-time shape on the top row. Previously the
+		// error header was empty (relying on the StateError
+		// branch falling through to `return ""`), which made
+		// the failed-turn card look indistinguishable from an
+		// in-progress one after collapse.
+		if r == nil || r.completedAt.IsZero() {
+			return "❌"
+		}
+		return fmt.Sprintf("❌ %s", r.completedAt.Format("15:04:05"))
 	}
 	return ""
 }

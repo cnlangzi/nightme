@@ -1917,7 +1917,7 @@ func TestSend_OutUsage_SilentDrop(t *testing.T) {
 
 // TestEnsureReceiptForTyping_CreatesPlaceholder verifies that
 // ensureReceiptForTyping creates a Typing-placeholder card in main
-// chat (top-level Create, rootID="") with the "⌨️ Typing..."
+// chat (top-level Create, rootID="") with the "⌨️ Working..."
 // header line that buildReceiptCard prepends when both entries and
 // tasks are empty.
 //
@@ -1975,7 +1975,7 @@ func TestEnsureReceiptForTyping_CreatesPlaceholder(t *testing.T) {
 		t.Errorf("reply_in_thread = true, want false")
 	}
 	// Body must contain the Typing header line.
-	if !strings.Contains(got.Body, "⌨️ Typing...") {
+	if !strings.Contains(got.Body, "⌨️ Working...") {
 		t.Errorf("body missing Typing header line, got %q", got.Body)
 	}
 	// Receipt registered in receiptsByUserMsgID with the placeholder

@@ -772,9 +772,20 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 		return nil, false, fmt.Errorf("feishu: ensure typing receipt build card: %w", err)
 	}
 
-	// Top-level Create (rootID="") so the Typing placeholder stays
-	// visible in main chat regardless of the parent thread state.
-	msgID, err := a.SendCard(ctx, chatID, body, "", false)
+	// ReplyInBoth (rootID=userMsgID) — safe pattern from main's
+	// reply.go doc: at MessageForwarded time, the parent has no
+	// thread yet (no prior reply_in_thread=true call), so
+	// ReplyInBoth reserves the inline-rendering slot in main
+	// chat with the "Reply to <sender>" quote header. Subsequent
+	// updates (OutReply AppendEntry / OutTask SetTaskList) go
+	// through PatchMessage on this same message_id, which is
+	// immune to a later thread promotion that happens when
+	// OutToolStart/OutToolEnd (ReplyInThread) lands on the
+	// parent. PATCH edits in place and does not re-enter the
+	// reply/thread routing logic, so the placeholder preserves
+	// its inline main-chat rendering for the lifetime of the
+	// turn.
+	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -867,15 +878,23 @@ func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, 
 		return nil, false, fmt.Errorf("feishu: ensure reply receipt build card: %w", err)
 	}
 
-	// Cold-start card: top-level Create (no anchor, rootID="").
-	// Same parent-thread rationale as OutResult / OutTask* / OutCard
-	// / OutCommandReply — Feishu pulls ReplyInBoth-anchored cards
-	// into the thread drawer when the user message has any
-	// reply_in_thread=true sibling (OutToolStart/End). Top-level
-	// Create keeps the rolling-log card visible in main chat
-	// regardless of the parent's thread state. Subsequent PATCHes
-	// preserve the no-anchor state (PATCH on a top-level Create
-	// stays top-level). See docstring above for the full rationale.
+	// Cold-start card: ReplyInBoth (anchored to userMsgID). Per
+	// main's reply.go "safe pattern" doc: at the time the first
+	// OutReply arrives (no prior receipt), the user message has
+	// no thread yet (no OutToolStart/End has fired in this turn).
+	// ReplyInBoth reserves the inline-rendering slot in main
+	// chat with the "Reply to <sender>" quote header. Subsequent
+	// updates (AppendEntry → PatchMessage on this message_id)
+	// are immune to a later thread promotion that happens when
+	// OutToolStart/End (ReplyInThread) lands — PATCH edits in
+	// place and does NOT re-enter the reply/thread routing.
+	//
+	// If a Typing-placeholder receipt was already created by
+	// ensureReceiptForTyping on MessageForwarded (rootID also
+	// userMsgID via ReplyInBoth), this SendCard is short-circuited
+	// by the existing-receipt check above (returns existing,
+	// created=false). The placeholder's own thread_id was already
+	// reserved; AppendEntry/SetTaskList PATCH it in place.
 	//
 	// The orphan-overflow pre-check (50 elements / 30 KB envelope)
 	// runs later at AppendEntry time on each subsequent chunk; if
@@ -883,7 +902,7 @@ func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, 
 	// a single chunk over ~30 KB), the helper returns an error
 	// and the caller falls back to a top-level Create via
 	// sendReplyInThreadAndChat.
-	msgID, err := a.SendCard(ctx, chatID, body, "", false)
+	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -968,10 +987,18 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 		return nil, false, fmt.Errorf("feishu: ensure task receipt build card: %w", err)
 	}
 
-	// F-44 follow-up: top-level Create (rootID="") so the task
-	// card stays visible in main chat regardless of whether the
-	// parent user message has a tool thread. See docstring above.
-	msgID, err := a.SendCard(ctx, chatID, body, "", false)
+	// F-44 + reply.go safe pattern: ReplyInBoth (rootID=userMsgID)
+// so the task card anchors to the user message with the
+// "Reply to <sender>" quote header. The parent is fresh at
+// this point (no prior reply_in_thread=true call in the turn)
+// so the slot reservation is safe; subsequent SetTaskList
+// PATCHes on the same message_id are immune to any later
+// thread promotion by OutToolStart/End. If a Typing-placeholder
+// or rolling-log receipt was already created by
+// ensureReceiptForTyping / ensureReceiptForReply, the
+// existing-receipt check above short-circuits this SendCard
+// (returns existing, created=false).
+	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {

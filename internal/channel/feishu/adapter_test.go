@@ -1329,31 +1329,36 @@ func TestSendViaLark_ReplyInThread_Dispatch(t *testing.T) {
 	}
 }
 
-// TestSendViaLark_TopLevelCreate_Dispatch — F-44 follow-up wiring proof.
-// sendViaLark must route user-visible kinds (OutTaskCreate /
-// OutTaskUpdate) through ReplyInChat, i.e. top-level Create with
-// rootID="" so the cold-start task card is a standalone bubble in
-// main chat. This is verified by asserting rootID="" on the captured
-// sendFunc invocation. Without this guard, a future regression that
-// re-anchors the task card to the user message would not be caught —
-// and the parent-thread gotcha would silently reappear.
+// TestSendViaLark_Dispatch — F-44 + reply.go safe pattern wiring
+// proof. sendViaLark routes user-visible kinds to one of the three
+// PR #47 surfaces based on call semantics:
 //
-// Why OutTask* is in this set even though it's "single card" not
-// "chunk stream": the gotcha is the same. Once OutToolStart/End
-// (ReplyInThread) creates a thread on the user message, Feishu pulls
-// the cold-start task card into the thread drawer regardless of how
-// many events the card accumulates afterward. Same rule for the
-// cold-start card as for individual reply chunks: stay top-level.
+//	OutReply / OutResult / OutCard / OutCommandReply / OutTask*:
+//	  - The receipt card (OutReply / OutTask*) cold-start uses
+//	    ReplyInBoth (anchored to userMsgID, reply_in_thread omitted)
+//	    so the card reserves the inline-rendering slot in main chat
+//	    before any thread is created. Subsequent updates PATCH on
+//	    the same message_id — immune to later thread promotion.
+//	  - OutCard / OutCommandReply / OutResult stay on ReplyInChat
+//	    (top-level Create, no anchor) per F-44 follow-up; these are
+//	    one-shot messages that don't need to survive a thread
+//	    promotion.
 //
-// (OutReply / OutResult are also ReplyInChat; they're covered by
-// TestSend_OutReply_IndependentReply_NotFolded and
-// TestSend_OutResult_OrphanTopLevel which assert the same rootID=""
-// invariant at the call site. OutTask* is added here because it
-// wasn't covered at all before this commit.)
-func TestSendViaLark_TopLevelCreate_Dispatch(t *testing.T) {
+// The test asserts the captured rootID per kind so any future
+// regression (e.g. accidentally switching the receipt back to
+// ReplyInChat and losing the "Reply to <sender>" header) is caught.
+//
+// Why OutTask* is anchored even though it's "single card": same
+// safe-pattern reasoning as OutReply. The cold-start card posts
+// before any OutToolStart/End has fired (parent has no thread
+// yet) — ReplyInBoth is safe at this exact call moment, and PATCH
+// preserves the slot thereafter.
+func TestSendViaLark_Dispatch(t *testing.T) {
 	cases := []struct {
-		name string
-		msg  gateway.OutboundMessage
+		name             string
+		msg              gateway.OutboundMessage
+		wantRootID       string // "" = top-level Create; else = ReplyInBoth anchor
+		wantReplyInThread bool
 	}{
 		{
 			name: "OutTaskCreate",
@@ -1365,6 +1370,8 @@ func TestSendViaLark_TopLevelCreate_Dispatch(t *testing.T) {
 					{Subject: "step 1", Status: agent.TaskPending, ActiveForm: "doing 1"},
 				}},
 			},
+			wantRootID:       "om_user_1", // receipt cold-start: ReplyInBoth anchored
+			wantReplyInThread: false,
 		},
 		{
 			name: "OutTaskUpdate",
@@ -1376,27 +1383,33 @@ func TestSendViaLark_TopLevelCreate_Dispatch(t *testing.T) {
 					{Subject: "step 1", Status: agent.TaskCompleted, ActiveForm: "doing 1"},
 				}},
 			},
+			wantRootID:       "om_user_2", // receipt cold-start: ReplyInBoth anchored
+			wantReplyInThread: false,
 		},
 		{
 			name: "OutCard (permission)",
 			msg: gateway.OutboundMessage{
 				Kind:    gateway.OutCard,
 				ChatID:  "oc_test",
-				ReplyTo: "om_user_3", // F-44 follow-up: ReplyTo is ignored
+				ReplyTo: "om_user_3", // F-44 follow-up: ReplyTo is ignored (top-level Create)
 				Card: &gateway.Card{
 					Title:   "Allow Bash?",
 					Options: []string{"Allow", "Deny"},
 				},
 			},
+			wantRootID:       "", // top-level Create, no anchor
+			wantReplyInThread: false,
 		},
 		{
 			name: "OutCommandReply",
 			msg: gateway.OutboundMessage{
 				Kind:    gateway.OutCommandReply,
 				ChatID:  "oc_test",
-				ReplyTo: "om_user_4", // F-44 follow-up: ReplyTo is ignored
+				ReplyTo: "om_user_4", // F-44 follow-up: ReplyTo is ignored (top-level Create)
 				Text:    "/help result",
 			},
+			wantRootID:       "", // top-level Create, no anchor
+			wantReplyInThread: false,
 		},
 	}
 
@@ -1414,13 +1427,11 @@ func TestSendViaLark_TopLevelCreate_Dispatch(t *testing.T) {
 			if err := a.Send(t.Context(), tc.msg); err != nil {
 				t.Fatalf("Send: %v", err)
 			}
-			if capturedRootID != "" {
-				t.Errorf("rootID = %q, want %q (F-44 follow-up: %s must route via ReplyInChat / top-level Create, no anchor)",
-					capturedRootID, "", tc.name)
+			if capturedRootID != tc.wantRootID {
+				t.Errorf("rootID = %q, want %q", capturedRootID, tc.wantRootID)
 			}
-			if capturedReplyInThread {
-				t.Errorf("replyInThread = true, want false (F-44 follow-up: %s top-level Create ignores reply_in_thread)",
-					tc.name)
+			if capturedReplyInThread != tc.wantReplyInThread {
+				t.Errorf("replyInThread = %v, want %v", capturedReplyInThread, tc.wantReplyInThread)
 			}
 		})
 	}
@@ -1745,15 +1756,18 @@ func TestSend_OutReply_FoldsIntoReceipt(t *testing.T) {
 	if got.MsgType != "interactive" {
 		t.Errorf("MsgType = %q, want %q (Feishu Card 2.0)", got.MsgType, "interactive")
 	}
-	// Top-level Create (rootID="", reply_in_thread=false) so the
-	// card stays in main chat regardless of the parent thread
-	// state. The parent user message id is still used as the
-	// receipt registry key but does NOT anchor the card itself.
-	if got.RootID != "" {
-		t.Errorf("RootID = %q, want %q (top-level Create, no anchor)", got.RootID, "")
+	// ReplyInBoth (rootID="om_user", reply_in_thread=false) — the
+	// safe pattern from main's reply.go doc: at the time the first
+	// OutReply lands, the parent has no thread yet, so ReplyInBoth
+	// reserves the inline-rendering slot with the "Reply to
+	// <sender>" quote header. Subsequent AppendEntry PATCHes
+	// preserve the slot even after OutToolStart/End promotes the
+	// parent.
+	if got.RootID != "om_user" {
+		t.Errorf("RootID = %q, want %q (ReplyInBoth anchored to userMsgID via reply.go safe pattern)", got.RootID, "om_user")
 	}
 	if got.ReplyInThread {
-		t.Errorf("reply_in_thread = true, want false (top-level Create)")
+		t.Errorf("reply_in_thread = true, want false (ReplyInBoth: reply_in_thread field omitted)")
 	}
 	// Body must be Card 2.0 JSON with the chunk embedded.
 	if !strings.Contains(got.Body, "💬 first chunk of the reply") {
@@ -1965,14 +1979,18 @@ func TestEnsureReceiptForTyping_CreatesPlaceholder(t *testing.T) {
 	if got.MsgType != "interactive" {
 		t.Errorf("MsgType = %q, want %q (Feishu Card 2.0)", got.MsgType, "interactive")
 	}
-	// Top-level Create (rootID="", reply_in_thread=false) so the
-	// placeholder stays in main chat regardless of the parent
-	// thread state.
-	if got.RootID != "" {
-		t.Errorf("RootID = %q, want %q (top-level Create)", got.RootID, "")
+	// ReplyInBoth (rootID=userMsgID, reply_in_thread=false) — the
+	// safe pattern from main's reply.go doc: at MessageForwarded
+	// time the parent has no thread yet, so ReplyInBoth reserves
+	// the inline-rendering slot with the "Reply to <sender>"
+	// quote header. Subsequent OutReply / OutTask* updates PATCH
+	// on this message_id and are immune to any later thread
+	// promotion that OutToolStart/End would cause.
+	if got.RootID != userMsgID {
+		t.Errorf("RootID = %q, want %q (ReplyInBoth anchored to userMsgID via reply.go safe pattern)", got.RootID, userMsgID)
 	}
 	if got.ReplyInThread {
-		t.Errorf("reply_in_thread = true, want false")
+		t.Errorf("reply_in_thread = true, want false (ReplyInBoth: reply_in_thread field omitted)")
 	}
 	// Body must contain the Typing header line.
 	if !strings.Contains(got.Body, "⌨️ Working...") {

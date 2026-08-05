@@ -254,6 +254,14 @@ func TestReceiptStringContainsEmoji(t *testing.T) {
 // a PATCH between visible events. Only events that change the
 // card body (text / result / init / usage) trigger a render.
 func TestReceipt_FirstSendThenPatch(t *testing.T) {
+	// F-42: NewMessageReceiptForReply now seeds BOTH replyMsgID
+	// and cardMsgID with the same value. The "first send then
+	// patch" sequence is now: caller POSTs the card (via
+	// ensureReceiptForReply), then subsequent Append events take
+	// the PATCH path. From the receipt's perspective the first
+	// renderLocked call ALREADY has cardMsgID, so it goes
+	// straight to PatchMessage — no SendCard from the receipt
+	// itself.
 	bot := &mockReceiptBot{}
 	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
 
@@ -277,55 +285,43 @@ func TestReceipt_FirstSendThenPatch(t *testing.T) {
 	textMsgs := append([]string(nil), bot.messages...)
 	bot.mu.Unlock()
 
-	if len(cards) != 1 {
-		t.Fatalf("SendCard calls = %d, want 1 (first render only)", len(cards))
+	// F-42: no SendCard from the receipt — the first card was
+	// already shipped by ensureReceiptForReply before the receipt
+	// existed. Subsequent Appends go straight to PATCH.
+	if len(cards) != 0 {
+		t.Fatalf("SendCard calls = %d, want 0 (F-42: ensure helper already posted the card)", len(cards))
 	}
-	if len(patches) != 2 {
-		t.Fatalf("PatchMessage calls = %d, want 2 (one per subsequent render)", len(patches))
+	if len(patches) != 3 {
+		t.Fatalf("PatchMessage calls = %d, want 3 (one per Append)", len(patches))
 	}
 	if len(textMsgs) != 0 {
 		t.Errorf("SendMessageText calls = %d, want 0 (text path retired for receipts)", len(textMsgs))
 	}
 
-	cardID := cards[0].MessageID
-	if cardID == "" {
-		t.Fatal("SendCard returned empty message id; receipt cannot store it as cardMsgID")
-	}
+	cardID := "om_initial" // pre-seeded by NewMessageReceiptForReply
 	for i, p := range patches {
 		if p.MessageID != cardID {
-			t.Errorf("patches[%d].MessageID = %q, want %q (same id as SendCard)", i, p.MessageID, cardID)
+			t.Errorf("patches[%d].MessageID = %q, want %q (seeded cardMsgID)", i, p.MessageID, cardID)
 		}
 	}
 
 	// Body must be a Card 2.0 envelope ({"schema":"2.0", ...}).
-	// The pre-migration format wrapped in {"card":...} which
-	// Feishu silently failed to render; see the protocol diff
-	// captured in the PR description.
-	if !strings.Contains(cards[0].Body, `"schema":"2.0"`) {
-		t.Errorf("SendCard body missing Card 2.0 schema marker: %q", truncateForTest(cards[0].Body, 80))
-	}
-	if !strings.Contains(cards[0].Body, `"width_mode":"fill"`) {
-		t.Errorf("SendCard body missing Card 2.0 config.width_mode: %q", truncateForTest(cards[0].Body, 80))
-	}
-	if !strings.Contains(cards[0].Body, `"body":{`) {
-		t.Errorf("SendCard body missing Card 2.0 body wrapper: %q", truncateForTest(cards[0].Body, 80))
-	}
-	if !strings.Contains(cards[0].Body, `"tag":"markdown"`) {
-		t.Errorf("SendCard body missing Card 2.0 markdown element: %q", truncateForTest(cards[0].Body, 80))
-	}
-	if !strings.Contains(cards[0].Body, "hello from the agent") {
-		t.Errorf("SendCard body missing first event text: %q", truncateForTest(cards[0].Body, 120))
-	}
-	// The LAST PATCH should contain all reply entries seen so
-	// far (the rolling-log card is the union of reply/result
-	// events). Per F-34, tool_start / tool_end no longer surface
-	// in the receipt card — the adapter routes them to Feishu
-	// thread replies (Adapter.Send → postThreadReply). We assert
-	// on the visible reply text only.
-	last := patches[len(patches)-1].Body
-	for _, want := range []string{"hello from the agent"} {
-		if !strings.Contains(last, want) {
-			t.Errorf("last PATCH missing %q; got: %q", want, truncateForTest(last, 200))
+	if len(patches) > 0 {
+		last := patches[len(patches)-1].Body
+		if !strings.Contains(last, `"schema":"2.0"`) {
+			t.Errorf("last PATCH body missing Card 2.0 schema marker: %q", truncateForTest(last, 80))
+		}
+		if !strings.Contains(last, `"width_mode":"fill"`) {
+			t.Errorf("last PATCH body missing Card 2.0 config.width_mode: %q", truncateForTest(last, 80))
+		}
+		if !strings.Contains(last, `"body":{`) {
+			t.Errorf("last PATCH body missing Card 2.0 body wrapper: %q", truncateForTest(last, 80))
+		}
+		if !strings.Contains(last, `"tag":"markdown"`) {
+			t.Errorf("last PATCH body missing Card 2.0 markdown element: %q", truncateForTest(last, 80))
+		}
+		if !strings.Contains(last, "hello from the agent") {
+			t.Errorf("last PATCH body missing first event text: %q", truncateForTest(last, 200))
 		}
 	}
 }
@@ -957,27 +953,10 @@ func TestBuildReceiptCard_ThinkingCollapsiblePanel(t *testing.T) {
 // TestBuildColdStartCard_Card2Shape pins the cold-start card
 // emitted by Adapter.receiptFor. It must be a Card 2.0 envelope
 // (same shape contract as the rolling-log card) with a single ⏳
-// markdown element so the user sees a card surface from the first
-// event, not a bare text message.
-func TestBuildColdStartCard_Card2Shape(t *testing.T) {
-	body, err := buildColdStartCard()
-	if err != nil {
-		t.Fatalf("buildColdStartCard: %v", err)
-	}
-	mustContain := []string{
-		`"schema":"2.0"`,
-		`"width_mode":"fill"`,
-		`"body":{`,
-		`"elements":[`,
-		`"tag":"markdown"`,
-		`"content":"⏳ 等待中"`,
-	}
-	for _, want := range mustContain {
-		if !strings.Contains(body, want) {
-			t.Errorf("cold-start card body missing %q\n--- body ---\n%s", want, truncateForTest(body, 400))
-		}
-	}
-}
+// F-42: buildColdStartCard was removed; the cold-start "⏳ 等待中"
+// placeholder is no longer posted. Receipts are lazy-created with
+// their actual content by ensureReceiptForReply /
+// ensureReceiptForTask. See docs/feat/F-42-lazy-receipt-creation.md.
 
 // mustAppend calls Append and asserts no error. Helper for the
 // per-event test above.

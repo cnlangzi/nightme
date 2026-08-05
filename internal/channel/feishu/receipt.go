@@ -565,34 +565,17 @@ func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID stri
 // Adapter.Send dispatcher (mapStateToFeishuEmoji).
 // adapter's Send switch. See CHANGELOG v0.3 Stage 3 + the
 // `recover renderLocked panic` follow-up.)
+//
+// F-42: the "first message" is now ALWAYS the receipt card itself
+// (no cold-start text reply, no "minimal ⏳ card"). The cardMsgID
+// field is seeded here so subsequent renderLocked calls take the
+// PatchMessage branch instead of re-sending.
 func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receiptBot) *MessageReceipt {
 	return &MessageReceipt{
 		chatID:     chatID,
 		userMsgID:  userMsgID,
 		replyMsgID: replyMsgID,
-		bot:        bot,
-		logger:     slog.Default(),
-		state:      StateWaiting,
-	}
-}
-
-// NewMessageReceiptForCard wraps an already-posted interactive card
-// (the caller posted the cold-start card via SendCard and is
-// passing back the message id). The returned receipt is seeded
-// with cardMsgID = messageID so the FIRST Append skips the SendCard
-// step and goes straight to PATCH in place. The text-mode
-// NewMessageReceiptForReply constructor leaves cardMsgID empty and
-// triggers a SendCard on first render — that path is the right
-// choice when the gateway fell back to a text reply; this one is
-// the right choice when the adapter's receiptFor posted a card
-// directly (the recommended cold-start path, see
-// docs/channel/feishu.md §5.2 + buildColdStartCard in adapter.go).
-func NewMessageReceiptForCard(chatID, userMsgID, cardMessageID string, bot receiptBot) *MessageReceipt {
-	return &MessageReceipt{
-		chatID:     chatID,
-		userMsgID:  userMsgID,
-		replyMsgID: cardMessageID,
-		cardMsgID:  cardMessageID,
+		cardMsgID:  replyMsgID,
 		bot:        bot,
 		logger:     slog.Default(),
 		state:      StateWaiting,

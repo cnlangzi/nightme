@@ -115,31 +115,33 @@ func TestSend_OutMessageState_TracksStateIdempotency(t *testing.T) {
 // first StateReceived emit to be silently skipped. The fix uses
 // the comma-ok form to distinguish "no entry" from "prev ==
 // StateReceived".
+//
+// F-42: this test is now superseded — StateReceived is intentionally
+// silent-dropped by the Feishu adapter (see OutMessageState case in
+// adapter.go). The idempotency bug it guards no longer matters
+// because we never reach AddReaction for StateReceived. The test
+// remains as a regression sentinel for the OLD behavior (if a
+// future change re-enables StateReceived rendering, the same
+// zero-value idempotency bug could return). The assertion now
+// verifies the silent-drop path: Send returns nil without touching
+// messageStates or AddReaction.
 func TestSend_OutMessageState_FirstReceivedNotSkipped(t *testing.T) {
 	a := testAdapter(t)
 	ctx := context.Background()
 
-	// Inject a stub larkClient that always succeeds so the
-	// idempotency decision is observable via messageStates.
-	// (We can't easily mock the real larkClient because of deep
-	// struct nesting; track via messageStates side-effect which
-	// is set BEFORE AddReaction is called.)
-	a.mu.Lock()
 	// Pre-condition: messageStates has NO entry for this msgID.
+	a.mu.Lock()
 	delete(a.messageStates, "om_msg_first")
 	a.mu.Unlock()
 
-	// Send StateReceived. Even though larkClient is nil and
-	// AddReaction will fail, the messageStates update happens
-	// BEFORE AddReaction is called (and reverts on failure). So
-	// after the call, messageStates should NOT have an entry
-	// (revert due to nil larkClient). The point is: the Send
-	// dispatcher MUST have attempted AddReaction, not skipped it.
-	//
-	// We assert by checking that Send returned an error (i.e.
-	// AddReaction was attempted, and failed because larkClient is
-	// nil). If the bug were still present, Send would return nil
-	// (skip path), falsely indicating success.
+	// F-42: StateReceived is silent-dropped before the
+	// idempotency / AddReaction logic. Send must return nil
+	// without touching messageStates. (Pre-F-42 this same call
+	// would have attempted AddReaction, which fails with nil
+	// larkClient — the test originally asserted that error to
+	// detect the zero-value idempotency bug. After F-42 the
+	// reaction is never attempted, so we assert the opposite:
+	// nil err AND messageStates stays untouched.)
 	err := a.Send(ctx, gateway.OutboundMessage{
 		Kind:   gateway.OutMessageState,
 		ChatID: "oc_chat",
@@ -148,10 +150,43 @@ func TestSend_OutMessageState_FirstReceivedNotSkipped(t *testing.T) {
 			State:     agent.StateReceived,
 		},
 	})
-	// larkClient is nil → AddReaction returns "feishu: REST client
-	// not initialized". If we got nil err, the buggy skip path
-	// would have hidden the attempt.
-	if err == nil {
-		t.Fatalf("Send should attempt AddReaction and fail (nil larkClient); got nil err — likely the skip bug")
+	if err != nil {
+		t.Fatalf("StateReceived should be silent-dropped; got err=%v", err)
+	}
+	a.mu.Lock()
+	_, hasEntry := a.messageStates["om_msg_first"]
+	a.mu.Unlock()
+	if hasEntry {
+		t.Errorf("StateReceived silent-drop must not populate messageStates; entry found")
+	}
+}
+
+// TestSend_OutMessageState_StateForwardedIsSilentDrop mirrors the
+// StateReceived test for StateForwarded (🔄). F-42 drops both
+// intermediate states; only StateDone / StateError remain visible.
+func TestSend_OutMessageState_StateForwardedIsSilentDrop(t *testing.T) {
+	a := testAdapter(t)
+	ctx := context.Background()
+
+	a.mu.Lock()
+	delete(a.messageStates, "om_msg_fwd")
+	a.mu.Unlock()
+
+	err := a.Send(ctx, gateway.OutboundMessage{
+		Kind:   gateway.OutMessageState,
+		ChatID: "oc_chat",
+		MessageState: &gateway.MessageStatePayload{
+			MessageID: "om_msg_fwd",
+			State:     agent.StateForwarded,
+		},
+	})
+	if err != nil {
+		t.Fatalf("StateForwarded should be silent-dropped; got err=%v", err)
+	}
+	a.mu.Lock()
+	_, hasEntry := a.messageStates["om_msg_fwd"]
+	a.mu.Unlock()
+	if hasEntry {
+		t.Errorf("StateForwarded silent-drop must not populate messageStates; entry found")
 	}
 }

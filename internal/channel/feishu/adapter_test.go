@@ -515,7 +515,7 @@ func TestSend_RoutesByUserMsgID_NotChatID(t *testing.T) {
 
 	// Both receipts should have been cold-created via SendCard (one per turn).
 	if cards < 2 {
-		t.Errorf("expected >=2 cold-start SendCard calls, got %d", cards)
+		t.Errorf("expected >=2 SendCard calls (one per turn's lazy receipt), got %d", cards)
 	}
 
 	// After turn 1 was Completed, NO further PATCH may target
@@ -530,17 +530,19 @@ func TestSend_RoutesByUserMsgID_NotChatID(t *testing.T) {
 			t.Errorf("turn 2 wrote into turn 1's completed receipt (msgID=%s)", p.MessageID)
 		}
 	}
-	// And turn 2's content must actually land somewhere: at least
-	// one PATCH on rcpt2.cardMsgID since turn 2 started.
-	var rcpt2Patched bool
-	for _, p := range patches[patchesBeforeTurn2:] {
-		if p.MessageID == rcpt2.cardMsgID {
-			rcpt2Patched = true
-			break
-		}
+	// F-42: turn 2's text is shipped inside the lazy ensure's
+	// SendCard call (not via a subsequent PATCH). Verify the
+	// receipt registered with cardMsgID set and the text already
+	// in its entries list, so the user sees "turn 2 hello" in
+	// the chat even without a follow-up PATCH.
+	if rcpt2.cardMsgID == "" {
+		t.Errorf("turn 2 receipt has empty cardMsgID; SendCard did not seed it")
 	}
-	if !rcpt2Patched {
-		t.Errorf("turn 2 cold-create produced no PATCH on rcpt2 (cardMsgID=%s); user would see nothing", rcpt2.cardMsgID)
+	rcpt2.mu.Lock()
+	turn2TextInEntries := len(rcpt2.entries) >= 1 && rcpt2.entries[0].Text == "turn 2 hello"
+	rcpt2.mu.Unlock()
+	if !turn2TextInEntries {
+		t.Errorf("turn 2 receipt entries should contain \"turn 2 hello\"; lazy create did not seed the entry")
 	}
 }
 
@@ -957,7 +959,14 @@ func TestSend_ThreadOnlyEvents_PassReplyInThreadTrue(t *testing.T) {
 // "reply_in_thread=true everywhere" would silently hide the
 // receipt card behind a thread indicator, breaking the core UX.
 func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
-	t.Run("ReceiptColdStart", func(t *testing.T) {
+	t.Run("ReceiptLazyCreate", func(t *testing.T) {
+		// F-42: receiptFor is now a pure cache lookup and never
+		// ships a card. The first SendCard happens in
+		// ensureReceiptForReply when an actual OutReply lands.
+		// This subtest exercises that path: the SendCard that
+		// produces the receipt card must post to main chat
+		// (reply_in_thread=false), exactly like the old cold-start
+		// path did.
 		a := testAdapter(t)
 		var threadOnly int
 		var chatVisible int
@@ -972,15 +981,33 @@ func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
 			return "om_card_cold", nil
 		}
 
-		r := a.receiptFor(t.Context(), "oc_cold", "om_user_cold")
+		r, created, err := a.ensureReceiptForReply(t.Context(), "oc_cold", "om_user_cold", "hello world")
+		if err != nil {
+			t.Fatalf("ensureReceiptForReply: %v", err)
+		}
 		if r == nil {
-			t.Fatalf("receiptFor returned nil (cold-start card build or send failed)")
+			t.Fatalf("ensureReceiptForReply returned nil receipt")
+		}
+		if !created {
+			t.Errorf("ensureReceiptForReply created=false on first call; want true")
 		}
 		if chatVisible == 0 {
-			t.Errorf("cold-start card reply_in_thread flag was true (threaded), want false — receipt card must be visible in main chat")
+			t.Errorf("lazy-create card reply_in_thread flag was true (threaded), want false — receipt card must be visible in main chat")
 		}
 		if threadOnly != 0 {
-			t.Errorf("cold-start card was threaded %d times, want 0", threadOnly)
+			t.Errorf("lazy-create card was threaded %d times, want 0", threadOnly)
+		}
+		// Sanity: the entry is already installed; the receipt is
+		// StateExecuting (the empty-waiting header would have
+		// been the bug we're fixing).
+		if r.State() != StateExecuting {
+			t.Errorf("lazy-create receipt state = %v, want StateExecuting", r.State())
+		}
+		r.mu.Lock()
+		hasText := len(r.entries) == 1 && r.entries[0].Text == "hello world"
+		r.mu.Unlock()
+		if !hasText {
+			t.Errorf("lazy-create receipt entries should contain \"hello world\" exactly once")
 		}
 	})
 

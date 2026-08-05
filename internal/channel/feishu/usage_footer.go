@@ -75,7 +75,13 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 		idParts = append(idParts, ctx.Agent)
 	}
 	if ctx.Model != "" {
-		idParts = append(idParts, ctx.Model)
+		// Use middle-dot · between Agent and Model — same separator
+		// line 2 uses between token segments, so the identity line
+		// reads as a consistent footer taxonomy rather than two
+		// different rhythms ("🤖 claude opus-4-5" → "🤖 claude ·
+		// opus-4-5"). F-37 / F-44 footer convention; matches the
+		// rest of the line-2 separator family.
+		idParts = append(idParts, "·", ctx.Model)
 	}
 	if len(idParts) > 1 {
 		lines = append(lines, strings.Join(idParts, " "))

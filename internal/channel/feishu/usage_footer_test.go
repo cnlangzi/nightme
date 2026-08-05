@@ -30,7 +30,7 @@ func TestFormatSessionFooterLines_IdentityOnly(t *testing.T) {
 	// Agent + Model only, no tokens / cost → just line 1 (🤖 header).
 	ctx := &gateway.SessionContext{Agent: "claude", Model: "opus-4-5"}
 	got := formatSessionFooterLines(ctx)
-	want := []string{"🤖 claude opus-4-5"}
+	want := []string{"🤖 claude · opus-4-5"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("formatSessionFooterLines() = %v, want %v", got, want)
 	}
@@ -49,7 +49,7 @@ func TestFormatSessionFooterLines_TokenSegments(t *testing.T) {
 		},
 	}
 	got := formatSessionFooterLines(ctx)
-	want := []string{"🤖 claude opus-4-5", "💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k · $0.087"}
+	want := []string{"🤖 claude · opus-4-5", "💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k · $0.087"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("formatSessionFooterLines() mismatch:\n  got:  %v\n  want: %v", got, want)
 	}
@@ -67,7 +67,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 				Agent: "claude", Model: "opus-4-5",
 				CumulativeUsage: gateway.UsageInfo{OutputTokens: 234},
 			},
-			want: []string{"🤖 claude opus-4-5", "💰 ↑ 234 · 234"},
+			want: []string{"🤖 claude · opus-4-5", "💰 ↑ 234 · 234"},
 		},
 		{
 			name: "only cache hits",
@@ -75,7 +75,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 				Agent: "claude", Model: "opus-4-5",
 				CumulativeUsage: gateway.UsageInfo{CacheReadInputTokens: 5_600},
 			},
-			want: []string{"🤖 claude opus-4-5", "💰 ↻ 5.6k · 5.6k"},
+			want: []string{"🤖 claude · opus-4-5", "💰 ↻ 5.6k · 5.6k"},
 		},
 		{
 			name: "cost only (no tokens)",
@@ -83,7 +83,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 				Agent: "claude", Model: "opus-4-5",
 				CumulativeUsage: gateway.UsageInfo{CostUSD: 1.245},
 			},
-			want: []string{"🤖 claude opus-4-5", "💰 $1.245"},
+			want: []string{"🤖 claude · opus-4-5", "💰 $1.245"},
 		},
 		{
 			name: "no cost (omitted)",
@@ -93,7 +93,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 					InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
 				},
 			},
-			want: []string{"🤖 claude opus-4-5", "💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k"},
+			want: []string{"🤖 claude · opus-4-5", "💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k"},
 		},
 		{
 			name: "tokens but no Agent / Model",
@@ -127,7 +127,7 @@ func TestFormatSessionFooterLines_LargeNumbers(t *testing.T) {
 		},
 	}
 	got := formatSessionFooterLines(ctx)
-	want := []string{"🤖 claude opus-4-5", "💰 ↓ 156.0k · ↻ 1.2M · ↑ 18.0k · 1.4M · $1.245"}
+	want := []string{"🤖 claude · opus-4-5", "💰 ↓ 156.0k · ↻ 1.2M · ↑ 18.0k · 1.4M · $1.245"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -146,7 +146,7 @@ func TestFormatSessionFooter_StringForm(t *testing.T) {
 		},
 	}
 	got := formatSessionFooter(ctx)
-	want := "🤖 claude opus-4-5\n💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k"
+	want := "🤖 claude · opus-4-5\n💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

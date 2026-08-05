@@ -314,6 +314,43 @@ type UsageEvent struct {
 	CostUSD float64
 }
 
+// UsageInfo is the cumulative form of UsageEvent — populated by
+// the runtime as it observes EventUsage events arriving from
+// bridges, and stamped onto OutboundMessage.SessionContext for
+// main-chat footer rendering (see docs/feat/F-45-session-footer.md).
+//
+// Lives in the agent package (not gateway) because the cumulative
+// state is owned by AgentSession, which lives in internal/chatsession
+// and cannot reverse-import gateway. gateway re-exports UsageInfo
+// as a type alias for ABI compatibility with existing OutUsage
+// payload code (translate.go:158).
+//
+// The 4 token fields are independent counters — IN and CacheRead
+// are NOT additive (Anthropic API exposes them as separate fields;
+// InputTokens is non-cached input only, not the sum).
+type UsageInfo struct {
+	// InputTokens is the non-cached input token count from the
+	// last LLM call (Anthropic API: input_tokens field).
+	// Cache hits are NOT included — see CacheReadInputTokens.
+	InputTokens int
+
+	// OutputTokens is the generated output token count.
+	OutputTokens int
+
+	// CacheCreationInputTokens is the input tokens that wrote
+	// to the prompt cache (Anthropic API:
+	// cache_creation_input_tokens).
+	CacheCreationInputTokens int
+
+	// CacheReadInputTokens is the input tokens served from the
+	// prompt cache (Anthropic API: cache_read_input_tokens).
+	CacheReadInputTokens int
+
+	// CostUSD is the per-turn cost in USD; 0 when unknown /
+	// not reported. Cumulative state sums across turns.
+	CostUSD float64
+}
+
 // CompactionEvent is the payload for EventCompaction — a mid-turn
 // context-compaction signal from the agent. After this event the turn
 // continues (the agent may emit more tool_use / assistant text blocks);

@@ -109,7 +109,18 @@ func buildTaskChecklistChunks(items []agent.TaskItem) []string {
 	// atomicity; our checklist is a list of `- [ ]` / `- [x]`
 	// task lines, all of which share the same list item shape
 	// and are trivially paragraph-safe to split.
-	joined := joinLines(lines)
+	//
+	// F-42: prepend the markdown section header `**📋 Tasks**`
+	// so the checklist is visually distinct from the surrounding
+	// reply body. The title is added here (after the line budget
+	// is enforced) so the title itself can never push a real
+	// task line past `checklistBudgetRunes` — the divider is
+	// purely cosmetic, the lines below it are the user-visible
+	// content. Title is unconditional: it shows whether the
+	// checklist stands alone (no OutReply) or coexists with
+	// reply entries, keeping the section shape consistent.
+	const checklistHeader = "**📋 Tasks**"
+	joined := checklistHeader + "\n\n" + joinLines(lines)
 	chunks := splitMarkdownForDivs(joined, divTextCharLimit)
 	if len(chunks) == 0 {
 		// Defensive: splitMarkdownForDivs returns [] on empty

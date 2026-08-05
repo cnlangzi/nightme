@@ -345,6 +345,26 @@ case gateway.OutMessageState:
 
 `AddReaction` 失败时 log warn,返回 error 由 caller(`gateway.OnMessageState`)处理。**永不阻塞** ChatSession lifecycle 或消息处理主流程。
 
+#### 6.6.7 v1.3.x F-42:中间态 silent drop(简化)
+
+**v1.3.x F-42 后**:Feishu adapter 自决只渲染 `StateDone` / `StateError` 两个终态,`StateReceived` / `StateForwarded` silent drop。
+
+```go
+// Send() OutMessageState case (F-42 后)
+switch state {
+case agent.StateReceived, agent.StateForwarded:
+    return nil   // silent drop
+}
+// 仅 StateDone (✅ "DONE") / StateError (❌ "THUMBSUP") 走 AddReaction
+```
+
+**理由**:
+- F-37 thread route 让 Tool/Think reply 持续在 thread 报 execution activity ── ⏳/🔄 是冗余信号
+- 首 OutReply / OutTask 到达时 receipt 直接出,无需前置 reaction
+- ✅/❌ 终态不可替代的确认,保留
+
+`agent.MessageState` enum / `mapStateToFeishuEmoji` / `AddReaction` 实现均不变 ── 4 态契约是抽象层;Feishu adapter 在 channel 自治范围内选择哪些渲染。
+
 ### 6.7 30 KB body 限制(本期放宽)
 
 Feishu card body 上限 **30 KB**(Create 和 PATCH 相同)。本期 `replyMaxBytes` 从 4 KiB 放宽到 **24 KiB**(留 6 KiB 头空间)。`evictOverflowLocked` 同时受字节和元素数(50)两个约束,先触发的先 evict。
@@ -1560,10 +1580,86 @@ user_msg om_A
 
 **详细设计**:见 [`docs/feat/F-40-outreply-overflow.md`](../feat/F-40-outreply-overflow.md)。SPEC §0.9。
 
+### 13.20 🎯 F-42 决策 (2026-08-05):Lazy Receipt Creation + MessageState 简化 + TaskList 标题
+
+**背景**:Feishu receipt 在 v1.3 + F-25 落地后形成 rolling-log 形态,但渲染层仍有 3 处冗余 / 不清晰:
+
+1. **Cold-start 空 Receipt card 是 design smell** ── `Adapter.receiptFor()` 在 cache miss 时主动 `buildColdStartCard()` + `SendCard()` 发一个 minimal ⏳ 占位卡。短 turn 中几乎立刻被 PATCH 覆盖(用户感知不到),长 turn 中只是"空白 + ⏳"(⏳ reaction 已在 user msg 上,card 本身无新增信息)
+2. **⏳ / 🔄 reactions 跟其他 waiting 信号重复** ── F-37 thread route 让 Tool/Think thread reply 持续报 execution activity;⏳ (StateReceived) / 🔄 (StateForwarded) 在 user msg 上是冗余信号
+3. **TaskList 没标题,视觉不清晰** ── `buildTaskChecklistChunks` 直接挂 `- [ ] Subject` 在 reply entries 后面,没 section header。当 TaskList 是 receipt 唯一内容时尤其不清楚
+
+**核心变化**:
+
+1. **Receipt lazy creation** ── `Adapter.receiptFor()` 退化为纯 cache lookup(不再 `buildColdStartCard` + `SendCard`)。首个**有内容**的 OutboundKind 到达时由新 helper 主动建 receipt + post 带有实际内容的 card:
+
+   | 首个 OutboundKind | 新 helper | 首次 card body |
+   |---|---|---|
+   | `OutReply` | `ensureReceiptForReply(ctx, chatID, userMsgID, text)` | 该条 reply 内容(`eventToEntry(EventText)`)|
+   | `OutTaskCreate` / `OutTaskUpdate` | `ensureReceiptForTask(ctx, chatID, userMsgID, tasks)` | `**📋 Tasks**` + 完整 task list |
+   | `OutInit` / `OutUsage`(miss)| 不创建 | silent drop(同今天 cold-start 失败的 fallback)|
+
+   `ensureReceiptFor*` 内部:`buildReceiptCard[r.WithReply/WithTaskList]` → `SendCard(ctx, chatID, body, userMsgID, replyInThread=false)` POST → 拿到 `cardMsgID` → `NewMessageReceiptForReply(chatID, userMsgID, cardMsgID, bot)` → 存进 `receiptsByUserMsgID`。
+
+2. **MessageState reactions 简化** ── Feishu adapter 自决:
+
+   ```go
+   // Send() OutMessageState case
+   switch state {
+   case agent.StateReceived, agent.StateForwarded:
+       return nil   // F-42: silent drop,与 Tool/Think thread activity 重叠
+   }
+   // 只走 StateDone (✅) / StateError (❌) 的 AddReaction
+   ```
+
+   保留:`mapStateToFeishuEmoji` 函数(仍产 "DONE" / "THUMBSUP")、`messageStates` idempotency 表、`AddReaction` 实现。
+
+3. **TaskList markdown 标题** ── `buildTaskChecklistChunks` 第一行加 `**📋 Tasks**\n\n` 跟 reply body 内容视觉分开:
+
+   ```go
+   func buildTaskChecklistChunks(tasks []agent.TaskItem) []string {
+       var body strings.Builder
+       body.WriteString("**📋 Tasks**\n\n")   // F-42: 永远 prepend
+       // ... 现有 in_progress / pending / completed 排序 + checkbox 渲染
+       return splitMarkdownForDivs(body.String(), divTextCharLimit)
+   }
+   ```
+
+   **永远加**(无论是否与 OutReply body 共存),保持一致 ── 用户看到标题立刻知道有 task section。
+
+**架构不变式保留**:
+
+- `OutboundMessage` 契约不变(无新 Kind,无删 Kind,无改字段)
+- `agent.MessageState` enum 不动(Feishu adapter 自决 drop 中间态)
+- Gateway 不动(`Translate` 仍产 `OutboundMessage{Kind: OutMessageState, ...}`)
+- ChatSession 不动(`currentTurnUserMsgID` 单数锚点保留)
+- `ReplyTo = currentTurnUserMsgID` 不变(lazy create 也用同一锚点)
+- §1.4 边界规范保留(OutboundMessage 仍是 typed,Channel 自决渲染细节)
+- 抽象归抽象 / 具体归具体原则保留(lazy create / state 选择 / 标题样式都是 Feishu 自治)
+- 1 turn : 1 anchor 不变式保留
+- F-25 rolling-log UX 不变(card 仍是"事件日志 + 元数据")
+- F-31 MessageState 抽象契约不变(state → reaction 是 Channel 自治)
+- F-37 thread routing 不变(Tool/Think 仍走 thread)
+- F-38 task checklist 决策不变(TaskList 仍是 receipt 一部分)
+- F-39 OutResult 决策不变
+- F-40 OutReply 决策不变
+- F-41 active reconnect 决策不变
+
+**关键 trade-off 决策记录**:
+
+| 取舍 | 选择 | 理由 |
+|---|---|---|
+| 长 turn(无 Tool/Think)首 OutReply 前 0 反馈 | 接受 | 罕见场景;F-37 thread route 保证大多数 turn 有 Tool/Think activity |
+| 极快 turn(< 100ms 首 OutReply)无中间信号 | 接受 | turn 太快本来也不需要反馈 |
+| OutInit/OutUsage 单飞 silent drop | 接受 | Terminal reaction(✅/❌)仍发,turn 结束有信号;footer 元数据只在 card 已建后才有意义 |
+| TaskList 永远加标题 vs 仅无 body 时加 | 永远加 | 视觉一致;用户不用记 "有 body 不加" 这种条件 |
+
+**详细设计**:见 [`docs/feat/F-42-lazy-receipt-creation.md`](../feat/F-42-lazy-receipt-creation.md)。SPEC §0.10。
+
 ## 15. v1.3.x 实施计划
 
 ### 15.0 状态(2026-08-05 F-40 + F-41 落地后)
 
+- **F-42 lazy receipt + MessageState 简化 + TaskList 标题 (设计阶段)** ── 删 cold-start 空 Receipt card,改 lazy create(首个 OutReply / OutTask 触发);MessageState reactions 删 ⏳/🔄 留 ✅/❌;TaskList 永远加 `**📋 Tasks**` 标题。详见 §13.20 + F-42 design doc。
 - **F-41 active reconnect (commit 后续)** ── 30s ticker 周期性 `Stop()+Start()`,把 WS 断开到重连的最大等待从 SDK 默认 2min 压到 30s。prober goroutine 在 `OnDisconnected` 启动,`OnReconnected` 退出,无 HTTP probe / 无 tier / 无 circuit breaker。详见 §13.18 + F-41 design doc。
 - **F-40 observability (commit 85f5323, PR #41)** ── SDK `OnReady` / `OnError` / `OnDisconnected` / `OnReconnecting` / `OnReconnected` 五个 callback 接入 `WSHealth` struct,`nightme health` 命令通过 daemoncontrol unix-socket 调 `health` RPC 打印 STATUS / LIVENESS / LAST ERROR / RECENT EVENTS / RECENT INBOUND / RECENT OUTBOUND 六段。
 - **F-39 + F-39-follow-up (commit 5ab730b / ddb2cca, PR #39)** ── OutResult → 独立 reply(ReplyInThreadAndChat),`SetCompleted` 移到 EventDone 触发,`splitMarkdownForDivs` 复用,F-39 follow-up 修了 11 个 review 找出的 bug(dedup 参数、💬 entry 清空、SanitizeCardMarkdown 覆盖 OutThinking/OutCard、preprocessFeishuMarkdown 只在 opening fence 补 newline 等)。

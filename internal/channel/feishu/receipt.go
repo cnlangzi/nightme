@@ -248,6 +248,22 @@ type MessageReceipt struct {
 	// cardMsgID stays anchored to "the card we PATCH".
 	cardMsgID string
 
+	// initializing is true between the moment ensureReceiptForReply /
+	// ensureReceiptForTask registers this receipt in
+	// receiptsByUserMsgID and the moment its first SendCard returns
+	// with a real cardMsgID. During that brief window the
+	// placeholder is visible to other goroutines (receiptFor /
+	// ensureReceiptFor* return it), but its cardMsgID is still
+	// empty — so a renderLocked driven by a concurrent Append or
+	// SetTaskList would otherwise issue a second SendCard (orphan
+	// card). renderLocked checks this flag and short-circuits
+	// while true, dropping the render so the ensure helper's own
+	// SendCard is the only card in chat. The flag is cleared
+	// under r.mu immediately after the SendCard return value is
+	// stored, so the brief window is exactly "between registration
+	// and SendCard success". F-42 review finding #4/#5.
+	initializing bool
+
 	// Feishu limits message updates to roughly five per second.
 	// Skip duplicate bodies and pace real PATCH requests.
 	lastBody      string
@@ -335,13 +351,33 @@ func (s ReceiptState) headerLine(r *MessageReceipt) string {
 	case StateWaiting:
 		return "⏳ 等待中"
 	case StateExecuting:
+		// Intentionally empty: the in-progress signal is the
+		// F-31 user-message reaction (handled outside this
+		// receipt). No header row needed mid-turn.
 		return ""
 	case StateCompleted:
+		// F-42+ revision: terminal header is just `<icon>
+		// <time>`. The label "已完成" was dropped — the emoji
+		// already conveys "done" and a separate word crowds
+		// the top row. When the timestamp is unknown (rare
+		// for StateCompleted because SetCompleted always sets
+		// it) we fall back to the bare emoji so the row never
+		// collapses entirely.
 		if r == nil || r.completedAt.IsZero() {
-			return "✅ 已完成"
+			return "✅"
 		}
-		return fmt.Sprintf("✅ 已完成 %s",
-			r.completedAt.Format("15:04:05"))
+		return fmt.Sprintf("✅ %s", r.completedAt.Format("15:04:05"))
+	case StateError:
+		// F-42+ revision: parallel to StateCompleted — same
+		// icon-and-time shape on the top row. Previously the
+		// error header was empty (relying on the StateError
+		// branch falling through to `return ""`), which made
+		// the failed-turn card look indistinguishable from an
+		// in-progress one after collapse.
+		if r == nil || r.completedAt.IsZero() {
+			return "❌"
+		}
+		return fmt.Sprintf("❌ %s", r.completedAt.Format("15:04:05"))
 	}
 	return ""
 }
@@ -565,34 +601,17 @@ func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID stri
 // Adapter.Send dispatcher (mapStateToFeishuEmoji).
 // adapter's Send switch. See CHANGELOG v0.3 Stage 3 + the
 // `recover renderLocked panic` follow-up.)
+//
+// F-42: the "first message" is now ALWAYS the receipt card itself
+// (no cold-start text reply, no "minimal ⏳ card"). The cardMsgID
+// field is seeded here so subsequent renderLocked calls take the
+// PatchMessage branch instead of re-sending.
 func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receiptBot) *MessageReceipt {
 	return &MessageReceipt{
 		chatID:     chatID,
 		userMsgID:  userMsgID,
 		replyMsgID: replyMsgID,
-		bot:        bot,
-		logger:     slog.Default(),
-		state:      StateWaiting,
-	}
-}
-
-// NewMessageReceiptForCard wraps an already-posted interactive card
-// (the caller posted the cold-start card via SendCard and is
-// passing back the message id). The returned receipt is seeded
-// with cardMsgID = messageID so the FIRST Append skips the SendCard
-// step and goes straight to PATCH in place. The text-mode
-// NewMessageReceiptForReply constructor leaves cardMsgID empty and
-// triggers a SendCard on first render — that path is the right
-// choice when the gateway fell back to a text reply; this one is
-// the right choice when the adapter's receiptFor posted a card
-// directly (the recommended cold-start path, see
-// docs/channel/feishu.md §5.2 + buildColdStartCard in adapter.go).
-func NewMessageReceiptForCard(chatID, userMsgID, cardMessageID string, bot receiptBot) *MessageReceipt {
-	return &MessageReceipt{
-		chatID:     chatID,
-		userMsgID:  userMsgID,
-		replyMsgID: cardMessageID,
-		cardMsgID:  cardMessageID,
+		cardMsgID:  replyMsgID,
 		bot:        bot,
 		logger:     slog.Default(),
 		state:      StateWaiting,
@@ -710,7 +729,17 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.state == StateCompleted {
+	if r.state == StateCompleted || r.state == StateError {
+		// F-42 review finding #3: the early-return guard must
+		// include StateError (terminal-via-error, fixed in this
+		// commit). Previously a late non-terminal event after
+		// StateError would proceed through eventToEntry →
+		// appendEntryLocked → renderLocked and PATCH the error
+		// card with stale in-progress content, clobbering the
+		// ❌ timestamp header. Terminal guard now mirrors the
+		// SetCompleted / EventError transition symmetry: both
+		// terminal states drop late events silently.
+		//
 		// Late event after completion — drop silently. Tool
 		// echoes (Claude Code's stream-json user-role events)
 		// can arrive after the result event; they're noise from
@@ -726,7 +755,16 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 	case agent.EventDone:
 		// SetCompleted inlined: Append holds r.mu, calling SetCompleted
 		// would self-deadlock (sync.Mutex is not reentrant).
-		if r.state != StateCompleted {
+		//
+		// F-42 review finding #2: the "no re-set to StateCompleted"
+		// guard now also excludes StateError. A late EventDone
+		// arriving after EventError used to overwrite StateError
+		// back to StateCompleted, flipping the header from ❌
+		// to ✅ and breaking the terminal-error semantics. Both
+		// terminal states are now terminal — once we're done
+		// (with or without error), a subsequent EventDone has
+		// nothing to do and is treated as a no-op.
+		if r.state != StateCompleted && r.state != StateError {
 			r.state = StateCompleted
 			r.completedAt = time.Now()
 			r.entries = nil // collapse rolling-log on terminal
@@ -740,7 +778,21 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 		if entry.Text != "" || entry.Icon != "" {
 			r.appendEntryLocked(entry)
 		}
-		r.state = StateCompleted
+		// F-42+ bug fix: terminal transition for EventError must
+		// be StateError, not StateCompleted. Pre-fix the receipt
+		// collapsed to the StateCompleted header (✅ + time)
+		// even on failed turns, so the user couldn't distinguish
+		// a successful run from a crashed one from the card
+		// alone. With the correct StateError the header now
+		// renders ❌ + completedAt (per headerLine), matching
+		// the ❌ user-message reaction that OutMessageState adds
+		// on the same turn.
+		//
+		// Entries are NOT cleared (unlike EventDone) — the
+		// error message itself is useful context for the user,
+		// and a forced-turn-error card with the error line still
+		// visible is the most informative surface.
+		r.state = StateError
 		r.completedAt = time.Now()
 		return r.renderLocked(ctx)
 	case agent.EventInit:
@@ -924,6 +976,21 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	// receipt only renders the card body. ChatSession emits
 	// MessageState events that flow through Gateway.OnMessageState
 	// → Adapter.Send → AddReaction on userMsgID.
+
+	// F-42 review finding #4/#5: while an ensureReceipt* helper is
+	// mid-SendCard, this placeholder is visible to concurrent
+	// goroutines but cardMsgID is still empty. If we proceeded to
+	// the `cardMsgID == ""` SendCard branch, a concurrent Append /
+	// SetTaskList would create a SECOND card in chat (orphan). The
+	// ensure helper's own SendCard is the only legitimate card; any
+	// render triggered from elsewhere during this window is dropped
+	// — the entries it added stay in the buffer, and the next
+	// renderLocked call AFTER the ensure helper finishes will pick
+	// them up and PATCH them into the canonical card. Data is
+	// preserved; visual churn is avoided.
+	if r.initializing {
+		return nil
+	}
 
 	// 1. Build the card body. buildReceiptCard is in adapter.go.
 	body, err := buildReceiptCard(r)

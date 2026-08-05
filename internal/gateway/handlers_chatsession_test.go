@@ -382,7 +382,7 @@ func TestHandleKill_ClearsPool(t *testing.T) {
 	if !res.Consumed {
 		t.Fatalf("expected Consumed=true")
 	}
-	if !strings.Contains(ch.LastText(), "Killed") {
+	if !strings.Contains(ch.LastText(), "Stopped") && !strings.Contains(ch.LastText(), "Cleared") {
 		t.Fatalf("reply: %q", ch.LastText())
 	}
 	if len(cs.Pool()) != 0 {

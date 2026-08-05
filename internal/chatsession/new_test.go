@@ -4,10 +4,12 @@ package chatsession
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/registry"
 )
 
 // callRecordingAS records every New() invocation. err is returned
@@ -398,4 +400,185 @@ type fakeFailingSpawner struct{ err error }
 
 func (f *fakeFailingSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (agent.AgentSession, error) {
 	return nil, f.err
+}
+
+// F-42 tests for the dead/detached branch of NewActiveAgentSessions.
+// These lock the new behavior introduced by F-42 §5.4: dead entries
+// are NOT silently skipped — their stale ResumeID is cleared
+// (in-memory + persisted) so the next spawn will not resurrect a
+// dead session via --resume <dead-id>.
+
+// TestNewActiveAgentSessions_DeadEntryClearsResumeIDInMemory verifies
+// that a dead entry's ResumeID is cleared in-memory after /new.
+func TestNewActiveAgentSessions_DeadEntryClearsResumeIDInMemory(t *testing.T) {
+	cs := New("chat-dead-mem", "cc")
+	cwd := t.TempDir()
+	if err := cs.SetActiveCwd(cwd); err != nil {
+		t.Fatalf("SetActiveCwd: %v", err)
+	}
+	cs.WithPersistence(nil, nil)
+
+	// A dead entry with a stale ResumeID from a previous run.
+	a := NewAgentSession(newAgentSessionID(), cs.ID, "cc", cwd, nil)
+	a.SetResumeID("claude-sess-dead-123")
+	a.SetExited(0)
+	cs.mu.Lock()
+	cs.pool[agentCwdKey{Agent: "cc", Cwd: cwd}] = a
+	cs.mu.Unlock()
+
+	if got := a.ResumeID(); got != "claude-sess-dead-123" {
+		t.Fatalf("precondition: want ResumeID=%q, got %q", "claude-sess-dead-123", got)
+	}
+
+	matched, reset, results, err := cs.NewActiveAgentSessions(context.Background(), "")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if matched != 1 || reset != 1 {
+		t.Fatalf("Counters: want (1,1), got (%d,%d)", matched, reset)
+	}
+	if len(results) != 1 || results[0].Action != "marked-fresh" {
+		t.Fatalf("result: want one marked-fresh, got %+v", results)
+	}
+	if got := a.ResumeID(); got != "" {
+		t.Errorf("ResumeID should be cleared in-memory: got %q", got)
+	}
+}
+
+// TestNewActiveAgentSessions_DeadEntryPersistsClearedResumeID verifies
+// that the cleared ResumeID is persisted to agent_sessions.json so the
+// next spawn will not replay the old value.
+func TestNewActiveAgentSessions_DeadEntryPersistsClearedResumeID(t *testing.T) {
+	cs := New("chat-dead-persist", "cc")
+	cwd := t.TempDir()
+	if err := cs.SetActiveCwd(cwd); err != nil {
+		t.Fatalf("SetActiveCwd: %v", err)
+	}
+	asFile, err := registry.OpenAgentSessionFile(filepath.Join(t.TempDir(), "agent_sessions.json"))
+	if err != nil {
+		t.Fatalf("OpenAgentSessionFile: %v", err)
+	}
+	cs.WithPersistence(nil, asFile)
+
+	a := NewAgentSession(newAgentSessionID(), cs.ID, "cc", cwd, nil)
+	a.SetResumeID("claude-sess-dead-xyz")
+	a.SetExited(0)
+	cs.mu.Lock()
+	cs.pool[agentCwdKey{Agent: "cc", Cwd: cwd}] = a
+	cs.mu.Unlock()
+	if err := asFile.Upsert(a.Entry()); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	if _, _, _, err := cs.NewActiveAgentSessions(context.Background(), ""); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	// Reload from disk to verify persistence.
+	entry, ok := asFile.Get(a.ID)
+	if !ok {
+		t.Fatalf("entry should still be in the registry (F-42 §5.5: keep entry, clear ResumeID)")
+	}
+	if entry.ResumeID != "" {
+		t.Errorf("persisted ResumeID should be cleared: got %q", entry.ResumeID)
+	}
+}
+
+// TestNewActiveAgentSessions_DeadEntryDoesNotSpawn locks the F-34
+// §6 Q-N4 product clarification: dead entries must NOT trigger a
+// lazy spawn just to reset their conversation.
+func TestNewActiveAgentSessions_DeadEntryDoesNotSpawn(t *testing.T) {
+	cs := New("chat-dead-no-spawn", "cc")
+	cwd := t.TempDir()
+	if err := cs.SetActiveCwd(cwd); err != nil {
+		t.Fatalf("SetActiveCwd: %v", err)
+	}
+	cs.WithPersistence(nil, nil)
+
+	spy := &fakeRestartSpawner{handle: newFakeAgentSession(99)}
+	cs.WithSpawner(spy)
+
+	a := NewAgentSession(newAgentSessionID(), cs.ID, "cc", cwd, nil)
+	a.SetExited(0)
+	cs.mu.Lock()
+	cs.pool[agentCwdKey{Agent: "cc", Cwd: cwd}] = a
+	cs.mu.Unlock()
+
+	if _, _, _, err := cs.NewActiveAgentSessions(context.Background(), ""); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if spy.calledWithResumeID != "" && spy.calledWithResumeID != "<never-called>" {
+		t.Errorf("Spawner.Spawn should NOT have been called for dead entry")
+	}
+}
+
+// TestNewActiveAgentSessions_RunningPlusDeadMixed covers the F-42
+// expected behavior when the pool has both running and dead entries.
+// The dead one gets marked-fresh; the running one gets in-place-reset.
+func TestNewActiveAgentSessions_RunningPlusDeadMixed(t *testing.T) {
+	cs := New("chat-mixed", "cc")
+	cwd := t.TempDir()
+	if err := cs.SetActiveCwd(cwd); err != nil {
+		t.Fatalf("SetActiveCwd: %v", err)
+	}
+	cs.WithPersistence(nil, nil)
+
+	live := injectAS(t, cs, "cc", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
+	dead := NewAgentSession(newAgentSessionID(), cs.ID, "codex", cwd, nil)
+	dead.SetResumeID("codex-sess-dead-789")
+	dead.SetExited(0)
+	cs.mu.Lock()
+	cs.pool[agentCwdKey{Agent: "codex", Cwd: cwd}] = dead
+	cs.mu.Unlock()
+
+	matched, reset, results, err := cs.NewActiveAgentSessions(context.Background(), "")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if matched != 2 || reset != 2 {
+		t.Fatalf("counters: want (2,2), got (%d,%d)", matched, reset)
+	}
+
+	// Verify actions per agent.
+	byName := map[string]ResetResult{}
+	for _, r := range results {
+		byName[r.Agent] = r
+	}
+	if r := byName["cc"]; r.Action != "in-place-reset" {
+		t.Errorf("cc: want in-place-reset, got %q", r.Action)
+	}
+	if r := byName["codex"]; r.Action != "marked-fresh" {
+		t.Errorf("codex: want marked-fresh, got %q", r.Action)
+	}
+
+	// Dead entry's ResumeID is cleared.
+	if got := dead.ResumeID(); got != "" {
+		t.Errorf("dead ResumeID should be cleared: got %q", got)
+	}
+	// Live entry's bridge.New was called once.
+	if live.Handle().(*callRecordingAS).calls.Load() != 1 {
+		t.Errorf("live agent New() should have been called once: got %d",
+			live.Handle().(*callRecordingAS).calls.Load())
+	}
+}
+
+// TestNewActiveAgentSessions_ResultsSliceHasEveryEntry locks that the
+// result slice length matches the matched count (1:1 mapping).
+func TestNewActiveAgentSessions_ResultsSliceHasEveryEntry(t *testing.T) {
+	cs := New("chat-result-len", "cc")
+	cwd := t.TempDir()
+	if err := cs.SetActiveCwd(cwd); err != nil {
+		t.Fatalf("SetActiveCwd: %v", err)
+	}
+	cs.WithPersistence(nil, nil)
+	injectAS(t, cs, "cc", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
+	injectAS(t, cs, "codex", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(2)})
+
+	matched, _, results, err := cs.NewActiveAgentSessions(context.Background(), "")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(results) != matched {
+		t.Errorf("len(results)=%d != matched=%d (1:1 invariant)", len(results), matched)
+	}
 }

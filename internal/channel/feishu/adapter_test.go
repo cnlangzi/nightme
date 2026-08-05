@@ -1702,11 +1702,12 @@ func TestEnsureReceiptForTask_Concurrent_OnlyOneSendCard(t *testing.T) {
 
 // TestSend_OutReply_FoldsIntoReceipt verifies the F-44 revert
 // routing change: the first OutReply chunk cold-starts a new
-// receipt card via SendCard (ReplyInBoth, reply endpoint with
-// reply_in_thread omitted) anchored at userMsgID, with the chunk
-// already installed as the first LogEntry. The card body is the
-// Card 2.0 envelope; the entry text is sanitized + the icon
-// prefix is prepended.
+// rolling-log receipt card via SendCard (top-level Create, rootID="")
+// so the card stays visible in main chat regardless of whether
+// the parent user message has a tool thread (parent-thread
+// gotcha). The chunk is already installed as the first LogEntry.
+// The card body is the Card 2.0 envelope; the entry text is
+// sanitized + the icon prefix is prepended.
 func TestSend_OutReply_FoldsIntoReceipt(t *testing.T) {
 	a := testAdapter(t)
 
@@ -1744,12 +1745,15 @@ func TestSend_OutReply_FoldsIntoReceipt(t *testing.T) {
 	if got.MsgType != "interactive" {
 		t.Errorf("MsgType = %q, want %q (Feishu Card 2.0)", got.MsgType, "interactive")
 	}
-	// ReplyInBoth: reply endpoint, reply_in_thread omitted (false).
-	if got.RootID != "om_user" {
-		t.Errorf("RootID = %q, want %q (anchored to userMsgID)", got.RootID, "om_user")
+	// Top-level Create (rootID="", reply_in_thread=false) so the
+	// card stays in main chat regardless of the parent thread
+	// state. The parent user message id is still used as the
+	// receipt registry key but does NOT anchor the card itself.
+	if got.RootID != "" {
+		t.Errorf("RootID = %q, want %q (top-level Create, no anchor)", got.RootID, "")
 	}
 	if got.ReplyInThread {
-		t.Errorf("reply_in_thread = true, want false (F-44 revert: ReceiptInBoth)")
+		t.Errorf("reply_in_thread = true, want false (top-level Create)")
 	}
 	// Body must be Card 2.0 JSON with the chunk embedded.
 	if !strings.Contains(got.Body, "💬 first chunk of the reply") {

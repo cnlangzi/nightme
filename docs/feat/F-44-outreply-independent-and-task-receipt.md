@@ -64,7 +64,7 @@ Task Receipt 完全可以脱离 OutReply fold 路径独立存在。
 
 | OutboundKind | 表面 | 锚定 | F-44 后 |
 |---|---|---|---|
-| `OutReply` | **Rolling-log receipt**（N 事件 = 1 张 card，每 chunk = 1+ div；超限转 top-level） | `ReplyInBoth` (reply endpoint, reply_in_thread omitted, 锚定 userMsgID)；overflow → `ReplyInChat` | ✅ F-44 revert: 重新 fold |
+| `OutReply` | **Rolling-log receipt**（N 事件 = 1 张 card，每 chunk = 1+ div；超限转 top-level） | `ReplyInChat` (cold-start card 是 top-level Create，rootID=""，no anchor)；overflow → `ReplyInChat` | ✅ F-44 revert: 重新 fold，card 走 top-level 永远主 chat 可见 |
 | `OutResult` | 独立 top-level Create（每条 = 1 条消息） | `ReplyInChat` (top-level Create, no anchor) | ✅ 不变（F-39） |
 | `OutTaskCreate` / `OutTaskUpdate` | **Rolling-log receipt**（N 事件 = 1 张 card） | `ReplyInChat` (cold-start card 是 top-level Create; 后续 PATCH 保持) | ✅ 简化为只装 Tasks |
 | `OutCard` (permission) | Top-level Create + 🔐 emoji 前缀 | `ReplyInChat` (no anchor) | ✅ 切到 top-level (用户可一眼识别 permission 请求) |
@@ -77,20 +77,23 @@ Task Receipt 完全可以脱离 OutReply fold 路径独立存在。
 > 1. **F-44 first-pass**: `OutReply` 改为独立 top-level Create (ReplyInChat)
 > 2. **F-44 follow-up #1**: 同样理由把 `OutResult` 切到 `ReplyInChat`
 > 3. **F-44 follow-up #2**: 同样理由把 `OutTask*` 切到 `ReplyInChat` (cold-start)
-> 4. **F-44 revert (this commit 1)**: `OutReply` 改回 fold 进 receipt card (`ReplyInBoth` 锚定 userMsgID)，加 F-40 overflow bail-out
-> 5. **F-44 revert (this commit 2)**: `OutCard` / `OutCommandReply` 切到 `ReplyInChat`，加 emoji 前缀作为消息类型标识（跟 thinking 的 💭 一致的视觉模式）
+> 4. **F-44 revert (commit f61c948)**: `OutReply` 改回 fold 进 receipt card (`ReplyInBoth` 锚定 userMsgID)，加 F-40 overflow bail-out
+> 5. **F-44 revert #2 (commit current)**: `OutCard` / `OutCommandReply` 切到 `ReplyInChat` 加 emoji 前缀
+> 6. **F-44 revert #3 (this commit)**: `OutReply` receipt card 也改 top-level Create (`rootID=""`) 避免 parent-thread gotcha —— rolling-log 视觉保留，主 chat 永远可见
 
-**F-44 的最终视觉**:
-- 主 chat 永远可见（fold 进 receipt 的 `OutReply` 除外，那个走 ReplyInBoth 锚定 userMsgID）
-- `OutReply` 多 chunk 折进 1 张 card（overflow 自动 bail-out 到 top-level）
-- `OutResult` / `OutTask*` / `OutCard` / `OutCommandReply` 都是 top-level Create，每条独立 bubble
+**F-44 的最终视觉**（更新版）：
+- 主 chat 永远可见，所有 user-visible 消息都是 top-level Create（独立 bubble / card）
+- `OutReply` 多 chunk 折进 1 张 rolling-log card（PATCH 维护，Card 2.0 视觉，top-level Create）
+- `OutReply` overflow（50 elements / 30 KB envelope）→ 独立 top-level bubble（plain text / markdown，区分于 card 视觉）
+- `OutResult` / `OutTask*` / `OutCard` / `OutCommandReply` 都是 top-level Create，每条独立 surface
 - emoji 前缀让用户在主 chat 里能扫一眼就知道是哪种消息：
-  - 💬 = OutReply (rolling-log 内)
-  - 📋 = Tasks (receipt card 内)
+  - 💬 = OutReply (rolling-log card 内的 entry)
+  - 📋 = Tasks (rolling-log card 内的 checklist)
   - ✶ = Compacting
   - 💭 = Thinking (ReplyInThread, thread 抽屉内)
-  - 🔐 = Permission request
-  - ❯ = Slash command response
+  - 🔐 = Permission request (OutCard)
+  - ❯ = Slash command response (OutCommandReply)
+  - ❌ = Error result (OutResult.IsError)
 
 ### 0.4 为什么不是 v2.0
 
@@ -133,28 +136,30 @@ user_msg om_A
 **改后**（同样 turn）：
 
 ```
-user_msg om_A
-  ├ Thread (tool stream, only visible in side panel)
-  │   💭 thinking
-  │   🔧 Bash(ls)
-  │   ⎿  file1
-  │   file2
-  ├ Task Receipt (ReplyInThreadAndChat, 锚 om_A — single card, 任务清单 PATCH)
+main chat (top-level Create, no anchor — F-44 + F-44 revert #2):
+  ├ Reply 1  💬 chunk 1   ⬅ rolling-log card (Card 2.0, top-level)
+  │   💬 chunk 2
+  │   💬 chunk 3
+  │   💬 chunk 4
+  │   💬 chunk 5
   │   **📋 Tasks** checklist (2 items)
-  └ main chat (top-level Create, no anchor — F-44 follow-up):
-      ├ Reply 1  💬 chunk 1
-      ├ Reply 2  💬 chunk 2
-      ├ Reply 3  💬 chunk 3
-      ├ Reply 4  💬 chunk 4
-      ├ Reply 5  💬 chunk 5
-      └ Final Result 📝 complete OutResult text
+  ├ Reply 2  ❯ command response    ⬅ top-level Create, no anchor
+  ├ Reply 3  🔐 Permission request  ⬅ top-level Create, no anchor
+  ├ Reply 4  📝 complete OutResult text
+  └ Thread (side panel only):
+      💭 thinking
+      🔧 Bash(ls)
+      ⎿  file1
+         file2
 ```
 
 视觉变化：
 - ✅ 每个 reply chunk 立刻可见（不再等 PATCH 周期，不被 thread 抽屉吸走）
+- ✅ Rolling-log receipt card 永远在主 chat 可见（top-level Create，无 parent-thread 风险）
 - ✅ Task Receipt 单卡（不混 reply 流，PATCH 维护）
 - ✅ Tool stream（💭/🔧/⎿）跟 reply 流完全分离 — tool 在 thread 抽屉，reply 在主 chat 流
-- ⚠️ 失去 "Reply to <sender>" 头部（ReplyInChat 改写） — 跟 v1.3 行为一致（top-level bubble）
+- ✅ 各种消息有不同 emoji 前缀，扫一眼就识别类型（💬 reply, ❯ command, 🔐 permission, 📝 result）
+- ⚠️ 失去 "Reply to <sender>" 头部（top-level Create 没有 reply anchor） — 跟 v1.3 行为一致
 
 ### 1.2 Routing 分流表（最终）
 

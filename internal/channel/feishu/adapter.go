@@ -712,11 +712,23 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 // for a PATCH cycle.
 //
 // F-44 revert: restored the F-25 → F-40 "OutReply folds into
-// receipt" pattern. The card is anchored to userMsgID via
-// ReplyInBoth (reply endpoint, reply_in_thread omitted) so the
-// visual thread to the user input is preserved in the normal
-// case. Subsequent chunks (OutReply events) hit the
-// receipt.AppendEntry path which PATCHes the same card.
+// receipt" pattern for the visual scan benefit (1 card, N chunks,
+// PATCH in place). The card is posted via top-level Create (no
+// anchor) — same parent-thread gotcha rationale as OutResult /
+// OutTask* / OutCard / OutCommandReply: any tool-using turn creates
+// a thread on the user message, and a ReplyInBoth-anchored card
+// would be pulled into the thread drawer. Top-level Create
+// guarantees the rolling-log card stays visible in main chat.
+// The trade-off is no "Reply to <sender>" header on the card
+// (acceptable: the rolling-log card's own 💬 entries visually
+// establish "this is the bot's reply").
+//
+// Subsequent chunks (OutReply events) hit the receipt.AppendEntry
+// path which PATCHes the same card. AppendEntry's pre-render
+// overflow check catches the 50-element / 30 KB envelope limit
+// and returns ErrReceiptOverflow; the caller falls back to a
+// fresh top-level Create (always visible in main chat) so the
+// overflow chunk is never lost.
 //
 // Returns the receipt plus a `created` flag: created=true means
 // the first entry is already installed and the caller should NOT
@@ -765,15 +777,23 @@ func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, 
 		return nil, false, fmt.Errorf("feishu: ensure reply receipt build card: %w", err)
 	}
 
-	// Cold-start card: ReplyInBoth (reply endpoint, reply_in_thread
-	// omitted), anchored to userMsgID. Subsequent PATCHes preserve
-	// the thread. Caller is expected to have already verified this
-	// is not the bail-out case (overflow pre-check happens later,
-	// at AppendEntry time, because we don't know if the FIRST
-	// entry alone overflows the budget — for that rare case the
-	// helper returns an error and the caller falls back to a
-	// top-level Create).
-	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
+	// Cold-start card: top-level Create (no anchor, rootID="").
+	// Same parent-thread rationale as OutResult / OutTask* / OutCard
+	// / OutCommandReply — Feishu pulls ReplyInBoth-anchored cards
+	// into the thread drawer when the user message has any
+	// reply_in_thread=true sibling (OutToolStart/End). Top-level
+	// Create keeps the rolling-log card visible in main chat
+	// regardless of the parent's thread state. Subsequent PATCHes
+	// preserve the no-anchor state (PATCH on a top-level Create
+	// stays top-level). See docstring above for the full rationale.
+	//
+	// The orphan-overflow pre-check (50 elements / 30 KB envelope)
+	// runs later at AppendEntry time on each subsequent chunk; if
+	// the FIRST entry alone exceeds the budget (rare — would need
+	// a single chunk over ~30 KB), the helper returns an error
+	// and the caller falls back to a top-level Create via
+	// sendReplyInThreadAndChat.
+	msgID, err := a.SendCard(ctx, chatID, body, "", false)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -885,15 +905,29 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 	switch msg.Kind {
 	case gateway.OutReply:
 		// F-44 revert: OutReply folds into the rolling-log receipt
-		// card (F-25 → F-40 model). Each chunk is a LogEntry; the
-		// receipt renders them as one or more `div` elements
-		// (multi-div split when the entry text exceeds
-		// divTextCharLimit). Subsequent chunks PATCH the same card
-		// — single visible card with all chunks, easy to scan
-		// versus a stream of standalone bubbles.
+		// card (F-25 → F-40 model) for visual scan benefit (1
+		// card, N chunks, PATCH in place).
 		//
-		// Empty text is dropped silently to match pre-F-44 behavior
-		// (no blank bubbles).
+		// The cold-start card is posted via top-level Create
+		// (rootID="") — NOT ReplyInBoth. Same parent-thread
+		// rationale as OutResult / OutTask* / OutCard /
+		// OutCommandReply: any tool-using turn creates a thread on
+		// the user message, and a ReplyInBoth-anchored card would
+		// be pulled into the thread drawer. Top-level Create keeps
+		// the rolling-log card visible in main chat regardless of
+		// the parent's thread state. Subsequent chunks PATCH the
+		// same card via AppendEntry (preserves no-anchor state).
+		//
+		// Multi-div split: each chunk is 1+ div elements (split
+		// when text exceeds divTextCharLimit). Overflow pre-check
+		// in AppendEntry catches the 50 elements / 30 KB envelope
+		// limit and returns ErrReceiptOverflow; the caller falls
+		// back to a fresh top-level Create via
+		// sendReplyInThreadAndChat so the overflow chunk is never
+		// lost (F-40 bail-out, F-44 follow-up styling).
+		//
+		// Empty text is dropped silently to match pre-F-44
+		// behavior (no blank bubbles).
 		//
 		// Orphan path (no userMsgID): no anchor, no card. Send as
 		// top-level Create so the user still sees the chunk.
@@ -906,6 +940,8 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		// Cold-start: if no receipt exists for this userMsgID,
 		// create one with the first entry already installed.
+		// ensureReceiptForReply sends the card via top-level Create
+		// (rootID=""); subsequent chunks PATCH the same card.
 		receipt, created, err := a.ensureReceiptForReply(ctx, msg.ChatID, msg.ReplyTo, text)
 		if err != nil {
 			// Cold-start failed (SendCard error). Fall back to
@@ -915,8 +951,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if !created {
 			// Receipt exists. Try to append; if the would-be card
 			// would exceed 50 elements / 30 KB envelope, bail out
-			// to a fresh top-level Create (F-40 bail-out, F-44
-			// follow-up styling).
+			// to a fresh top-level Create.
 			if err := receipt.AppendEntry(ctx, LogEntry{Icon: "💬", Text: text}); err != nil {
 				if errors.Is(err, ErrReceiptOverflow) {
 					return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", text)

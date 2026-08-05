@@ -104,7 +104,7 @@ func TestManager_PoolAfterKillCanRespawn(t *testing.T) {
 	}
 
 	// /kill clears the pool.
-	if err := cs.KillAll(); err != nil {
+	if _, err := cs.KillAll(); err != nil {
 		t.Fatalf("KillAll: %v", err)
 	}
 	if len(cs.Pool()) != 0 {

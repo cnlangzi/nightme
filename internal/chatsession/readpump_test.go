@@ -181,7 +181,7 @@ func TestChatSession_KillAll_StopsReadPump(t *testing.T) {
 		t.Fatalf("pump should be running pre-kill")
 	}
 
-	if err := cs.KillAll(); err != nil {
+	if _, err := cs.KillAll(); err != nil {
 		t.Fatalf("KillAll: %v", err)
 	}
 

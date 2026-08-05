@@ -709,7 +709,7 @@ func shutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, cs
 
 		if cleanup {
 			for _, cs := range mgr.List() {
-				if err := cs.KillAll(); err != nil && logger != nil {
+				if _, err := cs.KillAll(); err != nil && logger != nil {
 					logger.Warn("kill all failed for chat", "chat", cs.ChatID, "err", err)
 				}
 			}

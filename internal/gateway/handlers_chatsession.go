@@ -316,7 +316,7 @@ func handleKill(ctx context.Context, mgr *chatsession.Manager, channel Channel, 
 	}
 
 	poolSize := len(cs.Pool())
-	if err := cs.KillAll(); err != nil {
+	if _, err := cs.KillAll(); err != nil {
 		return reply(ctx, channel, msg.ChatID, fmt.Sprintf("Kill failed: %v", err)), nil
 	}
 

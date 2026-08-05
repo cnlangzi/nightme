@@ -1825,6 +1825,16 @@ user_msg om_A
 > of truth for footer rendering across both OutReply and OutResult
 > cards. Step 5 below describes the pre-F-46 routing; the rendering
 > contract (hr + #999999 plain_text) is unchanged.
+>
+> ⚠️ **F-47 follow-up (PR #53)**: OutTask* still had the pre-F-46
+> anti-pattern — orphan `OutTask*` (msg.ReplyTo == "") and SendCard
+> cold-start failure both fell through to `sendRawOutText`
+> (plain-text checklist via `renderTaskFallbackText`), violating
+> the "main-chat is card" invariant. F-47 added
+> `postOrphanTaskCard` (symmetric to `postOrphanReplyCard` /
+> `sendOrphanResultCard`) and routed both paths through it;
+> `renderTaskFallbackText` deleted (no callers). After F-46 + F-47
+> the "always card" invariant holds for every main-chat kind.
 
 **背景**:F-44 §6.1 推迟的 footer 兑现。`OutInit` / `OutUsage` 自 F-44 以来一直 silent drop,token / model 信息完全丢给用户。本节把 metadata 从 bridge event 搬到 `AgentSession` wrapper 自身,持久化到 `agent_sessions.json`,在 4 个 main-chat Kind 上 stamp `SessionContext *SessionContext` typed snapshot 到每条消息。
 

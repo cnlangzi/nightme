@@ -974,11 +974,20 @@ func (a *Adapter) postOrphanReplyCard(ctx context.Context, chatID, text string, 
 // text checklist via sendRawOutText. No card frame, no <hr>, no
 // grey footer — visually different from anchored task cards.
 //
-// Forced card even for empty task lists: buildReceiptCard handles
-// nil entries + non-empty tasks by rendering the "**📋 Tasks**"
-// header line. An empty task list still produces a useful
-// "no tasks" card (shows the header with no items) rather than
-// the silent drop that renderTaskFallbackText used to handle.
+// Card body composition (delegated to buildReceiptCard):
+//   - entries=nil → no rolling-log entries
+//   - tasks=list.Items → buildTaskChecklistChunks emits one
+//     `<markdown>` chunk per multi-div chunk, with the
+//     `**📋 Tasks**` header prepended only when items is non-empty.
+//     An empty items slice produces NO checklist chunk (the
+//     function returns nil for len==0), so the orphan card ends
+//     up with just the footer section. That's intentional —
+//     matches the anchored receipt behavior (also no checklist
+//     for an empty list) and is meaningfully different from the
+//     pre-F-47 silent plain-text drop of renderTaskFallbackText
+//     for that case.
+//   - footerLines → <hr> + <markdown> with <font color='grey'> per
+//     line (same openclaw-lark pattern as OutReply / OutResult).
 func (a *Adapter) postOrphanTaskCard(ctx context.Context, chatID string, list *agent.TaskListEvent, footerLines []string) error {
 	body, err := buildReceiptCard(nil, list.Items, footerLines)
 	if err != nil {

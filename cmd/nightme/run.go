@@ -564,6 +564,14 @@ func ensureReadPumps(mgr *chatsession.Manager, ch channel.Channel, primary strin
 // persistence needs mgr.PersistAgentSession, which is the cold
 // path (once per AgentSession lifetime, not per event).
 func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chatsession.Manager, logger *slog.Logger) chatsession.EventHandler {
+	// Per-cs closure. No per-handler mutable state needed anymore:
+	// the bridge layer now attaches per-turn Usage to the SAME
+	// ResultEvent that delivers the final text (claudecode
+	// result.usage + result.modelUsage; Pi message_end.usage), so
+	// the runtime no longer needs to buffer OutResult until a
+	// following EventUsage lands. The previous EventResult-then-
+	// EventUsage two-event split was a bridge-layer artifact — the
+	// data was always co-located on the wire.
 	return func(chatID string, s *chatsession.AgentSession, ev agent.AgentEvent, userMsgID string) {
 		// Capture the agent's own session id from EventInit so the
 		// next respawn can replay `--resume <id>`. We persist
@@ -593,14 +601,16 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.Model != "" {
 			s.SetModel(ev.Init.Model)
 		}
-		// F-45 §2.5 改动 B: accumulate per-turn usage on every
-		// EventUsage. Runs BEFORE Translate so the snapshot
-		// stamped below (改动 C) includes this turn's counts.
-		// nil-safe — bridges may emit empty EventUsage as "no
-		// usage this turn".
-		if ev.Kind == agent.EventUsage && ev.Usage != nil {
-			s.AccumulateUsage(ev.Usage)
-		}
+		// Per-turn usage accumulation moved out of an EventUsage
+		// branch (the kind was removed) — the bridge now attaches
+		// Usage to the same AgentEvent that delivers Result (see
+		// agent.ResultEvent.Usage). Translate copies it onto
+		// OutboundMessage.Usage; we fold it into CumulativeUsage
+		// right after Translate, BEFORE stamping SessionContext.
+		// OutboundMessage.Usage may be nil (zero-usage turn,
+		// synthetic assistant message) — that's fine, we just
+		// skip AccumulateUsage for that invocation.
+		//
 		// F-45 §2.5 改动 D: persist cumulative stats on EventDone
 		// (turn end) so each turn costs at most one file write.
 		// PersistIfDirty is a no-op when cumulative is unchanged
@@ -623,6 +633,13 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		if !ok {
 			return
 		}
+		// Fold the per-turn Usage into CumulativeUsage NOW, before
+		// we stamp SessionContext below — single-event design
+		// (ResultEvent.Usage rides with Result). nil is fine
+		// (zero-usage turn / synthetic message).
+		if out.Usage != nil {
+			s.AccumulateUsage(out.Usage)
+		}
 		// Stamp the current turn's anchor so the Channel can
 		// route to the right per-userMsgID receipt. ReplyTo
 		// stays empty for orphan events (EventInit at startup,
@@ -643,7 +660,17 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		case gateway.OutReply, gateway.OutResult,
 			gateway.OutTaskCreate, gateway.OutTaskUpdate:
 			snap := s.CumulativeUsage()
+			// Stamp SessionContext when ANY token field or cost is
+			// non-zero OR when Model has been captured. The
+			// CacheCreationInputTokens field must be included —
+			// formatSessionFooter renders it as part of the '↓ in'
+			// segment, so a turn that only primed a cache entry
+			// (Input=0, Output=0, CacheRead=0, Cost=0, but
+			// CacheCreation > 0) is renderable and must reach
+			// the Channel. Without it, a transient cache-rewrite
+			// turn with no Model yet gets silently dropped.
 			if snap.InputTokens != 0 || snap.OutputTokens != 0 ||
+				snap.CacheCreationInputTokens != 0 ||
 				snap.CacheReadInputTokens != 0 || snap.CostUSD != 0 ||
 				s.Model() != "" {
 				out.SessionContext = &gateway.SessionContext{

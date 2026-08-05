@@ -113,6 +113,13 @@ func TestEventHandler_ThinkGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 			IsError: false,
 		},
 	}, "om_user_1")
+	// EventDone flushes the F-45 §2.5 OutResult buffer (turn-end
+	// fallback path). EventDone also sends nothing else of its own
+	// so the final count stays at 3 (OutReply + OutResult + OutToolStart).
+	h("oc_chat", as, agent.AgentEvent{
+		Kind: agent.EventDone,
+		Done: &agent.DoneEvent{ExitCode: 0},
+	}, "om_user_1")
 
 	// (c) EventToolStart — OutToolStart (passes because /tools on)
 	h("oc_chat", as, agent.AgentEvent{
@@ -220,6 +227,171 @@ func TestEventHandler_ThinkGate_PersistsAcrossInvocations(t *testing.T) {
 // a no-op for any future lint tooling that flags unused refs.)
 var _ = slog.Default
 
+// TestEventHandler_OutResult_FooterFirstTurnExact is the regression
+// for the user-reported bug ("first tokens always 0") post the
+// EventResult + EventUsage → single EventResult{Result, Usage}
+// merge. The runtime now stamps SessionContext on the same ch.Send
+// dispatch where AccumulateUsage runs — the footer sees the turn's
+// own tokens on the very first send (cumulative=inTok on turn 1).
+//
+// Sequence:
+//   1. EventInit → capture Model
+//   2. EventResult with ResultEvent.Usage populated — single event,
+//      dispatched once, footer stamped with this turn's tokens.
+func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
+	ch := echo.New("test", io.Discard)
+	mgr := chatsession.NewManager()
+	cs := mgr.GetOrCreate("oc_chat_first_turn", "claude")
+	logger := slog.Default()
+
+	h := newEventHandler(ch, cs, mgr, logger)
+	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_first_turn", "claude", "/tmp", nil)
+
+	// Step 1: EventInit captures Model.
+	h("oc_chat_first_turn", as, agent.AgentEvent{
+		Kind: agent.EventInit,
+		Init: &agent.InitEvent{
+			SessionID: "sess_test",
+			Model:     "claude-opus-4-5",
+		},
+	}, "om_user_1")
+
+	// Step 2: EventResult with co-located Usage. ONE event delivery
+	// in real wire order — no EventUsage to follow, no buffer.
+	const inTok, outTok, cost = 1234, 567, 0.012
+	h("oc_chat_first_turn", as, agent.AgentEvent{
+		Kind: agent.EventResult,
+		Result: &agent.ResultEvent{
+			Text:       "Final answer.",
+			DurationMs: 4321,
+			IsError:    false,
+			Usage: &agent.UsageEvent{
+				InputTokens:  inTok,
+				OutputTokens: outTok,
+				CostUSD:      cost,
+			},
+		},
+	}, "om_user_1")
+
+	got := ch.Record()
+	// Find the OutResult specifically — EventInit may also have
+	// emitted OutboundMessages (e.g. OutInit on echo); the merged
+	// design only changes how many OutResult-bound sends fire.
+	var out *gateway.OutboundMessage
+	for i := range got {
+		if got[i].Kind == gateway.OutResult {
+			if out != nil {
+				t.Fatalf("multiple OutResult in Record; expected exactly one")
+			}
+			out = &got[i]
+		}
+	}
+	if out == nil {
+		t.Fatalf("no OutResult in Record: %+v", got)
+	}
+	// SessionContext stamped with THIS turn's tokens — the user
+	// bug surface is gone: footer shows turn-1 cumulative = the
+	// actual usage, not 0.
+	if out.SessionContext == nil {
+		t.Fatal("OutResult SessionContext is nil; runtime should stamp inline after AccumulateUsage")
+	}
+	cum := out.SessionContext.CumulativeUsage
+	if cum.InputTokens != inTok || cum.OutputTokens != outTok {
+		t.Errorf("SessionContext.CumulativeUsage = %+v, want Input=%d Output=%d (first-turn tokens, NOT 0)",
+			cum, inTok, outTok)
+	}
+	if cum.CostUSD != cost {
+		t.Errorf("SessionContext.CumulativeUsage.CostUSD = %v, want %v", cum.CostUSD, cost)
+	}
+	if out.SessionContext.Model != "claude-opus-4-5" {
+		t.Errorf("SessionContext.Model = %q, want 'claude-opus-4-5'", out.SessionContext.Model)
+	}
+	// Co-located Usage rides on the same OutboundMessage for any
+	// channel that wants to render it directly (today's channels
+	// render via SessionContext, but the field stays for symmetry
+	// with the ResultEvent.Usage shape).
+	if out.Usage == nil {
+		t.Error("OutboundMessage.Usage is nil; gateway should populate from ResultEvent.Usage")
+	} else if out.Usage.InputTokens != inTok {
+		t.Errorf("OutboundMessage.Usage.InputTokens = %d, want %d", out.Usage.InputTokens, inTok)
+	}
+}
+
+// TestEventHandler_OutResult_AccumulatesAcrossTurns verifies that
+// successive EventResults with Usage fold into CumulativeUsage and
+// the SessionContext stamp on each turn reflects the running total,
+// not just the current turn.
+func TestEventHandler_OutResult_AccumulatesAcrossTurns(t *testing.T) {
+	ch := echo.New("test", io.Discard)
+	mgr := chatsession.NewManager()
+	cs := mgr.GetOrCreate("oc_chat_acc", "claude")
+	logger := slog.Default()
+
+	h := newEventHandler(ch, cs, mgr, logger)
+	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_acc", "claude", "/tmp", nil)
+
+	// Turn 1.
+	h("oc_chat_acc", as, agent.AgentEvent{
+		Kind: agent.EventResult,
+		Result: &agent.ResultEvent{
+			Text:  "first",
+			Usage: &agent.UsageEvent{InputTokens: 10, OutputTokens: 5},
+		},
+	}, "om_user_1")
+	// Turn 2.
+	h("oc_chat_acc", as, agent.AgentEvent{
+		Kind: agent.EventResult,
+		Result: &agent.ResultEvent{
+			Text:  "second",
+			Usage: &agent.UsageEvent{InputTokens: 20, OutputTokens: 7},
+		},
+	}, "om_user_2")
+
+	got := ch.Record()
+	if len(got) != 2 {
+		t.Fatalf("got %d events, want 2", len(got))
+	}
+	// First turn: cumulative = (10, 5).
+	if cum := got[0].SessionContext.CumulativeUsage; cum.InputTokens != 10 || cum.OutputTokens != 5 {
+		t.Errorf("turn-1 cumulative = %+v, want (10, 5)", cum)
+	}
+	// Second turn: cumulative = (10+20, 5+7) = (30, 12).
+	if cum := got[1].SessionContext.CumulativeUsage; cum.InputTokens != 30 || cum.OutputTokens != 12 {
+		t.Errorf("turn-2 cumulative = %+v, want (30, 12) — running total across turns", cum)
+	}
+}
+
+// TestEventHandler_OutResult_NilUsageLeavesEmptySessionContext: a
+// ResultEvent with no Usage (zero-usage turn / synthetic message)
+// still ships OutResult, with SessionContext either nil or
+// populated only by Model (no tokens to display). The runtime
+// skips AccumulateUsage for that invocation.
+func TestEventHandler_OutResult_NilUsageLeavesEmptySessionContext(t *testing.T) {
+	ch := echo.New("test", io.Discard)
+	mgr := chatsession.NewManager()
+	cs := mgr.GetOrCreate("oc_chat_zero", "claude")
+	logger := slog.Default()
+
+	h := newEventHandler(ch, cs, mgr, logger)
+	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_zero", "claude", "/tmp", nil)
+
+	h("oc_chat_zero", as, agent.AgentEvent{
+		Kind: agent.EventResult,
+		Result: &agent.ResultEvent{
+			Text: "no usage reported",
+			// Usage intentionally nil
+		},
+	}, "om_user_1")
+
+	got := ch.Record()
+	if len(got) != 1 || got[0].Kind != gateway.OutResult {
+		t.Fatalf("got %v, want 1 OutResult", got)
+	}
+	if got[0].SessionContext != nil {
+		t.Errorf("SessionContext = %+v, want nil (no Model, no usage → no footer)", got[0].SessionContext)
+	}
+}
+
 // TestEventHandler_ToolsGate_ShowPassesThrough verifies the
 // /tools on path: ToolsMode=Show does NOT drop OutToolStart /
 // OutToolEnd events — the Feishu adapter must still see them so
@@ -320,6 +492,12 @@ func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	h("oc_chat_tools_indep", as, agent.AgentEvent{
 		Kind:   agent.EventResult,
 		Result: &agent.ResultEvent{Text: "Final result text."},
+	}, "om_user_1")
+	// EventDone flushes the F-45 §2.5 OutResult buffer (turn-end
+	// fallback) — keeps the count at 3 (OutReply + OutResult + OutThinking).
+	h("oc_chat_tools_indep", as, agent.AgentEvent{
+		Kind: agent.EventDone,
+		Done: &agent.DoneEvent{ExitCode: 0},
 	}, "om_user_1")
 
 	// (c) OutThinking — must not be dropped by /tools off

@@ -335,7 +335,13 @@ func (t *translator) translateMessageEnd(raw []byte, logger *slog.Logger) ([]age
 }
 
 // translateAssistantMessage renders the terminal assistant message
-// into EventResult (+ EventUsage if usage totals are non-zero).
+// into a single EventResult with Usage co-located on the
+// ResultEvent payload. Used to emit EventResult + EventUsage in
+// sequence, but the data is already paired on Pi's `message_end`
+// (assistant role) wire event — splitting them forced the runtime
+// to buffer OutResult to get the footer stamp right. Now they
+// arrive together on the same AgentEvent.
+//
 // We suppress the result when the most recent text block was
 // already finalized via text_end, to avoid double-rendering the
 // same final text in the receipt.
@@ -355,24 +361,18 @@ func (t *translator) translateAssistantMessage(msg assistantMessage, _ *slog.Log
 		}
 	}
 
-	// EventResult: always emit, but Text may be empty when we
-	// already streamed it as deltas. The renderer branches on
-	// Text presence.
-	out = append(out, agent.AgentEvent{
-		Kind: agent.EventResult,
-		Result: &agent.ResultEvent{
-			Text:    finalText,
-			IsError: msg.StopReason == "error",
-			Subtype: msg.StopReason,
-		},
-	})
-
-	// EventUsage: only if Pi reported non-zero usage. Empty
-	// usage blocks are common (e.g. synthetic messages) and
-	// emitting an EventUsage with all-zero values would surface
-	// a misleading "$0.00 · 0 tokens" footer.
+	result := &agent.ResultEvent{
+		Text:    finalText,
+		IsError: msg.StopReason == "error",
+		Subtype: msg.StopReason,
+	}
+	// Attach usage from the same wire event (message_end carries
+	// both Content and Usage on the assistant role). Empty usage
+	// blocks are common (synthetic messages) and leaving
+	// result.Usage as nil is the documented "no usage reported"
+	// signal — runtime simply skips AccumulateUsage that invocation.
 	if msg.Usage != nil && (msg.Usage.Total > 0 || (msg.Usage.Cost != nil && msg.Usage.Cost.Total > 0)) {
-		ev := agent.UsageEvent{
+		usage := agent.UsageEvent{
 			InputTokens:          msg.Usage.Input,
 			OutputTokens:         msg.Usage.Output,
 			CacheReadInputTokens: msg.Usage.CacheRead,
@@ -380,15 +380,17 @@ func (t *translator) translateAssistantMessage(msg assistantMessage, _ *slog.Log
 		// Pi does not separate cache_creation from cache_write in
 		// its user-facing usage block. Map cacheWrite to
 		// CacheCreationInputTokens for parity with claudecode.
-		ev.CacheCreationInputTokens = msg.Usage.CacheWrite
+		usage.CacheCreationInputTokens = msg.Usage.CacheWrite
 		if msg.Usage.Cost != nil {
-			ev.CostUSD = msg.Usage.Cost.Total
+			usage.CostUSD = msg.Usage.Cost.Total
 		}
-		out = append(out, agent.AgentEvent{
-			Kind:  agent.EventUsage,
-			Usage: &ev,
-		})
+		result.Usage = &usage
 	}
+
+	out = append(out, agent.AgentEvent{
+		Kind:   agent.EventResult,
+		Result: result,
+	})
 
 	return out
 }

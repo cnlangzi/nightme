@@ -1658,7 +1658,7 @@ func TestEnsureReceiptForTask_Concurrent_OnlyOneSendCard(t *testing.T) {
 				list = listB
 			}
 			receipts[i], createds[i], errs[i] = a.ensureReceiptForTask(
-				t.Context(), chatID, userMsgID, list, "",
+				t.Context(), chatID, userMsgID, list, nil,
 			)
 		}(i)
 	}
@@ -1894,7 +1894,13 @@ func TestSend_OutInit_SilentDrop(t *testing.T) {
 	}
 }
 
-func TestSend_OutUsage_SilentDrop(t *testing.T) {
+// TestSend_OutResult_CoLocatesUsage locks the F-45 footer path:
+// when an OutResult carries Usage on the same OutboundMessage,
+// the adapter still sends the result message — usage is read
+// off the out to render the SessionContext footer (not a peer
+// outbound). The OutUsage kind itself is gone (merged into
+// OutResult.Usage).
+func TestSend_OutResult_CoLocatesUsage(t *testing.T) {
 	a := testAdapter(t)
 	var count int
 	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
@@ -1904,18 +1910,30 @@ func TestSend_OutUsage_SilentDrop(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutUsage,
+		Kind:    gateway.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
-		Usage: &gateway.UsageInfo{
+		Text:    "完成",
+		Result: &agent.ResultEvent{
+			Text:       "完成",
+			DurationMs: 1234,
+			Subtype:    "success",
+			Usage: &agent.UsageEvent{
+				InputTokens:  100,
+				OutputTokens: 50,
+				CostUSD:      0.001,
+			},
+		},
+		Usage: &agent.UsageEvent{
 			InputTokens:  100,
 			OutputTokens: 50,
+			CostUSD:      0.001,
 		},
 	}); err != nil {
-		t.Fatalf("Send(OutUsage): %v", err)
+		t.Fatalf("Send(OutResult): %v", err)
 	}
-	if count != 0 {
-		t.Errorf("send count = %d, want 0 (OutUsage silent drop until footer PR)", count)
+	if count != 1 {
+		t.Errorf("send count = %d, want 1 (OutResult with co-located Usage still ships one message)", count)
 	}
 }
 
@@ -2120,7 +2138,7 @@ func TestEnsureReceiptForTask_ReusesTypingPlaceholder(t *testing.T) {
 	list := &agent.TaskListEvent{Items: []agent.TaskItem{
 		{Subject: "step 1", Status: agent.TaskPending, ActiveForm: "doing 1"},
 	}}
-	rcpt2, created2, err := a.ensureReceiptForTask(context.Background(), "oc_test", "om_user", list, "")
+	rcpt2, created2, err := a.ensureReceiptForTask(context.Background(), "oc_test", "om_user", list, nil)
 	if err != nil || created2 {
 		t.Fatalf("ensureReceiptForTask: err=%v, created=%v (want false)", err, created2)
 	}

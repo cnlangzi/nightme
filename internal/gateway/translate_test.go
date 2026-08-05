@@ -99,39 +99,71 @@ func TestTranslate_EventResult_ErrorKept(t *testing.T) {
 	}
 }
 
-func TestTranslate_EventUsage(t *testing.T) {
+// TestTranslate_EventResult_CoLocatesUsage verifies that an
+// EventResult carrying usage (via ResultEvent.Usage, the
+// single-event design that replaced the EventResult + EventUsage
+// pair) gets Translated into an OutboundMessage with Usage
+// populated on the SAME out, not a separate OutUsage kind.
+func TestTranslate_EventResult_CoLocatesUsage(t *testing.T) {
 	in := agent.AgentEvent{
-		Kind: agent.EventUsage,
-		Usage: &agent.UsageEvent{
-			InputTokens:  100,
-			OutputTokens: 200,
-			CostUSD:      0.001,
+		Kind: agent.EventResult,
+		Result: &agent.ResultEvent{
+			Text:    "完成",
+			Subtype: "success",
+			Usage: &agent.UsageEvent{
+				InputTokens:          100,
+				OutputTokens:         200,
+				CacheReadInputTokens: 30,
+				CostUSD:              0.001,
+			},
 		},
 	}
 	msg, ok := Translate("chat1", in)
-	if !ok || msg.Kind != OutUsage {
-		t.Fatalf("got (%v, %v), want (OutUsage, true)", msg.Kind, ok)
+	if !ok {
+		t.Fatal("expected translate to emit")
 	}
-	// §1.4 cleanup: token counts flow through the typed
-	// OutboundMessage.Usage payload, not Meta.
+	if msg.Kind != OutResult {
+		t.Errorf("Kind = %v, want OutResult", msg.Kind)
+	}
 	if msg.Usage == nil {
-		t.Fatal("msg.Usage is nil; Gateway should populate the typed UsageInfo payload")
+		t.Fatal("msg.Usage is nil; Gateway should populate it from ResultEvent.Usage")
 	}
 	if msg.Usage.InputTokens != 100 {
 		t.Errorf("Usage.InputTokens = %v, want 100", msg.Usage.InputTokens)
 	}
+	if msg.Usage.OutputTokens != 200 {
+		t.Errorf("Usage.OutputTokens = %v, want 200", msg.Usage.OutputTokens)
+	}
+	if msg.Usage.CacheReadInputTokens != 30 {
+		t.Errorf("Usage.CacheReadInputTokens = %v, want 30", msg.Usage.CacheReadInputTokens)
+	}
 	if msg.Usage.CostUSD != 0.001 {
 		t.Errorf("Usage.CostUSD = %v, want 0.001", msg.Usage.CostUSD)
 	}
-	// Text should mention token count.
-	if msg.Text == "" {
-		t.Error("Text is empty; expected a one-line summary")
+	if msg.Text != "完成" {
+		t.Errorf("Text = %q, want 完成", msg.Text)
 	}
 }
 
-func TestTranslate_EventUsage_NilDropped(t *testing.T) {
-	if _, ok := Translate("chat1", agent.AgentEvent{Kind: agent.EventUsage}); ok {
-		t.Error("nil Usage should drop")
+// TestTranslate_EventResult_NilUsageFine: a Result event with no
+// usage (zero-usage turn / synthetic message) still translates.
+// OutboundMessage.Usage stays nil — runtime will skip
+// AccumulateUsage for that turn.
+func TestTranslate_EventResult_NilUsageFine(t *testing.T) {
+	in := agent.AgentEvent{
+		Kind: agent.EventResult,
+		Result: &agent.ResultEvent{
+			Text:    "ok",
+			Subtype: "success",
+			// Usage intentionally nil
+		},
+	}
+	msg, ok := Translate("chat1", in)
+	if !ok {
+		t.Fatal("expected translate to emit")
+	}
+	if msg.Usage != nil {
+		t.Errorf("msg.Usage = %+v, want nil (Result.Usage was nil)", msg.Usage)
 	}
 }
 

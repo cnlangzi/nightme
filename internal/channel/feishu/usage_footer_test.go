@@ -7,58 +7,59 @@
 package feishu
 
 import (
-	"strings"
+	"reflect"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
-func TestFormatSessionFooter_NilContextReturnsEmpty(t *testing.T) {
-	if got := formatSessionFooter(nil); got != "" {
-		t.Fatalf("formatSessionFooter(nil) = %q, want \"\"", got)
+func TestFormatSessionFooterLines_NilContextReturnsNil(t *testing.T) {
+	if got := formatSessionFooterLines(nil); got != nil {
+		t.Fatalf("formatSessionFooterLines(nil) = %v, want nil", got)
 	}
 }
 
-func TestFormatSessionFooter_AllZeroReturnsEmpty(t *testing.T) {
+func TestFormatSessionFooterLines_AllZeroReturnsNil(t *testing.T) {
 	ctx := &gateway.SessionContext{Agent: "", Model: ""}
-	if got := formatSessionFooter(ctx); got != "" {
-		t.Fatalf("empty SessionContext should yield \"\", got %q", got)
+	if got := formatSessionFooterLines(ctx); got != nil {
+		t.Fatalf("empty SessionContext should yield nil, got %v", got)
 	}
 }
 
-func TestFormatSessionFooter_AgentModelOnly(t *testing.T) {
+func TestFormatSessionFooterLines_IdentityOnly(t *testing.T) {
+	// Agent + Model only, no tokens / cost → just line 1 (🤖 header).
 	ctx := &gateway.SessionContext{Agent: "claude", Model: "opus-4-5"}
-	got := formatSessionFooter(ctx)
-	want := "claude · opus-4-5"
-	if got != want {
-		t.Fatalf("formatSessionFooter() = %q, want %q", got, want)
+	got := formatSessionFooterLines(ctx)
+	want := []string{"🤖 claude opus-4-5"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("formatSessionFooterLines() = %v, want %v", got, want)
 	}
 }
 
-func TestFormatSessionFooter_TokenSegments(t *testing.T) {
+func TestFormatSessionFooterLines_TokenSegments(t *testing.T) {
 	ctx := &gateway.SessionContext{
 		Agent: "claude",
 		Model: "opus-4-5",
 		CumulativeUsage: gateway.UsageInfo{
 			InputTokens:              11_700,
 			OutputTokens:             1_500,
-			CacheCreationInputTokens: 600, // counted into "in"
+			CacheCreationInputTokens: 600, // counted into "↓ in"
 			CacheReadInputTokens:     8_200,
 			CostUSD:                  0.087,
 		},
 	}
-	got := formatSessionFooter(ctx)
-	want := "claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k · $0.087"
-	if got != want {
-		t.Fatalf("formatSessionFooter() mismatch:\n  got:  %q\n  want: %q", got, want)
+	got := formatSessionFooterLines(ctx)
+	want := []string{"🤖 claude opus-4-5", "💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k · $0.087"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("formatSessionFooterLines() mismatch:\n  got:  %v\n  want: %v", got, want)
 	}
 }
 
-func TestFormatSessionFooter_OmitsZeroSegments(t *testing.T) {
+func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 	tests := []struct {
 		name string
 		ctx  *gateway.SessionContext
-		want string
+		want []string
 	}{
 		{
 			name: "no input but has output",
@@ -66,7 +67,7 @@ func TestFormatSessionFooter_OmitsZeroSegments(t *testing.T) {
 				Agent: "claude", Model: "opus-4-5",
 				CumulativeUsage: gateway.UsageInfo{OutputTokens: 234},
 			},
-			want: "claude · opus-4-5 · ↑ 234 · Total 234",
+			want: []string{"🤖 claude opus-4-5", "💰 ↑ 234 · 234"},
 		},
 		{
 			name: "only cache hits",
@@ -74,15 +75,15 @@ func TestFormatSessionFooter_OmitsZeroSegments(t *testing.T) {
 				Agent: "claude", Model: "opus-4-5",
 				CumulativeUsage: gateway.UsageInfo{CacheReadInputTokens: 5_600},
 			},
-			want: "claude · opus-4-5 · ↻ 5.6k cached · Total 5.6k",
+			want: []string{"🤖 claude opus-4-5", "💰 ↻ 5.6k · 5.6k"},
 		},
 		{
-			name: "cost only",
+			name: "cost only (no tokens)",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				CumulativeUsage: gateway.UsageInfo{CostUSD: 1.245},
 			},
-			want: "claude · opus-4-5 · $1.245",
+			want: []string{"🤖 claude opus-4-5", "💰 $1.245"},
 		},
 		{
 			name: "no cost (omitted)",
@@ -92,20 +93,29 @@ func TestFormatSessionFooter_OmitsZeroSegments(t *testing.T) {
 					InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
 				},
 			},
-			want: "claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k",
+			want: []string{"🤖 claude opus-4-5", "💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k"},
+		},
+		{
+			name: "tokens but no Agent / Model",
+			ctx: &gateway.SessionContext{
+				CumulativeUsage: gateway.UsageInfo{
+					InputTokens: 5_000, OutputTokens: 200,
+				},
+			},
+			want: []string{"💰 ↓ 5.0k · ↑ 200 · 5.2k"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := formatSessionFooter(tc.ctx)
-			if got != tc.want {
-				t.Fatalf("got %q, want %q", got, tc.want)
+			got := formatSessionFooterLines(tc.ctx)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestFormatSessionFooter_LargeNumbers(t *testing.T) {
+func TestFormatSessionFooterLines_LargeNumbers(t *testing.T) {
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
 		CumulativeUsage: gateway.UsageInfo{
@@ -116,15 +126,36 @@ func TestFormatSessionFooter_LargeNumbers(t *testing.T) {
 			CostUSD:                  1.245,
 		},
 	}
+	got := formatSessionFooterLines(ctx)
+	want := []string{"🤖 claude opus-4-5", "💰 ↓ 156.0k · ↻ 1.2M · ↑ 18.0k · 1.4M · $1.245"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// TestFormatSessionFooter_StringForm covers the legacy single-
+// string helper used by OutReply / OutResult orphan / overflow
+// paths (text concatenation). The string form joins the
+// lines with "\n" — plain-text rendering paths honour \n
+// natively.
+func TestFormatSessionFooter_StringForm(t *testing.T) {
+	ctx := &gateway.SessionContext{
+		Agent: "claude", Model: "opus-4-5",
+		CumulativeUsage: gateway.UsageInfo{
+			InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
+		},
+	}
 	got := formatSessionFooter(ctx)
-	want := "claude · opus-4-5 · ↓ 156.0k · ↻ 1.2M cached · ↑ 18.0k · Total 1.4M · $1.245"
+	want := "🤖 claude opus-4-5\n💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
-	// Sanity: 156000 + 0 + 1200000 + 18000 = 1374000 → 1.4M
-	// (Go's %.1f rounds 1.374 to 1.4)
-	if !strings.Contains(got, "1.4M") {
-		t.Fatalf("expected 1.4M total, got %q", got)
+	// Empty input → empty string.
+	if got := formatSessionFooter(&gateway.SessionContext{}); got != "" {
+		t.Fatalf("empty ctx should yield empty string, got %q", got)
+	}
+	if got := formatSessionFooter(nil); got != "" {
+		t.Fatalf("nil ctx should yield empty string, got %q", got)
 	}
 }
 

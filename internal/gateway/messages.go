@@ -213,12 +213,6 @@ const (
 	// render it with a distinct icon (e.g. 📝) so users can tell
 	// "the final answer" from rolling-log entries.
 	OutResult
-	// OutUsage carries the turn's token usage / cost. Sourced from
-	// agent.EventUsage (Claude Code: result.usage /
-	// result.modelUsage). Channels typically render it as a footer
-	// line ("1.2k tokens · $0.012") or append it to the receipt's
-	// terminal header.
-	OutUsage
 	// OutCompaction signals a mid-turn context compaction. NOT a
 	// turn end — the agent continues. Channels briefly surface
 	// "Compacting…" so users know why the agent paused.
@@ -277,8 +271,6 @@ func (k OutboundKind) String() string {
 		return "typing"
 	case OutResult:
 		return "result"
-	case OutUsage:
-		return "usage"
 	case OutCompaction:
 		return "compaction"
 	case OutInit:
@@ -333,12 +325,23 @@ type OutboundMessage struct {
 	// Meta["duration_ms"] / ["is_error"] / ["subtype"] implicit
 	// protocol (removed in §1.4 cleanup).
 	Result *agent.ResultEvent
-	// Usage carries the typed payload for OutUsage. nil for other
-	// Kinds. Gateway populates from AgentEvent.Usage. Replaces
-	// the legacy Meta["input_tokens"] / ["output_tokens"] /
-	// ["cache_creation_input_tokens"] / ["cache_read_input_tokens"]
-	// / ["cost_usd"] implicit protocol (removed in §1.4 cleanup).
-	Usage *UsageInfo
+	// Usage carries the per-turn token / cost payload co-located
+	// with the assistant's final reply (OutResult in practice).
+	// Bridges populate this from the same source event they put
+	// Result on (Claude Code: result.usage + result.modelUsage;
+	// Pi: message_end.usage on the assistant role). The runtime
+	// accumulates Usage on receipt before stamping SessionContext,
+	// so footer rendering sees this turn's tokens on the first
+	// try — the previous EventResult-then-EventUsage pair that
+	// required runtime buffering is gone (the data was always
+	// co-located on the wire). nil means "no usage reported"
+	// (zero-usage turn).
+	//
+	// Typed as *UsageEvent (per-event shape) rather than *UsageInfo
+	// (cumulative shape) because the payload IS a single turn's
+	// data, not a running total. SessionContext.CumulativeUsage
+	// is the cumulative form, populated from runtime sums.
+	Usage *agent.UsageEvent
 	// MessageState carries the payload for OutMessageState /
 	// OutMessageStateRemoved kinds (F-31). Channel reads from this
 	// typed field directly. Replaces the legacy

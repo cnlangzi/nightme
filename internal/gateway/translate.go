@@ -148,31 +148,24 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		if ev.Result.Text == "" && !ev.Result.IsError {
 			return OutboundMessage{}, false
 		}
-		return OutboundMessage{
+		out := OutboundMessage{
 			ChatID: chatID,
 			Kind:   OutResult,
 			Text:   ev.Result.Text,
 			Result: ev.Result,
-		}, true
-
-	case agent.EventUsage:
-		// Per-turn token usage (Claude Code: result.usage +
-		// result.modelUsage). Channels render it as a footer line.
-		if ev.Usage == nil {
-			return OutboundMessage{}, false
 		}
-		return OutboundMessage{
-			ChatID: chatID,
-			Kind:   OutUsage,
-			Text:   formatUsageSummary(ev.Usage),
-			Usage: &UsageInfo{
-				InputTokens:              ev.Usage.InputTokens,
-				OutputTokens:             ev.Usage.OutputTokens,
-				CacheCreationInputTokens: ev.Usage.CacheCreationInputTokens,
-				CacheReadInputTokens:     ev.Usage.CacheReadInputTokens,
-				CostUSD:                  ev.Usage.CostUSD,
-			},
-		}, true
+		// Bridges populate ev.Result.Usage from the same wire event
+		// they took Text from (Claude Code result.usage +
+		// result.modelUsage; Pi message_end.usage on the assistant
+		// role). Co-locating the usage on the OutResult eliminates
+		// the EventResult-then-EventUsage ordering hazard that
+		// forced the runtime to buffer OutResult. nil usage
+		// (zero-usage turn / synthetic message) is fine — the
+		// runtime simply skips AccumulateUsage that invocation.
+		if u := ev.Result.Usage; u != nil {
+			out.Usage = u
+		}
+		return out, true
 
 	case agent.EventCompaction:
 		// Mid-turn context compaction — NOT a turn end. Channels
@@ -237,35 +230,3 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 	return OutboundMessage{}, false
 }
 
-// formatUsageSummary renders a one-line usage summary suitable for
-// log lines / footer text. Returns "" when all counts are zero
-// (caller decides whether to drop the OutboundMessage).
-//
-// Shape (v0.3): "<N> tokens[ · $X.XXXX]" — the context-window
-// percentage requires a model-aware denominator that we don't carry
-// yet; v0.4 will add ContextWindow to UsageEvent and extend this.
-func formatUsageSummary(u *agent.UsageEvent) string {
-	total := u.InputTokens + u.OutputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
-	if total == 0 {
-		return ""
-	}
-	if u.CostUSD > 0 {
-		return fmt.Sprintf("%s tokens · $%.4f", humanTokens(total), u.CostUSD)
-	}
-	return fmt.Sprintf("%s tokens", humanTokens(total))
-}
-
-// humanTokens renders a token count with k-suffix rounding. Mirrors
-// the conventions used in Claude Code's own CLI output ("1.2k",
-// "12k"). Values < 1000 are returned verbatim so small counts stay
-// precise.
-func humanTokens(n int) string {
-	switch {
-	case n < 1000:
-		return fmt.Sprintf("%d", n)
-	case n < 10000:
-		return fmt.Sprintf("%.1fk", float64(n)/1000)
-	default:
-		return fmt.Sprintf("%dk", n/1000)
-	}
-}

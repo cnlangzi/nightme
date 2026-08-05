@@ -2584,3 +2584,154 @@ func TestEnsureReceiptForTask_ReusesTypingPlaceholder(t *testing.T) {
 		t.Errorf("receipt tasks = %d, want 1", len(rcpt.tasks))
 	}
 }
+
+// F-47 (symmetric to F-46 tests for OutReply): locks the
+// "main-chat is card" invariant for OutTaskCreate/OutTaskUpdate.
+// Pre-F-47 the orphan path fell through ensureReceiptForTask's
+// "requires userMsgID" error to sendRawOutText (plain text
+// checklist, no <hr>, no grey footer). F-47 routes both orphan
+// and SendCard-fail paths through postOrphanTaskCard so the
+// task checklist always renders as a Card 2.0 with the same
+// footer as OutReply / OutResult cards.
+
+func TestSend_OutTask_OrphanReplyTo_StillCard(t *testing.T) {
+	a := testAdapter(t)
+
+	var gotType, gotRootID, gotBody string
+	a.sendFunc = func(_ context.Context, _, msgType, body, rootID string, _ bool) (string, error) {
+		gotType = msgType
+		gotRootID = rootID
+		gotBody = body
+		return "om_task_orphan", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind:    gateway.OutTaskCreate,
+		ChatID:  "oc_test",
+		ReplyTo: "", // orphan — no parent user message
+		TaskList: &agent.TaskListEvent{Items: []agent.TaskItem{
+			{ID: "1", Subject: "task A", Status: agent.TaskPending},
+			{ID: "2", Subject: "task B", Status: agent.TaskCompleted},
+		}},
+		SessionContext: &gateway.SessionContext{
+			Agent: "claude", Model: "opus-4-5",
+			CumulativeUsage: agent.UsageInfo{InputTokens: 100, CostUSD: 0.001},
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutTask orphan): %v", err)
+	}
+
+	// F-47: orphan OutTask MUST be a card (interactive), not plain text.
+	if gotType != "interactive" {
+		t.Errorf("orphan task should be MsgTypeInteractive (F-47: main-chat is card), got %q", gotType)
+	}
+	if gotRootID != "" {
+		t.Errorf("orphan task rootID = %q, want \"\" (top-level Create)", gotRootID)
+	}
+	// Tasks checklist present in the card body.
+	if !strings.Contains(gotBody, "task A") {
+		t.Errorf("orphan task card missing task 'A'\nbody: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, "task B") {
+		t.Errorf("orphan task card missing task 'B'\nbody: %s", gotBody)
+	}
+	// Footer renders with same openclaw-lark pattern as OutReply.
+	if !strings.Contains(gotBody, `<font color='grey'>`) {
+		t.Errorf("orphan task card missing <font color='grey'> footer\nbody: %s", gotBody)
+	}
+}
+
+func TestSend_OutTask_ColdStartSendCardFails_StillCard(t *testing.T) {
+	a := testAdapter(t)
+
+	// First SendCard (ensureReceiptForTask cold-start) fails;
+	// second call (postOrphanTaskCard bail-out) succeeds and is
+	// captured.
+	type captured struct {
+		MsgType string
+		RootID  string
+		Body    string
+	}
+	var sends []captured
+	a.sendFunc = func(_ context.Context, _, msgType, body, rootID string, _ bool) (string, error) {
+		sends = append(sends, captured{MsgType: msgType, Body: body, RootID: rootID})
+		if len(sends) == 1 {
+			return "", errors.New("feishu: cold-start SendCard failed")
+		}
+		return "om_task_orphan_after_fail", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind:    gateway.OutTaskCreate,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user",
+		TaskList: &agent.TaskListEvent{Items: []agent.TaskItem{
+			{ID: "1", Subject: "fallback task", Status: agent.TaskPending},
+		}},
+		SessionContext: &gateway.SessionContext{
+			Agent: "claude", Model: "opus-4-5",
+			CumulativeUsage: agent.UsageInfo{InputTokens: 50, CostUSD: 0.005},
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutTask cold-start fail): %v", err)
+	}
+
+	if len(sends) != 2 {
+		t.Fatalf("send count = %d, want 2 (cold-start fail + orphan bail-out)", len(sends))
+	}
+	bail := sends[1]
+	if bail.MsgType != "interactive" {
+		t.Errorf("bail-out MsgType = %q, want interactive (F-47: never plain text)", bail.MsgType)
+	}
+	if bail.RootID != "" {
+		t.Errorf("bail-out RootID = %q, want \"\" (top-level Create)", bail.RootID)
+	}
+	if !strings.Contains(bail.Body, `<font color='grey'>`) {
+		t.Errorf("bail-out card missing <font color='grey'> footer\nbody: %s", bail.Body)
+	}
+	// The failed cold-start's transient receipt must be cleaned up
+	// so a subsequent OutTask on the same userMsgID cold-starts
+	// cleanly (no orphan state pollution).
+	a.mu.RLock()
+	_, hasReceipt := a.receiptsByUserMsgID["om_user"]
+	a.mu.RUnlock()
+	if hasReceipt {
+		t.Errorf("failed cold-start should clean up receipt registration")
+	}
+}
+
+func TestSend_OutTask_NilSessionContext_NoFooter(t *testing.T) {
+	a := testAdapter(t)
+
+	var gotBody string
+	a.sendFunc = func(_ context.Context, _, _, body, _ string, _ bool) (string, error) {
+		gotBody = body
+		return "om_task_noctx", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind:    gateway.OutTaskCreate,
+		ChatID:  "oc_test",
+		ReplyTo: "", // orphan
+		TaskList: &agent.TaskListEvent{Items: []agent.TaskItem{
+			{ID: "1", Subject: "no-ctx task", Status: agent.TaskPending},
+		}},
+		// SessionContext intentionally nil — no footer.
+	}); err != nil {
+		t.Fatalf("Send(OutTask nil ctx): %v", err)
+	}
+
+	if !strings.Contains(gotBody, "no-ctx task") {
+		t.Errorf("task missing from card body: %q", gotBody)
+	}
+	// No footer section when ctx is nil.
+	if strings.Contains(gotBody, `<font color='grey'>`) {
+		t.Errorf("orphan task card should not emit footer when SessionContext is nil\nbody: %s", gotBody)
+	}
+	if strings.Contains(gotBody, `"tag":"hr"`) {
+		t.Errorf("orphan task card should not emit <hr> when SessionContext is nil\nbody: %s", gotBody)
+	}
+}

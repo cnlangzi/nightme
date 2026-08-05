@@ -965,6 +965,32 @@ func (a *Adapter) postOrphanReplyCard(ctx context.Context, chatID, text string, 
 	return err
 }
 
+// postOrphanTaskCard sends an OutTask* chunk with no parent
+// userMsgID as a top-level Card 2.0 message. F-47 (symmetric to
+// F-46's postOrphanReplyCard): ensures every main-chat event lands
+// on a card, never a plain-text fallback. Pre-F-47 the orphan path
+// fell through to ensureReceiptForTask which returned
+// "requires userMsgID" error, and the caller degraded to a plain
+// text checklist via sendRawOutText. No card frame, no <hr>, no
+// grey footer — visually different from anchored task cards.
+//
+// Forced card even for empty task lists: buildReceiptCard handles
+// nil entries + non-empty tasks by rendering the "**📋 Tasks**"
+// header line. An empty task list still produces a useful
+// "no tasks" card (shows the header with no items) rather than
+// the silent drop that renderTaskFallbackText used to handle.
+func (a *Adapter) postOrphanTaskCard(ctx context.Context, chatID string, list *agent.TaskListEvent, footerLines []string) error {
+	body, err := buildReceiptCard(nil, list.Items, footerLines)
+	if err != nil {
+		return fmt.Errorf("feishu: build orphan task card: %w", err)
+	}
+	// rootID="" → top-level Create (ReplyInChat), replyInThread=false
+	// → main chat visible. Same wire shape as the cold-start
+	// task card; only the receipt registration differs.
+	_, err = a.SendCard(ctx, chatID, body, "", false)
+	return err
+}
+
 // ensureReceiptForTask lazily creates a receipt when the FIRST event
 // for a userMsgID is an OutTaskCreate / OutTaskUpdate (the agent
 // produces tasks but no OutReply yet — TaskCreate-only turn). The
@@ -1490,18 +1516,28 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if msg.TaskList == nil {
 			return errors.New("feishu: OutTask*/TaskList payload is nil")
 		}
-		// F-45: render SessionContext footer once (as per-line
-		// slice for the receipt card rendering) and reuse for
-		// both the cold-start and steady-state paths. Avoids
-		// recomputing formatSessionFooterLines on every task
-		// update.
+		// F-47 (symmetric to F-46): orphan path (msg.ReplyTo == "")
+		// bypasses ensureReceiptForTask's "requires userMsgID"
+		// error and routes through postOrphanTaskCard — fresh
+		// top-level card, no receipt registration. Pre-F-47 the
+		// orphan path fell through to sendRawOutText (plain text
+		// checklist), violating the "main-chat is card" invariant
+		// F-46 established for OutReply / OutResult.
 		footerLines := formatSessionFooterLines(msg.SessionContext)
+		if msg.ReplyTo == "" {
+			return a.postOrphanTaskCard(ctx, msg.ChatID, msg.TaskList, footerLines)
+		}
 		receipt, created, err := a.ensureReceiptForTask(ctx, msg.ChatID, msg.ReplyTo, msg.TaskList, footerLines)
 		if err != nil {
 			// SendCard failed — degrade gracefully so the user
-			// still sees the checklist as a standalone text
-			// bubble (ReplyInChat — top-level Create, no anchor).
-			return a.sendRawOutText(ctx, msg.ChatID, renderTaskFallbackText(msg.TaskList))
+			// still sees the checklist as a card (F-47: never
+			// plain text). postOrphanTaskCard creates a fresh
+			// top-level card; collateral damage is that the
+			// receipt we just registered is rolled back, so any
+			// subsequent OutTask* on the same userMsgID will
+			// cold-start a new receipt. Better than the pre-F-47
+			// silent plain-text fallback that hid the failure.
+			return a.postOrphanTaskCard(ctx, msg.ChatID, msg.TaskList, footerLines)
 		}
 		if !created {
 			// Receipt already exists (race or a previous OutReply

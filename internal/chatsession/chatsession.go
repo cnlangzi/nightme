@@ -148,6 +148,17 @@ type ChatSession struct {
 	// exitObserver is the runtime-installed callback fired when
 	// an active AgentSession's process exits. nil = no observer.
 	exitObserver AgentExitObserver
+
+	// --- F-45 teamflow (gtw) state ------------------------------
+	//
+	// gtwContext is the in-flight /gtw fix snapshot (nil when
+	// no fix is active). gtwDrafts maps the bot reply's
+	// userMsgID to a pending user-confirmation card. Both are
+	// in-memory only (F-45 §4.1: no per-repo files).
+	//
+	// Guarded by mu (same lock as activeCwd / watchMode).
+	gtwContext *GTWContext
+	gtwDrafts  map[string]*GTWDraft
 }
 
 // New creates a fresh ChatSession in memory. The caller is
@@ -165,6 +176,7 @@ func New(chatID, primaryAgent string) *ChatSession {
 		activeAgent:      primaryAgent, // init seed
 		primaryAgent:     primaryAgent, // historical snapshot, read-only
 		pool:             make(map[agentCwdKey]*AgentSession),
+		gtwDrafts:        make(map[string]*GTWDraft), // F-45
 		watchMode:        WatchModeMention, // F-watch default
 		thinkMode:        ThinkModeShow,    // F-think default
 		toolsMode:        agent.ToolsModeHide, // F-38 default (quiet by default)

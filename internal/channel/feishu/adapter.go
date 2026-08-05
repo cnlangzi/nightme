@@ -626,7 +626,7 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	                       (F-40 bail-out, F-44 follow-up styling).
 //	                       Orphan path (no userMsgID) goes straight
 //	                       to top-level Create via
-//	                       sendReplyInThreadAndChat.
+//	                       postOrphanReplyCard.
 //	OutResult            → top-level Create (F-39 + F-44 follow-up;
 //	                       ReplyInChat / sendResultAsReply — final
 //	                       answer, no chunk-stream visual problem).
@@ -909,7 +909,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	// the FIRST entry alone exceeds the budget (rare — would need
 	// a single chunk over ~30 KB), the helper returns an error
 	// and the caller falls back to a top-level Create via
-	// sendReplyInThreadAndChat.
+	// postOrphanReplyCard.
 	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
 	if err != nil {
 		a.mu.Lock()
@@ -1398,12 +1398,15 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if msg.Result.IsError && text != "" {
 			text = "❌ " + text
 		}
-		// F-45 §2.8: append SessionContext footer to the final
-		// reply body. Independent top-level Create so the footer
-		// is naturally part of the user's terminal visible message.
-		if footer := formatSessionFooter(msg.SessionContext); footer != "" {
-			text = text + "\n\n" + footer
-		}
+		// F-45 §2.8 / F-46: footer renders as card elements
+		// (<hr> + grey <plain_text>) via buildResultCardJSON,
+		// NOT appended to text. Pass footerLines separately so
+		// the card builder owns the styling; OutReply's path
+		// (postOrphanReplyCard / ensureReceiptForReplyWithFooter)
+		// uses the same shared cardFooterElements helper, so
+		// OutResult and OutReply cards now render identical
+		// footers.
+		footerLines := formatSessionFooterLines(msg.SessionContext)
 		// F-39 + F-44 follow-up: deliver the full result as a
 		// top-level Create (PR #47's ReplyInChat surface) — see
 		// OutReply case above for the parent-thread rationale that
@@ -1417,7 +1420,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		//
 		// Wire: POST /im/v1/messages (top-level Create) — no
 		// reply_in_thread field, no parent/thread relationship.
-		return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text)
+		return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text, footerLines)
 
 	case gateway.OutCompaction:
 		// Compaction marker is a one-shot, low-frequency event
@@ -1552,12 +1555,13 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 // subsequent ReplyInBoth calls into the existing thread panel and the
 // main-chat inline render is lost (the user sees the reply disappear
 // into the thread side panel). Since any non-trivial agent turn that
-// uses tools hits this case, F-44 follow-up routes OutResult (and
-// OutReply via sendReplyInThreadAndChat) through ReplyInChat — top-level
-// Create with no anchor — guaranteeing main-chat visibility at the cost
-// of the "Reply to <sender>" header. OutCard / OutCommandReply /
-// OutCompaction / OutTask* stay on ReplyInBoth because they don't have
-// the chunk-stream problem.
+// uses tools hits this case, F-44 follow-up routes OutResult through
+// ReplyInChat — top-level Create with no anchor — guaranteeing
+// main-chat visibility at the cost of the "Reply to <sender>" header.
+// OutReply (F-46) routes through ensureReceiptForReplyWithFooter when
+// anchored, postOrphanReplyCard when orphan — both end up as cards.
+// OutCard / OutCommandReply / OutCompaction / OutTask* stay on
+// ReplyInBoth because they don't have the chunk-stream problem.
 //
 // RATE-LIMIT / RETRY layering:
 //   - layer 1: F-35 global limiter (`a.limiter.Wait`) inside ReplyInChat
@@ -1566,7 +1570,7 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 //   - layer 2: F-36 transient retry wraps sendContent; transient network
 //     errors get exponential backoff. Final hit returns to caller for log.
 func (a *Adapter) sendResultAsReply(
-	ctx context.Context, chatID, userMsgID, text string,
+	ctx context.Context, chatID, userMsgID, text string, footerLines []string,
 ) error {
 	if strings.TrimSpace(chatID) == "" {
 		return errors.New("feishu: chat_id is required")
@@ -1576,10 +1580,14 @@ func (a *Adapter) sendResultAsReply(
 		return nil
 	}
 
-	// Orphan result (no userMsgID) — top-level plain text bubble.
-	// Mirrors the OutCommandReply fallback: no anchor → no thread.
+	// Orphan result (no userMsgID) — top-level Card 2.0. F-46
+	// unification: matches postOrphanReplyCard's "main-chat
+	// replies are unconditionally cards" invariant. Pre-F-46
+	// this fell through to sendRawOutText — a plain-text bubble
+	// with no <hr> / no grey footer, visually different from
+	// anchored result cards.
 	if userMsgID == "" {
-		return a.sendRawOutText(ctx, chatID, text)
+		return a.sendOrphanResultCard(ctx, chatID, text, footerLines)
 	}
 
 	// Apply markdown sanitize pipeline (URL / fence / image / heading /
@@ -1595,7 +1603,7 @@ func (a *Adapter) sendResultAsReply(
 		sanitized = truncateForLog(sanitized, perResultMaxBytes)
 	}
 
-	msgType, body, err := buildResultPayload(sanitized)
+	msgType, body, err := buildResultPayload(sanitized, footerLines)
 	if err != nil {
 		return err
 	}
@@ -1608,13 +1616,39 @@ func (a *Adapter) sendResultAsReply(
 			"chat_id", chatID, "user_msg_id", userMsgID,
 			"body_bytes", len(body))
 		truncated := truncateForLog(sanitized, resultCardEnvelopeBudget/3)
-		msgType, body, err = buildResultPayload(truncated)
+		msgType, body, err = buildResultPayload(truncated, footerLines)
 		if err != nil {
 			return err
 		}
 	}
 
 	_, err = a.sendContent(ctx, chatID, msgType, body, "", false)
+	return err
+}
+
+// sendOrphanResultCard sends an OutResult with no parent userMsgID
+// as a top-level Card 2.0 message. F-46 unification: mirrors
+// postOrphanReplyCard — main-chat replies are unconditionally cards.
+// Pre-F-46 the orphan OutResult path fell through to sendRawOutText
+// (plain text, no hr, no grey footer); this helper produces the same
+// card form as the anchored sendResultAsReply path.
+//
+// Forced card even for non-markdown content: the "main chat is
+// cards" invariant from F-46 wins over buildResultPayload's
+// text/post/card dispatch. Anchored sendResultAsReply still honors
+// the dispatch (text content → MsgTypeText, table-heavy → MsgTypePost)
+// because the result-card heuristic makes sense when there's a
+// receipt thread to absorb the surface mismatch; orphan has no such
+// fallback and should be uniform with OutReply's orphan path.
+func (a *Adapter) sendOrphanResultCard(ctx context.Context, chatID, text string, footerLines []string) error {
+	body, err := buildResultCardJSON(text, footerLines)
+	if err != nil {
+		return fmt.Errorf("feishu: build orphan result card: %w", err)
+	}
+	// rootID="" → top-level Create (ReplyInChat), replyInThread=false
+	// → main chat visible. Same wire shape as the anchored
+	// sendResultAsReply success path.
+	_, err = a.sendContent(ctx, chatID, larkim.MsgTypeInteractive, body, "", false)
 	return err
 }
 
@@ -1997,31 +2031,18 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.TaskItem, footerLines []
 	// the default ℹ️ icon that Feishu's <note> ships with —
 	// the footer is purely informational, no icon wanted.
 	//
-	// Color: #999999 (light grey, web "muted" tone). Body
-	// elements render in default black; the footer is dimmed
-	// to read as auxiliary metadata at a glance. Tested against
-	// the white Feishu card background — contrast is enough to
-	// stay legible while clearly receding from the body. The
+	// F-46: footer rendering moved to cardFooterElements
+	// (result_render.go) — single source of truth shared with
+	// buildResultCardJSON so OutResult cards render the same
+	// footer. Color #999999 (light grey, web "muted" tone);
 	// <hr> divider above stays at Feishu's default thin-grey
-	// (≈ #E5E5E5) which sits between body and footer cleanly.
+	// (≈ #E5E5E5).
 	//
 	// Footer lines are ASCII-only (output of formatSessionFooter
 	// Lines — only emits arrow set + Agent / Model names + cost
 	// USD); no sanitisation needed.
-	if len(footerLines) > 0 {
-		elements = append(elements, map[string]any{"tag": "hr"})
-		divElements := make([]any, 0, len(footerLines))
-		for _, line := range footerLines {
-			divElements = append(divElements, map[string]any{
-				"tag":        "plain_text",
-				"content":    line,
-				"text_color": "#999999",
-			})
-		}
-		elements = append(elements, map[string]any{
-			"tag":      "div",
-			"elements": divElements,
-		})
+	if footer := cardFooterElements(footerLines); footer != nil {
+		elements = append(elements, footer...)
 	}
 
 	card := map[string]any{

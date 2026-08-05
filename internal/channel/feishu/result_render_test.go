@@ -147,7 +147,7 @@ func TestBuildPostMdJSON_Shape(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildResultCardJSON_SingleDiv(t *testing.T) {
-	body, err := buildResultCardJSON("hello world")
+	body, err := buildResultCardJSON("hello world", nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestBuildResultCardJSON_SingleDiv(t *testing.T) {
 func TestBuildResultCardJSON_MultiDiv(t *testing.T) {
 	// 2500 chars × 'a' (ASCII) forces ≥3 divs at divTextCharLimit=1000.
 	in := strings.Repeat("a", 2500)
-	body, err := buildResultCardJSON(in)
+	body, err := buildResultCardJSON(in, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestBuildResultCardJSON_MultiDiv(t *testing.T) {
 func TestBuildResultCardJSON_PreservesCodeBlock(t *testing.T) {
 	// Code block must stay intact across splitMarkdownForDivs.
 	in := "intro\n\n```go\nfunc x() { return 1 }\n```\n\noutro"
-	body, err := buildResultCardJSON(in)
+	body, err := buildResultCardJSON(in, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestBuildResultCardJSON_PreservesCodeBlock(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildResultPayload_NoMarkdown_UsesText(t *testing.T) {
-	msgType, body, err := buildResultPayload("plain text without markers")
+	msgType, body, err := buildResultPayload("plain text without markers", nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestBuildResultPayload_LotsOfTables_UsesPost(t *testing.T) {
 		b.WriteString("| A | B |\n|---|---|\n| 1 | 2 |\n\n")
 	}
 	sanitized := SanitizeCardMarkdown(strings.TrimRight(b.String(), "\n"))
-	msgType, body, err := buildResultPayload(sanitized)
+	msgType, body, err := buildResultPayload(sanitized, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestBuildResultPayload_Default_UsesInteractiveCard(t *testing.T) {
 	// Has markdown (```) but few tables.
 	in := "intro\n\n```go\nfunc x() {}\n```\n\noutro"
 	sanitized := SanitizeCardMarkdown(in)
-	msgType, body, err := buildResultPayload(sanitized)
+	msgType, body, err := buildResultPayload(sanitized, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

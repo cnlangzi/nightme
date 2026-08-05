@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -341,6 +342,84 @@ func TestReceipt_FirstSendThenPatch(t *testing.T) {
 		if !strings.Contains(last, "hello from the agent") {
 			t.Errorf("last PATCH body missing first event text: %q", truncateForTest(last, 200))
 		}
+	}
+}
+
+// TestReceipt_Append_EventError_TransitionsToStateError guards the
+// pre-F-42+ bug where Append(EventError) set r.state = StateCompleted
+// instead of StateError, causing failed-turn cards to render the ✅
+// "completed" header instead of ❌. With the fix the terminal
+// transition goes to StateError, the header line picks up the ❌ +
+// timestamp rendering (per headerLine), and IsCompleted() returns
+// true (it accepts both terminal states).
+func TestReceipt_Append_EventError_TransitionsToStateError(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
+
+	// Seed one in-progress reply so we can verify the error
+	// entry is preserved on the card (unlike EventDone, which
+	// clears entries).
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "halfway through the agent turn",
+	})
+
+	// Append the error event. We pass Err explicitly so
+	// eventToEntry produces a non-empty "❌ error: ..." entry.
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventError,
+		Error: &agent.ErrorEvent{
+			Err: errors.New("bridge crashed: connection reset"),
+		},
+	})
+
+	if got := r.State(); got != StateError {
+		t.Fatalf("State() after EventError = %v, want StateError (was the pre-fix bug returning StateCompleted)", got)
+	}
+	if !r.IsCompleted() {
+		t.Errorf("IsCompleted() after EventError = false, want true")
+	}
+	if r.completedAt.IsZero() {
+		t.Errorf("completedAt not set by Append(EventError); headerLine would render bare ❌ fallback")
+	}
+
+	// Header line must show ❌ + timestamp (the user's "in-the-loop"
+	// signal lives on the top row).
+	got := r.state.headerLine(r)
+	if !strings.Contains(got, "❌") {
+		t.Errorf("headerLine = %q; want ❌ emoji", got)
+	}
+	wantTime := r.completedAt.Format("15:04:05")
+	if !strings.Contains(got, wantTime) {
+		t.Errorf("headerLine = %q; want to contain completion time %q", got, wantTime)
+	}
+
+	// Error entry must still be in the rolling log (preserved
+	// unlike EventDone's collapse).
+	r.mu.Lock()
+	entryCount := len(r.entries)
+	hasErrorEntry := false
+	for _, e := range r.entries {
+		if e.Kind == "error" {
+			hasErrorEntry = true
+			break
+		}
+	}
+	r.mu.Unlock()
+	if entryCount < 1 {
+		t.Errorf("entries should be preserved on error (count=%d); user loses error context", entryCount)
+	}
+	if !hasErrorEntry {
+		t.Errorf("expected error entry to remain in entries; got %d entries without kind=error", entryCount)
+	}
+
+	// Late appends after StateError must still drop silently
+	// (parity with StateCompleted terminal).
+	if err := r.Append(context.Background(), agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "late reply after error",
+	}); err != nil {
+		t.Errorf("Append after StateError returned err=%v; want nil (silent drop)", err)
 	}
 }
 

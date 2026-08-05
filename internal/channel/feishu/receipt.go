@@ -743,7 +743,21 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 		if entry.Text != "" || entry.Icon != "" {
 			r.appendEntryLocked(entry)
 		}
-		r.state = StateCompleted
+		// F-42+ bug fix: terminal transition for EventError must
+		// be StateError, not StateCompleted. Pre-fix the receipt
+		// collapsed to the StateCompleted header (✅ + time)
+		// even on failed turns, so the user couldn't distinguish
+		// a successful run from a crashed one from the card
+		// alone. With the correct StateError the header now
+		// renders ❌ + completedAt (per headerLine), matching
+		// the ❌ user-message reaction that OutMessageState adds
+		// on the same turn.
+		//
+		// Entries are NOT cleared (unlike EventDone) — the
+		// error message itself is useful context for the user,
+		// and a forced-turn-error card with the error line still
+		// visible is the most informative surface.
+		r.state = StateError
 		r.completedAt = time.Now()
 		return r.renderLocked(ctx)
 	case agent.EventInit:

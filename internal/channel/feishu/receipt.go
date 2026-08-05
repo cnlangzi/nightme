@@ -139,6 +139,15 @@ type MessageReceipt struct {
 	// element list (split by divTextCharLimit).
 	tasks []agent.TaskItem
 
+	// footer (F-45) is the rendered SessionContext footer line
+	// (e.g. "claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k ·
+	// Total 22.0k · $0.087") to append at the bottom of the
+	// receipt card. Set by callers (OutReply AppendEntry / OutTask*
+	// SetTaskList) when the runtime stamps SessionContext on the
+	// outbound message. Empty string = no footer (silent drop,
+	// pre-EventInit, or no SessionContext on the wire).
+	footer string
+
 	// cardMsgID is the Feishu message id of the rolling-log card
 	// once it has been created. Empty before the first render. After
 	// the first SendCard it is set; subsequent renders PatchMessage
@@ -207,6 +216,15 @@ func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receipt
 // without extra plumbing). Late SetTaskList after a successful PATCH
 // still PATCHes the card with the new snapshot.
 func (r *MessageReceipt) SetTaskList(ctx context.Context, list *agent.TaskListEvent) error {
+	return r.SetTaskListWithFooter(ctx, list, "")
+}
+
+// SetTaskListWithFooter (F-45) replaces the per-turn task
+// checklist AND stamps the rendered SessionContext footer at the
+// bottom of the receipt card. footer may be "" when no
+// SessionContext is stamped (silent drop); the receipt skips the
+// footer section in that case.
+func (r *MessageReceipt) SetTaskListWithFooter(ctx context.Context, list *agent.TaskListEvent, footer string) error {
 	if r == nil {
 		return nil
 	}
@@ -223,6 +241,7 @@ func (r *MessageReceipt) SetTaskList(ctx context.Context, list *agent.TaskListEv
 		copy(copyItems, items)
 		r.tasks = copyItems
 	}
+	r.footer = footer
 	if r.promptState == agent.PromptPending {
 		r.promptState = agent.PromptRunning
 	}
@@ -271,6 +290,15 @@ func (r *MessageReceipt) State() agent.PromptState {
 // that want a no-op on an empty receipt should short-circuit at
 // the call site).
 func (r *MessageReceipt) AppendEntry(ctx context.Context, entry LogEntry) error {
+	return r.AppendEntryWithFooter(ctx, entry, "")
+}
+
+// AppendEntryWithFooter (F-45) appends a rolling-log entry AND
+// stamps the rendered SessionContext footer for this turn. footer
+// may be "" (no SessionContext stamped this turn); the receipt
+// keeps the previously-stored footer in that case so the rendered
+// card's footer doesn't visually regress between turns.
+func (r *MessageReceipt) AppendEntryWithFooter(ctx context.Context, entry LogEntry, footer string) error {
 	if r == nil {
 		return nil
 	}
@@ -285,16 +313,19 @@ func (r *MessageReceipt) AppendEntry(ctx context.Context, entry LogEntry) error 
 	// so a subsequent successful append is a no-op (buildReceiptCard
 	// returns the same body, renderLocked skips the PATCH).
 	//
-	// buildReceiptCard takes (entries, tasks) directly — no struct
-	// copy — so we don't bypass the r.mu lock semantics. The
+	// buildReceiptCard takes (entries, tasks, footer) directly — no
+	// struct copy — so we don't bypass the r.mu lock semantics. The
 	// proposed slice is a fresh slice that we only commit to
 	// r.entries AFTER the overflow check passes.
 	proposed := append(r.entries, entry)
-	body, err := buildReceiptCard(proposed, r.tasks)
+	if footer != "" {
+		r.footer = footer
+	}
+	body, err := buildReceiptCard(proposed, r.tasks, r.footer)
 	if err != nil {
 		return fmt.Errorf("feishu receipt: build card for overflow check: %w", err)
 	}
-	elementCount, bodyBytes := receiptBodyStats(proposed, r.tasks, body)
+	elementCount, bodyBytes := receiptBodyStats(proposed, r.tasks, r.footer, body)
 	if wouldReceiptOverflow(elementCount, bodyBytes) {
 		return ErrReceiptOverflow
 	}
@@ -336,7 +367,7 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	}
 
 	// Build the card body. buildReceiptCard is in adapter.go.
-	body, err := buildReceiptCard(r.entries, r.tasks)
+	body, err := buildReceiptCard(r.entries, r.tasks, r.footer)
 	if err != nil {
 		r.logger.Warn("feishu receipt: build card failed",
 			"err", err, "state", r.promptState)
@@ -397,19 +428,19 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	return nil
 }
 // receiptBodyStats counts the elements and bytes in a card body that
-// would be built from the given (entries, tasks). Used by
-// AppendEntry's pre-render overflow check (and could be reused by
-// other card-builders in the future).
+// would be built from the given (entries, tasks, footer). Used by
+// AppendEntryWithFooter's pre-render overflow check (and could be
+// reused by other card-builders in the future).
 //
-// Element count is the sum of (entries × div count) + task divs
-// (matches what buildReceiptCard in adapter.go would emit). Byte
-// size is the JSON body size as built.
+// Element count is the sum of (entries × div count) + task divs +
+// optional footer (matches what buildReceiptCard in adapter.go
+// would emit). Byte size is the JSON body size as built.
 //
 // Note: this duplicates the element-counting logic in
 // buildReceiptCard; both must stay in sync. If a future change adds
 // a new section to the card (e.g. restored F-25 prompt state
 // header), update both functions.
-func receiptBodyStats(entries []LogEntry, tasks []agent.TaskItem, body string) (elementCount int, bodyBytes int) {
+func receiptBodyStats(entries []LogEntry, tasks []agent.TaskItem, footer string, body string) (elementCount int, bodyBytes int) {
 	bodyBytes = len(body)
 	for range entries {
 		// Each entry produces 1+ div elements (split per
@@ -421,6 +452,9 @@ func receiptBodyStats(entries []LogEntry, tasks []agent.TaskItem, body string) (
 		elementCount++
 	}
 	for range buildTaskChecklistChunks(tasks) {
+		elementCount++
+	}
+	if footer != "" {
 		elementCount++
 	}
 	return

@@ -36,6 +36,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/gtw"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -313,6 +314,17 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// inverted at the call site.
 	gwImpl := gateway.New(messageDispatcher).(*gateway.Router)
 	gateway.RegisterChatSessionCommands(gwImpl, mgr, ch, cfg.Primary)
+
+	// F-45: /gtw fix slash command. Token auth is borrowed from
+	// `gh` / `glab` — see internal/gtw/platform.go. Reaction
+	// routing (gtw decision cards via user emoji clicks) is wired
+	// on the feat/gtw-reaction branch; this PR ships the slash
+	// command and the gtw package without the SDK reaction ingest.
+	gtwDeps := gtw.HandlerDeps{
+		Git:         gtw.ExecGitRunner{},
+		NewPlatform: gtw.NewPlatformClient,
+	}
+	gateway.RegisterGTW(gwImpl, mgr, ch, cfg.Primary, gtwDeps)
 	gwImpl.AttachChannels(ch)
 
 	// F-watch §3.1.1: install the per-chat WatchMode resolver so

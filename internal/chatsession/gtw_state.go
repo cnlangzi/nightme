@@ -71,7 +71,7 @@ type GTWFixDraftPayload struct {
 
 // GTWDraft is one pending user-confirmation card indexed by the
 // bot reply's userMsgID. Reactions on that message id route to
-// the matching draft via ChatSession.HandleReaction.
+// the matching draft via ChatSession.HandleAction.
 type GTWDraft struct {
 	Kind    GTWDraftKind
 	Payload GTWFixDraftPayload

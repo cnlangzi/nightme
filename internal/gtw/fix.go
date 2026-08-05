@@ -39,7 +39,7 @@ type DraftsMap interface {
 	Lookup(userMsgID string) *Draft
 }
 
-// HandlerDeps wires the side effects RunFix / HandleReaction need.
+// HandlerDeps wires the side effects RunFix / HandleAction need.
 // All fields are required; pass an instance constructed in the
 // runtime's startup code (cmd/nightme/run.go).
 type HandlerDeps struct {

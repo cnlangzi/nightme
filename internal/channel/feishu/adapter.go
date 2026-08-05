@@ -279,7 +279,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		// gtw two-step-confirm flow. We translate the SDK event to
 		// an InboundMessage with msg.Reaction set, push it onto the
 		// incoming channel, and let the gateway dispatcher route to
-		// ChatSession.HandleReaction.
+		// ChatSession.HandleAction.
 		OnP2MessageReactionCreatedV1(a.handleReactionCreated).
 		// Pair with the created handler above so reaction removal
 		// (e.g. user un-clicks an emoji) is silently dropped — we
@@ -2918,7 +2918,7 @@ func (a *Adapter) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV
 // event into an InboundMessage with msg.Reaction set, then
 // pushes the message onto the incoming channel where the
 // gateway dispatcher picks it up and routes to
-// ChatSession.HandleReaction.
+// ChatSession.HandleAction.
 //
 // F-45 §3.5: this is the only path through which user emoji
 // reactions reach the gtw draft executor.

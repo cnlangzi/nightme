@@ -95,7 +95,7 @@ type OutMsg struct {
 }
 
 // SendFunc is the IM-side send callback. The ctx is the caller's
-// request context (typically the one passed to RunFix / HandleReaction
+// request context (typically the one passed to RunFix / HandleAction
 // from the slash-command dispatcher). Adapters use it for
 // cancellation + rate limiting; tests can pass a closure that
 // appends to a slice for assertions.

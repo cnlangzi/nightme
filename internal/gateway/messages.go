@@ -87,7 +87,7 @@ type InboundMessage struct {
 	// Reaction is non-nil when this inbound message represents a
 	// user-emoji reaction on a previously-sent message. Channels
 	// translate their native reaction-created event into this
-	// shape; the gateway routes to ChatSession.HandleReaction,
+	// shape; the gateway routes to ChatSession.HandleAction,
 	// which checks gtwDrafts first (F-45 §3.5) and may fall
 	// through to the F-31 MessageState FSM for non-gtw reactions.
 	//
@@ -183,8 +183,8 @@ type ActionPayload struct {
 // ReactionEvent is the abstract shape of a user-emoji reaction on
 // a previously-sent message. Channels build this from their
 // native reaction-created event; the gateway forwards to
-// ChatSession.HandleReaction which consults the per-chat
-// ReactionHandler installed at runtime.
+// ChatSession.HandleAction which consults the per-chat
+// ActionHandler installed at runtime.
 //
 // F-45 §3.2: this is the inbound counterpart of the bot's
 // AddReaction outbound API. Emoji is the raw unicode form

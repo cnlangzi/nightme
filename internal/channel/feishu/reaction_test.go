@@ -11,7 +11,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
-func TestHandleReactionCreated_TranslatesToInboundMessage(t *testing.T) {
+func TestHandleActionCreated_TranslatesToInboundMessage(t *testing.T) {
 	a := testAdapter(t)
 
 	const (
@@ -77,7 +77,7 @@ func TestHandleReactionCreated_TranslatesToInboundMessage(t *testing.T) {
 	}
 }
 
-func TestHandleReactionCreated_MissingFieldsDropsQuietly(t *testing.T) {
+func TestHandleActionCreated_MissingFieldsDropsQuietly(t *testing.T) {
 	a := testAdapter(t)
 	ev := &larkim.P2MessageReactionCreatedV1{
 		EventReq: &larkevent.EventReq{Body: []byte(`{"event":{}}`)},
@@ -93,7 +93,7 @@ func TestHandleReactionCreated_MissingFieldsDropsQuietly(t *testing.T) {
 	}
 }
 
-func TestHandleReactionCreated_NilEvent(t *testing.T) {
+func TestHandleActionCreated_NilEvent(t *testing.T) {
 	a := testAdapter(t)
 	if err := a.handleReactionCreated(context.Background(), nil); err != nil {
 		t.Errorf("nil event should be no-op, got error: %v", err)

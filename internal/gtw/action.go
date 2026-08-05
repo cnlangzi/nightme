@@ -6,15 +6,15 @@ import (
 	"strings"
 )
 
-// HandleReaction is the gtw-internal reaction router. The runtime
-// calls it from ChatSession.HandleReaction (the single extra branch
+// HandleAction is the gtw-internal reaction router. The runtime
+// calls it from ChatSession.HandleAction (the single extra branch
 // added in F-45 §3.5). It looks up the draft by Reaction.TargetMsgID
 // and dispatches to the kind-specific executor.
 //
 // Returns (true, nil) when the reaction was consumed (a draft was
 // found and executed). Returns (false, nil) when no draft matches —
 // the caller should fall through to the F-31 MessageState FSM.
-func HandleReaction(
+func HandleAction(
 	ctx context.Context,
 	deps HandlerDeps,
 	cs Sender,

@@ -4,7 +4,7 @@
 // `/cwd` / `/use` / `/kill`. The gtw-specific bits that hang off
 // ChatSession (gtwContext / gtwDrafts) are accessed via the
 // accessors in internal/chatsession/gtw_accessors.go. Reaction
-// routing is the single extra branch in ChatSession.HandleReaction
+// routing is the single extra branch in ChatSession.HandleAction
 // referenced by the F-45 §3.5 design.
 //
 // v1 only implements `/gtw fix <id>`. Other /gtw subcommands are
@@ -61,7 +61,7 @@ func RegisterGTW(
 // gtwSendAdapter wraps gateway.Channel.Send into a gtw.SendFunc.
 // Kept as a separate named func so the closure is alloc-free on
 // each /gtw invocation. The ctx comes from the caller (the
-// gtw.RunFix / HandleReaction invocation), not a fresh
+// gtw.RunFix / HandleAction invocation), not a fresh
 // context.Background() — adapters use the ctx for rate limiting
 // and cancellation.
 func gtwSendAdapter(channel Channel) gtw.SendFunc {
@@ -182,7 +182,7 @@ func (d *gtwDraftsMap) Lookup(userMsgID string) *gtw.Draft {
 
 // --- Action routing ---------------------------------------------
 //
-// RegisterGTWReaction installs the gtw-draft action executor
+// RegisterGTWAction installs the gtw-draft action executor
 // on every ChatSession the manager creates. The runtime calls
 // this once at startup (alongside the existing
 // `SetMessageStateHandler` wiring) so a /gtw decision card can
@@ -190,10 +190,10 @@ func (d *gtwDraftsMap) Lookup(userMsgID string) *gtw.Draft {
 //
 // The handler looks up gtwDrafts by TargetMsgID. If a draft
 // exists, it is taken (one-shot per emoji) and dispatched to
-// gtw.HandleReaction. If no draft matches, the handler returns
+// gtw.HandleAction. If no draft matches, the handler returns
 // false so the runtime can fall through to future handlers
 // (none today; placeholder for F-31+ reaction-driven FSM).
-func RegisterGTWReaction(mgr *chatsession.Manager, deps gtw.HandlerDeps) {
+func RegisterGTWAction(mgr *chatsession.Manager, deps gtw.HandlerDeps) {
 	if mgr == nil {
 		return
 	}
@@ -205,26 +205,26 @@ func RegisterGTWReaction(mgr *chatsession.Manager, deps gtw.HandlerDeps) {
 	}
 	if deps.Send == nil {
 		// The action handler does not currently call Send
-		// itself (the gtw.HandleReaction path uses the same
+		// itself (the gtw.HandleAction path uses the same
 		// Send func that RunFix uses). The default channel-
 		// backed adapter lives on the runtime; we don't have
 		// a Channel reference here so we leave deps.Send nil
-		// and let gtw.HandleReaction fall back to its
+		// and let gtw.HandleAction fall back to its
 		// in-package reply helper. The runtime is expected
 		// to pre-populate deps.Send via RegisterGTW before
-		// calling RegisterGTWReaction.
+		// calling RegisterGTWAction.
 		_ = deps.Send
 	}
 	storedDeps := deps
 	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
-		cs.SetReactionHandler(func(ctx context.Context, ev chatsession.ReactionEvent) bool {
+		cs.SetActionHandler(func(ctx context.Context, ev chatsession.ReactionEvent) bool {
 			if cs.GTWDraft(ev.TargetMsgID) == nil {
 				return false
 			}
 			csAdapter := &csSender{cs: cs}
 			slot := &gtwContextSlot{cs: cs}
 			drafts := &gtwDraftsMap{cs: cs}
-			consumed, _ := gtw.HandleReaction(ctx, storedDeps, csAdapter, slot, drafts, gtw.ReactionEvent{
+			consumed, _ := gtw.HandleAction(ctx, storedDeps, csAdapter, slot, drafts, gtw.ReactionEvent{
 				TargetMsgID: ev.TargetMsgID,
 				Emoji:       ev.Emoji,
 				UserID:      ev.UserID,

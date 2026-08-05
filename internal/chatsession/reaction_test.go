@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-func TestHandleReaction_NoHandler(t *testing.T) {
+func TestHandleAction_NoHandler(t *testing.T) {
 	cs := New("chat-1", "primary")
-	consumed := cs.HandleReaction(context.Background(), ReactionEvent{
+	consumed := cs.HandleAction(context.Background(), ReactionEvent{
 		TargetMsgID: "msg-1",
 		Emoji:       "✅",
 		ChatID:      "chat-1",
@@ -17,7 +17,7 @@ func TestHandleReaction_NoHandler(t *testing.T) {
 	}
 }
 
-func TestHandleReaction_DispatchesToHandler(t *testing.T) {
+func TestHandleAction_DispatchesToHandler(t *testing.T) {
 	cs := New("chat-1", "primary")
 
 	var (
@@ -25,7 +25,7 @@ func TestHandleReaction_DispatchesToHandler(t *testing.T) {
 		gotCtx context.Context
 		calls  int
 	)
-	cs.SetReactionHandler(func(ctx context.Context, ev ReactionEvent) bool {
+	cs.SetActionHandler(func(ctx context.Context, ev ReactionEvent) bool {
 		gotEv = ev
 		gotCtx = ctx
 		calls++
@@ -38,7 +38,7 @@ func TestHandleReaction_DispatchesToHandler(t *testing.T) {
 		UserID:      "ou_xyz",
 		ChatID:      "chat-1",
 	}
-	consumed := cs.HandleReaction(context.Background(), want)
+	consumed := cs.HandleAction(context.Background(), want)
 	if !consumed {
 		t.Fatal("consumed = false, want true (handler returned true)")
 	}
@@ -53,24 +53,24 @@ func TestHandleReaction_DispatchesToHandler(t *testing.T) {
 	}
 }
 
-func TestHandleReaction_HandlerFalse(t *testing.T) {
+func TestHandleAction_HandlerFalse(t *testing.T) {
 	cs := New("chat-1", "primary")
-	cs.SetReactionHandler(func(_ context.Context, _ ReactionEvent) bool {
+	cs.SetActionHandler(func(_ context.Context, _ ReactionEvent) bool {
 		return false
 	})
-	if cs.HandleReaction(context.Background(), ReactionEvent{TargetMsgID: "x"}) {
+	if cs.HandleAction(context.Background(), ReactionEvent{TargetMsgID: "x"}) {
 		t.Error("consumed = true, want false")
 	}
 }
 
-func TestSetReactionHandler_NilClears(t *testing.T) {
+func TestSetActionHandler_NilClears(t *testing.T) {
 	cs := New("chat-1", "primary")
-	cs.SetReactionHandler(func(_ context.Context, _ ReactionEvent) bool { return true })
-	cs.SetReactionHandler(nil)
-	if cs.HandleReaction(context.Background(), ReactionEvent{TargetMsgID: "x"}) {
+	cs.SetActionHandler(func(_ context.Context, _ ReactionEvent) bool { return true })
+	cs.SetActionHandler(nil)
+	if cs.HandleAction(context.Background(), ReactionEvent{TargetMsgID: "x"}) {
 		t.Error("after nil-clear, handler should not be called")
 	}
-	if cs.ReactionHandler() != nil {
-		t.Error("ReactionHandler() should return nil after nil-clear")
+	if cs.ActionHandler() != nil {
+		t.Error("ActionHandler() should return nil after nil-clear")
 	}
 }

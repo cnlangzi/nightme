@@ -325,7 +325,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		NewPlatform: gtw.NewPlatformClient,
 	}
 	gateway.RegisterGTW(gwImpl, mgr, ch, cfg.Primary, gtwDeps)
-	gateway.RegisterGTWReaction(mgr, gtwDeps)
+	gateway.RegisterGTWAction(mgr, gtwDeps)
 	gwImpl.AttachChannels(ch)
 
 	// F-watch §3.1.1: install the per-chat WatchMode resolver so

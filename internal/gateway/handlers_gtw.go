@@ -13,6 +13,8 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -49,11 +51,15 @@ func RegisterGTW(
 	// is self-contained. gtw package is stateless; this is the
 	// only place we materialize the binding.
 	storedDeps := deps
+	// Capture gw too so the /gtw test subcommand can call
+	// DispatchInbound to synthesise a reaction event against the
+	// user's real ChatSession. See runGTWTestAction.
+	storedGw := gw
 	gw.Register(Command{
 		Name:        "gtw",
-		Description: "Team workflow: /gtw fix <issue-id> (claim, worktree, label). F-45.",
+		Description: "Team workflow: /gtw fix <issue-id> | /gtw test {action|seed|drafts|drain} (F-45).",
 		Handler: func(ctx context.Context, msg *InboundMessage, args []string) (*CommandResult, error) {
-			return handleGTW(ctx, mgr, channel, msg, args, globalPrimary, storedDeps)
+			return handleGTW(ctx, mgr, channel, msg, args, globalPrimary, storedDeps, storedGw)
 		},
 	})
 }
@@ -76,8 +82,9 @@ func gtwSendAdapter(channel Channel) gtw.SendFunc {
 }
 
 // handleGTW is the single entry point for all /gtw subcommands.
-// v1 dispatches only `fix`; the rest return a "not implemented"
-// card. New subcommands are added in F-46+ and dispatched here.
+// v1 dispatches `fix` (real /gtw fix) and `test` (manual reaction
+// flow exerciser — F-45). New subcommands are added in F-46+
+// and dispatched here.
 func handleGTW(
 	ctx context.Context,
 	mgr *chatsession.Manager,
@@ -86,19 +93,22 @@ func handleGTW(
 	args []string,
 	globalPrimary string,
 	deps gtw.HandlerDeps,
+	gw Gateway,
 ) (*CommandResult, error) {
 	if len(args) < 1 {
 		return sendGTWReply(ctx, channel, msg.ChatID,
-			"Usage: /gtw fix <issue-id>"), nil
+			"Usage: /gtw fix <issue-id> | /gtw test {action|seed|drafts|drain}"), nil
 	}
 	sub := args[0]
 	rest := args[1:]
 	switch sub {
 	case "fix":
 		return runGTWFix(ctx, mgr, channel, msg, rest, globalPrimary, deps)
+	case "test":
+		return runGTWTest(ctx, mgr, channel, msg, rest, deps, gw)
 	default:
 		return sendGTWReply(ctx, channel, msg.ChatID,
-			"❌ Unknown /gtw subcommand: "+sub+" (v1 only supports `fix`)"), nil
+			"❌ Unknown /gtw subcommand: "+sub+" (v1 supports `fix` and `test`)"), nil
 	}
 }
 
@@ -233,4 +243,220 @@ func RegisterGTWAction(mgr *chatsession.Manager, deps gtw.HandlerDeps) {
 			return consumed
 		})
 	})
+}
+
+// runGTWTest is the manual reaction-flow exerciser. It lets a
+// developer drive the F-45 §3.5 reaction pipeline from a chat
+// without needing a real Feishu setup. The subcommands:
+//
+//	/gtw test action <msg_id> <emoji>
+//	    Synthesise a reaction event and run it through
+//	    gateway.DispatchInbound against the user's real
+//	    ChatSession. The runtime's gtw action handler fires
+//	    (installed via gateway.RegisterGTWAction); any cards
+//	    the executor emits land in the chat normally.
+//	    Reply: one-line summary (consumed/dropped + outcome).
+//
+//	/gtw test seed <user_msg_id> <kind>
+//	    Manually store a gtwDraft in the chat. <kind> is one
+//	    of branch-exists | worktree-fail | label-taken. Uses
+//	    hardcoded test values (issue=42, branch=fix/42-test,
+//	    repo=cnlangzi/nightme). Lets you seed a draft and then
+//	    drive it with a /gtw test action click.
+//
+//	/gtw test drafts
+//	    Print every gtwDraft in the chat. Useful for verifying
+//	    what was seeded or what a /gtw fix left behind.
+//
+//	/gtw test drain
+//	    Clear the gtwContext for the chat (and best-effort drop
+//    pending drafts). Useful between test runs.
+func runGTWTest(
+	ctx context.Context,
+	mgr *chatsession.Manager,
+	channel Channel,
+	msg *InboundMessage,
+	args []string,
+	deps gtw.HandlerDeps,
+	gw Gateway,
+) (*CommandResult, error) {
+	if len(args) < 1 {
+		return sendGTWReply(ctx, channel, msg.ChatID,
+			"Usage: /gtw test {action <msg_id> <emoji> | seed <user_msg_id> <kind> | drafts | drain}"), nil
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "action":
+		return runGTWTestAction(ctx, mgr, channel, msg, rest, gw)
+	case "seed":
+		return runGTWTestSeed(ctx, mgr, channel, msg, rest)
+	case "drafts":
+		return runGTWTestDrafts(ctx, mgr, channel, msg)
+	case "drain":
+		return runGTWTestDrain(ctx, mgr, channel, msg)
+	default:
+		return sendGTWReply(ctx, channel, msg.ChatID,
+			"❌ Unknown /gtw test subcommand: "+sub+" (want action | seed | drafts | drain)"), nil
+	}
+}
+
+// runGTWTestAction synthesises a reaction and dispatches it via
+// the real gateway. The runtime's gtw action handler is already
+// installed (gateway.RegisterGTWAction), so any draft in the
+// chat is consumed; any card the executor emits is sent to the
+// user normally.
+func runGTWTestAction(
+	ctx context.Context,
+	mgr *chatsession.Manager,
+	channel Channel,
+	msg *InboundMessage,
+	args []string,
+	gw Gateway,
+) (*CommandResult, error) {
+	_ = mgr // not used directly; the gateway looks up the chat
+	if len(args) < 2 {
+		return sendGTWReply(ctx, channel, msg.ChatID,
+			"Usage: /gtw test action <msg_id> <emoji>"), nil
+	}
+	msgID, emoji := args[0], args[1]
+	if msgID == "" || emoji == "" {
+		return sendGTWReply(ctx, channel, msg.ChatID,
+			"❌ /gtw test action: msg_id and emoji must be non-empty"), nil
+	}
+
+	inbound := &InboundMessage{
+		ChatID:     msg.ChatID,
+		UserID:     msg.UserID,
+		Text:       "", // reactions have no text
+		HasMention: true,
+		Reaction: &chatsession.ReactionEvent{
+			TargetMsgID: msgID,
+			Emoji:       emoji,
+			UserID:      msg.UserID,
+			ChatID:      msg.ChatID,
+		},
+	}
+
+	res, err := gw.DispatchInbound(ctx, inbound)
+	if err != nil {
+		return sendGTWReply(ctx, channel, msg.ChatID,
+			"❌ /gtw test action: dispatch error: "+err.Error()), nil
+	}
+	if res == nil {
+		return sendGTWReply(ctx, channel, msg.ChatID,
+			fmt.Sprintf("⚠️ /gtw test action %s %s: no result (unexpected nil)", msgID, emoji)), nil
+	}
+	switch {
+	case res.Consumed && !res.Dropped:
+		return sendGTWReply(ctx, channel, msg.ChatID,
+			fmt.Sprintf("✅ /gtw test action %s %s — consumed=true dropped=false. Any follow-up card is in the chat thread.", msgID, emoji)), nil
+	case res.Consumed && res.Dropped:
+		return sendGTWReply(ctx, channel, msg.ChatID,
+			fmt.Sprintf("⚠️ /gtw test action %s %s — consumed=true dropped=true (handler ran but did not consume; e.g. no matching gtwDraft, or the emoji was not in the documented set).", msgID, emoji)), nil
+	default:
+		return sendGTWReply(ctx, channel, msg.ChatID,
+			fmt.Sprintf("❌ /gtw test action %s %s — consumed=false dropped=%v (dispatcher rejected; check the runtime actionHandler).", msgID, emoji, res.Dropped)), nil
+	}
+}
+
+// runGTWTestSeed manually stores a gtwDraft so subsequent
+// /gtw test action clicks have a target. The test values are
+// hardcoded — for full control, use `nightme debug action
+// --seed=...` from the CLI instead.
+//
+// <kind> is one of: branch-exists, worktree-fail, label-taken.
+func runGTWTestSeed(
+	ctx context.Context,
+	mgr *chatsession.Manager,
+	channel Channel,
+	msg *InboundMessage,
+	args []string,
+) (*CommandResult, error) {
+	if len(args) < 2 {
+		return sendGTWReply(ctx, channel, msg.ChatID,
+			"Usage: /gtw test seed <user_msg_id> <kind>  (kind: branch-exists | worktree-fail | label-taken)"), nil
+	}
+	userMsgID, kind := args[0], args[1]
+	if userMsgID == "" {
+		return sendGTWReply(ctx, channel, msg.ChatID,
+			"❌ /gtw test seed: user_msg_id is required"), nil
+	}
+
+	var draftKind chatsession.GTWDraftKind
+	switch kind {
+	case "branch-exists":
+		draftKind = chatsession.GTWDraftFixBranchExists
+	case "worktree-fail":
+		draftKind = chatsession.GTWDraftFixWorktreeFail
+	case "label-taken":
+		draftKind = chatsession.GTWDraftFixLabelTaken
+	default:
+		return sendGTWReply(ctx, channel, msg.ChatID,
+			"❌ /gtw test seed: unknown kind "+kind+" (want branch-exists | worktree-fail | label-taken)"), nil
+	}
+
+	cs := mgr.GetOrCreate(msg.ChatID, "primary")
+	cs.StoreGTWDraft(userMsgID, &chatsession.GTWDraft{
+		Kind: draftKind,
+		Payload: chatsession.GTWFixDraftPayload{
+			IssueID:    42,
+			Title:      "synthetic /gtw test seed",
+			Branch:     "fix/42-test",
+			Slug:       "42-test",
+			Repo:       "cnlangzi/nightme",
+			Platform:   "github",
+			LabelAdded: kind != "worktree-fail",
+			ChatID:     msg.ChatID,
+		},
+		CreatedAt: time.Now(),
+	})
+	return sendGTWReply(ctx, channel, msg.ChatID,
+		fmt.Sprintf("✅ /gtw test seed — stored %s draft under userMsgID=%q. React with: /gtw test action %s <emoji>", kind, userMsgID, userMsgID)), nil
+}
+
+// runGTWTestDrafts lists every gtwDraft in the chat.
+func runGTWTestDrafts(
+	ctx context.Context,
+	mgr *chatsession.Manager,
+	channel Channel,
+	msg *InboundMessage,
+) (*CommandResult, error) {
+	cs := mgr.GetOrCreate(msg.ChatID, "primary")
+	drafts := cs.ListGTWDrafts()
+	if len(drafts) == 0 {
+		return sendGTWReply(ctx, channel, msg.ChatID,
+			"/gtw test drafts: (none in this chat)"), nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "/gtw test drafts — %d in this chat:\n", len(drafts))
+	for i, d := range drafts {
+		fmt.Fprintf(&b, "  [%d] kind=%s  issueID=%d  branch=%q  repo=%q  createdAt=%s\n",
+			i, d.Kind, d.Payload.IssueID, d.Payload.Branch, d.Payload.Repo,
+			d.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
+	}
+	return sendGTWReply(ctx, channel, msg.ChatID, b.String()), nil
+}
+
+// runGTWTestDrain clears the gtwContext and best-effort drops
+// pending drafts.
+func runGTWTestDrain(
+	ctx context.Context,
+	mgr *chatsession.Manager,
+	channel Channel,
+	msg *InboundMessage,
+) (*CommandResult, error) {
+	cs := mgr.GetOrCreate(msg.ChatID, "primary")
+	before := len(cs.ListGTWDrafts())
+	// chatsession has no public "drain all drafts" method; we
+	// iterate by stable key (kind-as-key is best-effort) and
+	// always end with ClearGTWContext which is the semantically
+	// important reset.
+	for _, d := range cs.ListGTWDrafts() {
+		_ = cs.TakeGTWDraft(string(d.Kind))
+	}
+	cs.ClearGTWContext()
+	after := len(cs.ListGTWDrafts())
+	return sendGTWReply(ctx, channel, msg.ChatID,
+		fmt.Sprintf("✅ /gtw test drain — cleared gtwContext (drafts before=%d after=%d)", before, after)), nil
 }

@@ -49,6 +49,29 @@ func handleNew(ctx context.Context, mgr *chatsession.Manager, channel Channel,
 
 	matched, _, results, err := cs.NewActiveAgentSessions(ctx, agentName)
 
+	// F-45 §1.7: /new is the ONLY event that clears cumulative
+	// token / cost stats on the AgentSession. Bridge New()
+	// already reset the conversation context; runtime resets the
+	// counter so the footer starts from zero on the next reply.
+	// PersistAgentSession is called immediately so the cleared
+	// state survives daemon restart even if no further turn
+	// completes (and thus no EventDone-triggered persist fires).
+	for _, r := range results {
+		if r.Session == nil || r.Error != nil {
+			continue
+		}
+		r.Session.ResetCumulative()
+		if mgr != nil {
+			if persistErr := mgr.PersistAgentSession(r.Session); persistErr != nil {
+				// Don't clobber the primary error if NewActiveAgentSessions
+				// already returned one — log and move on.
+				if err == nil {
+					err = persistErr
+				}
+			}
+		}
+	}
+
 	if matched == 0 {
 		if agentName != "" {
 			return reply(ctx, channel, msg.ChatID,

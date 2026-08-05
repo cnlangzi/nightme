@@ -704,6 +704,96 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 	return a.receiptsByUserMsgID[userMsgID] // nil on miss — caller decides
 }
 
+// ensureReceiptForTyping lazily creates a Typing-placeholder
+// receipt when the FIRST event for a userMsgID is a
+// OutMessageState{State: MessageForwarded} (the gateway just
+// forwarded the user message to the agent). The placeholder has
+// NO entries and NO tasks yet — the card body just shows the
+// "⏳ Typing..." markdown header line that buildReceiptCard
+// prepends when both lists are empty. Subsequent OutReply /
+// OutTask* events stream updates onto the same card via
+// AppendEntry / SetTaskList (each re-render replaces the
+// placeholder header with real content).
+//
+// F-44 lifecycle shift: receipts used to be lazy-created on the
+// first content event (OutReply / OutTaskCreate). With this
+// commit the placeholder appears the moment the agent receives
+// the user message — the user sees immediate "I heard you,
+// working on it…" feedback in main chat, before any stream chunk
+// or task event lands. The placeholder rolls forward into a real
+// rolling-log card as content arrives.
+//
+// Wire: top-level Create (rootID="") so the placeholder stays in
+// main chat regardless of the parent user message's thread
+// state. Same parent-thread gotcha rationale as
+// ensureReceiptForReply / ensureReceiptForTask / OutCard /
+// OutCommandReply.
+//
+// Returns the receipt plus a `created` flag: created=true means
+// the placeholder was just posted (caller can short-circuit any
+// duplicate logic — typically just OutMessageState AddReaction
+// path). created=false means a receipt already existed (race with
+// OutTask* / OutReply that fired before MessageForwarded was
+// observed, or a duplicate MessageForwarded) — caller treats it
+// as a no-op for placeholder purposes.
+//
+// F-42 review finding #5: same orphan-card race fix as
+// ensureReceiptForTask. Register-before-SendCard with the
+// `initializing` flag so concurrent SendCard / SetTaskList /
+// AppendEntry calls hit the renderLocked short-circuit instead of
+// issuing a second SendCard (the loser doesn't leave an orphan
+// card with a stale Typing header in chat).
+func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID string) (*MessageReceipt, bool, error) {
+	if userMsgID == "" {
+		return nil, false, errors.New("feishu: ensureReceiptForTyping requires userMsgID")
+	}
+
+	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
+	// No entries / no tasks — buildReceiptCard will render the
+	// "⏳ Typing..." placeholder header line.
+	transient.promptState = agent.PromptPending
+	transient.initializing = true
+
+	a.mu.Lock()
+	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
+		a.mu.Unlock()
+		return existing, false, nil
+	}
+	a.receiptsByUserMsgID[userMsgID] = transient
+	a.mu.Unlock()
+
+	body, err := buildReceiptCard(nil, nil)
+	if err != nil {
+		a.mu.Lock()
+		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
+			delete(a.receiptsByUserMsgID, userMsgID)
+		}
+		a.mu.Unlock()
+		return nil, false, fmt.Errorf("feishu: ensure typing receipt build card: %w", err)
+	}
+
+	// Top-level Create (rootID="") so the Typing placeholder stays
+	// visible in main chat regardless of the parent thread state.
+	msgID, err := a.SendCard(ctx, chatID, body, "", false)
+	if err != nil {
+		a.mu.Lock()
+		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
+			delete(a.receiptsByUserMsgID, userMsgID)
+		}
+		a.mu.Unlock()
+		a.logger.Warn("feishu: ensureReceiptForTyping send card failed",
+			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
+		return nil, false, err
+	}
+
+	a.mu.Lock()
+	transient.replyMsgID = msgID
+	transient.cardMsgID = msgID
+	transient.initializing = false
+	a.mu.Unlock()
+	return transient, true, nil
+}
+
 // ensureReceiptForReply lazily creates a rolling-log receipt when
 // the FIRST event for a userMsgID is an OutReply (no prior receipt
 // exists). The first entry is installed in the transient receipt
@@ -1000,6 +1090,21 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		messageID := msg.MessageState.MessageID
 		state := msg.MessageState.State
+
+		// F-44 lifecycle shift: when the gateway has just
+		// forwarded the user message to the agent
+		// (MessageForwarded), eagerly create a Typing-placeholder
+		// receipt so the user sees "⏳ Typing..." in main chat
+		// before any OutReply / OutTask* event lands. Subsequent
+		// events stream updates onto the same card via
+		// AppendEntry / SetTaskList. The placeholder goes to
+		// top-level Create (ReplyInChat) so it stays in main
+		// chat regardless of the parent thread state. Orphan
+		// path (no userMsgID from MessageForwarded) silently
+		// drops the placeholder — the reaction still fires below.
+		if state == agent.MessageForwarded && msg.ReplyTo != "" {
+			_, _, _ = a.ensureReceiptForTyping(ctx, msg.ChatID, msg.ReplyTo)
+		}
 
 		// Terminal-state guard: once we've rendered MessageDone or
 		// MessageFailed for a userMsgID, no later MessageState can
@@ -1806,7 +1911,22 @@ func encodeCardJSON(v any) ([]byte, error) {
 // would silently bypass the lock semantics.
 func buildReceiptCard(entries []LogEntry, tasks []agent.TaskItem) (string, error) {
 
-	elements := make([]map[string]any, 0, len(entries)+3)
+	elements := make([]map[string]any, 0, len(entries)+4)
+
+	// Section 0 (placeholder header): when the receipt has no
+	// entries and no tasks yet, prepend a Typing indicator so the
+	// user sees "⏳ Typing..." immediately after MessageForwarded
+	// fires. The header is removed as soon as the first entry or
+	// task arrives (the next renderLocked call sees a non-empty
+	// list and omits the header). This gives the user immediate
+	// feedback that the bot received the message and is working,
+	// before any stream chunk or task event lands.
+	if len(entries) == 0 && len(tasks) == 0 {
+		elements = append(elements, map[string]any{
+			"tag":     "markdown",
+			"content": "⏳ Typing...",
+		})
+	}
 
 	// Section 1: rolling-log entries. Each entry's text is
 	// sanitized (so a malicious or malformed chunk can't break

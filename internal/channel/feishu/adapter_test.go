@@ -1904,3 +1904,223 @@ func TestSend_OutUsage_SilentDrop(t *testing.T) {
 		t.Errorf("send count = %d, want 0 (OutUsage silent drop until footer PR)", count)
 	}
 }
+
+
+// ---------------------------------------------------------------------------
+// F-44 lifecycle shift: MessageForwarded → Typing placeholder receipt
+//
+// These tests call ensureReceiptForTyping directly (the unit under
+// test) instead of going through Send(), because Send() also calls
+// AddReaction for MessageForwarded which requires a real larkClient
+// (no mockable hook today — covered by integration tests).
+// ---------------------------------------------------------------------------
+
+// TestEnsureReceiptForTyping_CreatesPlaceholder verifies that
+// ensureReceiptForTyping creates a Typing-placeholder card in main
+// chat (top-level Create, rootID="") with the "⏳ Typing..."
+// header line that buildReceiptCard prepends when both entries and
+// tasks are empty.
+//
+// F-44 lifecycle shift: receipts used to be lazy-created on the
+// first content event (OutReply / OutTaskCreate). With this commit
+// the placeholder appears the moment the agent receives the user
+// message — the user sees immediate "I heard you, working on it…"
+// feedback in main chat, before any stream chunk or task event lands.
+// Subsequent events stream updates onto the same card via
+// AppendEntry / SetTaskList.
+func TestEnsureReceiptForTyping_CreatesPlaceholder(t *testing.T) {
+	a := testAdapter(t)
+
+	type captured struct {
+		ChatID        string
+		MsgType       string
+		RootID        string
+		Body          string
+		ReplyInThread bool
+	}
+	var sends []captured
+	a.sendFunc = func(_ context.Context, chatID, msgType, body, rootID string, replyInThread bool) (string, error) {
+		sends = append(sends, captured{ChatID: chatID, MsgType: msgType, RootID: rootID, Body: body, ReplyInThread: replyInThread})
+		return "om_typing_placeholder", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	const userMsgID = "om_user"
+	rcpt, created, err := a.ensureReceiptForTyping(context.Background(), "oc_test", userMsgID)
+	if err != nil {
+		t.Fatalf("ensureReceiptForTyping: %v", err)
+	}
+	if !created {
+		t.Errorf("created = false, want true (placeholder was just posted)")
+	}
+
+	// Exactly one SendCard call (the Typing placeholder).
+	if len(sends) != 1 {
+		t.Fatalf("send count = %d, want 1 (Typing placeholder)", len(sends))
+	}
+	got := sends[0]
+	if got.ChatID != "oc_test" {
+		t.Errorf("ChatID = %q, want %q", got.ChatID, "oc_test")
+	}
+	if got.MsgType != "interactive" {
+		t.Errorf("MsgType = %q, want %q (Feishu Card 2.0)", got.MsgType, "interactive")
+	}
+	// Top-level Create (rootID="", reply_in_thread=false) so the
+	// placeholder stays in main chat regardless of the parent
+	// thread state.
+	if got.RootID != "" {
+		t.Errorf("RootID = %q, want %q (top-level Create)", got.RootID, "")
+	}
+	if got.ReplyInThread {
+		t.Errorf("reply_in_thread = true, want false")
+	}
+	// Body must contain the Typing header line.
+	if !strings.Contains(got.Body, "⏳ Typing...") {
+		t.Errorf("body missing Typing header line, got %q", got.Body)
+	}
+	// Receipt registered in receiptsByUserMsgID with the placeholder
+	// cardMsgID and no entries / no tasks yet.
+	if rcpt == nil {
+		t.Fatalf("returned receipt is nil")
+	}
+	if rcpt.cardMsgID != "om_typing_placeholder" {
+		t.Errorf("receipt cardMsgID = %q, want %q", rcpt.cardMsgID, "om_typing_placeholder")
+	}
+	if len(rcpt.entries) != 0 {
+		t.Errorf("receipt entries = %d, want 0", len(rcpt.entries))
+	}
+	if len(rcpt.tasks) != 0 {
+		t.Errorf("receipt tasks = %d, want 0", len(rcpt.tasks))
+	}
+}
+
+// TestEnsureReceiptForTyping_NoOpWhenReceiptExists verifies that
+// calling ensureReceiptForTyping twice on the same userMsgID is
+// idempotent — the second call returns the existing receipt with
+// created=false, and no second SendCard is issued.
+func TestEnsureReceiptForTyping_NoOpWhenReceiptExists(t *testing.T) {
+	a := testAdapter(t)
+
+	var sends int
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		sends++
+		return "om_typing_placeholder", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	// First call: cold-start, posts the placeholder.
+	rcpt1, created1, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user")
+	if err != nil || !created1 {
+		t.Fatalf("first ensureReceiptForTyping: err=%v, created=%v", err, created1)
+	}
+	// Second call: receipt already exists, returns existing.
+	rcpt2, created2, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user")
+	if err != nil || created2 {
+		t.Fatalf("second ensureReceiptForTyping: err=%v, created=%v", err, created2)
+	}
+	if rcpt1 != rcpt2 {
+		t.Errorf("second call returned different receipt pointer")
+	}
+	if sends != 1 {
+		t.Errorf("send count = %d, want 1 (second call is no-op)", sends)
+	}
+}
+
+// TestEnsureReceiptForReply_ReusesTypingPlaceholder verifies that
+// after ensureReceiptForTyping creates the placeholder, the next
+// OutReply chunk's ensureReceiptForReply reuses the same receipt
+// (created=false), and the caller's AppendEntry PATCHes the
+// placeholder with the new entry.
+func TestEnsureReceiptForReply_ReusesTypingPlaceholder(t *testing.T) {
+	a := testAdapter(t)
+	var sends int
+	var patches int
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		sends++
+		return "om_typing_placeholder", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error {
+		patches++
+		return nil
+	}
+
+	// Step 1: Typing placeholder.
+	rcpt, created, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user")
+	if err != nil || !created {
+		t.Fatalf("ensureReceiptForTyping: err=%v, created=%v", err, created)
+	}
+
+	// Step 2: OutReply chunk reuses the same receipt.
+	rcpt2, created2, err := a.ensureReceiptForReply(context.Background(), "oc_test", "om_user", "first chunk")
+	if err != nil || created2 {
+		t.Fatalf("ensureReceiptForReply: err=%v, created=%v (want false)", err, created2)
+	}
+	if rcpt != rcpt2 {
+		t.Errorf("ensureReceiptForReply returned a different receipt (should reuse the Typing placeholder)")
+	}
+	// Caller (Send) now calls AppendEntry — PATCH the same card.
+	if err := rcpt2.AppendEntry(context.Background(), LogEntry{Icon: "💬", Text: "first chunk"}); err != nil {
+		t.Fatalf("AppendEntry: %v", err)
+	}
+
+	if sends != 1 {
+		t.Errorf("send count = %d, want 1 (only the placeholder was SendCard'd)", sends)
+	}
+	if patches != 1 {
+		t.Errorf("patch count = %d, want 1 (AppendEntry PATCHes the placeholder)", patches)
+	}
+	if len(rcpt.entries) != 1 {
+		t.Errorf("receipt entries = %d, want 1", len(rcpt.entries))
+	}
+}
+
+// TestEnsureReceiptForTask_ReusesTypingPlaceholder verifies that
+// after ensureReceiptForTyping creates the placeholder, the next
+// OutTask* event's ensureReceiptForTask reuses the same receipt
+// (created=false), and the caller's SetTaskList PATCHes the
+// placeholder with the task checklist.
+func TestEnsureReceiptForTask_ReusesTypingPlaceholder(t *testing.T) {
+	a := testAdapter(t)
+	var sends int
+	var patches int
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		sends++
+		return "om_typing_placeholder", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error {
+		patches++
+		return nil
+	}
+
+	// Step 1: Typing placeholder.
+	rcpt, created, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user")
+	if err != nil || !created {
+		t.Fatalf("ensureReceiptForTyping: err=%v, created=%v", err, created)
+	}
+
+	// Step 2: OutTask event reuses the same receipt.
+	list := &agent.TaskListEvent{Items: []agent.TaskItem{
+		{Subject: "step 1", Status: agent.TaskPending, ActiveForm: "doing 1"},
+	}}
+	rcpt2, created2, err := a.ensureReceiptForTask(context.Background(), "oc_test", "om_user", list)
+	if err != nil || created2 {
+		t.Fatalf("ensureReceiptForTask: err=%v, created=%v (want false)", err, created2)
+	}
+	if rcpt != rcpt2 {
+		t.Errorf("ensureReceiptForTask returned a different receipt (should reuse the Typing placeholder)")
+	}
+	// Caller (Send) now calls SetTaskList — PATCH the same card.
+	if err := rcpt2.SetTaskList(context.Background(), list); err != nil {
+		t.Fatalf("SetTaskList: %v", err)
+	}
+
+	if sends != 1 {
+		t.Errorf("send count = %d, want 1 (only the placeholder was SendCard'd)", sends)
+	}
+	if patches != 1 {
+		t.Errorf("patch count = %d, want 1 (SetTaskList PATCHes the placeholder)", patches)
+	}
+	if len(rcpt.tasks) != 1 {
+		t.Errorf("receipt tasks = %d, want 1", len(rcpt.tasks))
+	}
+}

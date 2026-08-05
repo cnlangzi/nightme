@@ -1709,6 +1709,14 @@ user_msg om_A
 
 ### 13.21 🎯 F-44 决策 (2026-08-05):OutReply 拆出 Receipt + Task Receipt 瘦身 + OutInit/OutUsage 推迟
 
+> ⚠️ **SUPERSEDED BY F-46** (PR #52). The `sendReplyInThreadAndChat`
+> helper described in this section was deleted in F-46; OutReply now
+> always renders as a Card 2.0 (via `postOrphanReplyCard` for the
+> orphan / cold-start-fail / overflow-bail-out paths, and via
+> `ensureReceiptForReplyWithFooter` for the anchored receipt path).
+> See the F-46 commit message for the current architecture. This
+> section is preserved as design history.
+
 **背景**:F-25 → F-40 → F-42 三轮演进后,Feishu receipt card 承担 4 类内容(prompt state header + OutReply entries + Tasks checklist + init/usage footer),渲染路径 ~1000 行。其中:
 
 1. **OutReply fold 进 receipt 的价值被稀释** ── 用户等 PATCH 周期才能看到完整内容;fold 路径需要 overflow / late-reply / no-receipt 三种 bail-out 协调
@@ -1809,6 +1817,14 @@ user_msg om_A
 **详细设计**:见 [`docs/feat/F-44-outreply-independent-and-task-receipt.md`](../feat/F-44-outreply-independent-and-task-receipt.md)。SPEC §0.11。
 
 ### 13.22 🎯 F-45 决策 (2026-08-05):Main-Chat 卡片 Footer + AgentSession 累计 Token 持久化
+
+> ⚠️ **F-46 follow-up (PR #52)**: the OutReply "append footer to text
+> via \n\n" path described in step 5 was replaced by a card-element
+> footer (hr + grey plain_text). OutResult got the same fix. The
+> helper `cardFooterElements` (result_render.go) is the single source
+> of truth for footer rendering across both OutReply and OutResult
+> cards. Step 5 below describes the pre-F-46 routing; the rendering
+> contract (hr + #999999 plain_text) is unchanged.
 
 **背景**:F-44 §6.1 推迟的 footer 兑现。`OutInit` / `OutUsage` 自 F-44 以来一直 silent drop,token / model 信息完全丢给用户。本节把 metadata 从 bridge event 搬到 `AgentSession` wrapper 自身,持久化到 `agent_sessions.json`,在 4 个 main-chat Kind 上 stamp `SessionContext *SessionContext` typed snapshot 到每条消息。
 

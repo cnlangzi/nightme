@@ -1,4 +1,4 @@
-// F-45: `/gtw fix <id>` slash command + reaction routing.
+// F-45: `/gtw fix <id>` slash command + action routing.
 //
 // `/gtw` is a regular Command registered on the Gateway, just like
 // `/cwd` / `/use` / `/kill`. The gtw-specific bits that hang off
@@ -180,9 +180,9 @@ func (d *gtwDraftsMap) Lookup(userMsgID string) *gtw.Draft {
 	return d.cs.GTWDraft(userMsgID)
 }
 
-// --- Reaction routing ---------------------------------------------
+// --- Action routing ---------------------------------------------
 //
-// RegisterGTWReaction installs the gtw-draft reaction executor
+// RegisterGTWReaction installs the gtw-draft action executor
 // on every ChatSession the manager creates. The runtime calls
 // this once at startup (alongside the existing
 // `SetMessageStateHandler` wiring) so a /gtw decision card can
@@ -204,7 +204,7 @@ func RegisterGTWReaction(mgr *chatsession.Manager, deps gtw.HandlerDeps) {
 		deps.NewPlatform = gtw.NewPlatformClient
 	}
 	if deps.Send == nil {
-		// The reaction handler does not currently call Send
+		// The action handler does not currently call Send
 		// itself (the gtw.HandleReaction path uses the same
 		// Send func that RunFix uses). The default channel-
 		// backed adapter lives on the runtime; we don't have

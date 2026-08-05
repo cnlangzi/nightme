@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -881,6 +883,98 @@ func (cs *ChatSession) KillAll() ([]KillResult, error) {
 	}
 	cs.persistChatEntry()
 	return results, nil
+}
+
+// FormatKillResults produces a human-readable summary of /kill's
+// per-entry outcomes. The output is suitable for channel.Send
+// (plain text, Feishu-renderable).
+//
+// Output templates (selected by the (killed, stale, failed) tuple):
+//   - all empty:           "No active agents to kill."
+//   - all killed:          "Stopped N agent session(s):\n  ✓ <name> @ <cwd>\n..."
+//   - all stale:           "Cleared N stale agent session(s) (no live processes):\n  • <name> @ <cwd> — already exited, entry cleaned\n..."
+//   - mixed:               "<header>:\n  ✓ ... \n  • ... \n  ✗ <name> @ <cwd> — <action>: <err>\n..."
+//
+// Errors are surfaced explicitly per-entry (never swallowed). Output is
+// capped at 20 lines + a "...and N more" tail to stay under Feishu's
+// 4KB single-message limit.
+//
+// Lines are sorted alphabetically for stable display across re-runs.
+// See docs/feat/F-42-kill-new-graceful-and-reset.md §6 for the Wording
+// variants and the ✓/✗/• icon legend.
+func FormatKillResults(results []KillResult) string {
+	if len(results) == 0 {
+		return "No active agents to kill."
+	}
+
+	var killed, stale, failed int
+	lines := make([]string, 0, len(results))
+
+	for _, r := range results {
+		if r.Error != nil {
+			failed++
+			lines = append(lines, fmt.Sprintf("  ✗ %s @ %s — %s: %v",
+				r.Agent, r.Cwd, actionVerb(r.Action), r.Error))
+			continue
+		}
+		switch r.Action {
+		case "killed":
+			killed++
+			lines = append(lines, fmt.Sprintf("  ✓ %s @ %s", r.Agent, r.Cwd))
+		case "stale-cleared":
+			stale++
+			lines = append(lines, fmt.Sprintf("  • %s @ %s — already exited, entry cleaned",
+				r.Agent, r.Cwd))
+		default:
+			// future action: surface as success mark, generic text
+			lines = append(lines, fmt.Sprintf("  ✓ %s @ %s — %s",
+				r.Agent, r.Cwd, r.Action))
+		}
+	}
+
+	sort.Strings(lines)
+
+	const maxLines = 20
+	if len(lines) > maxLines {
+		hidden := len(lines) - maxLines
+		lines = lines[:maxLines]
+		lines = append(lines, fmt.Sprintf("  ... and %d more", hidden))
+	}
+
+	return buildKillHeader(killed, stale, failed) + "\n" + strings.Join(lines, "\n")
+}
+
+func buildKillHeader(killed, stale, failed int) string {
+	if failed == 0 && stale == 0 {
+		return fmt.Sprintf("Stopped %d agent session(s):", killed)
+	}
+	if killed == 0 && stale > 0 && failed == 0 {
+		return fmt.Sprintf("Cleared %d stale agent session(s) (no live processes):", stale)
+	}
+	parts := make([]string, 0, 3)
+	if killed > 0 {
+		parts = append(parts, fmt.Sprintf("Stopped %d", killed))
+	}
+	if stale > 0 {
+		parts = append(parts, fmt.Sprintf("%d stale entry cleared", stale))
+	}
+	if failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed", failed))
+	}
+	return strings.Join(parts, ", ") + ":"
+}
+
+// actionVerb returns a short human-readable verb for an Action string
+// (used in error messages). Future actions can be added here.
+func actionVerb(action string) string {
+	switch action {
+	case "killed":
+		return "kill"
+	case "stale-cleared":
+		return "stale-clear"
+	default:
+		return action
+	}
 }
 
 // NewActiveAgentSessions resets the conversation context on the

@@ -762,7 +762,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(nil, nil)
+	body, err := buildReceiptCard(nil, nil, "")
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -844,6 +844,13 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 // instead of issuing a second SendCard, so the loser doesn't leave
 // an orphan card in chat with a stale entry / task snapshot.
 func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, firstEntryText string) (*MessageReceipt, bool, error) {
+	return a.ensureReceiptForReplyWithFooter(ctx, chatID, userMsgID, firstEntryText, "")
+}
+
+// ensureReceiptForReplyWithFooter (F-45) is the same as
+// ensureReceiptForReply but stamps the SessionContext footer at
+// cold-start so the very first chunk carries cumulative stats.
+func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, userMsgID, firstEntryText, footer string) (*MessageReceipt, bool, error) {
 	if userMsgID == "" {
 		return nil, false, errors.New("feishu: ensureReceiptForReply requires userMsgID")
 	}
@@ -855,6 +862,7 @@ func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, 
 	transient.entries = []LogEntry{
 		{Icon: "💬", Text: firstEntryText},
 	}
+	transient.footer = footer
 	transient.promptState = agent.PromptRunning
 	transient.initializing = true
 
@@ -868,7 +876,7 @@ func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, 
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(transient.entries, transient.tasks)
+	body, err := buildReceiptCard(transient.entries, transient.tasks, transient.footer)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -948,7 +956,7 @@ func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, 
 // visible in main chat. Subsequent PATCHes (SetTaskList →
 // PatchMessage) preserve the no-anchor state since PATCH on a
 // top-level Create stays top-level (root_id inheritance).
-func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID string, list *agent.TaskListEvent) (*MessageReceipt, bool, error) {
+func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID string, list *agent.TaskListEvent, footer string) (*MessageReceipt, bool, error) {
 	if userMsgID == "" {
 		return nil, false, errors.New("feishu: ensureReceiptForTask requires userMsgID")
 	}
@@ -964,6 +972,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	copied := make([]agent.TaskItem, len(items))
 	copy(copied, items)
 	transient.tasks = copied
+	transient.footer = footer // F-45: footer captured at cold-start
 	transient.promptState = agent.PromptRunning
 	transient.initializing = true
 
@@ -977,7 +986,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(nil, transient.tasks)
+	body, err := buildReceiptCard(nil, transient.tasks, transient.footer)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -1052,6 +1061,16 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if text == "" {
 			return nil
 		}
+		// F-45 §2.8: append SessionContext footer to the chunk
+		// body so each entry shows cumulative stats as of this
+		// chunk's arrival. Combining into the entry text (vs
+		// adding a separate element) keeps the 50 element
+		// receipt budget intact — long turns stay under cap.
+		// footer may be "" when no SessionContext stamped.
+		footer := formatSessionFooter(msg.SessionContext)
+		if footer != "" {
+			text = text + "\n\n" + footer
+		}
 		if msg.ReplyTo == "" {
 			return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", text)
 		}
@@ -1059,7 +1078,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// create one with the first entry already installed.
 		// ensureReceiptForReply sends the card via top-level Create
 		// (rootID=""); subsequent chunks PATCH the same card.
-		receipt, created, err := a.ensureReceiptForReply(ctx, msg.ChatID, msg.ReplyTo, text)
+		receipt, created, err := a.ensureReceiptForReplyWithFooter(ctx, msg.ChatID, msg.ReplyTo, text, footer)
 		if err != nil {
 			// Cold-start failed (SendCard error). Fall back to
 			// top-level Create so the user still sees the chunk.
@@ -1069,7 +1088,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 			// Receipt exists. Try to append; if the would-be card
 			// would exceed 50 elements / 30 KB envelope, bail out
 			// to a fresh top-level Create.
-			if err := receipt.AppendEntry(ctx, LogEntry{Icon: "💬", Text: text}); err != nil {
+			if err := receipt.AppendEntryWithFooter(ctx, LogEntry{Icon: "💬", Text: text}, footer); err != nil {
 				if errors.Is(err, ErrReceiptOverflow) {
 					return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", text)
 				}
@@ -1333,6 +1352,12 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if msg.Result.IsError && text != "" {
 			text = "❌ " + text
 		}
+		// F-45 §2.8: append SessionContext footer to the final
+		// reply body. Independent top-level Create so the footer
+		// is naturally part of the user's terminal visible message.
+		if footer := formatSessionFooter(msg.SessionContext); footer != "" {
+			text = text + "\n\n" + footer
+		}
 		// F-39 + F-44 follow-up: deliver the full result as a
 		// top-level Create (PR #47's ReplyInChat surface) — see
 		// OutReply case above for the parent-thread rationale that
@@ -1425,7 +1450,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if msg.TaskList == nil {
 			return errors.New("feishu: OutTask*/TaskList payload is nil")
 		}
-		receipt, created, err := a.ensureReceiptForTask(ctx, msg.ChatID, msg.ReplyTo, msg.TaskList)
+		receipt, created, err := a.ensureReceiptForTask(ctx, msg.ChatID, msg.ReplyTo, msg.TaskList, formatSessionFooter(msg.SessionContext))
 		if err != nil {
 			// SendCard failed — degrade gracefully so the user
 			// still sees the checklist as a standalone text
@@ -1435,7 +1460,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if !created {
 			// Receipt already exists (race or a previous OutReply
 			// created it). Push the snapshot via SetTaskList.
-			return receipt.SetTaskList(ctx, msg.TaskList)
+			return receipt.SetTaskListWithFooter(ctx, msg.TaskList, formatSessionFooter(msg.SessionContext))
 		}
 		// created=true — tasks already installed by ensure;
 		// first card already shipped.
@@ -1947,9 +1972,9 @@ func encodeCardJSON(v any) ([]byte, error) {
 // warning) — AppendEntry needs to build a hypothetical card body
 // to check the overflow budget, but doing so via a struct copy
 // would silently bypass the lock semantics.
-func buildReceiptCard(entries []LogEntry, tasks []agent.TaskItem) (string, error) {
+func buildReceiptCard(entries []LogEntry, tasks []agent.TaskItem, footer string) (string, error) {
 
-	elements := make([]map[string]any, 0, len(entries)+4)
+	elements := make([]map[string]any, 0, len(entries)+5)
 
 	// Section 0 (placeholder header): when the receipt has no
 	// entries and no tasks yet, prepend a Typing indicator so the
@@ -1995,6 +2020,20 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.TaskItem) (string, error
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
 			"content": chunk,
+		})
+	}
+
+	// Section 3 (F-45): SessionContext footer at the bottom of
+	// the card. Empty footer = section omitted. Single markdown
+	// element, no hr separator — receipts are already visually
+	// bounded by the card chrome. Footer text is taken verbatim
+	// from formatSessionFooter (already ASCII-safe; no
+	// sanitisation needed because the helper only emits the
+	// ASCII arrow set + Agent / Model / cost tokens we control).
+	if footer != "" {
+		elements = append(elements, map[string]any{
+			"tag":     "markdown",
+			"content": footer,
 		})
 	}
 

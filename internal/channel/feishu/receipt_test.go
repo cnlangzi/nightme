@@ -241,7 +241,7 @@ func TestBuildReceiptCard_TaskOnly(t *testing.T) {
 			{ID: "t2", Subject: "second task", Status: agent.TaskCompleted},
 		},
 	}
-	body, err := buildReceiptCard(r.entries, r.tasks)
+	body, err := buildReceiptCard(r.entries, r.tasks, r.footer)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestBuildReceiptCard_NoTasksEmptyBody(t *testing.T) {
 		chatID:    "oc_chat",
 		userMsgID: "om_user",
 	}
-	body, err := buildReceiptCard(r.entries, r.tasks)
+	body, err := buildReceiptCard(r.entries, r.tasks, r.footer)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}

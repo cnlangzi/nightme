@@ -1658,7 +1658,7 @@ func TestEnsureReceiptForTask_Concurrent_OnlyOneSendCard(t *testing.T) {
 				list = listB
 			}
 			receipts[i], createds[i], errs[i] = a.ensureReceiptForTask(
-				t.Context(), chatID, userMsgID, list,
+				t.Context(), chatID, userMsgID, list, "",
 			)
 		}(i)
 	}
@@ -2120,7 +2120,7 @@ func TestEnsureReceiptForTask_ReusesTypingPlaceholder(t *testing.T) {
 	list := &agent.TaskListEvent{Items: []agent.TaskItem{
 		{Subject: "step 1", Status: agent.TaskPending, ActiveForm: "doing 1"},
 	}}
-	rcpt2, created2, err := a.ensureReceiptForTask(context.Background(), "oc_test", "om_user", list)
+	rcpt2, created2, err := a.ensureReceiptForTask(context.Background(), "oc_test", "om_user", list, "")
 	if err != nil || created2 {
 		t.Fatalf("ensureReceiptForTask: err=%v, created=%v (want false)", err, created2)
 	}

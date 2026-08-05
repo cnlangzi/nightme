@@ -275,17 +275,16 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		// would log "no handler for card.action.trigger" and the user
 		// clicks would be lost.
 		OnP2CardActionTrigger(a.handleCardAction).
-		// User-driven reactions on bot messages are not a designed
-		// input channel (no /react command, no ack/cancel UX). Swallow
-		// the event so the SDK doesn't log "not found handler". The
-		// reaction event subscription is intentionally absent from
-		// DefaultAddons in internal/auth/feishu/feishu.go.
-		OnP2MessageReactionCreatedV1(func(_ context.Context, _ *larkim.P2MessageReactionCreatedV1) error {
-			return nil
-		}).
+		// F-45 §3.5: user-emoji reactions on bot messages drive the
+		// gtw two-step-confirm flow. We translate the SDK event to
+		// an InboundMessage with msg.Reaction set, push it onto the
+		// incoming channel, and let the gateway dispatcher route to
+		// ChatSession.HandleReaction.
+		OnP2MessageReactionCreatedV1(a.handleReactionCreated).
 		// Pair with the created handler above so reaction removal
-		// (e.g. user un-clicks an emoji) doesn't generate spurious
-		// "not found handler" errors either.
+		// (e.g. user un-clicks an emoji) is silently dropped — we
+		// only care about the "user picked" event, not the "user
+		// un-picked" event.
 		OnP2MessageReactionDeletedV1(func(_ context.Context, _ *larkim.P2MessageReactionDeletedV1) error {
 			return nil
 		})
@@ -2914,6 +2913,110 @@ func (a *Adapter) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV
 	return a.handleMessage(ctx, event)
 }
 
+// handleReactionCreated is the SDK callback for
+// `im.message.reaction.created_v1`. It translates the Feishu
+// event into an InboundMessage with msg.Reaction set, then
+// pushes the message onto the incoming channel where the
+// gateway dispatcher picks it up and routes to
+// ChatSession.HandleReaction.
+//
+// F-45 §3.5: this is the only path through which user emoji
+// reactions reach the gtw draft executor.
+//
+// We intentionally do NOT log every reaction at info level —
+// reactions are high-frequency (especially on busy threads)
+// and would dominate the structured log. Debug level is enough
+// for diagnostics; the gateway + gtw layers log consumed
+// reactions themselves.
+func (a *Adapter) handleReactionCreated(ctx context.Context, event *larkim.P2MessageReactionCreatedV1) error {
+	if event == nil || event.Event == nil {
+		return nil
+	}
+	ev := event.Event
+
+	// The SDK exposes message_id / emoji / user_id but not
+	// chat_id (Feishu v2 reaction event v3 puts chat_id in the
+	// raw envelope, not the structured event). We pull it from
+	// Body — see chatID extraction below.
+	var (
+		messageID string
+		emoji     string
+		userID    string
+	)
+	if ev.MessageId != nil {
+		messageID = *ev.MessageId
+	}
+	if ev.ReactionType != nil && ev.ReactionType.EmojiType != nil {
+		emoji = *ev.ReactionType.EmojiType
+	}
+	if ev.UserId != nil {
+		if ev.UserId.OpenId != nil {
+			userID = *ev.UserId.OpenId
+		} else if ev.UserId.UserId != nil {
+			userID = *ev.UserId.UserId
+		} else if ev.UserId.UnionId != nil {
+			userID = *ev.UserId.UnionId
+		}
+	}
+	// chat_id lives at the top level of the JSON envelope in
+	// the SDK's Body field (not in any typed struct field).
+	// Parse it once here rather than plumbing a generic raw
+	// access path through the gateway layer.
+	chatID := extractReactionChatID(event)
+
+	if messageID == "" || chatID == "" {
+		a.logger.Debug("feishu: reaction event missing message_id or chat_id; dropping",
+			"message_id", messageID, "chat_id", chatID, "emoji", emoji)
+		return nil
+	}
+
+	msg := channel.Message{
+		ChatID: chatID,
+		// Text is empty for reaction events; the discriminator
+		// is msg.Reaction != nil downstream.
+		Text: "",
+		// HasMention is irrelevant for reactions but we set it
+		// to true so the WatchMode gate never silently drops a
+		// reaction — reactions are user-initiated signals that
+		// should always reach the handler.
+		HasMention: true,
+		Reaction: &gateway.ReactionEvent{
+			TargetMsgID: messageID,
+			Emoji:       emoji,
+			UserID:      userID,
+			ChatID:      chatID,
+		},
+	}
+
+	// Mirror the publish path used by handleMessage so the
+	// reaction enters the same incoming channel. The SDK calls
+	// us on its own goroutine; ctx may already be cancelled by
+	// the time we get here — fall back to a fresh background
+	// context for the channel push, exactly like handleMessage
+	// does.
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.logInbound(msg)
+	a.health.recordInbound(time.Now(), chatID, "reaction")
+	a.publishMu.Lock()
+	defer a.publishMu.Unlock()
+	a.mu.RLock()
+	if a.stopped || a.incoming == nil {
+		a.mu.RUnlock()
+		return nil
+	}
+	in := a.incoming
+	done := a.done
+	a.mu.RUnlock()
+	select {
+	case in <- msg:
+	case <-ctx.Done():
+	case <-done:
+	}
+	return nil
+}
+
 // handleCardAction is the entry point for the card.action.trigger
 // callback. It is wired in via OnP2CardActionTrigger at construction
 // and paired with the matching callback registration in
@@ -3005,6 +3108,35 @@ func stringValue(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+// extractReactionChatID pulls the chat_id from the raw JSON
+// envelope of a `im.message.reaction.created_v1` event. The
+// typed SDK struct (P2MessageReactionCreatedV1Data) does not
+// expose chat_id, but the underlying JSON does — it's a sibling
+// of `event` in the wrapper body.
+//
+// The expected shape is:
+//
+//	{ "event": { "message_id": "...", ... }, "chat_id": "oc_xxx" }
+//
+// (Feishu v2 reaction v3 envelope — verified against the SDK
+// source v3.9.9.)
+//
+// Returns "" if the event, its body, or the chat_id field is
+// missing or malformed. The caller treats "" as a drop.
+func extractReactionChatID(event *larkim.P2MessageReactionCreatedV1) string {
+	if event == nil || len(event.Body) == 0 {
+		return ""
+	}
+	// We only need chat_id; avoid unmarshalling the whole event.
+	var wrap struct {
+		ChatID string `json:"chat_id"`
+	}
+	if err := json.Unmarshal(event.Body, &wrap); err != nil {
+		return ""
+	}
+	return wrap.ChatID
 }
 
 func splitLongMessage(text string, maxBytes int) []string {

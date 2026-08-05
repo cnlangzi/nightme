@@ -179,3 +179,58 @@ func (d *gtwDraftsMap) Take(userMsgID string) *gtw.Draft {
 func (d *gtwDraftsMap) Lookup(userMsgID string) *gtw.Draft {
 	return d.cs.GTWDraft(userMsgID)
 }
+
+// --- Reaction routing ---------------------------------------------
+//
+// RegisterGTWReaction installs the gtw-draft reaction executor
+// on every ChatSession the manager creates. The runtime calls
+// this once at startup (alongside the existing
+// `SetMessageStateHandler` wiring) so a /gtw decision card can
+// be acted on by user emoji clicks within the same chat.
+//
+// The handler looks up gtwDrafts by TargetMsgID. If a draft
+// exists, it is taken (one-shot per emoji) and dispatched to
+// gtw.HandleReaction. If no draft matches, the handler returns
+// false so the runtime can fall through to future handlers
+// (none today; placeholder for F-31+ reaction-driven FSM).
+func RegisterGTWReaction(mgr *chatsession.Manager, deps gtw.HandlerDeps) {
+	if mgr == nil {
+		return
+	}
+	if deps.Now == nil {
+		deps.Now = time.Now
+	}
+	if deps.NewPlatform == nil {
+		deps.NewPlatform = gtw.NewPlatformClient
+	}
+	if deps.Send == nil {
+		// The reaction handler does not currently call Send
+		// itself (the gtw.HandleReaction path uses the same
+		// Send func that RunFix uses). The default channel-
+		// backed adapter lives on the runtime; we don't have
+		// a Channel reference here so we leave deps.Send nil
+		// and let gtw.HandleReaction fall back to its
+		// in-package reply helper. The runtime is expected
+		// to pre-populate deps.Send via RegisterGTW before
+		// calling RegisterGTWReaction.
+		_ = deps.Send
+	}
+	storedDeps := deps
+	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
+		cs.SetReactionHandler(func(ctx context.Context, ev chatsession.ReactionEvent) bool {
+			if cs.GTWDraft(ev.TargetMsgID) == nil {
+				return false
+			}
+			csAdapter := &csSender{cs: cs}
+			slot := &gtwContextSlot{cs: cs}
+			drafts := &gtwDraftsMap{cs: cs}
+			consumed, _ := gtw.HandleReaction(ctx, storedDeps, csAdapter, slot, drafts, gtw.ReactionEvent{
+				TargetMsgID: ev.TargetMsgID,
+				Emoji:       ev.Emoji,
+				UserID:      ev.UserID,
+				ChatID:      ev.ChatID,
+			})
+			return consumed
+		})
+	})
+}

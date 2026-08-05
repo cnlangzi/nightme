@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
 // ChatType was removed in F-33. The Gateway never sees chat types;
@@ -83,6 +84,17 @@ type InboundMessage struct {
 	// Action is non-nil when this inbound message represents a user
 	// interaction with a previously-sent interactive card.
 	Action *ActionPayload
+	// Reaction is non-nil when this inbound message represents a
+	// user-emoji reaction on a previously-sent message. Channels
+	// translate their native reaction-created event into this
+	// shape; the gateway routes to ChatSession.HandleReaction,
+	// which checks gtwDrafts first (F-45 §3.5) and may fall
+	// through to the F-31 MessageState FSM for non-gtw reactions.
+	//
+	// Action and Reaction are mutually exclusive in practice: a
+	// reaction is an emoji click on a message; an Action is a
+	// card-button click. Both share the same inbound pipeline.
+	Reaction *ReactionEvent
 	// Raw carries the channel-native payload for handlers that
 	// genuinely need it.
 	Raw any
@@ -167,6 +179,23 @@ type ActionPayload struct {
 	// that need it.
 	Raw any
 }
+
+// ReactionEvent is the abstract shape of a user-emoji reaction on
+// a previously-sent message. Channels build this from their
+// native reaction-created event; the gateway forwards to
+// ChatSession.HandleReaction which consults the per-chat
+// ReactionHandler installed at runtime.
+//
+// F-45 §3.2: this is the inbound counterpart of the bot's
+// AddReaction outbound API. Emoji is the raw unicode form
+// ("✅", "🆕", "🔗", "❌", "🔄", "🤝"); semantic interpretation
+// is the per-draft handler's job.
+//
+// The type is declared in internal/chatsession (which owns the
+// per-chat handler machinery); the alias below keeps the
+// gateway-package import path working without creating an
+// import cycle (gateway → chatsession is the only direction).
+type ReactionEvent = chatsession.ReactionEvent
 
 // OutboundKind tags the shape of an OutboundMessage. Channels
 // decide whether/how to render each kind; they may drop or

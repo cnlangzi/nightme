@@ -2735,3 +2735,57 @@ func TestSend_OutTask_NilSessionContext_NoFooter(t *testing.T) {
 		t.Errorf("orphan task card should not emit <hr> when SessionContext is nil\nbody: %s", gotBody)
 	}
 }
+
+// TestSend_OutTask_EmptyItems_ShowsWorkingPlaceholder locks the
+// empty-items edge case for orphan OutTask*. Per review finding
+// (cross-file tracer #1, line-by-line #1): buildReceiptCard's
+// Section 0 placeholder ("⌨️ Working...") fires when BOTH entries
+// and tasks are empty. The orphan path always has nil entries,
+// so an empty Items slice renders the placeholder + (footer if
+// SessionContext is non-nil). Pre-F-47 this case went through
+// renderTaskFallbackText which explicitly returned "（无任务清单）";
+// post-F-47 the placeholder is the new behavior. Documenting it
+// as a test locks the current contract so a future refactor
+// either keeps the placeholder or surfaces the change explicitly.
+func TestSend_OutTask_EmptyItems_ShowsWorkingPlaceholder(t *testing.T) {
+	a := testAdapter(t)
+
+	var gotBody string
+	a.sendFunc = func(_ context.Context, _, _, body, _ string, _ bool) (string, error) {
+		gotBody = body
+		return "om_task_empty", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind:    gateway.OutTaskCreate,
+		ChatID:  "oc_test",
+		ReplyTo: "", // orphan
+		TaskList: &agent.TaskListEvent{
+			Items: nil, // ← empty task list edge case
+		},
+		SessionContext: &gateway.SessionContext{
+			Agent: "claude", Model: "opus-4-5",
+			CumulativeUsage: agent.UsageInfo{InputTokens: 10, CostUSD: 0.001},
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutTask empty items): %v", err)
+	}
+
+	// No checklist chunk — buildTaskChecklistChunks returns nil
+	// for empty items, so no `**📋 Tasks**` header.
+	if strings.Contains(gotBody, "📋 Tasks") {
+		t.Errorf("empty-items orphan card should not emit checklist header\nbody: %s", gotBody)
+	}
+	// BUT the buildReceiptCard Section 0 placeholder fires when
+	// both entries and tasks are empty. This is the documented
+	// F-47 behavior (no separate "empty list" indicator; the
+	// placeholder doubles as one).
+	if !strings.Contains(gotBody, "⌨️ Working") {
+		t.Errorf("empty-items orphan card should emit ⌨️ Working... placeholder (buildReceiptCard Section 0)\nbody: %s", gotBody)
+	}
+	// Footer still renders (ctx is non-nil).
+	if !strings.Contains(gotBody, `<font color='grey'>`) {
+		t.Errorf("empty-items orphan card should still emit footer when SessionContext is non-nil\nbody: %s", gotBody)
+	}
+}

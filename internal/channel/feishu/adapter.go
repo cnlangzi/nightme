@@ -715,7 +715,7 @@ func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, 
 
 	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
 	transient.entries = []LogEntry{entry}
-	transient.promptStatus = agent.PromptRunning
+	transient.promptState = agent.PromptRunning
 	transient.initializing = true // suppress renderLocked SendCard branch (see renderLocked docs)
 
 	// Register-before-SendCard. The lock-protected check-and-set
@@ -810,7 +810,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	copied := make([]agent.TaskItem, len(items))
 	copy(copied, items)
 	transient.tasks = copied
-	transient.promptStatus = agent.PromptRunning
+	transient.promptState = agent.PromptRunning
 	transient.initializing = true
 
 	// Register-before-SendCard (see ensureReceiptForReply for the
@@ -1764,7 +1764,7 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 	// The evictOverflowLocked on the receipt side keeps entries
 	// within Feishu's 50-element limit; this is the second line of
 	// defence.
-	headerLine := promptHeaderLine(r.promptStatus, r.completedAt)
+	headerLine := promptHeaderLine(r.promptState, r.completedAt)
 	elements := make([]map[string]any, 0, 3+len(r.entries))
 	if headerLine != "" {
 		elements = append(elements, map[string]any{
@@ -1856,7 +1856,7 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 		//     a successful one. OpenClaw wraps the i18n
 		//     copies in red when isError is true.
 		footerContent := note
-		if r.promptStatus == agent.PromptFailed {
+		if r.promptState == agent.PromptFailed {
 			footerContent = "<font color='red'>" + note + "</font>"
 		}
 		elements = append(elements, map[string]any{

@@ -534,7 +534,7 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 | **Binding FSM**（chat ↔ ChatSession）| Gateway | 1:1 绑定，永不删 | 是（ChatSessionEntry）|
 | **InputBuffer FSM**（per ChatSession）| ChatSession | `idle ↔ busy` | 否（重启丢）|
 | **MessageState FSM**（per userMsg）| ChatSession | `MessageReceived → MessageForwarded → MessageDone / MessageFailed` | 否（重启丢）|
-| **PromptStatus FSM**（per userMsg）| Channel's receipt | `PromptPending → PromptRunning → PromptSucceeded / PromptFailed` | 否（重启丢）|
+| **PromptState FSM**（per userMsg）| Channel's receipt | `PromptPending → PromptRunning → PromptSucceeded / PromptFailed` | 否（重启丢）|
 | **AgentSession.Status**（per AgentSession）| AgentSession | `running → detached / exited` | 是（AgentSessionEntry）|
 | **ChatSession.ActiveAgentSession**（per ChatSession）| ChatSession | 引用 pool 中的某个 AgentSession | 引用在 ChatSessionEntry |
 
@@ -1008,7 +1008,7 @@ OutboundMessage{
 
 **Channel 自治渲染选择**：上述 4 个状态由 ChatSession lifecycle emit 后，由 Gateway 翻译为 `OutboundMessage{Kind: OutMessageState}` 通过 `Channel.Send` 投递。每个 Channel 自决哪些状态需要渲染 + 怎么渲染（Feishu 加 reaction，Slack 加 emoji shortcode，Web 改 DOM 元素等）。v1.3.x 起 Feishu adapter 渲染**全部 4 态**——`agent.MessageReceived` → ⏳ `OneSecond`，`agent.MessageForwarded` → 🔄 `OnIt`，`agent.MessageDone` → ✅ `DONE`，`agent.MessageFailed` → 👎 `THUMBSDOWN`（Feishu predefined 里没有 ❌，用 closest negative 替代）。Slack / Web Channel 实现可以选更窄的渲染策略。`agent.MessageState` enum 本身是抽象层契约 ── 不变式是 ChatSession 必须按表格触发，**不**约束 Channel 必须全部渲染。
 
-**PromptStatus 平行 FSM**：每个 channel 的 receipt 对象维护一个 `agent.PromptStatus`，4 态对应 prompt 在 agent 进程内的执行生命周期：`agent.PromptPending`（receipt 创建后等首 event）→ `agent.PromptRunning`（首 non-empty entry 抵达）→ `agent.PromptSucceeded` / `agent.PromptFailed`（terminal）。与 MessageState 的关键区别：**PromptStatus 是 channel-internal 状态**（不走 wire event，每个 channel 各自的 receipt 自己观察 `agent.EventDone`/`EventError` 来 transition），而 MessageState 是抽象层广播事件（走 `OutboundMessage{Kind: OutMessageState}`）。两者都描述"消息处理到哪了"但回答的问题不同（投递 vs 执行），分别渲染到 user-message reaction 和 receipt card header。
+**PromptState 平行 FSM**：每个 channel 的 receipt 对象维护一个 `agent.PromptState`，4 态对应 prompt 在 agent 进程内的执行生命周期：`agent.PromptPending`（receipt 创建后等首 event）→ `agent.PromptRunning`（首 non-empty entry 抵达）→ `agent.PromptSucceeded` / `agent.PromptFailed`（terminal）。与 MessageState 的关键区别：**PromptState 是 channel-internal 状态**（不走 wire event，每个 channel 各自的 receipt 自己观察 `agent.EventDone`/`EventError` 来 transition），而 MessageState 是抽象层广播事件（走 `OutboundMessage{Kind: OutMessageState}`）。两者都描述"消息处理到哪了"但回答的问题不同（投递 vs 执行），分别渲染到 user-message reaction 和 receipt card header。
 
 详见 [`feat/F-31-message-state.md`](./feat/F-31-message-state.md) + [`feat/F-42-lazy-receipt-creation.md`](./feat/F-42-lazy-receipt-creation.md)（Feishu 选择 drop 中间态的记录）。
 

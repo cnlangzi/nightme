@@ -482,7 +482,7 @@ func TestSend_RoutesByUserMsgID_NotChatID(t *testing.T) {
 	}
 	// Simulate turn 1 ending: receipt reaches terminal state.
 	rcpt1.mu.Lock()
-	rcpt1.promptStatus = agent.PromptSucceeded
+	rcpt1.promptState = agent.PromptSucceeded
 	rcpt1.mu.Unlock()
 
 	// Reset PATCH counter so we only assert on turn 2's outgoing

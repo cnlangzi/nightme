@@ -207,7 +207,7 @@ type MessageReceipt struct {
 	logger     *slog.Logger
 
 	mu            sync.Mutex
-	promptStatus  agent.PromptStatus
+	promptState   agent.PromptState
 	completedAt   time.Time
 
 	// entries is the rolling-log buffer (FIFO). Append grows it;
@@ -291,7 +291,7 @@ type MessageReceipt struct {
 
 // ReceiptState was the lifecycle state of a MessageReceipt (v1.3.x
 // F-42 era). v1.3.x lifts the four values into the shared agent
-// vocabulary as agent.PromptStatus (see internal/agent/prompt_status.go)
+// vocabulary as agent.PromptState (see internal/agent/prompt_status.go)
 // so other Channel implementations (Slack / Web / ...) can adopt
 // the same names. The feishu-local type and its String() method are
 // removed; callers reference agent.PromptPending / PromptRunning /
@@ -318,7 +318,7 @@ type MessageReceipt struct {
 //
 // Note: promptHeaderLine reads r.completedAt which is feishu-
 // private, so the function lives in feishu (not in agent).
-func promptHeaderLine(s agent.PromptStatus, completedAt time.Time) string {
+func promptHeaderLine(s agent.PromptState, completedAt time.Time) string {
 	switch s {
 	case agent.PromptPending:
 		return "⏳ 等待中"
@@ -522,7 +522,7 @@ func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID stri
 		userMsgID:    userMsgID,
 		bot:          bot,
 		logger:       slog.Default(),
-		promptStatus: agent.PromptPending,
+		promptState: agent.PromptPending,
 	}
 
 	// v1.3 (F-31): initial reaction is NO LONGER added here.
@@ -543,7 +543,7 @@ func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID stri
 	//
 	// F-37: replyInThread=false — the cold-start text bubble is the
 	// pinned answer preview and must stay visible in main chat.
-	msgID, err := bot.SendMessageText(ctx, chatID, promptHeaderLine(r.promptStatus, r.completedAt), userMsgID, false)
+	msgID, err := bot.SendMessageText(ctx, chatID, promptHeaderLine(r.promptState, r.completedAt), userMsgID, false)
 	if err != nil {
 		r.logger.Warn("feishu receipt: initial reply failed", "err", err)
 		return r, fmt.Errorf("create receipt: %w", err)
@@ -587,7 +587,7 @@ func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receipt
 		cardMsgID:    replyMsgID,
 		bot:          bot,
 		logger:       slog.Default(),
-		promptStatus: agent.PromptPending,
+		promptState: agent.PromptPending,
 	}
 }
 
@@ -600,13 +600,13 @@ func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receipt
 func (r *MessageReceipt) SetExecuting(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.promptStatus == agent.PromptSucceeded {
+	if r.promptState == agent.PromptSucceeded {
 		return nil
 	}
-	if r.promptStatus == agent.PromptRunning {
+	if r.promptState == agent.PromptRunning {
 		return nil
 	}
-	r.promptStatus = agent.PromptRunning
+	r.promptState = agent.PromptRunning
 	return r.renderLocked(ctx)
 }
 
@@ -628,7 +628,7 @@ func (r *MessageReceipt) SetTaskList(ctx context.Context, list *agent.TaskListEv
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.promptStatus == agent.PromptSucceeded {
+	if r.promptState == agent.PromptSucceeded {
 		return nil
 	}
 	items := list.Items
@@ -639,8 +639,8 @@ func (r *MessageReceipt) SetTaskList(ctx context.Context, list *agent.TaskListEv
 		copy(copyItems, items)
 		r.tasks = copyItems
 	}
-	if r.promptStatus == agent.PromptPending {
-		r.promptStatus = agent.PromptRunning
+	if r.promptState == agent.PromptPending {
+		r.promptState = agent.PromptRunning
 	}
 	return r.renderLocked(ctx)
 }
@@ -657,35 +657,35 @@ func (r *MessageReceipt) SetTaskList(ctx context.Context, list *agent.TaskListEv
 func (r *MessageReceipt) SetCompleted(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.promptStatus == agent.PromptSucceeded {
+	if r.promptState == agent.PromptSucceeded {
 		return nil // idempotent
 	}
-	r.promptStatus = agent.PromptSucceeded
+	r.promptState = agent.PromptSucceeded
 	r.completedAt = time.Now()
 	r.entries = nil // collapse rolling-log; only metadata (header/footer/task list) survives
 	return r.renderLocked(ctx)
 }
 
-// PromptStatus returns the current prompt status. Useful for
-// tests + diagnostics. Returns the agent.PromptStatus value
+// PromptState returns the current prompt execution state. Useful
+// for tests + diagnostics. Returns the agent.PromptState value
 // stored on this receipt; callers should compare against
 // agent.PromptPending / PromptRunning / PromptSucceeded /
 // PromptFailed.
-func (r *MessageReceipt) PromptStatus() agent.PromptStatus {
+func (r *MessageReceipt) PromptState() agent.PromptState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.promptStatus
+	return r.promptState
 }
 
 // State returns the current state. Useful for tests + diagnostics.
 //
 // Deprecated: this getter preserves the v1.3.x F-42 era
 // signature for backward compatibility in test fixtures. New
-// code should call PromptStatus() (which returns the
-// agent.PromptStatus enum directly). Existing call sites will be
+// code should call PromptState() (which returns the
+// agent.PromptState enum directly). Existing call sites will be
 // migrated in a follow-up.
-func (r *MessageReceipt) State() agent.PromptStatus {
-	return r.PromptStatus()
+func (r *MessageReceipt) State() agent.PromptState {
+	return r.PromptState()
 }
 
 // IsCompleted reports whether the receipt has reached a terminal
@@ -694,7 +694,7 @@ func (r *MessageReceipt) State() agent.PromptStatus {
 // into-receipt and bail out to a stand-alone reply via
 // sendReplyAsMessage. See docs/feat/F-40-outreply-overflow.md §1.5.
 func (r *MessageReceipt) IsCompleted() bool {
-	return r.PromptStatus() == agent.PromptSucceeded || r.PromptStatus() == agent.PromptFailed
+	return r.PromptState() == agent.PromptSucceeded || r.PromptState() == agent.PromptFailed
 }
 
 // EntryCount returns the number of rolling-log entries currently
@@ -718,7 +718,7 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.promptStatus == agent.PromptSucceeded || r.promptStatus == agent.PromptFailed {
+	if r.promptState == agent.PromptSucceeded || r.promptState == agent.PromptFailed {
 		// F-42 review finding #3: the early-return guard must
 		// include PromptFailed (terminal-via-error, fixed in this
 		// commit). Previously a late non-terminal event after
@@ -753,8 +753,8 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 		// terminal states are now terminal — once we're done
 		// (with or without error), a subsequent EventDone has
 		// nothing to do and is treated as a no-op.
-		if r.promptStatus != agent.PromptSucceeded && r.promptStatus != agent.PromptFailed {
-			r.promptStatus = agent.PromptSucceeded
+		if r.promptState != agent.PromptSucceeded && r.promptState != agent.PromptFailed {
+			r.promptState = agent.PromptSucceeded
 			r.completedAt = time.Now()
 			r.entries = nil // collapse rolling-log on terminal
 			if err := r.renderLocked(ctx); err != nil {
@@ -781,7 +781,7 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 		// error message itself is useful context for the user,
 		// and a forced-turn-error card with the error line still
 		// visible is the most informative surface.
-		r.promptStatus = agent.PromptFailed
+		r.promptState = agent.PromptFailed
 		r.completedAt = time.Now()
 		return r.renderLocked(ctx)
 	case agent.EventInit:
@@ -834,8 +834,8 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 
 	// State transition: the first non-empty entry promotes the
 	// receipt from Pending → Running.
-	if r.promptStatus == agent.PromptPending && (entry.Text != "" || entry.Icon != "") {
-		r.promptStatus = agent.PromptRunning
+	if r.promptState == agent.PromptPending && (entry.Text != "" || entry.Icon != "") {
+		r.promptState = agent.PromptRunning
 	}
 
 	return r.renderLocked(ctx)
@@ -901,7 +901,7 @@ func totalLogBytesLocked(r *MessageReceipt) int {
 	const perElementOverhead = 96 // {"tag":"div","text":{"tag":"lark_md","content":""}} ≈ 50-100 bytes
 	const perPanelOverhead = 250  // collapsible_panel header / border / icon / padding JSON
 	total := 0
-	if hl := promptHeaderLine(r.promptStatus, r.completedAt); hl != "" {
+	if hl := promptHeaderLine(r.promptState, r.completedAt); hl != "" {
 		total += len(hl) + perElementOverhead
 	}
 	if r.evicted > 0 {
@@ -985,7 +985,7 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	body, err := buildReceiptCard(r)
 	if err != nil {
 		r.logger.Warn("feishu receipt: build card failed",
-			"err", err, "state", r.promptStatus, "entries", len(r.entries))
+			"err", err, "state", r.promptState, "entries", len(r.entries))
 		return fmt.Errorf("feishu receipt: build card: %w", err)
 	}
 
@@ -1004,7 +1004,7 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 		msgID, sendErr := r.bot.SendCard(ctx, r.chatID, body, r.userMsgID, false)
 		if sendErr != nil {
 			r.logger.Warn("feishu receipt: create card failed",
-				"err", sendErr, "state", r.promptStatus, "entries", len(r.entries))
+				"err", sendErr, "state", r.promptState, "entries", len(r.entries))
 			return fmt.Errorf("feishu receipt: create card: %w", sendErr)
 		}
 		r.cardMsgID = msgID
@@ -1035,7 +1035,7 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	// body is replaced; the server doesn't accept diffs.
 	if patchErr := r.bot.PatchMessage(ctx, r.cardMsgID, body); patchErr != nil {
 		r.logger.Warn("feishu receipt: patch card failed",
-			"err", patchErr, "state", r.promptStatus, "card_msg_id", r.cardMsgID,
+			"err", patchErr, "state", r.promptState, "card_msg_id", r.cardMsgID,
 			"entries", len(r.entries))
 		return fmt.Errorf("feishu receipt: patch card: %w", patchErr)
 	}

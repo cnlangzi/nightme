@@ -14,8 +14,8 @@ package agent
 // IMPORTANT: MessageState describes the DELIVERY pipeline (did the
 // message reach ChatSession? did it reach AgentSession? did the
 // agent turn terminate?), NOT the prompt execution lifecycle.
-// The execution view is PromptStatus (see prompt_status.go) —
-// each channel owns its own PromptStatus on its receipt object,
+// The execution view is PromptState (see prompt_state.go) —
+// each channel owns its own PromptState on its receipt object,
 // updated by receipt.Append on agent.EventDone / EventError.
 // The two FSMs answer different questions and are kept
 // independent on purpose.
@@ -37,7 +37,7 @@ package agent
 // no new dependency edge and no import cycle. The v1.3.x rename
 // drops the `State` prefix in favour of `Message` to make the
 // `agent.MessageReceived` form read as a complete phrase and to
-// distinguish from PromptStatus (which lives in the same
+// distinguish from PromptState (which lives in the same
 // package).
 type MessageState int
 

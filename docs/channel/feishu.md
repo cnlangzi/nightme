@@ -633,16 +633,16 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 
 | OutboundKind | 源 AgentEvent | 触发点 | Feishu 渲染 | msg_type / API | Receipt? |
 |--------------|---------------|--------|-------------|----------------|----------|
-| `OutReply` | `EventText`(无前缀) | agent 对当前 turn 的 reply 流式 chunks(F-40 改名,原 `OutText`) | 默认 fold 进 receipt card body `markdown` element + `💬` 图标,**不截断**(F-40 删 600B truncate,buildReceiptCard 用 F-37 `splitMarkdownForDivs` 拆多 div);**超限改独立 reply**(F-40 §13.19):`runes > perEntryMaxRunes(8000)` 或 receipt `entries >= replyMaxEntries(45)` → 走 `sendReplyAsMessage` 投递 `MsgTypeText` / `MsgTypePost+md` / `MsgTypeInteractive` 3 段 dispatch,F-39 sanitize + envelope defense 复用 | `interactive` PATCH / `interactive` Create (超限) / `post` Create / `text` Create | ✅(默认 fold) / ❌(超限改独立 reply,锚同 userMsgID) |
+| `OutReply` | `EventText`(无前缀) | agent 对当前 turn 的 reply 流式 chunks(F-40 改名,原 `OutText`) | **F-44 §13.21：每 chunk → 独立 `ReplyInThreadAndChat` 消息**(不再 fold 进 receipt)。`sendReplyInThreadAndChat` 走 3 段 dispatch:无 markdown → `MsgTypeText`;tables>5 → `MsgTypePost+md`;默认 → `MsgTypeInteractive` Card 2.0 + 1/`N` `tag:"markdown"` div(F-37 `splitMarkdownForDivs` 拆 ≤ 1000 runes/div)。复用 F-39 `SanitizeCardMarkdown` + `truncateRunes` 28 KB envelope defense。**不加 icon 前缀**(流延续,不是新条目) | `interactive` Create / `post` Create / `text` Create | ❌ (独立气泡,锚同 userMsgID) |
 | `OutThinking` | `EventText`(带 `[思考] ` 前缀,Gateway 已剥) | agent reasoning | **`collapsible_panel` + `💭` 折叠**(§13.6 设计决策;§13.1 bug 待修) | `interactive` PATCH | ✅ |
 | `OutToolStart` | `EventToolStart` | 工具开始 | **`collapsible_panel` + `🔧` 折叠**(§13.6 设计决策,粒度待定 §13.7) | `interactive` PATCH | ✅ |
 | `OutToolEnd` | `EventToolEnd` | 工具结束(成功/失败) | **`collapsible_panel` + `✅` / `❌` 折叠**(§13.6 设计决策,与 Start 合并 or 独立待定 §13.9) | `interactive` PATCH | ✅ |
-| `OutTaskCreate` | `EventTaskCreate` | Claude TaskCreate 成功结果 | 替换 receipt 内最新 typed task snapshot；单 markdown checklist element（§13.14 / §18） | `interactive` PATCH | ✅（独立 checklist block） |
-| `OutTaskUpdate` | `EventTaskUpdate` | Claude TaskUpdate / delete 成功结果 | 同上；空 snapshot 清除 checklist；不进入 tool thread | `interactive` PATCH | ✅（独立 checklist block） |
-| `OutResult` | `EventResult` | 最终回复 | **独立 reply 到 userMsgID**(F-39 §13.16;不 fold 进 receipt card)— 三段 dispatch:无 markdown → `MsgTypeText`;tables>5 → `MsgTypePost+md`;默认 → `MsgTypeInteractive` Card 2.0 + 1/`N` `tag:"markdown"` div(F-37 `splitMarkdownForDivs` 拆 ≤ 1000 runes/div)。sanitize via [`card_sanitize.go`](#) (cc-connect 移植)。 | `interactive` Create (新 reply) / `post` Create / `text` Create | ❌ (独立气泡,锚同 userMsgID) |
-| `OutUsage` | `EventUsage` | token 用量 | card body `markdown` + `"1.2k tokens · $0.012"`(无图标) | `interactive` PATCH | ✅ |
+| `OutTaskCreate` | `EventTaskCreate` | Claude TaskCreate 成功结果 | **F-44 §13.21：rolling-log receipt,card body 只剩 `**📋 Tasks**` checklist**;N 个 OutTask* 事件 → 1 张 card 反复 PATCH 同一 snapshot。`ensureReceiptForTask` lazy create(首个 OutTask* 触发) | `interactive` PATCH | ✅（仅 Task 单一 section,无 header/entries/footer） |
+| `OutTaskUpdate` | `EventTaskUpdate` | Claude TaskUpdate / delete 成功结果 | 同上;空 snapshot 清除 checklist;不进入 tool thread | `interactive` PATCH | ✅（仅 Task 单一 section） |
+| `OutResult` | `EventResult` | 最终回复 | **独立 reply 到 userMsgID**(F-39 §13.16;不 fold 进 receipt card)— 三段 dispatch:无 markdown → `MsgTypeText`;tables>5 → `MsgTypePost+md`;默认 → `MsgTypeInteractive` Card 2.0 + 1/`N` `tag:"markdown"` div(F-37 `splitMarkdownForDivs` 拆 ≤ 1000 runes/div)。sanitize via `result_render.go`(cc-connect 移植,F-44 后从 `card_sanitize.go` 合并) | `interactive` Create (新 reply) / `post` Create / `text` Create | ❌ (独立气泡,锚同 userMsgID) |
+| `OutUsage` | `EventUsage` | token 用量 | **F-44 §13.21：silent drop**(footer 设计推迟到 footer PR)。`agent.EventUsage` → `OutboundMessage{Usage}` Translate 路径保留 | — | ❌ (不渲染) |
 | `OutCompaction` | `EventCompaction` | 中途压缩 | card body `markdown` + `✶ Compacting conversation...` | `interactive` PATCH | ✅ |
-| `OutInit` | `EventInit` | 会话初始化 | card body `markdown` + `session initialized (model: X)`,**Meta 字段(session_id/agent_name/workspace/branch)未渲染**(见 §13.2) | `interactive` PATCH | ✅ |
+| `OutInit` | `EventInit` | 会话初始化 | **F-44 §13.21：silent drop**(footer 设计推迟到 footer PR)。`agent.EventInit` → `OutboundMessage{Init}` Translate 路径保留 | — | ❌ (不渲染) |
 | `OutCard` | `EventPermission` | 权限请求 | `buildInteractiveCard` → header(title,template:blue) + markdown body + action buttons(value 携带 request_id) | `interactive` Create | ❌(独立气泡) |
 | `OutMessageState` | ChatSession lifecycle | 消息进度变化 | `AddReaction(userMsgID, emoji_type)` -- 走 `messageStates` map 做 idempotency | reaction API | ❌(标在用户消息上) |
 | `OutMessageStateRemoved` | (reserved) | 撤销进度标记 | `DeleteReaction`(v1.3 未用,append-only) | reaction API | ❌ |
@@ -1654,6 +1654,107 @@ user_msg om_A
 | TaskList 永远加标题 vs 仅无 body 时加 | 永远加 | 视觉一致;用户不用记 "有 body 不加" 这种条件 |
 
 **详细设计**:见 [`docs/feat/F-42-lazy-receipt-creation.md`](../feat/F-42-lazy-receipt-creation.md)。SPEC §0.10。
+
+### 13.21 🎯 F-44 决策 (2026-08-05):OutReply 拆出 Receipt + Task Receipt 瘦身 + OutInit/OutUsage 推迟
+
+**背景**:F-25 → F-40 → F-42 三轮演进后,Feishu receipt card 承担 4 类内容(prompt state header + OutReply entries + Tasks checklist + init/usage footer),渲染路径 ~1000 行。其中:
+
+1. **OutReply fold 进 receipt 的价值被稀释** ── 用户等 PATCH 周期才能看到完整内容;fold 路径需要 overflow / late-reply / no-receipt 三种 bail-out 协调
+2. **OutInit / OutUsage footer 不再需要** ── F-42 lazy create 后,turn 无 OutReply/OutTask 时 receipt 不存在,footer 走 silent drop(token 成本信息丢失);turn 有内容时挤 50 element 预算
+3. **Task checklist 才是真正必要的 folding surface** ── 多事件 fold 成 1 张 card 持续 PATCH markdown checklist section,跟 OutReply fold 完全不同的渲染需求,可以脱离独立存在
+
+**核心变化**:
+
+1. **OutReply 拆出 receipt,改为独立 `ReplyInThreadAndChat`** ── 每个 `OutReply` chunk → 1 条独立消息,锚定 `userMsgID`(main chat 可见 + thread reply 视觉):
+   - 新 helper:`sendReplyInThreadAndChat(ctx, chatID, userMsgID, text)`
+   - 复用 F-39 `sendResultAsReply` 的 3 段 dispatch(`MsgTypeText` / `MsgTypePost+md` / `MsgTypeInteractive`)+ `SanitizeCardMarkdown`(F-44 后从 `card_sanitize.go` 合并进 `result_render.go` 私有)+ `splitMarkdownForDivs` + `truncateRunes`(28 KB envelope defense)
+   - 唯一差别:**不加 icon 前缀**(OutReply 是流延续,不是新条目)
+   - 删除:`ensureReceiptForReply` / `isOverflowingReceipt` / `sendReplyAsMessage` 三个 F-40 / F-42 加的协调 helper
+
+   ```go
+   // Send() OutReply case
+   case gateway.OutReply:
+       text := strings.TrimSpace(msg.Text)
+       if text == "" { return nil }
+       return a.sendReplyInThreadAndChat(ctx, msg.ChatID, msg.ReplyTo, text)
+   ```
+
+2. **Task Receipt 瘦身:只装 Tasks section** ── `buildReceiptCard` 删 header / entries / footer / hr sections,只剩 `**📋 Tasks**` checklist:
+   - `MessageReceipt` 删 `entries []LogEntry` / `init` / `usage` 字段及配套方法(appendEntry / setInit / setUsage / appendUsage / appendInit / promptHeaderLine / footerLine)
+   - 保留:`tasks []agent.TaskItem` + `SetTaskList` snapshot 替换逻辑 + `ensureReceiptForTask` lazy create + `promptState` FSM
+   - `promptState` 状态机仍由 Channel 内部 `MessageReceipt` 自管(`PromptPending → PromptRunning → PromptSucceeded/Failed`),但驱动源从"首 OutReply 到达"改成"首 OutTask* 到达"
+
+   ```go
+   // buildReceiptCard (F-44 后)
+   func buildReceiptCard(r *MessageReceipt) (string, error) {
+       elements := []any{}
+       if chunks := buildTaskChecklistChunks(r.tasks); len(chunks) > 0 {
+           for _, c := range chunks {
+               elements = append(elements, map[string]any{
+                   "tag":     "markdown",
+                   "content": c,
+               })
+           }
+       }
+       // 没了: header / entries loop / hr / footer
+       // encodeCardJSON ...
+   }
+   ```
+
+3. **`OutInit` / `OutUsage` silent drop(推迟到 footer PR)** ── footer 设计(每条 ReplyInThreadAndChat 都带 `🤖 Agent · Model · Tokens · Cost`)需要扩展 `OutboundMessage` wire format + ChatSession 状态 + EventHandler 协调,单独 PR 处理:
+   - `Send()` case `OutInit` / `OutUsage` → `return nil`
+   - `agent.EventInit` / `EventUsage` → `OutboundMessage{Init / Usage}` 的 Translate 路径**保留**(footer PR 用)
+
+   ```go
+   // Send() OutInit / OutUsage case
+   case gateway.OutInit, gateway.OutUsage:
+       // F-44: silent drop;footer 设计推迟
+       return nil
+   ```
+
+**EventDone / EventError 流说明(§5.2 重要)**:`agent.EventDone` / `EventError` 不通过 `OutboundMessage` 路径走 `Adapter.Send`(它们走 `ChatSession.emitMessageStateForCurrentTurn(MessageDone/Failed)` → `OutMessageState` → Feishu `AddReaction`)。这意味着 `MessageReceipt.Append` 内部的 `case EventDone` / `case EventError` 分支在 production 上**已是 dead code** ── `Append` 唯一 production caller (`Adapter.Send(OutReply)`) 只传 `EventText`。F-44 把 `Append` 整体删除即可,终态信号靠 `OutMessageState` reactions 表达。
+
+**额外 dead code 一并清理**:`Append` / `SetExecuting` / `SetCompleted` / `appendEntryLocked` / `lastEntryLocked` / `EntryCount` / `evictOverflowLocked` / `eventToEntry` / `formatUsageText` / `LogEntry` 整个 `receipt_event.go` 文件(`~1250` 行总删除,比 doc 初稿估算的 `~900` 行多 350 行,因为漏算了 `Append` state chain + `receipt_event.go` 整文件)。
+
+**wire 形态对比**:
+
+| Kind | F-40 / F-42 后 | F-44 后 |
+|---|---|---|
+| `OutReply` | 默认 fold 进 receipt + 超限改独立 reply | **每 chunk → 独立 `ReplyInThreadAndChat`**(恒定独立,不再 fold) |
+| `OutResult` | 独立 `ReplyInThreadAndChat`(F-39) | 独立 `ReplyInThreadAndChat`(F-39 不变)|
+| `OutTaskCreate` / `OutTaskUpdate` | rolling-log receipt(4 sections)| rolling-log receipt(**仅 Tasks section**)|
+| `OutInit` / `OutUsage` | receipt header / footer | **silent drop** |
+| `OutThinking` / `OutTool*` / `OutCompaction` / `OutCard` / `OutMessageState` / `OutCommandReply` | 不变 | **不变** |
+
+**架构不变式保留**:
+
+- `OutboundMessage` 全字段不变(`Init` / `Usage` typed field 保留,footer PR 用)
+- Gateway 不动(`Translate` 仍产 OutboundMessage)
+- ChatSession 不动(`currentTurnUserMsgID` 单数锚点 + `InputBuffer` 不变)
+- `OutboundMessage.ReplyTo = cs.currentTurnUserMsgID` 不变(独立 reply 也锚同 userMsgID)
+- §1.4 边界规范保留(Init/Usage 是 typed primitive,Channel 自决渲染目标)
+- 抽象归抽象 / 具体归具体原则保留(独立 reply 是 Feishu 自治决策)
+- 1 turn : 1 anchor 不变式保留
+- F-31 MessageState 抽象契约不变
+- F-37 thread routing 决策不变(thinking/tool/compaction 仍 thread reply)
+- F-38 task checklist 决策**保留**(task snapshot 仍 fold 进 rolling-log card,但 card 只剩 task section)
+- F-39 OutResult 决策不变(OutResult 仍独立 reply)
+- F-40 OutReply 命名 + 删 600B truncate 决策保留;overflow / late-reply bail-out **删除**(不再需要)
+- F-42 lazy receipt creation 决策保留;`ensureReceiptForReply` **删除**(OutReply 不再触发 receipt 创建),`ensureReceiptForTask` 保留
+- F-25 rolling-log UX **部分保留**:task receipt 仍是 rolling-log;OutReply 不再 rolling-log(改为独立 reply 流)
+
+**关键 trade-off 决策记录**:
+
+| 取舍 | 选择 | 理由 |
+|---|---|---|
+| OutReply fold 失去"card 内聚"视觉 | 接受 | F-39 OutResult 已是独立 reply,OutReply 也独立后用户视觉对齐;每条 reply 自己就是 agent 在 turn 里的发言 |
+| OutInit / OutUsage 本 PR 内不渲染 | 接受 | footer 设计跨层改动太大(ChatSession + EventHandler + wire format),单独 PR 处理;token 信息损失本就是 F-42 引入的"silent drop"问题 |
+| Task Receipt 失去 prompt state header(⏳/🔄/✅/❌)| 接受 | header 主要是 fill placeholder;MessageState ✅/❌ reactions 仍在 user msg 上,terminal 信号不丢;process state 可视化可后续 footer PR 一起加 |
+| Task Receipt 失去 hr / footer sections | 接受 | footer PR 一起设计;本 PR 内 Task card 是最简形态 |
+| Task receipt `promptState` 状态机保留 | 保留 | `SetCompleted` 仍需,用于未来 footer PR / process state UI;drive source 从 OutReply 改 OutTask*,turn 无 task 时不触发(receipt 不存在,state 缺失无副作用)|
+| 多 reply 流视觉噪声(N=20 chunks = 20 messages)| 接受 | F-39 OutResult 已是独立 reply,F-44 让 OutReply 跟 OutResult 视觉对齐;每个 reply 立刻可见比等 PATCH 周期更直观 |
+
+**详细设计**:见 [`docs/feat/F-44-outreply-independent-and-task-receipt.md`](../feat/F-44-outreply-independent-and-task-receipt.md)。SPEC §0.11。
 
 ## 15. v1.3.x 实施计划
 

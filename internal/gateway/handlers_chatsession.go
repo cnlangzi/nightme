@@ -309,18 +309,22 @@ func handleUse(ctx context.Context, mgr *chatsession.Manager, channel Channel, m
 // handleKill clears the ChatSession's AgentSession pool. The
 // ChatSession itself is preserved (activeCwd / activeAgent remain).
 // The next message triggers a fresh spawn via the configured Spawner.
+//
+// F-42 §6.1: replies are a per-entry list (see FormatKillResults) so
+// the user sees which agents were killed, which were already dead,
+// and which (if any) failed — not a bare count.
 func handleKill(ctx context.Context, mgr *chatsession.Manager, channel Channel, msg *InboundMessage) (*CommandResult, error) {
 	cs := mgr.Get(msg.ChatID)
 	if cs == nil {
 		return reply(ctx, channel, msg.ChatID, "No active chat session to kill."), nil
 	}
 
-	poolSize := len(cs.Pool())
-	if err := cs.KillAll(); err != nil {
+	results, err := cs.KillAll()
+	if err != nil {
 		return reply(ctx, channel, msg.ChatID, fmt.Sprintf("Kill failed: %v", err)), nil
 	}
 
-	return reply(ctx, channel, msg.ChatID, fmt.Sprintf("Killed %d agent session(s). Send a message to start fresh.", poolSize)), nil
+	return reply(ctx, channel, msg.ChatID, chatsession.FormatKillResults(results)), nil
 }
 
 // reply sends a text reply on channel and returns a consumed

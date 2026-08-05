@@ -1189,7 +1189,7 @@ mergeToolReply(om_xxx, "● Bash(ls)\n⎿  💻 Bash → 3 lines")
 | ChatSession, activeCwd=A, pool 含 (claude,A) | 用户发送 /use codex | activeAgent=codex, lookup (codex, A) → spawn 新 (codex,A) | Gateway.handler.use |
 | ChatSession, activeCwd=A, active=(claude,A) | 用户发送 /use claude (同一) | noop (已在用) | Gateway.handler.use |
 | ChatSession, activeCwd=A, active=(claude,A) | 用户发送 /cwd B | activeCwd=B; (claude,A) 仍在 pool; active=(claude,B) → spawn 新 (claude,B) | Gateway.handler.cwd |
-| ChatSession, activeCwd=A | 用户发送 /kill | 清空 pool; activeAgentSession=nil; 老 receipts dispose | Gateway.handler.kill |
+| ChatSession, activeCwd=A | 用户发送 /kill | 清空 pool; activeAgentSession=nil; 老 receipts dispose; **F-42**: graceful shutdown via bridge.Close (5s outer timeout); user reply is per-entry list (✓/✗/•) | Gateway.handler.kill |
 | AgentSession.Running | CLI exit / EOF | AgentSession.Exited（仍在 pool） | AgentSession.readPump |
 | AgentSession.Running | nightme SIGTERM (default) | AgentSession.Detached | cmd/nightme shutdownRun |
 | AgentSession.Running | nightme SIGTERM --cleanup | AgentSession.Exited (Kill) | cmd/nightme shutdownRun |
@@ -1341,7 +1341,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 | **Q8** | Receipt 状态机 owner | **Gateway**；Channel 只渲染 |
 | **Q9** | `/cwd` 语义 | **只改 activeCwd**，不触发 spawn / kill |
 | **Q10** | `/use` 语义 | **永不重启进程**；复用 pool 中现有 AgentSession，没有再 spawn |
-| **Q11** | `/kill` 语义 | **清空 ChatSession 整个 AgentSession 池**，下次消息触发 spawn 新 |
+| **Q11** | `/kill` 语义 | **清空 ChatSession 整个 AgentSession 池**，下次消息触发 spawn 新（F-42: graceful shutdown via bridge.Close，5s outer timeout；InputBuffer 保留；user reply 是 per-entry list） |
 | **Q12** | InputBuffer FSM owner | **ChatSession**（per ChatSession, 跨 `/use` 切换共享 queue）|
 | **Q13** | AgentSession 唯一性 | **`(agent, cwd)` per ChatSession 唯一**；不同 ChatSession 可独立 |
 | **Q14** | `session.Events()` 单消费者 | **readPump only**；ChatSession 通过 EventCallback 接收 |

@@ -181,7 +181,7 @@ func TestChatSession_KillAll_StopsReadPump(t *testing.T) {
 		t.Fatalf("pump should be running pre-kill")
 	}
 
-	if err := cs.KillAll(); err != nil {
+	if _, err := cs.KillAll(); err != nil {
 		t.Fatalf("KillAll: %v", err)
 	}
 
@@ -190,7 +190,12 @@ func TestChatSession_KillAll_StopsReadPump(t *testing.T) {
 	}
 }
 
-func TestChatSession_KillAll_ClearsBuffer(t *testing.T) {
+func TestChatSession_KillAll_PreservesBuffer(t *testing.T) {
+	// F-42 §4.1 invariant: /kill owns only the agent process lifecycle.
+	// InputBuffer is preserved across /kill — the user's queued messages
+	// are not /kill's concern. (Pre-F-42: buffer was cleared as a side
+	// effect; the new contract keeps the queue intact so the next
+	// inbound message can still flush to the fresh spawn.)
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
 	cs := New("oc_xxx", "claude").
@@ -203,7 +208,7 @@ func TestChatSession_KillAll_ClearsBuffer(t *testing.T) {
 	_ = cs.StartReadPump()
 	cs.SetBusy()
 	_ = cs.QueueUserMessage(
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "lost"}}, "m1")
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "survives"}}, "m1")
 
 	// Pre-condition: 1 queued, busy.
 	if cs.BufferPending() != 1 {
@@ -212,9 +217,9 @@ func TestChatSession_KillAll_ClearsBuffer(t *testing.T) {
 
 	cs.KillAll()
 
-	// After kill: buffer should be cleared (queued messages lost).
-	if cs.BufferPending() != 0 {
-		t.Fatalf("expected buffer cleared after KillAll; got %d pending", cs.BufferPending())
+	// After kill: buffer is preserved (user messages survive).
+	if cs.BufferPending() != 1 {
+		t.Fatalf("InputBuffer should be preserved across /kill: want 1, got %d pending", cs.BufferPending())
 	}
 }
 

@@ -218,7 +218,7 @@ func TestKillAllClearsPool(t *testing.T) {
 		t.Fatalf("precondition: pool size=%d", len(cs.Pool()))
 	}
 
-	if err := cs.KillAll(); err != nil {
+	if _, err := cs.KillAll(); err != nil {
 		t.Fatalf("KillAll: %v", err)
 	}
 	if len(cs.Pool()) != 0 {
@@ -426,7 +426,7 @@ func TestKillAll_ClearsStaleAnchor(t *testing.T) {
 	cs.currentTurnUserMsgID = "om_msg_killed_turn"
 	cs.mu.Unlock()
 
-	if err := cs.KillAll(); err != nil {
+	if _, err := cs.KillAll(); err != nil {
 		t.Fatalf("KillAll: %v", err)
 	}
 

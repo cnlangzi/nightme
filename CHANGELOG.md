@@ -11,6 +11,24 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### F-42: `/kill` graceful shutdown + `/new` ResumeID clear + per-entry list reply
+
+Three related fixes bundled:
+
+- **`/kill` graceful shutdown**: `ChatSession.KillAll()` now actually signals each child process to exit via the bridge's own `Close()` path (stdin EOF + SIGINT + 2s grace + SIGKILL fallback). Old v1.2 implementation was a data-only operation that orphaned children. Disk entries are deleted *after* the process dies. `InputBuffer` is preserved (user messages are not /kill's concern).
+
+- **`/new` clears ResumeID on dead/detached entries**: previously `NewActiveAgentSessions` silently skipped dead entries, leaving a stale `ResumeID` that the next spawn would replay as `--resume <dead-id>` — defeating the user's `/new` intent. Dead entries now count as `matched=1`, `action=marked-fresh`, and their ResumeID is cleared in-memory + persisted.
+
+- **Per-entry list reply** for both commands: instead of "Killed N" / "Reset X/Y", the user sees a per-agent status list with `✓` / `✗` / `•` markers, sorted alphabetically, capped at 20 lines + "...and N more" tail (Feishu 4KB safety).
+
+**Docs**: `docs/feat/F-43-kill-new-graceful-and-reset.md` (canonical — 14 sections, design + decision log + error matrix + test plan + risk).
+
+**Background**: v1.2 §3.2 documented `/kill` as "清空 pool" with no mention of process lifecycle. The bridge's graceful shutdown infrastructure (each bridge has its own 2s grace + SIGKILL watchdog) was already in place — but `KillAll` never called it. v1.3.x F-34 introduced `/new` with the "skip dead" optimization (Q-N4) which was correct for the no-spawn decision but didn't account for the stale ResumeID side effect.
+
+**API changes (breaking)**:
+- `KillAll() error` → `[]KillResult, error`
+- `NewActiveAgentSessions(ctx, name) (matched, reset int, err error)` → `(matched, reset int, results []ResetResult, firstErr error)`
+
 ### F-41: Active Reconnect — 30s forced Stop+Start (no HTTP probe, no tier)
 
 **Background**: F-40 added observability (`nightme health` + WSHealth struct + SDK lifecycle callbacks) so we can see when the Feishu WebSocket is down. F-41 closes the loop with **active recovery**: a 30s ticker that forces `ch.Stop() → 100ms → ch.Start()` whenever the SDK reports `OnDisconnected`, so the user-visible "no response" window drops from SDK's default 2min reconnectInterval to **30s**, and continues at 30s cadence for as long as the network stays down (no "give up after N tries" logic).

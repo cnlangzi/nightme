@@ -376,6 +376,55 @@ type OutboundMessage struct {
 
 ---
 
+## 0.10 文档变更摘要（v1.3.x F-42 增量，2026-08-05）
+
+**背景**：Feishu receipt 在 v1.3 + F-25 落地后形成 rolling-log 形态，但渲染层仍有 3 处冗余 / 不清晰：
+
+1. **Cold-start 空 Receipt card 是 design smell** ── `Adapter.receiptFor()` 在 cache miss 时会主动 `buildColdStartCard()` + `SendCard()` 发一个 minimal ⏳ 占位卡。短 turn 中几乎立刻被 PATCH 覆盖（用户感知不到），长 turn 中只是"空白 + ⏳"（⏳ reaction 已在 user msg 上，card 本身无新增信息）
+2. **⏳ / 🔄 reactions 跟其他 waiting 信号重复** ── F-37 thread route 让 Tool/Think thread reply 持续在 thread 报 execution activity；⏳ (StateReceived) / 🔄 (StateForwarded) 在 user msg 上是冗余信号
+3. **TaskList 没标题，视觉不清晰** ── `buildTaskChecklistChunks` 直接挂 `- [ ] Subject` 在 reply entries 后面，没 section header。当 TaskList 是 receipt 唯一内容时尤其不清楚
+
+**F-42 三件事一次解决**：
+
+1. **Receipt lazy creation** ── `Adapter.receiptFor()` 退化为纯 cache lookup，不再 cold-start。首个 `OutReply` / `OutTaskCreate` / `OutTaskUpdate` 到达时由新 helper (`ensureReceiptForReply` / `ensureReceiptForTask`) 主动建 receipt + post 带有实际内容的 card。`OutInit` / `OutUsage` 单飞（receipt 还没建）→ silent drop（同今天 cold-start 失败的 fallback）
+2. **MessageState reactions 简化** ── Feishu adapter 自决：只渲染 `StateDone` (✅) / `StateError` (❌) 两个终态；`StateReceived` / `StateForwarded` silent drop。`agent.MessageState` enum / 抽象契约 / 其他 Channel 实现不动 ── Slack / Web 将来仍可渲染
+3. **TaskList markdown 标题** ── `buildTaskChecklistChunks` 永远 prepend `**📋 Tasks**\n\n` 一行，跟其他 reply body 内容视觉分开。**永远加**（无论是否与 OutReply body 共存），保持一致
+
+**核心变化**：
+
+1. **`internal/channel/feishu/adapter.go`**:
+   - `receiptFor()` 退化（删 `buildColdStartCard` + `SendCard` 调用）
+   - 新 helper：`ensureReceiptForReply(ctx, chatID, userMsgID, text)` + `ensureReceiptForTask(ctx, chatID, userMsgID, tasks)`
+   - `Send()` `OutReply` case：receipt nil 时调 `ensureReceiptForReply`
+   - `Send()` `OutTaskCreate/Update` case：receipt nil 时调 `ensureReceiptForTask`
+   - `Send()` `OutMessageState` case：`StateReceived` / `StateForwarded` → return nil；只走 `StateDone` / `StateError` 的 AddReaction
+   - `Send()` `OutInit` / `OutUsage` case：receipt nil → silent drop（行为不变）
+2. **`internal/channel/feishu/receipt.go`**: 删 `NewMessageReceiptForCard`（cold-start 路径独有）；ensure 改走 `NewMessageReceiptForReply`
+3. **`internal/channel/feishu/receipt_task.go`**: `buildTaskChecklistChunks` 第一行加 `**📋 Tasks**\n\n`
+
+**不变式**：
+- `OutboundMessage` 契约不变（无新 Kind，无删 Kind，无改字段）
+- `agent.MessageState` enum 不动（Feishu adapter 自决 drop 中间态）
+- Gateway 不动（`Translate` 仍产 `OutboundMessage{Kind: OutMessageState, ...}`）
+- ChatSession 不动（`currentTurnUserMsgID` 单数锚点保留）
+- `ReplyTo = currentTurnUserMsgID` 不变（lazy create 也用同一锚点）
+- §1.4 边界规范保留（OutboundMessage 仍是 typed，Channel 自决渲染细节）
+- 抽象归抽象 / 具体归具体原则保留（lazy create / state 选择 / 标题样式都是 Feishu 自治）
+- 1 turn : 1 anchor 不变式保留
+- F-25 rolling-log UX 不变（card 仍是"事件日志 + 元数据"）
+- F-31 MessageState 抽象契约不变（state → reaction 是 Channel 自治）
+- F-37 thread routing 不变（Tool/Think 仍走 thread）
+- F-38 task checklist 决策不变（TaskList 仍是 receipt 一部分）
+- F-39 OutResult 决策不变（OutResult 不进 receipt，独立 reply）
+- F-40 OutReply 决策不变（outflow / rename）
+- F-41 active reconnect 决策不变
+
+**为什么不叫 v2.0**：v1.3 核心不变式（职责隔离、Binding FSM owner、Receipt 自治、抽象归抽象 / 具体归具体）全部保留。F-42 是 Channel 自治范围内的渲染细节调整（何时建 card / 哪些 state 渲染 / task list 视觉样式），不影响 nightme 数据模型与 Gateway 契约。
+
+**详细落地**：见 [`docs/feat/F-42-lazy-receipt-creation.md`](./feat/F-42-lazy-receipt-creation.md) + `docs/channel/feishu.md` §13.20。
+
+---
+
 ### 0.7 文档变更摘要（v1.3.x F-38 增量，2026-08-04）
 
 **背景**：F-thread-route 把 `OutToolStart` / `OutToolEnd` 都投到飞书 thread，每个 tool 产生**两条**独立 thread reply（先 `● Tool(args)` 再 `⎿  …`）。一次 agent turn 调 10 个工具 = 20 条 thread reply，视觉噪声 + 限速成本都很高。同时用户没有 per-chat 开关控制工具调用是否显示——既不能选择 plain text vs 合并格式，也不能选择看 vs 不看。F-38 同时解决这两点。
@@ -861,8 +910,9 @@ handler.kill(ctx, msg, args)
 
 **Channel 自治范围内的渲染行为**（仅作协议描述，**不是 Gateway 责任**）：
 
-- 每个 Channel 在收到第一个 `OutboundMessage{ReplyTo: userMsgID}` 时，自行决定如何"开张"：
-  - **Feishu**：cold-create 一张 interactive card 作为 userMsg 的 reply；记下 cardMsgID 供后续 PATCH
+- 每个 Channel 在收到第一个**有内容**的 `OutboundMessage{ReplyTo: userMsgID}` 时，自行决定如何"开张"：
+  - **Feishu (v1.3.x F-42 前)**：cold-create 一张 minimal ⏳ 占位 card，记下 cardMsgID 供后续 PATCH
+  - **Feishu (v1.3.x F-42 后)**：**lazy create** — 在收到第一个 `OutReply`（带 reply 文本）或第一个 `OutTaskCreate/Update`（带 task list）时，post 带有实际内容的 card；不创建空 receipt
   - **Slack**：在 userMsg 关联的 thread 下发第一条回复
   - **Web**：在 chat DOM 中插入一个 receipt block，带 `data-user-msg-id` 标记
 
@@ -871,8 +921,9 @@ handler.kill(ctx, msg, args)
   - Slack：thread 内发新回复 / 编辑已有回复
   - Web：更新 DOM block 的内容
 
-- 每个 Channel 在收到 `OutMessageState` 时，按状态映射 emoji：
-  - StateReceived/Forwarded/Done/Error → ⏳ / 🔄 / ✅ / ❌
+- 每个 Channel 在收到 `OutMessageState` 时，**自决**哪些状态渲染、怎么渲染：
+  - Feishu (v1.3.x F-42 后)：只渲染终态 — `StateDone` → ✅，`StateError` → ❌；`StateReceived` / `StateForwarded` silent drop（与 Tool/Think thread activity 信号重叠，无新增信息）
+  - Feishu (F-42 前) / 其他 Channel：可全部 4 态都渲染 — `StateReceived/Forwarded/Done/Error` → ⏳ / 🔄 / ✅ / ❌
 
 **Gateway 视角**：
 - Gateway 只发 `OutboundMessage{ReplyTo: userMsgID, Kind: OutText|ToolStart|...}`
@@ -954,7 +1005,9 @@ OutboundMessage{
 
 **Scope 强约束**：MessageState **只对普通用户消息触发**。Slash command（`/cwd` `/use` `/kill` 等）不产生 MessageState —— 控制平面有 `OutCommandReply` 作为反馈。
 
-详见 [`feat/F-31-message-state.md`](./feat/F-31-message-state.md)。
+**Channel 自治渲染选择**：上述 4 个状态由 ChatSession lifecycle emit 后，由 Gateway 翻译为 `OutboundMessage{Kind: OutMessageState}` 通过 `Channel.Send` 投递。每个 Channel 自决哪些状态需要渲染 + 怎么渲染（Feishu 加 reaction，Slack 加 emoji shortcode，Web 改 DOM 元素等）。Feishu 在 v1.3.x F-42 选择 silent drop `StateReceived` / `StateForwarded`（与 Tool/Think thread activity + 首 OutReply card 三者信号重叠），只渲染 `StateDone` / `StateError`。`agent.MessageState` enum 本身是抽象层契约 ── 不变式是 ChatSession 必须按表格触发，**不**约束 Channel 必须全部渲染。
+
+详见 [`feat/F-31-message-state.md`](./feat/F-31-message-state.md) + [`feat/F-42-lazy-receipt-creation.md`](./feat/F-42-lazy-receipt-creation.md)（Feishu 选择 drop 中间态的记录）。
 
 ---
 

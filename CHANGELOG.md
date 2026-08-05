@@ -21,7 +21,7 @@ Three related fixes bundled:
 
 - **Per-entry list reply** for both commands: instead of "Killed N" / "Reset X/Y", the user sees a per-agent status list with `✓` / `✗` / `•` markers, sorted alphabetically, capped at 20 lines + "...and N more" tail (Feishu 4KB safety).
 
-**Docs**: `docs/feat/F-42-kill-new-graceful-and-reset.md` (canonical — 14 sections, design + decision log + error matrix + test plan + risk).
+**Docs**: `docs/feat/F-43-kill-new-graceful-and-reset.md` (canonical — 14 sections, design + decision log + error matrix + test plan + risk).
 
 **Background**: v1.2 §3.2 documented `/kill` as "清空 pool" with no mention of process lifecycle. The bridge's graceful shutdown infrastructure (each bridge has its own 2s grace + SIGKILL watchdog) was already in place — but `KillAll` never called it. v1.3.x F-34 introduced `/new` with the "skip dead" optimization (Q-N4) which was correct for the no-spawn decision but didn't account for the stale ResumeID side effect.
 

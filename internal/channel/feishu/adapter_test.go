@@ -515,7 +515,7 @@ func TestSend_RoutesByUserMsgID_NotChatID(t *testing.T) {
 
 	// Both receipts should have been cold-created via SendCard (one per turn).
 	if cards < 2 {
-		t.Errorf("expected >=2 cold-start SendCard calls, got %d", cards)
+		t.Errorf("expected >=2 SendCard calls (one per turn's lazy receipt), got %d", cards)
 	}
 
 	// After turn 1 was Completed, NO further PATCH may target
@@ -530,17 +530,19 @@ func TestSend_RoutesByUserMsgID_NotChatID(t *testing.T) {
 			t.Errorf("turn 2 wrote into turn 1's completed receipt (msgID=%s)", p.MessageID)
 		}
 	}
-	// And turn 2's content must actually land somewhere: at least
-	// one PATCH on rcpt2.cardMsgID since turn 2 started.
-	var rcpt2Patched bool
-	for _, p := range patches[patchesBeforeTurn2:] {
-		if p.MessageID == rcpt2.cardMsgID {
-			rcpt2Patched = true
-			break
-		}
+	// F-42: turn 2's text is shipped inside the lazy ensure's
+	// SendCard call (not via a subsequent PATCH). Verify the
+	// receipt registered with cardMsgID set and the text already
+	// in its entries list, so the user sees "turn 2 hello" in
+	// the chat even without a follow-up PATCH.
+	if rcpt2.cardMsgID == "" {
+		t.Errorf("turn 2 receipt has empty cardMsgID; SendCard did not seed it")
 	}
-	if !rcpt2Patched {
-		t.Errorf("turn 2 cold-create produced no PATCH on rcpt2 (cardMsgID=%s); user would see nothing", rcpt2.cardMsgID)
+	rcpt2.mu.Lock()
+	turn2TextInEntries := len(rcpt2.entries) >= 1 && rcpt2.entries[0].Text == "turn 2 hello"
+	rcpt2.mu.Unlock()
+	if !turn2TextInEntries {
+		t.Errorf("turn 2 receipt entries should contain \"turn 2 hello\"; lazy create did not seed the entry")
 	}
 }
 
@@ -957,7 +959,14 @@ func TestSend_ThreadOnlyEvents_PassReplyInThreadTrue(t *testing.T) {
 // "reply_in_thread=true everywhere" would silently hide the
 // receipt card behind a thread indicator, breaking the core UX.
 func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
-	t.Run("ReceiptColdStart", func(t *testing.T) {
+	t.Run("ReceiptLazyCreate", func(t *testing.T) {
+		// F-42: receiptFor is now a pure cache lookup and never
+		// ships a card. The first SendCard happens in
+		// ensureReceiptForReply when an actual OutReply lands.
+		// This subtest exercises that path: the SendCard that
+		// produces the receipt card must post to main chat
+		// (reply_in_thread=false), exactly like the old cold-start
+		// path did.
 		a := testAdapter(t)
 		var threadOnly int
 		var chatVisible int
@@ -972,15 +981,33 @@ func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
 			return "om_card_cold", nil
 		}
 
-		r := a.receiptFor(t.Context(), "oc_cold", "om_user_cold")
+		r, created, err := a.ensureReceiptForReply(t.Context(), "oc_cold", "om_user_cold", "hello world")
+		if err != nil {
+			t.Fatalf("ensureReceiptForReply: %v", err)
+		}
 		if r == nil {
-			t.Fatalf("receiptFor returned nil (cold-start card build or send failed)")
+			t.Fatalf("ensureReceiptForReply returned nil receipt")
+		}
+		if !created {
+			t.Errorf("ensureReceiptForReply created=false on first call; want true")
 		}
 		if chatVisible == 0 {
-			t.Errorf("cold-start card reply_in_thread flag was true (threaded), want false — receipt card must be visible in main chat")
+			t.Errorf("lazy-create card reply_in_thread flag was true (threaded), want false — receipt card must be visible in main chat")
 		}
 		if threadOnly != 0 {
-			t.Errorf("cold-start card was threaded %d times, want 0", threadOnly)
+			t.Errorf("lazy-create card was threaded %d times, want 0", threadOnly)
+		}
+		// Sanity: the entry is already installed; the receipt is
+		// StateExecuting (the empty-waiting header would have
+		// been the bug we're fixing).
+		if r.State() != StateExecuting {
+			t.Errorf("lazy-create receipt state = %v, want StateExecuting", r.State())
+		}
+		r.mu.Lock()
+		hasText := len(r.entries) == 1 && r.entries[0].Text == "hello world"
+		r.mu.Unlock()
+		if !hasText {
+			t.Errorf("lazy-create receipt entries should contain \"hello world\" exactly once")
 		}
 	})
 
@@ -2045,5 +2072,251 @@ func TestSend_OutResult_OrphanTopLevel(t *testing.T) {
 	}
 	if !strings.Contains(gotContent, "Final") {
 		t.Errorf("orphan result body missing content, got %q", gotContent)
+	}
+}
+
+// TestEnsureReceiptForReply_ThinkingPrefix_ReturnsError guards F-42
+// review finding #1. Pre-fix the helper returned (nil, false, nil)
+// when eventToEntry filtered the text (thinking-prefix or empty),
+// and the OutReply caller then dereferenced the nil receipt via
+// receipt.IsCompleted() → panic on r.mu.Lock(). The fix returns an
+// error so the caller's existing error path (sendRawOutText
+// fallback) handles it cleanly.
+func TestEnsureReceiptForReply_ThinkingPrefix_ReturnsError(t *testing.T) {
+	a := testAdapter(t)
+
+	// Thinking-prefix text is the only currently-reachable
+	// eventToEntry filter (empty text is rejected upstream in
+	// Send). The thinking prefix is the gateway's [思考] marker.
+	const thinkingText = "[思考] internal note from a misrouted event"
+
+	r, created, err := a.ensureReceiptForReply(t.Context(), "oc_chat", "om_user", thinkingText)
+	if err == nil {
+		t.Fatalf("ensureReceiptForReply(thinking-prefix) returned nil err; want error (pre-fix returned nil and the caller nil-deref'd)")
+	}
+	if r != nil {
+		t.Errorf("ensureReceiptForReply returned non-nil receipt on error path: %v", r)
+	}
+	if created {
+		t.Errorf("created=true on error path; should be false")
+	}
+
+	// And the OutReply Send dispatcher must degrade gracefully
+	// via sendRawOutText — no panic, no nil deref.
+	a.sendFunc = func(_ context.Context, _, msgType, content, rootID string, _ bool) (string, error) {
+		if msgType != larkim.MsgTypeText {
+			t.Errorf("thinking-prefix fallback should use MsgTypeText, got %q", msgType)
+		}
+		if !strings.Contains(content, thinkingText) {
+			t.Errorf("fallback body should contain the original text %q, got %q", thinkingText, content)
+		}
+		return "om_text_fallback", nil
+	}
+	if sendErr := a.Send(t.Context(), gateway.OutboundMessage{
+		Kind:    gateway.OutReply,
+		ChatID:  "oc_chat",
+		ReplyTo: "om_user",
+		Text:    thinkingText,
+	}); sendErr != nil {
+		t.Fatalf("Send with thinking-prefix text returned err=%v; the fallback path must succeed silently", sendErr)
+	}
+}
+
+// TestEnsureReceiptForReply_Concurrent_OnlyOneSendCard guards F-42
+// review finding #4. Pre-fix the helper used a pre-check + SendCard
+// + post-SendCard recheck pattern: two goroutines for the same
+// userMsgID could both pass the pre-check, both call SendCard (each
+// producing a distinct card in chat), and the loser would discover
+// the winner under the post-SendCard lock and discard its receipt —
+// leaving its orphan card in chat forever (no future PATCH reaches
+// it because PATCHes target the winner's cardMsgID).
+//
+// The fix uses register-before-SendCard: only the goroutine that
+// wins the registration proceeds to SendCard. Concurrent callers
+// see the registered placeholder and return early (created=false);
+// their renderLocked calls short-circuit on `initializing` so no
+// second SendCard ever fires.
+func TestEnsureReceiptForReply_Concurrent_OnlyOneSendCard(t *testing.T) {
+	a := testAdapter(t)
+
+	// Inject a slow SendCard so both goroutines reach the
+	// registration race window before either finishes.
+	var (
+		sendCardMu     sync.Mutex
+		sendCardCalls  int
+		releaseSignal  = make(chan struct{})
+	)
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		sendCardMu.Lock()
+		sendCardCalls++
+		n := sendCardCalls
+		sendCardMu.Unlock()
+		// Block until the test releases us, so the second
+		// goroutine's call lands while we're still mid-SendCard.
+		<-releaseSignal
+		return fmt.Sprintf("om_card_%d", n), nil
+	}
+
+	const userMsgID = "om_user_race"
+	const chatID = "oc_race"
+
+	var (
+		wg          sync.WaitGroup
+		errs        [2]error
+		receipts    [2]*MessageReceipt
+		createds    [2]bool
+	)
+	for i := range 2 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			receipts[i], createds[i], errs[i] = a.ensureReceiptForReply(
+				t.Context(), chatID, userMsgID,
+				fmt.Sprintf("text from goroutine %d", i),
+			)
+		}(i)
+	}
+
+	// Wait briefly so both goroutines reach their respective
+	// SendCard calls (both blocked on releaseSignal).
+	time.Sleep(50 * time.Millisecond)
+
+	// Release both SendCard calls. They each complete and return
+	// a distinct message id.
+	close(releaseSignal)
+	wg.Wait()
+
+	for i, e := range errs {
+		if e != nil {
+			t.Errorf("goroutine %d: err = %v", i, e)
+		}
+	}
+
+	// Exactly one goroutine must have won registration (created=true).
+	winners := 0
+	for _, c := range createds {
+		if c {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Errorf("created count = %d, want 1 (only one goroutine should win registration)", winners)
+	}
+
+	// Exactly one SendCard should have been called (the orphan
+	// race pre-fix would produce 2).
+	sendCardMu.Lock()
+	calls := sendCardCalls
+	sendCardMu.Unlock()
+	if calls != 1 {
+		t.Errorf("SendCard calls = %d, want 1 (F-42 register-before-SendCard prevents the loser from posting an orphan card)", calls)
+	}
+
+	// Both goroutines must end up with the SAME receipt pointer
+	// (the winner's placeholder).
+	if receipts[0] != receipts[1] {
+		t.Errorf("receipts[0]=%p != receipts[1]=%p; both should be the same registered placeholder", receipts[0], receipts[1])
+	}
+
+	// The receipt must be registered under the canonical map key.
+	a.mu.Lock()
+	registered := a.receiptsByUserMsgID[userMsgID]
+	a.mu.Unlock()
+	if registered != receipts[0] {
+		t.Errorf("map[userMsgID]=%p != winner receipt=%p", registered, receipts[0])
+	}
+}
+
+// TestEnsureReceiptForTask_Concurrent_OnlyOneSendCard guards F-42
+// review finding #5. Same race as TestEnsureReceiptForReply but
+// for the task-list path — two OutTask* events for the same
+// userMsgID racing must produce exactly ONE card in chat, with
+// the winner's snapshot merged into the canonical receipt.
+func TestEnsureReceiptForTask_Concurrent_OnlyOneSendCard(t *testing.T) {
+	a := testAdapter(t)
+
+	var (
+		sendCardMu    sync.Mutex
+		sendCardCalls int
+		releaseSignal = make(chan struct{})
+	)
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		sendCardMu.Lock()
+		sendCardCalls++
+		sendCardMu.Unlock()
+		<-releaseSignal
+		return "om_task_card", nil
+	}
+
+	const userMsgID = "om_user_task_race"
+	const chatID = "oc_task_race"
+
+	listA := &agent.TaskListEvent{Items: []agent.TaskItem{
+		{ID: "1", Subject: "task A", Status: agent.TaskPending},
+	}}
+	listB := &agent.TaskListEvent{Items: []agent.TaskItem{
+		{ID: "1", Subject: "task B", Status: agent.TaskPending},
+	}}
+
+	var (
+		wg       sync.WaitGroup
+		errs     [2]error
+		receipts [2]*MessageReceipt
+		createds [2]bool
+	)
+	for i := range 2 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			list := listA
+			if i == 1 {
+				list = listB
+			}
+			receipts[i], createds[i], errs[i] = a.ensureReceiptForTask(
+				t.Context(), chatID, userMsgID, list,
+			)
+		}(i)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	close(releaseSignal)
+	wg.Wait()
+
+	for i, e := range errs {
+		if e != nil {
+			t.Errorf("goroutine %d: err = %v", i, e)
+		}
+	}
+
+	winners := 0
+	for _, c := range createds {
+		if c {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Errorf("created count = %d, want 1", winners)
+	}
+
+	sendCardMu.Lock()
+	calls := sendCardCalls
+	sendCardMu.Unlock()
+	if calls != 1 {
+		t.Errorf("SendCard calls = %d, want 1 (orphan-card race fix)", calls)
+	}
+
+	if receipts[0] != receipts[1] {
+		t.Errorf("receipts diverge: %p vs %p; both should be the registered placeholder", receipts[0], receipts[1])
+	}
+
+	// The loser's caller will SetTaskList on the shared receipt;
+	// that PATCH must hit the winner's cardMsgID (set by the
+	// register-before-SendCard path), not any orphan card.
+	a.mu.Lock()
+	registered := a.receiptsByUserMsgID[userMsgID]
+	cardMsgID := registered.cardMsgID
+	a.mu.Unlock()
+	if cardMsgID == "" {
+		t.Errorf("registered receipt has empty cardMsgID after the ensure path completed")
 	}
 }

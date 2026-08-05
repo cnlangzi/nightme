@@ -230,7 +230,7 @@ const killGraceTotal = 5 * time.Second
 // to a single pool entry during KillAll so the handler can render a
 // per-agent status instead of a bare count.
 //
-// See docs/feat/F-42-kill-new-graceful-and-reset.md §4.3.
+// See docs/feat/F-43-kill-new-graceful-and-reset.md §4.3.
 type KillResult struct {
 	Agent       string // e.g. "claude", "codex"
 	Cwd         string // e.g. "/code/A"
@@ -243,7 +243,7 @@ type KillResult struct {
 // to a single pool entry during NewActiveAgentSessions so the handler
 // can render a per-agent status instead of a bare count.
 //
-// See docs/feat/F-42-kill-new-graceful-and-reset.md §5.2.
+// See docs/feat/F-43-kill-new-graceful-and-reset.md §5.2.
 type ResetResult struct {
 	Agent       string // e.g. "claude", "codex"
 	Cwd         string // e.g. "/code/A"
@@ -803,7 +803,7 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 // (e.g. registry corruption); per-entry bridge errors are captured
 // in each KillResult.Error.
 //
-// F-42 design invariants (docs/feat/F-42-kill-new-graceful-and-reset.md
+// F-43 design invariants (docs/feat/F-43-kill-new-graceful-and-reset.md
 // §4.1):
 //   - activeCwd / activeAgent / InputBuffer are NOT touched — /kill
 //     owns only the agent process lifecycle.
@@ -922,7 +922,7 @@ func (cs *ChatSession) KillAll() ([]KillResult, error) {
 	//    owned this chat's ID but never made it into cs.pool (e.g.
 	//    from a prior /cwd swap that left a stale entry, or a crash
 	//    between Upsert and pool installation) — are also GC'd.
-	//    (Review finding #B4: old `KillAll` did this; F-42 first
+	//    (Review finding #B4: old `KillAll` did this; F-43 first
 	//    cut narrowed to snapshot-only, reintroducing orphan
 	//    accumulation across /kill cycles.)
 	if cs.asFile != nil {
@@ -994,7 +994,7 @@ func collectIDsForDelete(cs *ChatSession, snapshotIDs []string) []string {
 // always preceded killed rows, contrary to the spec's "success-first"
 // ordering (review finding #B7).
 //
-// See docs/feat/F-42-kill-new-graceful-and-reset.md §6 for the wording
+// See docs/feat/F-43-kill-new-graceful-and-reset.md §6 for the wording
 // variants and the ✓/✗/• icon legend.
 func FormatKillResults(results []KillResult) string {
 	if len(results) == 0 {
@@ -1036,7 +1036,7 @@ func FormatKillResults(results []KillResult) string {
 // per-entry outcomes. Companion to FormatKillResults; same plain-text
 // shape, same byte-based cap, same typed-priority sort.
 //
-// See docs/feat/F-42-kill-new-graceful-and-reset.md §6.2.
+// See docs/feat/F-43-kill-new-graceful-and-reset.md §6.2.
 func FormatResetResults(results []ResetResult) string {
 	if len(results) == 0 {
 		return "Reset 0 sessions."
@@ -1073,7 +1073,7 @@ func FormatResetResults(results []ResetResult) string {
 
 // humanAction returns a short human-readable verb for an Action
 // string (used in error messages). The name matches the design doc
-// (docs/feat/F-42-kill-new-graceful-and-reset.md §6.6). Future
+// (docs/feat/F-43-kill-new-graceful-and-reset.md §6.6). Future
 // actions can be added here.
 func humanAction(action string) string {
 	switch action {
@@ -1130,7 +1130,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 	cs.mu.RUnlock()
 
 	// 1. Snapshot ALL (cwd, [agentName]) targets (no lock held across
-	//    bridge calls). F-42 §5.4: dead/detached entries are NOT
+	//    bridge calls). F-43 §5.4: dead/detached entries are NOT
 	//    silently skipped — their stale ResumeID would resurrect a
 	//    dead session on next spawn, defeating /new's intent.
 	cs.mu.RLock()
@@ -1173,7 +1173,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 		}
 
 		if as.Status() != StatusRunning {
-			// F-42 §5.4: dead/detached entry has no live conversation
+			// F-43 §5.4: dead/detached entry has no live conversation
 			// to reset, but its stale ResumeID must NOT be replayed on
 			// the next spawn. Clear ResumeID in-memory + persist so the
 			// next LookupActiveAgentSession spawns fresh.
@@ -1188,7 +1188,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 				// ResumeID clear, the on-disk entry still carries the
 				// stale ResumeID, and the next restore on daemon restart
 				// would replay `--resume <dead-id>` — the exact bug
-				// F-42 §5.4 was designed to fix. Surface the error so
+				// F-43 §5.4 was designed to fix. Surface the error so
 				// the handler can report it (and the handler treats any
 				// per-row error as ✗ rather than ✓).
 				if err := cs.asFile.Upsert(as.Entry()); err != nil {

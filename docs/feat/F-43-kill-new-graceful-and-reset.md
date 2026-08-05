@@ -1,4 +1,4 @@
-# F-42: `/kill` Graceful Shutdown + `/new` ResumeID Clear + 列表式回复
+# F-43: `/kill` Graceful Shutdown + `/new` ResumeID Clear + 列表式回复
 
 > **Status**: 📝 设计落地（2026-08-05）
 > **Milestone**: v1.3.x
@@ -762,7 +762,7 @@ TestFormatResetResults_AllDead
 
 - [ ] SPEC.md §3.2 状态转换触发器表更新(`/kill` 行注明走 graceful)
 - [ ] F-34 §6 错误处理矩阵加 dead/detached 的 result 行
-- [ ] F-34 README linking 加 F-42
+- [ ] F-34 README linking 加 F-43
 
 ### 12.6 估计工作量
 

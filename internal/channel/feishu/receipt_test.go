@@ -3,6 +3,7 @@ package feishu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -136,8 +137,19 @@ func TestReceiptState_String(t *testing.T) {
 	if got := StateExecuting.headerLine(r); got != "" {
 		t.Errorf("Executing with ts = %q, want ''", got)
 	}
-	if got := StateCompleted.headerLine(r); got != "✅ 已完成 14:35:20" {
-		t.Errorf("Completed with ts = %q, want '✅ 已完成 14:35:20'", got)
+	if got := StateCompleted.headerLine(r); got != "✅ 14:35:20" {
+		t.Errorf("Completed with ts = %q, want '✅ 14:35:20'", got)
+	}
+	if got := StateError.headerLine(r); got != "❌ 14:35:20" {
+		t.Errorf("Error with ts = %q, want '❌ 14:35:20'", got)
+	}
+	// Terminal fallback: no timestamp → bare emoji, never empty.
+	empty := &MessageReceipt{}
+	if got := StateCompleted.headerLine(empty); got != "✅" {
+		t.Errorf("Completed without ts = %q, want '✅'", got)
+	}
+	if got := StateError.headerLine(empty); got != "❌" {
+		t.Errorf("Error without ts = %q, want '❌'", got)
 	}
 }
 
@@ -181,13 +193,19 @@ func TestReceiptLifecycle_Renderings(t *testing.T) {
 	// State 3: Completed
 	r.state = StateCompleted
 	r.completedAt = parseTime(t, "2026-08-01T14:35:30+08:00")
-	if got := r.state.headerLine(r); got != "✅ 已完成 14:35:30" {
-		t.Errorf("Completed.String = %q", got)
+	if got := r.state.headerLine(r); got != "✅ 14:35:30" {
+		t.Errorf("Completed.String = %q, want '✅ 14:35:30'", got)
+	}
+
+	// State 4: Error — parallel terminal header with ❌ + timestamp
+	r.state = StateError
+	if got := r.state.headerLine(r); got != "❌ 14:35:30" {
+		t.Errorf("Error.String = %q, want '❌ 14:35:30'", got)
 	}
 }
 
 func TestReceiptStringContainsEmoji(t *testing.T) {
-	// Sanity: Waiting + Completed state strings contain their
+	// Sanity: terminal + waiting state strings contain their
 	// identifying emoji so the user's eye can scan the receipt row.
 	// Executing state is intentionally empty (no heartbeat display);
 	// the in-progress emoji is conveyed via the user-message reaction
@@ -198,6 +216,7 @@ func TestReceiptStringContainsEmoji(t *testing.T) {
 	}{
 		{StateWaiting, "⏳"},
 		{StateCompleted, "✅"},
+		{StateError, "❌"},
 	} {
 		r := &MessageReceipt{
 			completedAt: parseTime(t, "2026-08-01T14:35:00+08:00"),
@@ -254,6 +273,14 @@ func TestReceiptStringContainsEmoji(t *testing.T) {
 // a PATCH between visible events. Only events that change the
 // card body (text / result / init / usage) trigger a render.
 func TestReceipt_FirstSendThenPatch(t *testing.T) {
+	// F-42: NewMessageReceiptForReply now seeds BOTH replyMsgID
+	// and cardMsgID with the same value. The "first send then
+	// patch" sequence is now: caller POSTs the card (via
+	// ensureReceiptForReply), then subsequent Append events take
+	// the PATCH path. From the receipt's perspective the first
+	// renderLocked call ALREADY has cardMsgID, so it goes
+	// straight to PatchMessage — no SendCard from the receipt
+	// itself.
 	bot := &mockReceiptBot{}
 	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
 
@@ -277,56 +304,122 @@ func TestReceipt_FirstSendThenPatch(t *testing.T) {
 	textMsgs := append([]string(nil), bot.messages...)
 	bot.mu.Unlock()
 
-	if len(cards) != 1 {
-		t.Fatalf("SendCard calls = %d, want 1 (first render only)", len(cards))
+	// F-42: no SendCard from the receipt — the first card was
+	// already shipped by ensureReceiptForReply before the receipt
+	// existed. Subsequent Appends go straight to PATCH.
+	if len(cards) != 0 {
+		t.Fatalf("SendCard calls = %d, want 0 (F-42: ensure helper already posted the card)", len(cards))
 	}
-	if len(patches) != 2 {
-		t.Fatalf("PatchMessage calls = %d, want 2 (one per subsequent render)", len(patches))
+	if len(patches) != 3 {
+		t.Fatalf("PatchMessage calls = %d, want 3 (one per Append)", len(patches))
 	}
 	if len(textMsgs) != 0 {
 		t.Errorf("SendMessageText calls = %d, want 0 (text path retired for receipts)", len(textMsgs))
 	}
 
-	cardID := cards[0].MessageID
-	if cardID == "" {
-		t.Fatal("SendCard returned empty message id; receipt cannot store it as cardMsgID")
-	}
+	cardID := "om_initial" // pre-seeded by NewMessageReceiptForReply
 	for i, p := range patches {
 		if p.MessageID != cardID {
-			t.Errorf("patches[%d].MessageID = %q, want %q (same id as SendCard)", i, p.MessageID, cardID)
+			t.Errorf("patches[%d].MessageID = %q, want %q (seeded cardMsgID)", i, p.MessageID, cardID)
 		}
 	}
 
 	// Body must be a Card 2.0 envelope ({"schema":"2.0", ...}).
-	// The pre-migration format wrapped in {"card":...} which
-	// Feishu silently failed to render; see the protocol diff
-	// captured in the PR description.
-	if !strings.Contains(cards[0].Body, `"schema":"2.0"`) {
-		t.Errorf("SendCard body missing Card 2.0 schema marker: %q", truncateForTest(cards[0].Body, 80))
-	}
-	if !strings.Contains(cards[0].Body, `"width_mode":"fill"`) {
-		t.Errorf("SendCard body missing Card 2.0 config.width_mode: %q", truncateForTest(cards[0].Body, 80))
-	}
-	if !strings.Contains(cards[0].Body, `"body":{`) {
-		t.Errorf("SendCard body missing Card 2.0 body wrapper: %q", truncateForTest(cards[0].Body, 80))
-	}
-	if !strings.Contains(cards[0].Body, `"tag":"markdown"`) {
-		t.Errorf("SendCard body missing Card 2.0 markdown element: %q", truncateForTest(cards[0].Body, 80))
-	}
-	if !strings.Contains(cards[0].Body, "hello from the agent") {
-		t.Errorf("SendCard body missing first event text: %q", truncateForTest(cards[0].Body, 120))
-	}
-	// The LAST PATCH should contain all reply entries seen so
-	// far (the rolling-log card is the union of reply/result
-	// events). Per F-34, tool_start / tool_end no longer surface
-	// in the receipt card — the adapter routes them to Feishu
-	// thread replies (Adapter.Send → postThreadReply). We assert
-	// on the visible reply text only.
-	last := patches[len(patches)-1].Body
-	for _, want := range []string{"hello from the agent"} {
-		if !strings.Contains(last, want) {
-			t.Errorf("last PATCH missing %q; got: %q", want, truncateForTest(last, 200))
+	if len(patches) > 0 {
+		last := patches[len(patches)-1].Body
+		if !strings.Contains(last, `"schema":"2.0"`) {
+			t.Errorf("last PATCH body missing Card 2.0 schema marker: %q", truncateForTest(last, 80))
 		}
+		if !strings.Contains(last, `"width_mode":"fill"`) {
+			t.Errorf("last PATCH body missing Card 2.0 config.width_mode: %q", truncateForTest(last, 80))
+		}
+		if !strings.Contains(last, `"body":{`) {
+			t.Errorf("last PATCH body missing Card 2.0 body wrapper: %q", truncateForTest(last, 80))
+		}
+		if !strings.Contains(last, `"tag":"markdown"`) {
+			t.Errorf("last PATCH body missing Card 2.0 markdown element: %q", truncateForTest(last, 80))
+		}
+		if !strings.Contains(last, "hello from the agent") {
+			t.Errorf("last PATCH body missing first event text: %q", truncateForTest(last, 200))
+		}
+	}
+}
+
+// TestReceipt_Append_EventError_TransitionsToStateError guards the
+// pre-F-42+ bug where Append(EventError) set r.state = StateCompleted
+// instead of StateError, causing failed-turn cards to render the ✅
+// "completed" header instead of ❌. With the fix the terminal
+// transition goes to StateError, the header line picks up the ❌ +
+// timestamp rendering (per headerLine), and IsCompleted() returns
+// true (it accepts both terminal states).
+func TestReceipt_Append_EventError_TransitionsToStateError(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
+
+	// Seed one in-progress reply so we can verify the error
+	// entry is preserved on the card (unlike EventDone, which
+	// clears entries).
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "halfway through the agent turn",
+	})
+
+	// Append the error event. We pass Err explicitly so
+	// eventToEntry produces a non-empty "❌ error: ..." entry.
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventError,
+		Error: &agent.ErrorEvent{
+			Err: errors.New("bridge crashed: connection reset"),
+		},
+	})
+
+	if got := r.State(); got != StateError {
+		t.Fatalf("State() after EventError = %v, want StateError (was the pre-fix bug returning StateCompleted)", got)
+	}
+	if !r.IsCompleted() {
+		t.Errorf("IsCompleted() after EventError = false, want true")
+	}
+	if r.completedAt.IsZero() {
+		t.Errorf("completedAt not set by Append(EventError); headerLine would render bare ❌ fallback")
+	}
+
+	// Header line must show ❌ + timestamp (the user's "in-the-loop"
+	// signal lives on the top row).
+	got := r.state.headerLine(r)
+	if !strings.Contains(got, "❌") {
+		t.Errorf("headerLine = %q; want ❌ emoji", got)
+	}
+	wantTime := r.completedAt.Format("15:04:05")
+	if !strings.Contains(got, wantTime) {
+		t.Errorf("headerLine = %q; want to contain completion time %q", got, wantTime)
+	}
+
+	// Error entry must still be in the rolling log (preserved
+	// unlike EventDone's collapse).
+	r.mu.Lock()
+	entryCount := len(r.entries)
+	hasErrorEntry := false
+	for _, e := range r.entries {
+		if e.Kind == "error" {
+			hasErrorEntry = true
+			break
+		}
+	}
+	r.mu.Unlock()
+	if entryCount < 1 {
+		t.Errorf("entries should be preserved on error (count=%d); user loses error context", entryCount)
+	}
+	if !hasErrorEntry {
+		t.Errorf("expected error entry to remain in entries; got %d entries without kind=error", entryCount)
+	}
+
+	// Late appends after StateError must still drop silently
+	// (parity with StateCompleted terminal).
+	if err := r.Append(context.Background(), agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "late reply after error",
+	}); err != nil {
+		t.Errorf("Append after StateError returned err=%v; want nil (silent drop)", err)
 	}
 }
 
@@ -957,25 +1050,124 @@ func TestBuildReceiptCard_ThinkingCollapsiblePanel(t *testing.T) {
 // TestBuildColdStartCard_Card2Shape pins the cold-start card
 // emitted by Adapter.receiptFor. It must be a Card 2.0 envelope
 // (same shape contract as the rolling-log card) with a single ⏳
-// markdown element so the user sees a card surface from the first
-// event, not a bare text message.
-func TestBuildColdStartCard_Card2Shape(t *testing.T) {
-	body, err := buildColdStartCard()
-	if err != nil {
-		t.Fatalf("buildColdStartCard: %v", err)
+// F-42: buildColdStartCard was removed; the cold-start "⏳ 等待中"
+// placeholder is no longer posted. Receipts are lazy-created with
+// their actual content by ensureReceiptForReply /
+// ensureReceiptForTask. See docs/feat/F-42-lazy-receipt-creation.md.
+
+// TestAppend_EventDoneAfterStateError_DoesNotOverwrite guards
+// F-42 review finding #2. Pre-fix the EventDone handler's
+// `if r.state != StateCompleted` guard let a late EventDone
+// arrive AFTER EventError had already transitioned the receipt
+// to StateError, clobbering it back to StateCompleted and
+// flipping the card header from ❌ back to ✅. The fix extends
+// the guard to also exclude StateError — both terminal states
+// are now sticky; a late EventDone is a no-op (idempotent
+// terminal).
+func TestAppend_EventDoneAfterStateError_DoesNotOverwrite(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
+
+	// Drive to StateError via EventError.
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventError,
+		Error: &agent.ErrorEvent{Err: errors.New("bridge crashed")},
+	})
+	if r.State() != StateError {
+		t.Fatalf("setup: State() after EventError = %v, want StateError", r.State())
 	}
-	mustContain := []string{
-		`"schema":"2.0"`,
-		`"width_mode":"fill"`,
-		`"body":{`,
-		`"elements":[`,
-		`"tag":"markdown"`,
-		`"content":"⏳ 等待中"`,
+	completedAtBefore := r.completedAt
+
+	// Late EventDone must NOT change the state.
+	if err := r.Append(context.Background(), agent.AgentEvent{
+		Kind: agent.EventDone,
+	}); err != nil {
+		t.Fatalf("late EventDone: %v", err)
 	}
-	for _, want := range mustContain {
-		if !strings.Contains(body, want) {
-			t.Errorf("cold-start card body missing %q\n--- body ---\n%s", want, truncateForTest(body, 400))
+	if r.State() != StateError {
+		t.Errorf("State() after late EventDone = %v, want StateError (post-fix)", r.State())
+	}
+	if !r.completedAt.Equal(completedAtBefore) {
+		t.Errorf("completedAt changed after late EventDone; want unchanged")
+	}
+
+	// And the header line should still render ❌ + the original
+	// timestamp, not ✅ + a fresh one.
+	got := r.state.headerLine(r)
+	if !strings.Contains(got, "❌") {
+		t.Errorf("headerLine = %q; want ❌ preserved after late EventDone", got)
+	}
+	if strings.Contains(got, "✅") {
+		t.Errorf("headerLine = %q; must NOT contain ✅ after late EventDone on StateError", got)
+	}
+}
+
+// TestAppend_NonTerminalAfterStateError_IsDropped guards F-42
+// review finding #3. Pre-fix the early-return guard was
+// `if r.state == StateCompleted` only — a late non-terminal
+// event (e.g. a stray EventText reply from a misbehaving bridge)
+// after StateError would proceed through eventToEntry →
+// appendEntryLocked → renderLocked and PATCH the error card
+// with fresh in-progress content, clobbering the ❌ header.
+// The fix adds StateError to the terminal-state short-circuit.
+func TestAppend_NonTerminalAfterStateError_IsDropped(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
+
+	// Seed an in-progress entry so we can verify it survives the
+	// error transition (error entry should also remain).
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "halfway text",
+	})
+
+	// Drive to StateError.
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventError,
+		Error: &agent.ErrorEvent{Err: errors.New("oops")},
+	})
+
+	bot.mu.Lock()
+	patchesBefore := len(bot.patches)
+	bot.mu.Unlock()
+
+	// Late non-terminal event. The terminal guard must drop it
+	// silently — no new entry, no PATCH.
+	if err := r.Append(context.Background(), agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "late reply after error — must be dropped",
+	}); err != nil {
+		t.Fatalf("late EventText after StateError: %v", err)
+	}
+
+	// No new PATCH should have been issued (terminal guard drops
+	// the render).
+	bot.mu.Lock()
+	patchesAfter := len(bot.patches)
+	bot.mu.Unlock()
+	if patchesAfter != patchesBefore {
+		t.Errorf("PATCH count changed after late EventText on StateError: before=%d after=%d (terminal guard should drop the render)",
+			patchesBefore, patchesAfter)
+	}
+
+	// Header still ❌, error entry still present, no "late reply"
+	// entry.
+	got := r.state.headerLine(r)
+	if !strings.Contains(got, "❌") {
+		t.Errorf("headerLine = %q; want ❌ preserved after late EventText on StateError", got)
+	}
+
+	r.mu.Lock()
+	hasLate := false
+	for _, e := range r.entries {
+		if strings.Contains(e.Text, "late reply") {
+			hasLate = true
+			break
 		}
+	}
+	r.mu.Unlock()
+	if hasLate {
+		t.Errorf("late EventText after StateError added an entry; terminal guard should drop the event entirely (no entry, no PATCH)")
 	}
 }
 

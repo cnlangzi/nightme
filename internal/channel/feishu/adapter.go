@@ -605,68 +605,219 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 // a ReplyTo that doesn't yet have a registered receipt.
 //
 // v1.3 (SPEC §2.2): each OutboundMessage{ReplyTo: userMsgID} maps
-// to exactly one receipt per userMsgID. The cold-start posts a
-// minimal ⏳ card via SendCard and registers the receipt keyed by
-// the actual userMsgID (NOT a synthetic chatID + timestamp — that
-// was the pre-v1.3 design and caused turn 2 events to silently
-// drop on the per-chat active receipt).
+// to exactly one receipt per userMsgID.
+//
+// F-42: this function is now a PURE cache lookup. The v1.3 "cold-start
+// minimal ⏳ card" path is removed — receipts are now lazy-created
+// by ensureReceiptForReply / ensureReceiptForTask on the FIRST
+// OutboundMessage that has real content (an OutReply with text or an
+// OutTask* with a TaskList). OutboundKinds without content (OutInit,
+// OutUsage before any reply) silently drop.
 //
 // userMsgID == "" means orphan event (startup EventInit, internal
-// log). Return nil so the caller falls back to sendRawOutText
-// (the card surface is meaningless for orphan events).
+// log). Return nil so the caller falls back to sendRawOutText.
 //
-// Locking: look-up / register under a.mu. The actual cold-start
-// SendCard runs without the lock (network call; must not block
-// other adapter operations).
+// Locking: read-only under a.mu.
 func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *MessageReceipt {
 	if userMsgID == "" {
 		return nil
 	}
 	a.mu.Lock()
-	if r, ok := a.receiptsByUserMsgID[userMsgID]; ok && r != nil {
-		a.mu.Unlock()
-		return r
-	}
-	a.mu.Unlock()
+	defer a.mu.Unlock()
+	return a.receiptsByUserMsgID[userMsgID] // nil on miss — caller decides
+}
 
-	// Cold start: post a minimal ⏳ card. buildColdStartCard builds
-	// the Card 2.0 envelope; SendCard routes through sendFunc so the
-	// resulting cardMsgID is set on the FIRST render — no
-	// "text then card" transition. See docs/channel/feishu.md §5.2.
-	//
-	// v1.3.x (§13.10): pass userMsgID as rootID so the card is
-	// rendered as a reply to the user's message in the main chat.
-	// Subsequent PatchMessage calls inherit the thread automatically.
-	cardBody, err := buildColdStartCard()
-	if err != nil {
-		a.logger.Warn("feishu: cold-start card build failed",
-			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
-		return nil
+// ensureReceiptForReply lazily creates a receipt for the FIRST OutReply
+// event on a given userMsgID. It POSTs a Card 2.0 envelope that
+// already contains the reply text (no placeholder) and registers the
+// receipt under a.mu so subsequent events on the same userMsgID find
+// it via receiptFor.
+//
+// Returns the receipt plus a `created` flag:
+//   - created=true: receipt was just constructed and `text` is already
+//     in its entries list. Caller MUST NOT call Append(EventText)
+//     again — it would duplicate the entry.
+//   - created=false: an existing receipt was returned (another
+//     goroutine won the race, or a TaskList-first path already built
+//     it). Caller should Append normally.
+//
+// F-42: replaces the v1.3 cold-start minimal-⏳-card behavior. See
+// docs/feat/F-42-lazy-receipt-creation.md §1.1 and SPEC §2.4.
+//
+// F-42 review fixes (this commit):
+//   - Finding #1: returns an error (not (nil,false,nil)) when
+//     eventToEntry filters the text (thinking-prefix or empty).
+//     The OutReply caller already degrades to sendRawOutText on
+//     error, so the user still sees the text as a top-level
+//     bubble — no more nil-pointer panic on receipt.IsCompleted().
+//   - Finding #4: register-before-SendCard. The placeholder is
+//     committed to receiptsByUserMsgID under a.mu BEFORE
+//     SendCard runs, with `initializing=true` set so concurrent
+//     renderLocked calls short-circuit instead of issuing a
+//     second SendCard (which would orphan the loser's card in
+//     chat). The pre-F-42 "pre-check, then SendCard, then
+//     post-SendCard re-check" pattern had a race window where
+//     two goroutines could both pass the pre-check and both call
+//     SendCard before either registered; the loser ended up
+//     with an orphan card in chat that no PATCH ever reached.
+func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, text string) (*MessageReceipt, bool, error) {
+	if userMsgID == "" {
+		return nil, false, errors.New("feishu: ensureReceiptForReply requires userMsgID")
 	}
-	// F-37: replyInThread=false — the cold-start card is the
-	// pinned main-chat answer; thread-only would leave the main
-	// chat empty until the receipt PATCHes happen.
-	msgID, err := a.SendCard(ctx, chatID, cardBody, userMsgID, false)
-	if err != nil {
-		a.logger.Warn("feishu: cold-start receipt card failed",
-			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
-		return nil
+
+	// Build the LogEntry the same way Append would. eventToEntry
+	// returns ok=false for empty text and for thinking-prefixed
+	// text (gateway normally remaps the latter into OutThinking
+	// upstream, but a direct constructor / test / future bridge
+	// path could route it here). Return an error in that case so
+	// the caller (OutReply Send dispatcher) degrades to
+	// sendRawOutText — the text still reaches the user, just as
+	// a top-level bubble rather than folded into a receipt card.
+	// Pre-fix the helper returned (nil, false, nil) which crashed
+	// the caller on the subsequent receipt.IsCompleted().
+	entry, ok := eventToEntry(agent.AgentEvent{Kind: agent.EventText, Text: text}, time.Now())
+	if !ok {
+		return nil, false, errors.New("feishu: ensureReceiptForReply: text not eligible for receipt entry (thinking-prefix or empty)")
 	}
-	// Use NewMessageReceiptForCard because the cold-start card
-	// is already posted; set cardMsgID so the FIRST Append goes
-	// straight to PATCH (no "text then card" transition and no
-	// duplicate SendCard call inside the receipt's renderLocked).
-	receipt := NewMessageReceiptForCard(chatID, userMsgID, msgID, a)
+
+	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
+	transient.entries = []LogEntry{entry}
+	transient.state = StateExecuting
+	transient.initializing = true // suppress renderLocked SendCard branch (see renderLocked docs)
+
+	// Register-before-SendCard. The lock-protected check-and-set
+	// is the linearization point: only the goroutine that wins
+	// the registration proceeds to SendCard. All subsequent
+	// callers (via receiptFor or via ensure itself returning the
+	// existing placeholder) get created=false and Append their
+	// own event into the placeholder; their renderLocked calls
+	// short-circuit on `initializing` and the data accumulates
+	// until the ensure helper's SendCard returns and clears the
+	// flag — at which point the next renderLocked PATCHes the
+	// canonical card with the merged entries.
 	a.mu.Lock()
-	// Re-check under the lock in case a concurrent send cold-created
-	// the same receipt between our look-up and register.
 	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
 		a.mu.Unlock()
-		return existing
+		return existing, false, nil
 	}
-	a.receiptsByUserMsgID[userMsgID] = receipt
+	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
-	return receipt
+
+	body, err := buildReceiptCard(transient)
+	if err != nil {
+		// Rollback the registration so a future attempt can retry
+		// cleanly. Compare-and-clear avoids clobbering a winner
+		// that took the slot between our release and re-acquire.
+		a.mu.Lock()
+		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
+			delete(a.receiptsByUserMsgID, userMsgID)
+		}
+		a.mu.Unlock()
+		return nil, false, fmt.Errorf("feishu: ensure receipt build card: %w", err)
+	}
+
+	// POST the card with the actual content. replyInThread=false —
+	// the card IS the pinned main-chat answer, not a thread-only
+	// artifact. (Same threading rule as the old cold-start path;
+	// see docs/channel/feishu.md §13.10.)
+	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
+	if err != nil {
+		a.mu.Lock()
+		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
+			delete(a.receiptsByUserMsgID, userMsgID)
+		}
+		a.mu.Unlock()
+		a.logger.Warn("feishu: ensureReceiptForReply send card failed",
+			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
+		return nil, false, err
+	}
+
+	// Promote the placeholder to a real receipt: set cardMsgID
+	// (so subsequent renderLocked takes the PATCH branch) and
+	// clear `initializing` (so the suppressed renderLocked calls
+	// from concurrent goroutines' Appends can finally fire and
+	// PATCH in their entries).
+	a.mu.Lock()
+	transient.replyMsgID = msgID
+	transient.cardMsgID = msgID
+	transient.initializing = false
+	a.mu.Unlock()
+	return transient, true, nil
+}
+
+// ensureReceiptForTask lazily creates a receipt when the FIRST event
+// for a userMsgID is an OutTaskCreate / OutTaskUpdate (the agent
+// produces tasks but no OutReply yet — TaskCreate-only turn). The
+// first card body carries the `**📋 Tasks**` section header (F-38 +
+// F-42) and the full task snapshot so the user sees something useful.
+//
+// Returns the receipt plus a `created` flag with the same semantics
+// as ensureReceiptForReply: created=true means the task list is
+// already installed and the caller should NOT call SetTaskList again.
+//
+// F-42 review finding #5: same orphan-card race fix as
+// ensureReceiptForReply. Register-before-SendCard with the
+// `initializing` flag — concurrent SetTaskList calls during the
+// SendCard window hit the renderLocked short-circuit instead of
+// issuing a second SendCard, so the loser doesn't leave an orphan
+// card in chat with a stale task snapshot.
+func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID string, list *agent.TaskListEvent) (*MessageReceipt, bool, error) {
+	if userMsgID == "" {
+		return nil, false, errors.New("feishu: ensureReceiptForTask requires userMsgID")
+	}
+	if list == nil {
+		return nil, false, errors.New("feishu: ensureReceiptForTask requires non-nil TaskListEvent")
+	}
+
+	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
+	// Copy the items exactly like SetTaskList does, so the
+	// snapshot we hand to buildReceiptCard is independent of any
+	// later mutations on the caller's TaskListEvent.
+	items := list.Items
+	copied := make([]agent.TaskItem, len(items))
+	copy(copied, items)
+	transient.tasks = copied
+	transient.state = StateExecuting
+	transient.initializing = true
+
+	// Register-before-SendCard (see ensureReceiptForReply for the
+	// full rationale — same race fix applied symmetrically here).
+	a.mu.Lock()
+	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
+		a.mu.Unlock()
+		return existing, false, nil
+	}
+	a.receiptsByUserMsgID[userMsgID] = transient
+	a.mu.Unlock()
+
+	body, err := buildReceiptCard(transient)
+	if err != nil {
+		a.mu.Lock()
+		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
+			delete(a.receiptsByUserMsgID, userMsgID)
+		}
+		a.mu.Unlock()
+		return nil, false, fmt.Errorf("feishu: ensure task receipt build card: %w", err)
+	}
+
+	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
+	if err != nil {
+		a.mu.Lock()
+		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
+			delete(a.receiptsByUserMsgID, userMsgID)
+		}
+		a.mu.Unlock()
+		a.logger.Warn("feishu: ensureReceiptForTask send card failed",
+			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
+		return nil, false, err
+	}
+
+	a.mu.Lock()
+	transient.replyMsgID = msgID
+	transient.cardMsgID = msgID
+	transient.initializing = false
+	a.mu.Unlock()
+	return transient, true, nil
 }
 
 func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
@@ -714,10 +865,15 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 			return nil
 		}
 
-		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
-		if receipt == nil {
-			// receiptFor's SendCard failed — degrade to plain
-			// top-level send so the user sees the text.
+		// F-42: lazy receipt creation. ensureReceiptForReply
+		// returns the receipt plus a `created` flag — created=true
+		// means the reply text is already in the receipt's entries
+		// list (we must NOT Append it again, that would duplicate).
+		receipt, created, err := a.ensureReceiptForReply(ctx, msg.ChatID, msg.ReplyTo, text)
+		if err != nil {
+			// SendCard failed (network, quota, etc.) — degrade
+			// to a plain top-level text bubble so the user at
+			// least sees the reply.
 			return a.sendRawOutText(ctx, msg.ChatID, text)
 		}
 
@@ -734,12 +890,19 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 			return a.sendReplyAsMessage(ctx, msg.ChatID, msg.ReplyTo, text)
 		}
 
-		// Normal fold: no truncation, buildReceiptCard splits
-		// internally if the entry crosses divTextCharLimit.
-		return receipt.Append(ctx, agent.AgentEvent{
-			Kind: agent.EventText,
-			Text: text,
-		})
+		if !created {
+			// Another goroutine had already registered the receipt
+			// (race lost, or a TaskList-first path built it first).
+			// Append this text as a fresh entry.
+			return receipt.Append(ctx, agent.AgentEvent{
+				Kind: agent.EventText,
+				Text: text,
+			})
+		}
+		// created=true — text already in entries by ensure.
+		// renderLocked already shipped the first card; subsequent
+		// events on this userMsgID take the Append path above.
+		return nil
 
 	case gateway.OutThinking:
 		// F-34: thinking is posted to the user message thread so
@@ -778,6 +941,32 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		messageID := msg.MessageState.MessageID
 		state := msg.MessageState.State
+
+		// F-42: drop intermediate MessageState reactions
+		// (StateReceived ⏳ / StateForwarded 🔄). The Feishu
+		// adapter's other channels of feedback already cover the
+		// waiting signal:
+		//
+		//   - F-37 thread-route: ToolStart/ToolEnd/Thinking
+		//     arrive in the user-message thread as soon as the
+		//     agent produces them.
+		//   - F-42 lazy receipt: the receipt card appears on
+		//     the first OutReply / OutTask* event.
+		//
+		// ⏳ (StateReceived) and 🔄 (StateForwarded) reactions
+		// are redundant in that context — they'd land on the
+		// user message before any visible activity and pile up
+		// (Feishu reactions are append-only). Terminal reactions
+		// (✅ StateDone / ❌ StateError) are kept because they
+		// provide an unambiguous completion signal even on
+		// short / no-tool turns. Other Channel implementations
+		// (Slack / Web) may still choose to render intermediate
+		// states; this is a Feishu-specific self-determination
+		// (SPEC §2.5 + docs/feat/F-42 §1.2).
+		if state == agent.StateReceived || state == agent.StateForwarded {
+			return nil
+		}
+
 		emoji := mapStateToFeishuEmoji(state)
 		if emoji == "" {
 			// Unknown state: silent drop (forward-compatible).
@@ -1036,18 +1225,31 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// on a confirmed success result so the user sees a single
 		// task element in the receipt rather than two thread lines
 		// per operation.
+		//
+		// F-42: lazy receipt creation. If no receipt exists yet
+		// (this userMsgID's first event is the task list — TaskCreate
+		// fires before any OutReply), ensureReceiptForTask builds
+		// the first card with `**📋 Tasks**` header + the snapshot
+		// already populated. Subsequent OutTask* events on the same
+		// userMsgID take the SetTaskList PATCH path.
 		if msg.TaskList == nil {
 			return errors.New("feishu: OutTask*/TaskList payload is nil")
 		}
-		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
-		if receipt == nil {
-			// Cold-start failed (existing pattern for other Kinds).
-			// Degrade gracefully so the user still sees the
-			// checklist in the main chat as a standalone text
-			// bubble, even when no receipt card could be PATCHed.
+		receipt, created, err := a.ensureReceiptForTask(ctx, msg.ChatID, msg.ReplyTo, msg.TaskList)
+		if err != nil {
+			// SendCard failed — degrade gracefully so the user
+			// still sees the checklist as a standalone text
+			// bubble.
 			return a.sendRawOutText(ctx, msg.ChatID, renderTaskFallbackText(msg.TaskList))
 		}
-		return receipt.SetTaskList(ctx, msg.TaskList)
+		if !created {
+			// Receipt already exists (race or a previous OutReply
+			// created it). Push the snapshot via SetTaskList.
+			return receipt.SetTaskList(ctx, msg.TaskList)
+		}
+		// created=true — tasks already installed by ensure;
+		// first card already shipped.
+		return nil
 	}
 	return fmt.Errorf("feishu: unsupported outbound kind %v", msg.Kind)
 }
@@ -1652,30 +1854,12 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 	return string(b), nil
 }
 
-// buildColdStartCard renders the minimal "⏳ 等待中" receipt used
-// by Adapter.receiptFor when the gateway's pumpOutbound emits an
-// OutReply without a prior SendUserMessage (i.e. the agent turn
-// started before the user message — a startup edge case). The
-// returned card is posted via SendCard and the resulting message id
-// seeds the receipt's cardMsgID so subsequent events PATCH the same
-// surface in place. See docs/channel/feishu.md §5.2 for the
-// first-send-then-PATCH strategy.
-func buildColdStartCard() (string, error) {
-	card := map[string]any{
-		"schema": "2.0",
-		"config": map[string]any{"width_mode": "fill"},
-		"body": map[string]any{
-			"elements": []map[string]any{
-				{"tag": "markdown", "content": "⏳ 等待中"},
-			},
-		},
-	}
-	b, err := encodeCardJSON(card)
-	if err != nil {
-		return "", fmt.Errorf("feishu: encode cold-start card: %w", err)
-	}
-	return string(b), nil
-}
+// buildColdStartCard was the minimal "⏳ 等待中" receipt posted by
+// receiptFor on cache miss. Removed in F-42 — receipts are now
+// lazy-created with their actual content (OutReply text or OutTask*
+// list) by ensureReceiptForReply / ensureReceiptForTask, never
+// with a placeholder. See docs/feat/F-42-lazy-receipt-creation.md
+// §1.1 for the rationale.
 
 // SetLogger swaps the structured logger used for outgoing-message
 // traces. Pass nil to fall back to slog.Default().

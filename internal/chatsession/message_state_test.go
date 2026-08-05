@@ -43,18 +43,18 @@ func TestEmitMessageState_HandlerInvoked(t *testing.T) {
 	cap := &captureHandler{}
 	cs.SetMessageStateHandler(cap.handler)
 
-	cs.EmitMessageState("om_msg_1", agent.StateReceived)
-	cs.EmitMessageState("om_msg_2", agent.StateForwarded)
-	cs.EmitMessageState("om_msg_3", agent.StateDone)
+	cs.EmitMessageState("om_msg_1", agent.MessageReceived)
+	cs.EmitMessageState("om_msg_2", agent.MessageForwarded)
+	cs.EmitMessageState("om_msg_3", agent.MessageDone)
 
 	got := cap.snapshot()
 	if len(got) != 3 {
 		t.Fatalf("captured %d calls; want 3", len(got))
 	}
 	want := []messageStateCall{
-		{"oc_chat", "om_msg_1", agent.StateReceived},
-		{"oc_chat", "om_msg_2", agent.StateForwarded},
-		{"oc_chat", "om_msg_3", agent.StateDone},
+		{"oc_chat", "om_msg_1", agent.MessageReceived},
+		{"oc_chat", "om_msg_2", agent.MessageForwarded},
+		{"oc_chat", "om_msg_3", agent.MessageDone},
 	}
 	for i, w := range want {
 		if got[i] != w {
@@ -68,7 +68,7 @@ func TestEmitMessageState_HandlerInvoked(t *testing.T) {
 func TestEmitMessageState_NoHandlerIsNoop(t *testing.T) {
 	cs := New("oc_chat", "claude")
 	// No SetMessageStateHandler call.
-	cs.EmitMessageState("om_msg", agent.StateReceived)
+	cs.EmitMessageState("om_msg", agent.MessageReceived)
 	// If we got here without panic, success.
 }
 
@@ -78,9 +78,9 @@ func TestSetMessageStateHandler_NilClears(t *testing.T) {
 	cs := New("oc_chat", "claude")
 	cap := &captureHandler{}
 	cs.SetMessageStateHandler(cap.handler)
-	cs.EmitMessageState("om_1", agent.StateReceived)
+	cs.EmitMessageState("om_1", agent.MessageReceived)
 	cs.SetMessageStateHandler(nil)
-	cs.EmitMessageState("om_2", agent.StateDone)
+	cs.EmitMessageState("om_2", agent.MessageDone)
 
 	if got := len(cap.snapshot()); got != 1 {
 		t.Fatalf("captured %d calls after nil-clear; want 1 (only the first emit)", got)
@@ -109,13 +109,13 @@ func TestEmitMessageStateForCurrentTurn_AnchorOnly(t *testing.T) {
 	cs.currentTurnUserMsgID = "om_b"
 	cs.mu.Unlock()
 
-	cs.emitMessageStateForCurrentTurn(agent.StateDone)
+	cs.emitMessageStateForCurrentTurn(agent.MessageDone)
 
 	got := cap.snapshot()
 	if len(got) != 1 {
 		t.Fatalf("captured %d calls; want 1 (anchor only)", len(got))
 	}
-	if got[0] != (messageStateCall{"oc_chat", "om_b", agent.StateDone}) {
+	if got[0] != (messageStateCall{"oc_chat", "om_b", agent.MessageDone}) {
 		t.Errorf("call[0] = %+v; want om_b/Done", got[0])
 	}
 
@@ -129,7 +129,7 @@ func TestEmitMessageStateForCurrentTurn_AnchorOnly(t *testing.T) {
 	}
 
 	// Subsequent call with empty currentTurnUserMsgID → no-op.
-	cs.emitMessageStateForCurrentTurn(agent.StateError)
+	cs.emitMessageStateForCurrentTurn(agent.MessageFailed)
 	if got := len(cap.snapshot()); got != 1 {
 		t.Errorf("captured %d calls; want 1 (no-op after clear)", got)
 	}

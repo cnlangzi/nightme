@@ -533,7 +533,8 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 |--------|-------|----------|--------|
 | **Binding FSM**（chat ↔ ChatSession）| Gateway | 1:1 绑定，永不删 | 是（ChatSessionEntry）|
 | **InputBuffer FSM**（per ChatSession）| ChatSession | `idle ↔ busy` | 否（重启丢）|
-| **MessageState FSM**（per userMsg）| ChatSession | `received → forwarded → done / error` | 否（重启丢）|
+| **MessageState FSM**（per userMsg）| ChatSession | `MessageReceived → MessageForwarded → MessageDone / MessageFailed` | 否（重启丢）|
+| **PromptState FSM**（per userMsg）| Channel's receipt | `PromptPending → PromptRunning → PromptSucceeded / PromptFailed` | 否（重启丢）|
 | **AgentSession.Status**（per AgentSession）| AgentSession | `running → detached / exited` | 是（AgentSessionEntry）|
 | **ChatSession.ActiveAgentSession**（per ChatSession）| ChatSession | 引用 pool 中的某个 AgentSession | 引用在 ChatSessionEntry |
 
@@ -768,9 +769,9 @@ messageDispatcher(ctx, msg)
   ├ gateway.bindings[msg.chat_id] 查 ChatSession
   │   ├ nil → channel.Send("no chat session, /cwd first")
   │   └ Status != Ready → channel.Send("not ready, /cwd + /use first")
-  ├ (0) cs.emitMessageState(msg.MessageID, StateReceived)   ← F-31: 触发 MessageState(Received) 事件
+  ├ (0) cs.emitMessageState(msg.MessageID, agent.MessageReceived)   ← F-31: 触发 MessageState(Received) 事件
   ├ (a) chatSession.LookupActiveAgentSession() (lazy spawn on miss)
-  ├ (b) cs.emitMessageState(msg.MessageID, StateForwarded)   ← F-31: dispatch 成功后触发
+  ├ (b) cs.emitMessageState(msg.MessageID, agent.MessageForwarded)   ← F-31: dispatch 成功后触发
   ├ (c) **blocks 路径选择**（F-14 v1.4b）：
   │     ├─ msg.Blocks != nil（post path）   → blocks = msg.Blocks    ← 顺序由 Feishu paragraph 决定
   │     └─ else（legacy single-resource）   → blocks = feishu.BuildBlocks(msg.Text, msg.Attachments)
@@ -816,7 +817,7 @@ agentSession.readPump (单消费者)
   ├ ChatSession.EventCallback(s, ev)   ← ChatSession 在这里注册的回调（**不另起 pump**）
   ├ InputBuffer.SetState(Busy)
   ├ EventDone/Error → SetState(Idle) + OnTurnEnded() + 翻 queued 消息出去
-  └ EventDone/Error → cs.emitMessageStateForCurrentTurn(StateDone|StateError)
+  └ EventDone/Error → cs.emitMessageStateForCurrentTurn(agent.MessageDone|agent.MessageFailed)
   ↓
 ChatSession.onAgentEvent(s, ev)        // EventCallback 驱动
   ├ InputBuffer.SetState(Busy)
@@ -942,9 +943,9 @@ handler.kill(ctx, msg, args)
 
 **`MessageState` = 消息的生命周期阶段属性**。回答 3 个问题：
 
-1. ChatSession 收到消息没有？ → `StateReceived`
-2. 消息转给 AgentSession 了没有？ → `StateForwarded`
-3. AgentSession 执行完成了没有？ → `StateDone` (+ `StateError` 可选)
+1. ChatSession 收到消息没有？ → `agent.MessageReceived`
+2. 消息转给 AgentSession 了没有？ → `agent.MessageForwarded`
+3. AgentSession 执行完成了没有？ → `agent.MessageDone` (+ `agent.MessageFailed` 可选)
 
 每条普通用户消息在系统里流转时，对应 `MessageState` 事件被 emit；Channel 把它渲染成平台原生视觉表达（Feishu reaction emoji，Slack emoji 短码，Web UI DOM 元素）。
 
@@ -998,14 +999,16 @@ OutboundMessage{
 
 | 触发时机 | 状态 | 说明 |
 |---|---|---|
-| `ChatSession.GetOrCreate(chatID)` 成功后 | `StateReceived` | 消息首次进 ChatSession |
-| `ChatSession.LookupActiveAgentSession()` 成功 | `StateForwarded` | spawn 成功或命中 running pool |
-| `ChatSession.runReadPump` 收到 `EventDone` | `StateDone` | agent 处理完 |
-| `ChatSession.runReadPump` 收到 `EventError` | `StateError` | agent 出错 |
+| `ChatSession.GetOrCreate(chatID)` 成功后 | `agent.MessageReceived` | 消息首次进 ChatSession |
+| `ChatSession.LookupActiveAgentSession()` 成功 | `agent.MessageForwarded` | spawn 成功或命中 running pool |
+| `ChatSession.runReadPump` 收到 `EventDone` | `agent.MessageDone` | agent 处理完 |
+| `ChatSession.runReadPump` 收到 `EventError` | `agent.MessageFailed` | agent 出错 |
 
 **Scope 强约束**：MessageState **只对普通用户消息触发**。Slash command（`/cwd` `/use` `/kill` 等）不产生 MessageState —— 控制平面有 `OutCommandReply` 作为反馈。
 
-**Channel 自治渲染选择**：上述 4 个状态由 ChatSession lifecycle emit 后，由 Gateway 翻译为 `OutboundMessage{Kind: OutMessageState}` 通过 `Channel.Send` 投递。每个 Channel 自决哪些状态需要渲染 + 怎么渲染（Feishu 加 reaction，Slack 加 emoji shortcode，Web 改 DOM 元素等）。Feishu 在 v1.3.x F-42 选择 silent drop `StateReceived` / `StateForwarded`（与 Tool/Think thread activity + 首 OutReply card 三者信号重叠），只渲染 `StateDone` / `StateError`。`agent.MessageState` enum 本身是抽象层契约 ── 不变式是 ChatSession 必须按表格触发，**不**约束 Channel 必须全部渲染。
+**Channel 自治渲染选择**：上述 4 个状态由 ChatSession lifecycle emit 后，由 Gateway 翻译为 `OutboundMessage{Kind: OutMessageState}` 通过 `Channel.Send` 投递。每个 Channel 自决哪些状态需要渲染 + 怎么渲染（Feishu 加 reaction，Slack 加 emoji shortcode，Web 改 DOM 元素等）。v1.3.x 起 Feishu adapter 渲染**全部 4 态**——`agent.MessageReceived` → ⏳ `OneSecond`，`agent.MessageForwarded` → 🔄 `OnIt`，`agent.MessageDone` → ✅ `DONE`，`agent.MessageFailed` → 👎 `THUMBSDOWN`（Feishu predefined 里没有 ❌，用 closest negative 替代）。Slack / Web Channel 实现可以选更窄的渲染策略。`agent.MessageState` enum 本身是抽象层契约 ── 不变式是 ChatSession 必须按表格触发，**不**约束 Channel 必须全部渲染。
+
+**PromptState 平行 FSM**：每个 channel 的 receipt 对象维护一个 `agent.PromptState`，4 态对应 prompt 在 agent 进程内的执行生命周期：`agent.PromptPending`（receipt 创建后等首 event）→ `agent.PromptRunning`（首 non-empty entry 抵达）→ `agent.PromptSucceeded` / `agent.PromptFailed`（terminal）。与 MessageState 的关键区别：**PromptState 是 channel-internal 状态**（不走 wire event，每个 channel 各自的 receipt 自己观察 `agent.EventDone`/`EventError` 来 transition），而 MessageState 是抽象层广播事件（走 `OutboundMessage{Kind: OutMessageState}`）。两者都描述"消息处理到哪了"但回答的问题不同（投递 vs 执行），分别渲染到 user-message reaction 和 receipt card header。
 
 详见 [`feat/F-31-message-state.md`](./feat/F-31-message-state.md) + [`feat/F-42-lazy-receipt-creation.md`](./feat/F-42-lazy-receipt-creation.md)（Feishu 选择 drop 中间态的记录）。
 

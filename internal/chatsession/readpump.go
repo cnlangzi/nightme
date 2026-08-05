@@ -202,11 +202,11 @@ func (cs *ChatSession) runReadPump(as *AgentSession, h EventHandler, stop, done 
 			// FSM driving + MessageState emission (F-31).
 			switch ev.Kind {
 			case agent.EventDone:
-				cs.emitMessageStateForCurrentTurn(agent.StateDone)
+				cs.emitMessageStateForCurrentTurn(agent.MessageDone)
 				cs.SetIdle()
 				_ = cs.OnTurnEnded()
 			case agent.EventError:
-				cs.emitMessageStateForCurrentTurn(agent.StateError)
+				cs.emitMessageStateForCurrentTurn(agent.MessageFailed)
 				cs.SetIdle()
 				_ = cs.OnTurnEnded()
 			default:

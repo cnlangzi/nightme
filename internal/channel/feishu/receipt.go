@@ -206,9 +206,9 @@ type MessageReceipt struct {
 	bot        receiptBot
 	logger     *slog.Logger
 
-	mu          sync.Mutex
-	state       ReceiptState
-	completedAt time.Time
+	mu            sync.Mutex
+	promptState   agent.PromptState
+	completedAt   time.Time
 
 	// entries is the rolling-log buffer (FIFO). Append grows it;
 	// renderLocked evicts from the front when either the byte budget
@@ -289,103 +289,76 @@ type MessageReceipt struct {
 	outputTokens int    // accumulated from agent.EventUsage
 }
 
-// ReceiptState is the lifecycle state of a MessageReceipt.
+// ReceiptState was the lifecycle state of a MessageReceipt (v1.3.x
+// F-42 era). v1.3.x lifts the four values into the shared agent
+// vocabulary as agent.PromptState (see internal/agent/prompt_status.go)
+// so other Channel implementations (Slack / Web / ...) can adopt
+// the same names. The feishu-local type and its String() method are
+// removed; callers reference agent.PromptPending / PromptRunning /
+// PromptSucceeded / PromptFailed directly.
 //
-// StateWaiting / StateExecuting / StateCompleted predate the v1.1
-// four-state cross-channel enum (channel.ReceiptState). They remain
-// in use because the existing adapter-internal paths
-// (SendUserMessage / MarkExecuting / SetExecuting / SetCompleted /
-// Append) flow through them; the new v1.1 path
-// (channel.CreateReceipt → channel.UpdateReceipt) translates the
-// cross-channel ReceiptState into one of these via applyState
-// (see bottom of this file).
-type ReceiptState int
+// The header rendering logic that used to live as a method on
+// ReceiptState moves to the package-level promptHeaderLine below —
+// it depends on feishu-private fields (completedAt, etc.) so it
+// stays feishu-local even though the status enum itself moved to
+// agent.
 
-const (
-	// StateWaiting means the message has been received and is in
-	// the buffer or pending dispatch to Claude.
-	StateWaiting ReceiptState = iota
-
-	// StateExecuting means Claude is processing this message (either
-	// directly or after a buffer flush).
-	StateExecuting
-
-	// StateCompleted means Claude's result event has been received.
-	// The receipt is terminal and no further updates happen.
-	StateCompleted
-
-	// StateError means dispatch or processing failed (v1.1). The
-	// receipt is terminal and the user should retry.
-	StateError
-)
-
-// String renders the state as a short human label. Mostly useful for
-// test diagnostics and structured logs.
-func (s ReceiptState) String() string {
-	switch s {
-	case StateWaiting:
-		return "waiting"
-	case StateExecuting:
-		return "executing"
-	case StateCompleted:
-		return "completed"
-	case StateError:
-		return "error"
-	}
-	return "unknown"
-}
-
-// headerLine returns the single-line header that sits at the top of
-// the reply message. It carries the lifecycle state.
+// promptHeaderLine returns the single-line header that sits at
+// the top of the reply message. It carries the prompt lifecycle
+// state.
 //
-// Executing state intentionally returns "": the previous
+// PromptRunning intentionally returns "": the previous
 // "🔄 ⏳ N · HH:MM:SS" line was driven by an auto-tick (Heartbeat)
 // that we removed in #40, and the ticking clock was misleading
 // once no events were flowing (it implied activity that did not
 // exist). The card body itself — log entries / task list / footer
 // — already conveys "we are working" once the first entry lands,
-// and the ⏳ / ✅ emoji reactions on the user message (managed by
-// MessageState FSM) carry the lifecycle markers.
-func (s ReceiptState) headerLine(r *MessageReceipt) string {
+// and the ⏳ / 🔄 / ✅ / ❌ emoji reactions on the user message
+// (managed by MessageState FSM) carry the lifecycle markers.
+//
+// Note: promptHeaderLine reads r.completedAt which is feishu-
+// private, so the function lives in feishu (not in agent).
+func promptHeaderLine(s agent.PromptState, completedAt time.Time) string {
 	switch s {
-	case StateWaiting:
+	case agent.PromptPending:
 		return "⏳ 等待中"
-	case StateExecuting:
+	case agent.PromptRunning:
 		// Intentionally empty: the in-progress signal is the
 		// F-31 user-message reaction (handled outside this
 		// receipt). No header row needed mid-turn.
 		return ""
-	case StateCompleted:
+	case agent.PromptSucceeded:
 		// F-42+ revision: terminal header is just `<icon>
 		// <time>`. The label "已完成" was dropped — the emoji
 		// already conveys "done" and a separate word crowds
 		// the top row. When the timestamp is unknown (rare
-		// for StateCompleted because SetCompleted always sets
+		// for PromptSucceeded because SetCompleted always sets
 		// it) we fall back to the bare emoji so the row never
 		// collapses entirely.
-		if r == nil || r.completedAt.IsZero() {
+		if completedAt.IsZero() {
 			return "✅"
 		}
-		return fmt.Sprintf("✅ %s", r.completedAt.Format("15:04:05"))
-	case StateError:
-		// F-42+ revision: parallel to StateCompleted — same
+		return fmt.Sprintf("✅ %s", completedAt.Format("15:04:05"))
+	case agent.PromptFailed:
+		// F-42+ revision: parallel to PromptSucceeded — same
 		// icon-and-time shape on the top row. Previously the
-		// error header was empty (relying on the StateError
+		// error header was empty (relying on the PromptFailed
 		// branch falling through to `return ""`), which made
 		// the failed-turn card look indistinguishable from an
 		// in-progress one after collapse.
-		if r == nil || r.completedAt.IsZero() {
+		if completedAt.IsZero() {
 			return "❌"
 		}
-		return fmt.Sprintf("❌ %s", r.completedAt.Format("15:04:05"))
+		return fmt.Sprintf("❌ %s", completedAt.Format("15:04:05"))
 	}
 	return ""
 }
 
-// footLine returns the labelled summary that sits at the bottom
-// of the receipt card (after a <hr> divider). It is rendered by
-// buildReceiptCard as a plain markdown element (no color tag —
-// the user requested the default card-renderer color).
+// promptFootLine returns the labelled summary that sits at the
+// bottom of the receipt card (after a <hr> divider). It is
+// rendered by buildReceiptCard as a plain markdown element (no
+// color tag — the user requested the default card-renderer
+// color).
 //
 // Format — two-line layout. The first line groups the three
 // "task-scoped" fields (Agent, GIT, Tokens) joined by " | ";
@@ -425,7 +398,7 @@ func (s ReceiptState) headerLine(r *MessageReceipt) string {
 // empty / zero. buildReceiptCard uses the empty return to omit
 // the <hr> + footer section entirely (no divider when there's
 // nothing to show).
-func (s ReceiptState) footLine(r *MessageReceipt) string {
+func promptFootLine(r *MessageReceipt) string {
 	if r == nil {
 		return ""
 	}
@@ -545,11 +518,11 @@ func compactNumberLoud(n int) string {
 // header line; entries are appended as events arrive via Append.
 func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID string) (*MessageReceipt, error) {
 	r := &MessageReceipt{
-		chatID:    chatID,
-		userMsgID: userMsgID,
-		bot:       bot,
-		logger:    slog.Default(),
-		state:     StateWaiting,
+		chatID:       chatID,
+		userMsgID:    userMsgID,
+		bot:          bot,
+		logger:       slog.Default(),
+		promptState: agent.PromptPending,
 	}
 
 	// v1.3 (F-31): initial reaction is NO LONGER added here.
@@ -570,7 +543,7 @@ func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID stri
 	//
 	// F-37: replyInThread=false — the cold-start text bubble is the
 	// pinned answer preview and must stay visible in main chat.
-	msgID, err := bot.SendMessageText(ctx, chatID, r.state.headerLine(r), userMsgID, false)
+	msgID, err := bot.SendMessageText(ctx, chatID, promptHeaderLine(r.promptState, r.completedAt), userMsgID, false)
 	if err != nil {
 		r.logger.Warn("feishu receipt: initial reply failed", "err", err)
 		return r, fmt.Errorf("create receipt: %w", err)
@@ -608,31 +581,32 @@ func NewMessageReceipt(ctx context.Context, bot *Adapter, chatID, userMsgID stri
 // PatchMessage branch instead of re-sending.
 func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receiptBot) *MessageReceipt {
 	return &MessageReceipt{
-		chatID:     chatID,
-		userMsgID:  userMsgID,
-		replyMsgID: replyMsgID,
-		cardMsgID:  replyMsgID,
-		bot:        bot,
-		logger:     slog.Default(),
-		state:      StateWaiting,
+		chatID:       chatID,
+		userMsgID:    userMsgID,
+		replyMsgID:   replyMsgID,
+		cardMsgID:    replyMsgID,
+		bot:          bot,
+		logger:       slog.Default(),
+		promptState: agent.PromptPending,
 	}
 }
 
-// SetExecuting transitions Waiting → Executing. First-call only;
+// SetExecuting transitions Pending → Running. First-call only;
 // subsequent SetExecuting calls are idempotent no-ops. The card
-// header in Executing state is empty (see headerLine) so no header
-// rewrite is needed; renderLocked still fires so the reaction FSM
-// can pick up the state change in any downstream consumers.
+// header in Running state is empty (see promptHeaderLine) so no
+// header rewrite is needed; renderLocked still fires so the
+// reaction FSM can pick up the state change in any downstream
+// consumers.
 func (r *MessageReceipt) SetExecuting(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.state == StateCompleted {
+	if r.promptState == agent.PromptSucceeded {
 		return nil
 	}
-	if r.state == StateExecuting {
+	if r.promptState == agent.PromptRunning {
 		return nil
 	}
-	r.state = StateExecuting
+	r.promptState = agent.PromptRunning
 	return r.renderLocked(ctx)
 }
 
@@ -654,7 +628,7 @@ func (r *MessageReceipt) SetTaskList(ctx context.Context, list *agent.TaskListEv
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.state == StateCompleted {
+	if r.promptState == agent.PromptSucceeded {
 		return nil
 	}
 	items := list.Items
@@ -665,47 +639,62 @@ func (r *MessageReceipt) SetTaskList(ctx context.Context, list *agent.TaskListEv
 		copy(copyItems, items)
 		r.tasks = copyItems
 	}
-	if r.state == StateWaiting {
-		r.state = StateExecuting
+	if r.promptState == agent.PromptPending {
+		r.promptState = agent.PromptRunning
 	}
 	return r.renderLocked(ctx)
 }
 
-// SetCompleted transitions Executing → Completed. The header flips to
+// SetCompleted transitions Running → Succeeded. The header flips to
 // ✅ and the rolling-log streaming text is cleared so the card collapses
 // to header + footer + task list — the answer text lives in the
 // independent reply (F-39 reverse-section proof). No new entry appended.
 //
 // Called from EventDone / EventError in Append; NOT from OutResult (which
 // was the F-39 mistake — early-terminal caused OutUsage / OutInit /
-// TaskList to be silently dropped because Append's StateCompleted guard
+// TaskList to be silently dropped because Append's PromptSucceeded guard
 // returned early).
 func (r *MessageReceipt) SetCompleted(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.state == StateCompleted {
+	if r.promptState == agent.PromptSucceeded {
 		return nil // idempotent
 	}
-	r.state = StateCompleted
+	r.promptState = agent.PromptSucceeded
 	r.completedAt = time.Now()
 	r.entries = nil // collapse rolling-log; only metadata (header/footer/task list) survives
 	return r.renderLocked(ctx)
 }
 
-// State returns the current state. Useful for tests + diagnostics.
-func (r *MessageReceipt) State() ReceiptState {
+// PromptState returns the current prompt execution state. Useful
+// for tests + diagnostics. Returns the agent.PromptState value
+// stored on this receipt; callers should compare against
+// agent.PromptPending / PromptRunning / PromptSucceeded /
+// PromptFailed.
+func (r *MessageReceipt) PromptState() agent.PromptState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.state
+	return r.promptState
+}
+
+// State returns the current state. Useful for tests + diagnostics.
+//
+// Deprecated: this getter preserves the v1.3.x F-42 era
+// signature for backward compatibility in test fixtures. New
+// code should call PromptState() (which returns the
+// agent.PromptState enum directly). Existing call sites will be
+// migrated in a follow-up.
+func (r *MessageReceipt) State() agent.PromptState {
+	return r.PromptState()
 }
 
 // IsCompleted reports whether the receipt has reached a terminal
-// state (Completed or Error). F-40: late-arriving OutReply events
+// state (Succeeded or Failed). F-40: late-arriving OutReply events
 // (after the agent turn ended) check this to decide between fold-
 // into-receipt and bail out to a stand-alone reply via
 // sendReplyAsMessage. See docs/feat/F-40-outreply-overflow.md §1.5.
 func (r *MessageReceipt) IsCompleted() bool {
-	return r.State() == StateCompleted || r.State() == StateError
+	return r.PromptState() == agent.PromptSucceeded || r.PromptState() == agent.PromptFailed
 }
 
 // EntryCount returns the number of rolling-log entries currently
@@ -729,11 +718,11 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.state == StateCompleted || r.state == StateError {
+	if r.promptState == agent.PromptSucceeded || r.promptState == agent.PromptFailed {
 		// F-42 review finding #3: the early-return guard must
-		// include StateError (terminal-via-error, fixed in this
+		// include PromptFailed (terminal-via-error, fixed in this
 		// commit). Previously a late non-terminal event after
-		// StateError would proceed through eventToEntry →
+		// PromptFailed would proceed through eventToEntry →
 		// appendEntryLocked → renderLocked and PATCH the error
 		// card with stale in-progress content, clobbering the
 		// ❌ timestamp header. Terminal guard now mirrors the
@@ -756,16 +745,16 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 		// SetCompleted inlined: Append holds r.mu, calling SetCompleted
 		// would self-deadlock (sync.Mutex is not reentrant).
 		//
-		// F-42 review finding #2: the "no re-set to StateCompleted"
-		// guard now also excludes StateError. A late EventDone
-		// arriving after EventError used to overwrite StateError
-		// back to StateCompleted, flipping the header from ❌
+		// F-42 review finding #2: the "no re-set to PromptSucceeded"
+		// guard now also excludes PromptFailed. A late EventDone
+		// arriving after EventError used to overwrite PromptFailed
+		// back to PromptSucceeded, flipping the header from ❌
 		// to ✅ and breaking the terminal-error semantics. Both
 		// terminal states are now terminal — once we're done
 		// (with or without error), a subsequent EventDone has
 		// nothing to do and is treated as a no-op.
-		if r.state != StateCompleted && r.state != StateError {
-			r.state = StateCompleted
+		if r.promptState != agent.PromptSucceeded && r.promptState != agent.PromptFailed {
+			r.promptState = agent.PromptSucceeded
 			r.completedAt = time.Now()
 			r.entries = nil // collapse rolling-log on terminal
 			if err := r.renderLocked(ctx); err != nil {
@@ -779,20 +768,20 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 			r.appendEntryLocked(entry)
 		}
 		// F-42+ bug fix: terminal transition for EventError must
-		// be StateError, not StateCompleted. Pre-fix the receipt
-		// collapsed to the StateCompleted header (✅ + time)
+		// be PromptFailed, not PromptSucceeded. Pre-fix the receipt
+		// collapsed to the PromptSucceeded header (✅ + time)
 		// even on failed turns, so the user couldn't distinguish
 		// a successful run from a crashed one from the card
-		// alone. With the correct StateError the header now
-		// renders ❌ + completedAt (per headerLine), matching
-		// the ❌ user-message reaction that OutMessageState adds
-		// on the same turn.
+		// alone. With the correct PromptFailed the header now
+		// renders ❌ + completedAt (per promptHeaderLine),
+		// matching the ❌ user-message reaction that
+		// OutMessageState adds on the same turn.
 		//
 		// Entries are NOT cleared (unlike EventDone) — the
 		// error message itself is useful context for the user,
 		// and a forced-turn-error card with the error line still
 		// visible is the most informative surface.
-		r.state = StateError
+		r.promptState = agent.PromptFailed
 		r.completedAt = time.Now()
 		return r.renderLocked(ctx)
 	case agent.EventInit:
@@ -844,9 +833,9 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 	}
 
 	// State transition: the first non-empty entry promotes the
-	// receipt from Waiting → Executing.
-	if r.state == StateWaiting && (entry.Text != "" || entry.Icon != "") {
-		r.state = StateExecuting
+	// receipt from Pending → Running.
+	if r.promptState == agent.PromptPending && (entry.Text != "" || entry.Icon != "") {
+		r.promptState = agent.PromptRunning
 	}
 
 	return r.renderLocked(ctx)
@@ -912,7 +901,7 @@ func totalLogBytesLocked(r *MessageReceipt) int {
 	const perElementOverhead = 96 // {"tag":"div","text":{"tag":"lark_md","content":""}} ≈ 50-100 bytes
 	const perPanelOverhead = 250  // collapsible_panel header / border / icon / padding JSON
 	total := 0
-	if hl := r.state.headerLine(r); hl != "" {
+	if hl := promptHeaderLine(r.promptState, r.completedAt); hl != "" {
 		total += len(hl) + perElementOverhead
 	}
 	if r.evicted > 0 {
@@ -935,7 +924,7 @@ func totalLogBytesLocked(r *MessageReceipt) int {
 		}
 	}
 	// Foot note (when present) — <hr> + plain markdown.
-	if note := r.state.footLine(r); note != "" {
+	if note := promptFootLine(r); note != "" {
 		total += len(note) + 2*perElementOverhead
 	}
 	return total
@@ -996,7 +985,7 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	body, err := buildReceiptCard(r)
 	if err != nil {
 		r.logger.Warn("feishu receipt: build card failed",
-			"err", err, "state", r.state, "entries", len(r.entries))
+			"err", err, "state", r.promptState, "entries", len(r.entries))
 		return fmt.Errorf("feishu receipt: build card: %w", err)
 	}
 
@@ -1015,7 +1004,7 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 		msgID, sendErr := r.bot.SendCard(ctx, r.chatID, body, r.userMsgID, false)
 		if sendErr != nil {
 			r.logger.Warn("feishu receipt: create card failed",
-				"err", sendErr, "state", r.state, "entries", len(r.entries))
+				"err", sendErr, "state", r.promptState, "entries", len(r.entries))
 			return fmt.Errorf("feishu receipt: create card: %w", sendErr)
 		}
 		r.cardMsgID = msgID
@@ -1046,7 +1035,7 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	// body is replaced; the server doesn't accept diffs.
 	if patchErr := r.bot.PatchMessage(ctx, r.cardMsgID, body); patchErr != nil {
 		r.logger.Warn("feishu receipt: patch card failed",
-			"err", patchErr, "state", r.state, "card_msg_id", r.cardMsgID,
+			"err", patchErr, "state", r.promptState, "card_msg_id", r.cardMsgID,
 			"entries", len(r.entries))
 		return fmt.Errorf("feishu receipt: patch card: %w", patchErr)
 	}

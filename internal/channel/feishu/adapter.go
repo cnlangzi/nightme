@@ -22,6 +22,8 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
+	lru "github.com/hashicorp/golang-lru/v2"
+
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
@@ -35,6 +37,23 @@ const maxMessageBytes = 3800
 // Channel.Send (OutCard kind) and CardActionTrigger callback
 // parsing in handleCardAction.
 const interactiveMessageType = "interactive"
+
+// messageStatesLRUSize bounds the in-memory MessageState cache.
+// Feishu adapters track the last-rendered MessageState per user
+// message id for idempotency (skip duplicate AddReaction calls) and
+// terminal-state guarding (prevent 👎 → ✅ flips from late events).
+// Without a bound this map grows unboundedly across long daemon
+// uptimes with high chat volume. 5K covers hours of active chat
+// across multiple ChatSessions — entries older than the LRU window
+// are evicted, accepting that very-late MessageState emits for
+// already-evicted user message ids may render a duplicate reaction
+// (Feishu reactions are append-only and idempotent so this is
+// visually harmless — same emoji, possibly stacked).
+//
+// The cap is intentionally generous vs. typical chat volume
+// (real-world: <100 active user message ids at any time) so that
+// eviction only happens for genuinely stale ids.
+const messageStatesLRUSize = 5000
 
 // sendMessageFunc is kept behind the adapter so unit tests can exercise the
 // channel without making an HTTP request to Feishu.
@@ -163,10 +182,20 @@ type Adapter struct {
 	// (F-31) replaces the per-receipt currentReaction field which
 	// was removed when MessageReceipt stopped owning reactions.
 	//
-	// Concurrency: reads/writes go through a.mu (same lock as
-	// receipts). Same lifecycle — entries persist for the
-	// ChatSession lifetime and are evicted only on adapter stop.
-	messageStates map[string]agent.MessageState
+	// Bounded by messageStatesLRUSize (LRU eviction). The cache
+	// itself is internally synchronized (hashicorp/golang-lru/v2
+	// uses an internal mutex); we additionally hold a.mu around
+	// the read-modify-write section to preserve the original
+	// "composite atomic update" semantic.
+	//
+	// Trade-off: when the cache evicts a previously-rendered
+	// terminal state, a very-late MessageState emit for that
+	// userMsgID will be treated as a fresh first-emit and may
+	// render a duplicate reaction. Feishu reactions are
+	// idempotent (AddReaction with the same reaction_type returns
+	// the existing reaction_id), so the user sees at most an
+	// extra emoji of the same kind — never a state flip.
+	messageStates *lru.Cache[string, agent.MessageState]
 
 	// toolEventBuf (F-38 §3.1.3) tracks in-flight OutToolStart
 	// thread replies so the matching OutToolEnd can PATCH the
@@ -221,10 +250,14 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		return nil, errors.New("feishu: app_secret is required; run `nightme auth login feishu`")
 	}
 
+	messageStates, err := lru.New[string, agent.MessageState](messageStatesLRUSize)
+	if err != nil {
+		return nil, fmt.Errorf("feishu: init messageStates LRU: %w", err)
+	}
 	a := &Adapter{
 		incoming:            make(chan channel.Message, 128),
 		receiptsByUserMsgID: make(map[string]*MessageReceipt),
-		messageStates:       make(map[string]agent.MessageState),
+		messageStates:       messageStates,
 		threadReplyLimiter:  newThreadReplyLimiter(200*time.Millisecond, 800*time.Millisecond),
 		cfg:                 cfg,
 		done:                make(chan struct{}),
@@ -682,7 +715,7 @@ func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, 
 
 	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
 	transient.entries = []LogEntry{entry}
-	transient.state = StateExecuting
+	transient.promptState = agent.PromptRunning
 	transient.initializing = true // suppress renderLocked SendCard branch (see renderLocked docs)
 
 	// Register-before-SendCard. The lock-protected check-and-set
@@ -777,7 +810,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	copied := make([]agent.TaskItem, len(items))
 	copy(copied, items)
 	transient.tasks = copied
-	transient.state = StateExecuting
+	transient.promptState = agent.PromptRunning
 	transient.initializing = true
 
 	// Register-before-SendCard (see ensureReceiptForReply for the
@@ -838,7 +871,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		//   1. receiptFor failed (cold-start SendCard errored) →
 		//      top-level plain text bubble via sendRawOutText so
 		//      the user at least sees the reply.
-		//   2. Receipt is already StateCompleted (EventDone /
+		//   2. Receipt is already PromptSucceeded (EventDone /
 		//      EventError landed earlier) → late-arriving reply
 		//      must NOT be silently dropped; deliver as a
 		//      stand-alone ReplyInThreadAndChat.
@@ -942,50 +975,37 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		messageID := msg.MessageState.MessageID
 		state := msg.MessageState.State
 
-		// F-42: drop intermediate MessageState reactions
-		// (StateReceived ⏳ / StateForwarded 🔄). The Feishu
-		// adapter's other channels of feedback already cover the
-		// waiting signal:
+		// Terminal-state guard: once we've rendered MessageDone or
+		// MessageFailed for a userMsgID, no later MessageState can
+		// change the reaction. Feishu reactions are append-only, so
+		// without this guard a late EventDone arriving after
+		// EventError used to flip the user-message reaction from
+		// 👎 (failed) back to ✅ (done), contradicting the ❌ header
+		// that the receipt card already shows (see receipt.go
+		// promptHeaderLine for PromptFailed). This guard mirrors
+		// the receipt-side terminal protection in Append.
 		//
-		//   - F-37 thread-route: ToolStart/ToolEnd/Thinking
-		//     arrive in the user-message thread as soon as the
-		//     agent produces them.
-		//   - F-42 lazy receipt: the receipt card appears on
-		//     the first OutReply / OutTask* event.
-		//
-		// ⏳ (StateReceived) and 🔄 (StateForwarded) reactions
-		// are redundant in that context — they'd land on the
-		// user message before any visible activity and pile up
-		// (Feishu reactions are append-only). Terminal reactions
-		// (✅ StateDone / ❌ StateError) are kept because they
-		// provide an unambiguous completion signal even on
-		// short / no-tool turns. Other Channel implementations
-		// (Slack / Web) may still choose to render intermediate
-		// states; this is a Feishu-specific self-determination
-		// (SPEC §2.5 + docs/feat/F-42 §1.2).
-		if state == agent.StateReceived || state == agent.StateForwarded {
-			return nil
-		}
-
+		// Intermediate states (MessageReceived / MessageForwarded)
+		// are NOT terminal and continue to flow through normally;
+		// they restore the F-42 drop that left the user message
+		// reaction-less during the FastAck window (the gap between
+		// user message dispatch and first OutReply / OutTask*).
 		emoji := mapStateToFeishuEmoji(state)
 		if emoji == "" {
 			// Unknown state: silent drop (forward-compatible).
 			return nil
 		}
-		// Idempotency: skip if we already rendered this state for
-		// this userMsgID. Tracks last-rendered state to avoid
-		// duplicate AddReaction calls on retries.
-		//
-		// v1.3.1 fix: use the comma-ok form to distinguish "no
-		// entry yet" (first emit) from "previous state is
-		// StateReceived" (which is the zero value of MessageState
-		// and was incorrectly treated as "already rendered",
-		// silently dropping every first StateReceived emit).
+
 		a.mu.Lock()
-		prev, hasPrev := a.messageStates[messageID]
+		prev, hasPrev := a.messageStates.Get(messageID)
+		// Idempotency: same state twice → drop.
 		skip := hasPrev && prev == state
+		// Terminal guard: already in a terminal MessageState → drop.
+		if hasPrev && (prev == agent.MessageDone || prev == agent.MessageFailed) {
+			skip = true
+		}
 		if !skip {
-			a.messageStates[messageID] = state
+			a.messageStates.Add(messageID, state)
 		}
 		a.mu.Unlock()
 		if skip {
@@ -993,9 +1013,13 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		if _, err := a.AddReaction(ctx, messageID, emoji); err != nil {
 			a.mu.Lock()
-			// Revert on failure so a later retry can re-add.
-			if a.messageStates[messageID] == state {
-				delete(a.messageStates, messageID)
+			// Revert on failure so a later retry can re-add. Peek
+			// (not Get) so the failure-path lookup doesn't bump
+			// the LRU recency order — a failed message id
+			// shouldn't count as "recently used" since it never
+			// successfully rendered.
+			if cur, ok := a.messageStates.Peek(messageID); ok && cur == state {
+				a.messageStates.Remove(messageID)
 			}
 			a.mu.Unlock()
 			a.logger.Warn("feishu: OutMessageState add reaction failed",
@@ -1138,10 +1162,10 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		// F-39: deliver the full result as an independent reply anchored at
 		// userMsgID. We deliberately do NOT call receipt.SetCompleted here —
-		// the receipt stays StateExecuting so subsequent OutUsage / OutInit /
+		// the receipt stays PromptRunning so subsequent OutUsage / OutInit /
 		// TaskList can still update the footer (token counts, agent name,
 		// task checklist). EventDone / EventError is the terminal signal that
-		// flips state to StateCompleted and collapses the rolling log.
+		// flips state to PromptSucceeded and collapses the rolling log.
 		return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text)
 
 	case gateway.OutUsage:
@@ -1740,7 +1764,7 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 	// The evictOverflowLocked on the receipt side keeps entries
 	// within Feishu's 50-element limit; this is the second line of
 	// defence.
-	headerLine := r.state.headerLine(r)
+	headerLine := promptHeaderLine(r.promptState, r.completedAt)
 	elements := make([]map[string]any, 0, 3+len(r.entries))
 	if headerLine != "" {
 		elements = append(elements, map[string]any{
@@ -1819,7 +1843,7 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 		})
 	}
 
-	if note := r.state.footLine(r); note != "" {
+	if note := promptFootLine(r); note != "" {
 		elements = append(elements, map[string]any{"tag": "hr"})
 		// Footer styling matches the OpenClaw Lark plugin
 		// (openclaw-lark src/card/builder.ts::buildFooter):
@@ -1832,7 +1856,7 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 		//     a successful one. OpenClaw wraps the i18n
 		//     copies in red when isError is true.
 		footerContent := note
-		if r.state == StateError {
+		if r.promptState == agent.PromptFailed {
 			footerContent = "<font color='red'>" + note + "</font>"
 		}
 		elements = append(elements, map[string]any{
@@ -2031,17 +2055,26 @@ func (a *Adapter) SendMessageText(ctx context.Context, chatID, text, rootID stri
 // unicode) — passing unicode to the reaction API returns
 // 99992354 "data not found".
 //
+// Feishu's predefined emoji catalog does NOT include a literal
+// ❌ — the closest negative indicator is THUMBSDOWN (👎). The
+// receipt card's ❌ header is custom markdown and renders
+// independently, so user-message reaction and card header may
+// not pixel-match on failure turns; both unambiguously signal
+// "failed" (the receipt header carries an additional HH:MM:SS
+// timestamp for the precise moment). If Feishu later adds a
+// "Cross" predefined type to its catalog, switch to that here.
+//
 // Returns "" for unknown states (forward-compatible silent drop).
 func mapStateToFeishuEmoji(state agent.MessageState) string {
 	switch state {
-	case agent.StateReceived:
+	case agent.MessageReceived:
 		return "OneSecond" // ⏳
-	case agent.StateForwarded:
+	case agent.MessageForwarded:
 		return "OnIt" // 🔄
-	case agent.StateDone:
+	case agent.MessageDone:
 		return "DONE" // ✅
-	case agent.StateError:
-		return "THUMBSUP" // closest predefined indicator of "failed"
+	case agent.MessageFailed:
+		return "THUMBSDOWN" // 👎 — closest predefined "negative"
 	}
 	return ""
 }

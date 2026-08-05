@@ -15,7 +15,7 @@ import (
 // (not in Meta).
 func TestOnMessageState_TranslatesToOutbound(t *testing.T) {
 	gw, ch := newWiredRouter(t)
-	gw.OnMessageState("oc_chat", "om_user_msg", agent.StateReceived)
+	gw.OnMessageState("oc_chat", "om_user_msg", agent.MessageReceived)
 
 	if len(ch.sends) != 1 {
 		t.Fatalf("got %d sends; want 1", len(ch.sends))
@@ -33,7 +33,7 @@ func TestOnMessageState_TranslatesToOutbound(t *testing.T) {
 	if got.MessageState.MessageID != "om_user_msg" {
 		t.Errorf("MessageState.MessageID = %q; want om_user_msg", got.MessageState.MessageID)
 	}
-	if got.MessageState.State != agent.StateReceived {
+	if got.MessageState.State != agent.MessageReceived {
 		t.Errorf("MessageState.State = %v; want StateReceived", got.MessageState.State)
 	}
 }
@@ -47,7 +47,7 @@ func TestOnMessageState_NoChannelDrops(t *testing.T) {
 	gw.mu.Lock()
 	gw.defaultChannel = nil
 	gw.mu.Unlock()
-	gw.OnMessageState("oc_unknown", "om_msg", agent.StateReceived)
+	gw.OnMessageState("oc_unknown", "om_msg", agent.MessageReceived)
 	if len(ch.sends) != 0 {
 		t.Errorf("got %d sends; want 0 (no channel registered)", len(ch.sends))
 	}
@@ -57,8 +57,8 @@ func TestOnMessageState_NoChannelDrops(t *testing.T) {
 // userMsgID is a silent drop (defensive against malformed events).
 func TestOnMessageState_EmptyIDsDrops(t *testing.T) {
 	gw, ch := newWiredRouter(t)
-	gw.OnMessageState("", "om_msg", agent.StateReceived)
-	gw.OnMessageState("oc_chat", "", agent.StateReceived)
+	gw.OnMessageState("", "om_msg", agent.MessageReceived)
+	gw.OnMessageState("oc_chat", "", agent.MessageReceived)
 	if len(ch.sends) != 0 {
 		t.Errorf("got %d sends; want 0 (empty chat/user ID)", len(ch.sends))
 	}
@@ -69,10 +69,10 @@ func TestOnMessageState_EmptyIDsDrops(t *testing.T) {
 func TestOnMessageState_AllStatesPassThrough(t *testing.T) {
 	gw, ch := newWiredRouter(t)
 	states := []agent.MessageState{
-		agent.StateReceived,
-		agent.StateForwarded,
-		agent.StateDone,
-		agent.StateError,
+		agent.MessageReceived,
+		agent.MessageForwarded,
+		agent.MessageDone,
+		agent.MessageFailed,
 	}
 	for i, s := range states {
 		gw.OnMessageState("oc_chat", "om_"+string(rune('a'+i)), s)

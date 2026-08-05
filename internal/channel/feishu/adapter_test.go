@@ -1374,6 +1374,82 @@ func TestSendViaLark_ReplyInThread_Dispatch(t *testing.T) {
 	}
 }
 
+// TestSendViaLark_TopLevelCreate_Dispatch — F-44 follow-up wiring proof.
+// sendViaLark must route user-visible kinds (OutTaskCreate /
+// OutTaskUpdate) through ReplyInChat, i.e. top-level Create with
+// rootID="" so the cold-start task card is a standalone bubble in
+// main chat. This is verified by asserting rootID="" on the captured
+// sendFunc invocation. Without this guard, a future regression that
+// re-anchors the task card to the user message would not be caught —
+// and the parent-thread gotcha would silently reappear.
+//
+// Why OutTask* is in this set even though it's "single card" not
+// "chunk stream": the gotcha is the same. Once OutToolStart/End
+// (ReplyInThread) creates a thread on the user message, Feishu pulls
+// the cold-start task card into the thread drawer regardless of how
+// many events the card accumulates afterward. Same rule for the
+// cold-start card as for individual reply chunks: stay top-level.
+//
+// (OutReply / OutResult are also ReplyInChat; they're covered by
+// TestSend_OutReply_IndependentReply_NotFolded and
+// TestSend_OutResult_OrphanTopLevel which assert the same rootID=""
+// invariant at the call site. OutTask* is added here because it
+// wasn't covered at all before this commit.)
+func TestSendViaLark_TopLevelCreate_Dispatch(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  gateway.OutboundMessage
+	}{
+		{
+			name: "OutTaskCreate",
+			msg: gateway.OutboundMessage{
+				Kind:    gateway.OutTaskCreate,
+				ChatID:  "oc_test",
+				ReplyTo: "om_user_1",
+				TaskList: &agent.TaskListEvent{Items: []agent.TaskItem{
+					{Subject: "step 1", Status: agent.TaskPending, ActiveForm: "doing 1"},
+				}},
+			},
+		},
+		{
+			name: "OutTaskUpdate",
+			msg: gateway.OutboundMessage{
+				Kind:    gateway.OutTaskUpdate,
+				ChatID:  "oc_test",
+				ReplyTo: "om_user_2",
+				TaskList: &agent.TaskListEvent{Items: []agent.TaskItem{
+					{Subject: "step 1", Status: agent.TaskCompleted, ActiveForm: "doing 1"},
+				}},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := testAdapter(t)
+			var capturedRootID string
+			var capturedReplyInThread bool
+			a.sendFunc = func(_ context.Context, _, _, _, rootID string, replyInThread bool) (string, error) {
+				capturedRootID = rootID
+				capturedReplyInThread = replyInThread
+				return "om_ok", nil
+			}
+			a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+			if err := a.Send(t.Context(), tc.msg); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			if capturedRootID != "" {
+				t.Errorf("rootID = %q, want %q (F-44 follow-up: %s must route via ReplyInChat / top-level Create, no anchor)",
+					capturedRootID, "", tc.name)
+			}
+			if capturedReplyInThread {
+				t.Errorf("replyInThread = true, want false (F-44 follow-up: %s top-level Create ignores reply_in_thread)",
+					tc.name)
+			}
+		})
+	}
+}
+
 // ===========================================================================
 // F-39: OutResult → independent reply tests
 // ===========================================================================

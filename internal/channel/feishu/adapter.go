@@ -640,10 +640,11 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	                       stays visible in main chat with a "Reply
 //	                       to <sender>" header; no chunk-stream so
 //	                       the parent-thread gotcha doesn't apply.
-//	OutTaskCreate/Update → Receipt card via SendCard (ReplyInBoth
-//	                       on first send, PATCH in place after) —
-//	                       rolling-log task checklist, anchored to
-//	                       userMsgID via F-37 §13.10.
+//	OutTaskCreate/Update → Receipt card via SendCard (top-level
+//	                       Create on first send, PATCH in place after)
+//	                       — rolling-log task checklist, no anchor
+//	                       to userMsgID (F-44 follow-up: same
+//	                       parent-thread gotcha as OutReply/OutResult).
 //	OutCompaction        → ReplyInBoth (visible in main chat; brief
 //	                       "✶ Compacting…" line is informative, not noise).
 //	OutCommandReply      → ReplyInBoth (slash command result, threaded
@@ -700,6 +701,16 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 // SendCard window hit the renderLocked short-circuit instead of
 // issuing a second SendCard, so the loser doesn't leave an orphan
 // card in chat with a stale task snapshot.
+//
+// F-44 follow-up: the cold-start card is posted via top-level Create
+// (ReplyInChat — rootID=""), NOT ReplyInBoth. Same parent-thread
+// gotcha as OutReply/OutResult: once the user message gets a thread
+// from prior OutToolStart/End (reply_in_thread=true), ReplyInBoth
+// is silently pulled into the thread drawer. The task card is the
+// user's primary "what is the agent doing" surface — it must stay
+// visible in main chat. Subsequent PATCHes (SetTaskList →
+// PatchMessage) preserve the no-anchor state since PATCH on a
+// top-level Create stays top-level (root_id inheritance).
 func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID string, list *agent.TaskListEvent) (*MessageReceipt, bool, error) {
 	if userMsgID == "" {
 		return nil, false, errors.New("feishu: ensureReceiptForTask requires userMsgID")
@@ -739,7 +750,10 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 		return nil, false, fmt.Errorf("feishu: ensure task receipt build card: %w", err)
 	}
 
-	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
+	// F-44 follow-up: top-level Create (rootID="") so the task
+	// card stays visible in main chat regardless of whether the
+	// parent user message has a tool thread. See docstring above.
+	msgID, err := a.SendCard(ctx, chatID, body, "", false)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -1082,12 +1096,12 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		return err
 
 	case gateway.OutTaskCreate, gateway.OutTaskUpdate:
-		// F-38 + PR #47: replace the per-turn checklist in the
-		// current receipt. We never call postThreadReply for task
-		// tools — the bridge suppresses the generic ToolStart/
-		// ToolEnd pair on a confirmed success result so the user
-		// sees a single task element in the receipt rather than
-		// two thread lines per operation.
+		// F-38 + PR #47 + F-44 follow-up: replace the per-turn
+		// checklist in the current receipt. We never call
+		// postThreadReply for task tools — the bridge suppresses
+		// the generic ToolStart/ToolEnd pair on a confirmed success
+		// result so the user sees a single task element in the
+		// receipt rather than two thread lines per operation.
 		//
 		// F-42: lazy receipt creation. If no receipt exists yet
 		// (this userMsgID's first event is the task list — TaskCreate
@@ -1096,9 +1110,11 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// already populated. Subsequent OutTask* events on the same
 		// userMsgID take the SetTaskList PATCH path.
 		//
-		// Wire: cold-start card is posted via SendCard → ReplyInBoth
-		// (reply endpoint, reply_in_thread omitted) so the receipt
-		// is visible inline in main chat. Subsequent SetTaskList
+		// Wire: cold-start card is posted via SendCard → top-level
+		// Create (ReplyInChat, rootID="") so the task card stays
+		// visible in main chat regardless of whether the parent
+		// user message has a tool thread — same parent-thread
+		// gotcha as OutReply/OutResult. Subsequent SetTaskList
 		// events PATCH the existing card (preserves root_id).
 		if msg.TaskList == nil {
 			return errors.New("feishu: OutTask*/TaskList payload is nil")
@@ -2080,14 +2096,14 @@ func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content, roo
 // subsequent in-place updates, so once Reply-creates the card the
 // thread is locked in.
 //
-// Per F-44 + PR #47, the OutCard / OutCommandReply / OutTask* /
-// OutCompaction paths pass replyInThread=false and therefore route
-// through ReplyInBoth. OutReply / OutResult (F-44 follow-up) always
-// pass rootID="" regardless of the user message, so they route
-// through ReplyInChat (top-level Create) — see the parent-thread
-// gotcha discussion in sendResultAsReply's docstring. OutThinking /
-// OutToolStart / OutToolEnd pass replyInThread=true and route through
-// ReplyInThread.
+// Per F-44 + PR #47, the OutCard / OutCommandReply / OutCompaction
+// paths pass replyInThread=false and therefore route through
+// ReplyInBoth. OutReply / OutResult / OutTask* (F-44 follow-up)
+// always pass rootID="" regardless of the user message, so they
+// route through ReplyInChat (top-level Create) — see the
+// parent-thread gotcha discussion in sendResultAsReply's docstring.
+// OutThinking / OutToolStart / OutToolEnd pass replyInThread=true
+// and route through ReplyInThread.
 //
 // All three Reply* helpers are defined in reply.go (PR #47) and each
 // owns its own F-35 limiter wait + SDK call + error formatting;

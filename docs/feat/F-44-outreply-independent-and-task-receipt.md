@@ -60,19 +60,20 @@ Task Receipt 完全可以脱离 OutReply fold 路径独立存在。
 
 ### 0.3 简化目标
 
-**两个独立 surface + 一个折叠 surface**：
+**四个独立 surface（全部 top-level Create）+ 一个折叠 surface**：
 
 | OutboundKind | 表面 | 锚定 | F-44 后 |
 |---|---|---|---|
 | `OutReply` | **独立 top-level Create**（每 chunk = 1 条消息） | `ReplyInChat` (top-level Create, no anchor) | ✅ 不再 fold |
 | `OutResult` | 独立 top-level Create（每条 = 1 条消息） | `ReplyInChat` (top-level Create, no anchor) | ✅ 不变（F-39） |
-| `OutTaskCreate` / `OutTaskUpdate` | **Rolling-log receipt**（N 事件 = 1 张 card） | `ReplyInThreadAndChat` (reply endpoint, reply_in_thread omitted) | ✅ 简化为只装 Tasks |
+| `OutTaskCreate` / `OutTaskUpdate` | **Rolling-log receipt**（N 事件 = 1 张 card） | `ReplyInChat` (cold-start card 是 top-level Create; 后续 PATCH 保持) | ✅ 简化为只装 Tasks |
+| `OutCard` / `OutCommandReply` / `OutCompaction` | ReplyInBoth（reply endpoint，reply_in_thread omitted） | 各自 surface | ✅ |
 | `OutInit` / `OutUsage` | Silent drop | — | ⏸ 推迟到 footer PR |
-| 其他（`OutThinking` / `OutTool*` / `OutCompaction` / `OutCard` / `OutMessageState` / `OutCommandReply`） | **不变** | 各自表面 | ✅ |
+| `OutThinking` / `OutToolStart` / `OutToolEnd` | ReplyInThread | thread 抽屉 | ✅ 不变 |
 
-> **F-44 follow-up**: `OutReply` / `OutResult` 最初规划走 `ReplyInThreadAndChat`（reply endpoint，reply_in_thread 省略）以保留 "Reply to <sender>" 视觉锚。生产环境中观察到：一旦同 turn 的 `OutToolStart` / `OutToolEnd`（用 `ReplyInThread` = `reply_in_thread=true`）在 user message 上建了 thread，**后续所有 `ReplyInBoth` 会被 server 拉进 thread 抽屉，主 chat 看不到**。reply.go docstring 第 17-19 行也明确写了这条 Feishu 行为。
+> **F-44 follow-up**: `OutReply` / `OutResult` / `OutTask*` 最初规划走 `ReplyInThreadAndChat`（reply endpoint，reply_in_thread 省略）以保留 "Reply to <sender>" 视觉锚。生产环境中观察到：一旦同 turn 的 `OutToolStart` / `OutToolEnd`（用 `ReplyInThread` = `reply_in_thread=true`）在 user message 上建了 thread，**后续所有 `ReplyInBoth` 会被 server 拉进 thread 抽屉，主 chat 看不到**。reply.go docstring 第 17-19 行也明确写了这条 Feishu 行为。
 >
-> 修法：`OutReply` / `OutResult` 改走 `ReplyInChat`（top-level Create，无 anchor），代价是失去 "Reply to <sender>" 头部，**保证主 chat 永远可见**。`OutTask*` 保持 `ReplyInThreadAndChat`（单张 receipt card，没有 chunk-stream 问题，thread anchor 帮用户回到自己的消息）。
+> 修法：`OutReply` / `OutResult` / `OutTask*` 改走 `ReplyInChat`（top-level Create，无 anchor），**保证主 chat 永远可见**，代价是失去 "Reply to <sender>" 头部（task receipt card 原本就没有 "Reply to" 概念，受影响小）。`OutCard` / `OutCommandReply` / `OutCompaction` 保持 `ReplyInBoth`——这些是单条 reply，触发 parent thread 的概率低（per-turn 通常 0–1 条）。
 
 ### 0.4 为什么不是 v2.0
 

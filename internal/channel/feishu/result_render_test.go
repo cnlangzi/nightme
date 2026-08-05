@@ -142,22 +142,26 @@ func TestBuildPostMdJSON_Shape(t *testing.T) {
 	}
 }
 
-// TestBuildReceiptCard_FooterUsesDivTextNotElements locks the
-// Feishu Card 2.0 schema for the F-46 footer. The pre-F-46 bug
-// emitted `{"tag":"div", "elements":[<plain_text>, ...]}` and
-// Feishu rejected the whole card with code 200621 ("unknown
-// property, property: elements, path: ... -> [2](tag: div)").
-// That broke every receipt SendCard / PATCH that carried a
-// footer, so the receipt was never created or PATCHed and the
-// user's response never appeared in chat. The corrected
-// structure is one <div> per footer line, each holding a single
-// nested <plain_text> in its `text` field.
+// TestBuildReceiptCard_FooterUsesMarkdownFontGrey locks the
+// Feishu CardKit lark_md footer rendering pattern (matches
+// openclaw-lark src/card/builder.ts::buildFooter). The footer is
+// rendered as:
+//   1. <hr> divider element
+//   2. one <markdown> element whose content uses inline
+//      <font color='grey'>...</font> tags per line
 //
-// This test parses the JSON and walks to assert: (a) every <div>
-// in the body has a `text` field, (b) no <div> has an `elements`
-// array. A future refactor that re-introduces the `elements`
-// array will fail this test before reaching production.
-func TestBuildReceiptCard_FooterUsesDivTextNotElements(t *testing.T) {
+// Previous attempts (gone through three iterations):
+//   - <div> wrapping <plain_text> with text_color="#999999" —
+//     Feishu rejected with "unknown property, property: elements"
+//     (code 200621) AND "invalid color: #999999" (code 230099).
+//   - <div> wrapping <plain_text> with text_color="grey-500" —
+//     Feishu plain_text text_color only accepts the grey-XXX
+//     numbered family in some contexts; still flaky.
+//   - this final approach: single <markdown> element with inline
+//     <font color='grey'> tags per line. Matches openclaw-lark's
+//     reference; verified against Feishu CardKit lark_md spec
+//     (named colors only — no hex).
+func TestBuildReceiptCard_FooterUsesMarkdownFontGrey(t *testing.T) {
 	footer := []string{"🤖 claude · opus-4-5", "💰 ↓ 1.0k · ↻ 0 · ↑ 0 · 1.0k · $0.001"}
 	body, err := buildReceiptCard(
 		[]LogEntry{{Icon: "💬", Text: "hello"}},
@@ -177,38 +181,47 @@ func TestBuildReceiptCard_FooterUsesDivTextNotElements(t *testing.T) {
 		t.Fatalf("parse card JSON: %v\nbody: %s", err, body)
 	}
 
-	// Find every <div> in the body and verify schema.
-	divCount := 0
-	for i, e := range envelope.Body.Elements {
-		tag, _ := e["tag"].(string)
-		if tag != "div" {
-			continue
-		}
-		divCount++
-		if _, hasText := e["text"]; !hasText {
-			t.Errorf("body element %d: <div> missing required `text` field\nelement: %#v\nbody: %s", i, e, body)
-		}
-		if _, hasElements := e["elements"]; hasElements {
-			t.Errorf("body element %d: <div> has invalid `elements` property (Feishu rejects with 200621)\nelement: %#v\nbody: %s", i, e, body)
-		}
-		if textColor, _ := e["text"].(map[string]any)["text_color"].(string); textColor != "grey-500" {
-			t.Errorf("body element %d: <plain_text> text_color = %q, want %q (Feishu rejects hex with 230099 'invalid color')\nelement: %#v", i, textColor, "grey-500", e)
-		}
-	}
-	if divCount != len(footer) {
-		t.Errorf("div count = %d, want %d (one <div> per footer line)", divCount, len(footer))
+	// Expect 3 elements: [entry markdown, hr, footer markdown].
+	// The entry "hello" is the first markdown (the body content);
+	// then the footer section: <hr> + <markdown> with <font> wrappers.
+	if len(envelope.Body.Elements) != 3 {
+		t.Fatalf("body element count = %d, want 3 ([entry-markdown, hr, footer-markdown]); body: %s", len(envelope.Body.Elements), body)
 	}
 
-	// Footer <hr> must be present.
-	var foundHr bool
-	for _, e := range envelope.Body.Elements {
-		if tag, _ := e["tag"].(string); tag == "hr" {
-			foundHr = true
-			break
+	// First element: <markdown> with the entry text.
+	entry := envelope.Body.Elements[0]
+	if tag, _ := entry["tag"].(string); tag != "markdown" {
+		t.Errorf("body[0].tag = %q, want %q\nbody: %s", tag, "markdown", body)
+	}
+	if content, _ := entry["content"].(string); content != "💬 hello" {
+		t.Errorf("body[0].content = %q, want %q\nbody: %s", content, "💬 hello", body)
+	}
+
+	// Second element: <hr>.
+	if tag, _ := envelope.Body.Elements[1]["tag"].(string); tag != "hr" {
+		t.Errorf("body[1].tag = %q, want %q\nbody: %s", tag, "hr", body)
+	}
+
+	// Third element: <markdown> with <font color='grey'> wrappers.
+	footerMd := envelope.Body.Elements[2]
+	if tag, _ := footerMd["tag"].(string); tag != "markdown" {
+		t.Errorf("body[2].tag = %q, want %q\nbody: %s", tag, "markdown", body)
+	}
+	content, _ := footerMd["content"].(string)
+	for _, line := range footer {
+		want := "<font color='grey'>" + line + "</font>"
+		if !strings.Contains(content, want) {
+			t.Errorf("markdown content missing %q\ncontent: %q\nbody: %s", want, content, body)
 		}
 	}
-	if !foundHr {
-		t.Errorf("body missing <hr> divider\nbody: %s", body)
+	// No <div> at all — plain_text is gone.
+	for i, e := range envelope.Body.Elements {
+		if tag, _ := e["tag"].(string); tag == "div" {
+			t.Errorf("body element %d: should NOT be <div> (footer uses <markdown>)\nelement: %#v\nbody: %s", i, e, body)
+		}
+		if tag, _ := e["tag"].(string); tag == "plain_text" {
+			t.Errorf("body element %d: should NOT be <plain_text> (footer uses <markdown>)\nelement: %#v\nbody: %s", i, e, body)
+		}
 	}
 }
 

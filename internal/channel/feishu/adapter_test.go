@@ -1623,7 +1623,7 @@ func TestSend_OutResult_OrphanTopLevel(t *testing.T) {
 	if !strings.Contains(gotContent, `"tag":"hr"`) {
 		t.Errorf("orphan result card missing hr divider; F-46 unification expects hr + grey footer in every card path\nbody: %s", gotContent)
 	}
-	if !strings.Contains(gotContent, `"text_color":"grey-500"`) {
+	if !strings.Contains(gotContent, `<font color='grey'>`) {
 		t.Errorf("orphan result card missing grey text_color; F-46 unification expects hr + grey footer in every card path\nbody: %s", gotContent)
 	}
 }
@@ -1953,11 +1953,11 @@ func TestSend_OutReply_OrphanReplyTo_AlwaysCard(t *testing.T) {
 	if !strings.Contains(got.Body, `"tag":"hr"`) {
 		t.Errorf("orphan card body missing hr divider; F-46 unification expects hr + grey footer in every card path\nbody: %s", got.Body)
 	}
-	if !strings.Contains(got.Body, `"text_color":"grey-500"`) {
+	if !strings.Contains(got.Body, `<font color='grey'>`) {
 		t.Errorf("orphan card body missing grey text_color; F-46 unification expects hr + grey footer in every card path\nbody: %s", got.Body)
 	}
-	if !strings.Contains(got.Body, `plain_text`) {
-		t.Errorf("orphan card body missing plain_text footer element\nbody: %s", got.Body)
+	if !strings.Contains(got.Body, `<font color='grey'>`) {
+		t.Errorf("orphan card body missing <font color='grey'> footer styling\nbody: %s", got.Body)
 	}
 	// No receipt registered (orphan has no parent to PATCH into).
 	a.mu.RLock()
@@ -2025,7 +2025,7 @@ func TestSend_OutReply_ColdStartSendCardFails_StillProducesCard(t *testing.T) {
 	if !strings.Contains(bail.Body, `"tag":"hr"`) {
 		t.Errorf("bail-out card missing hr divider\nbody: %s", bail.Body)
 	}
-	if !strings.Contains(bail.Body, `"text_color":"grey-500"`) {
+	if !strings.Contains(bail.Body, `<font color='grey'>`) {
 		t.Errorf("bail-out card missing grey text_color\nbody: %s", bail.Body)
 	}
 	// No receipt should remain after the failed cold-start (the
@@ -2123,7 +2123,7 @@ func TestSend_OutReply_AppendEntryOverflow_StillProducesCard(t *testing.T) {
 	if !strings.Contains(bail.Body, `"tag":"hr"`) {
 		t.Errorf("overflow bail-out card missing hr divider\nbody: %s", bail.Body)
 	}
-	if !strings.Contains(bail.Body, `"text_color":"grey-500"`) {
+	if !strings.Contains(bail.Body, `<font color='grey'>`) {
 		t.Errorf("overflow bail-out card missing grey text_color\nbody: %s", bail.Body)
 	}
 }
@@ -2213,7 +2213,7 @@ func TestSend_OutResult_AnchoredCardFooterStyled(t *testing.T) {
 	if !strings.Contains(gotBody, `"tag":"hr"`) {
 		t.Errorf("anchored result card missing hr divider\nbody: %s", gotBody)
 	}
-	if !strings.Contains(gotBody, `"text_color":"grey-500"`) {
+	if !strings.Contains(gotBody, `<font color='grey'>`) {
 		t.Errorf("anchored result card missing grey text_color\nbody: %s", gotBody)
 	}
 	// Pre-F-46 the footer was appended to text via "\n\n" — the
@@ -2243,10 +2243,44 @@ func TestSend_OutResult_AnchoredCardFooterStyled(t *testing.T) {
 	if len(markdownContents) == 0 {
 		t.Fatalf("card has no markdown element\nbody: %s", gotBody)
 	}
-	for i, mc := range markdownContents {
-		if strings.Contains(mc, "🤖") {
-			t.Errorf("markdown element %d should NOT contain footer emoji (footer belongs to plain_text block only)\ncontent: %q\nbody: %s", i, mc, gotBody)
+	// The footer is now ALSO a markdown element (wrapped in
+	// <font color='grey'>). The body content is whatever markdown
+	// appears BEFORE the <hr> divider. Verify the body markdown
+	// doesn't carry the footer emoji; the footer markdown
+	// legitimately does.
+	hrIdx := -1
+	for i, e := range envelope.Body.Elements {
+		if tag, _ := e["tag"].(string); tag == "hr" {
+			hrIdx = i
+			break
 		}
+	}
+	if hrIdx < 0 {
+		t.Fatalf("card has no <hr> divider\nbody: %s", gotBody)
+	}
+	for i, e := range envelope.Body.Elements[:hrIdx] {
+		if tag, _ := e["tag"].(string); tag != "markdown" {
+			continue
+		}
+		content, _ := e["content"].(string)
+		if strings.Contains(content, "🤖") {
+			t.Errorf("body markdown element %d should NOT contain footer emoji\ncontent: %q\nbody: %s", i, content, gotBody)
+		}
+	}
+	// The footer markdown (after hr) should contain the footer emoji.
+	footerMarkdownFound := false
+	for _, e := range envelope.Body.Elements[hrIdx+1:] {
+		if tag, _ := e["tag"].(string); tag != "markdown" {
+			continue
+		}
+		content, _ := e["content"].(string)
+		if strings.Contains(content, "🤖") {
+			footerMarkdownFound = true
+			break
+		}
+	}
+	if !footerMarkdownFound {
+		t.Errorf("footer markdown should contain footer emoji (🤖)\nbody: %s", gotBody)
 	}
 }
 

@@ -183,10 +183,10 @@ func buildResultCardJSON(content string, footerLines []string) (string, error) {
 }
 
 // cardFooterElements builds the card elements for the styled footer
-// section: <hr> divider + one <div> per footer line, each <div>
-// containing a single nested <plain_text text_color="grey-500">.
-// Returns nil when footerLines is empty so callers can skip the
-// section without an extra length check.
+// section: <hr> divider + single <markdown> element whose content
+// uses inline <font color='grey'> tags for each line. Returns nil
+// when footerLines is empty so callers can skip the section without
+// an extra length check.
 //
 // F-46 unification: this is the single source of truth for the
 // footer-as-card-elements pattern. Previously buildReceiptCard had
@@ -195,40 +195,43 @@ func buildResultCardJSON(content string, footerLines []string) (string, error) {
 // without the <hr> divider or grey color. With this helper both
 // receipt cards and result cards render the footer identically.
 //
-// Format invariants (must match buildReceiptCard Section 3, since
-// receipts are pinned to the user message and adjacent OutResult
-// cards should look like the same footer):
-//   - <hr> at index 0 (Feishu renders ≈ #E5E5E5 thin-grey line)
-//   - one <div> per footer line; lines come from
-//     formatSessionFooterLines, so newlines within a single element
-//     are impossible (we emit one div per line)
-//   - each <div> holds a single nested <plain_text> in its `text`
-//     field — div does NOT accept an `elements` array (Feishu
-//     rejects with "unknown property, property: elements"; was the
-//     pre-F-46 bug that broke SendCard / PATCH for any receipt or
-//     result card with a footer)
-//   - text_color="grey-500" — Feishu plain_text text_color only
-//     accepts named color tokens from its palette (grey-100,
-//     grey-500, etc.). The first attempt used hex "#999999" and
-//     Feishu rejected with "invalid color: #999999" (code 230099);
-//     "grey-500" is the closest medium-grey token.
+// Approach (matches openclaw-lark src/card/builder.ts::buildFooter):
+//   1. <hr> tag for the divider (Feishu renders ≈ #E5E5E5 thin-grey line)
+//   2. <markdown> element with multiline content + <font color='grey'>
+//      around each line. Feishu CardKit's lark_md supports inline
+//      <font color='...' color tags with named colors (red, green,
+//      grey, blue, etc.) — NOT hex (Feishu rejects with 230099
+//      "invalid color: #999999"). <text_tag color='grey'> is the
+//      newer equivalent of <font>; both work.
+//
+// Why NOT <plain_text> with text_color: a separate card element per
+// line works (each <div> wrapping a <plain_text>), but is more
+// verbose and the text_color field constrains the palette to the
+// grey-XXX numbered family (grey-100 … grey-1000). The markdown
+// approach is simpler and matches the canonical reference impl.
+//
+// Format invariants:
+//   - <hr> at index 0
+//   - exactly one <markdown> element after hr, with one line of
+//     content per footerLines entry (joined by \n)
+//   - each line wrapped in <font color='grey'>...</font>
 func cardFooterElements(footerLines []string) []map[string]any {
 	if len(footerLines) == 0 {
 		return nil
 	}
-	out := make([]map[string]any, 0, len(footerLines)+1)
-	out = append(out, map[string]any{"tag": "hr"})
-	for _, line := range footerLines {
-		out = append(out, map[string]any{
-			"tag": "div",
-			"text": map[string]any{
-				"tag":        "plain_text",
-				"content":    line,
-				"text_color": "grey-500",
-			},
-		})
+	var content strings.Builder
+	for i, line := range footerLines {
+		if i > 0 {
+			content.WriteByte('\n')
+		}
+		content.WriteString("<font color='grey'>")
+		content.WriteString(line)
+		content.WriteString("</font>")
 	}
-	return out
+	return []map[string]any{
+		{"tag": "hr"},
+		{"tag": "markdown", "content": content.String()},
+	}
 }
 
 // buildResultPayload selects the rendering surface and returns msg_type +

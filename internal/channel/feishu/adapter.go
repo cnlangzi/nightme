@@ -1124,13 +1124,24 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// receipt so the user sees "⌨️ Working..." in main chat
 		// before any OutReply / OutTask* event lands. Subsequent
 		// events stream updates onto the same card via
-		// AppendEntry / SetTaskList. The placeholder goes to
-		// top-level Create (ReplyInChat) so it stays in main
-		// chat regardless of the parent thread state. Orphan
-		// path (no userMsgID from MessageForwarded) silently
-		// drops the placeholder — the reaction still fires below.
-		if state == agent.MessageForwarded && msg.ReplyTo != "" {
-			_, _, _ = a.ensureReceiptForTyping(ctx, msg.ChatID, msg.ReplyTo)
+		// AppendEntry / SetTaskList. The placeholder uses
+		// ReplyInBoth (anchored to userMsgID) per main's reply.go
+		// safe pattern — the parent has no thread yet at
+		// MessageForwarded time, so the slot reservation is safe;
+		// later PATCHes on the same message_id are immune to a
+		// thread promotion by OutToolStart/End.
+		//
+		// (DEBUG trap: if msg.ReplyTo is empty the placeholder is
+		// silently dropped — log so future regressions surface
+		// immediately instead of being invisible to the user.)
+		if state == agent.MessageForwarded {
+			if msg.ReplyTo == "" {
+				a.logger.Warn("feishu: OutMessageState MessageForwarded missing ReplyTo — Typing placeholder skipped (gateway should set OutboundMessage.ReplyTo = userMsgID)",
+					"chat_id", msg.ChatID, "message_state_message_id", msg.MessageState.MessageID)
+			} else if _, _, err := a.ensureReceiptForTyping(ctx, msg.ChatID, msg.ReplyTo); err != nil {
+				a.logger.Warn("feishu: ensureReceiptForTyping failed",
+					"err", err, "chat_id", msg.ChatID, "user_msg_id", msg.ReplyTo)
+			}
 		}
 
 		// Terminal-state guard: once we've rendered MessageDone or

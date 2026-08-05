@@ -428,7 +428,13 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	if patchErr := r.bot.PatchMessage(ctx, r.cardMsgID, body); patchErr != nil {
 		r.logger.Warn("feishu receipt: patch card failed",
 			"err", patchErr, "state", r.promptState, "card_msg_id", r.cardMsgID)
-		return fmt.Errorf("feishu receipt: patch card: %w", err)
+		// F-46 follow-up: was wrapping the outer `err` (already
+		// returned from buildReceiptCard above), producing a
+		// "%!w(<nil>)" message and making errors.Is(err,
+		// ErrReceiptOverflow) return false in callers. Wrap
+		// patchErr so the upstream AppendEntryWithFooter caller
+		// can correctly route the overflow bail-out.
+		return fmt.Errorf("feishu receipt: patch card: %w", patchErr)
 	}
 	r.lastBody = body
 	r.lastBodyPatch = time.Now()

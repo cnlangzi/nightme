@@ -152,14 +152,23 @@ func buildPostMdJSON(content string) (string, error) {
 // HTML in the sanitized content survives serialization; cc-connect's
 // behavior — the JSON encoder defaults to escape `<`/`>`/`&` but encodeCardJSON
 // keeps them literal for Card bodies.
-func buildResultCardJSON(content string) (string, error) {
+func buildResultCardJSON(content string, footerLines []string) (string, error) {
 	chunks := splitMarkdownForDivs(content, divTextCharLimit)
-	elements := make([]map[string]any, 0, len(chunks))
+	elements := make([]map[string]any, 0, len(chunks)+2)
 	for _, c := range chunks {
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
 			"content": c,
 		})
+	}
+	// F-46: footer (when present) renders as the same <hr> +
+	// <div> + <plain_text text_color="#999999"> block that
+	// buildReceiptCard uses for OutReply receipt / orphan cards.
+	// cardFooterElements returns nil when footerLines is empty
+	// so callers can append unconditionally without an extra
+	// length check.
+	if footer := cardFooterElements(footerLines); footer != nil {
+		elements = append(elements, footer...)
 	}
 	card := map[string]any{
 		"schema": "2.0",
@@ -173,11 +182,69 @@ func buildResultCardJSON(content string) (string, error) {
 	return string(b), nil
 }
 
+// cardFooterElements builds the card elements for the styled footer
+// section: <hr> divider + single <markdown> element whose content
+// uses inline <font color='grey'> tags for each line. Returns nil
+// when footerLines is empty so callers can skip the section without
+// an extra length check.
+//
+// F-46 unification: this is the single source of truth for the
+// footer-as-card-elements pattern. Previously buildReceiptCard had
+// the inline rendering and OutResult (via buildResultCardJSON)
+// appended the footer as raw text via "\n\n" — visible in chat
+// without the <hr> divider or grey color. With this helper both
+// receipt cards and result cards render the footer identically.
+//
+// Approach (matches openclaw-lark src/card/builder.ts::buildFooter):
+//   1. <hr> tag for the divider (Feishu renders ≈ #E5E5E5 thin-grey line)
+//   2. <markdown> element with multiline content + <font color='grey'>
+//      around each line. Feishu CardKit's lark_md supports inline
+//      <font color='...' color tags with named colors (red, green,
+//      grey, blue, etc.) — NOT hex (Feishu rejects with 230099
+//      "invalid color: #999999"). <text_tag color='grey'> is the
+//      newer equivalent of <font>; both work.
+//
+// Why NOT <plain_text> with text_color: a separate card element per
+// line works (each <div> wrapping a <plain_text>), but is more
+// verbose and the text_color field constrains the palette to the
+// grey-XXX numbered family (grey-100 … grey-1000). The markdown
+// approach is simpler and matches the canonical reference impl.
+//
+// Format invariants:
+//   - <hr> at index 0
+//   - exactly one <markdown> element after hr, with one line of
+//     content per footerLines entry (joined by \n)
+//   - each line wrapped in <font color='grey'>...</font>
+func cardFooterElements(footerLines []string) []map[string]any {
+	if len(footerLines) == 0 {
+		return nil
+	}
+	var content strings.Builder
+	for i, line := range footerLines {
+		if i > 0 {
+			content.WriteByte('\n')
+		}
+		content.WriteString("<font color='grey'>")
+		content.WriteString(line)
+		content.WriteString("</font>")
+	}
+	return []map[string]any{
+		{"tag": "hr"},
+		{"tag": "markdown", "content": content.String()},
+	}
+}
+
 // buildResultPayload selects the rendering surface and returns msg_type +
 // body bytes ready to hand to SDK. Mirrors cc-connect `buildReplyContent`
-// (lines 2941-2960). Caller (sendResultAsReply / sendReplyInThreadAndChat)
-// is responsible for the 30 KB envelope guard.
-func buildResultPayload(sanitized string) (msgType string, body string, err error) {
+// (lines 2941-2960). Caller (sendResultAsReply) is responsible for
+// the 30 KB envelope guard.
+//
+// F-46: footerLines is plumbed through to buildResultCardJSON so
+// markdown-content OutResults render the footer as styled card
+// elements (hr + grey plain_text) instead of as inline text inside
+// the markdown body. No footer for text/post surfaces — those
+// message types don't support <hr> / text_color natively.
+func buildResultPayload(sanitized string, footerLines []string) (msgType string, body string, err error) {
 	if !containsMarkdown(sanitized) {
 		// No markdown → plain text bubble. Feishu still renders inline
 		// <at> mentions and 4-style runs.
@@ -194,7 +261,7 @@ func buildResultPayload(sanitized string) (msgType string, body string, err erro
 		}
 		return larkim.MsgTypePost, body, nil
 	}
-	body, err = buildResultCardJSON(sanitized)
+	body, err = buildResultCardJSON(sanitized, footerLines)
 	if err != nil {
 		return "", "", err
 	}
@@ -207,7 +274,8 @@ func buildResultPayload(sanitized string) (msgType string, body string, err erro
 // SanitizeCardMarkdown is the unified entry point for any markdown content
 // entering a Feishu Card 2.0 `tag:"markdown"` element. Apply at every code
 // path that ships such content (OutResult via sendResultAsReply; OutReply
-// via sendReplyInThreadAndChat; OutCard via buildInteractiveCard).
+// via buildReceiptCard inside ensureReceiptForReplyWithFooter /
+// postOrphanReplyCard; OutCard via buildInteractiveCard).
 //
 // Source: cc-connect `platform/feishu/feishu.go` (functions
 // sanitizeMarkdownURLs, preprocessFeishuMarkdown, stripInvalidFeishuCardImages,
@@ -462,8 +530,8 @@ func optimizeFeishuCardMarkdown(text string) string {
 // passed. For Chinese / emoji content (where 1 char = 3-4 bytes),
 // the cap now correctly counts chars rather than bytes.
 //
-// F-39 follow-up: also used by sendResultAsReply / sendReplyInThreadAndChat
-// (this file's envelope defense) so all outbound reply surfaces share the
+// F-39 follow-up: also used by sendResultAsReply (this file's envelope
+// defense) so all outbound reply surfaces share the
 // same truncation policy. Single source of truth.
 func truncateForLog(s string, max int) string {
 	if max <= 0 {

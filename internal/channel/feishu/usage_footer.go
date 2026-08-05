@@ -148,19 +148,3 @@ func abbrevTokens(n int) string {
 		return fmt.Sprintf("%d", n)
 	}
 }
-
-// appendFooterToText joins a chunk body with a rendered footer on
-// top-level / orphan / overflow messages that don't have a
-// rolling-log receipt to host the footer section. Returns text
-// unchanged when footer is empty (silent drop, no SessionContext).
-//
-// Used by Send's OutReply orphan + overflow fallback paths and
-// OutResult (independent reply) — the receipt path stamps
-// footer onto receipt.footer instead so the card bottom shows
-// exactly ONE copy regardless of chunk count.
-func appendFooterToText(text, footer string) string {
-	if footer == "" {
-		return text
-	}
-	return text + "\n\n" + footer
-}

@@ -644,39 +644,75 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 // F-42: replaces the v1.3 cold-start minimal-⏳-card behavior. See
 // docs/feat/F-42-lazy-receipt-creation.md §1.1 and SPEC §2.4.
 //
-// Locking: register under a.mu with re-check; SendCard runs without
-// the lock (network call must not block other adapter operations).
+// F-42 review fixes (this commit):
+//   - Finding #1: returns an error (not (nil,false,nil)) when
+//     eventToEntry filters the text (thinking-prefix or empty).
+//     The OutReply caller already degrades to sendRawOutText on
+//     error, so the user still sees the text as a top-level
+//     bubble — no more nil-pointer panic on receipt.IsCompleted().
+//   - Finding #4: register-before-SendCard. The placeholder is
+//     committed to receiptsByUserMsgID under a.mu BEFORE
+//     SendCard runs, with `initializing=true` set so concurrent
+//     renderLocked calls short-circuit instead of issuing a
+//     second SendCard (which would orphan the loser's card in
+//     chat). The pre-F-42 "pre-check, then SendCard, then
+//     post-SendCard re-check" pattern had a race window where
+//     two goroutines could both pass the pre-check and both call
+//     SendCard before either registered; the loser ended up
+//     with an orphan card in chat that no PATCH ever reached.
 func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, text string) (*MessageReceipt, bool, error) {
 	if userMsgID == "" {
 		return nil, false, errors.New("feishu: ensureReceiptForReply requires userMsgID")
 	}
 
-	// Pre-check: another goroutine may have created the receipt
-	// already (race). If so, return the existing one — caller
-	// must Append because its `text` was never registered.
+	// Build the LogEntry the same way Append would. eventToEntry
+	// returns ok=false for empty text and for thinking-prefixed
+	// text (gateway normally remaps the latter into OutThinking
+	// upstream, but a direct constructor / test / future bridge
+	// path could route it here). Return an error in that case so
+	// the caller (OutReply Send dispatcher) degrades to
+	// sendRawOutText — the text still reaches the user, just as
+	// a top-level bubble rather than folded into a receipt card.
+	// Pre-fix the helper returned (nil, false, nil) which crashed
+	// the caller on the subsequent receipt.IsCompleted().
+	entry, ok := eventToEntry(agent.AgentEvent{Kind: agent.EventText, Text: text}, time.Now())
+	if !ok {
+		return nil, false, errors.New("feishu: ensureReceiptForReply: text not eligible for receipt entry (thinking-prefix or empty)")
+	}
+
+	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
+	transient.entries = []LogEntry{entry}
+	transient.state = StateExecuting
+	transient.initializing = true // suppress renderLocked SendCard branch (see renderLocked docs)
+
+	// Register-before-SendCard. The lock-protected check-and-set
+	// is the linearization point: only the goroutine that wins
+	// the registration proceeds to SendCard. All subsequent
+	// callers (via receiptFor or via ensure itself returning the
+	// existing placeholder) get created=false and Append their
+	// own event into the placeholder; their renderLocked calls
+	// short-circuit on `initializing` and the data accumulates
+	// until the ensure helper's SendCard returns and clears the
+	// flag — at which point the next renderLocked PATCHes the
+	// canonical card with the merged entries.
 	a.mu.Lock()
 	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
 		a.mu.Unlock()
 		return existing, false, nil
 	}
+	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
-
-	// Build the LogEntry the same way Append would. The transient
-	// receipt only exists to feed buildReceiptCard; it is NOT
-	// stored in the map until SendCard succeeds.
-	entry, ok := eventToEntry(agent.AgentEvent{Kind: agent.EventText, Text: text}, time.Now())
-	if !ok {
-		// Defensive: eventToEntry returns false on empty text or
-		// thinking-prefixed text. The OutReply case in Send already
-		// rejects empty text, so this branch is effectively dead.
-		return nil, false, nil
-	}
-	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
-	transient.entries = []LogEntry{entry}
-	transient.state = StateExecuting
 
 	body, err := buildReceiptCard(transient)
 	if err != nil {
+		// Rollback the registration so a future attempt can retry
+		// cleanly. Compare-and-clear avoids clobbering a winner
+		// that took the slot between our release and re-acquire.
+		a.mu.Lock()
+		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
+			delete(a.receiptsByUserMsgID, userMsgID)
+		}
+		a.mu.Unlock()
 		return nil, false, fmt.Errorf("feishu: ensure receipt build card: %w", err)
 	}
 
@@ -686,31 +722,25 @@ func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, 
 	// see docs/channel/feishu.md §13.10.)
 	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
 	if err != nil {
+		a.mu.Lock()
+		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
+			delete(a.receiptsByUserMsgID, userMsgID)
+		}
+		a.mu.Unlock()
 		a.logger.Warn("feishu: ensureReceiptForReply send card failed",
 			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
 		return nil, false, err
 	}
+
+	// Promote the placeholder to a real receipt: set cardMsgID
+	// (so subsequent renderLocked takes the PATCH branch) and
+	// clear `initializing` (so the suppressed renderLocked calls
+	// from concurrent goroutines' Appends can finally fire and
+	// PATCH in their entries).
+	a.mu.Lock()
 	transient.replyMsgID = msgID
 	transient.cardMsgID = msgID
-
-	// Re-check under the lock: a concurrent sender may have
-	// registered between our pre-check and SendCard. Theirs wins;
-	// ours is discarded (its SendCard produced a redundant message
-	// that the user will see briefly before being superseded by
-	// subsequent PATCHes). In practice this race is rare because
-	// two OutReply events on the same userMsgID serialize through
-	// the agent session's read pump; we keep the defensive check
-	// anyway.
-	a.mu.Lock()
-	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
-		a.mu.Unlock()
-		// Note: the card we just posted stays in chat until the
-		// winner's first PATCH overwrites its content. Acceptable
-		// because both cards reference the same userMsgID and
-		// converge to identical content within one render cycle.
-		return existing, false, nil
-	}
-	a.receiptsByUserMsgID[userMsgID] = transient
+	transient.initializing = false
 	a.mu.Unlock()
 	return transient, true, nil
 }
@@ -724,6 +754,13 @@ func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, 
 // Returns the receipt plus a `created` flag with the same semantics
 // as ensureReceiptForReply: created=true means the task list is
 // already installed and the caller should NOT call SetTaskList again.
+//
+// F-42 review finding #5: same orphan-card race fix as
+// ensureReceiptForReply. Register-before-SendCard with the
+// `initializing` flag — concurrent SetTaskList calls during the
+// SendCard window hit the renderLocked short-circuit instead of
+// issuing a second SendCard, so the loser doesn't leave an orphan
+// card in chat with a stale task snapshot.
 func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID string, list *agent.TaskListEvent) (*MessageReceipt, bool, error) {
 	if userMsgID == "" {
 		return nil, false, errors.New("feishu: ensureReceiptForTask requires userMsgID")
@@ -731,13 +768,6 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	if list == nil {
 		return nil, false, errors.New("feishu: ensureReceiptForTask requires non-nil TaskListEvent")
 	}
-
-	a.mu.Lock()
-	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
-		a.mu.Unlock()
-		return existing, false, nil
-	}
-	a.mu.Unlock()
 
 	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
 	// Copy the items exactly like SetTaskList does, so the
@@ -748,27 +778,44 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	copy(copied, items)
 	transient.tasks = copied
 	transient.state = StateExecuting
+	transient.initializing = true
 
-	body, err := buildReceiptCard(transient)
-	if err != nil {
-		return nil, false, fmt.Errorf("feishu: ensure task receipt build card: %w", err)
-	}
-
-	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
-	if err != nil {
-		a.logger.Warn("feishu: ensureReceiptForTask send card failed",
-			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
-		return nil, false, err
-	}
-	transient.replyMsgID = msgID
-	transient.cardMsgID = msgID
-
+	// Register-before-SendCard (see ensureReceiptForReply for the
+	// full rationale — same race fix applied symmetrically here).
 	a.mu.Lock()
 	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
 		a.mu.Unlock()
 		return existing, false, nil
 	}
 	a.receiptsByUserMsgID[userMsgID] = transient
+	a.mu.Unlock()
+
+	body, err := buildReceiptCard(transient)
+	if err != nil {
+		a.mu.Lock()
+		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
+			delete(a.receiptsByUserMsgID, userMsgID)
+		}
+		a.mu.Unlock()
+		return nil, false, fmt.Errorf("feishu: ensure task receipt build card: %w", err)
+	}
+
+	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
+	if err != nil {
+		a.mu.Lock()
+		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
+			delete(a.receiptsByUserMsgID, userMsgID)
+		}
+		a.mu.Unlock()
+		a.logger.Warn("feishu: ensureReceiptForTask send card failed",
+			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
+		return nil, false, err
+	}
+
+	a.mu.Lock()
+	transient.replyMsgID = msgID
+	transient.cardMsgID = msgID
+	transient.initializing = false
 	a.mu.Unlock()
 	return transient, true, nil
 }

@@ -248,6 +248,22 @@ type MessageReceipt struct {
 	// cardMsgID stays anchored to "the card we PATCH".
 	cardMsgID string
 
+	// initializing is true between the moment ensureReceiptForReply /
+	// ensureReceiptForTask registers this receipt in
+	// receiptsByUserMsgID and the moment its first SendCard returns
+	// with a real cardMsgID. During that brief window the
+	// placeholder is visible to other goroutines (receiptFor /
+	// ensureReceiptFor* return it), but its cardMsgID is still
+	// empty — so a renderLocked driven by a concurrent Append or
+	// SetTaskList would otherwise issue a second SendCard (orphan
+	// card). renderLocked checks this flag and short-circuits
+	// while true, dropping the render so the ensure helper's own
+	// SendCard is the only card in chat. The flag is cleared
+	// under r.mu immediately after the SendCard return value is
+	// stored, so the brief window is exactly "between registration
+	// and SendCard success". F-42 review finding #4/#5.
+	initializing bool
+
 	// Feishu limits message updates to roughly five per second.
 	// Skip duplicate bodies and pace real PATCH requests.
 	lastBody      string
@@ -713,7 +729,17 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.state == StateCompleted {
+	if r.state == StateCompleted || r.state == StateError {
+		// F-42 review finding #3: the early-return guard must
+		// include StateError (terminal-via-error, fixed in this
+		// commit). Previously a late non-terminal event after
+		// StateError would proceed through eventToEntry →
+		// appendEntryLocked → renderLocked and PATCH the error
+		// card with stale in-progress content, clobbering the
+		// ❌ timestamp header. Terminal guard now mirrors the
+		// SetCompleted / EventError transition symmetry: both
+		// terminal states drop late events silently.
+		//
 		// Late event after completion — drop silently. Tool
 		// echoes (Claude Code's stream-json user-role events)
 		// can arrive after the result event; they're noise from
@@ -729,7 +755,16 @@ func (r *MessageReceipt) Append(ctx context.Context, ev agent.AgentEvent) error 
 	case agent.EventDone:
 		// SetCompleted inlined: Append holds r.mu, calling SetCompleted
 		// would self-deadlock (sync.Mutex is not reentrant).
-		if r.state != StateCompleted {
+		//
+		// F-42 review finding #2: the "no re-set to StateCompleted"
+		// guard now also excludes StateError. A late EventDone
+		// arriving after EventError used to overwrite StateError
+		// back to StateCompleted, flipping the header from ❌
+		// to ✅ and breaking the terminal-error semantics. Both
+		// terminal states are now terminal — once we're done
+		// (with or without error), a subsequent EventDone has
+		// nothing to do and is treated as a no-op.
+		if r.state != StateCompleted && r.state != StateError {
 			r.state = StateCompleted
 			r.completedAt = time.Now()
 			r.entries = nil // collapse rolling-log on terminal
@@ -941,6 +976,21 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	// receipt only renders the card body. ChatSession emits
 	// MessageState events that flow through Gateway.OnMessageState
 	// → Adapter.Send → AddReaction on userMsgID.
+
+	// F-42 review finding #4/#5: while an ensureReceipt* helper is
+	// mid-SendCard, this placeholder is visible to concurrent
+	// goroutines but cardMsgID is still empty. If we proceeded to
+	// the `cardMsgID == ""` SendCard branch, a concurrent Append /
+	// SetTaskList would create a SECOND card in chat (orphan). The
+	// ensure helper's own SendCard is the only legitimate card; any
+	// render triggered from elsewhere during this window is dropped
+	// — the entries it added stay in the buffer, and the next
+	// renderLocked call AFTER the ensure helper finishes will pick
+	// them up and PATCH them into the canonical card. Data is
+	// preserved; visual churn is avoided.
+	if r.initializing {
+		return nil
+	}
 
 	// 1. Build the card body. buildReceiptCard is in adapter.go.
 	body, err := buildReceiptCard(r)

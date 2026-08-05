@@ -1055,6 +1055,122 @@ func TestBuildReceiptCard_ThinkingCollapsiblePanel(t *testing.T) {
 // their actual content by ensureReceiptForReply /
 // ensureReceiptForTask. See docs/feat/F-42-lazy-receipt-creation.md.
 
+// TestAppend_EventDoneAfterStateError_DoesNotOverwrite guards
+// F-42 review finding #2. Pre-fix the EventDone handler's
+// `if r.state != StateCompleted` guard let a late EventDone
+// arrive AFTER EventError had already transitioned the receipt
+// to StateError, clobbering it back to StateCompleted and
+// flipping the card header from ❌ back to ✅. The fix extends
+// the guard to also exclude StateError — both terminal states
+// are now sticky; a late EventDone is a no-op (idempotent
+// terminal).
+func TestAppend_EventDoneAfterStateError_DoesNotOverwrite(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
+
+	// Drive to StateError via EventError.
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventError,
+		Error: &agent.ErrorEvent{Err: errors.New("bridge crashed")},
+	})
+	if r.State() != StateError {
+		t.Fatalf("setup: State() after EventError = %v, want StateError", r.State())
+	}
+	completedAtBefore := r.completedAt
+
+	// Late EventDone must NOT change the state.
+	if err := r.Append(context.Background(), agent.AgentEvent{
+		Kind: agent.EventDone,
+	}); err != nil {
+		t.Fatalf("late EventDone: %v", err)
+	}
+	if r.State() != StateError {
+		t.Errorf("State() after late EventDone = %v, want StateError (post-fix)", r.State())
+	}
+	if !r.completedAt.Equal(completedAtBefore) {
+		t.Errorf("completedAt changed after late EventDone; want unchanged")
+	}
+
+	// And the header line should still render ❌ + the original
+	// timestamp, not ✅ + a fresh one.
+	got := r.state.headerLine(r)
+	if !strings.Contains(got, "❌") {
+		t.Errorf("headerLine = %q; want ❌ preserved after late EventDone", got)
+	}
+	if strings.Contains(got, "✅") {
+		t.Errorf("headerLine = %q; must NOT contain ✅ after late EventDone on StateError", got)
+	}
+}
+
+// TestAppend_NonTerminalAfterStateError_IsDropped guards F-42
+// review finding #3. Pre-fix the early-return guard was
+// `if r.state == StateCompleted` only — a late non-terminal
+// event (e.g. a stray EventText reply from a misbehaving bridge)
+// after StateError would proceed through eventToEntry →
+// appendEntryLocked → renderLocked and PATCH the error card
+// with fresh in-progress content, clobbering the ❌ header.
+// The fix adds StateError to the terminal-state short-circuit.
+func TestAppend_NonTerminalAfterStateError_IsDropped(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
+
+	// Seed an in-progress entry so we can verify it survives the
+	// error transition (error entry should also remain).
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "halfway text",
+	})
+
+	// Drive to StateError.
+	mustAppend(t, r, agent.AgentEvent{
+		Kind: agent.EventError,
+		Error: &agent.ErrorEvent{Err: errors.New("oops")},
+	})
+
+	bot.mu.Lock()
+	patchesBefore := len(bot.patches)
+	bot.mu.Unlock()
+
+	// Late non-terminal event. The terminal guard must drop it
+	// silently — no new entry, no PATCH.
+	if err := r.Append(context.Background(), agent.AgentEvent{
+		Kind: agent.EventText,
+		Text: "late reply after error — must be dropped",
+	}); err != nil {
+		t.Fatalf("late EventText after StateError: %v", err)
+	}
+
+	// No new PATCH should have been issued (terminal guard drops
+	// the render).
+	bot.mu.Lock()
+	patchesAfter := len(bot.patches)
+	bot.mu.Unlock()
+	if patchesAfter != patchesBefore {
+		t.Errorf("PATCH count changed after late EventText on StateError: before=%d after=%d (terminal guard should drop the render)",
+			patchesBefore, patchesAfter)
+	}
+
+	// Header still ❌, error entry still present, no "late reply"
+	// entry.
+	got := r.state.headerLine(r)
+	if !strings.Contains(got, "❌") {
+		t.Errorf("headerLine = %q; want ❌ preserved after late EventText on StateError", got)
+	}
+
+	r.mu.Lock()
+	hasLate := false
+	for _, e := range r.entries {
+		if strings.Contains(e.Text, "late reply") {
+			hasLate = true
+			break
+		}
+	}
+	r.mu.Unlock()
+	if hasLate {
+		t.Errorf("late EventText after StateError added an entry; terminal guard should drop the event entirely (no entry, no PATCH)")
+	}
+}
+
 // mustAppend calls Append and asserts no error. Helper for the
 // per-event test above.
 func mustAppend(t *testing.T, r *MessageReceipt, ev agent.AgentEvent) {

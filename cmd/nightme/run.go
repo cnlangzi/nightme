@@ -341,6 +341,38 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		return cs.WatchMode(), true
 	})
 
+	// F-45 §3.5: install the action handler so DispatchInbound
+	// routes msg.Reaction (and future msg.Action for card button
+	// clicks) to ChatSession.HandleAction instead of treating
+	// them as empty-text messages. The handler is a thin
+	// trampoline: it looks up the ChatSession via mgr and
+	// forwards the event. Without this wiring the reaction
+	// pipeline is dead end-to-end (gtw decision cards can't be
+	// acted on by user emoji clicks).
+	gwImpl.WithActionHandler(func(ctx context.Context, msg *gateway.InboundMessage) bool {
+		if msg == nil {
+			return false
+		}
+		cs := mgr.Get(msg.ChatID)
+		if cs == nil {
+			return false
+		}
+		// Reactions are the only event the runtime wires up
+		// today; card button clicks (msg.Action) currently go
+		// through the same path for forward-compat. F-25 / F-37
+		// can split them out when the permission-card path is
+		// added.
+		if msg.Reaction != nil {
+			return cs.HandleAction(ctx, chatsession.ReactionEvent{
+				TargetMsgID: msg.Reaction.TargetMsgID,
+				Emoji:       msg.Reaction.Emoji,
+				UserID:      msg.Reaction.UserID,
+				ChatID:      msg.Reaction.ChatID,
+			})
+		}
+		return false
+	})
+
 	// WithOnCreate fires for both restored (RestoreFromRegistry)
 	// and future (GetOrCreate) ChatSessions. Place BEFORE
 	// RestoreFromRegistry so restored chats get their handlers.

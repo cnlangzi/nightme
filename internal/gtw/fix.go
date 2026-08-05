@@ -102,13 +102,9 @@ func RunFix(
 	// the user doesn't lose their fix state.
 	if rebuilt := RebuildContext(ctx, cs, deps.Git, deps.NewPlatform); rebuilt != (Context{}) {
 		slot.Store(rebuilt)
-		_ = deps.Send(ctx, OutMsg{
-			ChatID:  chatID,
-			ReplyTo: messageID,
-			Text: fmt.Sprintf(
-				"♻️ Recovered /gtw fix #%d (state: %s).\n  branch: %s\n  worktree: %s\n  Re-run `/gtw fix %d` to continue, or use a different command.",
-				rebuilt.Issue, rebuilt.State, rebuilt.Branch, rebuilt.Worktree, rebuilt.Issue),
-		})
+		_ = reply(ctx, deps.Send, chatID, messageID, fmt.Sprintf(
+			"♻️ Recovered /gtw fix #%d (state: %s) after daemon restart.\n  branch: %s\n  worktree: %s\n  Continue working in the worktree, or `/cwd` back to the repo before starting a new fix.",
+			rebuilt.Issue, rebuilt.State, rebuilt.Branch, rebuilt.Worktree))
 		return &Result{Consumed: true}, nil
 	}
 
@@ -190,8 +186,14 @@ func RunFix(
 	// --- create the worktree (§5.2.③) -----------------------------
 	if err := WorktreeAdd(ctx, repoRoot, branch, worktreePath, "HEAD", deps.Git); err != nil {
 		// Roll back the label we just added (§5.3.3 §5.4).
+		// We use the caller's ctx (not context.Background()) so
+		// a /kill or client disconnect can abort the rollback
+		// the same way it would the original AddLabel. The
+		// pre-fix version detached the rollback from caller
+		// cancellation, which could leak a slow `glab` child
+		// past daemon shutdown.
 		if labelAdded {
-			_ = platform.RemoveLabel(context.Background(), owner, repo, issueID, LabelWIP)
+			_ = platform.RemoveLabel(ctx, owner, repo, issueID, LabelWIP)
 		}
 		return emitWorktreeFailDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID:    issueID,

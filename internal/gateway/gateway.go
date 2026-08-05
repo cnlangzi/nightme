@@ -159,6 +159,17 @@ type Gateway interface {
 	// appropriate channel via resolveChannel + Send.
 	OnMessageState(chatID, userMsgID string, state agent.MessageState)
 
+	// WithActionHandler installs the F-45 §3.5 reaction/action
+	// router (F-25 + F-45). DispatchInbound calls the handler
+	// when msg.Reaction or msg.Action is set; the runtime
+	// implements the cross-package lookup (typically
+	// mgr.Get(msg.ChatID).HandleAction(ctx, ev)) and reports
+	// whether the action was consumed.
+	//
+	// The fluent return matches WithWatchModeResolver so the
+	// runtime can chain gateway construction in a single line.
+	WithActionHandler(handler func(ctx context.Context, msg *InboundMessage) (consumed bool)) Gateway
+
 	// Lifecycle
 	AttachChannels(channels ...Channel)
 	Start(ctx context.Context) error
@@ -190,6 +201,25 @@ func (g *gateway) WithWatchModeResolver(resolver func(chatID string) (chatsessio
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.watchModeResolver = resolver
+	return g
+}
+
+// WithActionHandler installs the F-45 §3.5 reaction/action
+// router. DispatchInbound calls this when msg.Reaction or
+// msg.Action is set; the runtime implements the cross-package
+// lookup (typically mgr.Get(msg.ChatID).HandleAction(ctx, ev))
+// and reports whether the action was consumed.
+//
+// A nil handler means the runtime hasn't wired reaction routing
+// yet; DispatchInbound falls through to dispatchMessage in
+// that case (existing pre-F-45 behaviour). The runtime MUST wire
+// this for reaction-driven decision cards to reach the gtw
+// executor; otherwise reactions get sent to the agent loop as
+// empty-text messages and silently no-op.
+func (g *gateway) WithActionHandler(handler func(ctx context.Context, msg *InboundMessage) (consumed bool)) Gateway {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.actionHandler = handler
 	return g
 }
 
@@ -228,6 +258,15 @@ type gateway struct {
 	// Wired by cmd/nightme/run.go via WithWatchModeResolver.
 	// Reading is concurrent-safe; updating takes mu.
 	watchModeResolver func(chatID string) (chatsession.WatchMode, bool)
+
+	// F-45 §3.5: per-chat action router. When DispatchInbound
+	// sees msg.Reaction or msg.Action, it calls this with the
+	// event; the runtime implements the cross-package lookup
+	// (mgr.Get(chatID).HandleAction(...)) and returns whether
+	// the action was consumed. Nil = no action handler; reactions
+	// fall through to dispatchMessage (the agent loop, which
+	// would just no-op on the empty text).
+	actionHandler func(ctx context.Context, msg *InboundMessage) (consumed bool)
 }
 
 // New constructs a Gateway (the inboundDispatcher).
@@ -303,6 +342,27 @@ func (g *gateway) DispatchInbound(ctx context.Context, msg *InboundMessage) (*Co
 	if msg == nil {
 		return nil, errors.New("gateway: nil message")
 	}
+
+	// F-45 §3.5: user actions on bot messages (card button
+	// clicks via msg.Action, emoji reactions via msg.Reaction)
+	// route through the per-chat action handler installed by
+	// the runtime. This branch sits BEFORE the slash-command
+	// parse because action events have empty Text — ParseCommand
+	// would fail and the old code would silently route the event
+	// to the agent loop as empty text.
+	//
+	// Without this branch (and without a wired actionHandler),
+	// reactions arrive at the dispatcher, fail ParseCommand,
+	// fall through to dispatchMessage, get queued into the
+	// agent's input buffer as empty text, and the gtw draft
+	// never receives its reaction. The whole reaction pipeline
+	// is dead in that state. The runtime MUST call
+	// gateway.WithActionHandler at startup for /gtw decision
+	// cards to be actionable.
+	if msg.Reaction != nil || msg.Action != nil {
+		return g.dispatchAction(ctx, msg)
+	}
+
 	name, args, err := ParseCommand(strings.TrimSpace(msg.Text))
 
 	// F-watch §3.1.1: per-chat message-watch gate (single entry,
@@ -336,6 +396,40 @@ func (g *gateway) DispatchInbound(ctx context.Context, msg *InboundMessage) (*Co
 		return gateAndDispatch()
 	}
 	return g.dispatchSlashCommand(ctx, msg, name, args, cmd)
+}
+
+// dispatchAction is the F-45 §3.5 + F-25 user-action branch.
+// It dispatches msg.Action (card button click) and msg.Reaction
+// (emoji reaction) to the per-chat action handler installed by
+// the runtime. The handler is responsible for cross-package
+// concerns (looking up the ChatSession via mgr, calling
+// ChatSession.HandleAction, etc.); the gateway itself stays
+// transport-only.
+//
+// Returns a consumed result with Dropped=true when no handler
+// is installed — that's the v1 pre-F-45 default and lets the
+// runtime come up before the reaction branch is wired.
+func (g *gateway) dispatchAction(ctx context.Context, msg *InboundMessage) (*CommandResult, error) {
+	g.mu.RLock()
+	h := g.actionHandler
+	g.mu.RUnlock()
+	if h == nil {
+		// Pre-F-45 runtime: action events silently dropped.
+		// Better than routing an empty-text event to the agent
+		// loop, which would queue a no-op turn and confuse the
+		// user with a "thinking…" state.
+		return &CommandResult{Consumed: true, Dropped: true}, nil
+	}
+	if consumed := h(ctx, msg); consumed {
+		return &CommandResult{Consumed: true}, nil
+	}
+	// Handler ran but decided not to consume (e.g. no matching
+	// gtwDraft, or the reaction emoji wasn't a recognised one).
+	// We still mark Consumed=true because DispatchInbound has
+	// "owned" the event — re-routing it to dispatchMessage
+	// would either send a confusing empty text to the agent
+	// (F-45 path) or trigger the watch-mode gate (F-watch path).
+	return &CommandResult{Consumed: true, Dropped: true}, nil
 }
 
 // applyWatchModeGate runs the F-watch §3.1.1 per-chat gate for

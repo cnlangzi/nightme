@@ -586,6 +586,38 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 				}
 			}
 		}
+		// F-45 §1.4: capture model on first EventInit. Independent
+		// of the SessionID capture above (some bridges may emit
+		// one without the other). SetModel is idempotent — empty
+		// incoming values don't overwrite.
+		if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.Model != "" {
+			s.SetModel(ev.Init.Model)
+		}
+		// F-45 §2.5 改动 B: accumulate per-turn usage on every
+		// EventUsage. Runs BEFORE Translate so the snapshot
+		// stamped below (改动 C) includes this turn's counts.
+		// nil-safe — bridges may emit empty EventUsage as "no
+		// usage this turn".
+		if ev.Kind == agent.EventUsage && ev.Usage != nil {
+			s.AccumulateUsage(ev.Usage)
+		}
+		// F-45 §2.5 改动 D: persist cumulative stats on EventDone
+		// (turn end) so each turn costs at most one file write.
+		// PersistIfDirty is a no-op when cumulative is unchanged
+		// (pure chat without agent invocation doesn't write).
+		if ev.Kind == agent.EventDone {
+			if err := s.PersistIfDirty(func(e *registry.AgentSessionEntry) error {
+				if mgr == nil {
+					return nil
+				}
+				return mgr.PersistAgentSession(s)
+			}); err != nil && logger != nil {
+				logger.Warn("persist agent session (usage) failed",
+					"chat_id", chatID,
+					"agent_session_id", s.ID,
+					"err", err)
+			}
+		}
 		// Translate the AgentEvent to an OutboundMessage.
 		out, ok := gateway.Translate(chatID, ev)
 		if !ok {
@@ -596,6 +628,31 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		// stays empty for orphan events (EventInit at startup,
 		// internal logs) — Channel renders those as plain text.
 		out.ReplyTo = userMsgID
+		// F-45 §2.5 改动 C: stamp SessionContext snapshot on the
+		// four main-chat Kinds. Other Kinds (thread-only,
+		// lifecycle, init/usage payloads themselves) skip the
+		// footer — they don't surface in the main chat timeline
+		// and would only inflate payload size.
+		//
+		// Skip when nothing meaningful — avoids empty / zero-only
+		// SessionContext on first reply before any EventUsage or
+		// EventInit has landed. AgentSession.Agent is immutable
+		// (direct field read, no lock); Model() and
+		// CumulativeUsage() take RLock internally.
+		switch out.Kind {
+		case gateway.OutReply, gateway.OutResult,
+			gateway.OutTaskCreate, gateway.OutTaskUpdate:
+			snap := s.CumulativeUsage()
+			if snap.InputTokens != 0 || snap.OutputTokens != 0 ||
+				snap.CacheReadInputTokens != 0 || snap.CostUSD != 0 ||
+				s.Model() != "" {
+				out.SessionContext = &gateway.SessionContext{
+					Agent:           s.Agent,
+					Model:           s.Model(),
+					CumulativeUsage: snap,
+				}
+			}
+		}
 		// F-think §3.1.2: per-chat OutThinking gate. When the
 		// chat has /think off, drop OutThinking events here
 		// (after Translate + ReplyTo stamping, before ch.Send)

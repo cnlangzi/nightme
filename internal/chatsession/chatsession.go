@@ -250,6 +250,13 @@ type ResetResult struct {
 	BeforeState Status // StatusRunning / StatusDetached / StatusExited
 	Action      string // "in-place-reset" | "marked-fresh"
 	Error       error  // nil on success
+
+	// Session is the underlying AgentSession — populated so the
+	// caller (handleNew in F-45) can perform per-row follow-up
+	// actions such as ResetCumulative + PersistAgentSession
+	// without re-walking the pool. nil only when targets were
+	// empty (matched == 0); always set otherwise.
+	Session *AgentSession
 }
 
 // SetActiveCwd changes the active workspace. Does NOT spawn or kill
@@ -1170,6 +1177,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 			Agent:       as.Agent,
 			Cwd:         as.Cwd,
 			BeforeState: as.Status(),
+			Session:     as,
 		}
 
 		if as.Status() != StatusRunning {

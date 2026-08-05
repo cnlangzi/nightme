@@ -11,6 +11,7 @@
 package chatsession
 
 import (
+	"errors"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -296,5 +297,165 @@ func TestKillAll_EmptyPool(t *testing.T) {
 	}
 	if len(results) != 0 {
 		t.Errorf("want empty results, got %d", len(results))
+	}
+}
+
+// failingCloseAS is a fakeAgentSession whose Close() returns an error.
+// Used to verify that KillAll propagates the error to the
+// corresponding KillResult (review finding #B2: previously the
+// goroutine discarded `_ = as.Close()` so any failure was reported
+// as ✓ success).
+type failingCloseAS struct {
+	*fakeAgentSession
+	closeErr error
+}
+
+func (f *failingCloseAS) Close() error {
+	close(f.fakeAgentSession.events)
+	return f.closeErr
+}
+
+// TestKillAll_CloseErrorPropagates — when a bridge's Close() returns
+// an error, the resulting KillResult must record Error != nil and
+// Action = "kill-failed" (review finding #B2).
+func TestKillAll_CloseErrorPropagates(t *testing.T) {
+	cs := New("chat-close-err", "cc")
+	cwd := t.TempDir()
+	if err := cs.SetActiveCwd(cwd); err != nil {
+		t.Fatalf("SetActiveCwd: %v", err)
+	}
+	cs.WithPersistence(nil, nil)
+
+	a := injectAS(t, cs, "cc", cwd,
+		&failingCloseAS{
+			fakeAgentSession: newFakeAgentSession(1),
+			closeErr:         errors.New("bridge shutdown: EPIPE on master fd"),
+		})
+
+	results, err := cs.KillAll()
+	if err != nil {
+		t.Fatalf("KillAll: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Error == nil {
+		t.Errorf("Error should be non-nil when bridge Close fails")
+	}
+	if results[0].Action != "kill-failed" {
+		t.Errorf("Action: want kill-failed, got %q", results[0].Action)
+	}
+	_ = a
+}
+
+// TestKillAll_StatusDetached_StillCallsClose — review finding #B1:
+// SetDetached documents "process alive but nightme no longer holds
+// it" — the live CLI must still be closed on /kill, not reported
+// as stale-cleared.
+func TestKillAll_StatusDetached_StillCallsClose(t *testing.T) {
+	cs := New("chat-detached", "cc")
+	cwd := t.TempDir()
+	if err := cs.SetActiveCwd(cwd); err != nil {
+		t.Fatalf("SetActiveCwd: %v", err)
+	}
+	cs.WithPersistence(nil, nil)
+
+	a := NewAgentSession(newAgentSessionID(), cs.ID, "cc", cwd, nil)
+	a.handle = &closedSpy{fakeAgentSession: newFakeAgentSession(1)}
+	a.SetRunning(1234)
+	a.SetDetached() // process alive but nightme no longer holds it
+	cs.mu.Lock()
+	cs.pool[agentCwdKey{Agent: "cc", Cwd: cwd}] = a
+	cs.mu.Unlock()
+
+	results, err := cs.KillAll()
+	if err != nil {
+		t.Fatalf("KillAll: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Action != "killed" {
+		t.Errorf("Action: want killed (process alive), got %q", results[0].Action)
+	}
+	if closes := a.Handle().(*closedSpy).closes.Load(); closes != 1 {
+		t.Errorf("Close() should have been called for StatusDetached entry: got %d", closes)
+	}
+}
+
+// TestKillAll_StatusDetached_NoHandle_StaleCleared — when the entry
+// is StatusDetached but the handle is nil (post-restart orphan from
+// FromAgentSessionEntry), we can't signal the (lost) process. The
+// entry is treated as stale-cleared and the disk entry is deleted.
+func TestKillAll_StatusDetached_NoHandle_StaleCleared(t *testing.T) {
+	cs := New("chat-detached-orphan", "cc")
+	cwd := t.TempDir()
+	if err := cs.SetActiveCwd(cwd); err != nil {
+		t.Fatalf("SetActiveCwd: %v", err)
+	}
+	cs.WithPersistence(nil, nil)
+
+	// Post-restart: FromAgentSessionEntry creates an AgentSession
+	// with StatusDetached but no handle (cmd died, hand lost).
+	a := NewAgentSession(newAgentSessionID(), cs.ID, "cc", cwd, nil)
+	a.SetDetached() // handle already nil from NewAgentSession
+	cs.mu.Lock()
+	cs.pool[agentCwdKey{Agent: "cc", Cwd: cwd}] = a
+	cs.mu.Unlock()
+
+	results, err := cs.KillAll()
+	if err != nil {
+		t.Fatalf("KillAll: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Action != "stale-cleared" {
+		t.Errorf("Action: want stale-cleared (no handle), got %q", results[0].Action)
+	}
+}
+
+// TestKillAll_OrphanDiskEntry_GCd — old `GetByChatPool` walk did
+// this; F-42 first cut narrowed to snapshot-only, reintroducing
+// orphan accumulation (review finding #B4). Verify orphan disk
+// entries owned by this chat are deleted even if not in the pool.
+func TestKillAll_OrphanDiskEntry_GCd(t *testing.T) {
+	cs := New("chat-orphan", "cc")
+	cwd := t.TempDir()
+	if err := cs.SetActiveCwd(cwd); err != nil {
+		t.Fatalf("SetActiveCwd: %v", err)
+	}
+	asFile, err := registry.OpenAgentSessionFile(filepath.Join(t.TempDir(), "agent_sessions.json"))
+	if err != nil {
+		t.Fatalf("OpenAgentSessionFile: %v", err)
+	}
+	cs.WithPersistence(nil, asFile)
+
+	// 1) snapshot entry (in pool + on disk)
+	poolAS := injectAS(t, cs, "cc", cwd, &closedSpy{fakeAgentSession: newFakeAgentSession(1)})
+	if err := asFile.Upsert(poolAS.Entry()); err != nil {
+		t.Fatalf("pool Upsert: %v", err)
+	}
+	// 2) orphan entry (NOT in pool, e.g. leftover from a prior /cwd swap)
+	orphanID := newAgentSessionID()
+	orphanAS := NewAgentSession(orphanID, cs.ID, "codex", cwd, nil)
+	orphanAS.SetRunning(9999)
+	if err := asFile.Upsert(orphanAS.Entry()); err != nil {
+		t.Fatalf("orphan Upsert: %v", err)
+	}
+
+	// Pre: 2 entries on disk (pool + orphan)
+	if n := len(asFile.GetByChatPool(cs.ID)); n != 2 {
+		t.Fatalf("pre: want 2 entries on disk, got %d", n)
+	}
+
+	_, err = cs.KillAll()
+	if err != nil {
+		t.Fatalf("KillAll: %v", err)
+	}
+
+	// Post: both gone (snapshot entry + orphan)
+	if n := len(asFile.GetByChatPool(cs.ID)); n != 0 {
+		t.Errorf("orphan: want 0 entries on disk post-KillAll, got %d", n)
 	}
 }

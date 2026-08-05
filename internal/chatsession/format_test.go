@@ -96,21 +96,33 @@ func TestFormatKillResults_SortedAlphabetically(t *testing.T) {
 	}
 }
 
-func TestFormatKillResults_TruncatesAt20Lines(t *testing.T) {
+func TestFormatKillResults_TruncatesByBytes(t *testing.T) {
+	// Build entries whose rendered line is ~250 bytes. 25 entries
+	// pack ~6250 bytes; the 4096-byte cap must trigger truncation.
 	results := make([]KillResult, 25)
 	for i := range results {
 		results[i] = KillResult{
-			Agent: "ag", Cwd: "/code/A", Action: "killed", BeforeState: StatusRunning,
+			Agent: "ag", Cwd: "/code/A",
+			Action: "kill-failed",
+			Error:  errors.New("bridge shutdown timeout: process did not exit within 2s (stdin EOF + SIGINT escalation; SIGKILL pending but parent hung in uninterruptible io wait)"),
 		}
 	}
 	got := FormatKillResults(results)
-	// Header + 20 rows + "and N more" = 22 lines
-	lines := strings.Split(got, "\n")
-	if len(lines) != 22 {
-		t.Errorf("expected 22 lines, got %d: %q", len(lines), got)
+	// The cap is "soft" — the tail itself can push ~30 bytes over.
+	// 4096 + 30 = 4126 is the realistic upper bound.
+	if len(got) > 4126 {
+		t.Errorf("output exceeds byte cap + tail slack: got %d bytes", len(got))
 	}
-	if !strings.Contains(got, "... and 5 more") {
-		t.Errorf("missing truncation tail: %q", got)
+	if !strings.Contains(got, "... and") {
+		t.Errorf("expected byte-cap truncation tail: %q", got)
+	}
+	// Header format: "25 failed:" (all-failed counts only).
+	if !strings.HasPrefix(got, "25 failed:") {
+		t.Errorf("missing header (want '25 failed:' prefix): %q", got)
+	}
+	lines := strings.Split(got, "\n")
+	if len(lines) < 2 {
+		t.Errorf("expected at least 2 lines (rows + tail): %q", got)
 	}
 }
 
@@ -173,19 +185,30 @@ func TestFormatResetResults_Mixed(t *testing.T) {
 	}
 }
 
-func TestFormatResetResults_TruncatesAt20Lines(t *testing.T) {
+func TestFormatResetResults_TruncatesByBytes(t *testing.T) {
+	// Same shape as KillResults byte-cap test.
 	results := make([]ResetResult, 25)
 	for i := range results {
 		results[i] = ResetResult{
-			Agent: "ag", Cwd: "/code/A", Action: "marked-fresh", BeforeState: StatusExited,
+			Agent: "ag", Cwd: "/code/A",
+			Action: "in-place-reset",
+			Error:  errors.New("bridge reset rejected: get_state handshake timed out after 30s waiting for state_update; emitter likely stuck because translator never accepted the type=state_update event in this session"),
 		}
 	}
 	got := FormatResetResults(results)
-	lines := strings.Split(got, "\n")
-	if len(lines) != 22 {
-		t.Errorf("expected 22 lines, got %d", len(lines))
+	if len(got) > 4126 {
+		t.Errorf("output exceeds byte cap + tail slack: got %d bytes", len(got))
 	}
-	if !strings.Contains(got, "... and 5 more") {
-		t.Errorf("missing truncation tail: %q", got)
+	if !strings.Contains(got, "... and") {
+		t.Errorf("expected byte-cap truncation tail: %q", got)
+	}
+	// Header: "Reset 0 session(s), 25 failed:" pattern (running=0, dead=0,
+	// failed=25 — all-failed counts).
+	if !strings.HasPrefix(got, "Reset 0 session(s),") {
+		t.Errorf("missing header: %q", got)
+	}
+	lines := strings.Split(got, "\n")
+	if len(lines) < 2 {
+		t.Errorf("expected at least 2 lines: %q", got)
 	}
 }

@@ -184,7 +184,7 @@ func buildResultCardJSON(content string, footerLines []string) (string, error) {
 
 // cardFooterElements builds the card elements for the styled footer
 // section: <hr> divider + one <div> per footer line, each <div>
-// containing a single nested <plain_text text_color="#999999">.
+// containing a single nested <plain_text text_color="grey-500">.
 // Returns nil when footerLines is empty so callers can skip the
 // section without an extra length check.
 //
@@ -207,7 +207,11 @@ func buildResultCardJSON(content string, footerLines []string) (string, error) {
 //     rejects with "unknown property, property: elements"; was the
 //     pre-F-46 bug that broke SendCard / PATCH for any receipt or
 //     result card with a footer)
-//   - text_color=#999999 (light grey, web "muted" tone)
+//   - text_color="grey-500" — Feishu plain_text text_color only
+//     accepts named color tokens from its palette (grey-100,
+//     grey-500, etc.). The first attempt used hex "#999999" and
+//     Feishu rejected with "invalid color: #999999" (code 230099);
+//     "grey-500" is the closest medium-grey token.
 func cardFooterElements(footerLines []string) []map[string]any {
 	if len(footerLines) == 0 {
 		return nil
@@ -220,7 +224,7 @@ func cardFooterElements(footerLines []string) []map[string]any {
 			"text": map[string]any{
 				"tag":        "plain_text",
 				"content":    line,
-				"text_color": "#999999",
+				"text_color": "grey-500",
 			},
 		})
 	}

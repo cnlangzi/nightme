@@ -191,6 +191,9 @@ func TestBuildReceiptCard_FooterUsesDivTextNotElements(t *testing.T) {
 		if _, hasElements := e["elements"]; hasElements {
 			t.Errorf("body element %d: <div> has invalid `elements` property (Feishu rejects with 200621)\nelement: %#v\nbody: %s", i, e, body)
 		}
+		if textColor, _ := e["text"].(map[string]any)["text_color"].(string); textColor != "grey-500" {
+			t.Errorf("body element %d: <plain_text> text_color = %q, want %q (Feishu rejects hex with 230099 'invalid color')\nelement: %#v", i, textColor, "grey-500", e)
+		}
 	}
 	if divCount != len(footer) {
 		t.Errorf("div count = %d, want %d (one <div> per footer line)", divCount, len(footer))

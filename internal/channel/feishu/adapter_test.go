@@ -1623,7 +1623,7 @@ func TestSend_OutResult_OrphanTopLevel(t *testing.T) {
 	if !strings.Contains(gotContent, `"tag":"hr"`) {
 		t.Errorf("orphan result card missing hr divider; F-46 unification expects hr + grey footer in every card path\nbody: %s", gotContent)
 	}
-	if !strings.Contains(gotContent, `"text_color":"#999999"`) {
+	if !strings.Contains(gotContent, `"text_color":"grey-500"`) {
 		t.Errorf("orphan result card missing grey text_color; F-46 unification expects hr + grey footer in every card path\nbody: %s", gotContent)
 	}
 }
@@ -1953,7 +1953,7 @@ func TestSend_OutReply_OrphanReplyTo_AlwaysCard(t *testing.T) {
 	if !strings.Contains(got.Body, `"tag":"hr"`) {
 		t.Errorf("orphan card body missing hr divider; F-46 unification expects hr + grey footer in every card path\nbody: %s", got.Body)
 	}
-	if !strings.Contains(got.Body, `"text_color":"#999999"`) {
+	if !strings.Contains(got.Body, `"text_color":"grey-500"`) {
 		t.Errorf("orphan card body missing grey text_color; F-46 unification expects hr + grey footer in every card path\nbody: %s", got.Body)
 	}
 	if !strings.Contains(got.Body, `plain_text`) {
@@ -2025,7 +2025,7 @@ func TestSend_OutReply_ColdStartSendCardFails_StillProducesCard(t *testing.T) {
 	if !strings.Contains(bail.Body, `"tag":"hr"`) {
 		t.Errorf("bail-out card missing hr divider\nbody: %s", bail.Body)
 	}
-	if !strings.Contains(bail.Body, `"text_color":"#999999"`) {
+	if !strings.Contains(bail.Body, `"text_color":"grey-500"`) {
 		t.Errorf("bail-out card missing grey text_color\nbody: %s", bail.Body)
 	}
 	// No receipt should remain after the failed cold-start (the
@@ -2123,7 +2123,7 @@ func TestSend_OutReply_AppendEntryOverflow_StillProducesCard(t *testing.T) {
 	if !strings.Contains(bail.Body, `"tag":"hr"`) {
 		t.Errorf("overflow bail-out card missing hr divider\nbody: %s", bail.Body)
 	}
-	if !strings.Contains(bail.Body, `"text_color":"#999999"`) {
+	if !strings.Contains(bail.Body, `"text_color":"grey-500"`) {
 		t.Errorf("overflow bail-out card missing grey text_color\nbody: %s", bail.Body)
 	}
 }
@@ -2213,7 +2213,7 @@ func TestSend_OutResult_AnchoredCardFooterStyled(t *testing.T) {
 	if !strings.Contains(gotBody, `"tag":"hr"`) {
 		t.Errorf("anchored result card missing hr divider\nbody: %s", gotBody)
 	}
-	if !strings.Contains(gotBody, `"text_color":"#999999"`) {
+	if !strings.Contains(gotBody, `"text_color":"grey-500"`) {
 		t.Errorf("anchored result card missing grey text_color\nbody: %s", gotBody)
 	}
 	// Pre-F-46 the footer was appended to text via "\n\n" — the

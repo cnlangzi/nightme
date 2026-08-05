@@ -94,7 +94,8 @@ func newTestAdapter(t *testing.T) *Adapter {
 }
 
 // liveCreateMessage — creates a fresh top-level parent, equivalent to
-// adapter.sendViaLarkCreate. Returns the message_id to use as the
+// the no-rootID branch in adapter.sendViaLark (which now routes
+// through a.ReplyInChat). Returns the message_id to use as the
 // reply test's parent.
 func liveCreateMessage(t *testing.T, a *Adapter, chatID, content string) string {
 	t.Helper()

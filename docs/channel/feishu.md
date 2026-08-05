@@ -1023,18 +1023,57 @@ PATCH 路径不动 -- Feishu 的 PATCH 接口会自动保留被 PATCH 消息的�
 | 形态名 | `reply_in_thread` 字段 | main chat | thread panel | `thread_id` 响应 |
 |---|---|---|---|---|
 | **ReplyInChat** | n/a（顶级 Create，不走 reply API）| 独立气泡 | 不在 thread | `""` |
-| **ReplyInThreadAndChat** | **字段省略**（SDK `omitempty` nil 指针）| **正文内联** | **同一份正文** | `""` |
+| **ReplyInThreadAndChat** | **字段省略**（SDK `omitempty` nil 指针）| **正文内联** *(group chat)* / thread-only *(p2p / topic)* | **同一份正文** *(group)* | `""` *(group)* / `omt_xxx` *(p2p / topic)* |
 | **ReplyInThread** | `true` | **"X replies" 灰条**（无正文）| **正文** | `omt_xxx`（首次分配，后续复用）|
 
 按 OutboundKind 拆分（与上表路径一致，2026-08-04 ops 实机确认）：
 
 - **ReplyInThread (`reply_in_thread=true`)** — `OutThinking` / `OutToolStart` / `OutToolEnd`：agent 进度流，绝不污染 main chat
 - **ReplyInThreadAndChat (字段省略)** — receipt 冷启动卡 / `OutCard` (permission) / `OutCommandReply` / `OutCompaction`：用户首要看到的答案 / 不可漏看的权限请求 / slash 命令回应 / brief 进度 marker，必须 main chat 可见
-- **ReplyInChat (顶级 Create)** — nightme **不**走此形态（fallback 路径 230011/231003 才退化到此，详见 §15.2）
+- **ReplyInChat (顶级 Create)** — `OutReply` / `OutResult` (F-44 follow-up)：每个 chunk / 每条 result 独立成 top-level bubble，**不**锚定到 user 消息。理由：一旦同 turn 的 `OutToolStart` / `OutToolEnd`（用 `ReplyInThread`）在 user message 上建了 thread，**Feishu server 会把后续所有 `ReplyInBoth` 拉进 thread 抽屉，主 chat 看不到**（reply.go docstring 第 17-19 行明文）。Fallback 路径 230011/231003 也走 `ReplyInChat`（详见 §15.2）。
 
-实现：`sendMessageFunc` / `sendContent` / `sendViaLarkReply` / `SendMessageText` / `SendCard` / `postThreadReply` 全链路加一个尾部 `replyInThread bool` 参数；`sendViaLarkReply` 内部 `larkim.NewReplyMessageReqBodyBuilder()` 仅在 `true` 时调 `.ReplyInThread(true)`（**不能简化成** `.ReplyInThread(replyInThread)`，否则 false 路径多 28 字节破坏 pre-F-37 idempotency cache）。详见 `docs/feat/F-37-tool-thread-routing.md` §2.1 + §7.5 实机验证 + adapter.go。
+实现（PR #47 收口后）：`sendMessageFunc` / `sendContent` / `SendMessageText` / `SendCard` / `postThreadReply` 全链路加一个尾部 `replyInThread bool` 参数；F-44 起 `sendViaLark` 内部直接路由到 PR #47 新加的三个 helper，不再有内联的 `sendViaLarkReply`：
 
-**相关测试**：`adapter_test.go::TestSend_ThreadOnlyEvents_PassReplyInThreadTrue` (4 kinds × ReplyInThread) + `TestSend_ChatVisibleEvents_PassReplyInThreadFalse` (3 paths × ReplyInThread+Also send it to chat)。
+- `rootID == ""` → `ReplyInChat`（顶级 `Create`，`sendViaLarkCreate` 现有实现；F-44 follow-up 起 `OutReply` / `OutResult` 不再锚定 user message，所以这里 rootID 永远为空，强制走 `ReplyInChat`）
+- `rootID != "" && replyInThread == true` → `ReplyInThread`（reply 端点 + `reply_in_thread=true`）
+- `rootID != "" && replyInThread == false` → `ReplyInBoth`（reply 端点 + 字段省略；不能简化成 `.ReplyInThread(replyInThread)`，否则 false 路径多 28 字节破坏 pre-F-37 idempotency cache — 由 `ReplyInBoth` 不调 `.ReplyInThread(...)` 保证）
+
+`OutReply` / `OutResult` 走 `ReplyInChat`（top-level Create，F-44 follow-up — 见 `docs/feat/F-44-outreply-independent-and-task-receipt.md` §0.3 + §1.5）；`OutTaskCreate` / `OutTaskUpdate` / `OutCard` / `OutCommandReply` / `OutCompaction` 走 `ReplyInBoth`；`OutThinking` / `OutToolStart` / `OutToolEnd` 走 `ReplyInThread`。详见 `docs/feat/F-37-tool-thread-routing.md` §2.1 + `docs/feat/F-44-outreply-independent-and-task-receipt.md` §0.3 / §1.5 + adapter.go::sendViaLark + reply.go（PR #47）。
+
+**相关测试**：`adapter_test.go::TestSend_ThreadOnlyEvents_PassReplyInThreadTrue` (3 kinds × ReplyInThread) + `TestSend_ChatVisibleEvents_PassReplyInThreadFalse` (3 paths × ReplyInThread+Also send it to chat) + PR #47 `TestSendViaLark_ReplyInBoth_Dispatch` (2 kinds × ReplyInBoth — OutCard / OutCommandReply) / `TestSendViaLark_ReplyInThread_Dispatch` (3 kinds × ReplyInThread) 锁定 dispatch 表。`OutReply` / `OutResult` 的 `ReplyInChat` 路由由 `TestSend_OutReply_IndependentReply_NotFolded` / `TestSend_OutResult_OrphanTopLevel`（及姐妹 path 测试）锁住：断言 sendFunc 被调用时 `rootID == ""`、`replyInThread == false`。
+
+#### 2026-08-05 实机验证(chat-mode 影响)
+
+**probe-B/C/D 实测**(F-44 阶段,`cli_aae7c0452678dbfc` bot,`oc_7cc94a3ed15afb8ac60c4ab7344d5cfd` DM):
+
+| chat_mode | reply endpoint 三种字段写法(omit / false / true) | thread_id 响应 | 视觉 |
+|---|---|---|---|
+| `p2p`(DM)| **三种完全一致**,全部继承父消息 `thread_id` | `omt_xxx`(继承)| 仅 thread |
+| `group`(普通群)| omit / false → `""`;true → `omt_xxx` | 行为如上表 | ✅ group 下 ReplyInThreadAndChat 正确 |
+| `topic`(话题群)| SDK 注释:「若群聊已经是话题模式,则自动回复该条消息所在的话题」| 强制 topic | 仅 thread |
+
+**3 种形态实机确认**(2026-08-05 12:50~12:59,DM `oc_7cc94a3ed15afb8ac60c4ab7344d5cfd`):
+
+| Probe | Endpoint | `reply_in_thread` | `thread_id` 响应 | 视觉 | 形态 |
+|---|---|---|---|---|---|
+| **probe-D** | `POST /im/v1/messages`(Create)| n/a | `<empty>` | **独立气泡,仅 main chat** | **ReplyInChat** ✅ |
+| **probe-A** | `POST /.../reply` | 字段省略 | `omt_19173381084e1c90` | 继承父 thread | 仅 thread(DM 下,跟 group 不同)|
+| **probe-B** | `POST /.../reply` | 显式 `false` | `omt_19173381084e1c90` | 继承父 thread | 仅 thread(DM 下,跟 group 不同)|
+| **probe-C** | `POST /.../reply` | 显式 `true` | `omt_19173381084e1c90` | 继承父 thread | **ReplyInThread: main chat "X replies" 灰条 + thread 正文** ✅ |
+
+**probe-D**:Create 端点 `POST /im/v1/messages` + `receive_id=chat_id`(不传 `root_id`)→ `parent_id=""`、`root_id=""`、`thread_id=""`,DM 中显示为独立气泡(仅 main chat,无 reply 箭头)。**ReplyInChat 形态实机确认**(2026-08-05 12:50)。
+
+**probe-C**:reply 端点 + `reply_in_thread=true` → `thread_id="omt_19173381084e1c90"`,DM 中 main chat 只显示 "X replies" 灰条(thread 计数 +1),正文仅在 thread 面板。**ReplyInThread 形态实机确认**(2026-08-05 12:59)。
+
+**关键观察**:
+- probe-A 和 probe-B 在 DM 中跟 probe-C 视觉一致(都仅 thread)—— **DM 下 `reply_in_thread` 字段写法**不影响**结果**
+- group chat 下,probe-A/probe-B(probe-A 在 group 中应是 `thread_id=""`)跟 probe-C 视觉**差异显著**(main chat 可见 vs 灰条)
+- probe-D(Create 端点)在 DM 下**唯一**达成 main chat 可见
+
+**Backlog (P2/P3)**:
+- **P2**:chat-mode 探测(`chat_mode` LRU 缓存,类似 `messageStates`),`p2p` / `topic` 群下自动 fallback 到 `sendViaLarkCreate`,达成 main chat 可见
+- **P3**:`chat_mode` 在 `Adapter` startup warm-up,避免首条消息延迟
+- 当前 F-44 + F-40 + F-42 实现跟 F-37 在 group chat 下完全一致;`p2p` / `topic` 群用户看到 "X replies" 灰条不影响 main chat 可达性(只是不直观,backlog 修)
 
 ### 13.11 决策记录(2026-08-03,F-33):ChatID 数据模型简化
 
@@ -1112,8 +1151,11 @@ Feishu SDK event(EventMessage{ChatId, ChatType, MessageId, ParentId, RootId, ...
 ```
 ChatSession.onAgentEvent
   ├─ out.ReplyTo = cs.currentTurnUserMsgID     // 不变
-  └─ channel.Send → sendViaLarkReply(POST /im/v1/messages/{rootID}/reply)
-     rootID = msg.ReplyTo = user 当前 message_id
+  └─ channel.Send → sendViaLark (PR #47 收口) → ReplyInBoth / ReplyInThread / ReplyInChat
+     · rootID = msg.ReplyTo = user 当前 message_id
+     · replyInThread = false → ReplyInBoth (OutReply / OutResult / OutTask* / OutCard / OutCommandReply / OutCompaction)
+     · replyInThread = true  → ReplyInThread (OutThinking / OutToolStart / OutToolEnd)
+     · rootID = ""          → ReplyInChat (orphan path / terminal-code fallback)
      ↓
      Feishu 端把 reply 视觉放到 user 当前 message 附近
 ```

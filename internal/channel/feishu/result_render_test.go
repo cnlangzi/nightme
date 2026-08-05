@@ -277,14 +277,14 @@ func TestBuildResultPayload_Default_UsesInteractiveCard(t *testing.T) {
 // truncateRunes
 // ---------------------------------------------------------------------------
 
-func TestTruncateRunes_ASCIIShortUnchanged(t *testing.T) {
-	if got := truncateRunes("hello", 100); got != "hello" {
+func TestTruncateForLog_ASCIIShortUnchanged(t *testing.T) {
+	if got := truncateForLog("hello", 100); got != "hello" {
 		t.Errorf("ASCII short should pass through, got %q", got)
 	}
 }
 
-func TestTruncateRunes_ASCIIOverTruncatedWithEllipsis(t *testing.T) {
-	got := truncateRunes("hello world", 6)
+func TestTruncateForLog_ASCIIOverTruncatedWithEllipsis(t *testing.T) {
+	got := truncateForLog("hello world", 6)
 	if !strings.HasSuffix(got, "…") {
 		t.Errorf("expected trailing ellipsis, got %q", got)
 	}
@@ -294,30 +294,30 @@ func TestTruncateRunes_ASCIIOverTruncatedWithEllipsis(t *testing.T) {
 	}
 }
 
-func TestTruncateRunes_CJKBoundary(t *testing.T) {
+func TestTruncateForLog_CJKBoundary(t *testing.T) {
 	// 5 CJK runes; limit 4 → 3 runes + ellipsis (4 runes total).
 	in := "你好世界你好"
-	got := truncateRunes(in, 4)
+	got := truncateForLog(in, 4)
 	if r := []rune(got); len(r) != 4 {
 		t.Errorf("expected 4 runes, got %d: %q", len(r), got)
 	}
 }
 
-func TestTruncateRunes_EdgeCaseOne(t *testing.T) {
-	if got := truncateRunes("hello", 1); got != "…" {
+func TestTruncateForLog_EdgeCaseOne(t *testing.T) {
+	if got := truncateForLog("hello", 1); got != "…" {
 		t.Errorf("maxRunes=1 should return single ellipsis, got %q", got)
 	}
 }
 
-func TestTruncateRunes_EdgeCaseZero(t *testing.T) {
-	if got := truncateRunes("hello", 0); got != "" {
+func TestTruncateForLog_EdgeCaseZero(t *testing.T) {
+	if got := truncateForLog("hello", 0); got != "" {
 		t.Errorf("maxRunes=0 should return empty, got %q", got)
 	}
 }
 
-func TestTruncateRunes_UTF8Valid(t *testing.T) {
+func TestTruncateForLog_UTF8Valid(t *testing.T) {
 	// Verify result is valid UTF-8 (no mid-rune slicing).
-	got := truncateRunes("中文mixed ascii 你好呀", 8)
+	got := truncateForLog("中文mixed ascii 你好呀", 8)
 	for _, r := range got {
 		if r == 0xFFFD {
 			t.Errorf("invalid UTF-8 rune in result: %q", got)

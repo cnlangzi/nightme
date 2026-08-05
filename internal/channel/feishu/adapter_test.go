@@ -448,118 +448,6 @@ func TestAdapter_StopClosesIncoming(t *testing.T) {
 // agent.PromptSucceeded) silently dropped inside receipt.Append. This test
 // reproduces that path: turn 1 completes, turn 2 starts, and we
 // assert turn 2 cold-creates its own receipt.
-func TestSend_RoutesByUserMsgID_NotChatID(t *testing.T) {
-	a := testAdapter(t)
-	chatID := "oc_chat_v13_routing"
-
-	// Mock: SendCard / SendMessageText return synthetic message IDs;
-	// PatchMessage is a no-op recorder.
-	var cards int
-	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
-		cards++
-		return fmt.Sprintf("om_card_%d", cards), nil
-	}
-	var patches []patchCall
-	a.updateFunc = func(_ context.Context, msgID, _ string) error {
-		patches = append(patches, patchCall{MessageID: msgID})
-		return nil
-	}
-
-	// ---- Turn 1 ----
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind: gateway.OutReply, ChatID: chatID, ReplyTo: "om_msg_1",
-		Text: "turn 1 hello",
-	}); err != nil {
-		t.Fatalf("turn 1 Send: %v", err)
-	}
-
-	// Receipt 1 should exist keyed by om_msg_1.
-	a.mu.RLock()
-	rcpt1, ok1 := a.receiptsByUserMsgID["om_msg_1"]
-	a.mu.RUnlock()
-	if !ok1 || rcpt1 == nil {
-		t.Fatalf("turn 1: receipt not registered for om_msg_1")
-	}
-	// Simulate turn 1 ending: receipt reaches terminal state.
-	rcpt1.mu.Lock()
-	rcpt1.promptState = agent.PromptSucceeded
-	rcpt1.mu.Unlock()
-
-	// Reset PATCH counter so we only assert on turn 2's outgoing
-	// writes. (Turn 1 legitimately PATCHed its own cardMsgID via
-	// the Append path before we marked it Completed.)
-	patchesBeforeTurn2 := len(patches)
-
-	// ---- Turn 2 ----
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind: gateway.OutReply, ChatID: chatID, ReplyTo: "om_msg_2",
-		Text: "turn 2 hello",
-	}); err != nil {
-		t.Fatalf("turn 2 Send: %v", err)
-	}
-
-	// Turn 2 must have cold-created a SEPARATE receipt.
-	a.mu.RLock()
-	rcpt2, ok2 := a.receiptsByUserMsgID["om_msg_2"]
-	rcpt1ByMsg, ok1ByMsg := a.receiptsByUserMsgID["om_msg_1"]
-	a.mu.RUnlock()
-	if !ok2 || rcpt2 == nil {
-		t.Fatalf("turn 2: receipt not registered for om_msg_2 (cold-create failed)")
-	}
-	if rcpt1 == rcpt2 {
-		t.Fatalf("turn 2 must cold-create new receipt; got same instance as turn 1 (per-chat routing bug)")
-	}
-	if !ok1ByMsg || rcpt1ByMsg != rcpt1 {
-		t.Fatalf("turn 1 receipt lost after turn 2 cold-create")
-	}
-
-	// Both receipts should have been cold-created via SendCard (one per turn).
-	if cards < 2 {
-		t.Errorf("expected >=2 SendCard calls (one per turn's lazy receipt), got %d", cards)
-	}
-
-	// After turn 1 was Completed, NO further PATCH may target
-	// rcpt1.cardMsgID. The pre-fix per-chat routing bug routed
-	// turn 2's events to rcpt1 (which had agent.PromptSucceeded, so the
-	// PATCH was silently dropped inside receipt.Append — but the
-	// user would see nothing in turn 2's reply, only rcpt2 would
-	// show). Asserting "no PATCH on rcpt1.cardMsgID after turn 2
-	// started" is the smoke test.
-	for _, p := range patches[patchesBeforeTurn2:] {
-		if p.MessageID == rcpt1.cardMsgID {
-			t.Errorf("turn 2 wrote into turn 1's completed receipt (msgID=%s)", p.MessageID)
-		}
-	}
-	// F-42: turn 2's text is shipped inside the lazy ensure's
-	// SendCard call (not via a subsequent PATCH). Verify the
-	// receipt registered with cardMsgID set and the text already
-	// in its entries list, so the user sees "turn 2 hello" in
-	// the chat even without a follow-up PATCH.
-	if rcpt2.cardMsgID == "" {
-		t.Errorf("turn 2 receipt has empty cardMsgID; SendCard did not seed it")
-	}
-	rcpt2.mu.Lock()
-	turn2TextInEntries := len(rcpt2.entries) >= 1 && rcpt2.entries[0].Text == "turn 2 hello"
-	rcpt2.mu.Unlock()
-	if !turn2TextInEntries {
-		t.Errorf("turn 2 receipt entries should contain \"turn 2 hello\"; lazy create did not seed the entry")
-	}
-}
-
-type patchCall struct {
-	MessageID string
-}
-
-// TestSend_OutThinking_PostsMarkdownCard — F-34 + F-think.
-// OutThinking is routed to a Feishu thread reply (rootID =
-// msg.ReplyTo) as an interactive card with a single (or
-// multi-div) lark_md body. Plain text thinking would lose all
-// markdown formatting in the chat.
-//
-// The test captures all outgoing sends and asserts on the
-// interactive card reply; any receipt cold-start / PATCH side
-// effects are accepted as observable side-effects, not tested
-// here (covered by TestReceipt_*).
 func TestSend_OutThinking_PostsMarkdownCard(t *testing.T) {
 	a := testAdapter(t)
 
@@ -959,57 +847,10 @@ func TestSend_ThreadOnlyEvents_PassReplyInThreadTrue(t *testing.T) {
 // "reply_in_thread=true everywhere" would silently hide the
 // receipt card behind a thread indicator, breaking the core UX.
 func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
-	t.Run("ReceiptLazyCreate", func(t *testing.T) {
-		// F-42: receiptFor is now a pure cache lookup and never
-		// ships a card. The first SendCard happens in
-		// ensureReceiptForReply when an actual OutReply lands.
-		// This subtest exercises that path: the SendCard that
-		// produces the receipt card must post to main chat
-		// (reply_in_thread=false), exactly like the old cold-start
-		// path did.
-		a := testAdapter(t)
-		var threadOnly int
-		var chatVisible int
-		a.sendFunc = func(_ context.Context, _, _, _, rootID string, replyInThread bool) (string, error) {
-			if rootID == "om_user_cold" {
-				if replyInThread {
-					threadOnly++
-				} else {
-					chatVisible++
-				}
-			}
-			return "om_card_cold", nil
-		}
-
-		r, created, err := a.ensureReceiptForReply(t.Context(), "oc_cold", "om_user_cold", "hello world")
-		if err != nil {
-			t.Fatalf("ensureReceiptForReply: %v", err)
-		}
-		if r == nil {
-			t.Fatalf("ensureReceiptForReply returned nil receipt")
-		}
-		if !created {
-			t.Errorf("ensureReceiptForReply created=false on first call; want true")
-		}
-		if chatVisible == 0 {
-			t.Errorf("lazy-create card reply_in_thread flag was true (threaded), want false — receipt card must be visible in main chat")
-		}
-		if threadOnly != 0 {
-			t.Errorf("lazy-create card was threaded %d times, want 0", threadOnly)
-		}
-		// Sanity: the entry is already installed; the receipt is
-		// agent.PromptRunning (the empty-waiting header would have
-		// been the bug we're fixing).
-		if r.State() != agent.PromptRunning {
-			t.Errorf("lazy-create receipt state = %v, want agent.PromptRunning", r.State())
-		}
-		r.mu.Lock()
-		hasText := len(r.entries) == 1 && r.entries[0].Text == "hello world"
-		r.mu.Unlock()
-		if !hasText {
-			t.Errorf("lazy-create receipt entries should contain \"hello world\" exactly once")
-		}
-	})
+	// F-44: ReceiptLazyCreate subtest removed — ensureReceiptForReply
+	// was deleted when OutReply stopped folding into the receipt card.
+	// The remaining subtests verify OutCard / OutCommandReply /
+	// OutCompaction still post to main chat (reply_in_thread=false).
 
 	t.Run("OutCard", func(t *testing.T) {
 		a := testAdapter(t)
@@ -1120,80 +961,6 @@ func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
 // TestSend_OutText_FoldsIntoReceipt — F-34 regression guard.
 // OutReply / OutResult / OutInit / OutUsage must still fold into
 // the receipt card (unchanged behavior).
-func TestSend_OutText_FoldsIntoReceipt(t *testing.T) {
-	a := testAdapter(t)
-	userMsgID := "om_user_out"
-
-	var cards int
-	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
-		cards++
-		return fmt.Sprintf("om_card_%d", cards), nil
-	}
-	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
-
-	// Warm up the receipt.
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutReply,
-		ChatID:  "oc_test",
-		ReplyTo: userMsgID,
-		Text:    "warmup",
-	}); err != nil {
-		t.Fatalf("Send(OutReply warmup): %v", err)
-	}
-
-	for _, kind := range []gateway.OutboundKind{
-		gateway.OutResult,
-		gateway.OutUsage,
-		gateway.OutInit,
-	} {
-		msg := gateway.OutboundMessage{
-			Kind:    kind,
-			ChatID:  "oc_test",
-			ReplyTo: userMsgID,
-			Text:    "x",
-		}
-		switch kind {
-		case gateway.OutResult:
-			msg.Result = &agent.ResultEvent{
-				Text:       "x",
-				DurationMs: 1234,
-				IsError:    false,
-				Subtype:    "success",
-			}
-		case gateway.OutUsage:
-			msg.Usage = &gateway.UsageInfo{
-				InputTokens:  10,
-				OutputTokens: 5,
-			}
-		case gateway.OutInit:
-			msg.Init = &agent.InitEvent{
-				SessionID: "s_1",
-				Model:     "claude-sonnet-4-5",
-				AgentName: "claude",
-				Workspace: "/tmp",
-				Branch:    "main",
-			}
-		}
-		if err := a.Send(t.Context(), msg); err != nil {
-			t.Fatalf("Send(%v): %v", kind, err)
-		}
-	}
-
-	a.mu.RLock()
-	rcpt := a.receiptsByUserMsgID[userMsgID]
-	a.mu.RUnlock()
-	if rcpt == nil {
-		t.Fatalf("receipt not registered for %s", userMsgID)
-	}
-	rcpt.mu.Lock()
-	defer rcpt.mu.Unlock()
-	if len(rcpt.entries) == 0 {
-		t.Fatalf("receipt has no entries; OutReply/OutResult/OutInit/OutUsage should fold in")
-	}
-}
-
-// TestSend_OutCard_PassesReplyTo — v1.3.x (§13.10). OutCard (permission
-// request) must thread to the user's message via Feishu root_id.
 func TestSend_OutCard_PassesReplyTo(t *testing.T) {
 	a := testAdapter(t)
 
@@ -1436,7 +1203,10 @@ func TestSendViaLark_NoRootIDSkipsReply(t *testing.T) {
 }
 
 // TestIsFeishuTerminalMessageCode — direct unit test for the
-// terminal-code detector that gates the fallback.
+// terminal-code detector that gates the fallback. Covers all three
+// accepted code-suffix formats: legacy "code NNNNN" (sendViaLarkReply,
+// kept for any in-flight log greps), colon "code:NNNNN", and the PR #47
+// "code=NNNNN" produced by ReplyInBoth / ReplyInThread.
 func TestIsFeishuTerminalMessageCode(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1444,8 +1214,15 @@ func TestIsFeishuTerminalMessageCode(t *testing.T) {
 		want bool
 	}{
 		{"nil", nil, false},
-		{"230011 recalled", errors.New("feishu: reply message failed with code 230011"), true},
-		{"231003 deleted", errors.New("feishu: reply message failed with code 231003"), true},
+		// Legacy sendViaLarkReply format.
+		{"230011 recalled (legacy)", errors.New("feishu: reply message failed with code 230011"), true},
+		{"231003 deleted (legacy)", errors.New("feishu: reply message failed with code 231003"), true},
+		// PR #47 ReplyInBoth / ReplyInThread format.
+		{"230011 recalled (PR47 code=)", errors.New("feishu: ReplyInBoth failed: code=230011 msg=msg has been deleted"), true},
+		{"231003 deleted (PR47 code=)", errors.New("feishu: ReplyInThread failed: code=231003 msg=message not found"), true},
+		// Colon form (defensive).
+		{"230011 recalled (colon)", errors.New("upstream wrapper: code:230011"), true},
+		// Negative cases.
 		{"230020 invalid-param (NOT terminal)", errors.New("feishu: reply message failed with code 230020"), false},
 		{"transport error (NOT terminal)", errors.New("feishu: reply message: connection reset"), false},
 		{"unrelated", errors.New("some other error"), false},
@@ -1459,6 +1236,144 @@ func TestIsFeishuTerminalMessageCode(t *testing.T) {
 	}
 }
 
+// TestSendViaLark_ReplyInBoth_Dispatch — PR #47 wiring proof.
+// sendViaLark must route user-visible kinds (OutCard /
+// OutCommandReply / OutTaskCreate / OutTaskUpdate) through
+// ReplyInBoth, i.e. the reply endpoint with reply_in_thread field
+// omitted. This is verified by asserting replyInThread=false on the
+// captured sendFunc invocation. The wire helpers are exercised via
+// the shared sendContent → sendFunc hook so the test exercises the
+// production dispatch path end-to-end.
+//
+// F-44 follow-up: OutReply / OutResult moved OFF ReplyInBoth
+// because of the parent-thread gotcha — once OutToolStart/End
+// creates a thread on the user message, Feishu pulls all subsequent
+// ReplyInBoth calls into the thread panel. OutReply / OutResult now
+// route through ReplyInChat (top-level Create) instead; see
+// TestSend_OutReply_RoutesToTopLevelCreate /
+// TestSend_OutResult_RoutesToTopLevelCreate for those paths.
+func TestSendViaLark_ReplyInBoth_Dispatch(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  gateway.OutboundMessage
+	}{
+		{
+			name: "OutCard (permission)",
+			msg: gateway.OutboundMessage{
+				Kind:    gateway.OutCard,
+				ChatID:  "oc_test",
+				ReplyTo: "om_user_3",
+				Card: &gateway.Card{
+					Title:   "Allow Bash?",
+					Options: []string{"Allow", "Deny"},
+				},
+			},
+		},
+		{
+			name: "OutCommandReply",
+			msg: gateway.OutboundMessage{
+				Kind:    gateway.OutCommandReply,
+				ChatID:  "oc_test",
+				ReplyTo: "om_user_4",
+				Text:    "/help result",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := testAdapter(t)
+			var capturedReplyInThread bool
+			var capturedRootID string
+			a.sendFunc = func(_ context.Context, _, _, _, rootID string, replyInThread bool) (string, error) {
+				capturedReplyInThread = replyInThread
+				capturedRootID = rootID
+				return "om_ok", nil
+			}
+			if err := a.Send(t.Context(), tc.msg); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			if capturedRootID != tc.msg.ReplyTo {
+				t.Errorf("rootID = %q, want %q (PR #47: ReplyInBoth must anchor on userMsgID)",
+					capturedRootID, tc.msg.ReplyTo)
+			}
+			if capturedReplyInThread {
+				t.Errorf("replyInThread = true, want false (PR #47: %s must route via ReplyInBoth, not ReplyInThread)",
+					tc.name)
+			}
+		})
+	}
+}
+
+// TestSendViaLark_ReplyInThread_Dispatch — PR #47 wiring proof.
+// sendViaLark must route the agent-progress kinds (OutThinking /
+// OutToolStart / OutToolEnd) through ReplyInThread, i.e. the reply
+// endpoint with reply_in_thread=true. OutCompaction stays in main
+// chat (replyOnly=false) and therefore routes through ReplyInBoth
+// — see TestSendViaLark_ReplyInBoth_Dispatch for that path.
+// This is the negation of TestSendViaLark_ReplyInBoth_Dispatch —
+// verifies the replyInThread=true wire path is preserved when F-44
+// collapses the sendViaLarkReply wrapper into
+// ReplyInBoth/ReplyInThread.
+func TestSendViaLark_ReplyInThread_Dispatch(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  gateway.OutboundMessage
+	}{
+		{
+			name: "OutThinking",
+			msg: gateway.OutboundMessage{
+				Kind:    gateway.OutThinking,
+				ChatID:  "oc_test",
+				ReplyTo: "om_user_1",
+				Text:    "considering",
+			},
+		},
+		{
+			name: "OutToolStart",
+			msg: gateway.OutboundMessage{
+				Kind:    gateway.OutToolStart,
+				ChatID:  "oc_test",
+				ReplyTo: "om_user_2",
+				Tool:    &gateway.ToolInfo{Name: "Bash", Args: "ls"},
+			},
+		},
+		{
+			name: "OutToolEnd",
+			msg: gateway.OutboundMessage{
+				Kind:    gateway.OutToolEnd,
+				ChatID:  "oc_test",
+				ReplyTo: "om_user_3",
+				Tool:    &gateway.ToolInfo{Name: "Bash", Output: "file1\nfile2"},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := testAdapter(t)
+			var capturedReplyInThread bool
+			var capturedRootID string
+			a.sendFunc = func(_ context.Context, _, _, _, rootID string, replyInThread bool) (string, error) {
+				capturedReplyInThread = replyInThread
+				capturedRootID = rootID
+				return "om_ok", nil
+			}
+			if err := a.Send(t.Context(), tc.msg); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			if capturedRootID != tc.msg.ReplyTo {
+				t.Errorf("rootID = %q, want %q (PR #47: ReplyInThread must anchor on userMsgID)",
+					capturedRootID, tc.msg.ReplyTo)
+			}
+			if !capturedReplyInThread {
+				t.Errorf("replyInThread = false, want true (PR #47: %s must route via ReplyInThread, not ReplyInBoth)",
+					tc.name)
+			}
+		})
+	}
+}
+
 // ===========================================================================
 // F-39: OutResult → independent reply tests
 // ===========================================================================
@@ -1466,388 +1381,6 @@ func TestIsFeishuTerminalMessageCode(t *testing.T) {
 // TestSend_OutResult_GoesToNewReply_NotReceipt — F-39 reverse-section proof.
 // OutResult must NOT fold into the rolling-log receipt card. It must be
 // delivered as a separate reply anchored at userMsgID via sendResultAsReply.
-func TestSend_OutResult_GoesToNewReply_NotReceipt(t *testing.T) {
-	a := testAdapter(t)
-	userMsgID := "om_user_f39"
-
-	var sends int
-	var gotMsgType, gotRootID string
-	a.sendFunc = func(_ context.Context, _, msgType, _, rootID string, _ bool) (string, error) {
-		sends++
-		gotMsgType = msgType
-		gotRootID = rootID
-		return "om_result_card", nil
-	}
-	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
-
-	// Pre-create the receipt via an OutReply warmup so receiptFor lookup
-	// has a real receipt to interact with.
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutReply,
-		ChatID:  "oc_test",
-		ReplyTo: userMsgID,
-		Text:    "streaming…",
-	}); err != nil {
-		t.Fatalf("warmup: %v", err)
-	}
-
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutResult,
-		ChatID:  "oc_test",
-		ReplyTo: userMsgID,
-		Text:    "完成",
-		Result: &agent.ResultEvent{
-			Text:       "完成",
-			DurationMs: 1234,
-			IsError:    false,
-		},
-	}); err != nil {
-		t.Fatalf("Send(OutResult): %v", err)
-	}
-
-	// Result should arrive as its own msg_type.
-	if sends != 2 {
-		t.Errorf("expected exactly 2 sends (warmup + result), got %d", sends)
-	}
-	if gotMsgType != "interactive" && gotMsgType != "post" && gotMsgType != "text" {
-		t.Errorf("result msgType should be one of interactive/post/text, got %q", gotMsgType)
-	}
-	if gotRootID != userMsgID {
-		t.Errorf("result should anchor at userMsgID %q, got %q", userMsgID, gotRootID)
-	}
-	// Result must NOT have been folded into receipt.entries.
-	a.mu.RLock()
-	rcpt := a.receiptsByUserMsgID[userMsgID]
-	a.mu.RUnlock()
-	if rcpt == nil {
-		t.Fatalf("receipt missing after warmup")
-	}
-	rcpt.mu.Lock()
-	defer rcpt.mu.Unlock()
-	hasResult := false
-	for _, e := range rcpt.entries {
-		if e.Kind == "result" {
-			hasResult = true
-		}
-	}
-	if hasResult {
-		t.Errorf("receipt.entries should not contain Kind=\"result\" entries (F-39 reverse)")
-	}
-}
-
-// --- F-40: OutReply fold / overflow routing ---
-
-// TestSend_OutReply_FoldsIntoReceipt_NoTruncate — F-40 default
-// fold path. Short replies must reach the receipt LogEntry
-// verbatim (no 600-byte truncation) and the receipt must NOT
-// trigger sendFunc for the fold path (no stand-alone reply).
-func TestSend_OutReply_FoldsIntoReceipt_NoTruncate(t *testing.T) {
-	a := testAdapter(t)
-	userMsgID := "om_user_fold"
-
-	var sends int
-	a.sendFunc = func(context.Context, string, string, string, string, bool) (string, error) {
-		sends++
-		return "om_xxx", nil
-	}
-	a.updateFunc = func(context.Context, string, string) error { return nil }
-
-	text1500 := strings.Repeat("y", 1500) // well under 8000 runes but well over old 600B cap
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutReply,
-		ChatID:  "oc_test",
-		ReplyTo: userMsgID,
-		Text:    text1500,
-	}); err != nil {
-		t.Fatalf("Send(OutReply): %v", err)
-	}
-
-	// The fold path itself doesn't call sendFunc after the
-	// initial cold-start (which DOES go through sendFunc via
-	// SendCard). Total sends = 1 (cold-start only). The fold
-	// event itself flows through receipt.Append → updateFunc.
-	if sends != 1 {
-		t.Errorf("fold path: expected exactly 1 sendFunc call (cold-start only), got %d", sends)
-	}
-
-	// Verify the full 1500-char text reached the LogEntry.
-	a.mu.RLock()
-	rcpt := a.receiptsByUserMsgID[userMsgID]
-	a.mu.RUnlock()
-	if rcpt == nil {
-		t.Fatal("receipt missing after OutReply fold")
-	}
-	rcpt.mu.Lock()
-	defer rcpt.mu.Unlock()
-	if len(rcpt.entries) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(rcpt.entries))
-	}
-	if rcpt.entries[0].Text != text1500 {
-		t.Errorf("reply text truncated: got %d chars, want %d",
-			len(rcpt.entries[0].Text), len(text1500))
-	}
-	if rcpt.entries[0].Kind != "reply" || rcpt.entries[0].Icon != "💬" {
-		t.Errorf("entry shape wrong: got (%q, %q), want (💬, reply)",
-			rcpt.entries[0].Icon, rcpt.entries[0].Kind)
-	}
-}
-
-// TestSend_OutReply_OverflowLength_AsReply — F-40 §1.2 length
-// rule. text rune count > perEntryMaxRunes (8000) must divert
-// to a stand-alone ReplyInThreadAndChat instead of folding into
-// the receipt. The receipt must NOT receive a new LogEntry.
-func TestSend_OutReply_OverflowLength_AsReply(t *testing.T) {
-	a := testAdapter(t)
-	userMsgID := "om_user_overflow_len"
-
-	var sends int
-	var gotMsgType, gotRootID string
-	a.sendFunc = func(_ context.Context, _, msgType, _, rootID string, replyInThread bool) (string, error) {
-		sends++
-		gotMsgType = msgType
-		gotRootID = rootID
-		return "om_overflow", nil
-	}
-	a.updateFunc = func(context.Context, string, string) error { return nil }
-
-	// Prime receipt with one short entry.
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: "first chunk",
-	}); err != nil {
-		t.Fatalf("warmup: %v", err)
-	}
-
-	// Now overflow: 9000 runes > perEntryMaxRunes (8000).
-	bigText := strings.Repeat("z", 9000)
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: bigText,
-	}); err != nil {
-		t.Fatalf("Send(overflow OutReply): %v", err)
-	}
-
-	// Overflow path: warmup triggers cold-start SendCard (1
-	// sendFunc), overflow triggers ReplyInThreadAndChat (1 more
-	// sendFunc). Total = 2.
-	if sends != 2 {
-		t.Errorf("expected exactly 2 sendFunc calls (cold-start + overflow), got %d", sends)
-	}
-	// Anchored at userMsgID via ReplyInThreadAndChat
-	// (replyInThread=false ⇒ rootID is set). The closure
-	// captures the LAST send's rootID; since overflow is the
-	// last call, this is the overflow reply's anchor.
-	if gotRootID != userMsgID {
-		t.Errorf("overflow reply must anchor at userMsgID %q, got %q", userMsgID, gotRootID)
-	}
-	// 3-segment dispatch returns interactive / post / text —
-	// the long text contains no markdown so it lands in text
-	// (no markdown indicators). Sanity-check the msgType family.
-	if gotMsgType != "interactive" && gotMsgType != "post" && gotMsgType != "text" {
-		t.Errorf("overflow reply msgType should be interactive/post/text, got %q", gotMsgType)
-	}
-
-	// Receipt should still hold only the warmup entry; the
-	// overflowed reply must NOT have appended a 9000-char entry.
-	a.mu.RLock()
-	rcpt := a.receiptsByUserMsgID[userMsgID]
-	a.mu.RUnlock()
-	if rcpt == nil {
-		t.Fatal("receipt missing after warmup")
-	}
-	rcpt.mu.Lock()
-	defer rcpt.mu.Unlock()
-	if len(rcpt.entries) != 1 {
-		t.Errorf("receipt should hold only the warmup entry; got %d entries (overflow must not fold)", len(rcpt.entries))
-	}
-}
-
-// TestSend_OutReply_OverflowQuantity_AsReply — F-40 §1.2 quantity
-// rule. Receipt already full (EntryCount >= replyMaxEntries = 45)
-// must divert a new reply to stand-alone ReplyInThreadAndChat
-// instead of FIFO-evicting the oldest entries.
-func TestSend_OutReply_OverflowQuantity_AsReply(t *testing.T) {
-	a := testAdapter(t)
-	userMsgID := "om_user_overflow_qty"
-
-	var sends int
-	a.sendFunc = func(context.Context, string, string, string, string, bool) (string, error) {
-		sends++
-		return "om_q", nil
-	}
-	a.updateFunc = func(context.Context, string, string) error { return nil }
-
-	// Prime receipt with one warmup send (drives cold-start
-	// through sendFunc), then inflate its entries directly to
-	// replyMaxEntries. Mutating the slice avoids driving 45
-	// sequential OutReply sends through the Append → renderLocked
-	// pipeline (which would do 45 PATCH storm calls) — we only
-	// care about the routing decision, not the appender path.
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: "warmup",
-	}); err != nil {
-		t.Fatalf("warmup: %v", err)
-	}
-	a.mu.RLock()
-	r := a.receiptsByUserMsgID[userMsgID]
-	a.mu.RUnlock()
-	if r == nil {
-		t.Fatal("receipt missing after warmup")
-	}
-	r.mu.Lock()
-	// First entry is the warmup; pad to replyMaxEntries total.
-	for len(r.entries) < replyMaxEntries {
-		r.entries = append(r.entries, LogEntry{Icon: "💬", Text: "x", Kind: "reply"})
-	}
-	r.mu.Unlock()
-
-	// A short reply (well below perEntryMaxRunes) but receipt is
-	// full → quantity overflow → divert to stand-alone reply.
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: "another",
-	}); err != nil {
-		t.Fatalf("Send(quantity overflow): %v", err)
-	}
-
-	if sends != 2 {
-		t.Errorf("expected exactly 2 sendFunc calls (warmup cold-start + quantity overflow reply), got %d", sends)
-	}
-
-	// The receipt must NOT have FIFO-evicted; all 45 original
-	// entries must still be present.
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.entries) != replyMaxEntries {
-		t.Errorf("receipt entries changed: got %d, want %d (no FIFO evict on overflow route)",
-			len(r.entries), replyMaxEntries)
-	}
-}
-
-// TestSend_OutReply_AfterCompletion_AsReply — F-40 §1.5 late
-// reply. Once the receipt has reached agent.PromptSucceeded (terminal),
-// further OutReply events must be delivered as stand-alone
-// replies rather than silently dropped (which is what the old
-// Append path did when state == agent.PromptSucceeded).
-func TestSend_OutReply_AfterCompletion_AsReply(t *testing.T) {
-	a := testAdapter(t)
-	userMsgID := "om_user_late"
-
-	var sends int
-	var gotRootID string
-	a.sendFunc = func(_ context.Context, _, _, _, rootID string, _ bool) (string, error) {
-		sends++
-		gotRootID = rootID
-		return "om_late", nil
-	}
-	a.updateFunc = func(context.Context, string, string) error { return nil }
-
-	// Prime receipt then mark it completed via the lifecycle.
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: "warmup",
-	}); err != nil {
-		t.Fatalf("warmup: %v", err)
-	}
-	a.mu.RLock()
-	rcpt := a.receiptsByUserMsgID[userMsgID]
-	a.mu.RUnlock()
-	if err := rcpt.SetCompleted(t.Context()); err != nil {
-		t.Fatalf("SetCompleted: %v", err)
-	}
-
-	sendsBeforeLate := sends
-	// Late OutReply — must NOT be silently dropped.
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: "late reply",
-	}); err != nil {
-		t.Fatalf("Send(late OutReply): %v", err)
-	}
-
-	if sends != sendsBeforeLate+1 {
-		t.Errorf("late OutReply must trigger sendFunc; got %d → %d sends",
-			sendsBeforeLate, sends)
-	}
-	if gotRootID != userMsgID {
-		t.Errorf("late reply must anchor at userMsgID %q, got %q", userMsgID, gotRootID)
-	}
-}
-
-// TestSend_OutReply_NoReceiptFallback — when receiptFor fails
-// (SendCard cold-start errored), OutReply must degrade to
-// sendRawOutText (plain top-level bubble) so the user still sees
-// the reply. Mirrors the pre-F-40 fail-safe path.
-func TestSend_OutReply_NoReceiptFallback(t *testing.T) {
-	a := testAdapter(t)
-
-	// Force receiptFor to fail: pre-populate the map with a
-	// poisoned receipt whose SendCard returns an error. Adapter
-	// will return this receipt from receiptFor but our new
-	// logic treats receipt == nil OR SendCard failure as "fallback".
-	// Simpler approach: send with empty ReplyTo so receiptFor
-	// itself short-circuits to nil (it returns nil when userMsgID
-	// is empty), exercising the fallback path.
-	var sends int
-	var gotRootID string
-	a.sendFunc = func(_ context.Context, _, _, _, rootID string, _ bool) (string, error) {
-		sends++
-		gotRootID = rootID
-		return "om_fb", nil
-	}
-	a.updateFunc = func(context.Context, string, string) error { return nil }
-
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: "", Text: "orphan",
-	}); err != nil {
-		t.Fatalf("Send(no-receipt OutReply): %v", err)
-	}
-
-	// Orphan path uses sendRawOutText which routes through
-	// sendContent with empty rootID (top-level).
-	if sends != 1 {
-		t.Errorf("expected exactly 1 sendFunc call (fallback), got %d", sends)
-	}
-	if gotRootID != "" {
-		t.Errorf("orphan fallback must use top-level send (rootID=\"\"), got %q", gotRootID)
-	}
-}
-
-// TestSend_OutReply_NoIconPrefix_OnOverflow — F-40 §1.3 visual:
-// the stand-alone reply payload must NOT carry the 💬 icon
-// prefix. The icon is reserved for receipt entries; the stand-
-// alone path is a continuation of the reply stream and would
-// visually clash with the receipt siblings if it carried the
-// same prefix.
-func TestSend_OutReply_NoIconPrefix_OnOverflow(t *testing.T) {
-	a := testAdapter(t)
-	userMsgID := "om_user_noicon"
-
-	var capturedBody string
-	a.sendFunc = func(_ context.Context, _, _, body, rootID string, _ bool) (string, error) {
-		capturedBody = body
-		return "om_n", nil
-	}
-	a.updateFunc = func(context.Context, string, string) error { return nil }
-
-	// Prime receipt, then trigger overflow.
-	_ = a.Send(t.Context(), gateway.OutboundMessage{
-		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: "warmup",
-	})
-	bigText := strings.Repeat("w", 9000)
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: bigText,
-	}); err != nil {
-		t.Fatalf("Send(overflow): %v", err)
-	}
-
-	if strings.Contains(capturedBody, "💬") {
-		t.Errorf("overflow reply body must not carry 💬 icon prefix; got: %s",
-			truncateForTest(capturedBody, 200))
-	}
-}
-
-// helper functions removed: newReceiptForTest / buildColdStartCardForTest
-// were left over from an earlier draft that inflated the receipt
-// via SendCard. The current TestSend_OutReply_OverflowQuantity
-// primes via a normal OutReply warmup then mutates r.entries
-// directly to avoid driving the SendCard → renderLocked pipeline.
-
 func TestSend_OutResult_LongMarkdownUsesInteractiveCard(t *testing.T) {
 	a := testAdapter(t)
 	var gotType string
@@ -1984,67 +1517,6 @@ func TestSend_OutResult_IsErrorPrefixedWithIcon(t *testing.T) {
 // after OutResult so subsequent OutUsage / OutInit / TaskList can
 // still update the footer (token counts, agent name, task list).
 // EventDone is the terminal signal that flips state to agent.PromptSucceeded.
-func TestSend_OutResult_LeavesReceiptAlive(t *testing.T) {
-	a := testAdapter(t)
-	userMsgID := "om_complete"
-
-	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
-	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
-		return "ok", nil
-	}
-
-	// Trigger a Text to ensure receipt exists + is Executing.
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: userMsgID, Text: "x",
-	}); err != nil {
-		t.Fatalf("warmup: %v", err)
-	}
-
-	// Send OutResult. The answer card goes out as an independent
-	// reply. The receipt stays in agent.PromptRunning so EventUsage
-	// / EventInit / TaskList can still update the footer after.
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutResult,
-		ChatID:  "oc_test",
-		ReplyTo: userMsgID,
-		Text:    "done",
-		Result:  &agent.ResultEvent{Text: "done"},
-	}); err != nil {
-		t.Fatalf("send: %v", err)
-	}
-
-	// Verify receipt is still alive (not agent.PromptSucceeded).
-	a.mu.RLock()
-	rcpt := a.receiptsByUserMsgID[userMsgID]
-	a.mu.RUnlock()
-	if rcpt == nil {
-		t.Fatalf("receipt missing")
-	}
-	if rcpt.State() != agent.PromptRunning {
-		t.Errorf("receipt state should remain agent.PromptRunning after OutResult, got %v", rcpt.State())
-	}
-
-	// Now simulate EventDone → receipt flips to agent.PromptSucceeded
-	// and clears the rolling-log entries (so the final card
-	// collapses to header + footer + task list).
-	if err := rcpt.Append(t.Context(), agent.AgentEvent{
-		Kind: agent.EventDone,
-		Done: &agent.DoneEvent{ExitCode: 0},
-	}); err != nil {
-		t.Fatalf("EventDone append: %v", err)
-	}
-	if rcpt.State() != agent.PromptSucceeded {
-		t.Errorf("receipt state should be agent.PromptSucceeded after EventDone, got %v", rcpt.State())
-	}
-	rcpt.mu.Lock()
-	defer rcpt.mu.Unlock()
-	if len(rcpt.entries) != 0 {
-		t.Errorf("rolling-log entries should be cleared on SetCompleted, got %d", len(rcpt.entries))
-	}
-}
-
-// TestSend_OutResult_OrphanTopLevel — when userMsgID is empty,
-// sendResultAsReply falls back to sendRawOutText (top-level plain text).
 func TestSend_OutResult_OrphanTopLevel(t *testing.T) {
 	a := testAdapter(t)
 	var gotType, gotRootID, gotContent string
@@ -2082,156 +1554,6 @@ func TestSend_OutResult_OrphanTopLevel(t *testing.T) {
 // receipt.IsCompleted() → panic on r.mu.Lock(). The fix returns an
 // error so the caller's existing error path (sendRawOutText
 // fallback) handles it cleanly.
-func TestEnsureReceiptForReply_ThinkingPrefix_ReturnsError(t *testing.T) {
-	a := testAdapter(t)
-
-	// Thinking-prefix text is the only currently-reachable
-	// eventToEntry filter (empty text is rejected upstream in
-	// Send). The thinking prefix is the gateway's [思考] marker.
-	const thinkingText = "[思考] internal note from a misrouted event"
-
-	r, created, err := a.ensureReceiptForReply(t.Context(), "oc_chat", "om_user", thinkingText)
-	if err == nil {
-		t.Fatalf("ensureReceiptForReply(thinking-prefix) returned nil err; want error (pre-fix returned nil and the caller nil-deref'd)")
-	}
-	if r != nil {
-		t.Errorf("ensureReceiptForReply returned non-nil receipt on error path: %v", r)
-	}
-	if created {
-		t.Errorf("created=true on error path; should be false")
-	}
-
-	// And the OutReply Send dispatcher must degrade gracefully
-	// via sendRawOutText — no panic, no nil deref.
-	a.sendFunc = func(_ context.Context, _, msgType, content, rootID string, _ bool) (string, error) {
-		if msgType != larkim.MsgTypeText {
-			t.Errorf("thinking-prefix fallback should use MsgTypeText, got %q", msgType)
-		}
-		if !strings.Contains(content, thinkingText) {
-			t.Errorf("fallback body should contain the original text %q, got %q", thinkingText, content)
-		}
-		return "om_text_fallback", nil
-	}
-	if sendErr := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutReply,
-		ChatID:  "oc_chat",
-		ReplyTo: "om_user",
-		Text:    thinkingText,
-	}); sendErr != nil {
-		t.Fatalf("Send with thinking-prefix text returned err=%v; the fallback path must succeed silently", sendErr)
-	}
-}
-
-// TestEnsureReceiptForReply_Concurrent_OnlyOneSendCard guards F-42
-// review finding #4. Pre-fix the helper used a pre-check + SendCard
-// + post-SendCard recheck pattern: two goroutines for the same
-// userMsgID could both pass the pre-check, both call SendCard (each
-// producing a distinct card in chat), and the loser would discover
-// the winner under the post-SendCard lock and discard its receipt —
-// leaving its orphan card in chat forever (no future PATCH reaches
-// it because PATCHes target the winner's cardMsgID).
-//
-// The fix uses register-before-SendCard: only the goroutine that
-// wins the registration proceeds to SendCard. Concurrent callers
-// see the registered placeholder and return early (created=false);
-// their renderLocked calls short-circuit on `initializing` so no
-// second SendCard ever fires.
-func TestEnsureReceiptForReply_Concurrent_OnlyOneSendCard(t *testing.T) {
-	a := testAdapter(t)
-
-	// Inject a slow SendCard so both goroutines reach the
-	// registration race window before either finishes.
-	var (
-		sendCardMu     sync.Mutex
-		sendCardCalls  int
-		releaseSignal  = make(chan struct{})
-	)
-	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
-		sendCardMu.Lock()
-		sendCardCalls++
-		n := sendCardCalls
-		sendCardMu.Unlock()
-		// Block until the test releases us, so the second
-		// goroutine's call lands while we're still mid-SendCard.
-		<-releaseSignal
-		return fmt.Sprintf("om_card_%d", n), nil
-	}
-
-	const userMsgID = "om_user_race"
-	const chatID = "oc_race"
-
-	var (
-		wg          sync.WaitGroup
-		errs        [2]error
-		receipts    [2]*MessageReceipt
-		createds    [2]bool
-	)
-	for i := range 2 {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			receipts[i], createds[i], errs[i] = a.ensureReceiptForReply(
-				t.Context(), chatID, userMsgID,
-				fmt.Sprintf("text from goroutine %d", i),
-			)
-		}(i)
-	}
-
-	// Wait briefly so both goroutines reach their respective
-	// SendCard calls (both blocked on releaseSignal).
-	time.Sleep(50 * time.Millisecond)
-
-	// Release both SendCard calls. They each complete and return
-	// a distinct message id.
-	close(releaseSignal)
-	wg.Wait()
-
-	for i, e := range errs {
-		if e != nil {
-			t.Errorf("goroutine %d: err = %v", i, e)
-		}
-	}
-
-	// Exactly one goroutine must have won registration (created=true).
-	winners := 0
-	for _, c := range createds {
-		if c {
-			winners++
-		}
-	}
-	if winners != 1 {
-		t.Errorf("created count = %d, want 1 (only one goroutine should win registration)", winners)
-	}
-
-	// Exactly one SendCard should have been called (the orphan
-	// race pre-fix would produce 2).
-	sendCardMu.Lock()
-	calls := sendCardCalls
-	sendCardMu.Unlock()
-	if calls != 1 {
-		t.Errorf("SendCard calls = %d, want 1 (F-42 register-before-SendCard prevents the loser from posting an orphan card)", calls)
-	}
-
-	// Both goroutines must end up with the SAME receipt pointer
-	// (the winner's placeholder).
-	if receipts[0] != receipts[1] {
-		t.Errorf("receipts[0]=%p != receipts[1]=%p; both should be the same registered placeholder", receipts[0], receipts[1])
-	}
-
-	// The receipt must be registered under the canonical map key.
-	a.mu.Lock()
-	registered := a.receiptsByUserMsgID[userMsgID]
-	a.mu.Unlock()
-	if registered != receipts[0] {
-		t.Errorf("map[userMsgID]=%p != winner receipt=%p", registered, receipts[0])
-	}
-}
-
-// TestEnsureReceiptForTask_Concurrent_OnlyOneSendCard guards F-42
-// review finding #5. Same race as TestEnsureReceiptForReply but
-// for the task-list path — two OutTask* events for the same
-// userMsgID racing must produce exactly ONE card in chat, with
-// the winner's snapshot merged into the canonical receipt.
 func TestEnsureReceiptForTask_Concurrent_OnlyOneSendCard(t *testing.T) {
 	a := testAdapter(t)
 
@@ -2318,5 +1640,184 @@ func TestEnsureReceiptForTask_Concurrent_OnlyOneSendCard(t *testing.T) {
 	a.mu.Unlock()
 	if cardMsgID == "" {
 		t.Errorf("registered receipt has empty cardMsgID after the ensure path completed")
+	}
+}
+
+
+// ---------------------------------------------------------------------------
+// F-44 OutReply / OutInit / OutUsage behavior
+// ---------------------------------------------------------------------------
+
+// TestSend_OutReply_IndependentReply_NotFolded verifies the F-44
+// routing change: each OutReply chunk goes to its own top-level
+// Create message (PR #47's ReplyInChat surface), NOT folded into
+// the receipt card. The receipt for the userMsgID is never created
+// (no OutTaskCreate/Update event) — out.replyTo is no longer used
+// to anchor the new message (F-44 follow-up moved OutReply off
+// ReplyInBoth because of the parent-thread gotcha).
+func TestSend_OutReply_IndependentReply_NotFolded(t *testing.T) {
+	a := testAdapter(t)
+
+	type captured struct {
+		ChatID        string
+		MsgType       string
+		RootID        string
+		Body          string
+		ReplyInThread bool
+	}
+	var sends []captured
+	a.sendFunc = func(_ context.Context, chatID, msgType, body, rootID string, replyInThread bool) (string, error) {
+		sends = append(sends, captured{ChatID: chatID, MsgType: msgType, RootID: rootID, Body: body, ReplyInThread: replyInThread})
+		return "om_msg_" + msgType, nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind:    gateway.OutReply,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user",
+		Text:    "first chunk of the reply",
+	}); err != nil {
+		t.Fatalf("Send(OutReply): %v", err)
+	}
+
+	if len(sends) != 1 {
+		t.Fatalf("send count = %d, want 1 (one top-level Create per chunk)", len(sends))
+	}
+	got := sends[0]
+	// F-44 follow-up: top-level Create, no parent/thread anchor.
+	// See sendResultAsReply / sendReplyInThreadAndChat docstrings
+	// for the parent-thread rationale.
+	if got.RootID != "" {
+		t.Errorf("RootID = %q, want %q (F-44 follow-up: OutReply is top-level Create, no anchor)", got.RootID, "")
+	}
+	if got.ReplyInThread {
+		t.Errorf("reply_in_thread = true, want false (ReplyInChat: top-level Create)")
+	}
+	if got.Body != `{"text":"first chunk of the reply"}` {
+		t.Errorf("body = %q, want %q", got.Body, `{"text":"first chunk of the reply"}`)
+	}
+	// Receipt must NOT be created — OutReply no longer folds.
+	a.mu.RLock()
+	rcpt, ok := a.receiptsByUserMsgID["om_user"]
+	a.mu.RUnlock()
+	if ok && rcpt != nil {
+		t.Errorf("receipt was created for OutReply; F-44: OutReply does NOT create a receipt")
+	}
+}
+
+// TestSend_OutReply_MultipleChunks_OneMessageEach verifies that
+// each chunk becomes its own Feishu message — no batching, no fold.
+// Three chunks → three independent ReplyInThreadAndChat messages.
+func TestSend_OutReply_MultipleChunks_OneMessageEach(t *testing.T) {
+	a := testAdapter(t)
+	var count int
+	a.sendFunc = func(_ context.Context, _, msgType, _, _ string, _ bool) (string, error) {
+		count++
+		return fmt.Sprintf("om_chunk_%d", count), nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	chunks := []string{"first", "second", "third"}
+	for i, chunk := range chunks {
+		if err := a.Send(context.Background(), gateway.OutboundMessage{
+			Kind:    gateway.OutReply,
+			ChatID:  "oc_test",
+			ReplyTo: "om_user",
+			Text:    chunk,
+		}); err != nil {
+			t.Fatalf("Send(OutReply chunk %d): %v", i, err)
+		}
+	}
+
+	if count != 3 {
+		t.Errorf("send count = %d, want 3 (one per chunk)", count)
+	}
+}
+
+// TestSend_OutReply_EmptyText_SilentDrop verifies that empty /
+// whitespace-only text is silently dropped (no Feishu message sent,
+// no error returned). This matches pre-F-40 behavior and avoids
+// blank bubbles in main chat.
+func TestSend_OutReply_EmptyText_SilentDrop(t *testing.T) {
+	a := testAdapter(t)
+	var count int
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		count++
+		return "om_msg", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	for _, text := range []string{"", "   ", "\n\n\t"} {
+		if err := a.Send(context.Background(), gateway.OutboundMessage{
+			Kind:    gateway.OutReply,
+			ChatID:  "oc_test",
+			ReplyTo: "om_user",
+			Text:    text,
+		}); err != nil {
+			t.Errorf("Send(OutReply empty %q) returned err: %v", text, err)
+		}
+	}
+	if count != 0 {
+		t.Errorf("send count = %d, want 0 (all empty texts dropped)", count)
+	}
+}
+
+// TestSend_OutInit_SilentDrop and TestSend_OutUsage_SilentDrop
+// verify the F-44 footer deferral: OutInit / OutUsage events reach
+// the Send dispatcher (the path is exercised) but produce no Feishu
+// traffic at all. The Translate path still produces
+// OutboundMessage{Init/Usage}; only the channel-side render is
+// skipped until the footer PR lands.
+func TestSend_OutInit_SilentDrop(t *testing.T) {
+	a := testAdapter(t)
+	var count int
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		count++
+		return "om_msg", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind:    gateway.OutInit,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user",
+		Init: &agent.InitEvent{
+			SessionID: "s_1",
+			Model:     "claude-sonnet-4-5",
+			AgentName: "claude",
+			Workspace: "/tmp",
+			Branch:    "main",
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutInit): %v", err)
+	}
+	if count != 0 {
+		t.Errorf("send count = %d, want 0 (OutInit silent drop until footer PR)", count)
+	}
+}
+
+func TestSend_OutUsage_SilentDrop(t *testing.T) {
+	a := testAdapter(t)
+	var count int
+	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
+		count++
+		return "om_msg", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind:    gateway.OutUsage,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user",
+		Usage: &gateway.UsageInfo{
+			InputTokens:  100,
+			OutputTokens: 50,
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutUsage): %v", err)
+	}
+	if count != 0 {
+		t.Errorf("send count = %d, want 0 (OutUsage silent drop until footer PR)", count)
 	}
 }

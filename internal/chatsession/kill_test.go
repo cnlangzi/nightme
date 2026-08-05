@@ -53,6 +53,15 @@ func TestKillAll_GracefulShutdown(t *testing.T) {
 	cs.activeAS = a1
 	cs.mu.Unlock()
 
+	// Start the read pump so we can also verify KillAll stops it
+	// before draining the dying bridge's events (F-42 review fix #1).
+	if err := cs.StartReadPump(); err != nil {
+		t.Fatalf("StartReadPump: %v", err)
+	}
+	if !cs.HasPump() {
+		t.Fatalf("pump should be running pre-KillAll")
+	}
+
 	results, err := cs.KillAll()
 	if err != nil {
 		t.Fatalf("KillAll err: %v", err)
@@ -76,6 +85,13 @@ func TestKillAll_GracefulShutdown(t *testing.T) {
 		if r.Action != "killed" {
 			t.Errorf("Action: want killed, got %s", r.Action)
 		}
+	}
+
+	// Pump must be stopped by KillAll (F-42 review fix #1: prevents
+	// dying bridge's final events from draining into the channel
+	// after /kill has been confirmed).
+	if cs.HasPump() {
+		t.Errorf("pump should be stopped after KillAll")
 	}
 }
 

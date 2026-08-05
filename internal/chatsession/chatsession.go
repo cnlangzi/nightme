@@ -820,6 +820,16 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 // goroutine); wg.Wait + 5s outer timeout guards against a wedged
 // bridge that bypasses its own SIGKILL fallback.
 func (cs *ChatSession) KillAll() ([]KillResult, error) {
+	// 0. stop pump FIRST so the dying bridge's final events don't
+	//    drain into the channel after /kill has been confirmed, and
+	//    so the preserved-input-buffer's FlushHook isn't accidentally
+	//    fired by SetIdle/OnTurnEnded emitted from a zombie pump.
+	//    (Without this, the natural pump exit lags the bridge close
+	//    by ~2s and can trigger OnTurnEnded -> FlushHook -> ErrNotRunning
+	//    on the freshly-nil'd activeAS, silently dropping the user's
+	//    preserved queued messages.)
+	cs.StopReadPump()
+
 	// 1. snapshot pool under read lock; do not mutate cs.pool until
 	//    every bridge has confirmed shutdown.
 	cs.mu.RLock()
@@ -891,7 +901,19 @@ func (cs *ChatSession) KillAll() ([]KillResult, error) {
 	//    corpse and would never again be replayed.
 	if cs.asFile != nil {
 		for _, as := range snapshot {
-			_ = cs.asFile.Delete(as.ID)
+			if err := cs.asFile.Delete(as.ID); err != nil {
+				// Non-fatal: the in-memory pool is already cleared.
+				// A stale disk entry is harmless (next spawn
+				// creates a fresh entry; the orphan is GC'd by
+				// RestoreFromRegistry on ConflictPolicy) but worth
+				// noticing so an operator can investigate.
+				slog.Warn("killAll: delete agent_session entry failed",
+					"chat_id", cs.ChatID,
+					"agent", as.Agent,
+					"cwd", as.Cwd,
+					"id", as.ID,
+					"err", err)
+			}
 		}
 	}
 	cs.persistChatEntry()

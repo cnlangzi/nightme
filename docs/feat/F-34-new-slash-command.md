@@ -1,9 +1,9 @@
 # F-34: `/new` Slash Command — Agent Conversation Reset
 
-> **Status**: ✅ **已实现（Phase 3 review 完成，2026-08-04）**
+> **Status**: ✅ **已实现（Phase 3 review 完成，2026-08-04）**。**F-42 supersedes §6 Q-N4 for dead/detached entries**（dead entries 现 is `matched=1, action=marked-fresh`,不再 silently skip）。
 > **Milestone**: v1.3.x
 > **Depends on**: F-09 (Agent abstraction), F-19 (CLI Bridge), F-21 (Agent Modes), F-24 (Claude Code Bridge), F-27 (ChatSession), F-28 (`/use`), F-29 (AgentSession pool), F-32 (Pi RPC Bridge)
-> **Related**: [`SPEC.md`](../SPEC.md) §3.2 状态转换触发器, [`F-28-use-command.md`](./F-28-use-command.md), [`F-29-agent-session-pool.md`](./F-29-agent-session-pool.md), [`F-32-pi-rpc-bridge.md`](./F-32-pi-rpc-bridge.md)
+> **Related**: [`SPEC.md`](../SPEC.md) §3.2 状态转换触发器, [`F-28-use-command.md`](./F-28-use-command.md), [`F-29-agent-session-pool.md`](./F-29-agent-session-pool.md), [`F-32-pi-rpc-bridge.md`](./F-32-pi-rpc-bridge.md), [`F-42-kill-new-graceful-and-reset.md`](./F-42-kill-new-graceful-and-reset.md)
 
 ---
 
@@ -418,7 +418,7 @@ if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.SessionID != "" {
 | `/new <agent>` 找不到 | reply "No agent session for <agent> in current workspace. Try /agents." |
 | 单个 AS reset 失败（如 pi 还在处理 turn）| reset 计数 -1；InputBuffer **仍清空**；reply 附 "errors: <first err>" |
 | 所有 AS reset 失败 | matched > 0, reset == 0；reply "Reset 0/N agent session(s). (errors: ...)" |
-| pool 有 AS 但都未启动 (Status==Detached/Exited) | **跳过静默**，matched == 0；reply "No agent session in current workspace to reset." —— **不**触发 lazy spawn |
+| pool 有 AS 但都未启动 (Status==Detached/Exited) | **F-42 ⚠ supersedes**: matched == 1, reset == 1, Action == `marked-fresh`; ResumeID cleared in-memory + persisted; reply 用 `FormatResetResults` per-entry list。原 F-34 "Q-N4 silently skip" 行为已被替换。 |
 | pool 在 activeCwd 下完全为空 | matched == 0；reply 同上 |
 
 ---

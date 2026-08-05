@@ -33,6 +33,7 @@
 | F-37 | **OutThinking / OutToolStart / OutToolEnd → Feishu thread reply + 类型感知摘要**（反转 §13.6 折叠方案；含 §1.4 抽象/具体边界规范的最终落地——OutboundMessage 100% typed，Meta + Reaction 死代码删除）| [feat/F-37-tool-thread-routing.md](./feat/F-37-tool-thread-routing.md) | v1.3.x | ✅ 已实现（9 commits / PR #31；review-clean）|
 | F-38 | **Claude TaskCreate / TaskUpdate → Feishu receipt 任务清单**（成功 tool_result 后归一化完整 task snapshot；Gateway typed 透传；Feishu 单 markdown element 原位 PATCH）| [feat/F-38-task-checklist.md](./feat/F-38-task-checklist.md) | v1.3.x | ✅ 已实现（doc-first + 完整 race 测试覆盖）|
 | F-39 | **`/tools on\|off` + 合并渲染** — per-chat ToolsMode 开关（默认 Hide，runtime 丢弃 OutToolStart / OutToolEnd）；当 on 时 Feishu adapter 合并每对 tool 的 start + end 为**一条** thread reply（PATCH 同一 message_id）；10 tools/turn 从 20 thread replies 降到 10 | [feat/F-38-tool-merge-and-toggle.md](./feat/F-38-tool-merge-and-toggle.md) | v1.3.x | ✅ 已实现（4 commits / 单 PR）|
+| F-42 | **`/kill` graceful + `/new` ResumeID clear + per-entry list reply** — `KillAll` 走 bridge.Close graceful 路径（5s outer timeout）；dead entry 的 ResumeID 清空防止 `--resume <dead-id>` 复活；`✓/✗/•` 三种 emoji 的 per-agent 列表回复，20 行 + ...and N more 截断（Feishu 4KB）| [feat/F-42-kill-new-graceful-and-reset.md](./feat/F-42-kill-new-graceful-and-reset.md) | v1.3.x | 🚧 PR #44 已开（6 commits，review 中）|
 
 **v1.2 关键变化**：
 - 删除：`/run` 命令（被 `/use` 替代）

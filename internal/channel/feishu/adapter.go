@@ -2043,9 +2043,15 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.TaskItem, footerLines []
 	// design: identity on line 1 + tokens on line 2) need one
 	// element per line. Using <div> instead of <note> to avoid
 	// the default ℹ️ icon that Feishu's <note> ships with —
-	// the footer is purely informational, no icon wanted. Plain
-	// <plain_text> inside a <div> renders in a neutral muted
-	// grey that matches the F-25 → F-42 footer styling.
+	// the footer is purely informational, no icon wanted.
+	//
+	// Color: #999999 (light grey, web "muted" tone). Body
+	// elements render in default black; the footer is dimmed
+	// to read as auxiliary metadata at a glance. Tested against
+	// the white Feishu card background — contrast is enough to
+	// stay legible while clearly receding from the body. The
+	// <hr> divider above stays at Feishu's default thin-grey
+	// (≈ #E5E5E5) which sits between body and footer cleanly.
 	//
 	// Footer lines are ASCII-only (output of formatSessionFooter
 	// Lines — only emits arrow set + Agent / Model names + cost
@@ -2055,8 +2061,9 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.TaskItem, footerLines []
 		divElements := make([]any, 0, len(footerLines))
 		for _, line := range footerLines {
 			divElements = append(divElements, map[string]any{
-				"tag":     "plain_text",
-				"content": line,
+				"tag":        "plain_text",
+				"content":    line,
+				"text_color": "#999999",
 			})
 		}
 		elements = append(elements, map[string]any{

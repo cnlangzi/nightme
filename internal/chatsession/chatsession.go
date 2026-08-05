@@ -239,6 +239,19 @@ type KillResult struct {
 	Error       error  // nil on success
 }
 
+// ResetResult is one row of the /new reply. It captures what happened
+// to a single pool entry during NewActiveAgentSessions so the handler
+// can render a per-agent status instead of a bare count.
+//
+// See docs/feat/F-42-kill-new-graceful-and-reset.md §5.2.
+type ResetResult struct {
+	Agent       string // e.g. "claude", "codex"
+	Cwd         string // e.g. "/code/A"
+	BeforeState Status // StatusRunning / StatusDetached / StatusExited
+	Action      string // "in-place-reset" | "marked-fresh"
+	Error       error  // nil on success
+}
+
 // SetActiveCwd changes the active workspace. Does NOT spawn or kill
 // any AgentSession; the pool is preserved. Next message triggers
 // LookupActiveAgentSession which may spawn or reuse.
@@ -977,6 +990,78 @@ func actionVerb(action string) string {
 	}
 }
 
+// FormatResetResults produces a human-readable summary of /new's
+// per-entry outcomes. Companion to FormatKillResults; same plain-text
+// shape, same 20-line cap, same alphabetical sort.
+//
+// Output templates (selected by the (running, dead) split):
+//   - all empty:           "Reset 0 sessions."
+//   - all running:         "Reset N session(s):\n  ✓ <name> @ <cwd>\n..."
+//   - all dead:            "Marked N session(s) fresh for next spawn:\n  ✓ <name> @ <cwd> — already exited, ResumeID cleared\n..."
+//   - mixed:               "Reset N session(s):\n  ✓ <name> @ <cwd> [— reset in-place]\n  ✓ <name> @ <cwd> — already exited, marked fresh\n..."
+//
+// See docs/feat/F-42-kill-new-graceful-and-reset.md §6.2.
+func FormatResetResults(results []ResetResult) string {
+	if len(results) == 0 {
+		return "Reset 0 sessions."
+	}
+
+	var running, dead, failed int
+	lines := make([]string, 0, len(results))
+
+	for _, r := range results {
+		if r.Error != nil {
+			failed++
+			lines = append(lines, fmt.Sprintf("  ✗ %s @ %s — bridge reset: %v",
+				r.Agent, r.Cwd, r.Error))
+			continue
+		}
+		switch r.Action {
+		case "in-place-reset":
+			running++
+			lines = append(lines, fmt.Sprintf("  ✓ %s @ %s — reset in-place", r.Agent, r.Cwd))
+		case "marked-fresh":
+			dead++
+			lines = append(lines, fmt.Sprintf("  ✓ %s @ %s — already exited, marked fresh", r.Agent, r.Cwd))
+		default:
+			// future action: surface as success mark, generic text
+			lines = append(lines, fmt.Sprintf("  ✓ %s @ %s — %s",
+				r.Agent, r.Cwd, r.Action))
+		}
+	}
+
+	sort.Strings(lines)
+
+	const maxLines = 20
+	if len(lines) > maxLines {
+		hidden := len(lines) - maxLines
+		lines = lines[:maxLines]
+		lines = append(lines, fmt.Sprintf("  ... and %d more", hidden))
+	}
+
+	return buildResetHeader(running, dead, failed) + "\n" + strings.Join(lines, "\n")
+}
+
+func buildResetHeader(running, dead, failed int) string {
+	if failed == 0 && dead == 0 {
+		return fmt.Sprintf("Reset %d session(s):", running)
+	}
+	if running == 0 && dead > 0 && failed == 0 {
+		return fmt.Sprintf("Marked %d session(s) fresh for next spawn:", dead)
+	}
+	parts := make([]string, 0, 3)
+	if running > 0 {
+		parts = append(parts, fmt.Sprintf("%d reset in-place", running))
+	}
+	if dead > 0 {
+		parts = append(parts, fmt.Sprintf("%d marked fresh", dead))
+	}
+	if failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed", failed))
+	}
+	return "Reset " + fmt.Sprintf("%d session(s), %s:", running+dead, strings.Join(parts, ", "))
+}
+
 // NewActiveAgentSessions resets the conversation context on the
 // AgentSessions associated with cs.ActiveCwd(). Filters the pool by
 // activeCwd, optionally narrowing further by agentName (when non-empty),
@@ -1011,16 +1096,19 @@ func actionVerb(action string) string {
 //   - firstErr: the first non-nil bridge.New error (other errors are
 //     counted into matched but not reset; callers report them in the
 //     reply via the returned error).
-func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName string) (matched, reset int, firstErr error) {
+func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName string) (matched, reset int, results []ResetResult, firstErr error) {
 	cs.mu.RLock()
 	cwd := cs.activeCwd
 	if cwd == "" {
 		cs.mu.RUnlock()
-		return 0, 0, nil
+		return 0, 0, nil, nil
 	}
 	cs.mu.RUnlock()
 
-	// 1. Snapshot RUNNING targets only (no lock held across bridge calls).
+	// 1. Snapshot ALL (cwd, [agentName]) targets (no lock held across
+	//    bridge calls). F-42 §5.4: dead/detached entries are NOT
+	//    silently skipped — their stale ResumeID would resurrect a
+	//    dead session on next spawn, defeating /new's intent.
 	cs.mu.RLock()
 	targets := make([]*AgentSession, 0)
 	for _, as := range cs.pool {
@@ -1030,34 +1118,57 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 		if agentName != "" && as.Agent != agentName {
 			continue
 		}
-		if as.Status() != StatusRunning {
-			// Not started → no conversation → skip silently.
-			// Do NOT trigger a lazy spawn here (F-34 §6 Q-N4 / product
-			// clarification 2026-08-04).
-			continue
-		}
 		targets = append(targets, as)
 	}
 	cs.mu.RUnlock()
 
 	// F-34 Phase 3 review #1: the queue must be cleared even when
-	// no Running targets matched (e.g. pool has entries but all are
-	// Detached/Exited, or /new <agent> with no <agent> in cwd).
-	// Otherwise the user's queued message stays stuck behind a
-	// dead session until they /kill or /cwd.
-	//
-	// Also covers the matched==0 path above (after the early-return).
+	// no targets matched (e.g. empty pool, wrong cwd, or /new <agent>
+	// with no <agent> in cwd). Otherwise the user's queued message
+	// stays stuck behind an unresponsive session until they /kill or
+	// /cwd.
 	if cs.inputBuffer != nil {
 		cs.inputBuffer.Clear()
 	}
 
 	if len(targets) == 0 {
-		return 0, 0, nil
+		return 0, 0, nil, nil
 	}
 
-	// 2. Serial reset.
+	results = make([]ResetResult, 0, len(targets))
+
+	// 2. Serial reset. Each entry's action branches on its Status:
+	//    - StatusRunning:   in-place reset via bridge.New(ctx)
+	//    - StatusDetached / StatusExited: clear ResumeID (no spawn)
 	for _, as := range targets {
 		matched++
+		result := ResetResult{
+			Agent:       as.Agent,
+			Cwd:         as.Cwd,
+			BeforeState: as.Status(),
+		}
+
+		if as.Status() != StatusRunning {
+			// F-42 §5.4: dead/detached entry has no live conversation
+			// to reset, but its stale ResumeID must NOT be replayed on
+			// the next spawn. Clear ResumeID in-memory + persist so the
+			// next LookupActiveAgentSession spawns fresh.
+			//
+			// NO lazy spawn (F-34 §6 Q-N4 / product clarification
+			// 2026-08-04): spawning just to reset a dead agent would
+			// waste resources and implicitly activate it.
+			as.SetResumeID("")
+			if cs.asFile != nil {
+				_ = cs.asFile.Upsert(as.Entry())
+			}
+			result.Action = "marked-fresh"
+			results = append(results, result)
+			reset++
+			continue
+		}
+
+		// Running: in-place reset via bridge.New(ctx).
+		//
 		// Active AgentSession pump coordination (F-34 Phase 3 review):
 		//
 		// The readPump captures as.Events() ONCE before its loop, so
@@ -1097,9 +1208,14 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 			if firstErr == nil {
 				firstErr = err
 			}
+			result.Action = "in-place-reset"
+			result.Error = err
+			results = append(results, result)
 			continue
 		}
 		reset++
+		result.Action = "in-place-reset"
+		results = append(results, result)
 		// Persist after a successful kill+respawn so the registry
 		// stays in sync with the in-memory state. For in-place
 		// resets the bridge will also emit a fresh EventInit which
@@ -1114,7 +1230,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 		}
 	}
 
-	return matched, reset, firstErr
+	return matched, reset, results, firstErr
 }
 
 // Entry returns a snapshot of this ChatSession as a registry entry.

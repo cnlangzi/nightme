@@ -47,7 +47,7 @@ func handleNew(ctx context.Context, mgr *chatsession.Manager, channel Channel,
 		}
 	}
 
-	matched, reset, err := cs.NewActiveAgentSessions(ctx, agentName)
+	matched, reset, _, err := cs.NewActiveAgentSessions(ctx, agentName)
 
 	if matched == 0 {
 		if agentName != "" {

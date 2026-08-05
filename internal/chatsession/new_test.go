@@ -53,7 +53,7 @@ func injectAS(t *testing.T, cs *ChatSession, agentName, cwd string, handle agent
 // returns (0,0,nil) so the handler can reply "send /cwd first".
 func TestNewActiveAgentSessions_NoCwd(t *testing.T) {
 	cs := New("chat-nocwd", "cc")
-	matched, reset, err := cs.NewActiveAgentSessions(context.Background(), "")
+	matched, reset, _, err := cs.NewActiveAgentSessions(context.Background(), "")
 	if err != nil || matched != 0 || reset != 0 {
 		t.Fatalf("want (0,0,nil), got (%d,%d,%v)", matched, reset, err)
 	}
@@ -66,7 +66,7 @@ func TestNewActiveAgentSessions_EmptyPool(t *testing.T) {
 	if err := cs.SetActiveCwd(t.TempDir()); err != nil {
 		t.Fatalf("SetActiveCwd: %v", err)
 	}
-	matched, reset, err := cs.NewActiveAgentSessions(context.Background(), "")
+	matched, reset, _, err := cs.NewActiveAgentSessions(context.Background(), "")
 	if err != nil || matched != 0 || reset != 0 {
 		t.Fatalf("want (0,0,nil), got (%d,%d,%v)", matched, reset, err)
 	}
@@ -96,7 +96,7 @@ func TestNewActiveAgentSessions_AllRunningReset(t *testing.T) {
 		t.Fatalf("inputBuffer pending should be > 0 before reset")
 	}
 
-	matched, reset, err := cs.NewActiveAgentSessions(context.Background(), "")
+	matched, reset, _, err := cs.NewActiveAgentSessions(context.Background(), "")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestNewActiveAgentSessions_AgentNameFilter(t *testing.T) {
 	a1 := injectAS(t, cs, "cc", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
 	a2 := injectAS(t, cs, "codex", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(2)})
 
-	matched, reset, err := cs.NewActiveAgentSessions(context.Background(), "cc")
+	matched, reset, _, err := cs.NewActiveAgentSessions(context.Background(), "cc")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -144,11 +144,14 @@ func TestNewActiveAgentSessions_AgentNameFilter(t *testing.T) {
 }
 
 // TestNewActiveAgentSessions_DetachedSkipped verifies that AgentSessions
-// that are NOT Running are silently skipped (do not count toward matched
-// and are NOT triggered into a lazy spawn just to call New).
+// that are NOT Running are NOT triggered into a lazy spawn (F-34 §6 Q-N4
+// product clarification) AND that their stale ResumeID is cleared so the
+// next spawn will not resurrect a dead session (F-42 §5.4).
 //
-// F-34 product clarification (2026-08-04): "如果没启动过的agentsession,
-// 则不需要去启动AgentSession.因为它本身就没启动,所以不需要New".
+// F-42 changes the counting semantics: dead/detached entries now count
+// as matched AND reset (with Action="marked-fresh") — the previous
+// silently-skip behavior was a bug because the stale ResumeID would be
+// replayed on the next spawn.
 func TestNewActiveAgentSessions_DetachedSkipped(t *testing.T) {
 	cs := New("chat-skip", "cc")
 	cwd := t.TempDir()
@@ -157,17 +160,28 @@ func TestNewActiveAgentSessions_DetachedSkipped(t *testing.T) {
 	}
 	// Detached entry: SetExited clears PID; Status returns StatusExited.
 	a := NewAgentSession(newAgentSessionID(), cs.ID, "cc", cwd, nil)
+	a.SetResumeID("dead-session-id-456") // populated as if a previous run
+	// captured an init event
 	a.SetExited(0)
 	cs.mu.Lock()
 	cs.pool[agentCwdKey{Agent: "cc", Cwd: cwd}] = a
 	cs.mu.Unlock()
 
-	matched, reset, err := cs.NewActiveAgentSessions(context.Background(), "")
+	matched, reset, results, err := cs.NewActiveAgentSessions(context.Background(), "")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if matched != 0 || reset != 0 {
-		t.Fatalf("want (0,0) for Exited, got (%d,%d)", matched, reset)
+	if matched != 1 || reset != 1 {
+		t.Fatalf("want (1,1) for Exited under F-42, got (%d,%d)", matched, reset)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Action != "marked-fresh" {
+		t.Fatalf("want Action=marked-fresh, got %q", results[0].Action)
+	}
+	if got := a.ResumeID(); got != "" {
+		t.Fatalf("ResumeID should be cleared, got %q", got)
 	}
 }
 
@@ -183,7 +197,7 @@ func TestNewActiveAgentSessions_CwdFilter(t *testing.T) {
 	other := injectAS(t, cs, "cc", cwd2, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
 	here := injectAS(t, cs, "cc", cwd1, &callRecordingAS{fakeAgentSession: newFakeAgentSession(2)})
 
-	matched, reset, err := cs.NewActiveAgentSessions(context.Background(), "")
+	matched, reset, _, err := cs.NewActiveAgentSessions(context.Background(), "")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -217,7 +231,7 @@ func TestNewActiveAgentSessions_PartialFailure(t *testing.T) {
 		t.Fatalf("inputBuffer.Add: %v", err)
 	}
 
-	matched, reset, err := cs.NewActiveAgentSessions(context.Background(), "")
+	matched, reset, _, err := cs.NewActiveAgentSessions(context.Background(), "")
 	if !errors.Is(err, errInjected) {
 		t.Fatalf("want errInjected, got %v", err)
 	}

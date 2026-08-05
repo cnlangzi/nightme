@@ -633,13 +633,13 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 
 | OutboundKind | 源 AgentEvent | 触发点 | Feishu 渲染 | msg_type / API | Receipt? |
 |--------------|---------------|--------|-------------|----------------|----------|
-| `OutReply` | `EventText`(无前缀) | agent 对当前 turn 的 reply 流式 chunks(F-40 改名,原 `OutText`) | **F-44 §13.21：每 chunk → 独立 `ReplyInThreadAndChat` 消息**(不再 fold 进 receipt)。`sendReplyInThreadAndChat` 走 3 段 dispatch:无 markdown → `MsgTypeText`;tables>5 → `MsgTypePost+md`;默认 → `MsgTypeInteractive` Card 2.0 + 1/`N` `tag:"markdown"` div(F-37 `splitMarkdownForDivs` 拆 ≤ 1000 runes/div)。复用 F-39 `SanitizeCardMarkdown` + `truncateRunes` 28 KB envelope defense。**不加 icon 前缀**(流延续,不是新条目) | `interactive` Create / `post` Create / `text` Create | ❌ (独立气泡,锚同 userMsgID) |
+| `OutReply` | `EventText`(无前缀) | agent 对当前 turn 的 reply 流式 chunks(F-40 改名,原 `OutText`) | **F-44 §13.21：每 chunk → 独立 `ReplyInThreadAndChat` 消息**(不再 fold 进 receipt)。`sendReplyInThreadAndChat` 走 3 段 dispatch:无 markdown → `MsgTypeText`;tables>5 → `MsgTypePost+md`;默认 → `MsgTypeInteractive` Card 2.0 + 1/`N` `tag:"markdown"` div(F-37 `splitMarkdownForDivs` 拆 ≤ 1000 runes/div)。复用 F-39 `SanitizeCardMarkdown` + `truncateRunes` 28 KB envelope defense。**不加 icon 前缀**(流延续,不是新条目)。**F-45 §13.22:文本末尾追加 `formatSessionFooter(msg.SessionContext)`**(Agent · Model · ↓ in · ↻ cached · ↑ out · Total · $cost,ASCII 箭头无 emoji) | `interactive` Create / `post` Create / `text` Create | ❌ (独立气泡,锚同 userMsgID) |
 | `OutThinking` | `EventText`(带 `[思考] ` 前缀,Gateway 已剥) | agent reasoning | **`collapsible_panel` + `💭` 折叠**(§13.6 设计决策;§13.1 bug 待修) | `interactive` PATCH | ✅ |
 | `OutToolStart` | `EventToolStart` | 工具开始 | **`collapsible_panel` + `🔧` 折叠**(§13.6 设计决策,粒度待定 §13.7) | `interactive` PATCH | ✅ |
 | `OutToolEnd` | `EventToolEnd` | 工具结束(成功/失败) | **`collapsible_panel` + `✅` / `❌` 折叠**(§13.6 设计决策,与 Start 合并 or 独立待定 §13.9) | `interactive` PATCH | ✅ |
-| `OutTaskCreate` | `EventTaskCreate` | Claude TaskCreate 成功结果 | **F-44 §13.21：rolling-log receipt,card body 只剩 `**📋 Tasks**` checklist**;N 个 OutTask* 事件 → 1 张 card 反复 PATCH 同一 snapshot。`ensureReceiptForTask` lazy create(首个 OutTask* 触发) | `interactive` PATCH | ✅（仅 Task 单一 section,无 header/entries/footer） |
-| `OutTaskUpdate` | `EventTaskUpdate` | Claude TaskUpdate / delete 成功结果 | 同上;空 snapshot 清除 checklist;不进入 tool thread | `interactive` PATCH | ✅（仅 Task 单一 section） |
-| `OutResult` | `EventResult` | 最终回复 | **独立 reply 到 userMsgID**(F-39 §13.16;不 fold 进 receipt card)— 三段 dispatch:无 markdown → `MsgTypeText`;tables>5 → `MsgTypePost+md`;默认 → `MsgTypeInteractive` Card 2.0 + 1/`N` `tag:"markdown"` div(F-37 `splitMarkdownForDivs` 拆 ≤ 1000 runes/div)。sanitize via `result_render.go`(cc-connect 移植,F-44 后从 `card_sanitize.go` 合并) | `interactive` Create (新 reply) / `post` Create / `text` Create | ❌ (独立气泡,锚同 userMsgID) |
+| `OutTaskCreate` | `EventTaskCreate` | Claude TaskCreate 成功结果 | **F-44 §13.21：rolling-log receipt,card body 只剩 `**📋 Tasks**` checklist**;N 个 OutTask* 事件 → 1 张 card 反复 PATCH 同一 snapshot。`ensureReceiptForTask` lazy create(首个 OutTask* 触发)。**F-45 §13.22:checklist 末尾追加 `formatSessionFooter(msg.SessionContext)`(hr + lark_md div)** | `interactive` PATCH | ✅（仅 Task 单一 section + footer） |
+| `OutTaskUpdate` | `EventTaskUpdate` | Claude TaskUpdate / delete 成功结果 | 同上;空 snapshot 清除 checklist;不进入 tool thread。**F-45 §13.22 footer 同上** | `interactive` PATCH | ✅（仅 Task 单一 section + footer） |
+| `OutResult` | `EventResult` | 最终回复 | **独立 reply 到 userMsgID**(F-39 §13.16;不 fold 进 receipt card)— 三段 dispatch:无 markdown → `MsgTypeText`;tables>5 → `MsgTypePost+md`;默认 → `MsgTypeInteractive` Card 2.0 + 1/`N` `tag:"markdown"` div(F-37 `splitMarkdownForDivs` 拆 ≤ 1000 runes/div)。sanitize via `result_render.go`(cc-connect 移植,F-44 后从 `card_sanitize.go` 合并)。**F-45 §13.22:文本末尾追加 `formatSessionFooter(msg.SessionContext)`** | `interactive` Create (新 reply) / `post` Create / `text` Create | ❌ (独立气泡,锚同 userMsgID) |
 | `OutUsage` | `EventUsage` | token 用量 | **F-44 §13.21：silent drop**(footer 设计推迟到 footer PR)。`agent.EventUsage` → `OutboundMessage{Usage}` Translate 路径保留 | — | ❌ (不渲染) |
 | `OutCompaction` | `EventCompaction` | 中途压缩 | card body `markdown` + `✶ Compacting conversation...` | `interactive` PATCH | ✅ |
 | `OutInit` | `EventInit` | 会话初始化 | **F-44 §13.21：silent drop**(footer 设计推迟到 footer PR)。`agent.EventInit` → `OutboundMessage{Init}` Translate 路径保留 | — | ❌ (不渲染) |
@@ -1807,6 +1807,126 @@ user_msg om_A
 | 多 reply 流视觉噪声(N=20 chunks = 20 messages)| 接受 | F-39 OutResult 已是独立 reply,F-44 让 OutReply 跟 OutResult 视觉对齐;每个 reply 立刻可见比等 PATCH 周期更直观 |
 
 **详细设计**:见 [`docs/feat/F-44-outreply-independent-and-task-receipt.md`](../feat/F-44-outreply-independent-and-task-receipt.md)。SPEC §0.11。
+
+### 13.22 🎯 F-45 决策 (2026-08-05):Main-Chat 卡片 Footer + AgentSession 累计 Token 持久化
+
+**背景**:F-44 §6.1 推迟的 footer 兑现。`OutInit` / `OutUsage` 自 F-44 以来一直 silent drop,token / model 信息完全丢给用户。本节把 metadata 从 bridge event 搬到 `AgentSession` wrapper 自身,持久化到 `agent_sessions.json`,在 4 个 main-chat Kind 上 stamp `SessionContext *SessionContext` typed snapshot 到每条消息。
+
+**核心变化**:
+
+1. **`AgentSession` 自管 metadata**(in-memory + 持久化)— runtime 是唯一 owner:
+   - `Model string` + `modelMu`:EventInit 时 `SetModel(ev.Init.Model)`(idempotent,空值不覆盖非空现有值)
+   - `cumulativeUsage UsageInfo` + `cumulativeUsageMu` + `cumulativeDirty bool`:EventUsage 时 `AccumulateUsage(ev.Usage)`(加锁累加 + 标 dirty)
+   - 6 个新方法:`SetModel` / `Model` / `AccumulateUsage` / `ResetCumulative` / `CumulativeUsage` / `PersistIfDirty`
+   - **`/new` 是唯一清零点**(`ResetCumulative` + 立即 `PersistAgentSession`);daemon 重启 / `/cwd` / `/use` / `/kill` / 进程崩溃一律保留
+   - EventDone 时 `PersistIfDirty(...)` 触发落盘,每个 turn 最多 1 次 `agent_sessions.json` atomic write
+
+2. **`OutboundMessage` 加 1 个 typed snapshot field**(不是 3 个分散字段):
+   ```go
+   // internal/gateway/messages.go
+   type SessionContext struct {
+       Agent           string      // s.Agent (immutable)
+       Model           string      // s.Model() (cached at EventInit)
+       CumulativeUsage UsageInfo   // s.CumulativeUsage() snapshot under RLock
+   }
+   
+   type OutboundMessage struct {
+       // ... 既有字段 ...
+       SessionContext *SessionContext  // F-45: stamped on 4 main-chat kinds
+   }
+   ```
+
+3. **`UsageInfo` 包迁移**(`internal/gateway/messages.go` → `internal/agent/agent.go`):
+   - 消除 `chatsession → gateway` 反向 import
+   - `gateway/messages.go` 保留 `type UsageInfo = agent.UsageInfo` alias 保 ABI
+   - 顺手修 `UsageInfo.InputTokens` 注释:原 "total input tokens consumed ... (prompt + cache reads + tool input)" 误导(实现只搬运裸 `input_tokens`,不包含 cache reads);新注释明确 "non-cached input token count ... Cache hits are NOT included — see CacheReadInputTokens"
+
+4. **Footer 格式 (C 版,ASCII 箭头无 emoji)**:
+   ```
+   claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k · $0.087
+   ```
+   - `↓ in` = `InputTokens + CacheCreationInputTokens`(按原价/1.25x 计费部分)
+   - `↻ cached` = `CacheReadInputTokens`(按 0.1x 计费部分)
+   - `↑ out` = `OutputTokens`
+   - `Total` = 三者之和(4 个原始 token 字段全加:In + CacheCreate + CacheRead + Out)
+   - `$cost` 仅 `CostUSD > 0` 时显示
+   - 缩写 `<1000 raw` / `≥1k "X.Xk"` / `≥1M "X.XM"`
+   - 各 segment 在 0 / 空时省略(不显示 `0 in`)
+   - 分隔符 ` · ` (middle dot + spaces),与 F-37 / F-44 footer 视觉一致
+
+5. **Adapter 改 3 case**(其他 case 零改动):
+   - `OutReply` → `sendReplyInThreadAndChat(ctx, chatID, userMsgID, text, ctx *SessionContext)`:helper 内部拼 footer 到 text 末尾(`text + "\n\n" + footer`)
+   - `OutResult` → `sendResultAsReply(ctx, chatID, userMsgID, text, ctx *SessionContext)`:同模式
+   - `OutTaskCreate` / `OutTaskUpdate` → `buildReceiptCard(tasks, footer string)`:footer 作为 `hr + lark_md div` 追加到 checklist 末尾(占 2 元素,50 上限远未撞破)
+   - 新文件 `internal/channel/feishu/usage_footer.go`:`formatSessionFooter` + `abbrevTokens` helpers
+
+6. **`/new` 触发清零**:`handleNew` 在 `as.New(ctx)` 后立即 `as.ResetCumulative() + mgr.PersistAgentSession(as)`。与 F-43 的 `clear ResumeID` 语义对称:「bridge 重置上下文」+「runtime 重置累计」。
+
+**Stamping 规则**(runtime 决定,不在 Channel):
+
+```go
+// cmd/nightme/run.go::newEventHandler
+switch out.Kind {
+case gateway.OutReply, gateway.OutResult,
+    gateway.OutTaskCreate, gateway.OutTaskUpdate:
+    snap := s.CumulativeUsage()
+    if snap.InputTokens != 0 || snap.OutputTokens != 0 ||
+        snap.CacheReadInputTokens != 0 || snap.CostUSD != 0 ||
+        s.Model() != "" {
+        out.SessionContext = &gateway.SessionContext{
+            Agent:           s.Agent,        // immutable, 无锁
+            Model:           s.Model(),
+            CumulativeUsage: snap,
+        }
+    }
+}
+```
+
+**wire 形态对比**:
+
+| Kind | F-44 后 | F-45 后 |
+|---|---|---|
+| `OutReply` | 独立 `ReplyInThreadAndChat` | 独立 `ReplyInThreadAndChat` **+ text 末尾 footer** |
+| `OutResult` | 独立 `ReplyInThreadAndChat`(F-39) | 独立 `ReplyInThreadAndChat` **+ text 末尾 footer** |
+| `OutTaskCreate` / `OutTaskUpdate` | rolling-log receipt(仅 Tasks) | rolling-log receipt(Tasks **+ footer** as 2 元素) |
+| `OutInit` / `OutUsage` | silent drop | **silent drop(不变)**;footer 数据走 `SessionContext` 单独路径 |
+| `OutThinking` / `OutTool*` / `OutCompaction` / `OutCard` / `OutMessageState` / `OutCommandReply` | 不变 | **不变**(不 stamp SessionContext) |
+
+**架构不变式保留**:
+
+- `OutboundMessage` 100% typed(§1.4 不变;`SessionContext` 是 typed struct,不是 Meta 黑盒)
+- §1.3 ChatSession 不 import channel/feishu(不变)
+- §1.3 Channel 不 import chatsession(不变;Channel 通过 typed `SessionContext` 字段读 metadata,无 callback injection)
+- 1 turn : 1 anchor 不变式保留(`ReplyTo = currentTurnUserMsgID` 仍是唯一 coordination key;`SessionContext` 是 payload data,不是 coordination)
+- 抽象归抽象 / 具体归具体(footer 渲染细节由 Feishu adapter 自决,Slack / Web / Echo 各自决定;Echo 透传字段,`c.Record()` 可见)
+- bridges 协议零变化(仍发 `EventInit` / `EventUsage`,runtime 翻译)
+- OutboundKind 不增不减(`SessionContext` 是字段,不是新 Kind)
+- OutInit / OutUsage 仍是 silent drop(F-44 决策保留)
+- §1.4 边界规则保留(metadata 是 typed primitive,Channel 自决渲染目标)
+- F-25 / F-31 / F-37 / F-38 / F-39 / F-40 / F-42 / F-43 / F-44 全部决策**保持成立**
+
+**关键 trade-off 决策记录**:
+
+| 取舍 | 选择 | 理由 |
+|---|---|---|
+| 3 字段 vs 1 typed struct | **1 struct** (`SessionContext`) | wire 更紧凑;Channel 拿到 atomic snapshot;扩展新字段(agent_version 等)只改 struct 定义,不破 Channel 接口 |
+| Cumulative 持久化粒度 | turn-end (EventDone) | hot path 写入开销不可接受;`/kill` 写太迟;turn-end 是用户视角的"自然快照点",刚好与 `emitMessageStateForCurrentTurn` 对齐 |
+| Cumulative 清零范围 | **仅 `/new`** | 用户视角下"累计 token"是有价值历史信息;`/kill` 杀进程不清 token(`/kill` 是 process-cleanup,语义不重叠);daemon 重启是 lifecycle,不算用户主动 reset |
+| Footer 用 `↓ ↻ ↑` 箭头 vs emoji | **箭头** | 用户偏好简洁;ASCII 箭头不依赖 emoji 字体;middle dot 分隔符与 F-37 / F-44 footer 视觉一致 |
+| 累计写盘失败处理 | log warn, 不回滚 | 累计是 best-effort 累加;写盘失败只丢最近 turn 的增量,下次 turn 自动重新落盘;不阻塞 reply 路径 |
+| `Total` 字段存 vs derive | **derive** at render | 4 个原始字段已存 Total 是冗余;derive 一次成本可忽略;少一个字段 = 少一处可能不一致 |
+| footer 拼接到 `OutReply` 文末 vs 独立 reply | **文末** | footer 是 reply 的元数据,不是独立消息;独立 reply 会让视觉噪声翻倍;lark_md `\n\n` 换行足够分隔 |
+| `UsageInfo` 搬到 `agent` 包 | **搬** | 消除 `chatsession → gateway` 反向 import;`UsageInfo` 与 `UsageEvent` 语义同层;type alias 保 ABI |
+| `AgentSession.Model` vs `InitEvent.Model` 每事件重发 | **缓存一次** | Model 在 session lifecycle 内不变(直到 `/new`);缓存避免每个 turn 重新解析;runtime EventHandler 一次 capture,后续 O(1) 读 |
+
+**Backlog**(F-45 out of scope):
+- `/cost` slash command(读 cumulative 主动展示)
+- ChatSession-level 总计(pool 内所有 AgentSession 之和)
+- per-model breakdown(Anthropic `modelUsage` map 展开成 multi-line footer)
+- token 数据准确性改进(claudecode `result.usage` 是最后 LLM call 的 token 数,不是 turn-accurate)
+- `agent_version` / `provider_url` 等扩展字段(`SessionContext` 已预留扩展位置)
+
+**详细设计**:见 [`docs/feat/F-45-session-footer.md`](../feat/F-45-session-footer.md)。SPEC §0.12。
 
 ## 15. v1.3.x 实施计划
 

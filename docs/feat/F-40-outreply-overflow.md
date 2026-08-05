@@ -26,10 +26,10 @@ User msg → Receipt Card (单张,反复 PATCH)
    ├ 💬 💬 💬    OutText 流式 chunks (各 ≤ 600 字节)
    ├ ✅ done / ❌  EventDone / EventError 状态转换
    ├ task checklist (F-38)
-   └ <hr> + footer (agent · cwd · tokens)
+   └ <hr> + footer (agent · cwd · tokens)    [F-44 后: header/entries/footer/hr 全部删除;F-45 后: footer 改走 SessionContext typed field → 4 个 main-chat Kind 文末,详见 F-44 §13.21 + F-45 §13.22]
 
 User msg → Final Result Reply (F-39 独立 reply, 锚同 userMsgID)
-   └ 📝 完整 OutResult text
+   └ 📝 完整 OutResult text    [F-45 后: + formatSessionFooter 拼文末]
 ```
 
 `OutText` 是 agent **对** user 当前 turn 的 reply 主体(流式 chunks),由 `cmd/nightme/run.go::responder.Send` 在每次 `EventText` 时投递。但它名义叫"Text"——`text` 在 OutboundKind 体系里是最弱泛化的名字,跟 F-38 加 `OutTaskCreate / OutTaskUpdate`、F-39 加 OutResult 独立 reply 后,体系需要更准确的命名:

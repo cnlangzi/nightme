@@ -4,6 +4,8 @@
 > **Scope**: `internal/channel/feishu/{adapter,receipt_event,card_sanitize,result_render}.go` — `OutResult` 不再 fold 进 rolling-log receipt card,改为独立 reply 投递
 > **目的**: 消除 `OutResult → receipt.Append → 📝 Entry` 路径上的"长答复被 dedup 静默吞"问题;与 [cc-connect `platform/feishu/feishu.go::buildReplyContent`](https://github.com/chenhg5/cc-connect/blob/main/platform/feishu/feishu.go) + [openclaw-lark `card/builder.ts::buildCompleteCard`](https://github.com/larksuite/openclaw-lark/blob/main/src/card/builder.ts) 的"最终答复独立 surface"模式对齐
 > **Reverse**: [SPEC §13.3](../SPEC.md) §"OutResult 600 字节截断 → F-37 multi-div 拆解"、F-37 doc §0.1 §1.4 中"OutResult entry 走 receipt"假设
+>
+> **🟡 已演化（2026-08-05）**：F-39 落地后又被 F-44 / F-45 演化。F-44 §0.11 把 receipt card 进一步简化（只装 Tasks，删 entries / footer / hr sections），OutResult 独立 reply 不变但已不是 receipt fold 路径的"对立面" —— 它**已经不存在**。F-45 §13.22 给 OutResult 独立 reply 加 `formatSessionFooter` 拼文末。本文档视觉序列中的 "<hr> + footer" 描述已过时，详见 `F-44 §13.21` + `F-45 §13.22`。
 > **Related docs**:
 > - [docs/feat/F-25-rolling-log.md](./F-25-rolling-log.md) — receipt 整体 UX (F-39 后剥离 OutResult)
 > - [docs/feat/F-37-multi-div-content-split.md](./F-37-multi-div-content-split.md) — `splitMarkdownForDivs` 仍用于新 helper,不再服务于 receipt 内 OutResult

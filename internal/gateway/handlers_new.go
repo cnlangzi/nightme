@@ -47,7 +47,7 @@ func handleNew(ctx context.Context, mgr *chatsession.Manager, channel Channel,
 		}
 	}
 
-	matched, reset, _, err := cs.NewActiveAgentSessions(ctx, agentName)
+	matched, _, results, err := cs.NewActiveAgentSessions(ctx, agentName)
 
 	if matched == 0 {
 		if agentName != "" {
@@ -59,7 +59,7 @@ func handleNew(ctx context.Context, mgr *chatsession.Manager, channel Channel,
 			"No agent session in current workspace to reset. Send a message to start one."), nil
 	}
 
-	text := fmt.Sprintf("Reset %d/%d agent session(s).", reset, matched)
+	text := chatsession.FormatResetResults(results)
 	if err != nil {
 		text += fmt.Sprintf(" (errors: %v)", err)
 	}

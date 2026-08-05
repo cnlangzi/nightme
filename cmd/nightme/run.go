@@ -394,7 +394,7 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 		// F-31: ChatSession has accepted the message. Emit
 		// StateReceived synchronously so the channel can render
 		// ⏳ even before spawn resolves (FastAck UX).
-		cs.EmitMessageState(userMsgID, agent.StateReceived)
+		cs.EmitMessageState(userMsgID, agent.MessageReceived)
 
 		// Resolve active AgentSession (lazy spawn on miss).
 		_, err := cs.LookupActiveAgentSession()
@@ -429,7 +429,7 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 		// AgentSession. Emit StateForwarded so the channel flips
 		// ⏳ → 🔄. (Emitted before QueueUserMessage so the visual
 		// transition is visible even if queueing is slow.)
-		cs.EmitMessageState(userMsgID, agent.StateForwarded)
+		cs.EmitMessageState(userMsgID, agent.MessageForwarded)
 
 		// Build structured blocks and queue to InputBuffer.
 		// F-14 v1.4b: post rich-text messages arrive with

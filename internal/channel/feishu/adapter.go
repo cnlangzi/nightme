@@ -682,7 +682,7 @@ func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, 
 
 	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
 	transient.entries = []LogEntry{entry}
-	transient.state = StateExecuting
+	transient.promptStatus = agent.PromptRunning
 	transient.initializing = true // suppress renderLocked SendCard branch (see renderLocked docs)
 
 	// Register-before-SendCard. The lock-protected check-and-set
@@ -777,7 +777,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	copied := make([]agent.TaskItem, len(items))
 	copy(copied, items)
 	transient.tasks = copied
-	transient.state = StateExecuting
+	transient.promptStatus = agent.PromptRunning
 	transient.initializing = true
 
 	// Register-before-SendCard (see ensureReceiptForReply for the
@@ -838,7 +838,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		//   1. receiptFor failed (cold-start SendCard errored) →
 		//      top-level plain text bubble via sendRawOutText so
 		//      the user at least sees the reply.
-		//   2. Receipt is already StateCompleted (EventDone /
+		//   2. Receipt is already PromptSucceeded (EventDone /
 		//      EventError landed earlier) → late-arriving reply
 		//      must NOT be silently dropped; deliver as a
 		//      stand-alone ReplyInThreadAndChat.
@@ -942,48 +942,35 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		messageID := msg.MessageState.MessageID
 		state := msg.MessageState.State
 
-		// F-42: drop intermediate MessageState reactions
-		// (StateReceived ⏳ / StateForwarded 🔄). The Feishu
-		// adapter's other channels of feedback already cover the
-		// waiting signal:
+		// Terminal-state guard: once we've rendered MessageDone or
+		// MessageFailed for a userMsgID, no later MessageState can
+		// change the reaction. Feishu reactions are append-only, so
+		// without this guard a late EventDone arriving after
+		// EventError used to flip the user-message reaction from
+		// 👎 (failed) back to ✅ (done), contradicting the ❌ header
+		// that the receipt card already shows (see receipt.go
+		// promptHeaderLine for PromptFailed). This guard mirrors
+		// the receipt-side terminal protection in Append.
 		//
-		//   - F-37 thread-route: ToolStart/ToolEnd/Thinking
-		//     arrive in the user-message thread as soon as the
-		//     agent produces them.
-		//   - F-42 lazy receipt: the receipt card appears on
-		//     the first OutReply / OutTask* event.
-		//
-		// ⏳ (StateReceived) and 🔄 (StateForwarded) reactions
-		// are redundant in that context — they'd land on the
-		// user message before any visible activity and pile up
-		// (Feishu reactions are append-only). Terminal reactions
-		// (✅ StateDone / ❌ StateError) are kept because they
-		// provide an unambiguous completion signal even on
-		// short / no-tool turns. Other Channel implementations
-		// (Slack / Web) may still choose to render intermediate
-		// states; this is a Feishu-specific self-determination
-		// (SPEC §2.5 + docs/feat/F-42 §1.2).
-		if state == agent.StateReceived || state == agent.StateForwarded {
-			return nil
-		}
-
+		// Intermediate states (MessageReceived / MessageForwarded)
+		// are NOT terminal and continue to flow through normally;
+		// they restore the F-42 drop that left the user message
+		// reaction-less during the FastAck window (the gap between
+		// user message dispatch and first OutReply / OutTask*).
 		emoji := mapStateToFeishuEmoji(state)
 		if emoji == "" {
 			// Unknown state: silent drop (forward-compatible).
 			return nil
 		}
-		// Idempotency: skip if we already rendered this state for
-		// this userMsgID. Tracks last-rendered state to avoid
-		// duplicate AddReaction calls on retries.
-		//
-		// v1.3.1 fix: use the comma-ok form to distinguish "no
-		// entry yet" (first emit) from "previous state is
-		// StateReceived" (which is the zero value of MessageState
-		// and was incorrectly treated as "already rendered",
-		// silently dropping every first StateReceived emit).
+
 		a.mu.Lock()
 		prev, hasPrev := a.messageStates[messageID]
+		// Idempotency: same state twice → drop.
 		skip := hasPrev && prev == state
+		// Terminal guard: already in a terminal MessageState → drop.
+		if hasPrev && (prev == agent.MessageDone || prev == agent.MessageFailed) {
+			skip = true
+		}
 		if !skip {
 			a.messageStates[messageID] = state
 		}
@@ -1138,10 +1125,10 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		// F-39: deliver the full result as an independent reply anchored at
 		// userMsgID. We deliberately do NOT call receipt.SetCompleted here —
-		// the receipt stays StateExecuting so subsequent OutUsage / OutInit /
+		// the receipt stays PromptRunning so subsequent OutUsage / OutInit /
 		// TaskList can still update the footer (token counts, agent name,
 		// task checklist). EventDone / EventError is the terminal signal that
-		// flips state to StateCompleted and collapses the rolling log.
+		// flips state to PromptSucceeded and collapses the rolling log.
 		return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text)
 
 	case gateway.OutUsage:
@@ -1740,7 +1727,7 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 	// The evictOverflowLocked on the receipt side keeps entries
 	// within Feishu's 50-element limit; this is the second line of
 	// defence.
-	headerLine := r.state.headerLine(r)
+	headerLine := promptHeaderLine(r.promptStatus, r.completedAt)
 	elements := make([]map[string]any, 0, 3+len(r.entries))
 	if headerLine != "" {
 		elements = append(elements, map[string]any{
@@ -1819,7 +1806,7 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 		})
 	}
 
-	if note := r.state.footLine(r); note != "" {
+	if note := promptFootLine(r); note != "" {
 		elements = append(elements, map[string]any{"tag": "hr"})
 		// Footer styling matches the OpenClaw Lark plugin
 		// (openclaw-lark src/card/builder.ts::buildFooter):
@@ -1832,7 +1819,7 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 		//     a successful one. OpenClaw wraps the i18n
 		//     copies in red when isError is true.
 		footerContent := note
-		if r.state == StateError {
+		if r.promptStatus == agent.PromptFailed {
 			footerContent = "<font color='red'>" + note + "</font>"
 		}
 		elements = append(elements, map[string]any{
@@ -2031,17 +2018,26 @@ func (a *Adapter) SendMessageText(ctx context.Context, chatID, text, rootID stri
 // unicode) — passing unicode to the reaction API returns
 // 99992354 "data not found".
 //
+// Feishu's predefined emoji catalog does NOT include a literal
+// ❌ — the closest negative indicator is THUMBSDOWN (👎). The
+// receipt card's ❌ header is custom markdown and renders
+// independently, so user-message reaction and card header may
+// not pixel-match on failure turns; both unambiguously signal
+// "failed" (the receipt header carries an additional HH:MM:SS
+// timestamp for the precise moment). If Feishu later adds a
+// "Cross" predefined type to its catalog, switch to that here.
+//
 // Returns "" for unknown states (forward-compatible silent drop).
 func mapStateToFeishuEmoji(state agent.MessageState) string {
 	switch state {
-	case agent.StateReceived:
+	case agent.MessageReceived:
 		return "OneSecond" // ⏳
-	case agent.StateForwarded:
+	case agent.MessageForwarded:
 		return "OnIt" // 🔄
-	case agent.StateDone:
+	case agent.MessageDone:
 		return "DONE" // ✅
-	case agent.StateError:
-		return "THUMBSUP" // closest predefined indicator of "failed"
+	case agent.MessageFailed:
+		return "THUMBSDOWN" // 👎 — closest predefined "negative"
 	}
 	return ""
 }

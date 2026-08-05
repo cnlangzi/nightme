@@ -445,7 +445,7 @@ func TestAdapter_StopClosesIncoming(t *testing.T) {
 //
 // The pre-fix implementation routed by chatID via a.receipts[chatID],
 // which meant turn 2's events (after turn 1's receipt hit
-// StateCompleted) silently dropped inside receipt.Append. This test
+// agent.PromptSucceeded) silently dropped inside receipt.Append. This test
 // reproduces that path: turn 1 completes, turn 2 starts, and we
 // assert turn 2 cold-creates its own receipt.
 func TestSend_RoutesByUserMsgID_NotChatID(t *testing.T) {
@@ -482,7 +482,7 @@ func TestSend_RoutesByUserMsgID_NotChatID(t *testing.T) {
 	}
 	// Simulate turn 1 ending: receipt reaches terminal state.
 	rcpt1.mu.Lock()
-	rcpt1.state = StateCompleted
+	rcpt1.promptStatus = agent.PromptSucceeded
 	rcpt1.mu.Unlock()
 
 	// Reset PATCH counter so we only assert on turn 2's outgoing
@@ -520,7 +520,7 @@ func TestSend_RoutesByUserMsgID_NotChatID(t *testing.T) {
 
 	// After turn 1 was Completed, NO further PATCH may target
 	// rcpt1.cardMsgID. The pre-fix per-chat routing bug routed
-	// turn 2's events to rcpt1 (which had StateCompleted, so the
+	// turn 2's events to rcpt1 (which had agent.PromptSucceeded, so the
 	// PATCH was silently dropped inside receipt.Append — but the
 	// user would see nothing in turn 2's reply, only rcpt2 would
 	// show). Asserting "no PATCH on rcpt1.cardMsgID after turn 2
@@ -998,10 +998,10 @@ func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
 			t.Errorf("lazy-create card was threaded %d times, want 0", threadOnly)
 		}
 		// Sanity: the entry is already installed; the receipt is
-		// StateExecuting (the empty-waiting header would have
+		// agent.PromptRunning (the empty-waiting header would have
 		// been the bug we're fixing).
-		if r.State() != StateExecuting {
-			t.Errorf("lazy-create receipt state = %v, want StateExecuting", r.State())
+		if r.State() != agent.PromptRunning {
+			t.Errorf("lazy-create receipt state = %v, want agent.PromptRunning", r.State())
 		}
 		r.mu.Lock()
 		hasText := len(r.entries) == 1 && r.entries[0].Text == "hello world"
@@ -1722,10 +1722,10 @@ func TestSend_OutReply_OverflowQuantity_AsReply(t *testing.T) {
 }
 
 // TestSend_OutReply_AfterCompletion_AsReply — F-40 §1.5 late
-// reply. Once the receipt has reached StateCompleted (terminal),
+// reply. Once the receipt has reached agent.PromptSucceeded (terminal),
 // further OutReply events must be delivered as stand-alone
 // replies rather than silently dropped (which is what the old
-// Append path did when state == StateCompleted).
+// Append path did when state == agent.PromptSucceeded).
 func TestSend_OutReply_AfterCompletion_AsReply(t *testing.T) {
 	a := testAdapter(t)
 	userMsgID := "om_user_late"
@@ -1980,10 +1980,10 @@ func TestSend_OutResult_IsErrorPrefixedWithIcon(t *testing.T) {
 
 // TestSend_OutResult_LeavesReceiptAlive — F-39 follow-up: OutResult
 // delivers the answer card independently but does NOT call
-// receipt.SetCompleted. The receipt must remain in StateExecuting
+// receipt.SetCompleted. The receipt must remain in agent.PromptRunning
 // after OutResult so subsequent OutUsage / OutInit / TaskList can
 // still update the footer (token counts, agent name, task list).
-// EventDone is the terminal signal that flips state to StateCompleted.
+// EventDone is the terminal signal that flips state to agent.PromptSucceeded.
 func TestSend_OutResult_LeavesReceiptAlive(t *testing.T) {
 	a := testAdapter(t)
 	userMsgID := "om_complete"
@@ -2001,7 +2001,7 @@ func TestSend_OutResult_LeavesReceiptAlive(t *testing.T) {
 	}
 
 	// Send OutResult. The answer card goes out as an independent
-	// reply. The receipt stays in StateExecuting so EventUsage
+	// reply. The receipt stays in agent.PromptRunning so EventUsage
 	// / EventInit / TaskList can still update the footer after.
 	if err := a.Send(t.Context(), gateway.OutboundMessage{
 		Kind:    gateway.OutResult,
@@ -2013,18 +2013,18 @@ func TestSend_OutResult_LeavesReceiptAlive(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 
-	// Verify receipt is still alive (not StateCompleted).
+	// Verify receipt is still alive (not agent.PromptSucceeded).
 	a.mu.RLock()
 	rcpt := a.receiptsByUserMsgID[userMsgID]
 	a.mu.RUnlock()
 	if rcpt == nil {
 		t.Fatalf("receipt missing")
 	}
-	if rcpt.State() != StateExecuting {
-		t.Errorf("receipt state should remain StateExecuting after OutResult, got %v", rcpt.State())
+	if rcpt.State() != agent.PromptRunning {
+		t.Errorf("receipt state should remain agent.PromptRunning after OutResult, got %v", rcpt.State())
 	}
 
-	// Now simulate EventDone → receipt flips to StateCompleted
+	// Now simulate EventDone → receipt flips to agent.PromptSucceeded
 	// and clears the rolling-log entries (so the final card
 	// collapses to header + footer + task list).
 	if err := rcpt.Append(t.Context(), agent.AgentEvent{
@@ -2033,8 +2033,8 @@ func TestSend_OutResult_LeavesReceiptAlive(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("EventDone append: %v", err)
 	}
-	if rcpt.State() != StateCompleted {
-		t.Errorf("receipt state should be StateCompleted after EventDone, got %v", rcpt.State())
+	if rcpt.State() != agent.PromptSucceeded {
+		t.Errorf("receipt state should be agent.PromptSucceeded after EventDone, got %v", rcpt.State())
 	}
 	rcpt.mu.Lock()
 	defer rcpt.mu.Unlock()

@@ -113,16 +113,16 @@ func TestReceiptState_String(t *testing.T) {
 	now := parseTime(t, "2026-08-01T14:35:20+08:00")
 
 	cases := []struct {
-		state  ReceiptState
+		state  agent.PromptStatus
 		ts     timeParseResult
 		expect string
 	}{
-		{StateWaiting, zeroTime(), "⏳ 等待中"},
-		{StateExecuting, zeroTime(), ""},
+		{agent.PromptPending, zeroTime(), "⏳ 等待中"},
+		{agent.PromptRunning, zeroTime(), ""},
 	}
 	// First two don't need a receipt (zero time fallback).
 	for _, c := range cases {
-		got := c.state.headerLine(nil)
+		got := promptHeaderLine(c.state, time.Time{})
 		if got != c.expect {
 			t.Errorf("%v.String(nil) = %q, want %q", c.state, got, c.expect)
 		}
@@ -132,24 +132,24 @@ func TestReceiptState_String(t *testing.T) {
 	r := &MessageReceipt{
 		completedAt: now,
 	}
-	// Executing state is intentionally empty regardless of timestamps
-	// (no heartbeat display — see headerLine docs).
-	if got := StateExecuting.headerLine(r); got != "" {
-		t.Errorf("Executing with ts = %q, want ''", got)
+	// Running state is intentionally empty regardless of timestamps
+	// (no heartbeat display — see promptHeaderLine docs).
+	if got := promptHeaderLine(agent.PromptRunning, r.completedAt); got != "" {
+		t.Errorf("Running with ts = %q, want ''", got)
 	}
-	if got := StateCompleted.headerLine(r); got != "✅ 14:35:20" {
-		t.Errorf("Completed with ts = %q, want '✅ 14:35:20'", got)
+	if got := promptHeaderLine(agent.PromptSucceeded, r.completedAt); got != "✅ 14:35:20" {
+		t.Errorf("Succeeded with ts = %q, want '✅ 14:35:20'", got)
 	}
-	if got := StateError.headerLine(r); got != "❌ 14:35:20" {
-		t.Errorf("Error with ts = %q, want '❌ 14:35:20'", got)
+	if got := promptHeaderLine(agent.PromptFailed, r.completedAt); got != "❌ 14:35:20" {
+		t.Errorf("Failed with ts = %q, want '❌ 14:35:20'", got)
 	}
 	// Terminal fallback: no timestamp → bare emoji, never empty.
 	empty := &MessageReceipt{}
-	if got := StateCompleted.headerLine(empty); got != "✅" {
-		t.Errorf("Completed without ts = %q, want '✅'", got)
+	if got := promptHeaderLine(agent.PromptSucceeded, empty.completedAt); got != "✅" {
+		t.Errorf("Succeeded without ts = %q, want '✅'", got)
 	}
-	if got := StateError.headerLine(empty); got != "❌" {
-		t.Errorf("Error without ts = %q, want '❌'", got)
+	if got := promptHeaderLine(agent.PromptFailed, empty.completedAt); got != "❌" {
+		t.Errorf("Failed without ts = %q, want '❌'", got)
 	}
 }
 
@@ -177,30 +177,30 @@ func TestReceiptLifecycle_Renderings(t *testing.T) {
 	r := &MessageReceipt{}
 
 	// State 1: Waiting
-	if r.State() != StateWaiting {
-		t.Errorf("initial State = %v, want StateWaiting", r.State())
+	if r.State() != agent.PromptPending {
+		t.Errorf("initial State = %v, want agent.PromptPending", r.State())
 	}
-	if got := r.state.headerLine(r); got != "⏳ 等待中" {
-		t.Errorf("Waiting.String = %q", got)
-	}
-
-	// State 2: Executing — header is intentionally empty (no heartbeat).
-	r.state = StateExecuting
-	if got := r.state.headerLine(r); got != "" {
-		t.Errorf("Executing.String = %q, want '' (no heartbeat display)", got)
+	if got := promptHeaderLine(r.promptStatus, r.completedAt); got != "⏳ 等待中" {
+		t.Errorf("Pending.String = %q", got)
 	}
 
-	// State 3: Completed
-	r.state = StateCompleted
+	// State 2: Running — header is intentionally empty (no heartbeat).
+	r.promptStatus = agent.PromptRunning
+	if got := promptHeaderLine(r.promptStatus, r.completedAt); got != "" {
+		t.Errorf("Running.String = %q, want '' (no heartbeat display)", got)
+	}
+
+	// State 3: Succeeded
+	r.promptStatus = agent.PromptSucceeded
 	r.completedAt = parseTime(t, "2026-08-01T14:35:30+08:00")
-	if got := r.state.headerLine(r); got != "✅ 14:35:30" {
-		t.Errorf("Completed.String = %q, want '✅ 14:35:30'", got)
+	if got := promptHeaderLine(r.promptStatus, r.completedAt); got != "✅ 14:35:30" {
+		t.Errorf("Succeeded.String = %q, want '✅ 14:35:30'", got)
 	}
 
-	// State 4: Error — parallel terminal header with ❌ + timestamp
-	r.state = StateError
-	if got := r.state.headerLine(r); got != "❌ 14:35:30" {
-		t.Errorf("Error.String = %q, want '❌ 14:35:30'", got)
+	// State 4: Failed — parallel terminal header with ❌ + timestamp
+	r.promptStatus = agent.PromptFailed
+	if got := promptHeaderLine(r.promptStatus, r.completedAt); got != "❌ 14:35:30" {
+		t.Errorf("Failed.String = %q, want '❌ 14:35:30'", got)
 	}
 }
 
@@ -211,26 +211,26 @@ func TestReceiptStringContainsEmoji(t *testing.T) {
 	// the in-progress emoji is conveyed via the user-message reaction
 	// (managed by MessageState FSM), not the card header.
 	for _, c := range []struct {
-		state ReceiptState
+		state agent.PromptStatus
 		emoji string
 	}{
-		{StateWaiting, "⏳"},
-		{StateCompleted, "✅"},
-		{StateError, "❌"},
+		{agent.PromptPending, "⏳"},
+		{agent.PromptSucceeded, "✅"},
+		{agent.PromptFailed, "❌"},
 	} {
 		r := &MessageReceipt{
 			completedAt: parseTime(t, "2026-08-01T14:35:00+08:00"),
 		}
-		got := c.state.headerLine(r)
+		got := promptHeaderLine(c.state, r.completedAt)
 		if !strings.Contains(got, c.emoji) {
 			t.Errorf("%v string %q does not contain emoji %q", c.state, got, c.emoji)
 		}
 	}
 
-	// Executing header is empty.
+	// Running header is empty.
 	r := &MessageReceipt{}
-	if got := StateExecuting.headerLine(r); got != "" {
-		t.Errorf("Executing header = %q, want ''", got)
+	if got := promptHeaderLine(agent.PromptRunning, r.completedAt); got != "" {
+		t.Errorf("Running header = %q, want ''", got)
 	}
 }
 
@@ -346,10 +346,10 @@ func TestReceipt_FirstSendThenPatch(t *testing.T) {
 }
 
 // TestReceipt_Append_EventError_TransitionsToStateError guards the
-// pre-F-42+ bug where Append(EventError) set r.state = StateCompleted
-// instead of StateError, causing failed-turn cards to render the ✅
+// pre-F-42+ bug where Append(EventError) set r.state = agent.PromptSucceeded
+// instead of agent.PromptFailed, causing failed-turn cards to render the ✅
 // "completed" header instead of ❌. With the fix the terminal
-// transition goes to StateError, the header line picks up the ❌ +
+// transition goes to agent.PromptFailed, the header line picks up the ❌ +
 // timestamp rendering (per headerLine), and IsCompleted() returns
 // true (it accepts both terminal states).
 func TestReceipt_Append_EventError_TransitionsToStateError(t *testing.T) {
@@ -373,8 +373,8 @@ func TestReceipt_Append_EventError_TransitionsToStateError(t *testing.T) {
 		},
 	})
 
-	if got := r.State(); got != StateError {
-		t.Fatalf("State() after EventError = %v, want StateError (was the pre-fix bug returning StateCompleted)", got)
+	if got := r.State(); got != agent.PromptFailed {
+		t.Fatalf("State() after EventError = %v, want agent.PromptFailed (was the pre-fix bug returning agent.PromptSucceeded)", got)
 	}
 	if !r.IsCompleted() {
 		t.Errorf("IsCompleted() after EventError = false, want true")
@@ -385,7 +385,7 @@ func TestReceipt_Append_EventError_TransitionsToStateError(t *testing.T) {
 
 	// Header line must show ❌ + timestamp (the user's "in-the-loop"
 	// signal lives on the top row).
-	got := r.state.headerLine(r)
+	got := promptHeaderLine(r.promptStatus, r.completedAt)
 	if !strings.Contains(got, "❌") {
 		t.Errorf("headerLine = %q; want ❌ emoji", got)
 	}
@@ -413,13 +413,13 @@ func TestReceipt_Append_EventError_TransitionsToStateError(t *testing.T) {
 		t.Errorf("expected error entry to remain in entries; got %d entries without kind=error", entryCount)
 	}
 
-	// Late appends after StateError must still drop silently
-	// (parity with StateCompleted terminal).
+	// Late appends after agent.PromptFailed must still drop silently
+	// (parity with agent.PromptSucceeded terminal).
 	if err := r.Append(context.Background(), agent.AgentEvent{
 		Kind: agent.EventText,
 		Text: "late reply after error",
 	}); err != nil {
-		t.Errorf("Append after StateError returned err=%v; want nil (silent drop)", err)
+		t.Errorf("Append after agent.PromptFailed returned err=%v; want nil (silent drop)", err)
 	}
 }
 
@@ -554,7 +554,7 @@ func TestFootLine_Components(t *testing.T) {
 				inputTokens:  tc.inputTokens,
 				outputTokens: tc.outputTokens,
 			}
-			got := StateExecuting.footLine(r)
+			got := promptFootLine(r)
 			if got != tc.want {
 				t.Errorf("footLine = %q, want %q", got, tc.want)
 			}
@@ -653,7 +653,7 @@ func TestFootLine_TwoLineLayout(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := StateExecuting.footLine(tc.r)
+			got := promptFootLine(tc.r)
 			if got != tc.want {
 				t.Errorf("footLine = %q, want %q", got, tc.want)
 			}
@@ -664,10 +664,8 @@ func TestFootLine_TwoLineLayout(t *testing.T) {
 // TestFootLine_NilReceipt returns "" — pins the guard so a nil
 // receipt doesn't panic when buildReceiptCard calls footLine.
 func TestFootLine_NilReceipt(t *testing.T) {
-	for _, s := range []ReceiptState{StateWaiting, StateExecuting, StateCompleted, StateError} {
-		if got := s.footLine(nil); got != "" {
-			t.Errorf("%v.footLine(nil) = %q, want \"\"", s, got)
-		}
+	if got := promptFootLine(nil); got != "" {
+		t.Errorf("promptFootLine(nil) = %q, want \"\"", got)
 	}
 }
 
@@ -754,7 +752,7 @@ func TestFootLine_ColonsByDesign(t *testing.T) {
 		inputTokens:  32_000,
 		outputTokens: 101,
 	}
-	got := StateExecuting.footLine(r)
+	got := promptFootLine(r)
 	for _, want := range []string{"Agent: claude", "Workspace: /Users/devin/code/nightme", "GIT: main", "Tokens: 32K/101"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("footLine = %q missing %q", got, want)
@@ -780,7 +778,7 @@ func TestFootLine_ColonsByDesign(t *testing.T) {
 //     (not the v1 `tag:"div"` + `text:{tag:"lark_md",...}` shape)
 func TestBuildReceiptCard_Card2Shape(t *testing.T) {
 	r := &MessageReceipt{
-		state:        StateExecuting,
+		promptStatus:        agent.PromptRunning,
 		agentName:    "main",
 		workspace:    "/Users/foo/bar/repo",
 		branch:       "feat/receipt-card",
@@ -875,7 +873,7 @@ func TestBuildReceiptCard_Card2Shape(t *testing.T) {
 func TestBuildReceiptCard_LongReply_SplitMultiDiv(t *testing.T) {
 	longText := strings.Repeat("x", 2500)
 	r := &MessageReceipt{
-		state: StateExecuting,
+		promptStatus: agent.PromptRunning,
 		entries: []LogEntry{
 			{Icon: "💬", Text: longText, Kind: "reply"},
 		},
@@ -929,7 +927,7 @@ func TestBuildReceiptCard_LongReply_SplitMultiDiv(t *testing.T) {
 //     Card 2.0 footnote size (small, dim, well-separated
 //     from the rolling log body). OpenClaw applies this to
 //     the footer + reasoning panel + tool use panels.
-//  2. When the receipt state is StateError, the footer
+//  2. When the receipt state is agent.PromptFailed, the footer
 //     content is wrapped in <font color='red'>...</font>
 //     so a failed session's footer is visually distinct.
 //     OpenClaw's buildFooter wraps the i18n copies in red
@@ -938,7 +936,7 @@ func TestBuildReceiptCard_LongReply_SplitMultiDiv(t *testing.T) {
 func TestBuildReceiptCard_FooterOpenClawStyle(t *testing.T) {
 	t.Run("notation-text-size-on-normal-state", func(t *testing.T) {
 		r := &MessageReceipt{
-			state:     StateCompleted,
+			promptStatus:     agent.PromptSucceeded,
 			agentName: "claude",
 			workspace: "/Users/devin/code/nightme",
 			branch:    "main",
@@ -962,7 +960,7 @@ func TestBuildReceiptCard_FooterOpenClawStyle(t *testing.T) {
 
 	t.Run("red-color-on-error-state", func(t *testing.T) {
 		r := &MessageReceipt{
-			state:     StateError,
+			promptStatus:     agent.PromptFailed,
 			agentName: "claude",
 			workspace: "/Users/devin/code/nightme",
 			branch:    "main",
@@ -1001,7 +999,7 @@ func TestBuildReceiptCard_FooterOpenClawStyle(t *testing.T) {
 //  2. Only the reply entry is rendered into the card body.
 func TestBuildReceiptCard_ThinkingCollapsiblePanel(t *testing.T) {
 	r := &MessageReceipt{
-		state:        StateExecuting,
+		promptStatus:        agent.PromptRunning,
 		agentName:    "claude",
 		workspace:    "/Users/devin/code/nightme",
 		branch:       "main",
@@ -1057,24 +1055,24 @@ func TestBuildReceiptCard_ThinkingCollapsiblePanel(t *testing.T) {
 
 // TestAppend_EventDoneAfterStateError_DoesNotOverwrite guards
 // F-42 review finding #2. Pre-fix the EventDone handler's
-// `if r.state != StateCompleted` guard let a late EventDone
+// `if r.state != agent.PromptSucceeded` guard let a late EventDone
 // arrive AFTER EventError had already transitioned the receipt
-// to StateError, clobbering it back to StateCompleted and
+// to agent.PromptFailed, clobbering it back to agent.PromptSucceeded and
 // flipping the card header from ❌ back to ✅. The fix extends
-// the guard to also exclude StateError — both terminal states
+// the guard to also exclude agent.PromptFailed — both terminal states
 // are now sticky; a late EventDone is a no-op (idempotent
 // terminal).
 func TestAppend_EventDoneAfterStateError_DoesNotOverwrite(t *testing.T) {
 	bot := &mockReceiptBot{}
 	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
 
-	// Drive to StateError via EventError.
+	// Drive to agent.PromptFailed via EventError.
 	mustAppend(t, r, agent.AgentEvent{
 		Kind: agent.EventError,
 		Error: &agent.ErrorEvent{Err: errors.New("bridge crashed")},
 	})
-	if r.State() != StateError {
-		t.Fatalf("setup: State() after EventError = %v, want StateError", r.State())
+	if r.State() != agent.PromptFailed {
+		t.Fatalf("setup: State() after EventError = %v, want agent.PromptFailed", r.State())
 	}
 	completedAtBefore := r.completedAt
 
@@ -1084,8 +1082,8 @@ func TestAppend_EventDoneAfterStateError_DoesNotOverwrite(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("late EventDone: %v", err)
 	}
-	if r.State() != StateError {
-		t.Errorf("State() after late EventDone = %v, want StateError (post-fix)", r.State())
+	if r.State() != agent.PromptFailed {
+		t.Errorf("State() after late EventDone = %v, want agent.PromptFailed (post-fix)", r.State())
 	}
 	if !r.completedAt.Equal(completedAtBefore) {
 		t.Errorf("completedAt changed after late EventDone; want unchanged")
@@ -1093,23 +1091,23 @@ func TestAppend_EventDoneAfterStateError_DoesNotOverwrite(t *testing.T) {
 
 	// And the header line should still render ❌ + the original
 	// timestamp, not ✅ + a fresh one.
-	got := r.state.headerLine(r)
+	got := promptHeaderLine(r.promptStatus, r.completedAt)
 	if !strings.Contains(got, "❌") {
 		t.Errorf("headerLine = %q; want ❌ preserved after late EventDone", got)
 	}
 	if strings.Contains(got, "✅") {
-		t.Errorf("headerLine = %q; must NOT contain ✅ after late EventDone on StateError", got)
+		t.Errorf("headerLine = %q; must NOT contain ✅ after late EventDone on agent.PromptFailed", got)
 	}
 }
 
 // TestAppend_NonTerminalAfterStateError_IsDropped guards F-42
 // review finding #3. Pre-fix the early-return guard was
-// `if r.state == StateCompleted` only — a late non-terminal
+// `if r.state == agent.PromptSucceeded` only — a late non-terminal
 // event (e.g. a stray EventText reply from a misbehaving bridge)
-// after StateError would proceed through eventToEntry →
+// after agent.PromptFailed would proceed through eventToEntry →
 // appendEntryLocked → renderLocked and PATCH the error card
 // with fresh in-progress content, clobbering the ❌ header.
-// The fix adds StateError to the terminal-state short-circuit.
+// The fix adds agent.PromptFailed to the terminal-state short-circuit.
 func TestAppend_NonTerminalAfterStateError_IsDropped(t *testing.T) {
 	bot := &mockReceiptBot{}
 	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_initial", bot)
@@ -1121,7 +1119,7 @@ func TestAppend_NonTerminalAfterStateError_IsDropped(t *testing.T) {
 		Text: "halfway text",
 	})
 
-	// Drive to StateError.
+	// Drive to agent.PromptFailed.
 	mustAppend(t, r, agent.AgentEvent{
 		Kind: agent.EventError,
 		Error: &agent.ErrorEvent{Err: errors.New("oops")},
@@ -1137,7 +1135,7 @@ func TestAppend_NonTerminalAfterStateError_IsDropped(t *testing.T) {
 		Kind: agent.EventText,
 		Text: "late reply after error — must be dropped",
 	}); err != nil {
-		t.Fatalf("late EventText after StateError: %v", err)
+		t.Fatalf("late EventText after agent.PromptFailed: %v", err)
 	}
 
 	// No new PATCH should have been issued (terminal guard drops
@@ -1146,15 +1144,15 @@ func TestAppend_NonTerminalAfterStateError_IsDropped(t *testing.T) {
 	patchesAfter := len(bot.patches)
 	bot.mu.Unlock()
 	if patchesAfter != patchesBefore {
-		t.Errorf("PATCH count changed after late EventText on StateError: before=%d after=%d (terminal guard should drop the render)",
+		t.Errorf("PATCH count changed after late EventText on agent.PromptFailed: before=%d after=%d (terminal guard should drop the render)",
 			patchesBefore, patchesAfter)
 	}
 
 	// Header still ❌, error entry still present, no "late reply"
 	// entry.
-	got := r.state.headerLine(r)
+	got := promptHeaderLine(r.promptStatus, r.completedAt)
 	if !strings.Contains(got, "❌") {
-		t.Errorf("headerLine = %q; want ❌ preserved after late EventText on StateError", got)
+		t.Errorf("headerLine = %q; want ❌ preserved after late EventText on agent.PromptFailed", got)
 	}
 
 	r.mu.Lock()
@@ -1167,7 +1165,7 @@ func TestAppend_NonTerminalAfterStateError_IsDropped(t *testing.T) {
 	}
 	r.mu.Unlock()
 	if hasLate {
-		t.Errorf("late EventText after StateError added an entry; terminal guard should drop the event entirely (no entry, no PATCH)")
+		t.Errorf("late EventText after agent.PromptFailed added an entry; terminal guard should drop the event entirely (no entry, no PATCH)")
 	}
 }
 
@@ -1195,7 +1193,7 @@ func (m *mockReceiptBot) UpdateMessage(_ context.Context, _, _ string) error {
 
 func TestBuildReceiptCard_ToolFolded(t *testing.T) {
 	r := &MessageReceipt{
-		state: StateExecuting,
+		promptStatus: agent.PromptRunning,
 		entries: []LogEntry{
 			{Icon: "🔧", Text: "Read(/a.py)", Kind: "tool"},
 			{Icon: "✅", Text: "Read → 47 lines", Kind: "tool"},
@@ -1230,7 +1228,7 @@ func TestBuildReceiptCard_LongEntryMultiDivs(t *testing.T) {
 	para2 := strings.Repeat("b", 1000)
 	text := para1 + "\n\n" + para2
 	r := &MessageReceipt{
-		state: StateCompleted,
+		promptStatus: agent.PromptSucceeded,
 		entries: []LogEntry{
 			{Icon: "📝", Text: text, Kind: "result"},
 		},
@@ -1278,7 +1276,7 @@ func decodeReceiptElements(t *testing.T, body string) []map[string]any {
 // (no unnecessary splitting).
 func TestBuildReceiptCard_ShortEntryStaysSingle(t *testing.T) {
 	r := &MessageReceipt{
-		state: StateExecuting,
+		promptStatus: agent.PromptRunning,
 		entries: []LogEntry{
 			{Icon: "💬", Text: "Short reply under 1000 chars.", Kind: "reply"},
 		},
@@ -1301,7 +1299,7 @@ func TestBuildReceiptCard_HugeEntryStaysBounded(t *testing.T) {
 	// 8000 chars, no paragraph breaks (so it splits via hardSplit at rune boundary)
 	text := strings.Repeat("x", 8000)
 	r := &MessageReceipt{
-		state: StateCompleted,
+		promptStatus: agent.PromptSucceeded,
 		entries: []LogEntry{
 			{Icon: "📝", Text: text, Kind: "result"},
 		},
@@ -1325,7 +1323,7 @@ func TestBuildReceiptCard_HugeEntryStaysBounded(t *testing.T) {
 // even when entries are split (they're not part of the splitter).
 func TestBuildReceiptCard_HeaderFooterRespected(t *testing.T) {
 	r := &MessageReceipt{
-		state:     StateCompleted,
+		promptStatus:     agent.PromptSucceeded,
 		evicted:   2,
 		agentName: "claude",
 		workspace: "/code/repo",
@@ -1362,13 +1360,13 @@ func TestBuildReceiptCard_HeaderFooterRespected(t *testing.T) {
 // (origin/main) where thinking/tool entries WERE rendered with
 // collapsible_panel + multi-div split. On the F-37 thread-route
 // branch they are filtered out entirely, so we flip the
-// assertion: 1 markdown element (the StateExecuting header
+// assertion: 1 markdown element (the agent.PromptRunning header
 // line) but NO entry content + NO collapsible_panel. The
 // multi-div split machinery is exercised by the OutReply /
 // OutResult long-content path instead — see F-37 §3.4.
 func TestBuildReceiptCard_ThinkingEntry_NotRendered(t *testing.T) {
 	r := &MessageReceipt{
-		state: StateExecuting,
+		promptStatus: agent.PromptRunning,
 		entries: []LogEntry{
 			{Icon: "💭", Text: strings.Repeat("thinking...", 250), Kind: "thinking"}, // ~2750 chars
 		},
@@ -1398,7 +1396,7 @@ func TestBuildReceiptCard_ThinkingEntry_NotRendered(t *testing.T) {
 // focused on the receipt card's final answer.
 func TestBuildReceiptCard_ToolEntry_NotRendered(t *testing.T) {
 	r := &MessageReceipt{
-		state: StateExecuting,
+		promptStatus: agent.PromptRunning,
 		entries: []LogEntry{
 			{Icon: "🔧", Text: "Read(/a.py) " + strings.Repeat("x", 1100), Kind: "tool"},
 		},

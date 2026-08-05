@@ -354,6 +354,55 @@ type OutboundMessage struct {
 	// ReplyTo carries the channel-native root message id when the
 	// agent wants to reply in a thread.
 	ReplyTo string
+
+	// SessionContext (F-45) is the runtime-stamped snapshot of the
+	// AgentSession that produced this outbound event. It carries
+	// everything the main-chat footer needs (Agent / Model /
+	// CumulativeUsage) as a single atomic value — not three
+	// scattered fields — so Channel render paths see one typed
+	// payload and future metadata additions don't break the
+	// Channel interface.
+	//
+	// Stamped ONLY on OutReply / OutResult / OutTaskCreate /
+	// OutTaskUpdate by the runtime's newEventHandler closure. nil
+	// on every other Kind (thread-only, lifecycle, init/usage
+	// payloads themselves) — Channel skips footer rendering when
+	// nil.
+	//
+	// Bridges never populate this field directly; runtime is the
+	// single owner. See docs/feat/F-45-session-footer.md §1.3.
+	SessionContext *SessionContext
+}
+
+// SessionContext is the runtime-stamped AgentSession snapshot
+// delivered alongside main-chat OutboundMessages for footer
+// rendering. Populated by the runtime's newEventHandler closure
+// (not by bridges) and read by Channel adapters to compose the
+// footer line on each reply / result / task receipt.
+//
+// Field semantics:
+//
+//	Agent           — registry name of the agent that produced this
+//	                  event (e.g. "claude", "codex"). Sourced from
+//	                  AgentSession.Agent (immutable, no lock).
+//	Model           — model the agent selected (e.g.
+//	                  "claude-opus-4-5-20250929"). Sourced from
+//	                  AgentSession.Model which the runtime caches
+//	                  on first EventInit. Empty before EventInit
+//	                  lands; footer omits the segment when "".
+//	CumulativeUsage — per-AgentSession running total of token /
+//	                  cost stats as of this event's emission.
+//	                  Sourced from AgentSession.CumulativeUsage;
+//	                  captured by VALUE (struct copy under RWMutex)
+//	                  so Channel can render at leisure. All 4
+//	                  fields are zero on a fresh /new'd session.
+//	                  Total = In + CacheCreate + CacheRead + Out
+//	                  is derived at render time; no Total field
+//	                  on the wire (avoids redundancy).
+type SessionContext struct {
+	Agent           string
+	Model           string
+	CumulativeUsage UsageInfo
 }
 
 // ToolInfo is the typed payload for OutboundMessage.Tool,
@@ -428,29 +477,18 @@ type MessageStatePayload struct {
 	Emoji string
 }
 
-// UsageInfo is the OutboundMessage payload for OutUsage. It is
-// the typed transport for the token / cost counts that v0.2
-// carried in Meta["input_tokens"] / ["output_tokens"] /
-// ["cache_creation_input_tokens"] / ["cache_read_input_tokens"] /
-// ["cost_usd"]; channels read from this typed field directly.
-// Replaces the implicit Meta protocol (removed in §1.4 cleanup).
-type UsageInfo struct {
-	// InputTokens is the total input tokens consumed across the
-	// turn (prompt + cache reads + tool input).
-	InputTokens int
-	// OutputTokens is the total output tokens generated.
-	OutputTokens int
-	// CacheCreationInputTokens is the subset of input tokens
-	// that landed in a new cache entry (cache write).
-	CacheCreationInputTokens int
-	// CacheReadInputTokens is the subset of input tokens that hit
-	// an existing cache entry (cache read).
-	CacheReadInputTokens int
-	// CostUSD is the dollar cost of the turn as reported by the
-	// bridge (claudecode: result.total_cost_usd; other bridges
-	// may compute from model pricing).
-	CostUSD float64
-}
+// UsageInfo is the typed payload for OutUsage and the
+// SessionContext.CumulativeUsage field. See agent.UsageInfo for
+// field semantics. Re-exported as a type alias here so existing
+// gateway code (translate.go:158) keeps the same symbol name; the
+// canonical definition lives in internal/agent (F-45 §2.1).
+//
+// (F-45): the comment block that used to live here was removed
+// when the type moved to agent.UsageInfo. Old "InputTokens is the
+// total input tokens ... (prompt + cache reads + tool input)" was
+// misleading — InputTokens is the non-cached input count, NOT the
+// sum with cache reads. Cache hits live in CacheReadInputTokens.
+type UsageInfo = agent.UsageInfo
 
 // AgentEventEnvelope carries the agent-side metadata alongside an
 // OutboundMessage so Channels can correlate updates (e.g., Feishu's

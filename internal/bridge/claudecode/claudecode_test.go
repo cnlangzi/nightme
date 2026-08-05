@@ -269,13 +269,14 @@ func TestPumpStream_AskUserQuestion(t *testing.T) {
 
 func TestPumpStream_Result(t *testing.T) {
 	// result.json fixture carries result/usage/duration_ms/subtype.
-	// Expect three events in order: EventResult (final reply) →
-	// EventUsage (token usage) → EventDone (terminal).
+	// Co-located usage design: a single EventResult with Usage
+	// attached to ResultEvent, then EventDone. The legacy
+	// EventResult + EventUsage pair no longer exists.
 	evs := streamFromFixture(t, "result.json", nil)
-	if len(evs) != 3 {
-		t.Fatalf("got %d events, want 3 (Result + Usage + Done)", len(evs))
+	if len(evs) != 2 {
+		t.Fatalf("got %d events, want 2 (Result with co-located Usage + Done)", len(evs))
 	}
-	// EventResult
+	// EventResult — carries Text, DurationMs, Subtype, AND Usage.
 	if evs[0].Kind != agent.EventResult {
 		t.Errorf("evs[0].Kind = %v, want EventResult", evs[0].Kind)
 	}
@@ -291,35 +292,33 @@ func TestPumpStream_Result(t *testing.T) {
 	if evs[0].Result.IsError {
 		t.Error("IsError = true, want false")
 	}
-	// EventUsage
-	if evs[1].Kind != agent.EventUsage {
-		t.Errorf("evs[1].Kind = %v, want EventUsage", evs[1].Kind)
+	// Usage is now on the same ResultEvent (not a separate event).
+	if evs[0].Result.Usage == nil {
+		t.Fatal("ResultEvent.Usage is nil; bridge should populate from result.usage")
 	}
-	if evs[1].Usage == nil {
-		t.Fatal("Usage payload is nil")
+	if evs[0].Result.Usage.InputTokens != 100 {
+		t.Errorf("InputTokens = %d, want 100", evs[0].Result.Usage.InputTokens)
 	}
-	if evs[1].Usage.InputTokens != 100 {
-		t.Errorf("InputTokens = %d, want 100", evs[1].Usage.InputTokens)
+	if evs[0].Result.Usage.OutputTokens != 200 {
+		t.Errorf("OutputTokens = %d, want 200", evs[0].Result.Usage.OutputTokens)
 	}
-	if evs[1].Usage.OutputTokens != 200 {
-		t.Errorf("OutputTokens = %d, want 200", evs[1].Usage.OutputTokens)
-	}
-	if evs[1].Usage.CostUSD != 0.001 {
-		t.Errorf("CostUSD = %f, want 0.001", evs[1].Usage.CostUSD)
+	if evs[0].Result.Usage.CostUSD != 0.001 {
+		t.Errorf("CostUSD = %f, want 0.001", evs[0].Result.Usage.CostUSD)
 	}
 	// EventDone
-	if evs[2].Kind != agent.EventDone {
-		t.Errorf("evs[2].Kind = %v, want EventDone", evs[2].Kind)
+	if evs[1].Kind != agent.EventDone {
+		t.Errorf("evs[1].Kind = %v, want EventDone", evs[1].Kind)
 	}
-	if evs[2].Done == nil || evs[2].Done.ExitCode != 0 {
-		t.Errorf("done = %+v, want ExitCode 0", evs[2].Done)
+	if evs[1].Done == nil || evs[1].Done.ExitCode != 0 {
+		t.Errorf("done = %+v, want ExitCode 0", evs[1].Done)
 	}
 }
 
 func TestPumpStream_Result_EmptyText_NoResultEvent(t *testing.T) {
-	// When the result has no text AND is_error=false, EventResult is
-	// dropped (nothing to surface). EventUsage + EventDone still fire
-	// if usage is present.
+	// When the result has no text AND is_error=false, the entire
+	// result branch is dropped (text + usage are useless). Only
+	// EventDone fires. Previously we emitted EventUsage + Done;
+	// now usage is co-located so it goes with the dropped Result.
 	input := `{"type":"result","subtype":"success","usage":{"input_tokens":50,"output_tokens":25},"session_id":"s_test_001"}` + "\n"
 	events := make(chan agent.AgentEvent, 4)
 	var wg sync.WaitGroup
@@ -333,20 +332,18 @@ func TestPumpStream_Result_EmptyText_NoResultEvent(t *testing.T) {
 	for ev := range events {
 		got = append(got, ev)
 	}
-	if len(got) != 2 {
-		t.Fatalf("got %d events, want 2 (Usage + Done, no Result)", len(got))
+	if len(got) != 1 {
+		t.Fatalf("got %d events, want 1 (Done only — text empty so Result dropped)", len(got))
 	}
-	if got[0].Kind != agent.EventUsage {
-		t.Errorf("got[0].Kind = %v, want EventUsage", got[0].Kind)
-	}
-	if got[1].Kind != agent.EventDone {
-		t.Errorf("got[1].Kind = %v, want EventDone", got[1].Kind)
+	if got[0].Kind != agent.EventDone {
+		t.Errorf("got[0].Kind = %v, want EventDone", got[0].Kind)
 	}
 }
 
-func TestPumpStream_Result_EmptyUsage_NoUsageEvent(t *testing.T) {
-	// When usage is absent / all-zero, EventUsage is dropped (nothing
-	// meaningful to surface). EventResult + EventDone still fire.
+func TestPumpStream_Result_NoUsagePayload(t *testing.T) {
+	// When usage is absent on the wire, ResultEvent.Usage stays
+	// nil and runtime's AccumulateUsage skips that turn. Result +
+	// Done still fire.
 	input := `{"type":"result","subtype":"success","result":"done","session_id":"s_test_001"}` + "\n"
 	events := make(chan agent.AgentEvent, 4)
 	var wg sync.WaitGroup
@@ -361,10 +358,13 @@ func TestPumpStream_Result_EmptyUsage_NoUsageEvent(t *testing.T) {
 		got = append(got, ev)
 	}
 	if len(got) != 2 {
-		t.Fatalf("got %d events, want 2 (Result + Done, no Usage)", len(got))
+		t.Fatalf("got %d events, want 2 (Result + Done)", len(got))
 	}
 	if got[0].Kind != agent.EventResult {
 		t.Errorf("got[0].Kind = %v, want EventResult", got[0].Kind)
+	}
+	if got[0].Result.Usage != nil {
+		t.Errorf("ResultEvent.Usage = %+v, want nil (no usage on the wire)", got[0].Result.Usage)
 	}
 	if got[1].Kind != agent.EventDone {
 		t.Errorf("got[1].Kind = %v, want EventDone", got[1].Kind)

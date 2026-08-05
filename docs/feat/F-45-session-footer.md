@@ -530,6 +530,8 @@ if ev.Kind == agent.EventDone {
 }
 ```
 
+**改动 E**：（已废弃）早期的 OutResult 缓冲机制。后续 bridge 重构把 Usage 合并到 ResultEvent 之后不再需要 —— 见 §2.5 changelog 末尾的 "single-event design" 注释。
+
 ### 2.6 `internal/gateway/handlers_chatsession.go::handleNew`
 
 **改动**：在调 `agentSession.New(ctx)` 之后立即清零：

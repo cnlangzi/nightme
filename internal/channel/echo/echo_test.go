@@ -115,7 +115,6 @@ func TestEcho_AutoHandlesNewKinds(t *testing.T) {
 		want string // substring expected in the writer output
 	}{
 		{gateway.OutResult, "完成", "echo: result"},
-		{gateway.OutUsage, "1.2k tokens", "echo: usage"},
 		{gateway.OutCompaction, "✶ Compacting conversation…", "echo: compaction"},
 		{gateway.OutInit, "session initialized", "echo: init"},
 	}

@@ -762,7 +762,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(nil, nil, "")
+	body, err := buildReceiptCard(nil, nil, nil)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -844,13 +844,13 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 // instead of issuing a second SendCard, so the loser doesn't leave
 // an orphan card in chat with a stale entry / task snapshot.
 func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, firstEntryText string) (*MessageReceipt, bool, error) {
-	return a.ensureReceiptForReplyWithFooter(ctx, chatID, userMsgID, firstEntryText, "")
+	return a.ensureReceiptForReplyWithFooter(ctx, chatID, userMsgID, firstEntryText, nil)
 }
 
 // ensureReceiptForReplyWithFooter (F-45) is the same as
 // ensureReceiptForReply but stamps the SessionContext footer at
 // cold-start so the very first chunk carries cumulative stats.
-func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, userMsgID, firstEntryText, footer string) (*MessageReceipt, bool, error) {
+func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, userMsgID, firstEntryText string, footerLines []string) (*MessageReceipt, bool, error) {
 	if userMsgID == "" {
 		return nil, false, errors.New("feishu: ensureReceiptForReply requires userMsgID")
 	}
@@ -862,7 +862,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	transient.entries = []LogEntry{
 		{Icon: "💬", Text: firstEntryText},
 	}
-	transient.footer = footer
+	transient.footerLines = footerLines
 	transient.promptState = agent.PromptRunning
 	transient.initializing = true
 
@@ -876,7 +876,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(transient.entries, transient.tasks, transient.footer)
+	body, err := buildReceiptCard(transient.entries, transient.tasks, transient.footerLines)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -956,7 +956,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 // visible in main chat. Subsequent PATCHes (SetTaskList →
 // PatchMessage) preserve the no-anchor state since PATCH on a
 // top-level Create stays top-level (root_id inheritance).
-func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID string, list *agent.TaskListEvent, footer string) (*MessageReceipt, bool, error) {
+func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID string, list *agent.TaskListEvent, footerLines []string) (*MessageReceipt, bool, error) {
 	if userMsgID == "" {
 		return nil, false, errors.New("feishu: ensureReceiptForTask requires userMsgID")
 	}
@@ -972,7 +972,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	copied := make([]agent.TaskItem, len(items))
 	copy(copied, items)
 	transient.tasks = copied
-	transient.footer = footer // F-45: footer captured at cold-start
+	transient.footerLines = footerLines // F-45: footer captured at cold-start
 	transient.promptState = agent.PromptRunning
 	transient.initializing = true
 
@@ -986,7 +986,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(nil, transient.tasks, transient.footer)
+	body, err := buildReceiptCard(nil, transient.tasks, transient.footerLines)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -1061,36 +1061,51 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if text == "" {
 			return nil
 		}
-		// F-45 §2.8: append SessionContext footer to the chunk
-		// body so each entry shows cumulative stats as of this
-		// chunk's arrival. Combining into the entry text (vs
-		// adding a separate element) keeps the 50 element
-		// receipt budget intact — long turns stay under cap.
-		// footer may be "" when no SessionContext stamped.
-		footer := formatSessionFooter(msg.SessionContext)
-		if footer != "" {
-			text = text + "\n\n" + footer
-		}
+		// F-45 §2.8: footer rendering strategy depends on the
+		// dispatch path:
+		//   - Receipt path (msg.ReplyTo != ""): the receipt card
+		//     IS the main-chat message — the footer appears ONCE
+		//     at the bottom of the card (Section 3 in
+		//     buildReceiptCard). We pass footer to the receipt,
+		//     NOT into the entry text, so N chunks render ONE
+		//     footer at the card bottom instead of N+1 copies
+		//     (one per entry + one final). Without this,
+		//     receipts with several chunks grow visually
+		//     cluttered and the PATCH diff grows on every render.
+		//   - Orphan / overflow path (no userMsgID or
+		//     ErrReceiptOverflow): the chunk escapes to a fresh
+		//     top-level Create via sendReplyInThreadAndChat —
+		//     no receipt to host the footer, so append to text.
+		// F-45 footer rendering:
+		//   - Receipt path: pass per-line footerLines to receipt
+		//     (card renders ONE footer at the bottom via div +
+		//     one plain_text per line). N chunks render ONE
+		//     footer, not N+1.
+		//   - Orphan / overflow path: append joined string form
+		//     to text (top-level message has no receipt to host
+		//     the footer).
+		footerLines := formatSessionFooterLines(msg.SessionContext)
+		footerText := formatSessionFooter(msg.SessionContext)
 		if msg.ReplyTo == "" {
-			return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", text)
+			return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", appendFooterToText(text, footerText))
 		}
 		// Cold-start: if no receipt exists for this userMsgID,
 		// create one with the first entry already installed.
 		// ensureReceiptForReply sends the card via top-level Create
 		// (rootID=""); subsequent chunks PATCH the same card.
-		receipt, created, err := a.ensureReceiptForReplyWithFooter(ctx, msg.ChatID, msg.ReplyTo, text, footer)
+		receipt, created, err := a.ensureReceiptForReplyWithFooter(ctx, msg.ChatID, msg.ReplyTo, text, footerLines)
 		if err != nil {
 			// Cold-start failed (SendCard error). Fall back to
 			// top-level Create so the user still sees the chunk.
-			return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", text)
+			return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", appendFooterToText(text, footerText))
 		}
 		if !created {
 			// Receipt exists. Try to append; if the would-be card
 			// would exceed 50 elements / 30 KB envelope, bail out
 			// to a fresh top-level Create.
-			if err := receipt.AppendEntryWithFooter(ctx, LogEntry{Icon: "💬", Text: text}, footer); err != nil {
+			if err := receipt.AppendEntryWithFooter(ctx, LogEntry{Icon: "💬", Text: text}, footerLines); err != nil {
 				if errors.Is(err, ErrReceiptOverflow) {
-					return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", text)
+					return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", appendFooterToText(text, footerText))
 				}
 				return err
 			}
@@ -1373,15 +1388,6 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// reply_in_thread field, no parent/thread relationship.
 		return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text)
 
-	case gateway.OutUsage:
-		// F-44: silent drop. Footer design (per-reply footer with
-		// Agent · Model · Tokens · Cost) is deferred to a follow-up
-		// PR — see docs/feat/F-44-outreply-independent-and-task-receipt.md
-		// §6.1. The Translate path still produces
-		// OutboundMessage{Usage} so the footer PR has the data on
-		// hand; only the channel-side render is skipped here.
-		return nil
-
 	case gateway.OutCompaction:
 		// Compaction marker is a one-shot, low-frequency event
 		// (not a stream like tool calls). Per ops decision
@@ -1450,7 +1456,13 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if msg.TaskList == nil {
 			return errors.New("feishu: OutTask*/TaskList payload is nil")
 		}
-		receipt, created, err := a.ensureReceiptForTask(ctx, msg.ChatID, msg.ReplyTo, msg.TaskList, formatSessionFooter(msg.SessionContext))
+		// F-45: render SessionContext footer once (as per-line
+		// slice for the receipt card rendering) and reuse for
+		// both the cold-start and steady-state paths. Avoids
+		// recomputing formatSessionFooterLines on every task
+		// update.
+		footerLines := formatSessionFooterLines(msg.SessionContext)
+		receipt, created, err := a.ensureReceiptForTask(ctx, msg.ChatID, msg.ReplyTo, msg.TaskList, footerLines)
 		if err != nil {
 			// SendCard failed — degrade gracefully so the user
 			// still sees the checklist as a standalone text
@@ -1460,7 +1472,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if !created {
 			// Receipt already exists (race or a previous OutReply
 			// created it). Push the snapshot via SetTaskList.
-			return receipt.SetTaskListWithFooter(ctx, msg.TaskList, formatSessionFooter(msg.SessionContext))
+			return receipt.SetTaskListWithFooter(ctx, msg.TaskList, footerLines)
 		}
 		// created=true — tasks already installed by ensure;
 		// first card already shipped.
@@ -1972,7 +1984,7 @@ func encodeCardJSON(v any) ([]byte, error) {
 // warning) — AppendEntry needs to build a hypothetical card body
 // to check the overflow budget, but doing so via a struct copy
 // would silently bypass the lock semantics.
-func buildReceiptCard(entries []LogEntry, tasks []agent.TaskItem, footer string) (string, error) {
+func buildReceiptCard(entries []LogEntry, tasks []agent.TaskItem, footerLines []string) (string, error) {
 
 	elements := make([]map[string]any, 0, len(entries)+5)
 
@@ -2024,16 +2036,39 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.TaskItem, footer string)
 	}
 
 	// Section 3 (F-45): SessionContext footer at the bottom of
-	// the card. Empty footer = section omitted. Single markdown
-	// element, no hr separator — receipts are already visually
-	// bounded by the card chrome. Footer text is taken verbatim
-	// from formatSessionFooter (already ASCII-safe; no
-	// sanitisation needed because the helper only emits the
-	// ASCII arrow set + Agent / Model / cost tokens we control).
-	if footer != "" {
+	// the card. Empty footer = section omitted. Rendered as
+	// <hr> + <div> wrapper containing one <plain_text> per
+	// footer line — Feishu's plain_text element does NOT honour
+	// \n inside a single element, so multi-line footers (F-45
+	// design: identity on line 1 + tokens on line 2) need one
+	// element per line. Using <div> instead of <note> to avoid
+	// the default ℹ️ icon that Feishu's <note> ships with —
+	// the footer is purely informational, no icon wanted.
+	//
+	// Color: #999999 (light grey, web "muted" tone). Body
+	// elements render in default black; the footer is dimmed
+	// to read as auxiliary metadata at a glance. Tested against
+	// the white Feishu card background — contrast is enough to
+	// stay legible while clearly receding from the body. The
+	// <hr> divider above stays at Feishu's default thin-grey
+	// (≈ #E5E5E5) which sits between body and footer cleanly.
+	//
+	// Footer lines are ASCII-only (output of formatSessionFooter
+	// Lines — only emits arrow set + Agent / Model names + cost
+	// USD); no sanitisation needed.
+	if len(footerLines) > 0 {
+		elements = append(elements, map[string]any{"tag": "hr"})
+		divElements := make([]any, 0, len(footerLines))
+		for _, line := range footerLines {
+			divElements = append(divElements, map[string]any{
+				"tag":        "plain_text",
+				"content":    line,
+				"text_color": "#999999",
+			})
+		}
 		elements = append(elements, map[string]any{
-			"tag":     "markdown",
-			"content": footer,
+			"tag":      "div",
+			"elements": divElements,
 		})
 	}
 

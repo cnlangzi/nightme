@@ -149,8 +149,9 @@ func TestTranslate_ToolErrorIsError(t *testing.T) {
 }
 
 // TestTranslate_AssistantMessageResult verifies that the
-// message_end assistant role produces EventResult + (when usage
-// is non-zero) EventUsage.
+// message_end assistant role produces ONE EventResult whose
+// ResultEvent carries Usage inline (co-located usage instead of
+// the legacy EventResult + EventUsage pair).
 func TestTranslate_AssistantMessageResult(t *testing.T) {
 	tr := newTestTranslator()
 	raw := mustMarshal(t, map[string]any{
@@ -171,30 +172,35 @@ func TestTranslate_AssistantMessageResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
-	if len(events) != 2 {
-		t.Fatalf("events = %d, want 2: %v", len(events), kinds(events))
+	// Single event — usage rides on the ResultEvent, not as a
+	// peer. The bridge-layer "split then rejoin at runtime" trick
+	// is gone.
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1 (Result with co-located Usage): %v", len(events), kinds(events))
 	}
 	if events[0].Kind != agent.EventResult {
-		t.Errorf("first event = %s, want result", events[0].Kind)
+		t.Errorf("kind = %s, want result", events[0].Kind)
 	}
 	if events[0].Result.Text != "hi" || events[0].Result.IsError {
 		t.Errorf("result = %+v", events[0].Result)
 	}
-	if events[1].Kind != agent.EventUsage {
-		t.Errorf("second event = %s, want usage", events[1].Kind)
+	u := events[0].Result.Usage
+	if u == nil {
+		t.Fatal("ResultEvent.Usage is nil; bridge should populate from message_end.usage")
 	}
-	if events[1].Usage.InputTokens != 10 || events[1].Usage.OutputTokens != 5 {
-		t.Errorf("usage = %+v", events[1].Usage)
+	if u.InputTokens != 10 || u.OutputTokens != 5 {
+		t.Errorf("usage = %+v", u)
 	}
-	if events[1].Usage.CostUSD != 0.03 {
-		t.Errorf("CostUSD = %f, want 0.03", events[1].Usage.CostUSD)
+	if u.CostUSD != 0.03 {
+		t.Errorf("CostUSD = %f, want 0.03", u.CostUSD)
 	}
 }
 
-// TestTranslate_EmptyUsageSuppressesEventUsage verifies that a
-// zero-totals usage block does not produce EventUsage, to avoid
-// "$0.00 · 0 tokens" footers.
-func TestTranslate_EmptyUsageSuppressesEventUsage(t *testing.T) {
+// TestTranslate_EmptyUsageStaysNil verifies that a zero-totals
+// usage block (synthetic messages, etc.) does not produce a
+// non-nil-but-all-zero Usage — the runtime skips AccumulateUsage
+// on nil and the channel renders no footer.
+func TestTranslate_EmptyUsageStaysNil(t *testing.T) {
 	tr := newTestTranslator()
 	raw := mustMarshal(t, map[string]any{
 		"type": "message_end",
@@ -209,10 +215,13 @@ func TestTranslate_EmptyUsageSuppressesEventUsage(t *testing.T) {
 		t.Fatalf("translate: %v", err)
 	}
 	if len(events) != 1 {
-		t.Fatalf("events = %d, want 1 (no usage): %v", len(events), kinds(events))
+		t.Fatalf("events = %d, want 1 (no usage field): %v", len(events), kinds(events))
 	}
 	if events[0].Kind != agent.EventResult {
 		t.Errorf("kind = %s, want result", events[0].Kind)
+	}
+	if events[0].Result.Usage != nil {
+		t.Errorf("ResultEvent.Usage = %+v, want nil (no usage section on the wire)", events[0].Result.Usage)
 	}
 }
 

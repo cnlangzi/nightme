@@ -92,14 +92,14 @@ const (
 	// result event — distinct from EventText (which is mid-stream
 	// assistant text). Channels typically render it with a different
 	// icon than the rolling-log entries.
+	//
+	// ResultEvent carries the per-turn Usage (token counts + cost) on
+	// the same field — bridges populate it from the source event's
+	// usage / modelUsage instead of emitting a separate EventUsage.
+	// Runtime accumulates Usage on receipt before stamping
+	// SessionContext, so the footer sees this turn's tokens on the
+	// first try.
 	EventResult
-
-	// EventUsage carries the turn's token usage. Bridges populate it
-	// from `result.usage` (Claude Code: input_tokens / output_tokens
-	// / cache_creation_input_tokens / cache_read_input_tokens) and
-	// optionally the per-model costUSD from `result.modelUsage`.
-	// Channels use it for "N tokens · $X" footers.
-	EventUsage
 
 	// EventCompaction signals a mid-turn context compaction. Bridges
 	// emit it when the agent's stream-json result carries
@@ -143,8 +143,6 @@ func (k EventKind) String() string {
 		return "error"
 	case EventResult:
 		return "result"
-	case EventUsage:
-		return "usage"
 	case EventCompaction:
 		return "compaction"
 	case EventInit:
@@ -263,6 +261,16 @@ type ErrorEvent struct {
 // result event's `result` field; DurationMs / IsError / Subtype are
 // pass-through metadata for the channel to surface alongside the text
 // (e.g. "📝 <text> (12.3s)").
+//
+// Usage is the per-turn token usage that the bridge observed on the
+// same wire event that delivered Text (Claude Code's `result.usage`
+// + `result.modelUsage`; Pi's `message_end.usage`). Bridges populate
+// this on the SAME ResultEvent rather than emitting a separate
+// EventUsage — the data is contextually attached to the turn's
+// result, not a peer event. Runtime accumulates Usage on receipt;
+// channels fold it into the SessionContext footer. nil is a valid
+// "no usage reported" value (the bridge may legitimately observe a
+// zero-usage turn, e.g. a synthetic assistant message).
 type ResultEvent struct {
 	// Text is the final assistant reply. May be empty when the turn
 	// ended with an error; channels typically still emit an EventResult
@@ -284,11 +292,19 @@ type ResultEvent struct {
 	// before the ResultEvent, so any Subtype seen here is a real
 	// terminal subtype.
 	Subtype string
+
+	// Usage is the per-turn token usage observed on the same wire
+	// event as Text. See struct doc above. Populated by bridges;
+	// consumed by the runtime's newEventHandler via
+	// agent.ResultEvent.Usage before stamping SessionContext.
+	Usage *UsageEvent
 }
 
-// UsageEvent is the payload for EventUsage — the turn's token usage
-// statistics. All four counts default to zero when missing; channels
-// decide how to surface (e.g. "1.2k tokens (in 800 · out 400) · $0.012").
+// UsageEvent is the turn's token usage statistics, packaged inside
+// ResultEvent (replaces the standalone EventUsage kind removed in the
+// footer's "calc-then-reply" cleanup). All four counts default to
+// zero when missing; channels decide how to surface (e.g. "1.2k
+// tokens (in 800 · out 400) · $0.012").
 //
 // CostUSD is optional; bridges populate it from
 // `result.modelUsage[<model>].costUSD` when present. Zero means

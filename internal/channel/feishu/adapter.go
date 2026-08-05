@@ -609,18 +609,27 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 // Send implements the v0.3 channel.Channel interface. It dispatches
 // each OutboundKind to the corresponding Feishu API call:
 //
-//	OutReply             → top-level Create (F-44 follow-up:
-//	                       ReplyInChat / sendReplyInThreadAndChat —
-//	                       each chunk is a standalone bubble in
-//	                       main chat, no parent anchor. The original
-//	                       ReplyInBoth routing was abandoned because
-//	                       Feishu pulls all ReplyInBoth calls into
-//	                       the thread drawer once the parent message
-//	                       has any reply_in_thread=true sibling — see
-//	                       sendResultAsReply docstring).
+//	OutReply             → rolling-log receipt card (F-44 revert —
+//	                       folds back into the F-25 → F-40 pattern).
+//	                       First chunk cold-starts a Card 2.0 via
+//	                       SendCard (ReplyInBoth, reply endpoint
+//	                       with reply_in_thread omitted, anchored
+//	                       to userMsgID). Subsequent chunks PATCH
+//	                       the same card in place; each chunk is
+//	                       rendered as one or more `div` elements
+//	                       (multi-div split via splitMarkdownForDivs
+//	                       when the chunk text exceeds 1000 runes).
+//	                       If appending would push the card past
+//	                       50 elements / 30 KB envelope, AppendEntry
+//	                       returns ErrReceiptOverflow and the
+//	                       chunk is sent as a fresh top-level Create
+//	                       (F-40 bail-out, F-44 follow-up styling).
+//	                       Orphan path (no userMsgID) goes straight
+//	                       to top-level Create via
+//	                       sendReplyInThreadAndChat.
 //	OutResult            → top-level Create (F-39 + F-44 follow-up;
-//	                       ReplyInChat / sendResultAsReply — same
-//	                       rationale as OutReply).
+//	                       ReplyInChat / sendResultAsReply — final
+//	                       answer, no chunk-stream visual problem).
 //	OutToolStart/End     → F-34 thread-reply as the "● Tool(args)"
 //	                       / "⎿  …" Claude Code-style lines. F-38
 //	                       §3.1.3: each Start posts a fresh thread
@@ -685,6 +694,95 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 	return a.receiptsByUserMsgID[userMsgID] // nil on miss — caller decides
 }
 
+// ensureReceiptForReply lazily creates a rolling-log receipt when
+// the FIRST event for a userMsgID is an OutReply (no prior receipt
+// exists). The first entry is installed in the transient receipt
+// BEFORE SendCard, so the cold-start card body already carries the
+// first chunk — the user sees the chunk in the card without waiting
+// for a PATCH cycle.
+//
+// F-44 revert: restored the F-25 → F-40 "OutReply folds into
+// receipt" pattern. The card is anchored to userMsgID via
+// ReplyInBoth (reply endpoint, reply_in_thread omitted) so the
+// visual thread to the user input is preserved in the normal
+// case. Subsequent chunks (OutReply events) hit the
+// receipt.AppendEntry path which PATCHes the same card.
+//
+// Returns the receipt plus a `created` flag: created=true means
+// the first entry is already installed and the caller should NOT
+// call AppendEntry again. created=false means a receipt already
+// existed (race or a prior OutTask* created it) and the caller
+// should call AppendEntry / SetTaskList as usual.
+//
+// F-42 review finding #5: same orphan-card race fix as
+// ensureReceiptForTask. Register-before-SendCard with the
+// `initializing` flag — concurrent AppendEntry / SetTaskList calls
+// during the SendCard window hit the renderLocked short-circuit
+// instead of issuing a second SendCard, so the loser doesn't leave
+// an orphan card in chat with a stale entry / task snapshot.
+func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, firstEntryText string) (*MessageReceipt, bool, error) {
+	if userMsgID == "" {
+		return nil, false, errors.New("feishu: ensureReceiptForReply requires userMsgID")
+	}
+	if firstEntryText == "" {
+		return nil, false, errors.New("feishu: ensureReceiptForReply requires non-empty firstEntryText")
+	}
+
+	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
+	transient.entries = []LogEntry{
+		{Icon: "💬", Text: firstEntryText},
+	}
+	transient.promptState = agent.PromptRunning
+	transient.initializing = true
+
+	// Register-before-SendCard (see ensureReceiptForTask for the
+	// full rationale — same race fix applied symmetrically here).
+	a.mu.Lock()
+	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
+		a.mu.Unlock()
+		return existing, false, nil
+	}
+	a.receiptsByUserMsgID[userMsgID] = transient
+	a.mu.Unlock()
+
+	body, err := buildReceiptCard(transient.entries, transient.tasks)
+	if err != nil {
+		a.mu.Lock()
+		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
+			delete(a.receiptsByUserMsgID, userMsgID)
+		}
+		a.mu.Unlock()
+		return nil, false, fmt.Errorf("feishu: ensure reply receipt build card: %w", err)
+	}
+
+	// Cold-start card: ReplyInBoth (reply endpoint, reply_in_thread
+	// omitted), anchored to userMsgID. Subsequent PATCHes preserve
+	// the thread. Caller is expected to have already verified this
+	// is not the bail-out case (overflow pre-check happens later,
+	// at AppendEntry time, because we don't know if the FIRST
+	// entry alone overflows the budget — for that rare case the
+	// helper returns an error and the caller falls back to a
+	// top-level Create).
+	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
+	if err != nil {
+		a.mu.Lock()
+		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
+			delete(a.receiptsByUserMsgID, userMsgID)
+		}
+		a.mu.Unlock()
+		a.logger.Warn("feishu: ensureReceiptForReply send card failed",
+			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
+		return nil, false, err
+	}
+
+	a.mu.Lock()
+	transient.replyMsgID = msgID
+	transient.cardMsgID = msgID
+	transient.initializing = false
+	a.mu.Unlock()
+	return transient, true, nil
+}
+
 // ensureReceiptForTask lazily creates a receipt when the FIRST event
 // for a userMsgID is an OutTaskCreate / OutTaskUpdate (the agent
 // produces tasks but no OutReply yet — TaskCreate-only turn). The
@@ -740,7 +838,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(transient)
+	body, err := buildReceiptCard(nil, transient.tasks)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -776,33 +874,49 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 	switch msg.Kind {
 	case gateway.OutReply:
-		// F-44 + F-44 follow-up: each chunk → independent top-level
-		// Create message (PR #47's ReplyInChat surface). The receipt
-		// card no longer carries reply entries; the receipt is
-		// task-only (see case gateway.OutTaskCreate / OutTaskUpdate
-		// below). Empty text is dropped silently to match pre-F-44
-		// behavior (no blank bubbles).
+		// F-44 revert: OutReply folds into the rolling-log receipt
+		// card (F-25 → F-40 model). Each chunk is a LogEntry; the
+		// receipt renders them as one or more `div` elements
+		// (multi-div split when the entry text exceeds
+		// divTextCharLimit). Subsequent chunks PATCH the same card
+		// — single visible card with all chunks, easy to scan
+		// versus a stream of standalone bubbles.
 		//
-		// Wire: POST /im/v1/messages (top-level Create) — no
-		// reply_in_thread field, no parent/thread relationship.
-		// Each chunk is a standalone bubble in main chat.
+		// Empty text is dropped silently to match pre-F-44 behavior
+		// (no blank bubbles).
 		//
-		// Why not ReplyInBoth: ReplyInBoth only renders the body
-		// inline in main chat while the parent user message has no
-		// thread. Once OutToolStart/End (which use ReplyInThread =
-		// reply_in_thread=true) creates a thread on the parent,
-		// Feishu pulls all subsequent ReplyInBoth calls into the
-		// existing thread panel and the main-chat inline render is
-		// lost — the user sees the reply disappear into the thread
-		// drawer. Routing through top-level Create guarantees
-		// main-chat visibility at the cost of the "Reply to <sender>"
-		// header (acceptable trade-off: a stream of standalone bubbles
-		// is easier to scan than a thread drawer).
+		// Orphan path (no userMsgID): no anchor, no card. Send as
+		// top-level Create so the user still sees the chunk.
 		text := strings.TrimSpace(msg.Text)
 		if text == "" {
 			return nil
 		}
-		return a.sendReplyInThreadAndChat(ctx, msg.ChatID, msg.ReplyTo, text)
+		if msg.ReplyTo == "" {
+			return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", text)
+		}
+		// Cold-start: if no receipt exists for this userMsgID,
+		// create one with the first entry already installed.
+		receipt, created, err := a.ensureReceiptForReply(ctx, msg.ChatID, msg.ReplyTo, text)
+		if err != nil {
+			// Cold-start failed (SendCard error). Fall back to
+			// top-level Create so the user still sees the chunk.
+			return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", text)
+		}
+		if !created {
+			// Receipt exists. Try to append; if the would-be card
+			// would exceed 50 elements / 30 KB envelope, bail out
+			// to a fresh top-level Create (F-40 bail-out, F-44
+			// follow-up styling).
+			if err := receipt.AppendEntry(ctx, LogEntry{Icon: "💬", Text: text}); err != nil {
+				if errors.Is(err, ErrReceiptOverflow) {
+					return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", text)
+				}
+				return err
+			}
+		}
+		// created=true — first entry was installed by ensure; no
+		// need to call AppendEntry again.
+		return nil
 
 	case gateway.OutThinking:
 		// F-34: thinking is posted to the user message thread so
@@ -1575,10 +1689,23 @@ func encodeCardJSON(v any) ([]byte, error) {
 	return out, nil
 }
 
-// buildReceiptCard renders the F-44 task-only receipt as a Feishu
-// Card 2.0 interactive card. Layout (top → bottom):
+// buildReceiptCard renders the rolling-log + task-checklist receipt
+// as a Feishu Card 2.0 interactive card. Layout (top → bottom):
 //
-//  1. **📋 Tasks** checklist — one or more markdown elements, one
+//  1. Rolling-log entries — one or more `div` elements per
+//     LogEntry, in arrival order. Each entry's text is sanitized
+//     via SanitizeCardMarkdown (URL / fence / image / heading
+//     pipeline) before rendering; the entry is then split by
+//     splitMarkdownForDivs (F-37 multi-div) so a single long
+//     chunk renders as multiple back-to-back divs each ≤ 1000
+//     runes. The Icon prefix is prepended to the first chunk
+//     of the entry (so the icon appears once even when the
+//     entry spans multiple divs). The section is omitted when
+//     no entries have been appended yet (cold-start before the
+//     first OutReply lands — the receipt task-only surface
+//     carries the **📋 Tasks** section alone in that case).
+//
+//  2. **📋 Tasks** checklist — one or more markdown elements, one
 //     per chunk from buildTaskChecklistChunks. The bridge always
 //     sends the full snapshot (F-38), so we copy it verbatim and
 //     let buildTaskChecklistChunks handle glyph / ordering /
@@ -1588,19 +1715,61 @@ func encodeCardJSON(v any) ([]byte, error) {
 // Returned string is the card JSON itself — NOT wrapped in
 // {"card": ...}. See buildInteractiveCard for the rationale.
 //
-// F-44 simplification: the F-25 → F-42 receipt used to carry a
-// 5-section layout (header / evicted-marker / entries / hr /
-// footer). All five are gone — OutReply is independent, OutInit /
-// OutUsage are silent-drop, the entries / evicted-marker / hr /
-// footer sections were tied to those paths. The card now carries
-// only the task checklist.
-func buildReceiptCard(r *MessageReceipt) (string, error) {
-	if r == nil {
-		return "", errors.New("feishu: receipt is nil")
+// F-44 simplification kept: the F-25 → F-42 receipt's 5-section
+// layout (header / evicted-marker / entries / hr / footer) is
+// STILL reduced to 2 sections. The header (⏳/🔄/✅/❌ prompt
+// state icon) is gone — terminal signals travel via
+// OutMessageState → AddReaction on the user message. The footer
+// (init / usage) is gone — those OutboundKinds are silent-drop
+// until the follow-up footer PR. The hr is gone (no header /
+// footer to separate). The evicted-marker is gone (overflow now
+// bails out per-entry to a fresh top-level Create instead of
+// FIFO-truncating the receipt).
+//
+// F-44 revert (this file): entries (OutReply text chunks) are
+// RESTORED as the first section. Each entry maps to one or more
+// `div` markdown elements via splitMarkdownForDivs (per-entry
+// multi-div split per the user-visible spec). AppendEntry's
+// pre-render overflow check (see receipt.go) catches the case
+// where adding an entry would push the card past 50 elements /
+// 30 KB envelope, so buildReceiptCard is never asked to render
+// an over-budget body.
+//
+// Signature: takes (entries, tasks) directly, not a *MessageReceipt.
+// This avoids copying a struct that contains a sync.Mutex (vet
+// warning) — AppendEntry needs to build a hypothetical card body
+// to check the overflow budget, but doing so via a struct copy
+// would silently bypass the lock semantics.
+func buildReceiptCard(entries []LogEntry, tasks []agent.TaskItem) (string, error) {
+
+	elements := make([]map[string]any, 0, len(entries)+3)
+
+	// Section 1: rolling-log entries. Each entry's text is
+	// sanitized (so a malicious or malformed chunk can't break
+	// the card), split into 1+ div elements by splitMarkdownForDivs
+	// (per-entry multi-div, the F-37 split helper), and prefixed
+	// with the entry icon on the first chunk only.
+	for _, entry := range entries {
+		sanitized := SanitizeCardMarkdown(entry.Text)
+		chunks := splitMarkdownForDivs(sanitized, divTextCharLimit)
+		if len(chunks) == 0 {
+			chunks = []string{""}
+		}
+		// Icon prefix on the first chunk only — multi-div entries
+		// otherwise repeat the icon on every div, which is noisy.
+		if entry.Icon != "" {
+			chunks[0] = entry.Icon + " " + chunks[0]
+		}
+		for _, chunk := range chunks {
+			elements = append(elements, map[string]any{
+				"tag":     "markdown",
+				"content": chunk,
+			})
+		}
 	}
 
-	elements := make([]map[string]any, 0, 3)
-	for _, chunk := range buildTaskChecklistChunks(r.tasks) {
+	// Section 2: task checklist (F-38, unchanged).
+	for _, chunk := range buildTaskChecklistChunks(tasks) {
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
 			"content": chunk,

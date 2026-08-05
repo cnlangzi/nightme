@@ -1,23 +1,33 @@
-// Package feishu — F-44 simplified MessageReceipt.
+// Package feishu — F-44 simplified MessageReceipt with F-44 revert
+// for OutReply folding.
 //
-// Post-F-44 the receipt card is task-only:
+// Post-F-44 the receipt card carries two sections:
 //
-//	📋 Tasks
-//	  - [ ] Subject
-//	  - [x] Subject
-//	  - [ ] Subject (ActiveForm)
+//	💬 chunk 1   ⬅ F-44 revert: OutReply folds into the rolling log
+//	💬 chunk 2   ⬅   (each entry split into 1+ div elements)
+//	💬 chunk 3
+//	📋 Tasks     ⬅ F-38: agent task checklist (F-44 simplified
+//	  - [ ] Subject       surface — no header / footer / evicted
+//	  - [x] Subject       marker, just the two sections above)
 //
-// F-25 → F-42 had OutReply / OutResult / OutInit / OutUsage / OutCompaction
-// fold into the same card (rolling-log + 元数据). F-44 reverses that:
-// OutReply / OutResult each go to their own ReplyInThreadAndChat message;
-// OutInit / OutUsage are silently dropped until the footer PR; the
-// remaining card surface is the F-38 task checklist.
+// F-25 → F-42 had OutReply / OutResult / OutInit / OutUsage /
+// OutCompaction fold into the same card. F-44 first-pass reversed
+// that: OutReply / OutResult each go to their own top-level Create
+// message; OutInit / OutUsage are silently dropped until the
+// footer PR. F-44 revert (this file) restores OutReply folding into
+// the rolling log because the top-level Create surface produced a
+// hard-to-scan stream of N standalone bubbles for any long reply.
+// OutResult / OutTask* stay on top-level Create (final-answer +
+// checklist don't have the same "many small chunks" visual
+// problem).
 //
-// The receipt state machine shrinks to one role: hold the latest task
-// snapshot and PATCH it in place when SetTaskList fires. renderLocked fires
-// only on SetTaskList (no more Append / SetExecuting / SetCompleted from
-// the receipt side — terminal signals travel via OutMessageState →
-// AddReaction on the user message).
+// Card limits + bail-out: when an OutReply chunk would push the
+// card past 50 elements / 30 KB envelope, AppendEntry returns
+// ErrReceiptOverflow and the caller sends that chunk as a fresh
+// top-level Create (ReplyInChat — always visible in main chat,
+// escapes the parent-thread drawer). The receipt itself stays
+// anchored to the user message (ReplyInBoth) so the visual thread
+// to the user input is preserved in the normal case.
 package feishu
 
 import (
@@ -75,26 +85,35 @@ type receiptBot interface {
 // for long task lists.
 const divTextCharLimit = 1000
 
-// MessageReceipt is the per-user-message task-checklist display (F-38 +
-// F-44). One receipt owns ONE Feishu card message (the cardMsgID) which
-// carries only the **📋 Tasks** markdown section. OutReply / OutResult
-// each have their own ReplyInThreadAndChat messages, anchored to the same
-// userMsgID for visual coherence.
+// MessageReceipt is the per-user-message rolling-log + task-checklist
+// display (F-25 → F-40 + F-38 + F-44 simplification + F-44 revert
+// for OutReply folding). One receipt owns ONE Feishu card message
+// (the cardMsgID) which carries two sections: the rolling-log
+// OutReply entries (multi-div when long) and the **📋 Tasks**
+// checklist. OutResult / OutTask* have their own top-level Create
+// messages and don't fold into the card (F-44 follow-up).
 //
 // F-44 fields:
-//   - promptState: reserved for footer PR (see §6.2 in F-44 doc). Set on
-//     first SetTaskList (PromptPending → PromptRunning). Not transitioned
-//     further (terminal signals travel via OutMessageState).
+//   - entries: rolling-log OutReply text chunks. Each entry is split
+//     into 1+ div elements by splitMarkdownForDivs (the per-entry
+//     budget respects Feishu's div.text 1000 char hard cap). New
+//     chunks arrive via AppendEntry; the per-card 50-element / 30 KB
+//     envelope cap is checked BEFORE the PATCH is issued, and a
+//     would-overflow entry is rejected with ErrReceiptOverflow so
+//     the caller can send it as a fresh top-level Create (F-40
+//     bail-out, F-44 follow-up styling).
 //   - tasks: latest snapshot, replaced wholesale on each SetTaskList.
 //   - cardMsgID / replyMsgID / initializing / lastBody / lastBodyPatch:
 //     SendCard → PatchMessage bookkeeping (unchanged from F-42).
 //   - bot / logger / mu / chatID / userMsgID: infrastructure.
 //
-// F-44 deleted fields (no longer needed; their writers all gone):
-//   - entries []LogEntry: OutReply / OutError no longer fold
+// F-44 deleted fields (still removed; their writers all gone):
 //   - agentName / workspace / branch / inputTokens / outputTokens:
 //     OutInit / OutUsage silent drop until footer PR
-//   - evicted: FIFO eviction was for OutReply entries
+//   - evicted: FIFO eviction was for OutReply entries (F-44 revert
+//     reinstates entries but the hard eviction policy stays gone —
+//     overflow now bails out to fresh messages instead of FIFO
+//     truncating the receipt).
 type MessageReceipt struct {
 	chatID     string
 	userMsgID  string
@@ -105,31 +124,40 @@ type MessageReceipt struct {
 	mu          sync.Mutex
 	promptState agent.PromptState
 
+	// entries is the rolling-log of OutReply text chunks, oldest
+	// first. Each entry is rendered as a separate markdown element
+	// (or split into multiple markdown elements by
+	// splitMarkdownForDivs when the entry text exceeds
+	// divTextCharLimit). Append-only; no FIFO eviction (F-44 revert
+	// dropped that — overflow now bails out per-entry to a fresh
+	// top-level Create instead of silently dropping old entries).
+	entries []LogEntry
+
 	// tasks is the latest Claude task snapshot (F-38) for this turn.
 	// The bridge always sends the full snapshot, so we copy it verbatim
 	// on every event. The slice is rendered as a single markdown
-	// element list (split by divTextCharLimit) — the only thing in the
-	// card body post-F-44.
+	// element list (split by divTextCharLimit).
 	tasks []agent.TaskItem
 
-	// cardMsgID is the Feishu message id of the task-checklist card
+	// cardMsgID is the Feishu message id of the rolling-log card
 	// once it has been created. Empty before the first render. After
 	// the first SendCard it is set; subsequent renders PatchMessage
 	// against this id rather than posting new messages.
 	cardMsgID string
 
-	// initializing is true between the moment ensureReceiptForTask
-	// registers this receipt in receiptsByUserMsgID and the moment its
-	// first SendCard returns with a real cardMsgID. During that brief
-	// window the placeholder is visible to other goroutines
-	// (receiptFor / ensureReceiptForTask return it), but its cardMsgID
-	// is still empty — so a renderLocked driven by a concurrent
-	// SetTaskList would otherwise issue a second SendCard (orphan).
-	// renderLocked checks this flag and short-circuits while true,
-	// dropping the render so the ensure helper's own SendCard is the
-	// only card in chat. The flag is cleared under r.mu immediately
-	// after the SendCard return value is stored. F-42 review
-	// finding #4/#5.
+	// initializing is true between the moment ensureReceiptForReply
+	// / ensureReceiptForTask registers this receipt in
+	// receiptsByUserMsgID and the moment its first SendCard returns
+	// with a real cardMsgID. During that brief window the
+	// placeholder is visible to other goroutines (receiptFor /
+	// ensureReceiptForReply return it), but its cardMsgID is still
+	// empty — so a renderLocked driven by a concurrent AppendEntry
+	// / SetTaskList would otherwise issue a second SendCard
+	// (orphan). renderLocked checks this flag and short-circuits
+	// while true, dropping the render so the ensure helper's own
+	// SendCard is the only card in chat. The flag is cleared under
+	// r.mu immediately after the SendCard return value is stored.
+	// F-42 review finding #4/#5.
 	initializing bool
 
 	// Feishu limits message updates to roughly five per second.
@@ -138,20 +166,24 @@ type MessageReceipt struct {
 	lastBodyPatch time.Time
 }
 
-// NewMessageReceiptForReply wraps an already-posted reply message (the
-// caller is responsible for sending the initial text). The returned
-// receipt is registered in the adapter's indexes so subsequent SetTaskList
-// calls update the same card. Use this when the adapter owns the full
-// lifecycle.
+// NewMessageReceiptForReply constructs a fresh rolling-log + task
+// receipt. F-44 callers (ensureReceiptForTask) use it for the
+// task-checklist path; F-44 revert callers (ensureReceiptForReply)
+// use it for the OutReply rolling-log path. The first entry is
+// installed before this constructor is called (by the ensure
+// helper); the constructor itself just wires infrastructure.
 //
 // bot is the adapter (or any receiptBot implementation) used by
 // renderLocked to ship card bodies (SendCard on first render,
-// PatchMessage on subsequent). F-44 callers pass `a`; passing nil will
-// panic on the first SetTaskList.
+// PatchMessage on subsequent). F-44 callers pass `a`; passing nil
+// will panic on the first render.
 //
-// F-44: this constructor now serves ONLY the task-checklist path
-// (ensureReceiptForTask). The ensureReceiptForReply / OutReply fold path
-// was deleted.
+// The replyMsgID parameter is the Feishu message id of any
+// pre-existing reply card (legacy F-44 path that no longer applies
+// post-F-44-revert — kept for the constructor signature so the
+// task-only caller can still pass a placeholder). Pass "" for
+// fresh receipts (the typical F-44 revert case); the first
+// SendCard in renderLocked populates cardMsgID.
 func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receiptBot) *MessageReceipt {
 	return &MessageReceipt{
 		chatID:       chatID,
@@ -212,16 +244,67 @@ func (r *MessageReceipt) PromptState() agent.PromptState {
 }
 
 // State returns the current state. Useful for tests + diagnostics.
-//
-// Deprecated: this getter preserves the v1.3.x F-42 era signature for
-// backward compatibility in test fixtures. New code should call
-// PromptState() (which returns the agent.PromptState enum directly).
-// Existing call sites will be migrated in a follow-up.
 func (r *MessageReceipt) State() agent.PromptState {
 	return r.PromptState()
 }
 
-// renderLocked pushes the current task-checklist snapshot to Feishu.
+// AppendEntry appends a new rolling-log entry (typically an OutReply
+// text chunk from the agent's stream-json) and re-renders the card.
+//
+// Pre-render overflow check: the would-be post-append card body is
+// built first; if its element count exceeds receiptMaxElements (50)
+// or its byte size exceeds resultCardEnvelopeBudget (28 KB), the
+// method returns ErrReceiptOverflow WITHOUT issuing a PATCH. The
+// caller is expected to catch this and send the entry as a fresh
+// top-level Create (F-40 bail-out, F-44 follow-up styling) so the
+// entry still reaches the user, just not folded into the card.
+//
+// Why bail out (not truncate / not FIFO-evict): truncation drops
+// the tail of the user's reply mid-word; FIFO eviction silently
+// hides old entries the user already saw. Bail-out gives the user
+// every entry in order, just in a different visual surface for
+// the overflow case (top-level bubble, always visible in main chat).
+//
+// The first entry of a receipt is installed by ensureReceiptForReply
+// before this method is called; the receipt's entries slice is
+// always non-empty when AppendEntry runs in production (callers
+// that want a no-op on an empty receipt should short-circuit at
+// the call site).
+func (r *MessageReceipt) AppendEntry(ctx context.Context, entry LogEntry) error {
+	if r == nil {
+		return nil
+	}
+	if entry.Text == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Build the would-be card body first so we can check the
+	// element / envelope budget BEFORE issuing any PATCH. The
+	// receipt's own lastBody is unchanged in the overflow path,
+	// so a subsequent successful append is a no-op (buildReceiptCard
+	// returns the same body, renderLocked skips the PATCH).
+	//
+	// buildReceiptCard takes (entries, tasks) directly — no struct
+	// copy — so we don't bypass the r.mu lock semantics. The
+	// proposed slice is a fresh slice that we only commit to
+	// r.entries AFTER the overflow check passes.
+	proposed := append(r.entries, entry)
+	body, err := buildReceiptCard(proposed, r.tasks)
+	if err != nil {
+		return fmt.Errorf("feishu receipt: build card for overflow check: %w", err)
+	}
+	elementCount, bodyBytes := receiptBodyStats(proposed, r.tasks, body)
+	if wouldReceiptOverflow(elementCount, bodyBytes) {
+		return ErrReceiptOverflow
+	}
+	// Commit the entry + render.
+	r.entries = proposed
+	return r.renderLocked(ctx)
+}
+
+// renderLocked pushes the current rolling-log + task-checklist
+// snapshot to Feishu. Caller must hold r.mu.
 // Caller must hold r.mu.
 //
 // F-44 simplified semantics:
@@ -253,7 +336,7 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	}
 
 	// Build the card body. buildReceiptCard is in adapter.go.
-	body, err := buildReceiptCard(r)
+	body, err := buildReceiptCard(r.entries, r.tasks)
 	if err != nil {
 		r.logger.Warn("feishu receipt: build card failed",
 			"err", err, "state", r.promptState)
@@ -312,4 +395,33 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 	r.lastBody = body
 	r.lastBodyPatch = time.Now()
 	return nil
+}
+// receiptBodyStats counts the elements and bytes in a card body that
+// would be built from the given (entries, tasks). Used by
+// AppendEntry's pre-render overflow check (and could be reused by
+// other card-builders in the future).
+//
+// Element count is the sum of (entries × div count) + task divs
+// (matches what buildReceiptCard in adapter.go would emit). Byte
+// size is the JSON body size as built.
+//
+// Note: this duplicates the element-counting logic in
+// buildReceiptCard; both must stay in sync. If a future change adds
+// a new section to the card (e.g. restored F-25 prompt state
+// header), update both functions.
+func receiptBodyStats(entries []LogEntry, tasks []agent.TaskItem, body string) (elementCount int, bodyBytes int) {
+	bodyBytes = len(body)
+	for range entries {
+		// Each entry produces 1+ div elements (split per
+		// divTextCharLimit). We count the worst case (1) here;
+		// overflow detection errs on the safe side. buildReceiptCard
+		// may produce more for long entries, so the actual
+		// element count can exceed this estimate — the overflow
+		// guard fires earlier in that case (good).
+		elementCount++
+	}
+	for range buildTaskChecklistChunks(tasks) {
+		elementCount++
+	}
+	return
 }

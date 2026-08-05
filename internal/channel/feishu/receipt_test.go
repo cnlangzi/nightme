@@ -10,6 +10,7 @@ package feishu
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -240,7 +241,7 @@ func TestBuildReceiptCard_TaskOnly(t *testing.T) {
 			{ID: "t2", Subject: "second task", Status: agent.TaskCompleted},
 		},
 	}
-	body, err := buildReceiptCard(r)
+	body, err := buildReceiptCard(r.entries, r.tasks)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -286,7 +287,7 @@ func TestBuildReceiptCard_NoTasksEmptyBody(t *testing.T) {
 		chatID:    "oc_chat",
 		userMsgID: "om_user",
 	}
-	body, err := buildReceiptCard(r)
+	body, err := buildReceiptCard(r.entries, r.tasks)
 	if err != nil {
 		t.Fatalf("buildReceiptCard: %v", err)
 	}
@@ -297,4 +298,78 @@ func TestBuildReceiptCard_NoTasksEmptyBody(t *testing.T) {
 	if strings.Contains(body, "**📋 Tasks**") {
 		t.Errorf("body should NOT contain Tasks header for empty receipt: %s", body)
 	}
+}
+// TestAppendEntry_FoldsIntoReceipt — F-44 revert: each OutReply
+// chunk is appended to the rolling-log entries, PATCHing the card
+// in place. The mockReceiptBot records each PATCH and the receipt
+// keeps append-only order.
+func TestAppendEntry_FoldsIntoReceipt(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card_initial", bot)
+	// Seed the first entry (the cold-start path installs the first
+	// entry before AppendEntry is called; the test mirrors that
+	// pattern by directly mutating r.entries).
+	r.mu.Lock()
+	r.entries = []LogEntry{{Icon: "💬", Text: "first"}}
+	r.mu.Unlock()
+
+	// Append second entry.
+	if err := r.AppendEntry(context.Background(), LogEntry{Icon: "💬", Text: "second"}); err != nil {
+		t.Fatalf("AppendEntry second: %v", err)
+	}
+	r.mu.Lock()
+	if len(r.entries) != 2 {
+		t.Errorf("after AppendEntry: entries len = %d, want 2", len(r.entries))
+	}
+	if r.entries[0].Text != "first" || r.entries[1].Text != "second" {
+		t.Errorf("entries out of order: %q / %q", r.entries[0].Text, r.entries[1].Text)
+	}
+	r.mu.Unlock()
+
+	// 1 PATCH (the second entry triggered a re-render).
+	if len(bot.patches) != 1 {
+		t.Errorf("patch count = %d, want 1 (one per AppendEntry)", len(bot.patches))
+	}
+}
+
+// TestAppendEntry_OverflowBailsOut — F-40 + F-44 revert: when
+// appending an entry would push the card past 50 elements /
+// 30 KB envelope, AppendEntry returns ErrReceiptOverflow WITHOUT
+// issuing a PATCH. The caller is expected to catch this and send
+// the entry as a fresh top-level Create (ReplyInChat). The
+// receipt's existing entries stay intact.
+func TestAppendEntry_OverflowBailsOut(t *testing.T) {
+	bot := &mockReceiptBot{}
+	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card_initial", bot)
+
+	// Pre-fill entries so the next append would push the card over
+	// the element cap. 50 entries × 1 element each = at the cap.
+	// The 51st would overflow.
+	entries := make([]LogEntry, receiptMaxElements)
+	for i := range entries {
+		entries[i] = LogEntry{Icon: "💬", Text: fmt.Sprintf("entry %d", i)}
+	}
+	r.mu.Lock()
+	r.entries = entries
+	r.mu.Unlock()
+
+	// Snapshot the PATCH count before the overflow attempt.
+	beforePatches := len(bot.patches)
+
+	// This append should overflow → return ErrReceiptOverflow, no PATCH.
+	err := r.AppendEntry(context.Background(), LogEntry{Icon: "💬", Text: "overflow"})
+	if !errors.Is(err, ErrReceiptOverflow) {
+		t.Fatalf("AppendEntry returned %v, want ErrReceiptOverflow", err)
+	}
+	if len(bot.patches) != beforePatches {
+		t.Errorf("PATCH issued on overflow path: before=%d, after=%d (should be unchanged)",
+			beforePatches, len(bot.patches))
+	}
+	// The receipt's existing entries stay intact.
+	r.mu.Lock()
+	if len(r.entries) != receiptMaxElements {
+		t.Errorf("entries len after overflow = %d, want %d (overflow entry must NOT be committed)",
+			len(r.entries), receiptMaxElements)
+	}
+	r.mu.Unlock()
 }

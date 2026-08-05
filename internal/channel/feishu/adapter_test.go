@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -1721,17 +1720,17 @@ func TestEnsureReceiptForTask_Concurrent_OnlyOneSendCard(t *testing.T) {
 
 
 // ---------------------------------------------------------------------------
-// F-44 OutReply / OutInit / OutUsage behavior
+// F-44 revert: OutReply folds into the rolling-log receipt card.
 // ---------------------------------------------------------------------------
 
-// TestSend_OutReply_IndependentReply_NotFolded verifies the F-44
-// routing change: each OutReply chunk goes to its own top-level
-// Create message (PR #47's ReplyInChat surface), NOT folded into
-// the receipt card. The receipt for the userMsgID is never created
-// (no OutTaskCreate/Update event) — out.replyTo is no longer used
-// to anchor the new message (F-44 follow-up moved OutReply off
-// ReplyInBoth because of the parent-thread gotcha).
-func TestSend_OutReply_IndependentReply_NotFolded(t *testing.T) {
+// TestSend_OutReply_FoldsIntoReceipt verifies the F-44 revert
+// routing change: the first OutReply chunk cold-starts a new
+// receipt card via SendCard (ReplyInBoth, reply endpoint with
+// reply_in_thread omitted) anchored at userMsgID, with the chunk
+// already installed as the first LogEntry. The card body is the
+// Card 2.0 envelope; the entry text is sanitized + the icon
+// prefix is prepended.
+func TestSend_OutReply_FoldsIntoReceipt(t *testing.T) {
 	a := testAdapter(t)
 
 	type captured struct {
@@ -1744,7 +1743,7 @@ func TestSend_OutReply_IndependentReply_NotFolded(t *testing.T) {
 	var sends []captured
 	a.sendFunc = func(_ context.Context, chatID, msgType, body, rootID string, replyInThread bool) (string, error) {
 		sends = append(sends, captured{ChatID: chatID, MsgType: msgType, RootID: rootID, Body: body, ReplyInThread: replyInThread})
-		return "om_msg_" + msgType, nil
+		return "om_card_test", nil
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
@@ -1757,42 +1756,55 @@ func TestSend_OutReply_IndependentReply_NotFolded(t *testing.T) {
 		t.Fatalf("Send(OutReply): %v", err)
 	}
 
+	// Exactly one SendCard call (the cold-start card).
 	if len(sends) != 1 {
-		t.Fatalf("send count = %d, want 1 (one top-level Create per chunk)", len(sends))
+		t.Fatalf("send count = %d, want 1 (one cold-start card)", len(sends))
 	}
 	got := sends[0]
-	// F-44 follow-up: top-level Create, no parent/thread anchor.
-	// See sendResultAsReply / sendReplyInThreadAndChat docstrings
-	// for the parent-thread rationale.
-	if got.RootID != "" {
-		t.Errorf("RootID = %q, want %q (F-44 follow-up: OutReply is top-level Create, no anchor)", got.RootID, "")
+	if got.ChatID != "oc_test" {
+		t.Errorf("ChatID = %q, want %q", got.ChatID, "oc_test")
+	}
+	if got.MsgType != "interactive" {
+		t.Errorf("MsgType = %q, want %q (Feishu Card 2.0)", got.MsgType, "interactive")
+	}
+	// ReplyInBoth: reply endpoint, reply_in_thread omitted (false).
+	if got.RootID != "om_user" {
+		t.Errorf("RootID = %q, want %q (anchored to userMsgID)", got.RootID, "om_user")
 	}
 	if got.ReplyInThread {
-		t.Errorf("reply_in_thread = true, want false (ReplyInChat: top-level Create)")
+		t.Errorf("reply_in_thread = true, want false (F-44 revert: ReceiptInBoth)")
 	}
-	if got.Body != `{"text":"first chunk of the reply"}` {
-		t.Errorf("body = %q, want %q", got.Body, `{"text":"first chunk of the reply"}`)
+	// Body must be Card 2.0 JSON with the chunk embedded.
+	if !strings.Contains(got.Body, "💬 first chunk of the reply") {
+		t.Errorf("body missing entry text (want 💬 prefix + chunk), got %q", got.Body)
 	}
-	// Receipt must NOT be created — OutReply no longer folds.
+	// Receipt IS created — F-44 revert: OutReply folds.
 	a.mu.RLock()
 	rcpt, ok := a.receiptsByUserMsgID["om_user"]
 	a.mu.RUnlock()
-	if ok && rcpt != nil {
-		t.Errorf("receipt was created for OutReply; F-44: OutReply does NOT create a receipt")
+	if !ok || rcpt == nil {
+		t.Errorf("receipt was NOT created for OutReply; F-44 revert: OutReply folds into receipt")
+	}
+	if rcpt != nil && len(rcpt.entries) != 1 {
+		t.Errorf("receipt entries = %d, want 1", len(rcpt.entries))
 	}
 }
 
-// TestSend_OutReply_MultipleChunks_OneMessageEach verifies that
-// each chunk becomes its own Feishu message — no batching, no fold.
-// Three chunks → three independent ReplyInThreadAndChat messages.
-func TestSend_OutReply_MultipleChunks_OneMessageEach(t *testing.T) {
+// TestSend_OutReply_MultipleChunks_PATCHesSameCard verifies that
+// the first chunk cold-starts the card and subsequent chunks PATCH
+// the same card in place (no new message per chunk).
+func TestSend_OutReply_MultipleChunks_PATCHesSameCard(t *testing.T) {
 	a := testAdapter(t)
-	var count int
+	var sends int
+	var patches int
 	a.sendFunc = func(_ context.Context, _, msgType, _, _ string, _ bool) (string, error) {
-		count++
-		return fmt.Sprintf("om_chunk_%d", count), nil
+		sends++
+		return "om_card_test", nil
 	}
-	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+	a.updateFunc = func(_ context.Context, _, _ string) error {
+		patches++
+		return nil
+	}
 
 	chunks := []string{"first", "second", "third"}
 	for i, chunk := range chunks {
@@ -1806,8 +1818,22 @@ func TestSend_OutReply_MultipleChunks_OneMessageEach(t *testing.T) {
 		}
 	}
 
-	if count != 3 {
-		t.Errorf("send count = %d, want 3 (one per chunk)", count)
+	// 1 cold-start SendCard + 2 PATCHes (one per additional chunk).
+	if sends != 1 {
+		t.Errorf("send count = %d, want 1 (one cold-start card)", sends)
+	}
+	if patches != 2 {
+		t.Errorf("patch count = %d, want 2 (one per additional chunk)", patches)
+	}
+	// Receipt should have all 3 entries.
+	a.mu.RLock()
+	rcpt := a.receiptsByUserMsgID["om_user"]
+	a.mu.RUnlock()
+	if rcpt == nil {
+		t.Fatalf("receipt missing")
+	}
+	if len(rcpt.entries) != 3 {
+		t.Errorf("receipt entries = %d, want 3 (all chunks folded)", len(rcpt.entries))
 	}
 }
 

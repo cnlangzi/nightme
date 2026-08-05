@@ -60,20 +60,30 @@ Task Receipt 完全可以脱离 OutReply fold 路径独立存在。
 
 ### 0.3 简化目标
 
-**四个独立 surface（全部 top-level Create）+ 一个折叠 surface**：
+**三个独立 surface + 一个折叠 + 一个 top-level 应急 surface**：
 
 | OutboundKind | 表面 | 锚定 | F-44 后 |
 |---|---|---|---|
-| `OutReply` | **独立 top-level Create**（每 chunk = 1 条消息） | `ReplyInChat` (top-level Create, no anchor) | ✅ 不再 fold |
+| `OutReply` | **Rolling-log receipt**（N 事件 = 1 张 card，每 chunk = 1+ div；超限转 top-level） | `ReplyInBoth` (reply endpoint, reply_in_thread omitted, 锚定 userMsgID)；overflow → `ReplyInChat` | ✅ F-44 revert: 重新 fold |
 | `OutResult` | 独立 top-level Create（每条 = 1 条消息） | `ReplyInChat` (top-level Create, no anchor) | ✅ 不变（F-39） |
 | `OutTaskCreate` / `OutTaskUpdate` | **Rolling-log receipt**（N 事件 = 1 张 card） | `ReplyInChat` (cold-start card 是 top-level Create; 后续 PATCH 保持) | ✅ 简化为只装 Tasks |
 | `OutCard` / `OutCommandReply` / `OutCompaction` | ReplyInBoth（reply endpoint，reply_in_thread omitted） | 各自 surface | ✅ |
 | `OutInit` / `OutUsage` | Silent drop | — | ⏸ 推迟到 footer PR |
 | `OutThinking` / `OutToolStart` / `OutToolEnd` | ReplyInThread | thread 抽屉 | ✅ 不变 |
 
-> **F-44 follow-up**: `OutReply` / `OutResult` / `OutTask*` 最初规划走 `ReplyInThreadAndChat`（reply endpoint，reply_in_thread 省略）以保留 "Reply to <sender>" 视觉锚。生产环境中观察到：一旦同 turn 的 `OutToolStart` / `OutToolEnd`（用 `ReplyInThread` = `reply_in_thread=true`）在 user message 上建了 thread，**后续所有 `ReplyInBoth` 会被 server 拉进 thread 抽屉，主 chat 看不到**。reply.go docstring 第 17-19 行也明确写了这条 Feishu 行为。
->
-> 修法：`OutReply` / `OutResult` / `OutTask*` 改走 `ReplyInChat`（top-level Create，无 anchor），**保证主 chat 永远可见**，代价是失去 "Reply to <sender>" 头部（task receipt card 原本就没有 "Reply to" 概念，受影响小）。`OutCard` / `OutCommandReply` / `OutCompaction` 保持 `ReplyInBoth`——这些是单条 reply，触发 parent thread 的概率低（per-turn 通常 0–1 条）。
+> **F-44 + F-44 follow-up timeline**:
+> 1. **F-44 first-pass**: `OutReply` 改为独立 top-level Create (ReplyInChat), 原因 parent-thread gotcha (一旦同 turn `OutToolStart`/`OutToolEnd` 在 user message 上建 thread, 后续 `ReplyInBoth` 被拉进 thread 抽屉)
+> 2. **F-44 follow-up #1**: 同样理由把 `OutResult` 切到 `ReplyInChat`
+> 3. **F-44 follow-up #2**: 同样理由把 `OutTask*` 切到 `ReplyInChat` (cold-start)
+> 4. **F-44 revert (this)**: `OutReply` 改回 fold 进 receipt card (`ReplyInBoth` 锚定 userMsgID)，原因: top-level Create 表面产生 N 个独立气泡, 视觉上难 scan。修法是 F-40 的 overflow bail-out — 一旦单 card 超过 50 elements / 30 KB envelope, 该 chunk 转 `ReplyInChat` (top-level Create, 永远在主 chat 可见)。`OutResult` / `OutTask*` 保持 `ReplyInChat`。
+
+**F-44 revert 的 trade-off**:
+- ✅ 视觉回到 F-25 → F-40 那种 "1 张 card 装 N 段 reply"，比 N 个独立气泡好 scan
+- ✅ Overflow 自动 bail-out：极端长 reply（每 chunk 都 1 KB+ × 50 个）不会让 card 爆炸
+- ❌ Receipt card 仍然受 parent-thread gotcha 影响（锚定 userMsgID），有 tool 的 turn 仍然会被吸进 thread 抽屉
+- ❌ Overflow 的 chunk 视觉上跟 fold 的 chunk 不一样（独立气泡 vs card 内的 div），用户可能感觉到割裂
+
+用户接受这个 trade-off：F-40 时代的 receipt card 是用户熟悉的视觉模型，且 overflow bail-out 保证了 "信息不会丢"。F-44 follow-up #1/#2 仍然解决 `OutResult` / `OutTask*` 的 thread 可见性问题（这两个没有 chunk-stream 视觉问题）。
 
 ### 0.4 为什么不是 v2.0
 

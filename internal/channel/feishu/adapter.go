@@ -930,6 +930,41 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	return transient, true, nil
 }
 
+// postOrphanReplyCard sends a single OutReply chunk as a top-level
+// Card 2.0 message — no parent userMsgID, so no receipt to PATCH
+// later. This is the unified fallback used by OutReply whenever the
+// anchored receipt path is unavailable: original orphan (msg.ReplyTo
+// == ""), cold-start SendCard failure, and AppendEntryWithFooter
+// ErrReceiptOverflow bail-out.
+//
+// F-46 unification: OutReply is ALWAYS a card. Pre-F-46 these
+// fallbacks called sendReplyInThreadAndChat which routed the orphan
+// case to sendRawOutText — a plain-text bubble with no hr / no grey
+// footer. That violated the "OutReply is a card" invariant the rest
+// of the chat relies on (receipt cards elsewhere render the footer
+// via buildReceiptCard's Section 3). postOrphanReplyCard runs the
+// same buildReceiptCard so the footer (hr + #999999 plain_text)
+// renders identically to anchored receipts — N+1 chunks → N+1 cards,
+// each carrying its own footer.
+//
+// No receipt registration: orphan replies have no parent userMsgID
+// to anchor subsequent chunks. If a later event in the same turn
+// arrives with a different reply target, it gets its own card via
+// the same helper (or a receipt if a userMsgID shows up later).
+func (a *Adapter) postOrphanReplyCard(ctx context.Context, chatID, text string, footerLines []string) error {
+	entries := []LogEntry{{Icon: "💬", Text: text}}
+	body, err := buildReceiptCard(entries, nil, footerLines)
+	if err != nil {
+		return fmt.Errorf("feishu: build orphan reply card: %w", err)
+	}
+	// rootID="" → top-level Create (ReplyInChat), replyInThread=false
+	// → main chat visible. Matches the cold-start receipt path so the
+	// orphan bubble is indistinguishable from the first receipt card
+	// at the wire level (only the receipt registration differs).
+	_, err = a.SendCard(ctx, chatID, body, "", false)
+	return err
+}
+
 // ensureReceiptForTask lazily creates a receipt when the FIRST event
 // for a userMsgID is an OutTaskCreate / OutTaskUpdate (the agent
 // produces tasks but no OutReply yet — TaskCreate-only turn). The
@@ -1048,46 +1083,42 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// when text exceeds divTextCharLimit). Overflow pre-check
 		// in AppendEntry catches the 50 elements / 30 KB envelope
 		// limit and returns ErrReceiptOverflow; the caller falls
-		// back to a fresh top-level Create via
-		// sendReplyInThreadAndChat so the overflow chunk is never
-		// lost (F-40 bail-out, F-44 follow-up styling).
+		// back to a fresh top-level Create via postOrphanReplyCard
+		// so the overflow chunk is never lost (F-40 bail-out, F-44
+		// follow-up styling).
 		//
 		// Empty text is dropped silently to match pre-F-44
 		// behavior (no blank bubbles).
 		//
-		// Orphan path (no userMsgID): no anchor, no card. Send as
-		// top-level Create so the user still sees the chunk.
+		// F-46 unification: OutReply is ALWAYS a card. Three
+		// sub-paths funnel through one renderer (buildReceiptCard):
+		//   - msg.ReplyTo == "": postOrphanReplyCard — fresh
+		//     top-level card, no receipt (no parent to PATCH into).
+		//   - msg.ReplyTo != "" + cold-start:
+		//     ensureReceiptForReplyWithFooter — receipt + first
+		//     entry, subsequent chunks AppendEntryWithFooter.
+		//   - msg.ReplyTo != "" + AppendEntryWithFooter overflow:
+		//     postOrphanReplyCard — fresh top-level card.
+		// In all three cases the footer (hr + #999999 plain_text)
+		// renders via buildReceiptCard's Section 3. Pre-F-46 the
+		// orphan / overflow fallbacks went through plain text via
+		// sendReplyInThreadAndChat → sendRawOutText, which had no
+		// hr element and no text_color support — those bubbles
+		// looked visibly different from the anchored receipt cards
+		// (no divider, no grey footer).
 		text := strings.TrimSpace(msg.Text)
 		if text == "" {
 			return nil
 		}
-		// F-45 §2.8: footer rendering strategy depends on the
-		// dispatch path:
-		//   - Receipt path (msg.ReplyTo != ""): the receipt card
-		//     IS the main-chat message — the footer appears ONCE
-		//     at the bottom of the card (Section 3 in
-		//     buildReceiptCard). We pass footer to the receipt,
-		//     NOT into the entry text, so N chunks render ONE
-		//     footer at the card bottom instead of N+1 copies
-		//     (one per entry + one final). Without this,
-		//     receipts with several chunks grow visually
-		//     cluttered and the PATCH diff grows on every render.
-		//   - Orphan / overflow path (no userMsgID or
-		//     ErrReceiptOverflow): the chunk escapes to a fresh
-		//     top-level Create via sendReplyInThreadAndChat —
-		//     no receipt to host the footer, so append to text.
-		// F-45 footer rendering:
-		//   - Receipt path: pass per-line footerLines to receipt
-		//     (card renders ONE footer at the bottom via div +
-		//     one plain_text per line). N chunks render ONE
-		//     footer, not N+1.
-		//   - Orphan / overflow path: append joined string form
-		//     to text (top-level message has no receipt to host
-		//     the footer).
+		// F-45 §2.8: footer is always passed per-line to
+		// buildReceiptCard (via the receipt or via the orphan
+		// helper). One footer per card, regardless of chunk
+		// count — the per-line array ensures buildReceiptCard
+		// emits one <hr> + <div> block at the bottom instead of
+		// N+1 copies inline.
 		footerLines := formatSessionFooterLines(msg.SessionContext)
-		footerText := formatSessionFooter(msg.SessionContext)
 		if msg.ReplyTo == "" {
-			return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", appendFooterToText(text, footerText))
+			return a.postOrphanReplyCard(ctx, msg.ChatID, text, footerLines)
 		}
 		// Cold-start: if no receipt exists for this userMsgID,
 		// create one with the first entry already installed.
@@ -1097,15 +1128,15 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if err != nil {
 			// Cold-start failed (SendCard error). Fall back to
 			// top-level Create so the user still sees the chunk.
-			return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", appendFooterToText(text, footerText))
+			return a.postOrphanReplyCard(ctx, msg.ChatID, text, footerLines)
 		}
 		if !created {
 			// Receipt exists. Try to append; if the would-be card
 			// would exceed 50 elements / 30 KB envelope, bail out
-			// to a fresh top-level Create.
+			// to a fresh top-level card.
 			if err := receipt.AppendEntryWithFooter(ctx, LogEntry{Icon: "💬", Text: text}, footerLines); err != nil {
 				if errors.Is(err, ErrReceiptOverflow) {
-					return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", appendFooterToText(text, footerText))
+					return a.postOrphanReplyCard(ctx, msg.ChatID, text, footerLines)
 				}
 				return err
 			}
@@ -1574,85 +1605,6 @@ func (a *Adapter) sendResultAsReply(
 	// push the card body past 28 KB once envelope JSON wrapping is added.
 	if len(body) > resultCardEnvelopeBudget {
 		a.logger.Warn("feishu: result reply over envelope, truncating",
-			"chat_id", chatID, "user_msg_id", userMsgID,
-			"body_bytes", len(body))
-		truncated := truncateForLog(sanitized, resultCardEnvelopeBudget/3)
-		msgType, body, err = buildResultPayload(truncated)
-		if err != nil {
-			return err
-		}
-	}
-
-	_, err = a.sendContent(ctx, chatID, msgType, body, "", false)
-	return err
-}
-
-// sendReplyInThreadAndChat (F-44) posts an OutReply chunk as a
-// stand-alone top-level message (ReplyInChat — PR #47's top-level
-// Create surface). This replaces the F-40 fold path (which routed
-// OutReply into the receipt card's rolling log) — every chunk now
-// gets its own message so the user sees content immediately without
-// waiting for a PATCH cycle.
-//
-// F-44 sibling of sendResultAsReply. Shares:
-//   - 3-segment dispatch (text / post+md / card) via buildResultPayload
-//   - markdown sanitize pipeline via SanitizeCardMarkdown
-//   - 28 KB envelope defense via resultCardEnvelopeBudget
-//   - top-level Create wire (ReplyInChat, per PR #47: main chat
-//     visible, no thread anchor)
-//
-// See sendResultAsReply for the full rationale on top-level Create vs
-// ReplyInBoth (the parent-thread gotcha that motivated this switch).
-//
-// Differences from sendResultAsReply:
-//   - envelope cap: perReplyMaxBytes (F-44) instead of perResultMaxBytes.
-//     Same value today (6 KB), independent constants so the two surfaces
-//     can diverge in the future if one surface adopts a stricter cap.
-//   - No `❌ ` prefix on errors: OutReply is a stream chunk and never
-//     carries an error payload. (EventError → OutMessageState path
-//     owns the error reaction; receipt error message is no longer
-//     rendered in F-44.)
-//   - Orphan path (empty userMsgID) → top-level plain text via
-//     sendRawOutText, identical to sendResultAsReply's fallback.
-func (a *Adapter) sendReplyInThreadAndChat(
-	ctx context.Context, chatID, userMsgID, text string,
-) error {
-	if strings.TrimSpace(chatID) == "" {
-		return errors.New("feishu: chat_id is required")
-	}
-	if strings.TrimSpace(text) == "" {
-		// Defensive: caller already filters empty replies.
-		return nil
-	}
-
-	// Orphan reply (no userMsgID) — top-level plain text
-	// bubble. Mirrors OutCommandReply + sendResultAsReply
-	// fallbacks: no anchor → no thread, just a plain bubble.
-	if userMsgID == "" {
-		return a.sendRawOutText(ctx, chatID, text)
-	}
-
-	// Apply markdown sanitize pipeline so the rendered output
-	// doesn't get rejected by Feishu (230001 invalid href) or
-	// break lark_md rendering on edge cases.
-	sanitized := SanitizeCardMarkdown(text)
-
-	// Hard cap to stay well under 30 KB envelope with margin
-	// for JSON envelope + future growth. Same budget as
-	// sendResultAsReply — the envelope is shared, so the cap
-	// is shared.
-	if len(sanitized) > perReplyMaxBytes*4 {
-		sanitized = truncateForLog(sanitized, perReplyMaxBytes)
-	}
-
-	msgType, body, err := buildResultPayload(sanitized)
-	if err != nil {
-		return err
-	}
-
-	// Envelope defensive cap.
-	if len(body) > resultCardEnvelopeBudget {
-		a.logger.Warn("feishu: reply over envelope, truncating",
 			"chat_id", chatID, "user_msg_id", userMsgID,
 			"body_bytes", len(body))
 		truncated := truncateForLog(sanitized, resultCardEnvelopeBudget/3)

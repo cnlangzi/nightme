@@ -1860,6 +1860,96 @@ func TestSend_OutReply_EmptyText_SilentDrop(t *testing.T) {
 	}
 }
 
+// TestSend_OutReply_OrphanReplyTo_AlwaysCard verifies the F-46
+// unification: when OutReply has no userMsgID (msg.ReplyTo == ""),
+// the message is still posted as a Card 2.0 (interactive) — NOT as
+// plain text. Pre-F-46 the orphan path went through
+// sendReplyInThreadAndChat → sendRawOutText, which rendered no
+// hr element and no text_color (Feishu plain-text bubbles don't
+// support either). This forced the orphan bubble to look visibly
+// different from the anchored receipt cards that DID have hr +
+// grey footer. F-46 funnels all three OutReply sub-paths
+// (orphan / cold-start / overflow-bail-out) through buildReceiptCard
+// so the footer renders identically in every case.
+func TestSend_OutReply_OrphanReplyTo_AlwaysCard(t *testing.T) {
+	a := testAdapter(t)
+
+	type captured struct {
+		ChatID        string
+		MsgType       string
+		RootID        string
+		Body          string
+		ReplyInThread bool
+	}
+	var sends []captured
+	a.sendFunc = func(_ context.Context, chatID, msgType, body, rootID string, replyInThread bool) (string, error) {
+		sends = append(sends, captured{ChatID: chatID, MsgType: msgType, RootID: rootID, Body: body, ReplyInThread: replyInThread})
+		return "om_card_orphan", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	ctx := &gateway.SessionContext{
+		Agent:  "claude",
+		Model:  "opus-4-5",
+		CumulativeUsage: agent.UsageInfo{
+			InputTokens: 100, OutputTokens: 50, CostUSD: 0.123,
+		},
+	}
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind:           gateway.OutReply,
+		ChatID:         "oc_test",
+		ReplyTo:        "", // orphan — no parent user message
+		Text:           "orphan reply chunk",
+		SessionContext: ctx,
+	}); err != nil {
+		t.Fatalf("Send(OutReply orphan): %v", err)
+	}
+
+	// Exactly one SendCard call.
+	if len(sends) != 1 {
+		t.Fatalf("send count = %d, want 1 (one orphan card)", len(sends))
+	}
+	got := sends[0]
+	if got.ChatID != "oc_test" {
+		t.Errorf("ChatID = %q, want %q", got.ChatID, "oc_test")
+	}
+	// F-46 unification: orphan OutReply MUST be a card (interactive
+	// message type), never plain text. Pre-F-46 this was
+	// MsgTypeText via sendRawOutText.
+	if got.MsgType != "interactive" {
+		t.Errorf("MsgType = %q, want %q (F-46: orphan OutReply is always a card)", got.MsgType, "interactive")
+	}
+	// Top-level Create (no anchor): rootID="", replyInThread=false.
+	if got.RootID != "" {
+		t.Errorf("RootID = %q, want \"\" (top-level Create for orphan)", got.RootID)
+	}
+	if got.ReplyInThread {
+		t.Errorf("reply_in_thread = true, want false (orphan: top-level in main chat)")
+	}
+	// Entry text embedded with the 💬 icon prefix.
+	if !strings.Contains(got.Body, "💬 orphan reply chunk") {
+		t.Errorf("body missing entry text (want 💬 prefix + chunk), got %q", got.Body)
+	}
+	// Footer renders via buildReceiptCard Section 3 — hr divider +
+	// grey plain_text lines. Pre-F-46 plain-text path had neither.
+	if !strings.Contains(got.Body, `"tag":"hr"`) {
+		t.Errorf("orphan card body missing hr divider; F-46 unification expects hr + grey footer in every card path\nbody: %s", got.Body)
+	}
+	if !strings.Contains(got.Body, `"text_color":"#999999"`) {
+		t.Errorf("orphan card body missing grey text_color; F-46 unification expects hr + grey footer in every card path\nbody: %s", got.Body)
+	}
+	if !strings.Contains(got.Body, `plain_text`) {
+		t.Errorf("orphan card body missing plain_text footer element\nbody: %s", got.Body)
+	}
+	// No receipt registered (orphan has no parent to PATCH into).
+	a.mu.RLock()
+	_, hasReceipt := a.receiptsByUserMsgID[""]
+	a.mu.RUnlock()
+	if hasReceipt {
+		t.Errorf("orphan reply should NOT register a receipt (no parent to anchor PATCHes to)")
+	}
+}
+
 // TestSend_OutInit_SilentDrop and TestSend_OutUsage_SilentDrop
 // verify the F-44 footer deferral: OutInit / OutUsage events reach
 // the Send dispatcher (the path is exercised) but produce no Feishu

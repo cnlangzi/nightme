@@ -33,6 +33,9 @@
 | F-37 | **OutThinking / OutToolStart / OutToolEnd → Feishu thread reply + 类型感知摘要**（反转 §13.6 折叠方案；含 §1.4 抽象/具体边界规范的最终落地——OutboundMessage 100% typed，Meta + Reaction 死代码删除）| [feat/F-37-tool-thread-routing.md](./feat/F-37-tool-thread-routing.md) | v1.3.x | ✅ 已实现（9 commits / PR #31；review-clean）|
 | F-38 | **Claude TaskCreate / TaskUpdate → Feishu receipt 任务清单**（成功 tool_result 后归一化完整 task snapshot；Gateway typed 透传；Feishu 单 markdown element 原位 PATCH）| [feat/F-38-task-checklist.md](./feat/F-38-task-checklist.md) | v1.3.x | ✅ 已实现（doc-first + 完整 race 测试覆盖）|
 | F-39 | **`/tools on\|off` + 合并渲染** — per-chat ToolsMode 开关（默认 Hide，runtime 丢弃 OutToolStart / OutToolEnd）；当 on 时 Feishu adapter 合并每对 tool 的 start + end 为**一条** thread reply（PATCH 同一 message_id）；10 tools/turn 从 20 thread replies 降到 10 | [feat/F-38-tool-merge-and-toggle.md](./feat/F-38-tool-merge-and-toggle.md) | v1.3.x | ✅ 已实现（4 commits / 单 PR）|
+| F-40 | **OutReply 超限改独立 Reply + `OutText` → `OutReply` 改名** — 长度(> 8000 runes)或数量(≥ 45 entries)超限 → `ReplyInThreadAndChat` 独立 reply；删 receipt 内 600B truncate；迟到 OutReply 走独立 reply 不静默丢 | [feat/F-40-outreply-overflow.md](./feat/F-40-outreply-overflow.md) | v1.3.x | ✅ 已实现（PR #43）|
+| F-41 | **WS active reconnect** — 30s ticker 在 `OnDisconnected` 后周期性 `Stop() + 100ms + Start()`，把 WS 断开到重连最大等待从 SDK 默认 2min 压到 30s；无 HTTP probe / 无 tier / 无 circuit breaker | [feat/F-41-active-reconnect.md](./feat/F-41-active-reconnect.md) | v1.3.x | ✅ 已实现 |
+| F-42 | **Lazy Receipt Creation + MessageState 简化 + TaskList 标题** — 删 cold-start 空 Receipt card，改 lazy create（首个 OutReply / OutTask 触发）；Feishu MessageState reactions 删 ⏳/🔄 留 ✅/❌；TaskList 永远加 `**📋 Tasks**` markdown 标题 | [feat/F-42-lazy-receipt-creation.md](./feat/F-42-lazy-receipt-creation.md) | v1.3.x | 📝 设计阶段（doc-first）|
 
 **v1.2 关键变化**：
 - 删除：`/run` 命令（被 `/use` 替代）

@@ -721,8 +721,9 @@ func (g *gateway) OnMessageState(chatID, userMsgID string, state agent.MessageSt
 		return
 	}
 	out := OutboundMessage{
-		Kind:   OutMessageState,
-		ChatID: chatID,
+		Kind:    OutMessageState,
+		ChatID:  chatID,
+		ReplyTo: userMsgID, // anchor for Typing placeholder + AddReaction target
 		MessageState: &MessageStatePayload{
 			State:     state,
 			MessageID: userMsgID,

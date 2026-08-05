@@ -425,6 +425,85 @@ type OutboundMessage struct {
 
 ---
 
+## 0.11 文档变更摘要（v1.3.x F-44 增量，2026-08-05）
+
+**背景**：F-25 → F-40 → F-42 三轮演进后，Feishu receipt card 承担 4 类内容（prompt state header + OutReply entries + Tasks checklist + init/usage footer），渲染路径 ~1000 行。但其中：
+- **OutReply fold 进 receipt 的价值被稀释** ── 用户等 PATCH 周期才能看到完整内容；fold 路径需要 overflow / late-reply / no-receipt 三种 bail-out 协调
+- **OutInit / OutUsage footer 不再需要** ── F-42 lazy create 后，turn 无 OutReply/OutTask 时 receipt 不存在，footer 走 silent drop（token 成本信息丢失）；turn 有内容时挤 50 element 预算
+- **Task checklist 才是真正必要的 folding surface** ── 多事件 fold 成 1 张 card 持续 PATCH markdown checklist section，跟 OutReply fold 完全不同的渲染需求，可以脱离 OutReply fold 路径独立存在
+
+**F-44 三件事一次解决**（渲染路径简化，不是新功能）：
+
+1. **OutReply 拆出 receipt，改为独立 `ReplyInThreadAndChat`**
+   - 每个 `OutReply` chunk → 1 条独立消息，锚定 `userMsgID`（main chat 可见 + thread reply 视觉）
+   - 复用 F-39 `sendResultAsReply` 的 3 段 dispatch（`MsgTypeText` / `MsgTypePost+md` / `MsgTypeInteractive`）+ `SanitizeCardMarkdown` + `splitMarkdownForDivs` + `truncateRunes`（28 KB envelope defense）
+   - 唯一差别：不加 icon 前缀（OutReply 是流延续，不是新条目）
+   - 删除：`ensureReceiptForReply` / `isOverflowingReceipt` / `sendReplyAsMessage` 三个 F-40 / F-42 加的协调 helper
+
+2. **Task Receipt 瘦身：只装 Tasks section**
+   - `buildReceiptCard` 删 header / entries / footer / hr sections，只保留 `**📋 Tasks**` checklist
+   - `MessageReceipt` 删 `entries []LogEntry` / `init` / `usage` 字段及配套方法
+   - 保留：`tasks []agent.TaskItem` + `SetTaskList` snapshot 替换逻辑 + `ensureReceiptForTask` lazy create
+   - `promptState` FSM 仍由 Channel 内部 `MessageReceipt` 自管（`PromptPending → PromptRunning → PromptSucceeded/Failed`），但驱动源从"首 OutReply 到达"改成"首 OutTask* 到达"
+
+3. **`OutInit` / `OutUsage` silent drop（推迟到 footer PR）**
+   - `Send()` case `OutInit` / `OutUsage` → `return nil`，不渲染
+   - `agent.EventInit` / `EventUsage` → `OutboundMessage{Init / Usage}` 的 Translate 路径**保留**（footer PR 用）
+   - footer 设计（每条 ReplyInThreadAndChat 都带 `🤖 Agent · Model · Tokens · Cost`）需要扩展 `OutboundMessage` wire format + ChatSession 状态 + EventHandler 协调，单独 PR 处理
+
+**核心变化**（仅 Channel 内部路由）：
+
+1. **`internal/channel/feishu/adapter.go`**:
+   - `Send` case `OutReply`：改为 `sendReplyInThreadAndChat`（每 chunk 独立 reply）
+   - `Send` case `OutInit` / `OutUsage`：`return nil`
+   - 新 helper：`sendReplyInThreadAndChat(ctx, chatID, userMsgID, text)`
+   - 新增常量：`perReplyMaxBytes = 6 * 1024`（独立 reply envelope defense）
+   - 删除：`ensureReceiptForReply` / `isOverflowingReceipt` / `sendReplyAsMessage`
+2. **`internal/channel/feishu/receipt.go`**:
+   - `buildReceiptCard`：只剩 tasks section（删 header / entries / footer / hr）
+   - `renderLocked`：只处理 task snapshot 替换 PATCH
+   - 删除 `MessageReceipt.Append` / `SetExecuting` / `SetCompleted` / `appendEntryLocked` / `lastEntryLocked` / `EntryCount` / `evictOverflowLocked` 方法（`Append` 是 F-44 后唯一 production caller 全消失的 dead state chain 入口；`SetExecuting` / `SetCompleted` 早就是 dead code）
+   - 删除字段：`entries` / `agentName` / `workspace` / `branch` / `inputTokens` / `outputTokens`（OutInit/OutUsage 改 silent drop 后无写者；buildReceiptCard 不读）
+   - 保留字段：`promptState` / `completedAt`（footer PR 可能复活 receipt prompt state header）
+3. **`internal/channel/feishu/receipt_event.go`**:
+   - **整个文件删除**（连带 `eventToEntry` / `formatUsageText` / `thinkingPrefix` / `truncateForLog` 全部 dead code）
+4. **`internal/channel/feishu/receipt_event_test.go`**:
+   - **整个文件删除**（覆盖的都是被删除的函数）
+5. **`internal/channel/feishu/card_sanitize.go`**:
+   - 整个文件**合并进 `result_render.go`**（`SanitizeCardMarkdown` 仍 exported，因为 `buildInteractiveCard` 也调用）
+
+**wire 形态**（`OutboundMessage` 字段不变）：
+
+| Kind | F-44 后 | Feishu API | main chat | thread |
+|---|---|---|---|---|
+| `OutReply` | 每 chunk → 独立 `ReplyInThreadAndChat` | `POST /messages/{rootID}/reply`, `reply_in_thread=false` | ✅ | ✅ reply 视觉 |
+| `OutResult` | 独立 `ReplyInThreadAndChat`（F-39 不变） | 同上 | ✅ | ✅ |
+| `OutTaskCreate` / `OutTaskUpdate` | Rolling-log `ReplyInThreadAndChat` card | Create + 多次 PATCH 同一 card | ✅ | ✅ |
+| `OutInit` / `OutUsage` | Silent drop | — | — | — |
+| 其他 | 不变 | 各自 | 各自 | 各自 |
+
+**不变式**：
+- `OutboundMessage` 全字段不变（`Init` / `Usage` typed field 保留，footer PR 用）
+- Gateway 不动（`Translate` 仍产 OutboundMessage）
+- ChatSession 不动（`currentTurnUserMsgID` 单数锚点 + `InputBuffer` 不变）
+- `OutboundMessage.ReplyTo = cs.currentTurnUserMsgID` 不变（独立 reply 也锚同 userMsgID）
+- §1.4 边界规范保留（Init/Usage 是 typed primitive，Channel 自决渲染目标）
+- 抽象归抽象 / 具体归具体原则保留（独立 reply 是 Feishu 自治决策）
+- 1 turn : 1 anchor 不变式保留
+- F-31 MessageState 抽象契约不变（state → reaction 是 Channel 自治）
+- F-37 thread routing 决策不变（thinking/tool/compaction 仍走 thread reply）
+- F-38 task checklist 决策**保留**（task snapshot 仍 fold 进 rolling-log card，但 card 只剩 task section）
+- F-39 OutResult 决策不变（OutResult 仍独立 reply）
+- F-40 OutReply 命名 + 删 600B truncate 决策保留；overflow / late-reply bail-out **删除**（不再需要）
+- F-42 lazy receipt creation 决策保留；`ensureReceiptForReply` **删除**（OutReply 不再触发 receipt 创建），`ensureReceiptForTask` 保留
+- F-25 rolling-log UX **部分保留**：task receipt 仍是 rolling-log；OutReply 不再 rolling-log（改为独立 reply 流）
+
+**为什么不叫 v2.0**：v1.3 核心不变式（职责隔离、Binding FSM owner、Receipt 自治、抽象归抽象 / 具体归具体）全部保留。F-44 是 Channel 自治范围内的渲染路径简化（OutReply 拆出 receipt + task receipt 瘦身 + OutInit/OutUsage 推迟），不影响 nightme 数据模型与 Gateway 契约。
+
+**详细落地**：见 [`docs/feat/F-44-outreply-independent-and-task-receipt.md`](./feat/F-44-outreply-independent-and-task-receipt.md) + `docs/channel/feishu.md` §13.21。
+
+---
+
 ### 0.7 文档变更摘要（v1.3.x F-38 增量，2026-08-04）
 
 **背景**：F-thread-route 把 `OutToolStart` / `OutToolEnd` 都投到飞书 thread，每个 tool 产生**两条**独立 thread reply（先 `● Tool(args)` 再 `⎿  …`）。一次 agent turn 调 10 个工具 = 20 条 thread reply，视觉噪声 + 限速成本都很高。同时用户没有 per-chat 开关控制工具调用是否显示——既不能选择 plain text vs 合并格式，也不能选择看 vs 不看。F-38 同时解决这两点。

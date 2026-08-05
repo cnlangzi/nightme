@@ -609,12 +609,33 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 // Send implements the v0.3 channel.Channel interface. It dispatches
 // each OutboundKind to the corresponding Feishu API call:
 //
-//	OutReply             → CreateMessage (msg_type=text)
+//	OutReply             → rolling-log receipt card (F-44 revert —
+//	                       folds back into the F-25 → F-40 pattern).
+//	                       First chunk cold-starts a Card 2.0 via
+//	                       SendCard (ReplyInBoth, reply endpoint
+//	                       with reply_in_thread omitted, anchored
+//	                       to userMsgID). Subsequent chunks PATCH
+//	                       the same card in place; each chunk is
+//	                       rendered as one or more `div` elements
+//	                       (multi-div split via splitMarkdownForDivs
+//	                       when the chunk text exceeds 1000 runes).
+//	                       If appending would push the card past
+//	                       50 elements / 30 KB envelope, AppendEntry
+//	                       returns ErrReceiptOverflow and the
+//	                       chunk is sent as a fresh top-level Create
+//	                       (F-40 bail-out, F-44 follow-up styling).
+//	                       Orphan path (no userMsgID) goes straight
+//	                       to top-level Create via
+//	                       sendReplyInThreadAndChat.
+//	OutResult            → top-level Create (F-39 + F-44 follow-up;
+//	                       ReplyInChat / sendResultAsReply — final
+//	                       answer, no chunk-stream visual problem).
 //	OutToolStart/End     → F-34 thread-reply as the "● Tool(args)"
 //	                       / "⎿  …" Claude Code-style lines. F-38
 //	                       §3.1.3: each Start posts a fresh thread
-//	                       reply; the matching End PATCHes that same
-//	                       reply with start body + "\n" + result body
+//	                       reply (ReplyInThread — reply_in_thread=true);
+//	                       the matching End PATCHes that same reply
+//	                       with start body + "\n" + result body
 //	                       (one thread reply per tool, not two).
 //	                       Orphan Ends + PATCH failures fall back to
 //	                       posting a fresh result thread reply.
@@ -623,10 +644,33 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	                       Idempotency via a.messageStates map.
 //	OutMessageStateRemoved → DeleteReaction on MessageState.ReactionID
 //	                       (reserved; v1.3 uses append-only)
-//	OutCard              → send interactive card via sendContent
-//	OutThinking          → dropped (no native Feishu equivalent;
-//	                       future: a sub-message indicator)
-//	OutTyping            → dropped (no native Feishu equivalent)
+//	OutCard              → top-level Create via sendContent (PR #47's
+//	                       ReplyInChat — rootID="") with the 🔐 emoji
+//	                       prepended to the card title (channel
+//	                       decoration). F-44 revert #2: a permission
+//	                       card is a blocking UI element (user must
+//	                       click Allow/Deny) — it MUST stay visible
+//	                       in main chat regardless of whether the
+//	                       parent user message has a tool thread.
+//	OutTaskCreate/Update → Receipt card via SendCard (top-level
+//	                       Create on first send, PATCH in place after)
+//	                       — rolling-log task checklist, no anchor
+//	                       to userMsgID (F-44 follow-up: same
+//	                       parent-thread gotcha as OutReply/OutResult).
+//	OutCompaction        → ReplyInBoth (low-frequency one-shot marker,
+//	                       brief "✶ Compacting…" line in main chat;
+//	                       thread-pull is acceptable since the
+//	                       marker is rare).
+//	OutCommandReply      → top-level Create via SendMessageText
+//	                       (PR #47's ReplyInChat — rootID="") with
+//	                       the ❯ emoji prepended to the text body
+//	                       (channel decoration). F-44 revert #2:
+//	                       slash-command replies are short status
+//	                       messages, anchoring them to the user
+//	                       message is unnecessary.
+//	OutThinking          → ReplyInThread (💭 line in side panel only).
+//	OutInit / OutUsage   → silent drop (F-44: footer design deferred).
+//	OutTyping            → dropped (no native Feishu equivalent).
 //
 // Errors from the underlying API are logged and returned; the
 // Gateway treats Send as fire-and-ack (no retry).
@@ -660,74 +704,56 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 	return a.receiptsByUserMsgID[userMsgID] // nil on miss — caller decides
 }
 
-// ensureReceiptForReply lazily creates a receipt for the FIRST OutReply
-// event on a given userMsgID. It POSTs a Card 2.0 envelope that
-// already contains the reply text (no placeholder) and registers the
-// receipt under a.mu so subsequent events on the same userMsgID find
-// it via receiptFor.
+// ensureReceiptForTyping lazily creates a Typing-placeholder
+// receipt when the FIRST event for a userMsgID is a
+// OutMessageState{State: MessageForwarded} (the gateway just
+// forwarded the user message to the agent). The placeholder has
+// NO entries and NO tasks yet — the card body just shows the
+// "⌨️ Working..." markdown header line that buildReceiptCard
+// prepends when both lists are empty. Subsequent OutReply /
+// OutTask* events stream updates onto the same card via
+// AppendEntry / SetTaskList (each re-render replaces the
+// placeholder header with real content).
 //
-// Returns the receipt plus a `created` flag:
-//   - created=true: receipt was just constructed and `text` is already
-//     in its entries list. Caller MUST NOT call Append(EventText)
-//     again — it would duplicate the entry.
-//   - created=false: an existing receipt was returned (another
-//     goroutine won the race, or a TaskList-first path already built
-//     it). Caller should Append normally.
+// F-44 lifecycle shift: receipts used to be lazy-created on the
+// first content event (OutReply / OutTaskCreate). With this
+// commit the placeholder appears the moment the agent receives
+// the user message — the user sees immediate "I heard you,
+// working on it…" feedback in main chat, before any stream chunk
+// or task event lands. The placeholder rolls forward into a real
+// rolling-log card as content arrives.
 //
-// F-42: replaces the v1.3 cold-start minimal-⏳-card behavior. See
-// docs/feat/F-42-lazy-receipt-creation.md §1.1 and SPEC §2.4.
+// Wire: top-level Create (rootID="") so the placeholder stays in
+// main chat regardless of the parent user message's thread
+// state. Same parent-thread gotcha rationale as
+// ensureReceiptForReply / ensureReceiptForTask / OutCard /
+// OutCommandReply.
 //
-// F-42 review fixes (this commit):
-//   - Finding #1: returns an error (not (nil,false,nil)) when
-//     eventToEntry filters the text (thinking-prefix or empty).
-//     The OutReply caller already degrades to sendRawOutText on
-//     error, so the user still sees the text as a top-level
-//     bubble — no more nil-pointer panic on receipt.IsCompleted().
-//   - Finding #4: register-before-SendCard. The placeholder is
-//     committed to receiptsByUserMsgID under a.mu BEFORE
-//     SendCard runs, with `initializing=true` set so concurrent
-//     renderLocked calls short-circuit instead of issuing a
-//     second SendCard (which would orphan the loser's card in
-//     chat). The pre-F-42 "pre-check, then SendCard, then
-//     post-SendCard re-check" pattern had a race window where
-//     two goroutines could both pass the pre-check and both call
-//     SendCard before either registered; the loser ended up
-//     with an orphan card in chat that no PATCH ever reached.
-func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, text string) (*MessageReceipt, bool, error) {
+// Returns the receipt plus a `created` flag: created=true means
+// the placeholder was just posted (caller can short-circuit any
+// duplicate logic — typically just OutMessageState AddReaction
+// path). created=false means a receipt already existed (race with
+// OutTask* / OutReply that fired before MessageForwarded was
+// observed, or a duplicate MessageForwarded) — caller treats it
+// as a no-op for placeholder purposes.
+//
+// F-42 review finding #5: same orphan-card race fix as
+// ensureReceiptForTask. Register-before-SendCard with the
+// `initializing` flag so concurrent SendCard / SetTaskList /
+// AppendEntry calls hit the renderLocked short-circuit instead of
+// issuing a second SendCard (the loser doesn't leave an orphan
+// card with a stale Typing header in chat).
+func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID string) (*MessageReceipt, bool, error) {
 	if userMsgID == "" {
-		return nil, false, errors.New("feishu: ensureReceiptForReply requires userMsgID")
-	}
-
-	// Build the LogEntry the same way Append would. eventToEntry
-	// returns ok=false for empty text and for thinking-prefixed
-	// text (gateway normally remaps the latter into OutThinking
-	// upstream, but a direct constructor / test / future bridge
-	// path could route it here). Return an error in that case so
-	// the caller (OutReply Send dispatcher) degrades to
-	// sendRawOutText — the text still reaches the user, just as
-	// a top-level bubble rather than folded into a receipt card.
-	// Pre-fix the helper returned (nil, false, nil) which crashed
-	// the caller on the subsequent receipt.IsCompleted().
-	entry, ok := eventToEntry(agent.AgentEvent{Kind: agent.EventText, Text: text}, time.Now())
-	if !ok {
-		return nil, false, errors.New("feishu: ensureReceiptForReply: text not eligible for receipt entry (thinking-prefix or empty)")
+		return nil, false, errors.New("feishu: ensureReceiptForTyping requires userMsgID")
 	}
 
 	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
-	transient.entries = []LogEntry{entry}
-	transient.promptState = agent.PromptRunning
-	transient.initializing = true // suppress renderLocked SendCard branch (see renderLocked docs)
+	// No entries / no tasks — buildReceiptCard will render the
+	// "⌨️ Working..." placeholder header line.
+	transient.promptState = agent.PromptPending
+	transient.initializing = true
 
-	// Register-before-SendCard. The lock-protected check-and-set
-	// is the linearization point: only the goroutine that wins
-	// the registration proceeds to SendCard. All subsequent
-	// callers (via receiptFor or via ensure itself returning the
-	// existing placeholder) get created=false and Append their
-	// own event into the placeholder; their renderLocked calls
-	// short-circuit on `initializing` and the data accumulates
-	// until the ensure helper's SendCard returns and clears the
-	// flag — at which point the next renderLocked PATCHes the
-	// canonical card with the merged entries.
 	a.mu.Lock()
 	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
 		a.mu.Unlock()
@@ -736,23 +762,146 @@ func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, 
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(transient)
+	body, err := buildReceiptCard(nil, nil)
 	if err != nil {
-		// Rollback the registration so a future attempt can retry
-		// cleanly. Compare-and-clear avoids clobbering a winner
-		// that took the slot between our release and re-acquire.
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
 			delete(a.receiptsByUserMsgID, userMsgID)
 		}
 		a.mu.Unlock()
-		return nil, false, fmt.Errorf("feishu: ensure receipt build card: %w", err)
+		return nil, false, fmt.Errorf("feishu: ensure typing receipt build card: %w", err)
 	}
 
-	// POST the card with the actual content. replyInThread=false —
-	// the card IS the pinned main-chat answer, not a thread-only
-	// artifact. (Same threading rule as the old cold-start path;
-	// see docs/channel/feishu.md §13.10.)
+	// ReplyInBoth (rootID=userMsgID) — safe pattern from main's
+	// reply.go doc: at MessageForwarded time, the parent has no
+	// thread yet (no prior reply_in_thread=true call), so
+	// ReplyInBoth reserves the inline-rendering slot in main
+	// chat with the "Reply to <sender>" quote header. Subsequent
+	// updates (OutReply AppendEntry / OutTask SetTaskList) go
+	// through PatchMessage on this same message_id, which is
+	// immune to a later thread promotion that happens when
+	// OutToolStart/OutToolEnd (ReplyInThread) lands on the
+	// parent. PATCH edits in place and does not re-enter the
+	// reply/thread routing logic, so the placeholder preserves
+	// its inline main-chat rendering for the lifetime of the
+	// turn.
+	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
+	if err != nil {
+		a.mu.Lock()
+		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
+			delete(a.receiptsByUserMsgID, userMsgID)
+		}
+		a.mu.Unlock()
+		a.logger.Warn("feishu: ensureReceiptForTyping send card failed",
+			"err", err, "chat_id", chatID, "user_msg_id", userMsgID)
+		return nil, false, err
+	}
+
+	a.mu.Lock()
+	transient.replyMsgID = msgID
+	transient.cardMsgID = msgID
+	transient.initializing = false
+	a.mu.Unlock()
+	return transient, true, nil
+}
+
+// ensureReceiptForReply lazily creates a rolling-log receipt when
+// the FIRST event for a userMsgID is an OutReply (no prior receipt
+// exists). The first entry is installed in the transient receipt
+// BEFORE SendCard, so the cold-start card body already carries the
+// first chunk — the user sees the chunk in the card without waiting
+// for a PATCH cycle.
+//
+// F-44 revert: restored the F-25 → F-40 "OutReply folds into
+// receipt" pattern for the visual scan benefit (1 card, N chunks,
+// PATCH in place). The card is posted via top-level Create (no
+// anchor) — same parent-thread gotcha rationale as OutResult /
+// OutTask* / OutCard / OutCommandReply: any tool-using turn creates
+// a thread on the user message, and a ReplyInBoth-anchored card
+// would be pulled into the thread drawer. Top-level Create
+// guarantees the rolling-log card stays visible in main chat.
+// The trade-off is no "Reply to <sender>" header on the card
+// (acceptable: the rolling-log card's own 💬 entries visually
+// establish "this is the bot's reply").
+//
+// Subsequent chunks (OutReply events) hit the receipt.AppendEntry
+// path which PATCHes the same card. AppendEntry's pre-render
+// overflow check catches the 50-element / 30 KB envelope limit
+// and returns ErrReceiptOverflow; the caller falls back to a
+// fresh top-level Create (always visible in main chat) so the
+// overflow chunk is never lost.
+//
+// Returns the receipt plus a `created` flag: created=true means
+// the first entry is already installed and the caller should NOT
+// call AppendEntry again. created=false means a receipt already
+// existed (race or a prior OutTask* created it) and the caller
+// should call AppendEntry / SetTaskList as usual.
+//
+// F-42 review finding #5: same orphan-card race fix as
+// ensureReceiptForTask. Register-before-SendCard with the
+// `initializing` flag — concurrent AppendEntry / SetTaskList calls
+// during the SendCard window hit the renderLocked short-circuit
+// instead of issuing a second SendCard, so the loser doesn't leave
+// an orphan card in chat with a stale entry / task snapshot.
+func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, firstEntryText string) (*MessageReceipt, bool, error) {
+	if userMsgID == "" {
+		return nil, false, errors.New("feishu: ensureReceiptForReply requires userMsgID")
+	}
+	if firstEntryText == "" {
+		return nil, false, errors.New("feishu: ensureReceiptForReply requires non-empty firstEntryText")
+	}
+
+	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
+	transient.entries = []LogEntry{
+		{Icon: "💬", Text: firstEntryText},
+	}
+	transient.promptState = agent.PromptRunning
+	transient.initializing = true
+
+	// Register-before-SendCard (see ensureReceiptForTask for the
+	// full rationale — same race fix applied symmetrically here).
+	a.mu.Lock()
+	if existing, ok := a.receiptsByUserMsgID[userMsgID]; ok && existing != nil {
+		a.mu.Unlock()
+		return existing, false, nil
+	}
+	a.receiptsByUserMsgID[userMsgID] = transient
+	a.mu.Unlock()
+
+	body, err := buildReceiptCard(transient.entries, transient.tasks)
+	if err != nil {
+		a.mu.Lock()
+		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
+			delete(a.receiptsByUserMsgID, userMsgID)
+		}
+		a.mu.Unlock()
+		return nil, false, fmt.Errorf("feishu: ensure reply receipt build card: %w", err)
+	}
+
+	// Cold-start card: ReplyInBoth (anchored to userMsgID). Per
+	// main's reply.go "safe pattern" doc: at the time the first
+	// OutReply arrives (no prior receipt), the user message has
+	// no thread yet (no OutToolStart/End has fired in this turn).
+	// ReplyInBoth reserves the inline-rendering slot in main
+	// chat with the "Reply to <sender>" quote header. Subsequent
+	// updates (AppendEntry → PatchMessage on this message_id)
+	// are immune to a later thread promotion that happens when
+	// OutToolStart/End (ReplyInThread) lands — PATCH edits in
+	// place and does NOT re-enter the reply/thread routing.
+	//
+	// If a Typing-placeholder receipt was already created by
+	// ensureReceiptForTyping on MessageForwarded (rootID also
+	// userMsgID via ReplyInBoth), this SendCard is short-circuited
+	// by the existing-receipt check above (returns existing,
+	// created=false). The placeholder's own thread_id was already
+	// reserved; AppendEntry/SetTaskList PATCH it in place.
+	//
+	// The orphan-overflow pre-check (50 elements / 30 KB envelope)
+	// runs later at AppendEntry time on each subsequent chunk; if
+	// the FIRST entry alone exceeds the budget (rare — would need
+	// a single chunk over ~30 KB), the helper returns an error
+	// and the caller falls back to a top-level Create via
+	// sendReplyInThreadAndChat.
 	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
 	if err != nil {
 		a.mu.Lock()
@@ -765,11 +914,6 @@ func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, 
 		return nil, false, err
 	}
 
-	// Promote the placeholder to a real receipt: set cardMsgID
-	// (so subsequent renderLocked takes the PATCH branch) and
-	// clear `initializing` (so the suppressed renderLocked calls
-	// from concurrent goroutines' Appends can finally fire and
-	// PATCH in their entries).
 	a.mu.Lock()
 	transient.replyMsgID = msgID
 	transient.cardMsgID = msgID
@@ -794,6 +938,16 @@ func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, 
 // SendCard window hit the renderLocked short-circuit instead of
 // issuing a second SendCard, so the loser doesn't leave an orphan
 // card in chat with a stale task snapshot.
+//
+// F-44 follow-up: the cold-start card is posted via top-level Create
+// (ReplyInChat — rootID=""), NOT ReplyInBoth. Same parent-thread
+// gotcha as OutReply/OutResult: once the user message gets a thread
+// from prior OutToolStart/End (reply_in_thread=true), ReplyInBoth
+// is silently pulled into the thread drawer. The task card is the
+// user's primary "what is the agent doing" surface — it must stay
+// visible in main chat. Subsequent PATCHes (SetTaskList →
+// PatchMessage) preserve the no-anchor state since PATCH on a
+// top-level Create stays top-level (root_id inheritance).
 func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID string, list *agent.TaskListEvent) (*MessageReceipt, bool, error) {
 	if userMsgID == "" {
 		return nil, false, errors.New("feishu: ensureReceiptForTask requires userMsgID")
@@ -823,7 +977,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(transient)
+	body, err := buildReceiptCard(nil, transient.tasks)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -833,6 +987,17 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 		return nil, false, fmt.Errorf("feishu: ensure task receipt build card: %w", err)
 	}
 
+	// F-44 + reply.go safe pattern: ReplyInBoth (rootID=userMsgID)
+// so the task card anchors to the user message with the
+// "Reply to <sender>" quote header. The parent is fresh at
+// this point (no prior reply_in_thread=true call in the turn)
+// so the slot reservation is safe; subsequent SetTaskList
+// PATCHes on the same message_id are immune to any later
+// thread promotion by OutToolStart/End. If a Typing-placeholder
+// or rolling-log receipt was already created by
+// ensureReceiptForTyping / ensureReceiptForReply, the
+// existing-receipt check above short-circuits this SendCard
+// (returns existing, created=false).
 	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
 	if err != nil {
 		a.mu.Lock()
@@ -856,85 +1021,63 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 	switch msg.Kind {
 	case gateway.OutReply:
-		// F-40: default fold path is the active receipt's
-		// rolling log. The Feishu reply is the single message the
-		// user sees; we edit it in place via UpdateMessage on
-		// each event. eventToEntry no longer truncates the text
-		// to 600 bytes — the full reply flows into LogEntry.Text
-		// and buildReceiptCard splits it into multiple `div`
-		// elements via splitMarkdownForDivs (≤ divTextCharLimit
-		// runes each).
+		// F-44 revert: OutReply folds into the rolling-log receipt
+		// card (F-25 → F-40 model) for visual scan benefit (1
+		// card, N chunks, PATCH in place).
 		//
-		// Three bail-out conditions route through
-		// sendReplyAsMessage instead of folding in:
+		// The cold-start card is posted via top-level Create
+		// (rootID="") — NOT ReplyInBoth. Same parent-thread
+		// rationale as OutResult / OutTask* / OutCard /
+		// OutCommandReply: any tool-using turn creates a thread on
+		// the user message, and a ReplyInBoth-anchored card would
+		// be pulled into the thread drawer. Top-level Create keeps
+		// the rolling-log card visible in main chat regardless of
+		// the parent's thread state. Subsequent chunks PATCH the
+		// same card via AppendEntry (preserves no-anchor state).
 		//
-		//   1. receiptFor failed (cold-start SendCard errored) →
-		//      top-level plain text bubble via sendRawOutText so
-		//      the user at least sees the reply.
-		//   2. Receipt is already PromptSucceeded (EventDone /
-		//      EventError landed earlier) → late-arriving reply
-		//      must NOT be silently dropped; deliver as a
-		//      stand-alone ReplyInThreadAndChat.
-		//   3. Receipt would overflow (length: text runes >
-		//      perEntryMaxRunes; quantity: receipt EntryCount >=
-		//      replyMaxEntries) → divert to stand-alone reply so
-		//      the receipt card stays within Feishu's element /
-		//      envelope budgets instead of crowding them.
+		// Multi-div split: each chunk is 1+ div elements (split
+		// when text exceeds divTextCharLimit). Overflow pre-check
+		// in AppendEntry catches the 50 elements / 30 KB envelope
+		// limit and returns ErrReceiptOverflow; the caller falls
+		// back to a fresh top-level Create via
+		// sendReplyInThreadAndChat so the overflow chunk is never
+		// lost (F-40 bail-out, F-44 follow-up styling).
 		//
-		// All three bail-outs share the same surface: a new
-		// ReplyInThreadAndChat message anchored at the same
-		// userMsgID. The visual distinction between "fold into
-		// receipt" and "stand-alone reply" is invisible to the
-		// user — both render as Feishu messages under their
-		// original message — but the stand-alone variant owns
-		// its own message envelope and never crowds the rolling
-		// log.
-		text := msg.Text
-		if strings.TrimSpace(text) == "" {
-			// Empty reply: drop silently. Matches the
-			// pre-F-40 behavior (append with empty text did
-			// nothing useful) and avoids sending blank
-			// bubbles to the user.
+		// Empty text is dropped silently to match pre-F-44
+		// behavior (no blank bubbles).
+		//
+		// Orphan path (no userMsgID): no anchor, no card. Send as
+		// top-level Create so the user still sees the chunk.
+		text := strings.TrimSpace(msg.Text)
+		if text == "" {
 			return nil
 		}
-
-		// F-42: lazy receipt creation. ensureReceiptForReply
-		// returns the receipt plus a `created` flag — created=true
-		// means the reply text is already in the receipt's entries
-		// list (we must NOT Append it again, that would duplicate).
+		if msg.ReplyTo == "" {
+			return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", text)
+		}
+		// Cold-start: if no receipt exists for this userMsgID,
+		// create one with the first entry already installed.
+		// ensureReceiptForReply sends the card via top-level Create
+		// (rootID=""); subsequent chunks PATCH the same card.
 		receipt, created, err := a.ensureReceiptForReply(ctx, msg.ChatID, msg.ReplyTo, text)
 		if err != nil {
-			// SendCard failed (network, quota, etc.) — degrade
-			// to a plain top-level text bubble so the user at
-			// least sees the reply.
-			return a.sendRawOutText(ctx, msg.ChatID, text)
+			// Cold-start failed (SendCard error). Fall back to
+			// top-level Create so the user still sees the chunk.
+			return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", text)
 		}
-
-		// Late reply after completion: never silently drop.
-		if receipt.IsCompleted() {
-			return a.sendReplyAsMessage(ctx, msg.ChatID, msg.ReplyTo, text)
-		}
-
-		// Overflow guard: length or quantity. isOverflowingReceipt
-		// is read-only against the receipt (acquires r.mu
-		// internally via EntryCount / len helpers — caller does
-		// not hold the lock).
-		if a.isOverflowingReceipt(receipt, text) {
-			return a.sendReplyAsMessage(ctx, msg.ChatID, msg.ReplyTo, text)
-		}
-
 		if !created {
-			// Another goroutine had already registered the receipt
-			// (race lost, or a TaskList-first path built it first).
-			// Append this text as a fresh entry.
-			return receipt.Append(ctx, agent.AgentEvent{
-				Kind: agent.EventText,
-				Text: text,
-			})
+			// Receipt exists. Try to append; if the would-be card
+			// would exceed 50 elements / 30 KB envelope, bail out
+			// to a fresh top-level Create.
+			if err := receipt.AppendEntry(ctx, LogEntry{Icon: "💬", Text: text}); err != nil {
+				if errors.Is(err, ErrReceiptOverflow) {
+					return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", text)
+				}
+				return err
+			}
 		}
-		// created=true — text already in entries by ensure.
-		// renderLocked already shipped the first card; subsequent
-		// events on this userMsgID take the Append path above.
+		// created=true — first entry was installed by ensure; no
+		// need to call AppendEntry again.
 		return nil
 
 	case gateway.OutThinking:
@@ -974,6 +1117,32 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		messageID := msg.MessageState.MessageID
 		state := msg.MessageState.State
+
+		// F-44 lifecycle shift: when the gateway has just
+		// forwarded the user message to the agent
+		// (MessageForwarded), eagerly create a Typing-placeholder
+		// receipt so the user sees "⌨️ Working..." in main chat
+		// before any OutReply / OutTask* event lands. Subsequent
+		// events stream updates onto the same card via
+		// AppendEntry / SetTaskList. The placeholder uses
+		// ReplyInBoth (anchored to userMsgID) per main's reply.go
+		// safe pattern — the parent has no thread yet at
+		// MessageForwarded time, so the slot reservation is safe;
+		// later PATCHes on the same message_id are immune to a
+		// thread promotion by OutToolStart/End.
+		//
+		// (DEBUG trap: if msg.ReplyTo is empty the placeholder is
+		// silently dropped — log so future regressions surface
+		// immediately instead of being invisible to the user.)
+		if state == agent.MessageForwarded {
+			if msg.ReplyTo == "" {
+				a.logger.Warn("feishu: OutMessageState MessageForwarded missing ReplyTo — Typing placeholder skipped (gateway should set OutboundMessage.ReplyTo = userMsgID)",
+					"chat_id", msg.ChatID, "message_state_message_id", msg.MessageState.MessageID)
+			} else if _, _, err := a.ensureReceiptForTyping(ctx, msg.ChatID, msg.ReplyTo); err != nil {
+				a.logger.Warn("feishu: ensureReceiptForTyping failed",
+					"err", err, "chat_id", msg.ChatID, "user_msg_id", msg.ReplyTo)
+			}
+		}
 
 		// Terminal-state guard: once we've rendered MessageDone or
 		// MessageFailed for a userMsgID, no later MessageState can
@@ -1053,14 +1222,18 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if err != nil {
 			return err
 		}
-		// v1.3.x (§13.10): thread permission card to the user's message
-		// so the user sees a visual "reply" line connecting the
-		// permission request to the task that triggered it.
-		//
-		// F-37: reply_in_thread stays false (default) for the
-		// permission card — discoverability matters more than chat
-		// cleanliness when a tool is blocked on user approval.
-		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, msg.ReplyTo, false)
+		// F-44 follow-up: OutCard → ReplyInChat (top-level Create,
+		// no anchor). Same parent-thread rationale as OutReply /
+		// OutResult / OutTask*: any tool-using turn creates a
+		// thread on the user message, and ReplyInBoth would be
+		// pulled into the thread drawer. The permission card is
+		// a blocking UI element (user must click Allow/Deny) —
+		// it MUST stay visible in main chat. The "🔐" emoji is
+		// prepended to the card title by buildInteractiveCard so
+		// the user can scan the main chat and immediately see
+		// "this is a permission request" (same pattern as 💭 for
+		// OutThinking).
+		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, "", false)
 		return err
 
 	case gateway.OutToolStart:
@@ -1160,32 +1333,29 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if msg.Result.IsError && text != "" {
 			text = "❌ " + text
 		}
-		// F-39: deliver the full result as an independent reply anchored at
-		// userMsgID. We deliberately do NOT call receipt.SetCompleted here —
-		// the receipt stays PromptRunning so subsequent OutUsage / OutInit /
-		// TaskList can still update the footer (token counts, agent name,
-		// task checklist). EventDone / EventError is the terminal signal that
-		// flips state to PromptSucceeded and collapses the rolling log.
+		// F-39 + F-44 follow-up: deliver the full result as a
+		// top-level Create (PR #47's ReplyInChat surface) — see
+		// OutReply case above for the parent-thread rationale that
+		// drove this off ReplyInBoth. We deliberately do NOT call
+		// receipt.SetCompleted here — the receipt stays
+		// PromptRunning so subsequent OutUsage / OutInit / TaskList
+		// can still update the footer (token counts, agent name,
+		// task checklist). EventDone / EventError is the terminal
+		// signal that flips state to PromptSucceeded and collapses
+		// the rolling log.
+		//
+		// Wire: POST /im/v1/messages (top-level Create) — no
+		// reply_in_thread field, no parent/thread relationship.
 		return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text)
 
 	case gateway.OutUsage:
-		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
-		if receipt == nil {
-			return nil
-		}
-		if msg.Usage == nil {
-			return errors.New("feishu: OutUsage missing Usage payload")
-		}
-		return receipt.Append(ctx, agent.AgentEvent{
-			Kind: agent.EventUsage,
-			Usage: &agent.UsageEvent{
-				InputTokens:              msg.Usage.InputTokens,
-				OutputTokens:             msg.Usage.OutputTokens,
-				CacheCreationInputTokens: msg.Usage.CacheCreationInputTokens,
-				CacheReadInputTokens:     msg.Usage.CacheReadInputTokens,
-				CostUSD:                  msg.Usage.CostUSD,
-			},
-		})
+		// F-44: silent drop. Footer design (per-reply footer with
+		// Agent · Model · Tokens · Cost) is deferred to a follow-up
+		// PR — see docs/feat/F-44-outreply-independent-and-task-receipt.md
+		// §6.1. The Translate path still produces
+		// OutboundMessage{Usage} so the footer PR has the data on
+		// hand; only the channel-side render is skipped here.
+		return nil
 
 	case gateway.OutCompaction:
 		// Compaction marker is a one-shot, low-frequency event
@@ -1203,21 +1373,10 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		return nil
 
 	case gateway.OutInit:
-		receipt := a.receiptFor(ctx, msg.ChatID, msg.ReplyTo)
-		if receipt == nil {
-			return nil
-		}
-		// Forward agent identity + workspace so the receipt
-		// card's foot note can render
-		// "Agent | cwd | tokens" (see docs/channel/feishu.md
-		// §9.3 + the footLine composer in receipt.go).
-		if msg.Init == nil {
-			return errors.New("feishu: OutInit missing Init payload")
-		}
-		return receipt.Append(ctx, agent.AgentEvent{
-			Kind: agent.EventInit,
-			Init: msg.Init,
-		})
+		// F-44: silent drop. Same rationale as OutUsage — footer
+		// design deferred. OutboundMessage{Init} is preserved on
+		// the wire; only the channel-side render is skipped.
+		return nil
 
 	case gateway.OutCommandReply:
 		// Slash command response (or runtime error reply). Plain
@@ -1226,29 +1385,29 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// uses msg_type: "text" so the message renders as a normal
 		// chat bubble, not an interactive card.
 		//
-		// v1.3.x (§13.10): thread the reply to the user's
-		// /command message via msg.ReplyTo as Feishu root_id, so
-		// the user sees a visual "reply" line connecting the bot
-		// reply to their command. msg.ReplyTo is empty for orphan
-		// replies (e.g. gateway startup logs); in that case the
-		// message stays top-level.
-		//
-		// F-37: slash-command replies stay visible in main chat
-		// (reply_in_thread=false) — the user fired the command and
-		// is waiting for the answer at the cursor.
+		// F-44 follow-up: OutCommandReply → ReplyInChat (top-level
+		// Create, no anchor). Same parent-thread rationale as
+		// OutReply / OutResult / OutTask*. Slash-command replies
+		// are typically short status messages (e.g. "/help result",
+		// "/agents list"); anchoring them to the user message is
+		// unnecessary, and a thread-on-parent would pull them
+		// into the drawer. The "❯" emoji is prepended to the
+		// text body so the user can scan main chat and
+		// immediately see "this is a command response" (same
+		// pattern as 💭 for OutThinking).
 		if msg.Text == "" {
 			return errors.New("feishu: OutCommandReply missing text")
 		}
-		_, err := a.SendMessageText(ctx, msg.ChatID, msg.Text, msg.ReplyTo, false)
+		_, err := a.SendMessageText(ctx, msg.ChatID, "❯ "+msg.Text, "", false)
 		return err
 
 	case gateway.OutTaskCreate, gateway.OutTaskUpdate:
-		// F-38: replace the per-turn checklist in the current
-		// receipt. We never call postThreadReply for task tools —
-		// the bridge suppresses the generic ToolStart/ToolEnd pair
-		// on a confirmed success result so the user sees a single
-		// task element in the receipt rather than two thread lines
-		// per operation.
+		// F-38 + PR #47 + F-44 follow-up: replace the per-turn
+		// checklist in the current receipt. We never call
+		// postThreadReply for task tools — the bridge suppresses
+		// the generic ToolStart/ToolEnd pair on a confirmed success
+		// result so the user sees a single task element in the
+		// receipt rather than two thread lines per operation.
 		//
 		// F-42: lazy receipt creation. If no receipt exists yet
 		// (this userMsgID's first event is the task list — TaskCreate
@@ -1256,6 +1415,13 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// the first card with `**📋 Tasks**` header + the snapshot
 		// already populated. Subsequent OutTask* events on the same
 		// userMsgID take the SetTaskList PATCH path.
+		//
+		// Wire: cold-start card is posted via SendCard → top-level
+		// Create (ReplyInChat, rootID="") so the task card stays
+		// visible in main chat regardless of whether the parent
+		// user message has a tool thread — same parent-thread
+		// gotcha as OutReply/OutResult. Subsequent SetTaskList
+		// events PATCH the existing card (preserves root_id).
 		if msg.TaskList == nil {
 			return errors.New("feishu: OutTask*/TaskList payload is nil")
 		}
@@ -1263,7 +1429,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		if err != nil {
 			// SendCard failed — degrade gracefully so the user
 			// still sees the checklist as a standalone text
-			// bubble.
+			// bubble (ReplyInChat — top-level Create, no anchor).
 			return a.sendRawOutText(ctx, msg.ChatID, renderTaskFallbackText(msg.TaskList))
 		}
 		if !created {
@@ -1292,11 +1458,12 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 	return err
 }
 
-// sendResultAsReply (F-39) posts the final agent result as a SEPARATE reply
-// anchored at userMsgID, independent from the rolling-log receipt card so
-// no dedup is needed. Always renders via Feishu's rich markdown surface
-// (Card 2.0 or Post+md or plain text) so code blocks, tables, lists, and
-// headers in Claude Code's stream-json output survive the round-trip.
+// sendResultAsReply (F-39) posts the final agent result as a SEPARATE
+// top-level message (ReplyInChat — PR #47's top-level Create surface),
+// independent from the rolling-log receipt card so no dedup is needed.
+// Always renders via Feishu's rich markdown surface (Card 2.0 or
+// Post+md or plain text) so code blocks, tables, lists, and headers
+// in Claude Code's stream-json output survive the round-trip.
 //
 // Dispatch (mirrors cc-connect `platform/feishu/feishu.go::buildReplyContent`):
 //   - no markdown indicators  → MsgTypeText (plain text bubble)
@@ -1309,13 +1476,25 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 // OutResult from Claude Code this is a guard for adversarial input, not
 // a hot path.
 //
-// Always renders as ReplyInThreadAndChat (reply_in_thread omitted) so
-// the result card is visible inline in the main chat — matching the
-// F-37 §13.13 surface-table mapping for the final answer.
+// Why top-level Create instead of ReplyInBoth (F-44 follow-up):
+// ReplyInBoth (reply endpoint with reply_in_thread field omitted) only
+// shows the body inline in main chat WHILE the parent user message has
+// no thread. Once OutToolStart / OutToolEnd (which use ReplyInThread =
+// reply_in_thread=true) creates a thread on the parent, Feishu pulls all
+// subsequent ReplyInBoth calls into the existing thread panel and the
+// main-chat inline render is lost (the user sees the reply disappear
+// into the thread side panel). Since any non-trivial agent turn that
+// uses tools hits this case, F-44 follow-up routes OutResult (and
+// OutReply via sendReplyInThreadAndChat) through ReplyInChat — top-level
+// Create with no anchor — guaranteeing main-chat visibility at the cost
+// of the "Reply to <sender>" header. OutCard / OutCommandReply /
+// OutCompaction / OutTask* stay on ReplyInBoth because they don't have
+// the chunk-stream problem.
 //
 // RATE-LIMIT / RETRY layering:
-//   - layer 1: F-35 global limiter (`a.limiter.Wait`) inside sendContent;
-//     prevents the SDK hitting Feishu's 230001 / 230020 throttle codes.
+//   - layer 1: F-35 global limiter (`a.limiter.Wait`) inside ReplyInChat
+//     (reply.go:205) and inside sendContent's retry wrap; prevents the
+//     SDK hitting Feishu's 230001 / 230020 throttle codes.
 //   - layer 2: F-36 transient retry wraps sendContent; transient network
 //     errors get exponential backoff. Final hit returns to caller for log.
 func (a *Adapter) sendResultAsReply(
@@ -1338,13 +1517,14 @@ func (a *Adapter) sendResultAsReply(
 	// Apply markdown sanitize pipeline (URL / fence / image / heading /
 	// code-block protection) so the rendered output doesn't get rejected
 	// by Feishu (230001 invalid href) or break lark_md rendering on edge
-	// cases. See internal/channel/feishu/card_sanitize.go.
+	// cases. See internal/channel/feishu/result_render.go (F-44: merged
+	// from card_sanitize.go).
 	sanitized := SanitizeCardMarkdown(text)
 
 	// Hard cap to stay well under 30 KB envelope with margin for JSON
 	// envelope + future growth.
 	if len(sanitized) > perResultMaxBytes*4 { // byte budget (multi-byte safe)
-		sanitized = truncateRunes(sanitized, perResultMaxBytes)
+		sanitized = truncateForLog(sanitized, perResultMaxBytes)
 	}
 
 	msgType, body, err := buildResultPayload(sanitized)
@@ -1359,72 +1539,45 @@ func (a *Adapter) sendResultAsReply(
 		a.logger.Warn("feishu: result reply over envelope, truncating",
 			"chat_id", chatID, "user_msg_id", userMsgID,
 			"body_bytes", len(body))
-		truncated := truncateRunes(sanitized, resultCardEnvelopeBudget/3)
+		truncated := truncateForLog(sanitized, resultCardEnvelopeBudget/3)
 		msgType, body, err = buildResultPayload(truncated)
 		if err != nil {
 			return err
 		}
 	}
 
-	_, err = a.sendContent(ctx, chatID, msgType, body, userMsgID, false)
+	_, err = a.sendContent(ctx, chatID, msgType, body, "", false)
 	return err
 }
 
-// isOverflowingReceipt decides whether an OutReply should bypass
-// the receipt's rolling log and be sent as a stand-alone
-// ReplyInThreadAndChat instead. F-40 §1.2 — two triggers:
+// sendReplyInThreadAndChat (F-44) posts an OutReply chunk as a
+// stand-alone top-level message (ReplyInChat — PR #47's top-level
+// Create surface). This replaces the F-40 fold path (which routed
+// OutReply into the receipt card's rolling log) — every chunk now
+// gets its own message so the user sees content immediately without
+// waiting for a PATCH cycle.
 //
-//   - length: text rune count exceeds perEntryMaxRunes (8000).
-//     Folding such a long entry would consume many `div`
-//     elements, threatening the 50-element card envelope budget
-//     and pushing the answer out of view.
-//
-//   - quantity: receipt already holds replyMaxEntries (45)
-//     entries. Folding another would trigger evictOverflowLocked
-//     FIFO eviction of older entries — visually noisy and
-//     semantically lossy. Diverting to a stand-alone reply
-//     preserves all previous entries while still delivering
-//     the new reply.
-//
-// Either trigger alone returns true (logical OR).
-//
-// Caller does NOT hold r.mu. The helper is read-only and
-// obtains its own snapshot via MessageReceipt.EntryCount which
-// takes r.mu internally.
-func (a *Adapter) isOverflowingReceipt(r *MessageReceipt, text string) bool {
-	if utf8.RuneCountInString(text) > perEntryMaxRunes {
-		return true
-	}
-	if r.EntryCount() >= replyMaxEntries {
-		return true
-	}
-	return false
-}
-
-// sendReplyAsMessage posts an OutReply that bypassed the receipt
-// (overflow length / overflow quantity / late after completion)
-// as a stand-alone ReplyInThreadAndChat anchored at userMsgID.
-//
-// F-40 §1.3-1.4 — sibling of sendResultAsReply (F-39). Shares:
-//   - 3-segment dispatch (text / post+md / card) via
-//     buildResultPayload from result_render.go
+// F-44 sibling of sendResultAsReply. Shares:
+//   - 3-segment dispatch (text / post+md / card) via buildResultPayload
 //   - markdown sanitize pipeline via SanitizeCardMarkdown
-//     (card_sanitize.go)
 //   - 28 KB envelope defense via resultCardEnvelopeBudget
-//   - replyInThread=false wire (ReplyInThreadAndChat: main chat
-//     visible, thread panel mirrored)
+//   - top-level Create wire (ReplyInChat, per PR #47: main chat
+//     visible, no thread anchor)
+//
+// See sendResultAsReply for the full rationale on top-level Create vs
+// ReplyInBoth (the parent-thread gotcha that motivated this switch).
 //
 // Differences from sendResultAsReply:
-//   - No `❌ ` prefix on errors: OutReply is a stream chunk,
-//     error variants are delivered as a separate OutboundMessage
-//     (Kind: OutError / EventError → fold path), so the
-//     stand-alone reply path never receives an error payload.
-//     Adding an icon would make the stand-alone reply visually
-//     different from its fold-context siblings, breaking the
-//     "this is the same reply, just delivered elsewhere" UX.
+//   - envelope cap: perReplyMaxBytes (F-44) instead of perResultMaxBytes.
+//     Same value today (6 KB), independent constants so the two surfaces
+//     can diverge in the future if one surface adopts a stricter cap.
+//   - No `❌ ` prefix on errors: OutReply is a stream chunk and never
+//     carries an error payload. (EventError → OutMessageState path
+//     owns the error reaction; receipt error message is no longer
+//     rendered in F-44.)
 //   - Orphan path (empty userMsgID) → top-level plain text via
 //     sendRawOutText, identical to sendResultAsReply's fallback.
-func (a *Adapter) sendReplyAsMessage(
+func (a *Adapter) sendReplyInThreadAndChat(
 	ctx context.Context, chatID, userMsgID, text string,
 ) error {
 	if strings.TrimSpace(chatID) == "" {
@@ -1451,8 +1604,8 @@ func (a *Adapter) sendReplyAsMessage(
 	// for JSON envelope + future growth. Same budget as
 	// sendResultAsReply — the envelope is shared, so the cap
 	// is shared.
-	if len(sanitized) > perResultMaxBytes*4 {
-		sanitized = truncateRunes(sanitized, perResultMaxBytes)
+	if len(sanitized) > perReplyMaxBytes*4 {
+		sanitized = truncateForLog(sanitized, perReplyMaxBytes)
 	}
 
 	msgType, body, err := buildResultPayload(sanitized)
@@ -1462,17 +1615,17 @@ func (a *Adapter) sendReplyAsMessage(
 
 	// Envelope defensive cap.
 	if len(body) > resultCardEnvelopeBudget {
-		a.logger.Warn("feishu: reply overflow over envelope, truncating",
+		a.logger.Warn("feishu: reply over envelope, truncating",
 			"chat_id", chatID, "user_msg_id", userMsgID,
 			"body_bytes", len(body))
-		truncated := truncateRunes(sanitized, resultCardEnvelopeBudget/3)
+		truncated := truncateForLog(sanitized, resultCardEnvelopeBudget/3)
 		msgType, body, err = buildResultPayload(truncated)
 		if err != nil {
 			return err
 		}
 	}
 
-	_, err = a.sendContent(ctx, chatID, msgType, body, userMsgID, false)
+	_, err = a.sendContent(ctx, chatID, msgType, body, "", false)
 	return err
 }
 
@@ -1644,6 +1797,16 @@ func toolOutput(m gateway.OutboundMessage) string {
 //	  "body":   { "elements": [ ... ] }
 //	}
 //
+// F-44 follow-up: the title is prefixed with a 🔐 emoji so the
+// user can scan main chat and immediately recognize the surface as
+// a permission request (same visual pattern as the 💭 prefix
+// OutThinking uses for reasoning, the ❯ prefix OutCommandReply
+// uses for slash-command responses). The emoji is the channel's
+// visual decoration — gateway.Card.Title is the original plain
+// title; we prepend here so the abstract gateway type stays
+// decoration-agnostic and other channels (e.g. CLI) can render
+// the same payload without the prefix.
+//
 // Returned string is the card JSON itself — NOT wrapped in
 // {"card": ...}. The wrapper is wrong: Feishu reads this string as
 // the value of the `content` field in the create_message / patch
@@ -1683,11 +1846,16 @@ func buildInteractiveCard(c *gateway.Card) (string, error) {
 			"value": map[string]any{"key": string(v)},
 		})
 	}
+	// F-44 follow-up: prepend 🔐 to the title (channel decoration).
+	title := c.Title
+	if title != "" {
+		title = "🔐 " + title
+	}
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{"width_mode": "fill"},
 		"header": map[string]any{
-			"title":    map[string]any{"tag": "plain_text", "content": c.Title},
+			"title":    map[string]any{"tag": "plain_text", "content": title},
 			"template": "blue",
 		},
 		"body": map[string]any{
@@ -1728,97 +1896,92 @@ func encodeCardJSON(v any) ([]byte, error) {
 	return out, nil
 }
 
-// buildReceiptCard renders the rolling-log receipt as a Feishu
-// Card 2.0 interactive card. Layout (top → bottom):
+// buildReceiptCard renders the rolling-log + task-checklist receipt
+// as a Feishu Card 2.0 interactive card. Layout (top → bottom):
 //
-//  1. Header markdown — state.headerLine(r) (e.g. "⏳ 等待中",
-//     "🔄 ⏳ N · HH:MM:SS", "✅ 已完成 HH:MM:SS").
-//  2. Evicted marker — only when r.evicted > 0; rendered as
-//     <text_tag color='neutral'> so it visually de-emphasises.
-//  3. Entries — each r.entries[i] as a markdown element
-//     "{Icon} {Text}". The log is FIFO; eviction is handled in the
-//     receipt itself (see receipt.go: evictOverflowLocked).
-//  4. <hr> divider — separates the log from the foot note.
-//  5. Foot note — state.footLine(r) wrapped in <text_tag color='neutral'>.
-//     Omitted entirely when footLine is empty (no hr, no footer).
+//  1. Rolling-log entries — one or more `div` elements per
+//     LogEntry, in arrival order. Each entry's text is sanitized
+//     via SanitizeCardMarkdown (URL / fence / image / heading
+//     pipeline) before rendering; the entry is then split by
+//     splitMarkdownForDivs (F-37 multi-div) so a single long
+//     chunk renders as multiple back-to-back divs each ≤ 1000
+//     runes. The Icon prefix is prepended to the first chunk
+//     of the entry (so the icon appears once even when the
+//     entry spans multiple divs). The section is omitted when
+//     no entries have been appended yet (cold-start before the
+//     first OutReply lands — the receipt task-only surface
+//     carries the **📋 Tasks** section alone in that case).
+//
+//  2. **📋 Tasks** checklist — one or more markdown elements, one
+//     per chunk from buildTaskChecklistChunks. The bridge always
+//     sends the full snapshot (F-38), so we copy it verbatim and
+//     let buildTaskChecklistChunks handle glyph / ordering /
+//     truncation / div splitting. Omitted entirely when no tasks
+//     have been reported.
 //
 // Returned string is the card JSON itself — NOT wrapped in
-// {"card": ...}. See buildInteractiveCard for the rationale (Feishu
-// reads the string as the value of `content`; the card object IS
-// the content; no extra wrapper).
+// {"card": ...}. See buildInteractiveCard for the rationale.
 //
-// Foot note content uses U+00B7 (·) as the separator — NEVER ": " —
-// so Feishu's lark_md renderer doesn't parse it as a Markdown
-// definition list and hoist the first value into the body
-// (OpenClaw issue #59360). For footLine specifically the current
-// state.String() never contains a key/value pair, so the pitfall
-// only matters once a future PR adds agent identity fields
-// (see docs/channel/feishu.md §9.4).
-func buildReceiptCard(r *MessageReceipt) (string, error) {
-	if r == nil {
-		return "", errors.New("feishu: receipt is nil")
+// F-44 simplification kept: the F-25 → F-42 receipt's 5-section
+// layout (header / evicted-marker / entries / hr / footer) is
+// STILL reduced to 2 sections. The header (⏳/🔄/✅/❌ prompt
+// state icon) is gone — terminal signals travel via
+// OutMessageState → AddReaction on the user message. The footer
+// (init / usage) is gone — those OutboundKinds are silent-drop
+// until the follow-up footer PR. The hr is gone (no header /
+// footer to separate). The evicted-marker is gone (overflow now
+// bails out per-entry to a fresh top-level Create instead of
+// FIFO-truncating the receipt).
+//
+// F-44 revert (this file): entries (OutReply text chunks) are
+// RESTORED as the first section. Each entry maps to one or more
+// `div` markdown elements via splitMarkdownForDivs (per-entry
+// multi-div split per the user-visible spec). AppendEntry's
+// pre-render overflow check (see receipt.go) catches the case
+// where adding an entry would push the card past 50 elements /
+// 30 KB envelope, so buildReceiptCard is never asked to render
+// an over-budget body.
+//
+// Signature: takes (entries, tasks) directly, not a *MessageReceipt.
+// This avoids copying a struct that contains a sync.Mutex (vet
+// warning) — AppendEntry needs to build a hypothetical card body
+// to check the overflow budget, but doing so via a struct copy
+// would silently bypass the lock semantics.
+func buildReceiptCard(entries []LogEntry, tasks []agent.TaskItem) (string, error) {
+
+	elements := make([]map[string]any, 0, len(entries)+4)
+
+	// Section 0 (placeholder header): when the receipt has no
+	// entries and no tasks yet, prepend a Typing indicator so the
+	// user sees "⌨️ Working..." immediately after MessageForwarded
+	// fires. The header is removed as soon as the first entry or
+	// task arrives (the next renderLocked call sees a non-empty
+	// list and omits the header). This gives the user immediate
+	// feedback that the bot received the message and is working,
+	// before any stream chunk or task event lands.
+	if len(entries) == 0 && len(tasks) == 0 {
+		elements = append(elements, map[string]any{
+			"tag":     "markdown",
+			"content": "⌨️ Working...",
+		})
 	}
 
-	// Pre-size elements: 1 (header) + 1 (evicted, optional) +
-	// len(entries) + 2 (hr + footer, when footLine is non-empty).
-	// The evictOverflowLocked on the receipt side keeps entries
-	// within Feishu's 50-element limit; this is the second line of
-	// defence.
-	headerLine := promptHeaderLine(r.promptState, r.completedAt)
-	elements := make([]map[string]any, 0, 3+len(r.entries))
-	if headerLine != "" {
-		elements = append(elements, map[string]any{
-			"tag":     "markdown",
-			"content": headerLine,
-		})
-	}
-	if r.evicted > 0 {
-		elements = append(elements, map[string]any{
-			"tag":     "markdown",
-			"content": fmt.Sprintf("…(前 %d 条已省略)", r.evicted),
-		})
-	}
-	for i := range r.entries {
-		e := r.entries[i]
-		if e.Icon == "" && e.Text == "" {
-			continue
+	// Section 1: rolling-log entries. Each entry's text is
+	// sanitized (so a malicious or malformed chunk can't break
+	// the card), split into 1+ div elements by splitMarkdownForDivs
+	// (per-entry multi-div, the F-37 split helper), and prefixed
+	// with the entry icon on the first chunk only.
+	for _, entry := range entries {
+		sanitized := SanitizeCardMarkdown(entry.Text)
+		chunks := splitMarkdownForDivs(sanitized, divTextCharLimit)
+		if len(chunks) == 0 {
+			chunks = []string{""}
 		}
-		// F-34: thinking / tool_start / tool_end / compaction
-		// entries are no longer rendered into the receipt card;
-		// the adapter routes them to Feishu thread replies
-		// (Adapter.Send → postThreadReply). eventToEntry returns
-		// (_, false) for them so they normally never reach this
-		// loop. This guard is a defensive backstop: if a future
-		// bridge or a buggy caller appends one of these Kinds
-		// directly to r.entries (e.g. when constructing fixtures
-		// in tests), the card body still hides it instead of
-		// leaking thinking/tool content into the rolling log.
-		switch e.Kind {
-		case "thinking", "tool", "tool_start", "tool_end", "compaction":
-			continue
+		// Icon prefix on the first chunk only — multi-div entries
+		// otherwise repeat the icon on every div, which is noisy.
+		if entry.Icon != "" {
+			chunks[0] = entry.Icon + " " + chunks[0]
 		}
-		content := e.Icon
-		if e.Text != "" {
-			if content != "" {
-				content += " "
-			}
-			content += e.Text
-		}
-		// F-37 thread-route: thinking/tool entries are NOT
-		// rendered here at all — they were routed to Feishu
-		// thread replies upstream. The old collapsible_panel
-		// branches for `Kind == "thinking"` and `Kind == "tool"`
-		// (origin/main version) are intentionally absent on
-		// this branch: those kinds no longer reach the card
-		// surface. Only OutReply / OutResult / OutInit / OutUsage
-		// entries make it here.
-		//
-		// F-37 multi-div content split: if the entry's text
-		// exceeds divTextCharLimit (Feishu hard limit), split
-		// at paragraph boundaries into multiple markdown elements
-		// so the full content renders without truncation. See
-		// docs/feat/F-37-multi-div-content-split.md.
-		chunks := splitMarkdownForDivs(content, divTextCharLimit)
 		for _, chunk := range chunks {
 			elements = append(elements, map[string]any{
 				"tag":     "markdown",
@@ -1826,43 +1989,12 @@ func buildReceiptCard(r *MessageReceipt) (string, error) {
 			})
 		}
 	}
-	// F-38: task checklist — one markdown element per chunk
-	// rendered below the answer entries and above the footer
-	// divider. The bridge always sends the full snapshot, so we
-	// copy it verbatim and let buildTaskChecklistChunks handle
-	// glyph / ordering / truncation / div splitting. Omitted
-	// entirely when no tasks have been reported. Each chunk is
-	// already <= divTextCharLimit runes (the splitter's contract),
-	// so we may emit multiple elements from a single checklist
-	// when the list is long; the 50-element budget still applies
-	// across the whole card.
-	for _, chunk := range buildTaskChecklistChunks(r.tasks) {
+
+	// Section 2: task checklist (F-38, unchanged).
+	for _, chunk := range buildTaskChecklistChunks(tasks) {
 		elements = append(elements, map[string]any{
 			"tag":     "markdown",
 			"content": chunk,
-		})
-	}
-
-	if note := promptFootLine(r); note != "" {
-		elements = append(elements, map[string]any{"tag": "hr"})
-		// Footer styling matches the OpenClaw Lark plugin
-		// (openclaw-lark src/card/builder.ts::buildFooter):
-		//   - text_size: "notation" gives the foot note a
-		//     compact, dim visual weight (the standard
-		//     Card 2.0 size for footnotes / status lines).
-		//   - On error, the content is wrapped in
-		//     <font color='red'>...</font> so a failed
-		//     session's footer is visually distinct from
-		//     a successful one. OpenClaw wraps the i18n
-		//     copies in red when isError is true.
-		footerContent := note
-		if r.promptState == agent.PromptFailed {
-			footerContent = "<font color='red'>" + note + "</font>"
-		}
-		elements = append(elements, map[string]any{
-			"tag":       "markdown",
-			"content":   footerContent,
-			"text_size": "notation",
 		})
 	}
 
@@ -2000,10 +2132,12 @@ func (a *Adapter) SendMessage(ctx context.Context, chatID, text string) error {
 // thread visually to the user's `/command` message. Empty rootID yields
 // a fresh top-level message (legacy behavior).
 //
-// replyInThread (F-37) is forwarded to the Reply body when rootID != "".
-// false = visible in main chat (default for slash commands and
-// receipt-cold-start); true = thread-only (used by postThreadReply for
-// the agent progress stream). Has no effect on the top-level Create path.
+// replyInThread (F-37 / PR #47) is forwarded to the Reply body when
+// rootID != "". false = visible in main chat (default for slash
+// commands and receipt-cold-start) → ReplyInBoth; true = thread-only
+// (used by postThreadReply for the agent progress stream) →
+// ReplyInThread. Has no effect on the top-level Create path (rootID
+// empty → ReplyInChat).
 //
 // Returns (messageID, error). On error, messageID is "".
 func (a *Adapter) SendMessageText(ctx context.Context, chatID, text, rootID string, replyInThread bool) (string, error) {
@@ -2249,16 +2383,24 @@ func (a *Adapter) SendLongMessage(ctx context.Context, chatID, text string) erro
 // the message is rendered as a reply to that user message; empty means
 // a fresh top-level message. See §15.2 of docs/channel/feishu.md.
 //
-// replyInThread (F-37) controls the Feishu body field reply_in_thread
-// when the Reply endpoint is selected (rootID != ""). It has no
-// effect on the top-level Create path. See postThreadReply for the
-// author-side policy that decides which callsites pass true.
+// replyInThread (F-37 / PR #47) controls the Feishu body field
+// reply_in_thread when the Reply endpoint is selected (rootID != ""):
+// false → ReplyInBoth (reply_in_thread omitted, body inline in main
+// chat + thread panel); true → ReplyInThread (reply_in_thread=true,
+// body only in thread panel). It has no effect on the top-level
+// Create path (rootID empty → ReplyInChat). See postThreadReply for
+// the author-side policy that decides which callsites pass true.
 //
 // v1.3.x (§13.10 fallback): when the Reply endpoint returns a
 // terminal error code (230011 recalled / 231003 deleted), we retry
 // as a top-level Create so the user still sees a message. The
 // pattern mirrors openclaw-lark's runWithMessageUnavailableGuard.
 // See docs/channel/feishu.md §13.10 / §15.7.
+//
+// Per PR #47 the fallback path is the "ReplyInChat" surface
+// (top-level Create) — the resulting message is a stand-alone
+// bubble with no parent / thread relationship, so the user sees
+// the content even when the original anchor is gone.
 //
 // Returns "" + error on failure. Empty message ID on success is
 // possible if the API omits it (defensive — should not happen).
@@ -2324,103 +2466,85 @@ func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content, roo
 	return msgID, err
 }
 
+// sendViaLark is the production implementation of the send dispatch
+// (wired in by NewAdapter as a.sendFunc). Routes the message to one
+// of three Feishu outbound surfaces via the PR #47 public helpers in
+// reply.go (ReplyInBoth / ReplyInThread / ReplyInChat):
+//
+//	rootID == "" → ReplyInChat (top-level Create, no reply relationship)
+//	rootID != "" && replyInThread == false → ReplyInBoth (reply endpoint
+//	    with reply_in_thread field omitted — body shows inline in main
+//	    chat AND in the Details / Thread side panel)
+//	rootID != "" && replyInThread == true → ReplyInThread (reply
+//	    endpoint with reply_in_thread=true — body shows ONLY in the
+//	    Thread side panel, main chat shows just the "X replies"
+//	    indicator)
+//
+// v1.3.x §13.10: when rootID is set, dispatch to the Reply endpoint
+// (`POST /im/v1/messages/{message_id}/reply`) which uses the path
+// message_id as the Feishu root_id. PatchMessage (PATCH
+// /im/v1/messages/{id}) preserves root_id automatically across
+// subsequent in-place updates, so once Reply-creates the card the
+// thread is locked in.
+//
+// Per F-44 + PR #47, the OutCard / OutCommandReply / OutCompaction
+// paths pass replyInThread=false and therefore route through
+// ReplyInBoth. OutReply / OutResult / OutTask* (F-44 follow-up)
+// always pass rootID="" regardless of the user message, so they
+// route through ReplyInChat (top-level Create) — see the
+// parent-thread gotcha discussion in sendResultAsReply's docstring.
+// OutThinking / OutToolStart / OutToolEnd pass replyInThread=true
+// and route through ReplyInThread.
+//
+// All three Reply* helpers are defined in reply.go (PR #47) and each
+// owns its own F-35 limiter wait + SDK call + error formatting;
+// this method therefore only routes, it does not invoke the SDK
+// directly.
 func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content, rootID string, replyInThread bool) (string, error) {
 	if a.larkClient == nil || a.larkClient.Im == nil || a.larkClient.Im.V1 == nil || a.larkClient.Im.V1.Message == nil {
 		return "", errors.New("feishu: REST client is nil")
 	}
-
-	// v1.3.x (§13.10): when rootID is set, dispatch to the Reply
-	// endpoint (`POST /im/v1/messages/{message_id}/reply`) which
-	// uses the path message_id as the Feishu root_id. PatchMessage
-	// (PATCH /im/v1/messages/{id}) preserves root_id automatically
-	// across subsequent in-place updates, so once Reply-creates the
-	// card the thread is locked in.
-	if rootID != "" {
-		return a.sendViaLarkReply(ctx, rootID, msgType, content, replyInThread)
+	switch {
+	case rootID == "":
+		// ReplyInChat: top-level Create, no reply relationship.
+		// Used by the orphan / fallback paths (empty userMsgID on
+		// OutReply / OutResult / OutCard / OutCommandReply) and by
+		// the F-44 follow-up OutReply / OutResult path (always
+		// rootID="" to dodge the parent-thread gotcha — see
+		// sendResultAsReply docstring). Construct a fresh
+		// *CreateMessageReqBodyBuilder and route through the public
+		// a.ReplyInChat so the live test pattern (reply_test.go)
+		// exercises the same code path.
+		createBuilder := larkim.NewCreateMessageReqBodyBuilder().
+			MsgType(msgType).
+			Content(content)
+		return a.ReplyInChat(ctx, chatID, createBuilder)
+	case replyInThread:
+		// ReplyInThread: reply_in_thread=true. Used by the agent
+		// progress stream (OutThinking / OutToolStart / OutToolEnd)
+		// so the main chat stays focused on the user-visible reply
+		// / receipt.
+		replyBuilder := larkim.NewReplyMessageReqBodyBuilder().
+			MsgType(msgType).
+			Content(content)
+		return a.ReplyInThread(ctx, rootID, replyBuilder)
+	default:
+		// ReplyInBoth: reply_in_thread omitted. Used by OutCard /
+		// OutCommandReply / OutTaskCreate / OutTaskUpdate /
+		// OutCompaction.
+		replyBuilder := larkim.NewReplyMessageReqBodyBuilder().
+			MsgType(msgType).
+			Content(content)
+		return a.ReplyInBoth(ctx, rootID, replyBuilder)
 	}
-	return a.sendViaLarkCreate(ctx, chatID, msgType, content)
 }
 
-// sendViaLarkReply invokes POST /im/v1/messages/{rootID}/reply
-// and returns the new message ID. Used when v1.3.x §13.10 needs
-// to thread a bot reply to a specific user message. Returns a
-// formatted error carrying the Feishu API code when the call
-// fails; callers inspect with isFeishuTerminalMessageCode to
-// decide whether to fall back to Create.
-//
-// replyInThread (F-37) controls the body field reply_in_thread.
-// true = thread/topic form only (main chat shows "X replies"
-// indicator without body); false (default) = visible in main chat
-// as an inline reply AND in thread panel. See postThreadReply /
-// F-37 §2.1 for which OutboundKind values pass true.
-func (a *Adapter) sendViaLarkReply(ctx context.Context, rootID, msgType, content string, replyInThread bool) (string, error) {
-	// F-35: 出口过限速器。
-	if err := a.limiter.Wait(ctx); err != nil {
-		return "", err
-	}
-	bodyBuilder := larkim.NewReplyMessageReqBodyBuilder().
-		MsgType(msgType).
-		Content(content)
-	if replyInThread {
-		// Field is omitempty — only set when true so the default
-		// payload stays byte-for-byte identical to pre-F-37 calls
-		// (preserves backward compat with the §13.10 recorder logs
-		// and any internal idempotency cache keyed on body hash).
-		bodyBuilder = bodyBuilder.ReplyInThread(true)
-	}
-	req := larkim.NewReplyMessageReqBuilder().
-		MessageId(rootID).
-		Body(bodyBuilder.Build()).
-		Build()
-	resp, err := a.larkClient.Im.V1.Message.Reply(ctx, req)
-	if err != nil {
-		return "", fmt.Errorf("feishu: reply message: %w", err)
-	}
-	if resp == nil {
-		return "", errors.New("feishu: reply message returned nil response")
-	}
-	if !resp.Success() {
-		return "", fmt.Errorf("feishu: reply message failed with code %d", resp.Code)
-	}
-	if resp.Data != nil && resp.Data.MessageId != nil {
-		return *resp.Data.MessageId, nil
-	}
-	return "", nil
-}
-
-// sendViaLarkCreate invokes POST /im/v1/messages (top-level Create).
-// Used both as the no-rootID path and as the fallback when Reply
-// fails on a recalled/deleted user message. replyInThread is unused
-// here (Create API does not accept reply_in_thread).
-func (a *Adapter) sendViaLarkCreate(ctx context.Context, chatID, msgType, content string) (string, error) {
-	// F-35: 出口过限速器。
-	if err := a.limiter.Wait(ctx); err != nil {
-		return "", err
-	}
-	body := &larkim.CreateMessageReqBody{
-		ReceiveId: &chatID,
-		MsgType:   &msgType,
-		Content:   &content,
-	}
-	req := larkim.NewCreateMessageReqBuilder().
-		ReceiveIdType(larkim.CreateMessageV1ReceiveIDTypeChatId).
-		Body(body).
-		Build()
-	resp, err := a.larkClient.Im.V1.Message.Create(ctx, req)
-	if err != nil {
-		return "", fmt.Errorf("feishu: create message: %w", err)
-	}
-	if resp == nil {
-		return "", errors.New("feishu: create message returned nil response")
-	}
-	if !resp.Success() {
-		return "", fmt.Errorf("feishu: create message failed with code %d", resp.Code)
-	}
-	if resp.Data != nil && resp.Data.MessageId != nil {
-		return *resp.Data.MessageId, nil
-	}
-	return "", nil
-}
+// (F-44 follow-up) The private sendViaLarkCreate helper used to live
+// here as a string-typed wrapper around a.ReplyInChat. Removed when
+// the no-rootID branch in sendViaLark was refactored to construct a
+// *larkim.CreateMessageReqBodyBuilder and call a.ReplyInChat directly
+// — every outbound surface now goes through the public PR #47
+// helpers, matching the reply_test.go smoke-test pattern.
 
 // isFeishuTerminalMessageCode returns true when a Reply failure
 // carries Feishu error code 230011 (message recalled by sender) or
@@ -2435,23 +2559,29 @@ func (a *Adapter) sendViaLarkCreate(ctx context.Context, chatID, msgType, conten
 // retry storms are unlikely in our hot path, and a per-call fallback
 // is simpler. Add the cache if retry spam becomes an issue in
 // production. See docs/channel/feishu.md §15.7.
+//
+// Three code-suffix formats are accepted to stay forward-compatible
+// with the various helpers that format the failure:
+//   - "code 230011" — the legacy `sendViaLarkReply` formatter
+//     (kept for any in-flight log greps / recorder scripts).
+//   - "code:230011" — colon form, accepted in case upstream
+//     wrappers translate the SDK error.
+//   - "code=230011" — equals form, used by the PR #47 `reply.go`
+//     ReplyInBoth / ReplyInThread helpers ("feishu: ReplyInBoth
+//     failed: code=%d msg=%s").
 func isFeishuTerminalMessageCode(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
-	// Cheap string match for the formatted "code NNNNN" suffix our
-	// sendViaLarkReply helper attaches (e.g. "...code 230011").
-	// Faster than unwrapping and avoids depending on a specific SDK
-	// error type for the transport-error path. We also accept the
-	// colon form ("code:NNNNN") in case future helpers format that
-	// way or upstream wrappers translate the error.
 	switch {
 	case strings.Contains(msg, "code 230011"),
-		strings.Contains(msg, "code:230011"):
+		strings.Contains(msg, "code:230011"),
+		strings.Contains(msg, "code=230011"):
 		return true
 	case strings.Contains(msg, "code 231003"),
-		strings.Contains(msg, "code:231003"):
+		strings.Contains(msg, "code:231003"),
+		strings.Contains(msg, "code=231003"):
 		return true
 	}
 	// Defensive: also unwrap a *larkcore.CodeError if the SDK
@@ -2482,6 +2612,12 @@ func isFeishuTerminalMessageCode(err error) bool {
 // chat-pinned visual answer is the whole point of the rolling log). It is
 // plumbed through so future callers (e.g. permission card as thread-only)
 // can opt in without a second signature change.
+//
+// Per PR #47, the receipt cold-start card routes through ReplyInBoth
+// (reply endpoint with reply_in_thread omitted) when rootID is non-empty
+// — the card body shows inline in main chat with a reply quote header
+// AND in the Details / Thread side panel. The orphan path (rootID="")
+// falls back to top-level Create (ReplyInChat).
 func (a *Adapter) SendCard(ctx context.Context, chatID, content, rootID string, replyInThread bool) (string, error) {
 	if strings.TrimSpace(chatID) == "" {
 		return "", errors.New("feishu: chat_id is required")

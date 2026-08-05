@@ -36,6 +36,14 @@ func TestOnMessageState_TranslatesToOutbound(t *testing.T) {
 	if got.MessageState.State != agent.MessageReceived {
 		t.Errorf("MessageState.State = %v; want StateReceived", got.MessageState.State)
 	}
+	// F-44 + reply.go safe pattern: ReplyTo must be set to userMsgID
+	// so the Feishu channel's Typing-placeholder handler has an
+	// anchor to reserve the inline-rendering slot. Before this was
+	// added, msg.ReplyTo arrived empty and the placeholder was
+	// silently skipped — invisible bug (user sees no Typing card).
+	if got.ReplyTo != "om_user_msg" {
+		t.Errorf("ReplyTo = %q; want om_user_msg (F-44 Typing placeholder anchor)", got.ReplyTo)
+	}
 }
 
 // TestOnMessageState_NoChannelDrops verifies that OnMessageState

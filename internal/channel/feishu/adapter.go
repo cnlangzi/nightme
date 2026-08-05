@@ -22,6 +22,8 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
+	lru "github.com/hashicorp/golang-lru/v2"
+
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
@@ -35,6 +37,23 @@ const maxMessageBytes = 3800
 // Channel.Send (OutCard kind) and CardActionTrigger callback
 // parsing in handleCardAction.
 const interactiveMessageType = "interactive"
+
+// messageStatesLRUSize bounds the in-memory MessageState cache.
+// Feishu adapters track the last-rendered MessageState per user
+// message id for idempotency (skip duplicate AddReaction calls) and
+// terminal-state guarding (prevent 👎 → ✅ flips from late events).
+// Without a bound this map grows unboundedly across long daemon
+// uptimes with high chat volume. 5K covers hours of active chat
+// across multiple ChatSessions — entries older than the LRU window
+// are evicted, accepting that very-late MessageState emits for
+// already-evicted user message ids may render a duplicate reaction
+// (Feishu reactions are append-only and idempotent so this is
+// visually harmless — same emoji, possibly stacked).
+//
+// The cap is intentionally generous vs. typical chat volume
+// (real-world: <100 active user message ids at any time) so that
+// eviction only happens for genuinely stale ids.
+const messageStatesLRUSize = 5000
 
 // sendMessageFunc is kept behind the adapter so unit tests can exercise the
 // channel without making an HTTP request to Feishu.
@@ -163,10 +182,20 @@ type Adapter struct {
 	// (F-31) replaces the per-receipt currentReaction field which
 	// was removed when MessageReceipt stopped owning reactions.
 	//
-	// Concurrency: reads/writes go through a.mu (same lock as
-	// receipts). Same lifecycle — entries persist for the
-	// ChatSession lifetime and are evicted only on adapter stop.
-	messageStates map[string]agent.MessageState
+	// Bounded by messageStatesLRUSize (LRU eviction). The cache
+	// itself is internally synchronized (hashicorp/golang-lru/v2
+	// uses an internal mutex); we additionally hold a.mu around
+	// the read-modify-write section to preserve the original
+	// "composite atomic update" semantic.
+	//
+	// Trade-off: when the cache evicts a previously-rendered
+	// terminal state, a very-late MessageState emit for that
+	// userMsgID will be treated as a fresh first-emit and may
+	// render a duplicate reaction. Feishu reactions are
+	// idempotent (AddReaction with the same reaction_type returns
+	// the existing reaction_id), so the user sees at most an
+	// extra emoji of the same kind — never a state flip.
+	messageStates *lru.Cache[string, agent.MessageState]
 
 	// toolEventBuf (F-38 §3.1.3) tracks in-flight OutToolStart
 	// thread replies so the matching OutToolEnd can PATCH the
@@ -221,10 +250,14 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		return nil, errors.New("feishu: app_secret is required; run `nightme auth login feishu`")
 	}
 
+	messageStates, err := lru.New[string, agent.MessageState](messageStatesLRUSize)
+	if err != nil {
+		return nil, fmt.Errorf("feishu: init messageStates LRU: %w", err)
+	}
 	a := &Adapter{
 		incoming:            make(chan channel.Message, 128),
 		receiptsByUserMsgID: make(map[string]*MessageReceipt),
-		messageStates:       make(map[string]agent.MessageState),
+		messageStates:       messageStates,
 		threadReplyLimiter:  newThreadReplyLimiter(200*time.Millisecond, 800*time.Millisecond),
 		cfg:                 cfg,
 		done:                make(chan struct{}),
@@ -964,7 +997,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 
 		a.mu.Lock()
-		prev, hasPrev := a.messageStates[messageID]
+		prev, hasPrev := a.messageStates.Get(messageID)
 		// Idempotency: same state twice → drop.
 		skip := hasPrev && prev == state
 		// Terminal guard: already in a terminal MessageState → drop.
@@ -972,7 +1005,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 			skip = true
 		}
 		if !skip {
-			a.messageStates[messageID] = state
+			a.messageStates.Add(messageID, state)
 		}
 		a.mu.Unlock()
 		if skip {
@@ -980,9 +1013,13 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		if _, err := a.AddReaction(ctx, messageID, emoji); err != nil {
 			a.mu.Lock()
-			// Revert on failure so a later retry can re-add.
-			if a.messageStates[messageID] == state {
-				delete(a.messageStates, messageID)
+			// Revert on failure so a later retry can re-add. Peek
+			// (not Get) so the failure-path lookup doesn't bump
+			// the LRU recency order — a failed message id
+			// shouldn't count as "recently used" since it never
+			// successfully rendered.
+			if cur, ok := a.messageStates.Peek(messageID); ok && cur == state {
+				a.messageStates.Remove(messageID)
 			}
 			a.mu.Unlock()
 			a.logger.Warn("feishu: OutMessageState add reaction failed",

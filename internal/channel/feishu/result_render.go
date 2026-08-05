@@ -183,9 +183,10 @@ func buildResultCardJSON(content string, footerLines []string) (string, error) {
 }
 
 // cardFooterElements builds the card elements for the styled footer
-// section: <hr> divider + <div> wrapping one <plain_text text_color=
-// "#999999"> per footer line. Returns nil when footerLines is empty
-// so callers can skip the section without an extra length check.
+// section: <hr> divider + one <div> per footer line, each <div>
+// containing a single nested <plain_text text_color="#999999">.
+// Returns nil when footerLines is empty so callers can skip the
+// section without an extra length check.
 //
 // F-46 unification: this is the single source of truth for the
 // footer-as-card-elements pattern. Previously buildReceiptCard had
@@ -198,26 +199,32 @@ func buildResultCardJSON(content string, footerLines []string) (string, error) {
 // receipts are pinned to the user message and adjacent OutResult
 // cards should look like the same footer):
 //   - <hr> at index 0 (Feishu renders ≈ #E5E5E5 thin-grey line)
-//   - <div> wrapping one <plain_text> per footer line; lines
-//     come from formatSessionFooterLines, so newlines within a
-//     single element are impossible (we emit one element per line)
+//   - one <div> per footer line; lines come from
+//     formatSessionFooterLines, so newlines within a single element
+//     are impossible (we emit one div per line)
+//   - each <div> holds a single nested <plain_text> in its `text`
+//     field — div does NOT accept an `elements` array (Feishu
+//     rejects with "unknown property, property: elements"; was the
+//     pre-F-46 bug that broke SendCard / PATCH for any receipt or
+//     result card with a footer)
 //   - text_color=#999999 (light grey, web "muted" tone)
 func cardFooterElements(footerLines []string) []map[string]any {
 	if len(footerLines) == 0 {
 		return nil
 	}
-	divElements := make([]any, 0, len(footerLines))
+	out := make([]map[string]any, 0, len(footerLines)+1)
+	out = append(out, map[string]any{"tag": "hr"})
 	for _, line := range footerLines {
-		divElements = append(divElements, map[string]any{
-			"tag":        "plain_text",
-			"content":    line,
-			"text_color": "#999999",
+		out = append(out, map[string]any{
+			"tag": "div",
+			"text": map[string]any{
+				"tag":        "plain_text",
+				"content":    line,
+				"text_color": "#999999",
+			},
 		})
 	}
-	return []map[string]any{
-		{"tag": "hr"},
-		{"tag": "div", "elements": divElements},
-	}
+	return out
 }
 
 // buildResultPayload selects the rendering surface and returns msg_type +

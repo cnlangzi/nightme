@@ -142,6 +142,73 @@ func TestBuildPostMdJSON_Shape(t *testing.T) {
 	}
 }
 
+// TestBuildReceiptCard_FooterUsesDivTextNotElements locks the
+// Feishu Card 2.0 schema for the F-46 footer. The pre-F-46 bug
+// emitted `{"tag":"div", "elements":[<plain_text>, ...]}` and
+// Feishu rejected the whole card with code 200621 ("unknown
+// property, property: elements, path: ... -> [2](tag: div)").
+// That broke every receipt SendCard / PATCH that carried a
+// footer, so the receipt was never created or PATCHed and the
+// user's response never appeared in chat. The corrected
+// structure is one <div> per footer line, each holding a single
+// nested <plain_text> in its `text` field.
+//
+// This test parses the JSON and walks to assert: (a) every <div>
+// in the body has a `text` field, (b) no <div> has an `elements`
+// array. A future refactor that re-introduces the `elements`
+// array will fail this test before reaching production.
+func TestBuildReceiptCard_FooterUsesDivTextNotElements(t *testing.T) {
+	footer := []string{"🤖 claude · opus-4-5", "💰 ↓ 1.0k · ↻ 0 · ↑ 0 · 1.0k · $0.001"}
+	body, err := buildReceiptCard(
+		[]LogEntry{{Icon: "💬", Text: "hello"}},
+		nil,
+		footer,
+	)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+
+	var envelope struct {
+		Body struct {
+			Elements []map[string]any `json:"elements"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatalf("parse card JSON: %v\nbody: %s", err, body)
+	}
+
+	// Find every <div> in the body and verify schema.
+	divCount := 0
+	for i, e := range envelope.Body.Elements {
+		tag, _ := e["tag"].(string)
+		if tag != "div" {
+			continue
+		}
+		divCount++
+		if _, hasText := e["text"]; !hasText {
+			t.Errorf("body element %d: <div> missing required `text` field\nelement: %#v\nbody: %s", i, e, body)
+		}
+		if _, hasElements := e["elements"]; hasElements {
+			t.Errorf("body element %d: <div> has invalid `elements` property (Feishu rejects with 200621)\nelement: %#v\nbody: %s", i, e, body)
+		}
+	}
+	if divCount != len(footer) {
+		t.Errorf("div count = %d, want %d (one <div> per footer line)", divCount, len(footer))
+	}
+
+	// Footer <hr> must be present.
+	var foundHr bool
+	for _, e := range envelope.Body.Elements {
+		if tag, _ := e["tag"].(string); tag == "hr" {
+			foundHr = true
+			break
+		}
+	}
+	if !foundHr {
+		t.Errorf("body missing <hr> divider\nbody: %s", body)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // buildResultCardJSON
 // ---------------------------------------------------------------------------

@@ -99,11 +99,15 @@ Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 | 方案 | JSON | 兼容性 |
 |---|---|---|
 | **v1 `note` element** | `{ "tag": "note", "elements": [{ "tag": "plain_text", "content": "..." }] }` | Card v1,大多数场景可用;Card 2.0 官方组件列表里**没有**该 tag |
-| **v2 neutral markdown + `<hr>`** | `elements.push({tag:"hr"}); elements.push({tag:"markdown", content:"<text_tag color='neutral'>...</text_tag>"});` | OpenClaw / 主流 v2 实践,**推荐** |
+| **v2 hr + markdown + inline color** | `elements.push({tag:"hr"}); elements.push({tag:"markdown", content:"<font color='grey'>line1</font>\n<font color='grey'>line2</font>"});` | Card 2.0,**本项目采用的方案**(见 §13.23) |
 
-**重要**: Feishu `lark_md` **不支持** `<font color='grey'>`。Feishu 官方允许的 inline 颜色用 `<text_tag color='...'>`,允许值:`neutral`、`blue`、`turquoise`、`lime`、`orange`、`violet`、`indigo`、`wathet`、`green`、`yellow`、`red`、`purple`、`carmine`。`neutral` 视觉上接近灰色。OpenClaw `send.ts:768` 写的 `<font color='grey'>` 实际渲染靠 Feishu 容错 -- 本项目**严格用 `<text_tag color='neutral'>`**。
+**颜色语法实测结论**(PR #52 验证):
+- `<font color='...'>` 在 `<markdown>` 标签内**有效** —— openclaw-lark (`src/card/builder.ts::buildFooter`) 用的就是这个,且实测生产可用。
+- 颜色值必须用**命名色**: `grey`、`red`、`green`、`turquoise`、`blue`、`yellow`、`orange`、`purple`、`neutral`、`carmine` 等。**不支持 hex**(`#999999` 会被 Feishu 直接拒绝,报错 `230099 invalid color`)。
+- `<text_tag color='neutral'>` 也是有效语法,但**只对 plain_text 的 `text_color` 字段生效**,在 `<markdown>` 内联语法里不支持 —— §6.2 的旧结论基于这个误解,已修订。
+- 不要把 footer 用独立的 `<plain_text>` 元素 + `text_color` 字段渲染 —— `text_color` 字段只接受 `grey-100`/`grey-500` 等具名调色板 token,不接受命名色,且与 `<font color>` 内联色重叠。**统一用 `<markdown>` + `<font color='grey'>`** 是最简单、最可控的方案。
 
-参考: `gcmsg/openclaw-feishu/src/menu.ts` 用前者(纯 v1),`openclaw/openclaw/extensions/feishu/src/send.ts:768` 用后者(纯 v2)。
+参考: `openclaw/openclaw/extensions/feishu/src/card/builder.ts::buildFooter` 是本项目最终采用的 v2 模式参考实现。本项目不再使用 v1 `<note>`。
 
 ### 3.3 常用元素
 
@@ -271,9 +275,12 @@ PATCH 失败时不降级为新消息 -- 简单实现,日志告警即可;下次 `
 
 **本期 foot note 不会出现 `key: value` 形态**(内容是 `state · N entries · HH:MM:SS`),但**约束记在 §9.3 后续加 agent info 时必须遵守**。中点字符用 U+00B7(`·`),不是句号或星号。
 
-### 6.2 `<text_tag color='neutral'>` 而非 `<font color='grey'>`
+### 6.2 ~~`<text_tag color='neutral'>` 而非 `<font color='grey'>`~~（已修订）
 
-Feishu `lark_md` **不支持** `<font color='grey'>`。**严格用 `<text_tag color='neutral'>`**(允许值: `neutral`, `blue`, `turquoise`, `lime`, `orange`, `violet`, `indigo`, `wathet`, `green`, `yellow`, `red`, `purple`, `carmine`)。OpenClaw `send.ts:768` 写的 `<font color='grey'>` 靠 Feishu 容错 -- 本项目不依赖容错。
+~~Feishu `lark_md` **不支持** `<font color='grey'>` ...~~ **这条结论是错的**(本项目最终用了 `<font color='grey'>`)。修订见 §3.2 + §13.23。简短版:
+- `<font color='grey'>` 在 `<markdown>` 内**有效**且**推荐** —— openclaw-lark 同款
+- `<text_tag color='neutral'>` 只在 plain_text 元素的 `text_color` 字段上有效,**不能放在 markdown 内联**
+- 不支持 hex 颜色(`#999999` 直接报错);只能用命名色
 
 ### 6.3 SDK: Patch ≠ Update
 
@@ -1417,6 +1424,73 @@ WebSearch  -> 10 results
 
 **详细设计**:见 [`docs/feat/F-39-tool-merge-and-toggle.md`](../feat/F-39-tool-merge-and-toggle.md) + `docs/SPEC.md` §0.7 + §3.1.3。
 
+### 13.23 🎯 F-46 + F-47 Implementation Experience:Footer Rendering 踩坑实录
+
+> 本节是 footer card 渲染的**实现经验总结**,给后续维护者一个"为什么现在长这样"的完整画像。设计动机见 §13.22,本次只讲踩过的坑 + 最终方案。
+
+**最终方案**(v2 markdown + `<font color='grey'>`,openclaw-lark 同款):
+
+```json
+[
+  {"tag": "hr"},
+  {"tag": "markdown", "content": "<font color='grey'>🤖 claude · opus-4-5</font>\n<font color='grey'>💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k · $0.087</font>"}
+]
+```
+
+源代码:`internal/channel/feishu/result_render.go::cardFooterElements` —— **单一来源**,被 `buildReceiptCard`(OutReply / OutTask 路径)和 `buildResultCardJSON`(OutResult 路径)共用。
+
+#### 13.23.1 三次踩坑迭代(每个都让 Feishu 整张 card 拒绝)
+
+| 尝试 | 错误 | Feishu 报错 |
+|------|------|------------|
+| **A.** `<div>` 包 `<plain_text>`, div 带 `elements: [...]` 子数组 | `div` 元素**不接受** `elements` 字段 —— 只接受 `text` 字段(单个 nested element) | `code=230099 ... unknown property, property: elements, path: ROOT -> body -> elements -> [2](tag: div)` |
+| **B.** `<plain_text text_color="#999999">`(hex 颜色) | Feishu 渲染器**不接受 hex**;只接受命名色 | `code=230099 ... invalid color: #999999` |
+| **C.** `<plain_text text_color="grey-500">`(调色板 token) | 部分 renderer 接受,部分拒绝;不稳定 | flaky;PR #52 早期测试看到的就是这种 |
+| **D.** ✅ `<markdown>` 包 `<font color='grey'>` 内联 | 跨 renderer 一致工作;openclaw-lark 同款 | (无错) |
+
+**为什么 `text_color` 字段路径反复失败**:`plain_text` 的 `text_color` 字段是 Feishu **早期 Card 1.0 schema 的字段**,在 Card 2.0 renderer 里要么被忽略要么接受范围极窄(只能 `grey-100`/`grey-500` 这种具名调色板)。**Card 2.0 + markdown 元素**才支持完整的 inline `<font color>`>`>` —— 这是 Feishu 把"卡片排版"和"卡片装饰"的关注点拆开的结果。
+
+**为什么**`elements` array 不可用:Card 2.0 重新设计了元素树(单根 + 单 `text` 字段嵌套),放弃了 Card 1.0 的 children-array 思路。`div` 元素**只是包装器**,不持有 children。
+
+#### 13.23.2 与 openclaw-lark 源码的对照
+
+| 维度 | openclaw-lark (`src/card/builder.ts::buildFooter`) | 本项目 (`cardFooterElements`) |
+|------|------|------|
+| 元素结构 | `<hr>` + `<markdown>` | `<hr>` + `<markdown>` |
+| 颜色语法 | `<font color='red'>` 或 `<font color='green'>` 等命名色 | `<font color='grey'>` |
+| 多行处理 | 单一 markdown content,无换行 | 多个 `<font>` 之间用 `\n` 分隔(Feishu lark_md 支持) |
+| 字号控制 | `text_size: 'notation'`(Card element 字段,不在 markdown 内) | 不设 —— `<markdown>` element 自身默认就是 body 字号 |
+| i18n | `content` + `i18n_content` 双字段 | 不做 i18n(项目范围只 zh-CN,没必要) |
+
+唯一差异是 `text_size` —— openclaw-lark 给 footer markdown 加 `text_size: 'notation'` 让字号变小。本项目没加,因为我们的 footer 文字本身已经够小(<font color='grey'> 在视觉上会自动变小一点),且 `text_size` 字段是 **card element 字段**不是 markdown 字段。如果未来实测发现 footer 太大,可以在 `cardFooterElements` 里给 markdown element 加 `text_size: 'notation'`。
+
+#### 13.23.3 测试覆盖
+
+- `TestBuildReceiptCard_FooterUsesMarkdownFontGrey`(在 `result_render_test.go`):**解析 card JSON** 验证 body shape = `[entry-markdown, hr, footer-markdown]`,footer markdown 内容包含 `<font color='grey'>` 包裹 + **不存在** `<div>` / `<plain_text>` 元素
+- `TestSend_OutReply_OrphanReplyTo_AlwaysCard` + `..._ColdStartSendCardFails_StillCard` + `..._NilSessionContext_NoFooter`(在 `adapter_test.go`):substring 断言 footer `<font color='grey'>` 出现 / 缺席
+- `TestSend_OutResult_AnchoredCardFooterStyled`:解析 card JSON 验证 footer markdown 在 `<hr>` **之后**,body markdown 在 `<hr>` **之前** —— 锁定 footer / body 不会混
+- `TestBuildReceiptCard_FooterUsesDivTextNotElements`(已被 `TestBuildReceiptCard_FooterUsesMarkdownFontGrey` 替代)
+
+**为什么必须 substring 断言 + JSON 解析双层**:substring 断言可以快速 catch"footer 完全消失"或"用了 hex 颜色";JSON 解析断言可以 catch"footer 元素类型错了"(比如 `div`/`elements` 这种 Feishu 拒绝的 schema)。两层都做才能锁住 §13.23.1 列的 4 个 schema 错误。
+
+#### 13.23.4 跨 kind 一致性(F-46 + F-47 invariant)
+
+| Kind | Footer 渲染路径 | 失败 fallback |
+|------|----------------|--------------|
+| `OutReply` | `buildReceiptCard` → `cardFooterElements` | `postOrphanReplyCard` 走同路径 |
+| `OutResult` | `buildResultCardJSON` → `cardFooterElements` | `sendOrphanResultCard` 走同路径 |
+| `OutTaskCreate` / `OutTaskUpdate` | `buildReceiptCard` → `cardFooterElements` | `postOrphanTaskCard` 走同路径 |
+
+**invariant**:**所有 main-chat event 都是 Card**(无 plain-text fallback)。F-46 把 OutReply / OutResult 改完,F-47 把 OutTask 改完。任何后续 `Out*` kind 要走 main-chat 都需要遵守这个 invariant。
+
+#### 13.23.5 后续维护陷阱
+
+- **不要试图改回 `<div>` + `<plain_text>`** —— Feishu 拒绝 `div.elements`。即使看代码觉得"我优化一下用 div 包 plain_text 更对称",也是错的。
+- **不要在 footer 里用 hex 颜色** —— `text_color` 字段只接受 `grey-100`/`grey-500`/`grey-1000` 这种调色板 token;`<font color>` 必须用命名色 (`grey`、`red`、`green` 等)。
+- **不要把 `<font>` 放在 `<plain_text>` 元素里** —— `<font>` 是 `<markdown>` 内联语法,plain_text 元素不支持富文本内联。
+- **不要给 footer 加 `text_size: 'notation'`(除非确认 markdown element 字号真的太大)** —— 字段存在,但视觉差异很小;加了反而跟 openclaw-lark 不一致。
+- **不要把 footer 渲染抽到 helper 之外的某个 markdown builder** —— `cardFooterElements` 是**单一来源**,任何 footer 渲染都必须经过它。OutReply / OutResult / OutTask 三处共用,F-47 review agent 提过"抽通用 `postOrphanCard(body)` 收敛 boilerplate",但那是另一个层面的抽象,不影响 footer 渲染逻辑。
+
 ## 14. 变更日志
 
 - **2026-08-03** - 加入 §11-§13: Feishu msg_type 全集参考、OutboundKind → Feishu 渲染映射表、审计结果(1 bug + 4 澄清)。基于 `internal/channel/feishu/*` 与 `internal/gateway/*` 现状。
@@ -1709,6 +1783,14 @@ user_msg om_A
 
 ### 13.21 🎯 F-44 决策 (2026-08-05):OutReply 拆出 Receipt + Task Receipt 瘦身 + OutInit/OutUsage 推迟
 
+> ⚠️ **SUPERSEDED BY F-46** (PR #52). The `sendReplyInThreadAndChat`
+> helper described in this section was deleted in F-46; OutReply now
+> always renders as a Card 2.0 (via `postOrphanReplyCard` for the
+> orphan / cold-start-fail / overflow-bail-out paths, and via
+> `ensureReceiptForReplyWithFooter` for the anchored receipt path).
+> See the F-46 commit message for the current architecture. This
+> section is preserved as design history.
+
 **背景**:F-25 → F-40 → F-42 三轮演进后,Feishu receipt card 承担 4 类内容(prompt state header + OutReply entries + Tasks checklist + init/usage footer),渲染路径 ~1000 行。其中:
 
 1. **OutReply fold 进 receipt 的价值被稀释** ── 用户等 PATCH 周期才能看到完整内容;fold 路径需要 overflow / late-reply / no-receipt 三种 bail-out 协调
@@ -1809,6 +1891,24 @@ user_msg om_A
 **详细设计**:见 [`docs/feat/F-44-outreply-independent-and-task-receipt.md`](../feat/F-44-outreply-independent-and-task-receipt.md)。SPEC §0.11。
 
 ### 13.22 🎯 F-45 决策 (2026-08-05):Main-Chat 卡片 Footer + AgentSession 累计 Token 持久化
+
+> ⚠️ **F-46 follow-up (PR #52)**: the OutReply "append footer to text
+> via \n\n" path described in step 5 was replaced by a card-element
+> footer (hr + grey plain_text). OutResult got the same fix. The
+> helper `cardFooterElements` (result_render.go) is the single source
+> of truth for footer rendering across both OutReply and OutResult
+> cards. Step 5 below describes the pre-F-46 routing; the rendering
+> contract (hr + #999999 plain_text) is unchanged.
+>
+> ⚠️ **F-47 follow-up (PR #53)**: OutTask* still had the pre-F-46
+> anti-pattern — orphan `OutTask*` (msg.ReplyTo == "") and SendCard
+> cold-start failure both fell through to `sendRawOutText`
+> (plain-text checklist via `renderTaskFallbackText`), violating
+> the "main-chat is card" invariant. F-47 added
+> `postOrphanTaskCard` (symmetric to `postOrphanReplyCard` /
+> `sendOrphanResultCard`) and routed both paths through it;
+> `renderTaskFallbackText` deleted (no callers). After F-46 + F-47
+> the "always card" invariant holds for every main-chat kind.
 
 **背景**:F-44 §6.1 推迟的 footer 兑现。`OutInit` / `OutUsage` 自 F-44 以来一直 silent drop,token / model 信息完全丢给用户。本节把 metadata 从 bridge event 搬到 `AgentSession` wrapper 自身,持久化到 `agent_sessions.json`,在 4 个 main-chat Kind 上 stamp `SessionContext *SessionContext` typed snapshot 到每条消息。
 
@@ -1981,6 +2081,85 @@ case gateway.OutReply, gateway.OutResult,
 - Receipt 自治不变（决策卡 ≠ receipt card，是独立 card message）
 
 **详细设计 + 调试心得**:见 [`docs/feat/F-46-interactive-cards.md`](../feat/F-46-interactive-cards.md)。SPEC §0.13 + §2.6。
+
+### 13.24 🎯 F-48 决策 (2026-08-06):Footer Line 3 ── Git Branch Tracking
+
+**背景**:F-45 footer 只展示 agent / model / token / cost,但用户在 IM 里看不到当前 workspace / branch / dirty 状态 — 每次要确认"我正在哪个 repo / 有没有 uncommitted / 有没有 unpushed"都得跳 terminal。F-48 在 footer 加第 3 行,让 Feishu 卡片本身是 ground truth。
+
+**核心变化**(`gateway.SessionContext` 加 2 个字段):
+
+```go
+type SessionContext struct {
+    Agent           string
+    Model           string
+    CumulativeUsage UsageInfo
+    Workspace       string                  // NEW: s.Cwd
+    GitStatus       *gtw.GitStatusSnapshot  // NEW: per-stamp git snapshot
+}
+
+// internal/gtw/git_status.go
+type GitStatusSnapshot struct {
+    Branch        string  // empty when detached HEAD / not-a-repo
+    Uncommitted   int     // M/A/D/R/C + 冲突 (UU/AA/DD/...)
+    Untracked     int     // ??
+    AheadOfRemote int     // 0 when no upstream
+    HasUpstream   bool    // false for detached HEAD / new branch
+}
+```
+
+**Footer line 3 格式**:
+
+```
+📁 code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
+```
+
+| 段 | 来源 | Omit 规则 |
+|---|---|---|
+| 📁 `<workspace>` | `Workspace` = `s.Cwd` | `Workspace=="" \|\| GitStatus==nil` 整段省略(review fix: non-git workspace 不显示误导性的 `⎇ ?`) |
+| ⎇ `<branch>` | `GitStatus.Branch` | 永远显示(行渲染时);`Branch==""` → 写 `?`(detached HEAD inside a real git repo) |
+| ↑ `<n>` | `GitStatus.Uncommitted` | `n==0` 省略 |
+| ? `<n>` | `GitStatus.Untracked` | `n==0` 省略 |
+| ⇡ `<n>` | `GitStatus.AheadOfRemote` | `HasUpstream==false \|\| n==0` 省略 |
+
+**Workspace 显示规则**(简化版,Devin 拍板 2026-08-06):
+- **不加任何前缀**(既不 `~` 也不 `/`)—— 路径是什么就显示什么。理由:`~` 在 workspace 不在 HOME 下时会误导(不同 operator / 容器化 session / 非标准 HOME 布局)
+- ≤ 2 目录组件 → 完整显示:`/home/devin` → `home/devin`、`/tmp/foo` → `tmp/foo`、`/home/devin/code` → `devin/code`
+- > 2 目录组件 → 只显示最后两个:`/home/devin/code/nightme` → `code/nightme`、`/home/devin/code/nightme/internal` → `nightme/internal`、`/tmp/a/b/c` → `b/c`
+
+**Arrow 选型**(与 F-45 约定一致):ASCII / Unicode 符号,无 emoji 字体依赖;middle dot ` · ` 分隔;`⎇` (U+2387) branch icon;`📁` 仅作 category header(与 line 1 🤖 / line 2 💰 一致)。
+
+**Stamping 规则**(`cmd/nightme/run.go::newEventHandler`):
+- 4 个 main-chat kind (OutReply / OutResult / OutTaskCreate / OutTaskUpdate) 上 stamp
+- 每次 stamp 都跑 `gtw.CollectStatus(s.Cwd, gtw.ExecGitRunner{})` —— **无缓存**,footer 永远反映当前 worktree 状态
+- `Workspace` = `s.Cwd`(immutable,无锁读)
+- `GitStatus` = parse 结果;非 git repo / git 失败 → `nil`(整段省略)
+- stamp condition 扩展:`hasGit := gitSnap != nil && s.Cwd != ""`;其他 usage/model 条件不变
+
+**Render 路径**(`internal/channel/feishu/usage_footer.go::formatSessionFooterLines`):
+- 现有 line 1 / line 2 不变
+- 新增 line 3:`formatGitLine(ctx)` 返回非空时 append
+- `formatGitLine` 内部调 `formatWorkspacePath`(HOME-aware,< 2 组件完整、> 2 截尾)
+
+**设计决策**:
+1. **不缓存 git CLI**:每 stamp 重跑 `git status`;chat 延迟 1-3s 摊薄在 LLM roundtrip 上,UX OK;用户拍板
+2. **测试不污染生产代码**:`gtw.GitRunner` interface 已是 abstraction(用于其他 gtw 测试);`CollectStatus` 接 runner 参数,production 用 `ExecGitRunner{}`,tests 用 fake;`formatWorkspacePath` 是纯函数,tests 直接构造 input/output
+3. **不在 Channel 调 git**:保持 F-08 "Channel is dumb" 边界;git CLI 只在 runtime stamp 时跑一次
+4. **path "≤2 完整, >2 截尾" + 无前缀**:让用户总能看到 leaf + 父目录;HOME `~` 前缀在 workspace 不在 HOME 下时会误导,统一不加任何前缀
+
+**Wire 兼容性**:
+- `SessionContext` 加 2 字段(已有 JSON-omitempty 风格;Echo / Slack / Web channel 零改动)
+- 其他 Channel 实现(无 git footer 渲染)不影响编译
+- runtime stamp 4 个 main-chat kind 不变(F-45 §1.5),只是 stamp 的字段多 2 个
+
+**PR scope**:
+- `internal/gtw/git_status.go` (NEW) — `CollectStatus` + `parsePorcelainBranchStatus` + `parseBranchHeader`
+- `internal/gtw/git_status_test.go` (NEW) — 9 case:clean / dirty / detached HEAD (3 sub) / no upstream / ahead+behind / conflicts / ignored / empty output / not-a-repo
+- `internal/gateway/messages.go` — `SessionContext` 加 2 字段
+- `cmd/nightme/run.go::newEventHandler` — stamp 时调用 `gtw.CollectStatus`
+- `internal/channel/feishu/usage_footer.go` — line 3 渲染 + `formatWorkspacePathWithHome` helper
+- `internal/channel/feishu/usage_footer_test.go` — 扩展 `TestFormatWorkspacePath_WithHome` (14 case) + `TestFormatGitLine_*` (8 case) + `TestFormatSessionFooterLines_WithGitLine` / `_GitOnly`
+
+**详细设计**:见 [`docs/feat/F-45-session-footer.md`](../feat/F-45-session-footer.md) §1.7。
 
 ## 15. v1.3.x 实施计划
 

@@ -28,6 +28,17 @@ type session struct {
 	events  chan agent.AgentEvent
 	pid     int
 
+	// pumpWG tracks the pumpStream goroutine lifecycle so Close
+	// can wait for it to finish before allowing the events channel
+	// to be closed. Before this existed, Close() called
+	// close(s.events) directly while pumpStream was still in its
+	// post-Scan teardown (scanner.Err check + final EventError
+	// emit), racing a send on a closed channel — see the
+	// TestClaudeCodeBridge_RealSubprocess race that surfaced in
+	// PR #53's CI. pumpStream owns the events-channel close via
+	// `defer close(s.events)`; Close only waits on pumpWG.
+	pumpWG sync.WaitGroup
+
 	// agentName + workspace + branch are captured at session start
 	// so the translate goroutine can stamp them onto the EventInit
 	// payload (consumed by channel-layer receipt rendering for
@@ -176,7 +187,16 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 	}
 
 	logger := slog.Default()
-	go pumpStream(stdout, s.events, handler, s.agentName, s.workspace, s.branch, logger)
+	// pumpStream owns the events-channel close so Close() can wait
+	// for it to drain (via pumpWG) before allowing close. Pre-fix
+	// Close closed the channel directly, racing pumpStream's
+	// post-Scan EventError emit. See PR #53 CI race trace.
+	s.pumpWG.Add(1)
+	go func() {
+		defer s.pumpWG.Done()
+		defer close(s.events)
+		pumpStream(stdout, s.events, handler, s.agentName, s.workspace, s.branch, logger)
+	}()
 
 	// stderr drainer — Claude Code logs to stderr; we discard
 	// rather than surface (the channel layer can subscribe via
@@ -492,7 +512,12 @@ func (s *session) Close() error {
 			<-done
 		}
 
-		close(s.events)
+		// Wait for pumpStream to drain + close the events channel
+		// itself (via defer in newSession). Pre-fix, Close closed
+		// s.events directly, racing pumpStream's
+		// scanner.Err → events <- EventError emit. See the
+		// TestClaudeCodeBridge_RealSubprocess race in PR #53's CI.
+		s.pumpWG.Wait()
 	})
 	return firstErr
 }

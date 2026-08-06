@@ -7,58 +7,60 @@
 package feishu
 
 import (
-	"strings"
+	"reflect"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/gtw"
 )
 
-func TestFormatSessionFooter_NilContextReturnsEmpty(t *testing.T) {
-	if got := formatSessionFooter(nil); got != "" {
-		t.Fatalf("formatSessionFooter(nil) = %q, want \"\"", got)
+func TestFormatSessionFooterLines_NilContextReturnsNil(t *testing.T) {
+	if got := formatSessionFooterLines(nil); got != nil {
+		t.Fatalf("formatSessionFooterLines(nil) = %v, want nil", got)
 	}
 }
 
-func TestFormatSessionFooter_AllZeroReturnsEmpty(t *testing.T) {
+func TestFormatSessionFooterLines_AllZeroReturnsNil(t *testing.T) {
 	ctx := &gateway.SessionContext{Agent: "", Model: ""}
-	if got := formatSessionFooter(ctx); got != "" {
-		t.Fatalf("empty SessionContext should yield \"\", got %q", got)
+	if got := formatSessionFooterLines(ctx); got != nil {
+		t.Fatalf("empty SessionContext should yield nil, got %v", got)
 	}
 }
 
-func TestFormatSessionFooter_AgentModelOnly(t *testing.T) {
+func TestFormatSessionFooterLines_IdentityOnly(t *testing.T) {
+	// Agent + Model only, no tokens / cost → just line 1 (🤖 header).
 	ctx := &gateway.SessionContext{Agent: "claude", Model: "opus-4-5"}
-	got := formatSessionFooter(ctx)
-	want := "claude · opus-4-5"
-	if got != want {
-		t.Fatalf("formatSessionFooter() = %q, want %q", got, want)
+	got := formatSessionFooterLines(ctx)
+	want := []string{"🤖 claude · opus-4-5"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("formatSessionFooterLines() = %v, want %v", got, want)
 	}
 }
 
-func TestFormatSessionFooter_TokenSegments(t *testing.T) {
+func TestFormatSessionFooterLines_TokenSegments(t *testing.T) {
 	ctx := &gateway.SessionContext{
 		Agent: "claude",
 		Model: "opus-4-5",
 		CumulativeUsage: gateway.UsageInfo{
 			InputTokens:              11_700,
 			OutputTokens:             1_500,
-			CacheCreationInputTokens: 600, // counted into "in"
+			CacheCreationInputTokens: 600, // counted into "↓ in"
 			CacheReadInputTokens:     8_200,
 			CostUSD:                  0.087,
 		},
 	}
-	got := formatSessionFooter(ctx)
-	want := "claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k · $0.087"
-	if got != want {
-		t.Fatalf("formatSessionFooter() mismatch:\n  got:  %q\n  want: %q", got, want)
+	got := formatSessionFooterLines(ctx)
+	want := []string{"🤖 claude · opus-4-5", "💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k · $0.087"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("formatSessionFooterLines() mismatch:\n  got:  %v\n  want: %v", got, want)
 	}
 }
 
-func TestFormatSessionFooter_OmitsZeroSegments(t *testing.T) {
+func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 	tests := []struct {
 		name string
 		ctx  *gateway.SessionContext
-		want string
+		want []string
 	}{
 		{
 			name: "no input but has output",
@@ -66,7 +68,7 @@ func TestFormatSessionFooter_OmitsZeroSegments(t *testing.T) {
 				Agent: "claude", Model: "opus-4-5",
 				CumulativeUsage: gateway.UsageInfo{OutputTokens: 234},
 			},
-			want: "claude · opus-4-5 · ↑ 234 · Total 234",
+			want: []string{"🤖 claude · opus-4-5", "💰 ↑ 234 · 234"},
 		},
 		{
 			name: "only cache hits",
@@ -74,15 +76,15 @@ func TestFormatSessionFooter_OmitsZeroSegments(t *testing.T) {
 				Agent: "claude", Model: "opus-4-5",
 				CumulativeUsage: gateway.UsageInfo{CacheReadInputTokens: 5_600},
 			},
-			want: "claude · opus-4-5 · ↻ 5.6k cached · Total 5.6k",
+			want: []string{"🤖 claude · opus-4-5", "💰 ↻ 5.6k · 5.6k"},
 		},
 		{
-			name: "cost only",
+			name: "cost only (no tokens)",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				CumulativeUsage: gateway.UsageInfo{CostUSD: 1.245},
 			},
-			want: "claude · opus-4-5 · $1.245",
+			want: []string{"🤖 claude · opus-4-5", "💰 $1.245"},
 		},
 		{
 			name: "no cost (omitted)",
@@ -92,20 +94,29 @@ func TestFormatSessionFooter_OmitsZeroSegments(t *testing.T) {
 					InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
 				},
 			},
-			want: "claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k",
+			want: []string{"🤖 claude · opus-4-5", "💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k"},
+		},
+		{
+			name: "tokens but no Agent / Model",
+			ctx: &gateway.SessionContext{
+				CumulativeUsage: gateway.UsageInfo{
+					InputTokens: 5_000, OutputTokens: 200,
+				},
+			},
+			want: []string{"💰 ↓ 5.0k · ↑ 200 · 5.2k"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := formatSessionFooter(tc.ctx)
-			if got != tc.want {
-				t.Fatalf("got %q, want %q", got, tc.want)
+			got := formatSessionFooterLines(tc.ctx)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestFormatSessionFooter_LargeNumbers(t *testing.T) {
+func TestFormatSessionFooterLines_LargeNumbers(t *testing.T) {
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
 		CumulativeUsage: gateway.UsageInfo{
@@ -116,15 +127,36 @@ func TestFormatSessionFooter_LargeNumbers(t *testing.T) {
 			CostUSD:                  1.245,
 		},
 	}
+	got := formatSessionFooterLines(ctx)
+	want := []string{"🤖 claude · opus-4-5", "💰 ↓ 156.0k · ↻ 1.2M · ↑ 18.0k · 1.4M · $1.245"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// TestFormatSessionFooter_StringForm covers the legacy single-
+// string helper used by OutReply / OutResult orphan / overflow
+// paths (text concatenation). The string form joins the
+// lines with "\n" — plain-text rendering paths honour \n
+// natively.
+func TestFormatSessionFooter_StringForm(t *testing.T) {
+	ctx := &gateway.SessionContext{
+		Agent: "claude", Model: "opus-4-5",
+		CumulativeUsage: gateway.UsageInfo{
+			InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
+		},
+	}
 	got := formatSessionFooter(ctx)
-	want := "claude · opus-4-5 · ↓ 156.0k · ↻ 1.2M cached · ↑ 18.0k · Total 1.4M · $1.245"
+	want := "🤖 claude · opus-4-5\n💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
-	// Sanity: 156000 + 0 + 1200000 + 18000 = 1374000 → 1.4M
-	// (Go's %.1f rounds 1.374 to 1.4)
-	if !strings.Contains(got, "1.4M") {
-		t.Fatalf("expected 1.4M total, got %q", got)
+	// Empty input → empty string.
+	if got := formatSessionFooter(&gateway.SessionContext{}); got != "" {
+		t.Fatalf("empty ctx should yield empty string, got %q", got)
+	}
+	if got := formatSessionFooter(nil); got != "" {
+		t.Fatalf("nil ctx should yield empty string, got %q", got)
 	}
 }
 
@@ -165,5 +197,224 @@ func TestAbbrevTokens(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("abbrevTokens(%d) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// ---- F-48 footer line 3: git tracking -----------------------------
+
+// TestFormatWorkspacePath exercises the simplified F-48 rule:
+// NO prefix, ≤2 components kept whole, >2 truncated to the
+// last 2. HOME / non-HOME / macOS / Windows — all the same.
+func TestFormatWorkspacePath(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty -> empty", "", ""},
+		{"dot -> empty", ".", ""},
+		{"root -> empty", "/", ""},
+		{"single dir (1 component)", "/home", "home"},
+		{"two dirs (≤2 keep all)", "/home/devin", "home/devin"},
+		{"three dirs (>2 last 2)", "/home/devin/code", "devin/code"},
+		{"four dirs (>2 last 2)", "/home/devin/code/nightme", "code/nightme"},
+		{"five dirs (>2 last 2)", "/home/devin/code/nightme/internal", "nightme/internal"},
+		{"deeply nested (>2 last 2)", "/home/devin/a/b/c/d/e", "d/e"},
+		{"trailing slash normalised", "/home/devin/", "home/devin"},
+		{"non-HOME absolute (1)", "/tmp", "tmp"},
+		{"non-HOME absolute (2)", "/tmp/foo", "tmp/foo"},
+		{"non-HOME absolute (3)", "/tmp/foo/bar", "foo/bar"},
+		{"non-HOME absolute deep", "/tmp/a/b/c", "b/c"},
+		{"macOS-style (3)", "/Users/dev/code", "dev/code"},
+		{"macOS-style (4)", "/Users/dev/code/nightme", "code/nightme"},
+		{"prefix-collision: /home/devin vs /home/devin-other", "/home/devin-other/foo", "devin-other/foo"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatWorkspacePath(tc.in)
+			if got != tc.want {
+				t.Fatalf("formatWorkspacePath(%q) = %q, want %q",
+					tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatGitLine_NilContextReturnsEmpty(t *testing.T) {
+	if got := formatGitLine(nil); got != "" {
+		t.Fatalf("nil ctx should yield empty, got %q", got)
+	}
+}
+
+func TestFormatGitLine_NoWorkspaceReturnsEmpty(t *testing.T) {
+	ctx := &gateway.SessionContext{
+		GitStatus: &gtw.GitStatusSnapshot{Branch: "main"},
+	}
+	if got := formatGitLine(ctx); got != "" {
+		t.Fatalf("Workspace=\"\" should yield empty, got %q", got)
+	}
+}
+
+// TestFormatGitLine_NoGitStatusOmitsLine (F-48 review fix):
+// when Workspace is set but GitStatus is nil (caller couldn't
+// collect — non-repo / git error / git timeout), the entire
+// footer line must be omitted. Rendering "📁 <ws> · ⎇ ?" would
+// imply Git tracking is available when it isn't — the user's
+// review caught this as a misleading UI bug. The "⎇ ?" rendering
+// is reserved for detached HEAD inside a real git repo
+// (Branch=="" + GitStatus!=nil).
+func TestFormatGitLine_NoGitStatusOmitsLine(t *testing.T) {
+	ctx := &gateway.SessionContext{Workspace: "/home/devin/code/nightme"}
+	if got := formatGitLine(ctx); got != "" {
+		t.Fatalf("Workspace set + GitStatus nil should omit line, got %q", got)
+	}
+}
+
+func TestFormatGitLine_FullSnapshot(t *testing.T) {
+	// Branch + dirty + untracked + unpushed — all segments.
+	ctx := &gateway.SessionContext{
+		Workspace: "/home/devin/code/nightme",
+		GitStatus: &gtw.GitStatusSnapshot{
+			Branch:        "main",
+			Uncommitted:   3,
+			Untracked:     2,
+			AheadOfRemote: 5,
+			HasUpstream:   true,
+		},
+	}
+	got := formatGitLine(ctx)
+	want := "📁 code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 5"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestFormatGitLine_OmitsZeroSegments(t *testing.T) {
+	tests := []struct {
+		name string
+		snap *gtw.GitStatusSnapshot
+		want string
+	}{
+		{
+			name: "clean working tree",
+			snap: &gtw.GitStatusSnapshot{
+				Branch: "main", HasUpstream: true, AheadOfRemote: 0,
+			},
+			want: "📁 code/nightme · ⎇ main",
+		},
+		{
+			name: "uncommitted only",
+			snap: &gtw.GitStatusSnapshot{
+				Branch: "feat/x", Uncommitted: 1, HasUpstream: true,
+			},
+			want: "📁 code/nightme · ⎇ feat/x · ↑ 1",
+		},
+		{
+			name: "untracked only",
+			snap: &gtw.GitStatusSnapshot{
+				Branch: "feat/x", Untracked: 7, HasUpstream: true,
+			},
+			want: "📁 code/nightme · ⎇ feat/x · ? 7",
+		},
+		{
+			name: "unpushed only",
+			snap: &gtw.GitStatusSnapshot{
+				Branch: "feat/x", AheadOfRemote: 4, HasUpstream: true,
+			},
+			want: "📁 code/nightme · ⎇ feat/x · ⇡ 4",
+		},
+		{
+			name: "no upstream — omit unpushed",
+			snap: &gtw.GitStatusSnapshot{
+				Branch:        "feat/new",
+				Uncommitted:   2,
+				AheadOfRemote: 0, // parser leaves this 0 when no upstream
+				HasUpstream:   false,
+			},
+			want: "📁 code/nightme · ⎇ feat/new · ↑ 2",
+		},
+		{
+			name: "detached HEAD — branch renders as ?",
+			snap: &gtw.GitStatusSnapshot{
+				Branch:        "", // empty -> renders "?"
+				Uncommitted:   1,
+				HasUpstream:   false,
+				AheadOfRemote: 0,
+			},
+			want: "📁 code/nightme · ⎇ ? · ↑ 1",
+		},
+		{
+			name: "long path — last 2 components",
+			snap: &gtw.GitStatusSnapshot{Branch: "main", HasUpstream: true},
+			want: "📁 code/nightme · ⎇ main",
+			// (default Workspace is /home/devin/code/nightme → code/nightme)
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := &gateway.SessionContext{
+				Workspace: "/home/devin/code/nightme",
+				GitStatus: tc.snap,
+			}
+			got := formatGitLine(ctx)
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatSessionFooterLines_WithGitLine confirms line 3 is
+// appended after lines 1+2 when both are populated.
+func TestFormatSessionFooterLines_WithGitLine(t *testing.T) {
+	ctx := &gateway.SessionContext{
+		Agent: "claude", Model: "opus-4-5",
+		CumulativeUsage: gateway.UsageInfo{
+			InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
+		},
+		Workspace: "/home/devin/code/nightme",
+		GitStatus: &gtw.GitStatusSnapshot{
+			Branch:        "feat/x",
+			Uncommitted:   2,
+			Untracked:     1,
+			AheadOfRemote: 3,
+			HasUpstream:   true,
+		},
+	}
+	got := formatSessionFooterLines(ctx)
+	want := []string{
+		"🤖 claude · opus-4-5",
+		"💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k",
+		"📁 code/nightme · ⎇ feat/x · ↑ 2 · ? 1 · ⇡ 3",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// TestFormatSessionFooterLines_GitOnly confirms line 3 appears
+// on its own when lines 1+2 are both empty (e.g. first reply on
+// a git repo before any usage / model has been captured).
+func TestFormatSessionFooterLines_GitOnly(t *testing.T) {
+	ctx := &gateway.SessionContext{
+		Workspace: "/home/devin/code/nightme",
+		GitStatus: &gtw.GitStatusSnapshot{Branch: "main", HasUpstream: true},
+	}
+	got := formatSessionFooterLines(ctx)
+	want := []string{"📁 code/nightme · ⎇ main"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// TestFormatSessionFooterLines_NoGitNoUsage confirms we still
+// return nil when nothing meaningful exists — backwards
+// compatible with F-45.
+func TestFormatSessionFooterLines_NoGitNoUsage(t *testing.T) {
+	ctx := &gateway.SessionContext{Agent: "claude", Model: "opus-4-5"}
+	got := formatSessionFooterLines(ctx)
+	want := []string{"🤖 claude · opus-4-5"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
 	}
 }

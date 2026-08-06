@@ -314,7 +314,13 @@ func (as *AgentSession) ResetCumulative() {
 // at most one file write; on clean state it is a no-op.
 //
 // persist is the registry callback (typically
-// Manager.PersistAgentSession). Returns nil when clean (no I/O).
+// Manager.PersistAgentSession). PersistIfDirty snapshots the
+// entry itself via as.Entry() — callers should NOT pre-build an
+// AgentSessionEntry to pass in, since that would duplicate the
+// snapshot work and risk drift between the entry passed to the
+// callback and the entry actually persisted.
+//
+// Returns nil when clean (no I/O) or when persist is nil.
 func (as *AgentSession) PersistIfDirty(persist func(*registry.AgentSessionEntry) error) error {
 	if persist == nil {
 		return nil

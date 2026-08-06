@@ -394,25 +394,24 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		}
 
 	case "result":
-		// A result event has four sub-shapes — handled in order:
+		// A result event has three sub-shapes — handled in order:
 		//
 		//   1. subtype "compact" / "compaction" — MID-TURN context
 		//      compaction. NOT a turn end: subsequent assistant /
 		//      tool events continue the same turn. Emit
 		//      EventCompaction and return without EventDone.
 		//
-		//   2. final assistant reply — text lives in ev.Result. Emit
-		//      EventResult with the text + duration + error flag +
-		//      subtype so the channel can render the final reply
-		//      distinctly from rolling-log EventText entries. Empty
-		//      Result + IsError=true still emits (so the header can
-		//      flip to an error state).
+		//   2. final assistant reply + token usage — text lives in
+		//      ev.Result; usage lives in ev.Usage / ev.ModelUsage.
+		//      Both are co-located on the same wire event, so we
+		//      emit ONE EventResult with Result.Usage attached. The
+		//      runtime accumulates Usage on the same dispatch,
+		//      before stamping SessionContext — no separate
+		//      EventUsage kind and no buffer needed. We emit even
+		//      when Result is empty AND IsError=true so the header
+		//      can flip to an error state.
 		//
-		//   3. token usage — ev.Usage / ev.ModelUsage. Emit
-		//      EventUsage so channels can render "N tokens · $X"
-		//      footers.
-		//
-		//   4. terminal — EventDone{ExitCode: 0}. ExitCode stays
+		//   3. terminal — EventDone{ExitCode: 0}. ExitCode stays
 		//      zero on the wire; IsError travels on the
 		//      EventResult payload instead.
 		if ev.Subtype == "compact" || ev.Subtype == "compaction" {
@@ -423,21 +422,25 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 			return
 		}
 		if ev.Result != "" || ev.IsError {
-			events <- agent.AgentEvent{
-				Kind: agent.EventResult,
-				Result: &agent.ResultEvent{
-					Text:       ev.Result,
-					DurationMs: ev.DurationMs,
-					IsError:    ev.IsError,
-					Subtype:    ev.Subtype,
-				},
+			result := &agent.ResultEvent{
+				Text:       ev.Result,
+				DurationMs: ev.DurationMs,
+				IsError:    ev.IsError,
+				Subtype:    ev.Subtype,
 			}
-		}
-		if u := decodeUsage(ev.Usage); u != nil {
-			u.CostUSD = decodeCostUSD(ev.ModelUsage)
+			// Attach usage from the same wire event. The previous
+			// design emitted a separate EventUsage here; runtime
+			// buffering was needed to re-stamp the OutResult footer.
+			// Co-locating the usage on ResultEvent removes that
+			// path entirely (calc-then-reply invariant now holds by
+			// construction — usage IS on the result event).
+			if u := decodeUsage(ev.Usage); u != nil {
+				u.CostUSD = decodeCostUSD(ev.ModelUsage)
+				result.Usage = u
+			}
 			events <- agent.AgentEvent{
-				Kind:  agent.EventUsage,
-				Usage: u,
+				Kind:   agent.EventResult,
+				Result: result,
 			}
 		}
 		events <- agent.AgentEvent{

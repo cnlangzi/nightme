@@ -185,18 +185,3 @@ func renderTaskLine(it agent.TaskItem) string {
 	return line
 }
 
-// renderTaskFallbackText joins the rendered checklist lines into
-// a single multi-line string for the cold-start-failure fallback
-// (a plain Feishu text bubble). The Feishu send path trims
-// excessively long bodies, so a 10–15 line list is the upper
-// practical bound before this fallback itself drops lines.
-func renderTaskFallbackText(list *agent.TaskListEvent) string {
-	if list == nil || len(list.Items) == 0 {
-		return "（无任务清单）"
-	}
-	chunks := buildTaskChecklistChunks(list.Items)
-	if len(chunks) == 0 {
-		return "（任务清单过长）"
-	}
-	return strings.Join(chunks, "\n")
-}

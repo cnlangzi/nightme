@@ -350,7 +350,86 @@ claude · ↓ 12.3k · ↑ 1.5k · Total 13.8k                                  
 claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k          # 无 cost
 ```
 
-### 1.7 State 流转
+### 1.7 Git Branch Tracking (F-48 follow-up)
+
+**Why**：用户在 IM 里看不到当前的 workspace / branch / dirty 状态 — 每次要确认"我正在哪个 repo"都得跳到 terminal。Footer 加一行 git tracking 让 Feishu 卡片本身就是 ground truth：workspace 路径 + branch + 未提交 + 未跟踪 + 未推送。
+
+**Format**（footer 第 3 行）：
+
+```
+📁 code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
+```
+
+| 段 | 来源 | Omit 规则 |
+|---|---|---|
+| 📁 `<workspace>` | `SessionContext.Workspace` = `s.Cwd` | 整段在 Workspace=="" 或 `GitStatus==nil` 时省略（review fix：non-git workspace 不显示误导性的 "⎇ ?"） |
+| ⎇ `<branch>` | `GitStatus.Branch` | 永远显示（当行渲染时）；`Branch==""`（detached HEAD 在 git repo 内）→ 写 `?` |
+| ↑ `<n>` | `GitStatus.Uncommitted` | `n==0` 省略 |
+| ? `<n>` | `GitStatus.Untracked` | `n==0` 省略 |
+| ⇡ `<n>` | `GitStatus.AheadOfRemote` | `HasUpstream==false \|\| n==0` 省略 |
+
+**Workspace 显示规则**（简化版，Devin 拍板 2026-08-06）：
+- **不加任何前缀**（既不 `~` 也不 `/`）—— 路径是什么就显示什么。理由：`~` 在 workspace 不在 HOME 下时会误导（不同 operator / 容器化 session / 非标准 HOME 布局）
+- ≤ 2 个目录组件 → 完整显示：`/home/devin` → `home/devin`、`/tmp/foo` → `tmp/foo`、`/home/devin/code` → `devin/code`
+- > 2 个目录组件 → 只显示最后两个：`/home/devin/code/nightme` → `code/nightme`、`/home/devin/code/nightme/internal` → `nightme/internal`、`/tmp/a/b/c` → `b/c`
+
+**Arrow 选型**（与 F-45 约定一致）：
+- `↑` / `⇡` / `?` — ASCII / Unicode 符号（非 emoji 字体），middle dot ` · ` 分隔
+- `⎇` — Unicode Alternative Key Symbol (U+2387)，代表 branch
+- `📁` — folder emoji，仅作 category header（与 F-45 line 1 🤖 / line 2 💰 风格一致）
+
+**Stamping 规则**：
+- 在 `cmd/nightme/run.go::newEventHandler` 的 4 个 main-chat kind 上 stamp
+- 每次 stamp 都跑 `gtw.CollectStatus(s.Cwd, gtw.ExecGitRunner{})` —— **无缓存**，footer 永远反映当前 worktree
+- Git 调用的 **3 秒 deadline**（review fix）：stalled NFS / broken .git/index 不能阻塞消息路径；超时返回 (nil, nil)，footer 静默省略 git 段
+- `Workspace` = `s.Cwd`（immutable 字段，无锁读）
+- `GitStatus` = parse 结果；非 git repo / git 失败 / git 超时 → `nil`（整段省略）
+- stamp condition 扩展：`hasGit := gitSnap != nil && s.Cwd != ""`；其他 usage/model 条件不变
+
+**Wire 形态**（`gateway.SessionContext`）：
+
+```go
+type SessionContext struct {
+    Agent           string
+    Model           string
+    CumulativeUsage UsageInfo
+    Workspace       string                  // NEW
+    GitStatus       *gtw.GitStatusSnapshot  // NEW
+}
+
+type GitStatusSnapshot struct {
+    Branch        string  // empty when detached HEAD / not-a-repo
+    Uncommitted   int     // M/A/D/R/C + 冲突 (UU/AA/DD/...)
+    Untracked     int     // ??
+    AheadOfRemote int     // 0 when no upstream
+    HasUpstream   bool    // false for detached HEAD / new branch
+}
+```
+
+**Render 路径**（`internal/channel/feishu/usage_footer.go::formatSessionFooterLines`）：
+- 现有 line 1 / line 2 不变
+- 新增 line 3：`formatGitLine(ctx)` 返回非空时 append
+- `formatGitLine` 内部调 `formatWorkspacePath`（无 HOME 处理、≤ 2 组件完整、> 2 截尾）
+
+**测试覆盖**：
+- `internal/gtw/git_status_test.go` (NEW) — 12 case：clean / dirty / detached HEAD (3 sub) / no upstream / ahead+behind / conflicts / ignored / empty output / not-a-repo
+- `internal/channel/feishu/usage_footer_test.go` — 新增 `TestFormatWorkspacePath`（17 case）+ `TestFormatGitLine_*`（8 case）+ `TestFormatSessionFooterLines_WithGitLine` / `_GitOnly`
+
+**不变式**：
+- `formatSessionFooterLines` 已存在测试全部通过（line 1/2 行为不变）
+- `OutboundMessage.SessionContext` wire 兼容性保持：Channel 不读 `Workspace` / `GitStatus` 时零影响
+- 不在 Channel 调 git（保持 F-08 "Channel is dumb" 边界）—— git CLI 只在 runtime stamp 时跑
+- 无生产代码注入：测试用真实 mock git output + 直接构造 `SessionContext` 输入，不引入 test-only 变量
+
+**F-48 PR scope**：
+- `internal/gtw/git_status.go` (NEW)
+- `internal/gtw/git_status_test.go` (NEW)
+- `internal/gateway/messages.go` — `SessionContext` 加 2 个字段
+- `cmd/nightme/run.go::newEventHandler` — stamp 时调用 `gtw.CollectStatus`
+- `internal/channel/feishu/usage_footer.go` — line 3 渲染 + `formatWorkspacePath`
+- `internal/channel/feishu/usage_footer_test.go` — 扩展测试
+
+### 1.8 State 流转
 
 ```
 AgentSession 生命周期:
@@ -530,6 +609,8 @@ if ev.Kind == agent.EventDone {
     }
 }
 ```
+
+**改动 E**：（已废弃）早期的 OutResult 缓冲机制。后续 bridge 重构把 Usage 合并到 ResultEvent 之后不再需要 —— 见 §2.5 changelog 末尾的 "single-event design" 注释。
 
 ### 2.6 `internal/gateway/handlers_chatsession.go::handleNew`
 

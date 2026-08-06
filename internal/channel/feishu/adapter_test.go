@@ -1574,12 +1574,15 @@ func TestSend_OutResult_IsErrorPrefixedWithIcon(t *testing.T) {
 	}
 }
 
-// TestSend_OutResult_LeavesReceiptAlive — F-39 follow-up: OutResult
-// delivers the answer card independently but does NOT call
-// receipt.SetCompleted. The receipt must remain in agent.PromptRunning
-// after OutResult so subsequent OutUsage / OutInit / TaskList can
-// still update the footer (token counts, agent name, task list).
-// EventDone is the terminal signal that flips state to agent.PromptSucceeded.
+// TestSend_OutResult_OrphanTopLevel verifies F-46 unification: an
+// OutResult with no parent userMsgID posts as a Card 2.0 (interactive)
+// — NOT plain text — matching OutReply's postOrphanReplyCard
+// invariant. Pre-F-46 the orphan path fell through to
+// sendResultAsReply → sendRawOutText (MsgTypeText), so the bubble
+// had no <hr> / no grey footer even when the anchored path rendered
+// one. F-46 routes both through buildResultCardJSON (which shares
+// cardFooterElements with buildReceiptCard) so the footer renders
+// identically in every case.
 func TestSend_OutResult_OrphanTopLevel(t *testing.T) {
 	a := testAdapter(t)
 	var gotType, gotRootID, gotContent string
@@ -1589,24 +1592,39 @@ func TestSend_OutResult_OrphanTopLevel(t *testing.T) {
 		gotRootID = rootID
 		return "ok", nil
 	}
+	ctx := &gateway.SessionContext{
+		Agent: "claude", Model: "opus-4-5",
+		CumulativeUsage: agent.UsageInfo{InputTokens: 200, OutputTokens: 80, CostUSD: 0.456},
+	}
 	text := "## Final\n\nbody"
 	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutResult,
-		ChatID:  "oc_test",
-		ReplyTo: "", // orphan
-		Text:    text,
-		Result:  &agent.ResultEvent{Text: text},
+		Kind:           gateway.OutResult,
+		ChatID:         "oc_test",
+		ReplyTo:        "", // orphan
+		Text:           text,
+		Result:         &agent.ResultEvent{Text: text},
+		SessionContext: ctx,
 	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	if gotType != "text" {
-		t.Errorf("orphan result should use MsgTypeText, got %q", gotType)
+	// F-46: orphan OutResult MUST be interactive (Card 2.0), not text.
+	if gotType != "interactive" {
+		t.Errorf("orphan result should use MsgTypeInteractive (F-46: main-chat replies are cards), got %q", gotType)
 	}
 	if gotRootID != "" {
 		t.Errorf("orphan result should not anchor, got rootID %q", gotRootID)
 	}
+	// Markdown body content preserved.
 	if !strings.Contains(gotContent, "Final") {
 		t.Errorf("orphan result body missing content, got %q", gotContent)
+	}
+	// F-46 footer renders as card elements (hr + #999999 plain_text),
+	// not as inline text appended via "\n\n".
+	if !strings.Contains(gotContent, `"tag":"hr"`) {
+		t.Errorf("orphan result card missing hr divider; F-46 unification expects hr + grey footer in every card path\nbody: %s", gotContent)
+	}
+	if !strings.Contains(gotContent, `<font color='grey'>`) {
+		t.Errorf("orphan result card missing grey text_color; F-46 unification expects hr + grey footer in every card path\nbody: %s", gotContent)
 	}
 }
 
@@ -1658,7 +1676,7 @@ func TestEnsureReceiptForTask_Concurrent_OnlyOneSendCard(t *testing.T) {
 				list = listB
 			}
 			receipts[i], createds[i], errs[i] = a.ensureReceiptForTask(
-				t.Context(), chatID, userMsgID, list, "",
+				t.Context(), chatID, userMsgID, list, nil,
 			)
 		}(i)
 	}
@@ -1860,6 +1878,412 @@ func TestSend_OutReply_EmptyText_SilentDrop(t *testing.T) {
 	}
 }
 
+// TestSend_OutReply_OrphanReplyTo_AlwaysCard verifies the F-46
+// unification: when OutReply has no userMsgID (msg.ReplyTo == ""),
+// the message is still posted as a Card 2.0 (interactive) — NOT as
+// plain text. Pre-F-46 the orphan path went through
+// sendReplyInThreadAndChat → sendRawOutText, which rendered no
+// hr element and no text_color (Feishu plain-text bubbles don't
+// support either). This forced the orphan bubble to look visibly
+// different from the anchored receipt cards that DID have hr +
+// grey footer. F-46 funnels all three OutReply sub-paths
+// (orphan / cold-start / overflow-bail-out) through buildReceiptCard
+// so the footer renders identically in every case.
+func TestSend_OutReply_OrphanReplyTo_AlwaysCard(t *testing.T) {
+	a := testAdapter(t)
+
+	type captured struct {
+		ChatID        string
+		MsgType       string
+		RootID        string
+		Body          string
+		ReplyInThread bool
+	}
+	var sends []captured
+	a.sendFunc = func(_ context.Context, chatID, msgType, body, rootID string, replyInThread bool) (string, error) {
+		sends = append(sends, captured{ChatID: chatID, MsgType: msgType, RootID: rootID, Body: body, ReplyInThread: replyInThread})
+		return "om_card_orphan", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	ctx := &gateway.SessionContext{
+		Agent:  "claude",
+		Model:  "opus-4-5",
+		CumulativeUsage: agent.UsageInfo{
+			InputTokens: 100, OutputTokens: 50, CostUSD: 0.123,
+		},
+	}
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind:           gateway.OutReply,
+		ChatID:         "oc_test",
+		ReplyTo:        "", // orphan — no parent user message
+		Text:           "orphan reply chunk",
+		SessionContext: ctx,
+	}); err != nil {
+		t.Fatalf("Send(OutReply orphan): %v", err)
+	}
+
+	// Exactly one SendCard call.
+	if len(sends) != 1 {
+		t.Fatalf("send count = %d, want 1 (one orphan card)", len(sends))
+	}
+	got := sends[0]
+	if got.ChatID != "oc_test" {
+		t.Errorf("ChatID = %q, want %q", got.ChatID, "oc_test")
+	}
+	// F-46 unification: orphan OutReply MUST be a card (interactive
+	// message type), never plain text. Pre-F-46 this was
+	// MsgTypeText via sendRawOutText.
+	if got.MsgType != "interactive" {
+		t.Errorf("MsgType = %q, want %q (F-46: orphan OutReply is always a card)", got.MsgType, "interactive")
+	}
+	// Top-level Create (no anchor): rootID="", replyInThread=false.
+	if got.RootID != "" {
+		t.Errorf("RootID = %q, want \"\" (top-level Create for orphan)", got.RootID)
+	}
+	if got.ReplyInThread {
+		t.Errorf("reply_in_thread = true, want false (orphan: top-level in main chat)")
+	}
+	// Entry text embedded with the 💬 icon prefix.
+	if !strings.Contains(got.Body, "💬 orphan reply chunk") {
+		t.Errorf("body missing entry text (want 💬 prefix + chunk), got %q", got.Body)
+	}
+	// Footer renders via buildReceiptCard Section 3 — hr divider +
+	// grey plain_text lines. Pre-F-46 plain-text path had neither.
+	if !strings.Contains(got.Body, `"tag":"hr"`) {
+		t.Errorf("orphan card body missing hr divider; F-46 unification expects hr + grey footer in every card path\nbody: %s", got.Body)
+	}
+	if !strings.Contains(got.Body, `<font color='grey'>`) {
+		t.Errorf("orphan card body missing grey text_color; F-46 unification expects hr + grey footer in every card path\nbody: %s", got.Body)
+	}
+	if !strings.Contains(got.Body, `<font color='grey'>`) {
+		t.Errorf("orphan card body missing <font color='grey'> footer styling\nbody: %s", got.Body)
+	}
+	// No receipt registered (orphan has no parent to PATCH into).
+	a.mu.RLock()
+	_, hasReceipt := a.receiptsByUserMsgID[""]
+	a.mu.RUnlock()
+	if hasReceipt {
+		t.Errorf("orphan reply should NOT register a receipt (no parent to anchor PATCHes to)")
+	}
+}
+
+// TestSend_OutReply_ColdStartSendCardFails_StillProducesCard
+// locks the F-46 fallback invariant: when the anchored receipt
+// path's SendCard fails (transient API error), the chunk must still
+// reach the user as a card via postOrphanReplyCard — NOT silently
+// dropped and NOT downgraded to sendRawOutText plain text. Without
+// this test, someone could revert the fallback to the old
+// sendReplyInThreadAndChat → sendRawOutText path and break the
+// "OutReply is always a card" invariant for the failure path only.
+func TestSend_OutReply_ColdStartSendCardFails_StillProducesCard(t *testing.T) {
+	a := testAdapter(t)
+
+	// First SendCard (cold-start receipt) fails; second call (the
+	// postOrphanReplyCard bail-out) succeeds and is captured.
+	var calls int
+	type captured struct {
+		MsgType string
+		RootID  string
+		Body    string
+	}
+	var sends []captured
+	a.sendFunc = func(_ context.Context, _, msgType, body, rootID string, _ bool) (string, error) {
+		calls++
+		sends = append(sends, captured{MsgType: msgType, RootID: rootID, Body: body})
+		if calls == 1 {
+			return "", errors.New("feishu: cold-start SendCard failed")
+		}
+		return "om_orphan_after_fail", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind:    gateway.OutReply,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user",
+		Text:    "first chunk after cold-start failure",
+		SessionContext: &gateway.SessionContext{
+			Agent: "claude", Model: "opus-4-5",
+			CumulativeUsage: agent.UsageInfo{InputTokens: 10, CostUSD: 0.001},
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutReply cold-start fail): %v", err)
+	}
+
+	if len(sends) != 2 {
+		t.Fatalf("send count = %d, want 2 (cold-start fail + orphan bail-out)", len(sends))
+	}
+	// Second send is the orphan card bail-out.
+	bail := sends[1]
+	if bail.MsgType != "interactive" {
+		t.Errorf("bail-out MsgType = %q, want interactive (F-46: cold-start failure falls back to orphan card, NOT plain text)", bail.MsgType)
+	}
+	if bail.RootID != "" {
+		t.Errorf("bail-out RootID = %q, want \"\" (top-level Create)", bail.RootID)
+	}
+	if !strings.Contains(bail.Body, `"tag":"hr"`) {
+		t.Errorf("bail-out card missing hr divider\nbody: %s", bail.Body)
+	}
+	if !strings.Contains(bail.Body, `<font color='grey'>`) {
+		t.Errorf("bail-out card missing grey text_color\nbody: %s", bail.Body)
+	}
+	// No receipt should remain after the failed cold-start (the
+	// cleanup in ensureReceiptForReplyWithFooter deletes the
+	// transient registration).
+	a.mu.RLock()
+	_, hasReceipt := a.receiptsByUserMsgID["om_user"]
+	a.mu.RUnlock()
+	if hasReceipt {
+		t.Errorf("failed cold-start should clean up receipt registration")
+	}
+}
+
+// TestSend_OutReply_AppendEntryOverflow_StillProducesCard locks the
+// F-46 overflow-bail-out invariant: when AppendEntryWithFooter
+// returns ErrReceiptOverflow (card budget exceeded by accumulated
+// chunks), the overflow chunk must reach the user as a card via
+// postOrphanReplyCard — not silently dropped, not downgraded to
+// plain text. This is the third of three sub-paths (orphan /
+// cold-start-fail / overflow) that all converge on the same card
+// renderer.
+//
+// Test setup: AppendEntryWithFooter's budget check (wouldReceiptOverflow)
+// runs BEFORE renderLocked, so we trip it by stuffing the receipt
+// with enough entries to push elementCount past the limit. The
+// second chunk's AppendEntryWithFooter then sees the would-be
+// overflow and returns ErrReceiptOverflow without ever calling
+// renderLocked — exercising the Send() bail-out path directly.
+func TestSend_OutReply_AppendEntryOverflow_StillProducesCard(t *testing.T) {
+	a := testAdapter(t)
+
+	type captured struct {
+		MsgType string
+		RootID  string
+		Body    string
+	}
+	var sends []captured
+	a.sendFunc = func(_ context.Context, _, msgType, body, rootID string, _ bool) (string, error) {
+		sends = append(sends, captured{MsgType: msgType, RootID: rootID, Body: body})
+		return "om_card_test", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	ctx := &gateway.SessionContext{
+		Agent: "claude", Model: "opus-4-5",
+		CumulativeUsage: agent.UsageInfo{InputTokens: 100, CostUSD: 0.01},
+	}
+
+	// Chunk 1: cold-start receipt.
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: "om_user",
+		Text: "first chunk", SessionContext: ctx,
+	}); err != nil {
+		t.Fatalf("Send(OutReply chunk 1): %v", err)
+	}
+
+	// Stuff the receipt past the budget so the NEXT chunk's
+	// AppendEntryWithFooter trips wouldReceiptOverflow. Looking up
+	// the cap from the same source AppendEntryWithFooter uses
+	// (receipt.go wouldReceiptOverflow / receiptBodyStats). The
+	// element cap is 50; piling on 60 entries guarantees overflow.
+	a.mu.Lock()
+	rcpt := a.receiptsByUserMsgID["om_user"]
+	if rcpt == nil {
+		a.mu.Unlock()
+		t.Fatal("receipt missing after cold-start")
+	}
+	for i := 0; i < 60; i++ {
+		rcpt.entries = append(rcpt.entries, LogEntry{Icon: "💬", Text: "fill"})
+	}
+	a.mu.Unlock()
+
+	// Chunk 2: AppendEntryWithFooter sees elementCount > cap →
+	// returns ErrReceiptOverflow → caller bails to
+	// postOrphanReplyCard.
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: "om_user",
+		Text: "second chunk triggers overflow", SessionContext: ctx,
+	}); err != nil {
+		t.Fatalf("Send(OutReply chunk 2): %v", err)
+	}
+
+	// Expect 2 sends: cold-start (anchored receipt) + overflow
+	// bail-out (top-level orphan card).
+	if len(sends) != 2 {
+		t.Fatalf("send count = %d, want 2 (cold-start + overflow bail-out)", len(sends))
+	}
+	bail := sends[1]
+	if bail.MsgType != "interactive" {
+		t.Errorf("overflow bail-out MsgType = %q, want interactive (F-46: overflow falls back to orphan card, NOT plain text)", bail.MsgType)
+	}
+	if bail.RootID != "" {
+		t.Errorf("overflow bail-out RootID = %q, want \"\"", bail.RootID)
+	}
+	if !strings.Contains(bail.Body, `"tag":"hr"`) {
+		t.Errorf("overflow bail-out card missing hr divider\nbody: %s", bail.Body)
+	}
+	if !strings.Contains(bail.Body, `<font color='grey'>`) {
+		t.Errorf("overflow bail-out card missing grey text_color\nbody: %s", bail.Body)
+	}
+}
+
+// TestSend_OutReply_NilSessionContext_NoFooterSection locks the
+// F-46 nil-guard invariant: when msg.SessionContext is nil,
+// formatSessionFooterLines returns nil and buildReceiptCard's
+// footer section is omitted entirely. Without this guard, a nil
+// deref would crash OR the footer section would emit an empty <hr>
+// with no plain_text children (visually a dangling divider).
+func TestSend_OutReply_NilSessionContext_NoFooterSection(t *testing.T) {
+	a := testAdapter(t)
+
+	var gotBody string
+	a.sendFunc = func(_ context.Context, _, _, body, _ string, _ bool) (string, error) {
+		gotBody = body
+		return "om_card_noctx", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind:    gateway.OutReply,
+		ChatID:  "oc_test",
+		ReplyTo: "", // orphan path
+		Text:    "no-session-ctx chunk",
+		// SessionContext intentionally nil.
+	}); err != nil {
+		t.Fatalf("Send(OutReply nil ctx): %v", err)
+	}
+
+	if !strings.Contains(gotBody, "💬 no-session-ctx chunk") {
+		t.Errorf("entry text missing from card body: %q", gotBody)
+	}
+	// No footer section when ctx is nil.
+	if strings.Contains(gotBody, `"tag":"hr"`) {
+		t.Errorf("orphan card should not emit hr when SessionContext is nil\nbody: %s", gotBody)
+	}
+	if strings.Contains(gotBody, "plain_text") {
+		t.Errorf("orphan card should not emit plain_text footer when SessionContext is nil\nbody: %s", gotBody)
+	}
+}
+
+// TestSend_OutResult_AnchoredCardFooterStyled locks the F-46
+// OutResult footer fix: when an OutResult lands in the markdown
+// card path (buildResultPayload → buildResultCardJSON), the
+// footer must render as <hr> + #999999 plain_text, NOT as inline
+// text appended via "\n\n" inside the markdown body. This is the
+// regression test for the exact bug that motivated unifying
+// OutReply and OutResult footer rendering — pre-F-46 the
+// anchored OutResult card showed the footer as plain text in the
+// markdown, indistinguishable from body content.
+func TestSend_OutResult_AnchoredCardFooterStyled(t *testing.T) {
+	a := testAdapter(t)
+
+	var gotBody string
+	a.sendFunc = func(_ context.Context, _, msgType, body, rootID string, _ bool) (string, error) {
+		if msgType != "interactive" {
+			t.Errorf("anchored result msgType = %q, want interactive (markdown content → Card 2.0)", msgType)
+		}
+		// F-44: OutResult always posts top-level Create
+		// (ReplyInChat) regardless of ReplyTo, to avoid the
+		// parent-thread gotcha. ReplyTo is consumed for receipt
+		// wiring only — the wire itself stays unanchored.
+		if rootID != "" {
+			t.Errorf("rootID = %q, want \"\" (F-44: OutResult is always ReplyInChat)", rootID)
+		}
+		gotBody = body
+		return "om_card_test", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind:    gateway.OutResult,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user", // anchored
+		Text:    "intro\n\n```go\nfunc x() { return 1 }\n```\n\noutro",
+		Result:  &agent.ResultEvent{Text: "intro\n\n```go\nfunc x() { return 1 }\n```\n\noutro"},
+		SessionContext: &gateway.SessionContext{
+			Agent: "claude", Model: "opus-4-5",
+			CumulativeUsage: agent.UsageInfo{InputTokens: 200, OutputTokens: 80, CostUSD: 0.456},
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutResult anchored): %v", err)
+	}
+
+	// Footer renders as card elements, NOT inline text.
+	if !strings.Contains(gotBody, `"tag":"hr"`) {
+		t.Errorf("anchored result card missing hr divider\nbody: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `<font color='grey'>`) {
+		t.Errorf("anchored result card missing grey text_color\nbody: %s", gotBody)
+	}
+	// Pre-F-46 the footer was appended to text via "\n\n" — the
+	// identity line ("🤖 claude") would show up as plain text
+	// inside the markdown element. With F-46 the footer lives
+	// ONLY in the plain_text footer block; the markdown element
+	// must NOT carry the 🤖 glyph. We parse the JSON and check
+	// the markdown element's content directly (substring search on
+	// the raw card body would false-positive on the plain_text
+	// footer element, which legitimately contains 🤖).
+	var envelope struct {
+		Body struct {
+			Elements []map[string]any `json:"elements"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(gotBody), &envelope); err != nil {
+		t.Fatalf("parse card JSON: %v\nbody: %s", err, gotBody)
+	}
+	var markdownContents []string
+	for _, e := range envelope.Body.Elements {
+		if tag, _ := e["tag"].(string); tag == "markdown" {
+			if content, _ := e["content"].(string); content != "" {
+				markdownContents = append(markdownContents, content)
+			}
+		}
+	}
+	if len(markdownContents) == 0 {
+		t.Fatalf("card has no markdown element\nbody: %s", gotBody)
+	}
+	// The footer is now ALSO a markdown element (wrapped in
+	// <font color='grey'>). The body content is whatever markdown
+	// appears BEFORE the <hr> divider. Verify the body markdown
+	// doesn't carry the footer emoji; the footer markdown
+	// legitimately does.
+	hrIdx := -1
+	for i, e := range envelope.Body.Elements {
+		if tag, _ := e["tag"].(string); tag == "hr" {
+			hrIdx = i
+			break
+		}
+	}
+	if hrIdx < 0 {
+		t.Fatalf("card has no <hr> divider\nbody: %s", gotBody)
+	}
+	for i, e := range envelope.Body.Elements[:hrIdx] {
+		if tag, _ := e["tag"].(string); tag != "markdown" {
+			continue
+		}
+		content, _ := e["content"].(string)
+		if strings.Contains(content, "🤖") {
+			t.Errorf("body markdown element %d should NOT contain footer emoji\ncontent: %q\nbody: %s", i, content, gotBody)
+		}
+	}
+	// The footer markdown (after hr) should contain the footer emoji.
+	footerMarkdownFound := false
+	for _, e := range envelope.Body.Elements[hrIdx+1:] {
+		if tag, _ := e["tag"].(string); tag != "markdown" {
+			continue
+		}
+		content, _ := e["content"].(string)
+		if strings.Contains(content, "🤖") {
+			footerMarkdownFound = true
+			break
+		}
+	}
+	if !footerMarkdownFound {
+		t.Errorf("footer markdown should contain footer emoji (🤖)\nbody: %s", gotBody)
+	}
+}
+
 // TestSend_OutInit_SilentDrop and TestSend_OutUsage_SilentDrop
 // verify the F-44 footer deferral: OutInit / OutUsage events reach
 // the Send dispatcher (the path is exercised) but produce no Feishu
@@ -1894,7 +2318,13 @@ func TestSend_OutInit_SilentDrop(t *testing.T) {
 	}
 }
 
-func TestSend_OutUsage_SilentDrop(t *testing.T) {
+// TestSend_OutResult_CoLocatesUsage locks the F-45 footer path:
+// when an OutResult carries Usage on the same OutboundMessage,
+// the adapter still sends the result message — usage is read
+// off the out to render the SessionContext footer (not a peer
+// outbound). The OutUsage kind itself is gone (merged into
+// OutResult.Usage).
+func TestSend_OutResult_CoLocatesUsage(t *testing.T) {
 	a := testAdapter(t)
 	var count int
 	a.sendFunc = func(_ context.Context, _, _, _, _ string, _ bool) (string, error) {
@@ -1904,18 +2334,30 @@ func TestSend_OutUsage_SilentDrop(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutUsage,
+		Kind:    gateway.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
-		Usage: &gateway.UsageInfo{
+		Text:    "完成",
+		Result: &agent.ResultEvent{
+			Text:       "完成",
+			DurationMs: 1234,
+			Subtype:    "success",
+			Usage: &agent.UsageEvent{
+				InputTokens:  100,
+				OutputTokens: 50,
+				CostUSD:      0.001,
+			},
+		},
+		Usage: &agent.UsageEvent{
 			InputTokens:  100,
 			OutputTokens: 50,
+			CostUSD:      0.001,
 		},
 	}); err != nil {
-		t.Fatalf("Send(OutUsage): %v", err)
+		t.Fatalf("Send(OutResult): %v", err)
 	}
-	if count != 0 {
-		t.Errorf("send count = %d, want 0 (OutUsage silent drop until footer PR)", count)
+	if count != 1 {
+		t.Errorf("send count = %d, want 1 (OutResult with co-located Usage still ships one message)", count)
 	}
 }
 
@@ -1960,7 +2402,7 @@ func TestEnsureReceiptForTyping_CreatesPlaceholder(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	const userMsgID = "om_user"
-	rcpt, created, err := a.ensureReceiptForTyping(context.Background(), "oc_test", userMsgID)
+	rcpt, created, err := a.ensureReceiptForTyping(context.Background(), "oc_test", userMsgID, nil)
 	if err != nil {
 		t.Fatalf("ensureReceiptForTyping: %v", err)
 	}
@@ -2027,12 +2469,12 @@ func TestEnsureReceiptForTyping_NoOpWhenReceiptExists(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	// First call: cold-start, posts the placeholder.
-	rcpt1, created1, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user")
+	rcpt1, created1, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user", nil)
 	if err != nil || !created1 {
 		t.Fatalf("first ensureReceiptForTyping: err=%v, created=%v", err, created1)
 	}
 	// Second call: receipt already exists, returns existing.
-	rcpt2, created2, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user")
+	rcpt2, created2, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user", nil)
 	if err != nil || created2 {
 		t.Fatalf("second ensureReceiptForTyping: err=%v, created=%v", err, created2)
 	}
@@ -2041,6 +2483,80 @@ func TestEnsureReceiptForTyping_NoOpWhenReceiptExists(t *testing.T) {
 	}
 	if sends != 1 {
 		t.Errorf("send count = %d, want 1 (second call is no-op)", sends)
+	}
+}
+
+// TestEnsureReceiptForTyping_RendersFooterWhenProvided (F-48):
+// when the caller passes non-empty footerLines (typically derived
+// from a stamped SessionContext at MessageForwarded time), the
+// placeholder card must include the footer in the rendered body.
+// This is the cold-start commit that fixes the "placeholder card
+// has no footer" UX gap — the user sees "📁 code/nightme · ⎇ main"
+// immediately on the "⌨️ Working..." emit, before any reply chunk
+// arrives.
+func TestEnsureReceiptForTyping_RendersFooterWhenProvided(t *testing.T) {
+	a := testAdapter(t)
+	body := "{\"elements\":[]}"
+	a.sendFunc = func(_ context.Context, _, _, cardJSON, _ string, _ bool) (string, error) {
+		body = cardJSON
+		return "om_placeholder_with_footer", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	footerLines := []string{
+		"🤖 claude",
+		"📁 code/nightme · ⎇ main",
+	}
+	if _, _, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user", footerLines); err != nil {
+		t.Fatalf("ensureReceiptForTyping: %v", err)
+	}
+
+	// Body must contain the Typing header AND the footer lines.
+	// Catches regressions where the placeholder forgets to include
+	// the footer (the bug the user noticed in the F-48 prod deploy).
+	if !strings.Contains(body, "⌨️ Working...") {
+		t.Errorf("placeholder body missing Typing header, got %q", body)
+	}
+	for _, line := range footerLines {
+		if !strings.Contains(body, line) {
+			t.Errorf("placeholder body missing footer line %q, got %q", line, body)
+		}
+	}
+	// Footer must be wrapped in the same <hr> + <font color='grey'>
+	// convention as the main-chat cards (F-45 §13.22 single source
+	// of truth: cardFooterElements). The hr element is the visual
+	// divider between the placeholder text and the footer.
+	if !strings.Contains(body, `"hr"`) {
+		t.Errorf("placeholder body missing <hr> divider before footer, got %q", body)
+	}
+}
+
+// TestEnsureReceiptForTyping_OmitsFooterWhenEmpty (F-48): when
+// the caller's footerLines is nil/empty (no SessionContext stamped
+// — e.g. agent hasn't EventInit'd yet and the Cwd is not in a git
+// repo), the placeholder card omits the footer entirely. The
+// hr divider is also absent. This is the back-compat path for
+// the pre-F-48 "no footer" placeholder — supported but not
+// preferred; the runtime now stamps SessionContext on
+// MessageForwarded so the populated path is the common case.
+func TestEnsureReceiptForTyping_OmitsFooterWhenEmpty(t *testing.T) {
+	a := testAdapter(t)
+	body := "{\"elements\":[]}"
+	a.sendFunc = func(_ context.Context, _, _, cardJSON, _ string, _ bool) (string, error) {
+		body = cardJSON
+		return "om_placeholder_no_footer", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if _, _, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user", nil); err != nil {
+		t.Fatalf("ensureReceiptForTyping: %v", err)
+	}
+
+	if !strings.Contains(body, "⌨️ Working...") {
+		t.Errorf("placeholder body missing Typing header, got %q", body)
+	}
+	if strings.Contains(body, `"hr"`) {
+		t.Errorf("placeholder body unexpectedly includes <hr> divider when footerLines is nil, got %q", body)
 	}
 }
 
@@ -2063,7 +2579,7 @@ func TestEnsureReceiptForReply_ReusesTypingPlaceholder(t *testing.T) {
 	}
 
 	// Step 1: Typing placeholder.
-	rcpt, created, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user")
+	rcpt, created, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user", nil)
 	if err != nil || !created {
 		t.Fatalf("ensureReceiptForTyping: err=%v, created=%v", err, created)
 	}
@@ -2111,7 +2627,7 @@ func TestEnsureReceiptForTask_ReusesTypingPlaceholder(t *testing.T) {
 	}
 
 	// Step 1: Typing placeholder.
-	rcpt, created, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user")
+	rcpt, created, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user", nil)
 	if err != nil || !created {
 		t.Fatalf("ensureReceiptForTyping: err=%v, created=%v", err, created)
 	}
@@ -2120,7 +2636,7 @@ func TestEnsureReceiptForTask_ReusesTypingPlaceholder(t *testing.T) {
 	list := &agent.TaskListEvent{Items: []agent.TaskItem{
 		{Subject: "step 1", Status: agent.TaskPending, ActiveForm: "doing 1"},
 	}}
-	rcpt2, created2, err := a.ensureReceiptForTask(context.Background(), "oc_test", "om_user", list, "")
+	rcpt2, created2, err := a.ensureReceiptForTask(context.Background(), "oc_test", "om_user", list, nil)
 	if err != nil || created2 {
 		t.Fatalf("ensureReceiptForTask: err=%v, created=%v (want false)", err, created2)
 	}
@@ -2140,5 +2656,210 @@ func TestEnsureReceiptForTask_ReusesTypingPlaceholder(t *testing.T) {
 	}
 	if len(rcpt.tasks) != 1 {
 		t.Errorf("receipt tasks = %d, want 1", len(rcpt.tasks))
+	}
+}
+
+// F-47 (symmetric to F-46 tests for OutReply): locks the
+// "main-chat is card" invariant for OutTaskCreate/OutTaskUpdate.
+// Pre-F-47 the orphan path fell through ensureReceiptForTask's
+// "requires userMsgID" error to sendRawOutText (plain text
+// checklist, no <hr>, no grey footer). F-47 routes both orphan
+// and SendCard-fail paths through postOrphanTaskCard so the
+// task checklist always renders as a Card 2.0 with the same
+// footer as OutReply / OutResult cards.
+
+func TestSend_OutTask_OrphanReplyTo_StillCard(t *testing.T) {
+	a := testAdapter(t)
+
+	var gotType, gotRootID, gotBody string
+	a.sendFunc = func(_ context.Context, _, msgType, body, rootID string, _ bool) (string, error) {
+		gotType = msgType
+		gotRootID = rootID
+		gotBody = body
+		return "om_task_orphan", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind:    gateway.OutTaskCreate,
+		ChatID:  "oc_test",
+		ReplyTo: "", // orphan — no parent user message
+		TaskList: &agent.TaskListEvent{Items: []agent.TaskItem{
+			{ID: "1", Subject: "task A", Status: agent.TaskPending},
+			{ID: "2", Subject: "task B", Status: agent.TaskCompleted},
+		}},
+		SessionContext: &gateway.SessionContext{
+			Agent: "claude", Model: "opus-4-5",
+			CumulativeUsage: agent.UsageInfo{InputTokens: 100, CostUSD: 0.001},
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutTask orphan): %v", err)
+	}
+
+	// F-47: orphan OutTask MUST be a card (interactive), not plain text.
+	if gotType != "interactive" {
+		t.Errorf("orphan task should be MsgTypeInteractive (F-47: main-chat is card), got %q", gotType)
+	}
+	if gotRootID != "" {
+		t.Errorf("orphan task rootID = %q, want \"\" (top-level Create)", gotRootID)
+	}
+	// Tasks checklist present in the card body.
+	if !strings.Contains(gotBody, "task A") {
+		t.Errorf("orphan task card missing task 'A'\nbody: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, "task B") {
+		t.Errorf("orphan task card missing task 'B'\nbody: %s", gotBody)
+	}
+	// Footer renders with same openclaw-lark pattern as OutReply.
+	if !strings.Contains(gotBody, `<font color='grey'>`) {
+		t.Errorf("orphan task card missing <font color='grey'> footer\nbody: %s", gotBody)
+	}
+}
+
+func TestSend_OutTask_ColdStartSendCardFails_StillCard(t *testing.T) {
+	a := testAdapter(t)
+
+	// First SendCard (ensureReceiptForTask cold-start) fails;
+	// second call (postOrphanTaskCard bail-out) succeeds and is
+	// captured.
+	type captured struct {
+		MsgType string
+		RootID  string
+		Body    string
+	}
+	var sends []captured
+	a.sendFunc = func(_ context.Context, _, msgType, body, rootID string, _ bool) (string, error) {
+		sends = append(sends, captured{MsgType: msgType, Body: body, RootID: rootID})
+		if len(sends) == 1 {
+			return "", errors.New("feishu: cold-start SendCard failed")
+		}
+		return "om_task_orphan_after_fail", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind:    gateway.OutTaskCreate,
+		ChatID:  "oc_test",
+		ReplyTo: "om_user",
+		TaskList: &agent.TaskListEvent{Items: []agent.TaskItem{
+			{ID: "1", Subject: "fallback task", Status: agent.TaskPending},
+		}},
+		SessionContext: &gateway.SessionContext{
+			Agent: "claude", Model: "opus-4-5",
+			CumulativeUsage: agent.UsageInfo{InputTokens: 50, CostUSD: 0.005},
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutTask cold-start fail): %v", err)
+	}
+
+	if len(sends) != 2 {
+		t.Fatalf("send count = %d, want 2 (cold-start fail + orphan bail-out)", len(sends))
+	}
+	bail := sends[1]
+	if bail.MsgType != "interactive" {
+		t.Errorf("bail-out MsgType = %q, want interactive (F-47: never plain text)", bail.MsgType)
+	}
+	if bail.RootID != "" {
+		t.Errorf("bail-out RootID = %q, want \"\" (top-level Create)", bail.RootID)
+	}
+	if !strings.Contains(bail.Body, `<font color='grey'>`) {
+		t.Errorf("bail-out card missing <font color='grey'> footer\nbody: %s", bail.Body)
+	}
+	// The failed cold-start's transient receipt must be cleaned up
+	// so a subsequent OutTask on the same userMsgID cold-starts
+	// cleanly (no orphan state pollution).
+	a.mu.RLock()
+	_, hasReceipt := a.receiptsByUserMsgID["om_user"]
+	a.mu.RUnlock()
+	if hasReceipt {
+		t.Errorf("failed cold-start should clean up receipt registration")
+	}
+}
+
+func TestSend_OutTask_NilSessionContext_NoFooter(t *testing.T) {
+	a := testAdapter(t)
+
+	var gotBody string
+	a.sendFunc = func(_ context.Context, _, _, body, _ string, _ bool) (string, error) {
+		gotBody = body
+		return "om_task_noctx", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind:    gateway.OutTaskCreate,
+		ChatID:  "oc_test",
+		ReplyTo: "", // orphan
+		TaskList: &agent.TaskListEvent{Items: []agent.TaskItem{
+			{ID: "1", Subject: "no-ctx task", Status: agent.TaskPending},
+		}},
+		// SessionContext intentionally nil — no footer.
+	}); err != nil {
+		t.Fatalf("Send(OutTask nil ctx): %v", err)
+	}
+
+	if !strings.Contains(gotBody, "no-ctx task") {
+		t.Errorf("task missing from card body: %q", gotBody)
+	}
+	// No footer section when ctx is nil.
+	if strings.Contains(gotBody, `<font color='grey'>`) {
+		t.Errorf("orphan task card should not emit footer when SessionContext is nil\nbody: %s", gotBody)
+	}
+	if strings.Contains(gotBody, `"tag":"hr"`) {
+		t.Errorf("orphan task card should not emit <hr> when SessionContext is nil\nbody: %s", gotBody)
+	}
+}
+
+// TestSend_OutTask_EmptyItems_ShowsWorkingPlaceholder locks the
+// empty-items edge case for orphan OutTask*. Per review finding
+// (cross-file tracer #1, line-by-line #1): buildReceiptCard's
+// Section 0 placeholder ("⌨️ Working...") fires when BOTH entries
+// and tasks are empty. The orphan path always has nil entries,
+// so an empty Items slice renders the placeholder + (footer if
+// SessionContext is non-nil). Pre-F-47 this case went through
+// renderTaskFallbackText which explicitly returned "（无任务清单）";
+// post-F-47 the placeholder is the new behavior. Documenting it
+// as a test locks the current contract so a future refactor
+// either keeps the placeholder or surfaces the change explicitly.
+func TestSend_OutTask_EmptyItems_ShowsWorkingPlaceholder(t *testing.T) {
+	a := testAdapter(t)
+
+	var gotBody string
+	a.sendFunc = func(_ context.Context, _, _, body, _ string, _ bool) (string, error) {
+		gotBody = body
+		return "om_task_empty", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if err := a.Send(context.Background(), gateway.OutboundMessage{
+		Kind:    gateway.OutTaskCreate,
+		ChatID:  "oc_test",
+		ReplyTo: "", // orphan
+		TaskList: &agent.TaskListEvent{
+			Items: nil, // ← empty task list edge case
+		},
+		SessionContext: &gateway.SessionContext{
+			Agent: "claude", Model: "opus-4-5",
+			CumulativeUsage: agent.UsageInfo{InputTokens: 10, CostUSD: 0.001},
+		},
+	}); err != nil {
+		t.Fatalf("Send(OutTask empty items): %v", err)
+	}
+
+	// No checklist chunk — buildTaskChecklistChunks returns nil
+	// for empty items, so no `**📋 Tasks**` header.
+	if strings.Contains(gotBody, "📋 Tasks") {
+		t.Errorf("empty-items orphan card should not emit checklist header\nbody: %s", gotBody)
+	}
+	// BUT the buildReceiptCard Section 0 placeholder fires when
+	// both entries and tasks are empty. This is the documented
+	// F-47 behavior (no separate "empty list" indicator; the
+	// placeholder doubles as one).
+	if !strings.Contains(gotBody, "⌨️ Working") {
+		t.Errorf("empty-items orphan card should emit ⌨️ Working... placeholder (buildReceiptCard Section 0)\nbody: %s", gotBody)
+	}
+	// Footer still renders (ctx is non-nil).
+	if !strings.Contains(gotBody, `<font color='grey'>`) {
+		t.Errorf("empty-items orphan card should still emit footer when SessionContext is non-nil\nbody: %s", gotBody)
 	}
 }

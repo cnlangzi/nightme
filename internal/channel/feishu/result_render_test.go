@@ -142,12 +142,95 @@ func TestBuildPostMdJSON_Shape(t *testing.T) {
 	}
 }
 
+// TestBuildReceiptCard_FooterUsesMarkdownFontGrey locks the
+// Feishu CardKit lark_md footer rendering pattern (matches
+// openclaw-lark src/card/builder.ts::buildFooter). The footer is
+// rendered as:
+//   1. <hr> divider element
+//   2. one <markdown> element whose content uses inline
+//      <font color='grey'>...</font> tags per line
+//
+// Previous attempts (gone through three iterations):
+//   - <div> wrapping <plain_text> with text_color="#999999" —
+//     Feishu rejected with "unknown property, property: elements"
+//     (code 200621) AND "invalid color: #999999" (code 230099).
+//   - <div> wrapping <plain_text> with text_color="grey-500" —
+//     Feishu plain_text text_color only accepts the grey-XXX
+//     numbered family in some contexts; still flaky.
+//   - this final approach: single <markdown> element with inline
+//     <font color='grey'> tags per line. Matches openclaw-lark's
+//     reference; verified against Feishu CardKit lark_md spec
+//     (named colors only — no hex).
+func TestBuildReceiptCard_FooterUsesMarkdownFontGrey(t *testing.T) {
+	footer := []string{"🤖 claude · opus-4-5", "💰 ↓ 1.0k · ↻ 0 · ↑ 0 · 1.0k · $0.001"}
+	body, err := buildReceiptCard(
+		[]LogEntry{{Icon: "💬", Text: "hello"}},
+		nil,
+		footer,
+	)
+	if err != nil {
+		t.Fatalf("buildReceiptCard: %v", err)
+	}
+
+	var envelope struct {
+		Body struct {
+			Elements []map[string]any `json:"elements"`
+		} `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		t.Fatalf("parse card JSON: %v\nbody: %s", err, body)
+	}
+
+	// Expect 3 elements: [entry markdown, hr, footer markdown].
+	// The entry "hello" is the first markdown (the body content);
+	// then the footer section: <hr> + <markdown> with <font> wrappers.
+	if len(envelope.Body.Elements) != 3 {
+		t.Fatalf("body element count = %d, want 3 ([entry-markdown, hr, footer-markdown]); body: %s", len(envelope.Body.Elements), body)
+	}
+
+	// First element: <markdown> with the entry text.
+	entry := envelope.Body.Elements[0]
+	if tag, _ := entry["tag"].(string); tag != "markdown" {
+		t.Errorf("body[0].tag = %q, want %q\nbody: %s", tag, "markdown", body)
+	}
+	if content, _ := entry["content"].(string); content != "💬 hello" {
+		t.Errorf("body[0].content = %q, want %q\nbody: %s", content, "💬 hello", body)
+	}
+
+	// Second element: <hr>.
+	if tag, _ := envelope.Body.Elements[1]["tag"].(string); tag != "hr" {
+		t.Errorf("body[1].tag = %q, want %q\nbody: %s", tag, "hr", body)
+	}
+
+	// Third element: <markdown> with <font color='grey'> wrappers.
+	footerMd := envelope.Body.Elements[2]
+	if tag, _ := footerMd["tag"].(string); tag != "markdown" {
+		t.Errorf("body[2].tag = %q, want %q\nbody: %s", tag, "markdown", body)
+	}
+	content, _ := footerMd["content"].(string)
+	for _, line := range footer {
+		want := "<font color='grey'>" + line + "</font>"
+		if !strings.Contains(content, want) {
+			t.Errorf("markdown content missing %q\ncontent: %q\nbody: %s", want, content, body)
+		}
+	}
+	// No <div> at all — plain_text is gone.
+	for i, e := range envelope.Body.Elements {
+		if tag, _ := e["tag"].(string); tag == "div" {
+			t.Errorf("body element %d: should NOT be <div> (footer uses <markdown>)\nelement: %#v\nbody: %s", i, e, body)
+		}
+		if tag, _ := e["tag"].(string); tag == "plain_text" {
+			t.Errorf("body element %d: should NOT be <plain_text> (footer uses <markdown>)\nelement: %#v\nbody: %s", i, e, body)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // buildResultCardJSON
 // ---------------------------------------------------------------------------
 
 func TestBuildResultCardJSON_SingleDiv(t *testing.T) {
-	body, err := buildResultCardJSON("hello world")
+	body, err := buildResultCardJSON("hello world", nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -174,7 +257,7 @@ func TestBuildResultCardJSON_SingleDiv(t *testing.T) {
 func TestBuildResultCardJSON_MultiDiv(t *testing.T) {
 	// 2500 chars × 'a' (ASCII) forces ≥3 divs at divTextCharLimit=1000.
 	in := strings.Repeat("a", 2500)
-	body, err := buildResultCardJSON(in)
+	body, err := buildResultCardJSON(in, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -199,7 +282,7 @@ func TestBuildResultCardJSON_MultiDiv(t *testing.T) {
 func TestBuildResultCardJSON_PreservesCodeBlock(t *testing.T) {
 	// Code block must stay intact across splitMarkdownForDivs.
 	in := "intro\n\n```go\nfunc x() { return 1 }\n```\n\noutro"
-	body, err := buildResultCardJSON(in)
+	body, err := buildResultCardJSON(in, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -227,7 +310,7 @@ func TestBuildResultCardJSON_PreservesCodeBlock(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestBuildResultPayload_NoMarkdown_UsesText(t *testing.T) {
-	msgType, body, err := buildResultPayload("plain text without markers")
+	msgType, body, err := buildResultPayload("plain text without markers", nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -245,7 +328,7 @@ func TestBuildResultPayload_LotsOfTables_UsesPost(t *testing.T) {
 		b.WriteString("| A | B |\n|---|---|\n| 1 | 2 |\n\n")
 	}
 	sanitized := SanitizeCardMarkdown(strings.TrimRight(b.String(), "\n"))
-	msgType, body, err := buildResultPayload(sanitized)
+	msgType, body, err := buildResultPayload(sanitized, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -261,7 +344,7 @@ func TestBuildResultPayload_Default_UsesInteractiveCard(t *testing.T) {
 	// Has markdown (```) but few tables.
 	in := "intro\n\n```go\nfunc x() {}\n```\n\noutro"
 	sanitized := SanitizeCardMarkdown(in)
-	msgType, body, err := buildResultPayload(sanitized)
+	msgType, body, err := buildResultPayload(sanitized, nil)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

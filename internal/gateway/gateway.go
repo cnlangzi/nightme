@@ -168,7 +168,7 @@ type Gateway interface {
 	// appropriate channel via resolveChannel + Send.
 	OnMessageState(chatID, userMsgID string, state agent.MessageState)
 
-	// WithActionHandler installs the F-45 §3.5 reaction/action
+	// WithActionHandler installs the reaction/action
 	// router (F-25 + F-45). DispatchInbound calls the handler
 	// when msg.Reaction or msg.Action is set; the runtime
 	// implements the cross-package lookup (typically
@@ -213,7 +213,7 @@ func (g *gateway) WithWatchModeResolver(resolver func(chatID string) (chatsessio
 	return g
 }
 
-// WithActionHandler installs the F-45 §3.5 reaction/action
+// WithActionHandler installs the reaction/action
 // router. DispatchInbound calls this when msg.Reaction or
 // msg.Action is set; the runtime implements the cross-package
 // lookup (typically mgr.Get(msg.ChatID).HandleAction(ctx, ev))
@@ -268,7 +268,7 @@ type gateway struct {
 	// Reading is concurrent-safe; updating takes mu.
 	watchModeResolver func(chatID string) (chatsession.WatchMode, bool)
 
-	// F-45 §3.5: per-chat action router. When DispatchInbound
+	// F-50 §6.1: per-chat action router. When DispatchInbound
 	// sees msg.Reaction or msg.Action, it calls this with the
 	// event; the runtime implements the cross-package lookup
 	// (mgr.Get(chatID).HandleAction(...)) and returns whether
@@ -352,7 +352,7 @@ func (g *gateway) DispatchInbound(ctx context.Context, msg *InboundMessage) (*Co
 		return nil, errors.New("gateway: nil message")
 	}
 
-	// F-45 §3.5: user actions on bot messages (card button
+	// F-50 §6.1: user actions on bot messages (card button
 	// clicks via msg.Action, emoji reactions via msg.Reaction)
 	// route through the per-chat action handler installed by
 	// the runtime. This branch sits BEFORE the slash-command
@@ -407,7 +407,7 @@ func (g *gateway) DispatchInbound(ctx context.Context, msg *InboundMessage) (*Co
 	return g.dispatchSlashCommand(ctx, msg, name, args, cmd)
 }
 
-// dispatchAction is the F-45 §3.5 + F-25 user-action branch.
+// dispatchAction is the F-50 §6.1 + F-25 user-action branch.
 // It dispatches msg.Action (card button click) and msg.Reaction
 // (emoji reaction) to the per-chat action handler installed by
 // the runtime. The handler is responsible for cross-package

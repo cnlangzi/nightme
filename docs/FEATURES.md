@@ -42,6 +42,7 @@
 | F-46 | **Interactive Decision Cards** — gtw 决策卡升级为交互卡 + 原地更新；按钮点击在 Channel 边界归一化为既有 reaction/action 通路；新增 `OutCard` / `OutCardPatch` | [feat/F-46-interactive-cards.md](./feat/F-46-interactive-cards.md) | v1.3.x | ✅ 已落地（UAT via `/gtw test`）|
 | F-48 | **Footer Line 3 — Git Branch Tracking** — SessionContext 加 workspace / git snapshot；main-chat footer 第三行展示 branch / dirty / ahead | [feat/F-45-session-footer.md](./feat/F-45-session-footer.md) §1.7 | v1.3.x | ✅ 已落地 |
 | F-49 | **Compaction Counter + Footer 语义拆分** — footer 暴露压缩次数；token 行为 since-last-compaction，`$cost` 仍为 lifetime；删「正在压缩…」瞬时出站通路；bridge 归一化协议差异 | [feat/F-49-compaction-counter.md](./feat/F-49-compaction-counter.md) | v1.3.x | 📝 设计阶段（doc-first）|
+| F-50 | **GitProvider 抽象 + 两阶段 Provider 探测** — 抽象层重命名 `Platform*` → `Provider*`；`Detect` 两阶段：URL hint（`github.com` / `gitlab` 子串零网络直返）+ API probe fallback（GitLab `/api/v4/version` / GitHub Enterprise `/api/v3/meta`）；新增 `HTTPProber` 接口对齐 `CLIRunner` 模式；自建 GitHub Enterprise / GitLab 现在能被识别。是 `F-45 §3.5` / `gtw §5.x` / `F-45 §7.2` 悬空引用的归宿 | [feat/F-50-git-provider.md](./feat/F-50-git-provider.md) | v1.3.x | 📝 设计阶段（doc-first）|
 
 **v1.2 关键变化**：
 - 删除：`/run` 命令（被 `/use` 替代）

@@ -44,15 +44,18 @@ const (
 )
 
 // GTWFixDraftPayload is the typed payload for a GTWDraftFix* entry.
-// F-45 §3.4 / §5.3. The fields are the rollback-relevant subset of
-// the original /gtw fix context.
+// F-45 §3.4 / §5.3 + F-50 rename. The fields are the rollback-
+// relevant subset of the original /gtw fix context.
 type GTWFixDraftPayload struct {
 	IssueID  int
 	Title    string
 	Branch   string
 	Slug     string
 	Repo     string // "owner/repo" (single-slash form)
-	Platform string // "github" | "gitlab"
+	// Provider is the provider identity (ProviderGitHub /
+	// ProviderGitLab). Used by the rollback path in action.go
+	// to construct a fresh GitProvider for label removal.
+	Provider string
 	// GitError is the last 10 lines of stderr from the failed
 	// `git worktree add` (only for GTWDraftFixWorktreeFail).
 	GitError string

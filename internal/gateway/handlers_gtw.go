@@ -5,7 +5,7 @@
 // ChatSession (gtwContext / gtwDrafts) are accessed via the
 // accessors in internal/chatsession/gtw_accessors.go. Reaction
 // routing is the single extra branch in ChatSession.HandleAction
-// referenced by the F-45 §3.5 design.
+// referenced by the F-50 §6.1 design (reaction/action routing).
 //
 // v1 implements `/gtw fix <id>`. Debug/UAT `/gtw test` lives in
 // handlers_gtw_debug.go so it cannot mix card shapes or seeds into
@@ -39,8 +39,8 @@ func RegisterGTW(
 	if deps.Now == nil {
 		deps.Now = time.Now
 	}
-	if deps.NewPlatform == nil {
-		deps.NewPlatform = gtw.NewPlatformClient
+	if deps.Prober == nil {
+		deps.Prober = &gtw.ExecHTTPProber{}
 	}
 	if deps.Send == nil {
 		deps.Send = gtwSendAdapter(channel)
@@ -296,8 +296,8 @@ func RegisterGTWAction(mgr *chatsession.Manager, deps gtw.HandlerDeps) {
 	if deps.Now == nil {
 		deps.Now = time.Now
 	}
-	if deps.NewPlatform == nil {
-		deps.NewPlatform = gtw.NewPlatformClient
+	if deps.Prober == nil {
+		deps.Prober = &gtw.ExecHTTPProber{}
 	}
 	if deps.Send == nil {
 		// The action handler does not currently call Send

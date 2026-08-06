@@ -10,7 +10,7 @@ import (
 
 // HandleAction is the gtw-internal reaction router. The runtime
 // calls it from ChatSession.HandleAction (the single extra branch
-// added in F-45 §3.5). It looks up the draft by Reaction.TargetMsgID
+// added in F-50 §6.1 reaction routing). It looks up the draft by Reaction.TargetMsgID
 // and dispatches to the kind-specific executor.
 //
 // Returns (true, nil) when the reaction was consumed (a draft was
@@ -100,15 +100,15 @@ func executeBranchExistsAction(
 		resultText := fmt.Sprintf("❌ Cancelled fix #%d.", p.IssueID)
 		if p.LabelAdded {
 			owner, repo, _ := splitOwnerRepo(p.Repo)
-			plat, platErr := deps.NewPlatform(PlatformKind(p.Platform))
+			provider, providerErr := NewProvider(ProviderKind(p.Provider), "")
 			switch {
-			case platErr != nil || plat == nil:
+			case providerErr != nil || provider == nil:
 				resultText = fmt.Sprintf(
-					"⚠️ Cancelled fix #%d locally, but could not reach the platform to remove `nightme/wip` label: %v\n  Manual cleanup: `gh issue edit %d --remove-label nightme/wip` (or `glab issue update %d --unlabel nightme/wip`).",
-					p.IssueID, platErr, p.IssueID, p.IssueID)
+					"⚠️ Cancelled fix #%d locally, but could not reach the provider to remove `nightme/wip` label: %v\n  Manual cleanup: `gh issue edit %d --remove-label nightme/wip` (or `glab issue update %d --unlabel nightme/wip`).",
+					p.IssueID, providerErr, p.IssueID, p.IssueID)
 				rollbackOK = false
 			default:
-				_ = plat.RemoveLabel(ctx, owner, repo, p.IssueID, LabelWIP)
+				_ = provider.RemoveLabel(ctx, owner, repo, p.IssueID, LabelWIP)
 			}
 		}
 		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), resultText)
@@ -216,15 +216,15 @@ func executeWorktreeFailAction(
 		resultText := fmt.Sprintf("❌ Cancelled fix #%d.", p.IssueID)
 		if p.LabelAdded {
 			owner, repo, _ := splitOwnerRepo(p.Repo)
-			plat, platErr := deps.NewPlatform(PlatformKind(p.Platform))
+			provider, providerErr := NewProvider(ProviderKind(p.Provider), "")
 			switch {
-			case platErr != nil || plat == nil:
+			case providerErr != nil || provider == nil:
 				resultText = fmt.Sprintf(
-					"⚠️ Cancelled fix #%d locally, but could not reach the platform to remove `nightme/wip` label: %v\n  Manual cleanup: `gh issue edit %d --remove-label nightme/wip` (or `glab issue update %d --unlabel nightme/wip`).",
-					p.IssueID, platErr, p.IssueID, p.IssueID)
+					"⚠️ Cancelled fix #%d locally, but could not reach the provider to remove `nightme/wip` label: %v\n  Manual cleanup: `gh issue edit %d --remove-label nightme/wip` (or `glab issue update %d --unlabel nightme/wip`).",
+					p.IssueID, providerErr, p.IssueID, p.IssueID)
 				rollbackOK = false
 			default:
-				_ = plat.RemoveLabel(ctx, owner, repo, p.IssueID, LabelWIP)
+				_ = provider.RemoveLabel(ctx, owner, repo, p.IssueID, LabelWIP)
 			}
 		}
 		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), resultText)

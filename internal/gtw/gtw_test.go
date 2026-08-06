@@ -2,12 +2,20 @@ package gtw
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
+
+// utf8RuneCount wraps utf8.RuneCountInString for table-test brevity.
+func utf8RuneCount(s string) int { return utf8.RuneCountInString(s) }
 
 // ---- slug / branch derivation -------------------------------------
 
@@ -214,42 +222,167 @@ func TestParseRepoOwner(t *testing.T) {
 	}
 }
 
-// ---- DetectPlatform ------------------------------------------------
+// ---- Detect (two-stage URL hint + API probe) -----------------------
 
-func TestDetectPlatform(t *testing.T) {
+// fakeHTTPProber returns canned JSON per (host,path) pair. Used
+// to exercise Detect's Stage B without real network. Set
+// `callOrder` to assert the probe sequence (GitLab first, GitHub
+// second). Set `err` per path to simulate timeouts / 5xx.
+type fakeHTTPProber struct {
+	responses map[string]fakeHTTPResp
+	callOrder []string
+	err       error // blanket error for any (host, path) not in responses
+}
+
+type fakeHTTPResp struct {
+	body []byte
+	err  error
+}
+
+func (p *fakeHTTPProber) Probe(_ context.Context, host, path string) ([]byte, error) {
+	p.callOrder = append(p.callOrder, host+path)
+	if r, ok := p.responses[host+path]; ok {
+		return r.body, r.err
+	}
+	if p.err != nil {
+		return nil, p.err
+	}
+	return nil, fmt.Errorf("fakeHTTPProber: no canned response for %s%s", host, path)
+}
+
+func TestDetect_URLHint(t *testing.T) {
 	cases := []struct {
 		url      string
-		want     PlatformKind
-		errMatch string
+		wantKind ProviderKind
+		wantHost string
 	}{
-		{"git@github.com:foo/bar.git", PlatformGitHub, ""},
-		{"https://github.com/foo/bar", PlatformGitHub, ""},
-		{"git@gitlab.com:foo/bar.git", PlatformGitLab, ""},
-		{"https://gitlab.example.com/foo/bar", PlatformGitLab, ""},
-		{"https://gitea.example.com/foo/bar", "", "unsupported git platform"},
-		{"https://bitbucket.org/foo/bar", "", "unsupported git platform"},
+		{"git@github.com:foo/bar.git", ProviderGitHub, "github.com"},
+		{"https://github.com/foo/bar", ProviderGitHub, "github.com"},
+		{"git@gitlab.com:foo/bar.git", ProviderGitLab, "gitlab.com"},
+		// gitlab.com substring also hits Stage A — self-hosted GitLab
+		// URLs containing "gitlab" also short-circuit (no probe).
+		{"https://gitlab.example.com/foo/bar", ProviderGitLab, "gitlab.example.com"},
 	}
 	for _, c := range cases {
-		got, err := DetectPlatform(c.url)
-		if c.errMatch == "" {
-			if err != nil {
-				t.Errorf("DetectPlatform(%q) unexpected error: %v", c.url, err)
-				continue
-			}
-			if got != c.want {
-				t.Errorf("DetectPlatform(%q) = %q, want %q", c.url, got, c.want)
-			}
-		} else {
-			if err == nil {
-				t.Errorf("DetectPlatform(%q) expected error containing %q, got nil (kind=%q)",
-					c.url, c.errMatch, got)
-				continue
-			}
-			if !strings.Contains(err.Error(), c.errMatch) {
-				t.Errorf("DetectPlatform(%q) error = %q, want containing %q",
-					c.url, err.Error(), c.errMatch)
-			}
+		prov, err := Detect(context.Background(), c.url, nil)
+		if err != nil {
+			t.Errorf("Detect(%q) unexpected error: %v", c.url, err)
+			continue
 		}
+		if prov.Kind() != c.wantKind {
+			t.Errorf("Detect(%q).Kind() = %q, want %q", c.url, prov.Kind(), c.wantKind)
+		}
+		if prov.Host() != c.wantHost {
+			t.Errorf("Detect(%q).Host() = %q, want %q", c.url, prov.Host(), c.wantHost)
+		}
+	}
+}
+
+func TestDetect_StageB_GitLabVersion(t *testing.T) {
+	prober := &fakeHTTPProber{
+		responses: map[string]fakeHTTPResp{
+			"gl.acme.internal/api/v4/version": {
+				body: []byte(`{"version":"16.5.0","revision":"abc123"}`),
+			},
+		},
+	}
+	prov, err := Detect(context.Background(), "git@gl.acme.internal:group/foo.git", prober)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if prov.Kind() != ProviderGitLab {
+		t.Errorf("Kind() = %q, want %q", prov.Kind(), ProviderGitLab)
+	}
+	if prov.Host() != "gl.acme.internal" {
+		t.Errorf("Host() = %q, want %q", prov.Host(), "gl.acme.internal")
+	}
+	if prov.Version() != "16.5.0" {
+		t.Errorf("Version() = %q, want %q", prov.Version(), "16.5.0")
+	}
+	// Probe order: GitLab first.
+	if len(prober.callOrder) != 1 || prober.callOrder[0] != "gl.acme.internal/api/v4/version" {
+		t.Errorf("expected single GitLab probe; got callOrder=%v", prober.callOrder)
+	}
+}
+
+func TestDetect_StageB_GitHubEnterpriseMeta(t *testing.T) {
+	prober := &fakeHTTPProber{
+		responses: map[string]fakeHTTPResp{
+			"gh.acme.internal/api/v4/version": {err: fmt.Errorf("404 not found")},
+			"gh.acme.internal/api/v3/meta": {
+				body: []byte(`{"verifiable_password_authentication":true,"github_token_smashed":false}`),
+			},
+		},
+	}
+	prov, err := Detect(context.Background(), "git@gh.acme.internal:foo/bar.git", prober)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if prov.Kind() != ProviderGitHub {
+		t.Errorf("Kind() = %q, want %q", prov.Kind(), ProviderGitHub)
+	}
+	if prov.Host() != "gh.acme.internal" {
+		t.Errorf("Host() = %q, want %q", prov.Host(), "gh.acme.internal")
+	}
+	// Both probes were attempted.
+	if len(prober.callOrder) != 2 {
+		t.Errorf("expected 2 probes; got %d (callOrder=%v)", len(prober.callOrder), prober.callOrder)
+	}
+}
+
+func TestDetect_StageB_BothFail(t *testing.T) {
+	prober := &fakeHTTPProber{err: fmt.Errorf("connection refused")}
+	_, err := Detect(context.Background(), "https://gitea.example.com/foo/bar", prober)
+	if err == nil {
+		t.Fatalf("Detect: expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unsupported git provider") {
+		t.Errorf("Detect error = %q, want containing %q", err.Error(), "unsupported git provider")
+	}
+	// Both probes attempted before failing.
+	if len(prober.callOrder) != 2 {
+		t.Errorf("expected 2 probes; got %d", len(prober.callOrder))
+	}
+}
+
+func TestDetect_StageA_ShortCircuits(t *testing.T) {
+	// Even with a prober that would succeed for GitLab, a github.com
+	// URL must NOT trigger Stage B (Stage A wins).
+	prober := &fakeHTTPProber{
+		responses: map[string]fakeHTTPResp{
+			"github.com/api/v4/version": {body: []byte(`{"version":"x"}`)},
+		},
+	}
+	prov, err := Detect(context.Background(), "git@github.com:foo/bar.git", prober)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if prov.Kind() != ProviderGitHub {
+		t.Errorf("Kind() = %q, want %q", prov.Kind(), ProviderGitHub)
+	}
+	if len(prober.callOrder) != 0 {
+		t.Errorf("Stage A should short-circuit; got %d probes", len(prober.callOrder))
+	}
+}
+
+func TestNewProvider_KindHostBinding(t *testing.T) {
+	gh, err := NewProvider(ProviderGitHub, "gh.acme")
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	if gh.Kind() != ProviderGitHub || gh.Host() != "gh.acme" {
+		t.Errorf("got Kind=%q Host=%q", gh.Kind(), gh.Host())
+	}
+	gl, err := NewProvider(ProviderGitLab, "gl.acme")
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	if gl.Kind() != ProviderGitLab || gl.Host() != "gl.acme" {
+		t.Errorf("got Kind=%q Host=%q", gl.Kind(), gl.Host())
+	}
+	_, err = NewProvider(ProviderKind("bitbucket"), "x")
+	if !errors.Is(err, ErrUnsupportedProvider) {
+		t.Errorf("NewProvider(bitbucket) error = %v, want ErrUnsupportedProvider", err)
 	}
 }
 
@@ -346,7 +479,7 @@ func TestRebuildContext_NilWhenNotInWorktree(t *testing.T) {
 		"symbolic-ref --short HEAD": {stdout: "main\n"},
 	}}
 	cs := &fakeSender{cwd: "/code/nightme"}
-	got := RebuildContext(context.Background(), cs, g, fakeNewPlatform)
+	got := RebuildContext(context.Background(), cs, g, nil, nil)
 	if got != (Context{}) {
 		t.Fatalf("RebuildContext = %+v, want zero", got)
 	}
@@ -358,19 +491,338 @@ type fakeSender struct{ cwd string }
 func (f *fakeSender) ActiveCwd() string             { return f.cwd }
 func (f *fakeSender) SetActiveCwd(cwd string) error { f.cwd = cwd; return nil }
 
-// fakeNewPlatform returns a no-op client; tests that need
-// richer behaviour build their own.
-func fakeNewPlatform(_ PlatformKind) (PlatformClient, error) {
-	return &fakePlatform{}, nil
+// ---- parseRemoteHost: full protocol matrix -------------------------
+//
+// Covers every git URL shape mentioned in F-50 §3 (self-hosted
+// matrix) + the userinfo / port / query / fragment edge cases
+// identified in review. parseRemoteHost is the gateway between
+// Detect's Stage A URL hint and Stage B API probe — getting the
+// host extraction wrong cascades into a wrong Stage B target.
+
+func TestParseRemoteHost(t *testing.T) {
+	cases := []struct {
+		name   string
+		url    string
+		want   string
+		errIs  error // expected errors.Is target
+	}{
+		// Standard protocols
+		{"https github", "https://github.com/foo/bar.git", "github.com", nil},
+		{"http github", "http://github.com/foo/bar", "github.com", nil},
+		{"ssh github", "ssh://git@github.com/foo/bar.git", "github.com", nil},
+		{"scp legacy", "git@github.com:foo/bar.git", "github.com", nil},
+		{"git protocol", "git://github.com/foo/bar.git", "github.com", nil},
+		{"gitlab.com", "https://gitlab.com/group/foo/bar.git", "gitlab.com", nil},
+
+		// Self-hosted (URL hint ambiguous → Stage B will probe)
+		{"self-hosted gitlab", "https://gitlab.acme.internal/foo/bar.git", "gitlab.acme.internal", nil},
+		{"self-hosted GHE", "https://github.acme.internal/foo/bar.git", "github.acme.internal", nil},
+
+		// Userinfo variants (gh / glab auth-helper, PAT in URL)
+		{"PAT in URL", "https://ghp_xxx@github.com/foo/bar.git", "github.com", nil},
+		{"userinfo with password", "https://oauth2:secret@gitlab.acme.io/foo/bar.git", "gitlab.acme.io", nil},
+		{"userinfo + ssh", "ssh://git@github.com:2222/foo/bar.git", "github.com:2222", nil},
+
+		// Port (ssh:// :port; HTTP :port for self-hosted on non-default)
+		{"gitlab port", "https://gitlab.acme.internal:8929/foo/bar.git", "gitlab.acme.internal:8929", nil},
+
+		// Query / fragment
+		{"query string", "https://github.com/foo/bar.git?ref=main", "github.com", nil},
+		{"fragment", "https://github.com/foo/bar.git#readme", "github.com", nil},
+		{"query + fragment", "https://github.com/foo/bar.git?ref=main#frag", "github.com", nil},
+
+		// Whitespace tolerance
+		{"leading/trailing whitespace", "  https://github.com/foo/bar.git\n", "github.com", nil},
+
+		// Malformed — should NOT silently extract wrong host
+		{"empty", "", "", ErrInvalidRemoteURL},
+		{"no scheme", "github.com/foo/bar", "", ErrInvalidRemoteURL},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseRemoteHost(c.url)
+			if c.errIs != nil {
+				if !errors.Is(err, c.errIs) {
+					t.Fatalf("parseRemoteHost(%q) err = %v, want errors.Is %v", c.url, err, c.errIs)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseRemoteHost(%q) unexpected error: %v", c.url, err)
+			}
+			if got != c.want {
+				t.Errorf("parseRemoteHost(%q) = %q, want %q", c.url, got, c.want)
+			}
+		})
+	}
 }
 
-type fakePlatform struct {
+// ---- Detect edge cases ----------------------------------------------
+
+func TestDetect_URLHint_GitProtocol(t *testing.T) {
+	// git:// URL must be recognised by Stage A (substring match
+	// catches "github.com" / "gitlab" regardless of protocol).
+	prov, err := Detect(context.Background(), "git://github.com/foo/bar.git", nil)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if prov.Kind() != ProviderGitHub {
+		t.Errorf("Kind() = %q, want %q", prov.Kind(), ProviderGitHub)
+	}
+}
+
+func TestDetect_InvalidURL_ReturnsInvalidRemoteURL(t *testing.T) {
+	// B1 + D3: empty / scheme-less URL must surface as
+	// ErrInvalidRemoteURL, not ErrUnsupportedProvider. The two
+	// need different user-facing hints (D3 split).
+	_, err := Detect(context.Background(), "", nil)
+	if !errors.Is(err, ErrInvalidRemoteURL) {
+		t.Errorf("Detect(\"\") err = %v, want ErrInvalidRemoteURL", err)
+	}
+	if errors.Is(err, ErrUnsupportedProvider) {
+		t.Errorf("Detect(\"\") err should NOT also be ErrUnsupportedProvider")
+	}
+
+	_, err = Detect(context.Background(), "github.com/foo/bar", nil)
+	if !errors.Is(err, ErrInvalidRemoteURL) {
+		t.Errorf("Detect(plain) err = %v, want ErrInvalidRemoteURL", err)
+	}
+}
+
+func TestDetect_StageA_PathologicalHosts(t *testing.T) {
+	// Stage A should be robust against weird-but-valid inputs.
+	cases := []struct {
+		name   string
+		url    string
+		wantK  ProviderKind
+		wantH  string
+	}{
+		{"trailing-slash repo", "https://github.com/foo/bar/", ProviderGitHub, "github.com"},
+		{"no .git suffix", "https://github.com/foo/bar", ProviderGitHub, "github.com"},
+		{"deep group path", "https://gitlab.com/g1/g2/g3/proj", ProviderGitLab, "gitlab.com"},
+		{"PAT embedded in URL", "https://ghp_abc@github.com/foo/bar.git", ProviderGitHub, "github.com"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			prov, err := Detect(context.Background(), c.url, nil)
+			if err != nil {
+				t.Fatalf("Detect(%q): %v", c.url, err)
+			}
+			if prov.Kind() != c.wantK {
+				t.Errorf("Kind() = %q, want %q", prov.Kind(), c.wantK)
+			}
+			if prov.Host() != c.wantH {
+				t.Errorf("Host() = %q, want %q", prov.Host(), c.wantH)
+			}
+		})
+	}
+}
+
+func TestDetect_NilProber_UsesExecHTTPProber(t *testing.T) {
+	// Stage A only — nil prober should not be invoked because
+	// the URL is on github.com (Stage A short-circuits). If it
+	// WERE invoked, the test would hang on real network or fail
+	// when offline; the assertion is implicit in not hanging.
+	prov, err := Detect(context.Background(), "git@github.com:foo/bar.git", nil)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if prov.Kind() != ProviderGitHub {
+		t.Errorf("Kind() = %q", prov.Kind())
+	}
+}
+
+func TestExecHTTPProber_NilPointer_Guarded(t *testing.T) {
+	// B2: passing a typed-nil pointer must not panic. The
+	// pointer-receiver Probe should re-zero itself.
+	var p *ExecHTTPProber // nil
+	// Just calling Probe would actually hit the network. The
+	// guard kicks in first — verify by checking the function
+	// does not panic on a synthetic call that immediately
+	// fails (closed test server = connection refused).
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	ts.Close() // close so Probe fails fast
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, _ = p.Probe(ctx, "localhost", "/")
+	// No panic = guard works.
+}
+
+// ---- ExecHTTPProber end-to-end (httptest.Server) -------------------
+
+func TestExecHTTPProber_End2End(t *testing.T) {
+	var gotPath string
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{"version":"16.5.0","revision":"abc"}`))
+	}))
+	defer ts.Close()
+
+	// httptest.NewTLSServer uses a self-signed cert that the
+	// default http client rejects. Extract the cert and add it
+	// to the client trust store via InsecureSkipVerify (test
+	// shortcut; production uses real CA-signed certs).
+	host := strings.TrimPrefix(ts.URL, "https://")
+
+	// Case 1: 200 OK with body — happy path
+	body, err := (&ExecHTTPProber{InsecureSkipVerify: true}).Probe(
+		context.Background(), host, "/api/v4/version")
+	if err != nil {
+		t.Fatalf("Probe(200): %v", err)
+	}
+	if !strings.Contains(string(body), `"version":"16.5.0"`) {
+		t.Errorf("body = %q, want containing version field", body)
+	}
+	if gotPath != "/api/v4/version" {
+		t.Errorf("path = %q, want /api/v4/version", gotPath)
+	}
+
+	// Case 2: 503 — non-200 status returns error
+	ts2 := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(503)
+	}))
+	defer ts2.Close()
+	host2 := strings.TrimPrefix(ts2.URL, "https://")
+	_, err = (&ExecHTTPProber{InsecureSkipVerify: true}).Probe(
+		context.Background(), host2, "/api/v4/version")
+	if err == nil {
+		t.Errorf("Probe(503): expected error, got nil")
+	}
+
+	// Case 3: timeout — slow server + tight deadline
+	ts3 := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+	}))
+	defer ts3.Close()
+	host3 := strings.TrimPrefix(ts3.URL, "https://")
+	_, err = (&ExecHTTPProber{InsecureSkipVerify: true, Timeout: 100 * time.Millisecond}).Probe(
+		context.Background(), host3, "/api/v4/version")
+	if err == nil {
+		t.Errorf("Probe(timeout): expected error, got nil")
+	}
+}
+
+// ---- redactForDisplay: credential stripping (security) ------------
+//
+// F-50 review fix: user-facing error messages must never echo the
+// raw remoteURL — it may contain userinfo (PAT / oauth2:token) that
+// would leak to the IM channel. These tests pin down the redaction
+// rules.
+
+func TestRedactForDisplay(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+		// forbiddenSubstrings: must NOT appear in output (security
+		// assertion — credential parts must be stripped).
+		forbid []string
+	}{
+		// PAT in URL — classic credential-leak case
+		{
+			"PAT in https URL",
+			"https://ghp_abc123@github.com/owner/repo.git",
+			"<redacted>@github.com/owner/repo.git",
+			[]string{"ghp_abc123"},
+		},
+		// oauth2:token userinfo
+		{
+			"oauth2:secret userinfo",
+			"https://oauth2:secret@gitlab.acme.io/group/foo.git",
+			"<redacted>@gitlab.acme.io/group/foo.git",
+			[]string{"oauth2:secret", "secret"},
+		},
+		// scp-style: "git@" is the protocol marker, not credential;
+		// there is no real userinfo. The output should look like a
+		// scp URL with the user stripped, leaving the host/path.
+		{
+			"scp-style no credentials",
+			"git@github.com:owner/repo.git",
+			"github.com:owner/repo.git",
+			nil,
+		},
+		// ssh:// + userinfo + port — all must be handled together
+		{
+			"ssh:// userinfo + port",
+			"ssh://git:pass@gitlab.acme.io:2222/foo/bar.git",
+			"<redacted>@gitlab.acme.io:2222/foo/bar.git",
+			[]string{"git:pass", "pass"},
+		},
+		// No credentials — pass through
+		{
+			"plain https",
+			"https://github.com/owner/repo.git",
+			"github.com/owner/repo.git",
+			nil,
+		},
+		// Query + fragment
+		{
+			"query + fragment",
+			"https://user@github.com/owner/repo.git?ref=main#frag",
+			"<redacted>@github.com/owner/repo.git",
+			[]string{"user"},
+		},
+		// Edge: empty / whitespace
+		{
+			"empty",
+			"",
+			"",
+			nil,
+		},
+		{
+			"whitespace only",
+			"   \t\n",
+			"",
+			nil,
+		},
+		// Length cap (security + size bound)
+		{
+			"very long URL",
+			"https://github.com/" + strings.Repeat("a", 500) + "/repo.git",
+			"", // checked via length assertion below
+			nil,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := redactForDisplay(c.in)
+			if c.name == "very long URL" {
+				// Length cap test: 256 rune ceiling + ellipsis
+				// (note: "…" is 3 bytes in UTF-8; we measure runes).
+				if utf8RuneCount(got) > 257 { // 256 + "…"
+					t.Errorf("rune count of got = %d, want ≤ 257 (256 cap + ellipsis)", utf8RuneCount(got))
+				}
+				return
+			}
+			if got != c.want {
+				t.Errorf("redactForDisplay(%q) = %q, want %q", c.in, got, c.want)
+			}
+			for _, f := range c.forbid {
+				if strings.Contains(got, f) {
+					t.Errorf("redactForDisplay(%q) = %q contains forbidden substring %q (CREDENTIAL LEAK)",
+						c.in, got, f)
+				}
+			}
+		})
+	}
+}
+
+// fakeProvider satisfies GitProvider for tests. F-50 introduced
+// the GitProvider abstraction; tests inject via the Detect
+// field — Detect returns the fakeProvider regardless of URL
+// hint.
+type fakeProvider struct {
 	issue *Issue
 	err   error
 }
 
-func (f *fakePlatform) Kind() PlatformKind { return PlatformGitHub }
-func (f *fakePlatform) GetIssue(_ context.Context, _, _ string, id int) (*Issue, error) {
+func (f *fakeProvider) Kind() ProviderKind  { return ProviderGitHub }
+func (f *fakeProvider) Host() string        { return "github.com" }
+func (f *fakeProvider) Version() string     { return "" }
+func (f *fakeProvider) GetIssue(_ context.Context, _, _ string, id int) (*Issue, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -382,10 +834,10 @@ func (f *fakePlatform) GetIssue(_ context.Context, _, _ string, id int) (*Issue,
 	c.ID = id
 	return &c, nil
 }
-func (f *fakePlatform) AddLabel(context.Context, string, string, int, string) error {
+func (f *fakeProvider) AddLabel(context.Context, string, string, int, string) error {
 	return nil
 }
-func (f *fakePlatform) RemoveLabel(context.Context, string, string, int, string) error {
+func (f *fakeProvider) RemoveLabel(context.Context, string, string, int, string) error {
 	return nil
 }
 
@@ -426,14 +878,18 @@ func TestRunFix_HappyPath(t *testing.T) {
 	}
 
 	sent := []OutMsg{}
-	plat := &fakePlatform{issue: &Issue{ID: 42, Title: "Login state expiration", State: "open"}}
+	provider := &fakeProvider{issue: &Issue{ID: 42, Title: "Login state expiration", State: "open"}}
 	sender := &fakeSender{cwd: dir}
 	slot := &fakeContextSlot{}
 	drafts := &fakeDraftsMap{}
 	deps := HandlerDeps{
 		Send: func(_ context.Context, m OutMsg) error { sent = append(sent, m); return nil },
 		Git:  ExecGitRunner{},
-		NewPlatform: func(_ PlatformKind) (PlatformClient, error) { return plat, nil },
+		// F-50 §1.4 migration: tests inject via the Detect field —
+		// Detect returns the fakeProvider regardless of URL hint.
+		Detect: func(_ context.Context, _ string, _ HTTPProber) (GitProvider, error) {
+			return provider, nil
+		},
 		Now: func() time.Time {
 			return time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 		},
@@ -521,8 +977,8 @@ func TestRunFix_DaemonRecovery(t *testing.T) {
 	deps := HandlerDeps{
 		Send: func(_ context.Context, m OutMsg) error { sent = append(sent, m); return nil },
 		Git:  ExecGitRunner{},
-		NewPlatform: func(_ PlatformKind) (PlatformClient, error) {
-			return &fakePlatform{issue: &Issue{ID: 42, Title: "recovery test", State: "open"}}, nil
+		Detect: func(_ context.Context, _ string, _ HTTPProber) (GitProvider, error) {
+			return &fakeProvider{issue: &Issue{ID: 42, Title: "recovery test", State: "open"}}, nil
 		},
 		Now: func() time.Time { return time.Now() },
 	}
@@ -573,8 +1029,8 @@ func TestHandleAction_BranchExists_ConfirmCancellation(t *testing.T) {
 	deps := HandlerDeps{
 		Send: func(_ context.Context, m OutMsg) error { sent = append(sent, m); return nil },
 		Git:  &fakeGit{},
-		NewPlatform: func(_ PlatformKind) (PlatformClient, error) {
-			return &fakePlatform{}, nil
+		Detect: func(_ context.Context, _ string, _ HTTPProber) (GitProvider, error) {
+			return &fakeProvider{}, nil
 		},
 	}
 
@@ -590,7 +1046,7 @@ func TestHandleAction_BranchExists_ConfirmCancellation(t *testing.T) {
 			Branch:   "fix/42-login-state-expiration",
 			Slug:     "42-login-state-expiration",
 			Repo:     "cnlangzi/nightme",
-			Platform: "github",
+			Provider: "github",
 			ChatID:   "chat-1",
 		},
 	})
@@ -629,7 +1085,9 @@ func TestHandleAction_NoDraftFallsThrough(t *testing.T) {
 	deps := HandlerDeps{
 		Send: func(_ context.Context, _ OutMsg) error { return nil },
 		Git:  &fakeGit{},
-		NewPlatform: func(_ PlatformKind) (PlatformClient, error) { return nil, nil },
+		Detect: func(_ context.Context, _ string, _ HTTPProber) (GitProvider, error) {
+			return nil, nil
+		},
 	}
 	consumed, _ := HandleAction(context.Background(), deps, cs,
 		&fakeContextSlot{}, &fakeDraftsMap{},
@@ -712,7 +1170,7 @@ func TestRebuildContext_FoundIssue(t *testing.T) {
 		"remote get-url origin":                {stdout: "git@github.com:cnlangzi/nightme.git\n"},
 	}}
 	cs := &fakeSender{cwd: "/code/nightme.nightme/42-login-state-expiration"}
-	ctx := RebuildContext(context.Background(), cs, g, fakeNewPlatform)
+	ctx := RebuildContext(context.Background(), cs, g, nil, nil)
 	if ctx == (Context{}) {
 		t.Fatal("RebuildContext = zero, want populated")
 	}

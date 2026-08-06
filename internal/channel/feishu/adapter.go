@@ -279,7 +279,7 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		// would log "no handler for card.action.trigger" and the user
 		// clicks would be lost.
 		OnP2CardActionTrigger(a.handleCardAction).
-		// F-45 §3.5: user-emoji reactions on bot messages drive the
+		// F-50 §6.1: user-emoji reactions on bot messages drive the
 		// gtw two-step-confirm flow. We translate the SDK event to
 		// an InboundMessage with msg.Reaction set, push it onto the
 		// incoming channel, and let the gateway dispatcher route to
@@ -3183,7 +3183,7 @@ func (a *Adapter) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV
 // gateway dispatcher picks it up and routes to
 // ChatSession.HandleAction.
 //
-// F-45 §3.5: this is the only path through which user emoji
+// F-50 §6.1: this is the only path through which user emoji
 // reactions reach the gtw draft executor.
 //
 // We intentionally do NOT log every reaction at info level —

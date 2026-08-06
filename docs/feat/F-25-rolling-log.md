@@ -51,7 +51,7 @@ The **rolling-log receipt** is that artifact (v1.3.x scope):
   carries `ReplyTo = currentTurnUserMsgID`; Channel routes by that
   key to its own per-userMsgID receipt object.
 
-> **决策卡 vs Receipt 卡**：`OutCard` 走 F-46 决策卡（gtw §5.3.1 / §5.3.3 确认分支）路径——bot 发独立 card message，用户点 button → reaction pipeline → 原卡 PATCH。`OutCard` 也用于 receipt（如 `OutCard` 类型 receipt checklist）。两者**不**冲突：决策卡的 PATCH 改 `Disabled+ChosenChoiceEmoji`；receipt 的 PATCH 改 entry list。详见 [`F-46-interactive-cards.md`](./F-46-interactive-cards.md) §2.6。
+> **决策卡 vs Receipt 卡**：`OutCard` 走 F-46 决策卡（branch-exists / worktree-fail 确认分支，详见 [`F-46-interactive-cards.md`](./F-46-interactive-cards.md) §3.3）路径——bot 发独立 card message，用户点 button → reaction pipeline → 原卡 PATCH。`OutCard` 也用于 receipt（如 `OutCard` 类型 receipt checklist）。两者**不**冲突：决策卡的 PATCH 改 `Disabled+ChosenChoiceEmoji`；receipt 的 PATCH 改 entry list。详见 [`F-46-interactive-cards.md`](./F-46-interactive-cards.md) §2.6。
 
 **Gateway sees none of this**. Gateway stamps `ReplyTo` and sends;
 Channel decides everything else (storage, lifecycle, terminal state,

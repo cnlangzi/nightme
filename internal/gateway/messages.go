@@ -89,7 +89,7 @@ type InboundMessage struct {
 	// user-emoji reaction on a previously-sent message. Channels
 	// translate their native reaction-created event into this
 	// shape; the gateway routes to ChatSession.HandleAction,
-	// which checks gtwDrafts first (F-45 §3.5) and may fall
+	// which checks gtwDrafts first (F-50 §6.1 reaction routing) and may fall
 	// through to the F-31 MessageState FSM for non-gtw reactions.
 	//
 	// Action and Reaction are mutually exclusive in practice: a

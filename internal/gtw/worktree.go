@@ -62,8 +62,14 @@ func RepoRoot(ctx context.Context, dir string, git GitRunner) (string, error) {
 }
 
 // RemoteOriginURL returns the URL of the "origin" remote, or "" if
-// no origin is configured. Used to detect GitHub vs GitLab vs
-// self-hosted (F-45 §7.2).
+// no origin is configured. Consumed by gtw.RunFix and
+// gtw.RebuildContext to drive Provider detection (URL hint +
+// optional API probe for self-hosted GitHub Enterprise / GitLab).
+//
+// The canonical Provider-abstraction design is in
+// docs/feat/F-50-git-provider.md (F-50 landed in v1.3.x as the
+// "do it once and for all" replacement for the dangling
+// "F-45 §7.2" reference that used to live here).
 func RemoteOriginURL(ctx context.Context, dir string, git GitRunner) (string, error) {
 	out, _, err := git.Run(ctx, dir, "remote", "get-url", "origin")
 	if err != nil {

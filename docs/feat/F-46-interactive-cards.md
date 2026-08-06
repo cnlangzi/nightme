@@ -25,7 +25,7 @@ nightme 现在有两套并行通路驱动 gtw 决策卡：
 | emoji reaction | 用户在 bot 消息上点 `🔄` 等 | `OnP2MessageReactionCreatedV1` → `handleReactionCreated` → 推进 inbound → `WithActionHandler` → `gtw.HandleAction` | ✅ 已通 |
 | interactive card button | 用户点 bot 卡片上的 `🆕` 按钮 | `OnP2CardActionTrigger` → `handleCardAction` (stub) | ❌ stub：log + 弹 toast |
 
-`/gtw fix` 跑出来的 §5.3.1 / §5.3.3 决策卡是纯文本 markdown（见 `internal/gtw/render.go`），用户必须打 emoji 才能继续。React Native / web 客户端上的表情输入体验不好（选 emoji 面板要找），所以要给决策卡加 button + `select_static` 让用户点一下。
+`/gtw fix` 跑出来的决策卡（branch-exists / worktree-fail 场景，见 §3.3）是纯文本 markdown（见 `internal/gtw/render.go`），用户必须打 emoji 才能继续。React Native / web 客户端上的表情输入体验不好（选 emoji 面板要找），所以要给决策卡加 button + `select_static` 让用户点一下。
 
 ### 1.2 邻近实现
 
@@ -98,10 +98,10 @@ const (
 )
 ```
 
-### 3.3 Decision card 渲染（§5.3.1 / §5.3.3）
+### 3.3 Decision card 渲染（branch-exists / worktree-fail）
 
 ```go
-// §5.3.1 branch-exists
+// branch-exists scenario (gtw fix flow decision)
 &Card{
     Kind:    CardKindDecision,
     Title:   fmt.Sprintf("⚠️ 分支 `%s` 已存在", payload.Branch),
@@ -114,7 +114,7 @@ const (
     RequestID: "gtw-fix-branch-exists-" + payload.IssueID,  // 关联 userMsgID
 }
 
-// §5.3.3 worktree-fail
+// worktree-fail scenario (gtw fix flow decision)
 &Card{
     Kind:    CardKindDecision,
     Title:   fmt.Sprintf("❌ 创建 worktree 失败(#%d)", payload.IssueID),
@@ -134,7 +134,7 @@ const (
 1. 拆 header 配色：根据 `CardKind` 选 `template`，默认 blue（permission 仍 blue + 🔐）
 2. `🔐 ` 前缀改成只在 `CardKindPermission` 时加
 3. Choices 渲染为 `column_set` 等宽布局（cc-connect `CardActionLayoutEqualColumns`），3 个按钮横排
-4. 单按钮场景（§5.3.3 两选项）也用 `column_set` 一致布局
+4. 单按钮场景（worktree-fail 两选项）也用 `column_set` 一致布局
 
 ```go
 // cc-connect 的等宽布局
@@ -393,7 +393,7 @@ func emitBranchExistsDraft(...) (*Result, error) {
 
 ### 5.3 手动验证
 
-- 飞书客户端（iOS/Android）：点 §5.3.1 卡片按钮 → toast "✅ 已选择 🆕" → 原卡变成 "已选择 🆕" 状态
+- 飞书客户端（iOS/Android）：点 branch-exists 卡片按钮 → toast "✅ 已选择 🆕" → 原卡变成 "已选择 🆕" 状态
 - 飞书桌面：同上
 - 飞书 Web：部分版本不渲染 button，确认走 emoji 降级路径
 - daemon 重启后跑 `/gtw fix 42`，决策卡渲染形状与点按钮的反馈
@@ -513,8 +513,8 @@ Feishu SDK 的 `event.Action.Option` 字段是 `select_static` 组件的选项�
 
 | 前缀 | 语义 | F-46 落地 |
 | --- | --- | --- |
-| `act:/gtw/branch-newv2` | §5.3.1 🆕（`/gtw test three`） | ✅ 已实现 |
-| `act:/gtw/branch-join` | §5.3.1 🔗（`/gtw test three`） | ✅ 已实现 |
+| `act:/gtw/branch-newv2` | branch-exists �（`/gtw test three`） | ✅ 已实现 |
+| `act:/gtw/branch-join` | branch-exists 🔗（`/gtw test three`） | ✅ 已实现 |
 | `act:/gtw/worktree-retry` | §5.3.3 🔄（`/gtw test ok`） | ✅ 已实现 |
 | `act:/gtw/cancel` | 任意决策卡 ❌ | ✅ 已实现 |
 | `nav:/xxx` / `cmd:/xxx` / `act:/gtw/label-force` | 导航 / 命令 / §5.3.2 强制接管 | ❌ 未进 map（F-47/48/49） |

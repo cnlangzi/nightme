@@ -135,7 +135,7 @@ func runGTWTestScenario(
 		}
 	}
 
-	if deps.Send == nil || deps.Git == nil || deps.NewPlatform == nil || deps.Now == nil {
+	if deps.Send == nil || deps.Git == nil || deps.Prober == nil || deps.Now == nil {
 		fallback := gtwTestFallbackDeps(channel)
 		if deps.Send == nil {
 			deps.Send = fallback.Send
@@ -143,8 +143,8 @@ func runGTWTestScenario(
 		if deps.Git == nil {
 			deps.Git = fallback.Git
 		}
-		if deps.NewPlatform == nil {
-			deps.NewPlatform = fallback.NewPlatform
+		if deps.Prober == nil {
+			deps.Prober = fallback.Prober
 		}
 		if deps.Now == nil {
 			deps.Now = fallback.Now
@@ -208,7 +208,7 @@ func gtwTestPayload(chatID, kind string) gtw.FixDraftPayload {
 		Branch:     "fix/42-test",
 		Slug:       "42-test",
 		Repo:       "cnlangzi/nightme",
-		Platform:   "github",
+		Provider:   "github",
 		LabelAdded: kind != "worktree-fail",
 		ChatID:     chatID,
 	}
@@ -324,7 +324,7 @@ func gtwTestFallbackDeps(channel Channel) gtw.HandlerDeps {
 			})
 		},
 		Git:         gtw.ExecGitRunner{},
-		NewPlatform: gtw.NewPlatformClient,
+		Prober:      &gtw.ExecHTTPProber{},
 		Now:         time.Now,
 	}
 }
@@ -442,7 +442,7 @@ func gtwTestSeedDraft(mgr *chatsession.Manager, chatID, userMsgID, kind string) 
 			Branch:     p.Branch,
 			Slug:       p.Slug,
 			Repo:       p.Repo,
-			Platform:   p.Platform,
+			Provider:   p.Provider,
 			LabelAdded: p.LabelAdded,
 			ChatID:     p.ChatID,
 		},

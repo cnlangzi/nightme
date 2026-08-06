@@ -9,7 +9,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
-// TestDispatchInbound_ActionBranch covers the F-45 §3.5 reaction
+// TestDispatchInbound_ActionBranch covers the F-50 §6.1 reaction
 // routing path: when msg.Reaction (or msg.Action) is set,
 // DispatchInbound must route to dispatchAction, NOT to
 // dispatchMessage (the agent loop). Without this branch the

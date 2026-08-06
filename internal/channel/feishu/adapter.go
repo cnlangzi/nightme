@@ -28,6 +28,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/gtw"
 )
 
 const maxMessageBytes = 3800
@@ -278,17 +279,16 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		// would log "no handler for card.action.trigger" and the user
 		// clicks would be lost.
 		OnP2CardActionTrigger(a.handleCardAction).
-		// User-driven reactions on bot messages are not a designed
-		// input channel (no /react command, no ack/cancel UX). Swallow
-		// the event so the SDK doesn't log "not found handler". The
-		// reaction event subscription is intentionally absent from
-		// DefaultAddons in internal/auth/feishu/feishu.go.
-		OnP2MessageReactionCreatedV1(func(_ context.Context, _ *larkim.P2MessageReactionCreatedV1) error {
-			return nil
-		}).
+		// F-45 §3.5: user-emoji reactions on bot messages drive the
+		// gtw two-step-confirm flow. We translate the SDK event to
+		// an InboundMessage with msg.Reaction set, push it onto the
+		// incoming channel, and let the gateway dispatcher route to
+		// ChatSession.HandleAction.
+		OnP2MessageReactionCreatedV1(a.handleReactionCreated).
 		// Pair with the created handler above so reaction removal
-		// (e.g. user un-clicks an emoji) doesn't generate spurious
-		// "not found handler" errors either.
+		// (e.g. user un-clicks an emoji) is silently dropped — we
+		// only care about the "user picked" event, not the "user
+		// un-picked" event.
 		OnP2MessageReactionDeletedV1(func(_ context.Context, _ *larkim.P2MessageReactionDeletedV1) error {
 			return nil
 		})
@@ -798,7 +798,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	// reply/thread routing logic, so the placeholder preserves
 	// its inline main-chat rendering for the lifetime of the
 	// turn.
-	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
+	msgID, err := a.sendCardContent(ctx, chatID, body, userMsgID, false)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -923,7 +923,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 	// a single chunk over ~30 KB), the helper returns an error
 	// and the caller falls back to a top-level Create via
 	// postOrphanReplyCard.
-	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
+	msgID, err := a.sendCardContent(ctx, chatID, body, userMsgID, false)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -974,7 +974,12 @@ func (a *Adapter) postOrphanReplyCard(ctx context.Context, chatID, text string, 
 	// → main chat visible. Matches the cold-start receipt path so the
 	// orphan bubble is indistinguishable from the first receipt card
 	// at the wire level (only the receipt registration differs).
-	_, err = a.SendCard(ctx, chatID, body, "", false)
+	//
+	// Use sendCardContent (raw card JSON), NOT SendCard(OutboundMessage):
+	// body is already a buildReceiptCard envelope; routing it through
+	// buildInteractiveCard would wrap the JSON as markdown inside a
+	// second card.
+	_, err = a.sendCardContent(ctx, chatID, body, "", false)
 	return err
 }
 
@@ -1025,7 +1030,12 @@ func (a *Adapter) postOrphanTaskCard(ctx context.Context, chatID string, list *a
 	// rootID="" → top-level Create (ReplyInChat), replyInThread=false
 	// → main chat visible. Same wire shape as the cold-start
 	// task card; only the receipt registration differs.
-	_, err = a.SendCard(ctx, chatID, body, "", false)
+	//
+	// Use sendCardContent (raw card JSON), NOT SendCard(OutboundMessage):
+	// body is already a buildReceiptCard envelope; routing it through
+	// buildInteractiveCard would wrap the JSON as markdown inside a
+	// second card.
+	_, err = a.sendCardContent(ctx, chatID, body, "", false)
 	return err
 }
 
@@ -1106,7 +1116,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 // ensureReceiptForTyping / ensureReceiptForReply, the
 // existing-receipt check above short-circuits this SendCard
 // (returns existing, created=false).
-	msgID, err := a.SendCard(ctx, chatID, body, userMsgID, false)
+	msgID, err := a.sendCardContent(ctx, chatID, body, userMsgID, false)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -1377,6 +1387,24 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// OutThinking).
 		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, "", false)
 		return err
+
+	case gateway.OutCardPatch:
+		// F-46: in-place PATCH of a previously sent decision card.
+		// gtw.HandleAction emits this when a follow-up wants to
+		// disable the original choices and surface the outcome
+		// (e.g. "✅ 已选择 🔄 重试 — Retry failed: …"). ReplyTo
+		// is the bot-side message id assigned at OutCard time.
+		if msg.Card == nil {
+			return errors.New("feishu: OutCardPatch missing card payload")
+		}
+		if msg.ReplyTo == "" {
+			return errors.New("feishu: OutCardPatch missing ReplyTo (target bot message id)")
+		}
+		content, err := buildInteractiveCard(msg.Card)
+		if err != nil {
+			return err
+		}
+		return a.PatchMessage(ctx, msg.ReplyTo, content)
 
 	case gateway.OutToolStart:
 		// F-34: tool_start is posted to the user message
@@ -1922,60 +1950,174 @@ func toolOutput(m gateway.OutboundMessage) string {
 // but rendered as blank/garbage for the receipt card (the user
 // reported "feishu上没看到起效果" until we aligned with the Card
 // 2.0 envelope).
+// buildInteractiveCard converts one nightme Card into a Feishu
+// Card 2.0 JSON envelope. The legacy Options path renders a flat
+// primary-button list (kept for permission cards); F-46 adds the
+// Choices path with column_set equal-width layout for decision
+// cards. See docs/feat/F-46-interactive-cards.md §3.
 func buildInteractiveCard(c *gateway.Card) (string, error) {
+	if c == nil {
+		return "", errors.New("feishu: card is nil")
+	}
 	if c.RequestID == "" {
 		return "", errors.New("feishu: card missing request_id")
 	}
-	options := c.Options
-	if len(options) == 0 {
-		options = []string{"Allow", "Deny"}
-	}
-	body := c.Title
-	if c.Body != "" {
-		body = c.Body
-	}
-	// Sanitize the permission card body markdown. Permission card titles
-	// are plain_text (escaped by SDK) and don't need it, but the body
-	// uses lark_md rendering and shares the OutResult / OutThinking
-	// surface protections (URL / fence / image / heading).
-	body = SanitizeCardMarkdown(body)
-	actions := make([]map[string]any, 0, len(options))
-	for _, opt := range options {
-		v, _ := json.Marshal(map[string]string{
-			"request_id": c.RequestID,
-			"option":     opt,
-		})
-		actions = append(actions, map[string]any{
-			"tag":   "button",
-			"text":  map[string]any{"tag": "plain_text", "content": opt},
-			"type":  "primary",
-			"value": map[string]any{"key": string(v)},
-		})
-	}
-	// F-44 follow-up: prepend 🔐 to the title (channel decoration).
+
+	// F-46 §3.2: 🔐 prefix is permission-specific; other kinds
+	// render the raw title. Default Kind (zero value) is Permission
+	// to preserve the pre-F-46 behaviour for callers that haven't
+	// been migrated yet.
 	title := c.Title
-	if title != "" {
+	if c.Kind == gateway.CardKindPermission {
 		title = "🔐 " + title
 	}
+
+	// Header template: explicit HeaderColor wins; otherwise pick
+	// from Kind.
+	template := c.HeaderColor
+	if template == "" {
+		template = "blue"
+	}
+
+	// Body element: use Card.Body when set; fall back to Title for
+	// legacy permission cards that only populate Title.
+	body := c.Body
+	if body == "" {
+		body = c.Title
+	}
+	body = SanitizeCardMarkdown(body)
+
+	var elements []map[string]any
+	if body != "" {
+		elements = append(elements, map[string]any{
+			"tag":     "markdown",
+			"content": body,
+		})
+	}
+
+	buttons := buildCardButtons(c)
+	if len(buttons) > 0 {
+		if c.Kind == gateway.CardKindDecision {
+			elements = append(elements, buildColumnSet(buttons))
+		} else {
+			elements = append(elements, map[string]any{
+				"tag": "action", "actions": buttons,
+			})
+		}
+	}
+
 	card := map[string]any{
 		"schema": "2.0",
 		"config": map[string]any{"width_mode": "fill"},
 		"header": map[string]any{
 			"title":    map[string]any{"tag": "plain_text", "content": title},
-			"template": "blue",
+			"template": template,
 		},
-		"body": map[string]any{
-			"elements": []map[string]any{
-				{"tag": "markdown", "content": body},
-				{"tag": "action", "actions": actions},
-			},
-		},
+		"body": map[string]any{"elements": elements},
 	}
 	b, err := encodeCardJSON(card)
 	if err != nil {
-		return "", fmt.Errorf("feishu: encode permission card: %w", err)
+		return "", fmt.Errorf("feishu: encode card: %w", err)
 	}
 	return string(b), nil
+}
+
+// buildCardButtons turns the Card's Choices / Options / Action into
+// a slice of button action maps. F-46 §3.1: each button's `value` is
+// the {"action": btn.Action, "request_id": RequestID} envelope so
+// handleCardAction can route via the act:/gtw/<scenario> prefix.
+//
+// F-46 disabled-cards (PATCH rebuild after the user picks):
+//   - Chosen button: type="success" (filled green Feishu tint)
+//     + "✓" prefix to make the picked state unmistakable. Feishu
+//     still respects disabled=true on a chosen button, so the click
+//     is a no-op (no double-dispatch).
+//   - Unchosen buttons: type="default" (outline) + disabled=true
+//     (greyed-out look). Both styles include the full label so the
+//     user can read what each option does even when only an icon
+//     is visible.
+func buildCardButtons(c *gateway.Card) []map[string]any {
+	var buttons []map[string]any
+	addButton := func(label, action string, isChosen bool) {
+		valMap := map[string]string{
+			"action":     action,
+			"request_id": c.RequestID,
+		}
+		btnType := "default"
+		if isChosen {
+			// Highlight the chosen button with Feishu's "success"
+			// type (filled green) so the user sees the picked
+			// state at a glance. Disabled stays true on the
+			// chosen button so it can't be re-clicked.
+			btnType = "success"
+		}
+		btn := map[string]any{
+			"tag":   "button",
+			"text":  map[string]any{"tag": "plain_text", "content": label},
+			"type":  btnType,
+			"value": valMap,
+		}
+		if c.Disabled {
+			// F-46 §3.7: PATCH-rendered cards disable every button
+			// after the user has picked.
+			btn["disabled"] = true
+		}
+		buttons = append(buttons, btn)
+	}
+	for _, ch := range c.Choices {
+		label := ch.Label
+		if ch.Emoji != "" {
+			label = ch.Emoji + " " + label
+		}
+		isChosen := c.Disabled && c.ChosenChoiceEmoji != "" && ch.Emoji == c.ChosenChoiceEmoji
+		// Chosen button shows "✓" prefix so the picked state is
+		// unmistakable even at a glance. Unchosen buttons keep
+		// their normal label so the user can still read what each
+		// option does.
+		if isChosen && label != "" {
+			label = "✓ " + label
+		}
+		addButton(label, ch.Action, isChosen)
+	}
+	for _, opt := range c.Options {
+		// Legacy Options path: emit one button per option with
+		// action="opt:<option>" so a future F-47 select_static
+		// bridge can recognise it.
+		addButton(opt, "opt:"+opt, false)
+	}
+	if c.Action != "" && len(buttons) == 0 {
+		label := c.Title
+		if label == "" {
+			label = "Confirm"
+		}
+		addButton(label, c.Action, false)
+	}
+	return buttons
+}
+
+// buildColumnSet wraps a flat slice of button actions into the
+// F-46 / cc-connect equal-width column_set layout. 2 buttons get
+// flex_mode=bisect; 3+ use the default weighted flex.
+func buildColumnSet(buttons []map[string]any) map[string]any {
+	columns := make([]map[string]any, 0, len(buttons))
+	for _, btn := range buttons {
+		columns = append(columns, map[string]any{
+			"tag":              "column",
+			"width":            "weighted",
+			"weight":           1,
+			"vertical_align":   "center",
+			"horizontal_align": "center",
+			"elements":         []map[string]any{btn},
+		})
+	}
+	set := map[string]any{
+		"tag":     "column_set",
+		"columns": columns,
+	}
+	if len(buttons) == 2 {
+		set["flex_mode"] = "bisect"
+	}
+	return set
 }
 
 // encodeCardJSON serialises a card map to JSON with HTMLEscape
@@ -2725,6 +2867,26 @@ func isFeishuTerminalMessageCode(err error) bool {
 	return false
 }
 
+// SendCard implements channel.Channel (F-46). Builds an interactive-
+// card payload from msg.Card via buildInteractiveCard and forwards
+// to the legacy (chatID, content, rootID, replyInThread) SendCard
+// helper. Returns the bot-side message id assigned by Feishu; empty
+// string + nil on transient errors that the SDK returns without an
+// id.
+func (a *Adapter) SendCard(ctx context.Context, msg gateway.OutboundMessage) (string, error) {
+	if msg.Card == nil {
+		return "", errors.New("feishu: SendCard requires msg.Card")
+	}
+	if msg.Card.RequestID == "" {
+		msg.Card.RequestID = fmt.Sprintf("%s:%d", msg.ChatID, time.Now().UnixNano())
+	}
+	content, err := buildInteractiveCard(msg.Card)
+	if err != nil {
+		return "", err
+	}
+	return a.sendCardContent(ctx, msg.ChatID, content, "", false)
+}
+
 // SendCard posts an interactive card and returns the created message
 // ID. The content must be a JSON-serialized card envelope
 // ({"card": {...}}) — see buildInteractiveCard / buildReceiptCard
@@ -2749,7 +2911,7 @@ func isFeishuTerminalMessageCode(err error) bool {
 // — the card body shows inline in main chat with a reply quote header
 // AND in the Details / Thread side panel. The orphan path (rootID="")
 // falls back to top-level Create (ReplyInChat).
-func (a *Adapter) SendCard(ctx context.Context, chatID, content, rootID string, replyInThread bool) (string, error) {
+func (a *Adapter) sendCardContent(ctx context.Context, chatID, content, rootID string, replyInThread bool) (string, error) {
 	if strings.TrimSpace(chatID) == "" {
 		return "", errors.New("feishu: chat_id is required")
 	}
@@ -2759,6 +2921,14 @@ func (a *Adapter) SendCard(ctx context.Context, chatID, content, rootID string, 
 	msgID, err := a.sendContent(ctx, chatID, larkim.MsgTypeInteractive, content, rootID, replyInThread)
 	a.logOutgoing("send_card", chatID, msgID, err)
 	return msgID, err
+}
+
+// SendCardForReceipt satisfies the receiptBot interface used by
+// rolling-log receipts (see receipt.go). It exposes the legacy
+// (chatID, content, rootID, replyInThread) signature the receipts
+// rely on, separate from the F-46 channel.Channel.SendCard method.
+func (a *Adapter) SendCardForReceipt(ctx context.Context, chatID, content, rootID string, replyInThread bool) (string, error) {
+	return a.sendCardContent(ctx, chatID, content, rootID, replyInThread)
 }
 
 // PatchMessage replaces the entire body of an existing message with
@@ -3006,6 +3176,110 @@ func (a *Adapter) onMessage(ctx context.Context, event *larkim.P2MessageReceiveV
 	return a.handleMessage(ctx, event)
 }
 
+// handleReactionCreated is the SDK callback for
+// `im.message.reaction.created_v1`. It translates the Feishu
+// event into an InboundMessage with msg.Reaction set, then
+// pushes the message onto the incoming channel where the
+// gateway dispatcher picks it up and routes to
+// ChatSession.HandleAction.
+//
+// F-45 §3.5: this is the only path through which user emoji
+// reactions reach the gtw draft executor.
+//
+// We intentionally do NOT log every reaction at info level —
+// reactions are high-frequency (especially on busy threads)
+// and would dominate the structured log. Debug level is enough
+// for diagnostics; the gateway + gtw layers log consumed
+// reactions themselves.
+func (a *Adapter) handleReactionCreated(ctx context.Context, event *larkim.P2MessageReactionCreatedV1) error {
+	if event == nil || event.Event == nil {
+		return nil
+	}
+	ev := event.Event
+
+	// The SDK exposes message_id / emoji / user_id but not
+	// chat_id (Feishu v2 reaction event v3 puts chat_id in the
+	// raw envelope, not the structured event). We pull it from
+	// Body — see chatID extraction below.
+	var (
+		messageID string
+		emoji     string
+		userID    string
+	)
+	if ev.MessageId != nil {
+		messageID = *ev.MessageId
+	}
+	if ev.ReactionType != nil && ev.ReactionType.EmojiType != nil {
+		emoji = *ev.ReactionType.EmojiType
+	}
+	if ev.UserId != nil {
+		if ev.UserId.OpenId != nil {
+			userID = *ev.UserId.OpenId
+		} else if ev.UserId.UserId != nil {
+			userID = *ev.UserId.UserId
+		} else if ev.UserId.UnionId != nil {
+			userID = *ev.UserId.UnionId
+		}
+	}
+	// chat_id lives at the top level of the JSON envelope in
+	// the SDK's Body field (not in any typed struct field).
+	// Parse it once here rather than plumbing a generic raw
+	// access path through the gateway layer.
+	chatID := extractReactionChatID(event)
+
+	if messageID == "" || chatID == "" {
+		a.logger.Debug("feishu: reaction event missing message_id or chat_id; dropping",
+			"message_id", messageID, "chat_id", chatID, "emoji", emoji)
+		return nil
+	}
+
+	msg := channel.Message{
+		ChatID: chatID,
+		// Text is empty for reaction events; the discriminator
+		// is msg.Reaction != nil downstream.
+		Text: "",
+		// HasMention is irrelevant for reactions but we set it
+		// to true so the WatchMode gate never silently drops a
+		// reaction — reactions are user-initiated signals that
+		// should always reach the handler.
+		HasMention: true,
+		Reaction: &gateway.ReactionEvent{
+			TargetMsgID: messageID,
+			Emoji:       emoji,
+			UserID:      userID,
+			ChatID:      chatID,
+		},
+	}
+
+	// Mirror the publish path used by handleMessage so the
+	// reaction enters the same incoming channel. The SDK calls
+	// us on its own goroutine; ctx may already be cancelled by
+	// the time we get here — fall back to a fresh background
+	// context for the channel push, exactly like handleMessage
+	// does.
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.logInbound(msg)
+	a.health.recordInbound(time.Now(), chatID, "reaction")
+	a.publishMu.Lock()
+	defer a.publishMu.Unlock()
+	a.mu.RLock()
+	if a.stopped || a.incoming == nil {
+		a.mu.RUnlock()
+		return nil
+	}
+	in := a.incoming
+	done := a.done
+	a.mu.RUnlock()
+	select {
+	case in <- msg:
+	case <-ctx.Done():
+	case <-done:
+	}
+	return nil
+}
+
 // handleCardAction is the entry point for the card.action.trigger
 // callback. It is wired in via OnP2CardActionTrigger at construction
 // and paired with the matching callback registration in
@@ -3022,20 +3296,104 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *larkcallback.Card
 		return &larkcallback.CardActionTriggerResponse{}, nil
 	}
 	req := event.Event
-	choice := "unknown"
-	if req.Action != nil {
-		if req.Action.Option != "" {
-			choice = req.Action.Option
-		} else if req.Action.Name != "" {
-			choice = req.Action.Name
+
+	// F-46 §3.1: the action string lives in event.Event.Action.Value
+	// under key "action". Fall back to event.Event.Action.Option for
+	// select_static components (the chosen option string), then to
+	// Name for legacy forms.
+	actionStr := ""
+	if req.Action != nil && req.Action.Value != nil {
+		if v, ok := req.Action.Value["action"].(string); ok {
+			actionStr = v
 		}
 	}
+	if actionStr == "" && req.Action != nil && req.Action.Option != "" {
+		actionStr = "opt:" + req.Action.Option
+	}
+	if actionStr == "" && req.Action != nil {
+		actionStr = req.Action.Name
+	}
+
+	switch {
+	case strings.HasPrefix(actionStr, "act:"):
+		return a.handleActCardAction(ctx, event, actionStr)
+	}
+
+	// Unknown / no prefix — fall back to the F-46 prototype log so
+	// future extensions can still see the click in stdout.
 	log.Printf("feishu: card action received chat=%s action=%s",
-		req.Context.OpenChatID, choice)
+		req.Context.OpenChatID, actionStr)
 	return &larkcallback.CardActionTriggerResponse{
 		Toast: &larkcallback.Toast{
 			Type:    "info",
-			Content: "Recorded: " + choice,
+			Content: "Recorded: " + actionStr,
+		},
+	}, nil
+}
+
+// handleActCardAction is F-46 §3.6: when the user clicks an
+// `act:/gtw/<scenario>` button, synthesise a chatsession.ReactionEvent
+// pointing at the bot's card message id, push it onto the inbound
+// stream, and let the existing action-handler pipeline do the rest.
+// The toast confirms the click immediately; the result of the gtw
+// dispatch (PATCH the card disabled) lands asynchronously.
+func (a *Adapter) handleActCardAction(
+	ctx context.Context,
+	event *larkcallback.CardActionTriggerEvent,
+	actionStr string,
+) (*larkcallback.CardActionTriggerResponse, error) {
+	if event == nil || event.Event == nil || event.Event.Context == nil {
+		return nil, nil
+	}
+	emoji, ok := gtw.ActionLookup(actionStr)
+	if !ok {
+		return &larkcallback.CardActionTriggerResponse{
+			Toast: &larkcallback.Toast{Type: "warning", Content: "未知操作: " + actionStr},
+		}, nil
+	}
+
+	chatID := event.Event.Context.OpenChatID
+	botMsgID := event.Event.Context.OpenMessageID
+	userID := ""
+	if event.Event.Operator != nil {
+		userID = event.Event.Operator.OpenID
+	}
+	if chatID == "" || botMsgID == "" {
+		return nil, nil
+	}
+
+	synthetic := channel.Message{
+		ChatID: chatID,
+		UserID: userID,
+		Text:   "",
+		// HasMention is irrelevant for reactions but we set it
+		// to true so the WatchMode gate never silently drops a
+		// reaction — reactions are user-initiated signals that
+		// should always reach the handler.
+		HasMention: true,
+		MessageID:  botMsgID,
+		Reaction: &gateway.ReactionEvent{
+			TargetMsgID: botMsgID,
+			Emoji:       string(emoji),
+			UserID:      userID,
+			ChatID:      chatID,
+		},
+	}
+	select {
+	case a.incoming <- synthetic:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+		// inbound 满：记 warn 后继续。生产 daemon inbound 128 buffer 不会满，
+		// 仅在测试 / 极端负载下可能触发。
+		a.logger.Warn("feishu: card action inbound full, dropping",
+			"chat_id", chatID, "action", actionStr)
+	}
+
+	return &larkcallback.CardActionTriggerResponse{
+		Toast: &larkcallback.Toast{
+			Type:    "info",
+			Content: "✅ 已选择 " + string(emoji),
 		},
 	}, nil
 }
@@ -3097,6 +3455,35 @@ func stringValue(value *string) string {
 		return ""
 	}
 	return *value
+}
+
+// extractReactionChatID pulls the chat_id from the raw JSON
+// envelope of a `im.message.reaction.created_v1` event. The
+// typed SDK struct (P2MessageReactionCreatedV1Data) does not
+// expose chat_id, but the underlying JSON does — it's a sibling
+// of `event` in the wrapper body.
+//
+// The expected shape is:
+//
+//	{ "event": { "message_id": "...", ... }, "chat_id": "oc_xxx" }
+//
+// (Feishu v2 reaction v3 envelope — verified against the SDK
+// source v3.9.9.)
+//
+// Returns "" if the event, its body, or the chat_id field is
+// missing or malformed. The caller treats "" as a drop.
+func extractReactionChatID(event *larkim.P2MessageReactionCreatedV1) string {
+	if event == nil || len(event.Body) == 0 {
+		return ""
+	}
+	// We only need chat_id; avoid unmarshalling the whole event.
+	var wrap struct {
+		ChatID string `json:"chat_id"`
+	}
+	if err := json.Unmarshal(event.Body, &wrap); err != nil {
+		return ""
+	}
+	return wrap.ChatID
 }
 
 func splitLongMessage(text string, maxBytes int) []string {

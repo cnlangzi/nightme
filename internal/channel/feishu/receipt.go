@@ -59,11 +59,13 @@ type receiptBot interface {
 	AddReaction(ctx context.Context, msgID, emoji string) (string, error)
 	UpdateMessage(ctx context.Context, messageID, text string) error
 	SendMessageText(ctx context.Context, chatID, text, rootID string, replyInThread bool) (string, error)
-	// SendCard posts a new interactive card and returns its message ID.
-	// Used on the FIRST render of a receipt (no cardMsgID yet).
-	// v1.3.x (§13.10): rootID is the user message id to thread
-	// the cold-start card to.
-	SendCard(ctx context.Context, chatID, cardJSON, rootID string, replyInThread bool) (string, error)
+	// SendCardForReceipt posts a new interactive card and returns its
+	// message ID. Used on the FIRST render of a receipt (no cardMsgID
+	// yet). v1.3.x (§13.10): rootID is the user message id to thread
+	// the cold-start card to. Renamed from SendCard in F-46 to
+	// disambiguate from the channel.Channel.SendCard interface
+	// method that takes a gateway.OutboundMessage.
+	SendCardForReceipt(ctx context.Context, chatID, cardJSON, rootID string, replyInThread bool) (string, error)
 	// PatchMessage replaces the body of an existing message in place
 	// (Feishu PATCH /im/v1/messages/{id}). Used on every render after
 	// the first.
@@ -396,7 +398,7 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 		// F-37: replyInThread=false — the cold-start card IS the
 		// pinned main-chat answer; thread-only would leave the main
 		// chat empty until the receipt PATCHes happen.
-		msgID, sendErr := r.bot.SendCard(ctx, r.chatID, body, r.userMsgID, false)
+		msgID, sendErr := r.bot.SendCardForReceipt(ctx, r.chatID, body, r.userMsgID, false)
 		if sendErr != nil {
 			r.logger.Warn("feishu receipt: create card failed",
 				"err", sendErr, "state", r.promptState)

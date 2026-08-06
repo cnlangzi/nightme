@@ -130,6 +130,17 @@ type ChatSession struct {
 	// nil = no observer; emitMessageState becomes a no-op.
 	onMessageState func(chatID, userMsgID string, state agent.MessageState)
 
+	// onReaction is the runtime-installed callback fired when a
+	// user adds an emoji reaction to a message in this chat
+	// (F-45 §3.5). Set once at startup. The handler decides
+	// whether the reaction was a gtw-draft confirmation (and
+	// dispatches to gtw.HandleAction) or a no-op (e.g. a
+	// thumbs-up on a regular bot reply). Returning false lets
+	// the caller fall through to future handlers.
+	//
+	// nil = no observer; HandleAction becomes a no-op.
+	onReaction func(ctx context.Context, ev ReactionEvent) (consumed bool)
+
 	// currentTurnUserMsgID is the single anchor for the in-flight
 	// (or just-completed) agent turn. Updated by
 	// defaultFlushHookLocked when InputBuffer flushes; consumed
@@ -652,6 +663,62 @@ func (cs *ChatSession) EmitMessageState(userMsgID string, state agent.MessageSta
 		return
 	}
 	h(chatID, userMsgID, state)
+}
+
+// SetActionHandler installs the callback fired when a user
+// adds an emoji reaction to a message in this chat (F-45 §3.5).
+// Set once at startup; nil clears.
+//
+// The handler is the per-chat reaction router. Its job is to
+// decide whether the reaction is a gtw-draft confirmation (and
+// dispatch to gtw.HandleAction) or a no-op (e.g. a thumbs-up
+// on a regular bot reply). Returning false lets the caller
+// fall through to future handlers — v1 has no fallthrough target
+// but the contract is in place for F-31+ extensions.
+func (cs *ChatSession) SetActionHandler(h func(ctx context.Context, ev ReactionEvent) (consumed bool)) {
+	slog.Default().Warn("F-46 debug: ChatSession.SetActionHandler entry",
+		"chat_id", cs.ChatID,
+		"handler_nil", h == nil)
+	cs.mu.Lock()
+	cs.onReaction = h
+	cs.mu.Unlock()
+}
+
+// ActionHandler returns the installed reaction callback, or
+// nil if none has been set. Exposed for tests.
+func (cs *ChatSession) ActionHandler() func(ctx context.Context, ev ReactionEvent) (consumed bool) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.onReaction
+}
+
+// HandleAction dispatches one user-emoji reaction to the
+// installed handler. The gateway layer calls this from
+// DispatchInbound (or its successor) when an InboundMessage
+// arrives with msg.Reaction set. Returns true when the
+// reaction was consumed (handler decided to act on it).
+//
+// Safe to call without any handler installed — returns false
+// (no-op) when onReaction is nil.
+func (cs *ChatSession) HandleAction(ctx context.Context, ev ReactionEvent) bool {
+	cs.mu.RLock()
+	h := cs.onReaction
+	cs.mu.RUnlock()
+	if h == nil {
+		slog.Default().Warn("F-46 debug: ChatSession.HandleAction onReaction is nil",
+			"chat_id", cs.ChatID,
+			"target_msg_id", ev.TargetMsgID,
+			"emoji", ev.Emoji)
+		return false
+	}
+	slog.Default().Warn("F-46 debug: ChatSession.HandleAction entry",
+		"chat_id", cs.ChatID,
+		"target_msg_id", ev.TargetMsgID,
+		"emoji", ev.Emoji)
+	consumed := h(ctx, ev)
+	slog.Default().Warn("F-46 debug: ChatSession.HandleAction return",
+		"consumed", consumed)
+	return consumed
 }
 
 // emitMessageStateForCurrentTurn fires onMessageState for the

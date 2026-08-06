@@ -114,3 +114,13 @@ func (cs *ChatSession) GTWDraftCount() int {
 	return len(cs.gtwDrafts)
 }
 
+// ClearGTWDrafts drops every pending draft. Used by `/gtw test reset`
+// (debug) and any future "abort all cards" path. Does not touch
+// gtwContext — call ClearGTWContext separately when both must go.
+func (cs *ChatSession) ClearGTWDrafts() {
+	cs.mu.Lock()
+	cs.gtwDrafts = make(map[string]*GTWDraft)
+	cs.lastInteractionAt = time.Now()
+	cs.mu.Unlock()
+}
+

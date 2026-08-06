@@ -314,6 +314,18 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// inverted at the call site.
 	gwImpl := gateway.New(messageDispatcher).(*gateway.Router)
 	gateway.RegisterChatSessionCommands(gwImpl, mgr, ch, cfg.Primary)
+
+	// F-45/F-46: /gtw fix slash command + reaction/action routing.
+	// Token auth is borrowed from `gh` / `glab` — see
+	// internal/gtw/platform.go. RegisterGTWAction wires decision-card
+	// emoji/button clicks onto ChatSession.HandleAction.
+	gtwDeps := gtw.HandlerDeps{
+		Git:         gtw.ExecGitRunner{},
+		NewPlatform: gtw.NewPlatformClient,
+	}
+	gateway.RegisterGTW(gwImpl, mgr, ch, cfg.Primary, gtwDeps)
+	gateway.RegisterGTWAction(mgr, gtwDeps)
+
 	gwImpl.AttachChannels(ch)
 
 	// F-watch §3.1.1: install the per-chat WatchMode resolver so
@@ -327,6 +339,46 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 			return 0, false
 		}
 		return cs.WatchMode(), true
+	})
+
+	// F-45 §3.5: install the action handler so DispatchInbound
+	// routes msg.Reaction (and future msg.Action for card button
+	// clicks) to ChatSession.HandleAction instead of treating
+	// them as empty-text messages. The handler is a thin
+	// trampoline: it looks up the ChatSession via mgr and
+	// forwards the event. Without this wiring the reaction
+	// pipeline is dead end-to-end (gtw decision cards can't be
+	// acted on by user emoji clicks).
+	slog.Default().Warn("F-46 debug: production WithActionHandler installed")
+	gwImpl.WithActionHandler(func(ctx context.Context, msg *gateway.InboundMessage) bool {
+		slog.Default().Warn("F-46 debug: production action handler closure fired",
+			"has_reaction", msg != nil && msg.Reaction != nil,
+			"has_action", msg != nil && msg.Action != nil)
+		if msg == nil {
+			return false
+		}
+		cs := mgr.Get(msg.ChatID)
+		if cs == nil {
+			slog.Default().Warn("F-46 debug: production action handler: cs nil, returning false")
+			return false
+		}
+		// Reactions are the only event the runtime wires up
+		// today; card button clicks (msg.Action) currently go
+		// through the same path for forward-compat. F-25 / F-37
+		// can split them out when the permission-card path is
+		// added.
+		if msg.Reaction != nil {
+			consumed := cs.HandleAction(ctx, chatsession.ReactionEvent{
+				TargetMsgID: msg.Reaction.TargetMsgID,
+				Emoji:       msg.Reaction.Emoji,
+				UserID:      msg.Reaction.UserID,
+				ChatID:      msg.Reaction.ChatID,
+			})
+			slog.Default().Warn("F-46 debug: production action handler: cs.HandleAction returned",
+				"consumed", consumed)
+			return consumed
+		}
+		return false
 	})
 
 	// WithOnCreate fires for both restored (RestoreFromRegistry)

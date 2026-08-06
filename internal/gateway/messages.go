@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gtw"
 )
 
@@ -84,6 +85,17 @@ type InboundMessage struct {
 	// Action is non-nil when this inbound message represents a user
 	// interaction with a previously-sent interactive card.
 	Action *ActionPayload
+	// Reaction is non-nil when this inbound message represents a
+	// user-emoji reaction on a previously-sent message. Channels
+	// translate their native reaction-created event into this
+	// shape; the gateway routes to ChatSession.HandleAction,
+	// which checks gtwDrafts first (F-45 §3.5) and may fall
+	// through to the F-31 MessageState FSM for non-gtw reactions.
+	//
+	// Action and Reaction are mutually exclusive in practice: a
+	// reaction is an emoji click on a message; an Action is a
+	// card-button click. Both share the same inbound pipeline.
+	Reaction *ReactionEvent
 	// Raw carries the channel-native payload for handlers that
 	// genuinely need it.
 	Raw any
@@ -169,6 +181,23 @@ type ActionPayload struct {
 	Raw any
 }
 
+// ReactionEvent is the abstract shape of a user-emoji reaction on
+// a previously-sent message. Channels build this from their
+// native reaction-created event; the gateway forwards to
+// ChatSession.HandleAction which consults the per-chat
+// ActionHandler installed at runtime.
+//
+// F-45 §3.2: this is the inbound counterpart of the bot's
+// AddReaction outbound API. Emoji is the raw unicode form
+// ("✅", "🆕", "🔗", "❌", "🔄", "🤝"); semantic interpretation
+// is the per-draft handler's job.
+//
+// The type is declared in internal/chatsession (which owns the
+// per-chat handler machinery); the alias below keeps the
+// gateway-package import path working without creating an
+// import cycle (gateway → chatsession is the only direction).
+type ReactionEvent = chatsession.ReactionEvent
+
 // OutboundKind tags the shape of an OutboundMessage. Channels
 // decide whether/how to render each kind; they may drop or
 // substitute kinds their UI cannot represent.
@@ -245,6 +274,13 @@ const (
 	// current full task snapshot, so an empty Items slice is a
 	// valid "clear the checklist" signal.
 	OutTaskUpdate
+
+	// OutCardPatch (F-46) replaces the body of an existing
+	// interactive card message in place (Feishu PATCH). Used by
+	// gtw.HandleAction follow-ups to disable the original decision
+	// card after the user has picked. ReplyTo carries the bot-side
+	// message id to PATCH; Card holds the new payload.
+	OutCardPatch
 )
 
 // String renders OutboundKind for log lines.
@@ -276,6 +312,8 @@ func (k OutboundKind) String() string {
 		return "task_create"
 	case OutTaskUpdate:
 		return "task_update"
+	case OutCardPatch:
+		return "card_patch"
 	}
 	return "unknown"
 }
@@ -462,6 +500,12 @@ type ToolInfo struct {
 
 // Card is an interactive permission card or any other card that
 // requires the user's choice.
+//
+// F-46: kind + choices + action encoding (see docs/feat/F-46-
+// interactive-cards.md). The legacy Options field still works for
+// callers that just want a flat list of button labels — build-
+// InteractiveCard renders Options as primary buttons when Choices
+// is empty.
 type Card struct {
 	// Title is the short headline (e.g., "Permission needed").
 	Title string
@@ -473,6 +517,65 @@ type Card struct {
 	Options []string
 	// RequestID is the correlation token.
 	RequestID string
+
+	// F-46 fields.
+	// Kind drives header decoration: CardKindPermission gets a
+	// 🔐 prefix and the default blue template; CardKindDecision
+	// renders the raw title with no prefix.
+	Kind CardKind
+	// Choices is the F-46 structured form of Options. Each choice
+	// emits one button; the action string is encoded into the
+	// button's `value` field with the F-46 {"action":..., "request_id":...}
+	// envelope so handleCardAction can route it back into the
+	// gtw pipeline via the act:/gtw/<scenario> prefix.
+	Choices []CardChoice
+	// Action is a single-button shortcut: when set, the card emits
+	// one primary button with this action string (used for simple
+	// "confirm" cards where Options/Choices would be overkill).
+	Action string
+	// Disabled disables every button on the card. PATCH-rendered
+	// cards use this to grey out the original choices once the
+	// user has picked one.
+	Disabled bool
+	// ChosenChoiceEmoji is the emoji of the button the user
+	// picked. When set together with Disabled, the chosen button
+	// is rendered with a "✅ 已<original-label>" label so the
+	// user sees the click result inline in the card (the toast
+	// position is controlled by Feishu and not always visible).
+	ChosenChoiceEmoji string
+	// HeaderColor overrides the default colour template
+	// (blue / red / green / grey / etc.). Empty string = pick
+	// from Kind.
+	HeaderColor string
+}
+
+// CardKind tags the semantic shape of a Card. Drives header
+// decoration and the 🔐 prefix policy.
+type CardKind int
+
+const (
+	// CardKindPermission is the original permission card. Header
+	// is prefixed with 🔐 and uses the blue template. v1 only
+	// ships this kind for /gtw permission flows.
+	CardKindPermission CardKind = iota
+	// CardKindDecision is a gtw decision card (§5.3.1 / §5.3.3).
+	// No 🔐 prefix; header is the title verbatim; buttons are
+	// rendered as an equal-width column_set.
+	CardKindDecision
+	// CardKindPreview is /gtw test card — non-interactive preview
+	// only; no buttons, no actions.
+	CardKindPreview
+)
+
+// CardChoice is one button on a F-46 decision card. The action
+// string follows the cc-connect convention: `act:/gtw/<scenario>`
+// for action dispatch (handled in F-46 main work; for the
+// prototype the action is encoded into the button value so a
+// future handleCardAction can read it back).
+type CardChoice struct {
+	Emoji  string // optional leading emoji (e.g. "🆕"); rendered as part of the button text
+	Label  string // visible button text
+	Action string // value sent back via card.action.trigger (e.g. "act:/gtw/branch-newv2")
 }
 
 // MessageStatePayload is the OutboundMessage payload for

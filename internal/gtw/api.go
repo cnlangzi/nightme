@@ -12,7 +12,7 @@
 //   - Zero new OutboundKind: all output is plain text (the caller wraps
 //     it into whatever OutboundKind the channel wants).
 //   - The reaction-routing entry point is one extra branch in
-//     ChatSession.HandleReaction (gtwDrafts checked before the F-31 FSM).
+//     ChatSession.HandleAction (gtwDrafts checked before the F-31 FSM).
 //   - Credentials are borrowed from `gh auth token` / `glab auth status`.
 //     nightme never persists its own tokens.
 //

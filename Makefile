@@ -19,6 +19,10 @@ build: ## Compile binary to bin/nightme with version metadata.
 	@mkdir -p bin
 	$(GO) build -ldflags '$(LDFLAGS)' -o $(BINARY) ./cmd/nightme
 
+.PHONY: restart
+restart: build ## Build and restart nightme daemon.
+	$(BINARY) restart
+
 .PHONY: test
 test: ## Run all tests with race detector.
 	$(GO) test -race ./...

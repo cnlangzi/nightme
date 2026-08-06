@@ -9,7 +9,9 @@
 > knows nothing about receipts; each Channel picks its own state
 > shape and storage form.
 >
-> **v1.3.x F-thread-route 收窄 scope**(2026-08-04):rolling-log receipt card 收窄到只承载 `OutText` / `OutResult` / `OutInit` / `OutUsage` 派生的 entry。`OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCompaction` **不再进 receipt**,由 Feishu adapter 路由到 user message 的 thread reply(详见 [`F-37-tool-thread-routing.md`](./F-37-tool-thread-routing.md) + [`channel/feishu.md` §13.12](../channel/feishu.md))。Receipt card body 元素数从 ~30 降到 ≤5,Feishu 50 element 上限不再是个问题。
+> **v1.3.x F-thread-route 收窄 scope**(2026-08-04):rolling-log receipt card 收窄到只承载 `OutText` / `OutResult` / `OutInit` / `OutUsage` 派生的 entry。`OutThinking` / `OutToolStart` / `OutToolEnd` **不再进 receipt**,由 Feishu adapter 路由到 user message 的 thread reply(详见 [`F-37-tool-thread-routing.md`](./F-37-tool-thread-routing.md) + [`channel/feishu.md` §13.12](../channel/feishu.md))。Receipt card body 元素数从 ~30 降到 ≤5,Feishu 50 element 上限不再是个问题。
+>
+> **v1.3.x F-49 行为变更**(2026-08-06):`OutCompaction` kind 整条 path 删除(详见 [`F-49-compaction-counter.md`](./F-49-compaction-counter.md) + [`SPEC §0.13`](../SPEC.md) + [`channel/feishu.md` §13.25](../channel/feishu.md))。Runtime handler 不再产生 `OutboundMessage{Kind: OutCompaction}`,Feishu adapter 不再有 `Send` case `OutCompaction`,receipt `eventToEntry` / `Append` 不再有 EventCompaction 分支。本文档关于 OutCompaction 的描述(§2.4 silent PATCH、§3.1.1 thread reply 行)全部作废;`F-25 §3.1.1` 列表删除 `OutCompaction → postThreadReply(... body)` 一行。
 >
 > **This doc is the canonical reference for the v1.3 rolling-log UX.**
 > For the InputBuffer FSM (idle/busy, separate concern owned by
@@ -30,7 +32,7 @@ the turn ends with `EventDone` / `EventError`. The user should see
 **one coherent visual artifact** for that turn — not a flurry of
 separate messages.
 
-**v1.3.x F-thread-route 收窄**:Receipt card 不再承载 agent turn 的全部 event,只承载**最终答复相关的 entry**(`OutText` / `OutResult` / `OutInit` / `OutUsage`)。中间过程(`OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCompaction`)由 Channel 路由到独立 thread reply / 折叠 section / DOM 子节点(Feishu 选择 thread reply + 类型感知摘要,详见 [`F-37-tool-thread-routing.md`](./F-37-tool-thread-routing.md))。Receipt card body 元素数从 ~30 降到 ≤5,Feishu 50 element 上限不再是个问题。
+**v1.3.x F-thread-route 收窄**:Receipt card 不再承载 agent turn 的全部 event,只承载**最终答复相关的 entry**(`OutText` / `OutResult` / `OutInit` / `OutUsage`)。中间过程(`OutThinking` / `OutToolStart` / `OutToolEnd`)由 Channel 路由到独立 thread reply / 折叠 section / DOM 子节点(Feishu 选择 thread reply + 类型感知摘要,详见 [`F-37-tool-thread-routing.md`](./F-37-tool-thread-routing.md))。Receipt card body 元素数从 ~30 降到 ≤5,Feishu 50 element 上限不再是个问题。
 
 The **rolling-log receipt** is that artifact (v1.3.x scope):
 
@@ -121,7 +123,8 @@ While each Channel can pick its own storage form, the
 | `OutboundMessage{Kind: OutMessageState, Meta: {state}}` | AddReaction / DOM state / status emoji on the user's message |
 | `OutboundMessage{Kind: OutText, ReplyTo: ""}` | Orphan: render as plain text (no anchor) |
 | `OutboundMessage{Kind: OutCard}` | Send as an interactive card (permission prompts etc.) — thread reply if ReplyTo set |
-| `OutboundMessage{Kind: OutThinking\|OutToolStart\|OutToolEnd\|OutCompaction}` | **v1.3.x F-thread-route**: Channel-specific routing. Feishu: post as plain text thread reply (rootID = msg.ReplyTo). Other Channels: pick their own routing (fold into receipt / separate message / drop). See [`F-37-tool-thread-routing.md`](./F-37-tool-thread-routing.md) §2.1. |
+| `OutboundMessage{Kind: OutThinking\|OutToolStart\|OutToolEnd}` | **v1.3.x F-thread-route**: Channel-specific routing. Feishu: post as plain text thread reply (rootID = msg.ReplyTo). Other Channels: pick their own routing (fold into receipt / separate message / drop). See [`F-37-tool-thread-routing.md`](./F-37-tool-thread-routing.md) §2.1. |
+| ~~`OutboundMessage{Kind: OutCompaction}`~~ | ~~**v1.3.x F-thread-route**: Feishu: `postThreadReply(... "✶ Compacting conversation…")`~~ | **F-49 删除**：`OutCompaction` kind 整条 path 删除(runtime 不再产生此 Outbound)。详见 [`F-49 §1.9`](./F-49-compaction-counter.md)。|
 
 > **v1.3.x 变更说明**: 折叠方案被 §13.12 反转,`OutThinking` / `OutToolStart` / `OutToolEnd` 不再 fold 进 receipt(走 thread + 类型感知摘要)。Receipt card scope 收窄到 OutText / OutResult / OutInit / OutUsage。
 
@@ -145,7 +148,7 @@ While each Channel can pick its own storage form, the
   drops oldest entries beyond the byte / count budget; card header
   shows "…(前 N 条已省略)"
 - **v1.3.x F-thread-route**: receipt card body 只承载 OutText / OutResult /
-  OutInit / OutUsage 派生的 entry;thinking/tool/compaction 走 §3.1.1 thread
+  OutInit / OutUsage 派生的 entry;thinking/tool 走 §3.1.1 thread
   reply path(不进入 receipt)。Receipt card body 元素数从 ~30 降到 ≤5,
   Feishu 50 element 上限不再是个问题。
 
@@ -156,7 +159,7 @@ While each Channel can pick its own storage form, the
 - `OutThinking` → `postThreadReply(ctx, chatID, rootID=userMsgID, body)` (plain text)
 - `OutToolStart` → `postThreadReply(... body)` (plain text, args inline)
 - `OutToolEnd` → 经 `summarizeToolEnd(name, args, output, err)` 生成单行摘要 → `postThreadReply(... body)`
-- `OutCompaction` → `postThreadReply(... body)` (✶ Compacting...)
+- ~~`OutCompaction` → `postThreadReply(... body)` (✶ Compacting...)~~ → **F-49 删除**:`OutCompaction` kind 整条 path 删除。runtime handler 在 EventCompaction 上只调 `s.RecordCompaction()` 累加计数,不产生 Outbound;channel 不发任何"压缩进行中"marker。详见 [`F-49 §1.9`](./F-49-compaction-counter.md)。
 
 底层走 `SendMessageText(ctx, chatID, text, rootID)` → `sendContent` → `sendViaLarkReply`(POST `/im/v1/messages/{rootID}/reply`,§13.10 已落地)。
 
@@ -168,12 +171,12 @@ While each Channel can pick its own storage form, the
   `OutboundMessage{ReplyTo: userMsgID}` posts the thread root;
   subsequent events post thread replies or edit the root via
   `chat.update`.
-  - **v1.3.x**: thinking/tool/compaction 决策自决 —— 可走 Slack Block Kit
+  - **v1.3.x**: thinking/tool 决策自决 —— 可走 Slack Block Kit
     的折叠 section、可走独立 thread reply、可 drop。**不**复制 Feishu 的 emoji 摘要
 - Web: maintain a `Map<userMsgID, DOMElement>` keyed by
   `data-user-msg-id`. Append events as child nodes; patch parent
   on terminal state.
-  - **v1.3.x**: thinking/tool/compaction 决策自决 —— DOM 子节点 + 折叠、可独立子面板、可 drop
+  - **v1.3.x**: thinking/tool 决策自决 —— DOM 子节点 + 折叠、可独立子面板、可 drop
 
 ## 4. Failure Modes
 
@@ -237,4 +240,4 @@ out of scope for v1.3).
 | v1.0 / v1.1 | Receipt FSM owned by Gateway (`internal/gateway.CreateReceipt / UpdateReceipt / DisposeReceipt`). Channel painted state transitions. Worked for Feishu; mismatched Slack / Web abstractions. |
 | v1.2 | Receipt FSM temporarily disabled; daemon sent plain `OutText` (no card UX). Documented as "known gap" in CHANGELOG. |
 | **v1.3** | **Receipt FSM removed from Gateway entirely.** Receipt is now a Channel-internal object keyed by `userMsgID`. Gateway stamps `OutboundMessage.ReplyTo = currentTurnUserMsgID`; each Channel routes + PATCHes its own receipt. "Abstract stays abstract, concrete stays concrete" principle applied throughout. |
-| **v1.3.x (F-thread-route)** | **Receipt scope 收窄**: receipt card body 不再承载全部 event,只承载 OutText / OutResult / OutInit / OutUsage 派生的 entry。OutThinking / OutToolStart / OutToolEnd / OutCompaction 路由到 Channel 自治的 thread reply(Feishu 选 thread + 类型感知摘要)。Card body 元素数从 ~30 降到 ≤5。详见 [`F-37-tool-thread-routing.md`](./F-37-tool-thread-routing.md) + [`channel/feishu.md` §13.12](../channel/feishu.md)。 |
+| **v1.3.x (F-thread-route)** | **Receipt scope 收窄**: receipt card body 不再承载全部 event,只承载 OutText / OutResult / OutInit / OutUsage 派生的 entry。OutThinking / OutToolStart / OutToolEnd 路由到 Channel 自治的 thread reply(Feishu 选 thread + 类型感知摘要)。~~OutCompaction 同理走 thread reply;F-49 删除该 path——runtime 不再产生 OutCompaction,count 由 `SessionContext.CompactionCount` 携带,footer Line 1 渲染 `🗜 N`。~~ Card body 元素数从 ~30 降到 ≤5。详见 [`F-37-tool-thread-routing.md`](./F-37-tool-thread-routing.md) + [`channel/feishu.md` §13.12](../channel/feishu.md) + [`channel/feishu.md` §13.25](../channel/feishu.md) (F-49)。 |

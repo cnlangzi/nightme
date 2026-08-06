@@ -1,6 +1,6 @@
 # F-45: AgentSession 累计 Token 统计 + Main-Chat 卡片 Footer
 
-> **Status**: 📝 设计阶段（doc-first，2026-08-05）
+> **Status**: ✅ 已落地（2026-08-05）；§1.7 F-48 follow-up（2026-08-06）；§1.8 F-49 follow-up（2026-08-06）
 > **Milestone**: v1.3.x
 > **Scope**:
 > - `internal/agent/agent.go` — `UsageInfo` 搬到 `agent` 包（type alias in gateway）
@@ -14,7 +14,7 @@
 > - 文档同步（`SPEC.md` §0.12 / `channel/feishu.md` §13.22 / `F-44 §6.1` cross-link）
 >
 > **Depends on**: F-25 (rolling-log receipt), F-37 (multi-div split), F-38 (task checklist), F-39 (OutResult 独立 reply), F-40 (OutReply 改名), F-42 (lazy receipt creation), F-43 (`/kill` graceful), F-44 (OutReply 拆出 receipt + OutInit/OutUsage 推迟)
-> **Related**: [`SPEC.md`](../SPEC.md) §0.12（本文落地）/ §1.3 / §1.4 / §2.2；[`channel/feishu.md`](../channel/feishu.md) §12 / §13.22 / §18；[`F-44 §6.1`](./F-44-outreply-independent-and-task-receipt.md) 推迟项兑现
+> **Related**: [`SPEC.md`](../SPEC.md) §0.12（本文落地）/ §1.3 / §1.4 / §2.2；[`channel/feishu.md`](../channel/feishu.md) §12 / §13.22 / §13.24 (F-48 git branch) / §13.25 (F-49 compaction counter) / §18；[`F-44 §6.1`](./F-44-outreply-independent-and-task-receipt.md) 推迟项兑现；§1.7 F-48 git branch follow-up；§1.8 F-49 compaction counter follow-up；详细 F-49 设计见 [`F-49`](./F-49-compaction-counter.md)
 
 ---
 
@@ -175,7 +175,8 @@ main chat:
 | `OutThinking` / `OutToolStart` / `OutToolEnd` | `ReplyInThread` | ❌ 不带 footer（thread 视觉独立） |
 | `OutMessageState` | AddReaction | ❌ 不带 footer |
 | `OutInit` / `OutUsage` | Silent drop（F-44 不变） | — |
-| `OutCompaction` | `ReplyInBoth` | ❌ 不带 footer（短暂 marker） |
+
+> **F-49 删除**：`OutCompaction` kind 整条 path 删除（runtime handler 不再产生 OutboundMessage；channel adapter 删除 `Send` case）。理由：用户明确不需要"压缩进行中"瞬时显示，compaction 只反映次数（Line 1 🗜 N）。详见 [`F-49 §1.9`](./F-49-compaction-counter.md)。
 
 **stamping 规则**（runtime 决定，不在 Channel）：
 ```go
@@ -212,6 +213,13 @@ type SessionContext struct {
     // Channel derives Total = In + CacheCreate + CacheRead + Out
     // at render time; no Total field on the wire (avoids redundancy).
     CumulativeUsage UsageInfo
+    // F-49: cumulative count of completed context compactions on
+    // this AgentSession. 0 when never compacted. Persists across
+    // daemon restarts; cleared only by /new. Sourced from
+    // AgentSession.CompactionCount at the same instant as
+    // CumulativeUsage so Line 1 (🗜 N) and Line 2 (↓ ↻ ↑ total)
+    // tell a coherent story.
+    CompactionCount int
 }
 ```
 
@@ -231,8 +239,11 @@ type AgentSession struct {
     
     // NEW: per-AgentSession cumulative token / cost totals.
     // Persists across daemon restarts; cleared only by /new.
+    // F-49: also guards compactionCount (RecordCompaction modifies
+    // both atomically — see F-49 §1.4).
     cumulativeUsageMu sync.RWMutex
     cumulativeUsage   UsageInfo
+    compactionCount   int       // F-49: 🗜 N 计数；同锁守护
     cumulativeDirty   bool
 }
 ```
@@ -245,8 +256,11 @@ func (as *AgentSession) Model() string
 
 // Usage
 func (as *AgentSession) AccumulateUsage(u *agent.UsageEvent)  // 加锁累加，dirty=true
-func (as *AgentSession) ResetCumulative()                      // 清零 + dirty=true（仅 /new）
+func (as *AgentSession) ResetCumulative()                      // 清零 + dirty=true（仅 /new，包括 compactionCount）
 func (as *AgentSession) CumulativeUsage() UsageInfo            // RLock 快照
+// F-49:
+func (as *AgentSession) RecordCompaction()                     // count++ + 4 token 字段归零 + CostUSD 保留 + dirty=true
+func (as *AgentSession) CompactionCount() int                  // RLock 快照
 func (as *AgentSession) PersistIfDirty(persist func(*registry.AgentSessionEntry) error) error
 ```
 
@@ -392,8 +406,9 @@ type SessionContext struct {
     Agent           string
     Model           string
     CumulativeUsage UsageInfo
-    Workspace       string                  // NEW
-    GitStatus       *gtw.GitStatusSnapshot  // NEW
+    Workspace       string                  // NEW (F-48)
+    GitStatus       *gtw.GitStatusSnapshot  // NEW (F-48)
+    CompactionCount int                     // NEW (F-49: 🗜 N 计数)
 }
 
 type GitStatusSnapshot struct {
@@ -428,7 +443,159 @@ type GitStatusSnapshot struct {
 - `internal/channel/feishu/usage_footer.go` — line 3 渲染 + `formatWorkspacePath`
 - `internal/channel/feishu/usage_footer_test.go` — 扩展测试
 
-### 1.8 State 流转
+### 1.8 Compaction Counter (F-49 follow-up)
+
+**Why**：F-45 的 Line 2 token 数字是 cumulative across the entire AgentSession。当 agent 执行 context compaction（截断/摘要化输入）后，cumulative 仍持续累加，导致用户看到的 total tokens 远超上下文窗口上限，**无法判断**是"真的用了那么多"还是"已压缩多次但 cumulative 不反映"。用户在 IM 视角下看到的是 mystery number。
+
+F-49 给 Line 1 加 `· 🗜 N` 段（compaction 计数），同时把 Line 2 的 token 部分改成"since-last-compaction 归零"语义，而 `$cost` 保留为 lifetime spend——两个目的清晰分离。
+
+**完整设计**：见 [`F-49-compaction-counter.md`](./F-49-compaction-counter.md)。本节只列与 F-45 footer 的交互点。
+
+#### 1.8.1 Footer 渲染差异
+
+**改前**（典型长 session，已 compact 3 次）：
+
+```
+🤖 claude · opus-4-5
+� ↓ 156k · ↻ 1.2M cached · ↑ 18k · Total 1.37M · $1.245
+📁 code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
+```
+
+**改后**（同 session，加 🗜 段 + token 归零）：
+
+```
+🤖 claude · opus-4-5 · 🗜 3
+💰 ↓ 5k · ↻ 2k · ↑ 0.8k · 7.8k · $1.245
+📁 code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
+```
+
+**关键变化**：
+- **Line 1 末尾**追加 `· 🗜 N`（仅 N>0）
+- **Line 2 token 部分**语义反转：从"lifetime"变成"since-last-compaction"——压缩后归零，从下一次 EventUsage 重新累加
+- **Line 2 `$cost`** 保持累加：lifetime spend 跨压缩单调累加
+
+**用户视角解读**：
+- `🗜 3` + `↓ 5k · Total 7.8k` → "当前上下文用了 7.8k（压缩后），3 次压缩前实际用过 1.37M tokens"
+- `$1.245` → "这个 Session 总共花了 $1.245，无论压缩几次都不会变"
+
+#### 1.8.2 两个 token 目的 → 两个独立 metric
+
+| 用户目的 | Footer 段 | 字段 | 压缩时行为 |
+|---|---|---|---|
+| **总耗费**（lifetime spend） | `$X.XXX` | `CostUSD` | **保留**，单调累加 |
+| **当前 Session 上下文用量** | `↓ X · ↻ X · ↑ X · Total X` | 4 个 token 字段 | **归零**，重新累加 |
+
+**为什么这样切**：
+- `CostUSD` 是货币量——花了不会退，跨压缩累加
+- 4 个 token 字段是**输入窗口**快照——压缩后输入窗口被截断，下一个 turn 的 input 自然变小；归零后从下一次 EventUsage 重新累加，**无需特殊处理**
+
+#### 1.8.3 Bridge 抽象（与 F-45 的解耦点）
+
+F-45 假设 bridge 只产生 `EventInit` / `EventUsage` / `EventResult` / `EventText` / `EventToolStart` / `EventToolEnd`。**F-49 新增一个 consumer**：`EventCompaction`。但 bridge 层有协议差异：
+
+- **Pi**：`compaction_start` + `compaction_end` 两条
+- **Claude Code**：result subtype `compact` / `compaction` 一条
+
+**抽象归抽象 / 具体归具体**（SPEC §1.4）：bridge 自己消化协议差异，runtime 一视同仁。
+
+```
+                  ┌─────────────────────────────────────────────┐
+  Pi 协议         │  compaction_start → [suppressed]            │
+  compaction_start│  compaction_end   → EventCompaction × 1    │
+  compaction_end  │                                             │
+                  └─────────────────────────────────────────────┘
+                                ↓
+                  ┌─────────────────────────────────────────────┐
+  Claude 协议     │  result.subtype == "compact" /              │
+  result.subtype  │  "compaction" → EventCompaction × 1         │
+                  └─────────────────────────────────────────────┘
+                                ↓
+                  ┌─────────────────────────────────────────────┐
+  runtime handler │  case EventCompaction:                       │
+  (协议无关)      │    as.RecordCompaction()                     │
+                  │    // 不判断 Subtype，不产生 Outbound        │
+                  └─────────────────────────────────────────────┘
+```
+
+详见 [`F-49 §1.3`](./F-49-compaction-counter.md) 与 [`F-32 §2.3`](./F-32-pi-rpc-bridge.md) 改动说明。
+
+#### 1.8.4 F-45 routing 表更新（删除 OutCompaction）
+
+F-45 §1.2 的 OutboundKind → Footer 路由表中 `OutCompaction` 一行删除：
+
+```diff
+  | OutboundKind | 表面 | Footer |
+  |---|---|---|
+  | `OutReply` | **ReplyInThreadAndChat**（每 chunk） | ✅ footer 在文末 |
+  | `OutResult` | ReplyInThreadAndChat | ✅ footer 在文末 |
+  | `OutTaskCreate` / `OutTaskUpdate` | **Rolling-log receipt card**（Tasks） | ✅ footer 在 checklist 末尾 |
+  | `OutCard` (permission) | Top-level Create | ❌ 不带 footer（短状态消息） |
+  | `OutCommandReply` | Top-level Create | ❌ 不带 footer |
+- | `OutThinking` / `OutToolStart` / `OutToolEnd` | `ReplyInThread` | ❌ 不带 footer（thread 视觉独立） |
+- | `OutCompaction` | `ReplyInBoth` | ❌ 不带 footer（短暂 marker） |
+  | `OutMessageState` | AddReaction | ❌ 不带 footer |
+  | `OutInit` / `OutUsage` | Silent drop（F-44 不变） | — |
+```
+
+**`OutCompaction` kind 整体删除**（不是"保留但 runtime 不发"）——runtime handler 不再产生 OutboundMessage；channel adapter 不再有 case 处理。理由见 [`F-49 §1.9`](./F-49-compaction-counter.md)。
+
+#### 1.8.5 SessionContext 扩展
+
+```go
+type SessionContext struct {
+    Agent           string
+    Model           string
+    CumulativeUsage UsageInfo
+    Workspace       string                  // F-48
+    GitStatus       *gtw.GitStatusSnapshot  // F-48
+    CompactionCount int                     // F-49: 🗜 N 计数
+}
+```
+
+#### 1.8.6 与 F-45 §1.5 stamping 规则的交互
+
+F-45 §1.5 在 4 个 main-chat Kind 上 stamp SessionContext。F-49 不改变这一规则——只在 stamp 时多填一个 `CompactionCount` 字段。Stamp condition 扩展（[`F-49 §1.8`](./F-49-compaction-counter.md)）：
+
+```go
+// 既有 condition（来自 F-45 §2.5 改动 C）
+if snap.InputTokens != 0 || snap.OutputTokens != 0 ||
+    snap.CacheCreationInputTokens != 0 ||
+    snap.CacheReadInputTokens != 0 || snap.CostUSD != 0 ||
+    s.Model() != "" || hasGit {
+    out.SessionContext = &gateway.SessionContext{...}
+}
+
+// F-49 扩展：compactionCount > 0 也触发 stamp
+if snap.InputTokens != 0 || ... || hasGit ||
+    s.CompactionCount() > 0 {
+    out.SessionContext = &gateway.SessionContext{
+        // ...
+        CompactionCount: s.CompactionCount(),
+    }
+}
+```
+
+实际上 `CompactionCount() > 0` 几乎不会单独触发 stamp（compaction 必然发生在至少 1 个 turn 之后，前几个 OR 条件已覆盖），但保持对称——理论上 `/new` 后立刻 compaction 也能显示 🗜 段。
+
+#### 1.8.7 F-49 与 F-45 §1.8 (State 流转) 的交互
+
+State 流转图（见下 §1.9）加一条 compaction 分支：
+
+```
+  SetModel(ev.Init.Model)     ← EventInit 触发；idempotent
+  AccumulateUsage(ev.Usage)   ← EventUsage 触发（每个 turn 一次）
+  ...
++ RecordCompaction()          ← EventCompaction 触发；count++ + 4 token 字段归零
++                              CostUSD 保留；后续 EventUsage 从零重新累加 token
+  ...
+  /new → ResetCumulative      ← 用户主动重置（compactionCount + usage 全清零）
+```
+
+#### 1.8.8 F-49 不在 F-45 PR scope
+
+F-49 是独立 PR（详见 §7 实施计划），不在 F-45 当初落地范围内。F-45 的 footer helper `formatSessionFooterLines` 在 F-49 PR 里加 `🗜 N` 段；其余文件（AgentSession / SessionContext / newEventHandler / bridges）都是 F-49 新增改动，与 F-45 已落地的代码解耦。
+
+### 1.9 State 流转
 
 ```
 AgentSession 生命周期:

@@ -6,7 +6,15 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/chatsession"
 )
+
+// chatsessionCardChoice is a local alias for the chatsession
+// package's CardChoice. F-46 stores the rendered-card choices on
+// GTWDraft so the action handler's follow-up PATCH can rebuild
+// the card with Disabled=true.
+type chatsessionCardChoice = chatsession.CardChoice
 
 // Sender is the small surface the gtw package needs from
 // ChatSession. Production callers pass an adapter backed by
@@ -39,13 +47,20 @@ type DraftsMap interface {
 	Lookup(userMsgID string) *Draft
 }
 
-// HandlerDeps wires the side effects RunFix / HandleReaction need.
+// HandlerDeps wires the side effects RunFix / HandleAction need.
 // All fields are required; pass an instance constructed in the
 // runtime's startup code (cmd/nightme/run.go).
 type HandlerDeps struct {
 	// Send is the IM-side send callback. Production: wraps
 	// gateway.Channel.Send; tests: appends to a slice.
 	Send SendFunc
+	// SendCard (F-46) is the IM-side card send callback. Returns
+	// the bot-side message id assigned by the channel so the
+	// dispatcher can store it on the draft for later PATCH.
+	// Production: wraps gateway.Channel.SendCard; tests can
+	// inject a fake or leave nil (legacy fallback uses Send +
+	// discards the id, action handler emits no PATCH).
+	SendCard SendCardFunc
 	// Git wraps the local git binary. Tests inject a fake.
 	Git GitRunner
 	// NewPlatform picks a PlatformClient based on the remote URL.
@@ -102,13 +117,9 @@ func RunFix(
 	// the user doesn't lose their fix state.
 	if rebuilt := RebuildContext(ctx, cs, deps.Git, deps.NewPlatform); rebuilt != (Context{}) {
 		slot.Store(rebuilt)
-		_ = deps.Send(ctx, OutMsg{
-			ChatID:  chatID,
-			ReplyTo: messageID,
-			Text: fmt.Sprintf(
-				"♻️ Recovered /gtw fix #%d (state: %s).\n  branch: %s\n  worktree: %s\n  Re-run `/gtw fix %d` to continue, or use a different command.",
-				rebuilt.Issue, rebuilt.State, rebuilt.Branch, rebuilt.Worktree, rebuilt.Issue),
-		})
+		_ = reply(ctx, deps.Send, chatID, messageID, fmt.Sprintf(
+			"♻️ Recovered /gtw fix #%d (state: %s) after daemon restart.\n  branch: %s\n  worktree: %s\n  Continue working in the worktree, or `/cwd` back to the repo before starting a new fix.",
+			rebuilt.Issue, rebuilt.State, rebuilt.Branch, rebuilt.Worktree))
 		return &Result{Consumed: true}, nil
 	}
 
@@ -190,8 +201,14 @@ func RunFix(
 	// --- create the worktree (§5.2.③) -----------------------------
 	if err := WorktreeAdd(ctx, repoRoot, branch, worktreePath, "HEAD", deps.Git); err != nil {
 		// Roll back the label we just added (§5.3.3 §5.4).
+		// We use the caller's ctx (not context.Background()) so
+		// a /kill or client disconnect can abort the rollback
+		// the same way it would the original AddLabel. The
+		// pre-fix version detached the rollback from caller
+		// cancellation, which could leak a slow `glab` child
+		// past daemon shutdown.
 		if labelAdded {
-			_ = platform.RemoveLabel(context.Background(), owner, repo, issueID, LabelWIP)
+			_ = platform.RemoveLabel(ctx, owner, repo, issueID, LabelWIP)
 		}
 		return emitWorktreeFailDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID:    issueID,
@@ -277,8 +294,8 @@ func emitBranchExistsDraft(
 	payload FixDraftPayload,
 	existingPath string,
 ) (*Result, error) {
-	card := renderBranchExistsCard(payload, existingPath)
-	return sendDraft(ctx, deps, chatID, messageID, userMsgID, card, drafts, DraftFixBranchExists, payload)
+		card := BranchExistsCard(payload, existingPath)
+		return sendDraft(ctx, deps, chatID, messageID, userMsgID, card, drafts, DraftFixBranchExists, payload)
 }
 
 func emitWorktreeFailDraft(
@@ -288,24 +305,110 @@ func emitWorktreeFailDraft(
 	drafts DraftsMap,
 	payload FixDraftPayload,
 ) (*Result, error) {
-	card := renderWorktreeFailCard(payload)
-	return sendDraft(ctx, deps, chatID, messageID, userMsgID, card, drafts, DraftFixWorktreeFail, payload)
+		card := WorktreeFailCard(payload)
+		return sendDraft(ctx, deps, chatID, messageID, userMsgID, card, drafts, DraftFixWorktreeFail, payload)
 }
 
 func sendDraft(
 	ctx context.Context,
 	deps HandlerDeps,
-	chatID, messageID, userMsgID, card string,
+	chatID, messageID, userMsgID string,
+	card Card,
 	drafts DraftsMap,
 	kind DraftKind,
 	payload FixDraftPayload,
 ) (*Result, error) {
+	requestID := "gtw-fix-" + userMsgID
+	if requestID == "" {
+		requestID = "gtw-fix-" + payload.Branch
+	}
+	card.RequestID = requestID
+
+	var botMsgID string
+	if deps.SendCard != nil {
+		id, err := deps.SendCard(ctx, OutCardMsg{
+			ChatID:  chatID,
+			ReplyTo: messageID,
+			Card:    card,
+		})
+		if err == nil {
+			botMsgID = id
+		}
+		// On error: fall through to text Send as a best-effort so
+		// the user still sees the decision content even if the
+		// channel's card path is unavailable.
+	}
+	if deps.SendCard == nil || botMsgID == "" {
+		// Legacy / fallback: render the card as plain markdown and
+		// send via deps.Send. The dispatcher still stores the
+		// draft so the reaction pipeline works; the action handler
+		// just emits plain text follow-ups (no PATCH) when the
+		// bot message id is empty.
+		_ = deps.Send(ctx, OutMsg{
+			ChatID:  chatID,
+			ReplyTo: messageID,
+			Text:    renderCardMarkdown(card),
+		})
+	}
+
 	drafts.Store(userMsgID, &Draft{
-		Kind:      kind,
-		Payload:   payload,
-		CreatedAt: deps.Now(),
+		Kind:          kind,
+		Payload:       payload,
+		CreatedAt:     deps.Now(),
+		BotMessageID:  botMsgID,
+		CardTitle:     card.Title,
+		CardBody:      card.Body,
+		CardChoices:   toChatsessionCardChoices(card.Choices),
+		CardRequestID: requestID,
 	})
-	return reply(ctx, deps.Send, chatID, messageID, card), nil
+	return &Result{Consumed: true}, nil
+}
+
+// toChatsessionCardChoices translates gtw.CardChoice to the
+// chatsession.CardChoice that lives on GTWDraft. Mirrors the
+// gtwSendAdapter translation for the inverse direction.
+func toChatsessionCardChoices(in []CardChoice) []chatsessionCardChoice {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]chatsessionCardChoice, len(in))
+	for i, c := range in {
+		out[i] = chatsessionCardChoice{
+			Emoji:  c.Emoji,
+			Label:  c.Label,
+			Action: c.Action,
+		}
+	}
+	return out
+}
+
+// renderCardMarkdown flattens a Card back to plain markdown for
+// legacy channels that don't support interactive cards (Feishu
+// Web in some configs, Slack, etc.). The shape mirrors the F-45
+// plain-text decision cards so the user's view is unchanged.
+func renderCardMarkdown(c Card) string {
+	var b strings.Builder
+	if c.Title != "" {
+		b.WriteString(c.Title)
+		b.WriteString("\n")
+	}
+	if c.Body != "" {
+		b.WriteString(c.Body)
+		b.WriteString("\n")
+	}
+	if len(c.Choices) > 0 {
+		b.WriteString("\n选择操作(反应对应 emoji):\n")
+		for _, ch := range c.Choices {
+			label := ch.Label
+			if ch.Emoji != "" {
+				label = ch.Emoji + " " + label
+			}
+			b.WriteString("  ")
+			b.WriteString(label)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
 }
 
 // reply is the single-send-and-ack helper. The reply is threaded

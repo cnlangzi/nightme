@@ -583,6 +583,29 @@ type OutboundMessage struct {
 
 **详细落地**：见 [`docs/feat/F-45-session-footer.md`](./feat/F-45-session-footer.md) + `docs/channel/feishu.md` §13.22。
 
+## 0.13 文档变更摘要（v1.3.x F-46 交互卡 PATCH 增量，2026-08-06）
+
+**背景**：兑现 §2.5「用户在 IM 里点反馈」——gtw §5.3.1 / §5.3.3 决策卡此前只能靠 emoji reaction，移动端体验差。F-46 把决策面升级为**交互卡 + 原地更新**，点击即完成决策。
+
+**核心变化**（概念级）：
+
+1. **OutboundKind 新增 `OutCard` / `OutCardPatch`**
+   - `OutCard`：发出一张新的交互决策卡
+   - `OutCardPatch`：原地更新已发出的决策卡（选中态 / 禁用其余选项 / 附结果）
+   - 仍走既有 `Channel.Send`；**Channel 自决**如何渲染（Feishu PATCH、Slack 编辑、Web DOM 等）
+
+2. **Card 契约结构化**
+   - 抽象层用 typed `Card`（kind / choices / chosen / disabled）描述决策面
+   - Channel 边界把平台按钮点击**归一化**为既有 `Reaction` / action 通路（与 emoji reaction 汇合），不新增平行生命周期
+
+3. **不破既有不变式**
+   - §1.3 / §1.4 保留：Channel 不 import chatsession；OutboundKind 仍为 typed enum；Receipt 自治不变（决策卡 ≠ receipt card）
+   - bridges 协议零变化
+
+**为什么不是 v2.0**：v1.3 核心不变式全部保留。F-46 是 Channel 自治范围内的「交互卡 kind + 原地更新通路」，不改 nightme 数据模型与 Gateway 核心契约。
+
+**详细设计 / 线格式 / Feishu 渲染 / `/gtw test` debug UAT**：见 [`feat/F-46-interactive-cards.md`](./feat/F-46-interactive-cards.md)。
+
 ---
 
 ### 0.7 文档变更摘要（v1.3.x F-38 增量，2026-08-04）
@@ -1171,6 +1194,47 @@ OutboundMessage{
 **PromptState 平行 FSM**：每个 channel 的 receipt 对象维护一个 `agent.PromptState`，4 态对应 prompt 在 agent 进程内的执行生命周期：`agent.PromptPending`（receipt 创建后等首 event）→ `agent.PromptRunning`（首 non-empty entry 抵达）→ `agent.PromptSucceeded` / `agent.PromptFailed`（terminal）。与 MessageState 的关键区别：**PromptState 是 channel-internal 状态**（不走 wire event，每个 channel 各自的 receipt 自己观察 `agent.EventDone`/`EventError` 来 transition），而 MessageState 是抽象层广播事件（走 `OutboundMessage{Kind: OutMessageState}`）。两者都描述"消息处理到哪了"但回答的问题不同（投递 vs 执行），分别渲染到 user-message reaction 和 receipt card header。
 
 详见 [`feat/F-31-message-state.md`](./feat/F-31-message-state.md) + [`feat/F-42-lazy-receipt-creation.md`](./feat/F-42-lazy-receipt-creation.md)（Feishu 选择 drop 中间态的记录）。
+
+### 2.6 Interactive Decision Cards（F-46 新增，2026-08-06）
+
+**核心问题**：gtw §5.3.1 / §5.3.3 决策卡此前是纯文本，用户只能靠 emoji reaction 继续；IM 移动端找 emoji 体验差。
+
+**F-46**：决策面改为**交互卡**；用户选择后**原地更新**同一张卡（选中态 + 禁用其余选项 + 可选结果摘要），而不是再发一条平行回复。
+
+**概念数据流**：
+
+```
+用户在决策卡上选择
+        │
+        ▼
+Channel：平台点击 → 归一化为 InboundMessage{Reaction|Action}
+        │
+        ▼
+Gateway：dispatchAction → ChatSession.HandleAction
+        │
+        ▼
+gtw：消费 draft → 执行决策 → 发出 OutCardPatch（或无 bot 卡 id 时退化为文本）
+        │
+        ▼
+Channel：按平台能力渲染原地更新（Feishu / Slack / Web 各自实现）
+```
+
+**抽象契约**（Gateway / gtw 看见的）：
+
+| 概念 | 含义 |
+|---|---|
+| `OutCard` | 发出一张新的交互决策卡 |
+| `OutCardPatch` | 原地更新已发出的决策卡 |
+| typed `Card` | kind / choices / chosen / disabled —— 描述决策面，不含平台 schema |
+| 边界归一化 | 平台按钮点击在 Channel 边界折成既有 reaction/action 通路，与 emoji 汇合 |
+
+**不变式**：
+
+- §1.4：OutboundKind 仍 typed；Channel 自决渲染（含是否支持原地更新）
+- §1.3：Channel 不 import chatsession；决策卡 ≠ receipt card（Receipt 自治不变）
+- 不引入第二条「卡片专属」生命周期与 emoji reaction 分叉
+
+**实现细节**（button value 编码、action 目录、Feishu 视觉、`/gtw test` debug UAT）：见 [`feat/F-46-interactive-cards.md`](./feat/F-46-interactive-cards.md)。
 
 ---
 

@@ -1,6 +1,7 @@
 # F-45: AgentSession 累计 Token 统计 + Main-Chat 卡片 Footer
 
-> **Status**: 📝 设计阶段（doc-first，2026-08-05）
+> **Status**: ✅ 已落地（main-chat cards 拼 footer，2026-08-05）
+> **F-46 增量**（2026-08-06）—decision cards 加 button + 原地 PATCH；详见 [`F-46-interactive-cards.md`](./F-46-interactive-cards.md)
 > **Milestone**: v1.3.x
 > **Scope**:
 > - `internal/agent/agent.go` — `UsageInfo` 搬到 `agent` 包（type alias in gateway）
@@ -14,7 +15,7 @@
 > - 文档同步（`SPEC.md` §0.12 / `channel/feishu.md` §13.22 / `F-44 §6.1` cross-link）
 >
 > **Depends on**: F-25 (rolling-log receipt), F-37 (multi-div split), F-38 (task checklist), F-39 (OutResult 独立 reply), F-40 (OutReply 改名), F-42 (lazy receipt creation), F-43 (`/kill` graceful), F-44 (OutReply 拆出 receipt + OutInit/OutUsage 推迟)
-> **Related**: [`SPEC.md`](../SPEC.md) §0.12（本文落地）/ §1.3 / §1.4 / §2.2；[`channel/feishu.md`](../channel/feishu.md) §12 / §13.22 / §18；[`F-44 §6.1`](./F-44-outreply-independent-and-task-receipt.md) 推迟项兑现
+> **Related**: [`SPEC.md`](../SPEC.md) §0.12（本文落地）/ §1.3 / §1.4 / §2.2；[`channel/feishu.md`](../channel/feishu.md) §12 / §13.22 / §18；[`F-44 §6.1`](./F-44-outreply-independent-and-task-receipt.md) 推迟项兑现；**[`F-46-interactive-cards.md`](./F-46-interactive-cards.md)** 决策卡 button + 原地 PATCH（同一 `OutCard` kind，复用 `OutCardPatch`）
 
 ---
 

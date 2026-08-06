@@ -59,7 +59,7 @@ func (m *mockReceiptBot) SendMessageText(_ context.Context, _, text, _ string, _
 	return "mock-text-msg", nil
 }
 
-func (m *mockReceiptBot) SendCard(_ context.Context, _, body, _ string, _ bool) (string, error) {
+func (m *mockReceiptBot) SendCardForReceipt(_ context.Context, _, body, _ string, _ bool) (string, error) {
 	if m.sendCardErr != nil {
 		return "", m.sendCardErr
 	}

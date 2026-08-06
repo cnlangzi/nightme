@@ -146,6 +146,6 @@ func (a *Adapter) postThreadMarkdownReply(ctx context.Context, chatID, rootID, b
 		return err
 	}
 
-	_, err = a.SendCard(ctx, chatID, cardJSON, rootID, replyOnly)
+	_, err = a.sendCardContent(ctx, chatID, cardJSON, rootID, replyOnly)
 	return err
 }

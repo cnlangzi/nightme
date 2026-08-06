@@ -559,13 +559,13 @@ func TestRunFix_DaemonRecovery(t *testing.T) {
 
 // ---- reaction routing -------------------------------------------
 
-// TestHandleReaction_BranchExists_ConfirmCancellation exercises
+// TestHandleAction_BranchExists_ConfirmCancellation exercises
 // the end-to-end reaction flow that the F-45 §5.3.1 card relies
 // on: a draft is stored, a ❌ reaction arrives, the draft is
 // taken, the label is rolled back, and a cancellation card is
 // sent. We use the fakeGit from earlier + a recording Send to
 // observe the side effects without real git/gh.
-func TestHandleReaction_BranchExists_ConfirmCancellation(t *testing.T) {
+func TestHandleAction_BranchExists_ConfirmCancellation(t *testing.T) {
 	sent := []OutMsg{}
 	drafts := &fakeDraftsMap{}
 	slot := &fakeContextSlot{}
@@ -595,14 +595,14 @@ func TestHandleReaction_BranchExists_ConfirmCancellation(t *testing.T) {
 		},
 	})
 
-	consumed, err := HandleReaction(context.Background(), deps, cs, slot, drafts, ReactionEvent{
+	consumed, err := HandleAction(context.Background(), deps, cs, slot, drafts, ReactionEvent{
 		TargetMsgID: "om_card_msg",
 		Emoji:       string(ReactionCancel),
 		UserID:      "ou_user_1",
 		ChatID:      "chat-1",
 	})
 	if err != nil {
-		t.Fatalf("HandleReaction: %v", err)
+		t.Fatalf("HandleAction: %v", err)
 	}
 	if !consumed {
 		t.Error("consumed = false, want true (draft matched)")
@@ -620,18 +620,18 @@ func TestHandleReaction_BranchExists_ConfirmCancellation(t *testing.T) {
 	}
 }
 
-// TestHandleReaction_NoDraftFallsThrough verifies the
+// TestHandleAction_NoDraftFallsThrough verifies the
 // non-consumption path: a reaction on a non-gtw message
 // returns (false, nil) so the caller can fall through to
 // future handlers (none today; placeholder for F-31+).
-func TestHandleReaction_NoDraftFallsThrough(t *testing.T) {
+func TestHandleAction_NoDraftFallsThrough(t *testing.T) {
 	cs := &fakeSender{cwd: "/code/nightme"}
 	deps := HandlerDeps{
 		Send: func(_ context.Context, _ OutMsg) error { return nil },
 		Git:  &fakeGit{},
 		NewPlatform: func(_ PlatformKind) (PlatformClient, error) { return nil, nil },
 	}
-	consumed, _ := HandleReaction(context.Background(), deps, cs,
+	consumed, _ := HandleAction(context.Background(), deps, cs,
 		&fakeContextSlot{}, &fakeDraftsMap{},
 		ReactionEvent{TargetMsgID: "om_random", Emoji: "👍"},
 	)
@@ -640,16 +640,16 @@ func TestHandleReaction_NoDraftFallsThrough(t *testing.T) {
 	}
 }
 
-// TestHandleReaction_EmptyTargetMsgIDIgnored verifies the
+// TestHandleAction_EmptyTargetMsgIDIgnored verifies the
 // defensive early-return for malformed events (e.g. SDK
 // delivering a half-parsed reaction).
-func TestHandleReaction_EmptyTargetMsgIDIgnored(t *testing.T) {
+func TestHandleAction_EmptyTargetMsgIDIgnored(t *testing.T) {
 	cs := &fakeSender{cwd: "/code/nightme"}
 	deps := HandlerDeps{
 		Send: func(_ context.Context, _ OutMsg) error { return nil },
 		Git:  &fakeGit{},
 	}
-	consumed, _ := HandleReaction(context.Background(), deps, cs,
+	consumed, _ := HandleAction(context.Background(), deps, cs,
 		&fakeContextSlot{}, &fakeDraftsMap{},
 		ReactionEvent{TargetMsgID: "", Emoji: "✅"},
 	)

@@ -30,6 +30,35 @@ func (c *fakeChannel) Send(_ context.Context, m OutboundMessage) error {
 	return nil
 }
 
+func (c *fakeChannel) SendCard(_ context.Context, m OutboundMessage) (string, error) {
+	// Record the send like Send, and return a synthetic msg id so
+	// callers that re-key a draft under the bot-side id can still
+	// find it. The test fixture doesn't care about real Feishu
+	// ids — it cares that rekey produces a non-empty key.
+	_ = c.Send(context.Background(), m)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return "fake-card-" + itoa(len(c.sends)), nil
+}
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	const digits = "0123456789"
+	if i < 0 {
+		return "-" + itoa(-i)
+	}
+	var buf [20]byte
+	pos := len(buf)
+	for i > 0 {
+		pos--
+		buf[pos] = digits[i%10]
+		i /= 10
+	}
+	return string(buf[pos:])
+}
+
 func (c *fakeChannel) LastText() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()

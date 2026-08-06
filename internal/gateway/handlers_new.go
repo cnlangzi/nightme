@@ -49,7 +49,7 @@ func handleNew(ctx context.Context, mgr *chatsession.Manager, channel Channel,
 
 	matched, _, results, err := cs.NewActiveAgentSessions(ctx, agentName)
 
-	// F-45 §1.7: /new is the ONLY event that clears cumulative
+	// F-45 §1.8: /new is the ONLY event that clears cumulative
 	// token / cost stats on the AgentSession. Bridge New()
 	// already reset the conversation context; runtime resets the
 	// counter so the footer starts from zero on the next reply.

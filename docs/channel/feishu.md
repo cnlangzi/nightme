@@ -2028,6 +2028,85 @@ case gateway.OutReply, gateway.OutResult,
 
 **详细设计**:见 [`docs/feat/F-45-session-footer.md`](../feat/F-45-session-footer.md)。SPEC §0.12。
 
+### 13.24 🎯 F-48 决策 (2026-08-06):Footer Line 3 ── Git Branch Tracking
+
+**背景**:F-45 footer 只展示 agent / model / token / cost,但用户在 IM 里看不到当前 workspace / branch / dirty 状态 — 每次要确认"我正在哪个 repo / 有没有 uncommitted / 有没有 unpushed"都得跳 terminal。F-48 在 footer 加第 3 行,让 Feishu 卡片本身是 ground truth。
+
+**核心变化**(`gateway.SessionContext` 加 2 个字段):
+
+```go
+type SessionContext struct {
+    Agent           string
+    Model           string
+    CumulativeUsage UsageInfo
+    Workspace       string                  // NEW: s.Cwd
+    GitStatus       *gtw.GitStatusSnapshot  // NEW: per-stamp git snapshot
+}
+
+// internal/gtw/git_status.go
+type GitStatusSnapshot struct {
+    Branch        string  // empty when detached HEAD / not-a-repo
+    Uncommitted   int     // M/A/D/R/C + 冲突 (UU/AA/DD/...)
+    Untracked     int     // ??
+    AheadOfRemote int     // 0 when no upstream
+    HasUpstream   bool    // false for detached HEAD / new branch
+}
+```
+
+**Footer line 3 格式**:
+
+```
+📁 code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
+```
+
+| 段 | 来源 | Omit 规则 |
+|---|---|---|
+| 📁 `<workspace>` | `Workspace` = `s.Cwd` | `Workspace==""` 整段省略 |
+| ⎇ `<branch>` | `GitStatus.Branch` | 永远显示;`Branch==""` → 写 `?`(detached / not-a-repo) |
+| ↑ `<n>` | `GitStatus.Uncommitted` | `n==0` 省略 |
+| ? `<n>` | `GitStatus.Untracked` | `n==0` 省略 |
+| ⇡ `<n>` | `GitStatus.AheadOfRemote` | `HasUpstream==false \|\| n==0` 省略 |
+
+**Workspace 显示规则**(简化版,Devin 拍板 2026-08-06):
+- **不加任何前缀**(既不 `~` 也不 `/`)—— 路径是什么就显示什么。理由:`~` 在 workspace 不在 HOME 下时会误导(不同 operator / 容器化 session / 非标准 HOME 布局)
+- ≤ 2 目录组件 → 完整显示:`/home/devin` → `home/devin`、`/tmp/foo` → `tmp/foo`、`/home/devin/code` → `devin/code`
+- > 2 目录组件 → 只显示最后两个:`/home/devin/code/nightme` → `code/nightme`、`/home/devin/code/nightme/internal` → `nightme/internal`、`/tmp/a/b/c` → `b/c`
+
+**Arrow 选型**(与 F-45 约定一致):ASCII / Unicode 符号,无 emoji 字体依赖;middle dot ` · ` 分隔;`⎇` (U+2387) branch icon;`📁` 仅作 category header(与 line 1 🤖 / line 2 💰 一致)。
+
+**Stamping 规则**(`cmd/nightme/run.go::newEventHandler`):
+- 4 个 main-chat kind (OutReply / OutResult / OutTaskCreate / OutTaskUpdate) 上 stamp
+- 每次 stamp 都跑 `gtw.CollectStatus(s.Cwd, gtw.ExecGitRunner{})` —— **无缓存**,footer 永远反映当前 worktree 状态
+- `Workspace` = `s.Cwd`(immutable,无锁读)
+- `GitStatus` = parse 结果;非 git repo / git 失败 → `nil`(整段省略)
+- stamp condition 扩展:`hasGit := gitSnap != nil && s.Cwd != ""`;其他 usage/model 条件不变
+
+**Render 路径**(`internal/channel/feishu/usage_footer.go::formatSessionFooterLines`):
+- 现有 line 1 / line 2 不变
+- 新增 line 3:`formatGitLine(ctx)` 返回非空时 append
+- `formatGitLine` 内部调 `formatWorkspacePath`(HOME-aware,< 2 组件完整、> 2 截尾)
+
+**设计决策**:
+1. **不缓存 git CLI**:每 stamp 重跑 `git status`;chat 延迟 1-3s 摊薄在 LLM roundtrip 上,UX OK;用户拍板
+2. **测试不污染生产代码**:`gtw.GitRunner` interface 已是 abstraction(用于其他 gtw 测试);`CollectStatus` 接 runner 参数,production 用 `ExecGitRunner{}`,tests 用 fake;`formatWorkspacePath` 是纯函数,tests 直接构造 input/output
+3. **不在 Channel 调 git**:保持 F-08 "Channel is dumb" 边界;git CLI 只在 runtime stamp 时跑一次
+4. **path "≤2 完整, >2 截尾" + 无前缀**:让用户总能看到 leaf + 父目录;HOME `~` 前缀在 workspace 不在 HOME 下时会误导,统一不加任何前缀
+
+**Wire 兼容性**:
+- `SessionContext` 加 2 字段(已有 JSON-omitempty 风格;Echo / Slack / Web channel 零改动)
+- 其他 Channel 实现(无 git footer 渲染)不影响编译
+- runtime stamp 4 个 main-chat kind 不变(F-45 §1.5),只是 stamp 的字段多 2 个
+
+**PR scope**:
+- `internal/gtw/git_status.go` (NEW) — `CollectStatus` + `parsePorcelainBranchStatus` + `parseBranchHeader`
+- `internal/gtw/git_status_test.go` (NEW) — 9 case:clean / dirty / detached HEAD (3 sub) / no upstream / ahead+behind / conflicts / ignored / empty output / not-a-repo
+- `internal/gateway/messages.go` — `SessionContext` 加 2 字段
+- `cmd/nightme/run.go::newEventHandler` — stamp 时调用 `gtw.CollectStatus`
+- `internal/channel/feishu/usage_footer.go` — line 3 渲染 + `formatWorkspacePathWithHome` helper
+- `internal/channel/feishu/usage_footer_test.go` — 扩展 `TestFormatWorkspacePath_WithHome` (14 case) + `TestFormatGitLine_*` (8 case) + `TestFormatSessionFooterLines_WithGitLine` / `_GitOnly`
+
+**详细设计**:见 [`docs/feat/F-45-session-footer.md`](../feat/F-45-session-footer.md) §1.7。
+
 ## 15. v1.3.x 实施计划
 
 ### 15.0 状态(2026-08-05 F-40 + F-41 落地后)

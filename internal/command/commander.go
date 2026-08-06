@@ -5,6 +5,15 @@
 // that translates *gateway.InboundMessage to SlashInput and
 // *SlashOutput back to *gateway.CommandResult. This package
 // never imports internal/gateway.
+//
+// 2026-08-06: Commander.Dispatch gained a third return value
+// `handled bool` so the caller can distinguish "was a slash
+// command attempt" from "no slash command here". A slash-text
+// input whose command name does not match any registered
+// factory now reports handled=true, output.Consumed=false
+// (the gateway falls through to the agent loop, preserving
+// the pre-F-51 passthrough characteristic — see ADR 0007 §
+// "What stays" and §"Open follow-ups" #3).
 package command
 
 import (
@@ -19,17 +28,29 @@ import (
 type Commander interface {
 	// Dispatch runs the slash command implied by input.Text.
 	//
-	// Returns (SlashOutput{Consumed: false}, nil) when:
-	//   - input.Text does not start with "/"
-	//   - the command name is empty after the "/"
-	//   - the command name does not match any registered factory
-	// (all three are fall-through to the agent loop).
+	// Returns (output, handled, err) where:
 	//
-	// Empty / unknown command: replies with a usage hint
-	// (SlashOutput.Consumed = true) when at least the leading
-	// "/" was present, so the user gets feedback. Without the
-	// "/" prefix, fall through silently.
-	Dispatch(ctx context.Context, rt RuntimeServices, input SlashInput) (*SlashOutput, error)
+	//   handled=false, output=nil: input.Text does not start
+	//     with "/" (or starts with "/" but the command name
+	//     is empty). The gateway treats this as a plain
+	//     message and falls through to the agent loop.
+	//
+	//   handled=true, output={Consumed: false}: input.Text
+	//     was a slash command attempt but the command name
+	//     did not match any registered factory. The gateway
+	//     forwards the original text to the agent loop so
+	//     paths like "/etc/passwd" still reach the agent
+	//     (preserves the v1.2.x passthrough characteristic).
+	//
+	//   handled=true, output={Consumed: true, Reply: "..."}:
+	//     a registered command handled the input. The gateway
+	//     sends output.Reply to the channel and does NOT
+	//     forward to the agent loop.
+	//
+	//   err != nil: the registered command's Handle returned
+	//     an error. The gateway reports the error as a reply
+	//     (handled=true, output={Consumed: true, Reply: "❌ ..."}).
+	Dispatch(ctx context.Context, rt RuntimeServices, input SlashInput) (*SlashOutput, bool, error)
 }
 
 // NewCommander constructs a Commander backed by reg. The
@@ -48,22 +69,30 @@ type commander struct {
 //   - Trim leading/trailing whitespace from input.Text.
 //   - Must start with "/" to be considered a slash command.
 //   - The first whitespace-delimited token is the command name
-//     (e.g. "/gtw" or "/gtw"); the rest is passed through as
+//     (e.g. "/gtw"); the rest is passed through as
 //     input.Args[1:] (input.Args[0] is the bare command name
 //     if the gateway pre-parsed; the commander does NOT
 //     re-parse if Args is already populated).
 //   - If Args is non-empty, use Args[0] as the command name.
 //   - Otherwise split Text on whitespace and take element 0,
 //     strip the leading "/".
-func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, input SlashInput) (*SlashOutput, error) {
+func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, input SlashInput) (*SlashOutput, bool, error) {
 	cmdName, args, isCommand := c.extractCommand(input)
 	if !isCommand {
-		return &SlashOutput{Consumed: false}, nil
+		// Not a slash command at all (no "/" prefix, or just "/").
+		// Fall through to the agent loop.
+		return nil, false, nil
 	}
 
 	cmd := c.reg.FindByName(cmdName)
 	if cmd == nil {
-		return unknownCommandReply(cmdName, c.reg), nil
+		// Slash command attempt with no matching factory. Preserve
+		// the pre-F-51 passthrough — the original text reaches
+		// the agent loop unchanged (so "/etc/passwd" and similar
+		// path-like inputs are still useful). The dispatcher
+		// treats handled=true + Consumed=false as a fall-through
+		// signal.
+		return &SlashOutput{Consumed: false}, true, nil
 	}
 
 	// Make sure Args is populated; if the gateway didn't
@@ -76,7 +105,14 @@ func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, input Slas
 		input.Args = append(input.Args, args...)
 	}
 
-	return cmd.Handle(ctx, rt, input)
+	out, err := cmd.Handle(ctx, rt, input)
+	if err != nil {
+		// The command itself errored — surface as a reply so the
+		// user gets feedback. Still handled=true (we know what
+		// they tried).
+		return &SlashOutput{Consumed: true, Reply: "❌ " + err.Error()}, true, nil
+	}
+	return out, true, nil
 }
 
 // extractCommand pulls the command name + trailing args out of
@@ -98,23 +134,4 @@ func (c *commander) extractCommand(input SlashInput) (cmdName string, args []str
 		return "", nil, false
 	}
 	return rawName, tokens[1:], true
-}
-
-// unknownCommandReply builds a "command not found" reply with
-// a hint listing the registered command names. SlashOutput is
-// non-nil with Consumed=true so the user sees feedback; the
-// gateway does NOT forward to the agent loop.
-func unknownCommandReply(name string, reg *Registry) *SlashOutput {
-	helpLine := ""
-	if specs := reg.Specs(); len(specs) > 0 {
-		names := make([]string, 0, len(specs))
-		for _, s := range specs {
-			names = append(names, s.Name)
-		}
-		helpLine = " (known: " + strings.Join(names, ", ") + ")"
-	}
-	return &SlashOutput{
-		Reply:    "Unknown command: /" + name + helpLine + "\nSend /help for usage.",
-		Consumed: true,
-	}
 }

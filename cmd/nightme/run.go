@@ -398,6 +398,16 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// here for now. When a future command needs the multi-message
 	// path, extend gateway.CommandResult with an Outbound []OutboundMessage
 	// slice and translate from command.Outbound here.
+	//
+	// 2026-08-06: Commander.Dispatch now returns (output, handled,
+	// err). When handled=false (plain text, no "/" prefix) the shim
+	// returns (nil, nil) so the gateway falls through to its legacy
+	// dispatcher + agent loop. When handled=true but output.Consumed=
+	// false (slash command attempt that did not match any factory),
+	// the shim returns a Consumed=false result — the gateway
+	// recognises that as "fall through" and forwards the original
+	// text to the agent loop, preserving the pre-F-51 passthrough
+	// characteristic for inputs like "/etc/passwd" or "/@everyone".
 	gwImpl.WithCommander(func(ctx context.Context, msg *gateway.InboundMessage) (*gateway.CommandResult, error) {
 		if msg == nil {
 			return nil, nil
@@ -409,13 +419,19 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 			MessageID:  msg.MessageID,
 			HasMention: msg.HasMention,
 		}
-		out, err := commander.Dispatch(ctx, rt, input)
+		out, handled, err := commander.Dispatch(ctx, rt, input)
 		if err != nil {
 			return &gateway.CommandResult{Consumed: true, Reply: "❌ " + err.Error()}, nil
 		}
-		if out == nil {
-			return &gateway.CommandResult{Consumed: false}, nil
+		if !handled {
+			// Plain text (no "/" prefix) or just "/" alone.
+			// Signal fall-through — gateway forwards to legacy
+			// dispatcher + agent loop.
+			return nil, nil
 		}
+		// handled=true. out may be Consumed=true (command replied)
+		// or Consumed=false (slash command attempt with no
+		// matching factory — fall through to agent loop).
 		return &gateway.CommandResult{
 			Consumed: out.Consumed,
 			Dropped:  out.Dropped,

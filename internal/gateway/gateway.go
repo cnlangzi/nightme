@@ -407,11 +407,29 @@ func (g *gateway) DispatchInbound(ctx context.Context, msg *InboundMessage) (*Co
 	// the runtime (cmd/nightme) and bridges
 	// *InboundMessage ↔ command.SlashInput /
 	// *CommandResult.
+	//
+	// 2026-08-06 fall-through semantics: the commander shim
+	// returns (nil, nil) when the input is plain text (no "/"
+	// prefix) AND returns a Consumed=false result when the
+	// input was a slash command attempt but no registered
+	// factory matched (e.g. "/etc/passwd"). In both cases we
+	// fall through to the legacy dispatch path so the original
+	// text reaches the agent loop — preserves the pre-F-51
+	// passthrough characteristic.
 	g.mu.RLock()
 	dispatch := g.commandDispatch
 	g.mu.RUnlock()
 	if dispatch != nil && strings.HasPrefix(strings.TrimSpace(msg.Text), "/") {
-		return dispatch(ctx, msg)
+		result, err := dispatch(ctx, msg)
+		if err != nil {
+			return nil, err
+		}
+		if result != nil && (result.Consumed || result.Dropped) {
+			// Commander handled the command — use its reply.
+			return result, nil
+		}
+		// result is nil OR Consumed=false. Fall through to legacy
+		// dispatch (legacy cmds table + dispatchMessage).
 	}
 
 	name, args, err := ParseCommand(strings.TrimSpace(msg.Text))

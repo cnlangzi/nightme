@@ -45,6 +45,42 @@ type (
 	FixDraftPayload = chatsession.GTWFixDraftPayload
 )
 
+// CardChoice is the gtw-package view of one button on a decision
+// card. Mirrors gateway.CardChoice (a separate type to avoid the
+// gateway → gtw → gateway cycle). The gateway adapter translates
+// at the gtwSendAdapter boundary.
+type CardChoice struct {
+	Emoji  string
+	Label  string
+	Action string
+}
+
+// Card represents the original decision card stored on a draft.
+// Carries enough information for the action handler to rebuild
+// the card with Disabled=true and a result note (see
+// executeXxxAction → deps.Send → PatchBotMsgID path).
+type Card struct {
+	Title     string
+	Body      string
+	Choices   []CardChoice
+	RequestID string
+}
+
+// OutCardMsg is the gtw-package view of an outbound card send.
+// Carries the card data and the chat + reply-target; the adapter
+// translates to the channel's native card wire format and returns
+// the bot-side message id assigned by the channel.
+type OutCardMsg struct {
+	ChatID  string
+	ReplyTo string
+	Card    Card
+}
+
+// SendCardFunc is the IM-side card send callback. Returns the
+// bot-side message id assigned by the channel so the dispatcher
+// can store it on the draft for later PATCH.
+type SendCardFunc func(ctx context.Context, m OutCardMsg) (botMessageID string, err error)
+
 const (
 	StateFixing   = chatsession.GTWStateFixing
 	StatePushing  = chatsession.GTWStatePushing
@@ -92,6 +128,26 @@ type OutMsg struct {
 	// ReplyTo is the channel-native userMsgID to thread under.
 	// Empty for top-level cards. Mirrors gateway.OutboundMessage.ReplyTo.
 	ReplyTo string
+
+	// F-46: when PatchBotMsgID is set the gateway emits a PATCH
+	// (OutboundKind.OutCardPatch) targeting the bot message at that
+	// ID, replacing its body with a disabled version of the
+	// original decision card. The fields below carry the rebuild
+	// context: title + body + choices mirror the original card so
+	// the PATCH keeps the same shape, plus a one-line result note
+	// appended to the body via PatchResult.
+	PatchBotMsgID     string
+	PatchChosenEmoji  string
+	PatchResult       string
+	CardTitle         string
+	CardBody          string
+	CardChoices       []CardChoice
+	CardRequestID     string
+	// ChosenChoiceEmoji opts the matching button into the
+	// "✅ 已<label>" inline state when the PATCH is rendered
+	// (mirrors ChosenChoiceEmoji on gateway.Card). When empty,
+	// every button is disabled with its original label.
+	ChosenChoiceEmoji string
 }
 
 // SendFunc is the IM-side send callback. The ctx is the caller's

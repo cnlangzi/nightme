@@ -104,7 +104,24 @@ type Channel interface {
 	// it in place; if no receipt exists for that userMsgID yet,
 	// cold-create one before patching. This is what makes F-25
 	// rolling-log UX work without Gateway knowing the receipt shape.
+	//
+	// F-46: for OutCard, Send SHOULD record the bot-side message id
+	// so callers can correlate it with later action callbacks.
+	// Callers that need the id back should use SendCard (added in
+	// v1.3.x) instead of Send + discard; Send may return ("", nil)
+	// when the channel cannot expose it.
 	Send(ctx context.Context, msg gateway.OutboundMessage) error
+
+	// SendCard is the F-46 specialised send for interactive
+	// decision cards. It returns the channel-native message id
+	// assigned to the newly created card; callers (notably the
+	// /gtw test command path) use this id to seed gtwDrafts
+	// under the same key the bot's card will receive reactions on.
+	//
+	// Channels that cannot return a meaningful id (test doubles,
+	// simple stubs) return ("", nil) — the caller falls back to a
+	// synthetic id and the action-callback round-trip degrades.
+	SendCard(ctx context.Context, msg gateway.OutboundMessage) (msgID string, err error)
 
 	// Incoming returns the channel's normalized message stream.
 	Incoming() <-chan Message

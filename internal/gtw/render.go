@@ -53,6 +53,27 @@ func renderBranchExistsCard(p FixDraftPayload, existingPath string) string {
 	return b.String()
 }
 
+// renderBranchExistsCardData returns the §5.3.1 decision card as
+// the F-46 Card struct (Title + Body + Choices + RequestID). The
+// action handler's follow-up PATCH rebuilds the card with
+// Disabled=true using this data.
+func renderBranchExistsCardData(p FixDraftPayload, existingPath string) Card {
+	body := fmt.Sprintf("issue: #%d  %s\n", p.IssueID, p.Title)
+	if existingPath != "" {
+		body += fmt.Sprintf("已有 worktree: %s\n", existingPath)
+	}
+	body += "\n选择操作(反应对应 emoji):"
+	return Card{
+		Title: fmt.Sprintf("⚠️ 分支 `%s` 已存在", p.Branch),
+		Body:  body,
+		Choices: []CardChoice{
+			{Emoji: "🆕", Label: "用 -v2 新分支", Action: "act:/gtw/branch-newv2"},
+			{Emoji: "🔗", Label: "加入现有协作",  Action: "act:/gtw/branch-join"},
+			{Emoji: "❌", Label: "取消",         Action: "act:/gtw/cancel"},
+		},
+	}
+}
+
 // renderWorktreeFailCard builds the §5.3.3 decision card.
 func renderWorktreeFailCard(p FixDraftPayload) string {
 	var b strings.Builder
@@ -73,4 +94,26 @@ func renderWorktreeFailCard(p FixDraftPayload) string {
 	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+// renderWorktreeFailCardData returns the §5.3.3 decision card as
+// the F-46 Card struct. Mirrors renderBranchExistsCardData.
+func renderWorktreeFailCardData(p FixDraftPayload) Card {
+	body := fmt.Sprintf("branch: %s\n", p.Branch)
+	if p.GitError != "" {
+		body += "[git stderr tail]\n" + p.GitError + "\n"
+	}
+	body += "\n选择操作(反应对应 emoji):"
+	cancelLabel := "❌ 取消"
+	if p.LabelAdded {
+		cancelLabel += " (已撤销 nightme/wip label)"
+	}
+	return Card{
+		Title: fmt.Sprintf("❌ 创建 worktree 失败(#%d)", p.IssueID),
+		Body:  body,
+		Choices: []CardChoice{
+			{Emoji: "🔄", Label: "重试", Action: "act:/gtw/worktree-retry"},
+			{Emoji: "❌", Label: cancelLabel, Action: "act:/gtw/cancel"},
+		},
+	}
 }

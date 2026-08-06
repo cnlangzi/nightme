@@ -36,6 +36,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -57,6 +58,14 @@ type Channel interface {
 	Name() string
 	Incoming() <-chan InboundMessage
 	Send(ctx context.Context, msg OutboundMessage) error
+	// SendCard (F-46) is the specialised variant for interactive
+	// decision cards. It returns the bot-side message id assigned
+	// by the channel so callers can correlate the rendered card
+	// with later card.action.trigger callbacks. The inner
+	// channel.Channel interface in internal/channel/channel.go
+	// carries the same method — this duplicate keeps the gateway
+	// package free of the channel-package's circular deps.
+	SendCard(ctx context.Context, msg OutboundMessage) (msgID string, err error)
 }
 
 // Command is one nightme-level slash command.
@@ -410,17 +419,24 @@ func (g *gateway) DispatchInbound(ctx context.Context, msg *InboundMessage) (*Co
 // is installed — that's the v1 pre-F-45 default and lets the
 // runtime come up before the reaction branch is wired.
 func (g *gateway) dispatchAction(ctx context.Context, msg *InboundMessage) (*CommandResult, error) {
+	slog.Default().Warn("F-46 debug: gateway.dispatchAction entry",
+		"chat_id", msg.ChatID,
+		"has_reaction", msg.Reaction != nil)
 	g.mu.RLock()
 	h := g.actionHandler
 	g.mu.RUnlock()
 	if h == nil {
+		slog.Default().Warn("F-46 debug: gateway.dispatchAction: actionHandler is nil, dropping")
 		// Pre-F-45 runtime: action events silently dropped.
 		// Better than routing an empty-text event to the agent
 		// loop, which would queue a no-op turn and confuse the
 		// user with a "thinking…" state.
 		return &CommandResult{Consumed: true, Dropped: true}, nil
 	}
-	if consumed := h(ctx, msg); consumed {
+	slog.Default().Warn("F-46 debug: gateway.dispatchAction: invoking handler")
+	consumed := h(ctx, msg)
+	if consumed {
+		slog.Default().Warn("F-46 debug: gateway.dispatchAction: handler returned true")
 		return &CommandResult{Consumed: true}, nil
 	}
 	// Handler ran but decided not to consume (e.g. no matching
@@ -429,6 +445,7 @@ func (g *gateway) dispatchAction(ctx context.Context, msg *InboundMessage) (*Com
 	// "owned" the event — re-routing it to dispatchMessage
 	// would either send a confusing empty text to the agent
 	// (F-45 path) or trigger the watch-mode gate (F-watch path).
+	slog.Default().Warn("F-46 debug: gateway.dispatchAction: handler returned false, dropping")
 	return &CommandResult{Consumed: true, Dropped: true}, nil
 }
 

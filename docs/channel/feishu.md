@@ -1928,6 +1928,60 @@ case gateway.OutReply, gateway.OutResult,
 
 **详细设计**:见 [`docs/feat/F-45-session-footer.md`](../feat/F-45-session-footer.md)。SPEC §0.12。
 
+### 13.23 F-46 决策(2026-08-06):决策卡交互 button + 原地 PATCH
+
+**背景**:SPEC §2.5 之前只定义了 reaction-based lifecycle。gtw 决策卡（§5.3.1 / §5.3.3）一直是纯文本 markdown——用户必须打 emoji 才能继续。F-46 把决策卡升级成可点 button + 原地 PATCH。
+
+**Feishu 端**做了 3 件事:
+
+1. **`handleCardAction`（`OnP2CardActionTrigger` 路由）**:
+   ```go
+   // internal/channel/feishu/adapter.go
+   func (a *Adapter) handleCardAction(ctx, event *larkcallback.CardActionTriggerEvent) (*larkcallback.CardActionTriggerResponse, error) {
+       // 1. 从 event.Action.Value["action"] 抽 "act:/gtw/<scenario>"
+       // 2. gtw.ActionLookup → ReactionKind
+       // 3. 合成 InboundMessage{Reaction: {TargetMsgID, Emoji, ChatID, UserID}}
+       // 4. push 到 a.incoming（buffer=128, 默认 0 阻塞）
+       // 5. 返回 toast "✅ 已选择 X"
+   }
+   ```
+   dispatcher 把 InboundMessage 推给 `g.actionHandler` → `cs.HandleAction` → 我的 `wireGTWActionOnSession` closure → `gtw.HandleAction` → `executeXxxAction` → `emitFollowUp` PATCH 原卡。
+
+2. **`OutCardPatch` case（`Send` dispatcher 路由）**:
+   ```go
+   case gateway.OutCardPatch:
+       if msg.Card == nil  →  return error "card missing payload"
+       if msg.ReplyTo == ""  →  return error "missing ReplyTo"
+       content, err := buildInteractiveCard(msg.Card)
+       if err != nil  →  return err
+       return a.PatchMessage(ctx, msg.ReplyTo, content)
+   ```
+   `PatchMessage` 调 SDK 的 `PATCH /im/v1/messages/{id}`，原卡内容被替换。logOutgoing 始终 fire 日志。
+
+3. **`buildCardButtons` 视觉反转**（PATCH 后渲染）:
+   - **选中的按钮**：`type: "success"`（Feishu 绿色填充）+ `✓` 前缀 + 完整 label（`✓ 🔄 重试`）
+   - **没选按钮**：`type: "default"` 灰描边 + `disabled: true` + 完整 label（`❌ 取消`）
+   - body **不**再加 `✅ 已选择 X` 行（冗余噪声；按钮绿色已传达"已选"语义）
+   - body 留原 body + 底部 `Retry failed: ...`（来自 `m.PatchResult`）
+
+**Feishu SDK 兼容性**：
+- Feishu Card 2.0 schema 仍支持 `type: "success"` / `type: "default"` / `disabled: true`
+- `card.action.trigger` 回调签名不变（只是 `event.Action.Value["action"]` 由 SDK 解析为我们的 `action` 字段）
+- PATCH `/im/v1/messages/{id}` 端点不变，Feishu 自家 SDK
+
+**已知设计决定**：
+- `gtwTestSeedDraft` 必须设 `CardRequestID: "gtw-test-" + userMsgID`——和 `sendScenarioCard` 的 RequestID 公式一致。PATCH 路径的 `buildInteractiveCard` 拿这个值，**没值就 fail "card missing request_id"**。
+- `/gtw test` 不 auto-dispatch——demo 模式让用户自己点。auto-mode 留给 `/gtw test auto <emoji>`。
+- `OutCard`（出新卡）的 `ReplyTo` 缺省 empty（顶层卡）。`OutCardPatch`（PATCH 已有卡）的 `ReplyTo` 必填 = bot card msg id。
+
+**不变式**：
+- §1.4 抽象 / 具体 边界保留：OutboundKind 仍 typed enum；Channel 自决 render
+- §1.3 Channel 不 import chatsession（不变；F-46 全程不破）
+- bridges 协议零变化（Feishu card API 是公共 SDK）
+- Receipt 自治不变（决策卡 ≠ receipt card，是独立 card message）
+
+**详细设计 + 调试心得**:见 [`docs/feat/F-46-interactive-cards.md`](../feat/F-46-interactive-cards.md)。SPEC §0.13 + §2.6。
+
 ## 15. v1.3.x 实施计划
 
 ### 15.0 状态(2026-08-05 F-40 + F-41 落地后)

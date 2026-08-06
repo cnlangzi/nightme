@@ -349,12 +349,17 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// forwards the event. Without this wiring the reaction
 	// pipeline is dead end-to-end (gtw decision cards can't be
 	// acted on by user emoji clicks).
+	slog.Default().Warn("F-46 debug: production WithActionHandler installed")
 	gwImpl.WithActionHandler(func(ctx context.Context, msg *gateway.InboundMessage) bool {
+		slog.Default().Warn("F-46 debug: production action handler closure fired",
+			"has_reaction", msg != nil && msg.Reaction != nil,
+			"has_action", msg != nil && msg.Action != nil)
 		if msg == nil {
 			return false
 		}
 		cs := mgr.Get(msg.ChatID)
 		if cs == nil {
+			slog.Default().Warn("F-46 debug: production action handler: cs nil, returning false")
 			return false
 		}
 		// Reactions are the only event the runtime wires up
@@ -363,12 +368,15 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		// can split them out when the permission-card path is
 		// added.
 		if msg.Reaction != nil {
-			return cs.HandleAction(ctx, chatsession.ReactionEvent{
+			consumed := cs.HandleAction(ctx, chatsession.ReactionEvent{
 				TargetMsgID: msg.Reaction.TargetMsgID,
 				Emoji:       msg.Reaction.Emoji,
 				UserID:      msg.Reaction.UserID,
 				ChatID:      msg.Reaction.ChatID,
 			})
+			slog.Default().Warn("F-46 debug: production action handler: cs.HandleAction returned",
+				"consumed", consumed)
+			return consumed
 		}
 		return false
 	})

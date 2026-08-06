@@ -6,7 +6,15 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/chatsession"
 )
+
+// chatsessionCardChoice is a local alias for the chatsession
+// package's CardChoice. F-46 stores the rendered-card choices on
+// GTWDraft so the action handler's follow-up PATCH can rebuild
+// the card with Disabled=true.
+type chatsessionCardChoice = chatsession.CardChoice
 
 // Sender is the small surface the gtw package needs from
 // ChatSession. Production callers pass an adapter backed by
@@ -46,6 +54,13 @@ type HandlerDeps struct {
 	// Send is the IM-side send callback. Production: wraps
 	// gateway.Channel.Send; tests: appends to a slice.
 	Send SendFunc
+	// SendCard (F-46) is the IM-side card send callback. Returns
+	// the bot-side message id assigned by the channel so the
+	// dispatcher can store it on the draft for later PATCH.
+	// Production: wraps gateway.Channel.SendCard; tests can
+	// inject a fake or leave nil (legacy fallback uses Send +
+	// discards the id, action handler emits no PATCH).
+	SendCard SendCardFunc
 	// Git wraps the local git binary. Tests inject a fake.
 	Git GitRunner
 	// NewPlatform picks a PlatformClient based on the remote URL.
@@ -279,7 +294,7 @@ func emitBranchExistsDraft(
 	payload FixDraftPayload,
 	existingPath string,
 ) (*Result, error) {
-	card := renderBranchExistsCard(payload, existingPath)
+	card := renderBranchExistsCardData(payload, existingPath)
 	return sendDraft(ctx, deps, chatID, messageID, userMsgID, card, drafts, DraftFixBranchExists, payload)
 }
 
@@ -290,24 +305,110 @@ func emitWorktreeFailDraft(
 	drafts DraftsMap,
 	payload FixDraftPayload,
 ) (*Result, error) {
-	card := renderWorktreeFailCard(payload)
+	card := renderWorktreeFailCardData(payload)
 	return sendDraft(ctx, deps, chatID, messageID, userMsgID, card, drafts, DraftFixWorktreeFail, payload)
 }
 
 func sendDraft(
 	ctx context.Context,
 	deps HandlerDeps,
-	chatID, messageID, userMsgID, card string,
+	chatID, messageID, userMsgID string,
+	card Card,
 	drafts DraftsMap,
 	kind DraftKind,
 	payload FixDraftPayload,
 ) (*Result, error) {
+	requestID := "gtw-fix-" + userMsgID
+	if requestID == "" {
+		requestID = "gtw-fix-" + payload.Branch
+	}
+	card.RequestID = requestID
+
+	var botMsgID string
+	if deps.SendCard != nil {
+		id, err := deps.SendCard(ctx, OutCardMsg{
+			ChatID:  chatID,
+			ReplyTo: messageID,
+			Card:    card,
+		})
+		if err == nil {
+			botMsgID = id
+		}
+		// On error: fall through to text Send as a best-effort so
+		// the user still sees the decision content even if the
+		// channel's card path is unavailable.
+	}
+	if deps.SendCard == nil || botMsgID == "" {
+		// Legacy / fallback: render the card as plain markdown and
+		// send via deps.Send. The dispatcher still stores the
+		// draft so the reaction pipeline works; the action handler
+		// just emits plain text follow-ups (no PATCH) when the
+		// bot message id is empty.
+		_ = deps.Send(ctx, OutMsg{
+			ChatID:  chatID,
+			ReplyTo: messageID,
+			Text:    renderCardMarkdown(card),
+		})
+	}
+
 	drafts.Store(userMsgID, &Draft{
-		Kind:      kind,
-		Payload:   payload,
-		CreatedAt: deps.Now(),
+		Kind:          kind,
+		Payload:       payload,
+		CreatedAt:     deps.Now(),
+		BotMessageID:  botMsgID,
+		CardTitle:     card.Title,
+		CardBody:      card.Body,
+		CardChoices:   toChatsessionCardChoices(card.Choices),
+		CardRequestID: requestID,
 	})
-	return reply(ctx, deps.Send, chatID, messageID, card), nil
+	return &Result{Consumed: true}, nil
+}
+
+// toChatsessionCardChoices translates gtw.CardChoice to the
+// chatsession.CardChoice that lives on GTWDraft. Mirrors the
+// gtwSendAdapter translation for the inverse direction.
+func toChatsessionCardChoices(in []CardChoice) []chatsessionCardChoice {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]chatsessionCardChoice, len(in))
+	for i, c := range in {
+		out[i] = chatsessionCardChoice{
+			Emoji:  c.Emoji,
+			Label:  c.Label,
+			Action: c.Action,
+		}
+	}
+	return out
+}
+
+// renderCardMarkdown flattens a Card back to plain markdown for
+// legacy channels that don't support interactive cards (Feishu
+// Web in some configs, Slack, etc.). The shape mirrors the F-45
+// plain-text decision cards so the user's view is unchanged.
+func renderCardMarkdown(c Card) string {
+	var b strings.Builder
+	if c.Title != "" {
+		b.WriteString(c.Title)
+		b.WriteString("\n")
+	}
+	if c.Body != "" {
+		b.WriteString(c.Body)
+		b.WriteString("\n")
+	}
+	if len(c.Choices) > 0 {
+		b.WriteString("\n选择操作(反应对应 emoji):\n")
+		for _, ch := range c.Choices {
+			label := ch.Label
+			if ch.Emoji != "" {
+				label = ch.Emoji + " " + label
+			}
+			b.WriteString("  ")
+			b.WriteString(label)
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
 }
 
 // reply is the single-send-and-ack helper. The reply is threaded

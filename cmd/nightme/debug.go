@@ -421,6 +421,13 @@ func (c *capturingChannel) Name() string { return "capture" }
 func (c *capturingChannel) Start(_ context.Context) error { return nil }
 func (c *capturingChannel) Stop(_ context.Context) error  { return nil }
 
+func (c *capturingChannel) SendCard(_ context.Context, m gateway.OutboundMessage) (string, error) {
+	_ = c.Send(context.Background(), m)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return fmt.Sprintf("capture-card-%d", len(c.msgs)), nil
+}
+
 func (c *capturingChannel) Send(_ context.Context, m gateway.OutboundMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

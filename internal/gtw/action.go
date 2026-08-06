@@ -3,6 +3,7 @@ package gtw
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 )
@@ -29,13 +30,24 @@ func HandleAction(
 	drafts DraftsMap,
 	ev ReactionEvent,
 ) (bool, error) {
+	slog.Default().Warn("F-46 debug: HandleAction entry",
+		"target_msg_id", ev.TargetMsgID,
+		"emoji", ev.Emoji,
+		"chat_id", ev.ChatID)
 	if ev.TargetMsgID == "" || ev.Emoji == "" {
+		slog.Default().Warn("F-46 debug: HandleAction empty target/emoji, return false")
 		return false, nil
 	}
 	draft := drafts.Lookup(ev.TargetMsgID)
 	if draft == nil {
+		slog.Default().Warn("F-46 debug: HandleAction draft not found",
+			"target_msg_id", ev.TargetMsgID)
 		return false, nil
 	}
+	slog.Default().Warn("F-46 debug: HandleAction draft found",
+		"target_msg_id", ev.TargetMsgID,
+		"draft_kind", draft.Kind,
+		"bot_msg_id", draft.BotMessageID)
 	switch draft.Kind {
 	case DraftFixBranchExists:
 		return executeBranchExistsAction(ctx, deps, cs, slot, drafts, ev, draft), nil
@@ -45,6 +57,8 @@ func HandleAction(
 	case DraftFixWorktreeFail:
 		return executeWorktreeFailAction(ctx, deps, cs, slot, drafts, ev, draft), nil
 	}
+	slog.Default().Warn("F-46 debug: HandleAction draft kind not matched",
+		"draft_kind", draft.Kind)
 	return false, nil
 }
 
@@ -69,7 +83,7 @@ func executeBranchExistsAction(
 		// the draft is broken — take it and surface a clear
 		// error so the user can re-run /gtw fix.
 		drafts.Take(ev.TargetMsgID)
-		_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID, Text: "❌ Internal error: draft missing repo."})
+		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), "❌ Internal error: draft missing repo.")
 		return true
 	}
 
@@ -83,50 +97,47 @@ func executeBranchExistsAction(
 		// the nightme/wip label is still on the issue. Better
 		// to over-report than leave a stale label dangling.
 		rollbackOK := true
+		resultText := fmt.Sprintf("❌ Cancelled fix #%d.", p.IssueID)
 		if p.LabelAdded {
 			owner, repo, _ := splitOwnerRepo(p.Repo)
 			plat, platErr := deps.NewPlatform(PlatformKind(p.Platform))
 			switch {
 			case platErr != nil || plat == nil:
-				_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID, Text: fmt.Sprintf(
+				resultText = fmt.Sprintf(
 					"⚠️ Cancelled fix #%d locally, but could not reach the platform to remove `nightme/wip` label: %v\n  Manual cleanup: `gh issue edit %d --remove-label nightme/wip` (or `glab issue update %d --unlabel nightme/wip`).",
-					p.IssueID, platErr, p.IssueID, p.IssueID)})
+					p.IssueID, platErr, p.IssueID, p.IssueID)
 				rollbackOK = false
 			default:
 				_ = plat.RemoveLabel(ctx, owner, repo, p.IssueID, LabelWIP)
 			}
 		}
-		if rollbackOK {
-			_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID,
-				Text: fmt.Sprintf("❌ Cancelled fix #%d.", p.IssueID)})
-		}
+		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), resultText)
+		_ = rollbackOK
 		return true
 
 	case ReactionNewV2:
 		drafts.Take(ev.TargetMsgID)
 		repoRoot := repoRootFromCS(cs)
+		resultText := ""
 		for n := range 9 {
 			n += 2 // 2..10 inclusive
 			variant := BranchVariant(p.Branch, n)
 			exists, err := BranchExists(ctx, repoRoot, variant, deps.Git)
 			if err != nil {
-				_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID,
-					Text: fmt.Sprintf("❌ git show-ref failed: %v", err)})
-				return true
+				resultText = fmt.Sprintf("❌ git show-ref failed: %v", err)
+				break
 			}
 			if exists {
 				continue
 			}
 			worktree := WorktreePath(repoRoot, BranchVariant(p.Slug, n))
 			if err := WorktreeAdd(ctx, repoRoot, variant, worktree, "HEAD", deps.Git); err != nil {
-				_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID,
-					Text: fmt.Sprintf("❌ git worktree add: %v", err)})
-				return true
+				resultText = fmt.Sprintf("❌ git worktree add: %v", err)
+				break
 			}
 			if err := cs.SetActiveCwd(worktree); err != nil {
-				_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID,
-					Text: fmt.Sprintf("❌ SetActiveCwd: %v", err)})
-				return true
+				resultText = fmt.Sprintf("❌ SetActiveCwd: %v", err)
+				break
 			}
 			slot.Store(Context{
 				Issue:     p.IssueID,
@@ -135,42 +146,37 @@ func executeBranchExistsAction(
 				State:     StateFixing,
 				UpdatedAt: deps.Now(),
 			})
-			_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID,
-				Text: fmt.Sprintf("✅ Fix #%d 就绪(使用 %s)。", p.IssueID, variant)})
-			return true
+			resultText = fmt.Sprintf("✅ Fix #%d 就绪(使用 %s)。", p.IssueID, variant)
+			break
 		}
-		_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID,
-			Text: "❌ Too many branch variants; please clean up locally."})
+		if resultText == "" {
+			resultText = "❌ Too many branch variants; please clean up locally."
+		}
+		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), resultText)
 		return true
 
 	case ReactionJoin:
 		drafts.Take(ev.TargetMsgID)
 		repoRoot := repoRootFromCS(cs)
 		existingPath, err := WorktreeListPath(ctx, repoRoot, p.Branch, deps.Git)
+		resultText := ""
 		if err != nil {
-			_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID,
-				Text: fmt.Sprintf("❌ git worktree list: %v", err)})
-			return true
+			resultText = fmt.Sprintf("❌ git worktree list: %v", err)
+		} else if existingPath == "" {
+			resultText = fmt.Sprintf("❌ Branch %s exists but no worktree holds it; run `git worktree add` manually.", p.Branch)
+		} else if err := cs.SetActiveCwd(existingPath); err != nil {
+			resultText = fmt.Sprintf("❌ SetActiveCwd: %v", err)
+		} else {
+			slot.Store(Context{
+				Issue:     p.IssueID,
+				Branch:    p.Branch,
+				Worktree:  existingPath,
+				State:     StateFixing,
+				UpdatedAt: deps.Now(),
+			})
+			resultText = fmt.Sprintf("✅ Joined existing worktree at %s.", existingPath)
 		}
-		if existingPath == "" {
-			_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID,
-				Text: fmt.Sprintf("❌ Branch %s exists but no worktree holds it; run `git worktree add` manually.", p.Branch)})
-			return true
-		}
-		if err := cs.SetActiveCwd(existingPath); err != nil {
-			_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID,
-				Text: fmt.Sprintf("❌ SetActiveCwd: %v", err)})
-			return true
-		}
-		slot.Store(Context{
-			Issue:     p.IssueID,
-			Branch:    p.Branch,
-			Worktree:  existingPath,
-			State:     StateFixing,
-			UpdatedAt: deps.Now(),
-		})
-		_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID,
-			Text: fmt.Sprintf("✅ Joined existing worktree at %s.", existingPath)})
+		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), resultText)
 		return true
 	}
 	// Unrecognised emoji on a known draft: leave the draft in
@@ -195,60 +201,122 @@ func executeWorktreeFailAction(
 	draft *Draft,
 ) bool {
 	p := draft.Payload
+	rk := ReactionKind(ev.Emoji)
+	slog.Default().Warn("F-46 debug: executeWorktreeFailAction entry",
+		"emoji", ev.Emoji,
+		"reaction_kind", rk,
+		"reaction_retry", ReactionRetry,
+		"matches", rk == ReactionRetry)
 
 	switch ReactionKind(ev.Emoji) {
 	case ReactionCancel:
+		slog.Default().Warn("F-46 debug: executeWorktreeFailAction → ReactionCancel")
 		drafts.Take(ev.TargetMsgID)
 		rollbackOK := true
+		resultText := fmt.Sprintf("❌ Cancelled fix #%d.", p.IssueID)
 		if p.LabelAdded {
 			owner, repo, _ := splitOwnerRepo(p.Repo)
 			plat, platErr := deps.NewPlatform(PlatformKind(p.Platform))
 			switch {
 			case platErr != nil || plat == nil:
-				_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID, Text: fmt.Sprintf(
+				resultText = fmt.Sprintf(
 					"⚠️ Cancelled fix #%d locally, but could not reach the platform to remove `nightme/wip` label: %v\n  Manual cleanup: `gh issue edit %d --remove-label nightme/wip` (or `glab issue update %d --unlabel nightme/wip`).",
-					p.IssueID, platErr, p.IssueID, p.IssueID)})
+					p.IssueID, platErr, p.IssueID, p.IssueID)
 				rollbackOK = false
 			default:
 				_ = plat.RemoveLabel(ctx, owner, repo, p.IssueID, LabelWIP)
 			}
 		}
-		if rollbackOK {
-			_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID,
-				Text: fmt.Sprintf("❌ Cancelled fix #%d.", p.IssueID)})
-		}
+		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), resultText)
+		_ = rollbackOK
 		return true
 
 	case ReactionRetry:
+		slog.Default().Warn("F-46 debug: executeWorktreeFailAction → ReactionRetry")
 		drafts.Take(ev.TargetMsgID)
 		repoRoot := repoRootFromCS(cs)
 		worktree := WorktreePath(repoRoot, p.Slug)
 		err := WorktreeAdd(ctx, repoRoot, p.Branch, worktree, "HEAD", deps.Git)
+		resultText := ""
 		if err != nil {
-			_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID,
-				Text: fmt.Sprintf("❌ Retry failed: %v", err)})
-			return true
+			resultText = fmt.Sprintf("❌ Retry failed: %v", err)
+		} else if err := cs.SetActiveCwd(worktree); err != nil {
+			resultText = fmt.Sprintf("❌ SetActiveCwd: %v", err)
+		} else {
+			slot.Store(Context{
+				Issue:     p.IssueID,
+				Branch:    p.Branch,
+				Worktree:  worktree,
+				State:     StateFixing,
+				UpdatedAt: deps.Now(),
+			})
+			resultText = fmt.Sprintf("✅ Fix #%d 就绪(重试成功)。", p.IssueID)
 		}
-		if err := cs.SetActiveCwd(worktree); err != nil {
-			_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID,
-				Text: fmt.Sprintf("❌ SetActiveCwd: %v", err)})
-			return true
-		}
-		slot.Store(Context{
-			Issue:     p.IssueID,
-			Branch:    p.Branch,
-			Worktree:  worktree,
-			State:     StateFixing,
-			UpdatedAt: deps.Now(),
-		})
-		_ = deps.Send(ctx, OutMsg{ChatID: ev.ChatID,
-			Text: fmt.Sprintf("✅ Fix #%d 就绪(重试成功)。", p.IssueID)})
+		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), resultText)
 		return true
 	}
 	// Unrecognised emoji: same semantics as branch-exists.
+	slog.Default().Warn("F-46 debug: executeWorktreeFailAction → emoji not matched",
+		"reaction_kind", rk)
 	return false
 }
 
+// emitFollowUp is the F-46 single-sink for action-handler
+// outcomes. When the dispatched draft has a bot-side message id
+// (i.e. the dispatcher sent an interactive card), it emits a
+// PATCH that disables the original card and appends a result
+// line. When the dispatcher never sent a card (legacy text or
+// fallback), it emits a plain text reply preserved from F-45.
+func emitFollowUp(
+	ctx context.Context,
+	deps HandlerDeps,
+	draft *Draft,
+	ev ReactionEvent,
+	chosenEmoji string,
+	resultText string,
+) {
+	slog.Default().Warn("F-46 debug: emitFollowUp entry",
+		"bot_msg_id", draft.BotMessageID,
+		"chosen_emoji", chosenEmoji,
+		"result_text", resultText)
+	if draft.BotMessageID != "" {
+		_ = deps.Send(ctx, OutMsg{
+			ChatID:             ev.ChatID,
+			PatchBotMsgID:      draft.BotMessageID,
+			PatchChosenEmoji:   chosenEmoji,
+			PatchResult:        resultText,
+			CardTitle:          draft.CardTitle,
+			CardBody:           draft.CardBody,
+			CardChoices:        gtwChoicesFromDraft(draft),
+			CardRequestID:      draft.CardRequestID,
+			ChosenChoiceEmoji:   chosenEmoji,
+		})
+		return
+	}
+	_ = deps.Send(ctx, OutMsg{
+		ChatID:  ev.ChatID,
+		ReplyTo: ev.TargetMsgID,
+		Text:    resultText,
+	})
+}
+
+// gtwChoicesFromDraft translates the chatsession.CardChoice
+// slice on the draft into the gtw-package CardChoice slice the
+// OutMsg adapter expects.
+func gtwChoicesFromDraft(draft *Draft) []CardChoice {
+	if len(draft.CardChoices) == 0 {
+		return nil
+	}
+	out := make([]CardChoice, len(draft.CardChoices))
+	for i, c := range draft.CardChoices {
+		out[i] = CardChoice{
+			Emoji:  c.Emoji,
+			Label:  c.Label,
+			Action: c.Action,
+		}
+	}
+	return out
+}
 // splitOwnerRepo splits "owner/repo" into its two parts.
 func splitOwnerRepo(s string) (string, string, error) {
 	idx := strings.Index(s, "/")

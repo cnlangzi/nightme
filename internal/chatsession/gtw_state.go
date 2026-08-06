@@ -69,6 +69,15 @@ type GTWFixDraftPayload struct {
 	ChatID string
 }
 
+// CardChoice is one button on a decision card. F-46 → action
+// handler includes the original Choices on the PATCH so the
+// rebuilt card keeps the same layout (every button disabled).
+type CardChoice struct {
+	Emoji  string
+	Label  string
+	Action string
+}
+
 // GTWDraft is one pending user-confirmation card indexed by the
 // bot reply's userMsgID. Reactions on that message id route to
 // the matching draft via ChatSession.HandleAction.
@@ -79,4 +88,18 @@ type GTWDraft struct {
 	// useful for diagnostics (e.g. "draft sat for 30s without
 	// reaction → expunge").
 	CreatedAt time.Time
+
+	// F-46: bot-side message id of the rendered decision card.
+	// Populated by the dispatcher after SendCard returns; consumed
+	// by the action handler's follow-up PATCH (see
+	// gtw.executeXxxAction). Empty when the dispatcher never sent
+	// a card (e.g. legacy text-only fallbacks).
+	BotMessageID string
+	// F-46: original card render data so the action handler can
+	// rebuild the card with `Disabled: true` and a result note
+	// without going back to the dispatcher.
+	CardTitle     string
+	CardBody      string
+	CardChoices   []CardChoice
+	CardRequestID string
 }

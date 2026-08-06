@@ -676,6 +676,9 @@ func (cs *ChatSession) EmitMessageState(userMsgID string, state agent.MessageSta
 // fall through to future handlers — v1 has no fallthrough target
 // but the contract is in place for F-31+ extensions.
 func (cs *ChatSession) SetActionHandler(h func(ctx context.Context, ev ReactionEvent) (consumed bool)) {
+	slog.Default().Warn("F-46 debug: ChatSession.SetActionHandler entry",
+		"chat_id", cs.ChatID,
+		"handler_nil", h == nil)
 	cs.mu.Lock()
 	cs.onReaction = h
 	cs.mu.Unlock()
@@ -702,9 +705,20 @@ func (cs *ChatSession) HandleAction(ctx context.Context, ev ReactionEvent) bool 
 	h := cs.onReaction
 	cs.mu.RUnlock()
 	if h == nil {
+		slog.Default().Warn("F-46 debug: ChatSession.HandleAction onReaction is nil",
+			"chat_id", cs.ChatID,
+			"target_msg_id", ev.TargetMsgID,
+			"emoji", ev.Emoji)
 		return false
 	}
-	return h(ctx, ev)
+	slog.Default().Warn("F-46 debug: ChatSession.HandleAction entry",
+		"chat_id", cs.ChatID,
+		"target_msg_id", ev.TargetMsgID,
+		"emoji", ev.Emoji)
+	consumed := h(ctx, ev)
+	slog.Default().Warn("F-46 debug: ChatSession.HandleAction return",
+		"consumed", consumed)
+	return consumed
 }
 
 // emitMessageStateForCurrentTurn fires onMessageState for the

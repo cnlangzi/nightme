@@ -12,13 +12,17 @@ import "context"
 // (e.g. add per-reply metadata, drop metadata, log all
 // replies) without touching every command.
 //
-// Returned error is always nil in the current implementation;
-// the signature includes error for forward-compat with
-// commands that may need to surface failures (e.g. when
-// reply involves async I/O in the future).
-func Reply(_ context.Context, _ RuntimeServices, text string) (*SlashOutput, error) {
+// Returns only *SlashOutput (no error) so callers can do
+//
+//	return command.Reply(ctx, rt, "..."), nil
+//
+// matching the (*SlashOutput, error) signature of
+// SlashCommandFactory.Handle. Callers that need to surface a
+// failure construct the SlashOutput directly with a non-nil
+// error.
+func Reply(_ context.Context, _ RuntimeServices, text string) *SlashOutput {
 	return &SlashOutput{
 		Reply:    text,
 		Consumed: true,
-	}, nil
+	}
 }

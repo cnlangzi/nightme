@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -33,28 +34,67 @@ func newFakeCmd(name string, summary string) *fakeCmd {
 
 func TestNewCommander_EmptyRegistry_NonCommandText(t *testing.T) {
 	c := NewCommander(NewRegistry())
-	got, err := c.Dispatch(context.Background(), RuntimeServices{},
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{},
 		SlashInput{Text: "hello world"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.Consumed {
-		t.Errorf("non-slash text should fall through, got Consumed=true")
+	if handled {
+		t.Errorf("non-slash text should report handled=false, got handled=true")
+	}
+	if got != nil {
+		t.Errorf("non-slash text should return nil output, got %+v", got)
 	}
 }
 
-func TestNewCommander_EmptyRegistry_SlashUnknown(t *testing.T) {
+func TestNewCommander_EmptyRegistry_SlashUnknown_FallsThrough(t *testing.T) {
+	// 2026-08-06: ADR 0007 follow-up. Previously unknown /cmd
+	// returned Consumed=true with a "Unknown command" reply. Now
+	// it reports handled=true + Consumed=false so the gateway
+	// can fall through to the agent loop, preserving the
+	// pre-F-51 passthrough characteristic.
 	c := NewCommander(NewRegistry())
-	got, err := c.Dispatch(context.Background(), RuntimeServices{},
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{},
 		SlashInput{Text: "/nope arg1 arg2"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !got.Consumed {
-		t.Errorf("unknown /cmd should reply with hint (Consumed=true), got Consumed=false")
+	if !handled {
+		t.Errorf("unknown /cmd should report handled=true (it WAS a slash command attempt), got handled=false")
 	}
-	if !strings.Contains(got.Reply, "Unknown command") {
-		t.Errorf("reply should mention unknown command, got %q", got.Reply)
+	if got == nil {
+		t.Fatalf("unknown /cmd should return non-nil output (Consumed=false), got nil")
+	}
+	if got.Consumed {
+		t.Errorf("unknown /cmd should report Consumed=false (gateway falls through to agent), got Consumed=true with reply %q", got.Reply)
+	}
+	if got.Reply != "" {
+		t.Errorf("unknown /cmd should not produce a reply (gateway forwards to agent), got %q", got.Reply)
+	}
+}
+
+func TestNewCommander_EmptyRegistry_SlashPath_FallsThrough(t *testing.T) {
+	// /etc/passwd style input — slash command attempt that the
+	// user might have intended as a file path. Should fall
+	// through to the agent loop, NOT be rejected with
+	// "Unknown command".
+	c := NewCommander(NewRegistry())
+	for _, text := range []string{
+		"/etc/passwd",
+		"/api/v1/foo",
+		"/@everyone hi",
+	} {
+		got, handled, err := c.Dispatch(context.Background(), RuntimeServices{},
+			SlashInput{Text: text})
+		if err != nil {
+			t.Fatalf("Dispatch(%q): %v", text, err)
+		}
+		if !handled {
+			t.Errorf("Dispatch(%q): handled=false, want handled=true (it was a slash command attempt)", text)
+		}
+		if got == nil || got.Consumed {
+			t.Errorf("Dispatch(%q): want Consumed=false (fall through), got %+v", text, got)
+		}
 	}
 }
 
@@ -64,10 +104,13 @@ func TestNewCommander_RoutedToRegisteredCmd(t *testing.T) {
 	reg.Register(gtw)
 
 	c := NewCommander(reg)
-	got, err := c.Dispatch(context.Background(), RuntimeServices{},
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{},
 		SlashInput{Text: "/gtw fix 42", Args: []string{"gtw", "fix", "42"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Errorf("known /cmd should report handled=true, got handled=false")
 	}
 	if !got.Consumed || got.Reply != "ok-gtw" {
 		t.Errorf("expected routed to gtw reply, got %+v", got)
@@ -87,10 +130,13 @@ func TestNewCommander_AliasRoutesToPrimary(t *testing.T) {
 	reg.Register(gtw)
 
 	c := NewCommander(reg)
-	got, err := c.Dispatch(context.Background(), RuntimeServices{},
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{},
 		SlashInput{Text: "/w list"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Errorf("alias should report handled=true, got handled=false")
 	}
 	if !got.Consumed || got.Reply != "ok-gtw" {
 		t.Errorf("alias /w should route to gtw, got %+v", got)
@@ -107,10 +153,13 @@ func TestNewCommander_NoArgsStillFillsArgs(t *testing.T) {
 
 	c := NewCommander(reg)
 	// gateway did NOT pre-parse; Args is empty.
-	got, err := c.Dispatch(context.Background(), RuntimeServices{},
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{},
 		SlashInput{Text: "/gtw fix 42"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handled {
+		t.Errorf("known /cmd should report handled=true")
 	}
 	if !got.Consumed {
 		t.Errorf("expected Consumed, got %+v", got)
@@ -129,22 +178,51 @@ func TestNewCommander_CaseInsensitive(t *testing.T) {
 	reg.Register(gtw)
 	c := NewCommander(reg)
 
-	got, _ := c.Dispatch(context.Background(), RuntimeServices{},
+	got, handled, _ := c.Dispatch(context.Background(), RuntimeServices{},
 		SlashInput{Text: "/GTW hi"})
-	if !got.Consumed || got.Reply != "ok-gtw" {
-		t.Errorf("expected /GTW to route to gtw, got %+v", got)
+	if !handled || !got.Consumed || got.Reply != "ok-gtw" {
+		t.Errorf("expected /GTW to route to gtw, got handled=%v output=%+v", handled, got)
 	}
 }
 
 func TestNewCommander_EmptyAfterSlash_FallsThrough(t *testing.T) {
 	c := NewCommander(NewRegistry())
-	got, err := c.Dispatch(context.Background(), RuntimeServices{},
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{},
 		SlashInput{Text: "/   trailing only"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// "/" alone or "/ " is not a slash command — fall through.
-	if got.Consumed {
-		t.Errorf("'/   ' (empty name) should fall through, got Consumed=true")
+	if handled {
+		t.Errorf("'/   ' (empty name) should report handled=false, got handled=true")
+	}
+	if got != nil {
+		t.Errorf("'/   ' should return nil output, got %+v", got)
+	}
+}
+
+func TestNewCommander_HandlerError_BecomesReply(t *testing.T) {
+	// A command whose Handle returns an error should surface as
+	// a Consumed=true reply (handled=true). The user gets a
+	// visible error message; the gateway does NOT fall through.
+	reg := NewRegistry()
+	cmd := newFakeCmd("boom", "")
+	cmd.err = errors.New("kaboom")
+	reg.Register(cmd)
+
+	c := NewCommander(reg)
+	got, handled, dispatchErr := c.Dispatch(context.Background(), RuntimeServices{},
+		SlashInput{Text: "/boom"})
+	if dispatchErr != nil {
+		t.Fatalf("unexpected error: %v", dispatchErr)
+	}
+	if !handled {
+		t.Errorf("erroring command should report handled=true")
+	}
+	if got == nil || !got.Consumed {
+		t.Fatalf("erroring command should return Consumed=true reply, got %+v", got)
+	}
+	if !strings.Contains(got.Reply, "kaboom") {
+		t.Errorf("reply should contain the error message, got %q", got.Reply)
 	}
 }

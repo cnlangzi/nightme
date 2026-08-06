@@ -11,18 +11,13 @@ import (
 // builds this once at startup; the Commander passes it to every
 // dispatched Handle() call.
 //
-// Commands must NEVER reach for *chatsession.Manager / *gtw /
-// *gateway concrete types via this struct — only the interfaces
-// below. RuntimeServices does NOT contain gateway.Channel or
-// gateway.OutboundMessage; it carries command.Channel (this
-// package) instead. See F-51 doc §1.2.7 for the translation
-// convention.
+// ADR 0007 (2026-08-06): Session was previously exposed here
+// through services.SessionService. The indirection was removed
+// — command packages now hold *chatsession.Manager directly via
+// their Factory, mirroring how they hold any other state they
+// need. The remaining fields are real interfaces with multiple
+// implementations or genuine cross-cutting concerns.
 type RuntimeServices struct {
-	// Session is the per-chat state surface (activeCwd,
-	// activeAgent, primaryAgent, AgentSession pool, per-chat
-	// toggle modes). Implemented by *chatsession.Manager via
-	// the sessionAdapter in cmd/nightme/session_adapter.go.
-	Session services.SessionService
 	// ReactionRouter dispatches reaction events to the right
 	// handler. Implemented by services.reactionRouter —
 	// held as a singleton by the runtime.

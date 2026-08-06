@@ -710,18 +710,16 @@ F-51 把 slash command 提到独立包 `internal/command/`，让 `chatsession` �
 internal/command/
 ├── commander.go          ← Commander 接口、Dispatch、Specs
 ├── factory.go            ← SlashCommandFactory、SlashRegistry
-├── runtime.go            ← RuntimeServices 聚合接口
+├── runtime.go            ← RuntimeServices 聚合接口 (Channel + ReactionRouter)
 ├── services/
-│   ├── session.go        ← SessionService / Session 接口
-│   ├── reaction.go       ← ReactionRouter 接口
-│   └── (watch/think/tools/service.go 等按需加)
+│   └── reaction.go       ← ReactionRouter 接口 (services/session.go ADR 0007 删除)
 ├── preflight.go          ← RequireActiveCwd 等通用 preflight
 ├── reply.go              ← 唯一 reply helper（合并两份）
 │
 ├── cwd/commands.go       ← /cwd 实现 SlashCommandFactory
 ├── use/commands.go       ← /use
 ├── kill/commands.go      ← /kill
-├── new/commands.go       ← /new
+├── newcmd/commands.go    ← /new (目录名 newcmd 因 Go new 关键字)
 ├── watch/commands.go     ← /watch
 ├── think/commands.go     ← /think
 ├── tools/commands.go     ← /tools
@@ -736,11 +734,11 @@ internal/command/
     └── debug.go          ← /gtw test(UAT/debug)
 ```
 
-依赖箭头（v1.3.x F-51 落地后）：
-- `command/` 包**只** import stdlib + 各服务接口；**不** import chatsession / gtw 具体类
+依赖箭头（v1.3.x F-51 落地后；2026-08-06 ADR 0007 简化）：
+- `command/` 包 import stdlib + `command/services` (ReactionRouter 接口) + `internal/chatsession` (ADR 0007 允许)
 - `chatsession` 包**不** import command/、**不** import gtw
-- `gtw` 包迁入 `command/gtw/` 后能 import `command/`（看 Service 接口）；**不** import chatsession 具体类（用 `SessionService` 接口）
-- `cmd/nightme/` 是唯一同时持 chatsession / gtw / channel 具体实现的装配者；通过 adapter 把它们喂给 `command.RuntimeServices`
+- `gtw` 包迁入 `command/gtw/` 后能 import `command/`；import `internal/chatsession` 取 `*chatsession.ChatSession`（ADR 0007 允许）
+- `cmd/nightme/` 装配者：把所有具体类型喂给各 command Factory 构造函数
 
 ### 2. `chatsession` 回归 §1.3 的中立 session 持有
 
@@ -793,39 +791,22 @@ ch.Incoming(reaction event)
 `internal/command/services/` 下：
 
 ```go
-// SessionService chatsession.Manager 的窄面
-type SessionService interface {
-    Get(chatID string) (Session, error)
-    GetOrCreate(chatID string) (Session, error)
-}
-type Session interface {
-    ActiveCwd() string
-    SetActiveCwd(p string) error
-    ActiveAgent() string
-    SetActiveAgent(name string) error
-    KillAll() ([]KillResult, error)
-    NewActiveAgentSessions(ctx context.Context, agentName string) ([]ResetResult, error)
-    // ... slash command 需要的窄面,见 §3.x
-}
-
-// ReactionRouter 跨 chat 的 reaction 分发
+// ReactionRouter 跨 chat 的 reaction 分发 (services/reaction.go)
 type ReactionRouter interface {
     Register(chatID string, handler func(ctx, ev ReactionEvent) bool)
     Handle(ctx context.Context, chatID string, ev ReactionEvent) bool
 }
 
 // RuntimeServices 聚合:command handler 拿到的不变量
-type RuntimeServices interface {
-    Session() SessionService
-    ReactionRouter() ReactionRouter
-    Channel() Channel          // gateway.Channel 接口,command 不必 import gateway
-    Watch() WatchService       // optional(F-watch),待加
-    Think() ThinkService       // optional(F-think),待加
-    Gtw() GtwService           // optional(F-45 gtw 公共接口),命令级访问
+// ADR 0007 (2026-08-06) 删除了 Session 字段 — 各 command Factory 现在
+// 直接持有 *chatsession.Manager,不再经 SessionService 间接层。
+type RuntimeServices struct {
+    ReactionRouter ReactionRouter
+    Channel        Channel  // gateway.Channel 接口,command 不必 import gateway
 }
 ```
 
-接口住 `command/` 包,**实现住具体服务包**（chatsession 实现 SessionService、gtw 实现 GtwService、runtime 实现 ReactionRouter）。Go 接口匹配的隐式机制让 chatsession / gtw **不需要** import command/ 包来"实现"接口——只要方法签名对得上，runtime 的 adapter 会把它们粘起来。
+只有 ReactionRouter 仍是抽象接口；chat-session 状态由各 command Factory 直接持有 (`*chatsession.Manager`)。Go 接口匹配的隐式机制让 chatsession **不需要** import command/ 包来"实现"接口 — `*chatsession.Manager` 直接被 command 包消费 (ADR 0007 撤销了原 §3.2 不变式)。
 
 ### 5. runtime 装配模式
 
@@ -837,18 +818,15 @@ mgr := chatsession.NewManager().WithSpawner(...).WithPersistence(...)
 gtwMgr := commandgtw.NewManager()
 ch := feishu.New(...)
 
-// Adapter:把具体类包成接口(住在 runtime,不进 chatsession / gtw)
-sessions := runtimeAdapter.NewSessionService(mgr, cfg.Primary)
-router := runtimeAdapter.NewReactionRouter()
-// gtw 注册自己的 reaction handler
+// ADR 0007:不再有 SessionService adapter — 8 个 Factory
+// 构造函数直接拿 *chatsession.Manager。
+router := commandServices.NewReactionRouter()
 router.Register("*", gtwMgr.HandleReaction)
 
-// RuntimeServices 聚合
+// RuntimeServices 聚合 (无 Session 字段)
 rt := command.RuntimeServices{
-    Session:        sessions,
     ReactionRouter: router,
     Channel:        ch,
-    // ...
 }
 
 // Commander 装配
@@ -918,7 +896,7 @@ gw.WithActionHandler(func(ctx, msg) bool {
 
 ### B1 设计目标（未落地，下一 PR）
 
-7 个文件落地（`commander.go` / `factory.go` / `runtime.go` / `event.go` / `preflight.go` / `reply.go` / `services/{session,reaction}.go`）。`internal/command` 包不 import chatsession / gtw / gateway 任一具体类；`sessionAdapter` 住在 `cmd/nightme/session_adapter.go`（不放在 `command/services/`，避免 `command/services` 包反过来 import chatsession——见 feat doc §1.2.5 + §3.2）。`command.Commander` 接口签名是 `(ctx, RuntimeServices, SlashInput) (*SlashOutput, error)`（用 command 自有类型；gateway 通过 `DispatchFunc` 函数值反向调，避开 import cycle，见 feat doc §1.2.7）。
+6 个文件落地（`commander.go` / `factory.go` / `runtime.go` / `event.go` / `preflight.go` / `reply.go` + `services/reaction.go`）。**ADR 0007 (2026-08-06)** 撤销了 B1 阶段规划的 `services/session.go` SessionService 抽象层 — command 包现在 import `internal/chatsession` 直接拿 `*chatsession.Manager`，不再经 adapter 间接层。`command.Commander` 接口签名是 `(ctx, RuntimeServices, SlashInput) (*SlashOutput, error)`（用 command 自有类型；gateway 通过 `DispatchFunc` 函数值反向调，避开 import cycle，见 feat doc §1.2.7）。
 
 ### B2 设计目标（未落地）
 
@@ -930,7 +908,7 @@ gw.WithActionHandler(func(ctx, msg) bool {
 - `chatsession/reaction_state.go` / `gtw_state.go` / `gtw_accessors.go` / `reaction_test.go`：4 文件全删
 - `chatsession` import 表仅剩：`context` / `encoding/json` / `errors` / `fmt` / `log/slog` / `sort` / `strings` / `sync` / `sync/atomic` / `time` / `internal/agent` / `internal/registry`；grep 0 命中 `command/` / `gtw` / `gateway` 标识（**注**：F-51 标注的"fence comment"允许在 chatsession 源码留 "F-51 refactor: ..." 注释自指）
 - `gateway/gateway.go`：加 `WithCommander(dispatch DispatchFunc) Gateway`（接 `func(ctx, *InboundMessage) (*CommandResult, error)`，**不**接 `command.Commander` interface——避免 gateway 依赖 command）；`dispatchInbound` 路径：若 `msg.Text` 以 `/gtw` 开头，调 `dispatch(ctx, msg)`（shim 由 `cmd/nightme/run.go` 提供，翻译为 `command.SlashInput` / 调 `commander.Dispatch` / 翻译回 `*gateway.CommandResult`）；action 路径调 `rt.ReactionRouter.Handle`（不再调 `cs.HandleAction`）
-- `cmd/nightme/run.go`：装配 `gtwMgr := gtw.NewManager()` + `router := command.NewReactionRouter()` + `router.Register("*", gtwMgr.HandleReaction)` + `reg.Register(gtw.NewFactory(gtwMgr))` + `commander := command.NewCommander(reg)` + 编译期断言 `var _ command.Channel = (*gateway.Channel)(nil)` + `rt := command.RuntimeServices{Session: sessionAdapter{chatMgr, cfg.Primary}, ReactionRouter: router, Channel: ch}` + `gw.WithCommander(slashDispatchFunc)`（shim 函数）+ `gw.WithActionHandler` closure 调 `rt.ReactionRouter.Handle`（取代原 `cs.HandleAction`）
+- `cmd/nightme/run.go`：装配 `gtwMgr := gtw.NewManager()` + `router := command.NewReactionRouter()` + `router.Register("*", gtwMgr.HandleReaction)` + `reg.Register(gtw.NewFactory(gtwMgr))` + `reg.Register(watch.NewFactory(mgr, cfg.Primary))` ... (8 个命令全部 reg.Register) + `commander := command.NewCommander(reg)` + 编译期断言 `var _ command.Channel = (*gateway.Channel)(nil)` + `rt := command.RuntimeServices{ReactionRouter: router, Channel: ch}` (ADR 0007 后无 Session 字段) + `gw.WithCommander(slashDispatchFunc)`（shim 函数）+ `gw.WithActionHandler` closure 调 `rt.ReactionRouter.Handle`（取代原 `cs.HandleAction`）
 - `cmd/nightme/debug.go`：`nightme gtw list` / `nightme gtw reset` 改用 `gtwMgr` 直接调 `Manager.List(chatID)` / `Manager.Reset(chatID)`
 - `internal/channel/feishu/adapter.go::handleActCardAction` 第 3375 行的 `gateway.ReactionEvent{...}` 改为 `command.ReactionEvent{...}`（`gateway.ReactionEvent` 是 `chatsession.ReactionEvent` 的 type alias（`gateway/messages.go:199`），跟着一起删）
 
@@ -1008,7 +986,7 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 |------|------|------------|
 | **Channel Adapter** | IM 协议编解码；`Send(OutboundMessage)` 渲染；**自管** receipt card / thread / DOM 节点的完整生命周期（含 cold-create / PATCH / 终态） | ChatSession、AgentSession、workspace、agent、binding、任何渲染状态 |
 | **Gateway** | 中枢 orchestrator：slash command 路由（**通过 Commander 抽象，不直接 import handlers_*.go**）、binding 表（chat_id ↔ ChatSession）、ChatSession 生命周期、Channel↔ChatSession↔AgentSession 跨层调度、outbound 路由（stamp `ReplyTo=userMsgID` 送到对应 Channel） | IM 协议细节、agent 内部协议、PTY/ACP 细节、Channel 内部渲染状态、命令实现细节（具体命令实现住 `internal/command/<name>/`） |
-| **Slash Command Layer**（Commander）住 `internal/command/`，由 `SlashCommandFactory` 装配 | 命令抽象层：定义 `Commander` / `SlashCommandFactory` / `SlashRegistry` / `RuntimeServices` 接口；声明 `SessionService` / `ReactionRouter` 等服务接口；提供通用 `preflight` / `reply` helper。各命令子包（`internal/command/<name>/commands.go`）实现 `SlashCommandFactory` | 命令的具体业务逻辑由各 `<name>` 子包实现；command 包本身**不** import chatsession / gtw / channel 具体类 |
+| **Slash Command Layer**（Commander）住 `internal/command/`，由 `SlashCommandFactory` 装配 | 命令抽象层：定义 `Commander` / `SlashCommandFactory` / `SlashRegistry` / `RuntimeServices` 接口；声明 `ReactionRouter` 服务接口（ADR 0007 后不再有 SessionService）；提供通用 `preflight` / `reply` helper。各命令子包（`internal/command/<name>/commands.go`）实现 `SlashCommandFactory`，Factory 构造函数直接拿 `*chatsession.Manager` | 命令的具体业务逻辑由各 `<name>` 子包实现；command 包本身**不** import gtw / gateway / channel 具体类（chatsession 允许 — ADR 0007） |
 | **ChatSession** | per chat 的会话上下文（持久化）：activeCwd / activeAgent / primaryAgent / InputBuffer FSM / `currentTurnUserMsgID` 跟踪 / AgentSession 池索引 | chat_id 之外没有"自己是谁"；Channel 协议细节；agent 内部协议；receipt 渲染；**slash command 详情；任何命令包路径；gtw / command / gateway 任何具体类型的名字**（F-51 强化） |
 | **AgentSession** | CLI 进程句柄；`(agent, cwd)` 1:1 唯一标识（immutable）；events() chan；sendText/sendBlocks；close | chat_id、ChatSession、binding、Channel、slash command |
 | **Bridge** | nightme 与底层 AI Coding CLI 之间的通信抽象；`AgentSession` 接口（Events / SendText / SendBlocks / SendPermission / Close）；四种模式（ACP / SDK / PTY / JSON-IO） | chat、binding、ChatSession、Channel |
@@ -1360,41 +1338,43 @@ channel.Send(ctx, OutboundMessage)
 
 ### 2.3 用户用 slash command 管理 ChatSession
 
-> **v1.3.x F-51 变化**：本节描述的命令（`/cwd` `/use` `/kill` `/watch` `/think` `/tools` `/new` `/gtw`）的物理实现位置从 `internal/gateway/handlers_*.go`（混合在 gateway 包内）搬到 `internal/command/<name>/commands.go`（独立的 `command/` 包，slash command 自有家）。Gateway 现在不持有 handler ——它持 `Commander` 接口的引用，在收到 slash command 形式的消息时调 `commander.Dispatch(...)`，由 commander 自己路由到对应 factory 注册的命令 handler。下面命令流图把 `handler.cwd` / `handler.use` / `handler.kill` 视为 `internal/command/cwd` / `use` / `kill` 子包内的 `handleCwd` / `handleUse` / `handleKill` 函数——它们经由 `RuntimeServices` 拿到 service 接口，**不再**直接拿到 `*chatsession.Manager` 具体引用。
+> **v1.3.x F-51 变化**：本节描述的命令（`/cwd` `/use` `/kill` `/watch` `/think` `/tools` `/new` `/gtw`）的物理实现位置从 `internal/gateway/handlers_*.go`（混合在 gateway 包内）搬到 `internal/command/<name>/commands.go`（独立的 `command/` 包，slash command 自有家）。Gateway 现在不持有 handler ——它持 `Commander` 接口的引用，在收到 slash command 形式的消息时调 `commander.Dispatch(...)`，由 commander 自己路由到对应 factory 注册的命令 handler。下面命令流图把 `handler.cwd` / `handler.use` / `handler.kill` 视为 `internal/command/cwd` / `use` / `kill` 子包内的 `handleCwd` / `handleUse` / `handleKill` 函数。
+
+> **2026-08-06 ADR 0007 进一步简化**：handler 不再经 `RuntimeServices.Session()` 间接拿 chat-session — command Factory 构造函数直接持 `*chatsession.Manager`，handler 直接调 `mgr.GetOrCreate(chatID, primary)` / `cs.SetActiveCwd(...)` 等。SessionService 抽象层已删除（`internal/command/services/session.go` 和 `cmd/nightme/session_adapter.go` 都不存在了）。
 
 #### `/cwd <path>`
 
 ```
-command.cwd.handleCwd(ctx, rt, msg, args)
+command.cwd.Factory.Handle(ctx, rt, input)
+  ├ Factory.mgr: *chatsession.Manager  (ADR 0007 — 直接持有)
   ├ 验证 path（~ 展开、绝对路径、目录存在）
-  ├ rt.Session().GetOrCreate(chatID) ← 通过 SessionService 接口,不直接 import chatsession
-  │   ├ nil → rt.Channel().Reply("Usage: /cwd <path>")  (具体 reply 走 Channel 接口,不进 chatsession)
-  │   └ 存在 → 继续
-  ├ sess.SetActiveCwd(abs)  ← 仅改 activeCwd, 不动 AgentSession
+  ├ cs := mgr.GetOrCreate(chatID, defaultPrimary)
+  │   ├ err SetActiveCwd → command.Reply("SetActiveCwd failed: ...")
+  │   └ OK → 继续
+  ├ cs.SetActiveCwd(abs)  ← 仅改 activeCwd, 不动 AgentSession
   │   (AgentSession 池中的所有项不动; 切回原 cwd 时复用老 AgentSession)
-  ├ registry.Upsert(ChatSessionEntry)  ← 持久化路径不归 commander 关心,此为伪示意
-  └ rt.Channel().Reply("Workspace set to <abs>")
+  └ command.Reply("Workspace set to <abs>")
 ```
 
 **关键变化（v1.2）**：`/cwd` **不触发 spawn**。它是"切换 activeCwd"的纯状态变更命令。当用户后续发消息时，ChatSession 通过 `LookupActiveAgentSession()` 重新解析 `(activeAgent, activeCwd)`，按需复用或 spawn。
 
-**关键变化（v1.3.x F-51）**：handler 通过 `RuntimeServices.Session()` 拿服务，不持有 `*chatsession.Manager`。`replaceTilde` / `expandTilde` 等纯函数仍在命令子包内实现（无 service 依赖）。
+**关键变化（ADR 0007 / 2026-08-06）**：handler 直接拿 `*chatsession.Manager`，不再经 SessionService 间接层。`expandTilde` 等纯函数仍在命令子包内实现（无 service 依赖）。
 
 #### `/use <agent>`
 
 ```
-command.use.handleUse(ctx, rt, msg, args)
-  ├ rt.Session().Get(chatID)  ← RuntimeServices 给出 SessionService
-  │   ├ nil → rt.Channel().Reply("no chat session, /cwd first")
+command.use.Factory.Handle(ctx, rt, input)
+  ├ Factory.mgr: *chatsession.Manager  (ADR 0007 — 直接持有)
+  ├ cs := mgr.GetOrCreate(chatID, defaultPrimary)
+  │   ├ ActiveCwd 空 → command.Reply("Send /cwd first")
   │   └ 存在 → 继续
-  ├ agentName := args[0]
-  ├ sess.SetActiveAgent(agentName)   ← 仅改 activeAgent
-  ├ agentSession = sess.LookupActiveAgentSession()  ← SessionService 接口暴露的方法
+  ├ agentName := input.Args[1]
+  ├ cs.SetActiveAgent(agentName)   ← 仅改 activeAgent
+  ├ as, err := cs.LookupActiveAgentSession()
   │   ├ pool[(activeAgent, activeCwd)] 命中 → 复用 (不重启进程)
   │   └ miss → spawn 新 AgentSession(agentName, activeCwd)
-  ├ sess.SetActiveAgentSession(agentSession)
-  ├ registry.Upsert(ChatSessionEntry + AgentSessionEntry)
-  └ rt.Channel().Reply("Now using <agent>, pid=<N>, cwd=<ws>")
+  ├ cs.StartReadPump()  ← commit 8c — 启动新 pump
+  └ command.Reply("Now using <agent>, pid=<N>, cwd=<ws>, source=<spawn|resumed>")
 ```
 
 **关键变化（v1.2）**：
@@ -1405,17 +1385,18 @@ command.use.handleUse(ctx, rt, msg, args)
 #### `/kill`
 
 ```
-command.kill.handleKill(ctx, rt, msg, args)
-  ├ rt.Session().Get(chatID)
-  │   ├ nil → rt.Channel().Reply("No active chat session to kill.")
+command.kill.Factory.Handle(ctx, rt, input)
+  ├ Factory.mgr: *chatsession.Manager  (ADR 0007 — 直接持有)
+  ├ cs := mgr.Get(chatID)
+  │   ├ nil → command.Reply("No active chat session to kill.")
   │   └ 存在 → 继续
-  ├ sess.KillAll()    ← 返回 KillResult 列表,format 后 reply
-  └ rt.Channel().Reply(formattedResults)
+  ├ results, err := cs.KillAll()    ← 返回 KillResult 列表,format 后 reply
+  └ command.Reply(chatsession.FormatKillResults(results))
 ```
 
 **关键变化（v1.2）**：`/kill` = "清空 ChatSession 的所有 AgentSession 上下文，重启新的"。下次消息触发 spawn 新 AgentSession。
 
-**关键变化（v1.3.x F-51）**：handler 通过 `SessionService.KillAll()` 调，不再直接调 `*chatsession.ChatSession.KillAll`。返回的 `[]KillResult` 类型住 `internal/chatsession` 公开暴露（已是公开 API），`command/services/session.go` 把它再包一层或者在 Session 接口里直接返回（待 F-51 落地时确认）。
+**关键变化（ADR 0007 / 2026-08-06）**：handler 直接调 `cs.KillAll()`，不再经 SessionService 间接层。`chatsession.FormatKillResults` 仍是 `internal/chatsession` 公开 API，被 command/kill 直接 import 调用。
 
 ### 2.4 Receipt 渲染（Channel 自治，v1.3）
 

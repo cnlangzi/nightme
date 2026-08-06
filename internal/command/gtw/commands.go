@@ -3,7 +3,6 @@ package gtw
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/command"
@@ -113,27 +112,25 @@ func (f *Factory) runFix(ctx context.Context, rt command.RuntimeServices, input 
 	}
 	// F-51: command.Commander prefixes Args with the command
 	// name ("gtw"), then the subcommand ("fix"), then the
-	// subcommand's args. So Args[2:] is the trailing argv for
-	// /gtw fix (e.g. ["42"] for /gtw fix 42).
+	// subcommand's args. So Args[2] is the issue id.
+	//
+	// Pre-validate locally with parseIssueID (not strconv.Atoi)
+	// so "#42" is accepted — the GitHub/GitLab convention users
+	// have muscle memory for. Validation also keeps the
+	// SlashOutput path predictable when RunFix's deps.Send is nil
+	// (some tests construct Factory without HandlerDeps).
 	issueArg := strings.TrimSpace(input.Args[2])
-	issueID, err := strconv.Atoi(issueArg)
-	if err != nil || issueID <= 0 {
+	if _, err := parseIssueID(issueArg); err != nil {
 		return &command.SlashOutput{
-			Reply:    fmt.Sprintf("Invalid issue id: %q", issueArg),
+			Reply:    fmt.Sprintf("Invalid issue id: %q (%v)", issueArg, err),
 			Consumed: true,
 		}, nil
 	}
 
-	// Resolve per-chat Sender. The runtime should have set it
-	// via Manager.SetSender at chat creation; if missing,
-	// reply with a hint.
+	// Resolve per-chat Sender. The runtime wires a sender factory
+	// at startup that lazy-creates a Sender on first GetSender miss,
+	// so this call always returns a non-nil Sender for known chats.
 	sender := f.mgr.GetSender(input.ChatID)
-	if sender == nil {
-		return &command.SlashOutput{
-			Reply:    "No active chat session. Send /cwd <path> first.",
-			Consumed: true,
-		}, nil
-	}
 	if sender.ActiveCwd() == "" {
 		return &command.SlashOutput{
 			Reply:    "No active workspace. Send /cwd <path> first.",
@@ -150,7 +147,7 @@ func (f *Factory) runFix(ctx context.Context, rt command.RuntimeServices, input 
 	// RunFix signature: (ctx, cs, slot, drafts, deps, chatID,
 	// messageID, args). Reply is sent inline via deps.Send;
 	// *Result only carries Consumed / Dropped for the runtime.
-	_, err = RunFix(ctx, sender, slot, drafts, f.deps, input.ChatID, input.MessageID, input.Args[2:])
+	_, err := RunFix(ctx, sender, slot, drafts, f.deps, input.ChatID, input.MessageID, input.Args[2:])
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw fix failed: %v", err),
@@ -188,8 +185,6 @@ func (f *Factory) runList(_ command.RuntimeServices, input command.SlashInput) (
 func (f *Factory) runReset(_ command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	before := f.mgr.DraftCount(input.ChatID)
 	f.mgr.Reset(input.ChatID)
-	hadCtx := f.mgr.HasContext(input.ChatID) // already cleared by Reset
-	_ = hadCtx
 	return &command.SlashOutput{
 		Reply:    fmt.Sprintf("✅ /gtw reset — cleared gtwContext + %d draft(s) for this chat", before),
 		Consumed: true,

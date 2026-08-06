@@ -73,9 +73,14 @@ func (m *Manager) SetSender(chatID string, s Sender) {
 // GetSender calls are O(1)).
 //
 // F-51 runtime wiring: cmd/nightme/run.go installs a factory
-// that wraps the SessionService adapter + Channel adapter;
-// per-chat Sender instances back onto the live chat session
-// for ActiveCwd / SetActiveCwd and onto the channel for Send.
+// that holds a *chatsession.Manager reference + a Channel
+// adapter. Per-chat Sender instances back onto the live chat
+// session (via mgr.GetOrCreate(chatID, primary)) for
+// ActiveCwd / SetActiveCwd and onto the channel for Send.
+//
+// ADR 0007 (2026-08-06): the factory previously routed through
+// a SessionService adapter; the adapter is gone and the
+// factory now holds *chatsession.Manager directly.
 //
 // nil disables the lazy path (GetSender returns nil).
 func (m *Manager) SetSenderFactory(fn func(chatID string) Sender) {

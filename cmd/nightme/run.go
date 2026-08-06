@@ -35,10 +35,17 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel/feishu"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/command/cwd"
+	"github.com/cnlangzi/nightme/internal/command/kill"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
+	"github.com/cnlangzi/nightme/internal/command/think"
+	"github.com/cnlangzi/nightme/internal/command/tools"
+	"github.com/cnlangzi/nightme/internal/command/use"
+	"github.com/cnlangzi/nightme/internal/command/watch"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
+	newcmd "github.com/cnlangzi/nightme/internal/command/newcmd"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -315,7 +322,12 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// WithOnCreate + RestoreFromRegistry so the order can't be
 	// inverted at the call site.
 	gwImpl := gateway.New(messageDispatcher).(*gateway.Router)
-	gateway.RegisterChatSessionCommands(gwImpl, mgr, ch, cfg.Primary)
+	// ADR 0007 + B5: all 7 chat-session commands (/cwd /use /kill
+	// /new /watch /think /tools) and /gtw are now SlashCommandFactory
+	// implementations registered with reg.Register below. The legacy
+	// gateway.RegisterChatSessionCommands helper is deleted; the
+	// gateway only sees the slash-command path via WithCommander
+	// (the shim below) and the reaction path via WithActionHandler.
 
 	// F-51: gtw moved to internal/command/gtw. Wiring is now
 	// (a) gtw.Manager owns the state, (b) services.ReactionRouter
@@ -345,7 +357,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	gtwMgr.SetSenderFactory(func(chatID string) gtw.Sender {
 		return newChatSessionSender(
 			chatID,
-			newSessionAdapter(mgr, cfg.Primary).GetOrCreate(chatID, cfg.Primary),
+			mgr.GetOrCreate(chatID, cfg.Primary),
 			newChannelAdapter(ch),
 		)
 	})
@@ -360,15 +372,20 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	gtwFactory := gtw.NewFactoryWithDeps(gtwMgr, gtwDeps)
 	reg := command.NewRegistry()
 	reg.Register(gtwFactory)
+	reg.Register(watch.NewFactory(mgr, cfg.Primary))
+	reg.Register(think.NewFactory(mgr, cfg.Primary))
+	reg.Register(tools.NewFactory(mgr, cfg.Primary))
+	reg.Register(cwd.NewFactory(mgr, cfg.Primary))
+	reg.Register(use.NewFactory(mgr, cfg.Primary))
+	reg.Register(kill.NewFactory(mgr))
+	reg.Register(newcmd.NewFactory(mgr, cfg.Primary))
 	commander := command.NewCommander(reg)
 
-	// RuntimeServices — fill all three slots via adapters
-	// (B3). Session wraps *chatsession.Manager (the B5+
-	// /cwd /use /kill handlers will use this); Channel
-	// wraps *gateway.Channel (any command that needs to
-	// send replies uses this).
+	// RuntimeServices — ADR 0007 dropped the Session field.
+	// Each command package holds *chatsession.Manager directly
+	// via its Factory. Channel wraps *gateway.Channel (any
+	// command that needs to send replies uses this).
 	rt := command.RuntimeServices{
-		Session:        newSessionAdapter(mgr, cfg.Primary),
 		ReactionRouter: router,
 		Channel:        newChannelAdapter(ch),
 	}
@@ -380,6 +397,16 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// here for now. When a future command needs the multi-message
 	// path, extend gateway.CommandResult with an Outbound []OutboundMessage
 	// slice and translate from command.Outbound here.
+	//
+	// 2026-08-06: Commander.Dispatch now returns (output, handled,
+	// err). When handled=false (plain text, no "/" prefix) the shim
+	// returns (nil, nil) so the gateway falls through to its legacy
+	// dispatcher + agent loop. When handled=true but output.Consumed=
+	// false (slash command attempt that did not match any factory),
+	// the shim returns a Consumed=false result — the gateway
+	// recognises that as "fall through" and forwards the original
+	// text to the agent loop, preserving the pre-F-51 passthrough
+	// characteristic for inputs like "/etc/passwd" or "/@everyone".
 	gwImpl.WithCommander(func(ctx context.Context, msg *gateway.InboundMessage) (*gateway.CommandResult, error) {
 		if msg == nil {
 			return nil, nil
@@ -391,12 +418,43 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 			MessageID:  msg.MessageID,
 			HasMention: msg.HasMention,
 		}
-		out, err := commander.Dispatch(ctx, rt, input)
+		out, handled, err := commander.Dispatch(ctx, rt, input)
 		if err != nil {
-			return &gateway.CommandResult{Consumed: true, Reply: "❌ " + err.Error()}, nil
+			errText := "❌ " + err.Error()
+			_ = ch.Send(ctx, gateway.OutboundMessage{
+				ChatID:  msg.ChatID,
+				Kind:    gateway.OutReply,
+				Text:    errText,
+				ReplyTo: msg.MessageID,
+			})
+			return &gateway.CommandResult{Consumed: true, Reply: errText}, nil
 		}
-		if out == nil {
-			return &gateway.CommandResult{Consumed: false}, nil
+		if !handled {
+			// Plain text (no "/" prefix) or just "/" alone.
+			// Signal fall-through — gateway forwards to legacy
+			// dispatcher + agent loop.
+			return nil, nil
+		}
+		// handled=true. out may be Consumed=true (command replied)
+		// or Consumed=false (slash command attempt with no
+		// matching factory — fall through to agent loop).
+		//
+		// The CommandResult.Reply text MUST be pushed through the
+		// channel here — the gateway's dispatchLoop only logs the
+		// result and never calls ch.Send on it. Without this send,
+		// users get no feedback from /cwd /use /kill /new /watch
+		// /think /tools /gtw. Pre-F-51 the gateway.handlers_*
+		// files did this inline via a `reply(ctx, channel, ...)`
+		// helper; the F-51 commander abstraction moved the
+		// channel into the runtime shim, so the send responsibility
+		// lives here.
+		if out.Consumed && out.Reply != "" {
+			_ = ch.Send(ctx, gateway.OutboundMessage{
+				ChatID:  msg.ChatID,
+				Kind:    gateway.OutReply,
+				Text:    out.Reply,
+				ReplyTo: msg.MessageID,
+			})
 		}
 		return &gateway.CommandResult{
 			Consumed: out.Consumed,

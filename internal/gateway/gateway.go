@@ -37,7 +37,6 @@ import (
 	"errors"
 	"log"
 	"log/slog"
-	"sort"
 	"strings"
 	"sync"
 
@@ -66,14 +65,6 @@ type Channel interface {
 	// carries the same method — this duplicate keeps the gateway
 	// package free of the channel-package's circular deps.
 	SendCard(ctx context.Context, msg OutboundMessage) (msgID string, err error)
-}
-
-// Command is one nightme-level slash command.
-type Command struct {
-	Name        string
-	Aliases     []string
-	Description string
-	Handler     func(ctx context.Context, msg *InboundMessage, args []string) (*CommandResult, error)
 }
 
 // CommandResult is the per-dispatch outcome.
@@ -135,24 +126,16 @@ type SweepSessions func() []OutboundSource
 // by stamping msg.ReplyTo = currentTurnUserMsgID; each Channel
 // looks up its own receipt by that userMsgID.
 type Gateway interface {
-	Register(cmd Command) (replaced bool)
-
 	// DispatchInbound is the inboundDispatcher entry point: every
 	// InboundMessage produced by an attached Channel flows through
-	// here. It parses the message text and branches to either
-	//   - dispatchSlashCommand (when the text matches a registered
-	//     Command), or
-	//   - the MessageDispatcher injected at construction time
-	//     (default branch for plain text).
-	//
-	// F-watch: non-slash-command messages are subject to the
-	// per-chat WatchMode gate; messages with HasMention==false
-	// and a WatchMode != WatchModeAll are dropped at this layer
-	// before reaching the MessageDispatcher. Slash commands
-	// bypass the gate.
+	// here. It routes to:
+	//   - dispatchAction (when msg.Reaction or msg.Action is set)
+	//   - the F-51 commander shim installed via WithCommander
+	//     (when text starts with "/")
+	//   - dispatchMessage (default branch), which applies the
+	//     F-watch WatchMode gate and forwards to the
+	//     MessageDispatcher injected at construction time.
 	DispatchInbound(ctx context.Context, msg *InboundMessage) (*CommandResult, error)
-
-	ListCommands() []Command
 
 	// v1.2 binding table (commit 3); chatType removed in F-33 (D1):
 	Bind(chatID, sessionID, workspace, agent string) *BindingEntry
@@ -261,9 +244,7 @@ func (g *gateway) WithCommander(dispatch func(ctx context.Context, msg *InboundM
 // no longer knows about receipts at all — only the binding table
 // (chat → ChatSession) remains.
 type gateway struct {
-	mu    sync.RWMutex
-	cmds  map[string]Command
-	order []string
+	mu sync.RWMutex
 	// messageDispatcher is the runtime-injected handler for the
 	// messageDispatcher branch (non-slash-command inbound). When
 	// nil, such messages are silently dropped.
@@ -319,7 +300,6 @@ type gateway struct {
 // the runtime + the chatsession package.
 func New(messageDispatcher MessageDispatcher) Gateway {
 	return &gateway{
-		cmds:              make(map[string]Command),
 		messageDispatcher: messageDispatcher,
 		chatToChan:        make(map[string]Channel),
 		bindings:          make(map[string]*BindingEntry),
@@ -342,111 +322,81 @@ func (g *gateway) AttachChannels(channels ...Channel) {
 	}
 }
 
-// Register stores cmd. Names and aliases are case-folded on insert.
-func (g *gateway) Register(cmd Command) (replaced bool) {
-	name := strings.ToLower(cmd.Name)
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if _, exists := g.cmds[name]; exists {
-		return true
-	}
-	for _, a := range cmd.Aliases {
-		alias := strings.ToLower(a)
-		if _, exists := g.cmds[alias]; exists {
-			return true
-		}
-	}
-	for _, a := range cmd.Aliases {
-		g.cmds[strings.ToLower(a)] = cmd
-	}
-	g.cmds[name] = cmd
-	g.order = append(g.order, name)
-	return false
-}
-
 // DispatchInbound is the inboundDispatcher entry point (implements
 // the Gateway interface). Every InboundMessage from an attached
-// Channel flows through here. It parses the message text and
-// branches to one of:
+// Channel flows through here. Routes to one of:
 //
-//   - dispatchSlashCommand(ctx, msg, name, args) when the text is a
-//     recognised slash command; or
-//   - the runtime-injected MessageDispatcher for plain text,
-//     attachments, or unrecognised "/foo".
+//   - dispatchAction (F-50) when msg.Reaction or msg.Action is set
+//   - the commander shim installed via WithCommander when the
+//     text starts with "/" — recognises the slash command or
+//     falls through to dispatchMessage
+//   - dispatchMessage, which applies the F-watch WatchMode gate
+//     and forwards to the runtime MessageDispatcher for plain
+//     text + commander fall-through inputs.
 //
 // Either branch may produce a CommandResult; the caller
 // (dispatchLoop) does not interpret it further.
+// DispatchInbound is the inboundDispatcher entry point. Routes
+// every inbound message through one of three branches:
+//
+//  1. action/reaction (F-50) → dispatchAction
+//  2. /-prefixed text        → command.Commander (handled here
+//                              via the shim installed by
+//                              cmd/nightme/run.go). If the
+//                              commander reports handled=false
+//                              (plain text or unknown /cmd),
+//                              falls through to dispatchMessage
+//                              so the original text reaches the
+//                              agent loop unchanged.
+//  3. otherwise              → dispatchMessage, which itself
+//                              applies the F-watch gate before
+//                              handing the message to the runtime
+//                              MessageDispatcher.
+//
+// The WatchMode gate lives inside dispatchMessage (see that
+// method's doc) so both the commander-fall-through path and the
+// plain-text path honour it consistently. The legacy ParseCommand
+// + g.cmds table is gone — all slash commands live in
+// command.Registry now (fa8c6d1 / 69d69e6).
 func (g *gateway) DispatchInbound(ctx context.Context, msg *InboundMessage) (*CommandResult, error) {
 	if msg == nil {
 		return nil, errors.New("gateway: nil message")
 	}
 
-	// F-50 §6.1: user actions on bot messages (card button
-	// clicks via msg.Action, emoji reactions via msg.Reaction)
-	// route through the per-chat action handler installed by
-	// the runtime. This branch sits BEFORE the slash-command
-	// parse because action events have empty Text — ParseCommand
-	// would fail and the old code would silently route the event
-	// to the agent loop as empty text.
-	//
-	// Without this branch (and without a wired actionHandler),
-	// reactions arrive at the dispatcher, fail ParseCommand,
-	// fall through to dispatchMessage, get queued into the
-	// agent's input buffer as empty text, and the gtw draft
-	// never receives its reaction. The whole reaction pipeline
-	// is dead in that state. The runtime MUST call
-	// gateway.WithActionHandler at startup for /gtw decision
-	// cards to be actionable.
+	// F-50 §6.1: action/reaction branch sits FIRST because
+	// action events have empty Text — routing them through the
+	// commander would consume them as plain text or as an empty
+	// slash command, and the gtw draft pipeline would never see
+	// its reaction. The runtime MUST wire an actionHandler at
+	// startup for the reaction path to work.
 	if msg.Reaction != nil || msg.Action != nil {
 		return g.dispatchAction(ctx, msg)
 	}
 
-	// F-51: if a commander is wired and the text starts with
-	// "/", route through the commander BEFORE the legacy
-	// handleXxx dispatch table. The commander is built by
-	// the runtime (cmd/nightme) and bridges
-	// *InboundMessage ↔ command.SlashInput /
-	// *CommandResult.
+	// F-51 + 2026-08-06 fall-through: commander shim is the
+	// only dispatch path for /-prefixed text. When it reports
+	// handled=true + Consumed=true (a registered command ran)
+	// we use its reply; otherwise we hand off to
+	// dispatchMessage, which applies the WatchMode gate and
+	// forwards to the agent loop.
 	g.mu.RLock()
 	dispatch := g.commandDispatch
 	g.mu.RUnlock()
 	if dispatch != nil && strings.HasPrefix(strings.TrimSpace(msg.Text), "/") {
-		return dispatch(ctx, msg)
-	}
-
-	name, args, err := ParseCommand(strings.TrimSpace(msg.Text))
-
-	// F-watch §3.1.1: per-chat message-watch gate (single entry,
-	// both branches below). Slash commands ALWAYS pass the gate
-	// — `/watch on` must work even from non-mention group
-	// messages, otherwise users can't opt back in once they've
-	// opted out. Only the plain-text / unrecognised-slash paths
-	// consult the gate.
-	//
-	// Drop condition: HasMention==false (group, no bot/@_all)
-	// AND chat is configured to drop non-mention messages.
-	//
-	// DM chats always pass: HasMention is set to true by the
-	// channel adapter for every DM (every DM is implicitly
-	// addressed to the bot). WatchMode is consulted but irrelevant.
-	gateAndDispatch := func() (*CommandResult, error) {
-		if dropped, _ := g.applyWatchModeGate(msg); dropped {
-			return &CommandResult{Consumed: true, Dropped: true}, nil
+		result, err := dispatch(ctx, msg)
+		if err != nil {
+			return nil, err
 		}
-		return g.dispatchMessage(ctx, msg)
+		if result != nil && (result.Consumed || result.Dropped) {
+			return result, nil
+		}
+		// Commander fall-through: slash command attempt with no
+		// matching factory, or input that wasn't a slash command
+		// at all. dispatchMessage will apply the WatchMode gate
+		// and forward to the runtime MessageDispatcher.
 	}
 
-	if err != nil || name == "" {
-		return gateAndDispatch()
-	}
-
-	g.mu.RLock()
-	cmd, ok := g.cmds[strings.ToLower(name)]
-	g.mu.RUnlock()
-	if !ok || cmd.Handler == nil {
-		return gateAndDispatch()
-	}
-	return g.dispatchSlashCommand(ctx, msg, name, args, cmd)
+	return g.dispatchMessage(ctx, msg)
 }
 
 // dispatchAction is the F-50 §6.1 + F-25 user-action branch.
@@ -548,21 +498,39 @@ func (g *gateway) shouldDropForWatchMode(chatID string) bool {
 	return mode != chatsession.WatchModeAll
 }
 
-// dispatchSlashCommand runs the registered Command.Handler for a
-// recognised slash command. This is the slashCommandDispatcher
-// branch of the inboundDispatcher.
-func (g *gateway) dispatchSlashCommand(ctx context.Context, msg *InboundMessage, name string, args []string, cmd Command) (*CommandResult, error) {
-	if cmd.Handler == nil {
-		return &CommandResult{Consumed: false}, nil
-	}
-	return cmd.Handler(ctx, msg, args)
-}
-
-// dispatchMessage forwards a non-slash-command inbound message to
-// the runtime-injected MessageDispatcher. This is the
-// messageDispatcher branch of the inboundDispatcher. A nil
-// MessageDispatcher silently drops the message.
+// dispatchMessage applies the F-watch §3.1.1 per-chat gate
+// and then hands the message to the runtime-injected
+// MessageDispatcher (which queues it into the per-chat input
+// buffer / spawns a new agent turn). The gate belongs here —
+// not in DispatchInbound — so every non-action inbound reaches
+// this single decision point regardless of whether the path is
+// plain text or commander fall-through.
+//
+// A nil MessageDispatcher silently drops the message (returns
+// Consumed=false rather than an error — the dispatcher already
+// "decided" the message isn't actionable).
 func (g *gateway) dispatchMessage(ctx context.Context, msg *InboundMessage) (*CommandResult, error) {
+	// F-watch §3.1.1: per-chat gate for non-mention group
+	// messages. Drop condition: HasMention==false (group, no
+	// bot/@_all) AND chat is configured to drop non-mention
+	// messages.
+	//
+	// DM chats always pass — the channel adapter is contractually
+	// required to set HasMention=true for every DM (see
+	// computeHasMention's chat_type == "p2p" branch), so this
+	// gate is a no-op for DMs.
+	//
+	// Note: recognised slash commands (handled by the commander
+	// with Consumed=true) NEVER reach this function — the
+	// commander branch in DispatchInbound returns before the
+	// gate runs. So /watch on still works from a non-mention
+	// group message even when WatchMode=Mention: the gate is
+	// for "message reaches agent" decisions, not for "command
+	// replies" decisions.
+	if dropped, _ := g.applyWatchModeGate(msg); dropped {
+		return &CommandResult{Consumed: true, Dropped: true}, nil
+	}
+
 	if g.messageDispatcher == nil {
 		return &CommandResult{Consumed: false}, nil
 	}
@@ -570,26 +538,6 @@ func (g *gateway) dispatchMessage(ctx context.Context, msg *InboundMessage) (*Co
 		return &CommandResult{}, err
 	}
 	return &CommandResult{}, nil
-}
-
-// ListCommands returns the registered commands in
-// case-insensitive alphabetical order.
-func (g *gateway) ListCommands() []Command {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	out := make([]Command, 0, len(g.order))
-	seen := make(map[string]bool, len(g.order))
-	for _, name := range g.order {
-		if seen[name] {
-			continue
-		}
-		if c, ok := g.cmds[name]; ok {
-			out = append(out, c)
-			seen[name] = true
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
 }
 
 // --- Stage 2: dispatch runtime ----------------------------------------

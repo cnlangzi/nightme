@@ -209,6 +209,79 @@ func TestSession_HandshakeTimeout(t *testing.T) {
 		t.Logf("note: Start did not wrap context.DeadlineExceeded: %v", err)
 	}
 }
+// TestSession_PromptTimeout_NotInfinite is the regression for
+// the F-32 2026-08-06 incident where SendText returned
+// context.Background() and the bridge blocked forever on a hung
+// pi prompt. The fix (SendText now wraps the ctx with
+// promptTimeout) means a hung prompt surfaces within
+// promptTimeout as a context.DeadlineExceeded error -- not as
+// a silent blank receipt card.
+//
+// Strategy:
+//   - mock answers get_state normally (handshake succeeds);
+//   - mock silently swallows every prompt command
+//     (MOCK_PI_PROMPT_HANG=1);
+//   - we shrink promptTimeout to 300 ms so the test runs in <2s
+//     instead of waiting the production 90 s;
+//   - SendText must return within ~promptTimeout and the error
+//     must wrap context.DeadlineExceeded.
+//
+// We restore the original promptTimeout via t.Cleanup so this
+// test never bleeds into the others in this package.
+func TestSession_PromptTimeout_NotInfinite(t *testing.T) {
+	mockPath, err := filepath.Abs("../../testdata/pi_mock.sh")
+	if err != nil {
+		t.Fatalf("abs mock path: %v", err)
+	}
+	if _, err := os.Stat(mockPath); err != nil {
+		t.Fatalf("mock script missing at %s: %v", mockPath, err)
+	}
+
+	workspace := t.TempDir()
+	t.Setenv("MOCK_PI_PROMPT_HANG", "1")
+
+	// Shrink promptTimeout so the test is fast. Restore on exit.
+	const shrunk = 300 * time.Millisecond
+	orig := promptTimeout
+	promptTimeout = shrunk
+	t.Cleanup(func() { promptTimeout = orig })
+
+	a := New("pi", mockPath, nil)
+	sess, err := a.Start(context.Background(), agent.StartConfig{Workspace: workspace})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() {
+		closeDone := make(chan error, 1)
+		go func() { closeDone <- sess.Close() }()
+		select {
+		case <-closeDone:
+		case <-time.After(3 * time.Second):
+			t.Errorf("Close did not return within 3s after prompt-timeout test")
+		}
+	}()
+
+	// Drain EventInit so we know the bridge is fully up before
+	// we measure SendText's behaviour. Without this, a slow
+	// handshake could leak into the SendText measurement.
+	mustFirstEventOfKind(t, sess, agent.EventInit, 3*time.Second)
+
+	start := time.Now()
+	sendErr := sess.SendText("hi")
+	elapsed := time.Since(start)
+
+	if sendErr == nil {
+		t.Fatalf("SendText returned nil after %s; bridge ignored the prompt deadline (F-32 2026-08-06 hang)", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("SendText took %s with a %s deadline; ctx was ignored", elapsed, shrunk)
+	}
+	if !errors.Is(sendErr, context.DeadlineExceeded) {
+		t.Errorf("SendText error %v does not wrap context.DeadlineExceeded; runtime cannot distinguish prompt-hang from other failures", sendErr)
+	}
+	t.Logf("SendText timed out as expected in %s: %v", elapsed, sendErr)
+}
+
 func mustFirstEventOfKind(t *testing.T, sess agent.AgentSession, kind agent.EventKind, timeout time.Duration) agent.AgentEvent {
 	t.Helper()
 	deadline := time.After(timeout)

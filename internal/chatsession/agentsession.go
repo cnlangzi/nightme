@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -40,6 +39,18 @@ const (
 // source of Events / SendText / SendBlocks / Close. Lifecycle
 // transitions (Running → Exited) are observed via the handle's
 // events channel and trigger SetExited on this struct.
+//
+// Concurrency: ONE mutex (asMu) guards every mutable field on
+// this struct. Why: in this codebase every accessor is called by
+// either (a) the runtime EventHandler on a single goroutine per
+// turn, or (b) lifecycle methods that already serialize on
+// Spawn/Close. turnMu at the bridge layer guarantees only one
+// prompt is in flight at a time, so writers within one AS never
+// overlap meaningfully. Field-level locks added no real
+// parallelism — they added reasoning cost (7-way lock ordering)
+// for zero throughput benefit. PID() is hot (log lines, footer,
+// KillAll fan-out) so asMu is RWMutex; readers can run
+// concurrently without contending with each other.
 type AgentSession struct {
 	// Identity (immutable post-construction).
 	ID            string
@@ -47,11 +58,38 @@ type AgentSession struct {
 	Agent         string
 	Cwd           string
 
-	// Lifecycle. pid is atomic; status is mutex-guarded (Status is a
-	// string alias, so atomic.Int32 cannot hold it directly).
-	pid    atomic.Int32
-	status sync.RWMutex // value: Status
-	stat   Status
+	// asMu guards every field below. RWMutex so concurrent readers
+	// (Status, Model, CumulativeUsage, CompactionCount, ExitCode,
+	// Handle, Events, PID) don't contend with each other when no
+	// writer is in flight.
+	asMu sync.RWMutex
+
+	// opCtx is the per-AgentSession operation context — owned by
+	// THIS AgentSession, not by ChatSession. The chat layer hands
+	// us its parent (cs.Context()) and we derive our own ctx from
+	// it via Activate(parent). The bridge layer reads OpContext()
+	// and derives its own per-call callCtx inside SendBlocks.
+	//
+	// Lifecycle is internal to AS:
+	//   - Activate(parent) — installs a fresh opCtx derived from
+	//     parent; called by the runtime when this AS becomes the
+	//     active one for a chat (e.g. /use promoted us, or a
+	//     freshly-spawned AS needs a ctx to operate under).
+	//   - Background() — cancels the current opCtx; called by the
+	//     runtime when this AS is being demoted (e.g. /use is
+	//     switching to a different agent). The cancel cascades to
+	//     any bridge callCtx derived from opCtx, so an in-flight
+	//     SendBlocks waiting on a hung prompt RPC wakes up
+	//     immediately with ctx.Canceled.
+	//
+	// The cancel handle is private — external callers must use the
+	// methods, not reach into the field. Guarded by asMu.
+	opCtx    context.Context
+	opCancel context.CancelFunc
+
+	// Lifecycle.
+	pid  int     // OS PID, 0 when not running
+	stat Status  // Running / Detached / Exited
 
 	// Spawn-time args; preserved across respawn.
 	args []string
@@ -60,9 +98,8 @@ type AgentSession struct {
 	createdAt time.Time
 	lastRunAt time.Time
 
-	// Exit code (when status == exited).
-	exitCodeMu sync.RWMutex
-	exitCode   *int
+	// Exit code (set when stat == Exited, nil otherwise).
+	exitCode *int
 
 	// Agent-session-resume id (e.g. Claude Code's
 	// `system/init.session_id`). Captured from EventInit on the
@@ -70,14 +107,12 @@ type AgentSession struct {
 	// `--resume <id>` (Claude Code currently translates this; other
 	// bridges ignore it). Empty when the agent has no resume
 	// semantics or has not yet emitted its init event.
-	resumeIDMu sync.RWMutex
-	resumeID   string
+	resumeID string
 
 	// handle is the bridge-level live session (returned by
 	// agent.Start). nil until Spawn succeeds. Committed to the
 	// caller (readPump) only after SetRunning is called.
-	handleMu sync.RWMutex
-	handle   agent.AgentSession
+	handle agent.AgentSession
 
 	// events is a tee of handle.Events() that signals handle-side
 	// close (last chan close → SetExited). Created in Spawn; nil
@@ -90,8 +125,7 @@ type AgentSession struct {
 	// Persisted via Entry → AgentSessionEntry.Model; restored on
 	// restart via FromAgentSessionEntry. Empty before the first
 	// EventInit lands.
-	modelMu sync.RWMutex
-	model   string
+	model string
 
 	// F-45: per-AgentSession running total of token / cost stats.
 	// AccumulateUsage adds turn-level counts; ResetCumulative zeroes
@@ -99,14 +133,13 @@ type AgentSession struct {
 	// to disk when dirty. Persisted via Entry → AgentSessionEntry.
 	//CumulativeUsage; restored on restart from FromAgentSessionEntry.
 	//
-	// F-49: also guards compactionCount. RecordCompaction atomically
-	// increments the count AND zeros the four token fields of
-	// cumulativeUsage (preserving CostUSD), all under this single
-	// mutex. See docs/feat/F-49-compaction-counter.md §1.4.
-	cumulativeUsageMu sync.RWMutex
-	cumulativeUsage   agent.UsageInfo
-	compactionCount   int
-	cumulativeDirty   bool
+	// F-49: compactionCount sits alongside cumulativeUsage. The
+	// RecordCompaction write path increments the count AND zeroes
+	// the four token fields (preserving CostUSD); the lock is
+	// shared with cumulativeUsage so the two stay consistent.
+	cumulativeUsage agent.UsageInfo
+	compactionCount int
+	cumulativeDirty bool
 }
 
 // NewAgentSession creates a new AgentSession in memory. The pool
@@ -123,7 +156,13 @@ func NewAgentSession(id, chatSessionID, agent, cwd string, args []string) *Agent
 		lastRunAt:     time.Now(),
 		stat:          StatusDetached,
 	}
-	as.pid.Store(0)
+	as.pid = 0
+	// Pre-install a usable opCtx (Background-derived from BG, no
+	// cancel — a "do-nothing" ctx). The first Activate(parent) call
+	// from the runtime replaces it; in the meantime OpContext()
+	// returns this so callers that read it before activation don't
+	// observe a nil ctx.
+	as.opCtx = context.Background()
 	return as
 }
 
@@ -152,8 +191,8 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 	// F-45: restore cumulative token / cost stats. nil on legacy
 	// entries (zero-value default = "never ran", will start
 	// counting from first EventUsage). We copy the struct by value
-	// (not by pointer) so the in-memory state is decoupled from
-	// the persisted entry.
+	// (not by pointer) so the in-memory state is decoupled from the
+	// persisted entry.
 	if e.CumulativeUsage != nil {
 		as.cumulativeUsage = *e.CumulativeUsage
 	}
@@ -170,25 +209,93 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 		status = StatusDetached
 	}
 	as.stat = status
-	as.pid.Store(0)
+	as.pid = 0
 	if e.ExitCode != nil {
-		as.exitCodeMu.Lock()
 		as.exitCode = e.ExitCode
-		as.exitCodeMu.Unlock()
 	}
 	return as
 }
 
 // PID returns the current OS process ID (0 if not running).
 func (as *AgentSession) PID() int {
-	return int(as.pid.Load())
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
+	return as.pid
 }
 
 // Status returns the current lifecycle state.
 func (as *AgentSession) Status() Status {
-	as.status.RLock()
-	defer as.status.RUnlock()
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
 	return as.stat
+}
+
+// --- per-AS operation context (Background / Activate) -------------
+
+// OpContext returns the per-AgentSession context the bridge layer
+// should use as the parent of its per-call callCtx. Lives for the
+// duration of one "this AS is active" window — installed by
+// Activate(parent) when the runtime promotes this AS to the active
+// role, cancelled by Background() when the runtime demotes it (e.g.
+// /use switching to a different agent).
+//
+// Callers MUST NOT cancel the returned ctx — that is the AgentSession's
+// responsibility (Background). External code that wants per-turn
+// cancellation observes the ctx's Done() channel or derives a child
+// with its own deadline; do not reach into the cancel func, which
+// is not exposed.
+//
+// Safe to call concurrently; the underlying context is replaced
+// atomically under asMu.
+func (as *AgentSession) OpContext() context.Context {
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
+	return as.opCtx
+}
+
+// Background cancels this AgentSession's opCtx. Any in-flight
+// bridge operation waiting on it (the bridge's callCtx derives
+// from opCtx, so cancellation cascades) wakes up immediately with
+// ctx.Canceled. Idempotent: a second call finds opCancel already
+// consumed and is a no-op aside from re-arming.
+//
+// Used by the runtime when the active AS is being demoted —
+// specifically, the /use handler calls Background() on the old
+// AS before Activate(parent) on the new one, so the old AS's
+// hung prompt RPC returns with ctx.Canceled instead of blocking
+// the /use round-trip.
+//
+// Safe to call when no AS is active — the cancel on a nil opCtx
+// is a no-op.
+func (as *AgentSession) Background() {
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
+	if as.opCancel != nil {
+		as.opCancel()
+	}
+}
+
+// Activate installs a fresh per-AS opCtx derived from parent.
+// Cancels the previous opCtx first (defensive — should already
+// be Background'd by the caller; redundant cancel is a no-op).
+// After Activate returns, OpContext() yields the new ctx; the
+// old one is dead.
+//
+// Used by the runtime to wire up an AS when it becomes active —
+// the /use handler calls Activate(cs.ctx) on the freshly-promoted
+// AS so its SendBlocks can use a ctx that lives for the duration
+// of its "active" tenure.
+//
+// parent typically comes from ChatSession.Context(); cancelling
+// cs.ctx (via cs.ResetContext) cascades through every AS active
+// on that chat, providing a clean shutdown path.
+func (as *AgentSession) Activate(parent context.Context) {
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
+	if as.opCancel != nil {
+		as.opCancel()
+	}
+	as.opCtx, as.opCancel = context.WithCancel(parent)
 }
 
 // Args returns a copy of the spawn arguments.
@@ -211,8 +318,8 @@ func (as *AgentSession) LastRunAt() time.Time {
 
 // ExitCode returns the exit code (nil if not exited).
 func (as *AgentSession) ExitCode() *int {
-	as.exitCodeMu.RLock()
-	defer as.exitCodeMu.RUnlock()
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
 	if as.exitCode == nil {
 		return nil
 	}
@@ -225,8 +332,8 @@ func (as *AgentSession) ExitCode() *int {
 // the agent has no resume semantics or has not yet emitted its
 // init event.
 func (as *AgentSession) ResumeID() string {
-	as.resumeIDMu.RLock()
-	defer as.resumeIDMu.RUnlock()
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
 	return as.resumeID
 }
 
@@ -235,9 +342,9 @@ func (as *AgentSession) ResumeID() string {
 // non-empty SessionID. Safe to call concurrently with Spawn /
 // SetRunning / SetExited.
 func (as *AgentSession) SetResumeID(id string) {
-	as.resumeIDMu.Lock()
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
 	as.resumeID = id
-	as.resumeIDMu.Unlock()
 }
 
 // --- F-45: model + cumulative usage API ----------------------------
@@ -255,16 +362,16 @@ func (as *AgentSession) SetModel(m string) {
 	if m == "" {
 		return
 	}
-	as.modelMu.Lock()
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
 	as.model = m
-	as.modelMu.Unlock()
 }
 
 // Model returns the captured model name. Empty before the first
 // EventInit lands or when the bridge does not report one.
 func (as *AgentSession) Model() string {
-	as.modelMu.RLock()
-	defer as.modelMu.RUnlock()
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
 	return as.model
 }
 
@@ -274,17 +381,12 @@ func (as *AgentSession) Model() string {
 // EventHandler closure on every EventUsage arriving from the
 // bridge — typically once per turn. nil u is a no-op (defensive:
 // some bridges emit empty EventUsage as "no usage this turn").
-//
-// RWMutex lets concurrent footer rendering skip the lock when no
-// EventUsage is in flight; writers (one EventHandler closure) and
-// readers (footer rendering, future /cost) contend at turn-end
-// frequency which is human-paced (≤ 1/s).
 func (as *AgentSession) AccumulateUsage(u *agent.UsageEvent) {
 	if u == nil {
 		return
 	}
-	as.cumulativeUsageMu.Lock()
-	defer as.cumulativeUsageMu.Unlock()
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
 	as.cumulativeUsage.InputTokens += u.InputTokens
 	as.cumulativeUsage.OutputTokens += u.OutputTokens
 	as.cumulativeUsage.CacheCreationInputTokens += u.CacheCreationInputTokens
@@ -298,8 +400,8 @@ func (as *AgentSession) AccumulateUsage(u *agent.UsageEvent) {
 // (footer rendering, future /cost) get the consistent struct
 // copy under RLock without contending with EventUsage writers.
 func (as *AgentSession) CumulativeUsage() agent.UsageInfo {
-	as.cumulativeUsageMu.RLock()
-	defer as.cumulativeUsageMu.RUnlock()
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
 	return as.cumulativeUsage
 }
 
@@ -316,11 +418,11 @@ func (as *AgentSession) CumulativeUsage() agent.UsageInfo {
 // purely "clear the counter and mark dirty"; the caller
 // (handleNew) is responsible for the surrounding PersistAgentSession.
 func (as *AgentSession) ResetCumulative() {
-	as.cumulativeUsageMu.Lock()
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
 	as.cumulativeUsage = agent.UsageInfo{}
 	as.compactionCount = 0
 	as.cumulativeDirty = true
-	as.cumulativeUsageMu.Unlock()
 }
 
 // RecordCompaction atomically:
@@ -345,8 +447,8 @@ func (as *AgentSession) ResetCumulative() {
 // CompactionCount / PersistIfDirty. Mirrors AccumulateUsage's
 // lock pattern (single-writer per EventCompaction).
 func (as *AgentSession) RecordCompaction() {
-	as.cumulativeUsageMu.Lock()
-	defer as.cumulativeUsageMu.Unlock()
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
 	as.compactionCount++
 	as.cumulativeUsage.InputTokens = 0
 	as.cumulativeUsage.CacheCreationInputTokens = 0
@@ -361,8 +463,8 @@ func (as *AgentSession) RecordCompaction() {
 // compacted. Snapshot under RLock; safe for concurrent read
 // alongside RecordCompaction.
 func (as *AgentSession) CompactionCount() int {
-	as.cumulativeUsageMu.RLock()
-	defer as.cumulativeUsageMu.RUnlock()
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
 	return as.compactionCount
 }
 
@@ -383,76 +485,79 @@ func (as *AgentSession) PersistIfDirty(persist func(*registry.AgentSessionEntry)
 	if persist == nil {
 		return nil
 	}
-	as.cumulativeUsageMu.Lock()
+	as.asMu.Lock()
 	if !as.cumulativeDirty {
-		as.cumulativeUsageMu.Unlock()
+		as.asMu.Unlock()
 		return nil
 	}
 	as.cumulativeDirty = false
-	as.cumulativeUsageMu.Unlock()
+	as.asMu.Unlock()
 	return persist(as.Entry())
 }
 
 // SetRunning marks the AgentSession as running with the given PID.
 // Bumps LastRunAt.
 func (as *AgentSession) SetRunning(pid int) {
-	as.pid.Store(int32(pid))
-	as.status.Lock()
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
+	as.pid = pid
 	as.stat = StatusRunning
-	as.status.Unlock()
 	as.lastRunAt = time.Now()
-	as.exitCodeMu.Lock()
 	as.exitCode = nil
-	as.exitCodeMu.Unlock()
 }
 
 // SetDetached marks the AgentSession as detached (process alive but
 // nightme no longer holds it; e.g. after daemon SIGTERM without
 // --cleanup). PID is preserved.
 func (as *AgentSession) SetDetached() {
-	as.status.Lock()
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
 	as.stat = StatusDetached
-	as.status.Unlock()
 	as.lastRunAt = time.Now()
 }
 
 // SetExited marks the AgentSession as exited with the given exit
 // code. PID is cleared.
 func (as *AgentSession) SetExited(code int) {
-	as.pid.Store(0)
-	as.status.Lock()
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
+	as.pid = 0
 	as.stat = StatusExited
-	as.status.Unlock()
 	as.lastRunAt = time.Now()
-	as.exitCodeMu.Lock()
 	as.exitCode = &code
-	as.exitCodeMu.Unlock()
 }
 
 // Entry returns a snapshot of this AgentSession as a registry entry
-// (for persistence).
+// (for persistence). All snapshots taken under one asMu RLock so
+// the persisted fields are internally consistent at one point in
+// time.
 func (as *AgentSession) Entry() *registry.AgentSessionEntry {
-	as.exitCodeMu.RLock()
+	as.asMu.RLock()
+	stat := as.stat
+	lastRun := as.lastRunAt
+	resume := as.resumeID
+	model := as.model
+	handle := as.handle
 	var ec *int
 	if as.exitCode != nil {
 		v := *as.exitCode
 		ec = &v
 	}
-	as.exitCodeMu.RUnlock()
-
-	// F-45: snapshot cumulative stats under RLock so we publish a
-	// consistent copy. Always emit a non-nil pointer — the legacy
-	// "never ran" case is distinguishable only by zero-value
-	// counters inside, and omitempty would skip the field for
-	// "ran but all zero" which obscures the persisted state.
+	// F-45: snapshot cumulative stats under the same RLock so we
+	// publish a consistent copy. Always emit a non-nil pointer —
+	// the legacy "never ran" case is distinguishable only by
+	// zero-value counters inside, and omitempty would skip the
+	// field for "ran but all zero" which obscures the persisted
+	// state.
 	//
 	// F-49: also snapshot compactionCount under the same RLock so
 	// the persisted entry is internally consistent (count + usage
 	// refer to the same point in time).
-	as.cumulativeUsageMu.RLock()
 	cum := as.cumulativeUsage
 	cc := as.compactionCount
-	as.cumulativeUsageMu.RUnlock()
+	as.asMu.RUnlock()
+
+	_ = handle // captured but not exported in the persisted entry
 
 	return &registry.AgentSessionEntry{
 		ID:              as.ID,
@@ -460,13 +565,13 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 		Agent:           as.Agent,
 		Cwd:             as.Cwd,
 		PID:             as.PID(),
-		Status:          as.Status(),
+		Status:          stat,
 		Args:            as.Args(),
-		ResumeID:        as.ResumeID(),
+		ResumeID:        resume,
 		CreatedAt:       as.createdAt,
-		LastRunAt:       as.lastRunAt,
+		LastRunAt:       lastRun,
 		ExitCode:        ec,
-		Model:           as.Model(),
+		Model:           model,
 		CumulativeUsage: &cum,
 		CompactionCount: cc,
 	}
@@ -507,20 +612,32 @@ func (as *AgentSession) Spawn(ctx context.Context, spawner Spawner) error {
 		return ErrSpawnerNotSet
 	}
 
-	as.handleMu.Lock()
-	defer as.handleMu.Unlock()
-
-	if as.handle != nil && as.Status() == StatusRunning {
-		return nil // already running
+	as.asMu.Lock()
+	alreadyRunning := as.handle != nil && as.stat == StatusRunning
+	if alreadyRunning {
+		as.asMu.Unlock()
+		return nil
 	}
+	// Copy out the fields we need under lock; spawner.Spawn may
+	// take seconds (fork+exec+handshake RPC), and we don't want to
+	// hold asMu across it — EventHandler / readPump / footer
+	// renderers would block.
+	resume := as.resumeID
+	args := append([]string(nil), as.args...)
+	as.asMu.Unlock()
 
-	handle, err := spawner.Spawn(ctx, as.Agent, as.Cwd, as.args, as.ResumeID())
+	handle, err := spawner.Spawn(ctx, as.Agent, as.Cwd, args, resume)
 	if err != nil {
 		return fmt.Errorf("chatsession: spawn %s at %s: %w", as.Agent, as.Cwd, err)
 	}
 
+	as.asMu.Lock()
 	as.handle = handle
-	as.SetRunning(handle.PID())
+	as.pid = handle.PID()
+	as.stat = StatusRunning
+	as.lastRunAt = time.Now()
+	as.exitCode = nil
+	as.asMu.Unlock()
 	return nil
 }
 
@@ -528,8 +645,8 @@ func (as *AgentSession) Spawn(ctx context.Context, spawner Spawner) error {
 // spawned). Exposed for callers that need direct access (e.g., the
 // ChatSession EventCallback installer).
 func (as *AgentSession) Handle() agent.AgentSession {
-	as.handleMu.RLock()
-	defer as.handleMu.RUnlock()
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
 	return as.handle
 }
 
@@ -538,32 +655,46 @@ func (as *AgentSession) Handle() agent.AgentSession {
 // bridge after EventDone / EventError / child EOF; AgentSession
 // status transitions to Exited at that point (see ObserveClose).
 func (as *AgentSession) Events() <-chan agent.AgentEvent {
-	as.handleMu.RLock()
-	defer as.handleMu.RUnlock()
-	if as.handle == nil {
+	as.asMu.RLock()
+	h := as.handle
+	as.asMu.RUnlock()
+	if h == nil {
 		return nil
 	}
-	return as.handle.Events()
+	return h.Events()
 }
 
-// SendText delivers text to the bridge child. Returns ErrNotRunning
-// if Spawn has not been called.
+// SendText delivers a single text block to the bridge child.
+// Convenience wrapper around SendBlocks: routes through the
+// chat's per-AS ctx (OpContext()) instead of touching bridge's
+// bare SendText (which has no ctx signature on agent.AgentSession).
+//
+// The ctx passed to SendBlocks is as.OpContext() — the AS-owned
+// ctx installed by Activate(parent). This makes SendText behave
+// exactly like SendBlocks wrt cancellation: /use Background()
+// wakes any in-flight SendText the same way it wakes an in-flight
+// SendBlocks. The bridge's SendBlocks then derives its own
+// per-call callCtx from as.OpContext().
+//
+// Returns ErrNotRunning if Spawn has not been called.
 func (as *AgentSession) SendText(text string) error {
-	as.handleMu.RLock()
+	as.asMu.RLock()
 	h := as.handle
-	as.handleMu.RUnlock()
+	as.asMu.RUnlock()
 	if h == nil {
 		return ErrNotRunning
 	}
-	return h.SendText(text)
+	return h.SendBlocks(as.OpContext(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: text},
+	})
 }
 
 // SendBlocks delivers structured content blocks. Returns ErrNotRunning
 // if Spawn has not been called.
 func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
-	as.handleMu.RLock()
+	as.asMu.RLock()
 	h := as.handle
-	as.handleMu.RUnlock()
+	as.asMu.RUnlock()
 	if h == nil {
 		return ErrNotRunning
 	}
@@ -601,10 +732,9 @@ func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBl
 // surfaces as-is. ChatSession.NewActiveAgentSessions always passes
 // the chat's configured spawner.
 func (as *AgentSession) New(ctx context.Context, spawner Spawner) error {
-	as.handleMu.Lock()
-	defer as.handleMu.Unlock()
-
+	as.asMu.Lock()
 	h := as.handle
+	as.asMu.Unlock()
 	if h == nil {
 		return ErrNotRunning
 	}
@@ -627,22 +757,38 @@ func (as *AgentSession) New(ctx context.Context, spawner Spawner) error {
 	// the close error — the new spawn below is the source of truth
 	// for "did reset succeed".
 	_ = h.Close()
-	as.handle = nil
 
-	newHandle, err := spawner.Spawn(ctx, as.Agent, as.Cwd, as.args, "")
+	// snapshot the args under lock; spawner.Spawn may take seconds
+	// and we don't want to hold asMu across it.
+	as.asMu.RLock()
+	args := append([]string(nil), as.args...)
+	as.asMu.RUnlock()
+	newHandle, err := spawner.Spawn(ctx, as.Agent, as.Cwd, args, "")
 	if err != nil {
 		// F-34 Phase 3 review: previously this branch returned
-		// without updating status, leaving as.status=StatusRunning
+		// without updating status, leaving as.stat=StatusRunning
 		// with the OLD PID and as.handle=nil. Subsequent
 		// LookupActiveAgentSession would see Running + nil handle
 		// and fail every SendBlocks with ErrNotRunning. Mark as
 		// Exited so the next user message lazy-spawns a fresh AS.
-		as.SetExited(-1)
+		as.asMu.Lock()
+		as.handle = nil
+		as.pid = 0
+		as.stat = StatusExited
+		as.lastRunAt = time.Now()
+		code := -1
+		as.exitCode = &code
+		as.asMu.Unlock()
 		as.SetResumeID("")
 		return fmt.Errorf("chatsession: restart %s at %s: %w", as.Agent, as.Cwd, err)
 	}
+	as.asMu.Lock()
 	as.handle = newHandle
-	as.SetRunning(newHandle.PID())
+	as.pid = newHandle.PID()
+	as.stat = StatusRunning
+	as.lastRunAt = time.Now()
+	as.exitCode = nil
+	as.asMu.Unlock()
 	// Explicitly clear ResumeID so a stale id never gets replayed on
 	// the next respawn (the new child will emit its own EventInit,
 	// and the runtime's eventHandler will SetResumeID via the normal
@@ -654,16 +800,13 @@ func (as *AgentSession) New(ctx context.Context, spawner Spawner) error {
 // Close terminates the bridge child (sends shutdown signal to the
 // underlying bridge). Idempotent. Marks status=Exited on success.
 func (as *AgentSession) Close() error {
-	as.handleMu.Lock()
+	as.asMu.RLock()
 	h := as.handle
-	as.handleMu.Unlock()
+	as.asMu.RUnlock()
 	if h == nil {
 		return nil // not running
 	}
-	if err := h.Close(); err != nil {
-		return err
-	}
-	return nil
+	return h.Close()
 }
 
 // ObserveClose runs in a goroutine after Spawn to watch the bridge
@@ -675,9 +818,9 @@ func (as *AgentSession) Close() error {
 // in its pool.
 func (as *AgentSession) ObserveClose() <-chan struct{} {
 	done := make(chan struct{})
-	as.handleMu.RLock()
+	as.asMu.RLock()
 	ev := as.handle.Events()
-	as.handleMu.RUnlock()
+	as.asMu.RUnlock()
 
 	go func() {
 		defer close(done)

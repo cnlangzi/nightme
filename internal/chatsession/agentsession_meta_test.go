@@ -149,7 +149,7 @@ func TestEntry_RoundtripPreserves(t *testing.T) {
 		CacheReadInputTokens:     8_200,
 		CostUSD:                  0.087,
 	})
-	as.pid.Store(42)
+	as.pid = 42
 
 	entry := as.Entry()
 	if entry.Model != "opus-4-5" {

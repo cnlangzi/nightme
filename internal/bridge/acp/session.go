@@ -236,6 +236,18 @@ func (s *acpSession) SendBlocks(ctx context.Context, blocks []agent.ContentBlock
 	if len(blocks) == 0 {
 		return nil
 	}
+	// Derive a per-call ctx so the bridge layer owns its own
+	// cancellation surface. ACP's requestAsync is fire-and-forget
+	// (no ack wait), so callCtx mostly exists for symmetry with
+	// pi / claudecode — future bridge-level semantics (per-call
+	// timeout, retry budget, trace values) attach here without
+	// leaking into the ChatSession layer. cancelCall is still
+	// wired in case callCtx is ever passed to a downstream call
+	// that does honor it (currently none — requestAsync is sync).
+	callCtx, cancelCall := context.WithCancel(ctx)
+	defer cancelCall()
+	_ = callCtx
+
 	out := make([]contentBlock, 0, len(blocks))
 	for _, b := range blocks {
 		switch b.Type {

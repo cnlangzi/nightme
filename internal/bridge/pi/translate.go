@@ -335,8 +335,10 @@ func (t *translator) translateMessageUpdate(raw []byte, logger *slog.Logger) ([]
 }
 
 // translateMessageEnd dispatches message_end events by role.
-// assistant -> EventResult + EventUsage; toolResult -> no-op
-// (the matching tool_execution_end already produced EventToolEnd).
+// assistant -> one EventResult (with Usage co-located on the
+// ResultEvent payload — see translateAssistantMessage);
+// toolResult -> no-op (the matching tool_execution_end already
+// produced EventToolEnd).
 func (t *translator) translateMessageEnd(raw []byte, logger *slog.Logger) ([]agent.AgentEvent, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -382,8 +384,10 @@ func (t *translator) translateMessageEnd(raw []byte, logger *slog.Logger) ([]age
 
 // translateAssistantMessage renders the terminal assistant message
 // into a single EventResult with Usage co-located on the
-// ResultEvent payload. Used to emit EventResult + EventUsage in
-// sequence, but the data is already paired on Pi's `message_end`
+// ResultEvent payload. The data is already paired on Pi's
+// `message_end` (assistant role) wire event — emitting two
+// separate events would force the runtime to buffer OutResult
+// waiting for the late EventUsage, so we keep them together.
 // to buffer OutResult to get the footer stamp right. Now they
 // arrive together on the same AgentEvent.
 //

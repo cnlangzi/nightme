@@ -153,8 +153,11 @@ type assistantMessageEvent struct {
 
 // assistantMessage is the body of a "message_end" event when
 // role=="assistant". Pi uses this to deliver the finalized message
-// plus the per-message usage. We translate the per-message usage
-// into EventUsage when the totals are non-zero.
+// plus the per-message usage. The bridge attaches the per-message
+// usage to the same EventResult that delivers the finalized text
+// (ResultEvent.Usage) when the totals are non-zero — see
+// translateAssistantMessage and F-32 §2.3 for the single-event
+// rationale.
 type assistantMessage struct {
 	Role       string           `json:"role"`
 	Content    []contentBlock   `json:"content"`
@@ -202,8 +205,11 @@ type messageUsage struct {
 	Cost       *usageCost    `json:"cost"`
 }
 
-// usageCost holds the dollar cost breakdown. The bridge only emits
-// EventUsage when total > 0 to avoid noise on empty turns.
+// usageCost holds the dollar cost breakdown. The bridge attaches
+// the cost onto the assistant message_end ResultEvent.Usage,
+// skipping emission when total is 0 to avoid noise on empty
+// turns. Co-located with text + token counts on the same event
+// (see F-32 §2.3).
 type usageCost struct {
 	Input      float64 `json:"input"`
 	Output     float64 `json:"output"`

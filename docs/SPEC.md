@@ -585,59 +585,26 @@ type OutboundMessage struct {
 
 ## 0.13 文档变更摘要（v1.3.x F-46 交互卡 PATCH 增量，2026-08-06）
 
-**背景**：兑现 §2.5 "用户在 IM 里点反馈" 命题的**最后一块拼图**——gtw §5.3.1 / §5.3.3 决策卡之前只能让用户打 emoji（React Native / Feishu Web 找 emoji 面板体验差）。F-46 引入交互卡 button + 原地 PATCH，用户点一下完成 gtw 决策。
+**背景**：兑现 §2.5「用户在 IM 里点反馈」——gtw §5.3.1 / §5.3.3 决策卡此前只能靠 emoji reaction，移动端体验差。F-46 把决策面升级为**交互卡 + 原地更新**，点击即完成决策。
 
-**核心变化**：
+**核心变化**（概念级）：
 
-1. **OutboundKind 新增 2 个值**（`OutCard` / `OutCardPatch`）
-   - `OutCard` 出新交互卡，`ReplyTo` 缺省 empty（顶层卡）/ 非空（thread reply）
-   - `OutCardPatch` 原地 PATCH（Feishu `PATCH /im/v1/messages/{id}`），`ReplyTo` 必填=bot card msg id
-   - **不破坏 §1.4 不变式**：Channel 决定怎么 render；新 Kind 走既有 `Channel.Send` 派发
+1. **OutboundKind 新增 `OutCard` / `OutCardPatch`**
+   - `OutCard`：发出一张新的交互决策卡
+   - `OutCardPatch`：原地更新已发出的决策卡（选中态 / 禁用其余选项 / 附结果）
+   - 仍走既有 `Channel.Send`；**Channel 自决**如何渲染（Feishu PATCH、Slack 编辑、Web DOM 等）
 
-2. **Card 模型扩展**（`internal/gateway/messages.go::Card`）
-   - 新增 `Kind CardKind`（`CardKindPermission` / `CardKindDecision` / `CardKindPreview`）——决定 header 配色 + 是否加 🔐
-   - 新增 `Choices []CardChoice`（`{Emoji, Label, Action}` 数组）——比 `Options []string` 更结构化
-   - 新增 `Disabled bool` / `ChosenChoiceEmoji string`（PATCH 状态）
-   - **Permission card 默认 🔐**，Decision card 不加 🔐（`buildInteractiveCard` 根据 `Kind` 决定）
+2. **Card 契约结构化**
+   - 抽象层用 typed `Card`（kind / choices / chosen / disabled）描述决策面
+   - Channel 边界把平台按钮点击**归一化**为既有 `Reaction` / action 通路（与 emoji reaction 汇合），不新增平行生命周期
 
-3. **OutboundMessage 新增 6 个 PATCH 字段**（`internal/gtw/types.go::OutMsg`）
-   - `PatchBotMsgID string` / `PatchChosenEmoji string` / `PatchResult string`
-   - `CardTitle` / `CardBody` / `CardChoices` / `CardRequestID` / `ChosenChoiceEmoji`
-   - 翻译层在 `internal/gateway/handlers_gtw.go::gtwSendAdapter` / `gtwSendCardAdapter`（包装 channel 消息）
+3. **不破既有不变式**
+   - §1.3 / §1.4 保留：Channel 不 import chatsession；OutboundKind 仍为 typed enum；Receipt 自治不变（决策卡 ≠ receipt card）
+   - bridges 协议零变化
 
-4. **Handler 新增 2 个 action 路由**（`internal/channel/feishu/adapter.go`）
-   - `handleCardAction`（`OnP2CardActionTrigger`）：从 `card.action.trigger` 事件里抽 `act:` 前缀的 action string，合成 `InboundMessage{Reaction}` 推 `a.incoming`
-   - `OutCardPatch` case（Send dispatcher）：调 `PatchMessage(msg.ReplyTo, buildInteractiveCard(msg.Card))`
+**为什么不是 v2.0**：v1.3 核心不变式全部保留。F-46 是 Channel 自治范围内的「交互卡 kind + 原地更新通路」，不改 nightme 数据模型与 Gateway 核心契约。
 
-5. **button value 编码统一**
-   - 旧：`{"request_id": "...", "option": "🆕"}`（`option` 是 `select_static` 字段语义，混用）
-   - 新：`{"action": "act:/gtw/branch-newv2", "request_id": "..."}`（cc-connect 风格）
-
-6. **gtw.HandleAction 内部完成 PATCH 重建**（`internal/gtw/action.go::emitFollowUp`）
-   - `draft.BotMessageID != ""` 时发 `OutCardPatch`（`CardRequestID = "gtw-test-"+userMsgID` 等同 stamp 公式）
-   - `BotMessageID` 由 `gtwTestSeedDraft` 提前 stamp 防止 PATCH 静默失败
-   - 没选按钮 `type: "default"` 灰描边 + `disabled: true`；选中按钮 `type: "success"` 绿填充 + `✓` 前缀
-
-7. **9 路 F-46 debug log**（`internal/gtw/action.go` / `internal/gateway/handlers_gtw.go` / `internal/gateway/gateway.go` / `internal/chatsession/chatsession.go` / `cmd/nightme/run.go`）
-   - `slog.Default().Warn("F-46 debug: <step>", ...)` 在每个岔路打点
-   - 配合 §10 实现过程总结的 9 路经典岔路表，定位 dispatch 断点
-
-8. **`/gtw test` 是 UAT demo，**不** auto-dispatch**
-   - 出卡 + 提示文字"请点按钮"——用户自己点
-   - auto-mode 留给 `/gtw test auto <emoji>`（F-46 后续）
-   - 取消 auto-dispatch 的关键原因：synthetic reaction 跑通后 draft 被 Take 走，用户的真点击找不到 draft
-
-**为什么不是 v2.0**：v1.3 核心不变式（职责隔离、Binding FSM owner、Receipt 自治、抽象归抽象 / 具体归具体、§1.4 边界规范）全部保留。F-46 是**Channel 自治**范围内新增的「交互卡 message kind + PATCH 通路」，不影响 nightme 数据模型与 Gateway 核心契约。
-
-**不变式**：
-- §1.3 Channel 不 import chatsession（不变；F-46 全程不破 §1.3 不变式）
-- §1.3 ChatSession 不 import channel/feishu（不变）
-- §1.4 抽象 / 具体 边界规范保留（OutboundKind 仍是 typed enum，Channel 自决 render）
-- OutboundKind 100% typed（新增 `OutCard` / `OutCardPatch` 是 enum 值，不是新接口）
-- bridges 协议零变化（Feishu card API 是公共 SDK，不破 §1.3 数据流）
-- Receipt 自治不变（决策卡 ≠ receipt card，是独立 card message，§1.4 边界保留）
-
-**详细设计 + 调试心得 + F-47/48/49 排期**：见 [`docs/feat/F-46-interactive-cards.md`](./feat/F-46-interactive-cards.md)。
+**详细设计 / 线格式 / Feishu 渲染 / `/gtw test` debug UAT**：见 [`feat/F-46-interactive-cards.md`](./feat/F-46-interactive-cards.md)。
 
 ---
 
@@ -1230,64 +1197,44 @@ OutboundMessage{
 
 ### 2.6 Interactive Decision Cards（F-46 新增，2026-08-06）
 
-**核心问题**：gtw §5.3.1 / §5.3.3 决策卡（worktree-fail / branch-exists）之前是**纯文本 markdown**——用户必须打 emoji 才能继续。在 Feishu 移动端，找 emoji 体验差；Web 端也没按钮。
+**核心问题**：gtw §5.3.1 / §5.3.3 决策卡此前是纯文本，用户只能靠 emoji reaction 继续；IM 移动端找 emoji 体验差。
 
-**F-46 引入交互卡 button + 原地 PATCH**，让用户点一下就完成 gtw 决策。
+**F-46**：决策面改为**交互卡**；用户选择后**原地更新**同一张卡（选中态 + 禁用其余选项 + 可选结果摘要），而不是再发一条平行回复。
 
-**完整路径**（生产运行时）：
+**概念数据流**：
 
 ```
-用户点 Feishu 卡片上的按钮（🔄 / ❌ / 🆕 / 🔗）
+用户在决策卡上选择
         │
         ▼
-Feishu SDK → card.action.trigger 事件
+Channel：平台点击 → 归一化为 InboundMessage{Reaction|Action}
         │
         ▼
-internal/channel/feishu/adapter.go::handleCardAction
+Gateway：dispatchAction → ChatSession.HandleAction
         │
         ▼
-gtw.ActionLookup("act:/gtw/<scenario>") → 解析为 ReactionKind
+gtw：消费 draft → 执行决策 → 发出 OutCardPatch（或无 bot 卡 id 时退化为文本）
         │
         ▼
-合成 InboundMessage{Reaction} → push 到 a.incoming（buffer=128）
-        │
-        ▼
-gateway.dispatchAction → g.actionHandler → cs.HandleAction
-        │
-        ▼
-gtw.HandleAction → executeXxxAction → emitFollowUp
-        │
-        ▼
-if draft.BotMessageID != "" → PATCH 原卡
-else → 落 plain text
-        │
-        ▼
-Feishu adapter Send → OutCardPatch case → PatchMessage
+Channel：按平台能力渲染原地更新（Feishu / Slack / Web 各自实现）
 ```
 
-**契约**：
+**抽象契约**（Gateway / gtw 看见的）：
 
-1. **Button value 编码**：`{"action": "act:/gtw/<scenario>", "request_id": "..."}`（cc-connect 风格）。`option` 字段完全废弃——那是 `select_static` 组件的语义。
-2. **`act:` 前缀三段式**（沿用 cc-connect）：
-   - `act:/gtw/branch-newv2` §5.3.1 选 🆕
-   - `act:/gtw/branch-join` §5.3.1 选 🔗
-   - `act:/gtw/worktree-retry` §5.3.3 选 🔄
-   - `act:/gtw/cancel` 任意决策卡选 ❌
-   - `act:/gtw/label-force` §5.3.2 强制接管（F-49 占位）
-   - `nav:/xxx` 卡片内导航（F-47 占位）
-   - `cmd:/xxx` button 当用户命令派发（F-48 占位）
-3. **PATCH 视觉反转**（user UX 决定）：
-   - **选中按钮**：`type: "success"` 填充绿 + `✓` 前缀 + 完整 label（`✓ 🔄 重试`）
-   - **没选按钮**：`type: "default"` 灰描边 + `disabled: true` + 完整 label（`❌ 取消`）
-   - body 不再加 `✅ 已选择 X` 行——冗余噪声；按钮绿色已传达"已选"语义
-   - body 只剩原 body + 底部 `Retry failed: ...`（来自 `m.PatchResult`）
-4. **不破坏 Channel 自治不变式**（§1.4）：`OutboundKind.OutCardPatch` 是新 Kind，Channel 决定怎么渲染。Feishu adapter 走 `PatchMessage`；Slack / Web 将来自己决定。
+| 概念 | 含义 |
+|---|---|
+| `OutCard` | 发出一张新的交互决策卡 |
+| `OutCardPatch` | 原地更新已发出的决策卡 |
+| typed `Card` | kind / choices / chosen / disabled —— 描述决策面，不含平台 schema |
+| 边界归一化 | 平台按钮点击在 Channel 边界折成既有 reaction/action 通路，与 emoji 汇合 |
 
-**详细设计 + 调试心得**：见 [`feat/F-46-interactive-cards.md`](./feat/F-46-interactive-cards.md)。
+**不变式**：
 
----
+- §1.4：OutboundKind 仍 typed；Channel 自决渲染（含是否支持原地更新）
+- §1.3：Channel 不 import chatsession；决策卡 ≠ receipt card（Receipt 自治不变）
+- 不引入第二条「卡片专属」生命周期与 emoji reaction 分叉
 
-## 3. ChatSession 生命周期
+**实现细节**（button value 编码、action 目录、Feishu 视觉、`/gtw test` debug UAT）：见 [`feat/F-46-interactive-cards.md`](./feat/F-46-interactive-cards.md)。
 
 ---
 

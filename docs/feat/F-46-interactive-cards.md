@@ -239,17 +239,15 @@ func (a *Adapter) handleActCardAction(
 `gtwActionMap` 在 `internal/gtw/action_routing.go`：
 
 ```go
-var gtwActionPrefixes = map[string]gtw.ReactionKind{
-    "act:/gtw/branch-newv2":   gtw.ReactionNewV2,
-    "act:/gtw/branch-join":    gtw.ReactionJoin,
-    "act:/gtw/cancel":         gtw.ReactionCancel,
-    "act:/gtw/worktree-retry": gtw.ReactionRetry,
-    "act:/gtw/label-force":    gtw.ReactionForce,  // F-49
+var gtwActionPrefixes = map[string]ReactionKind{
+    "act:/gtw/branch-newv2":   ReactionNewV2,  // /gtw test three
+    "act:/gtw/branch-join":    ReactionJoin,   // /gtw test three
+    "act:/gtw/worktree-retry": ReactionRetry,  // /gtw test ok
+    "act:/gtw/cancel":         ReactionCancel, // any decision card
 }
 
-func gtwActionMap(actionStr string) (draftHint gtw.DraftKind, emoji gtw.ReactionKind, ok bool) {
-    emoji, ok = gtwActionPrefixes[actionStr]
-    return "", emoji, ok
+func ActionLookup(action string) (ReactionKind, bool) {
+    // unknown / retired (label-force, worktree-cancel, …) → false
 }
 ```
 
@@ -515,15 +513,13 @@ Feishu SDK 的 `event.Action.Option` 字段是 `select_static` 组件的选项�
 
 | 前缀 | 语义 | F-46 落地 |
 | --- | --- | --- |
-| `act:/gtw/branch-newv2` | 在 §5.3.1 决策卡上选 🆕 | ✅ 已实现 |
-| `act:/gtw/branch-join` | 在 §5.3.1 决策卡上选 🔗 | ✅ 已实现 |
-| `act:/gtw/worktree-retry` | 在 §5.3.3 决策卡上选 🔄 | ✅ 已实现 |
-| `act:/gtw/cancel` | 任意决策卡选 ❌ | ✅ 已实现 |
-| `act:/gtw/label-force` | §5.3.2 强制接管 | 🟡 占位（F-49 待落地）|
-| `nav:/xxx` | 卡片内导航 | ❌ F-47 |
-| `cmd:/xxx` | button click 当用户命令派发 | ❌ F-48 |
+| `act:/gtw/branch-newv2` | §5.3.1 🆕（`/gtw test three`） | ✅ 已实现 |
+| `act:/gtw/branch-join` | §5.3.1 🔗（`/gtw test three`） | ✅ 已实现 |
+| `act:/gtw/worktree-retry` | §5.3.3 🔄（`/gtw test ok`） | ✅ 已实现 |
+| `act:/gtw/cancel` | 任意决策卡 ❌ | ✅ 已实现 |
+| `nav:/xxx` / `cmd:/xxx` / `act:/gtw/label-force` | 导航 / 命令 / §5.3.2 强制接管 | ❌ 未进 map（F-47/48/49） |
 
-`ActionLookup` 在 `internal/gtw/action_routing.go` 维护 `gtwActionPrefixes` map（key=actionStr, value=ReactionKind）。当前是静态 map，F-47/F-48 落地时改用 registry。
+`ActionLookup` 只收录**当前卡面真实发出的** action；占位 / alias（`label-force`、`worktree-cancel`）已从 map 清掉，避免与 `/gtw test` 场景脱节。
 
 #### 10.2.3 PATCH 视觉：颜色反转 + 完整 label + 无 "已选择" 头
 

@@ -5,17 +5,8 @@ import (
 	"strings"
 )
 
-// renderFixSuccessCard builds the §5.2.⑥ success card. Layout is
-//
-//	[Bot] ✅ Fix #42 就绪
-//	      ━━━━━━━━━━━━━━━━
-//	      [Context]
-//	      🌿 branch:   fix/42-login-state-expiration
-//	      📁 worktree: ~/code/nightme.nightme/42-login-state-expiration
-//	      🏷 平台:cnlangzi/nightme#42 [nightme/wip]
-//	      ━━━━━━━━━━━━━━━━
-//	      [Command result]
-//	      💡 下一步:/gtw push 或 /gtw pr
+// renderFixSuccessCard builds the §5.2.⑥ success card (plain text;
+// success has no interactive buttons in v1).
 func renderFixSuccessCard(issue *Issue, branch, worktree, repo string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "✅ Fix #%d 就绪\n", issue.ID)
@@ -33,31 +24,11 @@ func renderFixSuccessCard(issue *Issue, branch, worktree, repo string) string {
 	return b.String()
 }
 
-// renderBranchExistsCard builds the §5.3.1 decision card. The
-// existingPath is empty when the branch is in a non-default
-// worktree (rare in v1; we still render the card with the path
-// blank).
-func renderBranchExistsCard(p FixDraftPayload, existingPath string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "⚠️ 分支 `%s` 已存在\n", p.Branch)
-	b.WriteString("━━━━━━━━━━━━━━\n")
-	fmt.Fprintf(&b, "issue: #%d  %s\n", p.IssueID, p.Title)
-	if existingPath != "" {
-		fmt.Fprintf(&b, "已有 worktree: %s\n", existingPath)
-	}
-	b.WriteString("━━━━━━━━━━━━━━\n")
-	b.WriteString("选择操作(反应对应 emoji):\n")
-	b.WriteString("  🆕 用 -v2 新分支\n")
-	b.WriteString("  🔗 加入现有协作(切到已有 worktree)\n")
-	b.WriteString("  ❌ 取消\n")
-	return b.String()
-}
-
-// renderBranchExistsCardData returns the §5.3.1 decision card as
-// the F-46 Card struct (Title + Body + Choices + RequestID). The
-// action handler's follow-up PATCH rebuilds the card with
-// Disabled=true using this data.
-func renderBranchExistsCardData(p FixDraftPayload, existingPath string) Card {
+// BranchExistsCard builds the §5.3.1 interactive decision card.
+// This is the single source of truth for production `/gtw fix`
+// (emitBranchExistsDraft) and for debug `/gtw test` scenarios that
+// exercise the same card shape — debug must not re-hardcode Choices.
+func BranchExistsCard(p FixDraftPayload, existingPath string) Card {
 	body := fmt.Sprintf("issue: #%d  %s\n", p.IssueID, p.Title)
 	if existingPath != "" {
 		body += fmt.Sprintf("已有 worktree: %s\n", existingPath)
@@ -68,43 +39,22 @@ func renderBranchExistsCardData(p FixDraftPayload, existingPath string) Card {
 		Body:  body,
 		Choices: []CardChoice{
 			{Emoji: "🆕", Label: "用 -v2 新分支", Action: "act:/gtw/branch-newv2"},
-			{Emoji: "🔗", Label: "加入现有协作",  Action: "act:/gtw/branch-join"},
-			{Emoji: "❌", Label: "取消",         Action: "act:/gtw/cancel"},
+			{Emoji: "🔗", Label: "加入现有协作", Action: "act:/gtw/branch-join"},
+			{Emoji: "❌", Label: "取消", Action: "act:/gtw/cancel"},
 		},
 	}
 }
 
-// renderWorktreeFailCard builds the §5.3.3 decision card.
-func renderWorktreeFailCard(p FixDraftPayload) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "❌ 创建 worktree 失败(#%d)\n", p.IssueID)
-	b.WriteString("━━━━━━━━━━━━━━\n")
-	fmt.Fprintf(&b, "branch: %s\n", p.Branch)
-	if p.GitError != "" {
-		b.WriteString("[git stderr tail]\n")
-		b.WriteString(p.GitError)
-		b.WriteString("\n")
-	}
-	b.WriteString("━━━━━━━━━━━━━━\n")
-	b.WriteString("选择操作(反应对应 emoji):\n")
-	b.WriteString("  🔄 重试\n")
-	b.WriteString("  ❌ 取消")
-	if p.LabelAdded {
-		b.WriteString(" (已撤销 nightme/wip label)")
-	}
-	b.WriteString("\n")
-	return b.String()
-}
-
-// renderWorktreeFailCardData returns the §5.3.3 decision card as
-// the F-46 Card struct. Mirrors renderBranchExistsCardData.
-func renderWorktreeFailCardData(p FixDraftPayload) Card {
+// WorktreeFailCard builds the §5.3.3 interactive decision card.
+// Same ownership rule as BranchExistsCard: business layer owns the
+// shape; debug UAT reuses it.
+func WorktreeFailCard(p FixDraftPayload) Card {
 	body := fmt.Sprintf("branch: %s\n", p.Branch)
 	if p.GitError != "" {
 		body += "[git stderr tail]\n" + p.GitError + "\n"
 	}
 	body += "\n选择操作(反应对应 emoji):"
-	cancelLabel := "❌ 取消"
+	cancelLabel := "取消"
 	if p.LabelAdded {
 		cancelLabel += " (已撤销 nightme/wip label)"
 	}

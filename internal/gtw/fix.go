@@ -294,8 +294,8 @@ func emitBranchExistsDraft(
 	payload FixDraftPayload,
 	existingPath string,
 ) (*Result, error) {
-	card := renderBranchExistsCardData(payload, existingPath)
-	return sendDraft(ctx, deps, chatID, messageID, userMsgID, card, drafts, DraftFixBranchExists, payload)
+		card := BranchExistsCard(payload, existingPath)
+		return sendDraft(ctx, deps, chatID, messageID, userMsgID, card, drafts, DraftFixBranchExists, payload)
 }
 
 func emitWorktreeFailDraft(
@@ -305,8 +305,8 @@ func emitWorktreeFailDraft(
 	drafts DraftsMap,
 	payload FixDraftPayload,
 ) (*Result, error) {
-	card := renderWorktreeFailCardData(payload)
-	return sendDraft(ctx, deps, chatID, messageID, userMsgID, card, drafts, DraftFixWorktreeFail, payload)
+		card := WorktreeFailCard(payload)
+		return sendDraft(ctx, deps, chatID, messageID, userMsgID, card, drafts, DraftFixWorktreeFail, payload)
 }
 
 func sendDraft(

@@ -454,6 +454,15 @@ func (s *session) New(ctx context.Context) error {
 	// emit. We hold the lock across reset+emit+deliver.
 	s.translatorMu.Lock()
 	s.translator.initSent = false
+	// F-32 §12.1 defensive cleanup symmetry: /new is an explicit
+	// session boundary. Drop any in-flight pendingTools entries
+	// left over from a tool that was running when the user typed
+	// /new — otherwise a fresh session's tool could inherit stale
+	// Name/Args under the unlikely toolCallId collision with the
+	// prior session. Same critical section as the initSent reset
+	// so a concurrent readPump cannot observe a half-reset
+	// translator state.
+	s.translator.pendingTools = make(map[string]pendingTool)
 	stateCtx, stateCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer stateCancel()
 	stateEnv, err := s.rpc.request(stateCtx, "get_state", map[string]any{}, "")

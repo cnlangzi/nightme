@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/gtw"
 )
 
 // ChatType was removed in F-33. The Gateway never sees chat types;
@@ -406,6 +407,26 @@ type SessionContext struct {
 	Agent           string
 	Model           string
 	CumulativeUsage UsageInfo
+	// Workspace is the absolute path of the AgentSession's
+	// working directory at the time this OutboundMessage was
+	// emitted. Sourced from AgentSession.Cwd (immutable post-
+	// construction, no lock). Empty before the AgentSession has
+	// been bound; the footer omits the workspace segment when "".
+	//
+	// F-48 (F-45 follow-up): the third footer line ("📁 code/nightme
+	// · ⎇ main · …") uses this plus GitStatus to render the
+	// git-tracking segment. See docs/feat/F-45-session-footer.md
+	// §1.7.
+	Workspace string
+	// GitStatus is the per-stamp git status snapshot captured by
+	// the runtime via gtw.CollectStatus. nil when the workspace
+	// is not a git repo or the git invocation failed — the footer
+	// omits the entire git segment in that case.
+	//
+	// Recomputed on every main-chat stamp (no caching) so the
+	// footer reflects the latest worktree state without an
+	// invalidation hook. See docs/feat/F-45-session-footer.md §1.7.
+	GitStatus *gtw.GitStatusSnapshot
 }
 
 // ToolInfo is the typed payload for OutboundMessage.Tool,

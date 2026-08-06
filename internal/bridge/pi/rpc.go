@@ -27,6 +27,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // MaxFrameSize caps the size of a single JSONL frame the bridge will
@@ -249,17 +250,28 @@ func (c *rpcClient) dispatchResponse(env responseEnvelope) {
 }
 
 // failPending aborts every registered waiter with the given error
-// and marks the client closed. Called once, from the lifecycle
-// goroutine, when the underlying pipe is dead.
-func (c *rpcClient) failPending(_ error) {
+// and marks the client closed. Called from the lifecycle goroutine
+// after cmd.Wait returns AND from readPump on its way out (see the
+// note in readPump). Idempotent: the second call finds an empty
+// pending map and is effectively a no-op aside from the closed flag.
+func (c *rpcClient) failPending(err error) {
 	c.closed.Store(true)
 	c.pendingMu.Lock()
 	pending := c.pending
 	c.pending = make(map[string]chan responseEnvelope)
 	c.pendingMu.Unlock()
+	piLog("rpc.failPending", "waiters", len(pending), "cause", errStr(err))
 	for _, ch := range pending {
 		close(ch)
 	}
+}
+
+// errStr is a tiny nil-safe error stringifier for log fields.
+func errStr(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // request is the synchronous helper: it assigns an id, writes the
@@ -286,21 +298,40 @@ func (c *rpcClient) request(ctx context.Context, name string, body any, idHint s
 	if id == "" {
 		id = c.nextRequestID()
 	}
+	// reqStart stamps the whole request/response round-trip so
+	// the debug log shows exactly where the wait happened when
+	// handshake stalls (F-32 incident 2026-08-06).
+	reqStart := time.Now()
 	// Register the pending slot first so a fast response from
 	// the child cannot outrun the map write.
 	ch := c.expectResponse(id)
 	if _, err := c.writeCommand(name, body, id); err != nil {
 		c.cancelResponse(id)
+		piLog("rpc.request write failed",
+			"id", id, "name", name,
+			"elapsed_ms", time.Since(reqStart).Milliseconds(),
+			"err", err.Error())
 		return responseEnvelope{}, err
 	}
 	defer c.cancelResponse(id)
 	select {
 	case env, ok := <-ch:
 		if !ok {
+			piLog("rpc.request session closed",
+				"id", id, "name", name,
+				"elapsed_ms", time.Since(reqStart).Milliseconds())
 			return responseEnvelope{}, ErrSessionClosed
 		}
+		piLog("rpc.request ok",
+			"id", id, "name", name,
+			"elapsed_ms", time.Since(reqStart).Milliseconds(),
+			"success", env.Success)
 		return env, nil
 	case <-ctx.Done():
+		piLog("rpc.request ctx cancelled",
+			"id", id, "name", name,
+			"elapsed_ms", time.Since(reqStart).Milliseconds(),
+			"err", ctx.Err().Error())
 		return responseEnvelope{}, ctx.Err()
 	}
 }

@@ -62,9 +62,22 @@ while IFS= read -r line; do
       reply_get_state
       ;;
     *'"type":"prompt"'*)
+      # MOCK_PI_SILENT also covers prompt hang so the legacy
+      # handshake-timeout test still finds a quiet child on the
+      # second turn. MOCK_PI_PROMPT_HANG is a finer knob for
+      # prompt-deadline coverage: it answers get_state normally
+      # but silently swallows every prompt, letting the bridge's
+      # promptTimeout fire. Hang window must exceed promptTimeout
+      # (default 90 s) so the test waits for the deadline, not
+      # the script exit. After the hang the script exits so no
+      # orphan lingers between test runs.
       if [ "${MOCK_PI_SILENT:-0}" = "1" ]; then
         : # same trick -- never respond to prompts either.
         sleep 30
+        exit 0
+      fi
+      if [ "${MOCK_PI_PROMPT_HANG:-0}" = "1" ]; then
+        sleep 300
         exit 0
       fi
       # Extract the id field for the response.

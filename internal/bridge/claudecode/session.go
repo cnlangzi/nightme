@@ -264,6 +264,18 @@ func (s *session) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) e
 	if len(blocks) == 0 {
 		return nil
 	}
+	// Derive a per-call ctx so the bridge layer owns its own
+	// cancellation surface. Claudecode's write path is
+	// fire-and-forget (no ack wait), so callCtx mostly exists for
+	// symmetry with pi / acp — future bridge-level semantics
+	// (per-call timeout, retry budget, trace values) attach here
+	// without leaking into the ChatSession layer. cancelCall is
+	// still wired in case callCtx is ever passed to a downstream
+	// call that does honor it (currently none — writeLine is sync).
+	callCtx, cancelCall := context.WithCancel(ctx)
+	defer cancelCall()
+	_ = callCtx
+
 	content := make([]map[string]any, 0, len(blocks))
 	for _, b := range blocks {
 		switch b.Type {

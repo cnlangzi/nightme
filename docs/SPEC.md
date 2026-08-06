@@ -585,7 +585,7 @@ type OutboundMessage struct {
 
 ## 0.13 文档变更摘要（v1.3.x F-46 交互卡 PATCH 增量，2026-08-06）
 
-**背景**：兑现 §2.5「用户在 IM 里点反馈」——gtw §5.3.1 / §5.3.3 决策卡此前只能靠 emoji reaction，移动端体验差。F-46 把决策面升级为**交互卡 + 原地更新**，点击即完成决策。
+**背景**：兑现 §2.5「用户在 IM 里点反馈」—— gtw 决策卡的 branch-exists / worktree-fail 场景（详见 [`F-46-interactive-cards.md`](./feat/F-46-interactive-cards.md) §3.3）此前只能靠 emoji reaction，移动端体验差。F-46 把决策面升级为**交互卡 + 原地更新**，点击即完成决策。
 
 **核心变化**（概念级）：
 
@@ -1234,7 +1234,7 @@ OutboundMessage{
 
 ### 2.6 Interactive Decision Cards（F-46 新增，2026-08-06）
 
-**核心问题**：gtw §5.3.1 / §5.3.3 决策卡此前是纯文本，用户只能靠 emoji reaction 继续；IM 移动端找 emoji 体验差。
+**核心问题**：gtw 决策卡的 branch-exists / worktree-fail 场景（[`F-46-interactive-cards.md`](./feat/F-46-interactive-cards.md) §3.3）此前是纯文本，用户只能靠 emoji reaction 继续；IM 移动端找 emoji 体验差。
 
 **F-46**：决策面改为**交互卡**；用户选择后**原地更新**同一张卡（选中态 + 禁用其余选项 + 可选结果摘要），而不是再发一条平行回复。
 

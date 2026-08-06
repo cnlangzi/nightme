@@ -167,7 +167,7 @@ func newDebugFixture(f debugFlags) (*debugFixture, error) {
 	// print what the executor emitted.
 	gtwDeps := gtw.HandlerDeps{
 		Git:         gtw.ExecGitRunner{},
-		NewPlatform: gtw.NewPlatformClient,
+		Prober:      &gtw.ExecHTTPProber{},
 		Now:         func() time.Time { return timeNow() },
 		Send: func(_ context.Context, m gtw.OutMsg) error {
 			captured.mu.Lock()
@@ -372,7 +372,7 @@ func seedDraft(fix *debugFixture, f debugFlags, userMsgID, kind string) error {
 			Branch:     f.branch,
 			Slug:       fmt.Sprintf("%d-test-slug", f.issueID),
 			Repo:       f.repo,
-			Platform:   "github",
+			Provider:   "github",
 			LabelAdded: kind != "worktree-fail", // branch-exists & label-taken added it; worktree-fail did not
 			ChatID:     f.chatID,
 		},

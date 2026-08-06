@@ -11,8 +11,11 @@ import (
 //
 //  1. The git worktree list — if the cwd is a worktree holding a
 //     branch named `fix/<id>-*`, we have a strong signal.
-//  2. The platform label lookup — if the branch matches an issue
-//     with nightme/wip, we have the issue number.
+//  2. The provider label lookup — if the branch matches an issue
+//     with nightme/wip, we have the issue number. Detection uses
+//     the two-stage Detect (URL hint → API probe), so self-hosted
+//     GitHub Enterprise / GitLab instances on custom domains are
+//     recognised during daemon recovery too.
 //  3. The cwd's path layout — confirms the worktree ↔ repo mapping.
 //
 // Returns the zero Context when the cwd is not part of any /gtw fix;
@@ -25,7 +28,8 @@ func RebuildContext(
 	ctx context.Context,
 	cs Sender,
 	git GitRunner,
-	newPlatform func(PlatformKind) (PlatformClient, error),
+	detect func(ctx context.Context, remoteURL string, prober HTTPProber) (GitProvider, error),
+	prober HTTPProber,
 ) Context {
 	cwd := cs.ActiveCwd()
 	if cwd == "" {
@@ -65,7 +69,19 @@ func RebuildContext(
 	if err != nil || remoteURL == "" {
 		return Context{}
 	}
-	kind, err := DetectPlatform(remoteURL)
+	if detect == nil {
+		detect = Detect
+	}
+	if prober == nil {
+		prober = &ExecHTTPProber{}
+	}
+	// F-50 review fix: forward the caller's prober instead of
+	// passing nil. Previously Detect would internally instantiate
+	// a second ExecHTTPProber, doubling Stage B latency on the
+	// /gtw fix message path (worst case 6s instead of 3s when
+	// both RunFix's prober and RebuildContext's prober hit the
+	// same slow self-hosted host).
+	provider, err := detect(ctx, remoteURL, prober)
 	if err != nil {
 		return Context{}
 	}
@@ -73,11 +89,7 @@ func RebuildContext(
 	if err != nil {
 		return Context{}
 	}
-	plat, err := newPlatform(kind)
-	if err != nil {
-		return Context{}
-	}
-	issue, err := plat.GetIssue(ctx, owner, repo, issueID)
+	issue, err := provider.GetIssue(ctx, owner, repo, issueID)
 	now := timeNow()
 	if err != nil {
 		// Issue not found (deleted / moved) — keep the local

@@ -132,7 +132,7 @@ type ChatSession struct {
 
 	// onReaction is the runtime-installed callback fired when a
 	// user adds an emoji reaction to a message in this chat
-	// (F-45 §3.5). Set once at startup. The handler decides
+	// (F-50 §6.1 reaction routing). Set once at startup. The handler decides
 	// whether the reaction was a gtw-draft confirmation (and
 	// dispatches to gtw.HandleAction) or a no-op (e.g. a
 	// thumbs-up on a regular bot reply). Returning false lets
@@ -666,7 +666,7 @@ func (cs *ChatSession) EmitMessageState(userMsgID string, state agent.MessageSta
 }
 
 // SetActionHandler installs the callback fired when a user
-// adds an emoji reaction to a message in this chat (F-45 §3.5).
+// adds an emoji reaction to a message in this chat (F-50 §6.1 reaction routing).
 // Set once at startup; nil clears.
 //
 // The handler is the per-chat reaction router. Its job is to

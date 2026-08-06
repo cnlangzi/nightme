@@ -317,11 +317,12 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 
 	// F-45/F-46: /gtw fix slash command + reaction/action routing.
 	// Token auth is borrowed from `gh` / `glab` — see
-	// internal/gtw/platform.go. RegisterGTWAction wires decision-card
-	// emoji/button clicks onto ChatSession.HandleAction.
+	// internal/gtw/provider.go (F-50 renamed from platform.go).
+	// RegisterGTWAction wires decision-card emoji/button clicks
+	// onto ChatSession.HandleAction.
 	gtwDeps := gtw.HandlerDeps{
 		Git:         gtw.ExecGitRunner{},
-		NewPlatform: gtw.NewPlatformClient,
+		Prober:      &gtw.ExecHTTPProber{},
 	}
 	gateway.RegisterGTW(gwImpl, mgr, ch, cfg.Primary, gtwDeps)
 	gateway.RegisterGTWAction(mgr, gtwDeps)
@@ -341,7 +342,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		return cs.WatchMode(), true
 	})
 
-	// F-45 §3.5: install the action handler so DispatchInbound
+	// F-50 §6.1: install the action handler so DispatchInbound
 	// routes msg.Reaction (and future msg.Action for card button
 	// clicks) to ChatSession.HandleAction instead of treating
 	// them as empty-text messages. The handler is a thin

@@ -63,9 +63,16 @@ type HandlerDeps struct {
 	SendCard SendCardFunc
 	// Git wraps the local git binary. Tests inject a fake.
 	Git GitRunner
-	// NewPlatform picks a PlatformClient based on the remote URL.
-	// Production: NewPlatformClient. Tests: returns a fake.
-	NewPlatform func(kind PlatformKind) (PlatformClient, error)
+	// Prober is the HTTPProber for Detect's Stage B API probe
+	// (used only when the URL hint is ambiguous). nil → production
+	// uses ExecHTTPProber{} with 3s default timeout. Tests inject
+	// a fake that returns canned JSON for fixture-driven cases.
+	Prober HTTPProber
+	// Detect is the provider-detection function. nil → production
+	// uses package-level Detect (URL hint + API probe). Tests
+	// override to inject a fakeProvider without running real
+	// Detect logic (see F-50 §1.4 for the injection pattern).
+	Detect func(ctx context.Context, remoteURL string, prober HTTPProber) (GitProvider, error)
 	// Now is the clock. Tests override for deterministic drafts.
 	Now func() time.Time
 }
@@ -111,11 +118,21 @@ func RunFix(
 			"⚠️ Already inside a /gtw fix. Finish or cancel it first."), nil
 	}
 
-	// F-45 §5.7: daemon-recovery. If the in-memory gtwContext was
-	// lost (daemon restart), the cwd may still be inside a worktree
-	// holding a `fix/<id>-*` branch. Rebuild it transparently so
-	// the user doesn't lose their fix state.
-	if rebuilt := RebuildContext(ctx, cs, deps.Git, deps.NewPlatform); rebuilt != (Context{}) {
+	// F-50 §5.7 + F-45 reaction ingest: daemon-recovery. If the
+	// in-memory gtwContext was lost (daemon restart), the cwd may
+	// still be inside a worktree holding a `fix/<id>-*` branch.
+	// Rebuild it transparently so the user doesn't lose their
+	// fix state. F-50 review fix: forward the caller's prober to
+	// avoid a second ExecHTTPProber instantiation in Detect.
+	//
+	// The prober is created here (before the early rebuild call)
+	// so both the rebuild path and the main Detect path share the
+	// same instance — never two independent timeouts.
+	prober := deps.Prober
+	if prober == nil {
+		prober = &ExecHTTPProber{}
+	}
+	if rebuilt := RebuildContext(ctx, cs, deps.Git, deps.Detect, prober); rebuilt != (Context{}) {
 		slot.Store(rebuilt)
 		_ = reply(ctx, deps.Send, chatID, messageID, fmt.Sprintf(
 			"♻️ Recovered /gtw fix #%d (state: %s) after daemon restart.\n  branch: %s\n  worktree: %s\n  Continue working in the worktree, or `/cwd` back to the repo before starting a new fix.",
@@ -134,23 +151,70 @@ func RunFix(
 		return reply(ctx, deps.Send, chatID, messageID,
 			"❌ No `origin` remote. Add one with `git remote add origin <url>`."), nil
 	}
-	platformKind, err := DetectPlatform(remoteURL)
-	if err != nil {
-		return reply(ctx, deps.Send, chatID, messageID,
-			"❌ 暂不支持的 Git 平台 (only github.com / gitlab.com are supported in v1)."), nil
+	// Two-stage provider detection (F-50 §1.2): URL hint first
+	// (zero network), API endpoint probe fallback for self-hosted
+	// GitHub Enterprise / GitLab on custom domains. Returns a
+	// GitProvider already bound to host + version. Tests override
+	// via deps.Detect to inject a fakeProvider.
+	detect := deps.Detect
+	if detect == nil {
+		detect = Detect
 	}
+	// prober is the same instance created earlier for
+	// RebuildContext — reused here so the two Detect calls
+	// (rebuild + main) share the 3s timeout budget rather
+	// than doubling.
+	provider, err := detect(ctx, remoteURL, prober)
+	if err != nil {
+		// D3 split: distinguish "URL is malformed" (user error —
+		// the remote URL itself doesn't parse) from "host not
+		// recognised as GitHub/GitLab" (no provider implementation
+		// for that host yet). The two need different remediation
+		// hints in the IM reply.
+		//
+		// Security: never echo the raw remoteURL — it may carry
+		// userinfo (PAT / oauth2:token) that would leak to the
+		// IM channel. We use redactForDisplay() which strips
+		// credentials + caps length. If redaction fails (truly
+		// unparseable input), we fall back to a generic hint
+		// without any URL echo at all.
+		redacted := redactForDisplay(remoteURL)
+		switch {
+		case errors.Is(err, ErrInvalidRemoteURL):
+			if redacted == "" {
+				return reply(ctx, deps.Send, chatID, messageID,
+					"❌ 无效的 remote URL（凭证已脱敏）\n  Expected: https://github.com/<owner>/<repo>.git, git@github.com:<owner>/<repo>.git, ssh://git@<host>/path, git://<host>/path, etc."), nil
+			}
+			return reply(ctx, deps.Send, chatID, messageID,
+				fmt.Sprintf("❌ 无效的 remote URL: %s\n  Expected: https://github.com/<owner>/<repo>.git, git@github.com:<owner>/<repo>.git, ssh://git@<host>/path, git://<host>/path, etc.", redacted)), nil
+		default:
+			// ErrUnsupportedProvider (or wrapped): both stages
+			// failed. URL hint did not match github.com / gitlab.com,
+			// AND the API probe (when Stage A was ambiguous) did
+			// not recognise the host either. Self-hosted GitHub
+			// Enterprise / GitLab instances are tried first via
+			// /api/v3/meta or /api/v4/version; only true unknowns
+			// (Bitbucket / Gitea — not yet supported in v1) land here.
+			return reply(ctx, deps.Send, chatID, messageID,
+				fmt.Sprintf("❌ 暂不支持的 Git 平台 (host: %s — neither github.com/gitlab.com URL hint nor /api/v3/meta or /api/v4/version probe recognised it).", redacted)), nil
+		}
+	}
+	// Custom deps.Detect may legally return (nil, nil) (e.g. test
+	// fakes for negative paths). Production Detect never does; the
+	// guard prevents a panic in the .Kind() call below.
+	if provider == nil {
+		return reply(ctx, deps.Send, chatID, messageID,
+			"❌ Provider detection returned no result (deps.Detect override bug)."), nil
+	}
+	providerKind := provider.Kind()
 	owner, repo, err := ParseRepoOwner(remoteURL)
 	if err != nil {
 		return reply(ctx, deps.Send, chatID, messageID,
-			fmt.Sprintf("❌ Cannot parse owner/repo from remote URL %q.", remoteURL)), nil
-	}
-	platform, err := deps.NewPlatform(platformKind)
-	if err != nil {
-		return reply(ctx, deps.Send, chatID, messageID, fmt.Sprintf("❌ %v", err)), nil
+			fmt.Sprintf("❌ Cannot parse owner/repo from remote URL %s.", redactForDisplay(remoteURL))), nil
 	}
 
 	// --- fetch issue + derive branch + slug (§5.2.②) -------------
-	issue, err := platform.GetIssue(ctx, owner, repo, issueID)
+	issue, err := provider.GetIssue(ctx, owner, repo, issueID)
 	if err != nil {
 		if errors.Is(err, ErrIssueNotFound) {
 			return reply(ctx, deps.Send, chatID, messageID,
@@ -181,14 +245,14 @@ func RunFix(
 			Branch:   branch,
 			Slug:     worktreeSlug,
 			Repo:     owner + "/" + repo,
-			Platform: string(platformKind),
+			Provider: string(providerKind),
 			ChatID:   chatID,
 		}, existingPath)
 	}
 
 	// --- label the issue (§5.2.② cont.) ---------------------------
 	labelAdded := false
-	if err := platform.AddLabel(ctx, owner, repo, issueID, LabelWIP); err != nil {
+	if err := provider.AddLabel(ctx, owner, repo, issueID, LabelWIP); err != nil {
 		_ = deps.Send(ctx, OutMsg{
 			ChatID:  chatID,
 			ReplyTo: messageID,
@@ -208,7 +272,7 @@ func RunFix(
 		// cancellation, which could leak a slow `glab` child
 		// past daemon shutdown.
 		if labelAdded {
-			_ = platform.RemoveLabel(ctx, owner, repo, issueID, LabelWIP)
+			_ = provider.RemoveLabel(ctx, owner, repo, issueID, LabelWIP)
 		}
 		return emitWorktreeFailDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID:    issueID,
@@ -216,7 +280,7 @@ func RunFix(
 			Branch:     branch,
 			Slug:       worktreeSlug,
 			Repo:       owner + "/" + repo,
-			Platform:   string(platformKind),
+			Provider:   string(providerKind),
 			GitError:   tailLines(stderrFromWorktreeErr(err), 10),
 			LabelAdded: labelAdded,
 			ChatID:     chatID,

@@ -381,12 +381,9 @@ func TestPumpStream_Compact(t *testing.T) {
 	if evs[0].Kind != agent.EventCompaction {
 		t.Errorf("event kind = %v, want EventCompaction", evs[0].Kind)
 	}
-	if evs[0].Compaction == nil {
-		t.Fatal("Compaction payload is nil")
-	}
-	if evs[0].Compaction.Subtype != "compact" {
-		t.Errorf("Subtype = %q, want 'compact'", evs[0].Compaction.Subtype)
-	}
+	// F-49: Compaction payload is now an empty marker struct; the
+	// Kind alone discriminates. See
+	// docs/feat/F-49-compaction-counter.md §1.3.
 }
 
 func TestPumpStream_Compaction(t *testing.T) {
@@ -397,9 +394,6 @@ func TestPumpStream_Compaction(t *testing.T) {
 	}
 	if evs[0].Kind != agent.EventCompaction {
 		t.Errorf("event kind = %v, want EventCompaction", evs[0].Kind)
-	}
-	if evs[0].Compaction.Subtype != "compaction" {
-		t.Errorf("Subtype = %q, want 'compaction'", evs[0].Compaction.Subtype)
 	}
 }
 

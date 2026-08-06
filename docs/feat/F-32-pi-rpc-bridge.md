@@ -64,6 +64,8 @@ nightme 现有 FSM 假设"一个 AgentSession = 一个进程"；pi RPC 进程是
 
 ### 2.3 Event 表（映射到 `agent.AgentEvent`）
 
+> **F-49 行为变更**：Pi 协议层 `compaction_start` + `compaction_end` 两条 event,但 bridge 只在 `compaction_end` 时 emit **一个** `EventCompaction`（`compaction_start` 直接 `return nil, nil` 屏蔽）。这是 SPEC §1.4 "抽象归抽象 / 具体归具体" 不变式的要求——bridge 消化协议差异,runtime handler (`cmd/nightme/run.go::newEventHandler`) 一视同仁,不基于 Subtype dispatch。同时 `CompactionEvent.Subtype` 字段已删除（`CompactionEvent` 变空 struct）。详见 [`F-49 §1.3`](./F-49-compaction-counter.md) 与 [`F-49 §1.7`](./F-49-compaction-counter.md)。
+
 | pi event | payload 关键字段 | 目标 `AgentEvent` | 备注 |
 |---|---|---|---|
 | `agent_start` | — | (log debug) | 不入 events |
@@ -81,8 +83,8 @@ nightme 现有 FSM 假设"一个 AgentSession = 一个进程"；pi RPC 进程是
 | `message_end` `{message:{role:"assistant", stopReason}}` | `message.{content[], usage, stopReason}` | `EventResult{Text: <joined assistant text>, DurationMs: 0, IsError: stopReason=="error", Subtype: stopReason}` | **不切 FSM** |
 | `message_end` `{message:{role:"toolResult"}}` | `toolCallId`, `content[]` | (log debug；合并入 tool_execution_end) | — |
 | `message_end.usage` | `usage.{input,output,cacheRead,cacheWrite,totalTokens,cost.{input,output,cacheRead,cacheWrite,total}}` | `EventUsage{InputTokens, OutputTokens, CacheCreation: cacheWrite, CacheRead, CostUSD: cost.total}` | 仅当本 turn 累积 usage 非空；多个 message_end 累加 |
-| `compaction_start` | `reason` | `EventCompaction{Subtype: "start:" + reason}` | — |
-| `compaction_end` | `reason`, `result.aborted` | `EventCompaction{Subtype: "end:" + reason}` | — |
+| `compaction_start` | `reason` | **（F-49: 屏蔽,`return nil, nil`）** | runtime 不需要瞬态信号;bridge 自己消化协议差异 |
+| `compaction_end` | `reason`, `result.aborted` | **（F-49）** `EventCompaction`（无 Subtype 字段） | 一个完整的压缩周期 = runtime 收到一条 `EventCompaction` |
 | `extension_ui_request` | `id`, `method` (select/confirm/input/editor/notify/setStatus/setWidget/setTitle), … | (log warning) | **首期**：自动回 `extension_ui_response{id, cancelled:true}`；不向 ChatSession 发 EventPermission |
 | `extension_error` | `extensionPath`, `event`, `error` | (log warning) | 不杀 session |
 | `auto_retry_*` / `summarization_retry_*` | — | (log debug) | 不暴露 UI |
@@ -281,7 +283,7 @@ pnpm add -g @earendil-works/pi-coding-agent
 | thinking | ✅（`[思考] ` 前缀） |
 | tool_call / tool_result | ✅（`EventToolStart` / `EventToolEnd`） |
 | usage（input/output/cache/cost） | ✅ |
-| compaction | ✅（`EventCompaction`） |
+| compaction | ✅（F-49: `compaction_end` emit `EventCompaction` × 1;`compaction_start` 屏蔽） |
 | session state → EventInit | ✅（首次 `get_state`） |
 | 多轮长驻 | ✅（`agent_settled` 不关 channel） |
 | `/kill` 终止 | ✅（Close 路径） |

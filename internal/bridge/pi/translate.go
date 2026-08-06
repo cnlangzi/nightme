@@ -135,16 +135,14 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		}}, nil
 
 	case "compaction_start":
-		var ev compactionStart
-		if err := json.Unmarshal(raw, &ev); err != nil {
-			return nil, err
-		}
-		return []agent.AgentEvent{{
-			Kind: agent.EventCompaction,
-			Compaction: &agent.CompactionEvent{
-				Subtype: "start:" + ev.Reason,
-			},
-		}}, nil
+		// F-49: bridge abstracts the protocol difference. Pi emits a
+		// start+end pair per compaction cycle; only the end is
+		// surfaced to the runtime as one EventCompaction, so a single
+		// Pi cycle bumps the AgentSession counter exactly once.
+		// Reasons live in protocol.go's compactionStart.Reason but
+		// are intentionally not propagated (no Subtype field after
+		// F-49). See docs/feat/F-49-compaction-counter.md §1.3.
+		return nil, nil
 
 	case "compaction_end":
 		var ev compactionEnd
@@ -153,9 +151,6 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		}
 		return []agent.AgentEvent{{
 			Kind: agent.EventCompaction,
-			Compaction: &agent.CompactionEvent{
-				Subtype: "end:" + ev.Reason,
-			},
 		}}, nil
 
 	case "extension_ui_request":

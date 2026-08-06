@@ -200,16 +200,21 @@ func TestTranslate_EventToolEnd_CarriesArgs(t *testing.T) {
 }
 
 func TestTranslate_EventCompaction(t *testing.T) {
+	// F-49: Translate no longer produces an OutboundMessage for
+	// EventCompaction. The runtime consumes the event directly via
+	// AgentSession.RecordCompaction(); no transient "✶ Compacting…"
+	// marker, no channel side effect. The count surfaces later via
+	// SessionContext.CompactionCount → Footer Line 1 "🗜 N".
+	// See docs/feat/F-49-compaction-counter.md §1.3 / §1.9.
 	in := agent.AgentEvent{
-		Kind:       agent.EventCompaction,
-		Compaction: &agent.CompactionEvent{Subtype: "compact"},
+		Kind: agent.EventCompaction,
 	}
 	msg, ok := Translate("chat1", in)
-	if !ok || msg.Kind != OutCompaction {
-		t.Fatalf("got (%v, %v), want (OutCompaction, true)", msg.Kind, ok)
+	if ok {
+		t.Fatalf("Translate(EventCompaction) returned ok=true; want false (no Outbound produced). msg=%+v", msg)
 	}
-	if msg.Text == "" {
-		t.Error("Text is empty; expected the Compacting… indicator")
+	if msg.Kind != 0 {
+		t.Errorf("msg.Kind = %v, want zero value", msg.Kind)
 	}
 }
 

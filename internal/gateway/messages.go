@@ -243,10 +243,6 @@ const (
 	// render it with a distinct icon (e.g. 📝) so users can tell
 	// "the final answer" from rolling-log entries.
 	OutResult
-	// OutCompaction signals a mid-turn context compaction. NOT a
-	// turn end — the agent continues. Channels briefly surface
-	// "Compacting…" so users know why the agent paused.
-	OutCompaction
 	// OutInit carries session bootstrap data (session_id + model)
 	// from the agent's system/init event. Channels use it to render
 	// "session <id> · model <name>" in the receipt header.
@@ -308,8 +304,6 @@ func (k OutboundKind) String() string {
 		return "typing"
 	case OutResult:
 		return "result"
-	case OutCompaction:
-		return "compaction"
 	case OutInit:
 		return "init"
 	case OutCommandReply:
@@ -465,6 +459,15 @@ type SessionContext struct {
 	// footer reflects the latest worktree state without an
 	// invalidation hook. See docs/feat/F-45-session-footer.md §1.7.
 	GitStatus *gtw.GitStatusSnapshot
+	// CompactionCount is the cumulative number of completed
+	// context-compaction cycles observed on this AgentSession.
+	// 0 = never compacted. Sourced from AgentSession.CompactionCount
+	// at the same instant as CumulativeUsage, so the footer Line 1
+	// (🗜 N) and Line 2 (↓ ↻ ↑ total) tell a coherent story:
+	// "lifetime cost grew by $X, context window was reset and now
+	// totals Y since the last of N compactions". See
+	// docs/feat/F-49-compaction-counter.md §1.5.
+	CompactionCount int
 }
 
 // ToolInfo is the typed payload for OutboundMessage.Tool,

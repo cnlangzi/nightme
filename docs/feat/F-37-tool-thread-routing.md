@@ -8,7 +8,9 @@
 >
 > **Milestone**: v1.3.x (post-F-watch)
 > **Depends on**: F-08 (Channel interface), F-25 (rolling-log), F-33 (chatID 简化), §13.10 (reply-in-thread)
-> **Related**: [`SPEC.md`](../SPEC.md) §0.3 摘要 + §1.3 v1.3.x 新增（F-thread-route） + §11 backlog; [`channel/feishu.md`](../channel/feishu.md) §13.12; [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md) §4; [`F-25-rolling-log.md`](./F-25-rolling-log.md) §3 + §3.1.1; 后续演化: [`F-44`](./F-44-outreply-independent-and-task-receipt.md) + [`F-45`](./F-45-session-footer.md)
+> **Related**: [`SPEC.md`](../SPEC.md) §0.3 摘要 + §1.3 v1.3.x 新增（F-thread-route） + §11 backlog; [`channel/feishu.md`](../channel/feishu.md) §13.12; [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md) §4; [`F-25-rolling-log.md`](./F-25-rolling-log.md) §3 + §3.1.1; 后续演化: [`F-44`](./F-44-outreply-independent-and-task-receipt.md) + [`F-45`](./F-45-session-footer.md) + [`F-49`](./F-49-compaction-counter.md)
+>
+> **� F-49 行为变更（2026-08-06）**：`OutCompaction` kind 整条 path 删除 —— runtime handler 不再产生 `OutboundMessage{Kind: OutCompaction}`（无瞬时"压缩进行中"提示需求），Feishu adapter 不再有 `Send` case `OutCompaction`（不再发 thread reply "✶ Compacting conversation…"），receipt `eventToEntry` / `Append` 不再有 EventCompaction 分支。**F-37 本文档关于 OutCompaction 的描述（§2.1 路由表、§2.4 eventToEntry、§3 代码示例、§5 changelog）全部作废**，仅作为"曾存在过"的决策记录保留；实际行为以 [`F-49`](./F-49-compaction-counter.md) §1.9 + [`SPEC §0.14`](../SPEC.md) 为准。
 
 ---
 
@@ -95,7 +97,7 @@ Feishu adapter 在 `Send` dispatcher 按 Kind 自决 routing。
 | `OutThinking` | **ReplyInThread** | 纯文本 `💭 <text>`（每 event 一条）|
 | `OutToolStart` | **ReplyInThread** | 纯文本 `● <name>(<args>)`（每 event 一条）|
 | `OutToolEnd` | **ReplyInThread** | 纯文本 `⎿  <summary>`（类型感知摘要）|
-| `OutCompaction` | **ReplyInThreadAndChat** | 纯文本 `✶ Compacting conversation…`（main chat 可见，ops 决策 2026-08-04：brief marker 是 informative 不是 noise）|
+| ~~`OutCompaction`~~ | ~~**ReplyInThreadAndChat**~~ | ~~`✶ Compacting conversation…`~~ | **F-49 删除**：`OutCompaction` kind 整条 path 删除（无瞬时"压缩进行中"提示需求）。runtime 在 `EventCompaction` 上只调 `s.RecordCompaction()` 累加计数，不产生 Outbound。Channel 不再发任何 marker。详见 [`F-49 §1.9`](./F-49-compaction-counter.md)。 |
 | `OutText` / `OutResult` / `OutInit` / `OutUsage` | n/a（PATCH in place 不走 reply API） | 进 receipt card body |
 | `OutMessageState` | n/a | AddReaction ⏳/🔄/✅/❌ 在 user msg 上 |
 | `OutCard`（permission card） | **ReplyInThreadAndChat** | 进 main chat 内联回复 |
@@ -172,11 +174,11 @@ Feishu adapter 包内 `summarize_tool.go` 提供 `summarizeToolEnd(name, args, o
 - `EventText` 且 text 以 `[思考] ` 前缀开头（thinking）
 - `EventToolStart`
 - `EventToolEnd`
-- `EventCompaction`
+- ~~`EventCompaction`~~（**F-49 删除**：runtime 不再产生 `OutboundMessage{Kind: OutCompaction}`，receipt 也不再有 EventCompaction 分支）
 
 → `MessageReceipt.entries` 收窄到只装 OutText / OutResult / OutInit / OutUsage 派生的 entry。Card body 元素数通常 ≤ 5，**50 element 上限永远不破**。
 
-**Silent PATCH（实现细节）**：`MessageReceipt.Append` 对 `EventToolStart` / `EventToolEnd` / `EventCompaction` 这三类返回 `(_, false)` 的 kind **不**写 entries，但**仍然**触发 `renderLocked`，同步 bump `eventCount` + `lastEventAt` 并 PATCH card。理由：thinking/tool/compaction 现在走 thread reply，main chat 的 card header（`🔄 ⏳ N · HH:MM:SS`）必须反映 agent 仍 busy，否则 header 会冻结在 tool 之前的时刻。PATCH 频率：每个 tool event 一次（≈ 50/min 在 hot agent 上，远低于 Feishu 1000/min rate limit）。
+**Silent PATCH（实现细节）**：`MessageReceipt.Append` 对 `EventToolStart` / `EventToolEnd` 这两类返回 `(_, false)` 的 kind **不**写 entries，但**仍然**触发 `renderLocked`，同步 bump `eventCount` + `lastEventAt` 并 PATCH card。理由：thinking/tool 现在走 thread reply，main chat 的 card header（`🔄 ⏳ N · HH:MM:SS`）必须反映 agent 仍 busy，否则 header 会冻结在 tool 之前的时刻。~~EventCompaction 同理，但 F-49 后整条 path 删除，receipt 不再 bump。~~ PATCH 频率：每个 tool event 一次（≈ 50/min 在 hot agent 上，远低于 Feishu 1000/min rate limit）。
 
 ### 2.5 不变式
 
@@ -199,13 +201,13 @@ Feishu adapter 包内 `summarize_tool.go` 提供 `summarizeToolEnd(name, args, o
 | `internal/bridge/claudecode/stream.go` | 解析 `tool_result` 时从同 message `tool_use` block 拿 args 填进 `ToolEndEvent.Args` | §3.3 |
 | `internal/bridge/claudecode/claudecode_test.go` | 加 case：tool_use + tool_result 在同 message 时 `ToolEndEvent.Args` 非空 | — |
 | `internal/bridge/pi/translate.go` | 同样填 `ToolEndEvent.Args`（如果 pi bridge 支持 tool_result） | — |
-| `internal/channel/feishu/adapter.go` `Send` | 按 Kind 分流：thinking/tool/compaction → thread；text/result/init/usage → receipt card | §3.4 |
+| `internal/channel/feishu/adapter.go` `Send` | 按 Kind 分流：thinking/tool → thread；text/result/init/usage → receipt card | §3.4 |
 | `internal/channel/feishu/adapter.go` `buildReceiptCard` | 删 `Kind="thinking"` / `Kind="tool"` collapsible_panel 分支 | §3.4 |
-| `internal/channel/feishu/receipt_event.go` | `eventToEntry` 对 thinking/tool/compaction 返回 `(_, false)` | §3.4 |
+| `internal/channel/feishu/receipt_event.go` | `eventToEntry` 对 thinking/tool 返回 `(_, false)` | §3.4 |
 | `internal/channel/feishu/summarize_tool.go` | 新文件：`summarizeToolEnd` + `countLines` + `truncate` + `countUniqueFiles` helpers | §3.5 |
 | `internal/channel/feishu/summarize_tool_test.go` | 新文件：覆盖各 tool 类型 + 错误分支 + args 缺失 fallback | — |
-| `internal/channel/feishu/adapter_test.go` | `TestSend_OutThinking_PostsToThread` + `TestSend_OutToolStart_PostsToThread` + `TestSend_OutToolEnd_PostsToThread` + `TestSend_OutCompaction_PostsToThread` | — |
-| `internal/channel/feishu/receipt_event_test.go` | 删 thinking/tool/compaction assertion（这些走 thread 不进 receipt） | — |
+| `internal/channel/feishu/adapter_test.go` | `TestSend_OutThinking_PostsToThread` + `TestSend_OutToolStart_PostsToThread` + `TestSend_OutToolEnd_PostsToThread`（**F-49 删除** `TestSend_OutCompaction_PostsToThread`） | — |
+| `internal/channel/feishu/receipt_event_test.go` | 删 thinking/tool assertion（这些走 thread 不进 receipt） | — |
 | `internal/channel/feishu/adapter_test.go` | 删 `TestSend_OutThinking_AppendsWithPrefix`（§13.1 bug 修复不再需要 —— prefix 不再被 strip） | — |
 | `docs/channel/feishu.md` | §13.12 新增（决策反转记录）+ §15 实施计划修订 | §4.1 |
 | `docs/feat/F-25-rolling-log.md` | §3 contract 表更新 + §3.1.1 新增 "Thread reply path" | §4.2 |
@@ -312,9 +314,8 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
         body := summarizeToolEnd(name, args, output, err)
         return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo, body, true)
 
-    case gateway.OutCompaction:
-        return a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo,
-            "✶ Compacting conversation…", true)
+    // F-49 删除 case gateway.OutCompaction: — runtime 不再产生此 Outbound,
+    // 不再有 "✶ Compacting conversation…" thread reply。
 
     case gateway.OutText, gateway.OutResult, gateway.OutInit, gateway.OutUsage:
         // 不变：fold into receipt card
@@ -369,9 +370,9 @@ case agent.EventToolEnd:
     // F-37: tool_end 走 thread (类型感知摘要)
     return LogEntry{}, false
 
-case agent.EventCompaction:
-    // F-37: compaction 走 thread
-    return LogEntry{}, false
+// F-49 删除 case agent.EventCompaction: — runtime 不再产生 OutCompaction,
+// receipt 不再有 EventCompaction 分支。runtime 在 EventCompaction 上只调
+// s.RecordCompaction() 累加计数,无 receipt 副作用。
 ```
 
 **`Gateway.translate.go` 是否需要改**？
@@ -518,7 +519,7 @@ F-thread-route 方案下同一 turn：
 
 - §3 Channel Implementation Contract 表更新：
   - `OutThinking` / `OutToolStart` / `OutToolEnd` 行 → "Channel-specific (Feishu: thread reply with type-aware summary)"
-  - `OutCompaction` 行 → "Channel-specific (Feishu: thread reply)"
+  - ~~`OutCompaction` 行~~ → **F-49 删除**（runtime 不再产生此 Outbound；详见 `F-25 §3.1.1` 更新说明）
 - §3.1 Feishu implementation reference 加 §3.1.1 "Thread reply path"
 - §1 Description 加一段：receipt card 收窄到只承载 OutText / OutResult / OutInit / OutUsage
 
@@ -541,9 +542,9 @@ F-thread-route 方案下同一 turn：
 
 反转 v1.3 §13.6 折叠方案（实机验证失败：30 panel 撞破 50 element
 上限、视觉噪声大于折叠收益、最终回答被挤掉）。新方案：Channel 按
-OutboundKind 自决 routing——thinking/tool/compaction 直接 POST 到
+OutboundKind 自决 routing——thinking/tool 直接 POST 到
 Feishu thread（rootID = userMsgID），receipt card 收窄到只承载
-最终答复（OutText / OutResult）+ 元数据（OutInit / OutUsage）。
+最终答复（OutText / OutResult）+ 元数据（OutInit / OutUsage）。~~`compaction` 同理走 thread reply (`✶ Compacting conversation…`)；F-49 删除该 path——runtime 不再产生 OutCompaction，count 由 `SessionContext.CompactionCount` 携带，footer Line 1 渲染 `🗜 N`。~~
 
 OutToolEnd 类型感知摘要（"决断处理"）：bridge 层把
 `ToolEndEvent.Args` 填好；Channel 层 `summarizeToolEnd(name, args,
@@ -580,10 +581,10 @@ nightme 数据模型不变式保留。
   - `TestSend_OutThinking_PostsToThread`：mock `sendViaLarkReply`，验证收到 `OutThinking` 时调用 Reply endpoint（rootID = msg.ReplyTo）+ body 含 `💭` 前缀。
   - `TestSend_OutToolStart_PostsToThread`：验证收到 `OutToolStart` 时调 Reply + body 含 `🔧 <name>(<args>)`。
   - `TestSend_OutToolEnd_PostsToThread`：验证收到 `OutToolEnd` 时调 Reply + body 经 `summarizeToolEnd` 生成（含 `📄 Read /foo.go → 1234 lines` 这类格式）。
-  - `TestSend_OutCompaction_PostsToThread`：验证 thread reply + `✶ Compacting conversation…`。
+  - ~~`TestSend_OutCompaction_PostsToThread`~~：**F-49 删除**（`OutCompaction` kind 已删除）。
   - `TestSend_OutText_FoldsIntoReceipt`：回归测试，确保 OutText / OutResult / OutInit / OutUsage 仍然 fold 进 receipt（不变）。
 - `internal/channel/feishu/receipt_event_test.go`：
-  - 删 thinking/tool/compaction 的 entry assertion（这些 event 不再生成 entry）
+  - 删 thinking/tool 的 entry assertion（这些 event 不再生成 entry）~~+ compaction~~
   - 加 case：调用 `eventToEntry(EventText, "[思考] foo")` 返回 `(_, false)`（不再生成 thinking entry）
 - `internal/channel/feishu/receipt_test.go`：
   - 回归测试：receipt card body 不再含 `collapsible_panel` 元素

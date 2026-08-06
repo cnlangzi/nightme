@@ -103,10 +103,11 @@ func buildThinkingCard(body string) (string, error) {
 // falls back to plain text via sendRawOutText — exactly like
 // postThreadReply's rootID=="" path. This keeps the two sibling
 // helpers' orphan-event behaviour aligned: OutToolStart /
-// OutToolEnd / OutCompaction / OutThinking all degrade to the
-// same plain-text bubble when there's no user message to thread
-// to. A divergent fallback (markdown card vs plain text) would
-// surface as an inconsistent UX on the rare orphan path.
+// OutToolEnd / OutThinking all degrade to the same plain-text
+// bubble when there's no user message to thread to. (F-49:
+// OutCompaction kind deleted — not in this list.) A divergent
+// fallback (markdown card vs plain text) would surface as an
+// inconsistent UX on the rare orphan path.
 //
 // In practice this branch is unreachable for any OutboundKind
 // during normal flow (Translate + the runtime's EventCallback

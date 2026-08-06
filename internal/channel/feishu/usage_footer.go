@@ -6,11 +6,11 @@
 // OutTaskCreate / OutTaskUpdate). See docs/feat/F-45-session-footer.md
 // §1.6 / §1.7 for the full rendering rules.
 //
-// Line 1 (F-45):
+// Line 1 (F-45 + F-49):
 //
-//	🤖 Agent · Model
+//	🤖 Agent · Model · 🗜 N
 //
-// Line 2 (F-45):
+// Line 2 (F-45 + F-49 token semantics):
 //
 //	💰 ↓ in · ↻ cached · ↑ out · Total · $cost
 //
@@ -37,6 +37,7 @@ package feishu
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/gateway"
@@ -89,7 +90,7 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 	u := ctx.CumulativeUsage
 	var lines []string
 
-	// Line 1: identity (🤖 Agent Model).
+	// Line 1: identity (🤖 Agent · Model · � N).
 	idParts := []string{"🤖"}
 	if ctx.Agent != "" {
 		idParts = append(idParts, ctx.Agent)
@@ -102,6 +103,18 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 		// opus-4-5"). F-37 / F-44 footer convention; matches the
 		// rest of the line-2 separator family.
 		idParts = append(idParts, "·", ctx.Model)
+	}
+	// F-49: append "· 🗜 N" segment when at least one compaction
+	// cycle has been observed on this AgentSession. The clamp
+	// glyph (U+1F5DC, Unicode "COMPRESSION") is the most literal
+	// semantic match — see
+	// docs/feat/F-49-compaction-counter.md §1.6 + §1.2. Only
+	// rendered when N > 0 (F-45 §1.6 zero-omit convention; new
+	// sessions show no compaction segment). The "·" prefix matches
+	// the Agent · Model separator rhythm above, so the line reads
+	// as one consistent sequence rather than a parenthetical add-on.
+	if ctx.CompactionCount > 0 {
+		idParts = append(idParts, "·", "🗜", strconv.Itoa(ctx.CompactionCount))
 	}
 	if len(idParts) > 1 {
 		lines = append(lines, strings.Join(idParts, " "))

@@ -98,8 +98,14 @@ type AgentSession struct {
 	// (called only by /new handler); PersistIfDirty writes the entry
 	// to disk when dirty. Persisted via Entry → AgentSessionEntry.
 	//CumulativeUsage; restored on restart from FromAgentSessionEntry.
+	//
+	// F-49: also guards compactionCount. RecordCompaction atomically
+	// increments the count AND zeros the four token fields of
+	// cumulativeUsage (preserving CostUSD), all under this single
+	// mutex. See docs/feat/F-49-compaction-counter.md §1.4.
 	cumulativeUsageMu sync.RWMutex
 	cumulativeUsage   agent.UsageInfo
+	compactionCount   int
 	cumulativeDirty   bool
 }
 
@@ -151,6 +157,10 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 	if e.CumulativeUsage != nil {
 		as.cumulativeUsage = *e.CumulativeUsage
 	}
+	// F-49: restore compaction count. Zero value on legacy entries
+	// (no compactionCount field) is the safe default — "never
+	// compacted", consistent with cumulativeUsage being zero.
+	as.compactionCount = e.CompactionCount
 	// commit fix-6: any persisted "running" agent is actually dead
 	// after daemon restart (the process handle is in-memory only).
 	// Demote to Detached so the next LookupActiveAgentSession will
@@ -298,14 +308,62 @@ func (as *AgentSession) CumulativeUsage() agent.UsageInfo {
 // — /kill, /cwd, /use, daemon restart and process crash all leave
 // the cumulative intact (history is valuable to the user).
 //
+// F-49: also resets compactionCount. /new is the only point that
+// zeros the count, mirroring the cumulative-usage semantics —
+// user-initiated context reset clears both.
+//
 // The handle / pool / status are not touched — ResetCumulative is
 // purely "clear the counter and mark dirty"; the caller
 // (handleNew) is responsible for the surrounding PersistAgentSession.
 func (as *AgentSession) ResetCumulative() {
 	as.cumulativeUsageMu.Lock()
 	as.cumulativeUsage = agent.UsageInfo{}
+	as.compactionCount = 0
 	as.cumulativeDirty = true
 	as.cumulativeUsageMu.Unlock()
+}
+
+// RecordCompaction atomically:
+//   1. increments compactionCount;
+//   2. zeroes the four token fields of cumulativeUsage, preserving
+//      CostUSD;
+//   3. marks cumulativeDirty so the next PersistIfDirty flushes
+//      both the new count and the post-reset token snapshot.
+//
+// The token reset makes Footer Line 2 (↓ ↻ ↑ total) reflect
+// "since-last-compaction" — i.e. the agent's current context window
+// usage — while $cost stays as lifetime spend across the whole
+// AgentSession. See docs/feat/F-49-compaction-counter.md §1.2 /
+// §1.4 for the user-facing rationale and the cost-vs-token split.
+//
+// Bridges abstract their own protocol differences and emit exactly
+// one EventCompaction per completed compaction cycle (see F-49
+// §1.3). The runtime handler calls RecordCompaction unconditionally
+// on every EventCompaction — no Subtype branching here, by design.
+//
+// Safe to call concurrently with AccumulateUsage / CumulativeUsage /
+// CompactionCount / PersistIfDirty. Mirrors AccumulateUsage's
+// lock pattern (single-writer per EventCompaction).
+func (as *AgentSession) RecordCompaction() {
+	as.cumulativeUsageMu.Lock()
+	defer as.cumulativeUsageMu.Unlock()
+	as.compactionCount++
+	as.cumulativeUsage.InputTokens = 0
+	as.cumulativeUsage.CacheCreationInputTokens = 0
+	as.cumulativeUsage.CacheReadInputTokens = 0
+	as.cumulativeUsage.OutputTokens = 0
+	// CostUSD deliberately preserved (lifetime spend).
+	as.cumulativeDirty = true
+}
+
+// CompactionCount returns the cumulative number of completed
+// compaction cycles observed on this AgentSession. 0 when never
+// compacted. Snapshot under RLock; safe for concurrent read
+// alongside RecordCompaction.
+func (as *AgentSession) CompactionCount() int {
+	as.cumulativeUsageMu.RLock()
+	defer as.cumulativeUsageMu.RUnlock()
+	return as.compactionCount
 }
 
 // PersistIfDirty writes the AgentSession entry to disk when the
@@ -387,8 +445,13 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	// "never ran" case is distinguishable only by zero-value
 	// counters inside, and omitempty would skip the field for
 	// "ran but all zero" which obscures the persisted state.
+	//
+	// F-49: also snapshot compactionCount under the same RLock so
+	// the persisted entry is internally consistent (count + usage
+	// refer to the same point in time).
 	as.cumulativeUsageMu.RLock()
 	cum := as.cumulativeUsage
+	cc := as.compactionCount
 	as.cumulativeUsageMu.RUnlock()
 
 	return &registry.AgentSessionEntry{
@@ -405,6 +468,7 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 		ExitCode:        ec,
 		Model:           as.Model(),
 		CumulativeUsage: &cum,
+		CompactionCount: cc,
 	}
 }
 

@@ -46,8 +46,11 @@ import (
 //	/think <other>      → reply usage hint (parse failure)
 //
 // Other OutboundKinds (OutReply, OutResult, OutToolStart,
-// OutToolEnd, OutCompaction, OutInit, OutUsage) are not affected
-// by /think off — only OutThinking is gated.
+// OutToolEnd, OutInit, OutUsage) are not affected by /think off —
+// only OutThinking is gated. (F-49: OutCompaction kind deleted —
+// the runtime consumes EventCompaction directly via
+// AgentSession.RecordCompaction() and produces no OutboundMessage,
+// so /think off (or any other Channel-level gate) never sees it.)
 func handleThink(ctx context.Context, mgr *chatsession.Manager, channel Channel, msg *InboundMessage, args []string, globalPrimary string) (*CommandResult, error) {
 	cs := mgr.GetOrCreate(msg.ChatID, globalPrimary)
 

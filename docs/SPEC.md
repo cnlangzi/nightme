@@ -608,6 +608,43 @@ type OutboundMessage struct {
 
 ---
 
+## 0.14 文档变更摘要（v1.3.x F-49 增量，2026-08-06）
+
+**背景**：F-45 footer 的 token 行是 **AgentSession 生命周期累计**。agent 做完 context compaction 后，累计仍继续涨，IM 里常看到远超上下文窗口的总数——用户分不清「真用了那么多」还是「已经压缩多次但数字没说」。
+
+**核心变化**（概念级）：
+
+1. **两个目的拆成两个指标**
+   - **当前上下文用量**（token 行）：每次 compaction 后归零，从下一轮 usage 重新累加 → 「since last compaction」
+   - **生命周期花费**（`$cost`）：跨 compaction 单调累加 → 「这个 AgentSession 一共花了多少钱」
+   - 压缩不退钱；窗口截断后 token 快照必须重置——两者不再混在同一个「累计」语义里
+
+2. **Footer 暴露 compaction 次数**
+   - identity 行末尾追加「压缩次数」段（仅次数 > 0 时显示）
+   - 用户一眼能把「大数字」和「已压缩 N 次」对上号
+
+3. **协议差异消化在 Bridge；Runtime 只记数**
+   - 各 bridge 把平台特有的 start/end / subtype 归一成**同一次**抽象 compaction 事件
+   - Runtime 收到后累加计数并重置 token 快照，**不**再向 Channel 发「正在压缩…」类瞬时出站消息
+   - Channel 只读 SessionContext 上的计数做 footer，不感知 Pi / Claude Code 协议
+
+4. **删除「压缩进行中」出站通路**
+   - 去掉专用 OutboundKind 与对应 Channel 渲染分支
+   - Compaction 不再占 thread / receipt 时间线；信息只通过 footer 计数 + token 语义体现
+
+**不变式**：
+- §1.4：bridge 消化具体协议，抽象层不 sniff subtype / 平台字段
+- Channel 仍 dumb：不调 git、不算 token、不驱动计数
+- Footer 仍是三行结构（identity / tokens·cost / git）；压缩次数只是 identity 行的可选后缀
+- `/new` 仍是累计元数据的唯一清零入口；daemon 重启可从 AgentSession 持久化还原
+- F-45 / F-48 footer 契约保留；仅叠加计数与 token 语义澄清
+
+**为什么不是 v2.0**：不改 Gateway 核心路由与 ChatSession 模型；是 SessionContext / footer 语义上的增量，外加删除一条已无产品需求的瞬时出站通路。
+
+**详细设计 / 字段 / bridge 对照 / 测试**：见 [`feat/F-49-compaction-counter.md`](./feat/F-49-compaction-counter.md)；与 footer 的交点见 [`feat/F-45-session-footer.md`](./feat/F-45-session-footer.md) §1.8；Feishu 决策见 [`channel/feishu.md`](./channel/feishu.md) §13.25。
+
+---
+
 ### 0.7 文档变更摘要（v1.3.x F-38 增量，2026-08-04）
 
 **背景**：F-thread-route 把 `OutToolStart` / `OutToolEnd` 都投到飞书 thread，每个 tool 产生**两条**独立 thread reply（先 `● Tool(args)` 再 `⎿  …`）。一次 agent turn 调 10 个工具 = 20 条 thread reply，视觉噪声 + 限速成本都很高。同时用户没有 per-chat 开关控制工具调用是否显示——既不能选择 plain text vs 合并格式，也不能选择看 vs 不看。F-38 同时解决这两点。

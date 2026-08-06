@@ -2161,6 +2161,162 @@ type GitStatusSnapshot struct {
 
 **详细设计**:见 [`docs/feat/F-45-session-footer.md`](../feat/F-45-session-footer.md) §1.7。
 
+### 13.25 🎯 F-49 决策 (2026-08-06):Footer Line 1 ── Compaction Counter (🗜 N) + Token 归零语义
+
+**背景**:F-45 footer 的 `↓ X · ↻ X · ↑ X · Total X` 是 **cumulative across the entire AgentSession**。当 agent 执行 context compaction(截断/摘要化输入)后,cumulative 仍持续累加,导致用户看到的 total tokens 远超上下文窗口上限,**无法判断**是"真的用了那么多"还是"已压缩多次但 cumulative 不反映"。用户在 IM 视角下看到的是 mystery number。
+
+F-49 给 Footer Line 1 末尾加 `· 🗜 N` 段(compaction 计数),同时把 Line 2 的 token 部分改成"since-last-compaction 归零"语义,而 `$cost` 保留为 lifetime spend —— 两个目的清晰分离。
+
+**核心变化**(`gateway.SessionContext` 加 1 字段;`OutboundKind` 删 `OutCompaction`):
+
+```go
+type SessionContext struct {
+    Agent           string
+    Model           string
+    CumulativeUsage UsageInfo
+    Workspace       string                  // F-48
+    GitStatus       *gtw.GitStatusSnapshot  // F-48
+    CompactionCount int                     // F-49: 🗜 N 计数
+}
+
+type OutboundKind int
+
+const (
+    OutReply OutKind = iota
+    OutResult
+    // ... 其他既有 kind ...
+    // OutCompaction 删除(F-49)
+)
+```
+
+**Footer Line 1 格式变更**(从 `🤖 Agent · Model` 扩到 `🤖 Agent · Model · 🗜 N`):
+
+```
+🤖 claude · opus-4-5 · 🗜 3
+```
+
+| 段 | 来源 | Omit 规则 |
+|---|---|---|
+| 🤖 | literal | 永远显示 |
+| `<Agent>` | `ctx.Agent` | `""` 时省略(沿用 F-45 §1.6 约定) |
+| `· <Model>` | `ctx.Model` | `""` 时省略 |
+| `· 🗜 <N>` | `ctx.CompactionCount` | **`N == 0` 时省略**(沿用 F-45 zero-omit 约定;首次压缩后才显示) |
+
+**实测样例**:
+
+```
+🤖 claude                                         # 无 model 无 compaction
+🤖 claude · opus-4-5                              # 标准(F-45 既有)
+🤖 claude · opus-4-5 · � 1                       # 1 次压缩
+🤖 claude · opus-4-5 · � 3                       # 3 次压缩(F-49 典型场景)
+```
+
+**Glyph 选型**:`🗜` (U+1F5DC, Unicode 正式名 "COMPRESSION")——语义零歧义;与 F-45 line 1 🤖 / F-45 line 2 💰 / F-48 line 3 📁 emoji category header 风格一致。
+
+**Token 归零语义变更**(F-45 footer line 2 从 lifetime 改为 since-last-compaction):
+
+**改前**(典型长 session,已 compact 3 次):
+
+```
+🤖 claude · opus-4-5
+💰 ↓ 156k · ↻ 1.2M cached · ↑ 18k · Total 1.37M · $1.245
+📁 code/nightme · ⎇ main · ↑ 3 · ? 2 · � 2
+```
+
+**改后**(同 session,加 🗜 段 + token 归零):
+
+```
+🤖 claude · opus-4-5 · 🗜 3
+💰 ↓ 5k · ↻ 2k · ↑ 0.8k · 7.8k · $1.245
+📁 code/nightme · � main · ↑ 3 · ? 2 · ⇡ 2
+```
+
+**两个目的清晰分离**:
+
+| 用户目的 | Footer 段 | 字段 | 压缩时行为 |
+|---|---|---|---|
+| **总耗费**(lifetime spend) | `$X.XXX` | `CostUSD` | **保留**,单调累加 |
+| **当前 Session 上下文用量** | `↓ X · ↻ X · ↑ X · Total X` | 4 个 token 字段 | **归零**,重新累加 |
+
+**为什么这样切**:
+- `CostUSD` 是货币量——花了不会退,跨压缩累加
+- 4 个 token 字段是**输入窗口**快照——压缩后输入窗口被截断,下一个 turn 的 input 自然变小;归零后从下一次 EventUsage 重新累加,**无需特殊处理**
+
+**OutCompaction kind 删除**(不再是 thread reply):
+
+**改前**(F-37 §2.1 决策):
+
+| `OutCompaction` | `ReplyInThreadAndChat` | 纯文本 `✶ Compacting conversation…`(main chat 可见,ops 决策 2026-08-04:brief marker 是 informative 不是 noise)|
+
+**改后**(F-49):`OutCompaction` 整条 path 删除——
+- `gateway.translate.go` 不再产生 `OutboundMessage{Kind: OutCompaction, ...}`
+- `adapter.go::Send` 删 `OutCompaction` case
+- `receipt_event.go::eventToEntry` 删 EventCompaction 的 `(_, false)` 分支
+- `receipt.go::Append` 删 EventCompaction 的 silent PATCH 分支
+
+**理由**:用户明确不需要"压缩进行中"瞬时显示("压缩只反映次数,不用做进过程的显示",2026-08-06 对话)。Compaction 只反映次数(Line 1 🗜 N),无中间过程提示。
+
+**Bridge 抽象**(关键不变式):
+
+```
+                  ┌─────────────────────────────────────────────┐
+  Pi 协议         │  compaction_start → [suppressed]            │
+  compaction_start│  compaction_end   → EventCompaction × 1    │
+  compaction_end  │                                             │
+                  └─────────────────────────────────────────────┘
+                                ↓
+                  ┌─────────────────────────────────────────────┐
+  Claude 协议     │  result.subtype == "compact" /              │
+  result.subtype  │  "compaction" → EventCompaction × 1         │
+                  └─────────────────────────────────────────────┘
+                                ↓
+                  ┌─────────────────────────────────────────────┐
+  runtime handler │  case EventCompaction:                       │
+  (协议无关)      │    s.RecordCompaction()                      │
+                  │    // 不判断 Subtype,不产生 Outbound         │
+                  └─────────────────────────────────────────────┘
+```
+
+**抽象归抽象 / 具体归具体**(SPEC §1.4):bridge 各自消化协议差异,runtime 一视同仁。
+
+**Render 路径**(`internal/channel/feishu/usage_footer.go::formatSessionFooterLines`):
+- Line 1 末尾追加 `· 🗜 N`(N > 0 时)
+- Line 2 / Line 3 不变(token / git 渲染规则照旧)
+- **Line 2 的 token 部分自然反映"since-last-compaction"语义**——runtime 已经在 `RecordCompaction` 时把 4 个 token 字段归零,`CumulativeUsage` 已是压缩后快照,Channel 渲染逻辑零改动
+
+**测试影响**:
+- `usage_footer_test.go` 新增 `TestFormatSessionFooter_Line1_WithClamp` / `_NoClamp` / `_CostAfterReset`
+- `adapter_test.go` 验证 `OutCompaction` case 已删除(grep 反向断言)
+- `receipt_event_test.go` 删 EventCompaction 相关测试
+- `usage_footer_test.go` 既有 Line 2 测试不变(`CumulativeUsage` 已是压缩后值,渲染输出仍符合预期)
+
+**Wire 兼容性**:
+- `SessionContext` 加 1 字段(omitempty;已有 JSON 兼容风格;Echo / Slack / Web channel 零改动)
+- `OutboundKind` 删 `OutCompaction` 常量 —— **编译期保证**:Feishu adapter / receipt 都更新 case 后 `go build` 通过
+- `agent.AgentEvent.Compaction` 字段删除 —— bridges 同步删 `Compaction: &CompactionEvent{Subtype: ...}` 赋值
+
+**为什么是 Footer Line 1 而非 Line 2**:
+- Line 1 是 identity 行(`🤖 Agent · Model`),🗜 是身份的一部分——"这个 agent session 已 compact N 次"是 session 身份属性,不是 token/cost 数据
+- Line 2 是 cost 行,放 🗜 会和 `↓ ↻ ↑ Total $cost` 抢位置,且语义混淆(🗜 不是 token)
+- Line 3 是 git 行,与 session 上下文无关,不放
+
+**PR scope**:
+- `internal/agent/agent.go` —— 删 `CompactionEvent.Subtype` 字段 + `AgentEvent.Compaction` 字段
+- `internal/bridge/pi/translate.go` —— 屏蔽 `compaction_start`,`compaction_end` 不带 Subtype
+- `internal/bridge/claudecode/stream.go` —— emit `EventCompaction` 不带 Subtype
+- `internal/chatsession/agentsession.go` —— `compactionCount int` + `RecordCompaction()` / `CompactionCount()`
+- `internal/registry/agent_session_entry.go` —— `CompactionCount int` 字段 + `AgentSessionFileVersion` +1
+- `internal/gateway/messages.go` —— `SessionContext.CompactionCount` 字段 + 删 `OutboundKind.OutCompaction` 常量
+- `internal/gateway/translate.go` —— 删 `case agent.EventCompaction:` 分支
+- `cmd/nightme/run.go::newEventHandler` —— `case EventCompaction: s.RecordCompaction()` + `sessionContextInto` stamp
+- `internal/channel/feishu/usage_footer.go` —— Line 1 末尾追加 `· 🗜 N`(import `strconv`)
+- `internal/channel/feishu/adapter.go` —— 删 `Send` case `OutCompaction`
+- `internal/channel/feishu/receipt_event.go` —— 删 `eventToEntry` 对 EventCompaction 的 `(_, false)` 分支
+- `internal/channel/feishu/receipt.go` —— 删 `Append` 对 EventCompaction 的 silent PATCH 分支
+- 测试 5 处更新(`agentsession_meta_test.go` / `usage_footer_test.go` / `adapter_test.go` / `translate_test.go` / `run_test.go` / pi & claudecode bridge tests)
+
+**详细设计**:见 [`docs/feat/F-49-compaction-counter.md`](../feat/F-49-compaction-counter.md) + [`docs/feat/F-45-session-footer.md`](../feat/F-45-session-footer.md) §1.8 + SPEC §0.14。
+
 ## 15. v1.3.x 实施计划
 
 ### 15.0 状态(2026-08-05 F-40 + F-41 落地后)

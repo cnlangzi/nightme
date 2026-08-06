@@ -112,22 +112,31 @@ func TestDispatchInbound_WatchModeGate(t *testing.T) {
 // non-mention group message must reach the slash dispatcher,
 // even when WatchMode == WatchModeMention (otherwise users
 // can't opt back in once they've opted out).
+//
+// 2026-08-06: previously this test exercised the legacy
+// g.cmds table (gw.Register(cmd)). After the F-51+ADR 0007
+// refactor, all slash commands live in command.Registry and
+// are dispatched via the commander shim. We now install a fake
+// commander that recognises "/watch" and returns a stub reply,
+// verifying that the WatchMode gate does NOT apply to the
+// commander reply branch (the gate now lives in dispatchMessage,
+// which the commander reply branch never reaches).
 func TestDispatchInbound_WatchModeGate_SlashBypasses(t *testing.T) {
 	const chatID = "oc_chat"
 
 	called := false
-	cmd := Command{
-		Name: "watch",
-		Handler: func(_ context.Context, _ *InboundMessage, _ []string) (*CommandResult, error) {
-			called = true
-			return &CommandResult{Consumed: true}, nil
-		},
-	}
-
 	gw := New(nil).(*Router)
-	gw.Register(cmd)
+	gw.WithCommander(func(_ context.Context, msg *InboundMessage) (*CommandResult, error) {
+		if msg.Text == "/watch on" {
+			called = true
+			return &CommandResult{Consumed: true, Reply: "watch on"}, nil
+		}
+		// Anything else: not a slash command — let dispatcher fall
+		// through to dispatchMessage (which applies the gate).
+		return nil, nil
+	})
 	gw.WithWatchModeResolver(func(_ string) (chatsession.WatchMode, bool) {
-		return chatsession.WatchModeMention, true // would normally drop
+		return chatsession.WatchModeMention, true // would normally drop plain text
 	})
 
 	// Non-mentioned message with /watch on text.
@@ -144,7 +153,7 @@ func TestDispatchInbound_WatchModeGate_SlashBypasses(t *testing.T) {
 		t.Errorf("/watch slash command was dropped by WatchMode gate; want pass-through")
 	}
 	if !called {
-		t.Errorf("/watch handler was not invoked; expected it to run regardless of gate")
+		t.Errorf("/watch handler was not invoked; expected the commander to recognise /watch regardless of gate")
 	}
 }
 

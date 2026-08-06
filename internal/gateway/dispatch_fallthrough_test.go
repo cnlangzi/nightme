@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
 // TestDispatchInbound_CommanderFallThrough covers the
@@ -126,5 +128,74 @@ func TestDispatchInbound_CommanderFallThrough(t *testing.T) {
 				t.Errorf("Reply = %q, want %q", res.Reply, tc.wantReply)
 			}
 		})
+	}
+}
+
+// TestDispatchInbound_FallThrough_RespectsWatchModeGate verifies
+// that the F-watch §3.1.1 gate applies uniformly to the
+// commander fall-through path AND the plain-text path. Both
+// routes share the same single decision point (dispatchMessage),
+// so a /-prefixed input with no matching factory is gated
+// identically to a plain-text input of equivalent intent.
+func TestDispatchInbound_FallThrough_RespectsWatchModeGate(t *testing.T) {
+	const chatID = "oc_gate"
+
+	var dispatched int32
+	md := MessageDispatcher(func(_ context.Context, _ *InboundMessage) error {
+		atomic.AddInt32(&dispatched, 1)
+		return nil
+	})
+
+	gw := New(md).(*Router)
+	gw.WithCommander(func(_ context.Context, msg *InboundMessage) (*CommandResult, error) {
+		// No slash commands "registered" — every /-input falls
+		// through with handled=true + Consumed=false.
+		if len(msg.Text) > 0 && msg.Text[0] == '/' {
+			return &CommandResult{Consumed: false}, nil
+		}
+		return nil, nil
+	})
+	gw.WithWatchModeResolver(func(_ string) (chatsession.WatchMode, bool) {
+		// Would drop non-mention group messages.
+		return chatsession.WatchModeMention, true
+	})
+
+	// Group chat, no mention: gate drops both plain text and
+	// /-prefixed fall-through. This is the symmetric behaviour
+	// we want — once a message is not a recognised command, the
+	// /-prefix is irrelevant for gating decisions.
+	res, err := gw.DispatchInbound(context.Background(), &InboundMessage{
+		ChatID:     chatID,
+		Text:       "/xyz",
+		HasMention: false,
+		MessageID:  "om_test",
+	})
+	if err != nil {
+		t.Fatalf("DispatchInbound(/xyz, no mention): %v", err)
+	}
+	if !res.Dropped {
+		t.Errorf("/xyz with no mention in WatchModeMention should be dropped by the gate, got %+v", res)
+	}
+	if got := atomic.LoadInt32(&dispatched); got != 0 {
+		t.Errorf("messageDispatcher should NOT be called when the gate drops, got %d", got)
+	}
+
+	// Same chat, but mention present: gate passes, fall-through
+	// reaches messageDispatcher.
+	atomic.StoreInt32(&dispatched, 0)
+	res, err = gw.DispatchInbound(context.Background(), &InboundMessage{
+		ChatID:     chatID,
+		Text:       "/xyz",
+		HasMention: true,
+		MessageID:  "om_test",
+	})
+	if err != nil {
+		t.Fatalf("DispatchInbound(/xyz, mention): %v", err)
+	}
+	if res.Dropped {
+		t.Errorf("/xyz with mention should pass the gate, got %+v", res)
+	}
+	if got := atomic.LoadInt32(&dispatched); got != 1 {
+		t.Errorf("messageDispatcher should be called once, got %d", got)
 	}
 }

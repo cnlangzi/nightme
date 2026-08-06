@@ -44,13 +44,13 @@ func TestFormatSessionFooterLines_TokenSegments(t *testing.T) {
 		CumulativeUsage: gateway.UsageInfo{
 			InputTokens:              11_700,
 			OutputTokens:             1_500,
-			CacheCreationInputTokens: 600, // counted into "↓ in"
+			CacheCreationInputTokens: 600, // counted into "↑ in"
 			CacheReadInputTokens:     8_200,
 			CostUSD:                  0.087,
 		},
 	}
 	got := formatSessionFooterLines(ctx)
-	want := []string{"🤖 claude · opus-4-5", "💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k · $0.087"}
+	want := []string{"🤖 claude · opus-4-5", "💰 ↑ 12.3k · ↻ 8.2k · ↓ 1.5k · 22.0k · $0.087"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("formatSessionFooterLines() mismatch:\n  got:  %v\n  want: %v", got, want)
 	}
@@ -68,7 +68,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 				Agent: "claude", Model: "opus-4-5",
 				CumulativeUsage: gateway.UsageInfo{OutputTokens: 234},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰 ↑ 234 · 234"},
+			want: []string{"🤖 claude · opus-4-5", "💰 ↓ 234 · 234"},
 		},
 		{
 			name: "only cache hits",
@@ -94,7 +94,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 					InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k"},
+			want: []string{"🤖 claude · opus-4-5", "💰 ↑ 12.3k · ↻ 8.2k · ↓ 1.5k · 22.0k"},
 		},
 		{
 			name: "tokens but no Agent / Model",
@@ -103,7 +103,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 					InputTokens: 5_000, OutputTokens: 200,
 				},
 			},
-			want: []string{"💰 ↓ 5.0k · ↑ 200 · 5.2k"},
+			want: []string{"💰 ↑ 5.0k · ↓ 200 · 5.2k"},
 		},
 	}
 	for _, tc := range tests {
@@ -128,7 +128,7 @@ func TestFormatSessionFooterLines_LargeNumbers(t *testing.T) {
 		},
 	}
 	got := formatSessionFooterLines(ctx)
-	want := []string{"🤖 claude · opus-4-5", "💰 ↓ 156.0k · ↻ 1.2M · ↑ 18.0k · 1.4M · $1.245"}
+	want := []string{"🤖 claude · opus-4-5", "💰 ↑ 156.0k · ↻ 1.2M · ↓ 18.0k · 1.4M · $1.245"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -147,7 +147,7 @@ func TestFormatSessionFooter_StringForm(t *testing.T) {
 		},
 	}
 	got := formatSessionFooter(ctx)
-	want := "🤖 claude · opus-4-5\n💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k"
+	want := "🤖 claude · opus-4-5\n💰 ↑ 12.3k · ↻ 8.2k · ↓ 1.5k · 22.0k"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -384,7 +384,7 @@ func TestFormatSessionFooterLines_WithGitLine(t *testing.T) {
 	got := formatSessionFooterLines(ctx)
 	want := []string{
 		"🤖 claude · opus-4-5",
-		"💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k",
+		"💰 ↑ 12.3k · ↻ 8.2k · ↓ 1.5k · 22.0k",
 		"📁 code/nightme · ⎇ feat/x · ↑ 2 · ? 1 · ⇡ 3",
 	}
 	if !reflect.DeepEqual(got, want) {

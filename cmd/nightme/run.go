@@ -34,9 +34,11 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/channel/feishu"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/command"
+	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
-	"github.com/cnlangzi/nightme/internal/gtw"
+	"github.com/cnlangzi/nightme/internal/command/gtw"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -315,17 +317,93 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	gwImpl := gateway.New(messageDispatcher).(*gateway.Router)
 	gateway.RegisterChatSessionCommands(gwImpl, mgr, ch, cfg.Primary)
 
-	// F-45/F-46: /gtw fix slash command + reaction/action routing.
-	// Token auth is borrowed from `gh` / `glab` — see
-	// internal/gtw/provider.go (F-50 renamed from platform.go).
-	// RegisterGTWAction wires decision-card emoji/button clicks
-	// onto ChatSession.HandleAction.
+	// F-51: gtw moved to internal/command/gtw. Wiring is now
+	// (a) gtw.Manager owns the state, (b) services.ReactionRouter
+	// dispatches reactions, (c) command.Commander routes slash
+	// commands, (d) the runtime shim (defined below) translates
+	// *gateway.InboundMessage ↔ command.SlashInput /
+	// *CommandResult. The old gateway.RegisterGTW /
+	// RegisterGTWAction helpers were deleted in F-51 (their
+	// implementations moved to the new gtw.Factory + Manager).
 	gtwDeps := gtw.HandlerDeps{
-		Git:         gtw.ExecGitRunner{},
-		Prober:      &gtw.ExecHTTPProber{},
+		Git:    gtw.ExecGitRunner{},
+		Prober: &gtw.ExecHTTPProber{},
+		// Send / SendCard are populated lazily by the chatSessionSender
+		// (each chat gets its own Sender via gtwMgr.senderFactory).
+		// gtw.RunFix / HandleDraftReaction use these per-chat Senders,
+		// not the HandlerDeps-level Send. Leaving them nil here would
+		// not crash the per-chat paths, but keeping the field explicit
+		// makes the F-51 wiring contract easier to audit.
 	}
-	gateway.RegisterGTW(gwImpl, mgr, ch, cfg.Primary, gtwDeps)
-	gateway.RegisterGTWAction(mgr, gtwDeps)
+	gtwMgr := gtw.NewManager()
+	gtwMgr.SetHandlerDeps(gtwDeps)
+
+	// F-51 P0 fix: wire the per-chat Sender factory. Without
+	// this, /gtw fix and reaction paths would nil-deref on
+	// GetSender. The factory lazily creates a Sender on the
+	// first /gtw call (or reaction) per chat, then caches it.
+	gtwMgr.SetSenderFactory(func(chatID string) gtw.Sender {
+		return newChatSessionSender(
+			chatID,
+			newSessionAdapter(mgr, cfg.Primary).GetOrCreate(chatID, cfg.Primary),
+			newChannelAdapter(ch),
+		)
+	})
+
+	// Reaction router (services) — gtw registers its
+	// HandleReaction at startup; other commands can do the
+	// same in their own init() or factory construction.
+	router := commandServices.NewReactionRouter()
+	router.Register("*", gtwMgr.HandleReaction)
+
+	// Slash command registry + commander.
+	gtwFactory := gtw.NewFactoryWithDeps(gtwMgr, gtwDeps)
+	reg := command.NewRegistry()
+	reg.Register(gtwFactory)
+	commander := command.NewCommander(reg)
+
+	// RuntimeServices — fill all three slots via adapters
+	// (B3). Session wraps *chatsession.Manager (the B5+
+	// /cwd /use /kill handlers will use this); Channel
+	// wraps *gateway.Channel (any command that needs to
+	// send replies uses this).
+	rt := command.RuntimeServices{
+		Session:        newSessionAdapter(mgr, cfg.Primary),
+		ReactionRouter: router,
+		Channel:        newChannelAdapter(ch),
+	}
+
+	// Shim: translate *gateway.InboundMessage → command.SlashInput,
+	// dispatch, translate back. The gateway.CommandResult shape only
+	// carries Reply/Consumed/Dropped, so out.Outbound (multi-message
+	// atomic batches such as card + reply) is intentionally dropped
+	// here for now. When a future command needs the multi-message
+	// path, extend gateway.CommandResult with an Outbound []OutboundMessage
+	// slice and translate from command.Outbound here.
+	gwImpl.WithCommander(func(ctx context.Context, msg *gateway.InboundMessage) (*gateway.CommandResult, error) {
+		if msg == nil {
+			return nil, nil
+		}
+		input := command.SlashInput{
+			ChatID:     msg.ChatID,
+			UserID:     msg.UserID,
+			Text:       msg.Text,
+			MessageID:  msg.MessageID,
+			HasMention: msg.HasMention,
+		}
+		out, err := commander.Dispatch(ctx, rt, input)
+		if err != nil {
+			return &gateway.CommandResult{Consumed: true, Reply: "❌ " + err.Error()}, nil
+		}
+		if out == nil {
+			return &gateway.CommandResult{Consumed: false}, nil
+		}
+		return &gateway.CommandResult{
+			Consumed: out.Consumed,
+			Dropped:  out.Dropped,
+			Reply:    out.Reply,
+		}, nil
+	})
 
 	gwImpl.AttachChannels(ch)
 
@@ -342,44 +420,22 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		return cs.WatchMode(), true
 	})
 
-	// F-50 §6.1: install the action handler so DispatchInbound
-	// routes msg.Reaction (and future msg.Action for card button
-	// clicks) to ChatSession.HandleAction instead of treating
-	// them as empty-text messages. The handler is a thin
-	// trampoline: it looks up the ChatSession via mgr and
-	// forwards the event. Without this wiring the reaction
-	// pipeline is dead end-to-end (gtw decision cards can't be
-	// acted on by user emoji clicks).
-	slog.Default().Warn("F-46 debug: production WithActionHandler installed")
+	// F-51: the action handler now routes through
+	// services.ReactionRouter instead of calling
+	// chatsession.ChatSession.HandleAction (chatsession no
+	// longer dispatches reactions). The shim translates
+	// *commandServices.ReactionEvent → services.ReactionEvent.
+	slog.Default().Warn("F-51 debug: production WithActionHandler installed (router-based)")
 	gwImpl.WithActionHandler(func(ctx context.Context, msg *gateway.InboundMessage) bool {
-		slog.Default().Warn("F-46 debug: production action handler closure fired",
-			"has_reaction", msg != nil && msg.Reaction != nil,
-			"has_action", msg != nil && msg.Action != nil)
-		if msg == nil {
+		if msg == nil || msg.Reaction == nil {
 			return false
 		}
-		cs := mgr.Get(msg.ChatID)
-		if cs == nil {
-			slog.Default().Warn("F-46 debug: production action handler: cs nil, returning false")
-			return false
-		}
-		// Reactions are the only event the runtime wires up
-		// today; card button clicks (msg.Action) currently go
-		// through the same path for forward-compat. F-25 / F-37
-		// can split them out when the permission-card path is
-		// added.
-		if msg.Reaction != nil {
-			consumed := cs.HandleAction(ctx, chatsession.ReactionEvent{
-				TargetMsgID: msg.Reaction.TargetMsgID,
-				Emoji:       msg.Reaction.Emoji,
-				UserID:      msg.Reaction.UserID,
-				ChatID:      msg.Reaction.ChatID,
-			})
-			slog.Default().Warn("F-46 debug: production action handler: cs.HandleAction returned",
-				"consumed", consumed)
-			return consumed
-		}
-		return false
+		return router.Handle(ctx, msg.ChatID, commandServices.ReactionEvent{
+			TargetMsgID: msg.Reaction.TargetMsgID,
+			Emoji:       msg.Reaction.Emoji,
+			UserID:      msg.Reaction.UserID,
+			ChatID:      msg.Reaction.ChatID,
+		})
 	})
 
 	// WithOnCreate fires for both restored (RestoreFromRegistry)

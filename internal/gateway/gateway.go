@@ -179,6 +179,17 @@ type Gateway interface {
 	// runtime can chain gateway construction in a single line.
 	WithActionHandler(handler func(ctx context.Context, msg *InboundMessage) (consumed bool)) Gateway
 
+	// WithCommander installs the F-51 slash command dispatcher.
+	// When set, DispatchInbound routes messages whose Text
+	// starts with "/" through dispatch(ctx, msg) BEFORE the
+	// legacy handleXxx dispatch table. The runtime wires this
+	// to a shim that translates *InboundMessage to
+	// command.SlashInput, calls command.Commander.Dispatch,
+	// and converts the result back to *CommandResult.
+	//
+	// nil (default) keeps the legacy handleXxx dispatch path.
+	WithCommander(dispatch func(ctx context.Context, msg *InboundMessage) (*CommandResult, error)) Gateway
+
 	// Lifecycle
 	AttachChannels(channels ...Channel)
 	Start(ctx context.Context) error
@@ -232,6 +243,15 @@ func (g *gateway) WithActionHandler(handler func(ctx context.Context, msg *Inbou
 	return g
 }
 
+// WithCommander installs the F-51 slash command dispatcher.
+// See the Gateway interface for full docs.
+func (g *gateway) WithCommander(dispatch func(ctx context.Context, msg *InboundMessage) (*CommandResult, error)) Gateway {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.commandDispatch = dispatch
+	return g
+}
+
 // gateway is the concrete implementation + dispatch runtime. (It
 // carries the method set; Router is just an alias so external
 // packages can type-assert.)
@@ -276,6 +296,15 @@ type gateway struct {
 	// fall through to dispatchMessage (the agent loop, which
 	// would just no-op on the empty text).
 	actionHandler func(ctx context.Context, msg *InboundMessage) (consumed bool)
+
+	// F-51: slash command dispatcher. When set,
+	// DispatchInbound routes messages whose Text starts with
+	// "/" through this before the legacy handleXxx dispatch
+	// table. The runtime (cmd/nightme/run.go) wires this to a
+	// shim that translates *InboundMessage to command.SlashInput,
+	// calls command.Commander.Dispatch, and converts the result
+	// back to *CommandResult. nil = legacy handleXxx dispatch.
+	commandDispatch func(ctx context.Context, msg *InboundMessage) (*CommandResult, error)
 }
 
 // New constructs a Gateway (the inboundDispatcher).
@@ -370,6 +399,19 @@ func (g *gateway) DispatchInbound(ctx context.Context, msg *InboundMessage) (*Co
 	// cards to be actionable.
 	if msg.Reaction != nil || msg.Action != nil {
 		return g.dispatchAction(ctx, msg)
+	}
+
+	// F-51: if a commander is wired and the text starts with
+	// "/", route through the commander BEFORE the legacy
+	// handleXxx dispatch table. The commander is built by
+	// the runtime (cmd/nightme) and bridges
+	// *InboundMessage ↔ command.SlashInput /
+	// *CommandResult.
+	g.mu.RLock()
+	dispatch := g.commandDispatch
+	g.mu.RUnlock()
+	if dispatch != nil && strings.HasPrefix(strings.TrimSpace(msg.Text), "/") {
+		return dispatch(ctx, msg)
 	}
 
 	name, args, err := ParseCommand(strings.TrimSpace(msg.Text))

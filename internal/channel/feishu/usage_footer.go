@@ -41,7 +41,7 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/gateway"
-	"github.com/cnlangzi/nightme/internal/gtw"
+	"github.com/cnlangzi/nightme/internal/command/gtw"
 )
 
 // formatSessionFooterLines returns the SessionContext footer as a

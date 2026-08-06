@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/cnlangzi/nightme/internal/chatsession"
+	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 )
 
 // TestDispatchInbound_ActionBranch covers the F-50 §6.1 reaction
@@ -44,7 +44,7 @@ func TestDispatchInbound_ActionBranch(t *testing.T) {
 		res, err := gw.DispatchInbound(context.Background(), &InboundMessage{
 			ChatID: chatID,
 			Text:   "", // reactions have no text
-			Reaction: &chatsession.ReactionEvent{
+			Reaction: &commandServices.ReactionEvent{
 				TargetMsgID: "om_card_abc",
 				Emoji:       "✅",
 				UserID:      "ou_user_1",
@@ -88,7 +88,7 @@ func TestDispatchInbound_ActionBranch(t *testing.T) {
 		res, err := gw.DispatchInbound(context.Background(), &InboundMessage{
 			ChatID: chatID,
 			Text:   "",
-			Reaction: &chatsession.ReactionEvent{
+			Reaction: &commandServices.ReactionEvent{
 				TargetMsgID: "om_card_xyz",
 				Emoji:       "🆕",
 				ChatID:      chatID,
@@ -126,7 +126,7 @@ func TestDispatchInbound_ActionBranch(t *testing.T) {
 		res, err := gw.DispatchInbound(context.Background(), &InboundMessage{
 			ChatID: chatID,
 			Text:   "",
-			Reaction: &chatsession.ReactionEvent{
+			Reaction: &commandServices.ReactionEvent{
 				TargetMsgID: "om_orphan",
 				Emoji:       "👀",
 				ChatID:      chatID,
@@ -195,7 +195,7 @@ func TestDispatchInbound_ActionHandlerPanicSafe(t *testing.T) {
 	// reaction event that looks normal.
 	_, err := gw.DispatchInbound(context.Background(), &InboundMessage{
 		ChatID: chatID,
-		Reaction: &chatsession.ReactionEvent{
+		Reaction: &commandServices.ReactionEvent{
 			TargetMsgID: "om_test",
 			Emoji:       "✅",
 			ChatID:      chatID,

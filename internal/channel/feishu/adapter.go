@@ -26,9 +26,10 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
+	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
-	"github.com/cnlangzi/nightme/internal/gtw"
+	"github.com/cnlangzi/nightme/internal/command/gtw"
 )
 
 const maxMessageBytes = 3800
@@ -3243,7 +3244,7 @@ func (a *Adapter) handleReactionCreated(ctx context.Context, event *larkim.P2Mes
 		// reaction — reactions are user-initiated signals that
 		// should always reach the handler.
 		HasMention: true,
-		Reaction: &gateway.ReactionEvent{
+		Reaction: &commandServices.ReactionEvent{
 			TargetMsgID: messageID,
 			Emoji:       emoji,
 			UserID:      userID,
@@ -3332,7 +3333,7 @@ func (a *Adapter) handleCardAction(ctx context.Context, event *larkcallback.Card
 }
 
 // handleActCardAction is F-46 §3.6: when the user clicks an
-// `act:/gtw/<scenario>` button, synthesise a chatsession.ReactionEvent
+// `act:/gtw/<scenario>` button, synthesise a commandServices.ReactionEvent
 // pointing at the bot's card message id, push it onto the inbound
 // stream, and let the existing action-handler pipeline do the rest.
 // The toast confirms the click immediately; the result of the gtw
@@ -3372,7 +3373,7 @@ func (a *Adapter) handleActCardAction(
 		// should always reach the handler.
 		HasMention: true,
 		MessageID:  botMsgID,
-		Reaction: &gateway.ReactionEvent{
+		Reaction: &commandServices.ReactionEvent{
 			TargetMsgID: botMsgID,
 			Emoji:       string(emoji),
 			UserID:      userID,

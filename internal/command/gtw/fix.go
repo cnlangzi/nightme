@@ -6,28 +6,16 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
-// chatsessionCardChoice is a local alias for the chatsession
-// package's CardChoice. F-46 stores the rendered-card choices on
-// GTWDraft so the action handler's follow-up PATCH can rebuild
-// the card with Disabled=true.
-type chatsessionCardChoice = chatsession.CardChoice
+// Sender is the full outbound surface gtw uses. Defined in
+// types.go (canonical location for shared types); the gtw
+// package uses gtw.Sender everywhere instead of the previous
+// minimal ActiveCwd/SetActiveCwd subset.
 
-// Sender is the small surface the gtw package needs from
-// ChatSession. Production callers pass an adapter backed by
-// *chatsession.ChatSession (see internal/gateway/handlers_gtw.go).
-// Tests can pass a fake to avoid spinning up a real one.
-type Sender interface {
-	ActiveCwd() string
-	SetActiveCwd(cwd string) error
-}
-
-// ContextSlot is the gtw-package view of one ChatSession's
-// gtwContext slot. Production: gtwContextSlot from
-// internal/gateway. Tests: a tiny struct with closures.
+// ContextSlot is the gtw-package view of one Manager's per-chat
+// context slot. Production: gtw.Manager.GetContext / SetContext.
+// Tests can pass a small adapter that wraps those methods.
 //
 // The slot is value-typed: Load returns a copy, Store accepts a
 // copy. The gtw package never holds a live pointer to the stored
@@ -422,29 +410,15 @@ func sendDraft(
 		BotMessageID:  botMsgID,
 		CardTitle:     card.Title,
 		CardBody:      card.Body,
-		CardChoices:   toChatsessionCardChoices(card.Choices),
+		CardChoices:   card.Choices,
 		CardRequestID: requestID,
 	})
 	return &Result{Consumed: true}, nil
 }
 
-// toChatsessionCardChoices translates gtw.CardChoice to the
-// chatsession.CardChoice that lives on GTWDraft. Mirrors the
-// gtwSendAdapter translation for the inverse direction.
-func toChatsessionCardChoices(in []CardChoice) []chatsessionCardChoice {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]chatsessionCardChoice, len(in))
-	for i, c := range in {
-		out[i] = chatsessionCardChoice{
-			Emoji:  c.Emoji,
-			Label:  c.Label,
-			Action: c.Action,
-		}
-	}
-	return out
-}
+// toChatsessionCardChoices was removed in F-51: the gtw package
+// now owns CardChoice directly (no chatsession alias needed).
+// The renderer stores card.Choices verbatim on the draft.
 
 // renderCardMarkdown flattens a Card back to plain markdown for
 // legacy channels that don't support interactive cards (Feishu

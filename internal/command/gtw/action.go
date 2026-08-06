@@ -6,59 +6,61 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+
+	"github.com/cnlangzi/nightme/internal/command/services"
 )
 
-// HandleAction is the gtw-internal reaction router. The runtime
-// calls it from ChatSession.HandleAction (the single extra branch
-// added in F-50 §6.1 reaction routing). It looks up the draft by Reaction.TargetMsgID
-// and dispatches to the kind-specific executor.
+// HandleDraftReaction is the per-draft action router. It is called
+// by Manager.HandleReaction (which is the registered reaction
+// handler at services.ReactionRouter startup).
+//
+// Replaces the pre-F-51 `HandleAction(ctx, deps, cs, slot,
+// drafts, ev)` signature with `(ctx, m, deps, ev)` — the Manager
+// owns context + drafts + per-chat Sender lookup, so the slot /
+// drafts / cs parameters collapse into one *Manager.
 //
 // Returns (true, nil) when the reaction was consumed (a draft was
 // found AND the emoji was one of the documented set for that draft
 // kind — the executor actually performed an action). Returns
 // (false, nil) when no draft matches OR the emoji is unrecognised;
-// the caller falls through to the F-31 MessageState FSM and the
-// draft stays in place for the user to re-react. F-45 review
-// finding #3: the previous version called Take at function entry,
-// which silently consumed the draft for any emoji including
-// custom ones and 👍.
-func HandleAction(
+// the caller falls through and the draft stays in place for the
+// user to re-react.
+func HandleDraftReaction(
 	ctx context.Context,
+	m *Manager,
 	deps HandlerDeps,
-	cs Sender,
-	slot ContextSlot,
-	drafts DraftsMap,
-	ev ReactionEvent,
+	ev services.ReactionEvent,
 ) (bool, error) {
-	slog.Default().Warn("F-46 debug: HandleAction entry",
+	slog.Default().Warn("F-46 debug: HandleDraftReaction entry",
 		"target_msg_id", ev.TargetMsgID,
 		"emoji", ev.Emoji,
 		"chat_id", ev.ChatID)
 	if ev.TargetMsgID == "" || ev.Emoji == "" {
-		slog.Default().Warn("F-46 debug: HandleAction empty target/emoji, return false")
 		return false, nil
 	}
-	draft := drafts.Lookup(ev.TargetMsgID)
+	draft := m.GetDraft(ev.ChatID, ev.TargetMsgID)
 	if draft == nil {
-		slog.Default().Warn("F-46 debug: HandleAction draft not found",
-			"target_msg_id", ev.TargetMsgID)
+		slog.Default().Warn("F-46 debug: HandleDraftReaction draft not found",
+			"target_msg_id", ev.TargetMsgID,
+			"chat_id", ev.ChatID)
 		return false, nil
 	}
-	slog.Default().Warn("F-46 debug: HandleAction draft found",
+	slog.Default().Warn("F-46 debug: HandleDraftReaction draft found",
 		"target_msg_id", ev.TargetMsgID,
-		"draft_kind", draft.Kind,
+		"draft_kind", string(draft.Kind),
 		"bot_msg_id", draft.BotMessageID)
+	sender := m.GetSender(ev.ChatID)
 	switch draft.Kind {
 	case DraftFixBranchExists:
-		return executeBranchExistsAction(ctx, deps, cs, slot, drafts, ev, draft), nil
+		return executeBranchExistsAction(ctx, m, deps, sender, ev, draft), nil
+	case DraftFixWorktreeFail:
+		return executeWorktreeFailAction(ctx, m, deps, sender, ev, draft), nil
 	case DraftFixLabelTaken:
 		// Reserved for §5.3.2; not emitted by v1.
 		return false, nil
-	case DraftFixWorktreeFail:
-		return executeWorktreeFailAction(ctx, deps, cs, slot, drafts, ev, draft), nil
 	}
-	slog.Default().Warn("F-46 debug: HandleAction draft kind not matched",
-		"draft_kind", draft.Kind)
+	slog.Default().Warn("F-46 debug: HandleDraftReaction draft kind not matched",
+		"draft_kind", string(draft.Kind))
 	return false, nil
 }
 
@@ -66,14 +68,12 @@ func HandleAction(
 // card. Returns true when the emoji was recognised and the action
 // ran (and the draft was taken); false when the emoji was unknown
 // and the draft is left in place for the user to re-react.
-// F-45 review finding #3 + #4.
 func executeBranchExistsAction(
 	ctx context.Context,
+	m *Manager,
 	deps HandlerDeps,
-	cs Sender,
-	slot ContextSlot,
-	drafts DraftsMap,
-	ev ReactionEvent,
+	sender Sender,
+	ev services.ReactionEvent,
 	draft *Draft,
 ) bool {
 	p := draft.Payload
@@ -82,20 +82,14 @@ func executeBranchExistsAction(
 		// repo into the payload at emit time), but if it does
 		// the draft is broken — take it and surface a clear
 		// error so the user can re-run /gtw fix.
-		drafts.Take(ev.TargetMsgID)
+		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
 		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), "❌ Internal error: draft missing repo.")
 		return true
 	}
 
 	switch ReactionKind(ev.Emoji) {
 	case ReactionCancel:
-		drafts.Take(ev.TargetMsgID)
-		// F-45 §5.4 "platform label 更新失败 — low — warn 继续":
-		// if the platform client can't be constructed (gh/glab
-		// missing or unsupported host), we still tell the user
-		// the local fix state is cleared but be explicit that
-		// the nightme/wip label is still on the issue. Better
-		// to over-report than leave a stale label dangling.
+		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
 		rollbackOK := true
 		resultText := fmt.Sprintf("❌ Cancelled fix #%d.", p.IssueID)
 		if p.LabelAdded {
@@ -116,8 +110,8 @@ func executeBranchExistsAction(
 		return true
 
 	case ReactionNewV2:
-		drafts.Take(ev.TargetMsgID)
-		repoRoot := repoRootFromCS(cs)
+		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
+		repoRoot := repoRootFromSender(sender)
 		resultText := ""
 		for n := range 9 {
 			n += 2 // 2..10 inclusive
@@ -135,11 +129,11 @@ func executeBranchExistsAction(
 				resultText = fmt.Sprintf("❌ git worktree add: %v", err)
 				break
 			}
-			if err := cs.SetActiveCwd(worktree); err != nil {
+			if err := sender.SetActiveCwd(worktree); err != nil {
 				resultText = fmt.Sprintf("❌ SetActiveCwd: %v", err)
 				break
 			}
-			slot.Store(Context{
+			m.SetContext(ev.ChatID, Context{
 				Issue:     p.IssueID,
 				Branch:    variant,
 				Worktree:  worktree,
@@ -156,18 +150,18 @@ func executeBranchExistsAction(
 		return true
 
 	case ReactionJoin:
-		drafts.Take(ev.TargetMsgID)
-		repoRoot := repoRootFromCS(cs)
+		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
+		repoRoot := repoRootFromSender(sender)
 		existingPath, err := WorktreeListPath(ctx, repoRoot, p.Branch, deps.Git)
 		resultText := ""
 		if err != nil {
 			resultText = fmt.Sprintf("❌ git worktree list: %v", err)
 		} else if existingPath == "" {
 			resultText = fmt.Sprintf("❌ Branch %s exists but no worktree holds it; run `git worktree add` manually.", p.Branch)
-		} else if err := cs.SetActiveCwd(existingPath); err != nil {
+		} else if err := sender.SetActiveCwd(existingPath); err != nil {
 			resultText = fmt.Sprintf("❌ SetActiveCwd: %v", err)
 		} else {
-			slot.Store(Context{
+			m.SetContext(ev.ChatID, Context{
 				Issue:     p.IssueID,
 				Branch:    p.Branch,
 				Worktree:  existingPath,
@@ -180,38 +174,29 @@ func executeBranchExistsAction(
 		return true
 	}
 	// Unrecognised emoji on a known draft: leave the draft in
-	// place for the user to react correctly. Returning false
-	// tells the dispatcher this was not consumed (so the chat
-	// layer can fall through to a future handler if needed),
-	// and the draft stays alive for the next recognised click.
+	// place for the user to react correctly.
 	return false
 }
 
 // executeWorktreeFailAction handles 🔄 / ❌ on the §5.3.3 card.
-// Same contract as executeBranchExistsAction: returns true when
-// the action ran (draft taken), false when the emoji is unknown
-// (draft left in place).
 func executeWorktreeFailAction(
 	ctx context.Context,
+	m *Manager,
 	deps HandlerDeps,
-	cs Sender,
-	slot ContextSlot,
-	drafts DraftsMap,
-	ev ReactionEvent,
+	sender Sender,
+	ev services.ReactionEvent,
 	draft *Draft,
 ) bool {
 	p := draft.Payload
 	rk := ReactionKind(ev.Emoji)
 	slog.Default().Warn("F-46 debug: executeWorktreeFailAction entry",
 		"emoji", ev.Emoji,
-		"reaction_kind", rk,
-		"reaction_retry", ReactionRetry,
-		"matches", rk == ReactionRetry)
+		"reaction_kind", rk)
 
-	switch ReactionKind(ev.Emoji) {
+	switch rk {
 	case ReactionCancel:
 		slog.Default().Warn("F-46 debug: executeWorktreeFailAction → ReactionCancel")
-		drafts.Take(ev.TargetMsgID)
+		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
 		rollbackOK := true
 		resultText := fmt.Sprintf("❌ Cancelled fix #%d.", p.IssueID)
 		if p.LabelAdded {
@@ -233,17 +218,17 @@ func executeWorktreeFailAction(
 
 	case ReactionRetry:
 		slog.Default().Warn("F-46 debug: executeWorktreeFailAction → ReactionRetry")
-		drafts.Take(ev.TargetMsgID)
-		repoRoot := repoRootFromCS(cs)
+		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
+		repoRoot := repoRootFromSender(sender)
 		worktree := WorktreePath(repoRoot, p.Slug)
 		err := WorktreeAdd(ctx, repoRoot, p.Branch, worktree, "HEAD", deps.Git)
 		resultText := ""
 		if err != nil {
 			resultText = fmt.Sprintf("❌ Retry failed: %v", err)
-		} else if err := cs.SetActiveCwd(worktree); err != nil {
+		} else if err := sender.SetActiveCwd(worktree); err != nil {
 			resultText = fmt.Sprintf("❌ SetActiveCwd: %v", err)
 		} else {
-			slot.Store(Context{
+			m.SetContext(ev.ChatID, Context{
 				Issue:     p.IssueID,
 				Branch:    p.Branch,
 				Worktree:  worktree,
@@ -255,9 +240,6 @@ func executeWorktreeFailAction(
 		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), resultText)
 		return true
 	}
-	// Unrecognised emoji: same semantics as branch-exists.
-	slog.Default().Warn("F-46 debug: executeWorktreeFailAction → emoji not matched",
-		"reaction_kind", rk)
 	return false
 }
 
@@ -271,25 +253,21 @@ func emitFollowUp(
 	ctx context.Context,
 	deps HandlerDeps,
 	draft *Draft,
-	ev ReactionEvent,
+	ev services.ReactionEvent,
 	chosenEmoji string,
 	resultText string,
 ) {
-	slog.Default().Warn("F-46 debug: emitFollowUp entry",
-		"bot_msg_id", draft.BotMessageID,
-		"chosen_emoji", chosenEmoji,
-		"result_text", resultText)
 	if draft.BotMessageID != "" {
 		_ = deps.Send(ctx, OutMsg{
-			ChatID:             ev.ChatID,
-			PatchBotMsgID:      draft.BotMessageID,
-			PatchChosenEmoji:   chosenEmoji,
-			PatchResult:        resultText,
-			CardTitle:          draft.CardTitle,
-			CardBody:           draft.CardBody,
-			CardChoices:        gtwChoicesFromDraft(draft),
-			CardRequestID:      draft.CardRequestID,
-			ChosenChoiceEmoji:   chosenEmoji,
+			ChatID:            ev.ChatID,
+			PatchBotMsgID:     draft.BotMessageID,
+			PatchChosenEmoji:  chosenEmoji,
+			PatchResult:       resultText,
+			CardTitle:         draft.CardTitle,
+			CardBody:          draft.CardBody,
+			CardChoices:       draft.CardChoices,
+			CardRequestID:     draft.CardRequestID,
+			ChosenChoiceEmoji: chosenEmoji,
 		})
 		return
 	}
@@ -300,23 +278,6 @@ func emitFollowUp(
 	})
 }
 
-// gtwChoicesFromDraft translates the chatsession.CardChoice
-// slice on the draft into the gtw-package CardChoice slice the
-// OutMsg adapter expects.
-func gtwChoicesFromDraft(draft *Draft) []CardChoice {
-	if len(draft.CardChoices) == 0 {
-		return nil
-	}
-	out := make([]CardChoice, len(draft.CardChoices))
-	for i, c := range draft.CardChoices {
-		out[i] = CardChoice{
-			Emoji:  c.Emoji,
-			Label:  c.Label,
-			Action: c.Action,
-		}
-	}
-	return out
-}
 // splitOwnerRepo splits "owner/repo" into its two parts.
 func splitOwnerRepo(s string) (string, string, error) {
 	idx := strings.Index(s, "/")
@@ -326,36 +287,23 @@ func splitOwnerRepo(s string) (string, string, error) {
 	return s[:idx], s[idx+1:], nil
 }
 
-// repoRootFromCS returns the repo root given the active cwd.
+// repoRootFromSender returns the repo root given the active cwd.
 //
 // gtw's worktree layout is sibling/<repo>.nightme/<slug>/, so the
 // active cwd (a specific worktree) is 2 levels below the worktree
 // parent + 1 level above the repo. The repo is the worktree
 // parent with the `.nightme` suffix stripped.
-//
-// Examples (sibling=/code, repo=nightme):
-//
-//	/code/nightme.nightme/42-foo  →  /code/nightme
-//	/code                            →  /code  (no .nightme parent; assume cwd IS the repo)
-//
-// The old "walk up 2" implementation was wrong (returned
-// /code/nightme.nightme, not /code/nightme) and made every 🆕/🔗/🔄
-// reaction fail with "fatal: not a git repository". The strip
-// approach is exact for the gtw layout and safe for the
-// "cwd is already the repo" case (no .nightme to strip).
-func repoRootFromCS(cs Sender) string {
-	cwd := cs.ActiveCwd()
+func repoRootFromSender(sender Sender) string {
+	if sender == nil {
+		return ""
+	}
+	cwd := sender.ActiveCwd()
 	if cwd == "" {
 		return ""
 	}
-	// Worktree parent is `dirname(cwd)`; the repo is the worktree
-	// parent with the trailing `.nightme` component removed.
 	worktreeParent := filepath.Dir(cwd)
 	if strings.HasSuffix(filepath.Base(worktreeParent), ".nightme") {
 		return strings.TrimSuffix(worktreeParent, ".nightme")
 	}
-	// Not a gtw worktree layout; fall back to the parent dir.
-	// This matches the test fixture (worktree at <dir>/wt) and
-	// the "cwd is the main repo" case.
 	return worktreeParent
 }

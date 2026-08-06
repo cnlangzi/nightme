@@ -57,8 +57,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/gateway"
-	"github.com/cnlangzi/nightme/internal/gtw"
+	"github.com/cnlangzi/nightme/internal/command/gtw"
 )
 
 // debugFlags captures the shared flags.
@@ -139,6 +140,7 @@ func newDebugCmd() *cobra.Command {
 type debugFixture struct {
 	cs       *chatsession.ChatSession
 	mgr      *chatsession.Manager
+	gtwMgr   *gtw.Manager
 	gw       gateway.Gateway
 	captured *capturingChannel
 }
@@ -179,10 +181,17 @@ func newDebugFixture(f debugFlags) (*debugFixture, error) {
 		},
 	}
 
-	// 4. Install the gtw action handler BEFORE creating the
-	// ChatSession — chatsession.Manager.WithOnCreate only fires
-	// for chats created after the callback is registered.
-	gateway.RegisterGTWAction(mgr, gtwDeps)
+	// 4. F-51: build a fresh gtw.Manager + services.ReactionRouter
+	// and register gtwMgr.HandleReaction. The gateway's
+	// WithActionHandler below calls router.Handle for each
+	// reaction event. (Pre-F-51 this was
+	// gateway.RegisterGTWAction(mgr, gtwDeps), which installed
+	// SetActionHandler on each ChatSession. F-51 removed that
+	// path — reactions are now router-based.)
+	gtwMgr := gtw.NewManager()
+	gtwMgr.SetHandlerDeps(gtwDeps)
+	gtwRouter := commandServices.NewReactionRouter()
+	gtwRouter.Register("*", gtwMgr.HandleReaction)
 
 	// 5. Create the ChatSession — triggers the WithOnCreate
 	// callback, which installs the SetActionHandler.
@@ -206,11 +215,7 @@ func newDebugFixture(f debugFlags) (*debugFixture, error) {
 		if msg == nil || msg.Reaction == nil {
 			return false
 		}
-		csLocal := mgr.Get(msg.ChatID)
-		if csLocal == nil {
-			return false
-		}
-		return csLocal.HandleAction(ctx, chatsession.ReactionEvent{
+		return gtwRouter.Handle(ctx, msg.ChatID, commandServices.ReactionEvent{
 			TargetMsgID: msg.Reaction.TargetMsgID,
 			Emoji:       msg.Reaction.Emoji,
 			UserID:      msg.Reaction.UserID,
@@ -221,6 +226,7 @@ func newDebugFixture(f debugFlags) (*debugFixture, error) {
 	return &debugFixture{
 		cs:       cs,
 		mgr:      mgr,
+		gtwMgr:   gtwMgr,
 		gw:       gw,
 		captured: captured,
 	}, nil
@@ -263,7 +269,7 @@ func runDebugAction(cmd *cobra.Command, f debugFlags, msgID, emoji string) error
 		UserID:     f.userID,
 		Text:       "", // reactions have no text
 		HasMention: true,
-		Reaction: &chatsession.ReactionEvent{
+		Reaction: &commandServices.ReactionEvent{
 			TargetMsgID: msgID,
 			Emoji:       emoji,
 			UserID:      f.userID,
@@ -313,12 +319,13 @@ func runDebugDrain(cmd *cobra.Command, f debugFlags) error {
 	if err != nil {
 		return err
 	}
-	// Take each draft by its stable key. The list view doesn't
-	// expose keys, but we can clear the underlying slot and
-	// context. The gtw package will rebuild on next RunFix.
-	fix.cs.ClearGTWContext()
-	_ = fix.cs // gtwDrafts are best-effort cleared by context reset
-	fmt.Fprintf(cmd.OutOrStdout(), "drained gtwContext for chat %q\n", f.chatID)
+	// F-51: state lives on gtw.Manager; chatsession no longer
+	// knows about gtw. Reset the manager's per-chat state.
+	before := fix.gtwMgr.DraftCount(f.chatID)
+	fix.gtwMgr.Reset(f.chatID)
+	fmt.Fprintf(cmd.OutOrStdout(),
+		"drained gtw for chat %q (cleared %d drafts + context)\n",
+		f.chatID, before)
 	return nil
 }
 
@@ -328,11 +335,7 @@ func runDebugDrafts(cmd *cobra.Command, f debugFlags) error {
 	if err != nil {
 		return err
 	}
-	cs := fix.mgr.Get(f.chatID)
-	if cs == nil {
-		return fmt.Errorf("chat not found: %s", f.chatID)
-	}
-	drafts := cs.ListGTWDrafts()
+	drafts := fix.gtwMgr.ListDrafts(f.chatID)
 	if len(drafts) == 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "no gtwDrafts in chat %q\n", f.chatID)
 		return nil
@@ -353,20 +356,20 @@ func runDebugDrafts(cmd *cobra.Command, f debugFlags) error {
 // emit, so the action handler's downstream behaviour (label
 // removal, worktree add, etc.) can be exercised.
 func seedDraft(fix *debugFixture, f debugFlags, userMsgID, kind string) error {
-	var draftKind chatsession.GTWDraftKind
+	var draftKind gtw.DraftKind
 	switch kind {
 	case "branch-exists":
-		draftKind = chatsession.GTWDraftFixBranchExists
+		draftKind = gtw.DraftFixBranchExists
 	case "worktree-fail":
-		draftKind = chatsession.GTWDraftFixWorktreeFail
+		draftKind = gtw.DraftFixWorktreeFail
 	case "label-taken":
-		draftKind = chatsession.GTWDraftFixLabelTaken
+		draftKind = gtw.DraftFixLabelTaken
 	default:
 		return fmt.Errorf("unknown --seed=%q (want branch-exists | worktree-fail | label-taken)", kind)
 	}
-	fix.cs.StoreGTWDraft(userMsgID, &chatsession.GTWDraft{
+	fix.gtwMgr.StoreDraft(f.chatID, userMsgID, &gtw.Draft{
 		Kind: draftKind,
-		Payload: chatsession.GTWFixDraftPayload{
+		Payload: gtw.FixDraftPayload{
 			IssueID:    f.issueID,
 			Title:      f.title,
 			Branch:     f.branch,

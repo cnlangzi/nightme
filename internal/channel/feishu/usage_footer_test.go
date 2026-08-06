@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/gateway"
-	"github.com/cnlangzi/nightme/internal/gtw"
+	"github.com/cnlangzi/nightme/internal/command/gtw"
 )
 
 func TestFormatSessionFooterLines_NilContextReturnsNil(t *testing.T) {

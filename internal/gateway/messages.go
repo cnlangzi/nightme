@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/gtw"
+	commandServices "github.com/cnlangzi/nightme/internal/command/services"
+	"github.com/cnlangzi/nightme/internal/command/gtw"
 )
 
 // ChatType was removed in F-33. The Gateway never sees chat types;
@@ -95,7 +95,12 @@ type InboundMessage struct {
 	// Action and Reaction are mutually exclusive in practice: a
 	// reaction is an emoji click on a message; an Action is a
 	// card-button click. Both share the same inbound pipeline.
-	Reaction *ReactionEvent
+	//
+	// F-51: Reaction is the canonical command.ReactionEvent
+	// (defined in internal/command/services/reaction.go). The
+	// gateway no longer defines its own type; channel adapters
+	// construct this directly.
+	Reaction *commandServices.ReactionEvent
 	// Raw carries the channel-native payload for handlers that
 	// genuinely need it.
 	Raw any
@@ -193,10 +198,10 @@ type ActionPayload struct {
 // is the per-draft handler's job.
 //
 // The type is declared in internal/chatsession (which owns the
-// per-chat handler machinery); the alias below keeps the
-// gateway-package import path working without creating an
-// import cycle (gateway → chatsession is the only direction).
-type ReactionEvent = chatsession.ReactionEvent
+// per-chat handler machinery). F-51: the gateway no longer
+// defines a ReactionEvent type — the canonical one lives in
+// command/services. Channels construct it directly; the
+// gateway's only role is the InboundMessage.Reaction pointer.
 
 // OutboundKind tags the shape of an OutboundMessage. Channels
 // decide whether/how to render each kind; they may drop or

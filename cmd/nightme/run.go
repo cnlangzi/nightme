@@ -36,6 +36,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/gtw"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -660,8 +661,21 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		case gateway.OutReply, gateway.OutResult,
 			gateway.OutTaskCreate, gateway.OutTaskUpdate:
 			snap := s.CumulativeUsage()
+			// F-48: capture per-stamp git status for footer line 3.
+			// No caching — every main-chat event recomputes so the
+			// footer always reflects the latest worktree state
+			// (uncommitted edits / unpushed commits). Returns
+			// (nil, nil) for non-repo / git-failure; we treat that
+			// as "no git segment" in the footer render path.
+			//
+			// Computed before the stamp-decision so a non-repo
+			// workspace doesn't change the existing
+			// "no SessionContext without usage" behaviour.
+			gitSnap, _ := gtw.CollectStatus(context.Background(), s.Cwd,
+				gtw.ExecGitRunner{})
 			// Stamp SessionContext when ANY token field or cost is
-			// non-zero OR when Model has been captured. The
+			// non-zero OR when Model has been captured OR when
+			// git status is available. The
 			// CacheCreationInputTokens field must be included —
 			// formatSessionFooter renders it as part of the '↓ in'
 			// segment, so a turn that only primed a cache entry
@@ -669,15 +683,19 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 			// CacheCreation > 0) is renderable and must reach
 			// the Channel. Without it, a transient cache-rewrite
 			// turn with no Model yet gets silently dropped.
+			hasGit := gitSnap != nil && s.Cwd != ""
 			if snap.InputTokens != 0 || snap.OutputTokens != 0 ||
 				snap.CacheCreationInputTokens != 0 ||
 				snap.CacheReadInputTokens != 0 || snap.CostUSD != 0 ||
-				s.Model() != "" {
-				out.SessionContext = &gateway.SessionContext{
+				s.Model() != "" || hasGit {
+				ctx := &gateway.SessionContext{
 					Agent:           s.Agent,
 					Model:           s.Model(),
 					CumulativeUsage: snap,
+					Workspace:       s.Cwd,
+					GitStatus:       gitSnap,
 				}
+				out.SessionContext = ctx
 			}
 		}
 		// F-think §3.1.2: per-chat OutThinking gate. When the

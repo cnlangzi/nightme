@@ -373,7 +373,16 @@ func TestEventHandler_OutResult_NilUsageLeavesEmptySessionContext(t *testing.T) 
 	logger := slog.Default()
 
 	h := newEventHandler(ch, cs, mgr, logger)
-	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_zero", "claude", "/tmp", nil)
+	// t.TempDir() is guaranteed NOT to be inside a git working
+	// tree (Go creates it under the OS temp dir; tests don't
+	// nest a .git inside). Pre-F-48 the test hardcoded /tmp,
+	// which happened to be non-git on most dev machines but
+	// could fail under a CI runner that mounts the workspace
+	// under /tmp. F-48 stamps SessionContext whenever the cwd
+	// is in a git repo (regardless of usage), so the test must
+	// pin a non-git cwd explicitly.
+	tmpDir := t.TempDir()
+	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_zero", "claude", tmpDir, nil)
 
 	h("oc_chat_zero", as, agent.AgentEvent{
 		Kind: agent.EventResult,

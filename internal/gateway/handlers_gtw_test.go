@@ -11,10 +11,9 @@ import (
 	"github.com/cnlangzi/nightme/internal/gtw"
 )
 
-// TestRunGTWTest_ModeYesNo exercises the real /gtw test command
-// (NOT the runGTWTestScenario helper) so the test guards the
-// command-path argument forwarding. It picks the two-choice mode
-// to cover the "yes/no" reaction shape.
+// TestRunGTWTest_ModeYesNo asserts the debug/UAT setup path for
+// /gtw test yes-no: seed draft + OutCard + click instructions.
+// Full reaction/PATCH needs a real Feishu session — no auto-dispatch.
 func TestRunGTWTest_ModeYesNo(t *testing.T) {
 	const chatID = "oc_chat_test"
 
@@ -27,7 +26,7 @@ func TestRunGTWTest_ModeYesNo(t *testing.T) {
 		&InboundMessage{ChatID: chatID, UserID: "ou_user_1", MessageID: "msg-1"},
 		[]string{"yes-no"},
 		gtw.HandlerDeps{},
-		nil, // gw may be nil; runGTWTestScenario falls back to a stub gateway
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("yes-no: %v", err)
@@ -38,23 +37,24 @@ func TestRunGTWTest_ModeYesNo(t *testing.T) {
 
 	channel.mu.Lock()
 	defer channel.mu.Unlock()
-	// /gtw test yes-no now emits TWO outbound messages: the
-	// decision card preview (OutCard, no Text) and the result
-	// summary (OutReply with "yes-no" + "result:"). Find the
-	// text reply by scanning for the marker substrings.
-	summary := findTextByNeedles(channel.msgs, "yes-no", "result:")
-	if summary == "" {
-		t.Errorf("yes-no: no captured text reply containing 'yes-no' and 'result:'")
+	// Debug setup: OutCard + setup OutReply (click instructions).
+	// No auto-dispatched "result:" summary — that is Feishu UAT.
+	if !hasKind(channel.msgs, OutCard) {
+		t.Errorf("yes-no: expected an OutCard decision preview")
 	}
-
+	summary := findTextByNeedles(channel.msgs, "yes-no", "click", "debug")
+	if summary == "" {
+		t.Errorf("yes-no: no setup reply containing 'yes-no' + 'click' + 'debug'")
+	}
 	if cs := mgr.Get(chatID); cs == nil {
 		t.Fatal("yes-no: chat not created")
+	} else if n := cs.GTWDraftCount(); n == 0 {
+		t.Errorf("yes-no: draft missing after setup (count=%d); auto-dispatch must not consume it", n)
 	}
 }
 
-// TestRunGTWTest_ModeUnknown covers the unknown-emoji case: the
-// draft is left in place, no follow-up card is emitted, and the
-// result string reflects the "unrecognised emoji" path.
+// TestRunGTWTest_ModeUnknown asserts debug setup for the unknown-
+// emoji scenario: card + draft left in place for a real Feishu click.
 func TestRunGTWTest_ModeUnknown(t *testing.T) {
 	const chatID = "oc_chat_test"
 
@@ -78,27 +78,19 @@ func TestRunGTWTest_ModeUnknown(t *testing.T) {
 
 	channel.mu.Lock()
 	defer channel.mu.Unlock()
-	summary := findTextByNeedles(channel.msgs, "unknown", "result:")
+	summary := findTextByNeedles(channel.msgs, "unknown", "click", "debug")
 	if summary == "" {
-		t.Errorf("unknown: no captured text reply containing 'unknown' and 'result:'")
+		t.Errorf("unknown: no setup reply containing 'unknown' + 'click' + 'debug'")
 	}
 	if cs := mgr.Get(chatID); cs == nil {
 		t.Fatal("unknown: chat not created")
-	}
-	// F-46: the draft is now re-keyed under the bot's card message id
-	// (the one returned by SendCard), so we walk the ChatSession's
-	// draft set rather than looking up the original SetupUserMsgID.
-	// The intent is "unknown emoji leaves draft in place" — verified
-	// by count > 0 after the dispatch.
-	if n := mgr.Get(chatID).GTWDraftCount(); n == 0 {
-		t.Errorf("unknown: draft was taken (count=%d), want draft left in place for re-reaction", n)
+	} else if n := cs.GTWDraftCount(); n == 0 {
+		t.Errorf("unknown: draft missing after setup (count=%d)", n)
 	}
 }
 
-// TestRunGTWTest_ModeOrphan covers the "no draft" path: a
-// reaction dispatched against a random msg_id that has no
-// gtwDraft. The dispatcher should return Dropped=true and no
-// follow-up card should be sent.
+// TestRunGTWTest_ModeOrphan covers the "no draft" debug setup:
+// orphan scenario seeds nothing and only emits the setup reply.
 func TestRunGTWTest_ModeOrphan(t *testing.T) {
 	const chatID = "oc_chat_test"
 
@@ -122,10 +114,12 @@ func TestRunGTWTest_ModeOrphan(t *testing.T) {
 
 	channel.mu.Lock()
 	defer channel.mu.Unlock()
-	// Exactly 1 message: the test reply card. The gtw executor
-	// has no draft to act on, so no follow-up card is sent.
+	// Exactly 1 message: the debug setup reply. No draft → no card.
 	if n := len(channel.msgs); n != 1 {
-		t.Errorf("orphan: captured %d messages, want 1 (test reply only)", n)
+		t.Errorf("orphan: captured %d messages, want 1 (setup reply only)", n)
+	}
+	if findTextByNeedles(channel.msgs, "orphan", "debug") == "" {
+		t.Errorf("orphan: setup reply missing 'orphan' + 'debug'")
 	}
 }
 
@@ -219,8 +213,8 @@ func TestRunGTWTest_UnknownMode(t *testing.T) {
 
 // findTextByNeedles returns the Text of the first captured
 // OutboundMessage whose body contains every needle. Empty string if
-// no match. Used by /gtw test tests now that pipeline modes emit an
-// OutCard preview followed by the result text reply.
+// no match. Used by /gtw test debug-setup assertions (card + click
+// instructions; no auto-dispatched result summary).
 func findTextByNeedles(msgs []OutboundMessage, needles ...string) string {
 	for _, m := range msgs {
 		if containsAll(m.Text, needles...) {
@@ -228,6 +222,15 @@ func findTextByNeedles(msgs []OutboundMessage, needles ...string) string {
 		}
 	}
 	return ""
+}
+
+func hasKind(msgs []OutboundMessage, kind OutboundKind) bool {
+	for _, m := range msgs {
+		if m.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // containsAll is a tiny substring-presence helper.

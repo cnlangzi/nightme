@@ -55,13 +55,13 @@ func RegisterGTW(
 	// is self-contained. gtw package is stateless; this is the
 	// only place we materialize the binding.
 	storedDeps := deps
-	// Capture gw too so the /gtw test subcommand can call
-	// DispatchInbound to synthesise a reaction event against the
-	// user's real ChatSession. See runGTWTestAction.
+	// Capture gw for /gtw test plumbing (reply routing). Reaction
+	// auto-dispatch was removed — /gtw test is Feishu UAT/debug only
+	// and waits for a real card click / emoji reaction.
 	storedGw := gw
 	gw.Register(Command{
 		Name:        "gtw",
-		Description: "Team workflow: /gtw fix <issue-id> | /gtw test {action|seed|drafts|drain} (F-45).",
+		Description: "Team workflow: /gtw fix <issue-id> | /gtw test <scenario> (debug/Feishu UAT).",
 		Handler: func(ctx context.Context, msg *InboundMessage, args []string) (*CommandResult, error) {
 			return handleGTW(ctx, mgr, channel, msg, args, globalPrimary, storedDeps, storedGw)
 		},
@@ -185,7 +185,7 @@ func handleGTW(
 ) (*CommandResult, error) {
 	if len(args) < 1 {
 		return sendGTWReply(ctx, channel, msg.ChatID,
-			"Usage: /gtw fix <issue-id> | /gtw test {action|seed|drafts|drain}"), nil
+			"Usage: /gtw fix <issue-id> | /gtw test <scenario> (debug/Feishu UAT)"), nil
 	}
 	sub := args[0]
 	rest := args[1:]
@@ -333,15 +333,17 @@ func RegisterGTWAction(mgr *chatsession.Manager, deps gtw.HandlerDeps) {
 	})
 }
 
-// runGTWTest is the manual reaction-flow exerciser. Each mode keeps one
-// representative case so this command tests the reaction pipeline rather
-// than duplicating every business branch.
+// runGTWTest is a Feishu UAT / debug helper: seed a decision-card
+// draft, render the interactive card, and wait for a real user click
+// (or emoji reaction) on Feishu. It does NOT auto-dispatch a synthetic
+// reaction — unit tests cannot close the Feishu card/PATCH loop, so
+// CI only asserts setup (card + draft + click instructions).
 //
 // Modes:
 //
-//	/gtw test ok             single-choice reaction
-//	/gtw test yes-no         two-choice reaction
-//	/gtw test three          three-choice reaction
+//	/gtw test ok             single-choice reaction (debug)
+//	/gtw test yes-no         two-choice reaction (debug)
+//	/gtw test three          three-choice reaction (debug)
 //	/gtw test list           print every pending test draft
 //	/gtw test reset          drop every pending test draft and clear gtwContext
 //	/gtw test                print the mode catalogue
@@ -425,10 +427,11 @@ var gtwTestScenarios = []gtwTestScenario{
 	},
 }
 
-// runGTWTestScenario dispatches a preset by name. Seeds the
-// right draft (if any) then dispatches the right reaction. The
-// reply prints what the test exercised and what the expected
-// outcome is, so the user can compare.
+// runGTWTestScenario seeds a preset draft + decision card for
+// Feishu debug/UAT. The user clicks the card (or reacts with the
+// suggested emoji); production HandleAction does the PATCH. No
+// synthetic auto-dispatch — that would consume the draft before
+// the real click lands.
 func runGTWTestScenario(
 	ctx context.Context,
 	mgr *chatsession.Manager,
@@ -545,28 +548,18 @@ func runGTWTestScenario(
 		gtwTestStampBotMessageID(mgr, msg.ChatID, cardMsgID, cardMsgID)
 	}
 
-	// 2. Synthesise the reaction event and dispatch through
-	// the real gateway. The runtime's gtw action handler
-	// (installed at startup) fires on the seeded draft; any
-	// follow-up card the executor emits is sent to the chat
-	// normally via deps.Send → channel. In tests, gw may be
-	// nil — fall back to a local gateway with the gtw action
-	// F-46: /gtw test is a UAT demo. We send the card and let the
-	// user click it themselves so they can see the PATCH happen in
-	// real-time on Feishu. We do NOT auto-dispatch a synthetic
-	// reaction — that would consume the draft before the user gets
-	// to click. The result text only describes the setup, and the
-	// PATCH happens on the user's click via the production handler.
-	_ = gw // kept for command-result plumbing even though we don't dispatch here.
-	slog.Default().Warn("F-46 debug: runGTWTestScenario: card sent, waiting for user click",
-		"chat_id", msg.ChatID,
-		"card_msg_id", cardMsgID,
-		"setup_user_msg_id", sc.SetupUserMsgID,
-		"setup_emoji", sc.SetupEmoji)
-	return sendGTWReply(ctx, channel, msg.ChatID,
-		fmt.Sprintf("🧪 /gtw test %s\n  setup: %s\n  react:  click %s on the card above\n  expected: see scenario description above; any follow-up card is in the chat thread.\n\n  (real E2E not feasible without a Feishu account; this is the UAT demo loop.)",
-			name, sc.Description, sc.SetupEmoji)), nil
-}
+		// Debug/UAT only: leave the draft + card for a real Feishu
+		// click. Do not synthesise a reaction here.
+		_ = gw
+		slog.Default().Warn("F-46 debug: runGTWTestScenario: card sent, waiting for user click",
+			"chat_id", msg.ChatID,
+			"card_msg_id", cardMsgID,
+			"setup_user_msg_id", sc.SetupUserMsgID,
+			"setup_emoji", sc.SetupEmoji)
+		return sendGTWReply(ctx, channel, msg.ChatID,
+			fmt.Sprintf("🧪 /gtw test %s  [debug / Feishu UAT]\n  setup: %s\n  react:  click %s on the card above\n  expected: production HandleAction PATCHes the card on your click.\n\n  (no auto-dispatch — unit tests only assert this setup; full E2E needs a real Feishu session.)",
+				name, sc.Description, sc.SetupEmoji)), nil
+	}
 
 
 // sendScenarioCard renders an interactive decision card on the
@@ -660,10 +653,10 @@ For now reactions on the bot message still drive the pipeline:
 // runGTWTestHelp prints the scenario list.
 func runGTWTestHelp(ctx context.Context, channel Channel, msg *InboundMessage) *CommandResult {
 	var b strings.Builder
-	b.WriteString("🧪 /gtw test <scenario>  — preset-driven reaction exerciser\n\n")
-	b.WriteString("Modes exercise the reaction pipeline; `card` renders\n")
-	b.WriteString("the interactive decision card so you can eyeball its\n")
-	b.WriteString("shape in the channel.\n\n")
+	b.WriteString("🧪 /gtw test <scenario>  — debug / Feishu UAT only\n\n")
+	b.WriteString("Seeds a decision card + draft, then waits for YOUR click\n")
+	b.WriteString("(or emoji) on Feishu. No auto-dispatch — CI cannot close\n")
+	b.WriteString("the Feishu card/PATCH loop.\n\n")
 	b.WriteString("Scenarios:\n")
 	for _, sc := range gtwTestScenarios {
 		fmt.Fprintf(&b, "  %-18s  %s\n", sc.Name, sc.Description)

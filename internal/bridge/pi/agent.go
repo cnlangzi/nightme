@@ -86,11 +86,21 @@ func (a *Agent) Detect() error {
 // Kept in the signature for forward compatibility with future
 // /use flags that may translate to Pi commands.
 //
+// cfg.ResumeID, when non-empty, is forwarded as Pi's native
+// `--session-id <id>` CLI flag at spawn time so the spawned
+// process resumes the named session (the bridge's "opaque
+// ResumeID" contract translates cleanly: nightme stores pi's own
+// sessionId — captured from get_state — and feeds it back here on
+// the next spawn). Empty means "no --session-id; start a fresh
+// session". Mirrors Claude Code's `--resume <id>` flow in
+// internal/bridge/claudecode/claudecode.go: same field, each
+// bridge translates to its own CLI flag.
+//
 // On Start success, the returned session has an active process and
 // has already completed the get_state handshake. The caller must
 // Close() it when done.
 func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSession, error) {
-	args := buildArgs(a.args, cfg.Args)
+	args := buildArgs(a.args, cfg)
 
 	env := append([]string(nil), cfg.Env...)
 	env = append(env, a.command) // ensure command name is in env (defensive)
@@ -102,11 +112,24 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSe
 // as a package-private helper so tests can assert on the produced
 // argv without spawning a process. Mirrors the contract of
 // Agent.Start exactly.
-func buildArgs(extraArgs, cfgArgs []string) []string {
-	out := make([]string, 0, len(DefaultArgs)+len(extraArgs)+len(cfgArgs))
+// buildArgs concatenates DefaultArgs + extraArgs + cfg.Args, then
+// appends Pi's `--session-id <id>` when cfg.ResumeID is non-empty.
+// Extracted as a package-private helper so tests can assert on
+// the produced argv without spawning a process. Mirrors the
+// contract of Agent.Start exactly.
+//
+// Order rationale: resume flag goes LAST so user-supplied cfg.Args
+// (typically model/provider overrides) remain grep-visible before
+// the session identifier. Same convention as the claudecode
+// bridge in buildArgs().
+func buildArgs(extraArgs []string, cfg agent.StartConfig) []string {
+	out := make([]string, 0, len(DefaultArgs)+len(extraArgs)+len(cfg.Args)+2)
 	out = append(out, DefaultArgs...)
 	out = append(out, extraArgs...)
-	out = append(out, cfgArgs...)
+	out = append(out, cfg.Args...)
+	if cfg.ResumeID != "" {
+		out = append(out, "--session-id", cfg.ResumeID)
+	}
 	return out
 }
 

@@ -36,6 +36,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/gtw"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -519,7 +520,48 @@ func wireRuntimeCallbacksAndRestore(
 	}
 	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
 		cs.SetEventHandler(factory(cs))
-		cs.SetMessageStateHandler(gwImpl.OnMessageState)
+		// F-48: wrap the gateway's OnMessageState so the runtime
+		// can stamp SessionContext on MessageForwarded (the
+		// Feishu placeholder card needs the footer). The gateway's
+		// bare OnMessageState doesn't accept SessionContext — the
+		// runtime is the right owner of the stamp because it has
+		// access to the AgentSession via cs.ActiveAgentSession().
+		// We bypass gwImpl.OnMessageState entirely here: the
+		// runtime wrapper does the same thing (validate, build
+		// OutboundMessage, send) plus the stamp on MessageForwarded.
+		// Other states (Received / Done / Error) don't need the
+		// stamp — they don't create UI.
+		cs.SetMessageStateHandler(func(chatID, userMsgID string, state agent.MessageState) {
+			// Review fix: replicate the gateway's identifier
+			// validation. Empty chatID / userMsgID would produce
+			// an OutboundMessage with empty routing fields, which
+			// the Feishu adapter rejects ("feishu: OutMessageState
+			// missing MessageID") and which previously was a
+			// silent no-op via gwImpl.OnMessageState's early return.
+			if chatID == "" || userMsgID == "" {
+				return
+			}
+			out := gateway.OutboundMessage{
+				Kind:    gateway.OutMessageState,
+				ChatID:  chatID,
+				ReplyTo: userMsgID,
+				MessageState: &gateway.MessageStatePayload{
+					State:     state,
+					MessageID: userMsgID,
+				},
+			}
+			if state == agent.MessageForwarded {
+				if as := cs.ActiveAgentSession(); as != nil {
+					sessionContextInto(&out, as)
+				}
+			}
+			if err := ch.Send(context.Background(), out); err != nil {
+				logger.Warn("runtime: MessageState send failed",
+					"chat_id", chatID,
+					"state", state,
+					"err", err)
+			}
+		})
 	})
 	return mgr.RestoreFromRegistry()
 }
@@ -651,34 +693,14 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		// footer — they don't surface in the main chat timeline
 		// and would only inflate payload size.
 		//
-		// Skip when nothing meaningful — avoids empty / zero-only
-		// SessionContext on first reply before any EventUsage or
-		// EventInit has landed. AgentSession.Agent is immutable
-		// (direct field read, no lock); Model() and
-		// CumulativeUsage() take RLock internally.
+		// F-48 follow-up: MessageState events are stamped at
+		// the wireRuntimeCallbacksAndRestore wrapper (not here)
+		// — they don't flow through gateway.Translate + this
+		// handler, so the case below would never fire.
 		switch out.Kind {
 		case gateway.OutReply, gateway.OutResult,
 			gateway.OutTaskCreate, gateway.OutTaskUpdate:
-			snap := s.CumulativeUsage()
-			// Stamp SessionContext when ANY token field or cost is
-			// non-zero OR when Model has been captured. The
-			// CacheCreationInputTokens field must be included —
-			// formatSessionFooter renders it as part of the '↓ in'
-			// segment, so a turn that only primed a cache entry
-			// (Input=0, Output=0, CacheRead=0, Cost=0, but
-			// CacheCreation > 0) is renderable and must reach
-			// the Channel. Without it, a transient cache-rewrite
-			// turn with no Model yet gets silently dropped.
-			if snap.InputTokens != 0 || snap.OutputTokens != 0 ||
-				snap.CacheCreationInputTokens != 0 ||
-				snap.CacheReadInputTokens != 0 || snap.CostUSD != 0 ||
-				s.Model() != "" {
-				out.SessionContext = &gateway.SessionContext{
-					Agent:           s.Agent,
-					Model:           s.Model(),
-					CumulativeUsage: snap,
-				}
-			}
+			sessionContextInto(&out, s)
 		}
 		// F-think §3.1.2: per-chat OutThinking gate. When the
 		// chat has /think off, drop OutThinking events here
@@ -736,6 +758,61 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 				"user_msg_id", userMsgID,
 				"agent_session_id", s.ID,
 				"err", err)
+		}
+	}
+}
+
+// sessionContextInto populates the F-45/F-48 SessionContext
+// snapshot on the OutboundMessage when there's at least one
+// meaningful field to render. Reused by the 4 main-chat kind
+// stamp site AND the OutMessageState+MessageForwarded site (the
+// Feishu placeholder card needs the same snapshot so its footer
+// line 3 — git tracking — renders from the very first "⌨️
+// Working..." emit).
+//
+// F-48: capture per-stamp git status for footer line 3. No
+// caching — every stamp recomputes so the footer always reflects
+// the latest worktree state (uncommitted edits / unpushed
+// commits). Returns (nil, nil) for non-repo / git-failure; we
+// treat that as "no git segment" in the footer render path.
+//
+// Git invocation has a 3s deadline (review fix): a hung git
+// (stalled NFS, broken .git/index, ... ) would otherwise block
+// the entire outbound-message pipeline — MessageForwarded
+// placeholders AND every stamped reply/result wait for git to
+// return. 3s is plenty for normal repos (10-50ms typical; up to
+// ~1s on very large monorepos) and far below the user's
+// "chat is not realtime" tolerance. On timeout, CollectStatus
+// returns (nil, nil) and the footer omits the git segment
+// silently — chat keeps moving.
+//
+// Stamp SessionContext when ANY token field or cost is non-zero
+// OR when Model has been captured OR when git status is
+// available. The CacheCreationInputTokens field must be included
+// — formatSessionFooter renders it as part of the '↓ in' segment,
+// so a turn that only primed a cache entry (Input=0, Output=0,
+// CacheRead=0, Cost=0, but CacheCreation > 0) is renderable and
+// must reach the Channel. Without it, a transient cache-rewrite
+// turn with no Model yet gets silently dropped.
+//
+// AgentSession.Agent is immutable (direct field read, no lock);
+// Model() and CumulativeUsage() take RLock internally.
+func sessionContextInto(out *gateway.OutboundMessage, s *chatsession.AgentSession) {
+	snap := s.CumulativeUsage()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	gitSnap, _ := gtw.CollectStatus(ctx, s.Cwd, gtw.ExecGitRunner{})
+	cancel()
+	hasGit := gitSnap != nil && s.Cwd != ""
+	if snap.InputTokens != 0 || snap.OutputTokens != 0 ||
+		snap.CacheCreationInputTokens != 0 ||
+		snap.CacheReadInputTokens != 0 || snap.CostUSD != 0 ||
+		s.Model() != "" || hasGit {
+		out.SessionContext = &gateway.SessionContext{
+			Agent:           s.Agent,
+			Model:           s.Model(),
+			CumulativeUsage: snap,
+			Workspace:       s.Cwd,
+			GitStatus:       gitSnap,
 		}
 	}
 }

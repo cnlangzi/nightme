@@ -670,6 +670,30 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 					"err", err)
 			}
 		}
+		// F-49: bump the AgentSession's compaction counter on every
+		// EventCompaction. Bridges have already digested their
+		// protocol differences (Pi suppresses its transient
+		// `compaction_start`; Claude Code emits one event per
+		// cycle) so every EventCompaction here represents exactly
+		// one completed compaction cycle. No OutboundMessage is
+		// produced — the runtime is the single owner of compaction
+		// bookkeeping, and the count surfaces to the user later
+		// via SessionContext.CompactionCount → Footer Line 1
+		// "🗜 N". We `return` early so gateway.Translate is never
+		// consulted for this kind (it would return
+		// `(zero, false)` anyway after F-49 commit 4).
+		// See docs/feat/F-49-compaction-counter.md §1.3 / §1.8.
+		if ev.Kind == agent.EventCompaction {
+			s.RecordCompaction()
+			if logger != nil {
+				logger.Debug("runtime: compaction observed",
+					"chat_id", chatID,
+					"agent", s.Agent,
+					"agent_session_id", s.ID,
+					"count", s.CompactionCount())
+			}
+			return
+		}
 		// Translate the AgentEvent to an OutboundMessage.
 		out, ok := gateway.Translate(chatID, ev)
 		if !ok {
@@ -707,8 +731,11 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		// (after Translate + ReplyTo stamping, before ch.Send)
 		// so the Feishu adapter never sees them. Other
 		// OutboundKinds — OutReply / OutResult / OutToolStart /
-		// OutToolEnd / OutCompaction / OutInit / OutUsage —
-		// are unaffected.
+		// OutToolEnd / OutInit / OutUsage — are unaffected.
+		// (F-49: OutCompaction deleted — the runtime consumes
+		// EventCompaction directly via s.RecordCompaction() and
+		// produces no OutboundMessage, so the Channel never sees
+		// this kind at all.)
 		//
 		// cs is captured in the closure (per-cs handler
 		// factory), so this lookup is a direct field read —
@@ -732,8 +759,9 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		// OutToolEnd events here (after Translate + ReplyTo
 		// stamping, before ch.Send) so the Feishu adapter never
 		// sees them. Other OutboundKinds — OutReply / OutResult
-		// / OutThinking / OutCompaction / OutInit / OutUsage —
-		// are unaffected. The merge rendering (PATCH on start
+		// / OutThinking / OutInit / OutUsage — are unaffected.
+		// (F-49: OutCompaction deleted — see note above in the
+		// /think-off block.) The merge rendering (PATCH on start
 		// message_id when /tools on) is a Feishu adapter
 		// concern; this gate just decides whether the event
 		// reaches the Channel at all.
@@ -803,16 +831,23 @@ func sessionContextInto(out *gateway.OutboundMessage, s *chatsession.AgentSessio
 	gitSnap, _ := gtw.CollectStatus(ctx, s.Cwd, gtw.ExecGitRunner{})
 	cancel()
 	hasGit := gitSnap != nil && s.Cwd != ""
+	// F-49: also stamp CompactionCount so the footer Line 1 "🗜 N"
+	// segment can render. The compaction counter is captured under
+	// the same cumulativeUsageMu that guards CumulativeUsage, so
+	// the snapshot is internally consistent (count + token stats
+	// refer to the same point in time). See
+	// docs/feat/F-49-compaction-counter.md §1.5 / §1.8.
 	if snap.InputTokens != 0 || snap.OutputTokens != 0 ||
 		snap.CacheCreationInputTokens != 0 ||
 		snap.CacheReadInputTokens != 0 || snap.CostUSD != 0 ||
-		s.Model() != "" || hasGit {
+		s.Model() != "" || hasGit || s.CompactionCount() > 0 {
 		out.SessionContext = &gateway.SessionContext{
 			Agent:           s.Agent,
 			Model:           s.Model(),
 			CumulativeUsage: snap,
 			Workspace:       s.Cwd,
 			GitStatus:       gitSnap,
+			CompactionCount: s.CompactionCount(),
 		}
 	}
 }

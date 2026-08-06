@@ -367,16 +367,25 @@ type UsageInfo struct {
 	CostUSD float64
 }
 
-// CompactionEvent is the payload for EventCompaction — a mid-turn
-// context-compaction signal from the agent. After this event the turn
-// continues (the agent may emit more tool_use / assistant text blocks);
-// bridges MUST NOT emit EventDone for compaction events.
-type CompactionEvent struct {
-	// Subtype is the result event's subtype — either "compact" (newer
-	// Claude Code CLI) or "compaction" (older). Channels use it only
-	// for debugging; the user-facing icon / text is the same.
-	Subtype string
-}
+// CompactionEvent is the payload for EventCompaction — a marker
+// signalling that the agent completed a context-compaction cycle.
+//
+// F-49: bridges MUST emit exactly one EventCompaction per completed
+// cycle. Pi suppresses its transient `compaction_start` event so a
+// single Pi cycle yields one EventCompaction (on `compaction_end`);
+// Claude Code emits one event per cycle naturally (result subtype
+// "compact" / "compaction"). The runtime handler treats every
+// EventCompaction identically and bumps the AgentSession's
+// compaction counter + resets the per-cycle token stats (see
+// docs/feat/F-49-compaction-counter.md §1.3).
+//
+// The struct is intentionally empty: previously it carried a Subtype
+// string used by the runtime for protocol dispatch; F-49 removes that
+// dispatch (bridges digest protocol differences; runtime is
+// protocol-agnostic). Channels can rely on `Kind == EventCompaction`
+// alone as the discriminator. Add fields here in the future if a
+// new payload shape is needed.
+type CompactionEvent struct{}
 
 // InitEvent is the payload for EventInit — session bootstrap data
 // from the agent's system/init event. Bridges populate the
@@ -495,7 +504,7 @@ type TaskListEvent struct {
 //	EventError      -> Error
 //	EventResult     -> Result
 //	EventUsage      -> Usage
-//	EventCompaction -> Compaction
+//	EventCompaction -> (no payload — empty marker struct)
 //	EventInit       -> Init
 //	EventTaskCreate -> TaskList
 //	EventTaskUpdate -> TaskList
@@ -512,7 +521,6 @@ type AgentEvent struct {
 	Error      *ErrorEvent
 	Result     *ResultEvent
 	Usage      *UsageEvent
-	Compaction *CompactionEvent
 	Init       *InitEvent
 
 	// TaskList is the payload for EventTaskCreate / EventTaskUpdate.

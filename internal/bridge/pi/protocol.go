@@ -227,8 +227,13 @@ type toolExecutionEnd struct {
 	IsError    bool            `json:"isError"`
 }
 
-// compactionStart / compactionEnd are translated into
-// EventCompaction{Subtype:"start:<reason>"} / "end:<reason>".
+// compactionStart / compactionEnd are F-49 bridge-abstracted: the
+// start event is silently dropped (no Event emitted) and the end
+// event becomes one EventCompaction (a marker — the Subtype field
+// is gone). One full Pi cycle (start + end) yields exactly one
+// EventCompaction on the wire, so the runtime AgentSession counter
+// increments by 1 per cycle. See docs/feat/F-49-compaction-counter.md
+// §1.3 / §1.7.
 type compactionStart struct {
 	Reason string `json:"reason"`
 }

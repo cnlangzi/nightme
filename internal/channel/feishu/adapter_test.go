@@ -627,50 +627,12 @@ func TestSend_OutToolEnd_PostsToThread(t *testing.T) {
 	}
 }
 
-// TestSend_OutCompaction_PostsToThread — F-34. OutCompaction
-// is routed to a thread reply with "✶ Compacting conversation…".
-func TestSend_OutCompaction_PostsToThread(t *testing.T) {
-	a := testAdapter(t)
-
-	type captured struct {
-		MsgType string
-		RootID  string
-		Text    string
-	}
-	var sends []captured
-	a.sendFunc = func(_ context.Context, _, msgType, content, rootID string, _ bool) (string, error) {
-		var payload struct {
-			Text string `json:"text"`
-		}
-		_ = json.Unmarshal([]byte(content), &payload)
-		sends = append(sends, captured{msgType, rootID, payload.Text})
-		return "om_text_test", nil
-	}
-
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutCompaction,
-		ChatID:  "oc_test",
-		ReplyTo: "om_user_1",
-	}); err != nil {
-		t.Fatalf("Send(OutCompaction): %v", err)
-	}
-	var textReply *captured
-	for i := range sends {
-		if sends[i].MsgType == larkim.MsgTypeText {
-			textReply = &sends[i]
-			break
-		}
-	}
-	if textReply == nil {
-		t.Fatalf("no text reply in sends: %+v", sends)
-	}
-	if textReply.RootID != "om_user_1" {
-		t.Errorf("rootID = %q, want om_user_1", textReply.RootID)
-	}
-	if textReply.Text != "✶ Compacting conversation…" {
-		t.Errorf("body = %q, want %q", textReply.Text, "✶ Compacting conversation…")
-	}
-}
+// F-49: TestSend_OutCompaction_PostsToThread deleted — the
+// OutCompaction kind no longer exists (see
+// docs/feat/F-49-compaction-counter.md §1.9). The runtime consumes
+// EventCompaction directly via AgentSession.RecordCompaction() and
+// produces no OutboundMessage. The count surfaces later via
+// SessionContext.CompactionCount → Footer Line 1 "🗜 N".
 
 // TestSend_ThreadOnlyEvents_PassReplyInThreadTrue — F-37.
 // OutThinking / OutToolStart / OutToolEnd are the "agent progress
@@ -683,8 +645,12 @@ func TestSend_OutCompaction_PostsToThread(t *testing.T) {
 // Note: OutCompaction was originally in this set but moved to
 // ReplyInThreadAndChat on 2026-08-04 (ops decision: a brief
 // "✶ Compacting…" line in main chat is informative, not noise).
-// It's now covered by TestSend_ChatVisibleEvents_PassReplyInThreadFalse
-// → t.Run("OutCompaction", …).
+// F-49 then deleted the OutCompaction kind entirely — the
+// runtime now consumes EventCompaction directly via
+// AgentSession.RecordCompaction() and produces no OutboundMessage,
+// so neither this test nor
+// TestSend_ChatVisibleEvents_PassReplyInThreadFalse has an
+// "OutCompaction" subtest anymore.
 //
 // One table-driven test that exercises the three kinds so a future
 // regression in any one of them flags here. Each kind produces its
@@ -857,43 +823,10 @@ func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
 	// (TestSend_OutCard_TopLevelCreate_EmojiPrefixed /
 	// TestSend_OutCommandReply_TopLevelCreate_EmojiPrefixed).
 
-	// OutCompaction moved here from
-	// TestSend_ThreadOnlyEvents_PassReplyInThreadTrue on
-	// 2026-08-04 (ops: a brief "✶ Compacting…" line in main chat
-	// is informative, not noise). Still anchored via ReplyInBoth
-	// (low-frequency one-shot marker — thread-pull is acceptable
-	// since the marker is rare and the user knows what it
-	// means).
-	t.Run("OutCompaction", func(t *testing.T) {
-		a := testAdapter(t)
-		var threadOnly int
-		var chatVisible int
-		a.sendFunc = func(_ context.Context, _, msgTypeRaw, _, rootID string, replyInThread bool) (string, error) {
-			if msgTypeRaw == larkim.MsgTypeText && rootID == "om_user_compact" {
-				if replyInThread {
-					threadOnly++
-				} else {
-					chatVisible++
-				}
-			}
-			return "om_text_compact", nil
-		}
-
-		err := a.Send(t.Context(), gateway.OutboundMessage{
-			Kind:    gateway.OutCompaction,
-			ChatID:  "oc_test",
-			ReplyTo: "om_user_compact",
-		})
-		if err != nil {
-			t.Fatalf("Send(OutCompaction): %v", err)
-		}
-		if chatVisible == 0 {
-			t.Errorf("OutCompaction reply_in_thread flag was true (threaded), want false — compaction marker should be visible in main chat")
-		}
-		if threadOnly != 0 {
-			t.Errorf("OutCompaction was threaded %d times, want 0", threadOnly)
-		}
-	})
+	// F-49: "OutCompaction" subtest deleted — the OutCompaction kind
+	// no longer exists (see docs/feat/F-49-compaction-counter.md
+	// §1.9). The runtime consumes EventCompaction directly via
+	// AgentSession.RecordCompaction() and produces no OutboundMessage.
 }
 
 // TestSend_OutText_FoldsIntoReceipt — F-34 regression guard.
@@ -1219,20 +1152,13 @@ func TestSendViaLark_ReplyInBoth_Dispatch(t *testing.T) {
 		name string
 		msg  gateway.OutboundMessage
 	}{
-		// OutCompaction is one of the few user-visible kinds
-		// that still anchors to userMsgID via ReplyInBoth.
-		// It's a low-frequency one-shot marker ("✶
-		// Compacting…") so a thread-pull is acceptable; plus
-		// it's intentionally non-thread so the user sees
-		// the marker inline in main chat.
-		{
-			name: "OutCompaction",
-			msg: gateway.OutboundMessage{
-				Kind:    gateway.OutCompaction,
-				ChatID:  "oc_test",
-				ReplyTo: "om_user_5",
-			},
-		},
+		// F-49: "OutCompaction" case deleted — the OutCompaction
+		// kind no longer exists (see
+		// docs/feat/F-49-compaction-counter.md §1.9). The runtime
+		// consumes EventCompaction directly via
+		// AgentSession.RecordCompaction() and produces no
+		// OutboundMessage, so there is nothing for the channel
+		// to dispatch here.
 	}
 
 	for _, tc := range cases {
@@ -1263,8 +1189,9 @@ func TestSendViaLark_ReplyInBoth_Dispatch(t *testing.T) {
 // TestSendViaLark_ReplyInThread_Dispatch — PR #47 wiring proof.
 // sendViaLark must route the agent-progress kinds (OutThinking /
 // OutToolStart / OutToolEnd) through ReplyInThread, i.e. the reply
-// endpoint with reply_in_thread=true. OutCompaction stays in main
-// chat (replyOnly=false) and therefore routes through ReplyInBoth
+// endpoint with reply_in_thread=true. (F-49: OutCompaction kind
+// deleted — it was the "stays in main chat, routes through
+// ReplyInBoth" outlier; no longer in this dispatch matrix.)
 // — see TestSendViaLark_ReplyInBoth_Dispatch for that path.
 // This is the negation of TestSendViaLark_ReplyInBoth_Dispatch —
 // verifies the replyInThread=true wire path is preserved when F-44

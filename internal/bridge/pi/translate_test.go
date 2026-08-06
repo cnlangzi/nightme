@@ -225,23 +225,33 @@ func TestTranslate_EmptyUsageStaysNil(t *testing.T) {
 	}
 }
 
-// TestTranslate_CompactionStartEnd verifies that compaction events
-// produce EventCompaction with the right Subtype prefix.
-func TestTranslate_CompactionStartEnd(t *testing.T) {
+// TestTranslate_CompactionEndOnly verifies F-49 bridge abstraction:
+// a complete Pi compaction cycle (start+end) yields exactly one
+// EventCompaction on the wire. The start event is silently
+// suppressed (the runtime would otherwise double-count). See
+// docs/feat/F-49-compaction-counter.md §1.3 + §1.7.
+func TestTranslate_CompactionEndOnly(t *testing.T) {
 	tr := newTestTranslator()
+
+	// compaction_start → suppressed (returns nil, nil).
 	start, err := tr.translate([]byte(`{"type":"compaction_start","reason":"threshold"}`), nil)
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	if start[0].Compaction.Subtype != "start:threshold" {
-		t.Errorf("start subtype = %q", start[0].Compaction.Subtype)
+	if start != nil {
+		t.Errorf("compaction_start should be suppressed, got %v events", len(start))
 	}
+
+	// compaction_end → one EventCompaction (empty marker payload).
 	end, err := tr.translate([]byte(`{"type":"compaction_end","reason":"threshold","result":{"aborted":false}}`), nil)
 	if err != nil {
 		t.Fatalf("end: %v", err)
 	}
-	if end[0].Compaction.Subtype != "end:threshold" {
-		t.Errorf("end subtype = %q", end[0].Compaction.Subtype)
+	if len(end) != 1 {
+		t.Fatalf("compaction_end produced %d events, want 1", len(end))
+	}
+	if end[0].Kind != agent.EventCompaction {
+		t.Errorf("end kind = %s, want EventCompaction", end[0].Kind)
 	}
 }
 

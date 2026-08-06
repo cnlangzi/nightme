@@ -10,13 +10,16 @@
 //	  - [ ] Subject       surface — no header / footer / evicted
 //	  - [x] Subject       marker, just the two sections above)
 //
-// F-25 → F-42 had OutReply / OutResult / OutInit / OutUsage /
-// OutCompaction fold into the same card. F-44 first-pass reversed
-// that: OutReply / OutResult each go to their own top-level Create
-// message; OutInit / OutUsage are silently dropped until the
-// footer PR. F-44 revert (this file) restores OutReply folding into
-// the rolling log because the top-level Create surface produced a
-// hard-to-scan stream of N standalone bubbles for any long reply.
+// F-25 → F-42 had OutReply / OutResult / OutInit / OutUsage fold
+// into the same card. F-44 first-pass reversed that: OutReply /
+// OutResult each go to their own top-level Create message; OutInit
+// / OutUsage are silently dropped until the footer PR. F-44 revert
+// (this file) restores OutReply folding into the rolling log because
+// the top-level Create surface produced a hard-to-scan stream of N
+// standalone bubbles for any long reply. (F-49: OutCompaction kind
+// deleted — the runtime consumes EventCompaction directly via
+// AgentSession.RecordCompaction() and produces no OutboundMessage,
+// so the receipt path never sees this kind.)
 // OutResult / OutTask* stay on top-level Create (final-answer +
 // checklist don't have the same "many small chunks" visual
 // problem).

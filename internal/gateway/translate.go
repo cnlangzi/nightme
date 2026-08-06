@@ -168,19 +168,18 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		return out, true
 
 	case agent.EventCompaction:
-		// Mid-turn context compaction — NOT a turn end. Channels
-		// surface "✶ Compacting conversation…" briefly so users
-		// know why the agent paused.
-		//
-		// The Subtype field is currently unused by any channel;
-		// if a future channel needs it, add it as a typed field
-		// on OutboundMessage rather than smuggling it through Meta.
-		text := "✶ Compacting conversation…"
-		return OutboundMessage{
-			ChatID: chatID,
-			Kind:   OutCompaction,
-			Text:   text,
-		}, true
+		// F-49: compaction is now a runtime-side concern, not a
+		// wire-level one. The runtime handler in
+		// cmd/nightme/run.go::newEventHandler calls
+		// s.RecordCompaction() directly when it sees an
+		// EventCompaction — bumping the AgentSession counter and
+		// resetting the per-cycle token stats. No OutboundMessage
+		// is produced (no transient "✶ Compacting…" marker), no
+		// channel side effect. The count surfaces to the user
+		// later via SessionContext.CompactionCount → Footer Line 1
+		// "🗜 N". See docs/feat/F-49-compaction-counter.md §1.3 /
+		// §1.9.
+		return OutboundMessage{}, false
 
 	case agent.EventInit:
 		// Session bootstrap (Claude Code: system/init). Carries

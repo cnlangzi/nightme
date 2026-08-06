@@ -101,9 +101,12 @@ func TestEcho_RecordReturnsCopy(t *testing.T) {
 
 // TestEcho_AutoHandlesNewKinds verifies that echo serializes every
 // OutboundKind by its String() value — adding a new kind (P1 follow-up:
-// OutResult / OutUsage / OutCompaction / OutInit) requires zero changes
-// to echo's Send path. This test is the contract: any new kind must
-// flow through here without breaking.
+// OutResult / OutUsage / OutInit) requires zero changes to echo's
+// Send path. (F-49: OutCompaction kind deleted — not in this list
+// anymore; the runtime now consumes EventCompaction directly via
+// AgentSession.RecordCompaction() and produces no OutboundMessage.)
+// This test is the contract: any new kind must flow through here
+// without breaking.
 func TestEcho_AutoHandlesNewKinds(t *testing.T) {
 	var buf bytes.Buffer
 	c := New("echo", &buf)
@@ -115,7 +118,6 @@ func TestEcho_AutoHandlesNewKinds(t *testing.T) {
 		want string // substring expected in the writer output
 	}{
 		{gateway.OutResult, "完成", "echo: result"},
-		{gateway.OutCompaction, "✶ Compacting conversation…", "echo: compaction"},
 		{gateway.OutInit, "session initialized", "echo: init"},
 	}
 	for _, tc := range cases {

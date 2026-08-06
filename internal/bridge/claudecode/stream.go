@@ -415,9 +415,12 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		//      zero on the wire; IsError travels on the
 		//      EventResult payload instead.
 		if ev.Subtype == "compact" || ev.Subtype == "compaction" {
+			// F-49: one EventCompaction per cycle. Subtype is no
+			// longer carried on the payload (field deleted); the
+			// runtime discriminates purely on Kind. See
+			// docs/feat/F-49-compaction-counter.md §1.3.
 			events <- agent.AgentEvent{
-				Kind:       agent.EventCompaction,
-				Compaction: &agent.CompactionEvent{Subtype: ev.Subtype},
+				Kind: agent.EventCompaction,
 			}
 			return
 		}

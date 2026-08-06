@@ -52,6 +52,13 @@ import (
 //	                 nil pointer (= "never ran", cumulative starts at 0
 //	                 on first EventUsage). Non-nil pointer with all-zero
 //	                 values means "ran but token counts were 0".
+//
+// CompactionCount is the cumulative number of completed context-
+// compaction cycles observed on this AgentSession. F-49 addition.
+// 0 = never compacted. Legacy entries written before F-49 lack this
+// field; Go JSON unmarshal yields zero value, the safe default
+// ("never compacted"). See docs/feat/F-49-compaction-counter.md
+// §1.4 / §4.1.
 type AgentSessionEntry struct {
 	ID              string          `json:"id"`
 	ChatSessionID   string          `json:"chatSessionId"`
@@ -66,8 +73,12 @@ type AgentSessionEntry struct {
 	ExitCode        *int            `json:"exitCode,omitempty"`
 	Model           string          `json:"model,omitempty"`
 	CumulativeUsage *agent.UsageInfo `json:"cumulativeUsage,omitempty"`
+	CompactionCount int             `json:"compactionCount,omitempty"`
 }
 
 // AgentSessionFileVersion is the on-disk format version for
-// agent_sessions.json.
-const AgentSessionFileVersion = 1
+// agent_sessions.json. Bumped to 2 in F-49 to mark the addition of
+// the CompactionCount field; loaders remain permissive (zero value
+// on missing field) so v1 files load transparently as v2 entries
+// with CompactionCount=0.
+const AgentSessionFileVersion = 2

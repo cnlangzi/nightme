@@ -69,7 +69,10 @@ const messageStatesLRUSize = 5000
 // a "X replies" indicator with no body); when false (default) the message
 // appears inline in the main chat as a reply and is also collected in the
 // thread panel. Thread-only is used for the intermediate agent progress
-// stream (OutThinking / OutToolStart / OutToolEnd / OutCompaction) so the
+// stream (OutThinking / OutToolStart / OutToolEnd) so the
+// main chat stays focused on the final answer. (F-49: OutCompaction
+// kind deleted — the runtime consumes EventCompaction directly
+// via AgentSession.RecordCompaction() and produces no OutboundMessage.)
 // main chat stays focused on the final answer. Create-endpoint calls
 // ignore this flag (the field has no equivalent there).
 type sendMessageFunc func(ctx context.Context, chatID, msgType, content, rootID string, replyInThread bool) (string, error)
@@ -657,10 +660,14 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	                       — rolling-log task checklist, no anchor
 //	                       to userMsgID (F-44 follow-up: same
 //	                       parent-thread gotcha as OutReply/OutResult).
-//	OutCompaction        → ReplyInBoth (low-frequency one-shot marker,
-//	                       brief "✶ Compacting…" line in main chat;
-//	                       thread-pull is acceptable since the
-//	                       marker is rare).
+//	                       (F-49: OutCompaction kind deleted —
+//	                       the runtime consumes EventCompaction
+//	                       directly via AgentSession.RecordCompaction()
+//	                       and produces no OutboundMessage, so this
+//	                       routing table has no entry for it. The
+//	                       compaction count surfaces later via
+//	                       SessionContext.CompactionCount → Footer
+//	                       Line 1 "🗜 N".)
 //	OutCommandReply      → top-level Create via SendMessageText
 //	                       (PR #47's ReplyInChat — rootID="") with
 //	                       the ❯ emoji prepended to the text body
@@ -1492,20 +1499,14 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// reply_in_thread field, no parent/thread relationship.
 		return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text, footerLines)
 
-	case gateway.OutCompaction:
-		// Compaction marker is a one-shot, low-frequency event
-		// (not a stream like tool calls). Per ops decision
-		// 2026-08-04: "OutToolStart/End/OutThinking use
-		// ReplyInThread; everything else uses
-		// ReplyInThreadAndChat" — OutCompaction falls in
-		// 'everything else', so it stays visible in the main
-		// chat (replyOnly=false). A brief "✶ Compacting…" line
-		// in main chat is informative, not noise.
-		if err := a.postThreadReply(ctx, msg.ChatID, msg.ReplyTo,
-			"✶ Compacting conversation…", false); err != nil {
-			return err
-		}
-		return nil
+	// F-49: case gateway.OutCompaction: deleted. The runtime handler
+	// no longer produces an OutboundMessage for EventCompaction;
+	// instead it calls AgentSession.RecordCompaction() to bump the
+	// counter and reset per-cycle token stats. No transient
+	// "✶ Compacting conversation…" thread reply, no channel side
+	// effect. The count surfaces later via SessionContext.CompactionCount
+	// → Footer Line 1 "🗜 N". See docs/feat/F-49-compaction-counter.md
+	// §1.3 / §1.9.
 
 	case gateway.OutInit:
 		// F-44: silent drop. Same rationale as OutUsage — footer
@@ -1640,8 +1641,9 @@ func (a *Adapter) sendRawOutText(ctx context.Context, chatID, text string) error
 // main-chat visibility at the cost of the "Reply to <sender>" header.
 // OutReply (F-46) routes through ensureReceiptForReplyWithFooter when
 // anchored, postOrphanReplyCard when orphan — both end up as cards.
-// OutCard / OutCommandReply / OutCompaction / OutTask* stay on
-// ReplyInBoth because they don't have the chunk-stream problem.
+// OutCard / OutCommandReply / OutTask* stay on ReplyInBoth because
+// they don't have the chunk-stream problem. (F-49: OutCompaction
+// kind deleted — see the routing table comment above.)
 //
 // RATE-LIMIT / RETRY layering:
 //   - layer 1: F-35 global limiter (`a.limiter.Wait`) inside ReplyInChat
@@ -1742,8 +1744,9 @@ func (a *Adapter) sendOrphanResultCard(ctx context.Context, chatID, text string,
 // keeps the message OUT of the main chat (only the "X replies"
 // indicator is visible) so the agent progress stream doesn't pollute
 // the user's main view; false keeps the reply visible inline in the
-// main chat. OutThinking / OutToolStart / OutToolEnd / OutCompaction
-// pass true; receipt-card / outCard / slash-command replies pass false.
+// main chat. OutThinking / OutToolStart / OutToolEnd pass true;
+// receipt-card / outCard / slash-command replies pass false.
+// (F-49: OutCompaction kind deleted — not in either list.)
 func (a *Adapter) postThreadReply(ctx context.Context, chatID, rootID, body string, replyOnly bool) error {
 	// P1-4 (F-34 review): Feishu's bot API caps at 5 QPS per
 	// user / per group. A hot agent running 10+ tools per turn
@@ -2614,12 +2617,13 @@ func (a *Adapter) sendContent(ctx context.Context, chatID, msgType, content, roo
 // subsequent in-place updates, so once Reply-creates the card the
 // thread is locked in.
 //
-// Per F-44 + PR #47, the OutCard / OutCommandReply / OutCompaction
-// paths pass replyInThread=false and therefore route through
-// ReplyInBoth. OutReply / OutResult / OutTask* (F-44 follow-up)
-// always pass rootID="" regardless of the user message, so they
-// route through ReplyInChat (top-level Create) — see the
-// parent-thread gotcha discussion in sendResultAsReply's docstring.
+// Per F-44 + PR #47, the OutCard / OutCommandReply paths pass
+// replyInThread=false and therefore route through ReplyInBoth.
+// OutReply / OutResult / OutTask* (F-44 follow-up) always pass
+// rootID="" regardless of the user message, so they route through
+// ReplyInChat (top-level Create) — see the parent-thread gotcha
+// discussion in sendResultAsReply's docstring. (F-49: OutCompaction
+// kind deleted — not in this list.)
 // OutThinking / OutToolStart / OutToolEnd pass replyInThread=true
 // and route through ReplyInThread.
 //
@@ -2657,8 +2661,8 @@ func (a *Adapter) sendViaLark(ctx context.Context, chatID, msgType, content, roo
 		return a.ReplyInThread(ctx, rootID, replyBuilder)
 	default:
 		// ReplyInBoth: reply_in_thread omitted. Used by OutCard /
-		// OutCommandReply / OutTaskCreate / OutTaskUpdate /
-		// OutCompaction.
+		// OutCommandReply / OutTaskCreate / OutTaskUpdate.
+		// (F-49: OutCompaction kind deleted — not in this list.)
 		replyBuilder := larkim.NewReplyMessageReqBodyBuilder().
 			MsgType(msgType).
 			Content(content)

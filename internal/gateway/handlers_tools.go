@@ -54,9 +54,10 @@ import (
 //	/tools              → reply current mode + usage
 //	/tools <other>      → reply usage hint (parse failure)
 //
-// Other OutboundKinds (OutReply, OutResult, OutThinking, OutCompaction,
+// Other OutboundKinds (OutReply, OutResult, OutThinking,
 // OutInit, OutUsage) are not affected by /tools off — only
-// OutToolStart and OutToolEnd are gated.
+// OutToolStart and OutToolEnd are gated. (F-49: OutCompaction
+// kind deleted — see /think doc for the same rationale.)
 func handleTools(ctx context.Context, mgr *chatsession.Manager, channel Channel, msg *InboundMessage, args []string, globalPrimary string) (*CommandResult, error) {
 	cs := mgr.GetOrCreate(msg.ChatID, globalPrimary)
 

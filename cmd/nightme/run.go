@@ -345,7 +345,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	gtwMgr.SetSenderFactory(func(chatID string) gtw.Sender {
 		return newChatSessionSender(
 			chatID,
-			newSessionAdapter(mgr, cfg.Primary).GetOrCreate(chatID, cfg.Primary),
+			mgr.GetOrCreate(chatID, cfg.Primary),
 			newChannelAdapter(ch),
 		)
 	})
@@ -362,13 +362,11 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	reg.Register(gtwFactory)
 	commander := command.NewCommander(reg)
 
-	// RuntimeServices — fill all three slots via adapters
-	// (B3). Session wraps *chatsession.Manager (the B5+
-	// /cwd /use /kill handlers will use this); Channel
-	// wraps *gateway.Channel (any command that needs to
-	// send replies uses this).
+	// RuntimeServices — ADR 0007 dropped the Session field.
+	// Each command package holds *chatsession.Manager directly
+	// via its Factory. Channel wraps *gateway.Channel (any
+	// command that needs to send replies uses this).
 	rt := command.RuntimeServices{
-		Session:        newSessionAdapter(mgr, cfg.Primary),
 		ReactionRouter: router,
 		Channel:        newChannelAdapter(ch),
 	}

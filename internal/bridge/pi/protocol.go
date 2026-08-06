@@ -223,8 +223,15 @@ type toolExecutionStart struct {
 
 type toolExecutionEnd struct {
 	ToolCallID string          `json:"toolCallId"`
-	Result     json.RawMessage `json:"result"`
-	IsError    bool            `json:"isError"`
+	// ToolName is the canonical tool name on the wire
+	// (docs/rpc.md: every tool_execution_end carries a toolName).
+	// Used as a fallback when no matching tool_execution_start
+	// entry is in translator.pendingTools (orphan end, e.g. a tool
+	// that started before our translator was attached, or a wire
+	// event we saw out of order).
+	ToolName string          `json:"toolName"`
+	Result   json.RawMessage `json:"result"`
+	IsError  bool            `json:"isError"`
 }
 
 // compactionStart / compactionEnd are F-49 bridge-abstracted: the

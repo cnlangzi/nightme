@@ -15,6 +15,7 @@ package pi
 import (
 	"encoding/json"
 	"log/slog"
+	"sync"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
@@ -60,7 +61,18 @@ type translator struct {
 	// carry Name + Args into ToolEndEvent. Populated in
 	// tool_execution_start, drained in tool_execution_end,
 	// wholesale-cleared on agent_settled (defensive).
-	pendingTools map[string]pendingTool
+	//
+	// Concurrency: translate() runs from readPump; session.New()
+	// (called on /new) reassigns pendingTools from a different
+	// goroutine. pendingMu serialises the map so the assignment
+	// in New() cannot race against a read in translate(), which
+	// would otherwise panic the daemon ("concurrent map read and
+	// map write"). PendingMu is intentionally separate from
+	// translatorMu (which guards initSent / emitInit) — the two
+	// protect disjoint state and never need to be acquired
+	// together, so there's no ordering risk.
+	pendingMu     sync.Mutex
+	pendingTools  map[string]pendingTool
 }
 
 func newTranslator(agentName, workspace, branch string) *translator {
@@ -112,7 +124,9 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		// leak the entry across turns and mis-attribute a later
 		// tool's args.
 		t.sawTextEnd = false
+		t.pendingMu.Lock()
 		t.pendingTools = make(map[string]pendingTool)
+		t.pendingMu.Unlock()
 		return []agent.AgentEvent{{
 			Kind: agent.EventDone,
 			Done: &agent.DoneEvent{ExitCode: 0, Reason: "settled"},
@@ -129,13 +143,24 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return nil, err
 		}
-		// Record Name + raw Args so the matching tool_execution_end
-		// can re-surface them in ToolEndEvent — Pi's wire does not
-		// echo args on end. Stale entries are cleared on
-		// agent_settled so a missed end does not leak across turns.
-		t.pendingTools[ev.ToolCallID] = pendingTool{
-			Name: ev.ToolName,
-			Args: stringOrEmpty(ev.Args),
+		// Empty toolCallId is rejected at the wire level by Pi, but
+		// belt-and-braces: storing under key "" would let two
+		// malformed events collapse onto each other and a later
+		// empty-id end would inherit the wrong Name/Args. Record
+		// only when the id is non-empty; the matching end falls
+		// back to wire ToolName. EventToolStart still fires with
+		// ID=="" so consumers see the start; the orphan-end
+		// fallback path covers the result line.
+		if ev.ToolCallID != "" {
+			t.pendingMu.Lock()
+			t.pendingTools[ev.ToolCallID] = pendingTool{
+				Name: ev.ToolName,
+				Args: stringOrEmpty(ev.Args),
+			}
+			t.pendingMu.Unlock()
+		} else {
+			logger.Warn("pi tool_execution_start with empty toolCallId — pending correlation skipped",
+				slog.String("raw", string(raw)))
 		}
 		return []agent.AgentEvent{{
 			Kind: agent.EventToolStart,
@@ -167,13 +192,20 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		// reordered pump). Args stays empty in the fallback path.
 		name := ev.ToolName
 		args := ""
-		if pending, ok := t.pendingTools[ev.ToolCallID]; ok {
-			if name == "" {
-				name = pending.Name
+		if ev.ToolCallID != "" {
+			t.pendingMu.Lock()
+			if pending, ok := t.pendingTools[ev.ToolCallID]; ok {
+				if name == "" {
+					name = pending.Name
+				}
+				args = pending.Args
 			}
-			args = pending.Args
+			delete(t.pendingTools, ev.ToolCallID)
+			t.pendingMu.Unlock()
+		} else {
+			logger.Warn("pi tool_execution_end with empty toolCallId — orphan path, wire ToolName only",
+				slog.String("raw", string(raw)))
 		}
-		delete(t.pendingTools, ev.ToolCallID)
 		return []agent.AgentEvent{{
 			Kind: agent.EventToolEnd,
 			ToolEnd: &agent.ToolEndEvent{

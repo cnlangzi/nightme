@@ -9,8 +9,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -507,6 +510,132 @@ func TestTranslate_AgentSettled_ClearsPendingTools(t *testing.T) {
 	}
 	if len(tr.pendingTools) != 0 {
 		t.Errorf("pendingTools len after settled = %d, want 0", len(tr.pendingTools))
+	}
+}
+
+// TestTranslate_EmptyToolCallId_OrphanPath covers Finding 2 from
+// the post-merge code-review: malformed or partial wire events
+// with empty toolCallId must not collapse into a single map entry.
+// Two empty-ID starts must not overwrite each other; the matching
+// empty-ID end uses wire ToolName + empty Args, never inheriting
+// Name/Args from a different tool.
+func TestTranslate_EmptyToolCallId_OrphanPath(t *testing.T) {
+	tr := newTestTranslator()
+
+	// First empty-id start: does NOT record in pendingTools.
+	start1 := []byte(`{"type":"tool_execution_start","toolCallId":"","toolName":"bash","args":{"command":"ls"}}`)
+	evs1, err := tr.translate(start1, nil)
+	if err != nil {
+		t.Fatalf("start1 translate: %v", err)
+	}
+	if len(evs1) != 1 || evs1[0].Kind != agent.EventToolStart {
+		t.Fatalf("start1 events = %+v", evs1)
+	}
+	if evs1[0].ToolStart.Name != "bash" {
+		t.Errorf("start1 Name = %q, want bash from wire", evs1[0].ToolStart.Name)
+	}
+	if _, ok := tr.pendingTools[""]; ok {
+		t.Errorf("pendingTools[\"\"] must not be set on empty-id start; got %+v", tr.pendingTools[""])
+	}
+
+	// Second empty-id start with a different toolName would have
+	// overwritten a stale entry under "" — verify it didn't.
+	start2 := []byte(`{"type":"tool_execution_start","toolCallId":"","toolName":"read","args":{"path":"/etc"}}`)
+	if _, err := tr.translate(start2, nil); err != nil {
+		t.Fatalf("start2 translate: %v", err)
+	}
+	if _, ok := tr.pendingTools[""]; ok {
+		t.Errorf("pendingTools[\"\"] must remain unset on second empty-id start; got %+v", tr.pendingTools[""])
+	}
+
+	// Empty-id end falls back to wire ToolName; never inherits the
+	// (different) Args from a previous non-empty-id start.
+	prior := []byte(`{"type":"tool_execution_start","toolCallId":"c-real","toolName":"write","args":{"path":"/x"}}`)
+	if _, err := tr.translate(prior, nil); err != nil {
+		t.Fatalf("prior (real id) start translate: %v", err)
+	}
+	end := []byte(`{"type":"tool_execution_end","toolCallId":"","toolName":"bash","result":"x","isError":false}`)
+	evsEnd, err := tr.translate(end, nil)
+	if err != nil {
+		t.Fatalf("end translate: %v", err)
+	}
+	if len(evsEnd) != 1 || evsEnd[0].Kind != agent.EventToolEnd {
+		t.Fatalf("end events = %+v", evsEnd)
+	}
+	toolEnd := evsEnd[0].ToolEnd
+	if toolEnd.Name != "bash" {
+		t.Errorf("end Name = %q, want bash (from wire, orphan end)", toolEnd.Name)
+	}
+	if toolEnd.Args != "" {
+		t.Errorf("end Args = %q, want empty (orphan path did not touch pendingTools)", toolEnd.Args)
+	}
+
+	// Sanity: the real-id prior entry must still be in the map
+	// (not disturbed by any empty-id events).
+	if _, ok := tr.pendingTools["c-real"]; !ok {
+		t.Errorf("pendingTools[c-real] = missing, want present (real-id entry should survive)")
+	}
+}
+
+// TestTranslate_PendingTools_ConcurrentAccess is a -race guard for
+// Finding 1: pendingTools is read in translate() and reassigned
+// in session.New() (on /new) from different goroutines. Hit the
+// translator hard from many goroutines while another calls the
+// internal reset path equivalent; -race should produce no report.
+// Without pendingMu the runtime would race-panic with
+// "concurrent map read and map write".
+func TestTranslate_PendingTools_ConcurrentAccess(t *testing.T) {
+	tr := newTestTranslator()
+
+	const goroutines = 16
+	const iterations = 200
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines + 1)
+
+	// Producer goroutines hammer translate() with start/end pairs.
+	for g := 0; g < goroutines; g++ {
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				toolID := fmt.Sprintf("g%d-i%d", id, i)
+				start := []byte(fmt.Sprintf(
+					`{"type":"tool_execution_start","toolCallId":%q,"toolName":"bash","args":{"i":%d}}`,
+					toolID, i,
+				))
+				if _, err := tr.translate(start, nil); err != nil {
+					t.Errorf("start translate: %v", err)
+					return
+				}
+				end := []byte(fmt.Sprintf(
+					`{"type":"tool_execution_end","toolCallId":%q,"toolName":"bash","result":"ok","isError":false}`,
+					toolID,
+				))
+				if _, err := tr.translate(end, nil); err != nil {
+					t.Errorf("end translate: %v", err)
+					return
+				}
+			}
+		}(g)
+	}
+
+	// Reset goroutine periodically clears the map (simulating
+	// /new). It MUST take pendingMu the same way session.New does.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			tr.pendingMu.Lock()
+			tr.pendingTools = make(map[string]pendingTool)
+			tr.pendingMu.Unlock()
+			runtime.Gosched()
+		}
+	}()
+
+	wg.Wait()
+	// After the storm, the map should be empty (every end drained,
+	// last reset cleared any leftovers).
+	if len(tr.pendingTools) != 0 {
+		t.Errorf("after concurrent storm + reset, pendingTools len = %d, want 0", len(tr.pendingTools))
 	}
 }
 

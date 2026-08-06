@@ -13,6 +13,7 @@ package pi
 
 import (
 	"context"
+	"log/slog"
 	"os/exec"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -122,13 +123,65 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSe
 // (typically model/provider overrides) remain grep-visible before
 // the session identifier. Same convention as the claudecode
 // bridge in buildArgs().
+//
+// Conflict resolution: cfg.Args may legitimately carry session-
+// selection flags of its own (--session-id, --session, --no-session).
+// When cfg.ResumeID is non-empty the runtime-persisted identity
+// must win — see filterSessionFlags for the stripping logic.
+// When cfg.ResumeID is empty, user-supplied session-selection
+// flags pass through (legitimate "spawn a fresh session at this
+// id" use case).
 func buildArgs(extraArgs []string, cfg agent.StartConfig) []string {
-	out := make([]string, 0, len(DefaultArgs)+len(extraArgs)+len(cfg.Args)+2)
+	args := filterSessionFlags(cfg.Args, cfg.ResumeID, slog.Default())
+	out := make([]string, 0, len(DefaultArgs)+len(extraArgs)+len(args)+2)
 	out = append(out, DefaultArgs...)
 	out = append(out, extraArgs...)
-	out = append(out, cfg.Args...)
+	out = append(out, args...)
 	if cfg.ResumeID != "" {
 		out = append(out, "--session-id", cfg.ResumeID)
+	}
+	return out
+}
+
+// filterSessionFlags strips any session-selection flags the caller
+// placed in args when ResumeID is set. When ResumeID is empty the
+// args pass through unchanged so the user can intentionally spawn
+// a fresh session with --session-id <their-id>.
+//
+// Returns a fresh slice (does not mutate input). The logger may be
+// nil — when nil, suppressed-strip warnings are skipped silently.
+// Stripped flags + their value-taking flag's value are dropped
+// from the returned slice (e.g. --session-id abc contributes 2
+// elements to the source slice, 0 to the returned slice).
+func filterSessionFlags(args []string, resumeID string, logger *slog.Logger) []string {
+	if resumeID == "" {
+		return args
+	}
+	out := make([]string, 0, len(args))
+	skipNext := false
+	stripped := false
+	for _, a := range args {
+		if skipNext {
+			// The value arg belonging to a session-selection flag
+			// we already chose to drop.
+			skipNext = false
+			stripped = true
+			continue
+		}
+		switch a {
+		case "--session-id", "--session":
+			skipNext = true
+			stripped = true
+			continue
+		case "--no-session":
+			stripped = true
+			continue
+		}
+		out = append(out, a)
+	}
+	if stripped && logger != nil {
+		logger.Debug("pi buildArgs: cfg.Args carried session-selection flags; runtime ResumeID wins",
+			slog.String("resume_id", resumeID))
 	}
 	return out
 }

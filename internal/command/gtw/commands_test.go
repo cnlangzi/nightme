@@ -1,0 +1,177 @@
+package gtw
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/cnlangzi/nightme/internal/command"
+)
+
+// TestFactory_Spec covers the Factory.Spec() contract: the
+// returned Spec is what command.Registry uses to build the
+// dispatch table. Name + Aliases are the keys; Summary + Usage
+// surface in /help.
+func TestFactory_Spec(t *testing.T) {
+	f := NewFactory(NewManager())
+	s := f.Spec()
+	if s.Name != "gtw" {
+		t.Errorf("expected Name=gtw, got %q", s.Name)
+	}
+	if !contains(s.Aliases, "team") {
+		t.Errorf("expected alias 'team' in %v", s.Aliases)
+	}
+	if s.Summary == "" {
+		t.Errorf("expected non-empty Summary, got empty")
+	}
+	if !strings.Contains(s.Usage, "fix") {
+		t.Errorf("expected Usage to mention 'fix' subcommand, got %q", s.Usage)
+	}
+}
+
+// TestFactory_Handle_NoArgs covers the "no subcommand given"
+// path: the Factory returns a usage hint (Consumed=true) so
+// the user sees feedback instead of falling through to the
+// agent loop.
+//
+// F-51 argv convention: commander.Dispatch prefixes Args
+// with the command name, so production callers see
+// Args = ["gtw", ...]. Args[1] is the subcommand slot —
+// when only "gtw" is present (Args[1] out of range), the
+// Factory returns the usage hint.
+func TestFactory_Handle_NoArgs(t *testing.T) {
+	f := NewFactory(NewManager())
+	got, err := f.Handle(context.Background(),
+		command.RuntimeServices{},
+		command.SlashInput{Text: "/gtw", Args: []string{"gtw"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.Consumed {
+		t.Errorf("expected Consumed=true for empty /gtw, got %+v", got)
+	}
+	if !strings.Contains(got.Reply, "fix") {
+		t.Errorf("expected Reply to mention 'fix' (usage hint), got %q", got.Reply)
+	}
+}
+
+// TestFactory_Handle_List covers the /gtw list subcommand
+// with no drafts. Should reply with "(none in this chat)".
+func TestFactory_Handle_List_NoDrafts(t *testing.T) {
+	m := NewManager()
+	f := NewFactory(m)
+	got, _ := f.Handle(context.Background(), command.RuntimeServices{},
+		command.SlashInput{Text: "/gtw list", Args: []string{"gtw", "list"}, ChatID: "c1"})
+	if !got.Consumed {
+		t.Errorf("expected Consumed, got %+v", got)
+	}
+	if !strings.Contains(got.Reply, "none") {
+		t.Errorf("expected Reply to mention 'none', got %q", got.Reply)
+	}
+}
+
+// TestFactory_Handle_List_WithDrafts covers the /gtw list
+// subcommand with a real draft stored in the manager. The
+// reply should include the draft's kind + issueID.
+func TestFactory_Handle_List_WithDrafts(t *testing.T) {
+	m := NewManager()
+	m.StoreDraft("c1", "om_test", &Draft{
+		Kind: DraftFixBranchExists,
+		Payload: FixDraftPayload{
+			IssueID: 42, Branch: "fix/42-foo", Repo: "cnlangzi/nightme",
+		},
+	})
+	f := NewFactory(m)
+	got, _ := f.Handle(context.Background(), command.RuntimeServices{},
+		command.SlashInput{Text: "/gtw list", Args: []string{"gtw", "list"}, ChatID: "c1"})
+	if !got.Consumed {
+		t.Errorf("expected Consumed, got %+v", got)
+	}
+	if !strings.Contains(got.Reply, "branch-exists") {
+		t.Errorf("expected Reply to mention draft kind, got %q", got.Reply)
+	}
+	if !strings.Contains(got.Reply, "42") {
+		t.Errorf("expected Reply to mention issueID 42, got %q", got.Reply)
+	}
+}
+
+// TestFactory_Handle_Reset covers the /gtw reset subcommand.
+// After reset, ListDrafts returns empty.
+func TestFactory_Handle_Reset(t *testing.T) {
+	m := NewManager()
+	m.StoreDraft("c1", "om_test", &Draft{Kind: DraftFixBranchExists, Payload: FixDraftPayload{IssueID: 1}})
+	m.SetContext("c1", Context{Issue: 1, Branch: "fix/1", State: StateFixing})
+	f := NewFactory(m)
+	got, _ := f.Handle(context.Background(), command.RuntimeServices{},
+		command.SlashInput{Text: "/gtw reset", Args: []string{"gtw", "reset"}, ChatID: "c1"})
+	if !got.Consumed {
+		t.Errorf("expected Consumed, got %+v", got)
+	}
+	if m.DraftCount("c1") != 0 {
+		t.Errorf("expected DraftCount=0 after reset, got %d", m.DraftCount("c1"))
+	}
+	if m.HasContext("c1") {
+		t.Errorf("expected HasContext=false after reset, got true")
+	}
+}
+
+// TestFactory_Handle_Fix_NoArgs covers /gtw fix without an
+// issue id. Should reply with a usage hint.
+//
+// F-51 argv convention: commander.Dispatch prefixes Args
+// with the command name, so production callers see
+// Args = ["gtw", "fix", "<id>", ...]. The subcommand lives
+// at Args[1] and the subcommand's args start at Args[2].
+func TestFactory_Handle_Fix_NoArgs(t *testing.T) {
+	f := NewFactory(NewManager())
+	got, _ := f.Handle(context.Background(), command.RuntimeServices{},
+		command.SlashInput{Text: "/gtw fix", Args: []string{"gtw", "fix"}})
+	if !got.Consumed {
+		t.Errorf("expected Consumed, got %+v", got)
+	}
+	if !strings.Contains(got.Reply, "fix") {
+		t.Errorf("expected Reply to mention 'fix' (usage), got %q", got.Reply)
+	}
+}
+
+// TestFactory_Handle_Fix_BadIssueID covers /gtw fix with a
+// non-numeric id. Should reply with a hint.
+func TestFactory_Handle_Fix_BadIssueID(t *testing.T) {
+	f := NewFactory(NewManager())
+	got, _ := f.Handle(context.Background(), command.RuntimeServices{},
+		command.SlashInput{Text: "/gtw fix abc", Args: []string{"gtw", "fix", "abc"}})
+	if !got.Consumed {
+		t.Errorf("expected Consumed, got %+v", got)
+	}
+	if !strings.Contains(got.Reply, "abc") {
+		t.Errorf("expected Reply to mention 'abc' in error, got %q", got.Reply)
+	}
+}
+
+// TestFactory_Handle_UnknownSubcommand covers the
+// "/gtw bogus" path. Commander passes Args[0]="gtw" (the
+// command name); the factory must look at Args[1] for the
+// subcommand so the unknown-subcommand reply quotes "bogus"
+// (not "gtw").
+func TestFactory_Handle_UnknownSubcommand(t *testing.T) {
+	f := NewFactory(NewManager())
+	got, _ := f.Handle(context.Background(), command.RuntimeServices{},
+		command.SlashInput{Text: "/gtw bogus", Args: []string{"gtw", "bogus"}})
+	if !got.Consumed {
+		t.Errorf("expected Consumed, got %+v", got)
+	}
+	if !strings.Contains(got.Reply, "bogus") {
+		t.Errorf("expected Reply to mention 'bogus', got %q", got.Reply)
+	}
+}
+
+// contains is a tiny helper (Go 1.21+ has slices.Contains,
+// but we want to be explicit and avoid the import).
+func contains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}

@@ -608,107 +608,40 @@ type OutboundMessage struct {
 
 ---
 
-## 0.13 文档变更摘要（v1.3.x F-49 增量，2026-08-06）
+## 0.14 文档变更摘要（v1.3.x F-49 增量，2026-08-06）
 
-**背景**：F-45 footer 的 `↓ X · ↻ X · ↑ X · Total X` 是 **cumulative across the entire AgentSession**。当 agent 执行 context compaction（截断/摘要化输入）后，cumulative 仍持续累加，导致用户看到的 total tokens 远超上下文窗口上限，**无法判断**是"真的用了那么多"还是"已压缩多次但 cumulative 不反映"。用户在 IM 视角下看到的是 mystery number。
+**背景**：F-45 footer 的 token 行是 **AgentSession 生命周期累计**。agent 做完 context compaction 后，累计仍继续涨，IM 里常看到远超上下文窗口的总数——用户分不清「真用了那么多」还是「已经压缩多次但数字没说」。
 
-F-49 给 Footer Line 1 加 `· 🗜 N` 段（compaction 计数），同时把 Line 2 的 token 部分改成"since-last-compaction 归零"语义，而 `$cost` 保留为 lifetime spend——两个目的清晰分离。
+**核心变化**（概念级）：
 
-**核心变化**：
+1. **两个目的拆成两个指标**
+   - **当前上下文用量**（token 行）：每次 compaction 后归零，从下一轮 usage 重新累加 → 「since last compaction」
+   - **生命周期花费**（`$cost`）：跨 compaction 单调累加 → 「这个 AgentSession 一共花了多少钱」
+   - 压缩不退钱；窗口截断后 token 快照必须重置——两者不再混在同一个「累计」语义里
 
-1. **`AgentSession` 新增 compaction 计数器（runtime）**
-   - 新增 `compactionCount int` 字段（由 `cumulativeUsageMu` 守护，与 `cumulativeUsage` 共用一把锁；`RecordCompaction` 原子修改两者）
-   - 新增 2 个方法：`RecordCompaction()`（count++ + 4 个 token 字段归零 + `CostUSD` 保留 + `cumulativeDirty = true`）与 `CompactionCount() int`（RLock 快照）
-   - `ResetCumulative` 同步清零 `compactionCount`（`/new` 是唯一清零点）
-   - `Entry()` / `FromAgentSessionEntry` 同步拷出 / 还原
+2. **Footer 暴露 compaction 次数**
+   - identity 行末尾追加「压缩次数」段（仅次数 > 0 时显示）
+   - 用户一眼能把「大数字」和「已压缩 N 次」对上号
 
-2. **两个 token 目的 → 两个独立 metric**
-   - **总耗费**（lifetime spend）：`$X.XXX` —— `CostUSD` 单调累加，**跨压缩保留**
-   - **当前 Session 上下文用量**：`↓ X · ↻ X · ↑ X · Total X` —— 4 个 token 字段压缩时**归零**，从下一次 EventUsage 重新累加
-   - 理由：cost 是货币量，压缩不退钱；token 是输入窗口快照，压缩后输入窗口被截断，下一个 turn 的 input 自然变小
+3. **协议差异消化在 Bridge；Runtime 只记数**
+   - 各 bridge 把平台特有的 start/end / subtype 归一成**同一次**抽象 compaction 事件
+   - Runtime 收到后累加计数并重置 token 快照，**不**再向 Channel 发「正在压缩…」类瞬时出站消息
+   - Channel 只读 SessionContext 上的计数做 footer，不感知 Pi / Claude Code 协议
 
-3. **`SessionContext` 加 1 个字段**
-   - 新增 `CompactionCount int json:"compactionCount,omitempty"`
-   - stamp condition 扩展：`|| s.CompactionCount() > 0`（理论上不会单独触发，保持对称）
-
-4. **Footer Line 1 加 `· � N` 段**
-   - 仅 `N > 0` 时显示（沿用 F-45 §1.6 zero-omit 约定）
-   - `🗜` = U+1F5DC, Unicode 正式名 "COMPRESSION" —— 语义零歧义
-   - 与 F-45 line 1 🤖 / line 2 💰 / F-48 line 3 📁 emoji category header 风格一致
-   - 实测：`🤖 claude · opus-4-5 · 🗜 3`
-
-5. **Bridge 抽象（核心不变式）**
-   - **Pi bridge** (`internal/bridge/pi/translate.go`)：`compaction_start` 直接 `return nil, nil`（屏蔽瞬态信号），`compaction_end` 仍 emit `EventCompaction`
-   - **Claude Code bridge** (`internal/bridge/claudecode/stream.go`)：不变（自然就是 1 条）
-   - **runtime handler** (`cmd/nightme/run.go::newEventHandler`)：`case agent.EventCompaction: s.RecordCompaction()`——**不判断 Subtype，不产生 OutboundMessage**
-   - 抽象归抽象 / 具体归具体：bridge 各自消化协议差异，runtime 一视同仁
-
-6. **删除 `OutCompaction` kind**
-   - `gateway.OutboundKind` 删 `OutCompaction` 常量
-   - `gateway.translate.go` 删 `case agent.EventCompaction:`（runtime 不再产生 OutboundMessage）
-   - `channel/feishu/adapter.go` 删 `Send` case `OutCompaction`（不再发 thread reply "✶ Compacting conversation…"）
-   - `channel/feishu/receipt_event.go` 删 `eventToEntry` 对 `EventCompaction` 的 `(_, false)` 分支
-   - `channel/feishu/receipt.go` 删 `Append` 对 `EventCompaction` 的 silent PATCH 分支
-   - **不保留 OutCompaction + runtime 不发**——死代码删干净；要加字段 / 新行为时再加新 kind
-
-7. **删除 `CompactionEvent.Subtype` + `AgentEvent.Compaction` 字段**
-   - `CompactionEvent` 变空 struct（`type CompactionEvent struct{}`）
-   - `AgentEvent` 删 `Compaction *CompactionEvent` 字段（runtime 不再基于此指针判别，`Kind == EventCompaction` 是唯一判别）
-   - bridges 同步删 `Compaction: &CompactionEvent{Subtype: ...}` 赋值
-   - **不留空 struct 指针作 marker**——字段无值，删掉减少字段扫描，让 `AgentEvent` 更紧凑
-
-**wire 形态**（`OutboundMessage` / `SessionContext` 各加 1 字段，删 1 个 `OutboundKind`）：
-
-```go
-type SessionContext struct {
-    Agent           string
-    Model           string
-    CumulativeUsage UsageInfo
-    Workspace       string                  // F-48
-    GitStatus       *gtw.GitStatusSnapshot  // F-48
-    CompactionCount int                     // F-49: 🗜 N 计数
-}
-
-type OutboundKind int
-
-const (
-    OutReply OutKind = iota
-    OutResult
-    // ... 其他既有 kind ...
-    // OutCompaction 删除（F-49）
-)
-```
-
-**持久化**（`AgentSessionEntry` 加 1 字段）：
-
-```go
-type AgentSessionEntry struct {
-    // ... 既有字段 ...
-    CumulativeUsage *UsageInfo `json:"cumulativeUsage,omitempty"`
-    CompactionCount int        `json:"compactionCount,omitempty"`  // F-49
-}
-
-const AgentSessionFileVersion = <F-45 + 1>  // 版本号 bump
-```
-
-JSON 兼容：旧文件无 `compactionCount` 字段 → Go JSON unmarshal 容忍 → 内存里 `int == 0` → footer 不显示 🗜 段（符合零值约定）。
+4. **删除「压缩进行中」出站通路**
+   - 去掉专用 OutboundKind 与对应 Channel 渲染分支
+   - Compaction 不再占 thread / receipt 时间线；信息只通过 footer 计数 + token 语义体现
 
 **不变式**：
-- ✅ **bridge 消化协议差异**（抽象归抽象 / 具体归具体，§1.4 不变）
-- ✅ **runtime 不基于 Subtype dispatch**（字段已删除，runtime 不可能 string-sniff）
-- ✅ **Channel 不感知协议**（Feishu adapter 只读 `SessionContext.CompactionCount`，不知道来自 Pi / Claude Code）
-- ✅ **Footer 仍是 3 行结构**（Line 1 identity + Line 2 tokens/cost + Line 3 git）；🗜 是 Line 1 末尾 append
-- ✅ **每段独立 omit**（🗜 在 count==0 时不显示，与其他 footer segment 一致）
-- ✅ **AgentSession 是 metadata 唯一持久化载体**（compactionCount 跟 cumulativeUsage 同源）
-- ✅ **`/new` 是唯一清零入口**（compactionCount + cumulativeUsage 一同清零）
-- ✅ **daemon 重启不丢**（`FromAgentSessionEntry` 还原）
-- ✅ **1 turn : 1 anchor 不变式更干净**（之前 F-37 给 OutCompaction 发 thread reply 破坏精神；删掉后更纯）
-- ✅ **OutboundKind 集合净减少 1 个**（不增；要发瞬时提示时另起新 kind）
-- ✅ **§1.4 抽象 / 具体 边界规范**保留
-- ✅ **F-08 "Channel is dumb"** 保留（Channel 不调 git、不算 token、不调 RecordCompaction）
-- ✅ **F-25 / F-31 / F-37 / F-38 / F-39 / F-40 / F-42 / F-43 / F-44 / F-45 / F-48** 全部决策**保持成立**（F-49 仅删除 F-37 / F-25 关于 OutCompaction 的部分，其余叠加）
+- §1.4：bridge 消化具体协议，抽象层不 sniff subtype / 平台字段
+- Channel 仍 dumb：不调 git、不算 token、不驱动计数
+- Footer 仍是三行结构（identity / tokens·cost / git）；压缩次数只是 identity 行的可选后缀
+- `/new` 仍是累计元数据的唯一清零入口；daemon 重启可从 AgentSession 持久化还原
+- F-45 / F-48 footer 契约保留；仅叠加计数与 token 语义澄清
 
-**详细落地**：见 [`docs/feat/F-49-compaction-counter.md`](./feat/F-49-compaction-counter.md) + `docs/feat/F-45-session-footer.md` §1.8 + `docs/channel/feishu.md` §13.25 + [`docs/feat/F-32-pi-rpc-bridge.md` §2.3](./feat/F-32-pi-rpc-bridge.md)（bridge 行为更新）+ [`docs/feat/F-37-tool-thread-routing.md` §2.1](./feat/F-37-tool-thread-routing.md)（移除 OutCompaction thread 路由）+ [`docs/feat/F-25-rolling-log.md` §3.1.1](./feat/F-25-rolling-log.md)（移除 receipt entry）。
+**为什么不是 v2.0**：不改 Gateway 核心路由与 ChatSession 模型；是 SessionContext / footer 语义上的增量，外加删除一条已无产品需求的瞬时出站通路。
+
+**详细设计 / 字段 / bridge 对照 / 测试**：见 [`feat/F-49-compaction-counter.md`](./feat/F-49-compaction-counter.md)；与 footer 的交点见 [`feat/F-45-session-footer.md`](./feat/F-45-session-footer.md) §1.8；Feishu 决策见 [`channel/feishu.md`](./channel/feishu.md) §13.25。
 
 ---
 

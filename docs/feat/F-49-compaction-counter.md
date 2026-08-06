@@ -12,10 +12,10 @@
 > - `cmd/nightme/run.go::newEventHandler` — `case agent.EventCompaction: as.RecordCompaction()`（无 Subtype 判断、无 Outbound 产生）；`sessionContextInto` stamp `CompactionCount`
 > - `internal/channel/feishu/usage_footer.go` — Line 1 末尾追加 `· 🗜 N`（仅 N>0）
 > - `internal/channel/feishu/adapter.go` — 删除 `OutCompaction` case（不再有 thread reply "✶ Compacting…"）
-> - 文档同步（[`F-45 §1.8`](./F-45-session-footer.md) follow-up；[`SPEC.md` §0.13](../SPEC.md) changelog；[`channel/feishu.md` §13.25](../channel/feishu.md) decision；[`F-32`](./F-32-pi-rpc-bridge.md) bridge 行为更新；[`F-37`](./F-37-tool-thread-routing.md) 移除 OutCompaction thread 路由；[`F-25`](./F-25-rolling-log.md) 移除 receipt entry 映射）
+> - 文档同步（[`F-45 §1.8`](./F-45-session-footer.md) follow-up；[`SPEC.md` §0.14](../SPEC.md) changelog；[`channel/feishu.md` §13.25](../channel/feishu.md) decision；[`F-32`](./F-32-pi-rpc-bridge.md) bridge 行为更新；[`F-37`](./F-37-tool-thread-routing.md) 移除 OutCompaction thread 路由；[`F-25`](./F-25-rolling-log.md) 移除 receipt entry 映射）
 >
 > **Depends on**: F-45 (SessionContext footer), F-32 (Pi bridge), F-37 (thread routing — 移除), F-25 (rolling-log — 移除)
-> **Related**: [`SPEC.md`](../SPEC.md) §0.13（本文落地）；[`channel/feishu.md`](../channel/feishu.md) §13.25；[`F-45 §1.8`](./F-45-session-footer.md)；[`F-32 §2.3`](./F-32-pi-rpc-bridge.md)；[`F-37 §2.1`](./F-37-tool-thread-routing.md)（移除 OutCompaction 行）；[`F-25 §3.1.1`](./F-25-rolling-log.md)（移除 OutCompaction thread reply）
+> **Related**: [`SPEC.md`](../SPEC.md) §0.14（本文落地）；[`channel/feishu.md`](../channel/feishu.md) §13.25；[`F-45 §1.8`](./F-45-session-footer.md)；[`F-32 §2.3`](./F-32-pi-rpc-bridge.md)；[`F-37 §2.1`](./F-37-tool-thread-routing.md)（移除 OutCompaction 行）；[`F-25 §3.1.1`](./F-25-rolling-log.md)（移除 OutCompaction thread reply）
 
 ---
 
@@ -654,8 +654,8 @@ type AgentEvent struct {
    - `receipt_event.go` 删 EventCompaction 分支
    - `receipt.go` 删 Append silent PATCH
 
-7. **`docs(SPEC): §0.13 F-49 changelog`**
-   - `docs/SPEC.md` 加 §0.13 增量变更摘要
+7. **`docs(SPEC): §0.14 F-49 changelog`**
+   - `docs/SPEC.md` 加 §0.14 增量变更摘要
 
 8. **`docs(feat): F-45 §1.8 follow-up + F-32 bridge behavior + F-37 remove thread route + F-25 remove receipt entry`**
    - `docs/feat/F-45-session-footer.md` 加 §1.8

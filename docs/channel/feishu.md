@@ -2315,7 +2315,7 @@ const (
 - `internal/channel/feishu/receipt.go` —— 删 `Append` 对 EventCompaction 的 silent PATCH 分支
 - 测试 5 处更新(`agentsession_meta_test.go` / `usage_footer_test.go` / `adapter_test.go` / `translate_test.go` / `run_test.go` / pi & claudecode bridge tests)
 
-**详细设计**:见 [`docs/feat/F-49-compaction-counter.md`](../feat/F-49-compaction-counter.md) + [`docs/feat/F-45-session-footer.md`](../feat/F-45-session-footer.md) §1.8 + SPEC §0.13。
+**详细设计**:见 [`docs/feat/F-49-compaction-counter.md`](../feat/F-49-compaction-counter.md) + [`docs/feat/F-45-session-footer.md`](../feat/F-45-session-footer.md) §1.8 + SPEC §0.14。
 
 ## 15. v1.3.x 实施计划
 

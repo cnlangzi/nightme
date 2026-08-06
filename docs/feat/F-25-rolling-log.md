@@ -11,7 +11,7 @@
 >
 > **v1.3.x F-thread-route 收窄 scope**(2026-08-04):rolling-log receipt card 收窄到只承载 `OutText` / `OutResult` / `OutInit` / `OutUsage` 派生的 entry。`OutThinking` / `OutToolStart` / `OutToolEnd` **不再进 receipt**,由 Feishu adapter 路由到 user message 的 thread reply(详见 [`F-37-tool-thread-routing.md`](./F-37-tool-thread-routing.md) + [`channel/feishu.md` §13.12](../channel/feishu.md))。Receipt card body 元素数从 ~30 降到 ≤5,Feishu 50 element 上限不再是个问题。
 >
-> **v1.3.x F-49 行为变更**(2026-08-06):`OutCompaction` kind 整条 path 删除(详见 [`F-49-compaction-counter.md`](./F-49-compaction-counter.md) + [`SPEC §0.13`](../SPEC.md) + [`channel/feishu.md` §13.25](../channel/feishu.md))。Runtime handler 不再产生 `OutboundMessage{Kind: OutCompaction}`,Feishu adapter 不再有 `Send` case `OutCompaction`,receipt `eventToEntry` / `Append` 不再有 EventCompaction 分支。本文档关于 OutCompaction 的描述(§2.4 silent PATCH、§3.1.1 thread reply 行)全部作废;`F-25 §3.1.1` 列表删除 `OutCompaction → postThreadReply(... body)` 一行。
+> **v1.3.x F-49 行为变更**(2026-08-06):`OutCompaction` kind 整条 path 删除(详见 [`F-49-compaction-counter.md`](./F-49-compaction-counter.md) + [`SPEC §0.14`](../SPEC.md) + [`channel/feishu.md` §13.25](../channel/feishu.md))。Runtime handler 不再产生 `OutboundMessage{Kind: OutCompaction}`,Feishu adapter 不再有 `Send` case `OutCompaction`,receipt `eventToEntry` / `Append` 不再有 EventCompaction 分支。本文档关于 OutCompaction 的描述(§2.4 silent PATCH、§3.1.1 thread reply 行)全部作废;`F-25 §3.1.1` 列表删除 `OutCompaction → postThreadReply(... body)` 一行。
 >
 > **This doc is the canonical reference for the v1.3 rolling-log UX.**
 > For the InputBuffer FSM (idle/busy, separate concern owned by

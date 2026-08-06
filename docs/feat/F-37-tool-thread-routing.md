@@ -10,7 +10,7 @@
 > **Depends on**: F-08 (Channel interface), F-25 (rolling-log), F-33 (chatID 简化), §13.10 (reply-in-thread)
 > **Related**: [`SPEC.md`](../SPEC.md) §0.3 摘要 + §1.3 v1.3.x 新增（F-thread-route） + §11 backlog; [`channel/feishu.md`](../channel/feishu.md) §13.12; [`F-08-channel-abstraction.md`](./F-08-channel-abstraction.md) §4; [`F-25-rolling-log.md`](./F-25-rolling-log.md) §3 + §3.1.1; 后续演化: [`F-44`](./F-44-outreply-independent-and-task-receipt.md) + [`F-45`](./F-45-session-footer.md) + [`F-49`](./F-49-compaction-counter.md)
 >
-> **� F-49 行为变更（2026-08-06）**：`OutCompaction` kind 整条 path 删除 —— runtime handler 不再产生 `OutboundMessage{Kind: OutCompaction}`（无瞬时"压缩进行中"提示需求），Feishu adapter 不再有 `Send` case `OutCompaction`（不再发 thread reply "✶ Compacting conversation…"），receipt `eventToEntry` / `Append` 不再有 EventCompaction 分支。**F-37 本文档关于 OutCompaction 的描述（§2.1 路由表、§2.4 eventToEntry、§3 代码示例、§5 changelog）全部作废**，仅作为"曾存在过"的决策记录保留；实际行为以 [`F-49`](./F-49-compaction-counter.md) §1.9 + [`SPEC §0.13`](../SPEC.md) 为准。
+> **� F-49 行为变更（2026-08-06）**：`OutCompaction` kind 整条 path 删除 —— runtime handler 不再产生 `OutboundMessage{Kind: OutCompaction}`（无瞬时"压缩进行中"提示需求），Feishu adapter 不再有 `Send` case `OutCompaction`（不再发 thread reply "✶ Compacting conversation…"），receipt `eventToEntry` / `Append` 不再有 EventCompaction 分支。**F-37 本文档关于 OutCompaction 的描述（§2.1 路由表、§2.4 eventToEntry、§3 代码示例、§5 changelog）全部作废**，仅作为"曾存在过"的决策记录保留；实际行为以 [`F-49`](./F-49-compaction-counter.md) §1.9 + [`SPEC §0.14`](../SPEC.md) 为准。
 
 ---
 

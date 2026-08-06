@@ -15,9 +15,24 @@ package pi
 import (
 	"encoding/json"
 	"log/slog"
+	"sync"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
+
+// pendingTool records a tool_call that has emitted tool_execution_start
+// but not yet the matching tool_execution_end. The bridge uses it to
+// re-attach Name + raw Args on the end event — Pi's wire does not echo
+// args on end, so without start->end correlation the renderer would
+// fall back to "🔧 tool" and lose the type-aware summary.
+//
+// Entries are added on tool_execution_start and removed on
+// tool_execution_end; agent_settled clears the map defensively to
+// prevent leakage across turns when an end was missed.
+type pendingTool struct {
+	Name string
+	Args string // raw JSON from tool_execution_start.args
+}
 
 // translator carries the per-session translation state that is
 // independent of the protocol layer: the current session
@@ -40,13 +55,32 @@ type translator struct {
 	// message_end echoes a content[] we have already streamed as
 	// deltas. Per-turn; reset when agent_settled fires.
 	sawTextEnd bool
+
+	// pendingTools keys in-flight tool calls (toolCallId) to their
+	// start-time metadata so the matching tool_execution_end can
+	// carry Name + Args into ToolEndEvent. Populated in
+	// tool_execution_start, drained in tool_execution_end,
+	// wholesale-cleared on agent_settled (defensive).
+	//
+	// Concurrency: translate() runs from readPump; session.New()
+	// (called on /new) reassigns pendingTools from a different
+	// goroutine. pendingMu serialises the map so the assignment
+	// in New() cannot race against a read in translate(), which
+	// would otherwise panic the daemon ("concurrent map read and
+	// map write"). PendingMu is intentionally separate from
+	// translatorMu (which guards initSent / emitInit) — the two
+	// protect disjoint state and never need to be acquired
+	// together, so there's no ordering risk.
+	pendingMu     sync.Mutex
+	pendingTools  map[string]pendingTool
 }
 
 func newTranslator(agentName, workspace, branch string) *translator {
 	return &translator{
-		agentName: agentName,
-		workspace: workspace,
-		branch:    branch,
+		agentName:    agentName,
+		workspace:    workspace,
+		branch:       branch,
+		pendingTools: make(map[string]pendingTool),
 	}
 }
 
@@ -84,8 +118,15 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 
 	case "agent_settled":
 		// Turn-end marker. The session stays open; subsequent
-		// prompts are still accepted.
+		// prompts are still accepted. Reset per-turn sticky state
+		// AND defensively clear pendingTools so a missed
+		// tool_execution_end (e.g. Pi aborted mid-call) cannot
+		// leak the entry across turns and mis-attribute a later
+		// tool's args.
 		t.sawTextEnd = false
+		t.pendingMu.Lock()
+		t.pendingTools = make(map[string]pendingTool)
+		t.pendingMu.Unlock()
 		return []agent.AgentEvent{{
 			Kind: agent.EventDone,
 			Done: &agent.DoneEvent{ExitCode: 0, Reason: "settled"},
@@ -101,6 +142,25 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		var ev toolExecutionStart
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return nil, err
+		}
+		// Empty toolCallId is rejected at the wire level by Pi, but
+		// belt-and-braces: storing under key "" would let two
+		// malformed events collapse onto each other and a later
+		// empty-id end would inherit the wrong Name/Args. Record
+		// only when the id is non-empty; the matching end falls
+		// back to wire ToolName. EventToolStart still fires with
+		// ID=="" so consumers see the start; the orphan-end
+		// fallback path covers the result line.
+		if ev.ToolCallID != "" {
+			t.pendingMu.Lock()
+			t.pendingTools[ev.ToolCallID] = pendingTool{
+				Name: ev.ToolName,
+				Args: stringOrEmpty(ev.Args),
+			}
+			t.pendingMu.Unlock()
+		} else {
+			logger.Warn("pi tool_execution_start with empty toolCallId — pending correlation skipped",
+				slog.String("raw", string(raw)))
 		}
 		return []agent.AgentEvent{{
 			Kind: agent.EventToolStart,
@@ -125,10 +185,33 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return nil, err
 		}
+		// Re-attach Name + Args recorded from tool_execution_start.
+		// Fall back to the wire's own toolName when no start event
+		// was observed (orphan end — e.g. tool started before the
+		// bridge attached, or end arriving before start under a
+		// reordered pump). Args stays empty in the fallback path.
+		name := ev.ToolName
+		args := ""
+		if ev.ToolCallID != "" {
+			t.pendingMu.Lock()
+			if pending, ok := t.pendingTools[ev.ToolCallID]; ok {
+				if name == "" {
+					name = pending.Name
+				}
+				args = pending.Args
+			}
+			delete(t.pendingTools, ev.ToolCallID)
+			t.pendingMu.Unlock()
+		} else {
+			logger.Warn("pi tool_execution_end with empty toolCallId — orphan path, wire ToolName only",
+				slog.String("raw", string(raw)))
+		}
 		return []agent.AgentEvent{{
 			Kind: agent.EventToolEnd,
 			ToolEnd: &agent.ToolEndEvent{
 				ID:     ev.ToolCallID,
+				Name:   name,
+				Args:   args,
 				Output: stringOrEmpty(ev.Result),
 				Err:    toolErrorIf(ev.IsError),
 			},
@@ -284,8 +367,10 @@ func (t *translator) translateMessageUpdate(raw []byte, logger *slog.Logger) ([]
 }
 
 // translateMessageEnd dispatches message_end events by role.
-// assistant -> EventResult + EventUsage; toolResult -> no-op
-// (the matching tool_execution_end already produced EventToolEnd).
+// assistant -> one EventResult (with Usage co-located on the
+// ResultEvent payload — see translateAssistantMessage);
+// toolResult -> no-op (the matching tool_execution_end already
+// produced EventToolEnd).
 func (t *translator) translateMessageEnd(raw []byte, logger *slog.Logger) ([]agent.AgentEvent, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -331,9 +416,10 @@ func (t *translator) translateMessageEnd(raw []byte, logger *slog.Logger) ([]age
 
 // translateAssistantMessage renders the terminal assistant message
 // into a single EventResult with Usage co-located on the
-// ResultEvent payload. Used to emit EventResult + EventUsage in
-// sequence, but the data is already paired on Pi's `message_end`
-// (assistant role) wire event — splitting them forced the runtime
+// ResultEvent payload. The data is already paired on Pi's
+// `message_end` (assistant role) wire event — emitting two
+// separate events would force the runtime to buffer OutResult
+// waiting for the late EventUsage, so we keep them together.
 // to buffer OutResult to get the footer stamp right. Now they
 // arrive together on the same AgentEvent.
 //

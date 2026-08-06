@@ -1,6 +1,6 @@
 # F-32: Pi Coding Agent Bridge (RPC 模式)
 
-> **Status**: designing (Phase 1 — 文档评审通过后进入 Phase 2 实现)
+> **Status**: ✅ implemented (MVP landed on `fix/pi`; see §11 实施记录 + 已知 deferred 项)
 > **Milestone**: v1.3
 > **Depends on**: F-09 (Agent abstraction), F-19 (CLI Bridge), F-21 (Agent Modes), F-24 (Claude Code Bridge 模式), F-27 (ChatSession), F-28 (`/use`), F-29 (AgentSession pool)
 > **Related**: [`F-24-claudecode-bridge.md`](./F-24-claudecode-bridge.md), [`F-21-agent-modes.md`](./F-21-agent-modes.md), [`F-29-agent-session-pool.md`](./F-29-agent-session-pool.md)
@@ -80,9 +80,9 @@ nightme 现有 FSM 假设"一个 AgentSession = 一个进程"；pi RPC 进程是
 | `tool_execution_start` | `toolCallId`, `toolName`, `args` | `EventToolStart{ToolUseID: toolCallId, Name: toolName, Input: raw(args)}` | canonical "tool starting" 事件 |
 | `tool_execution_update` | `toolCallId`, `partialResult` | (log debug) | MVP 不暴露 partial；保留接口 |
 | `tool_execution_end` | `toolCallId`, `result`, `isError` | `EventToolEnd{ToolUseID: toolCallId, Name: <from start>, Output: stringified(result), IsError: isError}` | — |
-| `message_end` `{message:{role:"assistant", stopReason}}` | `message.{content[], usage, stopReason}` | `EventResult{Text: <joined assistant text>, DurationMs: 0, IsError: stopReason=="error", Subtype: stopReason}` | **不切 FSM** |
+| `message_end` `{message:{role:"assistant", stopReason}}` | `message.{content[], usage, stopReason}` | `EventResult{Text: <joined assistant text>, IsError: stopReason=="error", Subtype: stopReason, Usage: <usage payload>}` | **不切 FSM**；`Result.Usage` 与 assistant text 在**同**一 wire event 上共载（pi 把 `usage` 内嵌在 `message_end`），runtime 不需要 buffer OutResult 等待 usage 晚到 |
 | `message_end` `{message:{role:"toolResult"}}` | `toolCallId`, `content[]` | (log debug；合并入 tool_execution_end) | — |
-| `message_end.usage` | `usage.{input,output,cacheRead,cacheWrite,totalTokens,cost.{input,output,cacheRead,cacheWrite,total}}` | `EventUsage{InputTokens, OutputTokens, CacheCreation: cacheWrite, CacheRead, CostUSD: cost.total}` | 仅当本 turn 累积 usage 非空；多个 message_end 累加 |
+| `message_end.usage`（同 row 触发） | `usage.{input,output,cacheRead,cacheWrite,totalTokens,cost.*}` | **co-located on `EventResult.Usage`** | 不再独立 emit `EventUsage` 事件——reasoning: 见 [F-49 §1.9 bridge 抽象统一](./F-49-compaction-counter.md) + `internal/gateway/translate.go` 注释。runtime 从 `ev.Result.Usage` 一次取齐；`AgentSession.RecordUsage()` 由 runtime handler 调用，不依赖独立 Event
 | `compaction_start` | `reason` | **（F-49: 屏蔽,`return nil, nil`）** | runtime 不需要瞬态信号;bridge 自己消化协议差异 |
 | `compaction_end` | `reason`, `result.aborted` | **（F-49）** `EventCompaction`（无 Subtype 字段） | 一个完整的压缩周期 = runtime 收到一条 `EventCompaction` |
 | `extension_ui_request` | `id`, `method` (select/confirm/input/editor/notify/setStatus/setWidget/setTitle), … | (log warning) | **首期**：自动回 `extension_ui_response{id, cancelled:true}`；不向 ChatSession 发 EventPermission |
@@ -106,7 +106,7 @@ nightme 现有 FSM 假设"一个 AgentSession = 一个进程"；pi RPC 进程是
 }
 ```
 
-bridge 只用：`sessionId`、`model.id`、`model.name`、`sessionFile`（可选，注入到 EventInit metadata）。
+bridge 只用：`sessionId`、`model.id`、`model.name`（→ `EventInit.SessionID` / `EventInit.Model`）。`sessionFile` 等文件路径字段**不**进 bridge —— `--session-id <id>` 在 spawn 时已经把文件名协商这层折过去了，不再二次引入 path abstraction（OOB 设计见 §12.2 P1 备注）。
 
 ## 3. 进程与生命周期
 
@@ -131,7 +131,7 @@ session.Spawn()
   ├─ goroutine A: readPump (stdout scanner, 解 frame → 分流 response / event / extension_ui_request)
   ├─ goroutine B: drainStderr (stderr Read, debug log, 保留有界尾部用于错误)
   ├─ goroutine C: lifecycle (cmd.Wait, capture exitCode, 失败所有 pending, 关闭 events)
-  └─ goroutine D: handshake  (sync, 启动时 GetState 超时 5s)
+  └─ goroutine D: handshake  (sync, 启动时 GetState 超时 10s)
 ```
 
 **唯一 Wait / events close owner = goroutine C**。所有 Close 路径（包括 graceful shutdown、error、异常退出）最终通过 C 写 `exitCodeSink` 并 close events。`Close()` 不直接关 events，由 C 收尾。**这修正了 claudecode 注释掉的 watchdog race，并避免 ACP `readPump` 与 `Close` 双重关闭的同形问题**。
@@ -197,7 +197,7 @@ type rpcClient struct {
 }
 ```
 
-- 启动时 `get_state` 分配 id `"boot"`，timeout 5s。
+- 启动时 `get_state` 分配 id `"boot"`，timeout 10s。
 - `SendBlocks` 分配新 id，登记到 `pending` 等待 ack；ack 到达后从 pending 删除并允许下一 prompt。**只等 ack，不等 `agent_settled`**。
 - 第二次 `SendBlocks` 在 ack 尚未到达时直接返回 `ErrTurnBusy`。
 - 关闭 / 超时 / 异常时遍历 pending 写 `ErrSessionClosed`。
@@ -287,11 +287,13 @@ pnpm add -g @earendil-works/pi-coding-agent
 | session state → EventInit | ✅（首次 `get_state`） |
 | 多轮长驻 | ✅（`agent_settled` 不关 channel） |
 | `/kill` 终止 | ✅（Close 路径） |
+| **跨进程 Resume（daemon 重启续同会话）** | ✅（spawn-time `--session-id <id>`；`AgentSession.ResumeID` 由 `get_state.sessionId` 填入 → 写入 `agent_sessions.json` → 下次 spawn 翻译成 `--session-id`；与 claudecode 的 `--resume <id>` 同 bridge contract 各自翻译） |
 | `/abort` 单 turn 取消 | ❌ 用 `/kill` 替代 |
 | Extension UI 飞书回复 | ❌ 自动 cancelled，不发卡 |
 | steer / follow_up | ❌ 走 InputBuffer flush |
 | 运行时切 model / thinking | ❌ 改 pi CLI flag |
-| session switch / fork / clone | ❌ |
+| 运行时切 session（mid-process switch_session） | ❌ 当前走 spawn-time 注入即可覆盖 daemon 重启场景；mid-process switch 按需另开 |
+| session fork / clone | ❌ |
 | 真实 ACP wire / pi-acp | ❌ |
 
 ## 9. 验收矩阵
@@ -380,3 +382,71 @@ pnpm add -g @earendil-works/pi-coding-agent
 ---
 
 > **v1.3 release gate**：本 feature 与 F-31（MessageState）、ACP bridge 修复、文档一并合入 v1.3 后再开放主分支。
+
+---
+
+## 12. 实施记录（2026-08-06 — task `T-pi-bridge-align`）
+
+对照实现做了一次 gap 审计，落地 P0 / P1 / P4 三组改动；P2 / P3 仍按 §11 deferred。
+
+### 12.1 P0 — `EventToolEnd` Name + Args 回填（修 `🔧 tool → N bytes` 渲染 bug）
+
+**问题**：
+
+- `OutToolStart` 已正确填 Name/Args → Feishu call 行 `● bash(...)` 正常
+- `OutToolEnd` 此前**只**填 ID/Output/Err → `toolName()` fallback `"tool"` → result 行 `🔧 tool → N bytes`，类型感知摘要失效
+
+**根因**：`pi/translate.go` 的 `tool_execution_end` case 当时只用 `ToolCallID/Result/IsError`，丢弃 Name/Args。Pi 的 wire 在 end 事件上**只**回传 `toolName`（不带 args）——args 仅出现在对应的 start 事件。
+
+**修法**（claudecode `pendingTools` 同构，但更小）：
+
+1. `protocol.go`：`toolExecutionEnd` 加 `ToolName string`（wire 已有，code 漏解）
+2. `translate.go`：translator 加 `pendingTools map[string]pendingTool`（Name + raw Args），`tool_execution_start` 记录，`tool_execution_end` 弹出（pop 后 delete 防泄漏），`agent_settled` 清空（防止 turn-间 orphan）
+3. 兜底：若 end 无对应 pending（orphan end / 早于 start），用 wire 上的 `toolName`，`Args` 留空（renderer 显示 "(no args)"，优于错挂历史 args）
+
+**测试**（`translate_test.go` + `agent_test.go` 全绿）：
+
+- `TestTranslate_ToolExecutionEnd_FillsNameAndArgs` — start→end 关联；断言 `Name == "bash"` / `Args` 包含 `ls -la`
+- `TestTranslate_ToolExecutionEnd_WireToolNameFallback` — orphan end：Name 用 wire `toolName`，Args 为空
+- `TestTranslate_AgentSettled_ClearsPendingTools` — orphan 防御清理
+- `TestBuildArgs_*` — argv shaping（不直接覆盖本 P0，但同一 PR 验证 buildArgs 调度不破）
+
+### 12.2 P1 — Resume：桥接 Pi 的 `--session-id` CLI flag
+
+**问题**：原 `pi.Agent.Start` 完全忽略 `cfg.ResumeID`，daemon 重启后 pi 永远 fresh。
+
+**调研**：查 Pi 官方 `docs/rpc.md` + `pi --help` —— Pi **原生**支持 spawn-time resume：
+
+| Flag | 用途 |
+|---|---|
+| `--session-id <id>` | 传入已知 sessionId；agent 加载该 session |
+| `--session <path\|id>` | 按文件路径或部分 UUID 加载 |
+| `--no-session` | 不落盘 |
+
+`get_state` 响应里的 `sessionId` 就是稳定 ID。nightme 已有 `AgentSession.ResumeID` 字段 + 持久化路径（`agent_sessions.json`）——只需把 opaque `ResumeID` 在 spawn 时翻译成 `--session-id <id>`。
+
+**修法**（5 行 `buildArgs` + 1 行 `Start`）：
+
+1. `agent.go`：改 `buildArgs(extraArgs []string, cfg agent.StartConfig)` 接 cfg；当 `cfg.ResumeID != ""` → 追加 `--session-id <id>`（按约定放 argv 末尾；与 claudecode `--resume` 同位）
+2. 持久化路径不动：`EventInit.SessionID` 已由 `get_state` 写入（`emitInit`，旧实现）；runtime `SetResumeID` 已存在
+
+**测试**（`agent_test.go`，5 个 case 全绿）：
+
+- 缺省：`{"--mode","rpc"}`
+- 带 ResumeID：`..., "--session-id", "sess-abc-123"`
+- Resume flag 在 cfg.Args 之后：用户传的 `--model google/gemini` 仍能在 grep 中看见
+
+**`cfg.ResumeID` 是 opaque bridge contract**：claude 翻译成 `--resume <id>`，pi 翻译成 `--session-id <id>`。同一个字段，各自翻译 —— `internal/chatsession` 层无需感知差异。
+
+### 12.3 P4 — 文档卫生（本节落地点）
+
+- FEATURES.md F-32 row：`📝 设计阶段` → `✅ 已实现（核心）；Extension UI + /abort 仍 deferred`
+- F-32 §2.3 EventUsage row：原文档分两行（`EventResult` + `EventUsage`），现合并 — pi 把 usage 与 text 共载在**同一** `message_end` wire event，runtime 从 `Result.Usage` 一次取齐（避免 buffer OutResult 等 EventUsage 的顺序 hazard）
+- F-32 §3.2 / §4.3 handshake timeout 5s → 10s（与代码 `handshakeTimeout = 10 * time.Second` 一致）
+
+### 12.4 仍 deferred（不进本 PR，按 §11）
+
+- §11.1 Extension UI → 飞书卡闭环
+- §11.2 `/abort` + `agent.Abortable`
+- `switch_session` 中途切 session：现在用 spawn-time `--session-id` 已经覆盖 daemon 重启恢复场景；mid-process switch 是独立使用场景（用户明确切到一份老 session 做对比），按需再开
+- Task 清单（F-38 已为 claudecode 实现；pi 侧 TaskCreate/TaskUpdate 协议等价物待确认）

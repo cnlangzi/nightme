@@ -13,6 +13,7 @@ package pi
 
 import (
 	"context"
+	"log/slog"
 	"os/exec"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -86,11 +87,21 @@ func (a *Agent) Detect() error {
 // Kept in the signature for forward compatibility with future
 // /use flags that may translate to Pi commands.
 //
+// cfg.ResumeID, when non-empty, is forwarded as Pi's native
+// `--session-id <id>` CLI flag at spawn time so the spawned
+// process resumes the named session (the bridge's "opaque
+// ResumeID" contract translates cleanly: nightme stores pi's own
+// sessionId — captured from get_state — and feeds it back here on
+// the next spawn). Empty means "no --session-id; start a fresh
+// session". Mirrors Claude Code's `--resume <id>` flow in
+// internal/bridge/claudecode/claudecode.go: same field, each
+// bridge translates to its own CLI flag.
+//
 // On Start success, the returned session has an active process and
 // has already completed the get_state handshake. The caller must
 // Close() it when done.
 func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSession, error) {
-	args := buildArgs(a.args, cfg.Args)
+	args := buildArgs(a.args, cfg)
 
 	env := append([]string(nil), cfg.Env...)
 	env = append(env, a.command) // ensure command name is in env (defensive)
@@ -102,11 +113,76 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSe
 // as a package-private helper so tests can assert on the produced
 // argv without spawning a process. Mirrors the contract of
 // Agent.Start exactly.
-func buildArgs(extraArgs, cfgArgs []string) []string {
-	out := make([]string, 0, len(DefaultArgs)+len(extraArgs)+len(cfgArgs))
+// buildArgs concatenates DefaultArgs + extraArgs + cfg.Args, then
+// appends Pi's `--session-id <id>` when cfg.ResumeID is non-empty.
+// Extracted as a package-private helper so tests can assert on
+// the produced argv without spawning a process. Mirrors the
+// contract of Agent.Start exactly.
+//
+// Order rationale: resume flag goes LAST so user-supplied cfg.Args
+// (typically model/provider overrides) remain grep-visible before
+// the session identifier. Same convention as the claudecode
+// bridge in buildArgs().
+//
+// Conflict resolution: cfg.Args may legitimately carry session-
+// selection flags of its own (--session-id, --session, --no-session).
+// When cfg.ResumeID is non-empty the runtime-persisted identity
+// must win — see filterSessionFlags for the stripping logic.
+// When cfg.ResumeID is empty, user-supplied session-selection
+// flags pass through (legitimate "spawn a fresh session at this
+// id" use case).
+func buildArgs(extraArgs []string, cfg agent.StartConfig) []string {
+	args := filterSessionFlags(cfg.Args, cfg.ResumeID, slog.Default())
+	out := make([]string, 0, len(DefaultArgs)+len(extraArgs)+len(args)+2)
 	out = append(out, DefaultArgs...)
 	out = append(out, extraArgs...)
-	out = append(out, cfgArgs...)
+	out = append(out, args...)
+	if cfg.ResumeID != "" {
+		out = append(out, "--session-id", cfg.ResumeID)
+	}
+	return out
+}
+
+// filterSessionFlags strips any session-selection flags the caller
+// placed in args when ResumeID is set. When ResumeID is empty the
+// args pass through unchanged so the user can intentionally spawn
+// a fresh session with --session-id <their-id>.
+//
+// Returns a fresh slice (does not mutate input). The logger may be
+// nil — when nil, suppressed-strip warnings are skipped silently.
+// Stripped flags + their value-taking flag's value are dropped
+// from the returned slice (e.g. --session-id abc contributes 2
+// elements to the source slice, 0 to the returned slice).
+func filterSessionFlags(args []string, resumeID string, logger *slog.Logger) []string {
+	if resumeID == "" {
+		return args
+	}
+	out := make([]string, 0, len(args))
+	skipNext := false
+	stripped := false
+	for _, a := range args {
+		if skipNext {
+			// The value arg belonging to a session-selection flag
+			// we already chose to drop.
+			skipNext = false
+			stripped = true
+			continue
+		}
+		switch a {
+		case "--session-id", "--session":
+			skipNext = true
+			stripped = true
+			continue
+		case "--no-session":
+			stripped = true
+			continue
+		}
+		out = append(out, a)
+	}
+	if stripped && logger != nil {
+		logger.Debug("pi buildArgs: cfg.Args carried session-selection flags; runtime ResumeID wins",
+			slog.String("resume_id", resumeID))
+	}
 	return out
 }
 

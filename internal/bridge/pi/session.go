@@ -452,6 +452,17 @@ func (s *session) New(ctx context.Context) error {
 	// the runtime sees a zero-sessionId init (or a stale init from
 	// the boot handshake) leak out between the reset and the
 	// emit. We hold the lock across reset+emit+deliver.
+	//
+	// pendingTools reset is taken under pendingMu (NOT translatorMu)
+	// because translate() in readPump only takes pendingMu on its
+	// hot path — taking translatorMu around a translate() call
+	// would serialise every event against /new. pendingMu alone is
+	// enough to close the read/write race on the map; combining
+	// the two locks would risk inversion with no upside.
+	s.translator.pendingMu.Lock()
+	s.translator.pendingTools = make(map[string]pendingTool)
+	s.translator.pendingMu.Unlock()
+
 	s.translatorMu.Lock()
 	s.translator.initSent = false
 	stateCtx, stateCancel := context.WithTimeout(ctx, 10*time.Second)

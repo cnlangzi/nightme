@@ -387,7 +387,13 @@ if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.SessionID != "" {
 → `s.SetResumeID(newID)` 覆盖旧的 `ResumeID` 字段  
 → `mgr.PersistAgentSession(s)` 把新 `ResumeID` 写盘到 `agent_sessions.json`
 
-**零 schema 改动**。下次 daemon 重启时，spawn 携带新 `ResumeID`（claudecode: `--resume <newID>`，pi: 新 sessionId，acp: 新 sessionId），agent 看到 reset 后的上下文。
+**零 schema 改动**。下次 daemon 重启时，spawn 携带新 `ResumeID`；各 bridge 各自翻译成自己的 CLI flag（chatsession 层只持有 opaque id，不感知 agent 差异）：
+
+- `claudecode`：`--resume <newID>` —— `internal/bridge/claudecode/claudecode.go::buildArgs`
+- `pi`：`--session-id <newID>` —— `internal/bridge/pi/agent.go::buildArgs`（2026-08-06 task `T-pi-bridge-align` P1 落地；之前 pi 忽略 `cfg.ResumeID` → 跨重启 pi 永远 fresh，现在 daemon 重启也能续接）
+- `acp`：`session/load` JSON-RPC（OOB 走 transport-reuse 路径）
+
+详见 [F-32 §12.2 实施记录](./F-32-pi-rpc-bridge.md) 同款翻译契约说明。
 
 ---
 

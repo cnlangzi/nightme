@@ -9,8 +9,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -402,6 +405,237 @@ func TestTranslate_ToolExecutionStartArgs(t *testing.T) {
 	}
 	if !strings.Contains(events[0].ToolStart.Args, "/etc") {
 		t.Errorf("Args = %q", events[0].ToolStart.Args)
+	}
+}
+
+// TestTranslate_ToolExecutionEnd_FillsNameAndArgs verifies P0:
+// start→end correlation populates ToolEnd.Name + ToolEnd.Args from
+// the in-flight pendingTools map (recorded in tool_execution_start).
+// Without this, the renderer falls back to "🔧 tool → N bytes"
+// and loses the type-aware summary.
+//
+// Mirrors the claudecode streamState.pendingTools contract — see
+// internal/bridge/claudecode/stream.go. The argument order matches
+// the wire: tool_execution_end carries toolName as a redundant
+// signal, but args only travel on start; the bridge has to glue
+// them back together.
+func TestTranslate_ToolExecutionEnd_FillsNameAndArgs(t *testing.T) {
+	tr := newTestTranslator()
+	start := []byte(`{"type":"tool_execution_start","toolCallId":"c-1","toolName":"bash","args":{"command":"ls -la"}}`)
+	if _, err := tr.translate(start, nil); err != nil {
+		t.Fatalf("start translate: %v", err)
+	}
+
+	end := []byte(`{"type":"tool_execution_end","toolCallId":"c-1","toolName":"bash","result":[{"type":"text","text":"total 4"}],"isError":false}`)
+	events, err := tr.translate(end, nil)
+	if err != nil {
+		t.Fatalf("end translate: %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != agent.EventToolEnd {
+		t.Fatalf("events = %+v", events)
+	}
+	toolEnd := events[0].ToolEnd
+	if toolEnd.ID != "c-1" {
+		t.Errorf("ID = %q, want c-1", toolEnd.ID)
+	}
+	if toolEnd.Name != "bash" {
+		t.Errorf("Name = %q, want bash (from start)", toolEnd.Name)
+	}
+	if !strings.Contains(toolEnd.Args, "ls -la") {
+		t.Errorf("Args = %q, want to contain ls -la (from start)", toolEnd.Args)
+	}
+	if !strings.Contains(toolEnd.Output, "total 4") {
+		t.Errorf("Output = %q", toolEnd.Output)
+	}
+	if toolEnd.Err != nil {
+		t.Errorf("Err = %v, want nil", toolEnd.Err)
+	}
+
+	// Pending entry must be cleared so a later tool with the same
+	// id (Pi reusing toolCallIds across turns is unlikely but
+	// defensible) does not pick up stale args.
+	if _, ok := tr.pendingTools["c-1"]; ok {
+		t.Errorf("pendingTools[c-1] = %+v, want removed", tr.pendingTools["c-1"])
+	}
+}
+
+// TestTranslate_ToolExecutionEnd_WireToolNameFallback covers the
+// orphan end path: a tool_execution_end arrives without a matching
+// start (e.g. tool started before the bridge attached, or pump
+// reordered). The wire still carries toolName, so the renderer
+// gets a usable Name; Args stays empty by design (we have no source
+// of truth). The renderer falls back to displaying "(no args)" for
+// empty Args, which is preferable to mis-attributes via a stale
+// pending entry.
+func TestTranslate_ToolExecutionEnd_WireToolNameFallback(t *testing.T) {
+	tr := newTestTranslator()
+	end := []byte(`{"type":"tool_execution_end","toolCallId":"c-orphan","toolName":"write","result":[{"type":"text","text":"ok"}],"isError":false}`)
+	events, err := tr.translate(end, nil)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != agent.EventToolEnd {
+		t.Fatalf("events = %+v", events)
+	}
+	toolEnd := events[0].ToolEnd
+	if toolEnd.Name != "write" {
+		t.Errorf("Name = %q, want write (from wire)", toolEnd.Name)
+	}
+	if toolEnd.Args != "" {
+		t.Errorf("Args = %q, want empty (no pending)", toolEnd.Args)
+	}
+	if !strings.Contains(toolEnd.Output, "ok") {
+		t.Errorf("Output = %q, want to contain ok", toolEnd.Output)
+	}
+}
+
+// TestTranslate_AgentSettled_ClearsPendingTools verifies the
+// defensive cleanup: agent_settled must drop any in-flight
+// pending entries so a missed tool_execution_end (e.g. Pi aborted
+// mid-call, a future wire event class we don't yet handle) cannot
+// leak across turns and cause a later tool's end to inherit
+// stale Name/Args from the prior turn.
+func TestTranslate_AgentSettled_ClearsPendingTools(t *testing.T) {
+	tr := newTestTranslator()
+	start := []byte(`{"type":"tool_execution_start","toolCallId":"c-1","toolName":"bash","args":{"command":"sleep 9999"}}`)
+	if _, err := tr.translate(start, nil); err != nil {
+		t.Fatalf("start translate: %v", err)
+	}
+	if len(tr.pendingTools) != 1 {
+		t.Fatalf("pendingTools len = %d, want 1", len(tr.pendingTools))
+	}
+
+	if _, err := tr.translate([]byte(`{"type":"agent_settled"}`), nil); err != nil {
+		t.Fatalf("settled translate: %v", err)
+	}
+	if len(tr.pendingTools) != 0 {
+		t.Errorf("pendingTools len after settled = %d, want 0", len(tr.pendingTools))
+	}
+}
+
+// TestTranslate_EmptyToolCallId_OrphanPath covers Finding 2 from
+// the post-merge code-review: malformed or partial wire events
+// with empty toolCallId must not collapse into a single map entry.
+// Two empty-ID starts must not overwrite each other; the matching
+// empty-ID end uses wire ToolName + empty Args, never inheriting
+// Name/Args from a different tool.
+func TestTranslate_EmptyToolCallId_OrphanPath(t *testing.T) {
+	tr := newTestTranslator()
+
+	// First empty-id start: does NOT record in pendingTools.
+	start1 := []byte(`{"type":"tool_execution_start","toolCallId":"","toolName":"bash","args":{"command":"ls"}}`)
+	evs1, err := tr.translate(start1, nil)
+	if err != nil {
+		t.Fatalf("start1 translate: %v", err)
+	}
+	if len(evs1) != 1 || evs1[0].Kind != agent.EventToolStart {
+		t.Fatalf("start1 events = %+v", evs1)
+	}
+	if evs1[0].ToolStart.Name != "bash" {
+		t.Errorf("start1 Name = %q, want bash from wire", evs1[0].ToolStart.Name)
+	}
+	if _, ok := tr.pendingTools[""]; ok {
+		t.Errorf("pendingTools[\"\"] must not be set on empty-id start; got %+v", tr.pendingTools[""])
+	}
+
+	// Second empty-id start with a different toolName would have
+	// overwritten a stale entry under "" — verify it didn't.
+	start2 := []byte(`{"type":"tool_execution_start","toolCallId":"","toolName":"read","args":{"path":"/etc"}}`)
+	if _, err := tr.translate(start2, nil); err != nil {
+		t.Fatalf("start2 translate: %v", err)
+	}
+	if _, ok := tr.pendingTools[""]; ok {
+		t.Errorf("pendingTools[\"\"] must remain unset on second empty-id start; got %+v", tr.pendingTools[""])
+	}
+
+	// Empty-id end falls back to wire ToolName; never inherits the
+	// (different) Args from a previous non-empty-id start.
+	prior := []byte(`{"type":"tool_execution_start","toolCallId":"c-real","toolName":"write","args":{"path":"/x"}}`)
+	if _, err := tr.translate(prior, nil); err != nil {
+		t.Fatalf("prior (real id) start translate: %v", err)
+	}
+	end := []byte(`{"type":"tool_execution_end","toolCallId":"","toolName":"bash","result":"x","isError":false}`)
+	evsEnd, err := tr.translate(end, nil)
+	if err != nil {
+		t.Fatalf("end translate: %v", err)
+	}
+	if len(evsEnd) != 1 || evsEnd[0].Kind != agent.EventToolEnd {
+		t.Fatalf("end events = %+v", evsEnd)
+	}
+	toolEnd := evsEnd[0].ToolEnd
+	if toolEnd.Name != "bash" {
+		t.Errorf("end Name = %q, want bash (from wire, orphan end)", toolEnd.Name)
+	}
+	if toolEnd.Args != "" {
+		t.Errorf("end Args = %q, want empty (orphan path did not touch pendingTools)", toolEnd.Args)
+	}
+
+	// Sanity: the real-id prior entry must still be in the map
+	// (not disturbed by any empty-id events).
+	if _, ok := tr.pendingTools["c-real"]; !ok {
+		t.Errorf("pendingTools[c-real] = missing, want present (real-id entry should survive)")
+	}
+}
+
+// TestTranslate_PendingTools_ConcurrentAccess is a -race guard for
+// Finding 1: pendingTools is read in translate() and reassigned
+// in session.New() (on /new) from different goroutines. Hit the
+// translator hard from many goroutines while another calls the
+// internal reset path equivalent; -race should produce no report.
+// Without pendingMu the runtime would race-panic with
+// "concurrent map read and map write".
+func TestTranslate_PendingTools_ConcurrentAccess(t *testing.T) {
+	tr := newTestTranslator()
+
+	const goroutines = 16
+	const iterations = 200
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines + 1)
+
+	// Producer goroutines hammer translate() with start/end pairs.
+	for g := 0; g < goroutines; g++ {
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				toolID := fmt.Sprintf("g%d-i%d", id, i)
+				start := []byte(fmt.Sprintf(
+					`{"type":"tool_execution_start","toolCallId":%q,"toolName":"bash","args":{"i":%d}}`,
+					toolID, i,
+				))
+				if _, err := tr.translate(start, nil); err != nil {
+					t.Errorf("start translate: %v", err)
+					return
+				}
+				end := []byte(fmt.Sprintf(
+					`{"type":"tool_execution_end","toolCallId":%q,"toolName":"bash","result":"ok","isError":false}`,
+					toolID,
+				))
+				if _, err := tr.translate(end, nil); err != nil {
+					t.Errorf("end translate: %v", err)
+					return
+				}
+			}
+		}(g)
+	}
+
+	// Reset goroutine periodically clears the map (simulating
+	// /new). It MUST take pendingMu the same way session.New does.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			tr.pendingMu.Lock()
+			tr.pendingTools = make(map[string]pendingTool)
+			tr.pendingMu.Unlock()
+			runtime.Gosched()
+		}
+	}()
+
+	wg.Wait()
+	// After the storm, the map should be empty (every end drained,
+	// last reset cleared any leftovers).
+	if len(tr.pendingTools) != 0 {
+		t.Errorf("after concurrent storm + reset, pendingTools len = %d, want 0", len(tr.pendingTools))
 	}
 }
 

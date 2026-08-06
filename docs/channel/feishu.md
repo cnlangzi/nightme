@@ -99,11 +99,15 @@ Agent: main | Model: MiniMax-M2.7 | Provider: minimax
 | 方案 | JSON | 兼容性 |
 |---|---|---|
 | **v1 `note` element** | `{ "tag": "note", "elements": [{ "tag": "plain_text", "content": "..." }] }` | Card v1,大多数场景可用;Card 2.0 官方组件列表里**没有**该 tag |
-| **v2 neutral markdown + `<hr>`** | `elements.push({tag:"hr"}); elements.push({tag:"markdown", content:"<text_tag color='neutral'>...</text_tag>"});` | OpenClaw / 主流 v2 实践,**推荐** |
+| **v2 hr + markdown + inline color** | `elements.push({tag:"hr"}); elements.push({tag:"markdown", content:"<font color='grey'>line1</font>\n<font color='grey'>line2</font>"});` | Card 2.0,**本项目采用的方案**(见 §13.23) |
 
-**重要**: Feishu `lark_md` **不支持** `<font color='grey'>`。Feishu 官方允许的 inline 颜色用 `<text_tag color='...'>`,允许值:`neutral`、`blue`、`turquoise`、`lime`、`orange`、`violet`、`indigo`、`wathet`、`green`、`yellow`、`red`、`purple`、`carmine`。`neutral` 视觉上接近灰色。OpenClaw `send.ts:768` 写的 `<font color='grey'>` 实际渲染靠 Feishu 容错 -- 本项目**严格用 `<text_tag color='neutral'>`**。
+**颜色语法实测结论**(PR #52 验证):
+- `<font color='...'>` 在 `<markdown>` 标签内**有效** —— openclaw-lark (`src/card/builder.ts::buildFooter`) 用的就是这个,且实测生产可用。
+- 颜色值必须用**命名色**: `grey`、`red`、`green`、`turquoise`、`blue`、`yellow`、`orange`、`purple`、`neutral`、`carmine` 等。**不支持 hex**(`#999999` 会被 Feishu 直接拒绝,报错 `230099 invalid color`)。
+- `<text_tag color='neutral'>` 也是有效语法,但**只对 plain_text 的 `text_color` 字段生效**,在 `<markdown>` 内联语法里不支持 —— §6.2 的旧结论基于这个误解,已修订。
+- 不要把 footer 用独立的 `<plain_text>` 元素 + `text_color` 字段渲染 —— `text_color` 字段只接受 `grey-100`/`grey-500` 等具名调色板 token,不接受命名色,且与 `<font color>` 内联色重叠。**统一用 `<markdown>` + `<font color='grey'>`** 是最简单、最可控的方案。
 
-参考: `gcmsg/openclaw-feishu/src/menu.ts` 用前者(纯 v1),`openclaw/openclaw/extensions/feishu/src/send.ts:768` 用后者(纯 v2)。
+参考: `openclaw/openclaw/extensions/feishu/src/card/builder.ts::buildFooter` 是本项目最终采用的 v2 模式参考实现。本项目不再使用 v1 `<note>`。
 
 ### 3.3 常用元素
 
@@ -271,9 +275,12 @@ PATCH 失败时不降级为新消息 -- 简单实现,日志告警即可;下次 `
 
 **本期 foot note 不会出现 `key: value` 形态**(内容是 `state · N entries · HH:MM:SS`),但**约束记在 §9.3 后续加 agent info 时必须遵守**。中点字符用 U+00B7(`·`),不是句号或星号。
 
-### 6.2 `<text_tag color='neutral'>` 而非 `<font color='grey'>`
+### 6.2 ~~`<text_tag color='neutral'>` 而非 `<font color='grey'>`~~（已修订）
 
-Feishu `lark_md` **不支持** `<font color='grey'>`。**严格用 `<text_tag color='neutral'>`**(允许值: `neutral`, `blue`, `turquoise`, `lime`, `orange`, `violet`, `indigo`, `wathet`, `green`, `yellow`, `red`, `purple`, `carmine`)。OpenClaw `send.ts:768` 写的 `<font color='grey'>` 靠 Feishu 容错 -- 本项目不依赖容错。
+~~Feishu `lark_md` **不支持** `<font color='grey'>` ...~~ **这条结论是错的**(本项目最终用了 `<font color='grey'>`)。修订见 §3.2 + §13.23。简短版:
+- `<font color='grey'>` 在 `<markdown>` 内**有效**且**推荐** —— openclaw-lark 同款
+- `<text_tag color='neutral'>` 只在 plain_text 元素的 `text_color` 字段上有效,**不能放在 markdown 内联**
+- 不支持 hex 颜色(`#999999` 直接报错);只能用命名色
 
 ### 6.3 SDK: Patch ≠ Update
 
@@ -1416,6 +1423,73 @@ WebSearch  -> 10 results
 - Auto-disable after N turns(用户 opt-out 总是显式)
 
 **详细设计**:见 [`docs/feat/F-39-tool-merge-and-toggle.md`](../feat/F-39-tool-merge-and-toggle.md) + `docs/SPEC.md` §0.7 + §3.1.3。
+
+### 13.23 🎯 F-46 + F-47 Implementation Experience:Footer Rendering 踩坑实录
+
+> 本节是 footer card 渲染的**实现经验总结**,给后续维护者一个"为什么现在长这样"的完整画像。设计动机见 §13.22,本次只讲踩过的坑 + 最终方案。
+
+**最终方案**(v2 markdown + `<font color='grey'>`,openclaw-lark 同款):
+
+```json
+[
+  {"tag": "hr"},
+  {"tag": "markdown", "content": "<font color='grey'>🤖 claude · opus-4-5</font>\n<font color='grey'>💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k · $0.087</font>"}
+]
+```
+
+源代码:`internal/channel/feishu/result_render.go::cardFooterElements` —— **单一来源**,被 `buildReceiptCard`(OutReply / OutTask 路径)和 `buildResultCardJSON`(OutResult 路径)共用。
+
+#### 13.23.1 三次踩坑迭代(每个都让 Feishu 整张 card 拒绝)
+
+| 尝试 | 错误 | Feishu 报错 |
+|------|------|------------|
+| **A.** `<div>` 包 `<plain_text>`, div 带 `elements: [...]` 子数组 | `div` 元素**不接受** `elements` 字段 —— 只接受 `text` 字段(单个 nested element) | `code=230099 ... unknown property, property: elements, path: ROOT -> body -> elements -> [2](tag: div)` |
+| **B.** `<plain_text text_color="#999999">`(hex 颜色) | Feishu 渲染器**不接受 hex**;只接受命名色 | `code=230099 ... invalid color: #999999` |
+| **C.** `<plain_text text_color="grey-500">`(调色板 token) | 部分 renderer 接受,部分拒绝;不稳定 | flaky;PR #52 早期测试看到的就是这种 |
+| **D.** ✅ `<markdown>` 包 `<font color='grey'>` 内联 | 跨 renderer 一致工作;openclaw-lark 同款 | (无错) |
+
+**为什么 `text_color` 字段路径反复失败**:`plain_text` 的 `text_color` 字段是 Feishu **早期 Card 1.0 schema 的字段**,在 Card 2.0 renderer 里要么被忽略要么接受范围极窄(只能 `grey-100`/`grey-500` 这种具名调色板)。**Card 2.0 + markdown 元素**才支持完整的 inline `<font color>`>`>` —— 这是 Feishu 把"卡片排版"和"卡片装饰"的关注点拆开的结果。
+
+**为什么**`elements` array 不可用:Card 2.0 重新设计了元素树(单根 + 单 `text` 字段嵌套),放弃了 Card 1.0 的 children-array 思路。`div` 元素**只是包装器**,不持有 children。
+
+#### 13.23.2 与 openclaw-lark 源码的对照
+
+| 维度 | openclaw-lark (`src/card/builder.ts::buildFooter`) | 本项目 (`cardFooterElements`) |
+|------|------|------|
+| 元素结构 | `<hr>` + `<markdown>` | `<hr>` + `<markdown>` |
+| 颜色语法 | `<font color='red'>` 或 `<font color='green'>` 等命名色 | `<font color='grey'>` |
+| 多行处理 | 单一 markdown content,无换行 | 多个 `<font>` 之间用 `\n` 分隔(Feishu lark_md 支持) |
+| 字号控制 | `text_size: 'notation'`(Card element 字段,不在 markdown 内) | 不设 —— `<markdown>` element 自身默认就是 body 字号 |
+| i18n | `content` + `i18n_content` 双字段 | 不做 i18n(项目范围只 zh-CN,没必要) |
+
+唯一差异是 `text_size` —— openclaw-lark 给 footer markdown 加 `text_size: 'notation'` 让字号变小。本项目没加,因为我们的 footer 文字本身已经够小(<font color='grey'> 在视觉上会自动变小一点),且 `text_size` 字段是 **card element 字段**不是 markdown 字段。如果未来实测发现 footer 太大,可以在 `cardFooterElements` 里给 markdown element 加 `text_size: 'notation'`。
+
+#### 13.23.3 测试覆盖
+
+- `TestBuildReceiptCard_FooterUsesMarkdownFontGrey`(在 `result_render_test.go`):**解析 card JSON** 验证 body shape = `[entry-markdown, hr, footer-markdown]`,footer markdown 内容包含 `<font color='grey'>` 包裹 + **不存在** `<div>` / `<plain_text>` 元素
+- `TestSend_OutReply_OrphanReplyTo_AlwaysCard` + `..._ColdStartSendCardFails_StillCard` + `..._NilSessionContext_NoFooter`(在 `adapter_test.go`):substring 断言 footer `<font color='grey'>` 出现 / 缺席
+- `TestSend_OutResult_AnchoredCardFooterStyled`:解析 card JSON 验证 footer markdown 在 `<hr>` **之后**,body markdown 在 `<hr>` **之前** —— 锁定 footer / body 不会混
+- `TestBuildReceiptCard_FooterUsesDivTextNotElements`(已被 `TestBuildReceiptCard_FooterUsesMarkdownFontGrey` 替代)
+
+**为什么必须 substring 断言 + JSON 解析双层**:substring 断言可以快速 catch"footer 完全消失"或"用了 hex 颜色";JSON 解析断言可以 catch"footer 元素类型错了"(比如 `div`/`elements` 这种 Feishu 拒绝的 schema)。两层都做才能锁住 §13.23.1 列的 4 个 schema 错误。
+
+#### 13.23.4 跨 kind 一致性(F-46 + F-47 invariant)
+
+| Kind | Footer 渲染路径 | 失败 fallback |
+|------|----------------|--------------|
+| `OutReply` | `buildReceiptCard` → `cardFooterElements` | `postOrphanReplyCard` 走同路径 |
+| `OutResult` | `buildResultCardJSON` → `cardFooterElements` | `sendOrphanResultCard` 走同路径 |
+| `OutTaskCreate` / `OutTaskUpdate` | `buildReceiptCard` → `cardFooterElements` | `postOrphanTaskCard` 走同路径 |
+
+**invariant**:**所有 main-chat event 都是 Card**(无 plain-text fallback)。F-46 把 OutReply / OutResult 改完,F-47 把 OutTask 改完。任何后续 `Out*` kind 要走 main-chat 都需要遵守这个 invariant。
+
+#### 13.23.5 后续维护陷阱
+
+- **不要试图改回 `<div>` + `<plain_text>`** —— Feishu 拒绝 `div.elements`。即使看代码觉得"我优化一下用 div 包 plain_text 更对称",也是错的。
+- **不要在 footer 里用 hex 颜色** —— `text_color` 字段只接受 `grey-100`/`grey-500`/`grey-1000` 这种调色板 token;`<font color>` 必须用命名色 (`grey`、`red`、`green` 等)。
+- **不要把 `<font>` 放在 `<plain_text>` 元素里** —— `<font>` 是 `<markdown>` 内联语法,plain_text 元素不支持富文本内联。
+- **不要给 footer 加 `text_size: 'notation'`(除非确认 markdown element 字号真的太大)** —— 字段存在,但视觉差异很小;加了反而跟 openclaw-lark 不一致。
+- **不要把 footer 渲染抽到 helper 之外的某个 markdown builder** —— `cardFooterElements` 是**单一来源**,任何 footer 渲染都必须经过它。OutReply / OutResult / OutTask 三处共用,F-47 review agent 提过"抽通用 `postOrphanCard(body)` 收敛 boilerplate",但那是另一个层面的抽象,不影响 footer 渲染逻辑。
 
 ## 14. 变更日志
 

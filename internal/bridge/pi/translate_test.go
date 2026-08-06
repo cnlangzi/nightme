@@ -405,6 +405,111 @@ func TestTranslate_ToolExecutionStartArgs(t *testing.T) {
 	}
 }
 
+// TestTranslate_ToolExecutionEnd_FillsNameAndArgs verifies P0:
+// start→end correlation populates ToolEnd.Name + ToolEnd.Args from
+// the in-flight pendingTools map (recorded in tool_execution_start).
+// Without this, the renderer falls back to "🔧 tool → N bytes"
+// and loses the type-aware summary.
+//
+// Mirrors the claudecode streamState.pendingTools contract — see
+// internal/bridge/claudecode/stream.go. The argument order matches
+// the wire: tool_execution_end carries toolName as a redundant
+// signal, but args only travel on start; the bridge has to glue
+// them back together.
+func TestTranslate_ToolExecutionEnd_FillsNameAndArgs(t *testing.T) {
+	tr := newTestTranslator()
+	start := []byte(`{"type":"tool_execution_start","toolCallId":"c-1","toolName":"bash","args":{"command":"ls -la"}}`)
+	if _, err := tr.translate(start, nil); err != nil {
+		t.Fatalf("start translate: %v", err)
+	}
+
+	end := []byte(`{"type":"tool_execution_end","toolCallId":"c-1","toolName":"bash","result":[{"type":"text","text":"total 4"}],"isError":false}`)
+	events, err := tr.translate(end, nil)
+	if err != nil {
+		t.Fatalf("end translate: %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != agent.EventToolEnd {
+		t.Fatalf("events = %+v", events)
+	}
+	toolEnd := events[0].ToolEnd
+	if toolEnd.ID != "c-1" {
+		t.Errorf("ID = %q, want c-1", toolEnd.ID)
+	}
+	if toolEnd.Name != "bash" {
+		t.Errorf("Name = %q, want bash (from start)", toolEnd.Name)
+	}
+	if !strings.Contains(toolEnd.Args, "ls -la") {
+		t.Errorf("Args = %q, want to contain ls -la (from start)", toolEnd.Args)
+	}
+	if !strings.Contains(toolEnd.Output, "total 4") {
+		t.Errorf("Output = %q", toolEnd.Output)
+	}
+	if toolEnd.Err != nil {
+		t.Errorf("Err = %v, want nil", toolEnd.Err)
+	}
+
+	// Pending entry must be cleared so a later tool with the same
+	// id (Pi reusing toolCallIds across turns is unlikely but
+	// defensible) does not pick up stale args.
+	if _, ok := tr.pendingTools["c-1"]; ok {
+		t.Errorf("pendingTools[c-1] = %+v, want removed", tr.pendingTools["c-1"])
+	}
+}
+
+// TestTranslate_ToolExecutionEnd_WireToolNameFallback covers the
+// orphan end path: a tool_execution_end arrives without a matching
+// start (e.g. tool started before the bridge attached, or pump
+// reordered). The wire still carries toolName, so the renderer
+// gets a usable Name; Args stays empty by design (we have no source
+// of truth). The renderer falls back to displaying "(no args)" for
+// empty Args, which is preferable to mis-attributes via a stale
+// pending entry.
+func TestTranslate_ToolExecutionEnd_WireToolNameFallback(t *testing.T) {
+	tr := newTestTranslator()
+	end := []byte(`{"type":"tool_execution_end","toolCallId":"c-orphan","toolName":"write","result":[{"type":"text","text":"ok"}],"isError":false}`)
+	events, err := tr.translate(end, nil)
+	if err != nil {
+		t.Fatalf("translate: %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != agent.EventToolEnd {
+		t.Fatalf("events = %+v", events)
+	}
+	toolEnd := events[0].ToolEnd
+	if toolEnd.Name != "write" {
+		t.Errorf("Name = %q, want write (from wire)", toolEnd.Name)
+	}
+	if toolEnd.Args != "" {
+		t.Errorf("Args = %q, want empty (no pending)", toolEnd.Args)
+	}
+	if !strings.Contains(toolEnd.Output, "ok") {
+		t.Errorf("Output = %q, want to contain ok", toolEnd.Output)
+	}
+}
+
+// TestTranslate_AgentSettled_ClearsPendingTools verifies the
+// defensive cleanup: agent_settled must drop any in-flight
+// pending entries so a missed tool_execution_end (e.g. Pi aborted
+// mid-call, a future wire event class we don't yet handle) cannot
+// leak across turns and cause a later tool's end to inherit
+// stale Name/Args from the prior turn.
+func TestTranslate_AgentSettled_ClearsPendingTools(t *testing.T) {
+	tr := newTestTranslator()
+	start := []byte(`{"type":"tool_execution_start","toolCallId":"c-1","toolName":"bash","args":{"command":"sleep 9999"}}`)
+	if _, err := tr.translate(start, nil); err != nil {
+		t.Fatalf("start translate: %v", err)
+	}
+	if len(tr.pendingTools) != 1 {
+		t.Fatalf("pendingTools len = %d, want 1", len(tr.pendingTools))
+	}
+
+	if _, err := tr.translate([]byte(`{"type":"agent_settled"}`), nil); err != nil {
+		t.Fatalf("settled translate: %v", err)
+	}
+	if len(tr.pendingTools) != 0 {
+		t.Errorf("pendingTools len after settled = %d, want 0", len(tr.pendingTools))
+	}
+}
+
 // TestTranslate_RejectsMalformed is the negative counterpart of
 // TestTranslate_MalformedJSON: nested malformed payloads from
 // message_update must also surface as errors.

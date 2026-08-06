@@ -2402,7 +2402,7 @@ func TestEnsureReceiptForTyping_CreatesPlaceholder(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	const userMsgID = "om_user"
-	rcpt, created, err := a.ensureReceiptForTyping(context.Background(), "oc_test", userMsgID)
+	rcpt, created, err := a.ensureReceiptForTyping(context.Background(), "oc_test", userMsgID, nil)
 	if err != nil {
 		t.Fatalf("ensureReceiptForTyping: %v", err)
 	}
@@ -2469,12 +2469,12 @@ func TestEnsureReceiptForTyping_NoOpWhenReceiptExists(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	// First call: cold-start, posts the placeholder.
-	rcpt1, created1, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user")
+	rcpt1, created1, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user", nil)
 	if err != nil || !created1 {
 		t.Fatalf("first ensureReceiptForTyping: err=%v, created=%v", err, created1)
 	}
 	// Second call: receipt already exists, returns existing.
-	rcpt2, created2, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user")
+	rcpt2, created2, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user", nil)
 	if err != nil || created2 {
 		t.Fatalf("second ensureReceiptForTyping: err=%v, created=%v", err, created2)
 	}
@@ -2483,6 +2483,80 @@ func TestEnsureReceiptForTyping_NoOpWhenReceiptExists(t *testing.T) {
 	}
 	if sends != 1 {
 		t.Errorf("send count = %d, want 1 (second call is no-op)", sends)
+	}
+}
+
+// TestEnsureReceiptForTyping_RendersFooterWhenProvided (F-48):
+// when the caller passes non-empty footerLines (typically derived
+// from a stamped SessionContext at MessageForwarded time), the
+// placeholder card must include the footer in the rendered body.
+// This is the cold-start commit that fixes the "placeholder card
+// has no footer" UX gap — the user sees "📁 code/nightme · ⎇ main"
+// immediately on the "⌨️ Working..." emit, before any reply chunk
+// arrives.
+func TestEnsureReceiptForTyping_RendersFooterWhenProvided(t *testing.T) {
+	a := testAdapter(t)
+	body := "{\"elements\":[]}"
+	a.sendFunc = func(_ context.Context, _, _, cardJSON, _ string, _ bool) (string, error) {
+		body = cardJSON
+		return "om_placeholder_with_footer", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	footerLines := []string{
+		"🤖 claude",
+		"📁 code/nightme · ⎇ main",
+	}
+	if _, _, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user", footerLines); err != nil {
+		t.Fatalf("ensureReceiptForTyping: %v", err)
+	}
+
+	// Body must contain the Typing header AND the footer lines.
+	// Catches regressions where the placeholder forgets to include
+	// the footer (the bug the user noticed in the F-48 prod deploy).
+	if !strings.Contains(body, "⌨️ Working...") {
+		t.Errorf("placeholder body missing Typing header, got %q", body)
+	}
+	for _, line := range footerLines {
+		if !strings.Contains(body, line) {
+			t.Errorf("placeholder body missing footer line %q, got %q", line, body)
+		}
+	}
+	// Footer must be wrapped in the same <hr> + <font color='grey'>
+	// convention as the main-chat cards (F-45 §13.22 single source
+	// of truth: cardFooterElements). The hr element is the visual
+	// divider between the placeholder text and the footer.
+	if !strings.Contains(body, `"hr"`) {
+		t.Errorf("placeholder body missing <hr> divider before footer, got %q", body)
+	}
+}
+
+// TestEnsureReceiptForTyping_OmitsFooterWhenEmpty (F-48): when
+// the caller's footerLines is nil/empty (no SessionContext stamped
+// — e.g. agent hasn't EventInit'd yet and the Cwd is not in a git
+// repo), the placeholder card omits the footer entirely. The
+// hr divider is also absent. This is the back-compat path for
+// the pre-F-48 "no footer" placeholder — supported but not
+// preferred; the runtime now stamps SessionContext on
+// MessageForwarded so the populated path is the common case.
+func TestEnsureReceiptForTyping_OmitsFooterWhenEmpty(t *testing.T) {
+	a := testAdapter(t)
+	body := "{\"elements\":[]}"
+	a.sendFunc = func(_ context.Context, _, _, cardJSON, _ string, _ bool) (string, error) {
+		body = cardJSON
+		return "om_placeholder_no_footer", nil
+	}
+	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
+
+	if _, _, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user", nil); err != nil {
+		t.Fatalf("ensureReceiptForTyping: %v", err)
+	}
+
+	if !strings.Contains(body, "⌨️ Working...") {
+		t.Errorf("placeholder body missing Typing header, got %q", body)
+	}
+	if strings.Contains(body, `"hr"`) {
+		t.Errorf("placeholder body unexpectedly includes <hr> divider when footerLines is nil, got %q", body)
 	}
 }
 
@@ -2505,7 +2579,7 @@ func TestEnsureReceiptForReply_ReusesTypingPlaceholder(t *testing.T) {
 	}
 
 	// Step 1: Typing placeholder.
-	rcpt, created, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user")
+	rcpt, created, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user", nil)
 	if err != nil || !created {
 		t.Fatalf("ensureReceiptForTyping: err=%v, created=%v", err, created)
 	}
@@ -2553,7 +2627,7 @@ func TestEnsureReceiptForTask_ReusesTypingPlaceholder(t *testing.T) {
 	}
 
 	// Step 1: Typing placeholder.
-	rcpt, created, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user")
+	rcpt, created, err := a.ensureReceiptForTyping(context.Background(), "oc_test", "om_user", nil)
 	if err != nil || !created {
 		t.Fatalf("ensureReceiptForTyping: err=%v, created=%v", err, created)
 	}

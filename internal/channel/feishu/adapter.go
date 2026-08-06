@@ -743,14 +743,20 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 // AppendEntry calls hit the renderLocked short-circuit instead of
 // issuing a second SendCard (the loser doesn't leave an orphan
 // card with a stale Typing header in chat).
-func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID string) (*MessageReceipt, bool, error) {
+func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID string, footerLines []string) (*MessageReceipt, bool, error) {
 	if userMsgID == "" {
 		return nil, false, errors.New("feishu: ensureReceiptForTyping requires userMsgID")
 	}
 
 	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
 	// No entries / no tasks — buildReceiptCard will render the
-	// "⌨️ Working..." placeholder header line.
+	// "⌨️ Working..." placeholder header line. F-48: footer is
+	// rendered up-front so the placeholder card shows the
+	// workspace / branch / dirty state immediately — the user
+	// sees "📁 code/nightme · ⎇ main" before any reply chunk
+	// arrives. The first OutReply later overwrites footerLines
+	// via AppendEntryWithFooter once cumulative usage is available.
+	transient.footerLines = footerLines
 	transient.promptState = agent.PromptPending
 	transient.initializing = true
 
@@ -762,7 +768,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	a.receiptsByUserMsgID[userMsgID] = transient
 	a.mu.Unlock()
 
-	body, err := buildReceiptCard(nil, nil, nil)
+	body, err := buildReceiptCard(nil, nil, transient.footerLines)
 	if err != nil {
 		a.mu.Lock()
 		if cur, ok := a.receiptsByUserMsgID[userMsgID]; ok && cur == transient {
@@ -1254,9 +1260,22 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 			if msg.ReplyTo == "" {
 				a.logger.Warn("feishu: OutMessageState MessageForwarded missing ReplyTo — Typing placeholder skipped (gateway should set OutboundMessage.ReplyTo = userMsgID)",
 					"chat_id", msg.ChatID, "message_state_message_id", msg.MessageState.MessageID)
-			} else if _, _, err := a.ensureReceiptForTyping(ctx, msg.ChatID, msg.ReplyTo); err != nil {
-				a.logger.Warn("feishu: ensureReceiptForTyping failed",
-					"err", err, "chat_id", msg.ChatID, "user_msg_id", msg.ReplyTo)
+			} else {
+				// F-48: compute the footer (same shape as the
+				// main-chat footer, but stamped by the runtime
+				// on MessageForwarded so the placeholder card
+				// shows the git-tracking line 3 immediately).
+				// msg.SessionContext is non-nil here because the
+				// runtime stamps it on OutMessageState +
+				// MessageForwarded; with nothing meaningful
+				// (no Agent, no Model, no usage, no git),
+				// formatSessionFooterLines returns nil and the
+				// footer is omitted from the placeholder.
+				footerLines := formatSessionFooterLines(msg.SessionContext)
+				if _, _, err := a.ensureReceiptForTyping(ctx, msg.ChatID, msg.ReplyTo, footerLines); err != nil {
+					a.logger.Warn("feishu: ensureReceiptForTyping failed",
+						"err", err, "chat_id", msg.ChatID, "user_msg_id", msg.ReplyTo)
+				}
 			}
 		}
 

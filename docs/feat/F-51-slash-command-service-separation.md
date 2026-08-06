@@ -740,6 +740,28 @@ Gateway + Channel top layer
 
 ---
 
+## 8. Postscript — ADR 0007 撤销了 §3.2 (2026-08-06)
+
+本节是历史记录。F-51 §3.2 立下的 "command → services 是唯一允许跨层边" 不变式在 2026-08-06 被 [ADR 0007](../adr/0007-direct-chatsession-coupling.md) 撤销。
+
+**改动概要**:
+- `internal/command/services/session.go` (SessionService / Session / AgentSession / KillResult / ResetResult / WatchMode / ThinkMode / ToolsMode 别名) **已删除**
+- `cmd/nightme/session_adapter.go` (~200 行 passthrough) **已删除**
+- `RuntimeServices.Session` 字段 **已删除**
+- `command.RequireActiveCwd(sess services.Session)` → `command.RequireActiveCwd(cs *chatsession.ChatSession)`
+- 每个 `internal/command/<name>/` 包现在直接 `import "github.com/cnlangzi/nightme/internal/chatsession"`,Factory 持 `*chatsession.Manager`
+
+**保留**:
+- `internal/command/services/reaction.go` (ReactionRouter + ReactionEvent) — 这是真接口,有多个实现/多 consumer,价值独立
+- `command.Commander` / `Factory` / `Registry` 接口本身 — 正确,未动
+- `command.Reply` / `RequireActiveCwd` 等 helper — 保留,签名适应新架构
+
+**结果**: 8 个 slash command (`gtw` + 7 个 chat-session) 全部落地,代码净减 ~700 行 (含 B5 plan)。`internal/gateway/handlers_*.go` 5 个 legacy 文件 + 5 个 legacy test 文件已全部删除。
+
+**§1-7 的内容保持作为 F-51 设计的历史记录**。当前 command 架构的最新规约以 ADR 0007 + `internal/command/` 实际代码为准。
+
+---
+
 ## 8. 不在 F-51 范围（明确说"不做"）
 
 1. `chat_sessions.json` / `agent_sessions.json` 持久化层迁出 `internal/registry` —— 后续 batch

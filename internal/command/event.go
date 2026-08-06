@@ -2,14 +2,19 @@
 // It provides the Commander / SlashCommandFactory / RuntimeServices
 // interfaces, the canonical inbound/outbound types
 // (SlashInput / SlashOutput / Outbound / Card / CardChoice /
-// ReactionEvent), and the SessionService / ReactionRouter service
-// interfaces that command implementations depend on.
+// ReactionEvent), and the ReactionRouter service interface that
+// command implementations depend on.
 //
 // This package is the bottom of the command stack — it does NOT
 // import internal/gateway, internal/chatsession, internal/gtw, or
 // internal/channel. The runtime (cmd/nightme/) is the only place
 // that bridges the gap. See docs/feat/F-51-slash-command-service-
 // separation.md §1.2.7 for the translation convention.
+//
+// ADR 0007 (2026-08-06): command packages may import
+// internal/chatsession directly. The previous SessionService
+// indirection was removed; this package no longer declares any
+// chat-session interface (services/session.go was deleted).
 package command
 
 import "github.com/cnlangzi/nightme/internal/command/services"
@@ -24,7 +29,7 @@ import "github.com/cnlangzi/nightme/internal/command/services"
 // returns ReactionEvent in its signatures — placing the type
 // in services avoids a `command <-> services` import cycle
 // (command.RuntimeServices already depends on services for
-// SessionService / ReactionRouter).
+// ReactionRouter).
 type ReactionEvent = services.ReactionEvent
 
 // SlashInput is the command-package's view of one inbound message.

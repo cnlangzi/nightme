@@ -209,6 +209,17 @@ func (cs *ChatSession) runReadPump(as *AgentSession, h EventHandler, stop, done 
 				cs.emitMessageStateForCurrentTurn(agent.MessageFailed)
 				cs.SetIdle()
 				_ = cs.OnTurnEnded()
+			case agent.EventInit:
+				// Session metadata, NOT a turn in progress. Don't
+				// flip the InputBuffer FSM to Busy — that race
+				// would mark the buffer Busy before the first
+				// user message reaches QueueUserMessage, causing
+				// the message to be queued (waiting for an
+				// EventDone that won't come, because no prompt
+				// was sent) and silently dropped from the
+				// user's perspective. The handler already runs
+				// above, so the init payload still flows to the
+				// Channel — we just skip the state transition.
 			default:
 				cs.SetBusy()
 			}

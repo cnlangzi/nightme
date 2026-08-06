@@ -149,6 +149,26 @@ type ChatSession struct {
 	// an active AgentSession's process exits. nil = no observer.
 	exitObserver AgentExitObserver
 
+	// ctx is the per-ChatSession context. Lives for the chat's
+	// lifetime (until daemon shutdown). It is the PARENT context
+	// every AgentSession active on this chat derives its own
+	// per-AS ctx from via AgentSession.Activate(parent); when
+	// /use swaps the active AS, the old AS's Background() cancels
+	// its derived ctx while the new AS's Activate(cs.ctx) installs
+	// a fresh one. Cancelling cs.ctx itself cascades through every
+	// active AS (used by the runtime during graceful shutdown).
+	//
+	// Per-AS lifecycle control lives on AgentSession, not on
+	// ChatSession — the chat holds the parent, the AS owns the
+	// derived child. ChatSession does not need its own AS-level
+	// or turn-level ctx fields.
+	//
+	// Guarded by ctxMu; reads via Context(), writes via
+	// ResetContext().
+	ctx    context.Context
+	cancel context.CancelFunc
+	ctxMu  sync.Mutex
+
 	// --- F-45 teamflow (gtw) state ------------------------------
 	//
 	// REMOVED in F-51: gtwContext, gtwDrafts, and the
@@ -168,7 +188,7 @@ type ChatSession struct {
 // activeAgent). The snapshot itself is read-only post-construction
 // (Q-A: no /default command, no per-chat override).
 func New(chatID, primaryAgent string) *ChatSession {
-	return &ChatSession{
+	cs := &ChatSession{
 		ID:               deriveIDFromChatID(chatID),
 		ChatID:           chatID,
 		activeAgent:      primaryAgent, // init seed
@@ -180,6 +200,8 @@ func New(chatID, primaryAgent string) *ChatSession {
 		createdAt:        time.Now(),
 		lastInteractionAt: time.Now(),
 	}
+	cs.ctx, cs.cancel = context.WithCancel(context.Background())
+	return cs
 }
 
 // WithPersistence attaches registry stores. Both can be nil (no
@@ -496,6 +518,12 @@ func (cs *ChatSession) defaultFlushHookLocked() FlushHook {
 		// without the lock is a data race; the race detector
 		// catches it under buffered-batch + concurrent event
 		// drain.
+		//
+		// The ctx we hand to SendBlocks is the AS-owned per-AS
+		// ctx (as.OpContext()), not a turn-scoped child — the
+		// bridge's SendBlocks derives its own per-call ctx
+		// (callCtx) from whatever we pass, so the per-turn
+		// boundary is now owned entirely by the bridge layer.
 		if n := len(userMsgIDs); n > 0 {
 			cs.mu.Lock()
 			cs.currentTurnUserMsgID = userMsgIDs[n-1]
@@ -504,7 +532,7 @@ func (cs *ChatSession) defaultFlushHookLocked() FlushHook {
 			if as == nil || as.Handle() == nil {
 				return ErrNotRunning
 			}
-			return as.SendBlocks(context.Background(), combined)
+			return as.SendBlocks(as.OpContext(), combined)
 		}
 		cs.mu.RLock()
 		as := cs.activeAS
@@ -512,8 +540,47 @@ func (cs *ChatSession) defaultFlushHookLocked() FlushHook {
 		if as == nil || as.Handle() == nil {
 			return ErrNotRunning
 		}
-		return as.SendBlocks(context.Background(), combined)
+		return as.SendBlocks(as.OpContext(), combined)
 	}
+}
+
+// Context returns the per-ChatSession ctx. Every AgentSession
+// active on this chat derives its own per-AS ctx from
+// Context() via AgentSession.Activate(parent). The runtime reads
+// Context() when wiring up a freshly-activated AS; consumers
+// (InputBuffer FlushHook, runtime EventHandler) don't reach for
+// it — they go through AgentSession.OpContext() instead.
+//
+// To tear down every operation on this chat at once (graceful
+// shutdown path), call ResetContext(). All active ASes'
+// derived ctxs cascade.
+//
+// Safe to call concurrently; the underlying context is replaced
+// atomically under ctxMu.
+func (cs *ChatSession) Context() context.Context {
+	cs.ctxMu.Lock()
+	defer cs.ctxMu.Unlock()
+	return cs.ctx
+}
+
+// ResetContext cancels the per-ChatSession ctx and installs a
+// fresh one derived from context.Background(). Reserved for the
+// runtime's graceful-shutdown path — /use does NOT use this;
+// per-AS teardown is the AgentSession's job (Background/Activate).
+//
+// After ResetContext, every AgentSession whose opCtx was derived
+// from the previous cs.ctx has its operations cancelled
+// (cascade). The fresh cs.ctx is what the next AgentSession
+// .Activate() call will derive from.
+//
+// Always installs a fresh ctx; idempotent in spirit.
+func (cs *ChatSession) ResetContext() {
+	cs.ctxMu.Lock()
+	defer cs.ctxMu.Unlock()
+	if cs.cancel != nil {
+		cs.cancel()
+	}
+	cs.ctx, cs.cancel = context.WithCancel(context.Background())
 }
 
 // QueueUserMessage enqueues a structured user turn. Idle: flush
@@ -550,6 +617,22 @@ func (cs *ChatSession) BufferPending() int {
 		return 0
 	}
 	return cs.inputBuffer.Pending()
+}
+
+// ClearBuffer drops every buffered message without sending them.
+// Returns the number dropped. Used by handleUse when swapping the
+// active AS: any messages queued for the previous (hung) AS
+// should NOT auto-forward to the new AS — the user explicitly
+// switched away and the queued turns belong to the abandoned
+// context. After Clear, the FSM state is left untouched —
+// callers that need IDLE should also call SetIdle().
+func (cs *ChatSession) ClearBuffer() int {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if cs.inputBuffer == nil {
+		return 0
+	}
+	return cs.inputBuffer.Clear()
 }
 
 // BufferState returns the current FSM state (StateIdle if no

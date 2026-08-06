@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,9 +37,83 @@ import (
 // start; 10 s matches the acp bridge's startup deadline.
 const handshakeTimeout = 10 * time.Second
 
+// promptTimeout bounds a single SendText / SendBlocks turn.
+//
+// Pi is expected to ack the `prompt` RPC within a few seconds
+// even on slow first-token model latency; 90 s leaves generous
+// room for cold-model warm-up while still surfacing a real hang
+// before the channel's reaction times out. Without this deadline
+// a hung prompt leaves the user staring at an empty receipt card
+// (F-32 2026-08-06 incident: SendText used context.Background()
+// and the bridge returned nil on the prompt RPC even when pi
+// never replied -- ChatSession flipped to MessageForwarded and
+// the receipt sat blank until the user issued /kill).
+//
+// Declared as a var (not const) so unit tests in this package
+// can shrink it to ~hundreds of ms for fast prompt-deadline
+// coverage without spinning a fake pi that hangs for 90 s.
+var promptTimeout = 90 * time.Second
+
 // shutdownGrace is the SIGINT-to-SIGKILL window for Close(), kept
 // short so /kill on a stuck prompt does not hang the runtime.
 const shutdownGrace = 2 * time.Second
+
+// closeDrainTimeout bounds the time Close() will wait for the
+// lifecycle goroutine to reap the child and close the events
+// channel. Beyond this window Close returns even if the underlying
+// cmd.Wait is wedged (zombie / SIGKILL reap not landing). The
+// bridge is already unusable at this point (closeOnce has fired
+// SIGINT + SIGKILL), and a wedged Wait must NOT block the runtime's
+// spawn path indefinitely — that is exactly the failure mode that
+// froze the dispatchLoop in the F-32 incident report (2026-08-06).
+const closeDrainTimeout = 5 * time.Second
+
+// piDebug toggles the bridge's detailed debug logging. Default
+// ON (F-32 2026-08-06 follow-up) so a "why is pi hung" incident
+// produces a usable breadcrumb trail in the daemon log without
+// the operator remembering to flip an env var first. Silence it
+// by exporting NIGHTME_PI_DEBUG=0 (or "false", "no", "off").
+//
+// The flag is read once at package init; toggling it mid-session
+// has no effect. Tests in this package may flip `piDebug`
+// directly to keep test output clean.
+var piDebug = piDebugEnabled()
+
+// piDebugEnabled reports whether the operator wants the pi
+// bridge's breadcrumb trail. Default-on: empty / unset /
+// unrecognized values are treated as enabled. Explicit
+// "disable" tokens are "0", "false", "no", "off" (case-folded).
+func piDebugEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("NIGHTME_PI_DEBUG"))) {
+	case "0", "false", "no", "off":
+		return false
+	}
+	return true
+}
+
+// piLog emits an info-level message tagged [pi] (component="pi")
+// when piDebug is enabled. Otherwise the call is a no-op so the
+// hot path stays cheap. Used by newSession / Close / readPump /
+// rpc.request to surface the exact sequence of events when the
+// bridge stalls.
+//
+// Log level is Info (not Debug) on purpose: the default
+// production slog handler runs at LevelInfo, and breadcrumbs
+// that vanish into Debug-level filtering are useless when
+// chasing a hang. Operators who want quieter logs silence
+// piDebug via NIGHTME_PI_DEBUG=0; operators who want full
+// Debug-level context still get it because the daemon's
+// configured handler runs at Info by default (see
+// internal/logging/logging.go levelFor).
+func piLog(msg string, args ...any) {
+	if !piDebug {
+		return
+	}
+	all := make([]any, 0, len(args)+2)
+	all = append(all, slog.String("component", "pi"))
+	all = append(all, args...)
+	slog.Default().Info("[pi] "+msg, all...)
+}
 
 // maxImageBytes caps a single ContentImage after base64 encoding.
 // 10 MiB of decoded binary is well within Pi's stated image support
@@ -133,6 +208,12 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 		return nil, fmt.Errorf("pi: workspace is required")
 	}
 
+	// startTime stamps every major phase of the bridge bring-up
+	// so the debug log shows where the call spent its time when
+	// the Spawn path stalls (F-32 incident 2026-08-06).
+	startTime := time.Now()
+	piLog("newSession enter", "agent", agentName, "command", command, "workspace", workspace, "args", args)
+
 	branch := detectBranch(workspace)
 	logger := slog.Default()
 
@@ -160,6 +241,9 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 		_ = stdin.Close()
 		_ = stdout.Close()
 		_ = stderr.Close()
+		piLog("newSession cmd.Start failed",
+			"elapsed_ms", time.Since(startTime).Milliseconds(),
+			"err", err.Error())
 		return nil, fmt.Errorf("pi: start: %w", err)
 	}
 
@@ -198,14 +282,25 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 	}()
 	go s.lifecycle()
 
+	piLog("newSession pumps+lifecycle spawned",
+		"pid", s.pid,
+		"elapsed_ms", time.Since(startTime).Milliseconds())
+
 	// Drive the get_state handshake synchronously so a Start
 	// failure surfaces immediately. The handshake uses the
 	// dedicated id "boot" so it cannot collide with later
 	// per-turn requests (which use req-NNN ids).
 	hsCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
+	handshakeStart := time.Now()
+	piLog("handshake start", "pid", s.pid, "timeout", handshakeTimeout.String())
 	resp, err := s.rpc.request(hsCtx, "get_state", map[string]any{}, "boot")
+	handshakeElapsed := time.Since(handshakeStart)
 	if err != nil {
+		piLog("handshake failed",
+			"pid", s.pid,
+			"elapsed_ms", handshakeElapsed.Milliseconds(),
+			"err", err.Error())
 		_ = s.Close()
 		if errors.Is(err, context.DeadlineExceeded) {
 			return nil, fmt.Errorf("pi: handshake timeout after %s (binary present? --mode rpc supported?): %w", handshakeTimeout, context.DeadlineExceeded)
@@ -213,9 +308,18 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 		return nil, fmt.Errorf("pi: get_state: %w", err)
 	}
 	if !resp.Success {
+		piLog("handshake rejected",
+			"pid", s.pid,
+			"elapsed_ms", handshakeElapsed.Milliseconds(),
+			"err", resp.Error)
 		_ = s.Close()
 		return nil, fmt.Errorf("pi: get_state rejected: %s", resp.Error)
 	}
+
+	piLog("handshake ok",
+		"pid", s.pid,
+		"elapsed_ms", handshakeElapsed.Milliseconds(),
+		"success", resp.Success)
 
 	var state getStateResult
 	if len(resp.Data) > 0 {
@@ -232,6 +336,9 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 	s.translatorMu.Lock()
 	s.deliverInitLocked(&state)
 	s.translatorMu.Unlock()
+	piLog("newSession return ok",
+		"pid", s.pid,
+		"total_ms", time.Since(startTime).Milliseconds())
 	return s, nil
 }
 
@@ -286,10 +393,13 @@ func (s *session) Events() <-chan agent.AgentEvent { return s.events }
 // PID returns the child process pid.
 func (s *session) PID() int { return s.pid }
 
-// SendText delivers a single text user turn. It is a thin wrapper
-// around SendBlocks. The interface does not accept a context
-// here; callers that need a deadline should call SendBlocks
-// directly with a cancellable context.
+// SendText delivers a single text user turn. Thin wrapper around
+// SendBlocks; kept on the agent.AgentSession interface for
+// callers that don't carry a ctx. The deadline is applied by
+// SendBlocks' defensive check (promptTimeout when the caller's
+// ctx has no deadline), so this thin wrapper can hand in a bare
+// context.Background() and rely on the bridge layer to bound the
+// wait.
 func (s *session) SendText(text string) error {
 	if text == "" {
 		return nil
@@ -311,6 +421,31 @@ func (s *session) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) e
 	if len(blocks) == 0 {
 		return nil
 	}
+
+	// Defensive deadline: callers that hand us a no-deadline ctx
+	// (e.g. the runtime's FlushHook passing cs.OpContext() with
+	// no external timeout wired) would otherwise wait forever for
+	// pi to ack a hung prompt RPC. promptTimeout bounds the wait
+	// at the bridge layer; if the caller already wired a tighter
+	// or looser deadline, their ctx takes precedence (we wrap on
+	// top of it so the LATER of the two wins — which is the
+	// correct safety property).
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancelTimeout context.CancelFunc
+		ctx, cancelTimeout = context.WithTimeout(ctx, promptTimeout)
+		defer cancelTimeout()
+	}
+
+	// Derive a per-call ctx so the bridge layer owns its own
+	// cancellation surface (rpc.request's select observes callCtx,
+	// not the caller's ctx directly). Future bridge-level
+	// semantics — per-call deadline, retry budget, trace values —
+	// go on callCtx without leaking into the ChatSession layer.
+	// turnCtx cancellation cascades through WithCancel, so a
+	// /use-triggered Background() on the AS still wakes us
+	// promptly.
+	callCtx, cancelCall := context.WithCancel(ctx)
+	defer cancelCall()
 
 	s.turnMu.Lock()
 	if s.turnActive {
@@ -367,8 +502,13 @@ func (s *session) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) e
 		return nil
 	}
 
+	piLog("SendBlocks: callCtx derived",
+		"pid", s.pid,
+		"parent_has_deadline", ctxHasDeadline(ctx),
+		"call_has_deadline", ctxHasDeadline(callCtx),
+	)
 	params := promptParams{Message: messageText, Images: images}
-	resp, err := s.rpc.request(ctx, "prompt", params, "")
+	resp, err := s.rpc.request(callCtx, "prompt", params, "")
 	if err != nil {
 		return err
 	}
@@ -376,6 +516,19 @@ func (s *session) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) e
 		return fmt.Errorf("%w: %s", ErrTurnClosed, resp.Error)
 	}
 	return nil
+}
+
+// ctxHasDeadline reports whether ctx carries an explicit deadline.
+// Used by piLog breadcrumbs so we can tell at a glance whether the
+// caller's turnCtx had a timeout wired in (e.g. external code
+// enforcing a per-turn deadline) or whether we're relying on
+// pure cascade-cancel semantics.
+func ctxHasDeadline(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	_, ok := ctx.Deadline()
+	return ok
 }
 
 // SendPermission is not used in the F-32 MVP. Extension UI is
@@ -519,7 +672,17 @@ func (s *session) New(ctx context.Context) error {
 // an earlier watchdog + Close double-Wait race was fixed by
 // removing the watchdog) and avoids the os/exec.Cmd data race
 // described in the standard library docs.
+//
+// Bound on the drain wait: even after SIGKILL has been sent and
+// closeOnce fired, the underlying cmd.Wait can occasionally stall
+// (zombie child, debugger attach, launchd reap delay). To keep the
+// runtime's spawn path unblocked we time-out the <-s.exitDone wait
+// after closeDrainTimeout; at that point closeOnce has already
+// fired SIGINT+SIGKILL and the bridge is unusable, so returning
+// "succeeded" is the right semantic for callers (the test harness
+// in particular relied on Close being bounded).
 func (s *session) Close() error {
+	closeStart := time.Now()
 	s.closeOnce.Do(func() {
 		close(s.closed)
 
@@ -534,6 +697,9 @@ func (s *session) Close() error {
 
 		if s.cmd.Process != nil {
 			_ = s.cmd.Process.Signal(os.Interrupt)
+			piLog("Close: SIGINT sent", "pid", s.pid)
+		} else {
+			piLog("Close: cmd.Process nil (start race?)", "pid", s.pid)
 		}
 
 		// Spawn a watchdog that escalates to SIGKILL after the
@@ -546,10 +712,12 @@ func (s *session) Close() error {
 				// Lifecycle goroutine has already
 				// reaped the child. No escalation
 				// needed.
+				piLog("Close: watchdog exit (lifecycle done)", "pid", s.pid)
 				return
 			case <-time.After(shutdownGrace):
 				if s.cmd.Process != nil {
 					_ = s.cmd.Process.Kill()
+					piLog("Close: SIGKILL escalated", "pid", s.pid, "grace_ms", shutdownGrace.Milliseconds())
 				}
 			}
 		}()
@@ -559,8 +727,26 @@ func (s *session) Close() error {
 	// closed. Callers (especially the test harness) can rely on
 	// "<-sess.Events() == (zero, false)" returning immediately
 	// after Close() returns.
-	<-s.exitDone
-	return nil
+	//
+	// Bounded by closeDrainTimeout: a wedged cmd.Wait must not
+	// block the runtime's spawn path indefinitely (see comment
+	// above). On timeout we log a warn and return -- closeOnce
+	// has fired SIGINT+SIGKILL and the bridge is already
+	// unusable; pending RPC waiters were released by failPending
+	// at the top of Close.
+	select {
+	case <-s.exitDone:
+		piLog("Close returned", "pid", s.pid, "elapsed_ms", time.Since(closeStart).Milliseconds())
+		return nil
+	case <-time.After(closeDrainTimeout):
+		slog.Default().Warn("pi: Close drain timeout — lifecycle wedged, returning anyway",
+			slog.String("component", "pi"),
+			slog.Int("pid", s.pid),
+			slog.Int64("timeout_ms", closeDrainTimeout.Milliseconds()),
+			slog.Int64("elapsed_ms", time.Since(closeStart).Milliseconds()),
+		)
+		return nil
+	}
 }
 
 // readPump reads JSONL frames from stdout, dispatches responses to
@@ -568,6 +754,24 @@ func (s *session) Close() error {
 // owns the read side of the stdout pipe; lifecycle owns everything
 // else.
 func (s *session) readPump() {
+	// ALWAYS release pending RPC waiters when this goroutine
+	// exits, regardless of the cause (clean EOF, scanner error,
+	// or fatal parse). Without this, request() callers parked on
+	// `<-ch` would block until their ctx expires — fine for the
+	// 10 s handshake, but arbitrary caller contexts could wedge
+	// indefinitely. More importantly, parent paths that rely on
+	// closeOnce → Close → <-s.exitDone cannot observe "session
+	// is dead" until lifecycle.cmd.Wait returns, which can lag
+	// on a wedged reap. failPending here is the early-out that
+	// decouples pending RPCs from cmd.Wait. Idempotent: the
+	// lifecycle goroutine also calls failPending (with
+	// ErrSessionClosed) after cmd.Wait, and the second call is a
+	// no-op because pending is already empty.
+	defer func() {
+		s.rpc.failPending(io.EOF)
+		piLog("readPump exit", "pid", s.pid)
+	}()
+
 	scanner := bufio.NewScanner(s.stdoutR)
 	scanner.Buffer(make([]byte, 0, 64*1024), MaxFrameSize)
 

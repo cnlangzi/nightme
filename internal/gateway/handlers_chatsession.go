@@ -279,6 +279,28 @@ func handleUse(ctx context.Context, mgr *chatsession.Manager, channel Channel, m
 		return reply(ctx, channel, msg.ChatID, "No active workspace. Send /cwd <path> first."), nil
 	}
 
+	// Snapshot the current active AgentSession BEFORE we touch
+	// anything else. LookupActiveAgentSession later will overwrite
+	// cs.activeAS with the new AS, so we have to capture the
+	// old pointer now to Background() it.
+	oldAS := cs.ActiveAgentSession()
+
+	// Cancel any in-flight operations on the previous active
+	// AgentSession BEFORE we swap. The runtime's default
+	// FlushHook hands as.OpContext() to bridge.SendBlocks, so a
+	// hung pi prompt RPC observes ctx.Done() the moment we
+	// cancel and returns with context.Canceled instead of
+	// blocking /use indefinitely. This is the F-32 2026-08-06
+	// lesson: without a per-AS cancellable context, switching
+	// agents under a hung bridge would wedge the chat forever.
+	//
+	// Background/Activate is owned by AgentSession itself; CS
+	// just nudges the old AS into the background and primes the
+	// new one with the chat's parent ctx.
+	if oldAS != nil {
+		oldAS.Background()
+	}
+
 	// Pure state mutation first.
 	if err := cs.SetActiveAgent(agentName); err != nil {
 		return reply(ctx, channel, msg.ChatID, fmt.Sprintf("SetActiveAgent failed: %v", err)), nil
@@ -291,6 +313,26 @@ func handleUse(ctx context.Context, mgr *chatsession.Manager, channel Channel, m
 		// but pass through any spawn error.
 		return reply(ctx, channel, msg.ChatID, fmt.Sprintf("Failed to activate agent: %v", err)), nil
 	}
+
+	// Wire the freshly-active AS up to the chat's parent ctx so
+	// bridge.SendBlocks sees a live per-AS ctx derived from
+	// cs.ctx. Subsequent /use calls will Background() this one
+	// before promoting a different AS.
+	as.Activate(cs.Context())
+
+	// Reset the InputBuffer FSM for the new AS. The FSM state
+	// is shared across ASes (it's a per-ChatSession field, not
+	// per-AS), so the previous AS's BUSY would otherwise carry
+	// over and the next user message would be silently queued
+	// — claude would never see a prompt, the receipt would
+	// stick at "Working...", and the user would think the new
+	// AS is hung too. /use must explicitly hand a clean
+	// IDLE-state buffer to the promoted AS. Also drop any
+	// messages the previous AS had queued; those turns belong
+	// to the abandoned context and the user explicitly switched
+	// away.
+	cs.ClearBuffer()
+	cs.SetIdle()
 
 	// commit 8c: stop the previous pump (if any) and start a new
 	// one for the freshly-active AgentSession. Events drain into

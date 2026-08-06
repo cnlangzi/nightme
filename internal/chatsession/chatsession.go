@@ -524,23 +524,34 @@ func (cs *ChatSession) defaultFlushHookLocked() FlushHook {
 		// bridge's SendBlocks derives its own per-call ctx
 		// (callCtx) from whatever we pass, so the per-turn
 		// boundary is now owned entirely by the bridge layer.
+		//
+		// Race note (F-32 2026-08-06 follow-up): a concurrent
+		// /use can call oldAS.Background() between our read of
+		// activeAS/OpContext and the SendBlocks call. That
+		// cancels the ctx mid-send and SendBlocks returns
+		// context.Canceled — the message would otherwise be
+		// silently dropped (runReadPump discards OnTurnEnded's
+		// error). Surface a structured error so the operator can
+		// distinguish "lost on /use" from a transport failure.
+		var as *AgentSession
 		if n := len(userMsgIDs); n > 0 {
 			cs.mu.Lock()
 			cs.currentTurnUserMsgID = userMsgIDs[n-1]
-			as := cs.activeAS
+			as = cs.activeAS
 			cs.mu.Unlock()
-			if as == nil || as.Handle() == nil {
-				return ErrNotRunning
-			}
-			return as.SendBlocks(as.OpContext(), combined)
+		} else {
+			cs.mu.RLock()
+			as = cs.activeAS
+			cs.mu.RUnlock()
 		}
-		cs.mu.RLock()
-		as := cs.activeAS
-		cs.mu.RUnlock()
 		if as == nil || as.Handle() == nil {
 			return ErrNotRunning
 		}
-		return as.SendBlocks(as.OpContext(), combined)
+		err := as.SendBlocks(as.OpContext(), combined)
+		if errors.Is(err, context.Canceled) {
+			return fmt.Errorf("flush: AS backgrounded during send (likely /use): %w", err)
+		}
+		return err
 	}
 }
 

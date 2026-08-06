@@ -468,7 +468,7 @@ type SessionContext struct {
 	// context-compaction cycles observed on this AgentSession.
 	// 0 = never compacted. Sourced from AgentSession.CompactionCount
 	// at the same instant as CumulativeUsage, so the footer Line 1
-	// (🗜 N) and Line 2 (↓ ↻ ↑ total) tell a coherent story:
+	// (🗜 N) and Line 2 (↑ ↻ ↓ total) tell a coherent story:
 	// "lifetime cost grew by $X, context window was reset and now
 	// totals Y since the last of N compactions". See
 	// docs/feat/F-49-compaction-counter.md §1.5.

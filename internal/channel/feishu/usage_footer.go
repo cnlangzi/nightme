@@ -12,7 +12,7 @@
 //
 // Line 2 (F-45 + F-49 token semantics):
 //
-//	💰 ↓ in · ↻ cached · ↑ out · Total · $cost
+//	💰 ↑ in · ↻ cached · ↓ out · Total · $cost
 //
 // Line 3 (F-48 follow-up to F-45):
 //
@@ -61,14 +61,14 @@ import (
 // display). The arrow glyphs (↓ ↻ ↑) act as inline semantic
 // markers without taking label real estate.
 //
-//	💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k · $0.087
+//	💰 ↑ 12.3k · ↻ 8.2k · ↓ 1.5k · 22.0k · $0.087
 //
 // Each segment is omitted independently:
 //   - Line 1: Agent omitted when "". Model omitted when "".
 //   - Line 2 tokens:
-//       ↓ in:    InputTokens + CacheCreationInputTokens == 0 → omit
+//       ↑ in:    InputTokens + CacheCreationInputTokens == 0 → omit
 //       ↻ cache: CacheReadInputTokens == 0 → omit
-//       ↑ out:   OutputTokens == 0 → omit
+//       ↓ out:   OutputTokens == 0 → omit
 //       Total:   omitted when all three token segments above are
 //                omitted (i.e. total == 0). Otherwise shows the
 //                raw sum so users see the absolute number.
@@ -120,17 +120,17 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 		lines = append(lines, strings.Join(idParts, " "))
 	}
 
-	// Line 2: tokens + cost (💰 ↓ X · ↻ X · ↑ X · Total · $X).
+	// Line 2: tokens + cost (💰 ↑ X · ↻ X · ↓ X · Total · $X).
 	tokParts := make([]string, 0, 6)
 	in := u.InputTokens + u.CacheCreationInputTokens
 	if in > 0 {
-		tokParts = append(tokParts, "↓ "+abbrevTokens(in))
+		tokParts = append(tokParts, "↑ "+abbrevTokens(in))
 	}
 	if u.CacheReadInputTokens > 0 {
 		tokParts = append(tokParts, "↻ "+abbrevTokens(u.CacheReadInputTokens))
 	}
 	if u.OutputTokens > 0 {
-		tokParts = append(tokParts, "↑ "+abbrevTokens(u.OutputTokens))
+		tokParts = append(tokParts, "↓ "+abbrevTokens(u.OutputTokens))
 	}
 	total := in + u.CacheReadInputTokens + u.OutputTokens
 	if total > 0 {

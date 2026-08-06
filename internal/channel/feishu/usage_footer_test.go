@@ -37,6 +37,84 @@ func TestFormatSessionFooterLines_IdentityOnly(t *testing.T) {
 	}
 }
 
+// TestFormatSessionFooterLines_CompactionSegment (F-49) covers
+// the Line 1 "🗜 N" segment that records how many context-
+// compaction cycles this AgentSession has gone through. The
+// segment is appended after Agent · Model when N > 0; the
+// F-45 §1.6 zero-omit convention keeps brand-new sessions clean.
+func TestFormatSessionFooterLines_CompactionSegment(t *testing.T) {
+	tests := []struct {
+		name string
+		ctx  *gateway.SessionContext
+		want []string
+	}{
+		{
+			name: "count=0 — segment omitted",
+			ctx:  &gateway.SessionContext{Agent: "claude", Model: "opus-4-5"},
+			want: []string{"🤖 claude · opus-4-5"},
+		},
+		{
+			name: "count=1 — single compaction renders",
+			ctx: &gateway.SessionContext{
+				Agent: "claude", Model: "opus-4-5",
+				CompactionCount: 1,
+			},
+			want: []string{"🤖 claude · opus-4-5 · 🗜 1"},
+		},
+		{
+			name: "count=3 — multiple compactions render verbatim",
+			ctx: &gateway.SessionContext{
+				Agent: "claude", Model: "opus-4-5",
+				CompactionCount: 3,
+			},
+			want: []string{"🤖 claude · opus-4-5 · 🗜 3"},
+		},
+		{
+			name: "count=12 — double-digit renders verbatim",
+			ctx: &gateway.SessionContext{
+				Agent: "claude", Model: "opus-4-5",
+				CompactionCount: 12,
+			},
+			want: []string{"🤖 claude · opus-4-5 · 🗜 12"},
+		},
+		{
+			name: "count without Agent/Model — segment still emits",
+			// Edge case: only the compaction counter is known.
+			// Should still render — the counter alone is
+			// informationally meaningful even without identity.
+			ctx: &gateway.SessionContext{CompactionCount: 2},
+			want: []string{"🤖 · 🗜 2"},
+		},
+		{
+			name: "count + tokens — both lines populated",
+			// End-to-end: identity + compaction on Line 1,
+			// tokens on Line 2. Confirms the segment doesn't
+			// bleed into Line 2 (different rhythm, · 🗜 N only
+			// appears once).
+			ctx: &gateway.SessionContext{
+				Agent: "claude", Model: "opus-4-5",
+				CompactionCount: 2,
+				CumulativeUsage: gateway.UsageInfo{
+					InputTokens: 12_300, OutputTokens: 1_500,
+					CacheReadInputTokens: 8_200,
+				},
+			},
+			want: []string{
+				"🤖 claude · opus-4-5 · 🗜 2",
+				"💰 ↑ 12.3k · ↻ 8.2k · ↓ 1.5k · 22.0k",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatSessionFooterLines(tc.ctx)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestFormatSessionFooterLines_TokenSegments(t *testing.T) {
 	ctx := &gateway.SessionContext{
 		Agent: "claude",

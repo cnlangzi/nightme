@@ -1,0 +1,111 @@
+// Package newcmd implements the `/new [<agent>]` slash command.
+//
+// F-34: `/new [<agent>]` resets the conversation context on
+// AgentSessions in this chat's pool without terminating any CLI
+// process or transport. Equivalent to claudecode's `/clear`,
+// pi's `new_session` RPC, or ACP's `session/new` JSON-RPC — but
+// issued from the IM channel.
+//
+// Semantics (see docs/feat/F-34-new-slash-command.md §4):
+//
+//	/new         → reset all AgentSessions in activeCwd
+//	/new <agent> → reset only the AgentSession named <agent> in activeCwd
+//
+// In both cases the InputBuffer queued messages are cleared.
+// Pool identity (AgentSession.ID / Cwd / Agent / args) is
+// preserved.
+//
+// The package is named `newcmd` because `new` is a Go keyword
+// and would shadow the builtin. The /new slash command Spec name
+// is unchanged.
+package newcmd
+
+import (
+	"context"
+	"fmt"
+	"strings"
+
+	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/command"
+)
+
+// Factory is the command.SlashCommandFactory for /new.
+type Factory struct {
+	mgr            *chatsession.Manager
+	defaultPrimary string
+}
+
+// NewFactory constructs a Factory backed by mgr.
+func NewFactory(mgr *chatsession.Manager, defaultPrimary string) *Factory {
+	return &Factory{mgr: mgr, defaultPrimary: defaultPrimary}
+}
+
+// Spec implements command.SlashCommandFactory.
+func (f *Factory) Spec() command.Spec {
+	return command.Spec{
+		Name:    "new",
+		Summary: "Reset conversation context: /new for all sessions in current workspace, /new <agent> for one",
+		Usage:   "/new [<agent>]",
+	}
+}
+
+// Handle implements command.SlashCommandFactory.
+func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
+	input command.SlashInput) (*command.SlashOutput, error) {
+
+	cs := f.mgr.GetOrCreate(input.ChatID, f.defaultPrimary)
+
+	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
+		return failOut, nil
+	}
+
+	agentName := ""
+	if len(input.Args) > 1 {
+		agentName = strings.TrimSpace(input.Args[1])
+		if agentName == "" {
+			return command.Reply(ctx, rt, "Usage: /new [<agent>]"), nil
+		}
+	}
+
+	matched, _, results, err := cs.NewActiveAgentSessions(ctx, agentName)
+
+	// F-45 §1.8: /new is the ONLY event that clears cumulative
+	// token / cost stats on the AgentSession. Bridge New()
+	// already reset the conversation context; runtime resets the
+	// counter so the footer starts from zero on the next reply.
+	// PersistAgentSession is called immediately so the cleared
+	// state survives daemon restart even if no further turn
+	// completes (and thus no EventDone-triggered persist fires).
+	for _, r := range results {
+		if r.Session == nil || r.Error != nil {
+			continue
+		}
+		r.Session.ResetCumulative()
+		if f.mgr != nil {
+			if persistErr := f.mgr.PersistAgentSession(r.Session); persistErr != nil {
+				// Don't clobber the primary error if
+				// NewActiveAgentSessions already returned one
+				// — log and move on.
+				if err == nil {
+					err = persistErr
+				}
+			}
+		}
+	}
+
+	if matched == 0 {
+		if agentName != "" {
+			return command.Reply(ctx, rt, fmt.Sprintf(
+				"No agent session for %q in current workspace. Try /agents.",
+				agentName)), nil
+		}
+		return command.Reply(ctx, rt,
+			"No agent session in current workspace to reset. Send a message to start one."), nil
+	}
+
+	text := chatsession.FormatResetResults(results)
+	if err != nil {
+		text += fmt.Sprintf(" (errors: %v)", err)
+	}
+	return command.Reply(ctx, rt, text), nil
+}

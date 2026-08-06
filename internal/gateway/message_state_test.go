@@ -2,10 +2,39 @@ package gateway
 
 import (
 	"context"
+	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
+
+// fakeChannel is a minimal Channel implementation used by
+// gateway-level tests (kept local because the legacy shared
+// definition lived in the deleted handlers_chatsession_test.go).
+// Records every Send / SendCard so tests can assert on the
+// resulting OutboundMessages.
+type fakeChannel struct {
+	mu    sync.Mutex
+	sends []OutboundMessage
+}
+
+func (c *fakeChannel) Name() string { return "fake" }
+func (c *fakeChannel) Incoming() <-chan InboundMessage {
+	return make(<-chan InboundMessage)
+}
+func (c *fakeChannel) Send(_ context.Context, m OutboundMessage) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sends = append(c.sends, m)
+	return nil
+}
+func (c *fakeChannel) SendCard(_ context.Context, m OutboundMessage) (string, error) {
+	_ = c.Send(context.Background(), m)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return "fake-card-" + strconv.Itoa(len(c.sends)), nil
+}
 
 // TestOnMessageState_TranslatesToOutbound verifies that
 // Gateway.OnMessageState produces the right OutboundMessage

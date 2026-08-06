@@ -35,10 +35,17 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel/feishu"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/command/cwd"
+	"github.com/cnlangzi/nightme/internal/command/kill"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
+	"github.com/cnlangzi/nightme/internal/command/think"
+	"github.com/cnlangzi/nightme/internal/command/tools"
+	"github.com/cnlangzi/nightme/internal/command/use"
+	"github.com/cnlangzi/nightme/internal/command/watch"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
+	newcmd "github.com/cnlangzi/nightme/internal/command/newcmd"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -315,7 +322,13 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// WithOnCreate + RestoreFromRegistry so the order can't be
 	// inverted at the call site.
 	gwImpl := gateway.New(messageDispatcher).(*gateway.Router)
-	gateway.RegisterChatSessionCommands(gwImpl, mgr, ch, cfg.Primary)
+	// ADR 0007 + B5: all 7 chat-session commands (/cwd /use /kill
+	// /new /watch /think /tools) and /gtw are now SlashCommandFactory
+	// implementations registered with reg.Register below. The legacy
+	// gateway.RegisterChatSessionCommands helper is deleted; the
+	// gateway only sees the slash-command path via WithCommander
+	// (the shim below) and the reaction path via WithActionHandler.
+	_ = gwImpl
 
 	// F-51: gtw moved to internal/command/gtw. Wiring is now
 	// (a) gtw.Manager owns the state, (b) services.ReactionRouter
@@ -360,6 +373,13 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	gtwFactory := gtw.NewFactoryWithDeps(gtwMgr, gtwDeps)
 	reg := command.NewRegistry()
 	reg.Register(gtwFactory)
+	reg.Register(watch.NewFactory(mgr, cfg.Primary))
+	reg.Register(think.NewFactory(mgr, cfg.Primary))
+	reg.Register(tools.NewFactory(mgr, cfg.Primary))
+	reg.Register(cwd.NewFactory(mgr, cfg.Primary))
+	reg.Register(use.NewFactory(mgr, cfg.Primary))
+	reg.Register(kill.NewFactory(mgr))
+	reg.Register(newcmd.NewFactory(mgr, cfg.Primary))
 	commander := command.NewCommander(reg)
 
 	// RuntimeServices — ADR 0007 dropped the Session field.

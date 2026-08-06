@@ -696,6 +696,62 @@ func TestWireRuntimeCallbacksAndRestore_InstallsHandlersOnRestoredChats(t *testi
 	}
 }
 
+// TestWireRuntimeCallbacksAndRestore_MessageStateDropsEmptyIDs
+// (review fix): the F-48 wrapper that replaced gwImpl.OnMessageState
+// must replicate the gateway's early-return-on-empty-IDs guard.
+// Without it, an EmitMessageState("", "", ...) would push an
+// OutboundMessage with empty ChatID / MessageID to the channel —
+// the Feishu adapter rejects MessageState with missing MessageID,
+// and an empty ChatID would route to the wrong chat.
+func TestWireRuntimeCallbacksAndRestore_MessageStateDropsEmptyIDs(t *testing.T) {
+	csFile, asFile := newWireTestStores(t)
+	seedPersistedChatForWire(t, csFile, "oc_drop", "claude")
+
+	mgr := chatsession.NewManager().WithPersistence(csFile, asFile)
+	ch := echo.New("test", io.Discard)
+	gwImpl := gateway.New(func(_ context.Context, _ *gateway.InboundMessage) error { return nil }).(*gateway.Router)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	if err := wireRuntimeCallbacksAndRestore(mgr, ch, gwImpl, logger); err != nil {
+		t.Fatalf("wireRuntimeCallbacksAndRestore: %v", err)
+	}
+
+	csList := mgr.List()
+	if len(csList) != 1 {
+		t.Fatalf("mgr.List len = %d, want 1", len(csList))
+	}
+	cs := csList[0]
+	handler := cs.MessageStateHandler()
+	if handler == nil {
+		t.Fatal("MessageStateHandler is nil")
+	}
+
+	// Empty chatID: handler must return silently without sending.
+	handler("", "om_user", agent.MessageForwarded)
+	if got := ch.Record(); len(got) != 0 {
+		t.Errorf("empty chatID should drop silently; got %d events", len(got))
+	}
+
+	// Empty userMsgID: same.
+	handler(cs.ChatID, "", agent.MessageForwarded)
+	if got := ch.Record(); len(got) != 0 {
+		t.Errorf("empty userMsgID should drop silently; got %d events", len(got))
+	}
+
+	// Both empty: same.
+	handler("", "", agent.MessageForwarded)
+	if got := ch.Record(); len(got) != 0 {
+		t.Errorf("both empty should drop silently; got %d events", len(got))
+	}
+
+	// Sanity: a valid call DOES produce an OutboundMessage (so
+	// the silent drop is targeted, not "the handler never fires").
+	handler(cs.ChatID, "om_user", agent.MessageDone)
+	if got := ch.Record(); len(got) != 1 {
+		t.Errorf("valid call should fire; got %d events", len(got))
+	}
+}
+
 // TestWireRuntimeCallbacksAndRestore_NoPersistence verifies the
 // helper handles the cold-start path (no chat_sessions.json yet):
 // WithOnCreate is set, RestoreFromRegistry is a no-op, no error.

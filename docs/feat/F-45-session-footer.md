@@ -361,8 +361,8 @@ claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k   
 
 | 段 | 来源 | Omit 规则 |
 |---|---|---|
-| 📁 `<workspace>` | `SessionContext.Workspace` = `s.Cwd` | 整段在 Workspace=="" 时省略 |
-| ⎇ `<branch>` | `GitStatus.Branch` | 永远显示；`Branch==""`（detached HEAD / not-a-repo）→ 写 `?` |
+| 📁 `<workspace>` | `SessionContext.Workspace` = `s.Cwd` | 整段在 Workspace=="" 或 `GitStatus==nil` 时省略（review fix：non-git workspace 不显示误导性的 "⎇ ?"） |
+| ⎇ `<branch>` | `GitStatus.Branch` | 永远显示（当行渲染时）；`Branch==""`（detached HEAD 在 git repo 内）→ 写 `?` |
 | ↑ `<n>` | `GitStatus.Uncommitted` | `n==0` 省略 |
 | ? `<n>` | `GitStatus.Untracked` | `n==0` 省略 |
 | ⇡ `<n>` | `GitStatus.AheadOfRemote` | `HasUpstream==false \|\| n==0` 省略 |
@@ -380,8 +380,9 @@ claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k   
 **Stamping 规则**：
 - 在 `cmd/nightme/run.go::newEventHandler` 的 4 个 main-chat kind 上 stamp
 - 每次 stamp 都跑 `gtw.CollectStatus(s.Cwd, gtw.ExecGitRunner{})` —— **无缓存**，footer 永远反映当前 worktree
+- Git 调用的 **3 秒 deadline**（review fix）：stalled NFS / broken .git/index 不能阻塞消息路径；超时返回 (nil, nil)，footer 静默省略 git 段
 - `Workspace` = `s.Cwd`（immutable 字段，无锁读）
-- `GitStatus` = parse 结果；非 git repo / git 失败 → `nil`（整段省略）
+- `GitStatus` = parse 结果；非 git repo / git 失败 / git 超时 → `nil`（整段省略）
 - stamp condition 扩展：`hasGit := gitSnap != nil && s.Cwd != ""`；其他 usage/model 条件不变
 
 **Wire 形态**（`gateway.SessionContext`）：

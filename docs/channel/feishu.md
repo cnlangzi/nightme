@@ -2061,8 +2061,8 @@ type GitStatusSnapshot struct {
 
 | 段 | 来源 | Omit 规则 |
 |---|---|---|
-| 📁 `<workspace>` | `Workspace` = `s.Cwd` | `Workspace==""` 整段省略 |
-| ⎇ `<branch>` | `GitStatus.Branch` | 永远显示;`Branch==""` → 写 `?`(detached / not-a-repo) |
+| 📁 `<workspace>` | `Workspace` = `s.Cwd` | `Workspace=="" \|\| GitStatus==nil` 整段省略(review fix: non-git workspace 不显示误导性的 `⎇ ?`) |
+| ⎇ `<branch>` | `GitStatus.Branch` | 永远显示(行渲染时);`Branch==""` → 写 `?`(detached HEAD inside a real git repo) |
 | ↑ `<n>` | `GitStatus.Uncommitted` | `n==0` 省略 |
 | ? `<n>` | `GitStatus.Untracked` | `n==0` 省略 |
 | ⇡ `<n>` | `GitStatus.AheadOfRemote` | `HasUpstream==false \|\| n==0` 省略 |

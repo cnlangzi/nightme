@@ -255,16 +255,18 @@ func TestFormatGitLine_NoWorkspaceReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestFormatGitLine_NoGitStatusShowsWorkspaceAndBranchAsQuestionMark(t *testing.T) {
-	// Workspace set but no GitStatus snapshot — caller
-	// couldn't collect (non-repo / git error). Render the
-	// workspace + "⎇ ?" so users see "we tried but have no
-	// branch info" rather than dropping the segment entirely.
+// TestFormatGitLine_NoGitStatusOmitsLine (F-48 review fix):
+// when Workspace is set but GitStatus is nil (caller couldn't
+// collect — non-repo / git error / git timeout), the entire
+// footer line must be omitted. Rendering "📁 <ws> · ⎇ ?" would
+// imply Git tracking is available when it isn't — the user's
+// review caught this as a misleading UI bug. The "⎇ ?" rendering
+// is reserved for detached HEAD inside a real git repo
+// (Branch=="" + GitStatus!=nil).
+func TestFormatGitLine_NoGitStatusOmitsLine(t *testing.T) {
 	ctx := &gateway.SessionContext{Workspace: "/home/devin/code/nightme"}
-	got := formatGitLine(ctx)
-	want := "📁 code/nightme · ⎇ ?"
-	if got != want {
-		t.Fatalf("got %q, want %q", got, want)
+	if got := formatGitLine(ctx); got != "" {
+		t.Fatalf("Workspace set + GitStatus nil should omit line, got %q", got)
 	}
 }
 

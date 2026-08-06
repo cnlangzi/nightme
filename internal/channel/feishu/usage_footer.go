@@ -248,6 +248,17 @@ func formatGitLine(ctx *gateway.SessionContext) string {
 	if ctx.Workspace == "" {
 		return ""
 	}
+	// Non-Git workspaces (Workspace set, GitStatus nil) must drop
+	// the entire line — rendering "📁 <ws> · ⎇ ?" would imply
+	// Git tracking is available when it's not (caller couldn't
+	// collect because the workspace isn't a git repo, git is
+	// missing, or git failed). F-48 documented contract:
+	// "Workspace=='' OR GitStatus==nil → entire line omitted."
+	// The "⎇ ?" rendering is reserved for detached HEAD inside
+	// an actual git repo (Branch=="" + GitStatus!=nil).
+	if ctx.GitStatus == nil {
+		return ""
+	}
 	ws := formatWorkspacePath(ctx.Workspace)
 	if ws == "" {
 		return ""
@@ -257,21 +268,19 @@ func formatGitLine(ctx *gateway.SessionContext) string {
 
 	// Branch segment (always present when line is shown).
 	branch := "?"
-	if ctx.GitStatus != nil && ctx.GitStatus.Branch != "" {
+	if ctx.GitStatus.Branch != "" {
 		branch = ctx.GitStatus.Branch
 	}
 	parts = append(parts, "⎇ "+branch)
 
-	if ctx.GitStatus != nil {
-		if ctx.GitStatus.Uncommitted > 0 {
-			parts = append(parts, fmt.Sprintf("↑ %d", ctx.GitStatus.Uncommitted))
-		}
-		if ctx.GitStatus.Untracked > 0 {
-			parts = append(parts, fmt.Sprintf("? %d", ctx.GitStatus.Untracked))
-		}
-		if ctx.GitStatus.HasUpstream && ctx.GitStatus.AheadOfRemote > 0 {
-			parts = append(parts, fmt.Sprintf("⇡ %d", ctx.GitStatus.AheadOfRemote))
-		}
+	if ctx.GitStatus.Uncommitted > 0 {
+		parts = append(parts, fmt.Sprintf("↑ %d", ctx.GitStatus.Uncommitted))
+	}
+	if ctx.GitStatus.Untracked > 0 {
+		parts = append(parts, fmt.Sprintf("? %d", ctx.GitStatus.Untracked))
+	}
+	if ctx.GitStatus.HasUpstream && ctx.GitStatus.AheadOfRemote > 0 {
+		parts = append(parts, fmt.Sprintf("⇡ %d", ctx.GitStatus.AheadOfRemote))
 	}
 
 	return strings.Join(parts, " · ")

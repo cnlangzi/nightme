@@ -532,6 +532,15 @@ func wireRuntimeCallbacksAndRestore(
 		// Other states (Received / Done / Error) don't need the
 		// stamp — they don't create UI.
 		cs.SetMessageStateHandler(func(chatID, userMsgID string, state agent.MessageState) {
+			// Review fix: replicate the gateway's identifier
+			// validation. Empty chatID / userMsgID would produce
+			// an OutboundMessage with empty routing fields, which
+			// the Feishu adapter rejects ("feishu: OutMessageState
+			// missing MessageID") and which previously was a
+			// silent no-op via gwImpl.OnMessageState's early return.
+			if chatID == "" || userMsgID == "" {
+				return
+			}
 			out := gateway.OutboundMessage{
 				Kind:    gateway.OutMessageState,
 				ChatID:  chatID,
@@ -767,6 +776,16 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 // commits). Returns (nil, nil) for non-repo / git-failure; we
 // treat that as "no git segment" in the footer render path.
 //
+// Git invocation has a 3s deadline (review fix): a hung git
+// (stalled NFS, broken .git/index, ... ) would otherwise block
+// the entire outbound-message pipeline — MessageForwarded
+// placeholders AND every stamped reply/result wait for git to
+// return. 3s is plenty for normal repos (10-50ms typical; up to
+// ~1s on very large monorepos) and far below the user's
+// "chat is not realtime" tolerance. On timeout, CollectStatus
+// returns (nil, nil) and the footer omits the git segment
+// silently — chat keeps moving.
+//
 // Stamp SessionContext when ANY token field or cost is non-zero
 // OR when Model has been captured OR when git status is
 // available. The CacheCreationInputTokens field must be included
@@ -780,8 +799,9 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 // Model() and CumulativeUsage() take RLock internally.
 func sessionContextInto(out *gateway.OutboundMessage, s *chatsession.AgentSession) {
 	snap := s.CumulativeUsage()
-	gitSnap, _ := gtw.CollectStatus(context.Background(), s.Cwd,
-		gtw.ExecGitRunner{})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	gitSnap, _ := gtw.CollectStatus(ctx, s.Cwd, gtw.ExecGitRunner{})
+	cancel()
 	hasGit := gitSnap != nil && s.Cwd != ""
 	if snap.InputTokens != 0 || snap.OutputTokens != 0 ||
 		snap.CacheCreationInputTokens != 0 ||

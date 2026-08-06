@@ -69,15 +69,18 @@ type commander struct {
 //   - Trim leading/trailing whitespace from input.Text.
 //   - Must start with "/" to be considered a slash command.
 //   - The first whitespace-delimited token is the command name
-//     (e.g. "/gtw"); the rest is passed through as
-//     input.Args[1:] (input.Args[0] is the bare command name
-//     if the gateway pre-parsed; the commander does NOT
-//     re-parse if Args is already populated).
-//   - If Args is non-empty, use Args[0] as the command name.
-//   - Otherwise split Text on whitespace and take element 0,
-//     strip the leading "/".
+//     (e.g. "/gtw"); the rest is the trailing argv.
+//   - If input.Args is empty (the runtime shim's default), the
+//     commander builds Args = [cmdName, ...trailing] so that
+//     factories can read input.Args[1:] to find the first
+//     trailing token, input.Args[2:] for the second, etc. —
+//     matching the convention documented in each Factory.Handle.
+//   - The commander always parses from Text; if a future caller
+//     pre-populates input.Args, the trailing-token fields are
+//     NOT updated (the commander does not know whether the
+//     pre-parsed argv matches the Text-parse argv).
 func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, input SlashInput) (*SlashOutput, bool, error) {
-	cmdName, args, isCommand := c.extractCommand(input)
+	cmdName, trailingArgs, isCommand := c.extractCommand(input)
 	if !isCommand {
 		// Not a slash command at all (no "/" prefix, or just "/").
 		// Fall through to the agent loop.
@@ -95,14 +98,15 @@ func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, input Slas
 		return &SlashOutput{Consumed: false}, true, nil
 	}
 
-	// Make sure Args is populated; if the gateway didn't
-	// pre-parse, fill it from the post-name text.
+	// Build [cmdName, ...trailing] when the caller did not pre-parse.
+	// Currently only the empty-Args case is exercised (the runtime
+	// shim sets Args=[]); the else-if branch is kept as a safety net
+	// for a future caller that pre-parses one token and leaves room
+	// for the commander to fill trailing.
 	if len(input.Args) == 0 {
-		input.Args = append([]string{cmdName}, args...)
-	} else if len(input.Args) == 1 && len(args) > 0 {
-		// Gateway parsed but the runtime wants the trailing
-		// args — append them.
-		input.Args = append(input.Args, args...)
+		input.Args = append([]string{cmdName}, trailingArgs...)
+	} else if len(input.Args) == 1 && len(trailingArgs) > 0 {
+		input.Args = append(input.Args, trailingArgs...)
 	}
 
 	out, err := cmd.Handle(ctx, rt, input)

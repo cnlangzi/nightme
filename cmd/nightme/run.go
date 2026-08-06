@@ -328,7 +328,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// gateway.RegisterChatSessionCommands helper is deleted; the
 	// gateway only sees the slash-command path via WithCommander
 	// (the shim below) and the reaction path via WithActionHandler.
-	_ = gwImpl
 
 	// F-51: gtw moved to internal/command/gtw. Wiring is now
 	// (a) gtw.Manager owns the state, (b) services.ReactionRouter
@@ -421,7 +420,14 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		}
 		out, handled, err := commander.Dispatch(ctx, rt, input)
 		if err != nil {
-			return &gateway.CommandResult{Consumed: true, Reply: "❌ " + err.Error()}, nil
+			errText := "❌ " + err.Error()
+			_ = ch.Send(ctx, gateway.OutboundMessage{
+				ChatID:  msg.ChatID,
+				Kind:    gateway.OutReply,
+				Text:    errText,
+				ReplyTo: msg.MessageID,
+			})
+			return &gateway.CommandResult{Consumed: true, Reply: errText}, nil
 		}
 		if !handled {
 			// Plain text (no "/" prefix) or just "/" alone.
@@ -432,6 +438,24 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		// handled=true. out may be Consumed=true (command replied)
 		// or Consumed=false (slash command attempt with no
 		// matching factory — fall through to agent loop).
+		//
+		// The CommandResult.Reply text MUST be pushed through the
+		// channel here — the gateway's dispatchLoop only logs the
+		// result and never calls ch.Send on it. Without this send,
+		// users get no feedback from /cwd /use /kill /new /watch
+		// /think /tools /gtw. Pre-F-51 the gateway.handlers_*
+		// files did this inline via a `reply(ctx, channel, ...)`
+		// helper; the F-51 commander abstraction moved the
+		// channel into the runtime shim, so the send responsibility
+		// lives here.
+		if out.Consumed && out.Reply != "" {
+			_ = ch.Send(ctx, gateway.OutboundMessage{
+				ChatID:  msg.ChatID,
+				Kind:    gateway.OutReply,
+				Text:    out.Reply,
+				ReplyTo: msg.MessageID,
+			})
+		}
 		return &gateway.CommandResult{
 			Consumed: out.Consumed,
 			Dropped:  out.Dropped,

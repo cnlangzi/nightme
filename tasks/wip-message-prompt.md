@@ -1,6 +1,7 @@
 # 开发任务：Message / Prompt 改名与对象化
 
-> **Status**: 设计已确认，待排期实现
+> **Status**: ✅ **Phase 0 已落地**（commits `5999057` + `9b3cd38` + `14b9dc6` + `fa5e9c5` on `main`，
+>   PR #65, 2026-08-08）。Phase 1（`!ok` 分支 `endPrompt(ProcessDied)` 收口 + `SetAgentExitObserver` 接线）仍 TBD。
 > **Design doc**: [`docs/feat/message_lifecycle.md`](../docs/feat/message_lifecycle.md)（先读这个，理解
 >   "为什么"和"最终形态"；本文档只管"怎么改代码"）
 > **Scope**: `internal/chatsession`（`Message`/`Prompt` 核心对象）+ `internal/agent`（`MessageState`/

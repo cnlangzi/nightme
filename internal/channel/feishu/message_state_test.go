@@ -159,10 +159,7 @@ func TestSend_OutMessageState_FirstReceivedNotSkipped(t *testing.T) {
 }
 
 // TestSend_OutMessageState_QueuedRenders verifies that
-// MessageQueued (⏳) is rendered as a user-message reaction. F-53
-// follow-up: the user-message reaction surface is now minimal —
-// only MessageQueued renders; MessageSubmitted and MessageDropped
-// return "" from mapStateToFeishuEmoji and are silent.
+// MessageQueued (⏳) is rendered as a user-message reaction.
 func TestSend_OutMessageState_QueuedRenders(t *testing.T) {
 	a := testAdapter(t)
 	ctx := context.Background()
@@ -187,6 +184,41 @@ func TestSend_OutMessageState_QueuedRenders(t *testing.T) {
 	}
 	a.mu.Lock()
 	_, hasEntry := a.messageStates.Get("om_msg_q")
+	a.mu.Unlock()
+	if hasEntry {
+		t.Errorf("after failed AddReaction, messageStates should be reverted (no entry); got hasEntry=true")
+	}
+}
+
+// TestSend_OutMessageState_SubmittedRenders verifies that
+// MessageSubmitted (🔄) is rendered as a user-message reaction.
+// F-08: OnIt restored on user message. The reaction sequence on
+// the user message is now ⏳ → 🔄 → (stays); terminal progress
+// lives on the receipt card via PromptState.
+func TestSend_OutMessageState_SubmittedRenders(t *testing.T) {
+	a := testAdapter(t)
+	ctx := context.Background()
+
+	a.mu.Lock()
+	a.messageStates.Remove("om_msg_s")
+	a.mu.Unlock()
+
+	// MessageSubmitted emit must proceed to AddReaction (not
+	// silently dropped). AddReaction against nil larkClient
+	// returns an error; the dispatcher reverts messageStates.
+	err := a.Send(ctx, gateway.OutboundMessage{
+		Kind:   gateway.OutMessageState,
+		ChatID: "oc_chat",
+		MessageState: &gateway.MessageStatePayload{
+			MessageID: "om_msg_s",
+			State:     agent.MessageSubmitted,
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected AddReaction error against nil larkClient; got nil")
+	}
+	a.mu.Lock()
+	_, hasEntry := a.messageStates.Get("om_msg_s")
 	a.mu.Unlock()
 	if hasEntry {
 		t.Errorf("after failed AddReaction, messageStates should be reverted (no entry); got hasEntry=true")

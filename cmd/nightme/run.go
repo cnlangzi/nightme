@@ -638,7 +638,7 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 				return ch.Send(ctx, gateway.OutboundMessage{
 					ChatID: msg.ChatID,
 					Kind:   gateway.OutReply,
-					Text:   "Input queue full. Send /flush or /clear.",
+					Text:   "Input queue full — the agent is behind. Wait for it to catch up before sending more.",
 				})
 			}
 			return err

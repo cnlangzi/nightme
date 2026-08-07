@@ -355,6 +355,17 @@ func (as *AgentSession) NewPromptID() string {
 // Submit, readpumpLoop, endPrompt). External callers should
 // prefer the higher-level API: Submit, IsReady, Events.
 func (as *AgentSession) CurrentPrompt() *Prompt {
+	// MUST take asMu: Submit installs currentPrompt under
+	// asMu.Lock and endPrompt clears it there too, both from other
+	// goroutines. Reading the field bare is a data race (caught by
+	// TestSubmit_AnchorWriteIsRaceFree under -race).
+	//
+	// No caller holds asMu when calling this — it is a public
+	// accessor used from CS-side code and tests; the internal
+	// readpump/endPrompt paths touch as.currentPrompt directly
+	// while already holding the lock.
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
 	return as.currentPrompt
 }
 

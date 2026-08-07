@@ -1486,12 +1486,11 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 	}
 	cs.mu.RUnlock()
 
-	// F-34 Phase 3 review #1: the queue must be cleared even when
-	// no targets matched (e.g. empty pool, wrong cwd, or /new <agent>
-	// with no <agent> in cwd). Otherwise the user's queued message
-	// stays stuck behind an unresponsive session until they /kill or
-	// /cwd.
-	cs.DropQueue()
+	// The queue is deliberately NOT dropped here. /new resets the
+	// agent's conversation context; queued messages are still owed
+	// a reply and flush into the fresh context on the next
+	// TryFlush. (Earlier revisions cleared the queue on /new — see
+	// internal/command/newcmd/cmd.go for the rationale.)
 
 	if len(targets) == 0 {
 		return 0, 0, nil, nil

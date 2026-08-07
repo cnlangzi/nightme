@@ -33,11 +33,23 @@ package claudecode
 //
 // The flag set is intentionally minimal:
 //
-//	--print                       : non-interactive (no TUI)
+//	--print                       : non-interactive (no TUI; each Spawn = one user turn; claude exits after the result event)
 //	--input-format stream-json    : stdin = line-delimited JSON user msgs
 //	--output-format stream-json   : stdout = line-delimited JSON events
 //	--permission-mode bypassPermissions : auto-accept (PLACEHOLDER — Agent.Start rewrites this from cfg.PermissionMode)
 //	--verbose                     : required to enable stream-json output
+//
+// T-alive (2026-08-07): restored `--print` after the multi-turn
+// experiment proved incompatible with chat-session's per-turn
+// respawn model. Without `--print`, claude runs as an interactive
+// TUI-style process that gates `system init` on stdin data — the
+// bridge's Spawn returns with no init in the events channel, and
+// the first user message would hang indefinitely. With `--print`,
+// each Spawn is a single-turn run: init emits immediately, the
+// user message is processed, the result event arrives, and claude
+// exits. The chat-session layer re-Spawns for each subsequent turn
+// with the persisted `--resume <id>` so context is preserved via
+// claude's on-disk session store (not via in-memory state).
 //
 // We deliberately do NOT pass --model. Selection is the user's choice via
 // Claude Code's own config / --settings, and forcing a model here would

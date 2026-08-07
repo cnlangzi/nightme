@@ -54,23 +54,13 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		return command.Reply(ctx, rt, fmt.Sprintf("Kill failed: %v", err)), nil
 	}
 
-	// F-53: drop any queued messages that were waiting for the
-	// killed AgentSession. ClearBuffer flips each to MessageDropped
-	// and wire-emits MessageDropped — the user sees them as
-	// "explicitly cleared" rather than dangling forever. See
-	// docs/feat/message_lifecycle.md §5.1 (MessageDropped
-	// trigger paths).
-	_ = cs.ClearBuffer()
-
-	// F-53 P2 follow-up: reset the InputBuffer FSM to Idle.
-	// KillAll nukes the pool + activeAS but does NOT flip the
-	// FSM; without this, the next user message after /kill would
-	// see state=Busy, get queued, and never be flushed (the new
-	// AS spawned on the next LookupActiveAgentSession can't drive
-	// a flushPending that the dead pump never fires). Calling
-	// SetIdle here puts the buffer back in a state where the
-	// next message can dispatch immediately.
-	cs.SetIdle()
+	// /kill only tears down the agent processes — the queue is
+	// deliberately left intact. Queued messages are still owed a
+	// reply; the next message arriving via QueueUserMessage
+	// triggers a respawn and a TryFlush that drains them against
+	// the fresh AgentSession. (/new is the command that discards
+	// queued work, because resetting context makes those messages
+	// meaningless.)
 
 	return command.Reply(ctx, rt, chatsession.FormatKillResults(results)), nil
 }

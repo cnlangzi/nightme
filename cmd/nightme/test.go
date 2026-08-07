@@ -216,14 +216,20 @@ func pumpIO(cmd *cobra.Command, as *chatsession.AgentSession) error {
 			return
 		}
 		for ev := range events {
-			switch ev.Kind {
+			// ev is now chatsession.EnrichedEvent (CS-AS 边界重构 Phase 1).
+			// Bridge events arrive as KindAgentEvent wrapping the original
+			// agent.AgentEvent.
+			if ev.Kind != chatsession.KindAgentEvent || ev.AgentEvent == nil {
+				continue
+			}
+			switch ev.AgentEvent.Kind {
 			case agent.EventText:
-				_, _ = io.WriteString(out, ev.Text)
+				_, _ = io.WriteString(out, ev.AgentEvent.Text)
 			case agent.EventDone:
 				fmt.Fprintln(out, "\n[nightme] session ended")
 				return
 			case agent.EventError:
-				fmt.Fprintf(out, "\n[nightme] session error: %v\n", ev.Error)
+				fmt.Fprintf(out, "\n[nightme] session error: %v\n", ev.AgentEvent.Error)
 				return
 			}
 		}

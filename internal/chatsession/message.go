@@ -74,4 +74,24 @@ type Message struct {
 	// MessageQueued on construction. See docs/feat/message_lifecycle.md
 	// §4.1 for the state machine.
 	Stage agent.MessageState
+
+	// LastProcessedAt (CS-AS 边界重构 Phase 1) is when the
+	// Prompt this message was merged into ended. Set by
+	// ChatSession.writebackMessageState on KindPromptEnded.
+	// Zero value while still Queued or unmapped to a finished
+	// Prompt.
+	LastProcessedAt time.Time
+
+	// LastPromptID is the most recent Prompt.ID this message was
+	// part of. Same semantics as LastProcessedAt — set by
+	// writebackMessageState. Once a message has flowed through
+	// at least one Prompt, this stays set across subsequent
+	// Prompts (overwritten).
+	LastPromptID string
+
+	// LastEndReason mirrors Prompt.EndReason of the most recent
+	// Prompt this message was merged into. Pure read-only
+	// diagnostic — the runtime uses it for status display
+	// (✅/❌ reaction after the 🔄 placeholder).
+	LastEndReason PromptEndReason
 }

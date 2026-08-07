@@ -1317,6 +1317,33 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 			return nil
 		}
 
+		// T-alive (2026-08-07) — restore the immediate Typing
+		// placeholder card at MessageQueued time. F-53 had moved
+		// this to lazy-on-first-OutReply, but that leaves the user
+		// with ONLY reactions when the bridge stalls (no events
+		// arrive from the agent). Showing the placeholder card at
+		// MessageQueued gives the user immediate visual feedback
+		// ("💬 Working...") so a wedged bridge is at least
+		// observable. The first OutReply / OutResult PATCHes this
+		// same card in place (the existing receipt path), so the
+		// cold-start path in ensureReceiptForReply stays a
+		// no-op when the placeholder already exists.
+		//
+		// Footer is nil here: SessionContext is only stamped on
+		// OutMessageState at MessageSubmitted time (see
+		// cmd/nightme/run.go newEventHandler), not Queued — the
+		// placeholder shows up before the runtime has the AS
+		// handle. The first OutReply fills the footer in via
+		// AppendEntryWithFooter.
+		if state == agent.MessageQueued {
+			if _, _, err := a.ensureReceiptForTyping(ctx, msg.ChatID, messageID, nil); err != nil {
+				// Non-fatal: the reaction still fires, and the
+				// first OutReply will retry the cold-start card.
+				a.logger.Warn("feishu: ensureReceiptForTyping at MessageQueued failed",
+					"err", err, "chat_id", msg.ChatID, "user_msg_id", messageID)
+			}
+		}
+
 		a.mu.Lock()
 		prev, hasPrev := a.messageStates.Get(messageID)
 		// Idempotency: same state twice → drop.

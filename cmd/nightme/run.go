@@ -483,7 +483,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// chatsession.ChatSession.HandleAction (chatsession no
 	// longer dispatches reactions). The shim translates
 	// *commandServices.ReactionEvent → services.ReactionEvent.
-	slog.Default().Warn("F-51 debug: production WithActionHandler installed (router-based)")
 	gwImpl.WithActionHandler(func(ctx context.Context, msg *gateway.InboundMessage) bool {
 		if msg == nil || msg.Reaction == nil {
 			return false
@@ -502,13 +501,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	if err := wireRuntimeCallbacksAndRestore(mgr, ch, gwImpl, logger); err != nil {
 		return fmt.Errorf("run: wire+restore: %w", err)
 	}
-
-	// Start readPumps for already-running AgentSessions that
-	// were restored from disk (Detached → running on next
-	// LookupActiveAgentSession). The daemon does NOT auto-spawn
-	// at startup; users must send a message (which triggers
-	// LookupActiveAgentSession → Spawner).
-	ensureReadPumps(mgr, ch, cfg.Primary, logger)
 
 	if err := gwImpl.Start(ctx); err != nil {
 		return fmt.Errorf("run: start gateway: %w", err)
@@ -582,16 +574,11 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 			})
 		}
 
-		// commit fix-5: start a readPump for the freshly-active
-		// AgentSession. Without this, the spawned claude process
-		// emits events on Events() but no one consumes them — the
-		// user sees "hi" go in but no reply ever comes back.
-		// handleUse also calls StartReadPump, but the FIRST message
-		// (before any /use) only goes through newMessageDispatcher, so we
-		// need to start the pump here too. StartReadPump is
-		// idempotent — it stops any existing pump first, so calling
-		// it again from handleUse is a no-op.
-		_ = cs.StartReadPump()
+		// CS-AS 边界重构 Phase 1: readpump is now per-AS (started
+		// by Spawn inside AgentSession). The chat layer just consumes
+		// the enriched event stream via cs.PumpEvents (launched in
+		// wireRuntimeCallbacksAndRestore). No StartReadPump call here
+		// — the old per-CS readpump file is gone.
 
 		// F-31 / F-53: dispatch successful — message has reached the
 		// AgentSession. Emit MessageSubmitted so the channel flips
@@ -647,11 +634,11 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 			Stage:      agent.MessageQueued, // already emitted above; redundant but explicit
 		}
 		if err := cs.QueueUserMessage(userMsg); err != nil {
-			if errors.Is(err, chatsession.ErrBufferFull) {
+			if errors.Is(err, chatsession.ErrQueueFull) {
 				return ch.Send(ctx, gateway.OutboundMessage{
 					ChatID: msg.ChatID,
 					Kind:   gateway.OutReply,
-					Text:   "Input buffer full. Send /flush or /clear.",
+					Text:   "Input queue full — the agent is behind. Wait for it to catch up before sending more.",
 				})
 			}
 			return err
@@ -660,10 +647,6 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 	}
 }
 
-// ensureReadPumps walks every ChatSession and ensures a readPump
-// is running for its current active AgentSession. Called at
-// startup after RestoreFromRegistry; the AgentSessions are
-// Detached (no process), so this is a no-op for restored
 // wireRuntimeCallbacksAndRestore installs the per-ChatSession
 // outbound handlers (EventHandler for AgentEvent → OutboundMessage
 // translation; MessageStateHandler for F-31 lifecycle reactions)
@@ -698,6 +681,25 @@ func wireRuntimeCallbacksAndRestore(
 		return newEventHandler(ch, cs, mgr, logger)
 	}
 	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
+		// Startup audit trail: one line per chat, bounded by the
+		// number of persisted chats — confirms the outbound
+		// wiring (EventHandler / MessageStateHandler /
+		// PromptEndHandler / PumpEvents) is actually installed
+		// for every restored-or-new ChatSession. See the bug
+		// history note on wireRuntimeCallbacksAndRestore above:
+		// a missing/misordered handler here is a silent failure
+		// (no logs, no channel.Send, no reactions), so this line
+		// is the cheapest signal that wiring succeeded.
+		//
+		// Debug-level (not Info) so a daemon with hundreds of
+		// persisted chats doesn't flood the log at startup; use
+		// `Logging.Level: debug` to surface the audit trail
+		// when investigating handler-installation regressions.
+		if logger != nil {
+			logger.Debug("runtime: handlers installed for chat",
+				"chat_id", cs.ChatID,
+				"cs_id", cs.ID)
+		}
 		cs.SetEventHandler(factory(cs))
 		// F-48: wrap the gateway's OnMessageState so the runtime
 		// can stamp SessionContext on MessageSubmitted (the
@@ -763,6 +765,23 @@ func wireRuntimeCallbacksAndRestore(
 				fa.MarkReceiptPromptDone(context.Background(), cid, userMsgID)
 			}
 		})
+
+		// CS-AS 边界重构 Phase 1: launch the per-chat pumpEvents
+		// goroutine. The pump drains cs.ActiveEvents() and dispatches
+		// each EnrichedEvent by Kind:
+		//   - KindAgentEvent   → cs.eventHandler (the closure above)
+		//   - KindPromptEnded  → writebackMessageState (built into
+		//                        cs.PumpEvents — fires onPromptEnd hook)
+		//   - KindLifecycle    → log only
+		// Replaces the per-CS StartReadPump / readRunPump that the
+		// pre-Phase-1 readpump.go file used to install. The new model
+		// has readpump per-AS (started by Spawn), so the chat layer
+		// only consumes the enriched event stream.
+		//
+		// The goroutine ends when cs.ActiveEvents() returns !ok,
+		// which happens when the active AS is Shutdown (for /use this
+		// happens at daemon exit; for /kill, immediately).
+		go cs.PumpEvents(context.Background())
 	})
 	return mgr.RestoreFromRegistry()
 }
@@ -771,15 +790,6 @@ func wireRuntimeCallbacksAndRestore(
 //
 // The runtime's actual readPump start happens in handleUse
 // (gateway package) and on first message dispatch in
-// newMessageDispatcher.
-func ensureReadPumps(mgr *chatsession.Manager, ch channel.Channel, primary string, logger *slog.Logger) {
-	// no-op for now; reserved for future startup-time readPump wiring.
-	_ = mgr
-	_ = ch
-	_ = primary
-	_ = logger
-}
-
 // newEventHandler returns the per-event callback installed on
 // every ChatSession by the runtime. The callback translates
 // AgentEvent → OutboundMessage and dispatches via the channel.
@@ -846,6 +856,17 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.Model != "" {
 			s.SetModel(ev.Init.Model)
 		}
+		// T-alive (2026-08-07): flip the reaction ⌨ → 🔄 ONLY
+		// when EventInit arrives, i.e. when we have proof claude
+		// actually started the new prompt. The dispatcher used
+		// to emit MessageSubmitted right after LookupActiveAgentSession
+		// returns — which gave a false-positive "On It" reaction
+		// whenever the spawn's 60s resume-fallback probe was in
+		// flight (or MCP startup was hung). Now: the reaction only
+		// flips when claude itself confirms it has started.
+		if ev.Kind == agent.EventInit && userMsgID != "" {
+			cs.EmitMessageState(userMsgID, agent.MessageSubmitted)
+		}
 		// Per-turn usage accumulation moved out of an EventUsage
 		// branch (the kind was removed) — the bridge now attaches
 		// Usage to the same AgentEvent that delivers Result (see
@@ -900,6 +921,12 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		// Translate the AgentEvent to an OutboundMessage.
 		out, ok := gateway.Translate(chatID, ev)
 		if !ok {
+			if logger != nil {
+				logger.Debug("runtime: Translate dropped event",
+					"chat_id", chatID,
+					"kind", ev.Kind.String(),
+					"agent_session_id", s.ID)
+			}
 			return
 		}
 		// Fold the per-turn Usage into CumulativeUsage NOW, before
@@ -989,6 +1016,14 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 				"user_msg_id", userMsgID,
 				"agent_session_id", s.ID,
 				"err", err)
+		}
+		if logger != nil {
+			logger.Debug("runtime: ch.Send dispatched",
+				"chat_id", chatID,
+				"user_msg_id", userMsgID,
+				"agent_session_id", s.ID,
+				"kind", out.Kind.String(),
+				"text_len", len(out.Text))
 		}
 	}
 }

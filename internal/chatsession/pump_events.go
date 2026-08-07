@@ -10,7 +10,14 @@
 //                       OutboundMessage via the existing gateway)
 //   - KindPromptEnded → writebackMessageState + onPromptEnd
 //                       (legacy hook for feishu reaction 🔄 → ✅/❌)
-//   - KindLifecycle   → observe (Spawned / Exited notifications)
+//   - KindLifecycle{StatusExited}
+//                     → as.SetExited(0) so the next LookupActiveAgentSession
+//                       sees StatusExited (≠ StatusRunning) and falls
+//                       through to the spawn-with-resume path. Without
+//                       this flip the chat-session reuses a stale
+//                       (closed) bridge handle and SendBlocks silently
+//                       writes to a broken pipe — the user sees the
+//                       "Working..." reaction forever with no response.
 //
 // Lane: per-goroutine, driven by cmd/nightme/run.go instead of
 // the per-CS readpump that was deleted in T13.
@@ -44,12 +51,12 @@ func (cs *ChatSession) ActiveEvents() <-chan EnrichedEvent {
 // goroutine from cmd/nightme/run.go after wiring the chat.
 //
 // Routes:
-//   - KindAgentEvent  → cs.eventHandler (the runtime-installed
-//                       callback, kept for F-44 backward compat)
-//   - KindPromptEnded → cs.writebackMessageState(p) +
-//                       TryFlush (next batch if queue non-empty)
-//   - KindLifecycle   → log only (T+ follow-ups wire Phase 1.5
-//                       observability)
+//   - KindAgentEvent    → cs.eventHandler (the runtime-installed
+//                         callback, kept for F-44 backward compat)
+//   - KindPromptEnded   → cs.writebackMessageState(p) +
+//                         TryFlush (next batch if queue non-empty)
+//   - KindLifecycle{StatusExited}
+//                       → as.SetExited(0) — see package doc
 //
 // Returns when ctx is cancelled (chat shutdown).
 func (cs *ChatSession) PumpEvents(ctx context.Context) {
@@ -110,9 +117,25 @@ func (cs *ChatSession) routeEvent(ev EnrichedEvent) {
 		// will pick up the queued messages if any.
 		_ = cs.TryFlush()
 	case KindLifecycle:
-		// Logged for T+ observability. Phase 1.5 (next PR)
-		// wires `nightme health` to consume this.
-		log.Printf("chatsession: lifecycle event chat=%s as=%s %v", ev.ChatID, ev.AgentSessionID, ev.Lifecycle)
+		// T-alive (2026-08-07): the readpumpLoop emits
+		// KindLifecycle{StatusExited} when the bridge's events
+		// channel closes (claude exited — natural at end of a
+		// --print single-turn, or unexpected crash). We MUST
+		// flip the AS's Status so the next LookupActiveAgentSession
+		// falls through to the spawn-with-resume path; otherwise
+		// the chat-session reuses the closed handle and the user
+		// sees the "Working..." reaction indefinitely with no
+		// OutReply. Main branch did this in readpump.go; feat/alive
+		// moved the loop into per-AS readpump but missed wiring
+		// the consumer side.
+		if ev.Lifecycle != nil && ev.Lifecycle.Status == StatusExited {
+			if as := cs.lookupAS(ev.AgentSessionID); as != nil {
+				as.SetExited(0)
+				log.Printf("chatsession: AS %s marked Exited (claude process exited)", ev.AgentSessionID)
+			}
+		} else {
+			log.Printf("chatsession: lifecycle event chat=%s as=%s %v", ev.ChatID, ev.AgentSessionID, ev.Lifecycle)
+		}
 	}
 }
 

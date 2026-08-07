@@ -143,6 +143,30 @@ type AgentSession struct {
 	compactionCount int
 	cumulativeDirty bool
 
+	// lastContextWindowPct is the per-turn context-window usage
+	// percentage snapshot, computed by AccumulateUsage via Doc 1
+	// formula from the u's four token fields + u.ContextWindow
+	// (API-reported model window size). OVERWRITE not sum — the
+	// value reflects the model's CURRENT context usage at the
+	// latest EventDone-with-Usage, not a lifetime aggregate.
+	//
+	// Skipped when u.ContextWindow == 0 (model didn't report it)
+	// or when used == 0 (nothing to compare) — both leave the
+	// previous snapshot untouched so the footer keeps showing the
+	// last-known % instead of jumping to 0.
+	//
+	// Zeroed by ResetCumulative (/new) and RecordCompaction
+	// (post-compaction the snapshot is misleading until the next
+	// EventDone-with-Usage lands; we don't get a fresh contextWindow
+	// at compaction time so the honest representation is "no
+	// recent data").
+	//
+	// NOT persisted to agent_sessions.json — it's a per-turn
+	// snapshot that only makes sense in the runtime session;
+	// restart drops it and the next EventDone-with-Usage
+	// repopulates.
+	lastContextWindowPct float64
+
 	// F-53: the in-flight Prompt for this AgentSession, or nil if
 	// no Prompt is currently active. Stored on AS (not on
 	// ChatSession) because a Prompt is bound to one specific AS
@@ -630,7 +654,40 @@ func (as *AgentSession) AccumulateUsage(u *agent.UsageEvent) {
 	as.cumulativeUsage.CacheCreationInputTokens += u.CacheCreationInputTokens
 	as.cumulativeUsage.CacheReadInputTokens += u.CacheReadInputTokens
 	as.cumulativeUsage.CostUSD += u.CostUSD
+	// Doc 1: per-turn context-window % via exact Anthropic formula.
+	// Every input is a wire field (no approximation); the
+	// denominator is API-provided per turn (no client-side
+	// hardcoded model window table). Skipped when ContextWindow
+	// is 0 (model didn't report it) or when total used is 0
+	// (nothing to compare) — both leave the previous snapshot
+	// untouched so the footer keeps showing the last-known %
+	// instead of jumping to 0.
+	used := u.InputTokens + u.OutputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+	if used > 0 && u.ContextWindow > 0 {
+		as.lastContextWindowPct = float64(used) / float64(u.ContextWindow) * 100
+	}
 	as.cumulativeDirty = true
+}
+
+// LastContextWindowPct returns the most-recent context-window
+// percentage snapshot, computed by the last AccumulateUsage call
+// via Doc 1's stream-json exact formula. Returns 0 before the
+// first EventDone-with-Usage lands, or when the model didn't
+// report a ContextWindow on that turn (the runtime skipped the
+// pct calc in AccumulateUsage). Snapshot under RLock; safe for
+// concurrent read alongside AccumulateUsage / CumulativeUsage /
+// CompactionCount.
+//
+// Per-turn snapshot semantics (see lastContextWindowPct field
+// doc): the value reflects the model's CURRENT context at the
+// latest turn's EventDone-with-Usage. After ResetCumulative
+// (/new) or RecordCompaction the value is zeroed (no longer
+// "stale pre-{reset,compaction} %"); the next EventDone-with-Usage
+// repopulates it.
+func (as *AgentSession) LastContextWindowPct() float64 {
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
+	return as.lastContextWindowPct
 }
 
 // CumulativeUsage returns a snapshot of this AgentSession's
@@ -660,6 +717,7 @@ func (as *AgentSession) ResetCumulative() {
 	defer as.asMu.Unlock()
 	as.cumulativeUsage = agent.UsageInfo{}
 	as.compactionCount = 0
+	as.lastContextWindowPct = 0 // stale snapshot; next EventDone-with-Usage repopulates
 	as.cumulativeDirty = true
 }
 
@@ -693,6 +751,15 @@ func (as *AgentSession) RecordCompaction() {
 	as.cumulativeUsage.CacheReadInputTokens = 0
 	as.cumulativeUsage.OutputTokens = 0
 	// CostUSD deliberately preserved (lifetime spend).
+	//
+	// The pre-compaction context-window % is now stale (the model's
+	// actual context dropped after the summarize step, but we
+	// don't get a fresh contextWindow at compaction time to
+	// recompute against). Zeroing the snapshot means the footer
+	// omits the "X%" segment until the next EventDone-with-Usage
+	// lands, which is the honest representation of "no recent
+	// data".
+	as.lastContextWindowPct = 0
 	as.cumulativeDirty = true
 }
 

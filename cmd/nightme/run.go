@@ -927,13 +927,39 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 					"kind", ev.Kind.String(),
 					"agent_session_id", s.ID)
 			}
+			// F-52: even when Translate drops EventDone (no
+			// OutboundMessage produced — terminal events don't
+			// surface to the channel), the DoneEvent may carry
+			// Usage from the bridge. Fold it into CumulativeUsage
+			// here so bridges that emit ONLY EventDone-with-Usage
+			// (e.g. Pi-style settled signals without a text
+			// EventResult) still register their per-turn stats.
+			// This is the "single source of truth" path —
+			// ResultEvent.Usage and DoneEvent.Usage are mutually
+			// consistent at the wire level, but only one is
+			// present per turn in practice; this catches the
+			// Done-only case.
+			if ev.Kind == agent.EventDone && ev.Done != nil && ev.Done.Usage != nil {
+				s.AccumulateUsage(ev.Done.Usage)
+			}
 			return
 		}
 		// Fold the per-turn Usage into CumulativeUsage NOW, before
-		// we stamp SessionContext below — single-event design
-		// (ResultEvent.Usage rides with Result). nil is fine
-		// (zero-usage turn / synthetic message).
-		if out.Usage != nil {
+		// we stamp SessionContext below. Sources (in priority
+		// order):
+		//   1. ev.Done.Usage — F-52 universal prompt-end signal
+		//      (Pi-style bridges that emit only EventDone).
+		//   2. out.Usage — populated from ev.Result.Usage by
+		//      Translate for Claude-Code-style bridges that emit
+		//      a text-bearing EventResult.
+		// Done.Usage wins when both are present (the runtime is
+		// the single accumulator and Done is the universal
+		// signal); out.Usage is the canonical source otherwise.
+		// Both paths are no-ops when nil.
+		switch {
+		case ev.Kind == agent.EventDone && ev.Done != nil && ev.Done.Usage != nil:
+			s.AccumulateUsage(ev.Done.Usage)
+		case out.Usage != nil:
 			s.AccumulateUsage(out.Usage)
 		}
 		// Stamp the current turn's anchor so the Channel can
@@ -1075,17 +1101,26 @@ func sessionContextInto(out *gateway.OutboundMessage, s *chatsession.AgentSessio
 	// the snapshot is internally consistent (count + token stats
 	// refer to the same point in time). See
 	// docs/feat/F-49-compaction-counter.md §1.5 / §1.8.
+	//
+	// ContextWindowPct: per-turn snapshot (not cumulative) from
+	// LastContextWindowPct() — see docs/feat/F-45-session-footer.md
+	// §1.5 / §1.6. Included in the predicate so a turn with only
+	// a fresh context % (no other usage) still emits a
+	// SessionContext (the footer wants the "X%" segment).
+	pct := s.LastContextWindowPct()
 	if snap.InputTokens != 0 || snap.OutputTokens != 0 ||
 		snap.CacheCreationInputTokens != 0 ||
 		snap.CacheReadInputTokens != 0 || snap.CostUSD != 0 ||
-		s.Model() != "" || hasGit || s.CompactionCount() > 0 {
+		s.Model() != "" || hasGit || s.CompactionCount() > 0 ||
+		pct > 0 {
 		out.SessionContext = &gateway.SessionContext{
-			Agent:           s.Agent,
-			Model:           s.Model(),
-			CumulativeUsage: snap,
-			Workspace:       s.Cwd,
-			GitStatus:       gitSnap,
-			CompactionCount: s.CompactionCount(),
+			Agent:            s.Agent,
+			Model:            s.Model(),
+			CumulativeUsage:  snap,
+			Workspace:        s.Cwd,
+			GitStatus:        gitSnap,
+			CompactionCount:  s.CompactionCount(),
+			ContextWindowPct: pct,
 		}
 	}
 }

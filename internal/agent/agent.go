@@ -257,6 +257,15 @@ type ToolEndEvent struct {
 // "channel closed" as the universal "session is over" signal and
 // use the Reason field (when non-empty) to disambiguate turn-end
 // from process-end.
+//
+// Usage rides on DoneEvent (F-52 universal-prompt-end design) so
+// the runtime can read per-turn stats from EITHER EventResult or
+// EventDone uniformly — EventResult is emitted only when there is a
+// text payload, but EventDone fires every turn, including empty /
+// aborted ones. ResultEvent.Usage remains populated for callers
+// that already read from the result-bearing event, but the runtime's
+// accumulation path reads from Done.Usage (single source of truth).
+// See docs/feat/F-52-pi-stream-aggregation.md.
 type DoneEvent struct {
 	// ExitCode follows Unix convention: 0 = success, non-zero = error.
 	// -1 indicates an abnormal termination (e.g. PTY EOF without a
@@ -271,6 +280,20 @@ type DoneEvent struct {
 	// turn-end EventDone from a process-end one. See
 	// docs/feat/F-32-pi-rpc-bridge.md §3.
 	Reason string
+
+	// Usage is the per-turn token usage observed on the same wire
+	// event as the bridge's turn-end signal. Bridges populate this
+	// on the SAME DoneEvent they emit — for one-shot bridges this
+	// happens at process exit; for long-lived bridges (Pi) this
+	// happens at every settled turn. Runtime reads Done.Usage as
+	// the single source of truth (it folds the values into
+	// AgentSession.cumulativeUsage via AccumulateUsage, then stamps
+	// the per-turn snapshot onto OutboundMessage.Usage for the
+	// gateway to forward into SessionContext). nil is a valid
+	// "no usage reported" value (zero-usage turn, synthetic
+	// assistant message, etc.) — runtime simply skips
+	// AccumulateUsage that invocation.
+	Usage *UsageEvent
 }
 
 // ErrorEvent carries an unrecoverable error from the session.
@@ -331,6 +354,21 @@ type ResultEvent struct {
 // CostUSD is optional; bridges populate it from
 // `result.modelUsage[<model>].costUSD` when present. Zero means
 // "unknown / not reported" — channels must NOT render "$0.00".
+//
+// ContextWindow is the API-reported model context-window size for
+// the turn (Claude Code: `modelUsage[<model>].contextWindow`,
+// Anthropic API: model's own context_window field). Zero means
+// "not reported by this turn" — the runtime's AccumulateUsage
+// leaves LastContextWindowPct untouched in that case (rather
+// than jumping to 0). When non-zero, the runtime computes
+//
+//	pct = (InputTokens + OutputTokens + CacheCreation + CacheRead)
+//	     / ContextWindow * 100
+//
+// as the per-turn context-window usage snapshot. Doc 1 formula,
+// exact (no approximation), every input is a wire field, the
+// denominator is API-provided per turn — no client-side hardcoded
+// model table. See docs/feat/F-45-session-footer.md §1.5 / §1.6.
 type UsageEvent struct {
 	// InputTokens is the non-cached input token count.
 	InputTokens int
@@ -350,6 +388,11 @@ type UsageEvent struct {
 
 	// CostUSD is the optional per-turn cost in USD; 0 when unknown.
 	CostUSD float64
+
+	// ContextWindow is the model's reported context-window size
+	// (tokens). Bridges populate from `modelUsage.<model>.contextWindow`
+	// when present. See struct doc above for semantics.
+	ContextWindow int
 }
 
 // UsageInfo is the cumulative form of UsageEvent — populated by

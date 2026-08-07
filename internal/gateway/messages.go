@@ -473,6 +473,29 @@ type SessionContext struct {
 	// totals Y since the last of N compactions". See
 	// docs/feat/F-49-compaction-counter.md §1.5.
 	CompactionCount int
+
+	// ContextWindowPct is the per-turn context-window usage
+	// percentage snapshot (0–100), computed by AccumulateUsage
+	// from the model's API-reported ContextWindow + the turn's
+	// total used tokens (Doc 1 formula). Footer surfaces this as
+	// the "X%" segment so users can see at a glance how close the
+	// conversation is to the model's context limit.
+	//
+	// 0 in three honest cases (we never paper over with a
+	// placeholder):
+	//   - No EventDone-with-Usage has landed yet (early turn).
+	//   - The model didn't report a ContextWindow on the most
+	//     recent turn (skipped in AccumulateUsage).
+	//   - The most recent lifecycle transition was a
+	//     ResetCumulative (/new) or RecordCompaction (snapshot
+	//     zeroed; repopulates on the next EventDone-with-Usage).
+	//
+	// Sourced from AgentSession.LastContextWindowPct(), which
+	// takes the same RLock as CumulativeUsage and
+	// CompactionCount so the snapshot is consistent with the
+	// other footer fields. See
+	// docs/feat/F-45-session-footer.md §1.5 / §1.6.
+	ContextWindowPct float64
 }
 
 // ToolInfo is the typed payload for OutboundMessage.Tool,

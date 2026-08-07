@@ -437,8 +437,7 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 			// Co-locating the usage on ResultEvent removes that
 			// path entirely (calc-then-reply invariant now holds by
 			// construction — usage IS on the result event).
-			if u := decodeUsage(ev.Usage); u != nil {
-				u.CostUSD = decodeCostUSD(ev.ModelUsage)
+			if u := decodeUsage(ev.Usage, ev.ModelUsage); u != nil {
 				result.Usage = u
 			}
 			events <- agent.AgentEvent{
@@ -446,9 +445,21 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 				Result: result,
 			}
 		}
+		// F-52: Usage rides on DoneEvent so the runtime can read it
+		// uniformly from the universal prompt-end signal regardless
+		// of whether the bridge emitted a result-bearing EventResult.
+		// For one-shot bridges (Claude Code) EventDone here marks
+		// process exit; for long-lived bridges it marks turn end.
+		// Decode ONCE; reuse the same *UsageEvent on both events so
+		// the runtime's accumulator (which reads Done.Usage) and any
+		// consumer reading Result.Usage get byte-identical data.
+		usage := decodeUsage(ev.Usage, ev.ModelUsage)
 		events <- agent.AgentEvent{
 			Kind: agent.EventDone,
-			Done: &agent.DoneEvent{ExitCode: 0},
+			Done: &agent.DoneEvent{
+				ExitCode: 0,
+				Usage:    usage,
+			},
 		}
 
 	case "control_request":
@@ -594,18 +605,33 @@ func truncateForLog(s string, max int) string {
 	return s[:max] + "…"
 }
 
-// decodeUsage parses the result.usage payload into an agent.UsageEvent.
-// Returns nil when the payload is empty or malformed — bridges that
-// fail to extract usage should NOT emit EventUsage (channels render
-// nothing in that case). The decoder is intentionally permissive:
-// zero / unknown counts default to zero rather than erroring out.
+// decodeUsage parses the result.usage payload (and the co-located
+// result.modelUsage payload, which carries per-model costUSD +
+// contextWindow) into a single *agent.UsageEvent. Returns nil
+// when the usage payload is empty / malformed / all-zero — the
+// caller should NOT emit a meaningless EventResult-with-Usage in
+// that case. The decoder is intentionally permissive: zero /
+// unknown counts default to zero rather than erroring out.
+//
+// Combined decode (vs the previous split decodeUsage + decodeCostUSD)
+// means the result handler can't forget to wire CostUSD or
+// ContextWindow after decoding; one call site, complete payload.
 //
 // Claude Code schema:
 //
-//	{"input_tokens": N, "output_tokens": N,
-//	 "cache_creation_input_tokens": N, "cache_read_input_tokens": N}
-func decodeUsage(raw json.RawMessage) *agent.UsageEvent {
-	if len(raw) == 0 {
+//	usage:      {"input_tokens": N, "output_tokens": N,
+//	             "cache_creation_input_tokens": N,
+//	             "cache_read_input_tokens": N}
+//	modelUsage: {"<model>": {"costUSD": 0.012, "contextWindow": N, ...},
+//	             ...}
+//
+// nil usage → nil result (no usage on the wire this turn). nil
+// modelUsage → CostUSD=0, ContextWindow=0 (still produces a
+// populated UsageEvent when the usage payload has any non-zero
+// field; the runtime's AccumulateUsage will skip the pct calc
+// when ContextWindow=0).
+func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageEvent {
+	if len(rawUsage) == 0 {
 		return nil
 	}
 	var u struct {
@@ -614,47 +640,41 @@ func decodeUsage(raw json.RawMessage) *agent.UsageEvent {
 		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
 	}
-	if err := json.Unmarshal(raw, &u); err != nil {
+	if err := json.Unmarshal(rawUsage, &u); err != nil {
 		return nil
 	}
 	if u.InputTokens == 0 && u.OutputTokens == 0 &&
 		u.CacheCreationInputTokens == 0 && u.CacheReadInputTokens == 0 {
 		// All zero is indistinguishable from "absent" — don't emit
-		// a meaningless EventUsage.
+		// a meaningless EventResult-with-Usage.
 		return nil
 	}
-	return &agent.UsageEvent{
+	out := &agent.UsageEvent{
 		InputTokens:              int(u.InputTokens),
 		OutputTokens:             int(u.OutputTokens),
 		CacheCreationInputTokens: int(u.CacheCreationInputTokens),
 		CacheReadInputTokens:     int(u.CacheReadInputTokens),
 	}
-}
-
-// decodeCostUSD parses the result.modelUsage payload and returns the
-// first non-zero costUSD across all per-model entries. Returns 0 when
-// absent / unparseable / all-zero — channels MUST treat 0 as
-// "unknown" and not render a "$0.00" line.
-//
-// Claude Code schema (shape may grow over time):
-//
-//	{"claude-sonnet-4-5": {"costUSD": 0.012, ...}, ...}
-func decodeCostUSD(raw json.RawMessage) float64 {
-	if len(raw) == 0 {
-		return 0
-	}
-	var m map[string]struct {
-		CostUSD float64 `json:"costUSD"`
-	}
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return 0
-	}
-	for _, v := range m {
-		if v.CostUSD > 0 {
-			return v.CostUSD
+	// modelUsage is best-effort: any parse failure or empty payload
+	// leaves CostUSD / ContextWindow at 0, which the runtime treats
+	// as "not reported".
+	if len(rawModelUsage) > 0 {
+		var m map[string]struct {
+			CostUSD       float64 `json:"costUSD"`
+			ContextWindow int     `json:"contextWindow"`
+		}
+		if err := json.Unmarshal(rawModelUsage, &m); err == nil {
+			for _, v := range m {
+				if v.CostUSD > 0 {
+					out.CostUSD = v.CostUSD
+				}
+				if v.ContextWindow > 0 {
+					out.ContextWindow = v.ContextWindow
+				}
+			}
 		}
 	}
-	return 0
+	return out
 }
 
 // strings.HasPrefix shim so we don't import strings just for one call.

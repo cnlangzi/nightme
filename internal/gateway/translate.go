@@ -134,6 +134,14 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		// header; the Stage 3 Feishu renderer flips the reaction
 		// emoji and edits the header line. We don't emit a separate
 		// OutboundMessage for them here.
+		//
+		// F-52 note: Done.Usage (when populated by the bridge) is
+		// read directly by the runtime's newEventHandler BEFORE
+		// Translate returns — see cmd/nightme/run.go. Translate
+		// itself does not need to surface it; the runtime is the
+		// single accumulator and reads from Done.Usage uniformly
+		// regardless of whether the bridge also emitted an
+		// EventResult-bearing text.
 		return OutboundMessage{}, false
 
 	case agent.EventResult:

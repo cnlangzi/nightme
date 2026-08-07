@@ -510,6 +510,22 @@ func (cs *ChatSession) GetMessage(userMsgID string) *Message {
 	return nil
 }
 
+// MessageState returns the last-processed-at timestamp and EndReason
+// for a message, or zero values if not found. Reads under cs.mu —
+// safe against concurrent writebackMessageState (CS-AS 边界重构
+// Phase 1: writeback uses these fields for runtime observability of
+// Prompt lifecycle; tests must use this method, not direct field
+// reads, to avoid races).
+func (cs *ChatSession) MessageState(userMsgID string) (lastProcessedAt time.Time, endReason PromptEndReason) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if v, ok := cs.messagesByID.Load(userMsgID); ok {
+		msg := v.(*Message)
+		return msg.LastProcessedAt, msg.LastEndReason
+	}
+	return
+}
+
 // MarkDropped (F-53) flips a single message to `MessageDropped`
 // and wire emits `MessageDropped`. Called from BufferClear (for
 // every message in a cleared batch) and from the /kill / /new
@@ -677,12 +693,29 @@ func (cs *ChatSession) buildPromptLocked() *Prompt {
 		ids = append(ids, m.ID)
 		blocks = append(blocks, m.Blocks...)
 	}
-	return &Prompt{
+	p := &Prompt{
 		ChatSessionID: cs.ID,
 		MessageIDs:    ids,
 		Blocks:        blocks,
 		CreatedAt:     time.Now(),
 	}
+	// LastMessageID is the anchor for the EventHandler — the
+	// readpump reads it from `as.currentPrompt.LastMessageID` at
+	// enrichment time and stamps it as UserMsgID on every
+	// EnrichedEvent. The feishu adapter uses it to route
+	// OutReply/OutResult to the right per-userMsgID receipt card
+	// (ensureReceiptForReplyWithFooter / ensureReceiptForTask).
+	//
+	// Without this, every AgentEvent reaches the channel with
+	// ReplyTo="", which makes the placeholder card creation
+	// (F-46 lazy-receipt path) silently fail because the receipt
+	// helper requires userMsgID != "". Multi-message turns
+	// (merged queue) anchor on the LAST message id, matching
+	// the pre-Phase-1 behavior.
+	if n := len(ids); n > 0 {
+		p.LastMessageID = ids[n-1]
+	}
+	return p
 }
 
 // TryFlush (CS-AS 边界重构 Phase 1) attempts to submit the queue
@@ -707,11 +740,26 @@ func (cs *ChatSession) TryFlush() error {
 	cs.mu.Lock()
 	if len(cs.queue) == 0 {
 		cs.mu.Unlock()
+		// T-alive DEBUG (2026-08-07): test06 logs show no Submit
+		// line. Trace which early-return TryFlush hits so we can
+		// localize the silent drop.
+		slog.Info("chatsession: TryFlush SKIP",
+			"chat_id", cs.ChatID, "reason", "queue_empty")
 		return nil
 	}
 	as := cs.activeAS
-	if as == nil || !as.IsReady() {
+	if as == nil {
 		cs.mu.Unlock()
+		slog.Info("chatsession: TryFlush SKIP",
+			"chat_id", cs.ChatID, "reason", "activeAS_nil",
+			"queue_len", len(cs.queue))
+		return nil
+	}
+	if !as.IsReady() {
+		cs.mu.Unlock()
+		slog.Info("chatsession: TryFlush SKIP",
+			"chat_id", cs.ChatID, "reason", "as_not_ready",
+			"queue_len", len(cs.queue), "as_id", as.ID)
 		return nil
 	}
 	p := cs.buildPromptLocked()

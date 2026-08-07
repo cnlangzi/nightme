@@ -836,6 +836,21 @@ func (as *AgentSession) Spawn(ctx context.Context, spawner Spawner) error {
 	as.exitCode = nil
 	as.asMu.Unlock()
 
+	// T-alive (2026-08-07): restore isReady on every Spawn. The
+	// disk-restore path (FromAgentSessionEntry) constructs the
+	// AgentSession literal-style and never initializes isReady,
+	// leaving the atomic.Bool zero value of false. Without this
+	// reset, TryFlush SKIPs on every restored chat (reason=
+	// as_not_ready) → Submit is never called → the bridge's
+	// stdin is never written → claude never sees the prompt.
+	// The previous turn's isReady=false (set after a successful
+	// Submit) would normally be cleared by endPrompt, but if the
+	// prompt never completes (e.g. bridge hangs) the flag stays
+	// false; the next Spawn is the right place to re-arm it
+	// because "we just transitioned back to Running, ready for
+	// the next turn".
+	as.isReady.Store(true)
+
 	// Start readpump after handle is set. startReadPump is idempotent
 	// (subsequent Spawns / re-activations are no-ops). This is the
 	// canonical readpump start point, decoupled from Activate so

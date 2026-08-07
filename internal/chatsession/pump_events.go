@@ -92,10 +92,7 @@ func (cs *ChatSession) routeEvent(ev EnrichedEvent) {
 		// Phase 1 keeps the existing EventHandler callback (set
 		// via SetEventHandler) so we don't break the existing
 		// wiring in cmd/nightme/run.go.
-		if cs.eventHandler == nil {
-			return
-		}
-		if ev.AgentEvent == nil {
+		if cs.eventHandler == nil || ev.AgentEvent == nil {
 			return
 		}
 		// Look up the AgentSession from the pool by ID (the

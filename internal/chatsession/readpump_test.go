@@ -193,16 +193,19 @@ func TestChatSession_PumpEvents_RoutesKindPromptEnded(t *testing.T) {
 	// PumpEvents runs concurrently. Wait for the message's
 	// LastProcessedAt to be set.
 	if !waitFor(func() bool {
-		v, ok := cs.messagesByID.Load(msg.ID)
-		return ok && !v.(*Message).LastProcessedAt.IsZero()
-	}, 2*time.Second) {
+		_, _ = cs.MessageState(msg.ID)
+		return false // unused
+	}, 0) {
+		// waitFor signature; we'll use MessageState below for race-safe read.
+	}
+	lastProcessedAt, endReason := cs.MessageState(msg.ID)
+	if lastProcessedAt.IsZero() {
 		t.Fatal("LastProcessedAt not set after KindPromptEnded")
 	}
-
-	got := cs.GetMessage(msg.ID)
-	if got.LastEndReason != PromptEndClean {
-		t.Errorf("LastEndReason = %v, want %v", got.LastEndReason, PromptEndClean)
+	if endReason != PromptEndClean {
+		t.Errorf("LastEndReason = %v, want %v", endReason, PromptEndClean)
 	}
+
 	// Stage stays at MessageQueued: this test bypasses TryFlush
 	// (calls Submit directly) so Stage transitions are not exercised.
 	// Stage=Submitted is verified separately by TestChatSession_TryFlush_AtLeastOnce.

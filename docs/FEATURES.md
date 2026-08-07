@@ -27,7 +27,7 @@
 
 | ID | 功能 | 设计文档 | 里程碑 | 状态 |
 |----|------|----------|--------|------|
-| F-32 | **Pi Coding Agent Bridge (`pi --mode rpc`)** — 真实 stdio pipes 长驻 JSONL；MVP turn 循环（`get_state` + `prompt` + `agent_settled`）+ `new_session` (F-34) + compaction (F-49) + Resume 经 Pi 的 `--session-id` CLI flag；不打通 Extension UI 飞书闭环；不实现 `/abort` | [feat/F-32-pi-rpc-bridge.md](./feat/F-32-pi-rpc-bridge.md) | v1.3 | ✅ 已实现（核心）；Extension UI + /abort 仍 deferred（见 F-32 §11 未知限制 + tasks/T-pi-bridge-align.md）|
+| F-32 | **Pi Coding Agent Bridge (`pi --mode rpc`)** — 真实 stdio pipes 长驻 JSONL；MVP turn 循环（`get_state` + `prompt` + `agent_settled`）+ `new_session` (F-34) + compaction (F-49) + Resume 经 Pi 的 `--session-id` CLI flag；不打通 Extension UI 飞书闭环；不实现 `/abort` | [feat/F-32-pi-rpc-bridge.md](./feat/F-32-pi-rpc-bridge.md) | v1.3 | ✅ 已实现（核心）；Extension UI + /abort 仍 deferred（见 F-32 §11 未知限制）|
 | F-33 | **ChatID 数据模型简化**（删 ChatType 抽象 + topic_group 不特殊处理 + ReplyTo = ParentId）| [feat/F-33-simplify-chatid-data-model.md](./feat/F-33-simplify-chatid-data-model.md) | v1.3.x | ✅ Docs 完成（代码 backlog）|
 | F-34 | **`/new` slash command** — 不退进程重置 agent 对话上下文（对齐 claudecode `/clear` / pi 内置 `/new` / acp `session/new`）；可选 `/new <agent>` 精修粒度；清 InputBuffer | [feat/F-34-new-slash-command.md](./feat/F-34-new-slash-command.md) | v1.3.x | ✅ 已实现（Phase 3 review 完成）|
 | F-37 | **OutThinking / OutToolStart / OutToolEnd → Feishu thread reply + 类型感知摘要**（反转 §13.6 折叠方案；含 §1.4 抽象/具体边界规范的最终落地——OutboundMessage 100% typed，Meta + Reaction 死代码删除）| [feat/F-37-tool-thread-routing.md](./feat/F-37-tool-thread-routing.md) | v1.3.x | ✅ 已实现（9 commits / PR #31；review-clean）|
@@ -45,7 +45,7 @@
 | F-50 | **GitProvider 抽象 + 两阶段 Provider 探测** — 抽象层重命名 `Platform*` → `Provider*`；`Detect` 两阶段：URL hint（`github.com` / `gitlab` 子串零网络直返）+ API probe fallback（GitLab `/api/v4/version` / GitHub Enterprise `/api/v3/meta`）；新增 `HTTPProber` 接口对齐 `CLIRunner` 模式；自建 GitHub Enterprise / GitLab 现在能被识别。是 `F-45 §3.5` / `gtw §5.x` / `F-45 §7.2` 悬空引用的归宿 | [feat/F-50-git-provider.md](./feat/F-50-git-provider.md) | v1.3.x | 📝 设计阶段（doc-first）|
 | F-51 | **Slash Command 分层** — `/cwd` `/use` `/kill` `/new` `/watch` `/think` `/tools` `/gtw` 统一由 `internal/command/` 的 Commander / Registry / Factory 路由；需要 chat-session 状态的 Factory 直接使用 `*chatsession.Manager`，reaction 由 `ReactionRouter` 统一分发 | [SPEC](./SPEC.md) | v1.3.x | ✅ 已实现 |
 | F-52 | **Pi Bridge 流式事件整合** — pi 以 token 粒度推 `text_delta`，改动前逐 token emit `EventText`，一句话在飞书裂成 ~20 条 💬 + ~20 次卡片 PATCH；translator 改为缓冲 delta，在 `tool_execution_start` flush 中途叙述、在 `agent_settled` 发**一轮唯一**的 `EventResult`；顺带修复两处静默故障：pi 从来不产生 OutResult（`sawTextEnd` 抑制 → gateway 丢空文本 result）、以及连带丢失的 usage/cost。usage 改为取最后一条快照而非累加（上下文占用语义）。共享层 `AccumulateUsage` 累加→覆盖 + footer 分母留待下个 PR | [feat/F-52-pi-stream-aggregation.md](./feat/F-52-pi-stream-aggregation.md) | v1.3.x | ✅ 已实现 |
-| F-53 | **Message / Prompt 生命周期模型** — 把"一次提交给 agent 的执行单元"从裸元组 + 用完即扔的字符串标量（`currentTurnUserMsgID`）正式实体化为 `Prompt`；`Message.Stage` 收敛为纯投递语义（`Queued`/`Submitted`/`Dropped`，不再镜像执行结果，堵住批次内非 anchor 消息永远卡在中间态的问题）；`Prompt` 执行状态收敛为 `Running`/`Done` 两态，成功/失败只由 `EndReason` 承载；`Turn` 系命名（`OnTurnEnded`/`currentTurnUserMsgID`）全面退役。`agent.MessageState` 常量从 `Received/Forwarded/Done/Failed` 物理改名为 `Queued/Submitted/Dropped`，`Done/Failed` 删除（Feishu 用户消息上 ✅/👎 反应**永久下线**，明确 UX 回归点）。`Prompt` 实体挂 `AgentSession.currentPrompt`，anchor 由 `Prompt.LastMessageID` 提供 | [feat/message_lifecycle.md](./feat/message_lifecycle.md) | v1.3.x | 🚧 Phase 0 实施中（实施计划 [`tasks/plan.md`](../tasks/plan.md)；原始 dev brief [`tasks/wip-message-prompt.md`](../tasks/wip-message-prompt.md)）|
+| F-53 | **Message / Prompt 生命周期模型** — 把"一次提交给 agent 的执行单元"从裸元组 + 用完即扔的字符串标量（`currentTurnUserMsgID`）正式实体化为 `Prompt`；`Message.Stage` 收敛为纯投递语义（`Queued`/`Submitted`/`Dropped`，不再镜像执行结果，堵住批次内非 anchor 消息永远卡在中间态的问题）；`Prompt` 执行状态收敛为 `Running`/`Done` 两态，成功/失败只由 `EndReason` 承载；`Turn` 系命名（`OnTurnEnded`/`currentTurnUserMsgID`）全面退役。`agent.MessageState` 常量从 `Received/Forwarded/Done/Failed` 物理改名为 `Queued/Submitted/Dropped`，`Done/Failed` 删除（Feishu 用户消息上 ✅/👎 反应**永久下线**，明确 UX 回归点）。`Prompt` 实体挂 `AgentSession.currentPrompt`，anchor 由 `Prompt.LastMessageID` 提供 | [feat/message_lifecycle.md](./feat/message_lifecycle.md) | v1.3.x | 🚧 Phase 0 实施中 |
 
 **v1.2 关键变化**：
 - 删除：`/run` 命令（被 `/use` 替代）
@@ -175,7 +175,7 @@ are tracked here (not in a TODO file) so they don't get lost.
 | `docs/feat/F-29-agent-session-pool.md` | ✅ includes Spawner production wiring + corrected v1.1 migration story |
 | `docs/feat/F-30-interactive-config.md` | ✅ |
 | `docs/feat/F-25-rolling-log.md` | ✅ Current (v1.3; Channel-autonomous rolling-log UX) |
-| `docs/feat/message_lifecycle.md` | 🚧 F-53 Phase 0 实施中（设计已对齐最终方案；实施计划 [`tasks/plan.md`](../tasks/plan.md)）|
+| `docs/feat/message_lifecycle.md` | 🚧 F-53 Phase 0 实施中（设计已对齐最终方案） |
 | `README.md` | ✅ one-dev-version framing |
 | `CHANGELOG.md` | ✅ single [Unreleased] covering current dev |
 | `MIGRATION.md` | ✅ breaking-changes guide from v1.x |

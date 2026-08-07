@@ -1,10 +1,12 @@
 # F-42: Lazy Receipt Creation + Simplified MessageState + TaskList Markdown Title
 
-> **Status**: 📝 设计阶段（doc-first）— **SUPERSEDED by F-53（部分）**
+> **Status**: ⛔ **HISTORICAL — 部分 SUPERSEDED by F-53 (v1.3.x)**
 > **Milestone**: v1.3.x
 > **Scope**: `internal/channel/feishu/{adapter.go,receipt.go,receipt_task.go}` + 文档同步
 > **Depends on**: F-25 (rolling-log receipt), F-31 (MessageState), F-37 (thread routing), F-38 (task checklist), F-40 (OutReply overflow)
 > **Related**: [`SPEC.md`](../SPEC.md) §0.10 / §2.4 / §2.5; [`channel/feishu.md`](../channel/feishu.md) §6.6 / §13.20 / §15.0
+>
+> **⚠️ MessageState / Reaction 相关部分已被 F-53 替代（见下）。Lazy receipt creation / TaskList title 仍有效。**
 >
 > **Superseded 部分**（F-53 已重做）：
 > - §0.2 "⏳ / 🔄 reactions 跟其他 waiting 信号重复" 的判断过时：F-53 决定 Phase 0 **彻底删除** ✅ / 👎

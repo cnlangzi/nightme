@@ -42,13 +42,15 @@ v1.2 在 v1.1 锁定的职责隔离架构上做**结构重组**——不变的�
 
 v1.3 在 v1.2 架构上做**职责再切分**——核心变化是**删除 Gateway 端的 Receipt 抽象**，让"抽象归抽象、具体归具体"：
 
+> **v1.3.x F-53 重写**：v1.3 引入的 `currentTurnUserMsgID` 字符串标量 + `MessageState` 4 态 (`Received`/`Forwarded`/`Done`/`Failed`) 已被 F-53 替代：`Prompt` 实体挂 `AgentSession.currentPrompt.LastMessageID`，`MessageState` 收缩为 3 态（`Queued`/`Submitted`/`Dropped`），`Done`/`Failed` 物理删除。详见 [`feat/message_lifecycle.md`](./feat/message_lifecycle.md)。
+
 1. **Receipt FSM 从 Gateway 端移除**
    - Gateway 不再持有 `receipts[userMsgID]` map
    - `Channel.CreateReceipt / UpdateReceipt / DisposeReceipt` 接口方法从 `Channel` 接口移除
    - `internal/receipt/` 整个包删除(v1.2 仅保留 `MessageState` 一个 enum;v1.3 把它搬到 `internal/agent/` 因为所有 layer 都已依赖 agent)
 
 2. **outbound 路由改为 userMsgID-driven**
-   - EventHandler 在每个 `OutboundMessage` 上设 `out.ReplyTo = cs.currentTurnUserMsgID`
+   - EventHandler 在每个 `OutboundMessage` 上设 `out.ReplyTo = cs.currentTurnUserMsgID`（F-53 后改为 `out.ReplyTo = as.currentPrompt.LastMessageID`）
    - Channel.Send 拿 `ReplyTo` 当路由 key，自行 material 化（receipt card / thread / DOM 节点）
    - Gateway 只负责"把消息送到对的 Channel"，Channel 决定怎么渲染、怎么存、怎么 PATCH
 
@@ -56,6 +58,7 @@ v1.3 在 v1.2 架构上做**职责再切分**——核心变化是**删除 Gatew
    - 一个 turn 一个锚点（single）
    - buffered batch 时锚到这一批的最后一条 userMsgID
    - 1 turn : 1 anchor, n events（无需 fanout 多 receipt）
+   - **F-53 进一步**：锚点来源从 `cs.currentTurnUserMsgID` 移到 `as.currentPrompt.LastMessageID`（一等公民字段而不是字符串标量）
 
 4. **MessageState 与 Receipt 真正解耦** — v1.2 末尾已加注释；v1.3 把 Receipt 整个删了，MessageState 真正独立运作，不再有"两个 owner 都说自己拥有 receipt"的歧义
 
@@ -766,8 +769,8 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 |--------|-------|----------|--------|
 | **Binding FSM**（chat ↔ ChatSession）| Gateway | 1:1 绑定，永不删 | 是（ChatSessionEntry）|
 | **InputBuffer FSM**（per ChatSession）| ChatSession | `idle ↔ busy` | 否（重启丢）|
-| **MessageState FSM**（per userMsg）| ChatSession | `MessageReceived → MessageForwarded → MessageDone / MessageFailed` | 否（重启丢）|
-| **PromptState FSM**（per userMsg）| Channel's receipt | `PromptPending → PromptRunning → PromptSucceeded / PromptFailed` | 否（重启丢）|
+| **MessageState FSM**（per userMsg）| ChatSession | `MessageQueued → MessageSubmitted → MessageDropped`（F-53 之前是 4 态 `Received/Forwarded/Done/Failed`，Done/Failed 已删）| 否（重启丢）|
+| **PromptState FSM**（per userMsg）| Channel's receipt | `PromptRunning → PromptDone`（F-53 之前 4 态，已收为 2 态；Pending/Succeeded/Failed 已删）| 否（重启丢）|
 | **AgentSession.Status**（per AgentSession）| AgentSession | `running → detached / exited` | 是（AgentSessionEntry）|
 | **ChatSession.ActiveAgentSession**（per ChatSession）| ChatSession | 引用 pool 中的某个 AgentSession | 引用在 ChatSessionEntry |
 
@@ -1268,13 +1271,13 @@ OutboundMessage{
 
 **Scope 强约束**：MessageState **只对普通用户消息触发**。Slash command（`/cwd` `/use` `/kill` 等）不产生 MessageState —— 控制平面有 `OutCommandReply` 作为反馈。
 
-**Channel 自治渲染选择**：上述 3 个状态由 ChatSession lifecycle emit 后，由 Gateway 翻译为 `OutboundMessage{Kind: OutMessageState}` 通过 `Channel.Send` 投递。每个 Channel 自决哪些状态需要渲染 + 怎么渲染（Feishu 加 reaction，Slack 加 emoji shortcode，Web 改 DOM 元素等）。v1.3.x 起 Feishu adapter 渲染 `agent.MessageQueued` → ⏳ `OneSecond`，`agent.MessageSubmitted` → 🔄 `OnIt`，`agent.MessageDropped` → 空（不渲染）。Slack / Web Channel 实现可以选更窄的渲染策略。`agent.MessageState` enum 本身是抽象层契约 ── 不变式是 ChatSession 必须按表格触发，**不**约束 Channel 必须全部渲染。
+**Channel 自治渲染选择**：上述 3 个状态由 ChatSession lifecycle emit 后，由 Gateway 翻译为 `OutboundMessage{Kind: OutMessageState}` 通过 `Channel.Send` 投递。每个 Channel 自决哪些状态需要渲染 + 怎么渲染（Feishu 加 reaction，Slack 加 emoji shortcode，Web 改 DOM 元素等）。v1.3.x F-53 follow-up：**Feishu adapter 只渲染 `MessageQueued` → ⏳ `OneSecond`**；`MessageSubmitted` / `MessageDropped` 不再渲染用户消息 reaction。终态进度（Running/Done）转由 receipt card 上独立 reaction 通路承载（见 `mapPromptStateToFeishuEmoji` + `MessageReceipt.SetPromptState`）。Slack / Web Channel 实现可以选更窄的渲染策略。`agent.MessageState` enum 本身是抽象层契约 ── 不变式是 ChatSession 必须按表格触发，**不**约束 Channel 必须全部渲染。
 
-**v1.3.x 显式 UX 回归**：Feishu 用户消息上的 ✅ / 👎 反应**永久下线**（`MessageDone` / `MessageFailed` 物理删除）。reaction 序列由 `⏳ → 🔄 → ✅ / 👎` 变为 `⏳ → 🔄 →（不变）`。替代 UX（占位卡终态展示？reaction 移到卡片？）由独立后续任务决定。
+**v1.3.x 显式 UX 回归**：Feishu 用户消息上的 ✅ / 👎 反应**永久下线**（`MessageDone` / `MessageFailed` 物理删除）。reaction 序列由 `⏳ → 🔄 → ✅ / 👎` 变为 `⏳ → （永远停在 ⏳）`。终态进度 ✅ 由 receipt card 上独立的 PromptState 通路承载（运行结束时 reaction `DONE`），不再走用户消息。
 
 **Prompt 实体 + PromptState 平行 FSM**：F-53 起 `chatsession.Prompt` 是一等公民对象（见 [`feat/message_lifecycle.md`](./feat/message_lifecycle.md) §4.2），挂在 `AgentSession.currentPrompt` 上。Feishu receipt 内的 `PromptState` 同步收敛：`agent.PromptState` 整体从 `agent` 包私有化到 `internal/channel/feishu`，常量缩为 `Running` / `Done` 两值（`Pending` / `Succeeded` / `Failed` 物理删除；构造初始值改 `Running`；删 `Pending → Running` 转换判断）。与 MessageState 的关键区别：**PromptState 是 channel-internal 状态**（不走 wire event，每个 channel 各自的 receipt 自己观察 `agent.EventDone`/`EventError` 来 transition），而 MessageState 是抽象层广播事件（走 `OutboundMessage{Kind: OutMessageState}`）。两者都描述"消息处理到哪了"但回答的问题不同（投递 vs 执行），分别渲染到 user-message reaction 和 receipt card header。
 
-详见 [`feat/F-31-message-state.md`](./feat/F-31-message-state.md)（已 superseded；保留作 v1.3 历史参考）+ [`feat/message_lifecycle.md`](./feat/message_lifecycle.md)（v1.3.x 权威定义）+ [`feat/F-42-lazy-receipt-creation.md`](./feat/F-42-lazy-receipt-creation.md)（已 superseded；保留作 v1.3 历史参考）。
+详见 [`feat/F-31-message-state.md`](./feat/F-31-message-state.md)（已 superseded；保留作 v1.3 历史参考）+ [`feat/message_lifecycle.md`](./feat/message_lifecycle.md)（v1.3.x 权威定义）。
 
 ### 2.6 Interactive Decision Cards（F-46 新增，2026-08-06）
 

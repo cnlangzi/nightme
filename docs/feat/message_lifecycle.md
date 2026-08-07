@@ -5,9 +5,8 @@
 > **Depends on**: F-27（ChatSession）、F-29（AgentSession Pool）、F-31（MessageState）、F-32（Pi RPC Bridge）
 > **Related docs**: [`SPEC.md`](../SPEC.md) §2.5、[`F-31-message-state.md`](./F-31-message-state.md)、
 >   [`F-42-lazy-receipt-creation.md`](./F-42-lazy-receipt-creation.md)、[`F-44-outreply-independent-and-task-receipt.md`](./F-44-outreply-independent-and-task-receipt.md)
-> **Out of scope（本文档不覆盖，见对应任务）**：
-> - 具体代码改动、文件级迁移步骤、Phase 划分 → [`tasks/plan.md`](../../tasks/plan.md)（v1.3.x 实施计划）；原始 dev brief 见 [`tasks/wip-message-prompt.md`](../../tasks/wip-message-prompt.md)
-> - Agent 存活探测 / Prompt 卡死检测 / `nightme health` 扩展等健康监控体系 → [`tasks/wip.md`](../../tasks/wip.md)
+> **Out of scope（本文档不覆盖）**：
+> - Agent 存活探测 / Prompt 卡死检测 / `nightme health` 扩展等健康监控体系 → 留给"Prompt 投递稳定性优化" PR
 > - Feishu 卡片 / 消息 reaction 的具体渲染调整（对 F-42 / F-44 的后续修订）→ 独立任务，未立项
 
 ---
@@ -106,7 +105,7 @@
 | `LastMessageID` | 本批次最后一条 `Message.ID`——EventHandler 的 anchor 来源（占位卡挂载点） |
 | `Blocks` | 合并后实际发送的内容 |
 | `CreatedAt` / `AckedAt` | 创建与确认收到的时间线；`AckedAt` = SendBlocks 返回 nil 的时刻（权威提交成功时间戳） |
-| `LastProgressAt` | 最近一次观察到进展的时间（用于未来的卡死检测，见 `tasks/wip.md`） |
+| `LastProgressAt` | 最近一次观察到进展的时间（用于未来的卡死检测） |
 | `EndedAt` | 结束时间 |
 | `EndReason` | 结束原因（见下） |
 
@@ -135,8 +134,8 @@
 |---|---|---|
 | `Clean` | 正常完成 | |
 | `Error` | agent 报告了错误 | |
-| `ProcessDied` | 进程异常退出，既没有正常完成也没有报错 | 对应现状里"进程崩溃导致永久卡住"的那类 bug，详见 `tasks/wip.md` |
-| `StalledKilled` | 因为长时间无进展被主动判定为卡死并终止 | 依赖尚未实现的卡死检测能力，见 `tasks/wip.md` |
+| `ProcessDied` | 进程异常退出，既没有正常完成也没有报错 | 对应现状里"进程崩溃导致永久卡住"的那类 bug，留给"Prompt 投递稳定性优化" PR |
+| `StalledKilled` | 因为长时间无进展被主动判定为卡死并终止 | 依赖尚未实现的卡死检测能力，留给"Prompt 投递稳定性优化" PR |
 | `UserKilled` | 用户主动终止 | |
 
 ### 4.3 关系与基数
@@ -236,7 +235,7 @@ Phase 0 把 `agent.MessageState` 的常量从旧的 `Received` / `Forwarded` / `
   的表情反应搬到占位卡片上展示，涉及具体的渲染改动和一次产品侧的 UX 评审，不夹在对象重构里做。
 - **Agent 存活探测（进程/传输层）**、**Prompt 卡死检测（长时间无进展）**、**AgentSession 状态队列**
   （切换会话上下文后离线 Prompt 的追踪）、**`nightme health` 扩展**——这些都是建立在 `Message`/
-  `Prompt` 对象之上的健康监控能力，见 [`tasks/wip.md`](../../tasks/wip.md)。
+- Agent 存活探测（进程/传输层）、Prompt 卡死检测（长时间无进展）、AgentSession 状态队列（切换会话上下文后离线 Prompt 的追踪）、`nightme health` 扩展——这些都是建立在 `Message`/`Prompt` 对象之上的健康监控能力，留给"Prompt 投递稳定性优化" PR。
 - **`Prompt` 是否持久化**：Phase 0 不持久化（仅内存 + 最近 K 个用于调试）。崩溃后能看到"上一个
   Prompt 卡在哪一步"需要落盘，待确认。
 
@@ -245,11 +244,9 @@ Phase 0 把 `agent.MessageState` 的常量从旧的 `Received` / `Forwarded` / `
 ## 9. References
 
 - [`SPEC.md`](../SPEC.md) §2.5 Message Lifecycle Tracking
-- [`F-27-chatsession.md`](./F-27-chatsession.md)
+- [`F-27-chatsession.md`](./F-27-chatsession.md) — v1.2 ChatSession 设计（已 superseded by F-53；见文档顶部 SUPERSEDED 横幅）
 - [`F-29-agent-session-pool.md`](./F-29-agent-session-pool.md)
-- [`F-31-message-state.md`](./F-31-message-state.md)
+- [`F-31-message-state.md`](./F-31-message-state.md) — v1.3 MessageState 4 态设计（已 superseded by F-53）
 - [`F-32-pi-rpc-bridge.md`](./F-32-pi-rpc-bridge.md)
-- [`F-42-lazy-receipt-creation.md`](./F-42-lazy-receipt-creation.md)
-- [`F-44-outreply-independent-and-task-receipt.md`](./F-44-outreply-independent-and-task-receipt.md)
-- [`tasks/wip-message-prompt.md`](../../tasks/wip-message-prompt.md) — 本设计的开发任务拆解
-- [`tasks/wip.md`](../../tasks/wip.md) — 建立在本设计之上的健康监控体系
+- [`F-42-lazy-receipt-creation.md`](./F-42-lazy-receipt-creation.md) — 已 superseded by F-53
+- [`F-44-outreply-independent-and-task-receipt.md`](./F-44-outreply-independent-and-task-receipt.md) — 已 superseded by F-53

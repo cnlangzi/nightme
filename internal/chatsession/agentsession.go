@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -933,11 +934,31 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	p.AckedAt = time.Now()
 	p.LastProgressAt = time.Now()
 
+	// T-alive DEBUG (2026-08-07): trace Submit via slog (not
+	// stdlib log.Printf, which goes to stderr and is missed by
+	// `nightme logs`). Lets us localize "Submit returns nil but
+	// no events arrive" — the canonical feishu+claudecode hang.
+	evPtr := h.Events()
+	slog.Info("chatsession: Submit",
+		"chat_id", as.ChatSessionID,
+		"as_id", as.ID,
+		"handle_events_ptr", fmt.Sprintf("%p", evPtr),
+		"blocks", len(p.Blocks),
+		"prompt_id", p.ID)
+
 	// SendBlocks can block on a hung prompt RPC; do NOT hold asMu.
 	err := h.SendBlocks(as.OpContext(), p.Blocks)
 	if err != nil {
+		slog.Warn("chatsession: Submit SendBlocks FAILED",
+			"chat_id", as.ChatSessionID,
+			"as_id", as.ID,
+			"err", err)
 		return err
 	}
+	slog.Info("chatsession: Submit SendBlocks ok",
+		"chat_id", as.ChatSessionID,
+		"as_id", as.ID,
+		"prompt_id", p.ID)
 
 	// Commit: install currentPrompt and flip isReady.
 	as.asMu.Lock()

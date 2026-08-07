@@ -49,3 +49,8 @@ graphify-out/
 
 # tokensave local index
 .tokensave/
+
+# Task scratch / design notes (not part of repo)
+# /tasks/ holds WIP design docs and implementation plans;
+# treated as ephemeral working notes (not tracked in git).
+/tasks/

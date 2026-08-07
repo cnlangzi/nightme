@@ -7,6 +7,7 @@
 package chatsession
 
 import (
+	"context"
 	"encoding/json"
 	"sync"
 	"testing"
@@ -222,5 +223,52 @@ func TestEntry_LegacyFileWithMissingCumulativeUsage(t *testing.T) {
 	as.AccumulateUsage(&agent.UsageEvent{InputTokens: 42})
 	if as.CumulativeUsage().InputTokens != 42 {
 		t.Fatal("AccumulateUsage after legacy restore did not work")
+	}
+}
+
+// TestFromAgentSessionEntry_OpContextNotNil is the regression lock
+// for a daemon-killing crash.
+//
+// AgentSessions restored from disk went through FromAgentSessionEntry,
+// which — unlike NewAgentSession — never pre-installed opCtx. The
+// default FlushHook passes OpContext() straight into
+// bridge.SendBlocks, and the pi bridge calls ctx.Deadline() on entry,
+// so the FIRST message after any daemon restart panicked the whole
+// daemon with a nil-pointer dereference.
+func TestFromAgentSessionEntry_OpContextNotNil(t *testing.T) {
+	as := FromAgentSessionEntry(&registry.AgentSessionEntry{
+		ID:            "as-restored",
+		ChatSessionID: "cs-1",
+		Agent:         "pi",
+		Cwd:           "/tmp/ws",
+		Status:        StatusRunning, // demoted to Detached on restore
+	})
+	if as == nil {
+		t.Fatal("FromAgentSessionEntry returned nil")
+	}
+	if as.OpContext() == nil {
+		t.Fatal("OpContext() is nil; the first SendBlocks after a daemon restart would panic")
+	}
+	// A restored session has no live cancel yet — it must not be
+	// mistaken for an activated one, or promoteActiveLocked would
+	// skip wiring it to the chat ctx.
+	if as.IsActivated() {
+		t.Error("IsActivated() = true on a freshly restored session, want false")
+	}
+}
+
+// TestNewAgentSession_OpContextNotNil pins the same invariant on the
+// other constructor so the two cannot drift apart again.
+func TestNewAgentSession_OpContextNotNil(t *testing.T) {
+	as := NewAgentSession("as-new", "cs-1", "pi", "/tmp/ws", nil)
+	if as.OpContext() == nil {
+		t.Fatal("OpContext() is nil")
+	}
+	if as.IsActivated() {
+		t.Error("IsActivated() = true before Activate, want false")
+	}
+	as.Activate(context.Background())
+	if !as.IsActivated() {
+		t.Error("IsActivated() = false after Activate, want true")
 	}
 }

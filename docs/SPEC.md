@@ -1192,19 +1192,25 @@ command.kill.Factory.Handle(ctx, rt, input)
 
 ---
 
-### 2.5 Message Lifecycle Tracking（v1.3 新增）
+### 2.5 Message Lifecycle Tracking（v1.3 新增；v1.3.x F-53 重构）
 
 **核心问题**：用户在 IM 里发了一条消息，怎么知道系统处理到哪一步了？—— `MessageState` 是这个问题的答案。
 
 #### 2.5.1 概念
 
-**`MessageState` = 消息的生命周期阶段属性**。回答 3 个问题：
+**`MessageState` = 消息的投递阶段属性**。回答 2 个问题（v1.3.x 起，**不再**承载"执行结果"——见 F-53）：
 
-1. ChatSession 收到消息没有？ → `agent.MessageReceived`
-2. 消息转给 AgentSession 了没有？ → `agent.MessageForwarded`
-3. AgentSession 执行完成了没有？ → `agent.MessageDone` (+ `agent.MessageFailed` 可选)
+1. 系统收到消息没有？ → `agent.MessageQueued`
+2. 消息正式交给 AgentSession 了没有？ → `agent.MessageSubmitted`
+3. 消息被主动清空了没有？ → `agent.MessageDropped`
 
-每条普通用户消息在系统里流转时，对应 `MessageState` 事件被 emit；Channel 把它渲染成平台原生视觉表达（Feishu reaction emoji，Slack emoji 短码，Web UI DOM 元素）。
+> **v1.3.x F-53 重构**：常量从 `MessageReceived` / `MessageForwarded` / `MessageDone` /
+> `MessageFailed`（4 态，含执行结果）改为 `MessageQueued` / `MessageSubmitted` / `MessageDropped`
+> （3 态，纯投递语义）。`MessageDone` / `MessageFailed` 物理删除。详见
+> [`feat/message_lifecycle.md`](./feat/message_lifecycle.md) §3 原则 1 / §6.3 / §7。
+
+每条普通用户消息在系统里流转时，对应 `MessageState` 事件被 emit；Channel 把它渲染成平台原生视觉
+表达（Feishu reaction emoji，Slack emoji 短码，Web UI DOM 元素）。
 
 #### 2.5.2 4 层事件流
 
@@ -1256,18 +1262,19 @@ OutboundMessage{
 
 | 触发时机 | 状态 | 说明 |
 |---|---|---|
-| `ChatSession.GetOrCreate(chatID)` 成功后 | `agent.MessageReceived` | 消息首次进 ChatSession |
-| `ChatSession.LookupActiveAgentSession()` 成功 | `agent.MessageForwarded` | spawn 成功或命中 running pool |
-| `ChatSession.runReadPump` 收到 `EventDone` | `agent.MessageDone` | agent 处理完 |
-| `ChatSession.runReadPump` 收到 `EventError` | `agent.MessageFailed` | agent 出错 |
+| `cmd/nightme/run.go newMessageDispatcher` 入口（Gateway inbound 拿到后、`LookupActiveAgentSession` 之前） | `agent.MessageQueued` | 消息进 ChatSession 的消息队列（**不**依赖 AS spawn 是否成功） |
+| `ChatSession.defaultPromptHookLocked` 内 `SendBlocks` 返回 nil 之后 | `agent.MessageSubmitted` | 提交事务成功；批量翻 `Message.Stage` + wire emit |
+| `ChatSession.MarkDropped(userMsgID)` 调用时 | `agent.MessageDropped` | 仅由 `/kill`、`/new`、`BufferClear` 触发，不覆盖投递失败 |
 
 **Scope 强约束**：MessageState **只对普通用户消息触发**。Slash command（`/cwd` `/use` `/kill` 等）不产生 MessageState —— 控制平面有 `OutCommandReply` 作为反馈。
 
-**Channel 自治渲染选择**：上述 4 个状态由 ChatSession lifecycle emit 后，由 Gateway 翻译为 `OutboundMessage{Kind: OutMessageState}` 通过 `Channel.Send` 投递。每个 Channel 自决哪些状态需要渲染 + 怎么渲染（Feishu 加 reaction，Slack 加 emoji shortcode，Web 改 DOM 元素等）。v1.3.x 起 Feishu adapter 渲染**全部 4 态**——`agent.MessageReceived` → ⏳ `OneSecond`，`agent.MessageForwarded` → 🔄 `OnIt`，`agent.MessageDone` → ✅ `DONE`，`agent.MessageFailed` → 👎 `THUMBSDOWN`（Feishu predefined 里没有 ❌，用 closest negative 替代）。Slack / Web Channel 实现可以选更窄的渲染策略。`agent.MessageState` enum 本身是抽象层契约 ── 不变式是 ChatSession 必须按表格触发，**不**约束 Channel 必须全部渲染。
+**Channel 自治渲染选择**：上述 3 个状态由 ChatSession lifecycle emit 后，由 Gateway 翻译为 `OutboundMessage{Kind: OutMessageState}` 通过 `Channel.Send` 投递。每个 Channel 自决哪些状态需要渲染 + 怎么渲染（Feishu 加 reaction，Slack 加 emoji shortcode，Web 改 DOM 元素等）。v1.3.x 起 Feishu adapter 渲染 `agent.MessageQueued` → ⏳ `OneSecond`，`agent.MessageSubmitted` → 🔄 `OnIt`，`agent.MessageDropped` → 空（不渲染）。Slack / Web Channel 实现可以选更窄的渲染策略。`agent.MessageState` enum 本身是抽象层契约 ── 不变式是 ChatSession 必须按表格触发，**不**约束 Channel 必须全部渲染。
 
-**PromptState 平行 FSM**：每个 channel 的 receipt 对象维护一个 `agent.PromptState`，4 态对应 prompt 在 agent 进程内的执行生命周期：`agent.PromptPending`（receipt 创建后等首 event）→ `agent.PromptRunning`（首 non-empty entry 抵达）→ `agent.PromptSucceeded` / `agent.PromptFailed`（terminal）。与 MessageState 的关键区别：**PromptState 是 channel-internal 状态**（不走 wire event，每个 channel 各自的 receipt 自己观察 `agent.EventDone`/`EventError` 来 transition），而 MessageState 是抽象层广播事件（走 `OutboundMessage{Kind: OutMessageState}`）。两者都描述"消息处理到哪了"但回答的问题不同（投递 vs 执行），分别渲染到 user-message reaction 和 receipt card header。
+**v1.3.x 显式 UX 回归**：Feishu 用户消息上的 ✅ / 👎 反应**永久下线**（`MessageDone` / `MessageFailed` 物理删除）。reaction 序列由 `⏳ → 🔄 → ✅ / 👎` 变为 `⏳ → 🔄 →（不变）`。替代 UX（占位卡终态展示？reaction 移到卡片？）由独立后续任务决定。
 
-详见 [`feat/F-31-message-state.md`](./feat/F-31-message-state.md) + [`feat/F-42-lazy-receipt-creation.md`](./feat/F-42-lazy-receipt-creation.md)（Feishu 选择 drop 中间态的记录）。
+**Prompt 实体 + PromptState 平行 FSM**：F-53 起 `chatsession.Prompt` 是一等公民对象（见 [`feat/message_lifecycle.md`](./feat/message_lifecycle.md) §4.2），挂在 `AgentSession.currentPrompt` 上。Feishu receipt 内的 `PromptState` 同步收敛：`agent.PromptState` 整体从 `agent` 包私有化到 `internal/channel/feishu`，常量缩为 `Running` / `Done` 两值（`Pending` / `Succeeded` / `Failed` 物理删除；构造初始值改 `Running`；删 `Pending → Running` 转换判断）。与 MessageState 的关键区别：**PromptState 是 channel-internal 状态**（不走 wire event，每个 channel 各自的 receipt 自己观察 `agent.EventDone`/`EventError` 来 transition），而 MessageState 是抽象层广播事件（走 `OutboundMessage{Kind: OutMessageState}`）。两者都描述"消息处理到哪了"但回答的问题不同（投递 vs 执行），分别渲染到 user-message reaction 和 receipt card header。
+
+详见 [`feat/F-31-message-state.md`](./feat/F-31-message-state.md)（已 superseded；保留作 v1.3 历史参考）+ [`feat/message_lifecycle.md`](./feat/message_lifecycle.md)（v1.3.x 权威定义）+ [`feat/F-42-lazy-receipt-creation.md`](./feat/F-42-lazy-receipt-creation.md)（已 superseded；保留作 v1.3 历史参考）。
 
 ### 2.6 Interactive Decision Cards（F-46 新增，2026-08-06）
 

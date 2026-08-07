@@ -727,26 +727,28 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateDropsEmptyIDs(t *testing.T) 
 	}
 
 	// Empty chatID: handler must return silently without sending.
-	handler("", "om_user", agent.MessageForwarded)
+	handler("", "om_user", agent.MessageSubmitted)
 	if got := ch.Record(); len(got) != 0 {
 		t.Errorf("empty chatID should drop silently; got %d events", len(got))
 	}
 
 	// Empty userMsgID: same.
-	handler(cs.ChatID, "", agent.MessageForwarded)
+	handler(cs.ChatID, "", agent.MessageSubmitted)
 	if got := ch.Record(); len(got) != 0 {
 		t.Errorf("empty userMsgID should drop silently; got %d events", len(got))
 	}
 
 	// Both empty: same.
-	handler("", "", agent.MessageForwarded)
+	handler("", "", agent.MessageSubmitted)
 	if got := ch.Record(); len(got) != 0 {
 		t.Errorf("both empty should drop silently; got %d events", len(got))
 	}
 
 	// Sanity: a valid call DOES produce an OutboundMessage (so
 	// the silent drop is targeted, not "the handler never fires").
-	handler(cs.ChatID, "om_user", agent.MessageDone)
+	// F-53: agent.MessageDone no longer exists; use the closest
+	// live state (MessageSubmitted) for the sanity probe.
+	handler(cs.ChatID, "om_user", agent.MessageSubmitted)
 	if got := ch.Record(); len(got) != 1 {
 		t.Errorf("valid call should fire; got %d events", len(got))
 	}

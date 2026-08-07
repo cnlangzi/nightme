@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -140,6 +141,30 @@ type AgentSession struct {
 	cumulativeUsage agent.UsageInfo
 	compactionCount int
 	cumulativeDirty bool
+
+	// F-53: the in-flight Prompt for this AgentSession, or nil if
+	// no Prompt is currently active. Stored on AS (not on
+	// ChatSession) because a Prompt is bound to one specific AS
+	// for its entire lifetime — see docs/feat/message_lifecycle.md
+	// §4.2 存储归属.
+	//
+	// Concurrency: writes happen inside `defaultPromptHookLocked`
+	// (under `ChatSession.mu`, NOT `asMu` — see the locking note
+	// in defaultPromptHookLocked). Reads from `runReadPump` also
+	// happen under `ChatSession.mu` for the LastMessageID lookup
+	// (the EventHandler anchor). To avoid `cs.mu ↔ asMu` ordering
+	// issues, `currentPrompt` is accessed ONLY through helpers
+	// that take `ChatSession.mu` — direct field access from
+	// elsewhere is a bug.
+	//
+	// Set to nil by `endPrompt(reason)`.
+	currentPrompt *Prompt
+
+	// F-53: monotonic counter for Prompt IDs within this
+	// AgentSession. Incremented by `NewPromptID` to produce
+	// `<AS.ID>-p<seq>` (e.g. `as_3-p7`). Atomic — ID generation
+	// doesn't need to coordinate with anything else.
+	promptCounter atomic.Uint64
 }
 
 // NewAgentSession creates a new AgentSession in memory. The pool
@@ -237,6 +262,44 @@ func (as *AgentSession) Status() Status {
 	as.asMu.RLock()
 	defer as.asMu.RUnlock()
 	return as.stat
+}
+
+// NewPromptID (F-53) returns a unique Prompt ID of the form
+// `<as.ID>-p<seq>` (e.g. `as_3-p7`). The sequence is monotonic per
+// AgentSession (starts at 1; never reused within the daemon's
+// lifetime — restored ASes from disk start fresh at 1 again, which
+// is acceptable because the ID is only used for log / diagnostics
+// correlation, not as a durable key).
+//
+// Concurrency: safe to call concurrently — backed by an atomic
+// counter. The returned ID is reserved at the moment of the call,
+// so a subsequent failure to install the Prompt (e.g. SendBlocks
+// error) will leave a gap in the sequence. That's intentional —
+// the counter tracks "IDs handed out", not "Prompts that
+// succeeded".
+func (as *AgentSession) NewPromptID() string {
+	n := as.promptCounter.Add(1)
+	return fmt.Sprintf("%s-p%d", as.ID, n)
+}
+
+// CurrentPrompt (F-53) returns the in-flight Prompt for this AS, or
+// nil if no Prompt is currently active. Reads happen under
+// `ChatSession.mu` (the field is written from
+// `defaultPromptHookLocked` and `endPrompt`); callers that already
+// hold `cs.mu` may call this directly. Callers that do NOT hold
+// `cs.mu` should use `ChatSession.GetCurrentPrompt(as)` instead
+// (planned — Phase 0 mostly reads it from inside the locked
+// regions of `defaultPromptHookLocked` and `runReadPump`).
+func (as *AgentSession) CurrentPrompt() *Prompt {
+	return as.currentPrompt
+}
+
+// SetCurrentPrompt (F-53) installs or clears the current Prompt.
+// Pass nil to clear (called by `endPrompt`). The caller MUST hold
+// `ChatSession.mu` (NOT `asMu`) — see the field comment for
+// rationale.
+func (as *AgentSession) SetCurrentPrompt(p *Prompt) {
+	as.currentPrompt = p
 }
 
 // --- per-AS operation context (Background / Activate) -------------

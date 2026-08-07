@@ -31,7 +31,7 @@ func TestSend_OutMessageState_MissingPayload(t *testing.T) {
 		Kind:   gateway.OutMessageState,
 		ChatID: "oc_chat",
 		MessageState: &gateway.MessageStatePayload{
-			State: agent.MessageReceived,
+			State: agent.MessageQueued,
 		},
 	})
 	if err == nil || !strings.Contains(err.Error(), "MessageID") {
@@ -74,7 +74,7 @@ func TestSend_OutMessageState_TracksStateIdempotency(t *testing.T) {
 		ChatID: "oc_chat",
 		MessageState: &gateway.MessageStatePayload{
 			MessageID: "om_msg_1",
-			State:     agent.MessageReceived,
+			State:     agent.MessageQueued,
 		},
 	})
 	// After failure, messageStates should not be marked (revert).
@@ -88,7 +88,7 @@ func TestSend_OutMessageState_TracksStateIdempotency(t *testing.T) {
 	// Pre-populate messageStates with MessageReceived (simulating
 	// a successful prior render).
 	a.mu.Lock()
-	a.messageStates.Add("om_msg_1", agent.MessageReceived)
+	a.messageStates.Add("om_msg_1", agent.MessageQueued)
 	a.mu.Unlock()
 
 	// Second emit with same state: should be short-circuited
@@ -101,7 +101,7 @@ func TestSend_OutMessageState_TracksStateIdempotency(t *testing.T) {
 		ChatID: "oc_chat",
 		MessageState: &gateway.MessageStatePayload{
 			MessageID: "om_msg_1",
-			State:     agent.MessageReceived,
+			State:     agent.MessageQueued,
 		},
 	})
 	if err != nil {
@@ -144,7 +144,7 @@ func TestSend_OutMessageState_FirstReceivedNotSkipped(t *testing.T) {
 		ChatID: "oc_chat",
 		MessageState: &gateway.MessageStatePayload{
 			MessageID: "om_msg_first",
-			State:     agent.MessageReceived,
+			State:     agent.MessageQueued,
 		},
 	})
 	if err == nil {
@@ -179,7 +179,7 @@ func TestSend_OutMessageState_StateForwardedRenders(t *testing.T) {
 		ChatID: "oc_chat",
 		MessageState: &gateway.MessageStatePayload{
 			MessageID: "om_msg_fwd",
-			State:     agent.MessageForwarded,
+			State:     agent.MessageSubmitted,
 		},
 	})
 	if err == nil {
@@ -210,7 +210,10 @@ func TestMessageStatesLRU_BoundsMemory(t *testing.T) {
 	total := messageStatesLRUSize + overflow
 	for i := 0; i < total; i++ {
 		key := fmt.Sprintf("om_lru_%d", i)
-		a.messageStates.Add(key, agent.MessageDone)
+		// F-53: any non-zero MessageState is fine here; we just
+		// need distinct entries to exercise the LRU. Use
+		// MessageSubmitted as the canonical "lifecycle state".
+		a.messageStates.Add(key, agent.MessageSubmitted)
 	}
 
 	// Cache size must be capped at messageStatesLRUSize.
@@ -249,13 +252,13 @@ func TestMessageStatesLRU_TerminalGuardSurvivesEviction(t *testing.T) {
 	// terminal entry we'll add below. (Cap+1 adds guarantees
 	// om_evict_me is evicted.)
 	for i := 0; i <= messageStatesLRUSize; i++ {
-		a.messageStates.Add(fmt.Sprintf("om_filler_%d", i), agent.MessageDone)
+		a.messageStates.Add(fmt.Sprintf("om_filler_%d", i), agent.MessageSubmitted)
 	}
-	a.messageStates.Add("om_evict_me", agent.MessageDone)
+	a.messageStates.Add("om_evict_me", agent.MessageSubmitted)
 
 	// Fill again to push om_evict_me out of the LRU.
 	for i := 0; i < messageStatesLRUSize+1; i++ {
-		a.messageStates.Add(fmt.Sprintf("om_evict_%d", i), agent.MessageFailed)
+		a.messageStates.Add(fmt.Sprintf("om_evict_%d", i), agent.MessageSubmitted)
 	}
 
 	// om_evict_me should be gone (evicted).
@@ -273,7 +276,7 @@ func TestMessageStatesLRU_TerminalGuardSurvivesEviction(t *testing.T) {
 		ChatID: "oc_chat",
 		MessageState: &gateway.MessageStatePayload{
 			MessageID: "om_evict_me",
-			State:     agent.MessageDone,
+			State:     agent.MessageSubmitted,
 		},
 	})
 	if err == nil {

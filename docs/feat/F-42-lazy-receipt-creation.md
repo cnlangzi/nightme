@@ -1,10 +1,19 @@
 # F-42: Lazy Receipt Creation + Simplified MessageState + TaskList Markdown Title
 
-> **Status**: 📝 设计阶段（doc-first）
+> **Status**: 📝 设计阶段（doc-first）— **SUPERSEDED by F-53（部分）**
 > **Milestone**: v1.3.x
 > **Scope**: `internal/channel/feishu/{adapter.go,receipt.go,receipt_task.go}` + 文档同步
 > **Depends on**: F-25 (rolling-log receipt), F-31 (MessageState), F-37 (thread routing), F-38 (task checklist), F-40 (OutReply overflow)
 > **Related**: [`SPEC.md`](../SPEC.md) §0.10 / §2.4 / §2.5; [`channel/feishu.md`](../channel/feishu.md) §6.6 / §13.20 / §15.0
+>
+> **Superseded 部分**（F-53 已重做）：
+> - §0.2 "⏳ / 🔄 reactions 跟其他 waiting 信号重复" 的判断过时：F-53 决定 Phase 0 **彻底删除** ✅ / 👎
+>   反应（`MessageDone` / `MessageFailed` 物理删除），**不**只是删 ⏳ / 🔄。本文 §0.2 的"F-42 选择"在 v1.3.x 不再适用。
+> - "✅ / ❌ 是**终态不可替代**的确认，保留" —— ❌（对应 `MessageFailed`）已删除；✅ 对应的
+>   `MessageDone` 也已删除。用户消息 reaction 终态不再由 MessageState 承载。
+>
+> F-42 的其它内容（lazy receipt creation、TaskList 标题）仍有效，未被 F-53 影响。
+> 新设计权威定义见 [`feat/message_lifecycle.md`](./message_lifecycle.md) §7。
 
 ---
 

@@ -127,7 +127,7 @@ type MessageReceipt struct {
 	logger     *slog.Logger
 
 	mu          sync.Mutex
-	promptState agent.PromptState
+	promptState PromptState // F-53: feishu-local 2-value enum (was agent.PromptState 4-value)
 
 	// entries is the rolling-log of OutReply text chunks, oldest
 	// first. Each entry is rendered as a separate markdown element
@@ -207,7 +207,13 @@ func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receipt
 		cardMsgID:    replyMsgID,
 		bot:          bot,
 		logger:       slog.Default(),
-		promptState: agent.PromptPending,
+		// F-53: initial state is PromptRunning (was PromptPending
+		// in v1.3). The "Prompt is born running" rule from
+		// docs/feat/message_lifecycle.md §4.2 means we never need
+		// a Pending→Running transition on first SetTaskList —
+		// SetTaskListWithFooter's transition guard is removed
+		// below.
+		promptState: PromptRunning,
 	}
 }
 
@@ -253,28 +259,30 @@ func (r *MessageReceipt) SetTaskListWithFooter(ctx context.Context, list *agent.
 	if len(footerLines) > 0 {
 		r.footerLines = footerLines
 	}
-	if r.promptState == agent.PromptPending {
-		r.promptState = agent.PromptRunning
-	}
+	// F-53: Pending→Running transition removed. Initial state is
+	// already PromptRunning (set at construction). Receipt never
+	// transitions to PromptDone in Phase 0 — that value is reserved
+	// for a future UX PR that surfaces terminal state on the card
+	// (see docs/feat/message_lifecycle.md §7).
 	return r.renderLocked(ctx)
 }
 
 // PromptState returns the current prompt execution state. Useful for
-// tests + diagnostics. Returns the agent.PromptState value stored on
-// this receipt; callers should compare against agent.PromptPending /
-// PromptRunning / PromptSucceeded / PromptFailed.
+// tests + diagnostics. Returns the local PromptState value stored on
+// this receipt; callers should compare against PromptRunning /
+// PromptDone.
 //
-// F-44: SetTaskList promotes Pending → Running on first call. The
-// receipt does not transition to Succeeded / Failed (terminal signals
-// travel via OutMessageState → AddReaction, not via receipt state).
-func (r *MessageReceipt) PromptState() agent.PromptState {
+// F-53: SetTaskList no longer promotes Pending → Running (there is
+// no Pending state — receipts start at PromptRunning). Receipts do
+// not transition to PromptDone in Phase 0.
+func (r *MessageReceipt) PromptState() PromptState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.promptState
 }
 
 // State returns the current state. Useful for tests + diagnostics.
-func (r *MessageReceipt) State() agent.PromptState {
+func (r *MessageReceipt) State() PromptState {
 	return r.PromptState()
 }
 

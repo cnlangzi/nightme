@@ -559,10 +559,10 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 
 		cs := mgr.GetOrCreate(msg.ChatID, primary)
 
-		// F-31: ChatSession has accepted the message. Emit
-		// StateReceived synchronously so the channel can render
+		// F-31 / F-53: ChatSession has accepted the message. Emit
+		// MessageQueued synchronously so the channel can render
 		// ⏳ even before spawn resolves (FastAck UX).
-		cs.EmitMessageState(userMsgID, agent.MessageReceived)
+		cs.EmitMessageState(userMsgID, agent.MessageQueued)
 
 		// Resolve active AgentSession (lazy spawn on miss).
 		_, err := cs.LookupActiveAgentSession()
@@ -593,11 +593,11 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 		// it again from handleUse is a no-op.
 		_ = cs.StartReadPump()
 
-		// F-31: dispatch successful — message has reached the
-		// AgentSession. Emit StateForwarded so the channel flips
+		// F-31 / F-53: dispatch successful — message has reached the
+		// AgentSession. Emit MessageSubmitted so the channel flips
 		// ⏳ → 🔄. (Emitted before QueueUserMessage so the visual
 		// transition is visible even if queueing is slow.)
-		cs.EmitMessageState(userMsgID, agent.MessageForwarded)
+		cs.EmitMessageState(userMsgID, agent.MessageSubmitted)
 
 		// Build structured blocks and queue to InputBuffer.
 		// F-14 v1.4b: post rich-text messages arrive with
@@ -634,7 +634,19 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 				"block_types", types,
 			)
 		}
-		if err := cs.QueueUserMessage(blocks, userMsgID); err != nil {
+		// F-53: build the per-message domain object. The
+		// `ReceivedAt` is set to the inbound timestamp so log /
+		// debug surfaces see the true arrival time (not the
+		// dispatcher-pass time, which may be a hair later when
+		// the spawn path took a moment).
+		userMsg := &chatsession.Message{
+			ID:         userMsgID,
+			ChatID:     msg.ChatID,
+			Blocks:     blocks,
+			ReceivedAt: msg.Time,
+			Stage:      agent.MessageQueued, // already emitted above; redundant but explicit
+		}
+		if err := cs.QueueUserMessage(userMsg); err != nil {
 			if errors.Is(err, chatsession.ErrBufferFull) {
 				return ch.Send(ctx, gateway.OutboundMessage{
 					ChatID: msg.ChatID,
@@ -688,16 +700,16 @@ func wireRuntimeCallbacksAndRestore(
 	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
 		cs.SetEventHandler(factory(cs))
 		// F-48: wrap the gateway's OnMessageState so the runtime
-		// can stamp SessionContext on MessageForwarded (the
+		// can stamp SessionContext on MessageSubmitted (the
 		// Feishu placeholder card needs the footer). The gateway's
 		// bare OnMessageState doesn't accept SessionContext — the
 		// runtime is the right owner of the stamp because it has
 		// access to the AgentSession via cs.ActiveAgentSession().
 		// We bypass gwImpl.OnMessageState entirely here: the
 		// runtime wrapper does the same thing (validate, build
-		// OutboundMessage, send) plus the stamp on MessageForwarded.
-		// Other states (Received / Done / Error) don't need the
-		// stamp — they don't create UI.
+		// OutboundMessage, send) plus the stamp on MessageSubmitted.
+		// Other states (MessageQueued / MessageDropped) don't need
+		// the stamp — they don't create UI.
 		cs.SetMessageStateHandler(func(chatID, userMsgID string, state agent.MessageState) {
 			// Review fix: replicate the gateway's identifier
 			// validation. Empty chatID / userMsgID would produce
@@ -717,7 +729,7 @@ func wireRuntimeCallbacksAndRestore(
 					MessageID: userMsgID,
 				},
 			}
-			if state == agent.MessageForwarded {
+			if state == agent.MessageSubmitted {
 				if as := cs.ActiveAgentSession(); as != nil {
 					sessionContextInto(&out, as)
 				}
@@ -755,11 +767,13 @@ func ensureReadPumps(mgr *chatsession.Manager, ch channel.Channel, primary strin
 // to look it up.
 //
 // userMsgID is the current turn's single anchor (passed by
-// readPump from cs.currentTurnUserMsgID). The handler stamps it
-// onto OutboundMessage.ReplyTo so each Channel can route the
-// event to its own per-userMsgID receipt (card / thread / DOM
-// node). Empty when the event has no anchor (startup EventInit
-// etc.) — Channel falls back to plain text in that case.
+// readPump from AgentSession.currentPrompt.LastMessageID; F-53
+// moved it there from the deleted cs.currentTurnUserMsgID
+// scalar). The handler stamps it onto OutboundMessage.ReplyTo
+// so each Channel can route the event to its own per-userMsgID
+// receipt (card / thread / DOM node). Empty when the event has
+// no anchor (startup EventInit, post-/use while no Prompt is
+// active, etc.) — Channel falls back to plain text in that case.
 //
 // v1.3 (SPEC §2.2): 1 turn : 1 anchor. Receipt rendering and
 // FSM are Channel-internal; Gateway only knows about userMsgID.
@@ -960,7 +974,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 // sessionContextInto populates the F-45/F-48 SessionContext
 // snapshot on the OutboundMessage when there's at least one
 // meaningful field to render. Reused by the 4 main-chat kind
-// stamp site AND the OutMessageState+MessageForwarded site (the
+// stamp site AND the OutMessageState+MessageSubmitted site (the
 // Feishu placeholder card needs the same snapshot so its footer
 // line 3 — git tracking — renders from the very first "⌨️
 // Working..." emit).
@@ -973,7 +987,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 //
 // Git invocation has a 3s deadline (review fix): a hung git
 // (stalled NFS, broken .git/index, ... ) would otherwise block
-// the entire outbound-message pipeline — MessageForwarded
+// the entire outbound-message pipeline — MessageSubmitted
 // placeholders AND every stamped reply/result wait for git to
 // return. 3s is plenty for normal repos (10-50ms typical; up to
 // ~1s on very large monorepos) and far below the user's

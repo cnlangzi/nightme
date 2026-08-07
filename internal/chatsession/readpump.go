@@ -30,6 +30,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
@@ -48,9 +49,10 @@ import (
 // thread / DOM node). Empty when the event has no anchor (e.g.
 // startup EventInit with no user message yet).
 //
-// v1.3 (SPEC §2.2): 1 turn : 1 userMsgID, no fanout. The
-// ChatSession tracks the anchor via currentTurnUserMsgID and
-// passes it to the handler here.
+// v1.3 (SPEC §2.2): 1 turn : 1 userMsgID, no fanout. F-53 moves
+// the anchor onto AgentSession.currentPrompt.LastMessageID; this
+// readPump resolves it from as.currentPrompt under cs.mu.RLock
+// before invoking the handler.
 //
 // Implementations MUST be non-blocking or short (events drain
 // through a buffered channel; long handlers stall the pump).
@@ -148,19 +150,24 @@ func (cs *ChatSession) HasPump() bool {
 //   - ctx cancels (ChatSession shutdown)
 //
 // On every event, in order:
-//   1. Invoke the EventHandler (if non-nil)
-//   2. Drive the InputBuffer FSM
-//   3. If EventDone/EventError, also flush the buffer
+//   1. Touch `as.currentPrompt.LastProgressAt` if a Prompt is
+//      active (F-53 L2 hook point; no action in Phase 0)
+//   2. Resolve `userMsgID` from `as.currentPrompt.LastMessageID`
+//      (empty when no Prompt active — startup EventInit etc.)
+//   3. Invoke the EventHandler (if non-nil) with (chatID, as, ev, userMsgID)
+//   4. Drive the InputBuffer FSM
+//   5. If EventDone/EventError, also `endPrompt(reason)` then `flushPending()`
 //
 // Event order: handler runs BEFORE FSM transition, so the handler
 // can observe "agent is going idle" via ev.Kind. (Most handlers
 // don't care; this is for completeness.)
 //
-// v1.3 (F-31): on terminal events (EventDone/EventError), emit
-// MessageState(Done/Error) for every userMsgID in the just-
-// completed turn (tracked via currentTurnUserMsgID). Emit BEFORE
-// SetIdle + OnTurnEnded so the next flush (if any queued messages
-// remain) doesn't overwrite the userMsgIDs we just consumed.
+// F-53: on terminal events, `endPrompt(reason)` closes the
+// in-flight Prompt (sets EndedAt + EndReason, clears
+// `as.currentPrompt`). NO MessageState fan-out — messages already
+// reached their terminal Stage=Submitted at submit time (see
+// docs/feat/message_lifecycle.md §5.1). After endPrompt,
+// `flushPending()` drains any messages queued during the turn.
 func (cs *ChatSession) runReadPump(as *AgentSession, h EventHandler, stop, done chan struct{}) {
 	defer func() {
 		cs.pumpRunning.Store(false)
@@ -189,26 +196,40 @@ func (cs *ChatSession) runReadPump(as *AgentSession, h EventHandler, stop, done 
 			return
 		case ev, ok := <-evCh:
 			if !ok {
-				// Channel closed: process exited.
+				// Channel closed: process exited. F-53 Phase 0
+				// does NOT call endPrompt(ProcessDied) here —
+				// that's deferred to the "Prompt 投递稳定性优化"
+				// PR (see tasks/wip.md L3 +
+				// docs/feat/message_lifecycle.md §8). For now we
+				// just mark the AS exited; the buffer stays Busy
+				// and any queued messages wait for the next
+				// prompt attempt.
 				as.SetExited(0)
 				return
 			}
+			// Resolve anchor from currentPrompt (F-53). Empty
+			// when no Prompt is active (e.g. startup EventInit
+			// before the first user message has been submitted).
+			cs.mu.RLock()
+			userMsgID := ""
+			if p := as.CurrentPrompt(); p != nil {
+				userMsgID = p.LastMessageID
+				p.LastProgressAt = time.Now() // F-53 L2 hook (no-op in Phase 0)
+			}
+			cs.mu.RUnlock()
 			if h != nil {
-				cs.mu.RLock()
-				userMsgID := cs.currentTurnUserMsgID
-				cs.mu.RUnlock()
 				h(cs.ChatID, as, ev, userMsgID)
 			}
-			// FSM driving + MessageState emission (F-31).
+			// FSM driving + endPrompt sink (F-53).
 			switch ev.Kind {
 			case agent.EventDone:
-				cs.emitMessageStateForCurrentTurn(agent.MessageDone)
+				cs.endPrompt(PromptEndClean)
 				cs.SetIdle()
-				_ = cs.OnTurnEnded()
+				_ = cs.ensureBuffer().flushPending()
 			case agent.EventError:
-				cs.emitMessageStateForCurrentTurn(agent.MessageFailed)
+				cs.endPrompt(PromptEndError)
 				cs.SetIdle()
-				_ = cs.OnTurnEnded()
+				_ = cs.ensureBuffer().flushPending()
 			case agent.EventInit:
 				// Session metadata, NOT a turn in progress. Don't
 				// flip the InputBuffer FSM to Busy — that race

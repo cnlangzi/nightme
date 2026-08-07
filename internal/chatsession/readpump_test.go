@@ -207,8 +207,8 @@ func TestChatSession_KillAll_PreservesBuffer(t *testing.T) {
 	cs.LookupActiveAgentSession()
 	_ = cs.StartReadPump()
 	cs.SetBusy()
-	_ = cs.QueueUserMessage(
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "survives"}}, "m1")
+	_ = cs.QueueUserMessage(makeTestMessage(cs,
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "survives"}}, "m1"))
 
 	// Pre-condition: 1 queued, busy.
 	if cs.BufferPending() != 1 {

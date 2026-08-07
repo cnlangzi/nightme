@@ -392,97 +392,179 @@ func TestCreatedAtAndID(t *testing.T) {
 	}
 }
 // TestSetActiveAgent_ClearsStaleAnchor verifies the v1.3 fix:
-// when /use switches the active agent mid-flight, the previous
-// turn's anchor (currentTurnUserMsgID) MUST be cleared so the
-// new AS's events don't get stamped with the OLD userMsgID and
-// routed to the OLD receipt card.
-func TestSetActiveAgent_ClearsStaleAnchor(t *testing.T) {
-	cs := New("oc_chat", "claude")
-
-	cs.mu.Lock()
-	cs.currentTurnUserMsgID = "om_msg_old_turn"
-	cs.mu.Unlock()
-
-	if err := cs.SetActiveAgent("codex"); err != nil {
-		t.Fatalf("SetActiveAgent: %v", err)
-	}
-
-	cs.mu.RLock()
-	got := cs.currentTurnUserMsgID
-	cs.mu.RUnlock()
-	if got != "" {
-		t.Errorf("SetActiveAgent did not clear currentTurnUserMsgID: got %q", got)
-	}
-}
-
-// TestKillAll_ClearsStaleAnchor mirrors the above for /kill: when
-// the active AS pool is torn down, the in-flight anchor must be
-// cleared so the next /spawn's events start fresh.
-func TestKillAll_ClearsStaleAnchor(t *testing.T) {
-	cs := New("oc_chat", "claude")
-	cs.WithSpawner(&spySpawner{})
-
-	cs.mu.Lock()
-	cs.currentTurnUserMsgID = "om_msg_killed_turn"
-	cs.mu.Unlock()
-
-	if _, err := cs.KillAll(); err != nil {
-		t.Fatalf("KillAll: %v", err)
-	}
-
-	cs.mu.RLock()
-	got := cs.currentTurnUserMsgID
-	cs.mu.RUnlock()
-	if got != "" {
-		t.Errorf("KillAll did not clear currentTurnUserMsgID: got %q", got)
-	}
-}
-
-// TestDefaultFlushHook_AnchorWriteIsRaceFree exercises the v1.3
-// concurrent-write fix: the flush hook closure runs WITHOUT cs.mu
-// held (InputBuffer releases its own lock before invoking the
-// hook), so the closure must acquire cs.mu when writing
-// currentTurnUserMsgID. The runReadPump goroutine reads it under
-// RLock — racing between them is what the race detector catches.
+// F-53: the old TestSetActiveAgent_ClearsStaleAnchor and
+// TestKillAll_ClearsStaleAnchor tests were deleted — their
+// subject (`currentTurnUserMsgID` scalar) is gone. The new
+// anchor lives on `AgentSession.currentPrompt.LastMessageID` and
+// is cleared automatically by `endPrompt` / agent-switch paths.
+// See docs/feat/message_lifecycle.md §4.2 + §5.1.
+//
+// TestDefaultPromptHook_AnchorWriteIsRaceFree exercises the F-53
+// concurrent-write fix: the default PromptHook closure runs
+// WITHOUT cs.mu held (InputBuffer releases its own lock before
+// invoking the hook), so the closure must acquire cs.mu when
+// writing as.currentPrompt. The runReadPump goroutine reads it
+// under RLock — racing between them is what the race detector
+// catches.
 //
 // We launch N concurrent flushes and N concurrent reads. If the
 // fix is in place (Lock inside the closure), no data race. If
 // not, -race trips immediately.
-func TestDefaultFlushHook_AnchorWriteIsRaceFree(t *testing.T) {
+func TestDefaultPromptHook_AnchorWriteIsRaceFree(t *testing.T) {
 	cs := New("oc_chat", "claude")
 	cs.WithSpawner(&spySpawner{})
 
 	cs.mu.Lock()
 	cs.activeAS = newActiveAgentNoop()
-	hook := cs.defaultFlushHookLocked()
+	hook := cs.defaultPromptHookLocked()
 	cs.mu.Unlock()
 
 	const N = 64
 	var wg sync.WaitGroup
 
-	// Writers: each invokes the hook with its own userMsgID.
+	// Writers: each invokes the hook with its own Prompt.
 	for i := 0; i < N; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_ = hook([]agent.ContentBlock{{Text: "x"}}, []string{
-				fmt.Sprintf("om_writer_%d", i),
-			})
+			p := &Prompt{
+				MessageIDs:    []string{fmt.Sprintf("om_writer_%d", i)},
+				LastMessageID: fmt.Sprintf("om_writer_%d", i),
+				Blocks:        []agent.ContentBlock{{Text: "x"}},
+				ChatSessionID: cs.ChatID,
+			}
+			_ = hook(p)
 		}(i)
 	}
 
-	// Readers: drain currentTurnUserMsgID under RLock.
+	// Readers: drain as.currentPrompt.LastMessageID under RLock.
 	for i := 0; i < N; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 16; j++ {
 				cs.mu.RLock()
-				_ = cs.currentTurnUserMsgID
+				if p := cs.activeAS.CurrentPrompt(); p != nil {
+					_ = p.LastMessageID
+				}
 				cs.mu.RUnlock()
 			}
 		}()
 	}
 
 	wg.Wait()
+}
+
+// TestQueueUserMessage_RemovesGhostOnBufferFull verifies the F-53
+// invariant: messagesByID contains only messages that are either
+// in the buffer queue, Submitted, or Dropped. A failed Add (e.g.
+// ErrBufferFull) must NOT leave a "ghost" entry behind —
+// otherwise the chat would accumulate stale Queued entries
+// forever (ClearBuffer only clears the queue, not messagesByID).
+func TestQueueUserMessage_RemovesGhostOnBufferFull(t *testing.T) {
+	cs := New("oc_chat", "claude")
+	cs.SetActiveCwd("/x")
+	cs.SetActiveAgent("claude")
+
+	// Force BufferFull by setting maxMsgs to 0 on the inputBuffer.
+	// We can't reach the constructor from outside, so simulate by
+	// filling the buffer to its cap.
+	cs.ensureBuffer().maxMsgs = 0
+	cs.ensureBuffer().maxBytes = 0
+	cs.SetBusy()
+
+	msg := makeTestMessage(cs, []agent.ContentBlock{{Type: agent.ContentText, Text: "will fail"}}, "om_ghost")
+
+	err := cs.QueueUserMessage(msg)
+	if err == nil {
+		t.Fatalf("expected buffer-full error from QueueUserMessage with 0 capacity, got nil")
+	}
+
+	if cs.GetMessage("om_ghost") != nil {
+		t.Errorf("messagesByID still has om_ghost after Add failure; want removed (no ghost leak)")
+	}
+}
+
+// TestKillAllSequence_ResetsBufferFSM verifies the post-/kill FSM
+// state — the InputBuffer must be Idle after /kill so the next
+// user message doesn't get stranded in a "Busy but no active AS
+// will ever flush" state.
+//
+// Sequence (mimics cmd/command/kill/cmd.go Handle):
+//  1. Spawn an AS, mark Busy, queue messages
+//  2. KillAll → pool cleared, activeAS=nil
+//  3. ClearBuffer → queued messages flipped to Dropped
+//  4. SetIdle → FSM reset (the /kill handler does this; Phase 0
+//     documents it explicitly because KillAll alone doesn't touch
+//     the FSM)
+//
+// Pre-fix bug: step 4 was missing. The next user message would see
+// state=Busy, get queued by InputBuffer.Add, and never flush
+// (the dead AS can't drive a flushPending). User sees the
+// message silently dropped.
+func TestKillAllSequence_ResetsBufferFSM(t *testing.T) {
+	cs := New("oc_chat", "claude")
+	cs.SetActiveCwd(t.TempDir())
+
+	// Spawn an AS via the recordingSpawner pattern would be
+	// heavier than needed — for this test we just need any
+	// activeAS that KillAll can iterate over.
+	as := NewAgentSession("as_kill", "oc_chat", "claude", t.TempDir(), nil)
+	as.handle = newRecordingAgentSession(1)
+	as.stat = StatusRunning
+
+	cs.mu.Lock()
+	cs.pool[agentCwdKey{Agent: as.Agent, Cwd: as.Cwd}] = as
+	cs.activeAS = as
+	cs.mu.Unlock()
+
+	// Mark Busy and queue a message — simulate "agent is mid-turn,
+	// user sends another message".
+	cs.SetBusy()
+	msg := makeTestMessage(cs, []agent.ContentBlock{{Text: "x"}}, "om_queued")
+	if err := cs.QueueUserMessage(msg); err != nil {
+		t.Fatalf("QueueUserMessage: %v", err)
+	}
+	if cs.BufferState() != StateBusy {
+		t.Fatalf("pre-kill: BufferState = %s, want Busy", cs.BufferState())
+	}
+
+	// Run the /kill handler's sequence.
+	if _, err := cs.KillAll(); err != nil {
+		t.Fatalf("KillAll: %v", err)
+	}
+	cs.ClearBuffer()
+	cs.SetIdle()
+
+	if got := cs.BufferState(); got != StateIdle {
+		t.Errorf("post-kill: BufferState = %s, want Idle (next user message would be stranded)", got)
+	}
+
+	// The queued message should be Dropped (Stage=Dropped), not
+	// silently stranded in Queued.
+	if msg.Stage != agent.MessageDropped {
+		t.Errorf("queued message after /kill: Stage = %v, want MessageDropped", msg.Stage)
+	}
+
+	// Verify the next user message can dispatch immediately
+	// (Idle path: hook fires synchronously). Use the new
+	// recordingAgentSession so the hook succeeds.
+	newAS := NewAgentSession("as_respawn", "oc_chat", "claude", t.TempDir(), nil)
+	newAS.handle = newRecordingAgentSession(2)
+	newAS.stat = StatusRunning
+	cs.mu.Lock()
+	cs.pool[agentCwdKey{Agent: newAS.Agent, Cwd: newAS.Cwd}] = newAS
+	cs.activeAS = newAS
+	cs.mu.Unlock()
+
+	nextMsg := makeTestMessage(cs, []agent.ContentBlock{{Text: "after-kill"}}, "om_after_kill")
+	if err := cs.QueueUserMessage(nextMsg); err != nil {
+		t.Fatalf("post-kill QueueUserMessage: %v", err)
+	}
+	if nextMsg.Stage != agent.MessageSubmitted {
+		t.Errorf("post-kill message: Stage = %v, want MessageSubmitted (Idle path)", nextMsg.Stage)
+	}
+	if cs.BufferPending() != 0 {
+		t.Errorf("post-kill buffer should be empty, got %d queued", cs.BufferPending())
+	}
 }

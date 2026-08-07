@@ -91,7 +91,7 @@ func TestNewActiveAgentSessions_AllRunningReset(t *testing.T) {
 	// immediately when Idle, bypassing the queue).
 	cs.ensureBuffer()
 	cs.inputBuffer.SetState(StateBusy)
-	if err := cs.inputBuffer.Add([]agent.ContentBlock{{Type: agent.ContentText, Text: "queued"}}, "u1"); err != nil {
+	if err := cs.inputBuffer.Add(makeTestMessage(cs, []agent.ContentBlock{{Type: agent.ContentText, Text: "queued"}}, "u1")); err != nil {
 		t.Fatalf("inputBuffer.Add: %v", err)
 	}
 	if got := cs.inputBuffer.Pending(); got == 0 {
@@ -229,7 +229,7 @@ func TestNewActiveAgentSessions_PartialFailure(t *testing.T) {
 	injectAS(t, cs, "codex", cwd, &failingNewAS{fakeAgentSession: newFakeAgentSession(2)})
 	cs.ensureBuffer()
 	cs.inputBuffer.SetState(StateBusy)
-	if err := cs.inputBuffer.Add([]agent.ContentBlock{{Type: agent.ContentText, Text: "x"}}, "u1"); err != nil {
+	if err := cs.inputBuffer.Add(makeTestMessage(cs, []agent.ContentBlock{{Type: agent.ContentText, Text: "x"}}, "u1")); err != nil {
 		t.Fatalf("inputBuffer.Add: %v", err)
 	}
 

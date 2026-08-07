@@ -1,11 +1,20 @@
 # F-27: ChatSession Model
 
-> **Status**: locked (v1.2; shipped in commits 5/6/8b/8c on `fix/cwd_session`; 2026-08-02)
+> **Status**: locked (v1.2; shipped in commits 5/6/8b/8c on `fix/cwd_session`; 2026-08-02) — **v1.3.x F-53 命名更新**
 > **Milestone**: v1.2 (commit 1 of "ChatSession refactor")
 > **Depends on**: F-26 (v1.1 responsibility isolation), F-08 (Channel), F-20 (Gateway)
 > **Replaces**: v1.1 `Session` (see F-01/F-07 for original design)
 > **Used by**: F-28 (`/use`), F-29 (AgentSession pool), F-25 (InputBuffer FSM)
 > **Related docs**: [`SPEC.md`](../SPEC.md) v1.2 §1.2/§1.3/§3, [`PRD.md`](../PRD.md) v1.2 §4.3/§4.6
+>
+> **F-53 命名更新**（v1.3.x，相对本文）：
+> - `FlushHook` → `PromptHook`（签名 `(blocks, userMsgIDs) error` → `(p *Prompt) error`）
+> - `OnTurnEnded()` → `endPrompt(reason)` + `flushPending()`
+> - `currentTurnUserMsgID` → `AgentSession.currentPrompt.LastMessageID`
+> - `Message` 实体替代 `bufferEntry`
+>
+> 高层架构（ChatSession + AgentSession 拆分、InputBuffer FSM 归属）保持不变；命名 / 字段迁移
+> 见 [`feat/message_lifecycle.md`](./message_lifecycle.md)。
 
 ---
 

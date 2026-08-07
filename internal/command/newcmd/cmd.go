@@ -69,6 +69,14 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 
 	matched, _, results, err := cs.NewActiveAgentSessions(ctx, agentName)
 
+	// F-53: drop any queued messages that were waiting for the
+	// reset AgentSession. ClearBuffer flips each to MessageDropped
+	// and wire-emits MessageDropped — matches /kill semantics (see
+	// docs/feat/message_lifecycle.md §5.1 MessageDropped trigger
+	// paths). Without this, queued messages would survive /new
+	// and flush into the reset context, which is surprising UX.
+	_ = cs.ClearBuffer()
+
 	// F-45 §1.8: /new is the ONLY event that clears cumulative
 	// token / cost stats on the AgentSession. Bridge New()
 	// already reset the conversation context; runtime resets the

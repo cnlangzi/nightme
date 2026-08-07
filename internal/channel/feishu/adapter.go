@@ -765,7 +765,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	// arrives. The first OutReply later overwrites footerLines
 	// via AppendEntryWithFooter once cumulative usage is available.
 	transient.footerLines = footerLines
-	transient.promptState = agent.PromptPending
+	transient.promptState = PromptRunning
 	transient.initializing = true
 
 	a.mu.Lock()
@@ -877,7 +877,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 		{Icon: "💬", Text: firstEntryText},
 	}
 	transient.footerLines = footerLines
-	transient.promptState = agent.PromptRunning
+	transient.promptState = PromptRunning
 	transient.initializing = true
 
 	// Register-before-SendCard (see ensureReceiptForTask for the
@@ -1083,7 +1083,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	copy(copied, items)
 	transient.tasks = copied
 	transient.footerLines = footerLines // F-45: footer captured at cold-start
-	transient.promptState = agent.PromptRunning
+	transient.promptState = PromptRunning
 	transient.initializing = true
 
 	// Register-before-SendCard (see ensureReceiptForReply for the
@@ -1267,25 +1267,25 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// AppendEntry / SetTaskList. The placeholder uses
 		// ReplyInBoth (anchored to userMsgID) per main's reply.go
 		// safe pattern — the parent has no thread yet at
-		// MessageForwarded time, so the slot reservation is safe;
+		// MessageSubmitted time, so the slot reservation is safe;
 		// later PATCHes on the same message_id are immune to a
 		// thread promotion by OutToolStart/End.
 		//
 		// (DEBUG trap: if msg.ReplyTo is empty the placeholder is
 		// silently dropped — log so future regressions surface
 		// immediately instead of being invisible to the user.)
-		if state == agent.MessageForwarded {
+		if state == agent.MessageSubmitted {
 			if msg.ReplyTo == "" {
-				a.logger.Warn("feishu: OutMessageState MessageForwarded missing ReplyTo — Typing placeholder skipped (gateway should set OutboundMessage.ReplyTo = userMsgID)",
+				a.logger.Warn("feishu: OutMessageState MessageSubmitted missing ReplyTo — Typing placeholder skipped (gateway should set OutboundMessage.ReplyTo = userMsgID)",
 					"chat_id", msg.ChatID, "message_state_message_id", msg.MessageState.MessageID)
 			} else {
 				// F-48: compute the footer (same shape as the
 				// main-chat footer, but stamped by the runtime
-				// on MessageForwarded so the placeholder card
+				// on MessageSubmitted so the placeholder card
 				// shows the git-tracking line 3 immediately).
 				// msg.SessionContext is non-nil here because the
 				// runtime stamps it on OutMessageState +
-				// MessageForwarded; with nothing meaningful
+				// MessageSubmitted; with nothing meaningful
 				// (no Agent, no Model, no usage, no git),
 				// formatSessionFooterLines returns nil and the
 				// footer is omitted from the placeholder.
@@ -1307,7 +1307,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// promptHeaderLine for PromptFailed). This guard mirrors
 		// the receipt-side terminal protection in Append.
 		//
-		// Intermediate states (MessageReceived / MessageForwarded)
+		// Intermediate states (MessageQueued / MessageSubmitted)
 		// are NOT terminal and continue to flow through normally;
 		// they restore the F-42 drop that left the user message
 		// reaction-less during the FastAck window (the gap between
@@ -1322,10 +1322,12 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		prev, hasPrev := a.messageStates.Get(messageID)
 		// Idempotency: same state twice → drop.
 		skip := hasPrev && prev == state
-		// Terminal guard: already in a terminal MessageState → drop.
-		if hasPrev && (prev == agent.MessageDone || prev == agent.MessageFailed) {
-			skip = true
-		}
+		// F-53: MessageDone / MessageFailed no longer exist (see
+		// docs/feat/message_lifecycle.md §7). Message.Stage has no
+		// terminal value, so the previous "terminal guard" branch
+		// is removed. Queued → Submitted → (silent) is the only
+		// valid sequence on user messages; same-state idempotency
+		// above is sufficient.
 		if !skip {
 			a.messageStates.Add(messageID, state)
 		}
@@ -2472,16 +2474,20 @@ func (a *Adapter) SendMessageText(ctx context.Context, chatID, text, rootID stri
 // "Cross" predefined type to its catalog, switch to that here.
 //
 // Returns "" for unknown states (forward-compatible silent drop).
+//
+// F-53: MessageDone / MessageFailed cases removed. ✅ / 👎
+// reactions on user messages are permanently retired — terminal
+// execution status is carried by `chatsession.Prompt.EndReason`
+// (and will surface in a future UX PR via a different surface,
+// e.g. the receipt card). See docs/feat/message_lifecycle.md §7.
 func mapStateToFeishuEmoji(state agent.MessageState) string {
 	switch state {
-	case agent.MessageReceived:
+	case agent.MessageQueued:
 		return "OneSecond" // ⏳
-	case agent.MessageForwarded:
+	case agent.MessageSubmitted:
 		return "OnIt" // 🔄
-	case agent.MessageDone:
-		return "DONE" // ✅
-	case agent.MessageFailed:
-		return "THUMBSDOWN" // 👎 — closest predefined "negative"
+	case agent.MessageDropped:
+		return "" // explicitly no reaction (Phase 0 UX)
 	}
 	return ""
 }

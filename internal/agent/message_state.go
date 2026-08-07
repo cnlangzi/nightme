@@ -1,81 +1,68 @@
 package agent
 
-// MessageState is the lifecycle stage of one inbound user message
-// within nightme's delivery pipeline. It answers "where is this
-// message in the system right now?" so channels can render a
-// user-visible reaction emoji on the user message itself
-// (⏳ received → 🔄 forwarded → ✅ done / ❌ failed).
+// MessageState is the wire + lifecycle stage of one inbound user
+// message within nightme's processing pipeline. F-53 shrinks the
+// v1.3 4-value enum to 3 values:
 //
-// Owner: ChatSession (per-userMsg). Trigger: ChatSession
-// lifecycle events (received / forwarded / done / failed). See
-// SPEC §2.5 for full semantics and the rationale for keeping
-// MessageState independent from any Channel's receipt object.
+//   - MessageQueued:    was MessageReceived
+//   - MessageSubmitted: was MessageForwarded
+//   - MessageDropped:   new (Phase 0; explicit clear only)
 //
-// IMPORTANT: MessageState describes the DELIVERY pipeline (did the
-// message reach ChatSession? did it reach AgentSession? did the
-// agent turn terminate?), NOT the prompt execution lifecycle.
-// The execution view is PromptState (see prompt_state.go) —
-// each channel owns its own PromptState on its receipt object,
-// updated by receipt.Append on agent.EventDone / EventError.
-// The two FSMs answer different questions and are kept
-// independent on purpose.
+// The previous MessageDone / MessageFailed values (which conflated
+// execution result with delivery state) are physically deleted —
+// terminal execution result is now carried by `chatsession.Prompt.
+// EndReason`. See docs/feat/message_lifecycle.md §3 原则 1 / §6.3.
 //
-// Scope: only produced for plain user messages, NOT slash
-// commands. See docs/feat/F-31-message-state.md.
-//
-// Channel rendering: every Channel implements its own
-// MessageState → native-rendering mapping (Feishu AddReaction,
-// Slack emoji shortcode, Web DOM state). The abstract enum is
-// the contract; the concrete rendering is the Channel's
-// responsibility (SPEC §2.4 / §2.5).
-//
-// History: this type used to live in its own package
-// `internal/receipt/` alongside a now-removed Receipt FSM and
-// ReceiptState enum (v1.2 Gateway-owned design). v1.3 collapsed
-// the package to just this one enum; we moved it into `agent`
-// (the package every other layer already imports) so there is
-// no new dependency edge and no import cycle. The v1.3.x rename
-// drops the `State` prefix in favour of `Message` to make the
-// `agent.MessageReceived` form read as a complete phrase and to
-// distinguish from PromptState (which lives in the same
-// package).
+// MessageState is the abstract-layer vocabulary; Channels consume
+// it via the existing wire (Gateway.OnMessageState →
+// `OutboundMessage{Kind: OutMessageState, MessageState: ...}`) and
+// render via their own platform primitives (Feishu reaction emoji,
+// Slack shortcode, Web DOM diff, etc.). Channel authors are NOT
+// required to render every value — Channels choose what subset to
+// surface.
 type MessageState int
 
 const (
-	// MessageReceived: ChatSession has accepted the message but
-	// not yet dispatched it to an AgentSession. Triggered on
-	// ChatSession.GetOrCreate.
-	MessageReceived MessageState = iota
+	// MessageQueued: ChatSession has accepted the message and
+	// queued it for submission. Triggered on `QueueUserMessage`
+	// entry (currently on the runtime dispatcher in
+	// cmd/nightme/run.go newMessageDispatcher, BEFORE the
+	// AS-spawn attempt — spawn failure is reported via OutReply,
+	// not as a MessageState transition).
+	MessageQueued MessageState = iota
 
-	// MessageForwarded: the message has been dispatched to an
-	// AgentSession (lazy spawn succeeded; blocks enqueued or
-	// sent to PTY stdin). Triggered on successful
-	// LookupActiveAgentSession.
-	MessageForwarded
+	// MessageSubmitted: SendBlocks returned nil; the message
+	// (and any batched siblings) have been formally delivered to
+	// the AgentSession. Triggered inside
+	// ChatSession.defaultPromptHookLocked after successful
+	// submission. Terminal from a delivery-pipeline perspective
+	// — `Message.Stage` does NOT change when the corresponding
+	// Prompt ends (no fan-out; see docs/feat/message_lifecycle.md
+	// §5.1).
+	MessageSubmitted
 
-	// MessageDone: the AgentSession has finished processing this
-	// message (EventDone arrived on the readPump). Terminal.
-	// Triggered by ChatSession.runReadPump on EventDone.
-	MessageDone
-
-	// MessageFailed: the AgentSession reported an error for this
-	// message (EventError arrived). Terminal. Triggered by
-	// ChatSession.runReadPump on EventError.
-	MessageFailed
+	// MessageDropped: the message was explicitly cleared before
+	// it could be submitted. Triggered by `ChatSession.
+	// MarkDropped`, which is called from:
+	//   - BufferClear (which `/kill` and `/new` invoke to drop
+	//     the queued batch)
+	//
+	// NOT triggered by SendBlocks failure — a failed send leaves
+	// the message in `MessageQueued` and the next
+	// `flushPending` retries it.
+	MessageDropped
 )
 
 // String renders MessageState as a short human label, primarily
 // for log lines and test diagnostics.
 func (s MessageState) String() string {
 	switch s {
-	case MessageReceived:
-		return "received"
-	case MessageForwarded:
-		return "forwarded"
-	case MessageDone:
-		return "done"
-	case MessageFailed:
-		return "failed"
+	case MessageQueued:
+		return "queued"
+	case MessageSubmitted:
+		return "submitted"
+	case MessageDropped:
+		return "dropped"
 	}
 	return "unknown"
 }

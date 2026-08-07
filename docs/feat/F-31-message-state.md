@@ -1,10 +1,20 @@
 # F-31: MessageState — 消息生命周期进度跟踪
 
-> **Status**: locked (v1.3; shipped in commit a6113d9)
-> **Milestone**: v1.3
+> **Status**: 🔒 locked (v1.3; shipped in commit a6113d9) — **SUPERSEDED by F-53**
+> **Milestone**: v1.3（原始定义）→ v1.3.x F-53 重构
 > **Depends on**: F-08 (Channel abstraction), F-26 (Gateway), F-27 (ChatSession), F-29 (AgentSession pool)
 > **Used by**: end users (visual feedback), ChatSession lifecycle
 > **Related docs**: [`SPEC.md`](../SPEC.md) v1.3 §2.5, [`F-26-gateway-hub.md`](./F-26-gateway-hub.md), [`channel/feishu.md`](../channel/feishu.md) §6.6, [`F-25-rolling-log.md`](./F-25-rolling-log.md)
+> **Superseded by**: [`feat/message_lifecycle.md`](./message_lifecycle.md)（v1.3.x F-53）—— 本文档保留作 v1.3 历史参考，**不要**作为新设计的依据
+>
+> **F-53 的关键变更**（相对本文）：
+> - `MessageState` 4 态（`Received` / `Forwarded` / `Done` / `Failed`）→ 3 态（`Queued` / `Submitted` / `Dropped`）
+> - `MessageDone` / `MessageFailed` 物理删除（执行结果由 `Prompt.EndReason` 承载）
+> - Feishu 用户消息上的 ✅ / 👎 反应**永久下线**
+> - `MessageQueued` 触发点改为 Gateway inbound 入口（早于 spawn）
+> - `MessageSubmitted` 触发点改为 `defaultPromptHookLocked` 内 `SendBlocks` 返回 nil 之后
+>
+> 新设计权威定义见 [`feat/message_lifecycle.md`](./message_lifecycle.md) §4 / §5 / §7 / §8。
 
 ---
 

@@ -26,6 +26,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
@@ -712,6 +713,23 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 	return a.receiptsByUserMsgID[userMsgID] // nil on miss — caller decides
 }
 
+// MarkReceiptPromptDone (F-53 follow-up) transitions the receipt
+// bound to `userMsgID` to chatsession.PromptDone (✅ reaction on the card).
+// Called by the runtime when `ChatSession.endPrompt` fires (i.e.
+// the readpump saw EventDone or EventError).
+//
+// Best-effort: silently no-op when no receipt exists yet (e.g.
+// /kill before any event arrived — the receipt would never have
+// rendered). All API failures inside SetPromptState are logged
+// and do not propagate.
+func (a *Adapter) MarkReceiptPromptDone(ctx context.Context, chatID, userMsgID string) {
+	r := a.receiptFor(ctx, chatID, userMsgID)
+	if r == nil {
+		return
+	}
+	r.SetPromptState(ctx, chatsession.PromptDone)
+}
+
 // ensureReceiptForTyping lazily creates a Typing-placeholder
 // receipt when the FIRST event for a userMsgID is a
 // OutMessageState{State: MessageForwarded} (the gateway just
@@ -765,7 +783,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	// arrives. The first OutReply later overwrites footerLines
 	// via AppendEntryWithFooter once cumulative usage is available.
 	transient.footerLines = footerLines
-	transient.promptState = agent.PromptPending
+	transient.promptState = chatsession.PromptRunning
 	transient.initializing = true
 
 	a.mu.Lock()
@@ -877,7 +895,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 		{Icon: "💬", Text: firstEntryText},
 	}
 	transient.footerLines = footerLines
-	transient.promptState = agent.PromptRunning
+	transient.promptState = chatsession.PromptRunning
 	transient.initializing = true
 
 	// Register-before-SendCard (see ensureReceiptForTask for the
@@ -1083,7 +1101,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	copy(copied, items)
 	transient.tasks = copied
 	transient.footerLines = footerLines // F-45: footer captured at cold-start
-	transient.promptState = agent.PromptRunning
+	transient.promptState = chatsession.PromptRunning
 	transient.initializing = true
 
 	// Register-before-SendCard (see ensureReceiptForReply for the
@@ -1258,45 +1276,26 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		messageID := msg.MessageState.MessageID
 		state := msg.MessageState.State
 
-		// F-44 lifecycle shift: when the gateway has just
-		// forwarded the user message to the agent
-		// (MessageForwarded), eagerly create a Typing-placeholder
-		// receipt so the user sees "⌨️ Working..." in main chat
-		// before any OutReply / OutTask* event lands. Subsequent
-		// events stream updates onto the same card via
-		// AppendEntry / SetTaskList. The placeholder uses
-		// ReplyInBoth (anchored to userMsgID) per main's reply.go
-		// safe pattern — the parent has no thread yet at
-		// MessageForwarded time, so the slot reservation is safe;
-		// later PATCHes on the same message_id are immune to a
-		// thread promotion by OutToolStart/End.
+		// F-53 follow-up: MessageDone / MessageFailed no longer
+		// exist (see docs/feat/message_lifecycle.md §7). The old
+		// "Typing placeholder" created on MessageSubmitted is also
+		// gone — receipt progress is reflected on the card itself
+		// via `MessageReceipt.SetPromptState`, which the adapter
+		// invokes when the runtime emits the `OnPromptEnd` callback
+		// from `ChatSession.endPrompt`. The user-message reaction
+		// surface is now minimal: only MessageQueued renders ⏳;
+		// everything else is silent.
 		//
-		// (DEBUG trap: if msg.ReplyTo is empty the placeholder is
-		// silently dropped — log so future regressions surface
-		// immediately instead of being invisible to the user.)
-		if state == agent.MessageForwarded {
-			if msg.ReplyTo == "" {
-				a.logger.Warn("feishu: OutMessageState MessageForwarded missing ReplyTo — Typing placeholder skipped (gateway should set OutboundMessage.ReplyTo = userMsgID)",
-					"chat_id", msg.ChatID, "message_state_message_id", msg.MessageState.MessageID)
-			} else {
-				// F-48: compute the footer (same shape as the
-				// main-chat footer, but stamped by the runtime
-				// on MessageForwarded so the placeholder card
-				// shows the git-tracking line 3 immediately).
-				// msg.SessionContext is non-nil here because the
-				// runtime stamps it on OutMessageState +
-				// MessageForwarded; with nothing meaningful
-				// (no Agent, no Model, no usage, no git),
-				// formatSessionFooterLines returns nil and the
-				// footer is omitted from the placeholder.
-				footerLines := formatSessionFooterLines(msg.SessionContext)
-				if _, _, err := a.ensureReceiptForTyping(ctx, msg.ChatID, msg.ReplyTo, footerLines); err != nil {
-					a.logger.Warn("feishu: ensureReceiptForTyping failed",
-						"err", err, "chat_id", msg.ChatID, "user_msg_id", msg.ReplyTo)
-				}
-			}
-		}
+		// Same-state idempotency (was the "terminal guard" before
+		// F-53): skip duplicate emits of the same state.
 
+		// F-53 follow-up: MessageDone / MessageFailed no longer exist (see
+		// docs/feat/message_lifecycle.md §7). Message.Stage has no
+		// terminal value, so the previous "terminal guard" branch
+		// is removed. Queued → (silent) is the only valid user-
+		// message sequence; receipt progress is reflected on the
+		// card itself via `MessageReceipt.SetPromptState` (not via
+		// user-message reactions).
 		// Terminal-state guard: once we've rendered MessageDone or
 		// MessageFailed for a userMsgID, no later MessageState can
 		// change the reaction. Feishu reactions are append-only, so
@@ -1307,7 +1306,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// promptHeaderLine for PromptFailed). This guard mirrors
 		// the receipt-side terminal protection in Append.
 		//
-		// Intermediate states (MessageReceived / MessageForwarded)
+		// Intermediate states (MessageQueued / MessageSubmitted)
 		// are NOT terminal and continue to flow through normally;
 		// they restore the F-42 drop that left the user message
 		// reaction-less during the FastAck window (the gap between
@@ -1322,10 +1321,12 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		prev, hasPrev := a.messageStates.Get(messageID)
 		// Idempotency: same state twice → drop.
 		skip := hasPrev && prev == state
-		// Terminal guard: already in a terminal MessageState → drop.
-		if hasPrev && (prev == agent.MessageDone || prev == agent.MessageFailed) {
-			skip = true
-		}
+		// F-53: MessageDone / MessageFailed no longer exist (see
+		// docs/feat/message_lifecycle.md §7). Message.Stage has no
+		// terminal value, so the previous "terminal guard" branch
+		// is removed. Queued → Submitted → (silent) is the only
+		// valid sequence on user messages; same-state idempotency
+		// above is sufficient.
 		if !skip {
 			a.messageStates.Add(messageID, state)
 		}
@@ -1518,7 +1519,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// OutReply case above for the parent-thread rationale that
 		// drove this off ReplyInBoth. We deliberately do NOT call
 		// receipt.SetCompleted here — the receipt stays
-		// PromptRunning so subsequent OutUsage / OutInit / TaskList
+		// chatsession.PromptRunning so subsequent OutUsage / OutInit / TaskList
 		// can still update the footer (token counts, agent name,
 		// task checklist). EventDone / EventError is the terminal
 		// signal that flips state to PromptSucceeded and collapses
@@ -2472,16 +2473,53 @@ func (a *Adapter) SendMessageText(ctx context.Context, chatID, text, rootID stri
 // "Cross" predefined type to its catalog, switch to that here.
 //
 // Returns "" for unknown states (forward-compatible silent drop).
+//
+// F-53: MessageDone / MessageFailed cases removed. ✅ / 👎
+// reactions on user messages are permanently retired — terminal
+// execution status is carried by `chatsession.Prompt.EndReason`
+// (and will surface via the receipt card's own reaction surface —
+// see `mapPromptStateToFeishuEmoji` below).
+//
+// F-08 (current): renders Queued → ⏳ and Submitted → 🔄 on the user
+// message. All other states return ""; the receipt card carries the
+// Running/Done reactions (separate PromptState passage, see
+// `mapPromptStateToFeishuEmoji` below).
+//
+// Why both MessageState and PromptState exist: MessageState is the
+// abstract delivery-pipeline state — fires on every message in the
+// chat. PromptState is the receipt's own lifecycle — fire on the
+// receipt card only. Together they cover the user-visible surface
+// without duplicating the same visual on both user msg and card.
 func mapStateToFeishuEmoji(state agent.MessageState) string {
 	switch state {
-	case agent.MessageReceived:
+	case agent.MessageQueued:
 		return "OneSecond" // ⏳
-	case agent.MessageForwarded:
+	case agent.MessageSubmitted:
 		return "OnIt" // 🔄
-	case agent.MessageDone:
+	}
+	return ""
+}
+
+// mapPromptStateToFeishuEmoji converts a receipt-local
+// `feishu.PromptState` into the Feishu emoji_type string that
+// the receipt adds as a reaction on its OWN card (NOT the user
+// message — see `mapStateToFeishuEmoji` above for the user-
+// message surface).
+//
+//	F-53 Phase 0 (revised):
+//	  chatsession.PromptRunning → OnIt       (🔄)
+//	  chatsession.PromptDone    → DONE       (✅)
+//
+// The 🔄 is added the first time the receipt renders (via
+// `MessageReceipt.SetPromptState(chatsession.PromptRunning)`); the ✅ is
+// added when `ChatSession.endPrompt` fires
+// (`SetPromptState(chatsession.PromptDone)` from the adapter).
+func mapPromptStateToFeishuEmoji(state chatsession.PromptState) string {
+	switch state {
+	case chatsession.PromptRunning:
+		return "OnIt" // 🔄
+	case chatsession.PromptDone:
 		return "DONE" // ✅
-	case agent.MessageFailed:
-		return "THUMBSDOWN" // 👎 — closest predefined "negative"
 	}
 	return ""
 }

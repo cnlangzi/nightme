@@ -37,10 +37,7 @@ func TestClearBuffer_DropsQueuedMessages(t *testing.T) {
 	// Drop a fake message into the buffer by setting state to
 	// Busy and calling Add — Add's Busy branch queues.
 	cs.SetBusy()
-	if err := cs.QueueUserMessage(
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "abandoned hi"}},
-		"um_abandoned",
-	); err != nil {
+	if err := cs.QueueUserMessage(makeTestMessage(cs, []agent.ContentBlock{{Type: agent.ContentText, Text: "abandoned hi"}}, "um_abandoned")); err != nil {
 		t.Fatalf("QueueUserMessage (Busy): %v", err)
 	}
 	if n := cs.BufferPending(); n != 1 {
@@ -101,10 +98,7 @@ func TestUseSwap_BothInvariantsRunTogether(t *testing.T) {
 	// flipped Busy by some leaked pi event, and the message is
 	// queued (instead of being sent to the hung pi bridge).
 	cs.SetBusy()
-	if err := cs.QueueUserMessage(
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}},
-		"um_pi",
-	); err != nil {
+	if err := cs.QueueUserMessage(makeTestMessage(cs, []agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}}, "um_pi")); err != nil {
 		t.Fatalf("QueueUserMessage (Busy): %v", err)
 	}
 	if cs.BufferState() != StateBusy {
@@ -122,10 +116,7 @@ func TestUseSwap_BothInvariantsRunTogether(t *testing.T) {
 
 	// Step 3: the next user message must flush immediately
 	// (FSM is IDLE) — the bug would queue it silently.
-	if err := cs.QueueUserMessage(
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "hi to claude"}},
-		"um_claude",
-	); err != nil {
+	if err := cs.QueueUserMessage(makeTestMessage(cs, []agent.ContentBlock{{Type: agent.ContentText, Text: "hi to claude"}}, "um_claude")); err != nil {
 		t.Fatalf("QueueUserMessage (post-/use): %v", err)
 	}
 	// FlushHook was called synchronously (state==Idle); if the

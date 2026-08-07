@@ -11,20 +11,26 @@ import (
 )
 
 // trackingFlushHook records calls; threadsafe.
+//
+// F-53: hook signature changed from
+//   func(combined []agent.ContentBlock, userMsgIDs []string) error
+// to:
+//   func(p *Prompt) error
+// The hook now receives the entire Prompt; recording keeps the
+// last one for assertion.
 type trackingFlushHook struct {
-	mu       sync.Mutex
-	calls    int
-	lastCombined []agent.ContentBlock
-	lastIDs    []string
+	mu     sync.Mutex
+	calls  int
+	lastP  *Prompt
+	lastOK error
 }
 
-func (h *trackingFlushHook) hook(combined []agent.ContentBlock, userMsgIDs []string) error {
+func (h *trackingFlushHook) hook(p *Prompt) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.calls++
-	h.lastCombined = combined
-	h.lastIDs = userMsgIDs
-	return nil
+	h.lastP = p
+	return h.lastOK
 }
 
 func (h *trackingFlushHook) Calls() int {
@@ -33,14 +39,21 @@ func (h *trackingFlushHook) Calls() int {
 	return h.calls
 }
 
+func (h *trackingFlushHook) LastPrompt() *Prompt {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lastP
+}
+
 // --- InputBuffer FSM tests (mirrors session/input_buffer_test.go) ---
 
 func TestInputBuffer_IdleFlushesImmediately(t *testing.T) {
 	hook := &trackingFlushHook{}
 	b := NewInputBuffer(hook.hook, 50, 1024)
 
+	cs := &ChatSession{ChatID: "oc_test"}
 	blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: "hello"}}
-	if err := b.Add(blocks, "msg1"); err != nil {
+	if err := b.Add(makeTestMessage(cs, blocks, "msg1")); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if hook.Calls() != 1 {
@@ -57,10 +70,10 @@ func TestInputBuffer_BusyQueuesThenFlushes(t *testing.T) {
 
 	b.SetState(StateBusy)
 
-	if err := b.Add([]agent.ContentBlock{{Type: agent.ContentText, Text: "first"}}, "m1"); err != nil {
+	if err := b.Add(makeTestMessage(&ChatSession{ChatID: "oc_test"}, []agent.ContentBlock{{Type: agent.ContentText, Text: "first"}}, "m1")); err != nil {
 		t.Fatalf("Add #1: %v", err)
 	}
-	if err := b.Add([]agent.ContentBlock{{Type: agent.ContentText, Text: "second"}}, "m2"); err != nil {
+	if err := b.Add(makeTestMessage(&ChatSession{ChatID: "oc_test"}, []agent.ContentBlock{{Type: agent.ContentText, Text: "second"}}, "m2")); err != nil {
 		t.Fatalf("Add #2: %v", err)
 	}
 	if hook.Calls() != 0 {
@@ -87,9 +100,9 @@ func TestInputBuffer_FullReturnsError(t *testing.T) {
 	b := NewInputBuffer(nil, 2, 1024)
 	b.SetState(StateBusy)
 
-	_ = b.Add([]agent.ContentBlock{{Type: agent.ContentText, Text: "a"}}, "m1")
-	_ = b.Add([]agent.ContentBlock{{Type: agent.ContentText, Text: "b"}}, "m2")
-	err := b.Add([]agent.ContentBlock{{Type: agent.ContentText, Text: "c"}}, "m3")
+	_ = b.Add(makeTestMessage(&ChatSession{ChatID: "oc_test"}, []agent.ContentBlock{{Type: agent.ContentText, Text: "a"}}, "m1"))
+	_ = b.Add(makeTestMessage(&ChatSession{ChatID: "oc_test"}, []agent.ContentBlock{{Type: agent.ContentText, Text: "b"}}, "m2"))
+	err := b.Add(makeTestMessage(&ChatSession{ChatID: "oc_test"}, []agent.ContentBlock{{Type: agent.ContentText, Text: "c"}}, "m3"))
 	if !errors.Is(err, ErrBufferFull) {
 		t.Fatalf("expected ErrBufferFull, got %v", err)
 	}
@@ -98,11 +111,11 @@ func TestInputBuffer_FullReturnsError(t *testing.T) {
 func TestInputBuffer_ClearDiscardsQueued(t *testing.T) {
 	b := NewInputBuffer(nil, 50, 1024)
 	b.SetState(StateBusy)
-	_ = b.Add([]agent.ContentBlock{{Type: agent.ContentText, Text: "x"}}, "m1")
-	_ = b.Add([]agent.ContentBlock{{Type: agent.ContentText, Text: "y"}}, "m2")
+	_ = b.Add(makeTestMessage(&ChatSession{ChatID: "oc_test"}, []agent.ContentBlock{{Type: agent.ContentText, Text: "x"}}, "m1"))
+	_ = b.Add(makeTestMessage(&ChatSession{ChatID: "oc_test"}, []agent.ContentBlock{{Type: agent.ContentText, Text: "y"}}, "m2"))
 
-	if got := b.Clear(); got != 2 {
-		t.Fatalf("Clear should return 2, got %d", got)
+	if got := b.Clear(); len(got) != 2 {
+		t.Fatalf("Clear should return 2 messages, got %d", len(got))
 	}
 	if b.Pending() != 0 {
 		t.Fatalf("buffer should be empty after clear")
@@ -115,7 +128,7 @@ func TestInputBuffer_SetFlushHook_RebindsTarget(t *testing.T) {
 
 	b := NewInputBuffer(hook1.hook, 50, 1024)
 	b.SetState(StateBusy)
-	_ = b.Add([]agent.ContentBlock{{Type: agent.ContentText, Text: "first"}}, "m1")
+	_ = b.Add(makeTestMessage(&ChatSession{ChatID: "oc_test"}, []agent.ContentBlock{{Type: agent.ContentText, Text: "first"}}, "m1"))
 
 	// Rebind hook mid-flight.
 	b.SetFlushHook(hook2.hook)
@@ -141,8 +154,8 @@ func TestChatSession_QueueUserMessage_IdleFlushed(t *testing.T) {
 	cs.SetActiveCwd("/x")
 	cs.SetActiveAgent("claude")
 
-	if err := cs.QueueUserMessage(
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "hello"}}, "m1"); err != nil {
+	if err := cs.QueueUserMessage(makeTestMessage(cs,
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "hello"}}, "m1")); err != nil {
 		t.Fatalf("QueueUserMessage: %v", err)
 	}
 	if hook.Calls() != 1 {
@@ -159,8 +172,8 @@ func TestChatSession_QueueUserMessage_BusyQueued(t *testing.T) {
 	cs.SetFlushHook(hook.hook)
 
 	cs.SetBusy()
-	if err := cs.QueueUserMessage(
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "hello"}}, "m1"); err != nil {
+	if err := cs.QueueUserMessage(makeTestMessage(cs,
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "hello"}}, "m1")); err != nil {
 		t.Fatalf("QueueUserMessage: %v", err)
 	}
 	if hook.Calls() != 0 {
@@ -201,8 +214,8 @@ func TestChatSession_BufferSurvivesAgentSwitch(t *testing.T) {
 
 	// Mark Busy (simulating claude processing a turn).
 	cs.SetBusy()
-	if err := cs.QueueUserMessage(
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "queued"}}, "m1"); err != nil {
+	if err := cs.QueueUserMessage(makeTestMessage(cs,
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "queued"}}, "m1")); err != nil {
 		t.Fatalf("QueueUserMessage: %v", err)
 	}
 	if cs.BufferPending() != 1 {
@@ -236,11 +249,11 @@ func TestChatSession_BufferSurvivesAgentSwitch(t *testing.T) {
 	}
 
 	// Verify the flushed content is the queued one (the agent switch
-	// did NOT silently drop it).
-	hook.mu.Lock()
-	defer hook.mu.Unlock()
-	if len(hook.lastCombined) != 1 || hook.lastCombined[0].Text != "queued" {
-		t.Errorf("flushed content lost during /use: %+v", hook.lastCombined)
+	// did NOT silently drop it). LastPrompt() takes the mutex
+	// itself; do NOT lock here (would deadlock).
+	p := hook.LastPrompt()
+	if p == nil || len(p.Blocks) != 1 || p.Blocks[0].Text != "queued" {
+		t.Errorf("flushed content lost during /use: %+v", p)
 	}
 }
 
@@ -250,10 +263,10 @@ func TestChatSession_KillAllClearsBuffer(t *testing.T) {
 	cs.SetFlushHook(hook.hook)
 
 	cs.SetBusy()
-	_ = cs.QueueUserMessage(
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "lost"}}, "m1")
-	_ = cs.QueueUserMessage(
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "lost2"}}, "m2")
+	_ = cs.QueueUserMessage(makeTestMessage(cs,
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "lost"}}, "m1"))
+	_ = cs.QueueUserMessage(makeTestMessage(cs,
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "lost2"}}, "m2"))
 
 	cs.KillAll()
 
@@ -269,8 +282,8 @@ func TestChatSession_KillAllClearsBuffer(t *testing.T) {
 func TestChatSession_BufferClearAfterKill(t *testing.T) {
 	cs := New("oc_xxx", "claude")
 	cs.SetBusy()
-	_ = cs.QueueUserMessage(
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "x"}}, "m1")
+	_ = cs.QueueUserMessage(makeTestMessage(cs,
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "x"}}, "m1"))
 
 	if got := cs.BufferClear(); got != 1 {
 		t.Fatalf("BufferClear: got %d, want 1", got)

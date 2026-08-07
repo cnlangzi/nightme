@@ -1,10 +1,26 @@
 # F-44: OutReply 拆出 Receipt + Task Receipt 瘦身 + OutInit/OutUsage 推迟
 
-> **Status**: 📝 设计阶段（doc-first，2026-08-05）
+> **Status**: ⛔ **HISTORICAL — 部分 SUPERSEDED by F-53 (v1.3.x)**
 > **Milestone**: v1.3.x
 > **Scope**: `internal/channel/feishu/{adapter.go, receipt.go, receipt_event.go, card_sanitize.go}` + 文档同步
 > **Depends on**: F-25 (rolling-log receipt), F-37 (multi-div split + thread routing), F-38 (task checklist), F-39 (OutResult 独立 reply), F-40 (OutReply 改名 + 600B truncate 删除 + overflow bail-out), F-42 (lazy receipt creation)
 > **Related**: [`SPEC.md`](../SPEC.md) §0.11 / §2.4; [`channel/feishu.md`](../channel/feishu.md) §12 / §13.21 / §18
+>
+> **⚠️ PromptState / Reaction 相关部分已被 F-53 替代（见下）。OutReply 拆出 / Task Receipt 瘦身 / OutInit 推迟 仍有效。**
+>
+> **Superseded 部分**（F-53 已重做）：
+> - §0.2 "Header (prompt state icon ⏳/🔄/✅/❌)" 的 4 态 header —— `PromptState` 从 `agent` 包私有化到
+>   `feishu` 包，常量缩为 `Running` / `Done` 两值（`Pending` / `Succeeded` / `Failed` 物理删除；F-44
+>   当时仅"实际未使用"）—— 详见 [`feat/message_lifecycle.md`](./message_lifecycle.md) §7。
+> - §0.2 / §6.1 中提及的"reaction ⏳ → 🔄 → ✅ / ❌ 路径"—— F-53 物理删除 ✅ / ❌ 路径
+>   （`MessageDone` / `MessageFailed` 删除）。Receipt `promptState` 也不再 transition 到 `Succeeded` /
+>   `Failed`（两值删除）。
+> - §6.3 / §7.2 中 `PromptPending → PromptRunning → PromptSucceeded / PromptFailed` 链路 —— F-53 收敛为
+>   单一构造初始 `Running`，无 transition（详见 [`message_lifecycle.md`](./message_lifecycle.md) §4.2 /
+>   §7）。
+>
+> F-44 的其它内容（OutReply 拆出 Receipt、Task Receipt 瘦身、OutInit/OutUsage 推迟）仍有效。
+> 新设计权威定义见 [`feat/message_lifecycle.md`](./message_lifecycle.md) §7。
 
 ---
 

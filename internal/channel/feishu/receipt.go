@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
 // receiptBot is the minimal Feishu surface the task receipt depends on.
@@ -127,7 +128,7 @@ type MessageReceipt struct {
 	logger     *slog.Logger
 
 	mu          sync.Mutex
-	promptState agent.PromptState
+	promptState chatsession.PromptState // F-53: feishu-local 2-value enum (was agent.PromptState 4-value)
 
 	// entries is the rolling-log of OutReply text chunks, oldest
 	// first. Each entry is rendered as a separate markdown element
@@ -207,7 +208,13 @@ func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receipt
 		cardMsgID:    replyMsgID,
 		bot:          bot,
 		logger:       slog.Default(),
-		promptState: agent.PromptPending,
+		// F-53: initial state is chatsession.PromptRunning (was PromptPending
+		// in v1.3). The "Prompt is born running" rule from
+		// docs/feat/message_lifecycle.md §4.2 means we never need
+		// a Pending→Running transition on first SetTaskList —
+		// SetTaskListWithFooter's transition guard is removed
+		// below.
+		promptState: chatsession.PromptRunning,
 	}
 }
 
@@ -217,7 +224,7 @@ func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receipt
 // lists (len(Items)==0) are accepted and clear the checklist.
 //
 // F-44: SetTaskList is now the ONLY production writer to a receipt. It
-// also promotes the receipt from PromptPending to PromptRunning on
+// also promotes the receipt from PromptPending to chatsession.PromptRunning on
 // first call (so future footer PR can recover the prompt state header
 // without extra plumbing). Late SetTaskList after a successful PATCH
 // still PATCHes the card with the new snapshot.
@@ -253,29 +260,86 @@ func (r *MessageReceipt) SetTaskListWithFooter(ctx context.Context, list *agent.
 	if len(footerLines) > 0 {
 		r.footerLines = footerLines
 	}
-	if r.promptState == agent.PromptPending {
-		r.promptState = agent.PromptRunning
-	}
+	// F-53: Pending→Running transition removed. Initial state is
+	// already chatsession.PromptRunning (set at construction). Receipt never
+	// transitions to chatsession.PromptDone in Phase 0 — that value is reserved
+	// for a future UX PR that surfaces terminal state on the card
+	// (see docs/feat/message_lifecycle.md §7).
 	return r.renderLocked(ctx)
 }
 
-// PromptState returns the current prompt execution state. Useful for
-// tests + diagnostics. Returns the agent.PromptState value stored on
-// this receipt; callers should compare against agent.PromptPending /
-// PromptRunning / PromptSucceeded / PromptFailed.
+// chatsession.PromptState returns the current prompt execution state. Useful for
+// tests + diagnostics. Returns the local chatsession.PromptState value stored on
+// this receipt; callers should compare against chatsession.PromptRunning /
+// chatsession.PromptDone.
 //
-// F-44: SetTaskList promotes Pending → Running on first call. The
-// receipt does not transition to Succeeded / Failed (terminal signals
-// travel via OutMessageState → AddReaction, not via receipt state).
-func (r *MessageReceipt) PromptState() agent.PromptState {
+// F-53: SetTaskList no longer promotes Pending → Running (there is
+// no Pending state — receipts start at chatsession.PromptRunning). Receipts do
+// not transition to chatsession.PromptDone in Phase 0.
+func (r *MessageReceipt) PromptState() chatsession.PromptState {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.promptState
 }
 
 // State returns the current state. Useful for tests + diagnostics.
-func (r *MessageReceipt) State() agent.PromptState {
+func (r *MessageReceipt) State() chatsession.PromptState {
 	return r.PromptState()
+}
+
+// SetPromptState (F-53 follow-up) transitions the receipt's
+// `promptState` to `state` and, when transitioning for the first
+// time to that state, adds the corresponding reaction on the
+// receipt's own card (NOT the user message — see
+// `mapStateToFeishuEmoji` for that surface).
+//
+// Reaction mapping (driven by `mapPromptStateToFeishuEmoji`):
+//
+//	chatsession.PromptRunning → OnIt  (🔄)  — added the first time the
+//	                              receipt renders (cold-start card)
+//	chatsession.PromptDone    → DONE  (✅)  — added when ChatSession.endPrompt
+//	                              fires (EventDone / EventError)
+//
+// Idempotent: calling SetPromptState with the state already set
+// is a no-op (no duplicate reaction, no extra API call).
+//
+// Called from two sites:
+//
+//  1. `renderLocked` after the first successful
+//     `SendCardForReceipt` (chatsession.PromptRunning) — adds 🔄 once.
+//  2. The adapter's prompt-end wiring (chatsession.PromptDone) when
+//     ChatSession.endPrompt fires — adds ✅ once.
+//
+// If `cardMsgID` is empty (receipt not yet rendered, or first
+// render failed), the reaction is silently skipped — the
+// `cardMsgID` set just before this call ensures the cold-start
+// path always has a card to react on.
+//
+// Best-effort: AddReaction failures are logged at the adapter
+// level (via the runtime's reaction handler) and do not propagate.
+// The receipt's `promptState` is updated regardless — the FSM is
+// the source of truth, the reaction is visual decoration.
+func (r *MessageReceipt) SetPromptState(ctx context.Context, state chatsession.PromptState) {
+	r.mu.Lock()
+	prev := r.promptState
+	cardMsgID := r.cardMsgID
+	r.promptState = state
+	r.mu.Unlock()
+
+	if prev == state || cardMsgID == "" {
+		return
+	}
+
+	emoji := mapPromptStateToFeishuEmoji(state)
+	if emoji == "" {
+		return
+	}
+	if _, err := r.bot.AddReaction(ctx, cardMsgID, emoji); err != nil {
+		// Best-effort: log and move on. We don't want a transient
+		// Feishu reaction-API failure to derail the receipt FSM.
+		r.logger.Warn("feishu receipt: add prompt-state reaction failed",
+			"err", err, "state", state, "emoji", emoji, "card_msg_id", cardMsgID)
+	}
 }
 
 // AppendEntry appends a new rolling-log entry (typically an OutReply
@@ -408,6 +472,10 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 		r.replyMsgID = msgID // keep alias in sync
 		r.lastBody = body
 		r.lastBodyPatch = time.Now()
+		// F-53 follow-up: add the 🔄 "Running" reaction on the
+		// newly-created card. Idempotent — SetPromptState skips
+		// when state is already chatsession.PromptRunning.
+		r.SetPromptState(ctx, chatsession.PromptRunning)
 		return nil
 	}
 

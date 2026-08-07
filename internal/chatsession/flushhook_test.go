@@ -98,7 +98,7 @@ func TestFlushHook_DefaultDeliversToAgent(t *testing.T) {
 	}
 
 	blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}}
-	if err := cs.QueueUserMessage(blocks, "msg_1"); err != nil {
+	if err := cs.QueueUserMessage(makeTestMessage(cs, blocks, "msg_1")); err != nil {
 		t.Fatalf("QueueUserMessage: %v", err)
 	}
 
@@ -126,8 +126,8 @@ func TestFlushHook_BusyQueues(t *testing.T) {
 	cs.LookupActiveAgentSession()
 
 	cs.SetBusy() // simulate "agent is processing a turn"
-	if err := cs.QueueUserMessage(
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "queued"}}, "m_queued"); err != nil {
+	if err := cs.QueueUserMessage(makeTestMessage(cs,
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "queued"}}, "m_queued")); err != nil {
 		t.Fatalf("QueueUserMessage Busy: %v", err)
 	}
 	if got := spawner.sessions[0].SentCount(); got != 0 {
@@ -161,8 +161,8 @@ func TestFlushHook_NoActiveAgentSession(t *testing.T) {
 	// produces a buffer entry to flush. With no active AS, the
 	// default hook must return ErrNotRunning.
 	cs.SetBusy()
-	if err := cs.QueueUserMessage(
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "lost"}}, "m_lost"); err != nil {
+	if err := cs.QueueUserMessage(makeTestMessage(cs,
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "lost"}}, "m_lost")); err != nil {
 		t.Fatalf("QueueUserMessage Busy: %v", err)
 	}
 	cs.SetIdle()

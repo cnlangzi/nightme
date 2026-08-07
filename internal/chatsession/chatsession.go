@@ -109,6 +109,13 @@ type ChatSession struct {
 	// messages don't pay for it.
 	inputBuffer *InputBuffer
 
+	// queue (CS-AS 边界重构 Phase 1) is the at-least-once
+	// successful submission queue. Head element is currently
+	// being attempted; failed Submit keeps the head in place.
+	// Locked by cs.mu. T12 will retire inputBuffer; for now
+	// the two coexist.
+	queue []*Message
+
 	// commit 8c: per-ChatSession readPump controller. Only one
 	// pump is active at a time (the active AgentSession's pump);
 	// /use swaps the pump by StopReadPump + StartReadPump.
@@ -663,27 +670,22 @@ func (cs *ChatSession) MarkDropped(userMsgID string) bool {
 //
 // No-op when `as.currentPrompt` is nil. Caller does NOT need to
 // hold `cs.mu`; the method acquires it itself.
+// endPrompt (CS-AS 边界重构 Phase 1) is a thin delegation to the
+// active AS's own endPrompt. The real termination logic now lives
+// on AgentSession (where the Prompt lifecycle is naturally owned);
+// this method remains only because the per-ChatSession readpump
+// (got deleted in T13) used to call it.
+//
+// Phase 1 cleanup:    nilling this method out is part of T11
+// (delete defaultPromptHookLocked + related ChatSession endPrompt).
 func (cs *ChatSession) endPrompt(reason PromptEndReason) {
-	cs.mu.Lock()
+	cs.mu.RLock()
 	as := cs.activeAS
+	cs.mu.RUnlock()
 	if as == nil {
-		cs.mu.Unlock()
 		return
 	}
-	p := as.CurrentPrompt()
-	if p == nil {
-		cs.mu.Unlock()
-		return
-	}
-	p.EndedAt = time.Now()
-	p.EndReason = reason
-	lastMID := p.LastMessageID
-	as.SetCurrentPrompt(nil)
-	h := cs.onPromptEnd
-	cs.mu.Unlock()
-	if h != nil && lastMID != "" {
-		h(lastMID, reason)
-	}
+	as.endPrompt(reason)
 }
 
 // onPromptEnd (F-53 follow-up) is the runtime-installed callback
@@ -745,44 +747,152 @@ func (cs *ChatSession) ResetContext() {
 	cs.ctx, cs.cancel = context.WithCancel(context.Background())
 }
 
-// QueueUserMessage accepts an already-built `*Message` from the
-// runtime dispatcher, stores it in `cs.messagesByID`, and hands it
-// to the InputBuffer FSM. Idle → flush immediately via the
-// PromptHook. Busy → queue.
+// QueueUserMessage (CS-AS 边界重构 Phase 1) accepts an already-built
+// `*Message` from the runtime dispatcher, stores it in
+// `cs.messagesByID`, appends to the at-least-once queue, and
+// fires a TryFlush to immediately dispatch if the active AS is
+// ready.
 //
-// F-53 signature change: takes a `*Message` rather than raw
-// `(blocks, userMsgID)`. The dispatcher (cmd/nightme/run.go
-// newMessageDispatcher) is responsible for constructing the
-// Message (with the channel-native ID and `Stage=MessageQueued`)
-// and emitting `MessageQueued` BEFORE calling this — see the
-// `OnInbound` wiring comment in run.go for the timing.
+// The dispatcher (cmd/nightme/run.go newMessageDispatcher) is
+// responsible for emitting `MessageQueued` BEFORE calling this —
+// see the `OnInbound` wiring comment in run.go for the timing.
 //
-// On Add failure (e.g. ErrBufferFull), the message is removed
-// from `messagesByID` so it doesn't leak as a "ghost" — a message
-// that stays in Queued forever with no path to either Submitted
-// or Dropped. This is the only invariant on `messagesByID`:
-// every entry is either (a) in the buffer queue awaiting flush,
-// (b) Submitted (with PromptID set), or (c) Dropped.
+// TryFlush covers the "queue was empty when this message arrived"
+// case: AS is ready, so the prompt is built and submitted right
+// away. If queue is non-empty, TryFlush sees !IsReady() and is a
+// no-op; the next KindPromptEnded event will trigger a retry.
 func (cs *ChatSession) QueueUserMessage(msg *Message) error {
 	if msg == nil {
 		return nil
 	}
+	cs.mu.Lock()
 	cs.messagesByID.Store(msg.ID, msg)
-	if err := cs.ensureBuffer().Add(msg); err != nil {
-		// Don't leak: remove the message we just stored. Without
-		// this, a buffer-full path would accumulate stale
-		// Queued entries forever (ClearBuffer only clears the
-		// queue, not messagesByID).
-		cs.messagesByID.Delete(msg.ID)
-		return err
-	}
-	return nil
+	cs.queue = append(cs.queue, msg)
+	cs.mu.Unlock()
+	return cs.TryFlush()
 }
 
 // SetBusy marks the FSM as busy (agent is processing a turn).
 // Called by the runtime event pump on non-terminal events.
 func (cs *ChatSession) SetBusy() {
 	cs.ensureBuffer().SetState(StateBusy)
+}
+
+// buildPromptLocked (CS-AS 边界重构 Phase 1) constructs a candidate
+// Prompt from the current queue. Caller MUST hold cs.mu.
+//
+// The Prompt's CS-side fields are populated here (ChatSessionID,
+// MessageIDs, Blocks, CreatedAt). AS-side fields (ID, AckedAt,
+// LastProgressAt, AgentSessionID) are filled by AgentSession.Submit
+// after SendBlocks succeeds.
+//
+// The returned Prompt references the same *Message pointers as the
+// queue — no copying. Phase 1: AS does not see Message objects at
+// all; it only sees the merged Blocks and MessageIDs.
+func (cs *ChatSession) buildPromptLocked() *Prompt {
+	ids := make([]string, 0, len(cs.queue))
+	var blocks []agent.ContentBlock
+	for _, m := range cs.queue {
+		ids = append(ids, m.ID)
+		blocks = append(blocks, m.Blocks...)
+	}
+	return &Prompt{
+		ChatSessionID: cs.ID,
+		MessageIDs:    ids,
+		Blocks:        blocks,
+		CreatedAt:     time.Now(),
+	}
+}
+
+// TryFlush (CS-AS 边界重构 Phase 1) attempts to submit the queue
+// to the active AgentSession. Driver of the "at-least-once
+// successful submission" semantic.
+//
+// Behavior:
+//   - If queue is empty or no active AS, return nil.
+//   - If active AS is not ready (currentPrompt in flight), return nil.
+//   - Build a candidate Prompt from queue.
+//   - Release cs.mu; call as.Submit(p) (SendBlocks can block).
+//   - Re-acquire cs.mu; on success: dequeue, flip Stage = Submitted.
+//   - After releasing cs.mu, emit MessageSubmitted wire events.
+//
+// Concurrency: cs.mu is held throughout except during Submit and
+// during wire-event emission. Two concurrent TryFlush calls on
+// the same ChatSession serialize through cs.mu.
+//
+// On error, the queue is NOT modified. The next TryFlush (driven
+// by IsReady flipping true via a KindPromptEnded event) will retry.
+func (cs *ChatSession) TryFlush() error {
+	cs.mu.Lock()
+	if len(cs.queue) == 0 {
+		cs.mu.Unlock()
+		return nil
+	}
+	as := cs.activeAS
+	if as == nil || !as.IsReady() {
+		cs.mu.Unlock()
+		return nil
+	}
+	p := cs.buildPromptLocked()
+	cs.mu.Unlock()
+
+	// Submit runs OUTSIDE cs.mu — SendBlocks can block on a hung
+	// prompt RPC. The submission is logically atomic from the CS
+	// perspective (errors mean "queue stays put").
+	err := as.Submit(p)
+	if err != nil {
+		return err
+	}
+
+	// On success: dequeue + flip Stage under cs.mu, capture emit
+	// jobs, then release cs.mu and emit OUTSIDE the lock (the
+	// callback may run ch.Send() which can block on Feishu API).
+	var submitted []string
+	cs.mu.Lock()
+	cs.queue = nil
+	for _, mid := range p.MessageIDs {
+		if v, ok := cs.messagesByID.Load(mid); ok {
+			msg := v.(*Message)
+			msg.Stage = agent.MessageSubmitted
+			submitted = append(submitted, msg.ID)
+		}
+	}
+	cs.mu.Unlock()
+	for _, mid := range submitted {
+		cs.EmitMessageState(mid, agent.MessageSubmitted)
+	}
+	return nil
+}
+
+// writebackMessageState (CS-AS 边界重构 Phase 1) updates the
+// per-message bookkeeping after a PromptEnds. Sets last-processed
+// timestamp + EndReason on every Message that was part of the
+// Prompt. msg.Stage stays at Submitted (terminal for delivery).
+//
+// Called by the runtime's KindPromptEnded handler. Looks up
+// messages by ID from messagesByID.
+//
+// Does NOT emit MessageState wire events — Stage is already
+// Submitted (terminal). This is purely persistence/UIdrawback.
+func (cs *ChatSession) writebackMessageState(p *Prompt) {
+	if p == nil {
+		return
+	}
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	for _, mid := range p.MessageIDs {
+		if v, ok := cs.messagesByID.Load(mid); ok {
+			msg := v.(*Message)
+			msg.LastProcessedAt = p.EndedAt
+			msg.LastPromptID = p.ID
+			msg.LastEndReason = p.EndReason
+		}
+	}
+	// Fire the in-process hook for any listener of prompt-end
+	// (legacy: used by feishu adapter to flip reaction 🔄 → ✅/❌).
+	if cs.onPromptEnd != nil && p.LastMessageID != "" {
+		cs.onPromptEnd(p.LastMessageID, p.EndReason)
+	}
 }
 
 // SetIdle marks the FSM as idle and flushes queued messages
@@ -1008,23 +1118,23 @@ func (cs *ChatSession) LookupInPool(agent, cwd string) (*AgentSession, error) {
 // the running turn. We only (re)activate when the active AgentSession
 // actually changes, or when it has never been activated.
 //
+// Phase 1 (CS-AS 边界重构): the previous prev.Background() call is
+// gone. /use no longer cancels the old AS's opCtx — the old AS
+// keeps running in the background, its readpump continues to
+// consume events, and ChatSession can resume reading from the same
+// channel on re-/use. Real cancellation happens via Shutdown()
+// (called only by /kill or CS shutdown).
+//
 // Caller must hold cs.mu. Takes cs.ctxMu (via Context()) and the
 // target's asMu; neither is ever held while acquiring cs.mu, so the
 // ordering is safe.
 func (cs *ChatSession) promoteActiveLocked(as *AgentSession) {
-	prev := cs.activeAS
 	cs.activeAS = as
 	if as == nil {
 		return
 	}
-	if prev == as && as.IsActivated() {
+	if as.IsActivated() {
 		return
-	}
-	if prev != nil && prev != as {
-		// Tear down the outgoing AS's operations before the new one
-		// takes over — same contract /use has always implemented by
-		// hand.
-		prev.Background()
 	}
 	as.Activate(cs.Context())
 }

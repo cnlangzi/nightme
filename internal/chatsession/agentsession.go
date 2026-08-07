@@ -148,14 +148,12 @@ type AgentSession struct {
 	// for its entire lifetime — see docs/feat/message_lifecycle.md
 	// §4.2 存储归属.
 	//
-	// Concurrency: writes happen inside `defaultPromptHookLocked`
-	// (under `ChatSession.mu`, NOT `asMu` — see the locking note
-	// in defaultPromptHookLocked). Reads from `runReadPump` also
-	// happen under `ChatSession.mu` for the LastMessageID lookup
-	// (the EventHandler anchor). To avoid `cs.mu ↔ asMu` ordering
-	// issues, `currentPrompt` is accessed ONLY through helpers
-	// that take `ChatSession.mu` — direct field access from
-	// elsewhere is a bug.
+	// Concurrency (CS-AS 边界重构 Phase 1+): writes happen inside
+	// `AgentSession.Submit` and `AgentSession.endPrompt` under
+	// `asMu`. Reads from `as.readpumpLoop` also happen under `asMu`
+	// for the LastMessageID anchoring. `cs.mu` does NOT touch this
+	// field anymore — Phase 0's awkward "currentPrompt 物理上在 AS
+	// 但访问必经 cs.mu" coupling is removed.
 	//
 	// Set to nil by `endPrompt(reason)`.
 	currentPrompt *Prompt
@@ -165,6 +163,35 @@ type AgentSession struct {
 	// `<AS.ID>-p<seq>` (e.g. `as_3-p7`). Atomic — ID generation
 	// doesn't need to coordinate with anything else.
 	promptCounter atomic.Uint64
+
+	// CS-AS 边界重构 Phase 1: AgentSession 自治 readpump + eventQueue.
+	//
+	// isReady flips true when the AS is ready to accept a new Submit
+	// (initial state true; flips false on Submit success; flips true on
+	// endPrompt). Exposed via `IsReady()` for ChatSession.TryFlush.
+	// Atomic — read concurrently from ChatSession's main loop.
+	isReady atomic.Bool
+
+	// eventQueue is the per-AS enriched-event buffer (cap
+	// eventQueueCapacity). Push by readpump; pull by ChatSession
+	// via `Events()`. Created at construction time, persists for
+	// AS lifetime. Closed by `Shutdown()` after readpump exits.
+	eventQueue chan EnrichedEvent
+
+	// readpumpStarted guards single-launch of the readpump goroutine.
+	// Set true on first Activate. Re-A activate is a no-op.
+	readpumpStarted bool
+
+	// readpumpStop / readpumpDone coordinate orderly shutdown of
+	// the readpump goroutine. Stop is closed by Shutdown; Done is
+	// closed by the readpump on exit.
+	readpumpStop chan struct{}
+	readpumpDone chan struct{}
+
+	// shutdownOnce guards Shutdown's idempotency. The first call
+	// closes eventQueue; subsequent calls are no-ops (close-on-
+	// closed-channel panic guard).
+	shutdownOnce sync.Once
 }
 
 // NewAgentSession creates a new AgentSession in memory. The pool
@@ -180,8 +207,10 @@ func NewAgentSession(id, chatSessionID, agent, cwd string, args []string) *Agent
 		createdAt:     time.Now(),
 		lastRunAt:     time.Now(),
 		stat:          StatusDetached,
+		eventQueue:    make(chan EnrichedEvent, eventQueueCapacity),
 	}
 	as.pid = 0
+	as.isReady.Store(true) // not yet activated; flips false on first Submit success
 	// Pre-install a usable opCtx (Background-derived from BG, no
 	// cancel — a "do-nothing" ctx). The first Activate(parent) call
 	// from the runtime replaces it; in the meantime OpContext()
@@ -295,11 +324,14 @@ func (as *AgentSession) CurrentPrompt() *Prompt {
 }
 
 // SetCurrentPrompt (F-53) installs or clears the current Prompt.
-// Pass nil to clear (called by `endPrompt`). The caller MUST hold
-// `ChatSession.mu` (NOT `asMu`) — see the field comment for
-// rationale.
+// Pass nil to clear (called by `endPrompt`). Takes asMu internally —
+// CS-AS 边界重构 Phase 1: callers no longer need to hold cs.mu; the
+// old comment about "MUST hold ChatSession.mu" was Phase 0's
+// hack to avoid double-locking. Now the field is owned by ASMu.
 func (as *AgentSession) SetCurrentPrompt(p *Prompt) {
+	as.asMu.Lock()
 	as.currentPrompt = p
+	as.asMu.Unlock()
 }
 
 // --- per-AS operation context (Background / Activate) -------------
@@ -334,28 +366,91 @@ func (as *AgentSession) OpContext() context.Context {
 	return as.opCtx
 }
 
-// Background cancels this AgentSession's opCtx. Any in-flight
-// bridge operation waiting on it (the bridge's callCtx derives
-// from opCtx, so cancellation cascades) wakes up immediately with
-// ctx.Canceled. Idempotent: a second call finds opCancel already
-// consumed and is a no-op aside from re-arming.
+// Background (CS-AS 边界重构 Phase 1) is a no-op.
 //
-// Used by the runtime when the active AS is being demoted —
-// specifically, the /use handler calls Background() on the old
-// AS before Activate(parent) on the new one, so the old AS's
-// hung prompt RPC returns with ctx.Canceled instead of blocking
-// the /use round-trip.
+// Phase 0 semantics: cancelled the current opCtx, which caused any
+// bridge callCtx derived from opCtx to wake up with ctx.Canceled.
+// This was used to "interrupt" an in-flight SendBlocks when /use
+// switched active AS.
 //
-// Safe to call when no AS is active — the cancel on a nil opCtx
-// is a no-op. Note that it is ALSO a no-op on an AgentSession that
-// was never activated (opCancel nil); promoteActiveLocked exists so
-// that state is not reachable for an AS the chat is actually using.
+// Phase 1 semantics: /use does NOT cancel the in-flight prompt.
+// The old AS continues to run in the background; its readpump
+// keeps draining events into eventQueue; ChatSession can resume
+// reading from the same channel on re-/use. The Prompt keeps
+// running until EventDone/Error/!ok ends it via `endPrompt`.
+//
+// Reserved as a method (rather than deleted) so callers that
+// invoke it don't break at compile time, but the operation is
+// intentionally a no-op. Real cancellation happens via Shutdown()
+// (whole-AS lifecycle end) or via the underlying handle.Close().
 func (as *AgentSession) Background() {
+	// no-op: see comment above.
+}
+
+// Shutdown (Phase 1) is the orderly AS lifecycle end. It:
+//
+//  1. Cancels opCtx (cascades to any bridge callCtx derived from
+//     it; an in-flight SendBlocks waiting on a hung prompt RPC
+//     wakes up with ctx.Canceled).
+//  2. Signals the readpump goroutine to exit via readpumpStop,
+//     then waits on readpumpDone.
+//  3. Closes the eventQueue channel so CS readers see `!ok`.
+//
+// Called by /kill, ChatSession shutdown, and AS reaping. NOT
+// called by /use (which only changes `cs.activeAS` — see
+// Background).
+//
+// Distinct from `as.handle.Close()` (which only closes the bridge
+// transport; the wrapper-level AS still has readpump + eventQueue
+// running until Shutdown is called).
+//
+// Idempotent: subsequent calls are no-ops (readpumpDone is closed
+// once and stays closed).
+func (as *AgentSession) Shutdown() {
 	as.asMu.Lock()
-	defer as.asMu.Unlock()
+	// Step 1: cancel opCtx
 	if as.opCancel != nil {
 		as.opCancel()
+		as.opCancel = nil
 	}
+	// Step 2: snapshot readpumpStop / readpumpDone under lock
+	stop := as.readpumpStop
+	done := as.readpumpDone
+	as.asMu.Unlock()
+
+	// Closing the stop chan wakes the readpump select.
+	if stop != nil {
+		select {
+		case <-stop:
+			// already closed
+		default:
+			close(stop)
+		}
+	}
+
+	// Wait for readpump to drain remaining work and exit.
+	if done != nil {
+		<-done
+	}
+
+	// Step 3: close eventQueue. Safe to do here because readpump
+	// has exited and won't push more. After this, CS's
+	// `for ev := range as.Events()` returns `!ok` and exits.
+	//
+	// Note: we close but do NOT nil-out eventQueue. Callers that
+	// captured a reference to the channel before Shutdown
+	// (e.g. time-of-check as.Events() in a long-running reader)
+	// must still see the closed channel — nil-ing would lose
+	// that reference and reads would block forever.
+	//
+	// Idempotent via sync.Once: double-Shutdown is safe.
+	as.shutdownOnce.Do(func() {
+		as.asMu.Lock()
+		if as.eventQueue != nil {
+			close(as.eventQueue)
+		}
+		as.asMu.Unlock()
+	})
 }
 
 // IsActivated reports whether Activate has installed a live per-AS
@@ -389,11 +484,21 @@ func (as *AgentSession) IsActivated() bool {
 // providing a clean shutdown path.
 func (as *AgentSession) Activate(parent context.Context) {
 	as.asMu.Lock()
-	defer as.asMu.Unlock()
+	// Phase 1: idempotent. Repeated calls (e.g. /use re-promoting
+	// the same AS) are no-ops — the first Activate installs opCtx
+	// for the AS's whole lifetime. Re-Activate would cancel an
+	// in-flight SendBlocks, which is no longer desired (see
+	// Background's new no-op semantics).
 	if as.opCancel != nil {
-		as.opCancel()
+		as.asMu.Unlock()
+		return
 	}
 	as.opCtx, as.opCancel = context.WithCancel(parent)
+	as.asMu.Unlock()
+
+	// Readpump is started by Spawn (after handle is set), not by
+	// Activate. This avoids leaking a polling goroutine on tests
+	// that call Activate but never Spawn.
 }
 
 // Args returns a copy of the spawn arguments.
@@ -736,6 +841,13 @@ func (as *AgentSession) Spawn(ctx context.Context, spawner Spawner) error {
 	as.lastRunAt = time.Now()
 	as.exitCode = nil
 	as.asMu.Unlock()
+
+	// Start readpump after handle is set. startReadPump is idempotent
+	// (subsequent Spawns / re-activations are no-ops). This is the
+	// canonical readpump start point, decoupled from Activate so
+	// tests that Activate without Spawn don't leak a polling
+	// goroutine.
+	as.startReadPump()
 	return nil
 }
 
@@ -749,17 +861,81 @@ func (as *AgentSession) Handle() agent.AgentSession {
 }
 
 // Events returns the live event channel from the bridge. Returns nil
-// before Spawn succeeds. The returned channel is closed by the
-// bridge after EventDone / EventError / child EOF; AgentSession
-// status transitions to Exited at that point (see ObserveClose).
-func (as *AgentSession) Events() <-chan agent.AgentEvent {
+// Events (CS-AS 边界重构 Phase 1) returns the enriched event stream
+// for ChatSession. Reads from this channel receive EnrichedEvent
+// values (KindAgentEvent / KindPromptEnded / KindLifecycle) instead
+// of raw bridge events, with Prompt anchoring already applied.
+//
+// The returned channel is closed by Shutdown after the readpump
+// goroutine exits. Returns nil before the AgentSession is fully
+// constructed (defensive — should not happen in production).
+//
+// Compare to Phase 0's `Events()` which returned the raw bridge
+// channel; that responsibility moved to the readpump (see
+// `agentsession_readpump.go`).
+func (as *AgentSession) Events() <-chan EnrichedEvent {
+	as.asMu.RLock()
+	eq := as.eventQueue
+	as.asMu.RUnlock()
+	return eq
+}
+
+// IsReady (CS-AS 边界重构 Phase 1) reports whether the AS can
+// accept a new Submit. True when:
+//   - No Prompt is currently in flight (currentPrompt == nil), AND
+//   - The handle is spawned and process is alive.
+//
+// ChatSession.TryFlush polls this before calling Submit. Atomic
+// load — safe to call concurrently with Submit / endPrompt.
+func (as *AgentSession) IsReady() bool {
+	return as.isReady.Load()
+}
+
+// Submit (CS-AS 边界重构 Phase 1) hands a candidate Prompt to the
+// bridge. The CS side builds the Prompt (MessageIDs, Blocks) and
+// passes it here; AS owns the rest of the lifecycle (ID
+// assignment, ack timestamp, currentPrompt install, isReady flip).
+//
+// Returns:
+//   - ErrNotRunning if Spawn has not been called (handle is nil).
+//   - The bridge's SendBlocks error (e.g. ctx.Canceled, network
+//     failure). On error, currentPrompt is NOT installed and
+//     isReady stays true — caller can retry on next IsReady=true.
+//
+// On success: currentPrompt is set, isReady is false, the readpump
+// will start bridging events for this Prompt's lifetime.
+//
+// Concurrency: asMu briefly during commit, but SendBlocks runs
+// outside the lock (it can block on a hung prompt RPC). Two
+// concurrent Submits are serialized by the bridge's turnMu
+// (pi) or single-threaded access (claudecode / pty).
+func (as *AgentSession) Submit(p *Prompt) error {
 	as.asMu.RLock()
 	h := as.handle
 	as.asMu.RUnlock()
 	if h == nil {
-		return nil
+		return ErrNotRunning
 	}
-	return h.Events()
+
+	// Assign IDs / timestamps BEFORE the bridge call. These belong
+	// to AS (per the design — see wip-cs-as-boundary.md §2.2).
+	p.ID = as.NewPromptID()
+	p.AgentSessionID = as.ID
+	p.AckedAt = time.Now()
+	p.LastProgressAt = time.Now()
+
+	// SendBlocks can block on a hung prompt RPC; do NOT hold asMu.
+	err := h.SendBlocks(as.OpContext(), p.Blocks)
+	if err != nil {
+		return err
+	}
+
+	// Commit: install currentPrompt and flip isReady.
+	as.asMu.Lock()
+	as.currentPrompt = p
+	as.asMu.Unlock()
+	as.isReady.Store(false)
+	return nil
 }
 
 // SendText delivers a single text block to the bridge child.

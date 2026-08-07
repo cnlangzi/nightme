@@ -2,8 +2,6 @@ package chatsession
 
 import (
 	"context"
-	"errors"
-	"sync"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -12,55 +10,10 @@ import (
 // sentBlock records what the default FlushHook actually sent to
 // the agent (used to verify the commit-9+ bugfix: messages must
 // reach the spawned agent, not be silently dropped).
-type sentBlock struct {
-	blocks    []agent.ContentBlock
-	userMsgIDs []string
-}
-
-type recordingAgentSession struct {
-	mu       sync.Mutex
-	pid      int
-	events   chan agent.AgentEvent
-	sent     []sentBlock
-	closed   bool
-}
-
-func newRecordingAgentSession(pid int) *recordingAgentSession {
-	return &recordingAgentSession{pid: pid, events: make(chan agent.AgentEvent, 16)}
-}
-
-func (r *recordingAgentSession) Events() <-chan agent.AgentEvent { return r.events }
-func (r *recordingAgentSession) PID() int                      { return r.pid }
-func (r *recordingAgentSession) SendText(_ string) error       { return nil }
-func (r *recordingAgentSession) SendBlocks(_ context.Context, blocks []agent.ContentBlock) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.closed {
-		return errors.New("closed")
-	}
-	// record (a copy for race safety)
-	cp := make([]agent.ContentBlock, len(blocks))
-	copy(cp, blocks)
-	r.sent = append(r.sent, sentBlock{blocks: cp})
-	return nil
-}
-func (r *recordingAgentSession) SendPermission(_ string) error  { return nil }
-func (r *recordingAgentSession) New(_ context.Context) error    { return nil }
-func (r *recordingAgentSession) Close() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.closed {
-		r.closed = true
-		close(r.events)
-	}
-	return nil
-}
-
-func (r *recordingAgentSession) SentCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.sent)
-}
+// sentBlock / recordingAgentSession / newRecordingAgentSession
+// live in test_helpers_recording_test.go — they were extracted
+// there while this file was shelved, and other test files now
+// depend on them.
 
 // spawnerRecording wraps a single recordingAgentSession so we can
 // substitute it for the real spawner and assert that the hook
@@ -98,7 +51,7 @@ func TestFlushHook_DefaultDeliversToAgent(t *testing.T) {
 	}
 
 	blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}}
-	if err := cs.QueueUserMessage(blocks, "msg_1"); err != nil {
+	if err := cs.QueueUserMessage(makeTestMessage(cs, blocks, "msg_1")); err != nil {
 		t.Fatalf("QueueUserMessage: %v", err)
 	}
 
@@ -112,9 +65,15 @@ func TestFlushHook_DefaultDeliversToAgent(t *testing.T) {
 	}
 }
 
-// TestFlushHook_BusyQueues: same as above but Busy state queues
-// instead of flushing immediately; flush happens via SetIdle +
-// OnTurnEnded (which the readPump drives in production).
+// TestFlushHook_BusyQueues: same as above, but with a Prompt
+// already in flight the message queues instead of flushing
+// immediately; the flush happens when the Prompt ends.
+//
+// CS-AS 边界重构 Phase 1 port: "busy" is no longer a CS buffer
+// state (SetBusy/SetIdle) — it is the presence of an in-flight
+// Prompt on the AgentSession, so the setup submits one. The
+// OnTurnEnded hook became endPrompt (driven by the per-AS readpump
+// on EventDone) followed by TryFlush.
 func TestFlushHook_BusyQueues(t *testing.T) {
 	spawner := &spawnerRecording{}
 	csFile, asFile := newTestStores(t)
@@ -123,29 +82,54 @@ func TestFlushHook_BusyQueues(t *testing.T) {
 		WithSpawner(spawner)
 	cs.SetActiveCwd("/x")
 	cs.SetActiveAgent("claude")
-	cs.LookupActiveAgentSession()
-
-	cs.SetBusy() // simulate "agent is processing a turn"
-	if err := cs.QueueUserMessage(
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "queued"}}, "m_queued"); err != nil {
-		t.Fatalf("QueueUserMessage Busy: %v", err)
-	}
-	if got := spawner.sessions[0].SentCount(); got != 0 {
-		t.Fatalf("Busy should queue, not flush; agent got %d, want 0", got)
+	as, err := cs.LookupActiveAgentSession()
+	if err != nil {
+		t.Fatalf("LookupActiveAgentSession: %v", err)
 	}
 
-	cs.SetIdle()
-	if err := cs.OnTurnEnded(); err != nil {
-		t.Fatalf("OnTurnEnded: %v", err)
+	// Put a Prompt in flight — this is what "agent is processing a
+	// turn" means now. It costs one SendBlocks, so the baseline
+	// count below is 1, not 0.
+	if err := as.Submit(&Prompt{
+		Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: "in-flight"}},
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
 	}
-	if got := spawner.sessions[0].SentCount(); got != 1 {
-		t.Fatalf("after flush agent got %d, want 1", got)
+	if as.IsReady() {
+		t.Fatalf("AS should be mid-turn after Submit")
+	}
+	base := spawner.sessions[0].SentCount()
+
+	if err := cs.QueueUserMessage(makeTestMessage(cs,
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "queued"}}, "m_queued")); err != nil {
+		t.Fatalf("QueueUserMessage mid-turn: %v", err)
+	}
+	if got := spawner.sessions[0].SentCount(); got != base {
+		t.Fatalf("mid-turn should queue, not flush; agent got %d, want %d", got, base)
+	}
+	if got := cs.QueueLen(); got != 1 {
+		t.Fatalf("QueueLen = %d mid-turn; want 1", got)
+	}
+
+	// End the turn — in production the per-AS readpump does this on
+	// EventDone, then routeEvent calls TryFlush.
+	as.endPrompt(PromptEndClean)
+	if err := cs.TryFlush(); err != nil {
+		t.Fatalf("TryFlush: %v", err)
+	}
+	if got := spawner.sessions[0].SentCount(); got != base+1 {
+		t.Fatalf("after flush agent got %d, want %d", got, base+1)
 	}
 }
 
 // TestFlushHook_NoActiveAgentSession: when /kill has cleared the
-// pool (activeAS == nil), the default hook returns ErrNotRunning
-// instead of panicking.
+// pool (activeAS == nil), flushing is a safe no-op that leaves the
+// message queued for the next respawn, instead of panicking.
+//
+// CS-AS 边界重构 Phase 1 port: the old default hook returned
+// ErrNotRunning here. TryFlush now SKIPs with reason=activeAS_nil
+// and returns nil — /kill deliberately preserves the queue, and
+// the message flushes when the next AS spawns.
 func TestFlushHook_NoActiveAgentSession(t *testing.T) {
 	spawner := &spawnerRecording{}
 	csFile, asFile := newTestStores(t)
@@ -157,16 +141,21 @@ func TestFlushHook_NoActiveAgentSession(t *testing.T) {
 	cs.LookupActiveAgentSession()
 
 	cs.KillAll()
-	// activeAS is nil. Queue a message BEFORE OnTurnEnded; this
-	// produces a buffer entry to flush. With no active AS, the
-	// default hook must return ErrNotRunning.
-	cs.SetBusy()
-	if err := cs.QueueUserMessage(
-		[]agent.ContentBlock{{Type: agent.ContentText, Text: "lost"}}, "m_lost"); err != nil {
-		t.Fatalf("QueueUserMessage Busy: %v", err)
+
+	// activeAS is nil. Queueing must not panic, and the message
+	// must survive for the next respawn.
+	msg := makeTestMessage(cs,
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "lost"}}, "m_lost")
+	if err := cs.QueueUserMessage(msg); err != nil {
+		t.Fatalf("QueueUserMessage with no active AS: %v", err)
 	}
-	cs.SetIdle()
-	if err := cs.OnTurnEnded(); err == nil {
-		t.Fatalf("OnTurnEnded with no active AS should return ErrNotRunning, got nil")
+	if err := cs.TryFlush(); err != nil {
+		t.Fatalf("TryFlush with no active AS should be a no-op, got %v", err)
+	}
+	if got := cs.QueueLen(); got != 1 {
+		t.Errorf("QueueLen = %d; want 1 (message retained for respawn)", got)
+	}
+	if msg.Stage != agent.MessageQueued {
+		t.Errorf("msg.Stage = %v; want MessageQueued (never delivered)", msg.Stage)
 	}
 }

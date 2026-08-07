@@ -69,6 +69,13 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 
 	matched, _, results, err := cs.NewActiveAgentSessions(ctx, agentName)
 
+	// The queue is deliberately NOT dropped. /new resets the
+	// agent's conversation context via the bridge's New() (claude
+	// code's `/clear`, acp's session/new) — queued messages are
+	// still owed a reply and flush into the fresh context on the
+	// next TryFlush. Dropping them here would silently discard
+	// work the user already submitted.
+
 	// F-45 §1.8: /new is the ONLY event that clears cumulative
 	// token / cost stats on the AgentSession. Bridge New()
 	// already reset the conversation context; runtime resets the

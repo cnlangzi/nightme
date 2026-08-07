@@ -382,7 +382,13 @@ func (s *session) deliver(ev agent.AgentEvent) {
 	select {
 	case s.events <- ev:
 	case <-s.closed:
+		piLog("deliver dropped (session closed)", "kind", ev.Kind.String())
 	case <-t.C:
+		// A dropped event is invisible to the user AND to the
+		// operator unless we say so — a lost EventResult is a reply
+		// that silently never arrives.
+		piLog("deliver dropped (events channel full for 1s)",
+			"kind", ev.Kind.String(), "buffered", len(s.events), "cap", cap(s.events))
 	}
 }
 
@@ -606,15 +612,33 @@ func (s *session) New(ctx context.Context) error {
 	// the boot handshake) leak out between the reset and the
 	// emit. We hold the lock across reset+emit+deliver.
 	//
-	// pendingTools reset is taken under pendingMu (NOT translatorMu)
-	// because translate() in readPump only takes pendingMu on its
-	// hot path — taking translatorMu around a translate() call
-	// would serialise every event against /new. pendingMu alone is
-	// enough to close the read/write race on the map; combining
-	// the two locks would risk inversion with no upside.
-	s.translator.pendingMu.Lock()
-	s.translator.pendingTools = make(map[string]pendingTool)
-	s.translator.pendingMu.Unlock()
+	// The turn-state reset is taken under the translator's own turnMu
+	// (NOT translatorMu) because translate() in readPump only takes
+	// turnMu on its hot path — taking translatorMu around a
+	// translate() call would serialise every event against /new.
+	// turnMu alone closes the read/write race on the turn buffers;
+	// combining the two locks would risk inversion with no upside.
+	//
+	// F-52: beginReset discards the whole turnState (text buffers,
+	// usage snapshot, pendingTools) AND opens a suppression window
+	// that runs until this function returns.
+	//
+	// The window is the load-bearing part. Clearing the turn state
+	// only handles what has already been translated; readPump keeps
+	// running throughout the get_state round-trip below (10s
+	// deadline), and /new is reachable mid-turn — nothing gates it
+	// on the FSM being Idle, and slash commands bypass the
+	// InputBuffer. Without suppression, wire events from the
+	// abandoned turn land in the fresh turnState: an old message_end
+	// stamps its usage onto the new session (corrupting the
+	// context-occupancy figure and racing handleNew's
+	// ResetCumulative), and an old agent_settled ships the abandoned
+	// reply as the new session's result card.
+	//
+	// endReset is deferred so an error return below cannot leave the
+	// session permanently muted.
+	s.translator.beginReset()
+	defer s.translator.endReset()
 
 	s.translatorMu.Lock()
 	s.translator.initSent = false

@@ -183,7 +183,16 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 	}
 	defer devNull.Close()
 	child.Stdout = devNull
+	// Panics write to stderr; devNull throws the stack trace away and
+	// a daemon crash then looks like "the log just stops". Opt in to
+	// capturing it with NIGHTME_STDERR_FILE=<path> when diagnosing.
 	child.Stderr = devNull
+	if p := os.Getenv("NIGHTME_STDERR_FILE"); p != "" {
+		if f, ferr := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); ferr == nil {
+			defer f.Close()
+			child.Stderr = f
+		}
+	}
 	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := child.Start(); err != nil {

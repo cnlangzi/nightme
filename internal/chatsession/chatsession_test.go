@@ -1,6 +1,7 @@
 package chatsession
 
 import (
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -12,21 +13,9 @@ import (
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
-// newTestStores returns a ChatSessionFile + AgentSessionFile pair
-// backed by a temp directory.
-func newTestStores(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessionFile) {
-	t.Helper()
-	dir := t.TempDir()
-	csFile, err := registry.OpenChatSessionFile(filepath.Join(dir, "chat_sessions.json"))
-	if err != nil {
-		t.Fatalf("OpenChatSessionFile: %v", err)
-	}
-	asFile, err := registry.OpenAgentSessionFile(filepath.Join(dir, "agent_sessions.json"))
-	if err != nil {
-		t.Fatalf("OpenAgentSessionFile: %v", err)
-	}
-	return csFile, asFile
-}
+// newTestStores lives in test_helpers_store_test.go — it was
+// extracted there while this file was shelved, and other test
+// files now depend on it.
 
 func TestNewAndBasics(t *testing.T) {
 	cs := New("oc_xxx", "claude")
@@ -391,98 +380,180 @@ func TestCreatedAtAndID(t *testing.T) {
 			cs.CreatedAt(), before, after)
 	}
 }
+
 // TestSetActiveAgent_ClearsStaleAnchor verifies the v1.3 fix:
-// when /use switches the active agent mid-flight, the previous
-// turn's anchor (currentTurnUserMsgID) MUST be cleared so the
-// new AS's events don't get stamped with the OLD userMsgID and
-// routed to the OLD receipt card.
-func TestSetActiveAgent_ClearsStaleAnchor(t *testing.T) {
-	cs := New("oc_chat", "claude")
-
-	cs.mu.Lock()
-	cs.currentTurnUserMsgID = "om_msg_old_turn"
-	cs.mu.Unlock()
-
-	if err := cs.SetActiveAgent("codex"); err != nil {
-		t.Fatalf("SetActiveAgent: %v", err)
-	}
-
-	cs.mu.RLock()
-	got := cs.currentTurnUserMsgID
-	cs.mu.RUnlock()
-	if got != "" {
-		t.Errorf("SetActiveAgent did not clear currentTurnUserMsgID: got %q", got)
-	}
-}
-
-// TestKillAll_ClearsStaleAnchor mirrors the above for /kill: when
-// the active AS pool is torn down, the in-flight anchor must be
-// cleared so the next /spawn's events start fresh.
-func TestKillAll_ClearsStaleAnchor(t *testing.T) {
-	cs := New("oc_chat", "claude")
-	cs.WithSpawner(&spySpawner{})
-
-	cs.mu.Lock()
-	cs.currentTurnUserMsgID = "om_msg_killed_turn"
-	cs.mu.Unlock()
-
-	if _, err := cs.KillAll(); err != nil {
-		t.Fatalf("KillAll: %v", err)
-	}
-
-	cs.mu.RLock()
-	got := cs.currentTurnUserMsgID
-	cs.mu.RUnlock()
-	if got != "" {
-		t.Errorf("KillAll did not clear currentTurnUserMsgID: got %q", got)
-	}
-}
-
-// TestDefaultFlushHook_AnchorWriteIsRaceFree exercises the v1.3
-// concurrent-write fix: the flush hook closure runs WITHOUT cs.mu
-// held (InputBuffer releases its own lock before invoking the
-// hook), so the closure must acquire cs.mu when writing
-// currentTurnUserMsgID. The runReadPump goroutine reads it under
-// RLock — racing between them is what the race detector catches.
+// F-53: the old TestSetActiveAgent_ClearsStaleAnchor and
+// TestKillAll_ClearsStaleAnchor tests were deleted — their
+// subject (`currentTurnUserMsgID` scalar) is gone. The new
+// anchor lives on `AgentSession.currentPrompt.LastMessageID` and
+// is cleared automatically by `endPrompt` / agent-switch paths.
+// See docs/feat/message_lifecycle.md §4.2 + §5.1.
 //
-// We launch N concurrent flushes and N concurrent reads. If the
-// fix is in place (Lock inside the closure), no data race. If
-// not, -race trips immediately.
-func TestDefaultFlushHook_AnchorWriteIsRaceFree(t *testing.T) {
+// TestSubmit_AnchorWriteIsRaceFree exercises the concurrent-write
+// fix on the Prompt anchor.
+//
+// CS-AS 边界重构 Phase 1 port: the subject used to be the default
+// PromptHook closure, which ran without cs.mu held and had to take
+// the lock itself when writing as.currentPrompt. That hook is gone;
+// the write now happens inside `AgentSession.Submit` under
+// as.asMu, and readers (the per-AS readpump, CurrentPrompt()) take
+// as.asMu.RLock. This test keeps the guarantee under the race
+// detector: N concurrent Submits against N concurrent readers.
+//
+// Run with -race for this to mean anything.
+func TestSubmit_AnchorWriteIsRaceFree(t *testing.T) {
 	cs := New("oc_chat", "claude")
 	cs.WithSpawner(&spySpawner{})
 
+	as := newActiveAgentNoop()
 	cs.mu.Lock()
-	cs.activeAS = newActiveAgentNoop()
-	hook := cs.defaultFlushHookLocked()
+	cs.activeAS = as
 	cs.mu.Unlock()
 
 	const N = 64
 	var wg sync.WaitGroup
 
-	// Writers: each invokes the hook with its own userMsgID.
+	// Writers: each submits its own Prompt.
 	for i := 0; i < N; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_ = hook([]agent.ContentBlock{{Text: "x"}}, []string{
-				fmt.Sprintf("om_writer_%d", i),
-			})
+			p := &Prompt{
+				MessageIDs:    []string{fmt.Sprintf("om_writer_%d", i)},
+				LastMessageID: fmt.Sprintf("om_writer_%d", i),
+				Blocks:        []agent.ContentBlock{{Text: "x"}},
+				ChatSessionID: cs.ChatID,
+			}
+			_ = as.Submit(p)
 		}(i)
 	}
 
-	// Readers: drain currentTurnUserMsgID under RLock.
+	// Readers: drain currentPrompt.LastMessageID via the accessor.
 	for i := 0; i < N; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 16; j++ {
-				cs.mu.RLock()
-				_ = cs.currentTurnUserMsgID
-				cs.mu.RUnlock()
+				if p := as.CurrentPrompt(); p != nil {
+					_ = p.LastMessageID
+				}
 			}
 		}()
 	}
 
 	wg.Wait()
+}
+
+// TestQueueUserMessage_RemovesGhostOnQueueFull verifies the F-53
+// invariant: messagesByID contains only messages that are either
+// in the queue, Submitted, or Dropped. A rejected enqueue
+// (ErrQueueFull) must NOT leave a "ghost" entry behind — otherwise
+// the chat would accumulate stale Queued entries forever
+// (DropQueue only clears the queue, not messagesByID).
+//
+// CS-AS 边界重构 Phase 1 port: the old version reached into
+// inputBuffer.maxMsgs to force the failure. The queue cap is now
+// the QueueMaxMsgs constant, so we fill the queue instead. No
+// activeAS is installed, so the TryFlush inside QueueUserMessage
+// is a no-op and nothing drains.
+func TestQueueUserMessage_RemovesGhostOnQueueFull(t *testing.T) {
+	cs := New("oc_chat", "claude")
+	cs.SetActiveCwd("/x")
+	cs.SetActiveAgent("claude")
+
+	for i := 0; i < QueueMaxMsgs; i++ {
+		msg := makeTestMessage(cs,
+			[]agent.ContentBlock{{Type: agent.ContentText, Text: "filler"}},
+			fmt.Sprintf("om_fill_%d", i))
+		if err := cs.QueueUserMessage(msg); err != nil {
+			t.Fatalf("QueueUserMessage(filler %d): %v", i, err)
+		}
+	}
+	if got := cs.QueueLen(); got != QueueMaxMsgs {
+		t.Fatalf("QueueLen = %d after filling; want %d", got, QueueMaxMsgs)
+	}
+
+	msg := makeTestMessage(cs,
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "will fail"}}, "om_ghost")
+	err := cs.QueueUserMessage(msg)
+	if !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("QueueUserMessage on a full queue = %v; want ErrQueueFull", err)
+	}
+
+	if cs.GetMessage("om_ghost") != nil {
+		t.Errorf("messagesByID still has om_ghost after a rejected enqueue; want removed (no ghost leak)")
+	}
+}
+
+// TestKillAllSequence_QueueSurvivesAndReflushes verifies the
+// post-/kill contract.
+//
+// CS-AS 边界重构 Phase 1 port, with a deliberate semantic change:
+// the old test asserted the /kill handler ran ClearBuffer + SetIdle
+// and that queued messages came out MessageDropped. /kill no longer
+// discards the queue — it only tears down the agent processes.
+// Queued messages are still owed a reply, so they must survive the
+// kill and flush against the respawned AgentSession.
+//
+// The pre-fix bug this replaces (next message stranded in a "Busy
+// but no AS will ever flush it" state) cannot recur: readiness now
+// lives on the AgentSession, so a fresh AS is ready by construction.
+func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
+	cs := New("oc_chat", "claude")
+	cs.SetActiveCwd(t.TempDir())
+
+	as := NewAgentSession("as_kill", "oc_chat", "claude", t.TempDir(), nil)
+	as.handle = newRecordingAgentSession(1)
+	as.stat = StatusRunning
+	// Put a Prompt in flight so the AS is mid-turn and the message
+	// queued below is not flushed immediately.
+	if err := as.Submit(&Prompt{Blocks: []agent.ContentBlock{{Text: "in-flight"}}}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	cs.mu.Lock()
+	cs.pool[agentCwdKey{Agent: as.Agent, Cwd: as.Cwd}] = as
+	cs.activeAS = as
+	cs.mu.Unlock()
+
+	msg := makeTestMessage(cs, []agent.ContentBlock{{Text: "x"}}, "om_queued")
+	if err := cs.QueueUserMessage(msg); err != nil {
+		t.Fatalf("QueueUserMessage: %v", err)
+	}
+	if got := cs.QueueLen(); got != 1 {
+		t.Fatalf("pre-kill: QueueLen = %d, want 1 (AS is mid-turn)", got)
+	}
+
+	// Run /kill's sequence — KillAll and nothing else.
+	if _, err := cs.KillAll(); err != nil {
+		t.Fatalf("KillAll: %v", err)
+	}
+
+	// The queued message survives, still Queued (never delivered).
+	if got := cs.QueueLen(); got != 1 {
+		t.Errorf("post-kill: QueueLen = %d, want 1 (/kill must not discard queued work)", got)
+	}
+	if msg.Stage != agent.MessageQueued {
+		t.Errorf("post-kill: msg.Stage = %v, want MessageQueued", msg.Stage)
+	}
+
+	// Respawn: the next AS is ready by construction, so the queued
+	// message flushes against it.
+	newAS := NewAgentSession("as_respawn", "oc_chat", "claude", t.TempDir(), nil)
+	newAS.handle = newRecordingAgentSession(2)
+	newAS.stat = StatusRunning
+	cs.mu.Lock()
+	cs.pool[agentCwdKey{Agent: newAS.Agent, Cwd: newAS.Cwd}] = newAS
+	cs.activeAS = newAS
+	cs.mu.Unlock()
+
+	if err := cs.TryFlush(); err != nil {
+		t.Fatalf("post-kill TryFlush: %v", err)
+	}
+	if msg.Stage != agent.MessageSubmitted {
+		t.Errorf("post-respawn: msg.Stage = %v, want MessageSubmitted", msg.Stage)
+	}
+	if got := cs.QueueLen(); got != 0 {
+		t.Errorf("post-respawn: QueueLen = %d, want 0 (queue drained)", got)
+	}
 }

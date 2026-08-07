@@ -1,11 +1,25 @@
 # F-27: ChatSession Model
 
-> **Status**: locked (v1.2; shipped in commits 5/6/8b/8c on `fix/cwd_session`; 2026-08-02)
-> **Milestone**: v1.2 (commit 1 of "ChatSession refactor")
+> **Status**: ⛔ **HISTORICAL — SUPERSEDED by F-53 (v1.3.x)**
+> **Milestone**: v1.2 (commit 1 of "ChatSession refactor") — content describes v1.2 design
 > **Depends on**: F-26 (v1.1 responsibility isolation), F-08 (Channel), F-20 (Gateway)
 > **Replaces**: v1.1 `Session` (see F-01/F-07 for original design)
 > **Used by**: F-28 (`/use`), F-29 (AgentSession pool), F-25 (InputBuffer FSM)
 > **Related docs**: [`SPEC.md`](../SPEC.md) v1.2 §1.2/§1.3/§3, [`PRD.md`](../PRD.md) v1.2 §4.3/§4.6
+>
+> **⚠️ 本文档保留作 v1.2 历史参考。v1.3.x 的命名 / 字段已经由 F-53 重写，本文档中的 `FlushHook` / `OnTurnEnded` / `currentTurnUserMsgID` / `bufferEntry` 等命名都是 v1.2 旧描述，代码中已不存在。**
+>
+> **新设计权威定义**：[`feat/message_lifecycle.md`](./message_lifecycle.md)（F-53）。要看当前实现请读 `chatsession` 包的源码。
+>
+> **F-53 命名/结构变更**（v1.3.x 相对本文）：
+> - `FlushHook` → `PromptHook`（签名 `(blocks, userMsgIDs) error` → `(p *Prompt) error`）
+> - `OnTurnEnded()` → `endPrompt(reason)` + `flushPending()`
+> - `currentTurnUserMsgID`（字符串标量） → `AgentSession.currentPrompt.LastMessageID`（一等公民字段）
+> - `bufferEntry`（裸元组） → `Message`（first-class 实体，挂在 `ChatSession.messagesByID`）
+> - `MessageState` 4 态 → 3 态（`Queued`/`Submitted`/`Dropped`；`Done`/`Failed` 删除）
+> - `PromptState` 4 态 → 2 态（`Running`/`Done`；移入 `feishu` 包私有）
+>
+> 高层架构（ChatSession + AgentSession 拆分、InputBuffer FSM 归属）保持不变；详见 [`feat/message_lifecycle.md`](./message_lifecycle.md)。
 
 ---
 

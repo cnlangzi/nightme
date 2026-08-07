@@ -5,6 +5,29 @@
 // spawn_test.go for the existing Spawn / Kill test suite).
 package chatsession
 
+import (
+	"time"
+
+	"github.com/cnlangzi/nightme/internal/agent"
+)
+
+// makeTestMessage (F-53 helper) constructs a `*Message` with the
+// minimal fields a test typically needs: an ID, the owning
+// ChatSession's ChatID, the supplied blocks, a fresh ReceivedAt,
+// and Stage=MessageQueued. Use this in tests that previously called
+// `cs.QueueUserMessage(blocks, userMsgID)` — the new signature
+// takes a `*Message` and the construction is noisy enough to
+// warrant a helper.
+func makeTestMessage(cs *ChatSession, blocks []agent.ContentBlock, userMsgID string) *Message {
+	return &Message{
+		ID:         userMsgID,
+		ChatID:     cs.ChatID,
+		Blocks:     blocks,
+		ReceivedAt: time.Now(),
+		Stage:      agent.MessageQueued,
+	}
+}
+
 // newTestASWithFakeHandle wires a fresh AgentSession to a fake
 // bridge handle WITHOUT going through Spawn / Spawner. Used by
 // the FSM-transition tests that only care about the readPump /

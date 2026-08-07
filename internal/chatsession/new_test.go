@@ -86,16 +86,15 @@ func TestNewActiveAgentSessions_AllRunningReset(t *testing.T) {
 	a1 := injectAS(t, cs, "cc", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
 	a2 := injectAS(t, cs, "codex", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(2)})
 
-	// Force InputBuffer into Busy state and add a queued message so
-	// we can assert Clear() actually emptied it (Add otherwise flushes
-	// immediately when Idle, bypassing the queue).
-	cs.ensureBuffer()
-	cs.inputBuffer.SetState(StateBusy)
-	if err := cs.inputBuffer.Add([]agent.ContentBlock{{Type: agent.ContentText, Text: "queued"}}, "u1"); err != nil {
-		t.Fatalf("inputBuffer.Add: %v", err)
+	// Queue a message so we can assert /new does NOT discard it.
+	// No activeAS is installed, so the TryFlush inside
+	// QueueUserMessage is a no-op and the message stays queued.
+	if err := cs.QueueUserMessage(makeTestMessage(cs,
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "queued"}}, "u1")); err != nil {
+		t.Fatalf("QueueUserMessage: %v", err)
 	}
-	if got := cs.inputBuffer.Pending(); got == 0 {
-		t.Fatalf("inputBuffer pending should be > 0 before reset")
+	if got := cs.QueueLen(); got == 0 {
+		t.Fatalf("queue should be non-empty before reset")
 	}
 
 	matched, reset, _, err := cs.NewActiveAgentSessions(context.Background(), "")
@@ -105,8 +104,11 @@ func TestNewActiveAgentSessions_AllRunningReset(t *testing.T) {
 	if matched != 2 || reset != 2 {
 		t.Fatalf("want matched=2 reset=2, got matched=%d reset=%d", matched, reset)
 	}
-	if got := cs.inputBuffer.Pending(); got != 0 {
-		t.Fatalf("inputBuffer not cleared: Pending=%d", got)
+	// /new resets the agent's conversation context but does NOT
+	// discard queued work — those messages are still owed a reply
+	// and flush into the fresh context on the next TryFlush.
+	if got := cs.QueueLen(); got != 1 {
+		t.Fatalf("queue must survive /new: want 1, got %d", got)
 	}
 	// Identity preserved.
 	if a1.Cwd != cwd || a2.Cwd != cwd {
@@ -227,10 +229,9 @@ func TestNewActiveAgentSessions_PartialFailure(t *testing.T) {
 	}
 	injectAS(t, cs, "cc", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
 	injectAS(t, cs, "codex", cwd, &failingNewAS{fakeAgentSession: newFakeAgentSession(2)})
-	cs.ensureBuffer()
-	cs.inputBuffer.SetState(StateBusy)
-	if err := cs.inputBuffer.Add([]agent.ContentBlock{{Type: agent.ContentText, Text: "x"}}, "u1"); err != nil {
-		t.Fatalf("inputBuffer.Add: %v", err)
+	if err := cs.QueueUserMessage(makeTestMessage(cs,
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "x"}}, "u1")); err != nil {
+		t.Fatalf("QueueUserMessage: %v", err)
 	}
 
 	matched, reset, _, err := cs.NewActiveAgentSessions(context.Background(), "")
@@ -240,8 +241,10 @@ func TestNewActiveAgentSessions_PartialFailure(t *testing.T) {
 	if matched != 2 || reset != 1 {
 		t.Fatalf("want (2,1), got (%d,%d)", matched, reset)
 	}
-	if got := cs.inputBuffer.Pending(); got != 0 {
-		t.Fatalf("inputBuffer not cleared on partial failure: %d", got)
+	// Even on partial failure the queue is preserved — /new never
+	// discards queued work.
+	if got := cs.QueueLen(); got != 1 {
+		t.Fatalf("queue must survive a partially-failed /new: want 1, got %d", got)
 	}
 }
 

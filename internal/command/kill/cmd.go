@@ -54,5 +54,13 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		return command.Reply(ctx, rt, fmt.Sprintf("Kill failed: %v", err)), nil
 	}
 
+	// /kill only tears down the agent processes — the queue is
+	// deliberately left intact. Queued messages are still owed a
+	// reply; the next message arriving via QueueUserMessage
+	// triggers a respawn and a TryFlush that drains them against
+	// the fresh AgentSession. (/new is the command that discards
+	// queued work, because resetting context makes those messages
+	// meaningless.)
+
 	return command.Reply(ctx, rt, chatsession.FormatKillResults(results)), nil
 }

@@ -103,18 +103,18 @@ type ChatSession struct {
 	// production wires a registrySpawner at runtime).
 	spawner Spawner
 
-	// inputBuffer is the per-ChatSession FSM that queues user
-	// messages while the active AgentSession is Busy. Lazily
-	// created via ensureBuffer() so tests that don't dispatch
-	// messages don't pay for it.
-	inputBuffer *InputBuffer
+	// queue (CS-AS 边界重构 Phase 1) is the at-least-once
+	// successful submission queue. Head element is currently
+	// being attempted; failed Submit keeps the head in place.
+	// Locked by cs.mu.
+	queue []*Message
 
 	// commit 8c: per-ChatSession readPump controller. Only one
-	// pump is active at a time (the active AgentSession's pump);
-	// /use swaps the pump by StopReadPump + StartReadPump.
-	pumpMu      sync.Mutex
-	pump        EventPumpState
-	pumpRunning atomic.Bool // true while a pump goroutine is alive
+	// CS-AS 边界重构 Phase 1: readpump is now per-AS (started
+	// by Spawn inside AgentSession). The chat-layer no longer
+	// owns a pump goroutine — it just consumes the enriched
+	// event stream via cs.PumpEvents (launched by the runtime
+	// for each ChatSession).
 
 	// eventHandler is the runtime-installed EventHandler invoked
 	// for each event drained from the active AgentSession. Set
@@ -122,40 +122,43 @@ type ChatSession struct {
 	eventHandler EventHandler
 
 	// onMessageState is the runtime-installed callback fired when
-	// this ChatSession's message lifecycle advances (F-31). Set
-	// once at startup. Reads from currentTurnUserMsgID (mutated
-	// by FlushHook) so EventDone/Error can emit the terminal
-	// MessageState for the anchor user message.
-	//
-	// nil = no observer; emitMessageState becomes a no-op.
+	// this ChatSession's message lifecycle advances (F-31 / F-53).
+	// Set once at startup. nil = no observer; emitMessageState
+	// becomes a no-op.
 	onMessageState func(chatID, userMsgID string, state agent.MessageState)
 
-	// currentTurnUserMsgID is the single anchor for the in-flight
-	// (or just-completed) agent turn. Updated by
-	// defaultFlushHookLocked when InputBuffer flushes; consumed
-	// by the outbound EventHandler to stamp
-	// OutboundMessage.ReplyTo, and by runReadPump on
-	// EventDone/Error to emit MessageState(Done/Error) for
-	// the anchor user message. Empty when no turn is in flight.
+	// messagesByID (F-53) is the per-ChatSession index of every
+	// `*Message` ever accepted into this chat (no persistence in
+	// Phase 0 — see docs/feat/message_lifecycle.md §8). Keyed by
+	// `Message.ID` (channel-native, with dispatcher fallback at
+	// construction time). Messages stay in this map for the life
+	// of the ChatSession; their `Stage` field may be mutated
+	// (Submitted / Dropped) under `cs.mu`.
 	//
-	// v1.3 (SPEC §0.1): single userMsgID per turn (was a slice
-	// in v1.2/F-31). Buffered batch flushes anchor to the LAST
-	// userMsgID in the batch (one card / thread / DOM node per
-	// turn; the other user messages in the batch still receive
-	// their own MessageState fan-out per design choice).
-	currentTurnUserMsgID string
+	// Read by `defaultPromptHookLocked` (Stage → Submitted
+	// transition), `MarkDropped` (Stage → Dropped), and the
+	// outbound EventHandler when it needs to look up metadata.
+	messagesByID sync.Map
 
-	// exitObserver is the runtime-installed callback fired when
-	// an active AgentSession's process exits. nil = no observer.
-	exitObserver AgentExitObserver
+	// CS-AS 边界重构 Phase 1: exitObserver is now removed.
+	// Lifecycle events surface via KindLifecycle in the
+	// EnrichedEvent stream; the runtime registers its handler
+	// by reading the stream (not via a per-CS callback).
+
+	// onPromptEnd (F-53 follow-up) is fired by `endPrompt` after
+	// a Prompt reaches a terminal state (EventDone / EventError
+	// in the readpump). Adapters use this to transition the
+	// receipt card to PromptDone (✅) and react accordingly.
+	// nil = no observer; endPrompt's handler call is skipped.
+	onPromptEnd PromptEndHandler
 
 	// ctx is the per-ChatSession context. Lives for the chat's
 	// lifetime (until daemon shutdown). It is the PARENT context
 	// every AgentSession active on this chat derives its own
-	// per-AS ctx from via AgentSession.Activate(parent); when
-	// /use swaps the active AS, the old AS's Background() cancels
-	// its derived ctx while the new AS's Activate(cs.ctx) installs
-	// a fresh one. Cancelling cs.ctx itself cascades through every
+	// per-AS ctx from. promoteActiveLocked owns that handover: on
+	// every change of active AS it Background()s the outgoing one
+	// (cancelling its derived ctx) and Activate(cs.ctx)s the
+	// incoming one. Cancelling cs.ctx itself cascades through every
 	// active AS (used by the runtime during graceful shutdown).
 	//
 	// Per-AS lifecycle control lives on AgentSession, not on
@@ -355,12 +358,25 @@ func (cs *ChatSession) SetActiveAgent(agent string) error {
 	}
 	cs.mu.Lock()
 	cs.activeAgent = agent
-	// /use switches the AgentSession; the previous turn's anchor
-	// must NOT survive or the new AS's events would be stamped
-	// with the OLD userMsgID (channel routes them to the old
-	// receipt card). Clear under the same lock as activeAgent
-	// write so the two are atomic relative to readPump reads.
-	cs.currentTurnUserMsgID = ""
+	// F-53: no more `currentTurnUserMsgID` to clear — the anchor
+	// now lives on `AgentSession.currentPrompt.LastMessageID`,
+	// which is set/cleared by `defaultPromptHookLocked` /
+	// `endPrompt`. Switching activeAgent here just kicks the
+	// hook closure (which captures `cs.activeAS` at flush time)
+	// to look up the new AS on the next flush.
+	//
+	// KNOWN LIMITATION (Phase 0, deferred to "Prompt 投递稳定性
+	// 优化" PR — see docs/feat/message_lifecycle.md §8): if the old AS had an in-flight Prompt (currentPrompt
+	// != nil), it stays installed on the old AS after the switch.
+	// The new AS starts with currentPrompt=nil, so subsequent
+	// events on the new AS use the new anchor. The old Prompt's
+	// EndedAt remains zero until either the old AS process dies
+	// (at which point Phase 1 will call endPrompt(ProcessDied))
+	// or the old AS is /killed. endPrompt itself only operates
+	// on cs.activeAS, so it cannot clean the old one. This is
+	// a deliberate Phase 0 simplification; the cost is one
+	// orphaned Prompt struct per /use-while-busy until the old
+	// AS exits.
 	cs.lastInteractionAt = time.Now()
 	cs.mu.Unlock()
 	cs.persistChatEntry()
@@ -467,92 +483,125 @@ func (cs *ChatSession) ActiveAgentSession() *AgentSession {
 	return cs.activeAS
 }
 
-// --- InputBuffer FSM (commit 9) ----------------------------------------
+// --- InputBuffer FSM (F-53) ---------------------------------------
 
 // ensureBuffer lazily creates the InputBuffer on first use. Called
 // from QueueUserMessage / SetBusy / SetIdle / OnTurnEnded so tests
 // that don't dispatch messages don't allocate the FSM.
 //
-// Construction installs a default FlushHook that sends queued
-// blocks to cs.activeAS (current active AgentSession). The runtime
-// can override via SetFlushHook if it needs receipts or other
-// side effects.
+// Construction installs a default PromptHook that handles the
+// entire submission transaction (see defaultPromptHookLocked
+// below). The runtime can override via SetPromptHook if it needs
+// receipts or other side effects.
 //
-// commit 9+ fix: without a hook, QueueUserMessage on an Idle
-// buffer silently drops the message (InputBuffer.Add returns nil
-// without forwarding). The default hook closes that gap: any
-// ChatSession with an active AgentSession will route user messages
-// to the agent.
-func (cs *ChatSession) ensureBuffer() *InputBuffer {
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	if cs.inputBuffer == nil {
-		cs.inputBuffer = NewInputBuffer(cs.defaultFlushHookLocked(), 50, 100*1024)
+// F-53: without a hook, QueueUserMessage on an Idle buffer
+// silently drops the message (InputBuffer.Add returns nil
+// ensureBuffer was the lazy initializer for the per-CS inputBuffer
+// FSM. T12 (CS-AS 边界重构) retired the FSM entirely; the new
+// model is `cs.queue` + `cs.TryFlush` (no FSM state). Kept as a
+// no-op stub for source compatibility during the cleanup window.
+func (cs *ChatSession) ensureBuffer() { /* no-op */ }
+
+func (cs *ChatSession) GetMessage(userMsgID string) *Message {
+	if v, ok := cs.messagesByID.Load(userMsgID); ok {
+		return v.(*Message)
 	}
-	return cs.inputBuffer
+	return nil
 }
 
-// defaultFlushHookLocked returns the built-in FlushHook that
-// forwards user blocks to the current active AgentSession. Caller
-// must hold cs.mu (Lock).
-//
-// v1.3 (SPEC §2.2): captures the LAST userMsgID into
-// currentTurnUserMsgID — the single anchor for the entire turn.
-// All outbound events from this turn carry ReplyTo=anchor; Channel
-// PATCHes the same receipt card / thread / DOM node. Earlier
-// userMsgIDs in the buffered batch are still tracked separately
-// for MessageState fan-out (see emitMessageStateForCurrentTurn —
-// that one still iterates the full batch for honest per-message
-// progress feedback).
-func (cs *ChatSession) defaultFlushHookLocked() FlushHook {
-	return func(combined []agent.ContentBlock, userMsgIDs []string) error {
-		// Anchor = last userMsgID in the batch. A 1-message
-		// turn anchors to itself; a buffered batch anchors to
-		// the most recent user message (matches ChatGPT-style
-		// "submit all → reply on last" UX).
-		//
-		// IMPORTANT: the closure body runs WITHOUT cs.mu held
-		// (InputBuffer.OnTurnEnded releases its b.mu before
-		// invoking the hook). We must acquire cs.mu here to
-		// synchronize with the read side in runReadPump. Writing
-		// without the lock is a data race; the race detector
-		// catches it under buffered-batch + concurrent event
-		// drain.
-		//
-		// The ctx we hand to SendBlocks is the AS-owned per-AS
-		// ctx (as.OpContext()), not a turn-scoped child — the
-		// bridge's SendBlocks derives its own per-call ctx
-		// (callCtx) from whatever we pass, so the per-turn
-		// boundary is now owned entirely by the bridge layer.
-		//
-		// Race note (F-32 2026-08-06 follow-up): a concurrent
-		// /use can call oldAS.Background() between our read of
-		// activeAS/OpContext and the SendBlocks call. That
-		// cancels the ctx mid-send and SendBlocks returns
-		// context.Canceled — the message would otherwise be
-		// silently dropped (runReadPump discards OnTurnEnded's
-		// error). Surface a structured error so the operator can
-		// distinguish "lost on /use" from a transport failure.
-		var as *AgentSession
-		if n := len(userMsgIDs); n > 0 {
-			cs.mu.Lock()
-			cs.currentTurnUserMsgID = userMsgIDs[n-1]
-			as = cs.activeAS
-			cs.mu.Unlock()
-		} else {
-			cs.mu.RLock()
-			as = cs.activeAS
-			cs.mu.RUnlock()
-		}
-		if as == nil || as.Handle() == nil {
-			return ErrNotRunning
-		}
-		err := as.SendBlocks(as.OpContext(), combined)
-		if errors.Is(err, context.Canceled) {
-			return fmt.Errorf("flush: AS backgrounded during send (likely /use): %w", err)
-		}
-		return err
+// MessageState returns the last-processed-at timestamp and EndReason
+// for a message, or zero values if not found. Reads under cs.mu —
+// safe against concurrent writebackMessageState (CS-AS 边界重构
+// Phase 1: writeback uses these fields for runtime observability of
+// Prompt lifecycle; tests must use this method, not direct field
+// reads, to avoid races).
+func (cs *ChatSession) MessageState(userMsgID string) (lastProcessedAt time.Time, endReason PromptEndReason) {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	if v, ok := cs.messagesByID.Load(userMsgID); ok {
+		msg := v.(*Message)
+		return msg.LastProcessedAt, msg.LastEndReason
 	}
+	return
+}
+
+// MarkDropped (F-53) flips a single message to `MessageDropped`
+// and wire emits `MessageDropped`. Called from BufferClear (for
+// every message in a cleared batch) and from the /kill / /new
+// slash command paths. NOT called from SendBlocks-failure paths
+// (those leave the message Queued for natural retry).
+//
+// No-op when the message is unknown (returns false); returns
+// true when the message existed and was transitioned (even if
+// it was already Dropped — idempotent).
+func (cs *ChatSession) MarkDropped(userMsgID string) bool {
+	v, ok := cs.messagesByID.Load(userMsgID)
+	if !ok {
+		return false
+	}
+	msg := v.(*Message)
+	cs.mu.Lock()
+	msg.Stage = agent.MessageDropped
+	h := cs.onMessageState
+	chatID := cs.ChatID
+	cs.mu.Unlock()
+	if h != nil {
+		h(chatID, userMsgID, agent.MessageDropped)
+	}
+	return true
+}
+
+// endPrompt (F-53) is the single sink for closing the
+// in-flight Prompt. Sets `EndedAt` + `EndReason`, clears
+// `AgentSession.currentPrompt`. Does NOT iterate
+// `Prompt.MessageIDs` — messages already received their terminal
+// Stage at Submitted time (no fan-out, per docs §5.1).
+//
+// After clearing currentPrompt, fires the runtime-installed
+// `onPromptEnd` handler (if any) so adapters can react to the
+// terminal event — e.g. Feishu's adapter uses this to transition
+// the receipt card to PromptDone and add the ✅ reaction.
+// The handler runs WITHOUT cs.mu held so it can call back into
+// adapter APIs without deadlocking.
+//
+// No-op when `as.currentPrompt` is nil. Caller does NOT need to
+// hold `cs.mu`; the method acquires it itself.
+// endPrompt (CS-AS 边界重构 Phase 1) is a thin delegation to the
+// active AS's own endPrompt. The real termination logic now lives
+// on AgentSession (where the Prompt lifecycle is naturally owned);
+// this method remains only because the per-ChatSession readpump
+// (got deleted in T13) used to call it.
+//
+// Phase 1 cleanup:    nilling this method out is part of T11
+// (delete defaultPromptHookLocked + related ChatSession endPrompt).
+func (cs *ChatSession) endPrompt(reason PromptEndReason) {
+	cs.mu.RLock()
+	as := cs.activeAS
+	cs.mu.RUnlock()
+	if as == nil {
+		return
+	}
+	as.endPrompt(reason)
+}
+
+// onPromptEnd (F-53 follow-up) is the runtime-installed callback
+// fired by `endPrompt` after the Prompt's terminal fields are
+// stamped and `AgentSession.currentPrompt` is cleared. nil = no
+// observer; the call becomes a no-op.
+type PromptEndHandler func(userMsgID string, reason PromptEndReason)
+
+// SetPromptEndHandler installs (or replaces) the prompt-end
+// observer. The runtime typically wires this once at startup:
+// the handler routes the terminal event to the channel adapter
+// so the receipt card can transition to PromptDone (✅) and
+// the user message can be left alone (per the F-53 Reaction
+// split: user message only carries ⏳, the card carries 🔄/✅).
+//
+// Handler runs WITHOUT cs.mu held.
+func (cs *ChatSession) SetPromptEndHandler(h PromptEndHandler) {
+	cs.mu.Lock()
+	cs.onPromptEnd = h
+	cs.mu.Unlock()
 }
 
 // Context returns the per-ChatSession ctx. Every AgentSession
@@ -576,13 +625,13 @@ func (cs *ChatSession) Context() context.Context {
 
 // ResetContext cancels the per-ChatSession ctx and installs a
 // fresh one derived from context.Background(). Reserved for the
-// runtime's graceful-shutdown path — /use does NOT use this;
-// per-AS teardown is the AgentSession's job (Background/Activate).
+// runtime's graceful-shutdown path — an active-AS switch does NOT
+// use this; per-AS teardown belongs to promoteActiveLocked.
 //
 // After ResetContext, every AgentSession whose opCtx was derived
 // from the previous cs.ctx has its operations cancelled
-// (cascade). The fresh cs.ctx is what the next AgentSession
-// .Activate() call will derive from.
+// (cascade). The fresh cs.ctx is what the next promotion's
+// Activate() call will derive from.
 //
 // Always installs a fresh ctx; idempotent in spirit.
 func (cs *ChatSession) ResetContext() {
@@ -594,79 +643,225 @@ func (cs *ChatSession) ResetContext() {
 	cs.ctx, cs.cancel = context.WithCancel(context.Background())
 }
 
-// QueueUserMessage enqueues a structured user turn. Idle: flush
-// immediately via the hook. Busy: queue. Behavior mirrors v1.1's
-// InputBuffer.Add but is owned by ChatSession.
-func (cs *ChatSession) QueueUserMessage(blocks []agent.ContentBlock, userMsgID string) error {
-	return cs.ensureBuffer().Add(blocks, userMsgID)
-}
-
-// SetBusy marks the FSM as busy (agent is processing a turn).
-// Called by the runtime event pump on non-terminal events.
-func (cs *ChatSession) SetBusy() {
-	cs.ensureBuffer().SetState(StateBusy)
-}
-
-// SetIdle marks the FSM as idle and flushes queued messages
-// (typically called together by the runtime on EventDone / Error).
-func (cs *ChatSession) SetIdle() {
-	cs.ensureBuffer().SetState(StateIdle)
-}
-
-// OnTurnEnded flushes the buffer. Call after SetIdle() when the
-// active AgentSession's turn ends.
-func (cs *ChatSession) OnTurnEnded() error {
-	return cs.ensureBuffer().OnTurnEnded()
-}
-
-// BufferPending returns the current queue size (0 if no
-// InputBuffer yet).
-func (cs *ChatSession) BufferPending() int {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	if cs.inputBuffer == nil {
-		return 0
+// QueueUserMessage (CS-AS 边界重构 Phase 1) accepts an already-built
+// `*Message` from the runtime dispatcher, stores it in
+// `cs.messagesByID`, appends to the at-least-once queue, and
+// fires a TryFlush to immediately dispatch if the active AS is
+// ready.
+//
+// The dispatcher (cmd/nightme/run.go newMessageDispatcher) is
+// responsible for emitting `MessageQueued` BEFORE calling this —
+// see the `OnInbound` wiring comment in run.go for the timing.
+//
+// TryFlush covers the "queue was empty when this message arrived"
+// case: AS is ready, so the prompt is built and submitted right
+// away. If queue is non-empty, TryFlush sees !IsReady() and is a
+// no-op; the next KindPromptEnded event will trigger a retry.
+func (cs *ChatSession) QueueUserMessage(msg *Message) error {
+	if msg == nil {
+		return nil
 	}
-	return cs.inputBuffer.Pending()
+	cs.mu.Lock()
+	cs.messagesByID.Store(msg.ID, msg)
+	if len(cs.queue) >= QueueMaxMsgs {
+		cs.mu.Unlock()
+		cs.messagesByID.Delete(msg.ID)
+		return ErrQueueFull
+	}
+	cs.queue = append(cs.queue, msg)
+	cs.mu.Unlock()
+	_ = cs.TryFlush()
+	return nil
 }
 
-// ClearBuffer drops every buffered message without sending them.
-// Returns the number dropped. Used by handleUse when swapping the
-// active AS: any messages queued for the previous (hung) AS
-// should NOT auto-forward to the new AS — the user explicitly
-// switched away and the queued turns belong to the abandoned
-// context. After Clear, the FSM state is left untouched —
-// callers that need IDLE should also call SetIdle().
-func (cs *ChatSession) ClearBuffer() int {
+// buildPromptLocked (CS-AS 边界重构 Phase 1) constructs a candidate
+// Prompt from the current queue. Caller MUST hold cs.mu.
+//
+// The Prompt's CS-side fields are populated here (ChatSessionID,
+// MessageIDs, Blocks, CreatedAt). AS-side fields (ID, AckedAt,
+// LastProgressAt, AgentSessionID) are filled by AgentSession.Submit
+// after SendBlocks succeeds.
+//
+// The returned Prompt references the same *Message pointers as the
+// queue — no copying. Phase 1: AS does not see Message objects at
+// all; it only sees the merged Blocks and MessageIDs.
+func (cs *ChatSession) buildPromptLocked() *Prompt {
+	ids := make([]string, 0, len(cs.queue))
+	var blocks []agent.ContentBlock
+	for _, m := range cs.queue {
+		ids = append(ids, m.ID)
+		blocks = append(blocks, m.Blocks...)
+	}
+	p := &Prompt{
+		ChatSessionID: cs.ID,
+		MessageIDs:    ids,
+		Blocks:        blocks,
+		CreatedAt:     time.Now(),
+	}
+	// LastMessageID is the anchor for the EventHandler — the
+	// readpump reads it from `as.currentPrompt.LastMessageID` at
+	// enrichment time and stamps it as UserMsgID on every
+	// EnrichedEvent. The feishu adapter uses it to route
+	// OutReply/OutResult to the right per-userMsgID receipt card
+	// (ensureReceiptForReplyWithFooter / ensureReceiptForTask).
+	//
+	// Without this, every AgentEvent reaches the channel with
+	// ReplyTo="", which makes the placeholder card creation
+	// (F-46 lazy-receipt path) silently fail because the receipt
+	// helper requires userMsgID != "". Multi-message turns
+	// (merged queue) anchor on the LAST message id, matching
+	// the pre-Phase-1 behavior.
+	if n := len(ids); n > 0 {
+		p.LastMessageID = ids[n-1]
+	}
+	return p
+}
+
+// TryFlush (CS-AS 边界重构 Phase 1) attempts to submit the queue
+// to the active AgentSession. Driver of the "at-least-once
+// successful submission" semantic.
+//
+// Behavior:
+//   - If queue is empty or no active AS, return nil.
+//   - If active AS is not ready (currentPrompt in flight), return nil.
+//   - Build a candidate Prompt from queue.
+//   - Release cs.mu; call as.Submit(p) (SendBlocks can block).
+//   - Re-acquire cs.mu; on success: dequeue, flip Stage = Submitted.
+//   - After releasing cs.mu, emit MessageSubmitted wire events.
+//
+// Concurrency: cs.mu is held throughout except during Submit and
+// during wire-event emission. Two concurrent TryFlush calls on
+// the same ChatSession serialize through cs.mu.
+//
+// On error, the queue is NOT modified. The next TryFlush (driven
+// by IsReady flipping true via a KindPromptEnded event) will retry.
+func (cs *ChatSession) TryFlush() error {
+	cs.mu.Lock()
+	if len(cs.queue) == 0 {
+		cs.mu.Unlock()
+		// Empty-queue is the common steady-state case (every
+		// KindPromptEnded re-triggers TryFlush "just in case" —
+		// see routeEvent). Debug-only: logging this at Info would
+		// spam the daemon log on every turn for no diagnostic
+		// value.
+		slog.Debug("chatsession: TryFlush SKIP",
+			"chat_id", cs.ChatID, "reason", "queue_empty")
+		return nil
+	}
+	as := cs.activeAS
+	if as == nil {
+		cs.mu.Unlock()
+		// activeAS_nil / as_not_ready DO indicate real backpressure
+		// (a queued message waiting on an AS that isn't ready yet)
+		// — worth Debug-level visibility when actively diagnosing
+		// a stuck chat, but not Info-level noise in steady state.
+		slog.Debug("chatsession: TryFlush SKIP",
+			"chat_id", cs.ChatID, "reason", "activeAS_nil",
+			"queue_len", len(cs.queue))
+		return nil
+	}
+	if !as.IsReady() {
+		cs.mu.Unlock()
+		slog.Debug("chatsession: TryFlush SKIP",
+			"chat_id", cs.ChatID, "reason", "as_not_ready",
+			"queue_len", len(cs.queue), "as_id", as.ID)
+		return nil
+	}
+	p := cs.buildPromptLocked()
+	cs.mu.Unlock()
+
+	// Submit runs OUTSIDE cs.mu — SendBlocks can block on a hung
+	// prompt RPC. The submission is logically atomic from the CS
+	// perspective (errors mean "queue stays put").
+	err := as.Submit(p)
+	if err != nil {
+		return err
+	}
+
+	// On success: dequeue + flip Stage under cs.mu, capture emit
+	// jobs, then release cs.mu and emit OUTSIDE the lock (the
+	// callback may run ch.Send() which can block on Feishu API).
+	var submitted []string
+	cs.mu.Lock()
+	cs.queue = nil
+	for _, mid := range p.MessageIDs {
+		if v, ok := cs.messagesByID.Load(mid); ok {
+			msg := v.(*Message)
+			msg.Stage = agent.MessageSubmitted
+			submitted = append(submitted, msg.ID)
+		}
+	}
+	cs.mu.Unlock()
+	for _, mid := range submitted {
+		cs.EmitMessageState(mid, agent.MessageSubmitted)
+	}
+	return nil
+}
+
+// writebackMessageState (CS-AS 边界重构 Phase 1) updates the
+// per-message bookkeeping after a PromptEnds. Sets last-processed
+// timestamp + EndReason on every Message that was part of the
+// Prompt. msg.Stage stays at Submitted (terminal for delivery).
+//
+// Called by the runtime's KindPromptEnded handler. Looks up
+// messages by ID from messagesByID.
+//
+// Does NOT emit MessageState wire events — Stage is already
+// Submitted (terminal). This is purely persistence/UIdrawback.
+func (cs *ChatSession) writebackMessageState(p *Prompt) {
+	if p == nil {
+		return
+	}
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-	if cs.inputBuffer == nil {
-		return 0
+	for _, mid := range p.MessageIDs {
+		if v, ok := cs.messagesByID.Load(mid); ok {
+			msg := v.(*Message)
+			msg.LastProcessedAt = p.EndedAt
+			msg.LastPromptID = p.ID
+			msg.LastEndReason = p.EndReason
+		}
 	}
-	return cs.inputBuffer.Clear()
+	// Fire the in-process hook for any listener of prompt-end
+	// (legacy: used by feishu adapter to flip reaction 🔄 → ✅/❌).
+	if cs.onPromptEnd != nil && p.LastMessageID != "" {
+		cs.onPromptEnd(p.LastMessageID, p.EndReason)
+	}
 }
 
-// BufferState returns the current FSM state (StateIdle if no
-// InputBuffer yet).
-func (cs *ChatSession) BufferState() SessionState {
+// ErrQueueFull is returned by QueueUserMessage when the at-least-once
+// queue exceeds its size cap. Replaces the v1.3 ErrBufferFull.
+var ErrQueueFull = errors.New("chatsession: input queue full")
+
+// QueueMaxMsgs is the maximum number of queued messages a
+// ChatSession can hold before QueueUserMessage returns
+// ErrQueueFull. Phase 1 default: 50 (matches v1.3 inputBuffer).
+const QueueMaxMsgs = 50
+
+// DropQueue (CS-AS 边界重构 Phase 1) empties the at-least-once
+// queue, marks each dropped message as MessageDropped, and emits
+// the wire event. Returns the number dropped.
+//
+// Used by /kill and /new to clear queued messages on a forced
+// buffer reset. SendBlocks failures DO NOT trigger this path —
+// failed messages stay Queued for natural retry (see
+// docs/feat/message_lifecycle.md §5.1).
+func (cs *ChatSession) DropQueue() int {
+	cs.mu.Lock()
+	cleared := cs.queue
+	cs.queue = nil
+	cs.mu.Unlock()
+	for _, m := range cleared {
+		cs.MarkDropped(m.ID)
+	}
+	return len(cleared)
+}
+
+// QueueLen returns the current queue size (0 if empty).
+func (cs *ChatSession) QueueLen() int {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	if cs.inputBuffer == nil {
-		return StateIdle
-	}
-	return cs.inputBuffer.State()
-}
-
-// SetFlushHook installs (or replaces) the runtime-provided flush
-// hook. The hook receives (combined blocks, userMsgIDs) and is
-// expected to SendBlocks on the active AgentSession.
-//
-// Switching hooks (e.g., on /use) is supported: the runtime calls
-// SetFlushHook with a fresh closure pointing at the new active
-// AgentSession; queued messages flush to the new target on the
-// next OnTurnEnded.
-func (cs *ChatSession) SetFlushHook(h FlushHook) {
-	cs.ensureBuffer().SetFlushHook(h)
+	return len(cs.queue)
 }
 
 // SetEventHandler installs the per-event callback. The runtime
@@ -693,18 +888,20 @@ func (cs *ChatSession) EventHandler() EventHandler {
 }
 
 // SetMessageStateHandler installs the callback fired when this
-// ChatSession's message lifecycle advances (F-31). The runtime
-// (cmd/nightme) wires gw.OnMessageState into every ChatSession at
-// startup; ChatSession calls it on:
+// ChatSession's message lifecycle advances (F-31, F-53). The
+// runtime (cmd/nightme) wires gw.OnMessageState into every
+// ChatSession at startup; ChatSession calls it on:
 //
-//   - StateReceived: ChatSession accepts a user message for
-//     dispatch (called from dispatchMessage before spawn work).
-//   - StateForwarded: message dispatched to AgentSession
-//     (called from dispatchMessage after LookupActiveAgentSession
-//     success).
-//   - StateDone: active AgentSession emitted EventDone for the
-//     messages in the just-completed turn.
-//   - StateError: active AgentSession emitted EventError.
+//   - MessageQueued: ChatSession has accepted a user message
+//     (called from newMessageDispatcher before spawn work).
+//   - MessageSubmitted: SendBlocks returned nil — the message
+//     was committed to the AgentSession (called from
+//     defaultPromptHookLocked after a successful submission,
+//     per message in the batch).
+//   - MessageDropped: the message was explicitly cleared via
+//     /kill, /new, or BufferClear. NOT produced by SendBlocks
+//     failure — failed sends leave the message Queued for the
+//     next flushPending retry.
 //
 // nil clears the handler (emitMessageState becomes a no-op).
 //
@@ -728,9 +925,10 @@ func (cs *ChatSession) MessageStateHandler() func(chatID, userMsgID string, stat
 
 // EmitMessageState fires the onMessageState callback for a single
 // userMsgID. Public entry point for external lifecycle triggers
-// (e.g. dispatchMessage in cmd/nightme calling cs.EmitMessageState
-// (userMsgID, StateReceived) before spawn). Internal lifecycle
-// hooks call this too. No-op if no handler is installed.
+// (e.g. newMessageDispatcher in cmd/nightme calling
+// cs.EmitMessageState(userMsgID, MessageQueued) before spawn).
+// Internal lifecycle hooks call this too. No-op if no handler is
+// installed.
 //
 // Caller MUST NOT hold cs.mu (handler is invoked synchronously and
 // may call back into ChatSession methods).
@@ -759,31 +957,11 @@ func (cs *ChatSession) EmitMessageState(userMsgID string, state agent.MessageSta
 // intermediate messages; if a fan-out is later preferred,
 // re-introduce the slice here.
 //
-// Clears currentTurnUserMsgID after emission so a subsequent
-// turn (e.g. OnTurnEnded flushing queued messages) starts fresh.
-func (cs *ChatSession) emitMessageStateForCurrentTurn(state agent.MessageState) {
-	cs.mu.Lock()
-	id := cs.currentTurnUserMsgID
-	cs.currentTurnUserMsgID = ""
-	h := cs.onMessageState
-	chatID := cs.ChatID
-	cs.mu.Unlock()
-	if h == nil || id == "" {
-		return
-	}
-	h(chatID, id, state)
-}
-
-// BufferClear discards queued messages without sending. Returns
-// the number cleared.
-func (cs *ChatSession) BufferClear() int {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	if cs.inputBuffer == nil {
-		return 0
-	}
-	return cs.inputBuffer.Clear()
-}
+// F-53: `emitMessageStateForCurrentTurn` REMOVED. The whole
+// MessageState fan-out pattern is gone — `Message.Stage` reaches
+// its terminal value (Submitted or Dropped) at the moment of the
+// relevant transition, never changing again. See docs/feat/
+// message_lifecycle.md §5.1.
 
 // LookupInPool returns the AgentSession matching (agent, cwd) if
 // present in the pool (regardless of status). Returns
@@ -796,6 +974,49 @@ func (cs *ChatSession) LookupInPool(agent, cwd string) (*AgentSession, error) {
 		return nil, ErrAgentNotFound
 	}
 	return as, nil
+}
+
+// promoteActiveLocked makes as the chat's active AgentSession and
+// owns the per-AS context lifecycle for that promotion.
+//
+// Context wiring belongs here, at the single point where the active
+// AgentSession changes, rather than in individual handlers. Before
+// this, only /use called Activate — so any chat that never ran /use
+// left every AgentSession unactivated. Two consequences:
+//
+//   - opCtx stayed at the constructor's Background value (or, for
+//     sessions restored from disk, nil — which panicked the daemon on
+//     the first message after every restart, because the default
+//     FlushHook passes OpContext() straight into bridge.SendBlocks and
+//     the pi bridge dereferences it on entry);
+//   - Background() was a silent no-op (opCancel nil), so /use could
+//     not actually interrupt an in-flight turn on the outgoing AS, and
+//     ResetContext could not cascade a shutdown into it.
+//
+// Idempotent by design. Activate CANCELS the previous opCtx, so
+// calling it on every lookup — the per-message hot path — would kill
+// the running turn. We only (re)activate when the active AgentSession
+// actually changes, or when it has never been activated.
+//
+// Phase 1 (CS-AS 边界重构): the previous prev.Background() call is
+// gone. /use no longer cancels the old AS's opCtx — the old AS
+// keeps running in the background, its readpump continues to
+// consume events, and ChatSession can resume reading from the same
+// channel on re-/use. Real cancellation happens via Shutdown()
+// (called only by /kill or CS shutdown).
+//
+// Caller must hold cs.mu. Takes cs.ctxMu (via Context()) and the
+// target's asMu; neither is ever held while acquiring cs.mu, so the
+// ordering is safe.
+func (cs *ChatSession) promoteActiveLocked(as *AgentSession) {
+	cs.activeAS = as
+	if as == nil {
+		return
+	}
+	if as.IsActivated() {
+		return
+	}
+	as.Activate(cs.Context())
 }
 
 // LookupActiveAgentSession resolves the active AgentSession.
@@ -835,7 +1056,7 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	// restart) or Exited entry (CLI died) falls through to the
 	// spawn path below.
 	if as, ok := cs.pool[agentCwdKey{Agent: cs.activeAgent, Cwd: cs.activeCwd}]; ok && as.Status() == StatusRunning && as.Handle() != nil {
-		cs.activeAS = as
+		cs.promoteActiveLocked(as)
 		return as, nil
 	}
 
@@ -861,7 +1082,7 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	// from the prior construction or RestoreFromRegistry. Spawn
 	// will fork a new process and SetRunning will clear the stale
 	// exit code and flip stat back to Running.
-	cs.activeAS = newAS
+	cs.promoteActiveLocked(newAS)
 	if cs.asFile != nil {
 		_ = cs.asFile.Upsert(newAS.Entry())
 	}
@@ -916,25 +1137,30 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 // F-43 design invariants (docs/feat/F-43-kill-new-graceful-and-reset.md
 // §4.1):
 //   - activeCwd / activeAgent / InputBuffer are NOT touched — /kill
-//     owns only the agent process lifecycle.
-//   - currentTurnUserMsgID is cleared (next inbound turn opens a new
-//     receipt anchor).
+//     owns only the agent process lifecycle. (F-53 note: the
+//     in-flight Prompt on each AgentSession becomes unreachable
+//     when the pool is cleared; any event that lands after /kill
+//     on an old AS reads a nil currentPrompt and renders an empty
+//     userMsgID. This is the deliberate Phase 0 simplification —
+//     see docs/feat/message_lifecycle.md §8.)
 //   - Pool entry identities are preserved while bridges shut down
 //     (children may still be alive during the wg.Wait window); the
 //     new empty pool is installed AFTER all bridges confirm exit.
 //   - agent_sessions.json entries are deleted AFTER the process is
 //     dead, never before, so a late read can't resurrect a corpse.
+//   - F-53 P2 follow-up (kill cmd): /kill also calls ClearBuffer
+//     (drops queued messages with MessageDropped wire emits) and
+//     SetIdle (resets the FSM so the next message can dispatch
+//     immediately — see internal/command/kill/cmd.go).
 //
 // Concurrency: safe to call concurrently with LookupActiveAgentSession.
 // The per-entry as.Close() is fan-out (each bridge drives its own
 // goroutine); wg.Wait + 5s outer timeout guards against a wedged
 // bridge that bypasses its own SIGKILL fallback.
 func (cs *ChatSession) KillAll() ([]KillResult, error) {
-	// 0. stop pump FIRST so the dying bridge's final events don't
-	//    drain into the channel after /kill has been confirmed, and
-	//    so the preserved-input-buffer's FlushHook isn't accidentally
-	//    fired by SetIdle/OnTurnEnded emitted from a zombie pump.
-	cs.StopReadPump()
+	// 0. (CS-AS 边界重构 Phase 1: no per-CS StopReadPump call.
+	//    Each AS has its own readpump; we call as.Shutdown() below
+	//    per-agent which drains the readpump and closes eventQueue.
 
 	// 1. snapshot pool under read lock; do not mutate cs.pool until
 	//    every bridge has confirmed shutdown.
@@ -1024,7 +1250,11 @@ func (cs *ChatSession) KillAll() ([]KillResult, error) {
 	cs.mu.Lock()
 	cs.pool = make(map[agentCwdKey]*AgentSession)
 	cs.activeAS = nil
-	cs.currentTurnUserMsgID = ""
+	// F-53: no `currentTurnUserMsgID` to clear. The anchor now
+	// lives on AgentSession.currentPrompt.LastMessageID; clearing
+	// the pool + activeAS is sufficient to invalidate any stale
+	// anchor (readpump will read as.CurrentPrompt() which is nil
+	// after endPrompt or pool reset).
 	cs.mu.Unlock()
 
 	// 6. delete persistent entries. Use GetByChatPool walk (not just
@@ -1256,14 +1486,11 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 	}
 	cs.mu.RUnlock()
 
-	// F-34 Phase 3 review #1: the queue must be cleared even when
-	// no targets matched (e.g. empty pool, wrong cwd, or /new <agent>
-	// with no <agent> in cwd). Otherwise the user's queued message
-	// stays stuck behind an unresponsive session until they /kill or
-	// /cwd.
-	if cs.inputBuffer != nil {
-		cs.inputBuffer.Clear()
-	}
+	// The queue is deliberately NOT dropped here. /new resets the
+	// agent's conversation context; queued messages are still owed
+	// a reply and flush into the fresh context on the next
+	// TryFlush. (Earlier revisions cleared the queue on /new — see
+	// internal/command/newcmd/cmd.go for the rationale.)
 
 	if len(targets) == 0 {
 		return 0, 0, nil, nil
@@ -1338,17 +1565,12 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 			oldHandle = as.Handle()
 		}
 		cs.mu.RUnlock()
-		if isActive {
-			cs.StopReadPump()
-		}
+		// CS-AS 边界重构 Phase 1: no per-CS StopReadPump / StartReadPump
+		// calls. as.New handles in-place reset; the per-AS readpump
+		// follows whatever the bridge does (close on reset, restart on
+		// new process).
 		err := as.New(ctx, cs.spawner)
 		handleChanged := isActive && (as.Handle() != oldHandle)
-		if isActive {
-			// Restart the pump regardless of in-place vs
-			// kill+respawn — StopReadPump signaled the prior
-			// goroutine to exit, so we must launch a new one.
-			_ = cs.StartReadPump()
-		}
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err

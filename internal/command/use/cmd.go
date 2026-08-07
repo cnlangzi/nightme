@@ -80,9 +80,8 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	}
 
 	// commit 8c: stop the previous pump (if any) and start a new
-	// one for the freshly-active AgentSession. Events drain into
-	// cs.eventHandler (installed by runtime at startup).
-	_ = cs.StartReadPump()
+	// CS-AS 边界重构 Phase 1: readpump is per-AS (started by Spawn).
+	// No manual StartReadPump call needed.
 
 	source := "spawn"
 	if as.Handle() != nil {

@@ -22,6 +22,7 @@ package chatsession
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -414,6 +415,58 @@ func waitFor(cond func() bool, timeout time.Duration) bool {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return false
+}
+
+// TestAgentSession_ReadPump_StableEventPointers is a regression
+// test for the &ev race that readpumpLoop had: the readpump
+// pushed `&ev` to eventQueue, and on the next iteration Go's
+// range loop shadowed ev with a fresh value. If the runtime
+// was slow to process the previous event, dereferencing the
+// pointer could see the new event's bytes. The fix copies
+// ev to the heap before taking its address.
+//
+// This test pushes a flood of events, then reads them ALL out
+// of eventQueue, and verifies each one has its original payload
+// (not the payload of any other event that came through the
+// readpump's stack frame).
+func TestAgentSession_ReadPump_StableEventPointers(t *testing.T) {
+	cs := newChatSessionForTest("cs_test")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	as, fake := makeSpawnedAS(t, cs, "pi", ctx)
+	defer as.Shutdown()
+
+	const N = 50
+	for i := 0; i < N; i++ {
+		fake.PushEvent(agent.AgentEvent{
+			Kind: agent.EventText,
+			Text: fmt.Sprintf("event-%d", i),
+		})
+	}
+
+	// Drain all events and verify each one.
+	for i := 0; i < N; i++ {
+		select {
+		case ev := <-as.Events():
+			if ev.Kind != KindAgentEvent {
+				t.Fatalf("event %d: kind = %v, want KindAgentEvent", i, ev.Kind)
+			}
+			if ev.AgentEvent == nil {
+				t.Fatalf("event %d: AgentEvent is nil", i)
+			}
+			want := fmt.Sprintf("event-%d", i)
+			if ev.AgentEvent.Text != want {
+				t.Fatalf("event %d: Text = %q, want %q "+
+					"(pointer-corruption regression: readpump's "+
+					"stack-allocated ev was overwritten by the next "+
+					"iteration before the runtime dereferenced it)",
+					i, ev.AgentEvent.Text, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out reading event %d", i)
+		}
+	}
 }
 
 // silence unused warning for helpers that may be conditionally used

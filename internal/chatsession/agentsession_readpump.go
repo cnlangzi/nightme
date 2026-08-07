@@ -62,24 +62,27 @@ func (as *AgentSession) startReadPump() {
 func (as *AgentSession) readpumpLoop() {
 	defer close(as.readpumpDone)
 
-	// Phase 1: wait for handle to be set (Spawn completes).
-	var events <-chan agent.AgentEvent
-	for {
-		as.asMu.RLock()
-		handle := as.handle
-		as.asMu.RUnlock()
-		if handle != nil {
-			events = handle.Events()
-			break
-		}
-		// Handle not yet set. Sleep briefly and re-check.
+	// Phase 1: snapshot handle. Spawn guarantees it's set before
+	// startReadPump; the defensive path below handles the rare
+	// race where startReadPump runs before Spawn has populated
+	// as.handle (only seen in tests that wire them out of order).
+	as.asMu.RLock()
+	handle := as.handle
+	as.asMu.RUnlock()
+	if handle == nil {
 		select {
 		case <-as.readpumpStop:
 			return
-		case <-time.After(50 * time.Millisecond):
-			// loop again
+		case <-time.After(100 * time.Millisecond):
+		}
+		as.asMu.RLock()
+		handle = as.handle
+		as.asMu.RUnlock()
+		if handle == nil {
+			return // nothing to do; abort
 		}
 	}
+	events := handle.Events()
 
 	// Phase 2: event loop.
 	for {
@@ -107,7 +110,17 @@ func (as *AgentSession) readpumpLoop() {
 				promptID = prompt.ID
 			}
 
-			// Push to eventQueue, but allow Shutdown to interrupt.
+			// CRITICAL: copy ev to heap before taking its address.
+			// Go's range loop gives each iteration its own ev
+			// variable, but the address is still on the readpump's
+			// stack frame. When the next iteration starts, ev is
+			// overwritten — and the runtime, which may still be
+			// reading the previous event via the old &ev pointer,
+			// would see the new event's bytes (silent data
+			// corruption). Forcing evCopy to escape via the
+			// channel-send keeps the pointer stable across the
+			// readpump's lifetime.
+			evCopy := ev
 			select {
 			case as.eventQueue <- EnrichedEvent{
 				ChatID:         as.ChatSessionID,
@@ -116,7 +129,7 @@ func (as *AgentSession) readpumpLoop() {
 				PromptID:       promptID,
 				Prompt:         prompt,
 				Kind:           KindAgentEvent,
-				AgentEvent:     &ev,
+				AgentEvent:     &evCopy,
 			}:
 			case <-as.readpumpStop:
 				return

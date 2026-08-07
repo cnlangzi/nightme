@@ -2480,13 +2480,22 @@ func (a *Adapter) SendMessageText(ctx context.Context, chatID, text, rootID stri
 // (and will surface via the receipt card's own reaction surface —
 // see `mapPromptStateToFeishuEmoji` below).
 //
-// F-53 follow-up: ONLY MessageQueued renders a reaction on the
-// user message (⏳ OneSecond). All other states return ""; the
-// receipt card carries the Running/Done reactions.
+// F-08 (current): renders Queued → ⏳ and Submitted → 🔄 on the user
+// message. All other states return ""; the receipt card carries the
+// Running/Done reactions (separate PromptState passage, see
+// `mapPromptStateToFeishuEmoji` below).
+//
+// Why both MessageState and PromptState exist: MessageState is the
+// abstract delivery-pipeline state — fires on every message in the
+// chat. PromptState is the receipt's own lifecycle — fire on the
+// receipt card only. Together they cover the user-visible surface
+// without duplicating the same visual on both user msg and card.
 func mapStateToFeishuEmoji(state agent.MessageState) string {
 	switch state {
 	case agent.MessageQueued:
 		return "OneSecond" // ⏳
+	case agent.MessageSubmitted:
+		return "OnIt" // 🔄
 	}
 	return ""
 }

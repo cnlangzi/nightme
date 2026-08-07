@@ -3,11 +3,9 @@
 // gtw.HandleDraftReaction) from the runtime's *chatsession.Manager
 // + Channel adapter.
 //
-// ADR 0007 (2026-08-06): the previous SessionService indirection
-// was removed; chatSessionSender now takes a *chatsession.ChatSession
-// directly. The Sender surface is unchanged (gtw only reads
-// ActiveCwd / writes SetActiveCwd / sends messages) so gtw itself
-// is not affected.
+// chatSessionSender wraps the live *chatsession.ChatSession directly.
+// The Sender surface is intentionally narrow: gtw reads ActiveCwd,
+// writes SetActiveCwd, and sends messages through the channel.
 //
 // Constructed lazily by the gtw.Manager's senderFactory
 // (installed in run.go). One Sender instance per chatID;

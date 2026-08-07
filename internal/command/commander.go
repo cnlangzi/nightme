@@ -12,8 +12,7 @@
 // input whose command name does not match any registered
 // factory now reports handled=true, output.Consumed=false
 // (the gateway falls through to the agent loop, preserving
-// the pre-F-51 passthrough characteristic — see ADR 0007 §
-// "What stays" and §"Open follow-ups" #3).
+// the existing passthrough behavior).
 package command
 
 import (

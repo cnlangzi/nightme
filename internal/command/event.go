@@ -7,14 +7,8 @@
 //
 // This package is the bottom of the command stack — it does NOT
 // import internal/gateway, internal/chatsession, internal/gtw, or
-// internal/channel. The runtime (cmd/nightme/) is the only place
-// that bridges the gap. See docs/feat/F-51-slash-command-service-
-// separation.md §1.2.7 for the translation convention.
-//
-// ADR 0007 (2026-08-06): command packages may import
-// internal/chatsession directly. The previous SessionService
-// indirection was removed; this package no longer declares any
-// chat-session interface (services/session.go was deleted).
+// internal/channel. The runtime (cmd/nightme/) owns the boundary
+// translation between gateway messages and command inputs/outputs.
 package command
 
 import "github.com/cnlangzi/nightme/internal/command/services"

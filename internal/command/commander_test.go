@@ -48,11 +48,9 @@ func TestNewCommander_EmptyRegistry_NonCommandText(t *testing.T) {
 }
 
 func TestNewCommander_EmptyRegistry_SlashUnknown_FallsThrough(t *testing.T) {
-	// 2026-08-06: ADR 0007 follow-up. Previously unknown /cmd
-	// returned Consumed=true with a "Unknown command" reply. Now
-	// it reports handled=true + Consumed=false so the gateway
-	// can fall through to the agent loop, preserving the
-	// pre-F-51 passthrough characteristic.
+	// Unknown slash commands report handled=true + Consumed=false so
+	// the gateway can fall through to the agent loop, preserving the
+	// existing passthrough behavior.
 	c := NewCommander(NewRegistry())
 	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{},
 		SlashInput{Text: "/nope arg1 arg2"})

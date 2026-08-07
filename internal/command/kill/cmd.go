@@ -10,7 +10,7 @@
 // were killed, which were already dead, and which (if any)
 // failed — not a bare count.
 //
-// ADR 0007: Factory holds *chatsession.Manager directly.
+// Factory holds *chatsession.Manager directly.
 package kill
 
 import (

@@ -9,7 +9,7 @@
 // newly-active AgentSession (translates Events → Channel.Send).
 // Old pump is implicitly stopped via /kill or previous /use.
 //
-// ADR 0007: Factory holds *chatsession.Manager directly.
+// Factory holds *chatsession.Manager directly.
 package use
 
 import (

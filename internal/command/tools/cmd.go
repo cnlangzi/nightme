@@ -11,7 +11,7 @@
 // /tools defaults to ToolsModeHide (quiet by default; users opt
 // in to see tool calls).
 //
-// ADR 0007: Factory holds *chatsession.Manager directly.
+// Factory holds *chatsession.Manager directly.
 package tools
 
 import (

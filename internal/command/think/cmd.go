@@ -6,7 +6,7 @@
 // runtime's EventHandler closure, which reads cs.ThinkMode() after
 // Translate + ReplyTo stamping and before ch.Send.
 //
-// ADR 0007: Factory holds *chatsession.Manager directly.
+// Factory holds *chatsession.Manager directly.
 package think
 
 import (

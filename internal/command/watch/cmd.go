@@ -5,7 +5,7 @@
 // (drop non-mention messages vs pass-through) lives in
 // gateway.Handle — this handler only mutates state and replies.
 //
-// ADR 0007: Factory holds *chatsession.Manager directly.
+// Factory holds *chatsession.Manager directly.
 package watch
 
 import (

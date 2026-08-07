@@ -582,16 +582,11 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 			})
 		}
 
-		// commit fix-5: start a readPump for the freshly-active
-		// AgentSession. Without this, the spawned claude process
-		// emits events on Events() but no one consumes them — the
-		// user sees "hi" go in but no reply ever comes back.
-		// handleUse also calls StartReadPump, but the FIRST message
-		// (before any /use) only goes through newMessageDispatcher, so we
-		// need to start the pump here too. StartReadPump is
-		// idempotent — it stops any existing pump first, so calling
-		// it again from handleUse is a no-op.
-		_ = cs.StartReadPump()
+		// CS-AS 边界重构 Phase 1: readpump is now per-AS (started
+		// by Spawn inside AgentSession). The chat layer just consumes
+		// the enriched event stream via cs.PumpEvents (launched in
+		// wireRuntimeCallbacksAndRestore). No StartReadPump call here
+		// — the old per-CS readpump file is gone.
 
 		// F-31 / F-53: dispatch successful — message has reached the
 		// AgentSession. Emit MessageSubmitted so the channel flips
@@ -647,11 +642,11 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 			Stage:      agent.MessageQueued, // already emitted above; redundant but explicit
 		}
 		if err := cs.QueueUserMessage(userMsg); err != nil {
-			if errors.Is(err, chatsession.ErrBufferFull) {
+			if errors.Is(err, chatsession.ErrQueueFull) {
 				return ch.Send(ctx, gateway.OutboundMessage{
 					ChatID: msg.ChatID,
 					Kind:   gateway.OutReply,
-					Text:   "Input buffer full. Send /flush or /clear.",
+					Text:   "Input queue full. Send /flush or /clear.",
 				})
 			}
 			return err
@@ -763,6 +758,23 @@ func wireRuntimeCallbacksAndRestore(
 				fa.MarkReceiptPromptDone(context.Background(), cid, userMsgID)
 			}
 		})
+
+		// CS-AS 边界重构 Phase 1: launch the per-chat pumpEvents
+		// goroutine. The pump drains cs.ActiveEvents() and dispatches
+		// each EnrichedEvent by Kind:
+		//   - KindAgentEvent   → cs.eventHandler (the closure above)
+		//   - KindPromptEnded  → writebackMessageState (built into
+		//                        cs.PumpEvents — fires onPromptEnd hook)
+		//   - KindLifecycle    → log only
+		// Replaces the per-CS StartReadPump / readRunPump that the
+		// pre-Phase-1 readpump.go file used to install. The new model
+		// has readpump per-AS (started by Spawn), so the chat layer
+		// only consumes the enriched event stream.
+		//
+		// The goroutine ends when cs.ActiveEvents() returns !ok,
+		// which happens when the active AS is Shutdown (for /use this
+		// happens at daemon exit; for /kill, immediately).
+		go cs.PumpEvents(context.Background())
 	})
 	return mgr.RestoreFromRegistry()
 }

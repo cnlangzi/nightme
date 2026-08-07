@@ -75,7 +75,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// docs/feat/message_lifecycle.md §5.1 MessageDropped trigger
 	// paths). Without this, queued messages would survive /new
 	// and flush into the reset context, which is surprising UX.
-	_ = cs.ClearBuffer()
+	_ = cs.DropQueue()
 
 	// F-45 §1.8: /new is the ONLY event that clears cumulative
 	// token / cost stats on the AgentSession. Bridge New()

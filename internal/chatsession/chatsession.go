@@ -103,25 +103,18 @@ type ChatSession struct {
 	// production wires a registrySpawner at runtime).
 	spawner Spawner
 
-	// inputBuffer is the per-ChatSession FSM that queues user
-	// messages while the active AgentSession is Busy. Lazily
-	// created via ensureBuffer() so tests that don't dispatch
-	// messages don't pay for it.
-	inputBuffer *InputBuffer
-
 	// queue (CS-AS 边界重构 Phase 1) is the at-least-once
 	// successful submission queue. Head element is currently
 	// being attempted; failed Submit keeps the head in place.
-	// Locked by cs.mu. T12 will retire inputBuffer; for now
-	// the two coexist.
+	// Locked by cs.mu.
 	queue []*Message
 
 	// commit 8c: per-ChatSession readPump controller. Only one
-	// pump is active at a time (the active AgentSession's pump);
-	// /use swaps the pump by StopReadPump + StartReadPump.
-	pumpMu      sync.Mutex
-	pump        EventPumpState
-	pumpRunning atomic.Bool // true while a pump goroutine is alive
+	// CS-AS 边界重构 Phase 1: readpump is now per-AS (started
+	// by Spawn inside AgentSession). The chat-layer no longer
+	// owns a pump goroutine — it just consumes the enriched
+	// event stream via cs.PumpEvents (launched by the runtime
+	// for each ChatSession).
 
 	// eventHandler is the runtime-installed EventHandler invoked
 	// for each event drained from the active AgentSession. Set
@@ -147,9 +140,10 @@ type ChatSession struct {
 	// outbound EventHandler when it needs to look up metadata.
 	messagesByID sync.Map
 
-	// exitObserver is the runtime-installed callback fired when
-	// an active AgentSession's process exits. nil = no observer.
-	exitObserver AgentExitObserver
+	// CS-AS 边界重构 Phase 1: exitObserver is now removed.
+	// Lifecycle events surface via KindLifecycle in the
+	// EnrichedEvent stream; the runtime registers its handler
+	// by reading the stream (not via a per-CS callback).
 
 	// onPromptEnd (F-53 follow-up) is fired by `endPrompt` after
 	// a Prompt reaches a terminal state (EventDone / EventError
@@ -503,17 +497,11 @@ func (cs *ChatSession) ActiveAgentSession() *AgentSession {
 //
 // F-53: without a hook, QueueUserMessage on an Idle buffer
 // silently drops the message (InputBuffer.Add returns nil
-// without forwarding). The default hook closes that gap: any
-// ChatSession with an active AgentSession will route user messages
-// to the agent.
-func (cs *ChatSession) ensureBuffer() *InputBuffer {
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	if cs.inputBuffer == nil {
-		cs.inputBuffer = NewInputBuffer(cs.defaultPromptHookLocked(), 50, 100*1024)
-	}
-	return cs.inputBuffer
-}
+// ensureBuffer was the lazy initializer for the per-CS inputBuffer
+// FSM. T12 (CS-AS 边界重构) retired the FSM entirely; the new
+// model is `cs.queue` + `cs.TryFlush` (no FSM state). Kept as a
+// no-op stub for source compatibility during the cleanup window.
+func (cs *ChatSession) ensureBuffer() { /* no-op */ }
 
 // defaultPromptHookLocked (F-53, was `defaultFlushHookLocked`)
 // returns the built-in PromptHook that performs the full
@@ -767,15 +755,15 @@ func (cs *ChatSession) QueueUserMessage(msg *Message) error {
 	}
 	cs.mu.Lock()
 	cs.messagesByID.Store(msg.ID, msg)
+	if len(cs.queue) >= QueueMaxMsgs {
+		cs.mu.Unlock()
+		cs.messagesByID.Delete(msg.ID)
+		return ErrQueueFull
+	}
 	cs.queue = append(cs.queue, msg)
 	cs.mu.Unlock()
-	return cs.TryFlush()
-}
-
-// SetBusy marks the FSM as busy (agent is processing a turn).
-// Called by the runtime event pump on non-terminal events.
-func (cs *ChatSession) SetBusy() {
-	cs.ensureBuffer().SetState(StateBusy)
+	_ = cs.TryFlush()
+	return nil
 }
 
 // buildPromptLocked (CS-AS 边界重构 Phase 1) constructs a candidate
@@ -895,50 +883,27 @@ func (cs *ChatSession) writebackMessageState(p *Prompt) {
 	}
 }
 
-// SetIdle marks the FSM as idle and flushes queued messages
-// (typically called together by the runtime on EventDone / Error).
-func (cs *ChatSession) SetIdle() {
-	cs.ensureBuffer().SetState(StateIdle)
-}
+// ErrQueueFull is returned by QueueUserMessage when the at-least-once
+// queue exceeds its size cap. Replaces the v1.3 ErrBufferFull.
+var ErrQueueFull = errors.New("chatsession: input queue full")
 
-// OnTurnEnded flushes the buffer. Call after SetIdle() when the
-// active AgentSession's turn ends.
-func (cs *ChatSession) OnTurnEnded() error {
-	return cs.ensureBuffer().OnTurnEnded()
-}
+// QueueMaxMsgs is the maximum number of queued messages a
+// ChatSession can hold before QueueUserMessage returns
+// ErrQueueFull. Phase 1 default: 50 (matches v1.3 inputBuffer).
+const QueueMaxMsgs = 50
 
-// BufferPending returns the current queue size (0 if no
-// InputBuffer yet).
-func (cs *ChatSession) BufferPending() int {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	if cs.inputBuffer == nil {
-		return 0
-	}
-	return cs.inputBuffer.Pending()
-}
-
-// ClearBuffer drops every buffered message without sending them.
-// Returns the number dropped. Used by handleUse when swapping the
-// active AS: any messages queued for the previous (hung) AS
-// should NOT auto-forward to the new AS — the user explicitly
-// switched away and the queued turns belong to the abandoned
-// context. After Clear, the FSM state is left untouched —
-// callers that need IDLE should also call SetIdle().
+// DropQueue (CS-AS 边界重构 Phase 1) empties the at-least-once
+// queue, marks each dropped message as MessageDropped, and emits
+// the wire event. Returns the number dropped.
 //
-// F-53: returns the count of cleared messages; each cleared
-// message is also marked `MessageDropped` (Stage + wire emit)
-// via `MarkDropped`. This is the ONLY path that produces
-// `MessageDropped` per docs/feat/message_lifecycle.md §5.1 —
-// SendBlocks failure does NOT call Clear (failed messages stay
-// Queued for natural retry).
-func (cs *ChatSession) ClearBuffer() int {
+// Used by /kill and /new to clear queued messages on a forced
+// buffer reset. SendBlocks failures DO NOT trigger this path —
+// failed messages stay Queued for natural retry (see
+// docs/feat/message_lifecycle.md §5.1).
+func (cs *ChatSession) DropQueue() int {
 	cs.mu.Lock()
-	if cs.inputBuffer == nil {
-		cs.mu.Unlock()
-		return 0
-	}
-	cleared := cs.inputBuffer.Clear()
+	cleared := cs.queue
+	cs.queue = nil
 	cs.mu.Unlock()
 	for _, m := range cleared {
 		cs.MarkDropped(m.ID)
@@ -946,35 +911,11 @@ func (cs *ChatSession) ClearBuffer() int {
 	return len(cleared)
 }
 
-// BufferState returns the current FSM state (StateIdle if no
-// InputBuffer yet).
-func (cs *ChatSession) BufferState() SessionState {
+// QueueLen returns the current queue size (0 if empty).
+func (cs *ChatSession) QueueLen() int {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	if cs.inputBuffer == nil {
-		return StateIdle
-	}
-	return cs.inputBuffer.State()
-}
-
-// SetPromptHook installs (or replaces) the runtime-provided flush
-// hook. The hook receives a fully-built `*Prompt` and is
-// responsible for the entire submission transaction (see
-// `chatsession.PromptHook`).
-//
-// Switching hooks (e.g., on /use) is supported: the runtime calls
-// SetPromptHook with a fresh closure pointing at the new active
-// AgentSession; queued messages flush to the new target on the
-// next flushPending.
-func (cs *ChatSession) SetPromptHook(h PromptHook) {
-	cs.ensureBuffer().SetPromptHook(h)
-}
-
-// SetFlushHook is the legacy alias for SetPromptHook (F-53
-// follow-up: remove once no callers remain; kept so external
-// tests don't break during Phase 0 migration).
-func (cs *ChatSession) SetFlushHook(h PromptHook) {
-	cs.SetPromptHook(h)
+	return len(cs.queue)
 }
 
 // SetEventHandler installs the per-event callback. The runtime
@@ -1077,10 +1018,10 @@ func (cs *ChatSession) EmitMessageState(userMsgID string, state agent.MessageSta
 // message_lifecycle.md §5.1.
 //
 // BufferClear (F-53 alias for ClearBuffer, kept for compat with
-// existing call sites — see the new ClearBuffer above for the
-// current implementation).
+// existing call sites — see DropQueue above for the current
+// implementation).
 func (cs *ChatSession) BufferClear() int {
-	return cs.ClearBuffer()
+	return cs.DropQueue()
 }
 
 // LookupInPool returns the AgentSession matching (agent, cwd) if
@@ -1278,11 +1219,9 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 // goroutine); wg.Wait + 5s outer timeout guards against a wedged
 // bridge that bypasses its own SIGKILL fallback.
 func (cs *ChatSession) KillAll() ([]KillResult, error) {
-	// 0. stop pump FIRST so the dying bridge's final events don't
-	//    drain into the channel after /kill has been confirmed, and
-	//    so the preserved-input-buffer's FlushHook isn't accidentally
-	//    fired by SetIdle/OnTurnEnded emitted from a zombie pump.
-	cs.StopReadPump()
+	// 0. (CS-AS 边界重构 Phase 1: no per-CS StopReadPump call.
+	//    Each AS has its own readpump; we call as.Shutdown() below
+	//    per-agent which drains the readpump and closes eventQueue.
 
 	// 1. snapshot pool under read lock; do not mutate cs.pool until
 	//    every bridge has confirmed shutdown.
@@ -1613,9 +1552,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 	// with no <agent> in cwd). Otherwise the user's queued message
 	// stays stuck behind an unresponsive session until they /kill or
 	// /cwd.
-	if cs.inputBuffer != nil {
-		cs.inputBuffer.Clear()
-	}
+	cs.DropQueue()
 
 	if len(targets) == 0 {
 		return 0, 0, nil, nil
@@ -1690,17 +1627,14 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 			oldHandle = as.Handle()
 		}
 		cs.mu.RUnlock()
-		if isActive {
-			cs.StopReadPump()
-		}
+		// CS-AS 边界重构 Phase 1: no per-CS StopReadPump / StartReadPump
+		// calls. as.New handles in-place reset; the per-AS readpump
+		// follows whatever the bridge does (close on reset, restart on
+		// new process).
 		err := as.New(ctx, cs.spawner)
+		_ = err
 		handleChanged := isActive && (as.Handle() != oldHandle)
-		if isActive {
-			// Restart the pump regardless of in-place vs
-			// kill+respawn — StopReadPump signaled the prior
-			// goroutine to exit, so we must launch a new one.
-			_ = cs.StartReadPump()
-		}
+		_ = handleChanged
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err

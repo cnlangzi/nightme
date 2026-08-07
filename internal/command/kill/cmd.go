@@ -60,17 +60,12 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// "explicitly cleared" rather than dangling forever. See
 	// docs/feat/message_lifecycle.md §5.1 (MessageDropped
 	// trigger paths).
-	_ = cs.ClearBuffer()
+	_ = cs.DropQueue()
 
-	// F-53 P2 follow-up: reset the InputBuffer FSM to Idle.
-	// KillAll nukes the pool + activeAS but does NOT flip the
-	// FSM; without this, the next user message after /kill would
-	// see state=Busy, get queued, and never be flushed (the new
-	// AS spawned on the next LookupActiveAgentSession can't drive
-	// a flushPending that the dead pump never fires). Calling
-	// SetIdle here puts the buffer back in a state where the
-	// next message can dispatch immediately.
-	cs.SetIdle()
+	// CS-AS 边界重构 Phase 1: DropQueue is the new path. The
+	// queue is empty after DropQueue; the next message arriving
+	// via QueueUserMessage will trigger a fresh TryFlush on
+	// whatever AS the next prompt promotes.
 
 	return command.Reply(ctx, rt, chatsession.FormatKillResults(results)), nil
 }

@@ -195,29 +195,67 @@ type AgentSession struct {
 	shutdownOnce sync.Once
 }
 
-// NewAgentSession creates a new AgentSession in memory. The pool
-// caller is responsible for adding it to the ChatSession's pool and
-// persisting via registry.AgentSessionFile.
-func NewAgentSession(id, chatSessionID, agent, cwd string, args []string) *AgentSession {
+// newAgentSessionRuntime is the SOLE place that allocates an
+// AgentSession's runtime-only fields — the ones that have no
+// meaningful "zero value" and MUST be valid before Spawn /
+// Activate / the readpump can touch them (channels, atomics,
+// contexts, the initial lifecycle state). Both NewAgentSession
+// (fresh, in-memory) and FromAgentSessionEntry (restored from
+// disk) call this FIRST and then only overlay the fields that are
+// specific to their construction path (identity + persisted
+// state).
+//
+// T-alive (2026-08-07) postmortem: eventQueue used to be
+// allocated inline in NewAgentSession only. FromAgentSessionEntry
+// was written independently and forgot it, leaving every
+// post-restart AgentSession with a nil eventQueue — the readpump's
+// first `as.eventQueue <- EnrichedEvent{}` then blocked forever
+// (send on nil channel), which backed up the bridge's own event
+// channel and made a perfectly healthy `claude` child process look
+// hung from the outside (SendBlocks succeeded, zero events ever
+// surfaced).
+//
+// This was the SECOND time a runtime field silently diverged
+// between the two constructors (isReady missed FromAgentSessionEntry
+// first). Recurring pattern: two
+// independent struct literals for "the same kind of thing" always
+// drift as fields get added. The fix is structural, not another
+// diff pass — every future runtime field goes here ONCE, and both
+// callers get it automatically. Do NOT construct `&AgentSession{}`
+// anywhere else in this package; route through this function.
+func newAgentSessionRuntime(id, chatSessionID, agentName, cwd string) *AgentSession {
 	as := &AgentSession{
 		ID:            id,
 		ChatSessionID: chatSessionID,
-		Agent:         agent,
+		Agent:         agentName,
 		Cwd:           cwd,
-		args:          append([]string(nil), args...),
-		createdAt:     time.Now(),
-		lastRunAt:     time.Now(),
 		stat:          StatusDetached,
 		eventQueue:    make(chan EnrichedEvent, eventQueueCapacity),
 	}
 	as.pid = 0
-	as.isReady.Store(true) // not yet activated; flips false on first Submit success
-	// Pre-install a usable opCtx (Background-derived from BG, no
-	// cancel — a "do-nothing" ctx). The first Activate(parent) call
-	// from the runtime replaces it; in the meantime OpContext()
-	// returns this so callers that read it before activation don't
-	// observe a nil ctx.
+	// Not yet activated; flips false on first Submit success (or,
+	// for restored ASes, re-armed defensively — see
+	// FromAgentSessionEntry / Spawn).
+	as.isReady.Store(true)
+	// Pre-install a usable opCtx (Background-derived, no cancel —
+	// a "do-nothing" ctx). The first Activate(parent) call from the
+	// runtime replaces it; in the meantime OpContext() returns this
+	// so callers that read it before activation don't observe a
+	// nil ctx (the pi bridge calls ctx.Deadline() on entry, so a
+	// nil ctx here previously panicked the whole daemon on the
+	// first message after a restart).
 	as.opCtx = context.Background()
+	return as
+}
+
+// NewAgentSession creates a new AgentSession in memory. The pool
+// caller is responsible for adding it to the ChatSession's pool and
+// persisting via registry.AgentSessionFile.
+func NewAgentSession(id, chatSessionID, agent, cwd string, args []string) *AgentSession {
+	as := newAgentSessionRuntime(id, chatSessionID, agent, cwd)
+	as.args = append([]string(nil), args...)
+	as.createdAt = time.Now()
+	as.lastRunAt = time.Now()
 	return as
 }
 
@@ -228,21 +266,21 @@ func NewAgentSession(id, chatSessionID, agent, cwd string, args []string) *Agent
 // LookupActiveAgentSession. This prevents the "spawned but
 // handle=nil" silent-drop bug where SendBlocks returns
 // ErrNotRunning and the default FlushHook ignores it.
+//
+// Every runtime-only field (eventQueue, isReady, opCtx, pid, stat
+// default) comes from newAgentSessionRuntime — see its doc comment
+// for why that indirection exists. Only identity + persisted state
+// is set here.
 func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 	if e == nil {
 		return nil
 	}
-	as := &AgentSession{
-		ID:            e.ID,
-		ChatSessionID: e.ChatSessionID,
-		Agent:         e.Agent,
-		Cwd:           e.Cwd,
-		args:          append([]string(nil), e.Args...),
-		createdAt:     e.CreatedAt,
-		lastRunAt:     e.LastRunAt,
-		resumeID:      e.ResumeID,
-		model:         e.Model,
-	}
+	as := newAgentSessionRuntime(e.ID, e.ChatSessionID, e.Agent, e.Cwd)
+	as.args = append([]string(nil), e.Args...)
+	as.createdAt = e.CreatedAt
+	as.lastRunAt = e.LastRunAt
+	as.resumeID = e.ResumeID
+	as.model = e.Model
 	// F-45: restore cumulative token / cost stats. nil on legacy
 	// entries (zero-value default = "never ran", will start
 	// counting from first EventUsage). We copy the struct by value
@@ -258,22 +296,13 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 	// commit fix-6: any persisted "running" agent is actually dead
 	// after daemon restart (the process handle is in-memory only).
 	// Demote to Detached so the next LookupActiveAgentSession will
-	// re-spawn. Persisted PID is also stale; clear it.
+	// re-spawn. Persisted PID is also stale (newAgentSessionRuntime
+	// already zeroed it).
 	status := e.Status
 	if status == StatusRunning {
 		status = StatusDetached
 	}
 	as.stat = status
-	as.pid = 0
-	// Pre-install a usable opCtx, exactly as NewAgentSession does.
-	// Without this, every AgentSession restored from disk carries a
-	// nil opCtx until the first Activate(parent), and the default
-	// FlushHook hands that nil straight to the bridge
-	// (chatsession.go: `as.SendBlocks(as.OpContext(), combined)`).
-	// The pi bridge calls ctx.Deadline() on entry, so the FIRST
-	// message after any daemon restart panicked the whole daemon with
-	// a nil-pointer dereference.
-	as.opCtx = context.Background()
 	if e.ExitCode != nil {
 		as.exitCode = e.ExitCode
 	}
@@ -735,7 +764,6 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	lastRun := as.lastRunAt
 	resume := as.resumeID
 	model := as.model
-	handle := as.handle
 	var ec *int
 	if as.exitCode != nil {
 		v := *as.exitCode
@@ -754,8 +782,6 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	cum := as.cumulativeUsage
 	cc := as.compactionCount
 	as.asMu.RUnlock()
-
-	_ = handle // captured but not exported in the persisted entry
 
 	return &registry.AgentSessionEntry{
 		ID:              as.ID,
@@ -934,15 +960,13 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	p.AckedAt = time.Now()
 	p.LastProgressAt = time.Now()
 
-	// T-alive DEBUG (2026-08-07): trace Submit via slog (not
-	// stdlib log.Printf, which goes to stderr and is missed by
-	// `nightme logs`). Lets us localize "Submit returns nil but
-	// no events arrive" — the canonical feishu+claudecode hang.
-	evPtr := h.Events()
-	slog.Info("chatsession: Submit",
+	// Debug-only per-message trace (use `Logging.Level: debug` in
+	// config to enable). Every user message goes through here, so
+	// Info-level would spam the daemon log; SendBlocks failure
+	// below stays at Warn since that IS an actionable event.
+	slog.Debug("chatsession: Submit",
 		"chat_id", as.ChatSessionID,
 		"as_id", as.ID,
-		"handle_events_ptr", fmt.Sprintf("%p", evPtr),
 		"blocks", len(p.Blocks),
 		"prompt_id", p.ID)
 
@@ -955,7 +979,7 @@ func (as *AgentSession) Submit(p *Prompt) error {
 			"err", err)
 		return err
 	}
-	slog.Info("chatsession: Submit SendBlocks ok",
+	slog.Debug("chatsession: Submit SendBlocks ok",
 		"chat_id", as.ChatSessionID,
 		"as_id", as.ID,
 		"prompt_id", p.ID)
@@ -1098,6 +1122,19 @@ func (as *AgentSession) New(ctx context.Context, spawner Spawner) error {
 	// and the runtime's eventHandler will SetResumeID via the normal
 	// path).
 	as.SetResumeID("")
+
+	// Restart the per-AS readpump on the new handle. The old
+	// readpumpLoop saw !ok from the closed handle above and exited;
+	// without this restart, no one is draining the new handle's
+	// Events() and the chat stalls silently. startReadPump is guarded
+	// by readpumpStarted — flip it back to false first so the new
+	// handle gets a fresh drainer. Previous readpumpDone is already
+	// closed (deferred from the exited goroutine), so waiting on it
+	// is a no-op.
+	as.asMu.Lock()
+	as.readpumpStarted = false
+	as.asMu.Unlock()
+	as.startReadPump()
 	return nil
 }
 

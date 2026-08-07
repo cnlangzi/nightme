@@ -16,7 +16,6 @@ package claudecode
 
 import (
 	"context"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -41,9 +40,7 @@ import (
 // the persisted context only when the daemon restarts or AS
 // respawns (not across user turns within one chat).
 func TestStart_ResumeMultiTurnRespawn(t *testing.T) {
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skipf("claude binary not on PATH: %v", err)
-	}
+	requireRealClaude(t)
 
 	ws := t.TempDir()
 	a := New("claude", "claude", nil)

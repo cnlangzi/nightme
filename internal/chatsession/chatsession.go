@@ -366,8 +366,7 @@ func (cs *ChatSession) SetActiveAgent(agent string) error {
 	// to look up the new AS on the next flush.
 	//
 	// KNOWN LIMITATION (Phase 0, deferred to "Prompt 投递稳定性
-	// 优化" PR — see tasks/wip.md L3 + docs/feat/message_lifecycle.md
-	// §8): if the old AS had an in-flight Prompt (currentPrompt
+	// 优化" PR — see docs/feat/message_lifecycle.md §8): if the old AS had an in-flight Prompt (currentPrompt
 	// != nil), it stays installed on the old AS after the switch.
 	// The new AS starts with currentPrompt=nil, so subsequent
 	// events on the new AS use the new anchor. The old Prompt's
@@ -740,24 +739,30 @@ func (cs *ChatSession) TryFlush() error {
 	cs.mu.Lock()
 	if len(cs.queue) == 0 {
 		cs.mu.Unlock()
-		// T-alive DEBUG (2026-08-07): test06 logs show no Submit
-		// line. Trace which early-return TryFlush hits so we can
-		// localize the silent drop.
-		slog.Info("chatsession: TryFlush SKIP",
+		// Empty-queue is the common steady-state case (every
+		// KindPromptEnded re-triggers TryFlush "just in case" —
+		// see routeEvent). Debug-only: logging this at Info would
+		// spam the daemon log on every turn for no diagnostic
+		// value.
+		slog.Debug("chatsession: TryFlush SKIP",
 			"chat_id", cs.ChatID, "reason", "queue_empty")
 		return nil
 	}
 	as := cs.activeAS
 	if as == nil {
 		cs.mu.Unlock()
-		slog.Info("chatsession: TryFlush SKIP",
+		// activeAS_nil / as_not_ready DO indicate real backpressure
+		// (a queued message waiting on an AS that isn't ready yet)
+		// — worth Debug-level visibility when actively diagnosing
+		// a stuck chat, but not Info-level noise in steady state.
+		slog.Debug("chatsession: TryFlush SKIP",
 			"chat_id", cs.ChatID, "reason", "activeAS_nil",
 			"queue_len", len(cs.queue))
 		return nil
 	}
 	if !as.IsReady() {
 		cs.mu.Unlock()
-		slog.Info("chatsession: TryFlush SKIP",
+		slog.Debug("chatsession: TryFlush SKIP",
 			"chat_id", cs.ChatID, "reason", "as_not_ready",
 			"queue_len", len(cs.queue), "as_id", as.ID)
 		return nil
@@ -1566,9 +1571,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 		// follows whatever the bridge does (close on reset, restart on
 		// new process).
 		err := as.New(ctx, cs.spawner)
-		_ = err
 		handleChanged := isActive && (as.Handle() != oldHandle)
-		_ = handleChanged
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err

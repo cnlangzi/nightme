@@ -11,7 +11,6 @@ package claudecode
 import (
 	"context"
 	"os"
-	"os/exec"
 	"testing"
 	"time"
 
@@ -19,9 +18,7 @@ import (
 )
 
 func TestReproRealClaude(t *testing.T) {
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skipf("claude binary not on PATH: %v", err)
-	}
+	requireRealClaude(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -121,9 +118,7 @@ func TestReproRealClaude(t *testing.T) {
 // returning nil). This test asserts the negative: no events should
 // arrive without SendBlocks.
 func TestReproRealClaude_NoSendBlocks(t *testing.T) {
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skipf("claude binary not on PATH: %v", err)
-	}
+	requireRealClaude(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	a := New("claude", "claude", nil)
@@ -170,9 +165,7 @@ func TestReproRealClaude_NoSendBlocks(t *testing.T) {
 // Args slice matching what /use /cwd would populate. It exercises
 // every layer nightme uses.
 func TestReproRealClaude_ProductionArgs(t *testing.T) {
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skipf("claude binary not on PATH: %v", err)
-	}
+	requireRealClaude(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 

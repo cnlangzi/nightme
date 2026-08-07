@@ -25,7 +25,7 @@ package chatsession
 
 import (
 	"context"
-	"log"
+	"log/slog"
 )
 
 // ActiveEvents (CS-AS 边界重构 Phase 1) returns the enriched event
@@ -117,24 +117,24 @@ func (cs *ChatSession) routeEvent(ev EnrichedEvent) {
 		// will pick up the queued messages if any.
 		_ = cs.TryFlush()
 	case KindLifecycle:
-		// T-alive (2026-08-07): the readpumpLoop emits
-		// KindLifecycle{StatusExited} when the bridge's events
-		// channel closes (claude exited — natural at end of a
-		// --print single-turn, or unexpected crash). We MUST
-		// flip the AS's Status so the next LookupActiveAgentSession
-		// falls through to the spawn-with-resume path; otherwise
-		// the chat-session reuses the closed handle and the user
-		// sees the "Working..." reaction indefinitely with no
-		// OutReply. Main branch did this in readpump.go; feat/alive
-		// moved the loop into per-AS readpump but missed wiring
-		// the consumer side.
+		// The readpumpLoop emits KindLifecycle{StatusExited} when
+		// the bridge's events channel closes (claude exited —
+		// natural end of a turn with stdin held open, or an
+		// unexpected crash). We MUST flip the AS's Status so the
+		// next LookupActiveAgentSession falls through to the
+		// spawn-with-resume path; otherwise the chat-session
+		// reuses the closed handle and the user sees the
+		// "Working..." reaction indefinitely with no OutReply.
+		//
+		// emitLifecycleLocked (agentsession_readpump.go) only ever
+		// emits StatusExited today — there is no other lifecycle
+		// transition routed through this event kind yet.
 		if ev.Lifecycle != nil && ev.Lifecycle.Status == StatusExited {
 			if as := cs.lookupAS(ev.AgentSessionID); as != nil {
 				as.SetExited(0)
-				log.Printf("chatsession: AS %s marked Exited (claude process exited)", ev.AgentSessionID)
+				slog.Info("chatsession: AS marked Exited (claude process exited)",
+					"chat_id", ev.ChatID, "as_id", ev.AgentSessionID)
 			}
-		} else {
-			log.Printf("chatsession: lifecycle event chat=%s as=%s %v", ev.ChatID, ev.AgentSessionID, ev.Lifecycle)
 		}
 	}
 }

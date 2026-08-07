@@ -188,15 +188,37 @@ func probeResume(ctx context.Context, sess agent.AgentSession) (string, bool) {
 		safetyCtx, safetyCancel := context.WithTimeout(ctx, resumeFallbackTimeout)
 		defer safetyCancel()
 
+		// Drain stderr until either a rejection signal lands or the
+		// probe window expires. The select below ALWAYS drains every
+		// stderr line that has already arrived before declaring
+		// healthy — otherwise a rejection line that races the
+		// safetyCtx.Done() signal would be lost (Go's select picks
+		// pseudo-randomly when both cases are ready), silently
+		// dropping the user's resume context.
 		for {
 			select {
 			case <-safetyCtx.Done():
-				// stderr drainer closed within the window
-				// (process died) OR window expired (process
-				// alive but no signal — we let it through).
-				// stderr-only probe: no signal = healthy.
-				done <- probeResult{healthy: true, reason: "no_stderr_signal_within_window"}
-				return
+				// Window expired. Drain any stderr lines that
+				// already landed before we exit — a rejection
+				// signal that arrived at the same tick as the
+				// timeout would otherwise be lost.
+				for {
+					select {
+					case line, ok := <-stderrCh:
+						if !ok {
+							done <- probeResult{healthy: true, reason: "stderr_drained_no_signal"}
+							return
+						}
+						if reason, isBad := classifyStderrLineForResume(line); isBad {
+							done <- probeResult{healthy: false, reason: reason}
+							return
+						}
+					default:
+						// No more stderr buffered; safe to declare healthy.
+						done <- probeResult{healthy: true, reason: "no_stderr_signal_within_window"}
+						return
+					}
+				}
 			case line, ok := <-stderrCh:
 				if !ok {
 					// stderr drainer exited; spawn is done.

@@ -582,7 +582,13 @@ func (s *session) writeLine(data []byte) error {
 // Used by the bridge to keep stderr from blocking and to surface
 // stderr content to the resume fallback probe.
 //
-// T-alive: see tasks/wip.md / T-alive (2026-08-07).
+// T-alive: claude hang-on-init post-mortem (2026-08-07). Root cause
+// was a nil `eventQueue` channel left uninitialized by the daemon
+// restart code path — `AgentSession` got it from `NewAgentSession`
+// but `FromAgentSessionEntry` missed it, so the readpump blocked on
+// `send to nil channel` while the child `claude` process stayed
+// alive. Restoring `--print` and wiring `KindLifecycle` into
+// `SetExited` were necessary but not sufficient.
 func drainStderr(r interface {
 	Read(p []byte) (int, error)
 }, logger *slog.Logger, lines chan<- string) error {

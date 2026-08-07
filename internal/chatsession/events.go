@@ -3,7 +3,7 @@
 // `EnrichedEvent` 是 AgentSession 与 ChatSession 之间的唯一事件协议。
 // ChatSession 从 `cs.activeAS.Events()` 读取事件流,按 Kind 路由到 runtime。
 //
-// 设计原则(详见 `tasks/wip-cs-as-boundary.md`):
+// 设计原则:
 //
 //  1. 引用优于复制:Prompt / AgentEvent 全部以指针形态流转,避免在
 //     CS/AS 边界搬砖。

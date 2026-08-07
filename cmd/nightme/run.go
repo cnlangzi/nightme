@@ -483,7 +483,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// chatsession.ChatSession.HandleAction (chatsession no
 	// longer dispatches reactions). The shim translates
 	// *commandServices.ReactionEvent → services.ReactionEvent.
-	slog.Default().Warn("F-51 debug: production WithActionHandler installed (router-based)")
 	gwImpl.WithActionHandler(func(ctx context.Context, msg *gateway.InboundMessage) bool {
 		if msg == nil || msg.Reaction == nil {
 			return false
@@ -502,13 +501,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	if err := wireRuntimeCallbacksAndRestore(mgr, ch, gwImpl, logger); err != nil {
 		return fmt.Errorf("run: wire+restore: %w", err)
 	}
-
-	// Start readPumps for already-running AgentSessions that
-	// were restored from disk (Detached → running on next
-	// LookupActiveAgentSession). The daemon does NOT auto-spawn
-	// at startup; users must send a message (which triggers
-	// LookupActiveAgentSession → Spawner).
-	ensureReadPumps(mgr, ch, cfg.Primary, logger)
 
 	if err := gwImpl.Start(ctx); err != nil {
 		return fmt.Errorf("run: start gateway: %w", err)
@@ -655,10 +647,6 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 	}
 }
 
-// ensureReadPumps walks every ChatSession and ensures a readPump
-// is running for its current active AgentSession. Called at
-// startup after RestoreFromRegistry; the AgentSessions are
-// Detached (no process), so this is a no-op for restored
 // wireRuntimeCallbacksAndRestore installs the per-ChatSession
 // outbound handlers (EventHandler for AgentEvent → OutboundMessage
 // translation; MessageStateHandler for F-31 lifecycle reactions)
@@ -693,10 +681,22 @@ func wireRuntimeCallbacksAndRestore(
 		return newEventHandler(ch, cs, mgr, logger)
 	}
 	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
-		// T-alive DEBUG: confirm runtime handlers are installed
-		// for every newly-created or restored chat.
+		// Startup audit trail: one line per chat, bounded by the
+		// number of persisted chats — confirms the outbound
+		// wiring (EventHandler / MessageStateHandler /
+		// PromptEndHandler / PumpEvents) is actually installed
+		// for every restored-or-new ChatSession. See the bug
+		// history note on wireRuntimeCallbacksAndRestore above:
+		// a missing/misordered handler here is a silent failure
+		// (no logs, no channel.Send, no reactions), so this line
+		// is the cheapest signal that wiring succeeded.
+		//
+		// Debug-level (not Info) so a daemon with hundreds of
+		// persisted chats doesn't flood the log at startup; use
+		// `Logging.Level: debug` to surface the audit trail
+		// when investigating handler-installation regressions.
 		if logger != nil {
-			logger.Info("runtime: handlers installed for chat",
+			logger.Debug("runtime: handlers installed for chat",
 				"chat_id", cs.ChatID,
 				"cs_id", cs.ID)
 		}
@@ -790,15 +790,6 @@ func wireRuntimeCallbacksAndRestore(
 //
 // The runtime's actual readPump start happens in handleUse
 // (gateway package) and on first message dispatch in
-// newMessageDispatcher.
-func ensureReadPumps(mgr *chatsession.Manager, ch channel.Channel, primary string, logger *slog.Logger) {
-	// no-op for now; reserved for future startup-time readPump wiring.
-	_ = mgr
-	_ = ch
-	_ = primary
-	_ = logger
-}
-
 // newEventHandler returns the per-event callback installed on
 // every ChatSession by the runtime. The callback translates
 // AgentEvent → OutboundMessage and dispatches via the channel.

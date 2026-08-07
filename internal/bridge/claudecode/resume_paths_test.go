@@ -12,7 +12,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -37,9 +36,7 @@ import (
 //
 // Output is structured so it can be compared at a glance.
 func TestResumePaths_Table(t *testing.T) {
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skipf("claude binary not on PATH: %v", err)
-	}
+	requireRealClaude(t)
 
 	t.Run("resume_happy_path_replay", func(t *testing.T) {
 		if !envOn("NIGHTME_TALIVE_RESUME_REPLAY") {

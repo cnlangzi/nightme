@@ -27,7 +27,6 @@ package claudecode
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -45,9 +44,7 @@ import (
 // SendBlocks. The test logs the verdict for each flavor so
 // the next person debugging has the answer in CI output.
 func TestFreshLiveness_PassesAnswer(t *testing.T) {
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skipf("claude binary not on PATH: %v", err)
-	}
+	requireRealClaude(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
@@ -168,9 +165,7 @@ func TestFreshLiveness_LogsUserMCP(t *testing.T) {
 	if os.Getenv("NIGHTME_TALIVE_USER_MCP") != "1" {
 		t.Skip("set NIGHTME_TALIVE_USER_MCP=1 to enable")
 	}
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skipf("claude binary not on PATH: %v", err)
-	}
+	requireRealClaude(t)
 
 	// Best-guess default workspace: the repo cwd at test start.
 	ws, _ := os.Getwd()

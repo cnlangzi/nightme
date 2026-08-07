@@ -12,7 +12,6 @@ package claudecode
 import (
 	"context"
 	"errors"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -27,9 +26,7 @@ import (
 // wedged session and re-spawn with ResumeID="" — the runtime saw
 // a "working" session but the assistant had no resume context.
 func TestStart_ResumeRejectionSurfacesError(t *testing.T) {
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skipf("claude binary not on PATH: %v", err)
-	}
+	requireRealClaude(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -71,9 +68,7 @@ func TestStart_ResumeRejectionSurfacesError(t *testing.T) {
 // ids — the test exercises the same code path the runtime uses
 // for resume, end-to-end.
 func TestStart_ResumeID_PreservedAcrossProbe(t *testing.T) {
-	if _, err := exec.LookPath("claude"); err != nil {
-		t.Skipf("claude binary not on PATH: %v", err)
-	}
+	requireRealClaude(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()

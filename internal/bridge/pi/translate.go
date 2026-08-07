@@ -1,44 +1,174 @@
 // Pi event -> agent.AgentEvent translation table.
 //
-// The translator is purely functional: it takes one parsed event
-// envelope and returns the AgentEvent stream to feed into the
-// session's events channel. It never touches the read loop, the
-// process, or the pending registry. This makes it trivial to test
-// against a JSON fixture per the F-32 acceptance matrix §9.2.
+// The translator is purely functional from the caller's point of
+// view: it takes one parsed event envelope and returns the
+// AgentEvent stream to feed into the session's events channel. It
+// never touches the read loop, the process, or the pending registry.
+// This makes it trivial to test against a JSON fixture per the F-32
+// acceptance matrix §9.2.
 //
 // Translation rules are documented in docs/feat/F-32-pi-rpc-bridge.md
-// §2.3. Anything not explicitly listed there is dropped (logged at
-// debug) so unknown upstream events do not terminate the session.
+// §2.3, as revised by docs/feat/F-52-pi-stream-aggregation.md.
+// Anything not explicitly listed there is dropped (logged at debug)
+// so unknown upstream events do not terminate the session.
+//
+// F-52 — stream aggregation. Pi streams assistant text at *token*
+// granularity (`text_delta`). Before F-52 each delta became its own
+// EventText, which the gateway turned into an OutReply and the Feishu
+// adapter into a separate 💬 log entry — one sentence exploded into
+// twenty bubbles and twenty card PATCHes. The translator now buffers
+// deltas and emits at semantic-block boundaries instead:
+//
+//	no tools   : 0 × EventText,  1 × EventResult
+//	with tools : 1 × EventText per narration segment preceding a
+//	             tool call, then 1 × EventResult for the conclusion
+//
+// The flush point is `tool_execution_start` (see flushPendingTextLocked).
+// That is what keeps "one reply per turn" and "show progress mid-turn"
+// from fighting each other, and it is why the final EventResult never
+// duplicates text the user has already seen.
 
 package pi
 
 import (
 	"encoding/json"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
+
+// thinkingPrefix marks an EventText as a reasoning block rather than
+// a reply. gateway.Translate strips it and routes the payload to
+// OutThinking; the claudecode bridge uses the same sentinel, so the
+// channel renderers need no per-bridge branching.
+const thinkingPrefix = "[思考] "
+
+// emptyReplyFallback is the EventResult text used when a turn settles
+// without any un-flushed assistant text — e.g. the agent ended on a
+// tool call and said nothing afterwards.
+//
+// It is NOT cosmetic. gateway.Translate drops an EventResult whose
+// Text is empty and IsError is false (internal/gateway/translate.go),
+// and the runtime reads Usage off the *translated* OutboundMessage
+// (cmd/nightme/run.go), so an empty-text result silently takes the
+// turn's token counts down with it. Guaranteeing a non-empty Text in
+// the bridge keeps usage flowing without touching the shared gateway
+// layer. cc-connect (MsgEmptyResponse) and openclaw-lark
+// (EMPTY_REPLY_FALLBACK_TEXT = 'Done.') both do the same thing.
+const emptyReplyFallback = "Done."
 
 // pendingTool records a tool_call that has emitted tool_execution_start
 // but not yet the matching tool_execution_end. The bridge uses it to
 // re-attach Name + raw Args on the end event — Pi's wire does not echo
 // args on end, so without start->end correlation the renderer would
 // fall back to "🔧 tool" and lose the type-aware summary.
-//
-// Entries are added on tool_execution_start and removed on
-// tool_execution_end; agent_settled clears the map defensively to
-// prevent leakage across turns when an end was missed.
 type pendingTool struct {
 	Name string
 	Args string // raw JSON from tool_execution_start.args
 }
 
-// translator carries the per-session translation state that is
-// independent of the protocol layer: the current session
-// fingerprint (used to attribute EventInit), and a couple of flags
-// for sticky behavior (have we already emitted EventInit; has the
-// text stream already ended for the current assistant message).
+// turnState is every piece of mutable state scoped to a single turn
+// (prompt -> ... -> agent_settled). It is replaced wholesale on
+// agent_settled and on /new, which is the whole point of grouping it:
+// resetting a turn is one assignment, and a future per-turn field
+// cannot be forgotten by a reset path.
+//
+// Concurrency: all fields are read and written under translator.turnMu.
+// See the comment on that field for who contends.
+type turnState struct {
+	// textBuf accumulates text_delta payloads per contentIndex.
+	// Keyed rather than a single Builder because Pi's wire allows
+	// several content blocks to interleave on one message; in
+	// practice models emit them in order, but keying costs nothing
+	// and removes an ordering assumption. Entries are created on
+	// first delta and drained by closeTextBlockLocked.
+	textBuf map[int]*strings.Builder
+
+	// thinkBuf accumulates thinking_delta payloads. Reasoning has a
+	// single stream (no contentIndex fan-out in practice) and is
+	// flushed on thinking_end rather than at the tool boundary —
+	// reasoning is a different kind of thing from the reply and must
+	// not bleed into pendingText.
+	thinkBuf strings.Builder
+
+	// pendingText holds text blocks that have been completed
+	// (text_end) but not yet delivered. Drained either by
+	// flushPendingTextLocked at a tool boundary or by the final
+	// EventResult on agent_settled. Blocks are joined with "\n".
+	pendingText string
+
+	// lastMessageText is the text composed from the most recent
+	// assistant message_end's content[] — Pi's own authoritative
+	// rendering of that message. Overwritten (not appended) per
+	// message: only the final assistant message of the turn matters.
+	// Used solely as a fallback when the delta stream produced
+	// nothing, which happens when Pi replays a message instead of
+	// streaming it. Gated by textDelivered — see there.
+	lastMessageText string
+
+	// textDelivered records that at least one EventText carrying
+	// *reply* text has already gone out this turn (reasoning does not
+	// count; it is a different surface).
+	//
+	// It exists to disarm the lastMessageText fallback. Pi emits
+	// message_end(assistant) with content[] = [text, toolCall] BEFORE
+	// the matching tool_execution_start, so a turn that ends on a tool
+	// call leaves lastMessageText holding text we already flushed at
+	// that tool boundary. Falling back to it would re-deliver the
+	// paragraph the user just read — as a 📝 result card this time.
+	//
+	// A boolean rather than clearing lastMessageText at flush time
+	// because the two events can arrive in either order; the flag is
+	// order-independent, a clear is not.
+	textDelivered bool
+
+	// active records that this turn observed something worth
+	// reporting (reply text, reasoning, an assistant message, or a
+	// tool call). A settled turn that saw none of those produces no
+	// EventResult at all — see finishTurnLocked.
+	active bool
+
+	// stopReason is the most recent assistant message_end's
+	// stopReason. Surfaced as ResultEvent.Subtype; "error" also
+	// sets ResultEvent.IsError.
+	stopReason string
+
+	// lastUsage is the usage block of the most recent assistant
+	// message_end.
+	//
+	// OVERWRITTEN, never summed. Each Pi API call reports an input
+	// side (input + cacheRead + cacheWrite) that already contains
+	// the entire conversation history, so it is a *snapshot* of
+	// current context occupancy. Summing the snapshots of a
+	// multi-call turn would overstate it by roughly the call count.
+	// cc-connect reaches the same conclusion from the other
+	// direction — its handleAgentEnd walks agent_end.messages[]
+	// backwards and takes the last assistant usage.
+	lastUsage *agent.UsageEvent
+
+	// pendingTools keys in-flight tool calls (toolCallId) to their
+	// start-time metadata so the matching tool_execution_end can
+	// carry Name + Args into ToolEndEvent. Populated in
+	// tool_execution_start, drained in tool_execution_end, and
+	// discarded wholesale when the turn resets — a tool that never
+	// reported an end (Pi aborted mid-call) must not leak into the
+	// next turn and mis-attribute a later tool's args.
+	pendingTools map[string]pendingTool
+}
+
+func newTurnState() *turnState {
+	return &turnState{
+		textBuf:      make(map[int]*strings.Builder),
+		pendingTools: make(map[string]pendingTool),
+	}
+}
+
+// translator carries the per-session translation state: the session
+// fingerprint used to attribute EventInit, the sticky initSent flag,
+// and the current turn's accumulation buffers.
 type translator struct {
 	agentName string
 	workspace string
@@ -46,42 +176,83 @@ type translator struct {
 
 	// initSent is set after the first EventInit has been emitted
 	// for the session, so subsequent get_state responses or model
-	// changes do not re-fire the receipt header.
+	// changes do not re-fire the receipt header. Guarded by the
+	// session's translatorMu (NOT turnMu) — see below.
 	initSent bool
 
-	// sawTextEnd tracks whether the most recent text block on the
-	// current assistant message has already produced a text_end.
-	// We use it to suppress duplicate EventResult payloads when
-	// message_end echoes a content[] we have already streamed as
-	// deltas. Per-turn; reset when agent_settled fires.
-	sawTextEnd bool
-
-	// pendingTools keys in-flight tool calls (toolCallId) to their
-	// start-time metadata so the matching tool_execution_end can
-	// carry Name + Args into ToolEndEvent. Populated in
-	// tool_execution_start, drained in tool_execution_end,
-	// wholesale-cleared on agent_settled (defensive).
+	// turnMu serialises all access to turn and suppressing.
+	// translate() runs on the readPump goroutine; session.New()
+	// (driven by /new) resets the turn from a different goroutine.
+	// Without the mutex that is a concurrent map read/write on
+	// textBuf / pendingTools, which panics the daemon.
 	//
-	// Concurrency: translate() runs from readPump; session.New()
-	// (called on /new) reassigns pendingTools from a different
-	// goroutine. pendingMu serialises the map so the assignment
-	// in New() cannot race against a read in translate(), which
-	// would otherwise panic the daemon ("concurrent map read and
-	// map write"). PendingMu is intentionally separate from
-	// translatorMu (which guards initSent / emitInit) — the two
-	// protect disjoint state and never need to be acquired
-	// together, so there's no ordering risk.
-	pendingMu     sync.Mutex
-	pendingTools  map[string]pendingTool
+	// turnMu is intentionally separate from the session's
+	// translatorMu (which guards initSent + emitInit). The two
+	// protect disjoint state and are never held together — New()
+	// takes them sequentially, not nested — so there is no lock
+	// ordering hazard. Keep it that way: taking translatorMu around
+	// translate() would serialise every wire event against /new.
+	turnMu sync.Mutex
+	turn   *turnState
+
+	// suppressing drops every translated event while a /new reset is
+	// in flight. Set by beginReset, cleared by endReset.
+	//
+	// Resetting the turn state alone is not enough. session.New()
+	// resets, then issues a get_state RPC with a 10s deadline before
+	// it can deliver the new EventInit — and readPump keeps
+	// translating the whole time. Wire events still in the pipe from
+	// the turn the user just abandoned would land in the *fresh*
+	// turnState: an old message_end would stamp its usage onto the
+	// new session (corrupting the context-occupancy number, and
+	// racing handleNew's ResetCumulative), and an old agent_settled
+	// would ship the abandoned reply as the new session's result
+	// card.
+	//
+	// Dropping is unconditionally correct in this window: no prompt
+	// has been sent to the new session yet, so nothing arriving here
+	// can belong to it. Command responses (new_session / get_state)
+	// travel the response path, and extension_ui_request +
+	// malformed-frame errors are handled in readPump before
+	// translate() is reached — none of them are affected.
+	suppressing bool
 }
 
 func newTranslator(agentName, workspace, branch string) *translator {
 	return &translator{
-		agentName:    agentName,
-		workspace:    workspace,
-		branch:       branch,
-		pendingTools: make(map[string]pendingTool),
+		agentName: agentName,
+		workspace: workspace,
+		branch:    branch,
+		turn:      newTurnState(),
 	}
+}
+
+// beginReset discards the current turn and opens the suppression
+// window. Called by session.New() as soon as pi has acknowledged
+// new_session; every subsequent wire event is dropped until
+// endReset. See translator.suppressing for why the window is needed
+// rather than a bare turn reset.
+//
+// MUST be paired with endReset on every exit path — a leaked
+// suppression flag mutes the session permanently. session.New()
+// defers the call.
+func (t *translator) beginReset() {
+	t.turnMu.Lock()
+	defer t.turnMu.Unlock()
+	t.turn = newTurnState()
+	t.suppressing = true
+}
+
+// endReset closes the suppression window opened by beginReset.
+//
+// The turn state is not re-created here: translate() bails out
+// before touching it while suppressing, so nothing accumulated
+// during the window and the state is still the pristine one
+// beginReset installed.
+func (t *translator) endReset() {
+	t.turnMu.Lock()
+	defer t.turnMu.Unlock()
+	t.suppressing = false
 }
 
 // translate consumes one Pi event and returns zero or more
@@ -90,6 +261,11 @@ func newTranslator(agentName, workspace, branch string) *translator {
 // payload that the caller should treat as fatal for the session
 // (the bridge closes the events channel and emits EventError in
 // that case).
+//
+// The whole body runs under turnMu. That is safe because translation
+// is pure CPU — no I/O, no channel sends, no calls back into the
+// session — so the critical section is bounded by a JSON decode.
+// Delivery happens in readPump *after* translate returns.
 func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEvent, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -97,6 +273,19 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 	var env eventEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, err
+	}
+
+	t.turnMu.Lock()
+	defer t.turnMu.Unlock()
+
+	// A /new reset is in flight — everything on the wire belongs to
+	// the turn the user just abandoned. Drop it before it can touch
+	// the fresh turn state. See translator.suppressing.
+	if t.suppressing {
+		logger.Debug("pi event dropped (reset in flight)",
+			slog.String("type", env.Type),
+		)
+		return nil, nil
 	}
 
 	switch env.Type {
@@ -110,6 +299,12 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		// Lifecycle / queue / streaming events that the F-32 MVP
 		// does not surface. Logged for debug; never terminate the
 		// session.
+		//
+		// agent_end stays on this list deliberately: it carries a
+		// willRetry flag and can fire several times within one turn,
+		// so it is NOT a terminal marker (F-32 §2.3). cc-connect
+		// emits its EventResult here and accepts the duplicates; we
+		// use agent_settled instead and get exactly one.
 		logger.Debug("pi event ignored",
 			slog.String("type", env.Type),
 			slog.String("raw", string(raw)),
@@ -118,31 +313,40 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 
 	case "agent_settled":
 		// Turn-end marker. The session stays open; subsequent
-		// prompts are still accepted. Reset per-turn sticky state
-		// AND defensively clear pendingTools so a missed
-		// tool_execution_end (e.g. Pi aborted mid-call) cannot
-		// leak the entry across turns and mis-attribute a later
-		// tool's args.
-		t.sawTextEnd = false
-		t.pendingMu.Lock()
-		t.pendingTools = make(map[string]pendingTool)
-		t.pendingMu.Unlock()
-		return []agent.AgentEvent{{
+		// prompts are still accepted.
+		//
+		// This is the only place a turn's EventResult is produced —
+		// exactly one per turn, carrying the final text and the
+		// usage snapshot. EventDone follows it because the runtime's
+		// readpump flips to Idle and flushes the queued prompts on
+		// EventDone; emitting the result afterwards would race the
+		// next turn.
+		out := t.finishTurnLocked()
+		out = append(out, agent.AgentEvent{
 			Kind: agent.EventDone,
 			Done: &agent.DoneEvent{ExitCode: 0, Reason: "settled"},
-		}}, nil
+		})
+		t.turn = newTurnState()
+		return out, nil
 
 	case "message_update":
-		return t.translateMessageUpdate(raw, logger)
+		return t.translateMessageUpdateLocked(raw, logger)
 
 	case "message_end":
-		return t.translateMessageEnd(raw, logger)
+		return t.translateMessageEndLocked(raw, logger)
 
 	case "tool_execution_start":
 		var ev toolExecutionStart
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return nil, err
 		}
+		// Flush the narration that preceded this tool call so the
+		// user sees what the agent is doing while it runs. Clearing
+		// pendingText here is also what guarantees the turn's final
+		// EventResult carries only the *last* segment — the text
+		// delivered now is never repeated in the result (F-52).
+		t.turn.active = true
+		out := t.flushPendingTextLocked()
 		// Empty toolCallId is rejected at the wire level by Pi, but
 		// belt-and-braces: storing under key "" would let two
 		// malformed events collapse onto each other and a later
@@ -152,24 +356,22 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		// ID=="" so consumers see the start; the orphan-end
 		// fallback path covers the result line.
 		if ev.ToolCallID != "" {
-			t.pendingMu.Lock()
-			t.pendingTools[ev.ToolCallID] = pendingTool{
+			t.turn.pendingTools[ev.ToolCallID] = pendingTool{
 				Name: ev.ToolName,
 				Args: stringOrEmpty(ev.Args),
 			}
-			t.pendingMu.Unlock()
 		} else {
 			logger.Warn("pi tool_execution_start with empty toolCallId — pending correlation skipped",
 				slog.String("raw", string(raw)))
 		}
-		return []agent.AgentEvent{{
+		return append(out, agent.AgentEvent{
 			Kind: agent.EventToolStart,
 			ToolStart: &agent.ToolStartEvent{
 				ID:   ev.ToolCallID,
 				Name: ev.ToolName,
 				Args: stringOrEmpty(ev.Args),
 			},
-		}}, nil
+		}), nil
 
 	case "tool_execution_update":
 		// MVP does not surface partial tool results. Logged for
@@ -193,15 +395,13 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		name := ev.ToolName
 		args := ""
 		if ev.ToolCallID != "" {
-			t.pendingMu.Lock()
-			if pending, ok := t.pendingTools[ev.ToolCallID]; ok {
+			if pending, ok := t.turn.pendingTools[ev.ToolCallID]; ok {
 				if name == "" {
 					name = pending.Name
 				}
 				args = pending.Args
 			}
-			delete(t.pendingTools, ev.ToolCallID)
-			t.pendingMu.Unlock()
+			delete(t.turn.pendingTools, ev.ToolCallID)
 		} else {
 			logger.Warn("pi tool_execution_end with empty toolCallId — orphan path, wire ToolName only",
 				slog.String("raw", string(raw)))
@@ -232,6 +432,9 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		if err := json.Unmarshal(raw, &ev); err != nil {
 			return nil, err
 		}
+		// Compaction can fire mid-turn; the turn's accumulation
+		// buffers are deliberately left untouched so the reply being
+		// composed survives the cycle.
 		return []agent.AgentEvent{{
 			Kind: agent.EventCompaction,
 		}}, nil
@@ -301,13 +504,12 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 	}
 }
 
-// translateMessageUpdate dispatches message_update events to the
-// per-delta translator. The nested assistantMessageEvent.type field
-// is the discriminator; the surrounding eventEnvelope is discarded.
-func (t *translator) translateMessageUpdate(raw []byte, logger *slog.Logger) ([]agent.AgentEvent, error) {
-	if logger == nil {
-		logger = slog.Default()
-	}
+// translateMessageUpdateLocked dispatches message_update events to the
+// per-delta handler. The nested assistantMessageEvent.type field is
+// the discriminator; the surrounding eventEnvelope is discarded.
+//
+// Caller must hold turnMu.
+func (t *translator) translateMessageUpdateLocked(raw []byte, logger *slog.Logger) ([]agent.AgentEvent, error) {
 	var ev messageUpdateEnvelope
 	if err := json.Unmarshal(raw, &ev); err != nil {
 		return nil, err
@@ -318,45 +520,69 @@ func (t *translator) translateMessageUpdate(raw []byte, logger *slog.Logger) ([]
 	}
 
 	switch delta.Type {
-	case "text_delta":
-		return []agent.AgentEvent{{Kind: agent.EventText, Text: delta.Delta}}, nil
-	case "text_start", "text_end":
-		if delta.Type == "text_end" {
-			t.sawTextEnd = true
-		}
-		// No-op events; deltas are sufficient.
+	case "text_start":
+		// A new block opens on this index. Drop any stale partial
+		// so a missed text_end cannot bleed the previous block's
+		// tail into this one.
+		delete(t.turn.textBuf, delta.ContentIndex)
 		return nil, nil
+
+	case "text_delta":
+		// Accumulate only. See the F-52 note at the top of the file
+		// for why this no longer emits.
+		if delta.Delta == "" {
+			return nil, nil
+		}
+		b := t.turn.textBuf[delta.ContentIndex]
+		if b == nil {
+			b = &strings.Builder{}
+			t.turn.textBuf[delta.ContentIndex] = b
+		}
+		b.WriteString(delta.Delta)
+		t.turn.active = true
+		return nil, nil
+
+	case "text_end":
+		// Block complete — move it into pendingText, awaiting either
+		// a tool boundary or the turn's EventResult.
+		t.closeTextBlockLocked(delta.ContentIndex)
+		return nil, nil
+
+	case "thinking_start":
+		t.turn.thinkBuf.Reset()
+		return nil, nil
+
 	case "thinking_delta":
-		// Reuse the claudecode "[思考] " prefix convention so the
-		// receipt renderer can branch on the leading bracket.
+		t.turn.thinkBuf.WriteString(delta.Delta)
+		t.turn.active = true
+		return nil, nil
+
+	case "thinking_end":
+		// Reasoning flushes on its own boundary rather than at the
+		// tool boundary: it is a distinct surface (💭 vs 💬) and must
+		// never end up inside the reply's EventResult.
+		text := strings.TrimSpace(t.turn.thinkBuf.String())
+		t.turn.thinkBuf.Reset()
+		if text == "" {
+			return nil, nil
+		}
 		return []agent.AgentEvent{{
 			Kind: agent.EventText,
-			Text: "[思考] " + delta.Delta,
+			Text: thinkingPrefix + text,
 		}}, nil
-	case "thinking_start", "thinking_end":
-		// No-ops; we do not emit anything for these.
+
+	case "toolcall_start", "toolcall_delta", "toolcall_end":
+		// toolcall_* precedes tool_execution_* in Pi's event stream.
+		// We deliberately do NOT emit here: tool_execution_start
+		// carries the canonical name and args, and emitting twice
+		// would surface a phantom "starting" line in the receipt
+		// between two genuine tool invocations.
 		return nil, nil
-	case "toolcall_start":
-		// toolcall_start precedes tool_execution_start in Pi's
-		// event stream. We deliberately do NOT emit EventToolStart
-		// here: tool_execution_start carries the canonical name
-		// and args, and emitting twice would surface a phantom
-		// "starting" line in the receipt between two genuine
-		// tool invocations. The first time the renderer hears
-		// about a tool id is at tool_execution_start.
-		return nil, nil
-	case "toolcall_delta":
-		// Streaming tool-call argument delta; MVP drops it.
-		return nil, nil
-	case "toolcall_end":
-		// Same rationale as toolcall_start: the canonical start
-		// event is tool_execution_start. toolcall_end here would
-		// only refresh the args payload, which the renderer
-		// would not render until tool_execution_end anyway.
-		return nil, nil
+
 	case "start", "done", "error":
 		// Lifecycle markers on the assistant message; no event.
 		return nil, nil
+
 	default:
 		logger.Debug("pi message_update delta unknown",
 			slog.String("type", delta.Type),
@@ -366,15 +592,18 @@ func (t *translator) translateMessageUpdate(raw []byte, logger *slog.Logger) ([]
 	}
 }
 
-// translateMessageEnd dispatches message_end events by role.
-// assistant -> one EventResult (with Usage co-located on the
-// ResultEvent payload — see translateAssistantMessage);
-// toolResult -> no-op (the matching tool_execution_end already
-// produced EventToolEnd).
-func (t *translator) translateMessageEnd(raw []byte, logger *slog.Logger) ([]agent.AgentEvent, error) {
-	if logger == nil {
-		logger = slog.Default()
-	}
+// translateMessageEndLocked dispatches message_end events by role.
+// Neither role emits an event any more: assistant messages record the
+// turn's final text / stopReason / usage for agent_settled to deliver,
+// and toolResult is already covered by tool_execution_end.
+//
+// A turn can contain several assistant messages (text -> toolCall ->
+// toolResult -> next assistant message). Emitting per message, as the
+// pre-F-52 code did, produced one EventResult per message rather than
+// one per turn.
+//
+// Caller must hold turnMu.
+func (t *translator) translateMessageEndLocked(raw []byte, logger *slog.Logger) ([]agent.AgentEvent, error) {
 	var env struct {
 		Message json.RawMessage `json:"message"`
 	}
@@ -401,7 +630,8 @@ func (t *translator) translateMessageEnd(raw []byte, logger *slog.Logger) ([]age
 		if err := json.Unmarshal(env.Message, &msg); err != nil {
 			return nil, err
 		}
-		return t.translateAssistantMessage(msg, logger), nil
+		t.recordAssistantMessageLocked(msg)
+		return nil, nil
 	case "toolResult":
 		// Already covered by tool_execution_end.
 		return nil, nil
@@ -414,65 +644,181 @@ func (t *translator) translateMessageEnd(raw []byte, logger *slog.Logger) ([]age
 	}
 }
 
-// translateAssistantMessage renders the terminal assistant message
-// into a single EventResult with Usage co-located on the
-// ResultEvent payload. The data is already paired on Pi's
-// `message_end` (assistant role) wire event — emitting two
-// separate events would force the runtime to buffer OutResult
-// waiting for the late EventUsage, so we keep them together.
-// to buffer OutResult to get the footer stamp right. Now they
-// arrive together on the same AgentEvent.
+// recordAssistantMessageLocked folds one finalized assistant message
+// into the turn state. Nothing is emitted; agent_settled delivers.
 //
-// We suppress the result when the most recent text block was
-// already finalized via text_end, to avoid double-rendering the
-// same final text in the receipt.
-func (t *translator) translateAssistantMessage(msg assistantMessage, _ *slog.Logger) []agent.AgentEvent {
-	var out []agent.AgentEvent
-
-	// Compose the final text from content[].text blocks in order.
-	var finalText string
-	if !t.sawTextEnd {
-		for _, b := range msg.Content {
-			if b.Type == "text" && b.Text != "" {
-				if finalText != "" {
-					finalText += "\n"
-				}
-				finalText += b.Text
+// Caller must hold turnMu.
+func (t *translator) recordAssistantMessageLocked(msg assistantMessage) {
+	// Pi's own rendering of this message's text. Kept only as a
+	// fallback for when the delta stream produced nothing (replayed
+	// or non-streamed message) — the streamed buffers are the
+	// primary source because they are what the tool-boundary flush
+	// operates on, and mixing the two could double-deliver.
+	var text string
+	for _, b := range msg.Content {
+		if b.Type == "text" && b.Text != "" {
+			if text != "" {
+				text += "\n"
 			}
+			text += b.Text
 		}
+	}
+	// Overwrite, not append: only the turn's final assistant message
+	// is a candidate for the result text. An earlier message's text
+	// has already been flushed at the tool boundary that followed it.
+	t.turn.lastMessageText = text
+	t.turn.stopReason = msg.StopReason
+	t.turn.active = true
+
+	// Usage is a context-occupancy snapshot, so the latest one wins.
+	// See turnState.lastUsage for why summing would be wrong.
+	// Empty usage blocks are common (synthetic messages); leaving the
+	// previous snapshot in place is better than clobbering it with
+	// zeroes.
+	if u := decodeMessageUsage(msg.Usage); u != nil {
+		t.turn.lastUsage = u
+	}
+}
+
+// closeTextBlockLocked drains the accumulated deltas for one content
+// index into pendingText. No-op when the index has no buffer.
+//
+// Caller must hold turnMu.
+func (t *translator) closeTextBlockLocked(idx int) {
+	b := t.turn.textBuf[idx]
+	if b == nil {
+		return
+	}
+	delete(t.turn.textBuf, idx)
+	text := b.String()
+	if text == "" {
+		return
+	}
+	if t.turn.pendingText != "" {
+		t.turn.pendingText += "\n"
+	}
+	t.turn.pendingText += text
+}
+
+// closeOpenBlocksLocked drains every still-open text block, in
+// ascending content-index order so the result is deterministic
+// regardless of Go's map iteration order.
+//
+// Normally a no-op: Pi closes each block with text_end. It matters on
+// the abort / error paths, where a turn can settle with deltas still
+// buffered — without this the tail of the reply would be silently lost.
+//
+// Caller must hold turnMu.
+func (t *translator) closeOpenBlocksLocked() {
+	if len(t.turn.textBuf) == 0 {
+		return
+	}
+	idxs := make([]int, 0, len(t.turn.textBuf))
+	for i := range t.turn.textBuf {
+		idxs = append(idxs, i)
+	}
+	sort.Ints(idxs)
+	for _, i := range idxs {
+		t.closeTextBlockLocked(i)
+	}
+}
+
+// flushPendingTextLocked delivers the accumulated narration as a
+// single EventText and clears it. Returns nil (not an empty event)
+// when there is nothing pending, so callers can append unconditionally.
+//
+// Caller must hold turnMu.
+func (t *translator) flushPendingTextLocked() []agent.AgentEvent {
+	t.closeOpenBlocksLocked()
+	text := strings.TrimSpace(t.turn.pendingText)
+	t.turn.pendingText = ""
+	if text == "" {
+		return nil
+	}
+	// Only a real delivery arms the flag — a no-op flush (nothing
+	// buffered) must leave the lastMessageText fallback available for
+	// turns where Pi never streamed in the first place.
+	t.turn.textDelivered = true
+	return []agent.AgentEvent{{Kind: agent.EventText, Text: text}}
+}
+
+// finishTurnLocked builds the turn's single EventResult, or returns
+// nil when the turn observed nothing worth reporting.
+//
+// Text resolution order:
+//  1. pendingText — what we accumulated since the last flush. This is
+//     the normal path and is exactly the segment the user has NOT
+//     seen yet.
+//  2. lastMessageText — Pi's own composition, but ONLY when no reply
+//     text has been delivered yet this turn. See turnState.textDelivered
+//     for why the guard is load-bearing.
+//  3. emptyReplyFallback — never emit an empty Text; see the const.
+//
+// Caller must hold turnMu.
+func (t *translator) finishTurnLocked() []agent.AgentEvent {
+	t.closeOpenBlocksLocked()
+
+	// An untouched turn means agent_settled fired without an
+	// accompanying run (Pi settles out-of-band paths such as a
+	// fire-and-forget compaction the same way). Emitting a result
+	// there would put a spurious "Done." card in the user's chat.
+	if !t.turn.active {
+		return nil
 	}
 
-	result := &agent.ResultEvent{
-		Text:    finalText,
-		IsError: msg.StopReason == "error",
-		Subtype: msg.StopReason,
+	text := strings.TrimSpace(t.turn.pendingText)
+	if text == "" && !t.turn.textDelivered {
+		text = strings.TrimSpace(t.turn.lastMessageText)
 	}
-	// Attach usage from the same wire event (message_end carries
-	// both Content and Usage on the assistant role). Empty usage
-	// blocks are common (synthetic messages) and leaving
-	// result.Usage as nil is the documented "no usage reported"
-	// signal — runtime simply skips AccumulateUsage that invocation.
-	if msg.Usage != nil && (msg.Usage.Total > 0 || (msg.Usage.Cost != nil && msg.Usage.Cost.Total > 0)) {
-		usage := agent.UsageEvent{
-			InputTokens:          msg.Usage.Input,
-			OutputTokens:         msg.Usage.Output,
-			CacheReadInputTokens: msg.Usage.CacheRead,
-		}
+	if text == "" {
+		text = emptyReplyFallback
+	}
+	t.turn.pendingText = ""
+
+	return []agent.AgentEvent{{
+		Kind: agent.EventResult,
+		Result: &agent.ResultEvent{
+			Text:    text,
+			IsError: t.turn.stopReason == "error",
+			Subtype: t.turn.stopReason,
+			Usage:   t.turn.lastUsage,
+		},
+	}}
+}
+
+// decodeMessageUsage converts Pi's per-message usage block into the
+// bridge-neutral agent.UsageEvent. Returns nil when the block is
+// absent or reports nothing — the documented "no usage this message"
+// signal, which keeps the previous snapshot in place.
+//
+// Each breakdown field (input / output / cacheRead / cacheWrite) is
+// checked independently. Pi's `totalTokens` is reported separately
+// from the breakdown on the wire, so it can legitimately be 0 while
+// the per-field totals are non-zero (synthetic messages, early
+// releases, schema variants). Gating on `Total` alone would silently
+// drop those turns' usage — breaking the F-52 promise that "usage
+// 100% flows through". Mirrors the symmetric check in
+// internal/bridge/claudecode/stream.go:decodeUsage.
+func decodeMessageUsage(u *messageUsage) *agent.UsageEvent {
+	if u == nil {
+		return nil
+	}
+	costZero := u.Cost == nil || u.Cost.Total == 0
+	if u.Input == 0 && u.Output == 0 && u.CacheRead == 0 && u.CacheWrite == 0 && costZero {
+		return nil
+	}
+	out := &agent.UsageEvent{
+		InputTokens:          u.Input,
+		OutputTokens:         u.Output,
+		CacheReadInputTokens: u.CacheRead,
 		// Pi does not separate cache_creation from cache_write in
 		// its user-facing usage block. Map cacheWrite to
 		// CacheCreationInputTokens for parity with claudecode.
-		usage.CacheCreationInputTokens = msg.Usage.CacheWrite
-		if msg.Usage.Cost != nil {
-			usage.CostUSD = msg.Usage.Cost.Total
-		}
-		result.Usage = &usage
+		CacheCreationInputTokens: u.CacheWrite,
 	}
-
-	out = append(out, agent.AgentEvent{
-		Kind:   agent.EventResult,
-		Result: result,
-	})
-
+	if u.Cost != nil {
+		out.CostUSD = u.Cost.Total
+	}
 	return out
 }
 

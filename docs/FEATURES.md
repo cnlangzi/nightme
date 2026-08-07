@@ -44,6 +44,7 @@
 | F-49 | **Compaction Counter + Footer 语义拆分** — footer 暴露压缩次数；token 行为 since-last-compaction，`$cost` 仍为 lifetime；删「正在压缩…」瞬时出站通路；bridge 归一化协议差异 | [feat/F-49-compaction-counter.md](./feat/F-49-compaction-counter.md) | v1.3.x | 📝 设计阶段（doc-first）|
 | F-50 | **GitProvider 抽象 + 两阶段 Provider 探测** — 抽象层重命名 `Platform*` → `Provider*`；`Detect` 两阶段：URL hint（`github.com` / `gitlab` 子串零网络直返）+ API probe fallback（GitLab `/api/v4/version` / GitHub Enterprise `/api/v3/meta`）；新增 `HTTPProber` 接口对齐 `CLIRunner` 模式；自建 GitHub Enterprise / GitLab 现在能被识别。是 `F-45 §3.5` / `gtw §5.x` / `F-45 §7.2` 悬空引用的归宿 | [feat/F-50-git-provider.md](./feat/F-50-git-provider.md) | v1.3.x | 📝 设计阶段（doc-first）|
 | F-51 | **Slash Command 分层** — `/cwd` `/use` `/kill` `/new` `/watch` `/think` `/tools` `/gtw` 统一由 `internal/command/` 的 Commander / Registry / Factory 路由；需要 chat-session 状态的 Factory 直接使用 `*chatsession.Manager`，reaction 由 `ReactionRouter` 统一分发 | [SPEC](./SPEC.md) | v1.3.x | ✅ 已实现 |
+| F-52 | **Pi Bridge 流式事件整合** — pi 以 token 粒度推 `text_delta`，改动前逐 token emit `EventText`，一句话在飞书裂成 ~20 条 💬 + ~20 次卡片 PATCH；translator 改为缓冲 delta，在 `tool_execution_start` flush 中途叙述、在 `agent_settled` 发**一轮唯一**的 `EventResult`；顺带修复两处静默故障：pi 从来不产生 OutResult（`sawTextEnd` 抑制 → gateway 丢空文本 result）、以及连带丢失的 usage/cost。usage 改为取最后一条快照而非累加（上下文占用语义）。共享层 `AccumulateUsage` 累加→覆盖 + footer 分母留待下个 PR | [feat/F-52-pi-stream-aggregation.md](./feat/F-52-pi-stream-aggregation.md) | v1.3.x | ✅ 已实现 |
 
 **v1.2 关键变化**：
 - 删除：`/run` 命令（被 `/use` 替代）

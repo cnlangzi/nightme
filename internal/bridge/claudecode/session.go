@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,14 @@ type session struct {
 	stdinMu sync.Mutex // guards Write on the underlying pipe
 	events  chan agent.AgentEvent
 	pid     int
+
+	// T-alive (2026-08-07): stderr lines captured line-by-line
+	// by drainStderr and pushed to this buffered channel so the
+	// resume-fallback probe can listen for --resume rejections
+	// and MCP server failures without parsing the bridge's
+	// stderr-drain log lines. Buffered so a slow probe can't
+	// wedge drainStderr. Closed by drainStderr when EOF arrives.
+	stderrLines chan string
 
 	// pumpWG tracks the pumpStream goroutine lifecycle so Close
 	// can wait for it to finish before allowing the events channel
@@ -118,14 +127,15 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 	}
 
 	s := &session{
-		cmd:       cmd,
-		stdin:     bufio.NewWriter(stdin),
-		events:    make(chan agent.AgentEvent, 64),
-		pid:       cmd.Process.Pid,
-		agentName: agentName,
-		workspace: workspace,
-		branch:    branch,
-		closed:    make(chan struct{}),
+		cmd:         cmd,
+		stdin:       bufio.NewWriter(stdin),
+		events:      make(chan agent.AgentEvent, 64),
+		stderrLines: make(chan string, 64),
+		pid:         cmd.Process.Pid,
+		agentName:   agentName,
+		workspace:   workspace,
+		branch:      branch,
+		closed:      make(chan struct{}),
 	}
 
 	// Register pendingAsk bridge for AskUserQuestion: the default
@@ -198,11 +208,13 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 		pumpStream(stdout, s.events, handler, s.agentName, s.workspace, s.branch, logger)
 	}()
 
-	// stderr drainer — Claude Code logs to stderr; we discard
-	// rather than surface (the channel layer can subscribe via
-	// a future "verbose" toggle).
+	// stderr drainer — Claude Code logs to stderr; we both log
+	// (debug) and forward each line to s.stderrLines so the
+	// --resume fallback probe can react to deterministic stderr
+	// signals ("No conversation found..." / MCP failures) without
+	// machine-dependent timeouts.
 	go func() {
-		_ = drainStderr(stderr, logger)
+		_ = drainStderr(stderr, logger, s.stderrLines)
 	}()
 
 	// NOTE: an earlier revision of this code spawned a watchdog
@@ -220,6 +232,14 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 
 // Events returns the live event stream. Closed by Close().
 func (s *session) Events() <-chan agent.AgentEvent { return s.events }
+
+// StderrLines (T-alive 2026-08-07) exposes the per-line stderr
+// stream captured by drainStderr. The --resume fallback probe
+// reads from this channel to detect deterministic stderr signals
+// (--resume rejection / MCP server failure) without relying on
+// timeout. Returns nil if drainStderr hasn't been wired (should
+// not happen for sessions produced by newSession).
+func (s *session) StderrLines() <-chan string { return s.stderrLines }
 
 // PID returns the OS process id of the child.
 func (s *session) PID() int { return s.pid }
@@ -552,27 +572,80 @@ func (s *session) writeLine(data []byte) error {
 	return nil
 }
 
-// drainStderr reads stderr until EOF, logging non-empty lines at
-// debug level. Used by the bridge to keep stderr from blocking.
+// drainStderr reads stderr line-by-line until EOF. Each non-empty
+// line is forwarded to lines (best-effort: a slow consumer is
+// dropped, never blocked) AND logged. Lines matching the
+// --resume / MCP failure patterns get elevated to Warn so they
+// show up in default-level daemon logs (helps T-alive debugging
+// of "claude hung after init"); the rest stay at Debug to keep
+// the log readable. The lines channel is closed when EOF arrives.
+// Used by the bridge to keep stderr from blocking and to surface
+// stderr content to the resume fallback probe.
+//
+// T-alive: see tasks/wip.md / T-alive (2026-08-07).
 func drainStderr(r interface {
 	Read(p []byte) (int, error)
-}, logger *slog.Logger) error {
-	if logger == nil {
+}, logger *slog.Logger, lines chan<- string) error {
+	defer func() {
+		if lines != nil {
+			close(lines)
+		}
+	}()
+	if r == nil {
 		return nil
 	}
-	buf := make([]byte, 4096)
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			line := trimTrailingNewline(string(buf[:n]))
-			if line != "" {
-				logger.Debug("claudecode stderr", "line", line)
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 4096), 64*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		if logger != nil {
+			level := slog.LevelDebug
+			if isLoudStderr(line) {
+				level = slog.LevelWarn
+			}
+			logger.Log(context.Background(), level, "claudecode stderr", "line", line)
+		}
+		if lines != nil {
+			select {
+			case lines <- line:
+			default:
+				// Probe consumer is slow; drop. We log
+				// anyway and the dropped line still
+				// surfaces via the elevated logger level.
 			}
 		}
-		if err != nil {
-			return nil
-		}
 	}
+	return nil
+}
+
+// isLoudStderr returns true when a stderr line carries a
+// resume-rejection or MCP-failure signal that operators need to
+// see at default log level. Mirrors classifyStderrLineForResume
+// in claudecode.go — kept duplicated rather than exported
+// because the two files live in the same package's bridge
+// surface (drainStderr is internal to claudecode).
+func isLoudStderr(line string) bool {
+	l := strings.ToLower(line)
+	if l == "" {
+		return false
+	}
+	if strings.Contains(l, "session") && (strings.Contains(l, "not found") ||
+		strings.Contains(l, "no conversation found") ||
+		strings.Contains(l, "resume requires")) {
+		return true
+	}
+	if (strings.Contains(l, "mcp") || strings.Contains(l, "tool")) &&
+		(strings.Contains(l, "failed") ||
+			strings.Contains(l, "timeout") ||
+			strings.Contains(l, "refused") ||
+			strings.Contains(l, "unreachable") ||
+			strings.Contains(l, "error")) {
+		return true
+	}
+	return false
 }
 
 func trimTrailingNewline(s string) string {

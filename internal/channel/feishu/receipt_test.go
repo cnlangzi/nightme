@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
 // mockReceiptBot captures SendCard / PatchMessage calls so the
@@ -81,20 +82,20 @@ func (m *mockReceiptBot) PatchMessage(_ context.Context, messageID, body string)
 }
 
 // TestSetTaskList_ReceiptBornRunning (F-53 rename) verifies that
-// a fresh receipt starts in PromptRunning (was PromptPending in
+// a fresh receipt starts in chatsession.PromptRunning (was PromptPending in
 // v1.3 — F-53 deletes the Pending value entirely). SetTaskList
 // no longer promotes any state — receipts are born running and
-// stay running for their lifetime (PromptDone is reserved but
+// stay running for their lifetime (chatsession.PromptDone is reserved but
 // never assigned in Phase 0).
 //
-// See docs/feat/message_lifecycle.md §7 (PromptState shrink to
+// See docs/feat/message_lifecycle.md §7 (chatsession.PromptState shrink to
 // Running/Done).
 func TestSetTaskList_ReceiptBornRunning(t *testing.T) {
 	bot := &mockReceiptBot{}
 	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card", bot)
 
-	if got := r.PromptState(); got != PromptRunning {
-		t.Fatalf("initial promptState = %v, want PromptRunning", got)
+	if got := r.PromptState(); got != chatsession.PromptRunning {
+		t.Fatalf("initial promptState = %v, want chatsession.PromptRunning", got)
 	}
 
 	list := &agent.TaskListEvent{
@@ -107,11 +108,11 @@ func TestSetTaskList_ReceiptBornRunning(t *testing.T) {
 		t.Fatalf("SetTaskList: %v", err)
 	}
 	// F-53: SetTaskList is a no-op on promptState — receipt was
-	// already PromptRunning at construction. After SetTaskList
-	// it should still be PromptRunning (not promoted to anything
+	// already chatsession.PromptRunning at construction. After SetTaskList
+	// it should still be chatsession.PromptRunning (not promoted to anything
 	// new).
-	if got := r.PromptState(); got != PromptRunning {
-		t.Errorf("after SetTaskList: promptState = %v, want PromptRunning", got)
+	if got := r.PromptState(); got != chatsession.PromptRunning {
+		t.Errorf("after SetTaskList: promptState = %v, want chatsession.PromptRunning", got)
 	}
 }
 

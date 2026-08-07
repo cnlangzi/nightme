@@ -26,6 +26,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
@@ -713,7 +714,7 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 }
 
 // MarkReceiptPromptDone (F-53 follow-up) transitions the receipt
-// bound to `userMsgID` to PromptDone (✅ reaction on the card).
+// bound to `userMsgID` to chatsession.PromptDone (✅ reaction on the card).
 // Called by the runtime when `ChatSession.endPrompt` fires (i.e.
 // the readpump saw EventDone or EventError).
 //
@@ -726,7 +727,7 @@ func (a *Adapter) MarkReceiptPromptDone(ctx context.Context, chatID, userMsgID s
 	if r == nil {
 		return
 	}
-	r.SetPromptState(ctx, PromptDone)
+	r.SetPromptState(ctx, chatsession.PromptDone)
 }
 
 // ensureReceiptForTyping lazily creates a Typing-placeholder
@@ -782,7 +783,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	// arrives. The first OutReply later overwrites footerLines
 	// via AppendEntryWithFooter once cumulative usage is available.
 	transient.footerLines = footerLines
-	transient.promptState = PromptRunning
+	transient.promptState = chatsession.PromptRunning
 	transient.initializing = true
 
 	a.mu.Lock()
@@ -894,7 +895,7 @@ func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, u
 		{Icon: "💬", Text: firstEntryText},
 	}
 	transient.footerLines = footerLines
-	transient.promptState = PromptRunning
+	transient.promptState = chatsession.PromptRunning
 	transient.initializing = true
 
 	// Register-before-SendCard (see ensureReceiptForTask for the
@@ -1100,7 +1101,7 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	copy(copied, items)
 	transient.tasks = copied
 	transient.footerLines = footerLines // F-45: footer captured at cold-start
-	transient.promptState = PromptRunning
+	transient.promptState = chatsession.PromptRunning
 	transient.initializing = true
 
 	// Register-before-SendCard (see ensureReceiptForReply for the
@@ -1518,7 +1519,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// OutReply case above for the parent-thread rationale that
 		// drove this off ReplyInBoth. We deliberately do NOT call
 		// receipt.SetCompleted here — the receipt stays
-		// PromptRunning so subsequent OutUsage / OutInit / TaskList
+		// chatsession.PromptRunning so subsequent OutUsage / OutInit / TaskList
 		// can still update the footer (token counts, agent name,
 		// task checklist). EventDone / EventError is the terminal
 		// signal that flips state to PromptSucceeded and collapses
@@ -2497,18 +2498,18 @@ func mapStateToFeishuEmoji(state agent.MessageState) string {
 // message surface).
 //
 //	F-53 Phase 0 (revised):
-//	  PromptRunning → OnIt       (🔄)
-//	  PromptDone    → DONE       (✅)
+//	  chatsession.PromptRunning → OnIt       (🔄)
+//	  chatsession.PromptDone    → DONE       (✅)
 //
 // The 🔄 is added the first time the receipt renders (via
-// `MessageReceipt.SetPromptState(PromptRunning)`); the ✅ is
+// `MessageReceipt.SetPromptState(chatsession.PromptRunning)`); the ✅ is
 // added when `ChatSession.endPrompt` fires
-// (`SetPromptState(PromptDone)` from the adapter).
-func mapPromptStateToFeishuEmoji(state PromptState) string {
+// (`SetPromptState(chatsession.PromptDone)` from the adapter).
+func mapPromptStateToFeishuEmoji(state chatsession.PromptState) string {
 	switch state {
-	case PromptRunning:
+	case chatsession.PromptRunning:
 		return "OnIt" // 🔄
-	case PromptDone:
+	case chatsession.PromptDone:
 		return "DONE" // ✅
 	}
 	return ""

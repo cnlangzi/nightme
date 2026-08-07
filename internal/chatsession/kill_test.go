@@ -3,7 +3,7 @@
 // Critical invariants locked here:
 //   - Running entries are closed via bridge.Close (graceful path).
 //   - Dead/exited entries are NOT signaled — they get "stale-cleared".
-//   - InputBuffer is preserved across /kill (user messages survive).
+//   - The message queue is preserved across /kill (user messages survive).
 //   - agent_sessions.json entries are deleted AFTER the process dies.
 //   - cs.activeAS is cleared.
 //   - The returned []KillResult reflects each entry's before-state +
@@ -54,14 +54,10 @@ func TestKillAll_GracefulShutdown(t *testing.T) {
 	cs.activeAS = a1
 	cs.mu.Unlock()
 
-	// Start the read pump so we can also verify KillAll stops it
-	// before draining the dying bridge's events (F-42 review fix #1).
-	if err := cs.StartReadPump(); err != nil {
-		t.Fatalf("StartReadPump: %v", err)
-	}
-	if !cs.HasPump() {
-		t.Fatalf("pump should be running pre-KillAll")
-	}
+	// CS-AS 边界重构 Phase 1: there is no per-CS read pump to start
+	// or assert on. Each AgentSession owns its readpump (started by
+	// Spawn, torn down by Shutdown — covered by
+	// TestAgentSession_Shutdown_ClosesReadPump).
 
 	results, err := cs.KillAll()
 	if err != nil {
@@ -88,17 +84,16 @@ func TestKillAll_GracefulShutdown(t *testing.T) {
 		}
 	}
 
-	// Pump must be stopped by KillAll (F-42 review fix #1: prevents
-	// dying bridge's final events from draining into the channel
-	// after /kill has been confirmed).
-	if cs.HasPump() {
-		t.Errorf("pump should be stopped after KillAll")
-	}
+	// CS-AS 边界重构 Phase 1: the equivalent of "pump stopped" is
+	// that KillAll shut every AgentSession down, which closes each
+	// AS's eventQueue and ends its readpump. cs.activeAS being
+	// cleared is the observable proxy asserted by
+	// TestKillAll_ActiveASCleared.
 }
 
-// TestKillAll_InputBufferPreserved verifies that queued user messages
+// TestKillAll_QueuePreserved verifies that queued user messages
 // survive /kill (user messages are not /kill's concern).
-func TestKillAll_InputBufferPreserved(t *testing.T) {
+func TestKillAll_QueuePreserved(t *testing.T) {
 	cs := New("chat-buf", "cc")
 	cwd := t.TempDir()
 	if err := cs.SetActiveCwd(cwd); err != nil {
@@ -108,21 +103,22 @@ func TestKillAll_InputBufferPreserved(t *testing.T) {
 
 	injectAS(t, cs, "cc", cwd, &closedSpy{fakeAgentSession: newFakeAgentSession(1)})
 
-	cs.ensureBuffer()
-	cs.inputBuffer.SetState(StateBusy)
-	if err := cs.inputBuffer.Add(makeTestMessage(cs, []agent.ContentBlock{{Type: agent.ContentText, Text: "msg"}}, "u1")); err != nil {
-		t.Fatalf("Add: %v", err)
+	// Queue a message with no activeAS installed, so the TryFlush
+	// inside QueueUserMessage is a no-op and the message stays put.
+	if err := cs.QueueUserMessage(makeTestMessage(cs,
+		[]agent.ContentBlock{{Type: agent.ContentText, Text: "msg"}}, "u1")); err != nil {
+		t.Fatalf("QueueUserMessage: %v", err)
 	}
-	if got := cs.inputBuffer.Pending(); got == 0 {
-		t.Fatalf("buffer should have a queued message pre-KillAll")
+	if got := cs.QueueLen(); got == 0 {
+		t.Fatalf("queue should have a message pre-KillAll")
 	}
 
 	if _, err := cs.KillAll(); err != nil {
 		t.Fatalf("KillAll: %v", err)
 	}
 
-	if got := cs.inputBuffer.Pending(); got != 1 {
-		t.Errorf("InputBuffer should be preserved across /kill: want 1, got %d", got)
+	if got := cs.QueueLen(); got != 1 {
+		t.Errorf("queue should be preserved across /kill: want 1, got %d", got)
 	}
 }
 
@@ -184,7 +180,9 @@ func TestKillAll_ActiveASCleared(t *testing.T) {
 	// F-53: pre-populate AgentSession.currentPrompt to verify
 	// KillAll clears it (the new anchor location — was
 	// ChatSession.currentTurnUserMsgID in v1.3).
-	a.SetCurrentPrompt(&Prompt{ID: "test-p1", MessageIDs: []string{"u-1"}, LastMessageID: "u-1"})
+	a.asMu.Lock()
+	a.currentPrompt = &Prompt{ID: "test-p1", MessageIDs: []string{"u-1"}, LastMessageID: "u-1"}
+	a.asMu.Unlock()
 	cs.mu.Unlock()
 
 	if _, err := cs.KillAll(); err != nil {

@@ -28,7 +28,6 @@ package chatsession
 import (
 	"context"
 	"errors"
-	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -82,9 +81,7 @@ func (c *fakeOutboundChannel) Send(ctx context.Context, msg any) error {
 //
 // Skipped if `pi` is not on PATH.
 func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
-	if _, err := exec.LookPath("pi"); err != nil {
-		t.Skipf("pi binary not on PATH; skipping real-pi runtime e2e: %v", err)
-	}
+	requireRealPi(t)
 
 	dir := t.TempDir()
 	csFile, err := registry.OpenChatSessionFile(dir + "/chat_sessions.json")
@@ -154,9 +151,15 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 		}
 	})
 
-	if err := cs.StartReadPump(); err != nil {
-		t.Fatalf("StartReadPump: %v", err)
-	}
+	// CS-AS 边界重构 Phase 1: the readpump is per-AgentSession and
+	// starts automatically once Spawn wires the handle (see
+	// AgentSession.startReadPump). The CS side consumes that
+	// enriched stream via PumpEvents — this is what dispatches
+	// KindAgentEvent into the EventHandler installed above, so it
+	// is the production path this test is asserting on.
+	pumpCtx, pumpCancel := context.WithCancel(context.Background())
+	defer pumpCancel()
+	go cs.PumpEvents(pumpCtx)
 
 	defer func() {
 		_, _ = cs.KillAll()

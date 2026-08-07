@@ -84,9 +84,15 @@ func TestReadPump_ContinuesAfterEventDone(t *testing.T) {
 	if _, err := cs.LookupActiveAgentSession(); err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
-	if err := cs.StartReadPump(); err != nil {
-		t.Fatalf("start read pump: %v", err)
-	}
+	// CS-AS 边界重构 Phase 1: the readpump is per-AgentSession and
+	// starts automatically once the handle is wired (see
+	// AgentSession.startReadPump). The CS side consumes the
+	// enriched stream via PumpEvents — that is what routes
+	// KindLifecycle{StatusExited} into AS.SetExited, which this
+	// test asserts on.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go cs.PumpEvents(ctx)
 
 	// First turn: a few events + EventDone.
 	fake.push(agent.AgentEvent{Kind: agent.EventText, Text: "hello"})

@@ -88,8 +88,8 @@ type Prompt struct {
 
 	// LastProgressAt is the most recent observed-progress time
 	// (touched by `runReadPump` on every AgentEvent). Reserved for
-	// future stall-detection work (see tasks/wip.md L2). Phase 0
-	// maintains the field but does not act on it.
+	// future stall-detection work (L2 in the original WIP design).
+	// Phase 0 maintains the field but does not act on it.
 	LastProgressAt time.Time
 
 	// EndedAt is when `endPrompt` was called. Zero value while
@@ -104,8 +104,7 @@ type Prompt struct {
 
 // PromptEndReason is the WHY of a Prompt ending. Independent of the
 // execution state (`Prompt` itself has no State field — Phase 0
-// derives "still running" from `EndedAt.IsZero()`, see tasks/plan.md
-// §5 open question 1).
+// derives "still running" from `EndedAt.IsZero()`).
 type PromptEndReason int
 
 const (
@@ -120,12 +119,12 @@ const (
 	// EventDone/EventError. PHASE 0 DOES NOT TRIGGER THIS — the
 	// readPump's `!ok` branch currently returns without calling
 	// endPrompt. Reserved for the "Prompt 投递稳定性优化" PR
-	// (see tasks/wip.md L3 + docs/feat/message_lifecycle.md §8).
+	// (see docs/feat/message_lifecycle.md §8).
 	PromptEndProcessDied
 
 	// PromptEndStalledKilled: endPrompt called by the stall
-	// watchdog (L2 in tasks/wip.md). Phase 0 does not implement
-	// stall detection; reserved.
+	// watchdog (L2). Phase 0 does not implement stall detection;
+	// reserved.
 	PromptEndStalledKilled
 
 	// PromptEndUserKilled: endPrompt called by `/kill` slash

@@ -42,6 +42,11 @@ go.work.sum
 registry.json
 sessions.json
 data/
+
+# Local task notes (developer-only — never tracked)
+# Used for in-flight design notes, handoff docs, post-mortems.
+# Lives on each dev's machine; not part of the project source.
+tasks/
 # Claude local config
 .claude/
 .codegraph/

@@ -103,13 +103,12 @@ func TestMarkDropped_FlipsStageAndEmits(t *testing.T) {
 	cs.SetMessageStateHandler(cap.handler)
 
 	msg := makeTestMessage(cs, []agent.ContentBlock{{Text: "hi"}}, "om_x")
-	// F-53 P1 fix: QueueUserMessage now removes the message from
-	// messagesByID on Add failure (so it doesn't leak as a ghost
-	// in the buffer-full path). For MarkDropped tests we want
-	// the message to STAY in the map; the simplest way is to
-	// set Busy before QueueUserMessage so Add appends to the
-	// queue without invoking the hook.
-	cs.SetBusy()
+	// QueueUserMessage removes the message from messagesByID when
+	// the queue is full, so it doesn't leak as a ghost. For
+	// MarkDropped we want the message to STAY in the map and in
+	// the queue. This cs has no activeAS, so the TryFlush that
+	// QueueUserMessage triggers is a no-op (TryFlush SKIP
+	// reason=activeAS_nil) and the message stays queued.
 	cs.QueueUserMessage(msg)
 
 	cs.MarkDropped("om_x")
@@ -153,49 +152,31 @@ func TestMarkDropped_UnknownMessageIsNoop(t *testing.T) {
 	}
 }
 
-// TestDefaultPromptHook_InstallsPromptOnAS verifies that
-// defaultPromptHookLocked (F-53's renamed default hook) actually
-// submits to the active AS and installs the resulting Prompt on
-// `AgentSession.currentPrompt`.
+// TestSubmit_InstallsPromptOnAS verifies that the submit path
+// installs the resulting Prompt on `AgentSession.currentPrompt`
+// and flips the queued Message to MessageSubmitted.
 //
-// F-53: replaces the old `TestDefaultFlushHook_TracksUserMsgIDs`,
-// which asserted on the (now-removed) `currentTurnUserMsgID`
-// scalar. The new anchor lives on `AgentSession.currentPrompt.
-// LastMessageID`.
-func TestDefaultPromptHook_InstallsPromptOnAS(t *testing.T) {
+// CS-AS 边界重构 Phase 1 port: this used to drive
+// `cs.defaultPromptHookLocked()` directly. That hook is gone —
+// `cs.TryFlush()` now builds the Prompt from the queue
+// (buildPromptLocked) and hands it to `as.Submit`, which assigns
+// the IDs/timestamps and installs currentPrompt. QueueUserMessage
+// calls TryFlush for us, so queueing IS the submit path.
+func TestSubmit_InstallsPromptOnAS(t *testing.T) {
 	cs := New("oc_chat", "claude")
 	cs.WithSpawner(&spySpawner{})
 
+	as := newActiveAgentNoop()
 	cs.mu.Lock()
-	hook := cs.defaultPromptHookLocked()
-	cs.activeAS = newActiveAgentNoop()
+	cs.activeAS = as
 	cs.mu.Unlock()
 
 	msg := makeTestMessage(cs, []agent.ContentBlock{{Text: "hi"}}, "om_x")
-	// Pre-register the message in cs.messagesByID so the hook's
-	// Stage-flip / PromptID-stamp have a target. In production
-	// this happens inside QueueUserMessage before the hook is
-	// ever invoked; here we bypass QueueUserMessage (which would
-	// call the hook itself) and call the hook directly.
-	cs.messagesByID.Store(msg.ID, msg)
-	p := &Prompt{
-		MessageIDs:    []string{"om_x"},
-		LastMessageID: "om_x",
-		Blocks:        msg.Blocks,
-		ChatSessionID: cs.ChatID,
-	}
-	if err := hook(p); err != nil {
-		t.Fatalf("hook: %v", err)
+	if err := cs.QueueUserMessage(msg); err != nil {
+		t.Fatalf("QueueUserMessage: %v", err)
 	}
 
-	cs.mu.RLock()
-	as := cs.activeAS
-	var installed *Prompt
-	if as != nil {
-		installed = as.CurrentPrompt()
-	}
-	cs.mu.RUnlock()
-
+	installed := as.CurrentPrompt()
 	if installed == nil {
 		t.Fatalf("AgentSession.currentPrompt is nil; want installed")
 	}
@@ -205,20 +186,29 @@ func TestDefaultPromptHook_InstallsPromptOnAS(t *testing.T) {
 	if installed.AgentSessionID != as.ID {
 		t.Errorf("Prompt.AgentSessionID = %q; want %q", installed.AgentSessionID, as.ID)
 	}
+	if installed.ID == "" {
+		t.Errorf("Prompt.ID is empty; want assigned by Submit")
+	}
 	if installed.AckedAt.IsZero() {
 		t.Errorf("Prompt.AckedAt is zero; want set after SendBlocks success")
 	}
-	// LastProgressAt touched by hook (not the readpump in this
-	// test path — the hook sets it to time.Now() on success).
 	if installed.LastProgressAt.IsZero() {
 		t.Errorf("Prompt.LastProgressAt is zero; want set on submit")
 	}
-	if msg := cs.GetMessage("om_x"); msg == nil {
+
+	// A submitted Prompt means the AS is mid-turn.
+	if as.IsReady() {
+		t.Errorf("AS is ready after Submit; want not-ready until the Prompt ends")
+	}
+
+	// The queue is drained and the message flipped to Submitted.
+	if got := cs.QueueLen(); got != 0 {
+		t.Errorf("QueueLen = %d after submit; want 0", got)
+	}
+	if m := cs.GetMessage("om_x"); m == nil {
 		t.Errorf("GetMessage(om_x) = nil after submit; want non-nil")
-	} else if msg.Stage != agent.MessageSubmitted {
-		t.Errorf("msg.Stage = %v; want MessageSubmitted", msg.Stage)
-	} else if msg.PromptID != installed.ID {
-		t.Errorf("msg.PromptID = %q; want %q", msg.PromptID, installed.ID)
+	} else if m.Stage != agent.MessageSubmitted {
+		t.Errorf("msg.Stage = %v; want MessageSubmitted", m.Stage)
 	}
 }
 
@@ -231,72 +221,63 @@ func (s *spySpawner) Spawn(_ context.Context, _ string, _ string, _ []string, _ 
 }
 
 // newActiveAgentNoop creates a minimal AgentSession whose
-// SendBlocks is a no-op, so PromptHook tests can run without
+// SendBlocks is a no-op, so submit-path tests can run without
 // spawning a real CLI.
 func newActiveAgentNoop() *AgentSession {
 	as := NewAgentSession("test-as", "test-cs", "claude", "/tmp", nil)
 	// Inject a fake handle so SendBlocks succeeds. We use the
-	// recordingAgentSession pattern from flushhook_test.go.
-	rec := &recordingAgentSession{pid: 1, events: make(chan agent.AgentEvent, 16)}
+	// recordingAgentSession pattern from test_helpers_recording_test.go.
+	rec := newRecordingAgentSession(1)
 	as.handle = rec
 	return as
 }
 
-// Use the existing recordingAgentSession type from flushhook_test.go
-// to satisfy AgentSession.Handle(). This avoids an import cycle
-// (test types live in the same package).
-var _ = (*recordingAgentSession)(nil)
-
-// TestDefaultPromptHook_FailedSendBlocksKeepsMessageQueued verifies
-// the F-53 retry semantics (docs/feat/message_lifecycle.md §3
-// 原则 5): when SendBlocks returns an error, the message stays
-// in MessageQueued so the next flushPending() retries it.
+// TestSubmit_FailedSendBlocksKeepsMessageQueued verifies the F-53
+// retry semantics (docs/feat/message_lifecycle.md §3 原则 5): when
+// SendBlocks returns an error, the message stays in MessageQueued
+// so the next TryFlush retries it.
 //
 // Critical assertion: NO MessageSubmitted is wire-emitted on a
 // failed SendBlocks. If it were, the channel would lie to the user
 // ("your message was delivered" when it wasn't).
-func TestDefaultPromptHook_FailedSendBlocksKeepsMessageQueued(t *testing.T) {
+func TestSubmit_FailedSendBlocksKeepsMessageQueued(t *testing.T) {
 	cs := New("oc_chat", "claude")
 	cs.WithSpawner(&spySpawner{})
 
 	cap := &captureHandler{}
 	cs.SetMessageStateHandler(cap.handler)
 
-	cs.mu.Lock()
-	hook := cs.defaultPromptHookLocked()
-	failing := newFailingAgentSession()
 	failingAS := NewAgentSession("test-as-fail", "test-cs", "claude", "/tmp", nil)
-	failingAS.handle = failing
+	failingAS.handle = newFailingAgentSession()
+	cs.mu.Lock()
 	cs.activeAS = failingAS
 	cs.mu.Unlock()
 
 	msg := makeTestMessage(cs, []agent.ContentBlock{{Text: "x"}}, "om_x")
-	cs.messagesByID.Store(msg.ID, msg)
-	p := &Prompt{
-		MessageIDs:    []string{"om_x"},
-		LastMessageID: "om_x",
-		Blocks:        msg.Blocks,
-		ChatSessionID: cs.ChatID,
+	// QueueUserMessage swallows the TryFlush error (`_ =
+	// cs.TryFlush()`) — the queue is intentionally left intact for
+	// the retry. Call TryFlush explicitly so we can assert on the
+	// error the submit path returned.
+	if err := cs.QueueUserMessage(msg); err != nil {
+		t.Fatalf("QueueUserMessage: %v", err)
 	}
-
-	if err := hook(p); err == nil {
-		t.Fatalf("hook returned nil; want error from SendBlocks")
+	if err := cs.TryFlush(); err == nil {
+		t.Fatalf("TryFlush returned nil; want error from SendBlocks")
 	}
 
 	// Message must still be Queued — failed SendBlocks does NOT
-	// flip Stage, and does NOT create a Prompt on the AS.
+	// flip Stage, and does NOT install a Prompt on the AS.
 	if msg.Stage != agent.MessageQueued {
 		t.Errorf("after failed SendBlocks, msg.Stage = %v; want MessageQueued", msg.Stage)
 	}
-	if msg.PromptID != "" {
-		t.Errorf("after failed SendBlocks, msg.PromptID = %q; want empty", msg.PromptID)
+	if got := cs.QueueLen(); got != 1 {
+		t.Errorf("QueueLen = %d after failed SendBlocks; want 1 (retained for retry)", got)
 	}
-
-	cs.mu.RLock()
-	installed := cs.activeAS.CurrentPrompt()
-	cs.mu.RUnlock()
-	if installed != nil {
-		t.Errorf("after failed SendBlocks, AgentSession.currentPrompt = %+v; want nil", installed)
+	if installed := failingAS.CurrentPrompt(); installed != nil {
+		t.Errorf("after failed SendBlocks, currentPrompt = %+v; want nil", installed)
+	}
+	if !failingAS.IsReady() {
+		t.Errorf("AS is not-ready after a FAILED Submit; a failed submit must not consume readiness")
 	}
 
 	// NO MessageSubmitted emit on the wire (the channel must not
@@ -308,60 +289,57 @@ func TestDefaultPromptHook_FailedSendBlocksKeepsMessageQueued(t *testing.T) {
 	}
 }
 
-// TestDefaultPromptHook_NextFlushRetriesFailedMessage verifies the
-// retry path: a SendBlocks-failed message left Queued gets re-tried
-// by the next flushPending() call. The retry path itself uses the
-// SAME hook — no special "retry" code path exists.
-func TestDefaultPromptHook_NextFlushRetriesFailedMessage(t *testing.T) {
+// TestSubmit_NextFlushRetriesFailedMessage verifies the retry path:
+// a SendBlocks-failed message left Queued gets re-tried by the next
+// TryFlush. The retry uses the SAME path — no special "retry" code
+// path exists.
+func TestSubmit_NextFlushRetriesFailedMessage(t *testing.T) {
 	cs := New("oc_chat", "claude")
 	cs.WithSpawner(&spySpawner{})
 
-	cs.mu.Lock()
-	hook := cs.defaultPromptHookLocked()
-	failing := newFailingAgentSession()
 	failingAS := NewAgentSession("test-as-fail", "test-cs", "claude", "/tmp", nil)
-	failingAS.handle = failing
+	failingAS.handle = newFailingAgentSession()
+	cs.mu.Lock()
 	cs.activeAS = failingAS
 	cs.mu.Unlock()
 
 	msg := makeTestMessage(cs, []agent.ContentBlock{{Text: "x"}}, "om_x")
-	cs.messagesByID.Store(msg.ID, msg)
-	p := &Prompt{
-		MessageIDs:    []string{"om_x"},
-		LastMessageID: "om_x",
-		Blocks:        msg.Blocks,
-		ChatSessionID: cs.ChatID,
+	if err := cs.QueueUserMessage(msg); err != nil {
+		t.Fatalf("QueueUserMessage: %v", err)
 	}
 
-	// First call: fails.
-	if err := hook(p); err == nil {
-		t.Fatalf("first hook should fail")
+	// First flush: fails, message stays queued.
+	if err := cs.TryFlush(); err == nil {
+		t.Fatalf("first TryFlush should fail")
 	}
 	if msg.Stage != agent.MessageQueued {
 		t.Fatalf("after first failure, msg.Stage = %v; want Queued", msg.Stage)
 	}
 
-	// Switch AS to a working one (simulating the user /use'ing
-	// back to a healthy agent, OR just retry semantics with the
-	// same AS — both work because the hook re-reads cs.activeAS
-	// on every call).
-	rec := newRecordingAgentSession(1)
+	// Switch to a working AS (simulating the user /use'ing back to
+	// a healthy agent, OR plain retry semantics — both work
+	// because TryFlush re-reads cs.activeAS on every call).
 	workingAS := NewAgentSession("test-as-2", "test-cs", "claude", "/tmp", nil)
-	workingAS.handle = rec
+	workingAS.handle = newRecordingAgentSession(1)
 	cs.mu.Lock()
 	cs.activeAS = workingAS
 	cs.mu.Unlock()
 
-	// Second call: succeeds.
-	if err := hook(p); err != nil {
-		t.Fatalf("second hook should succeed; got %v", err)
+	// Second flush: succeeds.
+	if err := cs.TryFlush(); err != nil {
+		t.Fatalf("second TryFlush should succeed; got %v", err)
 	}
 
 	if msg.Stage != agent.MessageSubmitted {
 		t.Errorf("after retry success, msg.Stage = %v; want Submitted", msg.Stage)
 	}
-	if msg.PromptID == "" {
-		t.Errorf("after retry success, msg.PromptID empty; want set")
+	if installed := workingAS.CurrentPrompt(); installed == nil {
+		t.Errorf("after retry success, currentPrompt is nil; want installed")
+	} else if installed.LastMessageID != "om_x" {
+		t.Errorf("retried Prompt.LastMessageID = %q; want om_x", installed.LastMessageID)
+	}
+	if got := cs.QueueLen(); got != 0 {
+		t.Errorf("QueueLen = %d after retry success; want 0", got)
 	}
 }
 

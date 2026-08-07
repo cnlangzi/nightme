@@ -11,12 +11,9 @@ import (
 // builds this once at startup; the Commander passes it to every
 // dispatched Handle() call.
 //
-// ADR 0007 (2026-08-06): Session was previously exposed here
-// through services.SessionService. The indirection was removed
-// — command packages now hold *chatsession.Manager directly via
-// their Factory, mirroring how they hold any other state they
-// need. The remaining fields are real interfaces with multiple
-// implementations or genuine cross-cutting concerns.
+// Commands that need per-chat state hold *chatsession.Manager
+// directly in their Factory. The remaining fields are shared
+// interfaces with multiple implementations or cross-cutting concerns.
 type RuntimeServices struct {
 	// ReactionRouter dispatches reaction events to the right
 	// handler. Implemented by services.reactionRouter —

@@ -113,9 +113,7 @@ func TestDispatchInbound_WatchModeGate(t *testing.T) {
 // even when WatchMode == WatchModeMention (otherwise users
 // can't opt back in once they've opted out).
 //
-// 2026-08-06: previously this test exercised the legacy
-// g.cmds table (gw.Register(cmd)). After the F-51+ADR 0007
-// refactor, all slash commands live in command.Registry and
+// All slash commands live in command.Registry and
 // are dispatched via the commander shim. We now install a fake
 // commander that recognises "/watch" and returns a stub reply,
 // verifying that the WatchMode gate does NOT apply to the

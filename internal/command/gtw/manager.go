@@ -78,9 +78,7 @@ func (m *Manager) SetSender(chatID string, s Sender) {
 // session (via mgr.GetOrCreate(chatID, primary)) for
 // ActiveCwd / SetActiveCwd and onto the channel for Send.
 //
-// ADR 0007 (2026-08-06): the factory previously routed through
-// a SessionService adapter; the adapter is gone and the
-// factory now holds *chatsession.Manager directly.
+// The runtime factory holds *chatsession.Manager directly.
 //
 // nil disables the lazy path (GetSender returns nil).
 func (m *Manager) SetSenderFactory(fn func(chatID string) Sender) {

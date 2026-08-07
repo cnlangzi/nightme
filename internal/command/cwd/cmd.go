@@ -5,7 +5,7 @@
 // directory-existence check before being committed via
 // cs.SetActiveCwd.
 //
-// ADR 0007: Factory holds *chatsession.Manager directly.
+// Factory holds *chatsession.Manager directly.
 package cwd
 
 import (

@@ -322,8 +322,8 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// WithOnCreate + RestoreFromRegistry so the order can't be
 	// inverted at the call site.
 	gwImpl := gateway.New(messageDispatcher).(*gateway.Router)
-	// ADR 0007 + B5: all 7 chat-session commands (/cwd /use /kill
-	// /new /watch /think /tools) and /gtw are now SlashCommandFactory
+	// All chat-session commands (/cwd /use /kill /new /watch /think
+	// /tools) and /gtw are SlashCommandFactory implementations
 	// implementations registered with reg.Register below. The legacy
 	// gateway.RegisterChatSessionCommands helper is deleted; the
 	// gateway only sees the slash-command path via WithCommander
@@ -381,7 +381,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	reg.Register(newcmd.NewFactory(mgr, cfg.Primary))
 	commander := command.NewCommander(reg)
 
-	// RuntimeServices — ADR 0007 dropped the Session field.
+	// RuntimeServices carries the shared command runtime interfaces.
 	// Each command package holds *chatsession.Manager directly
 	// via its Factory. Channel wraps *gateway.Channel (any
 	// command that needs to send replies uses this).

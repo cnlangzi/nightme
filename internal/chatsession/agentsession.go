@@ -319,19 +319,13 @@ func (as *AgentSession) NewPromptID() string {
 // `cs.mu` should use `ChatSession.GetCurrentPrompt(as)` instead
 // (planned — Phase 0 mostly reads it from inside the locked
 // regions of `defaultPromptHookLocked` and `runReadPump`).
+//
+// CS-AS 边界重构 Phase 1: the field is owned by AgentSession.
+// Reads/writes are protected by asMu (used directly inside
+// Submit, readpumpLoop, endPrompt). External callers should
+// prefer the higher-level API: Submit, IsReady, Events.
 func (as *AgentSession) CurrentPrompt() *Prompt {
 	return as.currentPrompt
-}
-
-// SetCurrentPrompt (F-53) installs or clears the current Prompt.
-// Pass nil to clear (called by `endPrompt`). Takes asMu internally —
-// CS-AS 边界重构 Phase 1: callers no longer need to hold cs.mu; the
-// old comment about "MUST hold ChatSession.mu" was Phase 0's
-// hack to avoid double-locking. Now the field is owned by ASMu.
-func (as *AgentSession) SetCurrentPrompt(p *Prompt) {
-	as.asMu.Lock()
-	as.currentPrompt = p
-	as.asMu.Unlock()
 }
 
 // --- per-AS operation context (Background / Activate) -------------

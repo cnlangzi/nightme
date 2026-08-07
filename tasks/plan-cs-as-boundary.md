@@ -1,6 +1,6 @@
 # ChatSession ↔ AgentSession 边界重构 —— 实施计划（Phase 1，单 PR）
 
-> **Status**: 待用户确认后开工
+> **Status**: ✅ **全部完成 (commits f7e7522 + 60b0a1c on `feat/alive`)**
 > **Design**: [`tasks/wip-cs-as-boundary.md`](./wip-cs-as-boundary.md)（先读这个，理解"为什么"和"最终形态";
 >   本文档只管"怎么改代码"）
 > **依赖**:Phase 0 (`Message`/`Prompt` 对象化) 已合到 `feat/alive` 分支
@@ -11,6 +11,46 @@
 >   - L1.5 离线 AS 跟踪的"快照补投"实现(下一 PR,本设计的 eventQueue 256 容量是基础)
 >   - `nightme health` 扩展(Phase 4)
 >   - `Prompt` 持久化(独立话题)
+
+## 实施回顾
+
+- **T01-T15** (主代码 + 字段): 60b0a1c commit
+- **T16** (chatsession 测试): 60b0a1c
+- **T18** (全量验证): 60b0a1c
+- **T19** (文档同步): 60b0a1c
+- **T11+T12+T14+T17** (清理窗口): f7e7522 commit
+  - T11: `defaultPromptHookLocked` + `cs.SetPromptHook` + `cs.SetFlushHook` 删除
+  - T12: `InputBuffer` FSM 删除(`StateIdle`/`StateBusy`/`SetState`/`OnTurnEnded`/`BufferPending`/`BufferState`/`SetBusy`/`SetIdle`/`ClearBuffer`/`BufferClear`/`ensureBuffer`/`defaultPromptHookLocked` 全部退役)
+  - T14: `cmd/nightme/run.go` 用 `go cs.PumpEvents(ctx)` 替代 `StartReadPump`,`/kill`/`/new` 用 `DropQueue` 替代 `ClearBuffer+SetIdle`
+  - T17: feishu 端 `MarkReceiptPromptDone` 由 `cs.PumpEvents` 触发 `KindPromptEnded` → `writebackMessageState` → `onPromptEnd` hook 调用
+
+**死代码已清理**:
+- `chatsession.go::ensureBuffer` (no-op stub)
+- `chatsession.go::defaultPromptHookLocked` (~110 行 PromptHook)
+- `chatsession.go::BufferClear` (alias for DropQueue)
+- `agentsession.go::SetCurrentPrompt` (高阶 API 替代)
+- `compat_stubs.go` 收窄到只保留 `EventHandler` 类型别名
+
+**代码量变化**:
+- Phase 0 末 → Phase 1 末:`internal/chatsession` 净减 ~245 行 (input_buffer.go 整体删,chatsession.go 减 ~250 行;新增 events.go + agentsession_readpump.go + pump_events.go + prompt_ended_test.go)
+- `cmd/nightme/run.go`:净变化 ~30 行(替换 StartReadPump 调用为 PumpEvents goroutine)
+
+## 验证
+
+- `go build ./...` ✅
+- `go vet ./...` ✅
+- `go test ./...` ✅ (28 packages 全绿)
+- 6 个 `*.skip` 测试文件待重写为新 pipeline 测试(下一 PR)
+- F-53 死锁(进程崩 → 🔄 永久卡住)修复:readpump `!ok` 分支调 `endPrompt(ProcessDied)`,自动清 currentPrompt + 翻 IsReady=true + emit KindPromptEnded;`cs.TryFlush` 自愈重发队列
+
+## 后续 PR (Phase 1.x / 2 / 3)
+
+- L1 Pinger (进程探活 + respawn-on-death) — wip.md §2
+- L2 stall watchdog (卡死检测 + 强杀) — wip.md §2
+- L1.5 离线 AS 跟踪 (快照补投 / use 切回时的离线累积事件处理) — wip.md §1.5
+- 6 个 `*.skip` 测试文件改写
+- `nightme health` 扩展消费 `KindLifecycle`
+- `Prompt` 持久化(独立话题)
 
 ---
 

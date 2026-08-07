@@ -1,7 +1,8 @@
 # ChatSession ↔ AgentSession 边界重构 —— 设计
 
-> **Status**: 设计已确认，待排期实现
-> **Plan**: [`tasks/plan-cs-as-boundary.md`](./plan-cs-as-boundary.md)（落地细节）
+> **Status**: ✅ **Phase 1 已落地 (commits 60b0a1c + f7e7522 on `feat/alive`)**。
+>   Phase 1.x / 2 / 3 设计工作见 [`tasks/wip.md`](./wip.md) (L1 Pinger / L2 Stall / L1.5 离线 AS 跟踪)。
+> **Plan**: [`tasks/plan-cs-as-boundary.md`](./plan-cs-as-boundary.md)（落地细节，含实施回顾）
 > **依赖**：[`docs/feat/message_lifecycle.md`](../docs/feat/message_lifecycle.md)（Phase 0 已合，本
 >   设计基于其上）
 > **Scope**: `internal/chatsession`（ChatSession 与 AgentSession 边界）+ `internal/agent`
@@ -283,12 +284,19 @@ func (cs *ChatSession) TryFlush() error {
 
 | 触发位置 | 事件 |
 |---|---|
-| `as.SetRunning()` (Spawn 成功后) | `KindLifecycle{Status: StatusRunning, PID: pid}` |
+| `as.Spawn()` 完成后 (handle 已就位) | readpump 启动 (Phase 1 实现:在 Spawn 末尾 `as.startReadPump()`) |
 | `readpumpLoop` `!ok` 分支 | `KindLifecycle{Status: StatusExited}` + `endPrompt(ProcessDied)` |
-| `as.Shutdown()` (正常结束) | `KindLifecycle{Status: StatusExited}` (readpump 退出后) |
+| `as.Shutdown()` (正常结束) | 关闭 readpump + 关闭 eventQueue |
 | `/kill` 命令 (T14 接线) | `as.Shutdown()` → 触发上面 |
 | `endPrompt(reason)` 后 | `KindPromptEnded{Prompt: p, EndReason: reason}` |
 | 桥事件透传 | `KindAgentEvent{AgentEvent: &ev}` |
+
+**注**:KindLifecycle{Status: StatusRunning} 由 readpump 启动时桥层
+EventInit 触发的 AgentEvent 自然产生(运行时通过 `KindAgentEvent` 透传,
+不单独发 Lifecycle 事件)。设计 §11 列了 SetRunning 触发,但实际
+实现:运行时只关心 EventInit 携带的 SessionID 和 Model,不需要独立的
+Spawned 事件。Phase 1.x 后续 PR 可能添加专门的 Lifecycle 事件用于
+`nightme health` 观测。
 
 ---
 

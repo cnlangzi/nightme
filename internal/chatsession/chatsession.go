@@ -503,113 +503,6 @@ func (cs *ChatSession) ActiveAgentSession() *AgentSession {
 // no-op stub for source compatibility during the cleanup window.
 func (cs *ChatSession) ensureBuffer() { /* no-op */ }
 
-// defaultPromptHookLocked (F-53, was `defaultFlushHookLocked`)
-// returns the built-in PromptHook that performs the full
-// submission transaction for one Prompt:
-//
-//  1. Read the active AgentSession under `cs.mu` (Handle check).
-//  2. Call `as.SendBlocks(as.OpContext(), p.Blocks)` WITHOUT
-//     `cs.mu` held (SendBlocks can block on a hung prompt RPC —
-//     see the F-32 race note below).
-//  3. On nil error: re-acquire `cs.mu`, flip every message in
-//     `p.MessageIDs` to `MessageSubmitted` (and stamp
-//     `Message.PromptID`), install `p` on
-//     `as.SetCurrentPrompt(p)`, set `p.AckedAt = now`, wire emit
-//     `MessageSubmitted` per message.
-//  4. On error: do NOT install Prompt, do NOT flip Stages. The
-//     Prompt object is abandoned; messages stay `MessageQueued`
-//     and the next `flushPending` will retry them (per docs/feat/
-//     message_lifecycle.md §3 原则 5).
-//
-// Caller must hold `cs.mu` only at construction (to capture `this`
-// for the closure). The closure itself re-acquires the lock as
-// needed.
-//
-// F-32 race note: a concurrent active-AS switch (e.g. /use) runs
-// promoteActiveLocked, which Background()s the outgoing AS between
-// our read of activeAS/OpContext and the SendBlocks call. That
-// cancels the ctx mid-send and SendBlocks returns
-// context.Canceled — the message would otherwise be silently
-// dropped. Surface a structured error so the operator can
-// distinguish "lost on /use" from a transport failure.
-func (cs *ChatSession) defaultPromptHookLocked() PromptHook {
-	return func(p *Prompt) error {
-		cs.mu.Lock()
-		as := cs.activeAS
-		cs.mu.Unlock()
-		if as == nil || as.Handle() == nil {
-			return ErrNotRunning
-		}
-
-		// SendBlocks outside the lock (it can block).
-		err := as.SendBlocks(as.OpContext(), p.Blocks)
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return fmt.Errorf("submit: AS backgrounded during send (likely /use): %w", err)
-			}
-			return err
-		}
-
-		// Success path: commit the Prompt.
-		//
-		// F-53 review fix: do NOT call the onMessageState handler
-		// under cs.mu. The runtime handler (cmd/nightme/run.go
-		// wireRuntimeCallbacksAndRestore) ends with ch.Send(), which
-		// can block on the Feishu API for tens to hundreds of
-		// milliseconds; holding cs.mu.Lock() across that call
-		// serializes every other ChatSession operation (LookupActive,
-		// SetActiveAgent, KillAll, endPrompt, the readpump's
-		// LastMessageID read, etc.) behind one network round-trip
-		// per batched message. We collect the (chatID, userMsgID)
-		// pairs inside the lock and dispatch the handler AFTER
-		// releasing it, mirroring the public EmitMessageState.
-		now := time.Now()
-		type emitJob struct {
-			chatID    string
-			userMsgID string
-			state     agent.MessageState
-		}
-		var jobs []emitJob
-		cs.mu.Lock()
-		// Fill the snapshot fields that the hook owns.
-		p.ID = as.NewPromptID()
-		p.AgentSessionID = as.ID
-		p.AckedAt = now
-		p.LastProgressAt = now
-		h := cs.onMessageState
-		chatID := cs.ChatID
-		// Flip every Message in the batch to Submitted; queue
-		// the wire emits for after we drop the lock.
-		for _, mid := range p.MessageIDs {
-			if v, ok := cs.messagesByID.Load(mid); ok {
-				msg := v.(*Message)
-				msg.Stage = agent.MessageSubmitted
-				msg.PromptID = p.ID
-				if h != nil {
-					jobs = append(jobs, emitJob{chatID: chatID, userMsgID: msg.ID, state: agent.MessageSubmitted})
-				}
-			}
-		}
-		// Install on the AS so runReadPump reads the anchor.
-		as.SetCurrentPrompt(p)
-		cs.mu.Unlock()
-		for _, j := range jobs {
-			h(j.chatID, j.userMsgID, j.state)
-		}
-		return nil
-	}
-}
-
-// emitMessageStateLocked was removed in F-53: the only caller
-// (defaultPromptHookLocked) now snapshots (h, chatID) under the
-// lock and dispatches the onMessageState callback AFTER releasing
-// it (so the runtime handler's ch.Send() does not run under
-// cs.mu). Use `EmitMessageState` for the single-shot path; it
-// snapshots under RLock and dispatches outside the lock.
-
-// GetMessage (F-53) returns the `*Message` for `userMsgID`, or
-// nil if not present in this ChatSession. Safe for concurrent
-// use (sync.Map.Load).
 func (cs *ChatSession) GetMessage(userMsgID string) *Message {
 	if v, ok := cs.messagesByID.Load(userMsgID); ok {
 		return v.(*Message)
@@ -1016,13 +909,6 @@ func (cs *ChatSession) EmitMessageState(userMsgID string, state agent.MessageSta
 // its terminal value (Submitted or Dropped) at the moment of the
 // relevant transition, never changing again. See docs/feat/
 // message_lifecycle.md §5.1.
-//
-// BufferClear (F-53 alias for ClearBuffer, kept for compat with
-// existing call sites — see DropQueue above for the current
-// implementation).
-func (cs *ChatSession) BufferClear() int {
-	return cs.DropQueue()
-}
 
 // LookupInPool returns the AgentSession matching (agent, cwd) if
 // present in the pool (regardless of status). Returns

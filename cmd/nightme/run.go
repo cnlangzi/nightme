@@ -693,6 +693,13 @@ func wireRuntimeCallbacksAndRestore(
 		return newEventHandler(ch, cs, mgr, logger)
 	}
 	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
+		// T-alive DEBUG: confirm runtime handlers are installed
+		// for every newly-created or restored chat.
+		if logger != nil {
+			logger.Info("runtime: handlers installed for chat",
+				"chat_id", cs.ChatID,
+				"cs_id", cs.ID)
+		}
 		cs.SetEventHandler(factory(cs))
 		// F-48: wrap the gateway's OnMessageState so the runtime
 		// can stamp SessionContext on MessageSubmitted (the
@@ -858,6 +865,17 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.Model != "" {
 			s.SetModel(ev.Init.Model)
 		}
+		// T-alive (2026-08-07): flip the reaction ⌨ → 🔄 ONLY
+		// when EventInit arrives, i.e. when we have proof claude
+		// actually started the new prompt. The dispatcher used
+		// to emit MessageSubmitted right after LookupActiveAgentSession
+		// returns — which gave a false-positive "On It" reaction
+		// whenever the spawn's 60s resume-fallback probe was in
+		// flight (or MCP startup was hung). Now: the reaction only
+		// flips when claude itself confirms it has started.
+		if ev.Kind == agent.EventInit && userMsgID != "" {
+			cs.EmitMessageState(userMsgID, agent.MessageSubmitted)
+		}
 		// Per-turn usage accumulation moved out of an EventUsage
 		// branch (the kind was removed) — the bridge now attaches
 		// Usage to the same AgentEvent that delivers Result (see
@@ -912,6 +930,12 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		// Translate the AgentEvent to an OutboundMessage.
 		out, ok := gateway.Translate(chatID, ev)
 		if !ok {
+			if logger != nil {
+				logger.Debug("runtime: Translate dropped event",
+					"chat_id", chatID,
+					"kind", ev.Kind.String(),
+					"agent_session_id", s.ID)
+			}
 			return
 		}
 		// Fold the per-turn Usage into CumulativeUsage NOW, before
@@ -1001,6 +1025,14 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 				"user_msg_id", userMsgID,
 				"agent_session_id", s.ID,
 				"err", err)
+		}
+		if logger != nil {
+			logger.Debug("runtime: ch.Send dispatched",
+				"chat_id", chatID,
+				"user_msg_id", userMsgID,
+				"agent_session_id", s.ID,
+				"kind", out.Kind.String(),
+				"text_len", len(out.Text))
 		}
 	}
 }

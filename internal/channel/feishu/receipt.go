@@ -286,6 +286,61 @@ func (r *MessageReceipt) State() PromptState {
 	return r.PromptState()
 }
 
+// SetPromptState (F-53 follow-up) transitions the receipt's
+// `promptState` to `state` and, when transitioning for the first
+// time to that state, adds the corresponding reaction on the
+// receipt's own card (NOT the user message — see
+// `mapStateToFeishuEmoji` for that surface).
+//
+// Reaction mapping (driven by `mapPromptStateToFeishuEmoji`):
+//
+//	PromptRunning → OnIt  (🔄)  — added the first time the
+//	                              receipt renders (cold-start card)
+//	PromptDone    → DONE  (✅)  — added when ChatSession.endPrompt
+//	                              fires (EventDone / EventError)
+//
+// Idempotent: calling SetPromptState with the state already set
+// is a no-op (no duplicate reaction, no extra API call).
+//
+// Called from two sites:
+//
+//  1. `renderLocked` after the first successful
+//     `SendCardForReceipt` (PromptRunning) — adds 🔄 once.
+//  2. The adapter's prompt-end wiring (PromptDone) when
+//     ChatSession.endPrompt fires — adds ✅ once.
+//
+// If `cardMsgID` is empty (receipt not yet rendered, or first
+// render failed), the reaction is silently skipped — the
+// `cardMsgID` set just before this call ensures the cold-start
+// path always has a card to react on.
+//
+// Best-effort: AddReaction failures are logged at the adapter
+// level (via the runtime's reaction handler) and do not propagate.
+// The receipt's `promptState` is updated regardless — the FSM is
+// the source of truth, the reaction is visual decoration.
+func (r *MessageReceipt) SetPromptState(ctx context.Context, state PromptState) {
+	r.mu.Lock()
+	prev := r.promptState
+	cardMsgID := r.cardMsgID
+	r.promptState = state
+	r.mu.Unlock()
+
+	if prev == state || cardMsgID == "" {
+		return
+	}
+
+	emoji := mapPromptStateToFeishuEmoji(state)
+	if emoji == "" {
+		return
+	}
+	if _, err := r.bot.AddReaction(ctx, cardMsgID, emoji); err != nil {
+		// Best-effort: log and move on. We don't want a transient
+		// Feishu reaction-API failure to derail the receipt FSM.
+		r.logger.Warn("feishu receipt: add prompt-state reaction failed",
+			"err", err, "state", state, "emoji", emoji, "card_msg_id", cardMsgID)
+	}
+}
+
 // AppendEntry appends a new rolling-log entry (typically an OutReply
 // text chunk from the agent's stream-json) and re-renders the card.
 //
@@ -416,6 +471,10 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 		r.replyMsgID = msgID // keep alias in sync
 		r.lastBody = body
 		r.lastBodyPatch = time.Now()
+		// F-53 follow-up: add the 🔄 "Running" reaction on the
+		// newly-created card. Idempotent — SetPromptState skips
+		// when state is already PromptRunning.
+		r.SetPromptState(ctx, PromptRunning)
 		return nil
 	}
 

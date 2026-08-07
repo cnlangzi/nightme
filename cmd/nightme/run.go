@@ -741,6 +741,28 @@ func wireRuntimeCallbacksAndRestore(
 					"err", err)
 			}
 		})
+
+		// F-53 follow-up: when ChatSession.endPrompt fires
+		// (EventDone / EventError in the readpump), route the
+		// terminal event to the Feishu adapter so the receipt
+		// card transitions to PromptDone and the ✅ reaction
+		// is added on the card. No user-message reaction is
+		// emitted from this path — the user-message surface
+		// is now minimal (⏳ only).
+		cs.SetPromptEndHandler(func(userMsgID string, reason chatsession.PromptEndReason) {
+			cid := cs.ChatID
+			if cid == "" || userMsgID == "" {
+				return
+			}
+			// The adapter call is fire-and-forget: failures
+			// are logged inside SetPromptState. We use
+			// context.Background() because the readpump-driven
+			// endPrompt happens off the inbound message path;
+			// there's no inbound ctx to chain.
+			if fa, ok := ch.(*feishu.Adapter); ok {
+				fa.MarkReceiptPromptDone(context.Background(), cid, userMsgID)
+			}
+		})
 	})
 	return mgr.RestoreFromRegistry()
 }

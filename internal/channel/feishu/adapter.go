@@ -712,6 +712,23 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 	return a.receiptsByUserMsgID[userMsgID] // nil on miss — caller decides
 }
 
+// MarkReceiptPromptDone (F-53 follow-up) transitions the receipt
+// bound to `userMsgID` to PromptDone (✅ reaction on the card).
+// Called by the runtime when `ChatSession.endPrompt` fires (i.e.
+// the readpump saw EventDone or EventError).
+//
+// Best-effort: silently no-op when no receipt exists yet (e.g.
+// /kill before any event arrived — the receipt would never have
+// rendered). All API failures inside SetPromptState are logged
+// and do not propagate.
+func (a *Adapter) MarkReceiptPromptDone(ctx context.Context, chatID, userMsgID string) {
+	r := a.receiptFor(ctx, chatID, userMsgID)
+	if r == nil {
+		return
+	}
+	r.SetPromptState(ctx, PromptDone)
+}
+
 // ensureReceiptForTyping lazily creates a Typing-placeholder
 // receipt when the FIRST event for a userMsgID is a
 // OutMessageState{State: MessageForwarded} (the gateway just
@@ -1258,45 +1275,26 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		messageID := msg.MessageState.MessageID
 		state := msg.MessageState.State
 
-		// F-44 lifecycle shift: when the gateway has just
-		// forwarded the user message to the agent
-		// (MessageForwarded), eagerly create a Typing-placeholder
-		// receipt so the user sees "⌨️ Working..." in main chat
-		// before any OutReply / OutTask* event lands. Subsequent
-		// events stream updates onto the same card via
-		// AppendEntry / SetTaskList. The placeholder uses
-		// ReplyInBoth (anchored to userMsgID) per main's reply.go
-		// safe pattern — the parent has no thread yet at
-		// MessageSubmitted time, so the slot reservation is safe;
-		// later PATCHes on the same message_id are immune to a
-		// thread promotion by OutToolStart/End.
+		// F-53 follow-up: MessageDone / MessageFailed no longer
+		// exist (see docs/feat/message_lifecycle.md §7). The old
+		// "Typing placeholder" created on MessageSubmitted is also
+		// gone — receipt progress is reflected on the card itself
+		// via `MessageReceipt.SetPromptState`, which the adapter
+		// invokes when the runtime emits the `OnPromptEnd` callback
+		// from `ChatSession.endPrompt`. The user-message reaction
+		// surface is now minimal: only MessageQueued renders ⏳;
+		// everything else is silent.
 		//
-		// (DEBUG trap: if msg.ReplyTo is empty the placeholder is
-		// silently dropped — log so future regressions surface
-		// immediately instead of being invisible to the user.)
-		if state == agent.MessageSubmitted {
-			if msg.ReplyTo == "" {
-				a.logger.Warn("feishu: OutMessageState MessageSubmitted missing ReplyTo — Typing placeholder skipped (gateway should set OutboundMessage.ReplyTo = userMsgID)",
-					"chat_id", msg.ChatID, "message_state_message_id", msg.MessageState.MessageID)
-			} else {
-				// F-48: compute the footer (same shape as the
-				// main-chat footer, but stamped by the runtime
-				// on MessageSubmitted so the placeholder card
-				// shows the git-tracking line 3 immediately).
-				// msg.SessionContext is non-nil here because the
-				// runtime stamps it on OutMessageState +
-				// MessageSubmitted; with nothing meaningful
-				// (no Agent, no Model, no usage, no git),
-				// formatSessionFooterLines returns nil and the
-				// footer is omitted from the placeholder.
-				footerLines := formatSessionFooterLines(msg.SessionContext)
-				if _, _, err := a.ensureReceiptForTyping(ctx, msg.ChatID, msg.ReplyTo, footerLines); err != nil {
-					a.logger.Warn("feishu: ensureReceiptForTyping failed",
-						"err", err, "chat_id", msg.ChatID, "user_msg_id", msg.ReplyTo)
-				}
-			}
-		}
+		// Same-state idempotency (was the "terminal guard" before
+		// F-53): skip duplicate emits of the same state.
 
+		// F-53 follow-up: MessageDone / MessageFailed no longer exist (see
+		// docs/feat/message_lifecycle.md §7). Message.Stage has no
+		// terminal value, so the previous "terminal guard" branch
+		// is removed. Queued → (silent) is the only valid user-
+		// message sequence; receipt progress is reflected on the
+		// card itself via `MessageReceipt.SetPromptState` (not via
+		// user-message reactions).
 		// Terminal-state guard: once we've rendered MessageDone or
 		// MessageFailed for a userMsgID, no later MessageState can
 		// change the reaction. Feishu reactions are append-only, so
@@ -2478,16 +2476,40 @@ func (a *Adapter) SendMessageText(ctx context.Context, chatID, text, rootID stri
 // F-53: MessageDone / MessageFailed cases removed. ✅ / 👎
 // reactions on user messages are permanently retired — terminal
 // execution status is carried by `chatsession.Prompt.EndReason`
-// (and will surface in a future UX PR via a different surface,
-// e.g. the receipt card). See docs/feat/message_lifecycle.md §7.
+// (and will surface via the receipt card's own reaction surface —
+// see `mapPromptStateToFeishuEmoji` below).
+//
+// F-53 follow-up: ONLY MessageQueued renders a reaction on the
+// user message (⏳ OneSecond). All other states return ""; the
+// receipt card carries the Running/Done reactions.
 func mapStateToFeishuEmoji(state agent.MessageState) string {
 	switch state {
 	case agent.MessageQueued:
 		return "OneSecond" // ⏳
-	case agent.MessageSubmitted:
+	}
+	return ""
+}
+
+// mapPromptStateToFeishuEmoji converts a receipt-local
+// `feishu.PromptState` into the Feishu emoji_type string that
+// the receipt adds as a reaction on its OWN card (NOT the user
+// message — see `mapStateToFeishuEmoji` above for the user-
+// message surface).
+//
+//	F-53 Phase 0 (revised):
+//	  PromptRunning → OnIt       (🔄)
+//	  PromptDone    → DONE       (✅)
+//
+// The 🔄 is added the first time the receipt renders (via
+// `MessageReceipt.SetPromptState(PromptRunning)`); the ✅ is
+// added when `ChatSession.endPrompt` fires
+// (`SetPromptState(PromptDone)` from the adapter).
+func mapPromptStateToFeishuEmoji(state PromptState) string {
+	switch state {
+	case PromptRunning:
 		return "OnIt" // 🔄
-	case agent.MessageDropped:
-		return "" // explicitly no reaction (Phase 0 UX)
+	case PromptDone:
+		return "DONE" // ✅
 	}
 	return ""
 }

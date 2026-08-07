@@ -158,35 +158,35 @@ func TestSend_OutMessageState_FirstReceivedNotSkipped(t *testing.T) {
 	}
 }
 
-// TestSend_OutMessageState_StateForwardedRenders verifies that
-// MessageForwarded (🔄) is rendered as a user-message reaction.
-// The F-42 silent-drop was reverted so intermediate states
-// provide FastAck UX during the gap between user message
-// dispatch and first OutReply / OutTask*.
-func TestSend_OutMessageState_StateForwardedRenders(t *testing.T) {
+// TestSend_OutMessageState_QueuedRenders verifies that
+// MessageQueued (⏳) is rendered as a user-message reaction. F-53
+// follow-up: the user-message reaction surface is now minimal —
+// only MessageQueued renders; MessageSubmitted and MessageDropped
+// return "" from mapStateToFeishuEmoji and are silent.
+func TestSend_OutMessageState_QueuedRenders(t *testing.T) {
 	a := testAdapter(t)
 	ctx := context.Background()
 
 	a.mu.Lock()
-	a.messageStates.Remove("om_msg_fwd")
+	a.messageStates.Remove("om_msg_q")
 	a.mu.Unlock()
 
-	// First MessageForwarded emit must proceed to AddReaction
-	// (not silently dropped). AddReaction against nil larkClient
+	// MessageQueued emit must proceed to AddReaction (not
+	// silently dropped). AddReaction against nil larkClient
 	// returns an error; the dispatcher reverts messageStates.
 	err := a.Send(ctx, gateway.OutboundMessage{
 		Kind:   gateway.OutMessageState,
 		ChatID: "oc_chat",
 		MessageState: &gateway.MessageStatePayload{
-			MessageID: "om_msg_fwd",
-			State:     agent.MessageSubmitted,
+			MessageID: "om_msg_q",
+			State:     agent.MessageQueued,
 		},
 	})
 	if err == nil {
 		t.Fatalf("expected AddReaction error against nil larkClient; got nil")
 	}
 	a.mu.Lock()
-	_, hasEntry := a.messageStates.Get("om_msg_fwd")
+	_, hasEntry := a.messageStates.Get("om_msg_q")
 	a.mu.Unlock()
 	if hasEntry {
 		t.Errorf("after failed AddReaction, messageStates should be reverted (no entry); got hasEntry=true")
@@ -212,8 +212,10 @@ func TestMessageStatesLRU_BoundsMemory(t *testing.T) {
 		key := fmt.Sprintf("om_lru_%d", i)
 		// F-53: any non-zero MessageState is fine here; we just
 		// need distinct entries to exercise the LRU. Use
-		// MessageSubmitted as the canonical "lifecycle state".
-		a.messageStates.Add(key, agent.MessageSubmitted)
+		// MessageQueued as the canonical "lifecycle state"
+		// (it's the only state that still renders a reaction
+		// on the user message in F-53 follow-up).
+		a.messageStates.Add(key, agent.MessageQueued)
 	}
 
 	// Cache size must be capped at messageStatesLRUSize.
@@ -237,14 +239,12 @@ func TestMessageStatesLRU_BoundsMemory(t *testing.T) {
 	}
 }
 
-// TestMessageStatesLRU_TerminalGuardSurvivesEviction verifies
-// that the terminal-state guard's correctness does not silently
-// regress when the LRU evicts a terminal entry. After eviction,
-// a same-state MessageDone emit must be treated as a fresh
-// first-emit (hasPrev=false) — this is the documented trade-off
-// in adapter.go's messageStates field comment. We pin the trade-off
-// here so any future change to "preserve terminal entries forever"
-// is forced to revisit the LRU design.
+// TestMessageStatesLRU_IdempotencySurvivesEviction verifies
+// that the same-state idempotency does not silently regress
+// when the LRU evicts an entry. After eviction, a fresh emit
+// for the same userMsgID is treated as a new first-emit (the
+// documented trade-off: we do NOT preserve "ever-emitted"
+// entries forever).
 func TestMessageStatesLRU_TerminalGuardSurvivesEviction(t *testing.T) {
 	a := testAdapter(t)
 
@@ -252,13 +252,13 @@ func TestMessageStatesLRU_TerminalGuardSurvivesEviction(t *testing.T) {
 	// terminal entry we'll add below. (Cap+1 adds guarantees
 	// om_evict_me is evicted.)
 	for i := 0; i <= messageStatesLRUSize; i++ {
-		a.messageStates.Add(fmt.Sprintf("om_filler_%d", i), agent.MessageSubmitted)
+		a.messageStates.Add(fmt.Sprintf("om_filler_%d", i), agent.MessageQueued)
 	}
-	a.messageStates.Add("om_evict_me", agent.MessageSubmitted)
+	a.messageStates.Add("om_evict_me", agent.MessageQueued)
 
 	// Fill again to push om_evict_me out of the LRU.
 	for i := 0; i < messageStatesLRUSize+1; i++ {
-		a.messageStates.Add(fmt.Sprintf("om_evict_%d", i), agent.MessageSubmitted)
+		a.messageStates.Add(fmt.Sprintf("om_evict_%d", i), agent.MessageQueued)
 	}
 
 	// om_evict_me should be gone (evicted).
@@ -266,7 +266,7 @@ func TestMessageStatesLRU_TerminalGuardSurvivesEviction(t *testing.T) {
 		t.Fatalf("om_evict_me should have been evicted by the second fill")
 	}
 
-	// A new MessageDone emit for the evicted userMsgID is
+	// A fresh MessageQueued emit for the evicted userMsgID is
 	// treated as a fresh first-emit. The dispatcher proceeds to
 	// AddReaction (which fails against nil larkClient), then
 	// reverts. We verify the cache ends up empty for this key
@@ -276,7 +276,7 @@ func TestMessageStatesLRU_TerminalGuardSurvivesEviction(t *testing.T) {
 		ChatID: "oc_chat",
 		MessageState: &gateway.MessageStatePayload{
 			MessageID: "om_evict_me",
-			State:     agent.MessageSubmitted,
+			State:     agent.MessageQueued,
 		},
 	})
 	if err == nil {
@@ -288,4 +288,5 @@ func TestMessageStatesLRU_TerminalGuardSurvivesEviction(t *testing.T) {
 	if hasEntry {
 		t.Errorf("after failed AddReaction, messageStates should be reverted (no entry); got hasEntry=true")
 	}
+
 }

@@ -144,6 +144,13 @@ type ChatSession struct {
 	// an active AgentSession's process exits. nil = no observer.
 	exitObserver AgentExitObserver
 
+	// onPromptEnd (F-53 follow-up) is fired by `endPrompt` after
+	// a Prompt reaches a terminal state (EventDone / EventError
+	// in the readpump). Adapters use this to transition the
+	// receipt card to PromptDone (✅) and react accordingly.
+	// nil = no observer; endPrompt's handler call is skipped.
+	onPromptEnd PromptEndHandler
+
 	// ctx is the per-ChatSession context. Lives for the chat's
 	// lifetime (until daemon shutdown). It is the PARENT context
 	// every AgentSession active on this chat derives its own
@@ -647,6 +654,13 @@ func (cs *ChatSession) MarkDropped(userMsgID string) bool {
 // `Prompt.MessageIDs` — messages already received their terminal
 // Stage at Submitted time (no fan-out, per docs §5.1).
 //
+// After clearing currentPrompt, fires the runtime-installed
+// `onPromptEnd` handler (if any) so adapters can react to the
+// terminal event — e.g. Feishu's adapter uses this to transition
+// the receipt card to PromptDone and add the ✅ reaction.
+// The handler runs WITHOUT cs.mu held so it can call back into
+// adapter APIs without deadlocking.
+//
 // No-op when `as.currentPrompt` is nil. Caller does NOT need to
 // hold `cs.mu`; the method acquires it itself.
 func (cs *ChatSession) endPrompt(reason PromptEndReason) {
@@ -663,7 +677,32 @@ func (cs *ChatSession) endPrompt(reason PromptEndReason) {
 	}
 	p.EndedAt = time.Now()
 	p.EndReason = reason
+	lastMID := p.LastMessageID
 	as.SetCurrentPrompt(nil)
+	h := cs.onPromptEnd
+	cs.mu.Unlock()
+	if h != nil && lastMID != "" {
+		h(lastMID, reason)
+	}
+}
+
+// onPromptEnd (F-53 follow-up) is the runtime-installed callback
+// fired by `endPrompt` after the Prompt's terminal fields are
+// stamped and `AgentSession.currentPrompt` is cleared. nil = no
+// observer; the call becomes a no-op.
+type PromptEndHandler func(userMsgID string, reason PromptEndReason)
+
+// SetPromptEndHandler installs (or replaces) the prompt-end
+// observer. The runtime typically wires this once at startup:
+// the handler routes the terminal event to the channel adapter
+// so the receipt card can transition to PromptDone (✅) and
+// the user message can be left alone (per the F-53 Reaction
+// split: user message only carries ⏳, the card carries 🔄/✅).
+//
+// Handler runs WITHOUT cs.mu held.
+func (cs *ChatSession) SetPromptEndHandler(h PromptEndHandler) {
+	cs.mu.Lock()
+	cs.onPromptEnd = h
 	cs.mu.Unlock()
 }
 

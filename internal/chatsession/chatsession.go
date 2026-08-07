@@ -152,10 +152,10 @@ type ChatSession struct {
 	// ctx is the per-ChatSession context. Lives for the chat's
 	// lifetime (until daemon shutdown). It is the PARENT context
 	// every AgentSession active on this chat derives its own
-	// per-AS ctx from via AgentSession.Activate(parent); when
-	// /use swaps the active AS, the old AS's Background() cancels
-	// its derived ctx while the new AS's Activate(cs.ctx) installs
-	// a fresh one. Cancelling cs.ctx itself cascades through every
+	// per-AS ctx from. promoteActiveLocked owns that handover: on
+	// every change of active AS it Background()s the outgoing one
+	// (cancelling its derived ctx) and Activate(cs.ctx)s the
+	// incoming one. Cancelling cs.ctx itself cascades through every
 	// active AS (used by the runtime during graceful shutdown).
 	//
 	// Per-AS lifecycle control lives on AgentSession, not on
@@ -526,7 +526,8 @@ func (cs *ChatSession) defaultFlushHookLocked() FlushHook {
 		// boundary is now owned entirely by the bridge layer.
 		//
 		// Race note (F-32 2026-08-06 follow-up): a concurrent
-		// /use can call oldAS.Background() between our read of
+		// active-AS switch (e.g. /use) runs promoteActiveLocked,
+		// which Background()s the outgoing AS between our read of
 		// activeAS/OpContext and the SendBlocks call. That
 		// cancels the ctx mid-send and SendBlocks returns
 		// context.Canceled — the message would otherwise be
@@ -576,13 +577,13 @@ func (cs *ChatSession) Context() context.Context {
 
 // ResetContext cancels the per-ChatSession ctx and installs a
 // fresh one derived from context.Background(). Reserved for the
-// runtime's graceful-shutdown path — /use does NOT use this;
-// per-AS teardown is the AgentSession's job (Background/Activate).
+// runtime's graceful-shutdown path — an active-AS switch does NOT
+// use this; per-AS teardown belongs to promoteActiveLocked.
 //
 // After ResetContext, every AgentSession whose opCtx was derived
 // from the previous cs.ctx has its operations cancelled
-// (cascade). The fresh cs.ctx is what the next AgentSession
-// .Activate() call will derive from.
+// (cascade). The fresh cs.ctx is what the next promotion's
+// Activate() call will derive from.
 //
 // Always installs a fresh ctx; idempotent in spirit.
 func (cs *ChatSession) ResetContext() {
@@ -798,6 +799,49 @@ func (cs *ChatSession) LookupInPool(agent, cwd string) (*AgentSession, error) {
 	return as, nil
 }
 
+// promoteActiveLocked makes as the chat's active AgentSession and
+// owns the per-AS context lifecycle for that promotion.
+//
+// Context wiring belongs here, at the single point where the active
+// AgentSession changes, rather than in individual handlers. Before
+// this, only /use called Activate — so any chat that never ran /use
+// left every AgentSession unactivated. Two consequences:
+//
+//   - opCtx stayed at the constructor's Background value (or, for
+//     sessions restored from disk, nil — which panicked the daemon on
+//     the first message after every restart, because the default
+//     FlushHook passes OpContext() straight into bridge.SendBlocks and
+//     the pi bridge dereferences it on entry);
+//   - Background() was a silent no-op (opCancel nil), so /use could
+//     not actually interrupt an in-flight turn on the outgoing AS, and
+//     ResetContext could not cascade a shutdown into it.
+//
+// Idempotent by design. Activate CANCELS the previous opCtx, so
+// calling it on every lookup — the per-message hot path — would kill
+// the running turn. We only (re)activate when the active AgentSession
+// actually changes, or when it has never been activated.
+//
+// Caller must hold cs.mu. Takes cs.ctxMu (via Context()) and the
+// target's asMu; neither is ever held while acquiring cs.mu, so the
+// ordering is safe.
+func (cs *ChatSession) promoteActiveLocked(as *AgentSession) {
+	prev := cs.activeAS
+	cs.activeAS = as
+	if as == nil {
+		return
+	}
+	if prev == as && as.IsActivated() {
+		return
+	}
+	if prev != nil && prev != as {
+		// Tear down the outgoing AS's operations before the new one
+		// takes over — same contract /use has always implemented by
+		// hand.
+		prev.Background()
+	}
+	as.Activate(cs.Context())
+}
+
 // LookupActiveAgentSession resolves the active AgentSession.
 //
 // Single-path resolution (no runtime fallback):
@@ -835,7 +879,7 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	// restart) or Exited entry (CLI died) falls through to the
 	// spawn path below.
 	if as, ok := cs.pool[agentCwdKey{Agent: cs.activeAgent, Cwd: cs.activeCwd}]; ok && as.Status() == StatusRunning && as.Handle() != nil {
-		cs.activeAS = as
+		cs.promoteActiveLocked(as)
 		return as, nil
 	}
 
@@ -861,7 +905,7 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	// from the prior construction or RestoreFromRegistry. Spawn
 	// will fork a new process and SetRunning will clear the stale
 	// exit code and flip stat back to Running.
-	cs.activeAS = newAS
+	cs.promoteActiveLocked(newAS)
 	if cs.asFile != nil {
 		_ = cs.asFile.Upsert(newAS.Entry())
 	}

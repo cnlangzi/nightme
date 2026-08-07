@@ -66,21 +66,26 @@ nightme 现有 FSM 假设"一个 AgentSession = 一个进程"；pi RPC 进程是
 
 > **F-49 行为变更**：Pi 协议层 `compaction_start` + `compaction_end` 两条 event,但 bridge 只在 `compaction_end` 时 emit **一个** `EventCompaction`（`compaction_start` 直接 `return nil, nil` 屏蔽）。这是 SPEC §1.4 "抽象归抽象 / 具体归具体" 不变式的要求——bridge 消化协议差异,runtime handler (`cmd/nightme/run.go::newEventHandler`) 一视同仁,不基于 Subtype dispatch。同时 `CompactionEvent.Subtype` 字段已删除（`CompactionEvent` 变空 struct）。详见 [`F-49 §1.3`](./F-49-compaction-counter.md) 与 [`F-49 §1.7`](./F-49-compaction-counter.md)。
 
+> **F-52 行为变更**：`text_delta` / `thinking_delta` 不再逐 token emit `EventText`。Pi 以 token 粒度推流,原实现让一句话在飞书裂成 ~20 条 💬 气泡 + ~20 次卡片 PATCH。translator 现在缓冲 delta,在语义边界才 emit;`EventResult` 从 `message_end` 移到 `agent_settled`,**一个 turn 恰好一次**。下表标 ⟪F-52⟫ 的行即为改动点,权威描述见 [`F-52`](./F-52-pi-stream-aggregation.md)。
+
 | pi event | payload 关键字段 | 目标 `AgentEvent` | 备注 |
 |---|---|---|---|
 | `agent_start` | — | (log debug) | 不入 events |
 | `agent_end` | `willRetry` | (log debug) | **不**作为 turn 终态 |
-| `agent_settled` | — | **`EventDone{Reason:"settled"}`** | turn 终态；**不关 channel** |
+| `agent_settled` | — | ⟪F-52⟫ **`EventResult{...}` → `EventDone{Reason:"settled"}`** | turn 终态；**不关 channel**。result 必须排在 done **之前**——runtime readpump 在 EventDone 切 Idle 并 flush 队列。若本 turn 未观察到任何事件（out-of-band settle，如 fire-and-forget 压缩），**只发 EventDone**，不发 result——否则用户会收到一张莫名的「Done.」卡片。见 [F-52 §2.4.3](./F-52-pi-stream-aggregation.md) |
 | `turn_start` / `turn_end` | — | (log debug) | 暂不消费 |
 | `message_start` | `message` | (log debug) | — |
-| `message_update` `{assistantMessageEvent:{type:"text_delta"}}` | `delta`, `contentIndex` | `EventText{Text: delta}` | 与 F-24 assistant 行为对齐 |
-| `message_update` `{assistantMessageEvent:{type:"thinking_delta"}}` | `delta` | `EventText{Text: "[思考] " + delta}` | 复用 claudecode 前缀约定 |
+| `message_update` `{assistantMessageEvent:{type:"text_start"}}` | `contentIndex` | ⟪F-52⟫ no-op（重置该 index 的缓冲） | 防御:漏掉的 text_end 不会把上一块尾巴串进来 |
+| `message_update` `{assistantMessageEvent:{type:"text_delta"}}` | `delta`, `contentIndex` | ⟪F-52⟫ **no-op（累加进缓冲）** | 按 contentIndex 分桶;不再逐 token emit |
+| `message_update` `{assistantMessageEvent:{type:"text_end"}}` | `contentIndex` | ⟪F-52⟫ no-op（该块转入 pendingText） | 等待 tool 边界 flush 或 turn 终态 |
+| `message_update` `{assistantMessageEvent:{type:"thinking_delta"}}` | `delta` | ⟪F-52⟫ **no-op（累加进 thinkBuf）** | — |
+| `message_update` `{assistantMessageEvent:{type:"thinking_end"}}` | — | ⟪F-52⟫ **`EventText{Text: "[思考] " + 全文}`** | 复用 claudecode 前缀约定。思考在**自己**的边界 flush,不进 pendingText——它是另一个渲染面(💭 vs 💬),且绝不能落进 EventResult |
 | `message_update` `{assistantMessageEvent:{type:"toolcall_start"}}` | `toolCallId`, `name`, `partial.arguments` | no-op | `tool_execution_start` 是唯一 EventToolStart 来源；此事件提前到达以解析 partial args，但渲染层等 canonical 事件 |
 | `message_update` `{assistantMessageEvent:{type:"toolcall_end"}}` | `toolCallId`, `toolCall.{name, arguments}` | no-op | 同 toolcall_start：canonical 事件是 tool_execution_start |
-| `tool_execution_start` | `toolCallId`, `toolName`, `args` | `EventToolStart{ToolUseID: toolCallId, Name: toolName, Input: raw(args)}` | canonical "tool starting" 事件 |
+| `tool_execution_start` | `toolCallId`, `toolName`, `args` | ⟪F-52⟫ **`EventText{pendingText}`（若非空）→** `EventToolStart{ToolUseID: toolCallId, Name: toolName, Input: raw(args)}` | canonical "tool starting" 事件。**这个 flush 点是 F-52 的关键**:它让「一轮一次 OutResult」和「中途能看到进度」不冲突,并且因为 flush 会清空 pendingText,最终 EventResult 永不重复已发出的文本 |
 | `tool_execution_update` | `toolCallId`, `partialResult` | (log debug) | MVP 不暴露 partial；保留接口 |
 | `tool_execution_end` | `toolCallId`, `result`, `isError` | `EventToolEnd{ToolUseID: toolCallId, Name: <from start>, Output: stringified(result), IsError: isError}` | — |
-| `message_end` `{message:{role:"assistant", stopReason}}` | `message.{content[], usage, stopReason}` | `EventResult{Text: <joined assistant text>, IsError: stopReason=="error", Subtype: stopReason, Usage: <usage payload>}` | **不切 FSM**；`Result.Usage` 与 assistant text 在**同**一 wire event 上共载（pi 把 `usage` 内嵌在 `message_end`），runtime 不需要 buffer OutResult 等待 usage 晚到 |
+| `message_end` `{message:{role:"assistant", stopReason}}` | `message.{content[], usage, stopReason}` | ⟪F-52⟫ **no-op（记录 `lastMessageText` / `stopReason` / `lastUsage`）** | **不切 FSM**。一个 turn 可含多条 assistant message(text → toolCall → toolResult → 下一条),原实现逐条 emit 会得到「一条 message 一个 result」而非「一轮一个」。usage **覆盖**不累加:每次 API call 的 input 侧已含全部历史,是上下文占用**快照**,累加会按调用次数倍数虚高 |
 | `message_end` `{message:{role:"toolResult"}}` | `toolCallId`, `content[]` | (log debug；合并入 tool_execution_end) | — |
 | `message_end.usage`（同 row 触发） | `usage.{input,output,cacheRead,cacheWrite,totalTokens,cost.*}` | **co-located on `EventResult.Usage`** | 不再独立 emit `EventUsage` 事件——reasoning: 见 [F-49 §1.9 bridge 抽象统一](./F-49-compaction-counter.md) + `internal/gateway/translate.go` 注释。runtime 从 `ev.Result.Usage` 一次取齐；`AgentSession.RecordUsage()` 由 runtime handler 调用，不依赖独立 Event
 | `compaction_start` | `reason` | **（F-49: 屏蔽,`return nil, nil`）** | runtime 不需要瞬态信号;bridge 自己消化协议差异 |

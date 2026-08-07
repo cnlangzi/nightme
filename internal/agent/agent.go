@@ -67,6 +67,28 @@ type EventKind int
 const (
 	// EventText is a stream of text bytes from the CLI (PTY mode) or a
 	// structured assistant message chunk (ACP / SDK modes).
+	//
+	// GRANULARITY CONTRACT (F-52): one EventText is ONE COMPLETE
+	// SEMANTIC BLOCK — a paragraph the user should see as a single
+	// unit. It is NOT a streaming delta.
+	//
+	// This matters because gateway.Translate maps EventText to
+	// OutReply, and OutReply means "append one entry" to the channel's
+	// rolling log. A bridge that forwards per-token deltas therefore
+	// shatters one sentence into dozens of chat bubbles (and dozens of
+	// Feishu card PATCHes). That was the F-52 bug in the pi bridge:
+	// aggregate in the bridge, where the wire's own block boundaries
+	// are visible.
+	//
+	// Conformance:
+	//   - claudecode — yes, one per assistant content block.
+	//   - pi         — yes since F-52; buffers text_delta and emits at
+	//                  text_end / the tool boundary.
+	//   - acp        — NOT YET; still forwards agent_message_chunk
+	//                  deltas verbatim (internal/bridge/acp/session.go).
+	//                  Deliberately out of F-52's scope; its block
+	//                  boundary is stopReason, not text_end.
+	//   - pty        — exempt; raw byte stream with no block structure.
 	EventText EventKind = iota
 
 	// EventPermission is a permission request from the agent. The

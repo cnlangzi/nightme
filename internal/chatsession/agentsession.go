@@ -210,6 +210,15 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 	}
 	as.stat = status
 	as.pid = 0
+	// Pre-install a usable opCtx, exactly as NewAgentSession does.
+	// Without this, every AgentSession restored from disk carries a
+	// nil opCtx until the first Activate(parent), and the default
+	// FlushHook hands that nil straight to the bridge
+	// (chatsession.go: `as.SendBlocks(as.OpContext(), combined)`).
+	// The pi bridge calls ctx.Deadline() on entry, so the FIRST
+	// message after any daemon restart panicked the whole daemon with
+	// a nil-pointer dereference.
+	as.opCtx = context.Background()
 	if e.ExitCode != nil {
 		as.exitCode = e.ExitCode
 	}
@@ -250,6 +259,15 @@ func (as *AgentSession) Status() Status {
 func (as *AgentSession) OpContext() context.Context {
 	as.asMu.RLock()
 	defer as.asMu.RUnlock()
+	// Never hand back a nil ctx. Both constructors pre-install one,
+	// but callers pass this value straight into bridge code that
+	// dereferences it (the pi bridge calls ctx.Deadline() on entry),
+	// so a future constructor that forgets would take the daemon down
+	// rather than fail locally. Defence in depth for a crash that
+	// already happened once.
+	if as.opCtx == nil {
+		return context.Background()
+	}
 	return as.opCtx
 }
 
@@ -266,7 +284,9 @@ func (as *AgentSession) OpContext() context.Context {
 // the /use round-trip.
 //
 // Safe to call when no AS is active — the cancel on a nil opCtx
-// is a no-op.
+// is a no-op. Note that it is ALSO a no-op on an AgentSession that
+// was never activated (opCancel nil); promoteActiveLocked exists so
+// that state is not reachable for an AS the chat is actually using.
 func (as *AgentSession) Background() {
 	as.asMu.Lock()
 	defer as.asMu.Unlock()
@@ -275,20 +295,35 @@ func (as *AgentSession) Background() {
 	}
 }
 
+// IsActivated reports whether Activate has installed a live per-AS
+// ctx (i.e. one derived from the ChatSession, with a working cancel).
+// A pre-installed Background ctx from either constructor does NOT
+// count — it has no cancel, so Background() would be a silent no-op.
+//
+// Used by ChatSession.promoteActiveLocked to make activation
+// idempotent: re-activating on every lookup would cancel the
+// in-flight turn.
+func (as *AgentSession) IsActivated() bool {
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
+	return as.opCancel != nil
+}
+
 // Activate installs a fresh per-AS opCtx derived from parent.
 // Cancels the previous opCtx first (defensive — should already
 // be Background'd by the caller; redundant cancel is a no-op).
 // After Activate returns, OpContext() yields the new ctx; the
 // old one is dead.
 //
-// Used by the runtime to wire up an AS when it becomes active —
-// the /use handler calls Activate(cs.ctx) on the freshly-promoted
-// AS so its SendBlocks can use a ctx that lives for the duration
-// of its "active" tenure.
+// The ONLY caller is ChatSession.promoteActiveLocked, which runs on
+// every change of active AgentSession. Do not call it from handlers:
+// scattering activation is what left non-/use chats with an
+// unactivated AS (nil opCtx -> daemon panic on the first message
+// after a restart, and a Background() that silently did nothing).
 //
-// parent typically comes from ChatSession.Context(); cancelling
-// cs.ctx (via cs.ResetContext) cascades through every AS active
-// on that chat, providing a clean shutdown path.
+// parent comes from ChatSession.Context(); cancelling cs.ctx (via
+// cs.ResetContext) cascades through every AS active on that chat,
+// providing a clean shutdown path.
 func (as *AgentSession) Activate(parent context.Context) {
 	as.asMu.Lock()
 	defer as.asMu.Unlock()

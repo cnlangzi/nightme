@@ -358,22 +358,27 @@ type ResultEvent struct {
 // ContextWindow is the API-reported model context-window size for
 // the turn (Claude Code: `modelUsage[<model>].contextWindow`,
 // Anthropic API: model's own context_window field). Zero means
-// "not reported by this turn" — the runtime's AccumulateUsage
-// leaves LastContextWindowPct untouched in that case (rather
-// than jumping to 0). When non-zero, the runtime computes
+// "not reported by this turn" — bridges that lack the data leave
+// it at zero; the channel footer omits X% in that case rather
+// than showing 0%.
+//
+// ContextWindowPct (see struct field below) is the per-turn
+// context-fill percentage, bridge-computed via the Doc 1 formula:
 //
 //	pct = (InputTokens + OutputTokens + CacheCreation + CacheRead)
 //	     / ContextWindow * 100
 //
-// as the per-turn context-window usage snapshot. Doc 1 formula,
-// exact (no approximation), every input is a wire field, the
-// denominator is API-provided per turn — no client-side hardcoded
-// model table. See docs/feat/F-45-session-footer.md §1.5 / §1.6.
+// i.e. exact wire fields divided by API-reported window — no
+// client-side model table needed. The runtime does NOT recompute
+// or overwrite this; bridges populate it (claudecode:
+// `modelUsage.contextWindow`), the channel footer renders it
+// verbatim as the "X%" segment. See
+// docs/feat/F-45-session-footer.md §1.5 / §1.6.
 type UsageEvent struct {
 	// InputTokens is the non-cached input token count.
 	InputTokens int
 
-	// OutputTokens is the generated output token count.
+	// OutputTokens is the generated output token count this turn.
 	OutputTokens int
 
 	// CacheCreationInputTokens is the input tokens that wrote to
@@ -393,25 +398,36 @@ type UsageEvent struct {
 	// (tokens). Bridges populate from `modelUsage.<model>.contextWindow`
 	// when present. See struct doc above for semantics.
 	ContextWindow int
+
+	// ContextWindowPct is the per-turn context-fill percentage
+	// (0–100), bridge-computed via the Doc 1 formula in the
+	// struct doc. The runtime does NOT recompute or overwrite
+	// this; the channel footer renders it verbatim.
+	ContextWindowPct float64
 }
 
-// UsageInfo is the cumulative form of UsageEvent — populated by
-// the runtime as it observes EventUsage events arriving from
-// bridges, and stamped onto OutboundMessage.SessionContext for
-// main-chat footer rendering (see docs/feat/F-45-session-footer.md).
+// UsageInfo is the **per-turn snapshot** form of UsageEvent — what
+// bridges emit on EventResult / EventDone and what the channel
+// footer reads from SessionContext.Usage (see
+// docs/feat/F-45-session-footer.md).
 //
-// Lives in the agent package (not gateway) because the cumulative
-// state is owned by AgentSession, which lives in internal/chatsession
-// and cannot reverse-import gateway. gateway re-exports UsageInfo
-// as a type alias for ABI compatibility with existing OutUsage
-// payload code (translate.go:158).
+// IMPORTANT: this struct is NOT cumulative. Each event carries its
+// own snapshot; the runtime does not sum across turns, and
+// AgentSession no longer persists any cross-turn totals. A new
+// bridge event is the only way a new value flows in.
+//
+// Lives in the agent package (not gateway) because the type is
+// referenced by both agent (events) and chatsession (AgentSession).
+// gateway re-exports UsageInfo as a type alias for ABI
+// compatibility with the typed `Usage *UsageInfo` field on
+// OutboundMessage (translate.go:158).
 //
 // The 4 token fields are independent counters — IN and CacheRead
 // are NOT additive (Anthropic API exposes them as separate fields;
 // InputTokens is non-cached input only, not the sum).
 type UsageInfo struct {
-	// InputTokens is the non-cached input token count from the
-	// last LLM call (Anthropic API: input_tokens field).
+	// InputTokens is the non-cached input token count from this
+	// turn's LLM call (Anthropic API: input_tokens field).
 	// Cache hits are NOT included — see CacheReadInputTokens.
 	InputTokens int
 
@@ -427,8 +443,9 @@ type UsageInfo struct {
 	// prompt cache (Anthropic API: cache_read_input_tokens).
 	CacheReadInputTokens int
 
-	// CostUSD is the per-turn cost in USD; 0 when unknown /
-	// not reported. Cumulative state sums across turns.
+	// CostUSD is the per-turn cost in USD reported by the API
+	// (Claude Code: result.total_cost_usd). Forwarded verbatim —
+	// the client never computes cost. 0 when the API didn't report.
 	CostUSD float64
 }
 

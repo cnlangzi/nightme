@@ -1,4 +1,4 @@
-// Package feishu implements auth.Provider for the Feishu (飞书) channel.
+// Package feishu implements login.Provider for the Feishu (飞书) channel.
 //
 // The provider wraps the larksuite/oapi-sdk-go v3 `registration`
 // scene: it asks Feishu for a device code, prints the verification
@@ -7,7 +7,7 @@
 // page (or ctx is cancelled).
 //
 // Upon success the registration returns the new App's ClientID /
-// ClientSecret, which we surface as a generic auth.Credentials. The
+// ClientSecret, which we surface as a generic login.Credentials. The
 // CLI is responsible for persisting them into the on-disk Config.
 package feishu
 
@@ -21,13 +21,13 @@ import (
 
 	"github.com/larksuite/oapi-sdk-go/v3/scene/registration"
 
-	"github.com/cnlangzi/nightme/internal/auth"
+	"github.com/cnlangzi/nightme/internal/login"
 )
 
-// FeishuAuthOptions configures a single auth flow run. AppPreset and
-// DefaultAddons are merged with built-in fallbacks in NewFeishuAuth
+// Options configures a single login flow run. AppPreset and
+// DefaultAddons are merged with built-in fallbacks in New
 // so callers only need to set what they care about.
-type FeishuAuthOptions struct {
+type Options struct {
 	// Addons overrides the default scopes/events. nil = use
 	// DefaultAddons.
 	Addons *registration.AppAddons
@@ -51,20 +51,20 @@ type FeishuAuthOptions struct {
 	Out io.Writer
 }
 
-// FeishuAuth is an auth.Provider for Feishu.
-type FeishuAuth struct {
-	opts   FeishuAuthOptions
+// Provider is a login.Provider for Feishu.
+type Provider struct {
+	opts   Options
 	addons *registration.AppAddons
 	preset *registration.AppPreset
 	out    io.Writer
 }
 
-// NewFeishuAuth returns a ready-to-Login Provider. opts.Addons is
+// New returns a ready-to-Login Provider. opts.Addons is
 // defaulted to DefaultAddons(); opts.AppPreset is defaulted to
 // DefaultAppPreset(); opts.Out falls back to os.Stdout.
 //
 // ExistingAppID and CreateOnly pass through unchanged.
-func NewFeishuAuth(opts FeishuAuthOptions) *FeishuAuth {
+func New(opts Options) *Provider {
 	addons := opts.Addons
 	if addons == nil {
 		addons = DefaultAddons()
@@ -77,7 +77,7 @@ func NewFeishuAuth(opts FeishuAuthOptions) *FeishuAuth {
 	if out == nil {
 		out = os.Stdout
 	}
-	return &FeishuAuth{
+	return &Provider{
 		opts:   opts,
 		addons: addons,
 		preset: preset,
@@ -85,8 +85,8 @@ func NewFeishuAuth(opts FeishuAuthOptions) *FeishuAuth {
 	}
 }
 
-// Name implements auth.Provider.
-func (f *FeishuAuth) Name() string { return "feishu" }
+// Name implements login.Provider.
+func (f *Provider) Name() string { return "feishu" }
 
 // Login runs the device-authorization flow against Feishu and
 // returns the freshly-issued credentials. It blocks until the user
@@ -96,7 +96,7 @@ func (f *FeishuAuth) Name() string { return "feishu" }
 // does the heavy lifting (HTTP, polling, error wrapping). All we add
 // is the QR callback, the status callback, and a sentinel-error wrap
 // so callers can errors.Is-match without depending on the SDK.
-func (f *FeishuAuth) Login(ctx context.Context) (*auth.Credentials, error) {
+func (f *Provider) Login(ctx context.Context) (*login.Credentials, error) {
 	opts := &registration.Options{
 		AppID:      f.opts.ExistingAppID,
 		CreateOnly: f.opts.CreateOnly,
@@ -113,11 +113,11 @@ func (f *FeishuAuth) Login(ctx context.Context) (*auth.Credentials, error) {
 	result, err := registration.RegisterApp(ctx, opts)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			return nil, fmt.Errorf("feishu: %w: %v", auth.ErrAuthTimeout, err)
+			return nil, fmt.Errorf("feishu: %w: %v", login.ErrLoginTimeout, err)
 		}
 		var regErr *registration.RegisterAppError
 		if errors.As(err, &regErr) {
-			return nil, fmt.Errorf("feishu: %w: %s: %s", auth.ErrAuthFailed, regErr.Code, regErr.Description)
+			return nil, fmt.Errorf("feishu: %w: %s: %s", login.ErrLoginFailed, regErr.Code, regErr.Description)
 		}
 		return nil, fmt.Errorf("feishu: register: %w", err)
 	}
@@ -126,7 +126,7 @@ func (f *FeishuAuth) Login(ctx context.Context) (*auth.Credentials, error) {
 	if f.preset != nil {
 		name = f.preset.Name
 	}
-	return &auth.Credentials{
+	return &login.Credentials{
 		AppID:     result.ClientID,
 		AppSecret: result.ClientSecret,
 		AppName:   name,
@@ -142,7 +142,7 @@ func (f *FeishuAuth) Login(ctx context.Context) (*auth.Credentials, error) {
 // OnStatusChange callback: the SDK calls OnStatusChange on every
 // poll cycle while waiting, so printing there would spam the
 // terminal once a second for ten minutes.
-func (f *FeishuAuth) printQRCode(info *registration.QRCodeInfo) {
+func (f *Provider) printQRCode(info *registration.QRCodeInfo) {
 	fmt.Fprintf(f.out, "Scan this QR code with Feishu mobile, or open this URL:\n%s\n(expires in %d seconds)\n\n",
 		info.URL, info.ExpireIn)
 	// Errors here mean stdout is broken (closed pipe); nothing for
@@ -156,7 +156,7 @@ func (f *FeishuAuth) printQRCode(info *registration.QRCodeInfo) {
 // human running a CLI actually cares about. "polling" is suppressed
 // entirely — the "Waiting…" line printed alongside the QR already
 // conveys that, and printing on every poll would spam the terminal.
-func (f *FeishuAuth) printStatus(info *registration.StatusChangeInfo) {
+func (f *Provider) printStatus(info *registration.StatusChangeInfo) {
 	switch info.Status {
 	case registration.StatusPolling:
 		// Silent: covered by the "Waiting…" line in printQRCode.
@@ -174,7 +174,7 @@ func (f *FeishuAuth) printStatus(info *registration.StatusChangeInfo) {
 // DefaultAppPreset returns the brand default pre-fill for the
 // consent page: the app name "NightMe" with the tagline
 // "Sleep tight, code all night.". Callers can override any field
-// at construction time via FeishuAuthOptions.AppPreset; the user
+// at construction time via Options.AppPreset; the user
 // can still edit them on the consent page before submitting.
 func DefaultAppPreset() *registration.AppPreset {
 	return &registration.AppPreset{

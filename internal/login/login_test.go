@@ -1,4 +1,4 @@
-package auth
+package login
 
 import (
 	"context"
@@ -28,16 +28,16 @@ func (f *fakeProvider) Login(_ context.Context) (*Credentials, error) {
 // stops compiling, the interface changed — update fakes too.
 func TestProvider_Interface(t *testing.T) {
 	var _ Provider = (*fakeProvider)(nil)
-	var _ Provider = (*feishuAuthStub)(nil)
+	var _ Provider = (*feishuStub)(nil)
 }
 
-// feishuAuthStub exists so the interface check covers a second
-// concrete type. The real FeishuAuth lives in internal/auth/feishu
+// feishuStub exists so the interface check covers a second
+// concrete type. The real feishu Provider lives in internal/login/feishu
 // and cannot be imported here without an import cycle.
-type feishuAuthStub struct{ name string }
+type feishuStub struct{ name string }
 
-func (f *feishuAuthStub) Name() string                                  { return f.name }
-func (f *feishuAuthStub) Login(_ context.Context) (*Credentials, error) { return nil, nil }
+func (f *feishuStub) Name() string                                  { return f.name }
+func (f *feishuStub) Login(_ context.Context) (*Credentials, error) { return nil, nil }
 
 // TestProvider_Name_And_Login verifies the fake behaves as the
 // interface contract promises: name is sticky, errors propagate.
@@ -96,7 +96,7 @@ func TestCredentials_JSON(t *testing.T) {
 // TestErrors_AreDistinct makes sure the sentinel errors stay
 // distinct so errors.Is matching keeps working in callers.
 func TestErrors_AreDistinct(t *testing.T) {
-	sentinels := []error{ErrAuthTimeout, ErrAuthFailed}
+	sentinels := []error{ErrLoginTimeout, ErrLoginFailed}
 	for i, a := range sentinels {
 		for j, b := range sentinels {
 			if i == j {

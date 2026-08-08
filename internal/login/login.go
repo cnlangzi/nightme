@@ -1,6 +1,6 @@
-// Package auth defines the per-channel credential onboarding contract.
+// Package login defines the per-channel credential onboarding contract.
 //
-// Each channel Feishu, Lark, WhatsApp, ... exposes a Provider that
+// Each channel (Feishu, Lark, WhatsApp, ...) exposes a Provider that
 // performs the interactive flow which yields a Credentials struct. The
 // returned credentials are written into the on-disk Config; Channel
 // adapters then read them at startup (see F-08).
@@ -9,7 +9,7 @@
 // ships only Feishu; the interface is designed to accommodate the
 // international Lark flavour and future channels without changing
 // call sites.
-package auth
+package login
 
 import (
 	"context"
@@ -17,12 +17,12 @@ import (
 	"time"
 )
 
-// Provider performs a channel-specific interactive auth flow and
+// Provider performs a channel-specific interactive login flow and
 // returns credentials suitable for storing in Config.
 //
 // Implementations are expected to honour ctx cancellation: the user
 // gave up, the network died, the timeout elapsed -> return promptly
-// with an error wrapping ErrAuthTimeout or ctx.Err().
+// with an error wrapping ErrLoginTimeout or ctx.Err().
 type Provider interface {
 	// Name returns the channel name (e.g. "feishu", "lark"). It
 	// exists primarily so log lines can attribute a Login call to
@@ -59,12 +59,12 @@ type Credentials struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// ErrAuthTimeout wraps the upstream context-deadline-exceeded path.
+// ErrLoginTimeout wraps the upstream context-deadline-exceeded path.
 // Providers return this (or wrap ctx.Err()) when the user took too
 // long to scan / confirm.
-var ErrAuthTimeout = errors.New("authentication timeout")
+var ErrLoginTimeout = errors.New("login timeout")
 
-// ErrAuthFailed is the generic "the channel rejected the registration"
+// ErrLoginFailed is the generic "the channel rejected the registration"
 // marker. Providers should wrap it with whatever concrete code the
 // channel returned (e.g. feishu's *registration.RegisterAppError).
-var ErrAuthFailed = errors.New("authentication failed")
+var ErrLoginFailed = errors.New("login failed")

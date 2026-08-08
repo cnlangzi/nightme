@@ -1,4 +1,4 @@
-// Package feishu provides the Feishu (Lark) auth Provider for nightme.
+// Package feishu provides the Feishu (Lark) login.Provider for nightme.
 //
 // The Terminal QR renderer (RenderASCII) is also kept here so the
 // feishu-only rendering logic does not leak into the parent package.

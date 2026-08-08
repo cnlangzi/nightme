@@ -9,21 +9,21 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/auth"
 	"github.com/cnlangzi/nightme/internal/config"
+	"github.com/cnlangzi/nightme/internal/login"
 )
 
-// fakeAuthProvider is an auth.Provider that returns whatever the
+// fakeProvider is a login.Provider that returns whatever the
 // test set up. It is the test's handle to "what the QR flow would
 // have produced".
-type fakeAuthProvider struct {
-	creds *auth.Credentials
+type fakeProvider struct {
+	creds *login.Credentials
 	err   error
 	delay time.Duration // simulate >zero Login before returning
 }
 
-func (f *fakeAuthProvider) Name() string { return "feishu" }
-func (f *fakeAuthProvider) Login(ctx context.Context) (*auth.Credentials, error) {
+func (f *fakeProvider) Name() string { return "feishu" }
+func (f *fakeProvider) Login(ctx context.Context) (*login.Credentials, error) {
 	if f.delay > 0 {
 		select {
 		case <-ctx.Done():
@@ -51,8 +51,8 @@ func withTempConfig(t *testing.T) string {
 func TestLogin_Success(t *testing.T) {
 	_ = withTempConfig(t)
 
-	prov := &fakeAuthProvider{
-		creds: &auth.Credentials{
+	prov := &fakeProvider{
+		creds: &login.Credentials{
 			AppID:     "cli_newapp",
 			AppSecret: "sek-ret-1",
 			AppName:   "nightme",
@@ -121,8 +121,8 @@ func TestLogin_AlwaysRebinds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	prov := &fakeAuthProvider{
-		creds: &auth.Credentials{AppID: "new-cli-id", AppSecret: "new-secret"},
+	prov := &fakeProvider{
+		creds: &login.Credentials{AppID: "new-cli-id", AppSecret: "new-secret"},
 	}
 
 	flags := &loginCmdFlags{timeout: 5 * time.Second}
@@ -149,7 +149,7 @@ func TestLogin_AlwaysRebinds(t *testing.T) {
 func TestLogin_ProviderError(t *testing.T) {
 	_ = withTempConfig(t)
 
-	prov := &fakeAuthProvider{err: auth.ErrAuthTimeout}
+	prov := &fakeProvider{err: login.ErrLoginTimeout}
 
 	cmd := newLoginFeishuCmd(&loginCmdFlags{timeout: 5 * time.Second})
 	cmd.SetOut(&bytes.Buffer{})
@@ -159,7 +159,7 @@ func TestLogin_ProviderError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "authentication timeout") {
+	if !strings.Contains(err.Error(), "login timeout") {
 		t.Errorf("error chain does not mention timeout: %v", err)
 	}
 
@@ -181,9 +181,9 @@ func TestLogin_ProviderError(t *testing.T) {
 func TestLogin_ContextDeadline(t *testing.T) {
 	_ = withTempConfig(t)
 
-	prov := &fakeAuthProvider{
+	prov := &fakeProvider{
 		delay: 10 * time.Millisecond,
-		creds: &auth.Credentials{AppID: "x", AppSecret: "x"},
+		creds: &login.Credentials{AppID: "x", AppSecret: "x"},
 	}
 
 	cmd := newLoginFeishuCmd(&loginCmdFlags{timeout: 50 * time.Millisecond})

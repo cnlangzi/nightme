@@ -231,8 +231,8 @@ var _ = slog.Default
 // for the user-reported bug ("first tokens always 0") post the
 // EventResult + EventUsage → single EventResult{Result, Usage}
 // merge. The runtime now stamps SessionContext on the same ch.Send
-// dispatch where AccumulateUsage runs — the footer sees the turn's
-// own tokens on the very first send (cumulative=inTok on turn 1).
+// dispatch where the Usage arrives — the footer sees the turn's
+// own tokens on the very first send.
 //
 // Sequence:
 //   1. EventInit → capture Model
@@ -369,9 +369,9 @@ func TestEventHandler_OutResult_UsageIsPerTurnNotCumulative(t *testing.T) {
 
 // TestEventHandler_OutResult_NilUsageLeavesEmptySessionContext: a
 // ResultEvent with no Usage (zero-usage turn / synthetic message)
-// still ships OutResult, with SessionContext either nil or
-// populated only by Model (no tokens to display). The runtime
-// skips AccumulateUsage for that invocation.
+// still ships OutResult, with SessionContext populated only by
+// Model / Agent (no tokens to display). The runtime is a passive
+// pass-through; nil Usage means the footer Line 2 is omitted.
 func TestEventHandler_OutResult_NilUsageLeavesEmptySessionContext(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()

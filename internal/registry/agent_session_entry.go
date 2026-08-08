@@ -42,14 +42,6 @@ import (
 //	                 first init event lands. Stable for the session
 //	                 identity's lifetime; reset only when bridge New()
 //	                 re-emits EventInit with a new model (post-/new).
-//	CumulativeUsage — F-45: per-AgentSession running total of token /
-//	                 cost stats. Persists across daemon restarts;
-//	                 cleared only by /new (handleNew resets + persists).
-//	                 Legacy entries written before F-45 lack this field;
-//	                 Go JSON unmarshal tolerates missing keys and yields
-//	                 nil pointer (= "never ran", cumulative starts at 0
-//	                 on first EventUsage). Non-nil pointer with all-zero
-//	                 values means "ran but token counts were 0".
 //
 // CompactionCount is the cumulative number of completed context-
 // compaction cycles observed on this AgentSession. F-49 addition.

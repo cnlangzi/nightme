@@ -285,14 +285,14 @@ type DoneEvent struct {
 	// event as the bridge's turn-end signal. Bridges populate this
 	// on the SAME DoneEvent they emit — for one-shot bridges this
 	// happens at process exit; for long-lived bridges (Pi) this
-	// happens at every settled turn. Runtime reads Done.Usage as
-	// the single source of truth (it folds the values into
-	// AgentSession.cumulativeUsage via AccumulateUsage, then stamps
-	// the per-turn snapshot onto OutboundMessage.Usage for the
-	// gateway to forward into SessionContext). nil is a valid
-	// "no usage reported" value (zero-usage turn, synthetic
-	// assistant message, etc.) — runtime simply skips
-	// AccumulateUsage that invocation.
+	// happens at every settled turn. The runtime is a passive
+	// pass-through: it does NOT aggregate across turns and does NOT
+	// fold Usage into any AgentSession state. Channel adapters read
+	// Usage directly from the OutboundMessage (populated by
+	// gateway.Translate from Done.Usage / Result.Usage) and render
+	// it as footer Line 2. nil is a valid "no usage reported" value
+	// (zero-usage turn, synthetic assistant message, etc.) — the
+	// footer omits Line 2 in that case.
 	Usage *UsageEvent
 }
 

@@ -424,6 +424,19 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 			}
 			return
 		}
+		// Decode usage once and share the *UsageEvent pointer
+		// across EventResult (when text/error makes one) and
+		// EventDone. Both events are derived from the same wire
+		// envelope so identical pointers reflect that fact and we
+		// avoid a redundant JSON round-trip per turn.
+		//
+		// F-52: Usage rides on DoneEvent so the runtime can read
+		// it uniformly from the universal prompt-end signal
+		// regardless of whether the bridge emitted a result-
+		// bearing EventResult. For one-shot bridges (Claude Code)
+		// EventDone here marks process exit; for long-lived
+		// bridges it marks turn end.
+		usage := decodeUsage(ev.Usage, ev.ModelUsage)
 		if ev.Result != "" || ev.IsError {
 			result := &agent.ResultEvent{
 				Text:       ev.Result,
@@ -437,23 +450,12 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 			// Co-locating the usage on ResultEvent removes that
 			// path entirely (calc-then-reply invariant now holds by
 			// construction — usage IS on the result event).
-			if u := decodeUsage(ev.Usage, ev.ModelUsage); u != nil {
-				result.Usage = u
-			}
+			result.Usage = usage
 			events <- agent.AgentEvent{
 				Kind:   agent.EventResult,
 				Result: result,
 			}
 		}
-		// F-52: Usage rides on DoneEvent so the runtime can read it
-		// uniformly from the universal prompt-end signal regardless
-		// of whether the bridge emitted a result-bearing EventResult.
-		// For one-shot bridges (Claude Code) EventDone here marks
-		// process exit; for long-lived bridges it marks turn end.
-		// Decode ONCE; reuse the same *UsageEvent on both events so
-		// the runtime's accumulator (which reads Done.Usage) and any
-		// consumer reading Result.Usage get byte-identical data.
-		usage := decodeUsage(ev.Usage, ev.ModelUsage)
 		events <- agent.AgentEvent{
 			Kind: agent.EventDone,
 			Done: &agent.DoneEvent{

@@ -61,9 +61,9 @@ type AgentSession struct {
 	Cwd           string
 
 	// asMu guards every field below. RWMutex so concurrent readers
-	// (Status, Model, CumulativeUsage, CompactionCount, ExitCode,
-	// Handle, Events, PID) don't contend with each other when no
-	// writer is in flight.
+	// (Status, Model, CompactionCount, ExitCode, Handle, Events,
+	// PID) don't contend with each other when no writer is in
+	// flight.
 	asMu sync.RWMutex
 
 	// opCtx is the per-AgentSession operation context — owned by

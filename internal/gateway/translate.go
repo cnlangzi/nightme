@@ -169,7 +169,8 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		// the EventResult-then-EventUsage ordering hazard that
 		// forced the runtime to buffer OutResult. nil usage
 		// (zero-usage turn / synthetic message) is fine — the
-		// runtime simply skips AccumulateUsage that invocation.
+		// runtime is a passive pass-through, so a nil Usage just
+		// means the channel footer omits Line 2.
 		if u := ev.Result.Usage; u != nil {
 			out.Usage = u
 		}

@@ -276,15 +276,13 @@ func TestFormatSessionFooter_StableAcrossReRenders(t *testing.T) {
 
 // TestFormatSessionFooterLines_ContextWindowPct (F-52) covers the
 // "X%" segment: the per-turn context-window usage percentage
-// surfaced from SessionContext.ContextWindowPct. The value is
-// computed in AgentSession.AccumulateUsage (Doc 1 formula); the
-// footer just renders it.
+// surfaced from UsageEvent.ContextWindowPct (bridge-computed via
+// the Doc 1 formula). The footer just renders it.
 //
 // Omit rules:
-//   - ContextWindowPct == 0 → segment dropped (runtime's three
-//     zero-cases: no EventDone-with-Usage yet, model didn't
-//     report ContextWindow, recent ResetCumulative /
-//     RecordCompaction).
+//   - ContextWindowPct == 0 → segment dropped (bridge didn't
+//     expose contextWindow this turn, pi protocol doesn't expose
+//     it yet, or the model simply didn't report it).
 //   - Otherwise renders as "X.Y%" with one decimal place (edge
 //     cases like 99.6% matter for context-window tracking —
 //     "%.0f%%" would round to misleading "100%").

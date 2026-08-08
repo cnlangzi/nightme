@@ -204,10 +204,9 @@ type translator struct {
 	// translating the whole time. Wire events still in the pipe from
 	// the turn the user just abandoned would land in the *fresh*
 	// turnState: an old message_end would stamp its usage onto the
-	// new session (corrupting the context-occupancy number, and
-	// racing handleNew's ResetCumulative), and an old agent_settled
-	// would ship the abandoned reply as the new session's result
-	// card.
+	// new session (corrupting the context-occupancy number on the
+	// bridge's per-turn snapshot), and an old agent_settled would
+	// ship the abandoned reply as the new session's result card.
 	//
 	// Dropping is unconditionally correct in this window: no prompt
 	// has been sent to the new session yet, so nothing arriving here

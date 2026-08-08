@@ -375,10 +375,11 @@ type OutboundMessage struct {
 	// co-located on the wire). nil means "no usage reported"
 	// (zero-usage turn).
 	//
-	// Typed as *UsageEvent (per-event shape) rather than *UsageInfo
-	// (cumulative shape) because the payload IS a single turn's
-	// data, not a running total. SessionContext.CumulativeUsage
-	// is the cumulative form, populated from runtime sums.
+	// Typed as *UsageEvent (per-event shape) because the payload IS
+	// a single turn's data, not a running total. The runtime is a
+	// passive pass-through — it does NOT aggregate Usage across
+	// turns; the channel footer reads out.Usage directly and
+	// surfaces it as Line 2 of the footer.
 	Usage *agent.UsageEvent
 	// MessageState carries the payload for OutMessageState /
 	// OutMessageStateRemoved kinds (F-31). Channel reads from this
@@ -399,10 +400,10 @@ type OutboundMessage struct {
 	// SessionContext (F-45) is the runtime-stamped snapshot of the
 	// AgentSession that produced this outbound event. It carries
 	// everything the main-chat footer needs (Agent / Model /
-	// CumulativeUsage) as a single atomic value — not three
-	// scattered fields — so Channel render paths see one typed
-	// payload and future metadata additions don't break the
-	// Channel interface.
+	// Usage, plus Workspace / GitStatus / CompactionCount) as a
+	// single atomic value — not a scattered set of fields — so
+	// Channel render paths see one typed payload and future
+	// metadata additions don't break the Channel interface.
 	//
 	// Stamped ONLY on OutReply / OutResult / OutTaskCreate /
 	// OutTaskUpdate by the runtime's newEventHandler closure. nil
@@ -431,12 +432,17 @@ type OutboundMessage struct {
 //	                  AgentSession.Model which the runtime caches
 //	                  on first EventInit. Empty before EventInit
 //	                  lands; footer omits the segment when "".
-//	CumulativeUsage — per-AgentSession running total of token /
-//	                  cost stats as of this event's emission.
-//	                  Sourced from AgentSession.CumulativeUsage;
-//	                  captured by VALUE (struct copy under RWMutex)
-//	                  so Channel can render at leisure. All 4
-//	                  fields are zero on a fresh /new'd session.
+//	Usage           — per-turn snapshot from the bridge event that
+//	                  produced this OutboundMessage (a pointer to
+//	                  agent.UsageEvent, copied off out.Usage by
+//	                  sessionContextInto). nil when the bridge
+//	                  event did not carry usage (OutReply chunks
+//	                  during streaming, etc.); the footer omits
+//	                  Line 2 entirely in that case. The runtime
+//	                  is a passive pass-through — it does NOT
+//	                  aggregate across turns, so this snapshot is
+//	                  always the single turn's bridge-reported
+//	                  value, not a running total.
 type SessionContext struct {
 	Agent string
 	Model string

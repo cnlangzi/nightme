@@ -20,14 +20,18 @@
 //       https://yb.tencent.com/s/3G6HphjOxM70 is the sum of the
 //       three, NOT uncached-only.)
 // out = OutputTokens
-// X%  = per-turn context-window usage percentage. Computed
-//       client-side by AgentSession.AccumulateUsage via the
-//       Doc 1 formula: (in + out) / ContextWindow * 100, where
-//       ContextWindow is the API-reported model window size
-//       (Claude Code: `modelUsage[<model>].contextWindow`).
-//       Skipped when ContextWindow == 0 (model didn't report
-//       it) or used == 0 — both leave the previous snapshot
-//       in place. See F-52 §1.5 / §1.6 for the full rules.
+// X%  = per-turn context-window usage percentage. Bridge-computed
+//       via the Doc 1 formula:
+//         (InputTokens + OutputTokens + CacheCreation + CacheRead)
+//         / ContextWindow * 100
+//       where ContextWindow is the API-reported model window size
+//       (Claude Code: `modelUsage[<model>].contextWindow`). The
+//       bridge owns this calculation — the runtime does NOT
+//       recompute pct, it just passes UsageEvent.ContextWindowPct
+//       through to the channel footer. 0 means "not reported"
+//       (model didn't expose contextWindow this turn, or pi
+//       protocol doesn't expose it yet) and the footer omits X%
+//       rather than showing 0%.
 // $cost = API-reported per-turn cost (Claude Code:
 //       `result.total_cost_usd`). Forwarded verbatim into
 //       agent.UsageEvent.CostUSD — the footer NEVER computes
@@ -84,11 +88,10 @@ import (
 // (InputTokens + CacheCreationInputTokens + CacheReadInputTokens)
 // into a single number per the Tencent YB doc — the "in" stat
 // is the input-side context-window total, not "uncached input
-// only". "X%" is the per-turn context-window usage snapshot
-// (computed client-side in AccumulateUsage from the
-// API-reported ContextWindow + used tokens; see F-52 Doc 1).
-// "$cost" is the API-reported total_cost_usd — we never
-// compute it client-side.
+// only". "X%" is the per-turn context-window usage snapshot,
+// bridge-computed via Doc 1 (see F-52 §1.5 / §1.6). "$cost" is
+// the API-reported total_cost_usd — we never compute it
+// client-side.
 //
 //	💰:「 20.5k / 1.5k · 10.5% · $0.087 」
 //
@@ -99,11 +102,10 @@ import (
 //                 Renders as "<in> / <out>" (zero side shows
 //                 "0" — rare in practice, e.g. compaction-only
 //                 turn with no new input).
-//       X%      : omitted when ctx.ContextWindowPct == 0. The
-//                 runtime's three zero-cases (no
-//                 EventDone-with-Usage yet / model didn't report
-//                 ContextWindow on the latest turn / recent
-//                 ResetCumulative or RecordCompaction) all
+//       X%      : omitted when Usage.ContextWindowPct == 0. The
+//                 zero-cases (bridge didn't expose contextWindow
+//                 this turn, pi protocol doesn't expose it yet,
+//                 or the model simply didn't report it) all
 //                 surface as "no X% segment" rather than a fake
 //                 0% (F-52 §1.6).
 //       $cost   : omitted when CostUSD == 0 (API didn't report).

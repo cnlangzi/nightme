@@ -871,9 +871,14 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		// gateway.Translate) → SessionContext.Usage (via
 		// sessionContextInto below) → channel footer. The runtime
 		// is a passive pass-through; no accumulation, no dedup,
-		// no priority. Bridges can populate ResultEvent.Usage
-		// and/or DoneEvent.Usage — the channel renders what's
-		// there.
+		// no priority. Usage rides on EventResult (populated by
+		// the bridges via ResultEvent.Usage) — DoneEvent.Usage is
+		// not currently surfaced because gateway.Translate drops
+		// EventDone events before the runtime stamps
+		// SessionContext. Bridges that only emit EventDone-with-
+		// Usage (no EventResult) will not see their Usage in the
+		// footer; only pi-style bridges that have an explicit
+		// EventResult path will.
 		//
 		// PersistIfDirty is no longer driven from here (the
 		// cumulative-dirty trigger is gone with cross-turn usage

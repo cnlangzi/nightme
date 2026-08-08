@@ -424,8 +424,9 @@ func TestPumpStream_Result_EmptyText_NoResultEvent(t *testing.T) {
 
 func TestPumpStream_Result_NoUsagePayload(t *testing.T) {
 	// When usage is absent on the wire, ResultEvent.Usage stays
-	// nil and runtime's AccumulateUsage skips that turn. Result +
-	// Done still fire.
+	// nil — the runtime is a passive pass-through, so a nil Usage
+	// just means the channel footer omits Line 2 for this event.
+	// Result + Done still fire.
 	input := `{"type":"result","subtype":"success","result":"done","session_id":"s_test_001"}` + "\n"
 	events := make(chan agent.AgentEvent, 4)
 	var wg sync.WaitGroup

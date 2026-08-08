@@ -94,8 +94,8 @@ func TestList_ShowsResumeID(t *testing.T) {
 	for _, r := range rows {
 		if r.AgentSessionID == asRun.ID {
 			found = true
-			if r.ResumeID != asRun.ResumeID {
-				t.Errorf("ResumeID = %q, want %q", r.ResumeID, asRun.ResumeID)
+			if r.SessionID != asRun.SessionID {
+				t.Errorf("SessionID = %q, want %q", r.SessionID, asRun.SessionID)
 			}
 		}
 	}
@@ -181,7 +181,7 @@ func TestList_SortedByLastRunAt(t *testing.T) {
 }
 
 // TestList_PreservesExitedWithResumeID asserts that an exited
-// AgentSession carrying a non-empty ResumeID is NOT garbage-collected
+// AgentSession carrying a non-empty SessionID is NOT garbage-collected
 // by `nightme list`. The resume id is the only durable handle the
 // next respawn of the same (chat, agent, cwd) tuple has onto the
 // agent's prior session (e.g. Claude Code's
@@ -200,7 +200,7 @@ func TestList_PreservesExitedWithResumeID(t *testing.T) {
 		Cwd:           "/tmp/w",
 		Status:        registry.StatusExited,
 		ExitCode:      &code,
-		ResumeID:      "sess-preserve-me",
+		SessionID:      "sess-preserve-me",
 		CreatedAt:     now,
 		LastRunAt:     now,
 	}); err != nil {
@@ -216,7 +216,7 @@ func TestList_PreservesExitedWithResumeID(t *testing.T) {
 	}
 
 	if gced != 0 {
-		t.Errorf("exited entry with ResumeID was GC'd (gced=%d); it must be preserved", gced)
+		t.Errorf("exited entry with SessionID was GC'd (gced=%d); it must be preserved", gced)
 	}
 	if _, ok := asFile.Get("as_exited_resume"); !ok {
 		t.Errorf("on-disk agent_sessions.json lost the resume-id-bearing exited row")

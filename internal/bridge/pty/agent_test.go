@@ -48,7 +48,7 @@ func TestAgentDetect(t *testing.T) {
 
 // TestAgentStartEndToEnd spawns /bin/echo under a PTY and verifies a
 // complete session round-trip: Start returns a non-nil session, the
-// Events channel yields EventText containing "hello", and Close
+// Events channel yields EventAgentText containing "hello", and Close
 // releases the bridge cleanly.
 func TestAgentStartEndToEnd(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -74,7 +74,7 @@ drain:
 			if !ok {
 				break drain
 			}
-			if ev.Kind == agent.EventText && contains(ev.Text, "hello") {
+			if ev.Kind == agent.EventAgentText && contains(ev.Text, "hello") {
 				gotHello = true
 				break drain
 			}

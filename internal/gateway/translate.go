@@ -25,7 +25,7 @@ import (
 )
 
 // thinkingPrefix is the sentinel the claudecode bridge prepends to
-// every thinking block before emitting EventText. Renderer.render
+// every thinking block before emitting EventAgentText. Renderer.render
 // (and Channel-specific renderers) use it to tell thinking from a
 // final reply and surface them with different icons (💭 vs 💬).
 const thinkingPrefix = "[思考] "
@@ -46,7 +46,7 @@ const thinkingPrefix = "[思考] "
 // Web HTML).
 func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 	switch ev.Kind {
-	case agent.EventText:
+	case agent.EventAgentText:
 		text := strings.TrimSpace(ev.Text)
 		if text == "" {
 			return OutboundMessage{}, false
@@ -64,7 +64,7 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 			Text:   text,
 		}, true
 
-	case agent.EventToolStart:
+	case agent.EventAgentToolStart:
 		if ev.ToolStart == nil {
 			return OutboundMessage{}, false
 		}
@@ -88,7 +88,7 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 			},
 		}, true
 
-	case agent.EventToolEnd:
+	case agent.EventAgentToolEnd:
 		if ev.ToolEnd == nil {
 			return OutboundMessage{}, false
 		}
@@ -96,7 +96,7 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		if name == "" {
 			name = "tool"
 		}
-		// Same as EventToolStart above — ToolInfo carries the
+		// Same as EventAgentToolStart above — ToolInfo carries the
 		// generic fields; gateway does not format Text or use
 		// Meta for tool data.
 		return OutboundMessage{
@@ -106,11 +106,11 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 				Name:   name,
 				Args:   ev.ToolEnd.Args,
 				Output: ev.ToolEnd.Output,
-				Err:    ev.ToolEnd.Err,
+				Err:    ev.Err,
 			},
 		}, true
 
-	case agent.EventPermission:
+	case agent.EventAgentPermission:
 		if ev.Permission == nil {
 			return OutboundMessage{}, false
 		}
@@ -129,31 +129,31 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 			},
 		}, true
 
-	case agent.EventDone, agent.EventError:
+	case agent.EventAgentDone, agent.EventAgentError:
 		// Terminal events are reflected in the receipt's terminal
 		// header; the Stage 3 Feishu renderer flips the reaction
 		// emoji and edits the header line. We don't emit a separate
 		// OutboundMessage for them here.
 		//
-		// F-52 note: Done.Usage (when populated by the bridge) is
-		// read directly by the runtime's newEventHandler BEFORE
-		// Translate returns — see cmd/nightme/run.go. Translate
-		// itself does not need to surface it; the runtime is the
-		// single accumulator and reads from Done.Usage uniformly
-		// regardless of whether the bridge also emitted an
-		// EventResult-bearing text.
+		// Translate is a pass-through — runtime (newEventHandler in
+		// cmd/nightme/run.go) does NOT read Done.Usage separately;
+		// per-turn Usage flows exclusively from EventAgentResult.Usage
+		// (co-located with the final assistant reply). Bridges that
+		// only emit EventAgentDone-with-Usage and no EventAgentResult will not
+		// see their Usage reach the channel footer — by design
+		// (F-45 §1.5 / F-52).
 		return OutboundMessage{}, false
 
-	case agent.EventResult:
+	case agent.EventAgentResult:
 		// Final assistant reply (Claude Code: result.Result).
-		// Distinct from EventText so channels can render it with a
+		// Distinct from EventAgentText so channels can render it with a
 		// dedicated icon (📝) instead of as a rolling-log entry.
 		// We emit even when Text is empty AND IsError is true so
 		// the channel can flip its header to an error state.
 		if ev.Result == nil {
 			return OutboundMessage{}, false
 		}
-		if ev.Result.Text == "" && !ev.Result.IsError {
+		if ev.Result.Text == "" && ev.Err == nil {
 			return OutboundMessage{}, false
 		}
 		out := OutboundMessage{
@@ -166,48 +166,39 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		// they took Text from (Claude Code result.usage +
 		// result.modelUsage; Pi message_end.usage on the assistant
 		// role). Co-locating the usage on the OutResult eliminates
-		// the EventResult-then-EventUsage ordering hazard that
+		// the EventAgentResult-then-EventUsage ordering hazard that
 		// forced the runtime to buffer OutResult. nil usage
 		// (zero-usage turn / synthetic message) is fine — the
 		// runtime is a passive pass-through, so a nil Usage just
 		// means the channel footer omits Line 2.
 		if u := ev.Result.Usage; u != nil {
-			out.Usage = u
+			out.Usage = (*UsageInfo)(u)
 		}
 		return out, true
 
-	case agent.EventCompaction:
-		// F-49: compaction is now a runtime-side concern, not a
-		// wire-level one. The runtime handler in
-		// cmd/nightme/run.go::newEventHandler calls
-		// s.RecordCompaction() directly when it sees an
-		// EventCompaction — bumping the AgentSession counter and
-		// resetting the per-cycle token stats. No OutboundMessage
-		// is produced (no transient "✶ Compacting…" marker), no
-		// channel side effect. The count surfaces to the user
-		// later via SessionContext.CompactionCount → Footer Line 1
-		// "🗜 N". See docs/feat/F-49-compaction-counter.md §1.3 /
-		// §1.9.
-		return OutboundMessage{}, false
-
-	case agent.EventAgentConnected:
+	case agent.EventAgentReady:
 		// Session bootstrap (Claude Code: system/init). Carries
 		// session_id + model; channels surface them in the receipt
 		// header so users can identify the session for /resume.
 		// agent_name + workspace are forwarded too so the Feishu
 		// receipt card's foot note can render
-		// "Agent | cwd | tokens" (see docs/channel/feishu.md §9.3).
-		if ev.Connected == nil {
-			return OutboundMessage{}, false
-		}
+		// "Agent | cwd · tokens" (see docs/channel/feishu.md §9.3).
+		//
+		// Note: bridges always stamp the 5 context fields on every
+		// event (incl. EventAgentReady), so we just pass them
+		// through. No "if Ready != nil" guard needed.
 		return OutboundMessage{
 			ChatID:    chatID,
 			Kind:      OutInit,
-			Text:      fmt.Sprintf("session initialized (model: %s)", ev.Connected.Model),
-			Connected: ev.Connected,
+			Text:      fmt.Sprintf("session initialized (model: %s)", ev.Model),
+			SessionID: ev.SessionID,
+			Model:     ev.Model,
+			AgentName: ev.AgentName,
+			Workspace: ev.Workspace,
+			Branch:    ev.Branch,
 		}, true
 
-	case agent.EventTaskCreate:
+	case agent.EventAgentTaskCreate:
 		// F-38: full task snapshot replaces the per-turn checklist.
 		// The Feishu adapter writes it into the current receipt and
 		// PATCHes the card; other Channels may render or drop.
@@ -222,9 +213,9 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 			TaskList: ev.TaskList,
 		}, true
 
-	case agent.EventTaskUpdate:
+	case agent.EventAgentTaskUpdate:
 		// F-38: subsequent mutations / deletions. Same snapshot
-		// semantics as EventTaskCreate; an empty Items slice is a
+		// semantics as EventAgentTaskCreate; an empty Items slice is a
 		// valid "clear the checklist" signal (e.g. all tasks done).
 		if ev.TaskList == nil {
 			return OutboundMessage{}, false

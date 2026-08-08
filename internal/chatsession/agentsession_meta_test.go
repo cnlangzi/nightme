@@ -32,7 +32,7 @@ func TestSetModel_Idempotent(t *testing.T) {
 	}
 
 	// Empty incoming value must NOT overwrite a captured model —
-	// bridges may re-emit EventAgentConnected with blank Model after a
+	// bridges may re-emit EventAgentReady with blank Model after a
 	// child restart and we don't want to wipe the prior capture.
 	as.SetModel("")
 	if got := as.Model(); got != "opus-4-5" {
@@ -40,7 +40,7 @@ func TestSetModel_Idempotent(t *testing.T) {
 	}
 
 	// Non-empty replacement IS allowed (e.g. /new reset via
-	// bridge.New() emitting a fresh EventAgentConnected with a new model).
+	// bridge.New() emitting a fresh EventAgentReady with a new model).
 	as.SetModel("haiku-4-5")
 	if got := as.Model(); got != "haiku-4-5" {
 		t.Fatalf("Model() after replacement SetModel = %q, want %q", got, "haiku-4-5")
@@ -77,21 +77,21 @@ func TestPersistIfDirty_PassesThrough(t *testing.T) {
 
 func TestEntry_RoundtripPreserves(t *testing.T) {
 	// The persistence roundtrip covers the per-AgentSession
-	// fields that DO get persisted (Model, ResumeID, status,
+	// fields that DO get persisted (Model, SessionID, status,
 	// PID). Usage is no longer on the entry — per-turn usage
 	// snapshots flow from bridge → out.Usage → channel footer
 	// without touching AgentSession state.
 	as := newTestAgentSession()
 	as.SetModel("opus-4-5")
-	as.SetResumeID("resume_xyz")
+	as.SetSessionID("resume_xyz")
 	as.pid = 42
 
 	entry := as.Entry()
 	if entry.Model != "opus-4-5" {
 		t.Fatalf("entry.Model = %q, want opus-4-5", entry.Model)
 	}
-	if entry.ResumeID != "resume_xyz" {
-		t.Fatalf("entry.ResumeID = %q, want resume_xyz", entry.ResumeID)
+	if entry.SessionID != "resume_xyz" {
+		t.Fatalf("entry.SessionID = %q, want resume_xyz", entry.SessionID)
 	}
 
 	data, err := json.Marshal(entry)
@@ -107,8 +107,8 @@ func TestEntry_RoundtripPreserves(t *testing.T) {
 	if restored.Model() != "opus-4-5" {
 		t.Fatalf("restored Model() = %q, want opus-4-5", restored.Model())
 	}
-	if restored.ResumeID() != "resume_xyz" {
-		t.Fatalf("restored ResumeID() = %q, want resume_xyz", restored.ResumeID())
+	if restored.SessionID() != "resume_xyz" {
+		t.Fatalf("restored SessionID() = %q, want resume_xyz", restored.SessionID())
 	}
 }
 

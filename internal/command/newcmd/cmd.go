@@ -77,7 +77,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// work the user already submitted.
 
 	// Usage stats are now per-turn (the runtime is a passive
-	// pass-through; the next EventResult / EventDone naturally
+	// pass-through; the next EventAgentResult / EventAgentDone naturally
 	// carries the new context's snapshot), so nothing on the
 	// AgentSession needs clearing here — the bridge's New() has
 	// already reset the conversation context, and any future

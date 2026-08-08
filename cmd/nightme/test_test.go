@@ -47,7 +47,7 @@ func listFixture(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessio
 		t.Fatalf("Upsert cs1: %v", err)
 	}
 
-	// AgentSession #1 (running, with a ResumeID).
+	// AgentSession #1 (running, with a SessionID).
 	asRun := &registry.AgentSessionEntry{
 		ID:            "as_run_1",
 		ChatSessionID: cs1.ID,
@@ -55,7 +55,7 @@ func listFixture(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessio
 		Cwd:           cs1.ActiveCwd,
 		PID:           12345,
 		Status:        registry.StatusRunning,
-		ResumeID:      "sess-claude-abc",
+		SessionID:      "sess-claude-abc",
 		CreatedAt:     now,
 		LastRunAt:     now,
 	}
@@ -78,7 +78,7 @@ func listFixture(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessio
 		t.Fatalf("Upsert cs2: %v", err)
 	}
 
-	// AgentSession #2 (detached, no ResumeID).
+	// AgentSession #2 (detached, no SessionID).
 	asDet := &registry.AgentSessionEntry{
 		ID:            "as_det_1",
 		ChatSessionID: cs2.ID,
@@ -151,7 +151,7 @@ func TestListTextFormat(t *testing.T) {
 	if !strings.Contains(out, "running") {
 		t.Errorf("table missing running status\n%s", out)
 	}
-	if !strings.Contains(out, asRun.ResumeID) {
+	if !strings.Contains(out, asRun.SessionID) {
 		t.Errorf("table missing resume id for Claude session\n%s", out)
 	}
 	if !strings.Contains(out, asDet.ID) {
@@ -206,7 +206,7 @@ func TestListJSONFormat(t *testing.T) {
 			t.Errorf("JSON output missing %q\n%s", want, buf.String())
 		}
 	}
-	if !strings.Contains(buf.String(), asRun.ResumeID) {
+	if !strings.Contains(buf.String(), asRun.SessionID) {
 		t.Errorf("JSON output missing resume id value\n%s", buf.String())
 	}
 }

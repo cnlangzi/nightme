@@ -74,10 +74,10 @@ func TestReproRealClaude(t *testing.T) {
 				return
 			}
 			t.Logf("[repro] EV kind=%v", ev.Kind)
-			if ev.Connected != nil {
+			if true {
 				gotInit = true
 				t.Logf("    init: sessionID=%q model=%q agent=%q",
-					ev.Connected.SessionID, ev.Connected.Model, ev.Connected.AgentName)
+					ev.SessionID, ev.Model, ev.AgentName)
 			}
 			if ev.Text != "" {
 				gotText = true
@@ -85,10 +85,10 @@ func TestReproRealClaude(t *testing.T) {
 			}
 			if ev.Result != nil {
 				gotResult = true
-				t.Logf("    result: %q (is_error=%v)", ev.Result.Text, ev.Result.IsError)
+				t.Logf("    result: %q (is_error=%v)", ev.Result.Text, ev.Err != nil)
 			}
-			if ev.Error != nil {
-				t.Logf("    error: %v", ev.Error.Err)
+			if ev.Err != nil {
+				t.Logf("    error: %v", ev.Err)
 			}
 			if ev.Done != nil {
 				t.Logf("    done: reason=%q", ev.Done.Reason)
@@ -172,7 +172,7 @@ func TestReproRealClaude_ProductionArgs(t *testing.T) {
 	// Mirror what the production chatsession.Spawn path passes:
 	//   cs.activeCwd = whatever the user set via /cwd
 	//   as.args      = nil (chatsession always passes nil for fresh AS)
-	//   as.resumeID  = "" on first Spawn, persisted on subsequent ones
+	//   as.sessionID  = "" on first Spawn, persisted on subsequent ones
 	a := New("claude", "claude", nil)
 	t.Logf("[repro] production-style Start: Workspace=current_dir, no args, no resume")
 	wd, _ := os.Getwd()
@@ -218,21 +218,21 @@ func TestReproRealClaude_ProductionArgs(t *testing.T) {
 				return
 			}
 			t.Logf("[repro] EV kind=%v", ev.Kind)
-			if ev.Kind == agent.EventAgentConnected {
+			if ev.Kind == agent.EventAgentReady {
 				gotInit = true
-				if ev.Connected != nil {
+				if true {
 					t.Logf("    init: sessionID=%q model=%q",
-						ev.Connected.SessionID, ev.Connected.Model)
+						ev.SessionID, ev.Model)
 				}
 			}
-			if ev.Kind == agent.EventResult {
+			if ev.Kind == agent.EventAgentResult {
 				gotResult = true
 				if ev.Result != nil {
 					t.Logf("    result: %q", ev.Result.Text)
 				}
 			}
-			if ev.Kind == agent.EventError && ev.Error != nil {
-				t.Logf("    error: %v", ev.Error.Err)
+			if ev.Kind == agent.EventAgentError && ev.Err != nil {
+				t.Logf("    error: %v", ev.Err)
 			}
 		case <-deadline:
 			t.Logf("[repro] TIMEOUT (init=%v result=%v)", gotInit, gotResult)

@@ -82,11 +82,11 @@ type imageAttachment struct {
 type getStateResult struct {
 	// Model is the currently selected model, or null if no model is
 	// configured. Bridge takes the first non-null entry and surfaces
-	// its ID + name in EventAgentConnected.
+	// its ID + name in EventAgentReady.
 	Model *getStateModel `json:"model"`
 
 	// SessionID is the running Pi session identifier. Used as the
-	// EventAgentConnected.SessionID.
+	// EventAgentReady.SessionID.
 	SessionID string `json:"sessionId"`
 
 	// SessionName is the optional human-readable name. Captured for
@@ -107,7 +107,7 @@ type getStateModel struct {
 	// present (F-54). Stored on translator.contextWindow
 	// (bridge-local state) for per-turn ContextWindowPct
 	// computation; the value itself never crosses the
-	// UsageEvent struct boundary.
+	// UsageInfo struct boundary.
 	ContextWindow int `json:"contextWindow"`
 }
 
@@ -162,8 +162,8 @@ type assistantMessageEvent struct {
 // assistantMessage is the body of a "message_end" event when
 // role=="assistant". Pi uses this to deliver the finalized message
 // plus the per-message usage. The bridge attaches the per-message
-// usage to the same EventResult that delivers the finalized text
-// (ResultEvent.Usage) when the totals are non-zero — see
+// usage to the same EventAgentResult that delivers the finalized text
+// (AgentResultEvent.Usage) when the totals are non-zero — see
 // translateAssistantMessage and F-32 §2.3 for the single-event
 // rationale.
 type assistantMessage struct {
@@ -214,7 +214,7 @@ type messageUsage struct {
 }
 
 // usageCost holds the dollar cost breakdown. The bridge attaches
-// the cost onto the assistant message_end ResultEvent.Usage,
+// the cost onto the assistant message_end AgentResultEvent.Usage,
 // skipping emission when total is 0 to avoid noise on empty
 // turns. Co-located with text + token counts on the same event
 // (see F-32 §2.3).
@@ -250,9 +250,9 @@ type toolExecutionEnd struct {
 
 // compactionStart / compactionEnd are F-49 bridge-abstracted: the
 // start event is silently dropped (no Event emitted) and the end
-// event becomes one EventCompaction (a marker — the Subtype field
+// event becomes one EventAgentCompaction (a marker — the Subtype field
 // is gone). One full Pi cycle (start + end) yields exactly one
-// EventCompaction on the wire, so the runtime AgentSession counter
+// EventAgentCompaction on the wire, so the runtime AgentSession counter
 // increments by 1 per cycle. See docs/feat/F-49-compaction-counter.md
 // §1.3 / §1.7.
 type compactionStart struct {
@@ -279,7 +279,7 @@ type extensionUIRequest struct {
 	Raw    json.RawMessage `json:"-"`
 }
 
-// extensionError is logged at warning; not surfaced as EventError.
+// extensionError is logged at warning; not surfaced as EventAgentError.
 type extensionError struct {
 	ExtensionPath string `json:"extensionPath"`
 	Event         string `json:"event"`
@@ -293,7 +293,7 @@ type extensionError struct {
 // bridge will continue to compile (Go's json.Unmarshal silently
 // ignores unknown fields and leaves missing fields at the zero
 // value). The bridge only ever relies on SessionID for the runtime
-// ResumeID pipeline.
+// SessionID pipeline.
 type stateUpdate struct {
 	SessionID  string `json:"sessionId"`
 	ModelID    string `json:"modelId"`

@@ -223,13 +223,13 @@ func pumpIO(cmd *cobra.Command, as *chatsession.AgentSession) error {
 				continue
 			}
 			switch ev.AgentEvent.Kind {
-			case agent.EventText:
+			case agent.EventAgentText:
 				_, _ = io.WriteString(out, ev.AgentEvent.Text)
-			case agent.EventDone:
+			case agent.EventAgentDone:
 				fmt.Fprintln(out, "\n[nightme] session ended")
 				return
-			case agent.EventError:
-				fmt.Fprintf(out, "\n[nightme] session error: %v\n", ev.AgentEvent.Error)
+			case agent.EventAgentError:
+				fmt.Fprintf(out, "\n[nightme] session error: %v\n", ev.AgentEvent.Err)
 				return
 			}
 		}

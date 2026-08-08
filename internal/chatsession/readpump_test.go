@@ -44,7 +44,7 @@ func TestAgentSession_ReadPump_DeliversEvents(t *testing.T) {
 
 	// Push a synthetic event into the fake bridge.
 	fake.PushEvent(agent.AgentEvent{
-		Kind: agent.EventText,
+		Kind: agent.EventAgentText,
 		Text: "hello",
 	})
 
@@ -129,7 +129,7 @@ func TestChatSession_PumpEvents_RoutesKindAgentEvent(t *testing.T) {
 	go cs.PumpEvents(ctx)
 
 	// Push a synthetic event.
-	fake.PushEvent(agent.AgentEvent{Kind: agent.EventText, Text: "pumped"})
+	fake.PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "pumped"})
 
 	select {
 	case <-received:
@@ -205,11 +205,11 @@ func TestChatSession_PumpEvents_RoutesKindPromptEnded(t *testing.T) {
 	go cs.PumpEvents(ctx)
 
 	// Push terminal event.
-	fake.PushEvent(agent.AgentEvent{Kind: agent.EventDone, Done: &agent.DoneEvent{ExitCode: 0}})
+	fake.PushEvent(agent.AgentEvent{Kind: agent.EventAgentDone, Done: &agent.AgentDoneEvent{ExitCode: 0}})
 
 	// Wait for AS to end the prompt (IsReady flips back).
 	if !waitForReadiness(t, as, true, 2*time.Second) {
-		t.Fatal("AS never became ready after EventDone")
+		t.Fatal("AS never became ready after EventAgentDone")
 	}
 
 	if !waitFor(func() bool {
@@ -307,7 +307,7 @@ func TestAgentSession_Shutdown_ClosesReadPump(t *testing.T) {
 	as, fake := makeSpawnedAS(t, cs, "pi", ctx)
 
 	// Push an event first so the readpump is in the event loop.
-	fake.PushEvent(agent.AgentEvent{Kind: agent.EventText, Text: "before-shutdown"})
+	fake.PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "before-shutdown"})
 
 	// Drain that event so the queue isn't blocked at shutdown.
 	select {
@@ -480,7 +480,7 @@ func TestAgentSession_ReadPump_StableEventPointers(t *testing.T) {
 	const N = 50
 	for i := 0; i < N; i++ {
 		fake.PushEvent(agent.AgentEvent{
-			Kind: agent.EventText,
+			Kind: agent.EventAgentText,
 			Text: fmt.Sprintf("event-%d", i),
 		})
 	}

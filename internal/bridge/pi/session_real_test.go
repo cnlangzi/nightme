@@ -41,13 +41,13 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// promptDeadline bounds the wait for EventDone after SendText.
+// promptDeadline bounds the wait for EventAgentDone after SendText.
 // Sized for a real model response on a healthy dev box; a hung
 // pi (the failure mode we guard against) blows past this and the
 // test fails with an elapsed-time message instead of stalling
 // the runner.
 //
-// handshakeWindow bounds the wait for EventAgentConnected; the bridge's
+// handshakeWindow bounds the wait for EventAgentReady; the bridge's
 // own handshakeTimeout is 10s but real-pi cold start (model
 // warm-up, plugin load) routinely takes longer.
 const (
@@ -71,10 +71,10 @@ const (
 // the e2e chain broke):
 //
 //  1. Start + get_state handshake complete and emit exactly one
-//     EventAgentConnected carrying a non-empty SessionID — so the runtime
+//     EventAgentReady carrying a non-empty SessionID — so the runtime
 //     can persist the resume id (input pipeline reaches pi).
 //  2. SendText(prompt-with-marker) returns nil within promptDeadline
-//     and the stream terminates in EventDone with Reason:"settled".
+//     and the stream terminates in EventAgentDone with Reason:"settled".
 //  3. The aggregated reply text contains the unique marker we
 //     embedded in our prompt — this is the *positive* proof that
 //     pi received our specific input (not just "got any reply"):
@@ -132,13 +132,13 @@ func TestSession_RealPi_E2E_ReceiveInputAndReply(t *testing.T) {
 		}
 	}()
 
-	// Step 1: handshake → EventAgentConnected.
-	init := mustFirstEventOfKind(t, sess, agent.EventAgentConnected, handshakeWindow)
-	if init.Connected.SessionID == "" {
+	// Step 1: handshake → EventAgentReady.
+	init := mustFirstEventOfKind(t, sess, agent.EventAgentReady, handshakeWindow)
+	if init.SessionID == "" {
 		t.Errorf("Init.SessionID is empty; runtime would fail to persist resume id (events seen so far are %v)",
 			init.Kind)
 	}
-	t.Logf("handshake ok: session=%q model=%q", init.Connected.SessionID, init.Connected.Model)
+	t.Logf("handshake ok: session=%q model=%q", init.SessionID, init.Model)
 
 	// Step 2 + 3: first turn — send a marker-bearing prompt and
 	// verify pi echoes the marker back. This is the strongest
@@ -174,11 +174,11 @@ func TestSession_RealPi_E2E_ReceiveInputAndReply(t *testing.T) {
 }
 
 // driveTurn sends prompt via SendText, waits up to deadline for
-// EventDone with Reason:"settled", and asserts:
+// EventAgentDone with Reason:"settled", and asserts:
 //
 //   - SendText did not error (transport write succeeded);
-//   - the stream terminated in EventDone with the right reason;
-//   - at least one EventText or EventResult was emitted;
+//   - the stream terminated in EventAgentDone with the right reason;
+//   - at least one EventAgentText or EventAgentResult was emitted;
 //   - the aggregated reply text contains marker — i.e. the LLM
 //     read our specific input (proves the input reached pi).
 //
@@ -198,7 +198,7 @@ func driveTurn(t *testing.T, sess agent.AgentSession, prompt string, deadline ti
 	}
 	turn := drainEventsUntilDone(t, sess, deadline)
 	if turn.Done == nil {
-		t.Fatalf("%s: no EventDone within %s; events seen: %v (elapsed=%s) — F-32 2026-08-06 production hang",
+		t.Fatalf("%s: no EventAgentDone within %s; events seen: %v (elapsed=%s) — F-32 2026-08-06 production hang",
 			turnLabel, deadline, turn.Kinds, time.Since(promptStartedAt))
 		return nil
 	}
@@ -207,9 +207,9 @@ func driveTurn(t *testing.T, sess agent.AgentSession, prompt string, deadline ti
 	}
 
 	// At least one text-bearing event in the turn.
-	if !slices.Contains(turn.Kinds, agent.EventText) &&
-		!slices.Contains(turn.Kinds, agent.EventResult) {
-		t.Errorf("%s: no EventText / EventResult in turn; events=%v", turnLabel, turn.Kinds)
+	if !slices.Contains(turn.Kinds, agent.EventAgentText) &&
+		!slices.Contains(turn.Kinds, agent.EventAgentResult) {
+		t.Errorf("%s: no EventAgentText / EventAgentResult in turn; events=%v", turnLabel, turn.Kinds)
 	}
 
 	// Aggregate reply text and assert non-empty + marker presence.
@@ -261,17 +261,17 @@ func extractMarker(prompt string) string {
 
 // aggregateReplyText returns the assistant's reply as a single
 // string, concatenating:
-//   - the streaming EventText chunks (real pi emits one or more),
-//   - the final EventResult.Result text, if present.
+//   - the streaming EventAgentText chunks (real pi emits one or more),
+//   - the final EventAgentResult.Result text, if present.
 //
 // Order is preserved as events arrived on the channel.
 func aggregateReplyText(events []agent.AgentEvent) string {
 	var sb strings.Builder
 	for _, ev := range events {
 		switch ev.Kind {
-		case agent.EventText:
+		case agent.EventAgentText:
 			sb.WriteString(ev.Text)
-		case agent.EventResult:
+		case agent.EventAgentResult:
 			if ev.Result != nil {
 				sb.WriteString(ev.Result.Text)
 			}

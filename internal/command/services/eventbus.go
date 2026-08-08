@@ -59,8 +59,18 @@ type busEntry[T any] struct {
 	fn func(T) bool
 }
 
-// Handler[T] is the typed callback. Return true to consume (later
-// handlers do not run); false to pass through.
+// Handler[T] is the typed callback.
+//
+// Return true to consume — Publish then stops dispatching to later
+// handlers in registration order. Return false to pass through.
+//
+// In current nightme use (the four ChatSession buses:
+// AgentEventBus / MessageStateBus / PromptEndBus), every subscriber
+// returns false: the bus is effectively a broadcast channel, not a
+// "first-claim wins" channel. The consumed=true path is preserved
+// here so future callers (e.g. an audit consumer that wants to
+// suppress an event after recording it) have the API; no caller
+// uses it today.
 type Handler[T any] func(T) bool
 
 // NewEventBus returns an empty EventBus. Pair with `defer b.Close()`
@@ -106,11 +116,14 @@ func (b *EventBus[T]) Subscribe(fn Handler[T]) (unsubscribe func()) {
 }
 
 // Publish invokes every registered handler in registration order,
-// stopping at the first that returns true.
+// stopping at the first that returns true. Returns true if any
+// handler consumed the event; false otherwise (also on a nil
+// receiver, a closed bus, or an empty handler list).
 //
-// Returns true if any handler consumed the event. Returns false on
-// a nil receiver, a closed bus, an empty handler list, or when all
-// handlers returned false.
+// Note: in current nightme use every ChatSession bus subscriber
+// returns false, so Publish fans out to all handlers in practice.
+// The stop-on-consumed=true behaviour is preserved for future
+// callers; see the Handler[T] doc for context.
 //
 // Handlers are invoked outside the bus mutex; Publish from inside a
 // handler is unsafe (would deadlock on b.mu). Use Subscribe /

@@ -78,14 +78,14 @@ func (f *fakeAgentSession) PushEvent(ev agent.AgentEvent) {
 	f.events <- ev
 }
 
-// FinishEvent delivers EventDone and closes the channel.
+// FinishEvent delivers EventAgentDone and closes the channel.
 func (f *fakeAgentSession) FinishEvent() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.closed {
 		return
 	}
-	f.events <- agent.AgentEvent{Kind: agent.EventDone}
+	f.events <- agent.AgentEvent{Kind: agent.EventAgentDone}
 	f.closed = true
 	close(f.events)
 }
@@ -110,11 +110,11 @@ func newFakeSpawner() *fakeSpawner {
 	return &fakeSpawner{fakes: make(map[spawnKey]*fakeAgentSession)}
 }
 
-func (s *fakeSpawner) Spawn(ctx context.Context, name, cwd string, args []string, resumeID string) (agent.AgentSession, error) {
+func (s *fakeSpawner) Spawn(ctx context.Context, name, cwd string, args []string, sessionID string) (agent.AgentSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
-	s.lastResumeID = resumeID
+	s.lastResumeID = sessionID
 	if s.spawnFn != nil {
 		return s.spawnFn(name, cwd)
 	}
@@ -261,8 +261,8 @@ func TestAgentSession_ObserveCloseTransitionsToExited(t *testing.T) {
 	as, _ := cs.LookupActiveAgentSession()
 
 	// Drain a few events then finish.
-	spawner.Get("claude", "/x").PushEvent(agent.AgentEvent{Kind: agent.EventText, Text: "hi"})
-	spawner.Get("claude", "/x").PushEvent(agent.AgentEvent{Kind: agent.EventToolStart, ToolStart: &agent.ToolStartEvent{ID: "t1", Name: "Bash"}})
+	spawner.Get("claude", "/x").PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "hi"})
+	spawner.Get("claude", "/x").PushEvent(agent.AgentEvent{Kind: agent.EventAgentToolStart, ToolStart: &agent.AgentToolStartEvent{ID: "t1", Name: "Bash"}})
 	spawner.Get("claude", "/x").FinishEvent()
 
 	// Start ObserveClose; it should transition Running → Exited
@@ -283,35 +283,35 @@ func TestAgentSession_ObserveCloseTransitionsToExited(t *testing.T) {
 	}
 }
 
-// TestAgentSession_ResumeIDRoundTrip asserts that SetResumeID is
-// idempotent, accessible via ResumeID(), and survives a round-trip
+// TestAgentSession_ResumeIDRoundTrip asserts that SetSessionID is
+// idempotent, accessible via SessionID(), and survives a round-trip
 // through the Entry-derived registry form.
 func TestAgentSession_ResumeIDRoundTrip(t *testing.T) {
 	as := NewAgentSession("as_1", "cs_1", "claude", "/x", nil)
 
-	if got := as.ResumeID(); got != "" {
-		t.Errorf("initial ResumeID = %q, want empty", got)
+	if got := as.SessionID(); got != "" {
+		t.Errorf("initial SessionID = %q, want empty", got)
 	}
 
-	as.SetResumeID("sess-abc")
-	if got := as.ResumeID(); got != "sess-abc" {
-		t.Errorf("after set: ResumeID = %q, want %q", got, "sess-abc")
+	as.SetSessionID("sess-abc")
+	if got := as.SessionID(); got != "sess-abc" {
+		t.Errorf("after set: SessionID = %q, want %q", got, "sess-abc")
 	}
 
 	entry := as.Entry()
-	if entry.ResumeID != "sess-abc" {
-		t.Errorf("Entry().ResumeID = %q, want %q", entry.ResumeID, "sess-abc")
+	if entry.SessionID != "sess-abc" {
+		t.Errorf("Entry().SessionID = %q, want %q", entry.SessionID, "sess-abc")
 	}
 
 	// Round-trip through FromAgentSessionEntry.
 	restored := FromAgentSessionEntry(entry)
-	if got := restored.ResumeID(); got != "sess-abc" {
-		t.Errorf("after FromAgentSessionEntry: ResumeID = %q, want %q", got, "sess-abc")
+	if got := restored.SessionID(); got != "sess-abc" {
+		t.Errorf("after FromAgentSessionEntry: SessionID = %q, want %q", got, "sess-abc")
 	}
 }
 
 // TestAgentSession_RespawnPassesResumeID asserts that after the
-// AgentSession captures a resume id (via SetResumeID), a subsequent
+// AgentSession captures a resume id (via SetSessionID), a subsequent
 // spawn calls the Spawner with that resume id so the bridge can
 // resume the previous session.
 func TestAgentSession_RespawnPassesResumeID(t *testing.T) {
@@ -332,12 +332,12 @@ func TestAgentSession_RespawnPassesResumeID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Lookup: %v", err)
 	}
-	if as.ResumeID() != "" {
+	if as.SessionID() != "" {
 		t.Errorf("fresh AgentSession should not have a resume id")
 	}
 
-	// Capture a resume id (simulating EventAgentConnected being handled).
-	as.SetResumeID("sess-resume-1")
+	// Capture a resume id (simulating EventAgentReady being handled).
+	as.SetSessionID("sess-resume-1")
 
 	// Simulate the process exiting; the next spawn should observe
 	// the saved resume id.
@@ -347,19 +347,19 @@ func TestAgentSession_RespawnPassesResumeID(t *testing.T) {
 	// id cleared on SetExited? No: SetExited only flips status and
 	// pid; the resume id is preserved so a subsequent respawn can
 	// forward it. (RestoreFromRegistry does NOT demote resume id.)
-	if got := as.ResumeID(); got != "sess-resume-1" {
+	if got := as.SessionID(); got != "sess-resume-1" {
 		t.Errorf("resume id should survive SetExited; got %q", got)
 	}
 
 	// Clear the in-memory handle so Spawn goes through the spawner.
 	as = NewAgentSession(as.ID, as.ChatSessionID, as.Agent, as.Cwd, as.Args())
-	as.SetResumeID("sess-resume-1")
+	as.SetSessionID("sess-resume-1")
 	if err := as.Spawn(context.Background(), spawner); err != nil {
 		t.Fatalf("respawn: %v", err)
 	}
 
 	if got := spawner.lastResumeID; got != "sess-resume-1" {
-		t.Errorf("Spawn received resumeID = %q, want %q", got, "sess-resume-1")
+		t.Errorf("Spawn received sessionID = %q, want %q", got, "sess-resume-1")
 	}
 }
 
@@ -373,12 +373,12 @@ func TestAgentSession_EmptyResumeIDPassesEmpty(t *testing.T) {
 		t.Fatalf("Spawn: %v", err)
 	}
 	if got := spawner.lastResumeID; got != "" {
-		t.Errorf("Spawn received resumeID = %q, want empty", got)
+		t.Errorf("Spawn received sessionID = %q, want empty", got)
 	}
 }
 
 // TestAgentSession_ResumeIDRestoreFromRegistry asserts that a
-// persisted AgentSessionEntry with a ResumeID is correctly restored
+// persisted AgentSessionEntry with a SessionID is correctly restored
 // by FromAgentSessionEntry. This is the path that survives a daemon
 // restart — the resume id must round-trip so the next respawn can
 // replay `--resume <id>`.
@@ -391,7 +391,7 @@ func TestAgentSession_ResumeIDRestoreFromRegistry(t *testing.T) {
 		Cwd:           "/x",
 		PID:           0,
 		Status:        registry.StatusDetached,
-		ResumeID:      "sess-round-trip-xyz",
+		SessionID:      "sess-round-trip-xyz",
 		CreatedAt:     now,
 		LastRunAt:     now,
 	}
@@ -399,8 +399,8 @@ func TestAgentSession_ResumeIDRestoreFromRegistry(t *testing.T) {
 	if as == nil {
 		t.Fatal("FromAgentSessionEntry returned nil")
 	}
-	if got := as.ResumeID(); got != "sess-round-trip-xyz" {
-		t.Errorf("ResumeID = %q, want %q", got, "sess-round-trip-xyz")
+	if got := as.SessionID(); got != "sess-round-trip-xyz" {
+		t.Errorf("SessionID = %q, want %q", got, "sess-round-trip-xyz")
 	}
 	// And the next spawn forwards the resume id to the spawner.
 	spawner := newFakeSpawner()
@@ -408,6 +408,6 @@ func TestAgentSession_ResumeIDRestoreFromRegistry(t *testing.T) {
 		t.Fatalf("Spawn: %v", err)
 	}
 	if got := spawner.lastResumeID; got != "sess-round-trip-xyz" {
-		t.Errorf("Spawn received resumeID = %q, want %q", got, "sess-round-trip-xyz")
+		t.Errorf("Spawn received sessionID = %q, want %q", got, "sess-round-trip-xyz")
 	}
 }

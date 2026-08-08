@@ -61,9 +61,10 @@ type AgentSession struct {
 	Cwd           string
 
 	// asMu guards every field below. RWMutex so concurrent readers
-	// (Status, Model, CompactionCount, ExitCode, Handle, Events,
-	// PID) don't contend with each other when no writer is in
-	// flight.
+	// (Status, Model, ExitCode, Handle, Events, PID) don't contend
+	// with each other when no writer is in flight. (F-49 removed
+	// CompactionCount from this list — the compaction counter is
+	// gone from AgentSession entirely.)
 	asMu sync.RWMutex
 
 	// opCtx is the per-AgentSession operation context — owned by
@@ -104,12 +105,12 @@ type AgentSession struct {
 	exitCode *int
 
 	// Agent-session-resume id (e.g. Claude Code's
-	// `system/init.session_id`). Captured from EventAgentConnected on the
+	// `system/init.session_id`). Captured from EventAgentReady on the
 	// first run; persisted via Entry; replayed on the next Spawn as
 	// `--resume <id>` (Claude Code currently translates this; other
 	// bridges ignore it). Empty when the agent has no resume
 	// semantics or has not yet emitted its init event.
-	resumeID string
+	sessionID string
 
 	// handle is the bridge-level live session (returned by
 	// agent.Start). nil until Spawn succeeds. Committed to the
@@ -121,21 +122,13 @@ type AgentSession struct {
 	// before that.
 	handleEventsClosed chan struct{}
 
-	// F-45: model captured on first EventAgentConnected (e.g.
+	// F-45: model captured on first EventAgentReady (e.g.
 	// "claude-opus-4-5-20250929"). SetModel is idempotent — empty
 	// incoming values do NOT overwrite a previously-captured model.
 	// Persisted via Entry → AgentSessionEntry.Model; restored on
 	// restart via FromAgentSessionEntry. Empty before the first
-	// EventAgentConnected lands.
+	// EventAgentReady lands.
 	model string
-
-	// compactionCount tracks the number of context-compaction
-	// cycles the bridge has reported on this AgentSession. Owned
-	// here so the runtime is the single source of truth for the
-	// footer Line 1 "🗜 N" segment (F-49). NOT persisted across
-	// compaction — the counter itself persists, but no per-cycle
-	// stats do (those live on the bridge).
-	compactionCount int
 
 	// F-53: the in-flight Prompt for this AgentSession, or nil if
 	// no Prompt is currently active. Stored on AS (not on
@@ -273,12 +266,8 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 	as.args = append([]string(nil), e.Args...)
 	as.createdAt = e.CreatedAt
 	as.lastRunAt = e.LastRunAt
-	as.resumeID = e.ResumeID
+	as.sessionID = e.SessionID
 	as.model = e.Model
-	// F-49: restore compaction count. Zero value on legacy entries
-	// (no compactionCount field) is the safe default — "never
-	// compacted".
-	as.compactionCount = e.CompactionCount
 	// commit fix-6: any persisted "running" agent is actually dead
 	// after daemon restart (the process handle is in-memory only).
 	// Demote to Detached so the next LookupActiveAgentSession will
@@ -398,7 +387,7 @@ func (as *AgentSession) OpContext() context.Context {
 // The old AS continues to run in the background; its readpump
 // keeps draining events into eventQueue; ChatSession can resume
 // reading from the same channel on re-/use. The Prompt keeps
-// running until EventDone/Error/!ok ends it via `endPrompt`.
+// running until EventAgentDone/Error/!ok ends it via `endPrompt`.
 //
 // Reserved as a method (rather than deleted) so callers that
 // invoke it don't break at compile time, but the operation is
@@ -551,34 +540,34 @@ func (as *AgentSession) ExitCode() *int {
 	return &v
 }
 
-// ResumeID returns the agent's own session id (e.g. Claude Code's
+// SessionID returns the agent's own session id (e.g. Claude Code's
 // `system/init.session_id`) captured on the last run. Empty when
 // the agent has no resume semantics or has not yet emitted its
 // init event.
-func (as *AgentSession) ResumeID() string {
+func (as *AgentSession) SessionID() string {
 	as.asMu.RLock()
 	defer as.asMu.RUnlock()
-	return as.resumeID
+	return as.sessionID
 }
 
-// SetResumeID records the agent's own session id. Called by the
-// runtime's EventHandler when it receives an EventAgentConnected with a
+// SetSessionID records the agent's own session id. Called by the
+// runtime's EventHandler when it receives an EventAgentReady with a
 // non-empty SessionID. Safe to call concurrently with Spawn /
 // SetRunning / SetExited.
-func (as *AgentSession) SetResumeID(id string) {
+func (as *AgentSession) SetSessionID(id string) {
 	as.asMu.Lock()
 	defer as.asMu.Unlock()
-	as.resumeID = id
+	as.sessionID = id
 }
 
-// --- F-45: model + CompactionCount metadata API -------------------
+// --- F-45: model metadata API ------------------------------------
 
 // SetModel records the agent's selected model (e.g. Claude Code:
 // system/init.model). Idempotent: an empty incoming value does NOT
 // overwrite a previously-captured model — bridges may re-emit
-// EventAgentConnected after a child restart with a blank Model and we don't
+// EventAgentReady after a child restart with a blank Model and we don't
 // want to wipe the prior capture. Called by the runtime's
-// EventHandler closure on EventAgentConnected.
+// EventHandler closure on EventAgentReady.
 //
 // Safe to call concurrently with Model() and other lifecycle
 // methods.
@@ -592,47 +581,19 @@ func (as *AgentSession) SetModel(m string) {
 }
 
 // Model returns the captured model name. Empty before the first
-// EventAgentConnected lands or when the bridge does not report one.
+// EventAgentReady lands or when the bridge does not report one.
 func (as *AgentSession) Model() string {
 	as.asMu.RLock()
 	defer as.asMu.RUnlock()
 	return as.model
 }
 
-// RecordCompaction atomically increments compactionCount. Bridges
-// have already digested their protocol differences (Pi suppresses
-// its transient `compaction_start`; Claude Code emits one event
-// per cycle) so every EventCompaction here represents exactly one
-// completed compaction cycle. No OutboundMessage is produced —
-// the runtime is the single owner of compaction bookkeeping, and
-// the count surfaces to the user later via
-// SessionContext.CompactionCount → Footer Line 1 "🗜 N". See
-// docs/feat/F-49-compaction-counter.md §1.3 / §1.8.
-//
-// Safe to call concurrently with CompactionCount / PersistIfDirty.
-// Mirrors the single-writer lock pattern (one writer per
-// EventCompaction).
-func (as *AgentSession) RecordCompaction() {
-	as.asMu.Lock()
-	defer as.asMu.Unlock()
-	as.compactionCount++
-}
-
-// CompactionCount returns the total number of completed
-// compaction cycles observed on this AgentSession. 0 when never
-// compacted. Snapshot under RLock; safe for concurrent read
-// alongside RecordCompaction.
-func (as *AgentSession) CompactionCount() int {
-	as.asMu.RLock()
-	defer as.asMu.RUnlock()
-	return as.compactionCount
-}
 
 // PersistIfDirty is currently a no-op pass-through (every prior
 // caller relied on cumulativeDirty, which is gone with the
 // cross-turn usage aggregation). Kept as the single entry point so
 // future per-AgentSession dirty state (e.g. status /
-// resumeID changes) can hook in without changing call sites.
+// sessionID changes) can hook in without changing call sites.
 //
 // persist is the registry callback (typically
 // Manager.PersistAgentSession). Returns nil when persist is nil.
@@ -683,32 +644,28 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	as.asMu.RLock()
 	stat := as.stat
 	lastRun := as.lastRunAt
-	resume := as.resumeID
+	resume := as.sessionID
 	model := as.model
 	var ec *int
 	if as.exitCode != nil {
 		v := *as.exitCode
 		ec = &v
 	}
-	// F-49: snapshot compactionCount under the same RLock so the
-	// persisted entry is internally consistent.
-	cc := as.compactionCount
 	as.asMu.RUnlock()
 
 	return &registry.AgentSessionEntry{
-		ID:              as.ID,
-		ChatSessionID:   as.ChatSessionID,
-		Agent:           as.Agent,
-		Cwd:             as.Cwd,
-		PID:             as.PID(),
-		Status:          stat,
-		Args:            as.Args(),
-		ResumeID:        resume,
-		CreatedAt:       as.createdAt,
-		LastRunAt:       lastRun,
-		ExitCode:        ec,
-		Model:           model,
-		CompactionCount: cc,
+		ID:            as.ID,
+		ChatSessionID: as.ChatSessionID,
+		Agent:         as.Agent,
+		Cwd:           as.Cwd,
+		PID:           as.PID(),
+		Status:        stat,
+		Args:          as.Args(),
+		SessionID:     resume,
+		CreatedAt:     as.createdAt,
+		LastRunAt:     lastRun,
+		ExitCode:      ec,
+		Model:         model,
 	}
 }
 
@@ -757,7 +714,7 @@ func (as *AgentSession) Spawn(ctx context.Context, spawner Spawner) error {
 	// take seconds (fork+exec+handshake RPC), and we don't want to
 	// hold asMu across it — EventHandler / readPump / footer
 	// renderers would block.
-	resume := as.resumeID
+	resume := as.sessionID
 	args := append([]string(nil), as.args...)
 	as.asMu.Unlock()
 
@@ -951,15 +908,15 @@ func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBl
 //     code's writeLine("/clear"), acp's session/new): New returns
 //     nil. AgentSession.ID / Cwd / pool membership are preserved;
 //     only the bridge's internal conversation state is cleared.
-//     The bridge is expected to emit a fresh EventAgentConnected carrying the
+//     The bridge is expected to emit a fresh EventAgentReady carrying the
 //     new SessionID; the runtime's AgentEventBus subscriber (cmd/nightme/run.go
-//     newEventHandler) captures it via SetResumeID and persists.
+//     newEventHandler) captures it via SetSessionID and persists.
 //
 //   - Bridge cannot do in-place reset (raw PTY bridge): bridge.New
 //     returns agent.ErrRestartRequired. The wrapper then kills the
 //     existing bridge handle and spawns a fresh one via spawner
-//     (with ResumeID="" so the new child starts with no --resume).
-//     ResumeID is explicitly cleared on the wrapper so persistence
+//     (with SessionID="" so the new child starts with no --resume).
+//     SessionID is explicitly cleared on the wrapper so persistence
 //     stays consistent.
 //
 //   - Bridge tried but failed (transient error): wrapped and
@@ -1018,7 +975,7 @@ func (as *AgentSession) New(ctx context.Context, spawner Spawner) error {
 		code := -1
 		as.exitCode = &code
 		as.asMu.Unlock()
-		as.SetResumeID("")
+		as.SetSessionID("")
 		return fmt.Errorf("chatsession: restart %s at %s: %w", as.Agent, as.Cwd, err)
 	}
 	as.asMu.Lock()
@@ -1028,11 +985,11 @@ func (as *AgentSession) New(ctx context.Context, spawner Spawner) error {
 	as.lastRunAt = time.Now()
 	as.exitCode = nil
 	as.asMu.Unlock()
-	// Explicitly clear ResumeID so a stale id never gets replayed on
-	// the next respawn (the new child will emit its own EventAgentConnected,
-	// and the runtime's AgentEventBus subscriber will SetResumeID via the normal
+	// Explicitly clear SessionID so a stale id never gets replayed on
+	// the next respawn (the new child will emit its own EventAgentReady,
+	// and the runtime's AgentEventBus subscriber will SetSessionID via the normal
 	// path).
-	as.SetResumeID("")
+	as.SetSessionID("")
 
 	// Restart the per-AS readpump on the new handle. The old
 	// readpumpLoop saw !ok from the closed handle above and exited;
@@ -1062,7 +1019,7 @@ func (as *AgentSession) Close() error {
 }
 
 // ObserveClose runs in a goroutine after Spawn to watch the bridge
-// events channel. When the channel closes (EventDone / EventError /
+// events channel. When the channel closes (EventAgentDone / EventAgentError /
 // child EOF), the AgentSession transitions to Exited. Returns a
 // channel that the caller can wait on for clean shutdown.
 //

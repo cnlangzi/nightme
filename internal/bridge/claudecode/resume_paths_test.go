@@ -28,10 +28,10 @@ import (
 //     session_id → close → re-spawn with --resume <id>
 //     (happy path: the resume works)
 //   NIGHTME_TALIVE_RESUME_BAD=1 → spawn with a definitely-invalid
-//     UUID (the user's symptom — stored ResumeID points at a
+//     UUID (the user's symptom — stored SessionID points at a
 //     session that no longer exists)
 //   NIGHTME_TALIVE_RESUME_USER=1 → use the user's actual
-//     ResumeID stored in agent_sessions.json (the actual
+//     SessionID stored in agent_sessions.json (the actual
 //     production symptom)
 //
 // Output is structured so it can be compared at a glance.
@@ -60,7 +60,7 @@ func TestResumePaths_Table(t *testing.T) {
 	})
 }
 
-// resumeHappyPath: spawn → send prompt → capture EventAgentConnected
+// resumeHappyPath: spawn → send prompt → capture EventAgentReady
 // SessionID → close → spawn again with --resume <id> → send
 // prompt → expect text. If both succeed, --resume works
 // correctly and the production hang is a different bug.
@@ -82,7 +82,7 @@ func resumeHappyPath(t *testing.T, deadline time.Duration) {
 		t.Fatalf("phase 1 Start: %v", err)
 	}
 	// T-alive (2026-08-07): claude --print is single-turn mode —
-	// it does NOT emit EventAgentConnected until it receives the first
+	// it does NOT emit EventAgentReady until it receives the first
 	// stdin block. SendText before waiting for events.
 	if err := sess1.SendText("capture my session id, then say only: pong"); err != nil {
 		t.Fatalf("phase 1 SendText: %v", err)
@@ -101,15 +101,15 @@ initLoop:
 			}
 			t.Logf("[replay] phase 1 EV at %s kind=%v initNonNil=%v sessionID=%q",
 				time.Since(phaseStart).Round(time.Millisecond), ev.Kind,
-				ev.Connected != nil, initSessionID(ev))
-			if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.SessionID != "" {
-				capturedID = ev.Connected.SessionID
+				true, initSessionID(ev))
+			if ev.Kind == agent.EventAgentReady  && ev.SessionID != "" {
+				capturedID = ev.SessionID
 				initSeen = true
 				t.Logf("[replay] phase 1: captured sessionID=%q", capturedID)
 				break initLoop
 			}
 		case <-time.After(90 * time.Second):
-			t.Fatalf("phase 1: no EventAgentConnected within 90s (claude took >90s to handshake; possible MCP startup hang in workspace=%s)", ws)
+			t.Fatalf("phase 1: no EventAgentReady within 90s (claude took >90s to handshake; possible MCP startup hang in workspace=%s)", ws)
 		}
 	}
 	if !initSeen {
@@ -125,7 +125,7 @@ initLoop:
 	sess2, err := a.Start(ctx, agent.StartConfig{
 		Workspace:      ws,
 		PermissionMode: "bypassPermissions",
-		ResumeID:       capturedID,
+		SessionID:       capturedID,
 	})
 	if err != nil {
 		t.Fatalf("phase 2 Start: %v", err)
@@ -144,7 +144,7 @@ initLoop:
 			if !ok {
 				t.Fatal("phase 2: events closed before output")
 			}
-			if ev.Kind == agent.EventText || ev.Kind == agent.EventResult || ev.Kind == agent.EventDone {
+			if ev.Kind == agent.EventAgentText || ev.Kind == agent.EventAgentResult || ev.Kind == agent.EventAgentDone {
 				t.Logf("[replay] phase 2: resumed session produced output: kind=%v text=%q",
 					ev.Kind, truncate(ev.Text, 100))
 				return
@@ -173,7 +173,7 @@ func resumeInvalidUUID(t *testing.T, deadline time.Duration) {
 	sess, err := a.Start(ctx, agent.StartConfig{
 		Workspace:      ws,
 		PermissionMode: "bypassPermissions",
-		ResumeID:       bad,
+		SessionID:       bad,
 	})
 	if sess != nil {
 		t.Cleanup(func() { _ = sess.Close() })
@@ -189,7 +189,7 @@ func resumeInvalidUUID(t *testing.T, deadline time.Duration) {
 
 // resumeUserWorkspaceKnownID: reproduce the actual production
 // hang. Uses NIGHTME_TALIVE_RESUME_USER_ID (a real, known-valid
-// ResumeID from the user's claude session store). The default
+// SessionID from the user's claude session store). The default
 // is the one we saw stuck during test10/11 — 372809cf-c36b-44e5-a321-adf93c159e5d.
 // If that id is invalid, set the env var to one that IS valid
 // in your local claude store.
@@ -210,7 +210,7 @@ func resumeUserWorkspaceKnownID(t *testing.T, deadline time.Duration) {
 	sess, err := a.Start(ctx, agent.StartConfig{
 		Workspace:      ws,
 		PermissionMode: "bypassPermissions",
-		ResumeID:       id,
+		SessionID:       id,
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -245,12 +245,12 @@ func resumeUserWorkspaceKnownID(t *testing.T, deadline time.Duration) {
 }
 
 // initSessionID safely extracts the SessionID from an
-// EventAgentConnected event (returns "" if Init is nil).
+// EventAgentReady event (returns "" if Init is nil).
 func initSessionID(ev agent.AgentEvent) string {
-	if ev.Connected == nil {
+	if true {
 		return ""
 	}
-	return ev.Connected.SessionID
+	return ev.SessionID
 }
 
 func envOn(name string) bool {

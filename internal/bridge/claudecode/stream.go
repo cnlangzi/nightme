@@ -46,9 +46,9 @@ type streamState struct {
 
 	// tasks is the provider-session-normalised task list. It is
 	// owned by the claudecode bridge (see task.go) and used to
-	// emit full TaskListEvent snapshots on EventTaskCreate /
-	// EventTaskUpdate. Map key is the provider-assigned task ID.
-	tasks     map[string]agent.TaskItem
+	// emit full AgentTaskListEvent snapshots on EventAgentTaskCreate /
+	// EventAgentTaskUpdate. Map key is the provider-assigned task ID.
+	tasks     map[string]agent.AgentTaskItem
 	taskOrder []string
 }
 
@@ -73,7 +73,7 @@ func resetTasksForNewTurn(state *streamState) {
 	if state == nil {
 		return
 	}
-	state.tasks = make(map[string]agent.TaskItem)
+	state.tasks = make(map[string]agent.AgentTaskItem)
 	state.taskOrder = nil
 }
 
@@ -106,7 +106,7 @@ type streamEvent struct {
 	// result.usage / result.modelUsage — kept as RawMessage so the
 	// decoder is permissive (extra keys / unexpected shapes are dropped
 	// silently). decodeUsage / decodeCostUSD shape them into
-	// agent.UsageEvent when translate() emits EventUsage.
+	// agent.UsageInfo when translate() emits EventUsage.
 	Usage      json.RawMessage `json:"usage,omitempty"`
 	ModelUsage json.RawMessage `json:"modelUsage,omitempty"`
 
@@ -153,15 +153,15 @@ type contentBlock struct {
 // Malformed lines are logged and skipped (do NOT abort the session —
 // Claude Code may emit non-JSON noise during startup banner / hooks).
 //
-// On normal EOF, a final EventDone is emitted with the captured exit
+// On normal EOF, a final EventAgentDone is emitted with the captured exit
 // code (-1 if not yet observed). The events channel is then closed.
 //
 // Permissions (AskUserQuestion) are routed through askHandler if non-nil;
-// otherwise they fall through to EventPermission with a default set of
+// otherwise they fall through to EventAgentPermission with a default set of
 // options. See ask.go for the dual-path (tool_use + text fallback)
 // detection logic.
 //
-// agentName + workspace are stamped onto the EventAgentConnected payload by
+// agentName + workspace are stamped onto the EventAgentReady payload by
 // translate (so channel-layer receipts can render the "Agent ·
 // name | cwd · path" foot note). They are immutable for the
 // session's lifetime and don't need a mutex.
@@ -183,7 +183,7 @@ func pumpStream(r io.Reader, events chan<- agent.AgentEvent, askHandler askHandl
 	state := &streamState{
 		toolUseArgs:  make(map[string]string),
 		pendingTools: make(map[string]pendingTool),
-		tasks:        make(map[string]agent.TaskItem),
+		tasks:        make(map[string]agent.AgentTaskItem),
 	}
 
 	for scanner.Scan() {
@@ -210,8 +210,8 @@ func pumpStream(r io.Reader, events chan<- agent.AgentEvent, askHandler askHandl
 			logger.Warn("claudecode: stream read error", "err", err)
 		}
 		events <- agent.AgentEvent{
-			Kind:  agent.EventError,
-			Error: &agent.ErrorEvent{Err: fmt.Errorf("claudecode stream: %w", err)},
+			Kind:  agent.EventAgentError,
+			Err: fmt.Errorf("claudecode stream: %w", err),
 		}
 	}
 }
@@ -220,13 +220,13 @@ func pumpStream(r io.Reader, events chan<- agent.AgentEvent, askHandler askHandl
 // Returns nothing — events that don't map to AgentEvent (e.g. unknown
 // type) are silently dropped (logged at debug).
 //
-// agentName + workspace are stamped onto the EventAgentConnected payload so
+// agentName + workspace are stamped onto the EventAgentReady payload so
 // channel-layer receipts can render the "Agent · name | cwd · path"
 // foot note. Both are immutable for the session's lifetime.
 func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEvent, askHandler askHandlerFunc, agentName, workspace, branch string, logger *slog.Logger) {
 	switch ev.Type {
 	case "system":
-		// system/init is informational; we surface it via EventAgentConnected
+		// system/init is informational; we surface it via EventAgentReady
 		// so the channel can echo a "session <id> · model <name>"
 		// header AND have access to SessionID for /resume. Other
 		// subtypes (e.g. status, hook_progress) are ignored.
@@ -239,14 +239,12 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 			// for the resume path where streamState is reused.
 			resetTasksForNewTurn(state)
 			events <- agent.AgentEvent{
-				Kind: agent.EventAgentConnected,
-				Connected: &agent.AgentConnectedEvent{
-					SessionID: ev.SessionID,
-					Model:     extractModel(ev),
-					AgentName: agentName,
-					Workspace: workspace,
-					Branch:    branch,
-				},
+				Kind:      agent.EventAgentReady,
+				SessionID: ev.SessionID,
+				Model:     extractModel(ev),
+				AgentName: agentName,
+				Workspace: workspace,
+				Branch:    branch,
 			}
 		}
 
@@ -263,20 +261,20 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 				// TEXT-FALLBACK (F-24 §5.3): when AskUserQuestion
 				// isn't exposed as a tool_use, Claude Code falls back
 				// to rendering a markdown question with "please pick
-				// one". Detect that pattern and emit EventPermission
-				// instead of EventText so the channel renders a
+				// one". Detect that pattern and emit EventAgentPermission
+				// instead of EventAgentText so the channel renders a
 				// proper interactive card.
 				if q := detectAskInText(block.Text); q != nil && askHandler != nil {
 					emitAskFromText(*q, events, logger)
 				} else {
 					events <- agent.AgentEvent{
-						Kind: agent.EventText,
+						Kind: agent.EventAgentText,
 						Text: block.Text,
 					}
 				}
 
 			case "thinking":
-				// Thinking blocks are surfaced as EventText with a
+				// Thinking blocks are surfaced as EventAgentText with a
 				// "[思考] " prefix so the channel layer (Feishu
 				// Renderer) can render them as a 💭 entry in the
 				// per-message activity log. The prefix lets the
@@ -289,7 +287,7 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 					continue
 				}
 				events <- agent.AgentEvent{
-					Kind: agent.EventText,
+					Kind: agent.EventAgentText,
 					Text: "[思考] " + block.Thinking,
 				}
 
@@ -299,7 +297,7 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 				// tool_result blocks arrive later in user-role
 				// messages. Record the raw input JSON here so
 				// the user-role handler can stamp it onto
-				// EventToolEnd.Args for the type-aware summary
+				// EventAgentToolEnd.Args for the type-aware summary
 				// (and so the F-38 task tool parser can re-parse
 				// the input after the result lands).
 				if state != nil {
@@ -325,14 +323,14 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		// user-role messages in stream-json carry two shapes:
 		//
 		//   (a) tool_result blocks — echoed back so the model sees
-		//       its own tool calls. Surface as EventToolEnd with the
+		//       its own tool calls. Surface as EventAgentToolEnd with the
 		//       tool_use_id stored on the ID field so start/end can
 		//       be correlated.
 		//
 		//   (b) plain text blocks — only emitted when Claude Code is
 		//       started with --replay-user-messages, OR by a
 		//       third-party bridge that mimics the same shape. Each
-		//       becomes an EventText with a "[你] " prefix so the
+		//       becomes an EventAgentText with a "[你] " prefix so the
 		//       channel can render the user's own input distinctly
 		//       from the assistant's replies.
 		//
@@ -352,7 +350,7 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 			case "tool_result":
 				// F-38: route the result through the task tool
 				// parser first. A successful task operation emits
-				// EventTaskCreate / EventTaskUpdate and suppresses
+				// EventAgentTaskCreate / EventAgentTaskUpdate and suppresses
 				// the generic ToolEnd. A failure, unknown shape,
 				// or non-task tool falls through to the existing
 				// generic ToolEnd emission.
@@ -374,8 +372,8 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 					args = state.toolUseArgs[block.ToolUseID]
 				}
 				events <- agent.AgentEvent{
-					Kind: agent.EventToolEnd,
-					ToolEnd: &agent.ToolEndEvent{
+					Kind: agent.EventAgentToolEnd,
+					ToolEnd: &agent.AgentToolEndEvent{
 						ID:     block.ToolUseID,
 						Name:   block.Name,
 						Args:   args,
@@ -387,7 +385,7 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 					continue
 				}
 				events <- agent.AgentEvent{
-					Kind: agent.EventText,
+					Kind: agent.EventAgentText,
 					Text: "[你] " + block.Text,
 				}
 			}
@@ -399,66 +397,62 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		//   1. subtype "compact" / "compaction" — MID-TURN context
 		//      compaction. NOT a turn end: subsequent assistant /
 		//      tool events continue the same turn. Emit
-		//      EventCompaction and return without EventDone.
+		//      EventAgentCompaction and return without EventAgentDone.
 		//
 		//   2. final assistant reply + token usage — text lives in
 		//      ev.Result; usage lives in ev.Usage / ev.ModelUsage.
 		//      Both are co-located on the same wire event, so we
-		//      emit ONE EventResult with Result.Usage attached. The
+		//      emit ONE EventAgentResult with Result.Usage attached. The
 		//      runtime accumulates Usage on the same dispatch,
 		//      before stamping SessionContext — no separate
 		//      EventUsage kind and no buffer needed. We emit even
 		//      when Result is empty AND IsError=true so the header
 		//      can flip to an error state.
 		//
-		//   3. terminal — EventDone{ExitCode: 0}. ExitCode stays
+		//   3. terminal — EventAgentDone{ExitCode: 0}. ExitCode stays
 		//      zero on the wire; IsError travels on the
-		//      EventResult payload instead.
+		//      EventAgentResult payload instead.
 		if ev.Subtype == "compact" || ev.Subtype == "compaction" {
-			// F-49: one EventCompaction per cycle. Subtype is no
-			// longer carried on the payload (field deleted); the
-			// runtime discriminates purely on Kind. See
-			// docs/feat/F-49-compaction-counter.md §1.3.
-			events <- agent.AgentEvent{
-				Kind: agent.EventCompaction,
-			}
+			// F-49 compaction tracking removed: bridges no longer emit a
+			// dedicated event for context compaction. Runtime is a
+			// pure pass-through; the per-cycle counter / footer 🗜 N
+			// rendering was dropped across the runtime.
 			return
 		}
-		// Decode usage once and share the *UsageEvent pointer
-		// across EventResult (when text/error makes one) and
-		// EventDone. Both events are derived from the same wire
+		// Decode usage once and share the *UsageInfo pointer
+		// across EventAgentResult (when text/error makes one) and
+		// EventAgentDone. Both events are derived from the same wire
 		// envelope so identical pointers reflect that fact and we
 		// avoid a redundant JSON round-trip per turn.
 		//
-		// F-52: Usage rides on DoneEvent so the runtime can read
+		// F-52: Usage rides on AgentDoneEvent so the runtime can read
 		// it uniformly from the universal prompt-end signal
 		// regardless of whether the bridge emitted a result-
-		// bearing EventResult. For one-shot bridges (Claude Code)
-		// EventDone here marks process exit; for long-lived
+		// bearing EventAgentResult. For one-shot bridges (Claude Code)
+		// EventAgentDone here marks process exit; for long-lived
 		// bridges it marks turn end.
 		usage := decodeUsage(ev.Usage, ev.ModelUsage)
 		if ev.Result != "" || ev.IsError {
-			result := &agent.ResultEvent{
+			result := &agent.AgentResultEvent{
 				Text:       ev.Result,
 				DurationMs: ev.DurationMs,
-				IsError:    ev.IsError,
 				Subtype:    ev.Subtype,
 			}
 			// Attach usage from the same wire event. The previous
 			// design emitted a separate EventUsage here; runtime
 			// buffering was needed to re-stamp the OutResult footer.
-			// Co-locating the usage on ResultEvent removes that
+			// Co-locating the usage on AgentResultEvent removes that
 			// path entirely (calc-then-reply invariant now holds by
 			// construction — usage IS on the result event).
 			result.Usage = usage
 			events <- agent.AgentEvent{
-				Kind:   agent.EventResult,
+				Kind:   agent.EventAgentResult,
 				Result: result,
 			}
 		}
 		events <- agent.AgentEvent{
-			Kind: agent.EventDone,
-			Done: &agent.DoneEvent{
+			Kind: agent.EventAgentDone,
+			Done: &agent.AgentDoneEvent{
 				ExitCode: 0,
 				Usage:    usage,
 			},
@@ -471,7 +465,7 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		// which bypasses this path entirely — so a control_request
 		// reaching us is unexpected. Log at debug for visibility
 		// without taking action; the future stdio-permission mode
-		// will hook this case to emit EventPermission.
+		// will hook this case to emit EventAgentPermission.
 		if logger != nil {
 			logger.Debug("claudecode: control_request received (unhandled under bypassPermissions)")
 		}
@@ -486,9 +480,9 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 // handleToolUse routes a tool_use block. AskUserQuestion is intercepted
 // via askHandler. Task tools (F-38) record their pending operation
 // on the streamState but DO NOT emit anything here — the matching
-// tool_result branch is the only place that emits EventTaskCreate /
-// EventTaskUpdate, after confirming the operation succeeded.
-// Other tools are emitted as EventToolStart.
+// tool_result branch is the only place that emits EventAgentTaskCreate /
+// EventAgentTaskUpdate, after confirming the operation succeeded.
+// Other tools are emitted as EventAgentToolStart.
 func handleToolUse(
 	block contentBlock,
 	_ *streamState,
@@ -518,8 +512,8 @@ func handleToolUse(
 		inputStr = inputStr[:500] + "…"
 	}
 	events <- agent.AgentEvent{
-		Kind: agent.EventToolStart,
-		ToolStart: &agent.ToolStartEvent{
+		Kind: agent.EventAgentToolStart,
+		ToolStart: &agent.AgentToolStartEvent{
 			ID:   block.ID,
 			Name: block.Name,
 			Args: inputStr,
@@ -609,9 +603,9 @@ func truncateForLog(s string, max int) string {
 
 // decodeUsage parses the result.usage payload (and the co-located
 // result.modelUsage payload, which carries per-model costUSD +
-// contextWindow) into a single *agent.UsageEvent. Returns nil
+// contextWindow) into a single *agent.UsageInfo. Returns nil
 // when the usage payload is empty / malformed / all-zero — the
-// caller should NOT emit a meaningless EventResult-with-Usage in
+// caller should NOT emit a meaningless EventAgentResult-with-Usage in
 // that case. The decoder is intentionally permissive: zero /
 // unknown counts default to zero rather than erroring out.
 //
@@ -629,18 +623,18 @@ func truncateForLog(s string, max int) string {
 //
 // nil usage → nil result (no usage on the wire this turn). nil
 // modelUsage → CostUSD=0, contextWindow=0 (still produces a
-// populated UsageEvent when the usage payload has any non-zero
+// populated UsageInfo when the usage payload has any non-zero
 // field; pct omitted because we lack the denominator).
 //
 // The bridge owns the context-window-pct calculation per
 // docs/feat/F-45-session-footer.md §1.5 / F-54: it reads
 // `modelUsage.<model>.contextWindow` into a bridge-local
 // variable, divides the per-turn used tokens by it, and fills
-// `UsageEvent.ContextWindowPct`. The window value itself is
-// never stored on UsageEvent (F-54 §1.2). The runtime is a
+// `UsageInfo.ContextWindowPct`. The window value itself is
+// never stored on UsageInfo (F-54 §1.2). The runtime is a
 // passive pass-through — it does NOT recompute pct, and it
 // does NOT know about Anthropic's model-window conventions.
-func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageEvent {
+func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageInfo {
 	if len(rawUsage) == 0 {
 		return nil
 	}
@@ -656,10 +650,10 @@ func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageEvent {
 	if u.InputTokens == 0 && u.OutputTokens == 0 &&
 		u.CacheCreationInputTokens == 0 && u.CacheReadInputTokens == 0 {
 		// All zero is indistinguishable from "absent" — don't emit
-		// a meaningless EventResult-with-Usage.
+		// a meaningless EventAgentResult-with-Usage.
 		return nil
 	}
-	out := &agent.UsageEvent{
+	out := &agent.UsageInfo{
 		InputTokens:              int(u.InputTokens),
 		OutputTokens:             int(u.OutputTokens),
 		CacheCreationInputTokens: int(u.CacheCreationInputTokens),
@@ -667,7 +661,7 @@ func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageEvent {
 	}
 	// `contextWindow` is a bridge-local value (F-54): parsed from
 	// `modelUsage[<model>].contextWindow`, used immediately to
-	// compute pct, never stored on UsageEvent. Any parse failure
+	// compute pct, never stored on UsageInfo. Any parse failure
 	// or empty payload leaves CostUSD / contextWindow at 0
 	// ("not reported" — footer omits the X% segment).
 	contextWindow := 0

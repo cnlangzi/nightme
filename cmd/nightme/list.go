@@ -27,7 +27,7 @@
 //     operators can clean up by hand.
 //   - The resume column is the agent's own session id (e.g. Claude
 //     Code's `system/init.session_id`); captured by the runtime's
-//     EventHandler on EventAgentConnected and persisted so a follow-up spawn
+//     EventHandler on EventAgentReady and persisted so a follow-up spawn
 //     can replay `--resume <id>`.
 package main
 
@@ -63,7 +63,7 @@ type listRow struct {
 	Cwd            string             `json:"cwd"`
 	PID            int                `json:"pid"`
 	Status         registry.Status    `json:"status"`
-	ResumeID       string             `json:"resumeId,omitempty"`
+	SessionID       string             `json:"resumeId,omitempty"`
 	ExitCode       *int               `json:"exitCode,omitempty"`
 	CreatedAt      time.Time          `json:"createdAt"`
 	LastRunAt      time.Time          `json:"lastRunAt"`
@@ -219,7 +219,7 @@ func loadListRows(
 			// uses this id to replay `--resume <id>`. Deleting it
 			// here would lose the id permanently — list must not
 			// destroy state the runtime needs.
-			canGC := as.ResumeID == ""
+			canGC := as.SessionID == ""
 			if !all && !keepExited && canGC {
 				toGC = append(toGC, as.ID)
 			}
@@ -245,7 +245,7 @@ func loadListRows(
 			Cwd:            as.Cwd,
 			PID:            as.PID,
 			Status:         as.Status,
-			ResumeID:       as.ResumeID,
+			SessionID:       as.SessionID,
 			ExitCode:       as.ExitCode,
 			CreatedAt:      as.CreatedAt,
 			LastRunAt:      as.LastRunAt,
@@ -298,7 +298,7 @@ func printListTable(w io.Writer, rows []listRow) {
 			r.Cwd,
 			startCell(r.LastRunAt),
 			r.AgentSessionID,
-			resumeCell(r.ResumeID),
+			resumeCell(r.SessionID),
 		)
 	}
 	tw.Flush()

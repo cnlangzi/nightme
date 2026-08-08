@@ -1,6 +1,26 @@
-# F-49: Context Compaction Counter + Footer Line 1 � N
+# F-49: Context Compaction Counter + Footer Line 1 🗜 N
 
-> **Status**: 📝 设计阶段（doc-first，2026-08-06）
+> **⚠️ OBSOLETE (2026-08-08)**：本文描述的"每 compaction 增计数 + footer 显示 🗜 N"链路已被**整体删除**。
+> 触发原因：bridges 在 F-49 之后仍在消化协议差异（Pi 抑制 transient `compaction_start`，
+> Claude Code 在 `result` subtype 上发 `compact`/`compaction`），runtime 计数器
+> 实际未观察到稳定数据。f49 落地后没人消费 `CompactionCount` 字段，于是：
+>
+> - 删除 `EventAgentCompaction` Kind + 4 个 bridge 的 emit 路径
+> - 删除 `AgentSession.CompactionCount` 字段 + `RecordCompaction` 方法
+> - 删除 `registry.AgentSessionEntry.CompactionCount` JSON 字段（v3 schema）
+> - 删除 `gateway.SessionContext.CompactionCount` 字段
+> - 删除 footer "· 🗜 N" 段渲染
+> - 4 个相关测试（`TestPumpStream_Compact`、`TestPumpStream_Compaction`、
+>   `TestTranslate_CompactionEndOnly`、`TestFormatSessionFooterLines_CompactionSegment`）整段删除
+>
+> 历史设计保留在本文档案，作为"为什么不这么做"参考。footer Line 1 退化为
+> `Agent · Model` 两段，token / cost 由 Line 2 渲染（per-turn snapshot，
+> F-52/F-55 契约）。rebuild 路径见 [`wip/agentevent.md`](../../wip/agentevent.md) §5 / §10 / §11。
+>
+> 详细的设计 / bridge 抽象 / Footer 渲染参考仍适用 — 只是 runtime / persistence
+> / footer 实施不再做。如未来重做"compaction tracking"，复用本文的设计部分。
+>
+> **Status**: 📝 **Superseded** (originally 设计阶段，doc-first，2026-08-06)
 > **Milestone**: v1.3.x
 > **Scope**:
 > - `internal/agent/agent.go` — `CompactionEvent` 删除 `Subtype` 字段（空 struct）；从 `AgentEvent` 删除 `Compaction *CompactionEvent` 字段（runtime 不再 translate 出去）

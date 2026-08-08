@@ -119,15 +119,15 @@ type Prompt struct {
 type PromptEndReason int
 
 const (
-	// PromptEndClean: agent emitted EventDone normally.
+	// PromptEndClean: agent emitted EventAgentDone normally.
 	PromptEndClean PromptEndReason = iota
 
-	// PromptEndError: agent emitted EventError (unrecoverable
+	// PromptEndError: agent emitted EventAgentError (unrecoverable
 	// per-event error reported by the bridge).
 	PromptEndError
 
 	// PromptEndProcessDied: AS process exited without producing
-	// EventDone/EventError. PHASE 0 DOES NOT TRIGGER THIS — the
+	// EventAgentDone/EventAgentError. PHASE 0 DOES NOT TRIGGER THIS — the
 	// readPump's `!ok` branch currently returns without calling
 	// endPrompt. Reserved for the "Prompt 投递稳定性优化" PR
 	// (see docs/feat/message_lifecycle.md §8).

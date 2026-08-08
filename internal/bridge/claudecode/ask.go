@@ -11,10 +11,10 @@ import (
 
 // askHandlerFunc is the callback invoked when pumpStream detects an
 // AskUserQuestion tool_use. Implementations translate the raw
-// contentBlock into an EventPermission that the channel can render.
+// contentBlock into an EventAgentPermission that the channel can render.
 //
 // nil means "do not handle AskUserQuestion" — the tool_use falls
-// through to the default tool_use path (EventToolStart) and the
+// through to the default tool_use path (EventAgentToolStart) and the
 // channel will not see a permission prompt. This is a graceful
 // degradation for environments where AskUserQuestion is not
 // surfaced (e.g. certain non-Anthropic model providers).
@@ -42,7 +42,7 @@ type Option struct {
 	Description string `json:"description"`
 }
 
-// defaultAskHandler emits an EventPermission with Options built from
+// defaultAskHandler emits an EventAgentPermission with Options built from
 // the question's option labels. The channel renders them as buttons
 // (or a select widget for multiSelect). The user's choice is fed
 // back via Session.SendPermission.
@@ -101,8 +101,8 @@ func defaultAskHandler(block contentBlock, events chan<- agent.AgentEvent, logge
 		opts = append(opts, "Other")
 
 		events <- agent.AgentEvent{
-			Kind: agent.EventPermission,
-			Permission: &agent.PermissionRequest{
+			Kind: agent.EventAgentPermission,
+			Permission: &agent.AgentPermissionRequest{
 				Tool:    "AskUserQuestion",
 				Action:  formatQuestionAction(q),
 				Options: opts,
@@ -140,8 +140,8 @@ func emitAskFromText(q Question, events chan<- agent.AgentEvent, logger *slog.Lo
 	}
 
 	events <- agent.AgentEvent{
-		Kind: agent.EventPermission,
-		Permission: &agent.PermissionRequest{
+		Kind: agent.EventAgentPermission,
+		Permission: &agent.AgentPermissionRequest{
 			Tool:       "AskUserQuestion",
 			Action:     formatQuestionAction(q),
 			Options:    opts,
@@ -215,7 +215,7 @@ func encodeUserAnswer(toolUseID string, selected []string, multi bool) ([]byte, 
 // detectAskInText is a TEXT-FALLBACK path for environments where
 // AskUserQuestion is not exposed as a tool_use block (e.g. third-party
 // model providers that strip Claude Code-specific tools from the
-// system prompt). It scans EventText payloads for the markdown-table
+// system prompt). It scans EventAgentText payloads for the markdown-table
 // pattern Claude Code emits when the tool is unavailable.
 //
 // Detection heuristic (deliberately conservative — false positives

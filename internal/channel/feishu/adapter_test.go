@@ -630,7 +630,7 @@ func TestSend_OutToolEnd_PostsToThread(t *testing.T) {
 // F-49: TestSend_OutCompaction_PostsToThread deleted — the
 // OutCompaction kind no longer exists (see
 // docs/feat/F-49-compaction-counter.md §1.9). The runtime consumes
-// EventCompaction directly via AgentSession.RecordCompaction() and
+// EventAgentCompaction directly via AgentSession.RecordCompaction() and
 // produces no OutboundMessage. The count surfaces later via
 // SessionContext.CompactionCount → Footer Line 1 "🗜 N".
 
@@ -646,7 +646,7 @@ func TestSend_OutToolEnd_PostsToThread(t *testing.T) {
 // ReplyInThreadAndChat on 2026-08-04 (ops decision: a brief
 // "✶ Compacting…" line in main chat is informative, not noise).
 // F-49 then deleted the OutCompaction kind entirely — the
-// runtime now consumes EventCompaction directly via
+// runtime now consumes EventAgentCompaction directly via
 // AgentSession.RecordCompaction() and produces no OutboundMessage,
 // so neither this test nor
 // TestSend_ChatVisibleEvents_PassReplyInThreadFalse has an
@@ -825,7 +825,7 @@ func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
 
 	// F-49: "OutCompaction" subtest deleted — the OutCompaction kind
 	// no longer exists (see docs/feat/F-49-compaction-counter.md
-	// §1.9). The runtime consumes EventCompaction directly via
+	// §1.9). The runtime consumes EventAgentCompaction directly via
 	// AgentSession.RecordCompaction() and produces no OutboundMessage.
 }
 
@@ -1155,7 +1155,7 @@ func TestSendViaLark_ReplyInBoth_Dispatch(t *testing.T) {
 		// F-49: "OutCompaction" case deleted — the OutCompaction
 		// kind no longer exists (see
 		// docs/feat/F-49-compaction-counter.md §1.9). The runtime
-		// consumes EventCompaction directly via
+		// consumes EventAgentCompaction directly via
 		// AgentSession.RecordCompaction() and produces no
 		// OutboundMessage, so there is nothing for the channel
 		// to dispatch here.
@@ -1293,7 +1293,7 @@ func TestSendViaLark_Dispatch(t *testing.T) {
 				Kind:    gateway.OutTaskCreate,
 				ChatID:  "oc_test",
 				ReplyTo: "om_user_1",
-				TaskList: &agent.TaskListEvent{Items: []agent.TaskItem{
+				TaskList: &agent.AgentTaskListEvent{Items: []agent.AgentTaskItem{
 					{Subject: "step 1", Status: agent.TaskPending, ActiveForm: "doing 1"},
 				}},
 			},
@@ -1306,7 +1306,7 @@ func TestSendViaLark_Dispatch(t *testing.T) {
 				Kind:    gateway.OutTaskUpdate,
 				ChatID:  "oc_test",
 				ReplyTo: "om_user_2",
-				TaskList: &agent.TaskListEvent{Items: []agent.TaskItem{
+				TaskList: &agent.AgentTaskListEvent{Items: []agent.AgentTaskItem{
 					{Subject: "step 1", Status: agent.TaskCompleted, ActiveForm: "doing 1"},
 				}},
 			},
@@ -1385,7 +1385,7 @@ func TestSend_OutResult_LongMarkdownUsesInteractiveCard(t *testing.T) {
 		ChatID:  "oc_test",
 		ReplyTo: "om_x",
 		Text:    longText,
-		Result:  &agent.ResultEvent{Text: longText},
+		Result:  &agent.AgentResultEvent{Text: longText},
 	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -1408,7 +1408,7 @@ func TestSend_OutResult_NoMarkdownUsesText(t *testing.T) {
 		ChatID:  "oc_test",
 		ReplyTo: "om_x",
 		Text:    "plain reply without any markdown markers",
-		Result:  &agent.ResultEvent{Text: "plain reply without any markdown markers"},
+		Result:  &agent.AgentResultEvent{Text: "plain reply without any markdown markers"},
 	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -1438,7 +1438,7 @@ func TestSend_OutResult_LotsOfTablesUsesPost(t *testing.T) {
 		ChatID:  "oc_test",
 		ReplyTo: "om_x",
 		Text:    text,
-		Result:  &agent.ResultEvent{Text: text},
+		Result:  &agent.AgentResultEvent{Text: text},
 	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -1460,7 +1460,7 @@ func TestSend_OutResult_EmptySkipped(t *testing.T) {
 		ChatID:  "oc_test",
 		ReplyTo: "om_x",
 		Text:    "",
-		Result:  &agent.ResultEvent{Text: ""},
+		Result:  &agent.AgentResultEvent{Text: ""},
 	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -1482,9 +1482,9 @@ func TestSend_OutResult_IsErrorPrefixedWithIcon(t *testing.T) {
 		ChatID:  "oc_test",
 		ReplyTo: "om_x",
 		Text:    "agent run failed",
-		Result: &agent.ResultEvent{
-			Text:    "agent run failed",
-			IsError: true,
+		Err:     errors.New("agent run failed"),
+		Result: &agent.AgentResultEvent{
+			Text: "agent run failed",
 		},
 	}); err != nil {
 		t.Fatalf("send: %v", err)
@@ -1521,7 +1521,7 @@ func TestSend_OutResult_OrphanTopLevel(t *testing.T) {
 	}
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
-		Usage: &agent.UsageEvent{InputTokens: 200, OutputTokens: 80, CostUSD: 0.456},
+		Usage: &agent.UsageInfo{InputTokens: 200, OutputTokens: 80, CostUSD: 0.456},
 	}
 	text := "## Final\n\nbody"
 	if err := a.Send(t.Context(), gateway.OutboundMessage{
@@ -1529,7 +1529,7 @@ func TestSend_OutResult_OrphanTopLevel(t *testing.T) {
 		ChatID:         "oc_test",
 		ReplyTo:        "", // orphan
 		Text:           text,
-		Result:         &agent.ResultEvent{Text: text},
+		Result:         &agent.AgentResultEvent{Text: text},
 		SessionContext: ctx,
 	}); err != nil {
 		t.Fatalf("send: %v", err)
@@ -1581,10 +1581,10 @@ func TestEnsureReceiptForTask_Concurrent_OnlyOneSendCard(t *testing.T) {
 	const userMsgID = "om_user_task_race"
 	const chatID = "oc_task_race"
 
-	listA := &agent.TaskListEvent{Items: []agent.TaskItem{
+	listA := &agent.AgentTaskListEvent{Items: []agent.AgentTaskItem{
 		{ID: "1", Subject: "task A", Status: agent.TaskPending},
 	}}
-	listB := &agent.TaskListEvent{Items: []agent.TaskItem{
+	listB := &agent.AgentTaskListEvent{Items: []agent.AgentTaskItem{
 		{ID: "1", Subject: "task B", Status: agent.TaskPending},
 	}}
 
@@ -1836,7 +1836,7 @@ func TestSend_OutReply_OrphanReplyTo_AlwaysCard(t *testing.T) {
 	ctx := &gateway.SessionContext{
 		Agent:  "claude",
 		Model:  "opus-4-5",
-		Usage: &agent.UsageEvent{
+		Usage: &agent.UsageInfo{
 			InputTokens: 100, OutputTokens: 50, CostUSD: 0.123,
 		},
 	}
@@ -1932,7 +1932,7 @@ func TestSend_OutReply_ColdStartSendCardFails_StillProducesCard(t *testing.T) {
 		Text:    "first chunk after cold-start failure",
 		SessionContext: &gateway.SessionContext{
 			Agent: "claude", Model: "opus-4-5",
-			Usage: &agent.UsageEvent{InputTokens: 10, CostUSD: 0.001},
+			Usage: &agent.UsageInfo{InputTokens: 10, CostUSD: 0.001},
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutReply cold-start fail): %v", err)
@@ -1998,7 +1998,7 @@ func TestSend_OutReply_AppendEntryOverflow_StillProducesCard(t *testing.T) {
 
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
-		Usage: &agent.UsageEvent{InputTokens: 100, CostUSD: 0.01},
+		Usage: &agent.UsageInfo{InputTokens: 100, CostUSD: 0.01},
 	}
 
 	// Chunk 1: cold-start receipt.
@@ -2127,10 +2127,10 @@ func TestSend_OutResult_AnchoredCardFooterStyled(t *testing.T) {
 		ChatID:  "oc_test",
 		ReplyTo: "om_user", // anchored
 		Text:    "intro\n\n```go\nfunc x() { return 1 }\n```\n\noutro",
-		Result:  &agent.ResultEvent{Text: "intro\n\n```go\nfunc x() { return 1 }\n```\n\noutro"},
+		Result:  &agent.AgentResultEvent{Text: "intro\n\n```go\nfunc x() { return 1 }\n```\n\noutro"},
 		SessionContext: &gateway.SessionContext{
 			Agent: "claude", Model: "opus-4-5",
-			Usage: &agent.UsageEvent{InputTokens: 200, OutputTokens: 80, CostUSD: 0.456},
+			Usage: &agent.UsageInfo{InputTokens: 200, OutputTokens: 80, CostUSD: 0.456},
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutResult anchored): %v", err)
@@ -2227,16 +2227,14 @@ func TestSend_OutInit_SilentDrop(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutInit,
-		ChatID:  "oc_test",
-		ReplyTo: "om_user",
-		Connected: &agent.AgentConnectedEvent{
-			SessionID: "s_1",
-			Model:     "claude-sonnet-4-5",
-			AgentName: "claude",
-			Workspace: "/tmp",
-			Branch:    "main",
-		},
+		Kind:      gateway.OutInit,
+		ChatID:    "oc_test",
+		ReplyTo:   "om_user",
+		SessionID: "s_1",
+		Model:     "claude-sonnet-4-5",
+		AgentName: "claude",
+		Workspace: "/tmp",
+		Branch:    "main",
 	}); err != nil {
 		t.Fatalf("Send(OutInit): %v", err)
 	}
@@ -2265,17 +2263,17 @@ func TestSend_OutResult_CoLocatesUsage(t *testing.T) {
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
 		Text:    "完成",
-		Result: &agent.ResultEvent{
+		Result: &agent.AgentResultEvent{
 			Text:       "完成",
 			DurationMs: 1234,
 			Subtype:    "success",
-			Usage: &agent.UsageEvent{
+			Usage: &agent.UsageInfo{
 				InputTokens:  100,
 				OutputTokens: 50,
 				CostUSD:      0.001,
 			},
 		},
-		Usage: &agent.UsageEvent{
+		Usage: &agent.UsageInfo{
 			InputTokens:  100,
 			OutputTokens: 50,
 			CostUSD:      0.001,
@@ -2460,7 +2458,7 @@ func TestEnsureReceiptForTyping_RendersFooterWhenProvided(t *testing.T) {
 
 // TestEnsureReceiptForTyping_OmitsFooterWhenEmpty (F-48): when
 // the caller's footerLines is nil/empty (no SessionContext stamped
-// — e.g. agent hasn't EventAgentConnected'd yet and the Cwd is not in a git
+// — e.g. agent hasn't EventAgentReady'd yet and the Cwd is not in a git
 // repo), the placeholder card omits the footer entirely. The
 // hr divider is also absent. This is the back-compat path for
 // the pre-F-48 "no footer" placeholder — supported but not
@@ -2560,7 +2558,7 @@ func TestEnsureReceiptForTask_ReusesTypingPlaceholder(t *testing.T) {
 	}
 
 	// Step 2: OutTask event reuses the same receipt.
-	list := &agent.TaskListEvent{Items: []agent.TaskItem{
+	list := &agent.AgentTaskListEvent{Items: []agent.AgentTaskItem{
 		{Subject: "step 1", Status: agent.TaskPending, ActiveForm: "doing 1"},
 	}}
 	rcpt2, created2, err := a.ensureReceiptForTask(context.Background(), "oc_test", "om_user", list, nil)
@@ -2611,13 +2609,13 @@ func TestSend_OutTask_OrphanReplyTo_StillCard(t *testing.T) {
 		Kind:    gateway.OutTaskCreate,
 		ChatID:  "oc_test",
 		ReplyTo: "", // orphan — no parent user message
-		TaskList: &agent.TaskListEvent{Items: []agent.TaskItem{
+		TaskList: &agent.AgentTaskListEvent{Items: []agent.AgentTaskItem{
 			{ID: "1", Subject: "task A", Status: agent.TaskPending},
 			{ID: "2", Subject: "task B", Status: agent.TaskCompleted},
 		}},
 		SessionContext: &gateway.SessionContext{
 			Agent: "claude", Model: "opus-4-5",
-			Usage: &agent.UsageEvent{InputTokens: 100, CostUSD: 0.001},
+			Usage: &agent.UsageInfo{InputTokens: 100, CostUSD: 0.001},
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutTask orphan): %v", err)
@@ -2668,12 +2666,12 @@ func TestSend_OutTask_ColdStartSendCardFails_StillCard(t *testing.T) {
 		Kind:    gateway.OutTaskCreate,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
-		TaskList: &agent.TaskListEvent{Items: []agent.TaskItem{
+		TaskList: &agent.AgentTaskListEvent{Items: []agent.AgentTaskItem{
 			{ID: "1", Subject: "fallback task", Status: agent.TaskPending},
 		}},
 		SessionContext: &gateway.SessionContext{
 			Agent: "claude", Model: "opus-4-5",
-			Usage: &agent.UsageEvent{InputTokens: 50, CostUSD: 0.005},
+			Usage: &agent.UsageInfo{InputTokens: 50, CostUSD: 0.005},
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutTask cold-start fail): %v", err)
@@ -2717,7 +2715,7 @@ func TestSend_OutTask_NilSessionContext_NoFooter(t *testing.T) {
 		Kind:    gateway.OutTaskCreate,
 		ChatID:  "oc_test",
 		ReplyTo: "", // orphan
-		TaskList: &agent.TaskListEvent{Items: []agent.TaskItem{
+		TaskList: &agent.AgentTaskListEvent{Items: []agent.AgentTaskItem{
 			{ID: "1", Subject: "no-ctx task", Status: agent.TaskPending},
 		}},
 		// SessionContext intentionally nil — no footer.
@@ -2762,12 +2760,12 @@ func TestSend_OutTask_EmptyItems_ShowsWorkingPlaceholder(t *testing.T) {
 		Kind:    gateway.OutTaskCreate,
 		ChatID:  "oc_test",
 		ReplyTo: "", // orphan
-		TaskList: &agent.TaskListEvent{
+		TaskList: &agent.AgentTaskListEvent{
 			Items: nil, // ← empty task list edge case
 		},
 		SessionContext: &gateway.SessionContext{
 			Agent: "claude", Model: "opus-4-5",
-			Usage: &agent.UsageEvent{InputTokens: 10, CostUSD: 0.001},
+			Usage: &agent.UsageInfo{InputTokens: 10, CostUSD: 0.001},
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutTask empty items): %v", err)

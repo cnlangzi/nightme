@@ -4,10 +4,10 @@ package claudecode
 // (no --resume) the issue, or only --resume?"
 //
 // Repro: spawn the user's real `claude` binary using the same
-// argv nightme would build for a fresh session (no ResumeID, no
+// argv nightme would build for a fresh session (no SessionID, no
 // args), point it at the user's workspace (so its .mcp.json is
 // loaded), push a single ContentText block, then assert we
-// observe EventText (real assistant output) within a bounded
+// observe EventAgentText (real assistant output) within a bounded
 // window.
 //
 // If this test passes: only --resume is broken — the existing
@@ -40,7 +40,7 @@ import (
 //   1. With the user's workspace (loads the heavy .mcp.json)
 //   2. With a clean workspace (no .mcp.json)
 //
-// Each flavor is allowed 60s to produce EventText after
+// Each flavor is allowed 60s to produce EventAgentText after
 // SendBlocks. The test logs the verdict for each flavor so
 // the next person debugging has the answer in CI output.
 func TestFreshLiveness_PassesAnswer(t *testing.T) {
@@ -81,7 +81,7 @@ func TestFreshLiveness_PassesAnswer(t *testing.T) {
 			sess, err := a.Start(ctx, agent.StartConfig{
 				Workspace:      tc.workspace,
 				PermissionMode: "bypassPermissions",
-				// ResumeID deliberately empty — this is the
+				// SessionID deliberately empty — this is the
 				// fresh-session case the user is asking about.
 			})
 			if err != nil {
@@ -108,19 +108,19 @@ func TestFreshLiveness_PassesAnswer(t *testing.T) {
 			go func() {
 				for ev := range sess.Events() {
 					switch ev.Kind {
-					case agent.EventAgentConnected:
+					case agent.EventAgentReady:
 						t.Logf("[liveness] init at %s", time.Since(start))
-					case agent.EventText:
+					case agent.EventAgentText:
 						resultCh <- outcome{ev.Kind, ev.Text, time.Now()}
 						return
-					case agent.EventResult:
+					case agent.EventAgentResult:
 						resultCh <- outcome{ev.Kind, ev.Result.Text, time.Now()}
 						return
-					case agent.EventDone:
+					case agent.EventAgentDone:
 						resultCh <- outcome{ev.Kind, "", time.Now()}
 						return
-					case agent.EventError:
-						t.Logf("[liveness] error event: %v", ev.Error)
+					case agent.EventAgentError:
+						t.Logf("[liveness] error event: %v", ev.Err)
 						return
 					}
 				}
@@ -136,11 +136,11 @@ func TestFreshLiveness_PassesAnswer(t *testing.T) {
 				}
 				t.Logf("[liveness] %s fresh session produced %v after %s (text=%q)",
 					tc.workspace, r.kind, time.Since(start), truncate(r.text, 80))
-				if r.kind == agent.EventText && !strings.Contains(strings.ToLower(r.text), "pong") {
+				if r.kind == agent.EventAgentText && !strings.Contains(strings.ToLower(r.text), "pong") {
 					t.Errorf("text response %q does not contain expected 'pong'", r.text)
 				}
 			case <-deadline:
-				t.Fatalf("fresh session in %s: 60s deadline, no EventText/Result/Done received — fresh session ALSO hangs", tc.workspace)
+				t.Fatalf("fresh session in %s: 60s deadline, no EventAgentText/Result/Done received — fresh session ALSO hangs", tc.workspace)
 			}
 		})
 	}
@@ -209,7 +209,7 @@ func TestFreshLiveness_LogsUserMCP(t *testing.T) {
 			t.Logf("[liveness/user-mcp] EV at %s kind=%v text=%q",
 				time.Since(start).Round(time.Millisecond),
 				ev.Kind, truncate(ev.Text, 200))
-			if ev.Kind == agent.EventText || ev.Kind == agent.EventResult || ev.Kind == agent.EventDone {
+			if ev.Kind == agent.EventAgentText || ev.Kind == agent.EventAgentResult || ev.Kind == agent.EventAgentDone {
 				gotOutput = true
 			}
 		case <-ctx.Done():

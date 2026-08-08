@@ -38,83 +38,9 @@ func TestFormatSessionFooterLines_IdentityOnly(t *testing.T) {
 	}
 }
 
-// TestFormatSessionFooterLines_CompactionSegment (F-49) covers
-// the Line 1 "🗜 N" segment that records how many context-
-// compaction cycles this AgentSession has gone through. The
-// segment is appended after Agent · Model when N > 0; the
-// F-45 §1.6 zero-omit convention keeps brand-new sessions clean.
-func TestFormatSessionFooterLines_CompactionSegment(t *testing.T) {
-	tests := []struct {
-		name string
-		ctx  *gateway.SessionContext
-		want []string
-	}{
-		{
-			name: "count=0 — segment omitted",
-			ctx:  &gateway.SessionContext{Agent: "claude", Model: "opus-4-5"},
-			want: []string{"🤖 claude · opus-4-5"},
-		},
-		{
-			name: "count=1 — single compaction renders",
-			ctx: &gateway.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				CompactionCount: 1,
-			},
-			want: []string{"🤖 claude · opus-4-5 · 🗜 1"},
-		},
-		{
-			name: "count=3 — multiple compactions render verbatim",
-			ctx: &gateway.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				CompactionCount: 3,
-			},
-			want: []string{"🤖 claude · opus-4-5 · 🗜 3"},
-		},
-		{
-			name: "count=12 — double-digit renders verbatim",
-			ctx: &gateway.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				CompactionCount: 12,
-			},
-			want: []string{"🤖 claude · opus-4-5 · 🗜 12"},
-		},
-		{
-			name: "count without Agent/Model — segment still emits",
-			// Edge case: only the compaction counter is known.
-			// Should still render — the counter alone is
-			// informationally meaningful even without identity.
-			ctx:  &gateway.SessionContext{CompactionCount: 2},
-			want: []string{"🤖 · 🗜 2"},
-		},
-		{
-			name: "count + tokens — both lines populated",
-			// End-to-end: identity + compaction on Line 1,
-			// usage stats on Line 2. Confirms the segment
-			// doesn't bleed into Line 2 (different rhythm,
-			// · 🗜 N only appears once).
-			ctx: &gateway.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				CompactionCount: 2,
-				Usage: &agent.UsageEvent{
-					InputTokens: 12_300, OutputTokens: 1_500,
-					CacheReadInputTokens: 8_200,
-				},
-			},
-			want: []string{
-				"🤖 claude · opus-4-5 · 🗜 2",
-				"💰:「 12.3k / 8.2k / 1.5k 」",
-			},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := formatSessionFooterLines(tc.ctx)
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("got %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
+// TestFormatSessionFooterLines_CompactionSegment removed: F-49
+// compaction tracking was deleted across the runtime. The "· 🗜 N"
+// segment is no longer rendered; the entire subtest is gone.
 
 func TestFormatSessionFooterLines_TokenSegments(t *testing.T) {
 	// F-52 / new footer convention: "in" folds all three input-side
@@ -124,7 +50,7 @@ func TestFormatSessionFooterLines_TokenSegments(t *testing.T) {
 	ctx := &gateway.SessionContext{
 		Agent: "claude",
 		Model: "opus-4-5",
-		Usage: &agent.UsageEvent{
+		Usage: &agent.UsageInfo{
 			InputTokens:              11_700,
 			OutputTokens:             1_500,
 			CacheCreationInputTokens: 600, // counted into "in"
@@ -152,7 +78,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			name: "no input but has output",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageEvent{OutputTokens: 234},
+				Usage: &agent.UsageInfo{OutputTokens: 234},
 			},
 			want: []string{"🤖 claude · opus-4-5", "💰:「 234 」"},
 		},
@@ -163,7 +89,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			name: "only cache hits — single segment renders",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageEvent{CacheReadInputTokens: 5_600},
+				Usage: &agent.UsageInfo{CacheReadInputTokens: 5_600},
 			},
 			want: []string{"🤖 claude · opus-4-5", "💰:「 5.6k 」"},
 		},
@@ -174,7 +100,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			name: "cost only (no tokens)",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageEvent{CostUSD: 1.245},
+				Usage: &agent.UsageInfo{CostUSD: 1.245},
 			},
 			want: []string{"🤖 claude · opus-4-5", "💰:「 $1.245 」"},
 		},
@@ -183,7 +109,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			name: "no cost (omitted)",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageEvent{
+				Usage: &agent.UsageInfo{
 					InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
 				},
 			},
@@ -193,7 +119,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			// No Agent/Model → only the usage line renders.
 			name: "tokens but no Agent / Model",
 			ctx: &gateway.SessionContext{
-				Usage: &agent.UsageEvent{
+				Usage: &agent.UsageInfo{
 					InputTokens: 5_000, OutputTokens: 200,
 				},
 			},
@@ -207,7 +133,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			name: "only cache hits — single segment renders",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageEvent{CacheReadInputTokens: 5_600},
+				Usage: &agent.UsageInfo{CacheReadInputTokens: 5_600},
 			},
 			want: []string{"🤖 claude · opus-4-5", "💰:「 5.6k 」"},
 		},
@@ -218,7 +144,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			name: "cache hits + output, no new tokens",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageEvent{
+				Usage: &agent.UsageInfo{
 					CacheReadInputTokens: 5_600,
 					OutputTokens:         800,
 				},
@@ -240,7 +166,7 @@ func TestFormatSessionFooterLines_LargeNumbers(t *testing.T) {
 	// in = 156_000 + 0 + 1_200_000 = 1_356_000 → "1.4M" (rounded).
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
-		Usage: &agent.UsageEvent{
+		Usage: &agent.UsageInfo{
 			InputTokens:              156_000,
 			OutputTokens:             18_000,
 			CacheCreationInputTokens: 0,
@@ -264,7 +190,7 @@ func TestFormatSessionFooter_StringForm(t *testing.T) {
 	// in = 12_300 + 0 + 8_200 = 20_500 → "20.5k".
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
-		Usage: &agent.UsageEvent{
+		Usage: &agent.UsageInfo{
 			InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
 		},
 	}
@@ -287,7 +213,7 @@ func TestFormatSessionFooter_StableAcrossReRenders(t *testing.T) {
 	// PATCH diffing relies on body equality.
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
-		Usage: &agent.UsageEvent{
+		Usage: &agent.UsageInfo{
 			InputTokens: 12_300, OutputTokens: 1_500,
 			CacheReadInputTokens: 8_200, CostUSD: 0.087,
 		},
@@ -302,7 +228,7 @@ func TestFormatSessionFooter_StableAcrossReRenders(t *testing.T) {
 
 // TestFormatSessionFooterLines_ContextWindowPct (F-52) covers the
 // "X%" segment: the per-turn context-window usage percentage
-// surfaced from UsageEvent.ContextWindowPct (bridge-computed via
+// surfaced from UsageInfo.ContextWindowPct (bridge-computed via
 // the Doc 1 formula). The footer just renders it.
 //
 // Omit rules:
@@ -322,7 +248,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 			name: "pct=0 — segment omitted (early turn / no ContextWindow reported)",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageEvent{
+				Usage: &agent.UsageInfo{
 					InputTokens: 12_300, OutputTokens: 1_500,
 					CacheReadInputTokens: 8_200, CostUSD: 0.087,
 				},
@@ -330,10 +256,10 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 			want: []string{"🤖 claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"},
 		},
 		{
-			name: "pct only — typical post-EventDone snapshot",
+			name: "pct only — typical post-EventAgentDone snapshot",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageEvent{
+				Usage: &agent.UsageInfo{
 					InputTokens: 20_000, OutputTokens: 1_000,
 					ContextWindow:    200_000,
 					ContextWindowPct: 10.5, // 21k / 200k * 100
@@ -345,7 +271,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 			name: "pct + cost — full usage line",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageEvent{
+				Usage: &agent.UsageInfo{
 					InputTokens: 1_200_000, OutputTokens: 80_000,
 					CacheReadInputTokens: 800_000, CostUSD: 1.234,
 					ContextWindow:    200_000,
@@ -358,7 +284,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 			name: "pct at the ceiling — 100.0% is honest, not 'full'",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageEvent{
+				Usage: &agent.UsageInfo{
 					ContextWindow:    200_000,
 					ContextWindowPct: 100.0,
 				},
@@ -368,7 +294,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 		{
 			name: "pct without identity — segment still emits alone",
 			ctx: &gateway.SessionContext{
-				Usage: &agent.UsageEvent{
+				Usage: &agent.UsageInfo{
 					ContextWindow:    200_000,
 					ContextWindowPct: 5.0,
 				},
@@ -383,7 +309,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 			name: "pct > 100% — not clamped, (window) surfaces the mismatch",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageEvent{
+				Usage: &agent.UsageInfo{
 					InputTokens: 200_000, OutputTokens: 1_000,
 					CacheReadInputTokens: 3_000,
 					ContextWindow:        200_000,
@@ -397,7 +323,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 			name: "1M context window — M unit",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-8",
-				Usage: &agent.UsageEvent{
+				Usage: &agent.UsageInfo{
 					InputTokens: 200_000, OutputTokens: 1_000,
 					ContextWindow:    1_000_000,
 					ContextWindowPct: 20.1,
@@ -411,7 +337,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 			name: "pct=0 — segment omitted even when window > 0",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageEvent{
+				Usage: &agent.UsageInfo{
 					InputTokens: 12_300, OutputTokens: 1_500,
 					CacheReadInputTokens: 8_200, CostUSD: 0.087,
 					ContextWindow: 200_000,
@@ -653,7 +579,7 @@ func TestFormatSessionFooterLines_WithGitLine(t *testing.T) {
 	// in = 12_300 + 0 + 8_200 = 20_500 → "20.5k".
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
-		Usage: &agent.UsageEvent{
+		Usage: &agent.UsageInfo{
 			InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
 		},
 		Workspace: "/home/devin/code/nightme",

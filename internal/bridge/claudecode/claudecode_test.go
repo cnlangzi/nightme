@@ -26,11 +26,11 @@ import (
 // contextWindow * 100.  Skipped when either operand is 0 (footer
 // would otherwise render a misleading "0.0%").
 //
-// F-54 dropped `ContextWindow` from UsageEvent; F-55 re-introduced
+// F-54 dropped `ContextWindow` from UsageInfo; F-55 re-introduced
 // it so the footer can render `(window)` alongside X% (CLI Agent
 // 报什么就显示什么,错了让用户自己计算 — see
 // docs/feat/F-55-footer-show-context-window.md). The window
-// value is bridge-local and passes through to UsageEvent verbatim;
+// value is bridge-local and passes through to UsageInfo verbatim;
 // runtime / channel do not recompute, catalog, or clamp on it.
 // Companion TestDecodeUsage_ForwardsContextWindow (below)
 // pins the re-introduced forwarding path so a future refactor
@@ -212,17 +212,20 @@ func TestPumpStream_Init(t *testing.T) {
 	if len(evs) != 1 {
 		t.Fatalf("got %d events, want 1", len(evs))
 	}
-	if evs[0].Kind != agent.EventAgentConnected {
-		t.Errorf("event kind = %v, want EventAgentConnected", evs[0].Kind)
+	if evs[0].Kind != agent.EventAgentReady {
+		t.Errorf("event kind = %v, want EventAgentReady", evs[0].Kind)
 	}
-	if evs[0].Connected == nil {
-		t.Fatal("Init payload is nil")
+	// Init no longer has a sub-struct payload — context fields
+	// are flattened on AgentEvent. Use SessionID == "" as the
+	// "not initialised" sentinel.
+	if evs[0].SessionID == "" {
+		t.Fatal("Init SessionID is empty")
 	}
-	if evs[0].Connected.SessionID != "s_test_001" {
-		t.Errorf("SessionID = %q, want 's_test_001'", evs[0].Connected.SessionID)
+	if evs[0].SessionID != "s_test_001" {
+		t.Errorf("SessionID = %q, want 's_test_001'", evs[0].SessionID)
 	}
-	if evs[0].Connected.Model != "claude-sonnet-4-5" {
-		t.Errorf("Model = %q, want 'claude-sonnet-4-5'", evs[0].Connected.Model)
+	if evs[0].Model != "claude-sonnet-4-5" {
+		t.Errorf("Model = %q, want 'claude-sonnet-4-5'", evs[0].Model)
 	}
 }
 
@@ -231,8 +234,8 @@ func TestPumpStream_TextChunk(t *testing.T) {
 	if len(evs) != 1 {
 		t.Fatalf("got %d events, want 1", len(evs))
 	}
-	if evs[0].Kind != agent.EventText {
-		t.Errorf("event kind = %v, want EventText", evs[0].Kind)
+	if evs[0].Kind != agent.EventAgentText {
+		t.Errorf("event kind = %v, want EventAgentText", evs[0].Kind)
 	}
 	if evs[0].Text != "让我看一下这段代码" {
 		t.Errorf("text = %q, want '让我看一下这段代码'", evs[0].Text)
@@ -244,8 +247,8 @@ func TestPumpStream_ToolUse(t *testing.T) {
 	if len(evs) != 1 {
 		t.Fatalf("got %d events, want 1", len(evs))
 	}
-	if evs[0].Kind != agent.EventToolStart {
-		t.Errorf("event kind = %v, want EventToolStart", evs[0].Kind)
+	if evs[0].Kind != agent.EventAgentToolStart {
+		t.Errorf("event kind = %v, want EventAgentToolStart", evs[0].Kind)
 	}
 	if evs[0].ToolStart.Name != "Read" {
 		t.Errorf("tool name = %q, want 'Read'", evs[0].ToolStart.Name)
@@ -263,8 +266,8 @@ func TestPumpStream_ToolResult(t *testing.T) {
 	if len(evs) != 1 {
 		t.Fatalf("got %d events, want 1", len(evs))
 	}
-	if evs[0].Kind != agent.EventToolEnd {
-		t.Errorf("event kind = %v, want EventToolEnd", evs[0].Kind)
+	if evs[0].Kind != agent.EventAgentToolEnd {
+		t.Errorf("event kind = %v, want EventAgentToolEnd", evs[0].Kind)
 	}
 	// Output must carry the tool_result content so the renderer
 	// can show "tool → result" instead of a blank "tool done".
@@ -289,12 +292,12 @@ func TestPumpStream_ToolResultArgsCorrelatedAcrossMessages(t *testing.T) {
 	user := `{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_001","name":"Read","content":"line 1\nline 2"}]}}` + "\n"
 	evs := streamFromString(assistant + user)
 	if len(evs) < 2 {
-		t.Fatalf("got %d events, want at least 2 (tool_use handleToolUse + tool_result EventToolEnd)", len(evs))
+		t.Fatalf("got %d events, want at least 2 (tool_use handleToolUse + tool_result EventAgentToolEnd)", len(evs))
 	}
-	// Last event should be the tool_result EventToolEnd with args.
+	// Last event should be the tool_result EventAgentToolEnd with args.
 	last := evs[len(evs)-1]
-	if last.Kind != agent.EventToolEnd || last.ToolEnd == nil {
-		t.Fatalf("last event = %+v, want EventToolEnd", last)
+	if last.Kind != agent.EventAgentToolEnd || last.ToolEnd == nil {
+		t.Fatalf("last event = %+v, want EventAgentToolEnd", last)
 	}
 	if last.ToolEnd.Args != `{"file_path":"/tmp/foo.go"}` {
 		t.Errorf("Args = %q, want raw tool_use input %q", last.ToolEnd.Args, `{"file_path":"/tmp/foo.go"}`)
@@ -378,8 +381,8 @@ func TestPumpStream_AskUserQuestion(t *testing.T) {
 	if len(evs) != 1 {
 		t.Fatalf("got %d events, want 1", len(evs))
 	}
-	if evs[0].Kind != agent.EventPermission {
-		t.Errorf("event kind = %v, want EventPermission", evs[0].Kind)
+	if evs[0].Kind != agent.EventAgentPermission {
+		t.Errorf("event kind = %v, want EventAgentPermission", evs[0].Kind)
 	}
 	pr := evs[0].Permission
 	if pr == nil {
@@ -408,16 +411,16 @@ func TestPumpStream_AskUserQuestion(t *testing.T) {
 
 func TestPumpStream_Result(t *testing.T) {
 	// result.json fixture carries result/usage/duration_ms/subtype.
-	// Co-located usage design: a single EventResult with Usage
-	// attached to ResultEvent, then EventDone. The legacy
-	// EventResult + EventUsage pair no longer exists.
+	// Co-located usage design: a single EventAgentResult with Usage
+	// attached to AgentResultEvent, then EventAgentDone. The legacy
+	// EventAgentResult + EventUsage pair no longer exists.
 	evs := streamFromFixture(t, "result.json", nil)
 	if len(evs) != 2 {
 		t.Fatalf("got %d events, want 2 (Result with co-located Usage + Done)", len(evs))
 	}
-	// EventResult — carries Text, DurationMs, Subtype, AND Usage.
-	if evs[0].Kind != agent.EventResult {
-		t.Errorf("evs[0].Kind = %v, want EventResult", evs[0].Kind)
+	// EventAgentResult — carries Text, DurationMs, Subtype, AND Usage.
+	if evs[0].Kind != agent.EventAgentResult {
+		t.Errorf("evs[0].Kind = %v, want EventAgentResult", evs[0].Kind)
 	}
 	if evs[0].Result == nil || evs[0].Result.Text != "完成" {
 		t.Errorf("evs[0].Result = %+v, want Text '完成'", evs[0].Result)
@@ -428,12 +431,12 @@ func TestPumpStream_Result(t *testing.T) {
 	if evs[0].Result.Subtype != "success" {
 		t.Errorf("Subtype = %q, want 'success'", evs[0].Result.Subtype)
 	}
-	if evs[0].Result.IsError {
+	if evs[0].Err != nil {
 		t.Error("IsError = true, want false")
 	}
-	// Usage is now on the same ResultEvent (not a separate event).
+	// Usage is now on the same AgentResultEvent (not a separate event).
 	if evs[0].Result.Usage == nil {
-		t.Fatal("ResultEvent.Usage is nil; bridge should populate from result.usage")
+		t.Fatal("AgentResultEvent.Usage is nil; bridge should populate from result.usage")
 	}
 	if evs[0].Result.Usage.InputTokens != 100 {
 		t.Errorf("InputTokens = %d, want 100", evs[0].Result.Usage.InputTokens)
@@ -444,9 +447,9 @@ func TestPumpStream_Result(t *testing.T) {
 	if evs[0].Result.Usage.CostUSD != 0.001 {
 		t.Errorf("CostUSD = %f, want 0.001", evs[0].Result.Usage.CostUSD)
 	}
-	// EventDone
-	if evs[1].Kind != agent.EventDone {
-		t.Errorf("evs[1].Kind = %v, want EventDone", evs[1].Kind)
+	// EventAgentDone
+	if evs[1].Kind != agent.EventAgentDone {
+		t.Errorf("evs[1].Kind = %v, want EventAgentDone", evs[1].Kind)
 	}
 	if evs[1].Done == nil || evs[1].Done.ExitCode != 0 {
 		t.Errorf("done = %+v, want ExitCode 0", evs[1].Done)
@@ -456,7 +459,7 @@ func TestPumpStream_Result(t *testing.T) {
 func TestPumpStream_Result_EmptyText_NoResultEvent(t *testing.T) {
 	// When the result has no text AND is_error=false, the entire
 	// result branch is dropped (text + usage are useless). Only
-	// EventDone fires. Previously we emitted EventUsage + Done;
+	// EventAgentDone fires. Previously we emitted EventUsage + Done;
 	// now usage is co-located so it goes with the dropped Result.
 	input := `{"type":"result","subtype":"success","usage":{"input_tokens":50,"output_tokens":25},"session_id":"s_test_001"}` + "\n"
 	events := make(chan agent.AgentEvent, 4)
@@ -474,13 +477,13 @@ func TestPumpStream_Result_EmptyText_NoResultEvent(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d events, want 1 (Done only — text empty so Result dropped)", len(got))
 	}
-	if got[0].Kind != agent.EventDone {
-		t.Errorf("got[0].Kind = %v, want EventDone", got[0].Kind)
+	if got[0].Kind != agent.EventAgentDone {
+		t.Errorf("got[0].Kind = %v, want EventAgentDone", got[0].Kind)
 	}
 }
 
 func TestPumpStream_Result_NoUsagePayload(t *testing.T) {
-	// When usage is absent on the wire, ResultEvent.Usage stays
+	// When usage is absent on the wire, AgentResultEvent.Usage stays
 	// nil — the runtime is a passive pass-through, so a nil Usage
 	// just means the channel footer omits Line 2 for this event.
 	// Result + Done still fire.
@@ -500,42 +503,25 @@ func TestPumpStream_Result_NoUsagePayload(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %d events, want 2 (Result + Done)", len(got))
 	}
-	if got[0].Kind != agent.EventResult {
-		t.Errorf("got[0].Kind = %v, want EventResult", got[0].Kind)
+	if got[0].Kind != agent.EventAgentResult {
+		t.Errorf("got[0].Kind = %v, want EventAgentResult", got[0].Kind)
 	}
 	if got[0].Result.Usage != nil {
-		t.Errorf("ResultEvent.Usage = %+v, want nil (no usage on the wire)", got[0].Result.Usage)
+		t.Errorf("AgentResultEvent.Usage = %+v, want nil (no usage on the wire)", got[0].Result.Usage)
 	}
-	if got[1].Kind != agent.EventDone {
-		t.Errorf("got[1].Kind = %v, want EventDone", got[1].Kind)
+	if got[1].Kind != agent.EventAgentDone {
+		t.Errorf("got[1].Kind = %v, want EventAgentDone", got[1].Kind)
 	}
 }
 
-func TestPumpStream_Compact(t *testing.T) {
-	// subtype:"compact" is a MID-TURN compaction. Emit EventCompaction
-	// and DO NOT emit EventDone — subsequent events continue the turn.
-	evs := streamFromFixture(t, "compact.json", nil)
-	if len(evs) != 1 {
-		t.Fatalf("got %d events, want 1", len(evs))
-	}
-	if evs[0].Kind != agent.EventCompaction {
-		t.Errorf("event kind = %v, want EventCompaction", evs[0].Kind)
-	}
-	// F-49: Compaction payload is now an empty marker struct; the
-	// Kind alone discriminates. See
-	// docs/feat/F-49-compaction-counter.md §1.3.
-}
-
-func TestPumpStream_Compaction(t *testing.T) {
-	// Older CLI used subtype:"compaction" — same handling as "compact".
-	evs := streamFromFixture(t, "compaction.json", nil)
-	if len(evs) != 1 {
-		t.Fatalf("got %d events, want 1", len(evs))
-	}
-	if evs[0].Kind != agent.EventCompaction {
-		t.Errorf("event kind = %v, want EventCompaction", evs[0].Kind)
-	}
-}
+// TestPumpStream_Compact removed: F-49 compaction tracking was
+// deleted across the runtime. The bridge no longer emits
+// EventAgentCompaction; subtype:"compact" is silently dropped
+// (Pi suppresses its transient `compaction_start`; the runtime
+// no longer tracks cycles).
+// TestPumpStream_Compaction removed: F-49 compaction tracking was
+// deleted across the runtime. The bridge no longer emits
+// EventAgentCompaction; the kind does not exist.
 
 func TestPumpStream_ControlRequest(t *testing.T) {
 	// control_request is not implemented under bypassPermissions —
@@ -554,8 +540,8 @@ func TestPumpStream_ReplayUserMessage(t *testing.T) {
 	if len(evs) != 1 {
 		t.Fatalf("got %d events, want 1", len(evs))
 	}
-	if evs[0].Kind != agent.EventText {
-		t.Errorf("event kind = %v, want EventText", evs[0].Kind)
+	if evs[0].Kind != agent.EventAgentText {
+		t.Errorf("event kind = %v, want EventAgentText", evs[0].Kind)
 	}
 	if evs[0].Text != "[你] hello" {
 		t.Errorf("text = %q, want '[你] hello'", evs[0].Text)
@@ -579,8 +565,8 @@ func TestPumpStream_InvalidJSON_Skipped(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d events, want 1 (invalid line skipped)", len(got))
 	}
-	if got[0].Kind != agent.EventDone {
-		t.Errorf("kind = %v, want EventDone", got[0].Kind)
+	if got[0].Kind != agent.EventAgentDone {
+		t.Errorf("kind = %v, want EventAgentDone", got[0].Kind)
 	}
 }
 
@@ -774,11 +760,11 @@ func TestAgent_BuildArgs_Auto(t *testing.T) {
 	}
 }
 
-// TestAgent_BuildArgs_ResumeIDAppended asserts that cfg.ResumeID, when
+// TestAgent_BuildArgs_ResumeIDAppended asserts that cfg.SessionID, when
 // non-empty, lands at the tail of argv as `--resume <id>` so the
 // bridge can resume the previous Claude Code session.
 func TestAgent_BuildArgs_ResumeIDAppended(t *testing.T) {
-	got := buildArgs(nil, agent.StartConfig{ResumeID: "sess-xyz-123"})
+	got := buildArgs(nil, agent.StartConfig{SessionID: "sess-xyz-123"})
 	if !containsSeq(got, "--resume", "sess-xyz-123") {
 		t.Errorf("--resume <id> not appended at tail; got=%v", got)
 	}
@@ -789,14 +775,14 @@ func TestAgent_BuildArgs_ResumeIDAppended(t *testing.T) {
 	}
 }
 
-// TestAgent_BuildArgs_EmptyResumeID asserts that an empty ResumeID
+// TestAgent_BuildArgs_EmptyResumeID asserts that an empty SessionID
 // does NOT add a `--resume ""` to the argv (which would be a no-op
 // or, worse, ambiguous).
 func TestAgent_BuildArgs_EmptyResumeID(t *testing.T) {
-	got := buildArgs(nil, agent.StartConfig{ResumeID: ""})
+	got := buildArgs(nil, agent.StartConfig{SessionID: ""})
 	for _, s := range got {
 		if s == "--resume" {
-			t.Errorf("empty ResumeID should not add --resume flag; got=%v", got)
+			t.Errorf("empty SessionID should not add --resume flag; got=%v", got)
 		}
 	}
 }
@@ -919,8 +905,8 @@ func TestPumpStream_MultiMessageBurst(t *testing.T) {
 
 	evs := streamFromString(stream)
 	// Each result event in Claude Code's stream-json emits both
-	// an EventResult (for the final assistant text) and an
-	// EventDone (terminal). So per user turn we get four
+	// an EventAgentResult (for the final assistant text) and an
+	// EventAgentDone (terminal). So per user turn we get four
 	// AgentEvents: replay + assistant + result + done. Total
 	// across `messages` turns is 4 * messages.
 	wantEvents := messages * 4
@@ -931,7 +917,7 @@ func TestPumpStream_MultiMessageBurst(t *testing.T) {
 	var replays, assistants, results, dones int
 	for _, ev := range evs {
 		switch ev.Kind {
-		case agent.EventText:
+		case agent.EventAgentText:
 			// The bridge prefixes user-role events with "[你] "
 			// before forwarding to the channel; assistant text
 			// goes through unprefixed.
@@ -941,9 +927,9 @@ func TestPumpStream_MultiMessageBurst(t *testing.T) {
 			case strings.HasPrefix(ev.Text, "got: "):
 				assistants++
 			}
-		case agent.EventResult:
+		case agent.EventAgentResult:
 			results++
-		case agent.EventDone:
+		case agent.EventAgentDone:
 			dones++
 		}
 	}
@@ -954,10 +940,10 @@ func TestPumpStream_MultiMessageBurst(t *testing.T) {
 		t.Errorf("assistant events = %d, want %d", assistants, messages)
 	}
 	if results != messages {
-		t.Errorf("EventResult count = %d, want %d", results, messages)
+		t.Errorf("EventAgentResult count = %d, want %d", results, messages)
 	}
 	if dones != messages {
-		t.Errorf("EventDone count = %d, want %d", dones, messages)
+		t.Errorf("EventAgentDone count = %d, want %d", dones, messages)
 	}
 }
 
@@ -1046,9 +1032,9 @@ func TestClaudeCodeBridge_RealSubprocess(t *testing.T) {
 
 	// Collect events. Per message we expect (post F-25 v1.1 rolling-
 	// log fix; --replay-user-messages was removed from DefaultArgs):
-	//   - 1 "got: hello-N"     EventText (assistant response)
-	//   - 1 EventResult (final assistant text)
-	//   - 1 EventDone  (terminal)
+	//   - 1 "got: hello-N"     EventAgentText (assistant response)
+	//   - 1 EventAgentResult (final assistant text)
+	//   - 1 EventAgentDone  (terminal)
 	// Total: 3 * messages.
 	//
 	// The loop drains every event from the channel until either
@@ -1056,7 +1042,7 @@ func TestClaudeCodeBridge_RealSubprocess(t *testing.T) {
 	// trips. Counting only the categories we care about avoids
 	// the trap of `assistants == messages && dones < messages` —
 	// the && would short-circuit as soon as assistants reached 3
-	// even when EventDone for the third message was still in
+	// even when EventAgentDone for the third message was still in
 	// the channel buffer.
 	var replays, assistants, results, dones int
 	deadline := time.After(5 * time.Second)
@@ -1079,16 +1065,16 @@ drain:
 				break drain
 			}
 			switch ev.Kind {
-			case agent.EventText:
+			case agent.EventAgentText:
 				switch {
 				case strings.HasPrefix(ev.Text, "[你] [replay] "):
 					replays++
 				case strings.HasPrefix(ev.Text, "got: "):
 					assistants++
 				}
-			case agent.EventResult:
+			case agent.EventAgentResult:
 				results++
-			case agent.EventDone:
+			case agent.EventAgentDone:
 				dones++
 			}
 		case <-deadline:
@@ -1104,10 +1090,10 @@ drain:
 		t.Errorf("assistant events = %d, want %d", assistants, messages)
 	}
 	if results != messages {
-		t.Errorf("EventResult count = %d, want %d", results, messages)
+		t.Errorf("EventAgentResult count = %d, want %d", results, messages)
 	}
 	if dones != messages {
-		t.Errorf("EventDone count = %d, want %d", dones, messages)
+		t.Errorf("EventAgentDone count = %d, want %d", dones, messages)
 	}
 }
 
@@ -1146,8 +1132,8 @@ func TestSession_New_SendsClearUserMessage(t *testing.T) {
 	}
 
 	// Drain events. Expect at least:
-	//   - 1 EventAgentConnected (session_id == "sess-after-clear-mock")
-	//   - 1 EventDone (terminal)
+	//   - 1 EventAgentReady (session_id == "sess-after-clear-mock")
+	//   - 1 EventAgentDone (terminal)
 	deadline := time.After(5 * time.Second)
 	var sawInit bool
 	var initSessionID string
@@ -1160,12 +1146,12 @@ loop:
 				break loop
 			}
 			switch ev.Kind {
-			case agent.EventAgentConnected:
+			case agent.EventAgentReady:
 				sawInit = true
-				if ev.Connected != nil {
-					initSessionID = ev.Connected.SessionID
+				if true {
+					initSessionID = ev.SessionID
 				}
-			case agent.EventDone:
+			case agent.EventAgentDone:
 				sawDone = true
 			}
 			if sawInit && sawDone {
@@ -1177,7 +1163,7 @@ loop:
 	}
 
 	if !sawInit {
-		t.Fatalf("expected EventAgentConnected from mock's /clear handling")
+		t.Fatalf("expected EventAgentReady from mock's /clear handling")
 	}
 	if initSessionID != "sess-after-clear-mock" {
 		t.Fatalf("Init.SessionID = %q, want %q (mock's post-clear session id)",

@@ -87,10 +87,10 @@ func (a *Agent) Detect() error {
 // Kept in the signature for forward compatibility with future
 // /use flags that may translate to Pi commands.
 //
-// cfg.ResumeID, when non-empty, is forwarded as Pi's native
+// cfg.SessionID, when non-empty, is forwarded as Pi's native
 // `--session-id <id>` CLI flag at spawn time so the spawned
 // process resumes the named session (the bridge's "opaque
-// ResumeID" contract translates cleanly: nightme stores pi's own
+// SessionID" contract translates cleanly: nightme stores pi's own
 // sessionId — captured from get_state — and feeds it back here on
 // the next spawn). Empty means "no --session-id; start a fresh
 // session". Mirrors Claude Code's `--resume <id>` flow in
@@ -114,7 +114,7 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSe
 // argv without spawning a process. Mirrors the contract of
 // Agent.Start exactly.
 // buildArgs concatenates DefaultArgs + extraArgs + cfg.Args, then
-// appends Pi's `--session-id <id>` when cfg.ResumeID is non-empty.
+// appends Pi's `--session-id <id>` when cfg.SessionID is non-empty.
 // Extracted as a package-private helper so tests can assert on
 // the produced argv without spawning a process. Mirrors the
 // contract of Agent.Start exactly.
@@ -126,25 +126,25 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSe
 //
 // Conflict resolution: cfg.Args may legitimately carry session-
 // selection flags of its own (--session-id, --session, --no-session).
-// When cfg.ResumeID is non-empty the runtime-persisted identity
+// When cfg.SessionID is non-empty the runtime-persisted identity
 // must win — see filterSessionFlags for the stripping logic.
-// When cfg.ResumeID is empty, user-supplied session-selection
+// When cfg.SessionID is empty, user-supplied session-selection
 // flags pass through (legitimate "spawn a fresh session at this
 // id" use case).
 func buildArgs(extraArgs []string, cfg agent.StartConfig) []string {
-	args := filterSessionFlags(cfg.Args, cfg.ResumeID, slog.Default())
+	args := filterSessionFlags(cfg.Args, cfg.SessionID, slog.Default())
 	out := make([]string, 0, len(DefaultArgs)+len(extraArgs)+len(args)+2)
 	out = append(out, DefaultArgs...)
 	out = append(out, extraArgs...)
 	out = append(out, args...)
-	if cfg.ResumeID != "" {
-		out = append(out, "--session-id", cfg.ResumeID)
+	if cfg.SessionID != "" {
+		out = append(out, "--session-id", cfg.SessionID)
 	}
 	return out
 }
 
 // filterSessionFlags strips any session-selection flags the caller
-// placed in args when ResumeID is set. When ResumeID is empty the
+// placed in args when SessionID is set. When SessionID is empty the
 // args pass through unchanged so the user can intentionally spawn
 // a fresh session with --session-id <their-id>.
 //
@@ -153,8 +153,8 @@ func buildArgs(extraArgs []string, cfg agent.StartConfig) []string {
 // Stripped flags + their value-taking flag's value are dropped
 // from the returned slice (e.g. --session-id abc contributes 2
 // elements to the source slice, 0 to the returned slice).
-func filterSessionFlags(args []string, resumeID string, logger *slog.Logger) []string {
-	if resumeID == "" {
+func filterSessionFlags(args []string, sessionID string, logger *slog.Logger) []string {
+	if sessionID == "" {
 		return args
 	}
 	out := make([]string, 0, len(args))
@@ -180,8 +180,8 @@ func filterSessionFlags(args []string, resumeID string, logger *slog.Logger) []s
 		out = append(out, a)
 	}
 	if stripped && logger != nil {
-		logger.Debug("pi buildArgs: cfg.Args carried session-selection flags; runtime ResumeID wins",
-			slog.String("resume_id", resumeID))
+		logger.Debug("pi buildArgs: cfg.Args carried session-selection flags; runtime SessionID wins",
+			slog.String("resume_id", sessionID))
 	}
 	return out
 }

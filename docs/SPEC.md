@@ -619,6 +619,17 @@ type OutboundMessage struct {
 
 ## 0.14 文档变更摘要（v1.3.x F-49 增量，2026-08-06）
 
+> **⚠️ SUPERSEDED (2026-08-08)**：本文描述的"每 compaction 增计数 + footer 🗜 N"链路被**整体删除**（F-49 abandonment）。
+> 触发原因：bridges 在 F-49 落地后仍未稳定 emit `EventAgentCompaction`（协议差异未消化），
+> runtime `CompactionCount` 计数实际未观察到稳定数据，没有消费者。详见
+> [`wip/agentevent.md`](../wip/agentevent.md) §5 / §10 / §11 与
+> [`feat/F-49-compaction-counter.md`](./feat/F-49-compaction-counter.md)（已标 OBSOLETE）。
+>
+> footer 退回 F-45 三段结构（Agent · Model / token / git），不显示压缩计数。
+>
+> 下文保留为设计档案参考 — **runtime / persistence / footer 实施不再做**，
+> "为什么要这么做"的论述与「为何不这么做」的反思仍有教学价值。
+
 **背景**：F-45 footer 的 token 行是 **AgentSession 生命周期累计**。agent 做完 context compaction 后，累计仍继续涨，IM 里常看到远超上下文窗口的总数——用户分不清「真用了那么多」还是「已经压缩多次但数字没说」。
 
 **核心变化**（概念级）：

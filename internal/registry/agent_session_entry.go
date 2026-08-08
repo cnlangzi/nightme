@@ -1,7 +1,15 @@
-// Package registry — AgentSessionEntry (v1.2 schema).
+// Package registry — AgentSessionEntry (v3 schema).
 //
 // See docs/SPEC.md v1.2 §1.2 and docs/feat/F-29-agent-session-pool.md
 // for the full model.
+//
+// v3 changes (SessionID rename + compaction removal):
+//   - ResumeID field renamed to SessionID; JSON key "resumeId" → "sessionId".
+//   - CompactionCount field removed entirely (compression tracking
+//     deleted across the runtime; no consumer remains).
+//   - Load compat: legacy JSON with "resumeId" key is silently
+//     ignored (SessionID defaults to "" → next spawn starts fresh).
+//     Legacy JSON with "compactionCount" key is silently ignored.
 package registry
 
 import (
@@ -29,7 +37,7 @@ import (
 //	PID             — OS process ID; 0 when not running (Detached or Exited).
 //	Status          — running | detached | exited (mirrors registry.Status).
 //	Args            — spawn arguments; preserved for respawn.
-//	ResumeID        — agent's own session id (e.g. Claude Code's
+//	SessionID       — agent's own session id (e.g. Claude Code's
 //	                 `system/init.session_id`); persisted so a future
 //	                 respawn can pass `--resume <id>` back to the agent.
 //	                 Empty if the agent has no resume semantics (ACP / Pi
@@ -37,37 +45,29 @@ import (
 //	CreatedAt       — first spawn time.
 //	LastRunAt       — last event time or status change.
 //	ExitCode        — exit code when Status == exited; nil otherwise.
-//	Model           — F-45: model captured on first EventAgentConnected (e.g.
+//	Model           — F-45: model captured on first EventAgentReady (e.g.
 //	                 "claude-opus-4-5-20250929"). Empty before the
 //	                 first init event lands. Stable for the session
 //	                 identity's lifetime; reset only when bridge New()
-//	                 re-emits EventAgentConnected with a new model (post-/new).
-//
-// CompactionCount is the cumulative number of completed context-
-// compaction cycles observed on this AgentSession. F-49 addition.
-// 0 = never compacted. Legacy entries written before F-49 lack this
-// field; Go JSON unmarshal yields zero value, the safe default
-// ("never compacted"). See docs/feat/F-49-compaction-counter.md
-// §1.4 / §4.1.
+//	                 re-emits EventAgentReady with a new model (post-/new).
 type AgentSessionEntry struct {
-	ID              string    `json:"id"`
-	ChatSessionID   string    `json:"chatSessionId"`
-	Agent           string    `json:"agent"`
-	Cwd             string    `json:"cwd"`
-	PID             int       `json:"pid"`
-	Status          Status    `json:"status"`
-	Args            []string  `json:"args,omitempty"`
-	ResumeID        string    `json:"resumeId,omitempty"`
-	CreatedAt       time.Time `json:"createdAt"`
-	LastRunAt       time.Time `json:"lastRunAt"`
-	ExitCode        *int      `json:"exitCode,omitempty"`
-	Model           string    `json:"model,omitempty"`
-	CompactionCount int       `json:"compactionCount,omitempty"`
+	ID            string    `json:"id"`
+	ChatSessionID string    `json:"chatSessionId"`
+	Agent         string    `json:"agent"`
+	Cwd           string    `json:"cwd"`
+	PID           int       `json:"pid"`
+	Status        Status    `json:"status"`
+	Args          []string  `json:"args,omitempty"`
+	SessionID     string    `json:"sessionId,omitempty"`
+	CreatedAt     time.Time `json:"createdAt"`
+	LastRunAt     time.Time `json:"lastRunAt"`
+	ExitCode      *int      `json:"exitCode,omitempty"`
+	Model         string    `json:"model,omitempty"`
 }
 
 // AgentSessionFileVersion is the on-disk format version for
-// agent_sessions.json. Bumped to 2 in F-49 to mark the addition of
-// the CompactionCount field; loaders remain permissive (zero value
-// on missing field) so v1 files load transparently as v2 entries
-// with CompactionCount=0.
-const AgentSessionFileVersion = 2
+// agent_sessions.json. Bumped to 3 to mark the SessionID rename +
+// CompactionCount removal. Load is permissive (unknown fields are
+// silently ignored by default), so v2 files load as v3 entries with
+// SessionID="" and no CompactionCount.
+const AgentSessionFileVersion = 3

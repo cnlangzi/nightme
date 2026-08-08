@@ -3,9 +3,9 @@
 // Session lifetime is two-tier:
 //
 //   - process  : spawn() -> cmd.Wait() -> close(events)
-//   - turn     : prompt() ack -> stream events -> agent_settled -> EventDone
+//   - turn     : prompt() ack -> stream events -> agent_settled -> EventAgentDone
 //
-// The process can carry many turns. EventDone marks the end of one
+// The process can carry many turns. EventAgentDone marks the end of one
 // turn but does NOT close the events channel; only process exit
 // (or Close) does that. This mirrors the contract documented in
 // F-32 §3.3 and lets ChatSession.runReadPump continue reading
@@ -194,7 +194,7 @@ type session struct {
 // get_state handshake. The returned AgentSession is ready for
 // SendText / Events immediately on success.
 //
-// agentName + workspace + branch are stamped onto every EventAgentConnected
+// agentName + workspace + branch are stamped onto every EventAgentReady
 // emitted by the translator so the channel-layer receipt can render
 // the "Agent | repo | branch | tokens" foot note.
 //
@@ -342,7 +342,7 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 	return s, nil
 }
 
-// deliverConnectedLocked emits the EventAgentConnected for `state` via deliver().
+// deliverConnectedLocked emits the EventAgentReady for `state` via deliver().
 // Caller MUST hold s.translatorMu so connectedSent's check-and-set is
 // atomic relative to translator.emitConnected. Shared between the boot
 // handshake (newSession) and the F-34 reset path (New).
@@ -385,7 +385,7 @@ func (s *session) deliver(ev agent.AgentEvent) {
 		piLog("deliver dropped (session closed)", "kind", ev.Kind.String())
 	case <-t.C:
 		// A dropped event is invisible to the user AND to the
-		// operator unless we say so — a lost EventResult is a reply
+		// operator unless we say so — a lost EventAgentResult is a reply
 		// that silently never arrives.
 		piLog("deliver dropped (events channel full for 1s)",
 			"kind", ev.Kind.String(), "buffered", len(s.events), "cap", cap(s.events))
@@ -557,7 +557,7 @@ func (s *session) SendPermission(_ string) error {
 //
 // Implementation: send new_session, wait for response, then issue
 // get_state to retrieve the new sessionId, then push it into the
-// events channel as an EventAgentConnected so the runtime's AgentEventBus subscriber
+// events channel as an EventAgentReady so the runtime's AgentEventBus subscriber
 // captures it via SetResumeID (cmd/nightme/run.go newEventHandler).
 //
 // The process stays alive; the transport stays open; Events() stays
@@ -663,8 +663,8 @@ func (s *session) New(ctx context.Context) error {
 
 	// F-34 review C2: refuse to commit the reset if pi has no
 	// sessionId in its state. emitConnected would emit a zero-SessionID
-	// EventAgentConnected which runtime's eventHandler ignores (cmd/nightme/run.go
-	// guards on SessionID != ""), leaving the OLD ResumeID persisted
+	// EventAgentReady which runtime's eventHandler ignores (cmd/nightme/run.go
+	// guards on SessionID != ""), leaving the OLD SessionID persisted
 	// in agent_sessions.json. Surface as a hard error so the caller
 	// knows the reset did not take effect.
 	if state.SessionID == "" {
@@ -672,7 +672,7 @@ func (s *session) New(ctx context.Context) error {
 		return errors.New("pi: get_state returned empty sessionId after new_session")
 	}
 
-	// 4. Push the new EventAgentConnected into the events channel. deliver()
+	// 4. Push the new EventAgentReady into the events channel. deliver()
 	// is non-blocking; if the channel is full we drop with a warn
 	// (the next prompt from the user will fail visibly, but the
 	// process / transport is fine).
@@ -811,8 +811,8 @@ func (s *session) readPump() {
 		}
 		if err := json.Unmarshal(line, &probe); err != nil {
 			s.deliver(agent.AgentEvent{
-				Kind:  agent.EventError,
-				Error: &agent.ErrorEvent{Err: fmt.Errorf("%w: %s", ErrMalformedJSON, string(line))},
+				Kind:  agent.EventAgentError,
+				Err: fmt.Errorf("%w: %s", ErrMalformedJSON, string(line)),
 			})
 			s.lifecycleHalt()
 			return
@@ -821,8 +821,8 @@ func (s *session) readPump() {
 			var resp responseEnvelope
 			if err := json.Unmarshal(line, &resp); err != nil {
 				s.deliver(agent.AgentEvent{
-					Kind:  agent.EventError,
-					Error: &agent.ErrorEvent{Err: fmt.Errorf("%w: %s", ErrMalformedJSON, string(line))},
+					Kind:  agent.EventAgentError,
+					Err: fmt.Errorf("%w: %s", ErrMalformedJSON, string(line)),
 				})
 				s.lifecycleHalt()
 				return
@@ -842,8 +842,8 @@ func (s *session) readPump() {
 		events, err := s.translator.translate(line, s.logger)
 		if err != nil {
 			s.deliver(agent.AgentEvent{
-				Kind:  agent.EventError,
-				Error: &agent.ErrorEvent{Err: fmt.Errorf("%w: %s", ErrMalformedJSON, string(line))},
+				Kind:  agent.EventAgentError,
+				Err: fmt.Errorf("%w: %s", ErrMalformedJSON, string(line)),
 			})
 			s.lifecycleHalt()
 			return
@@ -858,8 +858,8 @@ func (s *session) readPump() {
 		// internal; surface it as a structured error rather than
 		// the raw "bufio.Scanner: token too long" string.
 		s.deliver(agent.AgentEvent{
-			Kind:  agent.EventError,
-			Error: &agent.ErrorEvent{Err: fmt.Errorf("%w: %v", ErrFrameTooLarge, err)},
+			Kind:  agent.EventAgentError,
+			Err: fmt.Errorf("%w: %v", ErrFrameTooLarge, err),
 		})
 		s.lifecycleHalt()
 	}
@@ -951,17 +951,17 @@ func (s *session) lifecycle() {
 	// any pending callers.
 	s.rpc.failPending(ErrSessionClosed)
 
-	// Emit a final EventError when the process exited with a
+	// Emit a final EventAgentError when the process exited with a
 	// non-zero status, so the channel can flip the receipt to an
-	// error state. We do not duplicate EventDone here: Close()
+	// error state. We do not duplicate EventAgentDone here: Close()
 	// emits nothing on the channel, and the read pump's normal
 	// EOF path naturally stops emitting events. If a fatal scan
-	// error already emitted EventError, this is a second one --
+	// error already emitted EventAgentError, this is a second one --
 	// which is fine; the receipt tolerates multiple EventErrors.
 	if err != nil && !s.isGracefulClose() {
 		s.deliver(agent.AgentEvent{
-			Kind:  agent.EventError,
-			Error: &agent.ErrorEvent{Err: fmt.Errorf("pi: process exit: %w", err)},
+			Kind:  agent.EventAgentError,
+			Err: fmt.Errorf("pi: process exit: %w", err),
 		})
 	}
 	// Wait for readPump and drainStderr to finish their final
@@ -976,7 +976,7 @@ func (s *session) lifecycle() {
 
 // isGracefulClose returns true when Close() is the reason the
 // process exited (i.e. we deliberately killed it). Used to avoid
-// emitting a spurious EventError on user-initiated shutdown.
+// emitting a spurious EventAgentError on user-initiated shutdown.
 func (s *session) isGracefulClose() bool {
 	select {
 	case <-s.closed:

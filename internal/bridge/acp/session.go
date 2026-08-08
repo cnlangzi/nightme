@@ -26,7 +26,7 @@ type acpSession struct {
 	cancel context.CancelFunc
 
 	// agentName and workspace are captured at NewSession for the
-	// EventAgentConnected payload. ACP does not currently tell the runtime
+	// EventAgentReady payload. ACP does not currently tell the runtime
 	// about its session id through the channel — we synthesize one
 	// here so the rest of the runtime can capture the resume id
 	// uniformly (other bridges do this via the bridge's own init
@@ -37,7 +37,7 @@ type acpSession struct {
 	sessionID string
 	events    chan agent.AgentEvent
 
-	// connectedSent guards the synthesized EventAgentConnected. We emit at most
+	// connectedSent guards the synthesized EventAgentReady. We emit at most
 	// once per session, after the first successful session/new.
 	connectedSent bool
 
@@ -160,13 +160,13 @@ func (s *acpSession) setSessionID(result json.RawMessage) error {
 	if s.sessionID == "" {
 		return errors.New("bridge/acp: session/new response has no sessionId")
 	}
-	// Synthesize an EventAgentConnected so the runtime can capture the resume
+	// Synthesize an EventAgentReady so the runtime can capture the resume
 	// id uniformly with Claude Code / Pi. Idempotent via connectedSent.
 	s.emitConnected()
 	return nil
 }
 
-// emitConnected publishes a single EventAgentConnected on s.events carrying the
+// emitConnected publishes a single EventAgentReady on s.events carrying the
 // ACP session id so the runtime can persist it as the AgentSession's
 // resume id. Safe to call from setSessionID; emits are non-blocking
 // with a ctx.Done fallback to avoid wedging the new-session path.
@@ -176,12 +176,10 @@ func (s *acpSession) emitConnected() {
 	}
 	s.connectedSent = true
 	ev := agent.AgentEvent{
-		Kind: agent.EventAgentConnected,
-		Connected: &agent.AgentConnectedEvent{
-			SessionID: s.sessionID,
-			AgentName: s.agentName,
-			Workspace: s.workspace,
-		},
+		Kind:      agent.EventAgentReady,
+		SessionID: s.sessionID,
+		AgentName: s.agentName,
+		Workspace: s.workspace,
 	}
 	select {
 	case s.events <- ev:
@@ -379,10 +377,10 @@ func (s *acpSession) readPump() {
 		}
 	}
 	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
-		s.emit(agent.AgentEvent{Kind: agent.EventError, Error: &agent.ErrorEvent{Err: err}})
+		s.emit(agent.AgentEvent{Kind: agent.EventAgentError, Err: err})
 	}
 	s.rpc.failPending(io.EOF)
-	s.emit(agent.AgentEvent{Kind: agent.EventDone, Done: &agent.DoneEvent{ExitCode: -1}})
+	s.emit(agent.AgentEvent{Kind: agent.EventAgentDone, Done: &agent.AgentDoneEvent{ExitCode: -1}})
 }
 
 func (s *acpSession) handleMethod(message rpcMessage) {
@@ -401,14 +399,14 @@ func (s *acpSession) handleMethod(message rpcMessage) {
 			if text == "" {
 				text = params.Content
 			}
-			s.emit(agent.AgentEvent{Kind: agent.EventText, Text: text})
+			s.emit(agent.AgentEvent{Kind: agent.EventAgentText, Text: text})
 		}
 	case "tool_start":
 		s.handleToolStart(message.Params)
 	case "tool_end":
 		s.handleToolEnd(message.Params)
 	case "session_end":
-		s.emit(agent.AgentEvent{Kind: agent.EventDone, Done: &agent.DoneEvent{ExitCode: 0}})
+		s.emit(agent.AgentEvent{Kind: agent.EventAgentDone, Done: &agent.AgentDoneEvent{ExitCode: 0}})
 	case "initialize", "session/new", "session/prompt":
 		// A PTY may echo client requests before the ACP server disables
 		// terminal echo. They are outbound methods, not server calls.
@@ -450,7 +448,7 @@ func (s *acpSession) handleSessionUpdate(raw json.RawMessage) {
 			Text string `json:"text"`
 		}
 		if json.Unmarshal(update.Content, &content) == nil && content.Text != "" {
-			s.emit(agent.AgentEvent{Kind: agent.EventText, Text: content.Text})
+			s.emit(agent.AgentEvent{Kind: agent.EventAgentText, Text: content.Text})
 		}
 	case "tool_call":
 		s.handleToolStart(params.Update)
@@ -461,7 +459,7 @@ func (s *acpSession) handleSessionUpdate(raw json.RawMessage) {
 			Text string `json:"text"`
 		}
 		if json.Unmarshal(update.Content, &content) == nil {
-			s.emit(agent.AgentEvent{Kind: agent.EventText, Text: content.Text})
+			s.emit(agent.AgentEvent{Kind: agent.EventAgentText, Text: content.Text})
 		}
 	}
 }
@@ -503,7 +501,7 @@ func (s *acpSession) handlePermission(id json.RawMessage, raw json.RawMessage) {
 	s.permissionMu.Lock()
 	s.permissions = append(s.permissions, permissionCall{id: append(json.RawMessage(nil), id...), legacy: len(id) == 0})
 	s.permissionMu.Unlock()
-	s.emit(agent.AgentEvent{Kind: agent.EventPermission, Permission: &agent.PermissionRequest{
+	s.emit(agent.AgentEvent{Kind: agent.EventAgentPermission, Permission: &agent.AgentPermissionRequest{
 		Tool: toolName, Action: params.Action, Options: options, ResponseCh: make(chan string, 1),
 	}})
 }
@@ -527,7 +525,7 @@ func (s *acpSession) handleToolStart(raw json.RawMessage) {
 	if name == "" {
 		name = event.LegacyName
 	}
-	s.emit(agent.AgentEvent{Kind: agent.EventToolStart, ToolStart: &agent.ToolStartEvent{ID: id, Name: name, Args: string(event.Args)}})
+	s.emit(agent.AgentEvent{Kind: agent.EventAgentToolStart, ToolStart: &agent.AgentToolStartEvent{ID: id, Name: name, Args: string(event.Args)}})
 }
 
 func (s *acpSession) handleToolEnd(raw json.RawMessage) {
@@ -553,7 +551,11 @@ func (s *acpSession) handleToolEnd(raw json.RawMessage) {
 	if event.Status == "failed" || event.Status == "error" {
 		toolErr = errors.New(event.Status)
 	}
-	s.emit(agent.AgentEvent{Kind: agent.EventToolEnd, ToolEnd: &agent.ToolEndEvent{ID: id, Name: name, Err: toolErr}})
+	s.emit(agent.AgentEvent{
+		Kind:    agent.EventAgentToolEnd,
+		ToolEnd: &agent.AgentToolEndEvent{ID: id, Name: name},
+		Err:     toolErr,
+	})
 }
 
 func (s *acpSession) emit(event agent.AgentEvent) {

@@ -14,18 +14,18 @@
 //
 // F-52 — stream aggregation. Pi streams assistant text at *token*
 // granularity (`text_delta`). Before F-52 each delta became its own
-// EventText, which the gateway turned into an OutReply and the Feishu
+// EventAgentText, which the gateway turned into an OutReply and the Feishu
 // adapter into a separate 💬 log entry — one sentence exploded into
 // twenty bubbles and twenty card PATCHes. The translator now buffers
 // deltas and emits at semantic-block boundaries instead:
 //
-//	no tools   : 0 × EventText,  1 × EventResult
-//	with tools : 1 × EventText per narration segment preceding a
-//	             tool call, then 1 × EventResult for the conclusion
+//	no tools   : 0 × EventAgentText,  1 × EventAgentResult
+//	with tools : 1 × EventAgentText per narration segment preceding a
+//	             tool call, then 1 × EventAgentResult for the conclusion
 //
 // The flush point is `tool_execution_start` (see flushPendingTextLocked).
 // That is what keeps "one reply per turn" and "show progress mid-turn"
-// from fighting each other, and it is why the final EventResult never
+// from fighting each other, and it is why the final EventAgentResult never
 // duplicates text the user has already seen.
 
 package pi
@@ -41,17 +41,17 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// thinkingPrefix marks an EventText as a reasoning block rather than
+// thinkingPrefix marks an EventAgentText as a reasoning block rather than
 // a reply. gateway.Translate strips it and routes the payload to
 // OutThinking; the claudecode bridge uses the same sentinel, so the
 // channel renderers need no per-bridge branching.
 const thinkingPrefix = "[思考] "
 
-// emptyReplyFallback is the EventResult text used when a turn settles
+// emptyReplyFallback is the EventAgentResult text used when a turn settles
 // without any un-flushed assistant text — e.g. the agent ended on a
 // tool call and said nothing afterwards.
 //
-// It is NOT cosmetic. gateway.Translate drops an EventResult whose
+// It is NOT cosmetic. gateway.Translate drops an EventAgentResult whose
 // Text is empty and IsError is false (internal/gateway/translate.go),
 // and the runtime reads Usage off the *translated* OutboundMessage
 // (cmd/nightme/run.go), so an empty-text result silently takes the
@@ -98,7 +98,7 @@ type turnState struct {
 	// pendingText holds text blocks that have been completed
 	// (text_end) but not yet delivered. Drained either by
 	// flushPendingTextLocked at a tool boundary or by the final
-	// EventResult on agent_settled. Blocks are joined with "\n".
+	// EventAgentResult on agent_settled. Blocks are joined with "\n".
 	pendingText string
 
 	// lastMessageText is the text composed from the most recent
@@ -110,7 +110,7 @@ type turnState struct {
 	// streaming it. Gated by textDelivered — see there.
 	lastMessageText string
 
-	// textDelivered records that at least one EventText carrying
+	// textDelivered records that at least one EventAgentText carrying
 	// *reply* text has already gone out this turn (reasoning does not
 	// count; it is a different surface).
 	//
@@ -129,12 +129,12 @@ type turnState struct {
 	// active records that this turn observed something worth
 	// reporting (reply text, reasoning, an assistant message, or a
 	// tool call). A settled turn that saw none of those produces no
-	// EventResult at all — see finishTurnLocked.
+	// EventAgentResult at all — see finishTurnLocked.
 	active bool
 
 	// stopReason is the most recent assistant message_end's
-	// stopReason. Surfaced as ResultEvent.Subtype; "error" also
-	// sets ResultEvent.IsError.
+	// stopReason. Surfaced as AgentResultEvent.Subtype; "error" also
+	// sets .
 	stopReason string
 
 	// lastUsage is the usage block of the most recent assistant
@@ -148,11 +148,11 @@ type turnState struct {
 	// cc-connect reaches the same conclusion from the other
 	// direction — its handleAgentEnd walks agent_end.messages[]
 	// backwards and takes the last assistant usage.
-	lastUsage *agent.UsageEvent
+	lastUsage *agent.UsageInfo
 
 	// pendingTools keys in-flight tool calls (toolCallId) to their
 	// start-time metadata so the matching tool_execution_end can
-	// carry Name + Args into ToolEndEvent. Populated in
+	// carry Name + Args into AgentToolEndEvent. Populated in
 	// tool_execution_start, drained in tool_execution_end, and
 	// discarded wholesale when the turn resets — a tool that never
 	// reported an end (Pi aborted mid-call) must not leak into the
@@ -168,14 +168,14 @@ func newTurnState() *turnState {
 }
 
 // translator carries the per-session translation state: the session
-// fingerprint used to attribute EventAgentConnected, the sticky connectedSent flag,
+// fingerprint used to attribute EventAgentReady, the sticky connectedSent flag,
 // and the current turn's accumulation buffers.
 type translator struct {
 	agentName string
 	workspace string
 	branch    string
 
-	// connectedSent is set after the first EventAgentConnected has been emitted
+	// connectedSent is set after the first EventAgentReady has been emitted
 	// for the session, so subsequent get_state responses or model
 	// changes do not re-fire the receipt header. Guarded by the
 	// session's translatorMu (NOT turnMu) — see below.
@@ -185,7 +185,7 @@ type translator struct {
 	// in tokens, captured from get_state.data.model.contextWindow
 	// (F-54). Bridge-local: decodeMessageUsage receives it as a
 	// parameter, computes ContextWindowPct, and the value itself
-	// never crosses the UsageEvent struct boundary.
+	// never crosses the UsageInfo struct boundary.
 	//
 	// Refreshed on every emitConnected call. emitConnected fires
 	// once at boot AND once on every /new (session.New resets
@@ -223,7 +223,7 @@ type translator struct {
 	//
 	// Resetting the turn state alone is not enough. session.New()
 	// resets, then issues a get_state RPC with a 10s deadline before
-	// it can deliver the new EventAgentConnected — and readPump keeps
+	// it can deliver the new EventAgentReady — and readPump keeps
 	// translating the whole time. Wire events still in the pipe from
 	// the turn the user just abandoned would land in the *fresh*
 	// turnState: an old message_end would stamp its usage onto the
@@ -281,7 +281,7 @@ func (t *translator) endReset() {
 // AgentEvent values. The returned slice is empty for events that
 // should be dropped silently. A non-nil error indicates a malformed
 // payload that the caller should treat as fatal for the session
-// (the bridge closes the events channel and emits EventError in
+// (the bridge closes the events channel and emits EventAgentError in
 // that case).
 //
 // The whole body runs under turnMu. That is safe because translation
@@ -325,7 +325,7 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		// agent_end stays on this list deliberately: it carries a
 		// willRetry flag and can fire several times within one turn,
 		// so it is NOT a terminal marker (F-32 §2.3). cc-connect
-		// emits its EventResult here and accepts the duplicates; we
+		// emits its EventAgentResult here and accepts the duplicates; we
 		// use agent_settled instead and get exactly one.
 		logger.Debug("pi event ignored",
 			slog.String("type", env.Type),
@@ -337,16 +337,16 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		// Turn-end marker. The session stays open; subsequent
 		// prompts are still accepted.
 		//
-		// This is the only place a turn's EventResult is produced —
+		// This is the only place a turn's EventAgentResult is produced —
 		// exactly one per turn, carrying the final text and the
-		// usage snapshot. EventDone follows it because the runtime's
+		// usage snapshot. EventAgentDone follows it because the runtime's
 		// readpump flips to Idle and flushes the queued prompts on
-		// EventDone; emitting the result afterwards would race the
+		// EventAgentDone; emitting the result afterwards would race the
 		// next turn.
 		out := t.finishTurnLocked()
 		out = append(out, agent.AgentEvent{
-			Kind: agent.EventDone,
-			Done: &agent.DoneEvent{ExitCode: 0, Reason: "settled"},
+			Kind: agent.EventAgentDone,
+			Done: &agent.AgentDoneEvent{ExitCode: 0, Reason: "settled"},
 		})
 		t.turn = newTurnState()
 		return out, nil
@@ -365,7 +365,7 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		// Flush the narration that preceded this tool call so the
 		// user sees what the agent is doing while it runs. Clearing
 		// pendingText here is also what guarantees the turn's final
-		// EventResult carries only the *last* segment — the text
+		// EventAgentResult carries only the *last* segment — the text
 		// delivered now is never repeated in the result (F-52).
 		t.turn.active = true
 		out := t.flushPendingTextLocked()
@@ -374,7 +374,7 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		// malformed events collapse onto each other and a later
 		// empty-id end would inherit the wrong Name/Args. Record
 		// only when the id is non-empty; the matching end falls
-		// back to wire ToolName. EventToolStart still fires with
+		// back to wire ToolName. EventAgentToolStart still fires with
 		// ID=="" so consumers see the start; the orphan-end
 		// fallback path covers the result line.
 		if ev.ToolCallID != "" {
@@ -387,8 +387,8 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 				slog.String("raw", string(raw)))
 		}
 		return append(out, agent.AgentEvent{
-			Kind: agent.EventToolStart,
-			ToolStart: &agent.ToolStartEvent{
+			Kind: agent.EventAgentToolStart,
+			ToolStart: &agent.AgentToolStartEvent{
 				ID:   ev.ToolCallID,
 				Name: ev.ToolName,
 				Args: stringOrEmpty(ev.Args),
@@ -429,20 +429,20 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 				slog.String("raw", string(raw)))
 		}
 		return []agent.AgentEvent{{
-			Kind: agent.EventToolEnd,
-			ToolEnd: &agent.ToolEndEvent{
+			Kind: agent.EventAgentToolEnd,
+			ToolEnd: &agent.AgentToolEndEvent{
 				ID:     ev.ToolCallID,
 				Name:   name,
 				Args:   args,
 				Output: stringOrEmpty(ev.Result),
-				Err:    toolErrorIf(ev.IsError),
 			},
+			Err: toolErrorIf(ev.IsError),
 		}}, nil
 
 	case "compaction_start":
 		// F-49: bridge abstracts the protocol difference. Pi emits a
 		// start+end pair per compaction cycle; only the end is
-		// surfaced to the runtime as one EventCompaction, so a single
+		// surfaced to the runtime as one EventAgentCompaction, so a single
 		// Pi cycle bumps the AgentSession counter exactly once.
 		// Reasons live in protocol.go's compactionStart.Reason but
 		// are intentionally not propagated (no Subtype field after
@@ -457,9 +457,10 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		// Compaction can fire mid-turn; the turn's accumulation
 		// buffers are deliberately left untouched so the reply being
 		// composed survives the cycle.
-		return []agent.AgentEvent{{
-			Kind: agent.EventCompaction,
-		}}, nil
+		//
+		// Compaction tracking removed (F-49 abandoned): bridges no
+		// longer emit a dedicated event. Runtime is a pure pass-through.
+		return nil, nil
 
 	case "extension_ui_request":
 		// The F-32 MVP does not forward extension UI to the
@@ -488,7 +489,7 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		// does NOT list state_update as a server-emitted event. The
 		// F-34 reset path in pi/session.go New() does NOT rely on this
 		// case — it issues new_session + get_state synchronously and
-		// pushes the resulting EventAgentConnected through deliver().
+		// pushes the resulting EventAgentReady through deliver().
 		//
 		// We keep this case so a future pi version that DOES emit
 		// state_update (informally) still surfaces the new sessionId
@@ -504,15 +505,13 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 			return nil, nil
 		}
 		return []agent.AgentEvent{{
-			Kind: agent.EventAgentConnected,
-			Connected: &agent.AgentConnectedEvent{
-				SessionID: ev.SessionID,
-				Model:     modelDisplay(ev.ModelID, ev.ModelName),
-				AgentName: t.agentName,
-				Workspace: t.workspace,
-				Branch:    t.branch,
-			},
-		}}, nil
+		Kind:      agent.EventAgentReady,
+		SessionID: ev.SessionID,
+		Model:     modelDisplay(ev.ModelID, ev.ModelName),
+		AgentName: t.agentName,
+		Workspace: t.workspace,
+		Branch:    t.branch,
+	}}, nil
 
 	default:
 		// Unknown event. Drop silently with a debug log so a
@@ -566,7 +565,7 @@ func (t *translator) translateMessageUpdateLocked(raw []byte, logger *slog.Logge
 
 	case "text_end":
 		// Block complete — move it into pendingText, awaiting either
-		// a tool boundary or the turn's EventResult.
+		// a tool boundary or the turn's EventAgentResult.
 		t.closeTextBlockLocked(delta.ContentIndex)
 		return nil, nil
 
@@ -582,14 +581,14 @@ func (t *translator) translateMessageUpdateLocked(raw []byte, logger *slog.Logge
 	case "thinking_end":
 		// Reasoning flushes on its own boundary rather than at the
 		// tool boundary: it is a distinct surface (💭 vs 💬) and must
-		// never end up inside the reply's EventResult.
+		// never end up inside the reply's EventAgentResult.
 		text := strings.TrimSpace(t.turn.thinkBuf.String())
 		t.turn.thinkBuf.Reset()
 		if text == "" {
 			return nil, nil
 		}
 		return []agent.AgentEvent{{
-			Kind: agent.EventText,
+			Kind: agent.EventAgentText,
 			Text: thinkingPrefix + text,
 		}}, nil
 
@@ -621,7 +620,7 @@ func (t *translator) translateMessageUpdateLocked(raw []byte, logger *slog.Logge
 //
 // A turn can contain several assistant messages (text -> toolCall ->
 // toolResult -> next assistant message). Emitting per message, as the
-// pre-F-52 code did, produced one EventResult per message rather than
+// pre-F-52 code did, produced one EventAgentResult per message rather than
 // one per turn.
 //
 // Caller must hold turnMu.
@@ -746,7 +745,7 @@ func (t *translator) closeOpenBlocksLocked() {
 }
 
 // flushPendingTextLocked delivers the accumulated narration as a
-// single EventText and clears it. Returns nil (not an empty event)
+// single EventAgentText and clears it. Returns nil (not an empty event)
 // when there is nothing pending, so callers can append unconditionally.
 //
 // Caller must hold turnMu.
@@ -761,10 +760,10 @@ func (t *translator) flushPendingTextLocked() []agent.AgentEvent {
 	// buffered) must leave the lastMessageText fallback available for
 	// turns where Pi never streamed in the first place.
 	t.turn.textDelivered = true
-	return []agent.AgentEvent{{Kind: agent.EventText, Text: text}}
+	return []agent.AgentEvent{{Kind: agent.EventAgentText, Text: text}}
 }
 
-// finishTurnLocked builds the turn's single EventResult, or returns
+// finishTurnLocked builds the turn's single EventAgentResult, or returns
 // nil when the turn observed nothing worth reporting.
 //
 // Text resolution order:
@@ -798,10 +797,9 @@ func (t *translator) finishTurnLocked() []agent.AgentEvent {
 	t.turn.pendingText = ""
 
 	return []agent.AgentEvent{{
-		Kind: agent.EventResult,
-		Result: &agent.ResultEvent{
+		Kind: agent.EventAgentResult,
+		Result: &agent.AgentResultEvent{
 			Text:    text,
-			IsError: t.turn.stopReason == "error",
 			Subtype: t.turn.stopReason,
 			Usage:   t.turn.lastUsage,
 		},
@@ -809,7 +807,7 @@ func (t *translator) finishTurnLocked() []agent.AgentEvent {
 }
 
 // decodeMessageUsage converts Pi's per-message usage block into the
-// bridge-neutral agent.UsageEvent. Returns nil when the block is
+// bridge-neutral agent.UsageInfo. Returns nil when the block is
 // absent or reports nothing — the documented "no usage this message"
 // signal, which keeps the previous snapshot in place.
 //
@@ -823,7 +821,7 @@ func (t *translator) finishTurnLocked() []agent.AgentEvent {
 // internal/bridge/claudecode/stream.go:decodeUsage.
 // decodeMessageUsage translates a single pi message_usage payload
 // (cost + input/output/cache counters) into the canonical
-// agent.UsageEvent. Single-shot per-turn snapshot — runtime
+// agent.UsageInfo. Single-shot per-turn snapshot — runtime
 // does NOT aggregate across turns.
 //
 // ctxWindow is the API-reported model context-window size in
@@ -834,7 +832,7 @@ func (t *translator) finishTurnLocked() []agent.AgentEvent {
 // and the channel footer omits the "X%" segment. See
 // docs/feat/F-45-session-footer.md §1.5 /
 // docs/feat/F-54-pi-contextwindow-from-get-state.md §2.2.
-func decodeMessageUsage(u *messageUsage, ctxWindow int) *agent.UsageEvent {
+func decodeMessageUsage(u *messageUsage, ctxWindow int) *agent.UsageInfo {
 	if u == nil {
 		return nil
 	}
@@ -842,7 +840,7 @@ func decodeMessageUsage(u *messageUsage, ctxWindow int) *agent.UsageEvent {
 	if u.Input == 0 && u.Output == 0 && u.CacheRead == 0 && u.CacheWrite == 0 && costZero {
 		return nil
 	}
-	out := &agent.UsageEvent{
+	out := &agent.UsageInfo{
 		InputTokens:          u.Input,
 		OutputTokens:         u.Output,
 		CacheReadInputTokens: u.CacheRead,
@@ -870,7 +868,7 @@ func decodeMessageUsage(u *messageUsage, ctxWindow int) *agent.UsageEvent {
 
 // emitConnected is invoked from session.go after the get_state handshake
 // succeeds. It is independent of the per-event translate path
-// because EventAgentConnected is driven by a response, not an event.
+// because EventAgentReady is driven by a response, not an event.
 func (t *translator) emitConnected(result *getStateResult) []agent.AgentEvent {
 	if t.connectedSent {
 		return nil
@@ -894,7 +892,7 @@ func (t *translator) emitConnected(result *getStateResult) []agent.AgentEvent {
 		// F-54: cache the API-reported context-window on the
 		// translator so subsequent decodeMessageUsage calls can
 		// compute per-turn ContextWindowPct. Bridge-local state;
-		// only the percentage crosses the UsageEvent boundary.
+		// only the percentage crosses the UsageInfo boundary.
 		// Stored via atomic.StoreInt64 so the concurrent
 		// decodeMessageUsage read (under turnMu) sees a coherent
 		// value without coupling the two mutexes.
@@ -907,19 +905,17 @@ func (t *translator) emitConnected(result *getStateResult) []agent.AgentEvent {
 		sessionID = result.SessionID
 	}
 	return []agent.AgentEvent{{
-		Kind: agent.EventAgentConnected,
-		Connected: &agent.AgentConnectedEvent{
-			SessionID: sessionID,
-			Model:     modelDisplay(modelID, modelName),
-			AgentName: t.agentName,
-			Workspace: t.workspace,
-			Branch:    t.branch,
-		},
+		Kind:      agent.EventAgentReady,
+		SessionID: sessionID,
+		Model:     modelDisplay(modelID, modelName),
+		AgentName: t.agentName,
+		Workspace: t.workspace,
+		Branch:    t.branch,
 	}}
 }
 
 // stringOrEmpty renders a json.RawMessage as a string for the
-// ToolStartEvent.Args / ToolEndEvent.Output fields, which both
+// AgentToolStartEvent.Args / AgentToolEndEvent.Output fields, which both
 // carry a free-form text payload in the agent package.
 func stringOrEmpty(raw json.RawMessage) string {
 	if len(raw) == 0 {
@@ -929,7 +925,7 @@ func stringOrEmpty(raw json.RawMessage) string {
 }
 
 // toolErrorIf turns a boolean isError flag into a non-nil error
-// suitable for ToolEndEvent.Err. We do not include the tool's
+// suitable for GoneToolEndErr. We do not include the tool's
 // stdout text in the error; channels render Err string when
 // non-nil and ignore Output.
 func toolErrorIf(isError bool) error {
@@ -945,7 +941,7 @@ type piToolError struct{}
 
 func (e *piToolError) Error() string { return "pi: tool execution failed" }
 
-// modelDisplay composes a human-readable model label for EventAgentConnected
+// modelDisplay composes a human-readable model label for EventAgentReady
 // from Pi's id and name. We prefer "name (id)" when both are
 // present so the receipt shows the friendly name and the receipt
 // log line keeps the id for grep.

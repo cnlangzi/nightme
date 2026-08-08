@@ -11,20 +11,19 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// makeTestMessage (F-53 helper) constructs a `*Message` with the
-// minimal fields a test typically needs: an ID, the owning
-// ChatSession's ChatID, the supplied blocks, a fresh ReceivedAt,
-// and Stage=MessageQueued. Use this in tests that previously called
-// `cs.QueueUserMessage(blocks, userMsgID)` — the new signature
-// takes a `*Message` and the construction is noisy enough to
+// makeTestMessage constructs a `Message` value with the minimal
+// fields a test typically needs: an ID, the owning ChatSession's
+// ChatID, the supplied blocks, and a fresh ReceivedAt. Use this
+// in tests that previously called
+// `cs.QueueUserMessage(blocks, userMsgID)` — the signature takes
+// a `Message` value and the construction is noisy enough to
 // warrant a helper.
-func makeTestMessage(cs *ChatSession, blocks []agent.ContentBlock, userMsgID string) *Message {
-	return &Message{
+func makeTestMessage(cs *ChatSession, blocks []agent.ContentBlock, userMsgID string) Message {
+	return Message{
 		ID:         userMsgID,
 		ChatID:     cs.ChatID,
 		Blocks:     blocks,
 		ReceivedAt: time.Now(),
-		Stage:      agent.MessageQueued,
 	}
 }
 

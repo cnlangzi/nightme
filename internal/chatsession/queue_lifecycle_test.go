@@ -21,18 +21,40 @@
 package chatsession
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // TestDropQueue_DropsQueuedMessages covers the explicit-clear path:
-// DropQueue empties the queue, flips each message to
-// MessageDropped, and reports how many it dropped.
+// DropQueue empties the queue and fires a MessageDropped wire
+// event for each removed message.
 //
-// Ported from TestClearBuffer_DropsQueuedMessages.
+// Ported from TestClearBuffer_DropsQueuedMessages. Post-refactor:
+// the test no longer reads msg.Stage directly (the queue's copy
+// is what gets the Stage flip; value semantics mean the test's
+// local copy is untouched). The MessageStateBus event is the
+// canonical signal.
 func TestDropQueue_DropsQueuedMessages(t *testing.T) {
 	cs := New("test_dropqueue", "pi").WithSpawner(nil)
+
+	// Observe drop events.
+	var (
+		mu             sync.Mutex
+		droppedIDs     []string
+		haveDropEvent  bool
+	)
+	cs.MessageStateBus.Subscribe(func(e MessageStateEvent) bool {
+		if e.State != agent.MessageDropped {
+			return false
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		droppedIDs = append(droppedIDs, e.UserMsgID)
+		haveDropEvent = true
+		return false
+	})
 
 	// No activeAS, so the TryFlush inside QueueUserMessage is a
 	// no-op and the message stays queued.
@@ -51,8 +73,14 @@ func TestDropQueue_DropsQueuedMessages(t *testing.T) {
 	if n := cs.QueueLen(); n != 0 {
 		t.Errorf("post-drop: QueueLen = %d; want 0", n)
 	}
-	if msg.Stage != agent.MessageDropped {
-		t.Errorf("dropped message Stage = %v; want MessageDropped", msg.Stage)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !haveDropEvent {
+		t.Fatal("MessageStateBus saw no drop event")
+	}
+	if len(droppedIDs) != 1 || droppedIDs[0] != msg.ID {
+		t.Errorf("drop event IDs = %v, want [%s]", droppedIDs, msg.ID)
 	}
 }
 

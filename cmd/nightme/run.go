@@ -626,12 +626,11 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 		// debug surfaces see the true arrival time (not the
 		// dispatcher-pass time, which may be a hair later when
 		// the spawn path took a moment).
-		userMsg := &chatsession.Message{
+		userMsg := chatsession.Message{
 			ID:         userMsgID,
 			ChatID:     msg.ChatID,
 			Blocks:     blocks,
 			ReceivedAt: msg.Time,
-			Stage:      agent.MessageQueued, // already emitted above; redundant but explicit
 		}
 		if err := cs.QueueUserMessage(userMsg); err != nil {
 			if errors.Is(err, chatsession.ErrQueueFull) {

@@ -149,26 +149,18 @@ func TestMessageStateBus_ClearDropsAllSubscribers(t *testing.T) {
 	}
 }
 
-// TestMarkDropped_FlipsStageAndEmits verifies that MarkDropped
-// (F-53's new explicit-clear path) flips a single Message to
-// MessageDropped AND fires the MessageState event.
-//
-// F-54: firing goes through cs.MessageStateBus.Publish (called
-// from MarkDropped directly).
-func TestMarkDropped_FlipsStageAndEmits(t *testing.T) {
+// TestEmitMessageDropped_FlipsStageAndEmits verifies that the
+// post-refactor drop path (cs.emitMessageDropped) flips a
+// Message to MessageDropped AND fires the MessageState event.
+// F-54: firing goes through cs.MessageStateBus.Publish.
+func TestEmitMessageDropped_FlipsStageAndEmits(t *testing.T) {
 	cs := New("oc_chat", "claude")
 	cap := &captureHandler{}
 	cs.MessageStateBus.Subscribe(cap.handler)
 
-	msg := &Message{ID: "om_drop", ChatID: "oc_chat"}
-	cs.messagesByID.Store(msg.ID, msg)
+	msg := Message{ID: "om_drop", ChatID: "oc_chat"}
+	cs.emitMessageDropped(msg)
 
-	if !cs.MarkDropped("om_drop") {
-		t.Fatal("MarkDropped returned false for stored message")
-	}
-	if msg.Stage != agent.MessageDropped {
-		t.Errorf("Stage = %v; want MessageDropped", msg.Stage)
-	}
 	got := cap.snapshot()
 	if len(got) != 1 {
 		t.Fatalf("captured %d MessageState events; want 1", len(got))

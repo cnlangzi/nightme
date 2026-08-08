@@ -132,7 +132,7 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 
 	// Drive the queue + submit the prompt (real production path).
 	const userMsgID = "om_msg_1"
-	msg := &chatsession.Message{
+	msg := chatsession.Message{
 		ID:     userMsgID,
 		ChatID: cs.ChatID,
 		Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: "hi agent"}},
@@ -216,7 +216,7 @@ func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 	}
 
 	const userMsgID = "om_msg_2"
-	msg := &chatsession.Message{
+	msg := chatsession.Message{
 		ID:     userMsgID,
 		ChatID: cs.ChatID,
 		Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: "go"}},
@@ -409,7 +409,7 @@ exit 0
 	defer as.Shutdown()
 
 	const userMsgID = "om_real_bridge_1"
-	msg := &chatsession.Message{
+	msg := chatsession.Message{
 		ID:     userMsgID,
 		ChatID: cs.ChatID,
 		Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: "go"}},

@@ -24,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -145,8 +146,10 @@ func TestChatSession_PumpEvents_RoutesKindAgentEvent(t *testing.T) {
 }
 
 // TestChatSession_PumpEvents_RoutesKindPromptEnded verifies that
-// KindPromptEnded triggers writebackMessageState on the CS side.
-// Stage stays Submitted; LastProcessedAt / LastEndReason get set.
+// KindPromptEnded triggers writebackMessageState on the CS side
+// and fires the PromptEndBus event with the right userMsgID and
+// reason. Post-refactor (Message is immutable) the "the prompt
+// ended" signal is the bus event, not a field mutation.
 func TestChatSession_PumpEvents_RoutesKindPromptEnded(t *testing.T) {
 	cs := newChatSessionForTest("cs_test")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -159,18 +162,39 @@ func TestChatSession_PumpEvents_RoutesKindPromptEnded(t *testing.T) {
 	cs.activeAS = as
 	cs.mu.Unlock()
 
-	// Add a message to messagesByID and queue, then submit.
-	msg := &Message{
+	// Observe the terminal prompt-end event. writebackMessageState
+	// fires this on KindPromptEnded.
+	var (
+		mu             sync.Mutex
+		gotEvent       bool
+		gotUserMsgID   string
+		gotReason      PromptEndReason
+	)
+	cs.PromptEndBus.Subscribe(func(e PromptEndedEvent) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		gotEvent = true
+		gotUserMsgID = e.UserMsgID
+		gotReason = e.Reason
+		return false
+	})
+
+	// Build a Message value and a Prompt carrying it inline.
+	// Submit directly via the AS so we observe writeback without
+	// going through TryFlush (the test's intent is to exercise
+	// the KindPromptEnded → writebackMessageState path).
+	msg := Message{
 		ID:     "msg-1",
 		ChatID: cs.ID,
 		Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}},
-		Stage:  agent.MessageQueued,
 	}
-	cs.mu.Lock()
-	cs.messagesByID.Store(msg.ID, msg)
-	cs.mu.Unlock()
-
-	if err := as.Submit(&Prompt{MessageIDs: []string{msg.ID}, Blocks: msg.Blocks, LastMessageID: msg.ID}); err != nil {
+	p := &Prompt{
+		ID:            "p-1",
+		Messages:      []Message{msg},
+		Blocks:        msg.Blocks,
+		LastMessageID: msg.ID,
+	}
+	if err := as.Submit(p); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
 
@@ -188,23 +212,20 @@ func TestChatSession_PumpEvents_RoutesKindPromptEnded(t *testing.T) {
 		t.Fatal("AS never became ready after EventDone")
 	}
 
-	// writebackMessageState should have run (via PumpEvents OR
-	// directly — depends on whether PumpEvents is running). The
-	// CS-side writeback is invoked by ChatSession.routeEvent;
-	// PumpEvents runs concurrently. Wait for the message's
-	// LastProcessedAt to be set.
 	if !waitFor(func() bool {
-		_, _ = cs.MessageState(msg.ID)
-		return false // unused
-	}, 0) {
-		// waitFor signature; we'll use MessageState below for race-safe read.
+		mu.Lock()
+		defer mu.Unlock()
+		return gotEvent
+	}, 2*time.Second) {
+		t.Fatal("PromptEndBus saw no event for KindPromptEnded")
 	}
-	lastProcessedAt, endReason := cs.MessageState(msg.ID)
-	if lastProcessedAt.IsZero() {
-		t.Fatal("LastProcessedAt not set after KindPromptEnded")
+	mu.Lock()
+	defer mu.Unlock()
+	if gotUserMsgID != msg.ID {
+		t.Errorf("event UserMsgID = %q, want %q", gotUserMsgID, msg.ID)
 	}
-	if endReason != PromptEndClean {
-		t.Errorf("LastEndReason = %v, want %v", endReason, PromptEndClean)
+	if gotReason != PromptEndClean {
+		t.Errorf("event Reason = %v, want %v", gotReason, PromptEndClean)
 	}
 
 	// Stage stays at MessageQueued: this test bypasses TryFlush
@@ -234,30 +255,45 @@ func TestChatSession_TryFlush_AtLeastOnce(t *testing.T) {
 	cs.activeAS = as
 	cs.mu.Unlock()
 
-	msg := &Message{
+	// Subscribe to MessageStateBus to observe the post-Submit
+	// state transition. Post-refactor there is no per-chat
+	// message index to read Stage from directly; the wire
+	// event is the canonical signal.
+	var capturedState agent.MessageState
+	var capturedID string
+	var mu sync.Mutex
+	cs.MessageStateBus.Subscribe(func(e MessageStateEvent) bool {
+		mu.Lock()
+		capturedState = e.State
+		capturedID = e.UserMsgID
+		mu.Unlock()
+		return false
+	})
+
+	msg := Message{
 		ID:     "msg-1",
 		ChatID: cs.ID,
 		Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}},
-		Stage:  agent.MessageQueued,
 	}
-	cs.mu.Lock()
-	cs.messagesByID.Store(msg.ID, msg)
-	cs.queue = append(cs.queue, msg)
-	cs.mu.Unlock()
+	if err := cs.queue.Push(msg); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
 
 	// Successful TryFlush.
 	if err := cs.TryFlush(); err != nil {
 		t.Fatalf("TryFlush: %v", err)
 	}
-	cs.mu.RLock()
-	if len(cs.queue) != 0 {
-		t.Errorf("queue length after successful flush = %d, want 0", len(cs.queue))
+	if got := cs.queue.Len(); got != 0 {
+		t.Errorf("queue length after successful flush = %d, want 0", got)
 	}
-	cs.mu.RUnlock()
 
-	got := cs.GetMessage(msg.ID)
-	if got.Stage != agent.MessageSubmitted {
-		t.Errorf("Stage = %v, want MessageSubmitted", got.Stage)
+	mu.Lock()
+	defer mu.Unlock()
+	if capturedID != msg.ID {
+		t.Errorf("bus event ID = %q, want %q", capturedID, msg.ID)
+	}
+	if capturedState != agent.MessageSubmitted {
+		t.Errorf("bus event state = %v, want MessageSubmitted", capturedState)
 	}
 }
 
@@ -341,7 +377,7 @@ func TestAgentSession_EndPrompt_EmitsKindPromptEnded(t *testing.T) {
 	as, _ := makeSpawnedAS(t, cs, "pi", ctx)
 	defer as.Shutdown()
 
-	p := &Prompt{ID: "p-1", MessageIDs: []string{"m-1"}, LastMessageID: "m-1"}
+	p := &Prompt{ID: "p-1", LastMessageID: "m-1"}
 	as.asMu.Lock()
 	as.currentPrompt = p
 	as.asMu.Unlock()

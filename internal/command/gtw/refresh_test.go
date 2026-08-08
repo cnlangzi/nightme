@@ -54,7 +54,7 @@ func TestRefreshDefaultBranch_RealGitEndToEnd(t *testing.T) {
 		t.Fatalf("precondition: local HEAD should differ from upstream before refresh")
 	}
 
-	got, err := RefreshDefaultBranch(context.Background(), repoRoot, HandlerDeps{
+	got, _, err := RefreshDefaultBranch(context.Background(), repoRoot, HandlerDeps{
 		Git: ExecGitRunner{},
 	})
 	if err != nil {
@@ -90,7 +90,7 @@ func TestRefreshDefaultBranch_RefusesDirtyMain(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	_, err := RefreshDefaultBranch(context.Background(), repoRoot, HandlerDeps{
+	_, _, err := RefreshDefaultBranch(context.Background(), repoRoot, HandlerDeps{
 		Git: ExecGitRunner{},
 	})
 	if err == nil {
@@ -113,7 +113,7 @@ func TestRefreshDefaultBranch_NoOrigin(t *testing.T) {
 	// Deliberately do NOT call addLocalRemote — origin stays
 	// absent.
 
-	_, err := RefreshDefaultBranch(context.Background(), repoRoot, HandlerDeps{
+	_, _, err := RefreshDefaultBranch(context.Background(), repoRoot, HandlerDeps{
 		Git: ExecGitRunner{},
 	})
 	if err == nil {
@@ -160,7 +160,7 @@ func TestRefreshDefaultBranch_RebaseOnDivergedMain(t *testing.T) {
 		t.Fatalf("rev-parse local: %v", err)
 	}
 
-	_, err = RefreshDefaultBranch(context.Background(), repoRoot, HandlerDeps{
+	_, _, err = RefreshDefaultBranch(context.Background(), repoRoot, HandlerDeps{
 		Git: ExecGitRunner{},
 	})
 	if err != nil {
@@ -232,7 +232,7 @@ func TestRefreshDefaultBranch_RebaseConflict(t *testing.T) {
 	mustGit(t, repoRoot, "add", "shared.txt")
 	mustGit(t, repoRoot, "commit", "-q", "-m", "local change")
 
-	_, err := RefreshDefaultBranch(context.Background(), repoRoot, HandlerDeps{
+	_, _, err := RefreshDefaultBranch(context.Background(), repoRoot, HandlerDeps{
 		Git: ExecGitRunner{},
 	})
 	if err == nil {

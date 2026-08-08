@@ -166,22 +166,27 @@ func DefaultBranch(ctx context.Context, dir string, git GitRunner) (string, erro
 //  4. `git checkout <default>`.
 //  5. `git pull --rebase origin <default>`.
 //
-// Returns the resulting HEAD SHA so the caller can label
-// the success card ("based on origin/main@<sha>") and verify
-// the refresh actually happened.
-func RefreshDefaultBranch(ctx context.Context, repoRoot string, deps HandlerDeps) (string, error) {
+// Returns (newHead, pullOut, err):
+//   - newHead: the post-pull HEAD SHA, for callers that want
+//     to label a success card ("based on origin/main@<sha>")
+//     and verify the refresh moved the branch.
+//   - pullOut: the raw `git pull --rebase` stdout ("Already
+//     up to date.", "Updating X..Y\nFast-forward\n…", etc.).
+//     /gtw sync passes this through to the user; /gtw fix
+//     discards it in favour of its own success card layout.
+func RefreshDefaultBranch(ctx context.Context, repoRoot string, deps HandlerDeps) (string, string, error) {
 	branch, err := DefaultBranch(ctx, repoRoot, deps.Git)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	// Step 2: refuse on dirty main.
 	statusOut, _, err := deps.Git.Run(ctx, repoRoot, "status", "--porcelain")
 	if err != nil {
-		return "", fmt.Errorf("git status %s: %w", repoRoot, err)
+		return "", "", fmt.Errorf("git status %s: %w", repoRoot, err)
 	}
 	if statusOut != "" {
-		return "", fmt.Errorf(
+		return "", "", fmt.Errorf(
 			"❌ main repo %s has uncommitted changes — commit or stash first:\n%s",
 			repoRoot, statusOut)
 	}
@@ -194,23 +199,23 @@ func RefreshDefaultBranch(ctx context.Context, repoRoot string, deps HandlerDeps
 	// paths the same way regardless of how git printed them.
 	gitDirRaw, _, err := deps.Git.Run(ctx, repoRoot, "rev-parse", "--git-dir")
 	if err != nil {
-		return "", fmt.Errorf("git rev-parse --git-dir in %s: %w", repoRoot, err)
+		return "", "", fmt.Errorf("git rev-parse --git-dir in %s: %w", repoRoot, err)
 	}
 	commonDirRaw, _, err := deps.Git.Run(ctx, repoRoot, "rev-parse", "--git-common-dir")
 	if err != nil {
-		return "", fmt.Errorf("git rev-parse --git-common-dir in %s: %w", repoRoot, err)
+		return "", "", fmt.Errorf("git rev-parse --git-common-dir in %s: %w", repoRoot, err)
 	}
 	gitDir := filepath.Clean(filepath.Join(repoRoot, strings.TrimSpace(gitDirRaw)))
 	commonDir := filepath.Clean(filepath.Join(repoRoot, strings.TrimSpace(commonDirRaw)))
 	if gitDir != commonDir {
-		return "", fmt.Errorf(
+		return "", "", fmt.Errorf(
 			"❌ %s is a linked worktree; default-branch refresh must run from the primary checkout. /cwd into the main repo first.",
 			repoRoot)
 	}
 
 	// Step 4: checkout.
 	if _, _, err := deps.Git.Run(ctx, repoRoot, "checkout", branch); err != nil {
-		return "", fmt.Errorf("git checkout %s in %s: %w", branch, repoRoot, err)
+		return "", "", fmt.Errorf("git checkout %s in %s: %w", branch, repoRoot, err)
 	}
 
 	// Step 5: pull --rebase. We pass explicit `<remote>
@@ -237,9 +242,10 @@ func RefreshDefaultBranch(ctx context.Context, repoRoot string, deps HandlerDeps
 // state; we surface the conflict (and the abort command)
 // verbatim so the user can `git rebase --abort` and retry
 // after resolving manually.
-	if _, stderr, err := deps.Git.Run(ctx, repoRoot,
-		"pull", "--rebase", "origin", branch); err != nil {
-		return "", fmt.Errorf(
+	pullOut, stderr, err := deps.Git.Run(ctx, repoRoot,
+		"pull", "--rebase", "origin", branch)
+	if err != nil {
+		return "", pullOut, fmt.Errorf(
 			"git pull --rebase origin %s in %s: %w "+
 				"[stderr: %s] "+
 				"(rebase conflict? resolve manually, then `git rebase --abort` to clean up before retrying)",
@@ -249,9 +255,9 @@ func RefreshDefaultBranch(ctx context.Context, repoRoot string, deps HandlerDeps
 	// Step 5: report the new HEAD.
 	headOut, _, err := deps.Git.Run(ctx, repoRoot, "rev-parse", "HEAD")
 	if err != nil {
-		return "", fmt.Errorf("git rev-parse HEAD in %s: %w", repoRoot, err)
+		return "", pullOut, fmt.Errorf("git rev-parse HEAD in %s: %w", repoRoot, err)
 	}
-	return strings.TrimSpace(headOut), nil
+	return strings.TrimSpace(headOut), pullOut, nil
 }
 
 // WorktreeListPath returns the absolute path of the worktree that

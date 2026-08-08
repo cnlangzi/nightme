@@ -320,9 +320,11 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, input 
 }
 
 // runSync handles `/gtw sync`: checkout the default branch and
-// pull --rebase from origin. Errors are surfaced verbatim —
-// RefreshDefaultBranch already includes the dirty-worktree
-// refusal and rebase-conflict guidance the user needs.
+// pull --rebase from origin. The reply is git's own `pull`
+// stdout — no synthesis, no truncation. Errors are surfaced
+// verbatim (RefreshDefaultBranch already includes the
+// dirty-worktree refusal and rebase-conflict guidance the
+// user needs).
 func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	cwd, failOut := command.RequireActiveCwd(f.mgr.GetChatSession(input.ChatID))
 	if failOut != nil {
@@ -335,7 +337,7 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, input 
 			Consumed: true,
 		}, nil
 	}
-	newHead, err := RefreshDefaultBranch(ctx, repoRoot, f.deps)
+	pullOut, _, err := RefreshDefaultBranch(ctx, repoRoot, f.deps)
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    err.Error(),
@@ -343,7 +345,7 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, input 
 		}, nil
 	}
 	return &command.SlashOutput{
-		Reply:    fmt.Sprintf("✅ synced to %s", shortSHA(newHead)),
+		Reply:    pullOut,
 		Consumed: true,
 	}, nil
 }

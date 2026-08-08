@@ -372,7 +372,7 @@ func runFixRemote(
 	var baseSHA string
 	if !deps.SkipRefreshDefaultBranch {
 		var err error
-		baseSHA, err = RefreshDefaultBranch(ctx, repoRoot, deps)
+		baseSHA, _, err = RefreshDefaultBranch(ctx, repoRoot, deps)
 		if err != nil {
 			return reply(ctx, deps.Send, chatID, messageID, err.Error()), nil
 		}

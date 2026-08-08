@@ -345,7 +345,7 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 		stdoutR:   stdout,
 		stderrR:   stderr,
 		rpc:       newRPCClient(stdin),
-		events:    make(chan agent.AgentEvent, 64),
+		events:    make(chan agent.AgentEvent, 4096),
 		pid:       cmd.Process.Pid,
 		agentName: a.name,
 		workspace: cfg.Workspace,
@@ -674,26 +674,45 @@ func (a *Agent) deliverConnectedLocked(state *getStateResult) {
 
 // deliver pushes one AgentEvent onto the events channel.
 //
-// Two cancellation paths break the soft-stall that would otherwise
-// occur if the events buffer is full and the consumer (chat
-// session read pump) is slow or has stopped:
+// Producer-side back-pressure strategy: deliver NEVER times out
+// and NEVER drops. The events channel is sized large enough
+// (4096 — see Start) to absorb any burst the upstream runtime
+// (chat session) can produce during a /use switch, a long idle
+// turn, or a sustained non-active-AS backlog. The consumer (chat
+// session's per-AS readpump) eventually drains the buffer.
 //
-//  1. a.closed is the user-initiated Close() signal.
-//  2. The 1 s timeout covers the rare case where the consumer is
-//     just slow but not gone.
+// Two cancellation paths:
 //
-// The 1 s bound is well below shutdownGrace (2 s) so the Close
-// watchdog can still escalate to SIGKILL before the bridge stalls.
+//  1. a.closed is the user-initiated Close() signal — drops so
+//     we don't push to a closed channel and panic.
+//  2. a.exitDone is closed by the lifecycle goroutine after
+//     cmd.Wait returns — same reason. If neither has fired, the
+//     send blocks until the consumer catches up. The bridge's
+//     readpump blocks too, but pi's stdout pipe can absorb the
+//     Gigabit of buffered JSON without back-pressuring the
+//     pi process itself (kernel pipe buffer is 64 KiB; the
+//     4096-event channel is in our heap, not the pipe).
+//
+// The previous 1 s timeout + soft-drop behavior caused the
+// "bridge reset: pi: new_session: context deadline exceeded"
+// failure when the runtime was busy with another AS: the per-AS
+// readpump blocked on a full eventQueue, the events channel
+// filled to 64, the deliver dropped the post-/new
+// EventAgentReady, and the bridge's readpump stalled long enough
+// that the new_session RPC's 10 s deadline fired before the
+// response could be read from stdout. With a 4096-deep buffer
+// and no drop, the producer can always keep up with the byte
+// engine regardless of consumer lag.
 func (a *Agent) deliver(ev agent.AgentEvent) {
-	t := time.NewTimer(time.Second)
-	defer t.Stop()
+	exitDone := a.exitDone
 	select {
 	case a.events <- ev:
 	case <-a.closed:
 		piLog("deliver dropped (session closed)", "kind", ev.Kind.String())
-	case <-t.C:
-		piLog("deliver dropped (events channel full for 1s)",
-			"kind", ev.Kind.String(), "buffered", len(a.events), "cap", cap(a.events))
+	case <-exitDone:
+		// lifecycle goroutine closed exitDone after cmd.Wait
+		// returned; the bridge is being torn down. Drop
+		// silently — nobody will read this anyway.
 	}
 }
 

@@ -9,7 +9,7 @@ import (
 )
 
 // TestNightmeDataDir_Obsoleted was removed when the REPL switched to
-// in-memory history — the helper that created ~/.local/share/nightme
+// in-memory history — the helper that created ~/.nightme subdirs
 // is no longer needed. History now lives only in the readline ring
 // buffer and is discarded when the session ends (per Devin:
 // "history in memory is enough").

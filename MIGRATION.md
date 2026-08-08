@@ -138,7 +138,7 @@ If you previously ran `nightme test` for the full feature set
 ### Channel selection
 
 - `--channel=feishu` (default): WebSocket adapter; requires
-  `~/.config/nightme/config.yaml` with `feishu.app_id` and
+  `~/.nightme/config.yaml` with `feishu.app_id` and
   `feishu.app_secret` (run `nightme auth login feishu` to get them).
 - `--channel=echo`: no-network stub that prints outbound messages
   to stdout. Useful for smoke tests.
@@ -208,6 +208,6 @@ for that branch.
 For production, take a backup before upgrading:
 
 ```bash
-cp ~/.local/share/nightme/registry.json{,.pre-v1.2.bak}
-cp ~/.config/nightme/config.yaml{,.pre-v1.2.bak}
+cp ~/.nightme/registry.json{,.pre-v1.2.bak}
+cp ~/.nightme/config.yaml{,.pre-v1.2.bak}
 ```

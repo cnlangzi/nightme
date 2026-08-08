@@ -67,7 +67,7 @@ survives), or pass `--cleanup` to **kill** it instead:
 
 ```bash
 # (Optional) Copy and edit the example config
-cp configs/nightme.example.yaml ~/.config/nightme/config.yaml
+cp configs/nightme.example.yaml ~/.nightme/config.yaml
 
 # One-click Feishu registration (scan the QR code)
 ./bin/nightme auth login feishu
@@ -166,7 +166,7 @@ responsibility table.
 
 ## Configuration
 
-nightme reads YAML from `~/.config/nightme/config.yaml` (or
+nightme reads YAML from `~/.nightme/config.yaml` (or
 `$NIGHTME_CONFIG` if set). Env-var override:
 `NIGHTME_<SECTION>_<KEY>` (e.g. `NIGHTME_PRIMARY`).
 
@@ -184,7 +184,7 @@ agents:                                  # list (each entry = name/bridge/comman
 See [`configs/nightme.example.yaml`](./configs/nightme.example.yaml)
 for the full schema.
 
-Logs go to `~/.local/share/nightme/nightme.log` (mode 0600) as
+Logs go to `~/.nightme/nightme.log` (mode 0600) as
 JSON; attributes whose key contains `secret`, `token`, or
 `password` are auto-redacted to `***REDACTED***`.
 

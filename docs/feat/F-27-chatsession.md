@@ -409,7 +409,7 @@ user simply opens a fresh chat.
 ## 6. Registry schema (v1.2)
 
 ```jsonc
-// File: ~/.local/share/nightme/registry/chat_sessions.json
+// File: ~/.nightme/chat_sessions.json
 {
   "version": 2,
   "chatSessions": {
@@ -428,7 +428,7 @@ user simply opens a fresh chat.
   }
 }
 
-// File: ~/.local/share/nightme/registry/agent_sessions.json
+// File: ~/.nightme/agent_sessions.json
 {
   "version": 2,
   "agentSessions": {

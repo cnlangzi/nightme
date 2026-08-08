@@ -26,7 +26,7 @@ common operation: choosing which agent to spawn when no explicit
 nightme config
 ```
 
-Reads `~/.config/nightme/config.yaml` (or whatever `NIGHTME_CONFIG`
+Reads `~/.nightme/config.yaml` (or whatever `NIGHTME_CONFIG`
 points at), merges built-in agents with user-configured agents, lets
 the user pick one, and writes back the new `primary` value.
 
@@ -51,7 +51,7 @@ Agents (merged: builtins + your config):
 Current primary: claude
 Enter number to set as primary [1-3], q to cancel: 3
 ✓ Primary set to "cc" (config)
-✓ Saved to /home/user/.config/nightme/config.yaml
+✓ Saved to /home/user/.nightme/config.yaml
 
 Main menu:
   [1] Agents

@@ -146,20 +146,20 @@ type PathsConfig struct {
 }
 
 // DefaultPath is the conventional location of the nightme config
-// file on Linux/macOS (XDG-style with a fallback).
+// file: $HOME/.nightme/config.yaml.
+//
+// $NIGHTME_CONFIG overrides the location entirely (pointed at a
+// non-default path for testing, a per-project override, etc.). All
+// nightme state lives under $HOME/.nightme — no XDG split.
 func DefaultPath() string {
-	// Respect $NIGHTME_CONFIG if set.
 	if v := os.Getenv("NIGHTME_CONFIG"); v != "" {
 		return v
-	}
-	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
-		return filepath.Join(x, "nightme", "config.yaml")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".config", "nightme", "config.yaml")
+	return filepath.Join(home, ".nightme", "config.yaml")
 }
 
 // LoadDefault loads Config from DefaultPath(). If the file is missing
@@ -266,7 +266,7 @@ func applyDefaults(c *Config) {
 		c.Logging.Level = "info"
 	}
 	if c.Paths.DataDir == "" {
-		c.Paths.DataDir = "~/.local/share/nightme"
+		c.Paths.DataDir = "~/.nightme"
 	}
 }
 

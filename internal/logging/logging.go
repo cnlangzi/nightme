@@ -34,16 +34,16 @@ func resolvePath(cfg *config.Config) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("logging: resolve home dir: %w", err)
 		}
-		p = filepath.Join(home, ".local", "share", "nightme", "nightme.log")
+		p = filepath.Join(home, ".nightme", "nightme.log")
 	}
 	return p, nil
 }
 
 // Path returns the resolved log file path for cfg, honoring an
-// explicit Logging.File and falling back to the XDG-style default
-// at $HOME/.local/share/nightme/nightme.log. Exposed so companion
-// commands (notably `nightme logs`) can locate the same file the
-// logger writes to without duplicating the resolution logic.
+// explicit Logging.File and falling back to the default at
+// $HOME/.nightme/nightme.log. Exposed so companion commands
+// (notably `nightme logs`) can locate the same file the logger
+// writes to without duplicating the resolution logic.
 func Path(cfg *config.Config) (string, error) {
 	return resolvePath(cfg)
 }

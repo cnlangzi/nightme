@@ -1,5 +1,5 @@
 # nightme example configuration
-# Copy to ~/.config/nightme/config.yaml and edit.
+# Copy to ~/.nightme/config.yaml and edit.
 
 # Primary (default) agent name. Used when no /use <name> is given.
 primary: claude
@@ -53,7 +53,6 @@ logging:
   file: ""
 
 paths:
-  # Root for registry.json, sessions.json, per-session scratch.
-  data_dir: "~/.local/share/nightme"
-  registry_file: "registry.json"
-  sessions_file: "sessions.json"
+  # Root for the v1.2 persistence stores (chat_sessions.json +
+  # agent_sessions.json) and per-session scratch.
+  data_dir: "~/.nightme"

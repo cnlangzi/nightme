@@ -28,8 +28,9 @@ import (
 )
 
 // WSHealth tracks the live state of the Feishu WebSocket connection.
-// Persisted to ~/.local/share/nightme/health.json on every update so
-// `nightme health` can read it without IPC.
+// Read by `nightme health` (via the daemoncontrol server) and by
+// adapter lifecycle callbacks writing structured slog lines; reset
+// on every daemon restart (no on-disk persistence).
 type WSHealth struct {
 	mu sync.RWMutex
 

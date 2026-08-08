@@ -3,7 +3,7 @@
 // Usage:FEISHU_TEST_DM_CHAT_ID=oc_xxx go test -run TestReply_ -v ./internal/channel/feishu/
 //
 // Config reading reuses internal/config.LoadDefault() (equivalent to
-// ~/.config/nightme/config.yaml). FEISHU_TEST_DM_CHAT_ID is required;
+// ~/.nightme/config.yaml). FEISHU_TEST_DM_CHAT_ID is required;
 // without it, every live test is SKIPped.
 //
 // Each test creates a fresh top-level parent + invokes the corresponding
@@ -76,13 +76,13 @@ func testDMChatID(t *testing.T) string {
 // credentials are available. Credential resolution order matches
 // openclaw-lark/reply_in_both.js:
 //  1. LARK_APP_ID / LARK_APP_SECRET environment variables
-//  2. config.LoadDefault() (equivalent to ~/.config/nightme/config.yaml;
+//  2. config.LoadDefault() (equivalent to ~/.nightme/config.yaml;
 //     it has already merged env overrides, so the two are not in conflict)
 func newTestAdapter(t *testing.T) *Adapter {
 	t.Helper()
 	cfg, err := config.LoadDefault()
 	if err != nil {
-		t.Skipf("load nightme config: %v (set LARK_APP_ID / LARK_APP_SECRET, or put feishu.app_id/secret in ~/.config/nightme/config.yaml)", err)
+		t.Skipf("load nightme config: %v (set LARK_APP_ID / LARK_APP_SECRET, or put feishu.app_id/secret in ~/.nightme/config.yaml)", err)
 	}
 	if cfg.Feishu.AppID == "" || cfg.Feishu.AppSecret == "" {
 		t.Skip("feishu.app_id / app_secret missing in nightme config")

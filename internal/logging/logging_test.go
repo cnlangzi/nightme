@@ -72,7 +72,7 @@ func TestLogger_DefaultPath(t *testing.T) {
 	if _, err := New(&config.Config{}); err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	path := filepath.Join(dir, ".local", "share", "nightme", "nightme.log")
+	path := filepath.Join(dir, ".nightme", "nightme.log")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("default log: %v", err)
 	}

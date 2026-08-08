@@ -79,7 +79,7 @@ func (f *File) ListBindings() []BindingEntry
 func (f *File) Migrate() error  // 旧 schema → 新 schema
 ```
 
-**文件位置**：`~/.local/share/nightme/registry.json`（可通过配置覆盖）
+**文件位置**：`~/.nightme/registry.json`（可通过配置覆盖）
 **文件权限**：`0600`
 **持久化**：每次 Upsert 后立即 `fsync`
 

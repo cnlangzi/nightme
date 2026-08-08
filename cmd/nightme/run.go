@@ -920,7 +920,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 			// Translate drops events that don't surface to the
 			// channel (EventAgentDone, EventAgentCompaction (F-49 deleted), thread-only
 			// kinds, etc.). The runtime no longer folds usage
-			// anywhere — AgentSession is a passive pass-through,
+			// anywhere — Agent is a passive pass-through,
 			// and the channel-side footer reads ctx.Usage directly
 			// from OutboundMessage on the OK path below. Done.
 			// Usage, if any, dies with the dropped event (channel
@@ -1059,7 +1059,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 // Usage flows straight from the bridge event onto the outbound
 // message (out.Usage is set by gateway.Translate from
 // AgentResultEvent.Usage / AgentDoneEvent.Usage). The runtime does NOT
-// aggregate across turns; AgentSession is a passive
+// aggregate across turns; Agent is a passive
 // pass-through. The footer renders out.Usage directly.
 //
 // AgentSession.Agent is immutable (direct field read, no lock);

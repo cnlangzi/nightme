@@ -1,5 +1,5 @@
 // Package pty also provides the PTY-mode AgentSession that wraps a
-// pty.Bridge behind the agent.AgentSession contract. See
+// pty.Bridge behind the agent.Agent contract. See
 // docs/feat/F-21-agent-modes.md §5.3.
 package pty
 
@@ -16,7 +16,7 @@ import (
 // burst of fast writes without back-pressuring the PTY.
 const sessionBufferSize = 64
 
-// ptySession adapts a pty.Bridge to the agent.AgentSession interface.
+// ptySession adapts a pty.Bridge to the agent.Agent interface.
 // Bytes read from the bridge become EventAgentText; EOF or a read error
 // terminates the session with EventAgentDone.
 type ptySession struct {
@@ -167,4 +167,4 @@ func (s *ptySession) readLoop() {
 }
 
 // Compile-time guarantee that *ptySession satisfies AgentSession.
-var _ agent.AgentSession = (*ptySession)(nil)
+var _ agent.Agent = (*ptySession)(nil)

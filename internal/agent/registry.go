@@ -14,24 +14,24 @@ import "sync"
 // has not configured it, /run <name> returns "unknown agent".
 var Builtins = New()
 
-// Registry is a thread-safe map of Agent instances keyed by Name().
+// Registry is a thread-safe map of AgentSpec instances keyed by Name().
 //
 // The zero value is not usable; create one with New().
 type Registry struct {
 	mu      sync.RWMutex
-	entries map[string]Agent
+	entries map[string]AgentSpec
 }
 
 // New constructs an empty Registry.
 func New() *Registry {
-	return &Registry{entries: make(map[string]Agent)}
+	return &Registry{entries: make(map[string]AgentSpec)}
 }
 
 // Register stores an agent under its Name(). If an agent with the same
 // name is already registered, the new instance replaces it (the most
 // recent call wins). The replaced boolean reports whether a
 // replacement happened.
-func (r *Registry) Register(a Agent) (replaced bool) {
+func (r *Registry) Register(a AgentSpec) (replaced bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	_, existed := r.entries[a.Name()]
@@ -39,8 +39,8 @@ func (r *Registry) Register(a Agent) (replaced bool) {
 	return existed
 }
 
-// Get returns the Agent registered under name, or ErrUnknownAgent.
-func (r *Registry) Get(name string) (Agent, error) {
+// Get returns the AgentSpec registered under name, or ErrUnknownAgent.
+func (r *Registry) Get(name string) (AgentSpec, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	a, ok := r.entries[name]
@@ -52,10 +52,10 @@ func (r *Registry) Get(name string) (Agent, error) {
 
 // List returns all registered agents in unspecified order. The slice
 // is freshly allocated; callers may mutate it.
-func (r *Registry) List() []Agent {
+func (r *Registry) List() []AgentSpec {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]Agent, 0, len(r.entries))
+	out := make([]AgentSpec, 0, len(r.entries))
 	for _, a := range r.entries {
 		out = append(out, a)
 	}

@@ -81,7 +81,7 @@ type contentBlock struct {
 // NewSession starts an ACP JSON-RPC session over bridge. The server is
 // initialized and a session/new request is completed before the function
 // returns. Options are optional; without WithWorkspace, cwd is empty.
-func NewSession(ctx context.Context, bridge Bridge, agentName string, options ...func(*SessionOptions)) (agent.AgentSession, error) {
+func NewSession(ctx context.Context, bridge Bridge, agentName string, options ...func(*SessionOptions)) (agent.Agent, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -565,4 +565,4 @@ func (s *acpSession) emit(event agent.AgentEvent) {
 	}
 }
 
-var _ agent.AgentSession = (*acpSession)(nil)
+var _ agent.Agent = (*acpSession)(nil)

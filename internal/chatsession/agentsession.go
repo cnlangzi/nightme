@@ -37,7 +37,7 @@ const (
 // "change" them is to spawn a different AgentSession.
 //
 // commit 7: actual spawn integration via Spawner. The bridge-level
-// handle (agent.AgentSession) is stored in `handle` and is the
+// handle (agent.Agent) is stored in `handle` and is the
 // source of Events / SendText / SendBlocks / Close. Lifecycle
 // transitions (Running → Exited) are observed via the handle's
 // events channel and trigger SetExited on this struct.
@@ -115,7 +115,7 @@ type AgentSession struct {
 	// handle is the bridge-level live session (returned by
 	// agent.Start). nil until Spawn succeeds. Committed to the
 	// caller (readPump) only after SetRunning is called.
-	handle agent.AgentSession
+	handle agent.Agent
 
 	// events is a tee of handle.Events() that signals handle-side
 	// close (last chan close → SetExited). Created in Spawn; nil
@@ -755,10 +755,10 @@ func (as *AgentSession) Spawn(ctx context.Context, spawner Spawner) error {
 	return nil
 }
 
-// Handle returns the bridge-level agent.AgentSession (nil if not yet
+// Handle returns the bridge-level agent.Agent (nil if not yet
 // spawned). Exposed for callers that need direct access (e.g., the
 // ChatSession EventCallback installer).
-func (as *AgentSession) Handle() agent.AgentSession {
+func (as *AgentSession) Handle() agent.Agent {
 	as.asMu.RLock()
 	defer as.asMu.RUnlock()
 	return as.handle
@@ -863,7 +863,7 @@ func (as *AgentSession) Submit(p *Prompt) error {
 // SendText delivers a single text block to the bridge child.
 // Convenience wrapper around SendBlocks: routes through the
 // chat's per-AS ctx (OpContext()) instead of touching bridge's
-// bare SendText (which has no ctx signature on agent.AgentSession).
+// bare SendText (which has no ctx signature on agent.Agent).
 //
 // The ctx passed to SendBlocks is as.OpContext() — the AS-owned
 // ctx installed by Activate(parent). This makes SendText behave

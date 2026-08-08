@@ -20,7 +20,7 @@ import (
 // the child process, the JSON event pump goroutine, and the
 // AskUserQuestion permission flow.
 //
-// Implements agent.AgentSession. Safe for concurrent calls to SendText
+// Implements agent.Agent. Safe for concurrent calls to SendText
 // (writes are serialized via a mutex on stdin).
 type session struct {
 	cmd     *exec.Cmd
@@ -79,7 +79,7 @@ type pendingAsk struct {
 }
 
 // newSession spawns `claude` with args + env, then starts the JSON
-// event pump goroutine. The returned AgentSession is ready for
+// event pump goroutine. The returned Agent is ready for
 // SendText / Events immediately on success.
 //
 // agentName + workspace + branch are stamped onto every EventAgentReady
@@ -92,7 +92,7 @@ type pendingAsk struct {
 // non-fatal — the branch is just left empty and the receipt's
 // foot note omits that segment. We run this BEFORE spawning the
 // child so a slow `git` invocation doesn't block receipt init.
-func newSession(ctx context.Context, agentName, command string, args, env []string, workspace string) (agent.AgentSession, error) {
+func newSession(ctx context.Context, agentName, command string, args, env []string, workspace string) (agent.Agent, error) {
 	if workspace == "" {
 		return nil, fmt.Errorf("claudecode: workspace is required")
 	}

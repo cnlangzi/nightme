@@ -3,8 +3,8 @@
 //
 // Two layers:
 //
-//   - Agent       — static metadata + factory for sessions (Name, Mode, Detect, Start).
-//   - AgentSession — a running instance: events channel + control plane
+//   - AgentSpec — static metadata + factory for sessions (Name, Mode, Detect, Start).
+//   - Agent     — a running instance: events channel + control plane
 //     (SendText, SendPermission, Close).
 //
 // The Mode selector (ACP / SDK / PTY) lets the Bridge pick a backend
@@ -560,10 +560,10 @@ type StartConfig struct {
 	SessionID string
 }
 
-// Agent is the static description of a CLI wrapper plus a factory for
+// AgentSpec is the static description of a CLI wrapper plus a factory for
 // sessions. Implementations are expected to be safe for concurrent use
 // after Start returns; the registry stores values by reference.
-type Agent interface {
+type AgentSpec interface {
 	// Name is the unique identifier used in config and the registry.
 	Name() string
 
@@ -586,8 +586,8 @@ type Agent interface {
 	Detect() error
 
 	// Start spawns (or attaches to) the agent and returns a live
-	// AgentSession. The caller must Close() the session when done.
-	Start(ctx context.Context, cfg StartConfig) (AgentSession, error)
+	// Agent. The caller must Close() the session when done.
+	Start(ctx context.Context, cfg StartConfig) (Agent, error)
 }
 
 // ContentBlockType discriminates the payload shape on a ContentBlock.
@@ -643,9 +643,9 @@ type ContentBlock struct {
 	MediaType string
 }
 
-// AgentSession is the live, per-session handle. Session Manager drives
+// Agent is the live, per-session handle. Session Manager drives
 // it via the Events channel and the control methods.
-type AgentSession interface {
+type Agent interface {
 	// Events streams AgentEvent values until the session ends. The
 	// channel is closed by the implementation only when the
 	// underlying process (or transport) terminates -- NOT after

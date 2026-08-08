@@ -6,7 +6,7 @@
 // bridge package supplies the underlying protocol.
 //
 // To add a new built-in agent:
-//  1. Implement an `agent.Agent` constructor in the relevant
+//  1. Implement an `agent.AgentSpec` constructor in the relevant
 //     `internal/bridge/<protocol>/` package (or extend one).
 //  2. Add a Builtins.Register line below.
 //

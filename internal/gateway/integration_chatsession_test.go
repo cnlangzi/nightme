@@ -277,7 +277,7 @@ type integrationSpawner struct {
 	calls    int
 }
 
-func (s *integrationSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (agent.AgentSession, error) {
+func (s *integrationSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (agent.Agent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -286,7 +286,7 @@ func (s *integrationSpawner) Spawn(_ context.Context, _, _ string, _ []string, _
 	return fake, nil
 }
 
-// integrationFake is a minimal agent.AgentSession that captures
+// integrationFake is a minimal agent.Agent that captures
 // every PushEvent so the test can drive the bridge.
 type integrationFake struct {
 	mu     sync.Mutex
@@ -335,7 +335,7 @@ func (f *integrationFake) FinishEvent() {
 	close(f.events)
 }
 
-var _ agent.AgentSession = (*integrationFake)(nil)
+var _ agent.Agent = (*integrationFake)(nil)
 
 // --- helpers ----------------------------------------------------------
 
@@ -463,7 +463,7 @@ type realBridgeSpawner struct {
 	agent *claudecode.Agent
 }
 
-func (s *realBridgeSpawner) Spawn(ctx context.Context, _, _ string, args []string, sessionID string) (agent.AgentSession, error) {
+func (s *realBridgeSpawner) Spawn(ctx context.Context, _, _ string, args []string, sessionID string) (agent.Agent, error) {
 	return s.agent.Start(ctx, agent.StartConfig{
 		Workspace: "/tmp",
 		Args:      args,

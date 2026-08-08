@@ -15,28 +15,33 @@
 //	💰:「 in / out · X% · $cost 」
 //
 // in  = InputTokens + CacheCreationInputTokens + CacheReadInputTokens
-//       (the input-side total — Anthropic API exposes these as
-//       three independent counters; the "in" stat per
-//       https://yb.tencent.com/s/3G6HphjOxM70 is the sum of the
-//       three, NOT uncached-only.)
+//
+//	(the input-side total — Anthropic API exposes these as
+//	three independent counters; the "in" stat per
+//	https://yb.tencent.com/s/3G6HphjOxM70 is the sum of the
+//	three, NOT uncached-only.)
+//
 // out = OutputTokens
 // X%  = per-turn context-window usage percentage. Bridge-computed
-//       via the Doc 1 formula:
-//         (InputTokens + OutputTokens + CacheCreation + CacheRead)
-//         / contextWindow * 100
-//       where `contextWindow` is a bridge-local value (F-54):
-//       claudecode reads it from
-//       `modelUsage[<model>].contextWindow`, pi reads it from
-//       `get_state.data.model.contextWindow`. The bridge owns this
-//       calculation — the runtime does NOT recompute pct, it just
-//       passes UsageEvent.ContextWindowPct through to the channel
-//       footer. 0 means "not reported" (model didn't expose
-//       contextWindow this turn, or pi version lacks the field)
-//       and the footer omits X% rather than showing 0%.
+//
+//	via the Doc 1 formula:
+//	  (InputTokens + OutputTokens + CacheCreation + CacheRead)
+//	  / contextWindow * 100
+//	where `contextWindow` is a bridge-local value (F-54):
+//	claudecode reads it from
+//	`modelUsage[<model>].contextWindow`, pi reads it from
+//	`get_state.data.model.contextWindow`. The bridge owns this
+//	calculation — the runtime does NOT recompute pct, it just
+//	passes UsageEvent.ContextWindowPct through to the channel
+//	footer. 0 means "not reported" (model didn't expose
+//	contextWindow this turn, or pi version lacks the field)
+//	and the footer omits X% rather than showing 0%.
+//
 // $cost = API-reported per-turn cost (Claude Code:
-//       `result.total_cost_usd`). Forwarded verbatim into
-//       agent.UsageEvent.CostUSD — the footer NEVER computes
-//       cost client-side (no rate table, no per-model pricing).
+//
+//	`result.total_cost_usd`). Forwarded verbatim into
+//	agent.UsageEvent.CostUSD — the footer NEVER computes
+//	cost client-side (no rate table, no per-model pricing).
 //
 // Line 3 (F-48 follow-up to F-45):
 //
@@ -68,8 +73,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
+	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
 // formatSessionFooterLines returns the SessionContext footer as a
@@ -84,32 +89,47 @@ import (
 //
 //	🤖 claude opus-4-5
 //
-// Line 2: usage stats — 💰:「 in / out · X% · $cost 」. The
-// "in / out" convention folds all three input-side counters
-// (InputTokens + CacheCreationInputTokens + CacheReadInputTokens)
-// into a single number per the Tencent YB doc — the "in" stat
-// is the input-side context-window total, not "uncached input
-// only". "X%" is the per-turn context-window usage snapshot,
-// bridge-computed via Doc 1 (see F-52 §1.5 / §1.6). "$cost" is
-// the API-reported total_cost_usd — we never compute it
-// client-side.
+// Line 2: usage stats — 💰:「 new / cache / out · X% (window) · $cost 」
+// (F-55.1). F-55.1 splits the original `in` segment into two:
+// `new` (tokens not from cache this turn — input_tokens +
+// cache_creation_input_tokens) and `cache` (cache hits —
+// cache_read_input_tokens). The user sees at a glance whether
+// a turn is dominated by cache hits (e.g. an upstream that
+// reports cumulative cache_read across the session). Each
+// segment is independently omitted when zero; positions
+// `new / cache / out` are the meaning, no labels.
 //
-//	💰:「 20.5k / 1.5k · 10.5% · $0.087 」
+// Per Anthropic docs the three input-side fields are MUTUALLY
+// EXCLUSIVE — each token is counted exactly once across them —
+// so the split does NOT introduce overlap; `in == new + cache`
+// always. Doc 1 pct (F-52 §1.5 / §1.6) still uses
+// `(new + cache + out) / contextWindow`. F-55 appends "(window)"
+// so the user sees the denominator and judges upstream
+// compatibility-layer mismatches themselves (e.g. `101.6% (200k)`
+// against an actual 1M model — the bridge reported 200K, the
+// user does the math). nightme does NOT clamp pct > 100%, does
+// NOT catalog, does NOT override. "$cost" is the API-reported
+// total_cost_usd — we never compute it client-side.
+//
+//	💰:「 12.3k / 8.2k / 1.5k · 10.5% (200k) · $0.087 」
 //
 // Each segment is omitted independently:
 //   - Line 1: Agent omitted when "". Model omitted when "".
 //   - Line 2 segments:
-//       in / out: omitted when in == 0 && out == 0 (no usage).
-//                 Renders as "<in> / <out>" (zero side shows
-//                 "0" — rare in practice, e.g. compaction-only
-//                 turn with no new input).
-//       X%      : omitted when Usage.ContextWindowPct == 0. The
-//                 zero-cases (bridge didn't expose contextWindow
-//                 this turn, the model simply didn't report it,
-//                 or pi is older than the get_state contract) all
-//                 surface as "no X% segment" rather than a fake
-//                 0% (F-52 §1.6, F-54 §1.4).
-//       $cost   : omitted when CostUSD == 0 (API didn't report).
+//     new / cache / out: each token class omitted when its
+//     count is 0 (F-45 §1.6 zero-omit). The first non-zero
+//     segment leads the line; trailing zeros are not
+//     padded.
+//     X% (window): omitted when Usage.ContextWindowPct == 0. The
+//     zero-cases (bridge didn't expose contextWindow
+//     this turn, the model simply didn't report it,
+//     or pi is older than the get_state contract) all
+//     surface as "no X% segment" rather than a fake
+//     0% (F-52 §1.6, F-54 §1.4). F-55 appends `(window)`
+//     when Usage.ContextWindow > 0 so the user can read
+//     the denominator; pct > 100% renders verbatim
+//     without clamp or warning (see F-55).
+//     $cost   : omitted when CostUSD == 0 (API didn't report).
 //
 // Returns nil when both lines are empty.
 //
@@ -167,13 +187,17 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 	// The "in" stat folds the three input-side counters per the
 	// Tencent YB doc convention (uncached + cache_creation +
 	// cache_read — i.e. the input-side context-window total).
-	// "out" is the generated output. "X%" is the bridge-computed
-	// per-turn context-fill percentage (Doc 1 formula; bridge
-	// reads `contextWindow` — claudecode from
+	// "out" is the generated output. "X% (window)" is the
+	// bridge-computed per-turn context-fill percentage followed
+	// by the API-reported denominator (F-55; bridge reads
+	// `contextWindow` — claudecode from
 	// `modelUsage.contextWindow`, pi from
-	// `get_state.data.model.contextWindow` (F-54) — computes
-	// pct, fills UsageEvent.ContextWindowPct). "$cost" is the
-	// API-reported per-turn cost (Claude Code:
+	// `get_state.data.model.contextWindow` (F-54) — fills
+	// UsageEvent.ContextWindowPct AND UsageEvent.ContextWindow
+	// verbatim). nightme does NOT clamp pct > 100%, does NOT
+	// catalog, does NOT override — the user judges upstream
+	// compatibility-layer mismatches themselves. "$cost" is
+	// the API-reported per-turn cost (Claude Code:
 	// result.total_cost_usd) — forwarded verbatim, NEVER
 	// recomputed client-side.
 	//
@@ -185,16 +209,48 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 	// present.
 	if u := ctx.Usage; u != nil {
 		usageParts := make([]string, 0, 3)
-		in := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
-		if in > 0 || u.OutputTokens > 0 {
-			usageParts = append(usageParts, fmt.Sprintf("%s / %s",
-				abbrevTokens(in), abbrevTokens(u.OutputTokens)))
+		// F-55.1: split `in` into `new` (tokens not from cache this
+		// turn: input_tokens + cache_creation_input_tokens) and
+		// `cache` (tokens read from existing cache:
+		// cache_read_input_tokens). Per Anthropic docs the three
+		// input-side fields are MUTUALLY EXCLUSIVE — each token is
+		// counted exactly once. nightme does NOT recompute pct on
+		// the split — Doc 1 formula still uses
+		// (new + cache + out) / contextWindow.
+		//
+		// F-55.1 render: three numbers separated by " / ", no
+		// labels. The position (new / cache / out) is the meaning.
+		// Each segment independently omitted when zero (F-45 §1.6
+		// zero-omit); when cache == 0 the layout collapses to
+		// `new / out` (the pre-F-55.1 format). User can read at a
+		// glance whether a turn is dominated by cache hits (e.g.
+		// MiniMax `cache_read_input_tokens` reporting cumulative
+		// session totals — see F-55 §1.2).
+		new := u.InputTokens + u.CacheCreationInputTokens
+		cacheRead := u.CacheReadInputTokens
+		tokens := make([]string, 0, 3)
+		if new > 0 {
+			tokens = append(tokens, abbrevTokens(new))
+		}
+		if cacheRead > 0 {
+			tokens = append(tokens, abbrevTokens(cacheRead))
+		}
+		if u.OutputTokens > 0 {
+			tokens = append(tokens, abbrevTokens(u.OutputTokens))
+		}
+		if len(tokens) > 0 {
+			usageParts = append(usageParts, strings.Join(tokens, " / "))
 		}
 		if u.ContextWindowPct > 0 {
-			// One decimal place — context-window edges matter
-			// (99.5% vs 100.0% is a different signal to the user),
-			// and "%.0f%%" would round 99.6 to "100%" misleadingly.
-			usageParts = append(usageParts, fmt.Sprintf("%.1f%%", u.ContextWindowPct))
+			// F-55: append `(window)` after X% so the user can see
+			// the denominator and judge upstream compatibility-layer
+			// mismatches themselves (e.g. `101.6% (200k)` against an
+			// actual 1M model). nightme does NOT clamp / catalog /
+			// override — CLI Agent 报什么就显示什么,错了让用户
+			// 自己计算. One decimal place: 99.5% vs 100.0% is a
+			// different signal to the user, and "%.0f%%" would
+			// round 99.6 to "100%" misleadingly.
+			usageParts = append(usageParts, fmt.Sprintf("%.1f%% (%s)", u.ContextWindowPct, abbrevWindow(u.ContextWindow)))
 		}
 		if u.CostUSD > 0 {
 			usageParts = append(usageParts, fmt.Sprintf("$%.3f", u.CostUSD))
@@ -250,6 +306,29 @@ func abbrevTokens(n int) string {
 	}
 }
 
+// abbrevWindow formats a model context-window size into a compact
+// human-readable string. Same conventions as abbrevTokens — both
+// helpers exist as separate symbols so the formatting policy is
+// in one place per kind (test coverage in usage_footer_test.go).
+//
+// F-55: used by formatSessionFooterLines to render the `(window)`
+// segment alongside `X%` so the user can read the denominator and
+// judge upstream compatibility-layer mismatches themselves.
+//
+//   - n in [1, 999]: integer (no decimal).
+//   - n in [1_000, 999_999]: one decimal + "k" (e.g. 200_000 → "200k").
+//   - n >= 1_000_000: one decimal + "M" (e.g. 1_000_000 → "1.0M").
+func abbrevWindow(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
 // formatWorkspacePath renders the AgentSession's Cwd into a
 // short, human-readable label for footer line 3.
 //
@@ -261,7 +340,7 @@ func abbrevTokens(n int) string {
 //     isn't under HOME (different operators, containerised
 //     sessions, non-standard HOME layout). Skipping both prefixes
 //     keeps the segment unambiguous: "code/nightme" is the leaf
-//     + parent, period.
+//   - parent, period.
 //   - ≤ 2 path components → display all components.
 //     ("/home/devin" → "home/devin"; "/tmp/foo" → "tmp/foo").
 //   - > 2 path components → keep only the last 2.

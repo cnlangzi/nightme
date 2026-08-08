@@ -83,7 +83,7 @@ func TestFormatSessionFooterLines_CompactionSegment(t *testing.T) {
 			// Edge case: only the compaction counter is known.
 			// Should still render — the counter alone is
 			// informationally meaningful even without identity.
-			ctx: &gateway.SessionContext{CompactionCount: 2},
+			ctx:  &gateway.SessionContext{CompactionCount: 2},
 			want: []string{"🤖 · 🗜 2"},
 		},
 		{
@@ -102,7 +102,7 @@ func TestFormatSessionFooterLines_CompactionSegment(t *testing.T) {
 			},
 			want: []string{
 				"🤖 claude · opus-4-5 · 🗜 2",
-				"💰:「 20.5k / 1.5k 」",
+				"💰:「 12.3k / 8.2k / 1.5k 」",
 			},
 		},
 	}
@@ -133,7 +133,7 @@ func TestFormatSessionFooterLines_TokenSegments(t *testing.T) {
 		},
 	}
 	got := formatSessionFooterLines(ctx)
-	want := []string{"🤖 claude · opus-4-5", "💰:「 20.5k / 1.5k · $0.087 」"}
+	want := []string{"🤖 claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("formatSessionFooterLines() mismatch:\n  got:  %v\n  want: %v", got, want)
 	}
@@ -154,23 +154,23 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageEvent{OutputTokens: 234},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 0 / 234 」"},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 234 」"},
 		},
 		{
-			// Cache hits count as "in" per the new convention
-			// (Tencent YB doc — the input-side total includes
-			// cache_read). out=0, so the "out" side shows "0".
-			name: "only cache hits",
+			// F-55.1: only cache hits, no new tokens, no output.
+			// Strict zero-omit — single segment renders, no
+			// "0 /" prefix.
+			name: "only cache hits — single segment renders",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageEvent{CacheReadInputTokens: 5_600},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 5.6k / 0 」"},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 5.6k 」"},
 		},
 		{
-			// Cost only — tokens are zero, so the "in / out"
-			// segment is omitted; $cost segment stands alone
-			// inside the brackets.
+			// Cost only — tokens are zero, so the entire
+			// token segment is omitted; $cost segment stands
+			// alone inside the brackets.
 			name: "cost only (no tokens)",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
@@ -187,7 +187,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 					InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 20.5k / 1.5k 」"},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k 」"},
 		},
 		{
 			// No Agent/Model → only the usage line renders.
@@ -198,6 +198,32 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 				},
 			},
 			want: []string{"💰:「 5.0k / 200 」"},
+		},
+		{
+			// F-55.1: cache > 0 but no new and no out — only the
+			// cache segment renders, no zero-padding. Rare in
+			// practice (turn that hit cache only, no new content
+			// and no generation).
+			name: "only cache hits — single segment renders",
+			ctx: &gateway.SessionContext{
+				Agent: "claude", Model: "opus-4-5",
+				Usage: &agent.UsageEvent{CacheReadInputTokens: 5_600},
+			},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 5.6k 」"},
+		},
+		{
+			// F-55.1: cache + out > 0, no new — layout shows
+			// `cache / out`. Confirms cache doesn't lead the
+			// segment when new is 0 (we drop the leading "0").
+			name: "cache hits + output, no new tokens",
+			ctx: &gateway.SessionContext{
+				Agent: "claude", Model: "opus-4-5",
+				Usage: &agent.UsageEvent{
+					CacheReadInputTokens: 5_600,
+					OutputTokens:         800,
+				},
+			},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 5.6k / 800 」"},
 		},
 	}
 	for _, tc := range tests {
@@ -223,7 +249,7 @@ func TestFormatSessionFooterLines_LargeNumbers(t *testing.T) {
 		},
 	}
 	got := formatSessionFooterLines(ctx)
-	want := []string{"🤖 claude · opus-4-5", "💰:「 1.4M / 18.0k · $1.245 」"}
+	want := []string{"🤖 claude · opus-4-5", "💰:「 156.0k / 1.2M / 18.0k · $1.245 」"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -243,7 +269,7 @@ func TestFormatSessionFooter_StringForm(t *testing.T) {
 		},
 	}
 	got := formatSessionFooter(ctx)
-	want := "🤖 claude · opus-4-5\n💰:「 20.5k / 1.5k 」"
+	want := "🤖 claude · opus-4-5\n💰:「 12.3k / 8.2k / 1.5k 」"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -301,7 +327,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 					CacheReadInputTokens: 8_200, CostUSD: 0.087,
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 20.5k / 1.5k · $0.087 」"},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"},
 		},
 		{
 			name: "pct only — typical post-EventDone snapshot",
@@ -309,10 +335,11 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageEvent{
 					InputTokens: 20_000, OutputTokens: 1_000,
-				ContextWindowPct: 10.5, // 21k / 200k * 100
+					ContextWindow:    200_000,
+					ContextWindowPct: 10.5, // 21k / 200k * 100
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 20.0k / 1.0k · 10.5% 」"},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 20.0k / 1.0k · 10.5% (200.0k) 」"},
 		},
 		{
 			name: "pct + cost — full usage line",
@@ -321,25 +348,76 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 				Usage: &agent.UsageEvent{
 					InputTokens: 1_200_000, OutputTokens: 80_000,
 					CacheReadInputTokens: 800_000, CostUSD: 1.234,
-				ContextWindowPct: 99.6, // near the ceiling
+					ContextWindow:    200_000,
+					ContextWindowPct: 99.6, // near the ceiling
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 2.0M / 80.0k · 99.6% · $1.234 」"},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 1.2M / 800.0k / 80.0k · 99.6% (200.0k) · $1.234 」"},
 		},
 		{
 			name: "pct at the ceiling — 100.0% is honest, not 'full'",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageEvent{ContextWindowPct: 100.0},
+				Usage: &agent.UsageEvent{
+					ContextWindow:    200_000,
+					ContextWindowPct: 100.0,
+				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 100.0% 」"},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 100.0% (200.0k) 」"},
 		},
 		{
 			name: "pct without identity — segment still emits alone",
 			ctx: &gateway.SessionContext{
-				Usage: &agent.UsageEvent{ContextWindowPct: 5.0},
+				Usage: &agent.UsageEvent{
+					ContextWindow:    200_000,
+					ContextWindowPct: 5.0,
+				},
 			},
-			want: []string{"💰:「 5.0% 」"},
+			want: []string{"💰:「 5.0% (200.0k) 」"},
+		},
+		{
+			// F-55: pct > 100% does NOT trigger clamp / warning —
+			// we show the (window) so the user can judge upstream
+			// compatibility-layer mismatches themselves (e.g.
+			// `101.6% (200k)` against an actual 1M model).
+			name: "pct > 100% — not clamped, (window) surfaces the mismatch",
+			ctx: &gateway.SessionContext{
+				Agent: "claude", Model: "opus-4-5",
+				Usage: &agent.UsageEvent{
+					InputTokens: 200_000, OutputTokens: 1_000,
+					CacheReadInputTokens: 3_000,
+					ContextWindow:        200_000,
+					ContextWindowPct:     101.6, // 203_103 / 200_000 * 100
+				},
+			},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 200.0k / 3.0k / 1.0k · 101.6% (200.0k) 」"},
+		},
+		{
+			// F-55: 1M-class model window rendered with M unit.
+			name: "1M context window — M unit",
+			ctx: &gateway.SessionContext{
+				Agent: "claude", Model: "opus-4-8",
+				Usage: &agent.UsageEvent{
+					InputTokens: 200_000, OutputTokens: 1_000,
+					ContextWindow:    1_000_000,
+					ContextWindowPct: 20.1,
+				},
+			},
+			want: []string{"🤖 claude · opus-4-8", "💰:「 200.0k / 1.0k · 20.1% (1.0M) 」"},
+		},
+		{
+			// Defensive: pct==0 drops the entire segment; window
+			// alone is not surfaced (zero-omit, F-45 §1.6).
+			name: "pct=0 — segment omitted even when window > 0",
+			ctx: &gateway.SessionContext{
+				Agent: "claude", Model: "opus-4-5",
+				Usage: &agent.UsageEvent{
+					InputTokens: 12_300, OutputTokens: 1_500,
+					CacheReadInputTokens: 8_200, CostUSD: 0.087,
+					ContextWindow: 200_000,
+				},
+			},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"},
 		},
 	}
 	for _, tc := range tests {
@@ -357,11 +435,11 @@ func TestAbbrevTokens(t *testing.T) {
 		in   int
 		want string
 	}{
-		{0, "0"},          // caller is expected to skip, but defensively still formats
-		{1, "1"},          // raw integer
-		{999, "999"},      // boundary
-		{1_000, "1.0k"},   // boundary
-		{12_345, "12.3k"}, // one decimal
+		{0, "0"},             // caller is expected to skip, but defensively still formats
+		{1, "1"},             // raw integer
+		{999, "999"},         // boundary
+		{1_000, "1.0k"},      // boundary
+		{12_345, "12.3k"},    // one decimal
 		{999_999, "1000.0k"}, // one decimal, edge of M threshold
 		{1_000_000, "1.0M"},  // boundary
 		{1_234_567, "1.2M"},
@@ -559,7 +637,7 @@ func TestFormatSessionFooterLines_WithGitLine(t *testing.T) {
 	got := formatSessionFooterLines(ctx)
 	want := []string{
 		"🤖 claude · opus-4-5",
-		"💰:「 20.5k / 1.5k 」",
+		"💰:「 12.3k / 8.2k / 1.5k 」",
 		"📁 code/nightme · ⎇ feat/x · ↑ 2 · ? 1 · ⇡ 3",
 	}
 	if !reflect.DeepEqual(got, want) {

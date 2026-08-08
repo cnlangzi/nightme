@@ -677,7 +677,10 @@ func TestEmitInit_ContextWindowResetBetweenSessions(t *testing.T) {
 // translator's window is held outside UsageEvent — decodeMessageUsage
 // receives it as a parameter — so this test also implicitly
 // asserts that pct is the only context-window-derived field on
-// the returned UsageEvent (ContextWindow was deleted in F-54).
+// the returned UsageEvent. Companion
+// TestDecodeMessageUsage_ForwardsContextWindow (below) pins the
+// F-55 re-introduction of the field so a future refactor can't
+// silently drop the field again.
 func TestDecodeMessageUsage_ContextWindowPct(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -783,6 +786,45 @@ func TestDecodeMessageUsage_NoContextWindow(t *testing.T) {
 			ev := decodeMessageUsage(tc.usage, tc.ctxWindow)
 			if ev != nil && ev.ContextWindowPct != 0 {
 				t.Errorf("ContextWindowPct = %v, want 0", ev.ContextWindowPct)
+			}
+		})
+	}
+}
+
+// TestDecodeMessageUsage_ForwardsContextWindow pins F-55: the
+// translator-supplied contextWindow is also copied onto
+// `out.ContextWindow` so the channel footer can render
+// `X% (window)` alongside the percentage. Without this
+// assertion, a future refactor that drops the
+// `out.ContextWindow = ctxWindow` line would still pass
+// TestDecodeMessageUsage_ContextWindowPct (which only checks
+// the percentage) — but the footer would silently render
+// `X% (0)` for every turn, defeating the whole point of F-55.
+//
+// Scenarios: window > 0 (forwarded verbatim, both 200K and 1M),
+// window == 0 (stays 0, footer omits the segment).
+func TestDecodeMessageUsage_ForwardsContextWindow(t *testing.T) {
+	cases := []struct {
+		name      string
+		ctxWindow int
+		wantWin   int
+	}{
+		{name: "200k window — forwarded verbatim", ctxWindow: 200_000, wantWin: 200_000},
+		{name: "1M window — M-unit footer renders correctly", ctxWindow: 1_000_000, wantWin: 1_000_000},
+		{name: "ctxWindow=0 — stays 0 (footer omits)", ctxWindow: 0, wantWin: 0},
+		{name: "negative ctxWindow — never copied (gated by > 0)", ctxWindow: -1, wantWin: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := decodeMessageUsage(
+				&messageUsage{Input: 100, Output: 50, CacheRead: 0, CacheWrite: 0, Cost: &usageCost{Total: 0.01}},
+				tc.ctxWindow,
+			)
+			if ev == nil {
+				t.Fatalf("decodeMessageUsage returned nil")
+			}
+			if ev.ContextWindow != tc.wantWin {
+				t.Errorf("ContextWindow = %d, want %d", ev.ContextWindow, tc.wantWin)
 			}
 		})
 	}

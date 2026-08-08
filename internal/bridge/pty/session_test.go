@@ -9,9 +9,9 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// fakeBridge implements Bridge for unit-testing ptySession without
-// spawning a real child process. Reads come from a channel so the
-// test can drive the read loop deterministically.
+// fakeBridge implements Bridge for unit-testing the merged *Agent
+// without spawning a real child process. Reads come from a channel so
+// the test can drive the read loop deterministically.
 type fakeBridge struct {
 	mu      sync.Mutex
 	reads   chan []byte
@@ -70,19 +70,34 @@ func (f *fakeBridge) push(data string) {
 	f.reads <- []byte(data)
 }
 
-// TestPtySessionReadLoop verifies that bytes pushed into the bridge
-// become EventAgentText events, followed by an EventAgentDone on EOF.
-func TestPtySessionReadLoop(t *testing.T) {
+// newAgentForTest constructs an *Agent with the given fake Bridge and
+// a fresh events channel. Skips Start (no real process) and lets the
+// caller decide whether to kick off the read loop.
+//
+// Used by tests that want to drive Events / Send* / Close directly
+// without spawning a real PTY child.
+func newAgentForTest(b Bridge) *Agent {
+	return &Agent{
+		name:    "test",
+		command: "test",
+		bridge:  b,
+		events:  make(chan agent.AgentEvent, sessionBufferSize),
+	}
+}
+
+// TestAgentReadLoop verifies that bytes pushed into the bridge become
+// EventAgentText events, followed by an EventAgentDone on EOF.
+func TestAgentReadLoop(t *testing.T) {
 	b := newFakeBridge()
-	s := NewPtySession(b)
-	s.Start()
+	a := newAgentForTest(b)
+	go a.readLoop()
 
 	b.push("hello ")
 	b.push("world\n")
 	b.push("more text")
 
 	// Drain the first three events.
-	got := drainEvents(t, s.Events(), 3, 2*time.Second)
+	got := drainEvents(t, a.Events(), 3, 2*time.Second)
 	want := []string{"hello ", "world\n", "more text"}
 	if !equalTexts(got, want) {
 		t.Fatalf("Events() = %+v, want texts %q", got, want)
@@ -90,7 +105,7 @@ func TestPtySessionReadLoop(t *testing.T) {
 
 	// Trigger EOF and verify the terminal EventAgentDone arrives.
 	close(b.reads)
-	last := <-s.Events()
+	last := <-a.Events()
 	if last.Kind != agent.EventAgentDone {
 		t.Fatalf("final event Kind = %s, want done", last.Kind)
 	}
@@ -100,7 +115,7 @@ func TestPtySessionReadLoop(t *testing.T) {
 
 	// Channel must be closed after the terminal event.
 	select {
-	case _, ok := <-s.Events():
+	case _, ok := <-a.Events():
 		if ok {
 			t.Fatalf("Events() yielded a value after EventAgentDone")
 		}
@@ -109,16 +124,16 @@ func TestPtySessionReadLoop(t *testing.T) {
 	}
 }
 
-// TestPtySessionReadError verifies that a non-EOF read error also
+// TestAgentReadError verifies that a non-EOF read error also
 // terminates the session (with EventAgentDone, per the v0.1 contract —
 // EventAgentError is reserved for higher-level unrecoverable conditions).
-func TestPtySessionReadError(t *testing.T) {
+func TestAgentReadError(t *testing.T) {
 	b := newFakeBridge()
-	s := NewPtySession(b)
-	s.Start()
+	a := newAgentForTest(b)
+	go a.readLoop()
 
 	b.push("ok\n")
-	_ = <-s.Events()
+	_ = <-a.Events()
 
 	// Close the bridge to provoke an error on the next Read.
 	_ = b.Close()
@@ -127,7 +142,7 @@ func TestPtySessionReadError(t *testing.T) {
 	// from a Read that returned before the close, or the terminal
 	// EventAgentDone). Drain whatever the session produces and verify the
 	// last one is EventAgentDone.
-	got := drainEvents(t, s.Events(), 1, 2*time.Second)
+	got := drainEvents(t, a.Events(), 1, 2*time.Second)
 	if len(got) == 0 {
 		t.Fatalf("expected at least one event after Close(), got none")
 	}
@@ -136,15 +151,14 @@ func TestPtySessionReadError(t *testing.T) {
 	}
 }
 
-// TestPtySessionSendText verifies that SendText writes bytes to the
-// bridge.
-func TestPtySessionSendText(t *testing.T) {
+// TestAgentSendText verifies that SendText writes bytes to the bridge.
+func TestAgentSendText(t *testing.T) {
 	b := newFakeBridge()
-	s := NewPtySession(b)
-	s.Start()
-	t.Cleanup(func() { _ = s.Close() })
+	a := newAgentForTest(b)
+	go a.readLoop()
+	t.Cleanup(func() { _ = a.Close() })
 
-	if err := s.SendText("hello\n"); err != nil {
+	if err := a.SendText("hello\n"); err != nil {
 		t.Fatalf("SendText returned error: %v", err)
 	}
 
@@ -155,15 +169,15 @@ func TestPtySessionSendText(t *testing.T) {
 	}
 }
 
-// TestPtySessionSendPermission verifies that SendPermission also
-// writes bytes to the bridge (PTY mode has no structured decision).
-func TestPtySessionSendPermission(t *testing.T) {
+// TestAgentSendPermission verifies that SendPermission also writes
+// bytes to the bridge (PTY mode has no structured decision).
+func TestAgentSendPermission(t *testing.T) {
 	b := newFakeBridge()
-	s := NewPtySession(b)
-	s.Start()
-	t.Cleanup(func() { _ = s.Close() })
+	a := newAgentForTest(b)
+	go a.readLoop()
+	t.Cleanup(func() { _ = a.Close() })
 
-	if err := s.SendPermission("y\n"); err != nil {
+	if err := a.SendPermission("y\n"); err != nil {
 		t.Fatalf("SendPermission returned error: %v", err)
 	}
 
@@ -174,17 +188,17 @@ func TestPtySessionSendPermission(t *testing.T) {
 	}
 }
 
-// TestPtySessionCloseIdempotent verifies Close can be called more
-// than once without error or panic.
-func TestPtySessionCloseIdempotent(t *testing.T) {
+// TestAgentCloseIdempotent verifies Close can be called more than
+// once without error or panic.
+func TestAgentCloseIdempotent(t *testing.T) {
 	b := newFakeBridge()
-	s := NewPtySession(b)
-	s.Start()
+	a := newAgentForTest(b)
+	go a.readLoop()
 
-	if err := s.Close(); err != nil {
+	if err := a.Close(); err != nil {
 		t.Fatalf("first Close returned error: %v", err)
 	}
-	if err := s.Close(); err != nil {
+	if err := a.Close(); err != nil {
 		t.Fatalf("second Close returned error: %v", err)
 	}
 }

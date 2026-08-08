@@ -709,10 +709,11 @@ func TestSession_SendText_NoProcess(t *testing.T) {
 	}
 }
 
-func TestNewSession_EmptyWorkspace(t *testing.T) {
-	_, err := newSession(context.Background(), "echo", "echo", nil, nil, "")
+func TestStart_EmptyWorkspace(t *testing.T) {
+	a := New("echo", "echo", nil)
+	_, err := a.Start(context.Background(), agent.StartConfig{Workspace: ""})
 	if err == nil {
-		t.Fatal("newSession with empty workspace should fail")
+		t.Fatal("Start with empty workspace should fail")
 	}
 	if !strings.Contains(err.Error(), "workspace") {
 		t.Errorf("err = %v, want to mention 'workspace'", err)

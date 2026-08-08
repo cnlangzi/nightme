@@ -40,6 +40,15 @@ func newLongLivedFakeAS() *longLivedFakeAS {
 
 func (a *longLivedFakeAS) Events() <-chan agent.AgentEvent { return a.events }
 func (a *longLivedFakeAS) PID() int                       { return a.pid }
+func (a *longLivedFakeAS) Name() string                   { return "fake" }
+func (a *longLivedFakeAS) Mode() agent.Mode               { return agent.ModePTY }
+func (a *longLivedFakeAS) Command() string                { return "fake" }
+func (a *longLivedFakeAS) Args() []string                 { return nil }
+func (a *longLivedFakeAS) Env() []string                  { return nil }
+func (a *longLivedFakeAS) Detect() error                  { return nil }
+func (a *longLivedFakeAS) Start(context.Context, agent.StartConfig) (agent.Agent, error) {
+	return a, nil
+}
 func (a *longLivedFakeAS) SendText(string) error          { return nil }
 func (a *longLivedFakeAS) SendBlocks(context.Context, []agent.ContentBlock) error {
 	return nil

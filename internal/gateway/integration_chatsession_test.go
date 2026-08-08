@@ -301,6 +301,15 @@ func newIntegrationFake(pid int) *integrationFake {
 
 func (f *integrationFake) Events() <-chan agent.AgentEvent { return f.events }
 func (f *integrationFake) PID() int                       { return f.pid }
+func (f *integrationFake) Name() string                   { return "fake" }
+func (f *integrationFake) Mode() agent.Mode               { return agent.ModePTY }
+func (f *integrationFake) Command() string                { return "fake" }
+func (f *integrationFake) Args() []string                 { return nil }
+func (f *integrationFake) Env() []string                  { return nil }
+func (f *integrationFake) Detect() error                  { return nil }
+func (f *integrationFake) Start(context.Context, agent.StartConfig) (agent.Agent, error) {
+	return f, nil
+}
 func (f *integrationFake) SendText(string) error          { return nil }
 func (f *integrationFake) SendBlocks(context.Context, []agent.ContentBlock) error {
 	return nil

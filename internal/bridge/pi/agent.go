@@ -9,40 +9,231 @@
 // agent.AgentEvent values consumed by the rest of nightme.
 //
 // Design reference: docs/feat/F-32-pi-rpc-bridge.md.
+//
+// Agent is BOTH the template (registered with agent.Builtins) and
+// the live handle (returned by Start). The template half is set
+// once by New and is immutable thereafter; Start clones the
+// receiver and populates runtime fields on the clone. The two
+// states share one type so the registry, the Spawner, and
+// AgentSession.handle all deal with a single agent.Agent — no
+// separate session struct.
+//
+// Session lifetime is two-tier:
+//
+//   - process  : spawn() -> cmd.Wait() -> close(events)
+//   - turn     : prompt() ack -> stream events -> agent_settled -> EventAgentDone
+//
+// The process can carry many turns. EventAgentDone marks the end
+// of one turn but does NOT close the events channel; only process
+// exit (or Close) does that. This mirrors the contract documented
+// in F-32 §3.3 and lets ChatSession.runReadPump continue reading
+// across many turns on the same AgentSession.
 package pi
 
 import (
+	"bufio"
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
+// ─── constants & exported errors ───
+
 // DefaultArgs is the canonical argv used when spawning `pi` in RPC
-// mode. The flag set is intentionally minimal: --mode rpc is the only
-// behavioral switch. We deliberately do not pass --model or
-// --thinking; selection is the user's choice via Pi's own config or
-// future /use flags. We do not pass --permission-mode either; Pi
-// has no equivalent of Claude Code's bypassPermissions, and the
+// mode. The flag set is intentionally minimal: --mode rpc is the
+// only behavioral switch. We deliberately do not pass --model or
+// --thinking; selection is the user's choice via Pi's own config
+// or future /use flags. We do not pass --permission-mode either;
+// Pi has no equivalent of Claude Code's bypassPermissions, and the
 // F-32 MVP does not support /abort or extension UI forwarding.
 var DefaultArgs = []string{
 	"--mode", "rpc",
 }
 
-// Agent is the agent.AgentSpec descriptor for Pi. It returns
-// agent.ModeJSONIO because the bridge drives Pi over a structured
-// JSON I/O channel, even though the wire format is Pi's own
-// command/response/event JSONL rather than Claude Code stream-json.
+// handshakeTimeout bounds the initial get_state round-trip. Pi
+// is expected to answer within a couple of seconds even on cold
+// start; 10 s matches the acp bridge's startup deadline.
+const handshakeTimeout = 10 * time.Second
+
+// promptTimeout bounds a single SendText / SendBlocks turn.
+//
+// Pi is expected to ack the `prompt` RPC within a few seconds
+// even on slow first-token model latency; 90 s leaves generous
+// room for cold-model warm-up while still surfacing a real hang
+// before the channel's reaction times out. Without this deadline
+// a hung prompt leaves the user staring at an empty receipt card
+// (F-32 2026-08-06 incident).
+//
+// Declared as a var (not const) so unit tests in this package
+// can shrink it to ~hundreds of ms for fast prompt-deadline
+// coverage without spinning a fake pi that hangs for 90 s.
+var promptTimeout = 90 * time.Second
+
+// shutdownGrace is the SIGINT-to-SIGKILL window for Close(), kept
+// short so /kill on a stuck prompt does not hang the runtime.
+const shutdownGrace = 2 * time.Second
+
+// closeDrainTimeout bounds the time Close() will wait for the
+// lifecycle goroutine to reap the child and close the events
+// channel. Beyond this window Close returns even if the underlying
+// cmd.Wait is wedged (zombie / SIGKILL reap not landing). The
+// bridge is already unusable at this point (closeOnce has fired
+// SIGINT + SIGKILL), and a wedged Wait must NOT block the
+// runtime's spawn path indefinitely — that is exactly the failure
+// mode that froze the dispatchLoop in the F-32 incident report
+// (2026-08-06).
+const closeDrainTimeout = 5 * time.Second
+
+// piDebug toggles the bridge's detailed debug logging. Default
+// ON (F-32 2026-08-06 follow-up) so a "why is pi hung" incident
+// produces a usable breadcrumb trail in the daemon log without
+// the operator remembering to flip an env var first. Silence it
+// by exporting NIGHTME_PI_DEBUG=0 (or "false", "no", "off").
+//
+// The flag is read once at package init; toggling it mid-session
+// has no effect. Tests in this package may flip `piDebug`
+// directly to keep test output clean.
+var piDebug = piDebugEnabled()
+
+// piDebugEnabled reports whether the operator wants the pi
+// bridge's breadcrumb trail. Default-on: empty / unset /
+// unrecognized values are treated as enabled. Explicit
+// "disable" tokens are "0", "false", "no", "off" (case-folded).
+func piDebugEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("NIGHTME_PI_DEBUG"))) {
+	case "0", "false", "no", "off":
+		return false
+	}
+	return true
+}
+
+// piLog emits an info-level message tagged [pi] (component="pi")
+// when piDebug is enabled. Otherwise the call is a no-op so the
+// hot path stays cheap. Used by newSession / Close / readPump /
+// rpc.request to surface the exact sequence of events when the
+// bridge stalls.
+//
+// Log level is Info (not Debug) on purpose: the default
+// production slog handler runs at LevelInfo, and breadcrumbs
+// that vanish into Debug-level filtering are useless when
+// chasing a hang.
+func piLog(msg string, args ...any) {
+	if !piDebug {
+		return
+	}
+	all := make([]any, 0, len(args)+2)
+	all = append(all, slog.String("component", "pi"))
+	all = append(all, args...)
+	slog.Default().Info("[pi] "+msg, all...)
+}
+
+// maxImageBytes caps a single ContentImage after base64 encoding.
+// 10 MiB of decoded binary is well within Pi's stated image support
+// and keeps a single SendBlocks well under MaxFrameSize even after
+// other content. Larger images are rejected with ErrImageTooLarge
+// instead of silently truncating.
+const maxImageBytes = 10 * 1024 * 1024
+
+// ErrImageTooLarge is returned by SendBlocks when a single
+// ContentImage exceeds maxImageBytes after base64 encoding. The
+// caller should drop the offending block (or surface a clearer
+// user-facing error); the bridge does not retry.
+var ErrImageTooLarge = errors.New("pi: image too large")
+
+// ErrTurnClosed is returned by SendBlocks when the previous prompt
+// was rejected by Pi (success:false on the response envelope).
+// The session is still usable; the caller can retry.
+var ErrTurnClosed = errors.New("pi: previous prompt rejected")
+
+// ─── Agent struct (template + runtime) ───
+
+// Agent is the Pi-mode bridge descriptor.
+//
+// Two states share one type:
+//
+//   - Template state (after New, before Start): only the
+//     spec-half fields are populated. Registered in
+//     agent.Builtins and held there as a long-lived singleton
+//     per name.
+//
+//   - Live state (after Start, before Close): the receiver is a
+//     freshly-allocated clone with runtime fields populated (cmd,
+//     stdinW, stdoutR, stderrR, rpc, events, pid, agentName,
+//     workspace, branch, turnMu, turnActive, translator, logger,
+//     pumpWG, exitDone, ...). Calls to Events / PID / Send* /
+//     New / Close are valid here. Spec-half fields are still
+//     readable.
+//
+// The template (in Builtins) is never mutated; Start returns a
+// separate *Agent so concurrent Start calls from different chats
+// do not interfere with each other.
 type Agent struct {
+	// ─── template fields (set by New; immutable) ───
 	name    string
 	command string
 	args    []string
+
+	// ─── runtime fields (zero before Start; populated on the clone) ───
+	cmd     *exec.Cmd
+	stdinW  io.WriteCloser
+	stdoutR io.ReadCloser
+	stderrR io.ReadCloser
+	rpc     *rpcClient
+	events  chan agent.AgentEvent
+	pid     int
+
+	// agentName / workspace / branch captured at Start and
+	// stamped onto EventAgentReady events for the channel-layer
+	// receipt's foot note.
+	agentName string
+	workspace string
+	branch    string
+
+	// turnMu serializes SendBlocks calls so a second prompt
+	// cannot start before the first one is acknowledged by Pi. It
+	// also guards the turnActive flag.
+	turnMu     sync.Mutex
+	turnActive bool
+
+	translator *translator
+
+	// translatorMu serializes connectedSent reset + emitConnected
+	// calls between the boot handshake and F-34 reset (New).
+	translatorMu sync.Mutex
+	logger       *slog.Logger
+
+	closeOnce sync.Once
+	closed    chan struct{}
+
+	// pumpWG tracks readPump + drainStderr so the lifecycle
+	// goroutine can wait for them to drain before closing the
+	// events channel.
+	pumpWG sync.WaitGroup
+
+	// exitDone is closed by the lifecycle goroutine when the
+	// child has exited AND the events channel has been closed.
+	// Close() waits on this so callers know the bridge is fully
+	// reaped before they proceed.
+	exitDone chan struct{}
 }
 
-// New constructs a Pi agent descriptor. name is the registry key
-// (typically "pi"); command is the CLI binary name on PATH
-// (typically "pi"); args are extra flags appended after DefaultArgs.
+// ─── template constructor + spec-half methods ───
+
+// New constructs the template Agent. This is the entry point used
+// at registration time (cmd/nightme/agents.go calls it from
+// init()); the returned *Agent is held by agent.Builtins as the
+// singleton for `name`.
 func New(name, command string, args []string) *Agent {
 	return &Agent{
 		name:    name,
@@ -59,6 +250,7 @@ func (a *Agent) Name() string { return a.name }
 func (a *Agent) Mode() agent.Mode { return agent.ModeJSONIO }
 
 // Command returns the configured CLI binary (typically "pi").
+// Surfaced by `nightme agents` so users can see what /run would spawn.
 func (a *Agent) Command() string { return a.command }
 
 // Args returns a defensive copy of the constructor args. Callers may
@@ -67,70 +259,585 @@ func (a *Agent) Args() []string {
 	return append([]string(nil), a.args...)
 }
 
+// Env returns a defensive copy of the constructor env (always nil
+// for pi; kept for symmetry with the merged agent.Agent interface).
+func (a *Agent) Env() []string { return nil }
+
 // Detect verifies the `pi` binary resolves on PATH. Call before
-// Start to surface a friendly "pi not installed" error rather than a
-// confusing exec failure.
+// Start to surface a friendly "pi not installed" error rather than
+// a confusing exec failure.
 func (a *Agent) Detect() error {
 	_, err := exec.LookPath(a.command)
 	return err
 }
 
-// Start spawns Pi in RPC mode and returns an Agent that
-// streams events on its Events channel.
+// ─── lifecycle ───
+
+// Start spawns Pi in RPC mode and returns a live Agent that streams
+// events on its Events channel.
 //
-// Workspace is the child process's cwd. cfg.Args are appended after
-// the agent's defaults (DefaultArgs + a.args). cfg.Env is appended
-// to os.Environ() for the child.
+// Start clones the receiver — the template in Builtins is untouched.
+// The clone gets template fields copied (defensively), runtime
+// fields zeroed, then exec.CommandContext is called to spawn the
+// process, the read pump + stderr drainer + lifecycle goroutine are
+// kicked off, and the get_state handshake runs synchronously before
+// Start returns.
 //
-// cfg.PermissionMode is ignored: Pi has no equivalent CLI flag and
-// the F-32 MVP does not surface Pi's extension UI to the channel.
-// Kept in the signature for forward compatibility with future
-// /use flags that may translate to Pi commands.
+// cfg.Workspace is the child process's cwd. cfg.Args are appended
+// after the agent's defaults. cfg.Env is appended to os.Environ()
+// for the child.
 //
-// cfg.SessionID, when non-empty, is forwarded as Pi's native
-// `--session-id <id>` CLI flag at spawn time so the spawned
-// process resumes the named session (the bridge's "opaque
-// SessionID" contract translates cleanly: nightme stores pi's own
-// sessionId — captured from get_state — and feeds it back here on
-// the next spawn). Empty means "no --session-id; start a fresh
-// session". Mirrors Claude Code's `--resume <id>` flow in
-// internal/bridge/claudecode/claudecode.go: same field, each
-// bridge translates to its own CLI flag.
+// cfg.PermissionMode is ignored (Pi has no equivalent CLI flag).
 //
-// On Start success, the returned session has an active process and
-// has already completed the get_state handshake. The caller must
-// Close() it when done.
+// cfg.SessionID, when non-empty, is forwarded as `--session-id <id>`
+// at spawn time so the spawned process resumes the named session.
 func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, error) {
+	if cfg.Workspace == "" {
+		return nil, fmt.Errorf("pi: workspace is required")
+	}
+
+	startTime := time.Now()
 	args := buildArgs(a.args, cfg)
-
 	env := append([]string(nil), cfg.Env...)
-	env = append(env, a.command) // ensure command name is in env (defensive)
+	env = append(env, a.command)
 
-	return newSession(ctx, a.name, a.command, args, env, cfg.Workspace)
+	piLog("Start enter", "agent", a.name, "command", a.command, "workspace", cfg.Workspace, "args", args)
+
+	branch := detectBranch(cfg.Workspace)
+	logger := slog.Default()
+
+	cmd := exec.CommandContext(ctx, a.command, args...)
+	cmd.Dir = cfg.Workspace
+	cmd.Env = append(os.Environ(), env...)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("pi: stdin pipe: %w", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return nil, fmt.Errorf("pi: stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		return nil, fmt.Errorf("pi: stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		_ = stderr.Close()
+		piLog("Start cmd.Start failed",
+			"elapsed_ms", time.Since(startTime).Milliseconds(),
+			"err", err.Error())
+		return nil, fmt.Errorf("pi: start: %w", err)
+	}
+
+	live := &Agent{
+		name:      a.name,
+		command:   a.command,
+		args:      append([]string(nil), a.args...),
+		cmd:       cmd,
+		stdinW:    stdin,
+		stdoutR:   stdout,
+		stderrR:   stderr,
+		rpc:       newRPCClient(stdin),
+		events:    make(chan agent.AgentEvent, 64),
+		pid:       cmd.Process.Pid,
+		agentName: a.name,
+		workspace: cfg.Workspace,
+		branch:    branch,
+		translator: newTranslator(a.name, cfg.Workspace, branch),
+		logger:    logger,
+		closed:    make(chan struct{}),
+		exitDone:  make(chan struct{}),
+	}
+
+	// Read pump and stderr drainer start in parallel with the
+	// handshake so a slow get_state does not stall read-back
+	// pressure. The lifecycle goroutine (cmd.Wait) is started
+	// last so it owns both the events close and the pending
+	// fail. pumpWG is incremented BEFORE the goroutines start
+	// and decremented inside them so the lifecycle Wait below
+	// cannot race a missed Add.
+	live.pumpWG.Add(2)
+	go func() {
+		defer live.pumpWG.Done()
+		live.readPump()
+	}()
+	go func() {
+		defer live.pumpWG.Done()
+		live.drainStderr()
+	}()
+	go live.lifecycle()
+
+	piLog("Start pumps+lifecycle spawned",
+		"pid", live.pid,
+		"elapsed_ms", time.Since(startTime).Milliseconds())
+
+	// Drive the get_state handshake synchronously so a Start
+	// failure surfaces immediately.
+	hsCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancel()
+	handshakeStart := time.Now()
+	piLog("handshake start", "pid", live.pid, "timeout", handshakeTimeout.String())
+	resp, err := live.rpc.request(hsCtx, "get_state", map[string]any{}, "boot")
+	handshakeElapsed := time.Since(handshakeStart)
+	if err != nil {
+		piLog("handshake failed",
+			"pid", live.pid,
+			"elapsed_ms", handshakeElapsed.Milliseconds(),
+			"err", err.Error())
+		_ = live.Close()
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("pi: handshake timeout after %s (binary present? --mode rpc supported?): %w", handshakeTimeout, context.DeadlineExceeded)
+		}
+		return nil, fmt.Errorf("pi: get_state: %w", err)
+	}
+	if !resp.Success {
+		piLog("handshake rejected",
+			"pid", live.pid,
+			"elapsed_ms", handshakeElapsed.Milliseconds(),
+			"err", resp.Error)
+		_ = live.Close()
+		return nil, fmt.Errorf("pi: get_state rejected: %s", resp.Error)
+	}
+	piLog("handshake ok",
+		"pid", live.pid,
+		"elapsed_ms", handshakeElapsed.Milliseconds(),
+		"success", resp.Success)
+
+	var state getStateResult
+	if len(resp.Data) > 0 {
+		if err := json.Unmarshal(resp.Data, &state); err != nil {
+			_ = live.Close()
+			return nil, fmt.Errorf("pi: decode get_state: %w", err)
+		}
+	}
+	live.translatorMu.Lock()
+	live.deliverConnectedLocked(&state)
+	live.translatorMu.Unlock()
+	piLog("Start return ok",
+		"pid", live.pid,
+		"total_ms", time.Since(startTime).Milliseconds())
+	return live, nil
 }
 
-// buildArgs concatenates DefaultArgs + extraArgs + cfg.Args. Extracted
-// as a package-private helper so tests can assert on the produced
-// argv without spawning a process. Mirrors the contract of
-// Agent.Start exactly.
+// ─── live-half methods ───
+
+// Events returns the live event stream. The channel is closed by
+// the lifecycle goroutine after process exit or Close().
+func (a *Agent) Events() <-chan agent.AgentEvent { return a.events }
+
+// PID returns the child process pid.
+func (a *Agent) PID() int { return a.pid }
+
+// SendText delivers a single text user turn. Thin wrapper around
+// SendBlocks.
+func (a *Agent) SendText(text string) error {
+	if text == "" {
+		return nil
+	}
+	return a.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: text},
+	})
+}
+
+// SendBlocks delivers a structured user turn. The bridge joins
+// multiple ContentText blocks with "\n", base64-encodes
+// ContentImage blocks into prompt.images[], and degrades
+// ContentFile blocks to a "[file: <path>" suffix on the message.
+//
+// Empty blocks slice is a no-op. Concurrent SendBlocks calls are
+// rejected with ErrTurnBusy while a previous prompt is still
+// awaiting its ack response.
+func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
+	if len(blocks) == 0 {
+		return nil
+	}
+
+	// Defensive deadline: callers that hand us a no-deadline ctx
+	// (e.g. the runtime's FlushHook passing cs.OpContext() with
+	// no external timeout wired) would otherwise wait forever for
+	// pi to ack a hung prompt RPC. promptTimeout bounds the wait
+	// at the bridge layer; if the caller already wired a tighter
+	// or looser deadline, their ctx takes precedence.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancelTimeout context.CancelFunc
+		ctx, cancelTimeout = context.WithTimeout(ctx, promptTimeout)
+		defer cancelTimeout()
+	}
+
+	// Derive a per-call ctx so the bridge layer owns its own
+	// cancellation surface.
+	callCtx, cancelCall := context.WithCancel(ctx)
+	defer cancelCall()
+
+	a.turnMu.Lock()
+	if a.turnActive {
+		a.turnMu.Unlock()
+		return ErrTurnBusy
+	}
+	a.turnActive = true
+	a.turnMu.Unlock()
+	defer func() {
+		a.turnMu.Lock()
+		a.turnActive = false
+		a.turnMu.Unlock()
+	}()
+
+	var messageText string
+	var images []imageAttachment
+	for _, b := range blocks {
+		switch b.Type {
+		case agent.ContentText:
+			if b.Text == "" {
+				continue
+			}
+			if messageText != "" {
+				messageText += "\n"
+			}
+			messageText += b.Text
+		case agent.ContentImage:
+			dataURL, err := encodeImage(b.Path, b.MediaType)
+			if err != nil {
+				return err
+			}
+			images = append(images, imageAttachment{
+				Data:     stripDataURLPrefix(dataURL),
+				MimeType: b.MediaType,
+			})
+		case agent.ContentFile:
+			if b.Path == "" {
+				continue
+			}
+			if messageText != "" {
+				messageText += "\n"
+			}
+			messageText += "[file: " + b.Path + "]"
+		default:
+			return fmt.Errorf("pi: unknown content block type %q", b.Type)
+		}
+	}
+
+	if messageText == "" && len(images) == 0 {
+		return nil
+	}
+
+	piLog("SendBlocks: callCtx derived",
+		"pid", a.pid,
+		"parent_has_deadline", ctxHasDeadline(ctx),
+		"call_has_deadline", ctxHasDeadline(callCtx),
+	)
+	params := promptParams{Message: messageText, Images: images}
+	resp, err := a.rpc.request(callCtx, "prompt", params, "")
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("%w: %s", ErrTurnClosed, resp.Error)
+	}
+	return nil
+}
+
+// ctxHasDeadline reports whether ctx carries an explicit deadline.
+// Used by SendBlocks to substitute promptTimeout when the caller
+// passed a bare context.Background().
+func ctxHasDeadline(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	_, ok := ctx.Deadline()
+	return ok
+}
+
+// SendPermission is currently a no-op for pi: pi does not surface a
+// structured AskUserQuestion tool today (F-32 MVP). The signature
+// is kept so pi satisfies the merged agent.Agent interface; the
+// ChatSession layer treats a no-op return as "permission granted"
+// which is the safe default for pi's current tool surface.
+func (a *Agent) SendPermission(_ string) error {
+	return nil
+}
+
+// New resets the conversation context on the running session
+// without terminating the underlying process.
+//
+// Per F-34 §3.2.3 + Phase 3 final verification (2026-08-04):
+//   - `new_session` RPC exists, request envelope: {"type":"new_session"}
+//   - Response carries only {"cancelled":bool}; NO new sessionId in data
+//   - The ONLY way to learn the new sessionId is to call `get_state`
+//     again after `new_session` completes
+//
+// Implementation: send new_session, wait for response, then issue
+// get_state to retrieve the new sessionId, then push it into the
+// translator so the next EventAgentReady carries it.
+//
+// Timeout: each of the two RPC round-trips (new_session + get_state)
+// is bounded by handshakeTimeout; total wall time ≤ 2x that.
+func (a *Agent) New(ctx context.Context) error {
+	if a.rpc == nil {
+		return fmt.Errorf("pi: session is not initialized")
+	}
+
+	newCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancel()
+	resp, err := a.rpc.request(newCtx, "new_session", map[string]any{}, "reset-1")
+	if err != nil {
+		return fmt.Errorf("pi: new_session: %w", err)
+	}
+	if !resp.Success {
+		return fmt.Errorf("pi: new_session rejected: %s", resp.Error)
+	}
+
+	stateCtx, stateCancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer stateCancel()
+	stateResp, err := a.rpc.request(stateCtx, "get_state", map[string]any{}, "reset-state")
+	if err != nil {
+		return fmt.Errorf("pi: get_state after reset: %w", err)
+	}
+	if !stateResp.Success {
+		return fmt.Errorf("pi: get_state after reset rejected: %s", stateResp.Error)
+	}
+	var state getStateResult
+	if len(stateResp.Data) > 0 {
+		if err := json.Unmarshal(stateResp.Data, &state); err != nil {
+			return fmt.Errorf("pi: decode get_state: %w", err)
+		}
+	}
+	a.translatorMu.Lock()
+	a.deliverConnectedLocked(&state)
+	a.translatorMu.Unlock()
+	return nil
+}
+
+// Close terminates the session: signals the child, waits for the
+// lifecycle goroutine to drain, then returns. Idempotent. Waits up
+// to closeDrainTimeout for the underlying cmd.Wait goroutine so
+// that a wedged reap cannot block the runtime's spawn path
+// indefinitely (F-32 2026-08-06 incident).
+func (a *Agent) Close() error {
+	var firstErr error
+	a.closeOnce.Do(func() {
+		close(a.closed)
+		// SIGINT the child so it shuts down gracefully.
+		if a.cmd != nil && a.cmd.Process != nil {
+			_ = a.cmd.Process.Signal(os.Interrupt)
+		}
+		// Escalate to SIGKILL after shutdownGrace.
+		time.AfterFunc(shutdownGrace, func() {
+			if a.cmd != nil && a.cmd.Process != nil {
+				_ = a.cmd.Process.Kill()
+			}
+		})
+		// Wait up to closeDrainTimeout for the lifecycle goroutine
+		// (which owns cmd.Wait + the events-channel close + exitDone
+		// close) to finish. Beyond that, return even if the reap
+		// is wedged — the bridge is already unusable.
+		select {
+		case <-a.exitDone:
+		case <-time.After(closeDrainTimeout):
+			firstErr = fmt.Errorf("pi: close drain timed out after %s", closeDrainTimeout)
+		}
+	})
+	return firstErr
+}
+
+// ─── internals ───
+
+// deliverConnectedLocked emits the EventAgentReady for `state` via
+// deliver(). Caller MUST hold a.translatorMu.
+func (a *Agent) deliverConnectedLocked(state *getStateResult) {
+	for _, ev := range a.translator.emitConnected(state) {
+		a.deliver(ev)
+	}
+}
+
+// deliver pushes one AgentEvent onto the events channel.
+//
+// Two cancellation paths break the soft-stall that would otherwise
+// occur if the events buffer is full and the consumer (chat
+// session read pump) is slow or has stopped:
+//
+//  1. a.closed is the user-initiated Close() signal.
+//  2. The 1 s timeout covers the rare case where the consumer is
+//     just slow but not gone.
+//
+// The 1 s bound is well below shutdownGrace (2 s) so the Close
+// watchdog can still escalate to SIGKILL before the bridge stalls.
+func (a *Agent) deliver(ev agent.AgentEvent) {
+	t := time.NewTimer(time.Second)
+	defer t.Stop()
+	select {
+	case a.events <- ev:
+	case <-a.closed:
+		piLog("deliver dropped (session closed)", "kind", ev.Kind.String())
+	case <-t.C:
+		piLog("deliver dropped (events channel full for 1s)",
+			"kind", ev.Kind.String(), "buffered", len(a.events), "cap", cap(a.events))
+	}
+}
+
+// readPump reads JSONL frames from stdout, dispatches responses
+// to pending waiters, and feeds events through the translator.
+// It owns the read side of the stdout pipe; lifecycle owns
+// everything else.
+//
+// The deferred failPending releases any parked RPC waiters
+// regardless of exit cause — without it, callers parked on `<-ch`
+// would block until their ctx expires.
+func (a *Agent) readPump() {
+	defer func() {
+		a.rpc.failPending(io.EOF)
+		piLog("readPump exit", "pid", a.pid)
+	}()
+
+	scanner := bufio.NewScanner(a.stdoutR)
+	scanner.Buffer(make([]byte, 0, 64*1024), MaxFrameSize)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(line, &probe); err != nil {
+			a.deliver(agent.AgentEvent{
+				Kind:  agent.EventAgentError,
+				Err: fmt.Errorf("%w: %s", ErrMalformedJSON, string(line)),
+			})
+			a.lifecycleHalt()
+			return
+		}
+		if probe.Type == "response" {
+			var resp responseEnvelope
+			if err := json.Unmarshal(line, &resp); err != nil {
+				a.deliver(agent.AgentEvent{
+					Kind:  agent.EventAgentError,
+					Err: fmt.Errorf("%w: %s", ErrMalformedJSON, string(line)),
+				})
+				a.lifecycleHalt()
+				return
+			}
+			a.rpc.dispatchResponse(resp)
+			continue
+		}
+		if probe.Type == "extension_ui_request" {
+			a.handleExtensionUIRequest(line)
+			continue
+		}
+		events, err := a.translator.translate(line, a.logger)
+		if err != nil {
+			a.deliver(agent.AgentEvent{
+				Kind:  agent.EventAgentError,
+				Err: fmt.Errorf("%w: %s", ErrMalformedJSON, string(line)),
+			})
+			a.lifecycleHalt()
+			return
+		}
+		for _, ev := range events {
+			a.deliver(ev)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		a.deliver(agent.AgentEvent{
+			Kind:  agent.EventAgentError,
+			Err: fmt.Errorf("%w: %v", ErrFrameTooLarge, err),
+		})
+		a.lifecycleHalt()
+	}
+}
+
+// drainStderr consumes the child process's stderr to keep the
+// pipe from blocking the child on stderr writes (a wedged stderr
+// drain deadlocks the cmd.Wait that lifecycle needs).
+func (a *Agent) drainStderr() {
+	buf := make([]byte, 4096)
+	for {
+		n, err := a.stderrR.Read(buf)
+		if n > 0 {
+			a.logger.Debug("pi stderr",
+				slog.String("chunk", string(buf[:n])),
+			)
+		}
+		if err != nil {
+			if err != io.EOF {
+				a.logger.Debug("pi stderr EOF",
+					slog.String("error", err.Error()),
+				)
+			}
+			return
+		}
+	}
+}
+
+// lifecycleHalt is invoked from readPump on a fatal scan / parse
+// error. It kills the child so the cmd.Wait goroutine unblocks
+// and closes the events channel.
+func (a *Agent) lifecycleHalt() {
+	if a.cmd != nil && a.cmd.Process != nil {
+		_ = a.cmd.Process.Kill()
+	}
+}
+
+// lifecycle is the single owner of cmd.Wait and the events
+// channel close. Once-close semantics are enforced by the
+// closeOnce in Close(); everything else just nudges the
+// process toward a clean exit.
+func (a *Agent) lifecycle() {
+	err := a.cmd.Wait()
+	// Whatever the cause, stop accepting new requests and wake
+	// any pending callers.
+	a.rpc.failPending(ErrSessionClosed)
+
+	if err != nil && !a.isGracefulClose() {
+		a.deliver(agent.AgentEvent{
+			Kind:  agent.EventAgentError,
+			Err: fmt.Errorf("pi: process exit: %w", err),
+		})
+	}
+	a.pumpWG.Wait()
+	close(a.events)
+	close(a.exitDone)
+}
+
+// isGracefulClose returns true when Close() is the reason the
+// process exited (i.e. we deliberately killed it). Used to avoid
+// emitting a duplicate EventAgentError after a clean shutdown.
+func (a *Agent) isGracefulClose() bool {
+	select {
+	case <-a.closed:
+		return true
+	default:
+		return false
+	}
+}
+
+// handleExtensionUIRequest processes an extension_ui request frame
+// from Pi. Stub — Pi's F-32 MVP does not surface the extension UI
+// to the channel layer. Kept for forward compatibility with future
+// /follow and /approval flows.
+func (a *Agent) handleExtensionUIRequest(_ []byte) {}
+
+// ─── misc helpers (package-level) ───
+
 // buildArgs concatenates DefaultArgs + extraArgs + cfg.Args, then
 // appends Pi's `--session-id <id>` when cfg.SessionID is non-empty.
-// Extracted as a package-private helper so tests can assert on
-// the produced argv without spawning a process. Mirrors the
-// contract of Agent.Start exactly.
 //
-// Order rationale: resume flag goes LAST so user-supplied cfg.Args
-// (typically model/provider overrides) remain grep-visible before
-// the session identifier. Same convention as the claudecode
-// bridge in buildArgs().
+// Order rationale: resume flag goes LAST so user-supplied
+// cfg.Args (typically model/provider overrides) remain
+// grep-visible before the session identifier.
 //
-// Conflict resolution: cfg.Args may legitimately carry session-
-// selection flags of its own (--session-id, --session, --no-session).
-// When cfg.SessionID is non-empty the runtime-persisted identity
-// must win — see filterSessionFlags for the stripping logic.
-// When cfg.SessionID is empty, user-supplied session-selection
-// flags pass through (legitimate "spawn a fresh session at this
-// id" use case).
+// Conflict resolution: cfg.Args may legitimately carry
+// session-selection flags of its own (--session-id, --session,
+// --no-session). When cfg.SessionID is non-empty the
+// runtime-persisted identity must win — see filterSessionFlags.
 func buildArgs(extraArgs []string, cfg agent.StartConfig) []string {
 	args := filterSessionFlags(cfg.Args, cfg.SessionID, slog.Default())
 	out := make([]string, 0, len(DefaultArgs)+len(extraArgs)+len(args)+2)
@@ -144,15 +851,7 @@ func buildArgs(extraArgs []string, cfg agent.StartConfig) []string {
 }
 
 // filterSessionFlags strips any session-selection flags the caller
-// placed in args when SessionID is set. When SessionID is empty the
-// args pass through unchanged so the user can intentionally spawn
-// a fresh session with --session-id <their-id>.
-//
-// Returns a fresh slice (does not mutate input). The logger may be
-// nil — when nil, suppressed-strip warnings are skipped silently.
-// Stripped flags + their value-taking flag's value are dropped
-// from the returned slice (e.g. --session-id abc contributes 2
-// elements to the source slice, 0 to the returned slice).
+// placed in args when SessionID is set.
 func filterSessionFlags(args []string, sessionID string, logger *slog.Logger) []string {
 	if sessionID == "" {
 		return args
@@ -162,8 +861,6 @@ func filterSessionFlags(args []string, sessionID string, logger *slog.Logger) []
 	stripped := false
 	for _, a := range args {
 		if skipNext {
-			// The value arg belonging to a session-selection flag
-			// we already chose to drop.
 			skipNext = false
 			stripped = true
 			continue
@@ -186,5 +883,71 @@ func filterSessionFlags(args []string, sessionID string, logger *slog.Logger) []
 	return out
 }
 
-// Compile-time guarantee that *Agent satisfies agent.AgentSpec.
-var _ agent.AgentSpec = (*Agent)(nil)
+// detectBranch returns the current git branch for workspace, or ""
+// on any failure (non-git workspace, git not installed, detached
+// HEAD with no short SHA, hung invocation past 1s).
+func detectBranch(workspace string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", workspace, "symbolic-ref", "--short", "HEAD")
+	out, err := cmd.Output()
+	if err == nil {
+		s := string(out)
+		for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r') {
+			s = s[:len(s)-1]
+		}
+		if s != "" && s != "HEAD" {
+			return s
+		}
+	}
+	cmd = exec.CommandContext(ctx, "git", "-C", workspace, "rev-parse", "--short", "HEAD")
+	out, err = cmd.Output()
+	if err != nil {
+		return ""
+	}
+	s := string(out)
+	for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r') {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+// encodeImage reads an image file and returns a "data:<mime>;base64,
+// <payload>" URL. The bridge strips the prefix and emits only the
+// payload in the prompt.images[] array.
+func encodeImage(path, mimeType string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	if len(data) > maxImageBytes {
+		return "", ErrImageTooLarge
+	}
+	encoded := base64.StdEncoding.EncodeToString(data)
+	return "data:" + mimeType + ";base64," + encoded, nil
+}
+
+// stripDataURLPrefix removes the "data:<mime>;base64," prefix from a
+// data URL, returning only the base64 payload.
+func stripDataURLPrefix(dataURL string) string {
+	const prefix = "base64,"
+	if i := indexByte(dataURL, ','); i > 0 && strings.HasSuffix(dataURL[:i], prefix) {
+		return dataURL[i+1:]
+	}
+	return dataURL
+}
+
+// indexByte is a tiny helper to avoid importing strings for one
+// call. Returns the index of c in s, or -1 if absent.
+func indexByte(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+// Compile-time guarantee that *Agent satisfies agent.Agent (the
+// merged spec+live interface).
+var _ agent.Agent = (*Agent)(nil)

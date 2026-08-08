@@ -32,6 +32,15 @@ func newFakeAgentSession(pid int) *fakeAgentSession {
 
 func (f *fakeAgentSession) Events() <-chan agent.AgentEvent { return f.events }
 func (f *fakeAgentSession) PID() int                      { return f.pid }
+func (f *fakeAgentSession) Name() string                  { return "fake" }
+func (f *fakeAgentSession) Mode() agent.Mode              { return agent.ModePTY }
+func (f *fakeAgentSession) Command() string               { return "fake" }
+func (f *fakeAgentSession) Args() []string                { return nil }
+func (f *fakeAgentSession) Env() []string                 { return nil }
+func (f *fakeAgentSession) Detect() error                 { return nil }
+func (f *fakeAgentSession) Start(_ context.Context, _ agent.StartConfig) (agent.Agent, error) {
+	return f, nil
+}
 
 func (f *fakeAgentSession) SendText(text string) error {
 	f.mu.Lock()

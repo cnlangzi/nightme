@@ -560,9 +560,20 @@ type StartConfig struct {
 	SessionID string
 }
 
-// AgentSpec is the static description of a CLI wrapper plus a factory for
-// sessions. Implementations are expected to be safe for concurrent use
-// after Start returns; the registry stores values by reference.
+// AgentSpec is the static, read-only description of an agent.
+//
+// This is the surface used by tooling that only needs to enumerate
+// or display registered agents (`nightme agents`, config
+// validation, help generation). It deliberately does NOT include
+// Start / Events / Send* — those live on Agent. A consumer holding
+// an AgentSpec is guaranteed (by the type system) not to call
+// runtime methods, so it cannot accidentally spawn a process or
+// leak a live handle.
+//
+// The per-bridge Agent struct satisfies both this interface and
+// Agent. In template state (after the constructor, before Start)
+// only AgentSpec methods are meaningful; in live state (after
+// Start, before Close) both halves are valid.
 type AgentSpec interface {
 	// Name is the unique identifier used in config and the registry.
 	Name() string
@@ -580,72 +591,44 @@ type AgentSpec interface {
 	// slice; per-session overrides arrive separately via StartConfig.
 	Args() []string
 
+	// Env returns a defensive copy of the spawn recipe's default
+	// environment entries (KEY=VALUE strings merged into the child
+	// environment). Most bridges return nil; claudecode / pty return
+	// whatever they were constructed with.
+	Env() []string
+
 	// Detect verifies the agent is runnable (binary on PATH, SDK
 	// available, etc.). Called before Start; an error aborts session
 	// creation with a clear "X not found" message to the user.
 	Detect() error
+}
+
+// Agent is the merged interface: spec-half (via AgentSpec embedding)
+// + lifecycle (Start, Close) + live-half (Events, PID, Send*, New).
+//
+// In practice, every per-bridge struct (claudecode.Agent, pi.Agent,
+// pty.Agent, acp.Agent) implements this interface. The template
+// half lives in agent.Builtins; Start clones the receiver and
+// populates runtime fields on the clone, returning the clone as
+// the live handle. The live handle is what ChatSession holds in
+// AgentSession.handle.
+//
+// Callers that only need read-only spec data should declare a
+// parameter of type AgentSpec — that's the compile-time signal
+// that you don't intend to spawn or drive the agent.
+type Agent interface {
+	AgentSpec
 
 	// Start spawns (or attaches to) the agent and returns a live
-	// Agent. The caller must Close() the session when done.
+	// Agent. Called on the registered template; the receiver is
+	// unchanged. Caller must Close() the returned live Agent when
+	// done.
 	Start(ctx context.Context, cfg StartConfig) (Agent, error)
-}
 
-// ContentBlockType discriminates the payload shape on a ContentBlock.
-type ContentBlockType string
+	// Close terminates the session and releases resources. Idempotent.
+	// Called on the live handle returned by Start.
+	Close() error
 
-const (
-	// ContentText is a plain-text segment. Text field is set.
-	ContentText ContentBlockType = "text"
-
-	// ContentImage is an image the agent can see. Path (absolute
-	// filesystem path) and MediaType (MIME, e.g. "image/png") are
-	// set. Implementations that support vision (Claude Code
-	// stream-json in content-array mode) base64-encode and inline
-	// the image; implementations without vision fall back to
-	// emitting the path so the agent can read it with its file
-	// tools.
-	ContentImage ContentBlockType = "image"
-
-	// ContentFile is any non-image file the agent can read (PDF,
-	// source code, audio, video, etc.). Path is set; MediaType is
-	// optional (advisory only — implementations that stream the
-	// binary use it, others ignore it).
-	ContentFile ContentBlockType = "file"
-)
-
-// ContentBlock is one element of a structured user turn. A turn
-// contains zero or more blocks; implementations decide how to
-// express them (see AgentSession.SendBlocks).
-//
-// Exactly one of Text / (Path, MediaType) is meaningful per block,
-// based on Type:
-//
-//	ContentText  -> Text
-//	ContentImage -> Path + MediaType
-//	ContentFile  -> Path (+ optional MediaType)
-type ContentBlock struct {
-	Type ContentBlockType
-
-	// Text is the segment for ContentText blocks. Empty for other
-	// block types.
-	Text string
-
-	// Path is the absolute filesystem path for ContentImage /
-	// ContentFile blocks. Empty for ContentText. Implementations
-	// that stream the binary (e.g. Claude Code stream-json
-	// content-array) read from this path at send time.
-	Path string
-
-	// MediaType is the MIME type for ContentImage (required for
-	// vision-streaming implementations; e.g. "image/png",
-	// "image/jpeg") and advisory for ContentFile. Empty for
-	// ContentText.
-	MediaType string
-}
-
-// Agent is the live, per-session handle. Session Manager drives
-// it via the Events channel and the control methods.
-type Agent interface {
 	// Events streams AgentEvent values until the session ends. The
 	// channel is closed by the implementation only when the
 	// underlying process (or transport) terminates -- NOT after
@@ -714,9 +697,59 @@ type Agent interface {
 	// the new SessionID; the runtime's AgentEventBus subscriber captures
 	// it via SetResumeID and persists (cmd/nightme/run.go newEventHandler).
 	New(ctx context.Context) error
+}
 
-	// Close terminates the session and releases resources. Idempotent.
-	Close() error
+// ContentBlockType discriminates the payload shape on a ContentBlock.
+type ContentBlockType string
+
+const (
+	// ContentText is a plain-text segment. Text field is set.
+	ContentText ContentBlockType = "text"
+
+	// ContentImage is an image the agent can see. Path (absolute
+	// filesystem path) and MediaType (MIME, e.g. "image/png") are
+	// set. Implementations that support vision (Claude Code
+	// stream-json in content-array mode) base64-encode and inline
+	// the image; implementations without vision fall back to
+	// emitting the path so the agent can read it with its file
+	// tools.
+	ContentImage ContentBlockType = "image"
+
+	// ContentFile is any non-image file the agent can read (PDF,
+	// source code, audio, video, etc.). Path is set; MediaType is
+	// optional (advisory only — implementations that stream the
+	// binary use it, others ignore it).
+	ContentFile ContentBlockType = "file"
+)
+
+// ContentBlock is one element of a structured user turn. A turn
+// contains zero or more blocks; implementations decide how to
+// express them (see AgentSession.SendBlocks).
+//
+// Exactly one of Text / (Path, MediaType) is meaningful per block,
+// based on Type:
+//
+//	ContentText  -> Text
+//	ContentImage -> Path + MediaType
+//	ContentFile  -> Path (+ optional MediaType)
+type ContentBlock struct {
+	Type ContentBlockType
+
+	// Text is the segment for ContentText blocks. Empty for other
+	// block types.
+	Text string
+
+	// Path is the absolute filesystem path for ContentImage /
+	// ContentFile blocks. Empty for ContentText. Implementations
+	// that stream the binary (e.g. Claude Code stream-json
+	// content-array) read from this path at send time.
+	Path string
+
+	// MediaType is the MIME type for ContentImage (required for
+	// vision-streaming implementations; e.g. "image/png",
+	// "image/jpeg") and advisory for ContentFile. Empty for
+	// ContentText.
+	MediaType string
 }
 
 // Errors surfaced by the registry.

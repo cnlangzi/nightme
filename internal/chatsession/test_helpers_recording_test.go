@@ -32,6 +32,15 @@ func newRecordingAgentSession(pid int) *recordingAgentSession {
 
 func (r *recordingAgentSession) Events() <-chan agent.AgentEvent { return r.events }
 func (r *recordingAgentSession) PID() int                      { return r.pid }
+func (r *recordingAgentSession) Name() string                  { return "fake" }
+func (r *recordingAgentSession) Mode() agent.Mode              { return agent.ModePTY }
+func (r *recordingAgentSession) Command() string               { return "fake" }
+func (r *recordingAgentSession) Args() []string                { return nil }
+func (r *recordingAgentSession) Env() []string                 { return nil }
+func (r *recordingAgentSession) Detect() error                 { return nil }
+func (r *recordingAgentSession) Start(_ context.Context, _ agent.StartConfig) (agent.Agent, error) {
+	return r, nil
+}
 func (r *recordingAgentSession) SendText(_ string) error       { return nil }
 func (r *recordingAgentSession) SendBlocks(_ context.Context, blocks []agent.ContentBlock) error {
 	r.mu.Lock()

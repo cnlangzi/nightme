@@ -34,15 +34,15 @@ func TestAcpSession_SendText_EncodesCorrectly(t *testing.T) {
 		writeRPCForTest(t, server, rpcMessage{JSONRPC: jsonRPCVersion, ID: newSession.ID, Result: json.RawMessage(`{"sessionId":"session-1"}`)})
 	}()
 
-	session, err := NewSession(context.Background(), bridge, "mock", WithWorkspace("/tmp/workspace"))
-	if err != nil {
-		t.Fatalf("NewSession() error = %v", err)
+	a := newAgentForTest(bridge, "mock", "/tmp/workspace")
+	if err := a.handshake(context.Background(), "/tmp/workspace"); err != nil {
+		t.Fatalf("handshake() error = %v", err)
 	}
-	defer session.Close()
+	defer a.Close()
 
 	promptDone := make(chan rpcMessage, 1)
 	go func() { promptDone <- readRPCForTest(t, serverReader) }()
-	if err := session.SendText("hello"); err != nil {
+	if err := a.SendText("hello"); err != nil {
 		t.Fatalf("SendText() error = %v", err)
 	}
 	select {
@@ -62,12 +62,12 @@ func TestAcpSession_SendText_EncodesCorrectly(t *testing.T) {
 	}
 }
 
-// TestNewSession_EmitsInit asserts that NewSession synthesizes a
+// TestHandshake_EmitsInit asserts that handshake() synthesizes a
 // single EventAgentReady on the events channel carrying the ACP session
 // id, so the runtime can capture the resume id uniformly with
-// Claude Code / Pi. The EventAgentReady is emitted before NewSession
+// Claude Code / Pi. The EventAgentReady is emitted before handshake
 // returns, so the first event on Events() is the init.
-func TestNewSession_EmitsInit(t *testing.T) {
+func TestHandshake_EmitsInit(t *testing.T) {
 	client, server := net.Pipe()
 	bridge := &mockBridge{Conn: client, pid: 42}
 	defer server.Close()
@@ -80,14 +80,14 @@ func TestNewSession_EmitsInit(t *testing.T) {
 		writeRPCForTest(t, server, rpcMessage{JSONRPC: jsonRPCVersion, ID: newSession.ID, Result: json.RawMessage(`{"sessionId":"sess-acp-abc"}`)})
 	}()
 
-	session, err := NewSession(context.Background(), bridge, "codex", WithWorkspace("/tmp/ws"))
-	if err != nil {
-		t.Fatalf("NewSession() error = %v", err)
+	a := newAgentForTest(bridge, "codex", "/tmp/ws")
+	if err := a.handshake(context.Background(), "/tmp/ws"); err != nil {
+		t.Fatalf("handshake() error = %v", err)
 	}
-	defer session.Close()
+	defer a.Close()
 
 	select {
-	case ev := <-session.Events():
+	case ev := <-a.Events():
 		if ev.Kind != agent.EventAgentReady {
 			t.Fatalf("first event kind = %v, want EventAgentReady", ev.Kind)
 		}
@@ -105,10 +105,10 @@ func TestNewSession_EmitsInit(t *testing.T) {
 	}
 }
 
-// TestNewSession_NoSessionID_NoInit asserts that when the
-// session/new response has no sessionId, NewSession returns an
+// TestHandshake_NoSessionID_NoInit asserts that when the
+// session/new response has no sessionId, handshake returns an
 // error and emits no EventAgentReady.
-func TestNewSession_NoSessionID_NoInit(t *testing.T) {
+func TestHandshake_NoSessionID_NoInit(t *testing.T) {
 	client, server := net.Pipe()
 	bridge := &mockBridge{Conn: client, pid: 42}
 	defer server.Close()
@@ -122,12 +122,9 @@ func TestNewSession_NoSessionID_NoInit(t *testing.T) {
 		writeRPCForTest(t, server, rpcMessage{JSONRPC: jsonRPCVersion, ID: newSession.ID, Result: json.RawMessage(`{}`)})
 	}()
 
-	session, err := NewSession(context.Background(), bridge, "codex", WithWorkspace("/tmp/ws"))
-	if err == nil {
-		t.Fatal("NewSession() error = nil, want non-nil")
-	}
-	if session != nil {
-		t.Errorf("session = %+v, want nil", session)
+	a := newAgentForTest(bridge, "codex", "/tmp/ws")
+	if err := a.handshake(context.Background(), "/tmp/ws"); err == nil {
+		t.Fatal("handshake() error = nil, want non-nil")
 	}
 }
 
@@ -142,21 +139,21 @@ func TestAcpSession_ParseMessageChunkEvent(t *testing.T) {
 
 func TestAcpSession_ParsePermissionRequest(t *testing.T) {
 	var output bytes.Buffer
-	s := &acpSession{ctx: context.Background(), events: make(chan agent.AgentEvent, 1), rpc: newRPCClient(&output)}
-	s.handleMethod(rpcMessage{
+	a := &Agent{ctx: context.Background(), events: make(chan agent.AgentEvent, 1), rpc: newRPCClient(&output)}
+	a.handleMethod(rpcMessage{
 		JSONRPC: jsonRPCVersion,
 		ID:      json.RawMessage(`7`),
 		Method:  "session/request_permission",
 		Params:  json.RawMessage(`{"action":"run ls","toolCall":{"title":"Bash"},"options":[{"optionId":"allow_once"},{"optionId":"deny"}]}`),
 	})
-	event := receiveEvent(t, s.events)
+	event := receiveEvent(t, a.events)
 	if event.Kind != agent.EventAgentPermission || event.Permission == nil {
 		t.Fatalf("event = %+v", event)
 	}
 	if event.Permission.Tool != "Bash" || len(event.Permission.Options) != 2 {
 		t.Fatalf("permission = %+v", event.Permission)
 	}
-	if err := s.SendPermission("allow_once"); err != nil {
+	if err := a.SendPermission("allow_once"); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(output.String(), `"optionId":"allow_once"`) {
@@ -181,12 +178,12 @@ func TestAcpSession_ParseToolEvents(t *testing.T) {
 func TestAcpSession_EOFClosesEvents(t *testing.T) {
 	client, server := net.Pipe()
 	bridge := &mockBridge{Conn: client}
-	s := &acpSession{bridge: bridge, rpc: newRPCClient(io.Discard), ctx: context.Background(), events: make(chan agent.AgentEvent, eventBufferSize)}
-	go s.readPump()
+	a := &Agent{bridge: bridge, rpc: newRPCClient(io.Discard), ctx: context.Background(), events: make(chan agent.AgentEvent, eventBufferSize)}
+	go a.readPump()
 	_ = server.Close()
 
 	var gotDone bool
-	for event := range s.events {
+	for event := range a.events {
 		if event.Kind == agent.EventAgentDone {
 			gotDone = true
 		}
@@ -202,8 +199,29 @@ func TestRPCDecodeRejectsWrongVersion(t *testing.T) {
 	}
 }
 
-func testSession() *acpSession {
-	return &acpSession{ctx: context.Background(), events: make(chan agent.AgentEvent, eventBufferSize), rpc: newRPCClient(io.Discard)}
+func testSession() *Agent {
+	return &Agent{ctx: context.Background(), events: make(chan agent.AgentEvent, eventBufferSize), rpc: newRPCClient(io.Discard)}
+}
+
+// newAgentForTest constructs an Agent wired to a mock bridge (no real
+// PTY spawn), with rpc / events / ctx wired so handshake() can run
+// against the in-process server. Returns an Agent ready to call
+// handshake() and then Send* / Close.
+func newAgentForTest(bridge Bridge, name, workspace string) *Agent {
+	ctx, cancel := context.WithCancel(context.Background())
+	a := &Agent{
+		name:      name,
+		command:   "test",
+		bridge:    bridge,
+		rpc:       newRPCClient(bridge),
+		ctx:       ctx,
+		cancel:    cancel,
+		agentName: name,
+		workspace: workspace,
+		events:    make(chan agent.AgentEvent, eventBufferSize),
+	}
+	go a.readPump()
+	return a
 }
 
 func receiveEvent(t *testing.T, events <-chan agent.AgentEvent) agent.AgentEvent {

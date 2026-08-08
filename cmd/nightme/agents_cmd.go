@@ -80,7 +80,8 @@ func runAgents(cmd *cobra.Command, f agentsCmdFlags) error {
 	}
 
 	reg := buildRunAgentRegistry(cfg)
-	rows := collectAgents(reg)
+	specs := reg.Specs()
+	rows := collectAgents(specs)
 	defaultName := cfg.Primary
 	if defaultName == "" {
 		defaultName = "claude"
@@ -93,20 +94,21 @@ func runAgents(cmd *cobra.Command, f agentsCmdFlags) error {
 	return nil
 }
 
-// collectAgents projects the registry into the JSON-friendly row
-// shape. The order is the registry's order (unspecified) — both the
-// table and JSON consumers get the same slice.
-func collectAgents(reg *agent.Registry) []agentRow {
-	agents := reg.List()
-	rows := make([]agentRow, 0, len(agents))
-	for _, a := range agents {
-		if a == nil {
+// collectAgents projects the spec-only view into the JSON-friendly
+// row shape. The argument is `[]agent.AgentSpec` (not the merged
+// `[]agent.Agent`), so the loop body can only call spec-half
+// methods — Name / Command / Args / etc. — and the type system
+// forbids accidentally reaching for Start / Events / Send*.
+func collectAgents(specs []agent.AgentSpec) []agentRow {
+	rows := make([]agentRow, 0, len(specs))
+	for _, s := range specs {
+		if s == nil {
 			continue
 		}
 		rows = append(rows, agentRow{
-			Name:    a.Name(),
-			Command: a.Command(),
-			Args:    a.Args(),
+			Name:    s.Name(),
+			Command: s.Command(),
+			Args:    s.Args(),
 		})
 	}
 	return rows

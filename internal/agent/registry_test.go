@@ -17,10 +17,18 @@ func (f *fakeAgent) Name() string        { return f.name }
 func (f *fakeAgent) Mode() Mode          { return f.mode }
 func (f *fakeAgent) Command() string     { return "" }
 func (f *fakeAgent) Args() []string      { return nil }
+func (f *fakeAgent) Env() []string       { return nil }
 func (f *fakeAgent) Detect() error       { return nil }
 func (f *fakeAgent) Start(context.Context, StartConfig) (Agent, error) {
 	return nil, errors.New("fakeAgent: Start not implemented")
 }
+func (f *fakeAgent) Close() error        { return nil }
+func (f *fakeAgent) Events() <-chan AgentEvent { return nil }
+func (f *fakeAgent) PID() int            { return 0 }
+func (f *fakeAgent) SendText(string) error     { return nil }
+func (f *fakeAgent) SendBlocks(context.Context, []ContentBlock) error { return nil }
+func (f *fakeAgent) SendPermission(string) error { return nil }
+func (f *fakeAgent) New(context.Context) error { return nil }
 
 func TestRegisterAndGet(t *testing.T) {
 	r := New()

@@ -1,6 +1,7 @@
 package chatsession
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -102,9 +103,9 @@ func TestManager_PoolAfterKillCanRespawn(t *testing.T) {
 		t.Fatalf("precondition: expected Running")
 	}
 
-	// /kill clears the pool.
-	if _, err := cs.KillAll(); err != nil {
-		t.Fatalf("KillAll: %v", err)
+	// /kill clears the pool (cwd-scoped: only entries in activeCwd).
+	if _, err := KillAllAgents(&KillCmd{CS: cs, Ctx: context.Background()}); err != nil {
+		t.Fatalf("KillAllAgents: %v", err)
 	}
 	if len(cs.Pool()) != 0 {
 		t.Fatalf("pool should be empty after kill")

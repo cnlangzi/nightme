@@ -164,7 +164,7 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 	go cs.PumpEvents(pumpCtx)
 
 	defer func() {
-		_, _ = cs.KillAll()
+		_, _ = KillAllAgents(&KillCmd{CS: cs, Ctx: context.Background()})
 	}()
 
 	// Wait for the bridge session to be available, then call

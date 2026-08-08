@@ -1,6 +1,7 @@
 package chatsession
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"sync"
@@ -207,14 +208,14 @@ func TestKillAllClearsPool(t *testing.T) {
 		t.Fatalf("precondition: pool size=%d", len(cs.Pool()))
 	}
 
-	if _, err := cs.KillAll(); err != nil {
-		t.Fatalf("KillAll: %v", err)
+	if _, err := KillAllAgents(&KillCmd{CS: cs, Ctx: context.Background()}); err != nil {
+		t.Fatalf("KillAllAgents: %v", err)
 	}
 	if len(cs.Pool()) != 0 {
-		t.Fatalf("KillAll should clear pool; size=%d", len(cs.Pool()))
+		t.Fatalf("KillAllAgents should clear pool; size=%d", len(cs.Pool()))
 	}
 	if cs.ActiveAgentSession() != nil {
-		t.Fatalf("activeAS should be nil after KillAll")
+		t.Fatalf("activeAS should be nil after KillAllAgents")
 	}
 	// Persistence also cleared.
 	all := asFile.GetByChatPool(cs.ID)
@@ -528,7 +529,11 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 		return false
 	})
 
-	as := NewAgentSession("as_kill", "oc_chat", "claude", t.TempDir(), nil)
+	// AS must live in activeCwd so KillAllAgents (cwd-scoped)
+	// reaches it. Capture activeCwd before allocating the AS so
+	// the (Agent, Cwd) key matches the pool filter.
+	activeCwd := cs.ActiveCwd()
+	as := NewAgentSession("as_kill", "oc_chat", "claude", activeCwd, nil)
 	as.handle = newRecordingAgentSession(1)
 	as.stat = StatusRunning
 	// Put a Prompt in flight so the AS is mid-turn and the message
@@ -550,9 +555,9 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 		t.Fatalf("pre-kill: QueueLen = %d, want 1 (AS is mid-turn)", got)
 	}
 
-	// Run /kill's sequence — KillAll and nothing else.
-	if _, err := cs.KillAll(); err != nil {
-		t.Fatalf("KillAll: %v", err)
+	// Run /kill's sequence — KillAllAgents and nothing else.
+	if _, err := KillAllAgents(&KillCmd{CS: cs, Ctx: context.Background()}); err != nil {
+		t.Fatalf("KillAllAgents: %v", err)
 	}
 
 	// The queued message survives, still in the queue (/kill

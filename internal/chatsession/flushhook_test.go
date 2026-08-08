@@ -140,7 +140,7 @@ func TestFlushHook_NoActiveAgentSession(t *testing.T) {
 	cs.SetActiveAgent("claude")
 	cs.LookupActiveAgentSession()
 
-	cs.KillAll()
+	_, _ = KillAllAgents(&KillCmd{CS: cs, Ctx: context.Background()})
 
 	// activeAS is nil. Queueing must not panic, and the message
 	// must survive for the next respawn.

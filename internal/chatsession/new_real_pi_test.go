@@ -128,7 +128,7 @@ func TestRealPi_NewAfterSwitch(t *testing.T) {
 	go cs.PumpEvents(pumpCtx)
 
 	defer func() {
-		_, _ = cs.KillAll()
+		_, _ = KillAllAgents(&KillCmd{CS: cs, Ctx: context.Background()})
 	}()
 
 	// Wait for handle to be ready

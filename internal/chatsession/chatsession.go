@@ -253,19 +253,13 @@ var ErrNoActiveCwd = errors.New("chatsession: no active workspace (send /cwd fir
 // (Validation should happen at the gateway layer; this is a safety net.)
 var ErrUnknownAgent = errors.New("chatsession: unknown agent")
 
-// killGraceTotal is the overall timeout for graceful shutdown of all
-// running AgentSessions in the pool. Each bridge has its own 2s graceful
-// window + SIGKILL fallback; this 5s budget is the outer bound covering
-// (a) bridge internal grace + SIGKILL, (b) race detector margin, and
-// (c) bridges that take a beat to surface exit through ObserveClose.
-// Tuned for "user waits for /kill to confirm"; rarely triggers.
-const killGraceTotal = 5 * time.Second
-
 // KillResult is one row of the /kill reply. It captures what happened
-// to a single pool entry during KillAll so the handler can render a
-// per-agent status instead of a bare count.
+// to a single pool entry during KillAgent / KillAllAgents so the
+// handler can render a per-agent status instead of a bare count.
 //
-// See docs/feat/F-43-kill-new-graceful-and-reset.md §4.3.
+// Returned by the package-level kill functions in kill.go (not
+// methods on ChatSession — see kill.go doc comment for the
+// two-function kill surface).
 type KillResult struct {
 	Agent       string // e.g. "claude", "codex"
 	Cwd         string // e.g. "/code/A"
@@ -977,191 +971,12 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	return newAS, nil
 }
 
-// KillAll gracefully terminates every AgentSession in the pool via
-// each bridge's Close() path, then clears the persistent registry
-// entries so the next spawn won't resume the dead sessions.
+// --- kill surface -----------------------------------------------------
 //
-// Per-entry outcome is returned in []KillResult so the caller can
-// render a per-agent status list (`FormatKillResults` handles the
-// formatting). The overall error is non-nil only for hard failures
-// (e.g. registry corruption); per-entry bridge errors are captured
-// in each KillResult.Error.
-//
-// F-43 design invariants (docs/feat/F-43-kill-new-graceful-and-reset.md
-// §4.1):
-//   - activeCwd / activeAgent / InputBuffer are NOT touched — /kill
-//     owns only the agent process lifecycle. (F-53 note: the
-//     in-flight Prompt on each AgentSession becomes unreachable
-//     when the pool is cleared; any event that lands after /kill
-//     on an old AS reads a nil currentPrompt and renders an empty
-//     userMsgID. This is the deliberate Phase 0 simplification —
-//     see docs/feat/message_lifecycle.md §8.)
-//   - Pool entry identities are preserved while bridges shut down
-//     (children may still be alive during the wg.Wait window); the
-//     new empty pool is installed AFTER all bridges confirm exit.
-//   - agent_sessions.json entries are deleted AFTER the process is
-//     dead, never before, so a late read can't resurrect a corpse.
-//   - F-53 P2 follow-up (kill cmd): /kill also calls ClearBuffer
-//     (drops queued messages with MessageDropped wire emits) and
-//     SetIdle (resets the FSM so the next message can dispatch
-//     immediately — see internal/command/kill/cmd.go).
-//
-// Concurrency: safe to call concurrently with LookupActiveAgentSession.
-// The per-entry as.Close() is fan-out (each bridge drives its own
-// goroutine); wg.Wait + 5s outer timeout guards against a wedged
-// bridge that bypasses its own SIGKILL fallback.
-func (cs *ChatSession) KillAll() ([]KillResult, error) {
-	// 0. (CS-AS 边界重构 Phase 1: no per-CS StopReadPump call.
-	//    Each AS has its own readpump; we call as.Shutdown() below
-	//    per-agent which drains the readpump and closes eventQueue.
-
-	// 1. snapshot pool under read lock; do not mutate cs.pool until
-	//    every bridge has confirmed shutdown.
-	cs.mu.RLock()
-	snapshot := make([]*AgentSession, 0, len(cs.pool))
-	for _, as := range cs.pool {
-		snapshot = append(snapshot, as)
-	}
-	cs.mu.RUnlock()
-
-	// 2. classify each snapshot entry and fan out graceful shutdown
-	//    for the ones whose process is still believed alive.
-	//
-	//    StatusRunning   → alive, has handle → Close()
-	//    StatusDetached  → "process alive but nightme no longer holds
-	//                      it" (per SetDetached doc). Two flavors:
-	//                        a) mid-life (e.g. SIGTERM without --cleanup):
-	//                           handle is still set → Close() it.
-	//                        b) post-restart (FromAgentSessionEntry
-	//                           rehydrated StatusDetached): handle is nil
-	//                           → orphan, no way to signal, just delete
-	//                           the disk entry.
-	//    StatusExited    → dead, nothing to do but clean disk.
-	//
-	//    Each goroutine returns its outcome via chan; we collect
-	//    outcomes after wg.Wait so per-bridge Close errors are not
-	//    silently dropped (review finding #B2: previously `_ =
-	//    as.Close()` was discarded, so any Close failure was
-	//    reported as ✓ success).
-	closeCh := make(chan closeOutcome, len(snapshot))
-	results := make([]KillResult, len(snapshot))
-	var wg sync.WaitGroup
-	for i, as := range snapshot {
-		results[i] = KillResult{
-			Agent:       as.Agent,
-			Cwd:         as.Cwd,
-			BeforeState: as.Status(),
-		}
-		isAlive := as.Status() == StatusRunning ||
-			(as.Status() == StatusDetached && as.Handle() != nil)
-		if !isAlive {
-			// StatusExited or post-restart StatusDetached (no handle)
-			results[i].Action = "stale-cleared"
-			continue
-		}
-		results[i].Action = "killed"
-		wg.Add(1)
-		go func(i int, as *AgentSession) {
-			defer wg.Done()
-			closeCh <- closeOutcome{idx: i, err: as.Close()}
-		}(i, as)
-	}
-
-	// 3. wait for all bridges to confirm exit. Bridge Close sets the
-	//    events chan closed; the per-entry ObserveClose goroutine then
-	//    flips as.Status to Exited. We do NOT add a second escalation
-	//    here — nightme-side SIGTERM would race with the bridge's
-	//    local watchdog.
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(killGraceTotal):
-		// Bridge's own watchdog should have SIGKILL'd by now. If we
-		// still hit this, the child is wedged in a way even SIGKILL
-		// can't fix (zombie / uninterruptible IO). Log and proceed —
-		// we still want to clean our state. The persistent entries
-		// will be deleted in step 5; the bridge goroutine may still
-		// be running but it's "ownerless" (we no longer reference it).
-		slog.Warn("killAll: graceful shutdown timeout",
-			"chat_id", cs.ChatID,
-			"limit", killGraceTotal)
-	}
-	close(closeCh)
-
-	// 4. fold each goroutine's outcome into its KillResult.
-	for oc := range closeCh {
-		if oc.err != nil {
-			results[oc.idx].Error = oc.err
-			results[oc.idx].Action = "kill-failed"
-		}
-	}
-
-	// 5. clear activeAS pointer BEFORE removing from disk so a
-	//    follow-up inbound message sees "no active" and goes through
-	//    LookupActiveAgentSession -> spawn fresh.
-	cs.mu.Lock()
-	cs.pool = make(map[agentCwdKey]*AgentSession)
-	cs.activeAS = nil
-	// F-53: no `currentTurnUserMsgID` to clear. The anchor now
-	// lives on AgentSession.currentPrompt.LastMessageID; clearing
-	// the pool + activeAS is sufficient to invalidate any stale
-	// anchor (readpump will read as.CurrentPrompt() which is nil
-	// after endPrompt or pool reset).
-	cs.mu.Unlock()
-
-	// 6. delete persistent entries. Use GetByChatPool walk (not just
-	//    snapshot IDs) so orphan entries on disk — `entries` that
-	//    owned this chat's ID but never made it into cs.pool (e.g.
-	//    from a prior /cwd swap that left a stale entry, or a crash
-	//    between Upsert and pool installation) — are also GC'd.
-	//    (Review finding #B4: old `KillAll` did this; F-43 first
-	//    cut narrowed to snapshot-only, reintroducing orphan
-	//    accumulation across /kill cycles.)
-	if cs.asFile != nil {
-		ids := make([]string, 0, len(snapshot))
-		for _, as := range snapshot {
-			ids = append(ids, as.ID)
-		}
-		// Review finding #B6: DeleteMany already exists with the
-		// exact "batch GC where calling Delete in a loop would
-		// rewrite the file N times" rationale. Use it.
-		_ = ids // unused — we call DeleteMany on the orphan set below
-		_ = cs.asFile.DeleteMany(collectIDsForDelete(cs, ids))
-	}
-	cs.persistChatEntry()
-	return results, nil
-}
-
-// closeOutcome carries one goroutine's Close result back to the
-// orchestrator. idx indexes into the snapshot slice so the outer
-// loop can update the corresponding KillResult in place.
-type closeOutcome struct {
-	idx int
-	err error
-}
-
-// collectIDsForDelete returns the union of (a) snapshot IDs and
-// (b) any orphan disk entries owned by this chat (detected via
-// `GetByChatPool`). Pass-through helper for the DeleteMany call.
-func collectIDsForDelete(cs *ChatSession, snapshotIDs []string) []string {
-	if cs.asFile == nil {
-		return snapshotIDs
-	}
-	seen := make(map[string]struct{}, len(snapshotIDs))
-	for _, id := range snapshotIDs {
-		seen[id] = struct{}{}
-	}
-	// Add orphan IDs not already in the snapshot.
-	for _, e := range cs.asFile.GetByChatPool(cs.ID) {
-		if _, ok := seen[e.ID]; ok {
-			continue
-		}
-		seen[e.ID] = struct{}{}
-		snapshotIDs = append(snapshotIDs, e.ID)
-	}
-	return snapshotIDs
-}
+// Per-entry kill orchestration lives in kill.go (package-level
+// functions KillAgent / KillAllAgents). ChatSession exposes no
+// kill methods — the kill package owns process-shutdown semantics
+// and accesses cs internals via this package's same-package scope.
 
 // FormatKillResults produces a human-readable summary of /kill's
 // per-entry outcomes. The output is suitable for channel.Send

@@ -33,7 +33,6 @@ type Status struct {
 	StartedAt       time.Time `json:"started_at"`
 	UptimeSeconds   int64     `json:"uptime_seconds"`
 	Channel         string    `json:"channel"`
-	Cleanup         bool      `json:"cleanup"`
 	Version         string    `json:"version"`
 	LogPath         string    `json:"log_path,omitempty"`
 }

@@ -4,14 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
-)
 
-// Sender is the full outbound surface gtw uses. Defined in
-// types.go (canonical location for shared types); the gtw
-// package uses gtw.Sender everywhere instead of the previous
-// minimal ActiveCwd/SetActiveCwd subset.
+	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/chatsession"
+)
 
 // ContextSlot is the gtw-package view of one Manager's per-chat
 // context slot. Production: gtw.Manager.GetContext / SetContext.
@@ -75,10 +75,22 @@ type Result struct {
 }
 
 // RunFix is the exported entry point for the /gtw fix command.
-// Called from internal/gateway/handlers_gtw.go.
+// Called from cmd/nightme/run.go via gtw.Factory.runFix.
+//
+// F-XX: takes *chatsession.ChatSession directly (no longer through
+// the Sender interface) and accepts a Mode parameter to route
+// between the issue (remote) flow and the local branch flow.
+//
+//	args is the user-supplied argv tail AFTER the "fix"
+//	subcommand. For ModeRemote: args[0] is the issue id.
+//	For ModeLocal: args[0] is the literal branch name.
+//	Pass args[1:] (not args[0]) into ModeLocal/Remote since
+//	the "fix" subcommand token has already been consumed by
+//	Factory.runFix.
 func RunFix(
 	ctx context.Context,
-	cs Sender,
+	mode Mode,
+	cs *chatsession.ChatSession,
 	slot ContextSlot,
 	drafts DraftsMap,
 	deps HandlerDeps,
@@ -89,15 +101,12 @@ func RunFix(
 		deps.Now = timeNow
 	}
 	if len(args) < 1 {
-		return reply(ctx, deps.Send, chatID, messageID, "Usage: /gtw fix <issue-id>"), nil
-	}
-	issueID, err := parseIssueID(args[0])
-	if err != nil {
-		return reply(ctx, deps.Send, chatID, messageID, fmt.Sprintf("❌ %v", err)), nil
+		return reply(ctx, deps.Send, chatID, messageID,
+			"Usage: /gtw fix <issue-id>  |  /gtw fix --name <branch>"), nil
 	}
 
-	// --- preflight (§5.2.①) ---------------------------------------
-	if cs.ActiveCwd() == "" {
+	// --- preflight: ActiveCwd must be set for both modes --------
+	if cs == nil || cs.ActiveCwd() == "" {
 		return reply(ctx, deps.Send, chatID, messageID,
 			"❌ No active workspace. Send /cwd <path> first."), nil
 	}
@@ -106,26 +115,61 @@ func RunFix(
 			"⚠️ Already inside a /gtw fix. Finish or cancel it first."), nil
 	}
 
-	// F-50 §5.7 + F-45 reaction ingest: daemon-recovery. If the
-	// in-memory gtwContext was lost (daemon restart), the cwd may
-	// still be inside a worktree holding a `fix/<id>-*` branch.
-	// Rebuild it transparently so the user doesn't lose their
-	// fix state. F-50 review fix: forward the caller's prober to
-	// avoid a second ExecHTTPProber instantiation in Detect.
-	//
-	// The prober is created here (before the early rebuild call)
-	// so both the rebuild path and the main Detect path share the
-	// same instance — never two independent timeouts.
+	switch mode {
+	case ModeLocal:
+		return runFixLocal(ctx, cs, slot, drafts, deps, chatID, messageID, args[0])
+	default:
+		// ModeRemote (and the empty/zero legacy default).
+		return runFixRemote(ctx, cs, slot, drafts, deps, chatID, messageID, args[0])
+	}
+}
+
+// runFixRemote implements the F-45 / F-XX ID-mode flow:
+//
+//	/gtw fix <issue-id>
+//
+// Steps:
+//
+//  1. RebuildContext (daemon-recovery; §5.7).
+//  2. RepoRoot → RemoteOriginURL → Detect → GetIssue.
+//  3. Branch name = DeriveBranchFromTitle(issue.Title, id).
+//  4. PreflightWorktreeCreate → catches path / branch / parent
+//     errors before WorktreeAdd.
+//  5. BranchExists? → DraftFixBranchExists card.
+//  6. AddLabel(LabelWIP); on WorktreeAdd failure RemoveLabel
+//     and emit DraftFixWorktreeFail card.
+//  7. SetActiveCwd → slot.Store(ModeRemote).
+//  8. Render success card.
+//  9. Dispatch issue body to ChatSession.QueueUserMessage so
+//     the agent picks it up. Failure here does NOT roll back
+//     the worktree — the user can re-trigger manually.
+func runFixRemote(
+	ctx context.Context,
+	cs *chatsession.ChatSession,
+	slot ContextSlot,
+	drafts DraftsMap,
+	deps HandlerDeps,
+	chatID, messageID string,
+	rawID string,
+) (*Result, error) {
+	issueID, err := parseIssueID(rawID)
+	if err != nil {
+		return reply(ctx, deps.Send, chatID, messageID, fmt.Sprintf("❌ %v", err)), nil
+	}
+
+	// F-XX: daemon-recovery via the worktree's git branch was
+	// removed — the F-45 RebuildContext path relied on a
+	// `fix/<id>-*` branch prefix which the new naming
+	// convention no longer uses. Recovery now flows through the
+	// BranchExists → existingPath == worktreePath check below:
+	// when the user re-runs /gtw fix after a daemon restart
+	// while the worktree + branch still exist, we hit the same-
+	// path branch and skip creation. No separate RebuildContext
+	// step is needed.
+
 	prober := deps.Prober
 	if prober == nil {
 		prober = &ExecHTTPProber{}
-	}
-	if rebuilt := RebuildContext(ctx, cs, deps.Git, deps.Detect, prober); rebuilt != (Context{}) {
-		slot.Store(rebuilt)
-		_ = reply(ctx, deps.Send, chatID, messageID, fmt.Sprintf(
-			"♻️ Recovered /gtw fix #%d (state: %s) after daemon restart.\n  branch: %s\n  worktree: %s\n  Continue working in the worktree, or `/cwd` back to the repo before starting a new fix.",
-			rebuilt.Issue, rebuilt.State, rebuilt.Branch, rebuilt.Worktree))
-		return &Result{Consumed: true}, nil
 	}
 
 	// --- locate repo + remote (§5.2.② prep) -----------------------
@@ -139,33 +183,15 @@ func RunFix(
 		return reply(ctx, deps.Send, chatID, messageID,
 			"❌ No `origin` remote. Add one with `git remote add origin <url>`."), nil
 	}
-	// Two-stage provider detection (F-50 §1.2): URL hint first
-	// (zero network), API endpoint probe fallback for self-hosted
-	// GitHub Enterprise / GitLab on custom domains. Returns a
-	// GitProvider already bound to host + version. Tests override
-	// via deps.Detect to inject a fakeProvider.
 	detect := deps.Detect
 	if detect == nil {
 		detect = Detect
 	}
-	// prober is the same instance created earlier for
-	// RebuildContext — reused here so the two Detect calls
-	// (rebuild + main) share the 3s timeout budget rather
-	// than doubling.
 	provider, err := detect(ctx, remoteURL, prober)
 	if err != nil {
-		// D3 split: distinguish "URL is malformed" (user error —
-		// the remote URL itself doesn't parse) from "host not
-		// recognised as GitHub/GitLab" (no provider implementation
-		// for that host yet). The two need different remediation
-		// hints in the IM reply.
-		//
-		// Security: never echo the raw remoteURL — it may carry
-		// userinfo (PAT / oauth2:token) that would leak to the
-		// IM channel. We use redactForDisplay() which strips
-		// credentials + caps length. If redaction fails (truly
-		// unparseable input), we fall back to a generic hint
-		// without any URL echo at all.
+		// D3 split: distinguish "URL is malformed" (user error)
+		// from "host not recognised as GitHub/GitLab". Never
+		// echo the raw remoteURL — it may carry userinfo.
 		redacted := redactForDisplay(remoteURL)
 		switch {
 		case errors.Is(err, ErrInvalidRemoteURL):
@@ -176,20 +202,10 @@ func RunFix(
 			return reply(ctx, deps.Send, chatID, messageID,
 				fmt.Sprintf("❌ 无效的 remote URL: %s\n  Expected: https://github.com/<owner>/<repo>.git, git@github.com:<owner>/<repo>.git, ssh://git@<host>/path, git://<host>/path, etc.", redacted)), nil
 		default:
-			// ErrUnsupportedProvider (or wrapped): both stages
-			// failed. URL hint did not match github.com / gitlab.com,
-			// AND the API probe (when Stage A was ambiguous) did
-			// not recognise the host either. Self-hosted GitHub
-			// Enterprise / GitLab instances are tried first via
-			// /api/v3/meta or /api/v4/version; only true unknowns
-			// (Bitbucket / Gitea — not yet supported in v1) land here.
 			return reply(ctx, deps.Send, chatID, messageID,
 				fmt.Sprintf("❌ 暂不支持的 Git 平台 (host: %s — neither github.com/gitlab.com URL hint nor /api/v3/meta or /api/v4/version probe recognised it).", redacted)), nil
 		}
 	}
-	// Custom deps.Detect may legally return (nil, nil) (e.g. test
-	// fakes for negative paths). Production Detect never does; the
-	// guard prevents a panic in the .Kind() call below.
 	if provider == nil {
 		return reply(ctx, deps.Send, chatID, messageID,
 			"❌ Provider detection returned no result (deps.Detect override bug)."), nil
@@ -201,7 +217,7 @@ func RunFix(
 			fmt.Sprintf("❌ Cannot parse owner/repo from remote URL %s.", redactForDisplay(remoteURL))), nil
 	}
 
-	// --- fetch issue + derive branch + slug (§5.2.②) -------------
+	// --- fetch issue + derive branch (§5.2.②) --------------------
 	issue, err := provider.GetIssue(ctx, owner, repo, issueID)
 	if err != nil {
 		if errors.Is(err, ErrIssueNotFound) {
@@ -211,15 +227,18 @@ func RunFix(
 		return reply(ctx, deps.Send, chatID, messageID,
 			fmt.Sprintf("❌ Failed to fetch issue: %v", err)), nil
 	}
-	branch := DeriveBranch(issueID, issue.Title)
-	// The worktree directory name carries the issue-id prefix so
-	// multiple worktrees under the same repo don't collide on
-	// similar titles. DeriveSlug returns just the title-derived
-	// component; we compose the full worktree slug here.
-	worktreeSlug := fmt.Sprintf("%d-%s", issueID, DeriveSlug(issueID, issue.Title))
-	worktreePath := WorktreePath(repoRoot, worktreeSlug)
+	branch := DeriveBranchFromTitle(issue.Title, issueID)
+	worktreePath := WorktreePath(repoRoot, branch)
 
-	// --- branch-exists decision (§5.3.1) --------------------------
+	// --- branch-exists decision (§5.3.1) -------------------------
+	// Done BEFORE the preflight path-exists check: when the
+	// branch is attached at exactly the target worktree path,
+	// this is the daemon-recovery path (user re-runs /gtw fix
+	// after a restart) and the worktree directory is expected
+	// to exist. Preflight's "path occupied" check would
+	// otherwise block the recovery. The branch-exists card
+	// handles the "branch occupied elsewhere" case (where
+	// preflight would also fail).
 	exists, err := BranchExists(ctx, repoRoot, branch, deps.Git)
 	if err != nil {
 		return reply(ctx, deps.Send, chatID, messageID,
@@ -227,18 +246,32 @@ func RunFix(
 	}
 	if exists {
 		existingPath, _ := WorktreeListPath(ctx, repoRoot, branch, deps.Git)
+		// Normalize both sides: git porcelain paths are absolute but
+		// may carry trailing slashes or ./ components depending on
+		// platform; WorktreePath returns a Clean result. Compare
+		// through filepath.Clean to keep the recovery check in
+		// lockstep with PreflightWorktreeCreate.
+		if existingPath != "" && filepath.Clean(existingPath) == filepath.Clean(worktreePath) {
+			return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
+				branch, worktreePath, owner+"/"+repo, ModeRemote, issueID, issue, true /* skipDispatch */)
+		}
 		return emitBranchExistsDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID:  issueID,
 			Title:    issue.Title,
 			Branch:   branch,
-			Slug:     worktreeSlug,
+			Slug:     branch,
 			Repo:     owner + "/" + repo,
 			Provider: string(providerKind),
 			ChatID:   chatID,
 		}, existingPath)
 	}
 
-	// --- label the issue (§5.2.② cont.) ---------------------------
+	// --- preflight (path / branch / parent) ----------------------
+	if err := PreflightWorktreeCreate(ctx, repoRoot, branch, worktreePath, deps.Git); err != nil {
+		return reply(ctx, deps.Send, chatID, messageID, err.Error()), nil
+	}
+
+	// --- label the issue (§5.2.② cont.) -------------------------
 	labelAdded := false
 	if err := provider.AddLabel(ctx, owner, repo, issueID, LabelWIP); err != nil {
 		_ = deps.Send(ctx, OutMsg{
@@ -250,15 +283,8 @@ func RunFix(
 		labelAdded = true
 	}
 
-	// --- create the worktree (§5.2.③) -----------------------------
+	// --- create the worktree (§5.2.③) ---------------------------
 	if err := WorktreeAdd(ctx, repoRoot, branch, worktreePath, "HEAD", deps.Git); err != nil {
-		// Roll back the label we just added (§5.3.3 §5.4).
-		// We use the caller's ctx (not context.Background()) so
-		// a /kill or client disconnect can abort the rollback
-		// the same way it would the original AddLabel. The
-		// pre-fix version detached the rollback from caller
-		// cancellation, which could leak a slow `glab` child
-		// past daemon shutdown.
 		if labelAdded {
 			_ = provider.RemoveLabel(ctx, owner, repo, issueID, LabelWIP)
 		}
@@ -266,7 +292,7 @@ func RunFix(
 			IssueID:    issueID,
 			Title:      issue.Title,
 			Branch:     branch,
-			Slug:       worktreeSlug,
+			Slug:       branch,
 			Repo:       owner + "/" + repo,
 			Provider:   string(providerKind),
 			GitError:   tailLines(stderrFromWorktreeErr(err), 10),
@@ -275,15 +301,132 @@ func RunFix(
 		})
 	}
 
-	// --- switch cwd (§5.2.④) --------------------------------------
+	// --- switch cwd + write context + render + dispatch ----------
+	return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
+		branch, worktreePath, owner+"/"+repo, ModeRemote, issueID, issue, false)
+}
+
+// runFixLocal implements the F-XX local-mode flow:
+//
+//	/gtw fix --name <branch>
+//
+// Steps:
+//
+//  1. DeriveBranchFromName(rawName) — slugifies user input; errors
+//     out if the result is empty (no remote-issue id to fall
+//     back to).
+//  2. RepoRoot → no origin required.
+//  3. PreflightWorktreeCreate.
+//  4. BranchExists? → DraftFixBranchExists card (no LabelAdded
+//     payload — local mode has no remote state to roll back).
+//  5. WorktreeAdd; on failure emit DraftFixWorktreeFail card.
+//  6. SetActiveCwd → slot.Store(ModeLocal, Issue=-1).
+//  7. Render the simplified local success card.
+//
+// Local mode does NOT call provider.GetIssue / AddLabel /
+// QueueUserMessage — the user is opting into a no-remote flow
+// that should work even in repos without an `origin`.
+func runFixLocal(
+	ctx context.Context,
+	cs *chatsession.ChatSession,
+	slot ContextSlot,
+	drafts DraftsMap,
+	deps HandlerDeps,
+	chatID, messageID string,
+	rawName string,
+) (*Result, error) {
+	branch, err := DeriveBranchFromName(rawName)
+	if err != nil {
+		return reply(ctx, deps.Send, chatID, messageID, "❌ "+err.Error()), nil
+	}
+
+	repoRoot, err := RepoRoot(ctx, cs.ActiveCwd(), deps.Git)
+	if err != nil {
+		return reply(ctx, deps.Send, chatID, messageID,
+			"❌ Not in a git repository. Run /cwd <inside a repo> first."), nil
+	}
+	worktreePath := WorktreePath(repoRoot, branch)
+
+	// --- branch-exists decision (BEFORE preflight; see ID-mode
+	// runFixRemote for the rationale — preflight's "path occupied"
+	// check would block the daemon-recovery path where the branch
+	// is already attached at the target worktree path).
+	exists, err := BranchExists(ctx, repoRoot, branch, deps.Git)
+	if err != nil {
+		return reply(ctx, deps.Send, chatID, messageID,
+			fmt.Sprintf("❌ git show-ref failed: %v", err)), nil
+	}
+	if exists {
+		existingPath, _ := WorktreeListPath(ctx, repoRoot, branch, deps.Git)
+		// See runFixRemote: normalize both sides so porcelain's
+		// sometimes-dirty paths compare equal to WorktreePath.
+		if existingPath != "" && filepath.Clean(existingPath) == filepath.Clean(worktreePath) {
+			return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
+				branch, worktreePath, "", ModeLocal, -1, nil, true /* skipDispatch */)
+		}
+		return emitBranchExistsDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
+			IssueID: -1,
+			Title:   "(local branch)",
+			Branch:  branch,
+			Slug:    branch,
+			Repo:    "",
+			ChatID:  chatID,
+		}, existingPath)
+	}
+
+	if err := PreflightWorktreeCreate(ctx, repoRoot, branch, worktreePath, deps.Git); err != nil {
+		return reply(ctx, deps.Send, chatID, messageID, err.Error()), nil
+	}
+
+	if err := WorktreeAdd(ctx, repoRoot, branch, worktreePath, "HEAD", deps.Git); err != nil {
+		return emitWorktreeFailDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
+			IssueID:  -1,
+			Title:    "(local branch)",
+			Branch:   branch,
+			Slug:     branch,
+			Repo:     "",
+			GitError: tailLines(stderrFromWorktreeErr(err), 10),
+			ChatID:   chatID,
+		})
+	}
+
+	return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
+		branch, worktreePath, "", ModeLocal, -1, nil, false)
+}
+
+// completeFixAndDispatch handles the common tail of both modes:
+// switch cwd → store Context → render success card → dispatch
+// the issue body to the agent (ID mode only). Centralising this
+// means both modes share the same "after worktree is created"
+// logic; the mode-specific bits stay in runFixRemote /
+// runFixLocal.
+//
+// issue is non-nil only in ID mode; local mode passes nil (the
+// dispatcher check at the bottom skips it). skipDispatch is true
+// when the caller already decided we shouldn't dispatch (e.g.
+// the branch was already attached at the target path — a re-entry
+// after daemon recovery).
+func completeFixAndDispatch(
+	ctx context.Context,
+	cs *chatsession.ChatSession,
+	slot ContextSlot,
+	deps HandlerDeps,
+	chatID, messageID, branch, worktreePath, repo string,
+	mode Mode,
+	issueID int,
+	issue *Issue,
+	skipDispatch bool,
+) (*Result, error) {
+	// --- switch cwd (§5.2.④) -------------------------------------
 	if err := cs.SetActiveCwd(worktreePath); err != nil {
 		return reply(ctx, deps.Send, chatID, messageID,
 			fmt.Sprintf("❌ SetActiveCwd failed: %v", err)), nil
 	}
 
-	// --- write gtwContext (§5.2.⑤) --------------------------------
+	// --- write gtwContext (§5.2.⑤) -------------------------------
 	now := deps.Now()
 	slot.Store(Context{
+		Mode:      mode,
 		Issue:     issueID,
 		Branch:    branch,
 		Worktree:  worktreePath,
@@ -291,9 +434,107 @@ func RunFix(
 		UpdatedAt: now,
 	})
 
-	// --- render the success card (§5.2.⑥) -------------------------
-	card := renderFixSuccessCard(issue, branch, worktreePath, owner+"/"+repo)
-	return reply(ctx, deps.Send, chatID, messageID, card), nil
+	// --- render the success card (§5.2.⑥) ------------------------
+	var card string
+	if mode == ModeLocal {
+		card = renderFixLocalSuccessCard(branch, worktreePath)
+	} else {
+		// ID mode. Callers (runFixRemote) guarantee issue is
+		// non-nil; a nil here would be a programming error.
+		card = renderFixSuccessCard(issue, branch, worktreePath, repo)
+	}
+	result := reply(ctx, deps.Send, chatID, messageID, card)
+
+	// --- dispatch issue to agent (ID mode only) -------------------
+	// We do this AFTER the reply so the user sees the success
+	// card immediately even if dispatch stalls / fails. Failures
+	// here are warn-only — the worktree is the durable side
+	// effect; a failed dispatch can be retried by the user
+	// re-running /gtw fix or by manually sending the issue
+	// reference to the agent.
+	if mode == ModeRemote && !skipDispatch && issue != nil {
+		if err := dispatchIssueToChatSession(ctx, cs, deps.Now, chatID, messageID, issue, branch, repo); err != nil {
+			slog.Default().Warn("gtw: dispatch issue to agent failed",
+				"issue_id", issue.ID,
+				"chat_id", chatID,
+				"err", err)
+			// Append a single-line warning so the user knows
+			// the agent didn't receive the dispatch. We do not
+			// roll back the worktree — see comment above.
+			_ = deps.Send(ctx, OutMsg{
+				ChatID:  chatID,
+				ReplyTo: messageID,
+				Text:    fmt.Sprintf("⚠️ Could not dispatch issue #%d to agent: %v\nThe worktree is ready; you can /cwd into %s and tell the agent to fix #%d.", issue.ID, err, worktreePath, issue.ID),
+			})
+		}
+	}
+	return result, nil
+}
+
+// dispatchIssueToChatSession packages the issue into a fixed-
+// template text block and pushes it into the chat session's
+// input queue. The queue's TryFlush() will spawn (or reuse) an
+// AgentSession and submit the prompt.
+//
+// The synthesised Message reuses the GTW command's inbound
+// messageID so the agent's reply is anchored as a thread reply
+// under the user's original /gtw fix command — IM UX continuity.
+//
+// Kind is MessageKindQueue so the message forms its own Prompt
+// batch and isn't merged with subsequent user messages (a user
+// typing "thanks" right after the /gtw fix shouldn't be batched
+// into the same prompt as "fix issue #42").
+//
+// now is the clock dependency; callers pass deps.Now (which is
+// already used by completeFixAndDispatch for the Context
+// timestamp) so tests can pin time deterministically.
+func dispatchIssueToChatSession(
+	ctx context.Context,
+	cs *chatsession.ChatSession,
+	now func() time.Time,
+	chatID, messageID string,
+	issue *Issue,
+	branch, repo string,
+) error {
+	body := buildIssueDispatchText(issue, branch, repo)
+	// F-54 timing: the runtime dispatcher (cmd/nightme/run.go)
+	// emits MessageQueued BEFORE QueueUserMessage so channels
+	// can render the ⏳ indicator while the agent spawns. We
+	// honour the same contract here: emit first, then queue.
+	cs.EmitMessageState(messageID, agent.MessageQueued)
+	return cs.QueueUserMessage(chatsession.Message{
+		ID:         messageID,
+		ChatID:     chatID,
+		Blocks:     []agent.ContentBlock{{Type: agent.ContentText, Text: body}},
+		ReceivedAt: now(),
+		Kind:       chatsession.MessageKindQueue,
+	})
+}
+
+// buildIssueDispatchText formats the issue as a fixed-template
+// markdown block. The template lives here (rather than in the
+// renderer) because it's the "agent prompt" not the "user-facing
+// success card". The user never sees this body directly — they
+// see the success card; the agent sees this block.
+//
+// Section order is stable so agent prompts can rely on it:
+// header / metadata / body / closing.
+func buildIssueDispatchText(issue *Issue, branch, repo string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "📥 GitHub issue #%d — %s\n\n", issue.ID, issue.Title)
+	fmt.Fprintf(&b, "## Metadata\n")
+	fmt.Fprintf(&b, "- repo: %s\n", repo)
+	fmt.Fprintf(&b, "- branch: %s\n", branch)
+	fmt.Fprintf(&b, "- url: %s\n\n", issue.URL)
+	if strings.TrimSpace(issue.Body) != "" {
+		b.WriteString("## Description\n")
+		b.WriteString(issue.Body)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("## Task\n")
+	b.WriteString("Please investigate the issue above and implement a fix on the branch noted. ")
+	b.WriteString("The worktree is already prepared; reply when you have a plan, then proceed.")
+	return b.String()
 }
 
 // parseIssueID accepts a string like "42" or "#42" and returns the
@@ -453,7 +694,16 @@ func renderCardMarkdown(c Card) string {
 // under the user's /gtw fix message (ReplyTo = messageID) so the
 // channel can render it as a thread reply rather than a fresh top-
 // level bubble.
+//
+// F-XX: nil-safe on `send`. The runtime historically left
+// HandlerDeps.Send nil (chatSessionSender carried the actual
+// channel adapter); if a future wiring change regresses that,
+// calling a nil SendFunc would panic. The defensive `if send
+// != nil` keeps the helper safe and degrades to "reply
+// consumed but no text sent" rather than crashing the daemon.
 func reply(ctx context.Context, send SendFunc, chatID, messageID, text string) *Result {
-	_ = send(ctx, OutMsg{ChatID: chatID, ReplyTo: messageID, Text: text})
+	if send != nil {
+		_ = send(ctx, OutMsg{ChatID: chatID, ReplyTo: messageID, Text: text})
+	}
 	return &Result{Consumed: true}
 }

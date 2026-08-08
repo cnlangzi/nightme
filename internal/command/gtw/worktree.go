@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -62,14 +64,13 @@ func RepoRoot(ctx context.Context, dir string, git GitRunner) (string, error) {
 }
 
 // RemoteOriginURL returns the URL of the "origin" remote, or "" if
-// no origin is configured. Consumed by gtw.RunFix and
-// gtw.RebuildContext to drive Provider detection (URL hint +
-// optional API probe for self-hosted GitHub Enterprise / GitLab).
+// no origin is configured. Consumed by gtw.runFixRemote to drive
+// Provider detection (URL hint + optional API probe for self-hosted
+// GitHub Enterprise / GitLab). Local mode (runFixLocal) does not
+// call this — local worktrees have no remote issue.
 //
 // The canonical Provider-abstraction design is in
-// docs/feat/F-50-git-provider.md (F-50 landed in v1.3.x as the
-// "do it once and for all" replacement for the dangling
-// "F-45 §7.2" reference that used to live here).
+// docs/feat/F-50-git-provider.md.
 func RemoteOriginURL(ctx context.Context, dir string, git GitRunner) (string, error) {
 	out, _, err := git.Run(ctx, dir, "remote", "get-url", "origin")
 	if err != nil {
@@ -128,10 +129,11 @@ func WorktreeListPath(ctx context.Context, dir, branch string, git GitRunner) (s
 	if err != nil {
 		return "", err
 	}
-	_ = strings.SplitSeq(out, "\n") // doc reference: porcelain is line-oriented
 	// Walk the porcelain output once, tracking the most recent
 	// "worktree <path>" line so we can return the path whose
-	// "branch refs/heads/<branch>" line follows.
+	// "branch refs/heads/<branch>" line follows. Porcelain is
+	// line-oriented (one record per worktree, fields separated
+	// by newlines) so strings.Split is the right tool.
 	lines := strings.Split(out, "\n")
 	var path string
 	for _, line := range lines {
@@ -194,3 +196,80 @@ func (e *WorktreeError) Error() string {
 }
 
 func (e *WorktreeError) Unwrap() error { return e.Err }
+
+// PreflightWorktreeCreate runs four cheap checks before
+// `git worktree add`, so the user sees a clean error instead of
+// `git`'s internal "fatal: ..." strings. Returns nil when all
+// checks pass.
+//
+// F-XX: new for the gtw mode-split refactor.
+//
+// Checks (in order):
+//
+//  1. If `branch` is already attached to the target worktree
+//     path (a re-entry after daemon recovery, or a same-path
+//     repeat), return nil. The worktree directory exists
+//     intentionally in this case; the caller treats it as
+//     "already set up" rather than "create a new one".
+//  2. Branch not already attached to a DIFFERENT worktree via
+//     `git worktree list --porcelain` (catches `fatal: <branch>
+//     is already checked out at <other>`).
+//  3. Target path not already present on the filesystem
+//     (catches `fatal: <path> already exists`).
+//  4. Parent directory of the worktree path exists and is
+//     writable by us (catches `fatal: cannot create directory
+//     at <path>: Permission denied`).
+//
+// Pre-fix this code path deferred all checks to `WorktreeAdd`,
+// relying on its opaque `*WorktreeError` for surface. Users had
+// to read 10 lines of stderr to figure out which case they'd
+// hit; preflight surfaces a one-line friendly error.
+//
+// The same-path short-circuit (check 1) means the caller MUST
+// already have decided the branch is the right one — i.e. the
+// caller has done BranchExists(...) and seen true. The runFix*
+// callers honour that ordering; new callers should not skip
+// the BranchExists check before invoking preflight.
+func PreflightWorktreeCreate(ctx context.Context, repoRoot, branch, worktreePath string, git GitRunner) error {
+	attachedPath, err := WorktreeListPath(ctx, repoRoot, branch, git)
+	if err != nil {
+		return fmt.Errorf("git worktree list: %w", err)
+	}
+	if attachedPath != "" && filepath.Clean(attachedPath) == filepath.Clean(worktreePath) {
+		// Branch is attached at exactly the target path —
+		// daemon-recovery / repeat-run case. Allow it.
+		return nil
+	}
+	if attachedPath != "" {
+		return fmt.Errorf(
+			"❌ branch %q already checked out at %q — join that worktree, remove it, or pick a different branch",
+			branch, attachedPath,
+		)
+	}
+
+	if _, err := os.Stat(worktreePath); err == nil {
+		return fmt.Errorf(
+			"❌ worktree path %q already exists on filesystem — clean up before retrying",
+			worktreePath,
+		)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat worktree path %q: %w", worktreePath, err)
+	}
+
+	parent := filepath.Dir(worktreePath)
+	if info, err := os.Stat(parent); err != nil || !info.IsDir() {
+		return fmt.Errorf(
+			"❌ parent directory %q is not a usable directory: %v",
+			parent, err,
+		)
+	}
+	probeDir, err := os.MkdirTemp(parent, ".gtw-probe-*")
+	if err != nil {
+		return fmt.Errorf(
+			"❌ parent directory %q is not writable: %w",
+			parent, err,
+		)
+	}
+	_ = os.RemoveAll(probeDir)
+	return nil
+}

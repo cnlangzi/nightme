@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command/services"
 )
 
@@ -17,21 +18,22 @@ import (
 //
 // The runtime instantiates one Manager per process and shares
 // it across all chats. Per-chat substate (states / drafts /
-// senders) is keyed by chatID and protected by a single
-// sync.RWMutex.
+// chatSessions cache) is keyed by chatID and protected by a
+// single sync.RWMutex.
 type Manager struct {
 	mu      sync.RWMutex
-	states  map[string]Context              // chatID -> active /gtw fix snapshot
-	drafts  map[string]map[string]*Draft    // chatID -> userMsgID -> pending draft
-	senders map[string]Sender               // chatID -> outbound sender (cached per factory invocation)
+	states  map[string]Context                       // chatID -> active /gtw fix snapshot
+	drafts  map[string]map[string]*Draft             // chatID -> userMsgID -> pending draft
+	chatSessions map[string]*chatsession.ChatSession // chatID -> live ChatSession (cached per factory invocation)
 
-	// senderFactory is the runtime-supplied constructor for
-	// per-chat Sender instances. Called lazily on GetSender
-	// miss. Set via SetSenderFactory at runtime startup.
-	// nil = no factory; GetSender returns nil and the gtw
-	// command fails loudly (rather than silently corrupting
-	// state with a nil deref).
-	senderFactory func(chatID string) Sender
+	// chatSessionLookup is the runtime-supplied closure that
+	// resolves a chatID to its *chatsession.ChatSession on
+	// demand. Called lazily on GetChatSession miss. Set via
+	// SetGetChatSession at runtime startup. nil = no factory;
+	// GetChatSession returns nil and the gtw command fails
+	// loudly (rather than silently corrupting state with a nil
+	// deref).
+	chatSessionLookup func(chatID string) *chatsession.ChatSession
 
 	// now is overridable for tests; defaults to time.Now.
 	now func() time.Time
@@ -43,93 +45,82 @@ type Manager struct {
 }
 
 // NewManager returns an empty Manager ready to receive per-chat
-// state. Send funnels and providers are wired at runtime.
+// state. ChatSession lookup is wired at runtime.
 func NewManager() *Manager {
 	return &Manager{
-		states:  make(map[string]Context),
-		drafts:  make(map[string]map[string]*Draft),
-		senders: make(map[string]Sender),
-		now:     time.Now,
+		states:       make(map[string]Context),
+		drafts:       make(map[string]map[string]*Draft),
+		chatSessions: make(map[string]*chatsession.ChatSession),
+		now:          time.Now,
 	}
 }
 
-// SetSender registers the outbound Sender for a chat. Called
-// by the runtime after a chat is created or restored. gtw uses
-// this to send replies and PATCHes without holding a *chatsession
-// pointer.
-func (m *Manager) SetSender(chatID string, s Sender) {
-	if chatID == "" || s == nil {
-		return
-	}
+// SetGetChatSession installs a closure that resolves chatID to
+// its *chatsession.ChatSession on demand. The factory is called
+// under the manager's read lock; the result is cached, so
+// subsequent GetChatSession calls are O(1).
+//
+// F-XX runtime wiring: cmd/nightme/run.go installs a closure
+// that holds a *chatsession.Manager reference. The closure
+// delegates to mgr.GetOrCreate(chatID, primary) so per-chat
+// session materialisation follows the same path as the
+// runtime's other consumers.
+//
+// Tests install a closure that returns a per-chat fake
+// *chatsession.ChatSession (see manager_test.go's
+// fakeChatSession helper).
+//
+// nil disables the lazy path (GetChatSession returns nil).
+//
+// F-XX: replaces the old SetSender / SetChatSession pair —
+// the runtime never needs to pre-populate; the closure-based
+// lookup is enough.
+func (m *Manager) SetGetChatSession(fn func(chatID string) *chatsession.ChatSession) {
 	m.mu.Lock()
-	m.senders[chatID] = s
+	m.chatSessionLookup = fn
 	m.mu.Unlock()
 }
 
-// SetSenderFactory installs a function that creates a Sender
-// on demand when GetSender is called for a chatID that has no
-// pre-registered Sender. The factory is called under the
-// manager's read lock (the result is cached, so subsequent
-// GetSender calls are O(1)).
+// GetChatSession returns the *chatsession.ChatSession
+// registered for chatID. If none is pre-registered AND a
+// chatSessionLookup is installed, the lookup is called once
+// and the result is cached. Returns nil when no ChatSession is
+// available.
 //
-// F-51 runtime wiring: cmd/nightme/run.go installs a factory
-// that holds a *chatsession.Manager reference + a Channel
-// adapter. Per-chat Sender instances back onto the live chat
-// session (via mgr.GetOrCreate(chatID, primary)) for
-// ActiveCwd / SetActiveCwd and onto the channel for Send.
+// Used internally by RunFix / HandleDraftReaction to access
+// ActiveCwd / SetActiveCwd / QueueUserMessage without going
+// through an interface boundary.
 //
-// The runtime factory holds *chatsession.Manager directly.
-//
-// nil disables the lazy path (GetSender returns nil).
-func (m *Manager) SetSenderFactory(fn func(chatID string) Sender) {
-	m.mu.Lock()
-	m.senderFactory = fn
-	m.mu.Unlock()
-}
-
-// UnsetSender drops the Sender for a chat (e.g. on chat delete).
-func (m *Manager) UnsetSender(chatID string) {
-	m.mu.Lock()
-	delete(m.senders, chatID)
-	m.mu.Unlock()
-}
-
-// GetSender returns the Sender registered for chatID. If no
-// Sender is pre-registered AND a senderFactory is installed,
-// the factory is called once and the result is cached. Returns
-// nil when no Sender is available.
-//
-// Used internally by RunFix / HandleDraftReaction to push
-// outbound without going through ChatSession.
-func (m *Manager) GetSender(chatID string) Sender {
+// F-XX: replaces GetSender.
+func (m *Manager) GetChatSession(chatID string) *chatsession.ChatSession {
 	if chatID == "" {
 		return nil
 	}
 	m.mu.RLock()
-	s, ok := m.senders[chatID]
-	factory := m.senderFactory
+	cs, ok := m.chatSessions[chatID]
+	lookup := m.chatSessionLookup
 	m.mu.RUnlock()
 	if ok {
-		return s
+		return cs
 	}
-	if factory == nil {
+	if lookup == nil {
 		return nil
 	}
-	// Call factory outside the lock (factory may itself
-	// acquire other locks — e.g. *chatsession.Manager's Get
-	// takes a read lock).
-	fresh := factory(chatID)
+	// Call lookup outside the lock (lookup may itself acquire
+	// other locks — e.g. *chatsession.Manager.GetOrCreate takes
+	// a write lock).
+	fresh := lookup(chatID)
 	if fresh == nil {
 		return nil
 	}
 	m.mu.Lock()
 	// Double-check after re-acquiring: another goroutine may
-	// have raced us to install a sender.
-	if existing, ok := m.senders[chatID]; ok {
+	// have raced us to install a ChatSession.
+	if existing, ok := m.chatSessions[chatID]; ok {
 		m.mu.Unlock()
 		return existing
 	}
-	m.senders[chatID] = fresh
+	m.chatSessions[chatID] = fresh
 	m.mu.Unlock()
 	return fresh
 }
@@ -254,12 +245,12 @@ func (m *Manager) ClearDrafts(chatID string) {
 }
 
 // Reset clears all state for chatID (context + drafts +
-// sender). Used by `nightme gtw reset` debug command.
+// ChatSession cache). Used by `nightme gtw reset` debug command.
 func (m *Manager) Reset(chatID string) {
 	m.mu.Lock()
 	delete(m.states, chatID)
 	delete(m.drafts, chatID)
-	delete(m.senders, chatID)
+	delete(m.chatSessions, chatID)
 	m.mu.Unlock()
 }
 

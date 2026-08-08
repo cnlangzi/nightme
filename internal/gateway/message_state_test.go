@@ -37,14 +37,17 @@ func (c *fakeChannel) SendCard(_ context.Context, m OutboundMessage) (string, er
 }
 
 // TestOnMessageState_TranslatesToOutbound verifies that
-// Gateway.OnMessageState produces the right OutboundMessage
-// (Kind, MessageStatePayload) and forwards it through
-// the resolved channel's Send. After §1.4 cleanup, the
-// message_id + state fields live in the typed MessageStatePayload
-// (not in Meta).
+// emitMessageState produces the right OutboundMessage (Kind,
+// MessageStatePayload) and forwards it through the resolved
+// channel's Send. After §1.4 cleanup, the message_id + state
+// fields live in the typed MessageStatePayload (not in Meta).
+//
+// F-54: emitMessageState now lives in message_state_helpers_test.go
+// (test-only). The production path is the MessageStateBus
+// subscriber in cmd/nightme/run.go which adds the F-48 stamp.
 func TestOnMessageState_TranslatesToOutbound(t *testing.T) {
 	gw, ch := newWiredRouter(t)
-	gw.OnMessageState("oc_chat", "om_user_msg", agent.MessageQueued)
+	emitMessageState(gw, "oc_chat", "om_user_msg", agent.MessageQueued)
 
 	if len(ch.sends) != 1 {
 		t.Fatalf("got %d sends; want 1", len(ch.sends))
@@ -75,7 +78,7 @@ func TestOnMessageState_TranslatesToOutbound(t *testing.T) {
 	}
 }
 
-// TestOnMessageState_NoChannelDrops verifies that OnMessageState
+// TestOnMessageState_NoChannelDrops verifies that emitMessageState
 // is a silent drop when no channel is registered for the chat
 // (per F-31 §9: never block caller, log warn).
 func TestOnMessageState_NoChannelDrops(t *testing.T) {
@@ -84,7 +87,7 @@ func TestOnMessageState_NoChannelDrops(t *testing.T) {
 	gw.mu.Lock()
 	gw.defaultChannel = nil
 	gw.mu.Unlock()
-	gw.OnMessageState("oc_unknown", "om_msg", agent.MessageQueued)
+	emitMessageState(gw, "oc_unknown", "om_msg", agent.MessageQueued)
 	if len(ch.sends) != 0 {
 		t.Errorf("got %d sends; want 0 (no channel registered)", len(ch.sends))
 	}
@@ -94,8 +97,8 @@ func TestOnMessageState_NoChannelDrops(t *testing.T) {
 // userMsgID is a silent drop (defensive against malformed events).
 func TestOnMessageState_EmptyIDsDrops(t *testing.T) {
 	gw, ch := newWiredRouter(t)
-	gw.OnMessageState("", "om_msg", agent.MessageQueued)
-	gw.OnMessageState("oc_chat", "", agent.MessageQueued)
+	emitMessageState(gw, "", "om_msg", agent.MessageQueued)
+	emitMessageState(gw, "oc_chat", "", agent.MessageQueued)
 	if len(ch.sends) != 0 {
 		t.Errorf("got %d sends; want 0 (empty chat/user ID)", len(ch.sends))
 	}
@@ -114,7 +117,7 @@ func TestOnMessageState_AllStatesPassThrough(t *testing.T) {
 		agent.MessageDropped,
 	}
 	for i, s := range states {
-		gw.OnMessageState("oc_chat", "om_"+string(rune('a'+i)), s)
+		emitMessageState(gw, "oc_chat", "om_"+string(rune('a'+i)), s)
 	}
 	if len(ch.sends) != len(states) {
 		t.Fatalf("got %d sends; want %d", len(ch.sends), len(states))
@@ -133,7 +136,7 @@ func TestOnMessageState_AllStatesPassThrough(t *testing.T) {
 // newWiredRouter builds a minimal Gateway with a single fakeChannel
 // attached and chatToChan populated for "oc_chat". Returns the
 // concrete *Router so the test can call package-internal helpers
-// (OnMessageState, AttachChannels) directly.
+// (emitMessageState, AttachChannels) directly.
 func newWiredRouter(t *testing.T) (*Router, *fakeChannel) {
 	t.Helper()
 	ch := &fakeChannel{}

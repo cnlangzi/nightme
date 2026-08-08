@@ -1,4 +1,4 @@
-// Package services — Bus[T] tests (F-54).
+// Package services — EventBus[T] tests (F-54).
 //
 // Covers the 9 core invariants from docs/feat/F-54-event-bus.md §5:
 // registration order, consume-stops-chain, panic isolation,
@@ -14,9 +14,9 @@ import (
 	"time"
 )
 
-// TestBus_PublishOrder — handlers fire in registration order.
-func TestBus_PublishOrder(t *testing.T) {
-	b := NewBus[int]()
+// TestEventBus_PublishOrder — handlers fire in registration order.
+func TestEventBus_PublishOrder(t *testing.T) {
+	b := NewEventBus[int]()
 	var order []int
 
 	b.Subscribe(func(_ int) bool { order = append(order, 1); return false })
@@ -30,9 +30,9 @@ func TestBus_PublishOrder(t *testing.T) {
 	}
 }
 
-// TestBus_ConsumeStopsChain — first true stops the chain.
-func TestBus_ConsumeStopsChain(t *testing.T) {
-	b := NewBus[int]()
+// TestEventBus_ConsumeStopsChain — first true stops the chain.
+func TestEventBus_ConsumeStopsChain(t *testing.T) {
+	b := NewEventBus[int]()
 	var ran []int
 
 	b.Subscribe(func(_ int) bool { ran = append(ran, 1); return true }) // consumes
@@ -47,9 +47,9 @@ func TestBus_ConsumeStopsChain(t *testing.T) {
 	}
 }
 
-// TestBus_AllFalseContinues — all false → chain runs through, returns false.
-func TestBus_AllFalseContinues(t *testing.T) {
-	b := NewBus[int]()
+// TestEventBus_AllFalseContinues — all false → chain runs through, returns false.
+func TestEventBus_AllFalseContinues(t *testing.T) {
+	b := NewEventBus[int]()
 	var ran int
 
 	b.Subscribe(func(_ int) bool { ran++; return false })
@@ -63,11 +63,11 @@ func TestBus_AllFalseContinues(t *testing.T) {
 	}
 }
 
-// TestBus_PanicRecovered — handler panic is recovered; later handlers
+// TestEventBus_PanicRecovered — handler panic is recovered; later handlers
 // still run; consumed reports false (the panicking handler didn't
 // consume, semantically).
-func TestBus_PanicRecovered(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_PanicRecovered(t *testing.T) {
+	b := NewEventBus[int]()
 	var ranAfterPanic bool
 
 	b.Subscribe(func(_ int) bool { panic("boom") })
@@ -81,10 +81,10 @@ func TestBus_PanicRecovered(t *testing.T) {
 	}
 }
 
-// TestBus_UnsubscribeIdempotent — calling unsubscribe more than once
+// TestEventBus_UnsubscribeIdempotent — calling unsubscribe more than once
 // is a no-op (doesn't crash, doesn't affect others).
-func TestBus_UnsubscribeIdempotent(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_UnsubscribeIdempotent(t *testing.T) {
+	b := NewEventBus[int]()
 	var ran int
 
 	unbind := b.Subscribe(func(_ int) bool { ran++; return false })
@@ -99,10 +99,10 @@ func TestBus_UnsubscribeIdempotent(t *testing.T) {
 	}
 }
 
-// TestBus_UnsubscribeFromInsideHandler — handler can unsub itself
+// TestEventBus_UnsubscribeFromInsideHandler — handler can unsub itself
 // (or others) without affecting the current Publish pass.
-func TestBus_UnsubscribeFromInsideHandler(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_UnsubscribeFromInsideHandler(t *testing.T) {
+	b := NewEventBus[int]()
 	var selfUnbind func()
 
 	// selfUnbind is captured by reference in the closure; the first
@@ -125,10 +125,10 @@ func TestBus_UnsubscribeFromInsideHandler(t *testing.T) {
 	}
 }
 
-// TestBus_ClearDropsAll — Clear empties the subscriber list; bus
+// TestEventBus_ClearDropsAll — Clear empties the subscriber list; bus
 // stays open and Subscribe still works after.
-func TestBus_ClearDropsAll(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_ClearDropsAll(t *testing.T) {
+	b := NewEventBus[int]()
 	var ran int
 
 	b.Subscribe(func(_ int) bool { ran++; return false })
@@ -157,10 +157,10 @@ func TestBus_ClearDropsAll(t *testing.T) {
 	}
 }
 
-// TestBus_CloseStopsPublish — Close marks the bus closed; all
+// TestEventBus_CloseStopsPublish — Close marks the bus closed; all
 // subsequent ops are no-ops.
-func TestBus_CloseStopsPublish(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_CloseStopsPublish(t *testing.T) {
+	b := NewEventBus[int]()
 	var ran int
 
 	b.Subscribe(func(_ int) bool { ran++; return false })
@@ -185,11 +185,11 @@ func TestBus_CloseStopsPublish(t *testing.T) {
 	b.Clear()
 }
 
-// TestBus_NilSafe — every method on a nil *Bus[T] is a no-op
+// TestEventBus_NilSafe — every method on a nil *EventBus[T] is a no-op
 // (Subscribe returns a working unsubscribe; Publish returns false;
 // Clear / Close / Len are no-ops).
-func TestBus_NilSafe(t *testing.T) {
-	var b *Bus[int]
+func TestEventBus_NilSafe(t *testing.T) {
+	var b *EventBus[int]
 
 	if b.Publish(0) {
 		t.Fatal("nil.Publish should return false")
@@ -207,12 +207,12 @@ func TestBus_NilSafe(t *testing.T) {
 	unbind() // must not panic
 }
 
-// TestBus_ConcurrentSubscribe — Subscribe is safe under concurrent
+// TestEventBus_ConcurrentSubscribe — Subscribe is safe under concurrent
 // calls. Run with `-race` to catch missing synchronization. We don't
 // assert on Publish ordering under concurrency; that's a separate
 // test (and intentionally not guaranteed across goroutines).
-func TestBus_ConcurrentSubscribe(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_ConcurrentSubscribe(t *testing.T) {
+	b := NewEventBus[int]()
 	var wg sync.WaitGroup
 	var n int64
 
@@ -237,10 +237,10 @@ func TestBus_ConcurrentSubscribe(t *testing.T) {
 	}
 }
 
-// TestBus_NilHandler — Subscribe with nil fn returns a no-op
+// TestEventBus_NilHandler — Subscribe with nil fn returns a no-op
 // unsubscribe; the nil fn is never invoked.
-func TestBus_NilHandler(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_NilHandler(t *testing.T) {
+	b := NewEventBus[int]()
 	unbind := b.Subscribe(nil)
 	unbind() // must not panic
 
@@ -250,13 +250,13 @@ func TestBus_NilHandler(t *testing.T) {
 	}
 }
 
-// TestBus_SubscribeAfterClose_NeverFires verifies the contract:
+// TestEventBus_SubscribeAfterClose_NeverFires verifies the contract:
 // after Close, no handler — whether added before or racing with
 // Close — ever fires from Publish. The TOCTOU window in Subscribe
 // (Load closed, then Lock+append) is acceptable because Publish
 // rechecks closed before invoking any handler. Run with -race.
-func TestBus_SubscribeAfterClose_NeverFires(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_SubscribeAfterClose_NeverFires(t *testing.T) {
+	b := NewEventBus[int]()
 	var ran int32
 
 	var wg sync.WaitGroup
@@ -303,16 +303,16 @@ func equalIntSlice(a, b []int) bool {
 // formatting, the snapshot copy, and the nil-safe comparisons all
 // behave correctly across the full parameter space.
 
-// TestBus_StructPayload verifies Bus works with a struct event
+// TestEventBus_StructPayload verifies Bus works with a struct event
 // type (the shape used by chatsession.AgentEventEnvelope et al.).
 // Snapshots must copy struct values correctly and handler invocation
 // must see the original values, not aliased mutations.
-func TestBus_StructPayload(t *testing.T) {
+func TestEventBus_StructPayload(t *testing.T) {
 	type payload struct {
 		ID   int
 		Name string
 	}
-	b := NewBus[payload]()
+	b := NewEventBus[payload]()
 
 	var got payload
 	b.Subscribe(func(p payload) bool {
@@ -329,10 +329,10 @@ func TestBus_StructPayload(t *testing.T) {
 	}
 }
 
-// TestBus_StringPayload verifies Bus works with string T (zero value
+// TestEventBus_StringPayload verifies Bus works with string T (zero value
 // is ""; non-nil; typeName should return "string").
-func TestBus_StringPayload(t *testing.T) {
-	b := NewBus[string]()
+func TestEventBus_StringPayload(t *testing.T) {
+	b := NewEventBus[string]()
 	var got []string
 
 	b.Subscribe(func(s string) bool {
@@ -348,12 +348,12 @@ func TestBus_StringPayload(t *testing.T) {
 	}
 }
 
-// TestBus_PointerPayload verifies Bus works with *T (pointer to a
+// TestEventBus_PointerPayload verifies Bus works with *T (pointer to a
 // struct). Each Publish may carry a different pointer; handlers see
 // the exact pointer passed.
-func TestBus_PointerPayload(t *testing.T) {
+func TestEventBus_PointerPayload(t *testing.T) {
 	type message struct{ Body string }
-	b := NewBus[*message]()
+	b := NewEventBus[*message]()
 
 	var got *message
 	b.Subscribe(func(m *message) bool {
@@ -373,14 +373,14 @@ func TestBus_PointerPayload(t *testing.T) {
 	}
 }
 
-// TestBus_PointerPayload_PanicRecovers verifies panic recovery
+// TestEventBus_PointerPayload_PanicRecovers verifies panic recovery
 // works for pointer-typed T. The log uses fmt.Sprintf("%T", zero)
 // which formats a typed-nil *T as "*pkg.Foo" (not the empty
 // string — Go's typed-nil interface semantics mean the empty
 // branch in typeName is unreachable for concrete pointer types).
-func TestBus_PointerPayload_PanicRecovers(t *testing.T) {
+func TestEventBus_PointerPayload_PanicRecovers(t *testing.T) {
 	type message struct{ Body string }
-	b := NewBus[*message]()
+	b := NewEventBus[*message]()
 
 	b.Subscribe(func(_ *message) bool { panic("boom") })
 
@@ -390,16 +390,16 @@ func TestBus_PointerPayload_PanicRecovers(t *testing.T) {
 	}
 }
 
-// TestBus_SnapshotMutationSafety verifies that even if a handler
+// TestEventBus_SnapshotMutationSafety verifies that even if a handler
 // mutates the event payload after Publish returns, earlier handlers
 // (in the same Publish pass) saw the original value. The snapshot
 // mechanism in Publish copies busEntry values (not pointers) so the
 // function pointer is fixed; the payload itself is the caller's
 // responsibility. This test pins the contract that Subscribe
 // receives a per-Publish fresh payload, not a shared mutable one.
-func TestBus_SnapshotMutationSafety(t *testing.T) {
+func TestEventBus_SnapshotMutationSafety(t *testing.T) {
 	type payload struct{ Value int }
-	b := NewBus[payload]()
+	b := NewEventBus[payload]()
 	var seen []int
 
 	b.Subscribe(func(p payload) bool {
@@ -417,12 +417,12 @@ func TestBus_SnapshotMutationSafety(t *testing.T) {
 	}
 }
 
-// TestBus_EmptyPayload_Behavior pins behavior with empty struct
+// TestEventBus_EmptyPayload_Behavior pins behavior with empty struct
 // payloads (zero-size T). Cheap to cover; future-proofs against
 // regressions in the snapshot machinery for size-zero types.
-func TestBus_EmptyPayload_Behavior(t *testing.T) {
+func TestEventBus_EmptyPayload_Behavior(t *testing.T) {
 	type empty struct{}
-	b := NewBus[empty]()
+	b := NewEventBus[empty]()
 
 	var ran int
 	b.Subscribe(func(_ empty) bool {
@@ -440,12 +440,12 @@ func TestBus_EmptyPayload_Behavior(t *testing.T) {
 
 // --- Closed-bus state machine -------------------------------------
 
-// TestBus_SubscribeOnClosedBusIsNoop verifies that calling
+// TestEventBus_SubscribeOnClosedBusIsNoop verifies that calling
 // Subscribe on an already-closed bus is a no-op (returns a
 // no-op unsubscribe, doesn't append to the handler slice). This
-// is the sequential analog of TestBus_SubscribeAfterClose_NeverFires.
-func TestBus_SubscribeOnClosedBusIsNoop(t *testing.T) {
-	b := NewBus[int]()
+// is the sequential analog of TestEventBus_SubscribeAfterClose_NeverFires.
+func TestEventBus_SubscribeOnClosedBusIsNoop(t *testing.T) {
+	b := NewEventBus[int]()
 	b.Close()
 
 	var ran int
@@ -469,11 +469,11 @@ func TestBus_SubscribeOnClosedBusIsNoop(t *testing.T) {
 	unbind()
 }
 
-// TestBus_PublishOnClosedBusIgnoresSubscribers verifies that even
+// TestEventBus_PublishOnClosedBusIgnoresSubscribers verifies that even
 // if handlers are registered before Close, Publish after Close is
 // a no-op. Pin the contract: close is a hard barrier.
-func TestBus_PublishOnClosedBusIgnoresSubscribers(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_PublishOnClosedBusIgnoresSubscribers(t *testing.T) {
+	b := NewEventBus[int]()
 	var ran int32
 	b.Subscribe(func(_ int) bool {
 		atomic.AddInt32(&ran, 1)
@@ -490,13 +490,13 @@ func TestBus_PublishOnClosedBusIgnoresSubscribers(t *testing.T) {
 	}
 }
 
-// TestBus_UnsubscribeAfterCloseIsNoop verifies that calling the
+// TestEventBus_UnsubscribeAfterCloseIsNoop verifies that calling the
 // unsubscribe func returned from a pre-Close Subscribe, after the
 // bus has been Closed, doesn't panic and doesn't try to mutate a
 // nil slice. Defensive: production shutdown order is
 // unsubscribe → Close, but the inverse should also be safe.
-func TestBus_UnsubscribeAfterCloseIsNoop(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_UnsubscribeAfterCloseIsNoop(t *testing.T) {
+	b := NewEventBus[int]()
 	unbind := b.Subscribe(func(_ int) bool { return false })
 	b.Close()
 
@@ -504,10 +504,10 @@ func TestBus_UnsubscribeAfterCloseIsNoop(t *testing.T) {
 	unbind()
 }
 
-// TestBus_ClearOnClosedBusIsNoop — defensive; Clear on a closed
+// TestEventBus_ClearOnClosedBusIsNoop — defensive; Clear on a closed
 // bus is a no-op (subscribers already can't fire).
-func TestBus_ClearOnClosedBusIsNoop(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_ClearOnClosedBusIsNoop(t *testing.T) {
+	b := NewEventBus[int]()
 	b.Subscribe(func(_ int) bool { return false })
 	b.Close()
 
@@ -515,14 +515,14 @@ func TestBus_ClearOnClosedBusIsNoop(t *testing.T) {
 	b.Clear()
 }
 
-// TestBus_RemoveNonexistentIDIsNoop — unsubscribe returned by
+// TestEventBus_RemoveNonexistentIDIsNoop — unsubscribe returned by
 // Subscribe uses a unique id, so it's unusual to try removing an
 // arbitrary id. But the public surface is `Bus.remove(id)`, which
 // could be hit if a caller invokes the returned unsubscribe twice
 // (covered by UnsubscribeIdempotent) or after Clear. Pins the
 // "not found" branch as safe.
-func TestBus_RemoveNonexistentIDIsNoop(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_RemoveNonexistentIDIsNoop(t *testing.T) {
+	b := NewEventBus[int]()
 	b.Clear() // empty slice; subsequent unsubs are no-ops
 	// (Note: we can't reach b.remove directly from outside the
 	// package; this is verified indirectly by Clear + Subscribe
@@ -534,12 +534,12 @@ func TestBus_RemoveNonexistentIDIsNoop(t *testing.T) {
 
 // --- Multi-subscriber scenarios -----------------------------------
 
-// TestBus_MultipleSubscribersMixedReturn — three subscribers:
+// TestEventBus_MultipleSubscribersMixedReturn — three subscribers:
 // first returns false (pass through), second returns true
 // (consumes), third is unreachable. Confirms the chain semantics
 // and that consumed=true propagates correctly.
-func TestBus_MultipleSubscribersMixedReturn(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_MultipleSubscribersMixedReturn(t *testing.T) {
+	b := NewEventBus[int]()
 	var reached []int
 
 	b.Subscribe(func(_ int) bool { reached = append(reached, 1); return false })
@@ -554,11 +554,11 @@ func TestBus_MultipleSubscribersMixedReturn(t *testing.T) {
 	}
 }
 
-// TestBus_MultipleSubscribersAllFalse — three subscribers all
+// TestEventBus_MultipleSubscribersAllFalse — three subscribers all
 // returning false. Confirm Publish returns false (no consumption)
 // and all fire.
-func TestBus_MultipleSubscribersAllFalse(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_MultipleSubscribersAllFalse(t *testing.T) {
+	b := NewEventBus[int]()
 	var reached []int
 
 	b.Subscribe(func(_ int) bool { reached = append(reached, 1); return false })
@@ -573,10 +573,10 @@ func TestBus_MultipleSubscribersAllFalse(t *testing.T) {
 	}
 }
 
-// TestBus_UnsubscribeOneKeepsOthers verifies that unsubscribing one
+// TestEventBus_UnsubscribeOneKeepsOthers verifies that unsubscribing one
 // handler doesn't affect the others. Pins independence.
-func TestBus_UnsubscribeOneKeepsOthers(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_UnsubscribeOneKeepsOthers(t *testing.T) {
+	b := NewEventBus[int]()
 	var aRan, bRan, cRan int
 
 	unbindA := b.Subscribe(func(_ int) bool { aRan++; return false })
@@ -596,12 +596,12 @@ func TestBus_UnsubscribeOneKeepsOthers(t *testing.T) {
 
 // --- Concurrent stress ---------------------------------------------
 
-// TestBus_ConcurrentPublishAndClear — hammer the bus with
+// TestEventBus_ConcurrentPublishAndClear — hammer the bus with
 // concurrent Publish + Clear + Subscribe + Unsubscribe from
 // multiple goroutines. Run with -race to catch any data races
 // on the handlers slice header.
-func TestBus_ConcurrentPublishAndClear(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_ConcurrentPublishAndClear(t *testing.T) {
+	b := NewEventBus[int]()
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 
@@ -637,12 +637,12 @@ func TestBus_ConcurrentPublishAndClear(t *testing.T) {
 	wg.Wait()
 }
 
-// TestBus_SubscribePublishInterleave — Subscribe runs concurrently
+// TestEventBus_SubscribePublishInterleave — Subscribe runs concurrently
 // with Publish; a Subscribe mid-Dispatch may or may not see the
 // in-flight event (Publish snapshots under lock), but the bus must
 // not panic, deadlock, or corrupt the slice.
-func TestBus_SubscribePublishInterleave(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_SubscribePublishInterleave(t *testing.T) {
+	b := NewEventBus[int]()
 	var ran int32
 
 	stop := make(chan struct{})
@@ -681,18 +681,18 @@ func TestBus_SubscribePublishInterleave(t *testing.T) {
 
 // --- Bus lifecycle state -----------------------------------------
 
-// TestBus_CloseIdempotent — calling Close twice is safe; second
+// TestEventBus_CloseIdempotent — calling Close twice is safe; second
 // call is a no-op.
-func TestBus_CloseIdempotent(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_CloseIdempotent(t *testing.T) {
+	b := NewEventBus[int]()
 	b.Close()
 	b.Close() // must not panic, double-close must be safe
 }
 
-// TestBus_LenAfterClear — Len drops to 0 after Clear; re-Subscribe
+// TestEventBus_LenAfterClear — Len drops to 0 after Clear; re-Subscribe
 // works (bus stays open).
-func TestBus_LenAfterClear(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_LenAfterClear(t *testing.T) {
+	b := NewEventBus[int]()
 	b.Subscribe(func(_ int) bool { return false })
 	b.Subscribe(func(_ int) bool { return false })
 	if b.Len() != 2 {
@@ -710,10 +710,10 @@ func TestBus_LenAfterClear(t *testing.T) {
 	}
 }
 
-// TestBus_UnsubscribeThenClearIsSafe — calling unsubscribe on every
+// TestEventBus_UnsubscribeThenClearIsSafe — calling unsubscribe on every
 // subscriber followed by Clear is safe; Clear is idempotent.
-func TestBus_UnsubscribeThenClearIsSafe(t *testing.T) {
-	b := NewBus[int]()
+func TestEventBus_UnsubscribeThenClearIsSafe(t *testing.T) {
+	b := NewEventBus[int]()
 	unbinds := make([]func(), 5)
 	for i := range unbinds {
 		unbinds[i] = b.Subscribe(func(_ int) bool { return false })

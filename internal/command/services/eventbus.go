@@ -1,6 +1,6 @@
-// Package services — Bus[T] (F-54).
+// Package services — EventBus[T] (F-54).
 //
-// `Bus[T]` is a generic in-process pub/sub. Zero business coupling —
+// `EventBus[T]` is a generic in-process pub/sub. Zero business coupling —
 // the consumer instantiates one Bus per event type (e.g.
 // `*Bus[chatsession.MessageStateEvent]`) and the type parameter
 // provides the domain vocabulary. Subscribe / Publish / Clear / Close
@@ -43,9 +43,9 @@ import (
 	"sync/atomic"
 )
 
-// Bus[T] is a typed in-process pub/sub. See package doc for full
-// semantics. Construct with NewBus[T]().
-type Bus[T any] struct {
+// EventBus[T] is a typed in-process pub/sub. See package doc for full
+// semantics. Construct with NewEventBus[T]().
+type EventBus[T any] struct {
 	mu       sync.Mutex
 	handlers []busEntry[T]
 	closed   atomic.Bool
@@ -63,11 +63,11 @@ type busEntry[T any] struct {
 // handlers do not run); false to pass through.
 type Handler[T any] func(T) bool
 
-// NewBus returns an empty Bus. Pair with `defer b.Close()` if the
-// owning object has a finite lifetime; otherwise the bus is GC'd
-// when the last reference drops.
-func NewBus[T any]() *Bus[T] {
-	return &Bus[T]{}
+// NewEventBus returns an empty EventBus. Pair with `defer b.Close()`
+// if the owning object has a finite lifetime; otherwise the bus is
+// GC'd when the last reference drops.
+func NewEventBus[T any]() *EventBus[T] {
+	return &EventBus[T]{}
 }
 
 // Subscribe registers fn on the bus. The returned func unsubscribes
@@ -86,7 +86,7 @@ func NewBus[T any]() *Bus[T] {
 // Close flipped the atomic — the handler would sit in the slice
 // forever (Publish checks closed, so the handler never fires; the
 // func reference leaks until the bus itself is GC'd).
-func (b *Bus[T]) Subscribe(fn Handler[T]) (unsubscribe func()) {
+func (b *EventBus[T]) Subscribe(fn Handler[T]) (unsubscribe func()) {
 	if b == nil || fn == nil {
 		return func() {}
 	}
@@ -115,7 +115,7 @@ func (b *Bus[T]) Subscribe(fn Handler[T]) (unsubscribe func()) {
 // Handlers are invoked outside the bus mutex; Publish from inside a
 // handler is unsafe (would deadlock on b.mu). Use Subscribe /
 // Unsubscribe instead if mid-fan-out mutation is needed.
-func (b *Bus[T]) Publish(v T) bool {
+func (b *EventBus[T]) Publish(v T) bool {
 	if b == nil || b.closed.Load() {
 		return false
 	}
@@ -151,7 +151,7 @@ func (b *Bus[T]) Publish(v T) bool {
 // outside fan-out.
 //
 // Clear on a nil receiver or closed bus is a no-op.
-func (b *Bus[T]) Clear() {
+func (b *EventBus[T]) Clear() {
 	if b == nil || b.closed.Load() {
 		return
 	}
@@ -168,7 +168,7 @@ func (b *Bus[T]) Clear() {
 // handlers slice, because subscribers may still hold unsubscribe
 // funcs they plan to call. The slice becomes unreachable once the
 // last reference to the bus drops.
-func (b *Bus[T]) Close() {
+func (b *EventBus[T]) Close() {
 	if b == nil {
 		return
 	}
@@ -177,7 +177,7 @@ func (b *Bus[T]) Close() {
 
 // Len reports the current subscriber count. Debug / tests only;
 // callers should not branch on this for correctness.
-func (b *Bus[T]) Len() int {
+func (b *EventBus[T]) Len() int {
 	if b == nil {
 		return 0
 	}
@@ -193,7 +193,7 @@ func (b *Bus[T]) Len() int {
 // Subscribe; Subscribe pre-checks `b == nil` and returns a no-op
 // closure when the bus is nil, so this method never receives a
 // nil receiver in practice.
-func (b *Bus[T]) remove(id uint64) {
+func (b *EventBus[T]) remove(id uint64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for i, h := range b.handlers {
@@ -208,7 +208,7 @@ func (b *Bus[T]) remove(id uint64) {
 // the handler's bool; on panic, logs the bus type + recovered value
 // and returns false (chain continues — one buggy subscriber must
 // not silence later ones).
-func invokeBusHandler[T any](b *Bus[T], v T, h busEntry[T]) (consumed bool) {
+func invokeBusHandler[T any](b *EventBus[T], v T, h busEntry[T]) (consumed bool) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			slog.Default().Error("services.Bus: handler panic recovered",
@@ -226,7 +226,7 @@ func invokeBusHandler[T any](b *Bus[T], v T, h busEntry[T]) (consumed bool) {
 // `any(zero) == nil` is only true when T itself is the empty
 // interface — a case the Bus doesn't need to special-case (the
 // resulting string would be "interface {}", which is fine).
-func (b *Bus[T]) typeName() string {
+func (b *EventBus[T]) typeName() string {
 	var zero T
 	return fmt.Sprintf("%T", zero)
 }

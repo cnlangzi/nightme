@@ -135,7 +135,7 @@ type ChatSession struct {
 	// EnrichedEvent stream; the runtime registers its handler
 	// by reading the stream (not via a per-CS callback).
 
-	// Event buses (F-54). Each ChatSession owns one *services.Bus[X]
+	// Event buses (F-54). Each ChatSession owns one *services.EventBus[X]
 	// per event kind. The runtime wires subscribers via the
 	// getters below (AgentEventBus / MessageStateBus /
 	// PromptEndBus / LifecycleBus). Multiple subscribers may
@@ -144,10 +144,10 @@ type ChatSession struct {
 	// closed when the ChatSession ends — their lifetime matches
 	// the owning ChatSession, which is itself GC'd when no
 	// references remain.
-	agentEventBus   *services.Bus[AgentEventEnvelope]
-	messageStateBus *services.Bus[MessageStateEvent]
-	promptEndBus    *services.Bus[PromptEndedEvent]
-	lifecycleBus    *services.Bus[LifecycleEvent]
+	agentEventBus   *services.EventBus[AgentEventEnvelope]
+	messageStateBus *services.EventBus[MessageStateEvent]
+	promptEndBus    *services.EventBus[PromptEndedEvent]
+	lifecycleBus    *services.EventBus[LifecycleEvent]
 
 	// ctx is the per-ChatSession context. Lives for the chat's
 	// lifetime (until daemon shutdown). It is the PARENT context
@@ -203,10 +203,10 @@ func New(chatID, primaryAgent string) *ChatSession {
 	cs.ctx, cs.cancel = context.WithCancel(context.Background())
 	// F-54: one Bus per event kind. Constructed eagerly so the
 	// runtime can Subscribe even before the first Publish fires.
-	cs.agentEventBus = services.NewBus[AgentEventEnvelope]()
-	cs.messageStateBus = services.NewBus[MessageStateEvent]()
-	cs.promptEndBus = services.NewBus[PromptEndedEvent]()
-	cs.lifecycleBus = services.NewBus[LifecycleEvent]()
+	cs.agentEventBus = services.NewEventBus[AgentEventEnvelope]()
+	cs.messageStateBus = services.NewEventBus[MessageStateEvent]()
+	cs.promptEndBus = services.NewEventBus[PromptEndedEvent]()
+	cs.lifecycleBus = services.NewEventBus[LifecycleEvent]()
 	return cs
 }
 
@@ -881,7 +881,7 @@ func (cs *ChatSession) QueueLen() int {
 
 // --- F-54 event bus accessors ---------------------------------------
 //
-// Each ChatSession owns one *services.Bus[X] per event kind.
+// Each ChatSession owns one *services.EventBus[X] per event kind.
 // Runtime subscribers register via Bus().Subscribe(handler); multiple
 // subscribers may coexist (first to return true consumes the
 // event). The buses are constructed eagerly in New(); callers that
@@ -891,7 +891,7 @@ func (cs *ChatSession) QueueLen() int {
 // AgentEventBus is the pub/sub for bridge AgentEvent fan-out. The
 // runtime wires its event-translation lambda here; future
 // subscribers (audit, metrics, HUD) can register alongside it.
-func (cs *ChatSession) AgentEventBus() *services.Bus[AgentEventEnvelope] {
+func (cs *ChatSession) AgentEventBus() *services.EventBus[AgentEventEnvelope] {
 	return cs.agentEventBus
 }
 
@@ -902,7 +902,7 @@ func (cs *ChatSession) AgentEventBus() *services.Bus[AgentEventEnvelope] {
 //
 // Scope: NOT produced for slash commands (/cwd /use /kill etc.) —
 // those don't reach QueueUserMessage. See F-31 §3.2.
-func (cs *ChatSession) MessageStateBus() *services.Bus[MessageStateEvent] {
+func (cs *ChatSession) MessageStateBus() *services.EventBus[MessageStateEvent] {
 	return cs.messageStateBus
 }
 
@@ -910,14 +910,14 @@ func (cs *ChatSession) MessageStateBus() *services.Bus[MessageStateEvent] {
 // follow-up). Fires when AgentSession.readpump receives EventDone
 // or EventError and the Prompt reaches a terminal state. Adapters
 // use this to flip the receipt card from 🔄 to ✅ / ❌.
-func (cs *ChatSession) PromptEndBus() *services.Bus[PromptEndedEvent] {
+func (cs *ChatSession) PromptEndBus() *services.EventBus[PromptEndedEvent] {
 	return cs.promptEndBus
 }
 
 // LifecycleBus is the pub/sub for AgentSession status transitions
 // (Spawned / Exited). No receipt anchor — these events don't bind
 // to any Prompt.
-func (cs *ChatSession) LifecycleBus() *services.Bus[LifecycleEvent] {
+func (cs *ChatSession) LifecycleBus() *services.EventBus[LifecycleEvent] {
 	return cs.lifecycleBus
 }
 

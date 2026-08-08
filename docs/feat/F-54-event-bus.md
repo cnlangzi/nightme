@@ -10,14 +10,14 @@
 
 ## 1. Description
 
-把 ChatSession 上现有的 3 个单观察者 callback（`eventHandler` / `onMessageState` / `onPromptEnd`）统一替换为一个**泛型事件总线**（`services.Bus[T]`）。每个事件类型独占一个 `*Bus[X]`，由 ChatSession 持有，对外暴露 Subscribe/Publish/Clear/Close 四个 API。
+把 ChatSession 上现有的 3 个单观察者 callback（`eventHandler` / `onMessageState` / `onPromptEnd`）统一替换为一个**泛型事件总线**（`services.EventBus[T]`）。每个事件类型独占一个 `*EventBus[X]`，由 ChatSession 持有，对外暴露 Subscribe/Publish/Clear/Close 四个 API。
 
 效果：
 
 1. **统一接口** — 所有事件类型走同一套 Subscribe/Publish 形态，不再为每种事件写一套 setter/fire。
 2. **类型安全** — `Subscribe(func(MessageStateEvent) bool)` 在编译期保证 handler 签名匹配。
 3. **多订阅者** — 不再是 last-wins；多个 subscriber 共存，按注册顺序触发，第一个返回 `true` 的消费事件。
-4. **业务无关** — `Bus[T]` 不知道任何 domain 概念，可被任何 package 复用。
+4. **业务无关** — `EventBus[T]` 不知道任何 domain 概念，可被任何 package 复用。
 5. **panic 隔离** — 单个 handler panic 不影响 daemon，模仿既有 `invokeReactionHandler`。
 6. **Clear 逃生口** — 需要"换一组订阅者"时显式调 `Clear()`，没有 last-wins 包袱但仍能兼容迁移期 caller。
 
@@ -55,7 +55,7 @@ fire 点散落 3 处（`routeEvent` / `EmitMessageState` / `writebackMessageStat
 
 ### 2.3 设计目标
 
-1. **业务无关** — `Bus[T]` 不 import 任何 domain 类型，可被任何包使用
+1. **业务无关** — `EventBus[T]` 不 import 任何 domain 类型，可被任何包使用
 2. **不新增顶层包** — 放进已有 `internal/command/services/`，跟 `ReactionRouter` 同包
 3. **不在 `chatsession` 下开子包** — `event_types.go` 留在 `chatsession` 主包（跟 `prompt_state.go` 同级）
 4. **类型安全** — 编译期保证 handler 签名
@@ -70,42 +70,42 @@ fire 点散落 3 处（`routeEvent` / `EmitMessageState` / `writebackMessageStat
 
 | 文件 | 角色 |
 |---|---|
-| `internal/command/services/bus.go` | 新增。`Bus[T any]` 泛型，零 domain 耦合 |
-| `internal/command/services/bus_test.go` | 新增。覆盖 9 个核心不变量 |
+| `internal/command/services/eventbus.go` | 新增。`EventBus[T any]` 泛型，零 domain 耦合 |
+| `internal/command/services/eventbus_test.go` | 新增。覆盖 9 个核心不变量 |
 | `internal/chatsession/event_types.go` | 新增。4 个 typed event struct |
-| `internal/chatsession/chatsession.go` | 改造：删 3 个 setter + 1 个 getter，加 4 个 `*Bus[X]` 字段 + 4 个 getter，3 个 fire 点改 `Publish` |
+| `internal/chatsession/chatsession.go` | 改造：删 3 个 setter + 1 个 getter，加 4 个 `*EventBus[X]` 字段 + 4 个 getter，3 个 fire 点改 `Publish` |
 | `internal/chatsession/compat_stubs.go` | 删 `EventHandler` 类型别名 |
 | `cmd/nightme/run.go` | 改造：3 个 `SetXxxHandler` → 3 个 `XxxBus().Subscribe(...)` lambda |
 | `internal/channel/feishu/adapter.go` | 改造：handler 签名从散参数 → typed event struct |
 
-### 3.2 `Bus[T]` API
+### 3.2 `EventBus[T]` API
 
 ```go
 package services
 
-type Bus[T any] struct { /* ... */ }
+type EventBus[T any] struct { /* ... */ }
 
-func NewBus[T any]() *Bus[T]
+func NewEventBus[T any]() *EventBus[T]
 
 // Subscribe 注册 handler；返回的 func 是 unsubscribe，幂等；
 // 从 handler 内调用 unsubscribe 安全；nil handler 静默丢弃。
-func (b *Bus[T]) Subscribe(fn Handler[T]) (unsubscribe func())
+func (b *EventBus[T]) Subscribe(fn Handler[T]) (unsubscribe func())
 
 // Publish 按注册顺序触发 handler；第一个返回 true 的"消费"事件，后续不再调。
 // nil / closed Bus 是 no-op。每 handler panic 单独 recover + log。
-func (b *Bus[T]) Publish(v T) bool
+func (b *EventBus[T]) Publish(v T) bool
 
 // Clear 清空所有 subscriber。Bus 不进入 closed 状态，可继续 Subscribe。
 // 不允许在 handler 内调用（会死锁）。
-func (b *Bus[T]) Clear()
+func (b *EventBus[T]) Clear()
 
 // Close 永久关闭。后续 Publish/Subscribe/Clear 都是 no-op。
-func (b *Bus[T]) Close()
+func (b *EventBus[T]) Close()
 
-func (b *Bus[T]) Len() int  // 仅 debug / test
+func (b *EventBus[T]) Len() int  // 仅 debug / test
 ```
 
-类型参数 `T` 是事件 payload。`MessageStateEvent` / `PromptEndedEvent` / `AgentEventEnvelope` / `LifecycleEvent` 各自独占一个 `*Bus[X]`。
+类型参数 `T` 是事件 payload。`MessageStateEvent` / `PromptEndedEvent` / `AgentEventEnvelope` / `LifecycleEvent` 各自独占一个 `*EventBus[X]`。
 
 ### 3.3 4 个事件类型
 
@@ -167,10 +167,10 @@ type ChatSession struct {
 **构造函数**（`NewChatSession` / `RestoreFromRegistry`）：
 
 ```go
-cs.agentEventBus   = services.NewBus[AgentEventEnvelope]()
-cs.messageStateBus = services.NewBus[MessageStateEvent]()
-cs.promptEndBus    = services.NewBus[PromptEndedEvent]()
-cs.lifecycleBus    = services.NewBus[LifecycleEvent]()
+cs.agentEventBus   = services.NewEventBus[AgentEventEnvelope]()
+cs.messageStateBus = services.NewEventBus[MessageStateEvent]()
+cs.promptEndBus    = services.NewEventBus[PromptEndedEvent]()
+cs.lifecycleBus    = services.NewEventBus[LifecycleEvent]()
 ```
 
 **3 个 getter**（替代 3 个 Setter + 1 个 getter）：
@@ -252,7 +252,7 @@ func (a *Adapter) HandleMessageState(e chatsession.MessageStateEvent) bool
 2. **顺序保证** — handler 按 Subscribe 注册顺序触发（同 `ReactionRouter` 语义）。
 3. **类型安全** — `Subscribe(func(X) bool)` 编译期校验签名。
 4. **panic 隔离** — 每个 handler 用 `defer recover()` 包住；panic 后 `consumed = false`，chain 继续。
-5. **nil-safe** — 所有方法对 `(b *Bus[T])(nil)` 是 no-op。
+5. **nil-safe** — 所有方法对 `(b *EventBus[T])(nil)` 是 no-op。
 6. **closed-safe** — `Close` 后 `Publish` / `Subscribe` / `Clear` 全部 no-op。
 7. **unsubscribe 幂等** — `sync.Once` 包装，多次调安全。
 8. **handler 内 unsubscribe 安全** — entry 在 handler 返回后才删，不影响本次 fan-out。
@@ -261,7 +261,7 @@ func (a *Adapter) HandleMessageState(e chatsession.MessageStateEvent) bool
 
 ---
 
-## 5. 测试覆盖（`bus_test.go`）
+## 5. 测试覆盖（`eventbus_test.go`）
 
 | 用例 | 覆盖不变量 |
 |---|---|
@@ -280,11 +280,11 @@ func (a *Adapter) HandleMessageState(e chatsession.MessageStateEvent) bool
 
 ## 6. 迁移步骤
 
-1. 写 `internal/command/services/bus.go` (~120 行)
-2. 写 `internal/command/services/bus_test.go`（10 个用例）
+1. 写 `internal/command/services/eventbus.go` (~120 行)
+2. 写 `internal/command/services/eventbus_test.go`（10 个用例）
 3. 写 `internal/chatsession/event_types.go`（4 个 typed struct）
 4. 改 `ChatSession`：
-   - 加 4 个 `*Bus[X]` 字段 + 构造时 `NewBus[T]()`
+   - 加 4 个 `*EventBus[X]` 字段 + 构造时 `NewEventBus[T]()`
    - 加 4 个 getter
    - 删 `SetEventHandler` / `SetMessageStateHandler` / `SetPromptEndHandler` 3 个 setter
    - 删 `EventHandler()` / `MessageStateHandler()` 2 个 getter
@@ -311,6 +311,6 @@ func (a *Adapter) HandleMessageState(e chatsession.MessageStateEvent) bool
 
 ## 8. 已知限制 / 后续工作
 
-- `Bus[T]` 是同步 fan-out；如果未来要异步 fan-out（goroutine pool），需独立 PR，不在 F-54 范围
+- `EventBus[T]` 是同步 fan-out；如果未来要异步 fan-out（goroutine pool），需独立 PR，不在 F-54 范围
 - `Clear()` 不允许在 handler 内调（死锁）；迁移期 caller 注意
 - 没有 wildcard / topic 路由（这是 ReactionRouter 的职责，不重叠）

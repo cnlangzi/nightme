@@ -65,7 +65,8 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw close --force               force-close even when the worktree is dirty\n" +
 			"/gtw push                       commit + push the worktree's branch to origin\n" +
 			"/gtw push --pr                   also open a PR (gh/glab) against the default branch\n" +
-			"/gtw push --no-commit            refuse if there are uncommitted changes",
+			"/gtw push --no-commit            refuse if there are uncommitted changes\n" +
+			"/gtw sync                        checkout the default branch and pull --rebase from origin",
 	}
 }
 
@@ -93,6 +94,8 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, input 
 		return f.runClose(ctx, rt, input)
 	case "push":
 		return f.runPush(ctx, rt, input)
+	case "sync":
+		return f.runSync(ctx, rt, input)
 	}
 	return &command.SlashOutput{
 		Reply:    "Unknown subcommand: " + input.Args[1] + "\n" + f.Spec().Usage,
@@ -314,6 +317,35 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, input 
 	}
 	_ = res // RunPush already sent the reply via deps.Send
 	return &command.SlashOutput{Consumed: true}, nil
+}
+
+// runSync handles `/gtw sync`: checkout the default branch and
+// pull --rebase from origin. Errors are surfaced verbatim —
+// RefreshDefaultBranch already includes the dirty-worktree
+// refusal and rebase-conflict guidance the user needs.
+func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
+	cwd, failOut := command.RequireActiveCwd(f.mgr.GetChatSession(input.ChatID))
+	if failOut != nil {
+		return failOut, nil
+	}
+	repoRoot, err := RepoRoot(ctx, cwd, f.deps.Git)
+	if err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v", err),
+			Consumed: true,
+		}, nil
+	}
+	newHead, err := RefreshDefaultBranch(ctx, repoRoot, f.deps)
+	if err != nil {
+		return &command.SlashOutput{
+			Reply:    err.Error(),
+			Consumed: true,
+		}, nil
+	}
+	return &command.SlashOutput{
+		Reply:    fmt.Sprintf("✅ synced to %s", shortSHA(newHead)),
+		Consumed: true,
+	}, nil
 }
 
 // parseCloseForce extracts --force / -f from the close argv

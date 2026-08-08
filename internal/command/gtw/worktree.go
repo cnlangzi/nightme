@@ -149,27 +149,26 @@ func DefaultBranch(ctx context.Context, dir string, git GitRunner) (string, erro
 	return branch, nil
 }
 
-// RefreshDefaultBranch brings repoRoot up to date with the
-// upstream default branch before /gtw fix creates a new
-// worktree. The sequence:
+// RefreshDefaultBranch brings repoRoot (which MUST be the
+// primary checkout, not a linked worktree) up to date with
+// the upstream default branch. Called by /gtw fix as a
+// pre-worktree refresh and by /gtw sync as a user-invoked
+// command. The sequence:
 //
 //  1. Discover the default branch (errors if no origin).
-//  2. Refuse if the main repo has uncommitted changes —
+//  2. Refuse if the primary checkout has uncommitted changes —
 //     silently stashing / discarding would be hostile.
-//  3. `git checkout <default>`.
-//  4. `git pull --ff-only` — refuses non-fast-forward
-//     updates so we never silently create merge commits on
-//     the user's main branch.
+//  3. Verify repoRoot is the primary checkout (not a linked
+//     worktree). `git checkout <default>` from a linked
+//     worktree fails because the default branch is checked
+//     out elsewhere; worse, git can silently switch the
+//     worktree itself off the user's feature branch.
+//  4. `git checkout <default>`.
+//  5. `git pull --rebase origin <default>`.
 //
 // Returns the resulting HEAD SHA so the caller can label
 // the success card ("based on origin/main@<sha>") and verify
 // the refresh actually happened.
-//
-// /gtw fix calls this on the FRESH branch only — re-entry
-// paths (branch already attached at the target worktree path)
-// skip it because the user's working tree is already in the
-// worktree, not the main repo, and there's nothing useful to
-// refresh.
 func RefreshDefaultBranch(ctx context.Context, repoRoot string, deps HandlerDeps) (string, error) {
 	branch, err := DefaultBranch(ctx, repoRoot, deps.Git)
 	if err != nil {
@@ -183,16 +182,38 @@ func RefreshDefaultBranch(ctx context.Context, repoRoot string, deps HandlerDeps
 	}
 	if statusOut != "" {
 		return "", fmt.Errorf(
-			"❌ main repo %s has uncommitted changes — commit or stash before /gtw fix:\n%s",
+			"❌ main repo %s has uncommitted changes — commit or stash first:\n%s",
 			repoRoot, statusOut)
 	}
 
-	// Step 3: checkout.
+	// Step 3: enforce primary-checkout precondition. `git
+	// rev-parse --git-dir` returns the per-worktree .git
+	// location; `--git-common-dir` returns the shared .git
+	// directory. They match only in the primary checkout.
+	// Resolving both relative to repoRoot lets us compare
+	// paths the same way regardless of how git printed them.
+	gitDirRaw, _, err := deps.Git.Run(ctx, repoRoot, "rev-parse", "--git-dir")
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse --git-dir in %s: %w", repoRoot, err)
+	}
+	commonDirRaw, _, err := deps.Git.Run(ctx, repoRoot, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse --git-common-dir in %s: %w", repoRoot, err)
+	}
+	gitDir := filepath.Clean(filepath.Join(repoRoot, strings.TrimSpace(gitDirRaw)))
+	commonDir := filepath.Clean(filepath.Join(repoRoot, strings.TrimSpace(commonDirRaw)))
+	if gitDir != commonDir {
+		return "", fmt.Errorf(
+			"❌ %s is a linked worktree; default-branch refresh must run from the primary checkout. /cwd into the main repo first.",
+			repoRoot)
+	}
+
+	// Step 4: checkout.
 	if _, _, err := deps.Git.Run(ctx, repoRoot, "checkout", branch); err != nil {
 		return "", fmt.Errorf("git checkout %s in %s: %w", branch, repoRoot, err)
 	}
 
-	// Step 4: pull --rebase. We pass explicit `<remote>
+	// Step 5: pull --rebase. We pass explicit `<remote>
 // <branch>` so the command works on local branches that
 // have no upstream-tracking config. We use `--rebase` rather
 // than the default merge-style pull, OR `--ff-only`, for a
@@ -221,7 +242,7 @@ func RefreshDefaultBranch(ctx context.Context, repoRoot string, deps HandlerDeps
 		return "", fmt.Errorf(
 			"git pull --rebase origin %s in %s: %w "+
 				"[stderr: %s] "+
-				"(rebase conflict? resolve manually, then `git rebase --abort` to clean up before retrying /gtw fix)",
+				"(rebase conflict? resolve manually, then `git rebase --abort` to clean up before retrying)",
 			branch, repoRoot, err, stderr)
 	}
 

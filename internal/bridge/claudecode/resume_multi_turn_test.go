@@ -93,10 +93,10 @@ func TestStart_ResumeMultiTurnRespawn(t *testing.T) {
 				t.Fatalf("phase 2 turn A: events closed before result (gotInit=%v)", gotInit)
 			}
 			t.Logf("[multi-turn] phase 2 turn A EV kind=%v", ev.Kind)
-			if ev.Kind == agent.EventInit && ev.Init != nil {
-				if ev.Init.SessionID != capturedID {
+			if ev.Kind == agent.EventAgentConnected && ev.Connected != nil {
+				if ev.Connected.SessionID != capturedID {
 					t.Fatalf("phase 2: init.SessionID = %q, want %q (resume context lost across respawn)",
-						ev.Init.SessionID, capturedID)
+						ev.Connected.SessionID, capturedID)
 				}
 				gotInit = true
 				t.Logf("[multi-turn] phase 2: init.SessionID matches resumeID — resume preserved across respawn")
@@ -115,7 +115,7 @@ func TestStart_ResumeMultiTurnRespawn(t *testing.T) {
 		}
 	}
 	if !gotInit {
-		t.Fatalf("phase 2 turn A: never saw EventInit — regression of test19 hang")
+		t.Fatalf("phase 2 turn A: never saw EventAgentConnected — regression of test19 hang")
 	}
 
 	// Phase 3 (the multi-turn proof): turn B on the SAME bridge
@@ -154,7 +154,7 @@ func TestStart_ResumeMultiTurnRespawn(t *testing.T) {
 }
 
 // captureInitSessionID drains the events channel until it sees
-// an EventInit with a non-empty SessionID, or until the deadline
+// an EventAgentConnected with a non-empty SessionID, or until the deadline
 // elapses. Returns the captured id.
 func captureInitSessionID(t *testing.T, sess agent.AgentSession, timeout time.Duration) string {
 	t.Helper()
@@ -165,11 +165,11 @@ func captureInitSessionID(t *testing.T, sess agent.AgentSession, timeout time.Du
 			if !ok {
 				t.Fatalf("captureInit: events channel closed before init")
 			}
-			if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.SessionID != "" {
-				return ev.Init.SessionID
+			if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.SessionID != "" {
+				return ev.Connected.SessionID
 			}
 		case <-deadline:
-			t.Fatalf("captureInit: no EventInit within %s — claude hung (regression of test19 hang)", timeout)
+			t.Fatalf("captureInit: no EventAgentConnected within %s — claude hung (regression of test19 hang)", timeout)
 		}
 	}
 }

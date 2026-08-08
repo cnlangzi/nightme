@@ -136,7 +136,7 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 		defer mu.Unlock()
 		eventLog = append(eventLog, ev.Kind.String())
 		switch ev.Kind {
-		case agent.EventInit:
+		case agent.EventAgentConnected:
 			sawInit = true
 		case agent.EventText:
 			reply.WriteString(ev.Text)
@@ -215,7 +215,7 @@ wait:
 	mu.Unlock()
 
 	if !sawInit {
-		t.Errorf("EventInit never reached the runtime eventHandler; events=%v", events)
+		t.Errorf("EventAgentConnected never reached the runtime eventHandler; events=%v", events)
 	}
 	if replyStr == "" {
 		t.Fatalf("EventDone arrived but no text reply reached the runtime; events=%v", events)

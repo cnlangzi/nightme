@@ -173,7 +173,7 @@ Adapter.Send(OutboundMessage)
    │     → receipt.Append(AgentEvent) → renderLocked(ctx) → SendCard(首次) / PatchMessage(后续)
    │
    ├── OutInit
-   │     → receipt.Append(InitEvent) → renderLocked → Patch(刷新 footer)
+   │     → receipt.Append(AgentConnectedEvent) → renderLocked → Patch(刷新 footer)
    │
    └── OutCard (permission)
          → sendContent(interactive, buildInteractiveCard(...))   ← 不变
@@ -188,7 +188,7 @@ type MessageReceipt struct {
 }
 ```
 
-**本期不**新增 `agentName` / `provider` / `model` 字段 -- foot note 全部从已有 state 字段组装(state.String() + eventCount + lastEventAt)。这样不需要触动 `agent.InitEvent` / `gateway/translate.go` / `OutboundMessage.Meta` 任何上游。
+**本期不**新增 `agentName` / `provider` / `model` 字段 -- foot note 全部从已有 state 字段组装(state.String() + eventCount + lastEventAt)。这样不需要触动 `agent.AgentConnectedEvent` / `gateway/translate.go` / `OutboundMessage.Meta` 任何上游。
 
 `renderLocked` 替换为新的 card-first 策略:
 - 第一次:`sendContent(chatID, MsgTypeInteractive, buildReceiptCard(r))` 拿到 messageID
@@ -564,10 +564,10 @@ func (a *Adapter) UpdateMessage(ctx context.Context, messageID, content string) 
 ```
 
 所有 `key: value` 段必须用中点 `·`(防 hoisting,见 §6.1)。**留给下一份 PR 的契约**:
-- `agent.InitEvent` 新增 `AgentName` / `Provider` 字段
+- `agent.AgentConnectedEvent` 新增 `AgentName` / `Provider` 字段
 - `internal/bridge/claudecode/stream.go` 在 system/init 翻译处填充
 - `internal/gateway/translate.go` 写 `Meta["agent_name"]` / `Meta["provider"]`
-- `MessageReceipt` 新增对应字段,`Append(InitEvent)` 写入
+- `MessageReceipt` 新增对应字段,`Append(AgentConnectedEvent)` 写入
 - `footLine` 拼上 ` · Agent · X · Provider · Y`(model 已有,补中点)
 
 **这部分改动是叠加的,不动 card 渲染主体。**
@@ -649,7 +649,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 | `OutResult` | `EventResult` | 最终回复 | **独立 reply 到 userMsgID**(F-39 §13.16;不 fold 进 receipt card)— 三段 dispatch:无 markdown → `MsgTypeText`;tables>5 → `MsgTypePost+md`;默认 → `MsgTypeInteractive` Card 2.0 + 1/`N` `tag:"markdown"` div(F-37 `splitMarkdownForDivs` 拆 ≤ 1000 runes/div)。sanitize via `result_render.go`(cc-connect 移植,F-44 后从 `card_sanitize.go` 合并)。**F-45 §13.22:文本末尾追加 `formatSessionFooter(msg.SessionContext)`** | `interactive` Create (新 reply) / `post` Create / `text` Create | ❌ (独立气泡,锚同 userMsgID) |
 | `OutUsage` | `EventUsage` | token 用量 | **F-44 §13.21：silent drop**(footer 设计推迟到 footer PR)。`agent.EventUsage` → `OutboundMessage{Usage}` Translate 路径保留 | — | ❌ (不渲染) |
 | `OutCompaction` | `EventCompaction` | 中途压缩 | card body `markdown` + `✶ Compacting conversation...` | `interactive` PATCH | ✅ |
-| `OutInit` | `EventInit` | 会话初始化 | **F-44 §13.21：silent drop**(footer 设计推迟到 footer PR)。`agent.EventInit` → `OutboundMessage{Init}` Translate 路径保留 | — | ❌ (不渲染) |
+| `OutInit` | `EventAgentConnected` | 会话初始化 | **F-44 §13.21：silent drop**(footer 设计推迟到 footer PR)。`agent.EventAgentConnected` → `OutboundMessage{Init}` Translate 路径保留 | — | ❌ (不渲染) |
 | `OutCard` | `EventPermission` | 权限请求 | `buildInteractiveCard` → header(title,template:blue) + markdown body + action buttons(value 携带 request_id) | `interactive` Create | ❌(独立气泡) |
 | `OutMessageState` | ChatSession lifecycle | 消息进度变化 | `AddReaction(userMsgID, emoji_type)` -- 走 `messageStates` map 做 idempotency | reaction API | ❌(标在用户消息上) |
 | `OutMessageStateRemoved` | (reserved) | 撤销进度标记 | `DeleteReaction`(v1.3 未用,append-only) | reaction API | ❌ |
@@ -735,15 +735,15 @@ if e.Kind == "thinking" {  // ← 永远不会为真
 
 ```go
 Meta: {
-    "session_id": ev.Init.SessionID,
-    "model":      ev.Init.Model,
-    "agent_name": ev.Init.AgentName,  // 新加
-    "workspace":  ev.Init.Workspace,  // 新加
-    "branch":     ev.Init.Branch,     // 新加
+    "session_id": ev.Connected.SessionID,
+    "model":      ev.Connected.Model,
+    "agent_name": ev.Connected.AgentName,  // 新加
+    "workspace":  ev.Connected.Workspace,  // 新加
+    "branch":     ev.Connected.Branch,     // 新加
 }
 ```
 
-`adapter.go:600-616` 也读到了 `agent.InitEvent` 字段里。但:
+`adapter.go:600-616` 也读到了 `agent.AgentConnectedEvent` 字段里。但:
 
 - `MessageReceipt` 结构体没有存这些字段
 - `buildReceiptCard.footLine()` 只拼 `state + N entries + HH:MM:SS`,**session_id / model / agent_name / workspace / branch 全部丢失**
@@ -1837,7 +1837,7 @@ user_msg om_A
 
 3. **`OutInit` / `OutUsage` silent drop(推迟到 footer PR)** ── footer 设计(每条 ReplyInThreadAndChat 都带 `🤖 Agent · Model · Tokens · Cost`)需要扩展 `OutboundMessage` wire format + ChatSession 状态 + EventHandler 协调,单独 PR 处理:
    - `Send()` case `OutInit` / `OutUsage` → `return nil`
-   - `agent.EventInit` / `EventUsage` → `OutboundMessage{Init / Usage}` 的 Translate 路径**保留**(footer PR 用)
+   - `agent.EventAgentConnected` / `EventUsage` → `OutboundMessage{Init / Usage}` 的 Translate 路径**保留**(footer PR 用)
 
    ```go
    // Send() OutInit / OutUsage case
@@ -1915,7 +1915,7 @@ user_msg om_A
 **核心变化**:
 
 1. **`AgentSession` 自管 metadata**(in-memory + 持久化)— runtime 是唯一 owner:
-   - `Model string` + `modelMu`:EventInit 时 `SetModel(ev.Init.Model)`(idempotent,空值不覆盖非空现有值)
+   - `Model string` + `modelMu`:EventAgentConnected 时 `SetModel(ev.Connected.Model)`(idempotent,空值不覆盖非空现有值)
    - `cumulativeUsage UsageInfo` + `cumulativeUsageMu` + `cumulativeDirty bool`:EventUsage 时 `AccumulateUsage(ev.Usage)`(加锁累加 + 标 dirty)
    - 6 个新方法:`SetModel` / `Model` / `AccumulateUsage` / `ResetCumulative` / `CumulativeUsage` / `PersistIfDirty`
    - **`/new` 是唯一清零点**(`ResetCumulative` + 立即 `PersistAgentSession`);daemon 重启 / `/cwd` / `/use` / `/kill` / 进程崩溃一律保留
@@ -1926,7 +1926,7 @@ user_msg om_A
    // internal/gateway/messages.go
    type SessionContext struct {
        Agent           string      // s.Agent (immutable)
-       Model           string      // s.Model() (cached at EventInit)
+       Model           string      // s.Model() (cached at EventAgentConnected)
        CumulativeUsage UsageInfo   // s.CumulativeUsage() snapshot under RLock
    }
    
@@ -1999,7 +1999,7 @@ case gateway.OutReply, gateway.OutResult,
 - §1.3 Channel 不 import chatsession(不变;Channel 通过 typed `SessionContext` 字段读 metadata,无 callback injection)
 - 1 turn : 1 anchor 不变式保留(`ReplyTo = currentTurnUserMsgID` 仍是唯一 coordination key;`SessionContext` 是 payload data,不是 coordination)
 - 抽象归抽象 / 具体归具体(footer 渲染细节由 Feishu adapter 自决,Slack / Web / Echo 各自决定;Echo 透传字段,`c.Record()` 可见)
-- bridges 协议零变化(仍发 `EventInit` / `EventUsage`,runtime 翻译)
+- bridges 协议零变化(仍发 `EventAgentConnected` / `EventUsage`,runtime 翻译)
 - OutboundKind 不增不减(`SessionContext` 是字段,不是新 Kind)
 - OutInit / OutUsage 仍是 silent drop(F-44 决策保留)
 - §1.4 边界规则保留(metadata 是 typed primitive,Channel 自决渲染目标)
@@ -2017,7 +2017,7 @@ case gateway.OutReply, gateway.OutResult,
 | `Total` 字段存 vs derive | **derive** at render | 4 个原始字段已存 Total 是冗余;derive 一次成本可忽略;少一个字段 = 少一处可能不一致 |
 | footer 拼接到 `OutReply` 文末 vs 独立 reply | **文末** | footer 是 reply 的元数据,不是独立消息;独立 reply 会让视觉噪声翻倍;lark_md `\n\n` 换行足够分隔 |
 | `UsageInfo` 搬到 `agent` 包 | **搬** | 消除 `chatsession → gateway` 反向 import;`UsageInfo` 与 `UsageEvent` 语义同层;type alias 保 ABI |
-| `AgentSession.Model` vs `InitEvent.Model` 每事件重发 | **缓存一次** | Model 在 session lifecycle 内不变(直到 `/new`);缓存避免每个 turn 重新解析;runtime EventHandler 一次 capture,后续 O(1) 读 |
+| `AgentSession.Model` vs `AgentConnectedEvent.Model` 每事件重发 | **缓存一次** | Model 在 session lifecycle 内不变(直到 `/new`);缓存避免每个 turn 重新解析;runtime EventHandler 一次 capture,后续 O(1) 读 |
 
 **Backlog**(F-45 out of scope):
 - `/cost` slash command(读 cumulative 主动展示)
@@ -2572,7 +2572,7 @@ if e.Kind == "tool" {
 |------|------|
 | `TestReceipt_BuildCard_FoldedEntries` | append thinking + tool_start + tool_end + reply → 生成的 card JSON 包含 3 个 `collapsible_panel`(前 3 个)+ 1 个平铺 `markdown`(reply) |
 | `TestReceipt_BuildCard_AllCollapsed` | 默认 `expanded: false`(思考 + 工具全部折叠) |
-| `TestReceipt_BuildCard_NoFoldedForUsage` | `EventUsage` / `EventCompaction` / `EventInit` / `EventResult` 不走折叠分支 |
+| `TestReceipt_BuildCard_NoFoldedForUsage` | `EventUsage` / `EventCompaction` / `EventAgentConnected` / `EventResult` 不走折叠分支 |
 
 **`adapter_test.go` 新增**:
 

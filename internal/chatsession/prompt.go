@@ -104,7 +104,8 @@ type Prompt struct {
 
 // PromptEndReason is the WHY of a Prompt ending. Independent of the
 // execution state (`Prompt` itself has no State field — Phase 0
-// derives "still running" from `EndedAt.IsZero()`).
+// derives "still running" from `EndedAt.IsZero()`, see
+// docs/feat/message_lifecycle.md §4.2).
 type PromptEndReason int
 
 const (

@@ -471,7 +471,7 @@ plat, platErr := NewProvider(ProviderKind(p.Platform), "")
 
 - **§1.4 抽象 / 具体 边界规范**：`GitProvider` 是抽象，channel 不感知；gtw 不感知 provider 实现细节（除了 `Kind()` 用于 telemetry / 日志）。
 - **§1.3 Channel 不 import gtw / chatsession**：Provider 抽象属于 gtw 包；Channel 通过 `gtw.SendFunc` 间接使用。
-- **bridge 协议零变化**：bridges 仍发 `EventInit` / `EventUsage` / ...;runtime 翻译；Provider 探测完全是 runtime 行为。
+- **bridge 协议零变化**：bridges 仍发 `EventAgentConnected` / `EventUsage` / ...;runtime 翻译；Provider 探测完全是 runtime 行为。
 - **nightme 不持久化 token**：gh / glab 的 auth 委托给 `gh auth login` / `glab auth login`（已有约定，见 `internal/gtw/api.go:17`）。
 
 ---

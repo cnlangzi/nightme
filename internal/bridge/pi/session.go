@@ -161,11 +161,11 @@ type session struct {
 
 	translator *translator
 
-	// translatorMu serializes initSent reset + emitInit calls between
+	// translatorMu serializes connectedSent reset + emitConnected calls between
 	// the boot handshake (newSession) and F-34 reset (s.New). Both
 	// call paths can race if the user fires /new before the boot
 	// handshake completes; we hold this mutex across both so the
-	// initSent flag stays consistent.
+	// connectedSent flag stays consistent.
 	translatorMu sync.Mutex
 	logger       *slog.Logger
 
@@ -194,7 +194,7 @@ type session struct {
 // get_state handshake. The returned AgentSession is ready for
 // SendText / Events immediately on success.
 //
-// agentName + workspace + branch are stamped onto every EventInit
+// agentName + workspace + branch are stamped onto every EventAgentConnected
 // emitted by the translator so the channel-layer receipt can render
 // the "Agent | repo | branch | tokens" foot note.
 //
@@ -328,13 +328,13 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 			return nil, fmt.Errorf("pi: decode get_state: %w", err)
 		}
 	}
-	// F-34 review C1: hold translatorMu across emitInit + deliver so
-	// a concurrent s.New cannot observe initSent=false between our
+	// F-34 review C1: hold translatorMu across emitConnected + deliver so
+	// a concurrent s.New cannot observe connectedSent=false between our
 	// reset and emit. Boot path runs before the bridge returns to
 	// callers, so contention is theoretical, but the symmetry with
 	// the reset path keeps the invariant obvious.
 	s.translatorMu.Lock()
-	s.deliverInitLocked(&state)
+	s.deliverConnectedLocked(&state)
 	s.translatorMu.Unlock()
 	piLog("newSession return ok",
 		"pid", s.pid,
@@ -342,12 +342,12 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 	return s, nil
 }
 
-// deliverInitLocked emits the EventInit for `state` via deliver().
-// Caller MUST hold s.translatorMu so initSent's check-and-set is
-// atomic relative to translator.emitInit. Shared between the boot
+// deliverConnectedLocked emits the EventAgentConnected for `state` via deliver().
+// Caller MUST hold s.translatorMu so connectedSent's check-and-set is
+// atomic relative to translator.emitConnected. Shared between the boot
 // handshake (newSession) and the F-34 reset path (New).
-func (s *session) deliverInitLocked(state *getStateResult) {
-	for _, ev := range s.translator.emitInit(state) {
+func (s *session) deliverConnectedLocked(state *getStateResult) {
+	for _, ev := range s.translator.emitConnected(state) {
 		s.deliver(ev)
 	}
 }
@@ -557,7 +557,7 @@ func (s *session) SendPermission(_ string) error {
 //
 // Implementation: send new_session, wait for response, then issue
 // get_state to retrieve the new sessionId, then push it into the
-// events channel as an EventInit so the runtime's eventHandler
+// events channel as an EventAgentConnected so the runtime's eventHandler
 // captures it via SetResumeID (cmd/nightme/run.go newEventHandler).
 //
 // The process stays alive; the transport stays open; Events() stays
@@ -605,9 +605,9 @@ func (s *session) New(ctx context.Context) error {
 		return errors.New("pi: new_session cancelled by extension")
 	}
 
-	// 3. Re-arm emitInit for the new session and fetch the new id
+	// 3. Re-arm emitConnected for the new session and fetch the new id
 	// via get_state. F-34 review C1: translatorMu must cover BOTH
-	// the initSent reset AND the subsequent emitInit call; otherwise
+	// the connectedSent reset AND the subsequent emitConnected call; otherwise
 	// the runtime sees a zero-sessionId init (or a stale init from
 	// the boot handshake) leak out between the reset and the
 	// emit. We hold the lock across reset+emit+deliver.
@@ -641,7 +641,7 @@ func (s *session) New(ctx context.Context) error {
 	defer s.translator.endReset()
 
 	s.translatorMu.Lock()
-	s.translator.initSent = false
+	s.translator.connectedSent = false
 	stateCtx, stateCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer stateCancel()
 	stateEnv, err := s.rpc.request(stateCtx, "get_state", map[string]any{}, "")
@@ -663,8 +663,8 @@ func (s *session) New(ctx context.Context) error {
 	}
 
 	// F-34 review C2: refuse to commit the reset if pi has no
-	// sessionId in its state. emitInit would emit a zero-SessionID
-	// EventInit which runtime's eventHandler ignores (cmd/nightme/run.go
+	// sessionId in its state. emitConnected would emit a zero-SessionID
+	// EventAgentConnected which runtime's eventHandler ignores (cmd/nightme/run.go
 	// guards on SessionID != ""), leaving the OLD ResumeID persisted
 	// in agent_sessions.json. Surface as a hard error so the caller
 	// knows the reset did not take effect.
@@ -673,7 +673,7 @@ func (s *session) New(ctx context.Context) error {
 		return errors.New("pi: get_state returned empty sessionId after new_session")
 	}
 
-	// 4. Push the new EventInit into the events channel. deliver()
+	// 4. Push the new EventAgentConnected into the events channel. deliver()
 	// is non-blocking; if the channel is full we drop with a warn
 	// (the next prompt from the user will fail visibly, but the
 	// process / transport is fine).
@@ -682,8 +682,8 @@ func (s *session) New(ctx context.Context) error {
 	// deliver() may block up to 1s on a full channel, so a busy
 	// readPump holding the chan could delay /new by up to 1s. The
 	// alternative is to release the lock and accept a brief window
-	// where another caller sees initSent=false; we err on safety.
-	s.deliverInitLocked(&state)
+	// where another caller sees connectedSent=false; we err on safety.
+	s.deliverConnectedLocked(&state)
 	s.translatorMu.Unlock()
 	return nil
 }

@@ -26,7 +26,7 @@ type acpSession struct {
 	cancel context.CancelFunc
 
 	// agentName and workspace are captured at NewSession for the
-	// EventInit payload. ACP does not currently tell the runtime
+	// EventAgentConnected payload. ACP does not currently tell the runtime
 	// about its session id through the channel — we synthesize one
 	// here so the rest of the runtime can capture the resume id
 	// uniformly (other bridges do this via the bridge's own init
@@ -37,9 +37,9 @@ type acpSession struct {
 	sessionID string
 	events    chan agent.AgentEvent
 
-	// initSent guards the synthesized EventInit. We emit at most
+	// connectedSent guards the synthesized EventAgentConnected. We emit at most
 	// once per session, after the first successful session/new.
-	initSent bool
+	connectedSent bool
 
 	permissionMu sync.Mutex
 	permissions  []permissionCall
@@ -160,24 +160,24 @@ func (s *acpSession) setSessionID(result json.RawMessage) error {
 	if s.sessionID == "" {
 		return errors.New("bridge/acp: session/new response has no sessionId")
 	}
-	// Synthesize an EventInit so the runtime can capture the resume
-	// id uniformly with Claude Code / Pi. Idempotent via initSent.
-	s.emitInit()
+	// Synthesize an EventAgentConnected so the runtime can capture the resume
+	// id uniformly with Claude Code / Pi. Idempotent via connectedSent.
+	s.emitConnected()
 	return nil
 }
 
-// emitInit publishes a single EventInit on s.events carrying the
+// emitConnected publishes a single EventAgentConnected on s.events carrying the
 // ACP session id so the runtime can persist it as the AgentSession's
 // resume id. Safe to call from setSessionID; emits are non-blocking
 // with a ctx.Done fallback to avoid wedging the new-session path.
-func (s *acpSession) emitInit() {
-	if s.initSent {
+func (s *acpSession) emitConnected() {
+	if s.connectedSent {
 		return
 	}
-	s.initSent = true
+	s.connectedSent = true
 	ev := agent.AgentEvent{
-		Kind: agent.EventInit,
-		Init: &agent.InitEvent{
+		Kind: agent.EventAgentConnected,
+		Connected: &agent.AgentConnectedEvent{
 			SessionID: s.sessionID,
 			AgentName: s.agentName,
 			Workspace: s.workspace,
@@ -189,7 +189,7 @@ func (s *acpSession) emitInit() {
 	default:
 		// events buffer is full — drop. The runtime will treat a
 		// missing resume id as "no resume", which is the safe
-		// default; the next init/emit cycle still has initSent=true
+		// default; the next init/emit cycle still has connectedSent=true
 		// so we don't busy-loop.
 	}
 }
@@ -313,7 +313,7 @@ func (s *acpSession) SendPermission(response string) error {
 // session. The transport process stays alive; Events() stays open;
 // PID stays the same.
 //
-// We reset s.initSent so emitInit fires again with the new sessionId,
+// We reset s.connectedSent so emitConnected fires again with the new sessionId,
 // letting the runtime's eventHandler capture it via SetResumeID
 // (cmd/nightme/run.go newEventHandler).
 func (s *acpSession) New(ctx context.Context) error {
@@ -329,13 +329,13 @@ func (s *acpSession) New(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("bridge/acp: session/new: %w", err)
 	}
-	// Re-arm initSent so emitInit fires again with the new id.
-	// We can't reuse the initSent guard as a one-shot across the
+	// Re-arm connectedSent so emitConnected fires again with the new id.
+	// We can't reuse the connectedSent guard as a one-shot across the
 	// session lifetime now that New can reset it; instead we use
-	// the existing permissionMu (which already serializes initSent
-	// writes through setSessionID/emitInit) as a memory barrier.
+	// the existing permissionMu (which already serializes connectedSent
+	// writes through setSessionID/emitConnected) as a memory barrier.
 	s.permissionMu.Lock()
-	s.initSent = false
+	s.connectedSent = false
 	s.permissionMu.Unlock()
 	if err := s.setSessionID(result); err != nil {
 		return err

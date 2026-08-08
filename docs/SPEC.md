@@ -167,7 +167,7 @@ v1.3 在 v1.2 架构上做**职责再切分**——核心变化是**删除 Gatew
 - **新增 typed payload**：
   - `Result *agent.ResultEvent`（OutResult）
   - `Usage *UsageInfo`（OutUsage，5 个 token/cost 字段）
-  - `Init *agent.InitEvent`（OutInit，session_id / model / workspace / branch）
+  - `Connected *agent.AgentConnectedEvent`（OutInit，session_id / model / workspace / branch）
   - `MessageStatePayload.MessageID` + `ReactionID`（扩展 typed field，OutMessageState / Removed）
 - **删 helper 函数**：metaString / metaInt / metaFloat / metaBool / durationMs / isErrorOut / subtypeOut / usageFromMeta（全部读 Meta 的 typed assertion + reverse rebuild）
 
@@ -183,7 +183,7 @@ type OutboundMessage struct {
     Result       *agent.ResultEvent
     Usage        *UsageInfo
     MessageState *MessageStatePayload
-    Init         *agent.InitEvent
+    Init         *agent.AgentConnectedEvent
     ReplyTo      string
 }
 ```
@@ -451,7 +451,7 @@ type OutboundMessage struct {
 
 3. **`OutInit` / `OutUsage` silent drop（推迟到 footer PR）**
    - `Send()` case `OutInit` / `OutUsage` → `return nil`，不渲染
-   - `agent.EventInit` / `EventUsage` → `OutboundMessage{Init / Usage}` 的 Translate 路径**保留**（footer PR 用）
+   - `agent.EventAgentConnected` / `EventUsage` → `OutboundMessage{Init / Usage}` 的 Translate 路径**保留**（footer PR 用）
    - footer 设计（每条 ReplyInThreadAndChat 都带 `🤖 Agent · Model · Tokens · Cost`）需要扩展 `OutboundMessage` wire format + ChatSession 状态 + EventHandler 协调，单独 PR 处理
 
 **核心变化**（仅 Channel 内部路由）：
@@ -514,7 +514,7 @@ type OutboundMessage struct {
 **核心变化**：
 
 1. **`AgentSession` 自管 metadata（runtime）**
-   - 加 `Model string` 字段：EventInit 时捕获（`s.SetModel(ev.Init.Model)`），持久化到 `AgentSessionEntry.Model`
+   - 加 `Model string` 字段：EventAgentConnected 时捕获（`s.SetModel(ev.Connected.Model)`），持久化到 `AgentSessionEntry.Model`
    - 加 `cumulativeUsage UsageInfo` + mutex + `cumulativeDirty bool`：EventUsage 时累加（`s.AccumulateUsage(ev.Usage)`），EventDone 时落盘（`s.PersistIfDirty(...)`）
    - **仅 `/new` 清零**（`s.ResetCumulative()`），daemon 重启 / `/cwd` / `/use` / `/kill` / 进程崩溃一律保留
    - 6 个新方法：`SetModel` / `Model` / `AccumulateUsage` / `ResetCumulative` / `CumulativeUsage` / `PersistIfDirty`
@@ -576,7 +576,7 @@ type OutboundMessage struct {
 - §1.3 Channel 不 import chatsession（不变；Channel 通过 typed `SessionContext` 字段读 metadata）
 - 1 turn : 1 anchor 不变式保留（`ReplyTo = currentTurnUserMsgID` 仍是唯一 coordination key）
 - 抽象归抽象 / 具体归具体（footer 渲染细节由 Feishu adapter 自决，Slack / Web / Echo 各自决定）
-- bridges 协议零变化（仍发 EventInit / EventUsage，runtime 翻译）
+- bridges 协议零变化（仍发 EventAgentConnected / EventUsage，runtime 翻译）
 - OutboundKind 不增不减（`SessionContext` 是字段，不是新 Kind）
 - OutInit / OutUsage 仍是 silent drop（F-44 决策保留；footer 走 `SessionContext` 单独路径）
 - §1.4 抽象 / 具体 边界规范保留（metadata 是 typed primitive，Channel 自决渲染目标）
@@ -1057,7 +1057,7 @@ messageDispatcher(ctx, msg)
 
 ### 2.2 CLI 输出 → 用户（Outbound）
 
-**核心语义：1 turn : 1 anchor, n events**。每个 agent turn 由 ChatSession 锚定到单一 `currentTurnUserMsgID`（buffered batch 时锚到最后一条 userMsgID）；EventHandler 在每个 OutboundMessage 上设 `out.ReplyTo = currentTurnUserMsgID`；Channel 据此路由到对应 receipt（card / thread / DOM 节点）。`ReplyTo == ""` 是仅有的"无锚" case（启动期 EventInit、系统日志、内部事件），Channel 走 plain text / 跳过。
+**核心语义：1 turn : 1 anchor, n events**。每个 agent turn 由 ChatSession 锚定到单一 `currentTurnUserMsgID`（buffered batch 时锚到最后一条 userMsgID）；EventHandler 在每个 OutboundMessage 上设 `out.ReplyTo = currentTurnUserMsgID`；Channel 据此路由到对应 receipt（card / thread / DOM 节点）。`ReplyTo == ""` 是仅有的"无锚" case（启动期 EventAgentConnected、系统日志、内部事件），Channel 走 plain text / 跳过。
 
 ```
 Claude Code 进程 (PTY child, cwd = chatSession.activeCwd)

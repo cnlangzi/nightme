@@ -139,7 +139,7 @@ If you previously ran `nightme test` for the full feature set
 
 - `--channel=feishu` (default): WebSocket adapter; requires
   `~/.nightme/config.yaml` with `feishu.app_id` and
-  `feishu.app_secret` (run `nightme auth login feishu` to get them).
+  `feishu.app_secret` (run `nightme login feishu` to get them).
 - `--channel=echo`: no-network stub that prints outbound messages
   to stdout. Useful for smoke tests.
 

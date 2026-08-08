@@ -9,21 +9,21 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/auth"
 	"github.com/cnlangzi/nightme/internal/config"
+	"github.com/cnlangzi/nightme/internal/login"
 )
 
-// fakeAuthProvider is an auth.Provider that returns whatever the
+// fakeProvider is a login.Provider that returns whatever the
 // test set up. It is the test's handle to "what the QR flow would
 // have produced".
-type fakeAuthProvider struct {
-	creds *auth.Credentials
+type fakeProvider struct {
+	creds *login.Credentials
 	err   error
 	delay time.Duration // simulate >zero Login before returning
 }
 
-func (f *fakeAuthProvider) Name() string { return "feishu" }
-func (f *fakeAuthProvider) Login(ctx context.Context) (*auth.Credentials, error) {
+func (f *fakeProvider) Name() string { return "feishu" }
+func (f *fakeProvider) Login(ctx context.Context) (*login.Credentials, error) {
 	if f.delay > 0 {
 		select {
 		case <-ctx.Done():
@@ -45,14 +45,14 @@ func withTempConfig(t *testing.T) string {
 	return path
 }
 
-// TestAuthLogin_Success walks the happy path: clean config + fake
+// TestLogin_Success walks the happy path: clean config + fake
 // provider returning credentials -> config.yaml is written, success
 // banner mentions the app_id.
-func TestAuthLogin_Success(t *testing.T) {
+func TestLogin_Success(t *testing.T) {
 	_ = withTempConfig(t)
 
-	prov := &fakeAuthProvider{
-		creds: &auth.Credentials{
+	prov := &fakeProvider{
+		creds: &login.Credentials{
 			AppID:     "cli_newapp",
 			AppSecret: "sek-ret-1",
 			AppName:   "nightme",
@@ -61,14 +61,14 @@ func TestAuthLogin_Success(t *testing.T) {
 	}
 
 	flags := &loginCmdFlags{timeout: 5 * time.Second}
-	cmd := newAuthLoginFeishuCmd(flags)
+	cmd := newLoginFeishuCmd(flags)
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stdout)
 	cmd.SetContext(context.Background())
 
-	if err := runAuthLoginWith(cmd, flags, prov); err != nil {
-		t.Fatalf("runAuthLoginWith: %v", err)
+	if err := runLoginWith(cmd, flags, prov); err != nil {
+		t.Fatalf("runLoginWith: %v", err)
 	}
 
 	// Config got written with our credentials.
@@ -102,13 +102,13 @@ func TestAuthLogin_Success(t *testing.T) {
 	}
 }
 
-// TestAuthLogin_AlwaysRebinds asserts the rebind contract: running
+// TestLogin_AlwaysRebinds asserts the rebind contract: running
 // login on a config that already holds Feishu credentials
 // unconditionally overwrites them. There is no --force flag, no
-// "already configured" guard — `nightme auth login feishu` IS the
+// "already configured" guard — `nightme login feishu` IS the
 // rebind operation. This is what makes bumping the requested scopes
 // (e.g. adding im:message.reactions:write_only) a single command.
-func TestAuthLogin_AlwaysRebinds(t *testing.T) {
+func TestLogin_AlwaysRebinds(t *testing.T) {
 	_ = withTempConfig(t)
 
 	cfg, err := config.LoadDefault()
@@ -121,17 +121,17 @@ func TestAuthLogin_AlwaysRebinds(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	prov := &fakeAuthProvider{
-		creds: &auth.Credentials{AppID: "new-cli-id", AppSecret: "new-secret"},
+	prov := &fakeProvider{
+		creds: &login.Credentials{AppID: "new-cli-id", AppSecret: "new-secret"},
 	}
 
 	flags := &loginCmdFlags{timeout: 5 * time.Second}
-	cmd := newAuthLoginFeishuCmd(flags)
+	cmd := newLoginFeishuCmd(flags)
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetContext(context.Background())
-	if err := runAuthLoginWith(cmd, flags, prov); err != nil {
-		t.Fatalf("runAuthLoginWith: %v", err)
+	if err := runLoginWith(cmd, flags, prov); err != nil {
+		t.Fatalf("runLoginWith: %v", err)
 	}
 
 	cfg2, _ := config.LoadDefault()
@@ -143,23 +143,23 @@ func TestAuthLogin_AlwaysRebinds(t *testing.T) {
 	}
 }
 
-// TestAuthLogin_ProviderError wraps the SDK error path: any Login
+// TestLogin_ProviderError wraps the SDK error path: any Login
 // failure bubbles through verbatim so the user sees the real
 // upstream message rather than a placeholder.
-func TestAuthLogin_ProviderError(t *testing.T) {
+func TestLogin_ProviderError(t *testing.T) {
 	_ = withTempConfig(t)
 
-	prov := &fakeAuthProvider{err: auth.ErrAuthTimeout}
+	prov := &fakeProvider{err: login.ErrLoginTimeout}
 
-	cmd := newAuthLoginFeishuCmd(&loginCmdFlags{timeout: 5 * time.Second})
+	cmd := newLoginFeishuCmd(&loginCmdFlags{timeout: 5 * time.Second})
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetContext(context.Background())
-	err := runAuthLoginWith(cmd, &loginCmdFlags{timeout: 5 * time.Second}, prov)
+	err := runLoginWith(cmd, &loginCmdFlags{timeout: 5 * time.Second}, prov)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "authentication timeout") {
+	if !strings.Contains(err.Error(), "login timeout") {
 		t.Errorf("error chain does not mention timeout: %v", err)
 	}
 
@@ -175,25 +175,25 @@ func TestAuthLogin_ProviderError(t *testing.T) {
 	}
 }
 
-// TestAuthLogin_ContextDeadline aligns the timeout-in-the-flag with
+// TestLogin_ContextDeadline aligns the timeout-in-the-flag with
 // the actual context passed to provider.Login. A 1ms timeout with
 // a fake that sleeps 1s should surface ctx.DeadlineExceeded.
-func TestAuthLogin_ContextDeadline(t *testing.T) {
+func TestLogin_ContextDeadline(t *testing.T) {
 	_ = withTempConfig(t)
 
-	prov := &fakeAuthProvider{
+	prov := &fakeProvider{
 		delay: 10 * time.Millisecond,
-		creds: &auth.Credentials{AppID: "x", AppSecret: "x"},
+		creds: &login.Credentials{AppID: "x", AppSecret: "x"},
 	}
 
-	cmd := newAuthLoginFeishuCmd(&loginCmdFlags{timeout: 50 * time.Millisecond})
+	cmd := newLoginFeishuCmd(&loginCmdFlags{timeout: 50 * time.Millisecond})
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetContext(context.Background())
 	// This should NOT time out: 50ms > 10ms delay, so the fake
 	// returns in time. The point of this test is mostly to lock
 	// in the plumbing: ctx is passed, Login respects it.
-	if err := runAuthLoginWith(cmd, &loginCmdFlags{timeout: 50 * time.Millisecond}, prov); err != nil {
+	if err := runLoginWith(cmd, &loginCmdFlags{timeout: 50 * time.Millisecond}, prov); err != nil {
 		// Tolerated: if timer scheduling gets weird it can race,
 		// but neither side should crash.
 		t.Logf("note: timed error returned (likely scheduling): %v", err)

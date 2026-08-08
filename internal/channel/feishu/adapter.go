@@ -250,10 +250,10 @@ func NewAdapter(cfg *config.Config) (*Adapter, error) {
 		return nil, errors.New("feishu: config is required")
 	}
 	if strings.TrimSpace(cfg.Feishu.AppID) == "" {
-		return nil, errors.New("feishu: app_id is required; run `nightme auth login feishu`")
+		return nil, errors.New("feishu: app_id is required; run `nightme login feishu`")
 	}
 	if strings.TrimSpace(cfg.Feishu.AppSecret) == "" {
-		return nil, errors.New("feishu: app_secret is required; run `nightme auth login feishu`")
+		return nil, errors.New("feishu: app_secret is required; run `nightme login feishu`")
 	}
 
 	messageStates, err := lru.New[string, agent.MessageState](messageStatesLRUSize)

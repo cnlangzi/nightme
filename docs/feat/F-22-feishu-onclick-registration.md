@@ -104,15 +104,15 @@ internal/auth/
     └── qrencode.go               # 终端 QR 渲染
 
 cmd/nightme/
-└── auth.go                       # `nightme auth login feishu` 子命令
+└── login.go                      # `nightme login feishu` 子命令
 ```
 
 **新增依赖**：
 - `github.com/skip2/go-qrcode` — 终端 QR 渲染（ASCII 字符）
 
-**`nightme auth login feishu` CLI 流程**：
+**`nightme login feishu` CLI 流程**：
 ```
-$ nightme auth login feishu
+$ nightme login feishu
 [nightme] requesting Feishu authorization...
 
 Scan this QR code with Feishu mobile, or open this URL:
@@ -158,7 +158,7 @@ Next: run `nightme run` to start the gateway.
 > **历史**：F-22 v1.0 设计稿（已过时）使用 `channels.feishu.accounts.main.{...}` 嵌套结构。后续根据 Devin 反馈（2026-07-31）改为顶层字段，因为 v0.1 single-account 场景下两种写法等价，且顶层结构更简单、不牵动 Config 其他调用点。
 
 **Manual 模式 fallback**：
-- config 里已有 `appId` / `appSecret` → `nightme auth login feishu` **直接覆盖**（rebind 即 login，无 `--force` flag）。这是升级 scope（如新增 `im:message.reactions:write_only`）的标准操作流程。
+- config 里已有 `appId` / `appSecret` → `nightme login feishu` **直接覆盖**（rebind 即 login，无 `--force` flag）。这是升级 scope（如新增 `im:message.reactions:write_only`）的标准操作流程。
 - 无需 `--force`，登录动作本身就是强制重新绑定。
 
 ## 4. Edge cases
@@ -172,15 +172,15 @@ Next: run `nightme run` to start the gateway.
 | 用户选了不存在的 tenant | 飞书返回 error，nightme 透传 |
 | Lark (international) vs Feishu (国内) | 自动检测 `tenant_brand`，用对应 `LarkDomain` 或 `Domain`（SDK 自动处理）|
 | 注册时网络断 | ctx timeout → 报错，下次重试无需重新写 config |
-| 用户想看当前凭证 | `nightme auth status feishu` → 显示当前 app_id（不显示 secret）|
+| 用户想看当前凭证 | 直接 `cat ~/.nightme/config.yaml`（无 status 命令；用户可读 config）|
 | 用户想撤销 app | 文档说明需要去飞书开放平台手动撤销 + 删 config |
 | `--update` 模式 | 用 `Options.AppID` 走 update flow，重新授权现有 app |
-| 升级 scope（如新增 reaction scope） | 重新跑 `nightme auth login feishu`，飞书重新创建 app，新凭证覆盖 config |
+| 升级 scope（如新增 reaction scope） | 重新跑 `nightme login feishu`，飞书重新创建 app，新凭证覆盖 config |
 | DM 中 `/watch` 为 no-op | DM chat_type 下 `HasMention` 永远 true，`/watch on/off` 状态正常写入但不影响消息处理 —— DM 消息全收，与模式无关 |
 
 ## 5. 验收流程（v0.1 演示）
 
-1. `nightme auth login feishu`
+1. `nightme login feishu`
 2. 终端显示 QR
 3. 用飞书 App 扫码
 4. 飞书显示"nightme 申请 X 权限"
@@ -197,14 +197,14 @@ Next: run `nightme run` to start the gateway.
 - `TestFeishuAuth_LoginTimeout` 模拟 context cancel → 验证返回 error
 - `TestFeishuAuth_LoginError` 模拟飞书返回 error code → 验证 error wrapping
 - `TestWriteCredentials_Atomic` 验证 config 写入是原子的 + 0600 权限
-- `TestAuthLogin_AlwaysRebinds` 验证重新 login 时无条件覆盖现有凭证（无 `--force` flag）
+- `TestLogin_AlwaysRebinds` 验证重新 login 时无条件覆盖现有凭证（无 `--force` flag）
 
 **集成测试**（需要 mock registration.RegisterApp）：
-- `TestAuthCommand_Success` 模拟整个 QR flow → config 写入正确
-- `TestAuthCommand_AlreadyConfigured` 验证错误信息
+- `TestLogin_Success` 模拟整个 QR flow → config 写入正确
+- `TestLogin_ProviderError` 验证 provider 失败时错误透传（无凭证写入磁盘）
 
 **E2E（手动）**：
-- 在真实飞书账号上跑 `nightme auth login feishu`
+- 在真实飞书账号上跑 `nightme login feishu`
 - 验证 QR 显示
 - 用飞书 App 扫
 - 验证 config 写入
@@ -221,7 +221,7 @@ Next: run `nightme run` to start the gateway.
 **对 F-08 的影响**：
 - F-08 Channel 启动时读 `feishu.app_id` / `feishu.app_secret` 顶层字段
 - 这两个值可以来自：
-  1. `nightme auth login feishu`（F-22 写入）✅ 推荐
+  1. `nightme login feishu`（F-22 写入）✅ 推荐
   2. 手动编辑 config.yaml（v0.1 兼容）
 
 ## 8. 实施顺序
@@ -247,6 +247,6 @@ PR #4 内部先做 F-22，再做 F-08（让 F-08 测试时用 F-22 拿到的真�
 - Lark (国际版) 是否用相同 SDK？倾向：同 SDK，自动检测 tenant_brand
 - ~~多 tenant 支持（一个 nightme 跑多个飞书 app）？v0.1 不支持，v0.2 考虑~~ — **2026-07-31 决议：v0.1 明确 single-account，不预留 multi-account 结构。v0.2 需要时重构为 `channels.feishu.accounts.<name>.{...}`。**
 - 用户拒绝授权后如何清理（feishu 侧是否残留）？飞书只授权后才会创建 app，拒绝则不创建，无需清理
-- 是否支持 `nightme auth export feishu` 输出可分享的 env var？v0.2 考虑
+- 是否支持 `nightme login export feishu` 输出可分享的 env var？v0.2 考虑
 - 与 M2 现有计划的 conflicts：原 M2 假设 manual setup，新增 F-22 是增量（向后兼容）
 - registry vs config：F-22 凭证存 config.yaml（用户可读可改），不是 registry（机器管理的 runtime state）

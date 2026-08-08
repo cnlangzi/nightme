@@ -605,6 +605,72 @@ func TestEmitInit_NoContextWindow(t *testing.T) {
 	}
 }
 
+// TestEmitInit_ContextWindowResetBetweenSessions pins F-54 §3:
+// the unconditional reset in emitConnected prevents the previous
+// session's window from leaking into a new session whose get_state
+// response lacks ContextWindow (catalog miss, RPC hiccup, future
+// set_model). Without the reset, /new's second emitConnected would
+// silently inherit the boot window and every subsequent pct would
+// be computed against the WRONG model's window.
+//
+// The session.New path resets connectedSent=false before re-running
+// the boot handshake; we simulate that here by flipping the flag
+// directly between emitConnected calls.
+func TestEmitInit_ContextWindowResetBetweenSessions(t *testing.T) {
+	tr := newTestTranslator()
+
+	// Session 1: a registered model with a known window.
+	state1 := &getStateResult{
+		SessionID: "sess-1",
+		Model:     &getStateModel{ID: "m1", ContextWindow: 200000},
+	}
+	if events := tr.emitConnected(state1); len(events) != 1 {
+		t.Fatalf("emitConnected #1 = %d events, want 1", len(events))
+	}
+	if got := tr.contextWindow.Load(); got != 200000 {
+		t.Fatalf("after session 1: contextWindow = %d, want 200000", got)
+	}
+
+	// /new: session.New clears connectedSent before re-running the
+	// boot handshake. Simulate the same state machine here.
+	tr.connectedSent = false
+
+	// Session 2: pi catalog miss → ContextWindow absent.
+	state2 := &getStateResult{
+		SessionID: "sess-2",
+		Model:     &getStateModel{ID: "unknown-model"}, // no ContextWindow
+	}
+	if events := tr.emitConnected(state2); len(events) != 1 {
+		t.Fatalf("emitConnected #2 = %d events, want 1", len(events))
+	}
+	if got := tr.contextWindow.Load(); got != 0 {
+		t.Errorf("after session 2 (catalog miss): contextWindow = %d, want 0 (must not inherit 200000)", got)
+	}
+
+	// Session 3: get_state returns nil Model entirely (RPC hiccup).
+	tr.connectedSent = false
+	state3 := &getStateResult{SessionID: "sess-3"}
+	if events := tr.emitConnected(state3); len(events) != 1 {
+		t.Fatalf("emitConnected #3 = %d events, want 1", len(events))
+	}
+	if got := tr.contextWindow.Load(); got != 0 {
+		t.Errorf("after session 3 (nil Model): contextWindow = %d, want 0", got)
+	}
+
+	// Session 4: same model as session 1 (sanity — must round-trip).
+	tr.connectedSent = false
+	state4 := &getStateResult{
+		SessionID: "sess-4",
+		Model:     &getStateModel{ID: "m1", ContextWindow: 200000},
+	}
+	if events := tr.emitConnected(state4); len(events) != 1 {
+		t.Fatalf("emitConnected #4 = %d events, want 1", len(events))
+	}
+	if got := tr.contextWindow.Load(); got != 200000 {
+		t.Errorf("after session 4 (same model): contextWindow = %d, want 200000 (reset+Store round-trip)", got)
+	}
+}
+
 // TestDecodeMessageUsage_ContextWindowPct pins F-54 §2.2: the
 // bridge-computed pct follows Doc 1 (used / window * 100) when
 // the translator-supplied contextWindow is positive. The

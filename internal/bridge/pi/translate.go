@@ -185,13 +185,22 @@ type translator struct {
 	// in tokens, captured from get_state.data.model.contextWindow
 	// (F-54). Bridge-local: decodeMessageUsage receives it as a
 	// parameter, computes ContextWindowPct, and the value itself
-	// never crosses the UsageEvent struct boundary. Sticky for the
-	// session lifetime — pi F-32 MVP does not support dynamic model
-	// switch (see translator.go context). Zero before get_state
-	// arrives; translate() is NOT otherwise gated, so reads from
-	// decodeMessageUsage must synchronise with the emitConnected
-	// write — atomic.LoadInt64/StoreInt64 provide that happens-
-	// before edge without coupling turnMu and translatorMu.
+	// never crosses the UsageEvent struct boundary.
+	//
+	// Refreshed on every emitConnected call. emitConnected fires
+	// once at boot AND once on every /new (session.New resets
+	// connectedSent=false and re-runs the boot handshake — see
+	// session.go newSession). emitConnected unconditionally
+	// resets the field to 0 before the conditional Store, so a
+	// missing ContextWindow in the new get_state response
+	// (catalog miss, RPC hiccup) does NOT silently inherit the
+	// previous session's window — that would corrupt every
+	// subsequent pct for the new session (F-54 §3).
+	//
+	// Stored via atomic.LoadInt64/StoreInt64 so the concurrent
+	// decodeMessageUsage read (on the readPump goroutine, under
+	// turnMu) sees a coherent value without coupling turnMu and
+	// translatorMu (emitConnected runs under translatorMu).
 	contextWindow atomic.Int64
 
 	// turnMu serialises all access to turn and suppressing.
@@ -862,6 +871,16 @@ func (t *translator) emitConnected(result *getStateResult) []agent.AgentEvent {
 		return nil
 	}
 	t.connectedSent = true
+	// F-54 §3: unconditional reset BEFORE the conditional Store.
+	// Without this, /new's second emitConnected would silently
+	// inherit the previous session's window when the new model's
+	// get_state returns ContextWindow=0 (catalog miss, RPC hiccup,
+	// future set_model) — every subsequent pct would be computed
+	// against the WRONG model's window. With this, the same-model
+	// /new case behaves identically to the old code (reset → Store
+	// the same value), and the model-switch /new case correctly
+	// clears the stale value.
+	t.contextWindow.Store(0)
 	modelID := ""
 	modelName := ""
 	if result != nil && result.Model != nil {

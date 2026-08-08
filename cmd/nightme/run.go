@@ -804,7 +804,7 @@ func wireRuntimeCallbacksAndRestore(
 // scalar). The handler stamps it onto OutboundMessage.ReplyTo
 // so each Channel can route the event to its own per-userMsgID
 // receipt (card / thread / DOM node). Empty when the event has
-// no anchor (startup EventInit, post-/use while no Prompt is
+// no anchor (startup AgentConnected, post-/use while no Prompt is
 // active, etc.) — Channel falls back to plain text in that case.
 //
 // v1.3 (SPEC §2.2): 1 turn : 1 anchor. Receipt rendering and
@@ -815,7 +815,7 @@ func wireRuntimeCallbacksAndRestore(
 // fires only for ChatSessions that already exist, so the
 // ChatSession is statically known at install time. Capturing it
 // in the closure eliminates the per-event mgr.Get round-trip
-// (RLock + map lookup). mgr is still passed because EventInit
+// (RLock + map lookup). mgr is still passed because AgentConnected
 // persistence needs mgr.PersistAgentSession, which is the cold
 // path (once per AgentSession lifetime, not per event).
 func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chatsession.Manager, logger *slog.Logger) chatsession.EventHandler {
@@ -828,18 +828,18 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 	// EventUsage two-event split was a bridge-layer artifact — the
 	// data was always co-located on the wire.
 	return func(chatID string, s *chatsession.AgentSession, ev agent.AgentEvent, userMsgID string) {
-		// Capture the agent's own session id from EventInit so the
+		// Capture the agent's own session id from AgentConnected so the
 		// next respawn can replay `--resume <id>`. We persist
 		// immediately (rather than waiting for the next status
 		// transition) so a daemon crash after this event still
 		// remembers the id. The capture is idempotent.
 		//
 		// Guard: only overwrite an existing (non-empty) ResumeID when
-		// the new id is non-empty. Some bridges re-emit EventInit
+		// the new id is non-empty. Some bridges re-emit AgentConnected
 		// after a child restart with a blank SessionID; we don't
 		// want to wipe a previously-captured id in that case.
-		if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.SessionID != "" {
-			s.SetResumeID(ev.Init.SessionID)
+		if ev.Kind == agent.AgentConnected && ev.Connected != nil && ev.Connected.SessionID != "" {
+			s.SetResumeID(ev.Connected.SessionID)
 			if mgr != nil {
 				if err := mgr.PersistAgentSession(s); err != nil && logger != nil {
 					logger.Warn("persist agent session (init) failed",
@@ -849,22 +849,22 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 				}
 			}
 		}
-		// F-45 §1.4: capture model on first EventInit. Independent
+		// F-45 §1.4: capture model on first AgentConnected. Independent
 		// of the SessionID capture above (some bridges may emit
 		// one without the other). SetModel is idempotent — empty
 		// incoming values don't overwrite.
-		if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.Model != "" {
-			s.SetModel(ev.Init.Model)
+		if ev.Kind == agent.AgentConnected && ev.Connected != nil && ev.Connected.Model != "" {
+			s.SetModel(ev.Connected.Model)
 		}
 		// T-alive (2026-08-07): flip the reaction ⌨ → 🔄 ONLY
-		// when EventInit arrives, i.e. when we have proof claude
+		// when AgentConnected arrives, i.e. when we have proof claude
 		// actually started the new prompt. The dispatcher used
 		// to emit MessageSubmitted right after LookupActiveAgentSession
 		// returns — which gave a false-positive "On It" reaction
 		// whenever the spawn's 60s resume-fallback probe was in
 		// flight (or MCP startup was hung). Now: the reaction only
 		// flips when claude itself confirms it has started.
-		if ev.Kind == agent.EventInit && userMsgID != "" {
+		if ev.Kind == agent.AgentConnected && userMsgID != "" {
 			cs.EmitMessageState(userMsgID, agent.MessageSubmitted)
 		}
 		// Per-turn usage accumulation moved out of an EventUsage
@@ -938,7 +938,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		}
 		// Stamp the current turn's anchor so the Channel can
 		// route to the right per-userMsgID receipt. ReplyTo
-		// stays empty for orphan events (EventInit at startup,
+		// stays empty for orphan events (AgentConnected at startup,
 		// internal logs) — Channel renders those as plain text.
 		out.ReplyTo = userMsgID
 		// F-45 §2.5 改动 C: stamp SessionContext snapshot on the

@@ -24,7 +24,7 @@ import (
 )
 
 // TestSession_FullRoundTrip spawns the mock pi, asserts that:
-//  1. Start succeeds and emits exactly one EventInit;
+//  1. Start succeeds and emits exactly one AgentConnected;
 //  2. the first SendBlocks returns nil and yields a stream
 //     of text + tool events followed by EventDone with
 //     Reason:"settled" -- the channel is NOT closed;
@@ -68,16 +68,16 @@ func TestSession_FullRoundTrip(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	// Step 1: collect the EventInit.
-	init := mustFirstEventOfKind(t, sess, agent.EventInit, 2*time.Second)
-	if init.Init.AgentName != "pi" {
-		t.Errorf("Init.AgentName = %q, want pi", init.Init.AgentName)
+	// Step 1: collect the AgentConnected.
+	init := mustFirstEventOfKind(t, sess, agent.AgentConnected, 2*time.Second)
+	if init.Connected.AgentName != "pi" {
+		t.Errorf("Init.AgentName = %q, want pi", init.Connected.AgentName)
 	}
-	if init.Init.SessionID != "mock-session-1" {
-		t.Errorf("Init.SessionID = %q, want mock-session-1", init.Init.SessionID)
+	if init.Connected.SessionID != "mock-session-1" {
+		t.Errorf("Init.SessionID = %q, want mock-session-1", init.Connected.SessionID)
 	}
-	if !strings.Contains(init.Init.Model, "Claude Sonnet 4") {
-		t.Errorf("Init.Model = %q, want to contain 'Claude Sonnet 4'", init.Init.Model)
+	if !strings.Contains(init.Connected.Model, "Claude Sonnet 4") {
+		t.Errorf("Init.Model = %q, want to contain 'Claude Sonnet 4'", init.Connected.Model)
 	}
 
 	// Step 2: drive a first prompt. The mock streams
@@ -261,10 +261,10 @@ func TestSession_PromptTimeout_NotInfinite(t *testing.T) {
 		}
 	}()
 
-	// Drain EventInit so we know the bridge is fully up before
+	// Drain AgentConnected so we know the bridge is fully up before
 	// we measure SendText's behaviour. Without this, a slow
 	// handshake could leak into the SendText measurement.
-	mustFirstEventOfKind(t, sess, agent.EventInit, 3*time.Second)
+	mustFirstEventOfKind(t, sess, agent.AgentConnected, 3*time.Second)
 
 	start := time.Now()
 	sendErr := sess.SendText("hi")

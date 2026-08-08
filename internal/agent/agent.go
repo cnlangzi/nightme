@@ -130,10 +130,10 @@ const (
 	// turn. Channels typically surface a brief "Compacting…" indicator.
 	EventCompaction
 
-	// EventInit carries session bootstrap data (session_id + model)
+	// AgentConnected carries session bootstrap data (session_id + model)
 	// from the agent's system/init event. Channels use it to surface
 	// "session <id> · model <name>" in the receipt header.
-	EventInit
+	AgentConnected
 
 	// EventTaskCreate signals the first confirmable task operation
 	// (e.g. Claude TaskCreate success). The payload carries the
@@ -167,7 +167,7 @@ func (k EventKind) String() string {
 		return "result"
 	case EventCompaction:
 		return "compaction"
-	case EventInit:
+	case AgentConnected:
 		return "init"
 	case EventTaskCreate:
 		return "task_create"
@@ -409,13 +409,13 @@ type UsageInfo struct {
 // new payload shape is needed.
 type CompactionEvent struct{}
 
-// InitEvent is the payload for EventInit — session bootstrap data
+// AgentConnectedEvent is the payload for AgentConnected — session bootstrap data
 // from the agent's system/init event. Bridges populate the
 // agent-specific fields (AgentName, Workspace) from their own start
 // config; the stream-json system event provides SessionID + Model.
 // Channels use this payload to surface the receipt card's foot
 // note (Agent · name | cwd · workspace | tokens · count).
-type InitEvent struct {
+type AgentConnectedEvent struct {
 	// SessionID is the agent's opaque session id. Used for `--resume`
 	// on subsequent runs; channels may surface it for debugging.
 	SessionID string
@@ -527,7 +527,7 @@ type TaskListEvent struct {
 //	EventResult     -> Result
 //	EventUsage      -> Usage
 //	EventCompaction -> (no payload — empty marker struct)
-//	EventInit       -> Init
+//	AgentConnected  -> Connected
 //	EventTaskCreate -> TaskList
 //	EventTaskUpdate -> TaskList
 type AgentEvent struct {
@@ -543,7 +543,7 @@ type AgentEvent struct {
 	Error      *ErrorEvent
 	Result     *ResultEvent
 	Usage      *UsageEvent
-	Init       *InitEvent
+	Connected  *AgentConnectedEvent
 
 	// TaskList is the payload for EventTaskCreate / EventTaskUpdate.
 	// Every event carries a full snapshot of the current task list
@@ -737,7 +737,7 @@ type AgentSession interface {
 	//   - pi:         send {"type":"new_session"} RPC
 	//   - acp:        send "session/new" JSON-RPC over the existing transport
 	//
-	// After New returns, the bridge MUST emit a fresh EventInit carrying
+	// After New returns, the bridge MUST emit a fresh AgentConnected carrying
 	// the new SessionID; the runtime's existing eventHandler captures
 	// it via SetResumeID and persists (cmd/nightme/run.go newEventHandler).
 	New(ctx context.Context) error

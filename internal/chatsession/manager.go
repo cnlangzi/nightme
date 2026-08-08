@@ -121,7 +121,7 @@ func (m *Manager) Get(chatID string) *ChatSession {
 // PersistAgentSession writes the entry for as to the manager's
 // agent_sessions.json store. Idempotent; safe to call from event
 // handlers (no daemon locks held). Used to durably save the
-// agent's resume id the first time it surfaces via EventInit, so
+// agent's resume id the first time it surfaces via AgentConnected, so
 // the next respawn can replay `--resume <id>`.
 func (m *Manager) PersistAgentSession(as *AgentSession) error {
 	if as == nil {

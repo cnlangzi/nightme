@@ -60,7 +60,7 @@ func TestResumePaths_Table(t *testing.T) {
 	})
 }
 
-// resumeHappyPath: spawn → send prompt → capture EventInit
+// resumeHappyPath: spawn → send prompt → capture AgentConnected
 // SessionID → close → spawn again with --resume <id> → send
 // prompt → expect text. If both succeed, --resume works
 // correctly and the production hang is a different bug.
@@ -82,7 +82,7 @@ func resumeHappyPath(t *testing.T, deadline time.Duration) {
 		t.Fatalf("phase 1 Start: %v", err)
 	}
 	// T-alive (2026-08-07): claude --print is single-turn mode —
-	// it does NOT emit EventInit until it receives the first
+	// it does NOT emit AgentConnected until it receives the first
 	// stdin block. SendText before waiting for events.
 	if err := sess1.SendText("capture my session id, then say only: pong"); err != nil {
 		t.Fatalf("phase 1 SendText: %v", err)
@@ -101,15 +101,15 @@ initLoop:
 			}
 			t.Logf("[replay] phase 1 EV at %s kind=%v initNonNil=%v sessionID=%q",
 				time.Since(phaseStart).Round(time.Millisecond), ev.Kind,
-				ev.Init != nil, initSessionID(ev))
-			if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.SessionID != "" {
-				capturedID = ev.Init.SessionID
+				ev.Connected != nil, initSessionID(ev))
+			if ev.Kind == agent.AgentConnected && ev.Connected != nil && ev.Connected.SessionID != "" {
+				capturedID = ev.Connected.SessionID
 				initSeen = true
 				t.Logf("[replay] phase 1: captured sessionID=%q", capturedID)
 				break initLoop
 			}
 		case <-time.After(90 * time.Second):
-			t.Fatalf("phase 1: no EventInit within 90s (claude took >90s to handshake; possible MCP startup hang in workspace=%s)", ws)
+			t.Fatalf("phase 1: no AgentConnected within 90s (claude took >90s to handshake; possible MCP startup hang in workspace=%s)", ws)
 		}
 	}
 	if !initSeen {
@@ -245,12 +245,12 @@ func resumeUserWorkspaceKnownID(t *testing.T, deadline time.Duration) {
 }
 
 // initSessionID safely extracts the SessionID from an
-// EventInit event (returns "" if Init is nil).
+// AgentConnected event (returns "" if Init is nil).
 func initSessionID(ev agent.AgentEvent) string {
-	if ev.Init == nil {
+	if ev.Connected == nil {
 		return ""
 	}
-	return ev.Init.SessionID
+	return ev.Connected.SessionID
 }
 
 func envOn(name string) bool {

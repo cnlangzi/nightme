@@ -358,7 +358,7 @@ func summarizeKinds(msgs []OutboundMessage) []OutboundKind {
 // fails with a clear signal.
 //
 // The shell script writes:
-//   1. system/init             → EventInit
+//   1. system/init             → AgentConnected
 //   2. assistant message       → EventText "hello back"
 //   3. result                  → EventResult "final answer"
 //   4. EOF (exit 0)            → pumpStream closes events

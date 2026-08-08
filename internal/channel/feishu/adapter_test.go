@@ -2230,7 +2230,7 @@ func TestSend_OutInit_SilentDrop(t *testing.T) {
 		Kind:    gateway.OutInit,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
-		Init: &agent.InitEvent{
+		Connected: &agent.AgentConnectedEvent{
 			SessionID: "s_1",
 			Model:     "claude-sonnet-4-5",
 			AgentName: "claude",
@@ -2460,7 +2460,7 @@ func TestEnsureReceiptForTyping_RendersFooterWhenProvided(t *testing.T) {
 
 // TestEnsureReceiptForTyping_OmitsFooterWhenEmpty (F-48): when
 // the caller's footerLines is nil/empty (no SessionContext stamped
-// — e.g. agent hasn't EventInit'd yet and the Cwd is not in a git
+// — e.g. agent hasn't AgentConnected'd yet and the Cwd is not in a git
 // repo), the placeholder card omits the footer entirely. The
 // hr divider is also absent. This is the back-compat path for
 // the pre-F-48 "no footer" placeholder — supported but not

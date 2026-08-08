@@ -108,7 +108,7 @@ func TestFreshLiveness_PassesAnswer(t *testing.T) {
 			go func() {
 				for ev := range sess.Events() {
 					switch ev.Kind {
-					case agent.EventInit:
+					case agent.AgentConnected:
 						t.Logf("[liveness] init at %s", time.Since(start))
 					case agent.EventText:
 						resultCh <- outcome{ev.Kind, ev.Text, time.Now()}

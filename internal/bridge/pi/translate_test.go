@@ -516,9 +516,9 @@ func TestTranslate_MalformedJSON(t *testing.T) {
 	}
 }
 
-// TestEmitInit_Once verifies that emitInit only fires the first
+// TestEmitInit_Once verifies that emitConnected only fires the first
 // time. Subsequent get_state responses (e.g. after a model switch
-// in a future MVP) do not re-emit EventInit and corrupt the
+// in a future MVP) do not re-emit AgentConnected and corrupt the
 // receipt header.
 func TestEmitInit_Once(t *testing.T) {
 	tr := newTestTranslator()
@@ -526,19 +526,19 @@ func TestEmitInit_Once(t *testing.T) {
 		SessionID: "sess-1",
 		Model:     &getStateModel{ID: "m1", Name: "M1"},
 	}
-	first := tr.emitInit(state)
+	first := tr.emitConnected(state)
 	if len(first) != 1 {
-		t.Fatalf("first emitInit = %d, want 1", len(first))
+		t.Fatalf("first emitConnected = %d, want 1", len(first))
 	}
-	if first[0].Init.SessionID != "sess-1" || first[0].Init.AgentName != "pi" {
-		t.Errorf("init = %+v", first[0].Init)
+	if first[0].Connected.SessionID != "sess-1" || first[0].Connected.AgentName != "pi" {
+		t.Errorf("init = %+v", first[0].Connected)
 	}
-	if !strings.Contains(first[0].Init.Model, "M1") {
-		t.Errorf("Model = %q, want to contain M1", first[0].Init.Model)
+	if !strings.Contains(first[0].Connected.Model, "M1") {
+		t.Errorf("Model = %q, want to contain M1", first[0].Connected.Model)
 	}
-	second := tr.emitInit(state)
+	second := tr.emitConnected(state)
 	if second != nil {
-		t.Errorf("second emitInit = %+v, want nil", second)
+		t.Errorf("second emitConnected = %+v, want nil", second)
 	}
 }
 
@@ -547,15 +547,15 @@ func TestEmitInit_Once(t *testing.T) {
 // in early-startup state).
 func TestEmitInit_NoModel(t *testing.T) {
 	tr := newTestTranslator()
-	first := tr.emitInit(nil)
+	first := tr.emitConnected(nil)
 	if len(first) != 1 {
-		t.Fatalf("emitInit(nil) = %d, want 1", len(first))
+		t.Fatalf("emitConnected(nil) = %d, want 1", len(first))
 	}
-	if first[0].Init.Model != "" || first[0].Init.SessionID != "" {
-		t.Errorf("empty init = %+v", first[0].Init)
+	if first[0].Connected.Model != "" || first[0].Connected.SessionID != "" {
+		t.Errorf("empty init = %+v", first[0].Connected)
 	}
-	if first[0].Init.AgentName != "pi" || first[0].Init.Workspace != "/tmp/ws" {
-		t.Errorf("agent/workspace = %+v", first[0].Init)
+	if first[0].Connected.AgentName != "pi" || first[0].Connected.Workspace != "/tmp/ws" {
+		t.Errorf("agent/workspace = %+v", first[0].Connected)
 	}
 }
 
@@ -879,7 +879,7 @@ var _ = errors.New
 
 // TestTranslate_StateUpdate_EmitsEventInit verifies F-34 §3.2.2:
 // when pi emits state_update after a new_session RPC, the translator
-// surfaces an EventInit carrying the new sessionId. The runtime's
+// surfaces an AgentConnected carrying the new sessionId. The runtime's
 // eventHandler (cmd/nightme/run.go newEventHandler) picks it up
 // via SetResumeID.
 func TestTranslate_StateUpdate_EmitsEventInit(t *testing.T) {
@@ -892,17 +892,17 @@ func TestTranslate_StateUpdate_EmitsEventInit(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1", len(events))
 	}
-	if events[0].Kind != agent.EventInit {
-		t.Fatalf("Kind = %s, want EventInit", events[0].Kind)
+	if events[0].Kind != agent.AgentConnected {
+		t.Fatalf("Kind = %s, want AgentConnected", events[0].Kind)
 	}
-	if events[0].Init.SessionID != "new-sess-1" {
-		t.Errorf("SessionID = %q, want new-sess-1", events[0].Init.SessionID)
+	if events[0].Connected.SessionID != "new-sess-1" {
+		t.Errorf("SessionID = %q, want new-sess-1", events[0].Connected.SessionID)
 	}
-	if !strings.Contains(events[0].Init.Model, "M1") {
-		t.Errorf("Model = %q, want to contain M1", events[0].Init.Model)
+	if !strings.Contains(events[0].Connected.Model, "M1") {
+		t.Errorf("Model = %q, want to contain M1", events[0].Connected.Model)
 	}
-	if events[0].Init.AgentName != "pi" {
-		t.Errorf("AgentName = %q, want pi", events[0].Init.AgentName)
+	if events[0].Connected.AgentName != "pi" {
+		t.Errorf("AgentName = %q, want pi", events[0].Connected.AgentName)
 	}
 }
 
@@ -1345,7 +1345,7 @@ func TestTranslate_UntouchedSettleEmitsNoResult(t *testing.T) {
 // TestTranslate_ResetWindowDropsAbandonedTurn is the regression lock
 // for the /new race window.
 //
-// session.New() cannot deliver the new EventInit until a get_state
+// session.New() cannot deliver the new AgentConnected until a get_state
 // round-trip completes (10s deadline), and readPump keeps translating
 // the whole time. /new is reachable mid-turn — nothing gates it on the
 // FSM being Idle and slash commands bypass the InputBuffer — so wire
@@ -1393,7 +1393,7 @@ func TestTranslate_ResetWindowDropsAbandonedTurn(t *testing.T) {
 		t.Errorf("pendingTools = %v, want empty", tr.turn.pendingTools)
 	}
 
-	tr.endReset() // EventInit delivered; normal translation resumes.
+	tr.endReset() // AgentConnected delivered; normal translation resumes.
 
 	next := drive(t, tr, append(textDeltas(0, "fresh answer"),
 		assistantMessageEnd(t, "fresh answer", 42, 7),

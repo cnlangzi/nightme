@@ -104,7 +104,7 @@ type AgentSession struct {
 	exitCode *int
 
 	// Agent-session-resume id (e.g. Claude Code's
-	// `system/init.session_id`). Captured from EventInit on the
+	// `system/init.session_id`). Captured from AgentConnected on the
 	// first run; persisted via Entry; replayed on the next Spawn as
 	// `--resume <id>` (Claude Code currently translates this; other
 	// bridges ignore it). Empty when the agent has no resume
@@ -121,12 +121,12 @@ type AgentSession struct {
 	// before that.
 	handleEventsClosed chan struct{}
 
-	// F-45: model captured on first EventInit (e.g.
+	// F-45: model captured on first AgentConnected (e.g.
 	// "claude-opus-4-5-20250929"). SetModel is idempotent — empty
 	// incoming values do NOT overwrite a previously-captured model.
 	// Persisted via Entry → AgentSessionEntry.Model; restored on
 	// restart via FromAgentSessionEntry. Empty before the first
-	// EventInit lands.
+	// AgentConnected lands.
 	model string
 
 	// F-45: per-AgentSession running total of token / cost stats.
@@ -576,7 +576,7 @@ func (as *AgentSession) ResumeID() string {
 }
 
 // SetResumeID records the agent's own session id. Called by the
-// runtime's EventHandler when it receives an EventInit with a
+// runtime's EventHandler when it receives an AgentConnected with a
 // non-empty SessionID. Safe to call concurrently with Spawn /
 // SetRunning / SetExited.
 func (as *AgentSession) SetResumeID(id string) {
@@ -590,9 +590,9 @@ func (as *AgentSession) SetResumeID(id string) {
 // SetModel records the agent's selected model (e.g. Claude Code:
 // system/init.model). Idempotent: an empty incoming value does NOT
 // overwrite a previously-captured model — bridges may re-emit
-// EventInit after a child restart with a blank Model and we don't
+// AgentConnected after a child restart with a blank Model and we don't
 // want to wipe the prior capture. Called by the runtime's
-// EventHandler closure on EventInit.
+// EventHandler closure on AgentConnected.
 //
 // Safe to call concurrently with Model() and other lifecycle
 // methods.
@@ -606,7 +606,7 @@ func (as *AgentSession) SetModel(m string) {
 }
 
 // Model returns the captured model name. Empty before the first
-// EventInit lands or when the bridge does not report one.
+// AgentConnected lands or when the bridge does not report one.
 func (as *AgentSession) Model() string {
 	as.asMu.RLock()
 	defer as.asMu.RUnlock()
@@ -1051,7 +1051,7 @@ func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBl
 //     code's writeLine("/clear"), acp's session/new): New returns
 //     nil. AgentSession.ID / Cwd / pool membership are preserved;
 //     only the bridge's internal conversation state is cleared.
-//     The bridge is expected to emit a fresh EventInit carrying the
+//     The bridge is expected to emit a fresh AgentConnected carrying the
 //     new SessionID; the runtime's eventHandler (cmd/nightme/run.go
 //     newEventHandler) captures it via SetResumeID and persists.
 //
@@ -1129,7 +1129,7 @@ func (as *AgentSession) New(ctx context.Context, spawner Spawner) error {
 	as.exitCode = nil
 	as.asMu.Unlock()
 	// Explicitly clear ResumeID so a stale id never gets replayed on
-	// the next respawn (the new child will emit its own EventInit,
+	// the next respawn (the new child will emit its own AgentConnected,
 	// and the runtime's eventHandler will SetResumeID via the normal
 	// path).
 	as.SetResumeID("")

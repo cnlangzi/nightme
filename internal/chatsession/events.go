@@ -33,7 +33,7 @@ type EnrichedEventKind int
 
 const (
 	// KindAgentEvent: bridges a single AgentEvent from the underlying
-	// transport (EventInit / EventText / EventToolStart / EventToolEnd /
+	// transport (AgentConnected / EventText / EventToolStart / EventToolEnd /
 	// EventResult / EventUsage / EventPermission / EventDone / EventError
 	// etc.). AgentEvent field holds the bridge event verbatim.
 	KindAgentEvent EnrichedEventKind = iota

@@ -19,7 +19,10 @@ agents:
 
   - name: codex
     bridge: codex
-    command: codex-acp
+    command: codex
+    # bridge automatically spawns `codex app-server --listen stdio://`
+    # and drives it via JSON-RPC 2.0 over raw stdio pipes (no PTY).
+    # See docs/bridge/codex.md.
 
   - name: opencode
     bridge: opencode

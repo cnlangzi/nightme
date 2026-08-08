@@ -11,6 +11,51 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### Codex app-server bridge (new agent)
+
+The `codex` CLI is now a first-class bridge agent, joining
+claude / pi / pty. The bridge speaks the codex **app-server** JSON-RPC
+2.0 protocol directly over merged stdio pipes (no ACP middleware,
+no PTY); see [`docs/bridge/codex.md`](./docs/bridge/codex.md) for the
+full reference and [`wip/codex.md`](./wip/codex.md) for the design
+notes.
+
+- **Handshake**: `initialize` (with `optOutNotificationMethods` for
+  all six text/reasoning delta streams) → `initialized`
+  notification → `thread/start` (or `thread/resume` when a
+  SessionID is supplied via `StartConfig.SessionID`).
+- **Translator**: F-52 state machine flushes agentMessage text at
+  tool boundaries and on turn completion; reasoning accumulates
+  with `[思考] ` prefix; commandExecution / fileChange /
+  webSearch / mcpToolCall / dynamicToolCall map to
+  `EventAgentToolStart` / `EventAgentToolEnd` with stable per-item
+  IDs.
+- **Usage**: populated via the codex ≥0.125 `thread/tokenUsage/updated`
+  notification (`last` preferred, `total` fallback). The per-turn
+  usage rides on both `EventAgentResult.Usage` and
+  `EventAgentDone.Usage`, including `ContextWindow` and the F-55
+  `ContextWindowPct` formula.
+- **Approvals**: `item/commandExecution/requestApproval`,
+  `item/fileChange/requestApproval`, `item/toolCall/requestApproval`,
+  and `item/requestUserInput` are dispatched to permission
+  handlers; `respond`/`respondErr` write the JSON-RPC envelope
+  directly. Five-minute default approval timeout; package var so
+  tests can compress it.
+- **Mode**: `ModeJSONIO` (same as claudecode / pi); the runtime
+  does not branch on `Mode` for JSON-IO bridges.
+- **Config**: the example agent name moves from `codex-acp` to
+  `codex`; the `codex-acp` reference in docs / agents / tests is
+  replaced with the new bridge.
+
+### Lifecycle / close ordering fix
+
+`codexserver.session.Close()` previously held `closeOnce.Do` while
+waiting for `cmd.Wait()` to drain, which deadlocked against
+`lifecycle()`’s own `closeOnce.Do(close(events))`. Split: lifecycle
+owns `close(events)`; Close owns the shutdown-initiation once and
+waits for `exitDone` outside of it. Caught by the real-CLI
+e2e test (`TestE2E_FreshThread`).
+
 ### AgentEvent flattening + ResumeID→SessionID rename + F-49 compaction removal
 
 Three related changes landed together as one runtime/schema

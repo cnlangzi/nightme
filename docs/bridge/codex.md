@@ -1,22 +1,21 @@
 # Codex App-Server Bridge — 集成方案
 
-> **Status**: 实现已落地(M2);活文档 — 实测 + 约定
-> **Scope**: `internal/bridge/codexserver/*` — nightme 侧的 codex CLI 适配器
-> **Related docs**:
-> - [docs/bridge/claude.md](./claude.md) — 姊妹文档(EventDone 不变量、生产踩坑)
+> **Status**: 已落地 M2 — 本文档是**活文档**,包含实测踩坑 + 实战经验
+> **Scope**: `internal/bridge/codex/` — nightme 侧的 codex CLI 适配器
+> **设计稿 / 调研**: [wip/codex.md](../../wip/codex.md)
+> **姊妹文档**:
+> - [docs/bridge/claude.md](./claude.md) — EventDone 不变量、生产踩坑
 > - [docs/bridge/pi.md](./pi.md) — JSON-IO 模板 + F-52 粒度契约
-> - [docs/feat/F-21-agent-modes.md §6](../feat/F-21-agent-modes.md) — 注册表(已对齐)
+> - [docs/feat/F-21-agent-modes.md §6](../feat/F-21-agent-modes.md) — 注册表
 > - [docs/feat/F-32-pi-rpc-bridge.md](../feat/F-32-pi-rpc-bridge.md) — clone + 模板+live 模式
 > - [docs/feat/F-52-pi-stream-aggregation.md](../feat/F-52-pi-stream-aggregation.md) — flush-at-tool-boundary
 > - [docs/feat/F-34-new-slash-command.md](../feat/F-34-new-slash-command.md) — `/new` 在长生命周期 bridge 上
-> - [docs/feat/F-55-footer-show-context-window.md](../feat/F-55-footer-show-context-window.md) — Usage.ContextWindow 语义
-> **设计稿**: [wip/codex.md](../../wip/codex.md) — 调研 + 决策记录
 
 ---
 
-## 1. 传输层选型
+## 1. 设计基线(已锁定,不再动摇)
 
-nightme 通过 **codex CLI 自带的 `app-server` 子命令**直连 JSON-RPC 2.0:
+### 1.1 传输选型
 
 ```text
 nightme ──stdio JSON-RPC 2.0──> codex app-server --listen stdio:// [-c model=…] [-c model_reasoning_effort=…]
@@ -31,106 +30,159 @@ nightme ──stdio JSON-RPC 2.0──> codex app-server --listen stdio:// [-c m
 | notification | `{"jsonrpc":"2.0","method":<name>,"params":<obj>}`(无 id) |
 | server request | `{"jsonrpc":"2.0","id":<n>,"method":<name>,"params":<obj>}`(需回包) |
 
-### 1.1 为什么不走 ACP 中间层
+### 1.2 三不做
 
-历史上有 `@agentclientprotocol/codex-acp`(npm),它内部就是 spawn `codex app-server`。再套一层 Node shim 没有价值——既增加启动延迟,又让 codex 私有协议独有的能力(流式 item/started vs item/completed 边界、turn/completed usage)被 ACP 协议压扁。nightme 直连 app-server。
+| 不做 | 理由 |
+|---|---|
+| **不走 ACP 中间层** | `@agentclientprotocol/codex-acp` 内部也是 spawn `codex app-server`,加一层 Node shim 只增加启动延迟 + 压平流式事件(`item/started` vs `item/completed` 边界、`turn/completed.usage` 被 ACP 抹掉)。 |
+| **不双后端(默认 `exec` + 可选 `app_server`)** | cc-connect 在 `codex.go::StartSession` L466–504 用了二选一,默认 `exec`。我们走单选 `app_server`,因为 `exec` 与 nightme 的多 turn + 流式事件 + 审批 IPC 三条核心契约全部不兼容。**用户临时降级 `codex` 命令 → 自动落 `ModePTY` 兜底**(`cmd/nightme/buildAgentRegistry`),不会失能。 |
+| **不做模型别名表** | `-c model=…` 直接透传,由用户在 `StartConfig.Args` / chat args 写明。 |
 
-### 1.2 为什么不支持 `codex exec` 后端
-
-cc-connect 在 `codex.go::StartSession`(L466–504)用 `backend == "app_server" ? newAppServerSession : newCodexSession` 二选一,**默认 `exec`**。nightme **不引入 backend 双选**:
-
-| 维度 | nightme 立场 | `exec` 兼容性 | `app_server` 兼容性 |
-|---|---|---|---|
-| 进程模型 | 一进程多 turn(F-32 §2.3) | ❌ 每条 prompt 重启 | ✅ |
-| 流式事件 | F-52 粒度契约 | ❌ exec 不发增量 | ✅ |
-| 审批 | `EventAgentPermission` + 5min 超时 | ❌ exec 无审批 IPC | ✅ 4 类 server-request |
-| `/new` | 原进程 reset(F-34 §3.2.1) | ❌ exec 只能 resume 重启 | ✅ `thread/start` 同 transport |
-| 持久化 | `thread/resume {persistExtendedHistory:true}` | ❌ exec 无 thread 概念 | ✅ |
-| Usage snapshot | `turn/completed.usage` 一次性填 | ⚠️ exec 不报 | ✅ |
-
-保留 `exec` 等于让 nightme 核心契约在 codex 上消失。
-
-**逃生路径**:用户临时降级 `codex` 命令 → 自动落 `ModePTY` 兜底(`cmd/nightme/buildAgentRegistry` 路径),不会失能。
-
-### 1.3 与 cc-connect 的差异
+### 1.3 与 cc-connect 的差异速查
 
 | | cc-connect | nightme |
 |---|---|---|
 | 后端选择 | `exec` (默认) / `app_server` 二选一 | 单选 `app_server` |
-| Provider config | `codex config.toml [model_providers.*]` + `auth.json` | 不做(本期) |
-| optOut 列表 | 6 条 | 同 6 条(`initialize.capabilities.optOutNotificationMethods` 必须全发,缺一条 double-consume) |
+| provider config | `codex config.toml [model_providers.*]` + `auth.json` | 不做(本期直接 `-c model_provider=… -c openai_base_url=…` 透传) |
+| `Mode` | `backend == "app_server" ? ModeJSONIO : ModePTY`(运行时分支) | `ModeJSONIO` 单一值,与 pi / claudecode 对齐 |
+| 多模态图片路径 | `codex/images/img_<ns>_<pid>.<ext>` | 同上(在 `<workspace>/.nightme/codex/images/` 下) |
+| optOut 列表 | 6 条 | 同 6 条,**必须全发** —— 缺一条 double-consume |
 
 ---
 
 ## 2. 生命周期
 
+### 2.1 进程级状态机
+
 ```
-进程: newSession() ──> initialize ──> initialized ──> thread/start ──> ... ──> cmd.Wait() ──> close(events)
-轮次: turn/start ──> item/started* ──> item/completed* ──> turn/completed ──> EventDone{Reason:"settled"}
+newSession() ──> initialize ──> initialized ──> thread/start ──> …turns… ──> cmd.Wait() ──> close(events)
 ```
 
-一个进程承载多个 turn。**`EventAgentDone` 不关闭 events channel**,只有进程退出或 `Close()` 才关——`ChatSession.runReadPump` 依赖这点跨 turn 持续读取。
+### 2.2 进程内事件流(每 turn)
+
+```
+turn/start ──> item/started* ──> item/completed* ──> turn/completed ──> EventDone{Reason:"settled"}
+```
+
+### 2.3 ⛓️ 关键不变量:`EventAgentDone ≠ close events`
+
+跨多 turn 的长生命周期 bridge,`ChatSession.runReadPump` 依赖 events channel 在 turn 之间持续打开。**只有进程退出或 `Close()` 才关闭 events**。
+
+实现上 lifecycle goroutine 是 `close(s.events)` 的**唯一**持有者;`Close()` 只发起关闭(关 stdin、cancel ctx),通过 `<-s.exitDone` 等 reap,绝不直接 close events。
+
+### 2.4 握手三步(必读)
+
+JSON-RPC 2.0 握手是三步,**任何一步错位都会让 codex app-server 拒绝后续请求**:
+
+1. `initialize {clientInfo, capabilities}` → 等待 response
+2. **收到 response 后** → `initialized` notify(无 params、无 id)
+3. `thread/start` 或 `thread/resume`
+
+`newSession` 串行做这三步,任一失败立即 `Close()` 释放资源再返回错误。
+
+### 2.5 超时表
 
 | 阶段 | 超时 | 说明 |
 |---|---|---|
-| initialize 握手 | 10s | 冷启动含模型预热 |
-| `Close()` SIGINT→SIGKILL | 2s | |
-| Close 等待 reap | 5s | 超时也返回,避免 wedge 住 runtime |
-| 审批等待 | 5min → decline | `permissionTimeout` 包级 var,测试可压缩 |
+| initialize 握手 | 10s(`handshakeTimeout`) | 冷启动含模型预热 |
+| `Close()` 等 reap | 5s(`closeDrainTimeout`) | 超时也返回,绝不 wedge runtime |
+| 审批等待 | 5min(`permissionTimeout`,包级 var) | 超时 → decline |
+| turn RPC 请求 | 跟随 `ctx` 生命周期 | 跟随 `SendBlocks` 调用的 ctx |
 
-`/new` → `ensureThread("")` 触发新的 `thread/start`(同 transport,不重启进程),后重新 emit `EventAgentReady`。
+`/new` → `ensureThread("")` 触发新的 `thread/start`(同 transport、不重启进程),后重新 emit `EventAgentReady`。
 
-### 2.1 必须先发送的 `initialized` notify
+### 2.6 ⛓️ 踩坑教训:`closeOnce.Do` 的死锁
 
-JSON-RPC 2.0 握手是三步:
+**问题**:最初 `Close()` 把 `close(s.events)` 也放进 `closeOnce.Do`,等待 `<-s.exitDone` 也在 Once 内。lifecycle goroutine 里 `defer close(s.exitDone)` 之前需要先 `s.pumpWG.Wait()`,而 pump 退出依赖 `lifecycle` 关闭 events — 形成**死锁**。
 
-1. `initialize {clientInfo, capabilities}` → 等待响应
-2. **收到响应后** → `initialized` notify(无 params,无 id)
-3. `thread/start` 或 `thread/resume`
+**修复**:`close(s.events)` **只在 lifecycle goroutine 里调用**(普通 `close()`,不是 `closeOnce.Do`);`Close()` 的 `<-s.exitDone` 等待**移到 `closeOnce.Do` 之外**,只保留 `close(s.closed) + s.cancel() + stdinW.Close()` 在 Once 内。
 
-第三步之前不发送 `initialized` 是 Codex app-server 拒绝后续请求的常见原因。nightme 的 `newSession` 串行做这三步。
+这条规则已经被 `TestE2E_FreshThread` + `TestE2E_ResumeThread` 守住:不开 e2e 实测,这个 bug 会藏到生产。
 
 ---
 
-## 3. 事件整合(F-52 镜像)
+## 3. JSON-RPC 2.0 客户端(rpc.go)
 
-### 3.1 翻译表
+### 3.1 写入路径
+
+`rpcClient.request(ctx, method, params, &result)`:
+
+1. 拿 `writeMu`(序列化所有写)
+2. 分配 `id`(`atomic.Int64` 单调递增)
+3. 注册到 `pending map[uint64]chan rpcResponse`
+4. marshal + 写入 stdout pipe(末尾 `\n`)
+5. `select { case <-ch: case <-ctx.Done(): case <-s.closed: }`
+
+`respond()` / `respondErr()` 是 server-initiated request 的应答路径,只写不读。
+
+### 3.2 读取路径(readPump)
+
+`bufio.Scanner` 逐行读取,buffer 上限 10 MiB。每一行:
+
+- 有 `id` + `result`/`error` → 查 `pending` map 派发
+- 有 `method` + 无 `id` → 走 `translator.handleNotification`
+- 有 `method` + 有 `id` → 走 `permissions.handleServerRequest`
+- 都不是 / 字段缺失 → `emitWireError`(见 §8)
+
+### 3.3 failPending 的两处调用点
+
+| 触发点 | 错误 | 何时 |
+|---|---|---|
+| `readPump` 看到 EOF | `ErrSessionClosed` | 子进程关 stdout,正常退出 |
+| `emitWireError` 之后 | `ErrSessionClosed` | wire 损坏,主动关 stdin |
+| `lifecycle()` 之后 | `ErrSessionClosed` | 兜底双触发 |
+
+**所有写请求都会在 `defer failPending(ErrSessionClosed)` 里被解**——见 §8。
+
+### 3.4 ⛓️ 踩坑:`rpcClient.request` 的 ctx 派生
+
+`request` 必须把传入 ctx 派生一个带 `s.ctx` 作为 parent 的 ctx,这样即便调用方 ctx 超时,session 关闭也能正确唤醒 caller。代码里:
+
+```go
+callCtx, cancel := context.WithCancel(ctx)
+defer cancel()
+go func() {
+    select {
+    case <-s.ctx.Done():
+        cancel()  // session 关闭 → caller ctx 立即收到
+    case <-callCtx.Done():
+    }
+}()
+```
+
+否则一旦父 ctx 取消,callCtx 会一直挂到子进程退出才醒。
+
+---
+
+## 4. 事件整合(F-52 镜像)
+
+### 4.1 翻译表
 
 | 通知 | 处理 | 产出 AgentEvent |
 |---|---|---|
-| `thread/started` | set threadId(model/threadId 已在 thread/start 响应里) | — (EventAgentReady 在 handshake 后早 emit) |
-| `turn/started` | `turnState.reset()`,`active=true` 由首个 item handler 决定(避免空 turn 误 emit) | — |
-| `item/started` `agentMessage` | 不缓存(避免重复) | — |
-| `item/started` `reasoning` | thinkBuf 累加 | — |
-| `item/started` tool | **先 flush `pendingMsgs` 为 Text**,再 `EventAgentToolStart` | N × Text + 1 × ToolStart |
-| `item/completed` `agentMessage` | append `pendingMsgs` | — |
-| `item/completed` `reasoning` | emit `EventAgentText{"[思考] " + thinkBuf}` | 1 × Text |
-| `item/completed` tool | emit `EventAgentToolEnd{ID, Name, Output, Err (failed)}` | 1 × ToolEnd |
-| `item/completed` `contextCompaction` | emit `EventAgentText{"[context 已压缩]"}`;**不清 pendingMsgs**(F-49 移除) | 1 × Text |
-| `turn/completed` | flush pending → `EventAgentResult{Text, Usage}` + `EventAgentDone{Reason:"settled", Usage}` | N × Text + 1 × Result + 1 × Done |
-| `turn/failed` | emit `EventAgentResult{Text, Err}` + `EventAgentDone{Reason:"failed"}` | 1 × Result + 1 × Done |
-| `thread/status/changed.idle`(codex ≥0.125) | 幂等去重:仅当 `active && doneEmitted==false` 触发 turn-end | (条件 N × Text + Result + Done) |
-| `account/rateLimits/updated` | debug 记录,不上抛(nightme 无 quota UI) | — |
-| `thread/tokenUsage/updated` | debug 记录,真 usage 走 `turn/completed.usage` | — |
-| `error` | `EventAgentError{Err}` + stderr tail(末 2KB) | 1 × Error |
+| `thread/started` | set threadId | — (`EventAgentReady` 已在 handshake 完成时合成) |
+| `turn/started` | mark `t.turn.active=true` | — |
+| `item/started` (agentMessage) | begin buffering | — |
+| `item/completed` (agentMessage) | 缓存 pendingMsg | — |
+| `item/agentMessage/delta` ❌ opt-out | — | — |
+| `turn/completed` | flush + Result + Done + `onTurnEnd()` | `EventResult` + `EventDone{Reason:"settled"}` |
+| `turn/failed` | flush + Err + Done + `onTurnEnd()` | `EventResult` + `EventAgentError` + `EventDone{Reason:"failed"}` |
+| `thread/status/changed.idle` | idem­potent Done | `EventDone{Reason:"idle"}` + `onTurnEnd()`(无 turn/completed 时兜底) |
+| `item/commandExecution/outputDelta` | append to tool block | `EventToolUpdate` |
+| `item/commandExecution/completed` | 终态 + status | `EventToolEnd` |
+| `item/fileChange/outputDelta` | patch 字符累积 | `EventToolUpdate` |
+| `item/fileChange/completed` | 终态 + status | `EventToolEnd` |
+| `item/reasoning/summaryTextDelta` / `textDelta` | 拼 `Reasoning` 块,带 `[思考]` 前缀 | `EventToolUpdate`(reasoning 工具) |
+| `item/plan/delta` ❌ opt-out | — | — |
+| `item/contextCompaction/completed` | 发 sentinel 文本 | `EventResult{Text:"…(context compacted)…"}` |
+| `thread/tokenUsage/updated`(codex ≥ 0.125) | overwrite `t.turn.lastUsage` | — (下一 turn/completed 时取用) |
+| `error` (顶层) | `EventAgentError` | `EventAgentError` |
 
-### 3.2 五个必须保留的守卫(对应 pi §3.4)
+### 4.2 6 条 optOut 必须全发
 
-1. `pendingMsgs` 只在 tool 边界或 turn/completed flush,token 级不刷。
-2. `EventAgentResult.Text` 永不为空,空回退到 `"Done."`(同 pi `emptyReplyFallback`)。
-3. `EventAgentDone` 不关闭 events channel,只有 `cmd.Wait()` / `Close()` 关。
-4. Usage = **OVERWRITTEN**:`turnState.lastUsage = usage`(赋值非 +=)。
-5. `ContextWindow` / `ContextWindowPct`:codex `turn/completed.usage` 不报,**第一期 footer `(window)` 分母缺**(同 claudecode v0.2 早期)。
+`initialize.capabilities.optOutNotificationMethods` 写死 6 条:
 
-### 3.3 thread/status/changed 双信号幂等
-
-`codex ≥0.125` 同时发 `turn/completed` 和 `thread/status/changed {type:"idle"}` 两个 turn-end 信号。Bridge 在 `turnState.doneEmitted` 守卫下,只第一个信号走 `completeTurn`,后续一律 short-circuit。
-
-### 3.4 optOut 列表(必须全发)
-
-`initialize.capabilities.optOutNotificationMethods` 必须包含全部 6 条:
-
-```
+```text
 command/exec/outputDelta
 item/agentMessage/delta
 item/plan/delta
@@ -139,13 +191,55 @@ item/reasoning/summaryTextDelta
 item/reasoning/textDelta
 ```
 
-缺一条 → 同一 agentMessage 会收到 `delta` 增量 + `completed` 全量,bridge 重复消费。`initialize()` 单测覆盖此契约。
+**缺一条 = 同一 agentMessage 收到 delta 增量 + completed 全量,bridge 重复消费。** 这条契约被 `initialize()` 单测守。
+
+### 4.3 ⛓️ 踩坑:`thread/tokenUsage/updated`(codex ≥ 0.125)
+
+旧版 codex 的 usage 只通过 `turn/completed.params.usage` 报一次;**0.125 之后会单独 push `thread/tokenUsage/updated` 通知**。两条路径都必须接,否则 usage 永远是 0:
+
+- **路径 A**(`turn/completed` 一次性):`params.usage != nil` → 直接用
+- **路径 B**(`thread/tokenUsage/updated` 多次):overwrite `t.turn.lastUsage`(`Last` 优先,全 0 才退回 `Total`)
+- **路径 C**(都空):`turn/completed` 来时 `params==nil` + `t.turn.lastUsage==nil` → 跳过 usage 字段(不要写 0 进去)
+
+`TestTranslate_TokenUsageUpdatedStoresLastAsUsage` + `TestTranslate_CompleteTurnUsesTokenUsageWhenParamsNil` 守住两条路径。
 
 ---
 
-## 4. 审批流(server-initiated request)
+## 5. 单线程单 turn(`ErrTurnBusy`)
 
-### 4.1 4 类 server-request + 1 类工具
+`codex app-server` 一个 thread 同时只能跑一个 turn,这是协议层面的硬约束。
+
+### 5.1 行为契约
+
+- `SendBlocks` 收到请求时,如果 `pendingTurnActive==true`(上一 turn 还没收到终态事件)→ **直接返回 `ErrTurnBusy`**,不发任何 RPC。
+- 终态事件触发(`turn/completed` / `turn/failed` / `thread/status/changed.idle`)→ 清除 `pendingTurnActive`。
+
+### 5.2 ⛓️ 踩坑:`pendingTurnActive` 的 defer 重置
+
+**问题**:最初用 `defer func(){ pendingTurnActive = false }()` 在 `SendBlocks` return 时清。结果是 `turn/start` 一返回(几十 ms)就清,真正的 turn 还在 codex 侧跑;紧接着第二次 `SendBlocks` 看 `pendingTurnActive==false` → 放行 → codex 侧拒绝 → `turn/start` 报错。
+
+**修复**:`pendingTurnActive` 的释放下沉到 **translator 的 `onTurnEnd()` 回调**,由 `completeTurn` 在发送完 `Result` + `Done` 之后调用。`SendBlocks` 只设置 `pendingTurnActive=true`,**不再 defer 清**。
+
+`onTurnEnd` 是 `translator` 构造时传入的闭包:
+
+```go
+live.session.translator = newTranslator(
+    live.deliver, a.name, cfg.Workspace, s.branch, s.stderrTail,
+    func() {
+        a.pendingMu.Lock()
+        a.pendingTurnActive = false
+        a.pendingMu.Unlock()
+    },
+)
+```
+
+注意三处调用点都要触发 `onTurnEnd`:正常 `completeTurn`、`completeTurn` 早返(turn 为空)、`handleThreadStatusChanged`(idle 兜底路径)。
+
+---
+
+## 6. 审批流(server-initiated request)
+
+### 6.1 4 类 server-request + 1 类工具
 
 | method | Tool | 默认选项 |
 |---|---|---|
@@ -153,9 +247,10 @@ item/reasoning/textDelta
 | `item/fileChange/requestApproval` | `Patch` | `["accept","decline"]` |
 | `item/permissions/requestApproval` | `Permissions` | `["accept","decline"]` |
 | `item/tool/requestUserInput` | `AskUserQuestion` | `["ok"]`(channel 回复 `<qid>:<labels>\|...`) |
-| `item/tool/call` | (动态工具) | 返回 `success:false`,contentItems=`"tool not available in nightme bridge"` |
+| `item/tool/call`(动态工具) | (动态) | `success:false`,contentItems=`"tool not available in nightme bridge"` |
+| (任何未知 method) | — | 回 `method not found` |
 
-### 4.2 5 分钟超时 → decline
+### 6.2 5 分钟超时 → decline
 
 ```go
 timer := time.NewTimer(permissionTimeout)  // 5 * time.Minute
@@ -168,9 +263,9 @@ case <-timer.C:
 }
 ```
 
-`permissionTimeout` 是包级 `var`(非 `const`),tests in `permissions_test.go` 压缩到 200ms。
+`permissionTimeout` 是包级 `var`(非 `const`),`permissions_test.go` 把它压成 200 ms。
 
-### 4.3 多 question AskUserQuestion 编码
+### 6.3 多 question AskUserQuestion 编码
 
 为保持 `AgentPermissionRequest.ResponseCh` 单一字符串 channel,bridge 用 inline 编码:
 
@@ -187,47 +282,216 @@ case <-timer.C:
 <qid1>:<label>[,<label>...][|<qid2>:<label>[,<label>...]]
 ```
 
-`parseRequestUserInputResponse` 解码 → `requestUserInputResponseResult{Answers: {qid: {Answers: [labels]}}}`,缺失 qid 用该题第一项兜底,保证响应永远结构良好。
+`parseRequestUserInputResponse` 解码 → `{Answers: {qid: {Answers: [labels]}}}`,缺失 qid 用该题第一项兜底,保证响应永远结构良好。
+
+### 6.4 ⛓️ 踩坑:`SendPermission` 误广播到所有 pending approval
+
+**问题**:最初实现是遍历 `pendingApprovals map` 全发。结果两个 bug:
+
+1. Go map 迭代顺序随机,行为不可预测
+2. 多 approval 并发场景(比如 `requestUserInput` 在飞 + 一个 `tool approval` 在飞)下,用户一个 `accept` 会同时解掉两个,语义错误(尤其 `requestUserInput` 的 `<qid>:labels` 是**按问题分**的,广播会让别的题答非所问)
+
+**修复**:session 加 `lastPendingID string`,`spawnApproval` 时更新成最新 request id,`SendPermission` 只往 `lastPendingID` 这一个 channel 发。decision goroutine 消费后清掉 `lastPendingID`,`emitWireError` 兜底清掉所有 pending。
+
+单 approval 场景下行为完全不变(因为只有一个 approval 时它就是 last);多 approval 场景下语义正确。
 
 ---
 
-## 5. 已知的 codex 特性差异
+## 7. 多模态图片
+
+`ContentImage` → stage 到 `<workspace>/.nightme/codex/images/img_<ns>_<pid>.<ext>`,`turn/start` 的 input 里追加 `localImage {path: "…"}`。
+
+文件后缀从 MIME type 推导(`imageExtFromMediaType`);`os.CreateTemp` 拿不到时返回错误。
+
+`ContentFile` 第一期走 `@<path>` 行追加 fallback,无 file type。
+
+---
+
+## 8. Wire 错误处理(`emitWireError`)
+
+`rpcClient.readPump` 看到无法解析 / 超大帧 / schema 不符时,**不能**直接 panic,也不能只是记日志——runtime 等着 `EventAgentError` 知道要终止。
+
+### 8.1 必须做四件事,顺序敏感
+
+```go
+func (s *session) emitWireError(err error) {
+    cLog("wire error", "err", err.Error())
+    s.deliver(agent.AgentEvent{Kind: agent.EventAgentError, Err: err})
+
+    // 1. 解所有 pending approvals(否则 runtime 永远等用户回复)
+    s.pendingMu.Lock()
+    for id, ch := range s.pendingApprovals {
+        select {
+        case ch <- "decline":
+        default:
+        }
+        delete(s.pendingApprovals, id)
+    }
+    s.lastPendingID = ""
+    s.pendingMu.Unlock()
+
+    // 2. 解所有 pending RPC requests(否则调用方永远挂)
+    s.rpc.failPending(ErrSessionClosed)
+
+    // 3. 关 stdin(让 lifecycle 通过 cmd.Wait 退出)
+    select {
+    case <-s.closed:
+    default:
+        _ = s.stdinW.Close()
+    }
+}
+```
+
+### 8.2 ⛓️ 踩坑:少做了 1 + 2 会让 runtime 卡死
+
+**问题**:最初只发 `EventAgentError` + 关 stdin。后果:
+
+- `turn/start` 之类的 pending RPC 永远挂到子进程退出才返回
+- `permissionTimeout` 触底前,审批 goroutine 永远不退出(其实 user 也看不到审批,decision goroutine 在等 ch)
+- runtime 上层一片死寂,daemon 必须 SIGKILL
+
+**修复**:补上 `pendingApprovals` 遍历 + `rpc.failPending`。这条规则覆盖在 `TestSession_EmitWireError_UnblocksPendingRequests`(e2e 测试清单 §10)。
+
+---
+
+## 9. 实现文件 & 调用路径速查
+
+```text
+cmd/nightme/agents.go
+  └─ agent.Builtins.Register(codex.New("codex", "codex", nil))
+
+internal/bridge/codex/
+  ├── protocol.go          wire 类型 + initialize/thread/turn/permission
+  │                        + appServerTokenUsageNotification(tokenUsage/updated)
+  ├── rpc.go               JSON-RPC 2.0 client(writeMu/pendingMu/failPending/readPump)
+  │                        + ErrSessionClosed + 10 MiB frame cap
+  ├── session.go           spawn + I/O + lifecycle(独占 close(events)) + ringBuffer
+  │                        + detectBranch + handshakeTimeout + closeDrainTimeout
+  │                        + eventBufferSize=64 + permissionTimeout=5min
+  │                        + emitWireError(§8 四件套)
+  ├── agent.go             *Agent(模板+live)/Start/Events/Send*/SendPermission/New/Close
+  │                        + ErrTurnBusy + pendingTurnActive + onTurnEnd 接线
+  ├── translate.go         envelope → AgentEvent,F-52 状态机
+  │                        + pendingMsgs + flush-at-tool-boundary
+  │                        + 2 路 usage 兜底(§4.3)
+  │                        + onTurnEnd 三处触发(completeTurn 正常 + 早返 + idle)
+  ├── permissions.go       4 类 server-request + 5min 超时
+  │                        + lastPendingID 写入与清除
+  │                        + spawnApproval goroutine(s.ctx.Done 兜底)
+  ├── agent_test.go        SendPermission 路由 + 单元测试
+  ├── permissions_test.go  approval 流 + permissionTimeout 压缩到 200ms
+  ├── protocol_test.go     initialize params / optOut 6 条覆盖
+  ├── rpc_test.go          JSON-RPC client(11 个测试,含并发 / failPending)
+  ├── session_test.go      detectBranch + argv + SessionConfig
+  ├── translate_test.go    F-52 状态机 + 2 路 usage + CompleteTurn fallback
+  ├── testhelpers_realcodex_test.go  skip 守卫(NIGHTME_CODEX_E2E_APPROVAL)
+  └── session_real_test.go 真实 codex CLI 的 e2e(FreshThread / ResumeThread / ApprovalFlow)
+```
+
+### 9.1 关键不变量在文件中的位置
+
+| 不变量 | 位置 |
+|---|---|
+| `close(events)` 只在 lifecycle | `session.go::lifecycle()` |
+| `closeOnce.Do` 只包 close+cancel+stdinClose | `session.go::Close()` |
+| `onTurnEnd` 接线 | `agent.go::Start`(`newTranslator` 参数) |
+| `lastPendingID` 写入 | `permissions.go::spawnApproval` |
+| `lastPendingID` 清除 | `permissions.go::decision goroutine` + `session.go::emitWireError` |
+| `failPending(ErrSessionClosed)` 三处 | `rpc.go::readPump EOF` + `session.go::emitWireError` + `session.go::lifecycle` |
+| 6 条 optOut | `session.go::initialize`(`OptOutNotificationMethods` 字面量) |
+
+---
+
+## 10. 验收:测试金字塔
+
+### 10.1 测试分层
+
+| 层 | 跑法 | 不依赖 |
+|---|---|---|
+| 单元(50+) | `go test ./internal/bridge/codex/` 默认即跑 | 不需要 codex CLI |
+| Real-CLI e2e: FreshThread | 默认 skip,设 `NIGHTME_CODEX_REAL_CODEX=1` 跑 | 需要 `codex` 在 PATH |
+| Real-CLI e2e: ResumeThread | 同上 | 同上 |
+| Real-CLI e2e: ApprovalFlow | `NIGHTME_CODEX_E2E_APPROVAL=1` 才跑(默认 skip) | 同上 + 需交互 |
+
+### 10.2 实测耗时(2026-08)
+
+| 测试 | 耗时 |
+|---|---|
+| TestE2E_FreshThread | ~5–7s(冷启 codex + handshake + 1 turn) |
+| TestE2E_ResumeThread | ~13–16s(冷启 2 次 + handshake + 2 turns) |
+
+### 10.3 ⛓️ 坑:codex 走代理会让测试 hang
+
+codex CLI 默认会读 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `http_proxy` / `https_proxy` / `all_proxy` / `FTP_PROXY` / `RSYNC_PROXY` 等环境变量。如果设了,codex 会**绕过你预期的 `api.minimaxi.com`**,转而尝试走代理(代理常常不可达,握手超时挂死)。
+
+**测试前必须**:
+
+```bash
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy FTP_PROXY ftp_proxy RSYNC_PROXY rsync_proxy
+go test ./internal/bridge/codex/ -count=1
+```
+
+或在 Makefile / CI step 里强制 unset。
+
+---
+
+## 11. 可观测性
+
+### 11.1 调试日志
+
+`codexDebug` 默认 ON;**`NIGHTME_CODEX_DEBUG=0` 关**(也接受 `false` / `no` / `off`,大小写无关)。
+
+日志带 `component=codex`,关键节点:
+
+- `[codex] session started` (pid/workspace/resume/model/effort)
+- `[codex] initialize ok` (userAgent)
+- `[codex] session handshake complete` (threadId/model)
+- `[codex] SendBlocks enter` (blocks/threadID) — 上线后保留,排查 turn race 极有用
+- `[codex] SendText enter` — 仅调试时开,SendText 即 SendBlocks 包装
+- `[codex] server request: unknown method` (回 method not found)
+- `[codex] item/tool/call: returning tool not available` (动态工具降级)
+- `codex: approval timed out, defaulting to decline` (5min 触底)
+
+### 11.2 events channel 满的反压兜底
+
+`agent.deliver` 在 channel 满(cap=64)时:
+
+1. 主动丢这一条事件
+2. emit `EventAgentError{... dropped text}`
+
+这是**最后兜底**,正常情况下不应该发生。如果发生,说明 runtime readpump 比 bridge produce 慢,需要查 `Chatsession.PumpEvents` 是否在读。
+
+### 11.3 daemon / runtime 注意
+
+- 重启 daemon:`make restart`(kill 旧 + 起新);**不会**自动 rebuild,要先 `make build`
+- 日志:`~/.nightme/nightme.log`(JSON lines)
+- 状态:`~/.nightme/agent_sessions.json` + `~/.nightme/chat_sessions.json`
+- `/use codex` 切换之后,下一次 SendBlocks 才走 codex bridge,切换前的 chat session 继续跑原 agent
+
+---
+
+## 12. 已知的 codex 特性差异
 
 | 项 | 状态 | 备注 |
 |---|---|---|
 | `ContextWindow` 报数 | ❌ 第一期不报 | footer `(window)` 分母缺,后续若 codex 加 `turnInfo.model.contextWindow` 字段再补 |
 | task 子系统 | ❌ 不实现 | codex app-server 无 task 事件,`EventAgentTaskCreate/Update` 永不发 |
-| 多模态图片 | ✅ | `ContentImage` → stage 到 `<workspace>/.nightme/codexserver/images/img_<ns>_<pid>.<ext>` + `localImage` |
+| 多模态图片 | ✅ | `ContentImage` → stage + `localImage` |
 | 多模态文件 | ⚠️ fallback | `ContentFile` 走 `@<path>` 行追加(无 file type) |
-| 第三方 provider | ❌ 不实现 | `codex config.toml [model_providers.*]` / `auth.json` 留给 F-XX;本期直接 `-c model_provider=... -c openai_base_url=...` 透传 |
+| 第三方 provider | ❌ 不实现 | `codex config.toml [model_providers.*]` / `auth.json` 留给 F-XX;本期直接 `-c model_provider=… -c openai_base_url=…` 透传 |
 | 动态工具 `item/tool/call` | ❌ 返回 not available | 跟 cc-connect MVP 一致 |
 | `account/rateLimits/updated` UI | ❌ 不暴露 | nightme 无 quota UI |
-| 跨 turn threadId 持久化 | ✅ `cfg.SessionID` ↔ `threadId` | 见 §2.1 `/new` |
+| 跨 turn threadId 持久化 | ✅ `cfg.SessionID` ↔ `threadId` | `thread/resume {persistExtendedHistory:true}` |
 
 ---
 
-## 6. 可观测性
-
-codexserver 调试日志默认 ON,`NIGHTME_CODEX_DEBUG=0` 关,日志带 `component=codexserver`。关键节点:
-
-- `[codexserver] session started` (pid/workspace/resume/model/effort)
-- `[codexserver] initialize ok` (userAgent)
-- `[codexserver] session handshake complete` (threadId/model)
-- `[codexserver] server request: unknown method` (回 `method not found`)
-- `[codexserver] item/tool/call: returning tool not available` (动态工具降级)
-- `codexserver: approval timed out, defaulting to decline` (5min 触底)
-
-事件 channel 满(> 64 buffered)→ bridge 主动丢一条 + emit `EventAgentError{... dropped text}`。这是最后的反压兜底,正常情况下不应该发生。
-
----
-
-## 7. 待定事项(本期不做)
+## 13. 待定事项(本期不做)
 
 | 项 | 理由 | 何时做 |
 |---|---|---|
 | `codex exec` 后端(双选) | 违反 F-32/F-52/F-34 多 turn 契约 | 永不 |
-| ACP 中间层 | 多一层 Node shim,且其内部也是 spawn `codex app-server` | 永不 |
-| 模型别名表 | nightme 直接 `-c model=…` 透传 | 永不 |
+| ACP 中间层 | 多一层 Node shim | 永不 |
+| 模型别名表 | `-c model=…` 直传 | 永不 |
 | 第三方 provider config.toml | 独立 PR | F-XX |
 | `item/tool/call` 动态工具 | cc-connect 也只回 not available | 等 Codex 稳定再议 |
 | `account/rateLimits/updated` UI | nightme 无 quota UI | 待有 quota UI 再说 |
@@ -236,19 +500,36 @@ codexserver 调试日志默认 ON,`NIGHTME_CODEX_DEBUG=0` 关,日志带 `compone
 
 ---
 
-## 8. 关联文件 & 调用路径速查
+## 14. 回归测试清单(下一轮 review 时跑)
 
-```text
-cmd/nightme/agents.go
-  └─ agent.Builtins.Register(codexserver.New("codex", "codex", nil))
+放在 `session_close_test.go`,被下面这些坑逼出来的:
 
-internal/bridge/codexserver/
-  ├── protocol.go   wire 类型(initialize/thread.start/turn.start/permission)
-  ├── rpc.go        JSON-RPC 2.0 client(writeMu/pendingMu/failPending/readPump)
-  ├── session.go    spawn + I/O + lifecycle + ringBuffer + detectBranch
-  ├── agent.go      *Agent(模板+live)/Start/Events/Send*/SendPermission/New/Close
-  ├── translate.go  envelope → AgentEvent,F-52 状态机(pendingMsgs + flush-at-tool-boundary)
-  ├── permissions.go 4 类 server-request + 5min 超时
-  ├── *_test.go     52 个单元测试(rpc/translate/permissions/session/agent)
-  └── session_real_test.go  requireRealCodex e2e
-```
+- [ ] `TestSession_CloseAfterStart_ReturnsWithin5s` — 启动 + Close 必须在 `closeDrainTimeout` 内返回
+- [ ] `TestSession_ConcurrentClose_OnlyOneNoHang` — 两次 Close 并发,都不死锁
+- [ ] `TestAgent_PendingTurnActive_NotClearedUntilTurnEnd` — 模拟 turn/start 返回后立刻 SendBlocks,验 ErrTurnBusy;发 turn/completed 后 SendBlocks 成功
+- [ ] `TestAgent_SendPermission_RoutesToMostRecentOnly` — 两个 pending approval,SendPermission("accept") 只解最近一个
+- [ ] `TestSession_EmitWireError_UnblocksPendingRequests` — 注入 wire error,验 pending RPC 立即收到 ErrSessionClosed
+- [ ] `TestDetect_AcceptsExistingBinary`(已实现):用 `codex --version` 替换 `exec.LookPath`,坏 binary 立即失败
+
+---
+
+## 15. 排错速查
+
+| 症状 | 根因 | 修法 |
+|---|---|---|
+| `codex: approval timed out` 频繁触发 | 用户没看到审批 UI | 查 `ChatSession.PumpEvents` 是否在读 events |
+| `turn/start` 立刻报 `ErrSessionClosed` | 上一 turn 还没完又发新 turn | 检查 `pendingTurnActive` 释放路径(§5.2) |
+| events channel 满 + drop | runtime 没在读 | 查 `internal/chatsession` 的 `PumpEvents` |
+| usage 永远是 0 | codex 升级到 0.125+ | 检查是否注册了 `thread/tokenUsage/updated` 处理器(§4.3) |
+| test hang | 走了代理 | unset 代理变量(§10.3) |
+| 启动后立刻 `lifecycle exit` | stdin 漏接 / binary 错 | 看 `[codex] session started` 后有没有 `initialize ok`;有就 binary 错 |
+| `method not found` 回包 | codex 推了未识别 method | 看 `[codex] server request: unknown method` 日志 |
+| close 之后 runtime 卡住 | lifecycle 没拿到 exitDone | 看 §2.6 死锁模式 |
+
+---
+
+## 16. 版本与兼容性
+
+- **最低 codex CLI 版本**:≥ 0.95(`thread/started` 通知 + `initialize` 三步握手 + 6 条 optOut 生效)
+- **已知兼容**:codex 0.95–0.145(含 `thread/tokenUsage/updated` 0.125+)
+- **不兼容**:`< 0.95` 的旧 CLI(没用 app-server 子命令)— 用户应 `codex login` 升级

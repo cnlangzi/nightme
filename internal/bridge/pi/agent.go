@@ -145,6 +145,18 @@ func piLog(msg string, args ...any) {
 // instead of silently truncating.
 const maxImageBytes = 10 * 1024 * 1024
 
+// eventsBufferSize is the capacity of the AgentEvent channel.
+//
+// Sized large enough to absorb a sustained backlog rather than
+// dropping — the deliver() contract is "never time out, never drop,
+// exit only on a.closed or a.exitDone". Matches the producer-side
+// contract across acp / claudecode / pty (no timeout, no default-drop).
+//
+// The channel is allocated in Start; deliver_contract_test.go pins
+// the value at the package level so a regression that lowers the cap
+// is caught in `go test`.
+const eventsBufferSize = 40960
+
 // ErrImageTooLarge is returned by SendBlocks when a single
 // ContentImage exceeds maxImageBytes after base64 encoding. The
 // caller should drop the offending block (or surface a clearer
@@ -345,7 +357,7 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 		stdoutR:   stdout,
 		stderrR:   stderr,
 		rpc:       newRPCClient(stdin),
-		events:    make(chan agent.AgentEvent, 4096),
+		events:    make(chan agent.AgentEvent, eventsBufferSize),
 		pid:       cmd.Process.Pid,
 		agentName: a.name,
 		workspace: cfg.Workspace,
@@ -676,7 +688,7 @@ func (a *Agent) deliverConnectedLocked(state *getStateResult) {
 //
 // Producer-side back-pressure strategy: deliver NEVER times out
 // and NEVER drops. The events channel is sized large enough
-// (4096 — see Start) to absorb any burst the upstream runtime
+// (40960 — see Start) to absorb any burst the upstream runtime
 // (chat session) can produce during a /use switch, a long idle
 // turn, or a sustained non-active-AS backlog. The consumer (chat
 // session's per-AS readpump) eventually drains the buffer.
@@ -691,7 +703,7 @@ func (a *Agent) deliverConnectedLocked(state *getStateResult) {
 //     readpump blocks too, but pi's stdout pipe can absorb the
 //     Gigabit of buffered JSON without back-pressuring the
 //     pi process itself (kernel pipe buffer is 64 KiB; the
-//     4096-event channel is in our heap, not the pipe).
+//     40960-event channel is in our heap, not the pipe).
 //
 // The previous 1 s timeout + soft-drop behavior caused the
 // "bridge reset: pi: new_session: context deadline exceeded"
@@ -700,7 +712,7 @@ func (a *Agent) deliverConnectedLocked(state *getStateResult) {
 // filled to 64, the deliver dropped the post-/new
 // EventAgentReady, and the bridge's readpump stalled long enough
 // that the new_session RPC's 10 s deadline fired before the
-// response could be read from stdout. With a 4096-deep buffer
+// response could be read from stdout. With a 40960-deep buffer
 // and no drop, the producer can always keep up with the byte
 // engine regardless of consumer lag.
 func (a *Agent) deliver(ev agent.AgentEvent) {

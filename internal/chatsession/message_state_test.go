@@ -1,7 +1,7 @@
 // Package chatsession — MessageState emission tests + shared
 // helpers (F-54).
 //
-// F-54 replaced SetMessageStateHandler with cs.MessageStateBus().
+// F-54 replaced SetMessageStateHandler with cs.MessageStateBus.
 // Subscribe(...). Tests below mirror the new pattern: a
 // captureHandler struct subscribes to the bus, the test asserts on
 // the captured calls.
@@ -67,7 +67,7 @@ func (c *captureHandler) snapshot() []messageStateCall {
 func TestEmitMessageState_HandlerInvoked(t *testing.T) {
 	cs := New("oc_chat", "claude")
 	cap := &captureHandler{}
-	cs.MessageStateBus().Subscribe(cap.handler)
+	cs.MessageStateBus.Subscribe(cap.handler)
 
 	before := time.Now()
 	cs.EmitMessageState("om_msg_1", agent.MessageQueued)
@@ -113,7 +113,7 @@ func TestEmitMessageState_NoHandlerIsNoop(t *testing.T) {
 func TestMessageStateBus_UnsubscribeStopsDelivery(t *testing.T) {
 	cs := New("oc_chat", "claude")
 	cap := &captureHandler{}
-	unbind := cs.MessageStateBus().Subscribe(cap.handler)
+	unbind := cs.MessageStateBus.Subscribe(cap.handler)
 
 	cs.EmitMessageState("om_1", agent.MessageQueued)
 	unbind()
@@ -128,20 +128,20 @@ func TestMessageStateBus_UnsubscribeStopsDelivery(t *testing.T) {
 // equivalent: clearing the bus stops all subscribers at once.
 // Migration callers that previously relied on
 // `cs.SetMessageStateHandler(nil)` to wipe the prior handler can
-// now use `cs.MessageStateBus().Clear()`.
+// now use `cs.MessageStateBus.Clear()`.
 func TestMessageStateBus_ClearDropsAllSubscribers(t *testing.T) {
 	cs := New("oc_chat", "claude")
 	cap1 := &captureHandler{}
 	cap2 := &captureHandler{}
-	cs.MessageStateBus().Subscribe(cap1.handler)
-	cs.MessageStateBus().Subscribe(cap2.handler)
+	cs.MessageStateBus.Subscribe(cap1.handler)
+	cs.MessageStateBus.Subscribe(cap2.handler)
 
 	cs.EmitMessageState("om_pre", agent.MessageQueued)
 	if got := len(cap1.snapshot()) + len(cap2.snapshot()); got != 2 {
 		t.Fatalf("pre-Clear captured %d calls total; want 2", got)
 	}
 
-	cs.MessageStateBus().Clear()
+	cs.MessageStateBus.Clear()
 
 	cs.EmitMessageState("om_post", agent.MessageDropped)
 	if got := len(cap1.snapshot()) + len(cap2.snapshot()); got != 2 {
@@ -153,12 +153,12 @@ func TestMessageStateBus_ClearDropsAllSubscribers(t *testing.T) {
 // (F-53's new explicit-clear path) flips a single Message to
 // MessageDropped AND fires the MessageState event.
 //
-// F-54: firing goes through cs.messageStateBus.Publish (called
+// F-54: firing goes through cs.MessageStateBus.Publish (called
 // from MarkDropped directly).
 func TestMarkDropped_FlipsStageAndEmits(t *testing.T) {
 	cs := New("oc_chat", "claude")
 	cap := &captureHandler{}
-	cs.MessageStateBus().Subscribe(cap.handler)
+	cs.MessageStateBus.Subscribe(cap.handler)
 
 	msg := &Message{ID: "om_drop", ChatID: "oc_chat"}
 	cs.messagesByID.Store(msg.ID, msg)

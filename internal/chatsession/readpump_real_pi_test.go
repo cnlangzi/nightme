@@ -131,7 +131,7 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 		sawDone  bool
 		eventLog []string
 	)
-	cs.AgentEventBus().Subscribe(func(env AgentEventEnvelope) bool {
+	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
 		ev := env.Event
 		mu.Lock()
 		defer mu.Unlock()

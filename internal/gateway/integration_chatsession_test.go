@@ -112,7 +112,7 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 	// Recording channel + runtime handler (same shape as the
 	// production wireRuntimeCallbacksAndRestore onCreate).
 	mock := &recordingChannel{chatID: cs.ChatID}
-	cs.AgentEventBus().Subscribe(integrationEventHandler(mock, cs))
+	cs.AgentEventBus.Subscribe(integrationEventHandler(mock, cs))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -199,7 +199,7 @@ func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 	cs := newIntegrationChatSession("oc_test_chat", spawner)
 
 	mock := &recordingChannel{chatID: cs.ChatID}
-	cs.AgentEventBus().Subscribe(integrationEventHandler(mock, cs))
+	cs.AgentEventBus.Subscribe(integrationEventHandler(mock, cs))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -396,7 +396,7 @@ exit 0
 	cs := newIntegrationChatSession("oc_real_bridge", spawner)
 
 	mock := &recordingChannel{chatID: cs.ChatID}
-	cs.AgentEventBus().Subscribe(integrationEventHandler(mock, cs))
+	cs.AgentEventBus.Subscribe(integrationEventHandler(mock, cs))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

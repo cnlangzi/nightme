@@ -226,8 +226,8 @@ func TestManager_RestoreFromRegistry_WithOnCreateBefore_InstallsHandlers(t *test
 	// only needs to verify a Subscribe returns a working
 	// unsubscribe — the buses themselves are constructed in New().
 	mgr.WithOnCreate(func(cs *ChatSession) {
-		cs.AgentEventBus().Subscribe(func(_ AgentEventEnvelope) bool { return false })
-		cs.MessageStateBus().Subscribe(func(_ MessageStateEvent) bool { return false })
+		cs.AgentEventBus.Subscribe(func(_ AgentEventEnvelope) bool { return false })
+		cs.MessageStateBus.Subscribe(func(_ MessageStateEvent) bool { return false })
 	})
 
 	if err := mgr.RestoreFromRegistry(); err != nil {
@@ -239,16 +239,16 @@ func TestManager_RestoreFromRegistry_WithOnCreateBefore_InstallsHandlers(t *test
 		// assert that the buses are non-nil (constructed in New)
 		// and that subscribers are present (proves the wiring
 		// ran before Restore).
-		if cs.AgentEventBus() == nil {
+		if cs.AgentEventBus == nil {
 			t.Errorf("%s: AgentEventBus is nil — runtime did not install it", cs.ChatID)
 		}
-		if cs.MessageStateBus() == nil {
+		if cs.MessageStateBus == nil {
 			t.Errorf("%s: MessageStateBus is nil — runtime did not install it", cs.ChatID)
 		}
-		if cs.AgentEventBus().Len() == 0 {
+		if cs.AgentEventBus.Len() == 0 {
 			t.Errorf("%s: AgentEventBus has no subscribers — runtime did not install them", cs.ChatID)
 		}
-		if cs.MessageStateBus().Len() == 0 {
+		if cs.MessageStateBus.Len() == 0 {
 			t.Errorf("%s: MessageStateBus has no subscribers — runtime did not install them", cs.ChatID)
 		}
 	}
@@ -278,18 +278,18 @@ func TestManager_RestoreFromRegistry_WithOnCreateAfter_MissesHandlers(t *testing
 
 	// Then register onCreate — too late for already-restored chats.
 	mgr.WithOnCreate(func(cs *ChatSession) {
-		cs.AgentEventBus().Subscribe(func(_ AgentEventEnvelope) bool { return false })
-		cs.MessageStateBus().Subscribe(func(_ MessageStateEvent) bool { return false })
+		cs.AgentEventBus.Subscribe(func(_ AgentEventEnvelope) bool { return false })
+		cs.MessageStateBus.Subscribe(func(_ MessageStateEvent) bool { return false })
 	})
 
 	cs := mgr.Get("oc_alpha")
 	if cs == nil {
 		t.Fatalf("ChatSession not restored")
 	}
-	if cs.AgentEventBus().Len() != 0 {
+	if cs.AgentEventBus.Len() != 0 {
 		t.Errorf("AgentEventBus subscribers unexpectedly non-zero — bug repro is no longer valid; restore this assertion's expectation")
 	}
-	if cs.MessageStateBus().Len() != 0 {
+	if cs.MessageStateBus.Len() != 0 {
 		t.Errorf("MessageStateBus subscribers unexpectedly non-zero — bug repro is no longer valid; restore this assertion's expectation")
 	}
 }
@@ -318,19 +318,19 @@ func TestManager_GetOrCreate_AfterRestore_FiresOnCreate(t *testing.T) {
 	})
 
 	cs := mgr.GetOrCreate("oc_new", "claude")
-	if cs.AgentEventBus().Len() != 0 {
+	if cs.AgentEventBus.Len() != 0 {
 		t.Fatalf("AgentEventBus subscribers unexpectedly set by test setup")
 	}
 
-	cs.AgentEventBus().Subscribe(func(_ AgentEventEnvelope) bool { return false })
-	cs.MessageStateBus().Subscribe(func(_ MessageStateEvent) bool { return false })
+	cs.AgentEventBus.Subscribe(func(_ AgentEventEnvelope) bool { return false })
+	cs.MessageStateBus.Subscribe(func(_ MessageStateEvent) bool { return false })
 
 	mu.Lock()
 	defer mu.Unlock()
 	if len(seenIDs) != 1 || seenIDs[0] != "oc_new" {
 		t.Fatalf("onCreate should fire once with ChatID=oc_new; got %v", seenIDs)
 	}
-	if cs.AgentEventBus().Len() == 0 {
+	if cs.AgentEventBus.Len() == 0 {
 		t.Errorf("AgentEventBus subscribers should remain non-zero after onCreate ran")
 	}
 }

@@ -712,7 +712,7 @@ func wireRuntimeCallbacksAndRestore(
 		// allocates a closure, so calling it on every Publish
 		// would burn one allocation per event.
 		agentHandler := newEventHandler(ch, cs, mgr, logger)
-		cs.AgentEventBus().Subscribe(func(env chatsession.AgentEventEnvelope) bool {
+		cs.AgentEventBus.Subscribe(func(env chatsession.AgentEventEnvelope) bool {
 			agentHandler(env)
 			return false
 		})
@@ -739,7 +739,7 @@ func wireRuntimeCallbacksAndRestore(
 		// Send(...)` and the rest of the body is identical. The
 		// AgentEventBus and PromptEndBus handlers above have the
 		// same latent gap; the same one-line fix applies to both.
-		cs.MessageStateBus().Subscribe(func(e chatsession.MessageStateEvent) bool {
+		cs.MessageStateBus.Subscribe(func(e chatsession.MessageStateEvent) bool {
 			// Review fix: replicate the gateway's identifier
 			// validation. Empty chatID / userMsgID would produce
 			// an OutboundMessage with empty routing fields, which
@@ -779,7 +779,7 @@ func wireRuntimeCallbacksAndRestore(
 		// is added on the card. No user-message reaction is
 		// emitted from this path — the user-message surface is
 		// now minimal (⏳ only).
-		cs.PromptEndBus().Subscribe(func(e chatsession.PromptEndedEvent) bool {
+		cs.PromptEndBus.Subscribe(func(e chatsession.PromptEndedEvent) bool {
 			if e.ChatID == "" || e.UserMsgID == "" {
 				return false
 			}

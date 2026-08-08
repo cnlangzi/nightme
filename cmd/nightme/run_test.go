@@ -700,10 +700,10 @@ func TestWireRuntimeCallbacksAndRestore_InstallsHandlersOnRestoredChats(t *testi
 	}
 
 	for _, cs := range mgr.List() {
-		if cs.AgentEventBus().Len() == 0 {
+		if cs.AgentEventBus.Len() == 0 {
 			t.Errorf("%s: AgentEventBus has no subscribers — wiring regression", cs.ChatID)
 		}
-		if cs.MessageStateBus().Len() == 0 {
+		if cs.MessageStateBus.Len() == 0 {
 			t.Errorf("%s: MessageStateBus has no subscribers — wiring regression", cs.ChatID)
 		}
 	}
@@ -734,7 +734,7 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateDropsEmptyIDs(t *testing.T) 
 		t.Fatalf("mgr.List len = %d, want 1", len(csList))
 	}
 	cs := csList[0]
-	if cs.MessageStateBus().Len() == 0 {
+	if cs.MessageStateBus.Len() == 0 {
 		t.Fatal("MessageStateBus has no subscribers — wiring regression")
 	}
 
@@ -806,7 +806,7 @@ func TestEventHandler_OnAgentConnected_DoesNotEmitMessageSubmitted(t *testing.T)
 	// Capture every MessageState emit on this CS.
 	var emitted []messageStateCall
 	var mu sync.Mutex
-	cs.MessageStateBus().Subscribe(func(e chatsession.MessageStateEvent) bool {
+	cs.MessageStateBus.Subscribe(func(e chatsession.MessageStateEvent) bool {
 		mu.Lock()
 		defer mu.Unlock()
 		emitted = append(emitted, messageStateCall{e.ChatID, e.UserMsgID, e.State})

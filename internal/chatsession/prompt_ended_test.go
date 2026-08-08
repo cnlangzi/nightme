@@ -23,7 +23,7 @@ import (
 // This is the wiring that the runtime depends on to call
 // feishu.MarkReceiptPromptDone after a successful turn.
 //
-// F-54: replaced cs.SetPromptEndHandler with cs.PromptEndBus().
+// F-54: replaced cs.SetPromptEndHandler with cs.PromptEndBus.
 // Subscribe; the typed envelope carries userMsgID + reason.
 func TestWritebackMessageState_FiresOnPromptEndHook(t *testing.T) {
 	cs := newChatSessionForTest("cs_test")
@@ -43,7 +43,7 @@ func TestWritebackMessageState_FiresOnPromptEndHook(t *testing.T) {
 	var capturedMsgID string
 	var capturedReason PromptEndReason
 	var mu sync.Mutex
-	cs.PromptEndBus().Subscribe(func(e PromptEndedEvent) bool {
+	cs.PromptEndBus.Subscribe(func(e PromptEndedEvent) bool {
 		mu.Lock()
 		capturedMsgID = e.UserMsgID
 		capturedReason = e.Reason
@@ -79,7 +79,7 @@ func TestWritebackMessageState_NoFireOnAgentEvent(t *testing.T) {
 	cs := newChatSessionForTest("cs_test")
 
 	var hookCalls int
-	cs.PromptEndBus().Subscribe(func(_ PromptEndedEvent) bool {
+	cs.PromptEndBus.Subscribe(func(_ PromptEndedEvent) bool {
 		hookCalls++
 		return false
 	})

@@ -108,7 +108,7 @@ func (cs *ChatSession) routeEvent(ev EnrichedEvent) {
 		// Translation to OutboundMessage is the runtime's job.
 		// F-54: fan out via AgentEventBus (services.Bus). The
 		// runtime registers its event-translation lambda via
-		// cs.AgentEventBus().Subscribe(...). nil-safe: Publish
+		// cs.AgentEventBus.Subscribe(...). nil-safe: Publish
 		// on an empty bus is a no-op.
 		if ev.AgentEvent == nil {
 			return
@@ -121,7 +121,7 @@ func (cs *ChatSession) routeEvent(ev EnrichedEvent) {
 		if as == nil {
 			return
 		}
-		cs.agentEventBus.Publish(AgentEventEnvelope{
+		cs.AgentEventBus.Publish(AgentEventEnvelope{
 			ChatID:       cs.ChatID,
 			UserMsgID:    ev.UserMsgID,
 			PromptID:     ev.PromptID,
@@ -157,7 +157,7 @@ func (cs *ChatSession) routeEvent(ev EnrichedEvent) {
 			// status flip above is the legacy path; new
 			// observers should subscribe to LifecycleBus
 			// instead of polling ActiveAgentSession().
-			cs.lifecycleBus.Publish(LifecycleEvent{
+			cs.LifecycleBus.Publish(LifecycleEvent{
 				ChatID:         ev.ChatID,
 				AgentSessionID: ev.AgentSessionID,
 				PID:            ev.Lifecycle.PID,

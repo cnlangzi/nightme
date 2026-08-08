@@ -136,18 +136,22 @@ type ChatSession struct {
 	// by reading the stream (not via a per-CS callback).
 
 	// Event buses (F-54). Each ChatSession owns one *services.EventBus[X]
-	// per event kind. The runtime wires subscribers via the
-	// getters below (AgentEventBus / MessageStateBus /
-	// PromptEndBus / LifecycleBus). Multiple subscribers may
-	// register; first to return true consumes the event. nil-safe:
-	// Publish on an un-wired bus is a no-op. The buses are not
-	// closed when the ChatSession ends — their lifetime matches
-	// the owning ChatSession, which is itself GC'd when no
-	// references remain.
-	agentEventBus   *services.EventBus[AgentEventEnvelope]
-	messageStateBus *services.EventBus[MessageStateEvent]
-	promptEndBus    *services.EventBus[PromptEndedEvent]
-	lifecycleBus    *services.EventBus[LifecycleEvent]
+	// per event kind. The runtime wires subscribers by calling
+	// .Subscribe on these public fields directly (no getter).
+	// Multiple subscribers may register; first to return true consumes
+	// the event. nil-safe: Publish on an un-wired bus is a no-op. The
+	// buses are not closed when the ChatSession ends — their
+	// lifetime matches the owning ChatSession, which is itself GC'd
+	// when no references remain.
+	//
+	// Concurrency: Subscribe is called once at startup (no lock).
+	// Publish is called from the PumpEvents goroutine without
+	// holding cs.mu (writebackMessageState fix). The EventBus's
+	// own mutex protects the Publish/Subscribe race.
+	AgentEventBus   *services.EventBus[AgentEventEnvelope]
+	MessageStateBus *services.EventBus[MessageStateEvent]
+	PromptEndBus    *services.EventBus[PromptEndedEvent]
+	LifecycleBus    *services.EventBus[LifecycleEvent]
 
 	// ctx is the per-ChatSession context. Lives for the chat's
 	// lifetime (until daemon shutdown). It is the PARENT context
@@ -203,10 +207,10 @@ func New(chatID, primaryAgent string) *ChatSession {
 	cs.ctx, cs.cancel = context.WithCancel(context.Background())
 	// F-54: one Bus per event kind. Constructed eagerly so the
 	// runtime can Subscribe even before the first Publish fires.
-	cs.agentEventBus = services.NewEventBus[AgentEventEnvelope]()
-	cs.messageStateBus = services.NewEventBus[MessageStateEvent]()
-	cs.promptEndBus = services.NewEventBus[PromptEndedEvent]()
-	cs.lifecycleBus = services.NewEventBus[LifecycleEvent]()
+	cs.AgentEventBus = services.NewEventBus[AgentEventEnvelope]()
+	cs.MessageStateBus = services.NewEventBus[MessageStateEvent]()
+	cs.PromptEndBus = services.NewEventBus[PromptEndedEvent]()
+	cs.LifecycleBus = services.NewEventBus[LifecycleEvent]()
 	return cs
 }
 
@@ -545,7 +549,7 @@ func (cs *ChatSession) MarkDropped(userMsgID string) bool {
 	msg := v.(*Message)
 	cs.mu.Lock()
 	msg.Stage = agent.MessageDropped
-	bus := cs.messageStateBus
+	bus := cs.MessageStateBus
 	chatID := cs.ChatID
 	cs.mu.Unlock()
 	bus.Publish(MessageStateEvent{
@@ -592,7 +596,7 @@ func (cs *ChatSession) endPrompt(reason PromptEndReason) {
 
 // PromptEndBus (F-53 follow-up → F-54) is the runtime-installed callback
 // fired by `endPrompt` after the Prompt's terminal fields were
-// stamped. F-54 replaced it with cs.PromptEndBus().Publish(PromptEndedEvent{...});
+// stamped. F-54 replaced it with cs.PromptEndBus.Publish(PromptEndedEvent{...});
 // subscribers register via PromptEndBus().Subscribe. See
 // docs/feat/F-54-event-bus.md for the migration rationale.
 
@@ -840,7 +844,7 @@ func (cs *ChatSession) writebackMessageState(p *Prompt) {
 	}
 	cs.mu.Unlock()
 	if publish {
-		cs.promptEndBus.Publish(ev)
+		cs.PromptEndBus.Publish(ev)
 	}
 }
 
@@ -888,39 +892,6 @@ func (cs *ChatSession) QueueLen() int {
 // reach them via these accessors see a non-nil Bus even before any
 // subscriber has registered.
 
-// AgentEventBus is the pub/sub for bridge AgentEvent fan-out. The
-// runtime wires its event-translation lambda here; future
-// subscribers (audit, metrics, HUD) can register alongside it.
-func (cs *ChatSession) AgentEventBus() *services.EventBus[AgentEventEnvelope] {
-	return cs.agentEventBus
-}
-
-// MessageStateBus is the pub/sub for message-lifecycle transitions
-// (F-31, F-53). Fires on MessageQueued (inbound accept),
-// MessageSubmitted (SendBlocks nil), MessageDropped (/kill /new
-// clear).
-//
-// Scope: NOT produced for slash commands (/cwd /use /kill etc.) —
-// those don't reach QueueUserMessage. See F-31 §3.2.
-func (cs *ChatSession) MessageStateBus() *services.EventBus[MessageStateEvent] {
-	return cs.messageStateBus
-}
-
-// PromptEndBus is the pub/sub for Prompt termination (F-53
-// follow-up). Fires when AgentSession.readpump receives EventDone
-// or EventError and the Prompt reaches a terminal state. Adapters
-// use this to flip the receipt card from 🔄 to ✅ / ❌.
-func (cs *ChatSession) PromptEndBus() *services.EventBus[PromptEndedEvent] {
-	return cs.promptEndBus
-}
-
-// LifecycleBus is the pub/sub for AgentSession status transitions
-// (Spawned / Exited). No receipt anchor — these events don't bind
-// to any Prompt.
-func (cs *ChatSession) LifecycleBus() *services.EventBus[LifecycleEvent] {
-	return cs.lifecycleBus
-}
-
 // EmitMessageState (F-54) fires the MessageStateBus for a single
 // userMsgID. Public entry point for external lifecycle triggers
 // (e.g. newMessageDispatcher in cmd/nightme calling
@@ -932,7 +903,7 @@ func (cs *ChatSession) LifecycleBus() *services.EventBus[LifecycleEvent] {
 // synchronously; a handler may call back into ChatSession methods).
 func (cs *ChatSession) EmitMessageState(userMsgID string, state agent.MessageState) {
 	cs.mu.RLock()
-	bus, chatID := cs.messageStateBus, cs.ChatID
+	bus, chatID := cs.MessageStateBus, cs.ChatID
 	cs.mu.RUnlock()
 	bus.Publish(MessageStateEvent{
 		ChatID:    chatID,

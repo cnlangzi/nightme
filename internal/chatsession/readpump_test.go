@@ -118,7 +118,7 @@ func TestChatSession_PumpEvents_RoutesKindAgentEvent(t *testing.T) {
 	// Install event handler that captures the first event.
 	var captured agent.AgentEvent
 	received := make(chan struct{})
-	cs.AgentEventBus().Subscribe(func(env AgentEventEnvelope) bool {
+	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
 		captured = *env.Event
 		close(received)
 		return false

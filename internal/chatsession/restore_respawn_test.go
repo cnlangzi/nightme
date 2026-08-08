@@ -283,13 +283,15 @@ func TestFromAgentSessionEntry_InitializesEventQueue(t *testing.T) {
 	}
 
 	received := make(chan struct{}, 1)
-	cs.SetEventHandler(func(_ string, _ *AgentSession, ev agent.AgentEvent, _ string) {
+	cs.AgentEventBus().Subscribe(func(env AgentEventEnvelope) bool {
+		ev := env.Event
 		if ev.Kind == agent.EventText && ev.Text == "hello-after-restore" {
 			select {
 			case received <- struct{}{}:
 			default:
 			}
 		}
+		return false
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())

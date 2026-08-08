@@ -1,21 +1,14 @@
-// Package chatsession — EventHandler type alias (CS-AS 边界重构 Phase 1).
+// Package chatsession — compat stubs (F-54).
 //
-// `EventHandler` is the runtime-installed callback that translates
-// each bridge event into an OutboundMessage. The runtime still
-// installs it via ChatSession.SetEventHandler, and ChatSession.routeEvent
-// (in pump_events.go) calls it for KindAgentEvent wrapping.
+// F-54 replaced the single-observer EventHandler callback with
+// services.Bus[AgentEventEnvelope] (see AgentEventBus). The
+// `EventHandler` type alias defined here in v1.3.x is now removed:
+// there are no callers left.
 //
-// The callbacks previously in this file (StartReadPump, StopReadPump,
-// HasPump, EventPumpState, AgentExitObserver, SetAgentExitObserver)
-// were deleted in T13-T14 when the readpump moved per-AS. The
-// runtime no longer references them.
+// Earlier this file held additional stubs (StartReadPump,
+// StopReadPump, HasPump, EventPumpState, AgentExitObserver,
+// SetAgentExitObserver) that were deleted in T13-T14 when the
+// readpump moved per-AS. F-54 finishes the cleanup by removing the
+// EventHandler alias; the file remains so any future compat shim
+// has a clear home.
 package chatsession
-
-import (
-	"github.com/cnlangzi/nightme/internal/agent"
-)
-
-// EventHandler is the runtime-installed callback that processes
-// each bridge event. Phase 1: still installed via SetEventHandler,
-// invoked by ChatSession.routeEvent for KindAgentEvent.
-type EventHandler func(chatID string, s *AgentSession, ev agent.AgentEvent, userMsgID string)

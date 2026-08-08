@@ -78,14 +78,15 @@ var _ Channel = (*recordingChannel)(nil)
 // ch.Send) without the SessionContext / /think / /tools side-paths
 // — those are not relevant to the regression we're hunting.
 
-func integrationEventHandler(ch Channel, _ *chatsession.ChatSession) chatsession.EventHandler {
-	return func(chatID string, _ *chatsession.AgentSession, ev agent.AgentEvent, userMsgID string) {
-		out, ok := Translate(chatID, ev)
+func integrationEventHandler(ch Channel, _ *chatsession.ChatSession) func(env chatsession.AgentEventEnvelope) bool {
+	return func(env chatsession.AgentEventEnvelope) bool {
+		out, ok := Translate(env.ChatID, *env.Event)
 		if !ok {
-			return
+			return false
 		}
-		out.ReplyTo = userMsgID
+		out.ReplyTo = env.UserMsgID
 		_ = ch.Send(context.Background(), out)
+		return false
 	}
 }
 
@@ -111,7 +112,7 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 	// Recording channel + runtime handler (same shape as the
 	// production wireRuntimeCallbacksAndRestore onCreate).
 	mock := &recordingChannel{chatID: cs.ChatID}
-	cs.SetEventHandler(integrationEventHandler(mock, cs))
+	cs.AgentEventBus().Subscribe(integrationEventHandler(mock, cs))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -198,7 +199,7 @@ func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 	cs := newIntegrationChatSession("oc_test_chat", spawner)
 
 	mock := &recordingChannel{chatID: cs.ChatID}
-	cs.SetEventHandler(integrationEventHandler(mock, cs))
+	cs.AgentEventBus().Subscribe(integrationEventHandler(mock, cs))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -395,7 +396,7 @@ exit 0
 	cs := newIntegrationChatSession("oc_real_bridge", spawner)
 
 	mock := &recordingChannel{chatID: cs.ChatID}
-	cs.SetEventHandler(integrationEventHandler(mock, cs))
+	cs.AgentEventBus().Subscribe(integrationEventHandler(mock, cs))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

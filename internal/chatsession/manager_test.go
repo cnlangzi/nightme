@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -221,11 +220,14 @@ func TestManager_RestoreFromRegistry_WithOnCreateBefore_InstallsHandlers(t *test
 
 	// Mirror the production wiring in cmd/nightme/run.go:
 	// WithOnCreate goes BEFORE RestoreFromRegistry.
+	//
+	// F-54: handlers are installed by Subscribing to the typed
+	// buses. The Bus survives RestoreFromRegistry so the test
+	// only needs to verify a Subscribe returns a working
+	// unsubscribe — the buses themselves are constructed in New().
 	mgr.WithOnCreate(func(cs *ChatSession) {
-		cs.SetEventHandler(func(chatID string, _ *AgentSession, _ agent.AgentEvent, _ string) {
-			_ = chatID
-		})
-		cs.SetMessageStateHandler(func(_, _ string, _ agent.MessageState) {})
+		cs.AgentEventBus().Subscribe(func(_ AgentEventEnvelope) bool { return false })
+		cs.MessageStateBus().Subscribe(func(_ MessageStateEvent) bool { return false })
 	})
 
 	if err := mgr.RestoreFromRegistry(); err != nil {
@@ -233,11 +235,21 @@ func TestManager_RestoreFromRegistry_WithOnCreateBefore_InstallsHandlers(t *test
 	}
 
 	for _, cs := range mgr.List() {
-		if cs.EventHandler() == nil {
-			t.Errorf("%s: EventHandler is nil — runtime did not install it", cs.ChatID)
+		// F-54: there is no EventHandler getter anymore;
+		// assert that the buses are non-nil (constructed in New)
+		// and that subscribers are present (proves the wiring
+		// ran before Restore).
+		if cs.AgentEventBus() == nil {
+			t.Errorf("%s: AgentEventBus is nil — runtime did not install it", cs.ChatID)
 		}
-		if cs.MessageStateHandler() == nil {
-			t.Errorf("%s: MessageStateHandler is nil — runtime did not install it", cs.ChatID)
+		if cs.MessageStateBus() == nil {
+			t.Errorf("%s: MessageStateBus is nil — runtime did not install it", cs.ChatID)
+		}
+		if cs.AgentEventBus().Len() == 0 {
+			t.Errorf("%s: AgentEventBus has no subscribers — runtime did not install them", cs.ChatID)
+		}
+		if cs.MessageStateBus().Len() == 0 {
+			t.Errorf("%s: MessageStateBus has no subscribers — runtime did not install them", cs.ChatID)
 		}
 	}
 }
@@ -248,6 +260,11 @@ func TestManager_RestoreFromRegistry_WithOnCreateBefore_InstallsHandlers(t *test
 // loudly so the silent-failure bug can't return. The fix is
 // documented in cmd/nightme/run.go's block comment around the
 // WithOnCreate call site.
+//
+// F-54: with Bus subscriptions, the same invariant holds —
+// restored chats without onCreate have empty buses. The
+// AgentEventBus / MessageStateBus themselves are always non-nil
+// (constructed in New), so the assertion targets subscriber count.
 func TestManager_RestoreFromRegistry_WithOnCreateAfter_MissesHandlers(t *testing.T) {
 	csFile, _ := newTestStores(t)
 	seedPersistedChatSession(t, csFile, "oc_alpha", "claude")
@@ -261,21 +278,19 @@ func TestManager_RestoreFromRegistry_WithOnCreateAfter_MissesHandlers(t *testing
 
 	// Then register onCreate — too late for already-restored chats.
 	mgr.WithOnCreate(func(cs *ChatSession) {
-		cs.SetEventHandler(func(chatID string, _ *AgentSession, _ agent.AgentEvent, _ string) {
-			_ = chatID
-		})
-		cs.SetMessageStateHandler(func(_, _ string, _ agent.MessageState) {})
+		cs.AgentEventBus().Subscribe(func(_ AgentEventEnvelope) bool { return false })
+		cs.MessageStateBus().Subscribe(func(_ MessageStateEvent) bool { return false })
 	})
 
 	cs := mgr.Get("oc_alpha")
 	if cs == nil {
 		t.Fatalf("ChatSession not restored")
 	}
-	if cs.EventHandler() != nil {
-		t.Errorf("EventHandler unexpectedly non-nil — bug repro is no longer valid; restore this assertion's expectation")
+	if cs.AgentEventBus().Len() != 0 {
+		t.Errorf("AgentEventBus subscribers unexpectedly non-zero — bug repro is no longer valid; restore this assertion's expectation")
 	}
-	if cs.MessageStateHandler() != nil {
-		t.Errorf("MessageStateHandler unexpectedly non-nil — bug repro is no longer valid; restore this assertion's expectation")
+	if cs.MessageStateBus().Len() != 0 {
+		t.Errorf("MessageStateBus subscribers unexpectedly non-zero — bug repro is no longer valid; restore this assertion's expectation")
 	}
 }
 
@@ -284,6 +299,12 @@ func TestManager_RestoreFromRegistry_WithOnCreateAfter_MissesHandlers(t *testing
 // (post-Restore, e.g. first message in a brand new chat) also
 // fires onCreate, so handlers are installed uniformly across
 // restored + future chats.
+//
+// F-54: legacy cs.SetEventHandler / cs.SetMessageStateHandler
+// calls are replaced with Bus().Subscribe. The test only
+// subscribes AFTER GetOrCreate (after onCreate ran) so the
+// post-subscribe bus counts are 1, and the post-onCreate
+// ChatSession matches the expected wiring pattern.
 func TestManager_GetOrCreate_AfterRestore_FiresOnCreate(t *testing.T) {
 	mgr := NewManager()
 	var (
@@ -297,19 +318,19 @@ func TestManager_GetOrCreate_AfterRestore_FiresOnCreate(t *testing.T) {
 	})
 
 	cs := mgr.GetOrCreate("oc_new", "claude")
-	if cs.EventHandler() != nil {
-		t.Fatalf("EventHandler unexpectedly set by test setup")
+	if cs.AgentEventBus().Len() != 0 {
+		t.Fatalf("AgentEventBus subscribers unexpectedly set by test setup")
 	}
 
-	cs.SetEventHandler(func(string, *AgentSession, agent.AgentEvent, string) {})
-	cs.SetMessageStateHandler(func(string, string, agent.MessageState) {})
+	cs.AgentEventBus().Subscribe(func(_ AgentEventEnvelope) bool { return false })
+	cs.MessageStateBus().Subscribe(func(_ MessageStateEvent) bool { return false })
 
 	mu.Lock()
 	defer mu.Unlock()
 	if len(seenIDs) != 1 || seenIDs[0] != "oc_new" {
 		t.Fatalf("onCreate should fire once with ChatID=oc_new; got %v", seenIDs)
 	}
-	if cs.EventHandler() == nil {
-		t.Errorf("EventHandler should remain non-nil after onCreate ran")
+	if cs.AgentEventBus().Len() == 0 {
+		t.Errorf("AgentEventBus subscribers should remain non-zero after onCreate ran")
 	}
 }

@@ -19,9 +19,12 @@ import (
 )
 
 // TestWritebackMessageState_FiresOnPromptEndHook verifies that
-// ChatSession.writebackMessageState invokes the onPromptEnd
-// hook. This is the wiring that the runtime depends on to call
+// ChatSession.writebackMessageState publishes to the PromptEndBus.
+// This is the wiring that the runtime depends on to call
 // feishu.MarkReceiptPromptDone after a successful turn.
+//
+// F-54: replaced cs.SetPromptEndHandler with cs.PromptEndBus().
+// Subscribe; the typed envelope carries userMsgID + reason.
 func TestWritebackMessageState_FiresOnPromptEndHook(t *testing.T) {
 	cs := newChatSessionForTest("cs_test")
 
@@ -36,15 +39,16 @@ func TestWritebackMessageState_FiresOnPromptEndHook(t *testing.T) {
 	cs.messagesByID.Store(msg.ID, msg)
 	cs.mu.Unlock()
 
-	// Capture the hook call.
+	// Capture the bus event.
 	var capturedMsgID string
 	var capturedReason PromptEndReason
 	var mu sync.Mutex
-	cs.SetPromptEndHandler(func(userMsgID string, reason PromptEndReason) {
+	cs.PromptEndBus().Subscribe(func(e PromptEndedEvent) bool {
 		mu.Lock()
-		capturedMsgID = userMsgID
-		capturedReason = reason
+		capturedMsgID = e.UserMsgID
+		capturedReason = e.Reason
 		mu.Unlock()
+		return false
 	})
 
 	// Build a Prompt and call writebackMessageState.
@@ -60,34 +64,35 @@ func TestWritebackMessageState_FiresOnPromptEndHook(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if capturedMsgID != msg.ID {
-		t.Errorf("hook not called with msgID: got %q, want %q", capturedMsgID, msg.ID)
+		t.Errorf("bus not published with msgID: got %q, want %q", capturedMsgID, msg.ID)
 	}
 	if capturedReason != PromptEndClean {
-		t.Errorf("hook reason = %v, want %v", capturedReason, PromptEndClean)
+		t.Errorf("bus reason = %v, want %v", capturedReason, PromptEndClean)
 	}
 }
 
 // TestWritebackMessageState_NoFireOnAgentEvent verifies that
-// KindAgentEvent (e.g. a tool call mid-stream) does NOT fire
-// the prompt-end hook. Only the terminal KindPromptEnded should
+// KindAgentEvent (e.g. a tool call mid-stream) does NOT publish
+// to PromptEndBus. Only the terminal KindPromptEnded should
 // trigger it.
 func TestWritebackMessageState_NoFireOnAgentEvent(t *testing.T) {
 	cs := newChatSessionForTest("cs_test")
 
 	var hookCalls int
-	cs.SetPromptEndHandler(func(_ string, _ PromptEndReason) {
+	cs.PromptEndBus().Subscribe(func(_ PromptEndedEvent) bool {
 		hookCalls++
+		return false
 	})
 
 	// simulate KindAgentEvent arriving; PumpEvents does NOT call
 	// writebackMessageState for KindAgentEvent — only KindPromptEnded
 	// does. The test asserts that direct invocation of writebackMessageState
-	// is the only path that flips the hook.
+	// is the only path that publishes.
 	//
 	// (No actual call to writebackMessageState here; the absence
-	// is enough to verify the hook is gated by routeEvent's switch.)
+	// is enough to verify the bus is gated by routeEvent's switch.)
 	if hookCalls != 0 {
-		t.Errorf("hook fired prematurely: %d", hookCalls)
+		t.Errorf("bus published prematurely: %d", hookCalls)
 	}
 }
 

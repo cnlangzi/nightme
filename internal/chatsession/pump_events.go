@@ -26,6 +26,7 @@ package chatsession
 import (
 	"context"
 	"log/slog"
+	"time"
 )
 
 // ActiveEvents (CS-AS 边界重构 Phase 1) returns the enriched event
@@ -51,14 +52,21 @@ func (cs *ChatSession) ActiveEvents() <-chan EnrichedEvent {
 // goroutine from cmd/nightme/run.go after wiring the chat.
 //
 // Routes:
-//   - KindAgentEvent    → cs.eventHandler (the runtime-installed
-//                         callback, kept for F-44 backward compat)
-//   - KindPromptEnded   → cs.writebackMessageState(p) +
-//                         TryFlush (next batch if queue non-empty)
+//   - KindAgentEvent    → cs.AgentEventBus (F-54)
+//   - KindPromptEnded   → writebackMessageState + TryFlush
 //   - KindLifecycle{StatusExited}
-//                       → as.SetExited(0) — see package doc
+//                       → as.SetExited(0) + lifecycleBus.Publish
 //
 // Returns when ctx is cancelled (chat shutdown).
+//
+// Idle backoff (F-54 review fix): when the chat has no active AS
+// (between turns, after Shutdown before the next /use, etc.) the
+// inner wakeCh() returns immediately, which used to cause a tight
+// spin — every idle chat burned one CPU core. We now yield to the
+// runtime via time.Sleep between polls. The 100ms latency is well
+// below any user-visible event latency (a new message goes through
+// QueueUserMessage → TryFlush → submitPump, which is already async
+// with respect to PumpEvents).
 func (cs *ChatSession) PumpEvents(ctx context.Context) {
 	for {
 		events := cs.ActiveEvents()
@@ -67,7 +75,7 @@ func (cs *ChatSession) PumpEvents(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-wakeCh():
+			case <-time.After(100 * time.Millisecond):
 				continue
 			}
 		}
@@ -76,11 +84,13 @@ func (cs *ChatSession) PumpEvents(ctx context.Context) {
 			return
 		case ev, ok := <-events:
 			if !ok {
-				// Active AS closed its eventQueue. Re-evaluate.
+				// Active AS closed its eventQueue. Re-evaluate
+				// after a short backoff so we don't tight-spin if
+				// the AS is being torn down and respawned rapidly.
 				select {
 				case <-ctx.Done():
 					return
-				case <-wakeCh():
+				case <-time.After(100 * time.Millisecond):
 				}
 				continue
 			}
@@ -96,21 +106,28 @@ func (cs *ChatSession) routeEvent(ev EnrichedEvent) {
 	switch ev.Kind {
 	case KindAgentEvent:
 		// Translation to OutboundMessage is the runtime's job.
-		// Phase 1 keeps the existing EventHandler callback (set
-		// via SetEventHandler) so we don't break the existing
-		// wiring in cmd/nightme/run.go.
-		if cs.eventHandler == nil || ev.AgentEvent == nil {
+		// F-54: fan out via AgentEventBus (services.Bus). The
+		// runtime registers its event-translation lambda via
+		// cs.AgentEventBus().Subscribe(...). nil-safe: Publish
+		// on an empty bus is a no-op.
+		if ev.AgentEvent == nil {
 			return
 		}
 		// Look up the AgentSession from the pool by ID (the
 		// event carries AgentSessionID as a string for cross-
-		// channel safety, but the legacy EventHandler signature
-		// expects *AgentSession).
+		// channel safety, but the envelope carries *AgentSession
+		// so subscribers don't have to).
 		as := cs.lookupAS(ev.AgentSessionID)
 		if as == nil {
 			return
 		}
-		cs.eventHandler(cs.ChatID, as, *ev.AgentEvent, ev.UserMsgID)
+		cs.agentEventBus.Publish(AgentEventEnvelope{
+			ChatID:       cs.ChatID,
+			UserMsgID:    ev.UserMsgID,
+			PromptID:     ev.PromptID,
+			AgentSession: as,
+			Event:        ev.AgentEvent,
+		})
 	case KindPromptEnded:
 		cs.writebackMessageState(ev.Prompt)
 		// After a PromptEnds, the AS is ready again. TryFlush
@@ -135,6 +152,17 @@ func (cs *ChatSession) routeEvent(ev EnrichedEvent) {
 				slog.Info("chatsession: AS marked Exited (claude process exited)",
 					"chat_id", ev.ChatID, "as_id", ev.AgentSessionID)
 			}
+			// F-54: also publish to LifecycleBus for new
+			// subscribers (audit / metrics / HUD). The AS
+			// status flip above is the legacy path; new
+			// observers should subscribe to LifecycleBus
+			// instead of polling ActiveAgentSession().
+			cs.lifecycleBus.Publish(LifecycleEvent{
+				ChatID:         ev.ChatID,
+				AgentSessionID: ev.AgentSessionID,
+				PID:            ev.Lifecycle.PID,
+				Status:         ev.Lifecycle.Status,
+			})
 		}
 	}
 }
@@ -151,12 +179,4 @@ func (cs *ChatSession) lookupAS(id string) *AgentSession {
 		}
 	}
 	return nil
-}
-
-// wakeCh returns a small-channel-then-close pattern used as a
-// poll-tick. Avoids busy-spin when no active AS is available.
-func wakeCh() <-chan struct{} {
-	ch := make(chan struct{})
-	close(ch)
-	return ch
 }

@@ -131,7 +131,8 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 		sawDone  bool
 		eventLog []string
 	)
-	cs.SetEventHandler(func(chatID string, sess *AgentSession, ev agent.AgentEvent, userMsgID string) {
+	cs.AgentEventBus().Subscribe(func(env AgentEventEnvelope) bool {
+		ev := env.Event
 		mu.Lock()
 		defer mu.Unlock()
 		eventLog = append(eventLog, ev.Kind.String())
@@ -149,6 +150,7 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 		case agent.EventError:
 			t.Errorf("pi emitted error: %v", ev.Error)
 		}
+		return false
 	})
 
 	// CS-AS 边界重构 Phase 1: the readpump is per-AgentSession and

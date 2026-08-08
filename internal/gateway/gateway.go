@@ -143,12 +143,15 @@ type Gateway interface {
 	ListBindings() []BindingEntry
 
 	// OnMessageState is the v1.3 (F-31) ChatSession-callback
-	// entry point. The runtime (cmd/nightme) wires gw.OnMessageState
-	// into every ChatSession at startup via SetMessageStateHandler.
-	// ChatSession calls it on lifecycle events (received /
-	// forwarded / done / error); Gateway translates to
-	// OutboundMessage{Kind: OutMessageState} and forwards to the
-	// appropriate channel via resolveChannel + Send.
+	// entry point. DEPRECATED (F-54): the runtime no longer wires
+	// this into every ChatSession at startup — the MessageStateBus
+	// subscriber in cmd/nightme/run.go builds the F-48-stamped
+	// OutboundMessage directly and routes it via the runtime's
+	// channel handle. Calling OnMessageState from production code
+	// would produce duplicate MessageState transitions per event
+	// (one stamped via the bus, one un-stamped via this method).
+	// Kept on the interface for compatibility with v1.3 tests
+	// and any external embedder; production wiring must NOT call it.
 	OnMessageState(chatID, userMsgID string, state agent.MessageState)
 
 	// WithActionHandler installs the reaction/action
@@ -796,11 +799,12 @@ func (g *gateway) resolveChannel(chatID string) Channel {
 	return g.defaultChannel
 }
 
-// OnMessageState is the v1.3 (F-31) ChatSession-callback entry
-// point. Wired into every ChatSession at startup via
-// SetMessageStateHandler. Translates the abstract lifecycle event
-// to OutboundMessage{Kind: OutMessageState} and forwards via the
-// channel that owns chatID.
+// OnMessageState emits an OutboundMessage{Kind: OutMessageState}
+// to the channel bound to chatID. DEPRECATED (F-54): see the
+// interface doc. Production callers must use the runtime's
+// MessageStateBus subscriber in cmd/nightme/run.go (which adds
+// the F-48 SessionContext stamp). Kept here for v1.3 tests and
+// embedder compatibility.
 //
 // Failure semantics (per F-31 §9):
 //   - No channel for chatID: silent drop (debug log only).

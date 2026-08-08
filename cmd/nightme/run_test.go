@@ -34,7 +34,7 @@ func TestEventHandler_ThinkGate_ShowPassesThrough(t *testing.T) {
 	h := newEventHandler(ch, cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventText,
 		Text: "[思考] internal reasoning here",
 	}, UserMsgID: "om_user_1"})
@@ -64,7 +64,7 @@ func TestEventHandler_ThinkGate_HideDropsOutThinking(t *testing.T) {
 	h := newEventHandler(ch, cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventText,
 		Text: "[思考] internal reasoning here",
 	}, UserMsgID: "om_user_1"})
@@ -101,13 +101,13 @@ func TestEventHandler_ThinkGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	// (a) OutReply — final assistant reply (no <thinking> prefix)
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventText,
 		Text: "Here is your answer.",
 	}, UserMsgID: "om_user_1"})
 
 	// (b) EventResult — typed Result event (OutResult)
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventResult,
 		Result: &agent.ResultEvent{
 			Text:    "Final result text.",
@@ -117,13 +117,13 @@ h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &ag
 	// EventDone flushes the F-45 §2.5 OutResult buffer (turn-end
 	// fallback path). EventDone also sends nothing else of its own
 	// so the final count stays at 3 (OutReply + OutResult + OutToolStart).
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventDone,
 		Done: &agent.DoneEvent{ExitCode: 0},
 	}, UserMsgID: "om_user_1"})
 
 	// (c) EventToolStart — OutToolStart (passes because /tools on)
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
 		Kind:      agent.EventToolStart,
 		ToolStart: &agent.ToolStartEvent{Name: "Read", Args: "/tmp/foo"},
 	}, UserMsgID: "om_user_1"})
@@ -165,7 +165,7 @@ func TestEventHandler_ThinkGate_NilLoggerSafe(t *testing.T) {
 			t.Fatalf("nil logger caused panic: %v", r)
 		}
 	}()
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventText,
 		Text: "[思考] reasoning",
 	}, UserMsgID: "om_user_1"})
@@ -194,7 +194,7 @@ func TestEventHandler_ThinkGate_PersistsAcrossInvocations(t *testing.T) {
 	}
 
 	// Phase 1: default Show → forwarded.
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &thinking, UserMsgID: "om_1"})
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &thinking, UserMsgID: "om_1"})
 	if got := len(ch.Record()); got != 1 {
 		t.Fatalf("phase1 (Show) forwarded %d events; want 1", got)
 	}
@@ -205,7 +205,7 @@ h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &th
 	}
 
 	// Phase 2: Hide → dropped.
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &thinking, UserMsgID: "om_2"})
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &thinking, UserMsgID: "om_2"})
 	if got := len(ch.Record()); got != 1 {
 		t.Errorf("phase2 (Hide) total events = %d; want 1 (the phase-1 event only)", got)
 	}
@@ -216,7 +216,7 @@ h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &th
 	}
 
 	// Phase 3: Show again → forwarded.
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &thinking, UserMsgID: "om_3"})
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &thinking, UserMsgID: "om_3"})
 	if got := len(ch.Record()); got != 2 {
 		t.Errorf("phase3 (Show again) total events = %d; want 2 (phase1 + phase3)", got)
 	}
@@ -236,9 +236,9 @@ var _ = slog.Default
 // own tokens on the very first send.
 //
 // Sequence:
-//   1. EventAgentConnected → capture Model
-//   2. EventResult with ResultEvent.Usage populated — single event,
-//      dispatched once, footer stamped with this turn's tokens.
+//  1. EventAgentConnected → capture Model
+//  2. EventResult with ResultEvent.Usage populated — single event,
+//     dispatched once, footer stamped with this turn's tokens.
 func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
@@ -249,7 +249,7 @@ func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_first_turn", "claude", "/tmp", nil)
 
 	// Step 1: EventAgentConnected captures Model.
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_first_turn", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_first_turn", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventAgentConnected,
 		Connected: &agent.AgentConnectedEvent{
 			SessionID: "sess_test",
@@ -260,7 +260,7 @@ h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_first_turn", AgentSession: as,
 	// Step 2: EventResult with co-located Usage. ONE event delivery
 	// in real wire order — no EventUsage to follow, no buffer.
 	const inTok, outTok, cost = 1234, 567, 0.012
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_first_turn", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_first_turn", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventResult,
 		Result: &agent.ResultEvent{
 			Text:       "Final answer.",
@@ -391,7 +391,7 @@ func TestEventHandler_OutResult_NilUsageLeavesEmptySessionContext(t *testing.T) 
 	tmpDir := t.TempDir()
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_zero", "claude", tmpDir, nil)
 
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_zero", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_zero", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventResult,
 		Result: &agent.ResultEvent{
 			Text: "no usage reported",
@@ -414,6 +414,246 @@ h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_zero", AgentSession: as, Event
 	}
 }
 
+// TestSessionContextInto_ForwardsUsage pins F-55: sessionContextInto
+// must copy out.Usage (set by gateway.Translate from the bridge
+// wire payload) into out.SessionContext.Usage so the channel footer
+// can render it via ctx.Usage. Pre-F-55 the copy was missing, so
+// footers silently rendered without usage data even when the
+// bridge had populated it. The 1-line fix lives in run.go; this
+// test catches any future regression that drops Usage from the
+// SessionContext struct literal.
+//
+// Sub-cases:
+//   - Usage populated → SessionContext.Usage matches verbatim
+//     (input / output / cache_creation / cache_read /
+//     context_window / context_window_pct / costUSD all flow
+//     through unchanged — runtime is a passive pass-through).
+//   - Usage nil AND no other field qualifies → no SessionContext
+//     materialized (guard skips the whole block).
+//   - Usage nil BUT Agent set → SessionContext still stamped
+//     (Agent path wins; footer Line 2 omitted because ctx.Usage
+//     is nil — same behaviour as the pre-fix code for this case).
+func TestSessionContextInto_ForwardsUsage(t *testing.T) {
+	tmpDir := t.TempDir() // non-git cwd
+	as := chatsession.NewAgentSession("as_test", "cs_ctx", "claude", tmpDir, nil)
+
+	t.Run("usage populated → SessionContext.Usage verbatim", func(t *testing.T) {
+		out := &gateway.OutboundMessage{
+			ChatID:  "oc_chat_ctx_1",
+			Kind:    gateway.OutResult,
+			Text:    "answer",
+			ReplyTo: "om_user_1",
+			Usage: &agent.UsageEvent{
+				InputTokens:              12_300,
+				OutputTokens:             1_500,
+				CacheCreationInputTokens: 600,
+				CacheReadInputTokens:     8_200,
+				CostUSD:                  0.087,
+				ContextWindow:            200_000,
+				ContextWindowPct:         10.55,
+			},
+		}
+		sessionContextInto(out, as)
+		if out.SessionContext == nil {
+			t.Fatal("SessionContext is nil; Usage alone must materialize it (F-55)")
+		}
+		u := out.SessionContext.Usage
+		if u == nil {
+			t.Fatal("SessionContext.Usage is nil; out.Usage must be copied verbatim")
+		}
+		if u.InputTokens != 12_300 {
+			t.Errorf("InputTokens = %d, want 12_300", u.InputTokens)
+		}
+		if u.OutputTokens != 1_500 {
+			t.Errorf("OutputTokens = %d, want 1_500", u.OutputTokens)
+		}
+		if u.CacheCreationInputTokens != 600 {
+			t.Errorf("CacheCreationInputTokens = %d, want 600", u.CacheCreationInputTokens)
+		}
+		if u.CacheReadInputTokens != 8_200 {
+			t.Errorf("CacheReadInputTokens = %d, want 8_200", u.CacheReadInputTokens)
+		}
+		if u.CostUSD != 0.087 {
+			t.Errorf("CostUSD = %v, want 0.087", u.CostUSD)
+		}
+		if u.ContextWindow != 200_000 {
+			t.Errorf("ContextWindow = %d, want 200_000", u.ContextWindow)
+		}
+		if u.ContextWindowPct != 10.55 {
+			t.Errorf("ContextWindowPct = %v, want 10.55", u.ContextWindowPct)
+		}
+	})
+
+	t.Run("usage nil + no other field → no SessionContext", func(t *testing.T) {
+		// Fresh AS with Agent/Model/Compaction also empty so
+		// every guard condition fails.
+		emptyAS := chatsession.NewAgentSession("as_empty", "cs_empty", "", "", nil)
+		out := &gateway.OutboundMessage{
+			ChatID: "oc_chat_ctx_2",
+			Kind:   gateway.OutResult,
+			Text:   "answer",
+			// Usage intentionally nil
+		}
+		sessionContextInto(out, emptyAS)
+		if out.SessionContext != nil {
+			t.Errorf("SessionContext = %+v, want nil (no field qualifies)", out.SessionContext)
+		}
+	})
+
+	t.Run("usage nil but Agent set → SessionContext stamped, Usage nil", func(t *testing.T) {
+		out := &gateway.OutboundMessage{
+			ChatID: "oc_chat_ctx_3",
+			Kind:   gateway.OutResult,
+			Text:   "answer",
+			// Usage intentionally nil; Agent is set on the
+			// shared `as` so the guard passes via the Agent
+			// branch.
+		}
+		sessionContextInto(out, as)
+		if out.SessionContext == nil {
+			t.Fatal("SessionContext is nil; Agent is set so SessionContext should be stamped")
+		}
+		if out.SessionContext.Usage != nil {
+			t.Errorf("SessionContext.Usage = %+v, want nil (Usage was nil on the wire)", out.SessionContext.Usage)
+		}
+	})
+}
+
+// TestEventHandler_Chain_UsageFlowsFromResultEventToFooter exercises
+// the full F-55 chain end-to-end on the cmd/nightme side:
+//
+//	EventResult.Usage (set by bridge)
+//	  → gateway.Translate populates OutboundMessage.Usage
+//	  → sessionContextInto copies to OutboundMessage.SessionContext.Usage
+//	  → channel reads ctx.Usage and renders (window) + new/cache/out
+//
+// The test does NOT import the feishu package (cmd/nightme must
+// stay free of the channel impl to keep the runtime / channel
+// boundary clean). It verifies the runtime side of the chain
+// directly: every link from the AgentEvent envelope to the
+// OutboundMessage that's handed to ch.Send. The Feishu adapter
+// has its own chain test (TestSend_OutResult_CoLocatesUsage in
+// internal/channel/feishu/adapter_test.go) that verifies it
+// reads the values from OutboundMessage.Usage.
+//
+// This test is the regression guard for the F-55 footgun: a
+// future refactor that drops Usage from sessionContextInto (or
+// stops stamping it onto SessionContext) will fail this test
+// with a precise signal (SessionContext.Usage nil even though
+// OutboundMessage.Usage is populated), and the footer Line 2
+// will be silently empty in production until someone notices.
+func TestEventHandler_Chain_UsageFlowsFromResultEventToFooter(t *testing.T) {
+	ch := echo.New("test", io.Discard)
+	mgr := chatsession.NewManager()
+	cs := mgr.GetOrCreate("oc_chat_chain", "claude")
+	logger := slog.Default()
+
+	h := newEventHandler(ch, cs, mgr, logger)
+	tmpDir := t.TempDir() // non-git cwd
+	as := chatsession.NewAgentSession("as_chain", "cs_oc_chat_chain", "claude", tmpDir, nil)
+
+	// Bridge-populated ResultEvent.Usage — every field the
+	// runtime is expected to forward is set to a non-zero
+	// sentinel so a "dropped" field is loud.
+	const (
+		inTok   = 12_300
+		outTok  = 1_500
+		cacheCr = 600
+		cacheRd = 8_200
+		win     = 200_000
+		pct     = 10.55
+		cost    = 0.087
+	)
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_chain", AgentSession: as, Event: &agent.AgentEvent{
+		Kind: agent.EventAgentConnected,
+		Connected: &agent.AgentConnectedEvent{
+			SessionID: "sess_chain",
+			Model:     "claude-opus-4-5",
+		},
+	}, UserMsgID: "om_user_1"})
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_chain", AgentSession: as, Event: &agent.AgentEvent{
+		Kind: agent.EventResult,
+		Result: &agent.ResultEvent{
+			Text: "Final answer.",
+			Usage: &agent.UsageEvent{
+				InputTokens:              inTok,
+				OutputTokens:             outTok,
+				CacheCreationInputTokens: cacheCr,
+				CacheReadInputTokens:     cacheRd,
+				CostUSD:                  cost,
+				ContextWindow:            win,
+				ContextWindowPct:         pct,
+			},
+		},
+	}, UserMsgID: "om_user_1"})
+
+	var out *gateway.OutboundMessage
+	for _, m := range ch.Record() {
+		if m.Kind == gateway.OutResult {
+			out = &m
+			break
+		}
+	}
+	if out == nil {
+		t.Fatal("no OutResult in channel Record")
+	}
+
+	// Link 1: gateway.Translate populates OutboundMessage.Usage
+	// from the ResultEvent's Usage. This is the bridge→runtime
+	// boundary.
+	if out.Usage == nil {
+		t.Fatal("OutboundMessage.Usage is nil; gateway.Translate should populate from ResultEvent.Usage")
+	}
+
+	// Link 2: sessionContextInto copies out.Usage to
+	// out.SessionContext.Usage. This is the runtime→channel
+	// boundary; if it breaks, the footer Line 2 silently
+	// disappears (the actual user-facing bug F-55 surfaced).
+	if out.SessionContext == nil {
+		t.Fatal("SessionContext is nil; runtime should stamp it on OutResult")
+	}
+	if out.SessionContext.Usage == nil {
+		t.Fatal("SessionContext.Usage is nil; sessionContextInto must copy out.Usage verbatim")
+	}
+
+	// F-55 invariants: every wire field survives the chain
+	// unchanged. Runtime is a passive pass-through — no
+	// recompute, no catalog, no clamp.
+	cases := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"InputTokens", out.SessionContext.Usage.InputTokens, inTok},
+		{"OutputTokens", out.SessionContext.Usage.OutputTokens, outTok},
+		{"CacheCreationInputTokens", out.SessionContext.Usage.CacheCreationInputTokens, cacheCr},
+		{"CacheReadInputTokens", out.SessionContext.Usage.CacheReadInputTokens, cacheRd},
+		{"CostUSD", out.SessionContext.Usage.CostUSD, cost},
+		{"ContextWindow", out.SessionContext.Usage.ContextWindow, win},
+		{"ContextWindowPct", out.SessionContext.Usage.ContextWindowPct, pct},
+	}
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Errorf("SessionContext.Usage.%s = %v, want %v", tc.name, tc.got, tc.want)
+		}
+	}
+
+	// Same identity is preserved on SessionContext.
+	if out.SessionContext.Model != "claude-opus-4-5" {
+		t.Errorf("SessionContext.Model = %q, want 'claude-opus-4-5'", out.SessionContext.Model)
+	}
+
+	// Footer Line 2 will read these exact fields downstream
+	// (see internal/channel/feishu/usage_footer.go). The test
+	// below documents the expected rendered shape against the
+	// canonical format — not running the channel render here
+	// (that lives in feishu/usage_footer_test.go), but locking
+	// in the values the channel WILL see.
+	t.Logf("footer Line 2 inputs: in=%d cache_creation=%d cache_read=%d out=%d window=%d pct=%.2f cost=%.3f",
+		inTok, cacheCr, cacheRd, outTok, win, pct, cost)
+}
+
+// TestEventHandler_ToolsGate_ShowPassesThrough verifies the
 // TestEventHandler_ToolsGate_ShowPassesThrough verifies the
 // /tools on path: ToolsMode=Show does NOT drop OutToolStart /
 // OutToolEnd events — the Feishu adapter must still see them so
@@ -431,12 +671,12 @@ func TestEventHandler_ToolsGate_ShowPassesThrough(t *testing.T) {
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_show", "claude", "/tmp", nil)
 
 	// OutToolStart
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_show", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_show", AgentSession: as, Event: &agent.AgentEvent{
 		Kind:      agent.EventToolStart,
 		ToolStart: &agent.ToolStartEvent{Name: "Read", Args: "/tmp/foo"},
 	}, UserMsgID: "om_user_1"})
 	// OutToolEnd
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_show", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_show", AgentSession: as, Event: &agent.AgentEvent{
 		Kind:    agent.EventToolEnd,
 		ToolEnd: &agent.ToolEndEvent{Name: "Read", Output: "line1\nline2"},
 	}, UserMsgID: "om_user_1"})
@@ -473,11 +713,11 @@ func TestEventHandler_ToolsGate_HideDropsBothToolKinds(t *testing.T) {
 	h := newEventHandler(ch, cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_hide", "claude", "/tmp", nil)
 
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_hide", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_hide", AgentSession: as, Event: &agent.AgentEvent{
 		Kind:      agent.EventToolStart,
 		ToolStart: &agent.ToolStartEvent{Name: "Read", Args: "/tmp/foo"},
 	}, UserMsgID: "om_user_1"})
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_hide", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_hide", AgentSession: as, Event: &agent.AgentEvent{
 		Kind:    agent.EventToolEnd,
 		ToolEnd: &agent.ToolEndEvent{Name: "Read", Output: "line1\nline2"},
 	}, UserMsgID: "om_user_1"})
@@ -505,26 +745,26 @@ func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_indep", "claude", "/tmp", nil)
 
 	// (a) OutReply — final assistant reply (no <thinking> prefix)
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_indep", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_indep", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventText,
 		Text: "Here is your answer.",
 	}, UserMsgID: "om_user_1"})
 
 	// (b) EventResult — typed Result event (OutResult)
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_indep", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_indep", AgentSession: as, Event: &agent.AgentEvent{
 		Kind:   agent.EventResult,
 		Result: &agent.ResultEvent{Text: "Final result text."},
 	}, UserMsgID: "om_user_1"})
 	// EventDone flushes the F-45 §2.5 OutResult buffer (turn-end
 	// fallback) — keeps the count at 3 (OutReply + OutResult + OutThinking).
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_indep", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_indep", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventDone,
 		Done: &agent.DoneEvent{ExitCode: 0},
 	}, UserMsgID: "om_user_1"})
 
 	// (c) OutThinking — must not be dropped by /tools off
 	// (ThinkMode is the orthogonal gate; default Show passes it)
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_indep", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_indep", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventText,
 		Text: "[思考] reasoning",
 	}, UserMsgID: "om_user_1"})
@@ -555,7 +795,7 @@ func TestEventHandler_ToolsGate_PersistsAcrossInvocations(t *testing.T) {
 	}
 
 	// Phase 1: default Hide → dropped.
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_persist", AgentSession: as, Event: &toolStart, UserMsgID: "om_1"})
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_persist", AgentSession: as, Event: &toolStart, UserMsgID: "om_1"})
 	if got := len(ch.Record()); got != 0 {
 		t.Fatalf("phase1 (Hide) forwarded %d events; want 0", got)
 	}
@@ -566,7 +806,7 @@ h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_persist", AgentSession: 
 	}
 
 	// Phase 2: Show → forwarded.
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_persist", AgentSession: as, Event: &toolStart, UserMsgID: "om_2"})
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_persist", AgentSession: as, Event: &toolStart, UserMsgID: "om_2"})
 	if got := len(ch.Record()); got != 1 {
 		t.Errorf("phase2 (Show) total events = %d; want 1", got)
 	}
@@ -577,7 +817,7 @@ h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_persist", AgentSession: 
 	}
 
 	// Phase 3: Hide → dropped again.
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_persist", AgentSession: as, Event: &toolStart, UserMsgID: "om_3"})
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_persist", AgentSession: as, Event: &toolStart, UserMsgID: "om_3"})
 	if got := len(ch.Record()); got != 1 {
 		t.Errorf("phase3 (Hide again) total events = %d; want 1 (phase1 + phase3 dropped, phase2 kept)", got)
 	}
@@ -606,13 +846,13 @@ func TestEventHandler_ToolsAndThinkGatesIndependent(t *testing.T) {
 	}
 
 	// OutThinking → dropped (ThinkMode gate)
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_both_gates", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_both_gates", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventText,
 		Text: "[思考] reasoning",
 	}, UserMsgID: "om_user_1"})
 
 	// OutToolStart → dropped (ToolsMode gate)
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_both_gates", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_both_gates", AgentSession: as, Event: &agent.AgentEvent{
 		Kind:      agent.EventToolStart,
 		ToolStart: &agent.ToolStartEvent{Name: "Read", Args: "/tmp/foo"},
 	}, UserMsgID: "om_user_1"})
@@ -623,13 +863,13 @@ h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_both_gates", AgentSession: as,
 	}
 
 	// OutThinking → still dropped (ThinkMode gate unchanged)
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_both_gates", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_both_gates", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventText,
 		Text: "[思考] more reasoning",
 	}, UserMsgID: "om_user_2"})
 
 	// OutToolStart → now forwarded (ToolsMode flipped to Show)
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_both_gates", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_both_gates", AgentSession: as, Event: &agent.AgentEvent{
 		Kind:      agent.EventToolStart,
 		ToolStart: &agent.ToolStartEvent{Name: "Bash", Args: "ls"},
 	}, UserMsgID: "om_user_2"})
@@ -642,6 +882,7 @@ h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_both_gates", AgentSession: as,
 		t.Errorf("forwarded event Kind = %q, want %q", got[0].Kind.String(), "tool_start")
 	}
 }
+
 // newWireTestStores opens a temp-dir pair of ChatSessionFile +
 // AgentSessionFile. Mirrors chatsession.newTestStores but lives in
 // cmd/nightme (cross-package helpers in test packages aren't
@@ -821,7 +1062,7 @@ func TestEventHandler_OnAgentConnected_DoesNotEmitMessageSubmitted(t *testing.T)
 	// MessageSubmitted here — ChatSession.TryFlush owns the
 	// "submit succeeded" boundary, EventAgentConnected is just
 	// session-init metadata.
-h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
+	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventAgentConnected,
 		Connected: &agent.AgentConnectedEvent{
 			SessionID: "session-abc",

@@ -36,7 +36,9 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/command/cwd"
+	"github.com/cnlangzi/nightme/internal/command/gtw"
 	"github.com/cnlangzi/nightme/internal/command/kill"
+	newcmd "github.com/cnlangzi/nightme/internal/command/newcmd"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/command/think"
 	"github.com/cnlangzi/nightme/internal/command/tools"
@@ -44,23 +46,21 @@ import (
 	"github.com/cnlangzi/nightme/internal/command/watch"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
-	"github.com/cnlangzi/nightme/internal/command/gtw"
-	newcmd "github.com/cnlangzi/nightme/internal/command/newcmd"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
 // runDeps holds the construction seams for the daemon: every
 // dependency is injectable for deterministic tests.
 type runDeps struct {
-	loadConfig     func() (*config.Config, error)
-	openChatSessions func(*config.Config) (*registry.ChatSessionFile, error)
+	loadConfig        func() (*config.Config, error)
+	openChatSessions  func(*config.Config) (*registry.ChatSessionFile, error)
 	openAgentSessions func(*config.Config) (*registry.AgentSessionFile, error)
-	buildAgents    func(*config.Config) *agent.Registry
-	newChannel     func(*config.Config) (channel.Channel, error)
-	signals        <-chan os.Signal
-	cleanup        bool
-	skipFeishuAuth bool
-	onReady        func()
+	buildAgents       func(*config.Config) *agent.Registry
+	newChannel        func(*config.Config) (channel.Channel, error)
+	signals           <-chan os.Signal
+	cleanup           bool
+	skipFeishuAuth    bool
+	onReady           func()
 
 	// registerHealth, if non-nil, is called after the channel is
 	// constructed and started; the closure wires a closure returning
@@ -860,7 +860,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 	// following EventUsage lands. The previous EventResult-then-
 	// EventUsage two-event split was a bridge-layer artifact — the
 	// data was always co-located on the wire.
-return func(env chatsession.AgentEventEnvelope) {
+	return func(env chatsession.AgentEventEnvelope) {
 		chatID, s, ev, userMsgID := env.ChatID, env.AgentSession, env.Event, env.UserMsgID
 		// Capture the agent's own session id from EventAgentConnected so the
 		// next respawn can replay `--resume <id>`. We persist
@@ -1094,14 +1094,24 @@ func sessionContextInto(out *gateway.OutboundMessage, s *chatsession.AgentSessio
 	gitSnap, _ := gtw.CollectStatus(ctx, s.Cwd, gtw.ExecGitRunner{})
 	cancel()
 	hasGit := gitSnap != nil && s.Cwd != ""
+	// F-55 fix: out.Usage is set by gateway.Translate from the
+	// bridge wire payload (ResultEvent.Usage / DoneEvent.Usage).
+	// The runtime is a passive pass-through — copy verbatim so the
+	// channel footer can render it via ctx.Usage. Pre-F-55 the
+	// copy was missing, so footers silently rendered without
+	// usage data. Gated the same way as the other SessionContext
+	// fields: any one of (Agent / Model / GitStatus / Compaction /
+	// Usage) being present is enough to materialize the
+	// SessionContext.
 	if s.Agent != "" || s.Model() != "" || hasGit ||
-		s.CompactionCount() > 0 {
+		s.CompactionCount() > 0 || out.Usage != nil {
 		out.SessionContext = &gateway.SessionContext{
 			Agent:           s.Agent,
 			Model:           s.Model(),
 			Workspace:       s.Cwd,
 			GitStatus:       gitSnap,
 			CompactionCount: s.CompactionCount(),
+			Usage:           out.Usage,
 		}
 	}
 }

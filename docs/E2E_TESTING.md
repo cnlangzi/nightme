@@ -33,10 +33,10 @@ directions: chat → agent → chat.
    A QR code and verification URL appear in the terminal. Scan the QR code
    with the Feishu mobile app and approve the requested scopes. On success,
    `app_id` and `app_secret` are saved to
-   `~/.config/nightme/config.yaml` with restrictive permissions. A manually
+   `~/.nightme/config.yaml` with restrictive permissions. A manually
    configured `feishu.app_id` / `feishu.app_secret` pair works as well.
 
-3. Configure the agent list in `~/.config/nightme/config.yaml`:
+3. Configure the agent list in `~/.nightme/config.yaml`:
 
    ```yaml
    agent:

@@ -1298,7 +1298,7 @@ WebSearch  -> 10 results
 
 **用 larkim SDK 直接发**(无需 cmd/_probe/ 工具,工具已删;需要时按本节重建):
 
-1. 构造 `lark.Client` 用 `~/.config/nightme/config.yaml` 里的 `app_id` / `app_secret`(或从环境变量读)
+1. 构造 `lark.Client` 用 `~/.nightme/config.yaml` 里的 `app_id` / `app_secret`(或从环境变量读)
 2. Create 顶级:`cli.Im.V1.Message.Create(ctx, NewCreateMessageReqBuilder().ReceiveIdType("chat_id").Body(&CreateMessageReqBody{ReceiveId:&chatID, MsgType:&MsgTypeText, Content:&json}).Build())`
 3. Reply 默认:`cli.Im.V1.Message.Reply(ctx, NewReplyMessageReqBuilder().MessageId(om_M0).Body(NewReplyMessageReqBodyBuilder().MsgType(MsgTypeText).Content(json).Build()).Build())` — **不**调 `.ReplyInThread(...)`
 4. Reply true:在 3 的 builder 链上**追加** `.ReplyInThread(true)`

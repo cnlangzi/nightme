@@ -127,7 +127,7 @@ status: polling, next check in 5s
   App ID:     cli_xxxx
   App Name:   nightme
   Scopes:     im:message:send_as_bot, im:message:receive_v1
-  Credentials saved to: ~/.config/nightme/config.yaml (chmod 0600)
+  Credentials saved to: ~/.nightme/config.yaml (chmod 0600)
 
 Next: run `nightme run` to start the gateway.
 ```
@@ -147,7 +147,7 @@ Next: run `nightme run` to start the gateway.
 > **F-watch 决策记录**：原本考虑过提供 `--group-messages` CLI flag 让用户 opt-in，Devin 拍板：默认始终包含 `im:message.group_msg`，需 opt-out 时用 `/watch off`。理由：用户加 bot 到群 = 期望 bot 能听，不应被隐式 intercept 调到次路径。
 
 **Credentials 持久化**：
-- 写入 `~/.config/nightme/config.yaml` 的 `feishu.app_id` / `feishu.app_secret` 顶层字段（v0.1 single-account）
+- 写入 `~/.nightme/config.yaml` 的 `feishu.app_id` / `feishu.app_secret` 顶层字段（v0.1 single-account）
 - 文件权限 0600
 - 原子写（temp + rename，跟 registry 一样）
 

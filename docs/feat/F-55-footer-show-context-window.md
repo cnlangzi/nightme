@@ -47,7 +47,7 @@ F-54 §1.2 明确把 `agent.UsageEvent.ContextWindow` 字段删了,理由是"全
 **nightme 不做的三件事**(明确否决):
 
 1. ❌ 维护模型 → 窗口查表(避免引入 `anthropic-models-2026-06-24` 之类的 catalog,以及"Nightly 拉 `/v1/models` 校准"之类的运维负担)
-2. ❌ 配置 override(避免 `~/.config/nightme/config.yaml` 里出现 `agents.contextWindow: 1000000` 之类的 hack)
+2. ❌ 配置 override(避免 `~/.nightme/config.yaml` 里出现 `agents.contextWindow: 1000000` 之类的 hack)
 3. ❌ `pct > 100%` 时 clamp 或告警(让用户看到原始事实;clamp 会把上游 bug 隐藏)
 
 **一句话立场**:CLI Agent 报什么就显示什么,错了让用户自行计算。

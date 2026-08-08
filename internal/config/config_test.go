@@ -94,7 +94,7 @@ func TestDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(home, ".local", "share", "nightme")
+	want := filepath.Join(home, ".nightme")
 	if cfg.Paths.DataDir != want {
 		t.Errorf("default Paths.DataDir = %q, want %q", cfg.Paths.DataDir, want)
 	}

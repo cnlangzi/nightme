@@ -4,7 +4,7 @@
 // stdout and stderr are redirected to /dev/null so the parent shell
 // stays clean. The only persistent trace of daemon activity is the
 // slog file configured via Logging.File (default
-// $HOME/.local/share/nightme/nightme.log), so the natural way to
+// $HOME/.nightme/nightme.log), so the natural way to
 // watch the daemon after `start` is to tail that file.
 //
 // Behavior mirrors `tail -f`:

@@ -1833,7 +1833,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 `nightme run` 启动顺序（见 `cmd/nightme/run.go`）：
 
 ```
-1. loadConfig()                       # ~/.config/nightme/config.yaml
+1. loadConfig()                       # ~/.nightme/config.yaml
 2. openChatSessions() / openAgentSessions()   # chat_sessions.json / agent_sessions.json
 3. buildAgents(cfg)                   # cfg.Agents → agent.Registry
 4. MigrateV1ToV2(v1RegistryPath)     # 备份 registry.json → .v1.bak (idempotent)

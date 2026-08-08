@@ -96,7 +96,7 @@ func TestConfigAgentsMenu_PickAndSave(t *testing.T) {
 	// would otherwise redirect SaveDefault to a different file).
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
-	cfgPath := filepath.Join(tmp, ".config", "nightme", "config.yaml")
+	cfgPath := filepath.Join(tmp, ".nightme", "config.yaml")
 	t.Setenv("NIGHTME_CONFIG", cfgPath)
 
 	// Seed the file with cfg.Primary=claude + a user config entry.
@@ -158,7 +158,7 @@ func TestConfigAgentsMenu_PickAndSave(t *testing.T) {
 func TestConfigAgentsMenu_CancelWithQ(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
-	cfgPath := filepath.Join(tmp, ".config", "nightme", "config.yaml")
+	cfgPath := filepath.Join(tmp, ".nightme", "config.yaml")
 	t.Setenv("NIGHTME_CONFIG", cfgPath)
 
 	cfg, err := config.Load(cfgPath) // defaults: Primary=claude

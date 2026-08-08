@@ -20,7 +20,7 @@ import (
 // Wiring (mirrors cmd/nightme/run.go::wireRuntimeCallbacksAndRestore
 // + the runtime's EventHandler closure):
 //
-//   ChatSession.SetEventHandler(translate + ch.Send)
+//   ChatSession.AgentEventBus().Subscribe(translate + ch.Send)
 //   ChatSession.PumpEvents(ctx)        // consumes as.Events()
 //   AgentSession.Spawn(fakeSpawner)    // wires fake bridge handle
 //   AgentSession.readpumpLoop()        // reads handle.Events() →
@@ -187,7 +187,7 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 	}
 
 	// Tell the test we're done; Shutdown triggers a KindPromptEnded
-	// that would normally fire onPromptEnd.
+	// that would normally fire on the PromptEndBus.
 	fake.FinishEvent()
 }
 
@@ -354,7 +354,7 @@ func summarizeKinds(msgs []OutboundMessage) []OutboundKind {
 // pumpStream(stdout → s.events). It spawns a shell script via
 // claudecode.New(...).Start() that emits a stream-json transcript
 // on stdout, then drives the full Submit → readpump → PumpEvents
-// → eventHandler chain. If pumpStream is broken (closed before
+// → AgentEventBus fan-out. If pumpStream is broken (closed before
 // first read, wrong channel buffering, parse failure), this test
 // fails with a clear signal.
 //

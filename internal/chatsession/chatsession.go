@@ -564,7 +564,7 @@ func (cs *ChatSession) MarkDropped(userMsgID string) bool {
 // Stage at Submitted time (no fan-out, per docs §5.1).
 //
 // After clearing currentPrompt, fires the runtime-installed
-// `onPromptEnd` handler (if any) so adapters can react to the
+// `PromptEndBus` handler (if any) so adapters can react to the
 // terminal event — e.g. Feishu's adapter uses this to transition
 // the receipt card to PromptDone and add the ✅ reaction.
 // The handler runs WITHOUT cs.mu held so it can call back into
@@ -590,7 +590,7 @@ func (cs *ChatSession) endPrompt(reason PromptEndReason) {
 	as.endPrompt(reason)
 }
 
-// onPromptEnd (F-53 follow-up) was the runtime-installed callback
+// PromptEndBus (F-53 follow-up → F-54) is the runtime-installed callback
 // fired by `endPrompt` after the Prompt's terminal fields were
 // stamped. F-54 replaced it with cs.PromptEndBus().Publish(PromptEndedEvent{...});
 // subscribers register via PromptEndBus().Subscribe. See
@@ -941,26 +941,6 @@ func (cs *ChatSession) EmitMessageState(userMsgID string, state agent.MessageSta
 		At:        time.Now(),
 	})
 }
-
-// emitMessageStateForCurrentTurn fires onMessageState for the
-// single currentTurnUserMsgID. Called from runReadPump on terminal
-// agent events (EventDone/Error) so the anchor user message
-// receives its final state event.
-//
-// v1.3 (SPEC §2.5): terminal MessageState fires for the anchor
-// only. Earlier userMsgIDs in a buffered batch keep their own
-// MessageState at StateForwarded until they themselves anchor a
-// future turn — a deliberate UX choice to keep the per-message
-// progress indicator honest. Channel rendering of forward-only
-// reactions (🔄 without ✅) is acceptable for buffered-batch
-// intermediate messages; if a fan-out is later preferred,
-// re-introduce the slice here.
-//
-// F-53: `emitMessageStateForCurrentTurn` REMOVED. The whole
-// MessageState fan-out pattern is gone — `Message.Stage` reaches
-// its terminal value (Submitted or Dropped) at the moment of the
-// relevant transition, never changing again. See docs/feat/
-// message_lifecycle.md §5.1.
 
 // LookupInPool returns the AgentSession matching (agent, cwd) if
 // present in the pool (regardless of status). Returns
@@ -1585,7 +1565,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 		// Persist after a successful kill+respawn so the registry
 		// stays in sync with the in-memory state. For in-place
 		// resets the bridge will also emit a fresh EventAgentConnected which
-		// the runtime's eventHandler captures via
+		// the runtime's AgentEventBus subscriber captures via
 		// PersistAgentSession; for kill+respawn the new child hasn't
 		// started yet, so this Upsert captures the new PID +
 		// cleared ResumeID before any subsequent EventAgentConnected arrives

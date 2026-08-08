@@ -952,7 +952,7 @@ func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBl
 //     nil. AgentSession.ID / Cwd / pool membership are preserved;
 //     only the bridge's internal conversation state is cleared.
 //     The bridge is expected to emit a fresh EventAgentConnected carrying the
-//     new SessionID; the runtime's eventHandler (cmd/nightme/run.go
+//     new SessionID; the runtime's AgentEventBus subscriber (cmd/nightme/run.go
 //     newEventHandler) captures it via SetResumeID and persists.
 //
 //   - Bridge cannot do in-place reset (raw PTY bridge): bridge.New
@@ -1030,7 +1030,7 @@ func (as *AgentSession) New(ctx context.Context, spawner Spawner) error {
 	as.asMu.Unlock()
 	// Explicitly clear ResumeID so a stale id never gets replayed on
 	// the next respawn (the new child will emit its own EventAgentConnected,
-	// and the runtime's eventHandler will SetResumeID via the normal
+	// and the runtime's AgentEventBus subscriber will SetResumeID via the normal
 	// path).
 	as.SetResumeID("")
 

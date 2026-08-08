@@ -38,7 +38,7 @@ type Manager struct {
 
 	// onCreate fires once for every newly-created ChatSession,
 	// before GetOrCreate returns. Used by the runtime to wire
-	// per-ChatSession handlers (e.g. SetMessageStateHandler in
+	// per-ChatSession handlers (e.g. MessageStateBus in
 	// F-31) without requiring the runtime to enumerate sessions
 	// after startup. nil = no callback.
 	onCreate func(*ChatSession)

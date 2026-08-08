@@ -808,7 +808,7 @@ type AgentSession interface {
 	//   - acp:        send "session/new" JSON-RPC over the existing transport
 	//
 	// After New returns, the bridge MUST emit a fresh EventAgentConnected carrying
-	// the new SessionID; the runtime's existing eventHandler captures
+	// the new SessionID; the runtime's AgentEventBus subscriber captures
 	// it via SetResumeID and persists (cmd/nightme/run.go newEventHandler).
 	New(ctx context.Context) error
 

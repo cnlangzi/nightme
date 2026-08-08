@@ -300,7 +300,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// Manager.onCreate hook. Both callbacks MUST be installed in
 	// this single closure — separating them (one here, one in
 	// /use or newMessageDispatcher) is a silent-failure landmine
-	// because readpump fires only when eventHandler is non-nil.
+	// because readpump fires only when AgentEventBus has subscribers.
 	//
 	// ORDER MATTERS: WithOnCreate MUST be called BEFORE
 	// RestoreFromRegistry. RestoreFromRegistry fires onCreate for
@@ -649,7 +649,7 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 
 // wireRuntimeCallbacksAndRestore installs the per-ChatSession
 // outbound handlers (EventHandler for AgentEvent → OutboundMessage
-// translation; MessageStateHandler for F-31 lifecycle reactions)
+// translation; MessageStateBus subscriber for F-31 lifecycle reactions)
 // via Manager.WithOnCreate, then restores persisted ChatSessions
 // from disk. The two calls MUST happen in this order —
 // RestoreFromRegistry fires onCreate for every restored

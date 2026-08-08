@@ -45,7 +45,7 @@ const (
 	// (EventDone) or with an error (EventError). Wire-up is
 	// via `ChatSession.endPrompt(reason)`; the runtime
 	// translates that to a per-channel render via the
-	// `SetPromptEndHandler` callback.
+	// `PromptEndBus` callback.
 	//
 	// Although the value is reserved, Phase 0 only emits
 	// PromptRunning → (no transition) for the happy path;

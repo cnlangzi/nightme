@@ -557,7 +557,7 @@ func (s *session) SendPermission(_ string) error {
 //
 // Implementation: send new_session, wait for response, then issue
 // get_state to retrieve the new sessionId, then push it into the
-// events channel as an EventAgentConnected so the runtime's eventHandler
+// events channel as an EventAgentConnected so the runtime's AgentEventBus subscriber
 // captures it via SetResumeID (cmd/nightme/run.go newEventHandler).
 //
 // The process stays alive; the transport stays open; Events() stays

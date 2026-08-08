@@ -18,7 +18,7 @@ package main
 import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
-	"github.com/cnlangzi/nightme/internal/bridge/codexserver"
+	"github.com/cnlangzi/nightme/internal/bridge/codex"
 	"github.com/cnlangzi/nightme/internal/bridge/pi"
 	"github.com/cnlangzi/nightme/internal/bridge/pty"
 )
@@ -34,7 +34,7 @@ func init() {
 	// raw stdio pipes (no PTY). Single backend — see
 	// docs/bridge/codex.md §1 for the rationale on not supporting
 	// the legacy `codex exec` backend.
-	agent.Builtins.Register(codexserver.New("codex", "codex", nil))
+	agent.Builtins.Register(codex.New("codex", "codex", nil))
 
 	// pi — the long-lived `pi --mode rpc` JSONL bridge. The agent
 	// driver is the @earendil-works/pi-coding-agent CLI; see

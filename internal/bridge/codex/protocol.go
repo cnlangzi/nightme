@@ -1,4 +1,4 @@
-// Package codexserver implements a bridge to the Codex CLI via its
+// Package codex implements a bridge to the Codex CLI via its
 // `codex app-server --listen stdio://` JSON-RPC 2.0 transport.
 //
 // Wire format: LF-delimited JSON-RPC 2.0 messages. Notification methods
@@ -10,7 +10,7 @@
 // in session.go / agent.go / translate.go / permissions.go. Optional /
 // evolving fields are typed as `json.RawMessage` so an upstream schema
 // bump (0.43 → 0.46+) cannot fail unmarshal on the bridge side.
-package codexserver
+package codex
 
 import "encoding/json"
 

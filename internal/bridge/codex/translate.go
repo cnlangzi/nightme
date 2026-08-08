@@ -1,4 +1,4 @@
-// Package codexserver — translator + notification / server-request dispatch.
+// Package codex — translator + notification / server-request dispatch.
 //
 // This file owns the F-52-style state machine that turns app-server
 // wire envelopes into agent.AgentEvent values. Design reference:
@@ -9,7 +9,7 @@
 //   - EventAgentResult.Text is always non-empty (fallback to "Done.")
 //   - Usage is OVERWRITTEN (per-turn snapshot, never summed)
 //   - Unknown events / fields → debug log + drop, never terminate
-package codexserver
+package codex
 
 import (
 	"encoding/json"
@@ -108,20 +108,33 @@ func (t *turnState) reset() {
 // All emitted events are delivered via session.deliver so the Agent
 // can stamp session context (SessionID / Model / AgentName /
 // Workspace / Branch) on every event.
+//
+// onTurnEnd fires once per turn at the per-turn terminal event
+// (turn/completed, turn/failed, or thread/status/changed.idle) AFTER
+// the Result + Done pair has been emitted. The Agent uses it to
+// clear its pendingTurnActive flag so the next SendBlocks may
+// proceed; without it, a second SendBlocks during the same turn
+// would race because defer-based reset in SendBlocks clears the
+// flag the instant turn/start returns (before codex actually
+// processes the turn).
 type translator struct {
-	mu       sync.Mutex
-	turn     *turnState
-	deliver  func(agent.AgentEvent) agent.AgentEvent
+	mu         sync.Mutex
+	turn       *turnState
+	deliver    func(agent.AgentEvent) agent.AgentEvent
+	onTurnEnd  func()
 	agentName, workspace, branch string
 	stderrTail *ringBuffer
 }
 
 func newTranslator(deliver func(agent.AgentEvent) agent.AgentEvent,
 	agentName, workspace, branch string,
-	stderrTail *ringBuffer) *translator {
+	stderrTail *ringBuffer,
+	onTurnEnd func(),
+) *translator {
 	return &translator{
 		turn:       newTurnState(),
 		deliver:    deliver,
+		onTurnEnd:  onTurnEnd,
 		agentName:  agentName,
 		workspace:  workspace,
 		branch:     branch,
@@ -166,7 +179,7 @@ func (t *translator) notify(method string, params json.RawMessage) {
 	case "error":
 		t.handleError(params, t.stderrTail)
 	default:
-		slog.Default().Debug("codexserver: unknown notification",
+		slog.Default().Debug("codex: unknown notification",
 			slog.String("method", method))
 	}
 }
@@ -176,7 +189,7 @@ func (t *translator) notify(method string, params json.RawMessage) {
 // call translator.notify directly.
 func (s *session) onNotification(method string, params json.RawMessage) {
 	if s.translator == nil {
-		slog.Default().Debug("codexserver: notification before translator ready",
+		slog.Default().Debug("codex: notification before translator ready",
 			slog.String("method", method))
 		return
 	}
@@ -202,7 +215,7 @@ func (t *translator) handleError(params json.RawMessage, stderrTail *ringBuffer)
 	_ = json.Unmarshal(params, &ev)
 	msg := ev.Message
 	if msg == "" {
-		msg = "codexserver: server error"
+		msg = "codex: server error"
 	}
 	tail := ""
 	if stderrTail != nil {
@@ -255,7 +268,7 @@ func (t *translator) handleTokenUsageUpdated(params json.RawMessage) {
 }
 
 func (t *translator) handleRateLimits(params json.RawMessage) {
-	slog.Default().Debug("codexserver: rateLimits updated (ignored)",
+	slog.Default().Debug("codex: rateLimits updated (ignored)",
 		slog.String("raw", string(params)))
 }
 
@@ -264,7 +277,7 @@ func (t *translator) handleRateLimits(params json.RawMessage) {
 func (t *translator) handleItemStarted(params json.RawMessage) {
 	var notif itemStartedNotification
 	if err := json.Unmarshal(params, &notif); err != nil {
-		slog.Default().Debug("codexserver: item/started bad json",
+		slog.Default().Debug("codex: item/started bad json",
 			slog.String("err", err.Error()))
 		return
 	}
@@ -321,7 +334,7 @@ func (t *translator) handleItemStarted(params json.RawMessage) {
 		t.turn.active = true
 		t.mu.Unlock()
 	default:
-		slog.Default().Debug("codexserver: item/started ignored",
+		slog.Default().Debug("codex: item/started ignored",
 			slog.String("type", typ))
 	}
 }
@@ -329,7 +342,7 @@ func (t *translator) handleItemStarted(params json.RawMessage) {
 func (t *translator) handleItemCompleted(params json.RawMessage) {
 	var notif itemCompletedNotification
 	if err := json.Unmarshal(params, &notif); err != nil {
-		slog.Default().Debug("codexserver: item/completed bad json",
+		slog.Default().Debug("codex: item/completed bad json",
 			slog.String("err", err.Error()))
 		return
 	}
@@ -394,7 +407,7 @@ func (t *translator) handleItemCompleted(params json.RawMessage) {
 		// Here we keep pendingMsgs / tools intact — the assistant
 		// reply being composed survives the cycle.
 	default:
-		slog.Default().Debug("codexserver: item/completed ignored",
+		slog.Default().Debug("codex: item/completed ignored",
 			slog.String("type", typ))
 	}
 }
@@ -414,6 +427,11 @@ func (t *translator) completeTurn(params json.RawMessage, status string) {
 	if !t.turn.active {
 		// No meaningful activity this turn; skip Result + Done.
 		t.turn.doneEmitted = true
+		// Still mark the turn as ended so the busy guard releases —
+		// even an empty turn occupies the turn slot.
+		if t.onTurnEnd != nil {
+			t.onTurnEnd()
+		}
 		return
 	}
 
@@ -458,7 +476,7 @@ func (t *translator) completeTurn(params json.RawMessage, status string) {
 		_ = json.Unmarshal(params, &notif)
 		errMsg := decodeTurnError(notif.Error)
 		if errMsg == "" {
-			errMsg = "codexserver: turn failed"
+			errMsg = "codex: turn failed"
 		}
 		result.Err = errors.New(errMsg)
 	}
@@ -473,6 +491,9 @@ func (t *translator) completeTurn(params json.RawMessage, status string) {
 		},
 	})
 	t.turn.doneEmitted = true
+	if t.onTurnEnd != nil {
+		t.onTurnEnd()
+	}
 }
 
 // handleThreadStatusChanged processes the codex ≥0.125 thread idle

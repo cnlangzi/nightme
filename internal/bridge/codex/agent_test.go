@@ -1,4 +1,4 @@
-package codexserver
+package codex
 
 import (
 	"os"
@@ -183,6 +183,7 @@ func TestSendPermission_EmptyDefaultsToDecline(t *testing.T) {
 	ch := make(chan string, 1)
 	s := &session{
 		pendingApprovals: map[string]chan string{"req-x": ch},
+		lastPendingID:    "req-x",
 	}
 	a.session = s
 

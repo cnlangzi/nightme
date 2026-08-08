@@ -21,7 +21,7 @@
 //     before returning the error.
 //   - cmd.Wait owns the events-channel close (lifecycle goroutine).
 //     Close() waits up to closeDrainTimeout before forcing a kill.
-package codexserver
+package codex
 
 import (
 	"bytes"
@@ -65,12 +65,12 @@ const stderrTailBytes = 2048
 // var (not const) so tests can compress it.
 var permissionTimeout = 5 * time.Minute
 
-// codexserverDebug toggles the bridge's detailed debug logging.
+// codexDebug toggles the bridge's detailed debug logging.
 // Default ON; silence with NIGHTME_CODEX_DEBUG=0 (also accepts
 // "false", "no", "off", case-folded).
-var codexserverDebug = codexserverDebugEnabled()
+var codexDebug = codexDebugEnabled()
 
-func codexserverDebugEnabled() bool {
+func codexDebugEnabled() bool {
 	v := os.Getenv("NIGHTME_CODEX_DEBUG")
 	switch v {
 	case "", "1", "true", "yes", "on":
@@ -79,17 +79,17 @@ func codexserverDebugEnabled() bool {
 	return false
 }
 
-// cLog emits an info-level message tagged [codexserver] when debug is
+// cLog emits an info-level message tagged [codex] when debug is
 // enabled. Mirrors piLog so log scrapers see a consistent component.
 // Tests in this package may swap slog.Default via slog.SetDefault().
 func cLog(msg string, args ...any) {
-	if !codexserverDebug {
+	if !codexDebug {
 		return
 	}
 	all := make([]any, 0, len(args)+2)
-	all = append(all, "component", "codexserver")
+	all = append(all, "component", "codex")
 	all = append(all, args...)
-	slog.Default().Info("[codexserver] "+msg, all...)
+	slog.Default().Info("[codex] "+msg, all...)
 }
 
 // ─── ringBuffer ───
@@ -164,6 +164,12 @@ type session struct {
 	stderrTail  *ringBuffer
 	pendingMu   sync.Mutex
 	pendingApprovals map[string]chan string
+	// lastPendingID is the request id of the most-recently spawned
+	// approval. SendPermission routes to that specific channel
+	// rather than broadcasting across the map (which is both
+	// non-deterministic due to Go's randomised map iteration and
+	// semantically wrong for multi-approval scenarios).
+	lastPendingID string
 
 	closeOnce   sync.Once
 	closed      chan struct{}
@@ -193,7 +199,7 @@ type sessionConfig struct {
 	name      string
 	command   string
 	workspace string
-	args      []string // agent defaults (currently unused; codexserver ignores)
+	args      []string // agent defaults (currently unused; codex ignores)
 	env       []string // cfg.Env extras
 	model     string   // optional; passed via -c model=
 	effort    string   // optional; passed via -c model_reasoning_effort=
@@ -206,7 +212,7 @@ type sessionConfig struct {
 // session.deliver to its own deliver helper BEFORE emitting any events.
 func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 	if cfg.workspace == "" {
-		return nil, fmt.Errorf("codexserver: workspace required")
+		return nil, fmt.Errorf("codex: workspace required")
 	}
 
 	// Build argv.
@@ -224,24 +230,24 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, fmt.Errorf("codexserver: stdin pipe: %w", err)
+		return nil, fmt.Errorf("codex: stdin pipe: %w", err)
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		_ = stdin.Close()
-		return nil, fmt.Errorf("codexserver: stdout pipe: %w", err)
+		return nil, fmt.Errorf("codex: stdout pipe: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
-		return nil, fmt.Errorf("codexserver: stderr pipe: %w", err)
+		return nil, fmt.Errorf("codex: stderr pipe: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
 		_ = stdout.Close()
 		_ = stderr.Close()
-		return nil, fmt.Errorf("codexserver: start: %w", err)
+		return nil, fmt.Errorf("codex: start: %w", err)
 	}
 
 	parentCtx, cancel := context.WithCancel(ctx)
@@ -257,6 +263,7 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 		branch:            detectBranch(cfg.workspace),
 		stderrTail:        newRingBuffer(stderrTailBytes),
 		pendingApprovals:  make(map[string]chan string),
+		lastPendingID:     "",
 		closed:            make(chan struct{}),
 		exitDone:          make(chan struct{}),
 		ctx:               parentCtx,
@@ -295,11 +302,11 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 
 	if err := s.initialize(hsCtx); err != nil {
 		_ = s.Close()
-		return nil, fmt.Errorf("codexserver: initialize: %w", err)
+		return nil, fmt.Errorf("codex: initialize: %w", err)
 	}
 	if err := s.rpc.notify("initialized", nil); err != nil {
 		_ = s.Close()
-		return nil, fmt.Errorf("codexserver: initialized notify: %w", err)
+		return nil, fmt.Errorf("codex: initialized notify: %w", err)
 	}
 	if err := s.ensureThread(hsCtx, cfg.sessionID); err != nil {
 		_ = s.Close()
@@ -359,10 +366,10 @@ func (s *session) ensureThread(ctx context.Context, resumeID string) error {
 		}
 		var resp threadStartResponse
 		if err := s.rpc.request(ctx, "thread/resume", params, &resp); err != nil {
-			return fmt.Errorf("codexserver: thread/resume: %w", err)
+			return fmt.Errorf("codex: thread/resume: %w", err)
 		}
 		if resp.Thread.ID == "" {
-			return fmt.Errorf("codexserver: thread/resume returned empty thread id")
+			return fmt.Errorf("codex: thread/resume returned empty thread id")
 		}
 		s.threadID = resp.Thread.ID
 		s.model = resp.Model
@@ -375,10 +382,10 @@ func (s *session) ensureThread(ctx context.Context, resumeID string) error {
 	}
 	var resp threadStartResponse
 	if err := s.rpc.request(ctx, "thread/start", params, &resp); err != nil {
-		return fmt.Errorf("codexserver: thread/start: %w", err)
+		return fmt.Errorf("codex: thread/start: %w", err)
 	}
 	if resp.Thread.ID == "" {
-		return fmt.Errorf("codexserver: thread/start returned empty thread id")
+		return fmt.Errorf("codex: thread/start returned empty thread id")
 	}
 	s.threadID = resp.Thread.ID
 	s.model = resp.Model
@@ -409,12 +416,31 @@ func (s *session) stderrLoop(ctx context.Context) {
 // emitWireError is called by the rpcClient read pump when a malformed
 // or oversized frame arrives. We translate it into EventAgentError and
 // tear down the session — a corrupted wire cannot recover.
+//
+// We also fail any in-flight pending approvals so the channel /
+// runtime does not wait forever for a reply that will never come,
+// and we cancel the session ctx so any SendBlocks / pending
+// requests (e.g. a turn/start that fired immediately before the
+// wire broke) unblock promptly with ErrSessionClosed.
 func (s *session) emitWireError(err error) {
 	cLog("wire error", "err", err.Error())
 	s.deliver(agent.AgentEvent{
 		Kind: agent.EventAgentError,
 		Err:  err,
 	})
+	// Cancel pending approvals first so the decision goroutines
+	// exit cleanly (they select on s.ctx.Done as a fallback).
+	s.pendingMu.Lock()
+	for id, ch := range s.pendingApprovals {
+		select {
+		case ch <- "decline":
+		default:
+		}
+		delete(s.pendingApprovals, id)
+	}
+	s.lastPendingID = ""
+	s.pendingMu.Unlock()
+	s.rpc.failPending(ErrSessionClosed)
 	// Tear down by closing stdin; the lifecycle goroutine will reap
 	// the child and close events.
 	select {
@@ -438,7 +464,7 @@ func (s *session) lifecycle() {
 	// exit error when the cause is NOT a graceful Close().
 	if s.exitErr != nil && !s.isGracefulClose() {
 		tail := s.stderrTail.String()
-		msg := fmt.Sprintf("codexserver: process exit: %v", s.exitErr)
+		msg := fmt.Sprintf("codex: process exit: %v", s.exitErr)
 		if tail != "" {
 			msg += "\n--- stderr tail ---\n" + tail
 		}

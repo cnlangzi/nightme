@@ -49,7 +49,7 @@ notes.
 
 ### Lifecycle / close ordering fix
 
-`codexserver.session.Close()` previously held `closeOnce.Do` while
+`codex.session.Close()` previously held `closeOnce.Do` while
 waiting for `cmd.Wait()` to drain, which deadlocked against
 `lifecycle()`’s own `closeOnce.Do(close(events))`. Split: lifecycle
 owns `close(events)`; Close owns the shutdown-initiation once and

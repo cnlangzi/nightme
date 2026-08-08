@@ -1,4 +1,4 @@
-package codexserver
+package codex
 
 // Real end-to-end tests against the user's local `codex` CLI.
 //

@@ -16,7 +16,7 @@
 //     json.Marshal of a string (i.e. "\"req-001\""). The same key is
 //     used by the read loop, so request/response correlation is
 //     deterministic.
-package codexserver
+package codex
 
 import (
 	"bufio"
@@ -41,15 +41,15 @@ const MaxFrameSize = 10 * 1024 * 1024
 // ErrSessionClosed is returned by request when the session has been
 // (or is being) closed. Callers (notably SendBlocks) should treat
 // this as terminal and not retry.
-var ErrSessionClosed = errors.New("codexserver: session closed")
+var ErrSessionClosed = errors.New("codex: session closed")
 
 // ErrFrameTooLarge is returned by readLoop when a stdout frame
 // exceeds MaxFrameSize. The session is torn down.
-var ErrFrameTooLarge = errors.New("codexserver: frame too large")
+var ErrFrameTooLarge = errors.New("codex: frame too large")
 
 // ErrMalformedJSON is returned by readLoop when a frame cannot be
 // decoded as a JSON-RPC envelope. The session is torn down.
-var ErrMalformedJSON = errors.New("codexserver: malformed JSON")
+var ErrMalformedJSON = errors.New("codex: malformed JSON")
 
 // JSON-RPC 2.0 reserved errors we surface verbatim.
 const (
@@ -123,7 +123,7 @@ func (c *rpcClient) write(payload []byte) error {
 		return ErrSessionClosed
 	}
 	if _, err := c.wr.Write(payload); err != nil {
-		return fmt.Errorf("codexserver: write: %w", err)
+		return fmt.Errorf("codex: write: %w", err)
 	}
 	return nil
 }
@@ -138,10 +138,10 @@ func (c *rpcClient) writeLine(payload []byte) error {
 		return ErrSessionClosed
 	}
 	if _, err := c.wr.Write(payload); err != nil {
-		return fmt.Errorf("codexserver: write: %w", err)
+		return fmt.Errorf("codex: write: %w", err)
 	}
 	if _, err := c.wr.Write([]byte{'\n'}); err != nil {
-		return fmt.Errorf("codexserver: write newline: %w", err)
+		return fmt.Errorf("codex: write newline: %w", err)
 	}
 	return nil
 }
@@ -179,7 +179,7 @@ func (c *rpcClient) request(ctx context.Context, method string, params, out any)
 	raw, err := json.Marshal(msg)
 	if err != nil {
 		c.removePending(key)
-		return fmt.Errorf("codexserver: marshal %s: %w", method, err)
+		return fmt.Errorf("codex: marshal %s: %w", method, err)
 	}
 	if err := c.writeLine(raw); err != nil {
 		c.removePending(key)
@@ -196,7 +196,7 @@ func (c *rpcClient) request(ctx context.Context, method string, params, out any)
 		}
 		if out != nil && len(resp.result) > 0 {
 			if err := json.Unmarshal(resp.result, out); err != nil {
-				return fmt.Errorf("codexserver: decode %s response: %w", method, err)
+				return fmt.Errorf("codex: decode %s response: %w", method, err)
 			}
 		}
 		return nil
@@ -219,7 +219,7 @@ func (c *rpcClient) notify(method string, params any) error {
 	}
 	raw, err := json.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("codexserver: marshal %s: %w", method, err)
+		return fmt.Errorf("codex: marshal %s: %w", method, err)
 	}
 	return c.writeLine(raw)
 }
@@ -431,7 +431,7 @@ func (c *rpcClient) handleFrame(line []byte, onError func(error)) {
 			onError(fmt.Errorf("%w: response without id", ErrMalformedJSON))
 			return
 		}
-		slog.Default().Debug("codexserver: dropping unknown frame",
+		slog.Default().Debug("codex: dropping unknown frame",
 			slog.String("raw", string(line)))
 	}
 }

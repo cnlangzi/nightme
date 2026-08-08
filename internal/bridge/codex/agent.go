@@ -25,7 +25,7 @@
 // (or Close) does that. This mirrors the contract documented in
 // docs/feat/F-32-pi-rpc-bridge.md §3.3 and lets ChatSession's
 // readpump continue reading across many turns on the same AS.
-package codexserver
+package codex
 
 import (
 	"context"
@@ -47,11 +47,11 @@ import (
 
 // ErrTurnBusy is returned by SendBlocks when a previous turn is still
 // streaming. The caller may retry after the turn settles.
-var ErrTurnBusy = errors.New("codexserver: previous turn still active")
+var ErrTurnBusy = errors.New("codex: previous turn still active")
 
 // ErrImageTooLarge is returned by SendBlocks when a single image
 // exceeds maxImageBytes. Mirrors pi's limit.
-var ErrImageTooLarge = errors.New("codexserver: image too large")
+var ErrImageTooLarge = errors.New("codex: image too large")
 
 const maxImageBytes = 10 * 1024 * 1024
 
@@ -107,7 +107,7 @@ func (a *Agent) Args() []string {
 }
 
 // Env returns a defensive copy of the constructor env (always nil for
-// codexserver; kept for symmetry with the merged agent.Agent interface).
+// codex; kept for symmetry with the merged agent.Agent interface).
 func (a *Agent) Env() []string { return nil }
 
 // Detect verifies the `codex` binary resolves on PATH. Call before
@@ -136,7 +136,7 @@ func (a *Agent) Detect() error {
 // approvalPolicy on a per-turn / per-thread basis; not exposed yet).
 func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, error) {
 	if cfg.Workspace == "" {
-		return nil, fmt.Errorf("codexserver: workspace is required")
+		return nil, fmt.Errorf("codex: workspace is required")
 	}
 
 	live := &Agent{
@@ -169,9 +169,18 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 	live.session = s
 
 	// Translator is wired AFTER newSession so we have access to
-	// the session's current thread id / model.
+	// the session's current thread id / model. onTurnEnd releases
+	// the busy guard at the per-turn terminal event; the prior
+	// defer-in-SendBlocks pattern cleared it the instant turn/start
+	// returned, opening a window where a concurrent SendBlocks would
+	// race the in-flight turn on codex's side.
 	live.session.translator = newTranslator(
 		live.deliver, a.name, cfg.Workspace, s.branch, s.stderrTail,
+		func() {
+			a.pendingMu.Lock()
+			a.pendingTurnActive = false
+			a.pendingMu.Unlock()
+		},
 	)
 
 	// Synthesize the initial EventAgentReady. The runtime subscribes
@@ -215,6 +224,7 @@ func (a *Agent) PID() int { return a.session.pid }
 // SendText delivers plain-text user input. Convenience wrapper around
 // SendBlocks.
 func (a *Agent) SendText(text string) error {
+	cLog("SendText enter", "len", len(text), "text", text)
 	return a.SendBlocks(context.Background(), []agent.ContentBlock{
 		{Type: agent.ContentText, Text: text},
 	})
@@ -229,6 +239,10 @@ func (a *Agent) SendText(text string) error {
 // Empty blocks is a no-op. Concurrent calls during a streaming turn
 // return ErrTurnBusy (the app-server single-turns per thread).
 func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
+	cLog("SendBlocks enter", "blocks", len(blocks), "threadID", func() string {
+		if a.session == nil { return "<nil>" }
+		return a.session.threadID
+	}())
 	if len(blocks) == 0 {
 		return nil
 	}
@@ -239,11 +253,11 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 	}
 	a.pendingTurnActive = true
 	a.pendingMu.Unlock()
-	defer func() {
-		a.pendingMu.Lock()
-		a.pendingTurnActive = false
-		a.pendingMu.Unlock()
-	}()
+	// pendingTurnActive is released by the translator's onTurnEnd
+	// callback when the turn settles (turn/completed, turn/failed,
+	// or thread/status/changed.idle). NOT here — clearing on
+	// SendBlocks return would re-open the busy window while the
+	// turn is still active on codex's side.
 
 	input := make([]turnInput, 0, len(blocks))
 	for _, b := range blocks {
@@ -293,12 +307,12 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 // stageImage copies an image from b.Path into a workspace-local
 // staging dir and returns the absolute path the app-server can read.
 // Matches cc-connect's pattern of creating
-// `<workspace>/.nightme/codexserver/images/img_<ms>_<idx>.<ext>` so
+// `<workspace>/.nightme/codex/images/img_<ms>_<idx>.<ext>` so
 // the path is stable for log debugging and survives a /new.
 func (a *Agent) stageImage(b agent.ContentBlock) (string, error) {
 	data, err := os.ReadFile(b.Path)
 	if err != nil {
-		return "", fmt.Errorf("codexserver: read image: %w", err)
+		return "", fmt.Errorf("codex: read image: %w", err)
 	}
 	if len(data) > maxImageBytes {
 		return "", fmt.Errorf("%w: %d > %d", ErrImageTooLarge, len(data), maxImageBytes)
@@ -306,9 +320,9 @@ func (a *Agent) stageImage(b agent.ContentBlock) (string, error) {
 	// Sanity-check decode; base64 length does not need to match the
 	// decoded size, but the bytes must at least be a valid base64
 	// payload for the file extension / mime type.
-	dir := filepath.Join(a.session.workspace, ".nightme", "codexserver", "images")
+	dir := filepath.Join(a.session.workspace, ".nightme", "codex", "images")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("codexserver: mkdir images: %w", err)
+		return "", fmt.Errorf("codex: mkdir images: %w", err)
 	}
 	ext := strings.ToLower(filepath.Ext(b.Path))
 	if ext == "" {
@@ -317,7 +331,7 @@ func (a *Agent) stageImage(b agent.ContentBlock) (string, error) {
 	fname := fmt.Sprintf("img_%d_%d%s", time.Now().UnixNano(), os.Getpid(), ext)
 	dst := filepath.Join(dir, fname)
 	if err := os.WriteFile(dst, data, 0o644); err != nil {
-		return "", fmt.Errorf("codexserver: write image: %w", err)
+		return "", fmt.Errorf("codex: write image: %w", err)
 	}
 	return dst, nil
 }
@@ -350,25 +364,38 @@ func imageExtFromMediaType(mt string) string {
 //
 // Empty resp is treated as "decline" so a no-op call cannot wedge
 // the bridge.
+//
+// Routing: in a multi-approval scenario (e.g. an in-flight
+// requestUserInput plus a tool approval), the user's choice targets
+// the most-recently-emitted approval only. Older approvals keep
+// their pending channels untouched and stay pending until their
+// own timeout or ctx cancellation. The previous broadcast-all
+// behaviour caused concurrent approvals to receive duplicate or
+// unrelated responses, which is wrong for both the binary accept/
+// decline decision and the structured requestUserInput response
+// (whose `<qid>:labels` payload is per-question).
 func (a *Agent) SendPermission(resp string) error {
 	if resp == "" {
 		resp = "decline"
 	}
 	a.session.pendingMu.Lock()
 	defer a.session.pendingMu.Unlock()
-	if len(a.session.pendingApprovals) == 0 {
-		return fmt.Errorf("codexserver: no pending approval")
+	if a.session.lastPendingID == "" {
+		return fmt.Errorf("codex: no pending approval")
 	}
-	for id, ch := range a.session.pendingApprovals {
-		select {
-		case ch <- resp:
-		default:
-			// Channel already has a pending value; do not block.
-		}
-		// Drop the entry so a second SendPermission does not
-		// overwrite a still-waiting decision goroutine.
-		delete(a.session.pendingApprovals, id)
+	id := a.session.lastPendingID
+	ch, ok := a.session.pendingApprovals[id]
+	if !ok {
+		a.session.lastPendingID = ""
+		return fmt.Errorf("codex: no pending approval")
 	}
+	select {
+	case ch <- resp:
+	default:
+		// Channel already has a pending value; do not block.
+	}
+	delete(a.session.pendingApprovals, id)
+	a.session.lastPendingID = ""
 	return nil
 }
 
@@ -435,7 +462,7 @@ func (a *Agent) deliver(ev agent.AgentEvent) agent.AgentEvent {
 	select {
 	case a.session.events <- ev:
 	default:
-		slog.Default().Error("codexserver: events channel full, dropping event",
+		slog.Default().Error("codex: events channel full, dropping event",
 			"kind", ev.Kind.String(),
 			"session_id", ev.SessionID,
 		)
@@ -444,7 +471,7 @@ func (a *Agent) deliver(ev agent.AgentEvent) agent.AgentEvent {
 		select {
 		case a.session.events <- agent.AgentEvent{
 			Kind:      agent.EventAgentError,
-			Err:       fmt.Errorf("codexserver: events channel full, dropped %s", ev.Kind),
+			Err:       fmt.Errorf("codex: events channel full, dropped %s", ev.Kind),
 			SessionID: ev.SessionID,
 			Model:     ev.Model,
 			AgentName: ev.AgentName,

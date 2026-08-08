@@ -1,4 +1,4 @@
-package codexserver
+package codex
 
 // Shared skip guard for tests that spawn the REAL `codex` CLI's
 // app-server protocol. These tests exercise actual codex behaviour

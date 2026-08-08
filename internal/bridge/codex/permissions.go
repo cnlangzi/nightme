@@ -19,7 +19,7 @@
 // so a slow approval does not stall the read pump. The goroutine
 // selects on (responseCh | ctx.Done | 5min timer) and writes the
 // JSON-RPC response back on the same id.
-package codexserver
+package codex
 
 import (
 	"encoding/json"
@@ -203,6 +203,7 @@ func (s *session) spawnApproval(
 	ch := make(chan string, 1)
 	s.pendingMu.Lock()
 	s.pendingApprovals[requestID] = ch
+	s.lastPendingID = requestID
 	s.pendingMu.Unlock()
 
 	s.deliver(agent.AgentEvent{
@@ -225,13 +226,16 @@ func (s *session) spawnApproval(
 			resp = "decline"
 		case <-timer.C:
 			resp = "decline"
-			slog.Default().Info("codexserver: approval timed out, defaulting to decline",
+			slog.Default().Info("codex: approval timed out, defaulting to decline",
 				slog.String("tool", tool),
 				slog.String("request_id", requestID))
 		}
 
 		s.pendingMu.Lock()
 		delete(s.pendingApprovals, requestID)
+		if s.lastPendingID == requestID {
+			s.lastPendingID = ""
+		}
 		s.pendingMu.Unlock()
 
 		reply(resp)
@@ -303,4 +307,4 @@ func fallbackAnswers(questions []appServerRequestUserInputQuestion) map[string]r
 // errPermissionsReply is a sentinel returned when SendPermission is
 // called with no pending approval. The runtime surfaces it as a
 // "you didn't have a pending approval" error, not a panic.
-var errPermissionsReply = errors.New("codexserver: no pending approval")
+var errPermissionsReply = errors.New("codex: no pending approval")

@@ -1,4 +1,4 @@
-package codexserver
+package codex
 
 import (
 	"context"

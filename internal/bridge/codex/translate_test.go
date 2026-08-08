@@ -1,4 +1,4 @@
-package codexserver
+package codex
 
 import (
 	"encoding/json"
@@ -20,7 +20,7 @@ func captureTranslator() (*translator, *capturedEvents) {
 		cap.ch <- ev
 		return ev
 	}
-	t := newTranslator(deliver, "codex", "/tmp/ws", "main", newRingBuffer(stderrTailBytes))
+	t := newTranslator(deliver, "codex", "/tmp/ws", "main", newRingBuffer(stderrTailBytes), nil)
 	return t, cap
 }
 
@@ -445,7 +445,7 @@ func TestTranslate_TokenUsageUpdatedStoresLastAsUsage(t *testing.T) {
 		captured = append(captured, ev)
 		return ev
 	}
-	tr := newTranslator(deliver, "codex", "/tmp/ws", "main", nil)
+	tr := newTranslator(deliver, "codex", "/tmp/ws", "main", nil, nil)
 
 	// 1500 input + 0 output + 200 cached; modelContextWindow 200000.
 	params := []byte(`{
@@ -487,7 +487,7 @@ func TestTranslate_TokenUsageUpdatedStoresLastAsUsage(t *testing.T) {
 
 func TestTranslate_TokenUsageUpdatedFallsBackToTotalWhenLastEmpty(t *testing.T) {
 	deliver := func(ev agent.AgentEvent) agent.AgentEvent { return ev }
-	tr := newTranslator(deliver, "codex", "/tmp/ws", "main", nil)
+	tr := newTranslator(deliver, "codex", "/tmp/ws", "main", nil, nil)
 
 	params := []byte(`{
 		"threadId": "th-1",
@@ -510,7 +510,7 @@ func TestTranslate_TokenUsageUpdatedFallsBackToTotalWhenLastEmpty(t *testing.T) 
 
 func TestTranslate_TokenUsageUpdatedIgnoresZeroes(t *testing.T) {
 	deliver := func(ev agent.AgentEvent) agent.AgentEvent { return ev }
-	tr := newTranslator(deliver, "codex", "/tmp/ws", "main", nil)
+	tr := newTranslator(deliver, "codex", "/tmp/ws", "main", nil, nil)
 
 	// Both last and total are all zeros — defensive guard against
 	// malformed envelopes polluting the turn state.
@@ -536,7 +536,7 @@ func TestTranslate_CompleteTurnUsesTokenUsageWhenParamsNil(t *testing.T) {
 		captured = append(captured, ev)
 		return ev
 	}
-	tr := newTranslator(deliver, "codex", "/tmp/ws", "main", nil)
+	tr := newTranslator(deliver, "codex", "/tmp/ws", "main", nil, nil)
 
 	// Flip the turn active by simulating an agentMessage
 	// item/completed (translate.go sets active=true on the

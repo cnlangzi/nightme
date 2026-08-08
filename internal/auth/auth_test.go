@@ -59,8 +59,8 @@ func TestProvider_Name_And_Login(t *testing.T) {
 }
 
 // TestCredentials_JSON exercises the on-disk JSON encoding. The
-// shape is what `nightme auth status --json` will print, and what
-// the CLI persists when writing channels.<provider>.accounts.main.
+// shape mirrors what the CLI persists into config.yaml under
+// `feishu.app_id` / `feishu.app_secret` on a successful login.
 func TestCredentials_JSON(t *testing.T) {
 	in := Credentials{
 		AppID:     "cli_a1b2",

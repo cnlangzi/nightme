@@ -222,7 +222,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		return errors.New("run: load config: returned nil config")
 	}
 	if !deps.skipFeishuAuth && (cfg.Feishu.AppID == "" || cfg.Feishu.AppSecret == "") {
-		return errors.New("run: Feishu credentials are not configured; run `nightme auth login feishu`")
+		return errors.New("run: Feishu credentials are not configured; run `nightme login feishu`")
 	}
 
 	csFile, err := deps.openChatSessions(cfg)

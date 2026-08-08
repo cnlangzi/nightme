@@ -1,4 +1,11 @@
-// Package main — `nightme auth login feishu` subcommand.
+// Package main — `nightme login` subcommand tree.
+//
+// `nightme login` is the channel credential onboarding command. v0.1
+// ships a single channel (`feishu`) accessed as `nightme login feishu`.
+// The verb is promoted to a top-level command (no `nightme auth`
+// parent) because login is the only auth verb we ship — status /
+// logout are intentionally not provided; users can inspect / clear
+// credentials by editing `config.yaml` directly.
 //
 // The flow is:
 //  1. Load config from DefaultPath.
@@ -33,12 +40,12 @@ type loginCmdFlags struct {
 	timeout time.Duration
 }
 
-// newAuthLoginCmd returns the parent `nightme auth login` command.
+// newLoginCmd returns the top-level `nightme login` command.
 // `feishu` is added as a sub-command so the verb stays channel-keyed.
-func newAuthLoginCmd() *cobra.Command {
+func newLoginCmd() *cobra.Command {
 	var f loginCmdFlags
 
-	parent := &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Run an interactive channel auth flow",
 		Long: "login runs an interactive authentication flow for the\n" +
@@ -46,14 +53,14 @@ func newAuthLoginCmd() *cobra.Command {
 			"Re-running login unconditionally rebinds the channel —\n" +
 			"the existing app_id / app_secret are overwritten.",
 	}
-	parent.AddCommand(newAuthLoginFeishuCmd(&f))
-	return parent
+	cmd.AddCommand(newLoginFeishuCmd(&f))
+	return cmd
 }
 
-// newAuthLoginFeishuCmd builds `nightme auth login feishu`. The
-// flags struct is shared so tests can introspect it without
-// re-constructing the command.
-func newAuthLoginFeishuCmd(f *loginCmdFlags) *cobra.Command {
+// newLoginFeishuCmd builds `nightme login feishu`. The flags struct
+// is shared so tests can introspect it without re-constructing the
+// command.
+func newLoginFeishuCmd(f *loginCmdFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "feishu",
 		Short: "One-click Feishu app registration (QR scan)",
@@ -64,32 +71,32 @@ func newAuthLoginFeishuCmd(f *loginCmdFlags) *cobra.Command {
 			"Re-running this command rebinds the channel — any existing\n" +
 			"app_id / app_secret in config.yaml is overwritten.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runAuthLoginFeishu(cmd, f)
+			return runLoginFeishu(cmd, f)
 		},
 	}
 	cmd.Flags().DurationVar(&f.timeout, "timeout", 10*time.Minute, "abort the flow after this duration")
 	return cmd
 }
 
-// runAuthLoginFeishu is the body of `nightme auth login feishu`. It
-// is split from the cobra wiring so tests can drive it with custom
-// flags without re-creating the command tree.
+// runLoginFeishu is the body of `nightme login feishu`. It is split
+// from the cobra wiring so tests can drive it with custom flags
+// without re-creating the command tree.
 //
 // `provider` is injected by the production path via
 // defaultFeishuProvider(); tests substitute their own.
-func runAuthLoginFeishu(cmd *cobra.Command, f *loginCmdFlags) (err error) {
-	return runAuthLoginWith(cmd, f, defaultFeishuProvider(f))
+func runLoginFeishu(cmd *cobra.Command, f *loginCmdFlags) (err error) {
+	return runLoginWith(cmd, f, defaultFeishuProvider(f))
 }
 
-// runAuthLoginWith is the testable core. It accepts the provider
+// runLoginWith is the testable core. It accepts the provider
 // explicitly so unit tests can swap in a fake without hitting
 // Feishu's HTTP endpoints.
-func runAuthLoginWith(cmd *cobra.Command, f *loginCmdFlags, provider auth.Provider) (err error) {
+func runLoginWith(cmd *cobra.Command, f *loginCmdFlags, provider auth.Provider) (err error) {
 	out := cmd.OutOrStdout()
 
 	cfg, err := config.LoadDefault()
 	if err != nil {
-		return fmt.Errorf("auth login: load config: %w", err)
+		return fmt.Errorf("login: load config: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), f.timeout)
@@ -97,7 +104,7 @@ func runAuthLoginWith(cmd *cobra.Command, f *loginCmdFlags, provider auth.Provid
 
 	creds, err := provider.Login(ctx)
 	if err != nil {
-		return fmt.Errorf("auth login: %w", err)
+		return fmt.Errorf("login: %w", err)
 	}
 
 	cfg.Feishu.AppID = creds.AppID
@@ -113,7 +120,7 @@ func runAuthLoginWith(cmd *cobra.Command, f *loginCmdFlags, provider auth.Provid
 				"  app_id:     %s\n"+
 				"  app_secret: %s\n",
 			err, creds.AppID, creds.AppSecret)
-		return fmt.Errorf("auth login: %w", err)
+		return fmt.Errorf("login: %w", err)
 	}
 
 	fmt.Fprintf(out, "✓ App registered successfully!\n")
@@ -128,7 +135,7 @@ func runAuthLoginWith(cmd *cobra.Command, f *loginCmdFlags, provider auth.Provid
 
 // defaultFeishuProvider returns the production provider. It is a
 // function so tests can leave it untouched and overwrite the call
-// site in runAuthLoginFeishu without conditional compilation.
+// site in runLoginFeishu without conditional compilation.
 func defaultFeishuProvider(_ *loginCmdFlags) auth.Provider {
 	return feishu.NewFeishuAuth(feishu.FeishuAuthOptions{})
 }

@@ -27,7 +27,7 @@ directions: chat → agent → chat.
 2. Register the Feishu app (one-click QR flow):
 
    ```bash
-   ./bin/nightme auth login feishu
+   ./bin/nightme login feishu
    ```
 
    A QR code and verification URL appear in the terminal. Scan the QR code
@@ -127,8 +127,8 @@ the simplest first test.
 
 ### No connection message or authentication errors
 
-- Check `nightme auth status feishu` and confirm that an App ID is present.
-- Re-run `nightme auth login feishu --force` if the credentials are stale.
+- Inspect `~/.nightme/config.yaml` and confirm that an `feishu.app_id` is present.
+- Re-run `nightme login feishu` if the credentials are stale.
 - Confirm that `app_secret` was not copied with surrounding whitespace.
 - Check that the machine can reach Feishu's Open Platform endpoint and that
   the app has not been disabled or had its permissions revoked.

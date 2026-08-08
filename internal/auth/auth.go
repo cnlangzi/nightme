@@ -24,8 +24,12 @@ import (
 // gave up, the network died, the timeout elapsed -> return promptly
 // with an error wrapping ErrAuthTimeout or ctx.Err().
 type Provider interface {
-	// Name returns the channel name (e.g. "feishu", "lark"). It is
-	// used as the second-level key in `nightme auth <verb> <name>`.
+	// Name returns the channel name (e.g. "feishu", "lark"). It
+	// exists primarily so log lines can attribute a Login call to
+	// the right provider; it is not currently part of the CLI
+	// command tree (see cmd/nightme/login.go) since v0.1 ships a
+	// single channel. Kept on the interface so adding a second
+	// provider (e.g. Lark) does not require a signature change.
 	Name() string
 
 	// Login blocks until the user completes the flow (or ctx is

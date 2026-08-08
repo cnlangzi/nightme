@@ -42,8 +42,7 @@ Interactive shell. Type a command and press Enter.
 Common:
   list            list sessions
   agents          list registered agents
-  auth status     show channel credentials
-  auth login      QR Feishu registration
+  login feishu    QR Feishu registration
   test ...        spawn CLI in PTY (Ctrl-C to end)
   start           start daemon in the background
   status          show daemon status

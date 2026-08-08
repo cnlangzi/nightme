@@ -856,17 +856,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.Model != "" {
 			s.SetModel(ev.Connected.Model)
 		}
-		// T-alive (2026-08-07): flip the reaction ⌨ → 🔄 ONLY
-		// when EventAgentConnected arrives, i.e. when we have proof claude
-		// actually started the new prompt. The dispatcher used
-		// to emit MessageSubmitted right after LookupActiveAgentSession
-		// returns — which gave a false-positive "On It" reaction
-		// whenever the spawn's 60s resume-fallback probe was in
-		// flight (or MCP startup was hung). Now: the reaction only
-		// flips when claude itself confirms it has started.
-		if ev.Kind == agent.EventAgentConnected && userMsgID != "" {
-			cs.EmitMessageState(userMsgID, agent.MessageSubmitted)
-		}
+
 		// Per-turn usage accumulation moved out of an EventUsage
 		// branch (the kind was removed) — the bridge now attaches
 		// Usage to the same AgentEvent that delivers Result (see

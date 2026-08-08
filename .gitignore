@@ -28,6 +28,9 @@ go.work.sum
 
 # Environment
 .env
+
+# Working notes (untracked; drafts for future PRs go here)
+wip/
 .env.*
 
 # Editor / IDE

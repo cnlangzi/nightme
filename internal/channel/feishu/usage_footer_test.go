@@ -197,7 +197,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 					InputTokens: 5_000, OutputTokens: 200,
 				},
 			},
-			want: []string{"💰:「 5.0k / 200 」"},
+			want: []string{"💰:「 5k / 200 」"},
 		},
 		{
 			// F-55.1: cache > 0 but no new and no out — only the
@@ -249,7 +249,7 @@ func TestFormatSessionFooterLines_LargeNumbers(t *testing.T) {
 		},
 	}
 	got := formatSessionFooterLines(ctx)
-	want := []string{"🤖 claude · opus-4-5", "💰:「 156.0k / 1.2M / 18.0k · $1.245 」"}
+	want := []string{"🤖 claude · opus-4-5", "💰:「 156k / 1.2M / 18k · $1.245 」"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -339,7 +339,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 					ContextWindowPct: 10.5, // 21k / 200k * 100
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 20.0k / 1.0k · 10.5% (200.0k) 」"},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 20k / 1k · 10.5% (200k) 」"},
 		},
 		{
 			name: "pct + cost — full usage line",
@@ -352,7 +352,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 					ContextWindowPct: 99.6, // near the ceiling
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 1.2M / 800.0k / 80.0k · 99.6% (200.0k) · $1.234 」"},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 1.2M / 800k / 80k · 99.6% (200k) · $1.234 」"},
 		},
 		{
 			name: "pct at the ceiling — 100.0% is honest, not 'full'",
@@ -363,7 +363,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 					ContextWindowPct: 100.0,
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 100.0% (200.0k) 」"},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 100.0% (200k) 」"},
 		},
 		{
 			name: "pct without identity — segment still emits alone",
@@ -373,7 +373,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 					ContextWindowPct: 5.0,
 				},
 			},
-			want: []string{"💰:「 5.0% (200.0k) 」"},
+			want: []string{"💰:「 5.0% (200k) 」"},
 		},
 		{
 			// F-55: pct > 100% does NOT trigger clamp / warning —
@@ -390,7 +390,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 					ContextWindowPct:     101.6, // 203_103 / 200_000 * 100
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 200.0k / 3.0k / 1.0k · 101.6% (200.0k) 」"},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 200k / 3k / 1k · 101.6% (200k) 」"},
 		},
 		{
 			// F-55: 1M-class model window rendered with M unit.
@@ -403,7 +403,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 					ContextWindowPct: 20.1,
 				},
 			},
-			want: []string{"🤖 claude · opus-4-8", "💰:「 200.0k / 1.0k · 20.1% (1.0M) 」"},
+			want: []string{"🤖 claude · opus-4-8", "💰:「 200k / 1k · 20.1% (1M) 」"},
 		},
 		{
 			// Defensive: pct==0 drops the entire segment; window
@@ -435,13 +435,13 @@ func TestAbbrevTokens(t *testing.T) {
 		in   int
 		want string
 	}{
-		{0, "0"},             // caller is expected to skip, but defensively still formats
-		{1, "1"},             // raw integer
-		{999, "999"},         // boundary
-		{1_000, "1.0k"},      // boundary
-		{12_345, "12.3k"},    // one decimal
-		{999_999, "1000.0k"}, // one decimal, edge of M threshold
-		{1_000_000, "1.0M"},  // boundary
+		{0, "0"},         // caller is expected to skip, but defensively still formats
+		{1, "1"},         // raw integer
+		{999, "999"},     // boundary
+		{1_000, "1k"},    // boundary, integer multiple drops ".0"
+		{12_345, "12.3k"},
+		{999_999, "1000k"}, // edge of M threshold, integer multiple drops ".0"
+		{1_000_000, "1M"},  // boundary, integer multiple drops ".0"
 		{1_234_567, "1.2M"},
 	}
 	for _, tc := range tests {
@@ -469,10 +469,10 @@ func TestAbbrevWindow(t *testing.T) {
 		{0, "0"}, // defensive (caller omits the segment when pct==0)
 		{1, "1"},
 		{999, "999"},
-		{1_000, "1.0k"},
-		{200_000, "200.0k"}, // canonical MiniMax 200K case (the F-55 motivation)
-		{999_999, "1000.0k"},
-		{1_000_000, "1.0M"}, // canonical 1M model window
+		{1_000, "1k"},        // integer multiple drops ".0"
+		{200_000, "200k"},   // canonical MiniMax 200K case (the F-55 motivation)
+		{999_999, "1000k"},  // integer multiple drops ".0"
+		{1_000_000, "1M"},   // canonical 1M model window, integer multiple drops ".0"
 		{1_234_567, "1.2M"},
 	}
 	for _, tc := range tests {

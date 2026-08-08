@@ -608,9 +608,25 @@ func (a *Agent) New(ctx context.Context) error {
 			return fmt.Errorf("pi: decode get_state: %w", err)
 		}
 	}
+	// F-34: drive the same "boot handshake" path the original Start
+	// uses, so the runtime sees a fresh EventAgentReady carrying the
+	// new SessionID. Without the connectedSent reset, emitConnected
+	// bails out on the second call and the runtime keeps the old
+	// SessionID — observable as a stale context-window footer and a
+	// `--resume <dead>` on daemon restart.
+	//
+	// Also enter the suppression window (translate.beginReset) so any
+	// events that were still in the pipe from the abandoned turn
+	// (e.g. an agent_settled that races the rpc.request write of
+	// new_session) cannot land on the fresh turn state. The window
+	// stays open until the EventAgentReady has been pushed through
+	// the events channel, deferring endReset here.
 	a.translatorMu.Lock()
+	a.translator.connectedSent = false
+	a.translator.beginReset()
 	a.deliverConnectedLocked(&state)
 	a.translatorMu.Unlock()
+	defer a.translator.endReset()
 	return nil
 }
 

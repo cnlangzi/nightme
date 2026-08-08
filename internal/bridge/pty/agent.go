@@ -25,9 +25,11 @@ import (
 )
 
 // sessionBufferSize is the capacity of the AgentEvent channel. The
-// reader goroutine pushes one event per Read call, so 64 covers a
-// burst of fast writes without back-pressuring the PTY.
-const sessionBufferSize = 64
+// reader goroutine pushes one event per Read call; the channel is
+// sized large enough to absorb a sustained backlog rather than
+// dropping, matching the pi / acp / claudecode bridges' producer-
+// side contract (no timeout, no default-drop).
+const sessionBufferSize = 40960
 
 // Agent is the PTY-mode bridge descriptor.
 //

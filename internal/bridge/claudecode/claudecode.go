@@ -63,6 +63,21 @@ var ErrResumeUnhealthy = errors.New("claudecode: --resume session unhealthy")
 // signal claude emits to stdout (we verified both empirically).
 const resumeFallbackTimeout = 5 * time.Second
 
+// eventsBufferSize is the capacity of the AgentEvent channel.
+//
+// Sized large enough to absorb a sustained backlog rather than
+// dropping. The send sites in stream.go's translate() and elsewhere
+// use bare `events <- ev` (no select, no default drop), so the
+// producer is allowed to block until the consumer drains — the
+// natural pipe back-pressure to the upstream claude PTY bounds
+// memory in practice. Matches the producer-side contract across
+// pi / acp / pty (no timeout, no default-drop).
+//
+// Allocated in startOnce; buffer_contract_test.go pins the value at
+// the package level so a regression that lowers the cap or
+// introduces a `default:` drop is caught in `go test`.
+const eventsBufferSize = 40960
+
 // pendingAsk is the in-flight AskUserQuestion state. We keep it here
 // (rather than only on the EventAgentPermission) so Session.SendPermission
 // can serialize the user's answer back to stdin even if the channel
@@ -270,7 +285,7 @@ func (a *Agent) startOnce(ctx context.Context, cfg agent.StartConfig) (*Agent, e
 		args:        append([]string(nil), a.args...),
 		cmd:         cmd,
 		stdin:       bufio.NewWriter(stdin),
-		events:      make(chan agent.AgentEvent, 64),
+		events:      make(chan agent.AgentEvent, eventsBufferSize),
 		stderrLines: make(chan string, 64),
 		pid:         cmd.Process.Pid,
 		agentName:   a.name,

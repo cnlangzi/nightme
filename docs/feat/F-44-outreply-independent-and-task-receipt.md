@@ -466,7 +466,7 @@ func (r *MessageReceipt) evictOverflowLocked()       // ← 删除(appendEntryLo
 **删除的代码**：
 - `buildReceiptCard` 中 header / entries / footer / hr sections (~250 行)
 - `renderLocked` 中 entries PATCH / init / usage 部分 (~80 行)
-- `Append` (~70 行) — 内部仍保留 `case EventDone` / `case EventError` / `case EventInit` / `case EventUsage` 四个 case，但**这些 case 在 F-44 后都成为 unreachable**（详见 §5.2）
+- `Append` (~70 行) — 内部仍保留 `case EventDone` / `case EventError` / `case EventAgentConnected` / `case EventUsage` 四个 case，但**这些 case 在 F-44 后都成为 unreachable**（详见 §5.2）
 - `SetExecuting` (~20 行) — 无 production caller
 - `SetCompleted` (~40 行) — 无 production caller
 - `appendEntryLocked` / `lastEntryLocked` / `EntryCount` / `evictOverflowLocked` (~55 行) — Append 私有 / 唯一外部 caller 已删
@@ -478,7 +478,7 @@ func (r *MessageReceipt) evictOverflowLocked()       // ← 删除(appendEntryLo
 
 **整个文件删除**。
 
-理由：F-44 后 `MessageReceipt.Append` 整体删除，`Append` 是 `eventToEntry` 在 production 的唯一 caller（`ensureReceiptForReply` 也调它但同步删除）。`eventToEntry` 9 个 case（`EventText` / `EventToolStart` / `EventToolEnd` / `EventError` / `EventPermission` / `EventDone` / `EventUsage` / `EventCompaction` / `EventInit`）全部 unreachable：
+理由：F-44 后 `MessageReceipt.Append` 整体删除，`Append` 是 `eventToEntry` 在 production 的唯一 caller（`ensureReceiptForReply` 也调它但同步删除）。`eventToEntry` 9 个 case（`EventText` / `EventToolStart` / `EventToolEnd` / `EventError` / `EventPermission` / `EventDone` / `EventUsage` / `EventCompaction` / `EventAgentConnected`）全部 unreachable：
 
 | eventToEntry case | Append 前是否有用 | F-44 后状态 |
 |---|---|---|
@@ -489,7 +489,7 @@ func (r *MessageReceipt) evictOverflowLocked()       // ← 删除(appendEntryLo
 | `EventDone` | EventDone 不通过 Send | unreachable |
 | `EventUsage` | OutUsage case 触发，但 F-44 改 silent drop | Append 删除 → unreachable |
 | `EventCompaction` | F-34 后已不返回 entry；OutCompaction 也不调 Append | Append 删除 → unreachable |
-| `EventInit` | OutInit case 触发，但 F-44 改 silent drop | Append 删除 → unreachable |
+| `EventAgentConnected` | OutInit case 触发，但 F-44 改 silent drop | Append 删除 → unreachable |
 
 > **注**：`eventToEntry(EventError)` 即使在 F-44 前也是 dead code path — `EventError` 不通过 `OutboundMessage` 走 Send（它走 `ChatSession.emitMessageStateForCurrentTurn(MessageFailed)` → `OutMessageState` → AddReaction）。F-44 之前唯一可能调用 `Append(EventError)` 的路径已被 EventError 的 wire 路由切断；F-44 让这层 dead code 暴露并删除。
 
@@ -521,7 +521,7 @@ func (r *MessageReceipt) evictOverflowLocked()       // ← 删除(appendEntryLo
 
 #### **`internal/gateway/translate.go`**
 
-**不变**。`EventInit` / `EventUsage` 仍翻译为 `OutboundMessage{Init: ...}` / `{Usage: ...}`；footer PR 会用。
+**不变**。`EventAgentConnected` / `EventUsage` 仍翻译为 `OutboundMessage{Init: ...}` / `{Usage: ...}`；footer PR 会用。
 
 ### 2.2 保留不变的（确认无副作用）
 
@@ -546,7 +546,7 @@ func (r *MessageReceipt) evictOverflowLocked()       // ← 删除(appendEntryLo
 | `OutReply` | ensureReceipt + overflow check + fold / bail-out (~80 行) | `sendReplyInThreadAndChat` (~10 行) | `receipt.Append` 调用消失；无 LogEntry 写入 |
 | `OutResult` | `sendResultAsReply` | 不变 | 无 |
 | `OutTaskCreate` / `OutTaskUpdate` | `ensureReceiptForTask` + fallback | 不变 | 无 |
-| `OutInit` / `OutUsage` | `receipt.Append(EventInit/Usage)` 写 `agentName/workspace/branch/tokens` 字段 | `return nil` silent drop | `agentName/workspace/branch/tokens` 字段变 orphan → 整体删除 |
+| `OutInit` / `OutUsage` | `receipt.Append(EventAgentConnected/Usage)` 写 `agentName/workspace/branch/tokens` 字段 | `return nil` silent drop | `agentName/workspace/branch/tokens` 字段变 orphan → 整体删除 |
 | `OutMessageState` / 其他 | — | 不变 | 无 |
 
 ---

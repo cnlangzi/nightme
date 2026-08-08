@@ -156,7 +156,7 @@ F-49 §1.2 已把 4 个 token 字段定义为「当前上下文占用」（compa
 - pi 的 `Model` 对象含 `contextWindow`（如 `200000`）——我们的 `getStateModel` 只取了 `id`/`name`/`provider`
 - pi 还有 `get_session_stats` 命令，直接返回 `contextUsage: {tokens, contextWindow, percent}`，文档称其为「压缩和 footer 显示实际使用的估算」，是最权威的来源（代价：每轮一次额外 RPC，且 claudecode 无对应命令，跨 bridge 不统一）
 
-F-49 §6 把这项列为「后续 PR 单独讨论」。倾向方案：`getStateModel` 加 `contextWindow` → `InitEvent` → `AgentSession` → `SessionContext` → footer 渲染 `7.8k / 200k · 4%`；claudecode 无来源则留空降级。
+F-49 §6 把这项列为「后续 PR 单独讨论」。倾向方案：`getStateModel` 加 `contextWindow` → `AgentConnectedEvent` → `AgentSession` → `SessionContext` → footer 渲染 `7.8k / 200k · 4%`；claudecode 无来源则留空降级。
 
 ### 6.3 acp bridge 未对齐 `EventText` 契约
 

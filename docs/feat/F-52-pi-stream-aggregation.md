@@ -202,7 +202,7 @@ if u.Total == 0 && (u.Cost == nil || u.Cost.Total == 0) { return nil }
 
 #### 2.4.4 `/new` 抑制窗口（code-review PLAUSIBLE，评估后确认为真并修复）
 
-code-review 把这条标为 PLAUSIBLE 并跳过（理由：`session.go` 注释里写明是有意的锁策略权衡）。**复评后判定为真 bug**——注释解释的是「为什么不用 translatorMu 包住 translate()」，那个权衡确实成立；但它没有覆盖「重置之后、EventInit 之前」这段时间里到达的事件。
+code-review 把这条标为 PLAUSIBLE 并跳过（理由：`session.go` 注释里写明是有意的锁策略权衡）。**复评后判定为真 bug**——注释解释的是「为什么不用 translatorMu 包住 translate()」，那个权衡确实成立；但它没有覆盖「重置之后、EventAgentConnected 之前」这段时间里到达的事件。
 
 `session.New()` 的时间线：
 
@@ -213,7 +213,7 @@ turnState 重置                     ← 只清掉「已经累积的」
   ↓
 get_state RPC（10s 超时）          ← readPump 全程在跑!
   ↓
-deliverInitLocked → EventInit
+deliverInitLocked → EventAgentConnected
 ```
 
 而 `/new` **可以打断进行中的 turn**：`NewActiveAgentSessions`（`chatsession.go:1233`）没有任何 Busy/Idle 守卫，slash command 也不走 InputBuffer 排队。所以用户在长回复中途打 `/new` 时，旧 turn 仍在管道里的事件会落进**全新的** turnState：

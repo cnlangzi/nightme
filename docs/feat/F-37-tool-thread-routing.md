@@ -338,7 +338,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 // 面板显示、main chat 只看见 "X replies" 指示器。
 func (a *Adapter) postThreadReply(ctx context.Context, chatID, rootID, body string, replyOnly bool) error {
     if rootID == "" {
-        // Orphan event (startup EventInit etc.) — fall back to top-level
+        // Orphan event (startup EventAgentConnected etc.) — fall back to top-level
         return a.sendRawOutText(ctx, chatID, body)
     }
     _, err := a.SendMessageText(ctx, chatID, body, rootID)

@@ -683,7 +683,7 @@ func (s *claudeSession) handleEvent(ev StreamEvent) {
     switch ev.Type {
     case "system":
         if ev.Subtype == "init" {
-            s.events <- AgentEvent{Kind: EventInit, Init: &InitEvent{
+            s.events <- AgentEvent{Kind: EventAgentConnected, Init: &AgentConnectedEvent{
                 SessionID: ev.SessionID,
                 Tools:     ev.Tools,
                 Model:     ev.Model,
@@ -739,17 +739,17 @@ func (s *claudeSession) handleEvent(ev StreamEvent) {
 ```go
 // internal/bridge/claudecode/stream_test.go
 
-func TestPumpStdout_InitEvent(t *testing.T) {
+func TestPumpStdout_EventAgentConnected(t *testing.T) {
     fixture := loadFixture("testdata/init.json")
     session := newTestSession(fixture)
     go session.pumpStdout()
-    
+
     event := <-session.events
-    if event.Kind != EventInit {
-        t.Errorf("expected EventInit, got %v", event.Kind)
+    if event.Kind != EventAgentConnected {
+        t.Errorf("expected EventAgentConnected, got %v", event.Kind)
     }
-    if event.Init.Model != "claude-sonnet-4-5" {
-        t.Errorf("expected model claude-sonnet-4-5, got %s", event.Init.Model)
+    if event.Connected.Model != "claude-sonnet-4-5" {
+        t.Errorf("expected model claude-sonnet-4-5, got %s", event.Connected.Model)
     }
 }
 

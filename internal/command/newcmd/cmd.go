@@ -76,19 +76,19 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// next TryFlush. Dropping them here would silently discard
 	// work the user already submitted.
 
-	// F-45 §1.8: /new is the ONLY event that clears cumulative
-	// token / cost stats on the AgentSession. Bridge New()
-	// already reset the conversation context; runtime resets the
-	// counter so the footer starts from zero on the next reply.
-	// PersistAgentSession is called immediately so the cleared
-	// state survives daemon restart even if no further turn
-	// completes (and thus no EventDone-triggered persist fires).
+	// Usage stats are now per-turn (the runtime is a passive
+	// pass-through; the next EventResult / EventDone naturally
+	// carries the new context's snapshot), so nothing on the
+	// AgentSession needs clearing here — the bridge's New() has
+	// already reset the conversation context, and any future
+	// result event will populate a fresh footer.
 	for _, r := range results {
 		if r.Session == nil || r.Error != nil {
 			continue
 		}
-		r.Session.ResetCumulative()
 		if f.mgr != nil {
+			// Persist so the new (post-bridge-New) state survives
+			// daemon restart, even if no further turn completes.
 			if persistErr := f.mgr.PersistAgentSession(r.Session); persistErr != nil {
 				// Don't clobber the primary error if
 				// NewActiveAgentSessions already returned one

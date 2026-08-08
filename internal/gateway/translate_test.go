@@ -147,8 +147,9 @@ func TestTranslate_EventResult_CoLocatesUsage(t *testing.T) {
 
 // TestTranslate_EventResult_NilUsageFine: a Result event with no
 // usage (zero-usage turn / synthetic message) still translates.
-// OutboundMessage.Usage stays nil — runtime will skip
-// AccumulateUsage for that turn.
+// OutboundMessage.Usage stays nil — the runtime is a passive
+// pass-through, so a nil Usage just means the channel footer
+// omits Line 2 for this event.
 func TestTranslate_EventResult_NilUsageFine(t *testing.T) {
 	in := agent.AgentEvent{
 		Kind: agent.EventResult,

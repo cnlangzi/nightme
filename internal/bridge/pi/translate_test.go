@@ -350,8 +350,8 @@ func TestTranslate_AssistantMessageResult(t *testing.T) {
 
 // TestTranslate_EmptyUsageStaysNil verifies that a zero-totals
 // usage block (synthetic messages, etc.) does not produce a
-// non-nil-but-all-zero Usage — the runtime skips AccumulateUsage
-// on nil and the channel renders no footer.
+// non-nil-but-all-zero Usage — the channel renders no footer
+// when Usage is nil.
 func TestTranslate_EmptyUsageStaysNil(t *testing.T) {
 	tr := newTestTranslator()
 	raw := mustMarshal(t, map[string]any{
@@ -1354,8 +1354,8 @@ func TestTranslate_UntouchedSettleEmitsNoResult(t *testing.T) {
 //
 // Two concrete harms this locks out:
 //   - an old message_end stamping its usage onto the new session
-//     (corrupts the context-occupancy figure and races handleNew's
-//     ResetCumulative);
+//     (corrupts the context-occupancy figure on the bridge's
+//     per-turn snapshot);
 //   - an old agent_settled shipping the abandoned reply as the new
 //     session's result card.
 func TestTranslate_ResetWindowDropsAbandonedTurn(t *testing.T) {

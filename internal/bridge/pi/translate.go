@@ -204,10 +204,9 @@ type translator struct {
 	// translating the whole time. Wire events still in the pipe from
 	// the turn the user just abandoned would land in the *fresh*
 	// turnState: an old message_end would stamp its usage onto the
-	// new session (corrupting the context-occupancy number, and
-	// racing handleNew's ResetCumulative), and an old agent_settled
-	// would ship the abandoned reply as the new session's result
-	// card.
+	// new session (corrupting the context-occupancy number on the
+	// bridge's per-turn snapshot), and an old agent_settled would
+	// ship the abandoned reply as the new session's result card.
 	//
 	// Dropping is unconditionally correct in this window: no prompt
 	// has been sent to the new session yet, so nothing arriving here
@@ -799,6 +798,17 @@ func (t *translator) finishTurnLocked() []agent.AgentEvent {
 // drop those turns' usage — breaking the F-52 promise that "usage
 // 100% flows through". Mirrors the symmetric check in
 // internal/bridge/claudecode/stream.go:decodeUsage.
+// decodeMessageUsage translates a single pi message_usage payload
+// (cost + input/output/cache counters) into the canonical
+// agent.UsageEvent. Single-shot per-turn snapshot — runtime
+// does NOT aggregate across turns.
+//
+// Pi's protocol does NOT expose `modelUsage.contextWindow` (and
+// we don't query `get_session_stats` here yet), so the
+// `ContextWindowPct` field is left at zero — the channel footer
+// omits the "X%" segment for pi users until pi plumbing for
+// context-window lookup lands. Token / cost fields are
+// unaffected. See docs/feat/F-45-session-footer.md §1.5.
 func decodeMessageUsage(u *messageUsage) *agent.UsageEvent {
 	if u == nil {
 		return nil

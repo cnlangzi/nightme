@@ -104,12 +104,34 @@ const (
 //
 // F-51: defined natively in this package (was chatsession.GTWContext
 // pre-F-51). Field shape unchanged except for the Mode field
-// added in F-XX.
+// added in F-XX. F-XX (close): RepoRoot / Repo / Provider added
+// so /gtw close can switch CWD back + run git worktree remove
+// from the right directory, and so future /gtw push has the
+// remote info at hand without re-fetching.
 type Context struct {
-	Mode      Mode
-	Issue     int    // -1 for ModeLocal (no remote issue); > 0 for ModeRemote
-	Branch    string
-	Worktree  string // absolute path; empty when the fix flow hasn't reached §5.2.④
+	Mode     Mode
+	Issue    int    // -1 for ModeLocal (no remote issue); > 0 for ModeRemote
+	Branch   string
+	Worktree string // absolute path; empty when the fix flow hasn't reached §5.2.④
+
+	// RepoRoot is the main repository root (NOT the worktree).
+	// Captured at /gtw fix time so /gtw close can (a) run
+	// `git worktree remove` from inside the main repo — git
+	// refuses to run that command from a worktree — and (b)
+	// SetActiveCwd back here after teardown. Empty when the
+	// fix flow hasn't reached §5.2.④.
+	RepoRoot string
+
+	// Repo is the "owner/repo" form (single-slash, no scheme),
+	// parsed from the origin remote URL at fix time. Empty for
+	// ModeLocal. Reserved for /gtw push (F-XX) and /gtw pr.
+	Repo string
+
+	// Provider is "github" / "gitlab" / "" — picked by Detect at
+	// fix time. Empty for ModeLocal. /gtw push / /gtw pr use it
+	// to choose between `gh` and `glab`.
+	Provider string
+
 	State     State
 	UpdatedAt time.Time
 }

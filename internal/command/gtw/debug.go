@@ -42,9 +42,7 @@ func (d *debugFactory) Spec() command.Spec {
 		Name:    "gtw-test",
 		Aliases: []string{"gtwtest"},
 		Summary: "Debug / UAT only: seed a synthetic gtw draft and wait for a Feishu click.",
-		Usage: "/gtw test <scenario>   card | ok | yes-no | three | unknown | orphan\n" +
-			"/gtw test list          print every gtwDraft currently in the chat\n" +
-			"/gtw test reset         drop every gtwDraft and clear gtwContext",
+		Usage: "/gtw test <scenario>   card | ok | yes-no | three | unknown | orphan",
 	}
 }
 
@@ -52,12 +50,6 @@ func (d *debugFactory) Spec() command.Spec {
 func (d *debugFactory) Handle(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	if len(input.Args) < 1 {
 		return &command.SlashOutput{Reply: d.Spec().Usage, Consumed: true}, nil
-	}
-	switch input.Args[0] {
-	case "list":
-		return d.runList(input)
-	case "reset":
-		return d.runReset(input)
 	}
 	return d.runScenario(ctx, rt, input, input.Args[0], input.Args[1:])
 }
@@ -164,33 +156,6 @@ func (d *debugFactory) runPreview(_ context.Context, _ command.RuntimeServices, 
 	return &command.SlashOutput{
 		Reply: fmt.Sprintf("🧪 /gtw test card — preview\n  Card chrome: %s\n  Body: %s\n  (no auto-dispatch — seed only)",
 			card.Title, card.Body),
-		Consumed: true,
-	}, nil
-}
-
-func (d *debugFactory) runList(input command.SlashInput) (*command.SlashOutput, error) {
-	drafts := d.mgr.ListDrafts(input.ChatID)
-	if len(drafts) == 0 {
-		return &command.SlashOutput{
-			Reply:    "/gtw test list: (none in this chat)",
-			Consumed: true,
-		}, nil
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "/gtw test list — %d in this chat:\n", len(drafts))
-	for i, dd := range drafts {
-		fmt.Fprintf(&b, "  [%d] kind=%s  issueID=%d  branch=%q  repo=%q  createdAt=%s\n",
-			i, dd.Kind, dd.Payload.IssueID, dd.Payload.Branch, dd.Payload.Repo,
-			dd.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
-	}
-	return &command.SlashOutput{Reply: b.String(), Consumed: true}, nil
-}
-
-func (d *debugFactory) runReset(input command.SlashInput) (*command.SlashOutput, error) {
-	before := d.mgr.DraftCount(input.ChatID)
-	d.mgr.Reset(input.ChatID)
-	return &command.SlashOutput{
-		Reply:    fmt.Sprintf("✅ /gtw test reset — cleared gtwContext (drafts before=%d after=0)", before),
 		Consumed: true,
 	}, nil
 }

@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -235,7 +236,7 @@ var _ = slog.Default
 // own tokens on the very first send.
 //
 // Sequence:
-//   1. EventInit → capture Model
+//   1. EventAgentConnected → capture Model
 //   2. EventResult with ResultEvent.Usage populated — single event,
 //      dispatched once, footer stamped with this turn's tokens.
 func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
@@ -247,10 +248,10 @@ func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
 	h := newEventHandler(ch, cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_first_turn", "claude", "/tmp", nil)
 
-	// Step 1: EventInit captures Model.
+	// Step 1: EventAgentConnected captures Model.
 	h("oc_chat_first_turn", as, agent.AgentEvent{
-		Kind: agent.EventInit,
-		Init: &agent.InitEvent{
+		Kind: agent.EventAgentConnected,
+		Connected: &agent.AgentConnectedEvent{
 			SessionID: "sess_test",
 			Model:     "claude-opus-4-5",
 		},
@@ -274,7 +275,7 @@ func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
 	}, "om_user_1")
 
 	got := ch.Record()
-	// Find the OutResult specifically — EventInit may also have
+	// Find the OutResult specifically — EventAgentConnected may also have
 	// emitted OutboundMessages (e.g. OutInit on echo); the merged
 	// design only changes how many OutResult-bound sends fire.
 	var out *gateway.OutboundMessage
@@ -781,4 +782,66 @@ func TestWireRuntimeCallbacksAndRestore_NoPersistence(t *testing.T) {
 	if len(mgr.List()) != 0 {
 		t.Errorf("expected no restored chats; got %d", len(mgr.List()))
 	}
+}
+
+// TestEventHandler_OnAgentConnected_DoesNotEmitMessageSubmitted
+// locks the contract: ChatSession.TryFlush is the SOLE emit point
+// for MessageSubmitted. The runtime event handler must NOT re-emit
+// MessageSubmitted on EventAgentConnected (which fires at session
+// start, BEFORE any user message has a userMsgID anchor).
+//
+// Regression guard for the L869 emit that was added in T-alive
+// (2026-08-07) to avoid false-positive OnIt during 60s spawn probe.
+// The clean fix is to delete that emit entirely — ChatSession owns
+// Message.Stage lifecycle; "agent connected" is a session-level
+// event (carries SessionID + Model for resume/footer), not a turn
+// event (carries MessageState).
+func TestEventHandler_OnAgentConnected_DoesNotEmitMessageSubmitted(t *testing.T) {
+	ch := echo.New("test", io.Discard)
+	mgr := chatsession.NewManager()
+	cs := mgr.GetOrCreate("oc_chat", "claude")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Capture every MessageState emit on this CS.
+	var emitted []messageStateCall
+	var mu sync.Mutex
+	cs.SetMessageStateHandler(func(chatID, userMsgID string, state agent.MessageState) {
+		mu.Lock()
+		defer mu.Unlock()
+		emitted = append(emitted, messageStateCall{chatID, userMsgID, state})
+	})
+
+	h := newEventHandler(ch, cs, mgr, logger)
+	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
+
+	// Fire EventAgentConnected with a userMsgID present (the L869
+	// branch's old condition). The runtime must NOT emit
+	// MessageSubmitted here — ChatSession.TryFlush owns the
+	// "submit succeeded" boundary, EventAgentConnected is just
+	// session-init metadata.
+	h("oc_chat", as, agent.AgentEvent{
+		Kind: agent.EventAgentConnected,
+		Connected: &agent.AgentConnectedEvent{
+			SessionID: "session-abc",
+			AgentName: "claude",
+			Workspace: "/tmp",
+		},
+	}, "om_user_1")
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, e := range emitted {
+		if e.userMsgID == "om_user_1" && e.state == agent.MessageSubmitted {
+			t.Errorf("runtime event handler emitted MessageSubmitted on EventAgentConnected for %q; ChatSession.TryFlush is the sole emit point", e.userMsgID)
+		}
+	}
+}
+
+// messageStateCall is a lightweight capture record used by the
+// EventHandler tests. (Mirrors the type in
+// internal/chatsession/message_state_test.go but kept local to
+// avoid exporting it.)
+type messageStateCall struct {
+	chatID, userMsgID string
+	state             agent.MessageState
 }

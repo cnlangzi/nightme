@@ -387,12 +387,12 @@ type OutboundMessage struct {
 	// Meta["message_id"] / ["state"] / ["reaction_id"] implicit
 	// protocol (removed in §1.4 cleanup).
 	MessageState *MessageStatePayload
-	// Init carries the typed payload for OutInit. nil for other
-	// Kinds. Gateway populates from AgentEvent.Init. Replaces the
+	// Connected carries the typed payload for OutInit. nil for other
+	// Kinds. Gateway populates from AgentEvent.Connected. Replaces the
 	// legacy Meta["session_id"] / ["model"] / ["agent_name"] /
 	// ["workspace"] / ["branch"] implicit protocol (removed in
 	// §1.4 cleanup).
-	Init *agent.InitEvent
+	Connected *agent.AgentConnectedEvent
 	// ReplyTo carries the channel-native root message id when the
 	// agent wants to reply in a thread.
 	ReplyTo string
@@ -430,7 +430,7 @@ type OutboundMessage struct {
 //	Model           — model the agent selected (e.g.
 //	                  "claude-opus-4-5-20250929"). Sourced from
 //	                  AgentSession.Model which the runtime caches
-//	                  on first EventInit. Empty before EventInit
+//	                  on first EventAgentConnected. Empty before EventAgentConnected
 //	                  lands; footer omits the segment when "".
 //	Usage           — per-turn snapshot from the bridge event that
 //	                  produced this OutboundMessage (a pointer to

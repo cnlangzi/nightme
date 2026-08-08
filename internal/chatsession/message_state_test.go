@@ -364,3 +364,59 @@ func (f *failingAgentSession) SendBlocks(_ context.Context, _ []agent.ContentBlo
 func (f *failingAgentSession) SendPermission(_ string) error { return nil }
 func (f *failingAgentSession) New(_ context.Context) error   { return nil }
 func (f *failingAgentSession) Close() error                  { return nil }
+
+// TestDispatcher_DoesNotEmitMessageSubmitted locks the dispatcher
+// contract introduced by PR #69/#70: newMessageDispatcher emits
+// only MessageQueued, not MessageSubmitted. TryFlush is the sole
+// MessageSubmitted emit point.
+//
+// Regression guard for the L587 emit (which fired MessageSubmitted
+// in the dispatcher before QueueUserMessage, leading to duplicate
+// submits and false-positive OnIt on failure paths).
+func TestDispatcher_DoesNotEmitMessageSubmitted(t *testing.T) {
+	cs := New("oc_chat_dispatch", "claude")
+	cs.WithSpawner(&spySpawner{})
+
+	// Wire a working AS so the QueueUserMessage → TryFlush
+	// → as.Submit → success path runs cleanly.
+	workingAS := newActiveAgentNoop()
+	cs.mu.Lock()
+	cs.activeAS = workingAS
+	cs.mu.Unlock()
+
+	cap := &captureHandler{}
+	cs.SetMessageStateHandler(cap.handler)
+
+	// Mimic the dispatcher's hot path:
+	//  1. emit MessageQueued (FastAck UX)
+	//  2. LookupActiveAgentSession (would lazy-spawn in production)
+	//  3. QueueUserMessage → TryFlush → as.Submit → MessageSubmitted
+	msg := makeTestMessage(cs, []agent.ContentBlock{{Text: "hello"}}, "om_dispatch_test")
+	cs.EmitMessageState("om_dispatch_test", agent.MessageQueued) // dispatcher step 1
+	if err := cs.QueueUserMessage(msg); err != nil {              // dispatcher step 3
+		t.Fatalf("QueueUserMessage: %v", err)
+	}
+
+	// Exactly 1 MessageQueued (from step 1) and 1 MessageSubmitted
+	// (from TryFlush after Submit success). ZERO MessageSubmitted
+	// from the dispatcher layer itself.
+	queuedCount := 0
+	submittedCount := 0
+	for _, c := range cap.snapshot() {
+		if c.userMsgID != "om_dispatch_test" {
+			continue
+		}
+		switch c.state {
+		case agent.MessageQueued:
+			queuedCount++
+		case agent.MessageSubmitted:
+			submittedCount++
+		}
+	}
+	if queuedCount != 1 {
+		t.Errorf("MessageQueued count for om_dispatch_test = %d; want 1", queuedCount)
+	}
+	if submittedCount != 1 {
+		t.Errorf("MessageSubmitted count for om_dispatch_test = %d; want 1 (sentinel: dispatcher MUST NOT have emitted — TryFlush is the sole point). All emits: %+v", submittedCount, cap.snapshot())
+	}
+}

@@ -838,8 +838,8 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		// the new id is non-empty. Some bridges re-emit EventInit
 		// after a child restart with a blank SessionID; we don't
 		// want to wipe a previously-captured id in that case.
-		if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.SessionID != "" {
-			s.SetResumeID(ev.Init.SessionID)
+		if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.SessionID != "" {
+			s.SetResumeID(ev.Connected.SessionID)
 			if mgr != nil {
 				if err := mgr.PersistAgentSession(s); err != nil && logger != nil {
 					logger.Warn("persist agent session (init) failed",
@@ -853,19 +853,8 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		// of the SessionID capture above (some bridges may emit
 		// one without the other). SetModel is idempotent — empty
 		// incoming values don't overwrite.
-		if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.Model != "" {
-			s.SetModel(ev.Init.Model)
-		}
-		// T-alive (2026-08-07): flip the reaction ⌨ → 🔄 ONLY
-		// when EventInit arrives, i.e. when we have proof claude
-		// actually started the new prompt. The dispatcher used
-		// to emit MessageSubmitted right after LookupActiveAgentSession
-		// returns — which gave a false-positive "On It" reaction
-		// whenever the spawn's 60s resume-fallback probe was in
-		// flight (or MCP startup was hung). Now: the reaction only
-		// flips when claude itself confirms it has started.
-		if ev.Kind == agent.EventInit && userMsgID != "" {
-			cs.EmitMessageState(userMsgID, agent.MessageSubmitted)
+		if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.Model != "" {
+			s.SetModel(ev.Connected.Model)
 		}
 		// Per-event usage flows from bridge → out.Usage (via
 		// gateway.Translate) → SessionContext.Usage (via

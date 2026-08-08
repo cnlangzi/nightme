@@ -167,18 +167,18 @@ func newTurnState() *turnState {
 }
 
 // translator carries the per-session translation state: the session
-// fingerprint used to attribute EventInit, the sticky initSent flag,
+// fingerprint used to attribute EventAgentConnected, the sticky connectedSent flag,
 // and the current turn's accumulation buffers.
 type translator struct {
 	agentName string
 	workspace string
 	branch    string
 
-	// initSent is set after the first EventInit has been emitted
+	// connectedSent is set after the first EventAgentConnected has been emitted
 	// for the session, so subsequent get_state responses or model
 	// changes do not re-fire the receipt header. Guarded by the
 	// session's translatorMu (NOT turnMu) — see below.
-	initSent bool
+	connectedSent bool
 
 	// turnMu serialises all access to turn and suppressing.
 	// translate() runs on the readPump goroutine; session.New()
@@ -187,7 +187,7 @@ type translator struct {
 	// textBuf / pendingTools, which panics the daemon.
 	//
 	// turnMu is intentionally separate from the session's
-	// translatorMu (which guards initSent + emitInit). The two
+	// translatorMu (which guards connectedSent + emitConnected). The two
 	// protect disjoint state and are never held together — New()
 	// takes them sequentially, not nested — so there is no lock
 	// ordering hazard. Keep it that way: taking translatorMu around
@@ -200,7 +200,7 @@ type translator struct {
 	//
 	// Resetting the turn state alone is not enough. session.New()
 	// resets, then issues a get_state RPC with a 10s deadline before
-	// it can deliver the new EventInit — and readPump keeps
+	// it can deliver the new EventAgentConnected — and readPump keeps
 	// translating the whole time. Wire events still in the pipe from
 	// the turn the user just abandoned would land in the *fresh*
 	// turnState: an old message_end would stamp its usage onto the
@@ -465,11 +465,11 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		// does NOT list state_update as a server-emitted event. The
 		// F-34 reset path in pi/session.go New() does NOT rely on this
 		// case — it issues new_session + get_state synchronously and
-		// pushes the resulting EventInit through deliver().
+		// pushes the resulting EventAgentConnected through deliver().
 		//
 		// We keep this case so a future pi version that DOES emit
 		// state_update (informally) still surfaces the new sessionId
-		// to the runtime. Bypasses initSent for the same reason as
+		// to the runtime. Bypasses connectedSent for the same reason as
 		// the canonical path.
 		var ev stateUpdate
 		if err := json.Unmarshal(raw, &ev); err != nil {
@@ -481,8 +481,8 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 			return nil, nil
 		}
 		return []agent.AgentEvent{{
-			Kind: agent.EventInit,
-			Init: &agent.InitEvent{
+			Kind: agent.EventAgentConnected,
+			Connected: &agent.AgentConnectedEvent{
 				SessionID: ev.SessionID,
 				Model:     modelDisplay(ev.ModelID, ev.ModelName),
 				AgentName: t.agentName,
@@ -832,14 +832,14 @@ func decodeMessageUsage(u *messageUsage) *agent.UsageEvent {
 	return out
 }
 
-// emitInit is invoked from session.go after the get_state handshake
+// emitConnected is invoked from session.go after the get_state handshake
 // succeeds. It is independent of the per-event translate path
-// because EventInit is driven by a response, not an event.
-func (t *translator) emitInit(result *getStateResult) []agent.AgentEvent {
-	if t.initSent {
+// because EventAgentConnected is driven by a response, not an event.
+func (t *translator) emitConnected(result *getStateResult) []agent.AgentEvent {
+	if t.connectedSent {
 		return nil
 	}
-	t.initSent = true
+	t.connectedSent = true
 	modelID := ""
 	modelName := ""
 	if result != nil && result.Model != nil {
@@ -851,8 +851,8 @@ func (t *translator) emitInit(result *getStateResult) []agent.AgentEvent {
 		sessionID = result.SessionID
 	}
 	return []agent.AgentEvent{{
-		Kind: agent.EventInit,
-		Init: &agent.InitEvent{
+		Kind: agent.EventAgentConnected,
+		Connected: &agent.AgentConnectedEvent{
 			SessionID: sessionID,
 			Model:     modelDisplay(modelID, modelName),
 			AgentName: t.agentName,
@@ -889,7 +889,7 @@ type piToolError struct{}
 
 func (e *piToolError) Error() string { return "pi: tool execution failed" }
 
-// modelDisplay composes a human-readable model label for EventInit
+// modelDisplay composes a human-readable model label for EventAgentConnected
 // from Pi's id and name. We prefer "name (id)" when both are
 // present so the receipt shows the friendly name and the receipt
 // log line keeps the id for grep.

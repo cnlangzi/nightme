@@ -12,11 +12,11 @@
 // The F-32 2026-08-06 contract survives the refactor, restated in
 // the new vocabulary:
 //
-//   - EventInit MUST NOT end the in-flight Prompt — it is session
+//   - EventAgentConnected MUST NOT end the in-flight Prompt — it is session
 //     bootstrap metadata (model + session_id), not a turn boundary.
-//     In the old model the symptom was "EventInit flips the buffer
+//     In the old model the symptom was "EventAgentConnected flips the buffer
 //     Busy before the first user message is queued"; in the new
-//     model the mirror-image hazard is "EventInit ends the Prompt
+//     model the mirror-image hazard is "EventAgentConnected ends the Prompt
 //     early", which would make the AS accept a second prompt while
 //     the first turn is still streaming.
 //   - Other non-terminal events (EventText, EventResult, …) MUST
@@ -72,11 +72,11 @@ func submitInFlight(t *testing.T, as *AgentSession) *Prompt {
 	return p
 }
 
-// TestEventInit_DoesNotEndPrompt is the F-32 regression, ported.
-// EventInit arriving mid-turn must leave the Prompt in flight —
+// TestEventAgentConnected_DoesNotEndPrompt is the F-32 regression, ported.
+// EventAgentConnected arriving mid-turn must leave the Prompt in flight —
 // if it ended the Prompt, TryFlush would submit the next queued
 // message on top of a turn that is still streaming.
-func TestEventInit_DoesNotEndPrompt(t *testing.T) {
+func TestEventAgentConnected_DoesNotEndPrompt(t *testing.T) {
 	cs := newChatSessionForTest("cs_eventinit")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -87,8 +87,8 @@ func TestEventInit_DoesNotEndPrompt(t *testing.T) {
 	submitInFlight(t, as)
 
 	fake.PushEvent(agent.AgentEvent{
-		Kind: agent.EventInit,
-		Init: &agent.InitEvent{SessionID: "sess", Model: "test"},
+		Kind: agent.EventAgentConnected,
+		Connected: &agent.AgentConnectedEvent{SessionID: "sess", Model: "test"},
 	})
 
 	// Drain the enriched event so we know the readpump actually
@@ -98,15 +98,15 @@ func TestEventInit_DoesNotEndPrompt(t *testing.T) {
 	select {
 	case ev := <-as.Events():
 		if ev.Kind != KindAgentEvent || ev.AgentEvent == nil ||
-			ev.AgentEvent.Kind != agent.EventInit {
-			t.Fatalf("expected KindAgentEvent{EventInit}, got %+v", ev)
+			ev.AgentEvent.Kind != agent.EventAgentConnected {
+			t.Fatalf("expected KindAgentEvent{EventAgentConnected}, got %+v", ev)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("EventInit was not drained by the readpump within 2s")
+		t.Fatal("EventAgentConnected was not drained by the readpump within 2s")
 	}
 
 	if !waitReady(as, false, 100*time.Millisecond) {
-		t.Fatal("after EventInit the AS became ready; EventInit must not end the in-flight Prompt")
+		t.Fatal("after EventAgentConnected the AS became ready; EventAgentConnected must not end the in-flight Prompt")
 	}
 }
 

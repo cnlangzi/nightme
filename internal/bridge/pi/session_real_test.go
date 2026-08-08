@@ -47,7 +47,7 @@ import (
 // test fails with an elapsed-time message instead of stalling
 // the runner.
 //
-// handshakeWindow bounds the wait for EventInit; the bridge's
+// handshakeWindow bounds the wait for EventAgentConnected; the bridge's
 // own handshakeTimeout is 10s but real-pi cold start (model
 // warm-up, plugin load) routinely takes longer.
 const (
@@ -71,7 +71,7 @@ const (
 // the e2e chain broke):
 //
 //  1. Start + get_state handshake complete and emit exactly one
-//     EventInit carrying a non-empty SessionID — so the runtime
+//     EventAgentConnected carrying a non-empty SessionID — so the runtime
 //     can persist the resume id (input pipeline reaches pi).
 //  2. SendText(prompt-with-marker) returns nil within promptDeadline
 //     and the stream terminates in EventDone with Reason:"settled".
@@ -132,13 +132,13 @@ func TestSession_RealPi_E2E_ReceiveInputAndReply(t *testing.T) {
 		}
 	}()
 
-	// Step 1: handshake → EventInit.
-	init := mustFirstEventOfKind(t, sess, agent.EventInit, handshakeWindow)
-	if init.Init.SessionID == "" {
+	// Step 1: handshake → EventAgentConnected.
+	init := mustFirstEventOfKind(t, sess, agent.EventAgentConnected, handshakeWindow)
+	if init.Connected.SessionID == "" {
 		t.Errorf("Init.SessionID is empty; runtime would fail to persist resume id (events seen so far are %v)",
 			init.Kind)
 	}
-	t.Logf("handshake ok: session=%q model=%q", init.Init.SessionID, init.Init.Model)
+	t.Logf("handshake ok: session=%q model=%q", init.Connected.SessionID, init.Connected.Model)
 
 	// Step 2 + 3: first turn — send a marker-bearing prompt and
 	// verify pi echoes the marker back. This is the strongest

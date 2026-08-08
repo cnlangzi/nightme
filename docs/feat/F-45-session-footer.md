@@ -42,7 +42,7 @@ F-44 在 `internal/channel/feishu/receipt.go` 把 receipt 简化为只装 Task c
 - `internal/channel/feishu/adapter.go::Send` case `OutUsage`：**silent drop**（F-44 §0.11 落地）
 
 **model 数据已经到达 Gateway，也不被消费**：
-- `agent.InitEvent.Model` 字段已存在（`internal/agent/agent.go:341`）
+- `agent.AgentConnectedEvent.Model` 字段已存在（`internal/agent/agent.go:341`）
 - `internal/gateway/translate.go:205` 拼字符串 `"session initialized (model: %s)"`，但这个字符串随 `OutInit` 一起被 silent drop
 
 **AgentSession wrapper 完全不感知这些**：
@@ -101,7 +101,7 @@ type OutboundMessage struct {
 > 是的。`AgentSession.Agent string` 是 immutable 字段，runtime 直接读，无需走 OutInit 链路。
 
 **Q：Model 能不能也放到 AgentSession 上？**
-> 能。`InitEvent.Model` 字段已经存在；runtime 在 EventInit 时 `s.SetModel(ev.Init.Model)` 一次缓存，后续每次 outbound 直接读 `s.Model()`。避免每个 turn 都从 bridge event 流重新解析。
+> 能。`AgentConnectedEvent.Model` 字段已经存在；runtime 在 EventAgentConnected 时 `s.SetModel(ev.Connected.Model)` 一次缓存，后续每次 outbound 直接读 `s.Model()`。避免每个 turn 都从 bridge event 流重新解析。
 
 **Q：footer 格式偏好？**
 > 极简箭头版：
@@ -202,8 +202,8 @@ type SessionContext struct {
 
     // Model is the model the agent selected (Claude Code:
     // system/init.model). Sourced from AgentSession.Model, which
-    // the runtime captures on first EventInit. Empty before
-    // EventInit lands — footer helper omits the segment when "".
+    // the runtime captures on first EventAgentConnected. Empty before
+    // EventAgentConnected lands — footer helper omits the segment when "".
     Model string
 
     // CumulativeUsage is the per-AgentSession running total of
@@ -234,9 +234,9 @@ type AgentSession struct {
     // ... 既有字段 ...
     Agent         string  // 已有，immutable
     
-    // NEW: captured from EventInit on first observation.
+    // NEW: captured from EventAgentConnected on first observation.
     // Mutex-guarded because SetModel races with concurrent
-    // reads (footer rendering). Empty before EventInit lands.
+    // reads (footer rendering). Empty before EventAgentConnected lands.
     modelMu       sync.RWMutex
     Model         string
     
@@ -285,7 +285,7 @@ SessionContext *SessionContext
 
 **不变式**：
 - 1 个字段，不是 3 个（§0.3 论述）
-- bridges 不动（仍是 EventInit / EventUsage 事件）
+- bridges 不动（仍是 EventAgentConnected / EventUsage 事件）
 - runtime 唯一 owner
 - Channel 读 `msg.SessionContext`，nil 时跳过 footer
 
@@ -490,7 +490,7 @@ F-49 给 Line 1 加 `· 🗜 N` 段（compaction 计数），同时把 Line 2 �
 
 #### 1.8.3 Bridge 抽象（与 F-45 的解耦点）
 
-F-45 假设 bridge 只产生 `EventInit` / `EventUsage` / `EventResult` / `EventText` / `EventToolStart` / `EventToolEnd`。**F-49 新增一个 consumer**：`EventCompaction`。但 bridge 层有协议差异：
+F-45 假设 bridge 只产生 `EventAgentConnected` / `EventUsage` / `EventResult` / `EventText` / `EventToolStart` / `EventToolEnd`。**F-49 新增一个 consumer**：`EventCompaction`。但 bridge 层有协议差异：
 
 - **Pi**：`compaction_start` + `compaction_end` 两条
 - **Claude Code**：result subtype `compact` / `compaction` 一条
@@ -581,7 +581,7 @@ if snap.InputTokens != 0 || ... || hasGit ||
 State 流转图（见下 §1.9）加一条 compaction 分支：
 
 ```
-  SetModel(ev.Init.Model)     ← EventInit 触发；idempotent
+  SetModel(ev.Connected.Model)     ← EventAgentConnected 触发；idempotent
   AccumulateUsage(ev.Usage)   ← EventUsage 触发（每个 turn 一次）
   ...
 + RecordCompaction()          ← EventCompaction 触发；count++ + 4 token 字段归零
@@ -600,7 +600,7 @@ F-49 是独立 PR（详见 §7 实施计划），不在 F-45 当初落地范围�
 AgentSession 生命周期:
   [spawn]
     ↓
-  SetModel(ev.Init.Model)     ← EventInit 触发；idempotent
+  SetModel(ev.Connected.Model)     ← EventAgentConnected 触发；idempotent
   AccumulateUsage(ev.Usage)   ← EventUsage 触发（每个 turn 一次）
     ↓
   ... 持续累积 ...
@@ -613,8 +613,8 @@ AgentSession 生命周期:
 ```
 
 **与现有字段的关系**：
-- `ResumeID`：EventInit 时捕获，**永不重置**（除非 `/new` 通过 bridge `New()` 让 agent 重发 EventInit）
-- `Model`：EventInit 时捕获，**永不重置**（同 ResumeID 语义）
+- `ResumeID`：EventAgentConnected 时捕获，**永不重置**（除非 `/new` 通过 bridge `New()` 让 agent 重发 EventAgentConnected）
+- `Model`：EventAgentConnected 时捕获，**永不重置**（同 ResumeID 语义）
 - `CumulativeUsage`：EventUsage 时累加，**`/new` 重置**
 
 ---
@@ -675,9 +675,9 @@ type AgentSessionEntry struct {
     // nil on legacy entries (zero-value behavior on read).
     CumulativeUsage *UsageInfo `json:"cumulativeUsage,omitempty"`
     
-    // F-45: model captured on first EventInit. Persists for
+    // F-45: model captured on first EventAgentConnected. Persists for
     // the lifetime of the AgentSession IDENTITY (until /new
-    // re-emits EventInit with a new model — rare).
+    // re-emits EventAgentConnected with a new model — rare).
     Model string `json:"model,omitempty"`
 }
 ```
@@ -716,18 +716,18 @@ return &registry.AgentSessionEntry{
 
 ### 2.5 `cmd/nightme/run.go::newEventHandler`
 
-**改动 A**：`EventInit` 处理块里加 Model 捕获：
+**改动 A**：`EventAgentConnected` 处理块里加 Model 捕获：
 
 ```go
 // 既有：
-if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.SessionID != "" {
-    s.SetResumeID(ev.Init.SessionID)
+if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.SessionID != "" {
+    s.SetResumeID(ev.Connected.SessionID)
     if mgr != nil { _ = mgr.PersistAgentSession(s) }
 }
 
 // NEW:
-if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.Model != "" {
-    s.SetModel(ev.Init.Model)
+if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.Model != "" {
+    s.SetModel(ev.Connected.Model)
 }
 ```
 
@@ -984,7 +984,7 @@ if footer != "" {
 - 其他 Channel 实现（Echo / Slack / Web）零改动也能编译（只是不渲染 footer）
 - 未来 Channel 想支持 footer：读 `msg.SessionContext` 即可
 
-**bridge 协议**：零变化。bridges 仍发 `EventInit` / `EventUsage`，runtime 负责捕获并 stamp。
+**bridge 协议**：零变化。bridges 仍发 `EventAgentConnected` / `EventUsage`，runtime 负责捕获并 stamp。
 
 ### 5.3 行为兼容性
 
@@ -1015,7 +1015,7 @@ if footer != "" {
 - **Channel 不 import chatsession**（不变；Channel 通过 typed `SessionContext` 字段读 metadata）
 - **1 turn : 1 anchor 不变式**保留（`ReplyTo = currentTurnUserMsgID` 仍是唯一 coordination key）
 - **抽象归抽象 / 具体归具体**（footer 渲染细节由 Feishu adapter 自决，Slack / Web / Echo 各自决定）
-- **bridges 协议零变化**（仍发 EventInit / EventUsage，runtime 翻译）
+- **bridges 协议零变化**（仍发 EventAgentConnected / EventUsage，runtime 翻译）
 - **OutboundKind 不增不减**（`SessionContext` 是字段，不是新 Kind）
 - **OutInit / OutUsage 仍是 silent drop**（F-44 决策保留；footer 走 `SessionContext` 单独路径）
 - **§1.4 抽象 / 具体 边界规范**：metadata 是 typed primitive，Channel 自决渲染目标

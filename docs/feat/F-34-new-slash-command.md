@@ -48,7 +48,7 @@ nightme 已有 `/kill`（清空 pool + 杀全部进程）和 `/use`（切 active
 
 1. **轻量级 reset**：与 `/kill` 区分 —— 只丢对话，不丢进程 / pool 槽位 / args。
 2. **跨 agent 协议统一**：每个 bridge 暴露 `AgentSession.New(ctx) error`，把"reset conversation"的语义收敛到一个方法。
-3. **复用现有持久化链路**：bridge reset 后 emit `EventInit`（带新 SessionID）→ 现有 `cmd/nightme/run.go:467` 路径自动捕获 + 持久化。零新增 wiring。
+3. **复用现有持久化链路**：bridge reset 后 emit `EventAgentConnected`（带新 SessionID）→ 现有 `cmd/nightme/run.go:467` 路径自动捕获 + 持久化。零新增 wiring。
 4. **可选精修粒度**：`/new <agent>` 让用户只 reset 一个 agent 的对话，不动其他。
 
 ---
@@ -73,7 +73,7 @@ type AgentSession interface {
     // stays alive. Events() stays open. PID stays the same.
     // Subsequent SendText/SendBlocks operate on the fresh conversation.
     //
-    // After New returns, the bridge MUST emit a new EventInit carrying
+    // After New returns, the bridge MUST emit a new EventAgentConnected carrying
     // the new SessionID; the runtime's existing eventHandler captures
     // it via SetResumeID and persists. See cmd/nightme/run.go:467.
     //
@@ -146,7 +146,7 @@ func (s *session) New(ctx context.Context) error {
 |---|---|---|---|
 | `new_session` | C→S | `type` | 丢弃当前 session 对话上下文，server 端分配新 sessionId 并 emit `state_update` 等 init 类事件。**不**杀进程。 |
 
-**Translator 补丁（F-34 Phase 3 发现）**：原 F-32 translator 没有处理 `state_update` 事件（落入 default 分支被 log debug 丢弃），runtime 拿不到新 EventInit → ResumeID 不会更新到 `agent_sessions.json`。Phase 3 在 `internal/bridge/pi/translate.go` 加了 case `"state_update"`：解析 `sessionId`（+ 可选 `modelId`/`modelName`/`sessionFile`），emit `EventInit{SessionID: <new>}`，**绕开 `initSent` 守卫**（每次 new_session 都要让 runtime 重新捕获）。runtime eventHandler（`cmd/nightme/run.go newEventHandler`）自身有 `if ev.Init.SessionID != ""` 守卫，重复 init 是幂等的。
+**Translator 补丁（F-34 Phase 3 发现）**：原 F-32 translator 没有处理 `state_update` 事件（落入 default 分支被 log debug 丢弃），runtime 拿不到新 EventAgentConnected → ResumeID 不会更新到 `agent_sessions.json`。Phase 3 在 `internal/bridge/pi/translate.go` 加了 case `"state_update"`：解析 `sessionId`（+ 可选 `modelId`/`modelName`/`sessionFile`），emit `EventAgentConnected{SessionID: <new>}`，**绕开 `initSent` 守卫**（每次 new_session 都要让 runtime 重新捕获）。runtime eventHandler（`cmd/nightme/run.go newEventHandler`）自身有 `if ev.Connected.SessionID != ""` 守卫，重复 init 是幂等的。
 
 **但**：实测 pi-coding-agent 官方 `docs/rpc.md` 二次确认 —— **`state_update` 不在官方事件列表**，`new_session` 响应也**不带新 sessionId**。唯一的获取方式是发完 `new_session` 后再调一次 `get_state`。
 
@@ -165,7 +165,7 @@ translator 里保留的 `case "state_update"` 是**防御性**的（若 pi 未�
 
 #### 3.2.3 pty — `ErrRestartRequired` fallback (kill + respawn via Spawner)
 
-PTY 是协议无关的字节管道，没有 "reset conversation context" 的概念（产品澄清 2026-08-04："pty 是删掉进程, 重启进程"）。`ptySession.New(ctx)` 返回 `agent.ErrRestartRequired`；wrapper 层（`chatsession.AgentSession.New`）捕获这个 sentinel 后走 fallback 路径：关掉旧 handle，调 `spawner.Spawn(ctx, agent, cwd, args, "")`（resumeID 为空），把新 handle 装回 `as.handle`，并 `SetResumeID("")` 清掉旧 id。下次 runtime 收到新 child 的 `EventInit` 时会重新捕获新 ResumeID。
+PTY 是协议无关的字节管道，没有 "reset conversation context" 的概念（产品澄清 2026-08-04："pty 是删掉进程, 重启进程"）。`ptySession.New(ctx)` 返回 `agent.ErrRestartRequired`；wrapper 层（`chatsession.AgentSession.New`）捕获这个 sentinel 后走 fallback 路径：关掉旧 handle，调 `spawner.Spawn(ctx, agent, cwd, args, "")`（resumeID 为空），把新 handle 装回 `as.handle`，并 `SetResumeID("")` 清掉旧 id。下次 runtime 收到新 child 的 `EventAgentConnected` 时会重新捕获新 ResumeID。
 
 ```go
 // internal/bridge/pty/session.go
@@ -201,7 +201,7 @@ func (s *acpSession) New(ctx context.Context) error {
     if err != nil {
         return err
     }
-    // 用新 sessionID 替换；emit 新的 EventInit 让 runtime 持久化
+    // 用新 sessionID 替换；emit 新的 EventAgentConnected 让 runtime 持久化
     if err := s.setSessionID(result); err != nil {
         return err
     }
@@ -371,11 +371,11 @@ gw.Register(gateway.Command{
 
 ### 4.3 持久化副作用
 
-`/new` 后 bridge emit `EventInit{ SessionID: newID }` → 现有 `newEventHandler`（`cmd/nightme/run.go:467`）走：
+`/new` 后 bridge emit `EventAgentConnected{ SessionID: newID }` → 现有 `newEventHandler`（`cmd/nightme/run.go:467`）走：
 
 ```go
-if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.SessionID != "" {
-    s.SetResumeID(ev.Init.SessionID)
+if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.SessionID != "" {
+    s.SetResumeID(ev.Connected.SessionID)
     if mgr != nil {
         if err := mgr.PersistAgentSession(s); err != nil && logger != nil {
             logger.Warn("persist agent session (init) failed", ...)
@@ -411,7 +411,7 @@ if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.SessionID != "" {
 
 **新增不变式**：
 
-> **`AgentSession.New` 契约**：调用后 `Events()` 保持 open；`PID()` 不变；底层进程不退出；后续事件属于**新**对话。bridge 必须 emit 新 `EventInit{SessionID}`；runtime 自动持久化。
+> **`AgentSession.New` 契约**：调用后 `Events()` 保持 open；`PID()` 不变；底层进程不退出；后续事件属于**新**对话。bridge 必须 emit 新 `EventAgentConnected{SessionID}`；runtime 自动持久化。
 
 ---
 
@@ -434,8 +434,8 @@ if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.SessionID != "" {
 | 文件 | 测试 |
 |---|---|
 | `internal/bridge/claudecode/claudecode_test.go` | `New()` 写 `/clear\n` 到 mock stdin；writeLine 锁不与 SendBlocks 竞争 |
-| `internal/bridge/pi/session_test.go` | `New()` 发 `{"type":"new_session"}`；mock RPC server 返回新 sessionId；验证后续 EventInit 带新 SessionID |
-| `internal/bridge/acp/acp_test.go` | `New()` 发 `session/new`；验证 `s.sessionID` 被替换 + EventInit emit |
+| `internal/bridge/pi/session_test.go` | `New()` 发 `{"type":"new_session"}`；mock RPC server 返回新 sessionId；验证后续 EventAgentConnected 带新 SessionID |
+| `internal/bridge/acp/acp_test.go` | `New()` 发 `session/new`；验证 `s.sessionID` 被替换 + EventAgentConnected emit |
 | `internal/chatsession/new_test.go` | `ChatSession.NewActiveAgentSessions`：filter / 计数 / InputBuffer.Clear / Status 跳过 / firstErr 聚合 |
 | `internal/chatsession/agentsession_test.go` | `AgentSession.New` delegate：handle=nil 返回 ErrNotRunning |
 | `internal/gateway/handlers_new_test.go` | `handleNew` 命中 + 空 pool 报错 + `/new <agent>` 找不到 + 部分失败 reply |
@@ -465,7 +465,7 @@ if ev.Kind == agent.EventInit && ev.Init != nil && ev.Init.SessionID != "" {
 | Q-N6 | pi reset 协议 | **RPC command** `{"type":"new_session"}`（不是 prompt 文本 `/new`）| 2026-08-04 |
 | Q-N7 | acp reset 协议 | JSON-RPC `session/new` over existing transport | 2026-08-04 |
 | Q-N8 | `AgentSession` ID 是否换 | **不换** —— pool 槽位稳定 | 2026-08-04 |
-| Q-N9 | ResumeID 更新时机 | bridge emit EventInit 后，runtime 走现有路径自动持久化 | 2026-08-04 |
+| Q-N9 | ResumeID 更新时机 | bridge emit EventAgentConnected 后，runtime 走现有路径自动持久化 | 2026-08-04 |
 | Q-N10 | handle / readPump 处理 | 不动；bridge 在原 transport 上发 reset，Events() 不关 | 2026-08-04 |
 
 ---

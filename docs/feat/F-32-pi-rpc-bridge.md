@@ -111,7 +111,7 @@ nightme 现有 FSM 假设"一个 AgentSession = 一个进程"；pi RPC 进程是
 }
 ```
 
-bridge 只用：`sessionId`、`model.id`、`model.name`（→ `EventInit.SessionID` / `EventInit.Model`）。`sessionFile` 等文件路径字段**不**进 bridge —— `--session-id <id>` 在 spawn 时已经把文件名协商这层折过去了，不再二次引入 path abstraction（OOB 设计见 §12.2 P1 备注）。
+bridge 只用：`sessionId`、`model.id`、`model.name`（→ `EventAgentConnected.SessionID` / `EventAgentConnected.Model`）。`sessionFile` 等文件路径字段**不**进 bridge —— `--session-id <id>` 在 spawn 时已经把文件名协商这层折过去了，不再二次引入 path abstraction（OOB 设计见 §12.2 P1 备注）。
 
 ## 3. 进程与生命周期
 
@@ -146,7 +146,7 @@ session.Spawn()
 | 时刻 | 行为 | channel 状态 |
 |---|---|---|
 | `t0` cmd.Start | 启 A/B/C/D | open |
-| `t1` GetState 成功 | 在 C 或 A 中 emit `EventInit{SessionID, Model, AgentName:"pi", Workspace, Branch}` | open |
+| `t1` GetState 成功 | 在 C 或 A 中 emit `EventAgentConnected{SessionID, Model, AgentName:"pi", Workspace, Branch}` | open |
 | `t1'` GetState 失败 / 超时 | 失败 pending + emit `EventError` + 通知 C 关闭 | 关闭 |
 | `t2` SendBlocks → `prompt` | 写 stdin 等待 `response` ack | open |
 | `t3` `prompt` ack 收到 | 等待 stream events；`SendBlocks` 返回 nil | open |
@@ -226,7 +226,7 @@ else → 走 translate goroutine
 
 - 现有 `internal/agent/agent.go` 的 `AgentEvent` / `EventKind` **不动**。
 - `EventDone.Reason` 字段当前**不存在**；需在 `DoneEvent` 上加一个 `Reason string` 字段（兼容旧值零），并 `EventDone{Reason:"settled"}` 标明 turn-end。`internal/agent/agent.go:204-211` 同步注释，claudecode/pty 保持默认 `Reason:""`。
-- 现有 `internal/gateway/translate.go` 的事件翻译不需为 pi 改逻辑；`EventInit` / `EventResult` / `EventUsage` / `EventCompaction` / `EventToolStart` / `EventToolEnd` / `EventText` / `EventPermission`（本期不通过此路径走）/ `EventError` 都已存在。
+- 现有 `internal/gateway/translate.go` 的事件翻译不需为 pi 改逻辑；`EventAgentConnected` / `EventResult` / `EventUsage` / `EventCompaction` / `EventToolStart` / `EventToolEnd` / `EventText` / `EventPermission`（本期不通过此路径走）/ `EventError` 都已存在。
 
 ### 5.2 turn 终态语义（核心改动）
 
@@ -289,7 +289,7 @@ pnpm add -g @earendil-works/pi-coding-agent
 | tool_call / tool_result | ✅（`EventToolStart` / `EventToolEnd`） |
 | usage（input/output/cache/cost） | ✅ |
 | compaction | ✅（F-49: `compaction_end` emit `EventCompaction` × 1;`compaction_start` 屏蔽） |
-| session state → EventInit | ✅（首次 `get_state`） |
+| session state → EventAgentConnected | ✅（首次 `get_state`） |
 | 多轮长驻 | ✅（`agent_settled` 不关 channel） |
 | `/kill` 终止 | ✅（Close 路径） |
 | **跨进程 Resume（daemon 重启续同会话）** | ✅（spawn-time `--session-id <id>`；`AgentSession.ResumeID` 由 `get_state.sessionId` 填入 → 写入 `agent_sessions.json` → 下次 spawn 翻译成 `--session-id`；与 claudecode 的 `--resume <id>` 同 bridge contract 各自翻译） |
@@ -433,7 +433,7 @@ pnpm add -g @earendil-works/pi-coding-agent
 **修法**（5 行 `buildArgs` + 1 行 `Start`）：
 
 1. `agent.go`：改 `buildArgs(extraArgs []string, cfg agent.StartConfig)` 接 cfg；当 `cfg.ResumeID != ""` → 追加 `--session-id <id>`（按约定放 argv 末尾；与 claudecode `--resume` 同位）
-2. 持久化路径不动：`EventInit.SessionID` 已由 `get_state` 写入（`emitInit`，旧实现）；runtime `SetResumeID` 已存在
+2. 持久化路径不动：`EventAgentConnected.SessionID` 已由 `get_state` 写入（`emitInit`，旧实现）；runtime `SetResumeID` 已存在
 
 **测试**（`agent_test.go`，5 个 case 全绿）：
 

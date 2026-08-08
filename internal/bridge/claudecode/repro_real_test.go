@@ -74,10 +74,10 @@ func TestReproRealClaude(t *testing.T) {
 				return
 			}
 			t.Logf("[repro] EV kind=%v", ev.Kind)
-			if ev.Init != nil {
+			if ev.Connected != nil {
 				gotInit = true
 				t.Logf("    init: sessionID=%q model=%q agent=%q",
-					ev.Init.SessionID, ev.Init.Model, ev.Init.AgentName)
+					ev.Connected.SessionID, ev.Connected.Model, ev.Connected.AgentName)
 			}
 			if ev.Text != "" {
 				gotText = true
@@ -218,11 +218,11 @@ func TestReproRealClaude_ProductionArgs(t *testing.T) {
 				return
 			}
 			t.Logf("[repro] EV kind=%v", ev.Kind)
-			if ev.Kind == agent.EventInit {
+			if ev.Kind == agent.EventAgentConnected {
 				gotInit = true
-				if ev.Init != nil {
+				if ev.Connected != nil {
 					t.Logf("    init: sessionID=%q model=%q",
-						ev.Init.SessionID, ev.Init.Model)
+						ev.Connected.SessionID, ev.Connected.Model)
 				}
 			}
 			if ev.Kind == agent.EventResult {

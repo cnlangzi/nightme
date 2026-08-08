@@ -37,11 +37,11 @@ import (
 //	CreatedAt       — first spawn time.
 //	LastRunAt       — last event time or status change.
 //	ExitCode        — exit code when Status == exited; nil otherwise.
-//	Model           — F-45: model captured on first EventInit (e.g.
+//	Model           — F-45: model captured on first EventAgentConnected (e.g.
 //	                 "claude-opus-4-5-20250929"). Empty before the
 //	                 first init event lands. Stable for the session
 //	                 identity's lifetime; reset only when bridge New()
-//	                 re-emits EventInit with a new model (post-/new).
+//	                 re-emits EventAgentConnected with a new model (post-/new).
 //
 // CompactionCount is the cumulative number of completed context-
 // compaction cycles observed on this AgentSession. F-49 addition.

@@ -219,30 +219,30 @@ func TestTranslate_EventCompaction(t *testing.T) {
 	}
 }
 
-func TestTranslate_EventInit(t *testing.T) {
+func TestTranslate_EventAgentConnected(t *testing.T) {
 	in := agent.AgentEvent{
-		Kind: agent.EventInit,
-		Init: &agent.InitEvent{SessionID: "s_001", Model: "claude-sonnet-4-5"},
+		Kind: agent.EventAgentConnected,
+		Connected: &agent.AgentConnectedEvent{SessionID: "s_001", Model: "claude-sonnet-4-5"},
 	}
 	msg, ok := Translate("chat1", in)
 	if !ok || msg.Kind != OutInit {
 		t.Fatalf("got (%v, %v), want (OutInit, true)", msg.Kind, ok)
 	}
 	// §1.4 cleanup: init fields flow through the typed
-	// OutboundMessage.Init payload, not Meta.
-	if msg.Init == nil {
-		t.Fatal("msg.Init is nil; Gateway should populate the typed InitEvent payload")
+	// OutboundMessage.Connected payload, not Meta.
+	if msg.Connected == nil {
+		t.Fatal("msg.Connected is nil; Gateway should populate the typed AgentConnectedEvent payload")
 	}
-	if msg.Init.SessionID != "s_001" {
-		t.Errorf("Init.SessionID = %v, want 's_001'", msg.Init.SessionID)
+	if msg.Connected.SessionID != "s_001" {
+		t.Errorf("Init.SessionID = %v, want 's_001'", msg.Connected.SessionID)
 	}
-	if msg.Init.Model != "claude-sonnet-4-5" {
-		t.Errorf("Init.Model = %v, want 'claude-sonnet-4-5'", msg.Init.Model)
+	if msg.Connected.Model != "claude-sonnet-4-5" {
+		t.Errorf("Init.Model = %v, want 'claude-sonnet-4-5'", msg.Connected.Model)
 	}
 }
 
-func TestTranslate_EventInit_NilDropped(t *testing.T) {
-	if _, ok := Translate("chat1", agent.AgentEvent{Kind: agent.EventInit}); ok {
+func TestTranslate_EventAgentConnected_NilDropped(t *testing.T) {
+	if _, ok := Translate("chat1", agent.AgentEvent{Kind: agent.EventAgentConnected}); ok {
 		t.Error("nil Init should drop")
 	}
 }

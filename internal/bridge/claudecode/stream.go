@@ -628,17 +628,18 @@ func truncateForLog(s string, max int) string {
 //	             ...}
 //
 // nil usage → nil result (no usage on the wire this turn). nil
-// modelUsage → CostUSD=0, ContextWindow=0 (still produces a
+// modelUsage → CostUSD=0, contextWindow=0 (still produces a
 // populated UsageEvent when the usage payload has any non-zero
 // field; pct omitted because we lack the denominator).
 //
 // The bridge owns the context-window-pct calculation per
-// docs/feat/F-45-session-footer.md §1.5: it reads
-// `modelUsage.<model>.contextWindow` (API-reported model window
-// size), divides the per-turn used tokens by it, and fills
-// `UsageEvent.ContextWindowPct`. The runtime is a passive
-// pass-through — it does NOT recompute pct, and it does NOT
-// know about Anthropic's model-window conventions.
+// docs/feat/F-45-session-footer.md §1.5 / F-54: it reads
+// `modelUsage.<model>.contextWindow` into a bridge-local
+// variable, divides the per-turn used tokens by it, and fills
+// `UsageEvent.ContextWindowPct`. The window value itself is
+// never stored on UsageEvent (F-54 §1.2). The runtime is a
+// passive pass-through — it does NOT recompute pct, and it
+// does NOT know about Anthropic's model-window conventions.
 func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageEvent {
 	if len(rawUsage) == 0 {
 		return nil
@@ -664,9 +665,12 @@ func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageEvent {
 		CacheCreationInputTokens: int(u.CacheCreationInputTokens),
 		CacheReadInputTokens:     int(u.CacheReadInputTokens),
 	}
-	// modelUsage is best-effort: any parse failure or empty payload
-	// leaves CostUSD / ContextWindow / ContextWindowPct at 0
+	// `contextWindow` is a bridge-local value (F-54): parsed from
+	// `modelUsage[<model>].contextWindow`, used immediately to
+	// compute pct, never stored on UsageEvent. Any parse failure
+	// or empty payload leaves CostUSD / contextWindow at 0
 	// ("not reported" — footer omits the X% segment).
+	contextWindow := 0
 	if len(rawModelUsage) > 0 {
 		var m map[string]struct {
 			CostUSD       float64 `json:"costUSD"`
@@ -678,7 +682,7 @@ func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageEvent {
 					out.CostUSD = v.CostUSD
 				}
 				if v.ContextWindow > 0 {
-					out.ContextWindow = v.ContextWindow
+					contextWindow = v.ContextWindow
 				}
 			}
 		}
@@ -687,11 +691,11 @@ func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageEvent {
 	// Bridge-computed, runtime does NOT recompute (see struct doc).
 	// Skipped when either operand is 0 — a zero pct is meaningless
 	// and would mislead the footer into rendering "0.0%".
-	if out.ContextWindow > 0 {
+	if contextWindow > 0 {
 		used := out.InputTokens + out.OutputTokens +
 			out.CacheCreationInputTokens + out.CacheReadInputTokens
 		if used > 0 {
-			out.ContextWindowPct = float64(used) / float64(out.ContextWindow) * 100
+			out.ContextWindowPct = float64(used) / float64(contextWindow) * 100
 		}
 	}
 	return out

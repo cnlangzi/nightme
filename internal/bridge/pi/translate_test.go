@@ -559,6 +559,235 @@ func TestEmitInit_NoModel(t *testing.T) {
 	}
 }
 
+// TestEmitInit_CapturesContextWindow pins F-54: the bridge
+// caches `data.model.contextWindow` from get_state on the
+// translator so subsequent decodeMessageUsage calls can compute
+// the per-turn X% without re-querying. The value itself never
+// crosses the UsageEvent struct boundary (verified by the
+// decodeMessageUsage tests below — they receive ctxWindow as a
+// parameter, not from UsageEvent).
+func TestEmitInit_CapturesContextWindow(t *testing.T) {
+	tr := newTestTranslator()
+	if got := tr.contextWindow.Load(); got != 0 {
+		t.Fatalf("pre-condition: translator.contextWindow = %d, want 0", got)
+	}
+	state := &getStateResult{
+		SessionID: "sess-1",
+		Model: &getStateModel{
+			ID:            "claude-sonnet-4-5",
+			Name:          "Sonnet 4.5",
+			ContextWindow: 200000,
+		},
+	}
+	if events := tr.emitConnected(state); len(events) != 1 {
+		t.Fatalf("emitConnected = %d events, want 1", len(events))
+	}
+	if got := tr.contextWindow.Load(); got != 200000 {
+		t.Errorf("translator.contextWindow = %d, want 200000", got)
+	}
+}
+
+// TestEmitInit_NoContextWindow verifies the zero-window fallback
+// path: pi omitting `data.model.contextWindow` (older versions,
+// or new models the catalog hasn't registered yet) leaves the
+// translator's window at 0 — downstream decodeMessageUsage then
+// produces pct=0 and the footer omits X% per F-45 §1.6.
+func TestEmitInit_NoContextWindow(t *testing.T) {
+	tr := newTestTranslator()
+	state := &getStateResult{
+		SessionID: "sess-1",
+		Model:     &getStateModel{ID: "m1", Name: "M1"}, // no ContextWindow
+	}
+	tr.emitConnected(state)
+	if got := tr.contextWindow.Load(); got != 0 {
+		t.Errorf("translator.contextWindow = %d, want 0 (model had no ContextWindow)",
+			got)
+	}
+}
+
+// TestEmitInit_ContextWindowResetBetweenSessions pins F-54 §3:
+// the unconditional reset in emitConnected prevents the previous
+// session's window from leaking into a new session whose get_state
+// response lacks ContextWindow (catalog miss, RPC hiccup, future
+// set_model). Without the reset, /new's second emitConnected would
+// silently inherit the boot window and every subsequent pct would
+// be computed against the WRONG model's window.
+//
+// The session.New path resets connectedSent=false before re-running
+// the boot handshake; we simulate that here by flipping the flag
+// directly between emitConnected calls.
+func TestEmitInit_ContextWindowResetBetweenSessions(t *testing.T) {
+	tr := newTestTranslator()
+
+	// Session 1: a registered model with a known window.
+	state1 := &getStateResult{
+		SessionID: "sess-1",
+		Model:     &getStateModel{ID: "m1", ContextWindow: 200000},
+	}
+	if events := tr.emitConnected(state1); len(events) != 1 {
+		t.Fatalf("emitConnected #1 = %d events, want 1", len(events))
+	}
+	if got := tr.contextWindow.Load(); got != 200000 {
+		t.Fatalf("after session 1: contextWindow = %d, want 200000", got)
+	}
+
+	// /new: session.New clears connectedSent before re-running the
+	// boot handshake. Simulate the same state machine here.
+	tr.connectedSent = false
+
+	// Session 2: pi catalog miss → ContextWindow absent.
+	state2 := &getStateResult{
+		SessionID: "sess-2",
+		Model:     &getStateModel{ID: "unknown-model"}, // no ContextWindow
+	}
+	if events := tr.emitConnected(state2); len(events) != 1 {
+		t.Fatalf("emitConnected #2 = %d events, want 1", len(events))
+	}
+	if got := tr.contextWindow.Load(); got != 0 {
+		t.Errorf("after session 2 (catalog miss): contextWindow = %d, want 0 (must not inherit 200000)", got)
+	}
+
+	// Session 3: get_state returns nil Model entirely (RPC hiccup).
+	tr.connectedSent = false
+	state3 := &getStateResult{SessionID: "sess-3"}
+	if events := tr.emitConnected(state3); len(events) != 1 {
+		t.Fatalf("emitConnected #3 = %d events, want 1", len(events))
+	}
+	if got := tr.contextWindow.Load(); got != 0 {
+		t.Errorf("after session 3 (nil Model): contextWindow = %d, want 0", got)
+	}
+
+	// Session 4: same model as session 1 (sanity — must round-trip).
+	tr.connectedSent = false
+	state4 := &getStateResult{
+		SessionID: "sess-4",
+		Model:     &getStateModel{ID: "m1", ContextWindow: 200000},
+	}
+	if events := tr.emitConnected(state4); len(events) != 1 {
+		t.Fatalf("emitConnected #4 = %d events, want 1", len(events))
+	}
+	if got := tr.contextWindow.Load(); got != 200000 {
+		t.Errorf("after session 4 (same model): contextWindow = %d, want 200000 (reset+Store round-trip)", got)
+	}
+}
+
+// TestDecodeMessageUsage_ContextWindowPct pins F-54 §2.2: the
+// bridge-computed pct follows Doc 1 (used / window * 100) when
+// the translator-supplied contextWindow is positive. The
+// translator's window is held outside UsageEvent — decodeMessageUsage
+// receives it as a parameter — so this test also implicitly
+// asserts that pct is the only context-window-derived field on
+// the returned UsageEvent (ContextWindow was deleted in F-54).
+func TestDecodeMessageUsage_ContextWindowPct(t *testing.T) {
+	cases := []struct {
+		name      string
+		usage     *messageUsage
+		ctxWindow int
+		wantPct   float64
+	}{
+		{
+			name: "typical — 21100 of 200k → 10.55%",
+			usage: &messageUsage{
+				Input: 100, Output: 1000,
+				CacheRead: 0, CacheWrite: 20000,
+				Cost: &usageCost{Total: 0.01},
+			},
+			ctxWindow: 200000,
+			wantPct:   10.55,
+		},
+		{
+			name: "near ceiling — 199200 / 200000 → 99.6%",
+			usage: &messageUsage{
+				Input: 200, Output: 1000,
+				CacheRead: 0, CacheWrite: 198000,
+				Cost: &usageCost{Total: 0.5},
+			},
+			ctxWindow: 200000,
+			wantPct:   99.6,
+		},
+		{
+			name: "at ceiling — 200000 / 200000 → 100.0%",
+			usage: &messageUsage{
+				Input: 200000, Output: 0,
+				CacheRead: 0, CacheWrite: 0,
+				Cost: &usageCost{Total: 0.5},
+			},
+			ctxWindow: 200000,
+			wantPct:   100.0,
+		},
+		{
+			name: "1M context — 500k of 1M → 50.0%",
+			usage: &messageUsage{
+				Input: 500000, Output: 0,
+				CacheRead: 0, CacheWrite: 0,
+				Cost: &usageCost{Total: 1.0},
+			},
+			ctxWindow: 1000000,
+			wantPct:   50.0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := decodeMessageUsage(tc.usage, tc.ctxWindow)
+			if ev == nil {
+				t.Fatalf("decodeMessageUsage returned nil; want non-nil")
+			}
+			diff := ev.ContextWindowPct - tc.wantPct
+			if diff < -0.05 || diff > 0.05 {
+				t.Errorf("ContextWindowPct = %.4f, want %.4f (±0.05)",
+					ev.ContextWindowPct, tc.wantPct)
+			}
+		})
+	}
+}
+
+// TestDecodeMessageUsage_NoContextWindow pins F-54 fallback:
+// ctxWindow=0 (pi not yet reported / older version / model not
+// in catalog) → ContextWindowPct stays 0 → footer omits X%.
+func TestDecodeMessageUsage_NoContextWindow(t *testing.T) {
+	cases := []struct {
+		name      string
+		usage     *messageUsage
+		ctxWindow int
+	}{
+		{
+			name: "ctxWindow=0 — get_state not yet arrived",
+			usage: &messageUsage{
+				Input: 1000, Output: 500,
+				CacheRead: 0, CacheWrite: 0,
+				Cost: &usageCost{Total: 0.01},
+			},
+			ctxWindow: 0,
+		},
+		{
+			name: "negative ctxWindow treated as 0",
+			usage: &messageUsage{
+				Input: 1000, Output: 500,
+				CacheRead: 0, CacheWrite: 0,
+				Cost: &usageCost{Total: 0.01},
+			},
+			ctxWindow: -1,
+		},
+		{
+			name: "zero usage — pct stays 0 regardless of window",
+			usage: &messageUsage{
+				Input: 0, Output: 0,
+				CacheRead: 0, CacheWrite: 0,
+				Cost: &usageCost{Total: 0},
+			},
+			ctxWindow: 200000,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := decodeMessageUsage(tc.usage, tc.ctxWindow)
+			if ev != nil && ev.ContextWindowPct != 0 {
+				t.Errorf("ContextWindowPct = %v, want 0", ev.ContextWindowPct)
+			}
+		})
+	}
+}
+
 // TestTranslate_SilentDropLogging verifies that ignored events are
 // not surfaced as AgentEvents but are logged at debug so users
 // with --verbose can see them in the bridge log.

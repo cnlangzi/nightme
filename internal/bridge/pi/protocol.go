@@ -101,6 +101,14 @@ type getStateModel struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Provider string `json:"provider"`
+
+	// ContextWindow is the model's reported context-window size
+	// (tokens), populated from `data.model.contextWindow` when
+	// present (F-54). Stored on translator.contextWindow
+	// (bridge-local state) for per-turn ContextWindowPct
+	// computation; the value itself never crosses the
+	// UsageEvent struct boundary.
+	ContextWindow int `json:"contextWindow"`
 }
 
 // messageUpdateEnvelope is the body of a "message_update" event. Pi

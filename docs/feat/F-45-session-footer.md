@@ -293,7 +293,7 @@ SessionContext *SessionContext
 
 **F-52 重构 (2026-08)**：F-45 原本把 `in / out / cache / total / $cost` 拆成多段（`↓ in · ↻ cached · ↑ out · Total · $cost`）。F-52 统一为更紧凑的「`💰:「 in / out · X% · $cost 」`」格式，理由：
 - "in" 按 https://yb.tencent.com/s/3G6HphjOxM70 的口径合并三个 input-side 字段（`InputTokens + CacheCreationInputTokens + CacheReadInputTokens`），避免用户在 IM 里还要心算 cache_creation + cache_read。
-- "X%" 是 per-turn context-window 使用率（`used / ContextWindow * 100`，`ContextWindow` 是 API 报的模型窗口大小），让用户一眼看到距离 ceiling 还剩多少。
+- "X%" 是 per-turn context-window 使用率（`used / contextWindow * 100`，`contextWindow` 是 bridge-local 变量 — Claude Code 来自 `modelUsage[<model>].contextWindow`,Pi 来自 `get_state.data.model.contextWindow`,详见 [`F-54`](./F-54-pi-contextwindow-from-get-state.md)），让用户一眼看到距离 ceiling 还剩多少。
 - "$cost" 直接透传 API 报的 `total_cost_usd`，客户端不计算（没有 rate table / 没有 per-model pricing）。
 
 **新格式 (Format D, 「」 enclosed)**：
@@ -309,14 +309,14 @@ SessionContext *SessionContext
 | 段 | 来源 | Omit 规则 | 渲染 |
 |---|---|---|---|
 | `in / out` | `in = InputTokens + CacheCreationInputTokens + CacheReadInputTokens`；`out = OutputTokens` | `in == 0 && out == 0` 时整段省略（无 usage） | `abbrevTokens(in) + " / " + abbrevTokens(out)`；零侧显示 `0`（罕见，例如 compaction-only turn） |
-| `X%` | `SessionContext.ContextWindowPct`（F-52 算） | `== 0` 时省略（runtime 的三个零情形：还没收到 EventDone-with-Usage / 模型本轮没报 ContextWindow / 刚 ResetCumulative 或 RecordCompaction） | `fmt.Sprintf("%.1f%%", pct)` — 一位小数；`99.6%` 不能四舍五入到 `100%` |
+| `X%` | `SessionContext.ContextWindowPct`(bridge-local `contextWindow` 算,见 [`F-54`](./F-54-pi-contextwindow-from-get-state.md)) | `== 0` 时省略(runtime 的三个零情形：还没收到 EventDone-with-Usage / 模型本轮没报 contextWindow / 刚 RecordCompaction) | `fmt.Sprintf("%.1f%%", pct)` — 一位小数；`99.6%` 不能四舍五入到 `100%` |
 | `$cost` | `agent.UsageEvent.CostUSD`（F-52 透传 API 报的 `total_cost_usd`） | `== 0` 时省略（API 没报） | `fmt.Sprintf("$%.3f", cost)` — 三位小数，与 F-45 原约定一致 |
 
 段之间用 ` · ` 分隔；`「」` 括号只在至少一个段非空时才包裹整行。Line 1 / Line 3 的 omit 规则、emoji 选择（🤖 / 🗜 / 📁）均不变。
 
 **Why F-52 改这三件事**：
 1. **in = uncached + cache_creation + cache_read**：Tencent YB 文档 + Claude Code `/cost` 统计口径一致。之前的 `↓ in · ↻ cached` 拆法让用户得自己加两个数才知道"in 总共多少"，违反 footer 一次成型的目的。
-2. **加 `X%` 段**：F-52 引入的 `ContextWindowPct`（Doc 1 公式 = `used / ContextWindow * 100`）是 chat session 用户最关心的"距离 ceiling 还剩多少"指标，独立成段比塞进 `in / out` 自然。
+2. **加 `X%` 段**：F-52 引入的 `ContextWindowPct`（Doc 1 公式 = `used / contextWindow * 100`，`contextWindow` 是 bridge-local 变量，见 [`F-54`](./F-54-pi-contextwindow-from-get-state.md) §1.2）是 chat session 用户最关心的"距离 ceiling 还剩多少"指标，独立成段比塞进 `in / out` 自然。
 3. **`$cost` 客户端不计算**：Anthropic API 的 `total_cost_usd` 已经把不同模型的差异化定价算好了，客户端维护 rate table 既过时又错。直接透传是唯一正解。
 
 **实测样例 (F-52 后)**：

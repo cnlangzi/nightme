@@ -877,12 +877,12 @@ func TestTranslate_RejectsMalformed(t *testing.T) {
 // trimmed in future revisions.
 var _ = errors.New
 
-// TestTranslate_StateUpdate_EmitsEventInit verifies F-34 §3.2.2:
+// TestTranslate_StateUpdate_EmitsEventAgentConnected verifies F-34 §3.2.2:
 // when pi emits state_update after a new_session RPC, the translator
 // surfaces an EventAgentConnected carrying the new sessionId. The runtime's
 // eventHandler (cmd/nightme/run.go newEventHandler) picks it up
 // via SetResumeID.
-func TestTranslate_StateUpdate_EmitsEventInit(t *testing.T) {
+func TestTranslate_StateUpdate_EmitsEventAgentConnected(t *testing.T) {
 	tr := newTestTranslator()
 	raw := []byte(`{"type":"state_update","sessionId":"new-sess-1","modelId":"m1","modelName":"M1"}`)
 	events, err := tr.translate(raw, nil)

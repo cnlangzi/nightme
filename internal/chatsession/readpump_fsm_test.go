@@ -72,11 +72,11 @@ func submitInFlight(t *testing.T, as *AgentSession) *Prompt {
 	return p
 }
 
-// TestEventInit_DoesNotEndPrompt is the F-32 regression, ported.
+// TestEventAgentConnected_DoesNotEndPrompt is the F-32 regression, ported.
 // EventAgentConnected arriving mid-turn must leave the Prompt in flight —
 // if it ended the Prompt, TryFlush would submit the next queued
 // message on top of a turn that is still streaming.
-func TestEventInit_DoesNotEndPrompt(t *testing.T) {
+func TestEventAgentConnected_DoesNotEndPrompt(t *testing.T) {
 	cs := newChatSessionForTest("cs_eventinit")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

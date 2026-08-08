@@ -363,16 +363,20 @@ type ResultEvent struct {
 //
 // `contextWindow` is a bridge-local value: claudecode reads it
 // from `modelUsage[<model>].contextWindow`, pi reads it from
-// `get_state.data.model.contextWindow`. The window value itself
-// never crosses the bridge struct boundary (F-54) — bridges
-// compute pct and store only the percentage here.
+// `get_state.data.model.contextWindow`. F-54 originally dropped
+// the field from UsageEvent as dead (0 read / 0 write); F-55
+// re-introduced it (UsageEvent.ContextWindow below) so the
+// channel footer can render `(window)` alongside the percentage.
+// See docs/feat/F-55-footer-show-context-window.md for the
+// re-introduction rationale.
 //
 // i.e. exact wire fields divided by API-reported window — no
 // client-side model table needed. The runtime does NOT recompute
-// or overwrite this; the channel footer renders it verbatim as
-// the "X%" segment. See
-// docs/feat/F-45-session-footer.md §1.5 / §1.6 and
-// docs/feat/F-54-pi-contextwindow-from-get-state.md.
+// or overwrite these; the channel footer renders them verbatim
+// as the "X% (window)" segment. See
+// docs/feat/F-45-session-footer.md §1.5 / §1.6,
+// docs/feat/F-54-pi-contextwindow-from-get-state.md, and
+// docs/feat/F-55-footer-show-context-window.md.
 type UsageEvent struct {
 	// InputTokens is the non-cached input token count.
 	InputTokens int

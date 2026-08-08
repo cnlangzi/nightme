@@ -310,7 +310,7 @@ SessionContext *SessionContext
 |---|---|---|---|
 | `in / out` | `in = InputTokens + CacheCreationInputTokens + CacheReadInputTokens`；`out = OutputTokens`。F-55.1 进一步把 `in` 拆 `new / cache / out`： | `in == 0 && out == 0` 时整段省略（无 usage） | F-55.1 render:`new / cache / out`,纯数字无 label；每段按 `> 0` 独立 omit。`cache == 0` 时退回 `new / out` 布局。`new = InputTokens + CacheCreationInputTokens`,`cache = CacheReadInputTokens`。 |
 
-> F-55.1: Anthropic 三个 input-side 字段**互斥**(每个 token 恰好落一个桶),split 不引入重叠——`in == new + cache` 恒成立。Doc 1 pct 仍按 `(new + cache + out) / contextWindow` 计算。|
+> F-55.1: Anthropic 三个 input-side 字段**互斥**(每个 token 恰好落一个桶),split 不引入重叠——`in == new + cache` 恒成立。Doc 1 pct 仍按 `(new + cache + out) / contextWindow` 计算。
 | `X% (window)` | `SessionContext.ContextWindowPct` + `SessionContext.Usage.ContextWindow`(F-55 透传:Claude Code `modelUsage[<model>].contextWindow`,Pi `get_state.data.model.contextWindow`) | `ContextWindowPct == 0` 时整段省略(`window == 0 && pct == 0` 也走 omit 路径) | `fmt.Sprintf("%.1f%% (%s)", pct, abbrevWindow(window))` — 一位小数;`99.6%` 不能四舍五入到 `100%`;`pct > 100%` **不 clamp 不告警**,让用户看到分母自行判断(`101.6% (200k)` 即是 MiniMax 兼容端把 1M 模型错报成 200K 的诊断信号) |
 | `$cost` | `agent.UsageEvent.CostUSD`（F-52 透传 API 报的 `total_cost_usd`） | `== 0` 时省略（API 没报） | `fmt.Sprintf("$%.3f", cost)` — 三位小数，与 F-45 原约定一致 |
 

@@ -452,6 +452,37 @@ func TestAbbrevTokens(t *testing.T) {
 	}
 }
 
+// TestAbbrevWindow pins F-55's separate helper. abbrevWindow is
+// deliberately a duplicate of abbrevTokens (separate symbol so
+// the formatting policy lives in one place per kind; see
+// usage_footer.go abbrevWindow doc). Without this test, a
+// refactor that changes one helper but forgets the other would
+// silently diverge — abbrevWindow renders the model
+// context-window denominator in `X% (window)`, so a wrong
+// abbreviation would mislead the user about the actual window
+// size (the very thing F-55 tries to surface honestly).
+func TestAbbrevWindow(t *testing.T) {
+	tests := []struct {
+		in   int
+		want string
+	}{
+		{0, "0"}, // defensive (caller omits the segment when pct==0)
+		{1, "1"},
+		{999, "999"},
+		{1_000, "1.0k"},
+		{200_000, "200.0k"}, // canonical MiniMax 200K case (the F-55 motivation)
+		{999_999, "1000.0k"},
+		{1_000_000, "1.0M"}, // canonical 1M model window
+		{1_234_567, "1.2M"},
+	}
+	for _, tc := range tests {
+		got := abbrevWindow(tc.in)
+		if got != tc.want {
+			t.Errorf("abbrevWindow(%d) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 // ---- F-48 footer line 3: git tracking -----------------------------
 
 // TestFormatWorkspacePath exercises the simplified F-48 rule:

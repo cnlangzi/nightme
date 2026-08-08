@@ -30,7 +30,7 @@ func TestSetModel_Idempotent(t *testing.T) {
 	}
 
 	// Empty incoming value must NOT overwrite a captured model —
-	// bridges may re-emit AgentConnected with blank Model after a
+	// bridges may re-emit EventAgentConnected with blank Model after a
 	// child restart and we don't want to wipe the prior capture.
 	as.SetModel("")
 	if got := as.Model(); got != "opus-4-5" {
@@ -38,7 +38,7 @@ func TestSetModel_Idempotent(t *testing.T) {
 	}
 
 	// Non-empty replacement IS allowed (e.g. /new reset via
-	// bridge.New() emitting a fresh AgentConnected with a new model).
+	// bridge.New() emitting a fresh EventAgentConnected with a new model).
 	as.SetModel("haiku-4-5")
 	if got := as.Model(); got != "haiku-4-5" {
 		t.Fatalf("Model() after replacement SetModel = %q, want %q", got, "haiku-4-5")

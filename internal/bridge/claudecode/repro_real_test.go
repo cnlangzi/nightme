@@ -218,7 +218,7 @@ func TestReproRealClaude_ProductionArgs(t *testing.T) {
 				return
 			}
 			t.Logf("[repro] EV kind=%v", ev.Kind)
-			if ev.Kind == agent.AgentConnected {
+			if ev.Kind == agent.EventAgentConnected {
 				gotInit = true
 				if ev.Connected != nil {
 					t.Logf("    init: sessionID=%q model=%q",

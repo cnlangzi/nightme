@@ -220,7 +220,7 @@ func TestTranslate_EventCompaction(t *testing.T) {
 
 func TestTranslate_EventInit(t *testing.T) {
 	in := agent.AgentEvent{
-		Kind: agent.AgentConnected,
+		Kind: agent.EventAgentConnected,
 		Connected: &agent.AgentConnectedEvent{SessionID: "s_001", Model: "claude-sonnet-4-5"},
 	}
 	msg, ok := Translate("chat1", in)
@@ -241,7 +241,7 @@ func TestTranslate_EventInit(t *testing.T) {
 }
 
 func TestTranslate_EventInit_NilDropped(t *testing.T) {
-	if _, ok := Translate("chat1", agent.AgentEvent{Kind: agent.AgentConnected}); ok {
+	if _, ok := Translate("chat1", agent.AgentEvent{Kind: agent.EventAgentConnected}); ok {
 		t.Error("nil Init should drop")
 	}
 }

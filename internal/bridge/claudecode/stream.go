@@ -161,7 +161,7 @@ type contentBlock struct {
 // options. See ask.go for the dual-path (tool_use + text fallback)
 // detection logic.
 //
-// agentName + workspace are stamped onto the AgentConnected payload by
+// agentName + workspace are stamped onto the EventAgentConnected payload by
 // translate (so channel-layer receipts can render the "Agent ·
 // name | cwd · path" foot note). They are immutable for the
 // session's lifetime and don't need a mutex.
@@ -220,13 +220,13 @@ func pumpStream(r io.Reader, events chan<- agent.AgentEvent, askHandler askHandl
 // Returns nothing — events that don't map to AgentEvent (e.g. unknown
 // type) are silently dropped (logged at debug).
 //
-// agentName + workspace are stamped onto the AgentConnected payload so
+// agentName + workspace are stamped onto the EventAgentConnected payload so
 // channel-layer receipts can render the "Agent · name | cwd · path"
 // foot note. Both are immutable for the session's lifetime.
 func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEvent, askHandler askHandlerFunc, agentName, workspace, branch string, logger *slog.Logger) {
 	switch ev.Type {
 	case "system":
-		// system/init is informational; we surface it via AgentConnected
+		// system/init is informational; we surface it via EventAgentConnected
 		// so the channel can echo a "session <id> · model <name>"
 		// header AND have access to SessionID for /resume. Other
 		// subtypes (e.g. status, hook_progress) are ignored.
@@ -239,7 +239,7 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 			// for the resume path where streamState is reused.
 			resetTasksForNewTurn(state)
 			events <- agent.AgentEvent{
-				Kind: agent.AgentConnected,
+				Kind: agent.EventAgentConnected,
 				Connected: &agent.AgentConnectedEvent{
 					SessionID: ev.SessionID,
 					Model:     extractModel(ev),

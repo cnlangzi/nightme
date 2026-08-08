@@ -2460,7 +2460,7 @@ func TestEnsureReceiptForTyping_RendersFooterWhenProvided(t *testing.T) {
 
 // TestEnsureReceiptForTyping_OmitsFooterWhenEmpty (F-48): when
 // the caller's footerLines is nil/empty (no SessionContext stamped
-// — e.g. agent hasn't AgentConnected'd yet and the Cwd is not in a git
+// — e.g. agent hasn't EventAgentConnected'd yet and the Cwd is not in a git
 // repo), the placeholder card omits the footer entirely. The
 // hr divider is also absent. This is the back-compat path for
 // the pre-F-48 "no footer" placeholder — supported but not

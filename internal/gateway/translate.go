@@ -181,7 +181,7 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		// §1.9.
 		return OutboundMessage{}, false
 
-	case agent.AgentConnected:
+	case agent.EventAgentConnected:
 		// Session bootstrap (Claude Code: system/init). Carries
 		// session_id + model; channels surface them in the receipt
 		// header so users can identify the session for /resume.

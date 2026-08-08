@@ -58,7 +58,7 @@ func TestStart_ResumeRejectionSurfacesError(t *testing.T) {
 }
 
 // TestStart_ResumeID_PreservedAcrossProbe verifies that for a
-// VALID --resume id, the session id captured by AgentConnected equals
+// VALID --resume id, the session id captured by EventAgentConnected equals
 // the requested resume id — i.e. the bridge is actually
 // resuming, not silently replacing with a fresh session.
 //
@@ -99,7 +99,7 @@ phase1Loop:
 			if !ok {
 				t.Fatal("phase 1: events closed")
 			}
-			if ev.Kind == agent.AgentConnected && ev.Connected != nil && ev.Connected.SessionID != "" {
+			if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.SessionID != "" {
 				capturedID = ev.Connected.SessionID
 				t.Logf("[test] phase 1: captured sessionID=%q", capturedID)
 				break phase1Loop
@@ -139,7 +139,7 @@ phase1Loop:
 			if !ok {
 				t.Fatalf("phase 2: events closed before init")
 			}
-			if ev.Kind == agent.AgentConnected && ev.Connected != nil {
+			if ev.Kind == agent.EventAgentConnected && ev.Connected != nil {
 				if ev.Connected.SessionID != capturedID {
 					t.Fatalf("phase 2: init.SessionID = %q, want %q (resume context lost — bridge replaced with fresh session)",
 						ev.Connected.SessionID, capturedID)

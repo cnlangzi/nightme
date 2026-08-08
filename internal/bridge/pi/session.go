@@ -194,7 +194,7 @@ type session struct {
 // get_state handshake. The returned AgentSession is ready for
 // SendText / Events immediately on success.
 //
-// agentName + workspace + branch are stamped onto every AgentConnected
+// agentName + workspace + branch are stamped onto every EventAgentConnected
 // emitted by the translator so the channel-layer receipt can render
 // the "Agent | repo | branch | tokens" foot note.
 //
@@ -342,7 +342,7 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 	return s, nil
 }
 
-// deliverInitLocked emits the AgentConnected for `state` via deliver().
+// deliverInitLocked emits the EventAgentConnected for `state` via deliver().
 // Caller MUST hold s.translatorMu so connectedSent's check-and-set is
 // atomic relative to translator.emitConnected. Shared between the boot
 // handshake (newSession) and the F-34 reset path (New).
@@ -557,7 +557,7 @@ func (s *session) SendPermission(_ string) error {
 //
 // Implementation: send new_session, wait for response, then issue
 // get_state to retrieve the new sessionId, then push it into the
-// events channel as an AgentConnected so the runtime's eventHandler
+// events channel as an EventAgentConnected so the runtime's eventHandler
 // captures it via SetResumeID (cmd/nightme/run.go newEventHandler).
 //
 // The process stays alive; the transport stays open; Events() stays
@@ -664,7 +664,7 @@ func (s *session) New(ctx context.Context) error {
 
 	// F-34 review C2: refuse to commit the reset if pi has no
 	// sessionId in its state. emitConnected would emit a zero-SessionID
-	// AgentConnected which runtime's eventHandler ignores (cmd/nightme/run.go
+	// EventAgentConnected which runtime's eventHandler ignores (cmd/nightme/run.go
 	// guards on SessionID != ""), leaving the OLD ResumeID persisted
 	// in agent_sessions.json. Surface as a hard error so the caller
 	// knows the reset did not take effect.
@@ -673,7 +673,7 @@ func (s *session) New(ctx context.Context) error {
 		return errors.New("pi: get_state returned empty sessionId after new_session")
 	}
 
-	// 4. Push the new AgentConnected into the events channel. deliver()
+	// 4. Push the new EventAgentConnected into the events channel. deliver()
 	// is non-blocking; if the channel is full we drop with a warn
 	// (the next prompt from the user will fail visibly, but the
 	// process / transport is fine).

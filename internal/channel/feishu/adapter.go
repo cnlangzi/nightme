@@ -700,7 +700,7 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 // OutTask* with a TaskList). OutboundKinds without content (OutInit,
 // OutUsage before any reply) silently drop.
 //
-// userMsgID == "" means orphan event (startup AgentConnected, internal
+// userMsgID == "" means orphan event (startup EventAgentConnected, internal
 // log). Return nil so the caller falls back to sendRawOutText.
 //
 // Locking: read-only under a.mu.
@@ -1793,7 +1793,7 @@ func (a *Adapter) sendOrphanResultCard(ctx context.Context, chatID, text string,
 
 // postThreadReply posts body as a thread reply anchored at rootID.
 // rootID = msg.ReplyTo = currentTurnUserMsgID. When rootID is empty
-// (orphan event, e.g. startup AgentConnected) the helper falls back to a
+// (orphan event, e.g. startup EventAgentConnected) the helper falls back to a
 // top-level text send via sendRawOutText so the user still sees the
 // message.
 //

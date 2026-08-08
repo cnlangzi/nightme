@@ -336,7 +336,7 @@ func TestAgentSession_RespawnPassesResumeID(t *testing.T) {
 		t.Errorf("fresh AgentSession should not have a resume id")
 	}
 
-	// Capture a resume id (simulating AgentConnected being handled).
+	// Capture a resume id (simulating EventAgentConnected being handled).
 	as.SetResumeID("sess-resume-1")
 
 	// Simulate the process exiting; the next spawn should observe

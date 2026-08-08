@@ -73,8 +73,8 @@ func TestPumpStream_Init(t *testing.T) {
 	if len(evs) != 1 {
 		t.Fatalf("got %d events, want 1", len(evs))
 	}
-	if evs[0].Kind != agent.AgentConnected {
-		t.Errorf("event kind = %v, want AgentConnected", evs[0].Kind)
+	if evs[0].Kind != agent.EventAgentConnected {
+		t.Errorf("event kind = %v, want EventAgentConnected", evs[0].Kind)
 	}
 	if evs[0].Connected == nil {
 		t.Fatal("Init payload is nil")
@@ -1006,7 +1006,7 @@ func TestSession_New_SendsClearUserMessage(t *testing.T) {
 	}
 
 	// Drain events. Expect at least:
-	//   - 1 AgentConnected (session_id == "sess-after-clear-mock")
+	//   - 1 EventAgentConnected (session_id == "sess-after-clear-mock")
 	//   - 1 EventDone (terminal)
 	deadline := time.After(5 * time.Second)
 	var sawInit bool
@@ -1020,7 +1020,7 @@ loop:
 				break loop
 			}
 			switch ev.Kind {
-			case agent.AgentConnected:
+			case agent.EventAgentConnected:
 				sawInit = true
 				if ev.Connected != nil {
 					initSessionID = ev.Connected.SessionID
@@ -1037,7 +1037,7 @@ loop:
 	}
 
 	if !sawInit {
-		t.Fatalf("expected AgentConnected from mock's /clear handling")
+		t.Fatalf("expected EventAgentConnected from mock's /clear handling")
 	}
 	if initSessionID != "sess-after-clear-mock" {
 		t.Fatalf("Init.SessionID = %q, want %q (mock's post-clear session id)",

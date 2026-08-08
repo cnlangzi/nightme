@@ -130,10 +130,10 @@ const (
 	// turn. Channels typically surface a brief "Compacting…" indicator.
 	EventCompaction
 
-	// AgentConnected carries session bootstrap data (session_id + model)
+	// EventAgentConnected carries session bootstrap data (session_id + model)
 	// from the agent's system/init event. Channels use it to surface
 	// "session <id> · model <name>" in the receipt header.
-	AgentConnected
+	EventAgentConnected
 
 	// EventTaskCreate signals the first confirmable task operation
 	// (e.g. Claude TaskCreate success). The payload carries the
@@ -167,8 +167,8 @@ func (k EventKind) String() string {
 		return "result"
 	case EventCompaction:
 		return "compaction"
-	case AgentConnected:
-		return "init"
+	case EventAgentConnected:
+		return "agent_connected"
 	case EventTaskCreate:
 		return "task_create"
 	case EventTaskUpdate:
@@ -409,7 +409,7 @@ type UsageInfo struct {
 // new payload shape is needed.
 type CompactionEvent struct{}
 
-// AgentConnectedEvent is the payload for AgentConnected — session bootstrap data
+// AgentConnectedEvent is the payload for EventAgentConnected — session bootstrap data
 // from the agent's system/init event. Bridges populate the
 // agent-specific fields (AgentName, Workspace) from their own start
 // config; the stream-json system event provides SessionID + Model.
@@ -527,7 +527,7 @@ type TaskListEvent struct {
 //	EventResult     -> Result
 //	EventUsage      -> Usage
 //	EventCompaction -> (no payload — empty marker struct)
-//	AgentConnected  -> Connected
+//	EventAgentConnected  -> Connected
 //	EventTaskCreate -> TaskList
 //	EventTaskUpdate -> TaskList
 type AgentEvent struct {
@@ -737,7 +737,7 @@ type AgentSession interface {
 	//   - pi:         send {"type":"new_session"} RPC
 	//   - acp:        send "session/new" JSON-RPC over the existing transport
 	//
-	// After New returns, the bridge MUST emit a fresh AgentConnected carrying
+	// After New returns, the bridge MUST emit a fresh EventAgentConnected carrying
 	// the new SessionID; the runtime's existing eventHandler captures
 	// it via SetResumeID and persists (cmd/nightme/run.go newEventHandler).
 	New(ctx context.Context) error

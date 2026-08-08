@@ -518,7 +518,7 @@ func TestTranslate_MalformedJSON(t *testing.T) {
 
 // TestEmitInit_Once verifies that emitConnected only fires the first
 // time. Subsequent get_state responses (e.g. after a model switch
-// in a future MVP) do not re-emit AgentConnected and corrupt the
+// in a future MVP) do not re-emit EventAgentConnected and corrupt the
 // receipt header.
 func TestEmitInit_Once(t *testing.T) {
 	tr := newTestTranslator()
@@ -879,7 +879,7 @@ var _ = errors.New
 
 // TestTranslate_StateUpdate_EmitsEventInit verifies F-34 §3.2.2:
 // when pi emits state_update after a new_session RPC, the translator
-// surfaces an AgentConnected carrying the new sessionId. The runtime's
+// surfaces an EventAgentConnected carrying the new sessionId. The runtime's
 // eventHandler (cmd/nightme/run.go newEventHandler) picks it up
 // via SetResumeID.
 func TestTranslate_StateUpdate_EmitsEventInit(t *testing.T) {
@@ -892,8 +892,8 @@ func TestTranslate_StateUpdate_EmitsEventInit(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1", len(events))
 	}
-	if events[0].Kind != agent.AgentConnected {
-		t.Fatalf("Kind = %s, want AgentConnected", events[0].Kind)
+	if events[0].Kind != agent.EventAgentConnected {
+		t.Fatalf("Kind = %s, want EventAgentConnected", events[0].Kind)
 	}
 	if events[0].Connected.SessionID != "new-sess-1" {
 		t.Errorf("SessionID = %q, want new-sess-1", events[0].Connected.SessionID)
@@ -1345,7 +1345,7 @@ func TestTranslate_UntouchedSettleEmitsNoResult(t *testing.T) {
 // TestTranslate_ResetWindowDropsAbandonedTurn is the regression lock
 // for the /new race window.
 //
-// session.New() cannot deliver the new AgentConnected until a get_state
+// session.New() cannot deliver the new EventAgentConnected until a get_state
 // round-trip completes (10s deadline), and readPump keeps translating
 // the whole time. /new is reachable mid-turn — nothing gates it on the
 // FSM being Idle and slash commands bypass the InputBuffer — so wire
@@ -1393,7 +1393,7 @@ func TestTranslate_ResetWindowDropsAbandonedTurn(t *testing.T) {
 		t.Errorf("pendingTools = %v, want empty", tr.turn.pendingTools)
 	}
 
-	tr.endReset() // AgentConnected delivered; normal translation resumes.
+	tr.endReset() // EventAgentConnected delivered; normal translation resumes.
 
 	next := drive(t, tr, append(textDeltas(0, "fresh answer"),
 		assistantMessageEnd(t, "fresh answer", 42, 7),

@@ -429,7 +429,7 @@ type OutboundMessage struct {
 //	Model           — model the agent selected (e.g.
 //	                  "claude-opus-4-5-20250929"). Sourced from
 //	                  AgentSession.Model which the runtime caches
-//	                  on first AgentConnected. Empty before AgentConnected
+//	                  on first EventAgentConnected. Empty before EventAgentConnected
 //	                  lands; footer omits the segment when "".
 //	CumulativeUsage — per-AgentSession running total of token /
 //	                  cost stats as of this event's emission.

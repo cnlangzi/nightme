@@ -235,7 +235,7 @@ var _ = slog.Default
 // own tokens on the very first send (cumulative=inTok on turn 1).
 //
 // Sequence:
-//   1. AgentConnected → capture Model
+//   1. EventAgentConnected → capture Model
 //   2. EventResult with ResultEvent.Usage populated — single event,
 //      dispatched once, footer stamped with this turn's tokens.
 func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
@@ -247,9 +247,9 @@ func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
 	h := newEventHandler(ch, cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_first_turn", "claude", "/tmp", nil)
 
-	// Step 1: AgentConnected captures Model.
+	// Step 1: EventAgentConnected captures Model.
 	h("oc_chat_first_turn", as, agent.AgentEvent{
-		Kind: agent.AgentConnected,
+		Kind: agent.EventAgentConnected,
 		Connected: &agent.AgentConnectedEvent{
 			SessionID: "sess_test",
 			Model:     "claude-opus-4-5",
@@ -274,7 +274,7 @@ func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
 	}, "om_user_1")
 
 	got := ch.Record()
-	// Find the OutResult specifically — AgentConnected may also have
+	// Find the OutResult specifically — EventAgentConnected may also have
 	// emitted OutboundMessages (e.g. OutInit on echo); the merged
 	// design only changes how many OutResult-bound sends fire.
 	var out *gateway.OutboundMessage

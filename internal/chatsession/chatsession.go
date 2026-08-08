@@ -1585,11 +1585,11 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 		results = append(results, result)
 		// Persist after a successful kill+respawn so the registry
 		// stays in sync with the in-memory state. For in-place
-		// resets the bridge will also emit a fresh AgentConnected which
+		// resets the bridge will also emit a fresh EventAgentConnected which
 		// the runtime's eventHandler captures via
 		// PersistAgentSession; for kill+respawn the new child hasn't
 		// started yet, so this Upsert captures the new PID +
-		// cleared ResumeID before any subsequent AgentConnected arrives
+		// cleared ResumeID before any subsequent EventAgentConnected arrives
 		// (PTY's new child won't emit init at all, so this is the
 		// ONLY persistence opportunity for that path).
 		if handleChanged && cs.asFile != nil {

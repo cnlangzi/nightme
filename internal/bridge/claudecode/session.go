@@ -49,7 +49,7 @@ type session struct {
 	pumpWG sync.WaitGroup
 
 	// agentName + workspace + branch are captured at session start
-	// so the translate goroutine can stamp them onto the AgentConnected
+	// so the translate goroutine can stamp them onto the EventAgentConnected
 	// payload (consumed by channel-layer receipt rendering for
 	// the "Agent | repo | branch | tokens" foot note). All
 	// three are immutable for the session's lifetime so no
@@ -82,7 +82,7 @@ type pendingAsk struct {
 // event pump goroutine. The returned AgentSession is ready for
 // SendText / Events immediately on success.
 //
-// agentName + workspace + branch are stamped onto every AgentConnected
+// agentName + workspace + branch are stamped onto every EventAgentConnected
 // emitted by the pump so channel-layer receipts can render the
 // "Agent | repo | branch | tokens" foot note. The values are
 // stable for the session's lifetime (set once at start).

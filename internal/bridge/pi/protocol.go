@@ -82,11 +82,11 @@ type imageAttachment struct {
 type getStateResult struct {
 	// Model is the currently selected model, or null if no model is
 	// configured. Bridge takes the first non-null entry and surfaces
-	// its ID + name in AgentConnected.
+	// its ID + name in EventAgentConnected.
 	Model *getStateModel `json:"model"`
 
 	// SessionID is the running Pi session identifier. Used as the
-	// AgentConnected.SessionID.
+	// EventAgentConnected.SessionID.
 	SessionID string `json:"sessionId"`
 
 	// SessionName is the optional human-readable name. Captured for

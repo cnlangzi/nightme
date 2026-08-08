@@ -27,7 +27,7 @@
 //     operators can clean up by hand.
 //   - The resume column is the agent's own session id (e.g. Claude
 //     Code's `system/init.session_id`); captured by the runtime's
-//     EventHandler on AgentConnected and persisted so a follow-up spawn
+//     EventHandler on EventAgentConnected and persisted so a follow-up spawn
 //     can replay `--resume <id>`.
 package main
 

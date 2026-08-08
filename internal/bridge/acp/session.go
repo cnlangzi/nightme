@@ -26,7 +26,7 @@ type acpSession struct {
 	cancel context.CancelFunc
 
 	// agentName and workspace are captured at NewSession for the
-	// AgentConnected payload. ACP does not currently tell the runtime
+	// EventAgentConnected payload. ACP does not currently tell the runtime
 	// about its session id through the channel — we synthesize one
 	// here so the rest of the runtime can capture the resume id
 	// uniformly (other bridges do this via the bridge's own init
@@ -37,7 +37,7 @@ type acpSession struct {
 	sessionID string
 	events    chan agent.AgentEvent
 
-	// connectedSent guards the synthesized AgentConnected. We emit at most
+	// connectedSent guards the synthesized EventAgentConnected. We emit at most
 	// once per session, after the first successful session/new.
 	connectedSent bool
 
@@ -160,13 +160,13 @@ func (s *acpSession) setSessionID(result json.RawMessage) error {
 	if s.sessionID == "" {
 		return errors.New("bridge/acp: session/new response has no sessionId")
 	}
-	// Synthesize an AgentConnected so the runtime can capture the resume
+	// Synthesize an EventAgentConnected so the runtime can capture the resume
 	// id uniformly with Claude Code / Pi. Idempotent via connectedSent.
 	s.emitConnected()
 	return nil
 }
 
-// emitConnected publishes a single AgentConnected on s.events carrying the
+// emitConnected publishes a single EventAgentConnected on s.events carrying the
 // ACP session id so the runtime can persist it as the AgentSession's
 // resume id. Safe to call from setSessionID; emits are non-blocking
 // with a ctx.Done fallback to avoid wedging the new-session path.
@@ -176,7 +176,7 @@ func (s *acpSession) emitConnected() {
 	}
 	s.connectedSent = true
 	ev := agent.AgentEvent{
-		Kind: agent.AgentConnected,
+		Kind: agent.EventAgentConnected,
 		Connected: &agent.AgentConnectedEvent{
 			SessionID: s.sessionID,
 			AgentName: s.agentName,

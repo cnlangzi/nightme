@@ -151,7 +151,7 @@ type MessageReceipt struct {
 	// — Feishu plain_text does NOT honour \n inside a single
 	// element, so the receipt must store the multi-line form
 	// directly (rather than a single string with embedded \n).
-	// nil / empty slice = no footer (silent drop, pre-AgentConnected,
+	// nil / empty slice = no footer (silent drop, pre-EventAgentConnected,
 	// or no SessionContext on the wire).
 	footerLines []string
 

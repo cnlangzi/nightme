@@ -63,9 +63,9 @@ func TestAcpSession_SendText_EncodesCorrectly(t *testing.T) {
 }
 
 // TestNewSession_EmitsInit asserts that NewSession synthesizes a
-// single AgentConnected on the events channel carrying the ACP session
+// single EventAgentConnected on the events channel carrying the ACP session
 // id, so the runtime can capture the resume id uniformly with
-// Claude Code / Pi. The AgentConnected is emitted before NewSession
+// Claude Code / Pi. The EventAgentConnected is emitted before NewSession
 // returns, so the first event on Events() is the init.
 func TestNewSession_EmitsInit(t *testing.T) {
 	client, server := net.Pipe()
@@ -88,11 +88,11 @@ func TestNewSession_EmitsInit(t *testing.T) {
 
 	select {
 	case ev := <-session.Events():
-		if ev.Kind != agent.AgentConnected {
-			t.Fatalf("first event kind = %v, want AgentConnected", ev.Kind)
+		if ev.Kind != agent.EventAgentConnected {
+			t.Fatalf("first event kind = %v, want EventAgentConnected", ev.Kind)
 		}
 		if ev.Connected == nil {
-			t.Fatalf("AgentConnected.Connected is nil")
+			t.Fatalf("EventAgentConnected.Connected is nil")
 		}
 		if ev.Connected.SessionID != "sess-acp-abc" {
 			t.Errorf("Init.SessionID = %q, want %q", ev.Connected.SessionID, "sess-acp-abc")
@@ -104,13 +104,13 @@ func TestNewSession_EmitsInit(t *testing.T) {
 			t.Errorf("Init.Workspace = %q, want %q", ev.Connected.Workspace, "/tmp/ws")
 		}
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for AgentConnected")
+		t.Fatal("timed out waiting for EventAgentConnected")
 	}
 }
 
 // TestNewSession_NoSessionID_NoInit asserts that when the
 // session/new response has no sessionId, NewSession returns an
-// error and emits no AgentConnected.
+// error and emits no EventAgentConnected.
 func TestNewSession_NoSessionID_NoInit(t *testing.T) {
 	client, server := net.Pipe()
 	bridge := &mockBridge{Conn: client, pid: 42}

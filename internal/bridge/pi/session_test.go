@@ -24,7 +24,7 @@ import (
 )
 
 // TestSession_FullRoundTrip spawns the mock pi, asserts that:
-//  1. Start succeeds and emits exactly one AgentConnected;
+//  1. Start succeeds and emits exactly one EventAgentConnected;
 //  2. the first SendBlocks returns nil and yields a stream
 //     of text + tool events followed by EventDone with
 //     Reason:"settled" -- the channel is NOT closed;
@@ -68,8 +68,8 @@ func TestSession_FullRoundTrip(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	// Step 1: collect the AgentConnected.
-	init := mustFirstEventOfKind(t, sess, agent.AgentConnected, 2*time.Second)
+	// Step 1: collect the EventAgentConnected.
+	init := mustFirstEventOfKind(t, sess, agent.EventAgentConnected, 2*time.Second)
 	if init.Connected.AgentName != "pi" {
 		t.Errorf("Init.AgentName = %q, want pi", init.Connected.AgentName)
 	}
@@ -261,10 +261,10 @@ func TestSession_PromptTimeout_NotInfinite(t *testing.T) {
 		}
 	}()
 
-	// Drain AgentConnected so we know the bridge is fully up before
+	// Drain EventAgentConnected so we know the bridge is fully up before
 	// we measure SendText's behaviour. Without this, a slow
 	// handshake could leak into the SendText measurement.
-	mustFirstEventOfKind(t, sess, agent.AgentConnected, 3*time.Second)
+	mustFirstEventOfKind(t, sess, agent.EventAgentConnected, 3*time.Second)
 
 	start := time.Now()
 	sendErr := sess.SendText("hi")

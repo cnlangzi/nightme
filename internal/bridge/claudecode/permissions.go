@@ -6,7 +6,7 @@
 // --verbose` and parses one JSON event per stdout line. Events map to
 // AgentEvent (EventText / EventToolStart / EventToolEnd / EventPermission
 // / EventDone / EventError / EventResult / EventUsage / EventCompaction /
-// AgentConnected).
+// EventAgentConnected).
 //
 // We deliberately do NOT pass --replay-user-messages. The flag echoes
 // every user-role message back on stdout, which the channel would

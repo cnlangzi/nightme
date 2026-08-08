@@ -631,9 +631,8 @@ func (s *session) New(ctx context.Context) error {
 	// InputBuffer. Without suppression, wire events from the
 	// abandoned turn land in the fresh turnState: an old message_end
 	// stamps its usage onto the new session (corrupting the
-	// context-occupancy figure and racing handleNew's
-	// ResetCumulative), and an old agent_settled ships the abandoned
-	// reply as the new session's result card.
+	// context-occupancy figure), and an old agent_settled ships the
+	// abandoned reply as the new session's result card.
 	//
 	// endReset is deferred so an error return below cannot leave the
 	// session permanently muted.

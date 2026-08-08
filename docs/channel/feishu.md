@@ -640,7 +640,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 
 | OutboundKind | 源 AgentEvent | 触发点 | Feishu 渲染 | msg_type / API | Receipt? |
 |--------------|---------------|--------|-------------|----------------|----------|
-| `OutReply` | `EventText`(无前缀) | agent 对当前 turn 的 reply 流式 chunks(F-40 改名,原 `OutText`) | **F-44 §13.21：每 chunk → 独立 `ReplyInThreadAndChat` 消息**(不再 fold 进 receipt)。`sendReplyInThreadAndChat` 走 3 段 dispatch:无 markdown → `MsgTypeText`;tables>5 → `MsgTypePost+md`;默认 → `MsgTypeInteractive` Card 2.0 + 1/`N` `tag:"markdown"` div(F-37 `splitMarkdownForDivs` 拆 ≤ 1000 runes/div)。复用 F-39 `SanitizeCardMarkdown` + `truncateRunes` 28 KB envelope defense。**不加 icon 前缀**(流延续,不是新条目)。**F-45 §13.22:文本末尾追加 `formatSessionFooter(msg.SessionContext)`**(Agent · Model · ↓ in · ↻ cached · ↑ out · Total · $cost,ASCII 箭头无 emoji) | `interactive` Create / `post` Create / `text` Create | ❌ (独立气泡,锚同 userMsgID) |
+| `OutReply` | `EventText`(无前缀) | agent 对当前 turn 的 reply 流式 chunks(F-40 改名,原 `OutText`) | **F-44 §13.21：每 chunk → 独立 `ReplyInThreadAndChat` 消息**(不再 fold 进 receipt)。`sendReplyInThreadAndChat` 走 3 段 dispatch:无 markdown → `MsgTypeText`;tables>5 → `MsgTypePost+md`;默认 → `MsgTypeInteractive` Card 2.0 + 1/`N` `tag:"markdown"` div(F-37 `splitMarkdownForDivs` 拆 ≤ 1000 runes/div)。复用 F-39 `SanitizeCardMarkdown` + `truncateRunes` 28 KB envelope defense。**不加 icon 前缀**(流延续,不是新条目)。**F-45 §13.22:文本末尾追加 `formatSessionFooter(msg.SessionContext)`**(F-52 新格式:`🤖 Agent · Model` + `💰:「 in / out · X% · $cost 」`;`in` = 三个 input-side 字段之和;`X%` = per-turn context-window 占比,客户端从 API 报的 ContextWindow + used 算;`$cost` = API 透传 `total_cost_usd`,客户端不计算) | `interactive` Create / `post` Create / `text` Create | ❌ (独立气泡,锚同 userMsgID) |
 | `OutThinking` | `EventText`(带 `[思考] ` 前缀,Gateway 已剥) | agent reasoning | **`collapsible_panel` + `💭` 折叠**(§13.6 设计决策;§13.1 bug 待修) | `interactive` PATCH | ✅ |
 | `OutToolStart` | `EventToolStart` | 工具开始 | **`collapsible_panel` + `🔧` 折叠**(§13.6 设计决策,粒度待定 §13.7) | `interactive` PATCH | ✅ |
 | `OutToolEnd` | `EventToolEnd` | 工具结束(成功/失败) | **`collapsible_panel` + `✅` / `❌` 折叠**(§13.6 设计决策,与 Start 合并 or 独立待定 §13.9) | `interactive` PATCH | ✅ |
@@ -1433,9 +1433,11 @@ WebSearch  -> 10 results
 ```json
 [
   {"tag": "hr"},
-  {"tag": "markdown", "content": "<font color='grey'>🤖 claude · opus-4-5</font>\n<font color='grey'>💰 ↓ 12.3k · ↻ 8.2k · ↑ 1.5k · 22.0k · $0.087</font>"}
+  {"tag": "markdown", "content": "<font color='grey'>🤖 claude · opus-4-5</font>\n<font color='grey'>💰:「 20.5k / 1.5k · 10.5% · $0.087 」</font>"}
 ]
 ```
+
+> F-52 把 footer 收成「in / out · X% · $cost」三段、`「」` 包裹,`in` = 三个 input-side 字段之和;旧 C 版「↓ in · ↻ cached · ↑ out · Total · $cost」已废。
 
 源代码:`internal/channel/feishu/result_render.go::cardFooterElements` —— **单一来源**,被 `buildReceiptCard`(OutReply / OutTask 路径)和 `buildResultCardJSON`(OutResult 路径)共用。
 
@@ -1892,6 +1894,8 @@ user_msg om_A
 
 ### 13.22 🎯 F-45 决策 (2026-08-05):Main-Chat 卡片 Footer + AgentSession 累计 Token 持久化
 
+> ⚠️ **F-52 / single-shot refactor (2026-08-08)**：本节描述的"累计 token 持久化"架构已被后续 single-shot 重构废弃。`AgentSession` 不再持有 `cumulativeUsage` 字段,`AccumulateUsage` / `ResetCumulative` / `CumulativeUsage` 方法删除,`agent_sessions.json` 不再存 `cumulativeUsage` 字段。bridge 报的 `ResultEvent.Usage` / `DoneEvent.Usage` 直接透传到 `SessionContext.Usage`(每个 turn 独立 snapshot,runtime pass-through)。本节作为历史 design record 保留,新契约见 [`feat/F-45-session-footer.md`](../feat/F-45-session-footer.md) §1.6 与 [`wip/usage.md`](../wip/usage.md) 重构清单。
+
 > ⚠️ **F-46 follow-up (PR #52)**: the OutReply "append footer to text
 > via \n\n" path described in step 5 was replaced by a card-element
 > footer (hr + grey plain_text). OutResult got the same fix. The
@@ -1941,15 +1945,16 @@ user_msg om_A
    - `gateway/messages.go` 保留 `type UsageInfo = agent.UsageInfo` alias 保 ABI
    - 顺手修 `UsageInfo.InputTokens` 注释:原 "total input tokens consumed ... (prompt + cache reads + tool input)" 误导(实现只搬运裸 `input_tokens`,不包含 cache reads);新注释明确 "non-cached input token count ... Cache hits are NOT included — see CacheReadInputTokens"
 
-4. **Footer 格式 (C 版,ASCII 箭头无 emoji)**:
+4. **Footer 格式 (F-52 D 版,「」 enclosed)**:
    ```
-   claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k · $0.087
+   🤖 claude · opus-4-5
+   💰:「 20.5k / 1.5k · 10.5% · $0.087 」
    ```
-   - `↓ in` = `InputTokens + CacheCreationInputTokens`(按原价/1.25x 计费部分)
-   - `↻ cached` = `CacheReadInputTokens`(按 0.1x 计费部分)
-   - `↑ out` = `OutputTokens`
-   - `Total` = 三者之和(4 个原始 token 字段全加:In + CacheCreate + CacheRead + Out)
-   - `$cost` 仅 `CostUSD > 0` 时显示
+   - `in` = `InputTokens + CacheCreationInputTokens + CacheReadInputTokens`(Tencent YB 文档口径:input-side total,见 https://yb.tencent.com/s/3G6HphjOxM70;F-45 旧 C 版分两段 `↓ in + ↻ cached`,F-52 合并)
+   - `out` = `OutputTokens`
+   - `X%` = `(in + out) / ContextWindow * 100`,ContextWindow 是 API 报的模型窗口大小(Claude Code: `modelUsage[<model>].contextWindow`);一位小数;`== 0` 时省略(还没 EventDone / 模型没报 / 刚 Reset)
+   - `$cost` = API 透传 `total_cost_usd`,客户端**不计算**(无 rate table / 无 per-model pricing)
+   - 段之间 ` · ` 分隔,`「」` 括号只在至少一段非空时包裹整行
    - 缩写 `<1000 raw` / `≥1k "X.Xk"` / `≥1M "X.XM"`
    - 各 segment 在 0 / 空时省略(不显示 `0 in`)
    - 分隔符 ` · ` (middle dot + spaces),与 F-37 / F-44 footer 视觉一致

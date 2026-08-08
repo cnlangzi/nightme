@@ -290,9 +290,9 @@ type ResetResult struct {
 
 	// Session is the underlying AgentSession — populated so the
 	// caller (handleNew in F-45) can perform per-row follow-up
-	// actions such as ResetCumulative + PersistAgentSession
-	// without re-walking the pool. nil only when targets were
-	// empty (matched == 0); always set otherwise.
+	// actions such as PersistAgentSession without re-walking the
+	// pool. nil only when targets were empty (matched == 0);
+	// always set otherwise.
 	Session *AgentSession
 }
 

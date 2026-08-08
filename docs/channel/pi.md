@@ -141,7 +141,7 @@ bridge 对未知字段一律宽松（`json.RawMessage` + 忽略未知 key），�
 
 ### 6.1 共享层 usage 语义：累加 → 覆盖（**已知缺陷，未修**）
 
-F-49 §1.2 已把 4 个 token 字段定义为「当前上下文占用」（compaction 归零、`CostUSD` 保留），但 `AgentSession.AccumulateUsage`（`internal/chatsession/agentsession.go`）实现上是**跨轮累加**。
+F-49 §1.2 已把 4 个 token 字段定义为「当前上下文占用」（compaction 归零、`CostUSD` 保留），但 `AgentSession.AccumulateUsage`（`internal/chatsession/agentsession.go`）实现上是**跨轮累加**。**2026-08 update**:`AccumulateUsage` 已被后续 single-shot 重构删除,bridge 报的 `ResultEvent.Usage` 直接透传到 `SessionContext.Usage`,runtime 不再累加也不在 compaction 时归零 —— 下一轮 EventResult / EventDone 自带新的(压缩后)context 快照。详见 [`../wip/usage.md`](../wip/usage.md) 重构清单。
 
 而 bridge 报的是「最后一次 API call 的快照」，累加 N 轮就虚高 N 倍——正是 F-49 §0.1 抱怨的 "1.37M mystery number" 的根因，compaction 归零只是把问题往后推。
 

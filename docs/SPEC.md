@@ -515,30 +515,32 @@ type OutboundMessage struct {
 
 1. **`AgentSession` 自管 metadata（runtime）**
    - 加 `Model string` 字段：EventAgentConnected 时捕获（`s.SetModel(ev.Connected.Model)`），持久化到 `AgentSessionEntry.Model`
-   - 加 `cumulativeUsage UsageInfo` + mutex + `cumulativeDirty bool`：EventUsage 时累加（`s.AccumulateUsage(ev.Usage)`），EventDone 时落盘（`s.PersistIfDirty(...)`）
-   - **仅 `/new` 清零**（`s.ResetCumulative()`），daemon 重启 / `/cwd` / `/use` / `/kill` / 进程崩溃一律保留
-   - 6 个新方法：`SetModel` / `Model` / `AccumulateUsage` / `ResetCumulative` / `CumulativeUsage` / `PersistIfDirty`
+   - **不持有 usage 状态**：F-52 + 后续 single-shot 重构后,`cumulativeUsage` 字段、`AccumulateUsage` / `ResetCumulative` / `CumulativeUsage` 方法全部删除。bridge 报的 `ResultEvent.Usage` / `DoneEvent.Usage` 直接透传,runtime 不累加、不落盘、不重置。
+   - 仅保留:`Model` / `ResumeID` / `CompactionCount` / Prompt lifecycle(详见 [`usage.md`](wip/usage.md) 重构清单)
 
 2. **`OutboundMessage` 加 1 个 typed snapshot field**
-   - 新增 `SessionContext *SessionContext` 字段（不是 3 个分散字段），承载 `{Agent, Model, CumulativeUsage}`
-   - 设计收敛：所有 main-chat metadata 收拢到 1 个 atomic snapshot，扩展新字段只改 `SessionContext` 定义，不破 Channel 接口
-   - 仅在 4 个 main-chat Kind 上 stamp：`OutReply` / `OutResult` / `OutTaskCreate` / `OutTaskUpdate`
-   - 其他 Kind（thread / lifecycle / init+usage 自身）`SessionContext == nil`，Channel 跳过 footer
+   - 新增 `SessionContext *SessionContext` 字段(不是 3 个分散字段),承载 `{Agent, Model, Usage *agent.UsageEvent, CompactionCount}`
+   - 设计收敛:所有 main-chat metadata 收拢到 1 个 atomic snapshot,扩展新字段只改 `SessionContext` 定义,不破 Channel 接口
+   - 仅在 4 个 main-chat Kind 上 stamp:`OutReply` / `OutResult` / `OutTaskCreate` / `OutTaskUpdate`
+   - 其他 Kind(thread / lifecycle / init+usage 自身)`SessionContext == nil`,Channel 跳过 footer
+   - **`Usage` 字段**:per-turn snapshot(不是 cumulative),bridge 报的 `UsageEvent` 直接引用。`Usage == nil` 时 footer Line 2 省略(典型:OutReply streaming chunk 不带 usage)
 
 3. **`OutboundMessage` 与 `agent` 包结构整理**
-   - `UsageInfo` 从 `internal/gateway/messages.go` 搬到 `internal/agent/agent.go`（紧挨 `UsageEvent`）—— 消除 `chatsession → gateway` 反向 import
+   - `UsageInfo` 从 `internal/gateway/messages.go` 搬到 `internal/agent/agent.go`(紧挨 `UsageEvent`)—— 消除 `chatsession → gateway` 反向 import
    - `gateway/messages.go` 保留 `type UsageInfo = agent.UsageInfo` alias 保 ABI 兼容
+   - **`UsageInfo` 与 `UsageEvent` 都是 per-turn snapshot,不再"cumulative form"** — 重命名 / 注释全面更新,见 [`usage.md`](wip/usage.md) §1.2
    - 顺手修 `UsageInfo.InputTokens` 注释：原 "total input tokens consumed (prompt + cache reads + tool input)" 误导（实际只搬运裸 `input_tokens`），新注释 "non-cached input token count ... Cache hits are NOT included — see CacheReadInputTokens"
+   - `agent.UsageEvent` / `UsageInfo` 新增 `ContextWindowPct float64` — bridge 算的 per-turn context-fill %(Doc 1 公式),runtime 不参与。channel footer 从 `ctx.Usage.ContextWindowPct` 读取 X% 段
 
-4. **Footer 渲染规则（C 版，ASCII 箭头无 emoji）**
-   - 格式：`claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k · $0.087`
-   - `↓ in` = `InputTokens + CacheCreationInputTokens`（按原价/1.25x 计费部分）
-   - `↻ cached` = `CacheReadInputTokens`（按 0.1x 计费部分）
-   - `↑ out` = `OutputTokens`
-   - `Total` = 三者之和（4 个原始 token 字段全加）
-   - `$cost` 仅 `CostUSD > 0` 时显示
+4. **Footer 渲染规则（F-52 D 版，`「」` 包裹）**
+   - 格式：`🤖 claude · opus-4-5` + `💰:「 in / out · X% · $cost 」`
+   - `in` = `InputTokens + CacheCreationInputTokens + CacheReadInputTokens`（Tencent YB 文档口径：input-side total）
+   - `out` = `OutputTokens`
+   - `X%` = `(in + out) / ContextWindow * 100`，`ContextWindow` 取自 API（Claude Code: `modelUsage[<model>].contextWindow`），一位小数，`== 0` 时省略
+   - `$cost` = API 透传 `total_cost_usd`，**客户端不计算**
+   - 段之间 ` · ` 分隔；`「」` 括号只在至少一段非空时包裹整行
    - 缩写：`<1000 raw` / `≥1k "X.Xk"` / `≥1M "X.XM"`
-   - 各 segment 在 0 / 空时省略（不显示 `0 in`）
+   - 各 segment 在 0 / 空时独立省略（不显示 `0 in`）
 
 5. **Feishu adapter 改 3 case**
    - `OutReply` → `sendReplyInThreadAndChat`：签名加 `ctx *SessionContext`，helper 内部拼 footer 到 text 末尾（`text + "\n\n" + footer`）
@@ -546,9 +548,10 @@ type OutboundMessage struct {
    - `OutTaskCreate` / `OutTaskUpdate` → receipt card：`buildReceiptCard(tasks, footer)` 新签名，footer 作为独立的 `hr + lark_md div` 追加到 checklist 末尾（占用 2 元素，50 上限远未撞破）
    - 新文件 `internal/channel/feishu/usage_footer.go`：`formatSessionFooter` + `abbrevTokens` helpers
 
-6. **`/new` 清零 cumulative**
-   - `handleNew` 在调 `as.New(ctx)` 之后立即 `as.ResetCumulative()` + `mgr.PersistAgentSession(as)`
-   - 与 F-43 的 `clear ResumeID` 语义对称：「bridge 重置上下文」+「runtime 重置累计」
+6. **`/new` 不再清零 AS 任何 usage 状态**
+   - `handleNew` 只调 `as.New(ctx)`(bridge 协议层 reset context),runtime 不清零任何 token / cost
+   - 下一轮 EventResult / EventDone 自带新 snapshot,footer 直接渲染
+   - 历史原因:`AgentSession.ResetCumulative` 已被删除,`cumulativeUsage` 字段已不存在
 
 7. **EventDone 触发持久化**
    - `cmd/nightme/run.go::newEventHandler` 在 EventDone 处理路径调 `s.PersistIfDirty(...)`

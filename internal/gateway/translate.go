@@ -134,6 +134,14 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		// header; the Stage 3 Feishu renderer flips the reaction
 		// emoji and edits the header line. We don't emit a separate
 		// OutboundMessage for them here.
+		//
+		// F-52 note: Done.Usage (when populated by the bridge) is
+		// read directly by the runtime's newEventHandler BEFORE
+		// Translate returns — see cmd/nightme/run.go. Translate
+		// itself does not need to surface it; the runtime is the
+		// single accumulator and reads from Done.Usage uniformly
+		// regardless of whether the bridge also emitted an
+		// EventResult-bearing text.
 		return OutboundMessage{}, false
 
 	case agent.EventResult:
@@ -161,7 +169,8 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		// the EventResult-then-EventUsage ordering hazard that
 		// forced the runtime to buffer OutResult. nil usage
 		// (zero-usage turn / synthetic message) is fine — the
-		// runtime simply skips AccumulateUsage that invocation.
+		// runtime is a passive pass-through, so a nil Usage just
+		// means the channel footer omits Line 2.
 		if u := ev.Result.Usage; u != nil {
 			out.Usage = u
 		}

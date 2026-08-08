@@ -1,4 +1,4 @@
-# F-45: AgentSession 累计 Token 统计 + Main-Chat 卡片 Footer
+# F-45: Main-Chat 卡片 Footer (per-turn snapshot)
 
 > **Status**: ✅ 已落地（2026-08-05）；§1.7 F-48 follow-up（2026-08-06）；§1.8 F-49 follow-up（2026-08-06）
 > **F-46 增量**（2026-08-06）—decision cards 加 button + 原地 PATCH；详见 [`F-46-interactive-cards.md`](./F-46-interactive-cards.md)
@@ -58,7 +58,7 @@ F-44 在 `internal/channel/feishu/receipt.go` 把 receipt 简化为只装 Task c
 ```go
 AgentName       string  // runtime 填 s.Agent
 Model           string  // runtime 填 s.Model()
-CumulativeUsage *UsageInfo  // runtime 填 s.CumulativeUsage()
+Usage *agent.UsageEvent  // bridge 报的本轮 usage — runtime 直接 out.Usage 透传
 ```
 
 **问题**：Channel 拿到 3 个字段后要自己拼装 footer，metadata 关系散落 3 处，扩展新字段（如 `provider_url` / `agent_version`）要继续加字段。
@@ -71,7 +71,7 @@ CumulativeUsage *UsageInfo  // runtime 填 s.CumulativeUsage()
 type SessionContext struct {
     Agent           string
     Model           string
-    CumulativeUsage UsageInfo
+    Usage *agent.UsageEvent
 }
 
 type OutboundMessage struct {
@@ -109,6 +109,8 @@ type OutboundMessage struct {
 > claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k · $0.087
 > ```
 > `↓ / ↻ / ↑` 是 ASCII 箭头（不依赖 emoji 字体）；`·` 是 middle dot；`$0.087` 保留 3 位小数（与 Anthropic 账单精度对齐）。
+>
+> **F-52 update (2026-08)**：上方 C 版已废，footer 改为「`💰:「 in / out · X% · $cost 」`」格式——见 §1.6 最新规则。保留此行作为 F-45 原始 design record。
 
 ### 0.5 持久化范围澄清
 
@@ -213,7 +215,7 @@ type SessionContext struct {
     // All 4 token fields are zero on a fresh /new'd session.
     // Channel derives Total = In + CacheCreate + CacheRead + Out
     // at render time; no Total field on the wire (avoids redundancy).
-    CumulativeUsage UsageInfo
+    Usage *agent.UsageEvent
     // F-49: cumulative count of completed context compactions on
     // this AgentSession. 0 when never compacted. Persists across
     // daemon restarts; cleared only by /new. Sourced from
@@ -289,58 +291,52 @@ SessionContext *SessionContext
 
 ### 1.6 Footer 渲染规则（formatSessionFooter）
 
-```go
-// internal/channel/feishu/usage_footer.go (NEW)
-//
-// Format C (arrow-based, ASCII only):
-//   claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k · $0.087
-//
-// Segments:
-//   - Agent   : omitted when ""
-//   - Model   : omitted when ""
-//   - ↓ in    : omitted when 0; value = InputTokens + CacheCreationInputTokens
-//   - ↻ cache : omitted when 0; suffix " cached" fixed
-//   - ↑ out   : omitted when 0
-//   - Total   : omitted when all token segments are 0; value = sum of 3
-//   - $cost   : omitted when CostUSD == 0; 3 decimal places
-//
-// Separator: " · " (middle dot + spaces) — visually consistent with
-// F-37 / F-44 footer conventions. No emoji (user preference).
-func formatSessionFooter(ctx *gateway.SessionContext) string {
-    if ctx == nil {
-        return ""
-    }
-    parts := []string{}
-    if ctx.Agent != "" {
-        parts = append(parts, ctx.Agent)
-    }
-    if ctx.Model != "" {
-        parts = append(parts, ctx.Model)
-    }
-    u := ctx.CumulativeUsage
-    in := u.InputTokens + u.CacheCreationInputTokens
-    if in > 0 {
-        parts = append(parts, "↓ " + abbrevTokens(in))
-    }
-    if u.CacheReadInputTokens > 0 {
-        parts = append(parts, "↻ " + abbrevTokens(u.CacheReadInputTokens) + " cached")
-    }
-    if u.OutputTokens > 0 {
-        parts = append(parts, "↑ " + abbrevTokens(u.OutputTokens))
-    }
-    total := in + u.CacheReadInputTokens + u.OutputTokens
-    if total > 0 {
-        parts = append(parts, fmt.Sprintf("Total %s", abbrevTokens(total)))
-    }
-    if u.CostUSD > 0 {
-        parts = append(parts, fmt.Sprintf("$%.3f", u.CostUSD))
-    }
-    if len(parts) == 0 {
-        return ""
-    }
-    return strings.Join(parts, " · ")
-}
+**F-52 重构 (2026-08)**：F-45 原本把 `in / out / cache / total / $cost` 拆成多段（`↓ in · ↻ cached · ↑ out · Total · $cost`）。F-52 统一为更紧凑的「`💰:「 in / out · X% · $cost 」`」格式，理由：
+- "in" 按 https://yb.tencent.com/s/3G6HphjOxM70 的口径合并三个 input-side 字段（`InputTokens + CacheCreationInputTokens + CacheReadInputTokens`），避免用户在 IM 里还要心算 cache_creation + cache_read。
+- "X%" 是 per-turn context-window 使用率（`used / ContextWindow * 100`，`ContextWindow` 是 API 报的模型窗口大小），让用户一眼看到距离 ceiling 还剩多少。
+- "$cost" 直接透传 API 报的 `total_cost_usd`，客户端不计算（没有 rate table / 没有 per-model pricing）。
 
+**新格式 (Format D, 「」 enclosed)**：
+
+```
+🤖 claude · opus-4-5
+💰:「 20.5k / 1.5k · 10.5% · $0.087 」
+📁 code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
+```
+
+**Line 2 segments**：
+
+| 段 | 来源 | Omit 规则 | 渲染 |
+|---|---|---|---|
+| `in / out` | `in = InputTokens + CacheCreationInputTokens + CacheReadInputTokens`；`out = OutputTokens` | `in == 0 && out == 0` 时整段省略（无 usage） | `abbrevTokens(in) + " / " + abbrevTokens(out)`；零侧显示 `0`（罕见，例如 compaction-only turn） |
+| `X%` | `SessionContext.ContextWindowPct`（F-52 算） | `== 0` 时省略（runtime 的三个零情形：还没收到 EventDone-with-Usage / 模型本轮没报 ContextWindow / 刚 ResetCumulative 或 RecordCompaction） | `fmt.Sprintf("%.1f%%", pct)` — 一位小数；`99.6%` 不能四舍五入到 `100%` |
+| `$cost` | `agent.UsageEvent.CostUSD`（F-52 透传 API 报的 `total_cost_usd`） | `== 0` 时省略（API 没报） | `fmt.Sprintf("$%.3f", cost)` — 三位小数，与 F-45 原约定一致 |
+
+段之间用 ` · ` 分隔；`「」` 括号只在至少一个段非空时才包裹整行。Line 1 / Line 3 的 omit 规则、emoji 选择（🤖 / 🗜 / 📁）均不变。
+
+**Why F-52 改这三件事**：
+1. **in = uncached + cache_creation + cache_read**：Tencent YB 文档 + Claude Code `/cost` 统计口径一致。之前的 `↓ in · ↻ cached` 拆法让用户得自己加两个数才知道"in 总共多少"，违反 footer 一次成型的目的。
+2. **加 `X%` 段**：F-52 引入的 `ContextWindowPct`（Doc 1 公式 = `used / ContextWindow * 100`）是 chat session 用户最关心的"距离 ceiling 还剩多少"指标，独立成段比塞进 `in / out` 自然。
+3. **`$cost` 客户端不计算**：Anthropic API 的 `total_cost_usd` 已经把不同模型的差异化定价算好了，客户端维护 rate table 既过时又错。直接透传是唯一正解。
+
+**实测样例 (F-52 后)**：
+
+```
+🤖 claude · opus-4-5
+💰:「 20.5k / 1.5k · $0.087 」                                  # 无 ContextWindow 报回
+🤖 claude · opus-4-5
+💰:「 20.0k / 1.0k · 10.5% 」                                   # 有 X%，无 cost
+🤖 claude · opus-4-5
+💰:「 1.4M / 18.0k · 99.6% · $1.234 」                          # 大 turn，接近 ceiling
+🤖 claude · opus-4-5
+💰:「 $1.245 」                                                 # 只有 cost（极少见）
+🤖 claude · opus-4-5
+💰:「 100.0% 」                                                 # 满 context
+```
+
+**`abbrevTokens`**（未变）：
+
+```go
 // abbrevTokens: <1000 raw, 1000-999999 → "%.1fk", >=1M → "%.1fM"
 func abbrevTokens(n int) string {
     switch {
@@ -354,7 +350,7 @@ func abbrevTokens(n int) string {
 }
 ```
 
-**实测样例**：
+**F-45 原 Format C 样例（保留以便 review 对照）**：
 
 ```
 ↓ 234 · ↻ 5.6k cached · ↑ 89 · Total 5.9k                    # 小 turn，无 agent/model
@@ -363,6 +359,8 @@ claude · opus-4-5 · ↓ 156k · ↻ 1.2M cached · ↑ 18k · Total 1.37M · $
 claude · ↓ 12.3k · ↑ 1.5k · Total 13.8k                                       # 无 model 无 cost 无 cache
 claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k          # 无 cost
 ```
+
+> Format C 的对应代码已在 F-52 重构时删除，仅保留样例作为「之前怎么写」的考古参考。
 
 ### 1.7 Git Branch Tracking (F-48 follow-up)
 
@@ -406,7 +404,7 @@ claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k   
 type SessionContext struct {
     Agent           string
     Model           string
-    CumulativeUsage UsageInfo
+    Usage *agent.UsageEvent
     Workspace       string                  // NEW (F-48)
     GitStatus       *gtw.GitStatusSnapshot  // NEW (F-48)
     CompactionCount int                     // NEW (F-49: 🗜 N 计数)
@@ -546,7 +544,7 @@ F-45 §1.2 的 OutboundKind → Footer 路由表中 `OutCompaction` 一行删除
 type SessionContext struct {
     Agent           string
     Model           string
-    CumulativeUsage UsageInfo
+    Usage *agent.UsageEvent
     Workspace       string                  // F-48
     GitStatus       *gtw.GitStatusSnapshot  // F-48
     CompactionCount int                     // F-49: 🗜 N 计数

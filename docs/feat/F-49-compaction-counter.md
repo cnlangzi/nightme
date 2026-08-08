@@ -19,6 +19,8 @@
 
 ---
 
+> **⚠️ F-52 single-shot update (2026-08)**：本文最早基于 "cumulative token 累计 + compaction 时归零" 的语义撰写。F-52 重构后,token / cost 不再跨 turn 累加(每个 turn 是 bridge 报的独立 snapshot,详见 [`F-45 §1.6`](./F-45-session-footer.md) 新契约)。**§1.2 / §1.4 的 cumulative reset 设计已被 supersede** —— 现在 compaction 的语义更简单:bridge 报 compaction 事件,runtime 增 `compactionCount`,**不清零任何 token**(因为本来就没有 cumulative)。下一轮 EventResult / EventDone 自带新的(压缩后的) context 快照,footer 直接渲染。`CompactionCount` 和 `CostUSD` 都只是计数观测,不再 reset。本文档其余部分(bridge 抽象 / Footer Line 1 渲染 / Bridge 改动)仍然适用。
+
 ## 0. 背景
 
 ### 0.1 用户痛点

@@ -10,7 +10,7 @@
 // What it covers:
 //
 //	ChatSession.Dispatch → input buffer → Spawn → bridge.SendText →
-//	pi reads stdin → pi emits events → readPump → eventHandler →
+//	pi reads stdin → pi emits events → readPump → AgentEventBus subscriber →
 //	outbound Send on a fake channel
 //
 // This is the path the F-32 2026-08-06 incident was suspected to
@@ -44,7 +44,7 @@ import (
 // full outbound path. The current e2e test reads events from
 // the bridge directly (sess.Events()) which is sufficient to
 // prove the readPump pipeline — the outbound translation is
-// exercised by the runtime's eventHandler which the test
+// exercised by the runtime's AgentEventBus subscriber which the test
 // installs.
 type fakeOutboundChannel struct {
 	mu     sync.Mutex
@@ -123,7 +123,7 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 	// eventHandler — this is THE production path. We do NOT
 	// also drain sess.Events() ourselves, because the bridge
 	// channel is single-consumer; the readPump already drains
-	// it via the eventHandler callback.
+	// it via the AgentEventBus subscriber callback.
 	var (
 		mu       sync.Mutex
 		reply    strings.Builder
@@ -131,7 +131,8 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 		sawDone  bool
 		eventLog []string
 	)
-	cs.SetEventHandler(func(chatID string, sess *AgentSession, ev agent.AgentEvent, userMsgID string) {
+	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
+		ev := env.Event
 		mu.Lock()
 		defer mu.Unlock()
 		eventLog = append(eventLog, ev.Kind.String())
@@ -149,6 +150,7 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 		case agent.EventError:
 			t.Errorf("pi emitted error: %v", ev.Error)
 		}
+		return false
 	})
 
 	// CS-AS 边界重构 Phase 1: the readpump is per-AgentSession and

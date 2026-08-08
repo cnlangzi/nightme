@@ -142,15 +142,6 @@ type Gateway interface {
 	LookupByChat(chatID string) *BindingEntry
 	ListBindings() []BindingEntry
 
-	// OnMessageState is the v1.3 (F-31) ChatSession-callback
-	// entry point. The runtime (cmd/nightme) wires gw.OnMessageState
-	// into every ChatSession at startup via SetMessageStateHandler.
-	// ChatSession calls it on lifecycle events (received /
-	// forwarded / done / error); Gateway translates to
-	// OutboundMessage{Kind: OutMessageState} and forwards to the
-	// appropriate channel via resolveChannel + Send.
-	OnMessageState(chatID, userMsgID string, state agent.MessageState)
-
 	// WithActionHandler installs the reaction/action
 	// router (F-25 + F-45). DispatchInbound calls the handler
 	// when msg.Reaction or msg.Action is set; the runtime
@@ -796,41 +787,12 @@ func (g *gateway) resolveChannel(chatID string) Channel {
 	return g.defaultChannel
 }
 
-// OnMessageState is the v1.3 (F-31) ChatSession-callback entry
-// point. Wired into every ChatSession at startup via
-// SetMessageStateHandler. Translates the abstract lifecycle event
-// to OutboundMessage{Kind: OutMessageState} and forwards via the
-// channel that owns chatID.
-//
-// Failure semantics (per F-31 §9):
-//   - No channel for chatID: silent drop (debug log only).
-//   - Channel.Send error: log warn, never block caller.
-//     ChatSession lifecycle is unaffected by render failures.
-//   - Handler called with empty chatID or userMsgID: silent drop.
-//
-// Concurrency: callable from any goroutine. resolveChannel takes
-// RLock on g.mu briefly; Send runs synchronously per the caller's
-// context (background ctx is used internally because ChatSession
-// doesn't currently pass a cancellable ctx to emitMessageState).
-func (g *gateway) OnMessageState(chatID, userMsgID string, state agent.MessageState) {
-	if chatID == "" || userMsgID == "" {
-		return
-	}
-	ch := g.resolveChannel(chatID)
-	if ch == nil {
-		log.Printf("gateway: OnMessageState no channel for chat=%s, dropping", chatID)
-		return
-	}
-	out := OutboundMessage{
-		Kind:    OutMessageState,
-		ChatID:  chatID,
-		ReplyTo: userMsgID, // anchor for Typing placeholder + AddReaction target
-		MessageState: &MessageStatePayload{
-			State:     state,
-			MessageID: userMsgID,
-		},
-	}
-	if err := ch.Send(context.Background(), out); err != nil {
-		log.Printf("gateway: MessageState send failed (chat=%s, state=%s): %v", chatID, state, err)
-	}
-}
+// OnMessageState was the v1.3 (F-31) ChatSession-callback entry
+// point. REMOVED (F-54 review): production no longer wires this
+// — the runtime's MessageStateBus subscriber in cmd/nightme/run.go
+// builds the F-48-stamped OutboundMessage directly and routes it
+// via the runtime's channel handle. The un-stamped translation
+// helper now lives in message_state_helpers_test.go (test-only)
+// for tests that target the translation logic itself.
+
+// (impl removed — see message_state_helpers_test.go for the test helper)

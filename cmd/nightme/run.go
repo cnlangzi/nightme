@@ -300,7 +300,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// Manager.onCreate hook. Both callbacks MUST be installed in
 	// this single closure — separating them (one here, one in
 	// /use or newMessageDispatcher) is a silent-failure landmine
-	// because readpump fires only when eventHandler is non-nil.
+	// because readpump fires only when AgentEventBus has subscribers.
 	//
 	// ORDER MATTERS: WithOnCreate MUST be called BEFORE
 	// RestoreFromRegistry. RestoreFromRegistry fires onCreate for
@@ -649,7 +649,7 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 
 // wireRuntimeCallbacksAndRestore installs the per-ChatSession
 // outbound handlers (EventHandler for AgentEvent → OutboundMessage
-// translation; MessageStateHandler for F-31 lifecycle reactions)
+// translation; MessageStateBus subscriber for F-31 lifecycle reactions)
 // via Manager.WithOnCreate, then restores persisted ChatSessions
 // from disk. The two calls MUST happen in this order —
 // RestoreFromRegistry fires onCreate for every restored
@@ -677,30 +677,46 @@ func wireRuntimeCallbacksAndRestore(
 	gwImpl *gateway.Router,
 	logger *slog.Logger,
 ) error {
-	factory := func(cs *chatsession.ChatSession) chatsession.EventHandler {
-		return newEventHandler(ch, cs, mgr, logger)
-	}
 	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
 		// Startup audit trail: one line per chat, bounded by the
 		// number of persisted chats — confirms the outbound
-		// wiring (EventHandler / MessageStateHandler /
-		// PromptEndHandler / PumpEvents) is actually installed
-		// for every restored-or-new ChatSession. See the bug
-		// history note on wireRuntimeCallbacksAndRestore above:
-		// a missing/misordered handler here is a silent failure
-		// (no logs, no channel.Send, no reactions), so this line
-		// is the cheapest signal that wiring succeeded.
+		// wiring (AgentEventBus / MessageStateBus / PromptEndBus /
+		// PumpEvents) is actually installed for every
+		// restored-or-new ChatSession. See the bug history note on
+		// wireRuntimeCallbacksAndRestore above: a missing/misordered
+		// handler here is a silent failure (no logs, no
+		// channel.Send, no reactions), so this line is the cheapest
+		// signal that wiring succeeded.
 		//
 		// Debug-level (not Info) so a daemon with hundreds of
 		// persisted chats doesn't flood the log at startup; use
-		// `Logging.Level: debug` to surface the audit trail
-		// when investigating handler-installation regressions.
+		// `Logging.Level: debug` to surface the audit trail when
+		// investigating handler-installation regressions.
 		if logger != nil {
 			logger.Debug("runtime: handlers installed for chat",
 				"chat_id", cs.ChatID,
 				"cs_id", cs.ID)
 		}
-		cs.SetEventHandler(factory(cs))
+
+		// F-54: subscribe to the per-ChatSession event buses.
+		// Each handler is a typed lambda on the corresponding
+		// envelope; the Bus fires them in registration order with
+		// panic isolation. Multiple subscribers may coexist; we
+		// register exactly one per bus here. New subscribers
+		// (audit, metrics, HUD) can register alongside.
+
+		// AgentEventBus — translates bridge AgentEvent to
+		// OutboundMessage and dispatches via Channel.Send. The
+		// per-cs handler closure is built ONCE here (not inside
+		// the Subscribe callback) — newEventHandler itself
+		// allocates a closure, so calling it on every Publish
+		// would burn one allocation per event.
+		agentHandler := newEventHandler(ch, cs, mgr, logger)
+		cs.AgentEventBus.Subscribe(func(env chatsession.AgentEventEnvelope) bool {
+			agentHandler(env)
+			return false
+		})
+
 		// F-48: wrap the gateway's OnMessageState so the runtime
 		// can stamp SessionContext on MessageSubmitted (the
 		// Feishu placeholder card needs the footer). The gateway's
@@ -712,36 +728,48 @@ func wireRuntimeCallbacksAndRestore(
 		// OutboundMessage, send) plus the stamp on MessageSubmitted.
 		// Other states (MessageQueued / MessageDropped) don't need
 		// the stamp — they don't create UI.
-		cs.SetMessageStateHandler(func(chatID, userMsgID string, state agent.MessageState) {
+		//
+		// F-54 review note: this handler routes via `ch` (the
+		// single Channel passed into wireRuntimeCallbacksAndRestore)
+		// rather than via gwImpl.resolveChannel(chatID). Today there
+		// is one Channel in production, so the difference is
+		// observable only in tests that wire multiple channels via
+		// gateway.Bind/chatToChan. For multi-channel deployments,
+		// change `ch.Send(...)` to `gwImpl.resolveChannel(e.ChatID).
+		// Send(...)` and the rest of the body is identical. The
+		// AgentEventBus and PromptEndBus handlers above have the
+		// same latent gap; the same one-line fix applies to both.
+		cs.MessageStateBus.Subscribe(func(e chatsession.MessageStateEvent) bool {
 			// Review fix: replicate the gateway's identifier
 			// validation. Empty chatID / userMsgID would produce
 			// an OutboundMessage with empty routing fields, which
 			// the Feishu adapter rejects ("feishu: OutMessageState
 			// missing MessageID") and which previously was a
 			// silent no-op via gwImpl.OnMessageState's early return.
-			if chatID == "" || userMsgID == "" {
-				return
+			if e.ChatID == "" || e.UserMsgID == "" {
+				return false
 			}
 			out := gateway.OutboundMessage{
 				Kind:    gateway.OutMessageState,
-				ChatID:  chatID,
-				ReplyTo: userMsgID,
+				ChatID:  e.ChatID,
+				ReplyTo: e.UserMsgID,
 				MessageState: &gateway.MessageStatePayload{
-					State:     state,
-					MessageID: userMsgID,
+					State:     e.State,
+					MessageID: e.UserMsgID,
 				},
 			}
-			if state == agent.MessageSubmitted {
+			if e.State == agent.MessageSubmitted {
 				if as := cs.ActiveAgentSession(); as != nil {
 					sessionContextInto(&out, as)
 				}
 			}
 			if err := ch.Send(context.Background(), out); err != nil {
 				logger.Warn("runtime: MessageState send failed",
-					"chat_id", chatID,
-					"state", state,
+					"chat_id", e.ChatID,
+					"state", e.State,
 					"err", err)
 			}
+			return false
 		})
 
 		// F-53 follow-up: when ChatSession.endPrompt fires
@@ -749,30 +777,30 @@ func wireRuntimeCallbacksAndRestore(
 		// terminal event to the Feishu adapter so the receipt
 		// card transitions to PromptDone and the ✅ reaction
 		// is added on the card. No user-message reaction is
-		// emitted from this path — the user-message surface
-		// is now minimal (⏳ only).
-		cs.SetPromptEndHandler(func(userMsgID string, reason chatsession.PromptEndReason) {
-			cid := cs.ChatID
-			if cid == "" || userMsgID == "" {
-				return
+		// emitted from this path — the user-message surface is
+		// now minimal (⏳ only).
+		cs.PromptEndBus.Subscribe(func(e chatsession.PromptEndedEvent) bool {
+			if e.ChatID == "" || e.UserMsgID == "" {
+				return false
 			}
-			// The adapter call is fire-and-forget: failures
-			// are logged inside SetPromptState. We use
+			// The adapter call is fire-and-forget: failures are
+			// logged inside SetPromptState. We use
 			// context.Background() because the readpump-driven
 			// endPrompt happens off the inbound message path;
 			// there's no inbound ctx to chain.
 			if fa, ok := ch.(*feishu.Adapter); ok {
-				fa.MarkReceiptPromptDone(context.Background(), cid, userMsgID)
+				fa.MarkReceiptPromptDone(context.Background(), e.ChatID, e.UserMsgID)
 			}
+			return false
 		})
 
 		// CS-AS 边界重构 Phase 1: launch the per-chat pumpEvents
 		// goroutine. The pump drains cs.ActiveEvents() and dispatches
 		// each EnrichedEvent by Kind:
-		//   - KindAgentEvent   → cs.eventHandler (the closure above)
+		//   - KindAgentEvent   → cs.AgentEventBus (subscriber above)
 		//   - KindPromptEnded  → writebackMessageState (built into
-		//                        cs.PumpEvents — fires onPromptEnd hook)
-		//   - KindLifecycle    → log only
+		//                        cs.PumpEvents — publishes on PromptEndBus)
+		//   - KindLifecycle    → log + publish on LifecycleBus
 		// Replaces the per-CS StartReadPump / readRunPump that the
 		// pre-Phase-1 readpump.go file used to install. The new model
 		// has readpump per-AS (started by Spawn), so the chat layer
@@ -804,7 +832,7 @@ func wireRuntimeCallbacksAndRestore(
 // scalar). The handler stamps it onto OutboundMessage.ReplyTo
 // so each Channel can route the event to its own per-userMsgID
 // receipt (card / thread / DOM node). Empty when the event has
-// no anchor (startup EventInit, post-/use while no Prompt is
+// no anchor (startup EventAgentConnected, post-/use while no Prompt is
 // active, etc.) — Channel falls back to plain text in that case.
 //
 // v1.3 (SPEC §2.2): 1 turn : 1 anchor. Receipt rendering and
@@ -815,10 +843,15 @@ func wireRuntimeCallbacksAndRestore(
 // fires only for ChatSessions that already exist, so the
 // ChatSession is statically known at install time. Capturing it
 // in the closure eliminates the per-event mgr.Get round-trip
-// (RLock + map lookup). mgr is still passed because EventInit
+// (RLock + map lookup). mgr is still passed because EventAgentConnected
 // persistence needs mgr.PersistAgentSession, which is the cold
 // path (once per AgentSession lifetime, not per event).
-func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chatsession.Manager, logger *slog.Logger) chatsession.EventHandler {
+//
+// F-54: the handler takes a typed chatsession.AgentEventEnvelope
+// (delivered by cs.AgentEventBus). The legacy
+// `chatsession.EventHandler` callback signature is gone — see
+// docs/feat/F-54-event-bus.md §3.5.
+func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chatsession.Manager, logger *slog.Logger) func(env chatsession.AgentEventEnvelope) {
 	// Per-cs closure. No per-handler mutable state needed anymore:
 	// the bridge layer now attaches per-turn Usage to the SAME
 	// ResultEvent that delivers the final text (claudecode
@@ -827,15 +860,16 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 	// following EventUsage lands. The previous EventResult-then-
 	// EventUsage two-event split was a bridge-layer artifact — the
 	// data was always co-located on the wire.
-	return func(chatID string, s *chatsession.AgentSession, ev agent.AgentEvent, userMsgID string) {
-		// Capture the agent's own session id from EventInit so the
+return func(env chatsession.AgentEventEnvelope) {
+		chatID, s, ev, userMsgID := env.ChatID, env.AgentSession, env.Event, env.UserMsgID
+		// Capture the agent's own session id from EventAgentConnected so the
 		// next respawn can replay `--resume <id>`. We persist
 		// immediately (rather than waiting for the next status
 		// transition) so a daemon crash after this event still
 		// remembers the id. The capture is idempotent.
 		//
 		// Guard: only overwrite an existing (non-empty) ResumeID when
-		// the new id is non-empty. Some bridges re-emit EventInit
+		// the new id is non-empty. Some bridges re-emit EventAgentConnected
 		// after a child restart with a blank SessionID; we don't
 		// want to wipe a previously-captured id in that case.
 		if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.SessionID != "" {
@@ -849,7 +883,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 				}
 			}
 		}
-		// F-45 §1.4: capture model on first EventInit. Independent
+		// F-45 §1.4: capture model on first EventAgentConnected. Independent
 		// of the SessionID capture above (some bridges may emit
 		// one without the other). SetModel is idempotent — empty
 		// incoming values don't overwrite.
@@ -899,7 +933,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 			return
 		}
 		// Translate the AgentEvent to an OutboundMessage.
-		out, ok := gateway.Translate(chatID, ev)
+		out, ok := gateway.Translate(chatID, *ev)
 		if !ok {
 			if logger != nil {
 				logger.Debug("runtime: Translate dropped event",
@@ -927,7 +961,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		//
 		// Stamp the current turn's anchor so the Channel can
 		// route to the right per-userMsgID receipt. ReplyTo
-		// stays empty for orphan events (EventInit at startup,
+		// stays empty for orphan events (EventAgentConnected at startup,
 		// internal logs) — Channel renders those as plain text.
 		out.ReplyTo = userMsgID
 		// F-45 §2.5 改动 C: stamp SessionContext snapshot on the
@@ -1061,14 +1095,13 @@ func sessionContextInto(out *gateway.OutboundMessage, s *chatsession.AgentSessio
 	cancel()
 	hasGit := gitSnap != nil && s.Cwd != ""
 	if s.Agent != "" || s.Model() != "" || hasGit ||
-		s.CompactionCount() > 0 || out.Usage != nil {
+		s.CompactionCount() > 0 {
 		out.SessionContext = &gateway.SessionContext{
 			Agent:           s.Agent,
 			Model:           s.Model(),
 			Workspace:       s.Cwd,
 			GitStatus:       gitSnap,
 			CompactionCount: s.CompactionCount(),
-			Usage:           out.Usage,
 		}
 	}
 }

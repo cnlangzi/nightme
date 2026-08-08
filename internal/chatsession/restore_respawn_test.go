@@ -252,7 +252,7 @@ func TestFromAgentSessionEntry_InitializesEventQueue(t *testing.T) {
 	}
 
 	// End-to-end: wire into a ChatSession, Spawn, push a bridge
-	// event, assert PumpEvents delivers it via the eventHandler.
+	// event, assert PumpEvents delivers it via the AgentEventBus subscriber.
 	csFile, asFile := newTestStores(t)
 	if err := asFile.Upsert(entry); err != nil {
 		t.Fatalf("Upsert AS: %v", err)
@@ -283,13 +283,15 @@ func TestFromAgentSessionEntry_InitializesEventQueue(t *testing.T) {
 	}
 
 	received := make(chan struct{}, 1)
-	cs.SetEventHandler(func(_ string, _ *AgentSession, ev agent.AgentEvent, _ string) {
+	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
+		ev := env.Event
 		if ev.Kind == agent.EventText && ev.Text == "hello-after-restore" {
 			select {
 			case received <- struct{}{}:
 			default:
 			}
 		}
+		return false
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())

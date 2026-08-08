@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -116,17 +117,6 @@ type ChatSession struct {
 	// event stream via cs.PumpEvents (launched by the runtime
 	// for each ChatSession).
 
-	// eventHandler is the runtime-installed EventHandler invoked
-	// for each event drained from the active AgentSession. Set
-	// once at startup (or first dispatch); persists across /use.
-	eventHandler EventHandler
-
-	// onMessageState is the runtime-installed callback fired when
-	// this ChatSession's message lifecycle advances (F-31 / F-53).
-	// Set once at startup. nil = no observer; emitMessageState
-	// becomes a no-op.
-	onMessageState func(chatID, userMsgID string, state agent.MessageState)
-
 	// messagesByID (F-53) is the per-ChatSession index of every
 	// `*Message` ever accepted into this chat (no persistence in
 	// Phase 0 — see docs/feat/message_lifecycle.md §8). Keyed by
@@ -145,12 +135,23 @@ type ChatSession struct {
 	// EnrichedEvent stream; the runtime registers its handler
 	// by reading the stream (not via a per-CS callback).
 
-	// onPromptEnd (F-53 follow-up) is fired by `endPrompt` after
-	// a Prompt reaches a terminal state (EventDone / EventError
-	// in the readpump). Adapters use this to transition the
-	// receipt card to PromptDone (✅) and react accordingly.
-	// nil = no observer; endPrompt's handler call is skipped.
-	onPromptEnd PromptEndHandler
+	// Event buses (F-54). Each ChatSession owns one *services.EventBus[X]
+	// per event kind. The runtime wires subscribers by calling
+	// .Subscribe on these public fields directly (no getter).
+	// Multiple subscribers may register; first to return true consumes
+	// the event. nil-safe: Publish on an un-wired bus is a no-op. The
+	// buses are not closed when the ChatSession ends — their
+	// lifetime matches the owning ChatSession, which is itself GC'd
+	// when no references remain.
+	//
+	// Concurrency: Subscribe is called once at startup (no lock).
+	// Publish is called from the PumpEvents goroutine without
+	// holding cs.mu (writebackMessageState fix). The EventBus's
+	// own mutex protects the Publish/Subscribe race.
+	AgentEventBus   *services.EventBus[AgentEventEnvelope]
+	MessageStateBus *services.EventBus[MessageStateEvent]
+	PromptEndBus    *services.EventBus[PromptEndedEvent]
+	LifecycleBus    *services.EventBus[LifecycleEvent]
 
 	// ctx is the per-ChatSession context. Lives for the chat's
 	// lifetime (until daemon shutdown). It is the PARENT context
@@ -204,6 +205,12 @@ func New(chatID, primaryAgent string) *ChatSession {
 		lastInteractionAt: time.Now(),
 	}
 	cs.ctx, cs.cancel = context.WithCancel(context.Background())
+	// F-54: one Bus per event kind. Constructed eagerly so the
+	// runtime can Subscribe even before the first Publish fires.
+	cs.AgentEventBus = services.NewEventBus[AgentEventEnvelope]()
+	cs.MessageStateBus = services.NewEventBus[MessageStateEvent]()
+	cs.PromptEndBus = services.NewEventBus[PromptEndedEvent]()
+	cs.LifecycleBus = services.NewEventBus[LifecycleEvent]()
 	return cs
 }
 
@@ -542,12 +549,15 @@ func (cs *ChatSession) MarkDropped(userMsgID string) bool {
 	msg := v.(*Message)
 	cs.mu.Lock()
 	msg.Stage = agent.MessageDropped
-	h := cs.onMessageState
+	bus := cs.MessageStateBus
 	chatID := cs.ChatID
 	cs.mu.Unlock()
-	if h != nil {
-		h(chatID, userMsgID, agent.MessageDropped)
-	}
+	bus.Publish(MessageStateEvent{
+		ChatID:    chatID,
+		UserMsgID: userMsgID,
+		State:     agent.MessageDropped,
+		At:        time.Now(),
+	})
 	return true
 }
 
@@ -558,7 +568,7 @@ func (cs *ChatSession) MarkDropped(userMsgID string) bool {
 // Stage at Submitted time (no fan-out, per docs §5.1).
 //
 // After clearing currentPrompt, fires the runtime-installed
-// `onPromptEnd` handler (if any) so adapters can react to the
+// `PromptEndBus` handler (if any) so adapters can react to the
 // terminal event — e.g. Feishu's adapter uses this to transition
 // the receipt card to PromptDone and add the ✅ reaction.
 // The handler runs WITHOUT cs.mu held so it can call back into
@@ -584,25 +594,11 @@ func (cs *ChatSession) endPrompt(reason PromptEndReason) {
 	as.endPrompt(reason)
 }
 
-// onPromptEnd (F-53 follow-up) is the runtime-installed callback
-// fired by `endPrompt` after the Prompt's terminal fields are
-// stamped and `AgentSession.currentPrompt` is cleared. nil = no
-// observer; the call becomes a no-op.
-type PromptEndHandler func(userMsgID string, reason PromptEndReason)
-
-// SetPromptEndHandler installs (or replaces) the prompt-end
-// observer. The runtime typically wires this once at startup:
-// the handler routes the terminal event to the channel adapter
-// so the receipt card can transition to PromptDone (✅) and
-// the user message can be left alone (per the F-53 Reaction
-// split: user message only carries ⏳, the card carries 🔄/✅).
-//
-// Handler runs WITHOUT cs.mu held.
-func (cs *ChatSession) SetPromptEndHandler(h PromptEndHandler) {
-	cs.mu.Lock()
-	cs.onPromptEnd = h
-	cs.mu.Unlock()
-}
+// PromptEndBus (F-53 follow-up → F-54) is the runtime-installed callback
+// fired by `endPrompt` after the Prompt's terminal fields were
+// stamped. F-54 replaced it with cs.PromptEndBus.Publish(PromptEndedEvent{...});
+// subscribers register via PromptEndBus().Subscribe. See
+// docs/feat/F-54-event-bus.md for the migration rationale.
 
 // Context returns the per-ChatSession ctx. Every AgentSession
 // active on this chat derives its own per-AS ctx from
@@ -813,7 +809,6 @@ func (cs *ChatSession) writebackMessageState(p *Prompt) {
 		return
 	}
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
 	for _, mid := range p.MessageIDs {
 		if v, ok := cs.messagesByID.Load(mid); ok {
 			msg := v.(*Message)
@@ -822,10 +817,34 @@ func (cs *ChatSession) writebackMessageState(p *Prompt) {
 			msg.LastEndReason = p.EndReason
 		}
 	}
-	// Fire the in-process hook for any listener of prompt-end
-	// (legacy: used by feishu adapter to flip reaction 🔄 → ✅/❌).
-	if cs.onPromptEnd != nil && p.LastMessageID != "" {
-		cs.onPromptEnd(p.LastMessageID, p.EndReason)
+	// Fire the prompt-end event (F-54). Subscribers — typically
+	// the feishu adapter — flip the receipt card from 🔄 to ✅
+	// (or ❌) on this signal. nil-safe: Publish on an un-wired
+	// Bus is a no-op.
+	//
+	// Lock-ordering caveat (F-54 review fix): we previously held
+	// cs.mu across Publish, blocking every concurrent cs.mu caller
+	// (/use, /kill, QueueUserMessage, MarkDropped, TryFlush) for
+	// the duration of any subscriber's work — most importantly the
+	// feishu adapter's AddReaction HTTP round-trip (~200-500ms).
+	// We now snapshot the payload under the lock, release it, and
+	// then Publish. The payload's fields are values (no shared
+	// state), so post-unlock Publish is race-free.
+	publish := false
+	var ev PromptEndedEvent
+	if p.LastMessageID != "" {
+		ev = PromptEndedEvent{
+			ChatID:    cs.ChatID,
+			UserMsgID: p.LastMessageID,
+			PromptID:  p.ID,
+			Reason:    p.EndReason,
+			EndedAt:   p.EndedAt,
+		}
+		publish = true
+	}
+	cs.mu.Unlock()
+	if publish {
+		cs.PromptEndBus.Publish(ev)
 	}
 }
 
@@ -864,104 +883,35 @@ func (cs *ChatSession) QueueLen() int {
 	return len(cs.queue)
 }
 
-// SetEventHandler installs the per-event callback. The runtime
-// typically installs this once at first message dispatch; the
-// handler closes over (channel, ctx, etc.) and translates each
-// AgentEvent to a channel.Send call.
+// --- F-54 event bus accessors ---------------------------------------
 //
-// commit 8c: the handler persists across /use (we want outbound
-// translation to follow the new active AgentSession naturally).
-func (cs *ChatSession) SetEventHandler(h EventHandler) {
-	cs.mu.Lock()
-	cs.eventHandler = h
-	cs.mu.Unlock()
-}
+// Each ChatSession owns one *services.EventBus[X] per event kind.
+// Runtime subscribers register via Bus().Subscribe(handler); multiple
+// subscribers may coexist (first to return true consumes the
+// event). The buses are constructed eagerly in New(); callers that
+// reach them via these accessors see a non-nil Bus even before any
+// subscriber has registered.
 
-// EventHandler returns the installed outbound event handler, or
-// nil if none has been set. Exposed for tests that need to verify
-// runtime installation (e.g. RestoreFromRegistry regression
-// coverage in manager_test.go).
-func (cs *ChatSession) EventHandler() EventHandler {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return cs.eventHandler
-}
-
-// SetMessageStateHandler installs the callback fired when this
-// ChatSession's message lifecycle advances (F-31, F-53). The
-// runtime (cmd/nightme) wires gw.OnMessageState into every
-// ChatSession at startup; ChatSession calls it on:
-//
-//   - MessageQueued: ChatSession has accepted a user message
-//     (called from newMessageDispatcher before spawn work).
-//   - MessageSubmitted: SendBlocks returned nil — the message
-//     was committed to the AgentSession (called from
-//     defaultPromptHookLocked after a successful submission,
-//     per message in the batch).
-//   - MessageDropped: the message was explicitly cleared via
-//     /kill, /new, or BufferClear. NOT produced by SendBlocks
-//     failure — failed sends leave the message Queued for the
-//     next flushPending retry.
-//
-// nil clears the handler (emitMessageState becomes a no-op).
-//
-// Scope constraint: MessageState events are NOT produced for slash
-// commands (/cwd /use /kill etc.); those go through different
-// paths that don't reach QueueUserMessage. See F-31 §3.2.
-func (cs *ChatSession) SetMessageStateHandler(h func(chatID, userMsgID string, state agent.MessageState)) {
-	cs.mu.Lock()
-	cs.onMessageState = h
-	cs.mu.Unlock()
-}
-
-// MessageStateHandler returns the installed message-lifecycle
-// callback, or nil if none has been set. Exposed for tests; see
-// EventHandler() comment.
-func (cs *ChatSession) MessageStateHandler() func(chatID, userMsgID string, state agent.MessageState) {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return cs.onMessageState
-}
-
-// EmitMessageState fires the onMessageState callback for a single
+// EmitMessageState (F-54) fires the MessageStateBus for a single
 // userMsgID. Public entry point for external lifecycle triggers
 // (e.g. newMessageDispatcher in cmd/nightme calling
 // cs.EmitMessageState(userMsgID, MessageQueued) before spawn).
-// Internal lifecycle hooks call this too. No-op if no handler is
-// installed.
+// Internal lifecycle hooks call this too. No-op when the bus has
+// no subscribers.
 //
-// Caller MUST NOT hold cs.mu (handler is invoked synchronously and
-// may call back into ChatSession methods).
+// Caller MUST NOT hold cs.mu (the Publish call invokes handlers
+// synchronously; a handler may call back into ChatSession methods).
 func (cs *ChatSession) EmitMessageState(userMsgID string, state agent.MessageState) {
 	cs.mu.RLock()
-	h := cs.onMessageState
-	chatID := cs.ChatID
+	bus, chatID := cs.MessageStateBus, cs.ChatID
 	cs.mu.RUnlock()
-	if h == nil {
-		return
-	}
-	h(chatID, userMsgID, state)
+	bus.Publish(MessageStateEvent{
+		ChatID:    chatID,
+		UserMsgID: userMsgID,
+		State:     state,
+		At:        time.Now(),
+	})
 }
-
-// emitMessageStateForCurrentTurn fires onMessageState for the
-// single currentTurnUserMsgID. Called from runReadPump on terminal
-// agent events (EventDone/Error) so the anchor user message
-// receives its final state event.
-//
-// v1.3 (SPEC §2.5): terminal MessageState fires for the anchor
-// only. Earlier userMsgIDs in a buffered batch keep their own
-// MessageState at StateForwarded until they themselves anchor a
-// future turn — a deliberate UX choice to keep the per-message
-// progress indicator honest. Channel rendering of forward-only
-// reactions (🔄 without ✅) is acceptable for buffered-batch
-// intermediate messages; if a fan-out is later preferred,
-// re-introduce the slice here.
-//
-// F-53: `emitMessageStateForCurrentTurn` REMOVED. The whole
-// MessageState fan-out pattern is gone — `Message.Stage` reaches
-// its terminal value (Submitted or Dropped) at the moment of the
-// relevant transition, never changing again. See docs/feat/
-// message_lifecycle.md §5.1.
 
 // LookupInPool returns the AgentSession matching (agent, cwd) if
 // present in the pool (regardless of status). Returns
@@ -1586,7 +1536,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 		// Persist after a successful kill+respawn so the registry
 		// stays in sync with the in-memory state. For in-place
 		// resets the bridge will also emit a fresh EventAgentConnected which
-		// the runtime's eventHandler captures via
+		// the runtime's AgentEventBus subscriber captures via
 		// PersistAgentSession; for kill+respawn the new child hasn't
 		// started yet, so this Upsert captures the new PID +
 		// cleared ResumeID before any subsequent EventAgentConnected arrives

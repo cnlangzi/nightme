@@ -20,7 +20,7 @@ import (
 // Wiring (mirrors cmd/nightme/run.go::wireRuntimeCallbacksAndRestore
 // + the runtime's EventHandler closure):
 //
-//   ChatSession.SetEventHandler(translate + ch.Send)
+//   ChatSession.AgentEventBus().Subscribe(translate + ch.Send)
 //   ChatSession.PumpEvents(ctx)        // consumes as.Events()
 //   AgentSession.Spawn(fakeSpawner)    // wires fake bridge handle
 //   AgentSession.readpumpLoop()        // reads handle.Events() →
@@ -78,14 +78,15 @@ var _ Channel = (*recordingChannel)(nil)
 // ch.Send) without the SessionContext / /think / /tools side-paths
 // — those are not relevant to the regression we're hunting.
 
-func integrationEventHandler(ch Channel, _ *chatsession.ChatSession) chatsession.EventHandler {
-	return func(chatID string, _ *chatsession.AgentSession, ev agent.AgentEvent, userMsgID string) {
-		out, ok := Translate(chatID, ev)
+func integrationEventHandler(ch Channel, _ *chatsession.ChatSession) func(env chatsession.AgentEventEnvelope) bool {
+	return func(env chatsession.AgentEventEnvelope) bool {
+		out, ok := Translate(env.ChatID, *env.Event)
 		if !ok {
-			return
+			return false
 		}
-		out.ReplyTo = userMsgID
+		out.ReplyTo = env.UserMsgID
 		_ = ch.Send(context.Background(), out)
+		return false
 	}
 }
 
@@ -111,7 +112,7 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 	// Recording channel + runtime handler (same shape as the
 	// production wireRuntimeCallbacksAndRestore onCreate).
 	mock := &recordingChannel{chatID: cs.ChatID}
-	cs.SetEventHandler(integrationEventHandler(mock, cs))
+	cs.AgentEventBus.Subscribe(integrationEventHandler(mock, cs))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -186,7 +187,7 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 	}
 
 	// Tell the test we're done; Shutdown triggers a KindPromptEnded
-	// that would normally fire onPromptEnd.
+	// that would normally fire on the PromptEndBus.
 	fake.FinishEvent()
 }
 
@@ -198,7 +199,7 @@ func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 	cs := newIntegrationChatSession("oc_test_chat", spawner)
 
 	mock := &recordingChannel{chatID: cs.ChatID}
-	cs.SetEventHandler(integrationEventHandler(mock, cs))
+	cs.AgentEventBus.Subscribe(integrationEventHandler(mock, cs))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -353,7 +354,7 @@ func summarizeKinds(msgs []OutboundMessage) []OutboundKind {
 // pumpStream(stdout → s.events). It spawns a shell script via
 // claudecode.New(...).Start() that emits a stream-json transcript
 // on stdout, then drives the full Submit → readpump → PumpEvents
-// → eventHandler chain. If pumpStream is broken (closed before
+// → AgentEventBus fan-out. If pumpStream is broken (closed before
 // first read, wrong channel buffering, parse failure), this test
 // fails with a clear signal.
 //
@@ -395,7 +396,7 @@ exit 0
 	cs := newIntegrationChatSession("oc_real_bridge", spawner)
 
 	mock := &recordingChannel{chatID: cs.ChatID}
-	cs.SetEventHandler(integrationEventHandler(mock, cs))
+	cs.AgentEventBus.Subscribe(integrationEventHandler(mock, cs))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

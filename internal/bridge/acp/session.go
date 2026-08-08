@@ -314,7 +314,7 @@ func (s *acpSession) SendPermission(response string) error {
 // PID stays the same.
 //
 // We reset s.connectedSent so emitConnected fires again with the new sessionId,
-// letting the runtime's eventHandler capture it via SetResumeID
+// letting the runtime's AgentEventBus subscriber capture it via SetResumeID
 // (cmd/nightme/run.go newEventHandler).
 func (s *acpSession) New(ctx context.Context) error {
 	if s.bridge == nil {

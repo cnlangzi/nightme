@@ -14,12 +14,18 @@ package agent
 // EndReason`. See docs/feat/message_lifecycle.md §3 原则 1 / §6.3.
 //
 // MessageState is the abstract-layer vocabulary; Channels consume
-// it via the existing wire (Gateway.OnMessageState →
-// `OutboundMessage{Kind: OutMessageState, MessageState: ...}`) and
-// render via their own platform primitives (Feishu reaction emoji,
-// Slack shortcode, Web DOM diff, etc.). Channel authors are NOT
-// required to render every value — Channels choose what subset to
-// surface.
+// it via the runtime's MessageStateBus subscriber (see
+// cmd/nightme/run.go) which builds
+// `OutboundMessage{Kind: OutMessageState, MessageState: ...}` and
+// stamps F-48 SessionContext on MessageSubmitted. Channels render
+// via their own platform primitives (Feishu reaction emoji, Slack
+// shortcode, Web DOM diff, etc.). Channel authors are NOT required
+// to render every value — Channels choose what subset to surface.
+//
+// Note (F-54): the legacy gateway.OnMessageState path is still
+// present on the gateway interface for v1.3 test compatibility,
+// but production wiring must NOT call it (would cause duplicate
+// MessageState events per transition).
 type MessageState int
 
 const (

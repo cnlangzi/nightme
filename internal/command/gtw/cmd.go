@@ -60,8 +60,12 @@ func (f *Factory) Spec() command.Spec {
 		Usage: "/gtw fix <issue-id>              claim, label, and create a worktree\n" +
 			"/gtw fix --name <branch>         create a local worktree (no issue)\n" +
 			"/gtw fix -n <branch>             short form of --name\n" +
-			"/gtw list                        list pending gtw drafts in this chat\n" +
-			"/gtw reset                       clear gtw state for this chat (debug)",
+			"/gtw fix <id> --force            nuke any leftover at the target path, then re-create\n" +
+			"/gtw close                       tear down the worktree created by /gtw fix\n" +
+			"/gtw close --force               force-close even when the worktree is dirty\n" +
+			"/gtw push                       commit + push the worktree's branch to origin\n" +
+			"/gtw push --pr                   also open a PR (gh/glab) against the default branch\n" +
+			"/gtw push --no-commit            refuse if there are uncommitted changes",
 	}
 }
 
@@ -85,10 +89,10 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, input 
 	switch input.Args[1] {
 	case "fix":
 		return f.runFix(ctx, rt, input)
-	case "list":
-		return f.runList(rt, input)
-	case "reset":
-		return f.runReset(rt, input)
+	case "close":
+		return f.runClose(ctx, rt, input)
+	case "push":
+		return f.runPush(ctx, rt, input)
 	}
 	return &command.SlashOutput{
 		Reply:    "Unknown subcommand: " + input.Args[1] + "\n" + f.Spec().Usage,
@@ -111,7 +115,7 @@ func (f *Factory) runFix(ctx context.Context, rt command.RuntimeServices, input 
 		}, nil
 	}
 
-	mode, rawArg, err := parseFixMode(input.Args[2:])
+	args, err := parseFixArgs(input.Args[2:])
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ %v", err),
@@ -122,8 +126,8 @@ func (f *Factory) runFix(ctx context.Context, rt command.RuntimeServices, input 
 	// Local-mode quick validation: the slug must not be empty
 	// after normalisation. Doing this here (before RunFix) keeps
 	// the SlashOutput path simple when deps.Send is nil in tests.
-	if mode == ModeLocal {
-		if _, err := DeriveBranchFromName(rawArg); err != nil {
+	if args.Mode == ModeLocal {
+		if _, err := DeriveBranchFromName(args.RawArg); err != nil {
 			return &command.SlashOutput{
 				Reply:    fmt.Sprintf("❌ %v", err),
 				Consumed: true,
@@ -133,10 +137,10 @@ func (f *Factory) runFix(ctx context.Context, rt command.RuntimeServices, input 
 	// ID-mode quick validation: pre-validate locally with
 	// parseIssueID (not strconv.Atoi) so "#42" is accepted —
 	// the GitHub/GitLab convention users have muscle memory for.
-	if mode == ModeRemote {
-		if _, err := parseIssueID(rawArg); err != nil {
+	if args.Mode == ModeRemote {
+		if _, err := parseIssueID(args.RawArg); err != nil {
 			return &command.SlashOutput{
-				Reply:    fmt.Sprintf("Invalid issue id: %q (%v)", rawArg, err),
+				Reply:    fmt.Sprintf("Invalid issue id: %q (%v)", args.RawArg, err),
 				Consumed: true,
 			}, nil
 		}
@@ -158,10 +162,10 @@ func (f *Factory) runFix(ctx context.Context, rt command.RuntimeServices, input 
 	drafts := &managerDraftsMap{mgr: f.mgr, chatID: input.ChatID}
 
 	// RunFix signature: (ctx, mode, cs, slot, drafts, deps,
-	// chatID, messageID, args). Reply is sent inline via
+	// chatID, messageID, args, force). Reply is sent inline via
 	// deps.Send; *Result only carries Consumed / Dropped for
 	// the runtime.
-	_, err = RunFix(ctx, mode, cs, slot, drafts, f.deps, input.ChatID, input.MessageID, []string{rawArg})
+	_, err = RunFix(ctx, args.Mode, cs, slot, drafts, f.deps, input.ChatID, input.MessageID, []string{args.RawArg}, args.Force)
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw fix failed: %v", err),
@@ -201,42 +205,174 @@ func parseFixMode(argv []string) (Mode, string, error) {
 	}
 }
 
-// runList handles `/gtw list`. Lists pending gtw drafts in
-// the current chat.
-func (f *Factory) runList(_ command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
-	drafts := f.mgr.ListDrafts(input.ChatID)
-	if len(drafts) == 0 {
+// fixArgs bundles the parsed argv tail of `/gtw fix <...>`.
+// Splitting it into a struct (rather than separate return
+// values) keeps the parser functions readable as we add more
+// flags — `--force` / `-f` is the first, future flags
+// (`--no-dispatch`, `--base <ref>`) can land here without
+// breaking signatures again.
+type fixArgs struct {
+	Mode   Mode
+	RawArg string // issue id (ModeRemote) or branch name (ModeLocal)
+	Force  bool   // --force / -f: skip path-occupied preflight + nuke any leftover at the target path
+}
+
+// parseFixArgs is the argv tail → fixArgs entry point. It
+// strips --force / -f tokens from anywhere in the tail (so
+// both `/gtw fix --force 42` and `/gtw fix 42 --force`
+// parse), then dispatches the remaining tokens to parseFixMode.
+//
+// --force is intentionally permissive — it doesn't take an
+// argument and silently accepts duplicates. The semantic is
+// "any --force wins"; this matches git's own CLI conventions
+// for boolean flags.
+func parseFixArgs(argv []string) (fixArgs, error) {
+	force := false
+	filtered := make([]string, 0, len(argv))
+	for _, a := range argv {
+		if a == "--force" || a == "-f" {
+			force = true
+			continue
+		}
+		filtered = append(filtered, a)
+	}
+	if len(filtered) == 0 {
+		return fixArgs{}, fmt.Errorf("missing argument")
+	}
+	mode, rawArg, err := parseFixMode(filtered)
+	if err != nil {
+		return fixArgs{}, err
+	}
+	return fixArgs{Mode: mode, RawArg: rawArg, Force: force}, nil
+}
+
+// runClose handles `/gtw close`. Tears down the worktree
+// created by `/gtw fix`, switches CWD back to the main repo,
+// and clears gtw state. See wip/gtw.md §14.5 for the full flow
+// and RunClose for the implementation.
+//
+// --force / -f skips the dirty-worktree refusal and force-
+// removes via `git worktree remove --force`. Use this when
+// the user genuinely wants to throw away their in-progress
+// changes (e.g. they're abandoning the branch).
+//
+// Construction mirrors runFix: the slot / drafts shims route to
+// the per-chat Manager state, deps are forwarded verbatim, and
+// the reply path is RunClose's own deps.Send (no extra wiring).
+func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
+	cs := f.mgr.GetChatSession(input.ChatID)
+	if cs == nil {
 		return &command.SlashOutput{
-			Reply:    "/gtw list: (none in this chat)",
+			Reply:    "No active chat session.",
 			Consumed: true,
 		}, nil
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "/gtw list — %d in this chat:\n", len(drafts))
-	for i, d := range drafts {
-		// Local-mode drafts have IssueID == -1 (no remote issue).
-		// Display "(local)" instead of "-1" so the user doesn't
-		// think the system is in a bad state.
-		issueLabel := fmt.Sprintf("%d", d.Payload.IssueID)
-		if d.Payload.IssueID == -1 {
-			issueLabel = "(local)"
-		}
-		fmt.Fprintf(&b, "  [%d] kind=%s  issueID=%s  branch=%q  repo=%q  createdAt=%s\n",
-			i, d.Kind, issueLabel, d.Payload.Branch, d.Payload.Repo,
-			d.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
+	slot := &managerContextSlot{mgr: f.mgr, chatID: input.ChatID}
+
+	force, err := parseCloseForce(input.Args[2:])
+	if err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v", err),
+			Consumed: true,
+		}, nil
 	}
-	return &command.SlashOutput{Reply: b.String(), Consumed: true}, nil
+
+	res, err := RunClose(ctx, cs, slot, f.deps, input.ChatID, input.MessageID, force)
+	if err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ /gtw close failed: %v", err),
+			Consumed: true,
+		}, nil
+	}
+	_ = res // RunClose already sent the reply via deps.Send
+	return &command.SlashOutput{Consumed: true}, nil
 }
 
-// runReset handles `/gtw reset`. Clears gtw state for the
-// current chat (debug-only).
-func (f *Factory) runReset(_ command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
-	before := f.mgr.DraftCount(input.ChatID)
-	f.mgr.Reset(input.ChatID)
-	return &command.SlashOutput{
-		Reply:    fmt.Sprintf("✅ /gtw reset — cleared Context + %d draft(s) for this chat", before),
-		Consumed: true,
-	}, nil
+// runPush handles `/gtw push`. Reads the yml at the current
+// CWD to find the worktree, commits uncommitted changes
+// (unless --no-commit), pushes the branch to origin, and
+// optionally opens a PR (--pr).
+//
+// No slot/draft shim needed — push doesn't touch gtw state
+// or reaction cards. Just the same HandlerDeps as everywhere
+// else, plus the parsed push flags.
+func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
+	args, err := parsePushArgs(input.Args[2:])
+	if err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v", err),
+			Consumed: true,
+		}, nil
+	}
+
+	res, err := RunPush(ctx, f.deps, input.ChatID, input.MessageID, args)
+	if err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ /gtw push failed: %v", err),
+			Consumed: true,
+		}, nil
+	}
+	_ = res // RunPush already sent the reply via deps.Send
+	return &command.SlashOutput{Consumed: true}, nil
+}
+
+// parseCloseForce extracts --force / -f from the close argv
+// tail. Unlike /gtw fix, /gtw close takes no positional arg
+// (you can't target a specific worktree — it always operates
+// on the current chat's worktree), so the only thing to parse
+// is the boolean flag. We still tolerate positional tokens
+// silently for forward-compat (future: /gtw close <branch>).
+func parseCloseForce(argv []string) (bool, error) {
+	force := false
+	for _, a := range argv {
+		switch a {
+		case "--force", "-f":
+			force = true
+		default:
+			// Unknown token. Future: surface this when
+			// /gtw close starts accepting positional args.
+			// For now: silent accept.
+		}
+	}
+	return force, nil
+}
+
+// pushArgs bundles the parsed argv tail of `/gtw push <...>`.
+// Same rationale as fixArgs: a struct is more future-proof
+// than a growing positional return tuple.
+type pushArgs struct {
+	// OpenPR, when true, also runs `gh pr create` (or
+	// `glab mr create`) after push. Off by default — we
+	// don't want to surprise users with auto-created PRs
+	// on every /gtw push.
+	OpenPR bool
+
+	// NoCommit, when true, refuses any uncommitted changes
+	// in the worktree. Off by default — auto-staging +
+	// committing is the convenience path; users who want
+	// strictness pass --no-commit.
+	NoCommit bool
+}
+
+// parsePushArgs strips --pr / --no-commit (and their short
+// forms once defined) from the push argv tail. No positional
+// arg today — /gtw push always operates on the current
+// chat's worktree, like /gtw close.
+func parsePushArgs(argv []string) (pushArgs, error) {
+	out := pushArgs{}
+	for _, a := range argv {
+		switch a {
+		case "--pr":
+			out.OpenPR = true
+		case "--no-commit":
+			out.NoCommit = true
+		default:
+			// Unknown token. Future: surface when we
+			// accept positional args (e.g. --branch foo).
+			// For now: silent accept.
+		}
+	}
+	return out, nil
 }
 
 // --- shim adapters that let legacy RunFix see Manager state ---

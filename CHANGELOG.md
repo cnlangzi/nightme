@@ -11,6 +11,90 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### AgentEvent flattening + ResumeID→SessionID rename + F-49 compaction removal
+
+Three related changes landed together as one runtime/schema
+migration; see [`wip/agentevent.md`](./wip/agentevent.md) for the
+full plan (13 sections, ~580 lines).
+
+**`AgentEvent` payload flattening** — the long-standing tension
+between "events" (actions, transient) and "context" (state, stable
+for session lifetime) is resolved by giving every event a flat
+top-level copy of the bridge-side session context:
+
+- `AgentEvent` gains 5 flat `string` fields: `SessionID / Model /
+  AgentName / Workspace / Branch`. Bridges stamp these on every
+  delivered event (not just `EventAgentReady`); runtime reads them
+  directly instead of mirroring into `AgentSession` state.
+- `Err error` replaces `Error *AgentErrorEvent` (1-field wrapper)
+  and absorbs the in-sub-type `Err` / `IsError` fields on
+  `AgentToolEndEvent` / `AgentResultEvent`. Channels check
+  `msg.Err != nil` instead of digging into sub-structs.
+- Three single-purpose payload structs deleted entirely:
+  `AgentErrorEvent`, `AgentReadyEvent`, `AgentCompactionEvent`.
+  The corresponding EventKinds stay (`EventAgentError`,
+  `EventAgentReady`) — only the wrappers go.
+- `EventAgentCompaction` Kind **deleted entirely** — F-49
+  compaction tracking was YAGNI: bridges were still digesting
+  protocol differences, runtime `CompactionCount` was never
+  observed in production, no consumer existed.
+
+**`ResumeID` → `SessionID` rename (full chain)**:
+
+- `registry.AgentSessionEntry.ResumeID` → `SessionID` (JSON key
+  `resume_id` → `session_id`; `AgentSessionFileVersion` 2 → 3).
+  Existing `agent_sessions.json` files with `resume_id` keys are
+  silently ignored on load — `SessionID` defaults to `""`, the
+  next spawn starts fresh.
+- `AgentSession.resumeID` field → `sessionID`; `SetResumeID` →
+  `SetSessionID`.
+- `agent.StartConfig.ResumeID` → `SessionID`.
+
+The rename unifies the two naming variants that were drifting
+apart (the field captured "the agent's own session id" but the
+method/persistence layer called it "ResumeID", which was the
+wire-side semantics — confusing readers).
+
+**Compaction chain removed (F-49 abandonment)**:
+
+- `EventAgentCompaction` Kind, `AgentSession.CompactionCount`,
+  `RecordCompaction()`, `registry.AgentSessionEntry.CompactionCount`
+  JSON field, `gateway.SessionContext.CompactionCount`, feishu
+  footer "· 🗜 N" segment — all deleted. 4 tests removed.
+- [`docs/feat/F-49-compaction-counter.md`](./docs/feat/F-49-compaction-counter.md)
+  marked OBSOLETE; design preserved as "why we didn't do this"
+  reference.
+
+**`OutboundMessage` symmetric flattening**: `Ready *AgentReadyEvent`
+→ 5 flat `string` fields (`SessionID / Model / AgentName /
+Workspace / Branch`) on `OutboundMessage`; `Err error` added so
+channels can render error UI consistently.
+
+**Breaking**:
+- `agent.AgentEvent`: `Error *AgentErrorEvent` field removed
+  (use `Err error`); `Ready *AgentReadyEvent` field removed
+  (use top-level `SessionID / Model / AgentName / Workspace /
+  Branch`); `Usage *AgentUsageEvent` field removed (always nil
+  in old code); `IsError` field on `AgentToolEndEvent` and
+  `AgentResultEvent` removed; `EventAgentCompaction` Kind
+  removed; `Model` field on `AgentUsageEvent` removed (duplicate
+  of `AgentEvent.Model`).
+- `gateway.OutboundMessage`: `Ready *AgentReadyEvent` removed;
+  `Err error` field added.
+- `chatsession.AgentSession`: `resumeID` field renamed to
+  `sessionID`; `SetResumeID` renamed to `SetSessionID`;
+  `CompactionCount` field removed; `RecordCompaction` /
+  `CompactionCount` methods removed.
+- `registry.AgentSessionEntry`: `ResumeID` field renamed to
+  `SessionID` (JSON key `resume_id` → `session_id`); `Model`
+  field kept; `CompactionCount` field removed.
+
+**Docs**: [`wip/agentevent.md`](./wip/agentevent.md) (canonical
+plan), [`docs/feat/F-49-compaction-counter.md`](./docs/feat/F-49-compaction-counter.md)
+(marked OBSOLETE), [`docs/SPEC.md` §0.14 changelog](./docs/SPEC.md)
+(stale — needs follow-up edit; current entry still describes the
+original F-49 increment).
+
 ### F-42: `/kill` graceful shutdown + `/new` ResumeID clear + per-entry list reply
 
 Three related fixes bundled:

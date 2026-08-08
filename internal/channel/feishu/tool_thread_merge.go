@@ -32,7 +32,7 @@
 //     preserves pre-F-38 behavior for the unhappy path.
 //
 //   - clearToolEvents empties the buffer for a userMsgID. Called
-//     when the turn ends (EventDone / EventError) so a new turn
+//     when the turn ends (EventAgentDone / EventAgentError) so a new turn
 //     that re-anchors to the same userMsgID (rare but possible
 //     after a partial flush) starts with a clean slate. Also
 //     called by Adapter.Stop to avoid leaks.
@@ -129,7 +129,7 @@ func (a *Adapter) popToolStart(userMsgID string) (toolEventEntry, bool) {
 }
 
 // clearToolEvents empties the buffer for userMsgID. Called when
-// a turn ends (EventDone / EventError) so any orphaned Starts
+// a turn ends (EventAgentDone / EventAgentError) so any orphaned Starts
 // (whose matching Ends never arrived — agent crashed mid-tool,
 // stream truncated, etc.) don't leak across turns. Also called
 // from Adapter.Stop to release all per-turn state.

@@ -9,7 +9,7 @@
 //     (process death) or `Shutdown` closes readpumpStop.
 //   - On handle close (process death), calls `endPrompt(ProcessDied)`
 //     to fix the F-53 deadlock and emits `KindLifecycle{StatusExited}`.
-//   - On EventDone / EventError, calls `endPrompt(Clean | Error)`
+//   - On EventAgentDone / EventAgentError, calls `endPrompt(Clean | Error)`
 //     and emits `KindPromptEnded`.
 //   - Other events are wrapped as `KindAgentEvent` and pushed to
 //     eventQueue for ChatSession.
@@ -48,7 +48,7 @@ func (as *AgentSession) startReadPump() {
 //     goroutine that called Activate, so the wait is short.
 //  2. Once handle is set, switch to the event loop. Read each
 //     `agent.AgentEvent`, enrich it, and push to eventQueue.
-//  3. On EventDone / EventError, call `endPrompt(reason)` to
+//  3. On EventAgentDone / EventAgentError, call `endPrompt(reason)` to
 //     terminate the in-flight Prompt.
 //  4. On channel close (`!ok`), call `endPrompt(ProcessDied)`
 //     (fixes the F-53 deadlock), emit `KindLifecycle{StatusExited}`.
@@ -135,12 +135,12 @@ func (as *AgentSession) readpumpLoop() {
 				return
 			}
 
-			// Terminal handling: EventDone / EventError ends the
+			// Terminal handling: EventAgentDone / EventAgentError ends the
 			// in-flight Prompt. The PromptEnded event is emitted
 			// by endPrompt itself.
-			if ev.Kind == agent.EventDone || ev.Kind == agent.EventError {
+			if ev.Kind == agent.EventAgentDone || ev.Kind == agent.EventAgentError {
 				reason := PromptEndClean
-				if ev.Kind == agent.EventError {
+				if ev.Kind == agent.EventAgentError {
 					reason = PromptEndError
 				}
 				as.endPrompt(reason)
@@ -179,8 +179,8 @@ func (as *AgentSession) emitLifecycleLocked(status Status) {
 // endPrompt (CS-AS 边界重构 Phase 1) is the AS-internal Prompt
 // terminator. Called by:
 //
-//   - readpumpLoop, on EventDone → PromptEndClean
-//   - readpumpLoop, on EventError → PromptEndError
+//   - readpumpLoop, on EventAgentDone → PromptEndClean
+//   - readpumpLoop, on EventAgentError → PromptEndError
 //   - readpumpLoop, on channel close → PromptEndProcessDied (F-53
 //     deadlock fix)
 //

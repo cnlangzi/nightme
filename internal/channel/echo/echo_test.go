@@ -103,7 +103,7 @@ func TestEcho_RecordReturnsCopy(t *testing.T) {
 // OutboundKind by its String() value — adding a new kind (P1 follow-up:
 // OutResult / OutUsage / OutInit) requires zero changes to echo's
 // Send path. (F-49: OutCompaction kind deleted — not in this list
-// anymore; the runtime now consumes EventCompaction directly via
+// anymore; the runtime now consumes EventAgentCompaction directly via
 // AgentSession.RecordCompaction() and produces no OutboundMessage.)
 // This test is the contract: any new kind must flow through here
 // without breaking.

@@ -172,7 +172,7 @@ type Attachment struct {
 // submit / select payloads.
 type ActionPayload struct {
 	// RequestID is the Gateway-assigned correlation token that ties
-	// the click back to the original EventPermission.
+	// the click back to the original EventAgentPermission.
 	RequestID string
 	// Option is the user's choice (Feishu button label, Slack action
 	// value, etc.). Empty when the action is a form submission.
@@ -210,7 +210,7 @@ type OutboundKind int
 
 const (
 	// OutReply is a streaming reply chunk — the agent's reply to
-	// the user's current turn. Sourced from agent.EventText
+	// the user's current turn. Sourced from agent.EventAgentText
 	// (without the [思考] thinking prefix; thinking has its own
 	// OutThinking kind). The most common case for both multi-
 	// chunk final replies and single-chunk status lines.
@@ -241,10 +241,8 @@ const (
 	OutMessageStateRemoved
 	// OutCard sends an interactive card (permission request, etc.).
 	OutCard
-	// OutTyping sends a transient typing indicator.
-	OutTyping
 	// OutResult is the assistant's final reply for the turn. Sourced
-	// from agent.EventResult (Claude Code: result.Result). Channels
+	// from agent.EventAgentResult (Claude Code: result.Result). Channels
 	// render it with a distinct icon (e.g. 📝) so users can tell
 	// "the final answer" from rolling-log entries.
 	OutResult
@@ -305,8 +303,6 @@ func (k OutboundKind) String() string {
 		return "message_state_removed"
 	case OutCard:
 		return "card"
-	case OutTyping:
-		return "typing"
 	case OutResult:
 		return "result"
 	case OutInit:
@@ -355,14 +351,14 @@ type OutboundMessage struct {
 	// OutTaskUpdate. Every event carries a full snapshot of the
 	// current task list; an Items slice with length 0 is a valid
 	// "clear the checklist" signal. nil for other Kinds.
-	TaskList *agent.TaskListEvent
+	TaskList *agent.AgentTaskListEvent
 	// Result carries the typed payload for OutResult. nil for
 	// other Kinds. Gateway populates from AgentEvent.Result; the
 	// channel reads directly instead of round-tripping the
 	// fields through Meta. Replaces the legacy
 	// Meta["duration_ms"] / ["is_error"] / ["subtype"] implicit
 	// protocol (removed in §1.4 cleanup).
-	Result *agent.ResultEvent
+	Result *agent.AgentResultEvent
 	// Usage carries the per-turn token / cost payload co-located
 	// with the assistant's final reply (OutResult in practice).
 	// Bridges populate this from the same source event they put
@@ -370,37 +366,52 @@ type OutboundMessage struct {
 	// Pi: message_end.usage on the assistant role). The runtime
 	// accumulates Usage on receipt before stamping SessionContext,
 	// so footer rendering sees this turn's tokens on the first
-	// try — the previous EventResult-then-EventUsage pair that
+	// try — the previous EventAgentResult-then-EventUsage pair that
 	// required runtime buffering is gone (the data was always
 	// co-located on the wire). nil means "no usage reported"
 	// (zero-usage turn).
 	//
-	// Typed as *UsageEvent (per-event shape) because the payload IS
+	// Typed as *UsageInfo (per-event shape) because the payload IS
 	// a single turn's data, not a running total. The runtime is a
 	// passive pass-through — it does NOT aggregate Usage across
 	// turns; the channel footer reads out.Usage directly and
 	// surfaces it as Line 2 of the footer.
-	Usage *agent.UsageEvent
+	Usage *agent.UsageInfo
 	// MessageState carries the payload for OutMessageState /
 	// OutMessageStateRemoved kinds (F-31). Channel reads from this
 	// typed field directly. Replaces the legacy
 	// Meta["message_id"] / ["state"] / ["reaction_id"] implicit
 	// protocol (removed in §1.4 cleanup).
 	MessageState *MessageStatePayload
-	// Connected carries the typed payload for OutInit. nil for other
-	// Kinds. Gateway populates from AgentEvent.Connected. Replaces the
-	// legacy Meta["session_id"] / ["model"] / ["agent_name"] /
-	// ["workspace"] / ["branch"] implicit protocol (removed in
-	// §1.4 cleanup).
-	Connected *agent.AgentConnectedEvent
+
+	// SessionID / Model / AgentName / Workspace / Branch carry the
+	// session metadata for OutInit (Gateway populates from the
+	// top-level AgentEvent fields of the same name). They replace
+	// the legacy Ready *AgentReadyEvent field (deleted when event
+	// payloads were flattened). Channel reads these directly to
+	// render the receipt header / footer.
+	SessionID  string
+	Model      string
+	AgentName  string
+	Workspace string
+	Branch     string
+
 	// ReplyTo carries the channel-native root message id when the
 	// agent wants to reply in a thread.
 	ReplyTo string
 
+	// Err is the unified error indicator on this outbound message,
+	// sourced from AgentEvent.Err (see event flattening). Set on:
+	//   - OutResult when the turn ended in error
+	//   - OutToolEnd when the tool invocation failed
+	// nil otherwise. Channels check `msg.Err != nil` to render
+	// error UI (📛 icon, ⚠️ prefix, etc.).
+	Err error
+
 	// SessionContext (F-45) is the runtime-stamped snapshot of the
 	// AgentSession that produced this outbound event. It carries
 	// everything the main-chat footer needs (Agent / Model /
-	// Usage, plus Workspace / GitStatus / CompactionCount) as a
+	// Usage, plus Workspace / GitStatus) as a
 	// single atomic value — not a scattered set of fields — so
 	// Channel render paths see one typed payload and future
 	// metadata additions don't break the Channel interface.
@@ -430,11 +441,11 @@ type OutboundMessage struct {
 //	Model           — model the agent selected (e.g.
 //	                  "claude-opus-4-5-20250929"). Sourced from
 //	                  AgentSession.Model which the runtime caches
-//	                  on first EventAgentConnected. Empty before EventAgentConnected
+//	                  on first EventAgentReady. Empty before EventAgentReady
 //	                  lands; footer omits the segment when "".
 //	Usage           — per-turn snapshot from the bridge event that
 //	                  produced this OutboundMessage (a pointer to
-//	                  agent.UsageEvent, copied off out.Usage by
+//	                  agent.UsageInfo, copied off out.Usage by
 //	                  sessionContextInto). nil when the bridge
 //	                  event did not carry usage (OutReply chunks
 //	                  during streaming, etc.); the footer omits
@@ -466,29 +477,22 @@ type SessionContext struct {
 	// footer reflects the latest worktree state without an
 	// invalidation hook. See docs/feat/F-45-session-footer.md §1.7.
 	GitStatus *gtw.GitStatusSnapshot
-	// CompactionCount is the number of context-compaction cycles
-	// the bridge has reported on this AgentSession. 0 = never
-	// compacted. Sourced from AgentSession.CompactionCount, so
-	// the footer Line 1 (🗜 N) tells the user how many compaction
-	// cycles the conversation has been through. See
-	// docs/feat/F-49-compaction-counter.md §1.5.
-	CompactionCount int
 
 	// Usage is the per-turn snapshot from the bridge event that
 	// produced this OutboundMessage — bridges populate it on
-	// EventResult / EventDone. The runtime is a passive
+	// EventAgentResult / EventAgentDone. The runtime is a passive
 	// pass-through; AgentSession does NOT aggregate across turns.
 	// Channel footer reads Usage for the Line 2 segments (in / out
 	// · X% · $cost). nil when the bridge event didn't carry
 	// usage (e.g. OutReply chunks during streaming, which have no
 	// usage field). See docs/feat/F-45-session-footer.md §1.6.
 	//
-	// ContextWindowPct on UsageEvent is the bridge-computed
+	// ContextWindowPct on UsageInfo is the bridge-computed
 	// per-turn context-fill percentage (0–100), via the Doc 1
 	// formula. Channels read it verbatim as the "X%" segment;
 	// 0 means "not reported" and the footer omits X% rather than
 	// showing 0%. See docs/feat/F-45-session-footer.md §1.5.
-	Usage *agent.UsageEvent
+	Usage *agent.UsageInfo
 }
 
 // ToolInfo is the typed payload for OutboundMessage.Tool,

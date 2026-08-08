@@ -18,7 +18,7 @@ import (
 // pending rows before completed rows, with status-appropriate
 // checkbox states.
 func TestBuildTaskChecklistChunks_OrderingInProgressFirst(t *testing.T) {
-	items := []agent.TaskItem{
+	items := []agent.AgentTaskItem{
 		{ID: "1", Subject: "completed task", Status: agent.TaskCompleted},
 		{ID: "2", Subject: "pending task", Status: agent.TaskPending},
 		{ID: "3", Subject: "active task", Status: agent.TaskInProgress, ActiveForm: "writing"},
@@ -63,9 +63,9 @@ func TestBuildTaskChecklistChunks_OrderingInProgressFirst(t *testing.T) {
 // that exceeds checklistBudgetRunes is truncated with a "…N
 // 项任务已省略" tail appended to the LAST visible line.
 func TestBuildTaskChecklistChunks_LongListTruncates(t *testing.T) {
-	items := make([]agent.TaskItem, 80)
+	items := make([]agent.AgentTaskItem, 80)
 	for i := range items {
-		items[i] = agent.TaskItem{
+		items[i] = agent.AgentTaskItem{
 			ID:      itoaForTest(i),
 			Subject: strings.Repeat("x", 80),
 			Status:  agent.TaskCompleted,
@@ -91,7 +91,7 @@ func TestBuildTaskChecklistChunks_EmptyListReturnsNil(t *testing.T) {
 	if got := buildTaskChecklistChunks(nil); got != nil {
 		t.Errorf("nil input = %v, want nil", got)
 	}
-	if got := buildTaskChecklistChunks([]agent.TaskItem{}); got != nil {
+	if got := buildTaskChecklistChunks([]agent.AgentTaskItem{}); got != nil {
 		t.Errorf("empty input = %v, want nil", got)
 	}
 }
@@ -100,7 +100,7 @@ func TestBuildTaskChecklistChunks_EmptyListReturnsNil(t *testing.T) {
 // removes TaskDeleted rows from the rendered output, even if a
 // corrupt bridge snapshot still contains them.
 func TestBuildTaskChecklistChunks_FilterTaskDeleted(t *testing.T) {
-	items := []agent.TaskItem{
+	items := []agent.AgentTaskItem{
 		{ID: "1", Subject: "live task", Status: agent.TaskPending},
 		{ID: "2", Subject: "leaked deleted", Status: agent.TaskDeleted},
 	}

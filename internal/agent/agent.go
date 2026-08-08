@@ -65,14 +65,14 @@ func (m Mode) String() string {
 type EventKind int
 
 const (
-	// EventText is a stream of text bytes from the CLI (PTY mode) or a
+	// EventAgentText is a stream of text bytes from the CLI (PTY mode) or a
 	// structured assistant message chunk (ACP / SDK modes).
 	//
-	// GRANULARITY CONTRACT (F-52): one EventText is ONE COMPLETE
+	// GRANULARITY CONTRACT (F-52): one EventAgentText is ONE COMPLETE
 	// SEMANTIC BLOCK — a paragraph the user should see as a single
 	// unit. It is NOT a streaming delta.
 	//
-	// This matters because gateway.Translate maps EventText to
+	// This matters because gateway.Translate maps EventAgentText to
 	// OutReply, and OutReply means "append one entry" to the channel's
 	// rolling log. A bridge that forwards per-token deltas therefore
 	// shatters one sentence into dozens of chat bubbles (and dozens of
@@ -89,102 +89,101 @@ const (
 	//                  Deliberately out of F-52's scope; its block
 	//                  boundary is stopReason, not text_end.
 	//   - pty        — exempt; raw byte stream with no block structure.
-	EventText EventKind = iota
+	EventAgentText EventKind = iota
 
-	// EventPermission is a permission request from the agent. The
+	// EventAgentPermission is a permission request from the agent. The
 	// Channel renders it as an interactive UI (e.g. Feishu card with
 	// buttons) and the user choice is fed back via SendPermission.
-	EventPermission
+	EventAgentPermission
 
-	// EventToolStart marks the beginning of a tool invocation.
-	EventToolStart
+	// EventAgentToolStart marks the beginning of a tool invocation.
+	EventAgentToolStart
 
-	// EventToolEnd marks the end of a tool invocation (success or error).
-	EventToolEnd
+	// EventAgentToolEnd marks the end of a tool invocation (success or error).
+	EventAgentToolEnd
 
-	// EventDone signals the session has ended cleanly (or with an exit
-	// code). After EventDone no further events will be emitted.
-	EventDone
+	// EventAgentDone signals the session has ended cleanly (or with an exit
+	// code). After EventAgentDone no further events will be emitted.
+	EventAgentDone
 
-	// EventError carries an unrecoverable error during the session.
-	EventError
+	// EventAgentError carries an unrecoverable error during the session.
+	EventAgentError
 
-	// EventResult is the assistant's final reply for the turn. In
+	// EventAgentResult is the assistant's final reply for the turn. In
 	// Claude Code stream-json this is the value of `result` on the
-	// result event — distinct from EventText (which is mid-stream
+	// result event — distinct from EventAgentText (which is mid-stream
 	// assistant text). Channels typically render it with a different
 	// icon than the rolling-log entries.
 	//
-	// ResultEvent carries the per-turn Usage (token counts + cost) on
+	// AgentResultEvent carries the per-turn Usage (token counts + cost) on
 	// the same field — bridges populate it from the source event's
 	// usage / modelUsage instead of emitting a separate EventUsage.
 	// Runtime accumulates Usage on receipt before stamping
 	// SessionContext, so the footer sees this turn's tokens on the
 	// first try.
-	EventResult
+	EventAgentResult
 
-	// EventCompaction signals a mid-turn context compaction. Bridges
-	// emit it when the agent's stream-json result carries
-	// subtype "compact" or "compaction" — these are NOT turn-end
-	// signals; subsequent assistant / tool events continue the same
-	// turn. Channels typically surface a brief "Compacting…" indicator.
-	EventCompaction
-
-	// EventAgentConnected carries session bootstrap data (session_id + model)
+	// EventAgentReady carries session bootstrap data (session_id + model)
 	// from the agent's system/init event. Channels use it to surface
 	// "session <id> · model <name>" in the receipt header.
-	EventAgentConnected
+	//
+	// Semantic: the bridge has finished its initial bootstrap and
+	// the agent's session metadata (SessionID + Model + AgentName +
+	// Workspace + Branch) is now known to the runtime. Subsequent
+	// user prompts can flow. This is the only readiness signal today;
+	// if a bridge ever needs to distinguish "metadata known" from
+	// "warm-up complete", add a second event rather than overloading
+	// this one.
+	EventAgentReady
 
-	// EventTaskCreate signals the first confirmable task operation
+	// EventAgentTaskCreate signals the first confirmable task operation
 	// (e.g. Claude TaskCreate success). The payload carries the
 	// current full task snapshot, not a delta, so that any consumer
 	// can render a complete checklist without cross-event correlation.
-	EventTaskCreate
+	EventAgentTaskCreate
 
-	// EventTaskUpdate signals a confirmable task mutation after
+	// EventAgentTaskUpdate signals a confirmable task mutation after
 	// create (status change, edit, delete). The payload also carries
 	// the current full task snapshot so receipts can replace the
 	// checklist wholesale.
-	EventTaskUpdate
+	EventAgentTaskUpdate
 )
 
 // String renders an EventKind for logs.
 func (k EventKind) String() string {
 	switch k {
-	case EventText:
+	case EventAgentText:
 		return "text"
-	case EventPermission:
+	case EventAgentPermission:
 		return "permission"
-	case EventToolStart:
+	case EventAgentToolStart:
 		return "tool_start"
-	case EventToolEnd:
+	case EventAgentToolEnd:
 		return "tool_end"
-	case EventDone:
+	case EventAgentDone:
 		return "done"
-	case EventError:
+	case EventAgentError:
 		return "error"
-	case EventResult:
+	case EventAgentResult:
 		return "result"
-	case EventCompaction:
-		return "compaction"
-	case EventAgentConnected:
-		return "agent_connected"
-	case EventTaskCreate:
+	case EventAgentReady:
+		return "agent_ready"
+	case EventAgentTaskCreate:
 		return "task_create"
-	case EventTaskUpdate:
+	case EventAgentTaskUpdate:
 		return "task_update"
 	default:
 		return fmt.Sprintf("event(%d)", int(k))
 	}
 }
 
-// PermissionRequest is the structured payload for EventPermission.
+// AgentPermissionRequest is the structured payload for EventAgentPermission.
 //
 // The Bridge exposes the available options (e.g. "once", "session",
 // "reject") and the Channel renders them. The user's choice is sent
 // back via ResponseCh exactly once; the Bridge consumes it and
 // forwards the decision to the agent.
-type PermissionRequest struct {
+type AgentPermissionRequest struct {
 	// Tool is the tool name (e.g. "Bash", "Write", "Edit").
 	Tool string
 
@@ -201,10 +200,10 @@ type PermissionRequest struct {
 	ResponseCh chan string
 }
 
-// ToolStartEvent carries metadata when a tool invocation begins.
-type ToolStartEvent struct {
+// AgentToolStartEvent carries metadata when a tool invocation begins.
+type AgentToolStartEvent struct {
 	// ID is opaque, stable for the lifetime of one invocation. Pair
-	// with ToolEndEvent.ID to correlate start/end.
+	// with AgentToolEndEvent.ID to correlate start/end.
 	ID string
 
 	// Name is the tool name (e.g. "Bash", "Read", "Write").
@@ -214,12 +213,12 @@ type ToolStartEvent struct {
 	Args string
 }
 
-// ToolEndEvent carries the result of a finished tool invocation.
-type ToolEndEvent struct {
-	// ID matches the corresponding ToolStartEvent.ID.
+// AgentToolEndEvent carries the result of a finished tool invocation.
+type AgentToolEndEvent struct {
+	// ID matches the corresponding AgentToolStartEvent.ID.
 	ID string
 
-	// Name mirrors the tool name for symmetry with ToolStartEvent.
+	// Name mirrors the tool name for symmetry with AgentToolStartEvent.
 	Name string
 
 	// Args are the raw or structured arguments passed to the tool.
@@ -234,21 +233,16 @@ type ToolEndEvent struct {
 	// before display, so bridges may pass large payloads verbatim
 	// without pre-truncating.
 	Output string
-
-	// Err is non-nil when the tool failed. When Err is set, Output
-	// typically holds nothing (the failure path bypasses the
-	// payload); channels may use either field for display.
-	Err error
 }
 
-// DoneEvent is the terminal payload for a clean session end.
+// AgentDoneEvent is the terminal payload for a clean session end.
 //
-// EventDone carries two related but distinct lifecycle signals:
+// EventAgentDone carries two related but distinct lifecycle signals:
 //
-//   - For one-shot bridges (Claude Code stream-json, PTY) EventDone
+//   - For one-shot bridges (Claude Code stream-json, PTY) EventAgentDone
 //     means "the process is done; no more events will follow."
-//     The bridge closes the events channel after emitting EventDone.
-//   - For long-lived bridges (Pi --mode rpc) EventDone means
+//     The bridge closes the events channel after emitting EventAgentDone.
+//   - For long-lived bridges (Pi --mode rpc) EventAgentDone means
 //     "the current turn settled; the process is still alive and
 //     may produce more events on the next user turn." The events
 //     channel stays open until process exit or Close().
@@ -258,32 +252,32 @@ type ToolEndEvent struct {
 // use the Reason field (when non-empty) to disambiguate turn-end
 // from process-end.
 //
-// Usage rides on DoneEvent (F-52 universal-prompt-end design) so
-// the runtime can read per-turn stats from EITHER EventResult or
-// EventDone uniformly — EventResult is emitted only when there is a
-// text payload, but EventDone fires every turn, including empty /
-// aborted ones. ResultEvent.Usage remains populated for callers
+// Usage rides on AgentDoneEvent (F-52 universal-prompt-end design) so
+// the runtime can read per-turn stats from EITHER EventAgentResult or
+// EventAgentDone uniformly — EventAgentResult is emitted only when there is a
+// text payload, but EventAgentDone fires every turn, including empty /
+// aborted ones. AgentResultEvent.Usage remains populated for callers
 // that already read from the result-bearing event, but the runtime's
 // accumulation path reads from Done.Usage (single source of truth).
 // See docs/feat/F-52-pi-stream-aggregation.md.
-type DoneEvent struct {
+type AgentDoneEvent struct {
 	// ExitCode follows Unix convention: 0 = success, non-zero = error.
 	// -1 indicates an abnormal termination (e.g. PTY EOF without a
 	// child exit code).
 	ExitCode int
 
 	// Reason is an optional, bridge-defined tag describing why
-	// EventDone was emitted. Empty string means "use the bridge
+	// EventAgentDone was emitted. Empty string means "use the bridge
 	// default" (process exit for one-shot bridges). Bridges that
 	// multiplex turns over a single process set Reason to
 	// "settled" (or another agreed value) so callers can tell a
-	// turn-end EventDone from a process-end one. See
+	// turn-end EventAgentDone from a process-end one. See
 	// docs/feat/F-32-pi-rpc-bridge.md §3.
 	Reason string
 
 	// Usage is the per-turn token usage observed on the same wire
 	// event as the bridge's turn-end signal. Bridges populate this
-	// on the SAME DoneEvent they emit — for one-shot bridges this
+	// on the SAME AgentDoneEvent they emit — for one-shot bridges this
 	// happens at process exit; for long-lived bridges (Pi) this
 	// happens at every settled turn. The runtime is a passive
 	// pass-through: it does NOT aggregate across turns and does NOT
@@ -293,32 +287,32 @@ type DoneEvent struct {
 	// it as footer Line 2. nil is a valid "no usage reported" value
 	// (zero-usage turn, synthetic assistant message, etc.) — the
 	// footer omits Line 2 in that case.
-	Usage *UsageEvent
+	Usage *UsageInfo
 }
 
-// ErrorEvent carries an unrecoverable error from the session.
-type ErrorEvent struct {
-	Err error
-}
-
-// ResultEvent is the payload for EventResult — the assistant's final
+// AgentResultEvent is the payload for EventAgentResult — the assistant's final
 // reply for the turn. Bridges populate Text from the stream-json
-// result event's `result` field; DurationMs / IsError / Subtype are
+// result event's `result` field; DurationMs / Subtype are
 // pass-through metadata for the channel to surface alongside the text
 // (e.g. "📝 <text> (12.3s)").
+//
+// Error indication: when the result represents an error turn, bridges
+// populate the top-level AgentEvent.Err instead of an IsError flag on
+// this struct. Channels check `ev.Err != nil` (Kind == EventAgentResult)
+// to render the error icon.
 //
 // Usage is the per-turn token usage that the bridge observed on the
 // same wire event that delivered Text (Claude Code's `result.usage`
 // + `result.modelUsage`; Pi's `message_end.usage`). Bridges populate
-// this on the SAME ResultEvent rather than emitting a separate
+// this on the SAME AgentResultEvent rather than emitting a separate
 // EventUsage — the data is contextually attached to the turn's
 // result, not a peer event. Runtime accumulates Usage on receipt;
 // channels fold it into the SessionContext footer. nil is a valid
 // "no usage reported" value (the bridge may legitimately observe a
 // zero-usage turn, e.g. a synthetic assistant message).
-type ResultEvent struct {
+type AgentResultEvent struct {
 	// Text is the final assistant reply. May be empty when the turn
-	// ended with an error; channels typically still emit an EventResult
+	// ended with an error; channels typically still emit an EventAgentResult
 	// so the header line can flip to an error state.
 	Text string
 
@@ -326,27 +320,20 @@ type ResultEvent struct {
 	// milliseconds (Claude Code: result.duration_ms).
 	DurationMs int64
 
-	// IsError is true when the turn ended abnormally (Claude Code:
-	// result.is_error). When set, channels typically render the
-	// ResultEvent with an error icon.
-	IsError bool
-
 	// Subtype is the result event's subtype (Claude Code: e.g.
-	// "success", "error_max_turns", "compact", "compaction"). Bridges
-	// already convert "compact" / "compaction" into EventCompaction
-	// before the ResultEvent, so any Subtype seen here is a real
-	// terminal subtype.
+	// "success", "error_max_turns"). Categorisation only — error
+	// detection has moved to the top-level AgentEvent.Err field.
 	Subtype string
 
 	// Usage is the per-turn token usage observed on the same wire
 	// event as Text. See struct doc above. Populated by bridges;
 	// consumed by the runtime's newEventHandler via
-	// agent.ResultEvent.Usage before stamping SessionContext.
-	Usage *UsageEvent
+	// agent.AgentResultEvent.Usage before stamping SessionContext.
+	Usage *UsageInfo
 }
 
-// UsageEvent is the turn's token usage statistics, packaged inside
-// ResultEvent (replaces the standalone EventUsage kind removed in the
+// UsageInfo is the turn's token usage statistics, packaged inside
+// AgentResultEvent (replaces the standalone EventUsage kind removed in the
 // footer's "calc-then-reply" cleanup). All four counts default to
 // zero when missing; channels decide how to surface (e.g. "1.2k
 // tokens (in 800 · out 400) · $0.012").
@@ -364,8 +351,8 @@ type ResultEvent struct {
 // `contextWindow` is a bridge-local value: claudecode reads it
 // from `modelUsage[<model>].contextWindow`, pi reads it from
 // `get_state.data.model.contextWindow`. F-54 originally dropped
-// the field from UsageEvent as dead (0 read / 0 write); F-55
-// re-introduced it (UsageEvent.ContextWindow below) so the
+// the field from UsageInfo as dead (0 read / 0 write); F-55
+// re-introduced it (UsageInfo.ContextWindow below) so the
 // channel footer can render `(window)` alongside the percentage.
 // See docs/feat/F-55-footer-show-context-window.md for the
 // re-introduction rationale.
@@ -377,7 +364,7 @@ type ResultEvent struct {
 // docs/feat/F-45-session-footer.md §1.5 / §1.6,
 // docs/feat/F-54-pi-contextwindow-from-get-state.md, and
 // docs/feat/F-55-footer-show-context-window.md.
-type UsageEvent struct {
+type UsageInfo struct {
 	// InputTokens is the non-cached input token count.
 	InputTokens int
 
@@ -420,138 +407,12 @@ type UsageEvent struct {
 	ContextWindowPct float64
 }
 
-// UsageInfo is the **per-turn snapshot** form of UsageEvent — what
-// bridges emit on EventResult / EventDone and what the channel
-// footer reads from SessionContext.Usage (see
-// docs/feat/F-45-session-footer.md).
-//
-// IMPORTANT: this struct is NOT cumulative. Each event carries its
-// own snapshot; the runtime does not sum across turns, and
-// AgentSession no longer persists any cross-turn totals. A new
-// bridge event is the only way a new value flows in.
-//
-// Lives in the agent package (not gateway) because the type is
-// referenced by both agent (events) and chatsession (AgentSession).
-// gateway re-exports UsageInfo as a type alias for ABI
-// compatibility with the typed `Usage *UsageInfo` field on
-// OutboundMessage (translate.go:158).
-//
-// The 4 token fields are independent counters — IN and CacheRead
-// are NOT additive (Anthropic API exposes them as separate fields;
-// InputTokens is non-cached input only, not the sum).
-type UsageInfo struct {
-	// InputTokens is the non-cached input token count from this
-	// turn's LLM call (Anthropic API: input_tokens field).
-	// Cache hits are NOT included — see CacheReadInputTokens.
-	InputTokens int
-
-	// OutputTokens is the generated output token count.
-	OutputTokens int
-
-	// CacheCreationInputTokens is the input tokens that wrote
-	// to the prompt cache (Anthropic API:
-	// cache_creation_input_tokens).
-	CacheCreationInputTokens int
-
-	// CacheReadInputTokens is the input tokens served from the
-	// prompt cache (Anthropic API: cache_read_input_tokens).
-	CacheReadInputTokens int
-
-	// CostUSD is the per-turn cost in USD reported by the API
-	// (Claude Code: result.total_cost_usd). Forwarded verbatim —
-	// the client never computes cost. 0 when the API didn't report.
-	CostUSD float64
-
-	// ContextWindow is the API/CLI-reported model context-window
-	// size in tokens. F-55: re-introduced so the footer can show
-	// `(window)` alongside X% — the user judges upstream
-	// compatibility-layer mismatches (e.g. `101.6% (200k)` vs an
-	// actual 1M model). 0 means "not reported"; footer drops the
-	// `(window)` segment. Runtime does NOT recompute, catalog, or
-	// clamp based on this value.
-	ContextWindow int
-
-	// ContextWindowPct is the per-turn context-fill percentage
-	// (0-100), bridge-computed via the Doc 1 formula
-	// (input+output+cache_creation+cache_read)/contextWindow*100.
-	// Bridges populate from the same wire data that produces
-	// modelUsage.<model>.contextWindow; the runtime passes it
-	// through verbatim and the channel footer renders it as the
-	// "X%" segment. 0 means "not reported" - the footer omits
-	// X% rather than showing 0%.
-	ContextWindowPct float64
-}
-
-// CompactionEvent is the payload for EventCompaction — a marker
-// signalling that the agent completed a context-compaction cycle.
-//
-// F-49: bridges MUST emit exactly one EventCompaction per completed
-// cycle. Pi suppresses its transient `compaction_start` event so a
-// single Pi cycle yields one EventCompaction (on `compaction_end`);
-// Claude Code emits one event per cycle naturally (result subtype
-// "compact" / "compaction"). The runtime handler treats every
-// EventCompaction identically and bumps the AgentSession's
-// compaction counter + resets the per-cycle token stats (see
-// docs/feat/F-49-compaction-counter.md §1.3).
-//
-// The struct is intentionally empty: previously it carried a Subtype
-// string used by the runtime for protocol dispatch; F-49 removes that
-// dispatch (bridges digest protocol differences; runtime is
-// protocol-agnostic). Channels can rely on `Kind == EventCompaction`
-// alone as the discriminator. Add fields here in the future if a
-// new payload shape is needed.
-type CompactionEvent struct{}
-
-// AgentConnectedEvent is the payload for EventAgentConnected — session bootstrap data
-// from the agent's system/init event. Bridges populate the
-// agent-specific fields (AgentName, Workspace) from their own start
-// config; the stream-json system event provides SessionID + Model.
-// Channels use this payload to surface the receipt card's foot
-// note (Agent · name | cwd · workspace | tokens · count).
-type AgentConnectedEvent struct {
-	// SessionID is the agent's opaque session id. Used for `--resume`
-	// on subsequent runs; channels may surface it for debugging.
-	SessionID string
-
-	// Model is the model the agent selected (Claude Code:
-	// system/init.model).
-	Model string
-
-	// AgentName is the human-friendly name of the running agent
-	// (registry key, e.g. "claude" or a binding alias like "main").
-	// Bridges populate this from Agent.Name() at start time; it is
-	// stable for the lifetime of the session.
-	AgentName string
-
-	// Workspace is the absolute path of the working directory the
-	// agent process is running in. Bridges populate this from
-	// StartConfig.Workspace. Channels surface it as "cwd" in the
-	// receipt foot note.
-	Workspace string
-
-	// Branch is the git branch of the workspace, captured at
-	// session start by running `git -C workspace symbolic-ref
-	// --short HEAD`. Empty when the workspace is not a git
-	// repo or git is unavailable; the receipt's foot note
-	// omits the branch segment in that case. Channels surface
-	// it as the third "branch" segment of the
-	// "Agent | repo | branch | tokens" foot note.
-	Branch string
-}
-
-// TaskStatus is the abstract lifecycle stage of a single task in
-// an agent's per-turn checklist. It is intentionally generic: any
-// agent that exposes a "task list" / "todo list" primitive has
-// at least pending / in_progress / completed semantics, and the
-// Gateway / Channel layers must never see provider-specific
-// status strings. Bridges normalise provider values into this
-// enum in bridge/* before emitting a typed task event.
-type TaskStatus int
+type AgentTaskStatus int
 
 const (
 	// TaskPending is the default state for a freshly created task
 	// that has not started running.
-	TaskPending TaskStatus = iota
+	TaskPending AgentTaskStatus = iota
 	// TaskInProgress marks the task the agent is currently working
 	// on. The receipt may show an ActiveForm suffix ("... ·
 	// writing unit tests…") to give the user a live status hint.
@@ -565,13 +426,13 @@ const (
 	// provider-native delete, removes the task from its session
 	// state, and re-emits a full snapshot where the deleted id is
 	// no longer present. The Gateway / Channel must not see a
-	// TaskItem with Status == TaskDeleted — by contract the
+	// AgentTaskItem with Status == TaskDeleted — by contract the
 	// snapshot's Items only contains the live tasks.
 	TaskDeleted
 )
 
-// String renders a TaskStatus for log lines.
-func (s TaskStatus) String() string {
+// String renders a AgentTaskStatus for log lines.
+func (s AgentTaskStatus) String() string {
 	switch s {
 	case TaskPending:
 		return "pending"
@@ -585,65 +446,84 @@ func (s TaskStatus) String() string {
 	return "task(unknown)"
 }
 
-// TaskItem is one row in the per-turn checklist. ID is the
+// AgentTaskItem is one row in the per-turn checklist. ID is the
 // provider-assigned stable identifier (e.g. Claude's `Task #1`);
 // bridges MUST populate it so follow-up updates can correlate by
 // ID. Subject is the user-visible label. ActiveForm is the
 // optional present-continuous phrase the agent emits while the
 // task is in progress.
-type TaskItem struct {
+type AgentTaskItem struct {
 	ID         string
 	Subject    string
 	ActiveForm string
-	Status     TaskStatus
+	Status     AgentTaskStatus
 }
 
-// TaskListEvent is the typed payload for EventTaskCreate and
-// EventTaskUpdate. Items is the full current snapshot of the
+// AgentTaskListEvent is the typed payload for EventAgentTaskCreate and
+// EventAgentTaskUpdate. Items is the full current snapshot of the
 // provider session's task list (NOT a delta). An empty Items
 // slice is a valid "clear the checklist" signal — channels may
 // choose to render an empty section or hide it entirely.
-type TaskListEvent struct {
-	Items []TaskItem
+type AgentTaskListEvent struct {
+	Items []AgentTaskItem
 }
 
 // AgentEvent is the wire format on the AgentSession.Events() channel.
 //
-// Exactly one payload field is meaningful per Kind:
+// Exactly one action-payload field is meaningful per Kind:
 //
-//	EventText       -> Text
-//	EventPermission -> Permission
-//	EventToolStart  -> ToolStart
-//	EventToolEnd    -> ToolEnd
-//	EventDone       -> Done
-//	EventError      -> Error
-//	EventResult     -> Result
-//	EventUsage      -> Usage
-//	EventCompaction -> (no payload — empty marker struct)
-//	EventAgentConnected  -> Connected
-//	EventTaskCreate -> TaskList
-//	EventTaskUpdate -> TaskList
+//	EventAgentText       -> Text
+//	EventAgentPermission -> Permission
+//	EventAgentToolStart  -> ToolStart
+//	EventAgentToolEnd    -> ToolEnd (failure also sets top-level Err)
+//	EventAgentDone       -> Done
+//	EventAgentError      -> Err (top-level, no sub-struct)
+//	EventAgentResult     -> Result (error turns also set top-level Err)
+//	EventAgentReady      -> (no action payload; context fields only)
+//	EventAgentTaskCreate -> TaskList
+//	EventAgentTaskUpdate -> TaskList
+//
+// Bridge-side session context fields (SessionID / Model / AgentName /
+// Workspace / Branch) are stamped on every event by the bridge's
+// deliver() helper. They are stable for the lifetime of one bridge
+// session and only change on /new (re-emit EventAgentReady to update).
 type AgentEvent struct {
 	Kind EventKind
 
-	// Text is the payload for EventText. Other Kinds leave it empty.
+	// ───── Bridge-side session context (always populated) ─────
+	// Bridges maintain a "current context" snapshot and stamp these
+	// fields on every event before delivery. Runtime reads them
+	// directly; AgentSession holds no mirror state for these.
+	SessionID  string
+	Model      string
+	AgentName  string
+	Workspace string
+	Branch     string
+
+	// ───── Action payload (per Kind; usually exactly one is meaningful) ─────
+	// Text is the payload for EventAgentText. Other Kinds leave it empty.
 	Text string
 
-	Permission *PermissionRequest
-	ToolStart  *ToolStartEvent
-	ToolEnd    *ToolEndEvent
-	Done       *DoneEvent
-	Error      *ErrorEvent
-	Result     *ResultEvent
-	Usage      *UsageEvent
-	Connected  *AgentConnectedEvent
+	Permission *AgentPermissionRequest
+	ToolStart  *AgentToolStartEvent
+	ToolEnd    *AgentToolEndEvent
+	Done       *AgentDoneEvent
 
-	// TaskList is the payload for EventTaskCreate / EventTaskUpdate.
+	// Err is the unified error indicator. Populated on:
+	//   - EventAgentError  — unrecoverable session error
+	//   - EventAgentToolEnd — when the tool invocation failed
+	//   - EventAgentResult — when the result turn ended in error
+	// Channels check `ev.Err != nil` to render error UI.
+	Err error
+
+	Result *AgentResultEvent
+
+	// TaskList is the payload for EventAgentTaskCreate / EventAgentTaskUpdate.
 	// Every event carries a full snapshot of the current task list
 	// (not a delta) so consumers can replace the rendered checklist
 	// wholesale. An Items slice with length 0 is a valid "clear the
 	// checklist" signal.
-	TaskList *TaskListEvent
+	TaskList *AgentTaskListEvent
 }
 
 // StartConfig is the per-session configuration handed to Agent.Start.
@@ -671,13 +551,13 @@ type StartConfig struct {
 	// without changing the Start signature.
 	PermissionMode string
 
-	// ResumeID is the agent's own session id, captured from the
+	// SessionID is the agent's own session id, captured from the
 	// previous run's init event (e.g. Claude Code's
 	// `system/init.session_id`). Bridges that support resume (Claude
 	// Code) translate this into their native flag (e.g. `--resume
 	// <id>`); bridges that don't (ACP / Pi / PTY) silently ignore it.
 	// Empty means "no --resume; start a fresh session".
-	ResumeID string
+	SessionID string
 }
 
 // Agent is the static description of a CLI wrapper plus a factory for
@@ -769,12 +649,12 @@ type AgentSession interface {
 	// Events streams AgentEvent values until the session ends. The
 	// channel is closed by the implementation only when the
 	// underlying process (or transport) terminates -- NOT after
-	// every EventDone. Long-lived bridges that multiplex many
+	// every EventAgentDone. Long-lived bridges that multiplex many
 	// turns over a single process (e.g. Pi --mode rpc) emit
-	// EventDone at the end of each turn and keep the channel
+	// EventAgentDone at the end of each turn and keep the channel
 	// open until process exit or Close(). Channels and ChatSession
 	// rely on the channel being closed as the universal
-	// "session is over" signal; DoneEvent.Reason disambiguates
+	// "session is over" signal; AgentDoneEvent.Reason disambiguates
 	// turn-end from process-end.
 	Events() <-chan AgentEvent
 
@@ -815,7 +695,7 @@ type AgentSession interface {
 	// the block; some return an error.
 	SendBlocks(ctx context.Context, blocks []ContentBlock) error
 
-	// SendPermission responds to the most recent EventPermission. The
+	// SendPermission responds to the most recent EventAgentPermission. The
 	// argument is the option string the user chose. Only meaningful in
 	// ACP/SDK modes; PTY mode writes it verbatim to stdin.
 	SendPermission(resp string) error
@@ -830,7 +710,7 @@ type AgentSession interface {
 	//   - pi:         send {"type":"new_session"} RPC
 	//   - acp:        send "session/new" JSON-RPC over the existing transport
 	//
-	// After New returns, the bridge MUST emit a fresh EventAgentConnected carrying
+	// After New returns, the bridge MUST emit a fresh EventAgentReady carrying
 	// the new SessionID; the runtime's AgentEventBus subscriber captures
 	// it via SetResumeID and persists (cmd/nightme/run.go newEventHandler).
 	New(ctx context.Context) error

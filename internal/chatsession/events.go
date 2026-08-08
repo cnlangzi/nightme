@@ -33,9 +33,12 @@ type EnrichedEventKind int
 
 const (
 	// KindAgentEvent: bridges a single AgentEvent from the underlying
-	// transport (EventAgentConnected / EventText / EventToolStart / EventToolEnd /
-	// EventResult / EventUsage / EventPermission / EventDone / EventError
+	// transport (EventAgentReady / EventAgentText / EventAgentToolStart / EventAgentToolEnd /
+	// EventAgentResult / EventAgentPermission / EventAgentDone / EventAgentError
 	// etc.). AgentEvent field holds the bridge event verbatim.
+	//
+	// Per-event Usage is co-located on AgentResultEvent / AgentDoneEvent
+	// (F-52); the legacy EventAgentUsage kind was removed.
 	KindAgentEvent EnrichedEventKind = iota
 
 	// KindPromptEnded: the in-flight Prompt has terminated. Emitted by

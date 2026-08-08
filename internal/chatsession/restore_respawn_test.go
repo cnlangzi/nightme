@@ -157,10 +157,10 @@ func TestRestoreFromRegistry_ThenLookupTriggersSpawn(t *testing.T) {
 // TestRestoreFromRegistry_PreservesResumeIDOnRespawn is the
 // regression test for the resume-id-loss bug: after a daemon
 // restart, a Detached AgentSession restored from disk must keep
-// its captured ResumeID so the next Spawn replays `--resume <id>`
+// its captured SessionID so the next Spawn replays `--resume <id>`
 // to the bridge. The pre-fix LookupActiveAgentSession created a
 // fresh AgentSession on the spawn path, which discarded the
-// restored entry (and its ResumeID), forcing every restart to
+// restored entry (and its SessionID), forcing every restart to
 // start a brand-new agent session.
 func TestRestoreFromRegistry_PreservesResumeIDOnRespawn(t *testing.T) {
 	csFile, asFile := newTestStores(t)
@@ -174,7 +174,7 @@ func TestRestoreFromRegistry_PreservesResumeIDOnRespawn(t *testing.T) {
 		Agent:         "claude",
 		Cwd:           "/code/bailing",
 		Status:        registry.StatusDetached,
-		ResumeID:      "sess-from-prior-run",
+		SessionID:      "sess-from-prior-run",
 	}); err != nil {
 		t.Fatalf("Upsert AS: %v", err)
 	}
@@ -205,11 +205,11 @@ func TestRestoreFromRegistry_PreservesResumeIDOnRespawn(t *testing.T) {
 		t.Fatalf("LookupActiveAgentSession: %v", err)
 	}
 	if as.ID != asID {
-		t.Errorf("respawn replaced the pool entry: got ID %q, want %q (ResumeID round-trip depends on identity continuity)",
+		t.Errorf("respawn replaced the pool entry: got ID %q, want %q (SessionID round-trip depends on identity continuity)",
 			as.ID, asID)
 	}
-	if got := as.ResumeID(); got != "sess-from-prior-run" {
-		t.Errorf("in-memory ResumeID lost on respawn: got %q, want %q", got, "sess-from-prior-run")
+	if got := as.SessionID(); got != "sess-from-prior-run" {
+		t.Errorf("in-memory SessionID lost on respawn: got %q, want %q", got, "sess-from-prior-run")
 	}
 	if got := spawner.lastResumeID; got != "sess-from-prior-run" {
 		t.Errorf("Spawner did not receive the resume id: got %q, want %q", got, "sess-from-prior-run")
@@ -238,7 +238,7 @@ func TestFromAgentSessionEntry_InitializesEventQueue(t *testing.T) {
 		Agent:         "claude",
 		Cwd:           "/tmp/ws",
 		Status:        registry.StatusRunning, // demoted to Detached by FromAgentSessionEntry
-		ResumeID:      "resume-xyz",
+		SessionID:      "resume-xyz",
 	}
 	as := FromAgentSessionEntry(entry)
 	if as == nil {
@@ -285,7 +285,7 @@ func TestFromAgentSessionEntry_InitializesEventQueue(t *testing.T) {
 	received := make(chan struct{}, 1)
 	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
 		ev := env.Event
-		if ev.Kind == agent.EventText && ev.Text == "hello-after-restore" {
+		if ev.Kind == agent.EventAgentText && ev.Text == "hello-after-restore" {
 			select {
 			case received <- struct{}{}:
 			default:
@@ -312,7 +312,7 @@ func TestFromAgentSessionEntry_InitializesEventQueue(t *testing.T) {
 	if fake == nil {
 		t.Fatal("spawner did not capture a handle")
 	}
-	fake.PushEvent(agent.AgentEvent{Kind: agent.EventText, Text: "hello-after-restore"})
+	fake.PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "hello-after-restore"})
 
 	select {
 	case <-received:

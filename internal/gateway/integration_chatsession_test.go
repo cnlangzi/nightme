@@ -26,7 +26,7 @@ import (
 //   AgentSession.readpumpLoop()        // reads handle.Events() →
 //                                      // pushes EnrichedEvent to as.eventQueue
 //   AgentSession.Submit(prompt)        // drives bridge via SendBlocks
-//   fake.PushEvent(EventText "hello")  // simulates agent response
+//   fake.PushEvent(EventAgentText "hello")  // simulates agent response
 //   assert mock Channel.Record() sees OutReply{ChatID, ReplyTo, Text}
 //
 // This skips feishu / claudecode / --resume / persistence entirely:
@@ -103,7 +103,7 @@ func newIntegrationChatSession(chatID string, spawner chatsession.Spawner) *chat
 
 // TestIntegration_AgentEvent_ReachesChannel is the smallest
 // reproduction: enqueue a message, submit it to the AS, push an
-// EventText from the fake bridge, assert OutReply lands on the
+// EventAgentText from the fake bridge, assert OutReply lands on the
 // channel with the correct chat_id + reply_to + text.
 func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 	spawner := &integrationSpawner{}
@@ -142,7 +142,7 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 	}
 
 	// Fake bridge streams a reply chunk.
-	fake.PushEvent(agent.AgentEvent{Kind: agent.EventText, Text: "hello back"})
+	fake.PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "hello back"})
 
 	// Wait for the round-trip.
 	var rec []OutboundMessage
@@ -192,7 +192,7 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 }
 
 // TestIntegration_AgentEventResult_ReachesChannel exercises the
-// final-result path (EventResult → OutResult). This is the second
+// final-result path (EventAgentResult → OutResult). This is the second
 // half of the "no OutReply/OutResult to feishu" symptom.
 func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 	spawner := &integrationSpawner{}
@@ -226,8 +226,8 @@ func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 	}
 
 	fake.PushEvent(agent.AgentEvent{
-		Kind: agent.EventResult,
-		Result: &agent.ResultEvent{
+		Kind: agent.EventAgentResult,
+		Result: &agent.AgentResultEvent{
 			Text: "final answer",
 		},
 	})
@@ -242,7 +242,7 @@ func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if len(rec) == 0 {
-		t.Fatal("no OutboundMessage captured on channel within 2s — EventResult never reached ch.Send")
+		t.Fatal("no OutboundMessage captured on channel within 2s — EventAgentResult never reached ch.Send")
 	}
 
 	var outResult *OutboundMessage
@@ -330,7 +330,7 @@ func (f *integrationFake) FinishEvent() {
 	if f.closed {
 		return
 	}
-	f.events <- agent.AgentEvent{Kind: agent.EventDone}
+	f.events <- agent.AgentEvent{Kind: agent.EventAgentDone}
 	f.closed = true
 	close(f.events)
 }
@@ -359,9 +359,9 @@ func summarizeKinds(msgs []OutboundMessage) []OutboundKind {
 // fails with a clear signal.
 //
 // The shell script writes:
-//   1. system/init             → EventAgentConnected
-//   2. assistant message       → EventText "hello back"
-//   3. result                  → EventResult "final answer"
+//   1. system/init             → EventAgentReady
+//   2. assistant message       → EventAgentText "hello back"
+//   3. result                  → EventAgentResult "final answer"
 //   4. EOF (exit 0)            → pumpStream closes events
 func TestIntegration_RealBridge_FakeShell(t *testing.T) {
 	dir := t.TempDir()
@@ -463,10 +463,10 @@ type realBridgeSpawner struct {
 	agent *claudecode.Agent
 }
 
-func (s *realBridgeSpawner) Spawn(ctx context.Context, _, _ string, args []string, resumeID string) (agent.AgentSession, error) {
+func (s *realBridgeSpawner) Spawn(ctx context.Context, _, _ string, args []string, sessionID string) (agent.AgentSession, error) {
 	return s.agent.Start(ctx, agent.StartConfig{
 		Workspace: "/tmp",
 		Args:      args,
-		ResumeID:  resumeID,
+		SessionID:  sessionID,
 	})
 }

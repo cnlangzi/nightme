@@ -32,7 +32,7 @@
 //	`modelUsage[<model>].contextWindow`, pi reads it from
 //	`get_state.data.model.contextWindow`. The bridge owns this
 //	calculation — the runtime does NOT recompute pct, it just
-//	passes UsageEvent.ContextWindowPct through to the channel
+//	passes UsageInfo.ContextWindowPct through to the channel
 //	footer. 0 means "not reported" (model didn't expose
 //	contextWindow this turn, or pi version lacks the field)
 //	and the footer omits X% rather than showing 0%.
@@ -40,7 +40,7 @@
 // $cost = API-reported per-turn cost (Claude Code:
 //
 //	`result.total_cost_usd`). Forwarded verbatim into
-//	agent.UsageEvent.CostUSD — the footer NEVER computes
+//	agent.UsageInfo.CostUSD — the footer NEVER computes
 //	cost client-side (no rate table, no per-model pricing).
 //
 // Line 3 (F-48 follow-up to F-45):
@@ -160,27 +160,24 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 		// rest of the line-2 separator family.
 		idParts = append(idParts, "·", ctx.Model)
 	}
-	// F-49: append "· 🗜 N" segment when at least one compaction
-	// cycle has been observed on this AgentSession. The clamp
-	// glyph (U+1F5DC, Unicode "COMPRESSION") is the most literal
-	// semantic match — see
-	// docs/feat/F-49-compaction-counter.md §1.6 + §1.2. Only
-	// rendered when N > 0 (F-45 §1.6 zero-omit convention; new
-	// sessions show no compaction segment). The "·" prefix matches
-	// the Agent · Model separator rhythm above, so the line reads
-	// as one consistent sequence rather than a parenthetical add-on.
-	if ctx.CompactionCount > 0 {
-		idParts = append(idParts, "·", "🗜", strconv.Itoa(ctx.CompactionCount))
-	}
+	// F-49 compaction tracking removed: the "· 🗜 N" segment is
+	// no longer rendered. The runtime dropped its
+	// compactionCount bookkeeping; bridges no longer emit
+	// EventAgentCompaction. Line 1 retains Agent · Model only.
+	_ = strconv.Itoa // keep import stable during F-49 cleanup
 	if len(idParts) > 1 {
 		lines = append(lines, strings.Join(idParts, " "))
 	}
+
+	// Compaction tracking (🗜 N) was removed when the
+	// runtime-side compaction chain was dropped. F-49 §1.6 + §1.2
+	// no longer apply; Line 1 retains Agent · Model only.
 
 	// Line 2: usage stats (💰:「 in / out · X% · $cost 」).
 	//
 	// Renders the per-turn Usage snapshot stamped on the
 	// OutboundMessage (ctx.Usage, populated by
-	// gateway.Translate from ResultEvent.Usage / DoneEvent.Usage
+	// gateway.Translate from AgentResultEvent.Usage / AgentDoneEvent.Usage
 	// on the bridge event). The runtime is a passive
 	// pass-through — it does NOT aggregate across turns.
 	//
@@ -193,7 +190,7 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 	// `contextWindow` — claudecode from
 	// `modelUsage.contextWindow`, pi from
 	// `get_state.data.model.contextWindow` (F-54) — fills
-	// UsageEvent.ContextWindowPct AND UsageEvent.ContextWindow
+	// UsageInfo.ContextWindowPct AND UsageInfo.ContextWindow
 	// verbatim). nightme does NOT clamp pct > 100%, does NOT
 	// catalog, does NOT override — the user judges upstream
 	// compatibility-layer mismatches themselves. "$cost" is

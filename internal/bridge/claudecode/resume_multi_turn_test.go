@@ -6,7 +6,7 @@ package claudecode
 //  1. With --print restored, claude emits init immediately on
 //     spawn (no stdin-gated hang like multi-turn interactive
 //     mode caused).
-//  2. init.SessionID matches the requested ResumeID — resume
+//  2. init.SessionID matches the requested SessionID — resume
 //     context survives the respawn boundary.
 //  3. Within one bridge session, multiple SendBlocks on the
 //     same claude process produce multiple responses (proves
@@ -26,7 +26,7 @@ import (
 // TestStart_ResumeMultiTurnRespawn reproduces the test19 scenario:
 // spawn with --resume, confirm init.SessionID matches and a turn
 // completes. Then start a SECOND bridge session (separate go
-// process) with the same ResumeID and confirm init.SessionID still
+// process) with the same SessionID and confirm init.SessionID still
 // matches — proves resume context survives the per-chat-respawn
 // boundary that main's working mode relies on.
 //
@@ -71,7 +71,7 @@ func TestStart_ResumeMultiTurnRespawn(t *testing.T) {
 	sess2, err := a.Start(ctx, agent.StartConfig{
 		Workspace:      ws,
 		PermissionMode: "bypassPermissions",
-		ResumeID:       capturedID,
+		SessionID:       capturedID,
 	})
 	if err != nil {
 		t.Fatalf("phase 2 Start: %v", err)
@@ -93,29 +93,29 @@ func TestStart_ResumeMultiTurnRespawn(t *testing.T) {
 				t.Fatalf("phase 2 turn A: events closed before result (gotInit=%v)", gotInit)
 			}
 			t.Logf("[multi-turn] phase 2 turn A EV kind=%v", ev.Kind)
-			if ev.Kind == agent.EventAgentConnected && ev.Connected != nil {
-				if ev.Connected.SessionID != capturedID {
+			if ev.Kind == agent.EventAgentReady  {
+				if ev.SessionID != capturedID {
 					t.Fatalf("phase 2: init.SessionID = %q, want %q (resume context lost across respawn)",
-						ev.Connected.SessionID, capturedID)
+						ev.SessionID, capturedID)
 				}
 				gotInit = true
-				t.Logf("[multi-turn] phase 2: init.SessionID matches resumeID — resume preserved across respawn")
+				t.Logf("[multi-turn] phase 2: init.SessionID matches sessionID — resume preserved across respawn")
 			}
-			if ev.Kind == agent.EventResult {
+			if ev.Kind == agent.EventAgentResult {
 				gotResultA = true
 				if ev.Result == nil || !strings.Contains(strings.ToLower(ev.Result.Text), "pong") {
 					t.Errorf("phase 2 turn A: result = %q, want contains 'pong'", ev.Result.Text)
 				}
 			}
-			if ev.Kind == agent.EventError {
-				t.Fatalf("phase 2 turn A: bridge emitted EventError: %v", ev.Error.Err)
+			if ev.Kind == agent.EventAgentError {
+				t.Fatalf("phase 2 turn A: bridge emitted EventAgentError: %v", ev.Err)
 			}
 		case <-time.After(60 * time.Second):
 			t.Fatalf("phase 2 turn A: no result within 60s (gotInit=%v) — regression of test19 hang", gotInit)
 		}
 	}
 	if !gotInit {
-		t.Fatalf("phase 2 turn A: never saw EventAgentConnected — regression of test19 hang")
+		t.Fatalf("phase 2 turn A: never saw EventAgentReady — regression of test19 hang")
 	}
 
 	// Phase 3 (the multi-turn proof): turn B on the SAME bridge
@@ -137,14 +137,14 @@ func TestStart_ResumeMultiTurnRespawn(t *testing.T) {
 				t.Fatalf("phase 3 turn B: events closed before result — claude exited unexpectedly")
 			}
 			t.Logf("[multi-turn] phase 3 turn B EV kind=%v", ev.Kind)
-			if ev.Kind == agent.EventResult {
+			if ev.Kind == agent.EventAgentResult {
 				gotResultB = true
 				if ev.Result == nil || !strings.Contains(strings.ToLower(ev.Result.Text), "ping") {
 					t.Errorf("phase 3 turn B: result = %q, want contains 'ping'", ev.Result.Text)
 				}
 			}
-			if ev.Kind == agent.EventError {
-				t.Fatalf("phase 3 turn B: bridge emitted EventError: %v", ev.Error.Err)
+			if ev.Kind == agent.EventAgentError {
+				t.Fatalf("phase 3 turn B: bridge emitted EventAgentError: %v", ev.Err)
 			}
 		case <-time.After(60 * time.Second):
 			t.Fatalf("phase 3 turn B: no result within 60s — same-session multi-turn broken")
@@ -154,7 +154,7 @@ func TestStart_ResumeMultiTurnRespawn(t *testing.T) {
 }
 
 // captureInitSessionID drains the events channel until it sees
-// an EventAgentConnected with a non-empty SessionID, or until the deadline
+// an EventAgentReady with a non-empty SessionID, or until the deadline
 // elapses. Returns the captured id.
 func captureInitSessionID(t *testing.T, sess agent.AgentSession, timeout time.Duration) string {
 	t.Helper()
@@ -165,11 +165,11 @@ func captureInitSessionID(t *testing.T, sess agent.AgentSession, timeout time.Du
 			if !ok {
 				t.Fatalf("captureInit: events channel closed before init")
 			}
-			if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.SessionID != "" {
-				return ev.Connected.SessionID
+			if ev.Kind == agent.EventAgentReady  && ev.SessionID != "" {
+				return ev.SessionID
 			}
 		case <-deadline:
-			t.Fatalf("captureInit: no EventAgentConnected within %s — claude hung (regression of test19 hang)", timeout)
+			t.Fatalf("captureInit: no EventAgentReady within %s — claude hung (regression of test19 hang)", timeout)
 		}
 	}
 }

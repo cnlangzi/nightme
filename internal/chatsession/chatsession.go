@@ -136,10 +136,16 @@ type ChatSession struct {
 	// Publish is called from the PumpEvents goroutine without
 	// holding cs.mu (writebackMessageState fix). The EventBus's
 	// own mutex protects the Publish/Subscribe race.
+	//
+	// AS-level lifecycle transitions (Spawned / Exited) are not
+	// fanned out via a bus — the routeEvent KindLifecycle handler
+	// directly flips AgentSession.SetExited and logs at Info level.
+	// A LifecycleBus was prototyped in F-54 but no consumer ever
+	// materialised; re-add it here (plus a LifecycleEvent envelope)
+	// the day an audit / metrics / HUD subscriber actually needs it.
 	AgentEventBus   *services.EventBus[AgentEventEnvelope]
 	MessageStateBus *services.EventBus[MessageStateEvent]
 	PromptEndBus    *services.EventBus[PromptEndedEvent]
-	LifecycleBus    *services.EventBus[LifecycleEvent]
 
 	// ctx is the per-ChatSession context. Lives for the chat's
 	// lifetime (until daemon shutdown). It is the PARENT context
@@ -198,7 +204,6 @@ func New(chatID, primaryAgent string) *ChatSession {
 	cs.AgentEventBus = services.NewEventBus[AgentEventEnvelope]()
 	cs.MessageStateBus = services.NewEventBus[MessageStateEvent]()
 	cs.PromptEndBus = services.NewEventBus[PromptEndedEvent]()
-	cs.LifecycleBus = services.NewEventBus[LifecycleEvent]()
 	cs.queue = NewMessageQueue(QueueMaxMsgs)
 	return cs
 }
@@ -911,7 +916,7 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	// Reuse a non-Running pool entry (Detached after daemon restart,
 	// or Exited after CLI died) when one exists for this (agent,
 	// cwd) tuple. The existing entry preserves identity and
-	// — critically — the captured ResumeID from the prior run, so
+	// — critically — the captured SessionID from the prior run, so
 	// the next Spawn replays `--resume <id>` to the bridge. Creating
 	// a fresh entry here would discard the resume id and force a
 	// brand-new agent session after every daemon restart.
@@ -926,7 +931,7 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 		)
 		cs.pool[agentCwdKey{Agent: cs.activeAgent, Cwd: cs.activeCwd}] = newAS
 	}
-	// If hadPrior, the entry's ID + ResumeID + Args are preserved
+	// If hadPrior, the entry's ID + SessionID + Args are preserved
 	// from the prior construction or RestoreFromRegistry. Spawn
 	// will fork a new process and SetRunning will clear the stale
 	// exit code and flip stat back to Running.
@@ -1319,7 +1324,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 
 	// 1. Snapshot ALL (cwd, [agentName]) targets (no lock held across
 	//    bridge calls). F-43 §5.4: dead/detached entries are NOT
-	//    silently skipped — their stale ResumeID would resurrect a
+	//    silently skipped — their stale SessionID would resurrect a
 	//    dead session on next spawn, defeating /new's intent.
 	cs.mu.RLock()
 	targets := make([]*AgentSession, 0)
@@ -1348,7 +1353,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 
 	// 2. Serial reset. Each entry's action branches on its Status:
 	//    - StatusRunning:   in-place reset via bridge.New(ctx)
-	//    - StatusDetached / StatusExited: clear ResumeID (no spawn)
+	//    - StatusDetached / StatusExited: clear SessionID (no spawn)
 	for _, as := range targets {
 		matched++
 		result := ResetResult{
@@ -1360,19 +1365,19 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 
 		if as.Status() != StatusRunning {
 			// F-43 §5.4: dead/detached entry has no live conversation
-			// to reset, but its stale ResumeID must NOT be replayed on
-			// the next spawn. Clear ResumeID in-memory + persist so the
+			// to reset, but its stale SessionID must NOT be replayed on
+			// the next spawn. Clear SessionID in-memory + persist so the
 			// next LookupActiveAgentSession spawns fresh.
 			//
 			// NO lazy spawn (F-34 §6 Q-N4 / product clarification
 			// 2026-08-04): spawning just to reset a dead agent would
 			// waste resources and implicitly activate it.
-			as.SetResumeID("")
+			as.SetSessionID("")
 			if cs.asFile != nil {
 				// Review finding #B3: previously `_ = ...` swallowed
 				// the write error. If Upsert fails after the in-memory
-				// ResumeID clear, the on-disk entry still carries the
-				// stale ResumeID, and the next restore on daemon restart
+				// SessionID clear, the on-disk entry still carries the
+				// stale SessionID, and the next restore on daemon restart
 				// would replay `--resume <dead-id>` — the exact bug
 				// F-43 §5.4 was designed to fix. Surface the error so
 				// the handler can report it (and the handler treats any
@@ -1433,11 +1438,11 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 		results = append(results, result)
 		// Persist after a successful kill+respawn so the registry
 		// stays in sync with the in-memory state. For in-place
-		// resets the bridge will also emit a fresh EventAgentConnected which
+		// resets the bridge will also emit a fresh EventAgentReady which
 		// the runtime's AgentEventBus subscriber captures via
 		// PersistAgentSession; for kill+respawn the new child hasn't
 		// started yet, so this Upsert captures the new PID +
-		// cleared ResumeID before any subsequent EventAgentConnected arrives
+		// cleared SessionID before any subsequent EventAgentReady arrives
 		// (PTY's new child won't emit init at all, so this is the
 		// ONLY persistence opportunity for that path).
 		if handleChanged && cs.asFile != nil {

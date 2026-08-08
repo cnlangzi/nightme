@@ -152,17 +152,6 @@ func (cs *ChatSession) routeEvent(ev EnrichedEvent) {
 				slog.Info("chatsession: AS marked Exited (claude process exited)",
 					"chat_id", ev.ChatID, "as_id", ev.AgentSessionID)
 			}
-			// F-54: also publish to LifecycleBus for new
-			// subscribers (audit / metrics / HUD). The AS
-			// status flip above is the legacy path; new
-			// observers should subscribe to LifecycleBus
-			// instead of polling ActiveAgentSession().
-			cs.LifecycleBus.Publish(LifecycleEvent{
-				ChatID:         ev.ChatID,
-				AgentSessionID: ev.AgentSessionID,
-				PID:            ev.Lifecycle.PID,
-				Status:         ev.Lifecycle.Status,
-			})
 		}
 	}
 }

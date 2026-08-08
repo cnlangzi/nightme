@@ -71,7 +71,7 @@ func (f *fakeBridge) push(data string) {
 }
 
 // TestPtySessionReadLoop verifies that bytes pushed into the bridge
-// become EventText events, followed by an EventDone on EOF.
+// become EventAgentText events, followed by an EventAgentDone on EOF.
 func TestPtySessionReadLoop(t *testing.T) {
 	b := newFakeBridge()
 	s := NewPtySession(b)
@@ -88,30 +88,30 @@ func TestPtySessionReadLoop(t *testing.T) {
 		t.Fatalf("Events() = %+v, want texts %q", got, want)
 	}
 
-	// Trigger EOF and verify the terminal EventDone arrives.
+	// Trigger EOF and verify the terminal EventAgentDone arrives.
 	close(b.reads)
 	last := <-s.Events()
-	if last.Kind != agent.EventDone {
+	if last.Kind != agent.EventAgentDone {
 		t.Fatalf("final event Kind = %s, want done", last.Kind)
 	}
 	if last.Done == nil || last.Done.ExitCode != -1 {
-		t.Fatalf("terminal event missing DoneEvent{-1}: %+v", last)
+		t.Fatalf("terminal event missing AgentDoneEvent{-1}: %+v", last)
 	}
 
 	// Channel must be closed after the terminal event.
 	select {
 	case _, ok := <-s.Events():
 		if ok {
-			t.Fatalf("Events() yielded a value after EventDone")
+			t.Fatalf("Events() yielded a value after EventAgentDone")
 		}
 	case <-time.After(time.Second):
-		t.Fatalf("Events() not closed after EventDone")
+		t.Fatalf("Events() not closed after EventAgentDone")
 	}
 }
 
 // TestPtySessionReadError verifies that a non-EOF read error also
-// terminates the session (with EventDone, per the v0.1 contract —
-// EventError is reserved for higher-level unrecoverable conditions).
+// terminates the session (with EventAgentDone, per the v0.1 contract —
+// EventAgentError is reserved for higher-level unrecoverable conditions).
 func TestPtySessionReadError(t *testing.T) {
 	b := newFakeBridge()
 	s := NewPtySession(b)
@@ -125,14 +125,14 @@ func TestPtySessionReadError(t *testing.T) {
 
 	// We expect at least one more event (either a final text event
 	// from a Read that returned before the close, or the terminal
-	// EventDone). Drain whatever the session produces and verify the
-	// last one is EventDone.
+	// EventAgentDone). Drain whatever the session produces and verify the
+	// last one is EventAgentDone.
 	got := drainEvents(t, s.Events(), 1, 2*time.Second)
 	if len(got) == 0 {
 		t.Fatalf("expected at least one event after Close(), got none")
 	}
-	if got[len(got)-1].Kind != agent.EventDone {
-		t.Fatalf("expected terminal EventDone, got %+v", got)
+	if got[len(got)-1].Kind != agent.EventAgentDone {
+		t.Fatalf("expected terminal EventAgentDone, got %+v", got)
 	}
 }
 
@@ -216,7 +216,7 @@ func equalTexts(events []agent.AgentEvent, want []string) bool {
 		return false
 	}
 	for i, ev := range events {
-		if ev.Kind != agent.EventText || ev.Text != want[i] {
+		if ev.Kind != agent.EventAgentText || ev.Text != want[i] {
 			return false
 		}
 	}

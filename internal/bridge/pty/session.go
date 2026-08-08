@@ -17,8 +17,8 @@ import (
 const sessionBufferSize = 64
 
 // ptySession adapts a pty.Bridge to the agent.AgentSession interface.
-// Bytes read from the bridge become EventText; EOF or a read error
-// terminates the session with EventDone.
+// Bytes read from the bridge become EventAgentText; EOF or a read error
+// terminates the session with EventAgentDone.
 type ptySession struct {
 	bridge Bridge
 	events chan agent.AgentEvent
@@ -36,13 +36,13 @@ func NewPtySession(b Bridge) *ptySession {
 
 // Start kicks off the read loop in a background goroutine. The
 // goroutine owns the events channel and will close it after pushing
-// the terminal EventDone. Safe to call exactly once per session.
+// the terminal EventAgentDone. Safe to call exactly once per session.
 func (s *ptySession) Start() {
 	go s.readLoop()
 }
 
 // Events returns the read-only event stream. The implementation
-// closes the channel after a terminal EventDone / EventError, so
+// closes the channel after a terminal EventAgentDone / EventAgentError, so
 // callers can `for ev := range session.Events()` to drain.
 func (s *ptySession) Events() <-chan agent.AgentEvent { return s.events }
 
@@ -139,9 +139,9 @@ func (s *ptySession) Close() error {
 }
 
 // readLoop drains the bridge until EOF or a read error, then emits a
-// terminal EventDone and closes the events channel.
+// terminal EventAgentDone and closes the events channel.
 //
-// Bytes are wrapped in EventText with the raw payload — no
+// Bytes are wrapped in EventAgentText with the raw payload — no
 // transformation, no aggregation. Aggregation is the Channel
 // adapter's job (see F-19 §3).
 func (s *ptySession) readLoop() {
@@ -152,14 +152,14 @@ func (s *ptySession) readLoop() {
 		n, err := s.bridge.Read(buf)
 		if n > 0 {
 			s.events <- agent.AgentEvent{
-				Kind: agent.EventText,
+				Kind: agent.EventAgentText,
 				Text: string(buf[:n]),
 			}
 		}
 		if err != nil {
 			s.events <- agent.AgentEvent{
-				Kind: agent.EventDone,
-				Done: &agent.DoneEvent{ExitCode: -1},
+				Kind: agent.EventAgentDone,
+				Done: &agent.AgentDoneEvent{ExitCode: -1},
 			}
 			return
 		}

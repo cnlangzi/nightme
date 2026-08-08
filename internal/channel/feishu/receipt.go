@@ -17,7 +17,7 @@
 // (this file) restores OutReply folding into the rolling log because
 // the top-level Create surface produced a hard-to-scan stream of N
 // standalone bubbles for any long reply. (F-49: OutCompaction kind
-// deleted — the runtime consumes EventCompaction directly via
+// deleted — the runtime consumes EventAgentCompaction directly via
 // AgentSession.RecordCompaction() and produces no OutboundMessage,
 // so the receipt path never sees this kind.)
 // OutResult / OutTask* stay on top-level Create (final-answer +
@@ -143,7 +143,7 @@ type MessageReceipt struct {
 	// The bridge always sends the full snapshot, so we copy it verbatim
 	// on every event. The slice is rendered as a single markdown
 	// element list (split by divTextCharLimit).
-	tasks []agent.TaskItem
+	tasks []agent.AgentTaskItem
 
 	// footerLines (F-45) is the rendered SessionContext footer
 	// split into one entry per output line. Each entry maps to
@@ -151,7 +151,7 @@ type MessageReceipt struct {
 	// — Feishu plain_text does NOT honour \n inside a single
 	// element, so the receipt must store the multi-line form
 	// directly (rather than a single string with embedded \n).
-	// nil / empty slice = no footer (silent drop, pre-EventAgentConnected,
+	// nil / empty slice = no footer (silent drop, pre-EventAgentReady,
 	// or no SessionContext on the wire).
 	footerLines []string
 
@@ -228,7 +228,7 @@ func NewMessageReceiptForReply(chatID, userMsgID, replyMsgID string, bot receipt
 // first call (so future footer PR can recover the prompt state header
 // without extra plumbing). Late SetTaskList after a successful PATCH
 // still PATCHes the card with the new snapshot.
-func (r *MessageReceipt) SetTaskList(ctx context.Context, list *agent.TaskListEvent) error {
+func (r *MessageReceipt) SetTaskList(ctx context.Context, list *agent.AgentTaskListEvent) error {
 	return r.SetTaskListWithFooter(ctx, list, nil)
 }
 
@@ -240,12 +240,12 @@ func (r *MessageReceipt) SetTaskList(ctx context.Context, list *agent.TaskListEv
 // symmetric with AppendEntryWithFooter's preserve-on-empty
 // semantics, so a transient nil/zero SessionContext between
 // turns doesn't wipe a previously-rendered footer.
-func (r *MessageReceipt) SetTaskListWithFooter(ctx context.Context, list *agent.TaskListEvent, footerLines []string) error {
+func (r *MessageReceipt) SetTaskListWithFooter(ctx context.Context, list *agent.AgentTaskListEvent, footerLines []string) error {
 	if r == nil {
 		return nil
 	}
 	if list == nil {
-		return errors.New("feishu receipt: SetTaskList called with nil TaskListEvent")
+		return errors.New("feishu receipt: SetTaskList called with nil AgentTaskListEvent")
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -253,7 +253,7 @@ func (r *MessageReceipt) SetTaskListWithFooter(ctx context.Context, list *agent.
 	if len(items) == 0 {
 		r.tasks = nil
 	} else {
-		copyItems := make([]agent.TaskItem, len(items))
+		copyItems := make([]agent.AgentTaskItem, len(items))
 		copy(copyItems, items)
 		r.tasks = copyItems
 	}
@@ -298,7 +298,7 @@ func (r *MessageReceipt) State() chatsession.PromptState {
 //	chatsession.PromptRunning → OnIt  (🔄)  — added the first time the
 //	                              receipt renders (cold-start card)
 //	chatsession.PromptDone    → DONE  (✅)  — added when ChatSession.endPrompt
-//	                              fires (EventDone / EventError)
+//	                              fires (EventAgentDone / EventAgentError)
 //
 // Idempotent: calling SetPromptState with the state already set
 // is a no-op (no duplicate reaction, no extra API call).
@@ -526,7 +526,7 @@ func (r *MessageReceipt) renderLocked(ctx context.Context) error {
 // buildReceiptCard; both must stay in sync. If a future change adds
 // a new section to the card (e.g. restored F-25 prompt state
 // header), update both functions.
-func receiptBodyStats(entries []LogEntry, tasks []agent.TaskItem, footerLines []string, body string) (elementCount int, bodyBytes int) {
+func receiptBodyStats(entries []LogEntry, tasks []agent.AgentTaskItem, footerLines []string, body string) (elementCount int, bodyBytes int) {
 	bodyBytes = len(body)
 	for range entries {
 		// Each entry produces 1+ div elements (split per

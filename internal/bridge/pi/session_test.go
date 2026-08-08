@@ -24,12 +24,12 @@ import (
 )
 
 // TestSession_FullRoundTrip spawns the mock pi, asserts that:
-//  1. Start succeeds and emits exactly one EventAgentConnected;
+//  1. Start succeeds and emits exactly one EventAgentReady;
 //  2. the first SendBlocks returns nil and yields a stream
-//     of text + tool events followed by EventDone with
+//     of text + tool events followed by EventAgentDone with
 //     Reason:"settled" -- the channel is NOT closed;
 //  3. a second SendBlocks also succeeds and yields another
-//     EventDone -- still no channel close;
+//     EventAgentDone -- still no channel close;
 //  4. Close() blocks until the child exits and then closes
 //     the events channel exactly once.
 func TestSession_FullRoundTrip(t *testing.T) {
@@ -68,28 +68,28 @@ func TestSession_FullRoundTrip(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	// Step 1: collect the EventAgentConnected.
-	init := mustFirstEventOfKind(t, sess, agent.EventAgentConnected, 2*time.Second)
-	if init.Connected.AgentName != "pi" {
-		t.Errorf("Init.AgentName = %q, want pi", init.Connected.AgentName)
+	// Step 1: collect the EventAgentReady.
+	init := mustFirstEventOfKind(t, sess, agent.EventAgentReady, 2*time.Second)
+	if init.AgentName != "pi" {
+		t.Errorf("Init.AgentName = %q, want pi", init.AgentName)
 	}
-	if init.Connected.SessionID != "mock-session-1" {
-		t.Errorf("Init.SessionID = %q, want mock-session-1", init.Connected.SessionID)
+	if init.SessionID != "mock-session-1" {
+		t.Errorf("Init.SessionID = %q, want mock-session-1", init.SessionID)
 	}
-	if !strings.Contains(init.Connected.Model, "Claude Sonnet 4") {
-		t.Errorf("Init.Model = %q, want to contain 'Claude Sonnet 4'", init.Connected.Model)
+	if !strings.Contains(init.Model, "Claude Sonnet 4") {
+		t.Errorf("Init.Model = %q, want to contain 'Claude Sonnet 4'", init.Model)
 	}
 
 	// Step 2: drive a first prompt. The mock streams
 	// text_delta*2 + text_end + message_end + agent_settled, so
-	// we expect at least one EventText and the terminal
-	// EventDone with Reason:"settled".
+	// we expect at least one EventAgentText and the terminal
+	// EventAgentDone with Reason:"settled".
 	if err := sess.SendText("hello from the bridge"); err != nil {
 		t.Fatalf("SendText #1: %v", err)
 	}
 	first := drainEventsUntilDone(t, sess, 3*time.Second)
 	if first.Done == nil {
-		t.Fatalf("first turn: no EventDone received; events=%v", first.Kinds)
+		t.Fatalf("first turn: no EventAgentDone received; events=%v", first.Kinds)
 	}
 	if first.Done.Reason != "settled" {
 		t.Errorf("first turn: Done.Reason = %q, want settled", first.Done.Reason)
@@ -173,7 +173,7 @@ func TestSession_FullRoundTrip(t *testing.T) {
 type captured struct {
 	Events []agent.AgentEvent
 	Kinds  []agent.EventKind
-	Done   *agent.DoneEvent
+	Done   *agent.AgentDoneEvent
 }
 
 // (extension_ui_request auto-cancel is exercised end-to-end
@@ -285,10 +285,10 @@ func TestSession_PromptTimeout_NotInfinite(t *testing.T) {
 		}
 	}()
 
-	// Drain EventAgentConnected so we know the bridge is fully up before
+	// Drain EventAgentReady so we know the bridge is fully up before
 	// we measure SendText's behaviour. Without this, a slow
 	// handshake could leak into the SendText measurement.
-	mustFirstEventOfKind(t, sess, agent.EventAgentConnected, 3*time.Second)
+	mustFirstEventOfKind(t, sess, agent.EventAgentReady, 3*time.Second)
 
 	start := time.Now()
 	sendErr := sess.SendText("hi")
@@ -325,7 +325,7 @@ func mustFirstEventOfKind(t *testing.T, sess agent.AgentSession, kind agent.Even
 }
 
 // drainEventsUntilDone collects events from sess until an
-// EventDone arrives or the timeout elapses. Returns a snapshot
+// EventAgentDone arrives or the timeout elapses. Returns a snapshot
 // of the collected events plus the Done payload.
 func drainEventsUntilDone(t *testing.T, sess agent.AgentSession, timeout time.Duration) captured {
 	t.Helper()
@@ -335,16 +335,16 @@ func drainEventsUntilDone(t *testing.T, sess agent.AgentSession, timeout time.Du
 		select {
 		case ev, ok := <-sess.Events():
 			if !ok {
-				t.Fatalf("events channel closed before EventDone; saw %v", out.Kinds)
+				t.Fatalf("events channel closed before EventAgentDone; saw %v", out.Kinds)
 			}
 			out.Events = append(out.Events, ev)
 			out.Kinds = append(out.Kinds, ev.Kind)
-			if ev.Kind == agent.EventDone {
+			if ev.Kind == agent.EventAgentDone {
 				out.Done = ev.Done
 				return out
 			}
 		case <-deadline:
-			t.Fatalf("timeout waiting for EventDone; saw %v", out.Kinds)
+			t.Fatalf("timeout waiting for EventAgentDone; saw %v", out.Kinds)
 		}
 	}
 }

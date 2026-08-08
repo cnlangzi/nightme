@@ -63,9 +63,9 @@ func TestAcpSession_SendText_EncodesCorrectly(t *testing.T) {
 }
 
 // TestNewSession_EmitsInit asserts that NewSession synthesizes a
-// single EventAgentConnected on the events channel carrying the ACP session
+// single EventAgentReady on the events channel carrying the ACP session
 // id, so the runtime can capture the resume id uniformly with
-// Claude Code / Pi. The EventAgentConnected is emitted before NewSession
+// Claude Code / Pi. The EventAgentReady is emitted before NewSession
 // returns, so the first event on Events() is the init.
 func TestNewSession_EmitsInit(t *testing.T) {
 	client, server := net.Pipe()
@@ -88,29 +88,26 @@ func TestNewSession_EmitsInit(t *testing.T) {
 
 	select {
 	case ev := <-session.Events():
-		if ev.Kind != agent.EventAgentConnected {
-			t.Fatalf("first event kind = %v, want EventAgentConnected", ev.Kind)
+		if ev.Kind != agent.EventAgentReady {
+			t.Fatalf("first event kind = %v, want EventAgentReady", ev.Kind)
 		}
-		if ev.Connected == nil {
-			t.Fatalf("EventAgentConnected.Connected is nil")
+		if ev.SessionID != "sess-acp-abc" {
+			t.Errorf("Init.SessionID = %q, want %q", ev.SessionID, "sess-acp-abc")
 		}
-		if ev.Connected.SessionID != "sess-acp-abc" {
-			t.Errorf("Init.SessionID = %q, want %q", ev.Connected.SessionID, "sess-acp-abc")
+		if ev.AgentName != "codex" {
+			t.Errorf("Init.AgentName = %q, want %q", ev.AgentName, "codex")
 		}
-		if ev.Connected.AgentName != "codex" {
-			t.Errorf("Init.AgentName = %q, want %q", ev.Connected.AgentName, "codex")
-		}
-		if ev.Connected.Workspace != "/tmp/ws" {
-			t.Errorf("Init.Workspace = %q, want %q", ev.Connected.Workspace, "/tmp/ws")
+		if ev.Workspace != "/tmp/ws" {
+			t.Errorf("Init.Workspace = %q, want %q", ev.Workspace, "/tmp/ws")
 		}
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for EventAgentConnected")
+		t.Fatal("timed out waiting for EventAgentReady")
 	}
 }
 
 // TestNewSession_NoSessionID_NoInit asserts that when the
 // session/new response has no sessionId, NewSession returns an
-// error and emits no EventAgentConnected.
+// error and emits no EventAgentReady.
 func TestNewSession_NoSessionID_NoInit(t *testing.T) {
 	client, server := net.Pipe()
 	bridge := &mockBridge{Conn: client, pid: 42}
@@ -138,7 +135,7 @@ func TestAcpSession_ParseMessageChunkEvent(t *testing.T) {
 	s := testSession()
 	s.handleMethod(rpcMessage{Method: "message_chunk", Params: json.RawMessage(`{"text":"hello"}`)})
 	event := receiveEvent(t, s.events)
-	if event.Kind != agent.EventText || event.Text != "hello" {
+	if event.Kind != agent.EventAgentText || event.Text != "hello" {
 		t.Fatalf("event = %+v", event)
 	}
 }
@@ -153,7 +150,7 @@ func TestAcpSession_ParsePermissionRequest(t *testing.T) {
 		Params:  json.RawMessage(`{"action":"run ls","toolCall":{"title":"Bash"},"options":[{"optionId":"allow_once"},{"optionId":"deny"}]}`),
 	})
 	event := receiveEvent(t, s.events)
-	if event.Kind != agent.EventPermission || event.Permission == nil {
+	if event.Kind != agent.EventAgentPermission || event.Permission == nil {
 		t.Fatalf("event = %+v", event)
 	}
 	if event.Permission.Tool != "Bash" || len(event.Permission.Options) != 2 {
@@ -171,12 +168,12 @@ func TestAcpSession_ParseToolEvents(t *testing.T) {
 	s := testSession()
 	s.handleMethod(rpcMessage{Method: "tool_start", Params: json.RawMessage(`{"id":"tool-1","name":"Bash","rawInput":{"command":"ls"}}`)})
 	start := receiveEvent(t, s.events)
-	if start.Kind != agent.EventToolStart || start.ToolStart.ID != "tool-1" {
+	if start.Kind != agent.EventAgentToolStart || start.ToolStart.ID != "tool-1" {
 		t.Fatalf("start = %+v", start)
 	}
 	s.handleMethod(rpcMessage{Method: "tool_end", Params: json.RawMessage(`{"id":"tool-1","name":"Bash","status":"completed"}`)})
 	end := receiveEvent(t, s.events)
-	if end.Kind != agent.EventToolEnd || end.ToolEnd.ID != "tool-1" || end.ToolEnd.Err != nil {
+	if end.Kind != agent.EventAgentToolEnd || end.ToolEnd.ID != "tool-1" || end.Err != nil {
 		t.Fatalf("end = %+v", end)
 	}
 }
@@ -190,12 +187,12 @@ func TestAcpSession_EOFClosesEvents(t *testing.T) {
 
 	var gotDone bool
 	for event := range s.events {
-		if event.Kind == agent.EventDone {
+		if event.Kind == agent.EventAgentDone {
 			gotDone = true
 		}
 	}
 	if !gotDone {
-		t.Fatal("EOF did not emit EventDone")
+		t.Fatal("EOF did not emit EventAgentDone")
 	}
 }
 

@@ -2,9 +2,9 @@
 // real pumpStream against a synthetic stream of stream-json
 // envelopes that mirror the shape of Claude Code 2.1.220.
 //
-// We exercise the happy path (TaskCreate success → EventTaskCreate
+// We exercise the happy path (TaskCreate success → EventAgentTaskCreate
 // snapshot), the update paths (in_progress / completed / subject
-// / delete → EventTaskUpdate snapshots), the error paths
+// / delete → EventAgentTaskUpdate snapshots), the error paths
 // (IsError=true → no state mutation, thread fallback), the
 // unparseable path (success result that doesn't match our
 // expected regex → no state mutation, thread fallback), the
@@ -46,7 +46,7 @@ func concatTasks(t *testing.T, names ...string) string {
 }
 
 // taskEventOnly returns every emitted event with Kind in
-// {EventTaskCreate, EventTaskUpdate}, in the order the bridge
+// {EventAgentTaskCreate, EventAgentTaskUpdate}, in the order the bridge
 // produced them. Dropping the surrounding tool events makes
 // the test assertions about task sequence self-contained.
 func taskEventOnly(t *testing.T, events []agent.AgentEvent) []agent.AgentEvent {
@@ -54,7 +54,7 @@ func taskEventOnly(t *testing.T, events []agent.AgentEvent) []agent.AgentEvent {
 	out := make([]agent.AgentEvent, 0, len(events))
 	for _, ev := range events {
 		switch ev.Kind {
-		case agent.EventTaskCreate, agent.EventTaskUpdate:
+		case agent.EventAgentTaskCreate, agent.EventAgentTaskUpdate:
 			out = append(out, ev)
 		}
 	}
@@ -62,7 +62,7 @@ func taskEventOnly(t *testing.T, events []agent.AgentEvent) []agent.AgentEvent {
 }
 
 // TestPumpStream_TaskCreate_Success extracts the assigned task ID
-// from the success result and emits an EventTaskCreate carrying
+// from the success result and emits an EventAgentTaskCreate carrying
 // the single-item snapshot.
 func TestPumpStream_TaskCreate_Success(t *testing.T) {
 	stream := concatTasks(t,
@@ -74,8 +74,8 @@ func TestPumpStream_TaskCreate_Success(t *testing.T) {
 	if len(only) != 1 {
 		t.Fatalf("got %d task events, want 1: %+v", len(only), only)
 	}
-	if only[0].Kind != agent.EventTaskCreate {
-		t.Errorf("event kind = %v, want EventTaskCreate", only[0].Kind)
+	if only[0].Kind != agent.EventAgentTaskCreate {
+		t.Errorf("event kind = %v, want EventAgentTaskCreate", only[0].Kind)
 	}
 	if only[0].TaskList == nil || len(only[0].TaskList.Items) != 1 {
 		t.Fatalf("TaskList = %+v, want exactly 1 item", only[0].TaskList)
@@ -110,16 +110,16 @@ func TestPumpStream_TaskUpdate_Transitions(t *testing.T) {
 		t.Fatalf("got %d task events, want 3: %+v", len(only), only)
 	}
 	// event 0: create
-	if only[0].Kind != agent.EventTaskCreate || only[0].TaskList.Items[0].Status != agent.TaskPending {
-		t.Errorf("event 0 = %+v, want EventTaskCreate with pending status", only[0])
+	if only[0].Kind != agent.EventAgentTaskCreate || only[0].TaskList.Items[0].Status != agent.TaskPending {
+		t.Errorf("event 0 = %+v, want EventAgentTaskCreate with pending status", only[0])
 	}
 	// event 1: in_progress
-	if only[1].Kind != agent.EventTaskUpdate || only[1].TaskList.Items[0].Status != agent.TaskInProgress {
-		t.Errorf("event 1 = %+v, want EventTaskUpdate with in_progress status", only[1])
+	if only[1].Kind != agent.EventAgentTaskUpdate || only[1].TaskList.Items[0].Status != agent.TaskInProgress {
+		t.Errorf("event 1 = %+v, want EventAgentTaskUpdate with in_progress status", only[1])
 	}
 	// event 2: completed
-	if only[2].Kind != agent.EventTaskUpdate || only[2].TaskList.Items[0].Status != agent.TaskCompleted {
-		t.Errorf("event 2 = %+v, want EventTaskUpdate with completed status", only[2])
+	if only[2].Kind != agent.EventAgentTaskUpdate || only[2].TaskList.Items[0].Status != agent.TaskCompleted {
+		t.Errorf("event 2 = %+v, want EventAgentTaskUpdate with completed status", only[2])
 	}
 }
 
@@ -169,7 +169,7 @@ func TestPumpStream_TaskUpdate_Delete(t *testing.T) {
 
 // TestPumpStream_TaskResultError_Fallback ensures an IsError=true
 // tool result does not mutate the task state but still emits a
-// generic EventToolEnd so the thread line shows the call.
+// generic EventAgentToolEnd so the thread line shows the call.
 func TestPumpStream_TaskResultError_Fallback(t *testing.T) {
 	stream := concatTasks(t,
 		"task_create.json",
@@ -177,23 +177,26 @@ func TestPumpStream_TaskResultError_Fallback(t *testing.T) {
 	)
 	events := streamFromString(stream)
 	// No task event should have been emitted — only the
-	// fallback EventToolEnd.
+	// fallback EventAgentToolEnd.
 	for _, ev := range events {
-		if ev.Kind == agent.EventTaskCreate || ev.Kind == agent.EventTaskUpdate {
+		if ev.Kind == agent.EventAgentTaskCreate || ev.Kind == agent.EventAgentTaskUpdate {
 			t.Errorf("error result must not emit task event, got %+v", ev)
 		}
 	}
 	var fallback *agent.AgentEvent
 	for i, ev := range events {
-		if ev.Kind == agent.EventToolEnd && ev.ToolEnd != nil && ev.ToolEnd.Name == "TaskCreate" {
+		if ev.Kind == agent.EventAgentToolEnd && ev.ToolEnd != nil && ev.ToolEnd.Name == "TaskCreate" {
 			fallback = &events[i]
 		}
 	}
 	if fallback == nil {
-		t.Fatalf("expected a TaskCreate EventToolEnd fallback, got events: %+v", events)
+		t.Fatalf("expected a TaskCreate EventAgentToolEnd fallback, got events: %+v", events)
 	}
-	if fallback.ToolEnd.Err == nil {
-		t.Errorf("fallback ToolEnd.Err = nil, want non-nil error wrapping the reason")
+	// After event-payload flattening: tool errors live on the
+	// top-level AgentEvent.Err (not on AgentToolEndEvent.Err,
+	// which no longer exists). Check the envelope.
+	if fallback.Err == nil {
+		t.Errorf("fallback AgentEvent.Err = nil, want non-nil error wrapping the reason")
 	}
 }
 
@@ -208,18 +211,18 @@ func TestPumpStream_TaskUnparseableResult_Fallback(t *testing.T) {
 	)
 	events := streamFromString(stream)
 	for _, ev := range events {
-		if ev.Kind == agent.EventTaskCreate || ev.Kind == agent.EventTaskUpdate {
+		if ev.Kind == agent.EventAgentTaskCreate || ev.Kind == agent.EventAgentTaskUpdate {
 			t.Errorf("unparseable result must not emit task event, got %+v", ev)
 		}
 	}
 	var fallback *agent.AgentEvent
 	for i, ev := range events {
-		if ev.Kind == agent.EventToolEnd && ev.ToolEnd != nil && ev.ToolEnd.Name == "TaskCreate" {
+		if ev.Kind == agent.EventAgentToolEnd && ev.ToolEnd != nil && ev.ToolEnd.Name == "TaskCreate" {
 			fallback = &events[i]
 		}
 	}
 	if fallback == nil {
-		t.Fatalf("expected a TaskCreate EventToolEnd fallback, got events: %+v", events)
+		t.Fatalf("expected a TaskCreate EventAgentToolEnd fallback, got events: %+v", events)
 	}
 }
 
@@ -258,7 +261,7 @@ func TestPumpStream_TaskOutOfOrderResults(t *testing.T) {
 }
 
 // TestPumpStream_TaskNoGenericToolEnd confirms the bridge
-// suppresses the generic EventToolStart / EventToolEnd pair for
+// suppresses the generic EventAgentToolStart / EventAgentToolEnd pair for
 // confirmed task tools. Without this guard, every TaskCreate
 // would produce four events (TaskStart + TaskEnd + taskCreate)
 // and double the user's view.
@@ -270,7 +273,7 @@ func TestPumpStream_TaskNoGenericToolEnd(t *testing.T) {
 	events := streamFromString(stream)
 	for i, ev := range events {
 		switch ev.Kind {
-		case agent.EventToolStart, agent.EventToolEnd:
+		case agent.EventAgentToolStart, agent.EventAgentToolEnd:
 			t.Errorf("event %d = %+v, want no generic tool events for task tools", i, ev)
 		}
 	}
@@ -307,8 +310,8 @@ func TestPumpStream_TaskSystemInitReset(t *testing.T) {
 	// snapshot must be exactly 1 item (no leakage from the
 	// pre-init task #1 that the bridge just cleared).
 	final := only[len(only)-1]
-	if final.Kind != agent.EventTaskCreate {
-		t.Errorf("final kind = %v, want EventTaskCreate", final.Kind)
+	if final.Kind != agent.EventAgentTaskCreate {
+		t.Errorf("final kind = %v, want EventAgentTaskCreate", final.Kind)
 	}
 	if final.TaskList == nil || len(final.TaskList.Items) != 1 {
 		t.Errorf("post-init snapshot = %+v, want exactly 1 item (no leakage)", final.TaskList)

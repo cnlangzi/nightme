@@ -74,7 +74,7 @@ const messageStatesLRUSize = 5000
 // thread panel. Thread-only is used for the intermediate agent progress
 // stream (OutThinking / OutToolStart / OutToolEnd) so the
 // main chat stays focused on the final answer. (F-49: OutCompaction
-// kind deleted — the runtime consumes EventCompaction directly
+// kind deleted — the runtime consumes EventAgentCompaction directly
 // via AgentSession.RecordCompaction() and produces no OutboundMessage.)
 // main chat stays focused on the final answer. Create-endpoint calls
 // ignore this flag (the field has no equivalent there).
@@ -663,7 +663,7 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	                       to userMsgID (F-44 follow-up: same
 //	                       parent-thread gotcha as OutReply/OutResult).
 //	                       (F-49: OutCompaction kind deleted —
-//	                       the runtime consumes EventCompaction
+//	                       the runtime consumes EventAgentCompaction
 //	                       directly via AgentSession.RecordCompaction()
 //	                       and produces no OutboundMessage, so this
 //	                       routing table has no entry for it. The
@@ -679,7 +679,6 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	                       message is unnecessary.
 //	OutThinking          → ReplyInThread (💭 line in side panel only).
 //	OutInit / OutUsage   → silent drop (F-44: footer design deferred).
-//	OutTyping            → dropped (no native Feishu equivalent).
 //
 // Errors from the underlying API are logged and returned; the
 // Gateway treats Send as fire-and-ack (no retry).
@@ -700,7 +699,7 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 // OutTask* with a TaskList). OutboundKinds without content (OutInit,
 // OutUsage before any reply) silently drop.
 //
-// userMsgID == "" means orphan event (startup EventAgentConnected, internal
+// userMsgID == "" means orphan event (startup EventAgentReady, internal
 // log). Return nil so the caller falls back to sendRawOutText.
 //
 // Locking: read-only under a.mu.
@@ -716,7 +715,7 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 // MarkReceiptPromptDone (F-53 follow-up) transitions the receipt
 // bound to `userMsgID` to chatsession.PromptDone (✅ reaction on the card).
 // Called by the runtime when `ChatSession.endPrompt` fires (i.e.
-// the readpump saw EventDone or EventError).
+// the readpump saw EventAgentDone or EventAgentError).
 //
 // Best-effort: silently no-op when no receipt exists yet (e.g.
 // /kill before any event arrived — the receipt would never have
@@ -1028,19 +1027,19 @@ func (a *Adapter) postOrphanReplyCard(ctx context.Context, chatID, text string, 
 // placeholder + footer. This is technically misleading (the agent
 // isn't "working", it just emitted an empty task list), but it's
 // consistent with the anchored path's behavior on an empty
-// TaskListEvent — both paths hit the same buildReceiptCard edge
+// AgentTaskListEvent — both paths hit the same buildReceiptCard edge
 // case. The placeholder gets replaced once any subsequent event
 // (OutReply, OutTask with content, etc.) re-renders the card, so
 // the user-visible window is short. Documenting this rather than
 // special-casing it: the cross-channel rule "main chat is a card"
 // holds either way; the empty-list case is rare and self-correcting.
-func (a *Adapter) postOrphanTaskCard(ctx context.Context, chatID string, list *agent.TaskListEvent, footerLines []string) error {
+func (a *Adapter) postOrphanTaskCard(ctx context.Context, chatID string, list *agent.AgentTaskListEvent, footerLines []string) error {
 	// Defensive nil-check (matches ensureReceiptForTask's guard at
 	// L1033-1035). Send() already checks at L1525, but the helper
 	// itself shouldn't trust its caller — callers from tests or
 	// future code paths could omit the check.
 	if list == nil {
-		return errors.New("feishu: postOrphanTaskCard requires non-nil TaskListEvent")
+		return errors.New("feishu: postOrphanTaskCard requires non-nil AgentTaskListEvent")
 	}
 	body, err := buildReceiptCard(nil, list.Items, footerLines)
 	if err != nil {
@@ -1084,20 +1083,20 @@ func (a *Adapter) postOrphanTaskCard(ctx context.Context, chatID string, list *a
 // visible in main chat. Subsequent PATCHes (SetTaskList →
 // PatchMessage) preserve the no-anchor state since PATCH on a
 // top-level Create stays top-level (root_id inheritance).
-func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID string, list *agent.TaskListEvent, footerLines []string) (*MessageReceipt, bool, error) {
+func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID string, list *agent.AgentTaskListEvent, footerLines []string) (*MessageReceipt, bool, error) {
 	if userMsgID == "" {
 		return nil, false, errors.New("feishu: ensureReceiptForTask requires userMsgID")
 	}
 	if list == nil {
-		return nil, false, errors.New("feishu: ensureReceiptForTask requires non-nil TaskListEvent")
+		return nil, false, errors.New("feishu: ensureReceiptForTask requires non-nil AgentTaskListEvent")
 	}
 
 	transient := NewMessageReceiptForReply(chatID, userMsgID, "", a)
 	// Copy the items exactly like SetTaskList does, so the
 	// snapshot we hand to buildReceiptCard is independent of any
-	// later mutations on the caller's TaskListEvent.
+	// later mutations on the caller's AgentTaskListEvent.
 	items := list.Items
-	copied := make([]agent.TaskItem, len(items))
+	copied := make([]agent.AgentTaskItem, len(items))
 	copy(copied, items)
 	transient.tasks = copied
 	transient.footerLines = footerLines // F-45: footer captured at cold-start
@@ -1299,8 +1298,8 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// Terminal-state guard: once we've rendered MessageDone or
 		// MessageFailed for a userMsgID, no later MessageState can
 		// change the reaction. Feishu reactions are append-only, so
-		// without this guard a late EventDone arriving after
-		// EventError used to flip the user-message reaction from
+		// without this guard a late EventAgentDone arriving after
+		// EventAgentError used to flip the user-message reaction from
 		// 👎 (failed) back to ✅ (done), contradicting the ❌ header
 		// that the receipt card already shows (see receipt.go
 		// promptHeaderLine for PromptFailed). This guard mirrors
@@ -1514,22 +1513,17 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		return nil
 
-	case gateway.OutTyping:
-		// No native Feishu equivalent (typing indicators come from
-		// the OpenAPI, not the bot's message API). Silently drop.
-		return nil
-
 	case gateway.OutResult:
 		if msg.Result == nil {
 			return errors.New("feishu: OutResult missing Result payload")
 		}
 		text := strings.TrimSpace(msg.Result.Text)
-		if text == "" && !msg.Result.IsError {
+		if text == "" && msg.Err == nil {
 			return nil
 		}
 		// Icon prefix only when there's actual error text — without it
 		// the user would see a meaningless bare-emoji standalone message.
-		if msg.Result.IsError && text != "" {
+		if msg.Err != nil && text != "" {
 			text = "❌ " + text
 		}
 		// F-45 §2.8 / F-46: footer renders as card elements
@@ -1548,7 +1542,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// receipt.SetCompleted here — the receipt stays
 		// chatsession.PromptRunning so subsequent OutUsage / OutInit / TaskList
 		// can still update the footer (token counts, agent name,
-		// task checklist). EventDone / EventError is the terminal
+		// task checklist). EventAgentDone / EventAgentError is the terminal
 		// signal that flips state to PromptSucceeded and collapses
 		// the rolling log.
 		//
@@ -1557,7 +1551,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		return a.sendResultAsReply(ctx, msg.ChatID, msg.ReplyTo, text, footerLines)
 
 	// F-49: case gateway.OutCompaction: deleted. The runtime handler
-	// no longer produces an OutboundMessage for EventCompaction;
+	// no longer produces an OutboundMessage for EventAgentCompaction;
 	// instead it calls AgentSession.RecordCompaction() to bump the
 	// counter and reset per-cycle token stats. No transient
 	// "✶ Compacting conversation…" thread reply, no channel side
@@ -1793,7 +1787,7 @@ func (a *Adapter) sendOrphanResultCard(ctx context.Context, chatID, text string,
 
 // postThreadReply posts body as a thread reply anchored at rootID.
 // rootID = msg.ReplyTo = currentTurnUserMsgID. When rootID is empty
-// (orphan event, e.g. startup EventAgentConnected) the helper falls back to a
+// (orphan event, e.g. startup EventAgentReady) the helper falls back to a
 // top-level text send via sendRawOutText so the user still sees the
 // message.
 //
@@ -2224,7 +2218,7 @@ func encodeCardJSON(v any) ([]byte, error) {
 // warning) — AppendEntry needs to build a hypothetical card body
 // to check the overflow budget, but doing so via a struct copy
 // would silently bypass the lock semantics.
-func buildReceiptCard(entries []LogEntry, tasks []agent.TaskItem, footerLines []string) (string, error) {
+func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLines []string) (string, error) {
 
 	elements := make([]map[string]any, 0, len(entries)+5)
 

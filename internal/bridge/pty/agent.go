@@ -2,7 +2,7 @@
 // command into an agent.Agent backed by the PTY transport defined
 // in this package. The wrapper is the safe fallback for any binary
 // that does not yet speak ACP / SDK / JSON-IO — bytes flow through
-// the PTY as EventText and the session manager drives them.
+// the PTY as EventAgentText and the session manager drives them.
 //
 // Lives in bridge/pty/ (not in a separate agent package) so the
 // whole PTY story is one tree. See docs/feat/F-21-agent-modes.md §5.3.
@@ -74,7 +74,7 @@ func (a *Agent) Detect() error {
 }
 
 // Start spawns the CLI under a PTY and returns an AgentSession that
-// streams PTY bytes as EventText. The session is owned by the caller
+// streams PTY bytes as EventAgentText. The session is owned by the caller
 // and must be Close()d.
 //
 // Start honors cfg.Workspace as the child's working directory; any

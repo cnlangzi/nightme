@@ -1,6 +1,6 @@
 // Read-pump regression for the F-32 long-lived agent contract:
 //
-// EventDone marks the end of one turn; the events channel MUST
+// EventAgentDone marks the end of one turn; the events channel MUST
 // stay open across many turns. Only process exit (channel close)
 // transitions AgentSession to Exited.
 //
@@ -71,7 +71,7 @@ func (f fakeSpawnerLS) Spawn(_ context.Context, _, _ string, _ []string, _ strin
 }
 
 // TestReadPump_ContinuesAfterEventDone verifies the F-32 contract:
-// after EventDone, the read pump continues to consume events from
+// after EventAgentDone, the read pump continues to consume events from
 // the same session; it does NOT transition the session to Exited.
 // The session only flips to Exited when the events channel closes.
 func TestReadPump_ContinuesAfterEventDone(t *testing.T) {
@@ -94,22 +94,22 @@ func TestReadPump_ContinuesAfterEventDone(t *testing.T) {
 	defer cancel()
 	go cs.PumpEvents(ctx)
 
-	// First turn: a few events + EventDone.
-	fake.push(agent.AgentEvent{Kind: agent.EventText, Text: "hello"})
+	// First turn: a few events + EventAgentDone.
+	fake.push(agent.AgentEvent{Kind: agent.EventAgentText, Text: "hello"})
 	fake.push(agent.AgentEvent{
-		Kind: agent.EventDone,
-		Done: &agent.DoneEvent{ExitCode: 0, Reason: "settled"},
+		Kind: agent.EventAgentDone,
+		Done: &agent.AgentDoneEvent{ExitCode: 0, Reason: "settled"},
 	})
 	// Give the pump a chance to consume both events.
 	time.Sleep(50 * time.Millisecond)
 
-	// Second turn: more events + EventDone. The read pump must
+	// Second turn: more events + EventAgentDone. The read pump must
 	// still be alive (it would have exited only on channel
 	// close).
-	fake.push(agent.AgentEvent{Kind: agent.EventText, Text: "again"})
+	fake.push(agent.AgentEvent{Kind: agent.EventAgentText, Text: "again"})
 	fake.push(agent.AgentEvent{
-		Kind: agent.EventDone,
-		Done: &agent.DoneEvent{ExitCode: 0, Reason: "settled"},
+		Kind: agent.EventAgentDone,
+		Done: &agent.AgentDoneEvent{ExitCode: 0, Reason: "settled"},
 	})
 	time.Sleep(50 * time.Millisecond)
 

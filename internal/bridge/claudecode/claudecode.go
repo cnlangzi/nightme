@@ -105,11 +105,11 @@ const resumeFallbackTimeout = 5 * time.Second
 // v0.1 behaviour). Unknown values are forwarded as-is — Claude Code
 // itself validates the set of legal modes.
 //
-// cfg.ResumeID, when non-empty, is appended as `--resume <id>` after
+// cfg.SessionID, when non-empty, is appended as `--resume <id>` after
 // cfg.Args so the child resumes the previous Claude Code session.
 // Empty means "no --resume; start a fresh session".
 //
-// Resume-preservation (T-alive, 2026-08-07): when cfg.ResumeID is set,
+// Resume-preservation (T-alive, 2026-08-07): when cfg.SessionID is set,
 // the spawn is probed for stderr-detected rejection signals (see
 // classifyStderrLineForResume). On detection, the bridge now RETURNS
 // ErrResumeUnhealthy instead of silently falling back to a fresh
@@ -125,15 +125,15 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSe
 	if err != nil {
 		return nil, err
 	}
-	if cfg.ResumeID == "" {
+	if cfg.SessionID == "" {
 		return sess, nil
 	}
 	if reason, unhealthy := probeResume(ctx, sess); unhealthy {
 		slog.Warn("claudecode: --resume spawn unhealthy; refusing fallback to preserve resume context",
-			"resume_id", cfg.ResumeID, "reason", reason)
+			"resume_id", cfg.SessionID, "reason", reason)
 		_ = sess.Close()
 		return nil, fmt.Errorf("%w: %s (session_id=%s); check workspace path and resume id",
-			ErrResumeUnhealthy, reason, cfg.ResumeID)
+			ErrResumeUnhealthy, reason, cfg.SessionID)
 	}
 	return sess, nil
 }
@@ -321,7 +321,7 @@ func isResumeErrorMessage(text string) bool {
 // buildArgs concatenates DefaultArgs + extraArgs + cfg.Args, rewriting
 // the --permission-mode placeholder baked into DefaultArgs with the
 // effective mode from cfg.PermissionMode (PermissionBypass when empty).
-// When cfg.ResumeID is non-empty, `--resume <id>` is appended last so
+// When cfg.SessionID is non-empty, `--resume <id>` is appended last so
 // user-supplied cfg.Args are visible to the user before the resume flag.
 //
 // Extracted as a package-private helper so tests can assert on the
@@ -347,8 +347,8 @@ func buildArgs(extraArgs []string, cfg agent.StartConfig) []string {
 	}
 	out = append(out, extraArgs...)
 	out = append(out, cfg.Args...)
-	if cfg.ResumeID != "" {
-		out = append(out, "--resume", cfg.ResumeID)
+	if cfg.SessionID != "" {
+		out = append(out, "--resume", cfg.SessionID)
 	}
 	return out
 }

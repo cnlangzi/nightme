@@ -4,7 +4,7 @@
 // provider-specific names "TaskCreate", "TaskUpdate", "subject",
 // "activeForm", "taskId", "status" (and the human-rendered result
 // text starting with "Task #N ...") appear. They are normalised
-// into the generic agent.TaskListEvent shape so the Gateway and
+// into the generic agent.AgentTaskListEvent shape so the Gateway and
 // Feishu channels can render the checklist without knowing about
 // the Claude Code protocol.
 package claudecode
@@ -64,9 +64,9 @@ func isTaskToolName(name string) bool {
 // applyTaskToolResult inspects a tool_result block and, if the
 // underlying tool is a task tool, either:
 //
-//   - emits a fully-populated agent.AgentEvent (EventTaskCreate /
-//     EventTaskUpdate) on a confirmed success result;
-//   - emits a generic EventToolEnd with a degraded note so the
+//   - emits a fully-populated agent.AgentEvent (EventAgentTaskCreate /
+//     EventAgentTaskUpdate) on a confirmed success result;
+//   - emits a generic EventAgentToolEnd with a degraded note so the
 //     user still sees the operation in the thread on parse
 //     failure or confirmed error;
 //   - returns (false, nil) for a non-task tool so the caller
@@ -78,8 +78,8 @@ func isTaskToolName(name string) bool {
 // is removed on every code path (success, failure, unknown).
 //
 // The first successful TaskCreate of a session is emitted as
-// EventTaskCreate; subsequent TaskCreate / TaskUpdate / delete
-// operations are emitted as EventTaskUpdate, all carrying the
+// EventAgentTaskCreate; subsequent TaskCreate / TaskUpdate / delete
+// operations are emitted as EventAgentTaskUpdate, all carrying the
 // current full snapshot.
 func applyTaskToolResult(
 	state *streamState,
@@ -112,7 +112,7 @@ func applyTaskToolResult(
 			return true, taskToolEndFallback(pending, block, "unparseable result")
 		}
 		input := parseTaskCreateInput(pending.Input)
-		state.tasks[id] = agent.TaskItem{
+		state.tasks[id] = agent.AgentTaskItem{
 			ID:         id,
 			Subject:    coalesceNonEmpty(subject, input.Subject, "Task #"+id),
 			ActiveForm: input.ActiveForm,
@@ -120,7 +120,7 @@ func applyTaskToolResult(
 		}
 		state.taskOrder = upsertTaskOrder(state.taskOrder, id)
 		ev := agent.AgentEvent{
-			Kind:     agent.EventTaskCreate,
+			Kind:     agent.EventAgentTaskCreate,
 			TaskList: snapshotTasks(state),
 		}
 		return true, &ev
@@ -133,7 +133,7 @@ func applyTaskToolResult(
 		input := parseTaskUpdateInput(pending.Input)
 		existing, exists := state.tasks[id]
 		if !exists {
-			existing = agent.TaskItem{
+			existing = agent.AgentTaskItem{
 				ID:      id,
 				Subject: "Task #" + id,
 				Status:  agent.TaskPending,
@@ -148,7 +148,7 @@ func applyTaskToolResult(
 			state.taskOrder = upsertTaskOrder(state.taskOrder, id)
 		}
 		ev := agent.AgentEvent{
-			Kind:     agent.EventTaskUpdate,
+			Kind:     agent.EventAgentTaskUpdate,
 			TaskList: snapshotTasks(state),
 		}
 		return true, &ev
@@ -219,7 +219,7 @@ func parseTaskUpdateInput(raw []byte) taskUpdateInput {
 	return in
 }
 
-func applyTaskUpdateFields(prev agent.TaskItem, in taskUpdateInput) agent.TaskItem {
+func applyTaskUpdateFields(prev agent.AgentTaskItem, in taskUpdateInput) agent.AgentTaskItem {
 	if in.Subject != nil {
 		prev.Subject = *in.Subject
 	}
@@ -232,7 +232,7 @@ func applyTaskUpdateFields(prev agent.TaskItem, in taskUpdateInput) agent.TaskIt
 	return prev
 }
 
-func taskStatusFromString(s string) agent.TaskStatus {
+func taskStatusFromString(s string) agent.AgentTaskStatus {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "in_progress", "inprogress", "in-progress":
 		return agent.TaskInProgress
@@ -246,7 +246,7 @@ func taskStatusFromString(s string) agent.TaskStatus {
 	return agent.TaskPending
 }
 
-// taskToolEndFallback returns a synthetic EventToolEnd so the
+// taskToolEndFallback returns a synthetic EventAgentToolEnd so the
 // task tool call still shows up in the user message thread when
 // the result cannot drive a typed task event (parse failure or
 // IsError=true). The bridge's existing thread reply path renders
@@ -260,25 +260,25 @@ func taskToolEndFallback(pending pendingTool, block contentBlock, reason string)
 		args = args[:500] + "…"
 	}
 	return &agent.AgentEvent{
-		Kind: agent.EventToolEnd,
-		ToolEnd: &agent.ToolEndEvent{
+		Kind: agent.EventAgentToolEnd,
+		ToolEnd: &agent.AgentToolEndEvent{
 			ID:     block.ToolUseID,
 			Name:   pending.Name,
 			Args:   args,
 			Output: snippetToolResult(block.Content),
-			Err:    fmt.Errorf("claudecode: task tool result %s", reason),
 		},
+		Err: fmt.Errorf("claudecode: task tool result %s", reason),
 	}
 }
 
-func snapshotTasks(state *streamState) *agent.TaskListEvent {
-	items := make([]agent.TaskItem, 0, len(state.taskOrder))
+func snapshotTasks(state *streamState) *agent.AgentTaskListEvent {
+	items := make([]agent.AgentTaskItem, 0, len(state.taskOrder))
 	for _, id := range state.taskOrder {
 		if item, ok := state.tasks[id]; ok {
 			items = append(items, item)
 		}
 	}
-	return &agent.TaskListEvent{Items: items}
+	return &agent.AgentTaskListEvent{Items: items}
 }
 
 func upsertTaskOrder(order []string, id string) []string {

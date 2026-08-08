@@ -41,7 +41,7 @@ type session struct {
 	// can wait for it to finish before allowing the events channel
 	// to be closed. Before this existed, Close() called
 	// close(s.events) directly while pumpStream was still in its
-	// post-Scan teardown (scanner.Err check + final EventError
+	// post-Scan teardown (scanner.Err check + final EventAgentError
 	// emit), racing a send on a closed channel — see the
 	// TestClaudeCodeBridge_RealSubprocess race that surfaced in
 	// PR #53's CI. pumpStream owns the events-channel close via
@@ -49,7 +49,7 @@ type session struct {
 	pumpWG sync.WaitGroup
 
 	// agentName + workspace + branch are captured at session start
-	// so the translate goroutine can stamp them onto the EventAgentConnected
+	// so the translate goroutine can stamp them onto the EventAgentReady
 	// payload (consumed by channel-layer receipt rendering for
 	// the "Agent | repo | branch | tokens" foot note). All
 	// three are immutable for the session's lifetime so no
@@ -58,7 +58,7 @@ type session struct {
 	workspace string
 	branch    string
 
-	// pendingAsk is set when an AskUserQuestion EventPermission is
+	// pendingAsk is set when an AskUserQuestion EventAgentPermission is
 	// emitted; SendPermission reads from it (matching ResponseCh).
 	// nil means "no pending question".
 	pendingMu  sync.Mutex
@@ -69,7 +69,7 @@ type session struct {
 }
 
 // pendingAsk is the in-flight AskUserQuestion state. We keep it here
-// (rather than only on the EventPermission) so Session.SendPermission
+// (rather than only on the EventAgentPermission) so Session.SendPermission
 // can serialize the user's answer back to stdin even if the channel
 // dropped its copy of the response channel.
 type pendingAsk struct {
@@ -82,7 +82,7 @@ type pendingAsk struct {
 // event pump goroutine. The returned AgentSession is ready for
 // SendText / Events immediately on success.
 //
-// agentName + workspace + branch are stamped onto every EventAgentConnected
+// agentName + workspace + branch are stamped onto every EventAgentReady
 // emitted by the pump so channel-layer receipts can render the
 // "Agent | repo | branch | tokens" foot note. The values are
 // stable for the session's lifetime (set once at start).
@@ -139,7 +139,7 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 	}
 
 	// Register pendingAsk bridge for AskUserQuestion: the default
-	// handler emits EventPermission with our own ResponseCh so
+	// handler emits EventAgentPermission with our own ResponseCh so
 	// SendPermission routes the user's answer back through the
 	// same channel the bridge consumed from.
 	handler := func(block contentBlock, events chan<- agent.AgentEvent, logger *slog.Logger) {
@@ -170,7 +170,7 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 		s.pendingMu.Unlock()
 
 		// Translate the tool_use block. We need the resulting
-		// EventPermission to expose the SAME ResponseCh we just
+		// EventAgentPermission to expose the SAME ResponseCh we just
 		// stored in pendingAsk, otherwise the channel layer will
 		// write to a stale channel and SendPermission will block
 		// forever. To do that without re-parsing, we override
@@ -178,14 +178,14 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 		// intercepting the channel output.
 		//
 		// Strategy: run the default handler with a wrapper
-		// channel that intercepts the EventPermission and
+		// channel that intercepts the EventAgentPermission and
 		// rewrites its ResponseCh to our pending channel.
 		interceptEvents := make(chan agent.AgentEvent, 4)
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
 			for ev := range interceptEvents {
-				if ev.Kind == agent.EventPermission && ev.Permission != nil {
+				if ev.Kind == agent.EventAgentPermission && ev.Permission != nil {
 					ev.Permission.ResponseCh = respCh
 				}
 				events <- ev
@@ -200,7 +200,7 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 	// pumpStream owns the events-channel close so Close() can wait
 	// for it to drain (via pumpWG) before allowing close. Pre-fix
 	// Close closed the channel directly, racing pumpStream's
-	// post-Scan EventError emit. See PR #53 CI race trace.
+	// post-Scan EventAgentError emit. See PR #53 CI race trace.
 	s.pumpWG.Add(1)
 	go func() {
 		defer s.pumpWG.Done()
@@ -224,7 +224,7 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 	// so the goroutine only existed to call cmd.Wait() — which is
 	// also called from Close(), creating a documented data race
 	// against the Wait field of exec.Cmd. pumpStream is the real
-	// watchdog: it sends EventDone on EOF, and Close() is the
+	// watchdog: it sends EventAgentDone on EOF, and Close() is the
 	// single owner of cmd.Wait(). Remove the redundant goroutine.
 
 	return s, nil
@@ -547,7 +547,7 @@ func (s *session) Close() error {
 		// Wait for pumpStream to drain + close the events channel
 		// itself (via defer in newSession). Pre-fix, Close closed
 		// s.events directly, racing pumpStream's
-		// scanner.Err → events <- EventError emit. See the
+		// scanner.Err → events <- EventAgentError emit. See the
 		// TestClaudeCodeBridge_RealSubprocess race in PR #53's CI.
 		s.pumpWG.Wait()
 	})

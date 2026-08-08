@@ -77,7 +77,7 @@ func (c *fakeOutboundChannel) Send(ctx context.Context, msg any) error {
 //     production — no separate consumer of the bridge channel)
 //  4. Assert the accumulated reply contains the marker (proves
 //     pi received our input) and is non-empty (proves pi gave
-//     a response); the EventDone event arrived.
+//     a response); the EventAgentDone event arrived.
 //
 // Skipped if `pi` is not on PATH.
 func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
@@ -137,18 +137,18 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 		defer mu.Unlock()
 		eventLog = append(eventLog, ev.Kind.String())
 		switch ev.Kind {
-		case agent.EventAgentConnected:
+		case agent.EventAgentReady:
 			sawInit = true
-		case agent.EventText:
+		case agent.EventAgentText:
 			reply.WriteString(ev.Text)
-		case agent.EventResult:
+		case agent.EventAgentResult:
 			if ev.Result != nil {
 				reply.WriteString(ev.Result.Text)
 			}
-		case agent.EventDone:
+		case agent.EventAgentDone:
 			sawDone = true
-		case agent.EventError:
-			t.Errorf("pi emitted error: %v", ev.Error)
+		case agent.EventAgentError:
+			t.Errorf("pi emitted error: %v", ev.Err)
 		}
 		return false
 	})
@@ -189,7 +189,7 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 		t.Fatalf("SendBlocks: %v (elapsed=%s)", err, time.Since(sendStart))
 	}
 
-	// Wait for the EventHandler to see EventDone. Poll the
+	// Wait for the EventHandler to see EventAgentDone. Poll the
 	// accumulated state under the same mutex.
 	deadline := time.After(90 * time.Second)
 wait:
@@ -203,7 +203,7 @@ wait:
 		select {
 		case <-deadline:
 			mu.Lock()
-			t.Fatalf("no EventDone within 90s; events=%v reply=%q",
+			t.Fatalf("no EventAgentDone within 90s; events=%v reply=%q",
 				eventLog, reply.String())
 			mu.Unlock()
 		case <-time.After(50 * time.Millisecond):
@@ -217,10 +217,10 @@ wait:
 	mu.Unlock()
 
 	if !sawInit {
-		t.Errorf("EventAgentConnected never reached the runtime eventHandler; events=%v", events)
+		t.Errorf("EventAgentReady never reached the runtime eventHandler; events=%v", events)
 	}
 	if replyStr == "" {
-		t.Fatalf("EventDone arrived but no text reply reached the runtime; events=%v", events)
+		t.Fatalf("EventAgentDone arrived but no text reply reached the runtime; events=%v", events)
 	}
 	if !strings.Contains(replyStr, marker) {
 		t.Errorf("reply did NOT contain marker %q; pi likely did not read our input. reply=%q events=%v",

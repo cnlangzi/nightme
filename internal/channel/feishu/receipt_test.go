@@ -98,8 +98,8 @@ func TestSetTaskList_ReceiptBornRunning(t *testing.T) {
 		t.Fatalf("initial promptState = %v, want chatsession.PromptRunning", got)
 	}
 
-	list := &agent.TaskListEvent{
-		Items: []agent.TaskItem{
+	list := &agent.AgentTaskListEvent{
+		Items: []agent.AgentTaskItem{
 			{ID: "t1", Subject: "task one", Status: agent.TaskPending},
 			{ID: "t2", Subject: "task two", Status: agent.TaskCompleted},
 		},
@@ -123,8 +123,8 @@ func TestSetTaskList_EmptyClearsTasks(t *testing.T) {
 	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card", bot)
 
 	// First snapshot: 2 items.
-	if err := r.SetTaskList(context.Background(), &agent.TaskListEvent{
-		Items: []agent.TaskItem{
+	if err := r.SetTaskList(context.Background(), &agent.AgentTaskListEvent{
+		Items: []agent.AgentTaskItem{
 			{ID: "t1", Subject: "task one", Status: agent.TaskPending},
 		},
 	}); err != nil {
@@ -132,8 +132,8 @@ func TestSetTaskList_EmptyClearsTasks(t *testing.T) {
 	}
 
 	// Second snapshot: empty — should clear.
-	if err := r.SetTaskList(context.Background(), &agent.TaskListEvent{
-		Items: []agent.TaskItem{},
+	if err := r.SetTaskList(context.Background(), &agent.AgentTaskListEvent{
+		Items: []agent.AgentTaskItem{},
 	}); err != nil {
 		t.Fatalf("empty SetTaskList: %v", err)
 	}
@@ -154,13 +154,13 @@ func TestSetTaskList_ReplacesSnapshot(t *testing.T) {
 	bot := &mockReceiptBot{}
 	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card", bot)
 
-	first := &agent.TaskListEvent{
-		Items: []agent.TaskItem{
+	first := &agent.AgentTaskListEvent{
+		Items: []agent.AgentTaskItem{
 			{ID: "t1", Subject: "first", Status: agent.TaskPending},
 		},
 	}
-	second := &agent.TaskListEvent{
-		Items: []agent.TaskItem{
+	second := &agent.AgentTaskListEvent{
+		Items: []agent.AgentTaskItem{
 			{ID: "s1", Subject: "second-a", Status: agent.TaskPending},
 			{ID: "s2", Subject: "second-b", Status: agent.TaskCompleted},
 		},
@@ -194,13 +194,13 @@ func TestSetTaskList_PATCHesOnSubsequentCall(t *testing.T) {
 	bot := &mockReceiptBot{}
 	r := NewMessageReceiptForReply("oc_chat", "om_user", "om_card_initial", bot)
 
-	list1 := &agent.TaskListEvent{
-		Items: []agent.TaskItem{
+	list1 := &agent.AgentTaskListEvent{
+		Items: []agent.AgentTaskItem{
 			{ID: "t1", Subject: "first", Status: agent.TaskPending},
 		},
 	}
-	list2 := &agent.TaskListEvent{
-		Items: []agent.TaskItem{
+	list2 := &agent.AgentTaskListEvent{
+		Items: []agent.AgentTaskItem{
 			{ID: "t1", Subject: "first", Status: agent.TaskCompleted},
 			{ID: "t2", Subject: "second", Status: agent.TaskPending},
 		},
@@ -246,7 +246,7 @@ func TestBuildReceiptCard_TaskOnly(t *testing.T) {
 	r := &MessageReceipt{
 		chatID:    "oc_chat",
 		userMsgID: "om_user",
-		tasks: []agent.TaskItem{
+		tasks: []agent.AgentTaskItem{
 			{ID: "t1", Subject: "first task", Status: agent.TaskPending},
 			{ID: "t2", Subject: "second task", Status: agent.TaskCompleted},
 		},

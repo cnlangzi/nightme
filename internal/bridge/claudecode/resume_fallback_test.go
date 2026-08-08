@@ -23,7 +23,7 @@ import (
 // --resume session id results in a returned ErrResumeUnhealthy,
 // NOT a silent fallback to a fresh session. Before the
 // preservation fix (commit T-alive), the bridge would close the
-// wedged session and re-spawn with ResumeID="" — the runtime saw
+// wedged session and re-spawn with SessionID="" — the runtime saw
 // a "working" session but the assistant had no resume context.
 func TestStart_ResumeRejectionSurfacesError(t *testing.T) {
 	requireRealClaude(t)
@@ -35,12 +35,12 @@ func TestStart_ResumeRejectionSurfacesError(t *testing.T) {
 	// valid-format UUID that doesn't exist in claude's session store.
 	// claude emits "No conversation found with session ID: ..." on
 	// stderr, which the probe classifies as a resume rejection.
-	resumeID := "deadbeef-dead-dead-dead-deadbeefdead"
+	sessionID := "deadbeef-dead-dead-dead-deadbeefdead"
 
 	sess, err := a.Start(ctx, agent.StartConfig{
 		Workspace:      "/tmp",
 		PermissionMode: "bypassPermissions",
-		ResumeID:       resumeID,
+		SessionID:       sessionID,
 	})
 	if sess != nil {
 		t.Cleanup(func() { _ = sess.Close() })
@@ -51,14 +51,14 @@ func TestStart_ResumeRejectionSurfacesError(t *testing.T) {
 	if !errors.Is(err, ErrResumeUnhealthy) {
 		t.Errorf("Start error = %v, want ErrResumeUnhealthy", err)
 	}
-	if !strings.Contains(err.Error(), resumeID) {
-		t.Errorf("error should mention resume id %q for debuggability; got %q", resumeID, err.Error())
+	if !strings.Contains(err.Error(), sessionID) {
+		t.Errorf("error should mention resume id %q for debuggability; got %q", sessionID, err.Error())
 	}
-	t.Logf("[test] Start rejected --resume %q with: %v (no silent fallback)", resumeID, err)
+	t.Logf("[test] Start rejected --resume %q with: %v (no silent fallback)", sessionID, err)
 }
 
 // TestStart_ResumeID_PreservedAcrossProbe verifies that for a
-// VALID --resume id, the session id captured by EventAgentConnected equals
+// VALID --resume id, the session id captured by EventAgentReady equals
 // the requested resume id — i.e. the bridge is actually
 // resuming, not silently replacing with a fresh session.
 //
@@ -99,8 +99,8 @@ phase1Loop:
 			if !ok {
 				t.Fatal("phase 1: events closed")
 			}
-			if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.SessionID != "" {
-				capturedID = ev.Connected.SessionID
+			if ev.Kind == agent.EventAgentReady  && ev.SessionID != "" {
+				capturedID = ev.SessionID
 				t.Logf("[test] phase 1: captured sessionID=%q", capturedID)
 				break phase1Loop
 			}
@@ -119,7 +119,7 @@ phase1Loop:
 	sess2, err := a.Start(ctx, agent.StartConfig{
 		Workspace:      ws,
 		PermissionMode: "bypassPermissions",
-		ResumeID:       capturedID,
+		SessionID:       capturedID,
 	})
 	if err != nil {
 		t.Fatalf("phase 2 Start: %v (resume was lost — bridge errored instead of preserving)", err)
@@ -139,16 +139,16 @@ phase1Loop:
 			if !ok {
 				t.Fatalf("phase 2: events closed before init")
 			}
-			if ev.Kind == agent.EventAgentConnected && ev.Connected != nil {
-				if ev.Connected.SessionID != capturedID {
+			if ev.Kind == agent.EventAgentReady  {
+				if ev.SessionID != capturedID {
 					t.Fatalf("phase 2: init.SessionID = %q, want %q (resume context lost — bridge replaced with fresh session)",
-						ev.Connected.SessionID, capturedID)
+						ev.SessionID, capturedID)
 				}
-				t.Logf("[test] phase 2: init.SessionID = %q matches resumeID — resume preserved", ev.Connected.SessionID)
+				t.Logf("[test] phase 2: init.SessionID = %q matches sessionID — resume preserved", ev.SessionID)
 				return
 			}
-			if ev.Kind == agent.EventError {
-				t.Fatalf("phase 2: bridge emitted EventError: %v", ev.Error.Err)
+			if ev.Kind == agent.EventAgentError {
+				t.Fatalf("phase 2: bridge emitted EventAgentError: %v", ev.Err)
 			}
 		case <-deadline:
 			t.Fatalf("phase 2: no init within 60s")

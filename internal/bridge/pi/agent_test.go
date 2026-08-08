@@ -42,13 +42,13 @@ func TestBuildArgs_PassesExtraArgsThroughInOrder(t *testing.T) {
 }
 
 // TestBuildArgs_OmitsSessionIDWhenResumeIDEmpty verifies that a
-// zero-value ResumeID does NOT inject the resume flag (so
+// zero-value SessionID does NOT inject the resume flag (so
 // daemons with no persisted entry spawn fresh sessions cleanly).
 func TestBuildArgs_OmitsSessionIDWhenResumeIDEmpty(t *testing.T) {
 	got := buildArgs(nil, agent.StartConfig{})
 	for i, a := range got {
 		if a == "--session-id" {
-			t.Errorf("argv at [%d] = %q, want no --session-id when ResumeID is empty: %v", i, a, got)
+			t.Errorf("argv at [%d] = %q, want no --session-id when SessionID is empty: %v", i, a, got)
 		}
 	}
 }
@@ -58,10 +58,10 @@ func TestBuildArgs_OmitsSessionIDWhenResumeIDEmpty(t *testing.T) {
 // flag at the tail of the argv. The flag value is forwarded
 // verbatim — Pi's own validator decides whether the id is legal.
 func TestBuildArgs_AppendsSessionIDWhenResumeIDSet(t *testing.T) {
-	got := buildArgs(nil, agent.StartConfig{ResumeID: "sess-abc-123"})
+	got := buildArgs(nil, agent.StartConfig{SessionID: "sess-abc-123"})
 	want := []string{"--mode", "rpc", "--session-id", "sess-abc-123"}
 	if !equalSlice(got, want) {
-		t.Errorf("buildArgs with ResumeID = %v, want %v", got, want)
+		t.Errorf("buildArgs with SessionID = %v, want %v", got, want)
 	}
 }
 
@@ -74,7 +74,7 @@ func TestBuildArgs_ResumeFlagGoesLastAfterUserArgs(t *testing.T) {
 		nil,
 		agent.StartConfig{
 			Args:     []string{"--model", "google/gemini"},
-			ResumeID: "sess-xyz",
+			SessionID: "sess-xyz",
 		},
 	)
 	want := []string{
@@ -110,7 +110,7 @@ func equalSlice(a, b []string) bool {
 // ----- filterSessionFlags (Finding 3 — config Args collision) -----
 
 // TestFilterSessionFlags_ResumeIDWins_StripsValueArg verifies that
-// when the runtime-persisted ResumeID is set, a user-supplied
+// when the runtime-persisted SessionID is set, a user-supplied
 // --session-id <value> pair in cfg.Args is stripped —
 // runtime-persisted identity wins so Pi never sees conflicting
 // session-selection flags.
@@ -128,7 +128,7 @@ func TestFilterSessionFlags_ResumeIDWins_StripsValueArg(t *testing.T) {
 
 // TestFilterSessionFlags_ResumeIDWins_StripsSessionPath covers
 // the equal-looking --session <path|id> flag. Same treatment as
-// --session-id when ResumeID is set.
+// --session-id when SessionID is set.
 func TestFilterSessionFlags_ResumeIDWins_StripsSessionPath(t *testing.T) {
 	got := filterSessionFlags(
 		[]string{"--session", "/tmp/old.jsonl", "--verbose"},
@@ -158,7 +158,7 @@ func TestFilterSessionFlags_ResumeIDWins_StripsNoSession(t *testing.T) {
 
 // TestFilterSessionFlags_NoResume_PassesThrough is the legitimate
 // "spawn fresh with explicit id" path: user supplied
-// --session-id <their-id> themselves with no runtime ResumeID.
+// --session-id <their-id> themselves with no runtime SessionID.
 // Pass through unchanged so the flag actually reaches Pi.
 func TestFilterSessionFlags_NoResume_PassesThrough(t *testing.T) {
 	in := []string{"--session-id", "user-fresh", "--model", "y"}
@@ -169,7 +169,7 @@ func TestFilterSessionFlags_NoResume_PassesThrough(t *testing.T) {
 }
 
 // TestBuildArgs_ResumeIDStripsConflictingArg is the end-to-end
-// argv-shape guarantee: when cfg.ResumeID is set, the final argv
+// argv-shape guarantee: when cfg.SessionID is set, the final argv
 // contains --session-id <resume-id> exactly once (not duplicated
 // with a user --session-id).
 func TestBuildArgs_ResumeIDStripsConflictingArg(t *testing.T) {
@@ -177,7 +177,7 @@ func TestBuildArgs_ResumeIDStripsConflictingArg(t *testing.T) {
 		nil,
 		agent.StartConfig{
 			Args:     []string{"--session-id", "user-id", "--model", "x"},
-			ResumeID: "resume-id",
+			SessionID: "resume-id",
 		},
 	)
 	want := []string{"--mode", "rpc", "--model", "x", "--session-id", "resume-id"}
@@ -197,7 +197,7 @@ func TestBuildArgs_ResumeIDStripsConflictingArg(t *testing.T) {
 }
 
 // TestBuildArgs_NoResume_PassesSessionIDThrough verifies the
-// "spawn fresh with explicit id" path: cfg.ResumeID empty +
+// "spawn fresh with explicit id" path: cfg.SessionID empty +
 // cfg.Args={"--session-id", <id>} should produce argv with
 // exactly that --session-id (no runtime override).
 func TestBuildArgs_NoResume_PassesSessionIDThrough(t *testing.T) {
@@ -205,7 +205,7 @@ func TestBuildArgs_NoResume_PassesSessionIDThrough(t *testing.T) {
 		nil,
 		agent.StartConfig{
 			Args:     []string{"--session-id", "user-fresh"},
-			ResumeID: "",
+			SessionID: "",
 		},
 	)
 	want := []string{"--mode", "rpc", "--session-id", "user-fresh"}

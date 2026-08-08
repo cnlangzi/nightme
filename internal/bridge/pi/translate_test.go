@@ -64,36 +64,36 @@ func drive(t *testing.T, tr *translator, raws ...string) []agent.AgentEvent {
 	return out
 }
 
-// findResult returns the single EventResult in events, failing if
-// there is not exactly one. "Exactly one EventResult per turn" is the
+// findResult returns the single EventAgentResult in events, failing if
+// there is not exactly one. "Exactly one EventAgentResult per turn" is the
 // core F-52 invariant, so most tests want the strict form.
-func findResult(t *testing.T, events []agent.AgentEvent) *agent.ResultEvent {
+func findResult(t *testing.T, events []agent.AgentEvent) *agent.AgentResultEvent {
 	t.Helper()
-	var found *agent.ResultEvent
+	var found *agent.AgentResultEvent
 	for _, ev := range events {
-		if ev.Kind != agent.EventResult {
+		if ev.Kind != agent.EventAgentResult {
 			continue
 		}
 		if found != nil {
-			t.Fatalf("more than one EventResult in %v", kinds(events))
+			t.Fatalf("more than one EventAgentResult in %v", kinds(events))
 		}
 		if ev.Result == nil {
-			t.Fatal("EventResult with nil Result payload")
+			t.Fatal("EventAgentResult with nil Result payload")
 		}
 		found = ev.Result
 	}
 	if found == nil {
-		t.Fatalf("no EventResult in %v", kinds(events))
+		t.Fatalf("no EventAgentResult in %v", kinds(events))
 	}
 	return found
 }
 
-// texts collects the payloads of every EventText in order, so tests
+// texts collects the payloads of every EventAgentText in order, so tests
 // can assert on the narration stream without index arithmetic.
 func texts(events []agent.AgentEvent) []string {
 	var out []string
 	for _, ev := range events {
-		if ev.Kind == agent.EventText {
+		if ev.Kind == agent.EventAgentText {
 			out = append(out, ev.Text)
 		}
 	}
@@ -133,13 +133,13 @@ func assistantMessageEnd(t *testing.T, text string, input, output int) string {
 }
 
 // TestTranslate_AgentSettled verifies that the F-32 turn-end marker
-// emits the turn's single EventResult followed by exactly one
-// EventDone with Reason:"settled", and does NOT terminate the session
+// emits the turn's single EventAgentResult followed by exactly one
+// EventAgentDone with Reason:"settled", and does NOT terminate the session
 // (the runtime contract is that the events channel stays open across
 // many turns).
 //
 // F-52: the result must come FIRST — the runtime's readpump flips to
-// Idle and flushes the queued prompts on EventDone, so a result
+// Idle and flushes the queued prompts on EventAgentDone, so a result
 // emitted afterwards would race the next turn.
 //
 // A minimal real turn is driven rather than a bare agent_settled,
@@ -152,10 +152,10 @@ func TestTranslate_AgentSettled(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("events = %v, want [result done]", kinds(events))
 	}
-	if events[0].Kind != agent.EventResult {
+	if events[0].Kind != agent.EventAgentResult {
 		t.Errorf("events[0] kind = %s, want result", events[0].Kind)
 	}
-	if events[1].Kind != agent.EventDone {
+	if events[1].Kind != agent.EventAgentDone {
 		t.Errorf("events[1] kind = %s, want done", events[1].Kind)
 	}
 	if events[1].Done == nil || events[1].Done.Reason != "settled" {
@@ -199,12 +199,12 @@ func TestTranslate_TextDelta(t *testing.T) {
 }
 
 // TestTranslate_ThinkingDelta verifies reasoning accumulates across
-// deltas and flushes as ONE EventText on thinking_end, carrying the
+// deltas and flushes as ONE EventAgentText on thinking_end, carrying the
 // "[思考] " prefix the receipt renderer branches on.
 //
 // Reasoning flushes on its own boundary rather than at the tool
 // boundary because it is a distinct surface (💭 vs 💬) and must never
-// land inside the reply's EventResult.
+// land inside the reply's EventAgentResult.
 func TestTranslate_ThinkingDelta(t *testing.T) {
 	tr := newTestTranslator()
 
@@ -222,8 +222,8 @@ func TestTranslate_ThinkingDelta(t *testing.T) {
 	if err != nil {
 		t.Fatalf("thinking_end: %v", err)
 	}
-	if len(events) != 1 || events[0].Kind != agent.EventText {
-		t.Fatalf("thinking_end produced %+v, want one EventText", events)
+	if len(events) != 1 || events[0].Kind != agent.EventAgentText {
+		t.Fatalf("thinking_end produced %+v, want one EventAgentText", events)
 	}
 	if events[0].Text != "[思考] analyzing" {
 		t.Errorf("text = %q, want %q", events[0].Text, "[思考] analyzing")
@@ -233,7 +233,7 @@ func TestTranslate_ThinkingDelta(t *testing.T) {
 // TestTranslate_ThinkingDoesNotLeakIntoResult locks the separation
 // between the reasoning surface and the reply surface: a turn whose
 // only content is reasoning must NOT put that reasoning in the
-// EventResult.
+// EventAgentResult.
 func TestTranslate_ThinkingDoesNotLeakIntoResult(t *testing.T) {
 	tr := newTestTranslator()
 
@@ -243,7 +243,7 @@ func TestTranslate_ThinkingDoesNotLeakIntoResult(t *testing.T) {
 	events := mustTranslate(t, tr, `{"type":"agent_settled"}`)
 	result := findResult(t, events)
 	if strings.Contains(result.Text, "secret reasoning") {
-		t.Errorf("EventResult.Text = %q, must not contain the reasoning text", result.Text)
+		t.Errorf("EventAgentResult.Text = %q, must not contain the reasoning text", result.Text)
 	}
 }
 
@@ -256,7 +256,7 @@ func TestTranslate_ToolExecutionStartEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	if len(start) != 1 || start[0].Kind != agent.EventToolStart {
+	if len(start) != 1 || start[0].Kind != agent.EventAgentToolStart {
 		t.Fatalf("start = %+v", start)
 	}
 	if start[0].ToolStart.ID != "call-1" || start[0].ToolStart.Name != "bash" {
@@ -267,14 +267,14 @@ func TestTranslate_ToolExecutionStartEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("end: %v", err)
 	}
-	if len(end) != 1 || end[0].Kind != agent.EventToolEnd {
+	if len(end) != 1 || end[0].Kind != agent.EventAgentToolEnd {
 		t.Fatalf("end = %+v", end)
 	}
 	if end[0].ToolEnd.ID != "call-1" {
 		t.Errorf("end id = %q", end[0].ToolEnd.ID)
 	}
-	if end[0].ToolEnd.Err != nil {
-		t.Errorf("err = %v, want nil", end[0].ToolEnd.Err)
+	if end[0].Err != nil {
+		t.Errorf("err = %v, want nil", end[0].Err)
 	}
 }
 
@@ -286,16 +286,16 @@ func TestTranslate_ToolErrorIsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
-	if events[0].ToolEnd.Err == nil {
+	if events[0].Err == nil {
 		t.Errorf("expected non-nil Err on isError=true")
 	}
 }
 
 // TestTranslate_AssistantMessageResult verifies that a message_end
 // assistant role records the turn's text / usage WITHOUT emitting,
-// and that agent_settled then delivers ONE EventResult whose
-// ResultEvent carries Usage inline (co-located usage instead of the
-// legacy EventResult + EventUsage pair).
+// and that agent_settled then delivers ONE EventAgentResult whose
+// AgentResultEvent carries Usage inline (co-located usage instead of the
+// legacy EventAgentResult + EventUsage pair).
 //
 // F-52 moved the emit point from message_end to agent_settled: a turn
 // can contain several assistant messages (text -> toolCall ->
@@ -330,7 +330,7 @@ func TestTranslate_AssistantMessageResult(t *testing.T) {
 		t.Fatalf("agent_settled = %v, want [result done]", kinds(settled))
 	}
 	result := findResult(t, settled)
-	if result.Text != "hi" || result.IsError {
+	if result.Text != "hi" /* result.Err not available on AgentResultEvent — see ev.Err on AgentEvent */ {
 		t.Errorf("result = %+v", result)
 	}
 	if result.Subtype != "stop" {
@@ -338,7 +338,7 @@ func TestTranslate_AssistantMessageResult(t *testing.T) {
 	}
 	u := result.Usage
 	if u == nil {
-		t.Fatal("ResultEvent.Usage is nil; bridge should populate from message_end.usage")
+		t.Fatal("AgentResultEvent.Usage is nil; bridge should populate from message_end.usage")
 	}
 	if u.InputTokens != 10 || u.OutputTokens != 5 {
 		t.Errorf("usage = %+v", u)
@@ -374,7 +374,7 @@ func TestTranslate_EmptyUsageStaysNil(t *testing.T) {
 		t.Errorf("Text = %q, want %q", result.Text, "ok")
 	}
 	if result.Usage != nil {
-		t.Errorf("ResultEvent.Usage = %+v, want nil (no usage section on the wire)", result.Usage)
+		t.Errorf("AgentResultEvent.Usage = %+v, want nil (no usage section on the wire)", result.Usage)
 	}
 }
 
@@ -448,35 +448,10 @@ func TestTranslate_UsageDropsAllZeroIncludingZeroCost(t *testing.T) {
 	}
 }
 
-// TestTranslate_CompactionEndOnly verifies F-49 bridge abstraction:
-// a complete Pi compaction cycle (start+end) yields exactly one
-// EventCompaction on the wire. The start event is silently
-// suppressed (the runtime would otherwise double-count). See
-// docs/feat/F-49-compaction-counter.md §1.3 + §1.7.
-func TestTranslate_CompactionEndOnly(t *testing.T) {
-	tr := newTestTranslator()
-
-	// compaction_start → suppressed (returns nil, nil).
-	start, err := tr.translate([]byte(`{"type":"compaction_start","reason":"threshold"}`), nil)
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	if start != nil {
-		t.Errorf("compaction_start should be suppressed, got %v events", len(start))
-	}
-
-	// compaction_end → one EventCompaction (empty marker payload).
-	end, err := tr.translate([]byte(`{"type":"compaction_end","reason":"threshold","result":{"aborted":false}}`), nil)
-	if err != nil {
-		t.Fatalf("end: %v", err)
-	}
-	if len(end) != 1 {
-		t.Fatalf("compaction_end produced %d events, want 1", len(end))
-	}
-	if end[0].Kind != agent.EventCompaction {
-		t.Errorf("end kind = %s, want EventCompaction", end[0].Kind)
-	}
-}
+// TestTranslate_CompactionEndOnly removed: F-49 compaction tracking
+// was deleted across the runtime. Pi's compaction_start /
+// compaction_end events are now silently dropped at the bridge —
+// no AgentEvent emitted, no runtime bookkeeping, no footer 🗜 N.
 
 // TestTranslate_ExtensionUIRequestIgnored verifies that the F-32
 // MVP does not produce any AgentEvent for an extension_ui_request
@@ -518,7 +493,7 @@ func TestTranslate_MalformedJSON(t *testing.T) {
 
 // TestEmitInit_Once verifies that emitConnected only fires the first
 // time. Subsequent get_state responses (e.g. after a model switch
-// in a future MVP) do not re-emit EventAgentConnected and corrupt the
+// in a future MVP) do not re-emit EventAgentReady and corrupt the
 // receipt header.
 func TestEmitInit_Once(t *testing.T) {
 	tr := newTestTranslator()
@@ -530,11 +505,11 @@ func TestEmitInit_Once(t *testing.T) {
 	if len(first) != 1 {
 		t.Fatalf("first emitConnected = %d, want 1", len(first))
 	}
-	if first[0].Connected.SessionID != "sess-1" || first[0].Connected.AgentName != "pi" {
-		t.Errorf("init = %+v", first[0].Connected)
+	if first[0].SessionID != "sess-1" || first[0].AgentName != "pi" {
+		t.Errorf("init = %+v", first[0])
 	}
-	if !strings.Contains(first[0].Connected.Model, "M1") {
-		t.Errorf("Model = %q, want to contain M1", first[0].Connected.Model)
+	if !strings.Contains(first[0].Model, "M1") {
+		t.Errorf("Model = %q, want to contain M1", first[0].Model)
 	}
 	second := tr.emitConnected(state)
 	if second != nil {
@@ -551,11 +526,11 @@ func TestEmitInit_NoModel(t *testing.T) {
 	if len(first) != 1 {
 		t.Fatalf("emitConnected(nil) = %d, want 1", len(first))
 	}
-	if first[0].Connected.Model != "" || first[0].Connected.SessionID != "" {
-		t.Errorf("empty init = %+v", first[0].Connected)
+	if first[0].Model != "" || first[0].SessionID != "" {
+		t.Errorf("empty init = %+v", first[0])
 	}
-	if first[0].Connected.AgentName != "pi" || first[0].Connected.Workspace != "/tmp/ws" {
-		t.Errorf("agent/workspace = %+v", first[0].Connected)
+	if first[0].AgentName != "pi" || first[0].Workspace != "/tmp/ws" {
+		t.Errorf("agent/workspace = %+v", first[0])
 	}
 }
 
@@ -563,9 +538,9 @@ func TestEmitInit_NoModel(t *testing.T) {
 // caches `data.model.contextWindow` from get_state on the
 // translator so subsequent decodeMessageUsage calls can compute
 // the per-turn X% without re-querying. The value itself never
-// crosses the UsageEvent struct boundary (verified by the
+// crosses the UsageInfo struct boundary (verified by the
 // decodeMessageUsage tests below — they receive ctxWindow as a
-// parameter, not from UsageEvent).
+// parameter, not from UsageInfo).
 func TestEmitInit_CapturesContextWindow(t *testing.T) {
 	tr := newTestTranslator()
 	if got := tr.contextWindow.Load(); got != 0 {
@@ -674,10 +649,10 @@ func TestEmitInit_ContextWindowResetBetweenSessions(t *testing.T) {
 // TestDecodeMessageUsage_ContextWindowPct pins F-54 §2.2: the
 // bridge-computed pct follows Doc 1 (used / window * 100) when
 // the translator-supplied contextWindow is positive. The
-// translator's window is held outside UsageEvent — decodeMessageUsage
+// translator's window is held outside UsageInfo — decodeMessageUsage
 // receives it as a parameter — so this test also implicitly
 // asserts that pct is the only context-window-derived field on
-// the returned UsageEvent. Companion
+// the returned UsageInfo. Companion
 // TestDecodeMessageUsage_ForwardsContextWindow (below) pins the
 // F-55 re-introduction of the field so a future refactor can't
 // silently drop the field again.
@@ -861,7 +836,7 @@ func events0Reason(ev agent.AgentEvent) string {
 
 // TestTranslate_ToolCallStartNoop verifies the F-32 design
 // decision: toolcall_start is a no-op because the canonical
-// EventToolStart is emitted at tool_execution_start, which
+// EventAgentToolStart is emitted at tool_execution_start, which
 // arrives later in the event stream with the full name + args.
 // Emitting twice would surface a phantom "starting" line
 // between two genuine tool invocations.
@@ -878,7 +853,7 @@ func TestTranslate_ToolCallStartNoop(t *testing.T) {
 }
 
 // TestTranslate_ToolExecutionStartArgs verifies that the
-// canonical EventToolStart is emitted from tool_execution_start
+// canonical EventAgentToolStart is emitted from tool_execution_start
 // with the full name and args (the slot the renderer listens on
 // for "tool starting" lines).
 func TestTranslate_ToolExecutionStartArgs(t *testing.T) {
@@ -888,7 +863,7 @@ func TestTranslate_ToolExecutionStartArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
-	if len(events) != 1 || events[0].Kind != agent.EventToolStart {
+	if len(events) != 1 || events[0].Kind != agent.EventAgentToolStart {
 		t.Fatalf("events = %+v", events)
 	}
 	if events[0].ToolStart.ID != "c-1" || events[0].ToolStart.Name != "read" {
@@ -922,7 +897,7 @@ func TestTranslate_ToolExecutionEnd_FillsNameAndArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("end translate: %v", err)
 	}
-	if len(events) != 1 || events[0].Kind != agent.EventToolEnd {
+	if len(events) != 1 || events[0].Kind != agent.EventAgentToolEnd {
 		t.Fatalf("events = %+v", events)
 	}
 	toolEnd := events[0].ToolEnd
@@ -938,8 +913,8 @@ func TestTranslate_ToolExecutionEnd_FillsNameAndArgs(t *testing.T) {
 	if !strings.Contains(toolEnd.Output, "total 4") {
 		t.Errorf("Output = %q", toolEnd.Output)
 	}
-	if toolEnd.Err != nil {
-		t.Errorf("Err = %v, want nil", toolEnd.Err)
+	if events[0].Err != nil {
+		t.Errorf("Err = %v, want nil", events[0].Err)
 	}
 
 	// Pending entry must be cleared so a later tool with the same
@@ -965,7 +940,7 @@ func TestTranslate_ToolExecutionEnd_WireToolNameFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("translate: %v", err)
 	}
-	if len(events) != 1 || events[0].Kind != agent.EventToolEnd {
+	if len(events) != 1 || events[0].Kind != agent.EventAgentToolEnd {
 		t.Fatalf("events = %+v", events)
 	}
 	toolEnd := events[0].ToolEnd
@@ -1019,7 +994,7 @@ func TestTranslate_EmptyToolCallId_OrphanPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start1 translate: %v", err)
 	}
-	if len(evs1) != 1 || evs1[0].Kind != agent.EventToolStart {
+	if len(evs1) != 1 || evs1[0].Kind != agent.EventAgentToolStart {
 		t.Fatalf("start1 events = %+v", evs1)
 	}
 	if evs1[0].ToolStart.Name != "bash" {
@@ -1050,7 +1025,7 @@ func TestTranslate_EmptyToolCallId_OrphanPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("end translate: %v", err)
 	}
-	if len(evsEnd) != 1 || evsEnd[0].Kind != agent.EventToolEnd {
+	if len(evsEnd) != 1 || evsEnd[0].Kind != agent.EventAgentToolEnd {
 		t.Fatalf("end events = %+v", evsEnd)
 	}
 	toolEnd := evsEnd[0].ToolEnd
@@ -1150,9 +1125,9 @@ var _ = errors.New
 
 // TestTranslate_StateUpdate_EmitsEventAgentConnected verifies F-34 §3.2.2:
 // when pi emits state_update after a new_session RPC, the translator
-// surfaces an EventAgentConnected carrying the new sessionId. The runtime's
+// surfaces an EventAgentReady carrying the new sessionId. The runtime's
 // eventHandler (cmd/nightme/run.go newEventHandler) picks it up
-// via SetResumeID.
+// via SetSessionID.
 func TestTranslate_StateUpdate_EmitsEventAgentConnected(t *testing.T) {
 	tr := newTestTranslator()
 	raw := []byte(`{"type":"state_update","sessionId":"new-sess-1","modelId":"m1","modelName":"M1"}`)
@@ -1163,17 +1138,17 @@ func TestTranslate_StateUpdate_EmitsEventAgentConnected(t *testing.T) {
 	if len(events) != 1 {
 		t.Fatalf("events = %d, want 1", len(events))
 	}
-	if events[0].Kind != agent.EventAgentConnected {
-		t.Fatalf("Kind = %s, want EventAgentConnected", events[0].Kind)
+	if events[0].Kind != agent.EventAgentReady {
+		t.Fatalf("Kind = %s, want EventAgentReady", events[0].Kind)
 	}
-	if events[0].Connected.SessionID != "new-sess-1" {
-		t.Errorf("SessionID = %q, want new-sess-1", events[0].Connected.SessionID)
+	if events[0].SessionID != "new-sess-1" {
+		t.Errorf("SessionID = %q, want new-sess-1", events[0].SessionID)
 	}
-	if !strings.Contains(events[0].Connected.Model, "M1") {
-		t.Errorf("Model = %q, want to contain M1", events[0].Connected.Model)
+	if !strings.Contains(events[0].Model, "M1") {
+		t.Errorf("Model = %q, want to contain M1", events[0].Model)
 	}
-	if events[0].Connected.AgentName != "pi" {
-		t.Errorf("AgentName = %q, want pi", events[0].Connected.AgentName)
+	if events[0].AgentName != "pi" {
+		t.Errorf("AgentName = %q, want pi", events[0].AgentName)
 	}
 }
 
@@ -1196,7 +1171,7 @@ func TestTranslate_StateUpdate_NoSessionID_Ignored(t *testing.T) {
 // F-52: stream aggregation — turn-level contracts.
 //
 // These drive whole wire sequences rather than single events,
-// because the F-52 invariants ("one EventResult per turn", "no
+// because the F-52 invariants ("one EventAgentResult per turn", "no
 // duplicated text") are only observable across a turn.
 // See docs/feat/F-52-pi-stream-aggregation.md.
 // ---------------------------------------------------------------
@@ -1206,8 +1181,8 @@ func TestTranslate_StateUpdate_NoSessionID_Ignored(t *testing.T) {
 // produce exactly ONE user-visible event — the result — no matter how
 // many tokens Pi streamed.
 //
-// Before F-52 this sequence produced 5 EventText (one per delta) and
-// no EventResult at all, which the Feishu adapter rendered as five
+// Before F-52 this sequence produced 5 EventAgentText (one per delta) and
+// no EventAgentResult at all, which the Feishu adapter rendered as five
 // separate 💬 bubbles.
 func TestTranslate_SimpleTurn_SingleResult(t *testing.T) {
 	tr := newTestTranslator()
@@ -1223,7 +1198,7 @@ func TestTranslate_SimpleTurn_SingleResult(t *testing.T) {
 		t.Fatalf("kinds = %v, want exactly [result done]", got)
 	}
 	if txt := texts(events); len(txt) != 0 {
-		t.Errorf("EventText emitted %q, want none for a tool-free turn", txt)
+		t.Errorf("EventAgentText emitted %q, want none for a tool-free turn", txt)
 	}
 
 	result := findResult(t, events)
@@ -1236,8 +1211,8 @@ func TestTranslate_SimpleTurn_SingleResult(t *testing.T) {
 }
 
 // TestTranslate_ToolTurn_NoDuplicateText is the zero-duplication
-// lock. Narration that precedes a tool call is flushed as EventText
-// at the tool boundary; the turn's EventResult must then carry ONLY
+// lock. Narration that precedes a tool call is flushed as EventAgentText
+// at the tool boundary; the turn's EventAgentResult must then carry ONLY
 // the segment written after the tool returned.
 //
 // If flushPendingTextLocked ever stops clearing pendingText, the
@@ -1269,14 +1244,14 @@ func TestTranslate_ToolTurn_NoDuplicateText(t *testing.T) {
 		t.Errorf("Text = %q, want %q", result.Text, "Found the problem.")
 	}
 	if strings.Contains(result.Text, "Let me check") {
-		t.Errorf("Text = %q duplicates narration already delivered as EventText", result.Text)
+		t.Errorf("Text = %q duplicates narration already delivered as EventAgentText", result.Text)
 	}
 
 	// Ordering matters for the receipt: narration, then the tool
 	// pair, then the result, then done.
 	want := []agent.EventKind{
-		agent.EventText, agent.EventToolStart, agent.EventToolEnd,
-		agent.EventResult, agent.EventDone,
+		agent.EventAgentText, agent.EventAgentToolStart, agent.EventAgentToolEnd,
+		agent.EventAgentResult, agent.EventAgentDone,
 	}
 	got := kinds(events)
 	if len(got) != len(want) {
@@ -1320,7 +1295,7 @@ func TestTranslate_UsageIsLatestSnapshotNotSum(t *testing.T) {
 // on a tool call with no closing narration.
 //
 // The fallback text is load-bearing, not cosmetic: gateway.Translate
-// drops an EventResult whose Text is empty and IsError is false, and
+// drops an EventAgentResult whose Text is empty and IsError is false, and
 // the runtime reads Usage off the translated OutboundMessage — so an
 // empty Text would silently take the turn's token counts with it.
 func TestTranslate_EmptyTurnStillCarriesUsage(t *testing.T) {
@@ -1449,7 +1424,7 @@ func TestTranslate_TurnStateResetsBetweenTurns(t *testing.T) {
 // TestTranslate_ResetTurnClearsMidTurnState covers /new landing in
 // the middle of a streaming reply: session.New() calls resetTurn(),
 // after which the half-streamed text must not surface at all — the
-// reset turn is untouched, so settling it yields only EventDone — nor
+// reset turn is untouched, so settling it yields only EventAgentDone — nor
 // leak into the next real turn.
 func TestTranslate_ResetTurnClearsMidTurnState(t *testing.T) {
 	tr := newTestTranslator()
@@ -1463,7 +1438,7 @@ func TestTranslate_ResetTurnClearsMidTurnState(t *testing.T) {
 
 	// The abandoned turn is now untouched: no result, just the marker.
 	settled := drive(t, tr, `{"type":"agent_settled"}`)
-	if len(settled) != 1 || settled[0].Kind != agent.EventDone {
+	if len(settled) != 1 || settled[0].Kind != agent.EventAgentDone {
 		t.Fatalf("kinds = %v, want [done] only after /new discarded the turn", kinds(settled))
 	}
 
@@ -1495,8 +1470,8 @@ func TestTranslate_StopReasonError(t *testing.T) {
 	events := drive(t, tr, string(raw), `{"type":"agent_settled"}`)
 
 	result := findResult(t, events)
-	if !result.IsError {
-		t.Errorf("IsError = false, want true for stopReason=error")
+	if result.Subtype != "error" {
+		t.Errorf("Subtype = %q, want error", result.Subtype)
 	}
 	if result.Subtype != "error" {
 		t.Errorf("Subtype = %q, want %q", result.Subtype, "error")
@@ -1527,7 +1502,7 @@ func TestTranslate_CompactionPreservesTurnBuffers(t *testing.T) {
 // Pi emits message_end(assistant) with content[] = [text, toolCall]
 // BEFORE the matching tool_execution_start. So a turn that ends on a
 // tool call leaves lastMessageText holding the very paragraph that the
-// tool boundary then flushed as EventText. The original fallback chain
+// tool boundary then flushed as EventAgentText. The original fallback chain
 // ("pendingText, else lastMessageText") re-delivered it as the 📝
 // result card — the exact duplication F-52 set out to remove, just in
 // a shape the first round of tests did not cover.
@@ -1563,7 +1538,7 @@ func TestTranslate_ToolEndingTurn_NoDuplicate(t *testing.T) {
 	result := findResult(t, events)
 	for _, delivered := range narration {
 		if result.Text == delivered {
-			t.Fatalf("EventResult.Text = %q duplicates an EventText already delivered", result.Text)
+			t.Fatalf("EventAgentResult.Text = %q duplicates an EventAgentText already delivered", result.Text)
 		}
 	}
 	if result.Text != emptyReplyFallback {
@@ -1592,7 +1567,7 @@ func TestTranslate_NonStreamedTurnUsesMessageFallback(t *testing.T) {
 	)
 
 	if txt := texts(events); len(txt) != 0 {
-		t.Errorf("EventText = %q, want none (nothing was streamed)", txt)
+		t.Errorf("EventAgentText = %q, want none (nothing was streamed)", txt)
 	}
 	if got := findResult(t, events).Text; got != "replayed answer" {
 		t.Errorf("Text = %q, want %q (fallback must survive a no-op flush)", got, "replayed answer")
@@ -1608,7 +1583,7 @@ func TestTranslate_UntouchedSettleEmitsNoResult(t *testing.T) {
 	tr := newTestTranslator()
 
 	events := mustTranslate(t, tr, `{"type":"agent_settled"}`)
-	if len(events) != 1 || events[0].Kind != agent.EventDone {
+	if len(events) != 1 || events[0].Kind != agent.EventAgentDone {
 		t.Fatalf("kinds = %v, want [done] only", kinds(events))
 	}
 }
@@ -1616,7 +1591,7 @@ func TestTranslate_UntouchedSettleEmitsNoResult(t *testing.T) {
 // TestTranslate_ResetWindowDropsAbandonedTurn is the regression lock
 // for the /new race window.
 //
-// session.New() cannot deliver the new EventAgentConnected until a get_state
+// session.New() cannot deliver the new EventAgentReady until a get_state
 // round-trip completes (10s deadline), and readPump keeps translating
 // the whole time. /new is reachable mid-turn — nothing gates it on the
 // FSM being Idle and slash commands bypass the InputBuffer — so wire
@@ -1664,7 +1639,7 @@ func TestTranslate_ResetWindowDropsAbandonedTurn(t *testing.T) {
 		t.Errorf("pendingTools = %v, want empty", tr.turn.pendingTools)
 	}
 
-	tr.endReset() // EventAgentConnected delivered; normal translation resumes.
+	tr.endReset() // EventAgentReady delivered; normal translation resumes.
 
 	next := drive(t, tr, append(textDeltas(0, "fresh answer"),
 		assistantMessageEnd(t, "fresh answer", 42, 7),
@@ -1693,8 +1668,8 @@ func TestTranslate_EndResetRestoresTranslation(t *testing.T) {
 
 	events := drive(t, tr, `{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"back"}}`,
 		`{"type":"message_update","assistantMessageEvent":{"type":"thinking_end"}}`)
-	if len(events) != 1 || events[0].Kind != agent.EventText {
-		t.Fatalf("after endReset events = %v, want one EventText", kinds(events))
+	if len(events) != 1 || events[0].Kind != agent.EventAgentText {
+		t.Fatalf("after endReset events = %v, want one EventAgentText", kinds(events))
 	}
 	if events[0].Text != thinkingPrefix+"back" {
 		t.Errorf("Text = %q, want %q", events[0].Text, thinkingPrefix+"back")

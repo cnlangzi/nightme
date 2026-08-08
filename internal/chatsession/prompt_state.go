@@ -11,7 +11,7 @@
 //
 //	PromptRunning  ─happens when→  PromptDone
 //	  (set at construction;   (set by ChatSession.endPrompt on
-//	   endPrompt is no-op)    EventDone / EventError)
+//	   endPrompt is no-op)    EventAgentDone / EventAgentError)
 //
 // The phase-0 invariant is that `PromptRunning` is the
 // "interesting" state — there's no `PromptPending` (the v1.3
@@ -42,14 +42,14 @@ const (
 	PromptRunning PromptState = iota
 
 	// PromptDone: the `Prompt` has finished — either cleanly
-	// (EventDone) or with an error (EventError). Wire-up is
+	// (EventAgentDone) or with an error (EventAgentError). Wire-up is
 	// via `ChatSession.endPrompt(reason)`; the runtime
 	// translates that to a per-channel render via the
 	// `PromptEndBus` callback.
 	//
 	// Although the value is reserved, Phase 0 only emits
 	// PromptRunning → (no transition) for the happy path;
-	// the readpump calls `endPrompt` on EventDone/Error and
+	// the readpump calls `endPrompt` on EventAgentDone/Error and
 	// that mutates the receipt's promptState to PromptDone.
 	PromptDone
 )

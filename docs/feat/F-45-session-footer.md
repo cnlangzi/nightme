@@ -1,6 +1,7 @@
 # F-45: Main-Chat 卡片 Footer (per-turn snapshot)
 
-> **Status**: ✅ 已落地（2026-08-05）；§1.7 F-48 follow-up（2026-08-06）；§1.8 F-49 follow-up（2026-08-06）
+> **Status**: ✅ 已落地（2026-08-05）；§1.7 F-48 follow-up（2026-08-06）
+> **§1.8 F-49 follow-up SUPERSEDED (2026-08-08)**：F-49 compaction tracking 整体删除（详见 [`F-49-compaction-counter.md`](./F-49-compaction-counter.md) OBSOLETE 标记）。本节"🗜 N"段及其相关 schema 字段（`CompactionCount`、`compactionCount`）全部作废。
 > **F-46 增量**（2026-08-06）—decision cards 加 button + 原地 PATCH；详见 [`F-46-interactive-cards.md`](./F-46-interactive-cards.md)
 > **Milestone**: v1.3.x
 > **Scope**:
@@ -222,7 +223,11 @@ type SessionContext struct {
     // AgentSession.CompactionCount at the same instant as
     // CumulativeUsage so Line 1 (🗜 N) and Line 2 (↓ ↻ ↑ total)
     // tell a coherent story.
-    CompactionCount int
+    //
+    // F-49 SUPERSEDED (2026-08-08): CompactionCount field deleted
+    // across the runtime. Footer no longer renders the 🗜 N
+    // segment. See F-49 OBSOLETE notice at the top of this file.
+    // CompactionCount int    ← REMOVED
 }
 ```
 
@@ -244,9 +249,12 @@ type AgentSession struct {
     // Persists across daemon restarts; cleared only by /new.
     // F-49: also guards compactionCount (RecordCompaction modifies
     // both atomically — see F-49 §1.4).
+    //
+    // F-49 SUPERSEDED (2026-08-08): compactionCount field
+    // deleted. The cumulativeUsageMu now guards only cumulativeUsage.
     cumulativeUsageMu sync.RWMutex
     cumulativeUsage   UsageInfo
-    compactionCount   int       // F-49: 🗜 N 计数；同锁守护
+    // compactionCount int  ← REMOVED
     cumulativeDirty   bool
 }
 ```
@@ -259,11 +267,9 @@ func (as *AgentSession) Model() string
 
 // Usage
 func (as *AgentSession) AccumulateUsage(u *agent.UsageEvent)  // 加锁累加，dirty=true
-func (as *AgentSession) ResetCumulative()                      // 清零 + dirty=true（仅 /new，包括 compactionCount）
+func (as *AgentSession) ResetCumulative()                      // 清零 + dirty=true（仅 /new）
 func (as *AgentSession) CumulativeUsage() UsageInfo            // RLock 快照
-// F-49:
-func (as *AgentSession) RecordCompaction()                     // count++ + 4 token 字段归零 + CostUSD 保留 + dirty=true
-func (as *AgentSession) CompactionCount() int                  // RLock 快照
+// F-49 SUPERSEDED: RecordCompaction / CompactionCount methods removed
 func (as *AgentSession) PersistIfDirty(persist func(*registry.AgentSessionEntry) error) error
 ```
 

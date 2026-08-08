@@ -44,11 +44,10 @@ const (
 	// EventHandler gate (after Translate + ReplyTo stamping,
 	// before ch.Send). Other OutboundKinds — OutReply, OutResult,
 	// OutToolStart, OutToolEnd, OutInit, OutUsage — are unaffected.
-	// (F-49: OutCompaction kind deleted — the runtime consumes
-	// EventCompaction directly via AgentSession.RecordCompaction()
-	// and produces no OutboundMessage, so /think off (or any other
-	// Channel-level gate) never sees it.) State is persisted so
-	// /think off survives daemon restart.
+	// (F-49 compaction tracking removed: EventAgentCompaction no
+	// longer exists in the runtime, so /think off (or any other
+	// Channel-level gate) trivially doesn't see it.) State is
+	// persisted so /think off survives daemon restart.
 	ThinkModeHide
 )
 

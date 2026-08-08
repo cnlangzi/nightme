@@ -4,9 +4,9 @@
 // The bridge spawns `claude --print --input-format stream-json
 // --output-format stream-json --permission-mode bypassPermissions
 // --verbose` and parses one JSON event per stdout line. Events map to
-// AgentEvent (EventText / EventToolStart / EventToolEnd / EventPermission
-// / EventDone / EventError / EventResult / EventUsage / EventCompaction /
-// EventAgentConnected).
+// AgentEvent (EventAgentText / EventAgentToolStart / EventAgentToolEnd / EventAgentPermission
+// / EventAgentDone / EventAgentError / EventAgentResult / EventUsage / EventAgentCompaction /
+// EventAgentReady).
 //
 // We deliberately do NOT pass --replay-user-messages. The flag echoes
 // every user-role message back on stdout, which the channel would
@@ -20,7 +20,7 @@
 //
 // Permission model: bypassPermissions (default) — Claude Code
 // auto-accepts all permission prompts. AskUserQuestion (the structured
-// user-decision tool) is detected and surfaced as EventPermission for
+// user-decision tool) is detected and surfaced as EventAgentPermission for
 // the channel to render as an interactive card. See ask.go.
 //
 // cfg.PermissionMode (in agent.StartConfig) overrides the default; the
@@ -72,7 +72,7 @@ var DefaultArgs = []string{
 //
 //	PermissionBypass  — auto-approve everything
 //	PermissionDefault — every tool call requires user approval (would
-//	                    route through EventPermission / control_request
+//	                    route through EventAgentPermission / control_request
 //	                    once stream.go's control_request hook is wired)
 //	PermissionAuto    — Claude's automatic permission classifier
 const (

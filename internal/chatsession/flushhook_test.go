@@ -73,7 +73,7 @@ func TestFlushHook_DefaultDeliversToAgent(t *testing.T) {
 // state (SetBusy/SetIdle) — it is the presence of an in-flight
 // Prompt on the AgentSession, so the setup submits one. The
 // OnTurnEnded hook became endPrompt (driven by the per-AS readpump
-// on EventDone) followed by TryFlush.
+// on EventAgentDone) followed by TryFlush.
 func TestFlushHook_BusyQueues(t *testing.T) {
 	spawner := &spawnerRecording{}
 	csFile, asFile := newTestStores(t)
@@ -112,7 +112,7 @@ func TestFlushHook_BusyQueues(t *testing.T) {
 	}
 
 	// End the turn — in production the per-AS readpump does this on
-	// EventDone, then routeEvent calls TryFlush.
+	// EventAgentDone, then routeEvent calls TryFlush.
 	as.endPrompt(PromptEndClean)
 	if err := cs.TryFlush(); err != nil {
 		t.Fatalf("TryFlush: %v", err)

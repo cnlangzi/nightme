@@ -17,7 +17,7 @@
 // in-progress / pending / completed display order is a Feishu-
 // local decision; other Channels are free to pick their own
 // ordering and presentation. The generic status enum
-// (agent.TaskStatus) is the only input the renderer reads.
+// (agent.AgentTaskStatus) is the only input the renderer reads.
 package feishu
 
 import (
@@ -59,7 +59,7 @@ const checklistBudgetRunes = 4000
 // detect the "no checklist" state and skip the element entirely.
 // The total rune count across all chunks is guaranteed to fit
 // within checklistBudgetRunes.
-func buildTaskChecklistChunks(items []agent.TaskItem) []string {
+func buildTaskChecklistChunks(items []agent.AgentTaskItem) []string {
 	if len(items) == 0 {
 		return nil
 	}
@@ -67,7 +67,7 @@ func buildTaskChecklistChunks(items []agent.TaskItem) []string {
 	// the currently-active task first. Within each bucket we
 	// keep the bridge-supplied order (the bridge has its own
 	// insertion-order tracking) for a deterministic render.
-	buckets := make(map[agent.TaskStatus][]int, 3)
+	buckets := make(map[agent.AgentTaskStatus][]int, 3)
 	for i, it := range items {
 		// Filter TaskDeleted defensively: the bridge is supposed
 		// to remove deleted tasks before emitting, but a corrupt
@@ -169,7 +169,7 @@ func joinLines(lines []string) string {
 //   - pending      → - [ ] Subject
 //   - in_progress  → - [ ] Subject (ActiveForm)         (open checkbox + grey note)
 //   - completed    → - [x] Subject
-func renderTaskLine(it agent.TaskItem) string {
+func renderTaskLine(it agent.AgentTaskItem) string {
 	checkbox := "- [ ]"
 	if it.Status == agent.TaskCompleted {
 		checkbox = "- [x]"

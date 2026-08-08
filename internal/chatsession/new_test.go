@@ -149,12 +149,12 @@ func TestNewActiveAgentSessions_AgentNameFilter(t *testing.T) {
 
 // TestNewActiveAgentSessions_DetachedSkipped verifies that AgentSessions
 // that are NOT Running are NOT triggered into a lazy spawn (F-34 §6 Q-N4
-// product clarification) AND that their stale ResumeID is cleared so the
+// product clarification) AND that their stale SessionID is cleared so the
 // next spawn will not resurrect a dead session (F-42 §5.4).
 //
 // F-42 changes the counting semantics: dead/detached entries now count
 // as matched AND reset (with Action="marked-fresh") — the previous
-// silently-skip behavior was a bug because the stale ResumeID would be
+// silently-skip behavior was a bug because the stale SessionID would be
 // replayed on the next spawn.
 func TestNewActiveAgentSessions_DetachedSkipped(t *testing.T) {
 	cs := New("chat-skip", "cc")
@@ -164,7 +164,7 @@ func TestNewActiveAgentSessions_DetachedSkipped(t *testing.T) {
 	}
 	// Detached entry: SetExited clears PID; Status returns StatusExited.
 	a := NewAgentSession(newAgentSessionID(), cs.ID, "cc", cwd, nil)
-	a.SetResumeID("dead-session-id-456") // populated as if a previous run
+	a.SetSessionID("dead-session-id-456") // populated as if a previous run
 	// captured an init event
 	a.SetExited(0)
 	cs.mu.Lock()
@@ -184,8 +184,8 @@ func TestNewActiveAgentSessions_DetachedSkipped(t *testing.T) {
 	if results[0].Action != "marked-fresh" {
 		t.Fatalf("want Action=marked-fresh, got %q", results[0].Action)
 	}
-	if got := a.ResumeID(); got != "" {
-		t.Fatalf("ResumeID should be cleared, got %q", got)
+	if got := a.SessionID(); got != "" {
+		t.Fatalf("SessionID should be cleared, got %q", got)
 	}
 }
 
@@ -289,13 +289,13 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 		// (e.g. raw pty) cannot do an in-place reset and returns
 		// agent.ErrRestartRequired, the wrapper must close the old
 		// handle and spawn a fresh one via the Spawner, with
-		// ResumeID cleared.
+		// SessionID cleared.
 		cs := New("chat-restart", "cc")
 		cwd := t.TempDir()
 		cs.SetActiveCwd(cwd)
 		old := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
 		as := injectAS(t, cs, "cc", cwd, old)
-		as.SetResumeID("stale-id-should-be-cleared")
+		as.SetSessionID("stale-id-should-be-cleared")
 
 		newAS := &callRecordingAS{fakeAgentSession: newFakeAgentSession(2)}
 		spawner := &fakeRestartSpawner{handle: newAS}
@@ -309,8 +309,8 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 		if got := as.Handle(); got != agent.AgentSession(newAS) {
 			t.Fatalf("handle not swapped: got %T", got)
 		}
-		if got := as.ResumeID(); got != "" {
-			t.Fatalf("ResumeID should be cleared, got %q", got)
+		if got := as.SessionID(); got != "" {
+			t.Fatalf("SessionID should be cleared, got %q", got)
 		}
 		if newAS.calls.Load() != 0 {
 			t.Fatalf("newAS should not have been New()ed (it's the freshly-spawned handle)")
@@ -319,7 +319,7 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 			t.Fatalf("PID should be 2 (newFakeAgentSession), got %d", got)
 		}
 		if spawner.calledWithResumeID != "" {
-			t.Fatalf("Spawn should be called with empty resumeID, got %q", spawner.calledWithResumeID)
+			t.Fatalf("Spawn should be called with empty sessionID, got %q", spawner.calledWithResumeID)
 		}
 	})
 
@@ -350,7 +350,7 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 		cs.SetActiveCwd(cwd)
 		old := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
 		as := injectAS(t, cs, "cc", cwd, old)
-		as.SetResumeID("stale-id")
+		as.SetSessionID("stale-id")
 
 		failingSpawner := &fakeFailingSpawner{err: errors.New("spawn blew up")}
 		err := as.New(context.Background(), failingSpawner)
@@ -363,8 +363,8 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 		if got := as.Handle(); got != nil {
 			t.Fatalf("handle should be nil after spawn failure, got %T", got)
 		}
-		if got := as.ResumeID(); got != "" {
-			t.Fatalf("ResumeID should be cleared, got %q", got)
+		if got := as.SessionID(); got != "" {
+			t.Fatalf("SessionID should be cleared, got %q", got)
 		}
 	})
 }
@@ -385,15 +385,15 @@ func (r *restartErrAS) Close() error {
 
 // fakeRestartSpawner is a minimal chatsession.Spawner that returns a
 // pre-built handle. The wrapper only needs Spawn(ctx, name, cwd, args,
-// resumeID); we record the resumeID it was called with so tests can
+// sessionID); we record the sessionID it was called with so tests can
 // assert "no --resume on the fresh spawn".
 type fakeRestartSpawner struct {
 	handle             agent.AgentSession
 	calledWithResumeID string
 }
 
-func (f *fakeRestartSpawner) Spawn(_ context.Context, _, _ string, _ []string, resumeID string) (agent.AgentSession, error) {
-	f.calledWithResumeID = resumeID
+func (f *fakeRestartSpawner) Spawn(_ context.Context, _, _ string, _ []string, sessionID string) (agent.AgentSession, error) {
+	f.calledWithResumeID = sessionID
 	return f.handle, nil
 }
 
@@ -407,12 +407,12 @@ func (f *fakeFailingSpawner) Spawn(_ context.Context, _, _ string, _ []string, _
 
 // F-42 tests for the dead/detached branch of NewActiveAgentSessions.
 // These lock the new behavior introduced by F-42 §5.4: dead entries
-// are NOT silently skipped — their stale ResumeID is cleared
+// are NOT silently skipped — their stale SessionID is cleared
 // (in-memory + persisted) so the next spawn will not resurrect a
 // dead session via --resume <dead-id>.
 
 // TestNewActiveAgentSessions_DeadEntryClearsResumeIDInMemory verifies
-// that a dead entry's ResumeID is cleared in-memory after /new.
+// that a dead entry's SessionID is cleared in-memory after /new.
 func TestNewActiveAgentSessions_DeadEntryClearsResumeIDInMemory(t *testing.T) {
 	cs := New("chat-dead-mem", "cc")
 	cwd := t.TempDir()
@@ -421,16 +421,16 @@ func TestNewActiveAgentSessions_DeadEntryClearsResumeIDInMemory(t *testing.T) {
 	}
 	cs.WithPersistence(nil, nil)
 
-	// A dead entry with a stale ResumeID from a previous run.
+	// A dead entry with a stale SessionID from a previous run.
 	a := NewAgentSession(newAgentSessionID(), cs.ID, "cc", cwd, nil)
-	a.SetResumeID("claude-sess-dead-123")
+	a.SetSessionID("claude-sess-dead-123")
 	a.SetExited(0)
 	cs.mu.Lock()
 	cs.pool[agentCwdKey{Agent: "cc", Cwd: cwd}] = a
 	cs.mu.Unlock()
 
-	if got := a.ResumeID(); got != "claude-sess-dead-123" {
-		t.Fatalf("precondition: want ResumeID=%q, got %q", "claude-sess-dead-123", got)
+	if got := a.SessionID(); got != "claude-sess-dead-123" {
+		t.Fatalf("precondition: want SessionID=%q, got %q", "claude-sess-dead-123", got)
 	}
 
 	matched, reset, results, err := cs.NewActiveAgentSessions(context.Background(), "")
@@ -443,13 +443,13 @@ func TestNewActiveAgentSessions_DeadEntryClearsResumeIDInMemory(t *testing.T) {
 	if len(results) != 1 || results[0].Action != "marked-fresh" {
 		t.Fatalf("result: want one marked-fresh, got %+v", results)
 	}
-	if got := a.ResumeID(); got != "" {
-		t.Errorf("ResumeID should be cleared in-memory: got %q", got)
+	if got := a.SessionID(); got != "" {
+		t.Errorf("SessionID should be cleared in-memory: got %q", got)
 	}
 }
 
 // TestNewActiveAgentSessions_DeadEntryPersistsClearedResumeID verifies
-// that the cleared ResumeID is persisted to agent_sessions.json so the
+// that the cleared SessionID is persisted to agent_sessions.json so the
 // next spawn will not replay the old value.
 func TestNewActiveAgentSessions_DeadEntryPersistsClearedResumeID(t *testing.T) {
 	cs := New("chat-dead-persist", "cc")
@@ -464,7 +464,7 @@ func TestNewActiveAgentSessions_DeadEntryPersistsClearedResumeID(t *testing.T) {
 	cs.WithPersistence(nil, asFile)
 
 	a := NewAgentSession(newAgentSessionID(), cs.ID, "cc", cwd, nil)
-	a.SetResumeID("claude-sess-dead-xyz")
+	a.SetSessionID("claude-sess-dead-xyz")
 	a.SetExited(0)
 	cs.mu.Lock()
 	cs.pool[agentCwdKey{Agent: "cc", Cwd: cwd}] = a
@@ -480,10 +480,10 @@ func TestNewActiveAgentSessions_DeadEntryPersistsClearedResumeID(t *testing.T) {
 	// Reload from disk to verify persistence.
 	entry, ok := asFile.Get(a.ID)
 	if !ok {
-		t.Fatalf("entry should still be in the registry (F-42 §5.5: keep entry, clear ResumeID)")
+		t.Fatalf("entry should still be in the registry (F-42 §5.5: keep entry, clear SessionID)")
 	}
-	if entry.ResumeID != "" {
-		t.Errorf("persisted ResumeID should be cleared: got %q", entry.ResumeID)
+	if entry.SessionID != "" {
+		t.Errorf("persisted SessionID should be cleared: got %q", entry.SessionID)
 	}
 }
 
@@ -528,7 +528,7 @@ func TestNewActiveAgentSessions_RunningPlusDeadMixed(t *testing.T) {
 
 	live := injectAS(t, cs, "cc", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
 	dead := NewAgentSession(newAgentSessionID(), cs.ID, "codex", cwd, nil)
-	dead.SetResumeID("codex-sess-dead-789")
+	dead.SetSessionID("codex-sess-dead-789")
 	dead.SetExited(0)
 	cs.mu.Lock()
 	cs.pool[agentCwdKey{Agent: "codex", Cwd: cwd}] = dead
@@ -554,9 +554,9 @@ func TestNewActiveAgentSessions_RunningPlusDeadMixed(t *testing.T) {
 		t.Errorf("codex: want marked-fresh, got %q", r.Action)
 	}
 
-	// Dead entry's ResumeID is cleared.
-	if got := dead.ResumeID(); got != "" {
-		t.Errorf("dead ResumeID should be cleared: got %q", got)
+	// Dead entry's SessionID is cleared.
+	if got := dead.SessionID(); got != "" {
+		t.Errorf("dead SessionID should be cleared: got %q", got)
 	}
 	// Live entry's bridge.New was called once.
 	if live.Handle().(*callRecordingAS).calls.Load() != 1 {

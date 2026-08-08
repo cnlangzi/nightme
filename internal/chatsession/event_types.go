@@ -27,7 +27,7 @@ import (
 // single-subscriber.
 //
 // UserMsgID is the receipt anchor (last message id of the in-flight
-// Prompt); empty for EventAgentConnected and lifecycle events that
+// Prompt); empty for EventAgentReady and lifecycle events that
 // don't anchor.
 //
 // AgentSession is ALWAYS non-nil in production. The publisher
@@ -73,18 +73,4 @@ type PromptEndedEvent struct {
 	PromptID  string
 	Reason    PromptEndReason
 	EndedAt   time.Time
-}
-
-// LifecycleEvent fires when an AgentSession transitions status
-// (Spawned / Exited). No receipt anchor — these events don't bind
-// to any Prompt.
-//
-// ChatID is the owning ChatSession; AgentSessionID identifies the
-// AS without forcing subscribers to hold an *AgentSession pointer
-// (which may be nil after the process exits).
-type LifecycleEvent struct {
-	ChatID         string
-	AgentSessionID string
-	PID            int
-	Status         Status
 }

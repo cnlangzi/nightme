@@ -120,12 +120,12 @@ func TestModeString(t *testing.T) {
 
 func TestEventKindString(t *testing.T) {
 	cases := map[EventKind]string{
-		EventText:       "text",
-		EventPermission: "permission",
-		EventToolStart:  "tool_start",
-		EventToolEnd:    "tool_end",
-		EventDone:       "done",
-		EventError:      "error",
+		EventAgentText:       "text",
+		EventAgentPermission: "permission",
+		EventAgentToolStart:  "tool_start",
+		EventAgentToolEnd:    "tool_end",
+		EventAgentDone:       "done",
+		EventAgentError:      "error",
 	}
 	for k, want := range cases {
 		if got := k.String(); got != want {

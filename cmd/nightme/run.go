@@ -9,7 +9,7 @@
 //   - EventCallback: each AgentSession.Events() is consumed by a
 //     per-active-AS readPump goroutine that translates AgentEvent →
 //     OutboundMessage → channel.Send, AND drives the InputBuffer FSM
-//     (non-terminal events → SetBusy; EventDone / Error → SetIdle +
+//     (non-terminal events → SetBusy; EventAgentDone / Error → SetIdle +
 //     OnTurnEnded → flush via the runtime-installed FlushHook).
 //
 
@@ -766,7 +766,7 @@ func wireRuntimeCallbacksAndRestore(
 		})
 
 		// F-53 follow-up: when ChatSession.endPrompt fires
-		// (EventDone / EventError in the readpump), route the
+		// (EventAgentDone / EventAgentError in the readpump), route the
 		// terminal event to the Feishu adapter so the receipt
 		// card transitions to PromptDone and the ✅ reaction
 		// is added on the card. No user-message reaction is
@@ -793,7 +793,7 @@ func wireRuntimeCallbacksAndRestore(
 		//   - KindAgentEvent   → cs.AgentEventBus (subscriber above)
 		//   - KindPromptEnded  → writebackMessageState (built into
 		//                        cs.PumpEvents — publishes on PromptEndBus)
-		//   - KindLifecycle    → log + publish on LifecycleBus
+		//   - KindLifecycle    → log + flip AgentSession.SetExited (in pump_events)
 		// Replaces the per-CS StartReadPump / readRunPump that the
 		// pre-Phase-1 readpump.go file used to install. The new model
 		// has readpump per-AS (started by Spawn), so the chat layer
@@ -825,7 +825,7 @@ func wireRuntimeCallbacksAndRestore(
 // scalar). The handler stamps it onto OutboundMessage.ReplyTo
 // so each Channel can route the event to its own per-userMsgID
 // receipt (card / thread / DOM node). Empty when the event has
-// no anchor (startup EventAgentConnected, post-/use while no Prompt is
+// no anchor (startup EventAgentReady, post-/use while no Prompt is
 // active, etc.) — Channel falls back to plain text in that case.
 //
 // v1.3 (SPEC §2.2): 1 turn : 1 anchor. Receipt rendering and
@@ -836,7 +836,7 @@ func wireRuntimeCallbacksAndRestore(
 // fires only for ChatSessions that already exist, so the
 // ChatSession is statically known at install time. Capturing it
 // in the closure eliminates the per-event mgr.Get round-trip
-// (RLock + map lookup). mgr is still passed because EventAgentConnected
+// (RLock + map lookup). mgr is still passed because EventAgentReady
 // persistence needs mgr.PersistAgentSession, which is the cold
 // path (once per AgentSession lifetime, not per event).
 //
@@ -847,26 +847,26 @@ func wireRuntimeCallbacksAndRestore(
 func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chatsession.Manager, logger *slog.Logger) func(env chatsession.AgentEventEnvelope) {
 	// Per-cs closure. No per-handler mutable state needed anymore:
 	// the bridge layer now attaches per-turn Usage to the SAME
-	// ResultEvent that delivers the final text (claudecode
+	// AgentResultEvent that delivers the final text (claudecode
 	// result.usage + result.modelUsage; Pi message_end.usage), so
-	// the runtime no longer needs to buffer OutResult until a
-	// following EventUsage lands. The previous EventResult-then-
-	// EventUsage two-event split was a bridge-layer artifact — the
-	// data was always co-located on the wire.
+	// the runtime does not buffer OutResult waiting for a follow-up
+	// usage event. F-52 / AgentEvent-flattening unified the data on
+	// a single wire event; this collapsing was the bridge-layer
+	// artefact it dissolved.
 	return func(env chatsession.AgentEventEnvelope) {
 		chatID, s, ev, userMsgID := env.ChatID, env.AgentSession, env.Event, env.UserMsgID
-		// Capture the agent's own session id from EventAgentConnected so the
+		// Capture the agent's own session id from EventAgentReady so the
 		// next respawn can replay `--resume <id>`. We persist
 		// immediately (rather than waiting for the next status
 		// transition) so a daemon crash after this event still
 		// remembers the id. The capture is idempotent.
 		//
-		// Guard: only overwrite an existing (non-empty) ResumeID when
-		// the new id is non-empty. Some bridges re-emit EventAgentConnected
+		// Guard: only overwrite an existing (non-empty) SessionID when
+		// the new id is non-empty. Some bridges re-emit EventAgentReady
 		// after a child restart with a blank SessionID; we don't
 		// want to wipe a previously-captured id in that case.
-		if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.SessionID != "" {
-			s.SetResumeID(ev.Connected.SessionID)
+		if ev.Kind == agent.EventAgentReady && ev.SessionID != "" {
+			s.SetSessionID(ev.SessionID)
 			if mgr != nil {
 				if err := mgr.PersistAgentSession(s); err != nil && logger != nil {
 					logger.Warn("persist agent session (init) failed",
@@ -876,55 +876,38 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 				}
 			}
 		}
-		// F-45 §1.4: capture model on first EventAgentConnected. Independent
+		// F-45 §1.4: capture model on first EventAgentReady. Independent
 		// of the SessionID capture above (some bridges may emit
 		// one without the other). SetModel is idempotent — empty
 		// incoming values don't overwrite.
-		if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.Model != "" {
-			s.SetModel(ev.Connected.Model)
+		if ev.Kind == agent.EventAgentReady && ev.Model != "" {
+			s.SetModel(ev.Model)
 		}
 		// Per-event usage flows from bridge → out.Usage (via
 		// gateway.Translate) → SessionContext.Usage (via
 		// sessionContextInto below) → channel footer. The runtime
 		// is a passive pass-through; no accumulation, no dedup,
-		// no priority. Usage rides on EventResult (populated by
-		// the bridges via ResultEvent.Usage) — DoneEvent.Usage is
+		// no priority. Usage rides on EventAgentResult (populated by
+		// the bridges via AgentResultEvent.Usage) — AgentDoneEvent.Usage is
 		// not currently surfaced because gateway.Translate drops
-		// EventDone events before the runtime stamps
-		// SessionContext. Bridges that only emit EventDone-with-
-		// Usage (no EventResult) will not see their Usage in the
+		// EventAgentDone events before the runtime stamps
+		// SessionContext. Bridges that only emit EventAgentDone-with-
+		// Usage (no EventAgentResult) will not see their Usage in the
 		// footer; only pi-style bridges that have an explicit
-		// EventResult path will.
+		// EventAgentResult path will.
 		//
 		// PersistIfDirty is no longer driven from here (the
 		// cumulative-dirty trigger is gone with cross-turn usage
 		// aggregation). Future per-AgentSession dirty state can
 		// hook in without changing call sites — see
 		// AgentSession.PersistIfDirty for the new contract.
-		// F-49: bump the AgentSession's compaction counter on every
-		// EventCompaction. Bridges have already digested their
-		// protocol differences (Pi suppresses its transient
-		// `compaction_start`; Claude Code emits one event per
-		// cycle) so every EventCompaction here represents exactly
-		// one completed compaction cycle. No OutboundMessage is
-		// produced — the runtime is the single owner of compaction
-		// bookkeeping, and the count surfaces to the user later
-		// via SessionContext.CompactionCount → Footer Line 1
-		// "🗜 N". We `return` early so gateway.Translate is never
-		// consulted for this kind (it would return
-		// `(zero, false)` anyway after F-49 commit 4).
-		// See docs/feat/F-49-compaction-counter.md §1.3 / §1.8.
-		if ev.Kind == agent.EventCompaction {
-			s.RecordCompaction()
-			if logger != nil {
-				logger.Debug("runtime: compaction observed",
-					"chat_id", chatID,
-					"agent", s.Agent,
-					"agent_session_id", s.ID,
-					"count", s.CompactionCount())
-			}
-			return
-		}
+		// F-49 compaction tracking removed: bridges no longer
+		// emit a dedicated compaction event; runtime is a pure
+		// pass-through. The per-cycle counter / Footer 🗜 N
+		// segment is dropped across the runtime. The pre-F-49
+		// `case agent.EventAgentCompaction: ... return` block was
+		// removed entirely; no per-event short-circuit remains.
+
 		// Translate the AgentEvent to an OutboundMessage.
 		out, ok := gateway.Translate(chatID, *ev)
 		if !ok {
@@ -935,7 +918,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 					"agent_session_id", s.ID)
 			}
 			// Translate drops events that don't surface to the
-			// channel (EventDone, EventCompaction, thread-only
+			// channel (EventAgentDone, EventAgentCompaction (F-49 deleted), thread-only
 			// kinds, etc.). The runtime no longer folds usage
 			// anywhere — AgentSession is a passive pass-through,
 			// and the channel-side footer reads ctx.Usage directly
@@ -947,14 +930,14 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		}
 		// The runtime is a passive pass-through: out.Usage is
 		// populated by gateway.Translate from the bridge event
-		// (ResultEvent.Usage / DoneEvent.Usage) and rendered
+		// (AgentResultEvent.Usage / AgentDoneEvent.Usage) and rendered
 		// verbatim by the channel footer. No accumulation, no
 		// dedup, no priority — bridges are free to populate
 		// either field and the channel reads out.Usage directly.
 		//
 		// Stamp the current turn's anchor so the Channel can
 		// route to the right per-userMsgID receipt. ReplyTo
-		// stays empty for orphan events (EventAgentConnected at startup,
+		// stays empty for orphan events (EventAgentReady at startup,
 		// internal logs) — Channel renders those as plain text.
 		out.ReplyTo = userMsgID
 		// F-45 §2.5 改动 C: stamp SessionContext snapshot on the
@@ -978,9 +961,9 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		// so the Feishu adapter never sees them. Other
 		// OutboundKinds — OutReply / OutResult / OutToolStart /
 		// OutToolEnd / OutInit / OutUsage — are unaffected.
-		// (F-49: OutCompaction deleted — the runtime consumes
-		// EventCompaction directly via s.RecordCompaction() and
-		// produces no OutboundMessage, so the Channel never sees
+		// (F-49: OutCompaction deleted — the runtime consumed
+		// EventAgentCompaction directly via AgentSession.RecordCompaction()
+		// pre-F-49 and produced no OutboundMessage, so the Channel never saw
 		// this kind at all.)
 		//
 		// cs is captured in the closure (per-cs handler
@@ -1075,7 +1058,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 //
 // Usage flows straight from the bridge event onto the outbound
 // message (out.Usage is set by gateway.Translate from
-// ResultEvent.Usage / DoneEvent.Usage). The runtime does NOT
+// AgentResultEvent.Usage / AgentDoneEvent.Usage). The runtime does NOT
 // aggregate across turns; AgentSession is a passive
 // pass-through. The footer renders out.Usage directly.
 //
@@ -1088,23 +1071,22 @@ func sessionContextInto(out *gateway.OutboundMessage, s *chatsession.AgentSessio
 	cancel()
 	hasGit := gitSnap != nil && s.Cwd != ""
 	// F-55 fix: out.Usage is set by gateway.Translate from the
-	// bridge wire payload (ResultEvent.Usage / DoneEvent.Usage).
+	// bridge wire payload (AgentResultEvent.Usage / AgentDoneEvent.Usage).
 	// The runtime is a passive pass-through — copy verbatim so the
 	// channel footer can render it via ctx.Usage. Pre-F-55 the
 	// copy was missing, so footers silently rendered without
 	// usage data. Gated the same way as the other SessionContext
-	// fields: any one of (Agent / Model / GitStatus / Compaction /
-	// Usage) being present is enough to materialize the
-	// SessionContext.
+	// fields: any one of (Agent / Model / GitStatus / Usage) being
+	// present is enough to materialize the SessionContext.
+	// Compaction tracking removed (was the 4th condition).
 	if s.Agent != "" || s.Model() != "" || hasGit ||
-		s.CompactionCount() > 0 || out.Usage != nil {
+		out.Usage != nil {
 		out.SessionContext = &gateway.SessionContext{
-			Agent:           s.Agent,
-			Model:           s.Model(),
-			Workspace:       s.Cwd,
-			GitStatus:       gitSnap,
-			CompactionCount: s.CompactionCount(),
-			Usage:           out.Usage,
+			Agent:     s.Agent,
+			Model:     s.Model(),
+			Workspace: s.Cwd,
+			GitStatus: gitSnap,
+			Usage:     out.Usage,
 		}
 	}
 }

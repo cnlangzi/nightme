@@ -640,7 +640,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 
 | OutboundKind | 源 AgentEvent | 触发点 | Feishu 渲染 | msg_type / API | Receipt? |
 |--------------|---------------|--------|-------------|----------------|----------|
-| `OutReply` | `EventText`(无前缀) | agent 对当前 turn 的 reply 流式 chunks(F-40 改名,原 `OutText`) | **F-44 §13.21：每 chunk → 独立 `ReplyInThreadAndChat` 消息**(不再 fold 进 receipt)。`sendReplyInThreadAndChat` 走 3 段 dispatch:无 markdown → `MsgTypeText`;tables>5 → `MsgTypePost+md`;默认 → `MsgTypeInteractive` Card 2.0 + 1/`N` `tag:"markdown"` div(F-37 `splitMarkdownForDivs` 拆 ≤ 1000 runes/div)。复用 F-39 `SanitizeCardMarkdown` + `truncateRunes` 28 KB envelope defense。**不加 icon 前缀**(流延续,不是新条目)。**F-45 §13.22:文本末尾追加 `formatSessionFooter(msg.SessionContext)`**(F-52 新格式:`🤖 Agent · Model` + `💰:「 in / out · X% · $cost 」`;`in` = 三个 input-side 字段之和;`X%` = per-turn context-window 占比,客户端从 API 报的 ContextWindow + used 算;`$cost` = API 透传 `total_cost_usd`,客户端不计算) | `interactive` Create / `post` Create / `text` Create | ❌ (独立气泡,锚同 userMsgID) |
+| `OutReply` | `EventText`(无前缀) | agent 对当前 turn 的 reply 流式 chunks(F-40 改名,原 `OutText`) | **F-44 §13.21：每 chunk → 独立 `ReplyInThreadAndChat` 消息**(不再 fold 进 receipt)。`sendReplyInThreadAndChat` 走 3 段 dispatch:无 markdown → `MsgTypeText`;tables>5 → `MsgTypePost+md`;默认 → `MsgTypeInteractive` Card 2.0 + 1/`N` `tag:"markdown"` div(F-37 `splitMarkdownForDivs` 拆 ≤ 1000 runes/div)。复用 F-39 `SanitizeCardMarkdown` + `truncateRunes` 28 KB envelope defense。**不加 icon 前缀**(流延续,不是新条目)。**F-45 §13.22:文本末尾追加 `formatSessionFooter(msg.SessionContext)`**(F-52 新格式:`🤖 Agent · Model` + `💰:「 in / out · X% · $cost 」`;`in` = 三个 input-side 字段之和;`X%` = per-turn context-window 占比,客户端从 bridge-local `contextWindow` + used 算(Claude Code 来自 `modelUsage[<model>].contextWindow`;Pi 来自 `get_state.data.model.contextWindow`,见 [`F-54`](../feat/F-54-pi-contextwindow-from-get-state.md) §2.2);`$cost` = API 透传 `total_cost_usd`,客户端不计算) | `interactive` Create / `post` Create / `text` Create | ❌ (独立气泡,锚同 userMsgID) |
 | `OutThinking` | `EventText`(带 `[思考] ` 前缀,Gateway 已剥) | agent reasoning | **`collapsible_panel` + `💭` 折叠**(§13.6 设计决策;§13.1 bug 待修) | `interactive` PATCH | ✅ |
 | `OutToolStart` | `EventToolStart` | 工具开始 | **`collapsible_panel` + `🔧` 折叠**(§13.6 设计决策,粒度待定 §13.7) | `interactive` PATCH | ✅ |
 | `OutToolEnd` | `EventToolEnd` | 工具结束(成功/失败) | **`collapsible_panel` + `✅` / `❌` 折叠**(§13.6 设计决策,与 Start 合并 or 独立待定 §13.9) | `interactive` PATCH | ✅ |
@@ -1952,7 +1952,7 @@ user_msg om_A
    ```
    - `in` = `InputTokens + CacheCreationInputTokens + CacheReadInputTokens`(Tencent YB 文档口径:input-side total,见 https://yb.tencent.com/s/3G6HphjOxM70;F-45 旧 C 版分两段 `↓ in + ↻ cached`,F-52 合并)
    - `out` = `OutputTokens`
-   - `X%` = `(in + out) / ContextWindow * 100`,ContextWindow 是 API 报的模型窗口大小(Claude Code: `modelUsage[<model>].contextWindow`);一位小数;`== 0` 时省略(还没 EventDone / 模型没报 / 刚 Reset)
+   - `X%` = `(in + out) / contextWindow * 100`,`contextWindow` 是 bridge-local 变量(Claude Code: `modelUsage[<model>].contextWindow`;Pi: `get_state.data.model.contextWindow`,见 [`F-54`](../feat/F-54-pi-contextwindow-from-get-state.md) §2.2);一位小数;`== 0` 时省略(还没 EventDone / 模型没报 / 刚 Reset)
    - `$cost` = API 透传 `total_cost_usd`,客户端**不计算**(无 rate table / 无 per-model pricing)
    - 段之间 ` · ` 分隔,`「」` 括号只在至少一段非空时包裹整行
    - 缩写 `<1000 raw` / `≥1k "X.Xk"` / `≥1M "X.XM"`

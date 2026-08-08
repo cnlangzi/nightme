@@ -355,25 +355,24 @@ type ResultEvent struct {
 // `result.modelUsage[<model>].costUSD` when present. Zero means
 // "unknown / not reported" — channels must NOT render "$0.00".
 //
-// ContextWindow is the API-reported model context-window size for
-// the turn (Claude Code: `modelUsage[<model>].contextWindow`,
-// Anthropic API: model's own context_window field). Zero means
-// "not reported by this turn" — bridges that lack the data leave
-// it at zero; the channel footer omits X% in that case rather
-// than showing 0%.
-//
 // ContextWindowPct (see struct field below) is the per-turn
 // context-fill percentage, bridge-computed via the Doc 1 formula:
 //
 //	pct = (InputTokens + OutputTokens + CacheCreation + CacheRead)
-//	     / ContextWindow * 100
+//	     / contextWindow * 100
+//
+// `contextWindow` is a bridge-local value: claudecode reads it
+// from `modelUsage[<model>].contextWindow`, pi reads it from
+// `get_state.data.model.contextWindow`. The window value itself
+// never crosses the bridge struct boundary (F-54) — bridges
+// compute pct and store only the percentage here.
 //
 // i.e. exact wire fields divided by API-reported window — no
 // client-side model table needed. The runtime does NOT recompute
-// or overwrite this; bridges populate it (claudecode:
-// `modelUsage.contextWindow`), the channel footer renders it
-// verbatim as the "X%" segment. See
-// docs/feat/F-45-session-footer.md §1.5 / §1.6.
+// or overwrite this; the channel footer renders it verbatim as
+// the "X%" segment. See
+// docs/feat/F-45-session-footer.md §1.5 / §1.6 and
+// docs/feat/F-54-pi-contextwindow-from-get-state.md.
 type UsageEvent struct {
 	// InputTokens is the non-cached input token count.
 	InputTokens int
@@ -393,11 +392,6 @@ type UsageEvent struct {
 
 	// CostUSD is the optional per-turn cost in USD; 0 when unknown.
 	CostUSD float64
-
-	// ContextWindow is the model's reported context-window size
-	// (tokens). Bridges populate from `modelUsage.<model>.contextWindow`
-	// when present. See struct doc above for semantics.
-	ContextWindow int
 
 	// ContextWindowPct is the per-turn context-fill percentage
 	// (0–100), bridge-computed via the Doc 1 formula in the

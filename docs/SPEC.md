@@ -531,12 +531,13 @@ type OutboundMessage struct {
    - **`UsageInfo` 与 `UsageEvent` 都是 per-turn snapshot,不再"cumulative form"** — 重命名 / 注释全面更新,见 [`usage.md`](wip/usage.md) §1.2
    - 顺手修 `UsageInfo.InputTokens` 注释：原 "total input tokens consumed (prompt + cache reads + tool input)" 误导（实际只搬运裸 `input_tokens`），新注释 "non-cached input token count ... Cache hits are NOT included — see CacheReadInputTokens"
    - `agent.UsageEvent` / `UsageInfo` 新增 `ContextWindowPct float64` — bridge 算的 per-turn context-fill %(Doc 1 公式),runtime 不参与。channel footer 从 `ctx.Usage.ContextWindowPct` 读取 X% 段
+   - **`UsageEvent.ContextWindow` 字段已删除**([`F-54`](feat/F-54-pi-contextwindow-from-get-state.md)):`contextWindow` 是 bridge-local 本地变量(pi 来自 `get_state.data.model.contextWindow`,claudecode 来自 `modelUsage[<model>].contextWindow`),算完 pct 即丢,不进 struct 边界
 
-4. **Footer 渲染规则（F-52 D 版，`「」` 包裹）**
+4. **Footer 渲染规则（F-52 D 版,`「」` 包裹)**
    - 格式：`🤖 claude · opus-4-5` + `💰:「 in / out · X% · $cost 」`
-   - `in` = `InputTokens + CacheCreationInputTokens + CacheReadInputTokens`（Tencent YB 文档口径：input-side total）
+   - `in` = `InputTokens + CacheCreationInputTokens + CacheReadInputTokens`(Tencent YB 文档口径：input-side total)
    - `out` = `OutputTokens`
-   - `X%` = `(in + out) / ContextWindow * 100`，`ContextWindow` 取自 API（Claude Code: `modelUsage[<model>].contextWindow`），一位小数，`== 0` 时省略
+   - `X%` = `(in + out) / contextWindow * 100`，`contextWindow` 是 bridge-local 变量(Claude Code: `modelUsage[<model>].contextWindow`;Pi: `get_state.data.model.contextWindow`,见 [`F-54`](feat/F-54-pi-contextwindow-from-get-state.md) §2.2)，一位小数，`== 0` 时省略
    - `$cost` = API 透传 `total_cost_usd`，**客户端不计算**
    - 段之间 ` · ` 分隔；`「」` 括号只在至少一段非空时包裹整行
    - 缩写：`<1000 raw` / `≥1k "X.Xk"` / `≥1M "X.XM"`

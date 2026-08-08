@@ -23,15 +23,16 @@
 // X%  = per-turn context-window usage percentage. Bridge-computed
 //       via the Doc 1 formula:
 //         (InputTokens + OutputTokens + CacheCreation + CacheRead)
-//         / ContextWindow * 100
-//       where ContextWindow is the API-reported model window size
-//       (Claude Code: `modelUsage[<model>].contextWindow`). The
-//       bridge owns this calculation — the runtime does NOT
-//       recompute pct, it just passes UsageEvent.ContextWindowPct
-//       through to the channel footer. 0 means "not reported"
-//       (model didn't expose contextWindow this turn, or pi
-//       protocol doesn't expose it yet) and the footer omits X%
-//       rather than showing 0%.
+//         / contextWindow * 100
+//       where `contextWindow` is a bridge-local value (F-54):
+//       claudecode reads it from
+//       `modelUsage[<model>].contextWindow`, pi reads it from
+//       `get_state.data.model.contextWindow`. The bridge owns this
+//       calculation — the runtime does NOT recompute pct, it just
+//       passes UsageEvent.ContextWindowPct through to the channel
+//       footer. 0 means "not reported" (model didn't expose
+//       contextWindow this turn, or pi version lacks the field)
+//       and the footer omits X% rather than showing 0%.
 // $cost = API-reported per-turn cost (Claude Code:
 //       `result.total_cost_usd`). Forwarded verbatim into
 //       agent.UsageEvent.CostUSD — the footer NEVER computes
@@ -104,10 +105,10 @@ import (
 //                 turn with no new input).
 //       X%      : omitted when Usage.ContextWindowPct == 0. The
 //                 zero-cases (bridge didn't expose contextWindow
-//                 this turn, pi protocol doesn't expose it yet,
-//                 or the model simply didn't report it) all
+//                 this turn, the model simply didn't report it,
+//                 or pi is older than the get_state contract) all
 //                 surface as "no X% segment" rather than a fake
-//                 0% (F-52 §1.6).
+//                 0% (F-52 §1.6, F-54 §1.4).
 //       $cost   : omitted when CostUSD == 0 (API didn't report).
 //
 // Returns nil when both lines are empty.
@@ -168,10 +169,13 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 	// cache_read — i.e. the input-side context-window total).
 	// "out" is the generated output. "X%" is the bridge-computed
 	// per-turn context-fill percentage (Doc 1 formula; bridge
-	// reads `modelUsage.contextWindow`, computes pct, fills
-	// UsageEvent.ContextWindowPct). "$cost" is the API-reported
-	// per-turn cost (Claude Code: result.total_cost_usd) —
-	// forwarded verbatim, NEVER recomputed client-side.
+	// reads `contextWindow` — claudecode from
+	// `modelUsage.contextWindow`, pi from
+	// `get_state.data.model.contextWindow` (F-54) — computes
+	// pct, fills UsageEvent.ContextWindowPct). "$cost" is the
+	// API-reported per-turn cost (Claude Code:
+	// result.total_cost_usd) — forwarded verbatim, NEVER
+	// recomputed client-side.
 	//
 	// When ctx.Usage is nil (e.g. OutReply chunks during
 	// streaming have no usage), the entire Line 2 is omitted

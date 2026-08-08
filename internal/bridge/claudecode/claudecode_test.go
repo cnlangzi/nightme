@@ -25,48 +25,46 @@ import (
 // Formula: pct = (input + output + cache_creation + cache_read) /
 // contextWindow * 100.  Skipped when either operand is 0 (footer
 // would otherwise render a misleading "0.0%").
+//
+// F-54: `contextWindow` is bridge-local — this test pins the
+// pct output but no longer asserts any `ContextWindow` field on
+// UsageEvent (the field was deleted).
 func TestDecodeUsage_ComputesContextWindowPct(t *testing.T) {
 	cases := []struct {
-		name        string
-		usageJSON   string
-		modelJSON   string
-		wantPct     float64
-		wantContext int
+		name      string
+		usageJSON string
+		modelJSON string
+		wantPct   float64
 	}{
 		{
-			name:        "typical — 21100 of 200k → 10.55%",
-			usageJSON:   `{"input_tokens":100,"output_tokens":1000,"cache_creation_input_tokens":20000,"cache_read_input_tokens":0}`,
-			modelJSON:   `{"claude-opus-4-5":{"contextWindow":200000,"costUSD":0.01}}`,
-			wantPct:     10.55, // (100+1000+20000+0)/200000*100 = 10.55
-			wantContext: 200000,
+			name:      "typical — 21100 of 200k → 10.55%",
+			usageJSON: `{"input_tokens":100,"output_tokens":1000,"cache_creation_input_tokens":20000,"cache_read_input_tokens":0}`,
+			modelJSON: `{"claude-opus-4-5":{"contextWindow":200000,"costUSD":0.01}}`,
+			wantPct:   10.55, // (100+1000+20000+0)/200000*100 = 10.55
 		},
 		{
-			name:        "near ceiling — 199200 / 200000 → 99.6%",
-			usageJSON:   `{"input_tokens":200,"output_tokens":1000,"cache_creation_input_tokens":198000,"cache_read_input_tokens":0}`,
-			modelJSON:   `{"claude-opus-4-5":{"contextWindow":200000,"costUSD":0.5}}`,
-			wantPct:     99.6, // 199200/200000*100 = 99.6
-			wantContext: 200000,
+			name:      "near ceiling — 199200 / 200000 → 99.6%",
+			usageJSON: `{"input_tokens":200,"output_tokens":1000,"cache_creation_input_tokens":198000,"cache_read_input_tokens":0}`,
+			modelJSON: `{"claude-opus-4-5":{"contextWindow":200000,"costUSD":0.5}}`,
+			wantPct:   99.6, // 199200/200000*100 = 99.6
 		},
 		{
-			name:        "at ceiling — 200000 / 200000 → 100.0%",
-			usageJSON:   `{"input_tokens":200000,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}`,
-			modelJSON:   `{"claude-opus-4-5":{"contextWindow":200000,"costUSD":0.5}}`,
-			wantPct:     100.0,
-			wantContext: 200000,
+			name:      "at ceiling — 200000 / 200000 → 100.0%",
+			usageJSON: `{"input_tokens":200000,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}`,
+			modelJSON: `{"claude-opus-4-5":{"contextWindow":200000,"costUSD":0.5}}`,
+			wantPct:   100.0,
 		},
 		{
-			name:        "no contextWindow in modelUsage → pct omitted",
-			usageJSON:   `{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}`,
-			modelJSON:   `{"claude-opus-4-5":{"costUSD":0.01}}`,
-			wantPct:     0,
-			wantContext: 0,
+			name:      "no contextWindow in modelUsage → pct omitted",
+			usageJSON: `{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}`,
+			modelJSON: `{"claude-opus-4-5":{"costUSD":0.01}}`,
+			wantPct:   0,
 		},
 		{
-			name:        "no modelUsage payload at all → pct omitted",
-			usageJSON:   `{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}`,
-			modelJSON:   "",
-			wantPct:     0,
-			wantContext: 0,
+			name:      "no modelUsage payload at all → pct omitted",
+			usageJSON: `{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}`,
+			modelJSON: ``,
+			wantPct:   0,
 		},
 	}
 	for _, tc := range cases {
@@ -78,9 +76,14 @@ func TestDecodeUsage_ComputesContextWindowPct(t *testing.T) {
 			if u == nil {
 				t.Fatalf("decodeUsage returned nil; want non-nil")
 			}
-			if u.ContextWindow != tc.wantContext {
-				t.Errorf("ContextWindow = %d, want %d", u.ContextWindow, tc.wantContext)
-			}
+			// F-54: bridge-local contextWindow no longer stored on
+			// UsageEvent. The compile-time guard is implicit — if
+			// anyone re-adds `ContextWindow` to UsageEvent without
+			// re-introducing the assertion below, `agent.UsageEvent`
+			// itself will fail to compile against this test file's
+			// previous assertions (the `wantContext` field was
+			// removed in F-54). Only ContextWindowPct crosses the
+			// struct boundary.
 			if tc.wantPct == 0 {
 				if u.ContextWindowPct != 0 {
 					t.Errorf("ContextWindowPct = %v, want 0", u.ContextWindowPct)

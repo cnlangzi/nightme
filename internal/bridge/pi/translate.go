@@ -36,6 +36,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
@@ -179,6 +180,19 @@ type translator struct {
 	// changes do not re-fire the receipt header. Guarded by the
 	// session's translatorMu (NOT turnMu) — see below.
 	connectedSent bool
+
+	// contextWindow is the API-reported model context-window size
+	// in tokens, captured from get_state.data.model.contextWindow
+	// (F-54). Bridge-local: decodeMessageUsage receives it as a
+	// parameter, computes ContextWindowPct, and the value itself
+	// never crosses the UsageEvent struct boundary. Sticky for the
+	// session lifetime — pi F-32 MVP does not support dynamic model
+	// switch (see translator.go context). Zero before get_state
+	// arrives; translate() is NOT otherwise gated, so reads from
+	// decodeMessageUsage must synchronise with the emitConnected
+	// write — atomic.LoadInt64/StoreInt64 provide that happens-
+	// before edge without coupling turnMu and translatorMu.
+	contextWindow atomic.Int64
 
 	// turnMu serialises all access to turn and suppressing.
 	// translate() runs on the readPump goroutine; session.New()
@@ -674,7 +688,7 @@ func (t *translator) recordAssistantMessageLocked(msg assistantMessage) {
 	// Empty usage blocks are common (synthetic messages); leaving the
 	// previous snapshot in place is better than clobbering it with
 	// zeroes.
-	if u := decodeMessageUsage(msg.Usage); u != nil {
+	if u := decodeMessageUsage(msg.Usage, int(t.contextWindow.Load())); u != nil {
 		t.turn.lastUsage = u
 	}
 }
@@ -803,13 +817,15 @@ func (t *translator) finishTurnLocked() []agent.AgentEvent {
 // agent.UsageEvent. Single-shot per-turn snapshot — runtime
 // does NOT aggregate across turns.
 //
-// Pi's protocol does NOT expose `modelUsage.contextWindow` (and
-// we don't query `get_session_stats` here yet), so the
-// `ContextWindowPct` field is left at zero — the channel footer
-// omits the "X%" segment for pi users until pi plumbing for
-// context-window lookup lands. Token / cost fields are
-// unaffected. See docs/feat/F-45-session-footer.md §1.5.
-func decodeMessageUsage(u *messageUsage) *agent.UsageEvent {
+// ctxWindow is the API-reported model context-window size in
+// tokens, sourced from translator.contextWindow (F-54) which is
+// filled from get_state.data.model.contextWindow. Doc 1
+// context-window-pct formula is applied when both numerator and
+// denominator are positive; otherwise the field stays at zero
+// and the channel footer omits the "X%" segment. See
+// docs/feat/F-45-session-footer.md §1.5 /
+// docs/feat/F-54-pi-contextwindow-from-get-state.md §2.2.
+func decodeMessageUsage(u *messageUsage, ctxWindow int) *agent.UsageEvent {
 	if u == nil {
 		return nil
 	}
@@ -829,6 +845,12 @@ func decodeMessageUsage(u *messageUsage) *agent.UsageEvent {
 	if u.Cost != nil {
 		out.CostUSD = u.Cost.Total
 	}
+	if ctxWindow > 0 {
+		used := u.Input + u.Output + u.CacheRead + u.CacheWrite
+		if used > 0 {
+			out.ContextWindowPct = float64(used) / float64(ctxWindow) * 100
+		}
+	}
 	return out
 }
 
@@ -845,6 +867,16 @@ func (t *translator) emitConnected(result *getStateResult) []agent.AgentEvent {
 	if result != nil && result.Model != nil {
 		modelID = result.Model.ID
 		modelName = result.Model.Name
+		// F-54: cache the API-reported context-window on the
+		// translator so subsequent decodeMessageUsage calls can
+		// compute per-turn ContextWindowPct. Bridge-local state;
+		// only the percentage crosses the UsageEvent boundary.
+		// Stored via atomic.StoreInt64 so the concurrent
+		// decodeMessageUsage read (under turnMu) sees a coherent
+		// value without coupling the two mutexes.
+		if result.Model.ContextWindow > 0 {
+			t.contextWindow.Store(int64(result.Model.ContextWindow))
+		}
 	}
 	sessionID := ""
 	if result != nil {

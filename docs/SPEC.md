@@ -530,15 +530,15 @@ type OutboundMessage struct {
    - `gateway/messages.go` 保留 `type UsageInfo = agent.UsageInfo` alias 保 ABI 兼容
    - 顺手修 `UsageInfo.InputTokens` 注释：原 "total input tokens consumed (prompt + cache reads + tool input)" 误导（实际只搬运裸 `input_tokens`），新注释 "non-cached input token count ... Cache hits are NOT included — see CacheReadInputTokens"
 
-4. **Footer 渲染规则（C 版，ASCII 箭头无 emoji）**
-   - 格式：`claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k · $0.087`
-   - `↓ in` = `InputTokens + CacheCreationInputTokens`（按原价/1.25x 计费部分）
-   - `↻ cached` = `CacheReadInputTokens`（按 0.1x 计费部分）
-   - `↑ out` = `OutputTokens`
-   - `Total` = 三者之和（4 个原始 token 字段全加）
-   - `$cost` 仅 `CostUSD > 0` 时显示
+4. **Footer 渲染规则（F-52 D 版，`「」` 包裹）**
+   - 格式：`🤖 claude · opus-4-5` + `💰:「 in / out · X% · $cost 」`
+   - `in` = `InputTokens + CacheCreationInputTokens + CacheReadInputTokens`（Tencent YB 文档口径：input-side total）
+   - `out` = `OutputTokens`
+   - `X%` = `(in + out) / ContextWindow * 100`，`ContextWindow` 取自 API（Claude Code: `modelUsage[<model>].contextWindow`），一位小数，`== 0` 时省略
+   - `$cost` = API 透传 `total_cost_usd`，**客户端不计算**
+   - 段之间 ` · ` 分隔；`「」` 括号只在至少一段非空时包裹整行
    - 缩写：`<1000 raw` / `≥1k "X.Xk"` / `≥1M "X.XM"`
-   - 各 segment 在 0 / 空时省略（不显示 `0 in`）
+   - 各 segment 在 0 / 空时独立省略（不显示 `0 in`）
 
 5. **Feishu adapter 改 3 case**
    - `OutReply` → `sendReplyInThreadAndChat`：签名加 `ctx *SessionContext`，helper 内部拼 footer 到 text 末尾（`text + "\n\n" + footer`）

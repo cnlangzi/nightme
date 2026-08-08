@@ -1081,8 +1081,10 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 // Stamp SessionContext when ANY token field or cost is non-zero
 // OR when Model has been captured OR when git status is
 // available. The CacheCreationInputTokens field must be included
-// — formatSessionFooter renders it as part of the '↓ in' segment,
-// so a turn that only primed a cache entry (Input=0, Output=0,
+// — formatSessionFooter folds it into the "in" stat (F-52
+// convention: in = InputTokens + CacheCreationInputTokens +
+// CacheReadInputTokens, the Tencent YB input-side total), so a
+// turn that only primed a cache entry (Input=0, Output=0,
 // CacheRead=0, Cost=0, but CacheCreation > 0) is renderable and
 // must reach the Channel. Without it, a transient cache-rewrite
 // turn with no Model yet gets silently dropped.

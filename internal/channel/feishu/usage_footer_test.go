@@ -88,9 +88,9 @@ func TestFormatSessionFooterLines_CompactionSegment(t *testing.T) {
 		{
 			name: "count + tokens — both lines populated",
 			// End-to-end: identity + compaction on Line 1,
-			// tokens on Line 2. Confirms the segment doesn't
-			// bleed into Line 2 (different rhythm, · 🗜 N only
-			// appears once).
+			// usage stats on Line 2. Confirms the segment
+			// doesn't bleed into Line 2 (different rhythm,
+			// · 🗜 N only appears once).
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				CompactionCount: 2,
@@ -101,7 +101,7 @@ func TestFormatSessionFooterLines_CompactionSegment(t *testing.T) {
 			},
 			want: []string{
 				"🤖 claude · opus-4-5 · 🗜 2",
-				"💰 ↑ 12.3k · ↻ 8.2k · ↓ 1.5k · 22.0k",
+				"💰:「 20.5k / 1.5k 」",
 			},
 		},
 	}
@@ -116,19 +116,23 @@ func TestFormatSessionFooterLines_CompactionSegment(t *testing.T) {
 }
 
 func TestFormatSessionFooterLines_TokenSegments(t *testing.T) {
+	// F-52 / new footer convention: "in" folds all three input-side
+	// counters (uncached + cache_creation + cache_read) per the
+	// Tencent YB doc — see internal/channel/feishu/usage_footer.go
+	// §Line 2 doc block. Here in = 11_700 + 600 + 8_200 = 20_500.
 	ctx := &gateway.SessionContext{
 		Agent: "claude",
 		Model: "opus-4-5",
 		CumulativeUsage: gateway.UsageInfo{
 			InputTokens:              11_700,
 			OutputTokens:             1_500,
-			CacheCreationInputTokens: 600, // counted into "↑ in"
+			CacheCreationInputTokens: 600, // counted into "in"
 			CacheReadInputTokens:     8_200,
 			CostUSD:                  0.087,
 		},
 	}
 	got := formatSessionFooterLines(ctx)
-	want := []string{"🤖 claude · opus-4-5", "💰 ↑ 12.3k · ↻ 8.2k · ↓ 1.5k · 22.0k · $0.087"}
+	want := []string{"🤖 claude · opus-4-5", "💰:「 20.5k / 1.5k · $0.087 」"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("formatSessionFooterLines() mismatch:\n  got:  %v\n  want: %v", got, want)
 	}
@@ -141,30 +145,40 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 		want []string
 	}{
 		{
+			// No input-side tokens, only output. Renders as
+			// "0 / 234" — zero-side honesty, rare in practice
+			// (e.g. compaction-only turn with no new input).
 			name: "no input but has output",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				CumulativeUsage: gateway.UsageInfo{OutputTokens: 234},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰 ↓ 234 · 234"},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 0 / 234 」"},
 		},
 		{
+			// Cache hits count as "in" per the new convention
+			// (Tencent YB doc — the input-side total includes
+			// cache_read). out=0, so the "out" side shows "0".
 			name: "only cache hits",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				CumulativeUsage: gateway.UsageInfo{CacheReadInputTokens: 5_600},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰 ↻ 5.6k · 5.6k"},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 5.6k / 0 」"},
 		},
 		{
+			// Cost only — tokens are zero, so the "in / out"
+			// segment is omitted; $cost segment stands alone
+			// inside the brackets.
 			name: "cost only (no tokens)",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				CumulativeUsage: gateway.UsageInfo{CostUSD: 1.245},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰 $1.245"},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 $1.245 」"},
 		},
 		{
+			// No cost segment when CostUSD == 0.
 			name: "no cost (omitted)",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
@@ -172,16 +186,17 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 					InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰 ↑ 12.3k · ↻ 8.2k · ↓ 1.5k · 22.0k"},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 20.5k / 1.5k 」"},
 		},
 		{
+			// No Agent/Model → only the usage line renders.
 			name: "tokens but no Agent / Model",
 			ctx: &gateway.SessionContext{
 				CumulativeUsage: gateway.UsageInfo{
 					InputTokens: 5_000, OutputTokens: 200,
 				},
 			},
-			want: []string{"💰 ↑ 5.0k · ↓ 200 · 5.2k"},
+			want: []string{"💰:「 5.0k / 200 」"},
 		},
 	}
 	for _, tc := range tests {
@@ -195,6 +210,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 }
 
 func TestFormatSessionFooterLines_LargeNumbers(t *testing.T) {
+	// in = 156_000 + 0 + 1_200_000 = 1_356_000 → "1.4M" (rounded).
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
 		CumulativeUsage: gateway.UsageInfo{
@@ -206,7 +222,7 @@ func TestFormatSessionFooterLines_LargeNumbers(t *testing.T) {
 		},
 	}
 	got := formatSessionFooterLines(ctx)
-	want := []string{"🤖 claude · opus-4-5", "💰 ↑ 156.0k · ↻ 1.2M · ↓ 18.0k · 1.4M · $1.245"}
+	want := []string{"🤖 claude · opus-4-5", "💰:「 1.4M / 18.0k · $1.245 」"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -218,6 +234,7 @@ func TestFormatSessionFooterLines_LargeNumbers(t *testing.T) {
 // lines with "\n" — plain-text rendering paths honour \n
 // natively.
 func TestFormatSessionFooter_StringForm(t *testing.T) {
+	// in = 12_300 + 0 + 8_200 = 20_500 → "20.5k".
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
 		CumulativeUsage: gateway.UsageInfo{
@@ -225,7 +242,7 @@ func TestFormatSessionFooter_StringForm(t *testing.T) {
 		},
 	}
 	got := formatSessionFooter(ctx)
-	want := "🤖 claude · opus-4-5\n💰 ↑ 12.3k · ↻ 8.2k · ↓ 1.5k · 22.0k"
+	want := "🤖 claude · opus-4-5\n💰:「 20.5k / 1.5k 」"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -253,6 +270,86 @@ func TestFormatSessionFooter_StableAcrossReRenders(t *testing.T) {
 		if got := formatSessionFooter(ctx); got != first {
 			t.Fatalf("non-deterministic footer at iteration %d:\n  first: %q\n  got:   %q", i, first, got)
 		}
+	}
+}
+
+// TestFormatSessionFooterLines_ContextWindowPct (F-52) covers the
+// "X%" segment: the per-turn context-window usage percentage
+// surfaced from SessionContext.ContextWindowPct. The value is
+// computed in AgentSession.AccumulateUsage (Doc 1 formula); the
+// footer just renders it.
+//
+// Omit rules:
+//   - ContextWindowPct == 0 → segment dropped (runtime's three
+//     zero-cases: no EventDone-with-Usage yet, model didn't
+//     report ContextWindow, recent ResetCumulative /
+//     RecordCompaction).
+//   - Otherwise renders as "X.Y%" with one decimal place (edge
+//     cases like 99.6% matter for context-window tracking —
+//     "%.0f%%" would round to misleading "100%").
+func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
+	tests := []struct {
+		name string
+		ctx  *gateway.SessionContext
+		want []string
+	}{
+		{
+			name: "pct=0 — segment omitted (early turn / no ContextWindow reported)",
+			ctx: &gateway.SessionContext{
+				Agent: "claude", Model: "opus-4-5",
+				CumulativeUsage: gateway.UsageInfo{
+					InputTokens: 12_300, OutputTokens: 1_500,
+					CacheReadInputTokens: 8_200, CostUSD: 0.087,
+				},
+			},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 20.5k / 1.5k · $0.087 」"},
+		},
+		{
+			name: "pct only — typical post-EventDone snapshot",
+			ctx: &gateway.SessionContext{
+				Agent: "claude", Model: "opus-4-5",
+				CumulativeUsage: gateway.UsageInfo{
+					InputTokens: 20_000, OutputTokens: 1_000,
+				},
+				ContextWindowPct: 10.5, // 21k / 200k * 100
+			},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 20.0k / 1.0k · 10.5% 」"},
+		},
+		{
+			name: "pct + cost — full usage line",
+			ctx: &gateway.SessionContext{
+				Agent: "claude", Model: "opus-4-5",
+				CumulativeUsage: gateway.UsageInfo{
+					InputTokens: 1_200_000, OutputTokens: 80_000,
+					CacheReadInputTokens: 800_000, CostUSD: 1.234,
+				},
+				ContextWindowPct: 99.6, // near the ceiling
+			},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 2.0M / 80.0k · 99.6% · $1.234 」"},
+		},
+		{
+			name: "pct at the ceiling — 100.0% is honest, not 'full'",
+			ctx: &gateway.SessionContext{
+				Agent: "claude", Model: "opus-4-5",
+				ContextWindowPct: 100.0,
+			},
+			want: []string{"🤖 claude · opus-4-5", "💰:「 100.0% 」"},
+		},
+		{
+			name: "pct without identity — segment still emits alone",
+			ctx: &gateway.SessionContext{
+				ContextWindowPct: 5.0,
+			},
+			want: []string{"💰:「 5.0% 」"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := formatSessionFooterLines(tc.ctx)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -445,6 +542,7 @@ func TestFormatGitLine_OmitsZeroSegments(t *testing.T) {
 // TestFormatSessionFooterLines_WithGitLine confirms line 3 is
 // appended after lines 1+2 when both are populated.
 func TestFormatSessionFooterLines_WithGitLine(t *testing.T) {
+	// in = 12_300 + 0 + 8_200 = 20_500 → "20.5k".
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
 		CumulativeUsage: gateway.UsageInfo{
@@ -462,7 +560,7 @@ func TestFormatSessionFooterLines_WithGitLine(t *testing.T) {
 	got := formatSessionFooterLines(ctx)
 	want := []string{
 		"🤖 claude · opus-4-5",
-		"💰 ↑ 12.3k · ↻ 8.2k · ↓ 1.5k · 22.0k",
+		"💰:「 20.5k / 1.5k 」",
 		"📁 code/nightme · ⎇ feat/x · ↑ 2 · ? 1 · ⇡ 3",
 	}
 	if !reflect.DeepEqual(got, want) {

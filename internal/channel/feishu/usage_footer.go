@@ -10,9 +10,28 @@
 //
 //	🤖 Agent · Model · 🗜 N
 //
-// Line 2 (F-45 + F-49 token semantics):
+// Line 2 (F-45 + F-52 token semantics, F-49 + F-52 unified):
 //
-//	💰 ↑ in · ↻ cached · ↓ out · Total · $cost
+//	💰:「 in / out · X% · $cost 」
+//
+// in  = InputTokens + CacheCreationInputTokens + CacheReadInputTokens
+//       (the input-side total — Anthropic API exposes these as
+//       three independent counters; the "in" stat per
+//       https://yb.tencent.com/s/3G6HphjOxM70 is the sum of the
+//       three, NOT uncached-only.)
+// out = OutputTokens
+// X%  = per-turn context-window usage percentage. Computed
+//       client-side by AgentSession.AccumulateUsage via the
+//       Doc 1 formula: (in + out) / ContextWindow * 100, where
+//       ContextWindow is the API-reported model window size
+//       (Claude Code: `modelUsage[<model>].contextWindow`).
+//       Skipped when ContextWindow == 0 (model didn't report
+//       it) or used == 0 — both leave the previous snapshot
+//       in place. See F-52 §1.5 / §1.6 for the full rules.
+// $cost = API-reported per-turn cost (Claude Code:
+//       `result.total_cost_usd`). Forwarded verbatim into
+//       agent.UsageEvent.CostUSD — the footer NEVER computes
+//       cost client-side (no rate table, no per-model pricing).
 //
 // Line 3 (F-48 follow-up to F-45):
 //
@@ -23,8 +42,12 @@
 // omitted entirely when empty (so a non-git workspace still gets
 // lines 1-2, and a brand-new session with no Model yet gets no
 // line 2 — but line 1 always surfaces when Agent is known).
-// Separator is " · " (middle dot + spaces) — visually consistent
-// with F-37 / F-44 footer conventions.
+// Separator inside the 「」 brackets is " · " (middle dot +
+// spaces) — visually consistent with F-37 / F-44 footer
+// conventions. The 「」 enclosure + "💰:" prefix form a single
+// category header for the stats line (vs the previous
+// prose-style "💰 " line), so the rendering reads as a compact
+// stat bar rather than a free-form sentence.
 //
 // F-48 line 3 workspace segment intentionally has NO prefix
 // (`~`, `/`, etc.) — the path is just displayed as-is with the
@@ -56,23 +79,34 @@ import (
 //
 //	🤖 claude opus-4-5
 //
-// Line 2: tokens + cost — 💰 + raw numeric segments (no label
-// words like "cached" / "Total" — user preference for compact
-// display). The arrow glyphs (↓ ↻ ↑) act as inline semantic
-// markers without taking label real estate.
+// Line 2: usage stats — 💰:「 in / out · X% · $cost 」. The
+// "in / out" convention folds all three input-side counters
+// (InputTokens + CacheCreationInputTokens + CacheReadInputTokens)
+// into a single number per the Tencent YB doc — the "in" stat
+// is the input-side context-window total, not "uncached input
+// only". "X%" is the per-turn context-window usage snapshot
+// (computed client-side in AccumulateUsage from the
+// API-reported ContextWindow + used tokens; see F-52 Doc 1).
+// "$cost" is the API-reported total_cost_usd — we never
+// compute it client-side.
 //
-//	💰 ↑ 12.3k · ↻ 8.2k · ↓ 1.5k · 22.0k · $0.087
+//	💰:「 20.5k / 1.5k · 10.5% · $0.087 」
 //
 // Each segment is omitted independently:
 //   - Line 1: Agent omitted when "". Model omitted when "".
-//   - Line 2 tokens:
-//       ↑ in:    InputTokens + CacheCreationInputTokens == 0 → omit
-//       ↻ cache: CacheReadInputTokens == 0 → omit
-//       ↓ out:   OutputTokens == 0 → omit
-//       Total:   omitted when all three token segments above are
-//                omitted (i.e. total == 0). Otherwise shows the
-//                raw sum so users see the absolute number.
-//       $cost:   omitted when CostUSD == 0.
+//   - Line 2 segments:
+//       in / out: omitted when in == 0 && out == 0 (no usage).
+//                 Renders as "<in> / <out>" (zero side shows
+//                 "0" — rare in practice, e.g. compaction-only
+//                 turn with no new input).
+//       X%      : omitted when ctx.ContextWindowPct == 0. The
+//                 runtime's three zero-cases (no
+//                 EventDone-with-Usage yet / model didn't report
+//                 ContextWindow on the latest turn / recent
+//                 ResetCumulative or RecordCompaction) all
+//                 surface as "no X% segment" rather than a fake
+//                 0% (F-52 §1.6).
+//       $cost   : omitted when CostUSD == 0 (API didn't report).
 //
 // Returns nil when both lines are empty.
 //
@@ -90,7 +124,7 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 	u := ctx.CumulativeUsage
 	var lines []string
 
-	// Line 1: identity (🤖 Agent · Model · � N).
+	// Line 1: identity (🤖 Agent · Model · 🗜 N).
 	idParts := []string{"🤖"}
 	if ctx.Agent != "" {
 		idParts = append(idParts, ctx.Agent)
@@ -120,27 +154,38 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 		lines = append(lines, strings.Join(idParts, " "))
 	}
 
-	// Line 2: tokens + cost (💰 ↑ X · ↻ X · ↓ X · Total · $X).
-	tokParts := make([]string, 0, 6)
-	in := u.InputTokens + u.CacheCreationInputTokens
-	if in > 0 {
-		tokParts = append(tokParts, "↑ "+abbrevTokens(in))
+	// Line 2: usage stats (💰:「 in / out · X% · $cost 」).
+	//
+	// The "in" stat folds the three input-side counters per the
+	// Tencent YB doc convention (uncached + cache_creation +
+	// cache_read — i.e. the input-side context-window total).
+	// "out" is the generated output. "X%" is the per-turn
+	// context-window usage percentage, computed client-side in
+	// AccumulateUsage from the API-reported model ContextWindow
+	// (F-52 Doc 1 formula). "$cost" is the API-reported per-turn
+	// cost (Claude Code: result.total_cost_usd) — forwarded
+	// verbatim, NEVER recomputed client-side.
+	//
+	// Each segment is dropped independently with its owning "·"
+	// separator; the final 「」 enclosure is added only when at
+	// least one segment is present (F-45 §1.6 zero-omit).
+	usageParts := make([]string, 0, 3)
+	in := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+	if in > 0 || u.OutputTokens > 0 {
+		usageParts = append(usageParts, fmt.Sprintf("%s / %s",
+			abbrevTokens(in), abbrevTokens(u.OutputTokens)))
 	}
-	if u.CacheReadInputTokens > 0 {
-		tokParts = append(tokParts, "↻ "+abbrevTokens(u.CacheReadInputTokens))
-	}
-	if u.OutputTokens > 0 {
-		tokParts = append(tokParts, "↓ "+abbrevTokens(u.OutputTokens))
-	}
-	total := in + u.CacheReadInputTokens + u.OutputTokens
-	if total > 0 {
-		tokParts = append(tokParts, abbrevTokens(total))
+	if ctx.ContextWindowPct > 0 {
+		// One decimal place — context-window edges matter
+		// (99.5% vs 100.0% is a different signal to the user),
+		// and "%.0f%%" would round 99.6 to "100%" misleadingly.
+		usageParts = append(usageParts, fmt.Sprintf("%.1f%%", ctx.ContextWindowPct))
 	}
 	if u.CostUSD > 0 {
-		tokParts = append(tokParts, fmt.Sprintf("$%.3f", u.CostUSD))
+		usageParts = append(usageParts, fmt.Sprintf("$%.3f", u.CostUSD))
 	}
-	if len(tokParts) > 0 {
-		lines = append(lines, "💰 "+strings.Join(tokParts, " · "))
+	if len(usageParts) > 0 {
+		lines = append(lines, "💰:「 "+strings.Join(usageParts, " · ")+" 」")
 	}
 
 	// Line 3 (F-48): git tracking — workspace · branch · dirty counts.

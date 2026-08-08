@@ -10,8 +10,9 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
+	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
 func TestFormatSessionFooterLines_NilContextReturnsNil(t *testing.T) {
@@ -94,7 +95,7 @@ func TestFormatSessionFooterLines_CompactionSegment(t *testing.T) {
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				CompactionCount: 2,
-				CumulativeUsage: gateway.UsageInfo{
+				Usage: &agent.UsageEvent{
 					InputTokens: 12_300, OutputTokens: 1_500,
 					CacheReadInputTokens: 8_200,
 				},
@@ -123,7 +124,7 @@ func TestFormatSessionFooterLines_TokenSegments(t *testing.T) {
 	ctx := &gateway.SessionContext{
 		Agent: "claude",
 		Model: "opus-4-5",
-		CumulativeUsage: gateway.UsageInfo{
+		Usage: &agent.UsageEvent{
 			InputTokens:              11_700,
 			OutputTokens:             1_500,
 			CacheCreationInputTokens: 600, // counted into "in"
@@ -151,7 +152,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			name: "no input but has output",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				CumulativeUsage: gateway.UsageInfo{OutputTokens: 234},
+				Usage: &agent.UsageEvent{OutputTokens: 234},
 			},
 			want: []string{"🤖 claude · opus-4-5", "💰:「 0 / 234 」"},
 		},
@@ -162,7 +163,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			name: "only cache hits",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				CumulativeUsage: gateway.UsageInfo{CacheReadInputTokens: 5_600},
+				Usage: &agent.UsageEvent{CacheReadInputTokens: 5_600},
 			},
 			want: []string{"🤖 claude · opus-4-5", "💰:「 5.6k / 0 」"},
 		},
@@ -173,7 +174,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			name: "cost only (no tokens)",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				CumulativeUsage: gateway.UsageInfo{CostUSD: 1.245},
+				Usage: &agent.UsageEvent{CostUSD: 1.245},
 			},
 			want: []string{"🤖 claude · opus-4-5", "💰:「 $1.245 」"},
 		},
@@ -182,7 +183,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			name: "no cost (omitted)",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				CumulativeUsage: gateway.UsageInfo{
+				Usage: &agent.UsageEvent{
 					InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
 				},
 			},
@@ -192,7 +193,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			// No Agent/Model → only the usage line renders.
 			name: "tokens but no Agent / Model",
 			ctx: &gateway.SessionContext{
-				CumulativeUsage: gateway.UsageInfo{
+				Usage: &agent.UsageEvent{
 					InputTokens: 5_000, OutputTokens: 200,
 				},
 			},
@@ -213,7 +214,7 @@ func TestFormatSessionFooterLines_LargeNumbers(t *testing.T) {
 	// in = 156_000 + 0 + 1_200_000 = 1_356_000 → "1.4M" (rounded).
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
-		CumulativeUsage: gateway.UsageInfo{
+		Usage: &agent.UsageEvent{
 			InputTokens:              156_000,
 			OutputTokens:             18_000,
 			CacheCreationInputTokens: 0,
@@ -237,7 +238,7 @@ func TestFormatSessionFooter_StringForm(t *testing.T) {
 	// in = 12_300 + 0 + 8_200 = 20_500 → "20.5k".
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
-		CumulativeUsage: gateway.UsageInfo{
+		Usage: &agent.UsageEvent{
 			InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
 		},
 	}
@@ -260,7 +261,7 @@ func TestFormatSessionFooter_StableAcrossReRenders(t *testing.T) {
 	// PATCH diffing relies on body equality.
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
-		CumulativeUsage: gateway.UsageInfo{
+		Usage: &agent.UsageEvent{
 			InputTokens: 12_300, OutputTokens: 1_500,
 			CacheReadInputTokens: 8_200, CostUSD: 0.087,
 		},
@@ -297,7 +298,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 			name: "pct=0 — segment omitted (early turn / no ContextWindow reported)",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				CumulativeUsage: gateway.UsageInfo{
+				Usage: &agent.UsageEvent{
 					InputTokens: 12_300, OutputTokens: 1_500,
 					CacheReadInputTokens: 8_200, CostUSD: 0.087,
 				},
@@ -308,10 +309,10 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 			name: "pct only — typical post-EventDone snapshot",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				CumulativeUsage: gateway.UsageInfo{
+				Usage: &agent.UsageEvent{
 					InputTokens: 20_000, OutputTokens: 1_000,
-				},
 				ContextWindowPct: 10.5, // 21k / 200k * 100
+				},
 			},
 			want: []string{"🤖 claude · opus-4-5", "💰:「 20.0k / 1.0k · 10.5% 」"},
 		},
@@ -319,11 +320,11 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 			name: "pct + cost — full usage line",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				CumulativeUsage: gateway.UsageInfo{
+				Usage: &agent.UsageEvent{
 					InputTokens: 1_200_000, OutputTokens: 80_000,
 					CacheReadInputTokens: 800_000, CostUSD: 1.234,
-				},
 				ContextWindowPct: 99.6, // near the ceiling
+				},
 			},
 			want: []string{"🤖 claude · opus-4-5", "💰:「 2.0M / 80.0k · 99.6% · $1.234 」"},
 		},
@@ -331,14 +332,14 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 			name: "pct at the ceiling — 100.0% is honest, not 'full'",
 			ctx: &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
-				ContextWindowPct: 100.0,
+				Usage: &agent.UsageEvent{ContextWindowPct: 100.0},
 			},
 			want: []string{"🤖 claude · opus-4-5", "💰:「 100.0% 」"},
 		},
 		{
 			name: "pct without identity — segment still emits alone",
 			ctx: &gateway.SessionContext{
-				ContextWindowPct: 5.0,
+				Usage: &agent.UsageEvent{ContextWindowPct: 5.0},
 			},
 			want: []string{"💰:「 5.0% 」"},
 		},
@@ -545,7 +546,7 @@ func TestFormatSessionFooterLines_WithGitLine(t *testing.T) {
 	// in = 12_300 + 0 + 8_200 = 20_500 → "20.5k".
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
-		CumulativeUsage: gateway.UsageInfo{
+		Usage: &agent.UsageEvent{
 			InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
 		},
 		Workspace: "/home/devin/code/nightme",

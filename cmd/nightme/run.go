@@ -867,33 +867,19 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		if ev.Kind == agent.EventInit && userMsgID != "" {
 			cs.EmitMessageState(userMsgID, agent.MessageSubmitted)
 		}
-		// Per-turn usage accumulation moved out of an EventUsage
-		// branch (the kind was removed) — the bridge now attaches
-		// Usage to the same AgentEvent that delivers Result (see
-		// agent.ResultEvent.Usage). Translate copies it onto
-		// OutboundMessage.Usage; we fold it into CumulativeUsage
-		// right after Translate, BEFORE stamping SessionContext.
-		// OutboundMessage.Usage may be nil (zero-usage turn,
-		// synthetic assistant message) — that's fine, we just
-		// skip AccumulateUsage for that invocation.
+		// Per-event usage flows from bridge → out.Usage (via
+		// gateway.Translate) → SessionContext.Usage (via
+		// sessionContextInto below) → channel footer. The runtime
+		// is a passive pass-through; no accumulation, no dedup,
+		// no priority. Bridges can populate ResultEvent.Usage
+		// and/or DoneEvent.Usage — the channel renders what's
+		// there.
 		//
-		// F-45 §2.5 改动 D: persist cumulative stats on EventDone
-		// (turn end) so each turn costs at most one file write.
-		// PersistIfDirty is a no-op when cumulative is unchanged
-		// (pure chat without agent invocation doesn't write).
-		if ev.Kind == agent.EventDone {
-			if err := s.PersistIfDirty(func(e *registry.AgentSessionEntry) error {
-				if mgr == nil {
-					return nil
-				}
-				return mgr.PersistAgentSession(s)
-			}); err != nil && logger != nil {
-				logger.Warn("persist agent session (usage) failed",
-					"chat_id", chatID,
-					"agent_session_id", s.ID,
-					"err", err)
-			}
-		}
+		// PersistIfDirty is no longer driven from here (the
+		// cumulative-dirty trigger is gone with cross-turn usage
+		// aggregation). Future per-AgentSession dirty state can
+		// hook in without changing call sites — see
+		// AgentSession.PersistIfDirty for the new contract.
 		// F-49: bump the AgentSession's compaction counter on every
 		// EventCompaction. Bridges have already digested their
 		// protocol differences (Pi suppresses its transient
@@ -927,41 +913,24 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 					"kind", ev.Kind.String(),
 					"agent_session_id", s.ID)
 			}
-			// F-52: even when Translate drops EventDone (no
-			// OutboundMessage produced — terminal events don't
-			// surface to the channel), the DoneEvent may carry
-			// Usage from the bridge. Fold it into CumulativeUsage
-			// here so bridges that emit ONLY EventDone-with-Usage
-			// (e.g. Pi-style settled signals without a text
-			// EventResult) still register their per-turn stats.
-			// This is the "single source of truth" path —
-			// ResultEvent.Usage and DoneEvent.Usage are mutually
-			// consistent at the wire level, but only one is
-			// present per turn in practice; this catches the
-			// Done-only case.
-			if ev.Kind == agent.EventDone && ev.Done != nil && ev.Done.Usage != nil {
-				s.AccumulateUsage(ev.Done.Usage)
-			}
+			// Translate drops events that don't surface to the
+			// channel (EventDone, EventCompaction, thread-only
+			// kinds, etc.). The runtime no longer folds usage
+			// anywhere — AgentSession is a passive pass-through,
+			// and the channel-side footer reads ctx.Usage directly
+			// from OutboundMessage on the OK path below. Done.
+			// Usage, if any, dies with the dropped event (channel
+			// never sees it). See docs/feat/F-45-session-footer.md
+			// §1.5 / §1.6 for the per-turn snapshot contract.
 			return
 		}
-		// Fold the per-turn Usage into CumulativeUsage NOW, before
-		// we stamp SessionContext below. Sources (in priority
-		// order):
-		//   1. ev.Done.Usage — F-52 universal prompt-end signal
-		//      (Pi-style bridges that emit only EventDone).
-		//   2. out.Usage — populated from ev.Result.Usage by
-		//      Translate for Claude-Code-style bridges that emit
-		//      a text-bearing EventResult.
-		// Done.Usage wins when both are present (the runtime is
-		// the single accumulator and Done is the universal
-		// signal); out.Usage is the canonical source otherwise.
-		// Both paths are no-ops when nil.
-		switch {
-		case ev.Kind == agent.EventDone && ev.Done != nil && ev.Done.Usage != nil:
-			s.AccumulateUsage(ev.Done.Usage)
-		case out.Usage != nil:
-			s.AccumulateUsage(out.Usage)
-		}
+		// The runtime is a passive pass-through: out.Usage is
+		// populated by gateway.Translate from the bridge event
+		// (ResultEvent.Usage / DoneEvent.Usage) and rendered
+		// verbatim by the channel footer. No accumulation, no
+		// dedup, no priority — bridges are free to populate
+		// either field and the channel reads out.Usage directly.
+		//
 		// Stamp the current turn's anchor so the Channel can
 		// route to the right per-userMsgID receipt. ReplyTo
 		// stays empty for orphan events (EventInit at startup,
@@ -1078,51 +1047,34 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 // returns (nil, nil) and the footer omits the git segment
 // silently — chat keeps moving.
 //
-// Stamp SessionContext when ANY token field or cost is non-zero
-// OR when Model has been captured OR when git status is
-// available. The CacheCreationInputTokens field must be included
-// — formatSessionFooter folds it into the "in" stat (F-52
-// convention: in = InputTokens + CacheCreationInputTokens +
-// CacheReadInputTokens, the Tencent YB input-side total), so a
-// turn that only primed a cache entry (Input=0, Output=0,
-// CacheRead=0, Cost=0, but CacheCreation > 0) is renderable and
-// must reach the Channel. Without it, a transient cache-rewrite
-// turn with no Model yet gets silently dropped.
+// Stamp SessionContext when there's something worth showing in
+// the footer — either Agent/Model identity, git tracking, a
+// non-zero compaction count, or a per-event Usage payload on
+// this OutboundMessage.
+//
+// Usage flows straight from the bridge event onto the outbound
+// message (out.Usage is set by gateway.Translate from
+// ResultEvent.Usage / DoneEvent.Usage). The runtime does NOT
+// aggregate across turns; AgentSession is a passive
+// pass-through. The footer renders out.Usage directly.
 //
 // AgentSession.Agent is immutable (direct field read, no lock);
-// Model() and CumulativeUsage() take RLock internally.
+// Model() takes RLock internally; git status is captured fresh
+// on each stamp (3s deadline, no caching — see F-48 §1.7).
 func sessionContextInto(out *gateway.OutboundMessage, s *chatsession.AgentSession) {
-	snap := s.CumulativeUsage()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	gitSnap, _ := gtw.CollectStatus(ctx, s.Cwd, gtw.ExecGitRunner{})
 	cancel()
 	hasGit := gitSnap != nil && s.Cwd != ""
-	// F-49: also stamp CompactionCount so the footer Line 1 "🗜 N"
-	// segment can render. The compaction counter is captured under
-	// the same cumulativeUsageMu that guards CumulativeUsage, so
-	// the snapshot is internally consistent (count + token stats
-	// refer to the same point in time). See
-	// docs/feat/F-49-compaction-counter.md §1.5 / §1.8.
-	//
-	// ContextWindowPct: per-turn snapshot (not cumulative) from
-	// LastContextWindowPct() — see docs/feat/F-45-session-footer.md
-	// §1.5 / §1.6. Included in the predicate so a turn with only
-	// a fresh context % (no other usage) still emits a
-	// SessionContext (the footer wants the "X%" segment).
-	pct := s.LastContextWindowPct()
-	if snap.InputTokens != 0 || snap.OutputTokens != 0 ||
-		snap.CacheCreationInputTokens != 0 ||
-		snap.CacheReadInputTokens != 0 || snap.CostUSD != 0 ||
-		s.Model() != "" || hasGit || s.CompactionCount() > 0 ||
-		pct > 0 {
+	if s.Agent != "" || s.Model() != "" || hasGit ||
+		s.CompactionCount() > 0 || out.Usage != nil {
 		out.SessionContext = &gateway.SessionContext{
-			Agent:            s.Agent,
-			Model:            s.Model(),
-			CumulativeUsage:  snap,
-			Workspace:        s.Cwd,
-			GitStatus:        gitSnap,
-			CompactionCount:  s.CompactionCount(),
-			ContextWindowPct: pct,
+			Agent:           s.Agent,
+			Model:           s.Model(),
+			Workspace:       s.Cwd,
+			GitStatus:       gitSnap,
+			CompactionCount: s.CompactionCount(),
+			Usage:           out.Usage,
 		}
 	}
 }

@@ -447,6 +447,16 @@ type UsageInfo struct {
 	// (Claude Code: result.total_cost_usd). Forwarded verbatim —
 	// the client never computes cost. 0 when the API didn't report.
 	CostUSD float64
+
+	// ContextWindowPct is the per-turn context-fill percentage
+	// (0-100), bridge-computed via the Doc 1 formula
+	// (input+output+cache_creation+cache_read)/contextWindow*100.
+	// Bridges populate from the same wire data that produces
+	// modelUsage.<model>.contextWindow; the runtime passes it
+	// through verbatim and the channel footer renders it as the
+	// "X%" segment. 0 means "not reported" - the footer omits
+	// X% rather than showing 0%.
+	ContextWindowPct float64
 }
 
 // CompactionEvent is the payload for EventCompaction — a marker

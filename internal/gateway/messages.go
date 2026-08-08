@@ -437,13 +437,9 @@ type OutboundMessage struct {
 //	                  captured by VALUE (struct copy under RWMutex)
 //	                  so Channel can render at leisure. All 4
 //	                  fields are zero on a fresh /new'd session.
-//	                  Total = In + CacheCreate + CacheRead + Out
-//	                  is derived at render time; no Total field
-//	                  on the wire (avoids redundancy).
 type SessionContext struct {
-	Agent           string
-	Model           string
-	CumulativeUsage UsageInfo
+	Agent string
+	Model string
 	// Workspace is the absolute path of the AgentSession's
 	// working directory at the time this OutboundMessage was
 	// emitted. Sourced from AgentSession.Cwd (immutable post-
@@ -464,38 +460,29 @@ type SessionContext struct {
 	// footer reflects the latest worktree state without an
 	// invalidation hook. See docs/feat/F-45-session-footer.md §1.7.
 	GitStatus *gtw.GitStatusSnapshot
-	// CompactionCount is the cumulative number of completed
-	// context-compaction cycles observed on this AgentSession.
-	// 0 = never compacted. Sourced from AgentSession.CompactionCount
-	// at the same instant as CumulativeUsage, so the footer Line 1
-	// (🗜 N) and Line 2 (↑ ↻ ↓ total) tell a coherent story:
-	// "lifetime cost grew by $X, context window was reset and now
-	// totals Y since the last of N compactions". See
+	// CompactionCount is the number of context-compaction cycles
+	// the bridge has reported on this AgentSession. 0 = never
+	// compacted. Sourced from AgentSession.CompactionCount, so
+	// the footer Line 1 (🗜 N) tells the user how many compaction
+	// cycles the conversation has been through. See
 	// docs/feat/F-49-compaction-counter.md §1.5.
 	CompactionCount int
 
-	// ContextWindowPct is the per-turn context-window usage
-	// percentage snapshot (0–100), computed by AccumulateUsage
-	// from the model's API-reported ContextWindow + the turn's
-	// total used tokens (Doc 1 formula). Footer surfaces this as
-	// the "X%" segment so users can see at a glance how close the
-	// conversation is to the model's context limit.
+	// Usage is the per-turn snapshot from the bridge event that
+	// produced this OutboundMessage — bridges populate it on
+	// EventResult / EventDone. The runtime is a passive
+	// pass-through; AgentSession does NOT aggregate across turns.
+	// Channel footer reads Usage for the Line 2 segments (in / out
+	// · X% · $cost). nil when the bridge event didn't carry
+	// usage (e.g. OutReply chunks during streaming, which have no
+	// usage field). See docs/feat/F-45-session-footer.md §1.6.
 	//
-	// 0 in three honest cases (we never paper over with a
-	// placeholder):
-	//   - No EventDone-with-Usage has landed yet (early turn).
-	//   - The model didn't report a ContextWindow on the most
-	//     recent turn (skipped in AccumulateUsage).
-	//   - The most recent lifecycle transition was a
-	//     ResetCumulative (/new) or RecordCompaction (snapshot
-	//     zeroed; repopulates on the next EventDone-with-Usage).
-	//
-	// Sourced from AgentSession.LastContextWindowPct(), which
-	// takes the same RLock as CumulativeUsage and
-	// CompactionCount so the snapshot is consistent with the
-	// other footer fields. See
-	// docs/feat/F-45-session-footer.md §1.5 / §1.6.
-	ContextWindowPct float64
+	// ContextWindowPct on UsageEvent is the bridge-computed
+	// per-turn context-fill percentage (0–100), via the Doc 1
+	// formula. Channels read it verbatim as the "X%" segment;
+	// 0 means "not reported" and the footer omits X% rather than
+	// showing 0%. See docs/feat/F-45-session-footer.md §1.5.
+	Usage *agent.UsageEvent
 }
 
 // ToolInfo is the typed payload for OutboundMessage.Tool,

@@ -121,7 +121,6 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 	if ctx == nil {
 		return nil
 	}
-	u := ctx.CumulativeUsage
 	var lines []string
 
 	// Line 1: identity (🤖 Agent · Model · 🗜 N).
@@ -156,36 +155,47 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 
 	// Line 2: usage stats (💰:「 in / out · X% · $cost 」).
 	//
+	// Renders the per-turn Usage snapshot stamped on the
+	// OutboundMessage (ctx.Usage, populated by
+	// gateway.Translate from ResultEvent.Usage / DoneEvent.Usage
+	// on the bridge event). The runtime is a passive
+	// pass-through — it does NOT aggregate across turns.
+	//
 	// The "in" stat folds the three input-side counters per the
 	// Tencent YB doc convention (uncached + cache_creation +
 	// cache_read — i.e. the input-side context-window total).
-	// "out" is the generated output. "X%" is the per-turn
-	// context-window usage percentage, computed client-side in
-	// AccumulateUsage from the API-reported model ContextWindow
-	// (F-52 Doc 1 formula). "$cost" is the API-reported per-turn
-	// cost (Claude Code: result.total_cost_usd) — forwarded
-	// verbatim, NEVER recomputed client-side.
+	// "out" is the generated output. "X%" is the bridge-computed
+	// per-turn context-fill percentage (Doc 1 formula; bridge
+	// reads `modelUsage.contextWindow`, computes pct, fills
+	// UsageEvent.ContextWindowPct). "$cost" is the API-reported
+	// per-turn cost (Claude Code: result.total_cost_usd) —
+	// forwarded verbatim, NEVER recomputed client-side.
 	//
-	// Each segment is dropped independently with its owning "·"
-	// separator; the final 「」 enclosure is added only when at
-	// least one segment is present (F-45 §1.6 zero-omit).
-	usageParts := make([]string, 0, 3)
-	in := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
-	if in > 0 || u.OutputTokens > 0 {
-		usageParts = append(usageParts, fmt.Sprintf("%s / %s",
-			abbrevTokens(in), abbrevTokens(u.OutputTokens)))
-	}
-	if ctx.ContextWindowPct > 0 {
-		// One decimal place — context-window edges matter
-		// (99.5% vs 100.0% is a different signal to the user),
-		// and "%.0f%%" would round 99.6 to "100%" misleadingly.
-		usageParts = append(usageParts, fmt.Sprintf("%.1f%%", ctx.ContextWindowPct))
-	}
-	if u.CostUSD > 0 {
-		usageParts = append(usageParts, fmt.Sprintf("$%.3f", u.CostUSD))
-	}
-	if len(usageParts) > 0 {
-		lines = append(lines, "💰:「 "+strings.Join(usageParts, " · ")+" 」")
+	// When ctx.Usage is nil (e.g. OutReply chunks during
+	// streaming have no usage), the entire Line 2 is omitted
+	// (F-45 §1.6 zero-omit). Each segment is dropped
+	// independently with its owning "·" separator; the final
+	// 「」 enclosure is added only when at least one segment is
+	// present.
+	if u := ctx.Usage; u != nil {
+		usageParts := make([]string, 0, 3)
+		in := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+		if in > 0 || u.OutputTokens > 0 {
+			usageParts = append(usageParts, fmt.Sprintf("%s / %s",
+				abbrevTokens(in), abbrevTokens(u.OutputTokens)))
+		}
+		if u.ContextWindowPct > 0 {
+			// One decimal place — context-window edges matter
+			// (99.5% vs 100.0% is a different signal to the user),
+			// and "%.0f%%" would round 99.6 to "100%" misleadingly.
+			usageParts = append(usageParts, fmt.Sprintf("%.1f%%", u.ContextWindowPct))
+		}
+		if u.CostUSD > 0 {
+			usageParts = append(usageParts, fmt.Sprintf("$%.3f", u.CostUSD))
+		}
+		if len(usageParts) > 0 {
+			lines = append(lines, "💰:「 "+strings.Join(usageParts, " · ")+" 」")
+		}
 	}
 
 	// Line 3 (F-48): git tracking — workspace · branch · dirty counts.

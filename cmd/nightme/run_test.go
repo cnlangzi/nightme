@@ -293,15 +293,18 @@ func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
 	// bug surface is gone: footer shows turn-1 cumulative = the
 	// actual usage, not 0.
 	if out.SessionContext == nil {
-		t.Fatal("OutResult SessionContext is nil; runtime should stamp inline after AccumulateUsage")
+		t.Fatal("OutResult SessionContext is nil; runtime should stamp inline")
 	}
-	cum := out.SessionContext.CumulativeUsage
-	if cum.InputTokens != inTok || cum.OutputTokens != outTok {
-		t.Errorf("SessionContext.CumulativeUsage = %+v, want Input=%d Output=%d (first-turn tokens, NOT 0)",
-			cum, inTok, outTok)
+	u := out.SessionContext.Usage
+	if u == nil {
+		t.Fatal("SessionContext.Usage is nil; runtime should pass through ResultEvent.Usage")
 	}
-	if cum.CostUSD != cost {
-		t.Errorf("SessionContext.CumulativeUsage.CostUSD = %v, want %v", cum.CostUSD, cost)
+	if u.InputTokens != inTok || u.OutputTokens != outTok {
+		t.Errorf("SessionContext.Usage = %+v, want Input=%d Output=%d (this turn's tokens only)",
+			u, inTok, outTok)
+	}
+	if u.CostUSD != cost {
+		t.Errorf("SessionContext.Usage.CostUSD = %v, want %v", u.CostUSD, cost)
 	}
 	if out.SessionContext.Model != "claude-opus-4-5" {
 		t.Errorf("SessionContext.Model = %q, want 'claude-opus-4-5'", out.SessionContext.Model)
@@ -317,29 +320,30 @@ func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
 	}
 }
 
-// TestEventHandler_OutResult_AccumulatesAcrossTurns verifies that
-// successive EventResults with Usage fold into CumulativeUsage and
-// the SessionContext stamp on each turn reflects the running total,
-// not just the current turn.
-func TestEventHandler_OutResult_AccumulatesAcrossTurns(t *testing.T) {
+// TestEventHandler_OutResult_UsageIsPerTurnNotCumulative verifies
+// the per-turn snapshot semantics: SessionContext.Usage on each
+// turn reflects ONLY that turn's bridge-reported usage, NOT a
+// running total. The runtime is a passive pass-through; AgentSession
+// has no cumulative state.
+func TestEventHandler_OutResult_UsageIsPerTurnNotCumulative(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("oc_chat_acc", "claude")
+	cs := mgr.GetOrCreate("oc_chat_per", "claude")
 	logger := slog.Default()
 
 	h := newEventHandler(ch, cs, mgr, logger)
-	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_acc", "claude", "/tmp", nil)
+	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_per", "claude", "/tmp", nil)
 
 	// Turn 1.
-	h("oc_chat_acc", as, agent.AgentEvent{
+	h("oc_chat_per", as, agent.AgentEvent{
 		Kind: agent.EventResult,
 		Result: &agent.ResultEvent{
 			Text:  "first",
 			Usage: &agent.UsageEvent{InputTokens: 10, OutputTokens: 5},
 		},
 	}, "om_user_1")
-	// Turn 2.
-	h("oc_chat_acc", as, agent.AgentEvent{
+	// Turn 2 — different usage, no carryover from turn 1.
+	h("oc_chat_per", as, agent.AgentEvent{
 		Kind: agent.EventResult,
 		Result: &agent.ResultEvent{
 			Text:  "second",
@@ -351,13 +355,15 @@ func TestEventHandler_OutResult_AccumulatesAcrossTurns(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %d events, want 2", len(got))
 	}
-	// First turn: cumulative = (10, 5).
-	if cum := got[0].SessionContext.CumulativeUsage; cum.InputTokens != 10 || cum.OutputTokens != 5 {
-		t.Errorf("turn-1 cumulative = %+v, want (10, 5)", cum)
+	// First turn: Usage = (10, 5) — turn 1 only.
+	if u := got[0].SessionContext.Usage; u == nil ||
+		u.InputTokens != 10 || u.OutputTokens != 5 {
+		t.Errorf("turn-1 Usage = %+v, want (10, 5) — turn 1's snapshot only", u)
 	}
-	// Second turn: cumulative = (10+20, 5+7) = (30, 12).
-	if cum := got[1].SessionContext.CumulativeUsage; cum.InputTokens != 30 || cum.OutputTokens != 12 {
-		t.Errorf("turn-2 cumulative = %+v, want (30, 12) — running total across turns", cum)
+	// Second turn: Usage = (20, 7) — turn 2 only, NOT (30, 12).
+	if u := got[1].SessionContext.Usage; u == nil ||
+		u.InputTokens != 20 || u.OutputTokens != 7 {
+		t.Errorf("turn-2 Usage = %+v, want (20, 7) — turn 2's snapshot only (no carryover)", u)
 	}
 }
 
@@ -396,8 +402,14 @@ func TestEventHandler_OutResult_NilUsageLeavesEmptySessionContext(t *testing.T) 
 	if len(got) != 1 || got[0].Kind != gateway.OutResult {
 		t.Fatalf("got %v, want 1 OutResult", got)
 	}
-	if got[0].SessionContext != nil {
-		t.Errorf("SessionContext = %+v, want nil (no Model, no usage → no footer)", got[0].SessionContext)
+	// SessionContext IS stamped (Agent is set), but Usage is nil
+	// (no per-turn usage on this event) and the footer Line 2
+	// is omitted because ctx.Usage == nil.
+	if got[0].SessionContext == nil {
+		t.Fatal("SessionContext = nil; Agent is set so SessionContext should be stamped")
+	}
+	if got[0].SessionContext.Usage != nil {
+		t.Errorf("SessionContext.Usage = %+v, want nil (no usage on this event)", got[0].SessionContext.Usage)
 	}
 }
 

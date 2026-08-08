@@ -129,43 +129,13 @@ type AgentSession struct {
 	// EventInit lands.
 	model string
 
-	// F-45: per-AgentSession running total of token / cost stats.
-	// AccumulateUsage adds turn-level counts; ResetCumulative zeroes
-	// (called only by /new handler); PersistIfDirty writes the entry
-	// to disk when dirty. Persisted via Entry → AgentSessionEntry.
-	//CumulativeUsage; restored on restart from FromAgentSessionEntry.
-	//
-	// F-49: compactionCount sits alongside cumulativeUsage. The
-	// RecordCompaction write path increments the count AND zeroes
-	// the four token fields (preserving CostUSD); the lock is
-	// shared with cumulativeUsage so the two stay consistent.
-	cumulativeUsage agent.UsageInfo
+	// compactionCount tracks the number of context-compaction
+	// cycles the bridge has reported on this AgentSession. Owned
+	// here so the runtime is the single source of truth for the
+	// footer Line 1 "🗜 N" segment (F-49). NOT persisted across
+	// compaction — the counter itself persists, but no per-cycle
+	// stats do (those live on the bridge).
 	compactionCount int
-	cumulativeDirty bool
-
-	// lastContextWindowPct is the per-turn context-window usage
-	// percentage snapshot, computed by AccumulateUsage via Doc 1
-	// formula from the u's four token fields + u.ContextWindow
-	// (API-reported model window size). OVERWRITE not sum — the
-	// value reflects the model's CURRENT context usage at the
-	// latest EventDone-with-Usage, not a lifetime aggregate.
-	//
-	// Skipped when u.ContextWindow == 0 (model didn't report it)
-	// or when used == 0 (nothing to compare) — both leave the
-	// previous snapshot untouched so the footer keeps showing the
-	// last-known % instead of jumping to 0.
-	//
-	// Zeroed by ResetCumulative (/new) and RecordCompaction
-	// (post-compaction the snapshot is misleading until the next
-	// EventDone-with-Usage lands; we don't get a fresh contextWindow
-	// at compaction time so the honest representation is "no
-	// recent data").
-	//
-	// NOT persisted to agent_sessions.json — it's a per-turn
-	// snapshot that only makes sense in the runtime session;
-	// restart drops it and the next EventDone-with-Usage
-	// repopulates.
-	lastContextWindowPct float64
 
 	// F-53: the in-flight Prompt for this AgentSession, or nil if
 	// no Prompt is currently active. Stored on AS (not on
@@ -305,17 +275,9 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 	as.lastRunAt = e.LastRunAt
 	as.resumeID = e.ResumeID
 	as.model = e.Model
-	// F-45: restore cumulative token / cost stats. nil on legacy
-	// entries (zero-value default = "never ran", will start
-	// counting from first EventUsage). We copy the struct by value
-	// (not by pointer) so the in-memory state is decoupled from the
-	// persisted entry.
-	if e.CumulativeUsage != nil {
-		as.cumulativeUsage = *e.CumulativeUsage
-	}
 	// F-49: restore compaction count. Zero value on legacy entries
 	// (no compactionCount field) is the safe default — "never
-	// compacted", consistent with cumulativeUsage being zero.
+	// compacted".
 	as.compactionCount = e.CompactionCount
 	// commit fix-6: any persisted "running" agent is actually dead
 	// after daemon restart (the process handle is in-memory only).
@@ -637,130 +599,23 @@ func (as *AgentSession) Model() string {
 	return as.model
 }
 
-// AccumulateUsage atomically adds u's per-turn counters to this
-// AgentSession's cumulative state and marks it dirty so the next
-// PersistIfDirty writes the entry. Called by the runtime's
-// EventHandler closure on every EventUsage arriving from the
-// bridge — typically once per turn. nil u is a no-op (defensive:
-// some bridges emit empty EventUsage as "no usage this turn").
-func (as *AgentSession) AccumulateUsage(u *agent.UsageEvent) {
-	if u == nil {
-		return
-	}
-	as.asMu.Lock()
-	defer as.asMu.Unlock()
-	as.cumulativeUsage.InputTokens += u.InputTokens
-	as.cumulativeUsage.OutputTokens += u.OutputTokens
-	as.cumulativeUsage.CacheCreationInputTokens += u.CacheCreationInputTokens
-	as.cumulativeUsage.CacheReadInputTokens += u.CacheReadInputTokens
-	as.cumulativeUsage.CostUSD += u.CostUSD
-	// Doc 1: per-turn context-window % via exact Anthropic formula.
-	// Every input is a wire field (no approximation); the
-	// denominator is API-provided per turn (no client-side
-	// hardcoded model window table). Skipped when ContextWindow
-	// is 0 (model didn't report it) or when total used is 0
-	// (nothing to compare) — both leave the previous snapshot
-	// untouched so the footer keeps showing the last-known %
-	// instead of jumping to 0.
-	used := u.InputTokens + u.OutputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
-	if used > 0 && u.ContextWindow > 0 {
-		as.lastContextWindowPct = float64(used) / float64(u.ContextWindow) * 100
-	}
-	as.cumulativeDirty = true
-}
-
-// LastContextWindowPct returns the most-recent context-window
-// percentage snapshot, computed by the last AccumulateUsage call
-// via Doc 1's stream-json exact formula. Returns 0 before the
-// first EventDone-with-Usage lands, or when the model didn't
-// report a ContextWindow on that turn (the runtime skipped the
-// pct calc in AccumulateUsage). Snapshot under RLock; safe for
-// concurrent read alongside AccumulateUsage / CumulativeUsage /
-// CompactionCount.
+// RecordCompaction atomically increments compactionCount. Bridges
+// have already digested their protocol differences (Pi suppresses
+// its transient `compaction_start`; Claude Code emits one event
+// per cycle) so every EventCompaction here represents exactly one
+// completed compaction cycle. No OutboundMessage is produced —
+// the runtime is the single owner of compaction bookkeeping, and
+// the count surfaces to the user later via
+// SessionContext.CompactionCount → Footer Line 1 "🗜 N". See
+// docs/feat/F-49-compaction-counter.md §1.3 / §1.8.
 //
-// Per-turn snapshot semantics (see lastContextWindowPct field
-// doc): the value reflects the model's CURRENT context at the
-// latest turn's EventDone-with-Usage. After ResetCumulative
-// (/new) or RecordCompaction the value is zeroed (no longer
-// "stale pre-{reset,compaction} %"); the next EventDone-with-Usage
-// repopulates it.
-func (as *AgentSession) LastContextWindowPct() float64 {
-	as.asMu.RLock()
-	defer as.asMu.RUnlock()
-	return as.lastContextWindowPct
-}
-
-// CumulativeUsage returns a snapshot of this AgentSession's
-// running totals. Safe to call from any goroutine; readers
-// (footer rendering, future /cost) get the consistent struct
-// copy under RLock without contending with EventUsage writers.
-func (as *AgentSession) CumulativeUsage() agent.UsageInfo {
-	as.asMu.RLock()
-	defer as.asMu.RUnlock()
-	return as.cumulativeUsage
-}
-
-// ResetCumulative zeroes the cumulative state and marks the entry
-// dirty for the next PersistIfDirty. Called only by /new handler
-// — /kill, /cwd, /use, daemon restart and process crash all leave
-// the cumulative intact (history is valuable to the user).
-//
-// F-49: also resets compactionCount. /new is the only point that
-// zeros the count, mirroring the cumulative-usage semantics —
-// user-initiated context reset clears both.
-//
-// The handle / pool / status are not touched — ResetCumulative is
-// purely "clear the counter and mark dirty"; the caller
-// (handleNew) is responsible for the surrounding PersistAgentSession.
-func (as *AgentSession) ResetCumulative() {
-	as.asMu.Lock()
-	defer as.asMu.Unlock()
-	as.cumulativeUsage = agent.UsageInfo{}
-	as.compactionCount = 0
-	as.lastContextWindowPct = 0 // stale snapshot; next EventDone-with-Usage repopulates
-	as.cumulativeDirty = true
-}
-
-// RecordCompaction atomically:
-//   1. increments compactionCount;
-//   2. zeroes the four token fields of cumulativeUsage, preserving
-//      CostUSD;
-//   3. marks cumulativeDirty so the next PersistIfDirty flushes
-//      both the new count and the post-reset token snapshot.
-//
-// The token reset makes Footer Line 2 (↓ ↻ ↑ total) reflect
-// "since-last-compaction" — i.e. the agent's current context window
-// usage — while $cost stays as lifetime spend across the whole
-// AgentSession. See docs/feat/F-49-compaction-counter.md §1.2 /
-// §1.4 for the user-facing rationale and the cost-vs-token split.
-//
-// Bridges abstract their own protocol differences and emit exactly
-// one EventCompaction per completed compaction cycle (see F-49
-// §1.3). The runtime handler calls RecordCompaction unconditionally
-// on every EventCompaction — no Subtype branching here, by design.
-//
-// Safe to call concurrently with AccumulateUsage / CumulativeUsage /
-// CompactionCount / PersistIfDirty. Mirrors AccumulateUsage's
-// lock pattern (single-writer per EventCompaction).
+// Safe to call concurrently with CompactionCount / PersistIfDirty.
+// Mirrors the single-writer lock pattern (one writer per
+// EventCompaction).
 func (as *AgentSession) RecordCompaction() {
 	as.asMu.Lock()
 	defer as.asMu.Unlock()
 	as.compactionCount++
-	as.cumulativeUsage.InputTokens = 0
-	as.cumulativeUsage.CacheCreationInputTokens = 0
-	as.cumulativeUsage.CacheReadInputTokens = 0
-	as.cumulativeUsage.OutputTokens = 0
-	// CostUSD deliberately preserved (lifetime spend).
-	//
-	// The pre-compaction context-window % is now stale (the model's
-	// actual context dropped after the summarize step, but we
-	// don't get a fresh contextWindow at compaction time to
-	// recompute against). Zeroing the snapshot means the footer
-	// omits the "X%" segment until the next EventDone-with-Usage
-	// lands, which is the honest representation of "no recent
-	// data".
-	as.lastContextWindowPct = 0
-	as.cumulativeDirty = true
 }
 
 // CompactionCount returns the cumulative number of completed
@@ -773,30 +628,18 @@ func (as *AgentSession) CompactionCount() int {
 	return as.compactionCount
 }
 
-// PersistIfDirty writes the AgentSession entry to disk when the
-// cumulative stats have changed since the last persist. The
-// runtime calls this on EventDone (turn end) so each turn costs
-// at most one file write; on clean state it is a no-op.
+// PersistIfDirty is currently a no-op pass-through (every prior
+// caller relied on cumulativeDirty, which is gone with the
+// cross-turn usage aggregation). Kept as the single entry point so
+// future per-AgentSession dirty state (e.g. status /
+// resumeID changes) can hook in without changing call sites.
 //
 // persist is the registry callback (typically
-// Manager.PersistAgentSession). PersistIfDirty snapshots the
-// entry itself via as.Entry() — callers should NOT pre-build an
-// AgentSessionEntry to pass in, since that would duplicate the
-// snapshot work and risk drift between the entry passed to the
-// callback and the entry actually persisted.
-//
-// Returns nil when clean (no I/O) or when persist is nil.
+// Manager.PersistAgentSession). Returns nil when persist is nil.
 func (as *AgentSession) PersistIfDirty(persist func(*registry.AgentSessionEntry) error) error {
 	if persist == nil {
 		return nil
 	}
-	as.asMu.Lock()
-	if !as.cumulativeDirty {
-		as.asMu.Unlock()
-		return nil
-	}
-	as.cumulativeDirty = false
-	as.asMu.Unlock()
 	return persist(as.Entry())
 }
 
@@ -847,17 +690,8 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 		v := *as.exitCode
 		ec = &v
 	}
-	// F-45: snapshot cumulative stats under the same RLock so we
-	// publish a consistent copy. Always emit a non-nil pointer —
-	// the legacy "never ran" case is distinguishable only by
-	// zero-value counters inside, and omitempty would skip the
-	// field for "ran but all zero" which obscures the persisted
-	// state.
-	//
-	// F-49: also snapshot compactionCount under the same RLock so
-	// the persisted entry is internally consistent (count + usage
-	// refer to the same point in time).
-	cum := as.cumulativeUsage
+	// F-49: snapshot compactionCount under the same RLock so the
+	// persisted entry is internally consistent.
 	cc := as.compactionCount
 	as.asMu.RUnlock()
 
@@ -874,7 +708,6 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 		LastRunAt:       lastRun,
 		ExitCode:        ec,
 		Model:           model,
-		CumulativeUsage: &cum,
 		CompactionCount: cc,
 	}
 }

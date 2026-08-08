@@ -1521,7 +1521,7 @@ func TestSend_OutResult_OrphanTopLevel(t *testing.T) {
 	}
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
-		CumulativeUsage: agent.UsageInfo{InputTokens: 200, OutputTokens: 80, CostUSD: 0.456},
+		Usage: &agent.UsageEvent{InputTokens: 200, OutputTokens: 80, CostUSD: 0.456},
 	}
 	text := "## Final\n\nbody"
 	if err := a.Send(t.Context(), gateway.OutboundMessage{
@@ -1836,7 +1836,7 @@ func TestSend_OutReply_OrphanReplyTo_AlwaysCard(t *testing.T) {
 	ctx := &gateway.SessionContext{
 		Agent:  "claude",
 		Model:  "opus-4-5",
-		CumulativeUsage: agent.UsageInfo{
+		Usage: &agent.UsageEvent{
 			InputTokens: 100, OutputTokens: 50, CostUSD: 0.123,
 		},
 	}
@@ -1932,7 +1932,7 @@ func TestSend_OutReply_ColdStartSendCardFails_StillProducesCard(t *testing.T) {
 		Text:    "first chunk after cold-start failure",
 		SessionContext: &gateway.SessionContext{
 			Agent: "claude", Model: "opus-4-5",
-			CumulativeUsage: agent.UsageInfo{InputTokens: 10, CostUSD: 0.001},
+			Usage: &agent.UsageEvent{InputTokens: 10, CostUSD: 0.001},
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutReply cold-start fail): %v", err)
@@ -1998,7 +1998,7 @@ func TestSend_OutReply_AppendEntryOverflow_StillProducesCard(t *testing.T) {
 
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
-		CumulativeUsage: agent.UsageInfo{InputTokens: 100, CostUSD: 0.01},
+		Usage: &agent.UsageEvent{InputTokens: 100, CostUSD: 0.01},
 	}
 
 	// Chunk 1: cold-start receipt.
@@ -2130,7 +2130,7 @@ func TestSend_OutResult_AnchoredCardFooterStyled(t *testing.T) {
 		Result:  &agent.ResultEvent{Text: "intro\n\n```go\nfunc x() { return 1 }\n```\n\noutro"},
 		SessionContext: &gateway.SessionContext{
 			Agent: "claude", Model: "opus-4-5",
-			CumulativeUsage: agent.UsageInfo{InputTokens: 200, OutputTokens: 80, CostUSD: 0.456},
+			Usage: &agent.UsageEvent{InputTokens: 200, OutputTokens: 80, CostUSD: 0.456},
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutResult anchored): %v", err)
@@ -2617,7 +2617,7 @@ func TestSend_OutTask_OrphanReplyTo_StillCard(t *testing.T) {
 		}},
 		SessionContext: &gateway.SessionContext{
 			Agent: "claude", Model: "opus-4-5",
-			CumulativeUsage: agent.UsageInfo{InputTokens: 100, CostUSD: 0.001},
+			Usage: &agent.UsageEvent{InputTokens: 100, CostUSD: 0.001},
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutTask orphan): %v", err)
@@ -2673,7 +2673,7 @@ func TestSend_OutTask_ColdStartSendCardFails_StillCard(t *testing.T) {
 		}},
 		SessionContext: &gateway.SessionContext{
 			Agent: "claude", Model: "opus-4-5",
-			CumulativeUsage: agent.UsageInfo{InputTokens: 50, CostUSD: 0.005},
+			Usage: &agent.UsageEvent{InputTokens: 50, CostUSD: 0.005},
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutTask cold-start fail): %v", err)
@@ -2767,7 +2767,7 @@ func TestSend_OutTask_EmptyItems_ShowsWorkingPlaceholder(t *testing.T) {
 		},
 		SessionContext: &gateway.SessionContext{
 			Agent: "claude", Model: "opus-4-5",
-			CumulativeUsage: agent.UsageInfo{InputTokens: 10, CostUSD: 0.001},
+			Usage: &agent.UsageEvent{InputTokens: 10, CostUSD: 0.001},
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutTask empty items): %v", err)

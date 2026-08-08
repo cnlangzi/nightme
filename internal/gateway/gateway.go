@@ -1,17 +1,20 @@
 // Package gateway routes incoming chat messages. It is the
 // inboundDispatcher for every InboundMessage produced by a
 // Channel: each message flows in via pumpInbound → dispatchLoop →
-// DispatchInbound, which branches to either the
-// slashCommandDispatcher (when the message text is a registered
-// slash command) or the messageDispatcher (default branch; for
-// plain text the runtime injects a MessageDispatcher that routes
-// to ChatSession + Agent).
+// DispatchInbound, which walks a priority chain of tryDispatch*
+// methods until one claims the input.
 //
-// Three layers, named to match the v1.2 mental model:
+// Each tryDispatch* owns its own pattern matching: the chain
+// does NOT inspect msg.Reaction / msg.Action / msg.Text at the
+// top level. Adding a new dispatch mode = adding one tryDispatch*
+// method + one entry in the chain — nothing else changes
+// (DispatchInbound itself is a fixed-shape loop).
 //
-//	inboundDispatcher        (this package; Gateway interface)
-//	  ├─ slashCommandDispatcher  (dispatchSlashCommand; inline)
-//	  └─ messageDispatcher       (runtime-injected MessageDispatcher)
+// Current chain (priority order, first match wins):
+//
+//	1. tryActionDispatch   — msg.Reaction / msg.Action events
+//	2. tryCommandDispatch  — /-prefixed text via commander shim
+//	3. tryMessageDispatch  — universal fallback (WatchMode + agent loop)
 //
 // See docs/feat/F-20-gateway.md for the original router design
 // and docs/feat/F-26-gateway-hub.md for the Stage-3
@@ -315,34 +318,20 @@ func (g *gateway) AttachChannels(channels ...Channel) {
 
 // DispatchInbound is the inboundDispatcher entry point (implements
 // the Gateway interface). Every InboundMessage from an attached
-// Channel flows through here. Routes to one of:
+// Channel flows through here.
 //
-//   - dispatchAction (F-50) when msg.Reaction or msg.Action is set
-//   - the commander shim installed via WithCommander when the
-//     text starts with "/" — recognises the slash command or
-//     falls through to dispatchMessage
-//   - dispatchMessage, which applies the F-watch WatchMode gate
-//     and forwards to the runtime MessageDispatcher for plain
-//     text + commander fall-through inputs.
+// DispatchInbound walks a fixed priority chain of tryDispatch*
+// methods; the first one that claims the input (returns
+// handled=true) wins. The chain and DispatchInbound itself do
+// NOT inspect msg.Reaction / msg.Action / msg.Text at the top
+// level — each tryDispatch* owns its own pattern matching. To
+// add a new dispatch mode, add a tryDispatch* method + one
+// entry in the chain.
 //
 // Either branch may produce a CommandResult; the caller
-// (dispatchLoop) does not interpret it further.
-// DispatchInbound is the inboundDispatcher entry point. Routes
-// every inbound message through one of three branches:
-//
-//  1. action/reaction (F-50) → dispatchAction
-//  2. /-prefixed text        → command.Commander (handled here
-//                              via the shim installed by
-//                              cmd/nightme/run.go). If the
-//                              commander reports handled=false
-//                              (plain text or unknown /cmd),
-//                              falls through to dispatchMessage
-//                              so the original text reaches the
-//                              agent loop unchanged.
-//  3. otherwise              → dispatchMessage, which itself
-//                              applies the F-watch gate before
-//                              handing the message to the runtime
-//                              MessageDispatcher.
+// (dispatchLoop) only checks result == nil and otherwise
+// discards the value (it does not interpret Reply — that is
+// already sent by the dispatcher that produced the result).
 //
 // The WatchMode gate lives inside dispatchMessage (see that
 // method's doc) so both the commander-fall-through path and the
@@ -354,40 +343,100 @@ func (g *gateway) DispatchInbound(ctx context.Context, msg *InboundMessage) (*Co
 		return nil, errors.New("gateway: nil message")
 	}
 
-	// F-50 §6.1: action/reaction branch sits FIRST because
-	// action events have empty Text — routing them through the
-	// commander would consume them as plain text or as an empty
-	// slash command, and the gtw draft pipeline would never see
-	// its reaction. The runtime MUST wire an actionHandler at
-	// startup for the reaction path to work.
-	if msg.Reaction != nil || msg.Action != nil {
-		return g.dispatchAction(ctx, msg)
-	}
-
-	// F-51 + 2026-08-06 fall-through: commander shim is the
-	// only dispatch path for /-prefixed text. When it reports
-	// handled=true + Consumed=true (a registered command ran)
-	// we use its reply; otherwise we hand off to
-	// dispatchMessage, which applies the WatchMode gate and
-	// forwards to the agent loop.
-	g.mu.RLock()
-	dispatch := g.commandDispatch
-	g.mu.RUnlock()
-	if dispatch != nil && strings.HasPrefix(strings.TrimSpace(msg.Text), "/") {
-		result, err := dispatch(ctx, msg)
+	for _, try := range []func(context.Context, *InboundMessage) (bool, *CommandResult, error){
+		g.tryActionDispatch,   // priority 1: reaction / action events
+		g.tryCommandDispatch,  // priority 2: /-prefixed text via commander shim
+		g.tryMessageDispatch,  // priority 3: universal fallback (WatchMode + agent loop)
+	} {
+		handled, result, err := try(ctx, msg)
 		if err != nil {
 			return nil, err
 		}
-		if result != nil && (result.Consumed || result.Dropped) {
+		if handled {
 			return result, nil
 		}
-		// Commander fall-through: slash command attempt with no
-		// matching factory, or input that wasn't a slash command
-		// at all. dispatchMessage will apply the WatchMode gate
-		// and forward to the runtime MessageDispatcher.
 	}
+	// Unreachable: tryMessageDispatch always returns handled=true.
+	// Returning nil here preserves the pre-refactor "no handler
+	// → drop silently" behaviour for any future config that might
+	// remove tryMessageDispatch from the chain.
+	return nil, nil
+}
 
-	return g.dispatchMessage(ctx, msg)
+// tryActionDispatch claims Reaction / Action events. The pattern
+// (msg.Reaction != nil || msg.Action != nil) lives HERE so the
+// chain itself never inspects the message shape.
+//
+// Priority 1 because action events carry empty Text — letting
+// them fall through to the commander would either consume them
+// as plain text or as an empty slash command, and the gtw draft
+// pipeline would never see its reaction.
+//
+// For non-action messages returns (false, nil, nil) so the
+// chain continues to the next tryDispatch.
+func (g *gateway) tryActionDispatch(ctx context.Context, msg *InboundMessage) (bool, *CommandResult, error) {
+	if msg.Reaction == nil && msg.Action == nil {
+		return false, nil, nil
+	}
+	result, err := g.dispatchAction(ctx, msg)
+	return true, result, err
+}
+
+// tryCommandDispatch claims /-prefixed text routed through the
+// F-51 commander shim. The pattern (text starts with "/") and
+// the shim's fall-through semantics (Consumed=true / Dropped=true
+// ⇒ handled; otherwise ⇒ chain continues) live HERE.
+//
+// Priority 2: runs after tryActionDispatch so reaction events
+// never reach the commander, and before tryMessageDispatch so
+// recognised slash commands short-circuit the WatchMode gate
+// (which is otherwise a no-op for slash commands — see
+// dispatchMessage's doc).
+//
+// Returns (false, nil, nil) in three cases, all of which the
+// chain treats identically as "not my input":
+//
+//   - text does not start with "/"
+//   - commander shim is not installed (no WithCommander call)
+//   - shim ran but produced a non-claiming result
+//     (result == nil || !result.Consumed && !result.Dropped)
+//
+// The third case covers the F-51 fall-through contract: unknown
+// /-inputs and slash-command attempts with no matching factory
+// must reach dispatchMessage with the original text intact so
+// they fall through to the agent loop.
+func (g *gateway) tryCommandDispatch(ctx context.Context, msg *InboundMessage) (bool, *CommandResult, error) {
+	if !strings.HasPrefix(strings.TrimSpace(msg.Text), "/") {
+		return false, nil, nil
+	}
+	g.mu.RLock()
+	dispatch := g.commandDispatch
+	g.mu.RUnlock()
+	if dispatch == nil {
+		return false, nil, nil
+	}
+	result, err := dispatch(ctx, msg)
+	if err != nil {
+		return false, nil, err
+	}
+	if result == nil || (!result.Consumed && !result.Dropped) {
+		return false, nil, nil
+	}
+	return true, result, nil
+}
+
+// tryMessageDispatch is the universal fallback. Always claims
+// (handled=true). The F-watch §3.1.1 per-chat gate, the
+// MessageDispatcher injection, and the no-dispatcher drop
+// behaviour all live inside dispatchMessage — this wrapper just
+// guarantees the chain always terminates with a non-nil result.
+//
+// Sits at the bottom of the priority chain; new dispatchers
+// that should run before the agent loop add themselves ABOVE
+// this entry.
+func (g *gateway) tryMessageDispatch(ctx context.Context, msg *InboundMessage) (bool, *CommandResult, error) {
+	result, err := g.dispatchMessage(ctx, msg)
+	return true, result, err
 }
 
 // dispatchAction is the F-50 §6.1 + F-25 user-action branch.

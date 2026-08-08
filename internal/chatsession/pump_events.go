@@ -26,6 +26,7 @@ package chatsession
 import (
 	"context"
 	"log/slog"
+	"reflect"
 	"time"
 )
 
@@ -59,6 +60,23 @@ func (cs *ChatSession) ActiveEvents() <-chan EnrichedEvent {
 //
 // Returns when ctx is cancelled (chat shutdown).
 //
+// F-54 fix (2026-08-09): PumpEvents now drains the eventQueue of
+// EVERY running AS in the pool, not just activeAS. The previous
+// shape (read from activeAS.Events() only) caused a producer/
+// consumer deadlock when the user had two running ASes (e.g. /use
+// pi → /use claude → /new). The non-active AS's per-AS readpump
+// kept pushing to its eventQueue, but no consumer was draining
+// it. The eventQueue filled (cap 256), the per-AS readpump
+// blocked on push, the bridge's events channel filled (cap 64),
+// the bridge's deliver hit its 1s timeout and dropped events —
+// including the post-/new EventAgentReady the runtime was waiting
+// on. The bridge's new_session RPC then timed out at 10s.
+//
+// With reflect.Select on every AS's Events() channel, the
+// consumer is always moving the buffer regardless of which AS
+// is active. The per-AS readpump never blocks, the bridge's
+// events channel never fills, and the deliver never drops.
+//
 // Idle backoff (F-54 review fix): when the chat has no active AS
 // (between turns, after Shutdown before the next /use, etc.) the
 // inner wakeCh() returns immediately, which used to cause a tight
@@ -69,9 +87,18 @@ func (cs *ChatSession) ActiveEvents() <-chan EnrichedEvent {
 // with respect to PumpEvents).
 func (cs *ChatSession) PumpEvents(ctx context.Context) {
 	for {
-		events := cs.ActiveEvents()
-		if events == nil {
-			// No active AS; wait briefly for one to appear.
+		// Snapshot the pool under RLock; the select reads from
+		// a fixed list of channels for one iteration. Any AS
+		// spawned AFTER this snapshot is picked up on the next
+		// iteration (within ~100ms latency on the slow path).
+		cs.mu.RLock()
+		ases := make([]*AgentSession, 0, len(cs.pool))
+		for _, as := range cs.pool {
+			ases = append(ases, as)
+		}
+		cs.mu.RUnlock()
+
+		if len(ases) == 0 {
 			select {
 			case <-ctx.Done():
 				return
@@ -79,23 +106,39 @@ func (cs *ChatSession) PumpEvents(ctx context.Context) {
 				continue
 			}
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case ev, ok := <-events:
-			if !ok {
-				// Active AS closed its eventQueue. Re-evaluate
-				// after a short backoff so we don't tight-spin if
-				// the AS is being torn down and respawned rapidly.
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(100 * time.Millisecond):
-				}
-				continue
-			}
-			cs.routeEvent(ev)
+
+		// Build a select with one case per AS's Events() channel,
+		// plus ctx.Done() at index 0. reflect.Select is the runtime
+		// primitive that lets a runtime-sized slice of channels be
+		// waited on without a fixed-cap select.
+		cases := make([]reflect.SelectCase, 0, len(ases)+1)
+		cases = append(cases, reflect.SelectCase{
+			Dir:  reflect.SelectRecv,
+			Chan: reflect.ValueOf(ctx.Done()),
+		})
+		for _, as := range ases {
+			cases = append(cases, reflect.SelectCase{
+				Dir:  reflect.SelectRecv,
+				Chan: reflect.ValueOf(as.Events()),
+			})
 		}
+
+		chosen, value, ok := reflect.Select(cases)
+		if chosen == 0 {
+			return // ctx.Done()
+		}
+		as := ases[chosen-1]
+		if !ok {
+			// The AS closed its eventQueue (Shutdown / process
+			// death). Drop it from the pool so we don't re-select
+			// on the closed channel on the next iteration.
+			cs.mu.Lock()
+			delete(cs.pool, agentCwdKey{Agent: as.Agent, Cwd: as.Cwd})
+			cs.mu.Unlock()
+			continue
+		}
+		ev, _ := value.Interface().(EnrichedEvent)
+		cs.routeEvent(ev)
 	}
 }
 

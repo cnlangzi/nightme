@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	eventBufferSize = 64
+	eventBufferSize = 40960
 	startupTimeout  = 10 * time.Second
 )
 
@@ -453,8 +453,9 @@ func (a *Agent) setSessionID(result json.RawMessage) error {
 }
 
 // emitConnected publishes a single EventAgentReady carrying the ACP
-// session id. Emits are non-blocking with a ctx.Done fallback to
-// avoid wedging the new-session path.
+// session id. The send blocks until the consumer drains (or ctx is
+// done). Sized to absorb a sustained backlog — same producer-side
+// contract as pi/claudecode/pty.
 func (a *Agent) emitConnected() {
 	if a.connectedSent {
 		return
@@ -469,11 +470,6 @@ func (a *Agent) emitConnected() {
 	select {
 	case a.events <- ev:
 	case <-a.ctx.Done():
-	default:
-		// events buffer is full — drop. The runtime will treat a
-		// missing resume id as "no resume", which is the safe
-		// default; the next init/emit cycle still has
-		// connectedSent=true so we don't busy-loop.
 	}
 }
 

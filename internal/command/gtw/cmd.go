@@ -320,9 +320,10 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, input 
 }
 
 // runSync handles `/gtw sync`: checkout the default branch and
-// pull --rebase from origin. The reply is git's own `pull`
-// stdout — no synthesis, no truncation. Errors are surfaced
-// verbatim (RefreshDefaultBranch already includes the
+// pull --rebase from origin. The reply is an IM-friendly
+// compact summary (✅ branch @ sha + commit list, or ✨
+// already up to date) — not git's raw pull stdout. Errors are
+// surfaced verbatim (RefreshDefaultBranch already includes the
 // dirty-worktree refusal and rebase-conflict guidance the
 // user needs).
 func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
@@ -337,17 +338,76 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, input 
 			Consumed: true,
 		}, nil
 	}
-	pullOut, _, err := RefreshDefaultBranch(ctx, repoRoot, f.deps)
+	newHead, pullOut, err := RefreshDefaultBranch(ctx, repoRoot, f.deps)
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    err.Error(),
 			Consumed: true,
 		}, nil
 	}
+	branch, err := DefaultBranch(ctx, repoRoot, f.deps.Git)
+	if err != nil {
+		// Fall back to raw pull output if we can't read the
+		// branch name — better than a useless empty reply.
+		return &command.SlashOutput{Reply: pullOut, Consumed: true}, nil
+	}
 	return &command.SlashOutput{
-		Reply:    pullOut,
+		Reply:    renderSyncReply(branch, newHead, pullOut, repoRoot, ctx, f.deps.Git),
 		Consumed: true,
 	}, nil
+}
+
+// renderSyncReply turns git pull --rebase stdout into a compact
+// IM-friendly summary.
+//
+//   - "Already up to date." → "✨ origin/<branch> already up to date"
+//   - "Updating <old>..<new>" → header line + commit subject list
+//     capped at 10 entries ("📥 pulled N commits: • …")
+//   - Anything else (rare config variants) → fall back to the
+//     raw pull output so the user still sees what happened.
+//
+// On any parsing/log failure (missing SHA, git log error), we
+// degrade gracefully to the raw pull output rather than surfacing
+// a formatting-internal error to the user.
+func renderSyncReply(branch, newHead, pullOut, repoRoot string, ctx context.Context, git GitRunner) string {
+	if strings.Contains(pullOut, "Already up to date.") {
+		return fmt.Sprintf("✨ origin/%s already up to date", branch)
+	}
+
+	// Find the "Updating <old>..<new>" line.
+	var oldSHA string
+	for _, line := range strings.Split(pullOut, "\n") {
+		rest, ok := strings.CutPrefix(line, "Updating ")
+		if !ok {
+			continue
+		}
+		parts := strings.SplitN(rest, "..", 2)
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			oldSHA = parts[0]
+			break
+		}
+	}
+	if oldSHA == "" {
+		// No "Updating" line we recognise — fall back to raw.
+		return pullOut
+	}
+
+	// Get commit subjects for the pulled range.
+	subjectsRaw, _, err := git.Run(ctx, repoRoot, "log", oldSHA+"..HEAD", "--pretty=%s", "-n", "10")
+	if err != nil || strings.TrimSpace(subjectsRaw) == "" {
+		// Fall back to a plain header so the user still sees the
+		// sync happened.
+		return fmt.Sprintf("✅ origin/%s @ %s", branch, shortSHA(newHead))
+	}
+	subjects := strings.Split(strings.TrimSpace(subjectsRaw), "\n")
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "✅ origin/%s @ %s\n", branch, shortSHA(newHead))
+	fmt.Fprintf(&b, "📥 pulled %d commits:\n", len(subjects))
+	for _, s := range subjects {
+		fmt.Fprintf(&b, " • %s\n", s)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // parseCloseForce extracts --force / -f from the close argv

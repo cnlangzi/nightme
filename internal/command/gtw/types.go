@@ -9,7 +9,8 @@
 //
 // Scope (v1):
 //
-//	/gtw fix <issue-id>     claim an issue, create a worktree, label it
+//	/gtw fix <issue-id>           claim, label, create worktree, dispatch to agent
+//	/gtw fix --name <branch>      create local worktree (no issue / no agent)
 //
 // Design constraints (carried from F-45):
 //
@@ -25,10 +26,13 @@
 //
 // Provider abstraction (GitProvider): see provider.go.
 //
-// The gtw package is gateway-agnostic and chatsession-agnostic on
-// purpose. The runtime (cmd/nightme/) wires IM channel calls into
-// `Sender` (this package) and per-chat `Sender` instances into
-// `Manager` at registration time.
+// The gtw package is gateway-agnostic. It directly imports the
+// chatsession package for *ChatSession access (ActiveCwd,
+// SetActiveCwd, QueueUserMessage) — F-XX removed the Sender
+// interface indirection that the previous F-51 design used.
+//
+// `cmd/nightme/run.go` wires per-chat *ChatSession lookup into
+// `Manager` via SetGetChatSession at startup.
 package gtw
 
 import (
@@ -77,13 +81,33 @@ const (
 	StateCanceled State = "canceled"
 )
 
+// Mode tags which /gtw fix entry produced the in-flight snapshot.
+//
+//   - ModeRemote: `/gtw fix <id>` (default). Pulls issue from
+//     GitHub/GitLab, dispatches the issue body to the active
+//     AgentSession after worktree creation.
+//   - ModeLocal:  `/gtw fix --name <branch>` (F-XX). No issue, no
+//     label, no agent dispatch. Just creates a local worktree.
+//
+// Persisted in Context.Mode so rebuild after daemon restart can
+// reconstruct the right state. Empty / unknown values are treated
+// as ModeRemote (legacy entries predate this field).
+type Mode string
+
+const (
+	ModeRemote Mode = "remote"
+	ModeLocal  Mode = "local"
+)
+
 // Context is the per-chat snapshot of the in-flight /gtw fix.
 // The zero value (with State == "") signals "no active fix".
 //
 // F-51: defined natively in this package (was chatsession.GTWContext
-// pre-F-51). Field shape unchanged.
+// pre-F-51). Field shape unchanged except for the Mode field
+// added in F-XX.
 type Context struct {
-	Issue     int
+	Mode      Mode
+	Issue     int    // -1 for ModeLocal (no remote issue); > 0 for ModeRemote
 	Branch    string
 	Worktree  string // absolute path; empty when the fix flow hasn't reached §5.2.④
 	State     State
@@ -267,18 +291,6 @@ type OutCardMsg struct {
 // can store it on the draft for later PATCH.
 type SendCardFunc func(ctx context.Context, m OutCardMsg) (botMessageID string, err error)
 
-// Sender is the outbound surface gtw uses to push messages back
-// to the user. Production: cmd/nightme wires a closure that
-// wraps chatsession.ChatSession's ActiveCwd / SetActiveCwd /
-// outbound Send — but Manager never sees chatsession directly.
-type Sender interface {
-	// ActiveCwd returns the current working directory the chat
-	// is bound to. Used by gtw.RunFix to derive the worktree path.
-	ActiveCwd() string
-	// SetActiveCwd updates the chat's active workspace. gtw uses
-	// this on /gtw fix success to switch the chat to the
-	// newly-created worktree.
-	SetActiveCwd(cwd string) error
-	// Send posts an outbound message via the IM channel.
-	Send(ctx context.Context, m OutMsg) error
-}
+// F-XX removed `gtw.Sender` interface; the gtw package now
+// imports chatsession directly and uses *chatsession.ChatSession
+// for ActiveCwd / SetActiveCwd / QueueUserMessage.

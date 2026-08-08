@@ -569,7 +569,7 @@ func imageMediaType(path string) string {
 }
 
 // BuildBlocks converts a channel.Message into the structured
-// agent.ContentBlock slice that the agent.AgentSession.SendBlocks
+// agent.ContentBlock slice that the agent.Agent.SendBlocks
 // contract expects. Used by cmd/nightme/run.go to translate the
 // downloaded attachments + caption text into one ordered turn.
 //

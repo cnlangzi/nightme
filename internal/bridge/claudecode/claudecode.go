@@ -25,7 +25,7 @@ import (
 // so the bridge now fails loudly instead.
 var ErrResumeUnhealthy = errors.New("claudecode: --resume session unhealthy")
 
-// Agent is the agent.Agent descriptor for Claude Code. It returns
+// Agent is the agent.AgentSpec descriptor for Claude Code. It returns
 // agent.ModeJSONIO and spawns a stream-json session on Start.
 //
 // ModeJSONIO is a new value in the agent.Mode enum (added for v0.2 to
@@ -94,7 +94,7 @@ func (a *Agent) Detect() error {
 const resumeFallbackTimeout = 5 * time.Second
 
 // Start spawns Claude Code in stream-json mode and returns an
-// AgentSession that streams parsed events on its Events channel.
+// Agent that streams parsed events on its Events channel.
 //
 // Workspace is the child process's cwd. cfg.Args are appended after the
 // agent's defaults (DefaultArgs + a.args). cfg.Env is appended to
@@ -120,7 +120,7 @@ const resumeFallbackTimeout = 5 * time.Second
 //
 // On Start success, the returned session has an active process; the
 // caller must Close() it when done.
-func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSession, error) {
+func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, error) {
 	sess, err := a.startOnce(ctx, cfg)
 	if err != nil {
 		return nil, err
@@ -140,7 +140,7 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSe
 
 // startOnce is the bare spawn. Single call site: Agent.Start.
 // Kept private so the resume-preservation decision lives in Start.
-func (a *Agent) startOnce(ctx context.Context, cfg agent.StartConfig) (agent.AgentSession, error) {
+func (a *Agent) startOnce(ctx context.Context, cfg agent.StartConfig) (agent.Agent, error) {
 	args := buildArgs(a.args, cfg)
 
 	env := append([]string(nil), cfg.Env...)
@@ -166,7 +166,7 @@ func (a *Agent) startOnce(ctx context.Context, cfg agent.StartConfig) (agent.Age
 // "responding" — that's the AS readpump's job (it sees init,
 // text, result, etc.). The probe only checks for KNOWN-BAD
 // stderr signals and for process death during the probe window.
-func probeResume(ctx context.Context, sess agent.AgentSession) (string, bool) {
+func probeResume(ctx context.Context, sess agent.Agent) (string, bool) {
 	stderrCh := stderrLinesOf(sess)
 	if stderrCh == nil {
 		// Defensive fallback — every claudecode.session MUST
@@ -250,7 +250,7 @@ func probeResume(ctx context.Context, sess agent.AgentSession) (string, bool) {
 // Returning nil lets the probe fall back to event-only
 // detection — defensive in case a future bridge doesn't
 // implement the surface.
-func stderrLinesOf(sess agent.AgentSession) <-chan string {
+func stderrLinesOf(sess agent.Agent) <-chan string {
 	type stderrExposer interface {
 		StderrLines() <-chan string
 	}

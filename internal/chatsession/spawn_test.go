@@ -13,7 +13,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// fakeAgentSession is a minimal agent.AgentSession implementation
+// fakeAgentSession is a minimal agent.Agent implementation
 // used by tests. It does not spawn anything; the caller injects
 // events into the channel via PushEvent.
 type fakeAgentSession struct {
@@ -98,7 +98,7 @@ type fakeSpawner struct {
 	fakes        map[spawnKey]*fakeAgentSession
 	calls        int
 	lastResumeID string
-	spawnFn      func(name, cwd string) (agent.AgentSession, error) // optional override
+	spawnFn      func(name, cwd string) (agent.Agent, error) // optional override
 }
 
 type spawnKey struct {
@@ -110,7 +110,7 @@ func newFakeSpawner() *fakeSpawner {
 	return &fakeSpawner{fakes: make(map[spawnKey]*fakeAgentSession)}
 }
 
-func (s *fakeSpawner) Spawn(ctx context.Context, name, cwd string, args []string, sessionID string) (agent.AgentSession, error) {
+func (s *fakeSpawner) Spawn(ctx context.Context, name, cwd string, args []string, sessionID string) (agent.Agent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -182,7 +182,7 @@ func TestAgentSession_SpawnIsIdempotent(t *testing.T) {
 
 func TestAgentSession_SpawnFailureLeavesDetached(t *testing.T) {
 	spawner := newFakeSpawner()
-	spawner.spawnFn = func(name, cwd string) (agent.AgentSession, error) {
+	spawner.spawnFn = func(name, cwd string) (agent.Agent, error) {
 		return nil, errors.New("spawn boom")
 	}
 	csFile, asFile := newTestStores(t)

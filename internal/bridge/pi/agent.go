@@ -30,7 +30,7 @@ var DefaultArgs = []string{
 	"--mode", "rpc",
 }
 
-// Agent is the agent.Agent descriptor for Pi. It returns
+// Agent is the agent.AgentSpec descriptor for Pi. It returns
 // agent.ModeJSONIO because the bridge drives Pi over a structured
 // JSON I/O channel, even though the wire format is Pi's own
 // command/response/event JSONL rather than Claude Code stream-json.
@@ -75,7 +75,7 @@ func (a *Agent) Detect() error {
 	return err
 }
 
-// Start spawns Pi in RPC mode and returns an AgentSession that
+// Start spawns Pi in RPC mode and returns an Agent that
 // streams events on its Events channel.
 //
 // Workspace is the child process's cwd. cfg.Args are appended after
@@ -100,7 +100,7 @@ func (a *Agent) Detect() error {
 // On Start success, the returned session has an active process and
 // has already completed the get_state handshake. The caller must
 // Close() it when done.
-func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSession, error) {
+func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, error) {
 	args := buildArgs(a.args, cfg)
 
 	env := append([]string(nil), cfg.Env...)
@@ -186,5 +186,5 @@ func filterSessionFlags(args []string, sessionID string, logger *slog.Logger) []
 	return out
 }
 
-// Compile-time guarantee that *Agent satisfies agent.Agent.
-var _ agent.Agent = (*Agent)(nil)
+// Compile-time guarantee that *Agent satisfies agent.AgentSpec.
+var _ agent.AgentSpec = (*Agent)(nil)

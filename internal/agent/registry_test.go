@@ -18,7 +18,7 @@ func (f *fakeAgent) Mode() Mode          { return f.mode }
 func (f *fakeAgent) Command() string     { return "" }
 func (f *fakeAgent) Args() []string      { return nil }
 func (f *fakeAgent) Detect() error       { return nil }
-func (f *fakeAgent) Start(context.Context, StartConfig) (AgentSession, error) {
+func (f *fakeAgent) Start(context.Context, StartConfig) (Agent, error) {
 	return nil, errors.New("fakeAgent: Start not implemented")
 }
 

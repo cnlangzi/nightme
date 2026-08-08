@@ -137,7 +137,7 @@ var ErrTurnClosed = errors.New("pi: previous prompt rejected")
 // child process, the JSONL pump goroutine, the per-turn ack waiter,
 // and the Auto-cancelled extension-UI queue.
 //
-// Implements agent.AgentSession. Safe for concurrent calls to
+// Implements agent.Agent. Safe for concurrent calls to
 // SendText (writes are serialized via rpcClient.writeMu). The turn
 // lock (turnMu) prevents two prompts from being in flight at the
 // same time; the second SendBlocks returns ErrTurnBusy.
@@ -191,7 +191,7 @@ type session struct {
 }
 
 // newSession spawns `pi` with args + env, then drives the
-// get_state handshake. The returned AgentSession is ready for
+// get_state handshake. The returned Agent is ready for
 // SendText / Events immediately on success.
 //
 // agentName + workspace + branch are stamped onto every EventAgentReady
@@ -203,7 +203,7 @@ type session struct {
 // is left empty and the receipt omits that segment. We run this
 // BEFORE spawning the child so a slow `git` does not delay receipt
 // init.
-func newSession(ctx context.Context, agentName, command string, args, env []string, workspace string) (agent.AgentSession, error) {
+func newSession(ctx context.Context, agentName, command string, args, env []string, workspace string) (agent.Agent, error) {
 	if workspace == "" {
 		return nil, fmt.Errorf("pi: workspace is required")
 	}
@@ -400,7 +400,7 @@ func (s *session) Events() <-chan agent.AgentEvent { return s.events }
 func (s *session) PID() int { return s.pid }
 
 // SendText delivers a single text user turn. Thin wrapper around
-// SendBlocks; kept on the agent.AgentSession interface for
+// SendBlocks; kept on the agent.Agent interface for
 // callers that don't carry a ctx. The deadline is applied by
 // SendBlocks' defensive check (promptTimeout when the caller's
 // ctx has no deadline), so this thin wrapper can hand in a bare
@@ -1065,5 +1065,5 @@ func indexByte(s string, c byte) int {
 	return -1
 }
 
-// Compile-time guarantee that *session satisfies agent.AgentSession.
-var _ agent.AgentSession = (*session)(nil)
+// Compile-time guarantee that *session satisfies agent.Agent.
+var _ agent.Agent = (*session)(nil)

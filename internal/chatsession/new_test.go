@@ -39,7 +39,7 @@ func (f *failingNewAS) New(_ context.Context) error { return errInjected }
 // provided handle, bypassing Spawner. Mirrors what Spawn would produce
 // but skips the start-from-zero state, so tests stay focused on the
 // NewActiveAgentSessions filter / counter logic.
-func injectAS(t *testing.T, cs *ChatSession, agentName, cwd string, handle agent.AgentSession) *AgentSession {
+func injectAS(t *testing.T, cs *ChatSession, agentName, cwd string, handle agent.Agent) *AgentSession {
 	t.Helper()
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -306,7 +306,7 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 		if !old.closed {
 			t.Fatalf("old handle should have been Close()d")
 		}
-		if got := as.Handle(); got != agent.AgentSession(newAS) {
+		if got := as.Handle(); got != agent.Agent(newAS) {
 			t.Fatalf("handle not swapped: got %T", got)
 		}
 		if got := as.SessionID(); got != "" {
@@ -388,11 +388,11 @@ func (r *restartErrAS) Close() error {
 // sessionID); we record the sessionID it was called with so tests can
 // assert "no --resume on the fresh spawn".
 type fakeRestartSpawner struct {
-	handle             agent.AgentSession
+	handle             agent.Agent
 	calledWithResumeID string
 }
 
-func (f *fakeRestartSpawner) Spawn(_ context.Context, _, _ string, _ []string, sessionID string) (agent.AgentSession, error) {
+func (f *fakeRestartSpawner) Spawn(_ context.Context, _, _ string, _ []string, sessionID string) (agent.Agent, error) {
 	f.calledWithResumeID = sessionID
 	return f.handle, nil
 }
@@ -401,7 +401,7 @@ func (f *fakeRestartSpawner) Spawn(_ context.Context, _, _ string, _ []string, s
 // exercise the wrapper's spawn-failure cleanup path (F-34 review #4).
 type fakeFailingSpawner struct{ err error }
 
-func (f *fakeFailingSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (agent.AgentSession, error) {
+func (f *fakeFailingSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (agent.Agent, error) {
 	return nil, f.err
 }
 

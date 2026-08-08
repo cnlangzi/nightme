@@ -1,5 +1,5 @@
 // Package acp also provides the Agent wrapper that turns a CLI
-// command into an agent.Agent backed by the Agent Client Protocol
+// command into an agent.AgentSpec backed by the Agent Client Protocol
 // defined in this package. PTY remains the physical carrier;
 // ACP supplies the structured request and event layer above it.
 //
@@ -54,7 +54,7 @@ func (a *Agent) Detect() error {
 	return err
 }
 
-func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSession, error) {
+func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, error) {
 	args := append([]string(nil), a.args...)
 	args = append(args, cfg.Args...)
 	env := append([]string(nil), a.env...)
@@ -79,4 +79,4 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSe
 	return session, nil
 }
 
-var _ agent.Agent = (*Agent)(nil)
+var _ agent.AgentSpec = (*Agent)(nil)

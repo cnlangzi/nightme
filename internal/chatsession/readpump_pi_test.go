@@ -20,7 +20,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// longLivedFakeAS is an agent.AgentSession whose Events channel
+// longLivedFakeAS is an agent.Agent whose Events channel
 // delivers whatever the test writes to it. The "process" is
 // long-lived: the events channel does not close until the test
 // calls Close.
@@ -64,9 +64,9 @@ func (a *longLivedFakeAS) push(ev agent.AgentEvent) {
 }
 
 // fakeSpawnerLS is a Spawner that returns our longLivedFakeAS.
-type fakeSpawnerLS struct{ as agent.AgentSession }
+type fakeSpawnerLS struct{ as agent.Agent }
 
-func (f fakeSpawnerLS) Spawn(_ context.Context, _, _ string, _ []string, _ string) (agent.AgentSession, error) {
+func (f fakeSpawnerLS) Spawn(_ context.Context, _, _ string, _ []string, _ string) (agent.Agent, error) {
 	return f.as, nil
 }
 

@@ -25,7 +25,7 @@ import (
 //   - Run Detect to verify the binary exists / SDK is available.
 //   - Call Start(ctx, StartConfig{Workspace: cwd, Args: args,
 //     SessionID: sessionID}) to fork the child and obtain a live
-//     agent.AgentSession.
+//     agent.Agent.
 //
 // The sessionID is the agent's own session id from the previous run
 // (e.g. Claude Code's `system/init.session_id`); bridges that
@@ -37,7 +37,7 @@ import (
 // ChatSession.LookupActiveAgentSession) wraps it in an AgentSession
 // and stores it in the pool.
 type Spawner interface {
-	Spawn(ctx context.Context, agentName, cwd string, args []string, sessionID string) (agent.AgentSession, error)
+	Spawn(ctx context.Context, agentName, cwd string, args []string, sessionID string) (agent.Agent, error)
 }
 
 // ErrSpawnerNotSet is returned by ChatSession.LookupActiveAgentSession
@@ -62,7 +62,7 @@ func NewRegistrySpawner(reg *agent.Registry) Spawner {
 	return &registrySpawner{agents: reg}
 }
 
-func (s *registrySpawner) Spawn(ctx context.Context, agentName, cwd string, args []string, sessionID string) (agent.AgentSession, error) {
+func (s *registrySpawner) Spawn(ctx context.Context, agentName, cwd string, args []string, sessionID string) (agent.Agent, error) {
 	if s.agents == nil {
 		return nil, errors.New("registrySpawner: nil registry")
 	}

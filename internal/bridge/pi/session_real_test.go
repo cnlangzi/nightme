@@ -189,7 +189,7 @@ func TestSession_RealPi_E2E_ReceiveInputAndReply(t *testing.T) {
 //
 // turnLabel is only used in t.Logf to disambiguate turn-1 vs
 // turn-2 in the test output.
-func driveTurn(t *testing.T, sess agent.AgentSession, prompt string, deadline time.Duration, turnLabel string) error {
+func driveTurn(t *testing.T, sess agent.Agent, prompt string, deadline time.Duration, turnLabel string) error {
 	t.Helper()
 	promptStartedAt := time.Now()
 	if err := sess.SendText(prompt); err != nil {

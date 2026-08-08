@@ -1,5 +1,5 @@
 // Package pty also provides the Agent wrapper that turns a CLI
-// command into an agent.Agent backed by the PTY transport defined
+// command into an agent.AgentSpec backed by the PTY transport defined
 // in this package. The wrapper is the safe fallback for any binary
 // that does not yet speak ACP / SDK / JSON-IO — bytes flow through
 // the PTY as EventAgentText and the session manager drives them.
@@ -73,14 +73,14 @@ func (a *Agent) Detect() error {
 	return err
 }
 
-// Start spawns the CLI under a PTY and returns an AgentSession that
+// Start spawns the CLI under a PTY and returns an Agent that
 // streams PTY bytes as EventAgentText. The session is owned by the caller
 // and must be Close()d.
 //
 // Start honors cfg.Workspace as the child's working directory; any
 // cfg.Args are appended after the agent's defaults, and cfg.Env is
 // merged with the agent's defaults in that order (cfg wins).
-func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSession, error) {
+func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, error) {
 	cols := a.Cols
 	rows := a.Rows
 	if cols <= 0 {
@@ -113,5 +113,5 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.AgentSe
 	return session, nil
 }
 
-// Compile-time guarantee that *Agent satisfies agent.Agent.
-var _ agent.Agent = (*Agent)(nil)
+// Compile-time guarantee that *Agent satisfies agent.AgentSpec.
+var _ agent.AgentSpec = (*Agent)(nil)

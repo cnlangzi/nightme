@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -357,34 +358,71 @@ func summarizeKinds(msgs []OutboundMessage) []OutboundKind {
 // → AgentEventBus fan-out. If pumpStream is broken (closed before
 // first read, wrong channel buffering, parse failure), this test
 // fails with a clear signal.
+func TestIntegration_RealBridge_FakeShell(t *testing.T) {
 //
 // The shell script writes:
-//   1. system/init             → EventAgentReady
-//   2. assistant message       → EventAgentText "hello back"
-//   3. result                  → EventAgentResult "final answer"
-//   4. EOF (exit 0)            → pumpStream closes events
-func TestIntegration_RealBridge_FakeShell(t *testing.T) {
+//   1. system/init             → EventAgentReady (immediate, no anchor)
+//   2. (wait for stdin prompt)  → barrier: bridge.SendBlocks has
+//                                 set currentPrompt by the time we
+//                                 return from read
+//   3. assistant message       → EventAgentText "hello back"
+//   4. result                  → EventAgentResult "final answer"
+//   5. EOF (exit 0)            → pumpStream closes events
+//
+// Why the stdin-wait barrier matters: the bridge spawns the script
+// via exec.CommandContext and pumpStream starts reading stdout
+// immediately. If the script eagerly emits init/assistant/result
+// before the test calls QueueUserMessage, the readpump sees those
+// events while currentPrompt is still nil, so they all carry
+// UserMsgID="" and the OutReply.ReplyTo assertion below fails.
+// Real claudecode behaves correctly because the real CLI waits for
+// the prompt on stdin before producing the assistant turn — the
+// fake must mirror that. See issue: anchor race in
+// real-bridge + fake-shell integration test (env-sensitive).
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-claude.sh")
-	// Shell script: emit system/init + assistant + result, then exit.
-	// `read` is added so the bridge's stdin write doesn't fail with
-	// EPIPE before we finish emitting (the script exits after one
-	// read attempt with a 1s timeout — bridge's SendBlocks returns
-	// once the prompt is written, so the script just needs to drain
-	// a line).
+	//
+	// init is emitted immediately (matches real claude: ready fires
+	// before any prompt), then we block on stdin until the bridge's
+	// writeLine writes the prompt. By the time read returns, the
+	// ChatSession has currentPrompt set — see
+	// internal/chatsession/agentsession.go:Submit for the assignment
+	// order — so all subsequent events stamp UserMsgID and pass the
+	// ReplyTo assertion below.
+	//
+	// `set -e` is intentionally OMITTED. `read` returns non-zero on
+	// EOF or timeout; with set -e the script would exit on the very
+	// first false return, skipping assistant/result and producing a
+	// "no outbound" failure instead of a real anchor or bridge
+	// failure signal. `|| true` makes the timeout fallback explicit;
+	// 5s is comfortably above the test's 5s deadline so any hang in
+	// the bridge layer still surfaces as a test failure, not a hang.
+	//
+	// `read -t 5 _PROMPT` takes one line. writeLine writes the
+	// prompt body followed by a single \n, so one read is enough.
 	body := `#!/bin/bash
-set -e
 echo '{"type":"system","subtype":"init","session_id":"test-session-1","model":"claude-test","cwd":"/tmp"}'
+# Anchor barrier: wait for the bridge to write the prompt on
+# stdin before emitting the assistant turn. Without this, the
+# readpump races the test's QueueUserMessage and the assistant
+# event often lands with currentPrompt still nil → empty
+# UserMsgID → OutReply.ReplyTo = "" assertion failure.
+read -t 5 _PROMPT || true
 echo '{"type":"assistant","message":{"id":"msg_1","role":"assistant","model":"claude-test","content":[{"type":"text","text":"hello back"}]}}'
 echo '{"type":"result","result":"final answer","duration_ms":100,"is_error":false}'
-# Drain one line of stdin (the bridge's SendBlocks prompt) so the
-# pipe doesn't EPIPE before we finish emitting. 1s timeout so we
-# don't hang the test.
-read -t 1 _LINE || true
 exit 0
 `
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Sanity check: the bash on this host must understand `read -t N`
+	// (POSIX-extended, not dash-builtin semantics). Without this
+	// pre-flight, a sandbox where /bin/bash is missing or sh-linked
+	// to a dash variant would explode on a different test, not
+	// here, making the root cause harder to localize.
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not on PATH (%v) — fake script requires bash; skipping", err)
 	}
 
 	// Spawner that drives the real claudecode bridge against our

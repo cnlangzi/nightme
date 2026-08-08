@@ -1,4 +1,4 @@
-# F-45: AgentSession 累计 Token 统计 + Main-Chat 卡片 Footer
+# F-45: Main-Chat 卡片 Footer (per-turn snapshot)
 
 > **Status**: ✅ 已落地（2026-08-05）；§1.7 F-48 follow-up（2026-08-06）；§1.8 F-49 follow-up（2026-08-06）
 > **F-46 增量**（2026-08-06）—decision cards 加 button + 原地 PATCH；详见 [`F-46-interactive-cards.md`](./F-46-interactive-cards.md)
@@ -58,7 +58,7 @@ F-44 在 `internal/channel/feishu/receipt.go` 把 receipt 简化为只装 Task c
 ```go
 AgentName       string  // runtime 填 s.Agent
 Model           string  // runtime 填 s.Model()
-CumulativeUsage *UsageInfo  // runtime 填 s.CumulativeUsage()
+Usage *agent.UsageEvent  // bridge 报的本轮 usage — runtime 直接 out.Usage 透传
 ```
 
 **问题**：Channel 拿到 3 个字段后要自己拼装 footer，metadata 关系散落 3 处，扩展新字段（如 `provider_url` / `agent_version`）要继续加字段。
@@ -71,7 +71,7 @@ CumulativeUsage *UsageInfo  // runtime 填 s.CumulativeUsage()
 type SessionContext struct {
     Agent           string
     Model           string
-    CumulativeUsage UsageInfo
+    Usage *agent.UsageEvent
 }
 
 type OutboundMessage struct {
@@ -215,7 +215,7 @@ type SessionContext struct {
     // All 4 token fields are zero on a fresh /new'd session.
     // Channel derives Total = In + CacheCreate + CacheRead + Out
     // at render time; no Total field on the wire (avoids redundancy).
-    CumulativeUsage UsageInfo
+    Usage *agent.UsageEvent
     // F-49: cumulative count of completed context compactions on
     // this AgentSession. 0 when never compacted. Persists across
     // daemon restarts; cleared only by /new. Sourced from
@@ -404,7 +404,7 @@ claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k   
 type SessionContext struct {
     Agent           string
     Model           string
-    CumulativeUsage UsageInfo
+    Usage *agent.UsageEvent
     Workspace       string                  // NEW (F-48)
     GitStatus       *gtw.GitStatusSnapshot  // NEW (F-48)
     CompactionCount int                     // NEW (F-49: 🗜 N 计数)
@@ -544,7 +544,7 @@ F-45 §1.2 的 OutboundKind → Footer 路由表中 `OutCompaction` 一行删除
 type SessionContext struct {
     Agent           string
     Model           string
-    CumulativeUsage UsageInfo
+    Usage *agent.UsageEvent
     Workspace       string                  // F-48
     GitStatus       *gtw.GitStatusSnapshot  // F-48
     CompactionCount int                     // F-49: 🗜 N 计数

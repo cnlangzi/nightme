@@ -1894,6 +1894,8 @@ user_msg om_A
 
 ### 13.22 🎯 F-45 决策 (2026-08-05):Main-Chat 卡片 Footer + AgentSession 累计 Token 持久化
 
+> ⚠️ **F-52 / single-shot refactor (2026-08-08)**：本节描述的"累计 token 持久化"架构已被后续 single-shot 重构废弃。`AgentSession` 不再持有 `cumulativeUsage` 字段,`AccumulateUsage` / `ResetCumulative` / `CumulativeUsage` 方法删除,`agent_sessions.json` 不再存 `cumulativeUsage` 字段。bridge 报的 `ResultEvent.Usage` / `DoneEvent.Usage` 直接透传到 `SessionContext.Usage`(每个 turn 独立 snapshot,runtime pass-through)。本节作为历史 design record 保留,新契约见 [`feat/F-45-session-footer.md`](../feat/F-45-session-footer.md) §1.6 与 [`wip/usage.md`](../wip/usage.md) 重构清单。
+
 > ⚠️ **F-46 follow-up (PR #52)**: the OutReply "append footer to text
 > via \n\n" path described in step 5 was replaced by a card-element
 > footer (hr + grey plain_text). OutResult got the same fix. The

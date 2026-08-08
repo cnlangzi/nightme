@@ -239,11 +239,9 @@ deliverInitLocked → EventInit
 
 cc-connect 从另一个方向得出同样结论——它的 `handleAgentEnd` 倒序遍历 `agent_end.messages[]`，取最后一条 assistant 的 usage 作为 ContextUsage。
 
-> **已知遗留（下个 PR）**：共享层 `AgentSession.AccumulateUsage`（`internal/chatsession/agentsession.go`）目前仍是**跨轮累加**。F-49 §1.2 已把 4 个 token 字段的语义定为「当前上下文占用」（compaction 时归零、`CostUSD` 保留），但累加"最后一次调用的快照"在语义上是错的——跑 N 轮就虚高 N 倍，compaction 归零只是把问题推后。正确做法是**覆盖**。
+> **F-52 + 后续 single-shot refactor (2026-08)**：原本列出的"共享层累加问题"已被本 PR 后的 single-shot 重构解决 —— `AgentSession.AccumulateUsage` 整个方法已删除,token / cost 不再跨 turn 累加,每个 turn 是 bridge 报的独立 snapshot。runtime 完全 pass-through。详见 [`F-45 §1.6`](./F-45-session-footer.md) 新契约和 [`usage.md`](../../wip/usage.md) 重构清单。
 >
-> 这个缺陷同样存在于 claudecode（`stream.go` 的 `decodeUsage` 取的也是最后一次调用的快照），所以修复应在共享层统一做，连带把 F-49 §6 列为 out-of-scope 的 `model → contextWindow` 分母补上（pi 的 `Model` 对象有 `contextWindow: 200000`，我们现在在 `getStateModel` 里丢掉了；它还有 `get_session_stats` 命令直接返回 `contextUsage.{tokens,contextWindow,percent}`）。
->
-> 本 PR 范围内 pi 侧产出的已是正确的单点快照，共享层改成覆盖后立刻生效。
+> 历史遗留:bridge 仍各自负责"取哪一帧作为本 turn 的 usage",pi 和 claudecode 都已经在 result/done 事件上聚合到本 turn 的 snapshot,所以新契约下行为正确。
 
 ### 2.6 并发
 

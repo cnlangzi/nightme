@@ -294,13 +294,17 @@ func formatSessionFooter(ctx *gateway.SessionContext) string {
 //     still returns "0" defensively.
 //   - n in [1, 999]: integer (no decimal).
 //   - n in [1_000, 999_999]: one decimal + "k" (e.g. 12_345 → "12.3k").
-//   - n >= 1_000_000: one decimal + "M" (e.g. 1_234_567 → "1.2M").
+//     Integer multiples (e.g. 1_000, 200_000, 999_999) drop the
+//     trailing `.0` so the rendered string is `1k` / `200k` / `1000k`
+//     rather than `1.0k` / `200.0k` / `1000.0k`.
+//   - n >= 1_000_000: same rule with `M` suffix (e.g.
+//     1_234_567 → "1.2M", 1_000_000 → "1M").
 func abbrevTokens(n int) string {
 	switch {
 	case n >= 1_000_000:
-		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+		return abbrevOneDecimal(float64(n)/1_000_000, "M")
 	case n >= 1_000:
-		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+		return abbrevOneDecimal(float64(n)/1_000, "k")
 	default:
 		return fmt.Sprintf("%d", n)
 	}
@@ -316,17 +320,40 @@ func abbrevTokens(n int) string {
 // judge upstream compatibility-layer mismatches themselves.
 //
 //   - n in [1, 999]: integer (no decimal).
-//   - n in [1_000, 999_999]: one decimal + "k" (e.g. 200_000 → "200k").
-//   - n >= 1_000_000: one decimal + "M" (e.g. 1_000_000 → "1.0M").
+//   - n in [1_000, 999_999]: one decimal + "k" (e.g. 12_345 → "12.3k",
+//     200_000 → "200k" — no trailing `.0`).
+//   - n >= 1_000_000: same rule with `M` suffix (e.g.
+//     1_234_567 → "1.2M", 1_000_000 → "1M").
 func abbrevWindow(n int) string {
 	switch {
 	case n >= 1_000_000:
-		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+		return abbrevOneDecimal(float64(n)/1_000_000, "M")
 	case n >= 1_000:
-		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+		return abbrevOneDecimal(float64(n)/1_000, "k")
 	default:
 		return fmt.Sprintf("%d", n)
 	}
+}
+
+// abbrevOneDecimal formats `v` with one decimal place and appends
+// `unit`. Integer multiples (e.g. v=1.0, v=200.0, v=999.999)
+// drop the trailing `.0` so the rendered string is `1M` (not
+// `1.0M`), `200k` (not `200.0k`), `1000k` (not `1000.0k`).
+// Centralises the rule so abbrevTokens and abbrevWindow stay
+// byte-for-byte aligned.
+//
+// Implemented via suffix-trim rather than math.Trunc because
+// `math.Trunc(999.999)` ≠ `math.Trunc(999.999)` (obviously), so
+// a v==Trunc(v) check doesn't fire for the rounding case
+// 999_999 / 1000 → 999.999 which `%.1f` renders as "1000.0".
+// Trimming the formatted string is robust to this.
+func abbrevOneDecimal(v float64, unit string) string {
+	s := fmt.Sprintf("%.1f%s", v, unit)
+	zeroSuffix := ".0" + unit
+	if strings.HasSuffix(s, zeroSuffix) {
+		s = s[:len(s)-len(zeroSuffix)] + unit
+	}
+	return s
 }
 
 // formatWorkspacePath renders the AgentSession's Cwd into a

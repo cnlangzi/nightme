@@ -181,7 +181,7 @@ func TestKillAll_ActiveASCleared(t *testing.T) {
 	// KillAll clears it (the new anchor location — was
 	// ChatSession.currentTurnUserMsgID in v1.3).
 	a.asMu.Lock()
-	a.currentPrompt = &Prompt{ID: "test-p1", MessageIDs: []string{"u-1"}, LastMessageID: "u-1"}
+	a.currentPrompt = &Prompt{ID: "test-p1", LastMessageID: "u-1"}
 	a.asMu.Unlock()
 	cs.mu.Unlock()
 

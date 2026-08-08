@@ -28,16 +28,14 @@ import (
 func TestWritebackMessageState_FiresOnPromptEndHook(t *testing.T) {
 	cs := newChatSessionForTest("cs_test")
 
-	// Add a message to messagesByID so the writeback can find it.
-	msg := &Message{
+	// Build a Prompt with the message inline — the post-refactor
+	// Prompt carries the full Message values, so writeback can
+	// stamp them without consulting any external index.
+	msg := Message{
 		ID:     "msg-1",
 		ChatID: cs.ID,
 		Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}},
-		Stage:  agent.MessageQueued,
 	}
-	cs.mu.Lock()
-	cs.messagesByID.Store(msg.ID, msg)
-	cs.mu.Unlock()
 
 	// Capture the bus event.
 	var capturedMsgID string
@@ -54,7 +52,7 @@ func TestWritebackMessageState_FiresOnPromptEndHook(t *testing.T) {
 	// Build a Prompt and call writebackMessageState.
 	p := &Prompt{
 		ID:            "p-1",
-		MessageIDs:    []string{msg.ID},
+		Messages:      []Message{msg},
 		LastMessageID: msg.ID,
 		EndedAt:       time.Now(),
 		EndReason:     PromptEndClean,
@@ -97,18 +95,17 @@ func TestWritebackMessageState_NoFireOnAgentEvent(t *testing.T) {
 }
 
 // TestQueueUserMessage_QueueFullReturns verifies that exceeding
-// QueueMaxMsgs returns ErrQueueFull and removes the message from
-// messagesByID (no ghost entries).
+// QueueMaxMsgs returns ErrQueueFull and the rejected message is
+// not surfaced by any subsequent Peek.
 func TestQueueUserMessage_QueueFullReturns(t *testing.T) {
 	cs := newChatSessionForTest("cs_test")
 
 	// Fill the queue.
 	for i := 0; i < QueueMaxMsgs; i++ {
-		msg := &Message{
+		msg := Message{
 			ID:     "msg-" + string(rune('a'+i)),
 			ChatID: cs.ID,
 			Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: "x"}},
-			Stage:  agent.MessageQueued,
 		}
 		if err := cs.QueueUserMessage(msg); err != nil {
 			t.Fatalf("QueueUserMessage #%d: %v", i, err)
@@ -116,19 +113,20 @@ func TestQueueUserMessage_QueueFullReturns(t *testing.T) {
 	}
 
 	// One more should fail.
-	extra := &Message{
+	extra := Message{
 		ID:     "msg-overflow",
 		ChatID: cs.ID,
 		Blocks: []agent.ContentBlock{{Type: agent.ContentText, Text: "x"}},
-		Stage:  agent.MessageQueued,
 	}
 	if err := cs.QueueUserMessage(extra); err != ErrQueueFull {
 		t.Errorf("err = %v, want ErrQueueFull", err)
 	}
 
-	// And the message should NOT be in messagesByID.
-	if cs.GetMessage(extra.ID) != nil {
-		t.Error("overflow message leaked into messagesByID")
+	// No ghost: Peek must not surface the rejected message.
+	for _, m := range cs.queue.Peek() {
+		if m.ID == "msg-overflow" {
+			t.Error("overflow message leaked into queue")
+		}
 	}
 }
 

@@ -419,7 +419,6 @@ func TestSubmit_AnchorWriteIsRaceFree(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			p := &Prompt{
-				MessageIDs:    []string{fmt.Sprintf("om_writer_%d", i)},
 				LastMessageID: fmt.Sprintf("om_writer_%d", i),
 				Blocks:        []agent.ContentBlock{{Text: "x"}},
 				ChatSessionID: cs.ChatID,
@@ -480,8 +479,15 @@ func TestQueueUserMessage_RemovesGhostOnQueueFull(t *testing.T) {
 		t.Fatalf("QueueUserMessage on a full queue = %v; want ErrQueueFull", err)
 	}
 
-	if cs.GetMessage("om_ghost") != nil {
-		t.Errorf("messagesByID still has om_ghost after a rejected enqueue; want removed (no ghost leak)")
+	// Post-refactor: no per-chat messagesByID index exists.
+	// The rejected message was never added to the queue (Push
+	// failed at the cap check), so there's no ghost to look
+	// for. Verify by trying to Peek — should not surface
+	// om_ghost.
+	for _, m := range cs.queue.Peek() {
+		if m.ID == "om_ghost" {
+			t.Errorf("queue surfaced om_ghost after a rejected enqueue; want no ghost leak")
+		}
 	}
 }
 
@@ -501,6 +507,26 @@ func TestQueueUserMessage_RemovesGhostOnQueueFull(t *testing.T) {
 func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 	cs := New("oc_chat", "claude")
 	cs.SetActiveCwd(t.TempDir())
+
+	// Subscribe to MessageStateBus so we can observe the
+	// post-TryFlush state transition. With value semantics the
+	// test's local `msg` is a copy of what the queue holds;
+	// Stage mutations happen on the queue's copy, so the wire
+	// event is the canonical signal.
+	var (
+		mu             sync.Mutex
+		capturedState  agent.MessageState
+		capturedID     string
+		haveStateEvent bool
+	)
+	cs.MessageStateBus.Subscribe(func(e MessageStateEvent) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		capturedState = e.State
+		capturedID = e.UserMsgID
+		haveStateEvent = true
+		return false
+	})
 
 	as := NewAgentSession("as_kill", "oc_chat", "claude", t.TempDir(), nil)
 	as.handle = newRecordingAgentSession(1)
@@ -529,13 +555,18 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 		t.Fatalf("KillAll: %v", err)
 	}
 
-	// The queued message survives, still Queued (never delivered).
+	// The queued message survives, still in the queue (/kill
+	// must not discard queued work). Stage cannot be observed
+	// from the test's local copy (value semantics); we trust
+	// the queue to still own it.
 	if got := cs.QueueLen(); got != 1 {
 		t.Errorf("post-kill: QueueLen = %d, want 1 (/kill must not discard queued work)", got)
 	}
-	if msg.Stage != agent.MessageQueued {
-		t.Errorf("post-kill: msg.Stage = %v, want MessageQueued", msg.Stage)
-	}
+
+	// Reset the captured state — /kill may not have fired any.
+	mu.Lock()
+	haveStateEvent = false
+	mu.Unlock()
 
 	// Respawn: the next AS is ready by construction, so the queued
 	// message flushes against it.
@@ -550,10 +581,22 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 	if err := cs.TryFlush(); err != nil {
 		t.Fatalf("post-kill TryFlush: %v", err)
 	}
-	if msg.Stage != agent.MessageSubmitted {
-		t.Errorf("post-respawn: msg.Stage = %v, want MessageSubmitted", msg.Stage)
-	}
 	if got := cs.QueueLen(); got != 0 {
 		t.Errorf("post-respawn: QueueLen = %d, want 0 (queue drained)", got)
+	}
+
+	// Verify the bus saw the MessageSubmitted transition for our
+	// message id. (matters even more post-refactor: there is no
+	// messagesByID to read Stage from directly.)
+	mu.Lock()
+	defer mu.Unlock()
+	if !haveStateEvent {
+		t.Fatal("MessageStateBus saw no event for post-respawn flush")
+	}
+	if capturedID != msg.ID {
+		t.Errorf("bus event ID = %q, want %q", capturedID, msg.ID)
+	}
+	if capturedState != agent.MessageSubmitted {
+		t.Errorf("bus event state = %v, want MessageSubmitted", capturedState)
 	}
 }

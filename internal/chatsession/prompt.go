@@ -20,9 +20,10 @@
 //     for this AgentSession. `runReadPump` reads
 //     `as.currentPrompt.LastMessageID` for the EventHandler anchor.
 //   - End: `endPrompt(reason)` sets EndedAt + EndReason and clears
-//     `AgentSession.currentPrompt`. It does NOT iterate
-//     `Prompt.MessageIDs` — those messages already received their
-//     terminal Stage at Submitted time (no fan-out needed).
+//     `AgentSession.currentPrompt`. Messages stay attached to
+//     the Prompt via `Prompt.Messages` for the lifetime of the
+//     prompt's readpump subscribers; once cleared, no consumer
+//     holds a reference and they become eligible for GC.
 //
 // Storage: `*Prompt` lives on `AgentSession.currentPrompt`, NOT on
 // ChatSession. The write is performed under `ChatSession.mu` (see
@@ -62,15 +63,24 @@ type Prompt struct {
 	// see docs/feat/message_lifecycle.md §8 out-of-scope).
 	AgentSessionID string
 
-	// MessageIDs is the ordered list of Message.ID values merged
-	// into this Prompt. Populated at construction from the drained
-	// InputBuffer queue. Empty slice is invalid (Prompt requires
-	// at least one message).
-	MessageIDs []string
+	// Messages is the ordered list of Message values merged into
+	// this Prompt, in the same order they were pulled from
+	// the queue. Populated at construction from the drained
+	// queue. Empty slice is invalid (Prompt requires at least
+	// one message).
+	//
+	// Carrying the full values — instead of just IDs — lets
+	// the prompt-end path (ChatSession.writebackMessageState)
+	// and the AS-side readpump reach per-message data without
+	// needing a per-chat ID→Message index. The Messages are
+	// immutable; no consumer of this Prompt mutates them.
+	Messages []Message
 
-	// LastMessageID is the last entry of MessageIDs — the anchor
-	// for the EventHandler (placeholder card mounts to this
-	// message). `runReadPump` reads it from `as.currentPrompt`.
+	// LastMessageID is the ID of the last entry in Messages —
+	// the anchor for the EventHandler (placeholder card mounts
+	// to this message). `runReadPump` reads it from
+	// `as.currentPrompt`. Multi-message turns anchor on the
+	// LAST message id, matching the pre-Phase-1 behavior.
 	LastMessageID string
 
 	// Blocks is the merged ContentBlock slice that was actually

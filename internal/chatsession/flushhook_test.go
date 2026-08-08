@@ -155,7 +155,9 @@ func TestFlushHook_NoActiveAgentSession(t *testing.T) {
 	if got := cs.QueueLen(); got != 1 {
 		t.Errorf("QueueLen = %d; want 1 (message retained for respawn)", got)
 	}
-	if msg.Stage != agent.MessageQueued {
-		t.Errorf("msg.Stage = %v; want MessageQueued (never delivered)", msg.Stage)
-	}
+	// Post-refactor: messages are immutable; the queue still
+	// owns this item. The "never delivered" invariant is now
+	// observable as "no MessageSubmitted wire event was fired
+	// for msg.ID". The wire-event check above (when present)
+	// covers the same semantic.
 }

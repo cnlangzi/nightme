@@ -3,76 +3,43 @@ package gtw
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode"
 )
 
-// SlugMaxLen caps the length of the slug portion of branch / worktree
-// names. Git refuses refs over 100 bytes, and 30 leaves room for the
-// `fix/<id>-` prefix and the `-v<N>` suffix on retry.
-const SlugMaxLen = 30
-
-// IssueIDPrefix is the constant prefix on every /gtw fix branch
-// name (`fix/42-...`). Hard-coded; teams that need a different
-// namespace should fork this constant.
-const IssueIDPrefix = "fix"
-
-// DeriveBranch builds the canonical branch name for a /gtw fix claim.
+// ccPrefixRE matches conventional-commit / bracketed-tag prefixes
+// at the start of an issue title:
 //
-//	issue=42, title="Login state expiration" → "fix/42-login-state-expiration"
-//	issue=42, title=""                      → "fix/42"   (no slug)
+//	"feat(login): state expires" → matches; prefix=feat, scope=login
+//	"feat: state expires"        → matches; prefix=feat, scope=""
+//	"[BUG] state expires"        → matches; bracket=BUG
+//	"[BUG-123] state expires"    → matches; bracket=BUG-123
+//	"Login state expires"        → no match
 //
-// The slug portion is the lowercase, ASCII-only, dash-joined form
-// of the title, truncated to SlugMaxLen runes. The full name is
-// guaranteed to be a valid git ref-name component (no spaces, no
-// leading dashes, no trailing slashes).
-func DeriveBranch(issueID int, title string) string {
-	slug := DeriveSlug(issueID, title)
-	// DeriveSlug returns either "<id>" (no usable title letters)
-	// or a clean slug. If the slug already starts with the issue
-	// id (legacy callers / future expansion), drop the duplicate.
-	if strings.HasPrefix(slug, fmt.Sprintf("%d-", issueID)) || slug == fmt.Sprintf("%d", issueID) {
-		// Slug already includes the id; don't double-prepend.
-		return fmt.Sprintf("%s/%s", IssueIDPrefix, slug)
-	}
-	return fmt.Sprintf("%s/%d-%s", IssueIDPrefix, issueID, slug)
-}
+// Detection is intentionally minimal — we accept what's standard
+// in the wild, not a full grammar. Edge cases fall through to
+// the whole-title slugify.
+var ccPrefixRE = regexp.MustCompile(
+	`^(?:` +
+		`\[(?P<bracket>[A-Z][A-Z0-9_-]*)\]` +
+		`|(?P<type>[a-z]+)(?:\((?P<scope>[^)]+)\))?:` +
+		`)\s*`,
+)
 
-// DeriveSlug returns the slug portion of the worktree name
-// (the part after "<issueID>-"). Returns the bare issue id as
-// a string when the title has no usable ASCII letters. Used
-// both for the branch name and for the worktree directory
-// name (F-45 §6.4); DeriveBranch / WorktreePath compose the
-// full string with the issue-id prefix.
-func DeriveSlug(issueID int, title string) string {
-	cleaned := slugify(title)
-	if cleaned == "" {
-		return fmt.Sprintf("%d", issueID)
-	}
-	// Reserve room for the "<id>-" prefix that the caller will
-	// prepend. We truncate the slug component (not the final
-	// composed string) so DeriveBranch can compute its own length.
-	budget := max(SlugMaxLen-len(fmt.Sprintf("%d-", issueID)), 0)
-	if len(cleaned) > budget {
-		cleaned = cleaned[:budget]
-		cleaned = strings.TrimRight(cleaned, "-")
-	}
-	return cleaned
-}
-
-// slugify converts an issue title into a git-safe slug component.
+// slugify converts an input string into a git-safe slug component.
 // The transformation is:
 //
 //  1. Lowercase.
 //  2. Replace any non-[a-z0-9] run with a single "-" (collapse
 //     runs to avoid "foo--bar" from "foo - bar").
 //  3. Strip leading and trailing "-" so the result does not start
-//     or end with a separator (which would produce a ref like
-//     "fix/42--foo" or "fix/42-foo-").
+//     or end with a separator.
 //
-// Empty result is returned for titles that have no ASCII letter
+// Empty result is returned for inputs that have no ASCII letter
 // or digit at all (CJK, emoji-only, whitespace-only). Callers
-// should treat empty as "use bare issue id".
+// should treat empty as a special-case signal (e.g. fall back to
+// `fix-<id>` for ID mode, or return an error for local mode).
 func slugify(title string) string {
 	if title == "" {
 		return ""
@@ -108,12 +75,92 @@ func slugify(title string) string {
 	return out
 }
 
+// DeriveBranchFromTitle produces the branch name for the ID-mode
+// `/gtw fix <issue-id>` flow. The branch is derived from the
+// remote issue's title with these rules:
+//
+//  1. Try conventional-commit / bracketed-tag prefix detection
+//     (see ccPrefixRE). If matched, extract the prefix
+//     components and convert the `:` / `()` separators to `-`.
+//     Then slugify the remainder and concatenate. The branch
+//     ends up looking like `feat-login-state-expires` (or
+//     `bug-state-expires` for `[BUG] state expires`).
+//  2. If no prefix matches, run the whole title through
+//     slugify() (drop non-ASCII, lowercase, dash-collapse).
+//  3. If the result is empty (e.g. the title was pure CJK / emoji),
+//     fall back to `fix-<id>` — this preserves the "we still need
+//     to make progress on issue #N" signal even when the title
+//     yields no usable ref characters.
+//
+// F-XX: this replaces the old DeriveBranch which always emitted
+// `fix/<id>-<slug>`. The new convention puts no `fix/` ref
+// namespace — the slug itself is the branch name.
+func DeriveBranchFromTitle(title string, issueID int) string {
+	prefix := ""
+	rest := title
+
+	if m := ccPrefixRE.FindStringSubmatchIndex(title); m != nil {
+		// Pull matched groups out of title via the FindStringSubmatch
+		// capture groups. SubmatchIndex returns [start,end] pairs in
+		// the order the named groups appear in the regex; we index
+		// by subexp index (1-based) to read each named group.
+		groups := ccPrefixRE.FindStringSubmatch(title)
+		bracket := groups[ccPrefixRE.SubexpIndex("bracket")]
+		typ := groups[ccPrefixRE.SubexpIndex("type")]
+		scope := groups[ccPrefixRE.SubexpIndex("scope")]
+
+		switch {
+		case bracket != "":
+			prefix = strings.ToLower(bracket) + "-"
+		case typ != "":
+			if scope != "" {
+				prefix = typ + "-" + scope + "-"
+			} else {
+				prefix = typ + "-"
+			}
+		}
+		// Slice off the matched prefix + trailing whitespace from
+		// the input that we'll slugify.
+		rest = title[m[1]:]
+	}
+
+	slug := slugify(rest)
+	if slug == "" {
+		// Whole-title fallback when even the prefix is unusable.
+		return fmt.Sprintf("fix-%d", issueID)
+	}
+	return prefix + slug
+}
+
+// DeriveBranchFromName produces the branch name for the local-mode
+// `/gtw fix --name <branch>` flow. The user supplies the literal
+// name; we slugify it directly (no conventional-commit detection —
+// the user is choosing the name themselves, not naming an issue).
+//
+// Returns an error when the slug is empty (the input was empty /
+// pure-CJK / pure-symbol). Local mode has no issue id to fall
+// back to, so we surface a clear error and let the user retry
+// with a valid name.
+func DeriveBranchFromName(name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("branch name is empty")
+	}
+	slug := slugify(name)
+	if slug == "" {
+		return "", fmt.Errorf(
+			"branch name %q produces empty slug — use ASCII letters / digits / dashes",
+			name,
+		)
+	}
+	return slug, nil
+}
+
 // WorktreePath builds the absolute path of the per-fix worktree
 // directory under <sibling-of-repo>/<repo>.nightme/<slug>/. F-45 §6.1.
 //
 //	repoRoot = "/home/dev/code/nightme"
-//	slug     = "42-login-state-expiration"
-//	→ "/home/dev/code/nightme.nightme/42-login-state-expiration"
+//	slug     = "login-state-expiration"     (F-XX; was "42-login-state-expiration")
+//	→ "/home/dev/code/nightme.nightme/login-state-expiration"
 //
 // The sibling layout puts the worktree OUTSIDE the repository root
 // so build tools, linters, and codegraph don't see duplicate

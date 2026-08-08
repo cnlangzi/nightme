@@ -57,9 +57,11 @@ func (f *Factory) Spec() command.Spec {
 		Name:    "gtw",
 		Aliases: []string{"team"},
 		Summary: "GTW: Git-driven team workflow (claim, label, worktree).",
-		Usage: "/gtw fix <issue-id>     claim, label, and create a worktree\n" +
-			"/gtw list                 list pending gtw drafts in this chat\n" +
-			"/gtw reset                clear gtw state for this chat (debug)",
+		Usage: "/gtw fix <issue-id>              claim, label, and create a worktree\n" +
+			"/gtw fix --name <branch>         create a local worktree (no issue)\n" +
+			"/gtw fix -n <branch>             short form of --name\n" +
+			"/gtw list                        list pending gtw drafts in this chat\n" +
+			"/gtw reset                       clear gtw state for this chat (debug)",
 	}
 }
 
@@ -94,70 +96,109 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, input 
 	}, nil
 }
 
-// runFix handles `/gtw fix <issue-id>`. The main fix flow:
-//  1. Resolve activeCwd (need an active chat session with
-//     workspace).
-//  2. Build a Sender / slot / drafts shim that adapts the
-//     *Manager back to the legacy ContextSlot / DraftsMap
-//     interfaces (RunFix still uses those — refactoring RunFix
-//     itself is out of scope for B2.4).
-//  3. Call RunFix with the same arguments the gateway used to
-//     pass.
+// runFix handles `/gtw fix <issue-id>` and `/gtw fix --name <branch>`.
+// F-XX splits the entry into two modes at the factory boundary
+// so RunFix sees a single Mode constant.
+//
+// F-51: command.Commander prefixes Args with the command name
+// ("gtw"), then the subcommand ("fix"), then the subcommand's
+// args. So Args[2] is the first user-supplied token.
 func (f *Factory) runFix(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
 	if len(input.Args) < 3 {
 		return &command.SlashOutput{
-			Reply:    "Usage: /gtw fix <issue-id>",
-			Consumed: true,
-		}, nil
-	}
-	// F-51: command.Commander prefixes Args with the command
-	// name ("gtw"), then the subcommand ("fix"), then the
-	// subcommand's args. So Args[2] is the issue id.
-	//
-	// Pre-validate locally with parseIssueID (not strconv.Atoi)
-	// so "#42" is accepted — the GitHub/GitLab convention users
-	// have muscle memory for. Validation also keeps the
-	// SlashOutput path predictable when RunFix's deps.Send is nil
-	// (some tests construct Factory without HandlerDeps).
-	issueArg := strings.TrimSpace(input.Args[2])
-	if _, err := parseIssueID(issueArg); err != nil {
-		return &command.SlashOutput{
-			Reply:    fmt.Sprintf("Invalid issue id: %q (%v)", issueArg, err),
+			Reply:    "Usage: /gtw fix <issue-id>  |  /gtw fix --name <branch>",
 			Consumed: true,
 		}, nil
 	}
 
-	// Resolve per-chat Sender. The runtime wires a sender factory
-	// at startup that lazy-creates a Sender on first GetSender miss,
-	// so this call always returns a non-nil Sender for known chats.
-	sender := f.mgr.GetSender(input.ChatID)
-	if sender.ActiveCwd() == "" {
+	mode, rawArg, err := parseFixMode(input.Args[2:])
+	if err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v", err),
+			Consumed: true,
+		}, nil
+	}
+
+	// Local-mode quick validation: the slug must not be empty
+	// after normalisation. Doing this here (before RunFix) keeps
+	// the SlashOutput path simple when deps.Send is nil in tests.
+	if mode == ModeLocal {
+		if _, err := DeriveBranchFromName(rawArg); err != nil {
+			return &command.SlashOutput{
+				Reply:    fmt.Sprintf("❌ %v", err),
+				Consumed: true,
+			}, nil
+		}
+	}
+	// ID-mode quick validation: pre-validate locally with
+	// parseIssueID (not strconv.Atoi) so "#42" is accepted —
+	// the GitHub/GitLab convention users have muscle memory for.
+	if mode == ModeRemote {
+		if _, err := parseIssueID(rawArg); err != nil {
+			return &command.SlashOutput{
+				Reply:    fmt.Sprintf("Invalid issue id: %q (%v)", rawArg, err),
+				Consumed: true,
+			}, nil
+		}
+	}
+
+	// Resolve per-chat ChatSession. The runtime wires a lookup
+	// at startup that lazy-creates a *chatsession.ChatSession on
+	// first GetChatSession miss.
+	cs := f.mgr.GetChatSession(input.ChatID)
+	if cs == nil || cs.ActiveCwd() == "" {
 		return &command.SlashOutput{
 			Reply:    "No active workspace. Send /cwd <path> first.",
 			Consumed: true,
 		}, nil
 	}
 
-	// Build slot / drafts shims that route to the Manager
-	// (so the legacy RunFix code keeps working without
-	// refactor).
+	// Build slot / drafts shims that route to the Manager.
 	slot := &managerContextSlot{mgr: f.mgr, chatID: input.ChatID}
 	drafts := &managerDraftsMap{mgr: f.mgr, chatID: input.ChatID}
 
-	// RunFix signature: (ctx, cs, slot, drafts, deps, chatID,
-	// messageID, args). Reply is sent inline via deps.Send;
-	// *Result only carries Consumed / Dropped for the runtime.
-	_, err := RunFix(ctx, sender, slot, drafts, f.deps, input.ChatID, input.MessageID, input.Args[2:])
+	// RunFix signature: (ctx, mode, cs, slot, drafts, deps,
+	// chatID, messageID, args). Reply is sent inline via
+	// deps.Send; *Result only carries Consumed / Dropped for
+	// the runtime.
+	_, err = RunFix(ctx, mode, cs, slot, drafts, f.deps, input.ChatID, input.MessageID, []string{rawArg})
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw fix failed: %v", err),
 			Consumed: true,
 		}, nil
 	}
-	// RunFix sent its reply via deps.Send — return an empty
-	// SlashOutput marked Consumed so the gateway doesn't
-	// double-send.
 	return &command.SlashOutput{Consumed: true}, nil
+}
+
+// parseFixMode inspects the argv tail after "fix" and decides
+// whether the call is the issue-id (ModeRemote) or
+// --name/-n (ModeLocal) flow. Returns the mode plus the raw
+// value (issue id or branch name).
+//
+// Format:
+//
+//	[issue-id]                    → ModeRemote, raw = issue-id
+//	--name <branch>               → ModeLocal,  raw = branch
+//	-n <branch>                   → ModeLocal,  raw = branch
+//
+// Errors on missing value after the flag, or on
+// unrecognised leading tokens.
+func parseFixMode(argv []string) (Mode, string, error) {
+	if len(argv) < 1 {
+		return "", "", fmt.Errorf("missing argument")
+	}
+	switch argv[0] {
+	case "--name", "-n":
+		if len(argv) < 2 || strings.TrimSpace(argv[1]) == "" {
+			return "", "", fmt.Errorf("--name requires a branch name argument")
+		}
+		return ModeLocal, strings.TrimSpace(argv[1]), nil
+	default:
+		// Bare argument → treat as issue id. Validation lives
+		// in parseIssueID at the caller.
+		return ModeRemote, strings.TrimSpace(argv[0]), nil
+	}
 }
 
 // runList handles `/gtw list`. Lists pending gtw drafts in
@@ -173,8 +214,15 @@ func (f *Factory) runList(_ command.RuntimeServices, input command.SlashInput) (
 	var b strings.Builder
 	fmt.Fprintf(&b, "/gtw list — %d in this chat:\n", len(drafts))
 	for i, d := range drafts {
-		fmt.Fprintf(&b, "  [%d] kind=%s  issueID=%d  branch=%q  repo=%q  createdAt=%s\n",
-			i, d.Kind, d.Payload.IssueID, d.Payload.Branch, d.Payload.Repo,
+		// Local-mode drafts have IssueID == -1 (no remote issue).
+		// Display "(local)" instead of "-1" so the user doesn't
+		// think the system is in a bad state.
+		issueLabel := fmt.Sprintf("%d", d.Payload.IssueID)
+		if d.Payload.IssueID == -1 {
+			issueLabel = "(local)"
+		}
+		fmt.Fprintf(&b, "  [%d] kind=%s  issueID=%s  branch=%q  repo=%q  createdAt=%s\n",
+			i, d.Kind, issueLabel, d.Payload.Branch, d.Payload.Repo,
 			d.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
 	}
 	return &command.SlashOutput{Reply: b.String(), Consumed: true}, nil
@@ -186,7 +234,7 @@ func (f *Factory) runReset(_ command.RuntimeServices, input command.SlashInput) 
 	before := f.mgr.DraftCount(input.ChatID)
 	f.mgr.Reset(input.ChatID)
 	return &command.SlashOutput{
-		Reply:    fmt.Sprintf("✅ /gtw reset — cleared gtwContext + %d draft(s) for this chat", before),
+		Reply:    fmt.Sprintf("✅ /gtw reset — cleared Context + %d draft(s) for this chat", before),
 		Consumed: true,
 	}, nil
 }

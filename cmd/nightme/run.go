@@ -329,37 +329,31 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// gateway only sees the slash-command path via WithCommander
 	// (the shim below) and the reaction path via WithActionHandler.
 
-	// F-51: gtw moved to internal/command/gtw. Wiring is now
-	// (a) gtw.Manager owns the state, (b) services.ReactionRouter
-	// dispatches reactions, (c) command.Commander routes slash
-	// commands, (d) the runtime shim (defined below) translates
-	// *gateway.InboundMessage ↔ command.SlashInput /
-	// *CommandResult. The old gateway.RegisterGTW /
-	// RegisterGTWAction helpers were deleted in F-51 (their
-	// implementations moved to the new gtw.Factory + Manager).
+	// F-XX: gtw directly uses *chatsession.ChatSession (the
+	// Sender interface is gone). Wiring is now:
+	//   (a) gtw.Manager owns the state,
+	//   (b) services.ReactionRouter dispatches reactions,
+	//   (c) command.Commander routes slash commands,
+	//   (d) this runtime shim translates *gateway.InboundMessage
+	//       ↔ command.SlashInput / *CommandResult,
+	//   (e) SetGetChatSession hands gtw a per-chat lookup so
+	//       RunFix / HandleDraftReaction can call
+	//       cs.ActiveCwd / SetActiveCwd / QueueUserMessage
+	//       directly.
 	gtwDeps := gtw.HandlerDeps{
 		Git:    gtw.ExecGitRunner{},
 		Prober: &gtw.ExecHTTPProber{},
-		// Send / SendCard are populated lazily by the chatSessionSender
-		// (each chat gets its own Sender via gtwMgr.senderFactory).
-		// gtw.RunFix / HandleDraftReaction use these per-chat Senders,
-		// not the HandlerDeps-level Send. Leaving them nil here would
-		// not crash the per-chat paths, but keeping the field explicit
-		// makes the F-51 wiring contract easier to audit.
 	}
 	gtwMgr := gtw.NewManager()
 	gtwMgr.SetHandlerDeps(gtwDeps)
 
-	// F-51 P0 fix: wire the per-chat Sender factory. Without
-	// this, /gtw fix and reaction paths would nil-deref on
-	// GetSender. The factory lazily creates a Sender on the
-	// first /gtw call (or reaction) per chat, then caches it.
-	gtwMgr.SetSenderFactory(func(chatID string) gtw.Sender {
-		return newChatSessionSender(
-			chatID,
-			mgr.GetOrCreate(chatID, cfg.Primary),
-			newChannelAdapter(ch),
-		)
+	// F-XX: wire the per-chat ChatSession lookup. Without this,
+	// /gtw fix and reaction paths would nil-deref on
+	// GetChatSession. The lookup lazily creates a ChatSession
+	// via mgr.GetOrCreate on first /gtw call (or reaction) per
+	// chat, then caches it.
+	gtwMgr.SetGetChatSession(func(chatID string) *chatsession.ChatSession {
+		return mgr.GetOrCreate(chatID, cfg.Primary)
 	})
 
 	// Reaction router (services) — gtw registers its

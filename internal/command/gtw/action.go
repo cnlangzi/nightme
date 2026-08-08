@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command/services"
 )
 
@@ -16,8 +17,8 @@ import (
 //
 // Replaces the pre-F-51 `HandleAction(ctx, deps, cs, slot,
 // drafts, ev)` signature with `(ctx, m, deps, ev)` — the Manager
-// owns context + drafts + per-chat Sender lookup, so the slot /
-// drafts / cs parameters collapse into one *Manager.
+// owns context + drafts + per-chat ChatSession lookup, so the
+// slot / drafts / cs parameters collapse into one *Manager.
 //
 // Returns (true, nil) when the reaction was consumed (a draft was
 // found AND the emoji was one of the documented set for that draft
@@ -25,6 +26,10 @@ import (
 // (false, nil) when no draft matches OR the emoji is unrecognised;
 // the caller falls through and the draft stays in place for the
 // user to re-react.
+//
+// F-XX: the per-chat Sender interface is gone; executors take
+// *chatsession.ChatSession directly so they can call
+// SetActiveCwd without going through an interface adapter.
 func HandleDraftReaction(
 	ctx context.Context,
 	m *Manager,
@@ -49,12 +54,12 @@ func HandleDraftReaction(
 		"target_msg_id", ev.TargetMsgID,
 		"draft_kind", string(draft.Kind),
 		"bot_msg_id", draft.BotMessageID)
-	sender := m.GetSender(ev.ChatID)
+	cs := m.GetChatSession(ev.ChatID)
 	switch draft.Kind {
 	case DraftFixBranchExists:
-		return executeBranchExistsAction(ctx, m, deps, sender, ev, draft), nil
+		return executeBranchExistsAction(ctx, m, deps, cs, ev, draft), nil
 	case DraftFixWorktreeFail:
-		return executeWorktreeFailAction(ctx, m, deps, sender, ev, draft), nil
+		return executeWorktreeFailAction(ctx, m, deps, cs, ev, draft), nil
 	case DraftFixLabelTaken:
 		// Reserved for §5.3.2; not emitted by v1.
 		return false, nil
@@ -72,16 +77,16 @@ func executeBranchExistsAction(
 	ctx context.Context,
 	m *Manager,
 	deps HandlerDeps,
-	sender Sender,
+	cs *chatsession.ChatSession,
 	ev services.ReactionEvent,
 	draft *Draft,
 ) bool {
 	p := draft.Payload
-	if p.Repo == "" {
-		// Defensive: shouldn't happen (the runtime writes the
-		// repo into the payload at emit time), but if it does
-		// the draft is broken — take it and surface a clear
-		// error so the user can re-run /gtw fix.
+	// Defensive check: only ID-mode drafts (IssueID > 0) carry
+	// a Repo / Provider — local-mode drafts (IssueID == -1)
+	// legitimately have empty Repo. If an ID-mode draft shows
+	// up with no Repo, it's broken; surface that explicitly.
+	if p.IssueID != -1 && p.Repo == "" {
 		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
 		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), "❌ Internal error: draft missing repo.")
 		return true
@@ -90,9 +95,12 @@ func executeBranchExistsAction(
 	switch ReactionKind(ev.Emoji) {
 	case ReactionCancel:
 		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
-		rollbackOK := true
-		resultText := fmt.Sprintf("❌ Cancelled fix #%d.", p.IssueID)
-		if p.LabelAdded {
+		resultText := cancelResultText(p)
+		// Label rollback only applies to ID-mode drafts (local
+		// mode never added a label). resultText is set to a
+		// "manual cleanup" hint when the provider is unreachable
+		// so the user knows the label was NOT removed.
+		if p.LabelAdded && p.Repo != "" {
 			owner, repo, _ := splitOwnerRepo(p.Repo)
 			provider, providerErr := NewProvider(ProviderKind(p.Provider), "")
 			switch {
@@ -100,18 +108,16 @@ func executeBranchExistsAction(
 				resultText = fmt.Sprintf(
 					"⚠️ Cancelled fix #%d locally, but could not reach the provider to remove `nightme/wip` label: %v\n  Manual cleanup: `gh issue edit %d --remove-label nightme/wip` (or `glab issue update %d --unlabel nightme/wip`).",
 					p.IssueID, providerErr, p.IssueID, p.IssueID)
-				rollbackOK = false
 			default:
 				_ = provider.RemoveLabel(ctx, owner, repo, p.IssueID, LabelWIP)
 			}
 		}
 		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), resultText)
-		_ = rollbackOK
 		return true
 
 	case ReactionNewV2:
 		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
-		repoRoot := repoRootFromSender(sender)
+		repoRoot := repoRootFromChatSession(cs)
 		resultText := ""
 		for n := range 9 {
 			n += 2 // 2..10 inclusive
@@ -129,18 +135,19 @@ func executeBranchExistsAction(
 				resultText = fmt.Sprintf("❌ git worktree add: %v", err)
 				break
 			}
-			if err := sender.SetActiveCwd(worktree); err != nil {
+			if err := cs.SetActiveCwd(worktree); err != nil {
 				resultText = fmt.Sprintf("❌ SetActiveCwd: %v", err)
 				break
 			}
 			m.SetContext(ev.ChatID, Context{
+				Mode:      ModeFromDraftPayload(p),
 				Issue:     p.IssueID,
 				Branch:    variant,
 				Worktree:  worktree,
 				State:     StateFixing,
 				UpdatedAt: deps.Now(),
 			})
-			resultText = fmt.Sprintf("✅ Fix #%d 就绪(使用 %s)。", p.IssueID, variant)
+			resultText = variantReadyResultText(p, variant)
 			break
 		}
 		if resultText == "" {
@@ -151,17 +158,18 @@ func executeBranchExistsAction(
 
 	case ReactionJoin:
 		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
-		repoRoot := repoRootFromSender(sender)
+		repoRoot := repoRootFromChatSession(cs)
 		existingPath, err := WorktreeListPath(ctx, repoRoot, p.Branch, deps.Git)
 		resultText := ""
 		if err != nil {
 			resultText = fmt.Sprintf("❌ git worktree list: %v", err)
 		} else if existingPath == "" {
 			resultText = fmt.Sprintf("❌ Branch %s exists but no worktree holds it; run `git worktree add` manually.", p.Branch)
-		} else if err := sender.SetActiveCwd(existingPath); err != nil {
+		} else if err := cs.SetActiveCwd(existingPath); err != nil {
 			resultText = fmt.Sprintf("❌ SetActiveCwd: %v", err)
 		} else {
 			m.SetContext(ev.ChatID, Context{
+				Mode:      ModeFromDraftPayload(p),
 				Issue:     p.IssueID,
 				Branch:    p.Branch,
 				Worktree:  existingPath,
@@ -183,7 +191,7 @@ func executeWorktreeFailAction(
 	ctx context.Context,
 	m *Manager,
 	deps HandlerDeps,
-	sender Sender,
+	cs *chatsession.ChatSession,
 	ev services.ReactionEvent,
 	draft *Draft,
 ) bool {
@@ -197,9 +205,12 @@ func executeWorktreeFailAction(
 	case ReactionCancel:
 		slog.Default().Warn("F-46 debug: executeWorktreeFailAction → ReactionCancel")
 		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
-		rollbackOK := true
-		resultText := fmt.Sprintf("❌ Cancelled fix #%d.", p.IssueID)
-		if p.LabelAdded {
+		resultText := cancelResultText(p)
+		// Label rollback only applies to ID-mode drafts (local
+		// mode never added a label). resultText is set to a
+		// "manual cleanup" hint when the provider is unreachable
+		// so the user knows the label was NOT removed.
+		if p.LabelAdded && p.Repo != "" {
 			owner, repo, _ := splitOwnerRepo(p.Repo)
 			provider, providerErr := NewProvider(ProviderKind(p.Provider), "")
 			switch {
@@ -207,35 +218,34 @@ func executeWorktreeFailAction(
 				resultText = fmt.Sprintf(
 					"⚠️ Cancelled fix #%d locally, but could not reach the provider to remove `nightme/wip` label: %v\n  Manual cleanup: `gh issue edit %d --remove-label nightme/wip` (or `glab issue update %d --unlabel nightme/wip`).",
 					p.IssueID, providerErr, p.IssueID, p.IssueID)
-				rollbackOK = false
 			default:
 				_ = provider.RemoveLabel(ctx, owner, repo, p.IssueID, LabelWIP)
 			}
 		}
 		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), resultText)
-		_ = rollbackOK
 		return true
 
 	case ReactionRetry:
 		slog.Default().Warn("F-46 debug: executeWorktreeFailAction → ReactionRetry")
 		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
-		repoRoot := repoRootFromSender(sender)
+		repoRoot := repoRootFromChatSession(cs)
 		worktree := WorktreePath(repoRoot, p.Slug)
 		err := WorktreeAdd(ctx, repoRoot, p.Branch, worktree, "HEAD", deps.Git)
 		resultText := ""
 		if err != nil {
 			resultText = fmt.Sprintf("❌ Retry failed: %v", err)
-		} else if err := sender.SetActiveCwd(worktree); err != nil {
+		} else if err := cs.SetActiveCwd(worktree); err != nil {
 			resultText = fmt.Sprintf("❌ SetActiveCwd: %v", err)
 		} else {
 			m.SetContext(ev.ChatID, Context{
+				Mode:      ModeFromDraftPayload(p),
 				Issue:     p.IssueID,
 				Branch:    p.Branch,
 				Worktree:  worktree,
 				State:     StateFixing,
 				UpdatedAt: deps.Now(),
 			})
-			resultText = fmt.Sprintf("✅ Fix #%d 就绪(重试成功)。", p.IssueID)
+			resultText = variantReadyResultText(p, p.Branch)
 		}
 		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), resultText)
 		return true
@@ -287,17 +297,21 @@ func splitOwnerRepo(s string) (string, string, error) {
 	return s[:idx], s[idx+1:], nil
 }
 
-// repoRootFromSender returns the repo root given the active cwd.
+// repoRootFromChatSession returns the repo root given the active
+// cwd on the ChatSession.
 //
 // gtw's worktree layout is sibling/<repo>.nightme/<slug>/, so the
 // active cwd (a specific worktree) is 2 levels below the worktree
 // parent + 1 level above the repo. The repo is the worktree
 // parent with the `.nightme` suffix stripped.
-func repoRootFromSender(sender Sender) string {
-	if sender == nil {
+//
+// F-XX: replaces repoRootFromSender; takes
+// *chatsession.ChatSession directly.
+func repoRootFromChatSession(cs *chatsession.ChatSession) string {
+	if cs == nil {
 		return ""
 	}
-	cwd := sender.ActiveCwd()
+	cwd := cs.ActiveCwd()
 	if cwd == "" {
 		return ""
 	}
@@ -306,4 +320,35 @@ func repoRootFromSender(sender Sender) string {
 		return strings.TrimSuffix(worktreeParent, ".nightme")
 	}
 	return worktreeParent
+}
+
+// ModeFromDraftPayload infers the Mode for the new Context
+// being written by an action handler. Local-mode drafts (the
+// local branch flow) have IssueID == -1; everything else is
+// Remote.
+func ModeFromDraftPayload(p FixDraftPayload) Mode {
+	if p.IssueID == -1 {
+		return ModeLocal
+	}
+	return ModeRemote
+}
+
+// cancelResultText formats the user-visible "cancelled"
+// reply. Local-mode drafts omit the "#<id>" prefix; ID-mode
+// drafts include it.
+func cancelResultText(p FixDraftPayload) string {
+	if p.IssueID == -1 {
+		return "❌ Cancelled local worktree."
+	}
+	return fmt.Sprintf("❌ Cancelled fix #%d.", p.IssueID)
+}
+
+// variantReadyResultText formats the "you now have a fresh
+// worktree / variant branch" reply. Local mode omits the
+// "#<id>" reference; ID mode keeps it.
+func variantReadyResultText(p FixDraftPayload, branch string) string {
+	if p.IssueID == -1 {
+		return fmt.Sprintf("✅ Local worktree 就绪(使用 %s)。", branch)
+	}
+	return fmt.Sprintf("✅ Fix #%d 就绪(使用 %s)。", p.IssueID, branch)
 }

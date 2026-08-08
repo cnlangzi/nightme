@@ -59,7 +59,7 @@ type runDeps struct {
 	newChannel        func(*config.Config) (channel.Channel, error)
 	signals           <-chan os.Signal
 	cleanup           bool
-	skipFeishuAuth    bool
+	skipFeishuLogin   bool
 	onReady           func()
 
 	// registerHealth, if non-nil, is called after the channel is
@@ -157,7 +157,7 @@ func withChannel(deps runDeps, channelName string) runDeps {
 	case "feishu", "":
 		// default — feishu.NewAdapter
 	case "echo":
-		deps.skipFeishuAuth = true
+		deps.skipFeishuLogin = true
 		deps.newChannel = func(*config.Config) (channel.Channel, error) {
 			return echo.New("echo", os.Stdout), nil
 		}
@@ -221,8 +221,8 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	if cfg == nil {
 		return errors.New("run: load config: returned nil config")
 	}
-	if !deps.skipFeishuAuth && (cfg.Feishu.AppID == "" || cfg.Feishu.AppSecret == "") {
-		return errors.New("run: Feishu credentials are not configured; run `nightme auth login feishu`")
+	if !deps.skipFeishuLogin && (cfg.Feishu.AppID == "" || cfg.Feishu.AppSecret == "") {
+		return errors.New("run: Feishu credentials are not configured; run `nightme login feishu`")
 	}
 
 	csFile, err := deps.openChatSessions(cfg)

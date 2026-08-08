@@ -8,10 +8,10 @@ import (
 	"github.com/larksuite/oapi-sdk-go/v3/scene/registration"
 )
 
-// TestFeishuAuth_Name is the cheapest sanity check: the provider's
+// TestProvider_Name is the cheapest sanity check: the provider's
 // name is the key the CLI subcommand tree uses to look it up.
-func TestFeishuAuth_Name(t *testing.T) {
-	a := NewFeishuAuth(FeishuAuthOptions{})
+func TestProvider_Name(t *testing.T) {
+	a := New(Options{})
 	if got, want := a.Name(), "feishu"; got != want {
 		t.Errorf("Name() = %q, want %q", got, want)
 	}
@@ -76,13 +76,13 @@ func TestDefaultAddons_ContainsRequiredScopes(t *testing.T) {
 	}
 }
 
-// TestNewFeishuAuth_FillsDefaults verifies the constructor fills in
+// TestNew_FillsDefaults verifies the constructor fills in
 // what callers most often leave blank: addons (DefaultAddons),
 // AppPreset (DefaultAppPreset), and stdout. We can only observe the
 // addons substitution indirectly — the Out is observable via a buffer.
-func TestNewFeishuAuth_FillsDefaults(t *testing.T) {
+func TestNew_FillsDefaults(t *testing.T) {
 	t.Run("addons substituted when caller passes nil", func(t *testing.T) {
-		a := NewFeishuAuth(FeishuAuthOptions{})
+		a := New(Options{})
 		if a.addons == nil {
 			t.Fatal("constructor left addons nil; expected DefaultAddons()")
 		}
@@ -94,14 +94,14 @@ func TestNewFeishuAuth_FillsDefaults(t *testing.T) {
 	t.Run("caller-supplied addons preserved", func(t *testing.T) {
 		custom := DefaultAddons()
 		custom.Scopes.Tenant = []string{"only:this"}
-		a := NewFeishuAuth(FeishuAuthOptions{Addons: custom})
+		a := New(Options{Addons: custom})
 		if got := a.addons.Scopes.Tenant; len(got) != 1 || got[0] != "only:this" {
 			t.Errorf("caller addons not preserved: got %v", got)
 		}
 	})
 
 	t.Run("preset substituted with NightMe brand default when caller passes nil", func(t *testing.T) {
-		a := NewFeishuAuth(FeishuAuthOptions{})
+		a := New(Options{})
 		if a.preset == nil {
 			t.Fatal("constructor left preset nil; expected DefaultAppPreset()")
 		}
@@ -115,7 +115,7 @@ func TestNewFeishuAuth_FillsDefaults(t *testing.T) {
 
 	t.Run("caller-supplied preset preserved", func(t *testing.T) {
 		custom := &registration.AppPreset{Name: "CustomBot", Desc: "hello"}
-		a := NewFeishuAuth(FeishuAuthOptions{AppPreset: custom})
+		a := New(Options{AppPreset: custom})
 		if a.preset != custom {
 			t.Errorf("caller preset not preserved: got %+v", a.preset)
 		}
@@ -209,7 +209,7 @@ func TestQrencode_EmptyInput(t *testing.T) {
 // the "Waiting for scan" hint. The QR encoding itself is exercised
 // by TestQrencode_Renders.
 func TestPrintQRCode_WritesURLAndQR(t *testing.T) {
-	a := NewFeishuAuth(FeishuAuthOptions{})
+	a := New(Options{})
 	var buf bytes.Buffer
 	a.out = &buf
 
@@ -243,7 +243,7 @@ func TestPrintQRCode_WritesURLAndQR(t *testing.T) {
 // the terminal doesn't get spammed once a second for ten minutes.
 func TestPrintStatus_FriendlyMessages(t *testing.T) {
 	t.Run("polling is silent (avoid terminal spam)", func(t *testing.T) {
-		a := NewFeishuAuth(FeishuAuthOptions{})
+		a := New(Options{})
 		var buf bytes.Buffer
 		a.out = &buf
 
@@ -258,7 +258,7 @@ func TestPrintStatus_FriendlyMessages(t *testing.T) {
 	})
 
 	t.Run("slow_down is friendly", func(t *testing.T) {
-		a := NewFeishuAuth(FeishuAuthOptions{})
+		a := New(Options{})
 		var buf bytes.Buffer
 		a.out = &buf
 
@@ -273,7 +273,7 @@ func TestPrintStatus_FriendlyMessages(t *testing.T) {
 	})
 
 	t.Run("domain_switched is friendly", func(t *testing.T) {
-		a := NewFeishuAuth(FeishuAuthOptions{})
+		a := New(Options{})
 		var buf bytes.Buffer
 		a.out = &buf
 
@@ -288,7 +288,7 @@ func TestPrintStatus_FriendlyMessages(t *testing.T) {
 	})
 
 	t.Run("unknown status surfaces visibly", func(t *testing.T) {
-		a := NewFeishuAuth(FeishuAuthOptions{})
+		a := New(Options{})
 		var buf bytes.Buffer
 		a.out = &buf
 

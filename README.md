@@ -70,7 +70,7 @@ survives), or pass `--cleanup` to **kill** it instead:
 cp configs/nightme.example.yaml ~/.nightme/config.yaml
 
 # One-click Feishu registration (scan the QR code)
-./bin/nightme auth login feishu
+./bin/nightme login feishu
 
 # Start the daemon
 ./bin/nightme run
@@ -202,7 +202,7 @@ push and pull request.
 ### Project layout
 
 ```
-cmd/nightme/                       # cobra CLI (test, list, auth, run, config)
+cmd/nightme/                       # cobra CLI (test, list, login, run, config)
 configs/                           # example YAML config
 docs/                               # PRD / SPEC / FEATURES / PLAN / feat/*
 internal/

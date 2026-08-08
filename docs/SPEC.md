@@ -1819,7 +1819,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
   - `internal/gateway/gateway.go::Handle` 入口加 `HasMention` gate
   - `internal/auth/feishu/feishu.go::DefaultAddons` 加 `im:message.group_msg`
   - `internal/auth/feishu/feishu_test.go` 加 case
-  - `cmd/nightme/auth_login.go` 移除 `--group-messages` flag 设计（默认开启）
+  - `cmd/nightme/login.go` 移除 `--group-messages` flag 设计（默认开启）
   - 详纸面设计见 [`docs/SPEC.md`](./SPEC.md) §3.1.1 + [`docs/feat/F-08-channel-abstraction.md`](./feat/F-08-channel-abstraction.md)
 - ⏭ **F-thread-route（OutThinking/Tool → Feishu thread + 类型感知摘要）**：
   - 反转 v1.3 §13.6/§13.7/§13.9 折叠决议（collapsible_panel 实机验证失败）

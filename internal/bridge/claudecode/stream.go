@@ -628,8 +628,15 @@ func truncateForLog(s string, max int) string {
 // nil usage → nil result (no usage on the wire this turn). nil
 // modelUsage → CostUSD=0, ContextWindow=0 (still produces a
 // populated UsageEvent when the usage payload has any non-zero
-// field; the runtime's AccumulateUsage will skip the pct calc
-// when ContextWindow=0).
+// field; pct omitted because we lack the denominator).
+//
+// The bridge owns the context-window-pct calculation per
+// docs/feat/F-45-session-footer.md §1.5: it reads
+// `modelUsage.<model>.contextWindow` (API-reported model window
+// size), divides the per-turn used tokens by it, and fills
+// `UsageEvent.ContextWindowPct`. The runtime is a passive
+// pass-through — it does NOT recompute pct, and it does NOT
+// know about Anthropic's model-window conventions.
 func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageEvent {
 	if len(rawUsage) == 0 {
 		return nil
@@ -656,8 +663,8 @@ func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageEvent {
 		CacheReadInputTokens:     int(u.CacheReadInputTokens),
 	}
 	// modelUsage is best-effort: any parse failure or empty payload
-	// leaves CostUSD / ContextWindow at 0, which the runtime treats
-	// as "not reported".
+	// leaves CostUSD / ContextWindow / ContextWindowPct at 0
+	// ("not reported" — footer omits the X% segment).
 	if len(rawModelUsage) > 0 {
 		var m map[string]struct {
 			CostUSD       float64 `json:"costUSD"`
@@ -672,6 +679,17 @@ func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageEvent {
 					out.ContextWindow = v.ContextWindow
 				}
 			}
+		}
+	}
+	// Doc 1 context-window-pct formula: used / window * 100.
+	// Bridge-computed, runtime does NOT recompute (see struct doc).
+	// Skipped when either operand is 0 — a zero pct is meaningless
+	// and would mislead the footer into rendering "0.0%".
+	if out.ContextWindow > 0 {
+		used := out.InputTokens + out.OutputTokens +
+			out.CacheCreationInputTokens + out.CacheReadInputTokens
+		if used > 0 {
+			out.ContextWindowPct = float64(used) / float64(out.ContextWindow) * 100
 		}
 	}
 	return out

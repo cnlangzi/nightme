@@ -571,7 +571,7 @@ func (as *AgentSession) SetResumeID(id string) {
 	as.resumeID = id
 }
 
-// --- F-45: model + cumulative usage API ----------------------------
+// --- F-45: model + CompactionCount metadata API -------------------
 
 // SetModel records the agent's selected model (e.g. Claude Code:
 // system/init.model). Idempotent: an empty incoming value does NOT
@@ -618,7 +618,7 @@ func (as *AgentSession) RecordCompaction() {
 	as.compactionCount++
 }
 
-// CompactionCount returns the cumulative number of completed
+// CompactionCount returns the total number of completed
 // compaction cycles observed on this AgentSession. 0 when never
 // compacted. Snapshot under RLock; safe for concurrent read
 // alongside RecordCompaction.

@@ -781,7 +781,7 @@ func (a *Adapter) ensureReceiptForTyping(ctx context.Context, chatID, userMsgID 
 	// workspace / branch / dirty state immediately — the user
 	// sees "📁 code/nightme · ⎇ main" before any reply chunk
 	// arrives. The first OutReply later overwrites footerLines
-	// via AppendEntryWithFooter once cumulative usage is available.
+	// via AppendEntryWithFooter once the per-turn Usage is available.
 	transient.footerLines = footerLines
 	transient.promptState = chatsession.PromptRunning
 	transient.initializing = true

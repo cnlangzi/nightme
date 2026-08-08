@@ -799,6 +799,17 @@ func (t *translator) finishTurnLocked() []agent.AgentEvent {
 // drop those turns' usage — breaking the F-52 promise that "usage
 // 100% flows through". Mirrors the symmetric check in
 // internal/bridge/claudecode/stream.go:decodeUsage.
+// decodeMessageUsage translates a single pi message_usage payload
+// (cost + input/output/cache counters) into the canonical
+// agent.UsageEvent. Single-shot per-turn snapshot — runtime
+// does NOT aggregate across turns.
+//
+// Pi's protocol does NOT expose `modelUsage.contextWindow` (and
+// we don't query `get_session_stats` here yet), so the
+// `ContextWindowPct` field is left at zero — the channel footer
+// omits the "X%" segment for pi users until pi plumbing for
+// context-window lookup lands. Token / cost fields are
+// unaffected. See docs/feat/F-45-session-footer.md §1.5.
 func decodeMessageUsage(u *messageUsage) *agent.UsageEvent {
 	if u == nil {
 		return nil

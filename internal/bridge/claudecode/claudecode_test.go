@@ -15,6 +15,88 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
+// TestDecodeUsage_ComputesContextWindowPct pins the bridge's
+// contract: claudecode computes the Doc 1 context-window-pct
+// formula from the wire `modelUsage.<model>.contextWindow` +
+// the per-turn usage counters. Runtime does NOT recompute pct;
+// bridge-computed value flows verbatim through the channel
+// footer (X% segment).
+//
+// Formula: pct = (input + output + cache_creation + cache_read) /
+// contextWindow * 100.  Skipped when either operand is 0 (footer
+// would otherwise render a misleading "0.0%").
+func TestDecodeUsage_ComputesContextWindowPct(t *testing.T) {
+	cases := []struct {
+		name        string
+		usageJSON   string
+		modelJSON   string
+		wantPct     float64
+		wantContext int
+	}{
+		{
+			name:        "typical — 21100 of 200k → 10.55%",
+			usageJSON:   `{"input_tokens":100,"output_tokens":1000,"cache_creation_input_tokens":20000,"cache_read_input_tokens":0}`,
+			modelJSON:   `{"claude-opus-4-5":{"contextWindow":200000,"costUSD":0.01}}`,
+			wantPct:     10.55, // (100+1000+20000+0)/200000*100 = 10.55
+			wantContext: 200000,
+		},
+		{
+			name:        "near ceiling — 199200 / 200000 → 99.6%",
+			usageJSON:   `{"input_tokens":200,"output_tokens":1000,"cache_creation_input_tokens":198000,"cache_read_input_tokens":0}`,
+			modelJSON:   `{"claude-opus-4-5":{"contextWindow":200000,"costUSD":0.5}}`,
+			wantPct:     99.6, // 199200/200000*100 = 99.6
+			wantContext: 200000,
+		},
+		{
+			name:        "at ceiling — 200000 / 200000 → 100.0%",
+			usageJSON:   `{"input_tokens":200000,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}`,
+			modelJSON:   `{"claude-opus-4-5":{"contextWindow":200000,"costUSD":0.5}}`,
+			wantPct:     100.0,
+			wantContext: 200000,
+		},
+		{
+			name:        "no contextWindow in modelUsage → pct omitted",
+			usageJSON:   `{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}`,
+			modelJSON:   `{"claude-opus-4-5":{"costUSD":0.01}}`,
+			wantPct:     0,
+			wantContext: 0,
+		},
+		{
+			name:        "no modelUsage payload at all → pct omitted",
+			usageJSON:   `{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}`,
+			modelJSON:   "",
+			wantPct:     0,
+			wantContext: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u := decodeUsage(
+				json.RawMessage(tc.usageJSON),
+				json.RawMessage(tc.modelJSON),
+			)
+			if u == nil {
+				t.Fatalf("decodeUsage returned nil; want non-nil")
+			}
+			if u.ContextWindow != tc.wantContext {
+				t.Errorf("ContextWindow = %d, want %d", u.ContextWindow, tc.wantContext)
+			}
+			if tc.wantPct == 0 {
+				if u.ContextWindowPct != 0 {
+					t.Errorf("ContextWindowPct = %v, want 0", u.ContextWindowPct)
+				}
+			} else {
+				// Tolerate tiny float rounding (0.05% tolerance).
+				diff := u.ContextWindowPct - tc.wantPct
+				if diff < -0.05 || diff > 0.05 {
+					t.Errorf("ContextWindowPct = %.4f, want %.4f (±0.05)",
+						u.ContextWindowPct, tc.wantPct)
+				}
+			}
+		})
+	}
+}
+
 // readFixture loads a JSON fixture from testdata/.
 func readFixture(t *testing.T, name string) []byte {
 	t.Helper()

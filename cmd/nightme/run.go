@@ -580,12 +580,13 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 		// wireRuntimeCallbacksAndRestore). No StartReadPump call here
 		// — the old per-CS readpump file is gone.
 
-		// F-31 / F-53: dispatch successful — message has reached the
-		// AgentSession. Emit MessageSubmitted so the channel flips
-		// ⏳ → 🔄. (Emitted before QueueUserMessage so the visual
-		// transition is visible even if queueing is slow.)
-		cs.EmitMessageState(userMsgID, agent.MessageSubmitted)
-
+		// F-31 / F-53: MessageSubmitted is emitted by ChatSession
+		// (TryFlush) AFTER `as.Submit` returns success — not here in
+		// the dispatcher. The dispatcher is only allowed to emit
+		// MessageQueued (above): MessageQueued lives before spawn
+		// resolution so the channel can render ⌨️ + ⏳ for FastAck UX;
+		// MessageSubmitted is the "submit succeeded" signal and
+		// belongs to ChatSession's transaction boundary.
 		// Build structured blocks and queue to InputBuffer.
 		// F-14 v1.4b: post rich-text messages arrive with
 		// msg.Blocks already populated (ordered by Feishu paragraph)

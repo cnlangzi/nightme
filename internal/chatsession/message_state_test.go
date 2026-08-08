@@ -343,6 +343,104 @@ func TestSubmit_NextFlushRetriesFailedMessage(t *testing.T) {
 	}
 }
 
+// TestSubmit_EmitsMessageSubmittedExactlyOnce locks the F-53
+// "MessageSubmitted is the ChatSession transaction boundary" rule:
+// a successful TryFlush must emit MessageSubmitted exactly once
+// per message — not zero (the channel never gets told the message
+// was delivered), not two (the channel flips ⏳ → 🔄 twice, which
+// is a Tell-Don't-Show seam bug).
+//
+// The fix that made this test pass: delete the dispatcher's
+// premature `cs.EmitMessageState(MessageSubmitted)` in
+// cmd/nightme/run.go::newMessageDispatcher (the old code emitted
+// MessageSubmitted BEFORE QueueUserMessage → TryFlush ran, on top
+// of the TryFlush's own post-Submit emit). See
+// docs/feat/message_lifecycle.md §5.1 for the formal contract.
+func TestSubmit_EmitsMessageSubmittedExactlyOnce(t *testing.T) {
+	cs := New("oc_chat", "claude")
+	cs.WithSpawner(&spySpawner{})
+
+	cap := &captureHandler{}
+	cs.SetMessageStateHandler(cap.handler)
+
+	workingAS := NewAgentSession("test-as-ok", "test-cs", "claude", "/tmp", nil)
+	workingAS.handle = newRecordingAgentSession(1)
+	cs.mu.Lock()
+	cs.activeAS = workingAS
+	cs.mu.Unlock()
+
+	msg := makeTestMessage(cs, []agent.ContentBlock{{Text: "hello"}}, "om_hello")
+	if err := cs.QueueUserMessage(msg); err != nil {
+		t.Fatalf("QueueUserMessage: %v", err)
+	}
+
+	// Successful submit.
+	if err := cs.TryFlush(); err != nil {
+		t.Fatalf("TryFlush: %v", err)
+	}
+
+	// Count exactly the MessageSubmitted emits for this userMsgID.
+	submittedCount := 0
+	for _, c := range cap.snapshot() {
+		if c.userMsgID == "om_hello" && c.state == agent.MessageSubmitted {
+			submittedCount++
+		}
+	}
+	if submittedCount != 1 {
+		var recent []messageStateCall
+		for _, c := range cap.snapshot() {
+			if c.userMsgID == "om_hello" {
+				recent = append(recent, c)
+			}
+		}
+		t.Errorf("MessageSubmitted emit count for om_hello = %d; want 1 (exact). All emits for om_hello: %+v", submittedCount, recent)
+	}
+}
+
+// TestSubmit_DoesNotEmitMessageSubmittedOnFailure is the
+// companion to TestSubmit_FailedSendBlocksKeepsMessageQueued: it
+// asserts that the dispatcher-level emit path (currently empty
+// after the fix) does NOT reintroduce MessageSubmitted if Submit
+// fails. Belt-and-suspenders regression guard for the same bug.
+//
+// Pre-fix: the dispatcher emitted MessageSubmitted at line 587
+// before QueueUserMessage, so even a failed TryFlush would have
+// raised OnIt 🔄 on the user message. This test would FAIL
+// pre-fix and PASS post-fix.
+func TestSubmit_DoesNotEmitMessageSubmittedOnFailure(t *testing.T) {
+	cs := New("oc_chat", "claude")
+	cs.WithSpawner(&spySpawner{})
+
+	cap := &captureHandler{}
+	cs.SetMessageStateHandler(cap.handler)
+
+	failingAS := NewAgentSession("test-as-fail", "test-cs", "claude", "/tmp", nil)
+	failingAS.handle = newFailingAgentSession()
+	cs.mu.Lock()
+	cs.activeAS = failingAS
+	cs.mu.Unlock()
+
+	msg := makeTestMessage(cs, []agent.ContentBlock{{Text: "hello"}}, "om_failed")
+	if err := cs.QueueUserMessage(msg); err != nil {
+		t.Fatalf("QueueUserMessage: %v", err)
+	}
+	if err := cs.TryFlush(); err == nil {
+		t.Fatalf("TryFlush returned nil; want error from SendBlocks")
+	}
+
+	// No MessageSubmitted should ever be emitted for om_failed.
+	for _, c := range cap.snapshot() {
+		if c.userMsgID == "om_failed" && c.state == agent.MessageSubmitted {
+			t.Errorf("wire emit MessageSubmitted on failed SendBlocks; chatID=%q msgID=%q", c.chatID, c.userMsgID)
+		}
+	}
+	// No MessageState emit at all (this test bypasses the
+	// dispatcher which is the only producer of MessageQueued —
+	// it goes straight to QueueUserMessage → TryFlush). The only
+	// contract this test enforces is "no MessageSubmitted on a
+	// failed Submit".
+}
+
 // failingAgentSession is a minimal AgentSession implementation
 // whose SendBlocks always returns an error. Used by the
 // retry-semantics tests above. Other methods are no-op stubs

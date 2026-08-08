@@ -192,10 +192,10 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 			return OutboundMessage{}, false
 		}
 		return OutboundMessage{
-			ChatID: chatID,
-			Kind:   OutInit,
-			Text:   fmt.Sprintf("session initialized (model: %s)", ev.Connected.Model),
-			Connected:   ev.Connected,
+			ChatID:    chatID,
+			Kind:      OutInit,
+			Text:      fmt.Sprintf("session initialized (model: %s)", ev.Connected.Model),
+			Connected: ev.Connected,
 		}, true
 
 	case agent.EventTaskCreate:

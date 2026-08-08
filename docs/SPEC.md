@@ -167,7 +167,7 @@ v1.3 在 v1.2 架构上做**职责再切分**——核心变化是**删除 Gatew
 - **新增 typed payload**：
   - `Result *agent.ResultEvent`（OutResult）
   - `Usage *UsageInfo`（OutUsage，5 个 token/cost 字段）
-  - `Init *agent.AgentConnectedEvent`（OutInit，session_id / model / workspace / branch）
+  - `Connected *agent.AgentConnectedEvent`（OutInit，session_id / model / workspace / branch）
   - `MessageStatePayload.MessageID` + `ReactionID`（扩展 typed field，OutMessageState / Removed）
 - **删 helper 函数**：metaString / metaInt / metaFloat / metaBool / durationMs / isErrorOut / subtypeOut / usageFromMeta（全部读 Meta 的 typed assertion + reverse rebuild）
 

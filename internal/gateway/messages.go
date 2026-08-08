@@ -386,7 +386,7 @@ type OutboundMessage struct {
 	// Meta["message_id"] / ["state"] / ["reaction_id"] implicit
 	// protocol (removed in §1.4 cleanup).
 	MessageState *MessageStatePayload
-	// Init carries the typed payload for OutInit. nil for other
+	// Connected carries the typed payload for OutInit. nil for other
 	// Kinds. Gateway populates from AgentEvent.Connected. Replaces the
 	// legacy Meta["session_id"] / ["model"] / ["agent_name"] /
 	// ["workspace"] / ["branch"] implicit protocol (removed in

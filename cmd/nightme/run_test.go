@@ -833,4 +833,3 @@ type messageStateCall struct {
 	chatID, userMsgID string
 	state             agent.MessageState
 }
-

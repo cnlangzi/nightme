@@ -334,7 +334,7 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 	// callers, so contention is theoretical, but the symmetry with
 	// the reset path keeps the invariant obvious.
 	s.translatorMu.Lock()
-	s.deliverInitLocked(&state)
+	s.deliverConnectedLocked(&state)
 	s.translatorMu.Unlock()
 	piLog("newSession return ok",
 		"pid", s.pid,
@@ -342,11 +342,11 @@ func newSession(ctx context.Context, agentName, command string, args, env []stri
 	return s, nil
 }
 
-// deliverInitLocked emits the EventAgentConnected for `state` via deliver().
+// deliverConnectedLocked emits the EventAgentConnected for `state` via deliver().
 // Caller MUST hold s.translatorMu so connectedSent's check-and-set is
 // atomic relative to translator.emitConnected. Shared between the boot
 // handshake (newSession) and the F-34 reset path (New).
-func (s *session) deliverInitLocked(state *getStateResult) {
+func (s *session) deliverConnectedLocked(state *getStateResult) {
 	for _, ev := range s.translator.emitConnected(state) {
 		s.deliver(ev)
 	}
@@ -683,7 +683,7 @@ func (s *session) New(ctx context.Context) error {
 	// readPump holding the chan could delay /new by up to 1s. The
 	// alternative is to release the lock and accept a brief window
 	// where another caller sees connectedSent=false; we err on safety.
-	s.deliverInitLocked(&state)
+	s.deliverConnectedLocked(&state)
 	s.translatorMu.Unlock()
 	return nil
 }

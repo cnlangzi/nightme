@@ -697,6 +697,11 @@ func decodeUsage(rawUsage, rawModelUsage json.RawMessage) *agent.UsageEvent {
 		if used > 0 {
 			out.ContextWindowPct = float64(used) / float64(contextWindow) * 100
 		}
+		// F-55: forward the window alongside X% so the footer can
+		// render `X% (window)`. Single render-side consumer; the
+		// runtime does not recompute / catalog / clamp based on
+		// this value — see docs/feat/F-55-footer-show-context-window.md.
+		out.ContextWindow = contextWindow
 	}
 	return out
 }

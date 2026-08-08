@@ -26,9 +26,15 @@ import (
 // contextWindow * 100.  Skipped when either operand is 0 (footer
 // would otherwise render a misleading "0.0%").
 //
-// F-54: `contextWindow` is bridge-local — this test pins the
-// pct output but no longer asserts any `ContextWindow` field on
-// UsageEvent (the field was deleted).
+// F-54 dropped `ContextWindow` from UsageEvent; F-55 re-introduced
+// it so the footer can render `(window)` alongside X% (CLI Agent
+// 报什么就显示什么,错了让用户自己计算 — see
+// docs/feat/F-55-footer-show-context-window.md). The window
+// value is bridge-local and passes through to UsageEvent verbatim;
+// runtime / channel do not recompute, catalog, or clamp on it.
+// Companion TestDecodeUsage_ForwardsContextWindow (below)
+// pins the re-introduced forwarding path so a future refactor
+// can't silently drop the field again.
 func TestDecodeUsage_ComputesContextWindowPct(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -76,14 +82,6 @@ func TestDecodeUsage_ComputesContextWindowPct(t *testing.T) {
 			if u == nil {
 				t.Fatalf("decodeUsage returned nil; want non-nil")
 			}
-			// F-54: bridge-local contextWindow no longer stored on
-			// UsageEvent. The compile-time guard is implicit — if
-			// anyone re-adds `ContextWindow` to UsageEvent without
-			// re-introducing the assertion below, `agent.UsageEvent`
-			// itself will fail to compile against this test file's
-			// previous assertions (the `wantContext` field was
-			// removed in F-54). Only ContextWindowPct crosses the
-			// struct boundary.
 			if tc.wantPct == 0 {
 				if u.ContextWindowPct != 0 {
 					t.Errorf("ContextWindowPct = %v, want 0", u.ContextWindowPct)
@@ -95,6 +93,62 @@ func TestDecodeUsage_ComputesContextWindowPct(t *testing.T) {
 					t.Errorf("ContextWindowPct = %.4f, want %.4f (±0.05)",
 						u.ContextWindowPct, tc.wantPct)
 				}
+			}
+		})
+	}
+}
+
+// TestDecodeUsage_ForwardsContextWindow pins F-55: the wire
+// `modelUsage[<model>].contextWindow` value is copied onto
+// `out.ContextWindow` so the channel footer can render
+// `X% (window)` alongside the percentage. Without this
+// assertion, a future refactor that drops the `out.ContextWindow
+// = contextWindow` line would still pass
+// TestDecodeUsage_ComputesContextWindowPct (which only checks
+// the percentage) — but the footer would silently render
+// `X% (0)` for every turn, defeating the whole point of F-55.
+//
+// Scenarios: window present (forwarded verbatim, both 200K and
+// 1M), window absent in modelUsage (stays 0, footer omits the
+// segment), no modelUsage payload at all (stays 0).
+func TestDecodeUsage_ForwardsContextWindow(t *testing.T) {
+	cases := []struct {
+		name      string
+		modelJSON string
+		wantWin   int
+	}{
+		{
+			name:      "200k window — forwarded verbatim",
+			modelJSON: `{"claude-opus-4-5":{"contextWindow":200000}}`,
+			wantWin:   200_000,
+		},
+		{
+			name:      "1M window — M-unit footer renders correctly",
+			modelJSON: `{"claude-opus-4-8":{"contextWindow":1000000}}`,
+			wantWin:   1_000_000,
+		},
+		{
+			name:      "no contextWindow in modelUsage — stays 0 (footer omits)",
+			modelJSON: `{"claude-opus-4-5":{"costUSD":0.01}}`,
+			wantWin:   0,
+		},
+		{
+			name:      "no modelUsage payload at all — stays 0",
+			modelJSON: ``,
+			wantWin:   0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u := decodeUsage(
+				json.RawMessage(`{"input_tokens":1,"output_tokens":1}`),
+				json.RawMessage(tc.modelJSON),
+			)
+			if u == nil {
+				t.Fatalf("decodeUsage returned nil")
+			}
+			if u.ContextWindow != tc.wantWin {
+				t.Errorf("ContextWindow = %d, want %d", u.ContextWindow, tc.wantWin)
 			}
 		})
 	}

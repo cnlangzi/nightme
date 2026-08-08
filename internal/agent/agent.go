@@ -363,16 +363,20 @@ type ResultEvent struct {
 //
 // `contextWindow` is a bridge-local value: claudecode reads it
 // from `modelUsage[<model>].contextWindow`, pi reads it from
-// `get_state.data.model.contextWindow`. The window value itself
-// never crosses the bridge struct boundary (F-54) — bridges
-// compute pct and store only the percentage here.
+// `get_state.data.model.contextWindow`. F-54 originally dropped
+// the field from UsageEvent as dead (0 read / 0 write); F-55
+// re-introduced it (UsageEvent.ContextWindow below) so the
+// channel footer can render `(window)` alongside the percentage.
+// See docs/feat/F-55-footer-show-context-window.md for the
+// re-introduction rationale.
 //
 // i.e. exact wire fields divided by API-reported window — no
 // client-side model table needed. The runtime does NOT recompute
-// or overwrite this; the channel footer renders it verbatim as
-// the "X%" segment. See
-// docs/feat/F-45-session-footer.md §1.5 / §1.6 and
-// docs/feat/F-54-pi-contextwindow-from-get-state.md.
+// or overwrite these; the channel footer renders them verbatim
+// as the "X% (window)" segment. See
+// docs/feat/F-45-session-footer.md §1.5 / §1.6,
+// docs/feat/F-54-pi-contextwindow-from-get-state.md, and
+// docs/feat/F-55-footer-show-context-window.md.
 type UsageEvent struct {
 	// InputTokens is the non-cached input token count.
 	InputTokens int
@@ -392,6 +396,22 @@ type UsageEvent struct {
 
 	// CostUSD is the optional per-turn cost in USD; 0 when unknown.
 	CostUSD float64
+
+	// ContextWindow is the API/CLI-reported model context-window
+	// size in tokens, forwarded verbatim from the bridge wire
+	// payload (Claude Code: `modelUsage[<model>].contextWindow`;
+	// Pi: `get_state.data.model.contextWindow`). F-55: re-introduced
+	// after F-54 §1.2 dropped it as a dead field — it now has a
+	// single consumer (the channel footer) so the user can see the
+	// denominator alongside the percentage and judge upstream
+	// compatibility-layer mismatches (e.g. `101.6% (200k)` against
+	// an actual 1M model). 0 means "not reported" and the footer
+	// omits the `(window)` segment alongside X%.
+	//
+	// The runtime does NOT recompute pct based on this value, does
+	// NOT maintain a model catalog, and does NOT clamp pct > 100%.
+	// It is purely a render-side diagnostic.
+	ContextWindow int
 
 	// ContextWindowPct is the per-turn context-fill percentage
 	// (0–100), bridge-computed via the Doc 1 formula in the
@@ -441,6 +461,15 @@ type UsageInfo struct {
 	// (Claude Code: result.total_cost_usd). Forwarded verbatim —
 	// the client never computes cost. 0 when the API didn't report.
 	CostUSD float64
+
+	// ContextWindow is the API/CLI-reported model context-window
+	// size in tokens. F-55: re-introduced so the footer can show
+	// `(window)` alongside X% — the user judges upstream
+	// compatibility-layer mismatches (e.g. `101.6% (200k)` vs an
+	// actual 1M model). 0 means "not reported"; footer drops the
+	// `(window)` segment. Runtime does NOT recompute, catalog, or
+	// clamp based on this value.
+	ContextWindow int
 
 	// ContextWindowPct is the per-turn context-fill percentage
 	// (0-100), bridge-computed via the Doc 1 formula

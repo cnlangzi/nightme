@@ -531,13 +531,15 @@ type OutboundMessage struct {
    - **`UsageInfo` 与 `UsageEvent` 都是 per-turn snapshot,不再"cumulative form"** — 重命名 / 注释全面更新,见 [`usage.md`](wip/usage.md) §1.2
    - 顺手修 `UsageInfo.InputTokens` 注释：原 "total input tokens consumed (prompt + cache reads + tool input)" 误导（实际只搬运裸 `input_tokens`），新注释 "non-cached input token count ... Cache hits are NOT included — see CacheReadInputTokens"
    - `agent.UsageEvent` / `UsageInfo` 新增 `ContextWindowPct float64` — bridge 算的 per-turn context-fill %(Doc 1 公式),runtime 不参与。channel footer 从 `ctx.Usage.ContextWindowPct` 读取 X% 段
-   - **`UsageEvent.ContextWindow` 字段已删除**([`F-54`](feat/F-54-pi-contextwindow-from-get-state.md)):`contextWindow` 是 bridge-local 本地变量(pi 来自 `get_state.data.model.contextWindow`,claudecode 来自 `modelUsage[<model>].contextWindow`),算完 pct 即丢,不进 struct 边界
+   - **`UsageEvent.ContextWindow` 字段生命周期**：[`F-54`](feat/F-54-pi-contextwindow-from-get-state.md) 当时删过(理由:全 codebase 0 read / 0 write);[`F-55`](feat/F-55-footer-show-context-window.md) 又加回来(理由:footer 要给用户显示 `(window)`,让用户自己判断 `pct > 100%` 是否上游兼容端报错)。语义保持"bridge-local 透传":pi 来自 `get_state.data.model.contextWindow`,claudecode 来自 `modelUsage[<model>].contextWindow`。**runtime 不重算、不查表、不 clamp**,CLI Agent 报什么 footer 就显示什么。
 
 4. **Footer 渲染规则（F-52 D 版,`「」` 包裹)**
    - 格式：`🤖 claude · opus-4-5` + `💰:「 in / out · X% · $cost 」`
    - `in` = `InputTokens + CacheCreationInputTokens + CacheReadInputTokens`(Tencent YB 文档口径：input-side total)
+   - F-55.1: `in` 进一步拆 `new / cache / out`,纯数字无 label——`new = InputTokens + CacheCreationInputTokens`(本轮新增,不命中缓存),`cache = CacheReadInputTokens`(命中缓存),`out = OutputTokens`。`cache == 0` 时退回 `new / out` 布局。每段按 `> 0` 独立 omit(F-45 §1.6)
    - `out` = `OutputTokens`
    - `X%` = `(in + out) / contextWindow * 100`，`contextWindow` 是 bridge-local 变量(Claude Code: `modelUsage[<model>].contextWindow`;Pi: `get_state.data.model.contextWindow`,见 [`F-54`](feat/F-54-pi-contextwindow-from-get-state.md) §2.2)，一位小数，`== 0` 时省略
+   - F-55：`X%` 段后追加 `(window)` 让用户看到分母。例 `20.3% (1.0M)` / `101.6% (200k)`(后者是 MiniMax 兼容端把 1M 模型错报成 200K 的诊断信号)。`pct > 100%` **不 clamp 不告警**——见 [`F-55`](feat/F-55-footer-show-context-window.md)
    - `$cost` = API 透传 `total_cost_usd`，**客户端不计算**
    - 段之间 ` · ` 分隔；`「」` 括号只在至少一段非空时包裹整行
    - 缩写：`<1000 raw` / `≥1k "X.Xk"` / `≥1M "X.XM"`

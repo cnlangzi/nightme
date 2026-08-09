@@ -20,6 +20,7 @@ import (
 type nopCh struct{}
 func (nopCh) Send(_ context.Context, _ chatsession.OutboundMessage) error { return nil }
 func (nopCh) SendCard(_ context.Context, _ chatsession.OutboundMessage) (string, error) { return "", nil }
+func (nopCh) Patch(_ context.Context, _ chatsession.OutboundMessage) error { return nil }
 func newTestChannel() chatsession.Channel { return nopCh{} }
 
 

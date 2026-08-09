@@ -3,8 +3,8 @@ package command
 import "context"
 
 // Reply builds a SlashOutput with the given text, marked as
-// Consumed. The gateway (or the runtime shim) turns the
-// output into a single Outbound message via rt.Channel().Send.
+// Consumed. The runtime shim consumes the SlashOutput and
+// routes Reply / Outbound to cs.Channel().Send / SendCard.
 //
 // This is the ONE canonical reply helper — all commands use
 // it instead of constructing SlashOutput by hand. Keeping

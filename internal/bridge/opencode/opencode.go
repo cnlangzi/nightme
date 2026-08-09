@@ -110,6 +110,39 @@ const promptTimeout = 90 * time.Second
 // 5-minute default.
 const permissionTimeout = 5 * time.Minute
 
+// startupMaxAttempts bounds the Start retry loop. Two attempts
+// covers the common "stale HOME/.opencode state" case without
+// hiding genuine misconfiguration (auth / binary missing). Tested
+// as the upper bound for the retry budget in agent_test.go.
+const startupMaxAttempts = 2
+
+// startupRetryDelay is the wait between Start attempts. Long
+// enough that any transient I/O settle, short enough that the
+// user does not notice on the happy path.
+const startupRetryDelay = 2 * time.Second
+
+// turnWatchdogTimeout bounds the wall time between consecutive SSE
+// events during a turn. Resets on every event delivered by the
+// translator (model is alive, plugin loaded, etc.). On timeout the
+// bridge kills the server and emits EventAgentError so the
+// runtime readpump clears the busy guard and the chat surfaces a
+// clear "agent session timed out (no response)" message instead
+// of hanging on the busy spinner.
+//
+// Default 10 minutes — matches the model of "humans typing into
+// chat apps are patient but not infinitely so". cc-connect's
+// equivalent uses 2 hours (defaultEventIdleTimeout in their
+// engine.go) but our session-scoped bridge plus the per-turn
+// busy-guard semantics argue for a tighter bound; runtime
+// operators can extend via NIGHTME_OPENCODE_TURN_WATCHDOG.
+const turnWatchdogTimeout = 10 * time.Minute
+
+// turnWatchdogEmptyFlag is the Done.Reason string we use when the
+// turn settled normally but produced zero EventAgentText /
+// EventAgentToolStart events. Runtime uses this to surface
+// "(empty response)" hints in the channel footer.
+const turnWatchdogEmptyFlag = "empty"
+
 // ─── buffer sizes ───
 
 // eventBufferSize is the events channel capacity.

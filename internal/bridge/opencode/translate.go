@@ -54,6 +54,16 @@ type translator struct {
 	// stash it on the translator so the next session.idle can
 	// forward it on Done.Usage without re-emitting the wire event.
 	lastUsage *agent.UsageInfo
+
+	// turnHadContent tracks whether ANY AgentEvent conveying
+	// agent work (text / tool start / tool end / reasoning) has
+	// been delivered during the current turn. Reset on each new
+	// turn via ResetTurn(). When the terminal event fires and
+	// this is still false, we tag Done.Reason = "empty" so the
+	// runtime can surface a "(empty response)" hint to the
+	// user — distinguishing "model produced nothing" from a
+	// genuine settle. Mirrors cc-connect's relay.go:5161 fallback.
+	turnHadContent bool
 }
 
 type toolEntry struct {
@@ -74,6 +84,18 @@ func newTranslator(deliver func(agent.AgentEvent) agent.AgentEvent, agentName, w
 		model:        model,
 		pendingTools: make(map[string]toolEntry),
 	}
+}
+
+// ResetTurn clears per-turn state. Call before each Prompt submission
+// so the next terminal event can detect a (genuinely) empty response.
+func (t *translator) ResetTurn() {
+	t.turnHadContent = false
+}
+
+// markContent flips turnHadContent on. Called from the branches that
+// deliver agent work events (text, tool start/end, reasoning).
+func (t *translator) markContent() {
+	t.turnHadContent = true
 }
 
 // handleEvent is the entry point invoked by decodeSSE for each parsed
@@ -122,6 +144,7 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 			// the actual content is delivered via delta. Skip.
 			return nil
 		}
+		t.markContent()
 		t.deliver(agent.AgentEvent{
 			Kind:      agent.EventAgentText,
 			SessionID: t.sessionID,
@@ -148,7 +171,16 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 		// wired because the opencode 1.18 step event payload
 		// doesn't include callID; we log only and rely on the
 		// per-session text delta for the channel footer.
+		//
+		// Reason is "settled" when content arrived during the
+		// turn; "empty" when the model produced no text / tools
+		// (e.g. a misconfigured provider with no API key). The
+		// runtime uses this to surface a "(empty response)" hint.
 		usage := t.lastUsage
+		reason := "settled"
+		if !t.turnHadContent {
+			reason = "empty"
+		}
 		t.deliver(agent.AgentEvent{
 			Kind:      agent.EventAgentDone,
 			SessionID: t.sessionID,
@@ -157,9 +189,9 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 			Workspace: t.workspace,
 			Branch:    t.branch,
 			Done: &agent.AgentDoneEvent{
-				Reason:  "settled",
+				Reason:   reason,
 				ExitCode: 0,
-				Usage:   usage,
+				Usage:    usage,
 			},
 		})
 	case "session.idle", "session.next.idle":
@@ -169,6 +201,10 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 		// keep the case as a forward-compat hook so a future
 		// release reintroducing session.next.idle works.
 		usage := t.lastUsage
+		reason := "settled"
+		if !t.turnHadContent {
+			reason = "empty"
+		}
 		t.deliver(agent.AgentEvent{
 			Kind:      agent.EventAgentDone,
 			SessionID: t.sessionID,
@@ -177,9 +213,9 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 			Workspace: t.workspace,
 			Branch:    t.branch,
 			Done: &agent.AgentDoneEvent{
-				Reason:  "settled",
+				Reason:   reason,
 				ExitCode: 0,
-				Usage:   usage,
+				Usage:    usage,
 			},
 		})
 	case "session.next.step.failed":
@@ -324,6 +360,7 @@ func (t *translator) handlePart(p Part) {
 		if p.Text == "" {
 			return
 		}
+		t.markContent()
 		t.deliver(agent.AgentEvent{
 			Kind:      agent.EventAgentText,
 			SessionID: t.sessionID,
@@ -337,6 +374,7 @@ func (t *translator) handlePart(p Part) {
 		if p.Text == "" {
 			return
 		}
+		t.markContent()
 		t.deliver(agent.AgentEvent{
 			Kind:      agent.EventAgentText,
 			SessionID: t.sessionID,
@@ -347,6 +385,7 @@ func (t *translator) handlePart(p Part) {
 			Text:      "[思考] " + p.Text,
 		})
 	case "tool":
+		t.markContent()
 		t.handleToolPart(p)
 	case "agent", "subtask", "step-start", "step-finish", "snapshot",
 		"patch", "retry", "compaction":

@@ -188,9 +188,15 @@ func startServer(ctx context.Context, cfg serverConfig) (*serverProc, error) {
 
 	if bannerErr == nil && baseURL == "" {
 		// We hit the deadline without ever parsing the banner.
+		// Kill the process and return immediately. The stderr
+		// drain goroutine will exit on its own when the OS closes
+		// the pipe after the kill; we don't block on stderrDone
+		// here because on a wedged opencode binary the stderr
+		// read may stay parked indefinitely (manifested as a
+		// 5-minute hang in TestE2E_Interrupt). The caller still
+		// gets a clear ErrServerStartTimeout to retry against.
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
-		<-stderrDone
 		stderr := stderrTail.String()
 		if stderr != "" {
 			return nil, fmt.Errorf("%w (after %s)\n--- stderr ---\n%s", ErrServerStartTimeout, startTimeout, stderr)
@@ -222,29 +228,52 @@ func startServer(ctx context.Context, cfg serverConfig) (*serverProc, error) {
 // scanBanner reads one line at a time from r, returning the URL captured
 // by serverURLRegex on the first matching line. If the scan reaches
 // timeout or EOF before a match, it returns the relevant error.
+//
+// Implementation note: scanner.Scan() is blocking, so the original
+// `select { case <-deadline.C: default: }` check inside the loop never
+// fires once Scan() is parked on an empty pipe — the opencode server
+// may emit thousands of non-matching lines before the banner, and the
+// deadline was effectively ignored (manifested as a 5-minute hang in
+// TestE2E_Interrupt on a third server spawn with a stale HOME/.opencode
+// state). We now run Scan in a goroutine and select on its result.
 func scanBanner(r io.Reader, timeout time.Duration) (string, error) {
 	scanner := bufio.NewScanner(r)
 	// Generous buffer so a single banner line with a long URL does
 	// not trip the default 64 KiB cap.
 	scanner.Buffer(make([]byte, 0, 4096), 64*1024)
+
+	type scanResult struct {
+		line string
+		err  error
+	}
+	ch := make(chan scanResult, 1)
+	go func() {
+		for scanner.Scan() {
+			line := scanner.Text()
+			if m := serverURLRegex.FindStringSubmatch(line); m != nil {
+				ch <- scanResult{line: m[1]}
+				return
+			}
+		}
+		// EOF or read error — surface only if the deadline has not
+		// already won the race.
+		err := scanner.Err()
+		ch <- scanResult{err: err}
+	}()
+
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
-	for {
-		select {
-		case <-deadline.C:
-			return "", nil
-		default:
-		}
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				return "", err
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			if res.err == io.EOF {
+				return "", io.EOF
 			}
-			return "", io.EOF
+			return "", res.err
 		}
-		line := scanner.Text()
-		if m := serverURLRegex.FindStringSubmatch(line); m != nil {
-			return m[1], nil
-		}
+		return res.line, nil
+	case <-deadline.C:
+		return "", nil
 	}
 }
 

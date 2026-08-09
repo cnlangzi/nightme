@@ -219,12 +219,37 @@ func TestTranslator_ToolLifecycle(t *testing.T) {
 func TestTranslator_SessionIdle(t *testing.T) {
 	rec := &recorder{}
 	tr := newTranslator(rec.deliver, "opencode", "/tmp", "main", "ses_1", "")
+	// Synthesise a prior text event so the terminal event
+	// records Reason=settled rather than the empty-response
+	// hint (Reason=empty). Empty detection is exercised by
+	// TestTranslator_SessionIdle_EmptyReason below.
+	textProps, _ := json.Marshal(map[string]any{"text": "hi"})
+	if err := tr.handleEvent(SessionEvent{Type: "session.next.text.delta", Properties: textProps}); err != nil {
+		t.Fatalf("handleEvent text: %v", err)
+	}
+	idleProps, _ := json.Marshal(map[string]any{})
+	if err := tr.handleEvent(SessionEvent{Type: "session.idle", Properties: idleProps}); err != nil {
+		t.Fatalf("handleEvent idle: %v", err)
+	}
+	if len(rec.evs) != 2 || rec.evs[1].Done == nil || rec.evs[1].Done.Reason != "settled" {
+		t.Errorf("events = %+v, want [..., Done{Reason:settled}]", rec.evs)
+	}
+}
+
+// TestTranslator_SessionIdle_EmptyReason asserts the
+// empty-response hint: a turn that ends with no text / tool
+// events emits EventAgentDone{Reason:"empty"} so the runtime
+// can surface "(empty response)" to the user instead of an
+// ambiguous silent success.
+func TestTranslator_SessionIdle_EmptyReason(t *testing.T) {
+	rec := &recorder{}
+	tr := newTranslator(rec.deliver, "opencode", "/tmp", "main", "ses_1", "")
 	props, _ := json.Marshal(map[string]any{})
-	if err := tr.handleEvent(SessionEvent{Type: "session.idle", Properties: props}); err != nil {
+	if err := tr.handleEvent(SessionEvent{Type: "session.next.step.ended", Properties: props}); err != nil {
 		t.Fatalf("handleEvent: %v", err)
 	}
-	if len(rec.evs) != 1 || rec.evs[0].Done == nil || rec.evs[0].Done.Reason != "settled" {
-		t.Errorf("event = %+v, want Done{Reason:settled}", rec.evs)
+	if len(rec.evs) != 1 || rec.evs[0].Done == nil || rec.evs[0].Done.Reason != "empty" {
+		t.Errorf("event = %+v, want Done{Reason:empty}", rec.evs)
 	}
 }
 

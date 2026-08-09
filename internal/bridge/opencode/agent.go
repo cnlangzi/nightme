@@ -30,12 +30,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -68,6 +70,21 @@ type Agent struct {
 	pendingMu         sync.Mutex
 	pendingTurnActive bool
 	pendingApprovalID string // request id of the most recent permission.asked
+
+	// lastEventAtUnixNano is set by the SSE reader on every frame
+	// received. The watchdog goroutine compares it against the
+	// current wall clock to decide whether the server has gone
+	// silent. atomic.Int64 — written from readSSE, read from the
+	// watchdog, no shared mutex needed.
+	lastEventAtUnixNano atomic.Int64
+
+	// turnHadContent tracks whether ANY AgentEvent was delivered
+	// during the current turn (text, tool start, tool end). Reset
+	// on each Prompt submission. When the turn terminates with
+	// zero content, the translator emits EventAgentDone{Reason:
+	// "empty"} so the runtime can surface "(empty response)" to
+	// the user. Guarded by pendingMu.
+	turnHadContent bool
 
 	closeOnce sync.Once
 	closed    chan struct{}
@@ -155,6 +172,43 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 		"resume_id", cfg.SessionID,
 	)
 
+	// Retry wrapper. Long-lived bridge = a single failed server
+	// start would otherwise kill the chat session; a single retry
+	// covers the common case of a stale HOME/.opencode state from
+	// a previous interrupted run (the root cause of TestE2E_Interrupt
+	// hanging on the third server spawn). Auth / config errors are
+	// surfaced immediately via isUnrecoverableStartErr — we don't
+	// retry those.
+	var live *Agent
+	var err error
+	for attempt := 1; attempt <= startupMaxAttempts; attempt++ {
+		live, err = a.startOnce(ctx, cfg)
+		if err == nil {
+			return live, nil
+		}
+		if isUnrecoverableStartErr(err) {
+			return nil, err
+		}
+		oLog("Start: attempt failed, retrying",
+			"attempt", attempt,
+			"max", startupMaxAttempts,
+			"err", err.Error(),
+		)
+		if attempt < startupMaxAttempts {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(startupRetryDelay):
+			}
+		}
+	}
+	return nil, err
+}
+
+// startOnce does the actual work of Start without retry. Returns a
+// live *Agent on success; on failure the partial state has already
+// been torn down (live.Close called). Caller decides whether to retry.
+func (a *Agent) startOnce(ctx context.Context, cfg agent.StartConfig) (*Agent, error) {
 	live := &Agent{
 		name:        a.name,
 		command:     a.command,
@@ -173,6 +227,7 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 		args:      a.args,
 	})
 	if err != nil {
+		_ = live.Close()
 		return nil, err
 	}
 	live.server = proc
@@ -197,23 +252,25 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 		// would surprise the operator; we log loudly and proceed
 		// with a fresh session so the operator at least sees the
 		// context_loss signal in the log.
-		s, err = live.client.GetSession(hsCtx, cfg.SessionID)
-		if err != nil {
+		var hsErr error
+		s, hsErr = live.client.GetSession(hsCtx, cfg.SessionID)
+		if hsErr != nil {
 			oLog("Start: resume failed, falling back to fresh session",
-				"session_id", cfg.SessionID, "err", err.Error())
-			s, err = live.client.CreateSession(hsCtx, CreateSessionOpts{})
-			if err != nil {
+				"session_id", cfg.SessionID, "err", hsErr.Error())
+			s, hsErr = live.client.CreateSession(hsCtx, CreateSessionOpts{})
+			if hsErr != nil {
 				_ = live.Close()
-				return nil, fmt.Errorf("opencode: create session (fallback): %w", err)
+				return nil, fmt.Errorf("opencode: create session (fallback): %w", hsErr)
 			}
 		} else {
 			resumed = true
 		}
 	} else {
-		s, err = live.client.CreateSession(hsCtx, CreateSessionOpts{})
-		if err != nil {
+		var hsErr error
+		s, hsErr = live.client.CreateSession(hsCtx, CreateSessionOpts{})
+		if hsErr != nil {
 			_ = live.Close()
-			return nil, fmt.Errorf("opencode: create session: %w", err)
+			return nil, fmt.Errorf("opencode: create session: %w", hsErr)
 		}
 	}
 	live.sessionID = s.ID
@@ -282,6 +339,31 @@ func (a *Agent) PID() int {
 		return 0
 	}
 	return a.server.pid
+}
+
+// isUnrecoverableStartErr returns true for start errors that
+// retrying cannot fix. The retry wrapper in Start skips the next
+// attempt when this returns true. Currently:
+//
+//   - binary not found ("executable file not found") — the same
+//     missing binary will not magically appear.
+//   - "command not found" — same root cause.
+//   - context.Canceled / context.DeadlineExceeded — the caller
+//     already gave up.
+//
+// Network / timeout / "stale HOME state" errors are considered
+// recoverable.
+func isUnrecoverableStartErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "executable file not found") ||
+		strings.Contains(msg, "command not found") ||
+		strings.Contains(msg, "no such file")
 }
 
 // ─── user input ──────────────────────────────────────────────────
@@ -413,6 +495,17 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 		a.pendingMu.Unlock()
 		return err
 	}
+	// Prompt was admitted — reset the per-turn content flag so the
+	// next EventAgentDone can distinguish "agent produced text" from
+	// "(empty response)", and restart the watchdog clock. The
+	// watchdog only fires while pendingTurnActive is true; on a
+	// session.idle / step.ended the busy-guard release cancels it.
+	a.pendingMu.Lock()
+	a.turnHadContent = false
+	a.pendingMu.Unlock()
+	a.trans.ResetTurn()
+	a.lastEventAtUnixNano.Store(time.Now().UnixNano())
+	go a.watchdog()
 	return nil
 }
 
@@ -639,6 +732,19 @@ func (a *Agent) deliver(ev agent.AgentEvent) agent.AgentEvent {
 	ev.Workspace = a.workspace
 	ev.Branch = a.branch
 
+	// Track turn content for the "empty response" hint. We mark
+	// turnHadContent on every AgentEvent that conveys agent work —
+	// text / tool start / tool end / reasoning — so an empty turn
+	// (model produced nothing) surfaces distinctly from a turn that
+	// only emitted bookkeeping events (e.g. EventAgentReady).
+	if ev.Kind == agent.EventAgentText ||
+		ev.Kind == agent.EventAgentToolStart ||
+		ev.Kind == agent.EventAgentToolEnd {
+		a.pendingMu.Lock()
+		a.turnHadContent = true
+		a.pendingMu.Unlock()
+	}
+
 	select {
 	case a.events <- ev:
 	case <-a.stopDeliver:
@@ -664,7 +770,18 @@ func (a *Agent) readSSE(body io.ReadCloser) {
 	defer body.Close()
 	defer a.finishTurn()
 
+	// Stamp the watchdog's "last event" timer immediately so a
+	// quiet SSE stream from the start does not look like a hang
+	// (the watchdog only fires when pendingTurnActive is true, but
+	// the clock must be moving from the moment we subscribe).
+	a.lastEventAtUnixNano.Store(time.Now().UnixNano())
+
 	err := decodeSSE(body, func(ev SessionEvent) error {
+		// Every SSE frame — including unknown / plugin / catalog
+		// chatter — proves the server is alive. Reset the watchdog
+		// clock here so plugin load storms don't trigger false
+		// positives on a quiet model turn.
+		a.lastEventAtUnixNano.Store(time.Now().UnixNano())
 		// Stamp the request id onto the permission event so the
 		// reply goroutine can route SendPermission back.
 		if ev.Type == "permission.asked" {
@@ -734,6 +851,98 @@ func (a *Agent) lifecycle() {
 	// `case a.events <- ev:` could panic on a closed channel.
 	close(a.stopDeliver)
 	close(a.events)
+}
+
+// ─── turn watchdog ───────────────────────────────────────────────
+
+// watchdogTimeout returns the configured turn watchdog timeout,
+// with NIGHTME_OPENCODE_TURN_WATCHDOG as the per-deployment
+// override (e.g. operators with a slow enterprise model bump
+// this to 30m). Returns 0 to disable the watchdog entirely.
+func watchdogTimeout() time.Duration {
+	v := strings.TrimSpace(os.Getenv("NIGHTME_OPENCODE_TURN_WATCHDOG"))
+	if v == "" {
+		return turnWatchdogTimeout
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return turnWatchdogTimeout
+	}
+	return d
+}
+
+// watchdog is a per-turn self-healing timer. Patterned after
+// cc-connect (defaultEventIdleTimeout in their engine.go:953):
+// the timer is reset on every SSE event (readSSE writes
+// lastEventAtUnixNano on each frame). If the gap exceeds the
+// threshold while a turn is pending, we kill the server,
+// synthesise an EventAgentError, and let the runtime readpump
+// surface a clear "agent session timed out (no response)" message
+// instead of leaving the chat stuck on the busy spinner.
+//
+// The watchdog exits as soon as the busy-guard drops (terminal
+// event arrived) or the bridge closes (Close was called).
+func (a *Agent) watchdog() {
+	timeout := watchdogTimeout()
+	if timeout <= 0 {
+		return
+	}
+	// Tick at timeout/10 so a 10-minute production timeout wakes
+	// us every minute (cheap) and a 200ms test timeout wakes us
+	// every 20ms (fast enough that tests don't sleep for 10s).
+	// Capped at 5s so a 1-hour test override still wakes the
+	// watchdog within a reasonable wall time.
+	tickInterval := timeout / 10
+	if tickInterval < 20*time.Millisecond {
+		tickInterval = 20 * time.Millisecond
+	}
+	if tickInterval > 5*time.Second {
+		tickInterval = 5 * time.Second
+	}
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+	deadline := time.Now().Add(timeout)
+	for {
+		select {
+		case <-a.closed:
+			return
+		case <-ticker.C:
+			a.pendingMu.Lock()
+			busy := a.pendingTurnActive
+			a.pendingMu.Unlock()
+			if !busy {
+				// Turn settled cleanly before the deadline.
+				return
+			}
+			lastEvent := time.Unix(0, a.lastEventAtUnixNano.Load())
+			if time.Since(lastEvent) < timeout {
+				// Activity within the window — push the deadline.
+				deadline = lastEvent.Add(timeout)
+				continue
+			}
+			if time.Now().Before(deadline) {
+				continue
+			}
+			// Timed out. Kill the server, deliver the error,
+			// and close the bridge. The runtime's readpump
+			// will surface the error to the user.
+			oLog("watchdog: turn timeout, killing session",
+				"timeout", timeout,
+				"since_last_event", time.Since(lastEvent),
+			)
+			a.deliver(agent.AgentEvent{
+				Kind:      agent.EventAgentError,
+				SessionID: a.sessionID,
+				Model:     a.model,
+				AgentName: a.name,
+				Workspace: a.workspace,
+				Branch:    a.branch,
+				Err:       fmt.Errorf("opencode: turn watchdog timeout (no events for %s)", timeout),
+			})
+			_ = a.Close()
+			return
+		}
+	}
 }
 
 // ─── helpers ─────────────────────────────────────────────────────

@@ -95,7 +95,6 @@ func newFixRemoteRig(t *testing.T) *fixRemoteRig {
 	rig.deps = HandlerDeps{
 		Git:    ExecGitRunner{},
 		Now:    func() time.Time { return time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC) },
-		Send:   rig.captureSend,
 		Detect: fakeDetect(prov),
 		// SkipRefreshDefaultBranch: integration tests for the
 		// /gtw fix business logic don't want to satisfy the
@@ -108,7 +107,7 @@ func newFixRemoteRig(t *testing.T) *fixRemoteRig {
 
 // fixRemoteRecCh captures every Send / SendCard / Patch for the
 // fixRemote integration tests after the cs.Channel() migration.
-// The legacy deps.Send mock (rig.captureSend) is kept for
+// The legacy captureSend stub is kept for
 // backward compat with tests that read sentTexts, but the
 // production code now uses cs.Channel().Send — so we capture in
 // both places.
@@ -151,11 +150,12 @@ func (r *fixRemoteRecCh) serialized() []string {
 	return out
 }
 
-// captureSend is the deps.Send callback. Records every text
-// the ID-mode flow emits so tests can assert on warn lines,
-// success cards, etc.
-func (r *fixRemoteRig) captureSend(_ context.Context, m OutMsg) error {
-	r.sentTexts = append(r.sentTexts, m.Text)
+// captureSend is kept as a stub for legacy call sites; the
+// /gtw fix path no longer uses deps.Send (replies go through
+// cs.Channel().Send / SendCard / Patch), so this is a no-op.
+// Real test assertions go through the recordingCh passed to
+// chatsession.New.
+func (r *fixRemoteRig) captureSend(_ context.Context, _ chatsession.OutboundMessage) error {
 	return nil
 }
 

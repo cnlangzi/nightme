@@ -129,7 +129,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, _ *chat
 
 	// Local-mode quick validation: the slug must not be empty
 	// after normalisation. Doing this here (before RunFix) keeps
-	// the SlashOutput path simple when deps.Send is nil in tests.
+	// the SlashOutput path simple when no channel is wired in tests.
 	if args.Mode == ModeLocal {
 		if _, err := DeriveBranchFromName(args.RawArg); err != nil {
 			return &command.SlashOutput{
@@ -167,7 +167,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, _ *chat
 
 	// RunFix signature: (ctx, mode, cs, slot, drafts, deps,
 	// chatID, messageID, args, force). Reply is sent inline via
-	// deps.Send; *Result only carries Consumed / Dropped for
+	// cs.Channel(); *Result only carries Consumed / Dropped for
 	// the runtime.
 	_, err = RunFix(ctx, args.Mode, cs, slot, drafts, f.deps, input.ChatID, input.MessageID, []string{args.RawArg}, args.Force)
 	if err != nil {
@@ -262,7 +262,7 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 //
 // Construction mirrors runFix: the slot / drafts shims route to
 // the per-chat Manager state, deps are forwarded verbatim, and
-// the reply path is RunClose's own deps.Send (no extra wiring).
+// the reply path is RunClose's own cs.Channel() (no extra wiring).
 func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	cs := f.mgr.GetChatSession(input.ChatID)
 	if cs == nil {
@@ -288,7 +288,7 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, _ *ch
 			Consumed: true,
 		}, nil
 	}
-	_ = res // RunClose already sent the reply via deps.Send
+	_ = res // RunClose already sent the reply via cs.Channel()
 	return &command.SlashOutput{Consumed: true}, nil
 }
 
@@ -316,7 +316,7 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *ch
 			Consumed: true,
 		}, nil
 	}
-	_ = res // RunPush already sent the reply via deps.Send
+	_ = res // RunPush already sent the reply via cs.Channel()
 	return &command.SlashOutput{Consumed: true}, nil
 }
 

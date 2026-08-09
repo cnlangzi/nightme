@@ -75,31 +75,22 @@ func newCloseRig(t *testing.T) *closeTestRig {
 	rig.deps = HandlerDeps{
 		Git: rig.git,
 		Now: func() time.Time { return time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC) },
-		Send: func(_ context.Context, m OutMsg) error {
-			rig.sentTexts = append(rig.sentTexts, m.Text)
-			return nil
-		},
 	}
 	// Use a per-test ChatSession via the existing helper. Each
 	// test gets its own chatID so they don't bleed state. The
 	// recording channel captures every Send so tests can assert
-	// the reply text without depending on deps.Send.
+	// the reply text via cs.Channel().
 	rec := &closeTestRecCh{}
 	cs, _ := chatsession.New("chat-close-" + t.Name(), "test-agent", rec)
 	_ = cs.SetSelectedCwd("/tmp/start") // neutral starting cwd; tests overwrite
 	rig.cs = cs
 	rig.rec = rec
 	// Inject a shim HandlerDeps whose Send funnels into the same
-	// recorder so legacy deps.Send assertions keep working while
+	// recorder so the legacy assertion style keeps working while
 	// the production path is cs.Channel().Send.
 	rig.deps = HandlerDeps{
 		Git: rig.git,
 		Now: func() time.Time { return time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC) },
-		Send: func(_ context.Context, m OutMsg) error {
-			rec.record(m.Text)
-			rig.sentTexts = append(rig.sentTexts, m.Text)
-			return nil
-		},
 	}
 	return rig
 }

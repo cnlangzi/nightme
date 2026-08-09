@@ -36,7 +36,6 @@
 package gtw
 
 import (
-	"context"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/command/services"
@@ -247,45 +246,6 @@ const (
 // UserID / ChatID), so callers compiled against either form
 // can be migrated to this alias.
 type ReactionEvent = services.ReactionEvent
-
-// OutMsg is the gtw-package view of an outbound IM message. Kept
-// tiny on purpose — the gateway layer wraps this into its own
-// OutboundMessage / Kind taxonomy. Using a small struct here lets
-// the gtw package stay decoupled from internal/gateway.
-type OutMsg struct {
-	ChatID string
-	Text   string
-	// ReplyTo is the channel-native userMsgID to thread under.
-	// Empty for top-level cards. Mirrors gateway.OutboundMessage.ReplyTo.
-	ReplyTo string
-
-	// F-46: when PatchBotMsgID is set the gateway emits a PATCH
-	// (OutboundKind.OutCardPatch) targeting the bot message at that
-	// ID, replacing its body with a disabled version of the
-	// original decision card. The fields below carry the rebuild
-	// context: title + body + choices mirror the original card so
-	// the PATCH keeps the same shape, plus a one-line result note
-	// appended to the body via PatchResult.
-	PatchBotMsgID     string
-	PatchChosenEmoji  string
-	PatchResult       string
-	CardTitle         string
-	CardBody          string
-	CardChoices       []CardChoice
-	CardRequestID     string
-	// ChosenChoiceEmoji opts the matching button into the
-	// "✅ 已<label>" inline state when the PATCH is rendered
-	// (mirrors ChosenChoiceEmoji on gateway.Card). When empty,
-	// every button is disabled with its original label.
-	ChosenChoiceEmoji string
-}
-
-// SendFunc is the IM-side send callback. The ctx is the caller's
-// request context (typically the one passed to RunFix / HandleAction
-// from the slash-command dispatcher). Adapters use it for
-// cancellation + rate limiting; tests can pass a closure that
-// appends to a slice for assertions.
-type SendFunc func(ctx context.Context, m OutMsg) error
 
 // Card represents the original decision card stored on a draft.
 // Carries enough information for the action handler to rebuild

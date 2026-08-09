@@ -39,10 +39,14 @@ type DraftsMap interface {
 // HandlerDeps wires the side effects RunFix / HandleAction need.
 // All fields are required; pass an instance constructed in the
 // runtime's startup code (cmd/nightme/run.go).
+//
+// Send / SendCard / Patch are gone — replies are sent via
+// cs.Channel().Send / SendCard / Patch directly. The chat
+// session's Channel is wired at construction (Manager.WithChannelResolver)
+// and immutable thereafter; production runtime captures via a
+// `capturingChannel` shim in cmd/nightme/debug.go for the gtw-test
+// debug subcommand.
 type HandlerDeps struct {
-	// Send is the IM-side send callback. Production: wraps
-	// gateway.Channel.Send; tests: appends to a slice.
-	Send SendFunc
 	// Git wraps the local git binary. Tests inject a fake.
 	Git GitRunner
 	// Prober is the HTTPProber for Detect's Stage B API probe
@@ -951,12 +955,11 @@ func renderCardMarkdown(c Card) string {
 // channel can render it as a thread reply rather than a fresh top-
 // level bubble.
 //
-// F-XX: nil-safe on `send`. The runtime historically left
-// HandlerDeps.Send nil (chatSessionSender carried the actual
-// channel adapter); if a future wiring change regresses that,
-// calling a nil SendFunc would panic. The defensive `if send
-// != nil` keeps the helper safe and degrades to "reply
-// consumed but no text sent" rather than crashing the daemon.
+// nil-safe on the channel: if cs.Channel() is nil (test setup without
+// a resolver, or runtime with no channels attached), the reply is
+// dropped silently and Consumed=true is returned. The daemon must
+// never crash on a missing outbound surface — see wip/commander.md
+// §2.7 for the nil-skip invariant.
 func reply(ctx context.Context, ch chatsession.Channel, chatID, messageID, text string) *Result {
 	if ch != nil {
 		_ = ch.Send(ctx, chatsession.OutboundMessage{

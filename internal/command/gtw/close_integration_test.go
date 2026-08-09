@@ -100,9 +100,14 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 	deps := HandlerDeps{
 		Git: ExecGitRunner{},
 		Now: func() time.Time { return now },
+		// Close's step-9 sync would try to refresh a temp repo
+		// that has no origin remote, producing a "no upstream"
+		// error card. This test asserts on close's success card
+		// only — skip the sync step.
+		SkipRefreshDefaultBranch: true,
 	}
 
-	res, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg-int-1", false /* force */)
+	res, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg-int-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -171,7 +176,7 @@ func TestIntegration_CloseRejectsDirty(t *testing.T) {
 		Now: time.Now,
 	}
 
-	if _, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg", false /* force */); err != nil {
+	if _, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg"); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -384,6 +389,13 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	deps := HandlerDeps{
 		Git: ExecGitRunner{},
 		Now: func() time.Time { return time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC) },
+		// This test exercises RunFix + RunClose against a temp
+		// repo with no origin remote. Without this flag the close
+		// step would emit a "discover default branch ... no origin"
+		// error card after the success card — the test only
+		// asserts on the worktree path, but the chat output would
+		// be polluted with a misleading second card.
+		SkipRefreshDefaultBranch: true,
 	}
 
 	// parseFixArgs with `-n foo` — what /gtw fix -n foo would
@@ -445,7 +457,7 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	}
 
 	// Now /gtw close should cleanly tear down.
-	closeRes, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg-close", false /* force */)
+	closeRes, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg-close")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}

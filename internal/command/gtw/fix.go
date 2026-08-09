@@ -128,21 +128,22 @@ func RunFix(
 		return reply(ctx, cs.Channel(), chatID, messageID,
 			"⚠️ Already inside a /gtw fix. Finish or cancel it first."), nil
 	}
-	// preflightOrphanYml catches a related but distinct case:
-	// a previous /gtw fix whose /gtw close never ran, leaving
-	// an orphan .nightme/gtw.yml in some worktree under this
-	// repo. The slot check above misses this because (a) it
-	// lives on disk not in memory and (b) only this chat's
-	// in-memory slot is checked. See preflightOrphanYml's doc
-	// for the full failure scenario this prevents.
+	// preflightOrphanYml catches the one case the in-memory
+	// slot check above cannot: the user is sitting inside a
+	// worktree that already holds .nightme/gtw.yml (e.g.
+	// /cwd'd into a previous fix's worktree and forgot to
+	// /gtw close). v1.x does NOT scan sibling worktrees for
+	// ymls — parallel /gtw fix across separate worktrees is
+	// supported. See preflightOrphanYml's doc for the full
+	// rationale and the history of the removed sibling scan.
 	//
-	// When force=true, we DO skip this check — the user is
-	// explicitly opting in to a destructive cleanup that
-	// also nukes any orphan yml's parent worktree.
-	if !force {
-		if err := preflightOrphanYml(ctx, cs.SelectedCwd(), deps.Git); err != nil {
-			return reply(ctx, cs.Channel(), chatID, messageID, err.Error()), nil
-		}
+	// force=true does NOT bypass this check: starting a new
+	// fix on top of an active one is always a logic error
+	// regardless of intent. --force is for the worktree-path
+	// collision case (forceCleanWorktreePath), not for
+	// overriding the slot/preflight layer.
+	if err := preflightOrphanYml(cs.SelectedCwd()); err != nil {
+		return reply(ctx, cs.Channel(), chatID, messageID, err.Error()), nil
 	}
 
 	switch mode {

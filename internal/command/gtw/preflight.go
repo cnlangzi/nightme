@@ -1,101 +1,55 @@
 package gtw
 
 import (
-	"bufio"
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
-// preflightOrphanYml refuses /gtw fix when there's an unfinished
-// /gtw fix on this repo. Two cases produce an orphan yml:
+// preflightOrphanYml guards /gtw fix against one specific case:
+// SelectedCwd is itself the worktree of an in-flight fix (i.e.
+// .nightme/gtw.yml exists at SelectedCwd). This means the user
+// /cwd'd into a /gtw fix worktree and then started a new /gtw
+// fix without running /gtw close first — the new fix would
+// inherit the old fix's slot/yml and immediately contradict it.
 //
-//  1. SelectedCwd IS the fix worktree (i.e. the user is sitting
-//     inside a worktree that /gtw fix created, and forgot to
-//     /gtw close before running another /gtw fix).
-//  2. A sibling worktree under the same repo holds an orphan
-//     .nightme/gtw.yml from a previous /gtw fix whose /gtw close
-//     never ran. The slot is empty (in-memory state was cleared
-//     by a daemon restart or a different chat), but the on-disk
-//     yml survives.
+// What this function does NOT guard (v1.x, by design):
 //
-// Without this check, /gtw fix #2 would silently overwrite
-// worktree #2 onto a fresh path, ignore the existing yml
-// (ErrGtwYmlExists is warn-only inside completeFixAndDispatch),
-// and leave the user with in-memory state pointing at the new
-// fix while the yml describes the old one. /gtw close then
-// reads the old yml and tries to remove a now-non-existent
-// worktree. See wip/gtw.md §14.10 risk table for the original
-// discussion.
+//   - Other sibling worktrees under the same repo holding ymls.
+//     gtw supports N parallel /gtw fix in the same repo, each
+//     owning its own worktree + yml. The yml is the per-worktree
+//     source of truth; /gtw close reads it from CWD and tears
+//     down only that worktree. The whole point of git worktrees
+//     is to enable parallel branches on one machine — a global
+//     "one fix per repo" gate would defeat the tool's value
+//     proposition.
 //
-// Returns nil if no orphan is detected, or a user-friendly
-// error reply text otherwise.
-func preflightOrphanYml(ctx context.Context, selectedCwd string, git GitRunner) error {
-	// Case 1: SelectedCwd itself is a fix worktree.
-	if _, err := os.Stat(filepath.Join(selectedCwd, nightmeDirName, gtwYmlName)); err == nil {
+//   - Stale ymls in worktrees whose chat was lost (daemon
+//     restart, different chat ID, etc.). They are per-worktree
+//     state, not a cross-worktree hazard. /gtw close from the
+//     owning worktree (or /gtw close --force from anywhere with
+//     that worktree as CWD) reconciles them. If the user really
+//     wants to abandon a stale worktree, they can `git worktree
+//     remove --force` it; the yml goes with the directory.
+//
+// History: v1 carried a "sibling yml" check that rejected any
+// second /gtw fix under the same repo. It was removed because
+// (a) the failure scenario it described relied on the yml being
+// shared state, which it never was — each worktree has its own —
+// and (b) blocking parallel worktrees defeated the tool's
+// purpose. See commit history for the removal.
+//
+// Returns nil if SelectedCwd is fine, or a user-friendly error
+// reply text otherwise.
+func preflightOrphanYml(selectedCwd string) error {
+	target := filepath.Join(selectedCwd, nightmeDirName, gtwYmlName)
+	if _, err := os.Stat(target); err == nil {
 		return fmt.Errorf(
 			"❌ %s already exists\n"+
 				"  this directory is the current /gtw fix worktree.\n"+
 				"  fix: run /gtw close here (or /cwd into another worktree)",
-			filepath.Join(selectedCwd, nightmeDirName, gtwYmlName),
+			target,
 		)
 	}
-
-	// Case 2: a sibling worktree under the same repo holds an
-	// orphan yml. `git worktree list --porcelain` lists ALL
-	// linked worktrees (main repo + every worktree).
-	out, _, err := git.Run(ctx, selectedCwd, "worktree", "list", "--porcelain")
-	if err != nil {
-		// Not a git repo / git unavailable — let downstream
-		// preflight (RepoRoot / PreflightWorktreeCreate) catch
-		// the real failure. Don't fail on our scan.
-		return nil
-	}
-
-	for _, p := range parseWorktreePaths(out) {
-		if filepath.Clean(p) == filepath.Clean(selectedCwd) {
-			continue // already checked in case 1
-		}
-		if _, err := os.Stat(filepath.Join(p, nightmeDirName, gtwYmlName)); err == nil {
-			return fmt.Errorf(
-				"❌ found unfinished /gtw fix in sibling worktree %s\n"+
-					"  fix: /cwd into that worktree and run /gtw close first",
-				p,
-			)
-		}
-	}
 	return nil
-}
-
-// parseWorktreePaths extracts the absolute paths from
-// `git worktree list --porcelain` output. Each worktree entry
-// starts with `worktree <path>`; entries are separated by blank
-// lines. Only paths are returned — branch / HEAD lines are
-// ignored.
-//
-// Example input:
-//
-//	worktree /home/user/repo
-//	HEAD abc123
-//	branch refs/heads/main
-//
-//	worktree /home/user/repo.wt-fix-42
-//	HEAD def456
-//	branch refs/heads/fix/42-foo
-//
-// Output: ["/home/user/repo", "/home/user/repo.wt-fix-42"]
-func parseWorktreePaths(porcelain string) []string {
-	var out []string
-	sc := bufio.NewScanner(strings.NewReader(porcelain))
-	for sc.Scan() {
-		line := sc.Text()
-		const prefix = "worktree "
-		if !strings.HasPrefix(line, prefix) {
-			continue
-		}
-		out = append(out, strings.TrimPrefix(line, prefix))
-	}
-	return out
 }

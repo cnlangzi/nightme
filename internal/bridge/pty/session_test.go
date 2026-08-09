@@ -9,10 +9,10 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// fakeBridge implements Bridge for unit-testing the merged *Agent
+// fakeTransport implements Transport for unit-testing the merged *Agent
 // without spawning a real child process. Reads come from a channel so
 // the test can drive the read loop deterministically.
-type fakeBridge struct {
+type fakeTransport struct {
 	mu      sync.Mutex
 	reads   chan []byte
 	writes  [][]byte
@@ -20,14 +20,14 @@ type fakeBridge struct {
 	closeCh chan struct{}
 }
 
-func newFakeBridge() *fakeBridge {
-	return &fakeBridge{
+func newFakeTransport() *fakeTransport {
+	return &fakeTransport{
 		reads:   make(chan []byte, 4),
 		closeCh: make(chan struct{}),
 	}
 }
 
-func (f *fakeBridge) Read(p []byte) (int, error) {
+func (f *fakeTransport) Read(p []byte) (int, error) {
 	select {
 	case data, ok := <-f.reads:
 		if !ok {
@@ -40,7 +40,7 @@ func (f *fakeBridge) Read(p []byte) (int, error) {
 	}
 }
 
-func (f *fakeBridge) Write(p []byte) (int, error) {
+func (f *fakeTransport) Write(p []byte) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.closed {
@@ -51,7 +51,7 @@ func (f *fakeBridge) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (f *fakeBridge) Close() error {
+func (f *fakeTransport) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.closed {
@@ -62,33 +62,33 @@ func (f *fakeBridge) Close() error {
 	return nil
 }
 
-func (f *fakeBridge) PID() int               { return 4242 }
-func (f *fakeBridge) Setsize(int, int) error { return nil }
+func (f *fakeTransport) PID() int               { return 4242 }
+func (f *fakeTransport) Setsize(int, int) error { return nil }
 
 // push feeds bytes into the bridge as if the child had written them.
-func (f *fakeBridge) push(data string) {
+func (f *fakeTransport) push(data string) {
 	f.reads <- []byte(data)
 }
 
-// newAgentForTest constructs an *Agent with the given fake Bridge and
+// newAgentForTest constructs an *Agent with the given fake Transport and
 // a fresh events channel. Skips Start (no real process) and lets the
 // caller decide whether to kick off the read loop.
 //
 // Used by tests that want to drive Events / Send* / Close directly
 // without spawning a real PTY child.
-func newAgentForTest(b Bridge) *Agent {
+func newAgentForTest(b Transport) *Agent {
 	return &Agent{
-		name:    "test",
-		command: "test",
-		bridge:  b,
-		events:  make(chan agent.AgentEvent, sessionBufferSize),
+		name:      "test",
+		command:   "test",
+		transport: b,
+		events:    make(chan agent.AgentEvent, sessionBufferSize),
 	}
 }
 
 // TestAgentReadLoop verifies that bytes pushed into the bridge become
 // EventAgentText events, followed by an EventAgentDone on EOF.
 func TestAgentReadLoop(t *testing.T) {
-	b := newFakeBridge()
+	b := newFakeTransport()
 	a := newAgentForTest(b)
 	go a.readLoop()
 
@@ -128,7 +128,7 @@ func TestAgentReadLoop(t *testing.T) {
 // terminates the session (with EventAgentDone, per the v0.1 contract —
 // EventAgentError is reserved for higher-level unrecoverable conditions).
 func TestAgentReadError(t *testing.T) {
-	b := newFakeBridge()
+	b := newFakeTransport()
 	a := newAgentForTest(b)
 	go a.readLoop()
 
@@ -153,7 +153,7 @@ func TestAgentReadError(t *testing.T) {
 
 // TestAgentSendText verifies that SendText writes bytes to the bridge.
 func TestAgentSendText(t *testing.T) {
-	b := newFakeBridge()
+	b := newFakeTransport()
 	a := newAgentForTest(b)
 	go a.readLoop()
 	t.Cleanup(func() { _ = a.Close() })
@@ -172,7 +172,7 @@ func TestAgentSendText(t *testing.T) {
 // TestAgentSendPermission verifies that SendPermission also writes
 // bytes to the bridge (PTY mode has no structured decision).
 func TestAgentSendPermission(t *testing.T) {
-	b := newFakeBridge()
+	b := newFakeTransport()
 	a := newAgentForTest(b)
 	go a.readLoop()
 	t.Cleanup(func() { _ = a.Close() })
@@ -191,7 +191,7 @@ func TestAgentSendPermission(t *testing.T) {
 // TestAgentCloseIdempotent verifies Close can be called more than
 // once without error or panic.
 func TestAgentCloseIdempotent(t *testing.T) {
-	b := newFakeBridge()
+	b := newFakeTransport()
 	a := newAgentForTest(b)
 	go a.readLoop()
 

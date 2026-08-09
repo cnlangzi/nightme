@@ -11,23 +11,23 @@ import (
 )
 
 // TestPreflightOrphanYml_CleanRepo is the happy path: SelectedCwd
-// is the main repo, no orphan yml anywhere. preflightOrphanYml
-// must return nil.
+// is the main repo, no yml anywhere. preflightOrphanYml must
+// return nil.
 func TestPreflightOrphanYml_CleanRepo(t *testing.T) {
 	repoRoot := initTempRepo(t)
 	// Create one worktree with NO yml (the typical state).
 	wt := filepath.Join(filepath.Dir(repoRoot), filepath.Base(repoRoot)+".wt-clean")
 	mustGit(t, repoRoot, "worktree", "add", "-b", "feat/clean", wt, "HEAD")
 
-	if err := preflightOrphanYml(context.Background(), repoRoot, ExecGitRunner{}); err != nil {
+	if err := preflightOrphanYml(repoRoot); err != nil {
 		t.Fatalf("preflightOrphanYml on clean repo: %v", err)
 	}
 }
 
-// TestPreflightOrphanYml_ActiveCwdIsFixWorktree covers case 1
-// from preflightOrphanYml's doc: the user is sitting inside a
-// fix worktree (i.e. .nightme/gtw.yml exists at SelectedCwd).
-// preflightOrphanYml must reject.
+// TestPreflightOrphanYml_ActiveCwdIsFixWorktree covers the ONE
+// case preflightOrphanYml still rejects: the user is sitting
+// inside a fix worktree (i.e. .nightme/gtw.yml exists at
+// SelectedCwd). The new fix would inherit / contradict the old.
 func TestPreflightOrphanYml_ActiveCwdIsFixWorktree(t *testing.T) {
 	repoRoot := initTempRepo(t)
 	wt := filepath.Join(filepath.Dir(repoRoot), filepath.Base(repoRoot)+".wt-fix42")
@@ -42,7 +42,7 @@ func TestPreflightOrphanYml_ActiveCwdIsFixWorktree(t *testing.T) {
 		t.Fatalf("write yml: %v", err)
 	}
 
-	err := preflightOrphanYml(context.Background(), wt, ExecGitRunner{})
+	err := preflightOrphanYml(wt)
 	if err == nil {
 		t.Fatal("preflightOrphanYml: want error for yml-at-SelectedCwd, got nil")
 	}
@@ -54,18 +54,16 @@ func TestPreflightOrphanYml_ActiveCwdIsFixWorktree(t *testing.T) {
 	}
 }
 
-// TestPreflightOrphanYml_SiblingWorktreeHasYml covers case 2:
-// SelectedCwd is the main repo (no yml here), but a sibling
-// worktree holds an orphan yml.
-func TestPreflightOrphanYml_SiblingWorktreeHasYml(t *testing.T) {
+// TestPreflightOrphanYml_SiblingWorktreeYml_AllowedFromMain is
+// the v1.x invariant: a sibling worktree holding an orphan yml
+// must NOT block /gtw fix in the main repo. Parallel fixes
+// across separate worktrees are the explicit design goal —
+// the previous "one fix per repo" check was removed because it
+// defeated the purpose of git worktrees.
+func TestPreflightOrphanYml_SiblingWorktreeYml_AllowedFromMain(t *testing.T) {
 	repoRoot := initTempRepo(t)
 
-	// Worktree A: clean, no yml.
-	wtA := filepath.Join(filepath.Dir(repoRoot), filepath.Base(repoRoot)+".wt-a")
-	mustGit(t, repoRoot, "worktree", "add", "-b", "feat/a", wtA, "HEAD")
-
-	// Worktree B: HAS an orphan yml (e.g. /gtw fix that didn't
-	// close).
+	// Sibling worktree with a yml from a previous (unclosed) fix.
 	wtB := filepath.Join(filepath.Dir(repoRoot), filepath.Base(repoRoot)+".wt-b")
 	mustGit(t, repoRoot, "worktree", "add", "-b", "fix/42", wtB, "HEAD")
 	if err := os.MkdirAll(filepath.Join(wtB, nightmeDirName), 0o755); err != nil {
@@ -76,15 +74,37 @@ func TestPreflightOrphanYml_SiblingWorktreeHasYml(t *testing.T) {
 		t.Fatalf("write yml: %v", err)
 	}
 
-	err := preflightOrphanYml(context.Background(), repoRoot, ExecGitRunner{})
-	if err == nil {
-		t.Fatal("preflightOrphanYml: want error for sibling yml, got nil")
+	// SelectedCwd is the MAIN repo (no yml here). The sibling
+	// yml must be ignored.
+	if err := preflightOrphanYml(repoRoot); err != nil {
+		t.Fatalf("preflightOrphanYml: sibling yml must not block /gtw fix from main, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "sibling") {
-		t.Errorf("error = %q, want 'sibling' phrase", err.Error())
+}
+
+// TestPreflightOrphanYml_SiblingWorktreeYml_AllowedFromAnotherSibling
+// is the multi-worktree case: even when SelectedCwd is itself a
+// sibling worktree (different from the one with the yml), the
+// preflight must not block.
+func TestPreflightOrphanYml_SiblingWorktreeYml_AllowedFromAnotherSibling(t *testing.T) {
+	repoRoot := initTempRepo(t)
+
+	wtA := filepath.Join(filepath.Dir(repoRoot), filepath.Base(repoRoot)+".wt-a")
+	mustGit(t, repoRoot, "worktree", "add", "-b", "feat/a", wtA, "HEAD")
+
+	wtB := filepath.Join(filepath.Dir(repoRoot), filepath.Base(repoRoot)+".wt-b")
+	mustGit(t, repoRoot, "worktree", "add", "-b", "fix/42", wtB, "HEAD")
+	if err := os.MkdirAll(filepath.Join(wtB, nightmeDirName), 0o755); err != nil {
+		t.Fatalf("mkdir .nightme: %v", err)
 	}
-	if !strings.Contains(err.Error(), wtB) {
-		t.Errorf("error should name the sibling worktree %q:\n%s", wtB, err.Error())
+	if err := os.WriteFile(filepath.Join(wtB, nightmeDirName, gtwYmlName),
+		[]byte("mode: remote\nissue: 42\n"), 0o600); err != nil {
+		t.Fatalf("write yml: %v", err)
+	}
+
+	// SelectedCwd is wtA (no yml); wtB has an orphan yml.
+	// /gtw fix starting from wtA must not be blocked.
+	if err := preflightOrphanYml(wtA); err != nil {
+		t.Fatalf("preflightOrphanYml: sibling yml must not block /gtw fix from another sibling, got: %v", err)
 	}
 }
 
@@ -94,59 +114,26 @@ func TestPreflightOrphanYml_SiblingWorktreeHasYml(t *testing.T) {
 // "not in a git repo" failure.
 func TestPreflightOrphanYml_NotAGitRepo(t *testing.T) {
 	dir := t.TempDir()
-	if err := preflightOrphanYml(context.Background(), dir, ExecGitRunner{}); err != nil {
+	if err := preflightOrphanYml(dir); err != nil {
 		t.Fatalf("preflightOrphanYml on non-git dir: %v", err)
 	}
 }
 
-// TestParseWorktreePaths sanity-checks the porcelain parser
-// against the canonical `git worktree list --porcelain` shape.
-// Used by preflightOrphanYml — important to keep stable because
-// the function's correctness depends on it.
-func TestParseWorktreePaths(t *testing.T) {
-	porcelain := "" +
-		"worktree /home/user/repo\n" +
-		"HEAD abc123\n" +
-		"branch refs/heads/main\n" +
-		"\n" +
-		"worktree /home/user/repo.wt-fix-42\n" +
-		"HEAD def456\n" +
-		"branch refs/heads/fix/42-foo\n" +
-		"\n" // trailing blank line, common from `git worktree list`
-
-	got := parseWorktreePaths(porcelain)
-	want := []string{"/home/user/repo", "/home/user/repo.wt-fix-42"}
-	if len(got) != len(want) {
-		t.Fatalf("got %d paths, want %d: %v", len(got), len(want), got)
-	}
-	for i, w := range want {
-		if got[i] != w {
-			t.Errorf("[%d] got %q, want %q", i, got[i], w)
-		}
-	}
-}
-
-// TestPreflightOrphanYml_RunFixIntegration verifies the end-
-// to-end integration: a real /gtw fix flow that picks up an
-// orphan yml must short-circuit at RunFix's preflight rather
-// than silently overwriting. This is the test that would have
-// caught the original bug if it had existed when the orphan
-// case was first introduced.
-func TestPreflightOrphanYml_RunFixIntegration(t *testing.T) {
+// TestPreflightOrphanYml_RunFixIntegration_AllowsParallel
+// exercises the end-to-end flow: a sibling worktree has an
+// orphan yml, and the user runs /gtw fix from the main repo.
+// v1.x must allow this — the new fix creates a fresh worktree
+// at a fresh path, writes its own yml, and leaves the orphan
+// yml in the sibling alone. This is the test that would have
+// failed under v1's "one fix per repo" gate.
+func TestPreflightOrphanYml_RunFixIntegration_AllowsParallel(t *testing.T) {
 	repoRoot := initTempRepo(t)
-	mustGit(t, repoRoot, "remote", "add", "origin",
-		"https://github.com/cnlangzi/nightme.git")
-	mustGit(t, repoRoot, "symbolic-ref", "refs/remotes/origin/HEAD",
-		"refs/remotes/origin/main")
 
 	ch := &recordingCh{}
-	cs, _ := chatsession.New("chat-preflight", "test-agent", ch)
+	cs, _ := chatsession.New("chat-parallel", "test-agent", ch)
 	_ = cs.SetSelectedCwd(repoRoot)
 
-	// Simulate an orphan yml: create a worktree with a yml in
-	// it. The user is sitting in the main repo (not the
-	// worktree), but git knows about the worktree via
-	// `git worktree list`.
+	// Seed an orphan yml in a sibling worktree.
 	orphanWt := filepath.Join(filepath.Dir(repoRoot), filepath.Base(repoRoot)+".wt-orphan")
 	mustGit(t, repoRoot, "worktree", "add", "-b", "fix/99", orphanWt, "HEAD")
 	if err := os.MkdirAll(filepath.Join(orphanWt, nightmeDirName), 0o755); err != nil {
@@ -157,17 +144,25 @@ func TestPreflightOrphanYml_RunFixIntegration(t *testing.T) {
 		t.Fatalf("write yml: %v", err)
 	}
 
+	// Capture the orphan's yml content + mtime to verify
+	// untouched-ness after the second fix.
+	orphanYmlBefore, err := os.ReadFile(filepath.Join(orphanWt, nightmeDirName, gtwYmlName))
+	if err != nil {
+		t.Fatalf("read orphan yml before: %v", err)
+	}
+
 	deps := HandlerDeps{
-		Git:                   ExecGitRunner{},
-		Now:                   nil,
+		Git:                      ExecGitRunner{},
+		Now:                      nil,
 		SkipRefreshDefaultBranch: true,
 	}
 	slot := &memSlot{}
 
-	// /gtw fix 1 — should hit preflightOrphanYml and abort.
+	// /gtw fix --name fix/cwd (ModeLocal, no remote needed) —
+	// must succeed despite the sibling yml.
 	res, err := RunFix(
-		context.Background(), ModeRemote, cs, slot, newMemDrafts(), deps,
-		cs.ChatID, "msg", []string{"1"},
+		context.Background(), ModeLocal, cs, slot, newMemDrafts(), deps,
+		cs.ChatID, "msg", []string{"--name", "fix/cwd"},
 		false, /* force */
 	)
 	if err != nil {
@@ -176,18 +171,22 @@ func TestPreflightOrphanYml_RunFixIntegration(t *testing.T) {
 	if !res.Consumed {
 		t.Errorf("Result.Consumed = false")
 	}
-	last := ch.lastText()
-	if last == "" {
-		t.Fatalf("expected a reply from RunFix preflight, got none")
-	}
-	if !strings.Contains(last, "sibling") || !strings.Contains(last, orphanWt) {
-		t.Errorf("reply missing sibling-yaml hint:\n%s", last)
-	}
-	// No NEW worktree should have been created.
+
+	// A NEW worktree must have been created (in addition to
+	// the seed orphan). Expected count: 3 = main repo + orphan
+	// seed + new fix.
 	wtOut, _ := mustGitOut(t, repoRoot, "worktree", "list", "--porcelain")
-	if c := strings.Count(wtOut, "worktree "); c != 2 {
-		// 2 = main repo + the orphan we seeded; we expect no
-		// new worktree from the rejected /gtw fix.
-		t.Errorf("worktree count = %d, want 2 (no new from rejected /gtw fix):\n%s", c, wtOut)
+	if c := strings.Count(wtOut, "worktree "); c != 3 {
+		t.Errorf("worktree count = %d, want 3 (main + orphan + new fix):\n%s", c, wtOut)
+	}
+
+	// The orphan yml must be UNCHANGED.
+	orphanYmlAfter, err := os.ReadFile(filepath.Join(orphanWt, nightmeDirName, gtwYmlName))
+	if err != nil {
+		t.Fatalf("read orphan yml after: %v", err)
+	}
+	if string(orphanYmlAfter) != string(orphanYmlBefore) {
+		t.Errorf("orphan yml was modified — sibling state must be untouched:\nbefore: %q\nafter:  %q",
+			string(orphanYmlBefore), string(orphanYmlAfter))
 	}
 }

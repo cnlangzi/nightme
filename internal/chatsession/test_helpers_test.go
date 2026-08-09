@@ -68,6 +68,11 @@ func (t *testChannel) SendCard(_ context.Context, msg OutboundMessage) (string, 
 	return "bot-msg-test", nil
 }
 
+func (t *testChannel) Patch(_ context.Context, msg OutboundMessage) error {
+	t.Sent = append(t.Sent, msg)
+	return nil
+}
+
 // newTestChannel returns a fresh testChannel for tests that need
 // to bind a Channel to a ChatSession.
 func newTestChannel() *testChannel {

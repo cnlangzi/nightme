@@ -88,7 +88,7 @@ func executeBranchExistsAction(
 	// up with no Repo, it's broken; surface that explicitly.
 	if p.IssueID != -1 && p.Repo == "" {
 		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
-		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), "❌ Internal error: draft missing repo.")
+		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), "❌ Internal error: draft missing repo.")
 		return true
 	}
 
@@ -112,7 +112,7 @@ func executeBranchExistsAction(
 				_ = provider.RemoveLabel(ctx, owner, repo, p.IssueID, LabelWIP)
 			}
 		}
-		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), resultText)
+		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), resultText)
 		return true
 
 	case ReactionNewV2:
@@ -153,7 +153,7 @@ func executeBranchExistsAction(
 		if resultText == "" {
 			resultText = "❌ Too many branch variants; please clean up locally."
 		}
-		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), resultText)
+		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), resultText)
 		return true
 
 	case ReactionJoin:
@@ -178,7 +178,7 @@ func executeBranchExistsAction(
 			})
 			resultText = fmt.Sprintf("✅ Joined existing worktree at %s.", existingPath)
 		}
-		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), resultText)
+		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), resultText)
 		return true
 	}
 	// Unrecognised emoji on a known draft: leave the draft in
@@ -222,7 +222,7 @@ func executeWorktreeFailAction(
 				_ = provider.RemoveLabel(ctx, owner, repo, p.IssueID, LabelWIP)
 			}
 		}
-		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), resultText)
+		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), resultText)
 		return true
 
 	case ReactionRetry:
@@ -247,7 +247,7 @@ func executeWorktreeFailAction(
 			})
 			resultText = variantReadyResultText(p, p.Branch)
 		}
-		emitFollowUp(ctx, deps, draft, ev, string(ev.Emoji), resultText)
+		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), resultText)
 		return true
 	}
 	return false
@@ -261,31 +261,41 @@ func executeWorktreeFailAction(
 // fallback), it emits a plain text reply preserved from F-45.
 func emitFollowUp(
 	ctx context.Context,
-	deps HandlerDeps,
+	cs *chatsession.ChatSession,
 	draft *Draft,
 	ev services.ReactionEvent,
 	chosenEmoji string,
 	resultText string,
 ) {
 	if draft.BotMessageID != "" {
-		_ = deps.Send(ctx, OutMsg{
-			ChatID:            ev.ChatID,
-			PatchBotMsgID:     draft.BotMessageID,
-			PatchChosenEmoji:  chosenEmoji,
-			PatchResult:       resultText,
-			CardTitle:         draft.CardTitle,
-			CardBody:          draft.CardBody,
-			CardChoices:       draft.CardChoices,
-			CardRequestID:     draft.CardRequestID,
-			ChosenChoiceEmoji: chosenEmoji,
-		})
+		if cs != nil {
+			ch := cs.Channel()
+			if ch != nil {
+				_ = ch.Patch(ctx, chatsession.OutboundMessage{
+					ChatID:            ev.ChatID,
+					PatchBotMsgID:     draft.BotMessageID,
+					PatchChosenEmoji:  chosenEmoji,
+					PatchResult:       resultText,
+					CardTitle:         draft.CardTitle,
+					CardBody:          draft.CardBody,
+					CardChoices:       toChatCardChoices(draft.CardChoices),
+					CardRequestID:     draft.CardRequestID,
+					ChosenChoiceEmoji: chosenEmoji,
+				})
+			}
+		}
 		return
 	}
-	_ = deps.Send(ctx, OutMsg{
-		ChatID:  ev.ChatID,
-		ReplyTo: ev.TargetMsgID,
-		Text:    resultText,
-	})
+	if cs != nil {
+		ch := cs.Channel()
+		if ch != nil {
+			_ = ch.Send(ctx, chatsession.OutboundMessage{
+				ChatID:  ev.ChatID,
+				ReplyTo: ev.TargetMsgID,
+				Text:    resultText,
+			})
+		}
+	}
 }
 
 // splitOwnerRepo splits "owner/repo" into its two parts.
@@ -351,4 +361,23 @@ func variantReadyResultText(p FixDraftPayload, branch string) string {
 		return fmt.Sprintf("✅ Local worktree 就绪(使用 %s)。", branch)
 	}
 	return fmt.Sprintf("✅ Fix #%d 就绪(使用 %s)。", p.IssueID, branch)
+}
+
+// toChatCardChoices translates gtw.CardChoice to
+// chatsession.CardChoice (same fields, different packages).
+// Defined here so the gtw package doesn't depend on the
+// chatsession.CardChoice internal layout for translation.
+func toChatCardChoices(in []CardChoice) []chatsession.CardChoice {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]chatsession.CardChoice, len(in))
+	for i, c := range in {
+		out[i] = chatsession.CardChoice{
+			Emoji:  c.Emoji,
+			Label:  c.Label,
+			Action: c.Action,
+		}
+	}
+	return out
 }

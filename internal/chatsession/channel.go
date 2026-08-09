@@ -19,6 +19,10 @@ type Channel interface {
 	Send(ctx context.Context, msg OutboundMessage) error
 	// SendCard posts an interactive card; returns the bot-side msg id.
 	SendCard(ctx context.Context, msg OutboundMessage) (msgID string, err error)
+	// Patch edits an existing bot message in place (F-46). The
+	// implementation should treat msg.PatchBotMsgID as the target
+	// message id and update its body in place.
+	Patch(ctx context.Context, msg OutboundMessage) error
 }
 
 // OutboundMessage is the message payload Channel accepts. Mirrors the
@@ -29,6 +33,16 @@ type OutboundMessage struct {
 	Text    string
 	ReplyTo string
 	Card    *Card
+	// F-46: when PatchBotMsgID is set the Channel patches the
+	// existing bot message in place instead of sending new content.
+	PatchBotMsgID     string
+	PatchChosenEmoji  string
+	PatchResult       string
+	CardTitle         string
+	CardBody          string
+	CardChoices       []CardChoice
+	CardRequestID     string
+	ChosenChoiceEmoji string
 }
 
 // Card is the interactive card payload.

@@ -16,9 +16,16 @@ func TestEnrichedEvent_AgentSessionID_Populated(t *testing.T) {
 	cs := newChatSessionForTest("cs_env_asid")
 	cs.attachAgentSession(as)
 
-	var gotID string
+	// Subscriber runs in the dispatcher's goroutine; assertions run
+	// in the test goroutine. Signal via a buffered channel so the
+	// send/recv pair provides the happens-before edge — no race,
+	// no polling loop.
+	delivered := make(chan AgentEventEnvelope, 1)
 	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
-		gotID = env.AgentSession.ID
+		select {
+		case delivered <- env:
+		default:
+		}
 		return false
 	})
 
@@ -27,12 +34,18 @@ func TestEnrichedEvent_AgentSessionID_Populated(t *testing.T) {
 		AgentEvent: makeTextEvent("hi"),
 	})
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && gotID == "" {
-		time.Sleep(5 * time.Millisecond)
+	var env AgentEventEnvelope
+	select {
+	case env = <-delivered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("event bus did not receive event")
 	}
-	if gotID != as.ID {
-		t.Errorf("env.AgentSession.ID = %q, want %q", gotID, as.ID)
+	if env.AgentSession == nil || env.AgentSession.ID != as.ID {
+		got := ""
+		if env.AgentSession != nil {
+			got = env.AgentSession.ID
+		}
+		t.Errorf("env.AgentSession.ID = %q, want %q", got, as.ID)
 	}
 }
 
@@ -43,9 +56,12 @@ func TestEnrichedEvent_PromptID_Populated(t *testing.T) {
 	cs := newChatSessionForTest("cs_env_pid")
 	cs.attachAgentSession(as)
 
-	var gotPromptID string
+	delivered := make(chan AgentEventEnvelope, 1)
 	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
-		gotPromptID = env.PromptID
+		select {
+		case delivered <- env:
+		default:
+		}
 		return false
 	})
 
@@ -55,12 +71,14 @@ func TestEnrichedEvent_PromptID_Populated(t *testing.T) {
 		AgentEvent: makeTextEvent("hi"),
 	})
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && gotPromptID == "" {
-		time.Sleep(5 * time.Millisecond)
+	var env AgentEventEnvelope
+	select {
+	case env = <-delivered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("event bus did not receive event")
 	}
-	if gotPromptID != "PA-99" {
-		t.Errorf("env.PromptID = %q, want %q", gotPromptID, "PA-99")
+	if env.PromptID != "PA-99" {
+		t.Errorf("env.PromptID = %q, want %q", env.PromptID, "PA-99")
 	}
 }
 
@@ -81,10 +99,11 @@ func TestMessageStateEvent_AgentSessionID_Populated(t *testing.T) {
 	// the EventBus event from a direct push and verify the envelope
 	// carries AgentSessionID — same path that MessageStateEvent uses
 	// for source attribution.
-	var gotID string
+	delivered := make(chan AgentEventEnvelope, 1)
 	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
-		if env.AgentSession != nil {
-			gotID = env.AgentSession.ID
+		select {
+		case delivered <- env:
+		default:
 		}
 		return false
 	})
@@ -94,12 +113,18 @@ func TestMessageStateEvent_AgentSessionID_Populated(t *testing.T) {
 		AgentEvent: makeTextEvent("trigger"),
 	})
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && gotID == "" {
-		time.Sleep(5 * time.Millisecond)
+	var env AgentEventEnvelope
+	select {
+	case env = <-delivered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("event bus did not receive event")
 	}
-	if gotID != as.ID {
-		t.Errorf("MessageStateEvent source AS = %q, want %q", gotID, as.ID)
+	if env.AgentSession == nil || env.AgentSession.ID != as.ID {
+		got := ""
+		if env.AgentSession != nil {
+			got = env.AgentSession.ID
+		}
+		t.Errorf("MessageStateEvent source AS = %q, want %q", got, as.ID)
 	}
 }
 
@@ -111,30 +136,35 @@ func TestPromptEndedEvent_AgentSessionID_Populated(t *testing.T) {
 	cs := newChatSessionForTest("cs_env_promptend")
 	cs.attachAgentSession(as)
 
-	var gotID string
+	delivered := make(chan PromptEndedEvent, 1)
 	cs.PromptEndBus.Subscribe(func(e PromptEndedEvent) bool {
-		gotID = e.AgentSessionID
+		select {
+		case delivered <- e:
+		default:
+		}
 		return false
 	})
 
 	prompt := &Prompt{
-		ID:            "p-1",
+		ID:             "p-1",
 		AgentSessionID: as.ID,
-		LastMessageID: "u-1",
-		EndedAt:       time.Now(),
-		EndReason:     PromptEndClean,
+		LastMessageID:  "u-1",
+		EndedAt:        time.Now(),
+		EndReason:      PromptEndClean,
 	}
 	pushEvent(as, EnrichedEvent{
 		Kind:   KindPromptEnded,
 		Prompt: prompt,
 	})
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && gotID == "" {
-		time.Sleep(5 * time.Millisecond)
+	var ev PromptEndedEvent
+	select {
+	case ev = <-delivered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("event bus did not receive event")
 	}
-	if gotID != as.ID {
-		t.Errorf("PromptEndedEvent.AgentSessionID = %q, want %q", gotID, as.ID)
+	if ev.AgentSessionID != as.ID {
+		t.Errorf("PromptEndedEvent.AgentSessionID = %q, want %q", ev.AgentSessionID, as.ID)
 	}
 }
 
@@ -149,22 +179,29 @@ func TestRouteEvent_IgnoresSelectedAS(t *testing.T) {
 	cs.attachAgentSession(asB)
 	cs.selectAgentSessionLocked(asB) // selected = B
 
-	var observedFrom string
+	delivered := make(chan AgentEventEnvelope, 1)
 	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
-		if env.AgentSession != nil {
-			observedFrom = env.AgentSession.ID
+		select {
+		case delivered <- env:
+		default:
 		}
 		return false
 	})
 
-	pushEvent(asA, EnrichedEvent{Kind:KindAgentEvent, AgentEvent: makeTextEvent("from A")})
+	pushEvent(asA, EnrichedEvent{Kind: KindAgentEvent, AgentEvent: makeTextEvent("from A")})
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && observedFrom == "" {
-		time.Sleep(5 * time.Millisecond)
+	var env AgentEventEnvelope
+	select {
+	case env = <-delivered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("event bus did not receive event")
 	}
-	if observedFrom != asA.ID {
-		t.Errorf("envelope source = %q, want %q (must not read selectedAS)", observedFrom, asA.ID)
+	if env.AgentSession == nil || env.AgentSession.ID != asA.ID {
+		got := ""
+		if env.AgentSession != nil {
+			got = env.AgentSession.ID
+		}
+		t.Errorf("envelope source = %q, want %q (must not read selectedAS)", got, asA.ID)
 	}
 }
 

@@ -92,12 +92,12 @@ func MergeAgents(cfg *config.Config) []AgentChoice {
 
 	// 1. Builtins (sorted by name for stability).
 	builtins := agent.Builtins.List()
-	sort.Slice(builtins, func(i, j int) bool { return builtins[i].Name() < builtins[j].Name() })
+	sort.Slice(builtins, func(i, j int) bool { return builtins[i].Info().Name < builtins[j].Info().Name })
 	for _, a := range builtins {
 		choice := AgentChoice{
-			Name:    a.Name(),
-			Bridge:  a.Mode().String(),
-			Command: strings.TrimSpace(a.Command() + " " + strings.Join(a.Args(), " ")),
+			Name:    a.Info().Name,
+			Bridge:  a.Info().Mode.String(),
+			Command: strings.TrimSpace(a.Info().Command + " " + strings.Join(a.Info().Args, " ")),
 			Source:  "builtin",
 		}
 		seen[choice.Name] = len(out)

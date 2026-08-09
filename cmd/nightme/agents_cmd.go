@@ -80,8 +80,8 @@ func runAgents(cmd *cobra.Command, f agentsCmdFlags) error {
 	}
 
 	reg := buildRunAgentRegistry(cfg)
-	specs := reg.Specs()
-	rows := collectAgents(specs)
+	specs := reg.List()
+	rows := collectAgents(specs) //nolint:staticcheck
 	defaultName := cfg.Primary
 	if defaultName == "" {
 		defaultName = "claude"
@@ -99,16 +99,16 @@ func runAgents(cmd *cobra.Command, f agentsCmdFlags) error {
 // `[]agent.Agent`), so the loop body can only call spec-half
 // methods — Name / Command / Args / etc. — and the type system
 // forbids accidentally reaching for Start / Events / Send*.
-func collectAgents(specs []agent.AgentSpec) []agentRow {
+func collectAgents(specs []agent.Starter) []agentRow {
 	rows := make([]agentRow, 0, len(specs))
 	for _, s := range specs {
 		if s == nil {
 			continue
 		}
 		rows = append(rows, agentRow{
-			Name:    s.Name(),
-			Command: s.Command(),
-			Args:    s.Args(),
+			Name:    s.Info().Name,
+			Command: s.Info().Command,
+			Args:    s.Info().Args,
 		})
 	}
 	return rows

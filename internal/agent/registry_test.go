@@ -6,29 +6,21 @@ import (
 	"testing"
 )
 
-// fakeAgent is a minimal Agent implementation for testing the
-// registry. It does not spawn any process.
+// fakeAgent is a minimal Starter implementation for testing the
+// registry. After the Agent → Starter refactor it only implements
+// the spec-half (Info + Detect) and a Start that always errors.
 type fakeAgent struct {
 	name string
 	mode Mode
 }
 
-func (f *fakeAgent) Name() string        { return f.name }
-func (f *fakeAgent) Mode() Mode          { return f.mode }
-func (f *fakeAgent) Command() string     { return "" }
-func (f *fakeAgent) Args() []string      { return nil }
-func (f *fakeAgent) Env() []string       { return nil }
+func (f *fakeAgent) Info() Info {
+	return NewInfo(f.name, f.mode, "", nil, nil)
+}
 func (f *fakeAgent) Detect() error       { return nil }
-func (f *fakeAgent) Start(context.Context, StartConfig) (Agent, error) {
+func (f *fakeAgent) Start(context.Context, StartConfig) (*LiveAgent, error) {
 	return nil, errors.New("fakeAgent: Start not implemented")
 }
-func (f *fakeAgent) Close() error        { return nil }
-func (f *fakeAgent) Events() <-chan AgentEvent { return nil }
-func (f *fakeAgent) PID() int            { return 0 }
-func (f *fakeAgent) SendText(string) error     { return nil }
-func (f *fakeAgent) SendBlocks(context.Context, []ContentBlock) error { return nil }
-func (f *fakeAgent) SendPermission(string) error { return nil }
-func (f *fakeAgent) New(context.Context) error { return nil }
 
 func TestRegisterAndGet(t *testing.T) {
 	r := New()
@@ -44,8 +36,8 @@ func TestRegisterAndGet(t *testing.T) {
 	if got != a {
 		t.Fatalf("Get(claude) returned a different pointer")
 	}
-	if got.Mode() != ModePTY {
-		t.Fatalf("Mode() = %s, want pty", got.Mode())
+	if got.Info().Mode != ModePTY {
+		t.Fatalf("Info().Mode = %s, want pty", got.Info().Mode)
 	}
 }
 
@@ -70,7 +62,7 @@ func TestList(t *testing.T) {
 
 	seen := make(map[string]bool, len(got))
 	for _, a := range got {
-		seen[a.Name()] = true
+		seen[a.Info().Name] = true
 	}
 	for _, n := range want {
 		if !seen[n] {
@@ -98,8 +90,8 @@ func TestDuplicateRegistration(t *testing.T) {
 	if got != second {
 		t.Fatalf("expected latest registration to win")
 	}
-	if got.Mode() != ModeSDK {
-		t.Fatalf("Mode() = %s, want sdk (second registration)", got.Mode())
+	if got.Info().Mode != ModeSDK {
+		t.Fatalf("Info().Mode = %s, want sdk (second registration)", got.Info().Mode)
 	}
 }
 

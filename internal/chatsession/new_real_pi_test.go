@@ -65,12 +65,12 @@ func TestRealPi_NewAfterSwitch(t *testing.T) {
 
 	piAgent := pibridge.New("pi", "pi", nil)
 	reg := agent.New()
-	reg.Register(piAgent)
+	reg.LegacyRegister(piAgent)
 	// Register a fake "claude" agent so the chat session pool
 	// has TWO running AgentSessions when we issue /new — matching
 	// the user's actual sequence (use pi → switch to claude → /new).
 	claudeAgent := newFakeAgentBuilder("claude")
-	reg.Register(claudeAgent)
+	reg.LegacyRegister(claudeAgent)
 	spawner := NewRegistrySpawner(reg)
 
 	cs, _ := New("oc_real_pi_new", "pi", newTestChannel())

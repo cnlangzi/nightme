@@ -98,7 +98,7 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 	// look up the agent by name, run Detect, then Start.
 	piAgent := pibridge.New("pi", "pi", nil)
 	reg := agent.New()
-	reg.Register(piAgent)
+	reg.LegacyRegister(piAgent)
 	spawner := NewRegistrySpawner(reg)
 
 	cs, _ := New("oc_real_pi_test", "pi", newTestChannel())

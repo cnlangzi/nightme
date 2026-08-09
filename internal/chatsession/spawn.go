@@ -66,12 +66,20 @@ func (s *registrySpawner) Spawn(ctx context.Context, agentName, cwd string, args
 	if s.agents == nil {
 		return nil, errors.New("registrySpawner: nil registry")
 	}
-	a, err := s.agents.Get(agentName)
+	s2, err := s.agents.Get(agentName)
 	if err != nil {
 		return nil, err
 	}
-	if err := a.Detect(); err != nil {
+	if err := s2.Detect(); err != nil {
 		return nil, err
 	}
-	return a.Start(ctx, agent.StartConfig{Workspace: cwd, Args: args, SessionID: sessionID})
+	live, err := s2.Start(ctx, agent.StartConfig{Workspace: cwd, Args: args, SessionID: sessionID})
+	if err != nil {
+		return nil, err
+	}
+	// Wrap the *agent.LiveAgent in an agent.Agent-compatible view
+	// so the Spawner.Spawn signature is unchanged. The wrapper
+	// exposes the static metadata from s2.Info() (captured before
+	// Start) and forwards live runtime methods to live.
+	return agent.WrapAsAgent(live, s2.Info()), nil
 }

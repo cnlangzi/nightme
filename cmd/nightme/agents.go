@@ -27,14 +27,14 @@ func init() {
 	// claude — the JSON-IO bridge. Dedicated implementation; user
 	// config can override the command path but the override drops
 	// back to PTY (loses AskUserQuestion, structured events).
-	agent.Builtins.Register(claudecode.New("claude", "claude", nil))
+	agent.Builtins.LegacyRegister(claudecode.New("claude", "claude", nil))
 
 	// codex — the `codex app-server --listen stdio://` JSON-RPC 2.0
 	// bridge. Spawns codex in app-server mode and drives it via
 	// raw stdio pipes (no PTY). Single backend — see
 	// docs/bridge/codex.md §1 for the rationale on not supporting
 	// the legacy `codex exec` backend.
-	agent.Builtins.Register(codex.New("codex", "codex", nil))
+	agent.Builtins.LegacyRegister(codex.New("codex", "codex", nil))
 
 	// pi — the long-lived `pi --mode rpc` JSONL bridge. The agent
 	// driver is the @earendil-works/pi-coding-agent CLI; see
@@ -42,10 +42,10 @@ func init() {
 	// F-32 MVP scope. User config can override the command path;
 	// the structured bridge only works for builtin registration,
 	// not for the PTY fallback in buildAgentRegistry.
-	agent.Builtins.Register(pi.New("pi", "pi", nil))
+	agent.Builtins.LegacyRegister(pi.New("pi", "pi", nil))
 
 	// bash — example PTY-backed entry. Shows the registration
 	// shape for any binary the user might want to launch without
 	// an ACP/JSON-IO layer.
-	agent.Builtins.Register(pty.NewAgent("bash", "bash", nil, nil))
+	agent.Builtins.LegacyRegister(pty.NewAgent("bash", "bash", nil, nil))
 }

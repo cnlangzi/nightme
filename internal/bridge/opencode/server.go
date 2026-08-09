@@ -236,6 +236,13 @@ func startServer(ctx context.Context, cfg serverConfig) (*serverProc, error) {
 // deadline was effectively ignored (manifested as a 5-minute hang in
 // TestE2E_Interrupt on a third server spawn with a stale HOME/.opencode
 // state). We now run Scan in a goroutine and select on its result.
+//
+// Goroutine lifetime: when this function returns via the timeout path
+// the spawned goroutine is still parked on scanner.Scan(). It exits
+// only when r returns EOF — in production the caller is responsible
+// for killing the underlying `opencode serve` process; in tests the
+// caller must close r before the test ends, otherwise the goroutine
+// outlives the test binary.
 func scanBanner(r io.Reader, timeout time.Duration) (string, error) {
 	scanner := bufio.NewScanner(r)
 	// Generous buffer so a single banner line with a long URL does

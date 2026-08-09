@@ -161,6 +161,79 @@ func TestWatchdog_ExitsWhenTurnSettled(t *testing.T) {
 	}
 }
 
+// TestWatchdog_ActivityResetsDeadline asserts the watchdog does NOT
+// kill the bridge while a turn is pending AND recent activity
+// (lastEventAt within timeout window) is being recorded. This is the
+// happy-path regression guard — without this assertion the watchdog
+// could spuriously fire on every long turn.
+func TestWatchdog_ActivityResetsDeadline(t *testing.T) {
+	// timeout=300ms, tick=30ms. We refresh lastEventAt every 50ms
+	// for 200ms (4 ticks). Watchdog must NOT fire.
+	t.Setenv("NIGHTME_OPENCODE_TURN_WATCHDOG", "300ms")
+
+	a := &Agent{
+		name:        "opencode",
+		events:      make(chan agent.AgentEvent, 64),
+		closed:      make(chan struct{}),
+		stopDeliver: make(chan struct{}),
+		exitDone:    make(chan struct{}),
+		server:      &serverProc{baseURL: "http://127.0.0.1:1"},
+		client:      newClient(&serverProc{baseURL: "http://127.0.0.1:1"}, "/tmp"),
+	}
+	a.pendingMu.Lock()
+	a.pendingTurnActive = true
+	a.pendingMu.Unlock()
+	// recent activity — watchdog should treat this as alive
+	a.lastEventAtUnixNano.Store(time.Now().UnixNano())
+
+	// Refresh activity in the background.
+	stop := make(chan struct{})
+	go func() {
+		t := time.NewTicker(50 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				a.lastEventAtUnixNano.Store(time.Now().UnixNano())
+			}
+		}
+	}()
+
+	// Run watchdog for 200ms. It must NOT kill the bridge.
+	done := make(chan struct{})
+	go func() {
+		a.watchdog()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		close(stop)
+		t.Fatal("watchdog returned prematurely despite active turn")
+	case <-time.After(200 * time.Millisecond):
+		close(stop)
+		// Watchdog is still running (good — activity kept it alive).
+		// Shut it down via a.closed.
+		close(a.closed)
+		select {
+		case <-done:
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("watchdog did not exit after Close()")
+		}
+	}
+
+	// No EventAgentError should have been delivered.
+	select {
+	case ev := <-a.events:
+		if ev.Kind == agent.EventAgentError {
+			t.Errorf("unexpected error event during active turn: %v", ev.Err)
+		}
+	default:
+	}
+}
+
 // TestScanBanner_HonorsTimeout is a regression guard for the
 // scanner.Scan() blocking-vs-deadline bug we just fixed: the
 // previous `select { default: }` style allowed a quiet stdout to

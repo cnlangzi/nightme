@@ -78,14 +78,6 @@ type Agent struct {
 	// watchdog, no shared mutex needed.
 	lastEventAtUnixNano atomic.Int64
 
-	// turnHadContent tracks whether ANY AgentEvent was delivered
-	// during the current turn (text, tool start, tool end). Reset
-	// on each Prompt submission. When the turn terminates with
-	// zero content, the translator emits EventAgentDone{Reason:
-	// "empty"} so the runtime can surface "(empty response)" to
-	// the user. Guarded by pendingMu.
-	turnHadContent bool
-
 	closeOnce sync.Once
 	closed    chan struct{}
 	stopDeliver chan struct{} // closed before events to signal deliver to back off
@@ -495,26 +487,21 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 		a.pendingMu.Unlock()
 		return err
 	}
-	// Prompt was admitted — reset the per-turn content flag so the
-	// next EventAgentDone can distinguish "agent produced text" from
-	// "(empty response)", and restart the watchdog clock. The
-	// watchdog only fires while pendingTurnActive is true; on a
-	// session.idle / step.ended the busy-guard release cancels it.
-	a.pendingMu.Lock()
-	a.turnHadContent = false
-	a.pendingMu.Unlock()
+	// Prompt was admitted — reset the per-turn content flag on the
+	// translator so the next EventAgentDone can distinguish "agent
+	// produced text" from "(empty response)", and restart the
+	// watchdog clock. The watchdog only fires while pendingTurnActive
+	// is true; on a session.idle / step.ended the busy-guard release
+	// cancels it.
 	a.trans.ResetTurn()
 	a.lastEventAtUnixNano.Store(time.Now().UnixNano())
 	go a.watchdog()
 	return nil
 }
 
-// Abort sends /interrupt to cancel the in-flight turn. Mirrors what
-// the other bridges expose via /abort at the runtime layer — the
-// agent.Agent interface does not yet have a dedicated Abort method
-// (see F-49 §8 for the cross-bridge proposal), so we expose it as a
-// bridge-only method. Future callers should look for Abort on the
-// interface before adding more.
+// Abort sends /interrupt to cancel the in-flight turn. Implements
+// the agent.Agent.Abort contract (stage 6, commit e9886ec) — the
+// runtime calls this directly through the interface.
 //
 // Abort is best-effort: if the server is unreachable, the error
 // is returned to the caller but the bridge is not torn down. The
@@ -732,18 +719,14 @@ func (a *Agent) deliver(ev agent.AgentEvent) agent.AgentEvent {
 	ev.Workspace = a.workspace
 	ev.Branch = a.branch
 
-	// Track turn content for the "empty response" hint. We mark
-	// turnHadContent on every AgentEvent that conveys agent work —
-	// text / tool start / tool end / reasoning — so an empty turn
-	// (model produced nothing) surfaces distinctly from a turn that
-	// only emitted bookkeeping events (e.g. EventAgentReady).
-	if ev.Kind == agent.EventAgentText ||
-		ev.Kind == agent.EventAgentToolStart ||
-		ev.Kind == agent.EventAgentToolEnd {
-		a.pendingMu.Lock()
-		a.turnHadContent = true
-		a.pendingMu.Unlock()
-	}
+	// Note: the per-turn "did the agent produce any content?" flag
+	// lives on the translator (trans.turnHadContent) — it is set
+	// by translator.markContent() before deliver() is called for
+	// text / tool events, and consumed at the terminal-event branch
+	// to pick Done.Reason = "settled" vs "empty". We intentionally
+	// do NOT mirror the flag here on Agent; the previous
+	// agent.turnHadContent shadow was set but never read (stage 8
+	// review).
 
 	select {
 	case a.events <- ev:
@@ -895,13 +878,11 @@ func (a *Agent) watchdog() {
 	tickInterval := timeout / 10
 	if tickInterval < 20*time.Millisecond {
 		tickInterval = 20 * time.Millisecond
-	}
-	if tickInterval > 5*time.Second {
+	} else if tickInterval > 5*time.Second {
 		tickInterval = 5 * time.Second
 	}
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
-	deadline := time.Now().Add(timeout)
 	for {
 		select {
 		case <-a.closed:
@@ -916,11 +897,7 @@ func (a *Agent) watchdog() {
 			}
 			lastEvent := time.Unix(0, a.lastEventAtUnixNano.Load())
 			if time.Since(lastEvent) < timeout {
-				// Activity within the window — push the deadline.
-				deadline = lastEvent.Add(timeout)
-				continue
-			}
-			if time.Now().Before(deadline) {
+				// Activity within the window — keep waiting.
 				continue
 			}
 			// Timed out. Kill the server, deliver the error,

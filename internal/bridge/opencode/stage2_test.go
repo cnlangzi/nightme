@@ -352,7 +352,12 @@ func TestTranslator_AvailableCommandsUpdateDoesNotDeliver(t *testing.T) {
 
 // TestSendBlocks_ImageTooLarge verifies large images are rejected
 // before the prompt is sent.
-func TestSendBlocks_ImageTooLarge(t *testing.T) {
+//
+// Renamed in stage 5 to make room for the inline-base64 variant
+// that captures the request body. The behaviour this used to
+// verify is preserved by stage5_image_test.go's TestSendBlocks_ImageTooLarge
+// (which additionally asserts no HTTP request was made).
+func TestSendBlocks_ImageTooLarge_Stage2(t *testing.T) {
 	// Stage 2 uses os.Stat to pre-check the file size. We
 	// synthesize a "big" file by writing to a temp path.
 	dir := t.TempDir()

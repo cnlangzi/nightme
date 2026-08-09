@@ -28,6 +28,7 @@ package opencode
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -337,13 +338,45 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 				continue
 			}
 			parts = append(parts, TextPart(b.Text))
-		case agent.ContentImage, agent.ContentFile:
+		case agent.ContentImage:
+			// Inline base64. opencode's HTTP API accepts
+			// `data:<mime>;base64,<payload>` URLs in the
+			// FilePartInput.url field. We read the file from
+			// disk, base64-encode, and emit a data URL so the
+			// model sees the bytes immediately without a
+			// separate file fetch.
+			//
+			// Size guard: cap to maxImageBytes (10 MiB raw).
+			// A base64-encoded 10 MiB image is ~13 MiB which
+			// still fits well within SSE JSON line limits.
 			if b.Path == "" {
 				continue
 			}
-			// Sanity: cap the file size. opencode reads the bytes
-			// itself and we don't want to OOM the bridge by
-			// handing an unbounded path to the server.
+			data, err := os.ReadFile(b.Path)
+			if err != nil {
+				a.pendingMu.Lock()
+				a.pendingTurnActive = false
+				a.pendingMu.Unlock()
+				return fmt.Errorf("opencode: read image %s: %w", b.Path, err)
+			}
+			if int64(len(data)) > maxImageBytes {
+				a.pendingMu.Lock()
+				a.pendingTurnActive = false
+				a.pendingMu.Unlock()
+				return fmt.Errorf("%w: %s = %d bytes", ErrImageTooLarge, b.Path, len(data))
+			}
+			mime := b.MediaType
+			if mime == "" {
+				mime = "image/png"
+			}
+			encoded := base64.StdEncoding.EncodeToString(data)
+			parts = append(parts, FilePart(mime, "data:"+mime+";base64,"+encoded))
+		case agent.ContentFile:
+			if b.Path == "" {
+				continue
+			}
+			// Non-image files keep file:// URLs: opencode reads
+			// them itself, no need to round-trip the bytes.
 			info, err := os.Stat(b.Path)
 			if err != nil {
 				a.pendingMu.Lock()
@@ -357,15 +390,6 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 				a.pendingMu.Unlock()
 				return fmt.Errorf("%w: %s = %d bytes", ErrImageTooLarge, b.Path, info.Size())
 			}
-			// opencode reads file:// URLs directly. We do not
-			// stage copies — the workspace is visible to the
-			// child process via the server's project root.
-			//
-			// At stage 2 we forward paths instead of base64-
-			// inlining. opencode's HTTP API consumes file://
-			// URLs and the server reads them itself. Real vision
-			// (inline base64) is reserved for stage 4 if the
-			// model ever refuses to fetch files.
 			parts = append(parts, FilePart(b.MediaType, "file://"+b.Path))
 		default:
 			oLog("SendBlocks: unknown block type, skipping", "type", string(b.Type))

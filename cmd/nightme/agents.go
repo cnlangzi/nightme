@@ -42,7 +42,7 @@ func init() {
 	// F-32 MVP scope. User config can override the command path;
 	// the structured bridge only works for builtin registration,
 	// not for the PTY fallback in buildAgentRegistry.
-	agent.Builtins.LegacyRegister(pi.New("pi", "pi", nil))
+	agent.Builtins.Register(pi.NewStarter("pi", "pi", nil))
 
 	// bash — example PTY-backed entry. Shows the registration
 	// shape for any binary the user might want to launch without

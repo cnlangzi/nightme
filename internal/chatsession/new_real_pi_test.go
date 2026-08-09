@@ -63,9 +63,9 @@ func TestRealPi_NewAfterSwitch(t *testing.T) {
 		t.Fatalf("OpenAgentSessionFile: %v", err)
 	}
 
-	piAgent := pibridge.New("pi", "pi", nil)
+	piAgent := pibridge.NewStarter("pi", "pi", nil)
 	reg := agent.New()
-	reg.LegacyRegister(piAgent)
+	reg.Register(piAgent)
 	// Register a fake "claude" agent so the chat session pool
 	// has TWO running AgentSessions when we issue /new — matching
 	// the user's actual sequence (use pi → switch to claude → /new).

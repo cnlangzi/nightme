@@ -35,7 +35,7 @@ func TestReproNewAfterSwitch_Realistic(t *testing.T) {
 	workspace := t.TempDir()
 	// Mirror the runtime's spawn for pi exactly: no extra args, no
 	// --no-session. Pi decides whether to persist sessions.
-	a := New("pi", bin, nil)
+	a := NewStarter("pi", bin, nil)
 	if err := a.Detect(); err != nil {
 		t.Fatalf("Detect: %v", err)
 	}

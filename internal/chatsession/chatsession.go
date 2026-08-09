@@ -253,27 +253,6 @@ var ErrNoActiveCwd = errors.New("chatsession: no active workspace (send /cwd fir
 // (Validation should happen at the gateway layer; this is a safety net.)
 var ErrUnknownAgent = errors.New("chatsession: unknown agent")
 
-// killGraceTotal is the overall timeout for graceful shutdown of all
-// running AgentSessions in the pool. Each bridge has its own 2s graceful
-// window + SIGKILL fallback; this 5s budget is the outer bound covering
-// (a) bridge internal grace + SIGKILL, (b) race detector margin, and
-// (c) bridges that take a beat to surface exit through ObserveClose.
-// Tuned for "user waits for /kill to confirm"; rarely triggers.
-const killGraceTotal = 5 * time.Second
-
-// KillResult is one row of the /kill reply. It captures what happened
-// to a single pool entry during KillAll so the handler can render a
-// per-agent status instead of a bare count.
-//
-// See docs/feat/F-43-kill-new-graceful-and-reset.md §4.3.
-type KillResult struct {
-	Agent       string // e.g. "claude", "codex"
-	Cwd         string // e.g. "/code/A"
-	BeforeState Status // StatusRunning / StatusDetached / StatusExited
-	Action      string // "killed" | "stale-cleared"
-	Error       error  // nil on success
-}
-
 // ResetResult is one row of the /new reply. It captures what happened
 // to a single pool entry during NewActiveAgentSessions so the handler
 // can render a per-agent status instead of a bare count.
@@ -829,6 +808,64 @@ func (cs *ChatSession) LookupInPool(agent, cwd string) (*AgentSession, error) {
 	return as, nil
 }
 
+// AgentSessionsInCwd returns a snapshot of the pool entries whose
+// Cwd == cwd. Read-only — does not mutate pool / activeAS. The
+// returned slice is a fresh copy safe for iteration outside the
+// lock; callers (typically the kill package) compose it with
+// DropAgentSession to terminate a cwd-scoped set.
+//
+// An empty cwd returns an empty slice. A non-existent cwd also
+// returns an empty slice (no error) — pool filter is purely
+// syntactic on (agent, cwd).
+func (cs *ChatSession) AgentSessionsInCwd(cwd string) []*AgentSession {
+	if cwd == "" {
+		return nil
+	}
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	out := make([]*AgentSession, 0)
+	for _, as := range cs.pool {
+		if as.Cwd == cwd {
+			out = append(out, as)
+		}
+	}
+	return out
+}
+
+// DropAgentSession atomically removes as from the pool, clears
+// activeAS iff it pointed to as, deletes as's agent_sessions.json
+// row, and persists the chat entry. Caller is responsible for
+// graceful shutdown (as.Close()) BEFORE calling this — DropAgentSession
+// does NOT signal the bridge. The two-step pattern (Close → Drop)
+// keeps graceful-shutdown timing in the caller's hands (the kill
+// package owns the 5s outer bound and per-bridge Close goroutine
+// fan-out) and keeps this primitive focused on the post-close
+// bookkeeping.
+//
+// activeAS safety invariant: if as == cs.activeAS, the pointer is
+// cleared so a subsequent inbound message goes through
+// LookupActiveAgentSession → fresh spawn instead of dereferencing
+// a dangling pointer.
+//
+// Safe to call multiple times on the same as (the second call
+// becomes a no-op — the entry is no longer in the pool, so the
+// delete is a no-op, and the registry row is already gone).
+func (cs *ChatSession) DropAgentSession(as *AgentSession) {
+	if as == nil {
+		return
+	}
+	cs.mu.Lock()
+	delete(cs.pool, agentCwdKey{Agent: as.Agent, Cwd: as.Cwd})
+	if cs.activeAS == as {
+		cs.activeAS = nil
+	}
+	cs.mu.Unlock()
+	if cs.asFile != nil {
+		_ = cs.asFile.Delete(as.ID)
+	}
+	cs.persistChatEntry()
+}
+
 // promoteActiveLocked makes as the chat's active AgentSession and
 // owns the per-AS context lifecycle for that promotion.
 //
@@ -977,254 +1014,6 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	return newAS, nil
 }
 
-// KillAll gracefully terminates every AgentSession in the pool via
-// each bridge's Close() path, then clears the persistent registry
-// entries so the next spawn won't resume the dead sessions.
-//
-// Per-entry outcome is returned in []KillResult so the caller can
-// render a per-agent status list (`FormatKillResults` handles the
-// formatting). The overall error is non-nil only for hard failures
-// (e.g. registry corruption); per-entry bridge errors are captured
-// in each KillResult.Error.
-//
-// F-43 design invariants (docs/feat/F-43-kill-new-graceful-and-reset.md
-// §4.1):
-//   - activeCwd / activeAgent / InputBuffer are NOT touched — /kill
-//     owns only the agent process lifecycle. (F-53 note: the
-//     in-flight Prompt on each AgentSession becomes unreachable
-//     when the pool is cleared; any event that lands after /kill
-//     on an old AS reads a nil currentPrompt and renders an empty
-//     userMsgID. This is the deliberate Phase 0 simplification —
-//     see docs/feat/message_lifecycle.md §8.)
-//   - Pool entry identities are preserved while bridges shut down
-//     (children may still be alive during the wg.Wait window); the
-//     new empty pool is installed AFTER all bridges confirm exit.
-//   - agent_sessions.json entries are deleted AFTER the process is
-//     dead, never before, so a late read can't resurrect a corpse.
-//   - F-53 P2 follow-up (kill cmd): /kill also calls ClearBuffer
-//     (drops queued messages with MessageDropped wire emits) and
-//     SetIdle (resets the FSM so the next message can dispatch
-//     immediately — see internal/command/kill/cmd.go).
-//
-// Concurrency: safe to call concurrently with LookupActiveAgentSession.
-// The per-entry as.Close() is fan-out (each bridge drives its own
-// goroutine); wg.Wait + 5s outer timeout guards against a wedged
-// bridge that bypasses its own SIGKILL fallback.
-func (cs *ChatSession) KillAll() ([]KillResult, error) {
-	// 0. (CS-AS 边界重构 Phase 1: no per-CS StopReadPump call.
-	//    Each AS has its own readpump; we call as.Shutdown() below
-	//    per-agent which drains the readpump and closes eventQueue.
-
-	// 1. snapshot pool under read lock; do not mutate cs.pool until
-	//    every bridge has confirmed shutdown.
-	cs.mu.RLock()
-	snapshot := make([]*AgentSession, 0, len(cs.pool))
-	for _, as := range cs.pool {
-		snapshot = append(snapshot, as)
-	}
-	cs.mu.RUnlock()
-
-	// 2. classify each snapshot entry and fan out graceful shutdown
-	//    for the ones whose process is still believed alive.
-	//
-	//    StatusRunning   → alive, has handle → Close()
-	//    StatusDetached  → "process alive but nightme no longer holds
-	//                      it" (per SetDetached doc). Two flavors:
-	//                        a) mid-life (e.g. SIGTERM without --cleanup):
-	//                           handle is still set → Close() it.
-	//                        b) post-restart (FromAgentSessionEntry
-	//                           rehydrated StatusDetached): handle is nil
-	//                           → orphan, no way to signal, just delete
-	//                           the disk entry.
-	//    StatusExited    → dead, nothing to do but clean disk.
-	//
-	//    Each goroutine returns its outcome via chan; we collect
-	//    outcomes after wg.Wait so per-bridge Close errors are not
-	//    silently dropped (review finding #B2: previously `_ =
-	//    as.Close()` was discarded, so any Close failure was
-	//    reported as ✓ success).
-	closeCh := make(chan closeOutcome, len(snapshot))
-	results := make([]KillResult, len(snapshot))
-	var wg sync.WaitGroup
-	for i, as := range snapshot {
-		results[i] = KillResult{
-			Agent:       as.Agent,
-			Cwd:         as.Cwd,
-			BeforeState: as.Status(),
-		}
-		isAlive := as.Status() == StatusRunning ||
-			(as.Status() == StatusDetached && as.Handle() != nil)
-		if !isAlive {
-			// StatusExited or post-restart StatusDetached (no handle)
-			results[i].Action = "stale-cleared"
-			continue
-		}
-		results[i].Action = "killed"
-		wg.Add(1)
-		go func(i int, as *AgentSession) {
-			defer wg.Done()
-			closeCh <- closeOutcome{idx: i, err: as.Close()}
-		}(i, as)
-	}
-
-	// 3. wait for all bridges to confirm exit. Bridge Close sets the
-	//    events chan closed; the per-entry ObserveClose goroutine then
-	//    flips as.Status to Exited. We do NOT add a second escalation
-	//    here — nightme-side SIGTERM would race with the bridge's
-	//    local watchdog.
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(killGraceTotal):
-		// Bridge's own watchdog should have SIGKILL'd by now. If we
-		// still hit this, the child is wedged in a way even SIGKILL
-		// can't fix (zombie / uninterruptible IO). Log and proceed —
-		// we still want to clean our state. The persistent entries
-		// will be deleted in step 5; the bridge goroutine may still
-		// be running but it's "ownerless" (we no longer reference it).
-		slog.Warn("killAll: graceful shutdown timeout",
-			"chat_id", cs.ChatID,
-			"limit", killGraceTotal)
-	}
-	close(closeCh)
-
-	// 4. fold each goroutine's outcome into its KillResult.
-	for oc := range closeCh {
-		if oc.err != nil {
-			results[oc.idx].Error = oc.err
-			results[oc.idx].Action = "kill-failed"
-		}
-	}
-
-	// 5. clear activeAS pointer BEFORE removing from disk so a
-	//    follow-up inbound message sees "no active" and goes through
-	//    LookupActiveAgentSession -> spawn fresh.
-	cs.mu.Lock()
-	cs.pool = make(map[agentCwdKey]*AgentSession)
-	cs.activeAS = nil
-	// F-53: no `currentTurnUserMsgID` to clear. The anchor now
-	// lives on AgentSession.currentPrompt.LastMessageID; clearing
-	// the pool + activeAS is sufficient to invalidate any stale
-	// anchor (readpump will read as.CurrentPrompt() which is nil
-	// after endPrompt or pool reset).
-	cs.mu.Unlock()
-
-	// 6. delete persistent entries. Use GetByChatPool walk (not just
-	//    snapshot IDs) so orphan entries on disk — `entries` that
-	//    owned this chat's ID but never made it into cs.pool (e.g.
-	//    from a prior /cwd swap that left a stale entry, or a crash
-	//    between Upsert and pool installation) — are also GC'd.
-	//    (Review finding #B4: old `KillAll` did this; F-43 first
-	//    cut narrowed to snapshot-only, reintroducing orphan
-	//    accumulation across /kill cycles.)
-	if cs.asFile != nil {
-		ids := make([]string, 0, len(snapshot))
-		for _, as := range snapshot {
-			ids = append(ids, as.ID)
-		}
-		// Review finding #B6: DeleteMany already exists with the
-		// exact "batch GC where calling Delete in a loop would
-		// rewrite the file N times" rationale. Use it.
-		_ = ids // unused — we call DeleteMany on the orphan set below
-		_ = cs.asFile.DeleteMany(collectIDsForDelete(cs, ids))
-	}
-	cs.persistChatEntry()
-	return results, nil
-}
-
-// closeOutcome carries one goroutine's Close result back to the
-// orchestrator. idx indexes into the snapshot slice so the outer
-// loop can update the corresponding KillResult in place.
-type closeOutcome struct {
-	idx int
-	err error
-}
-
-// collectIDsForDelete returns the union of (a) snapshot IDs and
-// (b) any orphan disk entries owned by this chat (detected via
-// `GetByChatPool`). Pass-through helper for the DeleteMany call.
-func collectIDsForDelete(cs *ChatSession, snapshotIDs []string) []string {
-	if cs.asFile == nil {
-		return snapshotIDs
-	}
-	seen := make(map[string]struct{}, len(snapshotIDs))
-	for _, id := range snapshotIDs {
-		seen[id] = struct{}{}
-	}
-	// Add orphan IDs not already in the snapshot.
-	for _, e := range cs.asFile.GetByChatPool(cs.ID) {
-		if _, ok := seen[e.ID]; ok {
-			continue
-		}
-		seen[e.ID] = struct{}{}
-		snapshotIDs = append(snapshotIDs, e.ID)
-	}
-	return snapshotIDs
-}
-
-// FormatKillResults produces a human-readable summary of /kill's
-// per-entry outcomes. The output is suitable for channel.Send
-// (plain text, Feishu-renderable).
-//
-// Output templates (selected by the (killed, stale, failed) tuple):
-//   - all empty:           "No active agents to kill."
-//   - all killed:          "Stopped N agent session(s):\n  ✓ <name> @ <cwd>\n..."
-//   - all stale:           "Cleared N stale agent session(s) (no live processes):\n  • <name> @ <cwd> — already exited, entry cleaned\n..."
-//   - mixed:               "<header>:\n  ✓ ... \n  • ... \n  ✗ <name> @ <cwd> — <action>: <err>\n..."
-//
-// Errors are surfaced explicitly per-entry (never swallowed). Output is
-// capped to 4 KB total bytes (Feishu single-message limit) + a
-// "...and N more" tail to stay under the limit (review finding #B5:
-// the previous 20-line cap was insufficient when individual lines
-// were large — CJK / long paths / long bridge errors all blow past
-// 4 KB before the 20th line).
-//
-// Rows are sorted by **typed priority** (success → failure → skipped)
-// and then by (Agent, Cwd) within each priority bucket. The previous
-// `sort.Strings` on the formatted strings made `•` (U+2022) sort
-// before `✓` (U+2713) before `✗` (U+2717) — i.e. stale-cleared rows
-// always preceded killed rows, contrary to the spec's "success-first"
-// ordering (review finding #B7).
-//
-// See docs/feat/F-43-kill-new-graceful-and-reset.md §6 for the wording
-// variants and the ✓/✗/• icon legend.
-func FormatKillResults(results []KillResult) string {
-	if len(results) == 0 {
-		return "No active agents to kill."
-	}
-
-	rows := make([]resultRow, 0, len(results))
-	var killed, stale, failed int
-	for _, r := range results {
-		row, bucket := renderKillRow(r)
-		switch bucket {
-		case bucketSuccess:
-			killed++
-		case bucketSkipped:
-			stale++
-		case bucketFailure:
-			failed++
-		}
-		rows = append(rows, row)
-	}
-
-	// Sort by typed priority (success → failure → skipped), then by
-	// (Agent, Cwd) for stable display.
-	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].priority != rows[j].priority {
-			return rows[i].priority < rows[j].priority
-		}
-		if rows[i].agent != rows[j].agent {
-			return rows[i].agent < rows[j].agent
-		}
-		return rows[i].cwd < rows[j].cwd
-	})
-
-	header := buildKillHeader(killed, stale, failed)
-	return truncateByBytes(header, rows, formatTail)
-}
-
 // FormatResetResults produces a human-readable summary of /new's
 // per-entry outcomes. Companion to FormatKillResults; same plain-text
 // shape, same byte-based cap, same typed-priority sort.
@@ -1262,21 +1051,6 @@ func FormatResetResults(results []ResetResult) string {
 
 	header := buildResetHeader(running, dead, failed)
 	return truncateByBytes(header, rows, formatTail)
-}
-
-// humanAction returns a short human-readable verb for an Action
-// string (used in error messages). The name matches the design doc
-// (docs/feat/F-43-kill-new-graceful-and-reset.md §6.6). Future
-// actions can be added here.
-func humanAction(action string) string {
-	switch action {
-	case "killed":
-		return "kill"
-	case "stale-cleared":
-		return "stale-clear"
-	default:
-		return action
-	}
 }
 
 // NewActiveAgentSessions resets the conversation context on the
@@ -1551,44 +1325,6 @@ type resultRow struct {
 	agent, cwd       string
 }
 
-// renderKillRow is FormatKillResults' per-row branch. Returns the
-// rendered line and the bucket it belongs to.
-func renderKillRow(r KillResult) (resultRow, formatRowBucket) {
-	if r.Error != nil {
-		return resultRow{
-			text: fmt.Sprintf("  ✗ %s @ %s — %s: %v",
-				r.Agent, r.Cwd, humanAction(r.Action), r.Error),
-			priority: bucketFailure,
-			agent:    r.Agent,
-			cwd:      r.Cwd,
-		}, bucketFailure
-	}
-	switch r.Action {
-	case "killed":
-		return resultRow{
-			text:     fmt.Sprintf("  ✓ %s @ %s", r.Agent, r.Cwd),
-			priority: bucketSuccess,
-			agent:    r.Agent,
-			cwd:      r.Cwd,
-		}, bucketSuccess
-	case "stale-cleared":
-		return resultRow{
-			text:     fmt.Sprintf("  • %s @ %s — already exited, entry cleaned", r.Agent, r.Cwd),
-			priority: bucketSkipped,
-			agent:    r.Agent,
-			cwd:      r.Cwd,
-		}, bucketSkipped
-	default:
-		// future action: surface as success mark, generic text
-		return resultRow{
-			text:     fmt.Sprintf("  ✓ %s @ %s — %s", r.Agent, r.Cwd, r.Action),
-			priority: bucketSuccess,
-			agent:    r.Agent,
-			cwd:      r.Cwd,
-		}, bucketSuccess
-	}
-}
-
 // renderResetRow is FormatResetResults' per-row branch.
 func renderResetRow(r ResetResult) (resultRow, formatRowBucket) {
 	if r.Error != nil {
@@ -1625,29 +1361,6 @@ func renderResetRow(r ResetResult) (resultRow, formatRowBucket) {
 	}
 }
 
-// buildKillHeader mirrors the old buildKillHeader. Wording is the
-// same as the spec template (kept verbatim for downstream consumers
-// that pattern-match on the header text).
-func buildKillHeader(killed, stale, failed int) string {
-	if failed == 0 && stale == 0 {
-		return fmt.Sprintf("Stopped %d agent session(s):", killed)
-	}
-	if killed == 0 && stale > 0 && failed == 0 {
-		return fmt.Sprintf("Cleared %d stale agent session(s) (no live processes):", stale)
-	}
-	parts := make([]string, 0, 3)
-	if killed > 0 {
-		parts = append(parts, fmt.Sprintf("Stopped %d", killed))
-	}
-	if stale > 0 {
-		parts = append(parts, fmt.Sprintf("%d stale entry cleared", stale))
-	}
-	if failed > 0 {
-		parts = append(parts, fmt.Sprintf("%d failed", failed))
-	}
-	return strings.Join(parts, ", ") + ":"
-}
-
 // buildResetHeader mirrors the old buildResetHeader. Note the wording
 // differs from /kill (each command has its own header grammar).
 func buildResetHeader(running, dead, failed int) string {
@@ -1671,31 +1384,17 @@ func buildResetHeader(running, dead, failed int) string {
 }
 
 // formatReplyByteCap is the Feishu single-message payload limit
-// (page / IM message). Both /kill and /new format strings cap here
-// to keep the channel side from rejecting the message outright
-// (review finding #B5).
+// for FormatResetResults. The kill package carries its own
+// copy of these byte-cap helpers for FormatKillResults.
 const formatReplyByteCap = 4096
 
-// formatTail is the "...and N more" suffix appended when the output
-// would otherwise exceed the byte cap. Hidden = len(rows) - linesShown.
 const formatTail = "  ... and %d more"
 
-// truncateByBytes joins rows with "\n" and caps the total byte length
-// at formatReplyByteCap. Lines that would push the output over the cap
-// are truncated and replaced with the formatTail summary. The header is
-// always included (so the user always sees the headline counts).
-//
-// The cap is "soft" — the tail suffix can cause the final string to
-// exceed the cap by a small number of bytes (the tail itself is
-// short, ~30 bytes, and Feishu's limit is a guideline). Callers that
-// need a hard cap should re-check before sending.
 func truncateByBytes(header string, rows []resultRow, tailFmt string) string {
 	out := header
 	for i, r := range rows {
 		candidate := out + "\n" + r.text
 		if len(candidate)+len(tailFmtFor(i, len(rows))) > formatReplyByteCap {
-			// We've exhausted the budget. Replace the
-			// last appended line with the tail summary.
 			hidden := len(rows) - i
 			out = out + "\n" + fmt.Sprintf(tailFmt, hidden)
 			return out
@@ -1705,9 +1404,6 @@ func truncateByBytes(header string, rows []resultRow, tailFmt string) string {
 	return out
 }
 
-// tailFmtFor returns the byte-length the tail would consume for the
-// given (i, total) under the standard formatTail template. Used by
-// truncateByBytes to estimate budget before committing the tail.
 func tailFmtFor(i, total int) string {
 	return fmt.Sprintf(formatTail, total-i)
 }

@@ -36,6 +36,31 @@ type Issue struct {
 	State  string // "open" / "closed"
 	Labels []string
 	URL    string
+
+	// Attachments are downloadable artifacts attached to the
+	// issue. The provider fills this in as best it can:
+	//   - GitLab: native attachment_links from the issue API
+	//   - GitHub: image URLs parsed from the body markdown
+	//     (GitHub issues don't have a first-class "attachments"
+	//     API; user-uploaded images inline as `![](url)`).
+	// /gtw fix downloads each attachment into the worktree
+	// before dispatching the issue to the agent — the agent
+	// then sees them as ContentFile blocks alongside the text
+	// dispatch.
+	Attachments []IssueAttachment
+}
+
+// IssueAttachment is one downloadable artifact attached to an
+// issue. URL is required (it's where we GET from). Filename
+// is best-effort: when the provider can extract a sensible
+// filename from the URL or content-disposition header, it
+// sets it; when not, downloadAttachments picks a numbered
+// fallback. MIMEType is advisory — empty when the provider
+// can't determine it.
+type IssueAttachment struct {
+	URL      string
+	Filename string
+	MIMEType string
 }
 
 // GitProvider is the abstract /gtw interface to a git hosting
@@ -535,13 +560,84 @@ func (c *GitHubProvider) GetIssue(ctx context.Context, owner, repo string, id in
 		labels = append(labels, l.Name)
 	}
 	return &Issue{
-		ID:     raw.Number,
-		Title:  raw.Title,
-		Body:   raw.Body,
-		State:  strings.ToLower(raw.State),
-		Labels: labels,
-		URL:    raw.URL,
+		ID:          raw.Number,
+		Title:       raw.Title,
+		Body:        raw.Body,
+		State:       strings.ToLower(raw.State),
+		Labels:      labels,
+		URL:         raw.URL,
+		Attachments: extractGitHubAttachments(raw.Body),
 	}, nil
+}
+
+// extractGitHubAttachments pulls image URLs out of the issue
+// body markdown. GitHub doesn't have a first-class "issue
+// attachments" API — images are inline `![](url)` in the
+// body. We only handle github-user-images URLs (the canonical
+// upload host) for v1; other hosts work but may include
+// broken redirects that the download helper has to handle.
+//
+// Returns nil when no image URLs are found. Order matches the
+// order they appear in the body (top-down), which is what the
+// user expects when reviewing the issue.
+func extractGitHubAttachments(body string) []IssueAttachment {
+	if body == "" {
+		return nil
+	}
+	var out []IssueAttachment
+	for i := 0; i < len(body)-4; i++ {
+		if i+1 >= len(body) || body[i] != '!' || body[i+1] != '[' {
+			continue
+		}
+		// Find matching ](
+		closeBracket := -1
+		for j := i + 2; j < len(body); j++ {
+			if body[j] == ']' {
+				closeBracket = j
+				break
+			}
+		}
+		if closeBracket < 0 || closeBracket+1 >= len(body) || body[closeBracket+1] != '(' {
+			continue
+		}
+		// Find matching )
+		closeParen := -1
+		for j := closeBracket + 2; j < len(body); j++ {
+			if body[j] == ')' {
+				closeParen = j
+				break
+			}
+			if body[j] == '\n' {
+				// URL doesn't span newlines
+				break
+			}
+		}
+		if closeParen < 0 {
+			continue
+		}
+		url := body[closeBracket+2 : closeParen]
+		// Skip non-http / data: URIs.
+		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+			continue
+		}
+		// Filename from URL's last path segment.
+		fn := url[strings.LastIndex(url, "/")+1:]
+		// Strip query string.
+		if q := strings.Index(fn, "?"); q >= 0 {
+			fn = fn[:q]
+		}
+		if fn == "" {
+			fn = "image"
+		}
+		out = append(out, IssueAttachment{
+			URL:      url,
+			Filename: fn,
+			MIMEType: "image/png", // best guess; downloadAttachments refines from HTTP response
+		})
+		// Skip past this image to avoid overlapping matches.
+		i = closeParen
+	}
+	return out
 }
 
 // AddLabel runs `gh issue edit <id> --add-label <label> --repo ...`.

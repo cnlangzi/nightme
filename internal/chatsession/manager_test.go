@@ -102,9 +102,12 @@ func TestManager_PoolAfterKillCanRespawn(t *testing.T) {
 		t.Fatalf("precondition: expected Running")
 	}
 
-	// /kill clears the pool.
-	if _, err := cs.KillAll(); err != nil {
-		t.Fatalf("KillAll: %v", err)
+	// /kill clears the pool (cwd-scoped: only entries in activeCwd).
+	// Simulate via accessors — kill package tested separately.
+	snapshot := cs.AgentSessionsInCwd(cs.ActiveCwd())
+	for _, as := range snapshot {
+		_ = as.Close()
+		cs.DropAgentSession(as)
 	}
 	if len(cs.Pool()) != 0 {
 		t.Fatalf("pool should be empty after kill")

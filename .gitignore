@@ -62,3 +62,4 @@ graphify-out/
 # /tasks/ holds WIP design docs and implementation plans;
 # treated as ephemeral working notes (not tracked in git).
 /tasks/
+.nightme/

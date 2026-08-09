@@ -34,7 +34,6 @@ const (
 
 type daemonOptions struct {
 	channel string
-	cleanup bool
 }
 
 type bootstrapMessage struct {
@@ -97,7 +96,6 @@ func newRestartCmd() *cobra.Command {
 
 func addDaemonOptionFlags(cmd *cobra.Command, opts *daemonOptions) {
 	cmd.Flags().StringVar(&opts.channel, "channel", "feishu", "Channel implementation: feishu or echo")
-	cmd.Flags().BoolVar(&opts.cleanup, "cleanup", false, "Kill session CLIs on shutdown instead of detaching them")
 }
 
 func loadLifecyclePaths() (*config.Config, daemoncontrol.Paths, error) {
@@ -170,9 +168,6 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 	defer readyR.Close()
 
 	child := exec.Command(executable, "_daemon", "--channel", opts.channel)
-	if opts.cleanup {
-		child.Args = append(child.Args, "--cleanup")
-	}
 	child.Env = append(os.Environ(), daemonLockFDEnv+"=3", readyFDEnv+"=4")
 	child.ExtraFiles = []*os.File{lock.File(), readyW}
 	child.Stdin = nil
@@ -281,9 +276,9 @@ func runStatus(cmd *cobra.Command, jsonOutput bool) error {
 		return enc.Encode(status)
 	}
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "PID\tSTATE\tUPTIME\tCHANNEL\tCLEANUP\tVERSION")
-	fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%t\t%s\n", status.PID, status.State,
-		(time.Duration(status.UptimeSeconds) * time.Second).Round(time.Second), status.Channel, status.Cleanup, status.Version)
+	fmt.Fprintln(w, "PID\tSTATE\tUPTIME\tCHANNEL\tVERSION")
+	fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", status.PID, status.State,
+		(time.Duration(status.UptimeSeconds) * time.Second).Round(time.Second), status.Channel, status.Version)
 	return w.Flush()
 }
 
@@ -341,9 +336,6 @@ func runRestart(cmd *cobra.Command, opts daemonOptions) error {
 		if !cmd.Flags().Changed("channel") {
 			opts.channel = current.Channel
 		}
-		if !cmd.Flags().Changed("cleanup") {
-			opts.cleanup = current.Cleanup
-		}
 	}
 	if err := validateDaemonOptions(opts); err != nil {
 		return err
@@ -363,7 +355,6 @@ func validateDaemonOptions(opts daemonOptions) error {
 }
 
 func newDaemonCmd() *cobra.Command {
-	var cleanup bool
 	var channelName string
 	cmd := &cobra.Command{
 		Use:    "_daemon",
@@ -371,15 +362,14 @@ func newDaemonCmd() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDaemonChild(cmd, cleanup, channelName)
+			return runDaemonChild(cmd, channelName)
 		},
 	}
-	cmd.Flags().BoolVar(&cleanup, "cleanup", false, "Kill session CLIs on shutdown")
 	cmd.Flags().StringVar(&channelName, "channel", "feishu", "Channel implementation")
 	return cmd
 }
 
-func runDaemonChild(cmd *cobra.Command, cleanup bool, channelName string) (retErr error) {
+func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
 	lockFD, err := strconv.Atoi(os.Getenv(daemonLockFDEnv))
 	if err != nil || lockFD < 3 {
 		return errors.New("_daemon must be launched by `nightme start` or `nightme restart`")
@@ -419,7 +409,6 @@ func runDaemonChild(cmd *cobra.Command, cleanup bool, channelName string) (retEr
 		PID:       os.Getpid(),
 		StartedAt: time.Now().UTC(),
 		Channel:   channelName,
-		Cleanup:   cleanup,
 		Version:   version.String(),
 		LogPath:   cfg.Logging.File,
 	}
@@ -432,7 +421,7 @@ func runDaemonChild(cmd *cobra.Command, cleanup bool, channelName string) (retEr
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve() }()
 
-	deps := withCleanup(withChannel(defaultRunDeps(), channelName), cleanup)
+	deps := withChannel(defaultRunDeps(), channelName)
 	deps.onReady = func() {
 		server.SetReady()
 		writeBootstrap(bootstrapMessage{Ready: true})

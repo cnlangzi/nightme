@@ -57,63 +57,10 @@ func TestFactory_Handle_NoArgs(t *testing.T) {
 
 // TestFactory_Handle_List covers the /gtw list subcommand
 // with no drafts. Should reply with "(none in this chat)".
-func TestFactory_Handle_List_NoDrafts(t *testing.T) {
-	m := NewManager()
-	f := NewFactory(m)
-	got, _ := f.Handle(context.Background(), command.RuntimeServices{},
-		command.SlashInput{Text: "/gtw list", Args: []string{"gtw", "list"}, ChatID: "c1"})
-	if !got.Consumed {
-		t.Errorf("expected Consumed, got %+v", got)
-	}
-	if !strings.Contains(got.Reply, "none") {
-		t.Errorf("expected Reply to mention 'none', got %q", got.Reply)
-	}
-}
-
-// TestFactory_Handle_List_WithDrafts covers the /gtw list
-// subcommand with a real draft stored in the manager. The
-// reply should include the draft's kind + issueID.
-func TestFactory_Handle_List_WithDrafts(t *testing.T) {
-	m := NewManager()
-	m.StoreDraft("c1", "om_test", &Draft{
-		Kind: DraftFixBranchExists,
-		Payload: FixDraftPayload{
-			IssueID: 42, Branch: "fix/42-foo", Repo: "cnlangzi/nightme",
-		},
-	})
-	f := NewFactory(m)
-	got, _ := f.Handle(context.Background(), command.RuntimeServices{},
-		command.SlashInput{Text: "/gtw list", Args: []string{"gtw", "list"}, ChatID: "c1"})
-	if !got.Consumed {
-		t.Errorf("expected Consumed, got %+v", got)
-	}
-	if !strings.Contains(got.Reply, "branch-exists") {
-		t.Errorf("expected Reply to mention draft kind, got %q", got.Reply)
-	}
-	if !strings.Contains(got.Reply, "42") {
-		t.Errorf("expected Reply to mention issueID 42, got %q", got.Reply)
-	}
-}
-
-// TestFactory_Handle_Reset covers the /gtw reset subcommand.
-// After reset, ListDrafts returns empty.
-func TestFactory_Handle_Reset(t *testing.T) {
-	m := NewManager()
-	m.StoreDraft("c1", "om_test", &Draft{Kind: DraftFixBranchExists, Payload: FixDraftPayload{IssueID: 1}})
-	m.SetContext("c1", Context{Issue: 1, Branch: "fix/1", State: StateFixing})
-	f := NewFactory(m)
-	got, _ := f.Handle(context.Background(), command.RuntimeServices{},
-		command.SlashInput{Text: "/gtw reset", Args: []string{"gtw", "reset"}, ChatID: "c1"})
-	if !got.Consumed {
-		t.Errorf("expected Consumed, got %+v", got)
-	}
-	if m.DraftCount("c1") != 0 {
-		t.Errorf("expected DraftCount=0 after reset, got %d", m.DraftCount("c1"))
-	}
-	if m.HasContext("c1") {
-		t.Errorf("expected HasContext=false after reset, got true")
-	}
-}
+// (list / reset subcommands removed — see wip/gtw.md step 37.
+// Manager.ListDrafts / Manager.Reset / Manager.DraftCount are
+// still used by cmd/nightme/debug.go for the CLI debug
+// interface.)
 
 // TestFactory_Handle_Fix_NoArgs covers /gtw fix without an
 // issue id. Should reply with a usage hint.

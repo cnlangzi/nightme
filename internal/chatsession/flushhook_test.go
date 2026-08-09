@@ -140,7 +140,14 @@ func TestFlushHook_NoActiveAgentSession(t *testing.T) {
 	cs.SetActiveAgent("claude")
 	cs.LookupActiveAgentSession()
 
-	cs.KillAll()
+	// Simulate /kill via the lifecycle accessors (snapshot → Close →
+// Drop) — the kill package's KillAllAgents is tested separately in
+// internal/command/kill to avoid an import cycle here.
+snapshot := cs.AgentSessionsInCwd(cs.ActiveCwd())
+for _, as := range snapshot {
+	_ = as.Close()
+	cs.DropAgentSession(as)
+}
 
 	// activeAS is nil. Queueing must not panic, and the message
 	// must survive for the next respawn.

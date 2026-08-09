@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -63,6 +64,21 @@ type HandlerDeps struct {
 	Detect func(ctx context.Context, remoteURL string, prober HTTPProber) (GitProvider, error)
 	// Now is the clock. Tests override for deterministic drafts.
 	Now func() time.Time
+
+	// SkipRefreshDefaultBranch, when true, causes RunFix to
+	// skip the RefreshDefaultBranch step (no `git checkout
+	// <default>` / `git pull --ff-only`). Production leaves
+	// this false so the upstream default branch is always
+	// synced before the worktree branches off it; tests set
+	// it to true when their setup can't satisfy the pull (no
+	// upstream, fake URL, sandbox without network).
+	//
+	// The unit tests in worktree_test.go and
+	// refresh_default_branch_test.go exercise the real flow;
+	// this flag exists only for end-to-end integration tests
+	// that want to focus on the /gtw fix business logic without
+	// needing a usable origin remote.
+	SkipRefreshDefaultBranch bool
 }
 
 // Result is the gtw-package view of a command's outcome. Mirrors
@@ -96,6 +112,7 @@ func RunFix(
 	deps HandlerDeps,
 	chatID, messageID string,
 	args []string,
+	force bool,
 ) (*Result, error) {
 	if deps.Now == nil {
 		deps.Now = timeNow
@@ -114,14 +131,57 @@ func RunFix(
 		return reply(ctx, deps.Send, chatID, messageID,
 			"⚠️ Already inside a /gtw fix. Finish or cancel it first."), nil
 	}
+	// preflightOrphanYml catches a related but distinct case:
+	// a previous /gtw fix whose /gtw close never ran, leaving
+	// an orphan .nightme/gtw.yml in some worktree under this
+	// repo. The slot check above misses this because (a) it
+	// lives on disk not in memory and (b) only this chat's
+	// in-memory slot is checked. See preflightOrphanYml's doc
+	// for the full failure scenario this prevents.
+	//
+	// When force=true, we DO skip this check — the user is
+	// explicitly opting in to a destructive cleanup that
+	// also nukes any orphan yml's parent worktree.
+	if !force {
+		if err := preflightOrphanYml(ctx, cs.ActiveCwd(), deps.Git); err != nil {
+			return reply(ctx, deps.Send, chatID, messageID, err.Error()), nil
+		}
+	}
 
 	switch mode {
 	case ModeLocal:
-		return runFixLocal(ctx, cs, slot, drafts, deps, chatID, messageID, args[0])
+		return runFixLocal(ctx, cs, slot, drafts, deps, chatID, messageID, args[0], force)
 	default:
-		// ModeRemote (and the empty/zero legacy default).
-		return runFixRemote(ctx, cs, slot, drafts, deps, chatID, messageID, args[0])
+		return runFixRemote(ctx, cs, slot, drafts, deps, chatID, messageID, args[0], force)
 	}
+}
+
+// forceCleanWorktreePath is the --force counterpart to
+// PreflightWorktreeCreate's path-occupied check. When the user
+// passes /gtw fix <id> --force, they explicitly accept that
+// any leftover at the target worktree path will be nuked —
+// typically because the previous /gtw close aborted and left
+// a stale directory, or because they're re-running after a
+// failed /gtw fix.
+//
+// We only act when the path is occupied. A no-op when the path
+// doesn't exist (the normal first-time /gtw fix case). On a
+// real git failure (worktree remove --force refused, etc.)
+// returns the underlying WorktreeError so the caller can
+// surface a friendly reply.
+func forceCleanWorktreePath(ctx context.Context, repoRoot, worktreePath string, git GitRunner) error {
+	if _, err := os.Stat(worktreePath); err != nil {
+		if os.IsNotExist(err) {
+			return nil // nothing to clean
+		}
+		return fmt.Errorf("stat %s: %w", worktreePath, err)
+	}
+	// Path exists. Force-remove via `git worktree remove
+	// --force <path>` from the main repo. force=true tells git
+	// to skip the "untracked / modified files" safety net —
+	// the user opted into this with --force, so any local
+	// edits in the leftover worktree are forfeit.
+	return WorktreeRemove(ctx, repoRoot, worktreePath, true /* force */, git)
 }
 
 // runFixRemote implements the F-45 / F-XX ID-mode flow:
@@ -151,6 +211,7 @@ func runFixRemote(
 	deps HandlerDeps,
 	chatID, messageID string,
 	rawID string,
+	force bool,
 ) (*Result, error) {
 	issueID, err := parseIssueID(rawID)
 	if err != nil {
@@ -253,7 +314,7 @@ func runFixRemote(
 		// lockstep with PreflightWorktreeCreate.
 		if existingPath != "" && filepath.Clean(existingPath) == filepath.Clean(worktreePath) {
 			return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
-				branch, worktreePath, owner+"/"+repo, ModeRemote, issueID, issue, true /* skipDispatch */)
+				branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */)
 		}
 		return emitBranchExistsDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID:  issueID,
@@ -267,43 +328,109 @@ func runFixRemote(
 	}
 
 	// --- preflight (path / branch / parent) ----------------------
-	if err := PreflightWorktreeCreate(ctx, repoRoot, branch, worktreePath, deps.Git); err != nil {
-		return reply(ctx, deps.Send, chatID, messageID, err.Error()), nil
+	// --force skips the path-occupied branch of the preflight
+	// and force-removes any leftover at the target path
+	// instead. The branch-already-attached-elsewhere check is
+	// deliberately kept — touching an UNRELATED worktree the
+	// user is actively using in some other chat is not the
+	// kind of destruction --force is meant to authorise.
+	if force {
+		if err := forceCleanWorktreePath(ctx, repoRoot, worktreePath, deps.Git); err != nil {
+			var we *WorktreeError
+			stderr := ""
+			if errors.As(err, &we) {
+				stderr = tailLines(we.Stderr, 10)
+			}
+			body := fmt.Sprintf("❌ --force cleanup failed: %v", err)
+			if stderr != "" {
+				body += "\n[git stderr tail]\n" + stderr
+			}
+			return reply(ctx, deps.Send, chatID, messageID, body), nil
+		}
+	} else {
+		if err := PreflightWorktreeCreate(ctx, repoRoot, branch, worktreePath, deps.Git); err != nil {
+			return reply(ctx, deps.Send, chatID, messageID, err.Error()), nil
+		}
 	}
 
-	// --- label the issue (§5.2.② cont.) -------------------------
-	labelAdded := false
+	// --- sync default branch BEFORE creating worktree ---------
+	// We want the worktree to branch off the latest upstream
+	// code, not whatever stale state the user's local main is
+	// in. RefreshDefaultBranch errors on (a) no upstream
+	// configured, (b) dirty main repo, (c) non-fast-forward
+	// pull. All three are surfaced as a user-friendly reply;
+	// the worktree is NOT created in any of those cases.
+	//
+	// The HEAD SHA returned is threaded through to the
+	// success card so the user sees "based on origin/main@abc1234".
+	// Empty string when RefreshDefaultBranch skipped (future
+	// "no upstream" tolerance) — renderFixSuccessCard handles
+	// both.
+	//
+	// SkipRefreshDefaultBranch (deps flag) is honoured for
+	// tests that can't satisfy the pull — see HandlerDeps.
+	var baseSHA string
+	if !deps.SkipRefreshDefaultBranch {
+		var err error
+		baseSHA, _, err = RefreshDefaultBranch(ctx, repoRoot, deps)
+		if err != nil {
+			return reply(ctx, deps.Send, chatID, messageID, err.Error()), nil
+		}
+	}
+
+	// --- create the worktree FIRST (§5.2.③) ---------------------
+	// The worktree is the durable signal of "this user is
+	// working on this fix". The label is best-effort metadata
+	// on the remote issue tracker — applied AFTER the worktree
+	// exists so a label API failure cannot leave us needing to
+	// undo. If WorktreeAdd fails we surface the git error and
+	// bail out without touching the label; if AddLabel fails
+	// later, the worktree is already real and the user has a
+	// usable setup, label or not.
+	if err := WorktreeAdd(ctx, repoRoot, branch, worktreePath, "HEAD", deps.Git); err != nil {
+		return emitWorktreeFailDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
+			IssueID:  issueID,
+			Title:    issue.Title,
+			Branch:   branch,
+			Slug:     branch,
+			Repo:     owner + "/" + repo,
+			Provider: string(providerKind),
+			GitError: tailLines(stderrFromWorktreeErr(err), 10),
+			// LabelAdded is intentionally false here — the
+			// label is applied AFTER WorktreeAdd (post-fix),
+			// never before, so a WorktreeAdd failure means
+			// the label was never touched. The reaction card
+			// for this failure mode therefore never needs
+			// to clean up a label.
+			LabelAdded: false,
+			ChatID:     chatID,
+		})
+	}
+
+	// --- label the issue (post-WorktreeAdd; best-effort) --------
+	// AddLabel is idempotent (calling it twice is a no-op on
+	// the API side) so the brief race window between
+	// WorktreeAdd and AddLabel is harmless: if a second user
+	// also raced in, both would apply wip and git-side
+	// preflight's branch-attached check would catch them
+	// anyway. If AddLabel fails (network / 403 / missing
+	// label scope) we warn and continue — the worktree is
+	// the durable claim and the user can retry the label
+	// later or just live without it.
 	if err := provider.AddLabel(ctx, owner, repo, issueID, LabelWIP); err != nil {
 		_ = deps.Send(ctx, OutMsg{
 			ChatID:  chatID,
 			ReplyTo: messageID,
-			Text:    fmt.Sprintf("⚠️ Could not add label %q: %v\n(proceeding with local worktree)", LabelWIP, err),
-		})
-	} else {
-		labelAdded = true
-	}
-
-	// --- create the worktree (§5.2.③) ---------------------------
-	if err := WorktreeAdd(ctx, repoRoot, branch, worktreePath, "HEAD", deps.Git); err != nil {
-		if labelAdded {
-			_ = provider.RemoveLabel(ctx, owner, repo, issueID, LabelWIP)
-		}
-		return emitWorktreeFailDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
-			IssueID:    issueID,
-			Title:      issue.Title,
-			Branch:     branch,
-			Slug:       branch,
-			Repo:       owner + "/" + repo,
-			Provider:   string(providerKind),
-			GitError:   tailLines(stderrFromWorktreeErr(err), 10),
-			LabelAdded: labelAdded,
-			ChatID:     chatID,
+			Text: fmt.Sprintf(
+				"⚠️ Could not add label %q: %v\n"+
+					"worktree is ready at %s; you can retry the label manually with `gh issue edit %d --add-label %s`",
+				LabelWIP, err, worktreePath, issueID, LabelWIP),
 		})
 	}
 
 	// --- switch cwd + write context + render + dispatch ----------
 	return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
-		branch, worktreePath, owner+"/"+repo, ModeRemote, issueID, issue, false)
+		branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, false, baseSHA)
 }
 
 // runFixLocal implements the F-XX local-mode flow:
@@ -334,6 +461,7 @@ func runFixLocal(
 	deps HandlerDeps,
 	chatID, messageID string,
 	rawName string,
+	force bool,
 ) (*Result, error) {
 	branch, err := DeriveBranchFromName(rawName)
 	if err != nil {
@@ -362,7 +490,7 @@ func runFixLocal(
 		// sometimes-dirty paths compare equal to WorktreePath.
 		if existingPath != "" && filepath.Clean(existingPath) == filepath.Clean(worktreePath) {
 			return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
-				branch, worktreePath, "", ModeLocal, -1, nil, true /* skipDispatch */)
+				branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */)
 		}
 		return emitBranchExistsDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID: -1,
@@ -374,7 +502,22 @@ func runFixLocal(
 		}, existingPath)
 	}
 
-	if err := PreflightWorktreeCreate(ctx, repoRoot, branch, worktreePath, deps.Git); err != nil {
+	// --force: same semantics as runFixRemote. Skip the
+	// path-occupied preflight, force-clean any leftover.
+	if force {
+		if err := forceCleanWorktreePath(ctx, repoRoot, worktreePath, deps.Git); err != nil {
+			var we *WorktreeError
+			stderr := ""
+			if errors.As(err, &we) {
+				stderr = tailLines(we.Stderr, 10)
+			}
+			body := fmt.Sprintf("❌ --force cleanup failed: %v", err)
+			if stderr != "" {
+				body += "\n[git stderr tail]\n" + stderr
+			}
+			return reply(ctx, deps.Send, chatID, messageID, body), nil
+		}
+	} else if err := PreflightWorktreeCreate(ctx, repoRoot, branch, worktreePath, deps.Git); err != nil {
 		return reply(ctx, deps.Send, chatID, messageID, err.Error()), nil
 	}
 
@@ -391,31 +534,39 @@ func runFixLocal(
 	}
 
 	return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
-		branch, worktreePath, "", ModeLocal, -1, nil, false)
+		branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, false, "" /* baseSHA: local mode doesn't refresh */)
 }
 
 // completeFixAndDispatch handles the common tail of both modes:
-// switch cwd → store Context → render success card → dispatch
-// the issue body to the agent (ID mode only). Centralising this
-// means both modes share the same "after worktree is created"
-// logic; the mode-specific bits stay in runFixRemote /
-// runFixLocal.
+// switch cwd → ensure worktree .gitignore → write yml snapshot
+// → store Context → render success card → dispatch the issue
+// body to the agent (ID mode only). Centralising this means
+// both modes share the same "after worktree is created" logic;
+// the mode-specific bits stay in runFixRemote / runFixLocal.
 //
 // issue is non-nil only in ID mode; local mode passes nil (the
 // dispatcher check at the bottom skips it). skipDispatch is true
 // when the caller already decided we shouldn't dispatch (e.g.
 // the branch was already attached at the target path — a re-entry
 // after daemon recovery).
+//
+// repoRoot is the main repo path (needed for /gtw close to run
+// `git worktree remove` from there later) and is also written
+// into the on-disk snapshot. provider is the platform kind
+// ("github" / "gitlab"); empty for ModeLocal. repoRoot must be
+// absolute — callers in runFixRemote / runFixLocal get it from
+// RepoRoot(ctx, ...) which always returns an absolute path.
 func completeFixAndDispatch(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
 	slot ContextSlot,
 	deps HandlerDeps,
-	chatID, messageID, branch, worktreePath, repo string,
+	chatID, messageID, branch, worktreePath, repo, repoRoot, provider string,
 	mode Mode,
 	issueID int,
 	issue *Issue,
 	skipDispatch bool,
+	baseSHA string,
 ) (*Result, error) {
 	// --- switch cwd (§5.2.④) -------------------------------------
 	if err := cs.SetActiveCwd(worktreePath); err != nil {
@@ -423,13 +574,88 @@ func completeFixAndDispatch(
 			fmt.Sprintf("❌ SetActiveCwd failed: %v", err)), nil
 	}
 
-	// --- write gtwContext (§5.2.⑤) -------------------------------
+	// --- ensure worktree .gitignore (§14.4 step 5) ---------------
+	// We touch the worktree's gitignore AFTER SetActiveCwd so the
+	// file lives where the user's eye will land. Then we commit
+	// the change so the worktree ends up genuinely clean — that
+	// way `git worktree remove` later succeeds without
+	// --force. The commit author is forced to the gtw tool
+	// identity (see CommitGitignoreIfDirty) so the user can
+	// visually identify and squash tool commits if desired.
+	//
+	// EnsureGitignore failures are warn-only — the user can
+	// fix a missing .gitignore manually. CommitGitignore failures
+	// are HARD errors: without the commit, .gitignore stays
+	// untracked and /gtw close will reject the worktree as
+	// dirty, leaving the user stuck. Better to surface the
+	// problem now and roll back to the pre-WorktreeAdd state
+	// via a friendly reply.
+	if err := EnsureGitignore(worktreePath); err != nil {
+		slog.Default().Warn("gtw: EnsureGitignore failed",
+			"worktree", worktreePath,
+			"err", err)
+	} else if err := CommitGitignoreIfDirty(ctx, worktreePath, deps.Git); err != nil {
+		slog.Default().Warn("gtw: CommitGitignore failed",
+			"worktree", worktreePath,
+			"err", err)
+		// Roll back: the worktree was created but is unusable
+		// (untracked .gitignore → /gtw close will refuse). Best
+		// to remove it now so the user can retry. We pass
+		// force=true because .gitignore IS in the way of the
+		// remove — git would refuse otherwise.
+		if rmErr := WorktreeRemove(ctx, repoRoot, worktreePath, true /* force */, deps.Git); rmErr != nil {
+			slog.Default().Warn("gtw: rollback WorktreeRemove after CommitGitignore failure",
+				"worktree", worktreePath,
+				"commit_err", err,
+				"remove_err", rmErr)
+			// Even the rollback failed. Surface the original
+			// error + the rollback note so the user knows to
+			// clean up by hand.
+			return reply(ctx, deps.Send, chatID, messageID,
+				fmt.Sprintf("❌ /gtw fix: CommitGitignore failed (%v); rollback also failed (%v).\n"+
+					"the worktree at %s is in a stuck state — please `git worktree remove --force %s` manually.",
+					err, rmErr, worktreePath, worktreePath)), nil
+		}
+		return reply(ctx, deps.Send, chatID, messageID,
+			fmt.Sprintf("❌ /gtw fix: CommitGitignore failed (%v).\n"+
+				"rolled back worktree at %s. fix and retry:\n"+
+				"  - ensure `git config user.email` is set, OR\n"+
+				"  - manually commit %s/.gitignore before retrying /gtw fix",
+				err, worktreePath, worktreePath)), nil
+	}
+
+	// --- write on-disk snapshot (§14.4 step 6) -------------------
+	// Persist the immutable fix snapshot so /gtw close can rebuild
+	// state even after a daemon restart. State/UpdatedAt stay
+	// in-memory only. ErrGtwYmlExists is the daemon-recovery path
+	// (we just re-entered completeFixAndDispatch for a worktree
+	// that already has a yml) — silently skip. Any other error
+	// is warn-only: the worktree is the durable side effect and
+	// the user can manually finish or recover via /gtw close.
 	now := deps.Now()
+	if err := WriteGTWYml(worktreePath, Context{
+		Mode:     mode,
+		Issue:    issueID,
+		Branch:   branch,
+		Worktree: worktreePath,
+		RepoRoot: repoRoot,
+		Repo:     repo,
+		Provider: provider,
+	}, deps.Now); err != nil && !errors.Is(err, ErrGtwYmlExists) {
+		slog.Default().Warn("gtw: WriteGTWYml failed",
+			"worktree", worktreePath,
+			"err", err)
+	}
+
+	// --- write gtwContext (§5.2.⑤) -------------------------------
 	slot.Store(Context{
 		Mode:      mode,
 		Issue:     issueID,
 		Branch:    branch,
 		Worktree:  worktreePath,
+		RepoRoot:  repoRoot,
+		Repo:      repo,
+		Provider:  provider,
 		State:     StateFixing,
 		UpdatedAt: now,
 	})
@@ -441,7 +667,7 @@ func completeFixAndDispatch(
 	} else {
 		// ID mode. Callers (runFixRemote) guarantee issue is
 		// non-nil; a nil here would be a programming error.
-		card = renderFixSuccessCard(issue, branch, worktreePath, repo)
+		card = renderFixSuccessCard(issue, branch, worktreePath, repo, baseSHA)
 	}
 	result := reply(ctx, deps.Send, chatID, messageID, card)
 
@@ -453,7 +679,17 @@ func completeFixAndDispatch(
 	// re-running /gtw fix or by manually sending the issue
 	// reference to the agent.
 	if mode == ModeRemote && !skipDispatch && issue != nil {
-		if err := dispatchIssueToChatSession(ctx, cs, deps.Now, chatID, messageID, issue, branch, repo); err != nil {
+		// Download attachments (best-effort) and assemble the
+		// dispatch blocks. Download failures log a warning
+		// and continue with text-only — the agent still gets
+		// the issue body, just no files.
+		var attachmentBlocks []agent.ContentBlock
+		if len(issue.Attachments) > 0 {
+			dir := attachmentsDir(worktreePath, issueID)
+			attachmentBlocks = downloadAttachmentsBestEffort(ctx, issue.Attachments, dir)
+		}
+		blocks := buildIssueDispatchBlocks(issue, attachmentBlocks, branch, repo)
+		if err := dispatchIssueToChatSession(ctx, cs, deps.Now, chatID, messageID, blocks); err != nil {
 			slog.Default().Warn("gtw: dispatch issue to agent failed",
 				"issue_id", issue.ID,
 				"chat_id", chatID,
@@ -471,10 +707,16 @@ func completeFixAndDispatch(
 	return result, nil
 }
 
-// dispatchIssueToChatSession packages the issue into a fixed-
-// template text block and pushes it into the chat session's
-// input queue. The queue's TryFlush() will spawn (or reuse) an
-// AgentSession and submit the prompt.
+// dispatchIssueToChatSession packages the issue + downloaded
+// attachments into a slice of ContentBlocks and pushes them
+// into the chat session's input queue. The queue's TryFlush()
+// will spawn (or reuse) an AgentSession and submit the prompt.
+//
+// blocks is the full ContentBlock slice — usually one text
+// block (issue dispatch template) followed by zero or more
+// ContentFile blocks for downloaded attachments. completeFixAndDispatch
+// builds this slice by running buildIssueDispatchBlocks +
+// downloadAttachmentsBestEffort.
 //
 // The synthesised Message reuses the GTW command's inbound
 // messageID so the agent's reply is anchored as a thread reply
@@ -493,10 +735,8 @@ func dispatchIssueToChatSession(
 	cs *chatsession.ChatSession,
 	now func() time.Time,
 	chatID, messageID string,
-	issue *Issue,
-	branch, repo string,
+	blocks []agent.ContentBlock,
 ) error {
-	body := buildIssueDispatchText(issue, branch, repo)
 	// F-54 timing: the runtime dispatcher (cmd/nightme/run.go)
 	// emits MessageQueued BEFORE QueueUserMessage so channels
 	// can render the ⏳ indicator while the agent spawns. We
@@ -505,10 +745,23 @@ func dispatchIssueToChatSession(
 	return cs.QueueUserMessage(chatsession.Message{
 		ID:         messageID,
 		ChatID:     chatID,
-		Blocks:     []agent.ContentBlock{{Type: agent.ContentText, Text: body}},
+		Blocks:     blocks,
 		ReceivedAt: now(),
 		Kind:       chatsession.MessageKindQueue,
 	})
+}
+
+// buildIssueDispatchBlocks assembles the full
+// []agent.ContentBlock slice for the dispatch: a single text
+// block (the issue template) followed by attachmentBlocks
+// (zero or more ContentFile). The caller downloads
+// attachments before passing them in.
+func buildIssueDispatchBlocks(issue *Issue, attachmentBlocks []agent.ContentBlock, branch, repo string) []agent.ContentBlock {
+	text := buildIssueDispatchText(issue, branch, repo)
+	blocks := make([]agent.ContentBlock, 0, 1+len(attachmentBlocks))
+	blocks = append(blocks, agent.ContentBlock{Type: agent.ContentText, Text: text})
+	blocks = append(blocks, attachmentBlocks...)
+	return blocks
 }
 
 // buildIssueDispatchText formats the issue as a fixed-template
@@ -518,7 +771,7 @@ func dispatchIssueToChatSession(
 // see the success card; the agent sees this block.
 //
 // Section order is stable so agent prompts can rely on it:
-// header / metadata / body / closing.
+// header / metadata / body / attachments / closing.
 func buildIssueDispatchText(issue *Issue, branch, repo string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "📥 GitHub issue #%d — %s\n\n", issue.ID, issue.Title)
@@ -530,6 +783,10 @@ func buildIssueDispatchText(issue *Issue, branch, repo string) string {
 		b.WriteString("## Description\n")
 		b.WriteString(issue.Body)
 		b.WriteString("\n\n")
+	}
+	if len(issue.Attachments) > 0 {
+		fmt.Fprintf(&b, "## Attachments\n%d file(s) attached as ContentFile blocks — paths are absolute on this machine.\n\n",
+			len(issue.Attachments))
 	}
 	b.WriteString("## Task\n")
 	b.WriteString("Please investigate the issue above and implement a fix on the branch noted. ")

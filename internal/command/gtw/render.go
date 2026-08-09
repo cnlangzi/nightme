@@ -7,7 +7,12 @@ import (
 
 // renderFixSuccessCard builds the §5.2.⑥ success card (plain text;
 // success has no interactive buttons in v1).
-func renderFixSuccessCard(issue *Issue, branch, worktree, repo string) string {
+//
+// baseSHA is the HEAD sha of the upstream default branch
+// RefreshDefaultBranch pulled before WorktreeAdd. When empty
+// (e.g. daemon-recovery re-entry where we skipped the refresh)
+// the "based on" line is omitted.
+func renderFixSuccessCard(issue *Issue, branch, worktree, repo, baseSHA string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "✅ Fix #%d 就绪\n", issue.ID)
 	b.WriteString("━━━━━━━━━━━━━━\n")
@@ -15,6 +20,9 @@ func renderFixSuccessCard(issue *Issue, branch, worktree, repo string) string {
 	fmt.Fprintf(&b, "🌿 branch:   %s\n", branch)
 	fmt.Fprintf(&b, "📁 worktree: %s\n", worktree)
 	fmt.Fprintf(&b, "🏷 平台:%s#%d [%s]\n", repo, issue.ID, LabelWIP)
+	if baseSHA != "" {
+		fmt.Fprintf(&b, "🔗 based on: %s\n", shortSHA(baseSHA))
+	}
 	if issue.URL != "" {
 		fmt.Fprintf(&b, "🔗 %s\n", issue.URL)
 	}
@@ -22,6 +30,17 @@ func renderFixSuccessCard(issue *Issue, branch, worktree, repo string) string {
 	b.WriteString("[Command result]\n")
 	b.WriteString("💡 下一步:`/gtw push` (F-46) 或自由对话开发\n")
 	return b.String()
+}
+
+// shortSHA trims a full 40-char git SHA to the conventional
+// 12-char abbreviation. Used in success cards to keep the
+// card readable — the full SHA is recoverable by the user
+// via `git log` if they need it.
+func shortSHA(sha string) string {
+	if len(sha) < 12 {
+		return sha
+	}
+	return sha[:12]
 }
 
 // renderFixLocalSuccessCard builds the simplified success card

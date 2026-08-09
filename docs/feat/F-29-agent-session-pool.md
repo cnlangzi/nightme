@@ -16,7 +16,7 @@
 The pool enables:
 - **Lazy reuse** — switching to a previously-used agent/cwd reuses the existing process
 - **Preservation across switches** — `/cwd` and `/use` never kill AgentSessions; old entries stay in the pool
-- **Independent state** — each AgentSession has its own PID, status, Bridge, and conversation context
+- **Independent state** — each AgentSession has its own PID, status, transport, and conversation context
 
 ---
 
@@ -36,8 +36,8 @@ type AgentSession struct {
     status        atomic.Int32   // StatusRunning | StatusDetached | StatusExited
     args          []string       // spawn args (set on first spawn, applied on respawn)
 
-    // Bridge
-    bridge        bridge.Bridge  // PTY | ACP | SDK | JSON-IO
+    // Transport (renamed from `bridge` field, see refactor-agentsession)
+    transport     bridge.Transport  // PTY | ACP | SDK | JSON-IO
     events        chan agent.AgentEvent  // cap 64
 
     // Callbacks (set by ChatSession when active)

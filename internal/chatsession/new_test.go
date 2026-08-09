@@ -250,7 +250,10 @@ func TestNewActiveAgentSessions_PartialFailure(t *testing.T) {
 
 // TestAgentSession_New_Delegate verifies the wrapper passes the call
 // through to the bridge handle, and returns ErrNotRunning when the
-// handle is nil (Detached state).
+// AgentSession.New is intentionally thin: it just delegates to
+// handle.New(ctx). The PTY fallback (kill+respawn on
+// ErrRestartRequired) lives at the chat layer — see
+// TestChatSession_RestartAgentSession.
 func TestAgentSession_New_Delegate(t *testing.T) {
 	t.Run("running delegates", func(t *testing.T) {
 		cs, _ := New("chat-running", "cc", newTestChannel())
@@ -259,7 +262,7 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 		bh := &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)}
 		as := injectAS(t, cs, "cc", cwd, bh)
 
-		if err := as.New(context.Background(), nil); err != nil {
+		if err := as.New(context.Background()); err != nil {
 			t.Fatalf("New: %v", err)
 		}
 		if bh.calls.Load() != 1 {
@@ -278,17 +281,47 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 		cs.pool[agentCwdKey{Agent: "cc", Cwd: cwd}] = as
 		cs.mu.Unlock()
 
-		err := as.New(context.Background(), nil)
+		err := as.New(context.Background())
 		if !errors.Is(err, ErrNotRunning) {
 			t.Fatalf("want ErrNotRunning, got %v", err)
 		}
 	})
 
-	t.Run("bridge-returns-ErrRestartRequired-falls-back-to-respawn", func(t *testing.T) {
+	t.Run("bridge-returns-ErrRestartRequired-propagates", func(t *testing.T) {
+		// AgentSession.New no longer has a fallback — the caller
+		// (ChatSession.restartAgentSession) catches
+		// ErrRestartRequired and does the kill+respawn itself.
+		cs, _ := New("chat-restart", "cc", newTestChannel())
+		cwd := t.TempDir()
+		cs.SetSelectedCwd(cwd)
+		old := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
+		as := injectAS(t, cs, "cc", cwd, old)
+
+		err := as.New(context.Background())
+		if !errors.Is(err, agent.ErrRestartRequired) {
+			t.Fatalf("want ErrRestartRequired, got %v", err)
+		}
+		// AgentSession.New must NOT have touched the handle — the
+		// chat layer owns the kill+respawn.
+		if old.closed {
+			t.Fatalf("AgentSession.New must not Close() the handle; that's the chat layer's job")
+		}
+		if got := as.Handle(); got == nil {
+			t.Fatalf("handle should still be attached after a returned ErrRestartRequired")
+		}
+	})
+}
+
+// TestChatSession_RestartAgentSession exercises the chat-layer PTY
+// fallback. AgentSession.New returns ErrRestartRequired for bridges
+// that can't do in-place reset; ChatSession.restartAgentSession
+// catches that and does the kill+respawn itself.
+func TestChatSession_RestartAgentSession(t *testing.T) {
+	t.Run("PTY fallback closes old + spawns new + clears sessionID", func(t *testing.T) {
 		// F-34 + product clarification 2026-08-04: when the bridge
 		// (e.g. raw pty) cannot do an in-place reset and returns
-		// agent.ErrRestartRequired, the wrapper must close the old
-		// handle and spawn a fresh one via the Spawner, with
+		// agent.ErrRestartRequired, the chat layer must close the
+		// old handle and spawn a fresh one via the Spawner, with
 		// SessionID cleared.
 		cs, _ := New("chat-restart", "cc", newTestChannel())
 		cwd := t.TempDir()
@@ -299,9 +332,10 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 
 		newAS := &callRecordingAS{fakeAgentSession: newFakeAgentSession(2)}
 		spawner := &fakeRestartSpawner{handle: newAS}
+		cs = cs.WithSpawner(spawner)
 
-		if err := as.New(context.Background(), spawner); err != nil {
-			t.Fatalf("New: %v", err)
+		if err := cs.restartAgentSession(context.Background(), as); err != nil {
+			t.Fatalf("restartAgentSession: %v", err)
 		}
 		if !old.closed {
 			t.Fatalf("old handle should have been Close()d")
@@ -323,14 +357,18 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 		}
 	})
 
-	t.Run("bridge-ErrRestartRequired-with-nil-spawner-propagates", func(t *testing.T) {
+	t.Run("no spawner configured propagates ErrRestartRequired", func(t *testing.T) {
+		// Chat constructed WITHOUT WithSpawner (e.g. unit tests that
+		// only exercise the in-place path) — restartAgentSession
+		// can't fall back, so it returns the original sentinel for
+		// the caller to handle / surface.
 		cs, _ := New("chat-restart-no-spawner", "cc", newTestChannel())
 		cwd := t.TempDir()
 		cs.SetSelectedCwd(cwd)
 		old := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
 		as := injectAS(t, cs, "cc", cwd, old)
 
-		err := as.New(context.Background(), nil)
+		err := cs.restartAgentSession(context.Background(), as)
 		if !errors.Is(err, agent.ErrRestartRequired) {
 			t.Fatalf("want ErrRestartRequired, got %v", err)
 		}
@@ -341,10 +379,11 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 
 	t.Run("respawn-spawn-failure-cleans-up-status", func(t *testing.T) {
 		// F-34 Phase 3 review #4: when bridge.New returns
-		// ErrRestartRequired AND spawner.Spawn fails, the wrapper
-		// must mark the AS Exited so subsequent LookupSelectedAgentSession
-		// lazy-spawns a fresh one. Previously status stayed Running
-		// with handle=nil → next SendBlocks returned ErrNotRunning.
+		// ErrRestartRequired AND spawner.Spawn fails, the
+		// fallback must mark the AS Exited so subsequent
+		// LookupSelectedAgentSession lazy-spawns a fresh one.
+		// Previously status stayed Running with handle=nil → next
+		// SendBlocks returned ErrNotRunning.
 		cs, _ := New("chat-respawn-fail", "cc", newTestChannel())
 		cwd := t.TempDir()
 		cs.SetSelectedCwd(cwd)
@@ -353,9 +392,10 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 		as.SetSessionID("stale-id")
 
 		failingSpawner := &fakeFailingSpawner{err: errors.New("spawn blew up")}
-		err := as.New(context.Background(), failingSpawner)
+		cs = cs.WithSpawner(failingSpawner)
+		err := cs.restartAgentSession(context.Background(), as)
 		if err == nil {
-			t.Fatalf("New should have failed")
+			t.Fatalf("restartAgentSession should have failed")
 		}
 		if got := as.Status(); got != StatusExited {
 			t.Fatalf("status = %s, want StatusExited", got)

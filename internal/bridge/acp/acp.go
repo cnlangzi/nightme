@@ -5,9 +5,9 @@ package acp
 
 import "io"
 
-// Bridge is the byte transport required by an ACP session. pty.Bridge
+// Transport is the byte transport required by an ACP session. pty.Transport
 // satisfies it, while tests can provide an in-memory or net.Pipe transport.
-type Bridge interface {
+type Transport interface {
 	io.ReadWriteCloser
 	PID() int
 }

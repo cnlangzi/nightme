@@ -53,11 +53,11 @@ nightme 启动 session 时:
   │              → spawn `claude --input-format stream-json --output-format stream-json ...`
   │              → parse JSON events（system / assistant / tool_use / tool_result / result）
   │              → AskUserQuestion 双路兼容（tool_use 拦截 + text fallback）
-  │              → AgentSession 包装 claudecode.Bridge
+  │              → AgentSession 包装 claudecode.Transport
   └─ ModePTY  → 兜底（任何 CLI 都能用）
                  → spawn CLI 在 PTY 中
                  → read goroutine 把 bytes 转 TextEvent
-                 → AgentSession 包装 pty.Bridge
+                 → AgentSession 包装 pty.Transport
 ```
 
 **关键**：SessionManager 跟 AgentSession 交互，**不直接**跟 PTY/ACP/SDK 交互。所有模式都返回统一的 `AgentSession` 接口。
@@ -170,7 +170,7 @@ func (a *Agent) Start(ctx context.Context, cfg StartConfig) (AgentSession, error
 
 type acpSession struct {
     client *acp.Client
-    bridge pty.Bridge          // ACP 通信的物理载体
+    transport pty.Transport          // ACP 通信的物理载体
     events chan AgentEvent
 }
 
@@ -284,14 +284,14 @@ func (a *Agent) Start(ctx context.Context, cfg StartConfig) (AgentSession, error
 }
 
 type ptySession struct {
-    bridge pty.Bridge
-    events chan AgentEvent
+    transport pty.Transport
+    events    chan AgentEvent
 }
 
 func (s *ptySession) Events() <-chan AgentEvent { return s.events }
-func (s *ptySession) SendText(text string) error { return s.bridge.Write([]byte(text)) }
+func (s *ptySession) SendText(text string) error { return s.transport.Write([]byte(text)) }
 func (s *ptySession) SendPermission(resp string) error {
-    return s.bridge.Write([]byte(resp))  // best-effort：PTY 不理解"permission"，原样写入
+    return s.transport.Write([]byte(resp))  // best-effort：PTY 不理解"permission"，原样写入
 }
 func (s *ptySession) Close() error { return s.bridge.Close() }
 
@@ -426,7 +426,7 @@ type Session struct {
     Workspace    string
     AgentName    string
     Args         []string
-    agentSession agent.AgentSession  // 统一接口，不直接持有 pty.Bridge
+    agentSession agent.AgentSession  // 统一接口，不直接持有 pty.Transport
     cancel       context.CancelFunc
 }
 

@@ -44,7 +44,7 @@ const (
 //     and held there as a long-lived singleton per name.
 //
 //   - Live state (after Start, before Close): the receiver is a
-//     freshly-allocated clone with runtime fields populated (bridge,
+//     freshly-allocated clone with runtime fields populated (transport,
 //     rpc, ctx, events, sessionID, ...). Calls to Events / PID /
 //     Send* / New / Close are valid here. Spec-half fields are still
 //     readable.
@@ -62,10 +62,10 @@ type Agent struct {
 	rows    int
 
 	// ─── runtime fields (zero before Start; populated on the clone) ───
-	bridge Bridge
-	rpc    *rpcClient
-	ctx    context.Context
-	cancel context.CancelFunc
+	transport Transport
+	rpc       *rpcClient
+	ctx       context.Context
+	cancel    context.CancelFunc
 
 	// agentName and workspace are captured at Start for the
 	// EventAgentReady payload. ACP does not currently tell the runtime
@@ -177,7 +177,7 @@ func (a *Agent) Detect() error {
 //
 // Start clones the receiver — the template in Builtins is untouched.
 // The clone gets template fields copied (defensively), runtime
-// fields zeroed, then NewBridge is called to spawn the PTY, the
+// fields zeroed, then NewTransport is called to spawn the PTY, the
 // read pump is kicked off, and the JSON-RPC handshake runs
 // synchronously before Start returns.
 func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, error) {
@@ -200,7 +200,7 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 	env := append([]string(nil), a.env...)
 	env = append(env, cfg.Env...)
 
-	bridge, err := pty.NewBridge(cfg.Workspace, a.command, args, env, cols, rows)
+	transport, err := pty.NewTransport(cfg.Workspace, a.command, args, env, cols, rows)
 	if err != nil {
 		return nil, err
 	}
@@ -213,8 +213,8 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 		env:       append([]string(nil), a.env...),
 		cols:      cols,
 		rows:      rows,
-		bridge:    bridge,
-		rpc:       newRPCClient(bridge),
+		transport: transport,
+		rpc:       newRPCClient(transport),
 		ctx:       parentCtx,
 		cancel:    cancel,
 		agentName: a.name,
@@ -241,9 +241,9 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 // populated live.rpc, live.ctx, live.events, live.agentName, and (for
 // most callers) live.workspace.
 //
-// Extracted from Start so tests using a mockBridge (no real PTY) can
+// Extracted from Start so tests using a mockTransport (no real PTY) can
 // drive the handshake against an in-process net.Pipe server without
-// going through pty.NewBridge.
+// going through pty.NewTransport.
 func (a *Agent) handshake(ctx context.Context, workspace string) error {
 	if _, err := a.rpc.request(ctx, "initialize", initializeParams{
 		ProtocolVersion: protocolVersion,
@@ -278,10 +278,10 @@ func (a *Agent) handshake(ctx context.Context, workspace string) error {
 func (a *Agent) Events() <-chan agent.AgentEvent { return a.events }
 
 func (a *Agent) PID() int {
-	if a.bridge == nil {
+	if a.transport == nil {
 		return 0
 	}
-	return a.bridge.PID()
+	return a.transport.PID()
 }
 
 // SendText submits a prompt and returns after the JSON-RPC request
@@ -385,7 +385,7 @@ func (a *Agent) SendPermission(response string) error {
 // sessionId, letting the runtime's AgentEventBus subscriber capture
 // it via SetResumeID (cmd/nightme/run.go newEventHandler).
 func (a *Agent) New(ctx context.Context) error {
-	if a.bridge == nil {
+	if a.transport == nil {
 		return errors.New("bridge/acp: nil transport")
 	}
 	startupCtx, cancel := context.WithTimeout(ctx, startupTimeout)
@@ -420,8 +420,8 @@ func (a *Agent) Close() error {
 		// uncooperative PTY peer, so cleanup never waits for an
 		// optional server acknowledgement.
 		a.cancel()
-		if a.bridge != nil {
-			err = a.bridge.Close()
+		if a.transport != nil {
+			err = a.transport.Close()
 		}
 	})
 	return err
@@ -476,7 +476,7 @@ func (a *Agent) emitConnected() {
 func (a *Agent) readPump() {
 	defer close(a.events)
 
-	scanner := bufio.NewScanner(a.bridge)
+	scanner := bufio.NewScanner(a.transport)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())

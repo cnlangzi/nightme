@@ -300,7 +300,7 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, _ *ch
 // No slot/draft shim needed — push doesn't touch gtw state
 // or reaction cards. Just the same HandlerDeps as everywhere
 // else, plus the parsed push flags.
-func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	args, err := parsePushArgs(input.Args[2:])
 	if err != nil {
 		return &command.SlashOutput{
@@ -309,7 +309,7 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, _ *cha
 		}, nil
 	}
 
-	res, err := RunPush(ctx, f.deps, input.ChatID, input.MessageID, args)
+	res, err := RunPush(ctx, cs, f.deps, input.ChatID, input.MessageID, args)
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw push failed: %v", err),

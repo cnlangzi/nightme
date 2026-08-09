@@ -49,14 +49,14 @@ type ChatSession struct {
 
     // Active routing state (mutated by /cwd /use; primaryAgent is
     // captured at New() time from global config and never mutated).
-    ActiveCwd       string              // /cwd sets; immutable per AgentSession
-    ActiveAgent     string              // /use sets; immutable per AgentSession
+    SelectedCwd       string              // /cwd sets; immutable per AgentSession
+    SelectedAgent     string              // /use sets; immutable per AgentSession
     PrimaryAgent    string              // snapshot of cfg.Primary at New(); read-only
 
     // AgentSession pool (per-ChatSession unique on (agent, cwd))
     poolMu          sync.RWMutex
     pool            map[agentCwdKey]*AgentSession  // agent + cwd → AgentSession
-    activeAS        *AgentSession                  // current active (may be nil)
+    selectedAS        *AgentSession                  // current active (may be nil)
 
     // FSMs owned by ChatSession
     inputBuffer     *InputBuffer                   // F-25; idle ↔ busy; cross-/use shared
@@ -89,11 +89,11 @@ type ChatSessionEntry struct {
     ID                  string    `json:"id"`
     ChatID              string    `json:"chatId"`               // UNIQUE
     ChatType            string    `json:"chatType"`
-    ActiveCwd           string    `json:"activeCwd"`            // empty → not yet /cwd'd
-    ActiveAgent         string    `json:"activeAgent"`          // empty → not yet /use'd
+    SelectedCwd           string    `json:"selectedCwd"`            // empty → not yet /cwd'd
+    SelectedAgent         string    `json:"selectedAgent"`          // empty → not yet /use'd
     PrimaryAgent        string    `json:"primaryAgent"`         // snapshot of cfg.Primary at creation; read-only
     AgentSessionIDs     []string  `json:"agentSessionIds"`      // pool index
-    ActiveAgentSessionID *string   `json:"activeAgentSessionId"` // null → no active
+    SelectedAgentSessionID *string   `json:"selectedAgentSessionId"` // null → no active
     CreatedAt           time.Time `json:"createdAt"`
     LastInteractionAt   time.Time `json:"lastInteractionAt"`
 }
@@ -108,8 +108,8 @@ type ChatSessionEntry struct {
 ```
 Gateway.handler.cwd  (or first inbound msg if binding missing):
   1. registry.Bindings[chatId] check
-     ├─ exists → load ChatSession (Restore), SetActiveCwd
-     └─ missing → ChatSession.Create({ChatID, ChatType, ActiveCwd})
+     ├─ exists → load ChatSession (Restore), SetSelectedCwd
+     └─ missing → ChatSession.Create({ChatID, ChatType, SelectedCwd})
                    → registry.Upsert(ChatSessionEntry)
                    → bindings[ChatID] = new ChatSession
 ```
@@ -120,58 +120,58 @@ Gateway.handler.cwd  (or first inbound msg if binding missing):
 nightme run (startup):
   1. registry.LoadAll() → []ChatSessionEntry, []AgentSessionEntry
   2. For each ChatSessionEntry:
-     ├─ new ChatSession (id, chatId, chatType, activeCwd, activeAgent, primaryAgent)
+     ├─ new ChatSession (id, chatId, chatType, selectedCwd, selectedAgent, primaryAgent)
      ├─ For each agentSessionID:
      │   └─ new AgentSession (id, agent, cwd, status=Detached, pid=0)
      │       └─ chatSession.pool[(agent,cwd)] = agentSession
-     └─ activeAS = pool[(activeAgent, activeCwd)]  // may be nil if cwd changed
+     └─ selectedAS = pool[(selectedAgent, selectedCwd)]  // may be nil if cwd changed
   3. bindings[ChatID] = restored ChatSession
 ```
 
-**Detached state**: `pid=0, status=Detached`. Process not running; will be respawned on first message via `LookupActiveAgentSession()`.
+**Detached state**: `pid=0, status=Detached`. Process not running; will be respawned on first message via `LookupSelectedAgentSession()`.
 
 ### 3.3 Active AgentSession lookup (the heart of v1.2)
 
 ```go
-// LookupActiveAgentSession is the ONLY entry point for resolving
+// LookupSelectedAgentSession is the ONLY entry point for resolving
 // "which AgentSession should this message go to".
 //
 // Logic (single path — no runtime fallback):
-//   - ChatSession always carries an effective activeAgent:
-//       · at construction, activeAgent is seeded from cfg.Primary
-//       · /use overwrites activeAgent
-//   - Resolve pool[(activeAgent, activeCwd)]:
+//   - ChatSession always carries an effective selectedAgent:
+//       · at construction, selectedAgent is seeded from cfg.Primary
+//       · /use overwrites selectedAgent
+//   - Resolve pool[(selectedAgent, selectedCwd)]:
 //       · hit (StatusRunning) → reuse, register callback, return
-//       · miss (or non-Running) → spawn (activeAgent, activeCwd)
+//       · miss (or non-Running) → spawn (selectedAgent, selectedCwd)
 //
-// Returns ErrNoActiveCwd if activeCwd is empty (user has not /cwd'd yet).
-func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
+// Returns ErrNoSelectedCwd if selectedCwd is empty (user has not /cwd'd yet).
+func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
     cs.poolMu.Lock()
     defer cs.poolMu.Unlock()
 
-    if cs.ActiveCwd == "" {
-        return nil, ErrNoActiveCwd  // "no workspace, /cwd first"
+    if cs.SelectedCwd == "" {
+        return nil, ErrNoSelectedCwd  // "no workspace, /cwd first"
     }
 
-    key := agentCwdKey{Agent: cs.ActiveAgent, Cwd: cs.ActiveCwd}
+    key := agentCwdKey{Agent: cs.SelectedAgent, Cwd: cs.SelectedCwd}
     if as, ok := cs.pool[key]; ok {
         if as.Status() == StatusExited {
             // Process died; respawn with same (agent, cwd) entry
-            as.Respawn(cs.ActiveCwd)
+            as.Respawn(cs.SelectedCwd)
         }
-        cs.activeAS = as
+        cs.selectedAS = as
         as.RegisterEventCallback(cs.eventCallback)
         return as, nil
     }
 
-    // Miss: spawn (activeAgent, activeCwd). No fallback to any
-    // "default" agent — chatSession.activeAgent is the only
+    // Miss: spawn (selectedAgent, selectedCwd). No fallback to any
+    // "default" agent — chatSession.selectedAgent is the only
     // authority (seeded from cfg.Primary at New() time, /use
     // overrides it).
-    as := SpawnAgentSession(cs.ActiveAgent, cs.ActiveCwd)
+    as := SpawnAgentSession(cs.SelectedAgent, cs.SelectedCwd)
     cs.pool[key] = as
     as.RegisterEventCallback(cs.eventCallback)
-    cs.activeAS = as
+    cs.selectedAS = as
     cs.flushAgentSessionsToRegistry()
     return as, nil
 }
@@ -181,30 +181,30 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 
 | Command | Handler behavior | Side effects |
 |---------|------------------|--------------|
-| `/cwd <path>` | Validate → `chatSession.SetActiveCwd(abs)` | Updates `activeCwd`; pool untouched; next message triggers `LookupActiveAgentSession()` |
-| `/use <agent>` | Validate → `chatSession.SetActiveAgent(name)` → `LookupActiveAgentSession()` | May spawn new AgentSession if `(agent, activeCwd)` not in pool |
-| `/kill` | `chatSession.KillAll()` | Kills every AgentSession in pool; clears `activeAS`; old receipts dispose |
+| `/cwd <path>` | Validate → `chatSession.SetSelectedCwd(abs)` | Updates `selectedCwd`; pool untouched; next message triggers `LookupSelectedAgentSession()` |
+| `/use <agent>` | Validate → `chatSession.SetSelectedAgent(name)` → `LookupSelectedAgentSession()` | May spawn new AgentSession if `(agent, selectedCwd)` not in pool |
+| `/kill` | `chatSession.KillAll()` | Kills every AgentSession in pool; clears `selectedAS`; old receipts dispose |
 
 **No `/default` command** (Q-A simplification, 2026-08-02): the only user-facing Primary Agent is the global `primary` config. The `primaryAgent` field on ChatSession is captured at `New()` time (snapshot of `cfg.Primary`) and never mutated post-construction. Future feature: per-chat Primary via config (not command) — out of scope for v1.2.
 
-### 3.5 SetActiveCwd / SetActiveAgent (state mutations)
+### 3.5 SetSelectedCwd / SetSelectedAgent (state mutations)
 
 ```go
-func (cs *ChatSession) SetActiveCwd(cwd string) error {
+func (cs *ChatSession) SetSelectedCwd(cwd string) error {
     if !isValidCwd(cwd) {
         return ErrInvalidCwd
     }
     cs.poolMu.Lock()
-    cs.ActiveCwd = cwd
+    cs.SelectedCwd = cwd
     cs.poolMu.Unlock()
     cs.flushEntryToRegistry()
-    // No agent respawn here — LookupActiveAgentSession happens lazily
+    // No agent respawn here — LookupSelectedAgentSession happens lazily
     return nil
 }
 
-func (cs *ChatSession) SetActiveAgent(agent string) error {
+func (cs *ChatSession) SetSelectedAgent(agent string) error {
     cs.poolMu.Lock()
-    cs.ActiveAgent = agent
+    cs.SelectedAgent = agent
     cs.poolMu.Unlock()
     cs.flushEntryToRegistry()
     return nil
@@ -225,26 +225,26 @@ func (cs *ChatSession) SetActiveAgent(agent string) error {
 
 - **`AgentSession.readPump`** (one per AgentSession in pool, running or detached)
   - Reads from `as.Events()` (single consumer)
-  - Calls `cs.eventCallback(s, ev)` if `s == cs.activeAS` (set under poolMu read lock)
+  - Calls `cs.eventCallback(s, ev)` if `s == cs.selectedAS` (set under poolMu read lock)
   - Drops events from non-active AgentSession (logs at debug level)
 
 ### 4.3 Locks
 
-- `cs.poolMu` — guards `pool`, `activeAS`, `ActiveCwd`, `ActiveAgent`
-  - **Write**: `/cwd`, `/use`, `/kill`, `LookupActiveAgentSession()`, spawn, registry flush
+- `cs.poolMu` — guards `pool`, `selectedAS`, `SelectedCwd`, `SelectedAgent`
+  - **Write**: `/cwd`, `/use`, `/kill`, `LookupSelectedAgentSession()`, spawn, registry flush
   - **Read**: readPump callback registration, status queries
 
 ### 4.4 /use switch race window
 
 When `/use` switches active:
 ```
-1. /use claude enters LookupActiveAgentSession
+1. /use claude enters LookupSelectedAgentSession
 2. Take poolMu.Lock
-3. Resolve new activeAS (reuse or spawn)
-4. Set cs.activeAS = newAS
+3. Resolve new selectedAS (reuse or spawn)
+4. Set cs.selectedAS = newAS
 5. Release poolMu.Lock
 6. (In flight events from OLD AgentSession's readPump, if any:)
-   - Check cs.activeAS under poolMu.RLock
+   - Check cs.selectedAS under poolMu.RLock
    - If old, drop event (log: "event from non-active AgentSession, dropping")
 7. New events flow through newAS.readPump → cs.eventCallback
 ```
@@ -261,7 +261,7 @@ When `/use` switches active:
 | Receipt FSM (per userMsgID) | Gateway | `Gateway.receipts[userMsgID]` (map, in-memory) | 跨 /use /cwd 不变 |
 | InputBuffer FSM (idle ↔ busy) | **ChatSession** | `ChatSession.inputBuffer` | 跨 /use 切换共享 queue |
 | AgentSession.Status (running/detached/exited) | AgentSession | AgentSession.status (atomic) | 独立于 ChatSession |
-| ChatSession.ActiveAgentSession pointer | ChatSession | `cs.activeAS` (under poolMu) | /use 时切换 |
+| ChatSession.SelectedAgentSession pointer | ChatSession | `cs.selectedAS` (under poolMu) | /use 时切换 |
 
 ---
 
@@ -274,7 +274,7 @@ behaviour that make the FSMs come alive.
 ### 5.1.1 Spawner (lazy fork-exec seam)
 
 `Spawner` is the only way a ChatSession brings a new AgentSession
-to life (Step 3 of `LookupActiveAgentSession`). It is
+to life (Step 3 of `LookupSelectedAgentSession`). It is
 **injected** via `ChatSession.WithSpawner(s)`; the runtime wires
 the production implementation.
 
@@ -308,7 +308,7 @@ InputBuffer at construction time:
 ```go
 func (cs *ChatSession) defaultFlushHookLocked() FlushHook {
     return func(combined []agent.ContentBlock, userMsgIDs []string) error {
-        as := cs.activeAS
+        as := cs.selectedAS
         if as == nil || as.Handle() == nil {
             return ErrNotRunning
         }
@@ -358,9 +358,9 @@ return func(chatID string, s *AgentSession, ev agent.AgentEvent) {
 Each ChatSession has at most **one** active readPump goroutine
 (`internal/chatsession/readpump.go`). Lifecycle:
 
-- **`StartReadPump()`** — start pump for `cs.activeAS`. Captures
+- **`StartReadPump()`** — start pump for `cs.selectedAS`. Captures
   `cs.eventHandler` at start time. Stops any existing pump first.
-  Returns `ErrNoActiveAgentSession` if no active AS yet.
+  Returns `ErrNoSelectedAgentSession` if no active AS yet.
 - **`StopReadPump()`** — signal `stop`, wait for `done`.
   Idempotent. Called by `KillAll` (commit 8c).
 - **`HasPump()`** — atomic bool, true while the pump goroutine is
@@ -376,7 +376,7 @@ Each ChatSession has at most **one** active readPump goroutine
 - After `/use` resolves the new active AgentSession
   (`internal/gateway/handlers_chatsession.go::handleUse`).
 
-**Why not auto-start on spawn?** LookupActiveAgentSession does
+**Why not auto-start on spawn?** LookupSelectedAgentSession does
 **not** auto-start the pump — keeps ChatSession unit-testable
 without leaking goroutines (commit 8c).
 
@@ -417,11 +417,11 @@ user simply opens a fresh chat.
       "id": "cs_xxx",
       "chatId": "oc_xxx",
       "chatType": "p2p",
-      "activeCwd": "/code/bailing",
-      "activeAgent": "claude",
+      "selectedCwd": "/code/bailing",
+      "selectedAgent": "claude",
       "primaryAgent": "claude",
       "agentSessionIds": ["as_1", "as_2"],
-      "activeAgentSessionId": "as_1",
+      "selectedAgentSessionId": "as_1",
       "createdAt": "2026-08-02T...",
       "lastInteractionAt": "2026-08-02T..."
     }
@@ -463,11 +463,11 @@ user simply opens a fresh chat.
 
 ### 7.1 Unit
 
-- `SetActiveCwd` / `SetActiveAgent` — pure state mutation, no spawn/kill
-- `LookupActiveAgentSession()` resolution (single path: hit → reuse, miss → spawn `(activeAgent, activeCwd)`; no runtime fallback to any "default" agent)
-- `KillAll()` — all AgentSessions killed, activeAS=nil, pool emptied
+- `SetSelectedCwd` / `SetSelectedAgent` — pure state mutation, no spawn/kill
+- `LookupSelectedAgentSession()` resolution (single path: hit → reuse, miss → spawn `(selectedAgent, selectedCwd)`; no runtime fallback to any "default" agent)
+- `KillAll()` — all AgentSessions killed, selectedAS=nil, pool emptied
 - `Restore()` from ChatSessionEntry + AgentSessionEntry — detached state, no process
-- Concurrent `/use` + activeAS read — race-free (uses sync.RWMutex)
+- Concurrent `/use` + selectedAS read — race-free (uses sync.RWMutex)
 
 ### 7.2 Integration
 
@@ -496,8 +496,8 @@ user simply opens a fresh chat.
 ## 9. Open questions (draft)
 
 - **Q-A**: Default Agent setting granularity — global config only? per ChatSession command? both? (Lean: both)
-- **Q-B** (closed 2026-08-03): lookup only resolves `(activeAgent, activeCwd)`. No runtime fallback. activeAgent is seeded from `cfg.Primary` at ChatSession creation and only mutated by `/use`.
-- **Q-C**: Should `chatSession.SetActiveCwd` log to user "activeCwd changed, next message will spawn new AgentSession"? (Lean: yes, ephemeral info message)
+- **Q-B** (closed 2026-08-03): lookup only resolves `(selectedAgent, selectedCwd)`. No runtime fallback. selectedAgent is seeded from `cfg.Primary` at ChatSession creation and only mutated by `/use`.
+- **Q-C**: Should `chatSession.SetSelectedCwd` log to user "selectedCwd changed, next message will spawn new AgentSession"? (Lean: yes, ephemeral info message)
 - **Q-D**: When `/kill` clears pool, should queued InputBuffer messages be persisted or dropped? (Lean: dropped; user explicitly killed)
 - **Q-E**: ChatSession.ID is generated once or derived from chatId? (Lean: derived from chatId for 1:1 invariant enforcement)
 

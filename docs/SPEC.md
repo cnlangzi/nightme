@@ -25,8 +25,8 @@ v1.2 在 v1.1 锁定的职责隔离架构上做**结构重组**——不变的�
    - 变：会话上下文内部可有多个 AgentSession（按 `(agent, cwd)` 1:1 唯一）
 
 3. **`/run` 删除，`/use <agent>` 替代**
-   - `/use <agent>` 切换 activeAgent；复用或新建 `(activeAgent, activeCwd)` AgentSession
-   - `/cwd` 只改 activeCwd，不触发 spawn；切回能复用之前留下的 AgentSession
+   - `/use <agent>` 切换 selectedAgent；复用或新建 `(selectedAgent, selectedCwd)` AgentSession
+   - `/cwd` 只改 selectedCwd，不触发 spawn；切回能复用之前留下的 AgentSession
 
 4. **InputBuffer FSM 位置迁移：Session → ChatSession**
    - v1.1：挂在 Session 上（per chat）
@@ -752,8 +752,8 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 │  ┌─────────────────────┐  ┌─────────────────────┐           │
 │  │  ChatSession (池)   │  │  AgentSession 池    │           │
 │  │  ───────────────── │←→│  ─────────────────  │           │
-│  │  activeCwd          │  │  (claude, /A) 进程   │           │
-│  │  activeAgent        │  │  (codex,  /A) 进程   │           │
+│  │  selectedCwd          │  │  (claude, /A) 进程   │           │
+│  │  selectedAgent        │  │  (codex,  /A) 进程   │           │
 │  │  primaryAgent       │  │  (claude, /B) 进程   │           │
 │  │  InputBuffer FSM    │  │  (codex,  /B) 进程   │           │
 │  │  (idle ↔ busy)      │  │                      │           │
@@ -773,10 +773,10 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 | **Channel Adapter** | IM 协议编解码；`Send(OutboundMessage)` 渲染；**自管** receipt card / thread / DOM 节点的完整生命周期（含 cold-create / PATCH / 终态） | ChatSession、AgentSession、workspace、agent、binding、任何渲染状态 |
 | **Gateway** | 中枢 orchestrator：slash command 路由（**通过 Commander 抽象，不直接 import handlers_*.go**）、binding 表（chat_id ↔ ChatSession）、ChatSession 生命周期、Channel↔ChatSession↔AgentSession 跨层调度、outbound 路由（stamp `ReplyTo=userMsgID` 送到对应 Channel） | IM 协议细节、agent 内部协议、PTY/ACP 细节、Channel 内部渲染状态、命令实现细节（具体命令实现住 `internal/command/<name>/`） |
 | **Slash Command Layer**（Commander）住 `internal/command/`，由 `SlashCommandFactory` 装配 | 命令抽象层：定义 `Commander` / `SlashCommandFactory` / `SlashRegistry` / `RuntimeServices` 接口；声明 `ReactionRouter` 服务接口；提供通用 `preflight` / `reply` helper。各命令子包（`internal/command/<name>/cmd.go`）实现 `SlashCommandFactory`，Factory 构造函数直接拿 `*chatsession.Manager` | 命令的具体业务逻辑由各 `<name>` 子包实现；command 包本身**不** import gtw / gateway / channel 具体类（chatsession 是命令 Factory 的直接依赖） |
-| **ChatSession** | per chat 的会话上下文（持久化）：activeCwd / activeAgent / primaryAgent / InputBuffer FSM / `currentTurnUserMsgID` 跟踪 / AgentSession 池索引 | chat_id 之外没有"自己是谁"；Channel 协议细节；agent 内部协议；receipt 渲染；**slash command 详情；任何命令包路径；gtw / command / gateway 任何具体类型的名字**（强化） |
+| **ChatSession** | per chat 的会话上下文（持久化）：selectedCwd / selectedAgent / primaryAgent / InputBuffer FSM / `currentTurnUserMsgID` 跟踪 / AgentSession 池索引 | chat_id 之外没有"自己是谁"；Channel 协议细节；agent 内部协议；receipt 渲染；**slash command 详情；任何命令包路径；gtw / command / gateway 任何具体类型的名字**（强化） |
 | **AgentSession** | CLI 进程句柄；`(agent, cwd)` 1:1 唯一标识（immutable）；events() chan；sendText/sendBlocks；close | chat_id、ChatSession、binding、Channel、slash command |
 | **Bridge** | nightme 与底层 AI Coding CLI 之间的通信抽象；`AgentSession` 接口（Events / SendText / SendBlocks / SendPermission / Close）；四种模式（ACP / SDK / PTY / JSON-IO） | chat、binding、ChatSession、Channel |
-| **Process Registry** | JSON 持久化层。两类 entry：`ChatSessionEntry`（chat_id ↔ ChatSession 绑定 + activeCwd/activeAgent/primaryAgent + AgentSession 索引）+ `AgentSessionEntry`（agent + cwd + pid + status）| 运行时语义；只持久化 |
+| **Process Registry** | JSON 持久化层。两类 entry：`ChatSessionEntry`（chat_id ↔ ChatSession 绑定 + selectedCwd/selectedAgent/primaryAgent + AgentSession 索引）+ `AgentSessionEntry`（agent + cwd + pid + status）| 运行时语义；只持久化 |
 
 ### 1.2 三状态机，三个 owner（v1.2）
 
@@ -789,7 +789,7 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 | **MessageState FSM**（per userMsg）| ChatSession | `MessageQueued → MessageSubmitted → MessageDropped`（F-53 之前是 4 态 `Received/Forwarded/Done/Failed`，Done/Failed 已删）| 否（重启丢）|
 | **PromptState FSM**（per userMsg）| Channel's receipt | `PromptRunning → PromptDone`（F-53 之前 4 态，已收为 2 态；Pending/Succeeded/Failed 已删）| 否（重启丢）|
 | **AgentSession.Status**（per AgentSession）| AgentSession | `running → detached / exited` | 是（AgentSessionEntry）|
-| **ChatSession.ActiveAgentSession**（per ChatSession）| ChatSession | 引用 pool 中的某个 AgentSession | 引用在 ChatSessionEntry |
+| **ChatSession.SelectedAgentSession**（per ChatSession）| ChatSession | 引用 pool 中的某个 AgentSession | 引用在 ChatSessionEntry |
 
 **非 FSM 跟踪变量（v1.3 新增）**：
 
@@ -798,9 +798,9 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 | **`currentTurnUserMsgID`**（per ChatSession）| ChatSession | 当前 turn 的单一 userMsgID 锚点。buffered batch 时锚到最后一条。所有 outbound event 的 `OutboundMessage.ReplyTo` = currentTurnUserMsgID |
 
 **核心 FSM / 跟踪变量的耦合点**（全部经过 Gateway）：
-- **Inbound 流**：Channel → Gateway.pumpInbound → dispatchLoop → DispatchInbound (inboundDispatcher) → 命中 `/cwd` `/use` `/kill` 走 slashCommandDispatcher → 走 ChatSession；未命中走 messageDispatcher → `cs.emitMessageState(Received)` + `chatSession.QueueUserMessage` + `chatSession.LookupActiveAgentSession`（lazy spawn）+ `agentSession.SendBlocks` + `cs.emitMessageState(Forwarded)`
+- **Inbound 流**：Channel → Gateway.pumpInbound → dispatchLoop → DispatchInbound (inboundDispatcher) → 命中 `/cwd` `/use` `/kill` 走 slashCommandDispatcher → 走 ChatSession；未命中走 messageDispatcher → `cs.emitMessageState(Received)` + `chatSession.QueueUserMessage` + `chatSession.LookupSelectedAgentSession`（lazy spawn）+ `agentSession.SendBlocks` + `cs.emitMessageState(Forwarded)`
 - **Outbound 流**：`agentSession.Events()` → session 的 readPump（**单消费者**） → ChatSession.EventCallback → 设 `out.ReplyTo = cs.currentTurnUserMsgID` → `channel.Send` → Channel 内部按 ReplyTo 路由到对应 receipt（card / thread / DOM 节点） → PATCH
-- **切 AgentSession**：`/use` 触发 → ChatSession.LookupActiveAgentSession 重新解析 → 切换 ChatSession.EventCallback 目标 → 老 AgentSession 的事件不再消费
+- **切 AgentSession**：`/use` 触发 → ChatSession.LookupSelectedAgentSession 重新解析 → 切换 ChatSession.EventCallback 目标 → 老 AgentSession 的事件不再消费
 
 ### 1.3 不变式（v1.3 强制）
 
@@ -813,7 +813,7 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 - **`agentSession.Events()` chan 的唯一消费者是 session 自己的 readPump**；ChatSession 通过 `ChatSession.EventCallback` 接收事件，**不直接读 chan**（沿用 v1.1 修复）
 - **ChatSession 内 `(agent, cwd)` 唯一索引**（不是全局唯一；不同 ChatSession 可有独立 `(claude, /path/A)` AgentSession）
 - **`/use` 不重启进程**：永远复用 pool 中的现有 AgentSession，找不到才 spawn 新进程
-- **`/cwd` 不重启任何 AgentSession**：永远只改 activeCwd，老 AgentSession 保留在 pool
+- **`/cwd` 不重启任何 AgentSession**：永远只改 selectedCwd，老 AgentSession 保留在 pool
 - **`currentTurnUserMsgID` 单数**：一个 turn 一个 userMsgID 锚点；buffered batch 时锚到最后一条；outbound event 的 `ReplyTo` 必等于此
 - **抽象归抽象 / 具体归具体**：Gateway = 路由器（不假设任何 Channel 渲染细节）；Channel = 渲染器（自管 receipt 生命周期，自选存储形态：per-chat map / per-thread map / DOM 节点 / ...）
 - **outbound 路由唯一耦合点**：`EventHandler` 在每个 `OutboundMessage` 上设 `out.ReplyTo = cs.currentTurnUserMsgID`。Channel 据此 key 路由。Gateway 不需要知道 Channel 内部 receipt 怎么存
@@ -1042,7 +1042,7 @@ messageDispatcher(ctx, msg)
   │   ├ nil → channel.Send("no chat session, /cwd first")
   │   └ Status != Ready → channel.Send("not ready, /cwd + /use first")
   ├ (0) cs.emitMessageState(msg.MessageID, agent.MessageReceived)   ← F-31: 触发 MessageState(Received) 事件
-  ├ (a) chatSession.LookupActiveAgentSession() (lazy spawn on miss)
+  ├ (a) chatSession.LookupSelectedAgentSession() (lazy spawn on miss)
   ├ (b) cs.emitMessageState(msg.MessageID, agent.MessageForwarded)   ← F-31: dispatch 成功后触发
   ├ (c) **blocks 路径选择**（F-14 v1.4b）：
   │     ├─ msg.Blocks != nil（post path）   → blocks = msg.Blocks    ← 顺序由 Feishu paragraph 决定
@@ -1077,7 +1077,7 @@ messageDispatcher(ctx, msg)
 **核心语义：1 turn : 1 anchor, n events**。每个 agent turn 由 ChatSession 锚定到单一 `currentTurnUserMsgID`（buffered batch 时锚到最后一条 userMsgID）；EventHandler 在每个 OutboundMessage 上设 `out.ReplyTo = currentTurnUserMsgID`；Channel 据此路由到对应 receipt（card / thread / DOM 节点）。`ReplyTo == ""` 是仅有的"无锚" case（启动期 EventAgentConnected、系统日志、内部事件），Channel 走 plain text / 跳过。
 
 ```
-Claude Code 进程 (PTY child, cwd = chatSession.activeCwd)
+Claude Code 进程 (PTY child, cwd = chatSession.selectedCwd)
   ↓ stdout 是 stream-json 行
 bridge/claudecode.pumpStream
   ├ 逐行解析 JSON
@@ -1133,14 +1133,14 @@ command.cwd.Factory.Handle(ctx, rt, input)
   ├ Factory.mgr: *chatsession.Manager  (直接持有)
   ├ 验证 path（~ 展开、绝对路径、目录存在）
   ├ cs := mgr.GetOrCreate(chatID, defaultPrimary)
-  │   ├ err SetActiveCwd → command.Reply("SetActiveCwd failed: ...")
+  │   ├ err SetSelectedCwd → command.Reply("SetSelectedCwd failed: ...")
   │   └ OK → 继续
-  ├ cs.SetActiveCwd(abs)  ← 仅改 activeCwd, 不动 AgentSession
+  ├ cs.SetSelectedCwd(abs)  ← 仅改 selectedCwd, 不动 AgentSession
   │   (AgentSession 池中的所有项不动; 切回原 cwd 时复用老 AgentSession)
   └ command.Reply("Workspace set to <abs>")
 ```
 
-**关键变化（v1.2）**：`/cwd` **不触发 spawn**。它是"切换 activeCwd"的纯状态变更命令。当用户后续发消息时，ChatSession 通过 `LookupActiveAgentSession()` 重新解析 `(activeAgent, activeCwd)`，按需复用或 spawn。
+**关键变化（v1.2）**：`/cwd` **不触发 spawn**。它是"切换 selectedCwd"的纯状态变更命令。当用户后续发消息时，ChatSession 通过 `LookupSelectedAgentSession()` 重新解析 `(selectedAgent, selectedCwd)`，按需复用或 spawn。
 
 **当前实现**：handler 直接拿 `*chatsession.Manager`。`expandTilde` 等纯函数仍在命令子包内实现。
 
@@ -1150,13 +1150,13 @@ command.cwd.Factory.Handle(ctx, rt, input)
 command.use.Factory.Handle(ctx, rt, input)
   ├ Factory.mgr: *chatsession.Manager  (直接持有)
   ├ cs := mgr.GetOrCreate(chatID, defaultPrimary)
-  │   ├ ActiveCwd 空 → command.Reply("Send /cwd first")
+  │   ├ SelectedCwd 空 → command.Reply("Send /cwd first")
   │   └ 存在 → 继续
   ├ agentName := input.Args[1]
-  ├ cs.SetActiveAgent(agentName)   ← 仅改 activeAgent
-  ├ as, err := cs.LookupActiveAgentSession()
-  │   ├ pool[(activeAgent, activeCwd)] 命中 → 复用 (不重启进程)
-  │   └ miss → spawn 新 AgentSession(agentName, activeCwd)
+  ├ cs.SetSelectedAgent(agentName)   ← 仅改 selectedAgent
+  ├ as, err := cs.LookupSelectedAgentSession()
+  │   ├ pool[(selectedAgent, selectedCwd)] 命中 → 复用 (不重启进程)
+  │   └ miss → spawn 新 AgentSession(agentName, selectedCwd)
   ├ cs.StartReadPump()  ← commit 8c — 启动新 pump
   └ command.Reply("Now using <agent>, pid=<N>, cwd=<ws>, source=<spawn|resumed>")
 ```
@@ -1174,7 +1174,7 @@ command.kill.Factory.Handle(ctx, rt, input)
   ├ cs := mgr.Get(chatID)
   │   ├ nil → command.Reply("No active chat session to kill.")
   │   └ 存在 → 继续
-  ├ command.RequireActiveCwd(cs)   ← 没设 /cwd 就回复 "Send /cwd first"
+  ├ command.RequireSelectedCwd(cs)   ← 没设 /cwd 就回复 "Send /cwd first"
   ├ 解析 args[1]:空 → 进入 KillAllAgents 分支
   │   非空 → 作为 agentName,进入 KillAgent 分支
   ├ case /kill <agent>:
@@ -1187,9 +1187,9 @@ command.kill.Factory.Handle(ctx, rt, input)
       → command.Reply(kill.FormatKillResults(results))
 ```
 
-**关键变化**：scope 统一为 **activeCwd 子集**(与 `/new` 对齐),但**两个入口**粒度不同:
-- `/kill`(无参)= 杀 activeCwd 下 pool 中**所有 entries**
-- `/kill <agent>`= 杀 activeCwd 下**单个**(agent, cwd) entry
+**关键变化**：scope 统一为 **selectedCwd 子集**(与 `/new` 对齐),但**两个入口**粒度不同:
+- `/kill`(无参)= 杀 selectedCwd 下 pool 中**所有 entries**
+- `/kill <agent>`= 杀 selectedCwd 下**单个**(agent, cwd) entry
 
 `/kill` 不再误伤其他 cwd 下的 AgentSession —— 通过 `/cwd` 切到目标目录再 `/kill` 即可清理其他 workspace。
 
@@ -1198,13 +1198,13 @@ command.kill.Factory.Handle(ctx, rt, input)
 - `kill.KillAllAgents(cmd)` —— `/kill` 路径
 - `kill.Result` / `kill.FormatKillResults` —— 返回类型 + 渲染
 
-kill 包通过 ChatSession 上的两个通用 lifecycle accessor 访问 pool / activeAS / 持久化:
+kill 包通过 ChatSession 上的两个通用 lifecycle accessor 访问 pool / selectedAS / 持久化:
 - `cs.AgentSessionsInCwd(cwd) []*AgentSession` —— 快照(只读)
-- `cs.DropAgentSession(as)` —— 原子地 pool delete + activeAS clear + asFile delete + persistChatEntry
+- `cs.DropAgentSession(as)` —— 原子地 pool delete + selectedAS clear + asFile delete + persistChatEntry
 
-`ChatSession` 上**没有任何 kill 方法**;handler 负责 RequireActiveCwd preflight + args 解析 + 调包级函数 + FormatKillResults 渲染。
+`ChatSession` 上**没有任何 kill 方法**;handler 负责 RequireSelectedCwd preflight + args 解析 + 调包级函数 + FormatKillResults 渲染。
 
-**Daemon shutdown 不调任何 kill 函数** —— agents 是独立于 nightme 生命周期的长进程。SIGINT/SIGTERM 时只 `Stop()` channel、persist final state,AgentSessions 在 registry 里以 `Detached` 保留,下次 `nightme run` 通过 `Manager.RestoreFromRegistry` + `LookupActiveAgentSession` 自动复用 `--resume`。用户想真正关进程,通过 `/kill` 在对应 chat 里发即可。
+**Daemon shutdown 不调任何 kill 函数** —— agents 是独立于 nightme 生命周期的长进程。SIGINT/SIGTERM 时只 `Stop()` channel、persist final state,AgentSessions 在 registry 里以 `Detached` 保留,下次 `nightme run` 通过 `Manager.RestoreFromRegistry` + `LookupSelectedAgentSession` 自动复用 `--resume`。用户想真正关进程,通过 `/kill` 在对应 chat 里发即可。
 
 ### 2.4 Receipt 渲染（Channel 自治，v1.3）
 
@@ -1306,7 +1306,7 @@ OutboundMessage{
 
 | 触发时机 | 状态 | 说明 |
 |---|---|---|
-| `cmd/nightme/run.go newMessageDispatcher` 入口（Gateway inbound 拿到后、`LookupActiveAgentSession` 之前） | `agent.MessageQueued` | 消息进 ChatSession 的消息队列（**不**依赖 AS spawn 是否成功） |
+| `cmd/nightme/run.go newMessageDispatcher` 入口（Gateway inbound 拿到后、`LookupSelectedAgentSession` 之前） | `agent.MessageQueued` | 消息进 ChatSession 的消息队列（**不**依赖 AS spawn 是否成功） |
 | `ChatSession.defaultPromptHookLocked` 内 `SendBlocks` 返回 nil 之后 | `agent.MessageSubmitted` | 提交事务成功；批量翻 `Message.Stage` + wire emit |
 | `ChatSession.MarkDropped(userMsgID)` 调用时 | `agent.MessageDropped` | 仅由 `/kill`、`/new`、`BufferClear` 触发，不覆盖投递失败 |
 
@@ -1456,25 +1456,25 @@ ChatSession 分**三层状态**——但**三层状态的所有权清晰分离**
 
 ```
                        /cwd (binding 不存在)
-    [no binding] ────────────────────────────────► [binding → ChatSession, no activeCwd]
+    [no binding] ────────────────────────────────► [binding → ChatSession, no selectedCwd]
                                                                   │
                                                                   │ /cwd <path>
                                                                   ▼
-                              /kill ◄─────────────── [binding → ChatSession, activeCwd=/path, no active AgentSession]
+                              /kill ◄─────────────── [binding → ChatSession, selectedCwd=/path, no active AgentSession]
                                 │                          ▲
                                 │                          │ /use <agent> spawn
                                 │                          │
                                 ▼                          │
-                         [binding → ChatSession, activeCwd=/path, active=(agent, cwd), pool 多条]
+                         [binding → ChatSession, selectedCwd=/path, active=(agent, cwd), pool 多条]
 ```
 
 **关键规则**（v1.2）：
-- **activeCwd 是 /use 的硬性前置条件**：没有 activeCwd → ChatSession 无 active AgentSession → 不能 dispatch
-- **`/cwd` 不杀任何 AgentSession**：永远只改 activeCwd，老 AgentSession 保留在 pool
+- **selectedCwd 是 /use 的硬性前置条件**：没有 selectedCwd → ChatSession 无 active AgentSession → 不能 dispatch
+- **`/cwd` 不杀任何 AgentSession**：永远只改 selectedCwd，老 AgentSession 保留在 pool
 - **`/use` 永不重启进程**：永远复用 pool 中现有的，找不到才 spawn
 - **Binding 永不过期**：chat_id 永久绑定 ChatSession；ChatSession 跨 daemon 重启恢复
 - **AgentSession 不永生**：进程死掉就 status=exited；但 ChatSession 池里仍然引用它（pool 标记 `[exited]`）
-- **`/kill` 杀进程，cwd-scoped**：无参杀 activeCwd 下所有 entries；带参杀 `(agent, activeCwd)` 单个 entry；其他 cwd 下的 entries 不受影响；activeCwd / activeAgent / queue / InputBuffer 全部保留
+- **`/kill` 杀进程，cwd-scoped**：无参杀 selectedCwd 下所有 entries；带参杀 `(agent, selectedCwd)` 单个 entry；其他 cwd 下的 entries 不受影响；selectedCwd / selectedAgent / queue / InputBuffer 全部保留
 
 ### 3.1 Chat 类型语义（F-33 重写）
 
@@ -1623,12 +1623,12 @@ mergeToolReply(om_xxx, "● Bash(ls)\n⎿  💻 Bash → 3 lines")
 
 | From | 触发 | To | 由谁驱动 |
 |------|------|-----|----------|
-| (no binding) | 用户发送 /cwd | binding 创建 + ChatSession.activeCwd 设置 + pool 初始化 | Gateway.handler.cwd |
-| ChatSession, no activeCwd | 用户发送 /cwd | activeCwd 设置 | Gateway.handler.cwd |
-| ChatSession, activeCwd=A, pool 含 (claude,A) | 用户发送 /use codex | activeAgent=codex, lookup (codex, A) → spawn 新 (codex,A) | Gateway.handler.use |
-| ChatSession, activeCwd=A, active=(claude,A) | 用户发送 /use claude (同一) | noop (已在用) | Gateway.handler.use |
-| ChatSession, activeCwd=A, active=(claude,A) | 用户发送 /cwd B | activeCwd=B; (claude,A) 仍在 pool; active=(claude,B) → spawn 新 (claude,B) | Gateway.handler.cwd |
-| ChatSession, activeCwd=A | 用户发送 /kill | 清空 pool; activeAgentSession=nil; 老 receipts dispose; **F-42**: graceful shutdown via bridge.Close (5s outer timeout); user reply is per-entry list (✓/✗/•) | Gateway.handler.kill |
+| (no binding) | 用户发送 /cwd | binding 创建 + ChatSession.selectedCwd 设置 + pool 初始化 | Gateway.handler.cwd |
+| ChatSession, no selectedCwd | 用户发送 /cwd | selectedCwd 设置 | Gateway.handler.cwd |
+| ChatSession, selectedCwd=A, pool 含 (claude,A) | 用户发送 /use codex | selectedAgent=codex, lookup (codex, A) → spawn 新 (codex,A) | Gateway.handler.use |
+| ChatSession, selectedCwd=A, active=(claude,A) | 用户发送 /use claude (同一) | noop (已在用) | Gateway.handler.use |
+| ChatSession, selectedCwd=A, active=(claude,A) | 用户发送 /cwd B | selectedCwd=B; (claude,A) 仍在 pool; active=(claude,B) → spawn 新 (claude,B) | Gateway.handler.cwd |
+| ChatSession, selectedCwd=A | 用户发送 /kill | 清空 pool; selectedAgentSession=nil; 老 receipts dispose; **F-42**: graceful shutdown via bridge.Close (5s outer timeout); user reply is per-entry list (✓/✗/•) | Gateway.handler.kill |
 | AgentSession.Running | CLI exit / EOF | AgentSession.Exited（仍在 pool） | AgentSession.readPump |
 | AgentSession.Running | nightme SIGTERM (default) | AgentSession.Detached | cmd/nightme shutdownRun |
 | AgentSession.Running | nightme SIGTERM | AgentSession.Detached (registry persists) | cmd/nightme shutdownRun |
@@ -1653,13 +1653,13 @@ nightme 用 Go 的 goroutine 实现并发，结构如下：
 - **ChatSession 在 /use 时切换 EventCallback 目标**（老 AgentSession 的 readPump 仍在跑，事件被丢弃）
 
 **v1.2 新增并发约束**：
-- **每个 ChatSession 维护 `activeAgentSession` 指针**（原子读 / mutex 写）
-- **`/use` 切换时**：先原子清空 activeAgentSession → 等 in-flight EventCallback 完成 → 重设到新 AgentSession → 启动新 AgentSession 的 readPump（如果新 spawn）
+- **每个 ChatSession 维护 `selectedAgentSession` 指针**（原子读 / mutex 写）
+- **`/use` 切换时**：先原子清空 selectedAgentSession → 等 in-flight EventCallback 完成 → 重设到新 AgentSession → 启动新 AgentSession 的 readPump（如果新 spawn）
 - **老 AgentSession 的 readPump 不主动停**：继续跑，但 EventCallback 是 noop（因为不再 active）
 
 **并发安全**：
 - Gateway.bindings / receipts：mutex 保护
-- ChatSession.activeCwd / activeAgent / pool：mutex 保护
+- ChatSession.selectedCwd / selectedAgent / pool：mutex 保护
 - 每个 AgentSession 内部用 buffered channel 通信，无跨 session 共享状态
 - 无全局锁、无 errgroup、无 singleflight
 
@@ -1688,11 +1688,11 @@ nightme 用 Go 的 goroutine 实现并发，结构如下：
   "chat_sessions": {
     "<chatSessionId>": {
       "chatId":               "oc_xxx",          // UNIQUE 索引 (1 chat = 1 ChatSession); nightme 不持有 chat 类型
-      "activeCwd":            "/code/bailing",
-      "activeAgent":          "claude",
+      "selectedCwd":            "/code/bailing",
+      "selectedAgent":          "claude",
       "primaryAgent":         "claude",          // snapshot of cfg.Primary at creation; read-only
       "agentSessionIds":      ["as_1", "as_2"],
-      "activeAgentSessionId": "as_1",            // 引用 pool 中某项; null 表示未激活
+      "selectedAgentSessionId": "as_1",            // 引用 pool 中某项; null 表示未激活
       "createdAt":            "...",
       "lastInteractionAt":    "..."
     }
@@ -1778,9 +1778,9 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 | **Q6** | 鉴权 | **单用户独占假设**，不需要设备配对 |
 | **Q7** | Channel ↔ Session 通信 | **单向经过 Gateway**，Channel 与 Session 互不引用 |
 | **Q8** | Receipt 状态机 owner | **Gateway**；Channel 只渲染 |
-| **Q9** | `/cwd` 语义 | **只改 activeCwd**，不触发 spawn / kill |
+| **Q9** | `/cwd` 语义 | **只改 selectedCwd**，不触发 spawn / kill |
 | **Q10** | `/use` 语义 | **永不重启进程**；复用 pool 中现有 AgentSession，没有再 spawn |
-| **Q11** | `/kill` 语义 | **杀 cwd 下的 AgentSession entries，零 ChatSession 方法暴露**：`/kill` 杀 activeCwd 下 pool 中所有 entries；`/kill <agent>` 杀 `(agent, activeCwd)` 单个 entry；其他 cwd 下的 entry 不受影响。Process-shutdown 逻辑封装在 `internal/command/kill/` 包的 `kill.KillAgent` / `kill.KillAllAgents` package-level 函数里（不是 `ChatSession` 方法，零 `ChatSession` kill 方法）；通过 `cs.AgentSessionsInCwd` + `cs.DropAgentSession` 两个通用 lifecycle accessor 访问 pool / activeAS / 持久化。下次消息触发 spawn 新。Graceful shutdown via bridge.Close，5s outer timeout；InputBuffer 保留；reply 是 per-entry list。Daemon shutdown 不调任何 kill 函数——agents 跨 `nightme` 重启通过 Detached registry state + `--resume` 自动恢复 |
+| **Q11** | `/kill` 语义 | **杀 cwd 下的 AgentSession entries，零 ChatSession 方法暴露**：`/kill` 杀 selectedCwd 下 pool 中所有 entries；`/kill <agent>` 杀 `(agent, selectedCwd)` 单个 entry；其他 cwd 下的 entry 不受影响。Process-shutdown 逻辑封装在 `internal/command/kill/` 包的 `kill.KillAgent` / `kill.KillAllAgents` package-level 函数里（不是 `ChatSession` 方法，零 `ChatSession` kill 方法）；通过 `cs.AgentSessionsInCwd` + `cs.DropAgentSession` 两个通用 lifecycle accessor 访问 pool / selectedAS / 持久化。下次消息触发 spawn 新。Graceful shutdown via bridge.Close，5s outer timeout；InputBuffer 保留；reply 是 per-entry list。Daemon shutdown 不调任何 kill 函数——agents 跨 `nightme` 重启通过 Detached registry state + `--resume` 自动恢复 |
 | **Q12** | InputBuffer FSM owner | **ChatSession**（per ChatSession, 跨 `/use` 切换共享 queue）|
 | **Q13** | AgentSession 唯一性 | **`(agent, cwd)` per ChatSession 唯一**；不同 ChatSession 可独立 |
 | **Q14** | `session.Events()` 单消费者 | **readPump only**；ChatSession 通过 EventCallback 接收 |
@@ -1794,7 +1794,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 
 **已确认（2026-08-02，PRD v1.2 锁定）**：
 - **Q-A** ✅ Primary Agent 仅全局 config（顶层 `primary`，与 `agents:` list 并列）；ChatSession.primaryAgent 是创建时 snapshot，不可变。**无 `/default` 命令**。
-- **Q-B** ✅ LookupActiveAgentSession 只看 `(activeAgent, activeCwd)`：命中 Running 复用，否则 spawn `(activeAgent, activeCwd)`。**没有运行时 fallback**：ChatSession 始终持有一个有效的 activeAgent（创建/恢复时被 `cfg.Primary` 一次性填入），用户用 `/use` 显式覆盖，lookup 不再做降级判断。
+- **Q-B** ✅ LookupSelectedAgentSession 只看 `(selectedAgent, selectedCwd)`：命中 Running 复用，否则 spawn `(selectedAgent, selectedCwd)`。**没有运行时 fallback**：ChatSession 始终持有一个有效的 selectedAgent（创建/恢复时被 `cfg.Primary` 一次性填入），用户用 `/use` 显式覆盖，lookup 不再做降级判断。
 
 **Q-A 锁定补充**：config schema 顶层 `primary` + `agents` list（`nightme config` 交互菜单生成）。
 
@@ -1833,7 +1833,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
   - `cmd/nightme/run.go` `newEventHandler` 设 `out.ReplyTo = cs.currentTurnUserMsgID`
 - ✅ done in v1.3: docs/feat/F-25-rolling-log.md renamed from F-25-input-buffer.md; F-26-gateway-hub.md + F-08-channel-abstraction.md + F-31-message-state.md + docs/channel/feishu.md updated with v1.3 annotations
 - ⏭ **F-33（chatID 数据模型简化）**：删 Gateway ChatType 抽象 + topic_group 不特殊处理 + InboundMessage.ReplyTo = message.ParentId。详见 [`docs/feat/F-33-simplify-chatid-data-model.md`](./feat/F-33-simplify-chatid-data-model.md)
-- ⏭ **F-34（`/new` slash command）**：不退进程重置 agent 对话上下文；`/new` 清 activeCwd 下 pool 全部 AS；`/new <agent>` 清指定 AS；清 InputBuffer。详见 [`docs/feat/F-34-new-slash-command.md`](./feat/F-34-new-slash-command.md)
+- ⏭ **F-34（`/new` slash command）**：不退进程重置 agent 对话上下文；`/new` 清 selectedCwd 下 pool 全部 AS；`/new <agent>` 清指定 AS；清 InputBuffer。详见 [`docs/feat/F-34-new-slash-command.md`](./feat/F-34-new-slash-command.md)
 - ⏭ **F-watch（WatchMode per-chat 群消息全收 + mention strip）**：
   - `internal/channel/channel.go` `Message.HasMention bool` 字段 + 接口扩展
   - `internal/channel/feishu/adapter.go::handleMessage` 加 mention strip + `HasMention` 计算
@@ -1881,13 +1881,13 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 11. for each cs in mgr.List(): cs.SetEventHandler(newEventHandler(ch, logger))
 12. gwImpl.AttachChannels(ch) + gwImpl.Start()
 13. block on signal / ctx.Done()
-14. shutdownRun: stop channel + persist final state(不杀 agent 进程;AgentSession 在 registry 以 Detached 保留,下次启动经 RestoreFromRegistry + LookupActiveAgentSession 自动 reuse 或 re-spawn)
+14. shutdownRun: stop channel + persist final state(不杀 agent 进程;AgentSession 在 registry 以 Detached 保留,下次启动经 RestoreFromRegistry + LookupSelectedAgentSession 自动 reuse 或 re-spawn)
 ```
 
 **关键不变量**：
 - Step 11 的 `SetEventHandler` 在所有 ChatSession 上一次性安装；handler 跨 `/use` 持久。
 - Step 4-7 在没有 v1.x 数据时无操作（idempotent）。
-- Step 7 后所有 AgentSession 是 `Detached`（无进程）。用户第一次发消息 → `LookupActiveAgentSession` → Spawner spawn。
+- Step 7 后所有 AgentSession 是 `Detached`（无进程）。用户第一次发消息 → `LookupSelectedAgentSession` → Spawner spawn。
 
 ---
 
@@ -1898,7 +1898,7 @@ Daemon 重启后（用户发送 SIGINT 然后再启 `nightme run`）：
 | 数据 | 行为 |
 |---|---|
 | `cfg.Primary` | 重新读取配置。**不影响已存在的 ChatSession.primaryAgent**（Q-A snapshot）。 |
-| `chat_sessions.json` | 全量恢复为 in-memory ChatSession。`activeCwd`、`activeAgent`、`primaryAgent` 复原。 |
+| `chat_sessions.json` | 全量恢复为 in-memory ChatSession。`selectedCwd`、`selectedAgent`、`primaryAgent` 复原。 |
 | `agent_sessions.json` | 恢复为 in-memory AgentSession，**全部 `Status=Detached`，PID=0**。 |
 | v1.x `registry.json` | 备份为 `.v1.bak`，不恢复数据（见 MIGRATION.md）。 |
 

@@ -97,7 +97,7 @@ const (
     // StateForwarded: the message has been dispatched to an
     // AgentSession (lazy spawn succeeded; blocks enqueued or
     // sent to PTY stdin). Triggered on successful
-    // LookupActiveAgentSession.
+    // LookupSelectedAgentSession.
     StateForwarded
 
     // StateDone: the AgentSession has finished processing this
@@ -139,7 +139,7 @@ func (s MessageState) String() string {
 | 状态 | 含义 | 何时触发 | 何时结束 |
 |---|---|---|---|
 | `StateReceived` | 系统已收到消息，等待 dispatch | `ChatSession.GetOrCreate(chatID)` 成功后 | `StateForwarded` 或消息丢弃 |
-| `StateForwarded` | 消息已转给 AgentSession，正在处理 | `ChatSession.LookupActiveAgentSession()` 成功 | `StateDone` 或 `StateError` |
+| `StateForwarded` | 消息已转给 AgentSession，正在处理 | `ChatSession.LookupSelectedAgentSession()` 成功 | `StateDone` 或 `StateError` |
 | `StateDone` | AgentSession 处理完成 | `ChatSession.runReadPump` 收到 `EventDone` | 终态 |
 | `StateError` | AgentSession 处理出错 | `ChatSession.runReadPump` 收到 `EventError` | 终态 |
 
@@ -257,7 +257,7 @@ OutboundMessage{
 | 触发时机 | 状态 | 说明 |
 |---|---|---|
 | `ChatSession.GetOrCreate(chatID)` 成功后 | `StateReceived` | 消息首次进 ChatSession |
-| `ChatSession.LookupActiveAgentSession()` 成功 | `StateForwarded` | spawn 成功或命中 running pool |
+| `ChatSession.LookupSelectedAgentSession()` 成功 | `StateForwarded` | spawn 成功或命中 running pool |
 | `ChatSession.runReadPump` 收到 `EventDone` | `StateDone` | agent 处理完 |
 | `ChatSession.runReadPump` 收到 `EventError` | `StateError` | agent 出错 |
 
@@ -292,7 +292,7 @@ func (cs *ChatSession) emitMessageState(userMsgID string, state receipt.MessageS
 }
 
 // 在 GetOrCreate 成功路径里调 cs.emitMessageState(userMsgID, StateReceived)
-// 在 LookupActiveAgentSession 成功路径里调 cs.emitMessageState(userMsgID, StateForwarded)
+// 在 LookupSelectedAgentSession 成功路径里调 cs.emitMessageState(userMsgID, StateForwarded)
 // 在 runReadPump EventDone 分支调 cs.emitMessageState(userMsgID, StateDone)
 // 在 runReadPump EventError 分支调 cs.emitMessageState(userMsgID, StateError)
 ```
@@ -442,7 +442,7 @@ case gateway.OutMessageState:
 | 测试 | 验证 |
 |---|---|
 | `TestChatSession_EmitsReceived_OnGetOrCreate` | GetOrCreate 后 callback 被调，参数正确 |
-| `TestChatSession_EmitsForwarded_OnLookupActive` | LookupActiveAgentSession 成功后 callback 被调 |
+| `TestChatSession_EmitsForwarded_OnLookupActive` | LookupSelectedAgentSession 成功后 callback 被调 |
 | `TestChatSession_EmitsDone_OnEventDone` | readPump 收到 EventDone 后 callback 被调 |
 | `TestChatSession_EmitsError_OnEventError` | readPump 收到 EventError 后 callback 被调 |
 | `TestChatSession_NoEmit_OnSlashCommand` | `/cwd` `/use` `/kill` 不触发任何 MessageState |

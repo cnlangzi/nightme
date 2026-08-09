@@ -4,7 +4,7 @@
 > **Milestone**: v1.2 (commit 3 of "ChatSession refactor")
 > **Depends on**: F-27 (ChatSession), F-09 (Agent interface), F-19/F-21 (Bridge modes)
 > **Replaces**: v1.1 single-session-per-chat (Session type)
-> **Used by**: F-28 (`/use`), ChatSession.LookupActiveAgentSession
+> **Used by**: F-28 (`/use`), ChatSession.LookupSelectedAgentSession
 > **Related docs**: [`SPEC.md`](../SPEC.md) v1.2 §3, [`PRD.md`](../PRD.md) v1.2 §4.3
 
 ---
@@ -110,11 +110,11 @@ Note: `chatSessionId` is implied by `cs.pool` already; only `(agent, cwd)` is th
 | Event | Pool change |
 |-------|-------------|
 | First `/cwd` | pool empty; no AgentSession created |
-| First `/use` | lookup `(activeAgent, activeCwd)` → spawn → add to pool |
+| First `/use` | lookup `(selectedAgent, selectedCwd)` → spawn → add to pool |
 | `/use` (reuse) | no change (entry already exists) |
 | `/use` (new agent, same cwd) | spawn new AgentSession → add to pool |
 | `/use` (same agent, new cwd) | spawn new AgentSession → add to pool |
-| `/cwd` (any) | **no change** to pool; activeCwd updated |
+| `/cwd` (any) | **no change** to pool; selectedCwd updated |
 | `/kill` | **all** entries killed and removed from pool |
 | Agent process dies (natural exit) | status → Exited; **entry remains in pool** (pid=0) |
 | Agent process detached (daemon restart) | status → Detached; entry remains; pid=0 |
@@ -136,9 +136,9 @@ Future v0.4+ may add LRU eviction if pool grows unbounded.
 ### 4.1 First spawn
 
 ```
-LookupActiveAgentSession():
-  1. pool[(activeAgent, activeCwd)] miss
-  2. spawn (activeAgent, activeCwd) — no runtime fallback to any "default" agent
+LookupSelectedAgentSession():
+  1. pool[(selectedAgent, selectedCwd)] miss
+  2. spawn (selectedAgent, selectedCwd) — no runtime fallback to any "default" agent
      a. Generate AgentSession.ID (UUID v7)
      b. Create Bridge (PTY/ACP/SDK/JSON-IO based on agent config)
      c. agentSession := &AgentSession{
@@ -149,16 +149,16 @@ LookupActiveAgentSession():
      e. Start readPump goroutine
      f. agentSession.RegisterEventCallback(cs.eventCallback)
      g. registry.Upsert(AgentSessionEntry)
-     h. cs.activeAS = agentSession
+     h. cs.selectedAS = agentSession
 ```
 
 ### 4.2 Reuse
 
 ```
-LookupActiveAgentSession():
-  1. pool[(activeAgent, activeCwd)] hit
+LookupSelectedAgentSession():
+  1. pool[(selectedAgent, selectedCwd)] hit
   2. status check:
-     a. Running → cs.activeAS = as; RegisterEventCallback; return as
+     a. Running → cs.selectedAS = as; RegisterEventCallback; return as
      b. Detached/Exited → Respawn (see 4.3)
 ```
 
@@ -185,10 +185,10 @@ KillAll():
   2. for as := range cs.pool:
        as.Cancel() → SIGTERM to child → wait for exit (5s grace) → SIGKILL if needed
        delete(cs.pool, as.key)
-  3. cs.activeAS = nil
+  3. cs.selectedAS = nil
   4. cs.inputBuffer.Clear()  // queued messages lost
   5. poolMu.Unlock()
-  6. registry.Upsert(ChatSessionEntry{...agentSessionIds=[], activeAgentSessionId=null})
+  6. registry.Upsert(ChatSessionEntry{...agentSessionIds=[], selectedAgentSessionId=null})
 ```
 
 ### 4.5 Death detection
@@ -270,18 +270,18 @@ Pool operations happen under `cs.poolMu` from the dispatchLoop or handler gorout
 
 ### 6.3 Race scenarios
 
-**Race A: /use while old activeAS is processing**
+**Race A: /use while old selectedAS is processing**
 
 ```
 T0: claude_AS processing, 5 events queued in as.events
 T1: User sends /use codex
 T2: handler.use takes cs.poolMu.Lock
-T3: SetActiveAgent("codex")
-T4: LookupActiveAgentSession → spawn codex_AS, set cs.activeAS = codex_AS
+T3: SetSelectedAgent("codex")
+T4: LookupSelectedAgentSession → spawn codex_AS, set cs.selectedAS = codex_AS
 T5: cs.poolMu.Unlock
 T6: claude_AS.readPump picks next event from claude.events
-T7: callback(s=claude_AS, ev) → check cs.activeAS == claude_AS (under poolMu.RLock) → NO → drop
-T8: codex_AS.readPump picks events from codex.events → callback → cs.activeAS == codex_AS → YES → Translate + Send
+T7: callback(s=claude_AS, ev) → check cs.selectedAS == claude_AS (under poolMu.RLock) → NO → drop
+T8: codex_AS.readPump picks events from codex.events → callback → cs.selectedAS == codex_AS → YES → Translate + Send
 ```
 
 **Drop semantics**: Old in-flight events from claude_AS are dropped silently. User sees only codex output.
@@ -292,11 +292,11 @@ T8: codex_AS.readPump picks events from codex.events → callback → cs.activeA
 T0: User A sends "hi"
 T1: User B sends /use codex
 T2: messageDispatcher branch ("hi") acquires poolMu.Lock
-T3: LookupActiveAgentSession → resolves (claude, activeCwd) → cs.activeAS = claude_AS
+T3: LookupSelectedAgentSession → resolves (claude, selectedCwd) → cs.selectedAS = claude_AS
 T4: poolMu.Unlock
 T5: "hi" dispatched to claude_AS
 T6: handler.use acquires poolMu.Lock
-T7: LookupActiveAgentSession → spawns codex_AS → cs.activeAS = codex_AS
+T7: LookupSelectedAgentSession → spawns codex_AS → cs.selectedAS = codex_AS
 T8: poolMu.Unlock
 ```
 
@@ -304,7 +304,7 @@ T8: poolMu.Unlock
 
 ### 6.4 Lock ordering
 
-`cs.poolMu` is the single lock guarding pool state. No nested locks. Event callbacks take `poolMu.RLock` for `activeAS` check — no deadlock risk.
+`cs.poolMu` is the single lock guarding pool state. No nested locks. Event callbacks take `poolMu.RLock` for `selectedAS` check — no deadlock risk.
 
 ---
 
@@ -424,7 +424,7 @@ oc_bbb        /code/nightme        *         claude       22222  running
 ## 11. Open questions (draft)
 
 - **Q-J**: When pool has (claude, /A) status=Exited, and user sends /use claude without /cwd — does lookup reuse the exited entry (respawn) or treat as new? (Lean: respawn; same identity)
-- **Q-K**: When user sends /use claude with cwd-change-via-extraArgs (e.g., `--cd /other`), should that affect pool key? (Lean: no, extraArgs are spawn args only; cwd is ChatSession.ActiveCwd)
+- **Q-K**: When user sends /use claude with cwd-change-via-extraArgs (e.g., `--cd /other`), should that affect pool key? (Lean: no, extraArgs are spawn args only; cwd is ChatSession.SelectedCwd)
 - **Q-L**: Should /list show pool or only active? (Lean: show pool, with `*` marker for active)
 - **Q-M**: When two ChatSessions (different chats) both have (claude, /A), are PIDs guaranteed different? (Lean: yes, each ChatSession manages its own pool, spawn is per-pool)
 

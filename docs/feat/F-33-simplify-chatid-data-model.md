@@ -143,7 +143,7 @@ Gateway.dispatchLoop → Handle(ctx, msg)
   └ messageDispatcher(ctx, msg)
      ├ gateway.bindings[msg.ChatID]               // ChatID 字符串查找(无 ChatType 过滤)
      ├ cs.emitMessageState(msg.MessageID, ...)   // 不变
-     ├ chatSession.LookupActiveAgentSession()    // 不变
+     ├ chatSession.LookupSelectedAgentSession()    // 不变
      ├ cs.emitMessageState(msg.MessageID, ...)   // 不变
      └ chatSession.QueueUserMessage(blocks, msg.MessageID)
        └ InputBuffer FSM (idle ↔ busy)

@@ -100,7 +100,7 @@ nightme **不调** Claude Code 的 non-interactive 模式（`--print` / `-p`）�
 - **1 chat = 1 ChatSession**（永久绑定，跨重启）
 - **ChatSession 内可有多个 AgentSession**（每个 `(agent, cwd)` 一份）
 - **同一时刻只有 1 个 active AgentSession** 在被推送/接收
-- **切换 `/cwd` 或 `/use` 不杀任何 AgentSession**——只是改 ChatSession 的 activeCwd / activeAgent 和消息推送目标
+- **切换 `/cwd` 或 `/use` 不杀任何 AgentSession**——只是改 ChatSession 的 selectedCwd / selectedAgent 和消息推送目标
 - **切回原 cwd/agent 时复用之前的 AgentSession**（保持进程和对话上下文）
 
 **不支持**（v1.2 范围内）：
@@ -148,7 +148,7 @@ v1.1 之前的 nightme 里"Session" = CLI 进程，session 死了就没了。v1.
 
 **v1.2 新增**（PRD v1.2 → SPEC v1.2 锁定）：
 - **ChatSession 模型**（F-27）：ChatSession 取代 v1.1 的 Session，作为 chat ↔ AgentSession 间的会话上下文
-- **`/use <agent>` 命令**（F-28）：切换 ChatSession 的 activeAgent；复用或新建 AgentSession
+- **`/use <agent>` 命令**（F-28）：切换 ChatSession 的 selectedAgent；复用或新建 AgentSession
 - **AgentSession 池**（F-29）：ChatSession 内 `(agent, cwd)` 1:1 池化；切换 cwd/agent 不杀进程
 
 **MVP（v0.1）已发布**：F-01 ~ F-10, F-19 ~ F-22。
@@ -202,4 +202,4 @@ nightme v1.2 发布时，以下场景必须能跑通：
 - **v1.0**：锁定 6 项关键决策 + Chat↔Session 1:1 模型 + Minimal MVP 范围
 - **v1.0r**：从 SPEC.md 分离，独立维护产品级文档
 - **v1.2**：Chat=Session 1:1 → **Chat=ChatSession** 模型；新增 AgentSession 池 + `/use` 命令；产品语义锁定，架构在 SPEC v1.2
-  - **状态**：**已锁定**（2026-08-02；Q-A ✅ 全局 Primary only；Q-B ✅ lookup 只看 `(activeAgent, activeCwd)`，无运行时 fallback；落地 commits 5/6/7/8a/8b/8c/9）
+  - **状态**：**已锁定**（2026-08-02；Q-A ✅ 全局 Primary only；Q-B ✅ lookup 只看 `(selectedAgent, selectedCwd)`，无运行时 fallback；落地 commits 5/6/7/8a/8b/8c/9）

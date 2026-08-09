@@ -14,7 +14,7 @@
 │                                                                 │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │  ChatSession  (cs.mu)                                     │  │
-│  │  ┣━ activeCwd / activeAgent / activeAS                    │  │
+│  │  ┣━ selectedCwd / selectedAgent / selectedAS                    │  │
 │  │  ┣━ pool map[(agent, cwd)] → *AgentSession               │  │
 │  │  ┣━ currentTurnUserMsgID                                 │  │
 │  │  ┣━ inputBuffer (FSM Idle↔Busy) + flushHook              │  │
@@ -25,7 +25,7 @@
 │  │         (turnCtx is derived from asCtx)                   │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │            │                                                     │
-│            │ activeAS                                             │
+│            │ selectedAS                                             │
 │            ▼                                                     │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │  AgentSession  (handleMu, status, ...)                    │  │
@@ -80,10 +80,10 @@ cancelling turnCtx alone → 只干掉当前 turn,下一个 BeginTurn 仍从 asC
 | 字段 | 类型 | 锁 | 说明 |
 |------|------|------|------|
 | `ID`, `ChatID` | string | 不可变 | 由 |
-| `activeCwd`, `activeAgent` | string | `mu` | /cwd / /use 改;LookupActiveAgentSession 读 |
+| `selectedCwd`, `selectedAgent` | string | `mu` | /cwd / /use 改;LookupSelectedAgentSession 读 |
 | `primaryAgent` | string | 不可变 | cfg.Primary 快照,只读 |
 | `pool` | `map[agentCwdKey]*AgentSession` | `mu` | (agent, cwd) → AS 句柄 |
-| `activeAS` | `*AgentSession` | `mu` | 当前激活的 AS;`/use` + Lookup 改变 |
+| `selectedAS` | `*AgentSession` | `mu` | 当前激活的 AS;`/use` + Lookup 改变 |
 | `currentTurnUserMsgID` | string | `mu` | 本轮 single anchor;`/use` 清掉 |
 | `inputBuffer` | `*InputBuffer` | lazy init | FSM Idle↔Busy + 队列 |
 | `watchMode` / `thinkMode` / `toolsMode` | enums | `mu` | 聊天级偏好 |
@@ -97,7 +97,7 @@ cancelling turnCtx alone → 只干掉当前 turn,下一个 BeginTurn 仍从 asC
 
 ### 锁的顺序约定
 
-- **`mu` 是大锁**——改 `activeAS` / `pool` / `activeAgent` / `currentTurnUserMsgID` 等核心状态时持有。
+- **`mu` 是大锁**——改 `selectedAS` / `pool` / `selectedAgent` / `currentTurnUserMsgID` 等核心状态时持有。
 - **`pumpMu` 独立**——只控制 readPump 启动/停止。
 - **`asCtxMu` / `turnCtxMu` 独立**——只保护 ctx 切换。
 - 跨锁顺序:`mu` → `asCtxMu`/`turnCtxMu`/`pumpMu` 各自独立,可以按任意顺序,但**不能把 `mu` 拿住再去拿别的锁**(会让 SendText 等被饿死)。
@@ -120,14 +120,14 @@ GetOrCreate(chatID, primary)      manager 调用,缺失时 New,已有时返回
 ```go
 handleUse(ctx, mgr, ch, msg, args, primary):
   cs := mgr.GetOrCreate(msg.ChatID, primary)
-  if cs.ActiveCwd() == "" → "send /cwd first"
+  if cs.SelectedCwd() == "" → "send /cwd first"
 
   cs.ResetASContext()       // ← 关键:cancel asCtx + cancel turnCtx + 装新 ctx
                             //   旧 AS 上任何 in-flight bridge.SendBlocks 立刻 wake
 
-  cs.SetActiveAgent(name)   // mu.Lock: activeAgent=..., currentTurnUserMsgID=""
+  cs.SetSelectedAgent(name)   // mu.Lock: selectedAgent=..., currentTurnUserMsgID=""
 
-  as, err := cs.LookupActiveAgentSession()  // mu.Lock: 查/建 (agent, cwd) AS,可能 Spawn
+  as, err := cs.LookupSelectedAgentSession()  // mu.Lock: 查/建 (agent, cwd) AS,可能 Spawn
   if err != nil → reply with error
 
   _ = cs.StartReadPump()    // pumpMu: 停旧 pump + 起新 pump for 新 as
@@ -181,16 +181,16 @@ Detached ─────────────► Running
 - **`pid`** 用 `atomic.Int32`,因为是纯数值。
 - **`handle`** 用 `handleMu`,因为换 handle 的过程是"先 nil,再 newHandle,再 SetRunning",读端需要看到一致快照。
 
-### LookupActiveAgentSession(选 AS 的核心入口)
+### LookupSelectedAgentSession(选 AS 的核心入口)
 
 ```
 cs.mu.Lock
-if activeCwd == "" → ErrNoActiveCwd
-if activeAgent == "" → ErrNoActiveAgent
+if selectedCwd == "" → ErrNoSelectedCwd
+if selectedAgent == "" → ErrNoSelectedAgent
 
-key := (activeAgent, activeCwd)
+key := (selectedAgent, selectedCwd)
 if pool[key] exists AND Status==Running AND Handle() != nil:
-    activeAS = pool[key]    // 命中,直接返回
+    selectedAS = pool[key]    // 命中,直接返回
     return
 
 // 否则用旧 entry(Detached/Exited 状态保留 ID + ResumeID)或新建
@@ -198,7 +198,7 @@ newAS, hadPrior := pool[key]
 if !hadPrior:
     newAS = NewAgentSession(newID(), cs.ID, agent, cwd, nil)
     pool[key] = newAS
-activeAS = newAS
+selectedAS = newAS
 asFile.Upsert(newAS.Entry())
 
 // Spawn outside of cs.mu to avoid holding write lock across fork+exec
@@ -214,7 +214,7 @@ persistChatEntryLocked()
 return newAS
 ```
 
-**关键不变量:**`activeAS` 永远等于 `pool[(activeAgent, activeCwd)]`,status 为 Running。
+**关键不变量:**`selectedAS` 永远等于 `pool[(selectedAgent, selectedCwd)]`,status 为 Running。
 
 ### AgentSession.SendBlocks / SendText 的 ctx 处理
 
@@ -287,7 +287,7 @@ type EventPump struct {
 ```
 
 每次 `StartReadPump`:
-1. 读 `activeAS` (cs.mu.RLock)
+1. 读 `selectedAS` (cs.mu.RLock)
 2. 读 `eventHandler` (cs.mu.RLock)
 3. **StopReadPump**:把旧 pump 的 stop 关掉,等 <-done
 4. 起新 `runReadPump(as, h, stop, done)` goroutine
@@ -310,7 +310,7 @@ for {
 
 `pumpRunning.Store(false)` 在 defer 里设,`close(done)` 同步给 StopReadPump。
 
-**关键事实:每次只有一个 readPump 在跑。** `/use` 切 AS 时,StopReadPump 把旧的停掉再起新的(基于新的 activeAS)。事件流从 `as.Events()` 出来,自动绑死在 StartReadPump 时拍下的那个 AS 上。
+**关键事实:每次只有一个 readPump 在跑。** `/use` 切 AS 时,StopReadPump 把旧的停掉再起新的(基于新的 selectedAS)。事件流从 `as.Events()` 出来,自动绑死在 StartReadPump 时拍下的那个 AS 上。
 
 ---
 
@@ -334,7 +334,7 @@ flushHook(combined, userMsgIDs):
     cs.BeginTurn()           // cancel 旧 turnCtx + 装新 turnCtx derived from asCtx
     cs.mu.Lock
     cs.currentTurnUserMsgID = userMsgIDs[n-1]
-    as := cs.activeAS
+    as := cs.selectedAS
     cs.mu.Unlock
     return as.SendBlocks(cs.TurnContext(), combined)
                             // ↑ as.SendBlocks 把 ctx 透传给 bridge.SendBlocks
@@ -392,7 +392,7 @@ case agent.EventDone:
 | 1. SDK → dispatchLoop → DispatchInbound | gateway | `g.mu` | 无 |
 | 2. DispatchInbound → newMessageDispatcher | cmd/nightme | 无 | 无 |
 | 3. cs.EmitMessageState(Received) | runtime | `cs.mu` | 无 |
-| 4. cs.LookupActiveAgentSession | ChatSession | `cs.mu` | Spawn 可能(懒生成) |
+| 4. cs.LookupSelectedAgentSession | ChatSession | `cs.mu` | Spawn 可能(懒生成) |
 | 5. cs.StartReadPump | ChatSession | `pumpMu` | 等旧 pump done |
 | 6. cs.EmitMessageState(Forwarded) | runtime | `cs.mu` | 无 |
 | 7. cs.QueueUserMessage → InputBuffer.Add | ChatSession | `b.mu` | 无(Idle) |
@@ -410,8 +410,8 @@ case agent.EventDone:
 |------|------|------|--------|
 | 1. /use → handleUse | gateway | 无 | 无 |
 | 2. **cs.ResetASContext** | ChatSession | `asCtxMu` + `turnCtxMu` | **cascade cancel 旧 turnCtx → step 9 上一轮还在等的那条 wake** |
-| 3. cs.SetActiveAgent | ChatSession | `cs.mu` | 无 |
-| 4. cs.LookupActiveAgentSession | ChatSession | `cs.mu` | (Spawn 仅在 claude 第一次才走) |
+| 3. cs.SetSelectedAgent | ChatSession | `cs.mu` | 无 |
+| 4. cs.LookupSelectedAgentSession | ChatSession | `cs.mu` | (Spawn 仅在 claude 第一次才走) |
 | 5. cs.StartReadPump | ChatSession | `pumpMu` | 等旧 pump done |
 | 6. reply "Now using claude" | runtime | 无 | ch.Send |
 
@@ -434,13 +434,13 @@ case agent.EventDone:
 3. **readPump stuck in h(cs.ChatID, as, ev, ...)**:h 是 runtime 装的 EventHandler,里头可能 ch.Send 阻塞(Feishu 慢)。StopReadPump 要等 <-cur.done,而 done 只在 runReadPump 的 defer 里 close。如果 h 永远不返,**pump 永远不会停**——`/use` 的 StartReadPump 就会卡。
 4. **ActiveAS swap 时 pump 还在跑旧 AS 的 events**:StopReadPump 关闭 stop 之后,runReadPump 下一轮 select 见到 stop 就 return,**不会**消费旧 AS 的 events。旧 AS 的 events 在 buffered channel 里 GC 掉。
 5. **同一 turn 内的 cancel race**:BeginTurn / EndTurn / ResetASContext 都按 `asCtxMu → turnCtxMu` 顺序加锁;读路径 ASContext/TurnContext 也是单独加对应 mu。**但同一时刻 BeginTurn 和 EndTurn 并发不会出问题**——都是 turnCtxMu 串行化。
-6. **cs.mu 是大锁**:LookupActiveAgentSession 在里头 Spawn 时会 Unlock 然后 Lock 回来,避免 fork+exec 持锁。但任何长持锁路径都会让 SendText 类操作饿——目前没看到这种路径。
+6. **cs.mu 是大锁**:LookupSelectedAgentSession 在里头 Spawn 时会 Unlock 然后 Lock 回来,避免 fork+exec 持锁。但任何长持锁路径都会让 SendText 类操作饿——目前没看到这种路径。
 
 ---
 
 ## 8. 已知 UX 缺陷(不在当前 PR 范围)
 
-1. **被 abandon 的 receipt 不会翻 `❌`**:pi hang 时 /use 切走,但 pi 的 receipt 永远停在 `Working...`——因为 runReadPump 在 stop 路径上没发 MessageState。建议:`handleUse` 在 SetActiveAgent 之前,如果旧 as 上有 in-flight turn,emit MessageState(Error) 给旧 userMsgID。
+1. **被 abandon 的 receipt 不会翻 `❌`**:pi hang 时 /use 切走,但 pi 的 receipt 永远停在 `Working...`——因为 runReadPump 在 stop 路径上没发 MessageState。建议:`handleUse` 在 SetSelectedAgent 之前,如果旧 as 上有 in-flight turn,emit MessageState(Error) 给旧 userMsgID。
 2. **旧 AS 进程没被 kill**:`/use` 只取消 ctx 关联,旧 AS 还留在 pool 里,旧 bridge 还活着。建议:`/use` 时如果检测到 AS swap,Close 旧 AS(SetRunning → SetExited,bridge.Close,信号结束进程)。
 3. **InputBuffer FSM 没在 cancel 时复位**:`SetBusy` 是 readPump 在非 terminal event 上设的;如果 pump 被 stop 路径打断,SetIdle 不会调用,buffer FSM 留 Busy。建议:StopReadPump 路径上如果离开时 buffer 仍是 Busy,SetIdle。
 4. **dispatchLoop 单 goroutine 同步**:一个慢 handler 会阻塞所有后续 inbound(包括另一个 chat 的)。与本 PR 范围无关,但用户提的"agents 互相影响"在这个层面也成立。
@@ -449,4 +449,4 @@ case agent.EventDone:
 
 ## 9. 一句话总结
 
-ChatSession 用 `cs.mu` 守住"哪个 (agent, cwd) 是 active AS"这个事实,把 ctx 派生关系(asCtx → turnCtx → bridge)挂在 AS-swap 和 turn 边界上,每条 bridge 自己的 `turnMu`/`lifecycle`/`closeOnce` 保证子进程的串行化和单一所有者。readPump 在 ChatSession 上是单 goroutine,跟着 activeAS 走,事件从 bridge.events 出,经 EventHandler 转成 OutboundMessage 发到 IM channel。
+ChatSession 用 `cs.mu` 守住"哪个 (agent, cwd) 是 active AS"这个事实,把 ctx 派生关系(asCtx → turnCtx → bridge)挂在 AS-swap 和 turn 边界上,每条 bridge 自己的 `turnMu`/`lifecycle`/`closeOnce` 保证子进程的串行化和单一所有者。readPump 在 ChatSession 上是单 goroutine,跟着 selectedAS 走,事件从 bridge.events 出,经 EventHandler 转成 OutboundMessage 发到 IM channel。

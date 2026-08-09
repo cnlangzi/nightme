@@ -17,7 +17,7 @@
 
 不变式（受 SPEC §1.3 约束）：
 
-- **slash command 边界**:`/kill` 和 `/new` **只与 agent 进程交互**。`activeCwd` / `activeAgent` / `currentTurnUserMsgID` / `InputBuffer` 都不属于它们。
+- **slash command 边界**:`/kill` 和 `/new` **只与 agent 进程交互**。`selectedCwd` / `selectedAgent` / `currentTurnUserMsgID` / `InputBuffer` 都不属于它们。
 - **graceful 优先**:每个 bridge 的 `Close()` 已有 stdin EOF + SIGINT + 2s grace + SIGKILL 兜底的本地 watchdog（见 `claudecode` `session.go:466-498`）。nightme 端**不二次升级**信号。
 - **不主动浪费资源**:`/new` **永不**为触发"reset"而 spawn 一个 dead agent。dead 状态 = 不动进程,只清 ResumeID。
 - **state 同步**:disk 删除必须在进程死 *之后*,不能根据"还没发生的事"提前删。
@@ -35,7 +35,7 @@ func (cs *ChatSession) KillAll() error {
     cs.StopReadPump()                  // ← 停 nightme 侧 read goroutine
     cs.mu.Lock()
     cs.pool = make(map[agentCwdKey]*AgentSession)  // ← 整张 map 重新分配
-    cs.activeAS = nil
+    cs.selectedAS = nil
     cs.currentTurnUserMsgID = ""
     cs.mu.Unlock()
     if cs.inputBuffer != nil {
@@ -73,7 +73,7 @@ if as.Status() != StatusRunning {
 }
 ```
 
-但是这个 entry 还在 pool 里,**它的 `ResumeID` 也没清**。下次消息触发 `LookupActiveAgentSession` → pool hit but Status=Exited → spawn with `as.ResumeID()` 的旧值 → Claude Code 桥拼 `--resume <旧id>` → **试图续接一个死 session**。这跟 `/new` 的"下一次 fresh"语义完全相反。
+但是这个 entry 还在 pool 里,**它的 `ResumeID` 也没清**。下次消息触发 `LookupSelectedAgentSession` → pool hit but Status=Exited → spawn with `as.ResumeID()` 的旧值 → Claude Code 桥拼 `--resume <旧id>` → **试图续接一个死 session**。这跟 `/new` 的"下一次 fresh"语义完全相反。
 
 ### 2.3 UX 不一致
 
@@ -93,7 +93,7 @@ Reset 3 session(s). Send a message to start fresh.
 
 1. **`/kill` 真正 graceful kill**:每个 bridge 走自己的 Close() 路径,等进程真死,再清 disk。
 2. **`/new` 对 dead state 也要有副作用**:清 ResumeID,让下次 spawn 必然 fresh。
-3. **不动 slash command 边界外的 state**:InputBuffer、activeCwd、用户当前消息都不归 `/kill` 管。
+3. **不动 slash command 边界外的 state**:InputBuffer、selectedCwd、用户当前消息都不归 `/kill` 管。
 4. **per-entry 列表回复**:每个 agent 一行,带 ✓ / ✗ / • 状态标记,失败带 error msg。
 
 ---
@@ -118,7 +118,7 @@ cs.KillAll() —— 改造后
   │   ObserveClose goroutine:events chan 关闭 → SetExited(0)
   ├ wg.Wait() ← 等所有 bridge 走完 graceful
   ├ 设 5s 整体 timeout —— bridge 内部 SIGKILL 兜底后这个 timeout 几乎不触发
-  ├ activeAS = nil; currentTurnUserMsgID = ""
+  ├ selectedAS = nil; currentTurnUserMsgID = ""
   ├ asFile.Delete(each entry) ← 进程死 *之后* 删 disk
   └ persistChatEntry()
 ```
@@ -159,10 +159,10 @@ cs.NewActiveAgentSessions(ctx, agentName)
 
 | 触碰 | 不触碰 |
 |------|--------|
-| agent 进程(graceful shutdown) | `activeCwd` / `activeAgent` / `currentTurnUserMsgID` |
+| agent 进程(graceful shutdown) | `selectedCwd` / `selectedAgent` / `currentTurnUserMsgID` |
 | pool entry 状态(Running → Exited) | InputBuffer 排队消息 |
 | `agent_sessions.json` entry(**进程死 *之后***删除) | ChatSession 本身的 binding |
-| `activeAS` 在 ChatSession 内的引用 | 其他 chat 状态 |
+| `selectedAS` 在 ChatSession 内的引用 | 其他 chat 状态 |
 
 ### 4.2 实现位置
 
@@ -257,11 +257,11 @@ func (cs *ChatSession) KillAll() ([]KillResult, error) {
         log.Warn("killAll: graceful shutdown timeout", "limit", killGraceTotal)
     }
 
-    // 4. wipe activeAS pointer BEFORE removing from disk so a
+    // 4. wipe selectedAS pointer BEFORE removing from disk so a
     //    follow-up message sees "no active" and goes through
-    //    LookupActiveAgentSession -> spawn fresh.
+    //    LookupSelectedAgentSession -> spawn fresh.
     cs.mu.Lock()
-    cs.activeAS = nil
+    cs.selectedAS = nil
     cs.currentTurnUserMsgID = ""
     cs.mu.Unlock()
 
@@ -288,7 +288,7 @@ func (cs *ChatSession) KillAll() ([]KillResult, error) {
 | InputBuffer | ❌ `Clear()` | ✅ **保留** |
 | `agent_sessions.json` | ❌ 进程死 *前* 删 | ✅ 进程死 *后* 删 |
 | `currentTurnUserMsgID` | ❌ `= ""` | ✅ `= ""`(同) |
-| `activeAS` | ❌ `nil` | ✅ `nil`(同) |
+| `selectedAS` | ❌ `nil` | ✅ `nil`(同) |
 | 返回值 | `error` | `([]KillResult, error)` |
 | 5s 整体 timeout | ❌ | ✅ 兜底 |
 
@@ -347,7 +347,7 @@ if as.Status() != StatusRunning {
     // But the entry's stale ResumeID must not be replayed on the
     // next spawn — that would resurrect the dead session, defeating
     // the user's /new intent. Clear ResumeID in-memory + persist
-    // so the next LookupActiveAgentSession spawns fresh.
+    // so the next LookupSelectedAgentSession spawns fresh.
     as.SetResumeID("")
     if cs.asFile != nil {
         _ = cs.asFile.Upsert(as.Entry())
@@ -548,7 +548,7 @@ func buildKillHeader(killed, stale, failed int) string {
 
 ## 7. 不变式 checklist
 
-- [ ] `/kill` **永不动** `activeCwd` / `activeAgent` / `currentTurnUserMsgID` / `InputBuffer`
+- [ ] `/kill` **永不动** `selectedCwd` / `selectedAgent` / `currentTurnUserMsgID` / `InputBuffer`
 - [ ] `/kill` 调 `as.Close()` 而不是 `cs.pool = make(...)` 直接丢指针
 - [ ] `/kill` 删 `agent_sessions.json` entry 必须在 bridge 关闭 *之后*
 - [ ] `/kill` 整体 timeout 5s 是兜底,bridge 内部 2s 已 SIGKILL,几乎不触发
@@ -618,7 +618,7 @@ TestKillAll_AgentSessionEntriesDeleted
 
 TestKillAll_ActiveASCleared
   - 调 KillAll
-  - 断言:cs.ActiveAgentSession() == nil
+  - 断言:cs.SelectedAgentSession() == nil
   - 断言:cs.currentTurnUserMsgID == ""
 
 TestKillAll_OnlyExitedEntries
@@ -781,7 +781,7 @@ TestFormatResetResults_AllDead
 | 风险 | 缓解 |
 |------|------|
 | Bridge `Close()` hang 超过 5s 导致 `/kill` UX 慢 | `killGraceTotal` 可调;bridge 内部 2s 已 SIGKILL |
-| `SetResumeID("")` + 持久化 race(其它 goroutine 同时 `LookupActiveAgentSession`) | entry 复用已有 `resumeIDMu`,Upsert 是 atomic write |
+| `SetResumeID("")` + 持久化 race(其它 goroutine 同时 `LookupSelectedAgentSession`) | entry 复用已有 `resumeIDMu`,Upsert 是 atomic write |
 | `/kill` 保留 InputBuffer 但用户期望清 | 设计决策(D-1);若用户反馈,加 `/clear-buffer` 单独命令 |
 | 旧 `agent_sessions.json` 没 ResumeID 字段 | GO JSON 容忍,不破坏现有数据 |
 

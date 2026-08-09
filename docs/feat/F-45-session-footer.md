@@ -800,7 +800,7 @@ _ = mgr.PersistAgentSession(as)
 
 **scope**：
 - `/new <agent>`：只清单个 AgentSession
-- `/new`：清 activeCwd 下所有 AgentSession（pool 内）
+- `/new`：清 selectedCwd 下所有 AgentSession（pool 内）
 
 ### 2.7 `internal/channel/feishu/usage_footer.go` (NEW)
 
@@ -947,7 +947,7 @@ if footer != "" {
 | `TestPersistIfDirty_NoOpWhenClean` | `internal/chatsession/agentsession_test.go` | dirty=false 时 PersistIfDirty 不调 persist callback |
 | `TestPersistIfDirty_DirtyResets` | `internal/chatsession/agentsession_test.go` | dirty=true 时调一次 callback，dirty 立即重置（不会双重落盘） |
 | `TestEntry_RoundtripPreserves` | `internal/chatsession/agentsession_test.go` | `Entry() → JSON marshal → unmarshal → FromAgentSessionEntry` 字段全相等 |
-| `TestHandleNew_ResetsCumulative` | `internal/gateway/handlers_new_test.go` (EXTEND) | `/new` 后 ActiveAgentSession.CumulativeUsage() 全零 + 持久化 |
+| `TestHandleNew_ResetsCumulative` | `internal/gateway/handlers_new_test.go` (EXTEND) | `/new` 后 SelectedAgentSession.CumulativeUsage() 全零 + 持久化 |
 | `TestFormatSessionFooter_*` | `internal/channel/feishu/usage_footer_test.go` (NEW) | nil / all-zero / 仅 in / 含 cost / cache 标记 / 大数缩写 |
 | `TestSend_OutReply_AppendsFooter` | `internal/channel/feishu/adapter_test.go` (EXTEND) | msg.SessionContext 非 nil 时，sendContent 收到 body 包含 footer 行 |
 | `TestSend_OutResult_AppendsFooter` | 同上 | 同上 for OutResult |

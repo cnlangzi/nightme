@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 )
 
@@ -40,9 +41,11 @@ func TestFactory_Spec(t *testing.T) {
 // when only "gtw" is present (Args[1] out of range), the
 // Factory returns the usage hint.
 func TestFactory_Handle_NoArgs(t *testing.T) {
+	cs := &chatsession.ChatSession{}
 	f := NewFactory(NewManager())
 	got, err := f.Handle(context.Background(),
 		command.RuntimeServices{},
+		cs,
 		command.SlashInput{Text: "/gtw", Args: []string{"gtw"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -70,9 +73,11 @@ func TestFactory_Handle_NoArgs(t *testing.T) {
 // Args = ["gtw", "fix", "<id>", ...]. The subcommand lives
 // at Args[1] and the subcommand's args start at Args[2].
 func TestFactory_Handle_Fix_NoArgs(t *testing.T) {
+	cs := &chatsession.ChatSession{}
 	f := NewFactory(NewManager())
 	got, _ := f.Handle(context.Background(), command.RuntimeServices{},
-		command.SlashInput{Text: "/gtw fix", Args: []string{"gtw", "fix"}})
+		cs,
+	command.SlashInput{Text: "/gtw fix", Args: []string{"gtw", "fix"}})
 	if !got.Consumed {
 		t.Errorf("expected Consumed, got %+v", got)
 	}
@@ -84,9 +89,11 @@ func TestFactory_Handle_Fix_NoArgs(t *testing.T) {
 // TestFactory_Handle_Fix_BadIssueID covers /gtw fix with a
 // non-numeric id. Should reply with a hint.
 func TestFactory_Handle_Fix_BadIssueID(t *testing.T) {
+	cs := &chatsession.ChatSession{}
 	f := NewFactory(NewManager())
 	got, _ := f.Handle(context.Background(), command.RuntimeServices{},
-		command.SlashInput{Text: "/gtw fix abc", Args: []string{"gtw", "fix", "abc"}})
+		cs,
+	command.SlashInput{Text: "/gtw fix abc", Args: []string{"gtw", "fix", "abc"}})
 	if !got.Consumed {
 		t.Errorf("expected Consumed, got %+v", got)
 	}
@@ -101,9 +108,11 @@ func TestFactory_Handle_Fix_BadIssueID(t *testing.T) {
 // subcommand so the unknown-subcommand reply quotes "bogus"
 // (not "gtw").
 func TestFactory_Handle_UnknownSubcommand(t *testing.T) {
+	cs := &chatsession.ChatSession{}
 	f := NewFactory(NewManager())
 	got, _ := f.Handle(context.Background(), command.RuntimeServices{},
-		command.SlashInput{Text: "/gtw bogus", Args: []string{"gtw", "bogus"}})
+		cs,
+	command.SlashInput{Text: "/gtw bogus", Args: []string{"gtw", "bogus"}})
 	if !got.Consumed {
 		t.Errorf("expected Consumed, got %+v", got)
 	}

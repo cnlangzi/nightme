@@ -139,7 +139,8 @@ func TestPreflightOrphanYml_RunFixIntegration(t *testing.T) {
 	mustGit(t, repoRoot, "symbolic-ref", "refs/remotes/origin/HEAD",
 		"refs/remotes/origin/main")
 
-	cs := chatsession.New("chat-preflight", "test-agent")
+	ch := &recordingCh{}
+	cs, _ := chatsession.New("chat-preflight", "test-agent", ch)
 	_ = cs.SetSelectedCwd(repoRoot)
 
 	// Simulate an orphan yml: create a worktree with a yml in
@@ -156,14 +157,9 @@ func TestPreflightOrphanYml_RunFixIntegration(t *testing.T) {
 		t.Fatalf("write yml: %v", err)
 	}
 
-	var sentTexts []string
 	deps := HandlerDeps{
-		Git: ExecGitRunner{},
-		Now: nil,
-		Send: func(_ context.Context, m OutMsg) error {
-			sentTexts = append(sentTexts, m.Text)
-			return nil
-		},
+		Git:                   ExecGitRunner{},
+		Now:                   nil,
 		SkipRefreshDefaultBranch: true,
 	}
 	slot := &memSlot{}
@@ -180,7 +176,10 @@ func TestPreflightOrphanYml_RunFixIntegration(t *testing.T) {
 	if !res.Consumed {
 		t.Errorf("Result.Consumed = false")
 	}
-	last := sentTexts[len(sentTexts)-1]
+	last := ch.lastText()
+	if last == "" {
+		t.Fatalf("expected a reply from RunFix preflight, got none")
+	}
 	if !strings.Contains(last, "sibling") || !strings.Contains(last, orphanWt) {
 		t.Errorf("reply missing sibling-yaml hint:\n%s", last)
 	}

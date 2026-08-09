@@ -146,10 +146,9 @@ func (s *fakeSpawner) Get(name, cwd string) *fakeAgentSession {
 
 func TestAgentSession_SpawnViaSpawner(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "claude").
-		WithPersistence(csFile, asFile).
-		WithSpawner(newFakeSpawner())
-
+	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs = cs.WithPersistence(csFile, asFile)
+	cs = cs.WithSpawner(newFakeSpawner())
 	cs.SetSelectedCwd("/code/bailing")
 	cs.SetSelectedAgent("claude")
 
@@ -171,10 +170,9 @@ func TestAgentSession_SpawnViaSpawner(t *testing.T) {
 func TestAgentSession_SpawnIsIdempotent(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "claude").
-		WithPersistence(csFile, asFile).
-		WithSpawner(spawner)
-
+	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs = cs.WithPersistence(csFile, asFile)
+	cs = cs.WithSpawner(spawner)
 	cs.SetSelectedCwd("/x")
 	cs.SetSelectedAgent("claude")
 
@@ -195,10 +193,9 @@ func TestAgentSession_SpawnFailureLeavesDetached(t *testing.T) {
 		return nil, errors.New("spawn boom")
 	}
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "claude").
-		WithPersistence(csFile, asFile).
-		WithSpawner(spawner)
-
+	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs = cs.WithPersistence(csFile, asFile)
+	cs = cs.WithSpawner(spawner)
 	cs.SetSelectedCwd("/x")
 	cs.SetSelectedAgent("claude")
 
@@ -216,8 +213,8 @@ func TestAgentSession_SpawnFailureLeavesDetached(t *testing.T) {
 
 func TestAgentSession_NoSpawnerLeavesDetached(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "claude").
-		WithPersistence(csFile, asFile)
+	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs = cs.WithPersistence(csFile, asFile)
 	// no WithSpawner
 
 	cs.SetSelectedCwd("/x")
@@ -245,10 +242,9 @@ func TestAgentSession_SendTextBeforeSpawn(t *testing.T) {
 func TestAgentSession_SendTextAfterSpawn(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "claude").
-		WithPersistence(csFile, asFile).
-		WithSpawner(spawner)
-
+	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs = cs.WithPersistence(csFile, asFile)
+	cs = cs.WithSpawner(spawner)
 	cs.SetSelectedCwd("/x")
 	cs.SetSelectedAgent("claude")
 
@@ -261,10 +257,9 @@ func TestAgentSession_SendTextAfterSpawn(t *testing.T) {
 func TestAgentSession_ObserveCloseTransitionsToExited(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "claude").
-		WithPersistence(csFile, asFile).
-		WithSpawner(spawner)
-
+	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs = cs.WithPersistence(csFile, asFile)
+	cs = cs.WithSpawner(spawner)
 	cs.SetSelectedCwd("/x")
 	cs.SetSelectedAgent("claude")
 	as, _ := cs.LookupSelectedAgentSession()
@@ -327,9 +322,9 @@ func TestAgentSession_RespawnPassesResumeID(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	spawner := newFakeSpawner()
 
-	cs := New("oc_1", "claude").
-		WithPersistence(csFile, asFile).
-		WithSpawner(spawner)
+	cs, _ := New("oc_1", "claude", newTestChannel())
+	cs = cs.WithPersistence(csFile, asFile)
+	cs = cs.WithSpawner(spawner)
 	if err := cs.SetSelectedCwd("/x"); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}

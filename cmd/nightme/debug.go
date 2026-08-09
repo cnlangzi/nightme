@@ -168,17 +168,9 @@ func newDebugFixture(f debugFlags) (*debugFixture, error) {
 	// useful test coverage). Send pushes to captured so we can
 	// print what the executor emitted.
 	gtwDeps := gtw.HandlerDeps{
-		Git:         gtw.ExecGitRunner{},
-		Prober:      &gtw.ExecHTTPProber{},
-		Now:         func() time.Time { return timeNow() },
-		Send: func(_ context.Context, m gtw.OutMsg) error {
-			captured.mu.Lock()
-			defer captured.mu.Unlock()
-			captured.msgs = append(captured.msgs, gateway.OutboundMessage{
-				ChatID: m.ChatID, Kind: gateway.OutReply, Text: m.Text, ReplyTo: m.ReplyTo,
-			})
-			return nil
-		},
+		Git:    gtw.ExecGitRunner{},
+		Prober: &gtw.ExecHTTPProber{},
+		Now:    func() time.Time { return timeNow() },
 	}
 
 	// 4. F-51: build a fresh gtw.Manager + services.ReactionRouter
@@ -195,7 +187,7 @@ func newDebugFixture(f debugFlags) (*debugFixture, error) {
 
 	// 5. Create the ChatSession — triggers the WithOnCreate
 	// callback, which installs the SetActionHandler.
-	cs := mgr.GetOrCreate(f.chatID, "primary")
+	cs, _ := mgr.GetOrCreate(f.chatID, "primary")
 
 	// 6. Gateway with actionHandler + capturing channel.
 	// WithActionHandler is on the Gateway interface (not just

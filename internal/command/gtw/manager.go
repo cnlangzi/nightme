@@ -289,7 +289,7 @@ func (m *Manager) HandleReaction(ctx context.Context, ev services.ReactionEvent)
 	m.mu.RLock()
 	deps := m.deps
 	m.mu.RUnlock()
-	if deps.Send == nil {
+	if deps.Git == nil {
 		// Deps not yet wired — log and fall through.
 		slog.Default().Warn("gtw: HandleReaction called before SetHandlerDeps",
 			"chat_id", ev.ChatID,

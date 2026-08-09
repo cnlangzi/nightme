@@ -22,12 +22,11 @@ import (
 // Factory is the command.SlashCommandFactory for /cwd.
 type Factory struct {
 	mgr            *chatsession.Manager
-	defaultPrimary string
 }
 
 // NewFactory constructs a Factory backed by mgr.
-func NewFactory(mgr *chatsession.Manager, defaultPrimary string) *Factory {
-	return &Factory{mgr: mgr, defaultPrimary: defaultPrimary}
+func NewFactory(mgr *chatsession.Manager) *Factory {
+	return &Factory{mgr: mgr}
 }
 
 // Spec implements command.SlashCommandFactory.
@@ -52,7 +51,7 @@ func (f *Factory) Spec() command.Spec {
 // Existence check: we reject non-existent paths at /cwd time so
 // the agent doesn't fail later with a confusing spawn error.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
-	input command.SlashInput) (*command.SlashOutput, error) {
+	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
 	if len(input.Args) < 2 {
 		return command.Reply(ctx, rt, "Usage: /cwd <path>"), nil
@@ -94,15 +93,13 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	if !info.IsDir() {
 		return command.Reply(ctx, rt, fmt.Sprintf("Not a directory: %s", abs)), nil
 	}
-
-	cs := f.mgr.GetOrCreate(input.ChatID, f.defaultPrimary)
 	if err := cs.SetSelectedCwd(abs); err != nil {
 		return command.Reply(ctx, rt, fmt.Sprintf("SetSelectedCwd failed: %v", err)), nil
 	}
 
 	selectedAgent := cs.SelectedAgent()
 	if selectedAgent == "" {
-		selectedAgent = f.defaultPrimary
+		selectedAgent = rt.Config.Primary
 	}
 	return command.Reply(ctx, rt, fmt.Sprintf(
 		"Workspace set to %s.\nSession is ready (active agent: %s). Send any message to chat with it, or /use <agent> to switch. /use is optional — plain text is forwarded to the active agent automatically.",

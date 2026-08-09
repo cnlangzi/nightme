@@ -408,7 +408,18 @@ func PreflightWorktreeCreate(ctx context.Context, repoRoot, branch, worktreePath
 	if err != nil {
 		return fmt.Errorf("git worktree list: %w", err)
 	}
-	if attachedPath != "" && filepath.Clean(attachedPath) == filepath.Clean(worktreePath) {
+	// Resolve symlinks on both sides so macOS (/var vs /private/var)
+	// doesn't make same-path compare fail. EvalSymlinks is a
+	// no-op on Linux for non-symlinked paths.
+	canonicalAttached := attachedPath
+	canonicalTarget := worktreePath
+	if a, err := filepath.EvalSymlinks(attachedPath); err == nil {
+		canonicalAttached = a
+	}
+	if t, err := filepath.EvalSymlinks(worktreePath); err == nil {
+		canonicalTarget = t
+	}
+	if attachedPath != "" && canonicalAttached == canonicalTarget {
 		// Branch is attached at exactly the target path —
 		// daemon-recovery / repeat-run case. Allow it.
 		return nil

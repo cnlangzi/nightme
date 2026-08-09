@@ -61,21 +61,21 @@ func RunClose(
 	c, err := ReadGTWYml(selectedCwd)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return reply(ctx, deps.Send, chatID, messageID,
+			return reply(ctx, cs.Channel(), chatID, messageID,
 				"❌ no active fix to close in this chat\n"+
 					"hint: /cwd into the /gtw fix worktree first (its "+
 					"`.nightme/gtw.yml` is the close source of truth)."), nil
 		}
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err)), nil
 	}
 
 	if c.Worktree == "" {
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			"❌ .nightme/gtw.yml is malformed: worktree is empty"), nil
 	}
 	if c.RepoRoot == "" {
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			"❌ .nightme/gtw.yml is malformed: repoRoot is empty"), nil
 	}
 
@@ -84,7 +84,7 @@ func RunClose(
 	// risk of losing uncommitted local edits.
 	if !force {
 		if err := assertWorktreeClean(ctx, c.Worktree, deps); err != nil {
-			return reply(ctx, deps.Send, chatID, messageID, err.Error()), nil
+			return reply(ctx, cs.Channel(), chatID, messageID, err.Error()), nil
 		}
 	}
 
@@ -102,7 +102,7 @@ func RunClose(
 		if stderr != "" {
 			body += "\n[git stderr tail]\n" + stderr
 		}
-		return reply(ctx, deps.Send, chatID, messageID, body), nil
+		return reply(ctx, cs.Channel(), chatID, messageID, body), nil
 	}
 
 	// --- step 5: switch CWD back to repoRoot ----------------------
@@ -114,7 +114,7 @@ func RunClose(
 		slog.Default().Warn("gtw: SetSelectedCwd back to repoRoot failed",
 			"repo_root", c.RepoRoot,
 			"err", err)
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf("⚠️ worktree removed but SetSelectedCwd(%s) failed: %v\n"+
 				"run `/cwd %s` manually.", c.RepoRoot, err, c.RepoRoot)), nil
 	}
@@ -138,7 +138,7 @@ func RunClose(
 			"💡 next: continue working in %s, or run another /gtw fix",
 		c.Branch, c.Worktree, forceNote(force), c.RepoRoot, c.Branch, c.RepoRoot,
 	)
-	return reply(ctx, deps.Send, chatID, messageID, body), nil
+	return reply(ctx, cs.Channel(), chatID, messageID, body), nil
 }
 
 // forceNote renders the trailing "force" annotation for the

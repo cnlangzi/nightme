@@ -25,7 +25,7 @@ func TestFactory_Handle_NoSession_RepliesNoActive(t *testing.T) {
 	f := NewFactory(mgr)
 	input := command.SlashInput{ChatID: "no-such-chat"}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, input)
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -42,9 +42,9 @@ func TestFactory_Handle_NoSession_RepliesNoActive(t *testing.T) {
 func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory(mgr)
-	cs, _ := mgr.GetOrCreate("c1", "claude")
+	_ = mgr.GetOrCreate("c1", "claude")
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{},
 		command.SlashInput{ChatID: "c1", Args: []string{"kill"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -63,10 +63,10 @@ func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 func TestFactory_Handle_EmptyAgentArg_RepliesUsage(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory(mgr)
-	cs, _ := mgr.GetOrCreate("c1", "claude")
+	cs := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{},
 		command.SlashInput{ChatID: "c1", Args: []string{"kill", " "}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -81,14 +81,14 @@ func TestFactory_Handle_EmptyAgentArg_RepliesUsage(t *testing.T) {
 func TestFactory_Handle_NotInPool_RepliesFriendly(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory(mgr)
-	cs, _ := mgr.GetOrCreate("c1", "claude")
+	cs := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 	// Materialize (claude, /tmp) so the pool isn't empty.
 	if _, err := cs.LookupSelectedAgentSession(); err != nil {
 		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{},
 		command.SlashInput{ChatID: "c1", Args: []string{"kill", "codex"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -111,7 +111,7 @@ func TestFactory_Handle_NotInPool_RepliesFriendly(t *testing.T) {
 func TestFactory_Handle_NoArg_KillsAllInCwd(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory(mgr)
-	cs, _ := mgr.GetOrCreate("c1", "claude")
+	cs := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 	if _, err := cs.LookupSelectedAgentSession(); err != nil {
 		t.Fatalf("LookupSelectedAgentSession: %v", err)
@@ -120,7 +120,7 @@ func TestFactory_Handle_NoArg_KillsAllInCwd(t *testing.T) {
 		t.Fatalf("activeAgent: want claude, got %q", got)
 	}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{},
 		command.SlashInput{ChatID: "c1", Args: []string{"kill"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -140,7 +140,7 @@ func TestFactory_Handle_NoArg_KillsAllInCwd(t *testing.T) {
 func TestFactory_Handle_NoArg_KillsEveryAgentInCwd(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory(mgr)
-	cs, _ := mgr.GetOrCreate("c1", "claude")
+	cs := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 	if _, err := cs.LookupSelectedAgentSession(); err != nil {
 		t.Fatalf("LookupSelectedAgentSession (claude): %v", err)
@@ -155,7 +155,7 @@ func TestFactory_Handle_NoArg_KillsEveryAgentInCwd(t *testing.T) {
 		t.Fatalf("pre: pool size want 2 (claude + codex in /tmp), got %d", got)
 	}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{},
 		command.SlashInput{ChatID: "c1", Args: []string{"kill"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
@@ -176,7 +176,7 @@ func TestFactory_Handle_NoArg_KillsEveryAgentInCwd(t *testing.T) {
 func TestFactory_Handle_NamedAgent_LeavesSiblingsAlone(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory(mgr)
-	cs, _ := mgr.GetOrCreate("c1", "claude")
+	cs := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 	if _, err := cs.LookupSelectedAgentSession(); err != nil {
 		t.Fatalf("LookupSelectedAgentSession (claude): %v", err)
@@ -191,7 +191,7 @@ func TestFactory_Handle_NamedAgent_LeavesSiblingsAlone(t *testing.T) {
 		t.Fatalf("pre: pool size want 2, got %d", got)
 	}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	out, err := f.Handle(context.Background(), command.RuntimeServices{},
 		command.SlashInput{ChatID: "c1", Args: []string{"kill", "codex"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)

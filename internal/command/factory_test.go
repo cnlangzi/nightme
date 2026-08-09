@@ -3,6 +3,8 @@ package command
 import (
 	"context"
 	"testing"
+
+	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
 type fakeRegCmd struct {
@@ -11,7 +13,7 @@ type fakeRegCmd struct {
 }
 
 func (f *fakeRegCmd) Spec() Spec                 { return f.spec }
-func (f *fakeRegCmd) Handle(_ context.Context, _ RuntimeServices, _ SlashInput) (*SlashOutput, error) {
+func (f *fakeRegCmd) Handle(_ context.Context, _ RuntimeServices, _ *chatsession.ChatSession, _ SlashInput) (*SlashOutput, error) {
 	f.called++
 	return &SlashOutput{Consumed: true}, nil
 }

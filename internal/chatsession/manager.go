@@ -16,6 +16,7 @@ package chatsession
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/registry"
@@ -42,6 +43,13 @@ type Manager struct {
 	// F-31) without requiring the runtime to enumerate sessions
 	// after startup. nil = no callback.
 	onCreate func(*ChatSession)
+
+	// channelResolver is registered once at startup via
+	// WithChannelResolver. GetOrCreate calls it (outside m.mu)
+	// when creating a new ChatSession; the returned Channel is
+	// bound immutably to the new cs. nil = no resolver; tests
+	// without a channel pass nil and accept cs.Channel() == nil.
+	channelResolver func(chatID string) Channel
 }
 
 // NewManager creates an empty Manager. Both spawner and persistence
@@ -89,26 +97,105 @@ func (m *Manager) WithOnCreate(fn func(*ChatSession)) *Manager {
 // /default command, no per-chat override). It also seeds
 // selectedAgent so the runtime always has an effective agent to
 // dispatch to.
-func (m *Manager) GetOrCreate(chatID, primaryAgent string) *ChatSession {
+//
+// Errors:
+//   - New(...) itself returns error → propagated as-is.
+//
+// Concurrency: simple lock-internal critical section (the
+// single-threaded runtime path uses GetOrCreate; the per-AS
+// lifecycle doesn't touch the manager's table).
+// GetOrCreate returns the ChatSession for chatID, creating it if
+// missing. The chatType parameter was removed in F-33 (D1); nightme
+// no longer carries chat-type at the binding layer. primaryAgent
+// is the cfg.Primary snapshot from config; ChatSession.primaryAgent
+// is captured here and never mutated post-creation (Q-A: no
+// /default command, no per-chat override). It also seeds
+// activeAgent so the runtime always has an effective agent to
+// dispatch to.
+//
+// Errors:
+//   - channelResolver returns nil for chatID → returns (nil, err)
+//     (logs warn). The daemon does not crash; only this dispatch
+//     is affected. Caller decides how to handle.
+//   - New(...) itself returns error → propagated as-is.
+//
+// Concurrency: double-checked locking. The channelResolver call
+// is always outside m.mu to avoid nesting external locks (current
+// gateway.resolveChannel takes its own RLock; future resolver
+// implementations should not be required to know about m.mu).
+func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error) {
+	// Phase 1: lock-internal fast path
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if cs, ok := m.sessions[chatID]; ok {
-		return cs
+	cs, ok := m.sessions[chatID]
+	m.mu.Unlock()
+	if ok {
+		return cs, nil // existing cs → channel already bound
 	}
 
-	cs := New(chatID, primaryAgent).
-		WithSpawner(m.spawner).
-		WithPersistence(m.csFile, m.asFile)
+	// Phase 2: call resolver OUTSIDE the lock. Three cases:
+	//   - no resolver configured (tests, debug) → pass nil;
+	//     cs.Channel() returns nil; callers nil-check.
+	//   - resolver set but returns nil → log warn + error
+	//     (real production misconfiguration; this chat's outbound
+	//     surface is unusable).
+	//   - resolver returns a channel → bind to cs.
+	var ch Channel
+	if m.channelResolver != nil {
+		ch = m.channelResolver(chatID)
+		if ch == nil {
+			slog.Default().Warn("Manager.GetOrCreate: channelResolver returned nil",
+				"chat_id", chatID)
+			return nil, fmt.Errorf("manager: channel is nil for chatID=%s", chatID)
+		}
+	}
+
+	// Phase 3: construct + attach spawner/persistence (no lock)
+	cs, err := New(chatID, primaryAgent, ch)
+	if err != nil {
+		return nil, err
+	}
+	cs.WithSpawner(m.spawner).WithPersistence(m.csFile, m.asFile)
+
+	// Phase 4: re-lock + insert with re-check (race-safe)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if existing, ok := m.sessions[chatID]; ok {
+		// Another goroutine won the race; discard our construction.
+		return existing, nil
+	}
 	m.sessions[chatID] = cs
 
 	// Fire onCreate callback before releasing the lock so the
-	// callback's own locks see consistent state. Callback is
-	// allowed to call back into the ChatSession safely.
+	// callback's own locks see consistent state.
 	if m.onCreate != nil {
 		m.onCreate(cs)
 	}
-	return cs
+	return cs, nil
+}
+
+// WithChannelResolver registers the chatID → Channel resolver used
+// by GetOrCreate when creating new ChatSessions. Wired once at
+// startup (typically wrapping gateway.resolveChannel).
+//
+// The same chatID MUST always resolve to the same Channel —
+// that's the channel-binding invariant. Violating this would
+// cause commands on an existing chat to suddenly route to a
+// different IM channel, breaking ReplyTo threading.
+//
+// nil means "no resolver"; GetOrCreate will return an error when
+// it would need to create a new cs. Useful for tests that don't
+// care about channel binding.
+func (m *Manager) WithChannelResolver(fn func(chatID string) Channel) *Manager {
+	m.channelResolver = fn
+	return m
+}
+
+// channelResolver is registered once at startup via
+// WithChannelResolver. GetOrCreate calls it (outside m.mu)
+// when creating a new ChatSession; the returned Channel is
+// bound immutably to the new cs.
+func (m *Manager) channelResolverFn() func(chatID string) Channel {
+	return m.channelResolver
 }
 
 // Get returns the ChatSession for chatID, or nil if absent.
@@ -182,8 +269,21 @@ func (m *Manager) RestoreFromRegistry() error {
 	}
 
 	for _, entry := range m.csFile.List() {
-		cs := New(entry.ChatID, entry.PrimaryAgent).
-			WithSpawner(m.spawner).
+		var ch Channel
+		if m.channelResolver != nil {
+			ch = m.channelResolver(entry.ChatID)
+		}
+		if ch == nil {
+			slog.Default().Warn("Manager.RestoreFromRegistry: channelResolver returned nil; chat's outbound surface will be unavailable",
+				"chat_id", entry.ChatID)
+		}
+		cs, err := New(entry.ChatID, entry.PrimaryAgent, ch)
+		if err != nil {
+			slog.Default().Warn("Manager.RestoreFromRegistry: New failed; skipping chat",
+				"chat_id", entry.ChatID, "err", err)
+			continue
+		}
+		cs.WithSpawner(m.spawner).
 			WithPersistence(m.csFile, m.asFile)
 		cs.selectedCwd = entry.SelectedCwd
 		cs.selectedAgent = entry.SelectedAgent

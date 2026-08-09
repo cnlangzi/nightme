@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
 // RunPush is the entry point for `/gtw push`. Operates on the
@@ -28,13 +30,14 @@ import (
 // `git rebase --abort` / `git reset` manually.
 func RunPush(
 	ctx context.Context,
+	cs *chatsession.ChatSession,
 	deps HandlerDeps,
 	chatID, messageID string,
 	args pushArgs,
 ) (*Result, error) {
 	selectedCwd, err := pushCwd()
 	if err != nil {
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			"❌ no active workspace. Send /cwd <path> first."), nil
 	}
 
@@ -42,28 +45,28 @@ func RunPush(
 	c, err := ReadGTWYml(selectedCwd)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return reply(ctx, deps.Send, chatID, messageID,
+			return reply(ctx, cs.Channel(), chatID, messageID,
 				"❌ no active fix to push in this chat\n"+
 					"hint: /cwd into the /gtw fix worktree first (its "+
 					"`.nightme/gtw.yml` is the push source of truth)."), nil
 		}
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err)), nil
 	}
 	if c.Worktree == "" || c.Branch == "" || c.RepoRoot == "" {
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			"❌ .nightme/gtw.yml is malformed (worktree/branch/repoRoot required)"), nil
 	}
 
 	// --- step 2+3: dirty / commit ------------------------
 	if err := commitIfNeeded(ctx, deps, c, args.NoCommit); err != nil {
-		return reply(ctx, deps.Send, chatID, messageID, err.Error()), nil
+		return reply(ctx, cs.Channel(), chatID, messageID, err.Error()), nil
 	}
 
 	// --- step 4: push ----------------------------------
 	pushOut, err := pushBranch(ctx, deps, c)
 	if err != nil {
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf("❌ git push failed: %v\n%s", err, pushOut)), nil
 	}
 
@@ -109,7 +112,7 @@ func RunPush(
 		c.Branch, indentLines(pushOut, "  "), c.Branch, c.Worktree,
 	)
 	body += prSection
-	return reply(ctx, deps.Send, chatID, messageID, body), nil
+	return reply(ctx, cs.Channel(), chatID, messageID, body), nil
 }
 
 // commitIfNeeded runs the dirty-check + auto-stage + commit

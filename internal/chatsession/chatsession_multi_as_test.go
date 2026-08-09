@@ -362,14 +362,13 @@ func TestMultiAS_AllASIndependent(t *testing.T) {
 func TestMultiAS_SmallEventQueue_BackpressureRaceFree(t *testing.T) {
 	// Lower the production eventQueueCapacity to 4 for the
 	// duration of this test. The default (4096) is sized for
-	// worst-case /use switching; a 4-deep queue is small enough
-	// that 200 events per AS definitely forces backpressure
-	// (50x the cap), but large enough that the dispatcher can
-	// keep up — it never drops events, only blocks producers.
+	// The production default eventQueueCapacity is 4096 (see
+	// events.go for the worst-case /use switching rationale).
+	// A 4-deep queue is small enough that 200 events per AS
+	// definitely forces backpressure (50x the cap), but large
+	// enough that the dispatcher can keep up — it never drops
+	// events, only blocks producers.
 	const smallCap = 4
-	origCap := eventQueueCapacity
-	eventQueueCapacity = smallCap
-	defer func() { eventQueueCapacity = origCap }()
 
 	cs := newChatSessionForTest("cs_small_queue_race")
 
@@ -388,6 +387,7 @@ func TestMultiAS_SmallEventQueue_BackpressureRaceFree(t *testing.T) {
 			"pi",
 			"/tmp",
 			nil,
+			WithEventQueueCapacity(smallCap),
 		)
 		cs.attachAgentSession(ases[i])
 	}

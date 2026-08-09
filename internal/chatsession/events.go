@@ -39,8 +39,8 @@ import (
 //
 // Tradeoff: ~256 KB per non-active AS in the worst case. With
 // 1-3 ASes per chat at any time, this is <1 MB — acceptable.
-// eventQueueCapacity is the per-AgentSession event buffer size
-// between the readpump (producer) and the dispatcher (consumer).
+// eventQueueCapacity is the default per-AgentSession event buffer
+// size between the readpump (producer) and the dispatcher (consumer).
 //
 // 4096 is the "AS 在后台跑时 ChatSession 切换累积的事件窗口" budget.
 // Producer-side correctness: the chat session's per-AS readpump
@@ -61,11 +61,11 @@ import (
 // Tradeoff: ~256 KB per non-active AS in the worst case. With
 // 1-3 ASes per chat at any time, this is <1 MB — acceptable.
 //
-// Tests that need to exercise the buffer-cap path override this
-// var to a smaller value at the start of the test, with a defer
-// that restores the default. Don't lower it in production code
+// Tests that need to exercise the buffer-cap path use
+// `WithEventQueueCapacity(n)` to inject a smaller value at
+// construction time. The default is reserved for production
 // paths — see comment above on the worst-case AS backlog.
-var eventQueueCapacity = 4096
+const eventQueueCapacity = 4096
 
 // EnrichedEventKind tags the body of an EnrichedEvent. Exactly one of
 // AgentEvent / PromptEnded / Lifecycle is non-nil for any event.

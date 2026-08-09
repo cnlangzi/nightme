@@ -132,15 +132,21 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 		return cs, nil // existing cs → channel already bound
 	}
 
-	// Phase 2: call resolver OUTSIDE the lock
+	// Phase 2: call resolver OUTSIDE the lock. Three cases:
+	//   - no resolver configured (tests, debug) → pass nil;
+	//     cs.Channel() returns nil; callers nil-check.
+	//   - resolver set but returns nil → log warn + error
+	//     (real production misconfiguration; this chat's outbound
+	//     surface is unusable).
+	//   - resolver returns a channel → bind to cs.
 	var ch Channel
 	if m.channelResolver != nil {
 		ch = m.channelResolver(chatID)
-	}
-	if ch == nil {
-		slog.Default().Warn("Manager.GetOrCreate: channelResolver returned nil",
-			"chat_id", chatID)
-		return nil, fmt.Errorf("manager: channel is nil for chatID=%s", chatID)
+		if ch == nil {
+			slog.Default().Warn("Manager.GetOrCreate: channelResolver returned nil",
+				"chat_id", chatID)
+			return nil, fmt.Errorf("manager: channel is nil for chatID=%s", chatID)
+		}
 	}
 
 	// Phase 3: construct + attach spawner/persistence (no lock)

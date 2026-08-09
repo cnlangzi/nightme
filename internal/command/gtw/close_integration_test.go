@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -87,7 +88,8 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 	}
 
 	// --- step 4: actually run /gtw close -------------------------
-	cs, _ := chatsession.New("chat-int-1", "test-agent", newTestChannel())
+	ch := &recordingCh{}
+	cs, _ := chatsession.New("chat-int-1", "test-agent", ch)
 	if err := cs.SetActiveCwd(wt); err != nil {
 		t.Fatalf("SetActiveCwd wt: %v", err)
 	}
@@ -96,14 +98,9 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 		Worktree: wt, RepoRoot: repoRoot, State: StateFixing,
 		UpdatedAt: now,
 	}}
-	var sentTexts []string
 	deps := HandlerDeps{
 		Git: ExecGitRunner{},
 		Now: func() time.Time { return now },
-		Send: func(_ context.Context, m OutMsg) error {
-			sentTexts = append(sentTexts, m.Text)
-			return nil
-		},
 	}
 
 	res, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg-int-1", false /* force */)
@@ -131,7 +128,7 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 		t.Errorf("slot.Load() = %+v, want zero", slot.Load())
 	}
 	// Reply must mention both branch and the new cwd.
-	last := sentTexts[len(sentTexts)-1]
+	last := ch.lastText()
 	if !strings.Contains(last, branch) {
 		t.Errorf("reply missing branch %q:\n%s", branch, last)
 	}
@@ -166,17 +163,13 @@ func TestIntegration_CloseRejectsDirty(t *testing.T) {
 		t.Fatalf("WriteGTWYml: %v", err)
 	}
 
-	cs, _ := chatsession.New("chat-int-2", "test-agent", newTestChannel())
+	ch := &recordingCh{}
+	cs, _ := chatsession.New("chat-int-2", "test-agent", ch)
 	_ = cs.SetActiveCwd(wt)
 	slot := &memSlot{Context{Mode: ModeLocal, Branch: branch, Worktree: wt, RepoRoot: repoRoot, State: StateFixing}}
-	var sentTexts []string
 	deps := HandlerDeps{
 		Git: ExecGitRunner{},
 		Now: time.Now,
-		Send: func(_ context.Context, m OutMsg) error {
-			sentTexts = append(sentTexts, m.Text)
-			return nil
-		},
 	}
 
 	if _, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg", false /* force */); err != nil {
@@ -192,7 +185,7 @@ func TestIntegration_CloseRejectsDirty(t *testing.T) {
 		t.Errorf("dirty sentinel removed: %v", err)
 	}
 	// Reply must list the dirty sentinel and not contain "closed".
-	last := sentTexts[len(sentTexts)-1]
+	last := ch.lastText()
 	if !strings.Contains(last, "sentinel.txt") {
 		t.Errorf("reply missing dirty file:\n%s", last)
 	}
@@ -382,20 +375,16 @@ func mustGitOut(t *testing.T, dir string, args ...string) (string, string) {
 func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	repoRoot := initTempRepo(t)
 
-	cs, _ := chatsession.New("chat-int-shortN", "test-agent", newTestChannel())
+	ch := &recordingCh{}
+	cs, _ := chatsession.New("chat-int-shortN", "test-agent", ch)
 	if err := cs.SetActiveCwd(repoRoot); err != nil {
 		t.Fatalf("SetActiveCwd: %v", err)
 	}
 	slot := &memSlot{}
 	drafts := newMemDrafts()
-	var sentTexts []string
 	deps := HandlerDeps{
 		Git: ExecGitRunner{},
 		Now: func() time.Time { return time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC) },
-		Send: func(_ context.Context, m OutMsg) error {
-			sentTexts = append(sentTexts, m.Text)
-			return nil
-		},
 	}
 
 	// parseFixArgs with `-n foo` — what /gtw fix -n foo would
@@ -451,7 +440,7 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 		t.Errorf("queue len = %d, want 0 (local mode no dispatch)", n)
 	}
 	// Reply is the local-mode success card.
-	last := sentTexts[len(sentTexts)-1]
+	last := ch.lastText()
 	if !strings.Contains(last, "Local worktree") {
 		t.Errorf("reply missing local-mode marker:\n%s", last)
 	}
@@ -467,4 +456,42 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	if _, err := os.Stat(wt); !os.IsNotExist(err) {
 		t.Errorf("worktree still on disk after close: %v", err)
 	}
+}
+// recordingCh captures every Send / SendCard / Patch call's
+// payload for assertion. Used by integration tests after the
+// cs.Channel() migration; previous deps.Send mock is no longer
+// the actual path. Field-by-field copy of OutboundMessage.
+type recordingCh struct {
+	mu    sync.Mutex
+	sends []chatsession.OutboundMessage
+}
+
+func (r *recordingCh) Send(_ context.Context, m chatsession.OutboundMessage) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sends = append(r.sends, m)
+	return nil
+}
+
+func (r *recordingCh) SendCard(_ context.Context, m chatsession.OutboundMessage) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sends = append(r.sends, m)
+	return "rec-card-id", nil
+}
+
+func (r *recordingCh) Patch(_ context.Context, m chatsession.OutboundMessage) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sends = append(r.sends, m)
+	return nil
+}
+
+func (r *recordingCh) lastText() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.sends) == 0 {
+		return ""
+	}
+	return r.sends[len(r.sends)-1].Text
 }

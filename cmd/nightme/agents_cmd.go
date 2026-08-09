@@ -9,7 +9,7 @@
 //
 //	  NAME     COMMAND          ARGS
 //	  claude   claude
-//	  codex    codex-acp
+//	  codex    codex             (app-server)
 //	  opencode opencode         acp
 //
 //	  (default: claude)

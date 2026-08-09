@@ -387,7 +387,7 @@ The PTY is only the physical carrier. Invalid non-JSON banner lines are ignored 
 #### Agent launch commands
 
 - **OpenCode** exposes ACP as `opencode acp`, not `opencode --acp`; the example config uses `command: opencode` and `args: [acp]`.
-- **Codex CLI** does not expose a first-party `--acp` mode. The maintained ACP adapter is the separate `codex-acp` executable (`@agentclientprotocol/codex-acp`); the example config uses `command: codex-acp`. `CODEX_PATH` can point the adapter at a non-default Codex binary.
+- **Codex CLI** exposes `codex app-server --listen stdio://` as a first-party JSON-RPC 2.0 transport. The bridge spawns it directly (no ACP middleware like `@agentclientprotocol/codex-acp`); the example config uses `command: codex`. See [docs/bridge/codex.md](../bridge/codex.md) for the wire contract and rationale for not supporting the legacy `codex exec` backend.
 - Custom agent names remain ModePTY. A configured `claude`, `codex`, or `opencode` selects SDK, ACP, or ACP respectively; a path passed directly to the CLI remains PTY.
 
 #### Claude Code SDK finding
@@ -407,7 +407,7 @@ Anthropic's official Claude Agent SDK is currently published for Python and Type
 
 ```go
 // claude -> ModeSDK (SDK adapter currently returns ErrNotImplemented)
-// codex -> ModeACP (codex-acp executable)
+// codex -> ModeJSONIO (codex app-server; see docs/bridge/codex.md)
 // opencode -> ModeACP (opencode acp)
 // unknown configured names and direct binary paths -> ModePTY
 ```

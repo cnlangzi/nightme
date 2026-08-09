@@ -18,6 +18,7 @@ package main
 import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
+	"github.com/cnlangzi/nightme/internal/bridge/codex"
 	"github.com/cnlangzi/nightme/internal/bridge/pi"
 	"github.com/cnlangzi/nightme/internal/bridge/pty"
 )
@@ -27,6 +28,13 @@ func init() {
 	// config can override the command path but the override drops
 	// back to PTY (loses AskUserQuestion, structured events).
 	agent.Builtins.Register(claudecode.New("claude", "claude", nil))
+
+	// codex — the `codex app-server --listen stdio://` JSON-RPC 2.0
+	// bridge. Spawns codex in app-server mode and drives it via
+	// raw stdio pipes (no PTY). Single backend — see
+	// docs/bridge/codex.md §1 for the rationale on not supporting
+	// the legacy `codex exec` backend.
+	agent.Builtins.Register(codex.New("codex", "codex", nil))
 
 	// pi — the long-lived `pi --mode rpc` JSONL bridge. The agent
 	// driver is the @earendil-works/pi-coding-agent CLI; see

@@ -452,29 +452,21 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 				ReplyTo: msg.MessageID,
 			})
 		}
-		// 透传 out.Outbound(command.Outbound → chatsession.OutboundMessage)
+		// 透传 out.Outbound(都是 chatsession.OutboundMessage,直接
+		// 调 cs.Channel().Send/SendCard/Patch — channelWrap 在 binding
+		// 时已经把 gateway.Channel 包成 chatsession.Channel,所以
+		// runtime shim 这层不需要再做字段翻译)
 		for _, ob := range out.Outbound {
 			if ch == nil {
 				continue
 			}
-			cmOb := chatsession.OutboundMessage{
-				ChatID:  ob.ChatID,
-				Text:    ob.Text,
-				ReplyTo: ob.ReplyTo,
-			}
-			if ob.Card != nil {
-				cmOb.Card = &chatsession.Card{
-					Kind:         ob.Card.Kind,
-					Title:        ob.Card.Title,
-					Body:         ob.Card.Body,
-					Choices:      toChatCardChoices(ob.Card.Choices),
-					RequestID:    ob.Card.RequestID,
-					Disabled:     ob.Card.Disabled,
-					ChosenEmoji:  ob.Card.ChosenEmoji,
-				}
-				_, _ = ch.SendCard(ctx, cmOb)
-			} else {
-				_ = ch.Send(ctx, cmOb)
+			switch {
+			case ob.PatchBotMsgID != "":
+				_ = ch.Patch(ctx, ob)
+			case ob.Card != nil:
+				_, _ = ch.SendCard(ctx, ob)
+			default:
+				_ = ch.Send(ctx, ob)
 			}
 		}
 		return &gateway.CommandResult{

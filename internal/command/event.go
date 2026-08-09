@@ -18,7 +18,10 @@
 // translates at the boundary as before.
 package command
 
-import "github.com/cnlangzi/nightme/internal/command/services"
+import (
+	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/command/services"
+)
 
 // ReactionEvent is the inbound reaction / action payload.
 //
@@ -66,63 +69,27 @@ type SlashInput struct {
 }
 
 // SlashOutput is the command-package's view of one command's
-// result. gateway translates back to *gateway.CommandResult.
+// result. The runtime shim consumes Reply / Outbound and routes
+// them through cs.Channel().Send / SendCard / Patch. Consumed +
+// Dropped flow back to the gateway for legacy fall-through handling.
 type SlashOutput struct {
 	// Reply is the human-readable reply text. When Outbound is
-	// empty, gateway emits this as a single OutReply.
+	// empty, the runtime shim emits this as a single Send.
 	Reply string
 	// Consumed=true means the message was handled; gateway will
 	// NOT forward to the agent loop. false → fall through.
 	Consumed bool
-	// Dropped=true means gateway should silently drop the
-	// message (e.g. /watch off + not @-mentioned). Distinct
+	// Dropped=true means the runtime shim should silently drop
+	// the message (e.g. /watch off + not @-mentioned). Distinct
 	// from Consumed for log clarity.
 	Dropped bool
 	// Outbound is an explicit list of outbound messages to send
-	// in order. When non-empty, gateway uses these instead of
-	// building one from Reply. Allows commands to send cards +
-	// replies atomically (e.g. /gtw test seed-card → reaction
-	// → PATCH).
-	Outbound []Outbound
-}
-
-// Outbound is the command-package's view of one outbound message.
-// Mirrors a subset of gateway.OutboundMessage that commands need.
-type Outbound struct {
-	// ChatID is the destination chat id.
-	ChatID string
-	// Text is the message body (markdown; for card messages,
-	// the body becomes the card's main content).
-	Text string
-	// ReplyTo is the channel-native userMsgID to thread under.
-	// Empty for top-level messages.
-	ReplyTo string
-	// Card is non-nil for interactive card messages. When set,
-	// Channel.SendCard is called instead of Channel.Send.
-	Card *Card
-}
-
-// Card is the command-package's view of one interactive card.
-// gtw.Card translates to this at the action boundary.
-type Card struct {
-	// Kind is the card variant: "decision" (interactive button
-	// card) | "info" (read-only). Matches gateway.CardKind*.
-	Kind string
-	// Title is the card header.
-	Title string
-	// Body is the card's main markdown content.
-	Body string
-	// Choices is the list of buttons (decision cards only).
-	Choices []CardChoice
-	// RequestID is the per-card idempotency key. Channel
-	// adapters use it for de-dup on PATCH.
-	RequestID string
-	// Disabled=true means all buttons are non-interactive
-	// (used when PATCHing after a user has clicked).
-	Disabled bool
-	// ChosenEmoji marks one button as "✅ 已选" when PATCHing.
-	// Empty when no specific choice should be highlighted.
-	ChosenEmoji string
+	// in order. When non-empty, the runtime shim forwards each
+	// via cs.Channel().Send / SendCard / Patch. Uses the canonical
+	// chatsession.OutboundMessage so commands build messages with
+	// the same type the chatsession.Channel accepts (no mirror
+	// types in this package).
+	Outbound []chatsession.OutboundMessage
 }
 
 // CardChoice is the command-package's view of one button on a

@@ -22,6 +22,8 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
+
+
 // fixRemoteRig bundles everything an ID-mode /gtw fix test
 // needs: a real git repo, a ChatSession pre-pointed at it, the
 // fake provider, and the HandlerDeps that wires them together.
@@ -73,7 +75,7 @@ func newFixRemoteRig(t *testing.T) *fixRemoteRig {
 	mustGit(t, repoRoot, "symbolic-ref", "refs/remotes/origin/HEAD",
 		"refs/remotes/origin/main")
 
-	cs := chatsession.New("chat-fix-remote-"+t.Name(), "test-agent")
+	cs := chatsession.New("chat-fix-remote-"+t.Name(), "test-agent", newTestChannel())
 	if err := cs.SetActiveCwd(repoRoot); err != nil {
 		t.Fatalf("SetActiveCwd: %v", err)
 	}

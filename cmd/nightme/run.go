@@ -368,8 +368,8 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// via its Factory. Channel wraps *gateway.Channel (any
 	// command that needs to send replies uses this).
 	rt := command.RuntimeServices{
-		ReactionRouter: router,
-		Channel:        newChannelAdapter(ch),
+		Config: command.Config{Primary: cfg.Primary},
+		Logger: logger,
 	}
 
 	// Shim: translate *gateway.InboundMessage → command.SlashInput,

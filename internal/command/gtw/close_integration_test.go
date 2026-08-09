@@ -20,6 +20,8 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
+
+
 // TestIntegration_FixCloseRoundTrip is the most important
 // integration test: it drives the full /gtw fix → /gtw close
 // happy path against a real git repo. Steps:
@@ -85,7 +87,7 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 	}
 
 	// --- step 4: actually run /gtw close -------------------------
-	cs := chatsession.New("chat-int-1", "test-agent")
+	cs := chatsession.New("chat-int-1", "test-agent", newTestChannel())
 	if err := cs.SetActiveCwd(wt); err != nil {
 		t.Fatalf("SetActiveCwd wt: %v", err)
 	}
@@ -164,7 +166,7 @@ func TestIntegration_CloseRejectsDirty(t *testing.T) {
 		t.Fatalf("WriteGTWYml: %v", err)
 	}
 
-	cs := chatsession.New("chat-int-2", "test-agent")
+	cs := chatsession.New("chat-int-2", "test-agent", newTestChannel())
 	_ = cs.SetActiveCwd(wt)
 	slot := &memSlot{Context{Mode: ModeLocal, Branch: branch, Worktree: wt, RepoRoot: repoRoot, State: StateFixing}}
 	var sentTexts []string
@@ -380,7 +382,7 @@ func mustGitOut(t *testing.T, dir string, args ...string) (string, string) {
 func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	repoRoot := initTempRepo(t)
 
-	cs := chatsession.New("chat-int-shortN", "test-agent")
+	cs := chatsession.New("chat-int-shortN", "test-agent", newTestChannel())
 	if err := cs.SetActiveCwd(repoRoot); err != nil {
 		t.Fatalf("SetActiveCwd: %v", err)
 	}

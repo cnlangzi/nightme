@@ -11,6 +11,8 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
+
+
 // closeTestRig bundles the dependencies RunClose needs. Lives
 // here rather than in a shared test helper because no other test
 // file needs this exact setup.
@@ -78,7 +80,7 @@ func newCloseRig(t *testing.T) *closeTestRig {
 	}
 	// Use a per-test ChatSession via the existing helper. Each
 	// test gets its own chatID so they don't bleed state.
-	cs := chatsession.New("chat-close-" + t.Name(), "test-agent")
+	cs := chatsession.New("chat-close-" + t.Name(), "test-agent", newTestChannel())
 	_ = cs.SetActiveCwd("/tmp/start") // neutral starting cwd; tests overwrite
 	rig.cs = cs
 	return rig

@@ -20,11 +20,20 @@ import (
 	killpkg "github.com/cnlangzi/nightme/internal/command/kill"
 )
 
+// fakeCh is a minimal chatsession.Channel for tests in this package.
+// Defined inline to avoid a shared test-helpers package; mirrors the
+// shape in internal/chatsession/test_helpers_test.go.
+type nopCh struct{}
+func (nopCh) Send(_ context.Context, _ chatsession.OutboundMessage) error { return nil }
+func (nopCh) SendCard(_ context.Context, _ chatsession.OutboundMessage) (string, error) { return "", nil }
+func newTestChannel() chatsession.Channel { return nopCh{} }
+
+
 // TestKillAgent_NilCS — kill.KillAgent with nil CS returns
 // kill.ErrNoContext (defensive — every cmd preflights before
 // calling, but the package must not panic).
 func TestKillAgent_NilCS(t *testing.T) {
-	cs := chatsession.New("chat-nil", "cc")
+	cs := chatsession.New("chat-nil", "cc", newTestChannel())
 	defer cs.WithPersistence(nil, nil)
 	// Force the CS reference inside Cmd to be nil.
 	_, err := killpkg.KillAgent(&killpkg.Cmd{CS: nil, Ctx: context.Background()}, "cc")

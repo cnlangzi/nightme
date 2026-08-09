@@ -84,7 +84,7 @@ func (f fakeSpawnerLS) Spawn(_ context.Context, _, _ string, _ []string, _ strin
 // the same session; it does NOT transition the session to Exited.
 // The session only flips to Exited when the events channel closes.
 func TestReadPump_ContinuesAfterEventDone(t *testing.T) {
-	cs := New("oc_pi", "pi")
+	cs := New("oc_pi", "pi", newTestChannel())
 	cs.SetActiveCwd("/tmp")
 	cs.SetActiveAgent("pi")
 	fake := newLongLivedFakeAS()

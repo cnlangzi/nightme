@@ -73,7 +73,7 @@ func TestRealPi_NewAfterSwitch(t *testing.T) {
 	reg.Register(claudeAgent)
 	spawner := NewRegistrySpawner(reg)
 
-	cs := New("oc_real_pi_new", "pi").
+	cs := New("oc_real_pi_new", "pi", newTestChannel()).
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 	if err := cs.SetActiveCwd(dir); err != nil {

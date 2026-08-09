@@ -36,7 +36,7 @@ func (s *spawnerRecording) Spawn(_ context.Context, _, _ string, _ []string, _ s
 func TestFlushHook_DefaultDeliversToAgent(t *testing.T) {
 	spawner := &spawnerRecording{}
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "claude").
+	cs := New("oc_xxx", "claude", newTestChannel()).
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
@@ -77,7 +77,7 @@ func TestFlushHook_DefaultDeliversToAgent(t *testing.T) {
 func TestFlushHook_BusyQueues(t *testing.T) {
 	spawner := &spawnerRecording{}
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "claude").
+	cs := New("oc_xxx", "claude", newTestChannel()).
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 	cs.SetActiveCwd("/x")
@@ -133,7 +133,7 @@ func TestFlushHook_BusyQueues(t *testing.T) {
 func TestFlushHook_NoActiveAgentSession(t *testing.T) {
 	spawner := &spawnerRecording{}
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "claude").
+	cs := New("oc_xxx", "claude", newTestChannel()).
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 	cs.SetActiveCwd("/x")

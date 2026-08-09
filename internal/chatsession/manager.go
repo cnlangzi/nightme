@@ -97,7 +97,7 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) *ChatSession {
 		return cs
 	}
 
-	cs := New(chatID, primaryAgent).
+	cs := New(chatID, primaryAgent, nil).
 		WithSpawner(m.spawner).
 		WithPersistence(m.csFile, m.asFile)
 	m.sessions[chatID] = cs
@@ -182,7 +182,7 @@ func (m *Manager) RestoreFromRegistry() error {
 	}
 
 	for _, entry := range m.csFile.List() {
-		cs := New(entry.ChatID, entry.PrimaryAgent).
+		cs := New(entry.ChatID, entry.PrimaryAgent, nil).
 			WithSpawner(m.spawner).
 			WithPersistence(m.csFile, m.asFile)
 		cs.activeCwd = entry.ActiveCwd

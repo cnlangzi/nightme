@@ -167,6 +167,13 @@ type ChatSession struct {
 	cancel context.CancelFunc
 	ctxMu  sync.Mutex
 
+	// channel is the IM Channel bound to this chat session.
+	// Set once at New() time (production) or by WithChannel
+	// (test path / late binding). Immutable post-binding; no
+	// lock needed. nil means "no channel bound yet" — commands
+	// must nil-check via Channel() before calling Send/SendCard.
+	channel Channel
+
 	// --- F-45 teamflow (gtw) state ------------------------------
 	//
 	// REMOVED in F-51: gtwContext, gtwDrafts, and the
@@ -185,7 +192,15 @@ type ChatSession struct {
 // to dispatch to (no runtime fallback: the lookup only ever reads
 // activeAgent). The snapshot itself is read-only post-construction
 // (Q-A: no /default command, no per-chat override).
-func New(chatID, primaryAgent string) *ChatSession {
+//
+// ch is the IM channel bound to this chat; nil is permitted (test
+// scenarios) but production wiring must always pass a real Channel.
+// When ch is nil the constructor logs a warning and proceeds;
+// callers can detect this via cs.Channel() == nil.
+func New(chatID, primaryAgent string, ch Channel) *ChatSession {
+	if ch == nil {
+		slog.Default().Warn("chatsession.New: channel is nil (chatID=" + chatID + ")")
+	}
 	cs := &ChatSession{
 		ID:               deriveIDFromChatID(chatID),
 		ChatID:           chatID,
@@ -195,6 +210,7 @@ func New(chatID, primaryAgent string) *ChatSession {
 		watchMode:        WatchModeMention, // F-watch default
 		thinkMode:        ThinkModeShow,    // F-think default
 		toolsMode:        agent.ToolsModeHide, // F-38 default (quiet by default)
+		channel:          ch,
 		createdAt:        time.Now(),
 		lastInteractionAt: time.Now(),
 	}
@@ -495,6 +511,39 @@ func (cs *ChatSession) emitMessageDropped(msg Message) {
 // stamped. F-54 replaced it with cs.PromptEndBus.Publish(PromptEndedEvent{...});
 // subscribers register via PromptEndBus().Subscribe. See
 // docs/feat/F-54-event-bus.md for the migration rationale.
+
+// Channel returns the IM channel bound to this chat session.
+// Returns nil if no channel was bound at New() time (test path)
+// or if WithChannel was never called.
+//
+// Lock-free: channel is set once and never mutated.
+func (cs *ChatSession) Channel() Channel {
+	if cs == nil {
+		return nil
+	}
+	return cs.channel
+}
+
+// WithChannel binds a Channel to this ChatSession. Returns
+// the receiver for chaining. Used by Manager.GetOrCreate via
+// the channelResolver path; not normally called by commands.
+//
+// Idempotent: subsequent calls with the same Channel are no-ops;
+// calls with a different Channel panic — a chat's channel binding
+// is immutable for the daemon's lifetime.
+func (cs *ChatSession) WithChannel(ch Channel) *ChatSession {
+	if cs == nil {
+		return cs
+	}
+	if ch == nil {
+		return cs
+	}
+	if cs.channel != nil && cs.channel != ch {
+		panic(fmt.Sprintf("chatsession: ChatSession %s already bound to a different Channel", cs.ChatID))
+	}
+	cs.channel = ch
+	return cs
+}
 
 // Context returns the per-ChatSession ctx. Every AgentSession
 // active on this chat derives its own per-AS ctx from

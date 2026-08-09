@@ -16,11 +16,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
+
+
 
 // fixRemoteRig bundles everything an ID-mode /gtw fix test
 // needs: a real git repo, a ChatSession pre-pointed at it, the
@@ -34,6 +37,7 @@ type fixRemoteRig struct {
 	deps      HandlerDeps
 	prov      *fakeGitProvider
 	sentTexts []string
+	rec       *fixRemoteRecCh
 }
 
 // memDrafts is a tiny DraftsMap for tests that don't need
@@ -73,7 +77,8 @@ func newFixRemoteRig(t *testing.T) *fixRemoteRig {
 	mustGit(t, repoRoot, "symbolic-ref", "refs/remotes/origin/HEAD",
 		"refs/remotes/origin/main")
 
-	cs := chatsession.New("chat-fix-remote-"+t.Name(), "test-agent")
+	rec := &fixRemoteRecCh{}
+	cs, _ := chatsession.New("chat-fix-remote-"+t.Name(), "test-agent", rec)
 	if err := cs.SetSelectedCwd(repoRoot); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
@@ -85,6 +90,7 @@ func newFixRemoteRig(t *testing.T) *fixRemoteRig {
 		slot:     &memSlot{},
 		drafts:   newMemDrafts(),
 		prov:     prov,
+		rec:      rec,
 	}
 	rig.deps = HandlerDeps{
 		Git:    ExecGitRunner{},
@@ -98,6 +104,51 @@ func newFixRemoteRig(t *testing.T) *fixRemoteRig {
 		SkipRefreshDefaultBranch: true,
 	}
 	return rig
+}
+
+// fixRemoteRecCh captures every Send / SendCard / Patch for the
+// fixRemote integration tests after the cs.Channel() migration.
+// The legacy deps.Send mock (rig.captureSend) is kept for
+// backward compat with tests that read sentTexts, but the
+// production code now uses cs.Channel().Send — so we capture in
+// both places.
+type fixRemoteRecCh struct {
+	mu    sync.Mutex
+	sends []chatsession.OutboundMessage
+}
+
+func (r *fixRemoteRecCh) Send(_ context.Context, m chatsession.OutboundMessage) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sends = append(r.sends, m)
+	return nil
+}
+func (r *fixRemoteRecCh) SendCard(_ context.Context, m chatsession.OutboundMessage) (string, error) {
+	r.Send(context.Background(), m)
+	return "rec-card-id", nil
+}
+func (r *fixRemoteRecCh) Patch(_ context.Context, m chatsession.OutboundMessage) error {
+	r.Send(context.Background(), m)
+	return nil
+}
+
+func (r *fixRemoteRecCh) lastText() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.sends) == 0 {
+		return ""
+	}
+	return r.sends[len(r.sends)-1].Text
+}
+
+func (r *fixRemoteRecCh) serialized() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.sends))
+	for i, s := range r.sends {
+		out[i] = s.Text
+	}
+	return out
 }
 
 // captureSend is the deps.Send callback. Records every text
@@ -228,7 +279,7 @@ func TestFixRemote_HappyPath(t *testing.T) {
 	if parsed.Provider != string(ProviderGitHub) {
 		t.Errorf("yml provider = %q, want github", parsed.Provider)
 	}
-	if parsed.RepoRoot != rig.repoRoot {
+	if !pathsEqual(parsed.RepoRoot, rig.repoRoot) {
 		t.Errorf("yml repoRoot = %q, want %q", parsed.RepoRoot, rig.repoRoot)
 	}
 
@@ -249,7 +300,7 @@ func TestFixRemote_HappyPath(t *testing.T) {
 	}
 
 	// --- reply must include success card -----------------------
-	last := rig.sentTexts[len(rig.sentTexts)-1]
+	last := rig.rec.lastText()
 	if !strings.Contains(last, "Fix #"+fmt.Sprint(issueID)) {
 		t.Errorf("success reply missing issue header:\n%s", last)
 	}
@@ -292,7 +343,7 @@ func TestFixRemote_IssueNotFound(t *testing.T) {
 		t.Errorf("slot = %+v, want zero", got)
 	}
 	// Reply must mention the issue id + "not found".
-	last := rig.sentTexts[len(rig.sentTexts)-1]
+	last := rig.rec.lastText()
 	if !strings.Contains(last, "Issue #42") {
 		t.Errorf("reply missing 'Issue #42':\n%s", last)
 	}
@@ -329,7 +380,7 @@ func TestFixRemote_LabelFailContinues(t *testing.T) {
 		t.Errorf("worktree count = %d, want ≥ 2 (label fail should not block worktree):\n%s", c, wtOut)
 	}
 	// Reply set must include both the warning AND the success card.
-	all := strings.Join(rig.sentTexts, "\n---\n")
+	all := strings.Join(rig.rec.serialized(), "\n---\n")
 	if !strings.Contains(all, "Could not add label") {
 		t.Errorf("no label-fail warn in replies:\n%s", all)
 	}

@@ -14,6 +14,16 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
+// fakeCh is a minimal chatsession.Channel for tests in this package.
+// Defined inline to avoid a shared test-helpers package; mirrors the
+// shape in internal/chatsession/test_helpers_test.go.
+type nopCh struct{}
+func (nopCh) Send(_ context.Context, _ chatsession.OutboundMessage) error { return nil }
+func (nopCh) SendCard(_ context.Context, _ chatsession.OutboundMessage) (string, error) { return "", nil }
+func (nopCh) Patch(_ context.Context, _ chatsession.OutboundMessage) error { return nil }
+func newTestChannel() chatsession.Channel { return nopCh{} }
+
+
 // T-alive: end-to-end integration test that reproduces the
 // "AgentSession events never reach the channel" regression
 // observed on 2026-08-07 with feishu + claudecode.
@@ -94,7 +104,8 @@ func integrationEventHandler(ch Channel, _ *chatsession.ChatSession) func(env ch
 // --- helpers ----------------------------------------------------------
 
 func newIntegrationChatSession(chatID string, spawner chatsession.Spawner) *chatsession.ChatSession {
-	cs := chatsession.New(chatID, "fake").WithSpawner(spawner)
+	cs, _ := chatsession.New(chatID, "fake", newTestChannel())
+	cs = cs.WithSpawner(spawner)
 	cs.SetSelectedCwd("/tmp")
 	cs.SetSelectedAgent("fake")
 	return cs

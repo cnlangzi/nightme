@@ -24,12 +24,11 @@ import (
 // Factory is the command.SlashCommandFactory for /use.
 type Factory struct {
 	mgr            *chatsession.Manager
-	defaultPrimary string
 }
 
 // NewFactory constructs a Factory backed by mgr.
-func NewFactory(mgr *chatsession.Manager, defaultPrimary string) *Factory {
-	return &Factory{mgr: mgr, defaultPrimary: defaultPrimary}
+func NewFactory(mgr *chatsession.Manager) *Factory {
+	return &Factory{mgr: mgr}
 }
 
 // Spec implements command.SlashCommandFactory.
@@ -51,7 +50,7 @@ func (f *Factory) Spec() command.Spec {
 //	/use (no selectedCwd yet)        → reply "send /cwd <path> first"
 //	/use unknown-agent             → reply "unknown agent"
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
-	input command.SlashInput) (*command.SlashOutput, error) {
+	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
 	if len(input.Args) < 2 {
 		return command.Reply(ctx, rt, "Usage: /use <agent> [args...]"), nil
@@ -61,8 +60,6 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	if agentName == "" {
 		return command.Reply(ctx, rt, "Usage: /use <agent> [args...]"), nil
 	}
-
-	cs := f.mgr.GetOrCreate(input.ChatID, f.defaultPrimary)
 
 	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
 		return failOut, nil

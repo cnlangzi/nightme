@@ -73,9 +73,9 @@ func TestRealPi_NewAfterSwitch(t *testing.T) {
 	reg.Register(claudeAgent)
 	spawner := NewRegistrySpawner(reg)
 
-	cs := New("oc_real_pi_new", "pi").
-		WithPersistence(csFile, asFile).
-		WithSpawner(spawner)
+	cs, _ := New("oc_real_pi_new", "pi", newTestChannel())
+	cs = cs.WithPersistence(csFile, asFile)
+	cs = cs.WithSpawner(spawner)
 	if err := cs.SetSelectedCwd(dir); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}

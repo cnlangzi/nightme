@@ -11,7 +11,7 @@ import (
 )
 
 func TestFactory_Spec(t *testing.T) {
-	f := NewFactory(chatsession.NewManager(), "claude")
+	f := NewFactory(chatsession.NewManager())
 	s := f.Spec()
 	if s.Name != "watch" {
 		t.Fatalf("Spec.Name = %q, want watch", s.Name)
@@ -23,10 +23,11 @@ func TestFactory_Spec(t *testing.T) {
 
 func TestFactory_Handle_NoArgs_ReportsCurrentMode(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr, "claude")
+	f := NewFactory(mgr)
 	input := command.SlashInput{ChatID: "c1", Args: []string{"watch"}}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, input)
+	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -40,11 +41,12 @@ func TestFactory_Handle_NoArgs_ReportsCurrentMode(t *testing.T) {
 
 func TestFactory_Handle_OnOffRoundtrip(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr, "claude")
+	f := NewFactory(mgr)
 	ctx := context.Background()
+	cs, _ := mgr.GetOrCreate("c1", "claude")
 
 	on := command.SlashInput{ChatID: "c1", Args: []string{"watch", "on"}}
-	out, err := f.Handle(ctx, command.RuntimeServices{}, on)
+	out, err := f.Handle(ctx, command.RuntimeServices{}, cs, on)
 	if err != nil || !out.Consumed {
 		t.Fatalf("Handle on: err=%v consumed=%v", err, out.Consumed)
 	}
@@ -53,7 +55,7 @@ func TestFactory_Handle_OnOffRoundtrip(t *testing.T) {
 	}
 
 	off := command.SlashInput{ChatID: "c1", Args: []string{"watch", "off"}}
-	out, err = f.Handle(ctx, command.RuntimeServices{}, off)
+	out, err = f.Handle(ctx, command.RuntimeServices{}, cs, off)
 	if err != nil || !out.Consumed {
 		t.Fatalf("Handle off: err=%v consumed=%v", err, out.Consumed)
 	}
@@ -64,10 +66,11 @@ func TestFactory_Handle_OnOffRoundtrip(t *testing.T) {
 
 func TestFactory_Handle_UnknownMode_RepliesUsage(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr, "claude")
+	f := NewFactory(mgr)
 	input := command.SlashInput{ChatID: "c1", Args: []string{"watch", "maybe"}}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, input)
+	cs, _ := mgr.GetOrCreate(input.ChatID, "test")
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}

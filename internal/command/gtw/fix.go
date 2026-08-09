@@ -43,13 +43,6 @@ type HandlerDeps struct {
 	// Send is the IM-side send callback. Production: wraps
 	// gateway.Channel.Send; tests: appends to a slice.
 	Send SendFunc
-	// SendCard (F-46) is the IM-side card send callback. Returns
-	// the bot-side message id assigned by the channel so the
-	// dispatcher can store it on the draft for later PATCH.
-	// Production: wraps gateway.Channel.SendCard; tests can
-	// inject a fake or leave nil (legacy fallback uses Send +
-	// discards the id, action handler emits no PATCH).
-	SendCard SendCardFunc
 	// Git wraps the local git binary. Tests inject a fake.
 	Git GitRunner
 	// Prober is the HTTPProber for Detect's Stage B API probe
@@ -118,17 +111,17 @@ func RunFix(
 		deps.Now = timeNow
 	}
 	if len(args) < 1 {
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			"Usage: /gtw fix <issue-id>  |  /gtw fix --name <branch>"), nil
 	}
 
 	// --- preflight: SelectedCwd must be set for both modes --------
 	if cs == nil || cs.SelectedCwd() == "" {
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			"❌ No active workspace. Send /cwd <path> first."), nil
 	}
 	if cur := slot.Load(); cur != (Context{}) {
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			"⚠️ Already inside a /gtw fix. Finish or cancel it first."), nil
 	}
 	// preflightOrphanYml catches a related but distinct case:
@@ -144,7 +137,7 @@ func RunFix(
 	// also nukes any orphan yml's parent worktree.
 	if !force {
 		if err := preflightOrphanYml(ctx, cs.SelectedCwd(), deps.Git); err != nil {
-			return reply(ctx, deps.Send, chatID, messageID, err.Error()), nil
+			return reply(ctx, cs.Channel(), chatID, messageID, err.Error()), nil
 		}
 	}
 
@@ -215,7 +208,7 @@ func runFixRemote(
 ) (*Result, error) {
 	issueID, err := parseIssueID(rawID)
 	if err != nil {
-		return reply(ctx, deps.Send, chatID, messageID, fmt.Sprintf("❌ %v", err)), nil
+		return reply(ctx, cs.Channel(), chatID, messageID, fmt.Sprintf("❌ %v", err)), nil
 	}
 
 	// F-XX: daemon-recovery via the worktree's git branch was
@@ -236,12 +229,12 @@ func runFixRemote(
 	// --- locate repo + remote (§5.2.② prep) -----------------------
 	repoRoot, err := RepoRoot(ctx, cs.SelectedCwd(), deps.Git)
 	if err != nil {
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			"❌ Not in a git repository. Run /cwd <inside a repo> first."), nil
 	}
 	remoteURL, err := RemoteOriginURL(ctx, repoRoot, deps.Git)
 	if err != nil || remoteURL == "" {
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			"❌ No `origin` remote. Add one with `git remote add origin <url>`."), nil
 	}
 	detect := deps.Detect
@@ -257,24 +250,24 @@ func runFixRemote(
 		switch {
 		case errors.Is(err, ErrInvalidRemoteURL):
 			if redacted == "" {
-				return reply(ctx, deps.Send, chatID, messageID,
+				return reply(ctx, cs.Channel(), chatID, messageID,
 					"❌ 无效的 remote URL（凭证已脱敏）\n  Expected: https://github.com/<owner>/<repo>.git, git@github.com:<owner>/<repo>.git, ssh://git@<host>/path, git://<host>/path, etc."), nil
 			}
-			return reply(ctx, deps.Send, chatID, messageID,
+			return reply(ctx, cs.Channel(), chatID, messageID,
 				fmt.Sprintf("❌ 无效的 remote URL: %s\n  Expected: https://github.com/<owner>/<repo>.git, git@github.com:<owner>/<repo>.git, ssh://git@<host>/path, git://<host>/path, etc.", redacted)), nil
 		default:
-			return reply(ctx, deps.Send, chatID, messageID,
+			return reply(ctx, cs.Channel(), chatID, messageID,
 				fmt.Sprintf("❌ 暂不支持的 Git 平台 (host: %s — neither github.com/gitlab.com URL hint nor /api/v3/meta or /api/v4/version probe recognised it).", redacted)), nil
 		}
 	}
 	if provider == nil {
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			"❌ Provider detection returned no result (deps.Detect override bug)."), nil
 	}
 	providerKind := provider.Kind()
 	owner, repo, err := ParseRepoOwner(remoteURL)
 	if err != nil {
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf("❌ Cannot parse owner/repo from remote URL %s.", redactForDisplay(remoteURL))), nil
 	}
 
@@ -282,10 +275,10 @@ func runFixRemote(
 	issue, err := provider.GetIssue(ctx, owner, repo, issueID)
 	if err != nil {
 		if errors.Is(err, ErrIssueNotFound) {
-			return reply(ctx, deps.Send, chatID, messageID,
+			return reply(ctx, cs.Channel(), chatID, messageID,
 				fmt.Sprintf("❌ Issue #%d not found in %s/%s.", issueID, owner, repo)), nil
 		}
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf("❌ Failed to fetch issue: %v", err)), nil
 	}
 	branch := DeriveBranchFromTitle(issue.Title, issueID)
@@ -302,7 +295,7 @@ func runFixRemote(
 	// preflight would also fail).
 	exists, err := BranchExists(ctx, repoRoot, branch, deps.Git)
 	if err != nil {
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf("❌ git show-ref failed: %v", err)), nil
 	}
 	if exists {
@@ -316,7 +309,7 @@ func runFixRemote(
 			return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
 				branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */)
 		}
-		return emitBranchExistsDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
+		return emitBranchExistsDraft(ctx, cs, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID:  issueID,
 			Title:    issue.Title,
 			Branch:   branch,
@@ -345,11 +338,11 @@ func runFixRemote(
 			if stderr != "" {
 				body += "\n[git stderr tail]\n" + stderr
 			}
-			return reply(ctx, deps.Send, chatID, messageID, body), nil
+			return reply(ctx, cs.Channel(), chatID, messageID, body), nil
 		}
 	} else {
 		if err := PreflightWorktreeCreate(ctx, repoRoot, branch, worktreePath, deps.Git); err != nil {
-			return reply(ctx, deps.Send, chatID, messageID, err.Error()), nil
+			return reply(ctx, cs.Channel(), chatID, messageID, err.Error()), nil
 		}
 	}
 
@@ -374,7 +367,7 @@ func runFixRemote(
 		var err error
 		baseSHA, _, err = RefreshDefaultBranch(ctx, repoRoot, deps)
 		if err != nil {
-			return reply(ctx, deps.Send, chatID, messageID, err.Error()), nil
+			return reply(ctx, cs.Channel(), chatID, messageID, err.Error()), nil
 		}
 	}
 
@@ -388,7 +381,7 @@ func runFixRemote(
 	// later, the worktree is already real and the user has a
 	// usable setup, label or not.
 	if err := WorktreeAdd(ctx, repoRoot, branch, worktreePath, "HEAD", deps.Git); err != nil {
-		return emitWorktreeFailDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
+		return emitWorktreeFailDraft(ctx, cs, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID:  issueID,
 			Title:    issue.Title,
 			Branch:   branch,
@@ -418,7 +411,7 @@ func runFixRemote(
 	// the durable claim and the user can retry the label
 	// later or just live without it.
 	if err := provider.AddLabel(ctx, owner, repo, issueID, LabelWIP); err != nil {
-		_ = deps.Send(ctx, OutMsg{
+		_ = cs.Channel().Send(ctx, chatsession.OutboundMessage{
 			ChatID:  chatID,
 			ReplyTo: messageID,
 			Text: fmt.Sprintf(
@@ -465,12 +458,12 @@ func runFixLocal(
 ) (*Result, error) {
 	branch, err := DeriveBranchFromName(rawName)
 	if err != nil {
-		return reply(ctx, deps.Send, chatID, messageID, "❌ "+err.Error()), nil
+		return reply(ctx, cs.Channel(), chatID, messageID, "❌ "+err.Error()), nil
 	}
 
 	repoRoot, err := RepoRoot(ctx, cs.SelectedCwd(), deps.Git)
 	if err != nil {
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			"❌ Not in a git repository. Run /cwd <inside a repo> first."), nil
 	}
 	worktreePath := WorktreePath(repoRoot, branch)
@@ -481,7 +474,7 @@ func runFixLocal(
 	// is already attached at the target worktree path).
 	exists, err := BranchExists(ctx, repoRoot, branch, deps.Git)
 	if err != nil {
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf("❌ git show-ref failed: %v", err)), nil
 	}
 	if exists {
@@ -492,7 +485,7 @@ func runFixLocal(
 			return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
 				branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */)
 		}
-		return emitBranchExistsDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
+		return emitBranchExistsDraft(ctx, cs, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID: -1,
 			Title:   "(local branch)",
 			Branch:  branch,
@@ -515,14 +508,14 @@ func runFixLocal(
 			if stderr != "" {
 				body += "\n[git stderr tail]\n" + stderr
 			}
-			return reply(ctx, deps.Send, chatID, messageID, body), nil
+			return reply(ctx, cs.Channel(), chatID, messageID, body), nil
 		}
 	} else if err := PreflightWorktreeCreate(ctx, repoRoot, branch, worktreePath, deps.Git); err != nil {
-		return reply(ctx, deps.Send, chatID, messageID, err.Error()), nil
+		return reply(ctx, cs.Channel(), chatID, messageID, err.Error()), nil
 	}
 
 	if err := WorktreeAdd(ctx, repoRoot, branch, worktreePath, "HEAD", deps.Git); err != nil {
-		return emitWorktreeFailDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
+		return emitWorktreeFailDraft(ctx, cs, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID:  -1,
 			Title:    "(local branch)",
 			Branch:   branch,
@@ -570,7 +563,7 @@ func completeFixAndDispatch(
 ) (*Result, error) {
 	// --- switch cwd (§5.2.④) -------------------------------------
 	if err := cs.SetSelectedCwd(worktreePath); err != nil {
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf("❌ SetSelectedCwd failed: %v", err)), nil
 	}
 
@@ -611,12 +604,12 @@ func completeFixAndDispatch(
 			// Even the rollback failed. Surface the original
 			// error + the rollback note so the user knows to
 			// clean up by hand.
-			return reply(ctx, deps.Send, chatID, messageID,
+			return reply(ctx, cs.Channel(), chatID, messageID,
 				fmt.Sprintf("❌ /gtw fix: CommitGitignore failed (%v); rollback also failed (%v).\n"+
 					"the worktree at %s is in a stuck state — please `git worktree remove --force %s` manually.",
 					err, rmErr, worktreePath, worktreePath)), nil
 		}
-		return reply(ctx, deps.Send, chatID, messageID,
+		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf("❌ /gtw fix: CommitGitignore failed (%v).\n"+
 				"rolled back worktree at %s. fix and retry:\n"+
 				"  - ensure `git config user.email` is set, OR\n"+
@@ -669,7 +662,7 @@ func completeFixAndDispatch(
 		// non-nil; a nil here would be a programming error.
 		card = renderFixSuccessCard(issue, branch, worktreePath, repo, baseSHA)
 	}
-	result := reply(ctx, deps.Send, chatID, messageID, card)
+	result := reply(ctx, cs.Channel(), chatID, messageID, card)
 
 	// --- dispatch issue to agent (ID mode only) -------------------
 	// We do this AFTER the reply so the user sees the success
@@ -697,7 +690,7 @@ func completeFixAndDispatch(
 			// Append a single-line warning so the user knows
 			// the agent didn't receive the dispatch. We do not
 			// roll back the worktree — see comment above.
-			_ = deps.Send(ctx, OutMsg{
+			_ = cs.Channel().Send(ctx, chatsession.OutboundMessage{
 				ChatID:  chatID,
 				ReplyTo: messageID,
 				Text:    fmt.Sprintf("⚠️ Could not dispatch issue #%d to agent: %v\nThe worktree is ready; you can /cwd into %s and tell the agent to fix #%d.", issue.ID, err, worktreePath, issue.ID),
@@ -838,6 +831,7 @@ func stderrFromWorktreeErr(err error) string {
 
 func emitBranchExistsDraft(
 	ctx context.Context,
+	cs *chatsession.ChatSession,
 	deps HandlerDeps,
 	chatID, messageID, userMsgID string,
 	drafts DraftsMap,
@@ -845,22 +839,24 @@ func emitBranchExistsDraft(
 	existingPath string,
 ) (*Result, error) {
 		card := BranchExistsCard(payload, existingPath)
-		return sendDraft(ctx, deps, chatID, messageID, userMsgID, card, drafts, DraftFixBranchExists, payload)
+		return sendDraft(ctx, cs, deps, chatID, messageID, userMsgID, card, drafts, DraftFixBranchExists, payload)
 }
 
 func emitWorktreeFailDraft(
 	ctx context.Context,
+	cs *chatsession.ChatSession,
 	deps HandlerDeps,
 	chatID, messageID, userMsgID string,
 	drafts DraftsMap,
 	payload FixDraftPayload,
 ) (*Result, error) {
 		card := WorktreeFailCard(payload)
-		return sendDraft(ctx, deps, chatID, messageID, userMsgID, card, drafts, DraftFixWorktreeFail, payload)
+		return sendDraft(ctx, cs, deps, chatID, messageID, userMsgID, card, drafts, DraftFixWorktreeFail, payload)
 }
 
 func sendDraft(
 	ctx context.Context,
+	cs *chatsession.ChatSession,
 	deps HandlerDeps,
 	chatID, messageID, userMsgID string,
 	card Card,
@@ -874,12 +870,13 @@ func sendDraft(
 	}
 	card.RequestID = requestID
 
+	ch := cs.Channel()
 	var botMsgID string
-	if deps.SendCard != nil {
-		id, err := deps.SendCard(ctx, OutCardMsg{
+	if ch != nil {
+		id, err := ch.SendCard(ctx, chatsession.OutboundMessage{
 			ChatID:  chatID,
 			ReplyTo: messageID,
-			Card:    card,
+			Card:    gtwCardToChatsession(card),
 		})
 		if err == nil {
 			botMsgID = id
@@ -888,17 +885,19 @@ func sendDraft(
 		// the user still sees the decision content even if the
 		// channel's card path is unavailable.
 	}
-	if deps.SendCard == nil || botMsgID == "" {
+	if ch == nil || botMsgID == "" {
 		// Legacy / fallback: render the card as plain markdown and
-		// send via deps.Send. The dispatcher still stores the
+		// send via Send. The dispatcher still stores the
 		// draft so the reaction pipeline works; the action handler
 		// just emits plain text follow-ups (no PATCH) when the
 		// bot message id is empty.
-		_ = deps.Send(ctx, OutMsg{
-			ChatID:  chatID,
-			ReplyTo: messageID,
-			Text:    renderCardMarkdown(card),
-		})
+		if ch != nil {
+			_ = ch.Send(ctx, chatsession.OutboundMessage{
+				ChatID:  chatID,
+				ReplyTo: messageID,
+				Text:    renderCardMarkdown(card),
+			})
+		}
 	}
 
 	drafts.Store(userMsgID, &Draft{
@@ -958,9 +957,40 @@ func renderCardMarkdown(c Card) string {
 // calling a nil SendFunc would panic. The defensive `if send
 // != nil` keeps the helper safe and degrades to "reply
 // consumed but no text sent" rather than crashing the daemon.
-func reply(ctx context.Context, send SendFunc, chatID, messageID, text string) *Result {
-	if send != nil {
-		_ = send(ctx, OutMsg{ChatID: chatID, ReplyTo: messageID, Text: text})
+func reply(ctx context.Context, ch chatsession.Channel, chatID, messageID, text string) *Result {
+	if ch != nil {
+		_ = ch.Send(ctx, chatsession.OutboundMessage{
+			ChatID:  chatID,
+			ReplyTo: messageID,
+			Text:    text,
+		})
 	}
 	return &Result{Consumed: true}
+}
+// gtwCardToChatsession translates gtw.Card (business view) to
+// chatsession.Card (canonical message type). gtw.Card has fewer
+// fields (no Kind/Disabled/ChosenEmoji); those get zero values
+// in the destination.
+func gtwCardToChatsession(in Card) *chatsession.Card {
+	return &chatsession.Card{
+		Title:     in.Title,
+		Body:      in.Body,
+		Choices:   gtwCardChoicesToChat(in.Choices),
+		RequestID: in.RequestID,
+	}
+}
+
+func gtwCardChoicesToChat(in []CardChoice) []chatsession.CardChoice {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]chatsession.CardChoice, len(in))
+	for i, c := range in {
+		out[i] = chatsession.CardChoice{
+			Emoji:  c.Emoji,
+			Label:  c.Label,
+			Action: c.Action,
+		}
+	}
+	return out
 }

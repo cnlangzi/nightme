@@ -11,6 +11,8 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
+
+
 // --- parseFixArgs unit tests ---
 
 func TestParseFixArgs_BareIssueID(t *testing.T) {
@@ -245,20 +247,16 @@ func TestRunClose_ForceOverridesDirty(t *testing.T) {
 		t.Fatalf("WriteGTWYml: %v", err)
 	}
 
-	cs := chatsession.New("chat-force-dirty", "test-agent")
+	rec := &recordingCh{}
+	cs, _ := chatsession.New("chat-force-dirty", "test-agent", rec)
 	_ = cs.SetSelectedCwd(wt)
 	slot := &memSlot{Context{
 		Mode: ModeLocal, Issue: -1, Branch: "fix/dirty",
 		Worktree: wt, RepoRoot: repoRoot, State: StateFixing,
 	}}
-	var sentTexts []string
 	deps := HandlerDeps{
 		Git: ExecGitRunner{},
 		Now: func() time.Time { return time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC) },
-		Send: func(_ context.Context, m OutMsg) error {
-			sentTexts = append(sentTexts, m.Text)
-			return nil
-		},
 	}
 
 	// Make the worktree dirty.
@@ -277,7 +275,7 @@ func TestRunClose_ForceOverridesDirty(t *testing.T) {
 	if _, err := os.Stat(wt); err != nil {
 		t.Fatalf("worktree removed despite no-force: %v", err)
 	}
-	noForceReply := sentTexts[len(sentTexts)-1]
+	noForceReply := rec.lastText()
 	if !strings.Contains(noForceReply, "uncommitted") {
 		t.Errorf("no-force reply missing dirty hint:\n%s", noForceReply)
 	}
@@ -294,7 +292,7 @@ func TestRunClose_ForceOverridesDirty(t *testing.T) {
 	if _, err := os.Stat(wt); !os.IsNotExist(err) {
 		t.Errorf("worktree still present after force-close: %v", err)
 	}
-	forceReply := sentTexts[len(sentTexts)-1]
+	forceReply := rec.lastText()
 	if !strings.Contains(forceReply, "force-discarded") {
 		t.Errorf("force reply missing force-discarded note:\n%s", forceReply)
 	}
@@ -345,7 +343,8 @@ func TestFixRemote_ForceRemovesLeftoverWorktree(t *testing.T) {
 		t.Fatal("PreflightWorktreeCreate should reject occupied path")
 	}
 
-	cs := chatsession.New("chat-force", "test-agent")
+	rec := &recordingCh{}
+	cs, _ := chatsession.New("chat-force", "test-agent", rec)
 	if err := cs.SetSelectedCwd(repoRoot); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
@@ -353,14 +352,9 @@ func TestFixRemote_ForceRemovesLeftoverWorktree(t *testing.T) {
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	prov.SetIssue(42, &Issue{ID: 42, Title: "Title", State: "open"})
 
-	var sentTexts []string
 	deps := HandlerDeps{
 		Git: ExecGitRunner{},
 		Now: func() time.Time { return time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC) },
-		Send: func(_ context.Context, m OutMsg) error {
-			sentTexts = append(sentTexts, m.Text)
-			return nil
-		},
 		Detect:                  fakeDetect(prov),
 		SkipRefreshDefaultBranch: true,
 	}
@@ -385,7 +379,7 @@ func TestFixRemote_ForceRemovesLeftoverWorktree(t *testing.T) {
 	}
 
 	// After the fix, SelectedCwd must be the (re-created) worktree.
-	if got := cs.SelectedCwd(); got != wt {
+	if got := cs.SelectedCwd(); !pathsEqual(got, wt) {
 		t.Errorf("SelectedCwd = %q, want %q", got, wt)
 	}
 	// yml must be re-written under the same path.
@@ -398,7 +392,7 @@ func TestFixRemote_ForceRemovesLeftoverWorktree(t *testing.T) {
 		t.Errorf("leftover oldbranch still present in worktree list:\n%s", wtList)
 	}
 	// Success reply mentions the new fix.
-	last := sentTexts[len(sentTexts)-1]
+	last := rec.lastText()
 	if !strings.Contains(last, "Fix #42") {
 		t.Errorf("reply missing Fix #42:\n%s", last)
 	}
@@ -417,19 +411,15 @@ func TestFixRemote_WithoutForceStillRejectsOccupied(t *testing.T) {
 	wt := WorktreePath(repoRoot, "title")
 	mustGit(t, repoRoot, "worktree", "add", "-b", "oldbranch", wt, "HEAD")
 
-	cs := chatsession.New("chat-noforce", "test-agent")
+	rec := &recordingCh{}
+	cs, _ := chatsession.New("chat-noforce", "test-agent", rec)
 	_ = cs.SetSelectedCwd(repoRoot)
 
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	prov.SetIssue(42, &Issue{ID: 42, Title: "Title", State: "open"})
-	var sentTexts []string
 	deps := HandlerDeps{
 		Git: ExecGitRunner{},
 		Now: func() time.Time { return time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC) },
-		Send: func(_ context.Context, m OutMsg) error {
-			sentTexts = append(sentTexts, m.Text)
-			return nil
-		},
 		Detect:                  fakeDetect(prov),
 		SkipRefreshDefaultBranch: true,
 	}
@@ -446,7 +436,7 @@ func TestFixRemote_WithoutForceStillRejectsOccupied(t *testing.T) {
 	if !res.Consumed {
 		t.Errorf("Result.Consumed = false")
 	}
-	last := sentTexts[len(sentTexts)-1]
+	last := rec.lastText()
 	// Without --force, preflight rejects on path-occupied.
 	if !strings.Contains(last, "already exists on filesystem") {
 		t.Errorf("reply should mention path-occupied:\n%s", last)

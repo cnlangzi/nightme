@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
 // Spec describes one registered slash command. The runtime
@@ -23,6 +25,24 @@ type Spec struct {
 	// Usage is a short usage hint surfaced when args are
 	// missing or invalid. Free-form; may be multi-line.
 	Usage string
+	// Category groups commands for /help display. Free-form;
+	// runtime doesn't enforce a whitelist.
+	Category string
+	// Hidden suppresses the command from /help listings.
+	Hidden bool
+	// Subcommands lists per-subcommand metadata for commands
+	// that have sub-commands (e.g. /gtw fix / list / reset).
+	Subcommands []SubcommandSpec
+}
+
+// SubcommandSpec describes one sub-command. Used by /help to
+// surface per-subcommand usage rather than cramming everything
+// into the parent's Usage string.
+type SubcommandSpec struct {
+	Name    string
+	Summary string
+	Usage   string
+	Hidden  bool
 }
 
 // SlashCommandFactory builds the per-command implementation.
@@ -34,10 +54,15 @@ type SlashCommandFactory interface {
 	// registration.
 	Spec() Spec
 	// Handle dispatches one inbound that named this command.
-	// The command package is responsible for parsing args out
-	// of input.Text and returning a SlashOutput. nil error
-	// means success (even if the result's Reply is empty).
-	Handle(ctx context.Context, rt RuntimeServices, input SlashInput) (*SlashOutput, error)
+	// The command receives a *chatsession.ChatSession that has
+	// already been GetOrCreate'd by the runtime; commands can
+	// read/write per-chat state via cs.SetXxx / cs.GetXxx and
+	// send replies via cs.Channel().Send / SendCard.
+	//
+	// Handle is responsible for parsing args out of input.Text
+	// and returning a SlashOutput. nil error means success
+	// (even if the result's Reply is empty).
+	Handle(ctx context.Context, rt RuntimeServices, cs *chatsession.ChatSession, input SlashInput) (*SlashOutput, error)
 }
 
 // Registry holds the command dispatch table. The runtime
@@ -101,6 +126,18 @@ func (r *Registry) Specs() []Spec {
 	}
 	// Stable secondary sort by Name for deterministic output.
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// SpecsVisible returns Specs() with Hidden commands filtered out.
+func (r *Registry) SpecsVisible() []Spec {
+	all := r.Specs()
+	out := make([]Spec, 0, len(all))
+	for _, s := range all {
+		if !s.Hidden {
+			out = append(out, s)
+		}
+	}
 	return out
 }
 

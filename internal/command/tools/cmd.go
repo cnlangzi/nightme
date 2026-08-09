@@ -27,12 +27,11 @@ import (
 // Factory is the command.SlashCommandFactory for /tools.
 type Factory struct {
 	mgr            *chatsession.Manager
-	defaultPrimary string
 }
 
 // NewFactory constructs a Factory backed by mgr.
-func NewFactory(mgr *chatsession.Manager, defaultPrimary string) *Factory {
-	return &Factory{mgr: mgr, defaultPrimary: defaultPrimary}
+func NewFactory(mgr *chatsession.Manager) *Factory {
+	return &Factory{mgr: mgr}
 }
 
 // Spec implements command.SlashCommandFactory.
@@ -46,11 +45,8 @@ func (f *Factory) Spec() command.Spec {
 
 // Handle implements command.SlashCommandFactory.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
-	input command.SlashInput) (*command.SlashOutput, error) {
-
-	cs := f.mgr.GetOrCreate(input.ChatID, f.defaultPrimary)
-
-	if len(input.Args) < 2 {
+	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+if len(input.Args) < 2 {
 		return command.Reply(ctx, rt, fmt.Sprintf(
 			"Current tools mode: %s\nUsage: /tools on | /tools off",
 			cs.ToolsMode(),

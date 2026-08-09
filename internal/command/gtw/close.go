@@ -123,33 +123,30 @@ func RunClose(
 	slot.Store(Context{})
 
 	// --- step 7: success reply ------------------------------------
+	// IM-friendly layout that mirrors the fix success card:
+	// `✅` headline naming the branch, then one `→` row per
+	// side effect (worktree torn down, yml gone with it, cwd
+	// switched back). Keeps the substrings tests rely on
+	// (branch, "worktree", repoRoot).
 	body := fmt.Sprintf(
-		"✅ closed /gtw fix on branch %q\n"+
-			"━━━━━━━━━━━━━━\n"+
-			"[Torn down]\n"+
-			"📁 worktree: %s (removed%s)\n"+
-			"📄 .nightme/gtw.yml (removed with worktree)\n"+
-			"━━━━━━━━━━━━━━\n"+
-			"[Context]\n"+
-			"📂 cwd:      %s\n"+
-			"🌿 branch:   %s\n"+
-			"━━━━━━━━━━━━━━\n"+
-			"[Command result]\n"+
-			"💡 next: continue working in %s, or run another /gtw fix",
-		c.Branch, c.Worktree, forceNote(force), c.RepoRoot, c.Branch, c.RepoRoot,
+		"✅ closed `%s`%s\n"+
+			"→ worktree: %s (removed)\n"+
+			"→ .nightme/gtw.yml (removed with worktree)\n"+
+			"→ cwd → %s",
+		c.Branch, forceNote(force), c.Worktree, c.RepoRoot,
 	)
 	return reply(ctx, cs.Channel(), chatID, messageID, body), nil
 }
 
 // forceNote renders the trailing "force" annotation for the
 // success reply. Empty string for normal closes; a short
-// warning when the user opted into destroying uncommitted
-// edits.
+// inline warning when the user opted into destroying
+// uncommitted edits (sits right after the branch headline).
 func forceNote(force bool) string {
 	if !force {
 		return ""
 	}
-	return "; any uncommitted edits were force-discarded"
+	return " (uncommitted edits force-discarded)"
 }
 
 // assertWorktreeClean returns a user-friendly error if `dir` has

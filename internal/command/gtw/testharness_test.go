@@ -1,0 +1,91 @@
+// Test-only shared helpers for the gtw package. Exposes
+// recordingCh (a chatsession.Channel mock that records every
+// Send / SendCard / Patch call) and pathsEqual (symlink-safe
+// path comparison for macOS test fixtures). Both used to be
+// duplicated across close_test.go, close_integration_test.go,
+// fix_remote_integration_test.go, force_test.go,
+// preflight_test.go. Centralised here so every gtw test file
+// picks up the same definition.
+package gtw
+
+import (
+	"context"
+	"path/filepath"
+	"sync"
+
+	"github.com/cnlangzi/nightme/internal/chatsession"
+)
+
+// recordingCh captures every Send / SendCard / Patch call's
+// payload for assertion. Used by integration tests after the
+// cs.Channel() migration; previous deps.Send mock is no longer
+// the actual path. Field-by-field copy of OutboundMessage.
+type recordingCh struct {
+	mu    sync.Mutex
+	sends []chatsession.OutboundMessage
+}
+
+func (r *recordingCh) Send(_ context.Context, m chatsession.OutboundMessage) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sends = append(r.sends, m)
+	return nil
+}
+
+func (r *recordingCh) SendCard(_ context.Context, m chatsession.OutboundMessage) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sends = append(r.sends, m)
+	return "rec-card-id", nil
+}
+
+func (r *recordingCh) Patch(_ context.Context, m chatsession.OutboundMessage) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sends = append(r.sends, m)
+	return nil
+}
+
+// lastText returns the most recent captured message's Text field,
+// or "" if no captures. Tests inspect a single response after
+// the dispatcher returns; this helper covers that case.
+func (r *recordingCh) lastText() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.sends) == 0 {
+		return ""
+	}
+	return r.sends[len(r.sends)-1].Text
+}
+
+// serialized returns the captured messages' Text fields, joined
+// in send order. Useful when a single dispatch emits both a
+// warning (e.g. label-fail) and a success card.
+func (r *recordingCh) serialized() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.sends))
+	for i, s := range r.sends {
+		out[i] = s.Text
+	}
+	return out
+}
+
+// pathsEqual compares two filesystem paths. On macOS, t.TempDir()
+// returns the realpath (e.g. /var/folders/...) but os.Getwd() and
+// chat session SetActiveCwd record the symlink form
+// (e.g. /private/var/folders/...). Without canonicalization, the
+// same logical directory compares as different. Use
+// filepath.EvalSymlinks to canonicalize both before comparing;
+// on Linux EvalSymlinks is a no-op for non-symlinked paths.
+func pathsEqual(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ca, errA := filepath.EvalSymlinks(a)
+	cb, errB := filepath.EvalSymlinks(b)
+	if errA != nil || errB != nil {
+		return a == b
+	}
+	return ca == cb
+}

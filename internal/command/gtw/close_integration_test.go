@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -457,61 +456,5 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 		t.Errorf("worktree still on disk after close: %v", err)
 	}
 }
-// recordingCh captures every Send / SendCard / Patch call's
-// payload for assertion. Used by integration tests after the
-// cs.Channel() migration; previous deps.Send mock is no longer
-// the actual path. Field-by-field copy of OutboundMessage.
-type recordingCh struct {
-	mu    sync.Mutex
-	sends []chatsession.OutboundMessage
-}
-
-func (r *recordingCh) Send(_ context.Context, m chatsession.OutboundMessage) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.sends = append(r.sends, m)
-	return nil
-}
-
-func (r *recordingCh) SendCard(_ context.Context, m chatsession.OutboundMessage) (string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.sends = append(r.sends, m)
-	return "rec-card-id", nil
-}
-
-func (r *recordingCh) Patch(_ context.Context, m chatsession.OutboundMessage) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.sends = append(r.sends, m)
-	return nil
-}
-
-func (r *recordingCh) lastText() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.sends) == 0 {
-		return ""
-	}
-	return r.sends[len(r.sends)-1].Text
-}
 
 
-// pathsEqual compares two filesystem paths. On macOS, t.TempDir()
-// returns the realpath (e.g. /var/folders/...) but os.Getwd() and
-// chat session SetActiveCwd record the symlink form
-// (e.g. /private/var/folders/...). Without canonicalization, the
-// same logical directory compares as different. Use
-// filepath.EvalSymlinks to canonicalize both before comparing;
-// on Linux EvalSymlinks is a no-op for non-symlinked paths.
-func pathsEqual(a, b string) bool {
-	if a == b {
-		return true
-	}
-	ca, errA := filepath.EvalSymlinks(a)
-	cb, errB := filepath.EvalSymlinks(b)
-	if errA != nil || errB != nil {
-		return a == b
-	}
-	return ca == cb
-}

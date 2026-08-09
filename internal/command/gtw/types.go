@@ -298,21 +298,6 @@ type Card struct {
 	RequestID string
 }
 
-// OutCardMsg is the gtw-package view of an outbound card send.
-// Carries the card data and the chat + reply-target; the adapter
-// translates to the channel's native card wire format and returns
-// the bot-side message id assigned by the channel.
-type OutCardMsg struct {
-	ChatID  string
-	ReplyTo string
-	Card    Card
-}
-
-// SendCardFunc is the IM-side card send callback. Returns the
-// bot-side message id assigned by the channel so the dispatcher
-// can store it on the draft for later PATCH.
-type SendCardFunc func(ctx context.Context, m OutCardMsg) (botMessageID string, err error)
-
 // F-XX removed `gtw.Sender` interface; the gtw package now
 // imports chatsession directly and uses *chatsession.ChatSession
 // for ActiveCwd / SetActiveCwd / QueueUserMessage.

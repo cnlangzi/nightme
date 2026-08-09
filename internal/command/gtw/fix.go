@@ -43,13 +43,6 @@ type HandlerDeps struct {
 	// Send is the IM-side send callback. Production: wraps
 	// gateway.Channel.Send; tests: appends to a slice.
 	Send SendFunc
-	// SendCard (F-46) is the IM-side card send callback. Returns
-	// the bot-side message id assigned by the channel so the
-	// dispatcher can store it on the draft for later PATCH.
-	// Production: wraps gateway.Channel.SendCard; tests can
-	// inject a fake or leave nil (legacy fallback uses Send +
-	// discards the id, action handler emits no PATCH).
-	SendCard SendCardFunc
 	// Git wraps the local git binary. Tests inject a fake.
 	Git GitRunner
 	// Prober is the HTTPProber for Detect's Stage B API probe

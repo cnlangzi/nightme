@@ -65,6 +65,10 @@ func (f *fakeAgentSession) SendPermission(resp string) error {
 }
 
 func (f *fakeAgentSession) New(_ context.Context) error { return nil }
+func (f *fakeAgentSession) Abort(_ context.Context) error { return agent.ErrNotSupported }
+func (f *fakeAgentSession) SetModel(_ context.Context, _, _ string) error {
+	return agent.ErrNotSupported
+}
 
 func (f *fakeAgentSession) Close() error {
 	f.mu.Lock()

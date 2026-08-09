@@ -642,6 +642,39 @@ func (a *Agent) New(ctx context.Context) error {
 	return nil
 }
 
+// Abort sends an `abort` RPC to the pi session. The pi --mode rpc
+// protocol exposes an abort command that cancels the in-flight turn
+// and forces the agent_settled event to fire. The next
+// SendText/SendBlocks can proceed once the bridge observes that
+// boundary.
+//
+// Returns ErrNotSupported if the bridge is not started yet.
+func (a *Agent) Abort(ctx context.Context) error {
+	if a.rpc == nil {
+		return agent.ErrNotSupported
+	}
+	abortCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancel()
+	resp, err := a.rpc.request(abortCtx, "abort", map[string]any{}, "abort-1")
+	if err != nil {
+		return fmt.Errorf("pi: abort: %w", err)
+	}
+	if !resp.Success {
+		return fmt.Errorf("pi: abort rejected: %s", resp.Error)
+	}
+	return nil
+}
+
+// SetModel is not supported on the pi bridge. pi does not expose
+// a model swap RPC; the model is fixed at startup via pi's own
+// config.
+func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error {
+	_ = ctx
+	_ = providerID
+	_ = modelID
+	return agent.ErrNotSupported
+}
+
 // Close terminates the session: signals the child, waits for the
 // lifecycle goroutine to drain, then returns. Idempotent. Waits up
 // to closeDrainTimeout for the underlying cmd.Wait goroutine so

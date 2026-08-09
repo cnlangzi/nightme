@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -408,6 +409,29 @@ func (a *Agent) New(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// Abort sends SIGINT to the child process. ACP has no structured
+// "cancel" method on the bridge's PTY-based transport, so the
+// closest portable action is the same Ctrl-C signal a user would
+// press. The user-facing semantic is "interrupt the in-flight
+// turn" — the child interprets that as best it can.
+func (a *Agent) Abort(ctx context.Context) error {
+	_ = ctx
+	if a.bridge == nil {
+		return agent.ErrNotSupported
+	}
+	return a.bridge.Signal(os.Interrupt)
+}
+
+// SetModel is not supported on the ACP bridge. ACP has a
+// session/set_mode method but no public session/set_model; the
+// provider / model is fixed at session creation.
+func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error {
+	_ = ctx
+	_ = providerID
+	_ = modelID
+	return agent.ErrNotSupported
 }
 
 // Close terminates the session by cancelling the per-session ctx

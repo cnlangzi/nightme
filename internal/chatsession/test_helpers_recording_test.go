@@ -55,6 +55,10 @@ func (r *recordingAgentSession) SendBlocks(_ context.Context, blocks []agent.Con
 }
 func (r *recordingAgentSession) SendPermission(_ string) error { return nil }
 func (r *recordingAgentSession) New(_ context.Context) error   { return nil }
+func (r *recordingAgentSession) Abort(_ context.Context) error { return agent.ErrNotSupported }
+func (r *recordingAgentSession) SetModel(_ context.Context, _, _ string) error {
+	return agent.ErrNotSupported
+}
 func (r *recordingAgentSession) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

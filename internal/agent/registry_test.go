@@ -29,6 +29,8 @@ func (f *fakeAgent) SendText(string) error     { return nil }
 func (f *fakeAgent) SendBlocks(context.Context, []ContentBlock) error { return nil }
 func (f *fakeAgent) SendPermission(string) error { return nil }
 func (f *fakeAgent) New(context.Context) error { return nil }
+func (f *fakeAgent) Abort(context.Context) error { return nil }
+func (f *fakeAgent) SetModel(context.Context, string, string) error { return nil }
 
 func TestRegisterAndGet(t *testing.T) {
 	r := New()

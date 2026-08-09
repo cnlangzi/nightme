@@ -444,6 +444,33 @@ func (a *Agent) New(ctx context.Context) error {
 	return nil
 }
 
+// Abort sends SIGINT to the codex app-server. The codex app-server
+// JSON-RPC API does not expose a `turn/cancel` method, so the
+// closest portable action is the same Ctrl-C signal a user would
+// press in interactive mode. The server catches it and the
+// in-flight turn settles eventually with EventAgentDone or
+// EventAgentError.
+//
+// Returns ErrNotSupported if the bridge is not started yet.
+func (a *Agent) Abort(ctx context.Context) error {
+	_ = ctx
+	if a.session == nil || a.session.cmd == nil || a.session.cmd.Process == nil {
+		return agent.ErrNotSupported
+	}
+	return a.session.cmd.Process.Signal(os.Interrupt)
+}
+
+// SetModel is not supported on the codex bridge. codex reads the
+// model at startup via `-c model=...` and the app-server API does
+// not expose a model swap mechanism. Operators who want a
+// different model must restart the bridge.
+func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error {
+	_ = ctx
+	_ = providerID
+	_ = modelID
+	return agent.ErrNotSupported
+}
+
 // ─── close ───
 
 // Close terminates the session: closes stdin (so the child sees EOF

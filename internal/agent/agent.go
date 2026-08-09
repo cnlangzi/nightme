@@ -697,6 +697,40 @@ type Agent interface {
 	// the new SessionID; the runtime's AgentEventBus subscriber captures
 	// it via SetResumeID and persists (cmd/nightme/run.go newEventHandler).
 	New(ctx context.Context) error
+
+	// Abort cancels the in-flight turn. The next /use or /prompt
+	// can proceed once the bridge surfaces a terminal event
+	// (EventAgentDone or EventAgentError). The session id and
+	// process stay alive; mid-turn state is dropped.
+	//
+	// Bridge-specific implementations:
+	//   - codex:    POST /api/session/{id}/interrupt
+	//   - opencode: POST /api/session/{id}/interrupt
+	//   - pi:       {"type":"abort"} RPC
+	//   - acp:      session/cancel JSON-RPC
+	//   - claudecode / pty: best-effort SIGINT to the child;
+	//                        ErrNotSupported if the runtime really
+	//                        only wants structured abort
+	//
+	// Returning a non-nil error does NOT kill the bridge; the
+	// runtime surfaces the error to the user but the bridge stays
+	// usable. ErrNotSupported is the sentinel for bridges that
+	// cannot honour the request.
+	Abort(ctx context.Context) error
+
+	// SetModel switches the active model/provider on the next
+	// turn. In-flight turns are not affected by a model switch.
+	//
+	// Bridge-specific implementations:
+	//   - opencode: POST /api/session/{id}/model
+	//   - codex:    -c model=...  (requires restart; returns
+	//                        ErrNotSupported if the bridge cannot
+	//                        change model in place)
+	//   - pi: / claudecode / acp / pty: ErrNotSupported
+	//
+	// As with Abort, returning a non-nil error does NOT kill the
+	// bridge. The runtime surfaces the error to the user.
+	SetModel(ctx context.Context, providerID, modelID string) error
 }
 
 // ContentBlockType discriminates the payload shape on a ContentBlock.
@@ -766,6 +800,17 @@ var (
 	// Returning nil here would be wrong: callers must distinguish
 	// "successfully reset in-place" from "needs full restart".
 	ErrRestartRequired = errors.New("agent: bridge requires restart for reset")
+
+	// ErrNotSupported is returned by Abort / SetModel when the
+	// bridge does not implement the requested operation. The
+	// runtime can detect this with errors.Is and surface a
+	// user-friendly "not supported for this agent" message
+	// instead of treating it as a generic bridge error.
+	//
+	// Bridges that DO implement the operation return nil on
+	// success and a real error on failure. The sentinel is only
+	// for "operation is not implemented on this bridge".
+	ErrNotSupported = errors.New("agent: operation not supported on this bridge")
 )
 
 // sentinelErr is a small helper so tests can match errors with

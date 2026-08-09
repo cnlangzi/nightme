@@ -4,6 +4,7 @@
 package pty
 
 import (
+	"fmt"
 	"io"
 	"os"
 
@@ -18,6 +19,10 @@ type Bridge interface {
 	io.ReadWriteCloser
 	PID() int
 	Setsize(cols, rows int) error
+	// Signal sends a signal to the child process. Used by
+	// Agent.Abort to interrupt the in-flight turn (Ctrl-C on a
+	// shell prompt). Backed by go-pty's cmd.Signal underneath.
+	Signal(os.Signal) error
 }
 
 // ptyBridge is the production implementation backed by
@@ -83,6 +88,18 @@ func (b *ptyBridge) PID() int {
 // straight pass-through.
 func (b *ptyBridge) Setsize(cols, rows int) error {
 	return b.ptmx.Resize(cols, rows)
+}
+
+// Signal sends a signal to the child process. The shell convention
+// is SIGINT (Ctrl-C); the caller picks the signal. We pass through
+// to the underlying gopty.Cmd.Process (an *os.Process), which
+// forwards to the child over the controlling terminal so the
+// child sees the signal as if a user pressed the key.
+func (b *ptyBridge) Signal(sig os.Signal) error {
+	if b.cmd == nil || b.cmd.Process == nil {
+		return fmt.Errorf("pty: no command")
+	}
+	return b.cmd.Process.Signal(sig)
 }
 
 // Compile-time guarantee that *ptyBridge satisfies Bridge.

@@ -328,6 +328,10 @@ func (f *integrationFake) SendBlocks(context.Context, []agent.ContentBlock) erro
 }
 func (f *integrationFake) SendPermission(string) error { return nil }
 func (f *integrationFake) New(context.Context) error   { return nil }
+func (f *integrationFake) Abort(context.Context) error { return agent.ErrNotSupported }
+func (f *integrationFake) SetModel(context.Context, string, string) error {
+	return agent.ErrNotSupported
+}
 func (f *integrationFake) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

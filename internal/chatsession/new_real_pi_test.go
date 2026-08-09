@@ -327,6 +327,8 @@ func (b *fakeAgentBuilder) SendText(_ string) error                             
 func (b *fakeAgentBuilder) SendBlocks(_ context.Context, _ []agent.ContentBlock) error { return nil }
 func (b *fakeAgentBuilder) SendPermission(_ string) error                         { return nil }
 func (b *fakeAgentBuilder) New(_ context.Context) error                           { return nil }
+func (b *fakeAgentBuilder) Abort(_ context.Context) error                         { return agent.ErrNotSupported }
+func (b *fakeAgentBuilder) SetModel(_ context.Context, _, _ string) error          { return agent.ErrNotSupported }
 func (b *fakeAgentBuilder) Close() error {
 	select {
 	case <-b.events:

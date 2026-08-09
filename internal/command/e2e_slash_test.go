@@ -85,6 +85,10 @@ func (a *echoAgent) SendBlocks(context.Context, []agent.ContentBlock) error {
 }
 func (a *echoAgent) SendPermission(string) error { return nil }
 func (a *echoAgent) New(context.Context) error   { return nil }
+func (a *echoAgent) Abort(context.Context) error { return agent.ErrNotSupported }
+func (a *echoAgent) SetModel(context.Context, string, string) error {
+	return agent.ErrNotSupported
+}
 func (a *echoAgent) Close() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()

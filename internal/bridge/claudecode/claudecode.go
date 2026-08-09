@@ -589,6 +589,32 @@ func (a *Agent) New(ctx context.Context) error {
 	return a.writeLine(payload)
 }
 
+// Abort sends SIGINT to the claude code child. The stream-json
+// protocol does not expose a structured cancel, so the closest
+// portable action is the same Ctrl-C signal a user would press.
+// The child catches it and the in-flight turn settles with
+// EventAgentDone or EventAgentError.
+//
+// Returns ErrNotSupported if the bridge is not started.
+func (a *Agent) Abort(ctx context.Context) error {
+	_ = ctx
+	if a.cmd == nil || a.cmd.Process == nil {
+		return agent.ErrNotSupported
+	}
+	return a.cmd.Process.Signal(os.Interrupt)
+}
+
+// SetModel is not supported on the claudecode bridge. The
+// stream-json protocol does not expose a model swap mechanism.
+// Operators who want a different model must restart the bridge
+// with the desired `--model` flag.
+func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error {
+	_ = ctx
+	_ = providerID
+	_ = modelID
+	return agent.ErrNotSupported
+}
+
 // Close terminates the session: closes stdin (so the child sees EOF
 // and exits cleanly), waits briefly for graceful shutdown, then
 // SIGKILLs if necessary. Idempotent.

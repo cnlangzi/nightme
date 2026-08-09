@@ -18,6 +18,7 @@ package pty
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -265,6 +266,32 @@ func (a *Agent) SendPermission(resp string) error {
 func (a *Agent) New(ctx context.Context) error {
 	_ = ctx
 	return agent.ErrRestartRequired
+}
+
+// Abort sends SIGINT to the child process. PTY has no structured
+// abort — the wire is a byte pipe — but the child usually honours
+// SIGINT (Ctrl-C) by interrupting the current foreground command
+// and returning to its prompt. This is the same heuristic the
+// shell uses; we delegate to the child to decide what to do.
+//
+// If the bridge has no underlying process (test path) or the
+// signal cannot be delivered, returns the error verbatim.
+func (a *Agent) Abort(ctx context.Context) error {
+	_ = ctx
+	if a.bridge == nil {
+		return fmt.Errorf("pty: not started")
+	}
+	return a.bridge.Signal(os.Interrupt)
+}
+
+// SetModel is not supported on the PTY bridge. PTY has no
+// provider/model concept — the binary decides its own model at
+// startup.
+func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error {
+	_ = ctx
+	_ = providerID
+	_ = modelID
+	return agent.ErrNotSupported
 }
 
 // Close terminates the session by closing the PTY. Idempotent.

@@ -12,8 +12,8 @@ import (
 // directly, with no fallback path.
 func TestNew_PrimaryAgentSeedsActiveAgent(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "claude", newTestChannel()).
-		WithPersistence(csFile, asFile)
+	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs = cs.WithPersistence(csFile, asFile)
 
 	if cs.ActiveAgent() != "claude" {
 		t.Fatalf("ActiveAgent: got %q, want claude (seeded from primary)", cs.ActiveAgent())
@@ -29,8 +29,8 @@ func TestNew_PrimaryAgentSeedsActiveAgent(t *testing.T) {
 // LookupActiveAgentSession fails with ErrNoActiveAgent.
 func TestNew_EmptyPrimaryAgent_ActiveAgentEmpty(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "", newTestChannel()).
-		WithPersistence(csFile, asFile)
+	cs, _ := New("oc_xxx", "", newTestChannel())
+	cs = cs.WithPersistence(csFile, asFile)
 
 	if cs.ActiveAgent() != "" {
 		t.Fatalf("ActiveAgent: got %q, want empty (no primary)", cs.ActiveAgent())
@@ -53,8 +53,8 @@ func TestNew_EmptyPrimaryAgent_ActiveAgentEmpty(t *testing.T) {
 func TestLookupActiveAgentSession_UseOverridesPrimary(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
-	cs := New("oc_xxx", "claude", newTestChannel()).
-		WithPersistence(csFile, asFile).
+	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs = cs.WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
 	cs.SetActiveCwd("/code/bailing")

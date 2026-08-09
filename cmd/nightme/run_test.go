@@ -28,7 +28,7 @@ import (
 func TestEventHandler_ThinkGate_ShowPassesThrough(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("oc_chat", "claude")
+	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
 	logger := slog.Default()
 
 	h := newEventHandler(ch, cs, mgr, logger)
@@ -55,7 +55,7 @@ func TestEventHandler_ThinkGate_ShowPassesThrough(t *testing.T) {
 func TestEventHandler_ThinkGate_HideDropsOutThinking(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("oc_chat", "claude")
+	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
 	if err := cs.SetThinkMode(chatsession.ThinkModeHide); err != nil {
 		t.Fatalf("SetThinkMode: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestEventHandler_ThinkGate_HideDropsOutThinking(t *testing.T) {
 func TestEventHandler_ThinkGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("oc_chat", "claude")
+	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
 	if err := cs.SetThinkMode(chatsession.ThinkModeHide); err != nil {
 		t.Fatalf("SetThinkMode: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestEventHandler_ThinkGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 func TestEventHandler_ThinkGate_NilLoggerSafe(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("oc_chat", "claude")
+	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
 	if err := cs.SetThinkMode(chatsession.ThinkModeHide); err != nil {
 		t.Fatalf("SetThinkMode: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestEventHandler_ThinkGate_NilLoggerSafe(t *testing.T) {
 func TestEventHandler_ThinkGate_PersistsAcrossInvocations(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("oc_chat", "claude")
+	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
 	logger := slog.Default()
 
 	h := newEventHandler(ch, cs, mgr, logger)
@@ -241,7 +241,7 @@ var _ = slog.Default
 func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("oc_chat_first_turn", "claude")
+	cs, _ := mgr.GetOrCreate("oc_chat_first_turn", "claude")
 	logger := slog.Default()
 
 	h := newEventHandler(ch, cs, mgr, logger)
@@ -325,7 +325,7 @@ func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
 func TestEventHandler_OutResult_UsageIsPerTurnNotCumulative(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("oc_chat_per", "claude")
+	cs, _ := mgr.GetOrCreate("oc_chat_per", "claude")
 	logger := slog.Default()
 
 	h := newEventHandler(ch, cs, mgr, logger)
@@ -372,7 +372,7 @@ func TestEventHandler_OutResult_UsageIsPerTurnNotCumulative(t *testing.T) {
 func TestEventHandler_OutResult_NilUsageLeavesEmptySessionContext(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("oc_chat_zero", "claude")
+	cs, _ := mgr.GetOrCreate("oc_chat_zero", "claude")
 	logger := slog.Default()
 
 	h := newEventHandler(ch, cs, mgr, logger)
@@ -541,7 +541,7 @@ func TestSessionContextInto_ForwardsUsage(t *testing.T) {
 func TestEventHandler_Chain_UsageFlowsFromResultEventToFooter(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("oc_chat_chain", "claude")
+	cs, _ := mgr.GetOrCreate("oc_chat_chain", "claude")
 	logger := slog.Default()
 
 	h := newEventHandler(ch, cs, mgr, logger)
@@ -655,7 +655,7 @@ func TestEventHandler_Chain_UsageFlowsFromResultEventToFooter(t *testing.T) {
 func TestEventHandler_ToolsGate_ShowPassesThrough(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("oc_chat_tools_show", "claude")
+	cs, _ := mgr.GetOrCreate("oc_chat_tools_show", "claude")
 	if err := cs.SetToolsMode(agent.ToolsModeShow); err != nil {
 		t.Fatalf("SetToolsMode: %v", err)
 	}
@@ -695,7 +695,7 @@ func TestEventHandler_ToolsGate_ShowPassesThrough(t *testing.T) {
 func TestEventHandler_ToolsGate_HideDropsBothToolKinds(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("oc_chat_tools_hide", "claude")
+	cs, _ := mgr.GetOrCreate("oc_chat_tools_hide", "claude")
 	// cs.ToolsMode is the default (ToolsModeHide) — no SetToolsMode
 	// call needed, but assert it explicitly so the test reads as a
 	// contract check.
@@ -729,7 +729,7 @@ func TestEventHandler_ToolsGate_HideDropsBothToolKinds(t *testing.T) {
 func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("oc_chat_tools_indep", "claude")
+	cs, _ := mgr.GetOrCreate("oc_chat_tools_indep", "claude")
 	if got := cs.ToolsMode(); got != agent.ToolsModeHide {
 		t.Fatalf("fresh ChatSession ToolsMode = %q, want ToolsModeHide", got)
 	}
@@ -777,7 +777,7 @@ func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 func TestEventHandler_ToolsGate_PersistsAcrossInvocations(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("oc_chat_tools_persist", "claude")
+	cs, _ := mgr.GetOrCreate("oc_chat_tools_persist", "claude")
 	logger := slog.Default()
 
 	h := newEventHandler(ch, cs, mgr, logger)
@@ -825,7 +825,7 @@ func TestEventHandler_ToolsGate_PersistsAcrossInvocations(t *testing.T) {
 func TestEventHandler_ToolsAndThinkGatesIndependent(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("oc_chat_both_gates", "claude")
+	cs, _ := mgr.GetOrCreate("oc_chat_both_gates", "claude")
 	logger := slog.Default()
 
 	h := newEventHandler(ch, cs, mgr, logger)
@@ -1035,7 +1035,7 @@ func TestWireRuntimeCallbacksAndRestore_NoPersistence(t *testing.T) {
 func TestEventHandler_OnAgentConnected_DoesNotEmitMessageSubmitted(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("oc_chat", "claude")
+	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Capture every MessageState emit on this CS.

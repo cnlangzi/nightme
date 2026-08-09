@@ -33,7 +33,7 @@ func newTestChannel() chatsession.Channel { return nopCh{} }
 // kill.ErrNoContext (defensive — every cmd preflights before
 // calling, but the package must not panic).
 func TestKillAgent_NilCS(t *testing.T) {
-	cs := chatsession.New("chat-nil", "cc", newTestChannel())
+	cs, _ := chatsession.New("chat-nil", "cc", newTestChannel())
 	defer cs.WithPersistence(nil, nil)
 	// Force the CS reference inside Cmd to be nil.
 	_, err := killpkg.KillAgent(&killpkg.Cmd{CS: nil, Ctx: context.Background()}, "cc")
@@ -64,7 +64,7 @@ func TestKillAllAgents_NilCS(t *testing.T) {
 // function itself is well-defined when activeCwd is empty.
 func TestKillAllAgents_NoActiveCwd(t *testing.T) {
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("c1", "claude")
+	cs, _ := mgr.GetOrCreate("c1", "claude")
 	// No SetActiveCwd.
 
 	cmd := &killpkg.Cmd{CS: cs, Ctx: context.Background()}
@@ -81,7 +81,7 @@ func TestKillAllAgents_NoActiveCwd(t *testing.T) {
 // the pool returns chatsession.ErrAgentNotFound.
 func TestKillAgent_NotFound(t *testing.T) {
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("c1", "claude")
+	cs, _ := mgr.GetOrCreate("c1", "claude")
 	cs.WithPersistence(nil, nil)
 	if err := cs.SetActiveCwd("/tmp"); err != nil {
 		t.Fatalf("SetActiveCwd: %v", err)
@@ -99,7 +99,7 @@ func TestKillAgent_NotFound(t *testing.T) {
 // activeCwd set but an empty pool returns (nil, nil).
 func TestKillAllAgents_EmptyPool(t *testing.T) {
 	mgr := chatsession.NewManager()
-	cs := mgr.GetOrCreate("c1", "claude")
+	cs, _ := mgr.GetOrCreate("c1", "claude")
 	cs.WithPersistence(nil, nil)
 	if err := cs.SetActiveCwd("/tmp"); err != nil {
 		t.Fatalf("SetActiveCwd: %v", err)
@@ -152,18 +152,15 @@ func TestFormatKillResults_Killed(t *testing.T) {
 	}
 }
 
-// TestHandler_NoSession — the /kill handler with an unknown chat
-// ID replies with the canonical "No active chat session to kill."
+// TestHandler_NoSession — the /kill handler with a nil cs
+// replies with the canonical "No active chat session to kill."
 // message.
 func TestHandler_NoSession(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := killpkg.NewFactory(mgr)
 
-	cs := mgr.GetOrCreate("c1", "claude")
-
-
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
-	command.SlashInput{ChatID: "c1", Args: []string{"kill"}})
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil,
+		command.SlashInput{ChatID: "c1", Args: []string{"kill"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}

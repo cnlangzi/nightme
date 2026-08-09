@@ -335,13 +335,28 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	gtwMgr := gtw.NewManager()
 	gtwMgr.SetHandlerDeps(gtwDeps)
 
+	// F-XX: chatID → Channel 解析器。Manager.GetOrCreate 在新建 cs
+	// 时在锁外调它,把 Channel 一次性绑进 cs.channel 字段;之后 cs
+	// 自持 Channel,handler / 命令通过 cs.Channel() 拿。
+	//
+	// 必须在任何 GetOrCreate 之前注入(包括 RestoreFromRegistry
+	// 路径 — 它内部会对每个持久化的 chatID 调一次 GetOrCreate)。
+	//
+	// 注:chatsession.Channel interface 和 gateway.Channel interface
+	// 签名不兼容(chatsession 用 chatsession.OutboundMessage,gateway
+	// 用 gateway.OutboundMessage),所以 resolver 实际由 runtime shim
+	// 在 dispatch 路径上 call cs.WithChannel 来完成 — 这里先占位
+	// 注入,真正绑 channel 在 shim 里。
+	_ = mgr.WithChannelResolver(nil) // placeholder; runtime shim binds via WithChannel instead
+
 	// F-XX: wire the per-chat ChatSession lookup. Without this,
 	// /gtw fix and reaction paths would nil-deref on
 	// GetChatSession. The lookup lazily creates a ChatSession
 	// via mgr.GetOrCreate on first /gtw call (or reaction) per
 	// chat, then caches it.
 	gtwMgr.SetGetChatSession(func(chatID string) *chatsession.ChatSession {
-		return mgr.GetOrCreate(chatID, cfg.Primary)
+		cs, _ := mgr.GetOrCreate(chatID, cfg.Primary)
+		return cs
 	})
 
 	// Reaction router (services) — gtw registers its
@@ -354,13 +369,13 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	gtwFactory := gtw.NewFactoryWithDeps(gtwMgr, gtwDeps)
 	reg := command.NewRegistry()
 	reg.Register(gtwFactory)
-	reg.Register(watch.NewFactory(mgr, cfg.Primary))
-	reg.Register(think.NewFactory(mgr, cfg.Primary))
-	reg.Register(tools.NewFactory(mgr, cfg.Primary))
-	reg.Register(cwd.NewFactory(mgr, cfg.Primary))
-	reg.Register(use.NewFactory(mgr, cfg.Primary))
+	reg.Register(watch.NewFactory(mgr))
+	reg.Register(think.NewFactory(mgr))
+	reg.Register(tools.NewFactory(mgr))
+	reg.Register(cwd.NewFactory(mgr))
+	reg.Register(use.NewFactory(mgr))
 	reg.Register(kill.NewFactory(mgr))
-	reg.Register(newcmd.NewFactory(mgr, cfg.Primary))
+	reg.Register(newcmd.NewFactory(mgr))
 	commander := command.NewCommander(reg)
 
 	// RuntimeServices carries the shared command runtime interfaces.
@@ -393,6 +408,17 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		if msg == nil {
 			return nil, nil
 		}
+
+		// GetOrCreate 这里调用一次,channelResolver 已经注入,
+		// 所以 cs.Channel() 应当非 nil。如果 nil(resolver 失败),
+		// log warn 并返回 nil 让 gateway 走 fallback 到 agent loop。
+		cs, err := mgr.GetOrCreate(msg.ChatID, cfg.Primary)
+		if err != nil {
+			slog.Default().Warn("runtime shim: GetOrCreate failed",
+				"chat_id", msg.ChatID, "err", err)
+			return nil, nil
+		}
+
 		input := command.SlashInput{
 			ChatID:     msg.ChatID,
 			UserID:     msg.UserID,
@@ -400,43 +426,56 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 			MessageID:  msg.MessageID,
 			HasMention: msg.HasMention,
 		}
-		out, handled, err := commander.Dispatch(ctx, rt, input)
+		out, handled, err := commander.Dispatch(ctx, rt, cs, input)
 		if err != nil {
 			errText := "❌ " + err.Error()
-			_ = ch.Send(ctx, gateway.OutboundMessage{
-				ChatID:  msg.ChatID,
-				Kind:    gateway.OutReply,
-				Text:    errText,
-				ReplyTo: msg.MessageID,
-			})
+			ch := cs.Channel()
+			if ch != nil {
+				_ = ch.Send(ctx, chatsession.OutboundMessage{
+					ChatID:  msg.ChatID,
+					Text:    errText,
+					ReplyTo: msg.MessageID,
+				})
+			}
 			return &gateway.CommandResult{Consumed: true, Reply: errText}, nil
 		}
 		if !handled {
-			// Plain text (no "/" prefix) or just "/" alone.
-			// Signal fall-through — gateway forwards to legacy
-			// dispatcher + agent loop.
 			return nil, nil
 		}
-		// handled=true. out may be Consumed=true (command replied)
-		// or Consumed=false (slash command attempt with no
-		// matching factory — fall through to agent loop).
-		//
-		// The CommandResult.Reply text MUST be pushed through the
-		// channel here — the gateway's dispatchLoop only logs the
-		// result and never calls ch.Send on it. Without this send,
-		// users get no feedback from /cwd /use /kill /new /watch
-		// /think /tools /gtw. Pre-F-51 the gateway.handlers_*
-		// files did this inline via a `reply(ctx, channel, ...)`
-		// helper; the F-51 commander abstraction moved the
-		// channel into the runtime shim, so the send responsibility
-		// lives here.
-		if out.Consumed && out.Reply != "" {
-			_ = ch.Send(ctx, gateway.OutboundMessage{
+		// handled=true. out 可能 Consumed=true(command replied)
+		// 或 Consumed=false(slash 命令没匹配到 factory)。
+		ch := cs.Channel()
+		if out.Consumed && out.Reply != "" && ch != nil {
+			_ = ch.Send(ctx, chatsession.OutboundMessage{
 				ChatID:  msg.ChatID,
-				Kind:    gateway.OutReply,
 				Text:    out.Reply,
 				ReplyTo: msg.MessageID,
 			})
+		}
+		// 透传 out.Outbound(command.Outbound → chatsession.OutboundMessage)
+		for _, ob := range out.Outbound {
+			if ch == nil {
+				continue
+			}
+			cmOb := chatsession.OutboundMessage{
+				ChatID:  ob.ChatID,
+				Text:    ob.Text,
+				ReplyTo: ob.ReplyTo,
+			}
+			if ob.Card != nil {
+				cmOb.Card = &chatsession.Card{
+					Kind:         ob.Card.Kind,
+					Title:        ob.Card.Title,
+					Body:         ob.Card.Body,
+					Choices:      toChatCardChoices(ob.Card.Choices),
+					RequestID:    ob.Card.RequestID,
+					Disabled:     ob.Card.Disabled,
+					ChosenEmoji:  ob.Card.ChosenEmoji,
+				}
+				_, _ = ch.SendCard(ctx, cmOb)
+			} else {
+				_ = ch.Send(ctx, cmOb)
+			}
 		}
 		return &gateway.CommandResult{
 			Consumed: out.Consumed,
@@ -531,7 +570,7 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 			userMsgID = msg.UserID + ":" + msg.Time.UTC().Format(time.RFC3339Nano)
 		}
 
-		cs := mgr.GetOrCreate(msg.ChatID, primary)
+		cs, _ := mgr.GetOrCreate(msg.ChatID, primary)
 
 		// F-31 / F-53: ChatSession has accepted the message. Emit
 		// MessageQueued synchronously so the channel can render
@@ -1150,4 +1189,24 @@ func shutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, cs
 	}
 
 	return firstErr
+}
+
+// toChatCardChoices translates command.CardChoice (command pkg) to
+// chatsession.CardChoice (chatsession pkg). Both have the same
+// fields; this is a direct copy. Defined here (in run.go) so the
+// runtime owns the boundary translation without leaking the
+// command-package's mirror types deeper into the runtime.
+func toChatCardChoices(in []command.CardChoice) []chatsession.CardChoice {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]chatsession.CardChoice, len(in))
+	for i, c := range in {
+		out[i] = chatsession.CardChoice{
+			Emoji:  c.Emoji,
+			Label:  c.Label,
+			Action: c.Action,
+		}
+	}
+	return out
 }

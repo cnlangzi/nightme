@@ -181,6 +181,18 @@ type Gateway interface {
 // handle that also owns the per-channel / per-session goroutines.
 type Router = gateway
 
+// ResolveChannel returns the IM Channel that serves chatID.
+// ResolveChannel returns the IM Channel that serves chatID.
+// Exposed (vs the package-private resolveChannel) so the runtime
+// shim in cmd/nightme can look up the channel for a chatID
+// (used in the slash-command shim to bind cs.Channel() via
+// WithChannel after GetOrCreate). Falls back to the default
+// channel if chatID is not in the chatID→Channel map. Returns
+// nil if no default.
+func (r *Router) ResolveChannel(chatID string) Channel {
+	return r.resolveChannel(chatID)
+}
+
 // WithWatchModeResolver installs the per-chat WatchMode lookup
 // function used by the F-watch gate in DispatchInbound. The
 // runtime (cmd/nightme/run.go) wires this after constructing

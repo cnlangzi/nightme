@@ -195,9 +195,12 @@ type ChatSession struct {
 //
 // ch is the IM channel bound to this chat; nil is permitted (test
 // scenarios) but production wiring must always pass a real Channel.
-// When ch is nil the constructor logs a warning and proceeds;
-// callers can detect this via cs.Channel() == nil.
-func New(chatID, primaryAgent string, ch Channel) *ChatSession {
+// When ch is nil the constructor logs a warning and proceeds
+// with cs.channel = nil (no panic; daemon stability principle).
+// Callers can detect this via cs.Channel() == nil and skip
+// channel-dependent operations. Returns (*cs, nil) regardless
+// of ch — construction never fails on the channel binding.
+func New(chatID, primaryAgent string, ch Channel) (*ChatSession, error) {
 	if ch == nil {
 		slog.Default().Warn("chatsession.New: channel is nil (chatID=" + chatID + ")")
 	}
@@ -221,7 +224,7 @@ func New(chatID, primaryAgent string, ch Channel) *ChatSession {
 	cs.MessageStateBus = services.NewEventBus[MessageStateEvent]()
 	cs.PromptEndBus = services.NewEventBus[PromptEndedEvent]()
 	cs.queue = NewMessageQueue(QueueMaxMsgs)
-	return cs
+	return cs, nil
 }
 
 // WithPersistence attaches registry stores. Both can be nil (no

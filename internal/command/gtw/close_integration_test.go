@@ -87,7 +87,7 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 	}
 
 	// --- step 4: actually run /gtw close -------------------------
-	cs := chatsession.New("chat-int-1", "test-agent", newTestChannel())
+	cs, _ := chatsession.New("chat-int-1", "test-agent", newTestChannel())
 	if err := cs.SetActiveCwd(wt); err != nil {
 		t.Fatalf("SetActiveCwd wt: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestIntegration_CloseRejectsDirty(t *testing.T) {
 		t.Fatalf("WriteGTWYml: %v", err)
 	}
 
-	cs := chatsession.New("chat-int-2", "test-agent", newTestChannel())
+	cs, _ := chatsession.New("chat-int-2", "test-agent", newTestChannel())
 	_ = cs.SetActiveCwd(wt)
 	slot := &memSlot{Context{Mode: ModeLocal, Branch: branch, Worktree: wt, RepoRoot: repoRoot, State: StateFixing}}
 	var sentTexts []string
@@ -382,7 +382,7 @@ func mustGitOut(t *testing.T, dir string, args ...string) (string, string) {
 func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	repoRoot := initTempRepo(t)
 
-	cs := chatsession.New("chat-int-shortN", "test-agent", newTestChannel())
+	cs, _ := chatsession.New("chat-int-shortN", "test-agent", newTestChannel())
 	if err := cs.SetActiveCwd(repoRoot); err != nil {
 		t.Fatalf("SetActiveCwd: %v", err)
 	}

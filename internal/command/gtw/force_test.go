@@ -247,7 +247,7 @@ func TestRunClose_ForceOverridesDirty(t *testing.T) {
 		t.Fatalf("WriteGTWYml: %v", err)
 	}
 
-	cs := chatsession.New("chat-force-dirty", "test-agent", newTestChannel())
+	cs, _ := chatsession.New("chat-force-dirty", "test-agent", newTestChannel())
 	_ = cs.SetActiveCwd(wt)
 	slot := &memSlot{Context{
 		Mode: ModeLocal, Issue: -1, Branch: "fix/dirty",
@@ -347,7 +347,7 @@ func TestFixRemote_ForceRemovesLeftoverWorktree(t *testing.T) {
 		t.Fatal("PreflightWorktreeCreate should reject occupied path")
 	}
 
-	cs := chatsession.New("chat-force", "test-agent", newTestChannel())
+	cs, _ := chatsession.New("chat-force", "test-agent", newTestChannel())
 	if err := cs.SetActiveCwd(repoRoot); err != nil {
 		t.Fatalf("SetActiveCwd: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestFixRemote_WithoutForceStillRejectsOccupied(t *testing.T) {
 	wt := WorktreePath(repoRoot, "title")
 	mustGit(t, repoRoot, "worktree", "add", "-b", "oldbranch", wt, "HEAD")
 
-	cs := chatsession.New("chat-noforce", "test-agent", newTestChannel())
+	cs, _ := chatsession.New("chat-noforce", "test-agent", newTestChannel())
 	_ = cs.SetActiveCwd(repoRoot)
 
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")

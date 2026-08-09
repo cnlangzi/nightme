@@ -25,9 +25,8 @@ func TestFactory_Handle_NoSession_RepliesNoActive(t *testing.T) {
 	f := NewFactory(mgr)
 	input := command.SlashInput{ChatID: "no-such-chat"}
 
-	cs := mgr.GetOrCreate(input.ChatID, "test")
-
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
+	// No GetOrCreate — the test verifies the "session absent" path.
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -44,7 +43,7 @@ func TestFactory_Handle_NoSession_RepliesNoActive(t *testing.T) {
 func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory(mgr)
-	cs := mgr.GetOrCreate("c1", "claude")
+	cs, _ := mgr.GetOrCreate("c1", "claude")
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{},
 		cs,
@@ -66,7 +65,7 @@ func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 func TestFactory_Handle_EmptyAgentArg_RepliesUsage(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory(mgr)
-	cs := mgr.GetOrCreate("c1", "claude")
+	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetActiveCwd("/tmp")
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{},
@@ -85,7 +84,7 @@ func TestFactory_Handle_EmptyAgentArg_RepliesUsage(t *testing.T) {
 func TestFactory_Handle_NotInPool_RepliesFriendly(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory(mgr)
-	cs := mgr.GetOrCreate("c1", "claude")
+	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetActiveCwd("/tmp")
 	// Materialize (claude, /tmp) so the pool isn't empty.
 	if _, err := cs.LookupActiveAgentSession(); err != nil {
@@ -116,7 +115,7 @@ func TestFactory_Handle_NotInPool_RepliesFriendly(t *testing.T) {
 func TestFactory_Handle_NoArg_KillsAllInCwd(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory(mgr)
-	cs := mgr.GetOrCreate("c1", "claude")
+	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetActiveCwd("/tmp")
 	if _, err := cs.LookupActiveAgentSession(); err != nil {
 		t.Fatalf("LookupActiveAgentSession: %v", err)
@@ -146,7 +145,7 @@ func TestFactory_Handle_NoArg_KillsAllInCwd(t *testing.T) {
 func TestFactory_Handle_NoArg_KillsEveryAgentInCwd(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory(mgr)
-	cs := mgr.GetOrCreate("c1", "claude")
+	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetActiveCwd("/tmp")
 	if _, err := cs.LookupActiveAgentSession(); err != nil {
 		t.Fatalf("LookupActiveAgentSession (claude): %v", err)
@@ -183,7 +182,7 @@ func TestFactory_Handle_NoArg_KillsEveryAgentInCwd(t *testing.T) {
 func TestFactory_Handle_NamedAgent_LeavesSiblingsAlone(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory(mgr)
-	cs := mgr.GetOrCreate("c1", "claude")
+	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetActiveCwd("/tmp")
 	if _, err := cs.LookupActiveAgentSession(); err != nil {
 		t.Fatalf("LookupActiveAgentSession (claude): %v", err)

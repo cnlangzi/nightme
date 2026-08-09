@@ -141,7 +141,7 @@ func TestPreflightOrphanYml_RunFixIntegration(t *testing.T) {
 	mustGit(t, repoRoot, "symbolic-ref", "refs/remotes/origin/HEAD",
 		"refs/remotes/origin/main")
 
-	cs := chatsession.New("chat-preflight", "test-agent", newTestChannel())
+	cs, _ := chatsession.New("chat-preflight", "test-agent", newTestChannel())
 	_ = cs.SetActiveCwd(repoRoot)
 
 	// Simulate an orphan yml: create a worktree with a yml in

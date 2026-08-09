@@ -60,7 +60,7 @@ func TestThinkMode_ParseDelegation(t *testing.T) {
 // enum). A fresh ChatSession created without a registry entry
 // must report ThinkMode() == ThinkModeShow.
 func TestChatSession_New_DefaultThinkModeIsShow(t *testing.T) {
-	cs := New("oc_x", "claude", newTestChannel())
+	cs, _ := New("oc_x", "claude", newTestChannel())
 	if got := cs.ThinkMode(); got != ThinkModeShow {
 		t.Errorf("fresh ChatSession.ThinkMode() = %v, want ThinkModeShow", got)
 	}

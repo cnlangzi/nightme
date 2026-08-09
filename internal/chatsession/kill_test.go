@@ -56,7 +56,7 @@ func (f *failingCloseAS) Close() error {
 // used by kill.KillAllAgents. Empty cwd → nil; non-matching cwd →
 // nil; matching cwd → entries in undefined order.
 func TestAgentSessionsInCwd(t *testing.T) {
-	cs := New("chat-asic", "cc", newTestChannel())
+	cs, _ := New("chat-asic", "cc", newTestChannel())
 	cwd1 := t.TempDir()
 	cwd2 := t.TempDir()
 	cs.WithPersistence(nil, nil)
@@ -93,7 +93,7 @@ func TestAgentSessionsInCwd(t *testing.T) {
 // TestAgentSessionsInCwd_DoesNotMutate — the snapshot accessor
 // must NOT remove anything from the pool.
 func TestAgentSessionsInCwd_DoesNotMutate(t *testing.T) {
-	cs := New("chat-asic-mut", "cc", newTestChannel())
+	cs, _ := New("chat-asic-mut", "cc", newTestChannel())
 	cwd := t.TempDir()
 	cs.WithPersistence(nil, nil)
 
@@ -118,7 +118,7 @@ func TestAgentSessionsInCwd_DoesNotMutate(t *testing.T) {
 //   - Deletes agent_sessions.json row
 //   - Preserves activeAS when it pointed elsewhere
 func TestDropAgentSession(t *testing.T) {
-	cs := New("chat-drop", "cc", newTestChannel())
+	cs, _ := New("chat-drop", "cc", newTestChannel())
 	cwd := t.TempDir()
 
 	asFile, err := registry.OpenAgentSessionFile(filepath.Join(t.TempDir(), "agent_sessions.json"))
@@ -156,7 +156,7 @@ func TestDropAgentSession(t *testing.T) {
 // TestDropAgentSession_ActiveASCleared — DropAgentSession clears
 // activeAS iff it pointed to the dropped entry.
 func TestDropAgentSession_ActiveASCleared(t *testing.T) {
-	cs := New("chat-drop-active", "cc", newTestChannel())
+	cs, _ := New("chat-drop-active", "cc", newTestChannel())
 	cwd := t.TempDir()
 	cs.WithPersistence(nil, nil)
 
@@ -175,7 +175,7 @@ func TestDropAgentSession_ActiveASCleared(t *testing.T) {
 // TestDropAgentSession_Idempotent — calling twice is safe (no
 // panic, no error). The second call is a no-op.
 func TestDropAgentSession_Idempotent(t *testing.T) {
-	cs := New("chat-drop-idem", "cc", newTestChannel())
+	cs, _ := New("chat-drop-idem", "cc", newTestChannel())
 	cwd := t.TempDir()
 	cs.WithPersistence(nil, nil)
 
@@ -191,7 +191,7 @@ func TestDropAgentSession_Idempotent(t *testing.T) {
 // TestDropAgentSession_NilSafe — nil entry is a no-op (defense
 // against call sites that may pass nil).
 func TestDropAgentSession_NilSafe(t *testing.T) {
-	cs := New("chat-drop-nil", "cc", newTestChannel())
+	cs, _ := New("chat-drop-nil", "cc", newTestChannel())
 	cwd := t.TempDir()
 	cs.WithPersistence(nil, nil)
 
@@ -215,7 +215,7 @@ func TestDropAgentSession_NilSafe(t *testing.T) {
 // Find (agent, cwd) via LookupInPool, Close, Drop. Other entries
 // must not be touched.
 func TestKillWorkflow_KillOne(t *testing.T) {
-	cs := New("chat-wf-ka", "cc", newTestChannel())
+	cs, _ := New("chat-wf-ka", "cc", newTestChannel())
 	cwd := t.TempDir()
 	if err := cs.SetActiveCwd(cwd); err != nil {
 		t.Fatalf("SetActiveCwd: %v", err)
@@ -253,7 +253,7 @@ func TestKillWorkflow_KillOne(t *testing.T) {
 // TestKillWorkflow_KillOne_ActiveASCleared — workflow handles
 // activeAS correctly: cleared iff killed entry was active.
 func TestKillWorkflow_KillOne_ActiveASCleared(t *testing.T) {
-	cs := New("chat-wf-ka-active", "cc", newTestChannel())
+	cs, _ := New("chat-wf-ka-active", "cc", newTestChannel())
 	cwd := t.TempDir()
 	if err := cs.SetActiveCwd(cwd); err != nil {
 		t.Fatalf("SetActiveCwd: %v", err)
@@ -281,7 +281,7 @@ func TestKillWorkflow_KillOne_ActiveASCleared(t *testing.T) {
 // the pool, LookupInPool returns ErrAgentNotFound. The workflow
 // must NOT mutate anything.
 func TestKillWorkflow_KillOne_NotFound(t *testing.T) {
-	cs := New("chat-wf-ka-notfound", "cc", newTestChannel())
+	cs, _ := New("chat-wf-ka-notfound", "cc", newTestChannel())
 	cwd := t.TempDir()
 	if err := cs.SetActiveCwd(cwd); err != nil {
 		t.Fatalf("SetActiveCwd: %v", err)
@@ -306,7 +306,7 @@ func TestKillWorkflow_KillOne_NotFound(t *testing.T) {
 // TestKillWorkflow_KillAllAgents — the /kill (no args) path
 // simulated. AgentSessionsInCwd returns targets; Close each; Drop each.
 func TestKillWorkflow_KillAllAgents(t *testing.T) {
-	cs := New("chat-wf-kaa", "cc", newTestChannel())
+	cs, _ := New("chat-wf-kaa", "cc", newTestChannel())
 	cwd := t.TempDir()
 	if err := cs.SetActiveCwd(cwd); err != nil {
 		t.Fatalf("SetActiveCwd: %v", err)
@@ -344,7 +344,7 @@ func TestKillWorkflow_KillAllAgents(t *testing.T) {
 // TestKillWorkflow_KillAllAgents_EmptyCwd — AgentSessionsInCwd("")
 // returns nil → workflow is a no-op.
 func TestKillWorkflow_KillAllAgents_EmptyCwd(t *testing.T) {
-	cs := New("chat-wf-kaa-emptycwd", "cc", newTestChannel())
+	cs, _ := New("chat-wf-kaa-emptycwd", "cc", newTestChannel())
 	cs.WithPersistence(nil, nil)
 
 	a := injectAS(t, cs, "cc", "/some/other/cwd",
@@ -368,7 +368,7 @@ func TestKillWorkflow_KillAllAgents_EmptyCwd(t *testing.T) {
 // TestKillWorkflow_StaleCleared — StatusExited entries: workflow
 // detects no live handle → skips Close, just Drop.
 func TestKillWorkflow_StaleCleared(t *testing.T) {
-	cs := New("chat-wf-stale", "cc", newTestChannel())
+	cs, _ := New("chat-wf-stale", "cc", newTestChannel())
 	cwd := t.TempDir()
 	if err := cs.SetActiveCwd(cwd); err != nil {
 		t.Fatalf("SetActiveCwd: %v", err)

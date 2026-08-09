@@ -24,12 +24,11 @@ import (
 // Factory is the command.SlashCommandFactory for /use.
 type Factory struct {
 	mgr            *chatsession.Manager
-	defaultPrimary string
 }
 
 // NewFactory constructs a Factory backed by mgr.
-func NewFactory(mgr *chatsession.Manager, defaultPrimary string) *Factory {
-	return &Factory{mgr: mgr, defaultPrimary: defaultPrimary}
+func NewFactory(mgr *chatsession.Manager) *Factory {
+	return &Factory{mgr: mgr}
 }
 
 // Spec implements command.SlashCommandFactory.
@@ -61,6 +60,11 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	if agentName == "" {
 		return command.Reply(ctx, rt, "Usage: /use <agent> [args...]"), nil
 	}
+
+	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
+		return failOut, nil
+	}
+
 // Pure state mutation first.
 	if err := cs.SetActiveAgent(agentName); err != nil {
 		return command.Reply(ctx, rt, fmt.Sprintf("SetActiveAgent failed: %v", err)), nil

@@ -195,7 +195,7 @@ func newDebugFixture(f debugFlags) (*debugFixture, error) {
 
 	// 5. Create the ChatSession — triggers the WithOnCreate
 	// callback, which installs the SetActionHandler.
-	cs := mgr.GetOrCreate(f.chatID, "primary")
+	cs, _ := mgr.GetOrCreate(f.chatID, "primary")
 
 	// 6. Gateway with actionHandler + capturing channel.
 	// WithActionHandler is on the Gateway interface (not just

@@ -22,12 +22,11 @@ import (
 // Factory is the command.SlashCommandFactory for /cwd.
 type Factory struct {
 	mgr            *chatsession.Manager
-	defaultPrimary string
 }
 
 // NewFactory constructs a Factory backed by mgr.
-func NewFactory(mgr *chatsession.Manager, defaultPrimary string) *Factory {
-	return &Factory{mgr: mgr, defaultPrimary: defaultPrimary}
+func NewFactory(mgr *chatsession.Manager) *Factory {
+	return &Factory{mgr: mgr}
 }
 
 // Spec implements command.SlashCommandFactory.
@@ -100,7 +99,7 @@ if err := cs.SetActiveCwd(abs); err != nil {
 
 	activeAgent := cs.ActiveAgent()
 	if activeAgent == "" {
-		activeAgent = f.defaultPrimary
+		activeAgent = rt.Config.Primary
 	}
 	return command.Reply(ctx, rt, fmt.Sprintf(
 		"Workspace set to %s.\nSession is ready (active agent: %s). Send any message to chat with it, or /use <agent> to switch. /use is optional — plain text is forwarded to the active agent automatically.",

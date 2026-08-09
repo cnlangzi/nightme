@@ -103,7 +103,8 @@ func integrationEventHandler(ch Channel, _ *chatsession.ChatSession) func(env ch
 // --- helpers ----------------------------------------------------------
 
 func newIntegrationChatSession(chatID string, spawner chatsession.Spawner) *chatsession.ChatSession {
-	cs := chatsession.New(chatID, "fake", newTestChannel()).WithSpawner(spawner)
+	cs, _ := chatsession.New(chatID, "fake", newTestChannel())
+	cs = cs.WithSpawner(spawner)
 	cs.SetActiveCwd("/tmp")
 	cs.SetActiveAgent("fake")
 	return cs

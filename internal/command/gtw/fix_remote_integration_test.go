@@ -75,7 +75,7 @@ func newFixRemoteRig(t *testing.T) *fixRemoteRig {
 	mustGit(t, repoRoot, "symbolic-ref", "refs/remotes/origin/HEAD",
 		"refs/remotes/origin/main")
 
-	cs := chatsession.New("chat-fix-remote-"+t.Name(), "test-agent", newTestChannel())
+	cs, _ := chatsession.New("chat-fix-remote-"+t.Name(), "test-agent", newTestChannel())
 	if err := cs.SetActiveCwd(repoRoot); err != nil {
 		t.Fatalf("SetActiveCwd: %v", err)
 	}

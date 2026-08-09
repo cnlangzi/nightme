@@ -316,7 +316,7 @@ func runFixRemote(
 			return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
 				branch, worktreePath, owner+"/"+repo, repoRoot, string(providerKind), ModeRemote, issueID, issue, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */)
 		}
-		return emitBranchExistsDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
+		return emitBranchExistsDraft(ctx, cs, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID:  issueID,
 			Title:    issue.Title,
 			Branch:   branch,
@@ -388,7 +388,7 @@ func runFixRemote(
 	// later, the worktree is already real and the user has a
 	// usable setup, label or not.
 	if err := WorktreeAdd(ctx, repoRoot, branch, worktreePath, "HEAD", deps.Git); err != nil {
-		return emitWorktreeFailDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
+		return emitWorktreeFailDraft(ctx, cs, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID:  issueID,
 			Title:    issue.Title,
 			Branch:   branch,
@@ -418,7 +418,7 @@ func runFixRemote(
 	// the durable claim and the user can retry the label
 	// later or just live without it.
 	if err := provider.AddLabel(ctx, owner, repo, issueID, LabelWIP); err != nil {
-		_ = deps.Send(ctx, OutMsg{
+		_ = cs.Channel().Send(ctx, chatsession.OutboundMessage{
 			ChatID:  chatID,
 			ReplyTo: messageID,
 			Text: fmt.Sprintf(
@@ -492,7 +492,7 @@ func runFixLocal(
 			return completeFixAndDispatch(ctx, cs, slot, deps, chatID, messageID,
 				branch, worktreePath, "", repoRoot, "", ModeLocal, -1, nil, true /* skipDispatch */, "" /* baseSHA: re-entry skips refresh */)
 		}
-		return emitBranchExistsDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
+		return emitBranchExistsDraft(ctx, cs, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID: -1,
 			Title:   "(local branch)",
 			Branch:  branch,
@@ -522,7 +522,7 @@ func runFixLocal(
 	}
 
 	if err := WorktreeAdd(ctx, repoRoot, branch, worktreePath, "HEAD", deps.Git); err != nil {
-		return emitWorktreeFailDraft(ctx, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
+		return emitWorktreeFailDraft(ctx, cs, deps, chatID, messageID, messageID, drafts, FixDraftPayload{
 			IssueID:  -1,
 			Title:    "(local branch)",
 			Branch:   branch,
@@ -697,7 +697,7 @@ func completeFixAndDispatch(
 			// Append a single-line warning so the user knows
 			// the agent didn't receive the dispatch. We do not
 			// roll back the worktree — see comment above.
-			_ = deps.Send(ctx, OutMsg{
+			_ = cs.Channel().Send(ctx, chatsession.OutboundMessage{
 				ChatID:  chatID,
 				ReplyTo: messageID,
 				Text:    fmt.Sprintf("⚠️ Could not dispatch issue #%d to agent: %v\nThe worktree is ready; you can /cwd into %s and tell the agent to fix #%d.", issue.ID, err, worktreePath, issue.ID),
@@ -838,6 +838,7 @@ func stderrFromWorktreeErr(err error) string {
 
 func emitBranchExistsDraft(
 	ctx context.Context,
+	cs *chatsession.ChatSession,
 	deps HandlerDeps,
 	chatID, messageID, userMsgID string,
 	drafts DraftsMap,
@@ -845,22 +846,24 @@ func emitBranchExistsDraft(
 	existingPath string,
 ) (*Result, error) {
 		card := BranchExistsCard(payload, existingPath)
-		return sendDraft(ctx, deps, chatID, messageID, userMsgID, card, drafts, DraftFixBranchExists, payload)
+		return sendDraft(ctx, cs, deps, chatID, messageID, userMsgID, card, drafts, DraftFixBranchExists, payload)
 }
 
 func emitWorktreeFailDraft(
 	ctx context.Context,
+	cs *chatsession.ChatSession,
 	deps HandlerDeps,
 	chatID, messageID, userMsgID string,
 	drafts DraftsMap,
 	payload FixDraftPayload,
 ) (*Result, error) {
 		card := WorktreeFailCard(payload)
-		return sendDraft(ctx, deps, chatID, messageID, userMsgID, card, drafts, DraftFixWorktreeFail, payload)
+		return sendDraft(ctx, cs, deps, chatID, messageID, userMsgID, card, drafts, DraftFixWorktreeFail, payload)
 }
 
 func sendDraft(
 	ctx context.Context,
+	cs *chatsession.ChatSession,
 	deps HandlerDeps,
 	chatID, messageID, userMsgID string,
 	card Card,
@@ -874,12 +877,13 @@ func sendDraft(
 	}
 	card.RequestID = requestID
 
+	ch := cs.Channel()
 	var botMsgID string
-	if deps.SendCard != nil {
-		id, err := deps.SendCard(ctx, OutCardMsg{
+	if ch != nil {
+		id, err := ch.SendCard(ctx, chatsession.OutboundMessage{
 			ChatID:  chatID,
 			ReplyTo: messageID,
-			Card:    card,
+			Card:    gtwCardToChatsession(card),
 		})
 		if err == nil {
 			botMsgID = id
@@ -888,17 +892,19 @@ func sendDraft(
 		// the user still sees the decision content even if the
 		// channel's card path is unavailable.
 	}
-	if deps.SendCard == nil || botMsgID == "" {
+	if ch == nil || botMsgID == "" {
 		// Legacy / fallback: render the card as plain markdown and
-		// send via deps.Send. The dispatcher still stores the
+		// send via Send. The dispatcher still stores the
 		// draft so the reaction pipeline works; the action handler
 		// just emits plain text follow-ups (no PATCH) when the
 		// bot message id is empty.
-		_ = deps.Send(ctx, OutMsg{
-			ChatID:  chatID,
-			ReplyTo: messageID,
-			Text:    renderCardMarkdown(card),
-		})
+		if ch != nil {
+			_ = ch.Send(ctx, chatsession.OutboundMessage{
+				ChatID:  chatID,
+				ReplyTo: messageID,
+				Text:    renderCardMarkdown(card),
+			})
+		}
 	}
 
 	drafts.Store(userMsgID, &Draft{
@@ -967,4 +973,31 @@ func reply(ctx context.Context, ch chatsession.Channel, chatID, messageID, text 
 		})
 	}
 	return &Result{Consumed: true}
+}
+// gtwCardToChatsession translates gtw.Card (business view) to
+// chatsession.Card (canonical message type). gtw.Card has fewer
+// fields (no Kind/Disabled/ChosenEmoji); those get zero values
+// in the destination.
+func gtwCardToChatsession(in Card) *chatsession.Card {
+	return &chatsession.Card{
+		Title:     in.Title,
+		Body:      in.Body,
+		Choices:   gtwCardChoicesToChat(in.Choices),
+		RequestID: in.RequestID,
+	}
+}
+
+func gtwCardChoicesToChat(in []CardChoice) []chatsession.CardChoice {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]chatsession.CardChoice, len(in))
+	for i, c := range in {
+		out[i] = chatsession.CardChoice{
+			Emoji:  c.Emoji,
+			Label:  c.Label,
+			Action: c.Action,
+		}
+	}
+	return out
 }

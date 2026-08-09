@@ -104,19 +104,59 @@ func (m *Manager) WithOnCreate(fn func(*ChatSession)) *Manager {
 // Concurrency: simple lock-internal critical section (the
 // single-threaded runtime path uses GetOrCreate; the per-AS
 // lifecycle doesn't touch the manager's table).
+// GetOrCreate returns the ChatSession for chatID, creating it if
+// missing. The chatType parameter was removed in F-33 (D1); nightme
+// no longer carries chat-type at the binding layer. primaryAgent
+// is the cfg.Primary snapshot from config; ChatSession.primaryAgent
+// is captured here and never mutated post-creation (Q-A: no
+// /default command, no per-chat override). It also seeds
+// activeAgent so the runtime always has an effective agent to
+// dispatch to.
+//
+// Errors:
+//   - channelResolver returns nil for chatID → returns (nil, err)
+//     (logs warn). The daemon does not crash; only this dispatch
+//     is affected. Caller decides how to handle.
+//   - New(...) itself returns error → propagated as-is.
+//
+// Concurrency: double-checked locking. The channelResolver call
+// is always outside m.mu to avoid nesting external locks (current
+// gateway.resolveChannel takes its own RLock; future resolver
+// implementations should not be required to know about m.mu).
 func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error) {
+	// Phase 1: lock-internal fast path
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if cs, ok := m.sessions[chatID]; ok {
-		return cs, nil
+	cs, ok := m.sessions[chatID]
+	m.mu.Unlock()
+	if ok {
+		return cs, nil // existing cs → channel already bound
 	}
 
-	cs, err := New(chatID, primaryAgent, nil)
+	// Phase 2: call resolver OUTSIDE the lock
+	var ch Channel
+	if m.channelResolver != nil {
+		ch = m.channelResolver(chatID)
+	}
+	if ch == nil {
+		slog.Default().Warn("Manager.GetOrCreate: channelResolver returned nil",
+			"chat_id", chatID)
+		return nil, fmt.Errorf("manager: channel is nil for chatID=%s", chatID)
+	}
+
+	// Phase 3: construct + attach spawner/persistence (no lock)
+	cs, err := New(chatID, primaryAgent, ch)
 	if err != nil {
 		return nil, err
 	}
 	cs.WithSpawner(m.spawner).WithPersistence(m.csFile, m.asFile)
+
+	// Phase 4: re-lock + insert with re-check (race-safe)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if existing, ok := m.sessions[chatID]; ok {
+		// Another goroutine won the race; discard our construction.
+		return existing, nil
+	}
 	m.sessions[chatID] = cs
 
 	// Fire onCreate callback before releasing the lock so the

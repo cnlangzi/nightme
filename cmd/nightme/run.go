@@ -344,10 +344,13 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	//
 	// 注:chatsession.Channel interface 和 gateway.Channel interface
 	// 签名不兼容(chatsession 用 chatsession.OutboundMessage,gateway
-	// 用 gateway.OutboundMessage),所以 resolver 实际由 runtime shim
-	// 在 dispatch 路径上 call cs.WithChannel 来完成 — 这里先占位
-	// 注入,真正绑 channel 在 shim 里。
-	_ = mgr.WithChannelResolver(nil) // placeholder; runtime shim binds via WithChannel instead
+	// 用 gateway.OutboundMessage),所以 resolver 通过 newChannelWrap
+	// 把 gateway.Channel 适配成 chatsession.Channel 注入。生产环境
+	// 一个 nightme daemon 只有一个 gateway.Channel(目前永远是 feishu);
+	// 多 channel 部署时把 chatID → gateway.Channel 映射写进 resolver。
+	mgr.WithChannelResolver(func(string) chatsession.Channel {
+		return newChannelWrap(ch)
+	})
 
 	// F-XX: wire the per-chat ChatSession lookup. Without this,
 	// /gtw fix and reaction paths would nil-deref on
@@ -409,9 +412,10 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 			return nil, nil
 		}
 
-		// GetOrCreate 这里调用一次,channelResolver 已经注入,
-		// 所以 cs.Channel() 应当非 nil。如果 nil(resolver 失败),
-		// log warn 并返回 nil 让 gateway 走 fallback 到 agent loop。
+		// GetOrCreate 这里调用一次,channelResolver 已经注入(见
+		// 上方 WithChannelResolver 调用),所以 cs.Channel() 应当非 nil。
+		// 如果 nil(resolver 失败),log warn 并返回 nil 让 gateway
+		// 走 fallback 到 agent loop。
 		cs, err := mgr.GetOrCreate(msg.ChatID, cfg.Primary)
 		if err != nil {
 			slog.Default().Warn("runtime shim: GetOrCreate failed",

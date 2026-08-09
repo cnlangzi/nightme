@@ -137,7 +137,22 @@ func TestChatSession_PumpEvents_RoutesKindAgentEvent(t *testing.T) {
 		return false
 	})
 
-	// Start pump.
+	// Synchronously install the per-AS EventBus subscription
+	// BEFORE starting the pump goroutine. The race without this
+	// barrier: `go PumpEvents` only queues the goroutine — its
+	// first attachAllPendingSubscriptions() call is async, so
+	// fake.PushEvent's event can flow through readpumpLoop →
+	// eventDispatchLoop → as.EventBus.Publish with NO subscriber
+	// attached yet (services.EventBus.Publish is a no-op on an
+	// empty handler list). Symptom: the test fails with "PumpEvents
+	// did not deliver event within 2s". With -race the scheduler
+	// is slowed enough to expose this ~30% of runs; without -race
+	// it usually hides. See PR #92 follow-up commit.
+	cs.attachAllPendingSubscriptions()
+
+	// Start pump (its 100ms tick re-runs attachAllPendingSubscriptions
+	// for any AS added later — for this test it's a no-op since we
+	// already populated cs.subs).
 	go cs.PumpEvents(ctx)
 
 	// Push a synthetic event.
@@ -209,6 +224,12 @@ func TestChatSession_PumpEvents_RoutesKindPromptEnded(t *testing.T) {
 	if err := as.Submit(p); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
+
+	// Synchronously install the per-AS EventBus subscription
+	// BEFORE starting the pump goroutine. See the matching note
+	// in TestChatSession_PumpEvents_RoutesKindAgentEvent for the
+	// race this avoids.
+	cs.attachAllPendingSubscriptions()
 
 	// Start CS pump so KindPromptEnded → routeEvent → writebackMessageState runs.
 	// Note: do NOT put the message in cs.queue — TryFlush from the

@@ -300,6 +300,132 @@ func (c *Client) SetModel(ctx context.Context, sessionID, providerID, modelID st
 	return c.doJSON(req, nil)
 }
 
+// Compact calls POST /api/session/{id}/compact. The server compacts
+// the conversation history (drops intermediate turns, sums the
+// context) and returns 204 on success. The session id is unchanged;
+// the next /prompt response carries the fresh token totals.
+//
+// We surface this to the runtime so a "context full" hint in the
+// footer can drive a /compact slash command rather than waiting
+// for the model to error out.
+func (c *Client) Compact(ctx context.Context, sessionID string) error {
+	if sessionID == "" {
+		return fmt.Errorf("opencode: empty session id")
+	}
+	req, err := c.newRequest(ctx, "POST", "/api/session/"+url.PathEscape(sessionID)+"/compact", nil)
+	if err != nil {
+		return err
+	}
+	return c.doJSON(req, nil)
+}
+
+// ListSessions returns the sessions known to the server, scoped
+// to the bridge's workspace. Used by the runtime to surface a
+// resume picker when the user runs "/use opencode" with a saved
+// session id. The query params mirror the OpenAPI spec; the
+// `directory` query is enforced by the server-side instance
+// context so we don't need to pass it when the client already
+// sets the `x-opencode-directory` header.
+func (c *Client) ListSessions(ctx context.Context, limit int) ([]Session, error) {
+	path := "/api/session"
+	if limit > 0 {
+		path += fmt.Sprintf("?limit=%d", limit)
+	}
+	req, err := c.newRequest(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	// List responses are wrapped in {data: [...], cursor: ...}.
+	// Older versions return a bare array. We try both.
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("opencode: list sessions: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("opencode: list sessions: %d: %s",
+			resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("opencode: list: %w", err)
+	}
+	var wrapped struct {
+		Data []Session `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err == nil && len(wrapped.Data) > 0 {
+		return wrapped.Data, nil
+	}
+	var bare []Session
+	if err := json.Unmarshal(raw, &bare); err != nil {
+		return nil, fmt.Errorf("opencode: list decode: %w", err)
+	}
+	return bare, nil
+}
+
+// Provider is the subset of GET /api/provider we read. Only the
+// fields needed to drive a /model picker are kept.
+type Provider struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Source  string `json:"source"`
+	Env     []string `json:"env"`
+	Key     string `json:"key"`
+	Options any  `json:"options"`
+	Models  map[string]any `json:"models"`
+}
+
+// ListProviders calls GET /api/provider. Returns the configured
+// providers so the runtime can populate a /model picker. The
+// response shape mirrors the OpenAPI spec; we wrap it in {data:
+// [...]} fallback for older versions.
+func (c *Client) ListProviders(ctx context.Context) ([]Provider, error) {
+	req, err := c.newRequest(ctx, "GET", "/api/provider", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("opencode: list providers: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("opencode: list providers: %d: %s",
+			resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("opencode: list providers: %w", err)
+	}
+	var wrapped struct {
+		Data []Provider `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err == nil && len(wrapped.Data) > 0 {
+		return wrapped.Data, nil
+	}
+	var bare []Provider
+	if err := json.Unmarshal(raw, &bare); err != nil {
+		return nil, fmt.Errorf("opencode: list providers decode: %w", err)
+	}
+	return bare, nil
+}
+
+// ListModels calls GET /api/model. Convenience for the runtime —
+// some call sites want a flat list of (providerID, modelID) pairs.
+func (c *Client) ListModels(ctx context.Context) (map[string]any, error) {
+	req, err := c.newRequest(ctx, "GET", "/api/model", nil)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := c.doJSON(req, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GetConfig calls GET /api/config. Useful for surfacing the active
 // provider / model in the EventAgentReady payload.
 func (c *Client) GetConfig(ctx context.Context) (map[string]any, error) {

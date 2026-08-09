@@ -426,6 +426,56 @@ func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error 
 	return a.client.SetModel(ctx, a.sessionID, providerID, modelID)
 }
 
+// Compact asks the server to compact the conversation history. The
+// session id is unchanged; the next /prompt response carries the
+// fresh token totals so the channel footer can refresh without
+// waiting for the model to error out on context overflow.
+//
+// The session.compacted SSE event fires after success; the
+// runtime's translator already emits a fresh EventAgentReady
+// so the channel can refresh the header.
+func (a *Agent) Compact(ctx context.Context) error {
+	if a.server == nil {
+		return fmt.Errorf("opencode: not started")
+	}
+	if a.sessionID == "" {
+		return fmt.Errorf("opencode: no session")
+	}
+	return a.client.Compact(ctx, a.sessionID)
+}
+
+// ListSessions returns the sessions known to the server, scoped
+// to the bridge's workspace. The runtime uses this for a resume
+// picker; the bridge itself does not auto-resume from the list.
+//
+// Bridge-independent: this call does not require an active
+// session. We use the workspace-scoped header so the server
+// returns only sessions for this project.
+func (a *Agent) ListSessions(ctx context.Context, limit int) ([]Session, error) {
+	if a.client == nil {
+		return nil, fmt.Errorf("opencode: not started")
+	}
+	return a.client.ListSessions(ctx, limit)
+}
+
+// ListProviders returns the configured providers. Bridge-
+// independent; the runtime uses it for a /model picker.
+func (a *Agent) ListProviders(ctx context.Context) ([]Provider, error) {
+	if a.client == nil {
+		return nil, fmt.Errorf("opencode: not started")
+	}
+	return a.client.ListProviders(ctx)
+}
+
+// ListModels returns the active model catalog. Bridge-
+// independent.
+func (a *Agent) ListModels(ctx context.Context) (map[string]any, error) {
+	if a.client == nil {
+		return nil, fmt.Errorf("opencode: not started")
+	}
+	return a.client.ListModels(ctx)
+}
+
 
 // ─── permission response ─────────────────────────────────────────
 

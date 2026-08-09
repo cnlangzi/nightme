@@ -1,6 +1,8 @@
 package chatsession
 
 import (
+	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -220,23 +222,30 @@ func TestMultiAS_RouteEventUsesSourceNotSelected(t *testing.T) {
 	cs.attachAgentSession(asB)
 	cs.selectAgentSessionLocked(asB) // selected = B
 
-	var observedSource string
+	delivered := make(chan AgentEventEnvelope, 1)
 	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
-		if env.AgentSession != nil {
-			observedSource = env.AgentSession.ID
+		select {
+		case delivered <- env:
+		default:
 		}
 		return false
 	})
 
 	// Push from A (not selected).
-	pushEvent(asA, EnrichedEvent{Kind:KindAgentEvent, AgentEvent: makeTextEvent("a")})
+	pushEvent(asA, EnrichedEvent{Kind: KindAgentEvent, AgentEvent: makeTextEvent("a")})
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && observedSource == "" {
-		time.Sleep(5 * time.Millisecond)
+	var env AgentEventEnvelope
+	select {
+	case env = <-delivered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("event bus did not receive event")
 	}
-	if observedSource != asA.ID {
-		t.Errorf("observed source = %q, want %q (routeEvent must use AS source, not selected)", observedSource, asA.ID)
+	if env.AgentSession == nil || env.AgentSession.ID != asA.ID {
+		got := ""
+		if env.AgentSession != nil {
+			got = env.AgentSession.ID
+		}
+		t.Errorf("observed source = %q, want %q (routeEvent must use AS source, not selected)", got, asA.ID)
 	}
 }
 
@@ -323,6 +332,146 @@ func TestMultiAS_AllASIndependent(t *testing.T) {
 	for _, as := range ases {
 		if count[as.ID] != 3 {
 			t.Errorf("count[%s] = %d, want 3", as.ID, count[as.ID])
+		}
+	}
+}
+
+// TestMultiAS_HighConcurrency_BusFanoutRaceFree — many producers
+// pushing concurrently, many subscribers with shared per-AS state,
+// many reader goroutines draining. Run under -race; the detector
+// trips immediately on any unsynchronized access between the bus
+// dispatch goroutine, the subscriber closure, and the reader.
+//
+// This is the regression catcher for the bare-var-with-polling
+// pattern that previously bit TestRouteEvent_IgnoresSelectedAS,
+// TestMultiAS_RouteEventUsesSourceNotSelected, and 5 tests in
+// event_envelope_test.go. The fix pattern (atomic counter + buffered
+// channel signal) is inlined below; the test passes iff -race
+// reports nothing AND every event lands at the reader side.
+//
+// If you add a new Subscribe-based test, please mirror this pattern
+// rather than reintroducing the bare-var-with-poll loop: it's
+// strictly slower under -race and racy in theory.
+func TestMultiAS_HighConcurrency_BusFanoutRaceFree(t *testing.T) {
+	cs := newChatSessionForTest("cs_concurrent_stress")
+
+	const (
+		nAS     = 5
+		nPer    = 50 // events per AS
+		nRead   = 4  // reader goroutines
+		nSubs   = 3  // subscribers with shared state
+	)
+
+	ases := make([]*AgentSession, nAS)
+	for i := range ases {
+		ases[i] = NewAgentSession(
+			fmt.Sprintf("as_stress_%d", i),
+			cs.ID,
+			"pi",
+			"/tmp",
+			nil,
+		)
+		cs.attachAgentSession(ases[i])
+	}
+
+	// nSubs subscribers each maintain their own per-AS hit count.
+	// Atomic.Int64 → race-free read-modify-write. A bare
+	// map[string]int here would trip -race under this load.
+	subs := make([]*sync.Map, nSubs)
+	for i := range subs {
+		subs[i] = &sync.Map{}
+		idx := i
+		cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
+			if env.AgentSession == nil {
+				return false
+			}
+			// LoadOrStore + add via a small CAS loop on the int.
+			// (sync.Map stores any; we wrap counts in *atomic.Int64.)
+			v, _ := subs[idx].LoadOrStore(env.AgentSession.ID, new(atomic.Int64))
+			v.(*atomic.Int64).Add(1)
+			return false
+		})
+	}
+
+	// Producers — every AS pushes nPer events from its own goroutine.
+	var prodWG sync.WaitGroup
+	for _, as := range ases {
+		prodWG.Add(1)
+		go func(as *AgentSession) {
+			defer prodWG.Done()
+			for i := 0; i < nPer; i++ {
+				pushEvent(as, EnrichedEvent{
+					Kind:       KindAgentEvent,
+					AgentEvent: makeTextEvent(fmt.Sprintf("%s/%d", as.ID, i)),
+				})
+			}
+		}(as)
+	}
+
+	// Readers — multiple goroutines drain a shared delivery channel,
+	// proving the bus→subscriber→reader chain stays race-free at
+	// every step. Channel send/recv is the happens-before edge.
+	const totalEvents = nAS * nPer
+	delivered := make(chan AgentSession, totalEvents*2)
+	cs.AgentEventBus.Subscribe(func(env AgentEventEnvelope) bool {
+		if env.AgentSession == nil {
+			return false
+		}
+		select {
+		case delivered <- *env.AgentSession:
+		default:
+		}
+		return false
+	})
+
+	readerCtx, cancelReaders := context.WithCancel(context.Background())
+	defer cancelReaders()
+	var readerWG sync.WaitGroup
+	var seenCount atomic.Int64
+	for i := 0; i < nRead; i++ {
+		readerWG.Add(1)
+		go func() {
+			defer readerWG.Done()
+			for {
+				select {
+				case <-readerCtx.Done():
+					return
+				case <-delivered:
+					seenCount.Add(1)
+				}
+			}
+		}()
+	}
+
+	// Producers finish, then we wait until all events land at the
+	// readers. The bus dispatch + subscriber chain runs concurrently
+	// with the producers (pushEvent starts a dispatcher goroutine on
+	// each AS, then returns immediately).
+	prodWG.Wait()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && seenCount.Load() < int64(totalEvents) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	cancelReaders()
+	readerWG.Wait()
+
+	if got := seenCount.Load(); got != int64(totalEvents) {
+		t.Errorf("reader saw %d/%d events (bus dropped or reader starved)", got, totalEvents)
+	}
+
+	// Each subscriber must have observed every event from every AS.
+	// We read the per-subscriber counts (atomic) outside the
+	// subscriber goroutine → race-free read.
+	for i, sub := range subs {
+		for _, as := range ases {
+			v, ok := sub.Load(as.ID)
+			if !ok {
+				t.Errorf("sub[%d] missing count for %s", i, as.ID)
+				continue
+			}
+			if n := v.(*atomic.Int64).Load(); n != int64(nPer) {
+				t.Errorf("sub[%d] count for %s = %d, want %d", i, as.ID, n, nPer)
+			}
 		}
 	}
 }

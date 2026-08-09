@@ -13,25 +13,25 @@ import (
 // ─── template-half tests (no Start) ───
 
 func TestNew_StoresFields(t *testing.T) {
-	a := New("codex", "codex", []string{"a", "b"})
-	if a.Name() != "codex" {
-		t.Errorf("Name() = %q, want codex", a.Name())
+	a := NewStarter("codex", "codex", []string{"a", "b"})
+	if a.Info().Name != "codex" {
+		t.Errorf("Name() = %q, want codex", a.Info().Name)
 	}
-	if a.Command() != "codex" {
-		t.Errorf("Command() = %q, want codex", a.Command())
+	if a.Info().Command != "codex" {
+		t.Errorf("Command() = %q, want codex", a.Info().Command)
 	}
-	if got := a.Args(); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+	if got := a.Info().Args; len(got) != 2 || got[0] != "a" || got[1] != "b" {
 		t.Errorf("Args() = %v, want [a b]", got)
 	}
-	if a.Env() != nil {
-		t.Errorf("Env() = %v, want nil", a.Env())
+	if a.Info().Env != nil {
+		t.Errorf("Env() = %v, want nil", a.Info().Env)
 	}
 }
 
 func TestNew_DefensiveCopyOnArgs(t *testing.T) {
 	src := []string{"x", "y"}
-	a := New("c", "c", src)
-	got := a.Args()
+	a := NewStarter("c", "c", src)
+	got := a.Info().Args
 	got[0] = "MUTATED"
 	if a.args[0] != "x" {
 		t.Errorf("Args() did not return defensive copy: a.args[0] = %q", a.args[0])
@@ -42,14 +42,14 @@ func TestNew_DefensiveCopyOnArgs(t *testing.T) {
 }
 
 func TestMode_IsJSONIO(t *testing.T) {
-	a := New("codex", "codex", nil)
-	if got := a.Mode(); got != agent.ModeJSONIO {
+	a := NewStarter("codex", "codex", nil)
+	if got := a.Info().Mode; got != agent.ModeJSONIO {
 		t.Errorf("Mode() = %v, want ModeJSONIO", got)
 	}
 }
 
 func TestDetect_RejectsMissingBinary(t *testing.T) {
-	a := New("nonexistent-binary-xyz", "nonexistent-binary-xyz", nil)
+	a := NewStarter("nonexistent-binary-xyz", "nonexistent-binary-xyz", nil)
 	if err := a.Detect(); err == nil {
 		t.Error("Detect on missing binary should error")
 	}
@@ -62,7 +62,7 @@ func TestDetect_AcceptsExistingBinary(t *testing.T) {
 	// repro tests, which use the same `codex not installed`
 	// skip guard).
 	requireRealCodex(t)
-	a := New("codex", "codex", nil)
+	a := NewStarter("codex", "codex", nil)
 	if err := a.Detect(); err != nil {
 		t.Errorf("Detect on 'codex' binary: %v", err)
 	}
@@ -77,15 +77,17 @@ func TestSendText_WrapsBlocks(t *testing.T) {
 	//
 	// Since we don't expose buildBlocksInput, this is a smoke test:
 	// verify the live Agent has the expected method signature.
-	a := New("codex", "codex", nil)
-	// Type assertion sanity — keep the compiler honest.
-	var _ agent.Agent = a
+	a := NewStarter("codex", "codex", nil)
+	// Type assertion sanity — keep the compiler honest. Starter
+	// satisfies agent.Starter; the driver (live handle) is what
+	// satisfies the legacy agent.Agent interface via WrapAsAgent.
+	var _ agent.Starter = a
 }
 
 // ─── image staging tests ───
 
 func TestStageImage_ExtensionFromPath(t *testing.T) {
-	a := New("codex", "codex", nil)
+	a := &driver{closed: make(chan struct{})}
 	tmpDir := t.TempDir()
 	workspaceDir := filepath.Join(tmpDir, "ws")
 	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
@@ -126,7 +128,7 @@ func TestStageImage_ExtensionFromPath(t *testing.T) {
 }
 
 func TestStageImage_ExtensionFromMimeType(t *testing.T) {
-	a := New("codex", "codex", nil)
+	a := &driver{closed: make(chan struct{})}
 	tmpDir := t.TempDir()
 	workspaceDir := filepath.Join(tmpDir, "ws")
 	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
@@ -158,7 +160,7 @@ func TestStageImage_ExtensionFromMimeType(t *testing.T) {
 }
 
 func TestStageImage_RejectsMissingFile(t *testing.T) {
-	a := New("codex", "codex", nil)
+	a := &driver{closed: make(chan struct{})}
 	s := &session{workspace: t.TempDir()}
 	a.session = s
 
@@ -174,7 +176,7 @@ func TestStageImage_RejectsMissingFile(t *testing.T) {
 // ─── SendPermission routing test ───
 
 func TestSendPermission_NoPending(t *testing.T) {
-	a := New("codex", "codex", nil)
+	a := &driver{closed: make(chan struct{})}
 	s := &session{
 		pendingApprovals: make(map[string]chan string),
 	}
@@ -185,7 +187,7 @@ func TestSendPermission_NoPending(t *testing.T) {
 }
 
 func TestSendPermission_EmptyDefaultsToDecline(t *testing.T) {
-	a := New("codex", "codex", nil)
+	a := &driver{closed: make(chan struct{})}
 	ch := make(chan string, 1)
 	s := &session{
 		pendingApprovals: map[string]chan string{"req-x": ch},

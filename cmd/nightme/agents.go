@@ -34,7 +34,7 @@ func init() {
 	// raw stdio pipes (no PTY). Single backend — see
 	// docs/bridge/codex.md §1 for the rationale on not supporting
 	// the legacy `codex exec` backend.
-	agent.Builtins.LegacyRegister(codex.New("codex", "codex", nil))
+	agent.Builtins.Register(codex.NewStarter("codex", "codex", nil))
 
 	// pi — the long-lived `pi --mode rpc` JSONL bridge. The agent
 	// driver is the @earendil-works/pi-coding-agent CLI; see

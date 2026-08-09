@@ -39,7 +39,33 @@ import (
 //
 // Tradeoff: ~256 KB per non-active AS in the worst case. With
 // 1-3 ASes per chat at any time, this is <1 MB — acceptable.
-const eventQueueCapacity = 4096
+// eventQueueCapacity is the per-AgentSession event buffer size
+// between the readpump (producer) and the dispatcher (consumer).
+//
+// 4096 is the "AS 在后台跑时 ChatSession 切换累积的事件窗口" budget.
+// Producer-side correctness: the chat session's per-AS readpump
+// pushes every translated bridge event here, and the consumer
+// (cs.PumpEvents) drains it. When the active AS flips — via /use,
+// /new, etc. — the previously-active AS's readpump keeps pushing
+// but the consumer is now reading from the new AS's queue. The
+// 4096-deep buffer absorbs the burst without back-pressuring the
+// per-AS readpump, which would otherwise block the bridge's
+// readpump, which would otherwise stall pi's stdout. The
+// previous cap of 256 was sized for the "drop the oldest" regime;
+// since F-54 the readpump blocks on push (dropping would lose
+// lifecycle / prompt-ended events), so the cap must be large
+// enough to hold the worst-case AS backlog. 4096 (~256 KB per AS)
+// is large enough for sustained /use switching with a busy turn
+// in flight, and well within reasonable chat-session memory.
+//
+// Tradeoff: ~256 KB per non-active AS in the worst case. With
+// 1-3 ASes per chat at any time, this is <1 MB — acceptable.
+//
+// Tests that need to exercise the buffer-cap path override this
+// var to a smaller value at the start of the test, with a defer
+// that restores the default. Don't lower it in production code
+// paths — see comment above on the worst-case AS backlog.
+var eventQueueCapacity = 4096
 
 // EnrichedEventKind tags the body of an EnrichedEvent. Exactly one of
 // AgentEvent / PromptEnded / Lifecycle is non-nil for any event.

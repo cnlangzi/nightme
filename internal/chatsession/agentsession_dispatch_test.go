@@ -31,9 +31,15 @@ func pushEvent(as *AgentSession, ev EnrichedEvent) {
 func TestAgentSession_Dispatch_PublishesViaEventBus(t *testing.T) {
 	as := makeBareAgentSession(t, "pi", "/tmp")
 
-	var got EnrichedEvent
+	// The handler runs in the dispatcher's goroutine; the assertions
+	// below run in the test's goroutine. EnrichedEvent is multi-word,
+	// so unsynchronized sharing would race on torn reads / cache
+	// staleness — not just trip -race, but also risk reads that never
+	// observe the write. atomic.Pointer gives us a single
+	// publish-then-load edge for the whole struct snapshot.
+	var got atomic.Pointer[EnrichedEvent]
 	as.EventBus.Subscribe(func(ev EnrichedEvent) bool {
-		got = ev
+		got.Store(&ev)
 		return false
 	})
 
@@ -46,21 +52,25 @@ func TestAgentSession_Dispatch_PublishesViaEventBus(t *testing.T) {
 	pushEvent(as, want)
 
 	// Poll briefly for bus delivery (dispatcher runs in a goroutine).
+	var seen *EnrichedEvent
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if got.UserMsgID == "u_1" {
+		if seen = got.Load(); seen != nil && seen.UserMsgID == "u_1" {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if got.UserMsgID != "u_1" {
-		t.Fatalf("event bus did not receive event (got %+v)", got)
+	if seen == nil {
+		t.Fatalf("event bus did not receive event (got nil)")
 	}
-	if got.AgentSessionID != as.ID {
-		t.Errorf("AgentSessionID: got %q, want %q", got.AgentSessionID, as.ID)
+	if seen.UserMsgID != "u_1" {
+		t.Fatalf("event bus did not receive event (got %+v)", *seen)
 	}
-	if got.PromptID != "p_1" {
-		t.Errorf("PromptID: got %q, want %q", got.PromptID, "p_1")
+	if seen.AgentSessionID != as.ID {
+		t.Errorf("AgentSessionID: got %q, want %q", seen.AgentSessionID, as.ID)
+	}
+	if seen.PromptID != "p_1" {
+		t.Errorf("PromptID: got %q, want %q", seen.PromptID, "p_1")
 	}
 }
 

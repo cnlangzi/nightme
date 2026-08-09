@@ -9,6 +9,13 @@
 // import internal/gateway, internal/chatsession, internal/gtw, or
 // internal/channel. The runtime (cmd/nightme/) owns the boundary
 // translation between gateway messages and command inputs/outputs.
+//
+// The Commander refactor proposed deleting command.Outbound /
+// Card / CardChoice in favour of using gateway.OutboundMessage
+// directly. That would require command to import gateway, which
+// creates an import cycle (gateway → command/gtw → command). So
+// we keep the command-side mirror types; the runtime shim
+// translates at the boundary as before.
 package command
 
 import "github.com/cnlangzi/nightme/internal/command/services"
@@ -47,7 +54,7 @@ type SlashInput struct {
 	MessageID string
 	// HasMention indicates whether the bot was @-mentioned.
 	// Used by the WatchMode gate (silent-drop non-mentions in
-	// group chats when /watch is off).
+	// group chats when /watch off).
 	HasMention bool
 	// Reaction is non-nil for reaction / action events.
 	// Slash commands ignore this; ReactionRouter consumers use it.

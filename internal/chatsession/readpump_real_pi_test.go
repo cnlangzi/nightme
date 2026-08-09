@@ -196,6 +196,31 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 		t.Fatalf("SendBlocks: %v (elapsed=%s)", err, time.Since(sendStart))
 	}
 
+	// Wait for the EventHandler to see EventAgentReady first.
+	// EventAgentReady is a precondition — without it we know the
+	// bridge's startup handshake never reached the runtime, and
+	// the rest of the assertions are meaningless. 30s is generous;
+	// the bridge usually emits this within 2-3s on a warm pi.
+	initDeadline := time.After(30 * time.Second)
+waitInit:
+	for {
+		mu.Lock()
+		init := sawInit
+		mu.Unlock()
+		if init {
+			break waitInit
+		}
+		select {
+		case <-initDeadline:
+			mu.Lock()
+			t.Fatalf("no EventAgentReady within 30s; events=%v reply=%q",
+				eventLog, reply.String())
+			mu.Unlock()
+		case <-time.After(50 * time.Millisecond):
+			// poll again
+		}
+	}
+
 	// Wait for the EventHandler to see EventAgentDone. Poll the
 	// accumulated state under the same mutex.
 	deadline := time.After(90 * time.Second)

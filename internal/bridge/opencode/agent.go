@@ -1,0 +1,615 @@
+// Public Agent (template + live) for the opencode HTTP bridge.
+//
+// Two states share one type, matching the convention used by the
+// codex / pi / claudecode / acp bridges:
+//
+//   - Template state (after New, before Start): only the spec-half
+//     fields are populated. Registered in agent.Builtins and held
+//     there as a long-lived singleton per name.
+//
+//   - Live state (after Start, before Close): the receiver is a
+//     freshly-allocated clone with runtime fields populated (server
+//     process, client, events channel, deliver, lifecycle state).
+//     Calls to Events / PID / Send* / New / Close are valid here.
+//
+// The template in Builtins is never mutated; Start returns a separate
+// *Agent so concurrent Start calls from different chats do not
+// interfere with each other.
+//
+// Session lifetime is two-tier:
+//
+//   - process: `opencode serve` → HTTP baseURL captured → ... → Close
+//   - turn:    POST /prompt → SSE events … → session.idle → EventAgentDone{Reason:"settled"}
+//
+// The process carries many turns. EventAgentDone marks the end of one
+// turn but does NOT close the events channel; only process exit or
+// Close() does.
+package opencode
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/cnlangzi/nightme/internal/agent"
+)
+
+// ─── Agent struct ────────────────────────────────────────────────
+
+// Agent is the opencode HTTP bridge descriptor.
+//
+// Two states share one type (see file doc).
+type Agent struct {
+	// ─── template fields (set by New; immutable) ───
+	name    string
+	command string
+	args    []string
+
+	// ─── runtime fields (zero before Start; populated on the clone) ───
+	server    *serverProc
+	client    *Client
+	events    chan agent.AgentEvent
+	workspace string
+	branch    string
+	sessionID string
+	model     string
+	trans     *translator
+
+	// pendingMu guards both pendingTurnActive and pendingApproval.
+	// Lifted from the codex bridge's pattern, but simpler: opencode
+	// has only one pending approval at a time (no broadcast routes).
+	pendingMu         sync.Mutex
+	pendingTurnActive bool
+	pendingApprovalID string // request id of the most recent permission.asked
+
+	closeOnce sync.Once
+	closed    chan struct{}
+	stopDeliver chan struct{} // closed before events to signal deliver to back off
+	exitDone  chan struct{}
+
+	// sseCancel cancels the SSE stream context, which closes the
+	// HTTP response body and lets readSSE exit. Without this,
+	// readSSE blocks on a body that never closes and lifecycle
+	// deadlocks on pumpWG.Wait.
+	sseCancel context.CancelFunc
+
+	// pumpWG tracks readSSE so the lifecycle goroutine can wait
+	// for the SSE reader to drain before closing events. Without
+	// this, a slow SSE reader can race with close(events) and
+	// panic on a send to the closed channel.
+	pumpWG sync.WaitGroup
+}
+
+// ─── template constructor + spec-half methods ────────────────────
+
+// New constructs the template Agent. cmd/nightme/agents.go calls this
+// from init(); the returned *Agent is held by agent.Builtins as the
+// singleton for `name`.
+func New(name, command string, args []string) *Agent {
+	return &Agent{
+		name:    name,
+		command: command,
+		args:    append([]string(nil), args...),
+	}
+}
+
+// Name returns the registry key.
+func (a *Agent) Name() string { return a.name }
+
+// Mode reports the HTTP backend. The runtime does not branch on Mode;
+// the label is for `nightme agents` and logs. We reuse ModeJSONIO
+// because the bridge is wire-format-agnostic at the runtime layer;
+// F-OPENCODE §6 notes that a dedicated ModeHTTP would be cleaner but
+// is a separate PR.
+func (a *Agent) Mode() agent.Mode { return agent.ModeJSONIO }
+
+// Command returns the configured CLI binary (typically "opencode").
+func (a *Agent) Command() string { return a.command }
+
+// Args returns a defensive copy of the constructor args. The args
+// here are appended after the canonical serve flags (see Start). We
+// keep `args` empty by default — the bridge sets its own flags.
+func (a *Agent) Args() []string {
+	return append([]string(nil), a.args...)
+}
+
+// Env returns a defensive copy of the constructor env (always nil for
+// opencode; kept for symmetry with the merged agent.Agent interface).
+func (a *Agent) Env() []string { return nil }
+
+// Detect verifies the `opencode` binary resolves on PATH. Call before
+// Start to surface a friendly "opencode not installed" error rather
+// than a confusing exec failure.
+func (a *Agent) Detect() error {
+	_, err := exec.LookPath(a.command)
+	return err
+}
+
+// ─── lifecycle ───────────────────────────────────────────────────
+
+// Start spawns `opencode serve` and resolves its HTTP base URL, then
+// either creates a new session or resumes the given SessionID. The
+// caller is expected to call Close() on the returned Agent when done.
+//
+// Start clones the receiver — the template in Builtins is untouched.
+// The clone gets template fields copied (defensively), runtime fields
+// zeroed, then the server process is spawned (which gives us the
+// baseURL), then the HTTP session handshake (Create or Get) runs
+// synchronously before Start returns.
+func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, error) {
+	if cfg.Workspace == "" {
+		return nil, fmt.Errorf("opencode: workspace is required")
+	}
+
+	oLog("Start enter",
+		"agent", a.name,
+		"command", a.command,
+		"workspace", cfg.Workspace,
+		"resume_id", cfg.SessionID,
+	)
+
+	live := &Agent{
+		name:        a.name,
+		command:     a.command,
+		args:        append([]string(nil), a.args...),
+		events:      make(chan agent.AgentEvent, eventBufferSize),
+		workspace:   cfg.Workspace,
+		branch:      detectBranch(cfg.Workspace),
+		closed:      make(chan struct{}),
+		stopDeliver: make(chan struct{}),
+		exitDone:    make(chan struct{}),
+	}
+
+	proc, err := startServer(ctx, serverConfig{
+		workspace: cfg.Workspace,
+		env:       cfg.Env,
+		args:      a.args,
+	})
+	if err != nil {
+		return nil, err
+	}
+	live.server = proc
+
+	live.client = newClient(proc, cfg.Workspace)
+	// Re-add auth header from environment if the operator set it.
+	if pw := os.Getenv("OPENCODE_SERVER_PASSWORD"); pw != "" {
+		live.client.setPassword(pw)
+	}
+
+	// Session handshake: create or resume.
+	hsCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancel()
+
+	var s *Session
+	if cfg.SessionID != "" {
+		// Resume path. If the server has forgotten the session we
+		// fall through to create — opencode persists sessions by id
+		// inside its data dir, but a fresh server with --no-cache
+		// or after a config reset will not.
+		s, err = live.client.GetSession(hsCtx, cfg.SessionID)
+		if err != nil {
+			oLog("Start: resume failed, falling back to fresh session",
+				"session_id", cfg.SessionID, "err", err.Error())
+			s, err = live.client.CreateSession(hsCtx, CreateSessionOpts{})
+			if err != nil {
+				_ = live.Close()
+				return nil, fmt.Errorf("opencode: create session (fallback): %w", err)
+			}
+		}
+	} else {
+		s, err = live.client.CreateSession(hsCtx, CreateSessionOpts{})
+		if err != nil {
+			_ = live.Close()
+			return nil, fmt.Errorf("opencode: create session: %w", err)
+		}
+	}
+	live.sessionID = s.ID
+
+	live.trans = newTranslator(
+		live.deliver,
+		a.name,
+		cfg.Workspace,
+		live.branch,
+		live.sessionID,
+		live.model,
+	)
+
+	// Synthesize the initial EventAgentReady.
+	live.deliver(agent.AgentEvent{
+		Kind:      agent.EventAgentReady,
+		SessionID: live.sessionID,
+		Model:     live.model,
+		AgentName: a.name,
+		Workspace: cfg.Workspace,
+		Branch:    live.branch,
+	})
+
+	// Start the SSE reader + lifecycle goroutine. Once these are
+	// running the events channel is the source of truth for the
+	// runtime.
+	sseCtx, sseCancel := context.WithCancel(ctx)
+	live.sseCancel = sseCancel
+	body, err := live.client.Subscribe(sseCtx, live.sessionID)
+	if err != nil {
+		_ = live.Close()
+		return nil, fmt.Errorf("opencode: subscribe: %w", err)
+	}
+	go live.readSSE(body)
+	go live.lifecycle()
+
+	// Tear down on parent context cancellation.
+	go func() {
+		<-ctx.Done()
+		_ = live.Close()
+	}()
+
+	oLog("Start return ok",
+		"pid", live.server.pid,
+		"session_id", live.sessionID,
+		"base_url", live.server.baseURL,
+	)
+	return live, nil
+}
+
+// ─── live-half methods ───────────────────────────────────────────
+
+// Events returns the read-only event channel. Closed by the lifecycle
+// goroutine when the server process exits (or by Close()).
+func (a *Agent) Events() <-chan agent.AgentEvent { return a.events }
+
+// PID returns the OS process id of the `opencode serve` child, or 0
+// when the session has no process (e.g. before Start).
+func (a *Agent) PID() int {
+	if a.server == nil {
+		return 0
+	}
+	return a.server.pid
+}
+
+// ─── user input ──────────────────────────────────────────────────
+
+// SendText delivers a plain-text user turn. Convenience wrapper around
+// SendBlocks.
+func (a *Agent) SendText(text string) error {
+	if text == "" {
+		return nil
+	}
+	return a.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: text},
+	})
+}
+
+// SendBlocks delivers a structured user turn. The bridge maps:
+//
+//	ContentText  → {type:"text", text:t}
+//	ContentImage → {type:"file", mime, url:"file://..."} (opencode reads the bytes itself)
+//	ContentFile  → {type:"file", mime, url:"file://..."}
+//
+// Empty blocks is a no-op. Concurrent calls during a streaming turn
+// are rejected with ErrTurnBusy (the bridge single-turns per session
+// to keep the SSE event ordering sane).
+func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
+	if a.server == nil {
+		return fmt.Errorf("opencode: not started")
+	}
+	if len(blocks) == 0 {
+		return nil
+	}
+	a.pendingMu.Lock()
+	if a.pendingTurnActive {
+		a.pendingMu.Unlock()
+		return ErrTurnBusy
+	}
+	a.pendingTurnActive = true
+	a.pendingMu.Unlock()
+	// pendingTurnActive is released by the SSE handler when it sees
+	// session.idle. We do NOT defer-clear here — the turn is not
+	// finished until the server says so.
+
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancelTimeout context.CancelFunc
+		ctx, cancelTimeout = context.WithTimeout(ctx, promptTimeout)
+		defer cancelTimeout()
+	}
+
+	parts := make([]PartInput, 0, len(blocks))
+	for _, b := range blocks {
+		switch b.Type {
+		case agent.ContentText:
+			if b.Text == "" {
+				continue
+			}
+			parts = append(parts, TextPart(b.Text))
+		case agent.ContentImage, agent.ContentFile:
+			if b.Path == "" {
+				continue
+			}
+			// opencode reads file:// URLs directly. We do not
+			// stage copies — the workspace is visible to the
+			// child process via the server's project root.
+			parts = append(parts, FilePart(b.MediaType, "file://"+b.Path))
+		default:
+			oLog("SendBlocks: unknown block type, skipping", "type", string(b.Type))
+		}
+	}
+	if len(parts) == 0 {
+		// Nothing to send — release the busy guard so the next
+		// SendBlocks with non-empty input can proceed.
+		a.pendingMu.Lock()
+		a.pendingTurnActive = false
+		a.pendingMu.Unlock()
+		return nil
+	}
+
+	if _, err := a.client.Prompt(ctx, a.sessionID, parts); err != nil {
+		// Prompt failed before the turn even started — release the
+		// guard so the next SendBlocks can proceed. The normal
+		// release path is the session.idle SSE event.
+		a.pendingMu.Lock()
+		a.pendingTurnActive = false
+		a.pendingMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+
+// ─── permission response ─────────────────────────────────────────
+
+// SendPermission responds to the most recent permission.asked event.
+// The argument is interpreted as:
+//
+//	"once" / "always" / "reject" → passed verbatim to the server
+//	"accept"                      → mapped to "once" (Claude-style alias)
+//
+// Empty resp is treated as "reject" so a no-op call cannot wedge the
+// bridge.
+func (a *Agent) SendPermission(resp string) error {
+	if resp == "" {
+		resp = "reject"
+	}
+	switch strings.ToLower(resp) {
+	case "accept", "allow", "allow-once", "allow_once":
+		resp = "once"
+	case "deny", "decline", "reject-once", "reject_once":
+		resp = "reject"
+	}
+	a.pendingMu.Lock()
+	id := a.pendingApprovalID
+	a.pendingApprovalID = ""
+	a.pendingMu.Unlock()
+
+	if id == "" {
+		return ErrNoPendingPermission
+	}
+	if err := a.client.ReplyPermission(context.Background(), a.sessionID, id, resp); err != nil {
+		// Restore the id so the operator can retry.
+		a.pendingMu.Lock()
+		if a.pendingApprovalID == "" {
+			a.pendingApprovalID = id
+		}
+		a.pendingMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+// ─── /new (F-34) ─────────────────────────────────────────────────
+
+// New resets the conversation context on the running session. The
+// opencode server keeps the same session id; we emit a fresh
+// EventAgentReady so the runtime can refresh its session id cache.
+//
+// In practice opencode does not have a dedicated "reset" endpoint.
+// The runtime treats this as a no-op-with-fresh-EventAgentReady;
+// operators who want a clean slate should kill the session and Spawn
+// a new one.
+func (a *Agent) New(ctx context.Context) error {
+	if a.server == nil {
+		return fmt.Errorf("opencode: not started")
+	}
+	hsCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	defer cancel()
+	s, err := a.client.GetSession(hsCtx, a.sessionID)
+	if err != nil {
+		return fmt.Errorf("opencode: GET session on /new: %w", err)
+	}
+	a.sessionID = s.ID
+	a.trans.sessionID = s.ID
+	a.deliver(agent.AgentEvent{
+		Kind:      agent.EventAgentReady,
+		SessionID: a.sessionID,
+		Model:     a.model,
+		AgentName: a.name,
+		Workspace: a.workspace,
+		Branch:    a.branch,
+	})
+	return nil
+}
+
+// ─── close ───────────────────────────────────────────────────────
+
+// Close terminates the session: tells the server process to exit,
+// waits for the lifecycle goroutine to drain, then returns. Idempotent.
+// Waits up to closeDrainTimeout for the underlying cmd.Wait goroutine
+// so that a wedged reap cannot block the runtime's spawn path
+// indefinitely.
+func (a *Agent) Close() error {
+	var firstErr error
+	a.closeOnce.Do(func() {
+		close(a.closed)
+		// Cancel the SSE stream context so readSSE exits. This
+		// must run before server.Close so the in-flight HTTP
+		// request is cancelled (otherwise readSSE blocks on the
+		// body until the server tears down).
+		if a.sseCancel != nil {
+			a.sseCancel()
+		}
+		if a.server != nil {
+			firstErr = a.server.Close()
+		}
+	})
+	// Wait outside closeOnce so the lifecycle goroutine can always
+	// close exitDone even if our closeOnce is held.
+	select {
+	case <-a.exitDone:
+	case <-time.After(closeDrainTimeout):
+		if firstErr == nil {
+			firstErr = fmt.Errorf("opencode: close drain timed out after %s", closeDrainTimeout)
+		}
+	}
+	return firstErr
+}
+
+// ─── deliver ─────────────────────────────────────────────────────
+
+// deliver stamps the bridge-side session context onto every event
+// before delivery, then blocks on pushing onto the events channel
+// until either the runtime drains it OR the session is closed / the
+// lifecycle has reaped the server.
+//
+// Producer-side contract (matches codex / pi / claudecode / pty / acp,
+// promoted in commit 67b295ec):
+//   - No `default:` instant-drop. The producer is allowed to block
+//     until the consumer (runtime readpump) drains. The channel's
+//     40960 buffer absorbs bursts.
+//   - No timeout drop. A `case <-time.After(1s)` branch was the
+//     root cause of the F-54 "bridge reset: pi: new_session:
+//     context deadline exceeded" incident.
+//   - Close signals release a parked deliver(). This prevents leaked
+//     goroutines after the session is torn down.
+func (a *Agent) deliver(ev agent.AgentEvent) agent.AgentEvent {
+	if a.server == nil {
+		return ev
+	}
+	if ev.SessionID == "" {
+		ev.SessionID = a.sessionID
+	}
+	if ev.Model == "" {
+		ev.Model = a.model
+	}
+	ev.AgentName = a.name
+	ev.Workspace = a.workspace
+	ev.Branch = a.branch
+
+	select {
+	case a.events <- ev:
+	case <-a.stopDeliver:
+		// Lifecycle has begun teardown. Drop silently.
+	case <-a.closed:
+		oLog("deliver dropped (session closed)", "kind", ev.Kind.String())
+	case <-a.exitDone:
+		// lifecycle closed exitDone after wait returned; the bridge
+		// is being torn down. Drop silently.
+	}
+	return ev
+}
+
+// ─── SSE reader + lifecycle ──────────────────────────────────────
+
+// readSSE owns the SSE body. It blocks on decodeSSE until the server
+// closes the stream (graceful EOF → nil) or the wire errors. We
+// delegate event handling to the translator; this function never
+// touches the events channel directly.
+func (a *Agent) readSSE(body io.ReadCloser) {
+	a.pumpWG.Add(1)
+	defer a.pumpWG.Done()
+	defer body.Close()
+	defer a.finishTurn()
+
+	err := decodeSSE(body, func(ev SessionEvent) error {
+		// Stamp the request id onto the permission event so the
+		// reply goroutine can route SendPermission back.
+		if ev.Type == "permission.asked" {
+			var p PermissionAsked
+			if err := json.Unmarshal(ev.Properties, &p); err == nil {
+				a.pendingMu.Lock()
+				a.pendingApprovalID = p.ID
+				a.pendingMu.Unlock()
+			}
+		}
+		// Release pendingTurnActive at the per-turn terminal event.
+		// The earliest reliable signal is session.idle; we also
+		// release on session.error so a failed turn does not lock
+		// the bridge forever (the F-54 / F-32 lesson).
+		switch ev.Type {
+		case "session.idle", "session.error":
+			a.pendingMu.Lock()
+			a.pendingTurnActive = false
+			a.pendingMu.Unlock()
+		}
+		return a.trans.handleEvent(ev)
+	})
+	if err != nil {
+		oLog("sse read error", "err", err.Error())
+	}
+}
+
+// finishTurn is called when the SSE stream closes. It releases the
+// pendingTurnActive guard so the next SendBlocks can proceed. The
+// retry trap (turnActive not released) was the F-54 / F-32 root
+// cause for the other bridges; we mirror the same fix.
+func (a *Agent) finishTurn() {
+	a.pendingMu.Lock()
+	a.pendingTurnActive = false
+	a.pendingMu.Unlock()
+}
+
+// lifecycle is the single owner of the events-channel close. Once-close
+// semantics are enforced by the closeOnce in Close(); everything else
+// just nudges the process toward a clean exit.
+//
+// Order is critical:
+//   1. Wait for the SSE reader to drain (pumpWG.Wait). This prevents
+//      a concurrent readSSE from racing with close(events).
+//   2. Close stopDeliver so any in-flight deliver backs off.
+//   3. Close events.
+//   4. Close exitDone so Close() can return.
+//
+// We block on either the server cmd exiting (real production path) or
+// the close signal (test path — synthetic agents without a real cmd).
+func (a *Agent) lifecycle() {
+	defer close(a.exitDone)
+	if a.server != nil && a.server.cmd != nil {
+		// Production path: wait for the server to exit. Real
+		// cmd.Wait blocks until the child exits.
+		_, _ = a.server.cmd.Process.Wait()
+	} else {
+		// Test path: block until Close() is called.
+		<-a.closed
+	}
+	// Wait for the SSE reader to drain before we close events.
+	// Without this, a slow readSSE can race with close(events)
+	// and panic when deliver tries to send.
+	a.pumpWG.Wait()
+	// Close stopDeliver FIRST so any in-flight deliver backs off
+	// before we close events. Without this, a concurrent
+	// `case a.events <- ev:` could panic on a closed channel.
+	close(a.stopDeliver)
+	close(a.events)
+}
+
+// ─── helpers ─────────────────────────────────────────────────────
+
+// detectBranch returns the current git branch for workspace, or "" on
+// any failure (non-git workspace, git not installed, detached HEAD).
+// Mirrors the helper used by the codex / pi bridges.
+func detectBranch(workspace string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", workspace, "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// Compile-time guarantee that *Agent satisfies agent.Agent.
+var _ agent.Agent = (*Agent)(nil)

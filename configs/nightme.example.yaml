@@ -26,7 +26,12 @@ agents:
 
   - name: opencode
     bridge: opencode
-    command: "opencode acp"
+    command: opencode
+    # Bridge spawns `opencode serve --hostname=127.0.0.1 --port=0`
+    # (the server picks a free port and prints the bound URL on
+    # stdout), then drives the 9 OpenAPI endpoints via plain HTTP +
+    # SSE. No PTY, no JSON-RPC envelope. See
+    # docs/feat/F-OPENCODE-opencode-bridge.md.
 
   - name: pi
     bridge: pi

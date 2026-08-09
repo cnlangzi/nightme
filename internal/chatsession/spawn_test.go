@@ -66,6 +66,40 @@ func (f *fakeAgentSession) SendPermission(resp string) error {
 
 func (f *fakeAgentSession) New(_ context.Context) error { return nil }
 
+// RunOnce returns the next EventAgentResult.Text it sees via
+// PushEvent, or errors on EventAgentDone without a result. Used by
+// the few RunOnce callers in the chatsession tests; most push tests
+// drive the channel directly via PushEvent / FinishEvent instead.
+func (f *fakeAgentSession) RunOnce(ctx context.Context, _ agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
+	if err := f.SendBlocks(ctx, blocks); err != nil {
+		return "", err
+	}
+	for {
+		select {
+		case ev, ok := <-f.events:
+			if !ok {
+				return "", errors.New("fake: event stream closed without result")
+			}
+			switch ev.Kind {
+			case agent.EventAgentResult:
+				if ev.Result == nil {
+					return "", errors.New("fake: nil result payload")
+				}
+				return ev.Result.Text, nil
+			case agent.EventAgentDone:
+				return "", errors.New("fake: turn ended without result")
+			case agent.EventAgentError:
+				if ev.Err != nil {
+					return "", ev.Err
+				}
+				return "", errors.New("fake: nil error payload")
+			}
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+}
+
 func (f *fakeAgentSession) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

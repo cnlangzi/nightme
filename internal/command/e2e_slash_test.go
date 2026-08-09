@@ -26,6 +26,7 @@ package command_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -85,6 +86,35 @@ func (a *echoAgent) SendBlocks(context.Context, []agent.ContentBlock) error {
 }
 func (a *echoAgent) SendPermission(string) error { return nil }
 func (a *echoAgent) New(context.Context) error   { return nil }
+func (a *echoAgent) RunOnce(ctx context.Context, _ agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
+	if err := a.SendBlocks(ctx, blocks); err != nil {
+		return "", err
+	}
+	for {
+		select {
+		case ev, ok := <-a.events:
+			if !ok {
+				return "", errors.New("echoAgent: event stream closed without result")
+			}
+			switch ev.Kind {
+			case agent.EventAgentResult:
+				if ev.Result == nil {
+					return "", errors.New("echoAgent: nil result payload")
+				}
+				return ev.Result.Text, nil
+			case agent.EventAgentDone:
+				return "", errors.New("echoAgent: turn ended without result")
+			case agent.EventAgentError:
+				if ev.Err != nil {
+					return "", ev.Err
+				}
+				return "", errors.New("echoAgent: nil error payload")
+			}
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+}
 func (a *echoAgent) Close() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()

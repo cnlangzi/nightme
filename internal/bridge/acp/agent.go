@@ -236,6 +236,19 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 	return live, nil
 }
 
+// RunOnce is the one-shot counterpart to Start for ACP-backed agents.
+// Spawns a fresh session, sends blocks, and drains Events() until the
+// agent produces its final text result. Closes the session before
+// returning.
+func (a *Agent) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
+	live, err := a.Start(ctx, cfg)
+	if err != nil {
+		return "", fmt.Errorf("agent %s: spawn: %w", a.name, err)
+	}
+	defer live.Close()
+	return agent.RunOnceDrain(ctx, live, blocks, a.name)
+}
+
 // handshake runs the ACP initialize + session/new protocol exchange
 // and seeds the synthesized EventAgentReady. Caller must have already
 // populated live.rpc, live.ctx, live.events, live.agentName, and (for

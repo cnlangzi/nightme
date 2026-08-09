@@ -212,6 +212,19 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 	return live, nil
 }
 
+// RunOnce is the one-shot counterpart to Start for codex. Spawns a
+// fresh JSON-RPC session, sends blocks, and drains Events() until
+// the agent produces its final text result. Closes the session
+// before returning.
+func (a *Agent) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
+	live, err := a.Start(ctx, cfg)
+	if err != nil {
+		return "", fmt.Errorf("agent %s: spawn: %w", a.name, err)
+	}
+	defer live.Close()
+	return agent.RunOnceDrain(ctx, live, blocks, a.name)
+}
+
 // Events streams AgentEvent values until the session ends. The channel
 // is closed by the session's lifecycle goroutine only when the
 // underlying process (or transport) terminates — NOT after every

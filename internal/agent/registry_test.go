@@ -29,6 +29,9 @@ func (f *fakeAgent) SendText(string) error     { return nil }
 func (f *fakeAgent) SendBlocks(context.Context, []ContentBlock) error { return nil }
 func (f *fakeAgent) SendPermission(string) error { return nil }
 func (f *fakeAgent) New(context.Context) error { return nil }
+func (f *fakeAgent) RunOnce(context.Context, StartConfig, []ContentBlock) (string, error) {
+	return "", errors.New("fakeAgent: RunOnce not implemented")
+}
 
 func TestRegisterAndGet(t *testing.T) {
 	r := New()

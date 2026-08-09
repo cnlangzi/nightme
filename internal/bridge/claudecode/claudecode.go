@@ -241,6 +241,24 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 	return live, nil
 }
 
+// RunOnce is the one-shot counterpart to Start for claudecode.
+// Spawns a fresh stream-json session, sends blocks, and drains
+// Events() until the agent produces its final text result.
+//
+// We intentionally do NOT call Start (the public method) here
+// because Start also runs the resume-preservation probe when
+// cfg.SessionID is set — RunOnce never wants resume, so we go
+// straight to startOnce, the inner spawner that Start is built
+// on top of.
+func (a *Agent) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
+	live, err := a.startOnce(ctx, cfg)
+	if err != nil {
+		return "", fmt.Errorf("agent %s: spawn: %w", a.name, err)
+	}
+	defer live.Close()
+	return agent.RunOnceDrain(ctx, live, blocks, a.name)
+}
+
 // startOnce clones the receiver, spawns the process, wires the
 // pumps, and returns the live Agent. Split from Start so the
 // resume-preservation probe sees the live state.

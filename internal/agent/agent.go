@@ -601,6 +601,16 @@ type AgentSpec interface {
 	// available, etc.). Called before Start; an error aborts session
 	// creation with a clear "X not found" message to the user.
 	Detect() error
+
+	// RunOnce runs a single synchronous turn: the implementation
+	// owns the full spawn → send → wait → close cycle. cfg.Workspace
+	// is the agent's cwd for this call. Returns the agent's final
+	// text response, or an error if the turn didn't produce one.
+	//
+	// Meaningful only on the template (AgentSpec holder). Calling on
+	// a live handle returned by Start would start a second ephemeral
+	// session — wasteful. Use Start for multi-turn / chat sessions.
+	RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock) (string, error)
 }
 
 // Agent is the merged interface: spec-half (via AgentSpec embedding)

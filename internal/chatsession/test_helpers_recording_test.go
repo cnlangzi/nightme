@@ -55,6 +55,35 @@ func (r *recordingAgentSession) SendBlocks(_ context.Context, blocks []agent.Con
 }
 func (r *recordingAgentSession) SendPermission(_ string) error { return nil }
 func (r *recordingAgentSession) New(_ context.Context) error   { return nil }
+func (r *recordingAgentSession) RunOnce(ctx context.Context, _ agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
+	if err := r.SendBlocks(ctx, blocks); err != nil {
+		return "", err
+	}
+	for {
+		select {
+		case ev, ok := <-r.events:
+			if !ok {
+				return "", errors.New("recording: event stream closed without result")
+			}
+			switch ev.Kind {
+			case agent.EventAgentResult:
+				if ev.Result == nil {
+					return "", errors.New("recording: nil result payload")
+				}
+				return ev.Result.Text, nil
+			case agent.EventAgentDone:
+				return "", errors.New("recording: turn ended without result")
+			case agent.EventAgentError:
+				if ev.Err != nil {
+					return "", ev.Err
+				}
+				return "", errors.New("recording: nil error payload")
+			}
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+}
 func (r *recordingAgentSession) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

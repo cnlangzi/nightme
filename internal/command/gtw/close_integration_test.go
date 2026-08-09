@@ -107,7 +107,7 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 		SkipRefreshDefaultBranch: true,
 	}
 
-	res, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg-int-1", false /* force */)
+	res, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg-int-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestIntegration_CloseRejectsDirty(t *testing.T) {
 		Now: time.Now,
 	}
 
-	if _, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg", false /* force */); err != nil {
+	if _, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg"); err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
 
@@ -457,7 +457,7 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	}
 
 	// Now /gtw close should cleanly tear down.
-	closeRes, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg-close", false /* force */)
+	closeRes, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg-close")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}

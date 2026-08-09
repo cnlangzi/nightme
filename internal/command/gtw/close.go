@@ -31,17 +31,19 @@ const maxDirtyFilesReported = 10
 //     by design — see §14.4 design rationale).
 //  2. Refuse if missing — there's no active fix in this chat.
 //  3. Refuse if the worktree has uncommitted changes (`git
-//     status --porcelain` non-empty) — UNLESS force=true, in
-//     which case the user is opting into destroying any
-//     uncommitted local edits.
-//  4. Run `git worktree remove [(--force)] <path>` from inside
-//     the main repo (git refuses to run that command from
-//     inside a worktree itself). The yml file goes away with
-//     the worktree — no explicit unlink needed.
+//     status --porcelain` non-empty). Close is intentionally
+//     all-or-nothing: commit, stash, or discard before
+//     re-running. No --force escape hatch (deliberate — see
+//     cmd.go runClose doc).
+//  4. Run `git worktree remove <path>` from inside the main
+//     repo (git refuses to run that command from inside a
+//     worktree itself). The yml file goes away with the
+//     worktree — no explicit unlink needed.
 //  5. `git branch -D <branch>` from repoRoot (always force-
 //     delete — close is a "tear down the experiment" action
 //     and the local branch was created by /gtw fix, never
-//     published; force=true is unrelated to this step).
+//     published; the -d (lowercase) safe-delete would refuse
+//     on unmerged, which is hostile here).
 //  6. SetSelectedCwd back to repoRoot so the next agent message
 //     spawns in the main repo.
 //  7. Clear the in-memory Context.
@@ -60,18 +62,12 @@ const maxDirtyFilesReported = 10
 // once they fix the underlying problem. Step 9 (sync) errors
 // surface their own card but DO NOT undo steps 4-7: from the
 // user's perspective the local fix is gone either way.
-//
-// force=true changes step 3 (skipped) and step 4 (passes
-// --force to git worktree remove). It does NOT bypass step 9's
-// dirty-main check — that's a safety net for the primary repo,
-// independent of the worktree-destruction flag.
 func RunClose(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
 	slot ContextSlot,
 	deps HandlerDeps,
 	chatID, messageID string,
-	force bool,
 ) (*Result, error) {
 	selectedCwd := cs.SelectedCwd()
 
@@ -98,16 +94,17 @@ func RunClose(
 	}
 
 	// --- step 3: dirty check --------------------------------------
-	// force=true bypasses — the user explicitly accepted the
-	// risk of losing uncommitted local edits.
-	if !force {
-		if err := assertWorktreeClean(ctx, c.Worktree, deps); err != nil {
-			return reply(ctx, cs.Channel(), chatID, messageID, err.Error()), nil
-		}
+	// Close is intentionally all-or-nothing — the user must
+	// commit / stash / discard before re-running. /gtw fix keeps
+	// its --force for a different concern (nuking a leftover
+	// worktree at the target path); close has no equivalent
+	// because the yml snapshot is the recovery source of truth.
+	if err := assertWorktreeClean(ctx, c.Worktree, deps); err != nil {
+		return reply(ctx, cs.Channel(), chatID, messageID, err.Error()), nil
 	}
 
 	// --- step 4: git worktree remove ------------------------------
-	if err := WorktreeRemove(ctx, c.RepoRoot, c.Worktree, force, deps.Git); err != nil {
+	if err := WorktreeRemove(ctx, c.RepoRoot, c.Worktree, false, deps.Git); err != nil {
 		// Don't roll back — the yml still reflects the (still-
 		// attached) fix. User can retry once they understand the
 		// git error.
@@ -164,12 +161,12 @@ func RunClose(
 	// follows in step 9 has its own format — close does not
 	// preview or summarise it here, to keep card ownership clean.
 	body := fmt.Sprintf(
-		"✅ closed `%s`%s\n"+
+		"✅ closed `%s`\n"+
 			"→ worktree: %s (removed)\n"+
 			"→ branch: %s (deleted)\n"+
 			"→ .nightme/gtw.yml (removed with worktree)\n"+
 			"→ cwd → %s",
-		c.Branch, forceNote(force), c.Worktree, c.Branch, c.RepoRoot,
+		c.Branch, c.Worktree, c.Branch, c.RepoRoot,
 	)
 	// Send close's own success card. The reply() return is
 	// intentionally discarded — returning here would skip step 9's
@@ -197,17 +194,6 @@ func RunClose(
 		return &Result{Consumed: true}, nil
 	}
 	return reply(ctx, cs.Channel(), chatID, messageID, syncBody), nil
-}
-
-// forceNote renders the trailing "force" annotation for the
-// success reply. Empty string for normal closes; a short
-// inline warning when the user opted into destroying
-// uncommitted edits (sits right after the branch headline).
-func forceNote(force bool) string {
-	if !force {
-		return ""
-	}
-	return " (uncommitted edits force-discarded)"
 }
 
 // assertWorktreeClean returns a user-friendly error if `dir` has

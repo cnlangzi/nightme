@@ -63,7 +63,6 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw fix -n <branch>             short form of --name\n" +
 			"/gtw fix <id> --force            nuke any leftover at the target path, then re-create\n" +
 			"/gtw close                       tear down the worktree, delete the branch, and sync main\n" +
-			"/gtw close --force               force-close even when the worktree is dirty\n" +
 			"/gtw push                       commit + push the worktree's branch to origin\n" +
 			"/gtw push --pr                   also open a PR (gh/glab) against the default branch\n" +
 			"/gtw push --no-commit            refuse if there are uncommitted changes\n" +
@@ -258,12 +257,12 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 // See wip/gtw.md §14.5 for the full flow and RunClose for the
 // implementation.
 //
-// --force / -f skips the dirty-worktree refusal and force-
-// removes via `git worktree remove --force`. Use this when
-// the user genuinely wants to throw away their in-progress
-// changes (e.g. they're abandoning the branch). --force does
-// NOT bypass the sync step's own dirty-main check on the
-// primary repo.
+// No flags — close is intentionally all-or-nothing. If the
+// worktree is dirty the user must commit / stash / discard
+// before re-running; we don't expose a force-escape hatch.
+// /gtw fix keeps its own --force (different concern: nuking a
+// leftover worktree at the target path) so the close symmetry
+// doesn't extend there.
 //
 // Construction mirrors runFix: the slot / drafts shims route to
 // the per-chat Manager state, deps are forwarded verbatim, and
@@ -278,15 +277,7 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, _ *ch
 	}
 	slot := &managerContextSlot{mgr: f.mgr, chatID: input.ChatID}
 
-	force, err := parseCloseForce(input.Args[2:])
-	if err != nil {
-		return &command.SlashOutput{
-			Reply:    fmt.Sprintf("❌ %v", err),
-			Consumed: true,
-		}, nil
-	}
-
-	res, err := RunClose(ctx, cs, slot, f.deps, input.ChatID, input.MessageID, force)
+	res, err := RunClose(ctx, cs, slot, f.deps, input.ChatID, input.MessageID)
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw close failed: %v", err),
@@ -358,27 +349,6 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, _ *cha
 // buildSyncReply lives in render.go alongside renderSyncReply —
 // both shape the /gtw sync card. Kept together so the render
 // surface stays cohesive.
-
-// parseCloseForce extracts --force / -f from the close argv
-// tail. Unlike /gtw fix, /gtw close takes no positional arg
-// (you can't target a specific worktree — it always operates
-// on the current chat's worktree), so the only thing to parse
-// is the boolean flag. We still tolerate positional tokens
-// silently for forward-compat (future: /gtw close <branch>).
-func parseCloseForce(argv []string) (bool, error) {
-	force := false
-	for _, a := range argv {
-		switch a {
-		case "--force", "-f":
-			force = true
-		default:
-			// Unknown token. Future: surface this when
-			// /gtw close starts accepting positional args.
-			// For now: silent accept.
-		}
-	}
-	return force, nil
-}
 
 // pushArgs bundles the parsed argv tail of `/gtw push <...>`.
 // Same rationale as fixArgs: a struct is more future-proof

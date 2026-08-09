@@ -184,127 +184,14 @@ func TestParseFixArgs_MissingArg(t *testing.T) {
 	}
 }
 
-// --- /gtw close --force ---
-
-// TestParseCloseForce covers the boolean-flag-only parser
-// used by the close subcommand. Unlike /gtw fix, /gtw close
-// takes no positional arg today, so the parser just
-// recognises --force / -f.
-func TestParseCloseForce(t *testing.T) {
-	cases := []struct {
-		name string
-		argv []string
-		want bool
-	}{
-		{"empty", nil, false},
-		{"no flag", []string{"42"}, false},
-		{"--force", []string{"--force"}, true},
-		{"-f", []string{"-f"}, true},
-		{"force mixed", []string{"foo", "--force", "bar"}, true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got, err := parseCloseForce(c.argv)
-			if err != nil {
-				t.Fatalf("parseCloseForce: %v", err)
-			}
-			if got != c.want {
-				t.Errorf("force = %v, want %v", got, c.want)
-			}
-		})
-	}
-}
-
-// TestRunClose_ForceOverridesDirty is the integration
-// equivalent: the worktree has uncommitted changes, the
-// default close refuses; --force proceeds and force-removes
-// the worktree, with the reply noting that local edits were
-// discarded.
-//
-// Uses a real git repo (initTempRepo) because the unit
-// fake's `status` returns empty regardless of dirty state;
-// the integration test asserts on real porcelain output.
-func TestRunClose_ForceOverridesDirty(t *testing.T) {
-	repoRoot := initTempRepo(t)
-	wt := filepath.Join(filepath.Dir(repoRoot), filepath.Base(repoRoot)+".wt-dirty")
-	mustGit(t, repoRoot, "worktree", "add", "-b", "fix/dirty", wt, "HEAD")
-
-	// Ensure + Commit .gitignore so the worktree is clean
-	// BEFORE the sentinel write. Otherwise git status would
-	// see the untracked .gitignore and report "dirty" even
-	// without our sentinel.
-	if err := EnsureGitignore(wt); err != nil {
-		t.Fatalf("EnsureGitignore: %v", err)
-	}
-	if err := CommitGitignoreIfDirty(context.Background(), wt, ExecGitRunner{}); err != nil {
-		t.Fatalf("CommitGitignoreIfDirty: %v", err)
-	}
-
-	if err := WriteGTWYml(wt, Context{
-		Mode: ModeLocal, Issue: -1, Branch: "fix/dirty",
-		Worktree: wt, RepoRoot: repoRoot, State: StateFixing,
-	}, func() time.Time { return time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC) }); err != nil {
-		t.Fatalf("WriteGTWYml: %v", err)
-	}
-
-	rec := &recordingCh{}
-	cs, _ := chatsession.New("chat-force-dirty", "test-agent", rec)
-	_ = cs.SetSelectedCwd(wt)
-	slot := &memSlot{Context{
-		Mode: ModeLocal, Issue: -1, Branch: "fix/dirty",
-		Worktree: wt, RepoRoot: repoRoot, State: StateFixing,
-	}}
-	deps := HandlerDeps{
-		Git: ExecGitRunner{},
-		Now: func() time.Time { return time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC) },
-		// Close's step-9 sync would otherwise try to refresh
-		// origin from a temp repo that has no upstream, surfacing
-		// a spurious "no origin" error card. This test asserts
-		// on close's success card only — skip the sync step.
-		SkipRefreshDefaultBranch: true,
-	}
-
-	// Make the worktree dirty.
-	if err := os.WriteFile(filepath.Join(wt, "sentinel.txt"), []byte("dirty"), 0o644); err != nil {
-		t.Fatalf("write dirty sentinel: %v", err)
-	}
-
-	// Without force: refused.
-	res, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg-no", false /* force */)
-	if err != nil {
-		t.Fatalf("RunClose (no force): %v", err)
-	}
-	if !res.Consumed {
-		t.Errorf("Result.Consumed = false")
-	}
-	if _, err := os.Stat(wt); err != nil {
-		t.Fatalf("worktree removed despite no-force: %v", err)
-	}
-	noForceReply := rec.lastText()
-	if !strings.Contains(noForceReply, "uncommitted") {
-		t.Errorf("no-force reply missing dirty hint:\n%s", noForceReply)
-	}
-
-	// With force: proceeds. yml + slot are still valid from
-	// the no-force attempt (no state change on dirty refuse).
-	res, err = RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg-yes", true /* force */)
-	if err != nil {
-		t.Fatalf("RunClose (force): %v", err)
-	}
-	if !res.Consumed {
-		t.Errorf("Result.Consumed = false")
-	}
-	if _, err := os.Stat(wt); !os.IsNotExist(err) {
-		t.Errorf("worktree still present after force-close: %v", err)
-	}
-	forceReply := rec.lastText()
-	if !strings.Contains(forceReply, "force-discarded") {
-		t.Errorf("force reply missing force-discarded note:\n%s", forceReply)
-	}
-	if !strings.Contains(forceReply, "✅") {
-		t.Errorf("force reply missing success marker:\n%s", forceReply)
-	}
-}
+// TestParseCloseForce + TestRunClose_ForceOverridesDirty were
+// removed when --force was dropped from /gtw close (close is
+// intentionally all-or-nothing; the user must commit / stash /
+// discard before re-running). The remaining force_test.go cases
+// cover /gtw fix --force.
+// dropped from /gtw close (close is intentionally all-or-nothing;
+// the user must commit / stash / discard before re-running).
+// The remaining force_test.go cases cover /gtw fix --force.
 
 // --- forceCleanWorktreePath unit tests ---
 

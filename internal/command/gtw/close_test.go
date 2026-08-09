@@ -226,7 +226,7 @@ func TestRunClose_CleanWorktree_Success(t *testing.T) {
 	rig := newCloseRig(t)
 	seedFix(t, rig, wt, repoRoot)
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1", false /* force */)
+	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestRunClose_DirtyWorktree_Rejected(t *testing.T) {
 
 	rig.git.statusResp = " M foo.txt\n?? untracked.go\n"
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1", false /* force */)
+	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestRunClose_NoYml(t *testing.T) {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1", false /* force */)
+	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestRunClose_GitRemoveFails(t *testing.T) {
 	rig.git.worktreeRemoveErr = &fakeExitError{code: 128, msg: "worktree remove failed"}
 	rig.git.worktreeRemoveStderr = "fatal: could not remove worktree"
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1", false /* force */)
+	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestRunClose_BranchDeleteFails(t *testing.T) {
 	rig.git.branchDeleteErr = &fakeExitError{code: 1, msg: "branch delete failed"}
 	rig.git.branchDeleteStderr = "error: branch 'fix/42-test' not found"
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1", false /* force */)
+	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -505,7 +505,7 @@ func TestRunClose_CleanWorktree_Syncs(t *testing.T) {
 	rig.git.syncOriginRef = "origin/main"
 	rig.git.syncPullOut = "Already up to date.\n"
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1", false /* force */)
+	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}
@@ -561,7 +561,7 @@ func TestRunClose_SyncFails(t *testing.T) {
 	// error, RunClose emits the sync-failure card.
 	rig.git.symbolicRefErr = &fakeExitError{code: 128, msg: "no upstream"}
 
-	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1", false /* force */)
+	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
 	if err != nil {
 		t.Fatalf("RunClose: %v", err)
 	}

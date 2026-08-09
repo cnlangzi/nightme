@@ -130,10 +130,20 @@ func startServer(ctx context.Context, cfg serverConfig) (*serverProc, error) {
 		stderrTail strings.Builder
 		wg         sync.WaitGroup
 	)
+	startTimeout := serverStartTimeout
+	// NIGHTME_OPENCODE_INITIAL_DELAY overrides the start timeout for
+	// local-regulator tests where the bridge should wait longer
+	// (e.g. opencode pulls a model on first start). Values ≤ 0
+	// disable the override (use the default).
+	if v := os.Getenv("NIGHTME_OPENCODE_INITIAL_DELAY"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			startTimeout = d
+		}
+	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		baseURL, bannerErr = scanBanner(stdout, serverStartTimeout)
+		baseURL, bannerErr = scanBanner(stdout, startTimeout)
 	}()
 
 	stderrDone := make(chan struct{})
@@ -166,9 +176,9 @@ func startServer(ctx context.Context, cfg serverConfig) (*serverProc, error) {
 		<-stderrDone
 		stderr := stderrTail.String()
 		if stderr != "" {
-			return nil, fmt.Errorf("%w\n--- stderr ---\n%s", ErrServerStartTimeout, stderr)
+			return nil, fmt.Errorf("%w (after %s)\n--- stderr ---\n%s", ErrServerStartTimeout, startTimeout, stderr)
 		}
-		return nil, ErrServerStartTimeout
+		return nil, fmt.Errorf("%w (after %s)", ErrServerStartTimeout, startTimeout)
 	}
 	if bannerErr != nil {
 		_ = cmd.Process.Kill()

@@ -187,11 +187,15 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 	defer cancel()
 
 	var s *Session
+	resumed := false
 	if cfg.SessionID != "" {
-		// Resume path. If the server has forgotten the session we
-		// fall through to create — opencode persists sessions by id
-		// inside its data dir, but a fresh server with --no-cache
-		// or after a config reset will not.
+		// Resume path. We try GET /api/session/{id} first; if the
+		// server has forgotten the session (e.g. fresh server with
+		// cleared cache, or different data dir) we fall through
+		// to create. We DO NOT silently drop the SessionID — that
+		// would surprise the operator; we log loudly and proceed
+		// with a fresh session so the operator at least sees the
+		// context_loss signal in the log.
 		s, err = live.client.GetSession(hsCtx, cfg.SessionID)
 		if err != nil {
 			oLog("Start: resume failed, falling back to fresh session",
@@ -201,6 +205,8 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 				_ = live.Close()
 				return nil, fmt.Errorf("opencode: create session (fallback): %w", err)
 			}
+		} else {
+			resumed = true
 		}
 	} else {
 		s, err = live.client.CreateSession(hsCtx, CreateSessionOpts{})
@@ -210,6 +216,11 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 		}
 	}
 	live.sessionID = s.ID
+	oLog("session handshake complete",
+		"session_id", live.sessionID,
+		"resumed", resumed,
+		"requested_id", cfg.SessionID,
+	)
 
 	live.trans = newTranslator(
 		live.deliver,

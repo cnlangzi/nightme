@@ -178,11 +178,7 @@ func (c *Client) CreateSession(ctx context.Context, opts CreateSessionOpts) (*Se
 	if err != nil {
 		return nil, err
 	}
-	var s Session
-	if err := c.doJSON(req, &s); err != nil {
-		return nil, err
-	}
-	return &s, nil
+	return c.decodeSession(req)
 }
 
 // GetSession calls GET /api/session/{id}.
@@ -194,9 +190,47 @@ func (c *Client) GetSession(ctx context.Context, id string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	return c.decodeSession(req)
+}
+
+// decodeSession is the shared decoder for single-session responses.
+// opencode 1.18 wraps them in a `data` envelope:
+//
+//	{"data": {"id": "...", ...}}
+//
+// older versions and the mock test server return the Session
+// directly. We read the body once, then try both shapes so the
+// caller never sees a redundant HTTP round-trip (the previous
+// re-issue path was responsible for the doubled test count).
+func (c *Client) decodeSession(req *http.Request) (*Session, error) {
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("opencode: %s %s: %w", req.Method, req.URL.Path, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("opencode: %s %s: %d: %s",
+			req.Method, req.URL.Path, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("opencode: decode: %w", err)
+	}
+
+	// Try wrapped form first.
+	var wrapped struct {
+		Data *Session `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err == nil && wrapped.Data != nil && wrapped.Data.ID != "" {
+		return wrapped.Data, nil
+	}
+	// Fall back to bare form.
 	var s Session
-	if err := c.doJSON(req, &s); err != nil {
-		return nil, err
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil, fmt.Errorf("opencode: decode: %w", err)
 	}
 	return &s, nil
 }

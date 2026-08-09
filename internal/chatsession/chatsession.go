@@ -253,21 +253,6 @@ var ErrNoActiveCwd = errors.New("chatsession: no active workspace (send /cwd fir
 // (Validation should happen at the gateway layer; this is a safety net.)
 var ErrUnknownAgent = errors.New("chatsession: unknown agent")
 
-// KillResult is one row of the /kill reply. It captures what happened
-// to a single pool entry during KillAgent / KillAllAgents so the
-// handler can render a per-agent status instead of a bare count.
-//
-// Returned by the package-level kill functions in kill.go (not
-// methods on ChatSession — see kill.go doc comment for the
-// two-function kill surface).
-type KillResult struct {
-	Agent       string // e.g. "claude", "codex"
-	Cwd         string // e.g. "/code/A"
-	BeforeState Status // StatusRunning / StatusDetached / StatusExited
-	Action      string // "killed" | "stale-cleared"
-	Error       error  // nil on success
-}
-
 // ResetResult is one row of the /new reply. It captures what happened
 // to a single pool entry during NewActiveAgentSessions so the handler
 // can render a per-agent status instead of a bare count.
@@ -823,6 +808,64 @@ func (cs *ChatSession) LookupInPool(agent, cwd string) (*AgentSession, error) {
 	return as, nil
 }
 
+// AgentSessionsInCwd returns a snapshot of the pool entries whose
+// Cwd == cwd. Read-only — does not mutate pool / activeAS. The
+// returned slice is a fresh copy safe for iteration outside the
+// lock; callers (typically the kill package) compose it with
+// DropAgentSession to terminate a cwd-scoped set.
+//
+// An empty cwd returns an empty slice. A non-existent cwd also
+// returns an empty slice (no error) — pool filter is purely
+// syntactic on (agent, cwd).
+func (cs *ChatSession) AgentSessionsInCwd(cwd string) []*AgentSession {
+	if cwd == "" {
+		return nil
+	}
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	out := make([]*AgentSession, 0)
+	for _, as := range cs.pool {
+		if as.Cwd == cwd {
+			out = append(out, as)
+		}
+	}
+	return out
+}
+
+// DropAgentSession atomically removes as from the pool, clears
+// activeAS iff it pointed to as, deletes as's agent_sessions.json
+// row, and persists the chat entry. Caller is responsible for
+// graceful shutdown (as.Close()) BEFORE calling this — DropAgentSession
+// does NOT signal the bridge. The two-step pattern (Close → Drop)
+// keeps graceful-shutdown timing in the caller's hands (the kill
+// package owns the 5s outer bound and per-bridge Close goroutine
+// fan-out) and keeps this primitive focused on the post-close
+// bookkeeping.
+//
+// activeAS safety invariant: if as == cs.activeAS, the pointer is
+// cleared so a subsequent inbound message goes through
+// LookupActiveAgentSession → fresh spawn instead of dereferencing
+// a dangling pointer.
+//
+// Safe to call multiple times on the same as (the second call
+// becomes a no-op — the entry is no longer in the pool, so the
+// delete is a no-op, and the registry row is already gone).
+func (cs *ChatSession) DropAgentSession(as *AgentSession) {
+	if as == nil {
+		return
+	}
+	cs.mu.Lock()
+	delete(cs.pool, agentCwdKey{Agent: as.Agent, Cwd: as.Cwd})
+	if cs.activeAS == as {
+		cs.activeAS = nil
+	}
+	cs.mu.Unlock()
+	if cs.asFile != nil {
+		_ = cs.asFile.Delete(as.ID)
+	}
+	cs.persistChatEntry()
+}
+
 // promoteActiveLocked makes as the chat's active AgentSession and
 // owns the per-AS context lifecycle for that promotion.
 //
@@ -971,75 +1014,6 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	return newAS, nil
 }
 
-// --- kill surface -----------------------------------------------------
-//
-// Per-entry kill orchestration lives in kill.go (package-level
-// functions KillAgent / KillAllAgents). ChatSession exposes no
-// kill methods — the kill package owns process-shutdown semantics
-// and accesses cs internals via this package's same-package scope.
-
-// FormatKillResults produces a human-readable summary of /kill's
-// per-entry outcomes. The output is suitable for channel.Send
-// (plain text, Feishu-renderable).
-//
-// Output templates (selected by the (killed, stale, failed) tuple):
-//   - all empty:           "No active agents to kill."
-//   - all killed:          "Stopped N agent session(s):\n  ✓ <name> @ <cwd>\n..."
-//   - all stale:           "Cleared N stale agent session(s) (no live processes):\n  • <name> @ <cwd> — already exited, entry cleaned\n..."
-//   - mixed:               "<header>:\n  ✓ ... \n  • ... \n  ✗ <name> @ <cwd> — <action>: <err>\n..."
-//
-// Errors are surfaced explicitly per-entry (never swallowed). Output is
-// capped to 4 KB total bytes (Feishu single-message limit) + a
-// "...and N more" tail to stay under the limit (review finding #B5:
-// the previous 20-line cap was insufficient when individual lines
-// were large — CJK / long paths / long bridge errors all blow past
-// 4 KB before the 20th line).
-//
-// Rows are sorted by **typed priority** (success → failure → skipped)
-// and then by (Agent, Cwd) within each priority bucket. The previous
-// `sort.Strings` on the formatted strings made `•` (U+2022) sort
-// before `✓` (U+2713) before `✗` (U+2717) — i.e. stale-cleared rows
-// always preceded killed rows, contrary to the spec's "success-first"
-// ordering (review finding #B7).
-//
-// See docs/feat/F-43-kill-new-graceful-and-reset.md §6 for the wording
-// variants and the ✓/✗/• icon legend.
-func FormatKillResults(results []KillResult) string {
-	if len(results) == 0 {
-		return "No active agents to kill."
-	}
-
-	rows := make([]resultRow, 0, len(results))
-	var killed, stale, failed int
-	for _, r := range results {
-		row, bucket := renderKillRow(r)
-		switch bucket {
-		case bucketSuccess:
-			killed++
-		case bucketSkipped:
-			stale++
-		case bucketFailure:
-			failed++
-		}
-		rows = append(rows, row)
-	}
-
-	// Sort by typed priority (success → failure → skipped), then by
-	// (Agent, Cwd) for stable display.
-	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].priority != rows[j].priority {
-			return rows[i].priority < rows[j].priority
-		}
-		if rows[i].agent != rows[j].agent {
-			return rows[i].agent < rows[j].agent
-		}
-		return rows[i].cwd < rows[j].cwd
-	})
-
-	header := buildKillHeader(killed, stale, failed)
-	return truncateByBytes(header, rows, formatTail)
-}
-
 // FormatResetResults produces a human-readable summary of /new's
 // per-entry outcomes. Companion to FormatKillResults; same plain-text
 // shape, same byte-based cap, same typed-priority sort.
@@ -1077,21 +1051,6 @@ func FormatResetResults(results []ResetResult) string {
 
 	header := buildResetHeader(running, dead, failed)
 	return truncateByBytes(header, rows, formatTail)
-}
-
-// humanAction returns a short human-readable verb for an Action
-// string (used in error messages). The name matches the design doc
-// (docs/feat/F-43-kill-new-graceful-and-reset.md §6.6). Future
-// actions can be added here.
-func humanAction(action string) string {
-	switch action {
-	case "killed":
-		return "kill"
-	case "stale-cleared":
-		return "stale-clear"
-	default:
-		return action
-	}
 }
 
 // NewActiveAgentSessions resets the conversation context on the
@@ -1366,44 +1325,6 @@ type resultRow struct {
 	agent, cwd       string
 }
 
-// renderKillRow is FormatKillResults' per-row branch. Returns the
-// rendered line and the bucket it belongs to.
-func renderKillRow(r KillResult) (resultRow, formatRowBucket) {
-	if r.Error != nil {
-		return resultRow{
-			text: fmt.Sprintf("  ✗ %s @ %s — %s: %v",
-				r.Agent, r.Cwd, humanAction(r.Action), r.Error),
-			priority: bucketFailure,
-			agent:    r.Agent,
-			cwd:      r.Cwd,
-		}, bucketFailure
-	}
-	switch r.Action {
-	case "killed":
-		return resultRow{
-			text:     fmt.Sprintf("  ✓ %s @ %s", r.Agent, r.Cwd),
-			priority: bucketSuccess,
-			agent:    r.Agent,
-			cwd:      r.Cwd,
-		}, bucketSuccess
-	case "stale-cleared":
-		return resultRow{
-			text:     fmt.Sprintf("  • %s @ %s — already exited, entry cleaned", r.Agent, r.Cwd),
-			priority: bucketSkipped,
-			agent:    r.Agent,
-			cwd:      r.Cwd,
-		}, bucketSkipped
-	default:
-		// future action: surface as success mark, generic text
-		return resultRow{
-			text:     fmt.Sprintf("  ✓ %s @ %s — %s", r.Agent, r.Cwd, r.Action),
-			priority: bucketSuccess,
-			agent:    r.Agent,
-			cwd:      r.Cwd,
-		}, bucketSuccess
-	}
-}
-
 // renderResetRow is FormatResetResults' per-row branch.
 func renderResetRow(r ResetResult) (resultRow, formatRowBucket) {
 	if r.Error != nil {
@@ -1440,29 +1361,6 @@ func renderResetRow(r ResetResult) (resultRow, formatRowBucket) {
 	}
 }
 
-// buildKillHeader mirrors the old buildKillHeader. Wording is the
-// same as the spec template (kept verbatim for downstream consumers
-// that pattern-match on the header text).
-func buildKillHeader(killed, stale, failed int) string {
-	if failed == 0 && stale == 0 {
-		return fmt.Sprintf("Stopped %d agent session(s):", killed)
-	}
-	if killed == 0 && stale > 0 && failed == 0 {
-		return fmt.Sprintf("Cleared %d stale agent session(s) (no live processes):", stale)
-	}
-	parts := make([]string, 0, 3)
-	if killed > 0 {
-		parts = append(parts, fmt.Sprintf("Stopped %d", killed))
-	}
-	if stale > 0 {
-		parts = append(parts, fmt.Sprintf("%d stale entry cleared", stale))
-	}
-	if failed > 0 {
-		parts = append(parts, fmt.Sprintf("%d failed", failed))
-	}
-	return strings.Join(parts, ", ") + ":"
-}
-
 // buildResetHeader mirrors the old buildResetHeader. Note the wording
 // differs from /kill (each command has its own header grammar).
 func buildResetHeader(running, dead, failed int) string {
@@ -1486,31 +1384,17 @@ func buildResetHeader(running, dead, failed int) string {
 }
 
 // formatReplyByteCap is the Feishu single-message payload limit
-// (page / IM message). Both /kill and /new format strings cap here
-// to keep the channel side from rejecting the message outright
-// (review finding #B5).
+// for FormatResetResults. The kill package carries its own
+// copy of these byte-cap helpers for FormatKillResults.
 const formatReplyByteCap = 4096
 
-// formatTail is the "...and N more" suffix appended when the output
-// would otherwise exceed the byte cap. Hidden = len(rows) - linesShown.
 const formatTail = "  ... and %d more"
 
-// truncateByBytes joins rows with "\n" and caps the total byte length
-// at formatReplyByteCap. Lines that would push the output over the cap
-// are truncated and replaced with the formatTail summary. The header is
-// always included (so the user always sees the headline counts).
-//
-// The cap is "soft" — the tail suffix can cause the final string to
-// exceed the cap by a small number of bytes (the tail itself is
-// short, ~30 bytes, and Feishu's limit is a guideline). Callers that
-// need a hard cap should re-check before sending.
 func truncateByBytes(header string, rows []resultRow, tailFmt string) string {
 	out := header
 	for i, r := range rows {
 		candidate := out + "\n" + r.text
 		if len(candidate)+len(tailFmtFor(i, len(rows))) > formatReplyByteCap {
-			// We've exhausted the budget. Replace the
-			// last appended line with the tail summary.
 			hidden := len(rows) - i
 			out = out + "\n" + fmt.Sprintf(tailFmt, hidden)
 			return out
@@ -1520,9 +1404,6 @@ func truncateByBytes(header string, rows []resultRow, tailFmt string) string {
 	return out
 }
 
-// tailFmtFor returns the byte-length the tail would consume for the
-// given (i, total) under the standard formatTail template. Used by
-// truncateByBytes to estimate budget before committing the tail.
 func tailFmtFor(i, total int) string {
 	return fmt.Sprintf(formatTail, total-i)
 }

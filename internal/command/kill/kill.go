@@ -1,22 +1,25 @@
-// Package-level kill functions for /kill's process-shutdown
-// logic. Two entry points, no methods on ChatSession:
+// Package kill — /kill's process-shutdown logic.
 //
-//	KillAgent(c *KillCmd, agentName)    /kill <agent> path
-//	KillAllAgents(c *KillCmd)            /kill (no args) path
+// Two entry points, both cwd-scoped to the chat's activeCwd:
 //
-// Both functions:
-//   - Per-entry graceful shutdown via bridge.Close (5s outer bound)
-//   - Clear cs.activeAS iff it pointed to a killed entry
-//     (dangling-pointer safety invariant; not a /kill state change)
-//   - Delete the killed entries' agent_sessions.json rows
-//   - Preserve cs.activeCwd / cs.activeAgent / queue / InputBuffer
-//   - Preserve entries in OTHER cwds (cwd-scoped invariant)
+//	KillAgent(c *Cmd, agentName)    /kill <agent> path
+//	KillAllAgents(c *Cmd)            /kill (no args) path
 //
-// The slash handler at internal/command/kill/cmd.go wraps these
-// with RequireActiveCwd preflight + FormatKillResults rendering.
+// Per-entry graceful shutdown is owned here (5s outer bound, per-
+// bridge Close goroutine fan-out, StatusRunning / StatusDetached-
+// with-handle → Close, otherwise "stale-cleared"). Pool + activeAS
+// + agent_sessions.json cleanup is delegated to ChatSession's
+// lifecycle primitives (LookupInPool / AgentSessionsInCwd /
+// DropAgentSession) — this package never reaches into ChatSession's
+// private fields.
+//
+// Preserved invariants (matching /kill semantics):
+//   - cs.activeCwd / cs.activeAgent / queue / InputBuffer
+//   - Sibling entries in OTHER cwds / OTHER agent names
+//
 // Daemon shutdown (cmd/nightme/run.go) does NOT call these —
 // agents survive nightme restart via the Detached registry state.
-package chatsession
+package kill
 
 import (
 	"context"
@@ -25,15 +28,32 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
-// KillCmd is the per-call kill context. CS is the ChatSession
-// whose pool entries to operate on; Ctx is the parent context
-// for any blocking bridge calls (currently unused but kept for
-// forward compat with bridges that may want to wire it).
-type KillCmd struct {
-	CS  *ChatSession
+// Cmd is the per-call kill context. CS is the ChatSession whose
+// pool entries to operate on; Ctx is the parent context for any
+// blocking bridge calls (currently unused but kept for forward
+// compat with bridges that may want to wire it).
+type Cmd struct {
+	CS  *chatsession.ChatSession
 	Ctx context.Context
+}
+
+// ErrNoContext is returned when Cmd.CS is nil. Validation should
+// happen at the handler / gateway layer; this is the safety net.
+var ErrNoContext = errors.New("kill: nil ChatSession")
+
+// Result is one row of the /kill reply. It captures what happened
+// to a single pool entry during KillAgent / KillAllAgents so the
+// handler can render a per-agent status instead of a bare count.
+type Result struct {
+	Agent       string // e.g. "claude", "codex"
+	Cwd         string // e.g. "/code/A"
+	BeforeState chatsession.Status // StatusRunning / StatusDetached / StatusExited
+	Action      string // "killed" | "stale-cleared"
+	Error       error  // nil on success
 }
 
 // killGraceTotal is the outer-bound graceful shutdown timeout.
@@ -52,8 +72,8 @@ type closeOutcome struct {
 
 // KillAgent terminates the (agentName, c.CS.ActiveCwd()) entry.
 //
-// Returns ErrAgentNotFound when no entry matches. Returns a
-// generic error when c.CS is nil.
+// Returns chatsession.ErrAgentNotFound when no entry matches.
+// Returns ErrNoContext when c.CS is nil.
 //
 // Per-entry behavior:
 //   - StatusRunning / StatusDetached-with-handle → Close() with
@@ -62,35 +82,30 @@ type closeOutcome struct {
 //     that bypasses its own watchdog.
 //   - StatusExited / StatusDetached-without-handle → "stale-cleared"
 //     (no live process to signal; just clean disk).
-//   - activeAS is cleared iff it pointed to the killed entry.
-//   - The killed entry's agent_sessions.json row is deleted.
 //
-// Preserved (matching /kill semantics — only the targeted process
-// dies, chat state and other entries are untouched):
-//   - cs.activeCwd / cs.activeAgent / queue / InputBuffer
-//   - Sibling entries in OTHER cwds / OTHER agent names
-func KillAgent(c *KillCmd, agentName string) (KillResult, error) {
+// After Close (or the stale-clear decision), ChatSession.DropAgentSession
+// handles pool + activeAS + agent_sessions.json cleanup. This
+// function never reaches into CS private fields directly.
+func KillAgent(c *Cmd, agentName string) (Result, error) {
 	if c == nil || c.CS == nil {
-		return KillResult{}, errors.New("chatsession: kill: nil ChatSession")
+		return Result{}, ErrNoContext
 	}
 	cs := c.CS
 	cwd := cs.ActiveCwd()
 
-	cs.mu.RLock()
-	as, ok := cs.pool[agentCwdKey{Agent: agentName, Cwd: cwd}]
-	cs.mu.RUnlock()
-	if !ok {
-		return KillResult{}, ErrAgentNotFound
+	as, err := cs.LookupInPool(agentName, cwd)
+	if err != nil {
+		return Result{}, chatsession.ErrAgentNotFound
 	}
 
-	result := KillResult{
+	result := Result{
 		Agent:       as.Agent,
 		Cwd:         as.Cwd,
 		BeforeState: as.Status(),
 	}
 
-	isAlive := as.Status() == StatusRunning ||
-		(as.Status() == StatusDetached && as.Handle() != nil)
+	isAlive := as.Status() == chatsession.StatusRunning ||
+		(as.Status() == chatsession.StatusDetached && as.Handle() != nil)
 	if !isAlive {
 		result.Action = "stale-cleared"
 	} else {
@@ -113,17 +128,7 @@ func KillAgent(c *KillCmd, agentName string) (KillResult, error) {
 		}
 	}
 
-	cs.mu.Lock()
-	delete(cs.pool, agentCwdKey{Agent: agentName, Cwd: cwd})
-	if cs.activeAS == as {
-		cs.activeAS = nil
-	}
-	cs.mu.Unlock()
-
-	if cs.asFile != nil {
-		_ = cs.asFile.Delete(as.ID)
-	}
-	cs.persistChatEntry()
+	cs.DropAgentSession(as)
 	return result, nil
 }
 
@@ -139,13 +144,13 @@ func KillAgent(c *KillCmd, agentName string) (KillResult, error) {
 // (from prior /cwd switches) are preserved, matching /kill's
 // cwd-scoped invariant.
 //
-// Concurrency: pool mutation under write lock; persist after
-// release. Each bridge drives its own Close goroutine; wg.Wait
+// Concurrency: pool snapshot via cs.AgentSessionsInCwd (read-
+// only); each bridge drives its own Close goroutine; wg.Wait
 // + 5s outer timeout guards against a wedged bridge that bypasses
-// its own SIGKILL fallback.
-func KillAllAgents(c *KillCmd) ([]KillResult, error) {
+// its own SIGKILL fallback. Per-entry cleanup via cs.DropAgentSession.
+func KillAllAgents(c *Cmd) ([]Result, error) {
 	if c == nil || c.CS == nil {
-		return nil, errors.New("chatsession: kill: nil ChatSession")
+		return nil, ErrNoContext
 	}
 	cs := c.CS
 	cwd := cs.ActiveCwd()
@@ -153,16 +158,9 @@ func KillAllAgents(c *KillCmd) ([]KillResult, error) {
 		return nil, nil
 	}
 
-	// 1. Snapshot entries in activeCwd under read lock.
-	cs.mu.RLock()
-	snapshot := make([]*AgentSession, 0)
-	for _, as := range cs.pool {
-		if as.Cwd == cwd {
-			snapshot = append(snapshot, as)
-		}
-	}
-	cs.mu.RUnlock()
-
+	// 1. Snapshot entries in activeCwd (read-only — ChatSession
+	//    returns a fresh slice).
+	snapshot := cs.AgentSessionsInCwd(cwd)
 	if len(snapshot) == 0 {
 		return nil, nil
 	}
@@ -171,24 +169,24 @@ func KillAllAgents(c *KillCmd) ([]KillResult, error) {
 	//    alive ones. StatusRunning / StatusDetached-with-handle
 	//    → Close(); StatusExited / StatusDetached-without-handle
 	//    → "stale-cleared" (no process to signal).
-	results := make([]KillResult, len(snapshot))
+	results := make([]Result, len(snapshot))
 	closeCh := make(chan closeOutcome, len(snapshot))
 	var wg sync.WaitGroup
 	for i, as := range snapshot {
-		results[i] = KillResult{
+		results[i] = Result{
 			Agent:       as.Agent,
 			Cwd:         as.Cwd,
 			BeforeState: as.Status(),
 		}
-		isAlive := as.Status() == StatusRunning ||
-			(as.Status() == StatusDetached && as.Handle() != nil)
+		isAlive := as.Status() == chatsession.StatusRunning ||
+			(as.Status() == chatsession.StatusDetached && as.Handle() != nil)
 		if !isAlive {
 			results[i].Action = "stale-cleared"
 			continue
 		}
 		results[i].Action = "killed"
 		wg.Add(1)
-		go func(i int, as *AgentSession) {
+		go func(i int, as *chatsession.AgentSession) {
 			defer wg.Done()
 			closeCh <- closeOutcome{idx: i, err: as.Close()}
 		}(i, as)
@@ -215,31 +213,11 @@ func KillAllAgents(c *KillCmd) ([]KillResult, error) {
 		}
 	}
 
-	// 5. Pool + activeAS cleanup. Per-entry delete to preserve
-	//    entries in OTHER cwds. activeAS is cleared iff it pointed
-	//    to a killed entry.
-	cs.mu.Lock()
-	activeWasKilled := false
+	// 5. Per-entry cleanup via DropAgentSession. activeAS is
+	//    cleared by DropAgentSession iff it pointed to one of
+	//    the killed entries (safety invariant).
 	for _, as := range snapshot {
-		delete(cs.pool, agentCwdKey{Agent: as.Agent, Cwd: as.Cwd})
-		if cs.activeAS == as {
-			activeWasKilled = true
-		}
+		cs.DropAgentSession(as)
 	}
-	if activeWasKilled {
-		cs.activeAS = nil
-	}
-	cs.mu.Unlock()
-
-	// 6. Delete the killed entries' agent_sessions.json rows.
-	//    Other entries' rows are preserved (orphan GC from the
-	//    historical KillAll is NOT applied here — /kill only
-	//    touches its own scope).
-	if cs.asFile != nil {
-		for _, as := range snapshot {
-			_ = cs.asFile.Delete(as.ID)
-		}
-	}
-	cs.persistChatEntry()
 	return results, nil
 }

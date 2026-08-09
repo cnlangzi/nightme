@@ -1175,16 +1175,16 @@ command.kill.Factory.Handle(ctx, rt, input)
   │   ├ nil → command.Reply("No active chat session to kill.")
   │   └ 存在 → 继续
   ├ command.RequireActiveCwd(cs)   ← 没设 /cwd 就回复 "Send /cwd first"
-  ├ 解析 args[1]:空 → 进入 KillAll 分支
+  ├ 解析 args[1]:空 → 进入 KillAllAgents 分支
   │   非空 → 作为 agentName,进入 KillAgent 分支
   ├ case /kill <agent>:
-  │   result, err := chatsession.KillAgent(&KillCmd{CS: cs, Ctx: ctx}, agentName)
-  │     ├ ErrAgentNotFound → "No <agent> session in <cwd> to kill"
-  │     └ 成功 → 返回 KillResult
+  │   result, err := kill.KillAgent(&kill.Cmd{CS: cs, Ctx: ctx}, agentName)
+  │     ├ chatsession.ErrAgentNotFound → "No <agent> session in <cwd> to kill"
+  │     └ 成功 → 返回 kill.Result
   └ case /kill:
-      results, err := chatsession.KillAllAgents(&KillCmd{CS: cs, Ctx: ctx})
-        └ 成功 → 返回 []KillResult(空池/无匹配 → "No active agents to kill.")
-      → command.Reply(chatsession.FormatKillResults(results))
+      results, err := kill.KillAllAgents(&kill.Cmd{CS: cs, Ctx: ctx})
+        └ 成功 → 返回 []kill.Result(空池/无匹配 → "No active agents to kill.")
+      → command.Reply(kill.FormatKillResults(results))
 ```
 
 **关键变化**：scope 统一为 **activeCwd 子集**(与 `/new` 对齐),但**两个入口**粒度不同:
@@ -1193,11 +1193,16 @@ command.kill.Factory.Handle(ctx, rt, input)
 
 `/kill` 不再误伤其他 cwd 下的 AgentSession —— 通过 `/cwd` 切到目标目录再 `/kill` 即可清理其他 workspace。
 
-**当前实现**:`/kill` 的进程关闭逻辑不在 `ChatSession` 上,而是 `chatsession` 包内的两个 package-level 函数:
-- `chatsession.KillAgent(c *KillCmd, agent)` —— `/kill <agent>` 路径
-- `chatsession.KillAllAgents(c *KillCmd)` —— `/kill` 路径
+**当前实现**:`/kill` 的进程关闭逻辑完全封装在 `internal/command/kill/` 包(`kill.go` + `format.go`):
+- `kill.KillAgent(cmd, agentName)` —— `/kill <agent>` 路径
+- `kill.KillAllAgents(cmd)` —— `/kill` 路径
+- `kill.Result` / `kill.FormatKillResults` —— 返回类型 + 渲染
 
-handler 持有 `*chatsession.Manager`,负责 RequireActiveCwd preflight + args 解析 + 调用包级函数 + `FormatKillResults` 渲染。
+kill 包通过 ChatSession 上的两个通用 lifecycle accessor 访问 pool / activeAS / 持久化:
+- `cs.AgentSessionsInCwd(cwd) []*AgentSession` —— 快照(只读)
+- `cs.DropAgentSession(as)` —— 原子地 pool delete + activeAS clear + asFile delete + persistChatEntry
+
+`ChatSession` 上**没有任何 kill 方法**;handler 负责 RequireActiveCwd preflight + args 解析 + 调包级函数 + FormatKillResults 渲染。
 
 **Daemon shutdown 不调任何 kill 函数** —— agents 是独立于 nightme 生命周期的长进程。SIGINT/SIGTERM 时只 `Stop()` channel、persist final state,AgentSessions 在 registry 里以 `Detached` 保留,下次 `nightme run` 通过 `Manager.RestoreFromRegistry` + `LookupActiveAgentSession` 自动复用 `--resume`。用户想真正关进程,通过 `/kill` 在对应 chat 里发即可。
 
@@ -1775,7 +1780,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 | **Q8** | Receipt 状态机 owner | **Gateway**；Channel 只渲染 |
 | **Q9** | `/cwd` 语义 | **只改 activeCwd**，不触发 spawn / kill |
 | **Q10** | `/use` 语义 | **永不重启进程**；复用 pool 中现有 AgentSession，没有再 spawn |
-| **Q11** | `/kill` 语义 | **杀 cwd 下的 AgentSession entries，零 ChatSession 方法暴露**：`/kill` 杀 activeCwd 下 pool 中所有 entries；`/kill <agent>` 杀 `(agent, activeCwd)` 单个 entry；其他 cwd 下的 entry 不受影响。Process-shutdown 逻辑封装在 `chatsession` 包的 `KillAgent` / `KillAllAgents` package-level 函数里（不是 `ChatSession` 方法）。下次消息触发 spawn 新。Graceful shutdown via bridge.Close，5s outer timeout；InputBuffer 保留；reply 是 per-entry list。Daemon shutdown 不调任何 kill 函数——agents 跨 `nightme` 重启通过 Detached registry state + `--resume` 自动恢复 |
+| **Q11** | `/kill` 语义 | **杀 cwd 下的 AgentSession entries，零 ChatSession 方法暴露**：`/kill` 杀 activeCwd 下 pool 中所有 entries；`/kill <agent>` 杀 `(agent, activeCwd)` 单个 entry；其他 cwd 下的 entry 不受影响。Process-shutdown 逻辑封装在 `internal/command/kill/` 包的 `kill.KillAgent` / `kill.KillAllAgents` package-level 函数里（不是 `ChatSession` 方法，零 `ChatSession` kill 方法）；通过 `cs.AgentSessionsInCwd` + `cs.DropAgentSession` 两个通用 lifecycle accessor 访问 pool / activeAS / 持久化。下次消息触发 spawn 新。Graceful shutdown via bridge.Close，5s outer timeout；InputBuffer 保留；reply 是 per-entry list。Daemon shutdown 不调任何 kill 函数——agents 跨 `nightme` 重启通过 Detached registry state + `--resume` 自动恢复 |
 | **Q12** | InputBuffer FSM owner | **ChatSession**（per ChatSession, 跨 `/use` 切换共享 queue）|
 | **Q13** | AgentSession 唯一性 | **`(agent, cwd)` per ChatSession 唯一**；不同 ChatSession 可独立 |
 | **Q14** | `session.Events()` 单消费者 | **readPump only**；ChatSession 通过 EventCallback 接收 |

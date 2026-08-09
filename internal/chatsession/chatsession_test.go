@@ -1,7 +1,6 @@
 package chatsession
 
 import (
-	"context"
 	"errors"
 	"path/filepath"
 	"sync"
@@ -197,6 +196,21 @@ func TestLookupActiveAgentSession_SpawnWhenDefaultAlsoMiss(t *testing.T) {
 	}
 }
 
+// killAllForTest simulates the /kill (no args) workflow using the
+// lifecycle accessors that kill.KillAllAgents would compose:
+// AgentSessionsInCwd → per-entry Close → per-entry DropAgentSession.
+// Tests use this in place of the kill package directly to avoid an
+// import cycle (kill imports chatsession; chatsession tests cannot
+// transitively import kill).
+func killAllForTest(t *testing.T, cs *ChatSession) {
+	t.Helper()
+	snapshot := cs.AgentSessionsInCwd(cs.ActiveCwd())
+	for _, as := range snapshot {
+		_ = as.Close()
+		cs.DropAgentSession(as)
+	}
+}
+
 func TestKillAllClearsPool(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
@@ -208,9 +222,7 @@ func TestKillAllClearsPool(t *testing.T) {
 		t.Fatalf("precondition: pool size=%d", len(cs.Pool()))
 	}
 
-	if _, err := KillAllAgents(&KillCmd{CS: cs, Ctx: context.Background()}); err != nil {
-		t.Fatalf("KillAllAgents: %v", err)
-	}
+	killAllForTest(t, cs)
 	if len(cs.Pool()) != 0 {
 		t.Fatalf("KillAllAgents should clear pool; size=%d", len(cs.Pool()))
 	}
@@ -555,10 +567,9 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 		t.Fatalf("pre-kill: QueueLen = %d, want 1 (AS is mid-turn)", got)
 	}
 
-	// Run /kill's sequence — KillAllAgents and nothing else.
-	if _, err := KillAllAgents(&KillCmd{CS: cs, Ctx: context.Background()}); err != nil {
-		t.Fatalf("KillAllAgents: %v", err)
-	}
+	// Run /kill's sequence — KillAllAgents (simulated via accessors
+	// to avoid import cycle) and nothing else.
+	killAllForTest(t, cs)
 
 	// The queued message survives, still in the queue (/kill
 	// must not discard queued work). Stage cannot be observed

@@ -128,7 +128,14 @@ func TestRealPi_NewAfterSwitch(t *testing.T) {
 	go cs.PumpEvents(pumpCtx)
 
 	defer func() {
-		_, _ = KillAllAgents(&KillCmd{CS: cs, Ctx: context.Background()})
+		// Simulate /kill via the lifecycle accessors — the kill
+		// package's KillAllAgents is tested in internal/command/kill
+		// and importing it here would create a cycle.
+		snapshot := cs.AgentSessionsInCwd(cs.ActiveCwd())
+		for _, as := range snapshot {
+			_ = as.Close()
+			cs.DropAgentSession(as)
+		}
 	}()
 
 	// Wait for handle to be ready

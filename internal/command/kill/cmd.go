@@ -80,11 +80,11 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		return failOut, nil
 	}
 
-	cmd := &chatsession.KillCmd{CS: cs, Ctx: ctx}
+	cmd := &Cmd{CS: cs, Ctx: ctx}
 
 	var (
-		single  *chatsession.KillResult
-		results []chatsession.KillResult
+		single  *Result
+		results []Result
 	)
 
 	if len(input.Args) > 1 {
@@ -97,7 +97,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 			// the blast radius.
 			return command.Reply(ctx, rt, "Usage: /kill [<agent>]"), nil
 		}
-		r, err := chatsession.KillAgent(cmd, candidate)
+		r, err := KillAgent(cmd, candidate)
 		if err != nil {
 			if errors.Is(err, chatsession.ErrAgentNotFound) {
 				return command.Reply(ctx, rt, fmt.Sprintf(
@@ -109,7 +109,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		single = &r
 	} else {
 		// /kill (no args): kill every entry in activeCwd
-		rs, err := chatsession.KillAllAgents(cmd)
+		rs, err := KillAllAgents(cmd)
 		if err != nil {
 			return command.Reply(ctx, rt, fmt.Sprintf("Kill failed: %v", err)), nil
 		}
@@ -117,7 +117,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	}
 
 	if single != nil {
-		results = []chatsession.KillResult{*single}
+		results = []Result{*single}
 	}
-	return command.Reply(ctx, rt, chatsession.FormatKillResults(results)), nil
+	return command.Reply(ctx, rt, FormatKillResults(results)), nil
 }

@@ -1,7 +1,6 @@
 package chatsession
 
 import (
-	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -104,8 +103,11 @@ func TestManager_PoolAfterKillCanRespawn(t *testing.T) {
 	}
 
 	// /kill clears the pool (cwd-scoped: only entries in activeCwd).
-	if _, err := KillAllAgents(&KillCmd{CS: cs, Ctx: context.Background()}); err != nil {
-		t.Fatalf("KillAllAgents: %v", err)
+	// Simulate via accessors — kill package tested separately.
+	snapshot := cs.AgentSessionsInCwd(cs.ActiveCwd())
+	for _, as := range snapshot {
+		_ = as.Close()
+		cs.DropAgentSession(as)
 	}
 	if len(cs.Pool()) != 0 {
 		t.Fatalf("pool should be empty after kill")

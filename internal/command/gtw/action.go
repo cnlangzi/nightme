@@ -358,9 +358,9 @@ func cancelResultText(p FixDraftPayload) string {
 // "#<id>" reference; ID mode keeps it.
 func variantReadyResultText(p FixDraftPayload, branch string) string {
 	if p.IssueID == -1 {
-		return fmt.Sprintf("✅ Local worktree 就绪(使用 %s)。", branch)
+		return fmt.Sprintf("✅ Local worktree ready (using `%s`).", branch)
 	}
-	return fmt.Sprintf("✅ Fix #%d 就绪(使用 %s)。", p.IssueID, branch)
+	return fmt.Sprintf("✅ Fix #%d ready (using `%s`).", p.IssueID, branch)
 }
 
 // toChatCardChoices translates gtw.CardChoice to

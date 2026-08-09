@@ -144,8 +144,8 @@ func TestPreflightOrphanYml_RunFixIntegration_AllowsParallel(t *testing.T) {
 		t.Fatalf("write yml: %v", err)
 	}
 
-	// Capture the orphan's yml content + mtime to verify
-	// untouched-ness after the second fix.
+	// Capture the orphan's yml content to verify untouched-ness
+	// after the second fix.
 	orphanYmlBefore, err := os.ReadFile(filepath.Join(orphanWt, nightmeDirName, gtwYmlName))
 	if err != nil {
 		t.Fatalf("read orphan yml before: %v", err)

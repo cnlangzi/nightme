@@ -352,11 +352,13 @@ func TestFixRemote_IssueNotFound(t *testing.T) {
 	}
 }
 
-// TestFixRemote_LabelFailContinues verifies a label-API failure
-// degrades gracefully: a ⚠️ warn line is sent, but the worktree
-// is still created (the durable side effect). AddLabel is NOT
-// retried; we proceed straight to WorktreeAdd.
-func TestFixRemote_LabelFailContinues(t *testing.T) {
+// TestFixRemote_AddLabelFailure_RollsBackWorktreeAndBranch
+// verifies the v1.x atomic semantics: when AddLabel fails, the
+// worktree and branch created earlier in the flow must be
+// rolled back. The user sees a failure message naming the
+// provider error, the rollback status of each step, and the
+// next-step hint. The fix must not land half-coordinated.
+func TestFixRemote_AddLabelFailure_RollsBackWorktreeAndBranch(t *testing.T) {
 	rig := newFixRemoteRig(t)
 	rig.prov.SetIssue(42, &Issue{ID: 42, Title: "Title", State: "open"})
 	rig.prov.SetAddLabelErr(fmt.Errorf("403 forbidden: missing label-scope token"))
@@ -369,23 +371,44 @@ func TestFixRemote_LabelFailContinues(t *testing.T) {
 	if addCalls := rig.prov.CallsByMethod("AddLabel"); len(addCalls) != 1 {
 		t.Errorf("AddLabel calls = %d, want 1", len(addCalls))
 	}
-	// RemoveLabel must NOT be called (we never added it, so
-	// nothing to roll back).
+	// RemoveLabel must NOT be called — we never added the label
+	// in the first place (AddLabel failed), so there's nothing
+	// to remove on the provider side. Cleanup is purely local
+	// (worktree + branch).
 	if rms := rig.prov.CallsByMethod("RemoveLabel"); len(rms) != 0 {
 		t.Errorf("RemoveLabel unexpectedly called: %+v", rms)
 	}
-	// A worktree MUST have been created despite the label fail.
+	// The worktree must be gone. 1 = main repo only; the failed
+	// fix's worktree must NOT survive a label failure.
 	wtOut, _ := mustGitOut(t, rig.repoRoot, "worktree", "list", "--porcelain")
-	if c := strings.Count(wtOut, "worktree "); c < 2 {
-		t.Errorf("worktree count = %d, want ≥ 2 (label fail should not block worktree):\n%s", c, wtOut)
+	if c := strings.Count(wtOut, "worktree "); c != 1 {
+		t.Errorf("worktree count = %d, want 1 (rollback must remove the new worktree):\n%s", c, wtOut)
 	}
-	// Reply set must include both the warning AND the success card.
+	// The branch must also be gone. A left-behind branch would
+	// trigger the BranchExists draft on retry, contradicting the
+	// "clean state" message we sent the user.
+	branchOut, _ := mustGitOut(t, rig.repoRoot, "branch", "--list", "fix/*")
+	if strings.TrimSpace(branchOut) != "" {
+		t.Errorf("expected no fix/* branches after rollback, got: %q", branchOut)
+	}
+	// The reply must echo the provider error verbatim and report
+	// the rollback status. v1.x "label fail continues" no longer
+	// applies — atomic semantics mean the fix did not land.
+	last := rig.rec.lastText()
+	if !strings.Contains(last, "Could not add label") {
+		t.Errorf("reply missing 'Could not add label' phrase:\n%s", last)
+	}
+	if !strings.Contains(last, "rolled back") {
+		t.Errorf("reply missing 'rolled back' phrase:\n%s", last)
+	}
+	if !strings.Contains(last, "fix the cause and re-run /gtw fix 42") {
+		t.Errorf("reply missing retry hint:\n%s", last)
+	}
+	// The success card ("Fix #42") must NOT be present — the
+	// fix did not land.
 	all := strings.Join(rig.rec.serialized(), "\n---\n")
-	if !strings.Contains(all, "Could not add label") {
-		t.Errorf("no label-fail warn in replies:\n%s", all)
-	}
-	if !strings.Contains(all, "Fix #42") {
-		t.Errorf("no success card despite label fail:\n%s", all)
+	if strings.Contains(all, "Fix #42") {
+		t.Errorf("success card present despite rollback:\n%s", all)
 	}
 }
 

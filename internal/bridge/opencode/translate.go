@@ -100,37 +100,54 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 	// the global event bus. The per-session message.part.updated
 	// path still works for older releases. We accept both so the
 	// bridge renders text on whatever system the user is running.
-	case "session.next.text.delta":
+	//
+	// session.next.text.started / text.ended mark the boundaries
+	// of a single text block; the actual delta is on
+	// session.next.text.delta. For models that return the entire
+	// text in one shot (no streaming), the text may arrive via
+	// text.ended rather than as a series of deltas — we treat
+	// that as a fallback path.
+	case "session.next.text.started", "session.next.text.delta", "session.next.text.ended":
 		var p struct {
-			Text string `json:"text"`
+			Text  string `json:"text"`
+			Delta string `json:"delta"`
 		}
-		if err := json.Unmarshal(ev.properties(), &p); err == nil && p.Text != "" {
-			t.deliver(agent.AgentEvent{
-				Kind:      agent.EventAgentText,
-				SessionID: t.sessionID,
-				Model:     t.model,
-				AgentName: t.agentName,
-				Workspace: t.workspace,
-				Branch:    t.branch,
-				Text:      p.Text,
-			})
+		_ = json.Unmarshal(ev.properties(), &p)
+		text := p.Text
+		if text == "" {
+			text = p.Delta
 		}
-	case "session.next.step.started", "session.next.step.ended":
-		// Tool lifecycle in the new event taxonomy. The actual
-		// callID / tool name are not in the test fixtures yet —
-		// once we have a real sample we can correlate by callID.
-		// For now we log only.
+		if text == "" {
+			// text.started/ended may have an empty body when
+			// the actual content is delivered via delta. Skip.
+			return nil
+		}
+		t.deliver(agent.AgentEvent{
+			Kind:      agent.EventAgentText,
+			SessionID: t.sessionID,
+			Model:     t.model,
+			AgentName: t.agentName,
+			Workspace: t.workspace,
+			Branch:    t.branch,
+			Text:      text,
+		})
+	case "session.next.step.started":
+		// opencode 1.18 fired step.started as a per-step lifecycle
+		// marker. We log only — the actual tool streaming now
+		// goes through session.next.text.* events.
 		oLog("sse: session.next.step", "type", ev.Type)
-	case "session.idle", "session.next.idle":
-		// Carry forward the last-seen usage, if any, so the
-		// channel footer can render totals. The Done.Usage field
-		// is the canonical source for runtime accumulation per
-		// F-49 §1.2.
+	case "session.next.step.ended":
+		// TERMINAL signal for opencode 1.18+. The first
+		// session.next.step.ended after a session.next.step.started
+		// (or session.next.prompted) marks the end of the turn.
+		// We emit EventAgentDone so the runtime readpump clears
+		// the busy guard. Subsequent events from the same session
+		// (compaction, more turns) start a new turn cycle.
 		//
-		// opencode 1.18+ renamed the event from `session.idle` to
-		// `session.next.idle` as part of the session.next.*
-		// taxonomy rewrite. We accept both for forward
-		// compatibility with older releases.
+		// Tool lifecycle correlation (callID etc.) is not yet
+		// wired because the opencode 1.18 step event payload
+		// doesn't include callID; we log only and rely on the
+		// per-session text delta for the channel footer.
 		usage := t.lastUsage
 		t.deliver(agent.AgentEvent{
 			Kind:      agent.EventAgentDone,
@@ -144,6 +161,49 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 				ExitCode: 0,
 				Usage:   usage,
 			},
+		})
+	case "session.idle", "session.next.idle":
+		// Older opencode releases (≤ 1.17) emit the per-turn
+		// terminal signal as session.idle. opencode 1.18+ switched
+		// to session.next.step.ended (handled above) — but we
+		// keep the case as a forward-compat hook so a future
+		// release reintroducing session.next.idle works.
+		usage := t.lastUsage
+		t.deliver(agent.AgentEvent{
+			Kind:      agent.EventAgentDone,
+			SessionID: t.sessionID,
+			Model:     t.model,
+			AgentName: t.agentName,
+			Workspace: t.workspace,
+			Branch:    t.branch,
+			Done: &agent.AgentDoneEvent{
+				Reason:  "settled",
+				ExitCode: 0,
+				Usage:   usage,
+			},
+		})
+	case "session.next.step.failed":
+		// opencode 1.18 emits this when the model step (LLM call)
+		// failed — auth/network/quota. We treat it as a terminal
+		// event for the turn so the runtime readpump clears the
+		// busy guard and the next prompt can proceed. The error
+		// details are surfaced via EventAgentDone{Reason: "failed"}.
+		var p struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(ev.properties(), &p)
+		t.deliver(agent.AgentEvent{
+			Kind:      agent.EventAgentDone,
+			SessionID: t.sessionID,
+			Model:     t.model,
+			AgentName: t.agentName,
+			Workspace: t.workspace,
+			Branch:    t.branch,
+			Done: &agent.AgentDoneEvent{
+				Reason:  "failed",
+				ExitCode: 1,
+			},
+			Err: errorOrNil(p.Error),
 		})
 	case "session.error":
 		var p struct {
@@ -564,6 +624,18 @@ func stringOrEmpty(raw json.RawMessage) string {
 	}
 	// Not a plain string — return a compact JSON rendering.
 	return string(raw)
+}
+
+// errorOrNil wraps an empty string as nil so EventAgentError.Err
+// is a clean error instead of a stub with empty message. The
+// runtime uses `ev.Err != nil` to decide whether to render an
+// error icon, so we MUST keep the contract that empty-string
+// errors don't render.
+func errorOrNil(s string) error {
+	if s == "" {
+		return nil
+	}
+	return fmt.Errorf("%s", s)
 }
 
 // humanDuration formats a time.Duration as a short human-readable

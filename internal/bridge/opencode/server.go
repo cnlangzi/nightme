@@ -91,7 +91,24 @@ func startServer(ctx context.Context, cfg serverConfig) (*serverProc, error) {
 	args = append(args, cfg.args...)
 
 	cmd := exec.CommandContext(ctx, "opencode", args...)
-	cmd.Dir = cfg.workspace
+	// The server's cwd determines which instance context it picks
+	// up — the InstanceStore maps (directory → provider/auth). The
+	// user's opencode config lives at ~/.config/opencode (or
+	// $XDG_CONFIG_HOME/opencode) and is read by the server boot
+	// path, but the InstanceContext for /api/session/{id}/prompt
+	// must be wired from a directory the user has set up.
+	//
+	// We spawn from the user's HOME rather than the workspace
+	// because the workspace is typically a fresh git checkout
+	// without any opencode auth. The workspace is then attached
+	// per-session via the `x-opencode-directory` header and the
+	// Session.directory field, so the server routes the request
+	// to the right project.
+	//
+	// Operators who want a different default can set
+	// NIGHTME_OPENCODE_HOME in the env. Empty HOME falls back to
+	// the workspace (legacy behaviour).
+	cmd.Dir = opencodeHomeDir(cfg.workspace)
 	cmd.Env = append([]string(nil), cfg.env...)
 
 	// Capture stdout so we can parse the banner. We close the stdout
@@ -247,4 +264,31 @@ func (p *serverProc) Close() error {
 	defer timer.Stop()
 	_, err := p.cmd.Process.Wait()
 	return err
+}
+
+// opencodeHomeDir returns the directory the opencode server should
+// be spawned from. The server's cwd drives the InstanceStore
+// lookup, which is where the per-project provider/auth lives.
+//
+// Resolution order:
+//
+//  1. NIGHTME_OPENCODE_HOME env var (explicit override, useful for
+//     CI / test fixtures).
+//  2. cfg.workspace — the agent workspace passed in by nightme.
+//     In practice the user also runs `opencode run ...` from
+//     this directory, so it has opencode initialized (auth,
+//     MCP config, providers). Spawning the server from here
+//     guarantees the InstanceContext for the workspace is
+//     reachable via the cwd-scoped InstanceStore.
+//
+// opencode 1.18's HTTP layer returns 500 ServeError on
+// instance-scoped endpoints (/api/session/{id}/prompt) when the
+// server's cwd doesn't have a valid InstanceContext. Working
+// from the agent workspace (instead of HOME) matches the CLI's
+// session model where the user's cwd is the runtime context.
+func opencodeHomeDir(workspace string) string {
+	if v := os.Getenv("NIGHTME_OPENCODE_HOME"); v != "" {
+		return v
+	}
+	return workspace
 }

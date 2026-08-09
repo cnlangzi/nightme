@@ -1,9 +1,9 @@
 # F-OPENCODE — 接 opencode 的方案调研与设计 v2
 
-> **Status**: 研究 + 设计稿 v2（推翻 §4 的"复用 ACP"假设,改为最简: 手写 Go HTTP client + opencode serve 子进程）
+> **Status**: 已落地 M3 — stage 1/2/3/4 全部完成,实现文档在 [docs/bridge/opencode.md](../bridge/opencode.md)
 > **Scope**: nightme 接入 [sst/opencode](https://github.com/sst/opencode) 的方案
 > **Audit 时间**: 2026-08-09
-> **前置阅读**: [F-21-agent-modes.md](./F-21-agent-modes.md) §5.3 + [docs/bridge/codex.md](../bridge/codex.md)
+> **前置阅读**: [F-21-agent-modes.md](./F-21-agent-modes.md) §5.3 + [docs/bridge/codex.md](../bridge/codex.md) + [docs/bridge/opencode.md](../bridge/opencode.md) (实现)
 
 ---
 

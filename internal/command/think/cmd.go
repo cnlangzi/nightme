@@ -1,7 +1,7 @@
 // Package think implements the `/think on|off` slash command.
 //
 // F-think §3.1.2: per-chat thinking-content visibility toggle.
-// State-only; does not touch activeCwd / activeAgent / pool.
+// State-only; does not touch selectedCwd / selectedAgent / pool.
 // The actual gate (drop OutThinking vs pass-through) lives in the
 // runtime's EventHandler closure, which reads cs.ThinkMode() after
 // Translate + ReplyTo stamping and before ch.Send.

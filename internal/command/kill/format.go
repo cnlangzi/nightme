@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
 // FormatKillResults produces a human-readable summary of /kill's
@@ -186,4 +188,102 @@ func truncateByBytes(header string, rows []resultRow, tailFmt string) string {
 // the given (i, total) under the standard formatTail template.
 func tailFmtFor(i, total int) string {
 	return fmt.Sprintf(formatTail, total-i)
+}
+
+// FormatResetResults produces a human-readable summary of /new's
+// per-entry outcomes. Companion to FormatKillResults; same plain-text
+// shape, same byte-based cap, same typed-priority sort.
+//
+// See docs/feat/F-43-kill-new-graceful-and-reset.md §6.2.
+func FormatResetResults(results []chatsession.ResetResult) string {
+	if len(results) == 0 {
+		return "Reset 0 sessions."
+	}
+
+	rows := make([]resultRow, 0, len(results))
+	var running, dead, failed int
+	for _, r := range results {
+		row, bucket := renderResetRow(r)
+		switch bucket {
+		case bucketSuccess:
+			running++
+		case bucketSkipped:
+			dead++
+		case bucketFailure:
+			failed++
+		}
+		rows = append(rows, row)
+	}
+
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].priority != rows[j].priority {
+			return rows[i].priority < rows[j].priority
+		}
+		if rows[i].agent != rows[j].agent {
+			return rows[i].agent < rows[j].agent
+		}
+		return rows[i].cwd < rows[j].cwd
+	})
+
+	header := buildResetHeader(running, dead, failed)
+	return truncateByBytes(header, rows, formatTail)
+}
+
+// renderResetRow is FormatResetResults' per-row branch.
+func renderResetRow(r chatsession.ResetResult) (resultRow, formatRowBucket) {
+	if r.Error != nil {
+		return resultRow{
+			text: fmt.Sprintf("  ✗ %s @ %s — bridge reset: %v",
+				r.Agent, r.Cwd, r.Error),
+			priority: bucketFailure,
+			agent:    r.Agent,
+			cwd:      r.Cwd,
+		}, bucketFailure
+	}
+	switch r.Action {
+	case "in-place-reset":
+		return resultRow{
+			text:     fmt.Sprintf("  ✓ %s @ %s — reset in-place", r.Agent, r.Cwd),
+			priority: bucketSuccess,
+			agent:    r.Agent,
+			cwd:      r.Cwd,
+		}, bucketSuccess
+	case "marked-fresh":
+		return resultRow{
+			text:     fmt.Sprintf("  ✓ %s @ %s — already exited, marked fresh", r.Agent, r.Cwd),
+			priority: bucketSkipped,
+			agent:    r.Agent,
+			cwd:      r.Cwd,
+		}, bucketSkipped
+	default:
+		return resultRow{
+			text:     fmt.Sprintf("  ✓ %s @ %s — %s", r.Agent, r.Cwd, r.Action),
+			priority: bucketSuccess,
+			agent:    r.Agent,
+			cwd:      r.Cwd,
+		}, bucketSuccess
+	}
+}
+
+// buildResetHeader mirrors the /kill header but with /new-specific
+// wording. The two commands share the (success / failure / skipped)
+// tuple but differ in label vocabulary.
+func buildResetHeader(running, dead, failed int) string {
+	if failed == 0 && dead == 0 {
+		return fmt.Sprintf("Reset %d session(s):", running)
+	}
+	if running == 0 && dead > 0 && failed == 0 {
+		return fmt.Sprintf("Marked %d session(s) fresh for next spawn:", dead)
+	}
+	parts := make([]string, 0, 3)
+	if running > 0 {
+		parts = append(parts, fmt.Sprintf("%d reset in-place", running))
+	}
+	if dead > 0 {
+		parts = append(parts, fmt.Sprintf("%d marked fresh", dead))
+	}
+	if failed > 0 {
+		parts = append(parts, fmt.Sprintf("%d failed", failed))
+	}
+	return "Reset " + fmt.Sprintf("%d session(s), %s:", running+dead, strings.Join(parts, ", "))
 }

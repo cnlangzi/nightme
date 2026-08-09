@@ -3,7 +3,7 @@
 // Spawner is the seam between ChatSession (which knows about chat
 // state and pools) and the agent package (which knows how to fork
 // a CLI subprocess). ChatSession calls Spawner.Spawn when
-// LookupActiveAgentSession finds a missing (agent, cwd) pair.
+// LookupSelectedAgentSession finds a missing (agent, cwd) pair.
 //
 // In production, the runtime wires an agent.Registry-backed Spawner.
 // In tests, a fake Spawner returns synthetic handles without
@@ -34,13 +34,13 @@ import (
 // Empty means "no --resume; start a fresh session".
 //
 // Spawn returns the live bridge-level handle. The caller (typically
-// ChatSession.LookupActiveAgentSession) wraps it in an AgentSession
+// ChatSession.LookupSelectedAgentSession) wraps it in an AgentSession
 // and stores it in the pool.
 type Spawner interface {
 	Spawn(ctx context.Context, agentName, cwd string, args []string, sessionID string) (agent.Agent, error)
 }
 
-// ErrSpawnerNotSet is returned by ChatSession.LookupActiveAgentSession
+// ErrSpawnerNotSet is returned by ChatSession.LookupSelectedAgentSession
 // when the chat has no Spawner wired (typical in tests, or before
 // runtime bootstrapping). The caller can choose to either inject a
 // Spawner or treat the lookup as "AgentSession created but not

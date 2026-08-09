@@ -32,7 +32,7 @@ import (
 //  4. Run RunClose (which calls the REAL `git status` and
 //     `git worktree remove`) and verify:
 //     - worktree directory is gone
-//     - ActiveCwd is back at repoRoot
+//     - SelectedCwd is back at repoRoot
 //     - slot is cleared
 //     - reply text mentions branch + repoRoot
 func TestIntegration_FixCloseRoundTrip(t *testing.T) {
@@ -44,7 +44,7 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 	mustGit(t, repoRoot, "worktree", "add", "-b", branch, wt, "HEAD")
 
 	// EnsureGitignore + CommitGitignore + WriteGTWYml — exactly
-	// what completeFixAndDispatch does after SetActiveCwd. The
+	// what completeFixAndDispatch does after SetSelectedCwd. The
 	// commit step matters: without it, .gitignore stays untracked
 	// and `git worktree remove` (which RunClose uses) refuses
 	// with "contains modified or untracked files".
@@ -86,8 +86,8 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 
 	// --- step 4: actually run /gtw close -------------------------
 	cs := chatsession.New("chat-int-1", "test-agent")
-	if err := cs.SetActiveCwd(wt); err != nil {
-		t.Fatalf("SetActiveCwd wt: %v", err)
+	if err := cs.SetSelectedCwd(wt); err != nil {
+		t.Fatalf("SetSelectedCwd wt: %v", err)
 	}
 	slot := &memSlot{Context{
 		Mode: ModeLocal, Issue: -1, Branch: branch,
@@ -121,8 +121,8 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 		t.Errorf("yml still on disk after close: stat err=%v", err)
 	}
 	// CWD must be back at repoRoot.
-	if got := cs.ActiveCwd(); got != repoRoot {
-		t.Errorf("ActiveCwd = %q, want %q", got, repoRoot)
+	if got := cs.SelectedCwd(); got != repoRoot {
+		t.Errorf("SelectedCwd = %q, want %q", got, repoRoot)
 	}
 	// In-memory slot must be cleared.
 	if slot.Load() != (Context{}) {
@@ -165,7 +165,7 @@ func TestIntegration_CloseRejectsDirty(t *testing.T) {
 	}
 
 	cs := chatsession.New("chat-int-2", "test-agent")
-	_ = cs.SetActiveCwd(wt)
+	_ = cs.SetSelectedCwd(wt)
 	slot := &memSlot{Context{Mode: ModeLocal, Branch: branch, Worktree: wt, RepoRoot: repoRoot, State: StateFixing}}
 	var sentTexts []string
 	deps := HandlerDeps{
@@ -376,13 +376,13 @@ func mustGitOut(t *testing.T, dir string, args ...string) (string, string) {
 // isn't just syntactically accepted but also drives every
 // downstream step (RepoRoot / BranchExists / Preflight /
 // WorktreeAdd / EnsureGitignore+Commit / WriteGTWYml /
-// SetActiveCwd / dispatch-skip / slot.Store).
+// SetSelectedCwd / dispatch-skip / slot.Store).
 func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	repoRoot := initTempRepo(t)
 
 	cs := chatsession.New("chat-int-shortN", "test-agent")
-	if err := cs.SetActiveCwd(repoRoot); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(repoRoot); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	slot := &memSlot{}
 	drafts := newMemDrafts()
@@ -427,9 +427,9 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	if _, err := os.Stat(wt); err != nil {
 		t.Fatalf("worktree %s not created: %v", wt, err)
 	}
-	// ActiveCwd must point at the new worktree.
-	if got := cs.ActiveCwd(); got != wt {
-		t.Errorf("ActiveCwd = %q, want %q", got, wt)
+	// SelectedCwd must point at the new worktree.
+	if got := cs.SelectedCwd(); got != wt {
+		t.Errorf("SelectedCwd = %q, want %q", got, wt)
 	}
 	// yml must round-trip with the right fields.
 	parsed, err := ReadGTWYml(wt)

@@ -114,9 +114,9 @@ func TestAgentSessionsInCwd_DoesNotMutate(t *testing.T) {
 
 // TestDropAgentSession verifies the post-close cleanup primitive.
 //   - Removes from pool
-//   - Clears activeAS iff it pointed to the entry
+//   - Clears selectedAS iff it pointed to the entry
 //   - Deletes agent_sessions.json row
-//   - Preserves activeAS when it pointed elsewhere
+//   - Preserves selectedAS when it pointed elsewhere
 func TestDropAgentSession(t *testing.T) {
 	cs := New("chat-drop", "cc")
 	cwd := t.TempDir()
@@ -137,7 +137,7 @@ func TestDropAgentSession(t *testing.T) {
 	}
 
 	cs.mu.Lock()
-	cs.activeAS = sibling
+	cs.selectedAS = sibling
 	cs.mu.Unlock()
 
 	cs.DropAgentSession(target)
@@ -145,8 +145,8 @@ func TestDropAgentSession(t *testing.T) {
 	if got := cs.AgentSessionsInCwd(cwd); len(got) != 1 || got[0] != sibling {
 		t.Errorf("post-drop: want pool=[sibling], got %v entries", got)
 	}
-	if cs.ActiveAgentSession() != sibling {
-		t.Errorf("activeAS should remain sibling (target was not active)")
+	if cs.SelectedAgentSession() != sibling {
+		t.Errorf("selectedAS should remain sibling (target was not active)")
 	}
 	if n := len(asFile.GetByChatPool(cs.ID)); n != 1 {
 		t.Errorf("registry: want 1 row (sibling), got %d", n)
@@ -154,7 +154,7 @@ func TestDropAgentSession(t *testing.T) {
 }
 
 // TestDropAgentSession_ActiveASCleared — DropAgentSession clears
-// activeAS iff it pointed to the dropped entry.
+// selectedAS iff it pointed to the dropped entry.
 func TestDropAgentSession_ActiveASCleared(t *testing.T) {
 	cs := New("chat-drop-active", "cc")
 	cwd := t.TempDir()
@@ -162,13 +162,13 @@ func TestDropAgentSession_ActiveASCleared(t *testing.T) {
 
 	a := injectAS(t, cs, "cc", cwd, &closedSpy{fakeAgentSession: newFakeAgentSession(1)})
 	cs.mu.Lock()
-	cs.activeAS = a
+	cs.selectedAS = a
 	cs.mu.Unlock()
 
 	cs.DropAgentSession(a)
 
-	if cs.ActiveAgentSession() != nil {
-		t.Errorf("activeAS should be nil post-Drop of active entry")
+	if cs.SelectedAgentSession() != nil {
+		t.Errorf("selectedAS should be nil post-Drop of active entry")
 	}
 }
 
@@ -217,8 +217,8 @@ func TestDropAgentSession_NilSafe(t *testing.T) {
 func TestKillWorkflow_KillOne(t *testing.T) {
 	cs := New("chat-wf-ka", "cc")
 	cwd := t.TempDir()
-	if err := cs.SetActiveCwd(cwd); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(cwd); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	cs.WithPersistence(nil, nil)
 
@@ -251,18 +251,18 @@ func TestKillWorkflow_KillOne(t *testing.T) {
 }
 
 // TestKillWorkflow_KillOne_ActiveASCleared — workflow handles
-// activeAS correctly: cleared iff killed entry was active.
+// selectedAS correctly: cleared iff killed entry was active.
 func TestKillWorkflow_KillOne_ActiveASCleared(t *testing.T) {
 	cs := New("chat-wf-ka-active", "cc")
 	cwd := t.TempDir()
-	if err := cs.SetActiveCwd(cwd); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(cwd); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	cs.WithPersistence(nil, nil)
 
 	a := injectAS(t, cs, "cc", cwd, &closedSpy{fakeAgentSession: newFakeAgentSession(1)})
 	cs.mu.Lock()
-	cs.activeAS = a
+	cs.selectedAS = a
 	cs.mu.Unlock()
 
 	as, err := cs.LookupInPool("cc", cwd)
@@ -272,8 +272,8 @@ func TestKillWorkflow_KillOne_ActiveASCleared(t *testing.T) {
 	_ = as.Close()
 	cs.DropAgentSession(as)
 
-	if got := cs.ActiveAgentSession(); got != nil {
-		t.Errorf("activeAS should be nil post-Drop of active entry, got %v", got)
+	if got := cs.SelectedAgentSession(); got != nil {
+		t.Errorf("selectedAS should be nil post-Drop of active entry, got %v", got)
 	}
 }
 
@@ -283,8 +283,8 @@ func TestKillWorkflow_KillOne_ActiveASCleared(t *testing.T) {
 func TestKillWorkflow_KillOne_NotFound(t *testing.T) {
 	cs := New("chat-wf-ka-notfound", "cc")
 	cwd := t.TempDir()
-	if err := cs.SetActiveCwd(cwd); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(cwd); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	cs.WithPersistence(nil, nil)
 
@@ -308,8 +308,8 @@ func TestKillWorkflow_KillOne_NotFound(t *testing.T) {
 func TestKillWorkflow_KillAllAgents(t *testing.T) {
 	cs := New("chat-wf-kaa", "cc")
 	cwd := t.TempDir()
-	if err := cs.SetActiveCwd(cwd); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(cwd); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	cs.WithPersistence(nil, nil)
 
@@ -350,7 +350,7 @@ func TestKillWorkflow_KillAllAgents_EmptyCwd(t *testing.T) {
 	a := injectAS(t, cs, "cc", "/some/other/cwd",
 		&closedSpy{fakeAgentSession: newFakeAgentSession(1)})
 	cs.mu.Lock()
-	cs.activeAS = a
+	cs.selectedAS = a
 	cs.mu.Unlock()
 
 	snapshot := cs.AgentSessionsInCwd("")
@@ -360,8 +360,8 @@ func TestKillWorkflow_KillAllAgents_EmptyCwd(t *testing.T) {
 	if closes := a.Handle().(*closedSpy).closes.Load(); closes != 0 {
 		t.Errorf("entry in other cwd must NOT be killed: got %d closes", closes)
 	}
-	if cs.ActiveAgentSession() != a {
-		t.Errorf("activeAS must NOT be cleared when no kill happened")
+	if cs.SelectedAgentSession() != a {
+		t.Errorf("selectedAS must NOT be cleared when no kill happened")
 	}
 }
 
@@ -370,8 +370,8 @@ func TestKillWorkflow_KillAllAgents_EmptyCwd(t *testing.T) {
 func TestKillWorkflow_StaleCleared(t *testing.T) {
 	cs := New("chat-wf-stale", "cc")
 	cwd := t.TempDir()
-	if err := cs.SetActiveCwd(cwd); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(cwd); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
 	asFile, err := registry.OpenAgentSessionFile(filepath.Join(t.TempDir(), "agent_sessions.json"))

@@ -326,7 +326,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	//       ↔ command.SlashInput / *CommandResult,
 	//   (e) SetGetChatSession hands gtw a per-chat lookup so
 	//       RunFix / HandleDraftReaction can call
-	//       cs.ActiveCwd / SetActiveCwd / QueueUserMessage
+	//       cs.SelectedCwd / SetSelectedCwd / QueueUserMessage
 	//       directly.
 	gtwDeps := gtw.HandlerDeps{
 		Git:    gtw.ExecGitRunner{},
@@ -517,7 +517,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 // Flow:
 //
 //  1. cs = mgr.GetOrCreate(chatID, cfg.Primary)   // F-33: chatType removed
-//  2. cs.LookupActiveAgentSession() (lazy spawn)
+//  2. cs.LookupSelectedAgentSession() (lazy spawn)
 //  3. cs.QueueUserMessage(blocks, userMsgID) (Idle → flush now;
 //     Busy → queue)
 //  4. SetBusy on first event (drive FSM)
@@ -539,9 +539,9 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 		cs.EmitMessageState(userMsgID, agent.MessageQueued)
 
 		// Resolve active AgentSession (lazy spawn on miss).
-		_, err := cs.LookupActiveAgentSession()
+		_, err := cs.LookupSelectedAgentSession()
 		if err != nil {
-			if errors.Is(err, chatsession.ErrNoActiveCwd) {
+			if errors.Is(err, chatsession.ErrNoSelectedCwd) {
 				return ch.Send(ctx, gateway.OutboundMessage{
 					ChatID: msg.ChatID,
 					Kind:   gateway.OutReply,
@@ -703,7 +703,7 @@ func wireRuntimeCallbacksAndRestore(
 		// Feishu placeholder card needs the footer). The gateway's
 		// bare OnMessageState doesn't accept SessionContext — the
 		// runtime is the right owner of the stamp because it has
-		// access to the AgentSession via cs.ActiveAgentSession().
+		// access to the AgentSession via cs.SelectedAgentSession().
 		// We bypass gwImpl.OnMessageState entirely here: the
 		// runtime wrapper does the same thing (validate, build
 		// OutboundMessage, send) plus the stamp on MessageSubmitted.
@@ -740,7 +740,9 @@ func wireRuntimeCallbacksAndRestore(
 				},
 			}
 			if e.State == agent.MessageSubmitted {
-				if as := cs.ActiveAgentSession(); as != nil {
+				// multi-as Phase 1: source AS comes from the
+				// event itself, not from cs.SelectedAgentSession().
+				if as := lookupASByID(cs, e.AgentSessionID); as != nil {
 					sessionContextInto(&out, as)
 				}
 			}
@@ -1049,6 +1051,26 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 // AgentResultEvent.Usage / AgentDoneEvent.Usage). The runtime does NOT
 // aggregate across turns; Agent is a passive
 // pass-through. The footer renders out.Usage directly.
+
+// lookupASByID finds an AgentSession in the chat's pool by ID.
+// Used by event subscribers to recover the source AS from
+// AgentSessionID carried on each event (multi-as Phase 1: source
+// AS comes from the event, not from cs.selectedAS).
+//
+// Returns nil if the AS is no longer in the pool (e.g. after a
+// concurrent /kill). Subscribers must handle nil.
+func lookupASByID(cs *chatsession.ChatSession, id string) *chatsession.AgentSession {
+	if cs == nil || id == "" {
+		return nil
+	}
+	for _, as := range cs.Pool() {
+		if as.ID == id {
+			return as
+		}
+	}
+	return nil
+}
+
 //
 // AgentSession.Agent is immutable (direct field read, no lock);
 // Model() takes RLock internally; git status is captured fresh
@@ -1137,7 +1159,7 @@ func shutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, cs
 		// Persist final state.
 		for _, cs := range mgr.List() {
 			// Touch lastInteractionAt so the entry is fresh on disk.
-			cs.SetActiveAgent(cs.ActiveAgent()) // no-op write trigger via the locked path
+			cs.SetSelectedAgent(cs.SelectedAgent()) // no-op write trigger via the locked path
 		}
 	}
 

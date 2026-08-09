@@ -136,7 +136,7 @@ func TestFromAgentSessionEntry_OpContextNotNil(t *testing.T) {
 		t.Fatal("OpContext() is nil; the first SendBlocks after a daemon restart would panic")
 	}
 	// A restored session has no live cancel yet — it must not be
-	// mistaken for an activated one, or promoteActiveLocked would
+	// mistaken for an activated one, or selectAgentSessionLocked would
 	// skip wiring it to the chat ctx.
 	if as.IsActivated() {
 		t.Error("IsActivated() = true on a freshly restored session, want false")

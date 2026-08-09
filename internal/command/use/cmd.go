@@ -1,8 +1,8 @@
 // Package use implements the `/use <agent> [args...]` slash
 // command.
 //
-// /use sets the chat's activeAgent and triggers a lazy
-// LookupActiveAgentSession (Q-B fallback order: exact →
+// /use sets the chat's selectedAgent and triggers a lazy
+// LookupSelectedAgentSession (Q-B fallback order: exact →
 // default → spawn). Replies with the resolved AgentSession.
 //
 // commit 8c: also starts the per-ChatSession readPump for the
@@ -45,10 +45,10 @@ func (f *Factory) Spec() command.Spec {
 //
 // Semantics:
 //
-//	/use claude                    → set activeAgent, reuse/spawn (claude, cwd)
-//	/use codex --auto-approve      → set activeAgent, pass args to spawn
+//	/use claude                    → set selectedAgent, reuse/spawn (claude, cwd)
+//	/use codex --auto-approve      → set selectedAgent, pass args to spawn
 //	/use                           → reply "Usage: /use <agent> [args...]"
-//	/use (no activeCwd yet)        → reply "send /cwd <path> first"
+//	/use (no selectedCwd yet)        → reply "send /cwd <path> first"
 //	/use unknown-agent             → reply "unknown agent"
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	input command.SlashInput) (*command.SlashOutput, error) {
@@ -69,12 +69,12 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	}
 
 	// Pure state mutation first.
-	if err := cs.SetActiveAgent(agentName); err != nil {
-		return command.Reply(ctx, rt, fmt.Sprintf("SetActiveAgent failed: %v", err)), nil
+	if err := cs.SetSelectedAgent(agentName); err != nil {
+		return command.Reply(ctx, rt, fmt.Sprintf("SetSelectedAgent failed: %v", err)), nil
 	}
 
 	// Lazy lookup — may spawn via the configured Spawner.
-	as, err := cs.LookupActiveAgentSession()
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
 		return command.Reply(ctx, rt, fmt.Sprintf("Failed to activate agent: %v", err)), nil
 	}

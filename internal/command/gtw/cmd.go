@@ -153,7 +153,7 @@ func (f *Factory) runFix(ctx context.Context, rt command.RuntimeServices, input 
 	// at startup that lazy-creates a *chatsession.ChatSession on
 	// first GetChatSession miss.
 	cs := f.mgr.GetChatSession(input.ChatID)
-	if cs == nil || cs.ActiveCwd() == "" {
+	if cs == nil || cs.SelectedCwd() == "" {
 		return &command.SlashOutput{
 			Reply:    "No active workspace. Send /cwd <path> first.",
 			Consumed: true,

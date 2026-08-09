@@ -8,8 +8,8 @@
 //
 // Semantics (see docs/feat/F-34-new-slash-command.md §4):
 //
-//	/new         → reset all AgentSessions in activeCwd
-//	/new <agent> → reset only the AgentSession named <agent> in activeCwd
+//	/new         → reset all AgentSessions in selectedCwd
+//	/new <agent> → reset only the AgentSession named <agent> in selectedCwd
 //
 // In both cases the InputBuffer queued messages are cleared.
 // Pool identity (AgentSession.ID / Cwd / Agent / args) is
@@ -27,6 +27,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	killpkg "github.com/cnlangzi/nightme/internal/command/kill"
 )
 
 // Factory is the command.SlashCommandFactory for /new.
@@ -110,7 +111,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 			"No agent session in current workspace to reset. Send a message to start one."), nil
 	}
 
-	text := chatsession.FormatResetResults(results)
+	text := killpkg.FormatResetResults(results)
 	if err != nil {
 		text += fmt.Sprintf(" (errors: %v)", err)
 	}

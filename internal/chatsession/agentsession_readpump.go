@@ -1,7 +1,10 @@
 // Package chatsession — AgentSession readpump (CS-AS 边界重构 Phase 1).
 //
 // The readpump is the per-AS goroutine that drains `as.handle.Events()`
-// and produces enriched events for ChatSession. Lifecycle:
+// and produces enriched events. Events go into `as.eventQueue`; a
+// separate dispatcher goroutine (see agentsession_dispatch.go) drains
+// the queue and publishes onto `as.EventBus`, where ChatSession
+// subscribers receive them. Lifecycle:
 //
 //   - Started by `Activate` on first call (idempotent; subsequent
 //     calls are no-ops).
@@ -12,7 +15,7 @@
 //   - On EventAgentDone / EventAgentError, calls `endPrompt(Clean | Error)`
 //     and emits `KindPromptEnded`.
 //   - Other events are wrapped as `KindAgentEvent` and pushed to
-//     eventQueue for ChatSession.
+//     eventQueue for the dispatcher.
 package chatsession
 
 import (
@@ -36,6 +39,9 @@ func (as *AgentSession) startReadPump() {
 	as.readpumpStop = make(chan struct{})
 	as.readpumpDone = make(chan struct{})
 	as.asMu.Unlock()
+	// Lazily start the dispatcher too — it drains eventQueue into
+	// EventBus and must be running before any events are pushed.
+	as.startEventDispatch()
 	go as.readpumpLoop()
 }
 
@@ -121,6 +127,7 @@ func (as *AgentSession) readpumpLoop() {
 			// channel-send keeps the pointer stable across the
 			// readpump's lifetime.
 			evCopy := ev
+			as.ensureDispatcher()
 			select {
 			case as.eventQueue <- EnrichedEvent{
 				ChatID:         as.ChatSessionID,
@@ -161,6 +168,7 @@ func (as *AgentSession) emitLifecycleLocked(status Status) {
 	stop := as.readpumpStop
 	as.asMu.RUnlock()
 
+	as.ensureDispatcher()
 	select {
 	case as.eventQueue <- EnrichedEvent{
 		ChatID:         as.ChatSessionID,
@@ -214,6 +222,7 @@ func (as *AgentSession) endPrompt(reason PromptEndReason) {
 	// Push KindPromptEnded event. Honor readpumpStop so a Shutdown
 	// racing us can interrupt the push (otherwise Shutdown would
 	// deadlock on readpumpDone while we're blocked on eventQueue).
+	as.ensureDispatcher()
 	select {
 	case as.eventQueue <- EnrichedEvent{
 		ChatID:         as.ChatSessionID,

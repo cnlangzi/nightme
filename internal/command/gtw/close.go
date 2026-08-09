@@ -27,7 +27,7 @@ const maxDirtyFilesReported = 10
 //
 // Flow (wip/gtw.md §14.5):
 //
-//  1. Look for `<cs.ActiveCwd()>/.nightme/gtw.yml` (no walk-up
+//  1. Look for `<cs.SelectedCwd()>/.nightme/gtw.yml` (no walk-up
 //     by design — see §14.4 design rationale).
 //  2. Refuse if missing — there's no active fix in this chat.
 //  3. Refuse if the worktree has uncommitted changes (`git
@@ -38,7 +38,7 @@ const maxDirtyFilesReported = 10
 //     the main repo (git refuses to run that command from
 //     inside a worktree itself). The yml file goes away with
 //     the worktree — no explicit unlink needed.
-//  5. SetActiveCwd back to repoRoot so the next agent message
+//  5. SetSelectedCwd back to repoRoot so the next agent message
 //     spawns in the main repo.
 //  6. Clear the in-memory Context.
 //
@@ -55,10 +55,10 @@ func RunClose(
 	chatID, messageID string,
 	force bool,
 ) (*Result, error) {
-	activeCwd := cs.ActiveCwd()
+	selectedCwd := cs.SelectedCwd()
 
 	// --- step 1+2: locate the snapshot ---------------------------
-	c, err := ReadGTWYml(activeCwd)
+	c, err := ReadGTWYml(selectedCwd)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return reply(ctx, deps.Send, chatID, messageID,
@@ -106,16 +106,16 @@ func RunClose(
 	}
 
 	// --- step 5: switch CWD back to repoRoot ----------------------
-	if err := cs.SetActiveCwd(c.RepoRoot); err != nil {
+	if err := cs.SetSelectedCwd(c.RepoRoot); err != nil {
 		// The worktree IS removed at this point. Failing to
 		// switch CWD is awkward (user is stranded in a path
 		// that no longer exists) but we surface the error so
 		// they can run `/cwd <repoRoot>` manually.
-		slog.Default().Warn("gtw: SetActiveCwd back to repoRoot failed",
+		slog.Default().Warn("gtw: SetSelectedCwd back to repoRoot failed",
 			"repo_root", c.RepoRoot,
 			"err", err)
 		return reply(ctx, deps.Send, chatID, messageID,
-			fmt.Sprintf("⚠️ worktree removed but SetActiveCwd(%s) failed: %v\n"+
+			fmt.Sprintf("⚠️ worktree removed but SetSelectedCwd(%s) failed: %v\n"+
 				"run `/cwd %s` manually.", c.RepoRoot, err, c.RepoRoot)), nil
 	}
 

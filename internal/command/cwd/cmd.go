@@ -3,7 +3,7 @@
 // /cwd sets the workspace for the current chat. The path goes
 // through `~` expansion, $HOME-relative resolution, and a
 // directory-existence check before being committed via
-// cs.SetActiveCwd.
+// cs.SetSelectedCwd.
 //
 // Factory holds *chatsession.Manager directly.
 package cwd
@@ -96,17 +96,17 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	}
 
 	cs := f.mgr.GetOrCreate(input.ChatID, f.defaultPrimary)
-	if err := cs.SetActiveCwd(abs); err != nil {
-		return command.Reply(ctx, rt, fmt.Sprintf("SetActiveCwd failed: %v", err)), nil
+	if err := cs.SetSelectedCwd(abs); err != nil {
+		return command.Reply(ctx, rt, fmt.Sprintf("SetSelectedCwd failed: %v", err)), nil
 	}
 
-	activeAgent := cs.ActiveAgent()
-	if activeAgent == "" {
-		activeAgent = f.defaultPrimary
+	selectedAgent := cs.SelectedAgent()
+	if selectedAgent == "" {
+		selectedAgent = f.defaultPrimary
 	}
 	return command.Reply(ctx, rt, fmt.Sprintf(
 		"Workspace set to %s.\nSession is ready (active agent: %s). Send any message to chat with it, or /use <agent> to switch. /use is optional — plain text is forwarded to the active agent automatically.",
-		abs, activeAgent)), nil
+		abs, selectedAgent)), nil
 }
 
 // expandTilde expands a leading "~" or "~/" to the user's home

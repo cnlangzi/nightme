@@ -22,7 +22,6 @@ package chatsession
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -34,6 +33,12 @@ import (
 // TestAgentSession_ReadPump_DeliversEvents verifies that an
 // AgentSession's readpump (started by Spawn) consumes bridge
 // events and re-emits them as EnrichedEvent on the eventQueue.
+//
+// Reads via as.EventBus, not as.Events(): the per-AS dispatcher
+// goroutine (started by startReadPump) drains eventQueue into the
+// bus, so a direct <-as.Events() consumer competes with the
+// dispatcher for receives and silently drops events whenever the
+// dispatcher wins the race.
 func TestAgentSession_ReadPump_DeliversEvents(t *testing.T) {
 	cs := newChatSessionForTest("cs_test")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -42,16 +47,23 @@ func TestAgentSession_ReadPump_DeliversEvents(t *testing.T) {
 	as, fake := makeSpawnedAS(t, cs, "pi", ctx)
 	defer as.Shutdown()
 
+	delivered := make(chan EnrichedEvent, 1)
+	as.EventBus.Subscribe(func(ev EnrichedEvent) bool {
+		select {
+		case delivered <- ev:
+		default:
+		}
+		return false
+	})
+
 	// Push a synthetic event into the fake bridge.
 	fake.PushEvent(agent.AgentEvent{
 		Kind: agent.EventAgentText,
 		Text: "hello",
 	})
 
-	// Read from AS eventQueue; expect KindAgentEvent wrapping the
-	// bridge event.
 	select {
-	case ev := <-as.Events():
+	case ev := <-delivered:
 		if ev.Kind != KindAgentEvent {
 			t.Fatalf("kind = %v, want KindAgentEvent", ev.Kind)
 		}
@@ -113,7 +125,7 @@ func TestChatSession_PumpEvents_RoutesKindAgentEvent(t *testing.T) {
 
 	// Promote to active.
 	cs.mu.Lock()
-	cs.activeAS = as
+	cs.selectedAS = as
 	cs.mu.Unlock()
 
 	// Install event handler that captures the first event.
@@ -159,7 +171,7 @@ func TestChatSession_PumpEvents_RoutesKindPromptEnded(t *testing.T) {
 	defer as.Shutdown()
 
 	cs.mu.Lock()
-	cs.activeAS = as
+	cs.selectedAS = as
 	cs.mu.Unlock()
 
 	// Observe the terminal prompt-end event. writebackMessageState
@@ -252,7 +264,7 @@ func TestChatSession_TryFlush_AtLeastOnce(t *testing.T) {
 	defer as.Shutdown()
 
 	cs.mu.Lock()
-	cs.activeAS = as
+	cs.selectedAS = as
 	cs.mu.Unlock()
 
 	// Subscribe to MessageStateBus to observe the post-Submit
@@ -299,6 +311,10 @@ func TestChatSession_TryFlush_AtLeastOnce(t *testing.T) {
 
 // TestAgentSession_Shutdown_ClosesReadPump verifies that AS.Shutdown
 // cleanly drains the readpump goroutine and closes eventQueue.
+//
+// Reads via as.EventBus, not as.Events() — see the comment on
+// TestAgentSession_ReadPump_DeliversEvents for why direct
+// eventQueue reads race with the dispatcher.
 func TestAgentSession_Shutdown_ClosesReadPump(t *testing.T) {
 	cs := newChatSessionForTest("cs_test")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -306,29 +322,45 @@ func TestAgentSession_Shutdown_ClosesReadPump(t *testing.T) {
 
 	as, fake := makeSpawnedAS(t, cs, "pi", ctx)
 
+	delivered := make(chan EnrichedEvent, 16)
+	as.EventBus.Subscribe(func(ev EnrichedEvent) bool {
+		select {
+		case delivered <- ev:
+		default:
+		}
+		return false
+	})
+
 	// Push an event first so the readpump is in the event loop.
 	fake.PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "before-shutdown"})
 
-	// Drain that event so the queue isn't blocked at shutdown.
+	// Drain that event via the bus so the queue isn't blocked at shutdown.
 	select {
-	case <-as.Events():
+	case <-delivered:
 	case <-time.After(time.Second):
 		t.Fatal("readpump not delivering events")
 	}
 
-	// Shutdown should close the queue and exit readpump.
+	// Shutdown should close the bus and exit readpump. Bus.Close makes
+	// Publish a no-op, so the subscriber stops firing once shutdown
+	// runs; the readpump's last in-flight events may still arrive.
 	as.Shutdown()
 
-	// Drain remaining events; expect channel closed.
+	// Wait briefly for any in-flight events to drain, then verify the
+	// bus has stopped delivering. After Close the subscriber sees no
+	// further events; the channel simply goes idle.
 	deadline := time.After(2 * time.Second)
+	idle := time.NewTimer(100 * time.Millisecond)
+	defer idle.Stop()
 	for {
 		select {
-		case _, ok := <-as.Events():
-			if !ok {
-				return // channel closed; readpump drained
-			}
+		case <-delivered:
+			idle.Reset(100 * time.Millisecond)
+		case <-idle.C:
+			// 100ms with no events: bus has gone quiet post-shutdown.
+			return
 		case <-deadline:
-			t.Fatal("eventQueue not closed after Shutdown")
+			t.Fatal("eventBus kept delivering after Shutdown")
 		}
 	}
 }
@@ -347,14 +379,14 @@ func TestChatSession_PromoteActive_NoBackgroundOpCtx(t *testing.T) {
 
 	// Register as active.
 	cs.mu.Lock()
-	cs.activeAS = oldAS
+	cs.selectedAS = oldAS
 	cs.mu.Unlock()
 
 	// Spawn a new AS, activate it, promote.
 	newAS, _ := makeSpawnedAS(t, cs, "pi", ctx)
 	defer newAS.Shutdown()
 	cs.mu.Lock()
-	cs.promoteActiveLocked(newAS)
+	cs.selectAgentSessionLocked(newAS)
 	cs.mu.Unlock()
 
 	// Old AS's opCtx must still be alive.
@@ -369,6 +401,14 @@ func TestChatSession_PromoteActive_NoBackgroundOpCtx(t *testing.T) {
 // TestAgentSession_EndPrompt_EmitsKindPromptEnded verifies that
 // endPrompt emits a KindPromptEnded event with the prompt
 // reference populated.
+//
+// Reads via as.EventBus, not as.Events(): endPrompt pushes to
+// eventQueue synchronously from the test goroutine, with no
+// goroutine preemption in between. The dispatcher goroutine (hot
+// in its receive loop) reliably grabs the event before the test
+// goroutine's select on eventQueue can. Subscribe to the bus
+// instead — it's the canonical read path and observes every event
+// the dispatcher publishes, with no race.
 func TestAgentSession_EndPrompt_EmitsKindPromptEnded(t *testing.T) {
 	cs := newChatSessionForTest("cs_test")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -376,6 +416,18 @@ func TestAgentSession_EndPrompt_EmitsKindPromptEnded(t *testing.T) {
 
 	as, _ := makeSpawnedAS(t, cs, "pi", ctx)
 	defer as.Shutdown()
+
+	delivered := make(chan EnrichedEvent, 1)
+	as.EventBus.Subscribe(func(ev EnrichedEvent) bool {
+		if ev.Kind != KindPromptEnded {
+			return false
+		}
+		select {
+		case delivered <- ev:
+		default:
+		}
+		return false
+	})
 
 	p := &Prompt{ID: "p-1", LastMessageID: "m-1"}
 	as.asMu.Lock()
@@ -385,7 +437,7 @@ func TestAgentSession_EndPrompt_EmitsKindPromptEnded(t *testing.T) {
 	as.endPrompt(PromptEndClean)
 
 	select {
-	case ev := <-as.Events():
+	case ev := <-delivered:
 		if ev.Kind != KindPromptEnded {
 			t.Fatalf("kind = %v, want KindPromptEnded", ev.Kind)
 		}
@@ -457,57 +509,13 @@ func waitFor(cond func() bool, timeout time.Duration) bool {
 	return false
 }
 
-// TestAgentSession_ReadPump_StableEventPointers is a regression
-// test for the &ev race that readpumpLoop had: the readpump
-// pushed `&ev` to eventQueue, and on the next iteration Go's
-// range loop shadowed ev with a fresh value. If the runtime
-// was slow to process the previous event, dereferencing the
-// pointer could see the new event's bytes. The fix copies
-// ev to the heap before taking its address.
+// TestAgentSession_ReadPump_StableEventPointers — REMOVED.
 //
-// This test pushes a flood of events, then reads them ALL out
-// of eventQueue, and verifies each one has its original payload
-// (not the payload of any other event that came through the
-// readpump's stack frame).
-func TestAgentSession_ReadPump_StableEventPointers(t *testing.T) {
-	cs := newChatSessionForTest("cs_test")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	as, fake := makeSpawnedAS(t, cs, "pi", ctx)
-	defer as.Shutdown()
-
-	const N = 50
-	for i := 0; i < N; i++ {
-		fake.PushEvent(agent.AgentEvent{
-			Kind: agent.EventAgentText,
-			Text: fmt.Sprintf("event-%d", i),
-		})
-	}
-
-	// Drain all events and verify each one.
-	for i := 0; i < N; i++ {
-		select {
-		case ev := <-as.Events():
-			if ev.Kind != KindAgentEvent {
-				t.Fatalf("event %d: kind = %v, want KindAgentEvent", i, ev.Kind)
-			}
-			if ev.AgentEvent == nil {
-				t.Fatalf("event %d: AgentEvent is nil", i)
-			}
-			want := fmt.Sprintf("event-%d", i)
-			if ev.AgentEvent.Text != want {
-				t.Fatalf("event %d: Text = %q, want %q "+
-					"(pointer-corruption regression: readpump's "+
-					"stack-allocated ev was overwritten by the next "+
-					"iteration before the runtime dereferenced it)",
-					i, ev.AgentEvent.Text, want)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out reading event %d", i)
-		}
-	}
-}
+// Multi-as Phase 1 retires the direct `<-as.Events()` read path
+// in favor of the per-AS `EventBus`. Pointer-corruption coverage
+// now lives on the bus subscriber in
+// `agentsession_dispatch_test.go` (TestAgentSession_Dispatch_OrderingGuarantees),
+// which exercises the same hazard at the bus layer.
 
 // silence unused warning for helpers that may be conditionally used
 var _ = strings.Contains

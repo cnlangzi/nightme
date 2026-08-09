@@ -33,7 +33,7 @@ func makeTestMessage(cs *ChatSession, blocks []agent.ContentBlock, userMsgID str
 // InputBuffer path, not bridge bring-up.
 //
 // Returns the AgentSession (already inserted into cs.pool and
-// set as cs.activeAS, with handle wired and stat=Running) and
+// set as cs.selectedAS, with handle wired and stat=Running) and
 // the underlying fakeAgentSession the test can drive via
 // PushEvent / FinishEvent.
 func newTestASWithFakeHandle(cs *ChatSession) (*AgentSession, *fakeAgentSession) {
@@ -45,7 +45,7 @@ func newTestASWithFakeHandle(cs *ChatSession) (*AgentSession, *fakeAgentSession)
 
 	cs.mu.Lock()
 	cs.pool[agentCwdKey{Agent: as.Agent, Cwd: as.Cwd}] = as
-	cs.activeAS = as
+	cs.selectedAS = as
 	cs.mu.Unlock()
 
 	return as, sess

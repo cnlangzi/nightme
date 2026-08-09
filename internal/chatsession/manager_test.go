@@ -75,11 +75,11 @@ func TestManager_WithSpawner(t *testing.T) {
 	}
 
 	// /use should now actually spawn.
-	cs.SetActiveCwd("/code/bailing")
-	cs.SetActiveAgent("claude")
-	as, err := cs.LookupActiveAgentSession()
+	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedAgent("claude")
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession: %v", err)
+		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 	if as.Status() != StatusRunning {
 		t.Fatalf("after spawn: got %q, want Running", as.Status())
@@ -94,17 +94,17 @@ func TestManager_PoolAfterKillCanRespawn(t *testing.T) {
 		WithPersistence(csFile, asFile)
 
 	cs := mgr.GetOrCreate("oc_xxx", "claude")
-	cs.SetActiveCwd("/code/bailing")
-	cs.SetActiveAgent("claude")
+	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedAgent("claude")
 
-	as1, _ := cs.LookupActiveAgentSession()
+	as1, _ := cs.LookupSelectedAgentSession()
 	if as1.Status() != StatusRunning {
 		t.Fatalf("precondition: expected Running")
 	}
 
 	// /kill clears the pool (cwd-scoped: only entries in activeCwd).
 	// Simulate via accessors — kill package tested separately.
-	snapshot := cs.AgentSessionsInCwd(cs.ActiveCwd())
+	snapshot := cs.AgentSessionsInCwd(cs.SelectedCwd())
 	for _, as := range snapshot {
 		_ = as.Close()
 		cs.DropAgentSession(as)
@@ -114,10 +114,10 @@ func TestManager_PoolAfterKillCanRespawn(t *testing.T) {
 	}
 
 	// Sending a message after /kill re-spawns via the same Spawner.
-	cs.SetActiveCwd("/code/bailing")
-	as2, err := cs.LookupActiveAgentSession()
+	cs.SetSelectedCwd("/code/bailing")
+	as2, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession after kill: %v", err)
+		t.Fatalf("LookupSelectedAgentSession after kill: %v", err)
 	}
 	if as2.Status() != StatusRunning {
 		t.Fatalf("after respawn: got %q, want Running", as2.Status())
@@ -134,9 +134,9 @@ func TestManager_RestoreFromRegistry_NoPersistence(t *testing.T) {
 	}
 }
 
-func TestManager_ErrNoActiveChatSessionMessage(t *testing.T) {
-	if !strings.Contains(ErrNoActiveChatSession.Error(), "/cwd") {
-		t.Fatalf("error message should mention /cwd: %v", ErrNoActiveChatSession)
+func TestManager_ErrNoSelectedChatSessionMessage(t *testing.T) {
+	if !strings.Contains(ErrNoSelectedChatSession.Error(), "/cwd") {
+		t.Fatalf("error message should mention /cwd: %v", ErrNoSelectedChatSession)
 	}
 }
 
@@ -149,8 +149,8 @@ func seedPersistedChatSession(t *testing.T, csFile *registry.ChatSessionFile, ch
 	entry := &registry.ChatSessionEntry{
 		ID:                csID,
 		ChatID:            chatID,
-		ActiveCwd:         "/code/bailing",
-		ActiveAgent:       primary,
+		SelectedCwd:         "/code/bailing",
+		SelectedAgent:       primary,
 		PrimaryAgent:      primary,
 		AgentSessionIDs:   nil,
 		CreatedAt:         time.Now(),

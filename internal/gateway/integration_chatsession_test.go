@@ -95,8 +95,8 @@ func integrationEventHandler(ch Channel, _ *chatsession.ChatSession) func(env ch
 
 func newIntegrationChatSession(chatID string, spawner chatsession.Spawner) *chatsession.ChatSession {
 	cs := chatsession.New(chatID, "fake").WithSpawner(spawner)
-	cs.SetActiveCwd("/tmp")
-	cs.SetActiveAgent("fake")
+	cs.SetSelectedCwd("/tmp")
+	cs.SetSelectedAgent("fake")
 	return cs
 }
 
@@ -121,9 +121,9 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 
 	// Trigger Spawn (drives AgentSession.Spawn → fakeSpawner.Spawn →
 	// fakeAgentSession becomes the handle → startReadPump launches).
-	as, err := cs.LookupActiveAgentSession()
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession: %v", err)
+		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 	defer as.Shutdown()
 	fake := spawner.lastFake
@@ -206,9 +206,9 @@ func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 	defer cancel()
 	go cs.PumpEvents(ctx)
 
-	as, err := cs.LookupActiveAgentSession()
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession: %v", err)
+		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 	defer as.Shutdown()
 	fake := spawner.lastFake
@@ -449,9 +449,9 @@ exit 0
 	defer cancel()
 	go cs.PumpEvents(ctx)
 
-	as, err := cs.LookupActiveAgentSession()
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession: %v", err)
+		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 	defer as.Shutdown()
 

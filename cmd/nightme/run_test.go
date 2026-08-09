@@ -902,8 +902,8 @@ func seedPersistedChatForWire(t *testing.T, csFile *registry.ChatSessionFile, ch
 	entry := &registry.ChatSessionEntry{
 		ID:                "cs_" + chatID,
 		ChatID:            chatID,
-		ActiveCwd:         "/code/bailing",
-		ActiveAgent:       primary,
+		SelectedCwd:         "/code/bailing",
+		SelectedAgent:       primary,
 		PrimaryAgent:      primary,
 		CreatedAt:         time.Now(),
 		LastInteractionAt: time.Now(),

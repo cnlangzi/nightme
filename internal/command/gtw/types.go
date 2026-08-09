@@ -27,8 +27,8 @@
 // Provider abstraction (GitProvider): see provider.go.
 //
 // The gtw package is gateway-agnostic. It directly imports the
-// chatsession package for *ChatSession access (ActiveCwd,
-// SetActiveCwd, QueueUserMessage) — F-XX removed the Sender
+// chatsession package for *ChatSession access (SelectedCwd,
+// SetSelectedCwd, QueueUserMessage) — F-XX removed the Sender
 // interface indirection that the previous F-51 design used.
 //
 // `cmd/nightme/run.go` wires per-chat *ChatSession lookup into
@@ -118,7 +118,7 @@ type Context struct {
 	// Captured at /gtw fix time so /gtw close can (a) run
 	// `git worktree remove` from inside the main repo — git
 	// refuses to run that command from a worktree — and (b)
-	// SetActiveCwd back here after teardown. Empty when the
+	// SetSelectedCwd back here after teardown. Empty when the
 	// fix flow hasn't reached §5.2.④.
 	RepoRoot string
 
@@ -315,4 +315,4 @@ type SendCardFunc func(ctx context.Context, m OutCardMsg) (botMessageID string, 
 
 // F-XX removed `gtw.Sender` interface; the gtw package now
 // imports chatsession directly and uses *chatsession.ChatSession
-// for ActiveCwd / SetActiveCwd / QueueUserMessage.
+// for SelectedCwd / SetSelectedCwd / QueueUserMessage.

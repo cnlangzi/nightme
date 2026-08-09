@@ -81,8 +81,8 @@ func TestFactory_Handle_ValidDir_SetsActiveCwd(t *testing.T) {
 	if !strings.Contains(out.Reply, "Workspace set to") {
 		t.Fatalf("Reply missing set-confirmation: %q", out.Reply)
 	}
-	if got := mgr.Get("c1").ActiveCwd(); got != tmp {
-		t.Fatalf("ActiveCwd() = %q, want %q", got, tmp)
+	if got := mgr.Get("c1").SelectedCwd(); got != tmp {
+		t.Fatalf("SelectedCwd() = %q, want %q", got, tmp)
 	}
 }
 

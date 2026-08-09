@@ -79,7 +79,7 @@ func newCloseRig(t *testing.T) *closeTestRig {
 	// Use a per-test ChatSession via the existing helper. Each
 	// test gets its own chatID so they don't bleed state.
 	cs := chatsession.New("chat-close-" + t.Name(), "test-agent")
-	_ = cs.SetActiveCwd("/tmp/start") // neutral starting cwd; tests overwrite
+	_ = cs.SetSelectedCwd("/tmp/start") // neutral starting cwd; tests overwrite
 	rig.cs = cs
 	return rig
 }
@@ -103,8 +103,8 @@ func seedFix(t *testing.T, rig *closeTestRig, wt, repoRoot string) {
 	}, rig.deps.Now); err != nil {
 		t.Fatalf("seed WriteGTWYml: %v", err)
 	}
-	if err := rig.cs.SetActiveCwd(wt); err != nil {
-		t.Fatalf("seed SetActiveCwd: %v", err)
+	if err := rig.cs.SetSelectedCwd(wt); err != nil {
+		t.Fatalf("seed SetSelectedCwd: %v", err)
 	}
 	rig.slot.Store(Context{
 		Mode: ModeLocal, Issue: -1, Branch: "fix/42-test",
@@ -134,8 +134,8 @@ func TestRunClose_CleanWorktree_Success(t *testing.T) {
 	}
 
 	// CWD must be back at repoRoot.
-	if got := rig.cs.ActiveCwd(); got != repoRoot {
-		t.Errorf("ActiveCwd after close = %q, want %q", got, repoRoot)
+	if got := rig.cs.SelectedCwd(); got != repoRoot {
+		t.Errorf("SelectedCwd after close = %q, want %q", got, repoRoot)
 	}
 	// In-memory context must be cleared.
 	if got := rig.slot.Load(); got != (Context{}) {
@@ -187,8 +187,8 @@ func TestRunClose_DirtyWorktree_Rejected(t *testing.T) {
 	}
 
 	// CWD must still be the worktree.
-	if got := rig.cs.ActiveCwd(); got != wt {
-		t.Errorf("ActiveCwd after dirty close = %q, want %q (unchanged)", got, wt)
+	if got := rig.cs.SelectedCwd(); got != wt {
+		t.Errorf("SelectedCwd after dirty close = %q, want %q (unchanged)", got, wt)
 	}
 	// In-memory context must be unchanged.
 	gotCtx := rig.slot.Load()
@@ -221,8 +221,8 @@ func TestRunClose_NoYml(t *testing.T) {
 	wt := t.TempDir()
 
 	rig := newCloseRig(t)
-	if err := rig.cs.SetActiveCwd(wt); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := rig.cs.SetSelectedCwd(wt); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
 	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1", false /* force */)
@@ -267,8 +267,8 @@ func TestRunClose_GitRemoveFails(t *testing.T) {
 	}
 
 	// State must be untouched so user can retry.
-	if got := rig.cs.ActiveCwd(); got != wt {
-		t.Errorf("ActiveCwd after git failure = %q, want %q (unchanged)", got, wt)
+	if got := rig.cs.SelectedCwd(); got != wt {
+		t.Errorf("SelectedCwd after git failure = %q, want %q (unchanged)", got, wt)
 	}
 	if got := rig.slot.Load(); got.Branch != "fix/42-test" {
 		t.Errorf("slot cleared despite git failure: %+v", got)
@@ -294,4 +294,4 @@ type fakeExitError struct {
 func (e *fakeExitError) Error() string { return e.msg }
 
 // (rigSetCwd removed; we don't need it — RunClose takes the
-// ChatSession's ActiveCwd directly.)
+// ChatSession's SelectedCwd directly.)

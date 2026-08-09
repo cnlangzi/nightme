@@ -4,7 +4,7 @@
 // ChatSession's public lifecycle surface only — no private
 // injection helpers. The chat session's lifecycle accessors
 // (AgentSessionsInCwd, DropAgentSession) and the public
-// LookupActiveAgentSession spawn path provide everything we need
+// LookupSelectedAgentSession spawn path provide everything we need
 // to verify the kill orchestration's behavior at the package
 // boundary.
 package kill_test
@@ -56,7 +56,7 @@ func TestKillAllAgents_NilCS(t *testing.T) {
 func TestKillAllAgents_NoActiveCwd(t *testing.T) {
 	mgr := chatsession.NewManager()
 	cs := mgr.GetOrCreate("c1", "claude")
-	// No SetActiveCwd.
+	// No SetSelectedCwd.
 
 	cmd := &killpkg.Cmd{CS: cs, Ctx: context.Background()}
 	results, err := killpkg.KillAllAgents(cmd)
@@ -74,10 +74,10 @@ func TestKillAgent_NotFound(t *testing.T) {
 	mgr := chatsession.NewManager()
 	cs := mgr.GetOrCreate("c1", "claude")
 	cs.WithPersistence(nil, nil)
-	if err := cs.SetActiveCwd("/tmp"); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd("/tmp"); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
-	// No LookupActiveAgentSession — pool is empty.
+	// No LookupSelectedAgentSession — pool is empty.
 
 	cmd := &killpkg.Cmd{CS: cs, Ctx: context.Background()}
 	_, err := killpkg.KillAgent(cmd, "claude")
@@ -92,8 +92,8 @@ func TestKillAllAgents_EmptyPool(t *testing.T) {
 	mgr := chatsession.NewManager()
 	cs := mgr.GetOrCreate("c1", "claude")
 	cs.WithPersistence(nil, nil)
-	if err := cs.SetActiveCwd("/tmp"); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd("/tmp"); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
 	cmd := &killpkg.Cmd{CS: cs, Ctx: context.Background()}

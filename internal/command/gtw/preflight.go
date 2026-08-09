@@ -12,7 +12,7 @@ import (
 // preflightOrphanYml refuses /gtw fix when there's an unfinished
 // /gtw fix on this repo. Two cases produce an orphan yml:
 //
-//  1. ActiveCwd IS the fix worktree (i.e. the user is sitting
+//  1. SelectedCwd IS the fix worktree (i.e. the user is sitting
 //     inside a worktree that /gtw fix created, and forgot to
 //     /gtw close before running another /gtw fix).
 //  2. A sibling worktree under the same repo holds an orphan
@@ -32,21 +32,21 @@ import (
 //
 // Returns nil if no orphan is detected, or a user-friendly
 // error reply text otherwise.
-func preflightOrphanYml(ctx context.Context, activeCwd string, git GitRunner) error {
-	// Case 1: ActiveCwd itself is a fix worktree.
-	if _, err := os.Stat(filepath.Join(activeCwd, nightmeDirName, gtwYmlName)); err == nil {
+func preflightOrphanYml(ctx context.Context, selectedCwd string, git GitRunner) error {
+	// Case 1: SelectedCwd itself is a fix worktree.
+	if _, err := os.Stat(filepath.Join(selectedCwd, nightmeDirName, gtwYmlName)); err == nil {
 		return fmt.Errorf(
 			"❌ %s already exists\n"+
 				"  this directory is the current /gtw fix worktree.\n"+
 				"  fix: run /gtw close here (or /cwd into another worktree)",
-			filepath.Join(activeCwd, nightmeDirName, gtwYmlName),
+			filepath.Join(selectedCwd, nightmeDirName, gtwYmlName),
 		)
 	}
 
 	// Case 2: a sibling worktree under the same repo holds an
 	// orphan yml. `git worktree list --porcelain` lists ALL
 	// linked worktrees (main repo + every worktree).
-	out, _, err := git.Run(ctx, activeCwd, "worktree", "list", "--porcelain")
+	out, _, err := git.Run(ctx, selectedCwd, "worktree", "list", "--porcelain")
 	if err != nil {
 		// Not a git repo / git unavailable — let downstream
 		// preflight (RepoRoot / PreflightWorktreeCreate) catch
@@ -55,7 +55,7 @@ func preflightOrphanYml(ctx context.Context, activeCwd string, git GitRunner) er
 	}
 
 	for _, p := range parseWorktreePaths(out) {
-		if filepath.Clean(p) == filepath.Clean(activeCwd) {
+		if filepath.Clean(p) == filepath.Clean(selectedCwd) {
 			continue // already checked in case 1
 		}
 		if _, err := os.Stat(filepath.Join(p, nightmeDirName, gtwYmlName)); err == nil {

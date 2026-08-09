@@ -25,11 +25,11 @@ func TestNewAndBasics(t *testing.T) {
 	if cs.ID == "" {
 		t.Fatalf("ID should be derived from chatID")
 	}
-	if cs.ActiveCwd() != "" {
-		t.Fatalf("initial ActiveCwd should be empty")
+	if cs.SelectedCwd() != "" {
+		t.Fatalf("initial SelectedCwd should be empty")
 	}
-	if cs.ActiveAgent() != "claude" {
-		t.Fatalf("initial ActiveAgent should be seeded from PrimaryAgent; got %q", cs.ActiveAgent())
+	if cs.SelectedAgent() != "claude" {
+		t.Fatalf("initial SelectedAgent should be seeded from PrimaryAgent; got %q", cs.SelectedAgent())
 	}
 	if cs.PrimaryAgent() != "claude" {
 		t.Fatalf("PrimaryAgent: got %q", cs.PrimaryAgent())
@@ -40,8 +40,8 @@ func TestNewAndBasics(t *testing.T) {
 	if len(cs.Pool()) != 0 {
 		t.Fatalf("Pool should be empty initially")
 	}
-	if cs.ActiveAgentSession() != nil {
-		t.Fatalf("activeAS should be nil initially")
+	if cs.SelectedAgentSession() != nil {
+		t.Fatalf("selectedAS should be nil initially")
 	}
 }
 
@@ -49,15 +49,15 @@ func TestSetActiveCwdDoesNotSpawn(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
 
-	if err := cs.SetActiveCwd("/code/bailing"); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd("/code/bailing"); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
-	if cs.ActiveCwd() != "/code/bailing" {
-		t.Fatalf("ActiveCwd: got %q", cs.ActiveCwd())
+	if cs.SelectedCwd() != "/code/bailing" {
+		t.Fatalf("SelectedCwd: got %q", cs.SelectedCwd())
 	}
-	// Critical: SetActiveCwd must NOT add anything to the pool.
+	// Critical: SetSelectedCwd must NOT add anything to the pool.
 	if len(cs.Pool()) != 0 {
-		t.Fatalf("SetActiveCwd should not spawn; pool size=%d", len(cs.Pool()))
+		t.Fatalf("SetSelectedCwd should not spawn; pool size=%d", len(cs.Pool()))
 	}
 }
 
@@ -65,23 +65,23 @@ func TestSetActiveAgentDoesNotSpawn(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
 
-	cs.SetActiveCwd("/code/bailing")
-	if err := cs.SetActiveAgent("claude"); err != nil {
-		t.Fatalf("SetActiveAgent: %v", err)
+	cs.SetSelectedCwd("/code/bailing")
+	if err := cs.SetSelectedAgent("claude"); err != nil {
+		t.Fatalf("SetSelectedAgent: %v", err)
 	}
-	if cs.ActiveAgent() != "claude" {
-		t.Fatalf("ActiveAgent: got %q", cs.ActiveAgent())
+	if cs.SelectedAgent() != "claude" {
+		t.Fatalf("SelectedAgent: got %q", cs.SelectedAgent())
 	}
 	if len(cs.Pool()) != 0 {
-		t.Fatalf("SetActiveAgent should not spawn; pool size=%d", len(cs.Pool()))
+		t.Fatalf("SetSelectedAgent should not spawn; pool size=%d", len(cs.Pool()))
 	}
 }
 
 func TestLookupActiveAgentSession_RequiresCwd(t *testing.T) {
 	cs := New("oc_xxx", "claude")
-	_, err := cs.LookupActiveAgentSession()
-	if err != ErrNoActiveCwd {
-		t.Fatalf("expected ErrNoActiveCwd, got %v", err)
+	_, err := cs.LookupSelectedAgentSession()
+	if err != ErrNoSelectedCwd {
+		t.Fatalf("expected ErrNoSelectedCwd, got %v", err)
 	}
 }
 
@@ -89,12 +89,12 @@ func TestLookupActiveAgentSession_SpawnWhenMissing(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
 
-	cs.SetActiveCwd("/code/bailing")
-	cs.SetActiveAgent("claude")
+	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedAgent("claude")
 
-	as, err := cs.LookupActiveAgentSession()
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession: %v", err)
+		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 	if as == nil {
 		t.Fatalf("expected AgentSession, got nil")
@@ -131,11 +131,11 @@ func TestLookupActiveAgentSession_ReusesPoolEntry(t *testing.T) {
 	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(newFakeSpawner())
-	cs.SetActiveCwd("/code/bailing")
-	cs.SetActiveAgent("claude")
+	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedAgent("claude")
 
-	as1, _ := cs.LookupActiveAgentSession()
-	as2, _ := cs.LookupActiveAgentSession()
+	as1, _ := cs.LookupSelectedAgentSession()
+	as2, _ := cs.LookupSelectedAgentSession()
 
 	if as1.ID != as2.ID {
 		t.Fatalf("expected same AgentSession, got %s vs %s", as1.ID, as2.ID)
@@ -154,19 +154,19 @@ func TestLookupActiveAgentSession_UseOverrides(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
 
-	cs.SetActiveCwd("/code/bailing")
-	cs.SetActiveAgent("claude")
-	claudeAS, _ := cs.LookupActiveAgentSession() // spawns (claude, cwd)
+	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedAgent("claude")
+	claudeAS, _ := cs.LookupSelectedAgentSession() // spawns (claude, cwd)
 	if claudeAS.Agent != "claude" {
 		t.Fatalf("first spawn: got %q, want claude", claudeAS.Agent)
 	}
 
 	// /use codex. (claude, cwd) is in the pool; (codex, cwd) is not.
 	// Lookup must spawn codex (not reuse the seeded claude entry).
-	cs.SetActiveAgent("codex")
-	codexAS, err := cs.LookupActiveAgentSession()
+	cs.SetSelectedAgent("codex")
+	codexAS, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession: %v", err)
+		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 	if codexAS.Agent != "codex" {
 		t.Fatalf("after /use codex: got %q, want codex", codexAS.Agent)
@@ -179,13 +179,13 @@ func TestLookupActiveAgentSession_UseOverrides(t *testing.T) {
 func TestLookupActiveAgentSession_SpawnWhenDefaultAlsoMiss(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
-	cs.SetActiveCwd("/code/bailing")
-	cs.SetActiveAgent("codex") // active != default
+	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedAgent("codex") // active != default
 
 	// Neither (codex, /code/bailing) nor (claude, /code/bailing) is in pool.
-	as, err := cs.LookupActiveAgentSession()
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession: %v", err)
+		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 	// Step 3 spawns (codex, /code/bailing).
 	if as.Agent != "codex" {
@@ -204,7 +204,7 @@ func TestLookupActiveAgentSession_SpawnWhenDefaultAlsoMiss(t *testing.T) {
 // transitively import kill).
 func killAllForTest(t *testing.T, cs *ChatSession) {
 	t.Helper()
-	snapshot := cs.AgentSessionsInCwd(cs.ActiveCwd())
+	snapshot := cs.AgentSessionsInCwd(cs.SelectedCwd())
 	for _, as := range snapshot {
 		_ = as.Close()
 		cs.DropAgentSession(as)
@@ -214,9 +214,9 @@ func killAllForTest(t *testing.T, cs *ChatSession) {
 func TestKillAllClearsPool(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
-	cs.SetActiveCwd("/code/bailing")
-	cs.SetActiveAgent("claude")
-	cs.LookupActiveAgentSession() // spawns claude
+	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedAgent("claude")
+	cs.LookupSelectedAgentSession() // spawns claude
 
 	if len(cs.Pool()) != 1 {
 		t.Fatalf("precondition: pool size=%d", len(cs.Pool()))
@@ -226,8 +226,8 @@ func TestKillAllClearsPool(t *testing.T) {
 	if len(cs.Pool()) != 0 {
 		t.Fatalf("KillAllAgents should clear pool; size=%d", len(cs.Pool()))
 	}
-	if cs.ActiveAgentSession() != nil {
-		t.Fatalf("activeAS should be nil after KillAllAgents")
+	if cs.SelectedAgentSession() != nil {
+		t.Fatalf("selectedAS should be nil after KillAllAgents")
 	}
 	// Persistence also cleared.
 	all := asFile.GetByChatPool(cs.ID)
@@ -235,8 +235,8 @@ func TestKillAllClearsPool(t *testing.T) {
 		t.Fatalf("persisted AgentSessions should be cleared; got %d", len(all))
 	}
 	// activeCwd and activeAgent survive (only the pool is cleared).
-	if cs.ActiveCwd() != "/code/bailing" {
-		t.Fatalf("ActiveCwd should survive /kill; got %q", cs.ActiveCwd())
+	if cs.SelectedCwd() != "/code/bailing" {
+		t.Fatalf("SelectedCwd should survive /kill; got %q", cs.SelectedCwd())
 	}
 }
 
@@ -262,9 +262,9 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	}
 
 	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
-	cs.SetActiveCwd("/code/bailing")
-	cs.SetActiveAgent("claude")
-	cs.LookupActiveAgentSession()
+	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedAgent("claude")
+	cs.LookupSelectedAgentSession()
 
 	// Read phase: reload from disk.
 	csFile2, err := registry.OpenChatSessionFile(csPath)
@@ -280,17 +280,17 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatalf("ChatSessionEntry should be persisted by chatID")
 	}
-	if entry.ActiveCwd != "/code/bailing" {
-		t.Fatalf("persisted ActiveCwd: %q", entry.ActiveCwd)
+	if entry.SelectedCwd != "/code/bailing" {
+		t.Fatalf("persisted SelectedCwd: %q", entry.SelectedCwd)
 	}
-	if entry.ActiveAgent != "claude" {
-		t.Fatalf("persisted ActiveAgent: %q", entry.ActiveAgent)
+	if entry.SelectedAgent != "claude" {
+		t.Fatalf("persisted SelectedAgent: %q", entry.SelectedAgent)
 	}
 	if len(entry.AgentSessionIDs) != 1 {
 		t.Fatalf("persisted AgentSessionIDs: got %d, want 1", len(entry.AgentSessionIDs))
 	}
-	if entry.ActiveAgentSessionID == nil {
-		t.Fatalf("ActiveAgentSessionID should be set")
+	if entry.SelectedAgentSessionID == nil {
+		t.Fatalf("SelectedAgentSessionID should be set")
 	}
 
 	agentEntries := asFile2.GetByChatPool(entry.ID)
@@ -347,8 +347,8 @@ func TestAgentSessionStatusTransitions(t *testing.T) {
 func TestChatSessionConcurrentSetAndLookup(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs := New("oc_xxx", "claude").WithPersistence(csFile, asFile)
-	cs.SetActiveCwd("/code/bailing")
-	cs.SetActiveAgent("claude")
+	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedAgent("claude")
 
 	var wg sync.WaitGroup
 	const N = 50
@@ -356,11 +356,11 @@ func TestChatSessionConcurrentSetAndLookup(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_, _ = cs.LookupActiveAgentSession()
+			_, _ = cs.LookupSelectedAgentSession()
 		}()
 		go func() {
 			defer wg.Done()
-			_ = cs.SetActiveAgent("claude")
+			_ = cs.SetSelectedAgent("claude")
 		}()
 	}
 	wg.Wait()
@@ -374,10 +374,10 @@ func TestChatSessionConcurrentSetAndLookup(t *testing.T) {
 
 func TestEmptyCwdRejected(t *testing.T) {
 	cs := New("oc_xxx", "claude")
-	if err := cs.SetActiveCwd(""); err == nil {
+	if err := cs.SetSelectedCwd(""); err == nil {
 		t.Fatalf("expected error for empty cwd")
 	}
-	if err := cs.SetActiveAgent(""); err == nil {
+	if err := cs.SetSelectedAgent(""); err == nil {
 		t.Fatalf("expected error for empty agent")
 	}
 }
@@ -420,7 +420,7 @@ func TestSubmit_AnchorWriteIsRaceFree(t *testing.T) {
 
 	as := newActiveAgentNoop()
 	cs.mu.Lock()
-	cs.activeAS = as
+	cs.selectedAS = as
 	cs.mu.Unlock()
 
 	const N = 64
@@ -466,12 +466,12 @@ func TestSubmit_AnchorWriteIsRaceFree(t *testing.T) {
 // CS-AS 边界重构 Phase 1 port: the old version reached into
 // inputBuffer.maxMsgs to force the failure. The queue cap is now
 // the QueueMaxMsgs constant, so we fill the queue instead. No
-// activeAS is installed, so the TryFlush inside QueueUserMessage
+// selectedAS is installed, so the TryFlush inside QueueUserMessage
 // is a no-op and nothing drains.
 func TestQueueUserMessage_RemovesGhostOnQueueFull(t *testing.T) {
 	cs := New("oc_chat", "claude")
-	cs.SetActiveCwd("/x")
-	cs.SetActiveAgent("claude")
+	cs.SetSelectedCwd("/x")
+	cs.SetSelectedAgent("claude")
 
 	for i := 0; i < QueueMaxMsgs; i++ {
 		msg := makeTestMessage(cs,
@@ -519,7 +519,7 @@ func TestQueueUserMessage_RemovesGhostOnQueueFull(t *testing.T) {
 // lives on the AgentSession, so a fresh AS is ready by construction.
 func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 	cs := New("oc_chat", "claude")
-	cs.SetActiveCwd(t.TempDir())
+	cs.SetSelectedCwd(t.TempDir())
 
 	// Subscribe to MessageStateBus so we can observe the
 	// post-TryFlush state transition. With value semantics the
@@ -544,7 +544,7 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 	// AS must live in activeCwd so KillAllAgents (cwd-scoped)
 	// reaches it. Capture activeCwd before allocating the AS so
 	// the (Agent, Cwd) key matches the pool filter.
-	activeCwd := cs.ActiveCwd()
+	activeCwd := cs.SelectedCwd()
 	as := NewAgentSession("as_kill", "oc_chat", "claude", activeCwd, nil)
 	as.handle = newRecordingAgentSession(1)
 	as.stat = StatusRunning
@@ -556,7 +556,7 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 
 	cs.mu.Lock()
 	cs.pool[agentCwdKey{Agent: as.Agent, Cwd: as.Cwd}] = as
-	cs.activeAS = as
+	cs.selectedAS = as
 	cs.mu.Unlock()
 
 	msg := makeTestMessage(cs, []agent.ContentBlock{{Text: "x"}}, "om_queued")
@@ -591,7 +591,7 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 	newAS.stat = StatusRunning
 	cs.mu.Lock()
 	cs.pool[agentCwdKey{Agent: newAS.Agent, Cwd: newAS.Cwd}] = newAS
-	cs.activeAS = newAS
+	cs.selectedAS = newAS
 	cs.mu.Unlock()
 
 	if err := cs.TryFlush(); err != nil {

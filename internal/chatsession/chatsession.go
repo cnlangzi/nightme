@@ -12,8 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,10 +26,10 @@ import (
 // One ChatSession is bound 1:1 to an IM chat (chatID), enforced by
 // the UNIQUE constraint on registry.ChatSessionEntry.ChatID. Each
 // ChatSession owns a pool of AgentSessions keyed by (agent, cwd);
-// the active one (or nil) is tracked in activeAS.
+// the active one (or nil) is tracked in selectedAS.
 //
-// Concurrency: state fields (activeCwd, activeAgent, primaryAgent,
-// pool, activeAS) are guarded by mu. Reads take RLock; writes take
+// Concurrency: state fields (selectedCwd, selectedAgent, primaryAgent,
+// pool, selectedAS) are guarded by mu. Reads take RLock; writes take
 // Lock. /use / /cwd take RLock for the mutation + Lock for the
 // pool mutation when an AgentSession is added.
 type ChatSession struct {
@@ -40,15 +38,15 @@ type ChatSession struct {
 
 	mu sync.RWMutex
 
-	// Active routing state. activeAgent is mutable via /use;
-	// activeCwd via /cwd. primaryAgent is the cfg.Primary snapshot
+	// Active routing state. selectedAgent is mutable via /use;
+	// selectedCwd via /cwd. primaryAgent is the cfg.Primary snapshot
 	// at ChatSession construction; read-only post-construction
 	// (Q-A: no /default command, no per-chat override).
 	//
-	// At New() time activeAgent is seeded from primaryAgent so the
-	// runtime never sees an empty activeAgent on a fresh chat.
-	activeCwd    string
-	activeAgent  string
+	// At New() time selectedAgent is seeded from primaryAgent so the
+	// runtime never sees an empty selectedAgent on a fresh chat.
+	selectedCwd    string
+	selectedAgent  string
 	primaryAgent string
 
 	// F-watch §3.1.1: per-chat message-watch mode. Default
@@ -89,7 +87,7 @@ type ChatSession struct {
 
 	// Currently active AgentSession (pointer into pool). nil means
 	// no active session (ChatSession exists but no /cwd + /use yet).
-	activeAS *AgentSession
+	selectedAS *AgentSession
 
 	// Timestamps.
 	createdAt        time.Time
@@ -99,7 +97,7 @@ type ChatSession struct {
 	csFile *registry.ChatSessionFile
 	asFile *registry.AgentSessionFile
 
-	// spawner is used by LookupActiveAgentSession to fork new
+	// spawner is used by LookupSelectedAgentSession to fork new
 	// children on miss. nil means no spawn (test-friendly default;
 	// production wires a registrySpawner at runtime).
 	spawner Spawner
@@ -147,10 +145,15 @@ type ChatSession struct {
 	MessageStateBus *services.EventBus[MessageStateEvent]
 	PromptEndBus    *services.EventBus[PromptEndedEvent]
 
+	// subs tracks AgentSession.IDs for which an EventBus
+	// subscription has been installed by attachAgentSubscription.
+	// Keyed by AS.ID; values are placeholders. Guarded by mu.
+	subs map[string]struct{}
+
 	// ctx is the per-ChatSession context. Lives for the chat's
 	// lifetime (until daemon shutdown). It is the PARENT context
 	// every AgentSession active on this chat derives its own
-	// per-AS ctx from. promoteActiveLocked owns that handover: on
+	// per-AS ctx from. selectAgentSessionLocked owns that handover: on
 	// every change of active AS it Background()s the outgoing one
 	// (cancelling its derived ctx) and Activate(cs.ctx)s the
 	// incoming one. Cancelling cs.ctx itself cascades through every
@@ -181,15 +184,15 @@ type ChatSession struct {
 // responsible for persisting via Persist().
 //
 // primaryAgent is the cfg.Primary snapshot at creation time. It
-// seeds activeAgent so the runtime always has an effective agent
+// seeds selectedAgent so the runtime always has an effective agent
 // to dispatch to (no runtime fallback: the lookup only ever reads
-// activeAgent). The snapshot itself is read-only post-construction
+// selectedAgent). The snapshot itself is read-only post-construction
 // (Q-A: no /default command, no per-chat override).
 func New(chatID, primaryAgent string) *ChatSession {
 	cs := &ChatSession{
 		ID:               deriveIDFromChatID(chatID),
 		ChatID:           chatID,
-		activeAgent:      primaryAgent, // init seed
+		selectedAgent:      primaryAgent, // init seed
 		primaryAgent:     primaryAgent, // historical snapshot, read-only
 		pool:             make(map[agentCwdKey]*AgentSession),
 		watchMode:        WatchModeMention, // F-watch default
@@ -204,6 +207,7 @@ func New(chatID, primaryAgent string) *ChatSession {
 	cs.AgentEventBus = services.NewEventBus[AgentEventEnvelope]()
 	cs.MessageStateBus = services.NewEventBus[MessageStateEvent]()
 	cs.PromptEndBus = services.NewEventBus[PromptEndedEvent]()
+	cs.subs = make(map[string]struct{})
 	cs.queue = NewMessageQueue(QueueMaxMsgs)
 	return cs
 }
@@ -218,7 +222,7 @@ func (cs *ChatSession) WithPersistence(csFile *registry.ChatSessionFile, asFile 
 	return cs
 }
 
-// WithSpawner attaches a Spawner used by LookupActiveAgentSession
+// WithSpawner attaches a Spawner used by LookupSelectedAgentSession
 // to fork child processes. nil means no spawn (lookup returns
 // AgentSession with status=Detached, no process running).
 func (cs *ChatSession) WithSpawner(spawner Spawner) *ChatSession {
@@ -245,9 +249,9 @@ func deriveIDFromChatID(chatID string) string {
 	return "cs_" + chatID
 }
 
-// ErrNoActiveCwd is returned by LookupActiveAgentSession when the
-// ChatSession has no activeCwd set (user has not /cwd'd yet).
-var ErrNoActiveCwd = errors.New("chatsession: no active workspace (send /cwd first)")
+// ErrNoSelectedCwd is returned by LookupSelectedAgentSession when the
+// ChatSession has no selectedCwd set (user has not /cwd'd yet).
+var ErrNoSelectedCwd = errors.New("chatsession: no active workspace (send /cwd first)")
 
 // ErrUnknownAgent indicates the requested agent is not registered.
 // (Validation should happen at the gateway layer; this is a safety net.)
@@ -273,15 +277,15 @@ type ResetResult struct {
 	Session *AgentSession
 }
 
-// SetActiveCwd changes the active workspace. Does NOT spawn or kill
+// SetSelectedCwd changes the active workspace. Does NOT spawn or kill
 // any AgentSession; the pool is preserved. Next message triggers
-// LookupActiveAgentSession which may spawn or reuse.
-func (cs *ChatSession) SetActiveCwd(cwd string) error {
+// LookupSelectedAgentSession which may spawn or reuse.
+func (cs *ChatSession) SetSelectedCwd(cwd string) error {
 	if cwd == "" {
 		return errors.New("chatsession: empty cwd")
 	}
 	cs.mu.Lock()
-	cs.activeCwd = cwd
+	cs.selectedCwd = cwd
 	cs.lastInteractionAt = time.Now()
 	cs.mu.Unlock()
 	cs.persistChatEntry()
@@ -330,19 +334,19 @@ func (cs *ChatSession) SetThinkMode(mode ThinkMode) error {
 	return nil
 }
 
-// SetActiveAgent changes the active agent name. Does NOT spawn or
-// kill; caller must invoke LookupActiveAgentSession to materialize.
-func (cs *ChatSession) SetActiveAgent(agent string) error {
+// SetSelectedAgent changes the active agent name. Does NOT spawn or
+// kill; caller must invoke LookupSelectedAgentSession to materialize.
+func (cs *ChatSession) SetSelectedAgent(agent string) error {
 	if agent == "" {
 		return errors.New("chatsession: empty agent")
 	}
 	cs.mu.Lock()
-	cs.activeAgent = agent
+	cs.selectedAgent = agent
 	// F-53: no more `currentTurnUserMsgID` to clear — the anchor
 	// now lives on `AgentSession.currentPrompt.LastMessageID`,
 	// which is set/cleared by `defaultPromptHookLocked` /
-	// `endPrompt`. Switching activeAgent here just kicks the
-	// hook closure (which captures `cs.activeAS` at flush time)
+	// `endPrompt`. Switching selectedAgent here just kicks the
+	// hook closure (which captures `cs.selectedAS` at flush time)
 	// to look up the new AS on the next flush.
 	//
 	// KNOWN LIMITATION (Phase 0, deferred to "Prompt 投递稳定性
@@ -353,7 +357,7 @@ func (cs *ChatSession) SetActiveAgent(agent string) error {
 	// EndedAt remains zero until either the old AS process dies
 	// (at which point Phase 1 will call endPrompt(ProcessDied))
 	// or the old AS is /killed. endPrompt itself only operates
-	// on cs.activeAS, so it cannot clean the old one. This is
+	// on cs.selectedAS, so it cannot clean the old one. This is
 	// a deliberate Phase 0 simplification; the cost is one
 	// orphaned Prompt struct per /use-while-busy until the old
 	// AS exits.
@@ -363,18 +367,18 @@ func (cs *ChatSession) SetActiveAgent(agent string) error {
 	return nil
 }
 
-// ActiveCwd returns the current active workspace.
-func (cs *ChatSession) ActiveCwd() string {
+// SelectedCwd returns the current active workspace.
+func (cs *ChatSession) SelectedCwd() string {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return cs.activeCwd
+	return cs.selectedCwd
 }
 
-// ActiveAgent returns the current active agent name.
-func (cs *ChatSession) ActiveAgent() string {
+// SelectedAgent returns the current active agent name.
+func (cs *ChatSession) SelectedAgent() string {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return cs.activeAgent
+	return cs.selectedAgent
 }
 
 // WatchMode returns the current per-chat message-watch mode.
@@ -437,8 +441,8 @@ func (cs *ChatSession) ToolsMode() agent.ToolsMode {
 // PrimaryAgent returns the per-chat primary agent (snapshot of
 // cfg.Primary at ChatSession creation). v1.2 (Q-A) does not
 // allow post-creation mutation; the field is read-only. The
-// activeAgent is seeded from this value at construction; /use
-// overrides activeAgent but does NOT mutate primaryAgent.
+// selectedAgent is seeded from this value at construction; /use
+// overrides selectedAgent but does NOT mutate primaryAgent.
 func (cs *ChatSession) PrimaryAgent() string {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
@@ -456,11 +460,11 @@ func (cs *ChatSession) Pool() []*AgentSession {
 	return out
 }
 
-// ActiveAgentSession returns the current active AgentSession (or nil).
-func (cs *ChatSession) ActiveAgentSession() *AgentSession {
+// SelectedAgentSession returns the current active AgentSession (or nil).
+func (cs *ChatSession) SelectedAgentSession() *AgentSession {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
-	return cs.activeAS
+	return cs.selectedAS
 }
 
 // --- InputBuffer FSM (F-53) ---------------------------------------
@@ -518,7 +522,7 @@ func (cs *ChatSession) Context() context.Context {
 // ResetContext cancels the per-ChatSession ctx and installs a
 // fresh one derived from context.Background(). Reserved for the
 // runtime's graceful-shutdown path — an active-AS switch does NOT
-// use this; per-AS teardown belongs to promoteActiveLocked.
+// use this; per-AS teardown belongs to selectAgentSessionLocked.
 //
 // After ResetContext, every AgentSession whose opCtx was derived
 // from the previous cs.ctx has its operations cancelled
@@ -627,7 +631,7 @@ func (cs *ChatSession) buildPromptLocked(batch []Message) *Prompt {
 //   - On error: Rewind so the batch returns to pending for the
 //     next TryFlush (driven by KindPromptEnded → IsReady flip).
 //
-// Concurrency: cs.mu is held only briefly to read activeAS. The
+// Concurrency: cs.mu is held only briefly to read selectedAS. The
 // queue has its own mutex, and the batch slice returned by Peek
 // is a stable snapshot — the caller may iterate it freely while
 // the queue is being mutated concurrently.
@@ -648,7 +652,7 @@ func (cs *ChatSession) TryFlush() error {
 	}
 
 	cs.mu.Lock()
-	as := cs.activeAS
+	as := cs.selectedAS
 	cs.mu.Unlock()
 	if as == nil {
 		// activeAS_nil / as_not_ready DO indicate real backpressure
@@ -708,9 +712,13 @@ func (cs *ChatSession) TryFlush() error {
 // (typically the feishu adapter) can flip their receipt cards
 // from 🔄 to ✅ (or ❌).
 //
+// `as` is the AgentSession that owned the prompt; its ID is
+// denormalized into the PromptEndedEvent so subscribers don't
+// have to consult cs.selectedAS (which only routes input).
+//
 // Called by the runtime's KindPromptEnded handler (pump_events.go
 // routeEvent).
-func (cs *ChatSession) writebackMessageState(p *Prompt) {
+func (cs *ChatSession) writebackMessageState(as *AgentSession, p *Prompt) {
 	if p == nil {
 		return
 	}
@@ -730,12 +738,17 @@ func (cs *ChatSession) writebackMessageState(p *Prompt) {
 	if p.LastMessageID == "" {
 		return
 	}
+	asID := ""
+	if as != nil {
+		asID = as.ID
+	}
 	bus.Publish(PromptEndedEvent{
-		ChatID:    chatID,
-		UserMsgID: p.LastMessageID,
-		PromptID:  p.ID,
-		Reason:    p.EndReason,
-		EndedAt:   p.EndedAt,
+		ChatID:         chatID,
+		UserMsgID:      p.LastMessageID,
+		PromptID:       p.ID,
+		Reason:         p.EndReason,
+		EndedAt:        p.EndedAt,
+		AgentSessionID: asID,
 	})
 }
 
@@ -808,65 +821,54 @@ func (cs *ChatSession) LookupInPool(agent, cwd string) (*AgentSession, error) {
 	return as, nil
 }
 
-// AgentSessionsInCwd returns a snapshot of the pool entries whose
-// Cwd == cwd. Read-only — does not mutate pool / activeAS. The
-// returned slice is a fresh copy safe for iteration outside the
-// lock; callers (typically the kill package) compose it with
-// DropAgentSession to terminate a cwd-scoped set.
+// attachAgentSession adds as to the pool and installs an EventBus
+// subscription that routes its events to cs.routeEvent. Idempotent:
+// if as is already attached (by key), the call is a no-op.
 //
-// An empty cwd returns an empty slice. A non-existent cwd also
-// returns an empty slice (no error) — pool filter is purely
-// syntactic on (agent, cwd).
-func (cs *ChatSession) AgentSessionsInCwd(cwd string) []*AgentSession {
-	if cwd == "" {
-		return nil
-	}
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	out := make([]*AgentSession, 0)
-	for _, as := range cs.pool {
-		if as.Cwd == cwd {
-			out = append(out, as)
-		}
-	}
-	return out
-}
-
-// DropAgentSession atomically removes as from the pool, clears
-// activeAS iff it pointed to as, deletes as's agent_sessions.json
-// row, and persists the chat entry. Caller is responsible for
-// graceful shutdown (as.Close()) BEFORE calling this — DropAgentSession
-// does NOT signal the bridge. The two-step pattern (Close → Drop)
-// keeps graceful-shutdown timing in the caller's hands (the kill
-// package owns the 5s outer bound and per-bridge Close goroutine
-// fan-out) and keeps this primitive focused on the post-close
-// bookkeeping.
-//
-// activeAS safety invariant: if as == cs.activeAS, the pointer is
-// cleared so a subsequent inbound message goes through
-// LookupActiveAgentSession → fresh spawn instead of dereferencing
-// a dangling pointer.
-//
-// Safe to call multiple times on the same as (the second call
-// becomes a no-op — the entry is no longer in the pool, so the
-// delete is a no-op, and the registry row is already gone).
-func (cs *ChatSession) DropAgentSession(as *AgentSession) {
+// Subscribing OUTSIDE cs.mu: we acquire mu only to insert into
+// cs.pool, release it, then call EventBus.Subscribe (which takes
+// the bus's own lock, not cs.mu). Holding cs.mu across the bus's
+// lock would create lock-ordering risk if a bus handler ever
+// needed to call back into ChatSession.
+func (cs *ChatSession) attachAgentSession(as *AgentSession) {
 	if as == nil {
 		return
 	}
 	cs.mu.Lock()
-	delete(cs.pool, agentCwdKey{Agent: as.Agent, Cwd: as.Cwd})
-	if cs.activeAS == as {
-		cs.activeAS = nil
-	}
+	cs.attachAgentSessionLocked(as)
 	cs.mu.Unlock()
-	if cs.asFile != nil {
-		_ = cs.asFile.Delete(as.ID)
-	}
-	cs.persistChatEntry()
+	// Install the bus subscription OUTSIDE cs.mu — see the lock
+	// ordering note above. attachAgentSubscription is itself
+	// idempotent so a race with PumpEvents' periodic
+	// attachAllPendingSubscriptions is safe.
+	cs.attachAgentSubscription(as)
 }
 
-// promoteActiveLocked makes as the chat's active AgentSession and
+// attachAgentSessionLocked is attachAgentSession without the lock
+// acquire. MUST be called with cs.mu held (write). Idempotent.
+func (cs *ChatSession) attachAgentSessionLocked(as *AgentSession) {
+	if as == nil {
+		return
+	}
+	key := agentCwdKey{Agent: as.Agent, Cwd: as.Cwd}
+	if _, exists := cs.pool[key]; exists {
+		return
+	}
+	cs.pool[key] = as
+}
+
+// detachAgentSession removes as from the pool and tears down its
+// subscription record. Idempotent.
+//
+// MUST hold cs.mu (write).
+func (cs *ChatSession) detachAgentSession(as *AgentSession) {
+	if as == nil {
+		return
+	}
+	delete(cs.pool, agentCwdKey{Agent: as.Agent, Cwd: as.Cwd})
+}
+
+// selectAgentSessionLocked makes as the chat's active AgentSession and
 // owns the per-AS context lifecycle for that promotion.
 //
 // Context wiring belongs here, at the single point where the active
@@ -898,8 +900,8 @@ func (cs *ChatSession) DropAgentSession(as *AgentSession) {
 // Caller must hold cs.mu. Takes cs.ctxMu (via Context()) and the
 // target's asMu; neither is ever held while acquiring cs.mu, so the
 // ordering is safe.
-func (cs *ChatSession) promoteActiveLocked(as *AgentSession) {
-	cs.activeAS = as
+func (cs *ChatSession) selectAgentSessionLocked(as *AgentSession) {
+	cs.selectedAS = as
 	if as == nil {
 		return
 	}
@@ -909,44 +911,49 @@ func (cs *ChatSession) promoteActiveLocked(as *AgentSession) {
 	as.Activate(cs.Context())
 }
 
-// LookupActiveAgentSession resolves the active AgentSession.
+// LookupSelectedAgentSession resolves the active AgentSession.
 //
 // Single-path resolution (no runtime fallback):
 //
-//   - activeAgent is always non-empty for a ChatSession constructed
+//   - selectedAgent is always non-empty for a ChatSession constructed
 //     by Manager.GetOrCreate (init-time seed from cfg.Primary
 //     snapshot). The runtime never needs to choose between two
 //     agents at lookup time.
-//   - Resolve pool[(activeAgent, activeCwd)]:
+//   - Resolve pool[(selectedAgent, selectedCwd)]:
 //     · hit (StatusRunning) → reuse
 //     · miss (or non-Running, e.g. Detached after daemon restart,
-//       or Exited after CLI died) → spawn (activeAgent, activeCwd)
+//       or Exited after CLI died) → spawn (selectedAgent, selectedCwd)
 //
-// Returns ErrNoActiveCwd if activeCwd is empty. Returns
-// ErrNoActiveAgent if activeAgent is empty (misconfigured daemon —
+// Returns ErrNoSelectedCwd if selectedCwd is empty. Returns
+// ErrNoSelectedAgent if selectedAgent is empty (misconfigured daemon —
 // cfg.Primary snapshot was empty at ChatSession creation).
-func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
+func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
 
-	if cs.activeCwd == "" {
-		return nil, ErrNoActiveCwd
+	if cs.selectedCwd == "" {
+		cs.mu.Unlock()
+		return nil, ErrNoSelectedCwd
 	}
 
-	if cs.activeAgent == "" {
+	if cs.selectedAgent == "" {
 		// Misconfigured: Manager.GetOrCreate should have seeded
-		// activeAgent from cfg.Primary at construction. An empty
+		// selectedAgent from cfg.Primary at construction. An empty
 		// primary at construction means the daemon has no global
 		// default configured; the runtime cannot choose an agent.
-		return nil, ErrNoActiveAgent
+		cs.mu.Unlock()
+		return nil, ErrNoSelectedAgent
 	}
 
 	// commit fix-6: pool hit only returns if the entry is still
 	// Running. A Detached entry (process state unknown after
 	// restart) or Exited entry (CLI died) falls through to the
 	// spawn path below.
-	if as, ok := cs.pool[agentCwdKey{Agent: cs.activeAgent, Cwd: cs.activeCwd}]; ok && as.Status() == StatusRunning && as.Handle() != nil {
-		cs.promoteActiveLocked(as)
+	if as, ok := cs.pool[agentCwdKey{Agent: cs.selectedAgent, Cwd: cs.selectedCwd}]; ok && as.Status() == StatusRunning && as.Handle() != nil {
+		cs.selectAgentSessionLocked(as)
+		cs.mu.Unlock()
+		// Pool hit: install subscription if not already present.
+		// attachAgentSubscription is idempotent.
+		cs.attachAgentSubscription(as)
 		return as, nil
 	}
 
@@ -957,22 +964,22 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	// the next Spawn replays `--resume <id>` to the bridge. Creating
 	// a fresh entry here would discard the resume id and force a
 	// brand-new agent session after every daemon restart.
-	newAS, hadPrior := cs.pool[agentCwdKey{Agent: cs.activeAgent, Cwd: cs.activeCwd}]
+	newAS, hadPrior := cs.pool[agentCwdKey{Agent: cs.selectedAgent, Cwd: cs.selectedCwd}]
 	if !hadPrior {
 		newAS = NewAgentSession(
 			newAgentSessionID(),
 			cs.ID,
-			cs.activeAgent,
-			cs.activeCwd,
+			cs.selectedAgent,
+			cs.selectedCwd,
 			nil,
 		)
-		cs.pool[agentCwdKey{Agent: cs.activeAgent, Cwd: cs.activeCwd}] = newAS
+		cs.attachAgentSessionLocked(newAS)
 	}
 	// If hadPrior, the entry's ID + SessionID + Args are preserved
 	// from the prior construction or RestoreFromRegistry. Spawn
 	// will fork a new process and SetRunning will clear the stale
 	// exit code and flip stat back to Running.
-	cs.promoteActiveLocked(newAS)
+	cs.selectAgentSessionLocked(newAS)
 	if cs.asFile != nil {
 		_ = cs.asFile.Upsert(newAS.Entry())
 	}
@@ -985,7 +992,7 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	if cs.spawner != nil {
 		// Spawn outside of cs.mu to avoid holding the write lock
 		// across a fork+exec. We re-acquire mu for the subsequent
-		// persistence + activeAS assignment.
+		// persistence + selectedAS assignment.
 		spawner := cs.spawner
 		cs.mu.Unlock()
 		spawnErr := newAS.Spawn(context.Background(), spawner)
@@ -994,8 +1001,10 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 		if spawnErr != nil {
 			// Spawn failed; keep the entry in the pool but mark
 			// detached so the next lookup can re-attempt. Caller
-			// will see an error from LookupActiveAgentSession.
-			return newAS, fmt.Errorf("chatsession: spawn failed (activeAgent=%q, cwd=%q): %w", cs.activeAgent, cs.activeCwd, spawnErr)
+			// will see an error from LookupSelectedAgentSession.
+			cs.mu.Unlock()
+			cs.attachAgentSubscription(newAS)
+			return newAS, fmt.Errorf("chatsession: spawn failed (selectedAgent=%q, cwd=%q): %w", cs.selectedAgent, cs.selectedCwd, spawnErr)
 		}
 		// Refresh registry entry with updated PID/Status.
 		if cs.asFile != nil {
@@ -1004,6 +1013,11 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	}
 
 	cs.persistChatEntryLocked()
+	cs.mu.Unlock()
+	// Install the bus subscription OUTSIDE cs.mu — see the lock
+	// ordering note in attachAgentSubscription. attachAgentSubscription
+	// is idempotent so a race with PumpEvents' periodic scan is safe.
+	cs.attachAgentSubscription(newAS)
 
 	// commit 8c: readPump is NOT auto-started here. The runtime
 	// (cmd/nightme) explicitly calls cs.StartReadPump() after
@@ -1014,48 +1028,61 @@ func (cs *ChatSession) LookupActiveAgentSession() (*AgentSession, error) {
 	return newAS, nil
 }
 
-// FormatResetResults produces a human-readable summary of /new's
-// per-entry outcomes. Companion to FormatKillResults; same plain-text
-// shape, same byte-based cap, same typed-priority sort.
+// AgentSessionsInCwd returns a fresh slice of every AgentSession in
+// the pool whose Cwd == cwd. The returned slice is independent of
+// cs.pool (callers may mutate / range without disturbing subsequent
+// reads). Returns nil when no entries match — including when cwd is
+// empty (no selection yet).
+func (cs *ChatSession) AgentSessionsInCwd(cwd string) []*AgentSession {
+	if cwd == "" {
+		return nil
+	}
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	out := make([]*AgentSession, 0)
+	for _, as := range cs.pool {
+		if as.Cwd == cwd {
+			out = append(out, as)
+		}
+	}
+	return out
+}
+
+// DropAgentSession is the per-entry cleanup primitive used by
+// /kill's batch path. For a single kill it composes:
 //
-// See docs/feat/F-43-kill-new-graceful-and-reset.md §6.2.
-func FormatResetResults(results []ResetResult) string {
-	if len(results) == 0 {
-		return "Reset 0 sessions."
+//  1. detachAgentSubscription — tears down the EventBus subscriber
+//     so the AS no longer feeds the ChatSession receive loop.
+//  2. detachAgentSession — removes from cs.pool.
+//  3. selectedAS clear — if the dropped AS was the selected one,
+//     null out cs.selectedAS so the next message goes through
+//     LookupSelectedAgentSession → fresh spawn.
+//  4. asFile.Delete — removes the persistent agent_sessions.json
+//     entry so the next daemon restart does not resurrect a corpse.
+//
+// Safe to call concurrently with LookupSelectedAgentSession: takes
+// cs.mu once. Caller (kill.KillAgent / KillAllAgents) is responsible
+// for invoking as.Close() first so the bridge process is gone before
+// the disk entry is deleted (F-43 §5.3 invariant).
+func (cs *ChatSession) DropAgentSession(as *AgentSession) {
+	if as == nil {
+		return
 	}
-
-	rows := make([]resultRow, 0, len(results))
-	var running, dead, failed int
-	for _, r := range results {
-		row, bucket := renderResetRow(r)
-		switch bucket {
-		case bucketSuccess:
-			running++
-		case bucketSkipped:
-			dead++
-		case bucketFailure:
-			failed++
-		}
-		rows = append(rows, row)
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.detachAgentSubscriptionLocked(as)
+	cs.detachAgentSession(as)
+	if cs.selectedAS == as {
+		cs.selectedAS = nil
 	}
-
-	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].priority != rows[j].priority {
-			return rows[i].priority < rows[j].priority
-		}
-		if rows[i].agent != rows[j].agent {
-			return rows[i].agent < rows[j].agent
-		}
-		return rows[i].cwd < rows[j].cwd
-	})
-
-	header := buildResetHeader(running, dead, failed)
-	return truncateByBytes(header, rows, formatTail)
+	if cs.asFile != nil {
+		_ = cs.asFile.Delete(as.ID)
+	}
 }
 
 // NewActiveAgentSessions resets the conversation context on the
-// AgentSessions associated with cs.ActiveCwd(). Filters the pool by
-// activeCwd, optionally narrowing further by agentName (when non-empty),
+// AgentSessions associated with cs.SelectedCwd(). Filters the pool by
+// selectedCwd, optionally narrowing further by agentName (when non-empty),
 // AND by Status == StatusRunning — only RUNNING sessions have a live
 // bridge handle and therefore have conversation context to reset.
 //
@@ -1089,7 +1116,7 @@ func FormatResetResults(results []ResetResult) string {
 //     reply via the returned error).
 func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName string) (matched, reset int, results []ResetResult, firstErr error) {
 	cs.mu.RLock()
-	cwd := cs.activeCwd
+	cwd := cs.selectedCwd
 	if cwd == "" {
 		cs.mu.RUnlock()
 		return 0, 0, nil, nil
@@ -1141,7 +1168,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 			// F-43 §5.4: dead/detached entry has no live conversation
 			// to reset, but its stale SessionID must NOT be replayed on
 			// the next spawn. Clear SessionID in-memory + persist so the
-			// next LookupActiveAgentSession spawns fresh.
+			// next LookupSelectedAgentSession spawns fresh.
 			//
 			// NO lazy spawn (F-34 §6 Q-N4 / product clarification
 			// 2026-08-04): spawning just to reset a dead agent would
@@ -1176,7 +1203,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 		// closing branch calls as.SetExited(0) which races with our
 		// SetRunning after the swap.
 		//
-		// Pump coordination: capture the activeAS identity and
+		// Pump coordination: capture the selectedAS identity and
 		// current handle under one RLock, then stop the pump (if
 		// this AS is the active one), call as.New, and restart the
 		// pump on the new handle. The handleChanged flag is
@@ -1187,7 +1214,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 		isActive := false
 		oldHandle := agent.Agent(nil)
 		cs.mu.RLock()
-		isActive = (as == cs.activeAS)
+		isActive = (as == cs.selectedAS)
 		if isActive {
 			oldHandle = as.Handle()
 		}
@@ -1255,7 +1282,7 @@ func (cs *ChatSession) entryLocked() *registry.ChatSessionEntry {
 	var activeASID *string
 	for _, as := range cs.pool {
 		agentIDs = append(agentIDs, as.ID)
-		if cs.activeAS != nil && as.ID == cs.activeAS.ID {
+		if cs.selectedAS != nil && as.ID == cs.selectedAS.ID {
 			id := as.ID
 			activeASID = &id
 		}
@@ -1263,11 +1290,11 @@ func (cs *ChatSession) entryLocked() *registry.ChatSessionEntry {
 	return &registry.ChatSessionEntry{
 		ID:                   cs.ID,
 		ChatID:               cs.ChatID,
-		ActiveCwd:            cs.activeCwd,
-		ActiveAgent:          cs.activeAgent,
+		SelectedCwd:            cs.selectedCwd,
+		SelectedAgent:          cs.selectedAgent,
 		PrimaryAgent:         cs.primaryAgent,
 		AgentSessionIDs:      agentIDs,
-		ActiveAgentSessionID: activeASID,
+		SelectedAgentSessionID: activeASID,
 		CreatedAt:            cs.createdAt,
 		LastInteractionAt:    cs.lastInteractionAt,
 		WatchMode:            cs.watchMode,
@@ -1302,108 +1329,4 @@ var agentSessionCounter atomic.Uint64
 func newAgentSessionID() string {
 	n := agentSessionCounter.Add(1)
 	return fmt.Sprintf("as_%d_%d", time.Now().UnixNano(), n)
-}
-// formatRowBucket is the typed priority bucket for a formatter row.
-// Lower values sort first. success < failure < skipped so the user
-// sees ✓ first, then ✗, then • (review finding #B7 — the previous
-// alphabetical sort on the rendered strings placed `•` (U+2022)
-// before `✓` (U+2713) before `✗` (U+2717), inverting the spec).
-type formatRowBucket int
-
-const (
-	bucketSuccess formatRowBucket = iota
-	bucketFailure
-	bucketSkipped
-)
-
-// resultRow is one formatted line + the structured fields the sorter
-// needs. The previous implementation sorted the formatted strings
-// directly, which bound sort to Unicode codepoint ordering.
-type resultRow struct {
-	text             string
-	priority         formatRowBucket
-	agent, cwd       string
-}
-
-// renderResetRow is FormatResetResults' per-row branch.
-func renderResetRow(r ResetResult) (resultRow, formatRowBucket) {
-	if r.Error != nil {
-		return resultRow{
-			text: fmt.Sprintf("  ✗ %s @ %s — bridge reset: %v",
-				r.Agent, r.Cwd, r.Error),
-			priority: bucketFailure,
-			agent:    r.Agent,
-			cwd:      r.Cwd,
-		}, bucketFailure
-	}
-	switch r.Action {
-	case "in-place-reset":
-		return resultRow{
-			text:     fmt.Sprintf("  ✓ %s @ %s — reset in-place", r.Agent, r.Cwd),
-			priority: bucketSuccess,
-			agent:    r.Agent,
-			cwd:      r.Cwd,
-		}, bucketSuccess
-	case "marked-fresh":
-		return resultRow{
-			text:     fmt.Sprintf("  ✓ %s @ %s — already exited, marked fresh", r.Agent, r.Cwd),
-			priority: bucketSkipped,
-			agent:    r.Agent,
-			cwd:      r.Cwd,
-		}, bucketSkipped
-	default:
-		return resultRow{
-			text:     fmt.Sprintf("  ✓ %s @ %s — %s", r.Agent, r.Cwd, r.Action),
-			priority: bucketSuccess,
-			agent:    r.Agent,
-			cwd:      r.Cwd,
-		}, bucketSuccess
-	}
-}
-
-// buildResetHeader mirrors the old buildResetHeader. Note the wording
-// differs from /kill (each command has its own header grammar).
-func buildResetHeader(running, dead, failed int) string {
-	if failed == 0 && dead == 0 {
-		return fmt.Sprintf("Reset %d session(s):", running)
-	}
-	if running == 0 && dead > 0 && failed == 0 {
-		return fmt.Sprintf("Marked %d session(s) fresh for next spawn:", dead)
-	}
-	parts := make([]string, 0, 3)
-	if running > 0 {
-		parts = append(parts, fmt.Sprintf("%d reset in-place", running))
-	}
-	if dead > 0 {
-		parts = append(parts, fmt.Sprintf("%d marked fresh", dead))
-	}
-	if failed > 0 {
-		parts = append(parts, fmt.Sprintf("%d failed", failed))
-	}
-	return "Reset " + fmt.Sprintf("%d session(s), %s:", running+dead, strings.Join(parts, ", "))
-}
-
-// formatReplyByteCap is the Feishu single-message payload limit
-// for FormatResetResults. The kill package carries its own
-// copy of these byte-cap helpers for FormatKillResults.
-const formatReplyByteCap = 4096
-
-const formatTail = "  ... and %d more"
-
-func truncateByBytes(header string, rows []resultRow, tailFmt string) string {
-	out := header
-	for i, r := range rows {
-		candidate := out + "\n" + r.text
-		if len(candidate)+len(tailFmtFor(i, len(rows))) > formatReplyByteCap {
-			hidden := len(rows) - i
-			out = out + "\n" + fmt.Sprintf(tailFmt, hidden)
-			return out
-		}
-		out = candidate
-	}
-	return out
-}
-
-func tailFmtFor(i, total int) string {
-	return fmt.Sprintf(formatTail, total-i)
 }

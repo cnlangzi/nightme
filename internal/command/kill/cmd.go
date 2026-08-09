@@ -1,10 +1,9 @@
 // Package kill implements the `/kill` slash command.
 //
-// /kill is scoped to the chat's activeCwd. The slash command
-// only kills agent processes — the ChatSession's persistent
-// state (activeCwd / activeAgent / queue / InputBuffer) is
-// preserved. The next message in this cwd triggers a fresh
-// spawn via LookupActiveAgentSession.
+// /kill clears the ChatSession's AgentSession pool. The
+// ChatSession itself is preserved (selectedCwd / selectedAgent
+// remain). The next message triggers a fresh spawn via the
+// configured Spawner.
 //
 // Semantics:
 //
@@ -102,7 +101,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 			if errors.Is(err, chatsession.ErrAgentNotFound) {
 				return command.Reply(ctx, rt, fmt.Sprintf(
 					"No %s session in %s to kill. Try /agents.",
-					candidate, cs.ActiveCwd())), nil
+					candidate, cs.SelectedCwd())), nil
 			}
 			return command.Reply(ctx, rt, fmt.Sprintf("Kill failed: %v", err)), nil
 		}

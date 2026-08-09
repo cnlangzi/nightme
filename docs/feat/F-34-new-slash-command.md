@@ -12,8 +12,8 @@
 `/new` slash command 让用户在不退出 nightme daemon、不杀任何 CLI 进程的前提下，**丢弃 agent 的当前对话上下文**（history / 累积 usage / conversation state），从干净状态重新开始。语义对齐 claudecode 的内置 `/clear` 命令。
 
 ```
-/new                    → 重置当前 activeCwd 下 pool 里全部 AgentSession
-/new <agent>            → 只重置当前 activeCwd 下名为 <agent> 的那一条 AgentSession
+/new                    → 重置当前 selectedCwd 下 pool 里全部 AgentSession
+/new <agent>            → 只重置当前 selectedCwd 下名为 <agent> 的那一条 AgentSession
 ```
 
 为什么需要它：
@@ -252,7 +252,7 @@ func (as *AgentSession) New(ctx context.Context, spawner Spawner) error {
 // internal/chatsession/chatsession.go
 func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName string) (matched, reset int, firstErr error) {
     cs.mu.RLock()
-    cwd := cs.activeCwd
+    cwd := cs.selectedCwd
     if cwd == "" {
         cs.mu.RUnlock()
         return 0, 0, nil   // caller replies "send /cwd first"
@@ -309,7 +309,7 @@ func handleNew(ctx context.Context, mgr *chatsession.Manager, channel Channel,
                msg *InboundMessage, args []string, globalPrimary string) (*CommandResult, error) {
 
     cs := mgr.GetOrCreate(msg.ChatID, globalPrimary)
-    if cs.ActiveCwd() == "" {
+    if cs.SelectedCwd() == "" {
         return reply(ctx, channel, msg.ChatID, "No active workspace. Send /cwd <path> first."), nil
     }
 
@@ -356,14 +356,14 @@ gw.Register(gateway.Command{
 
 | 命令 | 过滤 | 清空的 AS | 清空 InputBuffer | 杀掉进程 |
 |---|---|---|---|---|
-| `/new`（默认）| `Cwd == activeCwd`（无 agent 过滤）| pool 中 activeCwd 下全部 | ✓ | ✗ |
-| `/new <agent>` | `Cwd == activeCwd && Agent == <name>` | 至多 1 条 | ✓ | ✗ |
+| `/new`（默认）| `Cwd == selectedCwd`（无 agent 过滤）| pool 中 selectedCwd 下全部 | ✓ | ✗ |
+| `/new <agent>` | `Cwd == selectedCwd && Agent == <name>` | 至多 1 条 | ✓ | ✗ |
 | `/kill` | 整个 pool | 全部 | ✓ | ✓ |
-| `/use <agent>` | 无 | 无（只切 activeAS）| ✗ | ✗ |
+| `/use <agent>` | 无 | 无（只切 selectedAS）| ✗ | ✗ |
 
 ### 4.2 `/new <agent>` 的 cwd 范围（决策锁）
 
-**为什么限定 activeCwd**：
+**为什么限定 selectedCwd**：
 
 - 与 `/new`（无参）保持对称 —— 两者都在当前 workspace 作用域内 reset。
 - 避免"在 /A reset /B 的 session"的反直觉行为 —— 用户已经在 /A 工作，不应该莫名其妙影响 /B 的 agent 对话。
@@ -419,13 +419,13 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 
 | 场景 | 行为 |
 |---|---|
-| `activeCwd == ""` | reply "No active workspace. Send /cwd <path> first." |
+| `selectedCwd == ""` | reply "No active workspace. Send /cwd <path> first." |
 | `/new` 命中 0 条 AS | reply "No agent session in current workspace to reset." |
 | `/new <agent>` 找不到 | reply "No agent session for <agent> in current workspace. Try /agents." |
 | 单个 AS reset 失败（如 pi 还在处理 turn）| reset 计数 -1；InputBuffer **仍清空**；reply 附 "errors: <first err>" |
 | 所有 AS reset 失败 | matched > 0, reset == 0；reply "Reset 0/N agent session(s). (errors: ...)" |
 | pool 有 AS 但都未启动 (Status==Detached/Exited) | **F-43 ⚠ supersedes**: matched == 1, reset == 1, Action == `marked-fresh`; ResumeID cleared in-memory + persisted; reply 用 `FormatResetResults` per-entry list。原 F-34 "Q-N4 silently skip" 行为已被替换。 |
-| pool 在 activeCwd 下完全为空 | matched == 0；reply 同上 |
+| pool 在 selectedCwd 下完全为空 | matched == 0；reply 同上 |
 
 ---
 
@@ -444,7 +444,7 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 
 ## 8. 不在范围内（Out of Scope）
 
-- **`/new` 跨 cwd reset**：`/new <agent>` 限定 activeCwd；reset 其他 cwd 的 AS 由用户 `/cwd` 切换触发（决策 §4.2）。
+- **`/new` 跨 cwd reset**：`/new <agent>` 限定 selectedCwd；reset 其他 cwd 的 AS 由用户 `/cwd` 切换触发（决策 §4.2）。
 - **bridge 层的并发 reset 优化**：当前串行；如有性能诉求可在 Phase 3 加 per-bridge 并发（注意 stdin / RPC 各自串行约束）。
 - **ACP transport 复用重构**：当前每次 `New` 都复用 transport 已有 session/new；不抽公共 transport（与 F-32 / F-21 Phase 2 一致）。
 - **`/new` 清空用户消息历史**：仅清 agent 对话上下文 + InputBuffer queued；不删 Channel 端已发的 user message（Channel 自管 receipt，与 `/new` 正交）。
@@ -458,8 +458,8 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 | # | 决策 | 结论 | 日期 |
 |---|---|---|---|
 | Q-N1 | `New` 放哪个接口 | `agent.AgentSession` 接口（不是 `agent.Agent`）| 2026-08-04 |
-| Q-N2 | `/new` 无参的清空范围 | pool 中 `Cwd == activeCwd` 的全部 | 2026-08-04 |
-| Q-N3 | `/new <agent>` 的清空范围 | pool 中 `Cwd == activeCwd && Agent == <name>`（限定 cwd，对称）| 2026-08-04 |
+| Q-N2 | `/new` 无参的清空范围 | pool 中 `Cwd == selectedCwd` 的全部 | 2026-08-04 |
+| Q-N3 | `/new <agent>` 的清空范围 | pool 中 `Cwd == selectedCwd && Agent == <name>`（限定 cwd，对称）| 2026-08-04 |
 | Q-N4 | InputBuffer 处理 | **清空** queued（与 `/kill` 行为对齐）| 2026-08-04 |
 | Q-N5 | claudecode reset 命令 | `writeLine({"type":"user","message":{...,"content":"/clear"}})` —— claude-code 在 stream-json 模式下接受 `/clear` 作为 user-typed slash command（实测 2026-08-04）；控制消息 `{"type":"control",...}` 各种 subtype 全部无效 | 2026-08-04 |
 | Q-N6 | pi reset 协议 | **RPC command** `{"type":"new_session"}`（不是 prompt 文本 `/new`）| 2026-08-04 |

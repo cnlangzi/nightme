@@ -19,7 +19,7 @@
 | ID | 功能 | 设计文档 | 里程碑 | 状态 |
 |----|------|----------|--------|------|
 | F-27 | **ChatSession 模型**（per chat 持久化会话上下文；合并 v1.1 ChannelSession + GatewaySession 逻辑）| [feat/F-27-chatsession.md](./feat/F-27-chatsession.md) | v1.2 (current) | ✅ 已实现 (commits 5/6/8b) |
-| F-28 | **`/use <agent>` 命令**（切换 activeAgent；复用或新建 AgentSession；永不重启进程）| [feat/F-28-use-command.md](./feat/F-28-use-command.md) | v1.2 (current) | ✅ 已实现 (commits 8a/8c) |
+| F-28 | **`/use <agent>` 命令**（切换 selectedAgent；复用或新建 AgentSession；永不重启进程）| [feat/F-28-use-command.md](./feat/F-28-use-command.md) | v1.2 (current) | ✅ 已实现 (commits 8a/8c) |
 | F-29 | **AgentSession 池**（`(agent, cwd)` 1:1 池化；`/cwd` / `/use` 不杀任何 AgentSession，切回能复用）| [feat/F-29-agent-session-pool.md](./feat/F-29-agent-session-pool.md) | v1.2 (current) | ✅ 已实现 (commits 7/8c) |
 | F-30 | **Interactive Config**（`nightme config` 进交互菜单；二级菜单只做 Agents；merge builtin + cfg；选 primary）| [feat/F-30-interactive-config.md](./feat/F-30-interactive-config.md) | v1.2 (current) | ✅ 已实现 |
 
@@ -138,7 +138,7 @@
 | 决策 | 现状 | 状态 |
 |------|------|------|
 | Q-A: Primary Agent 设置粒度 | 全局 only (`config.yaml` 的 `primary`)；ChatSession.primaryAgent 是创建时 snapshot；**无 `/default` 命令** | ✅ 已锁定 (2026-08-02) |
-| Q-B: `(activeAgent, activeCwd)` lookup 行为 | 只看 `(activeAgent, activeCwd)`：命中 Running 复用，否则 spawn；**无运行时 fallback** | ✅ 已锁定 (2026-08-02) |
+| Q-B: `(selectedAgent, selectedCwd)` lookup 行为 | 只看 `(selectedAgent, selectedCwd)`：命中 Running 复用，否则 spawn；**无运行时 fallback** | ✅ 已锁定 (2026-08-02) |
 | `ChatSession.primaryAgent` 字段持久化位置 | `ChatSessionEntry.primaryAgent` (snapshot，写时不变) | ✅ 已锁定 |
 | Config schema 顶层字段 | `primary` (top-level scalar) + `agents:` (top-level list); bridge 是每个 AgentEntry 的字段; command 是 full string 含 args | ✅ 已锁定 (2026-08-02) |
 

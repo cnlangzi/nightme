@@ -40,7 +40,7 @@ import (
 // EVERY layer:
 //
 //   - registrySpawner forks a real pi process
-//   - ChatSession.LookupActiveAgentSession spawns it
+//   - ChatSession.LookupSelectedAgentSession spawns it
 //   - per-AS readpump drains the bridge events channel
 //   - cs.PumpEvents consumes the enriched stream
 //   - AgentSession.SendBlocks sends the prompt
@@ -76,14 +76,14 @@ func TestRealPi_NewAfterSwitch(t *testing.T) {
 	cs := New("oc_real_pi_new", "pi").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
-	if err := cs.SetActiveCwd(dir); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(dir); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
 	// Spawn pi
-	as, err := cs.LookupActiveAgentSession()
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession (pi): %v", err)
+		t.Fatalf("LookupSelectedAgentSession (pi): %v", err)
 	}
 	if as.Agent != "pi" {
 		t.Fatalf("expected pi session, got %q", as.Agent)
@@ -131,7 +131,7 @@ func TestRealPi_NewAfterSwitch(t *testing.T) {
 		// Simulate /kill via the lifecycle accessors — the kill
 		// package's KillAllAgents is tested in internal/command/kill
 		// and importing it here would create a cycle.
-		snapshot := cs.AgentSessionsInCwd(cs.ActiveCwd())
+		snapshot := cs.AgentSessionsInCwd(cs.SelectedCwd())
 		for _, as := range snapshot {
 			_ = as.Close()
 			cs.DropAgentSession(as)
@@ -207,12 +207,12 @@ waitTurn1:
 	// reported: both pi and claude are running, then /new is
 	// invoked. Without this step, /new only matches pi.
 	t.Logf("step 2: switch to claude (spawn second AgentSession)")
-	if err := cs.SetActiveAgent("claude"); err != nil {
-		t.Fatalf("SetActiveAgent(claude): %v", err)
+	if err := cs.SetSelectedAgent("claude"); err != nil {
+		t.Fatalf("SetSelectedAgent(claude): %v", err)
 	}
-	claudeAS, err := cs.LookupActiveAgentSession()
+	claudeAS, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession (claude): %v", err)
+		t.Fatalf("LookupSelectedAgentSession (claude): %v", err)
 	}
 	if claudeAS.Agent != "claude" {
 		t.Fatalf("expected claude session, got %q", claudeAS.Agent)

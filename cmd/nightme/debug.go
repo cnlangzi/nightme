@@ -150,7 +150,7 @@ func newDebugFixture(f debugFlags) (*debugFixture, error) {
 		return nil, fmt.Errorf("--chat is required")
 	}
 
-	// 1. chatsession.Manager (no spawner — gtw.RunFix's SetActiveCwd
+	// 1. chatsession.Manager (no spawner — gtw.RunFix's SetSelectedCwd
 	// goes through the chat directly, no agent process needed).
 	mgr := chatsession.NewManager()
 

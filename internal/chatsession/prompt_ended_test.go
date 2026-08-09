@@ -12,6 +12,7 @@ package chatsession
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -57,7 +58,7 @@ func TestWritebackMessageState_FiresOnPromptEndHook(t *testing.T) {
 		EndedAt:       time.Now(),
 		EndReason:     PromptEndClean,
 	}
-	cs.writebackMessageState(p)
+	cs.writebackMessageState(nil, p)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -76,9 +77,9 @@ func TestWritebackMessageState_FiresOnPromptEndHook(t *testing.T) {
 func TestWritebackMessageState_NoFireOnAgentEvent(t *testing.T) {
 	cs := newChatSessionForTest("cs_test")
 
-	var hookCalls int
+	var hookCalls atomic.Int32
 	cs.PromptEndBus.Subscribe(func(_ PromptEndedEvent) bool {
-		hookCalls++
+		hookCalls.Add(1)
 		return false
 	})
 
@@ -89,8 +90,8 @@ func TestWritebackMessageState_NoFireOnAgentEvent(t *testing.T) {
 	//
 	// (No actual call to writebackMessageState here; the absence
 	// is enough to verify the bus is gated by routeEvent's switch.)
-	if hookCalls != 0 {
-		t.Errorf("bus published prematurely: %d", hookCalls)
+	if got := hookCalls.Load(); got != 0 {
+		t.Errorf("bus published prematurely: %d", got)
 	}
 }
 

@@ -29,7 +29,7 @@ import (
 //
 // F-XX: the per-chat Sender interface is gone; executors take
 // *chatsession.ChatSession directly so they can call
-// SetActiveCwd without going through an interface adapter.
+// SetSelectedCwd without going through an interface adapter.
 func HandleDraftReaction(
 	ctx context.Context,
 	m *Manager,
@@ -135,8 +135,8 @@ func executeBranchExistsAction(
 				resultText = fmt.Sprintf("❌ git worktree add: %v", err)
 				break
 			}
-			if err := cs.SetActiveCwd(worktree); err != nil {
-				resultText = fmt.Sprintf("❌ SetActiveCwd: %v", err)
+			if err := cs.SetSelectedCwd(worktree); err != nil {
+				resultText = fmt.Sprintf("❌ SetSelectedCwd: %v", err)
 				break
 			}
 			m.SetContext(ev.ChatID, Context{
@@ -165,8 +165,8 @@ func executeBranchExistsAction(
 			resultText = fmt.Sprintf("❌ git worktree list: %v", err)
 		} else if existingPath == "" {
 			resultText = fmt.Sprintf("❌ Branch %s exists but no worktree holds it; run `git worktree add` manually.", p.Branch)
-		} else if err := cs.SetActiveCwd(existingPath); err != nil {
-			resultText = fmt.Sprintf("❌ SetActiveCwd: %v", err)
+		} else if err := cs.SetSelectedCwd(existingPath); err != nil {
+			resultText = fmt.Sprintf("❌ SetSelectedCwd: %v", err)
 		} else {
 			m.SetContext(ev.ChatID, Context{
 				Mode:      ModeFromDraftPayload(p),
@@ -234,8 +234,8 @@ func executeWorktreeFailAction(
 		resultText := ""
 		if err != nil {
 			resultText = fmt.Sprintf("❌ Retry failed: %v", err)
-		} else if err := cs.SetActiveCwd(worktree); err != nil {
-			resultText = fmt.Sprintf("❌ SetActiveCwd: %v", err)
+		} else if err := cs.SetSelectedCwd(worktree); err != nil {
+			resultText = fmt.Sprintf("❌ SetSelectedCwd: %v", err)
 		} else {
 			m.SetContext(ev.ChatID, Context{
 				Mode:      ModeFromDraftPayload(p),
@@ -311,7 +311,7 @@ func repoRootFromChatSession(cs *chatsession.ChatSession) string {
 	if cs == nil {
 		return ""
 	}
-	cwd := cs.ActiveCwd()
+	cwd := cs.SelectedCwd()
 	if cwd == "" {
 		return ""
 	}

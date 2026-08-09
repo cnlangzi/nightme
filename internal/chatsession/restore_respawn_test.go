@@ -12,7 +12,7 @@ import (
 // TestRestoreFromRegistry_DemotesRunningToDetached is the commit
 // fix-6 regression test: after a daemon restart, the persisted
 // status="running" AS is actually dead (handle is in-memory only).
-// We must demote to Detached so the next LookupActiveAgentSession
+// We must demote to Detached so the next LookupSelectedAgentSession
 // re-spawns a fresh process.
 func TestRestoreFromRegistry_DemotesRunningToDetached(t *testing.T) {
 	csFile, asFile := newTestStores(t)
@@ -37,11 +37,11 @@ func TestRestoreFromRegistry_DemotesRunningToDetached(t *testing.T) {
 	csEntry := &registry.ChatSessionEntry{
 		ID:                   csID,
 		ChatID:               chatID,
-		ActiveCwd:            "/code/bailing",
-		ActiveAgent:          "claude",
+		SelectedCwd:            "/code/bailing",
+		SelectedAgent:          "claude",
 		PrimaryAgent:         "claude",
 		AgentSessionIDs:      []string{asID},
-		ActiveAgentSessionID: &asID,
+		SelectedAgentSessionID: &asID,
 		CreatedAt:            time.Now(),
 		LastInteractionAt:    time.Now(),
 	}
@@ -64,8 +64,8 @@ func TestRestoreFromRegistry_DemotesRunningToDetached(t *testing.T) {
 
 	// ActiveAS must be cleared (the in-memory handle is not
 	// recoverable from disk).
-	if cs.ActiveAgentSession() != nil {
-		t.Fatalf("ActiveAS should be nil after restore; got %v", cs.ActiveAgentSession())
+	if cs.SelectedAgentSession() != nil {
+		t.Fatalf("ActiveAS should be nil after restore; got %v", cs.SelectedAgentSession())
 	}
 
 	// The pool entry's status must be Demoted (not Running) so the
@@ -91,7 +91,7 @@ func TestRestoreFromRegistry_DemotesRunningToDetached(t *testing.T) {
 // TestRestoreFromRegistry_ThenLookupTriggersSpawn verifies the
 // end-to-end fix: after a daemon restart, the next "hi" message
 // successfully spawns a fresh agent (because the demoted status
-// allows LookupActiveAgentSession to call Spawn).
+// allows LookupSelectedAgentSession to call Spawn).
 func TestRestoreFromRegistry_ThenLookupTriggersSpawn(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 
@@ -112,11 +112,11 @@ func TestRestoreFromRegistry_ThenLookupTriggersSpawn(t *testing.T) {
 	csEntry := &registry.ChatSessionEntry{
 		ID:                   csID,
 		ChatID:               chatID,
-		ActiveCwd:            "/code/bailing",
-		ActiveAgent:          "claude",
+		SelectedCwd:            "/code/bailing",
+		SelectedAgent:          "claude",
 		PrimaryAgent:         "claude",
 		AgentSessionIDs:      []string{asID},
-		ActiveAgentSessionID: &asID,
+		SelectedAgentSessionID: &asID,
 		CreatedAt:            time.Now(),
 		LastInteractionAt:    time.Now(),
 	}
@@ -133,9 +133,9 @@ func TestRestoreFromRegistry_ThenLookupTriggersSpawn(t *testing.T) {
 	}
 
 	cs := mgr.Get(chatID)
-	as, err := cs.LookupActiveAgentSession()
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession post-restore: %v", err)
+		t.Fatalf("LookupSelectedAgentSession post-restore: %v", err)
 	}
 	if as.Status() != StatusRunning {
 		t.Fatalf("after re-spawn: got %q, want Running", as.Status())
@@ -158,7 +158,7 @@ func TestRestoreFromRegistry_ThenLookupTriggersSpawn(t *testing.T) {
 // regression test for the resume-id-loss bug: after a daemon
 // restart, a Detached AgentSession restored from disk must keep
 // its captured SessionID so the next Spawn replays `--resume <id>`
-// to the bridge. The pre-fix LookupActiveAgentSession created a
+// to the bridge. The pre-fix LookupSelectedAgentSession created a
 // fresh AgentSession on the spawn path, which discarded the
 // restored entry (and its SessionID), forcing every restart to
 // start a brand-new agent session.
@@ -182,11 +182,11 @@ func TestRestoreFromRegistry_PreservesResumeIDOnRespawn(t *testing.T) {
 	if err := csFile.Upsert(&registry.ChatSessionEntry{
 		ID:                     csID,
 		ChatID:                 chatID,
-		ActiveCwd:              "/code/bailing",
-		ActiveAgent:            "claude",
+		SelectedCwd:              "/code/bailing",
+		SelectedAgent:            "claude",
 		PrimaryAgent:           "claude",
 		AgentSessionIDs:        []string{asID},
-		ActiveAgentSessionID:   &csIDCopy,
+		SelectedAgentSessionID:   &csIDCopy,
 	}); err != nil {
 		t.Fatalf("Upsert CS: %v", err)
 	}
@@ -200,9 +200,9 @@ func TestRestoreFromRegistry_PreservesResumeIDOnRespawn(t *testing.T) {
 	}
 
 	cs := mgr.Get(chatID)
-	as, err := cs.LookupActiveAgentSession()
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession: %v", err)
+		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 	if as.ID != asID {
 		t.Errorf("respawn replaced the pool entry: got ID %q, want %q (SessionID round-trip depends on identity continuity)",
@@ -261,11 +261,11 @@ func TestFromAgentSessionEntry_InitializesEventQueue(t *testing.T) {
 	if err := csFile.Upsert(&registry.ChatSessionEntry{
 		ID:                   entry.ChatSessionID,
 		ChatID:               "oc_restored",
-		ActiveCwd:            entry.Cwd,
-		ActiveAgent:          entry.Agent,
+		SelectedCwd:            entry.Cwd,
+		SelectedAgent:          entry.Agent,
 		PrimaryAgent:         entry.Agent,
 		AgentSessionIDs:      []string{asID},
-		ActiveAgentSessionID: &asID,
+		SelectedAgentSessionID: &asID,
 	}); err != nil {
 		t.Fatalf("Upsert CS: %v", err)
 	}
@@ -298,9 +298,9 @@ func TestFromAgentSessionEntry_InitializesEventQueue(t *testing.T) {
 	defer cancel()
 	go cs.PumpEvents(ctx)
 
-	live, err := cs.LookupActiveAgentSession()
+	live, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession: %v", err)
+		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 	if live.Events() == nil {
 		t.Fatal("post-Spawn restored AS still has nil eventQueue")

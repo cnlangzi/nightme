@@ -10,7 +10,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
-// TestPreflightOrphanYml_CleanRepo is the happy path: ActiveCwd
+// TestPreflightOrphanYml_CleanRepo is the happy path: SelectedCwd
 // is the main repo, no orphan yml anywhere. preflightOrphanYml
 // must return nil.
 func TestPreflightOrphanYml_CleanRepo(t *testing.T) {
@@ -26,7 +26,7 @@ func TestPreflightOrphanYml_CleanRepo(t *testing.T) {
 
 // TestPreflightOrphanYml_ActiveCwdIsFixWorktree covers case 1
 // from preflightOrphanYml's doc: the user is sitting inside a
-// fix worktree (i.e. .nightme/gtw.yml exists at ActiveCwd).
+// fix worktree (i.e. .nightme/gtw.yml exists at SelectedCwd).
 // preflightOrphanYml must reject.
 func TestPreflightOrphanYml_ActiveCwdIsFixWorktree(t *testing.T) {
 	repoRoot := initTempRepo(t)
@@ -44,7 +44,7 @@ func TestPreflightOrphanYml_ActiveCwdIsFixWorktree(t *testing.T) {
 
 	err := preflightOrphanYml(context.Background(), wt, ExecGitRunner{})
 	if err == nil {
-		t.Fatal("preflightOrphanYml: want error for yml-at-ActiveCwd, got nil")
+		t.Fatal("preflightOrphanYml: want error for yml-at-SelectedCwd, got nil")
 	}
 	if !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("error = %q, want 'already exists' phrase", err.Error())
@@ -55,7 +55,7 @@ func TestPreflightOrphanYml_ActiveCwdIsFixWorktree(t *testing.T) {
 }
 
 // TestPreflightOrphanYml_SiblingWorktreeHasYml covers case 2:
-// ActiveCwd is the main repo (no yml here), but a sibling
+// SelectedCwd is the main repo (no yml here), but a sibling
 // worktree holds an orphan yml.
 func TestPreflightOrphanYml_SiblingWorktreeHasYml(t *testing.T) {
 	repoRoot := initTempRepo(t)
@@ -89,7 +89,7 @@ func TestPreflightOrphanYml_SiblingWorktreeHasYml(t *testing.T) {
 }
 
 // TestPreflightOrphanYml_NotAGitRepo must NOT fail even if
-// ActiveCwd isn't a git repo. preflightOrphanYml is a guard,
+// SelectedCwd isn't a git repo. preflightOrphanYml is a guard,
 // not a gate; downstream PreflightWorktreeCreate handles the
 // "not in a git repo" failure.
 func TestPreflightOrphanYml_NotAGitRepo(t *testing.T) {
@@ -140,7 +140,7 @@ func TestPreflightOrphanYml_RunFixIntegration(t *testing.T) {
 		"refs/remotes/origin/main")
 
 	cs := chatsession.New("chat-preflight", "test-agent")
-	_ = cs.SetActiveCwd(repoRoot)
+	_ = cs.SetSelectedCwd(repoRoot)
 
 	// Simulate an orphan yml: create a worktree with a yml in
 	// it. The user is sitting in the main repo (not the

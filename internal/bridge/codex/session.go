@@ -51,10 +51,19 @@ const handshakeTimeout = 10 * time.Second
 // SIGKILL), and a wedged Wait must NOT block the runtime's spawn path.
 const closeDrainTimeout = 5 * time.Second
 
-// eventBufferSize is the events channel capacity. Matches pi /
-// claudecode (64); deliberately lower than cc-connect's 128 to keep
-// the runtime's readpump pull-rate tuned to the bridge's natural pace.
-const eventBufferSize = 64
+// eventBufferSize is the events channel capacity.
+//
+// Sized to match the producer-side contract promoted in commit
+// 67b295ec ("unify producer-side buffer contract across all bridges"):
+// 40960 across pi / claudecode / pty / acp. Agent.deliver uses
+// `events <- ev` under a select against session.closed and
+// session.exitDone — NO `default:` drop, NO `time.After` drop —
+// so the producer is allowed to block until the consumer drains.
+//
+// Allocated in newSession; buffer_contract_test.go pins the value
+// at the package level so a regression that lowers the cap or
+// reintroduces a default-drop is caught in `go test`.
+const eventBufferSize = 40960
 
 // stderrTailBytes is how much of the child's stderr we keep for
 // error-enrichment on EventAgentError. Match cc-connect's choice.

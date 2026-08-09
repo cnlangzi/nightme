@@ -56,6 +56,12 @@ func TestDetect_RejectsMissingBinary(t *testing.T) {
 }
 
 func TestDetect_AcceptsExistingBinary(t *testing.T) {
+	// This test only makes sense when codex is on PATH. Skip
+	// otherwise so dev machines / CI without the binary don't
+	// fail the build (mirrors the pattern in pi / claudecode
+	// repro tests, which use the same `codex not installed`
+	// skip guard).
+	requireRealCodex(t)
 	a := New("codex", "codex", nil)
 	if err := a.Detect(); err != nil {
 		t.Errorf("Detect on 'codex' binary: %v", err)

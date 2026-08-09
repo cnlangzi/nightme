@@ -168,8 +168,8 @@ func (s *session) handleRequestUserInput(rawID, params json.RawMessage) {
 		[]string{"ok"},
 		func(resp string) {
 			answers := parseRequestUserInputResponse(resp, p.Questions)
-		_ = s.rpc.respond(rawID, requestUserInputResponseResult{Answers: answers})
-	})
+			_ = s.rpc.respond(rawID, requestUserInputResponseResult{Answers: answers})
+		})
 }
 
 // handleDynamicToolCall returns a "tool not available" error to the

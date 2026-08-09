@@ -674,9 +674,12 @@ func decodeTurnError(raw json.RawMessage) string {
 }
 
 // appServerUsageToUsageInfo maps app-server's wire shape to the
-// internal agent.UsageInfo. Note: codex does not report
-// ContextWindow / ContextWindowPct on the turn wire, so those
-// fields stay zero (footer omits "(window)" segment alongside X%).
+// internal agent.UsageInfo. ContextWindow / ContextWindowPct are
+// populated by handleTokenUsageUpdated on codex ≥0.125 (it has
+// direct access to ModelContextWindow on the notification); the
+// per-turn path falls back to lastUsage set by that handler. This
+// helper only fills the token-count fields so both code paths can
+// share the conversion.
 func appServerUsageToUsageInfo(u *appServerUsage) *agent.UsageInfo {
 	if u == nil {
 		return nil

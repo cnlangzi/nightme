@@ -32,7 +32,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -72,7 +71,7 @@ type Agent struct {
 	closed    chan struct{}
 
 	// pendingMu guards pendingTurnActive.
-	pendingMu       sync.Mutex
+	pendingMu         sync.Mutex
 	pendingTurnActive bool
 }
 
@@ -176,10 +175,15 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 	// race the in-flight turn on codex's side.
 	live.session.translator = newTranslator(
 		live.deliver, a.name, cfg.Workspace, s.branch, s.stderrTail,
+		// Captures live (not the template `a`): SendBlocks is
+		// called on the live clone, so the busy guard lives on
+		// live. Clearing `a.pendingTurnActive` (the template)
+		// would leave live's guard stuck at true forever and
+		// every subsequent SendBlocks would return ErrTurnBusy.
 		func() {
-			a.pendingMu.Lock()
-			a.pendingTurnActive = false
-			a.pendingMu.Unlock()
+			live.pendingMu.Lock()
+			live.pendingTurnActive = false
+			live.pendingMu.Unlock()
 		},
 	)
 
@@ -240,7 +244,9 @@ func (a *Agent) SendText(text string) error {
 // return ErrTurnBusy (the app-server single-turns per thread).
 func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
 	cLog("SendBlocks enter", "blocks", len(blocks), "threadID", func() string {
-		if a.session == nil { return "<nil>" }
+		if a.session == nil {
+			return "<nil>"
+		}
 		return a.session.threadID
 	}())
 	if len(blocks) == 0 {
@@ -274,6 +280,14 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 		case agent.ContentImage:
 			path, err := a.stageImage(b)
 			if err != nil {
+				// We never sent a turn — release the busy guard
+				// so the next SendBlocks can proceed. The normal
+				// release path is the translator's onTurnEnd
+				// callback, but that only fires after a turn was
+				// actually started.
+				a.pendingMu.Lock()
+				a.pendingTurnActive = false
+				a.pendingMu.Unlock()
 				return err
 			}
 			input = append(input, turnInput{
@@ -295,6 +309,14 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 		}
 	}
 	if len(input) == 0 {
+		// Nothing to send — release the busy guard so the next
+		// SendBlocks with non-empty input can proceed. Without
+		// this, every subsequent SendBlocks would return
+		// ErrTurnBusy since no turn was ever started to clear
+		// the guard via onTurnEnd.
+		a.pendingMu.Lock()
+		a.pendingTurnActive = false
+		a.pendingMu.Unlock()
 		return nil
 	}
 
@@ -317,9 +339,11 @@ func (a *Agent) stageImage(b agent.ContentBlock) (string, error) {
 	if len(data) > maxImageBytes {
 		return "", fmt.Errorf("%w: %d > %d", ErrImageTooLarge, len(data), maxImageBytes)
 	}
-	// Sanity-check decode; base64 length does not need to match the
-	// decoded size, but the bytes must at least be a valid base64
-	// payload for the file extension / mime type.
+	// Stage to a workspace-local dir so the app-server (which only
+	// sees the workspace) can read it via localImage. We do NOT
+	// decode the payload here — content sniffing is the app-server's
+	// job; we just need to get the bytes to disk with the right
+	// extension so it routes to the correct decoder.
 	dir := filepath.Join(a.session.workspace, ".nightme", "codex", "images")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("codex: mkdir images: %w", err)
@@ -439,10 +463,21 @@ func (a *Agent) Close() error {
 // ─── deliver ───
 
 // deliver stamps the bridge-side session context onto every event
-// before delivery, then pushes onto the events channel. The events
-// channel is buffered (size 64); if the runtime is stalled we drop
-// the event and emit a synthetic EventAgentError so the operator can
-// see the back-pressure incident in the log.
+// before delivery, then blocks on pushing onto the events channel
+// until either the runtime drains it OR the session is closed /
+// lifecycle has reaped the child.
+//
+// Producer-side contract (matches pi / claudecode / pty / acp,
+// promoted in commit 67b295ec):
+//   - No `default:` instant-drop. The producer is allowed to block
+//     until the consumer (runtime readpump) drains. The runtime's
+//     own per-AS eventQueue absorbs natural bursts.
+//   - No timeout drop. A `case <-time.After(1s)` branch was the
+//     root cause of the F-54 "bridge reset: pi: new_session:
+//     context deadline exceeded" incident when the runtime was
+//     busy with another AS.
+//   - Close signals release a parked deliver(). This prevents
+//     leaked goroutines after the session is torn down.
 //
 // Translators / handlers call this with the event they want to emit;
 // the public-facing signature has been kept tight so the call sites
@@ -457,31 +492,14 @@ func (a *Agent) deliver(ev agent.AgentEvent) agent.AgentEvent {
 	ev.Workspace = a.session.workspace
 	ev.Branch = a.session.branch
 
-	// Back-pressure: try the buffered channel; on full, drop and
-	// emit a synthetic EventAgentError so the operator sees it.
 	select {
 	case a.session.events <- ev:
-	default:
-		slog.Default().Error("codex: events channel full, dropping event",
-			"kind", ev.Kind.String(),
-			"session_id", ev.SessionID,
-		)
-		// Best-effort: synthesise a non-blocking error event so the
-		// log captures the back-pressure incident.
-		select {
-		case a.session.events <- agent.AgentEvent{
-			Kind:      agent.EventAgentError,
-			Err:       fmt.Errorf("codex: events channel full, dropped %s", ev.Kind),
-			SessionID: ev.SessionID,
-			Model:     ev.Model,
-			AgentName: ev.AgentName,
-			Workspace: ev.Workspace,
-			Branch:    ev.Branch,
-		}:
-		default:
-			// Even the synthetic error could not be delivered;
-			// the runtime is fully wedged. Nothing more we can do.
-		}
+	case <-a.session.closed:
+		cLog("deliver dropped (session closed)", "kind", ev.Kind.String())
+	case <-a.session.exitDone:
+		// lifecycle closed exitDone after cmd.Wait returned;
+		// the bridge is being torn down. Drop silently — nobody
+		// will read this anyway.
 	}
 	return ev
 }

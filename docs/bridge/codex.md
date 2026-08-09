@@ -367,7 +367,7 @@ internal/bridge/codex/
   │                        + ErrSessionClosed + 10 MiB frame cap
   ├── session.go           spawn + I/O + lifecycle(独占 close(events)) + ringBuffer
   │                        + detectBranch + handshakeTimeout + closeDrainTimeout
-  │                        + eventBufferSize=64 + permissionTimeout=5min
+  │                        + eventBufferSize=40960 + permissionTimeout=5min
   │                        + emitWireError(§8 四件套)
   ├── agent.go             *Agent(模板+live)/Start/Events/Send*/SendPermission/New/Close
   │                        + ErrTurnBusy + pendingTurnActive + onTurnEnd 接线
@@ -509,6 +509,13 @@ go test ./internal/bridge/codex/ -count=1
 - [ ] `TestAgent_PendingTurnActive_NotClearedUntilTurnEnd` — 模拟 turn/start 返回后立刻 SendBlocks,验 ErrTurnBusy;发 turn/completed 后 SendBlocks 成功
 - [ ] `TestAgent_SendPermission_RoutesToMostRecentOnly` — 两个 pending approval,SendPermission("accept") 只解最近一个
 - [ ] `TestSession_EmitWireError_UnblocksPendingRequests` — 注入 wire error,验 pending RPC 立即收到 ErrSessionClosed
+- [x] `TestEventsBufferSize_PinnedAt40960` — events channel cap 锁定 40960(对齐 pi / claudecode / pty / acp)
+- [x] `TestDeliver_BlocksWhenConsumerLags_NoDrop` — consumer lag 时不 instant drop
+- [x] `TestDeliver_UnblocksOnClose` — Close() 解 blocking deliver()
+- [x] `TestDeliver_UnblocksOnExitDone` — lifecycle 解 blocking deliver()
+- [x] `TestAgent_PendingTurnActive_ReleasedOnImageStageError` — image stage 错误后 guard 释放
+- [x] `TestAgent_PendingTurnActive_ReleasedOnEmptyInput` — 全空 input 后 guard 释放
+- [x] `TestAgent_PendingTurnActive_ReleasedByOnTurnEndCallback` — 闭包捕获 live 而非模板
 - [ ] `TestDetect_AcceptsExistingBinary`(已实现):用 `codex --version` 替换 `exec.LookPath`,坏 binary 立即失败
 
 ---

@@ -234,14 +234,22 @@ type AgentSession struct {
 // diff pass — every future runtime field goes here ONCE, and both
 // callers get it automatically. Do NOT construct `&AgentSession{}`
 // anywhere else in this package; route through this function.
-func newAgentSessionRuntime(id, chatSessionID, agentName, cwd string) *AgentSession {
+func newAgentSessionRuntime(id, chatSessionID, agentName, cwd string, opts []AgentSessionOption) *AgentSession {
+	var o agentSessionOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	queueCap := eventQueueCapacity
+	if o.eventQueueCapacity > 0 {
+		queueCap = o.eventQueueCapacity
+	}
 	as := &AgentSession{
 		ID:            id,
 		ChatSessionID: chatSessionID,
 		Agent:         agentName,
 		Cwd:           cwd,
 		stat:          StatusDetached,
-		eventQueue:    make(chan EnrichedEvent, eventQueueCapacity),
+		eventQueue:    make(chan EnrichedEvent, queueCap),
 		EventBus:      services.NewEventBus[EnrichedEvent](),
 	}
 	as.pid = 0
@@ -263,12 +271,42 @@ func newAgentSessionRuntime(id, chatSessionID, agentName, cwd string) *AgentSess
 // NewAgentSession creates a new AgentSession in memory. The pool
 // caller is responsible for adding it to the ChatSession's pool and
 // persisting via registry.AgentSessionFile.
-func NewAgentSession(id, chatSessionID, agent, cwd string, args []string) *AgentSession {
-	as := newAgentSessionRuntime(id, chatSessionID, agent, cwd)
+//
+// opts lets test/edge-case code override fields that the production
+// default would otherwise pin. Currently only the eventQueue
+// capacity is exposed (via WithEventQueueCapacity); production
+// callers should not pass any options.
+func NewAgentSession(id, chatSessionID, agent, cwd string, args []string, opts ...AgentSessionOption) *AgentSession {
+	as := newAgentSessionRuntime(id, chatSessionID, agent, cwd, opts)
 	as.args = append([]string(nil), args...)
 	as.createdAt = time.Now()
 	as.lastRunAt = time.Now()
 	return as
+}
+
+// AgentSessionOption overrides a default field at construction
+// time. Used by tests that need a different eventQueue cap (or
+// future fields) without mutating shared package state.
+type AgentSessionOption func(*agentSessionOptions)
+
+type agentSessionOptions struct {
+	// eventQueueCapacity, if > 0, overrides the package default
+	// for this AgentSession's eventQueue. The queue is created
+	// in newAgentSessionRuntime; passing 0 (or not setting it)
+	// uses eventQueueCapacity (the const default).
+	eventQueueCapacity int
+}
+
+// WithEventQueueCapacity returns an option that sets the
+// AgentSession's eventQueue capacity to n. Use this in tests
+// to exercise the buffer-cap backpressure path with a small
+// queue; production code should not override the default
+// (see eventQueueCapacity doc for the worst-case-AS-backlog
+// rationale).
+func WithEventQueueCapacity(n int) AgentSessionOption {
+	return func(o *agentSessionOptions) {
+		o.eventQueueCapacity = n
+	}
 }
 
 // FromAgentSessionEntry reconstructs an AgentSession from persisted
@@ -287,7 +325,7 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 	if e == nil {
 		return nil
 	}
-	as := newAgentSessionRuntime(e.ID, e.ChatSessionID, e.Agent, e.Cwd)
+	as := newAgentSessionRuntime(e.ID, e.ChatSessionID, e.Agent, e.Cwd, nil)
 	as.args = append([]string(nil), e.Args...)
 	as.createdAt = e.CreatedAt
 	as.lastRunAt = e.LastRunAt

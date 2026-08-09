@@ -6,6 +6,7 @@
 package chatsession
 
 import (
+	"context"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -49,4 +50,37 @@ func newTestASWithFakeHandle(cs *ChatSession) (*AgentSession, *fakeAgentSession)
 	cs.mu.Unlock()
 
 	return as, sess
+}
+
+// testChannel is a minimal Channel impl for in-package tests.
+// Records every Send/SendCard so tests can assert what was emitted.
+type testChannel struct {
+	Sent []OutboundMessage
+}
+
+func (t *testChannel) Send(_ context.Context, msg OutboundMessage) error {
+	t.Sent = append(t.Sent, msg)
+	return nil
+}
+
+func (t *testChannel) SendCard(_ context.Context, msg OutboundMessage) (string, error) {
+	t.Sent = append(t.Sent, msg)
+	return "bot-msg-test", nil
+}
+
+func (t *testChannel) Patch(_ context.Context, msg OutboundMessage) error {
+	t.Sent = append(t.Sent, msg)
+	return nil
+}
+
+// newTestChannel returns a fresh testChannel for tests that need
+// to bind a Channel to a ChatSession.
+func newTestChannel() *testChannel {
+	return &testChannel{}
+}
+
+// fakeResolvedChannel returns a resolver that always produces the
+// given channel.
+func fakeResolvedChannel(ch Channel) func(chatID string) Channel {
+	return func(string) Channel { return ch }
 }

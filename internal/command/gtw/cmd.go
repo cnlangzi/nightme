@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 )
 
@@ -80,7 +81,7 @@ func (f *Factory) Spec() command.Spec {
 // Args[0]. Tests written against this factory use the
 // "Args[0] = subcommand" convention because the commander
 // is bypassed; production callers must go through commander.
-func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
+func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	if len(input.Args) < 2 {
 		return &command.SlashOutput{
 			Reply:    f.Spec().Usage,
@@ -89,13 +90,13 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, input 
 	}
 	switch input.Args[1] {
 	case "fix":
-		return f.runFix(ctx, rt, input)
+		return f.runFix(ctx, rt, cs, input)
 	case "close":
-		return f.runClose(ctx, rt, input)
+		return f.runClose(ctx, rt, cs, input)
 	case "push":
-		return f.runPush(ctx, rt, input)
+		return f.runPush(ctx, rt, cs, input)
 	case "sync":
-		return f.runSync(ctx, rt, input)
+		return f.runSync(ctx, rt, cs, input)
 	}
 	return &command.SlashOutput{
 		Reply:    "Unknown subcommand: " + input.Args[1] + "\n" + f.Spec().Usage,
@@ -110,7 +111,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, input 
 // F-51: command.Commander prefixes Args with the command name
 // ("gtw"), then the subcommand ("fix"), then the subcommand's
 // args. So Args[2] is the first user-supplied token.
-func (f *Factory) runFix(ctx context.Context, rt command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
+func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	if len(input.Args) < 3 {
 		return &command.SlashOutput{
 			Reply:    "Usage: /gtw fix <issue-id>  |  /gtw fix --name <branch>",
@@ -128,7 +129,7 @@ func (f *Factory) runFix(ctx context.Context, rt command.RuntimeServices, input 
 
 	// Local-mode quick validation: the slug must not be empty
 	// after normalisation. Doing this here (before RunFix) keeps
-	// the SlashOutput path simple when deps.Send is nil in tests.
+	// the SlashOutput path simple when no channel is wired in tests.
 	if args.Mode == ModeLocal {
 		if _, err := DeriveBranchFromName(args.RawArg); err != nil {
 			return &command.SlashOutput{
@@ -166,7 +167,7 @@ func (f *Factory) runFix(ctx context.Context, rt command.RuntimeServices, input 
 
 	// RunFix signature: (ctx, mode, cs, slot, drafts, deps,
 	// chatID, messageID, args, force). Reply is sent inline via
-	// deps.Send; *Result only carries Consumed / Dropped for
+	// cs.Channel(); *Result only carries Consumed / Dropped for
 	// the runtime.
 	_, err = RunFix(ctx, args.Mode, cs, slot, drafts, f.deps, input.ChatID, input.MessageID, []string{args.RawArg}, args.Force)
 	if err != nil {
@@ -261,8 +262,8 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 //
 // Construction mirrors runFix: the slot / drafts shims route to
 // the per-chat Manager state, deps are forwarded verbatim, and
-// the reply path is RunClose's own deps.Send (no extra wiring).
-func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
+// the reply path is RunClose's own cs.Channel() (no extra wiring).
+func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	cs := f.mgr.GetChatSession(input.ChatID)
 	if cs == nil {
 		return &command.SlashOutput{
@@ -287,7 +288,7 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, input
 			Consumed: true,
 		}, nil
 	}
-	_ = res // RunClose already sent the reply via deps.Send
+	_ = res // RunClose already sent the reply via cs.Channel()
 	return &command.SlashOutput{Consumed: true}, nil
 }
 
@@ -299,7 +300,7 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, input
 // No slot/draft shim needed — push doesn't touch gtw state
 // or reaction cards. Just the same HandlerDeps as everywhere
 // else, plus the parsed push flags.
-func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
+func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	args, err := parsePushArgs(input.Args[2:])
 	if err != nil {
 		return &command.SlashOutput{
@@ -308,14 +309,14 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, input 
 		}, nil
 	}
 
-	res, err := RunPush(ctx, f.deps, input.ChatID, input.MessageID, args)
+	res, err := RunPush(ctx, cs, f.deps, input.ChatID, input.MessageID, args)
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw push failed: %v", err),
 			Consumed: true,
 		}, nil
 	}
-	_ = res // RunPush already sent the reply via deps.Send
+	_ = res // RunPush already sent the reply via cs.Channel()
 	return &command.SlashOutput{Consumed: true}, nil
 }
 
@@ -326,7 +327,7 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, input 
 // surfaced verbatim (RefreshDefaultBranch already includes the
 // dirty-worktree refusal and rebase-conflict guidance the
 // user needs).
-func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, input command.SlashInput) (*command.SlashOutput, error) {
+func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	cwd, failOut := command.RequireActiveCwd(f.mgr.GetChatSession(input.ChatID))
 	if failOut != nil {
 		return failOut, nil

@@ -18,6 +18,8 @@ package command
 import (
 	"context"
 	"strings"
+
+	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
 // Commander is the slash command dispatch surface. Constructed
@@ -49,7 +51,13 @@ type Commander interface {
 	//   err != nil: the registered command's Handle returned
 	//     an error. The gateway reports the error as a reply
 	//     (handled=true, output={Consumed: true, Reply: "❌ ..."}).
-	Dispatch(ctx context.Context, rt RuntimeServices, input SlashInput) (*SlashOutput, bool, error)
+	//
+	// The runtime shim is responsible for obtaining cs (the
+	// per-chat ChatSession) BEFORE calling Dispatch — typically
+	// via mgr.GetOrCreate(chatID, primaryAgent). Dispatch itself
+	// does not GetOrCreate (it has no *chatsession.Manager); it
+	// only passes the cs through to cmd.Handle.
+	Dispatch(ctx context.Context, rt RuntimeServices, cs *chatsession.ChatSession, input SlashInput) (*SlashOutput, bool, error)
 }
 
 // NewCommander constructs a Commander backed by reg. The
@@ -78,7 +86,7 @@ type commander struct {
 //     pre-populates input.Args, the trailing-token fields are
 //     NOT updated (the commander does not know whether the
 //     pre-parsed argv matches the Text-parse argv).
-func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, input SlashInput) (*SlashOutput, bool, error) {
+func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, cs *chatsession.ChatSession, input SlashInput) (*SlashOutput, bool, error) {
 	cmdName, trailingArgs, isCommand := c.extractCommand(input)
 	if !isCommand {
 		// Not a slash command at all (no "/" prefix, or just "/").
@@ -108,7 +116,7 @@ func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, input Slas
 		input.Args = append(input.Args, trailingArgs...)
 	}
 
-	out, err := cmd.Handle(ctx, rt, input)
+	out, err := cmd.Handle(ctx, rt, cs, input)
 	if err != nil {
 		// The command itself errored — surface as a reply so the
 		// user gets feedback. Still handled=true (we know what

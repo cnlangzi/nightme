@@ -20,6 +20,8 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
+
+
 // TestIntegration_FixCloseRoundTrip is the most important
 // integration test: it drives the full /gtw fix → /gtw close
 // happy path against a real git repo. Steps:
@@ -85,7 +87,8 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 	}
 
 	// --- step 4: actually run /gtw close -------------------------
-	cs := chatsession.New("chat-int-1", "test-agent")
+	ch := &recordingCh{}
+	cs, _ := chatsession.New("chat-int-1", "test-agent", ch)
 	if err := cs.SetSelectedCwd(wt); err != nil {
 		t.Fatalf("SetSelectedCwd wt: %v", err)
 	}
@@ -94,14 +97,9 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 		Worktree: wt, RepoRoot: repoRoot, State: StateFixing,
 		UpdatedAt: now,
 	}}
-	var sentTexts []string
 	deps := HandlerDeps{
 		Git: ExecGitRunner{},
 		Now: func() time.Time { return now },
-		Send: func(_ context.Context, m OutMsg) error {
-			sentTexts = append(sentTexts, m.Text)
-			return nil
-		},
 	}
 
 	res, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg-int-1", false /* force */)
@@ -121,7 +119,7 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 		t.Errorf("yml still on disk after close: stat err=%v", err)
 	}
 	// CWD must be back at repoRoot.
-	if got := cs.SelectedCwd(); got != repoRoot {
+	if got := cs.SelectedCwd(); !pathsEqual(got, repoRoot) {
 		t.Errorf("SelectedCwd = %q, want %q", got, repoRoot)
 	}
 	// In-memory slot must be cleared.
@@ -129,7 +127,7 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 		t.Errorf("slot.Load() = %+v, want zero", slot.Load())
 	}
 	// Reply must mention both branch and the new cwd.
-	last := sentTexts[len(sentTexts)-1]
+	last := ch.lastText()
 	if !strings.Contains(last, branch) {
 		t.Errorf("reply missing branch %q:\n%s", branch, last)
 	}
@@ -164,17 +162,13 @@ func TestIntegration_CloseRejectsDirty(t *testing.T) {
 		t.Fatalf("WriteGTWYml: %v", err)
 	}
 
-	cs := chatsession.New("chat-int-2", "test-agent")
+	ch := &recordingCh{}
+	cs, _ := chatsession.New("chat-int-2", "test-agent", ch)
 	_ = cs.SetSelectedCwd(wt)
 	slot := &memSlot{Context{Mode: ModeLocal, Branch: branch, Worktree: wt, RepoRoot: repoRoot, State: StateFixing}}
-	var sentTexts []string
 	deps := HandlerDeps{
 		Git: ExecGitRunner{},
 		Now: time.Now,
-		Send: func(_ context.Context, m OutMsg) error {
-			sentTexts = append(sentTexts, m.Text)
-			return nil
-		},
 	}
 
 	if _, err := RunClose(context.Background(), cs, slot, deps, cs.ChatID, "msg", false /* force */); err != nil {
@@ -190,7 +184,7 @@ func TestIntegration_CloseRejectsDirty(t *testing.T) {
 		t.Errorf("dirty sentinel removed: %v", err)
 	}
 	// Reply must list the dirty sentinel and not contain "closed".
-	last := sentTexts[len(sentTexts)-1]
+	last := ch.lastText()
 	if !strings.Contains(last, "sentinel.txt") {
 		t.Errorf("reply missing dirty file:\n%s", last)
 	}
@@ -380,20 +374,16 @@ func mustGitOut(t *testing.T, dir string, args ...string) (string, string) {
 func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	repoRoot := initTempRepo(t)
 
-	cs := chatsession.New("chat-int-shortN", "test-agent")
+	ch := &recordingCh{}
+	cs, _ := chatsession.New("chat-int-shortN", "test-agent", ch)
 	if err := cs.SetSelectedCwd(repoRoot); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	slot := &memSlot{}
 	drafts := newMemDrafts()
-	var sentTexts []string
 	deps := HandlerDeps{
 		Git: ExecGitRunner{},
 		Now: func() time.Time { return time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC) },
-		Send: func(_ context.Context, m OutMsg) error {
-			sentTexts = append(sentTexts, m.Text)
-			return nil
-		},
 	}
 
 	// parseFixArgs with `-n foo` — what /gtw fix -n foo would
@@ -428,7 +418,7 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 		t.Fatalf("worktree %s not created: %v", wt, err)
 	}
 	// SelectedCwd must point at the new worktree.
-	if got := cs.SelectedCwd(); got != wt {
+	if got := cs.SelectedCwd(); !pathsEqual(got, wt) {
 		t.Errorf("SelectedCwd = %q, want %q", got, wt)
 	}
 	// yml must round-trip with the right fields.
@@ -436,7 +426,7 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadGTWYml: %v", err)
 	}
-	if parsed.Mode != ModeLocal || parsed.Branch != wantBranch || parsed.RepoRoot != repoRoot {
+	if parsed.Mode != ModeLocal || parsed.Branch != wantBranch || !pathsEqual(parsed.RepoRoot, repoRoot) {
 		t.Errorf("yml = %+v, want mode=local branch=%s repoRoot=%s", parsed, wantBranch, repoRoot)
 	}
 	// In-memory slot must mirror yml.
@@ -449,7 +439,7 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 		t.Errorf("queue len = %d, want 0 (local mode no dispatch)", n)
 	}
 	// Reply is the local-mode success card.
-	last := sentTexts[len(sentTexts)-1]
+	last := ch.lastText()
 	if !strings.Contains(last, "Local worktree") {
 		t.Errorf("reply missing local-mode marker:\n%s", last)
 	}
@@ -466,3 +456,5 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 		t.Errorf("worktree still on disk after close: %v", err)
 	}
 }
+
+

@@ -33,12 +33,11 @@ import (
 // Factory is the command.SlashCommandFactory for /new.
 type Factory struct {
 	mgr            *chatsession.Manager
-	defaultPrimary string
 }
 
 // NewFactory constructs a Factory backed by mgr.
-func NewFactory(mgr *chatsession.Manager, defaultPrimary string) *Factory {
-	return &Factory{mgr: mgr, defaultPrimary: defaultPrimary}
+func NewFactory(mgr *chatsession.Manager) *Factory {
+	return &Factory{mgr: mgr}
 }
 
 // Spec implements command.SlashCommandFactory.
@@ -52,15 +51,14 @@ func (f *Factory) Spec() command.Spec {
 
 // Handle implements command.SlashCommandFactory.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
-	input command.SlashInput) (*command.SlashOutput, error) {
-
-	cs := f.mgr.GetOrCreate(input.ChatID, f.defaultPrimary)
-
+	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	if cs == nil {
+		return command.Reply(ctx, rt, "No active chat session."), nil
+	}
 	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
 		return failOut, nil
 	}
-
-	agentName := ""
+agentName := ""
 	if len(input.Args) > 1 {
 		agentName = strings.TrimSpace(input.Args[1])
 		if agentName == "" {

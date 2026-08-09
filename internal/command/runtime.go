@@ -1,9 +1,8 @@
 package command
 
 import (
-	"context"
-
-	"github.com/cnlangzi/nightme/internal/command/services"
+	"log/slog"
+	"time"
 )
 
 // RuntimeServices aggregates the dependencies a slash command
@@ -15,35 +14,29 @@ import (
 // directly in their Factory. The remaining fields are shared
 // interfaces with multiple implementations or cross-cutting concerns.
 type RuntimeServices struct {
-	// ReactionRouter dispatches reaction events to the right
-	// handler. Implemented by services.reactionRouter —
-	// held as a singleton by the runtime.
-	ReactionRouter services.ReactionRouter
-	// Channel is the outbound channel surface. *gateway.Channel
-	// satisfies this interface (compile-time asserted in
-	// cmd/nightme/run.go via
-	// `var _ command.Channel = (*gateway.Channel)(nil)`).
-	Channel Channel
-	// Reserved: future Logger / Metrics / Config once they
-	// become part of the command contract.
+	// Config provides cross-command read-only configuration.
+	// Currently exposes only Primary (default agent name).
+	Config Config
+
+	// Logger is the structured logger used for diagnostic output.
+	// May be nil; commands should fall back to slog.Default() in
+	// that case.
+	Logger *slog.Logger
+
+	// Clock returns the current time. May be nil; commands
+	// fall back to time.Now in that case. Test code overrides
+	// for deterministic timestamps.
+	Clock func() time.Time
 }
 
-// Channel is the command-package's view of an outbound channel.
-// *gateway.Channel satisfies this interface; channel adapters
-// that satisfy it (via wrapper if needed) can be wired in.
-//
-// The interface intentionally mirrors only the surface commands
-// need — Send and SendCard. Inbound (Receive) is NOT part of
-// this interface because the runtime owns the inbound pump;
-// commands only push back.
-type Channel interface {
-	// Send posts a text message (or a card, if m.Card is non-nil
-	// — the adapter routes to SendCard internally) and returns
-	// the bot-side message id assigned by the channel. Empty
-	// string + nil error on transient errors the adapter
-	// returns without an id.
-	Send(ctx context.Context, m Outbound) (msgID string, err error)
-	// SendCard posts an interactive card and returns the
-	// created message id. m.Card must be non-nil.
-	SendCard(ctx context.Context, m Outbound) (msgID string, err error)
+// Config is the read-only configuration slice RuntimeServices
+// exposes to commands. Currently just Primary; grows as commands
+// need more shared config.
+type Config struct {
+	// Primary is the default agent name (cmdline
+	// `nightme --primary` or cfg.Primary). Previously each
+	// Factory received this directly as `defaultPrimary`; now
+	// it lives in rt.Config.Primary and Factories no longer
+	// carry the field.
+	Primary string
 }

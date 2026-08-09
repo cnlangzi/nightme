@@ -60,7 +60,7 @@ func TestWatchMode_String(t *testing.T) {
 // ChatSession defaults to WatchModeMention (the safe mode that
 // drops non-mention group messages).
 func TestChatSession_WatchModeDefault(t *testing.T) {
-	cs := New("oc_test", "claude")
+	cs, _ := New("oc_test", "claude", newTestChannel())
 	if got := cs.WatchMode(); got != WatchModeMention {
 		t.Errorf("New().WatchMode() = %q, want %q (default safe mode)", got, WatchModeMention)
 	}
@@ -70,7 +70,7 @@ func TestChatSession_WatchModeDefault(t *testing.T) {
 // behaviour for invalid modes (ParseWatchMode rejects bad input
 // before SetWatchMode is called).
 func TestChatSession_SetWatchMode(t *testing.T) {
-	cs := New("oc_test", "claude")
+	cs, _ := New("oc_test", "claude", newTestChannel())
 
 	if err := cs.SetWatchMode(WatchModeAll); err != nil {
 		t.Fatalf("SetWatchMode(All) returned error: %v", err)

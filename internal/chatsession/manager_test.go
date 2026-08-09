@@ -11,7 +11,7 @@ import (
 
 func TestManager_GetOrCreate_New(t *testing.T) {
 	mgr := NewManager()
-	cs := mgr.GetOrCreate("oc_xxx", "claude")
+	cs, _ := mgr.GetOrCreate("oc_xxx", "claude")
 	if cs == nil {
 		t.Fatalf("GetOrCreate returned nil")
 	}
@@ -28,8 +28,8 @@ func TestManager_GetOrCreate_New(t *testing.T) {
 
 func TestManager_GetOrCreate_ReturnsSameOnRepeat(t *testing.T) {
 	mgr := NewManager()
-	a := mgr.GetOrCreate("oc_xxx", "claude")
-	b := mgr.GetOrCreate("oc_xxx", "codex")
+	a, _ := mgr.GetOrCreate("oc_xxx", "claude")
+	b, _ := mgr.GetOrCreate("oc_xxx", "codex")
 	if a != b {
 		t.Fatalf("GetOrCreate should return same instance; got different pointers")
 	}
@@ -49,9 +49,9 @@ func TestManager_GetMissing(t *testing.T) {
 
 func TestManager_List(t *testing.T) {
 	mgr := NewManager()
-	a := mgr.GetOrCreate("a", "claude")
-	b := mgr.GetOrCreate("b", "claude")
-	c := mgr.GetOrCreate("c", "claude")
+	a, _ := mgr.GetOrCreate("a", "claude")
+	b, _ := mgr.GetOrCreate("b", "claude")
+	c, _ := mgr.GetOrCreate("c", "claude")
 
 	list := mgr.List()
 	if len(list) != 3 {
@@ -69,7 +69,7 @@ func TestManager_List(t *testing.T) {
 func TestManager_WithSpawner(t *testing.T) {
 	spawner := newFakeSpawner()
 	mgr := NewManager().WithSpawner(spawner)
-	cs := mgr.GetOrCreate("oc_xxx", "claude")
+	cs, _ := mgr.GetOrCreate("oc_xxx", "claude")
 	if cs.Spawner() == nil {
 		t.Fatalf("spawner should be wired after WithSpawner")
 	}
@@ -93,7 +93,7 @@ func TestManager_PoolAfterKillCanRespawn(t *testing.T) {
 		WithSpawner(spawner).
 		WithPersistence(csFile, asFile)
 
-	cs := mgr.GetOrCreate("oc_xxx", "claude")
+	cs, _ := mgr.GetOrCreate("oc_xxx", "claude")
 	cs.SetSelectedCwd("/code/bailing")
 	cs.SetSelectedAgent("claude")
 
@@ -320,7 +320,7 @@ func TestManager_GetOrCreate_AfterRestore_FiresOnCreate(t *testing.T) {
 		seenIDs = append(seenIDs, cs.ChatID)
 	})
 
-	cs := mgr.GetOrCreate("oc_new", "claude")
+	cs, _ := mgr.GetOrCreate("oc_new", "claude")
 	if cs.AgentEventBus.Len() != 0 {
 		t.Fatalf("AgentEventBus subscribers unexpectedly set by test setup")
 	}

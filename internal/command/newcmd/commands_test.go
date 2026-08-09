@@ -10,7 +10,7 @@ import (
 )
 
 func TestFactory_Spec(t *testing.T) {
-	f := NewFactory(chatsession.NewManager(), "claude")
+	f := NewFactory(chatsession.NewManager())
 	s := f.Spec()
 	if s.Name != "new" {
 		t.Fatalf("Spec.Name = %q, want new", s.Name)
@@ -19,10 +19,11 @@ func TestFactory_Spec(t *testing.T) {
 
 func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr, "claude")
+	f := NewFactory(mgr)
+	cs, _ := mgr.GetOrCreate("c1", "claude")
 	input := command.SlashInput{ChatID: "c1", Args: []string{"new"}}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, input)
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -33,15 +34,15 @@ func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 
 func TestFactory_Handle_EmptyAgent_RepliesUsage(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr, "claude")
+	f := NewFactory(mgr)
 	// Pre-populate activeCwd so the preflight passes; the empty
 	// string after /new should trigger the usage reply.
-	cs := mgr.GetOrCreate("c1", "claude")
+	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
 	input := command.SlashInput{ChatID: "c1", Args: []string{"new", ""}}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, input)
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -52,11 +53,11 @@ func TestFactory_Handle_EmptyAgent_RepliesUsage(t *testing.T) {
 
 func TestFactory_Handle_NoSessions_RepliesNoSession(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := NewFactory(mgr, "claude")
-	cs := mgr.GetOrCreate("c1", "claude")
+	f := NewFactory(mgr)
+	cs, _ := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetSelectedCwd("/tmp")
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{},
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
 		command.SlashInput{ChatID: "c1", Args: []string{"new"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)

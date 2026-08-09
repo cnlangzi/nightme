@@ -2,6 +2,7 @@ package gtw
 
 import (
 	"context"
+	"sync"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
+
+
 
 // closeTestRig bundles the dependencies RunClose needs. Lives
 // here rather than in a shared test helper because no other test
@@ -20,6 +23,7 @@ type closeTestRig struct {
 	deps      HandlerDeps
 	sentTexts []string
 	git       *programmableGit
+	rec       *closeTestRecCh
 }
 
 // memSlot is an in-memory ContextSlot for tests. Real production
@@ -71,17 +75,63 @@ func newCloseRig(t *testing.T) *closeTestRig {
 	rig.deps = HandlerDeps{
 		Git: rig.git,
 		Now: func() time.Time { return time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC) },
-		Send: func(_ context.Context, m OutMsg) error {
-			rig.sentTexts = append(rig.sentTexts, m.Text)
-			return nil
-		},
 	}
 	// Use a per-test ChatSession via the existing helper. Each
-	// test gets its own chatID so they don't bleed state.
-	cs := chatsession.New("chat-close-" + t.Name(), "test-agent")
+	// test gets its own chatID so they don't bleed state. The
+	// recording channel captures every Send so tests can assert
+	// the reply text via cs.Channel().
+	rec := &closeTestRecCh{}
+	cs, _ := chatsession.New("chat-close-" + t.Name(), "test-agent", rec)
 	_ = cs.SetSelectedCwd("/tmp/start") // neutral starting cwd; tests overwrite
 	rig.cs = cs
+	rig.rec = rec
+	// Inject a shim HandlerDeps whose Send funnels into the same
+	// recorder so the legacy assertion style keeps working while
+	// the production path is cs.Channel().Send.
+	rig.deps = HandlerDeps{
+		Git: rig.git,
+		Now: func() time.Time { return time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC) },
+	}
 	return rig
+}
+
+// closeTestRecCh is a per-test recording channel that captures
+// every Send / SendCard / Patch call. Mirrors the pattern in
+// close_integration_test.go but lives here because the unit
+// tests want a no-network rig.
+type closeTestRecCh struct {
+	mu    sync.Mutex
+	sends []chatsession.OutboundMessage
+}
+
+func (r *closeTestRecCh) Send(_ context.Context, m chatsession.OutboundMessage) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sends = append(r.sends, m)
+	return nil
+}
+func (r *closeTestRecCh) SendCard(_ context.Context, m chatsession.OutboundMessage) (string, error) {
+	r.Send(context.Background(), m)
+	return "rec-card-id", nil
+}
+func (r *closeTestRecCh) Patch(_ context.Context, m chatsession.OutboundMessage) error {
+	r.Send(context.Background(), m)
+	return nil
+}
+
+func (r *closeTestRecCh) record(text string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sends = append(r.sends, chatsession.OutboundMessage{Text: text})
+}
+
+func (r *closeTestRecCh) lastText() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.sends) == 0 {
+		return ""
+	}
+	return r.sends[len(r.sends)-1].Text
 }
 
 // seedFix writes a complete fix snapshot into
@@ -156,7 +206,7 @@ func TestRunClose_CleanWorktree_Success(t *testing.T) {
 		t.Errorf("git worktree remove not called; calls=%v", rig.git.calls)
 	}
 	// Success reply must mention the branch + worktree.
-	got := rig.sentTexts[len(rig.sentTexts)-1]
+	got := rig.rec.lastText()
 	if !strings.Contains(got, "fix/42-test") {
 		t.Errorf("success reply missing branch:\n%s", got)
 	}
@@ -202,7 +252,7 @@ func TestRunClose_DirtyWorktree_Rejected(t *testing.T) {
 		}
 	}
 	// Reply must list the dirty files.
-	reply := rig.sentTexts[len(rig.sentTexts)-1]
+	reply := rig.rec.lastText()
 	if !strings.Contains(reply, "foo.txt") {
 		t.Errorf("dirty reply missing foo.txt:\n%s", reply)
 	}
@@ -236,7 +286,7 @@ func TestRunClose_NoYml(t *testing.T) {
 	if len(rig.git.calls) != 0 {
 		t.Errorf("git called despite missing yml: %v", rig.git.calls)
 	}
-	reply := rig.sentTexts[len(rig.sentTexts)-1]
+	reply := rig.rec.lastText()
 	if !strings.Contains(reply, "no active fix") {
 		t.Errorf("reply = %q, want 'no active fix'", reply)
 	}
@@ -274,7 +324,7 @@ func TestRunClose_GitRemoveFails(t *testing.T) {
 		t.Errorf("slot cleared despite git failure: %+v", got)
 	}
 	// Reply must surface the git stderr tail.
-	reply := rig.sentTexts[len(rig.sentTexts)-1]
+	reply := rig.rec.lastText()
 	if !strings.Contains(reply, "git worktree remove failed") {
 		t.Errorf("reply missing git error:\n%s", reply)
 	}

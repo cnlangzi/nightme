@@ -279,7 +279,7 @@ func TestFixRemote_HappyPath(t *testing.T) {
 	if parsed.Provider != string(ProviderGitHub) {
 		t.Errorf("yml provider = %q, want github", parsed.Provider)
 	}
-	if parsed.RepoRoot != rig.repoRoot {
+	if !pathsEqual(parsed.RepoRoot, rig.repoRoot) {
 		t.Errorf("yml repoRoot = %q, want %q", parsed.RepoRoot, rig.repoRoot)
 	}
 

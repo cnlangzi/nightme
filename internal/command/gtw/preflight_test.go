@@ -141,7 +141,8 @@ func TestPreflightOrphanYml_RunFixIntegration(t *testing.T) {
 	mustGit(t, repoRoot, "symbolic-ref", "refs/remotes/origin/HEAD",
 		"refs/remotes/origin/main")
 
-	cs, _ := chatsession.New("chat-preflight", "test-agent", newTestChannel())
+	rec := &recordingCh{}
+	cs, _ := chatsession.New("chat-preflight", "test-agent", rec)
 	_ = cs.SetActiveCwd(repoRoot)
 
 	// Simulate an orphan yml: create a worktree with a yml in
@@ -182,7 +183,7 @@ func TestPreflightOrphanYml_RunFixIntegration(t *testing.T) {
 	if !res.Consumed {
 		t.Errorf("Result.Consumed = false")
 	}
-	last := sentTexts[len(sentTexts)-1]
+	last := rec.lastText()
 	if !strings.Contains(last, "sibling") || !strings.Contains(last, orphanWt) {
 		t.Errorf("reply missing sibling-yaml hint:\n%s", last)
 	}

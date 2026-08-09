@@ -120,7 +120,7 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 		t.Errorf("yml still on disk after close: stat err=%v", err)
 	}
 	// CWD must be back at repoRoot.
-	if got := cs.ActiveCwd(); got != repoRoot {
+	if got := cs.ActiveCwd(); !pathsEqual(got, repoRoot) {
 		t.Errorf("ActiveCwd = %q, want %q", got, repoRoot)
 	}
 	// In-memory slot must be cleared.
@@ -419,7 +419,7 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 		t.Fatalf("worktree %s not created: %v", wt, err)
 	}
 	// ActiveCwd must point at the new worktree.
-	if got := cs.ActiveCwd(); got != wt {
+	if got := cs.ActiveCwd(); !pathsEqual(got, wt) {
 		t.Errorf("ActiveCwd = %q, want %q", got, wt)
 	}
 	// yml must round-trip with the right fields.
@@ -427,7 +427,7 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadGTWYml: %v", err)
 	}
-	if parsed.Mode != ModeLocal || parsed.Branch != wantBranch || parsed.RepoRoot != repoRoot {
+	if parsed.Mode != ModeLocal || parsed.Branch != wantBranch || !pathsEqual(parsed.RepoRoot, repoRoot) {
 		t.Errorf("yml = %+v, want mode=local branch=%s repoRoot=%s", parsed, wantBranch, repoRoot)
 	}
 	// In-memory slot must mirror yml.
@@ -494,4 +494,24 @@ func (r *recordingCh) lastText() string {
 		return ""
 	}
 	return r.sends[len(r.sends)-1].Text
+}
+
+
+// pathsEqual compares two filesystem paths. On macOS, t.TempDir()
+// returns the realpath (e.g. /var/folders/...) but os.Getwd() and
+// chat session SetActiveCwd record the symlink form
+// (e.g. /private/var/folders/...). Without canonicalization, the
+// same logical directory compares as different. Use
+// filepath.EvalSymlinks to canonicalize both before comparing;
+// on Linux EvalSymlinks is a no-op for non-symlinked paths.
+func pathsEqual(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ca, errA := filepath.EvalSymlinks(a)
+	cb, errB := filepath.EvalSymlinks(b)
+	if errA != nil || errB != nil {
+		return a == b
+	}
+	return ca == cb
 }

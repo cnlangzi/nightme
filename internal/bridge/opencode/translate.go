@@ -23,6 +23,7 @@ package opencode
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -48,6 +49,11 @@ type translator struct {
 	// not key this on the internal part.id because opencode re-uses
 	// the same callID across the running → completed states.
 	pendingTools map[string]toolEntry
+
+	// lastUsage is the most recent /usage_update payload. We
+	// stash it on the translator so the next session.idle can
+	// forward it on Done.Usage without re-emitting the wire event.
+	lastUsage *agent.UsageInfo
 }
 
 type toolEntry struct {
@@ -90,16 +96,22 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 		}
 		t.handlePart(p.Part)
 	case "session.idle":
+		// Carry forward the last-seen usage, if any, so the
+		// channel footer can render totals. The Done.Usage field
+		// is the canonical source for runtime accumulation per
+		// F-49 §1.2.
+		usage := t.lastUsage
 		t.deliver(agent.AgentEvent{
-			Kind:     agent.EventAgentDone,
+			Kind:      agent.EventAgentDone,
 			SessionID: t.sessionID,
 			Model:     t.model,
 			AgentName: t.agentName,
 			Workspace: t.workspace,
 			Branch:    t.branch,
 			Done: &agent.AgentDoneEvent{
-				Reason: "settled",
+				Reason:  "settled",
 				ExitCode: 0,
+				Usage:   usage,
 			},
 		})
 	case "session.error":
@@ -130,6 +142,39 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 			Workspace: t.workspace,
 			Branch:    t.branch,
 		})
+	case "usage_update":
+		var p UsageUpdate
+		if err := json.Unmarshal(ev.Properties, &p); err == nil {
+			t.lastUsage = p.toUsageInfo()
+		}
+	case "current_mode_update":
+		var p struct {
+			CurrentModeID string `json:"currentModeId"`
+		}
+		if err := json.Unmarshal(ev.Properties, &p); err == nil && p.CurrentModeID != "" {
+			// Cache mode on the translator; not surfaced to the
+			// runtime yet because the agent package does not have a
+			// dedicated mode event. Re-emit EventAgentReady so the
+			// channel can refresh its header.
+			t.deliver(agent.AgentEvent{
+				Kind:      agent.EventAgentReady,
+				SessionID: t.sessionID,
+				Model:     t.model,
+				AgentName: t.agentName,
+				Workspace: t.workspace,
+				Branch:    t.branch,
+			})
+		}
+	case "available_commands_update":
+		// Stage 2 stores the latest slash command list in the
+		// translator so future integrations can route unknown
+		// /commands to opencode. Currently we just log it.
+		var p struct {
+			AvailableCommands []json.RawMessage `json:"availableCommands"`
+		}
+		if err := json.Unmarshal(ev.Properties, &p); err == nil {
+			oLog("sse: available_commands_update", "count", len(p.AvailableCommands))
+		}
 	case "permission.asked":
 		var p PermissionAsked
 		if err := json.Unmarshal(ev.Properties, &p); err == nil {
@@ -233,11 +278,17 @@ func (t *translator) handleToolPart(p Part) {
 	}
 	_ = json.Unmarshal(p.State, &state)
 
+	// Normalize the tool name so the channel footer can render
+	// Claude-style titles (Bash, Read, Write) instead of the
+	// opencode-internal slugs (bash, read, write). We capitalize
+	// the first letter — sufficient for the most common tools.
+	name := normalizeToolName(p.Tool)
+
 	switch state.Status {
 	case "pending":
 		args := stringOrEmpty(state.Input)
 		t.pendingTools[p.CallID] = toolEntry{
-			name: p.Tool,
+			name: name,
 			args: args,
 		}
 		t.deliver(agent.AgentEvent{
@@ -249,7 +300,7 @@ func (t *translator) handleToolPart(p Part) {
 			Branch:    t.branch,
 			ToolStart: &agent.AgentToolStartEvent{
 				ID:   p.CallID,
-				Name: p.Tool,
+				Name: name,
 				Args: args,
 			},
 		})
@@ -261,7 +312,7 @@ func (t *translator) handleToolPart(p Part) {
 		// "running" indicator if it wants.
 		entry, ok := t.pendingTools[p.CallID]
 		if !ok {
-			entry = toolEntry{name: p.Tool}
+			entry = toolEntry{name: name}
 		}
 		args := entry.args
 		if args == "" {
@@ -276,14 +327,14 @@ func (t *translator) handleToolPart(p Part) {
 			Branch:    t.branch,
 			ToolStart: &agent.AgentToolStartEvent{
 				ID:   p.CallID,
-				Name: p.Tool,
+				Name: name,
 				Args: args,
 			},
 		})
 	case "completed":
 		entry, ok := t.pendingTools[p.CallID]
 		if !ok {
-			entry = toolEntry{name: p.Tool}
+			entry = toolEntry{name: name}
 		}
 		delete(t.pendingTools, p.CallID)
 		t.deliver(agent.AgentEvent{
@@ -303,7 +354,7 @@ func (t *translator) handleToolPart(p Part) {
 	case "error":
 		entry, ok := t.pendingTools[p.CallID]
 		if !ok {
-			entry = toolEntry{name: p.Tool}
+			entry = toolEntry{name: name}
 		}
 		delete(t.pendingTools, p.CallID)
 		t.deliver(agent.AgentEvent{
@@ -326,7 +377,106 @@ func (t *translator) handleToolPart(p Part) {
 	}
 }
 
-// ─── permission ──────────────────────────────────────────────────
+// normalizeToolName maps an opencode tool slug to the Claude-style
+// Title-Case name the channel footer / receipts expect. We do not
+// have a full tool catalog here; a handful of common tools get
+// explicit maps, the rest fall through to a capitalised first
+// letter ("read" → "Read", "todowrite" → "Todowrite"). When opencode
+// names a tool the channel adapter does not recognize, the user
+// sees a less polished but still functional name.
+func normalizeToolName(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	// Already canonical (mixed case ≥ 2 chars) — leave alone.
+	if strings.ToUpper(raw[:1]) == raw[:1] && len(raw) > 1 && raw[1:] != strings.ToUpper(raw[1:]) {
+		return raw
+	}
+	// Known aliases.
+	switch strings.ToLower(raw) {
+	case "bash":
+		return "Bash"
+	case "read":
+		return "Read"
+	case "write":
+		return "Write"
+	case "edit":
+		return "Edit"
+	case "glob":
+		return "Glob"
+	case "grep":
+		return "Grep"
+	case "task":
+		return "Task"
+	case "webfetch":
+		return "WebFetch"
+	case "websearch":
+		return "WebSearch"
+	case "todowrite":
+		return "TodoWrite"
+	case "todoread":
+		return "TodoRead"
+	}
+	// Default: capitalise the first letter.
+	if raw == "" {
+		return raw
+	}
+	return strings.ToUpper(raw[:1]) + raw[1:]
+}
+
+// ─── usage tracking ──────────────────────────────────────────────
+
+// UsageUpdate is the payload of the `usage_update` SSE event. The
+// shape mirrors the OpenAPI schema; we only read the fields we
+// render. Tokens: in + out + cache create + cache read all default
+// to 0 if missing. CostUSD is optional; 0 means "unknown".
+type UsageUpdate struct {
+	Used  int64 `json:"used"`
+	Size  int64 `json:"size"`
+	Cost  *struct {
+		Amount   float64 `json:"amount"`
+		Currency string  `json:"currency"`
+	} `json:"cost,omitempty"`
+	// Tokens is the API-reported split used by opencode. When
+	// present we use it verbatim; otherwise we split Used/4
+	// heuristically (F-49 §1.6 last-resort fallback).
+	Tokens *struct {
+		Input  int `json:"input"`
+		Output int `json:"output"`
+		Cache  *struct {
+			Read     int `json:"read"`
+			Creation int `json:"write"`
+		} `json:"cache,omitempty"`
+	} `json:"tokens,omitempty"`
+}
+
+// toUsageInfo converts the wire payload into the runtime's
+// UsageInfo. The translation mirrors the codex/pi pattern: cache
+// tokens are reported separately; context window is filled in if
+// the server sent `size` so the channel footer can render the
+// denominator.
+func (u UsageUpdate) toUsageInfo() *agent.UsageInfo {
+	info := &agent.UsageInfo{}
+	if u.Tokens != nil {
+		info.InputTokens = u.Tokens.Input
+		info.OutputTokens = u.Tokens.Output
+		if u.Tokens.Cache != nil {
+			info.CacheReadInputTokens = u.Tokens.Cache.Read
+			info.CacheCreationInputTokens = u.Tokens.Cache.Creation
+		}
+	}
+	if u.Cost != nil {
+		info.CostUSD = u.Cost.Amount
+	}
+	if u.Size > 0 {
+		// Size is the API-reported context window. The bridge
+		// forwards it verbatim; the channel footer renders it
+		// alongside the percentage.
+		info.ContextWindow = int(u.Size)
+	}
+	return info
+}
+
 
 // PermissionAsked is the payload of the `permission.asked` SSE event.
 type PermissionAsked struct {

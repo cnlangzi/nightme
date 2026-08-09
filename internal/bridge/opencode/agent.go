@@ -288,7 +288,7 @@ func (a *Agent) SendText(text string) error {
 // SendBlocks delivers a structured user turn. The bridge maps:
 //
 //	ContentText  → {type:"text", text:t}
-//	ContentImage → {type:"file", mime, url:"file://..."} (opencode reads the bytes itself)
+//	ContentImage → {type:"file", mime, url:"file://..."}  (opencode reads bytes)
 //	ContentFile  → {type:"file", mime, url:"file://..."}
 //
 // Empty blocks is a no-op. Concurrent calls during a streaming turn
@@ -330,9 +330,31 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 			if b.Path == "" {
 				continue
 			}
+			// Sanity: cap the file size. opencode reads the bytes
+			// itself and we don't want to OOM the bridge by
+			// handing an unbounded path to the server.
+			info, err := os.Stat(b.Path)
+			if err != nil {
+				a.pendingMu.Lock()
+				a.pendingTurnActive = false
+				a.pendingMu.Unlock()
+				return fmt.Errorf("opencode: stat %s: %w", b.Path, err)
+			}
+			if info.Size() > maxImageBytes {
+				a.pendingMu.Lock()
+				a.pendingTurnActive = false
+				a.pendingMu.Unlock()
+				return fmt.Errorf("%w: %s = %d bytes", ErrImageTooLarge, b.Path, info.Size())
+			}
 			// opencode reads file:// URLs directly. We do not
 			// stage copies — the workspace is visible to the
 			// child process via the server's project root.
+			//
+			// At stage 2 we forward paths instead of base64-
+			// inlining. opencode's HTTP API consumes file://
+			// URLs and the server reads them itself. Real vision
+			// (inline base64) is reserved for stage 4 if the
+			// model ever refuses to fetch files.
 			parts = append(parts, FilePart(b.MediaType, "file://"+b.Path))
 		default:
 			oLog("SendBlocks: unknown block type, skipping", "type", string(b.Type))
@@ -357,6 +379,40 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 		return err
 	}
 	return nil
+}
+
+// Abort sends /interrupt to cancel the in-flight turn. Mirrors what
+// the other bridges expose via /abort at the runtime layer — the
+// agent.Agent interface does not yet have a dedicated Abort method
+// (see F-49 §8 for the cross-bridge proposal), so we expose it as a
+// bridge-only method. Future callers should look for Abort on the
+// interface before adding more.
+//
+// Abort is best-effort: if the server is unreachable, the error
+// is returned to the caller but the bridge is not torn down. The
+// turn will eventually settle on its own via session.idle and the
+// pendingTurnActive guard will release.
+func (a *Agent) Abort(ctx context.Context) error {
+	if a.server == nil {
+		return fmt.Errorf("opencode: not started")
+	}
+	if a.sessionID == "" {
+		return fmt.Errorf("opencode: no session")
+	}
+	return a.client.Interrupt(ctx, a.sessionID)
+}
+
+// SetModel switches the active model on the running session. The
+// next turn will use the new model; in-flight turns are not affected.
+// Mirrors what /use would do at the runtime layer.
+func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error {
+	if a.server == nil {
+		return fmt.Errorf("opencode: not started")
+	}
+	if a.sessionID == "" {
+		return fmt.Errorf("opencode: no session")
+	}
+	return a.client.SetModel(ctx, a.sessionID, providerID, modelID)
 }
 
 

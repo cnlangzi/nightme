@@ -43,7 +43,7 @@ agent:
       args: []
       env: {}
     codex:
-      command: codex-acp
+      command: codex                 # spawns `codex app-server` via JSON-RPC 2.0
       args: []
       env: {}
 
@@ -58,7 +58,7 @@ agents:                                  # top-level LIST (was nested map)
     command: claude
   - name: codex
     bridge: codex
-    command: codex-acp
+    command: codex                 # app-server JSON-RPC 2.0 bridge (see docs/bridge/codex.md)
 ```
 
 Field changes:

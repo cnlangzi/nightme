@@ -301,7 +301,7 @@ Anything else (including unknown /-commands) is sent to the agent.
 
 ```
 handler.listAgents(ctx, msg, _)
-  └ Reply "Registered agents: • claude — claude • codex — codex-acp • ..."（每个一行）
+  └ Reply "Registered agents: • claude — claude • codex — codex (app-server) • ..."（每个一行）
 ```
 
 ---

@@ -58,7 +58,6 @@ type runDeps struct {
 	buildAgents       func(*config.Config) *agent.Registry
 	newChannel        func(*config.Config) (channel.Channel, error)
 	signals           <-chan os.Signal
-	cleanup           bool
 	skipFeishuLogin   bool
 	onReady           func()
 
@@ -103,7 +102,6 @@ func defaultOpenAgentSessions(cfg *config.Config) (*registry.AgentSessionFile, e
 
 // newRunCmd builds the long-running Feishu daemon command.
 func newRunCmd() *cobra.Command {
-	var cleanup bool
 	var channelName string
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -112,19 +110,19 @@ func newRunCmd() *cobra.Command {
 			"router on top of it. Slash commands (/cwd, /use, /kill, /help) " +
 			"drive session lifecycle; plain text is forwarded to the live " +
 			"agent behind the chat's active AgentSession.\n\n" +
-			"By default the daemon detaches session CLIs on shutdown so a " +
-			"later `nightme run` (or /use) can resume them. Pass --cleanup " +
-			"to instead Kill() every session on SIGINT/SIGTERM — useful for " +
-			"CI or one-shot runs.\n\n" +
+			"On shutdown the daemon stops the channel and persists final " +
+			"state. Agent processes are LONG-LIVED and intentionally NOT " +
+			"killed by nightme — they survive nightme restart via the " +
+			"Detached registry state, and `nightme run` (or /use) re-attaches " +
+			"to them on next start. Use `/kill` from the relevant chat to " +
+			"terminate agent processes.\n\n" +
 			"Pass --channel=echo to run the daemon with the echo channel " +
 			"(a no-network stub that prints outbound messages to stdout). " +
 			"Useful for smoke tests.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runRun(cmd, cleanup, channelName)
+			return runRun(cmd, channelName)
 		},
 	}
-	cmd.Flags().BoolVar(&cleanup, "cleanup", false,
-		"Kill every session CLI on shutdown instead of detaching them")
 	cmd.Flags().StringVar(&channelName, "channel", "feishu",
 		"Channel implementation: feishu (default) or echo (smoke test)")
 	return cmd
@@ -132,22 +130,12 @@ func newRunCmd() *cobra.Command {
 
 // runRun dispatches to the daemon. Channel selection via
 // the --channel flag (feishu | echo).
-func runRun(cmd *cobra.Command, cleanup bool, channelName string) error {
+func runRun(cmd *cobra.Command, channelName string) error {
 	if channelName != "" && channelName != "feishu" && channelName != "echo" {
 		return fmt.Errorf("run: unknown channel %q (want feishu or echo)", channelName)
 	}
 	deps := withChannel(defaultRunDeps(), channelName)
-	deps.cleanup = cleanup
 	return runRunWith(cmd, deps)
-}
-
-// withCleanup configures whether the daemon kills every session
-// CLI on shutdown (true) or detaches them so a later restart can
-// resume them (false). Exposed for tests; production wires this
-// from the --cleanup flag via runRun.
-func withCleanup(deps runDeps, cleanup bool) runDeps {
-	deps.cleanup = cleanup
-	return deps
 }
 
 // withChannel configures the runtime channel implementation
@@ -517,7 +505,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 			fmt.Fprintf(out, "[nightme] received %s\n", sig)
 		}
 	}
-	return shutdownRun(out, ch, mgr, csFile, asFile, deps.cleanup, logger)
+	return shutdownRun(out, ch, mgr, csFile, asFile, logger)
 }
 
 // newMessageDispatcher builds the runtime-injected
@@ -1113,14 +1101,24 @@ func (r *responder) Send(ctx context.Context, chatID, userMsgID, text string) er
 	})
 }
 
-// shutdownRun stops the channel, then either detaches or kills
-// every ChatSession's AgentSessions depending on cleanup.
+// shutdownRun stops the channel and persists final state.
+//
+// Agent processes are INTENTIONALLY NOT killed here — they are
+// long-running CLI sessions independent of nightme's lifetime.
+// AgentSessions that were Running remain in the registry as
+// Detached; the next `nightme run` re-attach path (Manager.RestoreFromRegistry
+// + FromAgentSessionEntry) hands them back to nightme, and
+// LookupActiveAgentSession reuses them via --resume where the
+// bridge supports it. /kill is the only path that terminates
+// agent processes; it is cwd-scoped and runs in chatsession.KillAgent /
+// chatsession.KillAllAgents (see internal/chatsession/kill.go).
 //
 // Persistence: chat_sessions.json + agent_sessions.json are left
 // in place. The Manager has been writing through to them
 // throughout the run via WithPersistence.
-func shutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, csFile *registry.ChatSessionFile, asFile *registry.AgentSessionFile, cleanup bool, logger *slog.Logger) error {
+func shutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, csFile *registry.ChatSessionFile, asFile *registry.AgentSessionFile, logger *slog.Logger) error {
 	_ = out // future shutdown status line
+	_ = asFile
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -1141,16 +1139,6 @@ func shutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, cs
 			// Touch lastInteractionAt so the entry is fresh on disk.
 			cs.SetActiveAgent(cs.ActiveAgent()) // no-op write trigger via the locked path
 		}
-
-		if cleanup {
-			for _, cs := range mgr.List() {
-				if _, err := cs.KillAll(); err != nil && logger != nil {
-					logger.Warn("kill all failed for chat", "chat", cs.ChatID, "err", err)
-				}
-			}
-		}
-		// (Detach is the default; AgentSessions that were Running
-		// remain in registry as Detached for next start.)
 	}
 
 	// Best-effort: flush registry stores.
@@ -1160,7 +1148,6 @@ func shutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, cs
 			_ = csFile.Upsert(cs.Entry())
 		}
 	}
-	_ = asFile
 
 	return firstErr
 }

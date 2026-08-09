@@ -14,21 +14,14 @@ import (
 // the "based on" line is omitted.
 func renderFixSuccessCard(issue *Issue, branch, worktree, repo, baseSHA string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "✅ Fix #%d 就绪\n", issue.ID)
-	b.WriteString("━━━━━━━━━━━━━━\n")
-	b.WriteString("[Context]\n")
-	fmt.Fprintf(&b, "🌿 branch:   %s\n", branch)
-	fmt.Fprintf(&b, "📁 worktree: %s\n", worktree)
-	fmt.Fprintf(&b, "🏷 平台:%s#%d [%s]\n", repo, issue.ID, LabelWIP)
+	fmt.Fprintf(&b, "✅ Fix #%d ready\n", issue.ID)
+	fmt.Fprintf(&b, "→ branch:   `%s`\n", branch)
+	fmt.Fprintf(&b, "→ worktree: %s\n", worktree)
+	fmt.Fprintf(&b, "→ issue:    %s#%d [%s]\n", repo, issue.ID, LabelWIP)
 	if baseSHA != "" {
-		fmt.Fprintf(&b, "🔗 based on: %s\n", shortSHA(baseSHA))
+		fmt.Fprintf(&b, "→ base:     %s\n", shortSHA(baseSHA))
 	}
-	if issue.URL != "" {
-		fmt.Fprintf(&b, "🔗 %s\n", issue.URL)
-	}
-	b.WriteString("━━━━━━━━━━━━━━\n")
-	b.WriteString("[Command result]\n")
-	b.WriteString("💡 下一步:`/gtw push` (F-46) 或自由对话开发\n")
+	b.WriteString("↳ `/gtw push` to ship · `/gtw close` to drop the worktree · or keep developing\n")
 	return b.String()
 }
 
@@ -53,14 +46,10 @@ func shortSHA(sha string) string {
 // those fields don't apply to local branches.
 func renderFixLocalSuccessCard(branch, worktree string) string {
 	var b strings.Builder
-	b.WriteString("✅ Local worktree 就绪\n")
-	b.WriteString("━━━━━━━━━━━━━━\n")
-	b.WriteString("[Context]\n")
-	fmt.Fprintf(&b, "🌿 branch:   %s\n", branch)
-	fmt.Fprintf(&b, "📁 worktree: %s\n", worktree)
-	b.WriteString("━━━━━━━━━━━━━━\n")
-	b.WriteString("[Command result]\n")
-	b.WriteString("💡 下一步:在 worktree 中自由开发,准备好后 /cwd 切回主仓即可\n")
+	b.WriteString("✅ Local worktree ready\n")
+	fmt.Fprintf(&b, "→ branch:   `%s`\n", branch)
+	fmt.Fprintf(&b, "→ worktree: %s\n", worktree)
+	b.WriteString("↳ work freely here · or `/gtw close` to drop the worktree\n")
 	return b.String()
 }
 

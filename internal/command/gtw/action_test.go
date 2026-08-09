@@ -44,10 +44,10 @@ func TestCancelResultText(t *testing.T) {
 // TestVariantReadyResultText covers the variant-ready reply
 // for 🆕 and 🔄 reactions.
 func TestVariantReadyResultText(t *testing.T) {
-	if got := variantReadyResultText(FixDraftPayload{IssueID: -1}, "login-fix-v2"); got != "✅ Local worktree 就绪(使用 login-fix-v2)。" {
+	if got := variantReadyResultText(FixDraftPayload{IssueID: -1}, "login-fix-v2"); got != "✅ Local worktree ready (using `login-fix-v2`)." {
 		t.Errorf("local variant text = %q", got)
 	}
-	if got := variantReadyResultText(FixDraftPayload{IssueID: 42}, "login-fix-v2"); got != "✅ Fix #42 就绪(使用 login-fix-v2)。" {
+	if got := variantReadyResultText(FixDraftPayload{IssueID: 42}, "login-fix-v2"); got != "✅ Fix #42 ready (using `login-fix-v2`)." {
 		t.Errorf("remote variant text = %q", got)
 	}
 }

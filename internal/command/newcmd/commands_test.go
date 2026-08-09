@@ -37,7 +37,7 @@ func TestFactory_Handle_EmptyAgent_RepliesUsage(t *testing.T) {
 	// Pre-populate activeCwd so the preflight passes; the empty
 	// string after /new should trigger the usage reply.
 	cs := mgr.GetOrCreate("c1", "claude")
-	_ = cs.SetActiveCwd("/tmp")
+	_ = cs.SetSelectedCwd("/tmp")
 
 	input := command.SlashInput{ChatID: "c1", Args: []string{"new", ""}}
 
@@ -54,7 +54,7 @@ func TestFactory_Handle_NoSessions_RepliesNoSession(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory(mgr, "claude")
 	cs := mgr.GetOrCreate("c1", "claude")
-	_ = cs.SetActiveCwd("/tmp")
+	_ = cs.SetSelectedCwd("/tmp")
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{},
 		command.SlashInput{ChatID: "c1", Args: []string{"new"}})

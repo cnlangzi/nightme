@@ -56,7 +56,7 @@ func TestDropQueue_DropsQueuedMessages(t *testing.T) {
 		return false
 	})
 
-	// No activeAS, so the TryFlush inside QueueUserMessage is a
+	// No selectedAS, so the TryFlush inside QueueUserMessage is a
 	// no-op and the message stays queued.
 	msg := makeTestMessage(cs,
 		[]agent.ContentBlock{{Type: agent.ContentText, Text: "abandoned hi"}}, "um_abandoned")
@@ -98,14 +98,14 @@ func TestQueueSurvivesAgentSwitch(t *testing.T) {
 	cs := New("oc_use_swap", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
-	if err := cs.SetActiveCwd(t.TempDir()); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
-	cs.SetActiveAgent("claude")
+	cs.SetSelectedAgent("claude")
 
-	claudeAS, err := cs.LookupActiveAgentSession()
+	claudeAS, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession(claude): %v", err)
+		t.Fatalf("LookupSelectedAgentSession(claude): %v", err)
 	}
 
 	// claude is mid-turn, so the next user message queues.
@@ -126,10 +126,10 @@ func TestQueueSurvivesAgentSwitch(t *testing.T) {
 
 	// /use codex — swap the active agent while the message is
 	// still queued.
-	cs.SetActiveAgent("codex")
-	codexAS, err := cs.LookupActiveAgentSession()
+	cs.SetSelectedAgent("codex")
+	codexAS, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession(codex): %v", err)
+		t.Fatalf("LookupSelectedAgentSession(codex): %v", err)
 	}
 	if codexAS.ID == claudeAS.ID {
 		t.Fatalf("/use did not swap the active AgentSession")

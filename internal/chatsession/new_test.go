@@ -65,8 +65,8 @@ func TestNewActiveAgentSessions_NoCwd(t *testing.T) {
 // activeCwd is set but the pool has no entries.
 func TestNewActiveAgentSessions_EmptyPool(t *testing.T) {
 	cs := New("chat-empty", "cc")
-	if err := cs.SetActiveCwd(t.TempDir()); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	matched, reset, _, err := cs.NewActiveAgentSessions(context.Background(), "")
 	if err != nil || matched != 0 || reset != 0 {
@@ -80,14 +80,14 @@ func TestNewActiveAgentSessions_EmptyPool(t *testing.T) {
 func TestNewActiveAgentSessions_AllRunningReset(t *testing.T) {
 	cs := New("chat-all", "cc")
 	cwd := t.TempDir()
-	if err := cs.SetActiveCwd(cwd); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(cwd); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	a1 := injectAS(t, cs, "cc", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
 	a2 := injectAS(t, cs, "codex", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(2)})
 
 	// Queue a message so we can assert /new does NOT discard it.
-	// No activeAS is installed, so the TryFlush inside
+	// No selectedAS is installed, so the TryFlush inside
 	// QueueUserMessage is a no-op and the message stays queued.
 	if err := cs.QueueUserMessage(makeTestMessage(cs,
 		[]agent.ContentBlock{{Type: agent.ContentText, Text: "queued"}}, "u1")); err != nil {
@@ -124,8 +124,8 @@ func TestNewActiveAgentSessions_AllRunningReset(t *testing.T) {
 func TestNewActiveAgentSessions_AgentNameFilter(t *testing.T) {
 	cs := New("chat-named", "cc")
 	cwd := t.TempDir()
-	if err := cs.SetActiveCwd(cwd); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(cwd); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	a1 := injectAS(t, cs, "cc", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
 	a2 := injectAS(t, cs, "codex", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(2)})
@@ -159,8 +159,8 @@ func TestNewActiveAgentSessions_AgentNameFilter(t *testing.T) {
 func TestNewActiveAgentSessions_DetachedSkipped(t *testing.T) {
 	cs := New("chat-skip", "cc")
 	cwd := t.TempDir()
-	if err := cs.SetActiveCwd(cwd); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(cwd); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	// Detached entry: SetExited clears PID; Status returns StatusExited.
 	a := NewAgentSession(newAgentSessionID(), cs.ID, "cc", cwd, nil)
@@ -195,8 +195,8 @@ func TestNewActiveAgentSessions_CwdFilter(t *testing.T) {
 	cs := New("chat-cwd", "cc")
 	cwd1 := t.TempDir()
 	cwd2 := t.TempDir()
-	if err := cs.SetActiveCwd(cwd1); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(cwd1); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	other := injectAS(t, cs, "cc", cwd2, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
 	here := injectAS(t, cs, "cc", cwd1, &callRecordingAS{fakeAgentSession: newFakeAgentSession(2)})
@@ -224,8 +224,8 @@ func TestNewActiveAgentSessions_CwdFilter(t *testing.T) {
 func TestNewActiveAgentSessions_PartialFailure(t *testing.T) {
 	cs := New("chat-fail", "cc")
 	cwd := t.TempDir()
-	if err := cs.SetActiveCwd(cwd); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(cwd); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	injectAS(t, cs, "cc", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
 	injectAS(t, cs, "codex", cwd, &failingNewAS{fakeAgentSession: newFakeAgentSession(2)})
@@ -255,7 +255,7 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 	t.Run("running delegates", func(t *testing.T) {
 		cs := New("chat-running", "cc")
 		cwd := t.TempDir()
-		cs.SetActiveCwd(cwd)
+		cs.SetSelectedCwd(cwd)
 		bh := &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)}
 		as := injectAS(t, cs, "cc", cwd, bh)
 
@@ -270,7 +270,7 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 	t.Run("detached returns ErrNotRunning", func(t *testing.T) {
 		cs := New("chat-detached", "cc")
 		cwd := t.TempDir()
-		cs.SetActiveCwd(cwd)
+		cs.SetSelectedCwd(cwd)
 		// Construct an AS whose handle is nil: use NewAgentSession
 		// (no SetRunning, no handle attached).
 		as := NewAgentSession(newAgentSessionID(), cs.ID, "cc", cwd, nil)
@@ -292,7 +292,7 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 		// SessionID cleared.
 		cs := New("chat-restart", "cc")
 		cwd := t.TempDir()
-		cs.SetActiveCwd(cwd)
+		cs.SetSelectedCwd(cwd)
 		old := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
 		as := injectAS(t, cs, "cc", cwd, old)
 		as.SetSessionID("stale-id-should-be-cleared")
@@ -326,7 +326,7 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 	t.Run("bridge-ErrRestartRequired-with-nil-spawner-propagates", func(t *testing.T) {
 		cs := New("chat-restart-no-spawner", "cc")
 		cwd := t.TempDir()
-		cs.SetActiveCwd(cwd)
+		cs.SetSelectedCwd(cwd)
 		old := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
 		as := injectAS(t, cs, "cc", cwd, old)
 
@@ -342,12 +342,12 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 	t.Run("respawn-spawn-failure-cleans-up-status", func(t *testing.T) {
 		// F-34 Phase 3 review #4: when bridge.New returns
 		// ErrRestartRequired AND spawner.Spawn fails, the wrapper
-		// must mark the AS Exited so subsequent LookupActiveAgentSession
+		// must mark the AS Exited so subsequent LookupSelectedAgentSession
 		// lazy-spawns a fresh one. Previously status stayed Running
 		// with handle=nil → next SendBlocks returned ErrNotRunning.
 		cs := New("chat-respawn-fail", "cc")
 		cwd := t.TempDir()
-		cs.SetActiveCwd(cwd)
+		cs.SetSelectedCwd(cwd)
 		old := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
 		as := injectAS(t, cs, "cc", cwd, old)
 		as.SetSessionID("stale-id")
@@ -416,8 +416,8 @@ func (f *fakeFailingSpawner) Spawn(_ context.Context, _, _ string, _ []string, _
 func TestNewActiveAgentSessions_DeadEntryClearsResumeIDInMemory(t *testing.T) {
 	cs := New("chat-dead-mem", "cc")
 	cwd := t.TempDir()
-	if err := cs.SetActiveCwd(cwd); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(cwd); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	cs.WithPersistence(nil, nil)
 
@@ -454,8 +454,8 @@ func TestNewActiveAgentSessions_DeadEntryClearsResumeIDInMemory(t *testing.T) {
 func TestNewActiveAgentSessions_DeadEntryPersistsClearedResumeID(t *testing.T) {
 	cs := New("chat-dead-persist", "cc")
 	cwd := t.TempDir()
-	if err := cs.SetActiveCwd(cwd); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(cwd); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	asFile, err := registry.OpenAgentSessionFile(filepath.Join(t.TempDir(), "agent_sessions.json"))
 	if err != nil {
@@ -493,8 +493,8 @@ func TestNewActiveAgentSessions_DeadEntryPersistsClearedResumeID(t *testing.T) {
 func TestNewActiveAgentSessions_DeadEntryDoesNotSpawn(t *testing.T) {
 	cs := New("chat-dead-no-spawn", "cc")
 	cwd := t.TempDir()
-	if err := cs.SetActiveCwd(cwd); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(cwd); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	cs.WithPersistence(nil, nil)
 
@@ -521,8 +521,8 @@ func TestNewActiveAgentSessions_DeadEntryDoesNotSpawn(t *testing.T) {
 func TestNewActiveAgentSessions_RunningPlusDeadMixed(t *testing.T) {
 	cs := New("chat-mixed", "cc")
 	cwd := t.TempDir()
-	if err := cs.SetActiveCwd(cwd); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(cwd); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	cs.WithPersistence(nil, nil)
 
@@ -570,8 +570,8 @@ func TestNewActiveAgentSessions_RunningPlusDeadMixed(t *testing.T) {
 func TestNewActiveAgentSessions_ResultsSliceHasEveryEntry(t *testing.T) {
 	cs := New("chat-result-len", "cc")
 	cwd := t.TempDir()
-	if err := cs.SetActiveCwd(cwd); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(cwd); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	cs.WithPersistence(nil, nil)
 	injectAS(t, cs, "cc", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})

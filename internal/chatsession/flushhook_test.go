@@ -40,14 +40,14 @@ func TestFlushHook_DefaultDeliversToAgent(t *testing.T) {
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
-	cs.SetActiveCwd("/code/bailing")
-	cs.SetActiveAgent("claude")
+	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedAgent("claude")
 
-	// Simulate the daemon path: GetOrCreate → LookupActiveAgentSession
+	// Simulate the daemon path: GetOrCreate → LookupSelectedAgentSession
 	// (spawns via spawner) → QueueUserMessage (Idle flush).
-	as, err := cs.LookupActiveAgentSession()
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession: %v", err)
+		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 
 	blocks := []agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}}
@@ -80,11 +80,11 @@ func TestFlushHook_BusyQueues(t *testing.T) {
 	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
-	cs.SetActiveCwd("/x")
-	cs.SetActiveAgent("claude")
-	as, err := cs.LookupActiveAgentSession()
+	cs.SetSelectedCwd("/x")
+	cs.SetSelectedAgent("claude")
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession: %v", err)
+		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 
 	// Put a Prompt in flight — this is what "agent is processing a
@@ -123,7 +123,7 @@ func TestFlushHook_BusyQueues(t *testing.T) {
 }
 
 // TestFlushHook_NoActiveAgentSession: when /kill has cleared the
-// pool (activeAS == nil), flushing is a safe no-op that leaves the
+// pool (selectedAS == nil), flushing is a safe no-op that leaves the
 // message queued for the next respawn, instead of panicking.
 //
 // CS-AS 边界重构 Phase 1 port: the old default hook returned
@@ -136,20 +136,20 @@ func TestFlushHook_NoActiveAgentSession(t *testing.T) {
 	cs := New("oc_xxx", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
-	cs.SetActiveCwd("/x")
-	cs.SetActiveAgent("claude")
-	cs.LookupActiveAgentSession()
+	cs.SetSelectedCwd("/x")
+	cs.SetSelectedAgent("claude")
+	cs.LookupSelectedAgentSession()
 
 	// Simulate /kill via the lifecycle accessors (snapshot → Close →
 // Drop) — the kill package's KillAllAgents is tested separately in
 // internal/command/kill to avoid an import cycle here.
-snapshot := cs.AgentSessionsInCwd(cs.ActiveCwd())
+snapshot := cs.AgentSessionsInCwd(cs.SelectedCwd())
 for _, as := range snapshot {
 	_ = as.Close()
 	cs.DropAgentSession(as)
 }
 
-	// activeAS is nil. Queueing must not panic, and the message
+	// selectedAS is nil. Queueing must not panic, and the message
 	// must survive for the next respawn.
 	msg := makeTestMessage(cs,
 		[]agent.ContentBlock{{Type: agent.ContentText, Text: "lost"}}, "m_lost")

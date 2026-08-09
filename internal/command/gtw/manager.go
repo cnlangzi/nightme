@@ -88,7 +88,7 @@ func (m *Manager) SetGetChatSession(fn func(chatID string) *chatsession.ChatSess
 // available.
 //
 // Used internally by RunFix / HandleDraftReaction to access
-// ActiveCwd / SetActiveCwd / QueueUserMessage without going
+// SelectedCwd / SetSelectedCwd / QueueUserMessage without going
 // through an interface boundary.
 //
 // F-XX: replaces GetSender.

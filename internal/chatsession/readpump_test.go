@@ -22,7 +22,6 @@ package chatsession
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -113,7 +112,7 @@ func TestChatSession_PumpEvents_RoutesKindAgentEvent(t *testing.T) {
 
 	// Promote to active.
 	cs.mu.Lock()
-	cs.activeAS = as
+	cs.selectedAS = as
 	cs.mu.Unlock()
 
 	// Install event handler that captures the first event.
@@ -159,7 +158,7 @@ func TestChatSession_PumpEvents_RoutesKindPromptEnded(t *testing.T) {
 	defer as.Shutdown()
 
 	cs.mu.Lock()
-	cs.activeAS = as
+	cs.selectedAS = as
 	cs.mu.Unlock()
 
 	// Observe the terminal prompt-end event. writebackMessageState
@@ -252,7 +251,7 @@ func TestChatSession_TryFlush_AtLeastOnce(t *testing.T) {
 	defer as.Shutdown()
 
 	cs.mu.Lock()
-	cs.activeAS = as
+	cs.selectedAS = as
 	cs.mu.Unlock()
 
 	// Subscribe to MessageStateBus to observe the post-Submit
@@ -347,14 +346,14 @@ func TestChatSession_PromoteActive_NoBackgroundOpCtx(t *testing.T) {
 
 	// Register as active.
 	cs.mu.Lock()
-	cs.activeAS = oldAS
+	cs.selectedAS = oldAS
 	cs.mu.Unlock()
 
 	// Spawn a new AS, activate it, promote.
 	newAS, _ := makeSpawnedAS(t, cs, "pi", ctx)
 	defer newAS.Shutdown()
 	cs.mu.Lock()
-	cs.promoteActiveLocked(newAS)
+	cs.selectAgentSessionLocked(newAS)
 	cs.mu.Unlock()
 
 	// Old AS's opCtx must still be alive.
@@ -457,57 +456,13 @@ func waitFor(cond func() bool, timeout time.Duration) bool {
 	return false
 }
 
-// TestAgentSession_ReadPump_StableEventPointers is a regression
-// test for the &ev race that readpumpLoop had: the readpump
-// pushed `&ev` to eventQueue, and on the next iteration Go's
-// range loop shadowed ev with a fresh value. If the runtime
-// was slow to process the previous event, dereferencing the
-// pointer could see the new event's bytes. The fix copies
-// ev to the heap before taking its address.
+// TestAgentSession_ReadPump_StableEventPointers — REMOVED.
 //
-// This test pushes a flood of events, then reads them ALL out
-// of eventQueue, and verifies each one has its original payload
-// (not the payload of any other event that came through the
-// readpump's stack frame).
-func TestAgentSession_ReadPump_StableEventPointers(t *testing.T) {
-	cs := newChatSessionForTest("cs_test")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	as, fake := makeSpawnedAS(t, cs, "pi", ctx)
-	defer as.Shutdown()
-
-	const N = 50
-	for i := 0; i < N; i++ {
-		fake.PushEvent(agent.AgentEvent{
-			Kind: agent.EventAgentText,
-			Text: fmt.Sprintf("event-%d", i),
-		})
-	}
-
-	// Drain all events and verify each one.
-	for i := 0; i < N; i++ {
-		select {
-		case ev := <-as.Events():
-			if ev.Kind != KindAgentEvent {
-				t.Fatalf("event %d: kind = %v, want KindAgentEvent", i, ev.Kind)
-			}
-			if ev.AgentEvent == nil {
-				t.Fatalf("event %d: AgentEvent is nil", i)
-			}
-			want := fmt.Sprintf("event-%d", i)
-			if ev.AgentEvent.Text != want {
-				t.Fatalf("event %d: Text = %q, want %q "+
-					"(pointer-corruption regression: readpump's "+
-					"stack-allocated ev was overwritten by the next "+
-					"iteration before the runtime dereferenced it)",
-					i, ev.AgentEvent.Text, want)
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out reading event %d", i)
-		}
-	}
-}
+// Multi-as Phase 1 retires the direct `<-as.Events()` read path
+// in favor of the per-AS `EventBus`. Pointer-corruption coverage
+// now lives on the bus subscriber in
+// `agentsession_dispatch_test.go` (TestAgentSession_Dispatch_OrderingGuarantees),
+// which exercises the same hazard at the bus layer.
 
 // silence unused warning for helpers that may be conditionally used
 var _ = strings.Contains

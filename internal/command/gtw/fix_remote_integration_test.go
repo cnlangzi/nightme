@@ -74,8 +74,8 @@ func newFixRemoteRig(t *testing.T) *fixRemoteRig {
 		"refs/remotes/origin/main")
 
 	cs := chatsession.New("chat-fix-remote-"+t.Name(), "test-agent")
-	if err := cs.SetActiveCwd(repoRoot); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(repoRoot); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
@@ -137,7 +137,7 @@ func (r *fixRemoteRig) drive(t *testing.T, rawID string) (*Result, error) {
 //	→ AddLabel(wip) succeeds
 //	→ WorktreeAdd creates a real worktree
 //	→ EnsureGitignore + CommitGitignore + WriteGTWYml
-//	→ SetActiveCwd(worktree) (in-memory only — chatsession
+//	→ SetSelectedCwd(worktree) (in-memory only — chatsession
 //	  ChatSession without persistence in tests)
 //	→ dispatch (queue gets the issue body)
 //

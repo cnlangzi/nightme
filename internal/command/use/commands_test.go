@@ -49,7 +49,7 @@ func TestFactory_Handle_EmptyAgent_RepliesUsage(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory(mgr, "claude")
 	cs := mgr.GetOrCreate("c1", "claude")
-	_ = cs.SetActiveCwd("/tmp")
+	_ = cs.SetSelectedCwd("/tmp")
 
 	input := command.SlashInput{ChatID: "c1", Args: []string{"use", "  "}}
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, input)

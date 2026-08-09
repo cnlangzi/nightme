@@ -32,14 +32,14 @@ func RunPush(
 	chatID, messageID string,
 	args pushArgs,
 ) (*Result, error) {
-	activeCwd, err := pushCwd()
+	selectedCwd, err := pushCwd()
 	if err != nil {
 		return reply(ctx, deps.Send, chatID, messageID,
 			"❌ no active workspace. Send /cwd <path> first."), nil
 	}
 
 	// --- step 1: read yml ------------------------------
-	c, err := ReadGTWYml(activeCwd)
+	c, err := ReadGTWYml(selectedCwd)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return reply(ctx, deps.Send, chatID, messageID,

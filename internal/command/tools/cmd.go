@@ -1,7 +1,7 @@
 // Package tools implements the `/tools on|off` slash command.
 //
 // F-38 §3.1.3: per-chat tool-event visibility toggle. State-only;
-// does not touch activeCwd / activeAgent / pool. The actual gate
+// does not touch selectedCwd / selectedAgent / pool. The actual gate
 // (drop OutToolStart / OutToolEnd vs pass-through) lives in the
 // runtime's EventHandler closure, which reads cs.ToolsMode() after
 // Translate + ReplyTo stamping and before ch.Send.

@@ -96,13 +96,13 @@ func runTest(cmd *cobra.Command, f testCmdFlags) error {
 	mgr := chatsession.NewManager().WithSpawner(spawner)
 
 	cs := mgr.GetOrCreate("test:"+f.agentName, f.agentName)
-	if err := cs.SetActiveCwd(f.workspace); err != nil {
+	if err := cs.SetSelectedCwd(f.workspace); err != nil {
 		return fmt.Errorf("test: set cwd: %w", err)
 	}
-	if err := cs.SetActiveAgent(f.agentName); err != nil {
+	if err := cs.SetSelectedAgent(f.agentName); err != nil {
 		return fmt.Errorf("test: set agent: %w", err)
 	}
-	as, err := cs.LookupActiveAgentSession()
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
 		return fmt.Errorf("test: spawn: %w", err)
 	}

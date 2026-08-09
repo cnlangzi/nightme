@@ -1,20 +1,20 @@
 // Package kill — /kill's process-shutdown logic.
 //
-// Two entry points, both cwd-scoped to the chat's activeCwd:
+// Two entry points, both cwd-scoped to the chat's SelectedCwd:
 //
 //	KillAgent(c *Cmd, agentName)    /kill <agent> path
 //	KillAllAgents(c *Cmd)            /kill (no args) path
 //
 // Per-entry graceful shutdown is owned here (5s outer bound, per-
 // bridge Close goroutine fan-out, StatusRunning / StatusDetached-
-// with-handle → Close, otherwise "stale-cleared"). Pool + activeAS
+// with-handle → Close, otherwise "stale-cleared"). Pool + selectedAS
 // + agent_sessions.json cleanup is delegated to ChatSession's
 // lifecycle primitives (LookupInPool / AgentSessionsInCwd /
 // DropAgentSession) — this package never reaches into ChatSession's
 // private fields.
 //
 // Preserved invariants (matching /kill semantics):
-//   - cs.activeCwd / cs.activeAgent / queue / InputBuffer
+//   - cs.selectedCwd / cs.selectedAgent / queue / InputBuffer
 //   - Sibling entries in OTHER cwds / OTHER agent names
 //
 // Daemon shutdown (cmd/nightme/run.go) does NOT call these —
@@ -84,14 +84,14 @@ type closeOutcome struct {
 //     (no live process to signal; just clean disk).
 //
 // After Close (or the stale-clear decision), ChatSession.DropAgentSession
-// handles pool + activeAS + agent_sessions.json cleanup. This
+// handles pool + selectedAS + agent_sessions.json cleanup. This
 // function never reaches into CS private fields directly.
 func KillAgent(c *Cmd, agentName string) (Result, error) {
 	if c == nil || c.CS == nil {
 		return Result{}, ErrNoContext
 	}
 	cs := c.CS
-	cwd := cs.ActiveCwd()
+	cwd := cs.SelectedCwd()
 
 	as, err := cs.LookupInPool(agentName, cwd)
 	if err != nil {
@@ -133,13 +133,13 @@ func KillAgent(c *Cmd, agentName string) (Result, error) {
 }
 
 // KillAllAgents terminates every pool entry whose Cwd ==
-// c.CS.ActiveCwd().
+// c.CS.SelectedCwd().
 //
-// Returns nil + nil when activeCwd is empty OR the pool has no
+// Returns nil + nil when selectedCwd is empty OR the pool has no
 // entries in that cwd (no action taken). FormatKillResults on
 // nil/empty renders as "No active agents to kill."
 //
-// Per-entry behavior mirrors KillAgent. Pool + activeAS cleanup
+// Per-entry behavior mirrors KillAgent. Pool + selectedAS cleanup
 // is scoped to the matching entries only; entries in OTHER cwds
 // (from prior /cwd switches) are preserved, matching /kill's
 // cwd-scoped invariant.
@@ -153,12 +153,12 @@ func KillAllAgents(c *Cmd) ([]Result, error) {
 		return nil, ErrNoContext
 	}
 	cs := c.CS
-	cwd := cs.ActiveCwd()
+	cwd := cs.SelectedCwd()
 	if cwd == "" {
 		return nil, nil
 	}
 
-	// 1. Snapshot entries in activeCwd (read-only — ChatSession
+	// 1. Snapshot entries in selectedCwd (read-only — ChatSession
 	//    returns a fresh slice).
 	snapshot := cs.AgentSessionsInCwd(cwd)
 	if len(snapshot) == 0 {
@@ -213,7 +213,7 @@ func KillAllAgents(c *Cmd) ([]Result, error) {
 		}
 	}
 
-	// 5. Per-entry cleanup via DropAgentSession. activeAS is
+	// 5. Per-entry cleanup via DropAgentSession. selectedAS is
 	//    cleared by DropAgentSession iff it pointed to one of
 	//    the killed entries (safety invariant).
 	for _, as := range snapshot {

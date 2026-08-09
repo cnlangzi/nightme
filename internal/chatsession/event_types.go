@@ -52,11 +52,18 @@ type AgentEventEnvelope struct {
 // feishu adapter) don't need to reach back into ChatSession to
 // look up the message. State carries the new stage; At is the wall
 // time at which the transition was observed.
+//
+// PromptID and AgentSessionID identify the source Prompt / AS for
+// the transition. They're denormalized so subscribers don't need
+// to consult `cs.selectedAS` (which only routes input, not source).
+// Empty when no Prompt is involved (e.g. queued-only transitions).
 type MessageStateEvent struct {
-	ChatID    string
-	UserMsgID string
-	State     agent.MessageState
-	At        time.Time
+	ChatID         string
+	UserMsgID      string
+	State          agent.MessageState
+	At             time.Time
+	PromptID       string
+	AgentSessionID string
 }
 
 // PromptEndedEvent fires when a Prompt terminates. Replaces the
@@ -67,10 +74,14 @@ type MessageStateEvent struct {
 // PromptID identifies the just-ended Prompt for diagnostics /
 // writeback; Reason / EndedAt are denormalized for subscribers that
 // don't want to reach back into *Prompt.
+//
+// AgentSessionID identifies the AS that owned the Prompt; empty
+// when no AS is involved.
 type PromptEndedEvent struct {
-	ChatID    string
-	UserMsgID string
-	PromptID  string
-	Reason    PromptEndReason
-	EndedAt   time.Time
+	ChatID         string
+	UserMsgID      string
+	PromptID       string
+	Reason         PromptEndReason
+	EndedAt        time.Time
+	AgentSessionID string
 }

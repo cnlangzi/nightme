@@ -27,7 +27,7 @@ type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*ChatSession
 
-	// spawner is used by LookupActiveAgentSession on every chat
+	// spawner is used by LookupSelectedAgentSession on every chat
 	// for new AgentSessions. Shared across all chats (production
 	// wires a registrySpawner here).
 	spawner Spawner
@@ -87,7 +87,7 @@ func (m *Manager) WithOnCreate(fn func(*ChatSession)) *Manager {
 // is the cfg.Primary snapshot from config; ChatSession.primaryAgent
 // is captured here and never mutated post-creation (Q-A: no
 // /default command, no per-chat override). It also seeds
-// activeAgent so the runtime always has an effective agent to
+// selectedAgent so the runtime always has an effective agent to
 // dispatch to.
 func (m *Manager) GetOrCreate(chatID, primaryAgent string) *ChatSession {
 	m.mu.Lock()
@@ -153,7 +153,7 @@ func (m *Manager) List() []*ChatSession {
 //
 // Each persisted AgentSessionEntry becomes an AgentSession with
 // status=Detached (no process running). Subsequent /use will
-// re-spawn via the Spawner. ChatSession's activeAgentSessionId
+// re-spawn via the Spawner. ChatSession's selectedAgentSessionId
 // reference is restored if it points at a valid AgentSession.
 //
 // chatIDMap is an optional function that maps a ChatSessionEntry.ID
@@ -185,26 +185,26 @@ func (m *Manager) RestoreFromRegistry() error {
 		cs := New(entry.ChatID, entry.PrimaryAgent).
 			WithSpawner(m.spawner).
 			WithPersistence(m.csFile, m.asFile)
-		cs.activeCwd = entry.ActiveCwd
-		cs.activeAgent = entry.ActiveAgent
+		cs.selectedCwd = entry.SelectedCwd
+		cs.selectedAgent = entry.SelectedAgent
 		cs.watchMode = entry.WatchMode // F-watch: 0 == WatchModeMention (default, safe)
 		cs.thinkMode = entry.ThinkMode // F-think: 0 == ThinkModeShow (default; preserve F-thread-route behavior)
 		cs.toolsMode = entry.ToolsMode // F-38: 0 == ToolsModeHide (default; quiet by default)
 		cs.lastInteractionAt = entry.LastInteractionAt
-		// commit fix-6: clear activeAS on restore. The persisted
-		// activeAgentSessionId points at an AgentSession whose
+		// commit fix-6: clear selectedAS on restore. The persisted
+		// selectedAgentSessionId points at an AgentSession whose
 		// handle is in-memory only (lost on restart). Leaving the
 		// pointer set would cause SendBlocks (called by the default
 		// FlushHook) to return ErrNotRunning and silently drop user
-		// messages. The next LookupActiveAgentSession will spawn
-		// fresh and re-populate activeAS.
-		cs.activeAS = nil
+		// messages. The next LookupSelectedAgentSession will spawn
+		// fresh and re-populate selectedAS.
+		cs.selectedAS = nil
 		// Seed the pool from the agent_sessions.json entries that
 		// belong to this ChatSession. FromAgentSessionEntry has
 		// already demoted any StatusRunning to StatusDetached, so
-		// LookupActiveAgentSession will re-spawn on the next call.
+		// LookupSelectedAgentSession will re-spawn on the next call.
 		for _, as := range agentsByCS[entry.ID] {
-			cs.pool[agentCwdKey{Agent: as.Agent, Cwd: as.Cwd}] = as
+			cs.attachAgentSession(as)
 		}
 		m.sessions[entry.ChatID] = cs
 
@@ -217,6 +217,6 @@ func (m *Manager) RestoreFromRegistry() error {
 	return nil
 }
 
-// ErrNoActiveChatSession is returned by handlers when chatID has no
+// ErrNoSelectedChatSession is returned by handlers when chatID has no
 // ChatSession yet. Callers should reply with "/cwd first".
-var ErrNoActiveChatSession = fmt.Errorf("chatsession: no ChatSession for chat (send /cwd <path> first)")
+var ErrNoSelectedChatSession = fmt.Errorf("chatsession: no ChatSession for chat (send /cwd <path> first)")

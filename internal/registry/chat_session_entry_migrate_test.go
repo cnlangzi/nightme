@@ -33,8 +33,8 @@ func TestChatSessionEntry_Unmarshal_LegacyDefaultAgent(t *testing.T) {
 	if e.PrimaryAgent != "claude" {
 		t.Fatalf("PrimaryAgent: got %q, want claude (migrated from legacy defaultAgent)", e.PrimaryAgent)
 	}
-	if e.ActiveAgent != "codex" {
-		t.Fatalf("ActiveAgent: got %q, want codex (preserved from legacy)", e.ActiveAgent)
+	if e.SelectedAgent != "codex" {
+		t.Fatalf("SelectedAgent: got %q, want codex (preserved from legacy)", e.SelectedAgent)
 	}
 }
 
@@ -71,8 +71,8 @@ func TestChatSessionEntry_RoundTrip_NoLegacyField(t *testing.T) {
 	e := ChatSessionEntry{
 		ID:           "cs_x",
 		ChatID:       "oc_x",
-		ActiveCwd:    "/code/x",
-		ActiveAgent:  "claude",
+		SelectedCwd:    "/code/x",
+		SelectedAgent:  "claude",
 		PrimaryAgent: "claude",
 		CreatedAt:    mustTime("2026-08-03T00:00:00Z"),
 		LastInteractionAt: mustTime("2026-08-03T00:00:00Z"),

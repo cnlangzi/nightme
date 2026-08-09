@@ -1,7 +1,7 @@
 // Package watch implements the `/watch on|off` slash command.
 //
 // F-watch §3.1.1: per-chat message-watch toggle. State-only;
-// does not touch activeCwd / activeAgent / pool. The actual gate
+// does not touch selectedCwd / selectedAgent / pool. The actual gate
 // (drop non-mention messages vs pass-through) lives in
 // gateway.Handle — this handler only mutates state and replies.
 //

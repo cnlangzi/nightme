@@ -85,12 +85,12 @@ func (f fakeSpawnerLS) Spawn(_ context.Context, _, _ string, _ []string, _ strin
 // The session only flips to Exited when the events channel closes.
 func TestReadPump_ContinuesAfterEventDone(t *testing.T) {
 	cs := New("oc_pi", "pi")
-	cs.SetActiveCwd("/tmp")
-	cs.SetActiveAgent("pi")
+	cs.SetSelectedCwd("/tmp")
+	cs.SetSelectedAgent("pi")
 	fake := newLongLivedFakeAS()
 	cs.spawner = fakeSpawnerLS{as: fake}
 
-	if _, err := cs.LookupActiveAgentSession(); err != nil {
+	if _, err := cs.LookupSelectedAgentSession(); err != nil {
 		t.Fatalf("lookup: %v", err)
 	}
 	// CS-AS 边界重构 Phase 1: the readpump is per-AgentSession and
@@ -130,15 +130,15 @@ func TestReadPump_ContinuesAfterEventDone(t *testing.T) {
 	// AgentSession status to Exited.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if cs.activeAS != nil {
-			if status := cs.activeAS.Status(); status == StatusExited {
+		if cs.selectedAS != nil {
+			if status := cs.selectedAS.Status(); status == StatusExited {
 				return
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if cs.activeAS == nil {
-		t.Fatalf("activeAS is nil after close")
+	if cs.selectedAS == nil {
+		t.Fatalf("selectedAS is nil after close")
 	}
-	t.Fatalf("AgentSession status = %s, want Exited after channel close", cs.activeAS.Status())
+	t.Fatalf("AgentSession status = %s, want Exited after channel close", cs.selectedAS.Status())
 }

@@ -122,8 +122,8 @@ func RunFix(
 			"Usage: /gtw fix <issue-id>  |  /gtw fix --name <branch>"), nil
 	}
 
-	// --- preflight: ActiveCwd must be set for both modes --------
-	if cs == nil || cs.ActiveCwd() == "" {
+	// --- preflight: SelectedCwd must be set for both modes --------
+	if cs == nil || cs.SelectedCwd() == "" {
 		return reply(ctx, deps.Send, chatID, messageID,
 			"❌ No active workspace. Send /cwd <path> first."), nil
 	}
@@ -143,7 +143,7 @@ func RunFix(
 	// explicitly opting in to a destructive cleanup that
 	// also nukes any orphan yml's parent worktree.
 	if !force {
-		if err := preflightOrphanYml(ctx, cs.ActiveCwd(), deps.Git); err != nil {
+		if err := preflightOrphanYml(ctx, cs.SelectedCwd(), deps.Git); err != nil {
 			return reply(ctx, deps.Send, chatID, messageID, err.Error()), nil
 		}
 	}
@@ -198,7 +198,7 @@ func forceCleanWorktreePath(ctx context.Context, repoRoot, worktreePath string, 
 //  5. BranchExists? → DraftFixBranchExists card.
 //  6. AddLabel(LabelWIP); on WorktreeAdd failure RemoveLabel
 //     and emit DraftFixWorktreeFail card.
-//  7. SetActiveCwd → slot.Store(ModeRemote).
+//  7. SetSelectedCwd → slot.Store(ModeRemote).
 //  8. Render success card.
 //  9. Dispatch issue body to ChatSession.QueueUserMessage so
 //     the agent picks it up. Failure here does NOT roll back
@@ -234,7 +234,7 @@ func runFixRemote(
 	}
 
 	// --- locate repo + remote (§5.2.② prep) -----------------------
-	repoRoot, err := RepoRoot(ctx, cs.ActiveCwd(), deps.Git)
+	repoRoot, err := RepoRoot(ctx, cs.SelectedCwd(), deps.Git)
 	if err != nil {
 		return reply(ctx, deps.Send, chatID, messageID,
 			"❌ Not in a git repository. Run /cwd <inside a repo> first."), nil
@@ -447,7 +447,7 @@ func runFixRemote(
 //  4. BranchExists? → DraftFixBranchExists card (no LabelAdded
 //     payload — local mode has no remote state to roll back).
 //  5. WorktreeAdd; on failure emit DraftFixWorktreeFail card.
-//  6. SetActiveCwd → slot.Store(ModeLocal, Issue=-1).
+//  6. SetSelectedCwd → slot.Store(ModeLocal, Issue=-1).
 //  7. Render the simplified local success card.
 //
 // Local mode does NOT call provider.GetIssue / AddLabel /
@@ -468,7 +468,7 @@ func runFixLocal(
 		return reply(ctx, deps.Send, chatID, messageID, "❌ "+err.Error()), nil
 	}
 
-	repoRoot, err := RepoRoot(ctx, cs.ActiveCwd(), deps.Git)
+	repoRoot, err := RepoRoot(ctx, cs.SelectedCwd(), deps.Git)
 	if err != nil {
 		return reply(ctx, deps.Send, chatID, messageID,
 			"❌ Not in a git repository. Run /cwd <inside a repo> first."), nil
@@ -569,13 +569,13 @@ func completeFixAndDispatch(
 	baseSHA string,
 ) (*Result, error) {
 	// --- switch cwd (§5.2.④) -------------------------------------
-	if err := cs.SetActiveCwd(worktreePath); err != nil {
+	if err := cs.SetSelectedCwd(worktreePath); err != nil {
 		return reply(ctx, deps.Send, chatID, messageID,
-			fmt.Sprintf("❌ SetActiveCwd failed: %v", err)), nil
+			fmt.Sprintf("❌ SetSelectedCwd failed: %v", err)), nil
 	}
 
 	// --- ensure worktree .gitignore (§14.4 step 5) ---------------
-	// We touch the worktree's gitignore AFTER SetActiveCwd so the
+	// We touch the worktree's gitignore AFTER SetSelectedCwd so the
 	// file lives where the user's eye will land. Then we commit
 	// the change so the worktree ends up genuinely clean — that
 	// way `git worktree remove` later succeeds without

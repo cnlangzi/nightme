@@ -57,7 +57,7 @@ func TestWritebackMessageState_FiresOnPromptEndHook(t *testing.T) {
 		EndedAt:       time.Now(),
 		EndReason:     PromptEndClean,
 	}
-	cs.writebackMessageState(p)
+	cs.writebackMessageState(nil, p)
 
 	mu.Lock()
 	defer mu.Unlock()

@@ -246,7 +246,7 @@ func TestRunClose_ForceOverridesDirty(t *testing.T) {
 	}
 
 	cs := chatsession.New("chat-force-dirty", "test-agent")
-	_ = cs.SetActiveCwd(wt)
+	_ = cs.SetSelectedCwd(wt)
 	slot := &memSlot{Context{
 		Mode: ModeLocal, Issue: -1, Branch: "fix/dirty",
 		Worktree: wt, RepoRoot: repoRoot, State: StateFixing,
@@ -346,8 +346,8 @@ func TestFixRemote_ForceRemovesLeftoverWorktree(t *testing.T) {
 	}
 
 	cs := chatsession.New("chat-force", "test-agent")
-	if err := cs.SetActiveCwd(repoRoot); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(repoRoot); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
@@ -384,9 +384,9 @@ func TestFixRemote_ForceRemovesLeftoverWorktree(t *testing.T) {
 		t.Errorf("Result.Consumed = false")
 	}
 
-	// After the fix, ActiveCwd must be the (re-created) worktree.
-	if got := cs.ActiveCwd(); got != wt {
-		t.Errorf("ActiveCwd = %q, want %q", got, wt)
+	// After the fix, SelectedCwd must be the (re-created) worktree.
+	if got := cs.SelectedCwd(); got != wt {
+		t.Errorf("SelectedCwd = %q, want %q", got, wt)
 	}
 	// yml must be re-written under the same path.
 	if _, err := os.Stat(filepath.Join(wt, ".nightme", "gtw.yml")); err != nil {
@@ -418,7 +418,7 @@ func TestFixRemote_WithoutForceStillRejectsOccupied(t *testing.T) {
 	mustGit(t, repoRoot, "worktree", "add", "-b", "oldbranch", wt, "HEAD")
 
 	cs := chatsession.New("chat-noforce", "test-agent")
-	_ = cs.SetActiveCwd(repoRoot)
+	_ = cs.SetSelectedCwd(repoRoot)
 
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	prov.SetIssue(42, &Issue{ID: 42, Title: "Title", State: "open"})

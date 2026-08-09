@@ -1,7 +1,7 @@
 // Package chatsession — EnrichedEvent (CS-AS 边界重构 Phase 1).
 //
 // `EnrichedEvent` 是 AgentSession 与 ChatSession 之间的唯一事件协议。
-// ChatSession 从 `cs.activeAS.Events()` 读取事件流,按 Kind 路由到 runtime。
+// ChatSession 从 `cs.selectedAS.Events()` 读取事件流,按 Kind 路由到 runtime。
 //
 // 设计原则:
 //

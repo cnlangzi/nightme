@@ -21,7 +21,7 @@ import (
 // by the unique ChatID constraint at the storage layer. Each
 // ChatSession owns a pool of AgentSessions (see AgentSessionEntry)
 // keyed by (agent, cwd); the active one is identified by
-// ActiveAgentSessionID.
+// SelectedAgentSessionID.
 //
 // Persistence file: chat_sessions.json
 //
@@ -34,18 +34,18 @@ import (
 //	                       Old files written before F-33 contain a
 //	                       `chatType` field; json.Unmarshal tolerates
 //	                       unknown fields and the field is ignored.
-//	ActiveCwd            — workspace currently bound; "" → ChatSession
+//	SelectedCwd            — workspace currently bound; "" → ChatSession
 //	                       exists but user has not yet /cwd'd.
-//	ActiveAgent          — agent name currently selected; "" → not yet
+//	SelectedAgent          — agent name currently selected; "" → not yet
 //	                       /use'd. Immutable per AgentSession.
 //	                       At construction, seeded from cfg.Primary
 //	                       (snapshot, see PrimaryAgent).
 //	PrimaryAgent         — snapshot of cfg.Primary at ChatSession
 //	                       creation time. Read-only post-construction
 //	                       (Q-A: no per-chat override). Init-time
-//	                       seeds ActiveAgent.
+//	                       seeds SelectedAgent.
 //	AgentSessionIDs      — pool index (in-order; unordered semantics).
-//	ActiveAgentSessionID — pointer into AgentSessionIDs[]; nil → no
+//	SelectedAgentSessionID — pointer into AgentSessionIDs[]; nil → no
 //	                       active AgentSession (need /cwd + /use).
 //	CreatedAt            — when ChatSession was first bound.
 //	LastInteractionAt    — last user message; used for idle expiry
@@ -80,34 +80,43 @@ import (
 //	                       ToolsMode's default is Hide (quiet by
 //	                       default; opt in to see tool calls).
 type ChatSessionEntry struct {
-	ID                   string    `json:"id"`
-	ChatID               string    `json:"chatId"`
-	ActiveCwd            string    `json:"activeCwd"`
-	ActiveAgent          string    `json:"activeAgent"`
-	PrimaryAgent         string    `json:"primaryAgent,omitempty"`
-	AgentSessionIDs      []string  `json:"agentSessionIds"`
-	ActiveAgentSessionID *string   `json:"activeAgentSessionId,omitempty"`
-	CreatedAt            time.Time `json:"createdAt"`
-	LastInteractionAt    time.Time `json:"lastInteractionAt"`
-	WatchMode            WatchMode        `json:"watchMode,omitempty"`
-	ThinkMode            ThinkMode        `json:"thinkMode,omitempty"`
-	ToolsMode            agent.ToolsMode  `json:"toolsMode,omitempty"`
+	ID                     string    `json:"id"`
+	ChatID                 string    `json:"chatId"`
+	SelectedCwd            string    `json:"selectedCwd"`
+	SelectedAgent          string    `json:"selectedAgent"`
+	PrimaryAgent           string    `json:"primaryAgent,omitempty"`
+	AgentSessionIDs        []string  `json:"agentSessionIds"`
+	SelectedAgentSessionID *string   `json:"selectedAgentSessionId,omitempty"`
+	CreatedAt              time.Time `json:"createdAt"`
+	LastInteractionAt      time.Time `json:"lastInteractionAt"`
+	WatchMode              WatchMode        `json:"watchMode,omitempty"`
+	ThinkMode              ThinkMode        `json:"thinkMode,omitempty"`
+	ToolsMode              agent.ToolsMode  `json:"toolsMode,omitempty"`
 }
 
 // UnmarshalJSON reads a ChatSessionEntry, transparently migrating
-// from the legacy field name `defaultAgent` (v1.2-early naming)
-// to the canonical `primaryAgent` (v1.2-final). Old chat_sessions.json
-// files written before the rename still carry `defaultAgent`; we
-// copy it into PrimaryAgent on read. New writes only emit
-// `primaryAgent`. Migration is one-shot and runs at first read.
+// from legacy field names:
 //
-// On write the canonical field is used; no migration file is left
-// behind. Subsequent reads see only the canonical field.
+//   - `defaultAgent` (v1.2-early)            → PrimaryAgent
+//   - `activeCwd`     (v1.2 early naming)   → SelectedCwd
+//   - `activeAgent`   (v1.2 early naming)   → SelectedAgent
+//   - `activeAgentSessionId` (v1.2 early)    → SelectedAgentSessionID
+//
+// Old chat_sessions.json files written before the renames still
+// carry the legacy keys; we copy each into the canonical field on
+// read. New writes only emit the canonical names. Migration is
+// one-shot and runs at first read.
+//
+// On write the canonical fields are used; no migration file is left
+// behind. Subsequent reads see only the canonical fields.
 func (e *ChatSessionEntry) UnmarshalJSON(data []byte) error {
 	type alias ChatSessionEntry
 	aux := struct {
 		*alias
-		LegacyDefaultAgent string `json:"defaultAgent,omitempty"`
+		LegacyDefaultAgent       string  `json:"defaultAgent,omitempty"`
+		LegacyActiveCwd          string  `json:"activeCwd,omitempty"`
+		LegacyActiveAgent        string  `json:"activeAgent,omitempty"`
+		LegacyActiveAgentSessID  *string `json:"activeAgentSessionId,omitempty"`
 	}{
 		alias: (*alias)(e),
 	}
@@ -116,6 +125,15 @@ func (e *ChatSessionEntry) UnmarshalJSON(data []byte) error {
 	}
 	if e.PrimaryAgent == "" && aux.LegacyDefaultAgent != "" {
 		e.PrimaryAgent = aux.LegacyDefaultAgent
+	}
+	if e.SelectedCwd == "" && aux.LegacyActiveCwd != "" {
+		e.SelectedCwd = aux.LegacyActiveCwd
+	}
+	if e.SelectedAgent == "" && aux.LegacyActiveAgent != "" {
+		e.SelectedAgent = aux.LegacyActiveAgent
+	}
+	if e.SelectedAgentSessionID == nil && aux.LegacyActiveAgentSessID != nil {
+		e.SelectedAgentSessionID = aux.LegacyActiveAgentSessID
 	}
 	return nil
 }

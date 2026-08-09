@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -161,10 +162,23 @@ type AgentSession struct {
 	isReady atomic.Bool
 
 	// eventQueue is the per-AS enriched-event buffer (cap
-	// eventQueueCapacity). Push by readpump; pull by ChatSession
-	// via `Events()`. Created at construction time, persists for
-	// AS lifetime. Closed by `Shutdown()` after readpump exits.
+	// eventQueueCapacity). Push by readpump; drained by the
+	// dispatcher goroutine which publishes onto EventBus. Created at
+	// construction time, persists for AS lifetime. Closed by
+	// `Shutdown()` after readpump exits.
 	eventQueue chan EnrichedEvent
+
+	// EventBus is the per-AS pub/sub for EnrichedEvent. The
+	// dispatcher goroutine publishes onto it; ChatSession subscribes
+	// when it attaches the AS. Owned by the AgentSession, persists
+	// for the AS lifetime (survives bridge respawns). Closed by
+	// `Shutdown()` after the dispatcher exits.
+	//
+	// Exposed as a field so callers can use the full EventBus API
+	// (Subscribe / Unsubscribe / Len). Publish / Close remain the
+	// AgentSession's responsibility; ChatSession should not call
+	// them directly.
+	EventBus *services.EventBus[EnrichedEvent]
 
 	// readpumpStarted guards single-launch of the readpump goroutine.
 	// Set true on first Activate. Re-A activate is a no-op.
@@ -175,6 +189,16 @@ type AgentSession struct {
 	// closed by the readpump on exit.
 	readpumpStop chan struct{}
 	readpumpDone chan struct{}
+
+	// dispatchStarted guards single-launch of the dispatcher
+	// goroutine that drains eventQueue and publishes onto EventBus.
+	dispatchStarted bool
+
+	// dispatchStop / dispatchDone coordinate orderly shutdown of
+	// the dispatcher goroutine. Stop is closed by Shutdown after
+	// readpumpStop; Done is closed by the dispatcher on exit.
+	dispatchStop chan struct{}
+	dispatchDone chan struct{}
 
 	// shutdownOnce guards Shutdown's idempotency. The first call
 	// closes eventQueue; subsequent calls are no-ops (close-on-
@@ -218,6 +242,7 @@ func newAgentSessionRuntime(id, chatSessionID, agentName, cwd string) *AgentSess
 		Cwd:           cwd,
 		stat:          StatusDetached,
 		eventQueue:    make(chan EnrichedEvent, eventQueueCapacity),
+		EventBus:      services.NewEventBus[EnrichedEvent](),
 	}
 	as.pid = 0
 	// Not yet activated; flips false on first Submit success (or,
@@ -250,7 +275,7 @@ func NewAgentSession(id, chatSessionID, agent, cwd string, args []string) *Agent
 // data. Process is not running on restart — the in-memory handle
 // is lost (we don't persist it), so we mark anything persisted as
 // StatusRunning as StatusDetached to force a re-spawn on next
-// LookupActiveAgentSession. This prevents the "spawned but
+// LookupSelectedAgentSession. This prevents the "spawned but
 // handle=nil" silent-drop bug where SendBlocks returns
 // ErrNotRunning and the default FlushHook ignores it.
 //
@@ -270,7 +295,7 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 	as.model = e.Model
 	// commit fix-6: any persisted "running" agent is actually dead
 	// after daemon restart (the process handle is in-memory only).
-	// Demote to Detached so the next LookupActiveAgentSession will
+	// Demote to Detached so the next LookupSelectedAgentSession will
 	// re-spawn. Persisted PID is also stale (newAgentSessionRuntime
 	// already zeroed it).
 	status := e.Status
@@ -397,17 +422,21 @@ func (as *AgentSession) Background() {
 	// no-op: see comment above.
 }
 
-// Shutdown (Phase 1) is the orderly AS lifecycle end. It:
+// Shutdown (multi-as Phase 1) is the orderly AS lifecycle end. It:
 //
 //  1. Cancels opCtx (cascades to any bridge callCtx derived from
 //     it; an in-flight SendBlocks waiting on a hung prompt RPC
 //     wakes up with ctx.Canceled).
 //  2. Signals the readpump goroutine to exit via readpumpStop,
 //     then waits on readpumpDone.
-//  3. Closes the eventQueue channel so CS readers see `!ok`.
+//  3. Closes the eventQueue channel so the dispatcher sees `!ok`.
+//  4. Signals the dispatcher goroutine to exit via dispatchStop,
+//     then waits on dispatchDone (so it can publish remaining
+//     events onto EventBus before closing it).
+//  5. Closes the EventBus so subscribers see Publish as a no-op.
 //
 // Called by /kill, ChatSession shutdown, and AS reaping. NOT
-// called by /use (which only changes `cs.activeAS` — see
+// called by /use (which only changes `cs.selectedAS` — see
 // Background).
 //
 // Distinct from `as.handle.Close()` (which only closes the bridge
@@ -444,12 +473,11 @@ func (as *AgentSession) Shutdown() {
 	}
 
 	// Step 3: close eventQueue. Safe to do here because readpump
-	// has exited and won't push more. After this, CS's
-	// `for ev := range as.Events()` returns `!ok` and exits.
+	// has exited and won't push more. After this, the dispatcher's
+	// `for ev := range eventQueue` returns `!ok` and exits.
 	//
 	// Note: we close but do NOT nil-out eventQueue. Callers that
 	// captured a reference to the channel before Shutdown
-	// (e.g. time-of-check as.Events() in a long-running reader)
 	// must still see the closed channel — nil-ing would lose
 	// that reference and reads would block forever.
 	//
@@ -461,6 +489,35 @@ func (as *AgentSession) Shutdown() {
 		}
 		as.asMu.Unlock()
 	})
+
+	// Step 4: signal dispatcher to stop and wait for it to drain
+	// remaining events onto EventBus. dispatcher is lazily started
+	// by ensureDispatcher(); on never-published ASes dispatchStop
+	// /dispatchDone are nil and we skip the close + wait.
+	as.asMu.RLock()
+	dStop := as.dispatchStop
+	dDone := as.dispatchDone
+	as.asMu.RUnlock()
+	if dStop != nil {
+		select {
+		case <-dStop:
+			// already closed
+		default:
+			close(dStop)
+		}
+	}
+	if dDone != nil {
+		<-dDone
+	}
+
+	// Step 5: close the EventBus so any future Subscribe/Publish
+	// calls become no-ops. Existing subscribers that captured the
+	// bus before Shutdown retain their unsubscribe funcs (they
+	// remain valid even after Close; Close just sets the closed
+	// flag).
+	if as.EventBus != nil {
+		as.EventBus.Close()
+	}
 }
 
 // IsActivated reports whether Activate has installed a live per-AS
@@ -468,7 +525,7 @@ func (as *AgentSession) Shutdown() {
 // A pre-installed Background ctx from either constructor does NOT
 // count — it has no cancel, so Background() would be a silent no-op.
 //
-// Used by ChatSession.promoteActiveLocked to make activation
+// Used by ChatSession.selectAgentSessionLocked to make activation
 // idempotent: re-activating on every lookup would cancel the
 // in-flight turn.
 func (as *AgentSession) IsActivated() bool {
@@ -483,7 +540,7 @@ func (as *AgentSession) IsActivated() bool {
 // After Activate returns, OpContext() yields the new ctx; the
 // old one is dead.
 //
-// The ONLY caller is ChatSession.promoteActiveLocked, which runs on
+// The ONLY caller is ChatSession.selectAgentSessionLocked, which runs on
 // every change of active AgentSession. Do not call it from handlers:
 // scattering activation is what left non-/use chats with an
 // unactivated AS (nil opCtx -> daemon panic on the first message
@@ -679,13 +736,13 @@ type agentCwdKey struct {
 // errors.Is to detect and decide whether to spawn.
 var ErrAgentNotFound = errors.New("chatsession: agent not in pool")
 
-// ErrNoActiveAgent is returned by LookupActiveAgentSession when
-// cs.activeAgent is empty. The runtime seeds activeAgent from
+// ErrNoSelectedAgent is returned by LookupSelectedAgentSession when
+// cs.selectedAgent is empty. The runtime seeds selectedAgent from
 // cfg.Primary at ChatSession construction (via
 // chatsession.NewManager.GetOrCreate); an empty primary at
 // construction indicates a misconfigured daemon (no global default
 // set in config.yaml).
-var ErrNoActiveAgent = errors.New("chatsession: activeAgent is empty (cfg.Primary snapshot was empty at construction)")
+var ErrNoSelectedAgent = errors.New("chatsession: selectedAgent is empty (cfg.Primary snapshot was empty at construction)")
 
 // ErrNotRunning is returned by SendText/SendBlocks/Close when called
 // before Spawn() succeeds.
@@ -764,19 +821,25 @@ func (as *AgentSession) Handle() agent.Agent {
 	return as.handle
 }
 
-// Events returns the live event channel from the bridge. Returns nil
-// Events (CS-AS 边界重构 Phase 1) returns the enriched event stream
+// Events (multi-as Phase 1) returns the per-AS enriched event channel
 // for ChatSession. Reads from this channel receive EnrichedEvent
 // values (KindAgentEvent / KindPromptEnded / KindLifecycle) instead
 // of raw bridge events, with Prompt anchoring already applied.
 //
+// Implementation: events flow through `as.eventQueue` (filled by the
+// read pump, drained by the dispatcher which publishes onto
+// `as.EventBus`). `as.Events()` returns `eventQueue` directly so
+// callers that read it observe events as soon as the read pump
+// pushes them — before the dispatcher publishes them onto the bus.
+//
+// Subscribers that prefer the bus interface should use
+// `as.EventBus.Subscribe(...)` directly. ChatSession's PumpEvents
+// keeps using `as.Events()` until S2 replaces it with a bus-based
+// subscription on attach.
+//
 // The returned channel is closed by Shutdown after the readpump
 // goroutine exits. Returns nil before the AgentSession is fully
 // constructed (defensive — should not happen in production).
-//
-// Compare to Phase 0's `Events()` which returned the raw bridge
-// channel; that responsibility moved to the readpump (see
-// `agentsession_readpump.go`).
 func (as *AgentSession) Events() <-chan EnrichedEvent {
 	as.asMu.RLock()
 	eq := as.eventQueue
@@ -964,7 +1027,7 @@ func (as *AgentSession) New(ctx context.Context, spawner Spawner) error {
 		// F-34 Phase 3 review: previously this branch returned
 		// without updating status, leaving as.stat=StatusRunning
 		// with the OLD PID and as.handle=nil. Subsequent
-		// LookupActiveAgentSession would see Running + nil handle
+		// LookupSelectedAgentSession would see Running + nil handle
 		// and fail every SendBlocks with ErrNotRunning. Mark as
 		// Exited so the next user message lazy-spawns a fresh AS.
 		as.asMu.Lock()

@@ -18,7 +18,7 @@ import (
 func fakeChatSession(id, cwd string) *chatsession.ChatSession {
 	cs := chatsession.New(id, "test-agent")
 	if cwd != "" {
-		_ = cs.SetActiveCwd(cwd)
+		_ = cs.SetSelectedCwd(cwd)
 	}
 	return cs
 }
@@ -224,8 +224,8 @@ func TestManager_SetGetChatSession_LazyCreate(t *testing.T) {
 	if calls != 1 {
 		t.Errorf("expected 1 factory call, got %d", calls)
 	}
-	if cs1.ActiveCwd() != "/code/A" {
-		t.Errorf("expected cwd /code/A, got %q", cs1.ActiveCwd())
+	if cs1.SelectedCwd() != "/code/A" {
+		t.Errorf("expected cwd /code/A, got %q", cs1.SelectedCwd())
 	}
 
 	// Second call: same ChatSession (cache hit, no new factory call).
@@ -288,7 +288,7 @@ func TestManager_SetGetChatSession_ConcurrentSafety(t *testing.T) {
 	}
 	// Allow some benign races but verify the cached value
 	// is consistent.
-	if cs := m.GetChatSession("c1"); cs == nil || cs.ActiveCwd() != "/code/c1" {
+	if cs := m.GetChatSession("c1"); cs == nil || cs.SelectedCwd() != "/code/c1" {
 		t.Errorf("expected cached ChatSession for c1, got %v", cs)
 	}
 }

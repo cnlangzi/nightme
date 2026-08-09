@@ -150,12 +150,12 @@ func TestAgentSession_SpawnViaSpawner(t *testing.T) {
 		WithPersistence(csFile, asFile).
 		WithSpawner(newFakeSpawner())
 
-	cs.SetActiveCwd("/code/bailing")
-	cs.SetActiveAgent("claude")
+	cs.SetSelectedCwd("/code/bailing")
+	cs.SetSelectedAgent("claude")
 
-	as, err := cs.LookupActiveAgentSession()
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession: %v", err)
+		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 	if as.Status() != StatusRunning {
 		t.Fatalf("expected Running after spawn, got %q", as.Status())
@@ -175,11 +175,11 @@ func TestAgentSession_SpawnIsIdempotent(t *testing.T) {
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
-	cs.SetActiveCwd("/x")
-	cs.SetActiveAgent("claude")
+	cs.SetSelectedCwd("/x")
+	cs.SetSelectedAgent("claude")
 
-	as1, _ := cs.LookupActiveAgentSession()
-	as2, _ := cs.LookupActiveAgentSession()
+	as1, _ := cs.LookupSelectedAgentSession()
+	as2, _ := cs.LookupSelectedAgentSession()
 
 	if as1.ID != as2.ID {
 		t.Fatalf("two lookups should resolve to same AgentSession")
@@ -199,10 +199,10 @@ func TestAgentSession_SpawnFailureLeavesDetached(t *testing.T) {
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
-	cs.SetActiveCwd("/x")
-	cs.SetActiveAgent("claude")
+	cs.SetSelectedCwd("/x")
+	cs.SetSelectedAgent("claude")
 
-	as, err := cs.LookupActiveAgentSession()
+	as, err := cs.LookupSelectedAgentSession()
 	if err == nil {
 		t.Fatalf("expected error from spawn failure")
 	}
@@ -220,12 +220,12 @@ func TestAgentSession_NoSpawnerLeavesDetached(t *testing.T) {
 		WithPersistence(csFile, asFile)
 	// no WithSpawner
 
-	cs.SetActiveCwd("/x")
-	cs.SetActiveAgent("claude")
+	cs.SetSelectedCwd("/x")
+	cs.SetSelectedAgent("claude")
 
-	as, err := cs.LookupActiveAgentSession()
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession: %v", err)
+		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 	if as.Status() != StatusDetached {
 		t.Fatalf("without Spawner: got %q, want Detached", as.Status())
@@ -249,10 +249,10 @@ func TestAgentSession_SendTextAfterSpawn(t *testing.T) {
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
-	cs.SetActiveCwd("/x")
-	cs.SetActiveAgent("claude")
+	cs.SetSelectedCwd("/x")
+	cs.SetSelectedAgent("claude")
 
-	as, _ := cs.LookupActiveAgentSession()
+	as, _ := cs.LookupSelectedAgentSession()
 	if err := as.SendText("hello"); err != nil {
 		t.Fatalf("SendText after spawn: %v", err)
 	}
@@ -265,9 +265,9 @@ func TestAgentSession_ObserveCloseTransitionsToExited(t *testing.T) {
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
 
-	cs.SetActiveCwd("/x")
-	cs.SetActiveAgent("claude")
-	as, _ := cs.LookupActiveAgentSession()
+	cs.SetSelectedCwd("/x")
+	cs.SetSelectedAgent("claude")
+	as, _ := cs.LookupSelectedAgentSession()
 
 	// Drain a few events then finish.
 	spawner.Get("claude", "/x").PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "hi"})
@@ -330,14 +330,14 @@ func TestAgentSession_RespawnPassesResumeID(t *testing.T) {
 	cs := New("oc_1", "claude").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
-	if err := cs.SetActiveCwd("/x"); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd("/x"); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
-	if err := cs.SetActiveAgent("claude"); err != nil {
-		t.Fatalf("SetActiveAgent: %v", err)
+	if err := cs.SetSelectedAgent("claude"); err != nil {
+		t.Fatalf("SetSelectedAgent: %v", err)
 	}
 
-	as, err := cs.LookupActiveAgentSession()
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
 		t.Fatalf("first Lookup: %v", err)
 	}

@@ -104,15 +104,15 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 	cs := New("oc_real_pi_test", "pi").
 		WithPersistence(csFile, asFile).
 		WithSpawner(spawner)
-	if err := cs.SetActiveCwd(dir); err != nil {
-		t.Fatalf("SetActiveCwd: %v", err)
+	if err := cs.SetSelectedCwd(dir); err != nil {
+		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
-	// Lazy spawn: the first Dispatch triggers LookupActiveAgentSession
+	// Lazy spawn: the first Dispatch triggers LookupSelectedAgentSession
 	// which spawns pi.
-	as, err := cs.LookupActiveAgentSession()
+	as, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupActiveAgentSession: %v", err)
+		t.Fatalf("LookupSelectedAgentSession: %v", err)
 	}
 	if as.Agent != "pi" {
 		t.Fatalf("expected pi session, got %q", as.Agent)
@@ -167,7 +167,7 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 		// Simulate /kill via the lifecycle accessors — the kill
 		// package's KillAllAgents is tested in internal/command/kill
 		// and importing it here would create a cycle.
-		snapshot := cs.AgentSessionsInCwd(cs.ActiveCwd())
+		snapshot := cs.AgentSessionsInCwd(cs.SelectedCwd())
 		for _, as := range snapshot {
 			_ = as.Close()
 			cs.DropAgentSession(as)

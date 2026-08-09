@@ -10,7 +10,7 @@ import "github.com/cnlangzi/nightme/internal/chatsession"
 // the "send /cwd first" hint reply — the caller should
 // return this output directly without further work.
 //
-// cs == nil is treated identically to ActiveCwd() == "" (both
+// cs == nil is treated identically to SelectedCwd() == "" (both
 // indicate "no session yet").
 //
 // Usage:
@@ -27,7 +27,7 @@ func RequireActiveCwd(cs *chatsession.ChatSession) (cwd string, failOut *SlashOu
 			Consumed: true,
 		}
 	}
-	cwd = cs.ActiveCwd()
+	cwd = cs.SelectedCwd()
 	if cwd == "" {
 		return "", &SlashOutput{
 			Reply:    "No active workspace. Send /cwd <path> first.",

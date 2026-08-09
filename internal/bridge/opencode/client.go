@@ -247,21 +247,32 @@ func (c *Client) decodeSession(req *http.Request) (*Session, error) {
 //
 // Body shape (opencode 1.18 OpenAPI):
 //
-//	{ "prompt": { "text": "...", "files": [...] } }
+//	{ "prompt": { "text": "...", "files": [...] },
+//	  "providerID": "...", "modelID": "..." }
 //
 // The bridge flattens the legacy PartInput union (text / file) into
 // this single-text-plus-files shape — opencode no longer accepts a
-// multi-part array.
-func (c *Client) Prompt(ctx context.Context, sessionID string, parts []PartInput) (*PromptResult, error) {
+// multi-part array. providerID + modelID are sent so opencode doesn't
+// fail with ModelNotSelectedError (the server doesn't pick a default
+// itself; it requires the bridge to tell it which provider/model
+// to dispatch to). Both are optional — empty strings are omitted
+// from the JSON so older opencode releases that don't expect them
+// still work.
+func (c *Client) Prompt(ctx context.Context, sessionID string, parts []PartInput, providerID, modelID string) (*PromptResult, error) {
 	if sessionID == "" {
 		return nil, fmt.Errorf("opencode: empty session id")
 	}
 	text, files := flattenPrompt(parts)
-	body := map[string]any{
-		"prompt": map[string]any{
-			"text":  text,
-			"files": files,
-		},
+	promptObj := map[string]any{
+		"text":  text,
+		"files": files,
+	}
+	body := map[string]any{"prompt": promptObj}
+	if providerID != "" {
+		body["providerID"] = providerID
+	}
+	if modelID != "" {
+		body["modelID"] = modelID
 	}
 	req, err := c.newRequest(ctx, "POST", "/api/session/"+url.PathEscape(sessionID)+"/prompt", body)
 	if err != nil {

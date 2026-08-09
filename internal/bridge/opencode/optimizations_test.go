@@ -7,9 +7,13 @@ package opencode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -302,7 +306,119 @@ type blockingWrite struct{ ch chan []byte }
 func (w *blockingWrite) Write(p []byte) (int, error) { return len(p), nil }
 func (w *blockingWrite) Close() error                { return nil }
 
-// _ keeps os imported even when no test below uses it (env helpers
-// above do). Avoids the "imported and not used" build break when
-// someone trims the file.
-var _ = os.Getenv
+// TestLoadDefaultOpencodeModel exercises the bridge's read of the
+// user's opencode state file. opencode 1.18 won't dispatch a
+// /prompt without providerID+modelID, so this read is what keeps
+// the bridge from hitting ModelNotSelectedError in production.
+//
+// We exercise three paths:
+//   - happy: a syntactically valid model.json → first recent entry
+//   - missing: the path doesn't exist → ("", "", nil)
+//   - malformed: garbage JSON → non-nil error
+func TestLoadDefaultOpencodeModel(t *testing.T) {
+	t.Run("happy", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "model.json")
+		contents := `{"recent":[
+			{"providerID":"minimax-cn-coding-plan","modelID":"MiniMax-M3"},
+			{"providerID":"minimax","modelID":"MiniMax-M2.7"}
+		],"favorite":[]}`
+		if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		t.Setenv("NIGHTME_OPENCODE_MODEL_JSON", path)
+		p, m, err := loadDefaultOpencodeModel()
+		if err != nil {
+			t.Fatalf("loadDefaultOpencodeModel: %v", err)
+		}
+		if p != "minimax-cn-coding-plan" || m != "MiniMax-M3" {
+			t.Errorf("got (%q, %q), want (minimax-cn-coding-plan, MiniMax-M3)", p, m)
+		}
+	})
+
+	t.Run("missing file is not an error", func(t *testing.T) {
+		t.Setenv("NIGHTME_OPENCODE_MODEL_JSON", "/no/such/path/model.json")
+		p, m, err := loadDefaultOpencodeModel()
+		if err != nil {
+			t.Errorf("missing file should not error, got %v", err)
+		}
+		if p != "" || m != "" {
+			t.Errorf("missing file should return empty, got (%q, %q)", p, m)
+		}
+	})
+
+	t.Run("malformed JSON errors", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "model.json")
+		if err := os.WriteFile(path, []byte("not json at all"), 0644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		t.Setenv("NIGHTME_OPENCODE_MODEL_JSON", path)
+		_, _, err := loadDefaultOpencodeModel()
+		if err == nil {
+			t.Error("malformed JSON should error")
+		}
+	})
+
+	t.Run("empty recent list", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "model.json")
+		if err := os.WriteFile(path, []byte(`{"recent":[]}`), 0644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		t.Setenv("NIGHTME_OPENCODE_MODEL_JSON", path)
+		p, m, err := loadDefaultOpencodeModel()
+		if err != nil {
+			t.Fatalf("loadDefaultOpencodeModel: %v", err)
+		}
+		if p != "" || m != "" {
+			t.Errorf("empty recent should return empty, got (%q, %q)", p, m)
+		}
+	})
+}
+
+// TestClient_PromptIncludesModel covers the wire-level change in
+// stage 8.3: Prompt now sends providerID + modelID so opencode
+// 1.18 doesn't reject with ModelNotSelectedError. Empty values
+// are omitted (forward-compat with older opencode releases that
+// don't expect these fields).
+func TestClient_PromptIncludesModel(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"id":"p_1","sessionID":"ses_1"}}`))
+	}))
+	defer srv.Close()
+	c := newClient(&serverProc{baseURL: srv.URL}, "/tmp")
+
+	t.Run("with model", func(t *testing.T) {
+		gotBody = nil
+		_, err := c.Prompt(context.Background(), "ses_1",
+			[]PartInput{TextPart("hi")}, "minimax-cn-coding-plan", "MiniMax-M3")
+		if err != nil {
+			t.Fatalf("Prompt: %v", err)
+		}
+		if gotBody["providerID"] != "minimax-cn-coding-plan" {
+			t.Errorf("providerID = %v, want minimax-cn-coding-plan", gotBody["providerID"])
+		}
+		if gotBody["modelID"] != "MiniMax-M3" {
+			t.Errorf("modelID = %v, want MiniMax-M3", gotBody["modelID"])
+		}
+	})
+
+	t.Run("empty model omitted", func(t *testing.T) {
+		gotBody = nil
+		_, err := c.Prompt(context.Background(), "ses_1",
+			[]PartInput{TextPart("hi")}, "", "")
+		if err != nil {
+			t.Fatalf("Prompt: %v", err)
+		}
+		if _, ok := gotBody["providerID"]; ok {
+			t.Errorf("empty providerID should be omitted, got %v", gotBody["providerID"])
+		}
+		if _, ok := gotBody["modelID"]; ok {
+			t.Errorf("empty modelID should be omitted, got %v", gotBody["modelID"])
+		}
+	})
+}

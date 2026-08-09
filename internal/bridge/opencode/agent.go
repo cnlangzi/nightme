@@ -35,6 +35,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -58,6 +59,8 @@ type Agent struct {
 	server    *serverProc
 	client    *Client
 	events    chan agent.AgentEvent
+	providerID string // opencode providerID (e.g. "minimax-cn-coding-plan"); loaded from ~/.local/state/opencode/model.json
+	modelID    string // opencode modelID (e.g. "MiniMax-M3"); loaded from same file
 	workspace string
 	branch    string
 	sessionID string
@@ -272,6 +275,26 @@ func (a *Agent) startOnce(ctx context.Context, cfg agent.StartConfig) (*Agent, e
 		"requested_id", cfg.SessionID,
 	)
 
+	// Load the user's opencode default model from
+	// ~/.local/state/opencode/model.json so /prompt has a
+	// providerID+modelID to send — without this, opencode 1.18
+	// rejects the prompt with ModelNotSelectedError because the
+	// server doesn't pick a default itself. We expose
+	// NIGHTME_OPENCODE_MODEL_JSON as an override so tests / CI
+	// can point at a fixture without touching $HOME.
+	providerID, modelID, modelErr := loadDefaultOpencodeModel()
+	if modelErr != nil {
+		oLog("default model load failed, prompt will use no model",
+			"err", modelErr.Error())
+	} else {
+		live.providerID = providerID
+		live.modelID = modelID
+		live.model = providerID + "/" + modelID
+		oLog("default model loaded",
+			"provider_id", providerID,
+			"model_id", modelID)
+	}
+
 	live.trans = newTranslator(
 		live.deliver,
 		a.name,
@@ -478,7 +501,7 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 		return nil
 	}
 
-	if _, err := a.client.Prompt(ctx, a.sessionID, parts); err != nil {
+	if _, err := a.client.Prompt(ctx, a.sessionID, parts, a.providerID, a.modelID); err != nil {
 		// Prompt failed before the turn even started — release the
 		// guard so the next SendBlocks can proceed. The normal
 		// release path is the session.idle SSE event.
@@ -954,7 +977,67 @@ func (a *Agent) watchdog() {
 	}
 }
 
-// ─── helpers ─────────────────────────────────────────────────────
+// loadDefaultOpencodeModel reads the user's most-recently-used
+// providerID + modelID from opencode's own state file
+// ($HOME/.local/state/opencode/model.json by default; override
+// via NIGHTME_OPENCODE_MODEL_JSON for tests). opencode 1.18 does
+// NOT pick a default model on its own — /prompt requires the
+// bridge to specify providerID + modelID, otherwise it returns
+// SessionRunnerModel.ModelNotSelectedError. We read the file
+// rather than adding a CLI flag to the bridge config so that
+// whichever model the operator has selected in the opencode TUI
+// (which writes to model.json) is what the bridge uses too —
+// the two stay in sync without runtime changes.
+//
+// Returns ("", "", nil) if the file does not exist (CI, fresh
+// install, etc.) — the bridge then sends /prompt without
+// providerID/modelID and relies on whatever opencode's server
+// happens to default to (typically an error for 1.18+).
+func loadDefaultOpencodeModel() (providerID, modelID string, err error) {
+	path := defaultOpencodeModelPath()
+	if path == "" {
+		return "", "", nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// No file = no default. Not an error.
+			return "", "", nil
+		}
+		return "", "", fmt.Errorf("read %s: %w", path, err)
+	}
+	var m struct {
+		Recent []struct {
+			ProviderID string `json:"providerID"`
+			ModelID    string `json:"modelID"`
+		} `json:"recent"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return "", "", fmt.Errorf("parse %s: %w", path, err)
+	}
+	if len(m.Recent) == 0 {
+		return "", "", nil
+	}
+	// Recent is MRU-first; the first entry is the most-recent
+	// selection. We trust that order rather than trying to
+	// reason about recency timestamps (the file shape only has
+	// an array, no per-entry time).
+	return m.Recent[0].ProviderID, m.Recent[0].ModelID, nil
+}
+
+// defaultOpencodeModelPath returns the opencode state file path,
+// honoring NIGHTME_OPENCODE_MODEL_JSON (test override) and
+// $HOME/.local/state/opencode/model.json otherwise.
+func defaultOpencodeModelPath() string {
+	if override := strings.TrimSpace(os.Getenv("NIGHTME_OPENCODE_MODEL_JSON")); override != "" {
+		return override
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".local", "state", "opencode", "model.json")
+}
 
 // detectBranch returns the current git branch for workspace, or "" on
 // any failure (non-git workspace, git not installed, detached HEAD).

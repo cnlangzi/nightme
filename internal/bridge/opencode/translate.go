@@ -91,15 +91,46 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 		var p struct {
 			Part Part `json:"part"`
 		}
-		if err := json.Unmarshal(ev.Properties, &p); err != nil {
+		if err := json.Unmarshal(ev.properties(), &p); err != nil {
 			return nil
 		}
 		t.handlePart(p.Part)
-	case "session.idle":
+
+	// opencode 1.18+ streams text via session.next.text.delta on
+	// the global event bus. The per-session message.part.updated
+	// path still works for older releases. We accept both so the
+	// bridge renders text on whatever system the user is running.
+	case "session.next.text.delta":
+		var p struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(ev.properties(), &p); err == nil && p.Text != "" {
+			t.deliver(agent.AgentEvent{
+				Kind:      agent.EventAgentText,
+				SessionID: t.sessionID,
+				Model:     t.model,
+				AgentName: t.agentName,
+				Workspace: t.workspace,
+				Branch:    t.branch,
+				Text:      p.Text,
+			})
+		}
+	case "session.next.step.started", "session.next.step.ended":
+		// Tool lifecycle in the new event taxonomy. The actual
+		// callID / tool name are not in the test fixtures yet —
+		// once we have a real sample we can correlate by callID.
+		// For now we log only.
+		oLog("sse: session.next.step", "type", ev.Type)
+	case "session.idle", "session.next.idle":
 		// Carry forward the last-seen usage, if any, so the
 		// channel footer can render totals. The Done.Usage field
 		// is the canonical source for runtime accumulation per
 		// F-49 §1.2.
+		//
+		// opencode 1.18+ renamed the event from `session.idle` to
+		// `session.next.idle` as part of the session.next.*
+		// taxonomy rewrite. We accept both for forward
+		// compatibility with older releases.
 		usage := t.lastUsage
 		t.deliver(agent.AgentEvent{
 			Kind:      agent.EventAgentDone,
@@ -118,7 +149,7 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 		var p struct {
 			Error json.RawMessage `json:"error"`
 		}
-		_ = json.Unmarshal(ev.Properties, &p)
+		_ = json.Unmarshal(ev.properties(), &p)
 		t.deliver(agent.AgentEvent{
 			Kind:      agent.EventAgentError,
 			SessionID: t.sessionID,
@@ -144,14 +175,14 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 		})
 	case "usage_update":
 		var p UsageUpdate
-		if err := json.Unmarshal(ev.Properties, &p); err == nil {
+		if err := json.Unmarshal(ev.properties(), &p); err == nil {
 			t.lastUsage = p.toUsageInfo()
 		}
 	case "current_mode_update":
 		var p struct {
 			CurrentModeID string `json:"currentModeId"`
 		}
-		if err := json.Unmarshal(ev.Properties, &p); err == nil && p.CurrentModeID != "" {
+		if err := json.Unmarshal(ev.properties(), &p); err == nil && p.CurrentModeID != "" {
 			// Cache mode on the translator; not surfaced to the
 			// runtime yet because the agent package does not have a
 			// dedicated mode event. Re-emit EventAgentReady so the
@@ -172,12 +203,12 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 		var p struct {
 			AvailableCommands []json.RawMessage `json:"availableCommands"`
 		}
-		if err := json.Unmarshal(ev.Properties, &p); err == nil {
+		if err := json.Unmarshal(ev.properties(), &p); err == nil {
 			oLog("sse: available_commands_update", "count", len(p.AvailableCommands))
 		}
 	case "permission.asked":
 		var p PermissionAsked
-		if err := json.Unmarshal(ev.Properties, &p); err == nil {
+		if err := json.Unmarshal(ev.properties(), &p); err == nil {
 			t.handlePermission(p)
 		}
 	default:

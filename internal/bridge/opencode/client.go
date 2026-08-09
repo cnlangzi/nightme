@@ -166,10 +166,15 @@ type CreateSessionOpts struct {
 }
 
 // PromptResult is the parsed response of POST /api/session/{id}/prompt.
-// The endpoint returns a full SessionMessagesResponse; we only need
-// the last assistant message's tokens / cost for the usage footer.
+// The endpoint returns {"data": {SessionInputAdmitted}}; we keep only
+// the parts we render (the message id for EventAgentResult, the
+// timestamps for future use). The runtime doesn't need the full
+// SessionInputAdmitted shape.
 type PromptResult struct {
-	Info any `json:"info"`
+	Data struct {
+		ID        string `json:"id"`
+		SessionID string `json:"sessionID"`
+	} `json:"data"`
 }
 
 // CreateSession calls POST /api/session.
@@ -239,11 +244,25 @@ func (c *Client) decodeSession(req *http.Request) (*Session, error) {
 // the turn is fully complete (synchronous). We use this rather than
 // prompt_async so the bridge's existing turn-completion signaling
 // (session.idle SSE) lines up with the prompt response.
+//
+// Body shape (opencode 1.18 OpenAPI):
+//
+//	{ "prompt": { "text": "...", "files": [...] } }
+//
+// The bridge flattens the legacy PartInput union (text / file) into
+// this single-text-plus-files shape — opencode no longer accepts a
+// multi-part array.
 func (c *Client) Prompt(ctx context.Context, sessionID string, parts []PartInput) (*PromptResult, error) {
 	if sessionID == "" {
 		return nil, fmt.Errorf("opencode: empty session id")
 	}
-	body := map[string]any{"parts": parts}
+	text, files := flattenPrompt(parts)
+	body := map[string]any{
+		"prompt": map[string]any{
+			"text":  text,
+			"files": files,
+		},
+	}
 	req, err := c.newRequest(ctx, "POST", "/api/session/"+url.PathEscape(sessionID)+"/prompt", body)
 	if err != nil {
 		return nil, err
@@ -253,6 +272,49 @@ func (c *Client) Prompt(ctx context.Context, sessionID string, parts []PartInput
 		return nil, err
 	}
 	return &r, nil
+}
+
+// flattenPrompt joins multiple text parts with "\n\n" and
+// collects file/image parts into a single files array. The
+// opencode PromptInput schema is intentionally simpler than the
+// legacy multi-part design — we keep the bridge's []PartInput
+// surface so callers don't change, but the on-wire shape is
+// flat.
+//
+// `files` is always non-nil because opencode's payload validator
+// rejects null with "Expected array, got null" (stage 7 e2e
+// regression against real opencode). An empty slice serializes
+// as `[]` which passes.
+func flattenPrompt(parts []PartInput) (string, []PromptInputFile) {
+	var textParts []string
+	files := []PromptInputFile{}
+	for _, p := range parts {
+		switch p.Type {
+		case "text":
+			if p.Text != "" {
+				textParts = append(textParts, p.Text)
+			}
+		case "file":
+			if p.URL == "" {
+				continue
+			}
+			files = append(files, PromptInputFile{
+				MIME: p.MIME,
+				URL:  p.URL,
+				Name: p.Filename,
+			})
+		}
+	}
+	return strings.Join(textParts, "\n\n"), files
+}
+
+// PromptInputFile mirrors the OpenAPI PromptInputFileAttachment —
+// one file per attachment. opencode then uploads/reads it
+// server-side.
+type PromptInputFile struct {
+	MIME string `json:"mime,omitempty"`
+	URL  string `json:"url"`
+	Name string `json:"filename,omitempty"`
 }
 
 // Interrupt calls POST /api/session/{id}/interrupt.

@@ -669,7 +669,7 @@ func (a *Agent) readSSE(body io.ReadCloser) {
 		// reply goroutine can route SendPermission back.
 		if ev.Type == "permission.asked" {
 			var p PermissionAsked
-			if err := json.Unmarshal(ev.Properties, &p); err == nil {
+			if err := json.Unmarshal(ev.properties(), &p); err == nil {
 				a.pendingMu.Lock()
 				a.pendingApprovalID = p.ID
 				a.pendingMu.Unlock()

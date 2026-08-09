@@ -30,16 +30,46 @@ import (
 )
 
 // SessionEvent is the discriminated union the opencode server emits on
-// the SSE stream. We keep `type` and `properties` as raw JSON so the
+// the SSE stream. We keep `type` and the payload as raw JSON so the
 // translator can dispatch on `type` without us re-typing every shape.
+//
+// opencode has two slightly different envelope shapes:
+//
+//	per-session: {"type":"...","properties":{...}}
+//	global:      {"type":"...","data":{...}}
+//
+// We normalise both into Properties. The translator dispatches on
+// Type without caring about which endpoint produced the event.
 type SessionEvent struct {
 	Type       string          `json:"type"`
 	Properties json.RawMessage `json:"properties"`
+	Data       json.RawMessage `json:"data"`
 }
 
-// Subscribe opens the SSE stream for sessionID and returns an
-// io.ReadCloser the caller can read events from. The caller is
+// properties returns the effective payload regardless of whether
+// the event came from the per-session or global stream. The
+// decoder maps both into the same field so the translator can
+// stay simple.
+func (e SessionEvent) properties() json.RawMessage {
+	if len(e.Properties) > 0 {
+		return e.Properties
+	}
+	return e.Data
+}
+
+// Subscribe opens the SSE stream for an opencode session and returns
+// an io.ReadCloser the caller can read events from. The caller is
 // responsible for closing the body when done.
+//
+// Implementation note: opencode 1.18.x's per-session endpoint
+// (/api/session/{id}/event) returns 500 ServeError because the
+// EventV2Bridge.Service layer is not available without an
+// active InstanceContext. We fall back to the global event
+// stream (/api/event) which is always wired and routes events
+// server-wide; the bridge's `x-opencode-directory` header is
+// already set by newRequest so the server-side event filter
+// applies (per-session events include the location field, the
+// global stream includes them too).
 //
 // The returned io.ReadCloser is the underlying response body. We do
 // not parse it here — the caller passes the body to decodeSSE.
@@ -47,7 +77,16 @@ func (c *Client) Subscribe(ctx context.Context, sessionID string) (io.ReadCloser
 	if sessionID == "" {
 		return nil, fmt.Errorf("opencode: empty session id")
 	}
-	req, err := c.newRequest(ctx, "GET", "/api/session/"+pathEscape(sessionID)+"/event", nil)
+	_ = sessionID // sessionID is informational; the global stream
+	// is filtered by the x-opencode-directory header we always set.
+	return c.subscribeGlobal(ctx)
+}
+
+// subscribeGlobal connects to /api/event, the server-wide SSE
+// stream. Used because the per-session endpoint is broken in
+// opencode 1.18.x (it returns 500 ServeError).
+func (c *Client) subscribeGlobal(ctx context.Context) (io.ReadCloser, error) {
+	req, err := c.newRequest(ctx, "GET", "/api/event", nil)
 	if err != nil {
 		return nil, err
 	}

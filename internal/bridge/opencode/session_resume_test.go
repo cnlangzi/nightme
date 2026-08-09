@@ -267,19 +267,23 @@ func TestSendBlocks_RequestShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
-	parts, ok := gotBody["parts"].([]any)
+	// opencode 1.18 prompt body shape: { prompt: { text, files } }
+	prompt, ok := gotBody["prompt"].(map[string]any)
 	if !ok {
-		t.Fatalf("parts not array: %v", gotBody)
+		t.Fatalf("prompt not object: %v", gotBody)
 	}
-	if len(parts) != 2 {
-		t.Fatalf("parts = %d, want 2", len(parts))
+	if got := prompt["text"]; got != "hello" {
+		t.Errorf("prompt.text = %v, want hello", got)
 	}
-	first, _ := parts[0].(map[string]any)
-	if first["type"] != "text" || first["text"] != "hello" {
-		t.Errorf("part[0] = %v", first)
+	files, ok := prompt["files"].([]any)
+	if !ok || len(files) != 1 {
+		t.Fatalf("prompt.files = %v, want 1 entry", prompt["files"])
 	}
-	second, _ := parts[1].(map[string]any)
-	if second["type"] != "file" || second["mime"] != "image/png" {
-		t.Errorf("part[1] = %v", second)
+	first, _ := files[0].(map[string]any)
+	if first["mime"] != "image/png" {
+		t.Errorf("file[0].mime = %v, want image/png", first["mime"])
+	}
+	if first["url"] != "file:///tmp/x.png" {
+		t.Errorf("file[0].url = %v, want file:///tmp/x.png", first["url"])
 	}
 }

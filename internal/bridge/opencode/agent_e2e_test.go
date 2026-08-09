@@ -66,6 +66,7 @@ func newFakeServer(t *testing.T) *fakeServer {
 	mux.HandleFunc("/api/health", fs.handleHealth)
 	mux.HandleFunc("/api/session", fs.handleSession)
 	mux.HandleFunc("/api/session/", fs.handleSessionByID)
+	mux.HandleFunc("/api/event", fs.handleGlobalEvent)
 	fs.srv = httptest.NewServer(mux)
 	return fs
 }
@@ -96,6 +97,19 @@ func (fs *fakeServer) url() string { return fs.srv.URL }
 func (fs *fakeServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// handleGlobalEvent is the GET /api/event SSE endpoint — the
+// bridge uses the global stream (stage 7) because opencode
+// 1.18.x's per-session /api/session/{id}/event returns 500.
+func (fs *fakeServer) handleGlobalEvent(w http.ResponseWriter, r *http.Request) {
+	// Force the path match even though the mux dispatches
+	// based on the route registration.
+	if r.URL.Path != "/api/event" {
+		http.NotFound(w, r)
+		return
+	}
+	fs.streamSSE(w, r)
 }
 
 func (fs *fakeServer) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -142,9 +156,9 @@ func (fs *fakeServer) handleSessionByID(w http.ResponseWriter, r *http.Request) 
 		}
 		fs.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"info":{}}`))
+		_, _ = w.Write([]byte(`{"data":{"id":"msg_1","sessionID":"ses_test"}}`))
 
-	// GET /api/session/{id}/event  (SSE)
+	// GET /api/session/{id}/event  (per-session SSE)
 	case len(parts) == 2 && parts[1] == "event" && r.Method == "GET":
 		fs.streamSSE(w, r)
 

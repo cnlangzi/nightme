@@ -580,6 +580,38 @@ func (a *Agent) ListModels(ctx context.Context) (map[string]any, error) {
 	return a.client.ListModels(ctx)
 }
 
+// AvailableBuiltinCommands returns the slash command names opencode
+// has advertised via the latest available_commands_update SSE event.
+// This is informational — opencode's HTTP API does not (yet)
+// expose a /command endpoint that would let us execute them, so
+// the runtime shim currently forwards commands as plain text
+// prompts to the model. Exposing the list lets the shim:
+//
+//   - render a help menu that includes opencode builtins
+//   - mark a passthrough input as "opencode builtin" for log
+//     clarity without changing the wire payload
+//
+// Returns nil before the first available_commands_update event
+// arrives (typically within ~1s of /api/event subscription) and
+// before Start.
+func (a *Agent) AvailableBuiltinCommands() []string {
+	if a.trans == nil {
+		return nil
+	}
+	return a.trans.AvailableBuiltinCommands()
+}
+
+// IsBuiltinCommand returns true if name (with or without leading
+// "/") is in opencode's advertised command list. Returns false
+// when no commands have been advertised yet, when the bridge is
+// not running, or when the name is unknown.
+func (a *Agent) IsBuiltinCommand(name string) bool {
+	if a.trans == nil {
+		return false
+	}
+	return a.trans.IsBuiltinCommand(name)
+}
+
 
 // ─── permission response ─────────────────────────────────────────
 

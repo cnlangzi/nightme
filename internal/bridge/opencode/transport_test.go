@@ -253,6 +253,57 @@ func TestTranslator_SessionIdle_EmptyReason(t *testing.T) {
 	}
 }
 
+// TestTranslator_StepStartedCountsAsActivity guards the refinement
+// added in stage 8.3: a turn that fires session.next.step.started
+// (proving the model took a turn) but produces no payload-bearing
+// events must NOT be marked "empty". This happens on opencode 1.18
+// when the model calls tools but the step event payload doesn't
+// include the callIDs we need to render them — the bridge sees a
+// "ghost" turn. Marking it "empty" would surface a misleading
+// "(empty response)" hint in the channel footer.
+func TestTranslator_StepStartedCountsAsActivity(t *testing.T) {
+	rec := &recorder{}
+	tr := newTranslator(rec.deliver, "opencode", "/tmp", "main", "ses_1", "")
+	stepStarted, _ := json.Marshal(map[string]any{})
+	if err := tr.handleEvent(SessionEvent{Type: "session.next.step.started", Properties: stepStarted}); err != nil {
+		t.Fatalf("handleEvent step.started: %v", err)
+	}
+	stepEnded, _ := json.Marshal(map[string]any{})
+	if err := tr.handleEvent(SessionEvent{Type: "session.next.step.ended", Properties: stepEnded}); err != nil {
+		t.Fatalf("handleEvent step.ended: %v", err)
+	}
+	if len(rec.evs) != 1 || rec.evs[0].Done == nil {
+		t.Fatalf("events = %+v, want one Done event", rec.evs)
+	}
+	if rec.evs[0].Done.Reason != "settled" {
+		t.Errorf("Done.Reason = %q, want settled (step.started proves activity)",
+			rec.evs[0].Done.Reason)
+	}
+}
+
+// TestTranslator_ResetTurnClearsStepFlag asserts ResetTurn resets
+// both turnHadContent AND turnHadStep so a subsequent turn doesn't
+// inherit the previous turn's step signal.
+func TestTranslator_ResetTurnClearsStepFlag(t *testing.T) {
+	rec := &recorder{}
+	tr := newTranslator(rec.deliver, "opencode", "/tmp", "main", "ses_1", "")
+	stepStarted, _ := json.Marshal(map[string]any{})
+	_ = tr.handleEvent(SessionEvent{Type: "session.next.step.started", Properties: stepStarted})
+
+	tr.ResetTurn()
+
+	// Now fire step.ended WITHOUT re-firing step.started. The turn
+	// is empty (no content, no fresh step.started).
+	stepEnded, _ := json.Marshal(map[string]any{})
+	if err := tr.handleEvent(SessionEvent{Type: "session.next.step.ended", Properties: stepEnded}); err != nil {
+		t.Fatalf("handleEvent: %v", err)
+	}
+	if len(rec.evs) != 1 || rec.evs[0].Done == nil || rec.evs[0].Done.Reason != "empty" {
+		t.Errorf("after ResetTurn, Done.Reason = %v, want empty (flags were cleared)",
+			rec.evs)
+	}
+}
+
 func TestTranslator_PermissionAsked(t *testing.T) {
 	rec := &recorder{}
 	tr := newTranslator(rec.deliver, "opencode", "/tmp", "main", "ses_1", "")
@@ -294,6 +345,142 @@ func TestTranslator_UnknownEventKeepsStreamAlive(t *testing.T) {
 	}
 	if len(rec.evs) != 0 {
 		t.Errorf("unknown event must not deliver, got %v", rec.evs)
+	}
+}
+
+// TestTranslator_NoiseEventsSilentlyDropped covers the allowlist of
+// known-noise event types opencode 1.18 emits (plugin.added,
+// catalog.updated, etc). They must NOT trigger delivery, and they
+// must NOT panic. The previous behaviour (log every occurrence at
+// info level) was correct but noisy; we now drop them silently.
+func TestTranslator_NoiseEventsSilentlyDropped(t *testing.T) {
+	for _, evType := range []string{
+		"plugin.added",
+		"catalog.updated",
+		"reference.updated",
+		"integration.updated",
+		"server.connected",
+		"message.updated",
+		"message.removed",
+	} {
+		t.Run(evType, func(t *testing.T) {
+			rec := &recorder{}
+			tr := newTranslator(rec.deliver, "opencode", "/tmp", "main", "ses_1", "")
+			props, _ := json.Marshal(map[string]any{})
+			if err := tr.handleEvent(SessionEvent{Type: evType, Properties: props}); err != nil {
+				t.Fatalf("handleEvent: %v", err)
+			}
+			if len(rec.evs) != 0 {
+				t.Errorf("noise event %q must not deliver, got %v", evType, rec.evs)
+			}
+		})
+	}
+}
+
+// TestTranslator_PromptLifecycleHandled covers the opencode 1.18
+// prompt lifecycle markers. Neither prompt.admitted nor prompted
+// carries payload we consume today, but the bridge must accept
+// them without crashing so a forward-compat opencode release that
+// starts emitting them does not break the stream.
+func TestTranslator_PromptLifecycleHandled(t *testing.T) {
+	for _, evType := range []string{
+		"session.next.prompt.admitted",
+		"session.next.prompted",
+	} {
+		t.Run(evType, func(t *testing.T) {
+			rec := &recorder{}
+			tr := newTranslator(rec.deliver, "opencode", "/tmp", "main", "ses_1", "")
+			props, _ := json.Marshal(map[string]any{"promptID": "p_42"})
+			if err := tr.handleEvent(SessionEvent{Type: evType, Properties: props}); err != nil {
+				t.Fatalf("handleEvent: %v", err)
+			}
+			if len(rec.evs) != 0 {
+				t.Errorf("prompt lifecycle event %q must not deliver (no consumer yet), got %v", evType, rec.evs)
+			}
+		})
+	}
+}
+
+// TestTranslator_AvailableCommandsCache exercises the stage 8.2
+// available_commands_update caching: the bridge stores every
+// advertised command (name + raw payload), so the runtime shim
+// can introspect via Agent.AvailableBuiltinCommands() /
+// IsBuiltinCommand(). The list is sorted alphabetically and
+// resets on every new available_commands_update (so a server-
+// side deletion propagates).
+func TestTranslator_AvailableCommandsCache(t *testing.T) {
+	rec := &recorder{}
+	tr := newTranslator(rec.deliver, "opencode", "/tmp", "main", "ses_1", "")
+
+	// Initial: no commands.
+	if got := tr.AvailableBuiltinCommands(); got != nil {
+		t.Errorf("initial AvailableBuiltinCommands = %v, want nil", got)
+	}
+	if tr.IsBuiltinCommand("clear") {
+		t.Error("IsBuiltinCommand should return false before any update")
+	}
+
+	// First update — three commands.
+	props1, _ := json.Marshal(map[string]any{
+		"availableCommands": []map[string]any{
+			{"name": "clear", "description": "reset session"},
+			{"name": "compact", "description": "compress history"},
+			{"name": "help", "description": "show help"},
+		},
+	})
+	if err := tr.handleEvent(SessionEvent{Type: "available_commands_update", Properties: props1}); err != nil {
+		t.Fatalf("handleEvent: %v", err)
+	}
+
+	got := tr.AvailableBuiltinCommands()
+	want := []string{"clear", "compact", "help"}
+	if len(got) != len(want) {
+		t.Fatalf("AvailableBuiltinCommands = %v, want %v", got, want)
+	}
+	for i, name := range want {
+		if got[i] != name {
+			t.Errorf("AvailableBuiltinCommands[%d] = %q, want %q", i, got[i], name)
+		}
+	}
+
+	// IsBuiltinCommand lookup: with and without leading slash,
+	// and a missing name.
+	if !tr.IsBuiltinCommand("clear") {
+		t.Error(`IsBuiltinCommand("clear") = false, want true`)
+	}
+	if !tr.IsBuiltinCommand("/clear") {
+		t.Error(`IsBuiltinCommand("/clear") = false, want true`)
+	}
+	if tr.IsBuiltinCommand("nonexistent") {
+		t.Error(`IsBuiltinCommand("nonexistent") = true, want false`)
+	}
+
+	// Second update — server removes "help", adds "editor".
+	props2, _ := json.Marshal(map[string]any{
+		"availableCommands": []map[string]any{
+			{"name": "clear", "description": "reset session"},
+			{"name": "compact", "description": "compress history"},
+			{"name": "editor", "description": "open editor"},
+		},
+	})
+	if err := tr.handleEvent(SessionEvent{Type: "available_commands_update", Properties: props2}); err != nil {
+		t.Fatalf("handleEvent: %v", err)
+	}
+	got = tr.AvailableBuiltinCommands()
+	want = []string{"clear", "compact", "editor"}
+	if len(got) != len(want) {
+		t.Fatalf("after reset AvailableBuiltinCommands = %v, want %v", got, want)
+	}
+	if tr.IsBuiltinCommand("help") {
+		t.Error("after reset IsBuiltinCommand(help) = true, want false")
+	}
+	if !tr.IsBuiltinCommand("editor") {
+		t.Error("after reset IsBuiltinCommand(editor) = false, want true")
+	}
+
+	// No events were delivered to the runtime (introspection only).
+	if len(rec.evs) != 0 {
+		t.Errorf("available_commands_update must not deliver, got %v", rec.evs)
 	}
 }
 

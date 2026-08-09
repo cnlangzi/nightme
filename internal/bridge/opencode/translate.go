@@ -23,6 +23,7 @@ package opencode
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -64,6 +65,31 @@ type translator struct {
 	// user — distinguishing "model produced nothing" from a
 	// genuine settle. Mirrors cc-connect's relay.go:5161 fallback.
 	turnHadContent bool
+
+	// turnHadStep tracks whether a session.next.step.started event
+	// fired during the current turn. The 1.18 step event payload
+	// doesn't carry tool callIDs (we can't reconstruct what ran),
+	// but its presence proves the model actually took a turn — so a
+	// turn with step.started + step.ended but no payload-bearing
+	// events is NOT "empty" (tools likely ran via the 1.18
+	// session.next.tool.* event family we don't yet consume).
+	// Combined with turnHadContent to refine the Done.Reason
+	// choice on terminal events.
+	turnHadStep bool
+
+	// availableCommands caches the latest list of slash commands
+	// opencode advertises via SSE (stage 8.2). The runtime shim
+	// can read this via the agent's AvailableBuiltinCommands()
+	// delegate to know which "/foo" inputs came from opencode
+	// itself rather than the runtime registry. Note: we don't
+	// (yet) execute these commands — opencode's HTTP API doesn't
+	// expose a /command endpoint, so they currently fall through
+	// to the agent as plain text prompts (same path as the
+	// cc-connect behavior). This list is purely informational.
+	//
+	// Map of command-name → raw JSON (for future expansion when
+	// opencode adds HTTP-side command dispatch).
+	availableCommands map[string]json.RawMessage
 }
 
 type toolEntry struct {
@@ -76,13 +102,14 @@ type toolEntry struct {
 // every produced event.
 func newTranslator(deliver func(agent.AgentEvent) agent.AgentEvent, agentName, workspace, branch, sessionID, model string) *translator {
 	return &translator{
-		deliver:      deliver,
-		agentName:    agentName,
-		workspace:    workspace,
-		branch:       branch,
-		sessionID:    sessionID,
-		model:        model,
-		pendingTools: make(map[string]toolEntry),
+		deliver:           deliver,
+		agentName:         agentName,
+		workspace:         workspace,
+		branch:            branch,
+		sessionID:         sessionID,
+		model:             model,
+		pendingTools:      make(map[string]toolEntry),
+		availableCommands: make(map[string]json.RawMessage),
 	}
 }
 
@@ -90,6 +117,7 @@ func newTranslator(deliver func(agent.AgentEvent) agent.AgentEvent, agentName, w
 // so the next terminal event can detect a (genuinely) empty response.
 func (t *translator) ResetTurn() {
 	t.turnHadContent = false
+	t.turnHadStep = false
 }
 
 // markContent flips turnHadContent on. Called from the branches that
@@ -98,16 +126,67 @@ func (t *translator) markContent() {
 	t.turnHadContent = true
 }
 
+// AvailableBuiltinCommands returns the slash command names opencode
+// has advertised via the latest available_commands_update event,
+// sorted alphabetically. The returned slice is a copy — callers
+// may mutate it without affecting translator state.
+//
+// Returns nil when no commands have been advertised yet (e.g. the
+// event hasn't fired, or the underlying agent isn't running
+// opencode 1.18+).
+func (t *translator) AvailableBuiltinCommands() []string {
+	if len(t.availableCommands) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(t.availableCommands))
+	for name := range t.availableCommands {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// IsBuiltinCommand returns true if name (without leading "/") is
+// in the opencode-advertised command list. Used by the runtime
+// shim to mark inputs as "this is an opencode builtin" before
+// forwarding as a prompt.
+func (t *translator) IsBuiltinCommand(name string) bool {
+	if t == nil || len(t.availableCommands) == 0 {
+		return false
+	}
+	name = strings.TrimPrefix(name, "/")
+	_, ok := t.availableCommands[name]
+	return ok
+}
+
+// sseNoiseEvents is the allowlist of known-noise event types the
+// opencode server emits that we neither act on nor need to log at
+// info level on every occurrence. Each is verified harmless during
+// the stage 8 e2e runs:
+//   - server.connected: subscription confirmation
+//   - plugin.added:    per-plugin boot chatter (one per loaded plugin)
+//   - catalog.updated: provider/model catalog refresh
+//   - reference.updated, integration.updated: editor integrations
+//
+// New event types SHOULD be added here only after confirming they
+// carry no payload we care about. Anything that does carry payload
+// gets an explicit case above the allowlist check.
+var sseNoiseEvents = map[string]struct{}{
+	"server.connected":      {},
+	"plugin.added":          {},
+	"catalog.updated":       {},
+	"reference.updated":     {},
+	"integration.updated":   {},
+	"message.updated":       {},
+	"message.removed":       {},
+}
+
 // handleEvent is the entry point invoked by decodeSSE for each parsed
 // event. Returns nil so the stream stays alive; SSE-level errors are
 // the caller's problem.
 func (t *translator) handleEvent(ev SessionEvent) error {
 	switch ev.Type {
 	case "":
-		return nil
-	// "message.updated" / "message.removed" are session-wide signals
-	// we don't render; ignore.
-	case "message.updated", "message.removed":
 		return nil
 	case "message.part.updated":
 		var p struct {
@@ -154,10 +233,26 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 			Branch:    t.branch,
 			Text:      text,
 		})
+	case "session.next.prompt.admitted", "session.next.prompted":
+		// opencode 1.18 emits these as the prompt lifecycle markers
+		// on the global bus:
+		//   prompt.admitted: the prompt was queued for processing
+		//   prompted:        the agent has started working on it
+		// Neither carries a payload we currently consume (no
+		// promptID, no queue position); we log at debug so future
+		// turn-tracking work has a breadcrumb trail. The actual
+		// turn-end signal is session.next.step.ended (handled
+		// below).
+		oLog("sse: session.next.prompt", "type", ev.Type)
 	case "session.next.step.started":
 		// opencode 1.18 fired step.started as a per-step lifecycle
 		// marker. We log only — the actual tool streaming now
-		// goes through session.next.text.* events.
+		// goes through session.next.text.* events. Mark turnHadStep
+		// so the terminal event knows the model took a turn even
+		// when no payload-bearing events fire (the 1.18 step event
+		// payload doesn't include tool callIDs so we can't tell what
+		// ran, just that something did).
+		t.turnHadStep = true
 		oLog("sse: session.next.step", "type", ev.Type)
 	case "session.next.step.ended":
 		// TERMINAL signal for opencode 1.18+. The first
@@ -173,12 +268,15 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 		// per-session text delta for the channel footer.
 		//
 		// Reason is "settled" when content arrived during the
-		// turn; "empty" when the model produced no text / tools
-		// (e.g. a misconfigured provider with no API key). The
-		// runtime uses this to surface a "(empty response)" hint.
+		// turn OR a step.started fired (proving the model did
+		// work even if the 1.18 protocol hid the details).
+		// Only mark "empty" when neither content events NOR
+		// step events arrived — that path means the prompt was
+		// admitted but the model produced nothing (auth/quota/
+		// hang before first token).
 		usage := t.lastUsage
 		reason := "settled"
-		if !t.turnHadContent {
+		if !t.turnHadContent && !t.turnHadStep {
 			reason = "empty"
 		}
 		t.deliver(agent.AgentEvent{
@@ -200,9 +298,12 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 		// to session.next.step.ended (handled above) — but we
 		// keep the case as a forward-compat hook so a future
 		// release reintroducing session.next.idle works.
+		//
+		// Same Reason rule as session.next.step.ended — settled
+		// unless both content AND step events were absent.
 		usage := t.lastUsage
 		reason := "settled"
-		if !t.turnHadContent {
+		if !t.turnHadContent && !t.turnHadStep {
 			reason = "empty"
 		}
 		t.deliver(agent.AgentEvent{
@@ -293,22 +394,46 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 			})
 		}
 	case "available_commands_update":
-		// Stage 2 stores the latest slash command list in the
-		// translator so future integrations can route unknown
-		// /commands to opencode. Currently we just log it.
+		// opencode advertises its built-in slash commands via this
+		// event (typically right after /api/event subscription).
+		// Each command has a shape like
+		//   {"name":"clear", "description":"...", "alias":"c"}
+		// We only need the name today (for the runtime shim's
+		// "is this an opencode builtin?" check). The full payload
+		// is kept in availableCommands[name] for future use when
+		// opencode ships HTTP-side command dispatch.
 		var p struct {
 			AvailableCommands []json.RawMessage `json:"availableCommands"`
 		}
-		if err := json.Unmarshal(ev.properties(), &p); err == nil {
-			oLog("sse: available_commands_update", "count", len(p.AvailableCommands))
+		if err := json.Unmarshal(ev.properties(), &p); err != nil {
+			return nil
 		}
+		// Reset and re-populate so deletions on the server side
+		// (e.g. a plugin disabling a command) are reflected.
+		t.availableCommands = make(map[string]json.RawMessage, len(p.AvailableCommands))
+		for _, raw := range p.AvailableCommands {
+			var meta struct {
+				Name string `json:"name"`
+			}
+			if err := json.Unmarshal(raw, &meta); err != nil || meta.Name == "" {
+				continue
+			}
+			t.availableCommands[meta.Name] = raw
+		}
+		oLog("sse: available_commands_update", "count", len(t.availableCommands))
 	case "permission.asked":
 		var p PermissionAsked
 		if err := json.Unmarshal(ev.properties(), &p); err == nil {
 			t.handlePermission(p)
 		}
 	default:
-		// Unknown event → debug log, do not kill the stream.
+		// Allowlist of known-noise events: drop silently. The
+		// sseNoiseEvents map is the single place to add new
+		// "we know about this but don't care" event types.
+		if _, ok := sseNoiseEvents[ev.Type]; ok {
+			return nil
+		}
+		// Truly unknown event → debug log, do not kill the stream.
 		oLog("sse: unknown event type", "type", ev.Type)
 	}
 	return nil

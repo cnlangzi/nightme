@@ -27,7 +27,7 @@ func init() {
 	// claude — the JSON-IO bridge. Dedicated implementation; user
 	// config can override the command path but the override drops
 	// back to PTY (loses AskUserQuestion, structured events).
-	agent.Builtins.LegacyRegister(claudecode.New("claude", "claude", nil))
+	agent.Builtins.Register(claudecode.NewStarter("claude", "claude", nil))
 
 	// codex — the `codex app-server --listen stdio://` JSON-RPC 2.0
 	// bridge. Spawns codex in app-server mode and drives it via

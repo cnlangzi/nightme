@@ -75,7 +75,7 @@ func TestFreshLiveness_PassesAnswer(t *testing.T) {
 		}
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			a := New("claude", "claude", nil)
+			a := NewStarter("claude", "claude", nil)
 			t.Logf("[liveness] workspace=%s", tc.workspace)
 
 			sess, err := a.Start(ctx, agent.StartConfig{
@@ -183,7 +183,7 @@ func TestFreshLiveness_LogsUserMCP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	a := New("claude", "claude", nil)
+	a := NewStarter("claude", "claude", nil)
 	sess, err := a.Start(ctx, agent.StartConfig{
 		Workspace:      ws,
 		PermissionMode: "bypassPermissions",

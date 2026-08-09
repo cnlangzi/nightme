@@ -69,7 +69,7 @@ func resumeHappyPath(t *testing.T, deadline time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 
-	a := New("claude", "claude", nil)
+	a := NewStarter("claude", "claude", nil)
 	ws, _ := resolveWorkspace(t)
 
 	// Phase 1: fresh spawn → capture session id.
@@ -166,7 +166,7 @@ func resumeInvalidUUID(t *testing.T, deadline time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 
-	a := New("claude", "claude", nil)
+	a := NewStarter("claude", "claude", nil)
 	ws, _ := resolveWorkspace(t)
 	const bad = "deadbeef-dead-dead-dead-deadbeefdead"
 	t.Logf("[invalid] spawning with --resume %q", bad)
@@ -202,7 +202,7 @@ func resumeUserWorkspaceKnownID(t *testing.T, deadline time.Duration) {
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 
-	a := New("claude", "claude", nil)
+	a := NewStarter("claude", "claude", nil)
 	ws, _ := resolveWorkspace(t)
 	const defaultUserID = "372809cf-c36b-44e5-a321-adf93c159e5d"
 	id := envOr("NIGHTME_TALIVE_RESUME_USER_ID", defaultUserID)

@@ -671,21 +671,21 @@ func TestEncodeUserAnswer_Empty_NoOp(t *testing.T) {
 // --- Agent descriptor tests ---
 
 func TestAgent_Name(t *testing.T) {
-	a := New("claude", "claude", nil)
-	if a.Name() != "claude" {
-		t.Errorf("Name = %q, want 'claude'", a.Name())
+	a := NewStarter("claude", "claude", nil)
+	if a.Info().Name != "claude" {
+		t.Errorf("Name = %q, want 'claude'", a.Info().Name)
 	}
 }
 
 func TestAgent_Mode(t *testing.T) {
-	a := New("claude", "claude", nil)
-	if a.Mode() != agent.ModeJSONIO {
-		t.Errorf("Mode = %v, want ModeJSONIO", a.Mode())
+	a := NewStarter("claude", "claude", nil)
+	if a.Info().Mode != agent.ModeJSONIO {
+		t.Errorf("Mode = %v, want ModeJSONIO", a.Info().Mode)
 	}
 }
 
 func TestAgent_Detect_MissingBinary(t *testing.T) {
-	a := New("claude", "this-binary-does-not-exist-12345", nil)
+	a := NewStarter("claude", "this-binary-does-not-exist-12345", nil)
 	if err := a.Detect(); err == nil {
 		t.Error("Detect should fail for missing binary")
 	}
@@ -696,7 +696,7 @@ func TestAgent_Detect_MissingBinary(t *testing.T) {
 func TestSession_SendText_NoProcess(t *testing.T) {
 	// newSession requires a real binary; we test the JSON encoding
 	// path indirectly via SendText/EncodeUserAnswer.
-	a := New("claude", "this-binary-does-not-exist-12345", nil)
+	a := NewStarter("claude", "this-binary-does-not-exist-12345", nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -710,7 +710,7 @@ func TestSession_SendText_NoProcess(t *testing.T) {
 }
 
 func TestStart_EmptyWorkspace(t *testing.T) {
-	a := New("echo", "echo", nil)
+	a := NewStarter("echo", "echo", nil)
 	_, err := a.Start(context.Background(), agent.StartConfig{Workspace: ""})
 	if err == nil {
 		t.Fatal("Start with empty workspace should fail")
@@ -1006,7 +1006,7 @@ func TestClaudeCodeBridge_RealSubprocess(t *testing.T) {
 		&slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	a := New("mock-claude", cmd, args)
+	a := NewStarter("mock-claude", cmd, args)
 	sess, err := a.Start(context.Background(), agent.StartConfig{
 		Workspace:      t.TempDir(),
 		PermissionMode: PermissionBypass,
@@ -1116,7 +1116,7 @@ func TestSession_New_SendsClearUserMessage(t *testing.T) {
 		&slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	a := New("mock-claude", cmd, args)
+	a := NewStarter("mock-claude", cmd, args)
 	sess, err := a.Start(context.Background(), agent.StartConfig{
 		Workspace:      t.TempDir(),
 		PermissionMode: PermissionBypass,

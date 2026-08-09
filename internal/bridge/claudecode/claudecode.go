@@ -88,15 +88,20 @@ type pendingAsk struct {
 	ResponseCh chan string
 }
 
-// ─── Agent struct (template + runtime) ───
+// ─── driver struct (runtime + protocol) ───
 
-// Agent is the Claude Code bridge descriptor.
+// driver is the claudecode runtime handle. After the
+// starter+driver split (P2 pilot, wip/agent.md), the template
+// fields (name/command/args) live on starter; this struct holds
+// only runtime state populated by starter.Start. Implements the
+// agent.driver interface (5 methods, package-private) plus a few
+// bridge-internal helpers (readPump, drainStderr, writeLine).
+//
+// driver is package-private. External code interacts through
+// starter.Start returning *agent.LiveAgent which delegates the
+// public Send*/Events/Close methods back here.
 //
 // Two states share one type:
-//
-//   - Template state (after New, before Start): only the spec-half
-//     fields are populated. Registered in agent.Builtins and held
-//     there as a long-lived singleton per name.
 //
 //   - Live state (after Start, before Close): the receiver is a
 //     freshly-allocated clone with runtime fields populated (cmd,
@@ -105,15 +110,10 @@ type pendingAsk struct {
 //     Spec-half fields are still readable.
 //
 // The template (in Builtins) is never mutated; Start returns a
-// separate *Agent so concurrent Start calls from different chats do
+// separate *driver so concurrent Start calls from different chats do
 // not interfere with each other.
-type Agent struct {
-	// ─── template fields (set by New; immutable) ───
-	name    string
-	command string
-	args    []string
-
-	// ─── runtime fields (zero before Start; populated on the clone) ───
+type driver struct {
+	// ─── runtime fields (zero before Start; populated by newDriver) ───
 	cmd     *exec.Cmd
 	stdin   *bufio.Writer
 	stdinMu sync.Mutex // guards Write on the underlying pipe
@@ -150,107 +150,20 @@ type Agent struct {
 	closed    chan struct{}
 }
 
-// ─── template constructor + spec-half methods ───
-
-// New constructs the template Agent. This is the entry point used at
-// registration time (cmd/nightme/agents.go calls it from init());
-// the returned *Agent is held by agent.Builtins as the singleton
-// for `name`.
-func New(name, command string, args []string) *Agent {
-	return &Agent{
-		name:    name,
-		command: command,
-		args:    append([]string(nil), args...),
-	}
-}
-
-// Name returns the registry key.
-func (a *Agent) Name() string { return a.name }
-
-// Mode reports the JSON-IO mode (introduced for v0.2).
-func (a *Agent) Mode() agent.Mode { return agent.ModeJSONIO }
-
-// Command returns the configured CLI binary (typically "claude").
-// Surfaced by `nightme agents` so users can see what /run would spawn.
-func (a *Agent) Command() string { return a.command }
-
-// Args returns a defensive copy of the constructor args. Callers may
-// not mutate the returned slice.
-func (a *Agent) Args() []string {
-	return append([]string(nil), a.args...)
-}
-
-// Env returns a defensive copy of the constructor env (currently
-// always empty for claudecode; kept for symmetry with the merged
-// agent.Agent interface).
-func (a *Agent) Env() []string { return nil }
-
-// Detect verifies the `claude` binary resolves on PATH. Call before
-// Start to surface a friendly "claude not installed" error rather
-// than a confusing exec failure.
-func (a *Agent) Detect() error {
-	_, err := exec.LookPath(a.command)
-	return err
-}
-
 // ─── lifecycle ───
 
-// Start spawns Claude Code in stream-json mode and returns a live
-// Agent that streams parsed events on its Events channel.
-//
-// Start clones the receiver — the template in Builtins is untouched.
-// The clone gets template fields copied (defensively), runtime
-// fields zeroed, then exec.CommandContext is called to spawn the
-// process, the pumpStream goroutine is kicked off, and the stderr
-// drainer is wired.
-//
-// cfg.Workspace is the child process's cwd. cfg.Args are appended
-// after the agent's defaults. cfg.Env is appended to os.Environ()
-// for the child.
-//
-// cfg.PermissionMode overrides the --permission-mode flag baked
-// into DefaultArgs. Empty falls back to PermissionBypass.
-//
-// cfg.SessionID, when non-empty, is appended as `--resume <id>`
-// after cfg.Args so the child resumes the previous Claude Code
-// session.
-//
-// Resume-preservation (T-alive, 2026-08-07): when cfg.SessionID is
-// set, the spawn is probed for stderr-detected rejection signals.
-// On detection, the bridge now RETURNS ErrResumeUnhealthy instead
-// of silently falling back to a fresh session.
-func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, error) {
-	if cfg.Workspace == "" {
-		return nil, fmt.Errorf("claudecode: workspace is required")
-	}
-
-	live, err := a.startOnce(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
-	if cfg.SessionID == "" {
-		return live, nil
-	}
-	if reason, unhealthy := probeResume(ctx, live); unhealthy {
-		slog.Warn("claudecode: --resume spawn unhealthy; refusing fallback to preserve resume context",
-			"resume_id", cfg.SessionID, "reason", reason)
-		_ = live.Close()
-		return nil, fmt.Errorf("%w: %s (session_id=%s); check workspace path and resume id",
-			ErrResumeUnhealthy, reason, cfg.SessionID)
-	}
-	return live, nil
-}
-
-// startOnce clones the receiver, spawns the process, wires the
-// pumps, and returns the live Agent. Split from Start so the
-// resume-preservation probe sees the live state.
-func (a *Agent) startOnce(ctx context.Context, cfg agent.StartConfig) (*Agent, error) {
-	args := buildArgs(a.args, cfg)
+// newDriver spawns the process and returns a fully-wired driver.
+// This is what starter.Start calls; the resume-preservation probe
+// (probeResume) sees the live driver before starter.Start wraps
+// it in a *agent.LiveAgent. Split out of the old Agent.Start so
+// the probe can interact with the runtime before it's exposed.
+func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver, error) {
+	args := buildArgs(s.args, cfg)
 
 	env := append([]string(nil), cfg.Env...)
-	env = append(env, a.command) // ensure command name is in env (defensive)
+	env = append(env, s.command) // ensure command name is in env (defensive)
 
-	cmd := exec.CommandContext(ctx, a.command, args...)
+	cmd := exec.CommandContext(ctx, s.command, args...)
 	cmd.Dir = cfg.Workspace
 	cmd.Env = append(os.Environ(), env...)
 
@@ -279,16 +192,13 @@ func (a *Agent) startOnce(ctx context.Context, cfg agent.StartConfig) (*Agent, e
 
 	branch := detectBranch(cfg.Workspace)
 
-	live := &Agent{
-		name:        a.name,
-		command:     a.command,
-		args:        append([]string(nil), a.args...),
+	live := &driver{
 		cmd:         cmd,
 		stdin:       bufio.NewWriter(stdin),
 		events:      make(chan agent.AgentEvent, eventsBufferSize),
 		stderrLines: make(chan string, 64),
 		pid:         cmd.Process.Pid,
-		agentName:   a.name,
+		agentName:   s.name,
 		workspace:   cfg.Workspace,
 		branch:      branch,
 		closed:      make(chan struct{}),
@@ -368,25 +278,25 @@ func (a *Agent) startOnce(ctx context.Context, cfg agent.StartConfig) (*Agent, e
 
 // Events returns the live event stream. Closed by Close() (via the
 // pumpStream goroutine's defer).
-func (a *Agent) Events() <-chan agent.AgentEvent { return a.events }
+func (d *driver) Events() <-chan agent.AgentEvent { return d.events }
 
 // StderrLines exposes the per-line stderr stream captured by
 // drainStderr. The --resume fallback probe reads from this channel
 // to detect deterministic stderr signals without relying on
 // timeout. Returns nil if drainStderr hasn't been wired (should not
 // happen for sessions produced by Start).
-func (a *Agent) StderrLines() <-chan string { return a.stderrLines }
+func (d *driver) StderrLines() <-chan string { return d.stderrLines }
 
 // PID returns the OS process id of the child.
-func (a *Agent) PID() int { return a.pid }
+func (d *driver) PID() int { return d.pid }
 
 // SendText is a convenience wrapper around SendBlocks for the
 // text-only path.
-func (a *Agent) SendText(text string) error {
+func (d *driver) SendText(text string) error {
 	if text == "" {
 		return nil
 	}
-	return a.SendBlocks(context.Background(), []agent.ContentBlock{
+	return d.SendBlocks(context.Background(), []agent.ContentBlock{
 		{Type: agent.ContentText, Text: text},
 	})
 }
@@ -409,7 +319,7 @@ func (a *Agent) SendText(text string) error {
 //
 // Empty blocks slice is a no-op. Image/file blocks whose Path does
 // not exist are logged at warn level and dropped.
-func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
+func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
 	_ = ctx
 	if len(blocks) == 0 {
 		return nil
@@ -511,7 +421,7 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 	if err != nil {
 		return fmt.Errorf("claudecode: marshal user msg: %w", err)
 	}
-	return a.writeLine(data)
+	return d.writeLine(data)
 }
 
 // readFileAsBase64 reads the file at path and returns its contents
@@ -529,11 +439,11 @@ func readFileAsBase64(path string) (string, error) {
 // option label the user selected.
 //
 // Blocks until the pending question is resolved.
-func (a *Agent) SendPermission(resp string) error {
-	a.pendingMu.Lock()
-	ask := a.pendingAsk
-	a.pendingAsk = nil
-	a.pendingMu.Unlock()
+func (d *driver) SendPermission(resp string) error {
+	d.pendingMu.Lock()
+	ask := d.pendingAsk
+	d.pendingAsk = nil
+	d.pendingMu.Unlock()
 
 	if ask == nil {
 		return fmt.Errorf("claudecode: no pending AskUserQuestion")
@@ -557,7 +467,7 @@ func (a *Agent) SendPermission(resp string) error {
 	if len(data) == 0 {
 		return nil
 	}
-	return a.writeLine(data)
+	return d.writeLine(data)
 }
 
 // New resets the conversation context on the running session without
@@ -575,57 +485,61 @@ func (a *Agent) SendPermission(resp string) error {
 // is literally "/clear" via writeLine. In-process reset: process
 // stays alive, transport stays open, Events() stays open, PID
 // stays the same.
-func (a *Agent) New(ctx context.Context) error {
+// Reset is the agent.driver interface name for New. Implements
+// the agent.driver Reset method (F-34).
+func (d *driver) Reset(ctx context.Context) error { return d.New(ctx) }
+
+func (d *driver) New(ctx context.Context) error {
 	_ = ctx
-	if a.closed == nil {
+	if d.closed == nil {
 		return fmt.Errorf("claudecode: session not initialized")
 	}
 	select {
-	case <-a.closed:
+	case <-d.closed:
 		return fmt.Errorf("claudecode: session closed")
 	default:
 	}
 	payload := []byte(`{"type":"user","message":{"role":"user","content":"/clear"}}`)
-	return a.writeLine(payload)
+	return d.writeLine(payload)
 }
 
 // Close terminates the session: closes stdin (so the child sees EOF
 // and exits cleanly), waits briefly for graceful shutdown, then
 // SIGKILLs if necessary. Idempotent.
-func (a *Agent) Close() error {
+func (d *driver) Close() error {
 	var firstErr error
-	a.closeOnce.Do(func() {
-		close(a.closed)
+	d.closeOnce.Do(func() {
+		close(d.closed)
 
 		// Close stdin so claude sees EOF and exits.
-		a.stdinMu.Lock()
-		_ = a.stdin.Flush()
-		a.stdinMu.Unlock()
+		d.stdinMu.Lock()
+		_ = d.stdin.Flush()
+		d.stdinMu.Unlock()
 
-		if a.cmd != nil && a.cmd.Process != nil {
-			_ = a.cmd.Process.Signal(os.Interrupt)
+		if d.cmd != nil && d.cmd.Process != nil {
+			_ = d.cmd.Process.Signal(os.Interrupt)
 		}
 
 		// Wait up to 2s for graceful exit; SIGKILL after.
 		done := make(chan struct{})
 		go func() {
-			if a.cmd != nil {
-				_ = a.cmd.Wait()
+			if d.cmd != nil {
+				_ = d.cmd.Wait()
 			}
 			close(done)
 		}()
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):
-			if a.cmd != nil && a.cmd.Process != nil {
-				_ = a.cmd.Process.Kill()
+			if d.cmd != nil && d.cmd.Process != nil {
+				_ = d.cmd.Process.Kill()
 			}
 			<-done
 		}
 
 		// Wait for pumpStream to drain + close the events channel
 		// itself (via defer in startOnce).
-		a.pumpWG.Wait()
+		d.pumpWG.Wait()
 	})
 	return firstErr
 }
@@ -633,17 +547,17 @@ func (a *Agent) Close() error {
 // writeLine writes a single JSON line to claude's stdin followed by
 // \n. The mutex serializes writes (multiple SendText calls in
 // flight).
-func (a *Agent) writeLine(data []byte) error {
-	a.stdinMu.Lock()
-	defer a.stdinMu.Unlock()
+func (d *driver) writeLine(data []byte) error {
+	d.stdinMu.Lock()
+	defer d.stdinMu.Unlock()
 
-	if _, err := a.stdin.Write(data); err != nil {
+	if _, err := d.stdin.Write(data); err != nil {
 		return fmt.Errorf("claudecode: write stdin: %w", err)
 	}
-	if _, err := a.stdin.WriteString("\n"); err != nil {
+	if _, err := d.stdin.WriteString("\n"); err != nil {
 		return fmt.Errorf("claudecode: write newline: %w", err)
 	}
-	if err := a.stdin.Flush(); err != nil {
+	if err := d.stdin.Flush(); err != nil {
 		return fmt.Errorf("claudecode: flush stdin: %w", err)
 	}
 	return nil
@@ -653,8 +567,8 @@ func (a *Agent) writeLine(data []byte) error {
 
 // probeResume monitors the session's stderr stream for resume-rejection
 // signals within resumeFallbackTimeout. STDERR-ONLY by design.
-func probeResume(ctx context.Context, sess agent.Agent) (string, bool) {
-	stderrCh := stderrLinesOf(sess)
+func probeResume(ctx context.Context, sess *driver) (string, bool) {
+	stderrCh := sess.StderrLines()
 	if stderrCh == nil {
 		slog.Error("claudecode: session has no stderr channel; resume probe disabled")
 		return "", false
@@ -710,17 +624,7 @@ func probeResume(ctx context.Context, sess agent.Agent) (string, bool) {
 	return res.reason, !res.healthy
 }
 
-// stderrLinesOf returns a channel of stderr lines emitted by the
-// session, or nil if the bridge doesn't expose one.
-func stderrLinesOf(sess agent.Agent) <-chan string {
-	type stderrExposer interface {
-		StderrLines() <-chan string
-	}
-	if e, ok := sess.(stderrExposer); ok {
-		return e.StderrLines()
-	}
-	return nil
-}
+
 
 // classifyStderrLineForResume examines one stderr line and returns
 // (reason, true) if it indicates --resume rejection.
@@ -923,8 +827,23 @@ func detectBranch(workspace string) string {
 	return branch
 }
 
-// Compile-time guarantee that *Agent satisfies agent.Agent (the
-// merged spec+live interface). The template-half of *Agent (set by
-// New) satisfies agent.AgentSpec implicitly because the new
-// agent.Agent interface embeds AgentSpec.
-var _ agent.Agent = (*Agent)(nil)
+// Compile-time guarantee that *driver satisfies agent.Agent (the
+// merged spec+live interface). The template-half of *driver (set by
+// driver implements the package-private agent.driver interface
+// (SendText/SendBlocks/SendPermission/Reset/Close). The public
+// runtime surface (PID/Events/StderrLines) is also here. After
+// the starter+driver split, callers never see *driver directly —
+// they go through *agent.LiveAgent which wraps it via the agent
+// package.
+var _ agentDriver = (*driver)(nil)
+
+// agentDriver is the local alias for the agent.driver interface so
+// this file can do a compile-time check that driver satisfies it
+// without importing the unexported name from the agent package.
+type agentDriver interface {
+	SendText(text string) error
+	SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error
+	SendPermission(resp string) error
+	Reset(ctx context.Context) error
+	Close() error
+}

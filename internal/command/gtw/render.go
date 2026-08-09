@@ -1,9 +1,42 @@
 package gtw
 
 import (
+	"context"
 	"fmt"
 	"strings"
 )
+
+// buildSyncReply runs RefreshDefaultBranch and turns the result
+// into an IM-friendly summary suitable for either /gtw sync
+// (slash dispatcher path) or /gtw close (which calls it inline
+// after tearing down the worktree, so the same card format
+// reaches the user). On any error from RefreshDefaultBranch —
+// dirty main, no origin, rebase conflict — the error is
+// returned to the caller verbatim (its message already includes
+// the git stderr tail + user-facing hint); the caller is
+// responsible for any ❌ prefix / wrapping.
+//
+// Honours deps.SkipRefreshDefaultBranch by returning (empty, nil)
+// so the caller can treat it as "sync not requested" without
+// special-casing the flag. /gtw sync ignores this flag (it's a
+// user-initiated refresh); /gtw close respects it as a test seam.
+//
+// When DefaultBranch can't be read after a successful pull, falls
+// back to the raw git pull output rather than fabricating a card.
+func buildSyncReply(ctx context.Context, repoRoot string, deps HandlerDeps) (string, error) {
+	if deps.SkipRefreshDefaultBranch {
+		return "", nil
+	}
+	newHead, pullOut, err := RefreshDefaultBranch(ctx, repoRoot, deps)
+	if err != nil {
+		return "", err
+	}
+	branch, derr := DefaultBranch(ctx, repoRoot, deps.Git)
+	if derr != nil || branch == "" {
+		return pullOut, nil
+	}
+	return renderSyncReply(branch, newHead, pullOut, repoRoot, ctx, deps.Git), nil
+}
 
 // renderFixSuccessCard builds the §5.2.⑥ success card (plain text;
 // success has no interactive buttons in v1).
@@ -34,6 +67,60 @@ func shortSHA(sha string) string {
 		return sha
 	}
 	return sha[:12]
+}
+
+// renderSyncReply turns git pull --rebase stdout into a compact
+// IM-friendly summary. Shared by /gtw sync (cmd.go runSync) and
+// /gtw close (close.go RunClose) so both surface the same card.
+//
+//   - "Already up to date." → "✨ origin/<branch> already up to date"
+//   - "Updating <old>..<new>" → header line + commit subject list
+//     capped at 10 entries ("📥 pulled N commits: • …")
+//   - Anything else (rare config variants) → fall back to the
+//     raw pull output so the user still sees what happened.
+//
+// On any parsing/log failure (missing SHA, git log error), we
+// degrade gracefully to the raw pull output rather than surfacing
+// a formatting-internal error to the user.
+func renderSyncReply(branch, newHead, pullOut, repoRoot string, ctx context.Context, git GitRunner) string {
+	if strings.Contains(pullOut, "Already up to date.") {
+		return fmt.Sprintf("✨ origin/%s already up to date", branch)
+	}
+
+	// Find the "Updating <old>..<new>" line.
+	var oldSHA string
+	for line := range strings.SplitSeq(pullOut, "\n") {
+		rest, ok := strings.CutPrefix(line, "Updating ")
+		if !ok {
+			continue
+		}
+		parts := strings.SplitN(rest, "..", 2)
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			oldSHA = parts[0]
+			break
+		}
+	}
+	if oldSHA == "" {
+		// No "Updating" line we recognise — fall back to raw.
+		return pullOut
+	}
+
+	// Get commit subjects for the pulled range.
+	subjectsRaw, _, err := git.Run(ctx, repoRoot, "log", oldSHA+"..HEAD", "--pretty=%s", "-n", "10")
+	if err != nil || strings.TrimSpace(subjectsRaw) == "" {
+		// Fall back to a plain header so the user still sees the
+		// sync happened.
+		return fmt.Sprintf("✅ origin/%s @ %s", branch, shortSHA(newHead))
+	}
+	subjects := strings.Split(strings.TrimSpace(subjectsRaw), "\n")
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "✅ origin/%s @ %s\n", branch, shortSHA(newHead))
+	fmt.Fprintf(&b, "📥 pulled %d commits:\n", len(subjects))
+	for _, s := range subjects {
+		fmt.Fprintf(&b, " • %s\n", s)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // renderFixLocalSuccessCard builds the simplified success card

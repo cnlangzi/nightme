@@ -38,15 +38,33 @@ const maxDirtyFilesReported = 10
 //     the main repo (git refuses to run that command from
 //     inside a worktree itself). The yml file goes away with
 //     the worktree — no explicit unlink needed.
-//  5. SetSelectedCwd back to repoRoot so the next agent message
+//  5. `git branch -D <branch>` from repoRoot (always force-
+//     delete — close is a "tear down the experiment" action
+//     and the local branch was created by /gtw fix, never
+//     published; force=true is unrelated to this step).
+//  6. SetSelectedCwd back to repoRoot so the next agent message
 //     spawns in the main repo.
-//  6. Clear the in-memory Context.
+//  7. Clear the in-memory Context.
+//  8. Emit close's own success card.
+//  9. Run `git pull --rebase origin <default>` on repoRoot and
+//     emit the same sync card /gtw sync uses. Sync runs AFTER
+//     close's local cleanup so the user sees two cards: one for
+//     the worktree tear-down, one for the upstream refresh. If
+//     sync errors (dirty main, rebase conflict), its own error
+//     card surfaces the cause — close's card above is not
+//     retracted because the local fix session genuinely ended.
 //
-// On any error before step 6 (yml missing / dirty / git failure)
-// we leave the chat's active cwd and the in-memory Context
-// untouched, so the user can retry once they fix the underlying
-// problem. force=true changes step 3 (skipped) and step 4
-// (passes --force to git).
+// On any error before step 7 (yml missing / dirty / worktree-
+// remove / branch-delete fail) we leave the chat's active cwd
+// and the in-memory Context untouched, so the user can retry
+// once they fix the underlying problem. Step 9 (sync) errors
+// surface their own card but DO NOT undo steps 4-7: from the
+// user's perspective the local fix is gone either way.
+//
+// force=true changes step 3 (skipped) and step 4 (passes
+// --force to git worktree remove). It does NOT bypass step 9's
+// dirty-main check — that's a safety net for the primary repo,
+// independent of the worktree-destruction flag.
 func RunClose(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
@@ -94,8 +112,7 @@ func RunClose(
 		// attached) fix. User can retry once they understand the
 		// git error.
 		stderr := ""
-		var we *WorktreeError
-		if errors.As(err, &we) {
+		if we, ok := errors.AsType[*WorktreeError](err); ok {
 			stderr = tailLines(we.Stderr, 10)
 		}
 		body := fmt.Sprintf("❌ git worktree remove failed: %v", err)
@@ -105,7 +122,24 @@ func RunClose(
 		return reply(ctx, cs.Channel(), chatID, messageID, body), nil
 	}
 
-	// --- step 5: switch CWD back to repoRoot ----------------------
+	// --- step 5: delete the local branch --------------------------
+	// `-D` (uppercase) is force-delete — refuses to keep the
+	// branch even if it's not fully merged. Always force: the
+	// branch was created by /gtw fix and the user is asking for
+	// a full close, so a "branch not merged" refusal would be
+	// hostile. Recovery remains possible via reflog if needed.
+	// Mirrors the rollback path in fix.go:440.
+	if _, brStderr, brErr := deps.Git.Run(ctx, c.RepoRoot, "branch", "-D", c.Branch); brErr != nil {
+		body := fmt.Sprintf(
+			"❌ git branch -D %s failed: %v\n"+
+				"[git stderr tail]\n%s\n"+
+				"hint: worktree at %s is already removed; clean up the branch manually with `git branch -D %s`.",
+			c.Branch, brErr, tailLines(brStderr, 10), c.Worktree, c.Branch,
+		)
+		return reply(ctx, cs.Channel(), chatID, messageID, body), nil
+	}
+
+	// --- step 6: switch CWD back to repoRoot ----------------------
 	if err := cs.SetSelectedCwd(c.RepoRoot); err != nil {
 		// The worktree IS removed at this point. Failing to
 		// switch CWD is awkward (user is stranded in a path
@@ -119,23 +153,50 @@ func RunClose(
 				"run `/cwd %s` manually.", c.RepoRoot, err, c.RepoRoot)), nil
 	}
 
-	// --- step 6: clear in-memory state ----------------------------
+	// --- step 7: clear in-memory state ----------------------------
 	slot.Store(Context{})
 
-	// --- step 7: success reply ------------------------------------
+	// --- step 8: close's own success card -------------------------
 	// IM-friendly layout that mirrors the fix success card:
 	// `✅` headline naming the branch, then one `→` row per
-	// side effect (worktree torn down, yml gone with it, cwd
-	// switched back). Keeps the substrings tests rely on
-	// (branch, "worktree", repoRoot).
+	// side effect (worktree torn down, branch deleted, yml gone
+	// with the worktree, cwd switched back). The sync card that
+	// follows in step 9 has its own format — close does not
+	// preview or summarise it here, to keep card ownership clean.
 	body := fmt.Sprintf(
 		"✅ closed `%s`%s\n"+
 			"→ worktree: %s (removed)\n"+
+			"→ branch: %s (deleted)\n"+
 			"→ .nightme/gtw.yml (removed with worktree)\n"+
 			"→ cwd → %s",
-		c.Branch, forceNote(force), c.Worktree, c.RepoRoot,
+		c.Branch, forceNote(force), c.Worktree, c.Branch, c.RepoRoot,
 	)
-	return reply(ctx, cs.Channel(), chatID, messageID, body), nil
+	// Send close's own success card. The reply() return is
+	// intentionally discarded — returning here would skip step 9's
+	// separate sync card. Every other reply path in this file
+	// uses `return reply(...), nil` because they're terminal;
+	// step 8 is mid-flow by design.
+	reply(ctx, cs.Channel(), chatID, messageID, body)
+
+	// --- step 9: sync main (separate card) ------------------------
+	// buildSyncReply shares the /gtw sync card formatter and
+	// respects deps.SkipRefreshDefaultBranch (test seam). If
+	// sync fails the error surfaces its own card with a ❌ prefix
+	// (RefreshDefaultBranch's own errors sometimes lack one);
+	// the close success card above is NOT retracted because the
+	// local fix session is genuinely over regardless.
+	syncBody, syncErr := buildSyncReply(ctx, c.RepoRoot, deps)
+	if syncErr != nil {
+		return reply(ctx, cs.Channel(), chatID, messageID,
+			"❌ sync failed: "+syncErr.Error()), nil
+	}
+	if syncBody == "" {
+		// SkipRefreshDefaultBranch was set (test-only path);
+		// no sync card to emit. close's card above is the
+		// complete reply for this invocation.
+		return &Result{Consumed: true}, nil
+	}
+	return reply(ctx, cs.Channel(), chatID, messageID, syncBody), nil
 }
 
 // forceNote renders the trailing "force" annotation for the
@@ -166,13 +227,13 @@ func assertWorktreeClean(ctx context.Context, dir string, deps HandlerDeps) erro
 		return nil
 	}
 
-	// Split + filter in one pass. strings.Split tolerates a
+	// Split + filter in one pass. strings.SplitSeq tolerates a
 	// trailing \n; we drop empties because git occasionally
 	// pads with blank lines (e.g. after a section header in
 	// some configs — defensive, even though --porcelain
 	// shouldn't produce any).
 	lines := make([]string, 0, 4)
-	for _, line := range strings.Split(stdout, "\n") {
+	for line := range strings.SplitSeq(stdout, "\n") {
 		if line != "" {
 			lines = append(lines, line)
 		}
@@ -182,17 +243,15 @@ func assertWorktreeClean(ctx context.Context, dir string, deps HandlerDeps) erro
 	if len(preview) > maxDirtyFilesReported {
 		preview = preview[:maxDirtyFilesReported]
 	}
-	body := fmt.Sprintf(
-		"❌ worktree has uncommitted changes — commit or stash before closing:\n"+
-			"  %s",
-		filepath.Join(dir, "(worktree)"),
-	)
+	var body strings.Builder
+	body.WriteString("❌ worktree has uncommitted changes — commit or stash before closing:\n")
+	fmt.Fprintf(&body, "  %s\n", filepath.Join(dir, "(worktree)"))
 	for _, line := range preview {
-		body += "\n  " + line
+		fmt.Fprintf(&body, "  %s\n", line)
 	}
 	if len(lines) > maxDirtyFilesReported {
-		body += fmt.Sprintf("\n  ... and %d more", len(lines)-maxDirtyFilesReported)
+		fmt.Fprintf(&body, "\n  ... and %d more\n", len(lines)-maxDirtyFilesReported)
 	}
-	body += "\nhint: this command does not support `--force`; clean the worktree first."
-	return errors.New(body)
+	body.WriteString("hint: this command does not support `--force`; clean the worktree first.")
+	return errors.New(body.String())
 }

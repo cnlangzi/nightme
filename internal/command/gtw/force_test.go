@@ -257,6 +257,11 @@ func TestRunClose_ForceOverridesDirty(t *testing.T) {
 	deps := HandlerDeps{
 		Git: ExecGitRunner{},
 		Now: func() time.Time { return time.Date(2026, 8, 8, 14, 0, 0, 0, time.UTC) },
+		// Close's step-9 sync would otherwise try to refresh
+		// origin from a temp repo that has no upstream, surfacing
+		// a spurious "no origin" error card. This test asserts
+		// on close's success card only — skip the sync step.
+		SkipRefreshDefaultBranch: true,
 	}
 
 	// Make the worktree dirty.

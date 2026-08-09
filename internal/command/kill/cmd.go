@@ -69,9 +69,8 @@ func (f *Factory) Spec() command.Spec {
 //  4. Wrap the per-entry KillResult slice with FormatKillResults
 //     and reply.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
-	input command.SlashInput) (*command.SlashOutput, error) {
+	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
-	cs := f.mgr.Get(input.ChatID)
 	if cs == nil {
 		return command.Reply(ctx, rt, "No active chat session to kill."), nil
 	}

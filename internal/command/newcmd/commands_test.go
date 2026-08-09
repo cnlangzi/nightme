@@ -22,7 +22,8 @@ func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 	f := NewFactory(mgr, "claude")
 	input := command.SlashInput{ChatID: "c1", Args: []string{"new"}}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, input)
+	cs := mgr.GetOrCreate(input.ChatID, "test")
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -41,7 +42,7 @@ func TestFactory_Handle_EmptyAgent_RepliesUsage(t *testing.T) {
 
 	input := command.SlashInput{ChatID: "c1", Args: []string{"new", ""}}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, input)
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -56,7 +57,7 @@ func TestFactory_Handle_NoSessions_RepliesNoSession(t *testing.T) {
 	cs := mgr.GetOrCreate("c1", "claude")
 	_ = cs.SetActiveCwd("/tmp")
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{},
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
 		command.SlashInput{ChatID: "c1", Args: []string{"new"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)

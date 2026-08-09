@@ -51,15 +51,8 @@ func (f *Factory) Spec() command.Spec {
 
 // Handle implements command.SlashCommandFactory.
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
-	input command.SlashInput) (*command.SlashOutput, error) {
-
-	cs := f.mgr.GetOrCreate(input.ChatID, f.defaultPrimary)
-
-	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
-		return failOut, nil
-	}
-
-	agentName := ""
+	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+agentName := ""
 	if len(input.Args) > 1 {
 		agentName = strings.TrimSpace(input.Args[1])
 		if agentName == "" {

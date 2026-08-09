@@ -22,7 +22,8 @@ func TestFactory_Handle_NoArgs_RepliesUsage(t *testing.T) {
 	f := NewFactory(mgr, "claude")
 	input := command.SlashInput{ChatID: "c1", Args: []string{"use"}}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, input)
+	cs := mgr.GetOrCreate(input.ChatID, "test")
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -36,7 +37,8 @@ func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 	f := NewFactory(mgr, "claude")
 	input := command.SlashInput{ChatID: "c1", Args: []string{"use", "claude"}}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, input)
+	cs := mgr.GetOrCreate(input.ChatID, "test")
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -52,7 +54,9 @@ func TestFactory_Handle_EmptyAgent_RepliesUsage(t *testing.T) {
 	_ = cs.SetActiveCwd("/tmp")
 
 	input := command.SlashInput{ChatID: "c1", Args: []string{"use", "  "}}
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, input)
+	_ = mgr.GetOrCreate(input.ChatID, "test")
+
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}

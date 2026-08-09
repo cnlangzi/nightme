@@ -51,7 +51,7 @@ func (f *Factory) Spec() command.Spec {
 //	/use (no activeCwd yet)        → reply "send /cwd <path> first"
 //	/use unknown-agent             → reply "unknown agent"
 func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
-	input command.SlashInput) (*command.SlashOutput, error) {
+	cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 
 	if len(input.Args) < 2 {
 		return command.Reply(ctx, rt, "Usage: /use <agent> [args...]"), nil
@@ -61,14 +61,7 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	if agentName == "" {
 		return command.Reply(ctx, rt, "Usage: /use <agent> [args...]"), nil
 	}
-
-	cs := f.mgr.GetOrCreate(input.ChatID, f.defaultPrimary)
-
-	if _, failOut := command.RequireActiveCwd(cs); failOut != nil {
-		return failOut, nil
-	}
-
-	// Pure state mutation first.
+// Pure state mutation first.
 	if err := cs.SetActiveAgent(agentName); err != nil {
 		return command.Reply(ctx, rt, fmt.Sprintf("SetActiveAgent failed: %v", err)), nil
 	}

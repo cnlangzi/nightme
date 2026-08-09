@@ -159,8 +159,11 @@ func TestHandler_NoSession(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := killpkg.NewFactory(mgr)
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{},
-		command.SlashInput{ChatID: "no-such-chat"})
+	cs := mgr.GetOrCreate("c1", "claude")
+
+
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs,
+	command.SlashInput{ChatID: "c1", Args: []string{"kill"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}

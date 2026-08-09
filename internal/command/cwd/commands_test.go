@@ -24,7 +24,8 @@ func TestFactory_Handle_NoArgs_RepliesUsage(t *testing.T) {
 	f := NewFactory(mgr, "claude")
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd"}}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, input)
+	cs := mgr.GetOrCreate(input.ChatID, "test")
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -38,7 +39,8 @@ func TestFactory_Handle_NonexistentPath_RejectsEarly(t *testing.T) {
 	f := NewFactory(mgr, "claude")
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", "/nonexistent-path-xyz"}}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, input)
+	cs := mgr.GetOrCreate(input.ChatID, "test")
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -59,7 +61,8 @@ func TestFactory_Handle_RegularFile_RejectsNotDirectory(t *testing.T) {
 	f := NewFactory(mgr, "claude")
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", file}}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, input)
+	cs := mgr.GetOrCreate(input.ChatID, "test")
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -74,7 +77,9 @@ func TestFactory_Handle_ValidDir_SetsActiveCwd(t *testing.T) {
 	f := NewFactory(mgr, "claude")
 
 	input := command.SlashInput{ChatID: "c1", Args: []string{"cwd", tmp}}
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, input)
+	cs := mgr.GetOrCreate(input.ChatID, "test")
+
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}

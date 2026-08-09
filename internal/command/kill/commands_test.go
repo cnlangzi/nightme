@@ -25,7 +25,9 @@ func TestFactory_Handle_NoSession_RepliesNoActive(t *testing.T) {
 	f := NewFactory(mgr)
 	input := command.SlashInput{ChatID: "no-such-chat"}
 
-	out, err := f.Handle(context.Background(), command.RuntimeServices{}, input)
+	cs := mgr.GetOrCreate(input.ChatID, "test")
+
+	out, err := f.Handle(context.Background(), command.RuntimeServices{}, cs, input)
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -42,10 +44,11 @@ func TestFactory_Handle_NoSession_RepliesNoActive(t *testing.T) {
 func TestFactory_Handle_NoActiveCwd_RepliesHint(t *testing.T) {
 	mgr := chatsession.NewManager()
 	f := NewFactory(mgr)
-	_ = mgr.GetOrCreate("c1", "claude")
+	cs := mgr.GetOrCreate("c1", "claude")
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{},
-		command.SlashInput{ChatID: "c1", Args: []string{"kill"}})
+		cs,
+	command.SlashInput{ChatID: "c1", Args: []string{"kill"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -67,7 +70,8 @@ func TestFactory_Handle_EmptyAgentArg_RepliesUsage(t *testing.T) {
 	_ = cs.SetActiveCwd("/tmp")
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{},
-		command.SlashInput{ChatID: "c1", Args: []string{"kill", " "}})
+		cs,
+	command.SlashInput{ChatID: "c1", Args: []string{"kill", " "}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -89,7 +93,8 @@ func TestFactory_Handle_NotInPool_RepliesFriendly(t *testing.T) {
 	}
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{},
-		command.SlashInput{ChatID: "c1", Args: []string{"kill", "codex"}})
+		cs,
+	command.SlashInput{ChatID: "c1", Args: []string{"kill", "codex"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -121,7 +126,8 @@ func TestFactory_Handle_NoArg_KillsAllInCwd(t *testing.T) {
 	}
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{},
-		command.SlashInput{ChatID: "c1", Args: []string{"kill"}})
+		cs,
+	command.SlashInput{ChatID: "c1", Args: []string{"kill"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -156,7 +162,8 @@ func TestFactory_Handle_NoArg_KillsEveryAgentInCwd(t *testing.T) {
 	}
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{},
-		command.SlashInput{ChatID: "c1", Args: []string{"kill"}})
+		cs,
+	command.SlashInput{ChatID: "c1", Args: []string{"kill"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
@@ -192,7 +199,8 @@ func TestFactory_Handle_NamedAgent_LeavesSiblingsAlone(t *testing.T) {
 	}
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{},
-		command.SlashInput{ChatID: "c1", Args: []string{"kill", "codex"}})
+		cs,
+	command.SlashInput{ChatID: "c1", Args: []string{"kill", "codex"}})
 	if err != nil {
 		t.Fatalf("Handle: %v", err)
 	}

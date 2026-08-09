@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
 // fakeCmd is a minimal SlashCommandFactory used to exercise the
@@ -19,7 +21,7 @@ type fakeCmd struct {
 }
 
 func (f *fakeCmd) Spec() Spec { return f.spec }
-func (f *fakeCmd) Handle(_ context.Context, _ RuntimeServices, in SlashInput) (*SlashOutput, error) {
+func (f *fakeCmd) Handle(_ context.Context, _ RuntimeServices, _ *chatsession.ChatSession, in SlashInput) (*SlashOutput, error) {
 	f.got = &in
 	f.calls++
 	return f.output, f.err
@@ -34,7 +36,8 @@ func newFakeCmd(name string, summary string) *fakeCmd {
 
 func TestNewCommander_EmptyRegistry_NonCommandText(t *testing.T) {
 	c := NewCommander(NewRegistry())
-	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{},
+	cs := &chatsession.ChatSession{}
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{}, cs,
 		SlashInput{Text: "hello world"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -52,8 +55,8 @@ func TestNewCommander_EmptyRegistry_SlashUnknown_FallsThrough(t *testing.T) {
 	// the gateway can fall through to the agent loop, preserving the
 	// existing passthrough behavior.
 	c := NewCommander(NewRegistry())
-	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{},
-		SlashInput{Text: "/nope arg1 arg2"})
+	cs := &chatsession.ChatSession{}
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{}, cs, SlashInput{Text: "/nope arg1 arg2"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -77,13 +80,13 @@ func TestNewCommander_EmptyRegistry_SlashPath_FallsThrough(t *testing.T) {
 	// through to the agent loop, NOT be rejected with
 	// "Unknown command".
 	c := NewCommander(NewRegistry())
+	cs := &chatsession.ChatSession{}
 	for _, text := range []string{
 		"/etc/passwd",
 		"/api/v1/foo",
 		"/@everyone hi",
 	} {
-		got, handled, err := c.Dispatch(context.Background(), RuntimeServices{},
-			SlashInput{Text: text})
+		got, handled, err := c.Dispatch(context.Background(), RuntimeServices{}, cs, SlashInput{Text: text})
 		if err != nil {
 			t.Fatalf("Dispatch(%q): %v", text, err)
 		}
@@ -102,8 +105,8 @@ func TestNewCommander_RoutedToRegisteredCmd(t *testing.T) {
 	reg.Register(gtw)
 
 	c := NewCommander(reg)
-	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{},
-		SlashInput{Text: "/gtw fix 42", Args: []string{"gtw", "fix", "42"}})
+	cs := &chatsession.ChatSession{}
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{}, cs, SlashInput{Text: "/gtw fix 42", Args: []string{"gtw", "fix", "42"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -128,8 +131,8 @@ func TestNewCommander_AliasRoutesToPrimary(t *testing.T) {
 	reg.Register(gtw)
 
 	c := NewCommander(reg)
-	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{},
-		SlashInput{Text: "/w list"})
+	cs := &chatsession.ChatSession{}
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{}, cs, SlashInput{Text: "/w list"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -151,8 +154,8 @@ func TestNewCommander_NoArgsStillFillsArgs(t *testing.T) {
 
 	c := NewCommander(reg)
 	// gateway did NOT pre-parse; Args is empty.
-	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{},
-		SlashInput{Text: "/gtw fix 42"})
+	cs := &chatsession.ChatSession{}
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{}, cs, SlashInput{Text: "/gtw fix 42"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -176,8 +179,8 @@ func TestNewCommander_CaseInsensitive(t *testing.T) {
 	reg.Register(gtw)
 	c := NewCommander(reg)
 
-	got, handled, _ := c.Dispatch(context.Background(), RuntimeServices{},
-		SlashInput{Text: "/GTW hi"})
+	cs := &chatsession.ChatSession{}
+	got, handled, _ := c.Dispatch(context.Background(), RuntimeServices{}, cs, SlashInput{Text: "/GTW hi"})
 	if !handled || !got.Consumed || got.Reply != "ok-gtw" {
 		t.Errorf("expected /GTW to route to gtw, got handled=%v output=%+v", handled, got)
 	}
@@ -185,8 +188,8 @@ func TestNewCommander_CaseInsensitive(t *testing.T) {
 
 func TestNewCommander_EmptyAfterSlash_FallsThrough(t *testing.T) {
 	c := NewCommander(NewRegistry())
-	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{},
-		SlashInput{Text: "/   trailing only"})
+	cs := &chatsession.ChatSession{}
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{}, cs, SlashInput{Text: "/   trailing only"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -209,8 +212,8 @@ func TestNewCommander_HandlerError_BecomesReply(t *testing.T) {
 	reg.Register(cmd)
 
 	c := NewCommander(reg)
-	got, handled, dispatchErr := c.Dispatch(context.Background(), RuntimeServices{},
-		SlashInput{Text: "/boom"})
+	cs := &chatsession.ChatSession{}
+	got, handled, dispatchErr := c.Dispatch(context.Background(), RuntimeServices{}, cs, SlashInput{Text: "/boom"})
 	if dispatchErr != nil {
 		t.Fatalf("unexpected error: %v", dispatchErr)
 	}

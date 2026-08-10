@@ -2,6 +2,7 @@ package prcache
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -191,5 +192,67 @@ func TestCache_ConcurrentGetAndInvalidate(t *testing.T) {
 	got := c.PR()
 	if got == nil || got.Number != 9 {
 		t.Fatalf("after parallel PR()/invalidate, PR = %+v, want {Number:9}", got)
+	}
+}
+
+// TestRegistry_CloseAll_CancelsInflight verifies Registry.CloseAll
+// cancels every Cache's in-flight refresh goroutine. We drive the
+// inflight state directly via Cache.mu (this is the same-package
+// test, no exported test helpers needed) — the production caller
+// is cmd/nightme/shutdownRun, whose wiring is covered by
+// cmd/nightme/run_test.go::TestShutdownRun_CloseAllCancelsCaches.
+//
+// The cancel is observed via a goroutine that watches ctx.Done();
+// CloseAll must reach the cache, grab mu, read cancel, and invoke
+// it within a bounded window.
+func TestRegistry_CloseAll_CancelsInflight(t *testing.T) {
+	r := &Registry{}
+
+	// Three caches, each with its own cancel context. CloseAll
+	// must hit all three — a single iteration bug (e.g.
+	// `for i := range caches` without copying the map) would
+	// leak the rest.
+	const N = 3
+	cancels := make([]context.CancelFunc, N)
+	done := make([]chan struct{}, N)
+
+	for i := 0; i < N; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancels[i] = cancel
+		done[i] = make(chan struct{})
+
+		c := r.GetOrCreate(fmt.Sprintf("as_%d", i))
+		c.mu.Lock()
+		c.inflight = true
+		c.cancel = cancel
+		c.mu.Unlock()
+
+		go func(idx int) {
+			<-ctx.Done()
+			close(done[idx])
+		}(i)
+	}
+
+	r.CloseAll()
+
+	for i := 0; i < N; i++ {
+		select {
+		case <-done[i]:
+			// observed
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("cache %d: CloseAll did not cancel within 500ms", i)
+		}
+	}
+
+	// After CloseAll the registry's map is empty: GetOrCreate
+	// returns a freshly-allocated Cache (different pointer from
+	// the pre-CloseAll instances, which remain valid for any
+	// caller still holding them).
+	pre := r.GetOrCreate("as_0") // first re-entry after CloseAll
+	if pre == nil {
+		t.Fatal("GetOrCreate after CloseAll returned nil; want fresh cache")
+	}
+	if pre.inflight {
+		t.Errorf("freshly-allocated cache has inflight=true; want false")
 	}
 }

@@ -351,36 +351,3 @@ func (r *Registry) CloseAll() {
 		c.Cancel()
 	}
 }
-
-// --- Test-only API --------------------------------------------------
-//
-// These methods exist so cross-package tests (cmd/nightme in
-// particular) can drive Cache / Registry internal state without
-// running a real Detect cycle. Production code MUST NOT use them
-// — the field-write semantics bypass the mutex-guarded production
-// paths.
-//
-// They live in production code (not _test.go) so cross-package
-// tests can call them. The "ForTest" suffix is the convention
-// (matches agentsession.SetHandleForTest / SetStatusForTest).
-
-// SetCachedForTest installs a known PR / branch / TTL into the
-// cache. Used by tests that need a non-nil PR() result without
-// standing up a working Detect round-trip.
-func (c *Cache) SetCachedForTest(pr *gtw.PR, branch string, expiresAt time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.pr = pr
-	c.branch = branch
-	c.expiresAt = expiresAt
-}
-
-// SetInflightForTest installs a hand-driven inflight state with
-// the supplied context.CancelFunc. Used by tests that need to
-// observe the cancel propagation without spawning MaybeRefresh.
-func (c *Cache) SetInflightForTest(cancel context.CancelFunc) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.inflight = true
-	c.cancel = cancel
-}

@@ -79,8 +79,8 @@ func TestSendText_WrapsBlocks(t *testing.T) {
 	// verify the live Agent has the expected method signature.
 	a := NewStarter("codex", "codex", nil)
 	// Type assertion sanity — keep the compiler honest. Starter
-	// satisfies agent.Starter; the driver (live handle) is what
-	// satisfies agent.Starter.
+	// satisfies agent.Starter; the driver (live handle) satisfies
+	// agent.driver (checked separately via var _ in agent.go).
 	var _ agent.Starter = a
 }
 

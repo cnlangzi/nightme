@@ -9,7 +9,6 @@ package pty
 
 import (
 	"context"
-	"fmt"
 	"os/exec"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -60,19 +59,11 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	return agent.NewAgent(s.Info(), d.PID(), d.events, d), nil
 }
 
-// pidForLive extracts the pid from a pty driver for the Agent.
-// This is a placeholder; pty.Transport has its own PID() method
-// that we use directly inside the live closure below.
-var _ = fmt.Sprintf
-
-// Compile-time guarantee that *driver satisfies the package-private
-// agent.driver interface (SendText/SendBlocks/SendPermission/
-// Reset/Close). External callers reach driver via *agent.Agent.
-var _ agentDriver = (*driver)(nil)
-
 // agentDriver is the local alias for the agent.driver interface so
 // this file can compile-time check driver satisfies it without
 // importing the unexported name from the agent package.
+// The matching `var _ agentDriver = (*driver)(nil)` check lives in
+// agent.go alongside the type so both files are self-contained.
 type agentDriver interface {
 	SendText(text string) error
 	SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error

@@ -627,13 +627,12 @@ func (d *driver) emit(event agent.AgentEvent) {
 	}
 }
 
-// Compile-time guarantee that *driver satisfies agent.Agent (the
-// merged spec+live interface). The template-half of *driver (set by
-// NewStarter) satisfies agent.Starter by implementing Info/Detect/Start.
-// Starter is the only interface in the package.
 // Compile-time guarantee that *driver satisfies the package-private
 // agent.driver interface (SendText/SendBlocks/SendPermission/
-// Reset/Close). External callers reach driver via *agent.Agent.
+// Reset/Close). External callers reach driver via *agent.Agent,
+// which forwards the public methods. The package-private starter
+// half is type-checked in starter.go via the same agentDriver
+// interface declaration.
 var _ agentDriver = (*driver)(nil)
 
 // agentDriver is the local alias for the agent.driver interface so

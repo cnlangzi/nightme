@@ -271,7 +271,10 @@ func (d *driver) readLoop() {
 	}
 }
 
-// Compile-time guarantee that *driver satisfies agent.Agent (the
-// merged spec+live interface). The template-half of *driver (set by
-// NewStarter) satisfies agent.Starter by implementing Info/Detect/Start.
+// Compile-time guarantee that *driver satisfies the package-private
+// agent.driver interface (SendText/SendBlocks/SendPermission/
+// Reset/Close). External callers reach driver via *agent.Agent,
+// which forwards the public methods. The package-private starter
+// half is type-checked in starter.go via the same agentDriver
+// interface declaration.
 var _ agentDriver = (*driver)(nil)

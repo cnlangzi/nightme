@@ -76,6 +76,5 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	if err != nil {
 		return nil, err
 	}
-	events := d.Events()
-	return agent.NewAgent(s.Info(), d.PID(), agent.MakeChanAlias(events), d), nil
+	return agent.NewAgent(s.Info(), d.PID(), d.events, d), nil
 }

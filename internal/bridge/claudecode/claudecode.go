@@ -827,14 +827,12 @@ func detectBranch(workspace string) string {
 	return branch
 }
 
-// Compile-time guarantee that *driver satisfies agent.Agent (the
-// merged spec+live interface). The template-half of *driver (set by
-// driver implements the package-private agent.driver interface
-// (SendText/SendBlocks/SendPermission/Reset/Close). The public
-// runtime surface (PID/Events/StderrLines) is also here. After
-// the starter+driver split, callers never see *driver directly —
-// they go through *agent.Agent which wraps it via the agent
-// package.
+// Compile-time guarantee that *driver satisfies the package-private
+// agent.driver interface (SendText/SendBlocks/SendPermission/
+// Reset/Close). External callers reach driver via *agent.Agent,
+// which forwards the public methods. The package-private starter
+// half is type-checked in starter.go via the same agentDriver
+// interface declaration.
 var _ agentDriver = (*driver)(nil)
 
 // agentDriver is the local alias for the agent.driver interface so

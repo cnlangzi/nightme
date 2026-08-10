@@ -635,8 +635,8 @@ type ContentBlock struct {
 // without affecting the underlying Starter/Agent.
 //
 // Use NewInfo when constructing an Info inside a bridge (it applies
-// the defensive-copy invariant); Info() on Starter/Agent uses
-// NewInfo internally.
+// the defensive-copy invariant); bridges construct one via NewInfo
+// in their Starter.Info method.
 type Info struct {
 	// Name is the unique identifier in the registry (e.g.
 	// "claude", "pi", "codex").
@@ -692,11 +692,6 @@ func copyStrings(s []string) []string {
 // (PID / Events / Send* / Close / New) is uniform across bridges —
 // per-bridge protocol details live in the unexported driver.
 //
-// TEMPORARY NAME: this is called Agent during the dual-track
-// transition (P1–P3) because the legacy Agent interface still
-// occupies the name Agent. After P4 deletes the legacy interface,
-// Agent is renamed to Agent.
-//
 // The lifecycle is:
 //
 //   - Template (held in agent.Builtins as a Starter) — only
@@ -729,10 +724,6 @@ type Agent struct {
 	closeOnce sync.Once
 	closed    chan struct{}
 }
-
-// Info returns the agent's fixed metadata. Observable on any
-// Agent handle at any time.
-func (a *Agent) infoValue() Info { return a.Info }
 
 // PID returns the OS process id of the underlying child, or 0 when
 // the session has no process (e.g. SDK backends that do not spawn
@@ -843,8 +834,8 @@ func NewAgent(info Info, pid int, events chan AgentEvent, d interface{}) *Agent 
 // external code interacts only with *Agent.
 //
 // The 5 methods capture exactly what bridges expose at runtime;
-// the static metadata is on Starter.infoValue(), the spawning logic
-// is on Starter.Start(), the close machinery is on Agent.Close.
+// the static metadata is on Starter.Info, the spawning logic
+// is on Starter.Start, the close machinery is on Agent.Close.
 type driver interface {
 	SendText(text string) error
 	SendBlocks(ctx context.Context, blocks []ContentBlock) error
@@ -867,7 +858,7 @@ type driver interface {
 //
 // Lifecycle:
 //
-//   - Starter.infoValue() returns the fixed metadata. Observable at
+//   - Starter.Info returns the fixed metadata. Observable at
 //     any time; used by `nightme agents`.
 //   - Starter.Detect() is the pre-flight check (binary on PATH,
 //     SDK available). Called by Spawner before Start; an error

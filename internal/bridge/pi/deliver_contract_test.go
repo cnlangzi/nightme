@@ -34,7 +34,7 @@ import (
 // Under the old behaviour deliver() would have returned within 1 s
 // and the event would have been silently dropped.
 func TestDeliver_BlocksWhenConsumerLags_NoDrop(t *testing.T) {
-	a := &Agent{
+	a := &driver{
 		events:   make(chan agent.AgentEvent, eventsBufferSize),
 		closed:   make(chan struct{}),
 		exitDone: make(chan struct{}),
@@ -78,7 +78,7 @@ func TestDeliver_BlocksWhenConsumerLags_NoDrop(t *testing.T) {
 // (Close() → close(a.closed)) releases a blocked deliver(). The
 // bridge must not leak producers after Close().
 func TestDeliver_UnblocksOnClose(t *testing.T) {
-	a := &Agent{
+	a := &driver{
 		events:   make(chan agent.AgentEvent, eventsBufferSize),
 		closed:   make(chan struct{}),
 		exitDone: make(chan struct{}),
@@ -117,7 +117,7 @@ func TestDeliver_UnblocksOnClose(t *testing.T) {
 // leak the producer when the process exits but Close() has not been
 // called explicitly (e.g. crash path).
 func TestDeliver_UnblocksOnExitDone(t *testing.T) {
-	a := &Agent{
+	a := &driver{
 		events:   make(chan agent.AgentEvent, eventsBufferSize),
 		closed:   make(chan struct{}),
 		exitDone: make(chan struct{}),

@@ -32,7 +32,7 @@ import (
 // asserting the goroutine is still blocked after 1 s catches any
 // regression that re-adds the instant-drop branch.
 func TestEmit_NoInstantDrop(t *testing.T) {
-	a := &Agent{
+	a := &driver{
 		ctx:    context.Background(),
 		events: make(chan agent.AgentEvent, eventBufferSize),
 	}
@@ -69,7 +69,7 @@ func TestEmit_NoInstantDrop(t *testing.T) {
 // the producer goroutine).
 func TestEmit_UnblocksOnCtxDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &Agent{
+	a := &driver{
 		ctx:    ctx,
 		events: make(chan agent.AgentEvent, eventBufferSize),
 	}
@@ -105,7 +105,7 @@ func TestEmit_UnblocksOnCtxDone(t *testing.T) {
 // "session id lost" failure mode. The test asserts the call blocks
 // rather than returning immediately when the channel is full.
 func TestEmitConnected_NoInstantDrop(t *testing.T) {
-	a := &Agent{
+	a := &driver{
 		ctx:           context.Background(),
 		events:        make(chan agent.AgentEvent, eventBufferSize),
 		sessionID:     "test-session",
@@ -154,7 +154,7 @@ func TestEmitConnected_NoInstantDrop(t *testing.T) {
 // emitConnected.
 func TestEmitConnected_UnblocksOnCtxDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &Agent{
+	a := &driver{
 		ctx:           ctx,
 		events:        make(chan agent.AgentEvent, eventBufferSize),
 		sessionID:     "test-session",

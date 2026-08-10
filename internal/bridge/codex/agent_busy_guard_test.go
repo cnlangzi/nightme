@@ -42,9 +42,11 @@ import (
 // process; stageImage uses os.ReadFile + os.WriteFile on the
 // workspace, and the turn/start RPC at the bottom of SendBlocks
 // is unreachable on the early-return paths under test.
-func fakeAgent(t *testing.T) *Agent {
+func fakeAgent(t *testing.T) *driver {
 	t.Helper()
-	a := New("codex", "codex", nil)
+	a := &driver{
+		closed: make(chan struct{}),
+	}
 	s := &session{
 		workspace: t.TempDir(),
 		threadID:  "th-test",
@@ -131,7 +133,7 @@ func TestAgent_PendingTurnActive_ReleasedByOnTurnEndCallback(t *testing.T) {
 	// form, capturing `live` (the receiver Start returns).
 	// We construct an Agent the same way Start does and pull
 	// out the callback.
-	live := New("codex", "codex", nil)
+	live := &driver{closed: make(chan struct{})}
 	live.session = a.session // share minimal session
 
 	// Replicate the closure construction in Agent.Start (the

@@ -382,11 +382,11 @@ func TestBuildAgentRegistryAutoRegister(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(%s) after auto-register: %v", bin, err)
 	}
-	if got.Mode() != 2 {
+	if got.Info().Mode != 2 {
 		// ModePTY = 2 in the agent package. The exact integer is
 		// not stable across reorders; pin the symbolic value here
 		// so we notice if someone changes the iota ordering.
-		t.Errorf("registered agent mode = %d, want ModePTY(2)", got.Mode())
+		t.Errorf("registered agent mode = %d, want ModePTY(2)", got.Info().Mode)
 	}
 }
 

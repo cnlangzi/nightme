@@ -164,9 +164,7 @@ func buildAgentRegistry(cfg *config.Config, requested string) *agent.Registry {
 			if len(fields) == 0 {
 				continue
 			}
-			a := pty.NewAgent(entry.Name, fields[0], fields[1:], nil)
-			a.Cols = cfg.Session.DefaultPtyCols
-			a.Rows = cfg.Session.DefaultPtyRows
+			a := pty.NewStarter(entry.Name, fields[0], fields[1:], nil, cfg.Session.DefaultPtyCols, cfg.Session.DefaultPtyRows)
 			reg.Register(a)
 		}
 	}
@@ -177,7 +175,7 @@ func buildAgentRegistry(cfg *config.Config, requested string) *agent.Registry {
 		// confusing exec error.
 		if requested != "" {
 			if _, statErr := os.Stat(requested); statErr == nil {
-				reg.Register(pty.NewAgent(requested, filepath.Base(requested), nil, nil))
+				reg.Register(pty.NewStarter(requested, filepath.Base(requested), nil, nil, 0, 0))
 			}
 		}
 	}

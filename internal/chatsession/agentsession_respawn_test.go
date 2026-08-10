@@ -35,7 +35,7 @@ func TestRespawn_ReapsOrphanBeforeSpawn(t *testing.T) {
 		close(waitDone)
 	}()
 
-	spawner := &fakeRestartSpawner{handle: &callRecordingAS{fakeAgentSession: newFakeAgentSession(9999)}}
+	spawner := &fakeRestartSpawner{handle: (&callRecordingAS{fakeAgentSession: newFakeAgentSession(9999)}).buildLive()}
 
 	if err := as.respawn(context.Background(), spawner, nil, ""); err != nil {
 		t.Fatalf("respawn: %v", err)
@@ -117,7 +117,7 @@ func TestRespawn_NoReapNeededWhenNoOrphan(t *testing.T) {
 	as := NewAgentSession(newAgentSessionID(), "cs_test", "cc", "/code", nil)
 	// pid defaults to 0 (never spawned).
 
-	spawner := &fakeRestartSpawner{handle: &callRecordingAS{fakeAgentSession: newFakeAgentSession(4242)}}
+	spawner := &fakeRestartSpawner{handle: (&callRecordingAS{fakeAgentSession: newFakeAgentSession(4242)}).buildLive()}
 	if err := as.respawn(context.Background(), spawner, nil, ""); err != nil {
 		t.Fatalf("respawn: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestRespawn_DoesNotTouchSessionID(t *testing.T) {
 	as := NewAgentSession(newAgentSessionID(), "cs_test", "cc", "/code", nil)
 	as.SetSessionID("resume-me-later")
 
-	spawner := &fakeRestartSpawner{handle: &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)}}
+	spawner := &fakeRestartSpawner{handle: (&callRecordingAS{fakeAgentSession: newFakeAgentSession(1)}).buildLive()}
 	if err := as.respawn(context.Background(), spawner, nil, "resume-me-later"); err != nil {
 		t.Fatalf("respawn: %v", err)
 	}

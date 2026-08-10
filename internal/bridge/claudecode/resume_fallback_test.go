@@ -31,7 +31,7 @@ func TestStart_ResumeRejectionSurfacesError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	a := New("claude", "claude", nil)
+	a := NewStarter("claude", "claude", nil)
 	// valid-format UUID that doesn't exist in claude's session store.
 	// claude emits "No conversation found with session ID: ..." on
 	// stderr, which the probe classifies as a resume rejection.
@@ -74,7 +74,7 @@ func TestStart_ResumeID_PreservedAcrossProbe(t *testing.T) {
 	defer cancel()
 
 	ws := t.TempDir()
-	a := New("claude", "claude", nil)
+	a := NewStarter("claude", "claude", nil)
 
 	// Phase 1: fresh spawn → capture session id.
 	sess1, err := a.Start(ctx, agent.StartConfig{

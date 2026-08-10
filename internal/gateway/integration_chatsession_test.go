@@ -289,13 +289,13 @@ type integrationSpawner struct {
 	calls    int
 }
 
-func (s *integrationSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (agent.Agent, error) {
+func (s *integrationSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (*agent.Agent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
 	fake := newIntegrationFake(99000 + s.calls)
 	s.lastFake = fake
-	return fake, nil
+	return fake.Start(context.Background(), agent.StartConfig{})
 }
 
 // integrationFake is a minimal agent.Agent that captures
@@ -313,15 +313,33 @@ func newIntegrationFake(pid int) *integrationFake {
 
 func (f *integrationFake) Events() <-chan agent.AgentEvent { return f.events }
 func (f *integrationFake) PID() int                       { return f.pid }
-func (f *integrationFake) Name() string                   { return "fake" }
-func (f *integrationFake) Mode() agent.Mode               { return agent.ModePTY }
-func (f *integrationFake) Command() string                { return "fake" }
-func (f *integrationFake) Args() []string                 { return nil }
-func (f *integrationFake) Env() []string                  { return nil }
-func (f *integrationFake) Detect() error                  { return nil }
-func (f *integrationFake) Start(context.Context, agent.StartConfig) (agent.Agent, error) {
-	return f, nil
+func (f *integrationFake) Info() agent.Info {
+	return agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil)
 }
+func (f *integrationFake) Detect() error { return nil }
+func (f *integrationFake) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
+	return f.buildLive(), nil
+}
+
+// buildLive wraps f in a *agent.Agent with integrationFakeDriver.
+func (f *integrationFake) buildLive() *agent.Agent {
+	return agent.NewAgent(
+		agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil),
+		f.pid, f.events, &integrationFakeDriver{inner: f})
+}
+
+// integrationFakeDriver forwards driver calls to integrationFake.
+type integrationFakeDriver struct{ inner *integrationFake }
+
+func (d *integrationFakeDriver) SendText(text string) error { return d.inner.SendText(text) }
+func (d *integrationFakeDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
+	return d.inner.SendBlocks(ctx, b)
+}
+func (d *integrationFakeDriver) SendPermission(resp string) error {
+	return d.inner.SendPermission(resp)
+}
+func (d *integrationFakeDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
+func (d *integrationFakeDriver) Close() error                   { return d.inner.Close() }
 func (f *integrationFake) SendText(string) error          { return nil }
 func (f *integrationFake) SendBlocks(context.Context, []agent.ContentBlock) error {
 	return nil
@@ -356,7 +374,7 @@ func (f *integrationFake) FinishEvent() {
 	close(f.events)
 }
 
-var _ agent.Agent = (*integrationFake)(nil)
+var _ agent.Starter = (*integrationFake)(nil)
 
 // --- helpers ----------------------------------------------------------
 
@@ -373,7 +391,7 @@ func summarizeKinds(msgs []OutboundMessage) []OutboundKind {
 // TestIntegration_RealBridge_FakeShell covers the layer the
 // in-memory integrationFake skips: the claudecode bridge's
 // pumpStream(stdout → s.events). It spawns a shell script via
-// claudecode.New(...).Start() that emits a stream-json transcript
+// claudecode.NewStarter(...).Start() that emits a stream-json transcript
 // on stdout, then drives the full Submit → readpump → PumpEvents
 // → AgentEventBus fan-out. If pumpStream is broken (closed before
 // first read, wrong channel buffering, parse failure), this test
@@ -448,7 +466,7 @@ exit 0
 	// Spawner that drives the real claudecode bridge against our
 	// fake shell. registrySpawner calls Agent.Start which calls
 	// newSession which exec's our script.
-	realAgent := claudecode.New("claude", script, nil)
+	realAgent := claudecode.NewStarter("claude", script, nil)
 	spawner := &realBridgeSpawner{agent: realAgent}
 
 	cs := newIntegrationChatSession("oc_real_bridge", spawner)
@@ -515,16 +533,16 @@ exit 0
 	}
 }
 
-// realBridgeSpawner wraps a real claudecode.Agent (whose Start
+// realBridgeSpawner wraps a real claudecode.Starter (whose Start
 // spawns an actual subprocess via exec.Command).
 type realBridgeSpawner struct {
-	agent *claudecode.Agent
+	agent *claudecode.Starter
 }
 
-func (s *realBridgeSpawner) Spawn(ctx context.Context, _, _ string, args []string, sessionID string) (agent.Agent, error) {
+func (s *realBridgeSpawner) Spawn(ctx context.Context, _, _ string, args []string, sessionID string) (*agent.Agent, error) {
 	return s.agent.Start(ctx, agent.StartConfig{
 		Workspace: "/tmp",
 		Args:      args,
-		SessionID:  sessionID,
+		SessionID: sessionID,
 	})
 }

@@ -6,8 +6,9 @@
 // bridge package supplies the underlying protocol.
 //
 // To add a new built-in agent:
-//  1. Implement an `agent.AgentSpec` constructor in the relevant
-//     `internal/bridge/<protocol>/` package (or extend one).
+//  1. Implement a `Starter` (Info/Detect/Start) in the relevant
+//     `internal/bridge/<protocol>/` package (or extend one). Use
+//     the bridge's exported `NewStarter(...)` constructor.
 //  2. Add a Builtins.Register line below.
 //
 // There is no name-based dispatch table elsewhere in the binary —
@@ -27,14 +28,14 @@ func init() {
 	// claude — the JSON-IO bridge. Dedicated implementation; user
 	// config can override the command path but the override drops
 	// back to PTY (loses AskUserQuestion, structured events).
-	agent.Builtins.Register(claudecode.New("claude", "claude", nil))
+	agent.Builtins.Register(claudecode.NewStarter("claude", "claude", nil))
 
 	// codex — the `codex app-server --listen stdio://` JSON-RPC 2.0
 	// bridge. Spawns codex in app-server mode and drives it via
 	// raw stdio pipes (no PTY). Single backend — see
 	// docs/bridge/codex.md §1 for the rationale on not supporting
 	// the legacy `codex exec` backend.
-	agent.Builtins.Register(codex.New("codex", "codex", nil))
+	agent.Builtins.Register(codex.NewStarter("codex", "codex", nil))
 
 	// pi — the long-lived `pi --mode rpc` JSONL bridge. The agent
 	// driver is the @earendil-works/pi-coding-agent CLI; see
@@ -42,10 +43,10 @@ func init() {
 	// F-32 MVP scope. User config can override the command path;
 	// the structured bridge only works for builtin registration,
 	// not for the PTY fallback in buildAgentRegistry.
-	agent.Builtins.Register(pi.New("pi", "pi", nil))
+	agent.Builtins.Register(pi.NewStarter("pi", "pi", nil))
 
 	// bash — example PTY-backed entry. Shows the registration
 	// shape for any binary the user might want to launch without
 	// an ACP/JSON-IO layer.
-	agent.Builtins.Register(pty.NewAgent("bash", "bash", nil, nil))
+	agent.Builtins.Register(pty.NewStarter("bash", "bash", nil, nil, 0, 0))
 }

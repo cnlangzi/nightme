@@ -42,7 +42,7 @@ func TestEventsBufferSize_PinnedAt40960(t *testing.T) {
 // 2 s. Under the old behaviour deliver() would have returned
 // immediately and the event would have been silently dropped.
 func TestDeliver_BlocksWhenConsumerLags_NoDrop(t *testing.T) {
-	a := &Agent{
+	a := &driver{
 		session: &session{
 			events:   make(chan agent.AgentEvent, eventBufferSize),
 			closed:   make(chan struct{}),
@@ -88,7 +88,7 @@ func TestDeliver_BlocksWhenConsumerLags_NoDrop(t *testing.T) {
 // (Close() → close(s.closed)) releases a blocked deliver(). The
 // bridge must not leak producers after Close().
 func TestDeliver_UnblocksOnClose(t *testing.T) {
-	a := &Agent{
+	a := &driver{
 		session: &session{
 			events:   make(chan agent.AgentEvent, eventBufferSize),
 			closed:   make(chan struct{}),
@@ -127,7 +127,7 @@ func TestDeliver_UnblocksOnClose(t *testing.T) {
 // close(s.exitDone) (after cmd.Wait returns) releases a blocked
 // deliver() too. Same leak-prevention contract as the closed signal.
 func TestDeliver_UnblocksOnExitDone(t *testing.T) {
-	a := &Agent{
+	a := &driver{
 		session: &session{
 			events:   make(chan agent.AgentEvent, eventBufferSize),
 			closed:   make(chan struct{}),

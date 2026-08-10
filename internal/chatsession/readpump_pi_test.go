@@ -46,9 +46,30 @@ func (a *longLivedFakeAS) Command() string                { return "fake" }
 func (a *longLivedFakeAS) Args() []string                 { return nil }
 func (a *longLivedFakeAS) Env() []string                  { return nil }
 func (a *longLivedFakeAS) Detect() error                  { return nil }
-func (a *longLivedFakeAS) Start(context.Context, agent.StartConfig) (agent.Agent, error) {
-	return a, nil
+func (a *longLivedFakeAS) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
+	return a.buildLive(), nil
 }
+
+// buildLive wraps a in a *agent.Agent with longLivedFakeASDriver.
+func (a *longLivedFakeAS) buildLive() *agent.Agent {
+	return agent.NewAgent(
+		agent.NewInfo("long-lived", agent.ModePTY, "long-lived", nil, nil),
+		12345, a.events,
+		&longLivedFakeASDriver{inner: a})
+}
+
+// longLivedFakeASDriver forwards driver calls to longLivedFakeAS.
+type longLivedFakeASDriver struct{ inner *longLivedFakeAS }
+
+func (d *longLivedFakeASDriver) SendText(text string) error { return d.inner.SendText(text) }
+func (d *longLivedFakeASDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
+	return d.inner.SendBlocks(ctx, b)
+}
+func (d *longLivedFakeASDriver) SendPermission(resp string) error {
+	return d.inner.SendPermission(resp)
+}
+func (d *longLivedFakeASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
+func (d *longLivedFakeASDriver) Close() error                   { return d.inner.Close() }
 func (a *longLivedFakeAS) SendText(string) error          { return nil }
 func (a *longLivedFakeAS) SendBlocks(context.Context, []agent.ContentBlock) error {
 	return nil
@@ -73,9 +94,9 @@ func (a *longLivedFakeAS) push(ev agent.AgentEvent) {
 }
 
 // fakeSpawnerLS is a Spawner that returns our longLivedFakeAS.
-type fakeSpawnerLS struct{ as agent.Agent }
+type fakeSpawnerLS struct{ as *agent.Agent }
 
-func (f fakeSpawnerLS) Spawn(_ context.Context, _, _ string, _ []string, _ string) (agent.Agent, error) {
+func (f fakeSpawnerLS) Spawn(_ context.Context, _, _ string, _ []string, _ string) (*agent.Agent, error) {
 	return f.as, nil
 }
 
@@ -88,7 +109,7 @@ func TestReadPump_ContinuesAfterEventDone(t *testing.T) {
 	cs.SetSelectedCwd("/tmp")
 	cs.SetSelectedAgent("pi")
 	fake := newLongLivedFakeAS()
-	cs.spawner = fakeSpawnerLS{as: fake}
+	cs.spawner = fakeSpawnerLS{as: fake.buildLive()}
 
 	if _, err := cs.LookupSelectedAgentSession(); err != nil {
 		t.Fatalf("lookup: %v", err)

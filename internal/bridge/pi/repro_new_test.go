@@ -32,7 +32,7 @@ func TestReproNewAfterSwitch(t *testing.T) {
 	t.Logf("using pi binary at %s", bin)
 
 	workspace := t.TempDir()
-	a := New("pi", bin, []string{
+	a := NewStarter("pi", bin, []string{
 		"--provider", "anthropic",
 		"--model", "claude-sonnet",
 		"--no-session",

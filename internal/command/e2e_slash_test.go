@@ -140,6 +140,10 @@ func (d *echoDriver) SendPermission(resp string) error {
 	return d.inner.SendPermission(resp)
 }
 func (d *echoDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
+func (d *echoDriver) Abort(ctx context.Context) error { return d.inner.Abort(ctx) }
+func (d *echoDriver) SetModel(ctx context.Context, providerID, modelID string) error {
+	return d.inner.SetModel(ctx, providerID, modelID)
+}
 func (d *echoDriver) Close() error                   { return d.inner.Close() }
 // echoSpawner is a Spawner that hands out fresh echoAgent instances.
 type echoSpawner struct {

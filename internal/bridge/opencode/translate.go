@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -64,6 +65,11 @@ type translator struct {
 	// runtime can surface a "(empty response)" hint to the
 	// user — distinguishing "model produced nothing" from a
 	// genuine settle. Mirrors cc-connect's relay.go:5161 fallback.
+	//
+	// Guarded by turnMu: written from the SSE reader goroutine
+	// (markContent) and the SendBlocks call path (ResetTurn),
+	// read from the terminal-event branch (handleEvent).
+	turnMu      sync.Mutex
 	turnHadContent bool
 
 	// turnHadStep tracks whether a session.next.step.started event
@@ -75,7 +81,7 @@ type translator struct {
 	// session.next.tool.* event family we don't yet consume).
 	// Combined with turnHadContent to refine the Done.Reason
 	// choice on terminal events.
-	turnHadStep bool
+	turnHadStep bool // guarded by turnMu; see turnHadContent
 
 	// availableCommands caches the latest list of slash commands
 	// opencode advertises via SSE (stage 8.2). The runtime shim
@@ -116,14 +122,27 @@ func newTranslator(deliver func(agent.AgentEvent) agent.AgentEvent, agentName, w
 // ResetTurn clears per-turn state. Call before each Prompt submission
 // so the next terminal event can detect a (genuinely) empty response.
 func (t *translator) ResetTurn() {
+	t.turnMu.Lock()
 	t.turnHadContent = false
 	t.turnHadStep = false
+	t.turnMu.Unlock()
 }
 
 // markContent flips turnHadContent on. Called from the branches that
 // deliver agent work events (text, tool start/end, reasoning).
 func (t *translator) markContent() {
+	t.turnMu.Lock()
 	t.turnHadContent = true
+	t.turnMu.Unlock()
+}
+
+// turnHadAny reports whether ANY content was delivered during the
+// current turn (text/tool/reasoning) or a step.started event fired.
+// Used by the terminal-event branches to choose Done.Reason.
+func (t *translator) turnHadAny() (content, step bool) {
+	t.turnMu.Lock()
+	defer t.turnMu.Unlock()
+	return t.turnHadContent, t.turnHadStep
 }
 
 // AvailableBuiltinCommands returns the slash command names opencode
@@ -252,7 +271,9 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 		// when no payload-bearing events fire (the 1.18 step event
 		// payload doesn't include tool callIDs so we can't tell what
 		// ran, just that something did).
+		t.turnMu.Lock()
 		t.turnHadStep = true
+		t.turnMu.Unlock()
 		oLog("sse: session.next.step", "type", ev.Type)
 	case "session.next.step.ended":
 		// TERMINAL signal for opencode 1.18+. The first
@@ -276,7 +297,7 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 		// hang before first token).
 		usage := t.lastUsage
 		reason := "settled"
-		if !t.turnHadContent && !t.turnHadStep {
+		hadContent, hadStep := t.turnHadAny(); if !hadContent && !hadStep {
 			reason = "empty"
 		}
 		t.deliver(agent.AgentEvent{
@@ -303,7 +324,7 @@ func (t *translator) handleEvent(ev SessionEvent) error {
 		// unless both content AND step events were absent.
 		usage := t.lastUsage
 		reason := "settled"
-		if !t.turnHadContent && !t.turnHadStep {
+		hadContent, hadStep := t.turnHadAny(); if !hadContent && !hadStep {
 			reason = "empty"
 		}
 		t.deliver(agent.AgentEvent{

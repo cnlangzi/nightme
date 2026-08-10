@@ -332,6 +332,10 @@ func (d *fakeBuilderDriver) SendPermission(resp string) error {
 	return d.inner.SendPermission(resp)
 }
 func (d *fakeBuilderDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
+func (d *fakeBuilderDriver) Abort(ctx context.Context) error { return d.inner.Abort(ctx) }
+func (d *fakeBuilderDriver) SetModel(ctx context.Context, providerID, modelID string) error {
+	return d.inner.SetModel(ctx, providerID, modelID)
+}
 func (d *fakeBuilderDriver) Close() error                   { return d.inner.Close() }
 func (b *fakeAgentBuilder) Events() <-chan agent.AgentEvent                      { return b.events }
 func (b *fakeAgentBuilder) PID() int                                              { return 99999 }

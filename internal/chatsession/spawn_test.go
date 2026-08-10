@@ -58,6 +58,10 @@ func (d *fakeDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) err
 }
 func (d *fakeDriver) SendPermission(resp string) error { return d.inner.SendPermission(resp) }
 func (d *fakeDriver) Reset(ctx context.Context) error    { return d.inner.New(ctx) }
+func (d *fakeDriver) Abort(ctx context.Context) error    { return d.inner.Abort(ctx) }
+func (d *fakeDriver) SetModel(ctx context.Context, providerID, modelID string) error {
+	return d.inner.SetModel(ctx, providerID, modelID)
+}
 func (d *fakeDriver) Close() error                      { return d.inner.Close() }
 
 func (f *fakeAgentSession) SendText(text string) error {

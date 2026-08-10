@@ -65,6 +65,10 @@ func (d *recordingDriver) SendPermission(resp string) error {
 	return d.inner.SendPermission(resp)
 }
 func (d *recordingDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
+func (d *recordingDriver) Abort(ctx context.Context) error { return d.inner.Abort(ctx) }
+func (d *recordingDriver) SetModel(ctx context.Context, providerID, modelID string) error {
+	return d.inner.SetModel(ctx, providerID, modelID)
+}
 func (d *recordingDriver) Close() error                   { return d.inner.Close() }
 func (r *recordingAgentSession) SendText(_ string) error       { return nil }
 func (r *recordingAgentSession) SendBlocks(_ context.Context, blocks []agent.ContentBlock) error {

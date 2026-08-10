@@ -263,7 +263,7 @@ func TestSendBlocks_RequestShape(t *testing.T) {
 	a := testAgentFromServer(t, srv)
 	a.sessionID = "ses_1"
 	_, err := a.client.Prompt(context.Background(), "ses_1",
-		[]PartInput{TextPart("hello"), FilePart("image/png", "file:///tmp/x.png")}, "", "")
+		[]PartInput{TextPart("hello"), FilePart("image/png", "file:///tmp/x.png")})
 	if err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}

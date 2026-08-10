@@ -549,7 +549,7 @@ func TestClient_PromptReturns503SurfacesError(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := newClient(&serverProc{baseURL: srv.URL}, "/tmp")
-	_, err := c.Prompt(context.Background(), "ses_1", []PartInput{TextPart("hi")}, "", "")
+	_, err := c.Prompt(context.Background(), "ses_1", []PartInput{TextPart("hi")})
 	if err == nil {
 		t.Fatalf("expected error on 503")
 	}

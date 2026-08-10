@@ -39,8 +39,8 @@ func makeTestMessage(cs *ChatSession, blocks []agent.ContentBlock, userMsgID str
 // PushEvent / FinishEvent.
 func newTestASWithFakeHandle(cs *ChatSession) (*AgentSession, *fakeAgentSession) {
 	as := NewAgentSession("as_test", cs.ID, "fake", "/tmp", nil)
-	sess := newFakeAgentSession(1).buildLive()
-	as.handle = sess
+	spy := newFakeAgentSession(1)
+	as.handle = spy.buildLive()
 	as.stat = StatusRunning
 	as.pid = 1
 
@@ -49,7 +49,7 @@ func newTestASWithFakeHandle(cs *ChatSession) (*AgentSession, *fakeAgentSession)
 	cs.selectedAS = as
 	cs.mu.Unlock()
 
-	return as, sess
+	return as, spy
 }
 
 // testChannel is a minimal Channel impl for in-package tests.

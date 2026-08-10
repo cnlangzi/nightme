@@ -60,9 +60,26 @@ type failingNewAS struct {
 
 var errInjected = errors.New("injected bridge failure")
 
+
 func (f *failingNewAS) buildLive() *agent.LiveAgent {
-	return f.fakeAgentSession.buildLive()
+	return agent.NewLiveAgent(
+		agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil),
+		f.pid, f.events,
+		&failingNewASDriver{inner: f})
 }
+
+// failingNewASDriver forwards driver calls to a failingNewAS.
+type failingNewASDriver struct{ inner *failingNewAS }
+
+func (d *failingNewASDriver) SendText(text string) error { return d.inner.SendText(text) }
+func (d *failingNewASDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
+	return d.inner.SendBlocks(ctx, b)
+}
+func (d *failingNewASDriver) SendPermission(resp string) error {
+	return d.inner.SendPermission(resp)
+}
+func (d *failingNewASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
+func (d *failingNewASDriver) Close() error                   { return d.inner.Close() }
 
 func (f *failingNewAS) New(_ context.Context) error { return errInjected }
 
@@ -325,7 +342,8 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 		cs, _ := New("chat-restart", "cc", newTestChannel())
 		cwd := t.TempDir()
 		cs.SetSelectedCwd(cwd)
-		old := (&restartErrAS{fakeAgentSession: newFakeAgentSession(1)}).buildLive()
+		oldSpy := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
+		old := oldSpy.buildLive()
 		as := injectAS(t, cs, "cc", cwd, old)
 
 		err := as.New(context.Background())
@@ -334,7 +352,7 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 		}
 		// AgentSession.New must NOT have touched the handle — the
 		// chat layer owns the kill+respawn.
-		if old.closed {
+		if oldSpy.closed {
 			t.Fatalf("AgentSession.New must not Close() the handle; that's the chat layer's job")
 		}
 		if got := as.Handle(); got == nil {
@@ -357,7 +375,8 @@ func TestChatSession_RestartAgentSession(t *testing.T) {
 		cs, _ := New("chat-restart", "cc", newTestChannel())
 		cwd := t.TempDir()
 		cs.SetSelectedCwd(cwd)
-		old := (&restartErrAS{fakeAgentSession: newFakeAgentSession(1)}).buildLive()
+		oldSpy := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
+		old := oldSpy.buildLive()
 		as := injectAS(t, cs, "cc", cwd, old)
 		as.SetSessionID("stale-id-should-be-cleared")
 
@@ -368,7 +387,7 @@ func TestChatSession_RestartAgentSession(t *testing.T) {
 		if err := cs.restartAgentSession(context.Background(), as); err != nil {
 			t.Fatalf("restartAgentSession: %v", err)
 		}
-		if !old.closed {
+		if !oldSpy.closed {
 			t.Fatalf("old handle should have been Close()d")
 		}
 		if got := as.Handle(); got != newAS {
@@ -419,7 +438,8 @@ func TestChatSession_RestartAgentSession(t *testing.T) {
 		cs, _ := New("chat-respawn-fail", "cc", newTestChannel())
 		cwd := t.TempDir()
 		cs.SetSelectedCwd(cwd)
-		old := (&restartErrAS{fakeAgentSession: newFakeAgentSession(1)}).buildLive()
+		oldSpy := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
+		old := oldSpy.buildLive()
 		as := injectAS(t, cs, "cc", cwd, old)
 		as.SetSessionID("stale-id")
 
@@ -454,6 +474,28 @@ func (r *restartErrAS) Close() error {
 	r.closed = true
 	return r.fakeAgentSession.Close()
 }
+
+// buildLive wraps r in a *agent.LiveAgent so its overridden New
+// (which returns ErrRestartRequired) is what driver.Reset dispatches.
+func (r *restartErrAS) buildLive() *agent.LiveAgent {
+	return agent.NewLiveAgent(
+		agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil),
+		r.pid, r.events,
+		&restartErrASDriver{inner: r})
+}
+
+// restartErrASDriver forwards driver calls to a restartErrAS.
+type restartErrASDriver struct{ inner *restartErrAS }
+
+func (d *restartErrASDriver) SendText(text string) error { return d.inner.SendText(text) }
+func (d *restartErrASDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
+	return d.inner.SendBlocks(ctx, b)
+}
+func (d *restartErrASDriver) SendPermission(resp string) error {
+	return d.inner.SendPermission(resp)
+}
+func (d *restartErrASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
+func (d *restartErrASDriver) Close() error                   { return d.inner.Close() }
 
 // fakeRestartSpawner is a minimal chatsession.Spawner that returns a
 // pre-built handle. The wrapper only needs Spawn(ctx, name, cwd, args,
@@ -570,7 +612,8 @@ func TestNewActiveAgentSessions_DeadEntryDoesNotSpawn(t *testing.T) {
 	}
 	cs.WithPersistence(nil, nil)
 
-	spy := &fakeRestartSpawner{handle: newFakeAgentSession(99)}
+	as := newFakeAgentSession(99)
+	spy := &fakeRestartSpawner{handle: as.buildLive()}
 	cs.WithSpawner(spy)
 
 	a := NewAgentSession(newAgentSessionID(), cs.ID, "cc", cwd, nil)

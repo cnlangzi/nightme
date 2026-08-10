@@ -70,14 +70,12 @@ func (a *echoAgent) PID() int {
 	defer a.mu.Unlock()
 	return a.pid
 }
-func (a *echoAgent) Name() string                  { return "echo" }
-func (a *echoAgent) Mode() agent.Mode              { return agent.ModePTY }
-func (a *echoAgent) Command() string               { return "echo" }
-func (a *echoAgent) Args() []string                { return nil }
-func (a *echoAgent) Env() []string                 { return nil }
-func (a *echoAgent) Detect() error                 { return nil }
+func (a *echoAgent) Info() agent.Info {
+	return agent.NewInfo("echo", agent.ModePTY, "echo", nil, nil)
+}
+func (a *echoAgent) Detect() error { return nil }
 func (a *echoAgent) Start(_ context.Context, _ agent.StartConfig) (*agent.LiveAgent, error) {
-	return a, nil
+	return agent.NewLiveAgent(a.Info(), a.pid, a.events, &echoDriver{inner: a}), nil
 }
 func (a *echoAgent) SendText(string) error                          { return nil }
 func (a *echoAgent) SendBlocks(context.Context, []agent.ContentBlock) error {
@@ -95,8 +93,20 @@ func (a *echoAgent) Close() error {
 	return nil
 }
 
-var _ agent.Agent = (*echoAgent)(nil)
+var _ agent.Starter = (*echoAgent)(nil)
 
+// echoDriver forwards driver calls back to an echoAgent.
+type echoDriver struct{ inner *echoAgent }
+
+func (d *echoDriver) SendText(text string) error { return d.inner.SendText(text) }
+func (d *echoDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
+	return d.inner.SendBlocks(ctx, b)
+}
+func (d *echoDriver) SendPermission(resp string) error {
+	return d.inner.SendPermission(resp)
+}
+func (d *echoDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
+func (d *echoDriver) Close() error                   { return d.inner.Close() }
 // echoSpawner is a Spawner that hands out fresh echoAgent instances.
 type echoSpawner struct {
 	mu       sync.Mutex
@@ -112,7 +122,7 @@ func (s *echoSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string
 	s.nextPID++
 	a := newEchoAgent(99000 + s.nextPID)
 	s.last = a
-	return a, nil
+	return a.Start(context.Background(), agent.StartConfig{})
 }
 
 // ─── Runtime shim (mirror of cmd/nightme/run.go) ─────────────────────

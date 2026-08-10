@@ -375,8 +375,8 @@ func TestKillWorkflow_KillAllAgents_EmptyCwd(t *testing.T) {
 	cs, _ := New("chat-wf-kaa-emptycwd", "cc", newTestChannel())
 	cs.WithPersistence(nil, nil)
 
-	a := injectAS(t, cs, "cc", "/some/other/cwd",
-		&(&closedSpy{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
+	spy := &closedSpy{fakeAgentSession: newFakeAgentSession(1)}
+	a := injectAS(t, cs, "cc", "/some/other/cwd", spy.buildLive())
 	cs.mu.Lock()
 	cs.selectedAS = a
 	cs.mu.Unlock()

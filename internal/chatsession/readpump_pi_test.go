@@ -47,10 +47,15 @@ func (a *longLivedFakeAS) Args() []string                 { return nil }
 func (a *longLivedFakeAS) Env() []string                  { return nil }
 func (a *longLivedFakeAS) Detect() error                  { return nil }
 func (a *longLivedFakeAS) Start(context.Context, agent.StartConfig) (*agent.LiveAgent, error) {
+	return a.buildLive(), nil
+}
+
+// buildLive wraps a in a *agent.LiveAgent with longLivedFakeASDriver.
+func (a *longLivedFakeAS) buildLive() *agent.LiveAgent {
 	return agent.NewLiveAgent(
 		agent.NewInfo("long-lived", agent.ModePTY, "long-lived", nil, nil),
 		12345, a.events,
-		&longLivedFakeASDriver{inner: a}), nil
+		&longLivedFakeASDriver{inner: a})
 }
 
 // longLivedFakeASDriver forwards driver calls to longLivedFakeAS.

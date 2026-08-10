@@ -147,11 +147,11 @@ func (s *fakeSpawner) Spawn(ctx context.Context, name, cwd string, args []string
 	}
 	key := spawnKey{name, cwd}
 	if f, ok := s.fakes[key]; ok {
-		return f, nil
+		return f.buildLive(), nil
 	}
 	f := newFakeAgentSession(10000 + s.calls)
 	s.fakes[key] = f
-	return f, nil
+	return f.buildLive(), nil
 }
 
 func (s *fakeSpawner) Get(name, cwd string) *fakeAgentSession {

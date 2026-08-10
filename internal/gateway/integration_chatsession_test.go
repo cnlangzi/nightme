@@ -295,7 +295,7 @@ func (s *integrationSpawner) Spawn(_ context.Context, _, _ string, _ []string, _
 	s.calls++
 	fake := newIntegrationFake(99000 + s.calls)
 	s.lastFake = fake
-	return fake, nil
+	return fake.Start(context.Background(), agent.StartConfig{})
 }
 
 // integrationFake is a minimal agent.Agent that captures
@@ -313,15 +313,33 @@ func newIntegrationFake(pid int) *integrationFake {
 
 func (f *integrationFake) Events() <-chan agent.AgentEvent { return f.events }
 func (f *integrationFake) PID() int                       { return f.pid }
-func (f *integrationFake) Name() string                   { return "fake" }
-func (f *integrationFake) Mode() agent.Mode               { return agent.ModePTY }
-func (f *integrationFake) Command() string                { return "fake" }
-func (f *integrationFake) Args() []string                 { return nil }
-func (f *integrationFake) Env() []string                  { return nil }
-func (f *integrationFake) Detect() error                  { return nil }
-func (f *integrationFake) Start(context.Context, agent.StartConfig) (*agent.LiveAgent, error) {
-	return f, nil
+func (f *integrationFake) Info() agent.Info {
+	return agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil)
 }
+func (f *integrationFake) Detect() error { return nil }
+func (f *integrationFake) Start(context.Context, agent.StartConfig) (*agent.LiveAgent, error) {
+	return f.buildLive(), nil
+}
+
+// buildLive wraps f in a *agent.LiveAgent with integrationFakeDriver.
+func (f *integrationFake) buildLive() *agent.LiveAgent {
+	return agent.NewLiveAgent(
+		agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil),
+		f.pid, f.events, &integrationFakeDriver{inner: f})
+}
+
+// integrationFakeDriver forwards driver calls to integrationFake.
+type integrationFakeDriver struct{ inner *integrationFake }
+
+func (d *integrationFakeDriver) SendText(text string) error { return d.inner.SendText(text) }
+func (d *integrationFakeDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
+	return d.inner.SendBlocks(ctx, b)
+}
+func (d *integrationFakeDriver) SendPermission(resp string) error {
+	return d.inner.SendPermission(resp)
+}
+func (d *integrationFakeDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
+func (d *integrationFakeDriver) Close() error                   { return d.inner.Close() }
 func (f *integrationFake) SendText(string) error          { return nil }
 func (f *integrationFake) SendBlocks(context.Context, []agent.ContentBlock) error {
 	return nil
@@ -356,7 +374,7 @@ func (f *integrationFake) FinishEvent() {
 	close(f.events)
 }
 
-var _ agent.Agent = (*integrationFake)(nil)
+var _ agent.Starter = (*integrationFake)(nil)
 
 // --- helpers ----------------------------------------------------------
 

@@ -494,17 +494,15 @@ func makeSpawnedAS(t *testing.T, cs *ChatSession, agentName string, parent conte
 
 	as.Activate(parent)
 
-	fake := newFakeAgentSession(99000).buildLive()
+	fake := newFakeAgentSession(99000)
 	as.asMu.Lock()
-	as.handle = fake
+	as.handle = fake.buildLive()
 	as.pid = fake.PID()
 	as.stat = StatusRunning
 	as.asMu.Unlock()
 	as.startReadPump()
 
-	return as, fake // *LiveAgent now
-		_ = fake // suppress unused
-
+	return as, fake
 }
 
 // waitForReadiness polls as.IsReady until it equals target or

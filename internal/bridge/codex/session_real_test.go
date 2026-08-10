@@ -117,7 +117,7 @@ func TestE2E_FreshThread(t *testing.T) {
 	defer cancel()
 
 	ws := t.TempDir()
-	a := New("codex", "codex", nil)
+	a := NewStarter("codex", "codex", nil)
 
 	sess, err := a.Start(ctx, agent.StartConfig{
 		Workspace: ws,
@@ -210,7 +210,7 @@ func TestE2E_ResumeThread(t *testing.T) {
 	ws := t.TempDir()
 
 	// --- first session: do one turn, capture thread id, close ---
-	a := New("codex", "codex", nil)
+	a := NewStarter("codex", "codex", nil)
 	sess1, err := a.Start(ctx, agent.StartConfig{Workspace: ws})
 	if err != nil {
 		t.Fatalf("Start first: %v", err)
@@ -304,7 +304,7 @@ func TestE2E_ApprovalFlow(t *testing.T) {
 	// Pass `-c approval_policy="on-request"` so every shell
 	// command triggers an approval request, regardless of project
 	// trust. We do this by extending the agent template's args.
-	a := New("codex", "codex", []string{
+	a := NewStarter("codex", "codex", []string{
 		"-c", `approval_policy="on-request"`,
 	})
 

@@ -1,5 +1,5 @@
 // Package pty also provides the Agent wrapper that turns a CLI
-// command into an agent.AgentSpec backed by the PTY transport defined
+// command into a Starter/Agent backed by the PTY transport defined
 // in this package. The wrapper is the safe fallback for any binary
 // that does not yet speak ACP / SDK / JSON-IO — bytes flow through
 // the PTY as EventAgentText and the session manager drives them.
@@ -18,7 +18,6 @@ package pty
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -45,21 +44,10 @@ const sessionBufferSize = 40960
 //     are valid here. Spec-half fields are still readable.
 //
 // The template (in Builtins) is never mutated; Start returns a
-// separate *Agent so concurrent Start calls from different chats do
+// separate *driver so concurrent Start calls from different chats do
 // not interfere with each other.
-type Agent struct {
-	// ─── template fields (set by NewAgent; immutable) ───
-	name    string
-	command string
-	args    []string
-	env     []string
-
-	// Cols and Rows set the initial PTY size. Zero values fall back
-	// to 80x24, matching config.SessionConfig defaults.
-	Cols int
-	Rows int
-
-	// ─── runtime fields (zero before Start; populated on the clone) ───
+type driver struct {
+	// ─── runtime fields (zero before Start; populated by newDriver) ───
 	transport Transport
 	events    chan agent.AgentEvent
 	closed    bool
@@ -67,59 +55,28 @@ type Agent struct {
 
 // NewAgent constructs the template Agent. This is the entry point
 // used at registration time (cmd/nightme/agents.go calls it from
-// init()); the returned *Agent is held by agent.Builtins as the
+// init()); the returned *driver is held by agent.Builtins as the
 // singleton for `name`.
 //
 // args are appended after the binary at Start time; env entries are
 // KEY=VALUE strings merged into the child environment. Both are
 // defensively copied.
-func NewAgent(name, command string, args, env []string) *Agent {
-	return &Agent{
+func NewStarter(name, command string, args, env []string, cols, rows int) *Starter {
+	return &Starter{
 		name:    name,
 		command: command,
 		args:    append([]string(nil), args...),
 		env:     append([]string(nil), env...),
+		cols:    cols,
+		rows:    rows,
 	}
-}
-
-// ─── spec-half methods (valid in any state) ───
-
-// Name returns the agent identifier used in the registry and config.
-func (a *Agent) Name() string { return a.name }
-
-// Mode reports ModePTY so the SessionManager routes through the PTY
-// backend.
-func (a *Agent) Mode() agent.Mode { return agent.ModePTY }
-
-// Command returns the CLI binary the agent wraps. Surfaced by
-// `nightme agents` so users can see what /run would spawn.
-func (a *Agent) Command() string { return a.command }
-
-// Args returns a defensive copy of the spawn recipe's default argv.
-// Callers may not mutate the returned slice.
-func (a *Agent) Args() []string {
-	return append([]string(nil), a.args...)
-}
-
-// Env returns a defensive copy of the spawn recipe's default env.
-// Callers may not mutate the returned slice.
-func (a *Agent) Env() []string {
-	return append([]string(nil), a.env...)
-}
-
-// Detect verifies the underlying CLI binary is on PATH. Callers
-// should invoke this before Start to produce a friendly "X not found"
-// error rather than letting Start fail deep inside the PTY layer.
-func (a *Agent) Detect() error {
-	_, err := exec.LookPath(a.command)
-	return err
 }
 
 // ─── lifecycle ───
 
 // Start spawns the CLI under a PTY and returns a live Agent. The
 // caller (typically chatsession.AgentSession via the Spawner) must
-// Close() the returned *Agent when done.
+// Close() the returned *driver when done.
 //
 // Start clones the receiver — the template in Builtins is untouched.
 // The clone gets its template fields copied (defensively), runtime
@@ -129,8 +86,12 @@ func (a *Agent) Detect() error {
 // cfg.Workspace is the child's working directory; cfg.Args are
 // appended after the agent's defaults (user wins); cfg.Env is merged
 // with the agent's defaults in that order (cfg wins).
-func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, error) {
-	cols, rows := a.Cols, a.Rows
+func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	cols, rows := s.cols, s.rows
 	if cols <= 0 {
 		cols = 80
 	}
@@ -139,10 +100,10 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 	}
 
 	// arg order: agent defaults, then user overrides (user wins).
-	args := append([]string(nil), a.args...)
+	args := append([]string(nil), s.args...)
 	args = append(args, cfg.Args...)
 	// env order: agent defaults, then per-session overrides (cfg wins).
-	env := append([]string(nil), a.env...)
+	env := append([]string(nil), s.env...)
 	env = append(env, cfg.Env...)
 
 	// ctx is currently unused — Start blocks synchronously. Reserved
@@ -150,20 +111,15 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 	// process via gopty.CmdContext.
 	_ = ctx
 
-	transport, err := NewTransport(cfg.Workspace, a.command, args, env, cols, rows)
+	transport, err := NewTransport(cfg.Workspace, s.command, args, env, cols, rows)
 	if err != nil {
 		return nil, err
 	}
 
-	live := &Agent{
-		name:      a.name,
-		command:   a.command,
-		args:      append([]string(nil), a.args...),
-		env:       append([]string(nil), a.env...),
-		Cols:      cols,
-		Rows:      rows,
+	live := &driver{
 		transport: transport,
 		events:    make(chan agent.AgentEvent, sessionBufferSize),
+		closed:    false,
 	}
 	go live.readLoop()
 	return live, nil
@@ -174,27 +130,27 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 // Events returns the live event stream. The read loop closes the
 // channel after pushing the terminal EventAgentDone / EventAgentError,
 // so callers can `for ev := range a.Events()` to drain.
-func (a *Agent) Events() <-chan agent.AgentEvent { return a.events }
+func (d *driver) Events() <-chan agent.AgentEvent { return d.events }
 
 // PID returns the child process PID recorded by the underlying
 // Transport. 0 if Start has not been called.
-func (a *Agent) PID() int {
-	if a.transport == nil {
+func (d *driver) PID() int {
+	if d.transport == nil {
 		return 0
 	}
-	return a.transport.PID()
+	return d.transport.PID()
 }
 
 // SendText writes raw user input to the PTY stdin. Newline
 // normalization is the Channel adapter's job (see F-19 §4.2).
-func (a *Agent) SendText(text string) error {
+func (d *driver) SendText(text string) error {
 	if text == "" {
 		return nil
 	}
-	if a.transport == nil {
+	if d.transport == nil {
 		return fmt.Errorf("pty: send on un-started agent")
 	}
-	_, err := a.transport.Write([]byte(text))
+	_, err := d.transport.Write([]byte(text))
 	return err
 }
 
@@ -211,9 +167,9 @@ func (a *Agent) SendText(text string) error {
 //
 // Empty blocks slice is a no-op. Image/file blocks with empty Path
 // are dropped (silent — no warn log since PTY mode is best-effort).
-func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
+func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
 	_ = ctx
-	if a.transport == nil {
+	if d.transport == nil {
 		return fmt.Errorf("pty: send on un-started agent")
 	}
 	if len(blocks) == 0 {
@@ -240,7 +196,7 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 	if b.Len() == 0 {
 		return nil
 	}
-	_, err := a.transport.Write([]byte(b.String()))
+	_, err := d.transport.Write([]byte(b.String()))
 	return err
 }
 
@@ -249,11 +205,11 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 // written verbatim to stdin. The CLI is expected to be currently
 // blocking on its own permission prompt ("Allow? [Y/n]") and accept
 // the bytes as input.
-func (a *Agent) SendPermission(resp string) error {
-	if a.transport == nil {
+func (d *driver) SendPermission(resp string) error {
+	if d.transport == nil {
 		return fmt.Errorf("pty: send on un-started agent")
 	}
-	_, err := a.transport.Write([]byte(resp))
+	_, err := d.transport.Write([]byte(resp))
 	return err
 }
 
@@ -262,15 +218,14 @@ func (a *Agent) SendPermission(resp string) error {
 // clarification 2026-08-04: "pty 是删掉进程, 重启进程"). The wrapper
 // layer (chatsession.AgentSession.New) catches this sentinel and
 // falls back to kill-and-respawn via the configured Spawner.
-func (a *Agent) New(ctx context.Context) error {
+// Reset is the agent.driver interface name for New.
+func (d *driver) Reset(ctx context.Context) error { return d.New(ctx) }
+
+func (d *driver) New(ctx context.Context) error {
 	_ = ctx
 	return agent.ErrRestartRequired
 }
 
-// Abort sends SIGINT to the child process. PTY has no structured
-// abort — the wire is a byte pipe — but the child usually honours
-// SIGINT (Ctrl-C) by interrupting the current foreground command
-// and returning to its prompt. This is the same heuristic the
 // Abort is not supported on the PTY bridge. PTY-mode CLIs don't
 // have a structured "abort the in-flight turn" RPC — the only
 // way to interrupt is to write Ctrl-C bytes to stdin or send a
@@ -281,7 +236,7 @@ func (a *Agent) New(ctx context.Context) error {
 // message rather than treating the absence as a generic error.
 //
 // See internal/agent/agent.go ErrNotSupported.
-func (a *Agent) Abort(ctx context.Context) error {
+func (d *driver) Abort(ctx context.Context) error {
 	_ = ctx
 	return agent.ErrNotSupported
 }
@@ -289,7 +244,7 @@ func (a *Agent) Abort(ctx context.Context) error {
 // SetModel is not supported on the PTY bridge. PTY has no
 // provider/model concept — the binary decides its own model at
 // startup.
-func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error {
+func (d *driver) SetModel(ctx context.Context, providerID, modelID string) error {
 	_ = ctx
 	_ = providerID
 	_ = modelID
@@ -297,15 +252,15 @@ func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error 
 }
 
 // Close terminates the session by closing the PTY. Idempotent.
-func (a *Agent) Close() error {
-	if a.closed {
+func (d *driver) Close() error {
+	if d.closed {
 		return nil
 	}
-	a.closed = true
-	if a.transport == nil {
+	d.closed = true
+	if d.transport == nil {
 		return nil
 	}
-	return a.transport.Close()
+	return d.transport.Close()
 }
 
 // ─── internals ───
@@ -317,22 +272,22 @@ func (a *Agent) Close() error {
 // transformation, no aggregation. Aggregation is the Channel
 // adapter's job (see F-19 §3).
 //
-// Kick off via `go a.readLoop()` from Start (production) or directly
+// Kick off via `go d.readLoop()` from Start (production) or directly
 // from tests that construct an Agent with a fake Transport.
-func (a *Agent) readLoop() {
-	defer close(a.events)
+func (d *driver) readLoop() {
+	defer close(d.events)
 
 	buf := make([]byte, 4096)
 	for {
-		n, err := a.transport.Read(buf)
+		n, err := d.transport.Read(buf)
 		if n > 0 {
-			a.events <- agent.AgentEvent{
+			d.events <- agent.AgentEvent{
 				Kind: agent.EventAgentText,
 				Text: string(buf[:n]),
 			}
 		}
 		if err != nil {
-			a.events <- agent.AgentEvent{
+			d.events <- agent.AgentEvent{
 				Kind: agent.EventAgentDone,
 				Done: &agent.AgentDoneEvent{ExitCode: -1},
 			}
@@ -341,8 +296,10 @@ func (a *Agent) readLoop() {
 	}
 }
 
-// Compile-time guarantee that *Agent satisfies agent.Agent (the
-// merged spec+live interface). The template-half of *Agent (set by
-// NewAgent) satisfies agent.AgentSpec implicitly because the new
-// agent.Agent interface embeds AgentSpec.
-var _ agent.Agent = (*Agent)(nil)
+// Compile-time guarantee that *driver satisfies the package-private
+// agent.driver interface (SendText/SendBlocks/SendPermission/
+// Reset/Close). External callers reach driver via *agent.Agent,
+// which forwards the public methods. The package-private starter
+// half is type-checked in starter.go via the same agentDriver
+// interface declaration.
+var _ agentDriver = (*driver)(nil)

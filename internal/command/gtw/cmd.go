@@ -63,9 +63,9 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw fix -n <branch>             short form of --name\n" +
 			"/gtw fix <id> --force            nuke any leftover at the target path, then re-create\n" +
 			"/gtw close                       tear down the worktree, delete the branch, and sync main\n" +
-			"/gtw push                       commit + push the worktree's branch to origin\n" +
-			"/gtw push --pr                   also open a PR (gh/glab) against the default branch\n" +
-			"/gtw push --no-commit            refuse if there are uncommitted changes\n" +
+			"/gtw push                        push the worktree branch (clean → push, dirty → agent commits+pushes)\n" +
+			"/gtw push -a claude              override which agent runs the one-shot\n" +
+			"/gtw push --agent opencode       same, long form\n" +
 			"/gtw sync                        checkout the default branch and pull --rebase from origin",
 	}
 }
@@ -305,14 +305,14 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *ch
 		}, nil
 	}
 
-	res, err := RunPush(ctx, cs, f.deps, input.ChatID, input.MessageID, args)
+	res, err := dispatchPush(ctx, cs, f.deps, input.ChatID, input.MessageID, args)
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw push failed: %v", err),
 			Consumed: true,
 		}, nil
 	}
-	_ = res // RunPush already sent the reply via cs.Channel()
+	_ = res // dispatchPush already sent the reply via cs.Channel()
 	return &command.SlashOutput{Consumed: true}, nil
 }
 
@@ -354,35 +354,37 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, _ *cha
 // Same rationale as fixArgs: a struct is more future-proof
 // than a growing positional return tuple.
 type pushArgs struct {
-	// OpenPR, when true, also runs `gh pr create` (or
-	// `glab mr create`) after push. Off by default — we
-	// don't want to surprise users with auto-created PRs
-	// on every /gtw push.
-	OpenPR bool
-
-	// NoCommit, when true, refuses any uncommitted changes
-	// in the worktree. Off by default — auto-staging +
-	// committing is the convenience path; users who want
-	// strictness pass --no-commit.
-	NoCommit bool
+	// Agent, when non-empty, overrides the chat's currently
+	// Selected Agent for this one-shot commit+push turn.
+	// Comes from `-a <name>` / `--agent <name>`. Empty
+	// means: use cs.SelectedAgent().
+	//
+	// This is per-invocation only. We do NOT mutate
+	// cs.selectedAgent — the chat remains bound to whatever
+	// /use last set. The user can /use back to a different
+	// agent after the push completes.
+	Agent string
 }
 
-// parsePushArgs strips --pr / --no-commit (and their short
-// forms once defined) from the push argv tail. No positional
-// arg today — /gtw push always operates on the current
-// chat's worktree, like /gtw close.
+// parsePushArgs strips `-a <name>` / `--agent <name>` from
+// the push argv tail. No positional arg today — /gtw push
+// always operates on the current chat's worktree, like
+// /gtw close.
 func parsePushArgs(argv []string) (pushArgs, error) {
 	out := pushArgs{}
-	for _, a := range argv {
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
 		switch a {
-		case "--pr":
-			out.OpenPR = true
-		case "--no-commit":
-			out.NoCommit = true
+		case "-a", "--agent":
+			if i+1 >= len(argv) {
+				return out, fmt.Errorf("missing value for %s", a)
+			}
+			out.Agent = argv[i+1]
+			i++
 		default:
-			// Unknown token. Future: surface when we
-			// accept positional args (e.g. --branch foo).
-			// For now: silent accept.
+			// Unknown token. Silent accept — future flag
+			// additions (e.g. positional branch arg) won't
+			// break callers passing them by mistake.
 		}
 	}
 	return out, nil

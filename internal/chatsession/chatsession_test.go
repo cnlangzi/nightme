@@ -550,7 +550,7 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 	// the (Agent, Cwd) key matches the pool filter.
 	activeCwd := cs.SelectedCwd()
 	as := NewAgentSession("as_kill", "oc_chat", "claude", activeCwd, nil)
-	as.handle = newRecordingAgentSession(1)
+	as.handle = newRecordingAgentSession(1).buildLive()
 	as.stat = StatusRunning
 	// Put a Prompt in flight so the AS is mid-turn and the message
 	// queued below is not flushed immediately.
@@ -591,7 +591,7 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 	// Respawn: the next AS is ready by construction, so the queued
 	// message flushes against it.
 	newAS := NewAgentSession("as_respawn", "oc_chat", "claude", t.TempDir(), nil)
-	newAS.handle = newRecordingAgentSession(2)
+	newAS.handle = newRecordingAgentSession(2).buildLive()
 	newAS.stat = StatusRunning
 	cs.mu.Lock()
 	cs.pool[agentCwdKey{Agent: newAS.Agent, Cwd: newAS.Cwd}] = newAS

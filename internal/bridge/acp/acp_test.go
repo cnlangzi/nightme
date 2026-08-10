@@ -145,7 +145,7 @@ func TestAcpSession_ParseMessageChunkEvent(t *testing.T) {
 
 func TestAcpSession_ParsePermissionRequest(t *testing.T) {
 	var output bytes.Buffer
-	a := &Agent{ctx: context.Background(), events: make(chan agent.AgentEvent, 1), rpc: newRPCClient(&output)}
+	a := &driver{ctx: context.Background(), events: make(chan agent.AgentEvent, 1), rpc: newRPCClient(&output)}
 	a.handleMethod(rpcMessage{
 		JSONRPC: jsonRPCVersion,
 		ID:      json.RawMessage(`7`),
@@ -184,7 +184,7 @@ func TestAcpSession_ParseToolEvents(t *testing.T) {
 func TestAcpSession_EOFClosesEvents(t *testing.T) {
 	client, server := net.Pipe()
 	transport := &mockTransport{Conn: client}
-	a := &Agent{transport: transport, rpc: newRPCClient(io.Discard), ctx: context.Background(), events: make(chan agent.AgentEvent, eventBufferSize)}
+	a := &driver{transport: transport, rpc: newRPCClient(io.Discard), ctx: context.Background(), events: make(chan agent.AgentEvent, eventBufferSize)}
 	go a.readPump()
 	_ = server.Close()
 
@@ -205,19 +205,17 @@ func TestRPCDecodeRejectsWrongVersion(t *testing.T) {
 	}
 }
 
-func testSession() *Agent {
-	return &Agent{ctx: context.Background(), events: make(chan agent.AgentEvent, eventBufferSize), rpc: newRPCClient(io.Discard)}
+func testSession() *driver {
+	return &driver{ctx: context.Background(), events: make(chan agent.AgentEvent, eventBufferSize), rpc: newRPCClient(io.Discard)}
 }
 
 // newAgentForTest constructs an Agent wired to a mock transport (no real
 // PTY spawn), with rpc / events / ctx wired so handshake() can run
 // against the in-process server. Returns an Agent ready to call
 // handshake() and then Send* / Close.
-func newAgentForTest(transport Transport, name, workspace string) *Agent {
+func newAgentForTest(transport Transport, name, workspace string) *driver {
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &Agent{
-		name:      name,
-		command:   "test",
+	a := &driver{
 		transport: transport,
 		rpc:       newRPCClient(transport),
 		ctx:       ctx,

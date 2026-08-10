@@ -1,11 +1,15 @@
 // Package agent defines the abstract Agent interface that wraps any
 // AI Coding CLI behind a single structured event stream.
 //
-// Two layers:
+// Three pieces:
 //
-//   - AgentSpec — static metadata + factory for sessions (Name, Mode, Detect, Start).
-//   - Agent     — a running instance: events channel + control plane
-//     (SendText, SendPermission, Close).
+//   - Info    — static metadata (Name, Mode, Command, Args, Env),
+//     readable from both Starter and the running Agent.
+//   - Starter — the spawn recipe; the only polymorphic point. Each
+//     bridge implements its own Start (fork+exec+handshake).
+//   - Agent   — the runtime handle. PID, events chan, sessionID,
+//     close machinery all live here; per-bridge protocol logic is
+//     hidden behind the unexported driver interface.
 //
 // The Mode selector (ACP / SDK / PTY) lets the Bridge pick a backend
 // without leaking protocol details to Session Manager. See
@@ -16,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 )
 
 // Mode identifies how the Bridge should communicate with the agent.
@@ -603,136 +609,6 @@ type AgentSpec interface {
 	Detect() error
 }
 
-// Agent is the merged interface: spec-half (via AgentSpec embedding)
-// + lifecycle (Start, Close) + live-half (Events, PID, Send*, New).
-//
-// In practice, every per-bridge struct (claudecode.Agent, pi.Agent,
-// pty.Agent, acp.Agent) implements this interface. The template
-// half lives in agent.Builtins; Start clones the receiver and
-// populates runtime fields on the clone, returning the clone as
-// the live handle. The live handle is what ChatSession holds in
-// AgentSession.handle.
-//
-// Callers that only need read-only spec data should declare a
-// parameter of type AgentSpec — that's the compile-time signal
-// that you don't intend to spawn or drive the agent.
-type Agent interface {
-	AgentSpec
-
-	// Start spawns (or attaches to) the agent and returns a live
-	// Agent. Called on the registered template; the receiver is
-	// unchanged. Caller must Close() the returned live Agent when
-	// done.
-	Start(ctx context.Context, cfg StartConfig) (Agent, error)
-
-	// Close terminates the session and releases resources. Idempotent.
-	// Called on the live handle returned by Start.
-	Close() error
-
-	// Events streams AgentEvent values until the session ends. The
-	// channel is closed by the implementation only when the
-	// underlying process (or transport) terminates -- NOT after
-	// every EventAgentDone. Long-lived bridges that multiplex many
-	// turns over a single process (e.g. Pi --mode rpc) emit
-	// EventAgentDone at the end of each turn and keep the channel
-	// open until process exit or Close(). Channels and ChatSession
-	// rely on the channel being closed as the universal
-	// "session is over" signal; AgentDoneEvent.Reason disambiguates
-	// turn-end from process-end.
-	Events() <-chan AgentEvent
-
-	// PID returns the OS process id of the underlying child, or 0
-	// when the session has no process (e.g. SDK backends that do
-	// not spawn one). The Session Manager caches this value for
-	// /run reconnect logic and for the registry.
-	PID() int
-
-	// SendText delivers plain-text user input. It is a convenience
-	// wrapper around SendBlocks with a single ContentText block.
-	// Implementations that support rich content MUST also implement
-	// SendBlocks; callers that need image/file attachments must
-	// use SendBlocks directly.
-	//
-	// In PTY mode the text is written as bytes to the child's
-	// stdin. In ACP / SDK / JSON-IO modes it is structured into a
-	// single-element content array.
-	SendText(text string) error
-
-	// SendBlocks delivers a structured user turn. Implementations
-	// decide how to render each block:
-	//
-	//   - PTY: each ContentText block is written verbatim; each
-	//     ContentImage / ContentFile block is rendered as the
-	//     agent's file-reference syntax (Claude Code TUI: "@<path>"
-	//     on its own line). Blocks are concatenated with "\n"
-	//     separators so a single turn arrives atomically.
-	//   - Claude Code stream-json: blocks are encoded into a
-	//     content-array with text and base64-inlined image blocks
-	//     (Anthropic API format).
-	//   - ACP / SDK: blocks are encoded into the protocol's
-	//     content-array shape.
-	//
-	// Implementations MUST handle an empty blocks slice as a no-op
-	// (returns nil). Image / file blocks whose Path does not exist
-	// are a per-implementation choice: most log a warning and drop
-	// the block; some return an error.
-	SendBlocks(ctx context.Context, blocks []ContentBlock) error
-
-	// SendPermission responds to the most recent EventAgentPermission. The
-	// argument is the option string the user chose. Only meaningful in
-	// ACP/SDK modes; PTY mode writes it verbatim to stdin.
-	SendPermission(resp string) error
-
-	// New resets the conversation context on the running session.
-	// The underlying process (or transport, for long-lived bridges)
-	// stays alive. Events() stays open. PID stays the same.
-	// Subsequent SendText / SendBlocks operate on the fresh conversation.
-	//
-	// Bridge-specific implementations (F-34):
-	//   - claudecode: writeLine("/clear")       // stdin slash command
-	//   - pi:         send {"type":"new_session"} RPC
-	//   - acp:        send "session/new" JSON-RPC over the existing transport
-	//
-	// After New returns, the bridge MUST emit a fresh EventAgentReady carrying
-	// the new SessionID; the runtime's AgentEventBus subscriber captures
-	// it via SetResumeID and persists (cmd/nightme/run.go newEventHandler).
-	New(ctx context.Context) error
-
-	// Abort cancels the in-flight turn. The next /use or /prompt
-	// can proceed once the bridge surfaces a terminal event
-	// (EventAgentDone or EventAgentError). The session id and
-	// process stay alive; mid-turn state is dropped.
-	//
-	// Bridge-specific implementations:
-	//   - codex:    POST /api/session/{id}/interrupt
-	//   - opencode: POST /api/session/{id}/interrupt
-	//   - pi:       {"type":"abort"} RPC
-	//   - acp:      session/cancel JSON-RPC
-	//   - claudecode / pty: best-effort SIGINT to the child;
-	//                        ErrNotSupported if the runtime really
-	//                        only wants structured abort
-	//
-	// Returning a non-nil error does NOT kill the bridge; the
-	// runtime surfaces the error to the user but the bridge stays
-	// usable. ErrNotSupported is the sentinel for bridges that
-	// cannot honour the request.
-	Abort(ctx context.Context) error
-
-	// SetModel switches the active model/provider on the next
-	// turn. In-flight turns are not affected by a model switch.
-	//
-	// Bridge-specific implementations:
-	//   - opencode: POST /api/session/{id}/model
-	//   - codex:    -c model=...  (requires restart; returns
-	//                        ErrNotSupported if the bridge cannot
-	//                        change model in place)
-	//   - pi: / claudecode / acp / pty: ErrNotSupported
-	//
-	// As with Abort, returning a non-nil error does NOT kill the
-	// bridge. The runtime surfaces the error to the user.
-	SetModel(ctx context.Context, providerID, modelID string) error
-}
-
 // ContentBlockType discriminates the payload shape on a ContentBlock.
 type ContentBlockType string
 
@@ -784,6 +660,289 @@ type ContentBlock struct {
 	// "image/jpeg") and advisory for ContentFile. Empty for
 	// ContentText.
 	MediaType string
+}
+
+// ─── Info: fixed metadata (was AgentSpec) ──────────────────────────
+
+// Info is the fixed metadata about an agent — its identity in the
+// registry plus the spawn recipe it was registered with.
+//
+// "Infer" describes how this is obtained: by calling Info() on any
+// Starter or *Agent handle. Info is not a separately-registered
+// entity; it is the read-only metadata that every Starter/Agent
+// exposes about itself.
+//
+// Info is a value type and immutable from the caller's perspective
+// after construction. Args and Env are defensively copied on every
+// Info() call so the caller can retain, mutate, or pass them on
+// without affecting the underlying Starter/Agent.
+//
+// Use NewInfo when constructing an Info inside a bridge (it applies
+// the defensive-copy invariant); bridges construct one via NewInfo
+// in their Starter.Info method.
+type Info struct {
+	// Name is the unique identifier in the registry (e.g.
+	// "claude", "pi", "codex").
+	Name string
+
+	// Mode reports which backend the bridge uses (PTY / ACP / SDK
+	// / JSON-IO).
+	Mode Mode
+
+	// Command is the CLI binary name (resolved via PATH at Start
+	// time) or absolute path. Surfaced by `nightme agents`.
+	Command string
+
+	// Args is the default argv after the binary. Per-session
+	// overrides arrive via StartConfig.Args. Defensively copied on
+	// every Info() call.
+	Args []string
+
+	// Env is the default env entries (KEY=VALUE) merged into the
+	// child environment. Defensively copied on every Info() call.
+	Env []string
+}
+
+// NewInfo constructs an Info, taking defensive copies of args and
+// env so the Agent can retain them independently of the caller's
+// slices. Nil slices are preserved as nil.
+//
+// Bridges call this in their Starter.infoValue() method; external
+// callers should rarely need it directly.
+func NewInfo(name string, mode Mode, command string, args, env []string) Info {
+	return Info{
+		Name:    name,
+		Mode:    mode,
+		Command: command,
+		Args:    copyStrings(args),
+		Env:     copyStrings(env),
+	}
+}
+
+func copyStrings(s []string) []string {
+	if s == nil {
+		return nil
+	}
+	out := make([]string, len(s))
+	copy(out, s)
+	return out
+}
+
+// ─── Agent: shared runtime handle (struct) ─────────────────────
+
+// Agent is the shared runtime handle for any bridge. It is a
+// concrete struct (not an interface) because the runtime surface
+// (PID / Events / Send* / Close / New) is uniform across bridges —
+// per-bridge protocol details live in the unexported driver.
+//
+// The lifecycle is:
+//
+//   - Template (held in agent.Builtins as a Starter) — only
+//     fields populated are the spec-half Info() returns.
+//   - Live (returned by Starter.Start) — Agent populated with
+//     events chan, pid, sessionID slot, and driver. Close() is
+//     idempotent and stops the underlying process.
+//
+// sessionID is captured from EventAgentReady and stored atomically
+// here so the runtime can read it without any cross-bridge type
+// switching (F-45).
+type Agent struct {
+	// Info is the fixed metadata. Exported so bridges and test
+	// fakes outside the package can construct a Agent via a
+	// struct literal.
+	Info Info
+
+	pid    int
+	events chan AgentEvent
+
+	// sessionID is written by the bridge's readPump on
+	// EventAgentReady and read by AgentSession.SessionID(). atomic
+	// because write happens on the readPump goroutine, read on
+	// AgentSession callers; both are short-lived accesses so a
+	// mutex would also be fine but atomic.Value is cheaper.
+	sessionID atomic.Value // string
+
+	driver driver
+
+	closeOnce sync.Once
+	closed    chan struct{}
+}
+
+// PID returns the OS process id of the underlying child, or 0 when
+// the session has no process (e.g. SDK backends that do not spawn
+// one) or before Start. The Session Manager caches this value
+// for /run reconnect logic and the registry.
+func (a *Agent) PID() int { return a.pid }
+
+// Events streams AgentEvent values until the session ends. The
+// channel is closed by the bridge implementation only when the
+// underlying process (or transport) terminates — NOT after every
+// EventAgentDone. Long-lived bridges that multiplex many turns
+// over a single process (e.g. Pi --mode rpc) emit EventAgentDone
+// at the end of each turn and keep the channel open until process
+// exit or Close(). Channels and ChatSession rely on the channel
+// being closed as the universal "session is over" signal;
+// AgentDoneEvent.Reason disambiguates turn-end from process-end.
+func (a *Agent) Events() <-chan AgentEvent { return a.events }
+
+// SessionID returns the agent's own session id captured on the
+// last EventAgentReady (e.g. Claude Code's
+// `system/init.session_id`). Empty when the agent has no resume
+// semantics or has not yet emitted its init event. Read is
+// concurrent-safe; write happens on the bridge's readPump via
+// setSessionID.
+func (a *Agent) SessionID() string {
+	v, _ := a.sessionID.Load().(string)
+	return v
+}
+
+// setSessionID records the agent's own session id. Called by the
+// bridge's readPump on EventAgentReady. Package-private so only
+// driver implementations can write.
+func (a *Agent) setSessionID(id string) { a.sessionID.Store(id) }
+
+// SendText delivers plain-text user input. Convenience wrapper
+// around SendBlocks with a single ContentText block. See the
+// driver interface for per-bridge encoding rules.
+func (a *Agent) SendText(text string) error { return a.driver.SendText(text) }
+
+// SendBlocks delivers a structured user turn. Delegates to the
+// bridge-specific driver.
+func (a *Agent) SendBlocks(ctx context.Context, blocks []ContentBlock) error {
+	return a.driver.SendBlocks(ctx, blocks)
+}
+
+// SendPermission responds to the most recent EventAgentPermission.
+// Only meaningful in ACP/SDK modes; PTY mode writes it verbatim
+// to stdin. See the driver interface for per-bridge semantics.
+func (a *Agent) SendPermission(resp string) error {
+	return a.driver.SendPermission(resp)
+}
+
+// New resets the conversation context on the running session.
+// The underlying process (or transport, for long-lived bridges)
+// stays alive. Events() stays open. PID stays the same.
+//
+// Bridge-specific implementations (F-34):
+//   - claudecode: writeLine("/clear")            // stdin slash command
+//   - pi:         send {"type":"new_session"}    // RPC
+//   - acp:        send "session/new"             // JSON-RPC over existing transport
+//
+// After New returns, the bridge MUST emit a fresh EventAgentReady
+// carrying the new SessionID; the runtime's EventAgentBus
+// subscriber captures it via setSessionID.
+func (a *Agent) New(ctx context.Context) error { return a.driver.Reset(ctx) }
+
+// Close terminates the session and releases resources.
+// Idempotent. Triggers driver.Close, which stops the underlying
+// process and closes the events channel (after pump goroutines
+// have drained). The driver is responsible for ordering.
+func (a *Agent) Close() error {
+	var err error
+	a.closeOnce.Do(func() {
+		close(a.closed)
+		err = a.driver.Close()
+	})
+	return err
+}
+
+// Driver returns the unexported driver interface for callers
+// that need access to bridge-specific state (e.g. tests
+// inspecting a *closedSpy behind the handle). Exposed as
+// interface{} because the driver interface is package-private.
+// Production code should call the typed methods on *Agent
+// (SendText, Events, …) rather than going through this.
+func (a *Agent) Driver() interface{} { return a.driver }
+
+// Abort cancels the in-flight turn. Delegates to the bridge's
+// driver; bridges that can't honor the call return
+// agent.ErrNotSupported.
+func (a *Agent) Abort(ctx context.Context) error {
+	return a.driver.Abort(ctx)
+}
+
+// SetModel switches the active model on the next turn. Bridges that
+// can't honor the call return agent.ErrNotSupported.
+func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error {
+	return a.driver.SetModel(ctx, providerID, modelID)
+}
+
+// NewAgent builds a *Agent from its constituent parts.
+// Exported so bridges and test fakes (outside the agent package)
+// can construct one. The driver is passed as interface{} because
+// the driver interface itself is package-private; production
+// callers pass the bridge-specific struct that implements the
+// five Send*/Reset/Close methods. The closed channel is freshly
+// allocated; the caller does not need to manage it.
+func NewAgent(info Info, pid int, events chan AgentEvent, d interface{}) *Agent {
+	return &Agent{
+		Info:   info,
+		pid:    pid,
+		events: events,
+		driver: d.(driver),
+		closed: make(chan struct{}),
+	}
+}
+
+// driver is the per-bridge protocol interface. Each bridge
+// implements this with its own runtime state (exec.Cmd / RPC
+// client / Transport / pump goroutines). It is package-private —
+// external code interacts only with *Agent.
+//
+// The 5 methods capture exactly what bridges expose at runtime;
+// the static metadata is on Starter.Info, the spawning logic
+// is on Starter.Start, the close machinery is on Agent.Close.
+type driver interface {
+	SendText(text string) error
+	SendBlocks(ctx context.Context, blocks []ContentBlock) error
+	SendPermission(resp string) error
+	Reset(ctx context.Context) error
+	Close() error
+
+	// Abort / SetModel are bridge-specific runtime methods that
+	// the shared *Agent wrapper exposes. Each driver returns
+	// agent.ErrNotSupported if the bridge cannot honor the call.
+	Abort(ctx context.Context) error
+	SetModel(ctx context.Context, providerID, modelID string) error
+}
+
+// ─── Starter: spawn recipe (interface, the only one) ──────────────
+
+// Starter is the spawn recipe for an agent. It is the only
+// interface in this package — the runtime surface (PID / Events /
+// Send* / Close) is uniform across bridges and lives on the
+// concrete *Agent struct, while the spawn recipe itself varies
+// per bridge and stays polymorphic.
+//
+// Each bridge's init() registers one Starter per agent name into
+// agent.Builtins. The registry stores Starter values, not *Agent.
+// Spawner calls Starter.Start(ctx, cfg) to obtain a live *Agent.
+//
+// Lifecycle:
+//
+//   - Starter.Info returns the fixed metadata. Observable at
+//     any time; used by `nightme agents`.
+//   - Starter.Detect() is the pre-flight check (binary on PATH,
+//     SDK available). Called by Spawner before Start; an error
+//     aborts session creation with a clear "X not found" message.
+//   - Starter.Start(ctx, cfg) spawns (or attaches to) the agent
+//     and returns a live *Agent. The receiver is unchanged;
+//     Starter is reusable across many sessions.
+type Starter interface {
+	Info() Info
+	Detect() error
+	Start(ctx context.Context, cfg StartConfig) (*Agent, error)
+
+	// RunOnce runs a single synchronous turn: the implementation
+	// owns the full spawn → send → wait → close cycle. cfg.Workspace
+	// is the agent's cwd for this call. Returns the agent's final
+	// text response, or an error if the turn didn't produce one.
+	//
+	// RunOnce is the "one-shot" counterpart to Start. Start returns
+	// a live *Agent for multi-turn / chat sessions; RunOnce is for
+	// callers (e.g. /gtw push) that want a single synchronous turn
+	// and don't need the session handle.
+	RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock) (string, error)
 }
 
 // Errors surfaced by the registry.

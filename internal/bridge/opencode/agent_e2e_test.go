@@ -235,7 +235,7 @@ func TestAgent_StartEndToEnd(t *testing.T) {
 		// supply a no-op cmd by leaving it nil; lifecycle handles
 		// nil cmd gracefully.
 	}
-	a := &Agent{
+	a := &driver{
 		name:        "opencode",
 		command:     "opencode",
 		workspace:   "/tmp",
@@ -347,7 +347,7 @@ func TestAgent_StartEndToEnd(t *testing.T) {
 // TestAgent_SendPermissionEmptyReturns verifies the empty-arg
 // default (reject).
 func TestAgent_SendPermissionEmptyReturns(t *testing.T) {
-	a := &Agent{name: "opencode", closed: make(chan struct{}), stopDeliver: make(chan struct{}), exitDone: make(chan struct{})}
+	a := &driver{name: "opencode", closed: make(chan struct{}), stopDeliver: make(chan struct{}), exitDone: make(chan struct{})}
 	if err := a.SendPermission(""); err != ErrNoPendingPermission {
 		t.Errorf("SendPermission(\"\") = %v, want ErrNoPendingPermission", err)
 	}
@@ -356,7 +356,7 @@ func TestAgent_SendPermissionEmptyReturns(t *testing.T) {
 // TestAgent_SendPermissionNoPendingReturns verifies we don't crash
 // when there's no pending approval.
 func TestAgent_SendPermissionNoPendingReturns(t *testing.T) {
-	a := &Agent{name: "opencode", closed: make(chan struct{}), stopDeliver: make(chan struct{}), exitDone: make(chan struct{})}
+	a := &driver{name: "opencode", closed: make(chan struct{}), stopDeliver: make(chan struct{}), exitDone: make(chan struct{})}
 	if err := a.SendPermission("accept"); err != ErrNoPendingPermission {
 		t.Errorf("SendPermission(\"accept\") = %v, want ErrNoPendingPermission", err)
 	}
@@ -375,7 +375,7 @@ func TestAgent_SendPermission_AcceptMapsToOnce(t *testing.T) {
 		w.WriteHeader(204)
 	}))
 	defer srv.Close()
-	a := &Agent{
+	a := &driver{
 		name: "opencode",
 		client: newClient(&serverProc{baseURL: srv.URL}, "/tmp"),
 		sessionID: "ses_1",
@@ -397,7 +397,7 @@ func TestAgent_SendPermission_AcceptMapsToOnce(t *testing.T) {
 func TestAgent_Close_IsIdempotent(t *testing.T) {
 	fs := newFakeServer(t)
 	defer fs.close()
-	a := &Agent{
+	a := &driver{
 		name:        "opencode",
 		events:      make(chan agent.AgentEvent, 64),
 		closed:      make(chan struct{}),

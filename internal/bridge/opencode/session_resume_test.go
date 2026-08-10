@@ -98,10 +98,10 @@ func (rs *resumeServer) handler(t *testing.T) http.Handler {
 // testAgentFromServer wires an Agent to a fake server. The Agent has
 // no SSE reader / lifecycle — these tests don't drive a turn, they
 // only check the resume path during Start.
-func testAgentFromServer(t *testing.T, srv *httptest.Server) *Agent {
+func testAgentFromServer(t *testing.T, srv *httptest.Server) *driver {
 	t.Helper()
 	proc := &serverProc{baseURL: srv.URL}
-	a := &Agent{
+	a := &driver{
 		name:        "opencode",
 		command:     "opencode",
 		workspace:   "/tmp",

@@ -149,7 +149,7 @@ const maxImageBytes = 10 * 1024 * 1024
 //
 // Sized large enough to absorb a sustained backlog rather than
 // dropping — the deliver() contract is "never time out, never drop,
-// exit only on a.closed or a.exitDone". Matches the producer-side
+// exit only on d.closed or d.exitDone". Matches the producer-side
 // contract across acp / claudecode / pty (no timeout, no default-drop).
 //
 // The channel is allocated in Start; deliver_contract_test.go pins
@@ -188,14 +188,9 @@ var ErrTurnClosed = errors.New("pi: previous prompt rejected")
 //     readable.
 //
 // The template (in Builtins) is never mutated; Start returns a
-// separate *Agent so concurrent Start calls from different chats
+// separate *driver so concurrent Start calls from different chats
 // do not interfere with each other.
-type Agent struct {
-	// ─── template fields (set by New; immutable) ───
-	name    string
-	command string
-	args    []string
-
+type driver struct {
 	// ─── runtime fields (zero before Start; populated on the clone) ───
 	cmd     *exec.Cmd
 	stdinW  io.WriteCloser
@@ -242,47 +237,6 @@ type Agent struct {
 
 // ─── template constructor + spec-half methods ───
 
-// New constructs the template Agent. This is the entry point used
-// at registration time (cmd/nightme/agents.go calls it from
-// init()); the returned *Agent is held by agent.Builtins as the
-// singleton for `name`.
-func New(name, command string, args []string) *Agent {
-	return &Agent{
-		name:    name,
-		command: command,
-		args:    append([]string(nil), args...),
-	}
-}
-
-// Name returns the registry key.
-func (a *Agent) Name() string { return a.name }
-
-// Mode reports the structured JSON-IO mode. The runtime does not
-// branch on Mode; the label is for `nightme agents` and logs.
-func (a *Agent) Mode() agent.Mode { return agent.ModeJSONIO }
-
-// Command returns the configured CLI binary (typically "pi").
-// Surfaced by `nightme agents` so users can see what /run would spawn.
-func (a *Agent) Command() string { return a.command }
-
-// Args returns a defensive copy of the constructor args. Callers may
-// not mutate the returned slice.
-func (a *Agent) Args() []string {
-	return append([]string(nil), a.args...)
-}
-
-// Env returns a defensive copy of the constructor env (always nil
-// for pi; kept for symmetry with the merged agent.Agent interface).
-func (a *Agent) Env() []string { return nil }
-
-// Detect verifies the `pi` binary resolves on PATH. Call before
-// Start to surface a friendly "pi not installed" error rather than
-// a confusing exec failure.
-func (a *Agent) Detect() error {
-	_, err := exec.LookPath(a.command)
-	return err
-}
-
 // ─── lifecycle ───
 
 // Start spawns Pi in RPC mode and returns a live Agent that streams
@@ -303,22 +257,22 @@ func (a *Agent) Detect() error {
 //
 // cfg.SessionID, when non-empty, is forwarded as `--session-id <id>`
 // at spawn time so the spawned process resumes the named session.
-func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, error) {
+func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver, error) {
 	if cfg.Workspace == "" {
 		return nil, fmt.Errorf("pi: workspace is required")
 	}
 
 	startTime := time.Now()
-	args := buildArgs(a.args, cfg)
+	args := buildArgs(s.args, cfg)
 	env := append([]string(nil), cfg.Env...)
-	env = append(env, a.command)
+	env = append(env, s.command)
 
-	piLog("Start enter", "agent", a.name, "command", a.command, "workspace", cfg.Workspace, "args", args)
+	piLog("Start enter", "agent", s.name, "command", s.command, "workspace", cfg.Workspace, "args", args)
 
 	branch := detectBranch(cfg.Workspace)
 	logger := slog.Default()
 
-	cmd := exec.CommandContext(ctx, a.command, args...)
+	cmd := exec.CommandContext(ctx, s.command, args...)
 	cmd.Dir = cfg.Workspace
 	cmd.Env = append(os.Environ(), env...)
 
@@ -348,21 +302,18 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 		return nil, fmt.Errorf("pi: start: %w", err)
 	}
 
-	live := &Agent{
-		name:      a.name,
-		command:   a.command,
-		args:      append([]string(nil), a.args...),
-		cmd:       cmd,
+	live := &driver{
+				cmd:       cmd,
 		stdinW:    stdin,
 		stdoutR:   stdout,
 		stderrR:   stderr,
 		rpc:       newRPCClient(stdin),
 		events:    make(chan agent.AgentEvent, eventsBufferSize),
 		pid:       cmd.Process.Pid,
-		agentName: a.name,
+		agentName: s.name,
 		workspace: cfg.Workspace,
 		branch:    branch,
-		translator: newTranslator(a.name, cfg.Workspace, branch),
+		translator: newTranslator(s.name, cfg.Workspace, branch),
 		logger:    logger,
 		closed:    make(chan struct{}),
 		exitDone:  make(chan struct{}),
@@ -442,18 +393,18 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 
 // Events returns the live event stream. The channel is closed by
 // the lifecycle goroutine after process exit or Close().
-func (a *Agent) Events() <-chan agent.AgentEvent { return a.events }
+func (d *driver) Events() <-chan agent.AgentEvent { return d.events }
 
 // PID returns the child process pid.
-func (a *Agent) PID() int { return a.pid }
+func (d *driver) PID() int { return d.pid }
 
 // SendText delivers a single text user turn. Thin wrapper around
 // SendBlocks.
-func (a *Agent) SendText(text string) error {
+func (d *driver) SendText(text string) error {
 	if text == "" {
 		return nil
 	}
-	return a.SendBlocks(context.Background(), []agent.ContentBlock{
+	return d.SendBlocks(context.Background(), []agent.ContentBlock{
 		{Type: agent.ContentText, Text: text},
 	})
 }
@@ -466,7 +417,7 @@ func (a *Agent) SendText(text string) error {
 // Empty blocks slice is a no-op. Concurrent SendBlocks calls are
 // rejected with ErrTurnBusy while a previous prompt is still
 // awaiting its ack response.
-func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
+func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
 	if len(blocks) == 0 {
 		return nil
 	}
@@ -488,17 +439,17 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 	callCtx, cancelCall := context.WithCancel(ctx)
 	defer cancelCall()
 
-	a.turnMu.Lock()
-	if a.turnActive {
-		a.turnMu.Unlock()
+	d.turnMu.Lock()
+	if d.turnActive {
+		d.turnMu.Unlock()
 		return ErrTurnBusy
 	}
-	a.turnActive = true
-	a.turnMu.Unlock()
+	d.turnActive = true
+	d.turnMu.Unlock()
 	defer func() {
-		a.turnMu.Lock()
-		a.turnActive = false
-		a.turnMu.Unlock()
+		d.turnMu.Lock()
+		d.turnActive = false
+		d.turnMu.Unlock()
 	}()
 
 	var messageText string
@@ -540,12 +491,12 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 	}
 
 	piLog("SendBlocks: callCtx derived",
-		"pid", a.pid,
+		"pid", d.pid,
 		"parent_has_deadline", ctxHasDeadline(ctx),
 		"call_has_deadline", ctxHasDeadline(callCtx),
 	)
 	params := promptParams{Message: messageText, Images: images}
-	resp, err := a.rpc.request(callCtx, "prompt", params, "")
+	resp, err := d.rpc.request(callCtx, "prompt", params, "")
 	if err != nil {
 		return err
 	}
@@ -571,7 +522,7 @@ func ctxHasDeadline(ctx context.Context) bool {
 // is kept so pi satisfies the merged agent.Agent interface; the
 // ChatSession layer treats a no-op return as "permission granted"
 // which is the safe default for pi's current tool surface.
-func (a *Agent) SendPermission(_ string) error {
+func (d *driver) SendPermission(_ string) error {
 	return nil
 }
 
@@ -590,14 +541,18 @@ func (a *Agent) SendPermission(_ string) error {
 //
 // Timeout: each of the two RPC round-trips (new_session + get_state)
 // is bounded by handshakeTimeout; total wall time ≤ 2x that.
-func (a *Agent) New(ctx context.Context) error {
-	if a.rpc == nil {
+// Reset is the agent.driver interface name for New. Implements
+// the agent.driver Reset method (F-34).
+func (d *driver) Reset(ctx context.Context) error { return d.New(ctx) }
+
+func (d *driver) New(ctx context.Context) error {
+	if d.rpc == nil {
 		return fmt.Errorf("pi: session is not initialized")
 	}
 
 	newCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
-	resp, err := a.rpc.request(newCtx, "new_session", map[string]any{}, "reset-1")
+	resp, err := d.rpc.request(newCtx, "new_session", map[string]any{}, "reset-1")
 	if err != nil {
 		return fmt.Errorf("pi: new_session: %w", err)
 	}
@@ -607,7 +562,7 @@ func (a *Agent) New(ctx context.Context) error {
 
 	stateCtx, stateCancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer stateCancel()
-	stateResp, err := a.rpc.request(stateCtx, "get_state", map[string]any{}, "reset-state")
+	stateResp, err := d.rpc.request(stateCtx, "get_state", map[string]any{}, "reset-state")
 	if err != nil {
 		return fmt.Errorf("pi: get_state after reset: %w", err)
 	}
@@ -633,12 +588,12 @@ func (a *Agent) New(ctx context.Context) error {
 	// new_session) cannot land on the fresh turn state. The window
 	// stays open until the EventAgentReady has been pushed through
 	// the events channel, deferring endReset here.
-	a.translatorMu.Lock()
-	a.translator.connectedSent = false
-	a.translator.beginReset()
-	a.deliverConnectedLocked(&state)
-	a.translatorMu.Unlock()
-	defer a.translator.endReset()
+	d.translatorMu.Lock()
+	d.translator.connectedSent = false
+	d.translator.beginReset()
+	d.deliverConnectedLocked(&state)
+	d.translatorMu.Unlock()
+	defer d.translator.endReset()
 	return nil
 }
 
@@ -649,13 +604,13 @@ func (a *Agent) New(ctx context.Context) error {
 // boundary.
 //
 // Returns ErrNotSupported if the bridge is not started yet.
-func (a *Agent) Abort(ctx context.Context) error {
-	if a.rpc == nil {
+func (d *driver) Abort(ctx context.Context) error {
+	if d.rpc == nil {
 		return agent.ErrNotSupported
 	}
 	abortCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
-	resp, err := a.rpc.request(abortCtx, "abort", map[string]any{}, "abort-1")
+	resp, err := d.rpc.request(abortCtx, "abort", map[string]any{}, "abort-1")
 	if err != nil {
 		return fmt.Errorf("pi: abort: %w", err)
 	}
@@ -668,7 +623,7 @@ func (a *Agent) Abort(ctx context.Context) error {
 // SetModel is not supported on the pi bridge. pi does not expose
 // a model swap RPC; the model is fixed at startup via pi's own
 // config.
-func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error {
+func (d *driver) SetModel(ctx context.Context, providerID, modelID string) error {
 	_ = ctx
 	_ = providerID
 	_ = modelID
@@ -680,18 +635,18 @@ func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error 
 // to closeDrainTimeout for the underlying cmd.Wait goroutine so
 // that a wedged reap cannot block the runtime's spawn path
 // indefinitely (F-32 2026-08-06 incident).
-func (a *Agent) Close() error {
+func (d *driver) Close() error {
 	var firstErr error
-	a.closeOnce.Do(func() {
-		close(a.closed)
+	d.closeOnce.Do(func() {
+		close(d.closed)
 		// SIGINT the child so it shuts down gracefully.
-		if a.cmd != nil && a.cmd.Process != nil {
-			_ = a.cmd.Process.Signal(os.Interrupt)
+		if d.cmd != nil && d.cmd.Process != nil {
+			_ = d.cmd.Process.Signal(os.Interrupt)
 		}
 		// Escalate to SIGKILL after shutdownGrace.
 		time.AfterFunc(shutdownGrace, func() {
-			if a.cmd != nil && a.cmd.Process != nil {
-				_ = a.cmd.Process.Kill()
+			if d.cmd != nil && d.cmd.Process != nil {
+				_ = d.cmd.Process.Kill()
 			}
 		})
 		// Wait up to closeDrainTimeout for the lifecycle goroutine
@@ -699,7 +654,7 @@ func (a *Agent) Close() error {
 		// close) to finish. Beyond that, return even if the reap
 		// is wedged — the bridge is already unusable.
 		select {
-		case <-a.exitDone:
+		case <-d.exitDone:
 		case <-time.After(closeDrainTimeout):
 			firstErr = fmt.Errorf("pi: close drain timed out after %s", closeDrainTimeout)
 		}
@@ -710,10 +665,10 @@ func (a *Agent) Close() error {
 // ─── internals ───
 
 // deliverConnectedLocked emits the EventAgentReady for `state` via
-// deliver(). Caller MUST hold a.translatorMu.
-func (a *Agent) deliverConnectedLocked(state *getStateResult) {
-	for _, ev := range a.translator.emitConnected(state) {
-		a.deliver(ev)
+// deliver(). Caller MUST hold d.translatorMu.
+func (d *driver) deliverConnectedLocked(state *getStateResult) {
+	for _, ev := range d.translator.emitConnected(state) {
+		d.deliver(ev)
 	}
 }
 
@@ -728,9 +683,9 @@ func (a *Agent) deliverConnectedLocked(state *getStateResult) {
 //
 // Two cancellation paths:
 //
-//  1. a.closed is the user-initiated Close() signal — drops so
+//  1. d.closed is the user-initiated Close() signal — drops so
 //     we don't push to a closed channel and panic.
-//  2. a.exitDone is closed by the lifecycle goroutine after
+//  2. d.exitDone is closed by the lifecycle goroutine after
 //     cmd.Wait returns — same reason. If neither has fired, the
 //     send blocks until the consumer catches up. The bridge's
 //     readpump blocks too, but pi's stdout pipe can absorb the
@@ -748,11 +703,11 @@ func (a *Agent) deliverConnectedLocked(state *getStateResult) {
 // response could be read from stdout. With a 40960-deep buffer
 // and no drop, the producer can always keep up with the byte
 // engine regardless of consumer lag.
-func (a *Agent) deliver(ev agent.AgentEvent) {
-	exitDone := a.exitDone
+func (d *driver) deliver(ev agent.AgentEvent) {
+	exitDone := d.exitDone
 	select {
-	case a.events <- ev:
-	case <-a.closed:
+	case d.events <- ev:
+	case <-d.closed:
 		piLog("deliver dropped (session closed)", "kind", ev.Kind.String())
 	case <-exitDone:
 		// lifecycle goroutine closed exitDone after cmd.Wait
@@ -769,13 +724,13 @@ func (a *Agent) deliver(ev agent.AgentEvent) {
 // The deferred failPending releases any parked RPC waiters
 // regardless of exit cause — without it, callers parked on `<-ch`
 // would block until their ctx expires.
-func (a *Agent) readPump() {
+func (d *driver) readPump() {
 	defer func() {
-		a.rpc.failPending(io.EOF)
-		piLog("readPump exit", "pid", a.pid)
+		d.rpc.failPending(io.EOF)
+		piLog("readPump exit", "pid", d.pid)
 	}()
 
-	scanner := bufio.NewScanner(a.stdoutR)
+	scanner := bufio.NewScanner(d.stdoutR)
 	scanner.Buffer(make([]byte, 0, 64*1024), MaxFrameSize)
 
 	for scanner.Scan() {
@@ -787,68 +742,68 @@ func (a *Agent) readPump() {
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(line, &probe); err != nil {
-			a.deliver(agent.AgentEvent{
+			d.deliver(agent.AgentEvent{
 				Kind:  agent.EventAgentError,
 				Err: fmt.Errorf("%w: %s", ErrMalformedJSON, string(line)),
 			})
-			a.lifecycleHalt()
+			d.lifecycleHalt()
 			return
 		}
 		if probe.Type == "response" {
 			var resp responseEnvelope
 			if err := json.Unmarshal(line, &resp); err != nil {
-				a.deliver(agent.AgentEvent{
+				d.deliver(agent.AgentEvent{
 					Kind:  agent.EventAgentError,
 					Err: fmt.Errorf("%w: %s", ErrMalformedJSON, string(line)),
 				})
-				a.lifecycleHalt()
+				d.lifecycleHalt()
 				return
 			}
-			a.rpc.dispatchResponse(resp)
+			d.rpc.dispatchResponse(resp)
 			continue
 		}
 		if probe.Type == "extension_ui_request" {
-			a.handleExtensionUIRequest(line)
+			d.handleExtensionUIRequest(line)
 			continue
 		}
-		events, err := a.translator.translate(line, a.logger)
+		events, err := d.translator.translate(line, d.logger)
 		if err != nil {
-			a.deliver(agent.AgentEvent{
+			d.deliver(agent.AgentEvent{
 				Kind:  agent.EventAgentError,
 				Err: fmt.Errorf("%w: %s", ErrMalformedJSON, string(line)),
 			})
-			a.lifecycleHalt()
+			d.lifecycleHalt()
 			return
 		}
 		for _, ev := range events {
-			a.deliver(ev)
+			d.deliver(ev)
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		a.deliver(agent.AgentEvent{
+		d.deliver(agent.AgentEvent{
 			Kind:  agent.EventAgentError,
 			Err: fmt.Errorf("%w: %v", ErrFrameTooLarge, err),
 		})
-		a.lifecycleHalt()
+		d.lifecycleHalt()
 	}
 }
 
 // drainStderr consumes the child process's stderr to keep the
 // pipe from blocking the child on stderr writes (a wedged stderr
 // drain deadlocks the cmd.Wait that lifecycle needs).
-func (a *Agent) drainStderr() {
+func (d *driver) drainStderr() {
 	buf := make([]byte, 4096)
 	for {
-		n, err := a.stderrR.Read(buf)
+		n, err := d.stderrR.Read(buf)
 		if n > 0 {
-			a.logger.Debug("pi stderr",
+			d.logger.Debug("pi stderr",
 				slog.String("chunk", string(buf[:n])),
 			)
 		}
 		if err != nil {
 			if err != io.EOF {
-				a.logger.Debug("pi stderr EOF",
+				d.logger.Debug("pi stderr EOF",
 					slog.String("error", err.Error()),
 				)
 			}
@@ -860,9 +815,9 @@ func (a *Agent) drainStderr() {
 // lifecycleHalt is invoked from readPump on a fatal scan / parse
 // error. It kills the child so the cmd.Wait goroutine unblocks
 // and closes the events channel.
-func (a *Agent) lifecycleHalt() {
-	if a.cmd != nil && a.cmd.Process != nil {
-		_ = a.cmd.Process.Kill()
+func (d *driver) lifecycleHalt() {
+	if d.cmd != nil && d.cmd.Process != nil {
+		_ = d.cmd.Process.Kill()
 	}
 }
 
@@ -870,29 +825,29 @@ func (a *Agent) lifecycleHalt() {
 // channel close. Once-close semantics are enforced by the
 // closeOnce in Close(); everything else just nudges the
 // process toward a clean exit.
-func (a *Agent) lifecycle() {
-	err := a.cmd.Wait()
+func (d *driver) lifecycle() {
+	err := d.cmd.Wait()
 	// Whatever the cause, stop accepting new requests and wake
 	// any pending callers.
-	a.rpc.failPending(ErrSessionClosed)
+	d.rpc.failPending(ErrSessionClosed)
 
-	if err != nil && !a.isGracefulClose() {
-		a.deliver(agent.AgentEvent{
+	if err != nil && !d.isGracefulClose() {
+		d.deliver(agent.AgentEvent{
 			Kind:  agent.EventAgentError,
 			Err: fmt.Errorf("pi: process exit: %w", err),
 		})
 	}
-	a.pumpWG.Wait()
-	close(a.events)
-	close(a.exitDone)
+	d.pumpWG.Wait()
+	close(d.events)
+	close(d.exitDone)
 }
 
 // isGracefulClose returns true when Close() is the reason the
 // process exited (i.e. we deliberately killed it). Used to avoid
 // emitting a duplicate EventAgentError after a clean shutdown.
-func (a *Agent) isGracefulClose() bool {
+func (d *driver) isGracefulClose() bool {
 	select {
-	case <-a.closed:
+	case <-d.closed:
 		return true
 	default:
 		return false
@@ -903,7 +858,7 @@ func (a *Agent) isGracefulClose() bool {
 // from Pi. Stub — Pi's F-32 MVP does not surface the extension UI
 // to the channel layer. Kept for forward compatibility with future
 // /follow and /approval flows.
-func (a *Agent) handleExtensionUIRequest(_ []byte) {}
+func (d *driver) handleExtensionUIRequest(_ []byte) {}
 
 // ─── misc helpers (package-level) ───
 
@@ -1028,6 +983,19 @@ func indexByte(s string, c byte) int {
 	return -1
 }
 
-// Compile-time guarantee that *Agent satisfies agent.Agent (the
-// merged spec+live interface).
-var _ agent.Agent = (*Agent)(nil)
+// Compile-time guarantee that *driver satisfies the package-private
+// agent.driver interface (SendText/SendBlocks/SendPermission/
+// Reset/Close). External callers reach driver via *agent.Agent,
+// which forwards the public methods.
+var _ agentDriver = (*driver)(nil)
+
+// agentDriver is the local alias for the agent.driver interface so
+// this file can compile-time check driver satisfies it without
+// importing the unexported name from the agent package.
+type agentDriver interface {
+	SendText(text string) error
+	SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error
+	SendPermission(resp string) error
+	Reset(ctx context.Context) error
+	Close() error
+}

@@ -85,7 +85,7 @@ func TestWatchdogTimeout_DefaultAndOverride(t *testing.T) {
 func TestWatchdog_FiresOnSilence(t *testing.T) {
 	t.Setenv("NIGHTME_OPENCODE_TURN_WATCHDOG", "200ms")
 
-	a := &Agent{
+	a := &driver{
 		name:        "opencode",
 		events:      make(chan agent.AgentEvent, 64),
 		closed:      make(chan struct{}),
@@ -134,7 +134,7 @@ func TestWatchdog_FiresOnSilence(t *testing.T) {
 func TestWatchdog_ExitsWhenTurnSettled(t *testing.T) {
 	t.Setenv("NIGHTME_OPENCODE_TURN_WATCHDOG", "100ms")
 
-	a := &Agent{
+	a := &driver{
 		name:        "opencode",
 		events:      make(chan agent.AgentEvent, 64),
 		closed:      make(chan struct{}),
@@ -170,7 +170,7 @@ func TestWatchdog_ActivityResetsDeadline(t *testing.T) {
 	// for 200ms (4 ticks). Watchdog must NOT fire.
 	t.Setenv("NIGHTME_OPENCODE_TURN_WATCHDOG", "300ms")
 
-	a := &Agent{
+	a := &driver{
 		name:        "opencode",
 		events:      make(chan agent.AgentEvent, 64),
 		closed:      make(chan struct{}),

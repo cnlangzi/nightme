@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -51,18 +50,10 @@ const (
 //     readable.
 //
 // The template (in Builtins) is never mutated; Start returns a
-// separate *Agent so concurrent Start calls from different chats do
+// separate *driver so concurrent Start calls from different chats do
 // not interfere with each other.
-type Agent struct {
-	// ─── template fields (set by NewAgent; immutable) ───
-	name    string
-	command string
-	args    []string
-	env     []string
-	cols    int
-	rows    int
-
-	// ─── runtime fields (zero before Start; populated on the clone) ───
+type driver struct {
+	// ─── runtime fields (zero before Start; populated by newDriver) ───
 	transport Transport
 	rpc       *rpcClient
 	ctx       context.Context
@@ -88,6 +79,7 @@ type Agent struct {
 	permissions  []permissionCall
 	closeOnce    sync.Once
 }
+
 
 // permissionCall tracks an outstanding session/request_permission
 // request so SendPermission can route the answer back to the right
@@ -127,66 +119,16 @@ type contentBlock struct {
 	Text string `json:"text,omitempty"`
 }
 
-// NewAgent constructs the template Agent. This is the entry point
-// used at registration time (cmd/nightme/agents.go calls it from
-// init()); the returned *Agent is held by agent.Builtins as the
-// singleton for `name`.
-//
-// args are the command's protocol flags (e.g. the ACP server flag).
-// Defensively copied.
-func NewAgent(name, command string, args []string) *Agent {
-	return &Agent{
-		name:    name,
-		command: command,
-		args:    append([]string(nil), args...),
-	}
-}
-
-// ─── spec-half methods (valid in any state) ───
-
-func (a *Agent) Name() string { return a.name }
-
-func (a *Agent) Mode() agent.Mode { return agent.ModeACP }
-
-// Command returns the CLI binary the agent wraps. Surfaced by
-// `nightme agents` so users can see what /run would spawn.
-func (a *Agent) Command() string { return a.command }
-
-// Args returns a defensive copy of the spawn recipe's default argv.
-// Callers may not mutate the returned slice.
-func (a *Agent) Args() []string {
-	return append([]string(nil), a.args...)
-}
-
-// Env returns a defensive copy of the spawn recipe's default env.
-// Callers may not mutate the returned slice.
-func (a *Agent) Env() []string {
-	return append([]string(nil), a.env...)
-}
-
-func (a *Agent) Detect() error {
-	_, err := exec.LookPath(a.command)
-	return err
-}
-
-// ─── lifecycle ───
-
-// Start spawns the CLI under a PTY, runs the ACP initialize +
-// session/new handshake, and returns a live Agent. The caller
-// (typically chatsession.AgentSession via the Spawner) must Close()
-// the returned *Agent when done.
-//
-// Start clones the receiver — the template in Builtins is untouched.
-// The clone gets template fields copied (defensively), runtime
-// fields zeroed, then NewTransport is called to spawn the PTY, the
-// read pump is kicked off, and the JSON-RPC handshake runs
-// synchronously before Start returns.
-func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, error) {
+// newDriver is invoked from starter.Start. It spawns the CLI under
+// a PTY, runs the ACP initialize + session/new handshake, and
+// returns a fully-wired *driver. Args are the command's protocol
+// flags (e.g. the ACP server flag); passed in from the Starter.
+func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
-	cols, rows := a.cols, a.rows
+	cols, rows := s.cols, s.rows
 	if cols <= 0 {
 		cols = 80
 	}
@@ -195,30 +137,24 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 	}
 
 	// arg order: agent defaults, then user overrides (user wins).
-	args := append([]string(nil), a.args...)
+	args := append([]string(nil), s.args...)
 	args = append(args, cfg.Args...)
 	// env order: agent defaults, then per-session overrides (cfg wins).
-	env := append([]string(nil), a.env...)
+	env := append([]string(nil), s.env...)
 	env = append(env, cfg.Env...)
 
-	transport, err := pty.NewTransport(cfg.Workspace, a.command, args, env, cols, rows)
+	transport, err := pty.NewTransport(cfg.Workspace, s.command, args, env, cols, rows)
 	if err != nil {
 		return nil, err
 	}
 
 	parentCtx, cancel := context.WithCancel(ctx)
-	live := &Agent{
-		name:      a.name,
-		command:   a.command,
-		args:      append([]string(nil), a.args...),
-		env:       append([]string(nil), a.env...),
-		cols:      cols,
-		rows:      rows,
-		transport: transport,
+	live := &driver{
+				transport: transport,
 		rpc:       newRPCClient(transport),
 		ctx:       parentCtx,
 		cancel:    cancel,
-		agentName: a.name,
+		agentName: s.name,
 		workspace: cfg.Workspace,
 		events:    make(chan agent.AgentEvent, eventBufferSize),
 	}
@@ -245,8 +181,8 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 // Extracted from Start so tests using a mockTransport (no real PTY) can
 // drive the handshake against an in-process net.Pipe server without
 // going through pty.NewTransport.
-func (a *Agent) handshake(ctx context.Context, workspace string) error {
-	if _, err := a.rpc.request(ctx, "initialize", initializeParams{
+func (d *driver) handshake(ctx context.Context, workspace string) error {
+	if _, err := d.rpc.request(ctx, "initialize", initializeParams{
 		ProtocolVersion: protocolVersion,
 		ClientCapabilities: map[string]any{
 			"fs":       map[string]any{"readTextFile": false, "writeTextFile": false},
@@ -254,21 +190,21 @@ func (a *Agent) handshake(ctx context.Context, workspace string) error {
 		},
 		ClientInfo: clientInfo{
 			Name:    clientName,
-			Title:   "nightme (" + a.agentName + ")",
+			Title:   "nightme (" + d.agentName + ")",
 			Version: clientVersion,
 		},
 	}); err != nil {
 		return fmt.Errorf("bridge/acp: initialize: %w", err)
 	}
 
-	result, err := a.rpc.request(ctx, "session/new", newSessionParams{
+	result, err := d.rpc.request(ctx, "session/new", newSessionParams{
 		CWD:        workspace,
 		MCPServers: []any{},
 	})
 	if err != nil {
 		return fmt.Errorf("bridge/acp: session/new: %w", err)
 	}
-	if err := a.setSessionID(result); err != nil {
+	if err := d.setSessionID(result); err != nil {
 		return err
 	}
 	return nil
@@ -276,28 +212,28 @@ func (a *Agent) handshake(ctx context.Context, workspace string) error {
 
 // ─── live-half methods (valid only between Start and Close) ───
 
-func (a *Agent) Events() <-chan agent.AgentEvent { return a.events }
+func (d *driver) Events() <-chan agent.AgentEvent { return d.events }
 
-func (a *Agent) PID() int {
-	if a.transport == nil {
+func (d *driver) PID() int {
+	if d.transport == nil {
 		return 0
 	}
-	return a.transport.PID()
+	return d.transport.PID()
 }
 
 // SendText submits a prompt and returns after the JSON-RPC request
 // is written. The prompt response only marks completion of that turn;
 // it does not end the reusable ACP session, so it is deliberately
 // consumed asynchronously.
-func (a *Agent) SendText(text string) error {
+func (d *driver) SendText(text string) error {
 	if text == "" {
 		return nil
 	}
-	if a.sessionID == "" {
+	if d.sessionID == "" {
 		return errors.New("bridge/acp: session is not initialized")
 	}
-	return a.rpc.requestAsync("session/prompt", promptParams{
-		SessionID: a.sessionID,
+	return d.rpc.requestAsync("session/prompt", promptParams{
+		SessionID: d.sessionID,
 		Prompt:    []contentBlock{{Type: "text", Text: text}},
 	})
 }
@@ -308,9 +244,9 @@ func (a *Agent) SendText(text string) error {
 // only Text is exercised by production agents (Codex / OpenCode
 // have not yet landed), so the type-safe Path-based blocks are
 // preserved here for Phase 2.
-func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
+func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
 	_ = ctx
-	if a.sessionID == "" {
+	if d.sessionID == "" {
 		return errors.New("bridge/acp: session is not initialized")
 	}
 	if len(blocks) == 0 {
@@ -342,8 +278,8 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 	if len(out) == 0 {
 		return nil
 	}
-	return a.rpc.requestAsync("session/prompt", promptParams{
-		SessionID: a.sessionID,
+	return d.rpc.requestAsync("session/prompt", promptParams{
+		SessionID: d.sessionID,
 		Prompt:    out,
 	})
 }
@@ -352,22 +288,22 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 // session/request_permission request. ACP represents the selected
 // option as the optionId supplied by the agent; callers pass that
 // opaque value through unchanged.
-func (a *Agent) SendPermission(response string) error {
-	a.permissionMu.Lock()
-	if len(a.permissions) == 0 {
-		a.permissionMu.Unlock()
+func (d *driver) SendPermission(response string) error {
+	d.permissionMu.Lock()
+	if len(d.permissions) == 0 {
+		d.permissionMu.Unlock()
 		return errors.New("bridge/acp: no pending permission request")
 	}
-	call := a.permissions[0]
-	a.permissions = a.permissions[1:]
-	a.permissionMu.Unlock()
+	call := d.permissions[0]
+	d.permissions = d.permissions[1:]
+	d.permissionMu.Unlock()
 
 	if call.legacy {
-		return a.rpc.requestAsync("permission_response", map[string]any{
+		return d.rpc.requestAsync("permission_response", map[string]any{
 			"response": response,
 		})
 	}
-	return a.rpc.respond(call.id, map[string]any{
+	return d.rpc.respond(call.id, map[string]any{
 		"outcome": map[string]any{
 			"outcome":  "selected",
 			"optionId": response,
@@ -385,14 +321,18 @@ func (a *Agent) SendPermission(response string) error {
 // Re-arms connectedSent so emitConnected fires again with the new
 // sessionId, letting the runtime's AgentEventBus subscriber capture
 // it via SetResumeID (cmd/nightme/run.go newEventHandler).
-func (a *Agent) New(ctx context.Context) error {
-	if a.transport == nil {
+// Reset is the agent.driver interface name for New. Implements
+// the agent.driver Reset method (F-34).
+func (d *driver) Reset(ctx context.Context) error { return d.New(ctx) }
+
+func (d *driver) New(ctx context.Context) error {
+	if d.transport == nil {
 		return errors.New("bridge/acp: nil transport")
 	}
 	startupCtx, cancel := context.WithTimeout(ctx, startupTimeout)
 	defer cancel()
-	result, err := a.rpc.request(startupCtx, "session/new", newSessionParams{
-		CWD:        a.workspace,
+	result, err := d.rpc.request(startupCtx, "session/new", newSessionParams{
+		CWD:        d.workspace,
 		MCPServers: []any{},
 	})
 	if err != nil {
@@ -402,10 +342,10 @@ func (a *Agent) New(ctx context.Context) error {
 	// new id. We reuse permissionMu (which already serializes
 	// connectedSent writes through setSessionID/emitConnected) as
 	// a memory barrier.
-	a.permissionMu.Lock()
-	a.connectedSent = false
-	a.permissionMu.Unlock()
-	if err := a.setSessionID(result); err != nil {
+	d.permissionMu.Lock()
+	d.connectedSent = false
+	d.permissionMu.Unlock()
+	if err := d.setSessionID(result); err != nil {
 		return err
 	}
 	return nil
@@ -416,18 +356,18 @@ func (a *Agent) New(ctx context.Context) error {
 // closest portable action is the same Ctrl-C signal a user would
 // press. The user-facing semantic is "interrupt the in-flight
 // turn" — the child interprets that as best it can.
-func (a *Agent) Abort(ctx context.Context) error {
+func (d *driver) Abort(ctx context.Context) error {
 	_ = ctx
-	if a.transport == nil {
+	if d.transport == nil {
 		return agent.ErrNotSupported
 	}
-	return a.transport.Signal(os.Interrupt)
+	return d.transport.Signal(os.Interrupt)
 }
 
 // SetModel is not supported on the ACP bridge. ACP has a
 // session/set_mode method but no public session/set_model; the
 // provider / model is fixed at session creation.
-func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error {
+func (d *driver) SetModel(ctx context.Context, providerID, modelID string) error {
 	_ = ctx
 	_ = providerID
 	_ = modelID
@@ -436,16 +376,16 @@ func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error 
 
 // Close terminates the session by cancelling the per-session ctx
 // and closing the underlying transport. Idempotent.
-func (a *Agent) Close() error {
+func (d *driver) Close() error {
 	var err error
-	a.closeOnce.Do(func() {
+	d.closeOnce.Do(func() {
 		// Closing the transport is the portable ACP shutdown
 		// operation. A JSON-RPC notification could block on an
 		// uncooperative PTY peer, so cleanup never waits for an
 		// optional server acknowledgement.
-		a.cancel()
-		if a.transport != nil {
-			err = a.transport.Close()
+		d.cancel()
+		if d.transport != nil {
+			err = d.transport.Close()
 		}
 	})
 	return err
@@ -456,7 +396,7 @@ func (a *Agent) Close() error {
 // setSessionID parses the session/new response and synthesizes the
 // EventAgentReady so the runtime can capture the resume id uniformly
 // with Claude Code / Pi.
-func (a *Agent) setSessionID(result json.RawMessage) error {
+func (d *driver) setSessionID(result json.RawMessage) error {
 	var response struct {
 		SessionID      string `json:"sessionId"`
 		SessionIDSnake string `json:"session_id"`
@@ -464,15 +404,15 @@ func (a *Agent) setSessionID(result json.RawMessage) error {
 	if err := json.Unmarshal(result, &response); err != nil {
 		return fmt.Errorf("bridge/acp: decode session/new response: %w", err)
 	}
-	a.sessionID = response.SessionID
-	if a.sessionID == "" {
-		a.sessionID = response.SessionIDSnake
+	d.sessionID = response.SessionID
+	if d.sessionID == "" {
+		d.sessionID = response.SessionIDSnake
 	}
-	if a.sessionID == "" {
+	if d.sessionID == "" {
 		return errors.New("bridge/acp: session/new response has no sessionId")
 	}
 	// Synthesize an EventAgentReady. Idempotent via connectedSent.
-	a.emitConnected()
+	d.emitConnected()
 	return nil
 }
 
@@ -480,27 +420,27 @@ func (a *Agent) setSessionID(result json.RawMessage) error {
 // session id. The send blocks until the consumer drains (or ctx is
 // done). Sized to absorb a sustained backlog — same producer-side
 // contract as pi/claudecode/pty.
-func (a *Agent) emitConnected() {
-	if a.connectedSent {
+func (d *driver) emitConnected() {
+	if d.connectedSent {
 		return
 	}
-	a.connectedSent = true
+	d.connectedSent = true
 	ev := agent.AgentEvent{
 		Kind:      agent.EventAgentReady,
-		SessionID: a.sessionID,
-		AgentName: a.agentName,
-		Workspace: a.workspace,
+		SessionID: d.sessionID,
+		AgentName: d.agentName,
+		Workspace: d.workspace,
 	}
 	select {
-	case a.events <- ev:
-	case <-a.ctx.Done():
+	case d.events <- ev:
+	case <-d.ctx.Done():
 	}
 }
 
-func (a *Agent) readPump() {
-	defer close(a.events)
+func (d *driver) readPump() {
+	defer close(d.events)
 
-	scanner := bufio.NewScanner(a.transport)
+	scanner := bufio.NewScanner(d.transport)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -514,26 +454,26 @@ func (a *Agent) readPump() {
 			// remains authoritative.
 			continue
 		}
-		if a.rpc.handleResponse(message) {
+		if d.rpc.handleResponse(message) {
 			continue
 		}
 		if message.Method != "" {
-			a.handleMethod(message)
+			d.handleMethod(message)
 		}
 	}
 	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
-		a.emit(agent.AgentEvent{Kind: agent.EventAgentError, Err: err})
+		d.emit(agent.AgentEvent{Kind: agent.EventAgentError, Err: err})
 	}
-	a.rpc.failPending(io.EOF)
-	a.emit(agent.AgentEvent{Kind: agent.EventAgentDone, Done: &agent.AgentDoneEvent{ExitCode: -1}})
+	d.rpc.failPending(io.EOF)
+	d.emit(agent.AgentEvent{Kind: agent.EventAgentDone, Done: &agent.AgentDoneEvent{ExitCode: -1}})
 }
 
-func (a *Agent) handleMethod(message rpcMessage) {
+func (d *driver) handleMethod(message rpcMessage) {
 	switch message.Method {
 	case "session/update":
-		a.handleSessionUpdate(message.Params)
+		d.handleSessionUpdate(message.Params)
 	case "session/request_permission", "permission_request":
-		a.handlePermission(message.ID, message.Params)
+		d.handlePermission(message.ID, message.Params)
 	case "message_chunk":
 		var params struct {
 			Text    string `json:"text"`
@@ -544,14 +484,14 @@ func (a *Agent) handleMethod(message rpcMessage) {
 			if text == "" {
 				text = params.Content
 			}
-			a.emit(agent.AgentEvent{Kind: agent.EventAgentText, Text: text})
+			d.emit(agent.AgentEvent{Kind: agent.EventAgentText, Text: text})
 		}
 	case "tool_start":
-		a.handleToolStart(message.Params)
+		d.handleToolStart(message.Params)
 	case "tool_end":
-		a.handleToolEnd(message.Params)
+		d.handleToolEnd(message.Params)
 	case "session_end":
-		a.emit(agent.AgentEvent{Kind: agent.EventAgentDone, Done: &agent.AgentDoneEvent{ExitCode: 0}})
+		d.emit(agent.AgentEvent{Kind: agent.EventAgentDone, Done: &agent.AgentDoneEvent{ExitCode: 0}})
 	case "initialize", "session/new", "session/prompt":
 		// A PTY may echo client requests before the ACP server
 		// disables terminal echo. They are outbound methods, not
@@ -559,12 +499,12 @@ func (a *Agent) handleMethod(message rpcMessage) {
 		return
 	default:
 		if len(message.ID) > 0 {
-			_ = a.rpc.respond(message.ID, nil, &rpcError{Code: -32601, Message: "method not found"})
+			_ = d.rpc.respond(message.ID, nil, &rpcError{Code: -32601, Message: "method not found"})
 		}
 	}
 }
 
-func (a *Agent) handleSessionUpdate(raw json.RawMessage) {
+func (d *driver) handleSessionUpdate(raw json.RawMessage) {
 	var params struct {
 		Update json.RawMessage `json:"update"`
 	}
@@ -594,23 +534,23 @@ func (a *Agent) handleSessionUpdate(raw json.RawMessage) {
 			Text string `json:"text"`
 		}
 		if json.Unmarshal(update.Content, &content) == nil && content.Text != "" {
-			a.emit(agent.AgentEvent{Kind: agent.EventAgentText, Text: content.Text})
+			d.emit(agent.AgentEvent{Kind: agent.EventAgentText, Text: content.Text})
 		}
 	case "tool_call":
-		a.handleToolStart(params.Update)
+		d.handleToolStart(params.Update)
 	case "tool_call_update":
-		a.handleToolEnd(params.Update)
+		d.handleToolEnd(params.Update)
 	case "message_chunk":
 		var content struct {
 			Text string `json:"text"`
 		}
 		if json.Unmarshal(update.Content, &content) == nil {
-			a.emit(agent.AgentEvent{Kind: agent.EventAgentText, Text: content.Text})
+			d.emit(agent.AgentEvent{Kind: agent.EventAgentText, Text: content.Text})
 		}
 	}
 }
 
-func (a *Agent) handlePermission(id json.RawMessage, raw json.RawMessage) {
+func (d *driver) handlePermission(id json.RawMessage, raw json.RawMessage) {
 	var params struct {
 		Tool       json.RawMessage `json:"toolCall"`
 		ToolLegacy string          `json:"tool"`
@@ -644,15 +584,15 @@ func (a *Agent) handlePermission(id json.RawMessage, raw json.RawMessage) {
 			options = append(options, option.Name)
 		}
 	}
-	a.permissionMu.Lock()
-	a.permissions = append(a.permissions, permissionCall{id: append(json.RawMessage(nil), id...), legacy: len(id) == 0})
-	a.permissionMu.Unlock()
-	a.emit(agent.AgentEvent{Kind: agent.EventAgentPermission, Permission: &agent.AgentPermissionRequest{
+	d.permissionMu.Lock()
+	d.permissions = append(d.permissions, permissionCall{id: append(json.RawMessage(nil), id...), legacy: len(id) == 0})
+	d.permissionMu.Unlock()
+	d.emit(agent.AgentEvent{Kind: agent.EventAgentPermission, Permission: &agent.AgentPermissionRequest{
 		Tool: toolName, Action: params.Action, Options: options, ResponseCh: make(chan string, 1),
 	}})
 }
 
-func (a *Agent) handleToolStart(raw json.RawMessage) {
+func (d *driver) handleToolStart(raw json.RawMessage) {
 	var event struct {
 		ID         string          `json:"toolCallId"`
 		LegacyID   string          `json:"id"`
@@ -671,10 +611,10 @@ func (a *Agent) handleToolStart(raw json.RawMessage) {
 	if name == "" {
 		name = event.LegacyName
 	}
-	a.emit(agent.AgentEvent{Kind: agent.EventAgentToolStart, ToolStart: &agent.AgentToolStartEvent{ID: id, Name: name, Args: string(event.Args)}})
+	d.emit(agent.AgentEvent{Kind: agent.EventAgentToolStart, ToolStart: &agent.AgentToolStartEvent{ID: id, Name: name, Args: string(event.Args)}})
 }
 
-func (a *Agent) handleToolEnd(raw json.RawMessage) {
+func (d *driver) handleToolEnd(raw json.RawMessage) {
 	var event struct {
 		ID         string `json:"toolCallId"`
 		LegacyID   string `json:"id"`
@@ -697,22 +637,35 @@ func (a *Agent) handleToolEnd(raw json.RawMessage) {
 	if event.Status == "failed" || event.Status == "error" {
 		toolErr = errors.New(event.Status)
 	}
-	a.emit(agent.AgentEvent{
+	d.emit(agent.AgentEvent{
 		Kind:    agent.EventAgentToolEnd,
 		ToolEnd: &agent.AgentToolEndEvent{ID: id, Name: name},
 		Err:     toolErr,
 	})
 }
 
-func (a *Agent) emit(event agent.AgentEvent) {
+func (d *driver) emit(event agent.AgentEvent) {
 	select {
-	case a.events <- event:
-	case <-a.ctx.Done():
+	case d.events <- event:
+	case <-d.ctx.Done():
 	}
 }
 
-// Compile-time guarantee that *Agent satisfies agent.Agent (the
-// merged spec+live interface). The template-half of *Agent (set by
-// NewAgent) satisfies agent.AgentSpec implicitly because the new
-// agent.Agent interface embeds AgentSpec.
-var _ agent.Agent = (*Agent)(nil)
+// Compile-time guarantee that *driver satisfies the package-private
+// agent.driver interface (SendText/SendBlocks/SendPermission/
+// Reset/Close). External callers reach driver via *agent.Agent,
+// which forwards the public methods. The package-private starter
+// half is type-checked in starter.go via the same agentDriver
+// interface declaration.
+var _ agentDriver = (*driver)(nil)
+
+// agentDriver is the local alias for the agent.driver interface so
+// this file can compile-time check driver satisfies it without
+// importing the unexported name from the agent package.
+type agentDriver interface {
+	SendText(text string) error
+	SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error
+	SendPermission(resp string) error
+	Reset(ctx context.Context) error
+	Close() error
+}

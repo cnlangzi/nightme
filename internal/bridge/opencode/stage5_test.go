@@ -60,7 +60,7 @@ func TestClient_Compact_ServerError(t *testing.T) {
 // TestAgent_Compact_NoServerReturnsError verifies Compact on an
 // unstarted Agent returns an error.
 func TestAgent_Compact_NoServerReturnsError(t *testing.T) {
-	a := &Agent{name: "opencode"}
+	a := &driver{name: "opencode"}
 	if err := a.Compact(context.Background()); err == nil {
 		t.Errorf("Compact on unstarted = nil, want error")
 	}
@@ -189,7 +189,7 @@ func TestClient_ListModels(t *testing.T) {
 // TestAgent_ListSessions_NoClientReturnsError verifies the agent
 // guards against nil client.
 func TestAgent_ListSessions_NoClientReturnsError(t *testing.T) {
-	a := &Agent{name: "opencode"}
+	a := &driver{name: "opencode"}
 	if _, err := a.ListSessions(context.Background(), 10); err == nil {
 		t.Errorf("ListSessions on unstarted = nil, want error")
 	}

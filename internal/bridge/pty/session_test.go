@@ -10,7 +10,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// fakeTransport implements Transport for unit-testing the merged *Agent
+// fakeTransport implements Transport for unit-testing the merged *driver
 // without spawning a real child process. Reads come from a channel so
 // the test can drive the read loop deterministically.
 type fakeTransport struct {
@@ -72,16 +72,14 @@ func (f *fakeTransport) push(data string) {
 	f.reads <- []byte(data)
 }
 
-// newAgentForTest constructs an *Agent with the given fake Transport and
+// newAgentForTest constructs an *driver with the given fake Transport and
 // a fresh events channel. Skips Start (no real process) and lets the
 // caller decide whether to kick off the read loop.
 //
 // Used by tests that want to drive Events / Send* / Close directly
 // without spawning a real PTY child.
-func newAgentForTest(b Transport) *Agent {
-	return &Agent{
-		name:      "test",
-		command:   "test",
+func newAgentForTest(b Transport) *driver {
+	return &driver{
 		transport: b,
 		events:    make(chan agent.AgentEvent, sessionBufferSize),
 	}

@@ -202,7 +202,7 @@ func TestE2E_FreshSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	template := New("opencode", "opencode", nil)
+	template := NewStarter("opencode", "opencode", nil)
 	if err := template.Detect(); err != nil {
 		t.Fatalf("Detect: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestE2E_ResumeSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	template := New("opencode", "opencode", nil)
+	template := NewStarter("opencode", "opencode", nil)
 	workspace := e2eWorkspace(t)
 
 	// First phase: fresh session.
@@ -331,7 +331,7 @@ func TestE2E_Interrupt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	template := New("opencode", "opencode", nil)
+	template := NewStarter("opencode", "opencode", nil)
 	sess, err := template.Start(ctx, agent.StartConfig{Workspace: e2eWorkspace(t)})
 	if err != nil {
 		if strings.Contains(err.Error(), "subscribe") {
@@ -347,14 +347,10 @@ func TestE2E_Interrupt(t *testing.T) {
 	if err := sess.SendText("list every file under /tmp recursively, one per line"); err != nil {
 		t.Fatalf("SendText: %v", err)
 	}
-	// Immediately abort. The agent.Agent interface does not yet
-	// expose Abort (the other bridges are the same), so we
-	// type-assert to the concrete *Agent the bridge returns.
-	bridge, ok := sess.(*Agent)
-	if !ok {
-		t.Skipf("sess is %T, not *opencode.Agent — Abort not callable", sess)
-	}
-	if err := bridge.Abort(ctx); err != nil {
+	// Immediately abort. agent.Agent exposes Abort (delegating to
+	// the bridge's driver); bridges that can't honor it return
+	// agent.ErrNotSupported, which we treat as acceptable.
+	if err := sess.Abort(ctx); err != nil {
 		t.Logf("[e2e-abort] Abort returned: %v (acceptable)", err)
 	}
 

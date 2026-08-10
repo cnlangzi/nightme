@@ -496,7 +496,7 @@ func makeSpawnedAS(t *testing.T, cs *ChatSession, agentName string, parent conte
 
 	fake := newFakeAgentSession(99000)
 	as.asMu.Lock()
-	as.handle = fake
+	as.handle = fake.buildLive()
 	as.pid = fake.PID()
 	as.stat = StatusRunning
 	as.asMu.Unlock()

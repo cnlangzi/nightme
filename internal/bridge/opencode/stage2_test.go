@@ -31,7 +31,7 @@ func TestAgent_AbortCallsInterrupt(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a := &Agent{
+	a := &driver{
 		name:      "opencode",
 		server:    &serverProc{baseURL: srv.URL},
 		client:    newClient(&serverProc{baseURL: srv.URL}, "/tmp"),
@@ -58,7 +58,7 @@ func TestAgent_SetModelCallsSwitch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a := &Agent{
+	a := &driver{
 		name:      "opencode",
 		server:    &serverProc{baseURL: srv.URL},
 		client:    newClient(&serverProc{baseURL: srv.URL}, "/tmp"),
@@ -78,7 +78,7 @@ func TestAgent_SetModelCallsSwitch(t *testing.T) {
 // TestAgent_AbortNoServerReturnsError verifies Abort on an unstarted
 // Agent returns an error rather than crashing.
 func TestAgent_AbortNoServerReturnsError(t *testing.T) {
-	a := &Agent{name: "opencode"}
+	a := &driver{name: "opencode"}
 	if err := a.Abort(context.Background()); err == nil {
 		t.Errorf("Abort on unstarted agent = nil, want error")
 	}
@@ -91,7 +91,7 @@ func TestAgent_SetModelNoSessionReturnsError(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	defer srv.Close()
-	a := &Agent{
+	a := &driver{
 		name:   "opencode",
 		server: &serverProc{baseURL: srv.URL},
 		client: newClient(&serverProc{baseURL: srv.URL}, "/tmp"),
@@ -372,7 +372,7 @@ func TestSendBlocks_ImageTooLarge_Stage2(t *testing.T) {
 	}
 	_ = f.Close()
 
-	a := &Agent{
+	a := &driver{
 		name:        "opencode",
 		server:      &serverProc{baseURL: ""},
 		events:      make(chan agent.AgentEvent, 16),
@@ -395,7 +395,7 @@ func TestSendBlocks_ImageTooLarge_Stage2(t *testing.T) {
 // TestSendBlocks_MissingImagePath verifies the bridge does not
 // crash when ContentImage has an empty path.
 func TestSendBlocks_MissingImagePath(t *testing.T) {
-	a := &Agent{
+	a := &driver{
 		name:        "opencode",
 		server:      &serverProc{baseURL: ""},
 		events:      make(chan agent.AgentEvent, 16),

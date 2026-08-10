@@ -96,7 +96,7 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 	// Wire a real Spawner that uses the pi Agent. The Spawner
 	// does the same thing the daemon's production code does:
 	// look up the agent by name, run Detect, then Start.
-	piAgent := pibridge.New("pi", "pi", nil)
+	piAgent := pibridge.NewStarter("pi", "pi", nil)
 	reg := agent.New()
 	reg.Register(piAgent)
 	spawner := NewRegistrySpawner(reg)

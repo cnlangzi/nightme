@@ -17,7 +17,7 @@ import (
 // TestNewAndSpec verifies the template constructor populates the
 // spec-half fields correctly and the Agent satisfies agent.Agent.
 func TestNewAndSpec(t *testing.T) {
-	a := New("opencode", "opencode", nil)
+	a := NewStarter("opencode", "opencode", nil)
 	if a.Name() != "opencode" {
 		t.Errorf("Name() = %q, want opencode", a.Name())
 	}
@@ -34,7 +34,7 @@ func TestNewAndSpec(t *testing.T) {
 		t.Errorf("Mode() = %v, want ModeJSONIO", a.Mode())
 	}
 	// Args() must return a defensive copy.
-	a2 := New("opencode", "opencode", []string{"--foo"})
+	a2 := NewStarter("opencode", "opencode", []string{"--foo"})
 	if a2.Args()[0] != "--foo" {
 		t.Errorf("Args() did not carry constructor args")
 	}
@@ -47,7 +47,7 @@ func TestNewAndSpec(t *testing.T) {
 
 // TestNew_NilArgsIsSafe verifies New does not panic when args is nil.
 func TestNew_NilArgsIsSafe(t *testing.T) {
-	a := New("opencode", "opencode", nil)
+	a := NewStarter("opencode", "opencode", nil)
 	if a.Args() != nil {
 		t.Errorf("Args() = %v, want nil", a.Args())
 	}
@@ -59,7 +59,7 @@ func TestNew_NilArgsIsSafe(t *testing.T) {
 // test guards the constructor against future regressions that
 // would silently drop args.
 func TestNew_EmptyArgs(t *testing.T) {
-	a := New("opencode", "opencode", []string{})
+	a := NewStarter("opencode", "opencode", []string{})
 	if len(a.Args()) != 0 {
 		t.Errorf("Args() = %v, want empty", a.Args())
 	}
@@ -69,7 +69,7 @@ func TestNew_EmptyArgs(t *testing.T) {
 // when the binary is not on PATH.
 func TestDetect_MissingBinary(t *testing.T) {
 	// Use a name that is extremely unlikely to exist.
-	a := New("opencode", "opencode-does-not-exist-xyz-12345", nil)
+	a := NewStarter("opencode", "opencode-does-not-exist-xyz-12345", nil)
 	if err := a.Detect(); err == nil {
 		t.Errorf("Detect() = nil, want error")
 	}
@@ -83,7 +83,7 @@ func TestDetect_PresentBinary(t *testing.T) {
 	if err != nil {
 		t.Skip("sh not on PATH")
 	}
-	a := New("opencode", sh, nil)
+	a := NewStarter("opencode", sh, nil)
 	if err := a.Detect(); err != nil {
 		t.Errorf("Detect() = %v, want nil", err)
 	}

@@ -23,8 +23,8 @@ func TestReproRealClaude(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	t.Logf("[repro] calling claudecode.New(\"claude\", \"claude\", nil).Start...")
-	a := New("claude", "claude", nil)
+	t.Logf("[repro] calling claudecode.NewStarter(\"claude\", \"claude\", nil).Start...")
+	a := NewStarter("claude", "claude", nil)
 	sess, err := a.Start(ctx, agent.StartConfig{
 		Workspace:      "/tmp",
 		PermissionMode: "bypassPermissions",
@@ -121,7 +121,7 @@ func TestReproRealClaude_NoSendBlocks(t *testing.T) {
 	requireRealClaude(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	a := New("claude", "claude", nil)
+	a := NewStarter("claude", "claude", nil)
 	sess, err := a.Start(ctx, agent.StartConfig{
 		Workspace:      "/tmp",
 		PermissionMode: "bypassPermissions",
@@ -173,7 +173,7 @@ func TestReproRealClaude_ProductionArgs(t *testing.T) {
 	//   cs.activeCwd = whatever the user set via /cwd
 	//   as.args      = nil (chatsession always passes nil for fresh AS)
 	//   as.sessionID  = "" on first Spawn, persisted on subsequent ones
-	a := New("claude", "claude", nil)
+	a := NewStarter("claude", "claude", nil)
 	t.Logf("[repro] production-style Start: Workspace=current_dir, no args, no resume")
 	wd, _ := os.Getwd()
 	t.Logf("[repro] Workspace = %s", wd)

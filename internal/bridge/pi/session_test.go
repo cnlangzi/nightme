@@ -53,11 +53,11 @@ func TestSession_FullRoundTrip(t *testing.T) {
 	workspace := t.TempDir()
 
 	// Construct the bridge with the mock script as the
-	// "binary". A real user would call New("pi", "pi", nil)
+	// "binary". A real user would call NewStarter("pi", "pi", nil)
 	// and rely on PATH; here we point at the absolute path so
 	// the test does not require `pi` to be uninstalled from
 	// the developer's machine.
-	a := New("pi", mockPath, nil)
+	a := NewStarter("pi", mockPath, nil)
 	if err := a.Detect(); err != nil {
 		t.Fatalf("Detect: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestSession_HandshakeTimeout(t *testing.T) {
 	workspace := t.TempDir()
 	t.Setenv("MOCK_PI_SILENT", "1")
 
-	a := New("pi", mockPath, nil)
+	a := NewStarter("pi", mockPath, nil)
 	ctx := context.Background()
 	start := time.Now()
 	_, err = a.Start(ctx, agent.StartConfig{Workspace: workspace})
@@ -270,7 +270,7 @@ func TestSession_PromptTimeout_NotInfinite(t *testing.T) {
 	promptTimeout = shrunk
 	t.Cleanup(func() { promptTimeout = orig })
 
-	a := New("pi", mockPath, nil)
+	a := NewStarter("pi", mockPath, nil)
 	sess, err := a.Start(context.Background(), agent.StartConfig{Workspace: workspace})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -306,7 +306,7 @@ func TestSession_PromptTimeout_NotInfinite(t *testing.T) {
 	t.Logf("SendText timed out as expected in %s: %v", elapsed, sendErr)
 }
 
-func mustFirstEventOfKind(t *testing.T, sess agent.Agent, kind agent.EventKind, timeout time.Duration) agent.AgentEvent {
+func mustFirstEventOfKind(t *testing.T, sess *agent.Agent, kind agent.EventKind, timeout time.Duration) agent.AgentEvent {
 	t.Helper()
 	deadline := time.After(timeout)
 	for {
@@ -327,7 +327,7 @@ func mustFirstEventOfKind(t *testing.T, sess agent.Agent, kind agent.EventKind, 
 // drainEventsUntilDone collects events from sess until an
 // EventAgentDone arrives or the timeout elapses. Returns a snapshot
 // of the collected events plus the Done payload.
-func drainEventsUntilDone(t *testing.T, sess agent.Agent, timeout time.Duration) captured {
+func drainEventsUntilDone(t *testing.T, sess *agent.Agent, timeout time.Duration) captured {
 	t.Helper()
 	deadline := time.After(timeout)
 	out := captured{}

@@ -51,9 +51,9 @@ func (s *captureBodyServer) handler() http.Handler {
 	return mux
 }
 
-func makeAgent(t *testing.T, srvURL string) *Agent {
+func makeAgent(t *testing.T, srvURL string) *driver {
 	t.Helper()
-	return &Agent{
+	return &driver{
 		name:        "opencode",
 		workspace:   "/tmp",
 		server:      &serverProc{baseURL: srvURL},

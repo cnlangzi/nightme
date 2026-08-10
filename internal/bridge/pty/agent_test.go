@@ -13,8 +13,8 @@ import (
 // TestAgentName verifies the Name field is surfaced through the
 // interface.
 func TestAgentName(t *testing.T) {
-	a := NewAgent("claude", "claude", nil, nil)
-	if got := a.Name(); got != "claude" {
+	a := NewStarter("claude", "claude", nil, nil, 0, 0)
+	if got := a.Info().Name; got != "claude" {
 		t.Fatalf("Name() = %q, want claude", got)
 	}
 }
@@ -22,8 +22,8 @@ func TestAgentName(t *testing.T) {
 // TestAgentMode verifies PTY agents report ModePTY so the
 // SessionManager routes them through the PTY backend.
 func TestAgentMode(t *testing.T) {
-	a := NewAgent("claude", "claude", nil, nil)
-	if got := a.Mode(); got != agent.ModePTY {
+	a := NewStarter("claude", "claude", nil, nil, 0, 0)
+	if got := a.Info().Mode; got != agent.ModePTY {
 		t.Fatalf("Mode() = %s, want pty", got)
 	}
 }
@@ -36,12 +36,12 @@ func TestAgentDetect(t *testing.T) {
 		t.Skip("skip unix-only smoke test on windows")
 	}
 
-	a := NewAgent("echo", "/bin/echo", nil, nil)
+	a := NewStarter("echo", "/bin/echo", nil, nil, 0, 0)
 	if err := a.Detect(); err != nil {
 		t.Fatalf("Detect(/bin/echo) = %v", err)
 	}
 
-	if err := NewAgent("missing", "/no/such/pty-agent", nil, nil).Detect(); err == nil {
+	if err := NewStarter("missing", "/no/such/pty-agent", nil, nil, 0, 0).Detect(); err == nil {
 		t.Fatal("Detect(missing) = nil, want error")
 	}
 }
@@ -55,7 +55,7 @@ func TestAgentStartEndToEnd(t *testing.T) {
 		t.Skip("skip unix-only smoke test on windows")
 	}
 
-	a := NewAgent("echo", "/bin/echo", nil, nil)
+	a := NewStarter("echo", "/bin/echo", nil, nil, 0, 0)
 	sess, err := a.Start(context.Background(), agent.StartConfig{
 		Workspace: t.TempDir(),
 		Args:      []string{"hello"},
@@ -93,7 +93,7 @@ func TestAgentStart_MissingBinary(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skip unix-only smoke test on windows")
 	}
-	a := NewAgent("missing", "/no/such/binary", nil, nil)
+	a := NewStarter("missing", "/no/such/binary", nil, nil, 0, 0)
 	_, err := a.Start(context.Background(), agent.StartConfig{Workspace: t.TempDir()})
 	if err == nil {
 		t.Fatal("Start on missing binary returned nil error")

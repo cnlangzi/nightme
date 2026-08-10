@@ -101,7 +101,7 @@ func TestSession_RealPi_E2E_ReceiveInputAndReply(t *testing.T) {
 	t.Logf("using pi binary at %s", bin)
 
 	workspace := t.TempDir()
-	a := New("pi", bin, nil)
+	a := NewStarter("pi", bin, nil)
 	if err := a.Detect(); err != nil {
 		t.Fatalf("Detect: %v (binary at %q)", err, bin)
 	}
@@ -189,7 +189,7 @@ func TestSession_RealPi_E2E_ReceiveInputAndReply(t *testing.T) {
 //
 // turnLabel is only used in t.Logf to disambiguate turn-1 vs
 // turn-2 in the test output.
-func driveTurn(t *testing.T, sess agent.Agent, prompt string, deadline time.Duration, turnLabel string) error {
+func driveTurn(t *testing.T, sess *agent.Agent, prompt string, deadline time.Duration, turnLabel string) error {
 	t.Helper()
 	promptStartedAt := time.Now()
 	if err := sess.SendText(prompt); err != nil {

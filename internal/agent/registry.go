@@ -2,7 +2,9 @@
 // contract; this file is just the map + helpers and is concurrency-safe.
 package agent
 
-import "sync"
+import (
+	"sync"
+)
 
 // Builtins is the package-level registry of agents that ship with
 // the nightme binary. Each agent package's init() registers itself
@@ -12,77 +14,83 @@ import "sync"
 //
 // There is no fallback: if a name is not in Builtins and the user
 // has not configured it, /run <name> returns "unknown agent".
+//
+// The registry now stores Starter values (P1 migration). Bridges
+// that have not yet been refactored into driver + starter can be
+// registered via AsStarter(legacyAgent) during the P1-P3 transition;
+// that wrapper is removed in P4 when all bridges migrate.
 var Builtins = New()
 
-// Registry is a thread-safe map of Agent instances keyed by Name().
+// Registry is a thread-safe map of Starter instances keyed by
+// Info().Name.
 //
-// Stores the merged Agent interface (spec-half + live-half), not
-// the narrower AgentSpec — see Specs() below for spec-only access.
+// Stores Starter rather than the previous Agent interface — the
+// static metadata (Info/Detect) is in Starter, and Starter.Start
+// is the only polymorphic operation. See agent.go for the
+// rationale.
 //
 // The zero value is not usable; create one with New().
 type Registry struct {
 	mu      sync.RWMutex
-	entries map[string]Agent
+	entries map[string]Starter
 }
 
 // New constructs an empty Registry.
 func New() *Registry {
-	return &Registry{entries: make(map[string]Agent)}
+	return &Registry{entries: make(map[string]Starter)}
 }
 
-// Register stores an agent under its Name(). If an agent with the same
-// name is already registered, the new instance replaces it (the most
-// recent call wins). The replaced boolean reports whether a
-// replacement happened.
-func (r *Registry) Register(a Agent) (replaced bool) {
+// Register stores a starter under s.Info().Name. If a starter
+// with the same name is already registered, the new instance
+// replaces it (the most recent call wins). The replaced boolean
+// reports whether a replacement happened.
+func (r *Registry) Register(s Starter) (replaced bool) {
+	info := s.Info()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_, existed := r.entries[a.Name()]
-	r.entries[a.Name()] = a
+	_, existed := r.entries[info.Name]
+	r.entries[info.Name] = s
 	return existed
 }
 
-// Get returns the Agent registered under name, or ErrUnknownAgent.
-// Callers can drive the returned Agent (Start it, etc.) — the
-// runtime path uses this; tooling that only needs spec data should
-// use Specs() or accept AgentSpec.
-func (r *Registry) Get(name string) (Agent, error) {
+// Get returns the Starter registered under name, or ErrUnknownAgent.
+// Callers drive the returned Starter via Info/Detect/Start.
+func (r *Registry) Get(name string) (Starter, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	a, ok := r.entries[name]
+	s, ok := r.entries[name]
 	if !ok {
 		return nil, ErrUnknownAgent
 	}
-	return a, nil
+	return s, nil
 }
 
-// List returns all registered agents in unspecified order. The slice
-// is freshly allocated; callers may mutate it. Use Specs() instead
-// when only static metadata is needed.
-func (r *Registry) List() []Agent {
+// List returns all registered starters in unspecified order. The
+// slice is freshly allocated; callers may mutate it.
+func (r *Registry) List() []Starter {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]Agent, 0, len(r.entries))
-	for _, a := range r.entries {
-		out = append(out, a)
+	out := make([]Starter, 0, len(r.entries))
+	for _, s := range r.entries {
+		out = append(out, s)
 	}
 	return out
 }
 
-// Specs returns the spec-only view of every registered agent.
-// Callers that only need Name / Mode / Command / Args / Env /
-// Detect should use this rather than List() — the static type
-// makes it impossible to accidentally call Start or Send* on the
-// returned values.
-//
-// `nightme agents` (cmd/nightme/agents_cmd.go) is the primary
-// consumer.
-func (r *Registry) Specs() []AgentSpec {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]AgentSpec, 0, len(r.entries))
-	for _, a := range r.entries {
-		out = append(out, a)
-	}
+// MakeChanAlias returns a writable channel that forwards values
+// from the read-only source. Used by legacyStarter to bridge a
+// legacy Agent.Events() (<-chan) into Agent.events (chan) so
+// the shared struct can have a single field type. Exported because
+// test bridges outside the agent package need to construct a
+// Agent from a legacy Agent and must wire the events chan the
+// same way.
+func MakeChanAlias(src <-chan AgentEvent) chan AgentEvent {
+	out := make(chan AgentEvent)
+	go func() {
+		for ev := range src {
+			out <- ev
+		}
+		close(out)
+	}()
 	return out
 }

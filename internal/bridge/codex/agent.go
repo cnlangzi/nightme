@@ -12,7 +12,7 @@
 //     Close are valid here.
 //
 // The template in Builtins is never mutated; Start returns a
-// separate *Agent so concurrent Start calls from different chats do
+// separate *driver so concurrent Start calls from different chats do
 // not interfere with each other.
 //
 // Session lifetime is two-tier:
@@ -33,7 +33,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -58,12 +57,7 @@ const maxImageBytes = 10 * 1024 * 1024
 
 // Agent is the Codex-app-server bridge descriptor. See file doc for
 // the template vs live state semantics.
-type Agent struct {
-	// ─── template fields (set by New; immutable) ───
-	name    string
-	command string
-	args    []string
-
+type driver struct {
 	// ─── runtime fields (zero before Start; populated on the clone) ───
 	session *session
 
@@ -73,48 +67,6 @@ type Agent struct {
 	// pendingMu guards pendingTurnActive.
 	pendingMu         sync.Mutex
 	pendingTurnActive bool
-}
-
-// ─── template constructor + spec-half methods ───
-
-// New constructs the template Agent. cmd/nightme/agents.go calls this
-// from init(); the returned *Agent is held by agent.Builtins as the
-// singleton for `name`.
-func New(name, command string, args []string) *Agent {
-	return &Agent{
-		name:    name,
-		command: command,
-		args:    append([]string(nil), args...),
-	}
-}
-
-// Name returns the registry key.
-func (a *Agent) Name() string { return a.name }
-
-// Mode reports the structured JSON-IO mode. The runtime does not
-// branch on Mode; the label is for `nightme agents` and logs.
-func (a *Agent) Mode() agent.Mode { return agent.ModeJSONIO }
-
-// Command returns the configured CLI binary (typically "codex").
-// Surfaced by `nightme agents` so users can see what /run would spawn.
-func (a *Agent) Command() string { return a.command }
-
-// Args returns a defensive copy of the constructor args. Callers may
-// not mutate the returned slice.
-func (a *Agent) Args() []string {
-	return append([]string(nil), a.args...)
-}
-
-// Env returns a defensive copy of the constructor env (always nil for
-// codex; kept for symmetry with the merged agent.Agent interface).
-func (a *Agent) Env() []string { return nil }
-
-// Detect verifies the `codex` binary resolves on PATH. Call before
-// Start to surface a friendly "codex not installed" error rather than
-// a confusing exec failure.
-func (a *Agent) Detect() error {
-	_, err := exec.LookPath(a.command)
-	return err
 }
 
 // ─── lifecycle ───
@@ -133,30 +85,27 @@ func (a *Agent) Detect() error {
 // forwarded. cfg.SessionID, when non-empty, is forwarded as
 // thread/resume. cfg.PermissionMode is ignored (the app-server uses
 // approvalPolicy on a per-turn / per-thread basis; not exposed yet).
-func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, error) {
+func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver, error) {
 	if cfg.Workspace == "" {
 		return nil, fmt.Errorf("codex: workspace is required")
 	}
 
-	live := &Agent{
-		name:    a.name,
-		command: a.command,
-		args:    append([]string(nil), a.args...),
-		closed:  make(chan struct{}),
+	live := &driver{
+		closed: make(chan struct{}),
 	}
 
 	cLog("Start enter",
-		"agent", a.name,
-		"command", a.command,
+		"agent", s.name,
+		"command", s.command,
 		"workspace", cfg.Workspace,
 		"resume_id", cfg.SessionID,
 	)
 
-	s, err := newSession(ctx, sessionConfig{
-		name:      a.name,
-		command:   a.command,
+	sess, err := newSession(ctx, sessionConfig{
+		name:      s.name,
+		command:   s.command,
 		workspace: cfg.Workspace,
-		args:      a.args,
+		args:      s.args,
 		env:       cfg.Env,
 		sessionID: cfg.SessionID,
 		resume:    cfg.SessionID != "",
@@ -164,8 +113,8 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 	if err != nil {
 		return nil, err
 	}
-	s.deliver = live.deliver
-	live.session = s
+	sess.deliver = live.deliver
+	live.session = sess
 
 	// Translator is wired AFTER newSession so we have access to
 	// the session's current thread id / model. onTurnEnd releases
@@ -174,10 +123,10 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 	// returned, opening a window where a concurrent SendBlocks would
 	// race the in-flight turn on codex's side.
 	live.session.translator = newTranslator(
-		live.deliver, a.name, cfg.Workspace, s.branch, s.stderrTail,
-		// Captures live (not the template `a`): SendBlocks is
+		live.deliver, s.name, cfg.Workspace, sess.branch, sess.stderrTail,
+		// Captures live (not the template): SendBlocks is
 		// called on the live clone, so the busy guard lives on
-		// live. Clearing `a.pendingTurnActive` (the template)
+		// live. Clearing `d.pendingTurnActive` (the template)
 		// would leave live's guard stuck at true forever and
 		// every subsequent SendBlocks would return ErrTurnBusy.
 		func() {
@@ -192,16 +141,16 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 	// thread id via SetSessionID.
 	live.deliver(agent.AgentEvent{
 		Kind:      agent.EventAgentReady,
-		SessionID: s.threadID,
-		Model:     s.model,
-		AgentName: a.name,
+		SessionID: sess.threadID,
+		Model:     sess.model,
+		AgentName: s.name,
 		Workspace: cfg.Workspace,
-		Branch:    s.branch,
+		Branch:    sess.branch,
 	})
 	cLog("Start: EventAgentReady emitted",
-		"pid", s.pid,
-		"thread_id", s.threadID,
-		"model", s.model,
+		"pid", sess.pid,
+		"thread_id", sess.threadID,
+		"model", sess.model,
 	)
 
 	go func() {
@@ -218,18 +167,18 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 // EventAgentDone. Long-lived bridges multiplex many turns over a
 // single process; AgentDoneEvent.Reason disambiguates turn-end from
 // process-end.
-func (a *Agent) Events() <-chan agent.AgentEvent { return a.session.events }
+func (d *driver) Events() <-chan agent.AgentEvent { return d.session.events }
 
 // PID returns the OS process id of the underlying child.
-func (a *Agent) PID() int { return a.session.pid }
+func (d *driver) PID() int { return d.session.pid }
 
 // ─── user input ───
 
 // SendText delivers plain-text user input. Convenience wrapper around
 // SendBlocks.
-func (a *Agent) SendText(text string) error {
+func (d *driver) SendText(text string) error {
 	cLog("SendText enter", "len", len(text), "text", text)
-	return a.SendBlocks(context.Background(), []agent.ContentBlock{
+	return d.SendBlocks(context.Background(), []agent.ContentBlock{
 		{Type: agent.ContentText, Text: text},
 	})
 }
@@ -242,23 +191,23 @@ func (a *Agent) SendText(text string) error {
 //
 // Empty blocks is a no-op. Concurrent calls during a streaming turn
 // return ErrTurnBusy (the app-server single-turns per thread).
-func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
+func (d *driver) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
 	cLog("SendBlocks enter", "blocks", len(blocks), "threadID", func() string {
-		if a.session == nil {
+		if d.session == nil {
 			return "<nil>"
 		}
-		return a.session.threadID
+		return d.session.threadID
 	}())
 	if len(blocks) == 0 {
 		return nil
 	}
-	a.pendingMu.Lock()
-	if a.pendingTurnActive {
-		a.pendingMu.Unlock()
+	d.pendingMu.Lock()
+	if d.pendingTurnActive {
+		d.pendingMu.Unlock()
 		return ErrTurnBusy
 	}
-	a.pendingTurnActive = true
-	a.pendingMu.Unlock()
+	d.pendingTurnActive = true
+	d.pendingMu.Unlock()
 	// pendingTurnActive is released by the translator's onTurnEnd
 	// callback when the turn settles (turn/completed, turn/failed,
 	// or thread/status/changed.idle). NOT here — clearing on
@@ -278,16 +227,16 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 				TextElements: []json.RawMessage{},
 			})
 		case agent.ContentImage:
-			path, err := a.stageImage(b)
+			path, err := d.stageImage(b)
 			if err != nil {
 				// We never sent a turn — release the busy guard
 				// so the next SendBlocks can proceed. The normal
 				// release path is the translator's onTurnEnd
 				// callback, but that only fires after a turn was
 				// actually started.
-				a.pendingMu.Lock()
-				a.pendingTurnActive = false
-				a.pendingMu.Unlock()
+				d.pendingMu.Lock()
+				d.pendingTurnActive = false
+				d.pendingMu.Unlock()
 				return err
 			}
 			input = append(input, turnInput{
@@ -314,14 +263,14 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 		// this, every subsequent SendBlocks would return
 		// ErrTurnBusy since no turn was ever started to clear
 		// the guard via onTurnEnd.
-		a.pendingMu.Lock()
-		a.pendingTurnActive = false
-		a.pendingMu.Unlock()
+		d.pendingMu.Lock()
+		d.pendingTurnActive = false
+		d.pendingMu.Unlock()
 		return nil
 	}
 
-	return a.session.rpc.request(ctx, "turn/start", turnStartParams{
-		ThreadID: a.session.threadID,
+	return d.session.rpc.request(ctx, "turn/start", turnStartParams{
+		ThreadID: d.session.threadID,
 		Input:    input,
 	}, nil)
 }
@@ -331,7 +280,7 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 // Matches cc-connect's pattern of creating
 // `<workspace>/.nightme/codex/images/img_<ms>_<idx>.<ext>` so
 // the path is stable for log debugging and survives a /new.
-func (a *Agent) stageImage(b agent.ContentBlock) (string, error) {
+func (d *driver) stageImage(b agent.ContentBlock) (string, error) {
 	data, err := os.ReadFile(b.Path)
 	if err != nil {
 		return "", fmt.Errorf("codex: read image: %w", err)
@@ -344,7 +293,7 @@ func (a *Agent) stageImage(b agent.ContentBlock) (string, error) {
 	// decode the payload here — content sniffing is the app-server's
 	// job; we just need to get the bytes to disk with the right
 	// extension so it routes to the correct decoder.
-	dir := filepath.Join(a.session.workspace, ".nightme", "codex", "images")
+	dir := filepath.Join(d.session.workspace, ".nightme", "codex", "images")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("codex: mkdir images: %w", err)
 	}
@@ -398,19 +347,19 @@ func imageExtFromMediaType(mt string) string {
 // unrelated responses, which is wrong for both the binary accept/
 // decline decision and the structured requestUserInput response
 // (whose `<qid>:labels` payload is per-question).
-func (a *Agent) SendPermission(resp string) error {
+func (d *driver) SendPermission(resp string) error {
 	if resp == "" {
 		resp = "decline"
 	}
-	a.session.pendingMu.Lock()
-	defer a.session.pendingMu.Unlock()
-	if a.session.lastPendingID == "" {
+	d.session.pendingMu.Lock()
+	defer d.session.pendingMu.Unlock()
+	if d.session.lastPendingID == "" {
 		return fmt.Errorf("codex: no pending approval")
 	}
-	id := a.session.lastPendingID
-	ch, ok := a.session.pendingApprovals[id]
+	id := d.session.lastPendingID
+	ch, ok := d.session.pendingApprovals[id]
 	if !ok {
-		a.session.lastPendingID = ""
+		d.session.lastPendingID = ""
 		return fmt.Errorf("codex: no pending approval")
 	}
 	select {
@@ -418,8 +367,8 @@ func (a *Agent) SendPermission(resp string) error {
 	default:
 		// Channel already has a pending value; do not block.
 	}
-	delete(a.session.pendingApprovals, id)
-	a.session.lastPendingID = ""
+	delete(d.session.pendingApprovals, id)
+	d.session.lastPendingID = ""
 	return nil
 }
 
@@ -429,17 +378,21 @@ func (a *Agent) SendPermission(resp string) error {
 // Stays on the same transport (process); only the thread changes.
 // Re-emits EventAgentReady with the new threadId / model so the
 // runtime's SetSessionID picks up the fresh id.
-func (a *Agent) New(ctx context.Context) error {
-	if err := a.session.ensureThread(ctx, ""); err != nil {
+// Reset is the agent.driver interface name for New. Implements
+// the agent.driver Reset method (F-34).
+func (d *driver) Reset(ctx context.Context) error { return d.New(ctx) }
+
+func (d *driver) New(ctx context.Context) error {
+	if err := d.session.ensureThread(ctx, ""); err != nil {
 		return err
 	}
-	a.deliver(agent.AgentEvent{
+	d.deliver(agent.AgentEvent{
 		Kind:      agent.EventAgentReady,
-		SessionID: a.session.threadID,
-		Model:     a.session.model,
-		AgentName: a.name,
-		Workspace: a.session.workspace,
-		Branch:    a.session.branch,
+		SessionID: d.session.threadID,
+		Model:     d.session.model,
+		AgentName: d.session.agentName,
+		Workspace: d.session.workspace,
+		Branch:    d.session.branch,
 	})
 	return nil
 }
@@ -452,19 +405,19 @@ func (a *Agent) New(ctx context.Context) error {
 // EventAgentError.
 //
 // Returns ErrNotSupported if the bridge is not started yet.
-func (a *Agent) Abort(ctx context.Context) error {
+func (d *driver) Abort(ctx context.Context) error {
 	_ = ctx
-	if a.session == nil || a.session.cmd == nil || a.session.cmd.Process == nil {
+	if d.session == nil || d.session.cmd == nil || d.session.cmd.Process == nil {
 		return agent.ErrNotSupported
 	}
-	return a.session.cmd.Process.Signal(os.Interrupt)
+	return d.session.cmd.Process.Signal(os.Interrupt)
 }
 
 // SetModel is not supported on the codex bridge. codex reads the
 // model at startup via `-c model=...` and the app-server API does
 // not expose a model swap mechanism. Operators who want a
 // different model must restart the bridge.
-func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error {
+func (d *driver) SetModel(ctx context.Context, providerID, modelID string) error {
 	_ = ctx
 	_ = providerID
 	_ = modelID
@@ -476,12 +429,12 @@ func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error 
 // Close terminates the session: closes stdin (so the child sees EOF
 // and exits), waits up to closeDrainTimeout for graceful reap, then
 // SIGKILLs if necessary. Idempotent.
-func (a *Agent) Close() error {
+func (d *driver) Close() error {
 	var firstErr error
-	a.closeOnce.Do(func() {
-		close(a.closed)
-		if a.session != nil {
-			firstErr = a.session.Close()
+	d.closeOnce.Do(func() {
+		close(d.closed)
+		if d.session != nil {
+			firstErr = d.session.Close()
 		}
 	})
 	return firstErr
@@ -509,21 +462,21 @@ func (a *Agent) Close() error {
 // Translators / handlers call this with the event they want to emit;
 // the public-facing signature has been kept tight so the call sites
 // stay grep-friendly.
-func (a *Agent) deliver(ev agent.AgentEvent) agent.AgentEvent {
-	if a.session == nil {
+func (d *driver) deliver(ev agent.AgentEvent) agent.AgentEvent {
+	if d.session == nil {
 		return ev
 	}
-	ev.SessionID = a.session.threadID
-	ev.Model = a.session.model
-	ev.AgentName = a.session.agentName
-	ev.Workspace = a.session.workspace
-	ev.Branch = a.session.branch
+	ev.SessionID = d.session.threadID
+	ev.Model = d.session.model
+	ev.AgentName = d.session.agentName
+	ev.Workspace = d.session.workspace
+	ev.Branch = d.session.branch
 
 	select {
-	case a.session.events <- ev:
-	case <-a.session.closed:
+	case d.session.events <- ev:
+	case <-d.session.closed:
 		cLog("deliver dropped (session closed)", "kind", ev.Kind.String())
-	case <-a.session.exitDone:
+	case <-d.session.exitDone:
 		// lifecycle closed exitDone after cmd.Wait returned;
 		// the bridge is being torn down. Drop silently — nobody
 		// will read this anyway.

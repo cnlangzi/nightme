@@ -32,15 +32,33 @@ func newFakeAgentSession(pid int) *fakeAgentSession {
 
 func (f *fakeAgentSession) Events() <-chan agent.AgentEvent { return f.events }
 func (f *fakeAgentSession) PID() int                      { return f.pid }
-func (f *fakeAgentSession) Name() string                  { return "fake" }
-func (f *fakeAgentSession) Mode() agent.Mode              { return agent.ModePTY }
-func (f *fakeAgentSession) Command() string               { return "fake" }
-func (f *fakeAgentSession) Args() []string                { return nil }
-func (f *fakeAgentSession) Env() []string                 { return nil }
-func (f *fakeAgentSession) Detect() error                 { return nil }
-func (f *fakeAgentSession) Start(_ context.Context, _ agent.StartConfig) (agent.Agent, error) {
-	return f, nil
+func (f *fakeAgentSession) Info() agent.Info {
+	return agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil)
 }
+func (f *fakeAgentSession) Detect() error { return nil }
+func (f *fakeAgentSession) Start(_ context.Context, _ agent.StartConfig) (*agent.Agent, error) {
+	return f.buildLive(), nil
+}
+
+// buildLive wraps f in a *agent.Agent with a fake driver that
+// forwards Send*/Reset/Close back to f. Used by fakeSpawners to
+// return a *Agent from Spawn().
+func (f *fakeAgentSession) buildLive() *agent.Agent {
+	return agent.NewAgent(
+		agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil),
+		f.pid, f.events, &fakeDriver{inner: f})
+}
+
+// fakeDriver forwards driver calls back to a fakeAgentSession.
+type fakeDriver struct{ inner *fakeAgentSession }
+
+func (d *fakeDriver) SendText(text string) error { return d.inner.SendText(text) }
+func (d *fakeDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
+	return d.inner.SendBlocks(ctx, b)
+}
+func (d *fakeDriver) SendPermission(resp string) error { return d.inner.SendPermission(resp) }
+func (d *fakeDriver) Reset(ctx context.Context) error    { return d.inner.New(ctx) }
+func (d *fakeDriver) Close() error                      { return d.inner.Close() }
 
 func (f *fakeAgentSession) SendText(text string) error {
 	f.mu.Lock()
@@ -111,7 +129,7 @@ type fakeSpawner struct {
 	fakes        map[spawnKey]*fakeAgentSession
 	calls        int
 	lastResumeID string
-	spawnFn      func(name, cwd string) (agent.Agent, error) // optional override
+	spawnFn      func(name, cwd string) (*agent.Agent, error) // optional override
 }
 
 type spawnKey struct {
@@ -123,7 +141,7 @@ func newFakeSpawner() *fakeSpawner {
 	return &fakeSpawner{fakes: make(map[spawnKey]*fakeAgentSession)}
 }
 
-func (s *fakeSpawner) Spawn(ctx context.Context, name, cwd string, args []string, sessionID string) (agent.Agent, error) {
+func (s *fakeSpawner) Spawn(ctx context.Context, name, cwd string, args []string, sessionID string) (*agent.Agent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -133,11 +151,11 @@ func (s *fakeSpawner) Spawn(ctx context.Context, name, cwd string, args []string
 	}
 	key := spawnKey{name, cwd}
 	if f, ok := s.fakes[key]; ok {
-		return f, nil
+		return f.buildLive(), nil
 	}
 	f := newFakeAgentSession(10000 + s.calls)
 	s.fakes[key] = f
-	return f, nil
+	return f.buildLive(), nil
 }
 
 func (s *fakeSpawner) Get(name, cwd string) *fakeAgentSession {
@@ -193,7 +211,7 @@ func TestAgentSession_SpawnIsIdempotent(t *testing.T) {
 
 func TestAgentSession_SpawnFailureLeavesDetached(t *testing.T) {
 	spawner := newFakeSpawner()
-	spawner.spawnFn = func(name, cwd string) (agent.Agent, error) {
+	spawner.spawnFn = func(name, cwd string) (*agent.Agent, error) {
 		return nil, errors.New("spawn boom")
 	}
 	csFile, asFile := newTestStores(t)

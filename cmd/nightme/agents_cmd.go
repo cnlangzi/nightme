@@ -95,10 +95,9 @@ func runAgents(cmd *cobra.Command, f agentsCmdFlags) error {
 }
 
 // collectAgents projects the spec-only view into the JSON-friendly
-// row shape. The argument is `[]agent.AgentSpec` (not the merged
-// `[]agent.Agent`), so the loop body can only call spec-half
-// methods — Name / Command / Args / etc. — and the type system
-// forbids accidentally reaching for Start / Events / Send*.
+// row shape. The argument is `[]agent.Starter`, so the loop body
+// reads s.Info() to get the static metadata without touching
+// the live-half methods.
 func collectAgents(specs []agent.Starter) []agentRow {
 	rows := make([]agentRow, 0, len(specs))
 	for _, s := range specs {

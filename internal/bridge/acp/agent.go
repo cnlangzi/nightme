@@ -629,8 +629,8 @@ func (d *driver) emit(event agent.AgentEvent) {
 
 // Compile-time guarantee that *driver satisfies agent.Agent (the
 // merged spec+live interface). The template-half of *driver (set by
-// NewAgent) satisfies agent.AgentSpec implicitly because the new
-// agent.Agent interface embeds AgentSpec.
+// NewStarter) satisfies agent.Starter by implementing Info/Detect/Start.
+// Starter is the only interface in the package.
 // Compile-time guarantee that *driver satisfies the package-private
 // agent.driver interface (SendText/SendBlocks/SendPermission/
 // Reset/Close). External callers reach driver via *agent.Agent.

@@ -1,5 +1,5 @@
 // Package pty also provides the Agent wrapper that turns a CLI
-// command into an agent.AgentSpec backed by the PTY transport defined
+// command into a Starter/Agent backed by the PTY transport defined
 // in this package. The wrapper is the safe fallback for any binary
 // that does not yet speak ACP / SDK / JSON-IO — bytes flow through
 // the PTY as EventAgentText and the session manager drives them.
@@ -273,6 +273,5 @@ func (d *driver) readLoop() {
 
 // Compile-time guarantee that *driver satisfies agent.Agent (the
 // merged spec+live interface). The template-half of *driver (set by
-// NewAgent) satisfies agent.AgentSpec implicitly because the new
-// agent.Agent interface embeds AgentSpec.
+// NewStarter) satisfies agent.Starter by implementing Info/Detect/Start.
 var _ agentDriver = (*driver)(nil)

@@ -1,11 +1,15 @@
 // Package agent defines the abstract Agent interface that wraps any
 // AI Coding CLI behind a single structured event stream.
 //
-// Two layers:
+// Three pieces:
 //
-//   - AgentSpec — static metadata + factory for sessions (Name, Mode, Detect, Start).
-//   - Agent     — a running instance: events channel + control plane
-//     (SendText, SendPermission, Close).
+//   - Info    — static metadata (Name, Mode, Command, Args, Env),
+//     readable from both Starter and the running Agent.
+//   - Starter — the spawn recipe; the only polymorphic point. Each
+//     bridge implements its own Start (fork+exec+handshake).
+//   - Agent   — the runtime handle. PID, events chan, sessionID,
+//     close machinery all live here; per-bridge protocol logic is
+//     hidden behind the unexported driver interface.
 //
 // The Mode selector (ACP / SDK / PTY) lets the Bridge pick a backend
 // without leaking protocol details to Session Manager. See

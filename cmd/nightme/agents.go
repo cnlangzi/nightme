@@ -6,8 +6,9 @@
 // bridge package supplies the underlying protocol.
 //
 // To add a new built-in agent:
-//  1. Implement an `agent.AgentSpec` constructor in the relevant
-//     `internal/bridge/<protocol>/` package (or extend one).
+//  1. Implement a `Starter` (Info/Detect/Start) in the relevant
+//     `internal/bridge/<protocol>/` package (or extend one). Use
+//     the bridge's exported `NewStarter(...)` constructor.
 //  2. Add a Builtins.Register line below.
 //
 // There is no name-based dispatch table elsewhere in the binary —

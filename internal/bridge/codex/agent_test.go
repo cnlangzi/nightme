@@ -80,7 +80,7 @@ func TestSendText_WrapsBlocks(t *testing.T) {
 	a := NewStarter("codex", "codex", nil)
 	// Type assertion sanity — keep the compiler honest. Starter
 	// satisfies agent.Starter; the driver (live handle) is what
-	// satisfies the legacy agent.Agent interface via WrapAsAgent.
+	// satisfies agent.Starter.
 	var _ agent.Starter = a
 }
 

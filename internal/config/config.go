@@ -99,7 +99,7 @@ type AgentEntry struct {
 	Name string `yaml:"name"`
 
 	// Bridge selects the Bridge backend (claude / codex / opencode).
-	// Names match agent.AgentSpec.Name() values; names not registered
+	// Names match the registered Starter's Info().Name values.
 	// trigger errors at session-create time.
 	Bridge string `yaml:"bridge"`
 

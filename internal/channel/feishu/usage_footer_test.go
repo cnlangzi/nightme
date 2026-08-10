@@ -77,6 +77,27 @@ func TestFormatSessionFooterLines_SessionIDOnly(t *testing.T) {
 	}
 }
 
+// F-56: Model is empty but Agent and SessionID are both set
+// (e.g. bridge hasn't reported the model yet — EventAgentReady
+// carries SessionID but Model can arrive later or be omitted
+// entirely by the bridge). The middle-dot segment is dropped
+// when Model is empty per the "each segment omitted
+// independently" convention; Agent · SessionID chain renders
+// with no separator gap. Locks the layout so a future
+// "always-show-the-middle-dot" PR doesn't silently change the
+// visual rhythm.
+func TestFormatSessionFooterLines_AgentSessionIDOnly(t *testing.T) {
+	ctx := &gateway.SessionContext{
+		Agent:     "claude",
+		SessionID: "abc123-uuid-here",
+	}
+	got := formatSessionFooterLines(ctx)
+	want := []string{"🤖: claude · abc123-uuid-here"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("formatSessionFooterLines() = %v, want %v", got, want)
+	}
+}
+
 // TestFormatSessionFooterLines_CompactionSegment removed: F-49
 // compaction tracking was deleted across the runtime. The "· 🗜 N"
 // segment is no longer rendered; the entire subtest is gone.

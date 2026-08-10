@@ -163,14 +163,15 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 		idParts = append(idParts, "·", ctx.Model)
 	}
 	// F-56: append the agent's own session id (Claude Code's
-	// system/init.session_id, ACP's synthesized uuid, etc.) as a
-	// trailing identity segment. Each segment is omitted
-	// independently when empty; a SessionID-only stamp renders as
-	// "🤖: · <sid>" (leading-separator caveat documented in
-	// formatSessionFooter's caller comment). The leading colon
-	// after 🤖 matches the 💰:「」 taxonomy on Line 2 and the
-	// 📁: on Line 3 so the three footer lines share a single
-	// category-prefix shape.
+	// system/init.session_id, ACP's session/new response id,
+	// codex's thread.id, etc.) as a trailing identity segment.
+	// Each segment is omitted independently when empty; a
+	// SessionID-only stamp renders as "🤖: · <sid>"
+	// (leading-separator caveat locked by
+	// TestFormatSessionFooterLines_SessionIDOnly + F-45 §1.10).
+	// The leading colon after 🤖 matches the 💰:「」 taxonomy
+	// on Line 2 and the 📁: on Line 3 so the three footer lines
+	// share a single category-prefix shape.
 	if ctx.SessionID != "" {
 		idParts = append(idParts, "·", ctx.SessionID)
 	}

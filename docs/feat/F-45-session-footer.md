@@ -713,7 +713,8 @@ if s.Agent != "" || s.Model() != "" || s.SessionID() != "" || hasGit ||
 **Bridge 兼容性**：
 - `claudecode`：`EventAgentReady.SessionID`（来自 `system/init.session_id`）—— 已实现
 - `pi`：同上
-- `acp`：ACP 协议不暴露原生 session id，`internal/bridge/acp/agent.go:79` 合成一个稳定 uuid（`agentName + workspace` 派生）。Footer 仍会显示合成 id——对 debug 有帮助（识别"这是 ACP 那条 session"），不算误导
+- `acp`：ACP **协议本身**返回 sessionId —— `internal/bridge/acp/agent.go::setSessionID` 解码 session/new 响应的 `sessionId` / `session_id` 字段；runtime 端 *synthesizes 的是 `EventAgentReady` envelope*（`emitConnected`），不是 sessionID 值。Footer 显示 ACP 真实 sessionId，对 debug 有帮助（识别"这是 ACP 那条 session"），不算误导
+- `codex`：`EventAgentReady.SessionID` 来自 `internal/bridge/codex/session.go::ensureThread` 的 `thread.id`（app-server JSON-RPC thread.start 响应）。同上，真实 id，不是合成
 - `pty`：pty 没有 init 事件，SessionID 为空，footer 跳过该 segment（既有 `each segment omitted independently` 规则自然处理）
 
 **F-56 PR scope**：

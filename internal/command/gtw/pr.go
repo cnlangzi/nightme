@@ -411,14 +411,19 @@ func countBaseAhead(ctx context.Context, worktree, base string, deps HandlerDeps
 // renderPROpenedCard renders the IM-friendly success card.
 // Mirrors the /gtw push and /gtw close card style (✅ + branch /
 // worktree footer; see wip/gtw-pr.md §5).
+// renderPROpenedCard renders the IM-friendly success card.
+// Format 1 (gtw/README.md §2.1): ✅ title + `→ field: value`
+// rows. The previous `━━━━━━━━━━━━━━ \n 🌿/🔗/📁` form was a
+// legacy mix that didn't fit any rule; the section divider is
+// gone, and `🌿/🔗/📁` merge into the `→` family alongside the
+// existing `→ base:` row.
 func renderPROpenedCard(c Context, base, url string) string {
 	return fmt.Sprintf(
 		"✅ PR opened\n"+
-			"━━━━━━━━━━━━━━\n"+
-			"🌿 branch:   %s\n"+
-			"→ base:      %s\n"+
-			"🔗 url:      %s\n"+
-			"📁 worktree: %s\n",
+			"→ branch:   %s\n"+
+			"→ base:     %s\n"+
+			"→ url:      %s\n"+
+			"→ worktree: %s\n",
 		c.Branch, base, url, c.Worktree,
 	)
 }

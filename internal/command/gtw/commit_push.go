@@ -102,14 +102,17 @@ func pushClean(
 		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf("❌ git push failed: %v\n%s", err, out)), nil
 	}
+	// Format 3 (see gtw/README.md §2.3): opaque content block.
+	// Title names the action, `> <branch>` line names the entity,
+	// raw git push output follows verbatim. The previous
+	// `[Push]\n━━━━━━━━━━━━━━\n🌿 branch: ...\n📁 worktree: ...`
+	// form was a Format 1/2 hybrid that didn't fit any rule; the
+	// branch is now redundant with the `>` line and the worktree
+	// path is recoverable from git config if the user needs it.
 	body := fmt.Sprintf(
-		"✅ Pushed %q\n"+
-			"━━━━━━━━━━━━━━\n"+
-			"[Push]\n%s\n"+
-			"━━━━━━━━━━━━━━\n"+
-			"🌿 branch:   %s\n"+
-			"📁 worktree: %s\n",
-		c.Branch, indentLines(out, "  "), c.Branch, c.Worktree,
+		"✅ pushed\n"+
+			"> %s\n%s\n",
+		c.Branch, strings.TrimRight(out, "\n"),
 	)
 	return reply(ctx, cs.Channel(), chatID, messageID, body), nil
 }
@@ -188,23 +191,30 @@ func pushDirty(
 			fmt.Sprintf("❌ agent %s failed: %v", agentName, err)), nil
 	}
 
-	// Note on the header: we deliberately use a neutral "🤖 Agent X
-	// completed" framing instead of "✅ Pushed (via X)". The agent's
-	// RunOnce exits 0 even when the underlying git push failed (e.g.
-	// non-fast-forward, auth expired) and reports the failure in its
-	// prose reply. By design we do NOT parse that text (per the
-	// plan's "agent reply is opaque; we just check err vs nil"
-	// decision), so we cannot honestly claim ✅. The neutral header
-	// lets the agent's text be the source of truth — if it says
-	// "pushed abc1234", great; if it says "push failed: ...", the
-	// user reads that without a green checkmark contradicting it.
+	// Format: gtw-standard three-line reply — emoji title on
+	// line 1, `> <branch>` prompt on line 2, agent's prose on
+	// line 3+. feishu auto-prepends `❯ ` to the first line of
+	// every OutCommandReply (adapter.go:1588), so the rendered
+	// card is:
+	//
+	//	❯ 🤖 <agent> pushed
+	//	> <branch>
+	//	<agent text>
+	//
+	// Note on the header: we deliberately use "🤖 X pushed"
+	// instead of "✅ Pushed (via X)". The agent's RunOnce exits
+	// 0 even when the underlying git push failed (e.g.
+	// non-fast-forward, auth expired) and reports the failure in
+	// its prose reply. By design we do NOT parse that text,
+	// so we cannot honestly claim ✅. The neutral header lets
+	// the agent's text be the source of truth — if it says
+	// "pushed abc1234", great; if it says "push failed: ...",
+	// the user reads that without a green checkmark contradicting
+	// it.
 	body := fmt.Sprintf(
-		"🤖 Agent %s completed\n"+
-			"━━━━━━━━━━━━━━\n%s\n"+
-			"━━━━━━━━━━━━━━\n"+
-			"🌿 branch:   %s\n"+
-			"📁 worktree: %s\n",
-		agentName, indentLines(text, "  "), c.Branch, c.Worktree,
+		"🤖 %s pushed\n"+
+			"> %s\n%s\n",
+		agentName, c.Branch, text,
 	)
 	// Surface agent-resolve notes (e.g. yml referenced an unknown
 	// agent but a session default was found) at the bottom of the

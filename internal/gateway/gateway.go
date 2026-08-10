@@ -50,8 +50,6 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
-
-	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // Channel is the abstract surface the Gateway needs from any IM
@@ -111,24 +109,6 @@ type CommandResult struct {
 // A nil MessageDispatcher means messages that don't match a
 // slash command are silently dropped (debug / test wiring).
 type MessageDispatcher func(ctx context.Context, msg *InboundMessage) error
-
-// OutboundSource is one running session's outbound event stream.
-// The runtime (typically cmd/nightme) provides these to the
-// Gateway via the SweepSessions callback. Each source maps a chat
-// to a single event channel; the Gateway attaches one outbound
-// pump per source.
-type OutboundSource struct {
-	SessionID string
-	ChatID    string
-	Events    <-chan agent.AgentEvent
-}
-
-// SweepSessions returns the currently-running OutboundSources. The
-// Gateway polls this on a ticker (every 5s) to discover new
-// sessions the /run command creates between sweeps. Returning nil
-// or an empty slice is fine — the Gateway simply has nothing to
-// attach.
-type SweepSessions func() []OutboundSource
 
 // Gateway is the public contract for the slash-command router.
 //
@@ -644,33 +624,12 @@ func (g *gateway) sweepSessions(ctx context.Context) {
 
 // pumpOutbound reads AgentEvent from the session's events channel,
 // translates via Translate, and dispatches to the right Channel.
-func (g *gateway) pumpOutbound(ctx context.Context, ch Channel, sessionID, chatID string, events <-chan agent.AgentEvent) {
-	defer g.wg.Done()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-g.stopCh:
-			return
-		case ev, ok := <-events:
-			if !ok {
-				return
-			}
-			msg, send := Translate(chatID, ev)
-			if !send {
-				continue
-			}
-			if err := ch.Send(ctx, msg); err != nil {
-				// Fire-and-ack: log and continue. Retry queue is
-				// explicitly out of scope for v0.3 — failures
-				// surface via the channel's own error reporting
-				// (Feishu's UpdateMessage / AddReaction paths log
-				// their own failures at warn level).
-				log.Printf("gateway: channel send failed (chat=%s, kind=%s): %v", chatID, msg.Kind, err)
-			}
-		}
-	}
-}
+// pumpOutbound was the gateway's internal outbound event pump.
+// Removed in the outbound-package extraction: Translate has moved
+// to internal/gateway/outbound, and the runtime's actual outbound
+// pump (cmd/nightme/run.go's newEventHandler) does this work
+// directly using outbound.Emitter — gateway no longer owns an
+// outbound loop of its own.
 
 // withGateway installs gw into ctx so handlers that need it
 // (currently just /help) can recover it without taking it as a
@@ -691,11 +650,6 @@ func WithGateway(ctx context.Context, gw Gateway) context.Context {
 // (so handlers in gateway/cmd can fetch the gateway from the
 // same context value the gateway's dispatchLoop installed).
 type GatewayKey struct{}
-
-// contextKey aliases GatewayKey so the type used by withGateway
-// and gwFromContext is identical (no duplicate struct declaration
-// in the cmd subpackage).
-type contextKey = GatewayKey
 
 // --- v1.1 binding table (commit 3) ----------------------------------
 

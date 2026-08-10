@@ -1,16 +1,17 @@
-// Package main — channelWrap bridges the gateway.Channel
-// interface (concrete, implemented by *feishu.Adapter and *echo
-// stubs) into the chatsession.Channel interface (abstract, used
-// by the command runtime after the Commander refactor).
+// Package main — channelWrap bridges the outbound.Emitter
+// interface (concrete, owned by cmd/nightme) into the
+// chatsession.Channel interface (abstract, used by the command
+// runtime after the Commander refactor).
 //
 // The two interfaces use different message types:
-//   - gateway.Channel accepts gateway.OutboundMessage
+//   - outbound.Emitter / Channel accept gateway.OutboundMessage
 //   - chatsession.Channel accepts chatsession.OutboundMessage
 //
 // The wrap performs a field-by-field copy between them at every
-// outbound call. The only non-trivial conversion is CardKind
-// (string ↔ int enum) — gtw's "decision" / "info" strings map
-// to gateway.CardKindDecision / CardKindInfo / CardKindPermission.
+// outbound call, then routes through Emitter so the unified
+// SessionContext footer (F-45/F-48) is stamped on slash-command
+// replies — pre-wrap these replies bypassed runtime stamping
+// entirely.
 //
 // PATCH semantics: chatsession.OutboundMessage.PatchBotMsgID
 // is non-empty → wrap sets gateway.OutboundMessage.Kind =
@@ -23,6 +24,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 )
 
 // cardKindFromString maps chatsession.Card.Kind (string) to
@@ -43,17 +45,24 @@ func cardKindFromString(s string) gateway.CardKind {
 }
 
 // channelWrap implements chatsession.Channel by delegating to
-// a gateway.Channel (concrete IM adapter). The runtime shim in
-// run.go wires one of these per ChatSession via cs.WithChannel
-// after GetOrCreate.
+// an outbound.Emitter. The runtime shim in run.go wires one of
+// these per ChatSession via cs.WithChannel after GetOrCreate.
+//
+// Why route through Emitter (instead of the underlying gateway.Channel
+// directly): pre-outbound-package, slash-command replies sent via
+// cs.Channel().Send() skipped the SessionContext footer because
+// the stamping logic lived at the runtime pump, not on the channel
+// path. The Emitter now owns stamping, so wrapping it gives every
+// reply the same treatment — slash-command, runtime-pump, and
+// MessageState subscriber all flow through the same stamping hook.
 type channelWrap struct {
-	ch gateway.Channel
+	em outbound.Emitter
 }
 
-// newChannelWrap constructs a wrap. The underlying ch must be
-// non-nil (it's the gateway.Channel returned by gateway.ResolveChannel).
-func newChannelWrap(ch gateway.Channel) chatsession.Channel {
-	return &channelWrap{ch: ch}
+// newChannelWrap constructs a wrap. The underlying emitter must be
+// non-nil.
+func newChannelWrap(em outbound.Emitter) chatsession.Channel {
+	return &channelWrap{em: em}
 }
 
 // Send posts a plain-text reply (Kind = OutCommandReply).
@@ -61,7 +70,7 @@ func newChannelWrap(ch gateway.Channel) chatsession.Channel {
 func (w *channelWrap) Send(ctx context.Context, msg chatsession.OutboundMessage) error {
 	gw := chatsessionToGateway(msg)
 	gw.Kind = gateway.OutCommandReply
-	return w.ch.Send(ctx, gw)
+	return w.em.Send(ctx, gw)
 }
 
 // SendCard posts an interactive card (Kind = OutCard). msg.Card
@@ -69,7 +78,7 @@ func (w *channelWrap) Send(ctx context.Context, msg chatsession.OutboundMessage)
 func (w *channelWrap) SendCard(ctx context.Context, msg chatsession.OutboundMessage) (string, error) {
 	gw := chatsessionToGateway(msg)
 	gw.Kind = gateway.OutCard
-	return w.ch.SendCard(ctx, gw)
+	return w.em.SendCard(ctx, gw)
 }
 
 // Patch edits an existing bot message in place (Kind = OutCardPatch).
@@ -79,7 +88,7 @@ func (w *channelWrap) Patch(ctx context.Context, msg chatsession.OutboundMessage
 	gw := chatsessionToGateway(msg)
 	gw.Kind = gateway.OutCardPatch
 	gw.Text = msg.PatchResult
-	return w.ch.Send(ctx, gw)
+	return w.em.Send(ctx, gw)
 }
 
 // chatsessionToGateway translates chatsession.OutboundMessage to
@@ -111,11 +120,11 @@ func chatsessionToGateway(in chatsession.OutboundMessage) gateway.OutboundMessag
 		// feishu/adapter.go: case OutCardPatch).
 		if in.CardTitle != "" || in.CardBody != "" || len(in.CardChoices) > 0 {
 			card := chatsessionCardToGateway(chatsession.Card{
-				Title:        in.CardTitle,
-				Body:         in.CardBody,
-				Choices:      in.CardChoices,
-				RequestID:    in.CardRequestID,
-				ChosenEmoji:  in.ChosenChoiceEmoji,
+				Title:       in.CardTitle,
+				Body:        in.CardBody,
+				Choices:     in.CardChoices,
+				RequestID:   in.CardRequestID,
+				ChosenEmoji: in.ChosenChoiceEmoji,
 			})
 			out.Card = &card
 		}
@@ -128,12 +137,12 @@ func chatsessionToGateway(in chatsession.OutboundMessage) gateway.OutboundMessag
 // enum).
 func chatsessionCardToGateway(in chatsession.Card) gateway.Card {
 	return gateway.Card{
-		Kind:             cardKindFromString(in.Kind),
-		Title:            in.Title,
-		Body:             in.Body,
-		Choices:          chatChoicesToGateway(in.Choices),
-		RequestID:        in.RequestID,
-		Disabled:         in.Disabled,
+		Kind:              cardKindFromString(in.Kind),
+		Title:             in.Title,
+		Body:              in.Body,
+		Choices:           chatChoicesToGateway(in.Choices),
+		RequestID:         in.RequestID,
+		Disabled:          in.Disabled,
 		ChosenChoiceEmoji: in.ChosenEmoji,
 	}
 }

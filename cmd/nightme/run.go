@@ -48,6 +48,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/command/watch"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -347,11 +348,16 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// 注:chatsession.Channel interface 和 gateway.Channel interface
 	// 签名不兼容(chatsession 用 chatsession.OutboundMessage,gateway
 	// 用 gateway.OutboundMessage),所以 resolver 通过 newChannelWrap
-	// 把 gateway.Channel 适配成 chatsession.Channel 注入。生产环境
+	// 把 outbound.Emitter 适配成 chatsession.Channel 注入。生产环境
 	// 一个 nightme daemon 只有一个 gateway.Channel(目前永远是 feishu);
 	// 多 channel 部署时把 chatID → gateway.Channel 映射写进 resolver。
+	//
+	// emitter 是所有出站消息的统一咽喉,负责把 SessionContext footer
+	// 盖在每条消息上(runtime pump / slash command / MessageState 三条
+	// 路径都走它)。stamper 在装配层注入,不暴露给 chatsession。
+	em := outbound.New(ch, outbound.Options{Stamper: newRuntimeStamper(mgr)})
 	mgr.WithChannelResolver(func(string) chatsession.Channel {
-		return newChannelWrap(ch)
+		return newChannelWrap(em)
 	})
 
 	// F-XX: wire the per-chat ChatSession lookup. Without this,
@@ -512,7 +518,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// WithOnCreate fires for both restored (RestoreFromRegistry)
 	// and future (GetOrCreate) ChatSessions. Place BEFORE
 	// RestoreFromRegistry so restored chats get their handlers.
-	if err := wireRuntimeCallbacksAndRestore(mgr, ch, gwImpl, logger); err != nil {
+	if err := wireRuntimeCallbacksAndRestore(mgr, ch, em, logger); err != nil {
 		return fmt.Errorf("run: wire+restore: %w", err)
 	}
 
@@ -553,7 +559,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 //  3. cs.QueueUserMessage(blocks, userMsgID) (Idle → flush now;
 //     Busy → queue)
 //  4. SetBusy on first event (drive FSM)
-func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary string, logger *slog.Logger) func(context.Context, *gateway.InboundMessage) error {
+func newMessageDispatcher(mgr *chatsession.Manager, em outbound.Emitter, primary string, logger *slog.Logger) func(context.Context, *gateway.InboundMessage) error {
 	return func(ctx context.Context, msg *gateway.InboundMessage) error {
 		if msg == nil {
 			return nil
@@ -587,14 +593,14 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 		_, err := cs.LookupSelectedAgentSession()
 		if err != nil {
 			if errors.Is(err, chatsession.ErrNoSelectedCwd) {
-				return ch.Send(ctx, gateway.OutboundMessage{
+				return em.Send(ctx, gateway.OutboundMessage{
 					ChatID: msg.ChatID,
 					Kind:   gateway.OutReply,
 					Text:   "No workspace set. Send /cwd <path> first.",
 				})
 			}
 			// Spawn failed (binary missing, etc.); let the user know.
-			return ch.Send(ctx, gateway.OutboundMessage{
+			return em.Send(ctx, gateway.OutboundMessage{
 				ChatID: msg.ChatID,
 				Kind:   gateway.OutReply,
 				Text:   fmt.Sprintf("Failed to spawn agent: %v", err),
@@ -661,7 +667,7 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 		}
 		if err := cs.QueueUserMessage(userMsg); err != nil {
 			if errors.Is(err, chatsession.ErrQueueFull) {
-				return ch.Send(ctx, gateway.OutboundMessage{
+				return em.Send(ctx, gateway.OutboundMessage{
 					ChatID: msg.ChatID,
 					Kind:   gateway.OutReply,
 					Text:   "Input queue full — the agent is behind. Wait for it to catch up before sending more.",
@@ -700,7 +706,7 @@ func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary 
 func wireRuntimeCallbacksAndRestore(
 	mgr *chatsession.Manager,
 	ch channel.Channel,
-	gwImpl *gateway.Router,
+	em outbound.Emitter,
 	logger *slog.Logger,
 ) error {
 	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
@@ -737,7 +743,7 @@ func wireRuntimeCallbacksAndRestore(
 		// the Subscribe callback) — newEventHandler itself
 		// allocates a closure, so calling it on every Publish
 		// would burn one allocation per event.
-		agentHandler := newEventHandler(ch, cs, mgr, logger)
+		agentHandler := newEventHandler(em, cs, mgr, logger)
 		cs.AgentEventBus.Subscribe(func(env chatsession.AgentEventEnvelope) bool {
 			agentHandler(env)
 			return false
@@ -755,16 +761,17 @@ func wireRuntimeCallbacksAndRestore(
 		// Other states (MessageQueued / MessageDropped) don't need
 		// the stamp — they don't create UI.
 		//
-		// F-54 review note: this handler routes via `ch` (the
-		// single Channel passed into wireRuntimeCallbacksAndRestore)
-		// rather than via gwImpl.resolveChannel(chatID). Today there
-		// is one Channel in production, so the difference is
+		// F-54 review note: this handler routes via `em` (the single
+		// Emitter passed into wireRuntimeCallbacksAndRestore). Today
+		// there is one Channel in production, so the difference is
 		// observable only in tests that wire multiple channels via
 		// gateway.Bind/chatToChan. For multi-channel deployments,
-		// change `ch.Send(...)` to `gwImpl.resolveChannel(e.ChatID).
-		// Send(...)` and the rest of the body is identical. The
-		// AgentEventBus and PromptEndBus handlers above have the
-		// same latent gap; the same one-line fix applies to both.
+		// route via a per-chatID Channel lookup in front of `em`
+		// (the wrap currently does the type conversion; a multi-channel
+		// variant would resolve the underlying gateway.Channel first
+		// and wrap-emit it). The AgentEventBus and PromptEndBus
+		// handlers above have the same latent gap; the same one-line
+		// fix applies to both.
 		cs.MessageStateBus.Subscribe(func(e chatsession.MessageStateEvent) bool {
 			// Review fix: replicate the gateway's identifier
 			// validation. Empty chatID / userMsgID would produce
@@ -787,11 +794,16 @@ func wireRuntimeCallbacksAndRestore(
 			if e.State == agent.MessageSubmitted {
 				// multi-as Phase 1: source AS comes from the
 				// event itself, not from cs.SelectedAgentSession().
+				// We pre-stamp here so the emitter's stamper (which
+				// uses cs.SelectedAgentSession()) sees a non-nil
+				// SessionContext and skips its lookup — preserving
+				// the "source AS, not selected AS" semantics this
+				// bus has always had.
 				if as := lookupASByID(cs, e.AgentSessionID); as != nil {
 					sessionContextInto(&out, as)
 				}
 			}
-			if err := ch.Send(context.Background(), out); err != nil {
+			if err := em.Send(context.Background(), out); err != nil {
 				logger.Warn("runtime: MessageState send failed",
 					"chat_id", e.ChatID,
 					"state", e.State,
@@ -879,7 +891,7 @@ func wireRuntimeCallbacksAndRestore(
 // (delivered by cs.AgentEventBus). The legacy
 // `chatsession.EventHandler` callback signature is gone — see
 // docs/feat/F-54-event-bus.md §3.5.
-func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chatsession.Manager, logger *slog.Logger) func(env chatsession.AgentEventEnvelope) {
+func newEventHandler(em outbound.Emitter, cs *chatsession.ChatSession, mgr *chatsession.Manager, logger *slog.Logger) func(env chatsession.AgentEventEnvelope) {
 	// Per-cs closure. No per-handler mutable state needed anymore:
 	// the bridge layer now attaches per-turn Usage to the SAME
 	// AgentResultEvent that delivers the final text (claudecode
@@ -944,7 +956,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		// removed entirely; no per-event short-circuit remains.
 
 		// Translate the AgentEvent to an OutboundMessage.
-		out, ok := gateway.Translate(chatID, *ev)
+		out, ok := outbound.Translate(chatID, *ev)
 		if !ok {
 			if logger != nil {
 				logger.Debug("runtime: Translate dropped event",
@@ -992,7 +1004,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		}
 		// F-think §3.1.2: per-chat OutThinking gate. When the
 		// chat has /think off, drop OutThinking events here
-		// (after Translate + ReplyTo stamping, before ch.Send)
+		// (after Translate + ReplyTo stamping, before em.Send)
 		// so the Feishu adapter never sees them. Other
 		// OutboundKinds — OutReply / OutResult / OutToolStart /
 		// OutToolEnd / OutInit / OutUsage — are unaffected.
@@ -1021,7 +1033,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 		// F-38 §3.1.3: per-chat tool-event gate. When the chat
 		// has /tools off (default), drop OutToolStart and
 		// OutToolEnd events here (after Translate + ReplyTo
-		// stamping, before ch.Send) so the Feishu adapter never
+		// stamping, before em.Send) so the Feishu adapter never
 		// sees them. Other OutboundKinds — OutReply / OutResult
 		// / OutThinking / OutInit / OutUsage — are unaffected.
 		// (F-49: OutCompaction deleted — see note above in the
@@ -1044,7 +1056,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 			}
 			return
 		}
-		if err := ch.Send(context.Background(), out); err != nil && logger != nil {
+		if err := em.Send(context.Background(), out); err != nil && logger != nil {
 			logger.Warn("channel send failed",
 				"chat_id", chatID,
 				"user_msg_id", userMsgID,
@@ -1121,20 +1133,40 @@ func lookupASByID(cs *chatsession.ChatSession, id string) *agentsession.AgentSes
 // Model() takes RLock internally; git status is captured fresh
 // on each stamp (3s deadline, no caching — see F-48 §1.7).
 func sessionContextInto(out *gateway.OutboundMessage, s *agentsession.AgentSession) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	gitSnap, _ := gtw.CollectStatus(ctx, s.Cwd, gtw.ExecGitRunner{})
-	cancel()
-	hasGit := gitSnap != nil && s.Cwd != ""
-	// F-55 fix: out.Usage is set by gateway.Translate from the
+	// Pure-F-55: out.Usage is set by gateway.Translate from the
 	// bridge wire payload (AgentResultEvent.Usage / AgentDoneEvent.Usage).
 	// The runtime is a passive pass-through — copy verbatim so the
 	// channel footer can render it via ctx.Usage. Pre-F-55 the
 	// copy was missing, so footers silently rendered without
-	// usage data. Gated the same way as the other SessionContext
-	// fields: any one of (Agent / Model / GitStatus / Usage) being
-	// present is enough to materialize the SessionContext.
-	// Compaction tracking removed (was the 4th condition).
-	//
+	// usage data. buildSessionContext is the shared gate; the
+	// stamper and this legacy path both feed it the same AS +
+	// usage inputs.
+	out.SessionContext = buildSessionContext(s, out.Usage)
+}
+
+// buildSessionContext is the pure (no I/O of its own — git
+// collection is delegated) stamping primitive shared by the
+// runtime pump (sessionContextInto) and the outbound.Stamper
+// (newRuntimeStamper). It snapshots the AgentSession's identity
+// fields plus a freshly-collected git status, and returns a
+// SessionContext when any meaningful field is non-empty.
+//
+// Returns nil when there's nothing to render — caller treats nil
+// as "skip the footer this turn" rather than rendering an empty
+// footer segment.
+//
+// Git invocation has a 3s deadline (review fix): a hung git
+// (stalled NFS, broken .git/index, ... ) would otherwise block
+// the entire outbound-message pipeline. 3s is plenty for normal
+// repos (10-50ms typical; up to ~1s on very large monorepos) and
+// far below the user's "chat is not realtime" tolerance. On
+// timeout, CollectStatus returns (nil, nil) and the footer omits
+// the git segment silently.
+func buildSessionContext(s *agentsession.AgentSession, usage *agent.UsageInfo) *gateway.SessionContext {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	gitSnap, _ := gtw.CollectStatus(ctx, s.Cwd, gtw.ExecGitRunner{})
+	cancel()
+	hasGit := gitSnap != nil && s.Cwd != ""
 	// Snapshot Model() and SessionID() once each — both take
 	// asMu.RLock() internally; calling them twice in the gate
 	// + the literal doubles the lock acquisitions per stamp for
@@ -1144,16 +1176,54 @@ func sessionContextInto(out *gateway.OutboundMessage, s *agentsession.AgentSessi
 	// no worse than a stale read in the gate).
 	model := s.Model()
 	sessionID := s.SessionID()
-	if s.Agent != "" || model != "" || sessionID != "" || hasGit ||
-		out.Usage != nil {
-		out.SessionContext = &gateway.SessionContext{
-			Agent:     s.Agent,
-			Model:     model,
-			SessionID: sessionID,
-			Workspace: s.Cwd,
-			GitStatus: gitSnap,
-			Usage:     out.Usage,
+	if s.Agent == "" && model == "" && sessionID == "" && !hasGit && usage == nil {
+		return nil
+	}
+	return &gateway.SessionContext{
+		Agent:     s.Agent,
+		Model:     model,
+		SessionID: sessionID,
+		Workspace: s.Cwd,
+		GitStatus: gitSnap,
+		Usage:     usage,
+	}
+}
+
+// newRuntimeStamper returns an outbound.Stamper that injects the
+// F-45/F-48 SessionContext footer for every outbound message.
+// Wired into outbound.Emitter at construction time so the stamp
+// happens uniformly — runtime pump, slash-command replies, and
+// MessageState subscribers all converge on the same stamping path.
+//
+// Returning nil (when the chat has no active AgentSession, or
+// every stamp field is empty) signals "skip the footer this turn";
+// the channel render path treats nil SessionContext as "omit the
+// footer segment" rather than rendering an empty one.
+//
+// Pre-refactor this logic lived at every call site (cmd/nightme/run.go's
+// sessionContextInto calls at the pump + MessageStateBus sites) and
+// was skipped entirely by slash-command replies — the whole point
+// of moving it onto outbound.Emitter is that nobody has to remember
+// to call it any more.
+func newRuntimeStamper(mgr *chatsession.Manager) outbound.Stamper {
+	return func(chatID string) *gateway.SessionContext {
+		if mgr == nil {
+			return nil
 		}
+		cs := mgr.Get(chatID)
+		if cs == nil {
+			return nil
+		}
+		as := cs.SelectedAgentSession()
+		if as == nil {
+			return nil
+		}
+		// buildSessionContext takes optional usage; the stamper has
+		// no per-event usage here (usage lives on the OutboundMessage
+		// when present, which the emitter sees before stamper lookup).
+		// Pass nil — usage-bearing events already carry their usage
+		// on the msg and don't need this footer path to populate it.
+		return buildSessionContext(as, nil)
 	}
 }
 

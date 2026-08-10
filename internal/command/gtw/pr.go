@@ -113,6 +113,37 @@ func dispatchPR(
 			fmt.Sprintf("❌ count commits ahead of base: %v", err)), nil
 	}
 	if ahead == 0 {
+		// "Nothing on this branch" almost always means the user
+		// has uncommitted local edits. Detect that and point them
+		// at /gtw push (which handles the commit + push step) so
+		// the next /gtw pr has something to ship. Falling through
+		// to the bare message below if the working tree is clean
+		// (or status can't be read — e.g. tests without a mock).
+		if snap, _ := CollectStatus(ctx, c.Worktree, deps.Git); snap != nil {
+			switch {
+			case snap.Uncommitted > 0 && snap.Untracked > 0:
+				return reply(ctx, cs.Channel(), chatID, messageID,
+					fmt.Sprintf(
+						"❌ branch %s is at %s\n"+
+							"⚠️ %d uncommitted file(s), %d untracked\n"+
+							"hint: /gtw push first to commit and push, then /gtw pr.",
+						c.Branch, baseBranch, snap.Uncommitted, snap.Untracked)), nil
+			case snap.Uncommitted > 0:
+				return reply(ctx, cs.Channel(), chatID, messageID,
+					fmt.Sprintf(
+						"❌ branch %s is at %s\n"+
+							"⚠️ %d uncommitted file(s)\n"+
+							"hint: /gtw push first to commit and push, then /gtw pr.",
+						c.Branch, baseBranch, snap.Uncommitted)), nil
+			case snap.Untracked > 0:
+				return reply(ctx, cs.Channel(), chatID, messageID,
+					fmt.Sprintf(
+						"❌ branch %s is at %s\n"+
+							"⚠️ %d untracked file(s)\n"+
+							"hint: git add them and /gtw push first, then /gtw pr.",
+						c.Branch, baseBranch, snap.Untracked)), nil
+			}
+		}
 		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf(
 				"❌ branch %s is at %s — nothing to PR",

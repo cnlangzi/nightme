@@ -616,6 +616,40 @@ func TestDispatchPR_NothingToPR(t *testing.T) {
 	}
 }
 
+// TestDispatchPR_NothingToPR_UncommittedHints — when the branch is
+// at base AND the working tree has uncommitted edits, dispatchPR
+// should detect that and tell the user to /gtw push first (which
+// handles the commit + push step). The bare "nothing to PR" reply
+// is correct only for the clean-tree case.
+func TestDispatchPR_NothingToPR_UncommittedHints(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{		Branch:   "wt-uncommitted",
+	})
+	setupPRGit(rig, "wt-uncommitted", 0, 0) // 0 ahead, but tree dirty
+	// status --porcelain --branch --untracked-files=normal:
+	//   1 modified (README.md), 0 untracked.
+	rig.git.onArgs([]string{"status", "--porcelain", "--branch", "--untracked-files=normal"},
+		"## wt-uncommitted...origin/wt-uncommitted\n M README.md\n", "", nil)
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "1 uncommitted") {
+		t.Fatalf("expected uncommitted-file hint, got:\n%s", r)
+	}
+	if !strings.Contains(r, "/gtw push first") {
+		t.Fatalf("expected /gtw push hint, got:\n%s", r)
+	}
+	if strings.Contains(r, "nothing to PR") {
+		t.Fatalf("bare 'nothing to PR' reply is misleading when tree is dirty:\n%s", r)
+	}
+}
+
 func TestDispatchPR_NoAgentSelected(t *testing.T) {
 	// Tests the "no agent selected" early-return branch of
 	// dispatchPR. We don't need a yml — the early-return fires

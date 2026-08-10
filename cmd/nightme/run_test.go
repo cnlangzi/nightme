@@ -12,7 +12,9 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/command/gtw"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -31,7 +33,7 @@ func TestEventHandler_ThinkGate_ShowPassesThrough(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(ch, cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
@@ -61,7 +63,7 @@ func TestEventHandler_ThinkGate_HideDropsOutThinking(t *testing.T) {
 	}
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(ch, cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
@@ -97,7 +99,7 @@ func TestEventHandler_ThinkGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	}
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(ch, cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	// (a) OutReply — final assistant reply (no <thinking> prefix)
@@ -154,7 +156,7 @@ func TestEventHandler_ThinkGate_NilLoggerSafe(t *testing.T) {
 	}
 
 	// nil logger — must not panic.
-	h := newEventHandler(ch, cs, mgr, nil)
+	h := newEventHandler(ch, cs, mgr, nil, &prcache.Registry{}, gtw.HandlerDeps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	// Run inside a recover probe to convert any panic into a
@@ -184,7 +186,7 @@ func TestEventHandler_ThinkGate_PersistsAcrossInvocations(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(ch, cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	thinking := agent.AgentEvent{
@@ -244,7 +246,7 @@ func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_first_turn", "claude")
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(ch, cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_first_turn", "claude", "/tmp", nil)
 
 	// Step 1: EventAgentReady captures Model.
@@ -328,7 +330,7 @@ func TestEventHandler_OutResult_UsageIsPerTurnNotCumulative(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_per", "claude")
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(ch, cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_per", "claude", "/tmp", nil)
 
 	// Turn 1.
@@ -375,7 +377,7 @@ func TestEventHandler_OutResult_NilUsageLeavesEmptySessionContext(t *testing.T) 
 	cs, _ := mgr.GetOrCreate("oc_chat_zero", "claude")
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(ch, cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
 	// t.TempDir() is guaranteed NOT to be inside a git working
 	// tree (Go creates it under the OS temp dir; tests don't
 	// nest a .git inside). Pre-F-48 the test hardcoded /tmp,
@@ -449,7 +451,7 @@ func TestSessionContextInto_ForwardsUsage(t *testing.T) {
 				ContextWindowPct:         10.55,
 			},
 		}
-		sessionContextInto(out, as)
+		sessionContextInto(out, as, &prcache.Registry{}, gtw.HandlerDeps{})
 		if out.SessionContext == nil {
 			t.Fatal("SessionContext is nil; Usage alone must materialize it (F-55)")
 		}
@@ -490,7 +492,7 @@ func TestSessionContextInto_ForwardsUsage(t *testing.T) {
 			Text:   "answer",
 			// Usage intentionally nil
 		}
-		sessionContextInto(out, emptyAS)
+		sessionContextInto(out, emptyAS, &prcache.Registry{}, gtw.HandlerDeps{})
 		if out.SessionContext != nil {
 			t.Errorf("SessionContext = %+v, want nil (no field qualifies)", out.SessionContext)
 		}
@@ -505,7 +507,7 @@ func TestSessionContextInto_ForwardsUsage(t *testing.T) {
 			// shared `as` so the guard passes via the Agent
 			// branch.
 		}
-		sessionContextInto(out, as)
+		sessionContextInto(out, as, &prcache.Registry{}, gtw.HandlerDeps{})
 		if out.SessionContext == nil {
 			t.Fatal("SessionContext is nil; Agent is set so SessionContext should be stamped")
 		}
@@ -544,7 +546,7 @@ func TestEventHandler_Chain_UsageFlowsFromResultEventToFooter(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_chain", "claude")
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(ch, cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
 	tmpDir := t.TempDir() // non-git cwd
 	as := chatsession.NewAgentSession("as_chain", "cs_oc_chat_chain", "claude", tmpDir, nil)
 
@@ -661,7 +663,7 @@ func TestEventHandler_ToolsGate_ShowPassesThrough(t *testing.T) {
 	}
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(ch, cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_show", "claude", "/tmp", nil)
 
 	// OutToolStart
@@ -704,7 +706,7 @@ func TestEventHandler_ToolsGate_HideDropsBothToolKinds(t *testing.T) {
 	}
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(ch, cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_hide", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_hide", AgentSession: as, Event: &agent.AgentEvent{
@@ -735,7 +737,7 @@ func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	}
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(ch, cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_indep", "claude", "/tmp", nil)
 
 	// (a) OutReply — final assistant reply (no <thinking> prefix)
@@ -780,7 +782,7 @@ func TestEventHandler_ToolsGate_PersistsAcrossInvocations(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_tools_persist", "claude")
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(ch, cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_persist", "claude", "/tmp", nil)
 
 	toolStart := agent.AgentEvent{
@@ -828,7 +830,7 @@ func TestEventHandler_ToolsAndThinkGatesIndependent(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_both_gates", "claude")
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(ch, cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_both_gates", "claude", "/tmp", nil)
 
 	// Flip both off.
@@ -930,7 +932,7 @@ func TestWireRuntimeCallbacksAndRestore_InstallsHandlersOnRestoredChats(t *testi
 	gwImpl := gateway.New(func(_ context.Context, _ *gateway.InboundMessage) error { return nil }).(*gateway.Router)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	if err := wireRuntimeCallbacksAndRestore(mgr, ch, gwImpl, logger); err != nil {
+	if err := wireRuntimeCallbacksAndRestore(mgr, ch, gwImpl, logger, &prcache.Registry{}, gtw.HandlerDeps{}); err != nil {
 		t.Fatalf("wireRuntimeCallbacksAndRestore: %v", err)
 	}
 
@@ -960,7 +962,7 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateDropsEmptyIDs(t *testing.T) 
 	gwImpl := gateway.New(func(_ context.Context, _ *gateway.InboundMessage) error { return nil }).(*gateway.Router)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	if err := wireRuntimeCallbacksAndRestore(mgr, ch, gwImpl, logger); err != nil {
+	if err := wireRuntimeCallbacksAndRestore(mgr, ch, gwImpl, logger, &prcache.Registry{}, gtw.HandlerDeps{}); err != nil {
 		t.Fatalf("wireRuntimeCallbacksAndRestore: %v", err)
 	}
 
@@ -1012,7 +1014,7 @@ func TestWireRuntimeCallbacksAndRestore_NoPersistence(t *testing.T) {
 	gwImpl := gateway.New(func(_ context.Context, _ *gateway.InboundMessage) error { return nil }).(*gateway.Router)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	if err := wireRuntimeCallbacksAndRestore(mgr, ch, gwImpl, logger); err != nil {
+	if err := wireRuntimeCallbacksAndRestore(mgr, ch, gwImpl, logger, &prcache.Registry{}, gtw.HandlerDeps{}); err != nil {
 		t.Fatalf("wireRuntimeCallbacksAndRestore on cold start: %v", err)
 	}
 	if len(mgr.List()) != 0 {
@@ -1048,7 +1050,7 @@ func TestEventHandler_OnAgentConnected_DoesNotEmitMessageSubmitted(t *testing.T)
 		return false
 	})
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(ch, cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	// Fire EventAgentReady with a userMsgID present (the L869
@@ -1079,4 +1081,135 @@ func TestEventHandler_OnAgentConnected_DoesNotEmitMessageSubmitted(t *testing.T)
 type messageStateCall struct {
 	chatID, userMsgID string
 	state             agent.MessageState
+}
+
+// TestSessionContextInto_ForwardsCachedPR verifies the runtime
+// stamp path threads prcache.Registry → SessionContext.PullRequest
+// verbatim. Pre-populates the cache with a known PR for the AS.ID
+// and asserts sessionContextInto copies it onto the stamped
+// SessionContext without spawning a network refresh.
+//
+// This is the regression guard for the PR-cache wiring in
+// sessionContextInto (cmd/nightme/run.go:1157+). A future refactor
+// that drops PullRequest from the materialize gate, or reads from
+// the wrong registry, or fails to copy the cache pointer verbatim
+// will fail this test.
+func TestSessionContextInto_ForwardsCachedPR(t *testing.T) {
+	tmpDir := t.TempDir() // non-git cwd so the GitStatus path drops Line 3
+	as := chatsession.NewAgentSession("as_pr_test", "cs_pr_test", "claude", tmpDir, nil)
+
+	prReg := &prcache.Registry{}
+	want := &gtw.PR{
+		Number: 42,
+		URL:    "https://github.com/cnlangzi/nightme/pull/42",
+		State:  "open",
+	}
+	// Pre-populate the cache so PR() returns a non-nil value
+	// without spawning a refresh (the deps have no working
+	// Detect, so MaybeRefresh would otherwise silently miss).
+	prReg.GetOrCreate(as.ID).SetCachedForTest(want, "fix-gitstatus", time.Now().Add(time.Hour))
+
+	out := &gateway.OutboundMessage{
+		ChatID: "oc_chat_pr",
+		Kind:   gateway.OutResult,
+		Text:   "answer",
+		Usage: &agent.UsageInfo{InputTokens: 100}, // ensure materialize gate fires
+	}
+	sessionContextInto(out, as, prReg, gtw.HandlerDeps{})
+
+	if out.SessionContext == nil {
+		t.Fatal("SessionContext is nil; Usage alone must materialize it")
+	}
+	if out.SessionContext.PullRequest == nil {
+		t.Fatal("SessionContext.PullRequest is nil; cached PR must be copied verbatim")
+	}
+	if out.SessionContext.PullRequest.Number != want.Number {
+		t.Errorf("PullRequest.Number = %d, want %d", out.SessionContext.PullRequest.Number, want.Number)
+	}
+	if out.SessionContext.PullRequest.URL != want.URL {
+		t.Errorf("PullRequest.URL = %q, want %q", out.SessionContext.PullRequest.URL, want.URL)
+	}
+}
+
+// TestSessionContextInto_NilPRRegistryLeavesEmpty verifies the
+// runtime is nil-safe on the prcache dependency: a nil
+// *prcache.Registry MUST NOT panic, MUST leave PullRequest nil
+// (no SessionContext.PullRequest from this path), and MUST still
+// materialize SessionContext when other gate fields fire.
+//
+// This pins the "defensive nil-handling" contract documented in
+// sessionContextInto's doc — a regression that drops the
+// `if prReg == nil` guard would crash on every stamp in a
+// single-process debug build that wires deps by hand.
+func TestSessionContextInto_NilPRRegistryLeavesEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	as := chatsession.NewAgentSession("as_nilpr", "cs_nilpr", "claude", tmpDir, nil)
+
+	out := &gateway.OutboundMessage{
+		ChatID: "oc_chat_nilpr",
+		Kind:   gateway.OutResult,
+		Text:   "answer",
+		Usage:  &agent.UsageInfo{InputTokens: 1},
+	}
+	// MUST NOT panic. The deps are empty so MaybeRefresh would
+	// no-op even with a registry — but with nil registry we
+	// specifically skip the GetOrCreate/MaybeRefresh/PR path.
+	sessionContextInto(out, as, nil, gtw.HandlerDeps{})
+
+	if out.SessionContext == nil {
+		t.Fatal("SessionContext is nil; Usage alone must materialize it even with nil prReg")
+	}
+	if out.SessionContext.PullRequest != nil {
+		t.Errorf("PullRequest = %+v, want nil (nil registry → no cached PR)", out.SessionContext.PullRequest)
+	}
+}
+
+// TestShutdownRun_CloseAllCancelsCaches verifies the daemon
+// shutdown hook drains every per-AgentSession PR-cache refresh
+// goroutine so the process exits cleanly. The test pre-populates
+// the registry with a cache that holds an inflight goroutine
+// driven by a slow Detect prober, calls shutdownRun, and asserts
+// the goroutine observed the cancel signal within the bounded
+// shutdown timeout.
+//
+// Regression guard for the missing wiring: prior to this fix the
+// doc in prcache.go promised "Per session teardown → cache.Cancel()"
+// but no caller actually invoked Cancel on shutdown, so an
+// in-flight `gh pr list` could keep running after the daemon
+// exited.
+func TestShutdownRun_CloseAllCancelsCaches(t *testing.T) {
+	prReg := &prcache.Registry{}
+	cache := prReg.GetOrCreate("as_shutdown_test")
+
+	// Install a hand-driven inflight state with a real cancel
+	// func so we can observe it. We don't actually invoke
+	// MaybeRefresh because that would need a working Detect;
+	// instead we simulate the cache's internal state directly.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	cache.SetInflightForTest(cancel)
+
+	go func() {
+		<-ctx.Done()
+		close(done)
+	}()
+
+	if err := shutdownRun(io.Discard, nil, nil, nil, nil, prReg, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatalf("shutdownRun: %v", err)
+	}
+
+	select {
+	case <-done:
+		// goroutine saw the cancel — registry.CloseAll() ran.
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("shutdownRun did not cancel the in-flight cache goroutine within 500ms")
+	}
+
+	// After CloseAll, the registry's map is cleared; a fresh
+	// GetOrCreate returns a NEW cache pointer (the old one is
+	// still valid for prior holders, but the registry forgot it).
+	fresh := prReg.GetOrCreate("as_shutdown_test")
+	if fresh == cache {
+		t.Errorf("GetOrCreate after CloseAll returned the old pointer; want a fresh cache")
+	}
 }

@@ -407,3 +407,65 @@ func TestTruncateForLog_UTF8Valid(t *testing.T) {
 		}
 	}
 }
+
+// TestCardFooterElements_LinkLineUnwrapped pins the
+// link-bypass logic introduced for Line 4
+// ("🔗: [#N](url)"): lines containing markdown link syntax
+// (`[#N](url)`) skip the <font color='grey'> wrap so Feishu's
+// lark_md parser surfaces the link as a clickable anchor
+// rather than treating it as plain grey text.
+//
+// Detection: substring `](` — only Line 4 emits this pattern
+// (formatPRLine). Other lines (🤖: / 💰:「」 / 📁:) never
+// contain `](`, so the heuristic is unambiguous today.
+func TestCardFooterElements_LinkLineUnwrapped(t *testing.T) {
+	elems := cardFooterElements([]string{
+		"🤖: claude · opus-4-5",
+		"💰:「 12.3k / 8.2k / 1.5k · $0.087 」",
+		"📁: code/nightme · ⎇ fix-x",
+		"🔗: [#42](https://github.com/cnlangzi/nightme/pull/42)",
+	})
+	if len(elems) != 2 {
+		t.Fatalf("got %d elements, want 2 (hr + markdown)", len(elems))
+	}
+	if elems[0]["tag"] != "hr" {
+		t.Errorf("elems[0].tag = %v, want hr", elems[0]["tag"])
+	}
+	if elems[1]["tag"] != "markdown" {
+		t.Errorf("elems[1].tag = %v, want markdown", elems[1]["tag"])
+	}
+	content, _ := elems[1]["content"].(string)
+	// Identity line: wrapped in <font color='grey'>…</font>.
+	if !strings.Contains(content, "<font color='grey'>🤖: claude · opus-4-5</font>") {
+		t.Errorf("identity line not wrapped in <font>:\n%s", content)
+	}
+	// PR line: NOT wrapped — lark_md sees the link syntax verbatim.
+	if strings.Contains(content, "<font color='grey'>🔗: [#42](https://github.com/cnlangzi/nightme/pull/42)</font>") {
+		t.Errorf("PR line wrapped in <font> — link syntax may be lost:\n%s", content)
+	}
+	// And the link syntax must survive into the markdown content.
+	if !strings.Contains(content, "[#42](https://github.com/cnlangzi/nightme/pull/42)") {
+		t.Errorf("PR link syntax missing from markdown content:\n%s", content)
+	}
+}
+
+// TestCardFooterElements_NoLinkAllWrapped is the negative case:
+// footer lines without any markdown link syntax are all
+// wrapped in <font color='grey'>, as before.
+func TestCardFooterElements_NoLinkAllWrapped(t *testing.T) {
+	elems := cardFooterElements([]string{
+		"🤖: claude",
+		"💰:「 1k / 2k 」",
+		"📁: code/nightme · ⎇ main",
+	})
+	content, _ := elems[1]["content"].(string)
+	for _, want := range []string{
+		"<font color='grey'>🤖: claude</font>",
+		"<font color='grey'>💰:「 1k / 2k 」</font>",
+		"<font color='grey'>📁: code/nightme · ⎇ main</font>",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("missing wrapped %q in:\n%s", want, content)
+		}
+	}
+}

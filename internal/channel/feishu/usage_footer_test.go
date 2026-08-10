@@ -8,6 +8,7 @@ package feishu
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -707,5 +708,88 @@ func TestFormatSessionFooterLines_NoGitNoUsage(t *testing.T) {
 	want := []string{"🤖: claude · opus-4-5"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// TestFormatSessionFooterLines_PRLine_Populated covers Line 4
+// when a PR has been resolved for the head branch. The line
+// uses markdown link syntax ([#N](url)) so cardFooterElements
+// can hand it to the lark_md parser untouched.
+//
+// ASCII-only invariant still holds (the line is header `🔗:`
+// followed by `#[id](url)`, where [id] and url are the
+// footer-bound characters).
+func TestFormatSessionFooterLines_PRLine_Populated(t *testing.T) {
+	ctx := &gateway.SessionContext{
+		Agent: "claude", Model: "opus-4-5",
+		PullRequest: &gtw.PR{
+			Number: 111,
+			URL:    "https://github.com/cnlangzi/nightme/pull/111",
+			State:  "open",
+		},
+	}
+	got := formatSessionFooterLines(ctx)
+	want := []string{
+		"🤖: claude · opus-4-5",
+		"🔗: [#111](https://github.com/cnlangzi/nightme/pull/111)",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v\nwant %v", got, want)
+	}
+}
+
+// TestFormatSessionFooterLines_PRLine_NilOrInvalid confirms
+// the omit rules: nil PR / Number <= 0 / empty URL all drop
+// the line entirely. "No PR" must look identical to "lookup
+// failed" — the right trade-off for a chat-side decoration.
+func TestFormatSessionFooterLines_PRLine_NilOrInvalid(t *testing.T) {
+	tests := []struct {
+		name string
+		pr   *gtw.PR
+	}{
+		{"nil PR", nil},
+		{"zero number", &gtw.PR{Number: 0, URL: "https://x/y"}},
+		{"empty URL", &gtw.PR{Number: 5, URL: ""}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := &gateway.SessionContext{
+				Agent: "claude", Model: "opus-4-5",
+				PullRequest: tc.pr,
+			}
+			got := formatSessionFooterLines(ctx)
+			// PR omitted → no Line 4 in the output.
+			for _, line := range got {
+				if strings.Contains(line, "🔗:") {
+					t.Errorf("footer lines %v contain 🔗:, want omitted when %s", got, tc.name)
+				}
+			}
+		})
+	}
+}
+
+// TestFormatSessionFooterLines_PRLine_CoexistsWithGitLines
+// confirms Line 4 sits AFTER the git line (Line 3) when
+// both are populated. Order matters: identity / usage /
+// workspace / PR is the canonical footer stack.
+func TestFormatSessionFooterLines_PRLine_CoexistsWithGitLines(t *testing.T) {
+	ctx := &gateway.SessionContext{
+		Agent: "claude", Model: "opus-4-5",
+		Workspace: "/home/devin/code/nightme",
+		GitStatus: &gtw.GitStatusSnapshot{Branch: "fix-x", HasUpstream: true},
+		PullRequest: &gtw.PR{
+			Number: 7,
+			URL:    "https://example/pr/7",
+			State:  "open",
+		},
+	}
+	got := formatSessionFooterLines(ctx)
+	want := []string{
+		"🤖: claude · opus-4-5",
+		"📁: code/nightme · ⎇ fix-x",
+		"🔗: [#7](https://example/pr/7)",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v\nwant %v", got, want)
 	}
 }

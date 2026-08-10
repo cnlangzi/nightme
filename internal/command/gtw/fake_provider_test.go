@@ -46,6 +46,14 @@ type fakeGitProvider struct {
 	createPRResp string
 	createPRErr  error
 
+	// GetPR response. prByHead[head] is returned when GetPR is
+	// called with the matching head branch; prErr[head] wins
+	// when set (overrides prByHead). Missing key returns
+	// (nil, nil) so the footer render path treats it as "no
+	// PR yet" — same fail-soft contract as the real providers.
+	prByHead map[string]*PR
+	prErr    map[string]error
+
 	// Recorded calls (chronological).
 	calls []fakeProviderCall
 }
@@ -54,15 +62,15 @@ type fakeGitProvider struct {
 // named after the interface method (one variant per interface
 // method) so tests can pattern-match cleanly.
 type fakeProviderCall struct {
-	Method string // "GetIssue" / "AddLabel" / "RemoveLabel" / "CreatePR"
+	Method string // "GetIssue" / "AddLabel" / "RemoveLabel" / "CreatePR" / "GetPR"
 	Owner  string
 	Repo   string
 	ID     int
 	Label  string // only set for AddLabel / RemoveLabel
+	Head   string // only set for CreatePR / GetPR
 
 	// CreatePR-only fields. Empty for the other methods.
 	Base    string
-	Head    string
 	PRTitle string
 	PRBody  string
 	PRURL   string // returned URL when CreatePRResp is set
@@ -77,6 +85,8 @@ func newFakeGitProvider(kind ProviderKind, host string) *fakeGitProvider {
 		version:   "v0.0.0-test",
 		issueByID: make(map[int]*Issue),
 		issueErr:  make(map[int]error),
+		prByHead:  make(map[string]*PR),
+		prErr:     make(map[string]error),
 	}
 }
 
@@ -149,6 +159,27 @@ func (f *fakeGitProvider) SetCreatePRErr(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.createPRErr = err
+}
+
+// SetPR registers `pr` as the response for GetPR(head). Tests
+// use this to simulate a repository where the current head
+// branch has an associated open PR / MR.
+func (f *fakeGitProvider) SetPR(head string, pr *PR) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prByHead[head] = pr
+	delete(f.prErr, head)
+}
+
+// SetGetPRErr configures GetPR(head) to return err. Use this to
+// simulate a provider-side failure (network down, auth expired,
+// rate limit). No sentinel — the footer path treats any error
+// as "no PR, omit Line 4".
+func (f *fakeGitProvider) SetGetPRErr(head string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prErr[head] = err
+	delete(f.prByHead, head)
 }
 
 // Calls returns a snapshot of recorded calls (so the caller
@@ -239,6 +270,30 @@ func (f *fakeGitProvider) CreatePR(_ context.Context, owner, repo, base, head, t
 	})
 	f.mu.Unlock()
 	return url, err
+}
+
+func (f *fakeGitProvider) GetPR(_ context.Context, owner, repo, head string) (*PR, error) {
+	f.mu.Lock()
+	// Record first, then read response. Recording inside the
+	// lock guarantees call order matches invocation order
+	// even when a test later reads Calls() under its own lock.
+	f.calls = append(f.calls, fakeProviderCall{
+		Method: "GetPR", Owner: owner, Repo: repo, Head: head,
+	})
+	if err, ok := f.prErr[head]; ok {
+		f.mu.Unlock()
+		return nil, err
+	}
+	pr, ok := f.prByHead[head]
+	f.mu.Unlock()
+	if !ok {
+		// "no PR for this head" — same fail-soft contract as
+		// the real providers. Caller (footer render path) treats
+		// (nil, nil) as "omit Line 4".
+		return nil, nil
+	}
+	cp := *pr
+	return &cp, nil
 }
 
 // --- dependency-injection shim ---

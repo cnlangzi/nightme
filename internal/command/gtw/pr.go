@@ -34,12 +34,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
-// prDiffScanCapBytes is reserved for a future pre-scan diff
-// feature (currently unused; see wip/gtw-pr-plan §P1 step 2).
-// Kept here so the constant has a clear home when we add the
-// feature.
-const prDiffScanCapBytes = 64 * 1024
-
 // errParseAgentReply is the sentinel returned by parsePRReply
 // when the agent's reply cannot be parsed into a title + body
 // (no fence, empty fence, malformed fence). The dispatcher
@@ -188,6 +182,31 @@ func dispatchPR(
 	}
 
 	card := renderPROpenedCard(c, baseBranch, url)
+
+	// Invalidate the footer's PR cache for every AgentSession
+	// in this chat whose Cwd is inside the worktree we just
+	// opened the PR for. Without this, the footer Line 4
+	// ("🔗: [#N](url)") would still render the previous
+	// state — either nil or a stale URL from a branch we
+	// last had a PR on — until the next 60s TTL expires.
+	// Iterating the pool + checking Cwd scopes the blow-up:
+	// other chat sessions and unrelated worktrees are not
+	// re-fetched.
+	if deps.PRInvalidator != nil {
+		for _, as := range cs.Pool() {
+			if as == nil || as.Cwd == "" {
+				continue
+			}
+			if !strings.HasPrefix(as.Cwd, c.Worktree) &&
+				!strings.HasPrefix(c.Worktree, as.Cwd) {
+				// AS.Cwd and the fix worktree share no
+				// path prefix → unrelated, skip.
+				continue
+			}
+			deps.PRInvalidator.Invalidate(as.ID)
+		}
+	}
+
 	return reply(ctx, cs.Channel(), chatID, messageID, card), nil
 }
 
@@ -408,9 +427,6 @@ func countBaseAhead(ctx context.Context, worktree, base string, deps HandlerDeps
 		base, base, lastStderr)
 }
 
-// renderPROpenedCard renders the IM-friendly success card.
-// Mirrors the /gtw push and /gtw close card style (✅ + branch /
-// worktree footer; see wip/gtw-pr.md §5).
 // renderPROpenedCard renders the IM-friendly success card.
 // Format 1 (gtw/README.md §2.1): ✅ title + `→ field: value`
 // rows. The previous `━━━━━━━━━━━━━━ \n 🌿/🔗/📁` form was a

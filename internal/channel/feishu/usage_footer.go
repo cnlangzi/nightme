@@ -280,7 +280,50 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 		lines = append(lines, gl)
 	}
 
+	// Line 4: PR / MR link. formatPRLine returns "" when
+	// ctx.PullRequest is nil — i.e. no PR has been resolved for
+	// the current head branch yet. In that case the line is
+	// dropped, so first-stamp / no-PR chats render no different
+	// from before. Rendered with markdown link syntax (`[#N](url)`)
+	// so cardFooterElements' <markdown> element surfaces the
+	// #N as a clickable hyperlink. The plain-text fallback
+	// (formatSessionFooter) emits the same line — platforms
+	// that render markdown in their text path (Feishu, most IM)
+	// honor the link; pure-text fallback renders the literal.
+	if pl := formatPRLine(ctx); pl != "" {
+		lines = append(lines, pl)
+	}
+
 	return lines
+}
+
+// formatPRLine renders footer line 4 — the per-stamp GitHub /
+// GitLab PR (or MR) reference — and returns "" when there is
+// nothing meaningful to show.
+//
+// Output (when non-empty):
+//
+//	🔗: [#42](https://github.com/cnlangzi/nightme/pull/42)
+//
+// Returns "" when ctx == nil or ctx.PullRequest == nil. The
+// "no PR yet" case collapses cleanly to "omit Line 4" —
+// indistinguishable from a failed refresh, which matches the
+// chat-decorator trade-off (footer is non-critical metadata).
+//
+// The [#N](url) form is markdown link syntax. cardFooterElements
+// detects this pattern and emits the line without the
+// <font color='grey'> wrapper so Feishu's lark_md parser
+// honors the link as a clickable anchor rather than treating
+// it as plain grey text.
+func formatPRLine(ctx *gateway.SessionContext) string {
+	if ctx == nil {
+		return ""
+	}
+	pr := ctx.PullRequest
+	if pr == nil || pr.Number <= 0 || pr.URL == "" {
+		return ""
+	}
+	return fmt.Sprintf("🔗: [#%d](%s)", pr.Number, pr.URL)
 }
 
 // formatSessionFooter joins formatSessionFooterLines with "\n"

@@ -62,10 +62,8 @@ func TestDispatch_NonBangText_FallsThrough(t *testing.T) {
 	}
 	for _, text := range cases {
 		t.Run(text, func(t *testing.T) {
-			r, err := Dispatch(context.Background(), Request{Text: text, Cwd: t.TempDir()})
-			if err != nil {
-				t.Fatalf("Dispatch(%q): %v", text, err)
-			}
+			r:= Dispatch(context.Background(), Request{Text: text, Cwd: t.TempDir()})
+			
 			if r.Consumed {
 				t.Errorf("Dispatch(%q): expected Consumed=false, got true (reply=%q)", text, r.Reply)
 			}
@@ -81,10 +79,8 @@ func TestDispatch_LoneBang_FallsThrough(t *testing.T) {
 	// dispatch. Returns Consumed=false so gateway can fall through.
 	for _, text := range []string{"!", "!   ", "！", "！  "} {
 		t.Run(text, func(t *testing.T) {
-			r, err := Dispatch(context.Background(), Request{Text: text, Cwd: t.TempDir()})
-			if err != nil {
-				t.Fatalf("Dispatch(%q): %v", text, err)
-			}
+			r:= Dispatch(context.Background(), Request{Text: text, Cwd: t.TempDir()})
+			
 			if r.Consumed {
 				t.Errorf("Dispatch(%q): lone bang should NOT consume (防呆), got reply=%q", text, r.Reply)
 			}
@@ -93,10 +89,8 @@ func TestDispatch_LoneBang_FallsThrough(t *testing.T) {
 }
 
 func TestDispatch_EmptyCwd_FriendlyError(t *testing.T) {
-	r, err := Dispatch(context.Background(), Request{Text: "!ls", Cwd: ""})
-	if err != nil {
-		t.Fatalf("Dispatch: %v", err)
-	}
+	r:= Dispatch(context.Background(), Request{Text: "!ls", Cwd: ""})
+	
 	if !r.Consumed {
 		t.Fatal("empty CWD should still be consumed (with friendly error)")
 	}
@@ -111,10 +105,8 @@ func TestDispatch_EchoHello_StdoutAndSummary(t *testing.T) {
 		// exercised by dispatch_windows_test.go separately.
 		t.Skip("echo path uses sh -c; skip on Windows (covered by dispatch_windows_test.go)")
 	}
-	r, err := Dispatch(context.Background(), Request{Text: "!echo hello", Cwd: t.TempDir()})
-	if err != nil {
-		t.Fatalf("Dispatch: %v", err)
-	}
+	r:= Dispatch(context.Background(), Request{Text: "!echo hello", Cwd: t.TempDir()})
+	
 	if !r.Consumed {
 		t.Fatal("expected Consumed=true")
 	}
@@ -136,10 +128,8 @@ func TestDispatch_False_ExitCodeOne_AndCrossMark(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("`false` is a Unix builtin; skip on Windows")
 	}
-	r, err := Dispatch(context.Background(), Request{Text: "!false", Cwd: t.TempDir()})
-	if err != nil {
-		t.Fatalf("Dispatch: %v", err)
-	}
+	r:= Dispatch(context.Background(), Request{Text: "!false", Cwd: t.TempDir()})
+	
 	if r.ExitCode != 1 {
 		t.Errorf("expected exit 1, got %d", r.ExitCode)
 	}
@@ -155,10 +145,8 @@ func TestDispatch_NotFoundCommand_Exit127(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX exit-127 semantic; skip on Windows")
 	}
-	r, err := Dispatch(context.Background(), Request{Text: "!definitely-not-a-real-command-xyzzy", Cwd: t.TempDir()})
-	if err != nil {
-		t.Fatalf("Dispatch: %v", err)
-	}
+	r:= Dispatch(context.Background(), Request{Text: "!definitely-not-a-real-command-xyzzy", Cwd: t.TempDir()})
+	
 	if r.ExitCode != 127 {
 		t.Errorf("expected exit 127 for missing command, got %d", r.ExitCode)
 	}
@@ -169,10 +157,8 @@ func TestDispatch_Pwd_MatchesCwd(t *testing.T) {
 		t.Skip("`pwd` is a Unix builtin; skip on Windows")
 	}
 	dir := t.TempDir()
-	r, err := Dispatch(context.Background(), Request{Text: "!pwd", Cwd: dir})
-	if err != nil {
-		t.Fatalf("Dispatch: %v", err)
-	}
+	r:= Dispatch(context.Background(), Request{Text: "!pwd", Cwd: dir})
+	
 	if r.ExitCode != 0 {
 		t.Fatalf("pwd failed: exit %d, stderr=%q", r.ExitCode, r.Stderr)
 	}
@@ -190,10 +176,8 @@ func TestDispatch_LongOutput_Truncated(t *testing.T) {
 	}
 	dir := t.TempDir()
 	// seq 1 200 emits 200 lines, well over MaxStdoutLines=50.
-	r, err := Dispatch(context.Background(), Request{Text: "!seq 1 200", Cwd: dir})
-	if err != nil {
-		t.Fatalf("Dispatch: %v", err)
-	}
+	r:= Dispatch(context.Background(), Request{Text: "!seq 1 200", Cwd: dir})
+	
 	if !strings.Contains(r.Reply, "truncated") {
 		t.Errorf("expected summary to mention truncation, got %q", r.Reply)
 	}

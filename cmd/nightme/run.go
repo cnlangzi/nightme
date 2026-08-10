@@ -501,6 +501,12 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// SelectedCwd as its working directory. If GetOrCreate fails
 	// (e.g. agent registry not loaded), fall through to message
 	// dispatch — the user can still talk to the agent.
+	//
+	// Reply delivery: the gateway's dispatchLoop only checks
+	// result != nil and otherwise discards CommandResult.Reply
+	// (see gateway.go's dispatchLoop / Contract section). Each
+	// shim is responsible for sending its own reply to the
+	// channel. We mirror the commander shim's pattern.
 	gwImpl.WithShellDispatch(func(ctx context.Context, msg *gateway.InboundMessage) (*gateway.CommandResult, error) {
 		if msg == nil {
 			return nil, nil
@@ -512,23 +518,23 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 			return nil, nil
 		}
 		// shell.Dispatch consumes the "!" prefix itself; we
-		// always pass msg.Text through unchanged. The chat's
-		// SelectedCwd is the workdir; fall back to the
-		// process CWD if the chat hasn't picked one yet (the
-		// shell package surfaces a friendly error if cwd is
-		// empty after trim).
-		cwd := cs.SelectedCwd()
-		if cwd == "" {
-			if wd, wderr := os.Getwd(); wderr == nil {
-				cwd = wd
-			}
-		}
-		out, err := shell.Dispatch(ctx, shell.Request{
+		// always pass msg.Text through unchanged. Per plan
+		// (wip/feat-shell.md §已确认决策 #5), CWD is strictly
+		// the chat's SelectedCwd — no fallback to os.Getwd().
+		// An empty SelectedCwd fires shell's friendly
+		// "no CWD configured for this chat" reply.
+		out := shell.Dispatch(ctx, shell.Request{
 			Text: msg.Text,
-			Cwd:  cwd,
+			Cwd:  cs.SelectedCwd(),
 		})
-		if err != nil {
-			return nil, err
+		if out.Consumed && out.Reply != "" {
+			if ch := cs.Channel(); ch != nil {
+				_ = ch.Send(ctx, chatsession.OutboundMessage{
+					ChatID:  msg.ChatID,
+					Text:    out.Reply,
+					ReplyTo: msg.MessageID,
+				})
+			}
 		}
 		return &gateway.CommandResult{
 			Consumed: out.Consumed,

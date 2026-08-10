@@ -13,12 +13,13 @@ package shell
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"time"
 )
 
-func executeShell(ctx context.Context, cwd, cmd string) (*Result, error) {
+func executeShell(ctx context.Context, cwd, cmd string) *Result {
 	start := time.Now()
 	c := exec.CommandContext(ctx, "sh", "-c", cmd)
 	c.Dir = cwd
@@ -43,7 +44,8 @@ func executeShell(ctx context.Context, cwd, cmd string) (*Result, error) {
 	if runErr != nil {
 		// exec.ExitError carries the child's exit code;
 		// anything else (e.g. ctx cancellation) reports -1.
-		if ee, ok := runErr.(*exec.ExitError); ok {
+		var ee *exec.ExitError
+		if errors.As(runErr, &ee) {
 			r.ExitCode = ee.ExitCode()
 		} else {
 			r.ExitCode = -1
@@ -56,5 +58,5 @@ func executeShell(ctx context.Context, cwd, cmd string) (*Result, error) {
 	}
 
 	r.Reply = renderSummary(r)
-	return r, nil
+	return r
 }

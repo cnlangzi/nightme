@@ -47,7 +47,7 @@ const cpACPChinese = 936
 // single argument and let cmd.exe handle its own parsing —
 // this matches how Windows users actually type commands in
 // cmd.exe interactively.
-func executeShell(ctx context.Context, cwd, cmd string) (*Result, error) {
+func executeShell(ctx context.Context, cwd, cmd string) *Result {
 	start := time.Now()
 
 	c := exec.CommandContext(ctx, "cmd", "/c", cmd)
@@ -86,7 +86,7 @@ func executeShell(ctx context.Context, cwd, cmd string) (*Result, error) {
 		Cwd:      cwd,
 	}
 	r.Reply = renderSummary(r)
-	return r, nil
+	return r
 }
 
 // decoderFor picks the right decoder for the given ANSI code
@@ -116,8 +116,11 @@ func decode(raw []byte, dec *encoding.Decoder) string {
 	out := &bytes.Buffer{}
 	if _, err := out.ReadFrom(r); err != nil {
 		// Decoder errors are rare (invalid byte sequences); we
-		// fall back to the raw bytes so the user at least sees
-		// something rather than an empty string.
+		// fall back to the raw bytes so the user sees something
+		// rather than an empty string. Note: on a Chinese-locale
+		// system this means the user will see GBK bytes rendered
+		// as Latin-1 (mojibake) — visually noisy but better than
+		// the alternative of silent truncation.
 		return string(raw)
 	}
 	return out.String()

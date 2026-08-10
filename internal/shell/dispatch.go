@@ -13,8 +13,10 @@
 // live next to the gateway in the dispatch chain, but neither
 // imports the other. Each owns its own prefix parser (parseShell
 // here, parseCommand in commander.go) and the parsing contract
-// between the two is locked in by the 13-row test matrix in
-// wip/feat-shell.md.
+// between the two is locked in by the parallel test matrices
+// in dispatch_test.go (this package) and commander_test.go
+// (internal/command) — both share the same 13-row normalization
+// cases.
 //
 // Platform-specific execution lives in dispatch_unix.go /
 // dispatch_windows.go (build-tag isolated). This file is
@@ -75,24 +77,32 @@ type Result struct {
 // so the gateway can fall through to message dispatch. If
 // matched, it delegates to executeShell (platform-specific) and
 // wraps the outcome in a Result with a rendered summary card.
-func Dispatch(ctx context.Context, req Request) (*Result, error) {
+//
+// Dispatch never returns an error: execution failures are
+// surfaced as Result.ExitCode (non-zero) plus a populated
+// Stderr so the summary card reports them. The signature
+// drops the error return so the caller doesn't need a dead
+// `if err != nil` branch.
+func Dispatch(ctx context.Context, req Request) *Result {
 	cmd, matched := parseShell(req.Text)
 	if !matched {
-		return &Result{Consumed: false}, nil
+		return &Result{Consumed: false}
 	}
 	if strings.TrimSpace(req.Cwd) == "" {
 		return &Result{
 			Consumed: true,
 			Reply:    "❌ shell: no CWD configured for this chat\nTry `/use <path>` first.",
 			Cmd:      cmd,
-		}, nil
+		}
 	}
 	return executeShell(ctx, req.Cwd, cmd)
 }
 
 // parseShell mirrors parseCommand in internal/command/commander.go —
 // both share the same normalization contract. Lock-step changes
-// required; see wip/feat-shell.md for the 13-row matrix.
+// required; the parallel test matrices in this package's
+// dispatch_test.go and internal/command's commander_test.go
+// both encode the 13-row behavior table.
 //
 // Rules:
 //  1. Trim leading whitespace (TrimLeft)
@@ -121,16 +131,19 @@ func parseShell(text string) (body string, matched bool) {
 //
 //	✅ $ <cmd>
 //	exit <code> · <ms>ms · <cwd>
-//	stdout:                  (optional)
+//	stdout:                  (optional, shown FIRST)
 //	  line1
 //	  line2
 //	  … N more lines truncated   (when stdout exceeds MaxStdoutLines)
-//	stderr:                  (optional)
+//	stderr:                  (optional, shown AFTER stdout)
 //	  line1
 //
 // Failure variants flip ✅ → ❌. Exit code -1 from
 // exec.ExitError indicates a signal (e.g. SIGKILL) — we
 // surface it as-is.
+//
+// stdout is rendered before stderr to match conventional
+// shell UX: the user wanted stdout, stderr is footnote noise.
 func renderSummary(r *Result) string {
 	var b strings.Builder
 	if r.ExitCode == 0 {
@@ -146,11 +159,6 @@ func renderSummary(r *Result) string {
 	b.WriteString(strconv.FormatInt(r.Duration.Milliseconds(), 10))
 	b.WriteString("ms · ")
 	b.WriteString(r.Cwd)
-
-	if r.Stderr != "" {
-		b.WriteString("\nstderr:\n")
-		b.WriteString(indent(r.Stderr))
-	}
 
 	if r.Stdout != "" {
 		lines := splitLines(r.Stdout)
@@ -170,33 +178,49 @@ func renderSummary(r *Result) string {
 		}
 	}
 
+	if r.Stderr != "" {
+		b.WriteString("\nstderr:\n")
+		b.WriteString(indent(r.Stderr))
+	}
+
 	return b.String()
 }
 
-// splitLines splits on '\n' and drops a single trailing empty
-// element caused by a terminal newline (so "a\nb\n" yields
-// ["a", "b"], not ["a", "b", ""]). Returns nil for empty input.
+// splitLines splits on '\n' and drops trailing empty elements
+// (so "a\nb\n" and "a\nb\n\n\n" both yield ["a", "b"]).
+// Returns nil for empty input. Used to canonicalize stdout
+// before truncation so the line count matches the rendered
+// output and the trailing empty-element case ("a\nb\n" →
+// ["a", "b"] not ["a", "b", ""]) doesn't inflate the count.
 func splitLines(s string) []string {
 	if s == "" {
 		return nil
 	}
 	lines := strings.Split(s, "\n")
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
+	// Drop ALL trailing empty elements (handles "a\n\n\n" too).
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
 	return lines
 }
 
 // indent prefixes every line with two spaces so the stdout
-// block reads as a code block in the Feishu card.
+// block reads as a code block in the Feishu card. Trailing
+// newline is preserved (so the block ends with "\n  " not
+// "\n  " + extra noise) — renderSummary's caller adds the
+// section separator.
 func indent(s string) string {
 	if s == "" {
 		return s
 	}
-	// strings.Split preserves empty trailing element on a
-	// terminal \n — we keep it here so the indent matches the
-	// original line count (matters for the truncated case).
-	lines := strings.Split(s, "\n")
+	// Trim a single trailing newline before indenting so the
+	// output doesn't end with a whitespace-only line that
+	// renders as a blank in the Feishu card.
+	trimmed := s
+	if strings.HasSuffix(trimmed, "\n") {
+		trimmed = trimmed[:len(trimmed)-1]
+	}
+	lines := strings.Split(trimmed, "\n")
 	for i, line := range lines {
 		lines[i] = "  " + line
 	}

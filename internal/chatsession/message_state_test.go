@@ -186,5 +186,5 @@ func (s *spySpawner) Spawn(_ context.Context, _ string, _ string, _ []string, _ 
 // operations are no-ops. Used by tests that need an active AS for
 // state-machine checks without spawning a real bridge.
 func newActiveAgentNoop() *AgentSession {
-	return newAgentSessionRuntime("as_noop", "cs_noop", "noop", "/tmp", nil)
+	return NewAgentSession("as_noop", "cs_noop", "noop", "/tmp", nil)
 }

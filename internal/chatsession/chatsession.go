@@ -49,6 +49,13 @@ var (
 	WithEventQueueCapacity = agentsession.WithEventQueueCapacity
 )
 
+// Sentinel error re-exports. The canonical definitions live in
+// agentsession; these aliases let CS callers keep using the
+// chatsession.X form without churn.
+var (
+	ErrNotRunning = agentsession.ErrNotRunning
+)
+
 // Re-exported constants.
 const (
 	MessageKindNormal = agentsession.MessageKindNormal
@@ -87,9 +94,10 @@ type agentCwdKey struct {
 	Cwd   string
 }
 
-// ErrAgentNotFound indicates a pool lookup miss. Callers may use
-// errors.Is to detect and decide whether to spawn.
-var ErrAgentNotFound = errors.New("chatsession: agent not in pool")
+// ErrAgentNotFound indicates a pool lookup miss. Lives in agentsession
+// (canonical), re-exported here so existing CS call sites can keep
+// using chatsession.ErrAgentNotFound without an import churn.
+var ErrAgentNotFound = agentsession.ErrAgentNotFound
 
 // ErrNoSelectedAgent is returned by LookupSelectedAgentSession when
 // cs.selectedAgent is empty. The runtime seeds selectedAgent from

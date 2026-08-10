@@ -1,4 +1,4 @@
-// Package chatsession — AgentSession (v1.2 per-CLI-process handle).
+// Package agentsession — AgentSession (v1.2 per-CLI-process handle).
 //
 // See docs/SPEC.md v1.2 §1.1 and docs/feat/F-29-agent-session-pool.md
 // for the full model. In v1.2 the AgentSession replaces v1.1's
@@ -776,6 +776,11 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 // ErrNotRunning is returned by SendText/SendBlocks/Close when called
 // before Spawn() succeeds.
 var ErrNotRunning = errors.New("chatsession: AgentSession not running (Spawn not called or failed)")
+
+// ErrAgentNotFound is returned by pool-lookup helpers when the
+// (agent, cwd) key has no AgentSession. Re-exported from chatsession
+// as chatsession.ErrAgentNotFound for back-compat.
+var ErrAgentNotFound = errors.New("agentsession: agent not in pool")
 
 // Spawn materializes the bridge-level child process via the given
 // Spawner. On success, the AgentSession transitions from

@@ -496,7 +496,7 @@ func makeSpawnedAS(t *testing.T, cs *ChatSession, agentName string, parent conte
 	as.SetHandleForTest(fake.buildLive())
 	as.SetPIDForTest(fake.PID())
 	as.SetStatusForTest(StatusRunning)
-	as.startReadPump()
+	as.StartReadPumpForTest()
 
 	return as, fake
 }

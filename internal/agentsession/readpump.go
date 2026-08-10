@@ -248,3 +248,10 @@ func (as *AgentSession) endPrompt(reason PromptEndReason) {
 func (as *AgentSession) EndPromptForTest(reason PromptEndReason) {
 	as.endPrompt(reason)
 }
+
+// StartReadPumpForTest is the public test-only version of
+// startReadPump. Idempotent (gated by readpumpStarted). Production
+// code MUST NOT use this — Spawn / Activate start the readpump.
+func (as *AgentSession) StartReadPumpForTest() {
+	as.startReadPump()
+}

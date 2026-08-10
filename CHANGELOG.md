@@ -11,6 +11,37 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### refactor(chatsession): extract AgentSession to internal/agentsession
+
+`AgentSession` and its directly-coupled types (`Prompt`, `EnrichedEvent`,
+`Spawner`, `Message`, `Status`, `agentSessionCounter`) moved from
+`internal/chatsession/` to a new `internal/agentsession/` package.
+
+Layering after this change:
+
+```
+internal/agent/         abstract: AgentSpec / Agent / Bridge / Mode
+internal/agentsession/  runtime unit: AgentSession + per-AS state
+internal/chatsession/   pool manager: ChatSession + persistence
+```
+
+Call-site impact is minimized via type aliases in `chatsession`
+(`type AgentSession = agentsession.AgentSession`, etc.). New public
+methods on `AgentSession`:
+
+- `HandlePTYRestart(ctx, launcher)` — encapsulates the kill + readpump
+  reset + respawn + `SessionID` clear lifecycle. `ChatSession` no
+  longer reaches into AS internals (asMu, readpumpStarted, respawn).
+- `InjectEvent(ev)` — test-only helper to push events directly into
+  the dispatcher queue.
+- Test-only setters: `SetHandleForTest`, `SetStatusForTest`,
+  `SetPIDForTest`, `SetCurrentPromptForTest`, `SetIsReadyForTest`,
+  `EndPromptForTest`. Production code MUST NOT use them.
+
+Docs: `docs/SPEC.md` §1.1a (new) documents the package structure;
+`docs/feat/F-32` / `F-34` / `F-54` updated to use `agentsession.*`
+type names.
+
 ### Codex app-server bridge (new agent)
 
 The `codex` CLI is now a first-class bridge agent, joining

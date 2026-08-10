@@ -17,9 +17,13 @@
 //
 //   - We also compute HasMention, which captures the ORIGINAL
 //     message semantic ("did this message address the bot or
-//     @_all") independent of the stripped text. Gateway dispatcher
-//     combines HasMention with ChatSession.WatchMode to drop
-//     non-mention group messages when WatchMode == WatchModeMention.
+//     @_all") independent of the stripped text. The runtime
+//     messageDispatcher (cmd/nightme/run.go) passes it to
+//     chatsession.Manager.AcceptInbound, which combines it with
+//     ChatSession.WatchMode() to drop non-mention group messages
+//     when WatchMode == WatchModeMention. The gate used to live
+//     in gateway.applyWatchModeGate; it moved to chatsession so
+//     the policy sits next to its state.
 //
 //   - Chat type detection: DM (chat_type="p2p") is always
 //     HasMention=true (every DM message is implicitly addressed to

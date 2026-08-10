@@ -204,8 +204,10 @@ func DefaultAppPreset() *registration.AppPreset {
 //	                                   drop or pass; see SPEC §3.1.1)
 //	im:message.group_msg               F-watch: receive ALL group messages
 //	                                  (not just @-mentions). Default-on at
-//	                                  install time; ChatSession.WatchMode
-//	                                  gates processing. NOT :readonly
+//	                                  install time; the runtime messageDispatcher
+//	                                  passes ChatSession.WatchMode + HasMention
+//	                                  to chatsession.Manager.AcceptInbound
+//	                                  to gate processing. NOT :readonly
 //	                                  because bot needs to reply.
 //	im:message.p2p_msg:readonly        bot triggered in 1:1 chats
 //	im:message.pins:read               read pinned-message state

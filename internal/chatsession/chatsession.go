@@ -148,8 +148,9 @@ type ChatSession struct {
 	// docs/SPEC.md §3.1.1 + docs/channel/feishu.md §6.10/§6.11.
 	// DM chats always behave as if WatchMode==WatchModeAll
 	// (every DM message is "addressed to bot"); the gate logic in
-	// gateway.Handle enforces that — this field is only consulted
-	// for group chats via the channel-supplied HasMention bool.
+	// Manager.AcceptInbound enforces that — this field is only
+	// consulted for group chats via the channel-supplied
+	// HasMention bool.
 	watchMode WatchMode
 
 	// F-think §3.1.2: per-chat thinking-content visibility. Default

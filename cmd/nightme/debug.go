@@ -191,18 +191,16 @@ func newDebugFixture(f debugFlags) (*debugFixture, error) {
 
 	// 6. Gateway with actionHandler + capturing channel.
 	// WithActionHandler is on the Gateway interface (not just
-	// *Router) per the F-45 dispatcher work. WithWatchModeResolver
-	// is only on the concrete *Router type, not the public
-	// interface; we skip it here because the default WatchMode
-	// gate (WatchModeAll-equivalent fall-through for reaction
-	// events) is what we want for debug mode.
+	// *Router) per the F-45 dispatcher work.
+	//
+	// F-watch §3.1.1: the per-chat WatchMode gate is no longer
+	// wired here — it lives in chatsession (Manager.AcceptInbound
+	// is called from the runtime messageDispatcher closure).
+	// Debug mode's reaction capture goes through the action
+	// handler branch, which never reaches the WatchMode gate,
+	// so no replacement is needed.
 	gw := gateway.New(captured.MessageDispatcher())
 	gw.AttachChannels(captured)
-	if router, ok := gw.(*gateway.Router); ok {
-		router.WithWatchModeResolver(func(_ string) (chatsession.WatchMode, bool) {
-			return chatsession.WatchModeAll, true
-		})
-	}
 	gw.WithActionHandler(func(ctx context.Context, msg *gateway.InboundMessage) bool {
 		if msg == nil || msg.Reaction == nil {
 			return false

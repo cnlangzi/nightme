@@ -3117,8 +3117,11 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	// text so slash commands like `/watch on` parse correctly
 	// (ParseCommand requires HasPrefix "/"). computeHasMention
 	// returns the original-message semantic ("did this message
-	// address the bot") which Gateway dispatcher combines with
-	// ChatSession.WatchMode() to drop non-mention group messages.
+	// address the bot") which the runtime messageDispatcher
+	// (cmd/nightme/run.go) passes to chatsession.Manager.AcceptInbound
+	// together with ChatSession.WatchMode() to drop non-mention
+	// group messages. The gate used to live in gateway; it moved
+	// to chatsession so the policy sits next to its state.
 	botOpenID := a.fetchBotOpenID(ctx)
 	hasMention := computeHasMention(message, botOpenID)
 	text = stripMentionPrefix(text, message.Mentions, botOpenID)
@@ -3298,10 +3301,12 @@ func (a *Adapter) handleReactionCreated(ctx context.Context, event *larkim.P2Mes
 		// Text is empty for reaction events; the discriminator
 		// is msg.Reaction != nil downstream.
 		Text: "",
-		// HasMention is irrelevant for reactions but we set it
-		// to true so the WatchMode gate never silently drops a
-		// reaction — reactions are user-initiated signals that
-		// should always reach the handler.
+		// HasMention is irrelevant for reactions — they bypass
+		// the WatchMode gate entirely (reactions go through
+		// gateway.dispatchAction, not the messageDispatcher that
+		// runs AcceptInbound). Setting true anyway as a defensive
+		// default in case some future path forwards reactions
+		// through the plain-text dispatcher.
 		HasMention: true,
 		Reaction: &commandServices.ReactionEvent{
 			TargetMsgID: messageID,
@@ -3426,10 +3431,12 @@ func (a *Adapter) handleActCardAction(
 		ChatID: chatID,
 		UserID: userID,
 		Text:   "",
-		// HasMention is irrelevant for reactions but we set it
-		// to true so the WatchMode gate never silently drops a
-		// reaction — reactions are user-initiated signals that
-		// should always reach the handler.
+		// HasMention is irrelevant for reactions — they bypass
+		// the WatchMode gate entirely (reactions go through
+		// gateway.dispatchAction, not the messageDispatcher that
+		// runs AcceptInbound). Setting true anyway as a defensive
+		// default in case some future path forwards reactions
+		// through the plain-text dispatcher.
 		HasMention: true,
 		MessageID:  botMsgID,
 		Reaction: &commandServices.ReactionEvent{

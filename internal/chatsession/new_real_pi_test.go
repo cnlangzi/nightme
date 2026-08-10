@@ -22,6 +22,7 @@ package chatsession
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -338,6 +339,9 @@ func (b *fakeAgentBuilder) SendText(_ string) error                             
 func (b *fakeAgentBuilder) SendBlocks(_ context.Context, _ []agent.ContentBlock) error { return nil }
 func (b *fakeAgentBuilder) SendPermission(_ string) error                         { return nil }
 func (b *fakeAgentBuilder) New(_ context.Context) error                           { return nil }
+func (b *fakeAgentBuilder) RunOnce(_ context.Context, _ agent.StartConfig, _ []agent.ContentBlock) (string, error) {
+	return "", errors.New("fakeAgentBuilder: RunOnce not implemented")
+}
 func (b *fakeAgentBuilder) Close() error {
 	select {
 	case <-b.events:

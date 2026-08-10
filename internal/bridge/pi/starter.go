@@ -68,3 +68,19 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	}
 	return agent.NewAgent(s.Info(), d.pid, d.events, d), nil
 }
+// RunOnce is the one-shot counterpart to Start. Spawns a fresh
+// RPC session, sends blocks, and drains Events() until the agent
+// produces its final text result. Closes the session before
+// returning. pi is a long-lived bridge (single process, many
+// turns), but RunOnce only consumes one turn — the EventAgentDone
+// that fires at turn end carries Reason:"settled" so the runtime
+// distinguishes turn-end from process-end. We don't care about
+// that distinction here because we Close the live immediately.
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
+	a, err := s.Start(ctx, cfg)
+	if err != nil {
+		return "", fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
+	}
+	defer a.Close()
+	return agent.RunOnceDrain(ctx, a, blocks, s.Info().Name)
+}

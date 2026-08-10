@@ -68,3 +68,15 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	}
 	return agent.NewAgent(s.Info(), d.session.pid, d.session.events, d), nil
 }
+// RunOnce is the one-shot counterpart to Start. Spawns a fresh
+// JSON-RPC session, sends blocks, and drains Events() until the
+// agent produces its final text result. Closes the session
+// before returning.
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
+	a, err := s.Start(ctx, cfg)
+	if err != nil {
+		return "", fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
+	}
+	defer a.Close()
+	return agent.RunOnceDrain(ctx, a, blocks, s.Info().Name)
+}

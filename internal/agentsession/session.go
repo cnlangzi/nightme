@@ -1202,35 +1202,27 @@ func newAgentSessionID() string {
 
 // --- Test-only API --------------------------------------------------
 //
-// NOTE on the XForTest pattern: these methods pollute agentsession's
-// public API with symbols production code should never call. They
-// predate the current refactor (F-29 etc.) and removing them requires
-// relocating cross-package tests in internal/chatsession and
-// internal/command/stop to use real public APIs or move into the
-// agentsession package itself — both of which are larger refactors
-// than the gitstatus fix scope. Until that happens, callers MUST
-// stay in *_test.go files. A future cleanup should consolidate
-// SetHandleForTest + SetStatusForTest (always called as a pair) into
-// a single AttachHandleForTest, and consider moving the rest to an
-// internal/agentsession/testutil sub-package so the production API
-// surface stays clean.
+// These methods exist so cross-package tests (chatsession package
+// in particular) can build up AgentSession state without going
+// through Spawn / Spawn-then-kill cycles. Production code MUST NOT
+// use them — use Spawn / SetRunning / SetDetached / SetExited /
+// SetSessionID / SetModel instead.
 //
-// AttachHandleForTest wires a pre-built bridge handle into the
-// session and marks it as the supplied status under a single
-// lock acquisition. This is the canonical "running AgentSession
-// without forking a real child process" pattern — every cross-
-// package test that drives ChatSession / KillAgent / stop logic
-// starts from here. Replaces the legacy SetHandleForTest +
-// SetStatusForTest pair (always called as a unit; keeping them
-// separate caused a TOCTOU window between the two lock acquires).
-//
-// Caller is responsible for keeping handle alive for the duration
-// of any usage. Idempotent: re-calling with a new handle replaces
-// the previous one.
-func (as *AgentSession) AttachHandleForTest(h *agent.Agent, s Status) {
+// They live in production code (not _test.go) so cross-package tests
+// can call them. The "ForTest" suffix is the convention.
+
+// SetHandleForTest injects a bridge handle. Caller is responsible
+// for keeping the handle alive for the duration of any usage.
+func (as *AgentSession) SetHandleForTest(h *agent.Agent) {
 	as.asMu.Lock()
 	defer as.asMu.Unlock()
 	as.handle = h
+}
+
+// SetStatusForTest sets the runtime status directly.
+func (as *AgentSession) SetStatusForTest(s Status) {
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
 	as.stat = s
 }
 

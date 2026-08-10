@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/agentsession/testutil"
 )
 
 // makeTestMessage constructs a `Message` value with the minimal
@@ -42,8 +41,9 @@ func makeTestMessage(cs *ChatSession, blocks []agent.ContentBlock, userMsgID str
 func newTestASWithFakeHandle(cs *ChatSession) (*AgentSession, *fakeAgentSession) {
 	as := NewAgentSession("as_test", cs.ID, "fake", "/tmp", nil)
 	spy := newFakeAgentSession(1)
-	as.AttachHandleForTest(spy.buildLive(), StatusRunning)
-	testutil.SetPID(as, 1)
+	as.SetHandleForTest(spy.buildLive())
+	as.SetStatusForTest(StatusRunning)
+	as.SetPIDForTest(1)
 
 	cs.mu.Lock()
 	cs.pool[agentCwdKey{Agent: as.Agent, Cwd: as.Cwd}] = as

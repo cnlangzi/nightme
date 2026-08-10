@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/agentsession/testutil"
 )
 
 // TestInput_RoutesToSelectedAS — input messages queued on ChatSession
@@ -145,7 +144,7 @@ func TestInput_NotReadySelectedAS_RetainsInQueue(t *testing.T) {
 	cs.selectAgentSessionLocked(as)
 
 	// Force not-ready.
-	testutil.SetIsReady(as, false)
+	as.SetIsReadyForTest(false)
 
 	msg := Message{
 		ID:     "msg-busy",

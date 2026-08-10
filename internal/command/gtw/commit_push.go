@@ -3,7 +3,6 @@ package gtw
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -11,19 +10,25 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
-// runOnceTimeout is the hard deadline for a one-shot agent
-// commit+push. 5 minutes covers realistic agent commits (lint
-// fixes, conflict resolution, multi-tool flows) without wedging
-// /gtw push if an agent hangs (e.g. PTY fallback with no idle
-// signal — see pty.RunOnce's ptyIdleTimeout for the per-call
-// short-window heuristic).
-const runOnceTimeout = 5 * time.Minute
+// RunOnceTimeout is the hard deadline for a one-shot agent
+// call (commit+push, PR title+body generation). 5 minutes
+// covers realistic agent commits (lint fixes, conflict
+// resolution, multi-tool flows) without wedging /gtw push if
+// an agent hangs (e.g. PTY fallback with no idle signal — see
+// pty.RunOnce's ptyIdleTimeout for the per-call short-window
+// heuristic).
+//
+// Exported because both /gtw push and /gtw pr use it.
+const RunOnceTimeout = 5 * time.Minute
 
 // dispatchPush is the three-state dispatcher for /gtw push.
 //
 // Flow:
 //
-//  1. Locate selectedCwd + .nightme/gtw.yml → c (Context).
+//  1. loadDispatchContext → c (Context). Reads cs.SelectedCwd()
+//     and either loads `.nightme/gtw.yml` (worktree mode) or
+//     derives Worktree/Branch/RepoRoot from git (non-worktree
+//     mode).
 //  2. git status --porcelain (single call, drives both the
 //     conflict check and the clean/dirty dispatch).
 //  3. If status has unmerged paths → refuse (rebase/merge
@@ -40,27 +45,11 @@ func dispatchPush(
 	deps HandlerDeps,
 	chatID, messageID string,
 	args pushArgs,
+	ymlAgent string,
 ) (*Result, error) {
-	selectedCwd, err := pushCwd()
-	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			"❌ no active workspace. Send /cwd <path> first."), nil
-	}
-
-	c, err := ReadGTWYml(selectedCwd)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return reply(ctx, cs.Channel(), chatID, messageID,
-				"❌ no active fix to push in this chat\n"+
-					"hint: /cwd into the /gtw fix worktree first (its "+
-					"`.nightme/gtw.yml` is the push source of truth)."), nil
-		}
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err)), nil
-	}
-	if c.Worktree == "" || c.Branch == "" || c.RepoRoot == "" {
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			"❌ .nightme/gtw.yml is malformed (worktree/branch/repoRoot required)"), nil
+	c, res := loadDispatchContext(ctx, cs, deps, chatID, messageID)
+	if res != nil {
+		return res, nil
 	}
 
 	statusOut, _, err := deps.Git.Run(ctx, c.Worktree, "status", "--porcelain")
@@ -78,7 +67,7 @@ func dispatchPush(
 	if strings.TrimSpace(statusOut) == "" {
 		return pushClean(ctx, cs, deps, chatID, messageID, c)
 	}
-	return pushDirty(ctx, cs, chatID, messageID, c, args)
+	return pushDirty(ctx, cs, chatID, messageID, c, args, ymlAgent)
 }
 
 // pushClean handles the clean-worktree branch:
@@ -150,14 +139,27 @@ func pushDirty(
 	chatID, messageID string,
 	c Context,
 	args pushArgs,
+	ymlAgent string,
 ) (*Result, error) {
-	agentName := args.Agent
+	// pushDirty is the only push path that spawns an agent
+	// (pushClean is a plain git push). The yml-configured agent
+	// name comes from the caller (cmd.go runPush already loaded
+	// the user-level config); pushDirty itself does NOT Load() —
+	// that responsibility lives in the cmd.go wrapper which
+	// surfaces loadNotes to the user. Loading here would
+	// duplicate the warning block in the chat (see wip/gtw-hooks.md
+	// "B1: 双重警告").
+	agentName, agentNotes := ResolveAgent(args.Agent, ymlAgent, cs)
 	if agentName == "" {
-		agentName = cs.SelectedAgent()
-	}
-	if agentName == "" {
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			"❌ no agent selected. Send `/use <name>` first or pass `-a <name>`."), nil
+		// B2: surface agentNotes here too. Without this, a yml
+		// pointing at an unknown agent (e.g. "pi") would
+		// silently degrade to "❌ no agent selected" — hiding
+		// the user's misconfiguration behind a generic error.
+		msg := "❌ no agent selected. Send `/use <name>` first or pass `-a <name>`."
+		for _, n := range agentNotes {
+			msg += "\n" + n
+		}
+		return reply(ctx, cs.Channel(), chatID, messageID, msg), nil
 	}
 
 	a, err := agent.Builtins.Get(agentName)
@@ -170,7 +172,7 @@ func pushDirty(
 			fmt.Sprintf("❌ agent %s not available: %v", agentName, err)), nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, runOnceTimeout)
+	ctx, cancel := context.WithTimeout(ctx, RunOnceTimeout)
 	defer cancel()
 
 	blocks := []agent.ContentBlock{{
@@ -204,6 +206,13 @@ func pushDirty(
 			"📁 worktree: %s\n",
 		agentName, indentLines(text, "  "), c.Branch, c.Worktree,
 	)
+	// Surface agent-resolve notes (e.g. yml referenced an unknown
+	// agent but a session default was found) at the bottom of the
+	// reply so the user can see why their config didn't fully apply.
+	// These are diagnostics, not blockers — main flow has succeeded.
+	if len(agentNotes) > 0 {
+		body += "\n" + strings.Join(agentNotes, "\n") + "\n"
+	}
 	return reply(ctx, cs.Channel(), chatID, messageID, body), nil
 }
 

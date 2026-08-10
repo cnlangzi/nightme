@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 )
@@ -47,7 +46,7 @@ func TestFactory_Handle_OnOffRoundtrip(t *testing.T) {
 	if err != nil || !out.Consumed {
 		t.Fatalf("Handle on: err=%v consumed=%v", err, out.Consumed)
 	}
-	if !strings.Contains(out.Reply, "Tools mode set to "+agent.ToolsModeShow.String()) {
+	if !strings.Contains(out.Reply, "Tools mode set to "+chatsession.ToolsModeShow.String()) {
 		t.Fatalf("Reply missing ToolsModeShow: %q", out.Reply)
 	}
 
@@ -56,7 +55,7 @@ func TestFactory_Handle_OnOffRoundtrip(t *testing.T) {
 	if err != nil || !out.Consumed {
 		t.Fatalf("Handle off: err=%v consumed=%v", err, out.Consumed)
 	}
-	if !strings.Contains(out.Reply, "Tools mode set to "+agent.ToolsModeHide.String()) {
+	if !strings.Contains(out.Reply, "Tools mode set to "+chatsession.ToolsModeHide.String()) {
 		t.Fatalf("Reply missing ToolsModeHide: %q", out.Reply)
 	}
 }

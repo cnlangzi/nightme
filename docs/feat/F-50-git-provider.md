@@ -7,7 +7,7 @@
 > - `internal/gtw/provider.go` (NEW) — `HTTPProber` 接口 + `ExecHTTPProber` 实现
 > - `internal/gtw/fix.go::RunFix` + `internal/gtw/rebuild.go::RebuildContext` — 调用 `Detect(ctx, remoteURL, prober)` 而非 `DetectPlatform(remoteURL)`
 > - `internal/gtw/api.go::HandlerDeps` — `NewPlatform func(PlatformKind) (PlatformClient, error)` 字段改为 `Prober HTTPProber`
-> - 全部调用方：`cmd/nightme/run.go` / `cmd/nightme/debug.go` / `internal/gateway/handlers_gtw*.go` 字段同步
+> - 全部调用方：`cmd/nightme/run.go` / `cmd/nightme/debug.go` / `internal/command/gtw/`（F-102 重构后 gtw 已迁移到 `internal/command/gtw/`）字段同步
 > - 测试：`internal/gtw/gtw_test.go` 加两阶段探测测试 + `fakeHTTPProber` fixture
 > - 文档同步：`FEATURES.md` 加 F-50 行；修复 `F-45 §3.5` / `gtw §5.x` / `F-45 §7.2` 全部悬空引用
 >
@@ -381,7 +381,7 @@ if err != nil {
 
 字段 `NewPlatform func(PlatformKind) (PlatformClient, error)` 删除；新增 `Prober HTTPProber`。
 
-### 2.5 `internal/gateway/handlers_gtw.go` / `handlers_gtw_debug.go`
+### 2.5 `internal/command/gtw/`（原 `internal/gateway/handlers_gtw.go` / `handlers_gtw_debug.go`）
 
 `deps.NewPlatform = gtw.NewPlatformClient` 改为 `deps.Prober = nil`（生产用 ExecHTTPProber 默认值）。或保留 `deps.Prober` 字段注入用于测试。
 
@@ -599,7 +599,7 @@ plat, platErr := NewProvider(ProviderKind(p.Platform), "")
 
 5. **`refactor(gateway): HandlerDeps.NewPlatform → HandlerDeps.Prober`**
    - `internal/gtw/api.go::HandlerDeps` 字段调整
-   - `internal/gateway/handlers_gtw*.go` + `cmd/nightme/run.go` + `debug.go` 同步
+   - `internal/command/gtw/` + `cmd/nightme/run.go` + `debug.go` 同步（handlers_*.go 已迁移）
    - `internal/gtw/fix.go::RunFix` + `rebuild.go::RebuildContext` 改调 `Detect`
 
 6. **`test(gtw): full Detect coverage + RunFix integration with fakeHTTPProber`**

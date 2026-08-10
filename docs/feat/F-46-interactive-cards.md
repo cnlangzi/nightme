@@ -5,7 +5,7 @@
 > **Scope**:
 > - `internal/channel/feishu/adapter.go` — `handleCardAction` 从 stub 改成真路由（`act:` 前缀）
 > - `internal/channel/feishu/adapter.go` — `buildInteractiveCard` 改 button value 编码（`action` envelope）+ column_set 等宽布局
-> - `internal/gateway/handlers_gtw.go` — 决策卡路径（§5.3.1 / §5.3.3）改用交互卡渲染
+> - `internal/command/gtw/`（F-102 重构后位置；原 `internal/gateway/handlers_gtw.go`） — 决策卡路径（§5.3.1 / §5.3.3）改用交互卡渲染
 > - `internal/gtw/render.go` — 旧的纯文本 markdown 渲染保留为 fallback
 > - `internal/gateway/messages.go` — `Card` 字段增加 `Kind` / `Choices` / `Action` / `Disabled` / `ChosenChoiceEmoji`
 > - `internal/gtw/types.go` — `OutMsg` 增加 `PatchBotMsgID` / `PatchChosenEmoji` / `PatchResult` / `CardTitle` / `CardBody` / `CardChoices` / `CardRequestID` / `ChosenChoiceEmoji`
@@ -469,7 +469,7 @@ internal/gateway/gateway.go::dispatchAction
         ▼
 生产 trampoline：cs := mgr.Get(msg.ChatID) → cs.HandleAction(ctx, ev)
    ├─ cs == nil?  ── 岔路 B：return false
-   └─ cs.onReaction(ctx, ev)        ← 由 internal/gateway/handlers_gtw.go::wireGTWActionOnSession
+   └─ cs.onReaction(ctx, ev)        ← 由 `internal/command/gtw/` 的 reaction handling 装上（原 `internal/gateway/handlers_gtw.go::wireGTWActionOnSession`；F-102 重构后 `gtw` 整体迁到 `internal/command/gtw/`，reaction 路由走 `services.ReactionRouter`，已不再走 `cs.SetActionHandler`）
         在 runGTWTestScenario / SetActionHandler 装上        注册 closure
         │
         ▼

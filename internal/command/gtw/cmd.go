@@ -52,6 +52,79 @@ func (f *Factory) SetHandlerDeps(deps HandlerDeps) {
 	}
 }
 
+// withHooks wraps an inner command run with the before/after
+// hook execution defined in ~/.nightme/gtw.yml. See
+// wip/gtw-hooks.md for the iron rule ("hooks are additive,
+// never block main flow") and the always-echo output policy.
+//
+// Behaviour:
+//
+//   - before hooks run first, sequentially, in declaration order
+//   - main() runs next; its error is returned unchanged
+//   - after hooks run after main(), regardless of main() outcome
+//   - hook failures never block main() and never short-circuit
+//     later hooks
+//   - hook output (success OR failure) is sent as TWO follow-up
+//     replies — one for before-hooks, one for after-hooks — so
+//     the chat ordering matches the execution ordering. The
+//     before-hooks reply lands AFTER main's own replies but
+//     BEFORE the after-hooks reply, eliminating the ambiguity
+//     of "did `codegraph init` run before or after the push?"
+//   - load-time notes (yml read/parse errors) ride with the
+//     before-hooks reply (the natural first thing the user
+//     reads in the follow-up)
+//
+// Returns main()'s error so callers can keep their existing
+// error-to-SlashOutput translation. All hook-related work is
+// best-effort and never surfaces as an error.
+func (f *Factory) withHooks(
+	ctx context.Context,
+	cs *chatsession.ChatSession,
+	chatID, messageID string,
+	loadNotes LoadNotes,
+	before, after []Hook,
+	main func() error,
+) error {
+	cwd := ""
+	if cs != nil {
+		cwd = cs.SelectedCwd()
+	}
+	pre := RunHooks(ctx, before, cwd)
+	mainErr := main()
+	post := RunHooks(ctx, after, cwd)
+
+	ch := chatsession.Channel(nil)
+	if cs != nil {
+		ch = cs.Channel()
+	}
+	// Reply 1: load-notes + before-hooks. Combined so "your yml
+	// had warnings" sits next to "here's what ran before the
+	// action" — both are pre-action context.
+	if block := formatLoadNotes(loadNotes) + FormatResults("before", pre); block != "" {
+		_ = reply(ctx, ch, chatID, messageID, block)
+	}
+	// Reply 2: after-hooks. Separate reply so it lands AFTER the
+	// before-hooks reply in chat order — the user reads "before"
+	// then "after", matching what actually happened.
+	if block := FormatResults("after", post); block != "" {
+		_ = reply(ctx, ch, chatID, messageID, block)
+	}
+	return mainErr
+}
+
+// formatLoadNotes renders load-time diagnostics (read/parse
+// errors when loading ~/.nightme/gtw.yml) into a small block
+// that precedes hook output in the consolidated reply.
+//
+// Returns "" when there are no notes — callers concatenate
+// without nil checks.
+func formatLoadNotes(notes LoadNotes) string {
+	if !notes.HasWarnings() {
+		return ""
+	}
+	return "\n━━ hooks config ━━\n" + strings.Join(notes.Warnings, "\n") + "\n"
+}
+
 // Spec implements command.SlashCommandFactory.
 func (f *Factory) Spec() command.Spec {
 	return command.Spec{
@@ -66,6 +139,8 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw push                        push the worktree branch (clean → push, dirty → agent commits+pushes)\n" +
 			"/gtw push -a claude              override which agent runs the one-shot\n" +
 			"/gtw push --agent opencode       same, long form\n" +
+			"/gtw pr                          generate PR title+body, then open the PR\n" +
+			"/gtw pr -a claude                override which agent runs the one-shot\n" +
 			"/gtw sync                        checkout the default branch and pull --rebase from origin",
 	}
 }
@@ -94,6 +169,8 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, cs *ch
 		return f.runClose(ctx, rt, cs, input)
 	case "push":
 		return f.runPush(ctx, rt, cs, input)
+	case "pr":
+		return f.runPR(ctx, rt, cs, input)
 	case "sync":
 		return f.runSync(ctx, rt, cs, input)
 	}
@@ -160,6 +237,11 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, _ *chat
 		}, nil
 	}
 
+	// Load user-level hook config (silent if missing). The
+	// before/after lists wrap the actual RunFix call below; any
+	// load-time warnings ride along in the consolidated reply.
+	cfg, loadNotes := Load()
+
 	// Build slot / drafts shims that route to the Manager.
 	slot := &managerContextSlot{mgr: f.mgr, chatID: input.ChatID}
 	drafts := &managerDraftsMap{mgr: f.mgr, chatID: input.ChatID}
@@ -167,8 +249,17 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, _ *chat
 	// RunFix signature: (ctx, mode, cs, slot, drafts, deps,
 	// chatID, messageID, args, force). Reply is sent inline via
 	// cs.Channel(); *Result only carries Consumed / Dropped for
-	// the runtime.
-	_, err = RunFix(ctx, args.Mode, cs, slot, drafts, f.deps, input.ChatID, input.MessageID, []string{args.RawArg}, args.Force)
+	// the runtime. The withHooks wrapper fires before/after
+	// hooks around the call and ships the hook output as a
+	// follow-up reply (per wip/gtw-hooks.md always-echo policy).
+	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
+		loadNotes, cfg.Fix.Hooks.Before, cfg.Fix.Hooks.After,
+		func() error {
+			_, e := RunFix(ctx, args.Mode, cs, slot, drafts, f.deps,
+				input.ChatID, input.MessageID,
+				[]string{args.RawArg}, args.Force)
+			return e
+		})
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw fix failed: %v", err),
@@ -267,6 +358,7 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 // Construction mirrors runFix: the slot / drafts shims route to
 // the per-chat Manager state, deps are forwarded verbatim, and
 // the reply path is RunClose's own cs.Channel() (no extra wiring).
+// Wrapped in withHooks so close.before / close.after fire.
 func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	cs := f.mgr.GetChatSession(input.ChatID)
 	if cs == nil {
@@ -277,14 +369,21 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, _ *ch
 	}
 	slot := &managerContextSlot{mgr: f.mgr, chatID: input.ChatID}
 
-	res, err := RunClose(ctx, cs, slot, f.deps, input.ChatID, input.MessageID)
+	cfg, loadNotes := Load()
+
+	err := f.withHooks(ctx, cs, input.ChatID, input.MessageID,
+		loadNotes, cfg.Close.Hooks.Before, cfg.Close.Hooks.After,
+		func() error {
+			res, e := RunClose(ctx, cs, slot, f.deps, input.ChatID, input.MessageID)
+			_ = res // RunClose already sent the reply via cs.Channel()
+			return e
+		})
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw close failed: %v", err),
 			Consumed: true,
 		}, nil
 	}
-	_ = res // RunClose already sent the reply via cs.Channel()
 	return &command.SlashOutput{Consumed: true}, nil
 }
 
@@ -295,7 +394,8 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, _ *ch
 //
 // No slot/draft shim needed — push doesn't touch gtw state
 // or reaction cards. Just the same HandlerDeps as everywhere
-// else, plus the parsed push flags.
+// else, plus the parsed push flags. Wrapped in withHooks so
+// push.before / push.after from ~/.nightme/gtw.yml fire.
 func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	args, err := parsePushArgs(input.Args[2:])
 	if err != nil {
@@ -305,14 +405,21 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *ch
 		}, nil
 	}
 
-	res, err := dispatchPush(ctx, cs, f.deps, input.ChatID, input.MessageID, args)
+	cfg, loadNotes := Load()
+
+	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
+		loadNotes, cfg.Push.Hooks.Before, cfg.Push.Hooks.After,
+		func() error {
+			res, e := dispatchPush(ctx, cs, f.deps, input.ChatID, input.MessageID, args, cfg.Push.Agent)
+			_ = res // dispatchPush already sent the reply via cs.Channel()
+			return e
+		})
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw push failed: %v", err),
 			Consumed: true,
 		}, nil
 	}
-	_ = res // dispatchPush already sent the reply via cs.Channel()
 	return &command.SlashOutput{Consumed: true}, nil
 }
 
@@ -323,27 +430,41 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *ch
 // surfaced verbatim (RefreshDefaultBranch already includes the
 // dirty-worktree refusal and rebase-conflict guidance the
 // user needs).
+//
+// Wrapped in withHooks so sync.before / sync.after fire.
 func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
-	cwd, failOut := command.RequireActiveCwd(f.mgr.GetChatSession(input.ChatID))
+	cs := f.mgr.GetChatSession(input.ChatID)
+	cwd, failOut := command.RequireActiveCwd(cs)
 	if failOut != nil {
 		return failOut, nil
 	}
-	repoRoot, err := RepoRoot(ctx, cwd, f.deps.Git)
+
+	cfg, loadNotes := Load()
+
+	var replyText string
+	err := f.withHooks(ctx, cs, input.ChatID, input.MessageID,
+		loadNotes, cfg.Sync.Hooks.Before, cfg.Sync.Hooks.After,
+		func() error {
+			repoRoot, e := RepoRoot(ctx, cwd, f.deps.Git)
+			if e != nil {
+				return e
+			}
+			// /gtw sync is a user-initiated refresh, so it
+			// ignores the SkipRefreshDefaultBranch test seam
+			// (buildSyncReply honours it as a short-circuit —
+			// but a real user calling /gtw sync should never
+			// see that flag set).
+			body, e := buildSyncReply(ctx, repoRoot, f.deps)
+			if e != nil {
+				return e
+			}
+			replyText = body
+			return nil
+		})
 	if err != nil {
-		return &command.SlashOutput{
-			Reply:    fmt.Sprintf("❌ %v", err),
-			Consumed: true,
-		}, nil
+		return &command.SlashOutput{Reply: fmt.Sprintf("❌ %v", err), Consumed: true}, nil
 	}
-	// /gtw sync is a user-initiated refresh, so it ignores the
-	// SkipRefreshDefaultBranch test seam (buildSyncReply honours
-	// it as a short-circuit — but a real user calling /gtw sync
-	// should never see that flag set).
-	body, err := buildSyncReply(ctx, repoRoot, f.deps)
-	if err != nil {
-		return &command.SlashOutput{Reply: err.Error(), Consumed: true}, nil
-	}
-	return &command.SlashOutput{Reply: body, Consumed: true}, nil
+	return &command.SlashOutput{Reply: replyText, Consumed: true}, nil
 }
 
 // buildSyncReply lives in render.go alongside renderSyncReply —
@@ -385,6 +506,56 @@ func parsePushArgs(argv []string) (pushArgs, error) {
 			// Unknown token. Silent accept — future flag
 			// additions (e.g. positional branch arg) won't
 			// break callers passing them by mistake.
+		}
+	}
+	return out, nil
+}
+
+// runPR handles `/gtw pr`. Reads the yml at the current CWD
+// to find the worktree, generates a Conventional Commits
+// title + body via a one-shot agent, then asks the provider
+// (GitHub or GitLab) to open the PR.
+//
+// The flow lives entirely in dispatchPR (pr.go); this wrapper
+// is a thin mirror of runPush — parse the agent override, hand
+// off, surface any dispatch error to the chat.
+func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	args, err := parsePRArgs(input.Args[2:])
+	if err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v", err),
+			Consumed: true,
+		}, nil
+	}
+
+	_, err = dispatchPR(ctx, cs, f.deps, input.ChatID, input.MessageID, args)
+	if err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ /gtw pr failed: %v", err),
+			Consumed: true,
+		}, nil
+	}
+	return &command.SlashOutput{Consumed: true}, nil
+}
+
+// parsePRArgs strips `-a <name>` / `--agent <name>` from the
+// pr argv tail. Mirrors parsePushArgs — v1 has no positional
+// arg; /gtw pr always operates on the current chat's worktree,
+// like /gtw push. Unknown flags are tolerated (future flags
+// like --draft / --base can land without breaking callers).
+func parsePRArgs(argv []string) (prArgs, error) {
+	out := prArgs{}
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		switch a {
+		case "-a", "--agent":
+			if i+1 >= len(argv) {
+				return out, fmt.Errorf("missing value for %s", a)
+			}
+			out.Agent = argv[i+1]
+			i++
+		default:
+			// Unknown token. Silent accept.
 		}
 	}
 	return out, nil

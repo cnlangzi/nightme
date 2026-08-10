@@ -7,7 +7,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/registry"
 )
 
 func TestFactory_Spec(t *testing.T) {
@@ -50,7 +49,7 @@ func TestFactory_Handle_OnOffRoundtrip(t *testing.T) {
 	if err != nil || !out.Consumed {
 		t.Fatalf("Handle on: err=%v consumed=%v", err, out.Consumed)
 	}
-	if !strings.Contains(out.Reply, "Watch mode set to "+registry.WatchModeAll.String()) {
+	if !strings.Contains(out.Reply, "Watch mode set to "+chatsession.WatchModeAll.String()) {
 		t.Fatalf("Reply missing WatchModeAll: %q", out.Reply)
 	}
 
@@ -59,7 +58,7 @@ func TestFactory_Handle_OnOffRoundtrip(t *testing.T) {
 	if err != nil || !out.Consumed {
 		t.Fatalf("Handle off: err=%v consumed=%v", err, out.Consumed)
 	}
-	if !strings.Contains(out.Reply, "Watch mode set to "+registry.WatchModeMention.String()) {
+	if !strings.Contains(out.Reply, "Watch mode set to "+chatsession.WatchModeMention.String()) {
 		t.Fatalf("Reply missing WatchModeMention: %q", out.Reply)
 	}
 }

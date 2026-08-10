@@ -105,7 +105,7 @@ Reset 3 session(s). Send a message to start fresh.
 ```
 user /kill
   ↓
-gateway.handleKill (handlers_chatsession.go)
+kill.Factory.Handle (internal/command/kill/kill.go)
   ↓
 cs.KillAll() —— 改造后
   ├ snapshot pool(拷贝 Go 指针,不在原 map 上原地删)
@@ -128,7 +128,7 @@ cs.KillAll() —— 改造后
 ```
 user /new
   ↓
-gateway.handleNew (handlers_new.go)
+newcmd.Factory.Handle (internal/command/newcmd/cmd.go)
   ↓
 cs.NewActiveAgentSessions(ctx, agentName)
   ├ for each (cwd, [agent]) 匹配 entry:
@@ -744,13 +744,13 @@ TestFormatResetResults_AllDead
 - [ ] 新增 `FormatResetResults` helper
 - [ ] 新增 `killGraceTotal = 5 * time.Second` 常量
 
-### 12.2 `internal/gateway/handlers_chatsession.go`
+### 12.2 `internal/command/kill/kill.go`
 
-- [ ] `handleKill` 改用 `FormatKillResults`
+- [ ] `Handle` 改用 `FormatKillResults`（位于 `internal/command/kill/format.go`）
 
-### 12.3 `internal/gateway/handlers_new.go`
+### 12.3 `internal/command/newcmd/cmd.go`
 
-- [ ] `handleNew` 改用 `FormatResetResults`
+- [ ] `Handle` 改用 `FormatResetResults`
 
 ### 12.4 测试
 

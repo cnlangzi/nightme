@@ -15,7 +15,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/registry"
 )
 
 // Factory is the command.SlashCommandFactory for /watch.
@@ -61,7 +60,7 @@ if len(input.Args) < 2 {
 	}
 
 	replyText := fmt.Sprintf("Watch mode set to %s.", mode)
-	if mode == registry.WatchModeAll {
+	if mode == chatsession.WatchModeAll {
 		replyText += " I will now process every message in this chat."
 	} else {
 		replyText += " I will only process messages that @ me or @_all."

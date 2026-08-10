@@ -3,33 +3,8 @@ package gtw
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 )
-
-// pushCwd returns the current working directory of the daemon.
-// Used as the source-of-truth for "where is the user right now"
-// when looking up the .nightme/gtw.yml.
-//
-// Implementation note: we shell out to `pwd` because os.Getwd()
-// reads the daemon's CWD (not the chat's). Each chat's CWD is
-// held in chatsession, but a slash command doesn't have direct
-// access to it from here — the HandlerDeps passed by the factory
-// wrapper has the chatID but not the *chatsession.ChatSession.
-// The factory would need a small refactor (pass the cs through,
-// like runFix does) to read the per-chat CWD without shelling out.
-//
-// We accept the subprocess cost (one `pwd` per /gtw push, ~1ms)
-// for now to keep the diff small. Future: thread cs through the
-// factory's push handler the same way runFix already does.
-func pushCwd() (string, error) {
-	cmd := exec.Command("pwd")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("pwd: %w", err)
-	}
-	return strings.TrimSpace(string(out)), nil
-}
 
 // programmaticPush runs `git push -u origin <branch>`. The -u flag
 // sets upstream tracking so subsequent plain `git push` works

@@ -7,6 +7,7 @@ package chatsession
 
 import (
 	"context"
+	"testing"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -40,9 +41,9 @@ func makeTestMessage(cs *ChatSession, blocks []agent.ContentBlock, userMsgID str
 func newTestASWithFakeHandle(cs *ChatSession) (*AgentSession, *fakeAgentSession) {
 	as := NewAgentSession("as_test", cs.ID, "fake", "/tmp", nil)
 	spy := newFakeAgentSession(1)
-	as.handle = spy.buildLive()
-	as.stat = StatusRunning
-	as.pid = 1
+	as.SetHandleForTest(spy.buildLive())
+	as.SetStatusForTest(StatusRunning)
+	as.SetPIDForTest(1)
 
 	cs.mu.Lock()
 	cs.pool[agentCwdKey{Agent: as.Agent, Cwd: as.Cwd}] = as
@@ -83,4 +84,19 @@ func newTestChannel() *testChannel {
 // given channel.
 func fakeResolvedChannel(ch Channel) func(chatID string) Channel {
 	return func(string) Channel { return ch }
+}
+// pushEvent pushes an EnrichedEvent into the AS's dispatch queue
+// (via the public InjectEvent helper). Test-only — production
+// events come from the bridge's readpump.
+func pushEvent(as *AgentSession, ev EnrichedEvent) {
+	as.InjectEvent(ev)
+}
+
+// makeBareAgentSession creates a fresh AgentSession for tests that
+// don't drive the full Spawn lifecycle. Equivalent to the helper of
+// the same name in the agentsession test package; duplicated here
+// because test files cannot share across packages.
+func makeBareAgentSession(t *testing.T, agentName, cwd string) *AgentSession {
+	t.Helper()
+	return NewAgentSession(newAgentSessionID(), "cs_test", agentName, cwd, nil)
 }

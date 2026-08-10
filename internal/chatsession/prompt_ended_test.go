@@ -150,7 +150,7 @@ func TestAgentSession_ReadyFlipSanity(t *testing.T) {
 	if as.IsReady() {
 		t.Fatal("AS should NOT be ready after Submit")
 	}
-	as.endPrompt(PromptEndClean)
+	as.EndPromptForTest(PromptEndClean)
 	if !as.IsReady() {
 		t.Fatal("AS should be ready after endPrompt")
 	}

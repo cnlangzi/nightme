@@ -101,7 +101,7 @@ func injectAS(t *testing.T, cs *ChatSession, agentName, cwd string, handle *agen
 	defer cs.mu.Unlock()
 	id := newAgentSessionID()
 	as := NewAgentSession(id, cs.ID, agentName, cwd, nil)
-	as.handle = handle
+	as.SetHandleForTest(handle)
 	as.SetRunning(1234) // arbitrary pid; needed so Status()==StatusRunning
 	cs.pool[agentCwdKey{Agent: agentName, Cwd: cwd}] = as
 	return as

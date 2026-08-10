@@ -63,7 +63,7 @@ func (s *Starter) Detect() error {
 
 // Start spawns the CLI under a PTY, runs the ACP initialize +
 // session/new handshake, and returns a live *agent.Agent. The
-// caller (typically chatsession.AgentSession via the Spawner) must
+// caller (typically agentsession.AgentSession via the Spawner) must
 // Close() the returned handle when done. The Starter is unchanged
 // (reusable across many sessions).
 //

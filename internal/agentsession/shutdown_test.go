@@ -1,4 +1,4 @@
-package chatsession
+package agentsession
 
 import (
 	"sync/atomic"
@@ -163,3 +163,9 @@ func TestShutdown_DoubleShutdownIsIdempotent(t *testing.T) {
 // silence unused import warnings.
 var _ = atomic.Int32{}
 var _ = agent.EventAgentText
+// makeTextEvent returns a non-nil AgentEvent so the dispatcher
+// publishes onto EventBus (gated on AgentEvent != nil).
+func makeTextEvent(text string) *agent.AgentEvent {
+	ev := agent.AgentEvent{Kind: agent.EventAgentText, Text: text}
+	return &ev
+}

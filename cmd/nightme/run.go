@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/channel/feishu"
@@ -797,7 +798,7 @@ func wireRuntimeCallbacksAndRestore(
 		// is added on the card. No user-message reaction is
 		// emitted from this path — the user-message surface is
 		// now minimal (⏳ only).
-		cs.PromptEndBus.Subscribe(func(e chatsession.PromptEndedEvent) bool {
+		cs.PromptEndBus.Subscribe(func(e agentsession.PromptEndedEvent) bool {
 			if e.ChatID == "" || e.UserMsgID == "" {
 				return false
 			}
@@ -1094,7 +1095,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 //
 // Returns nil if the AS is no longer in the pool (e.g. after a
 // concurrent /kill). Subscribers must handle nil.
-func lookupASByID(cs *chatsession.ChatSession, id string) *chatsession.AgentSession {
+func lookupASByID(cs *chatsession.ChatSession, id string) *agentsession.AgentSession {
 	if cs == nil || id == "" {
 		return nil
 	}
@@ -1110,7 +1111,7 @@ func lookupASByID(cs *chatsession.ChatSession, id string) *chatsession.AgentSess
 // AgentSession.Agent is immutable (direct field read, no lock);
 // Model() takes RLock internally; git status is captured fresh
 // on each stamp (3s deadline, no caching — see F-48 §1.7).
-func sessionContextInto(out *gateway.OutboundMessage, s *chatsession.AgentSession) {
+func sessionContextInto(out *gateway.OutboundMessage, s *agentsession.AgentSession) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	gitSnap, _ := gtw.CollectStatus(ctx, s.Cwd, gtw.ExecGitRunner{})
 	cancel()

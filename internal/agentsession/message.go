@@ -26,7 +26,7 @@
 // ChatSession that owns the queue, take their own locks for
 // list mutation; the values inside are immutable from the
 // queue's perspective.
-package chatsession
+package agentsession
 
 import (
 	"time"

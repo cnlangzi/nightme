@@ -1,10 +1,10 @@
-// Package chatsession — AgentSession (v1.2 per-CLI-process handle).
+// Package agentsession — AgentSession (v1.2 per-CLI-process handle).
 //
 // See docs/SPEC.md v1.2 §1.1 and docs/feat/F-29-agent-session-pool.md
 // for the full model. In v1.2 the AgentSession replaces v1.1's
 // Session type for process ownership; the per-chat ChatSession owns
 // the pool of AgentSessions.
-package chatsession
+package agentsession
 
 import (
 	"context"
@@ -773,27 +773,14 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	}
 }
 
-// agentCwdKey is the pool map key.
-type agentCwdKey struct {
-	Agent string
-	Cwd   string
-}
-
-// ErrAgentNotFound indicates a pool lookup miss. Callers may use
-// errors.Is to detect and decide whether to spawn.
-var ErrAgentNotFound = errors.New("chatsession: agent not in pool")
-
-// ErrNoSelectedAgent is returned by LookupSelectedAgentSession when
-// cs.selectedAgent is empty. The runtime seeds selectedAgent from
-// cfg.Primary at ChatSession construction (via
-// chatsession.NewManager.GetOrCreate); an empty primary at
-// construction indicates a misconfigured daemon (no global default
-// set in config.yaml).
-var ErrNoSelectedAgent = errors.New("chatsession: selectedAgent is empty (cfg.Primary snapshot was empty at construction)")
-
 // ErrNotRunning is returned by SendText/SendBlocks/Close when called
 // before Spawn() succeeds.
 var ErrNotRunning = errors.New("chatsession: AgentSession not running (Spawn not called or failed)")
+
+// ErrAgentNotFound is returned by pool-lookup helpers when the
+// (agent, cwd) key has no AgentSession. Re-exported from chatsession
+// as chatsession.ErrAgentNotFound for back-compat.
+var ErrAgentNotFound = errors.New("agentsession: agent not in pool")
 
 // Spawn materializes the bridge-level child process via the given
 // Spawner. On success, the AgentSession transitions from
@@ -1111,6 +1098,43 @@ func (as *AgentSession) New(ctx context.Context) error {
 	return h.New(ctx)
 }
 
+// HandlePTYRestart implements the PTY fallback for in-place reset.
+// Called by the chat layer when as.New(ctx) returns
+// agent.ErrRestartRequired. AS owns the full kill + respawn
+// lifecycle so callers don't need to reach into internals
+// (asMu, readpumpStarted, respawn).
+//
+// Preconditions:
+//   - as.handle is non-nil (as was previously spawned successfully).
+//   - launcher is non-nil (caller's responsibility to inject).
+//
+// Returns:
+//   - nil on success; handle has been swapped and readpump reset.
+//   - agent.ErrRestartRequired if launcher is nil (caller's bug).
+//   - any error from launcher.Launch (after respawn marks Exited).
+func (as *AgentSession) HandlePTYRestart(ctx context.Context, launcher Spawner) error {
+	if launcher == nil {
+		return agent.ErrRestartRequired
+	}
+	// Close the old handle. Swallow the close error — respawn is
+	// the source of truth for "did reset succeed".
+	if h := as.handle; h != nil {
+		_ = h.Close()
+	}
+	// Reset the readpump so a fresh drainer starts on the new handle.
+	as.asMu.Lock()
+	as.readpumpStarted = false
+	as.asMu.Unlock()
+	// respawn with empty sessionID — we deliberately want a fresh
+	// conversation, not a resume of the previous one.
+	if err := as.respawn(ctx, launcher, as.args, ""); err != nil {
+		as.SetSessionID("")
+		return err
+	}
+	as.SetSessionID("")
+	return nil
+}
+
 // Close terminates the bridge child (sends shutdown signal to the
 // underlying bridge). Idempotent. Marks status=Exited on success.
 func (as *AgentSession) Close() error {
@@ -1147,4 +1171,59 @@ func (as *AgentSession) ObserveClose() <-chan struct{} {
 		as.SetExited(0)
 	}()
 	return done
+}
+// newAgentSessionID returns a unique ID for an AgentSession. v1.2
+// commit 6 uses a simple counter-based scheme for testability;
+// commit 7 may swap to UUID v7.
+var agentSessionCounter atomic.Uint64
+
+func newAgentSessionID() string {
+	n := agentSessionCounter.Add(1)
+	return fmt.Sprintf("as_%d_%d", time.Now().UnixNano(), n)
+}
+
+// --- Test-only API --------------------------------------------------
+//
+// These methods exist so cross-package tests (chatsession package
+// in particular) can build up AgentSession state without going
+// through Spawn / Spawn-then-kill cycles. Production code MUST NOT
+// use them — use Spawn / SetRunning / SetDetached / SetExited /
+// SetSessionID / SetModel instead.
+//
+// They live in production code (not _test.go) so cross-package tests
+// can call them. The "ForTest" suffix is the convention.
+
+// SetHandleForTest injects a bridge handle. Caller is responsible
+// for keeping the handle alive for the duration of any usage.
+func (as *AgentSession) SetHandleForTest(h *agent.Agent) {
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
+	as.handle = h
+}
+
+// SetStatusForTest sets the runtime status directly.
+func (as *AgentSession) SetStatusForTest(s Status) {
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
+	as.stat = s
+}
+
+// SetPIDForTest sets the OS PID directly.
+func (as *AgentSession) SetPIDForTest(pid int) {
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
+	as.pid = pid
+}
+
+// SetCurrentPromptForTest installs the in-flight Prompt directly.
+// Used by tests that bypass Submit.
+func (as *AgentSession) SetCurrentPromptForTest(p *Prompt) {
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
+	as.currentPrompt = p
+}
+
+// SetIsReadyForTest toggles the isReady atomic flag.
+func (as *AgentSession) SetIsReadyForTest(v bool) {
+	as.isReady.Store(v)
 }

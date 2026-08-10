@@ -112,7 +112,7 @@ func TestFlushHook_BusyQueues(t *testing.T) {
 
 	// End the turn — in production the per-AS readpump does this on
 	// EventAgentDone, then routeEvent calls TryFlush.
-	as.endPrompt(PromptEndClean)
+	as.EndPromptForTest(PromptEndClean)
 	if err := cs.TryFlush(); err != nil {
 		t.Fatalf("TryFlush: %v", err)
 	}

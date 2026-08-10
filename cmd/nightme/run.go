@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/channel/feishu"
@@ -797,7 +798,7 @@ func wireRuntimeCallbacksAndRestore(
 		// is added on the card. No user-message reaction is
 		// emitted from this path — the user-message surface is
 		// now minimal (⏳ only).
-		cs.PromptEndBus.Subscribe(func(e chatsession.PromptEndedEvent) bool {
+		cs.PromptEndBus.Subscribe(func(e agentsession.PromptEndedEvent) bool {
 			if e.ChatID == "" || e.UserMsgID == "" {
 				return false
 			}
@@ -1094,7 +1095,7 @@ func newEventHandler(ch channel.Channel, cs *chatsession.ChatSession, mgr *chats
 //
 // Returns nil if the AS is no longer in the pool (e.g. after a
 // concurrent /kill). Subscribers must handle nil.
-func lookupASByID(cs *chatsession.ChatSession, id string) *chatsession.AgentSession {
+func lookupASByID(cs *chatsession.ChatSession, id string) *agentsession.AgentSession {
 	if cs == nil || id == "" {
 		return nil
 	}
@@ -1110,7 +1111,7 @@ func lookupASByID(cs *chatsession.ChatSession, id string) *chatsession.AgentSess
 // AgentSession.Agent is immutable (direct field read, no lock);
 // Model() takes RLock internally; git status is captured fresh
 // on each stamp (3s deadline, no caching — see F-48 §1.7).
-func sessionContextInto(out *gateway.OutboundMessage, s *chatsession.AgentSession) {
+func sessionContextInto(out *gateway.OutboundMessage, s *agentsession.AgentSession) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	gitSnap, _ := gtw.CollectStatus(ctx, s.Cwd, gtw.ExecGitRunner{})
 	cancel()
@@ -1124,11 +1125,22 @@ func sessionContextInto(out *gateway.OutboundMessage, s *chatsession.AgentSessio
 	// fields: any one of (Agent / Model / GitStatus / Usage) being
 	// present is enough to materialize the SessionContext.
 	// Compaction tracking removed (was the 4th condition).
-	if s.Agent != "" || s.Model() != "" || hasGit ||
+	//
+	// Snapshot Model() and SessionID() once each — both take
+	// asMu.RLock() internally; calling them twice in the gate
+	// + the literal doubles the lock acquisitions per stamp for
+	// no functional gain (a racing SetModel / SetSessionID
+	// between gate and literal would either be visible or not
+	// in both places anyway, and a stale read in the literal is
+	// no worse than a stale read in the gate).
+	model := s.Model()
+	sessionID := s.SessionID()
+	if s.Agent != "" || model != "" || sessionID != "" || hasGit ||
 		out.Usage != nil {
 		out.SessionContext = &gateway.SessionContext{
 			Agent:     s.Agent,
-			Model:     s.Model(),
+			Model:     model,
+			SessionID: sessionID,
 			Workspace: s.Cwd,
 			GitStatus: gitSnap,
 			Usage:     out.Usage,

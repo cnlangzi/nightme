@@ -39,9 +39,93 @@ implementations live next to the existing `GetIssue` /
   generates text.
 - **ErrPRExists sentinel**: `gh pr create`'s "already exists"
   path is mapped to a friendly ❌ instead of a raw error.
+- **Non-worktree mode**: `/gtw pr` (and `/gtw push`) work on a
+  plain `git checkout -b <branch>` checkout without a prior
+  `/gtw fix` — `loadDispatchContext` derives Worktree /
+  Branch / RepoRoot from `git rev-parse --show-toplevel` +
+  `--abbrev-ref HEAD` when there's no `.nightme/gtw.yml`.
+- **Chat-CWD reads**: `dispatchPush` / `dispatchPR` now read
+  `cs.SelectedCwd()` instead of the daemon's process pwd
+  (the previous `pushCwd()` shell-out silently returned the
+  daemon's startup directory and broke any user who `/cwd`'d
+  into a worktree after launching nightme).
 - See [`wip/gtw-pr.md`](./wip/gtw-pr.md) for the design rationale
   and [`wip/gtw-pr-plan.md`](./wip/gtw-pr-plan.md) for the
   implementation phases.
+
+### gtw hooks + agent config (`~/.nightme/gtw.yml`)
+
+`/gtw <fix|push|close|sync>` now supports a per-command user-level
+configuration loaded from `~/.nightme/gtw.yml`. Two surfaces:
+
+- **Agent priority**: `cli -a <name>` > `yml <cmd>.agent` >
+  `cs.SelectedAgent()`. Yml-referenced agent unknown to
+  `agent.Builtins` → warn + fall through to session default
+  (never silently swap, never brick `/gtw`).
+- **before/after hooks**: shell hooks run sequentially around the
+  main command. v1 only supports `type: shell` (or bare-string
+  sugar); the structured form leaves room for `type: agent` /
+  `type: notify` in v2. Implementation lives in
+  `internal/command/gtw/hooks.go` and is wrapped by
+  `Factory.withHooks` at the factory layer; see
+  [`wip/gtw-hooks.md`](./wip/gtw-hooks.md) for the full design.
+
+**Iron rule**: hooks and yml config are additive — they never
+block the main flow. Yml missing → silent skip; yml malformed →
+warn + skip; hook failure → warn + continue to next hook;
+`after` hooks fire even when the main command fails. All hook
+output (success or failure) is echoed back to the chat so users
+can see what actually ran.
+
+Tests added in `internal/command/gtw/hooks_test.go` (32 cases:
+Load semantics, RunHooks failure isolation, FormatResults
+always-echo, ResolveAgent 3-tier + fallback + note-honesty,
+withHooks factory wrapper including chat-order split).
+
+### refactor(chatsession): extract AgentSession to internal/agentsession
+
+`AgentSession` and its directly-coupled types (`Prompt`, `EnrichedEvent`,
+`Spawner`, `Message`, `Status`, `agentSessionCounter`) moved from
+`internal/chatsession/` to a new `internal/agentsession/` package.
+
+Layering after this change:
+
+```
+internal/agent/         abstract: AgentSpec / Agent / Bridge / Mode
+internal/agentsession/  runtime unit: AgentSession + per-AS state
+internal/chatsession/   pool manager: ChatSession + persistence
+```
+
+Call-site impact is minimized via type aliases in `chatsession`
+(`type AgentSession = agentsession.AgentSession`, etc.). New public
+methods on `AgentSession`:
+
+- `HandlePTYRestart(ctx, launcher)` — encapsulates the kill + readpump
+  reset + respawn + `SessionID` clear lifecycle. `ChatSession` no
+  longer reaches into AS internals (asMu, readpumpStarted, respawn).
+- `InjectEvent(ev)` — test-only helper to push events directly into
+  the dispatcher queue.
+- Test-only setters: `SetHandleForTest`, `SetStatusForTest`,
+  `SetPIDForTest`, `SetCurrentPromptForTest`, `SetIsReadyForTest`,
+  `EndPromptForTest`. Production code MUST NOT use them.
+
+Docs: `docs/SPEC.md` §1.1a (new) documents the package structure;
+`docs/feat/F-32` / `F-34` / `F-54` updated to use `agentsession.*`
+type names.
+
+### test(agentsession): satisfy driver interface in fakeDrivers
+
+`fakeDriver` and `callRecordingASDriver` in
+`internal/agentsession/test_helpers_test.go` were missing the
+`Abort` and `SetModel` methods added to `internal/agent.driver`
+by #99 (opencode bridge). The interface assertion in
+`agent.NewAgent` then panicked at test runtime once #102
+extracted AgentSession into its own package and started
+actually passing these fakes through `buildLive`. Fixed by
+adding the two no-op methods; no test currently exercises
+those paths so `nil` is correct. Out of scope for gtw hooks
+but blocks CI on `feat-gtw-hooks` (which merged main), so
+landed here to keep CI green.
 
 ### Codex app-server bridge (new agent)
 

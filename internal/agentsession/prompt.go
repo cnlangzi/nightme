@@ -32,7 +32,7 @@
 // AgentSession at the cost of a small coupling — accepted as the
 // simpler path for Phase 0 (see docs/feat/message_lifecycle.md §4.2
 // "存储归属").
-package chatsession
+package agentsession
 
 import (
 	"time"

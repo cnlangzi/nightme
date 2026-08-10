@@ -75,7 +75,7 @@ func NewStarter(name, command string, args, env []string, cols, rows int) *Start
 // ─── lifecycle ───
 
 // Start spawns the CLI under a PTY and returns a live Agent. The
-// caller (typically chatsession.AgentSession via the Spawner) must
+// caller (typically agentsession.AgentSession via the Spawner) must
 // Close() the returned *driver when done.
 //
 // Start clones the receiver — the template in Builtins is untouched.
@@ -216,7 +216,7 @@ func (d *driver) SendPermission(resp string) error {
 // New signals that the PTY bridge cannot reset conversation context
 // in-place. PTY is a protocol-less byte pipe (F-34 §3.2 + product
 // clarification 2026-08-04: "pty 是删掉进程, 重启进程"). The wrapper
-// layer (chatsession.AgentSession.New) catches this sentinel and
+// layer (agentsession.AgentSession.New) catches this sentinel and
 // falls back to kill-and-respawn via the configured Spawner.
 // Reset is the agent.driver interface name for New.
 func (d *driver) Reset(ctx context.Context) error { return d.New(ctx) }
@@ -224,6 +224,31 @@ func (d *driver) Reset(ctx context.Context) error { return d.New(ctx) }
 func (d *driver) New(ctx context.Context) error {
 	_ = ctx
 	return agent.ErrRestartRequired
+}
+
+// Abort is not supported on the PTY bridge. PTY-mode CLIs don't
+// have a structured "abort the in-flight turn" RPC — the only
+// way to interrupt is to write Ctrl-C bytes to stdin or send a
+// signal to the child, both of which are outside the agent.Agent
+// contract (the runtime treats ErrNotSupported as "this bridge
+// can't honor Abort; just close the session instead"). Returning
+// the sentinel lets the runtime surface a clean "not supported"
+// message rather than treating the absence as a generic error.
+//
+// See internal/agent/agent.go ErrNotSupported.
+func (d *driver) Abort(ctx context.Context) error {
+	_ = ctx
+	return agent.ErrNotSupported
+}
+
+// SetModel is not supported on the PTY bridge. PTY has no
+// provider/model concept — the binary decides its own model at
+// startup.
+func (d *driver) SetModel(ctx context.Context, providerID, modelID string) error {
+	_ = ctx
+	_ = providerID
+	_ = modelID
+	return agent.ErrNotSupported
 }
 
 // Close terminates the session by closing the PTY. Idempotent.

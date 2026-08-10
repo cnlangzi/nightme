@@ -13,14 +13,17 @@
 package chatsession
 
 import (
+	"os"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
 // requireRealPi skips the calling test when the `pi` binary is not
-// resolvable on PATH, OR when testing.Short() is set (CI / fast
-// dev loop). Call this as the first line of any test that
-// spawns a real pi process.
+// resolvable on PATH, when testing.Short() is set (CI / fast dev
+// loop), or when NIGHTME_REAL_PI is set to anything other than
+// "1"/"true"/"yes"/"on" (default: skipped). Call this as the
+// first line of any test that spawns a real pi process.
 //
 // The pi-E2E tests are inherently environment-dependent: they
 // need a working `pi` install AND tolerate the bridge's variable
@@ -28,11 +31,16 @@ import (
 // Skip them by default; opt in explicitly:
 //
 //	go test ./internal/chatsession -run RealPi -v
-//	go test ./internal/chatsession -count=1            # skip in CI
+//	NIGHTME_REAL_PI=1 go test ./internal/chatsession -run RealPi -v
+//	go test -short ./internal/chatsession               # always skip
 func requireRealPi(t *testing.T) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping real-pi test in -short mode (use -run RealPi to opt in)")
+	}
+	switch strings.ToLower(os.Getenv("NIGHTME_REAL_PI")) {
+	case "", "0", "false", "no", "off":
+		t.Skip("set NIGHTME_REAL_PI=1 to enable real-pi e2e tests")
 	}
 	if _, err := exec.LookPath("pi"); err != nil {
 		t.Skipf("pi binary not on PATH: %v", err)

@@ -83,6 +83,7 @@ In a 1:1 Feishu chat with the bot:
 /use claude           # pick primary agent (lazy spawn; first run)
 /hello                # plain text flows to the agent
 /use codex            # switch agent; pool preserved (no restart)
+/use opencode         # switch to opencode (HTTP server, see docs/bridge/opencode.md)
 /kill                 # clear pool; next message respawns
 /help                 # list every nightme command
 ```

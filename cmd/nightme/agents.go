@@ -20,6 +20,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
 	"github.com/cnlangzi/nightme/internal/bridge/codex"
+	"github.com/cnlangzi/nightme/internal/bridge/opencode"
 	"github.com/cnlangzi/nightme/internal/bridge/pi"
 	"github.com/cnlangzi/nightme/internal/bridge/pty"
 )
@@ -36,6 +37,13 @@ func init() {
 	// docs/bridge/codex.md §1 for the rationale on not supporting
 	// the legacy `codex exec` backend.
 	agent.Builtins.Register(codex.NewStarter("codex", "codex", nil))
+
+	// opencode — the `opencode serve` HTTP bridge. The bridge
+	// spawns `opencode serve --hostname=127.0.0.1 --port=0`, parses
+	// the bound URL from stdout, and drives the server via the 9
+	// endpoint OpenAPI surface. SSE is the event source. See
+	// docs/feat/F-OPENCODE-opencode-bridge.md for design notes.
+	agent.Builtins.Register(opencode.NewStarter("opencode", "opencode", nil))
 
 	// pi — the long-lived `pi --mode rpc` JSONL bridge. The agent
 	// driver is the @earendil-works/pi-coding-agent CLI; see

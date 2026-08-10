@@ -327,7 +327,8 @@ func TestRunPush_CleanNoUnpushed(t *testing.T) {
 	})
 
 	res, err := dispatchPush(context.Background(), newPushChatSession(t),
-		HandlerDeps{Git: git}, "chat", "msg", pushArgs{})
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
+
 	if err != nil || res == nil {
 		t.Fatalf("dispatchPush err=%v res=%v", err, res)
 	}
@@ -356,7 +357,8 @@ func TestRunPush_CleanWithUnpushed(t *testing.T) {
 	})
 
 	_, err := dispatchPush(context.Background(), newPushChatSession(t),
-		HandlerDeps{Git: git}, "chat", "msg", pushArgs{})
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
+
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -392,7 +394,7 @@ func TestRunPush_DirtyDelegatesToAgent(t *testing.T) {
 	_ = cs.SetSelectedAgent("claude")
 
 	_, err := dispatchPush(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", pushArgs{})
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -442,7 +444,7 @@ func TestRunPush_DirtyWithAgentFlag(t *testing.T) {
 	_ = cs.SetSelectedAgent("claude") // chat default = claude
 
 	_, err := dispatchPush(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", pushArgs{Agent: "opencode"})
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{Agent: "opencode"}, "")
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -468,7 +470,8 @@ func TestRunPush_NoAgentSelected(t *testing.T) {
 	})
 
 	_, err := dispatchPush(context.Background(), newPushChatSession(t),
-		HandlerDeps{Git: git}, "chat", "msg", pushArgs{})
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
+
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -493,7 +496,7 @@ func TestRunPush_UnknownAgent(t *testing.T) {
 	_ = cs.SetSelectedAgent("claude")
 
 	_, err := dispatchPush(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", pushArgs{Agent: "nope"})
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{Agent: "nope"}, "")
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -522,7 +525,7 @@ func TestRunPush_AgentBinaryMissing(t *testing.T) {
 	_ = cs.SetSelectedAgent("claude")
 
 	_, err := dispatchPush(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", pushArgs{})
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -551,7 +554,7 @@ func TestRunPush_AgentRunOnceError(t *testing.T) {
 	_ = cs.SetSelectedAgent("claude")
 
 	_, err := dispatchPush(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", pushArgs{})
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -576,7 +579,7 @@ func TestRunPush_ConflictState(t *testing.T) {
 	_ = cs.SetSelectedAgent("claude")
 
 	_, err := dispatchPush(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", pushArgs{})
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -595,7 +598,8 @@ func TestDispatchPush_NoYml(t *testing.T) {
 	// Don't call writeYml — leave the dir empty.
 
 	_, err := dispatchPush(context.Background(), newPushChatSession(t),
-		HandlerDeps{Git: git}, "chat", "msg", pushArgs{})
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
+
 	if err != nil {
 		t.Fatalf("dispatchPush: %v", err)
 	}
@@ -622,7 +626,8 @@ func TestDispatchPush_MalformedYml(t *testing.T) {
 	}
 
 	_, err := dispatchPush(context.Background(), newPushChatSession(t),
-		HandlerDeps{Git: git}, "chat", "msg", pushArgs{})
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
+
 	if err != nil {
 		t.Fatalf("dispatchPush: %v", err)
 	}
@@ -766,7 +771,7 @@ func TestRunPush_NonWorktree_CleanWithUnpushed(t *testing.T) {
 	s := captureCh(t, cs)
 
 	_, err := dispatchPush(context.Background(), cs,
-		HandlerDeps{Git: git}, "chat", "msg", pushArgs{})
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}

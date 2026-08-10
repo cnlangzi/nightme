@@ -8,7 +8,7 @@
 // usage aggregation moved out of AgentSession — usage is now a
 // per-turn snapshot that flows straight from bridge → channel
 // footer.
-package chatsession
+package agentsession
 
 import (
 	"context"

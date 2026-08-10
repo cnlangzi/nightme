@@ -276,7 +276,7 @@ npm install -g @earendil-works/pi-coding-agent
 pnpm add -g @earendil-works/pi-coding-agent
 ```
 
-`nightme agents` 表格显示 `pi / pi / --mode rpc`；`nightme config` → Agents 可选为 primary；飞书会话中 `/use pi` 走现有 `chatsession.Spawner`，经 `Detect()` (`exec.LookPath("pi")`) → `Start()`（`exec.Command("pi", "--mode", "rpc")` + 真实 pipes）→ `newSession(...)`。
+`nightme agents` 表格显示 `pi / pi / --mode rpc`；`nightme config` → Agents 可选为 primary；飞书会话中 `/use pi` 走现有 `agentsession.Spawner`，经 `Detect()` (`exec.LookPath("pi")`) → `Start()`（`exec.Command("pi", "--mode", "rpc")` + 真实 pipes）→ `newSession(...)`。
 
 ## 8. 已知限制（首期明确）
 

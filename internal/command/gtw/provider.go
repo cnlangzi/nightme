@@ -1,7 +1,6 @@
 package gtw
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -9,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os/exec"
 	"strings"
 	"time"
 )
@@ -368,7 +366,7 @@ func redactForDisplay(remoteURL string) string {
 //
 // `prober` may be nil; production uses ExecHTTPProber{} with a 3s
 // default timeout. Tests inject a fake that returns canned JSON.
-func Detect(ctx context.Context, remoteURL string, prober HTTPProber) (GitProvider, error) {
+func Detect(ctx context.Context, remoteURL string, prober HTTPProber, worktree string) (GitProvider, error) {
 	if prober == nil {
 		prober = &ExecHTTPProber{}
 	}
@@ -385,9 +383,9 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber) (GitProvid
 	lower := strings.ToLower(remoteURL)
 	switch {
 	case strings.Contains(lower, "github.com"):
-		return &GitHubProvider{host: host}, nil
+		return &GitHubProvider{host: host, Worktree: worktree}, nil
 	case strings.Contains(lower, "gitlab"):
-		return &GitLabProvider{host: host}, nil
+		return &GitLabProvider{host: host, Worktree: worktree}, nil
 	}
 
 	// Stage B · Live API probe (only when Stage A was ambiguous).
@@ -399,7 +397,7 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber) (GitProvid
 			Revision string `json:"revision"`
 		}
 		if json.Unmarshal(body, &v) == nil && (v.Version != "" || v.Revision != "") {
-			return &GitLabProvider{host: host, version: v.Version}, nil
+			return &GitLabProvider{host: host, version: v.Version, Worktree: worktree}, nil
 		}
 	}
 	if body, err := prober.Probe(ctx, host, "/api/v3/meta"); err == nil {
@@ -409,7 +407,7 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber) (GitProvid
 			// {"verifiable_password_authentication":..., ...}.
 			// No top-level "version" but identifiable by content.
 			if _, hasGH := meta["verifiable_password_authentication"]; hasGH {
-				return &GitHubProvider{host: host}, nil
+				return &GitHubProvider{host: host, Worktree: worktree}, nil
 			}
 		}
 	}
@@ -421,12 +419,12 @@ func Detect(ctx context.Context, remoteURL string, prober HTTPProber) (GitProvid
 // and binds host + version in one call. Use NewProvider only when
 // the caller has already identified the kind (e.g. tests, or a
 // future "force provider" override flag).
-func NewProvider(kind ProviderKind, host string) (GitProvider, error) {
+func NewProvider(kind ProviderKind, host, worktree string) (GitProvider, error) {
 	switch kind {
 	case ProviderGitHub:
-		return &GitHubProvider{host: host}, nil
+		return &GitHubProvider{host: host, Worktree: worktree}, nil
 	case ProviderGitLab:
-		return &GitLabProvider{host: host}, nil
+		return &GitLabProvider{host: host, Worktree: worktree}, nil
 	default:
 		return nil, ErrUnsupportedProvider
 	}
@@ -497,27 +495,29 @@ func (p *ExecHTTPProber) Probe(ctx context.Context, host, path string) ([]byte, 
 }
 
 // CLIRunner abstracts gh / glab. Same pattern as GitRunner: tests
-// inject a fake; production uses exec.CommandContext.
+// inject a fake; production delegates to runCmd (see exec.go).
+//
+// Note: this interface does NOT take a dir argument. Callers that
+// have a known worktree path should bind it via a wrapper (see
+// resolveProvider) so ExecCLIRunner.Dir is non-empty when invoked
+// — otherwise gh will inherit the daemon CWD, which can be stale.
 type CLIRunner interface {
 	Run(ctx context.Context, name string, args ...string) (stdout, stderr string, err error)
 }
 
-// ExecCLIRunner is the production CLIRunner.
-type ExecCLIRunner struct{}
+// ExecCLIRunner is the production CLIRunner. Dir, when set, is
+// passed to runCmd so the spawned gh/glab process runs in that
+// directory instead of inheriting the daemon CWD (see exec.go).
+type ExecCLIRunner struct {
+	Dir string
+}
 
-// Run implements CLIRunner.
-func (ExecCLIRunner) Run(ctx context.Context, name string, args ...string) (string, string, error) {
-	if name == "" {
-		return "", "", errors.New("gtw: cli: empty command name")
-	}
-	cmd := exec.CommandContext(ctx, name, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return strings.TrimRight(stdout.String(), "\n"),
-		strings.TrimRight(stderr.String(), "\n"),
-		err
+// Run implements CLIRunner by delegating to runCmd. Dir flows
+// through transparently — empty means "inherit parent CWD", which
+// preserves the pre-refactor behavior for callers that have no
+// known workspace yet.
+func (e ExecCLIRunner) Run(ctx context.Context, name string, args ...string) (string, string, error) {
+	return runCmd(ctx, e.Dir, name, args...)
 }
 
 // GitHubProvider wraps the `gh` CLI. Auth is delegated to
@@ -529,7 +529,17 @@ func (ExecCLIRunner) Run(ctx context.Context, name string, args ...string) (stri
 // nor GitHub Enterprise exposes one via /api/v3/meta).
 type GitHubProvider struct {
 	Runner CLIRunner
-	host   string
+
+	// Worktree is the working directory spawned gh/glab processes
+	// should run in. Set by resolveProvider from c.Worktree so gh
+	// doesn't fall back to the daemon CWD (which may have been
+	// stale'd since startup — see exec.go for the full rationale).
+	// Empty means "inherit parent CWD", matching the pre-fix
+	// behavior for callers that haven't yet discovered their
+	// workspace.
+	Worktree string
+
+	host string
 }
 
 // Kind implements GitProvider.
@@ -545,7 +555,7 @@ func (c *GitHubProvider) runner() CLIRunner {
 	if c.Runner != nil {
 		return c.Runner
 	}
-	return ExecCLIRunner{}
+	return ExecCLIRunner{Dir: c.Worktree}
 }
 
 // GetIssue runs `gh issue view <id> --repo <owner>/<repo> --json ...`
@@ -721,7 +731,12 @@ func (c *GitHubProvider) CreatePR(ctx context.Context, owner, repo, base, head, 
 // host is set by Detect / NewProvider; version is populated from
 // /api/v4/version probe when Detect's Stage B succeeds.
 type GitLabProvider struct {
-	Runner  CLIRunner
+	Runner CLIRunner
+
+	// Worktree is the working directory spawned gh/glab processes
+	// should run in. See GitHubProvider.Worktree for the rationale.
+	Worktree string
+
 	host    string
 	version string
 }
@@ -742,7 +757,7 @@ func (c *GitLabProvider) runner() CLIRunner {
 	if c.Runner != nil {
 		return c.Runner
 	}
-	return ExecCLIRunner{}
+	return ExecCLIRunner{Dir: c.Worktree}
 }
 
 // GetIssue runs `glab issue view <id> --output json`. Older glab

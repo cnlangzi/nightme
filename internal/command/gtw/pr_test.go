@@ -484,7 +484,7 @@ func TestDispatchPR_ResolveProvider_FromYml(t *testing.T) {
 	// doesn't expect to be invoked from the yml branch). We
 	// install a Detect that fails the test loudly.
 	detectCalled := false
-	rig.deps.Detect = func(context.Context, string, HTTPProber) (GitProvider, error) {
+	rig.deps.Detect = func(context.Context, string, HTTPProber, string) (GitProvider, error) {
 		detectCalled = true
 		return nil, errors.New("Detect should NOT be called when yml Repo+Provider are set")
 	}

@@ -337,7 +337,7 @@ func parsePRReply(text string) (title, body string, err error) {
 // echo credentials; the bucket split mirrors runFixRemote.
 func resolveProvider(ctx context.Context, c Context, deps HandlerDeps) (GitProvider, string, string, error) {
 	if c.Repo != "" && c.Provider != "" {
-		prov, err := NewProvider(ProviderKind(c.Provider), "")
+		prov, err := NewProvider(ProviderKind(c.Provider), "", c.Worktree)
 		if err != nil {
 			return nil, "", "", fmt.Errorf("provider %q from gtw.yml unsupported: %w", c.Provider, err)
 		}
@@ -359,7 +359,7 @@ func resolveProvider(ctx context.Context, c Context, deps HandlerDeps) (GitProvi
 	if prober == nil {
 		prober = &ExecHTTPProber{Timeout: 3 * time.Second}
 	}
-	prov, err := detect(ctx, remoteURL, prober)
+	prov, err := detect(ctx, remoteURL, prober, c.Worktree)
 	if err != nil {
 		redacted := redactForDisplay(remoteURL)
 		switch {

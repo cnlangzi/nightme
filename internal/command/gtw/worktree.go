@@ -1,12 +1,10 @@
 package gtw
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -23,20 +21,16 @@ type GitRunner interface {
 // otherwise it is the working directory of the spawned process.
 type ExecGitRunner struct{}
 
-// Run implements GitRunner by exec.CommandContext.
+// Run implements GitRunner by delegating to runCmd (see exec.go) —
+// the exec / Dir / capture plumbing lives in one place, so this
+// path can never drift from the CLI runner's. dir may be empty
+// (run in the caller's cwd); otherwise it is the working
+// directory of the spawned process.
 func (ExecGitRunner) Run(ctx context.Context, dir string, args ...string) (string, string, error) {
 	if len(args) == 0 {
 		return "", "", errors.New("gtw: git: empty argv")
 	}
-	cmd := exec.CommandContext(ctx, "git", args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return strings.TrimRight(stdout.String(), "\n"), strings.TrimRight(stderr.String(), "\n"), err
+	return runCmd(ctx, dir, "git", args...)
 }
 
 // ErrNotInGitRepo is returned by RepoRoot when cwd (or the

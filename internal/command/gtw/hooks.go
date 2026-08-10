@@ -148,7 +148,7 @@ func Load() (Config, LoadNotes) {
 // execution failure (exit != 0, timeout, unsupported type, etc.).
 // All failures are non-fatal by design — see wip/gtw-hooks.md.
 type HookResult struct {
-	Name   string // human-readable label: "sh -c <run>" or "<type>:<run-truncated>"
+	Name   string // user-facing command label: <run>, or "<empty>" / "<type>:<run-truncated>" for error cases
 	Stdout string
 	Stderr string
 	Err    error
@@ -213,8 +213,11 @@ func runOneHook(ctx context.Context, h Hook, cwd string) HookResult {
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
+	// Name is the user-facing command label. Held to the bare
+	// run string (no "sh -c " prefix) so FormatResults can render
+	// it as `> <run>` without double-stamping the shell layer.
 	return HookResult{
-		Name:   "sh -c " + run,
+		Name:   run,
 		Stdout: stdout.String(),
 		Stderr: stderr.String(),
 		Err:    err,
@@ -222,23 +225,29 @@ func runOneHook(ctx context.Context, h Hook, cwd string) HookResult {
 }
 
 // FormatResults renders hook results as a single markdown block
-// suitable for appending to a command reply. The block is
-// formatted with a section header so users can see what
-// actually ran (per the "always echo" decision in
-// wip/gtw-hooks.md).
+// suitable for appending to a command reply. The block follows
+// the standard gtw title convention (`✅ <text>`) so the hook
+// run-output reads as a first-class reply card next to the main
+// `✅ ... ready` card — not a separate "panel" with box-drawing
+// borders.
+//
+// Per-hook output uses a `> <run>` shell-prompt prefix (matches
+// the user's mental model of "I ran this command"); stdout/stderr
+// is indented two spaces underneath so multi-line output stays
+// visually attached to its command.
 //
 // Returns "" when results is empty so callers can concatenate
-// without nil checks.
+// without nil checks. Block has no leading newline; the caller
+// (cmd.go `formatLoadNotes` + `FormatResults` concatenation) is
+// responsible for separation.
 func FormatResults(label string, results []HookResult) string {
 	if len(results) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("\n━━ hooks: ")
-	b.WriteString(label)
-	b.WriteString(" ━━\n")
-	for i, r := range results {
-		fmt.Fprintf(&b, "[%d] $ %s\n", i+1, r.Name)
+	fmt.Fprintf(&b, "✅ hooks: %s\n", label)
+	for _, r := range results {
+		fmt.Fprintf(&b, "> %s\n", r.Name)
 		if out := strings.TrimRight(r.Stdout, "\n"); out != "" {
 			b.WriteString(indentLines(out, "  "))
 			b.WriteString("\n")

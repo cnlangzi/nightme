@@ -122,7 +122,7 @@ func formatLoadNotes(notes LoadNotes) string {
 	if !notes.HasWarnings() {
 		return ""
 	}
-	return "\n━━ hooks config ━━\n" + strings.Join(notes.Warnings, "\n") + "\n"
+	return "⚠️ hooks config\n" + strings.Join(notes.Warnings, "\n") + "\n"
 }
 
 // Spec implements command.SlashCommandFactory.

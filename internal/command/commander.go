@@ -18,6 +18,7 @@ package command
 import (
 	"context"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
@@ -126,23 +127,60 @@ func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, cs *chatse
 	return out, true, nil
 }
 
+// parseCommand detects whether text begins with a slash command prefix
+// (half-width '/' U+002F or full-width '／' U+FF0F), normalizes it to
+// half-width, and returns the trimmed body following the prefix.
+//
+// Returns:
+//
+//	body:    the trimmed text after the prefix (already without leading "/")
+//	matched: true when text starts with "/" (any flavor) AND has non-empty body
+//
+// Rules:
+//
+//  1. Skip leading whitespace (TrimLeft)
+//  2. First character normalized: '/' (U+002F) or '／' (U+FF0F) → '/'
+//  3. Trim leading whitespace after prefix
+//  4. Empty body → matched=false (防呆: lone "/" should fall through)
+//
+// Mirrors parseShell in internal/shell/dispatch.go — both share the
+// same normalization contract, kept in lock-step by the test matrix
+// in wip/feat-shell.md.
+func parseCommand(text string) (body string, matched bool) {
+	text = strings.TrimLeft(text, " \t")
+	if text == "" {
+		return "", false
+	}
+	r, size := utf8.DecodeRuneInString(text)
+	switch r {
+	case '/', '／': // / ／
+	default:
+		return "", false
+	}
+	rest := strings.TrimLeft(text[size:], " \t")
+	if rest == "" {
+		return "", false
+	}
+	return rest, true
+}
+
 // extractCommand pulls the command name + trailing args out of
 // input. Returns (name, args, isSlashCommand). isSlashCommand
-// is false when the text doesn't start with "/" — the caller
+// is false when the text doesn't start with a slash prefix (or
+// the prefix is followed only by whitespace) — the caller
 // should fall through to the agent loop.
+//
+// Uses parseCommand for prefix detection (FW→HW normalization +
+// trim + empty-body guard); only tokenizes the body when the
+// prefix matched.
 func (c *commander) extractCommand(input SlashInput) (cmdName string, args []string, isSlashCommand bool) {
-	text := strings.TrimSpace(input.Text)
-	if text == "" || !strings.HasPrefix(text, "/") {
+	body, matched := parseCommand(input.Text)
+	if !matched {
 		return "", nil, false
 	}
-	// Tokenize on whitespace; tokens[0] has the leading "/".
-	tokens := strings.Fields(text)
+	tokens := strings.Fields(body)
 	if len(tokens) == 0 {
 		return "", nil, false
 	}
-	rawName := strings.TrimPrefix(tokens[0], "/")
-	if rawName == "" {
-		return "", nil, false
-	}
-	return rawName, tokens[1:], true
+	return tokens[0], tokens[1:], true
 }

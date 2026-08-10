@@ -50,6 +50,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/registry"
+	"github.com/cnlangzi/nightme/internal/shell"
 )
 
 // runDeps holds the construction seams for the daemon: every
@@ -485,6 +486,52 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		return &gateway.CommandResult{
 			Consumed: out.Consumed,
 			Dropped:  out.Dropped,
+			Reply:    out.Reply,
+		}, nil
+	})
+
+	// feat-shell: install the `!cmd` shell dispatcher. Symmetric
+	// to the commander shim above; runs in priority 3 of the
+	// gateway dispatch chain (between tryCommandDispatch and
+	// tryMessageDispatch). The shell package owns its own prefix
+	// detection (parseShell) — this shim is transport-only.
+	//
+	// We resolve the chat session once via mgr.GetOrCreate (same
+	// as the commander shim) so shell.Dispatch gets the chat's
+	// SelectedCwd as its working directory. If GetOrCreate fails
+	// (e.g. agent registry not loaded), fall through to message
+	// dispatch — the user can still talk to the agent.
+	gwImpl.WithShellDispatch(func(ctx context.Context, msg *gateway.InboundMessage) (*gateway.CommandResult, error) {
+		if msg == nil {
+			return nil, nil
+		}
+		cs, err := mgr.GetOrCreate(msg.ChatID, cfg.Primary)
+		if err != nil {
+			slog.Default().Warn("runtime shim (shell): GetOrCreate failed",
+				"chat_id", msg.ChatID, "err", err)
+			return nil, nil
+		}
+		// shell.Dispatch consumes the "!" prefix itself; we
+		// always pass msg.Text through unchanged. The chat's
+		// SelectedCwd is the workdir; fall back to the
+		// process CWD if the chat hasn't picked one yet (the
+		// shell package surfaces a friendly error if cwd is
+		// empty after trim).
+		cwd := cs.SelectedCwd()
+		if cwd == "" {
+			if wd, wderr := os.Getwd(); wderr == nil {
+				cwd = wd
+			}
+		}
+		out, err := shell.Dispatch(ctx, shell.Request{
+			Text: msg.Text,
+			Cwd:  cwd,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &gateway.CommandResult{
+			Consumed: out.Consumed,
 			Reply:    out.Reply,
 		}, nil
 	})

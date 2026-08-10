@@ -187,18 +187,83 @@ func TestNewCommander_CaseInsensitive(t *testing.T) {
 }
 
 func TestNewCommander_EmptyAfterSlash_FallsThrough(t *testing.T) {
+	// Lone slash "/" or slash + only whitespace "/   " is not a
+	// slash command — fall through (防呆: empty body after prefix).
 	c := NewCommander(NewRegistry())
 	cs := &chatsession.ChatSession{}
-	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{}, cs, SlashInput{Text: "/   trailing only"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	for _, text := range []string{"/", "/   ", "/\t", "/  \t  "} {
+		got, handled, err := c.Dispatch(context.Background(), RuntimeServices{}, cs, SlashInput{Text: text})
+		if err != nil {
+			t.Fatalf("Dispatch(%q): %v", text, err)
+		}
+		if handled {
+			t.Errorf("Dispatch(%q): empty-after-slash should report handled=false, got handled=true", text)
+		}
+		if got != nil {
+			t.Errorf("Dispatch(%q): empty-after-slash should return nil output, got %+v", text, got)
+		}
 	}
-	// "/" alone or "/ " is not a slash command — fall through.
-	if handled {
-		t.Errorf("'/   ' (empty name) should report handled=false, got handled=true")
+}
+
+func TestNewCommander_LeadingWhitespace_BeforeSlash_Routes(t *testing.T) {
+	// parseCommand trims leading whitespace, so "   /cmd" should
+	// dispatch as if it were "/cmd". Verifies the FW→HW + trim
+	// normalization applies to whitespace BEFORE the prefix too.
+	reg := NewRegistry()
+	gtw := newFakeCmd("gtw", "")
+	reg.Register(gtw)
+	c := NewCommander(reg)
+	cs := &chatsession.ChatSession{}
+
+	for _, text := range []string{"   /gtw", "\t/gtw", "  \t/gtw hi"} {
+		got, handled, err := c.Dispatch(context.Background(), RuntimeServices{}, cs, SlashInput{Text: text})
+		if err != nil {
+			t.Fatalf("Dispatch(%q): %v", text, err)
+		}
+		if !handled {
+			t.Errorf("Dispatch(%q): should be handled as slash command, got handled=false", text)
+		}
+		if !got.Consumed || got.Reply != "ok-gtw" {
+			t.Errorf("Dispatch(%q): expected routed to gtw, got %+v", text, got)
+		}
 	}
-	if got != nil {
-		t.Errorf("'/   ' should return nil output, got %+v", got)
+}
+
+// TestParseCommand_Matrix locks in the 13-row normalization contract
+// shared between commander.parseCommand and shell.parseShell. See
+// wip/feat-shell.md §"防呆示例" for the authoritative table; if you
+// change the rules, update both parsers AND this test in lock-step.
+func TestParseCommand_Matrix(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		wantBody string
+		wantOK   bool
+	}{
+		{"empty", "", "", false},
+		{"whitespace_only", "   ", "", false},
+		{"plain_text", "hello", "", false},
+		{"half_slash_cmd", "/cmd", "cmd", true},
+		{"full_width_slash_cmd", "／cmd", "cmd", true},
+		{"leading_whitespace_slash", "   /cmd", "cmd", true},
+		{"slash_followed_by_whitespace", "/   cmd", "cmd", true},
+		{"lone_slash", "/", "", false},
+		{"slash_only_whitespace", "/   ", "", false},
+		{"first_char_is_bang", "!ls", "", false}, // parseCommand only handles /
+		{"slash_inside_string", "echo /hi", "", false},
+		{"fw_slash_with_trailing_space", "／  hi", "hi", true},
+		{"tab_separated", "/gtw\tfix", "gtw\tfix", true}, // trim, not all whitespace-collapse
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotBody, gotOK := parseCommand(tc.input)
+			if gotBody != tc.wantBody {
+				t.Errorf("parseCommand(%q) body = %q, want %q", tc.input, gotBody, tc.wantBody)
+			}
+			if gotOK != tc.wantOK {
+				t.Errorf("parseCommand(%q) ok = %v, want %v", tc.input, gotOK, tc.wantOK)
+			}
+		})
 	}
 }
 

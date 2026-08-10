@@ -62,8 +62,7 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw fix --name <branch>         create a local worktree (no issue)\n" +
 			"/gtw fix -n <branch>             short form of --name\n" +
 			"/gtw fix <id> --force            nuke any leftover at the target path, then re-create\n" +
-			"/gtw close                       tear down the worktree created by /gtw fix\n" +
-			"/gtw close --force               force-close even when the worktree is dirty\n" +
+			"/gtw close                       tear down the worktree, delete the branch, and sync main\n" +
 			"/gtw push                       commit + push the worktree's branch to origin\n" +
 			"/gtw push --pr                   also open a PR (gh/glab) against the default branch\n" +
 			"/gtw push --no-commit            refuse if there are uncommitted changes\n" +
@@ -251,14 +250,19 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 }
 
 // runClose handles `/gtw close`. Tears down the worktree
-// created by `/gtw fix`, switches CWD back to the main repo,
-// and clears gtw state. See wip/gtw.md §14.5 for the full flow
-// and RunClose for the implementation.
+// created by `/gtw fix`, deletes the local branch, switches CWD
+// back to the main repo, clears gtw state, and then runs the
+// upstream sync (same card /gtw sync emits). Two cards land in
+// the chat: one for the local teardown, one for the sync.
+// See wip/gtw.md §14.5 for the full flow and RunClose for the
+// implementation.
 //
-// --force / -f skips the dirty-worktree refusal and force-
-// removes via `git worktree remove --force`. Use this when
-// the user genuinely wants to throw away their in-progress
-// changes (e.g. they're abandoning the branch).
+// No flags — close is intentionally all-or-nothing. If the
+// worktree is dirty the user must commit / stash / discard
+// before re-running; we don't expose a force-escape hatch.
+// /gtw fix keeps its own --force (different concern: nuking a
+// leftover worktree at the target path) so the close symmetry
+// doesn't extend there.
 //
 // Construction mirrors runFix: the slot / drafts shims route to
 // the per-chat Manager state, deps are forwarded verbatim, and
@@ -273,15 +277,7 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, _ *ch
 	}
 	slot := &managerContextSlot{mgr: f.mgr, chatID: input.ChatID}
 
-	force, err := parseCloseForce(input.Args[2:])
-	if err != nil {
-		return &command.SlashOutput{
-			Reply:    fmt.Sprintf("❌ %v", err),
-			Consumed: true,
-		}, nil
-	}
-
-	res, err := RunClose(ctx, cs, slot, f.deps, input.ChatID, input.MessageID, force)
+	res, err := RunClose(ctx, cs, slot, f.deps, input.ChatID, input.MessageID)
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw close failed: %v", err),
@@ -339,98 +335,20 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, _ *cha
 			Consumed: true,
 		}, nil
 	}
-	newHead, pullOut, err := RefreshDefaultBranch(ctx, repoRoot, f.deps)
+	// /gtw sync is a user-initiated refresh, so it ignores the
+	// SkipRefreshDefaultBranch test seam (buildSyncReply honours
+	// it as a short-circuit — but a real user calling /gtw sync
+	// should never see that flag set).
+	body, err := buildSyncReply(ctx, repoRoot, f.deps)
 	if err != nil {
-		return &command.SlashOutput{
-			Reply:    err.Error(),
-			Consumed: true,
-		}, nil
+		return &command.SlashOutput{Reply: err.Error(), Consumed: true}, nil
 	}
-	branch, err := DefaultBranch(ctx, repoRoot, f.deps.Git)
-	if err != nil {
-		// Fall back to raw pull output if we can't read the
-		// branch name — better than a useless empty reply.
-		return &command.SlashOutput{Reply: pullOut, Consumed: true}, nil
-	}
-	return &command.SlashOutput{
-		Reply:    renderSyncReply(branch, newHead, pullOut, repoRoot, ctx, f.deps.Git),
-		Consumed: true,
-	}, nil
+	return &command.SlashOutput{Reply: body, Consumed: true}, nil
 }
 
-// renderSyncReply turns git pull --rebase stdout into a compact
-// IM-friendly summary.
-//
-//   - "Already up to date." → "✨ origin/<branch> already up to date"
-//   - "Updating <old>..<new>" → header line + commit subject list
-//     capped at 10 entries ("📥 pulled N commits: • …")
-//   - Anything else (rare config variants) → fall back to the
-//     raw pull output so the user still sees what happened.
-//
-// On any parsing/log failure (missing SHA, git log error), we
-// degrade gracefully to the raw pull output rather than surfacing
-// a formatting-internal error to the user.
-func renderSyncReply(branch, newHead, pullOut, repoRoot string, ctx context.Context, git GitRunner) string {
-	if strings.Contains(pullOut, "Already up to date.") {
-		return fmt.Sprintf("✨ origin/%s already up to date", branch)
-	}
-
-	// Find the "Updating <old>..<new>" line.
-	var oldSHA string
-	for _, line := range strings.Split(pullOut, "\n") {
-		rest, ok := strings.CutPrefix(line, "Updating ")
-		if !ok {
-			continue
-		}
-		parts := strings.SplitN(rest, "..", 2)
-		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
-			oldSHA = parts[0]
-			break
-		}
-	}
-	if oldSHA == "" {
-		// No "Updating" line we recognise — fall back to raw.
-		return pullOut
-	}
-
-	// Get commit subjects for the pulled range.
-	subjectsRaw, _, err := git.Run(ctx, repoRoot, "log", oldSHA+"..HEAD", "--pretty=%s", "-n", "10")
-	if err != nil || strings.TrimSpace(subjectsRaw) == "" {
-		// Fall back to a plain header so the user still sees the
-		// sync happened.
-		return fmt.Sprintf("✅ origin/%s @ %s", branch, shortSHA(newHead))
-	}
-	subjects := strings.Split(strings.TrimSpace(subjectsRaw), "\n")
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "✅ origin/%s @ %s\n", branch, shortSHA(newHead))
-	fmt.Fprintf(&b, "📥 pulled %d commits:\n", len(subjects))
-	for _, s := range subjects {
-		fmt.Fprintf(&b, " • %s\n", s)
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-// parseCloseForce extracts --force / -f from the close argv
-// tail. Unlike /gtw fix, /gtw close takes no positional arg
-// (you can't target a specific worktree — it always operates
-// on the current chat's worktree), so the only thing to parse
-// is the boolean flag. We still tolerate positional tokens
-// silently for forward-compat (future: /gtw close <branch>).
-func parseCloseForce(argv []string) (bool, error) {
-	force := false
-	for _, a := range argv {
-		switch a {
-		case "--force", "-f":
-			force = true
-		default:
-			// Unknown token. Future: surface this when
-			// /gtw close starts accepting positional args.
-			// For now: silent accept.
-		}
-	}
-	return force, nil
-}
+// buildSyncReply lives in render.go alongside renderSyncReply —
+// both shape the /gtw sync card. Kept together so the render
+// surface stays cohesive.
 
 // pushArgs bundles the parsed argv tail of `/gtw push <...>`.
 // Same rationale as fixArgs: a struct is more future-proof

@@ -606,8 +606,14 @@ func (as *AgentSession) Activate(parent context.Context) {
 	// that call Activate but never Spawn.
 }
 
-// Args returns a copy of the spawn arguments.
+// Args returns a defensive copy of the spawn arguments. as.args is
+// immutable post-construction today, but Args takes asMu.RLock to
+// keep the lock discipline consistent with other readers (e.g.
+// SessionID, Model) — protects against any future SetArgs-style
+// mutation racing a respawn-time read.
 func (as *AgentSession) Args() []string {
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
 	out := make([]string, len(as.args))
 	copy(out, as.args)
 	return out
@@ -811,11 +817,77 @@ func (as *AgentSession) Spawn(ctx context.Context, spawner Spawner) error {
 	// renderers would block.
 	resume := as.sessionID
 	args := append([]string(nil), as.args...)
+	_ = as.pid // respawn will read it under its own RLock
 	as.asMu.Unlock()
 
-	handle, err := spawner.Spawn(ctx, as.Agent, as.Cwd, args, resume)
+	// Reap + spawn are owned by respawn (single source of truth);
+	// Spawn just delegates. respawn will reap oldPID before launching
+	// the new child.
+	return as.respawn(ctx, spawner, args, resume)
+}
+
+// respawn is the single source of truth for "fork a fresh child and
+// wire it into this AgentSession". Both Spawn (cold start / crash
+// recovery) and AgentSession.New's PTY fallback (ErrRestartRequired)
+// route through here, so reap + spawn + state-update + readpump-start
+// live in exactly one place.
+//
+// Preconditions / contract:
+//   - Caller must NOT hold as.asMu (this function takes and releases it).
+//   - Caller is responsible for closing any previous handle BEFORE
+//     calling. respawn does NOT close the old handle — it only
+//     reaps the orphan PID as defense-in-depth (in case Close failed
+//     or the runtime crashed and left a child behind).
+//   - respawn does NOT touch as.sessionID. The caller decides
+//     whether to clear it (New's fallback does; Spawn preserves it
+//     so a future Spawn with cfg.SessionID can resume).
+//
+// On failure respawn marks the session Exited with exitCode=-1 so
+// the next caller sees a consistent state instead of a stale
+// closed handle left dangling.
+func (as *AgentSession) respawn(
+	ctx context.Context,
+	spawner Spawner,
+	args []string,
+	sessionID string,
+) error {
+	// Snapshot the orphan PID + previous stat under lock (no writer in
+	// flight yet). prevStat drives the failure-path semantics: only
+	// demote Running → Exited; preserve Detached (never ran) and
+	// Exited (already exited) so callers can distinguish them.
+	as.asMu.RLock()
+	oldPID := as.pid
+	prevStat := as.stat
+	as.asMu.RUnlock()
+
+	// Reap any orphan child from a previous (crashed) runtime before
+	// launching. Even when the caller has already Close()'d the
+	// previous handle, this catches the case where Close silently
+	// failed or the runtime died leaving a child behind.
+	if err := reapOrphan(oldPID); err != nil {
+		return fmt.Errorf("chatsession: reap orphan pid %d: %w", oldPID, err)
+	}
+
+	// Fork+exec+handshake may take seconds; don't hold asMu across it
+	// — EventHandler / readPump / footer renderers would block.
+	handle, err := spawner.Spawn(ctx, as.Agent, as.Cwd, args, sessionID)
 	if err != nil {
-		return fmt.Errorf("chatsession: spawn %s at %s: %w", as.Agent, as.Cwd, err)
+		as.asMu.Lock()
+		as.handle = nil
+		as.pid = 0
+		// Only demote Running → Exited. A fresh AS (Detached) that
+		// fails to spawn should stay Detached — the test
+		// TestAgentSession_SpawnFailureLeavesDetached pins this so
+		// callers can tell "we tried and failed" (Running → Exited)
+		// apart from "we never even tried successfully" (Detached).
+		if prevStat == StatusRunning {
+			as.stat = StatusExited
+			code := -1
+			as.exitCode = &code
+		}
+		as.lastRunAt = time.Now()
+		as.asMu.Unlock()
+		return fmt.Errorf("chatsession: respawn %s at %s: %w", as.Agent, as.Cwd, err)
 	}
 
 	as.asMu.Lock()
@@ -1003,108 +1075,33 @@ func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBl
 // or Exited).
 //
 // F-34: resets the conversation context on the running session.
-// Three outcomes, in priority order:
+// Returns one of:
 //
-//   - Bridge handles in-place reset (pi's new_session RPC, claude
-//     code's writeLine("/clear"), acp's session/new): New returns
-//     nil. AgentSession.ID / Cwd / pool membership are preserved;
-//     only the bridge's internal conversation state is cleared.
-//     The bridge is expected to emit a fresh EventAgentReady carrying the
-//     new SessionID; the runtime's AgentEventBus subscriber (cmd/nightme/run.go
-//     newEventHandler) captures it via SetSessionID and persists.
+//   - nil: bridge handled in-place reset (claudecode's writeLine("/clear"),
+//     pi's new_session RPC, acp's session/new, codex's thread reset).
+//     AgentSession.ID / Cwd / pool membership are preserved; only
+//     the bridge's internal conversation state is cleared. The
+//     bridge is expected to emit a fresh EventAgentReady carrying
+//     the new SessionID; the runtime's AgentEventBus subscriber
+//     captures it via SetSessionID and persists.
 //
-//   - Bridge cannot do in-place reset (raw PTY bridge): bridge.New
-//     returns agent.ErrRestartRequired. The wrapper then kills the
-//     existing bridge handle and spawns a fresh one via spawner
-//     (with SessionID="" so the new child starts with no --resume).
-//     SessionID is explicitly cleared on the wrapper so persistence
-//     stays consistent.
+//   - - agent.ErrRestartRequired: bridge cannot do in-place reset
+//     (raw PTY bridge). The CALLER is responsible for the
+//     kill-and-respawn fallback — AgentSession.New is deliberately
+//     not coupled to a Spawner, because 4/5 bridges never need one.
+//     ChatSession.NewActiveAgentSessions handles this case at the
+//     chat layer.
 //
-//   - Bridge tried but failed (transient error): wrapped and
-//     propagated. InputBuffer is NOT cleared by the wrapper in this
-//     case (caller's responsibility).
-//
-// spawner may be nil when the bridge is known to handle in-place
-// reset; in that case agent.ErrRestartRequired from the bridge
-// surfaces as-is. ChatSession.NewActiveAgentSessions always passes
-// the chat's configured spawner.
-func (as *AgentSession) New(ctx context.Context, spawner Spawner) error {
-	as.asMu.Lock()
+//   - other errors: bridge tried but failed (transient). Propagated
+//     to the caller; InputBuffer is NOT cleared by the wrapper.
+func (as *AgentSession) New(ctx context.Context) error {
+	as.asMu.RLock()
 	h := as.handle
-	as.asMu.Unlock()
+	as.asMu.RUnlock()
 	if h == nil {
 		return ErrNotRunning
 	}
-
-	if err := h.New(ctx); !errors.Is(err, agent.ErrRestartRequired) {
-		// nil or real (non-restart) error: pass through.
-		return err
-	}
-
-	// Bridge cannot reset in-place. Fall back to kill + respawn via
-	// the Spawner. This path is taken by the raw PTY bridge today;
-	// claudecode / pi / acp all handle reset in-place and never
-	// return ErrRestartRequired.
-	if spawner == nil {
-		return agent.ErrRestartRequired
-	}
-
-	// Close the old handle before spawning the replacement so the
-	// underlying process / transport tears down cleanly. We swallow
-	// the close error — the new spawn below is the source of truth
-	// for "did reset succeed".
-	_ = h.Close()
-
-	// snapshot the args under lock; spawner.Spawn may take seconds
-	// and we don't want to hold asMu across it.
-	as.asMu.RLock()
-	args := append([]string(nil), as.args...)
-	as.asMu.RUnlock()
-	newHandle, err := spawner.Spawn(ctx, as.Agent, as.Cwd, args, "")
-	if err != nil {
-		// F-34 Phase 3 review: previously this branch returned
-		// without updating status, leaving as.stat=StatusRunning
-		// with the OLD PID and as.handle=nil. Subsequent
-		// LookupSelectedAgentSession would see Running + nil handle
-		// and fail every SendBlocks with ErrNotRunning. Mark as
-		// Exited so the next user message lazy-spawns a fresh AS.
-		as.asMu.Lock()
-		as.handle = nil
-		as.pid = 0
-		as.stat = StatusExited
-		as.lastRunAt = time.Now()
-		code := -1
-		as.exitCode = &code
-		as.asMu.Unlock()
-		as.SetSessionID("")
-		return fmt.Errorf("chatsession: restart %s at %s: %w", as.Agent, as.Cwd, err)
-	}
-	as.asMu.Lock()
-	as.handle = newHandle
-	as.pid = newHandle.PID()
-	as.stat = StatusRunning
-	as.lastRunAt = time.Now()
-	as.exitCode = nil
-	as.asMu.Unlock()
-	// Explicitly clear SessionID so a stale id never gets replayed on
-	// the next respawn (the new child will emit its own EventAgentReady,
-	// and the runtime's AgentEventBus subscriber will SetSessionID via the normal
-	// path).
-	as.SetSessionID("")
-
-	// Restart the per-AS readpump on the new handle. The old
-	// readpumpLoop saw !ok from the closed handle above and exited;
-	// without this restart, no one is draining the new handle's
-	// Events() and the chat stalls silently. startReadPump is guarded
-	// by readpumpStarted — flip it back to false first so the new
-	// handle gets a fresh drainer. Previous readpumpDone is already
-	// closed (deferred from the exited goroutine), so waiting on it
-	// is a no-op.
-	as.asMu.Lock()
-	as.readpumpStarted = false
-	as.asMu.Unlock()
-	as.startReadPump()
-	return nil
+	return h.New(ctx)
 }
 
 // Close terminates the bridge child (sends shutdown signal to the

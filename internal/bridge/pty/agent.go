@@ -18,7 +18,6 @@ package pty
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 
@@ -41,7 +40,7 @@ const sessionBufferSize = 40960
 //     and held there as a long-lived singleton per name.
 //
 //   - Live state (after Start, before Close): the receiver is a
-//     freshly-allocated clone with runtime fields populated (bridge,
+//     freshly-allocated clone with runtime fields populated (transport,
 //     events, closed). Calls to Events / PID / Send* / New / Close
 //     are valid here. Spec-half fields are still readable.
 //
@@ -61,9 +60,9 @@ type Agent struct {
 	Rows int
 
 	// ─── runtime fields (zero before Start; populated on the clone) ───
-	bridge Bridge
-	events chan agent.AgentEvent
-	closed bool
+	transport Transport
+	events    chan agent.AgentEvent
+	closed    bool
 }
 
 // NewAgent constructs the template Agent. This is the entry point
@@ -124,7 +123,7 @@ func (a *Agent) Detect() error {
 //
 // Start clones the receiver — the template in Builtins is untouched.
 // The clone gets its template fields copied (defensively), runtime
-// fields zeroed, then NewBridge is called to spawn the process and
+// fields zeroed, then NewTransport is called to spawn the process and
 // the read loop is kicked off.
 //
 // cfg.Workspace is the child's working directory; cfg.Args are
@@ -151,20 +150,20 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 	// process via gopty.CmdContext.
 	_ = ctx
 
-	bridge, err := NewBridge(cfg.Workspace, a.command, args, env, cols, rows)
+	transport, err := NewTransport(cfg.Workspace, a.command, args, env, cols, rows)
 	if err != nil {
 		return nil, err
 	}
 
 	live := &Agent{
-		name:    a.name,
-		command: a.command,
-		args:    append([]string(nil), a.args...),
-		env:     append([]string(nil), a.env...),
-		Cols:    cols,
-		Rows:    rows,
-		bridge:  bridge,
-		events:  make(chan agent.AgentEvent, sessionBufferSize),
+		name:      a.name,
+		command:   a.command,
+		args:      append([]string(nil), a.args...),
+		env:       append([]string(nil), a.env...),
+		Cols:      cols,
+		Rows:      rows,
+		transport: transport,
+		events:    make(chan agent.AgentEvent, sessionBufferSize),
 	}
 	go live.readLoop()
 	return live, nil
@@ -178,12 +177,12 @@ func (a *Agent) Start(ctx context.Context, cfg agent.StartConfig) (agent.Agent, 
 func (a *Agent) Events() <-chan agent.AgentEvent { return a.events }
 
 // PID returns the child process PID recorded by the underlying
-// Bridge. 0 if Start has not been called.
+// Transport. 0 if Start has not been called.
 func (a *Agent) PID() int {
-	if a.bridge == nil {
+	if a.transport == nil {
 		return 0
 	}
-	return a.bridge.PID()
+	return a.transport.PID()
 }
 
 // SendText writes raw user input to the PTY stdin. Newline
@@ -192,10 +191,10 @@ func (a *Agent) SendText(text string) error {
 	if text == "" {
 		return nil
 	}
-	if a.bridge == nil {
+	if a.transport == nil {
 		return fmt.Errorf("pty: send on un-started agent")
 	}
-	_, err := a.bridge.Write([]byte(text))
+	_, err := a.transport.Write([]byte(text))
 	return err
 }
 
@@ -214,7 +213,7 @@ func (a *Agent) SendText(text string) error {
 // are dropped (silent — no warn log since PTY mode is best-effort).
 func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
 	_ = ctx
-	if a.bridge == nil {
+	if a.transport == nil {
 		return fmt.Errorf("pty: send on un-started agent")
 	}
 	if len(blocks) == 0 {
@@ -241,7 +240,7 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 	if b.Len() == 0 {
 		return nil
 	}
-	_, err := a.bridge.Write([]byte(b.String()))
+	_, err := a.transport.Write([]byte(b.String()))
 	return err
 }
 
@@ -251,10 +250,10 @@ func (a *Agent) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) err
 // blocking on its own permission prompt ("Allow? [Y/n]") and accept
 // the bytes as input.
 func (a *Agent) SendPermission(resp string) error {
-	if a.bridge == nil {
+	if a.transport == nil {
 		return fmt.Errorf("pty: send on un-started agent")
 	}
-	_, err := a.bridge.Write([]byte(resp))
+	_, err := a.transport.Write([]byte(resp))
 	return err
 }
 
@@ -272,16 +271,19 @@ func (a *Agent) New(ctx context.Context) error {
 // abort — the wire is a byte pipe — but the child usually honours
 // SIGINT (Ctrl-C) by interrupting the current foreground command
 // and returning to its prompt. This is the same heuristic the
-// shell uses; we delegate to the child to decide what to do.
+// Abort is not supported on the PTY bridge. PTY-mode CLIs don't
+// have a structured "abort the in-flight turn" RPC — the only
+// way to interrupt is to write Ctrl-C bytes to stdin or send a
+// signal to the child, both of which are outside the agent.Agent
+// contract (the runtime treats ErrNotSupported as "this bridge
+// can't honor Abort; just close the session instead"). Returning
+// the sentinel lets the runtime surface a clean "not supported"
+// message rather than treating the absence as a generic error.
 //
-// If the bridge has no underlying process (test path) or the
-// signal cannot be delivered, returns the error verbatim.
+// See internal/agent/agent.go ErrNotSupported.
 func (a *Agent) Abort(ctx context.Context) error {
 	_ = ctx
-	if a.bridge == nil {
-		return fmt.Errorf("pty: not started")
-	}
-	return a.bridge.Signal(os.Interrupt)
+	return agent.ErrNotSupported
 }
 
 // SetModel is not supported on the PTY bridge. PTY has no
@@ -300,15 +302,15 @@ func (a *Agent) Close() error {
 		return nil
 	}
 	a.closed = true
-	if a.bridge == nil {
+	if a.transport == nil {
 		return nil
 	}
-	return a.bridge.Close()
+	return a.transport.Close()
 }
 
 // ─── internals ───
 
-// readLoop drains the bridge until EOF or a read error, then emits a
+// readLoop drains the transport until EOF or a read error, then emits a
 // terminal EventAgentDone and closes the events channel.
 //
 // Bytes are wrapped in EventAgentText with the raw payload — no
@@ -316,13 +318,13 @@ func (a *Agent) Close() error {
 // adapter's job (see F-19 §3).
 //
 // Kick off via `go a.readLoop()` from Start (production) or directly
-// from tests that construct an Agent with a fake Bridge.
+// from tests that construct an Agent with a fake Transport.
 func (a *Agent) readLoop() {
 	defer close(a.events)
 
 	buf := make([]byte, 4096)
 	for {
-		n, err := a.bridge.Read(buf)
+		n, err := a.transport.Read(buf)
 		if n > 0 {
 			a.events <- agent.AgentEvent{
 				Kind: agent.EventAgentText,

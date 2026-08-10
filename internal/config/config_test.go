@@ -40,8 +40,8 @@ func TestLoadExample(t *testing.T) {
 	if codex == nil || codex.Command != "codex" {
 		t.Errorf("codex entry: %+v, want Command=\"codex\"", codex)
 	}
-	if opencode == nil || opencode.Command != "opencode acp" {
-		t.Errorf("opencode entry: %+v, want Command=\"opencode acp\"", opencode)
+	if opencode == nil || opencode.Command != "opencode" {
+		t.Errorf("opencode entry: %+v, want Command=\"opencode\" (the HTTP bridge appends `serve` itself)", opencode)
 	}
 	if cfg.Session.DefaultPtyCols != 80 {
 		t.Errorf("Session.DefaultPtyCols = %d, want 80", cfg.Session.DefaultPtyCols)

@@ -15,21 +15,21 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-type mockBridge struct {
+type mockTransport struct {
 	net.Conn
 	pid int
 }
 
-func (b *mockBridge) PID() int { return b.pid }
+func (b *mockTransport) PID() int { return b.pid }
 
 // Signal is a no-op for the test bridge. Production paths use this
 // to fan out SIGINT to the child; the test path never spawns a real
 // child and never reads Signal.
-func (b *mockBridge) Signal(_ os.Signal) error { return nil }
+func (b *mockTransport) Signal(_ os.Signal) error { return nil }
 
 func TestAcpSession_SendText_EncodesCorrectly(t *testing.T) {
 	client, server := net.Pipe()
-	bridge := &mockBridge{Conn: client, pid: 42}
+	transport := &mockTransport{Conn: client, pid: 42}
 	defer server.Close()
 
 	serverReader := bufio.NewReader(server)
@@ -40,7 +40,7 @@ func TestAcpSession_SendText_EncodesCorrectly(t *testing.T) {
 		writeRPCForTest(t, server, rpcMessage{JSONRPC: jsonRPCVersion, ID: newSession.ID, Result: json.RawMessage(`{"sessionId":"session-1"}`)})
 	}()
 
-	a := newAgentForTest(bridge, "mock", "/tmp/workspace")
+	a := newAgentForTest(transport, "mock", "/tmp/workspace")
 	if err := a.handshake(context.Background(), "/tmp/workspace"); err != nil {
 		t.Fatalf("handshake() error = %v", err)
 	}
@@ -75,7 +75,7 @@ func TestAcpSession_SendText_EncodesCorrectly(t *testing.T) {
 // returns, so the first event on Events() is the init.
 func TestHandshake_EmitsInit(t *testing.T) {
 	client, server := net.Pipe()
-	bridge := &mockBridge{Conn: client, pid: 42}
+	transport := &mockTransport{Conn: client, pid: 42}
 	defer server.Close()
 
 	serverReader := bufio.NewReader(server)
@@ -86,7 +86,7 @@ func TestHandshake_EmitsInit(t *testing.T) {
 		writeRPCForTest(t, server, rpcMessage{JSONRPC: jsonRPCVersion, ID: newSession.ID, Result: json.RawMessage(`{"sessionId":"sess-acp-abc"}`)})
 	}()
 
-	a := newAgentForTest(bridge, "codex", "/tmp/ws")
+	a := newAgentForTest(transport, "codex", "/tmp/ws")
 	if err := a.handshake(context.Background(), "/tmp/ws"); err != nil {
 		t.Fatalf("handshake() error = %v", err)
 	}
@@ -116,7 +116,7 @@ func TestHandshake_EmitsInit(t *testing.T) {
 // error and emits no EventAgentReady.
 func TestHandshake_NoSessionID_NoInit(t *testing.T) {
 	client, server := net.Pipe()
-	bridge := &mockBridge{Conn: client, pid: 42}
+	transport := &mockTransport{Conn: client, pid: 42}
 	defer server.Close()
 
 	serverReader := bufio.NewReader(server)
@@ -128,7 +128,7 @@ func TestHandshake_NoSessionID_NoInit(t *testing.T) {
 		writeRPCForTest(t, server, rpcMessage{JSONRPC: jsonRPCVersion, ID: newSession.ID, Result: json.RawMessage(`{}`)})
 	}()
 
-	a := newAgentForTest(bridge, "codex", "/tmp/ws")
+	a := newAgentForTest(transport, "codex", "/tmp/ws")
 	if err := a.handshake(context.Background(), "/tmp/ws"); err == nil {
 		t.Fatal("handshake() error = nil, want non-nil")
 	}
@@ -183,8 +183,8 @@ func TestAcpSession_ParseToolEvents(t *testing.T) {
 
 func TestAcpSession_EOFClosesEvents(t *testing.T) {
 	client, server := net.Pipe()
-	bridge := &mockBridge{Conn: client}
-	a := &Agent{bridge: bridge, rpc: newRPCClient(io.Discard), ctx: context.Background(), events: make(chan agent.AgentEvent, eventBufferSize)}
+	transport := &mockTransport{Conn: client}
+	a := &Agent{transport: transport, rpc: newRPCClient(io.Discard), ctx: context.Background(), events: make(chan agent.AgentEvent, eventBufferSize)}
 	go a.readPump()
 	_ = server.Close()
 
@@ -209,17 +209,17 @@ func testSession() *Agent {
 	return &Agent{ctx: context.Background(), events: make(chan agent.AgentEvent, eventBufferSize), rpc: newRPCClient(io.Discard)}
 }
 
-// newAgentForTest constructs an Agent wired to a mock bridge (no real
+// newAgentForTest constructs an Agent wired to a mock transport (no real
 // PTY spawn), with rpc / events / ctx wired so handshake() can run
 // against the in-process server. Returns an Agent ready to call
 // handshake() and then Send* / Close.
-func newAgentForTest(bridge Bridge, name, workspace string) *Agent {
+func newAgentForTest(transport Transport, name, workspace string) *Agent {
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &Agent{
 		name:      name,
 		command:   "test",
-		bridge:    bridge,
-		rpc:       newRPCClient(bridge),
+		transport: transport,
+		rpc:       newRPCClient(transport),
 		ctx:       ctx,
 		cancel:    cancel,
 		agentName: name,

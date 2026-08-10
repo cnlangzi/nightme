@@ -128,21 +128,22 @@ func RunFix(
 		return reply(ctx, cs.Channel(), chatID, messageID,
 			"⚠️ Already inside a /gtw fix. Finish or cancel it first."), nil
 	}
-	// preflightOrphanYml catches a related but distinct case:
-	// a previous /gtw fix whose /gtw close never ran, leaving
-	// an orphan .nightme/gtw.yml in some worktree under this
-	// repo. The slot check above misses this because (a) it
-	// lives on disk not in memory and (b) only this chat's
-	// in-memory slot is checked. See preflightOrphanYml's doc
-	// for the full failure scenario this prevents.
+	// preflightOrphanYml catches the one case the in-memory
+	// slot check above cannot: the user is sitting inside a
+	// worktree that already holds .nightme/gtw.yml (e.g.
+	// /cwd'd into a previous fix's worktree and forgot to
+	// /gtw close). v1.x does NOT scan sibling worktrees for
+	// ymls — parallel /gtw fix across separate worktrees is
+	// supported. See preflightOrphanYml's doc for the full
+	// rationale and the history of the removed sibling scan.
 	//
-	// When force=true, we DO skip this check — the user is
-	// explicitly opting in to a destructive cleanup that
-	// also nukes any orphan yml's parent worktree.
-	if !force {
-		if err := preflightOrphanYml(ctx, cs.SelectedCwd(), deps.Git); err != nil {
-			return reply(ctx, cs.Channel(), chatID, messageID, err.Error()), nil
-		}
+	// force=true does NOT bypass this check: starting a new
+	// fix on top of an active one is always a logic error
+	// regardless of intent. --force is for the worktree-path
+	// collision case (forceCleanWorktreePath), not for
+	// overriding the slot/preflight layer.
+	if err := preflightOrphanYml(cs.SelectedCwd()); err != nil {
+		return reply(ctx, cs.Channel(), chatID, messageID, err.Error()), nil
 	}
 
 	switch mode {
@@ -404,25 +405,73 @@ func runFixRemote(
 		})
 	}
 
-	// --- label the issue (post-WorktreeAdd; best-effort) --------
-	// AddLabel is idempotent (calling it twice is a no-op on
-	// the API side) so the brief race window between
-	// WorktreeAdd and AddLabel is harmless: if a second user
-	// also raced in, both would apply wip and git-side
-	// preflight's branch-attached check would catch them
-	// anyway. If AddLabel fails (network / 403 / missing
-	// label scope) we warn and continue — the worktree is
-	// the durable claim and the user can retry the label
-	// later or just live without it.
+	// --- label the issue (post-WorktreeAdd; atomic with worktree) ---
+	// The label is the external coordination signal on the issue
+	// tracker: it tells other viewers (and concurrent /gtw fix
+	// attempts on other machines) that this issue is claimed. A
+	// worktree without a label means the issue still looks
+	// unclaimed — a parallel /gtw fix can race in, leaving two
+	// fixes contending for the same issue with no way for either
+	// side to detect the conflict.
+	//
+	// v1.x: the fix is atomic with the label. AddLabel failure
+	// rolls back the worktree AND the branch so the user can fix
+	// the underlying cause (token scope, network, missing label,
+	// rate limit, etc.) and re-run /gtw fix from a clean state.
+	// The "label is decoration, worktree is durable" framing from
+	// v1 is gone — see commit history for the rationale.
+	//
+	// Rollback has two independent steps (worktree remove + branch
+	// delete) and either can fail in turn. We report each step's
+	// outcome honestly: only ask the user to clean up manually
+	// the things we couldn't do ourselves. The provider's error
+	// is echoed verbatim — no paraphrase, no speculation about
+	// cause. No manual `gh`/`glab` retry command is suggested:
+	// the whole point of atomic semantics is that the user just
+	// re-runs /gtw fix once the cause is fixed.
 	if err := provider.AddLabel(ctx, owner, repo, issueID, LabelWIP); err != nil {
-		_ = cs.Channel().Send(ctx, chatsession.OutboundMessage{
-			ChatID:  chatID,
-			ReplyTo: messageID,
-			Text: fmt.Sprintf(
-				"⚠️ Could not add label %q: %v\n"+
-					"worktree is ready at %s; you can retry the label manually with `gh issue edit %d --add-label %s`",
-				LabelWIP, err, worktreePath, issueID, LabelWIP),
-		})
+		wtErr := WorktreeRemove(ctx, repoRoot, worktreePath, true /* force */, deps.Git)
+		// Branch delete runs only if the worktree came out cleanly.
+		// Otherwise we leave the branch for the user to handle
+		// alongside the worktree so they keep a consistent mental
+		// model of "the worktree is gone, the branch references it".
+		var branchErr error
+		if wtErr == nil {
+			_, stderr, brErr := deps.Git.Run(ctx, repoRoot, "branch", "-D", branch)
+			if brErr != nil {
+				branchErr = fmt.Errorf("%w: %s", brErr, strings.TrimSpace(stderr))
+			}
+		}
+
+		head := fmt.Sprintf("❌ Could not add label %q to issue #%d: %v\n", LabelWIP, issueID, err)
+		var body string
+		switch {
+		case wtErr == nil && branchErr == nil:
+			body = head +
+				"worktree and branch have been rolled back.\n" +
+				"fix the cause and re-run /gtw fix " + fmt.Sprintf("%d", issueID)
+		case wtErr == nil && branchErr != nil:
+			body = head +
+				fmt.Sprintf("rolled back worktree at %s, but branch %q still exists.\n", worktreePath, branch) +
+				fmt.Sprintf("  [rollback warning] %v\n", branchErr) +
+				fmt.Sprintf("  please clean up manually: `git branch -D %s`\n", branch) +
+				"fix the cause and re-run /gtw fix " + fmt.Sprintf("%d", issueID)
+		default:
+			// wtErr != nil: worktree remove failed. Branch is
+			// untouched (and likely still attached to the stuck
+			// worktree). User has to clean up BOTH.
+			wtMsg := "unknown error"
+			if wtErr != nil {
+				wtMsg = wtErr.Error()
+			}
+			body = head +
+				"could not roll back automatically:\n" +
+				fmt.Sprintf("  [worktree] %s\n", wtMsg) +
+				fmt.Sprintf("    clean up with: `git worktree remove --force %s`\n", worktreePath) +
+				fmt.Sprintf("  [branch] %q likely still attached — clean up with: `git branch -D %s`\n", branch, branch) +
+				"fix the cause and re-run /gtw fix " + fmt.Sprintf("%d", issueID)
+		}
+		return reply(ctx, cs.Channel(), chatID, messageID, body), nil
 	}
 
 	// --- switch cwd + write context + render + dispatch ----------

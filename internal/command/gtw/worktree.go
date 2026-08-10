@@ -328,10 +328,10 @@ func WorktreeAdd(ctx context.Context, dir, newBranch, path, base string, git Git
 //
 // force=true maps to `git worktree remove --force <path>`, which
 // skips the "worktree contains modified or untracked files" safety
-// net. v1 of /gtw close never sets force=true (RunClose errors
-// out on dirty worktrees and lets the user decide); the flag is
-// exposed so future flows (e.g. an explicit /gtw close --force)
-// can opt in.
+// net. /gtw close passes its parsed --force flag straight through
+// (RunClose's step 4); this skips the worktree dirty check (step 3)
+// too, so the user can opt into destroying uncommitted edits in one
+// flag.
 //
 // On failure the returned *WorktreeError carries the git stderr
 // tail so the caller can render a useful "why did it fail" reply.

@@ -1275,7 +1275,16 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 		// calls. as.New handles in-place reset; the per-AS readpump
 		// follows whatever the bridge does (close on reset, restart on
 		// new process).
-		err := as.New(ctx, cs.spawner)
+		//
+		// PTY fallback: as.New returns agent.ErrRestartRequired for
+		// bridges that can't do in-place reset (raw PTY). The
+		// kill+respawn path is the chat layer's responsibility now —
+		// AgentSession.New deliberately doesn't take a Spawner, since
+		// 4/5 bridges never need one.
+		err := as.New(ctx)
+		if errors.Is(err, agent.ErrRestartRequired) {
+			err = cs.restartAgentSession(ctx, as)
+		}
 		handleChanged := isActive && (as.Handle() != oldHandle)
 		if err != nil {
 			if firstErr == nil {
@@ -1304,6 +1313,40 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 	}
 
 	return matched, reset, results, firstErr
+}
+
+// restartAgentSession is the chat-layer fallback for bridges that
+// can't reset conversation in-place (raw PTY). Called when
+// AgentSession.New returns agent.ErrRestartRequired.
+//
+// Contract:
+//   - Kill the old handle (clean shutdown via bridge.Close).
+//   - Reset the per-AS readpump (it saw !ok from the closed handle
+//     and exited; the respawn will start a fresh drainer).
+//   - Call AgentSession.respawn with sessionID="" (we deliberately
+//     want a fresh conversation — not a resume).
+//   - Clear the persisted SessionID so a stale id never gets replayed
+//     on the next respawn.
+//
+// Returns the original ErrRestartRequired when cs.spawner is nil
+// (chat was constructed without WithSpawner, e.g. in unit tests that
+// only exercise the in-place path).
+func (cs *ChatSession) restartAgentSession(ctx context.Context, as *AgentSession) error {
+	if cs.spawner == nil {
+		return agent.ErrRestartRequired
+	}
+	if h := as.Handle(); h != nil {
+		_ = h.Close()
+	}
+	as.asMu.Lock()
+	as.readpumpStarted = false
+	as.asMu.Unlock()
+	if err := as.respawn(ctx, cs.spawner, as.Args(), ""); err != nil {
+		as.SetSessionID("")
+		return fmt.Errorf("chatsession: restart %s at %s: %w", as.Agent, as.Cwd, err)
+	}
+	as.SetSessionID("")
+	return nil
 }
 
 // Entry returns a snapshot of this ChatSession as a registry entry.

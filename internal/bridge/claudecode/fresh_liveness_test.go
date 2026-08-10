@@ -91,8 +91,10 @@ func TestFreshLiveness_PassesAnswer(t *testing.T) {
 			t.Logf("[liveness] Spawned pid=%d (fresh, no --resume)", sess.PID())
 
 			// Push a benign prompt.
-			if err := sess.SendText("say only: pong"); err != nil {
-				t.Fatalf("SendText: %v", err)
+			if err := sess.SendBlocks(context.Background(), []agent.ContentBlock{
+				{Type: agent.ContentText, Text: "say only: pong"},
+			}); err != nil {
+				t.Fatalf("SendBlocks: %v", err)
 			}
 
 			// Wait up to 60s for the FIRST text/result/done
@@ -194,8 +196,10 @@ func TestFreshLiveness_LogsUserMCP(t *testing.T) {
 	t.Cleanup(func() { _ = sess.Close() })
 	t.Logf("[liveness/user-mcp] Spawned pid=%d (fresh, no --resume)", sess.PID())
 
-	if err := sess.SendText("say only: pong"); err != nil {
-		t.Fatalf("SendText: %v", err)
+	if err := sess.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "say only: pong"},
+	}); err != nil {
+		t.Fatalf("SendBlocks: %v", err)
 	}
 
 	start := time.Now()

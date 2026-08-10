@@ -1,6 +1,6 @@
 // Stage 6 cross-bridge compile-time test: every bridge
 // registered with agent.Builtins must satisfy the new agent.Agent
-// interface (Start + Close + Events + PID + SendText + SendBlocks +
+// interface (Start + Close + Events + PID + SendBlocks +
 // SendPermission + New + Stop + SetModel).
 //
 // Lives in package agent_test so we can import the bridge

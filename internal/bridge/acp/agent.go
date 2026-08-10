@@ -221,24 +221,7 @@ func (d *driver) PID() int {
 	return d.transport.PID()
 }
 
-// SendText submits a prompt and returns after the JSON-RPC request
-// is written. The prompt response only marks completion of that turn;
-// it does not end the reusable ACP session, so it is deliberately
-// consumed asynchronously.
-func (d *driver) SendText(text string) error {
-	if text == "" {
-		return nil
-	}
-	if d.sessionID == "" {
-		return errors.New("bridge/acp: session is not initialized")
-	}
-	return d.rpc.requestAsync("session/prompt", promptParams{
-		SessionID: d.sessionID,
-		Prompt:    []contentBlock{{Type: "text", Text: text}},
-	})
-}
-
-// SendBlocks submits a structured prompt. ACP's content-block
+// SendBlocks delivers a structured user turn. ACP's content-block
 // protocol supports text + image + file natively; the bridge
 // translates agent.ContentBlock values into the wire shape. Today
 // only Text is exercised by production agents (Codex / OpenCode
@@ -659,18 +642,16 @@ func (d *driver) emit(event agent.AgentEvent) {
 }
 
 // Compile-time guarantee that *driver satisfies the package-private
-// agent.driver interface (SendText/SendBlocks/SendPermission/
-// Reset/Close). External callers reach driver via *agent.Agent,
-// which forwards the public methods. The package-private starter
-// half is type-checked in starter.go via the same agentDriver
-// interface declaration.
+// agent.driver interface (SendBlocks/SendPermission/Reset/Close).
+// External callers reach driver via *agent.Agent, which forwards
+// the public methods. The package-private starter half is type-checked
+// in starter.go via the same agentDriver interface declaration.
 var _ agentDriver = (*driver)(nil)
 
 // agentDriver is the local alias for the agent.driver interface so
 // this file can compile-time check driver satisfies it without
 // importing the unexported name from the agent package.
 type agentDriver interface {
-	SendText(text string) error
 	SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error
 	SendPermission(resp string) error
 	Reset(ctx context.Context) error

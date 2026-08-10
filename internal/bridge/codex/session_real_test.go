@@ -4,7 +4,7 @@ package codex
 //
 // These tests exercise the full handshake + turn lifecycle:
 //
-//   1. TestE2E_FreshThread — Start → EventAgentReady → SendText →
+//   1. TestE2E_FreshThread — Start → EventAgentReady → SendBlocks →
 //      one complete turn. Verifies that thread/start works, the
 //      translator emits a non-empty EventAgentResult.Text, the
 //      per-turn usage is populated, and the per-turn EventAgentDone
@@ -147,8 +147,10 @@ func TestE2E_FreshThread(t *testing.T) {
 	}
 	t.Logf("[e2e-fresh] thread=%s model=%s pid=%d", ready.SessionID, ready.Model, sess.PID())
 
-	if err := sess.SendText("Reply with only the single word: pong"); err != nil {
-		t.Fatalf("SendText: %v", err)
+	if err := sess.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "Reply with only the single word: pong"},
+	}); err != nil {
+		t.Fatalf("SendBlocks: %v", err)
 	}
 
 	events := drainUntilTurnDone(t, sess.Events(), 120*time.Second)
@@ -226,8 +228,10 @@ func TestE2E_ResumeThread(t *testing.T) {
 	}
 	t.Logf("[e2e-resume] first thread=%s", ready1.SessionID)
 
-	if err := sess1.SendText("Reply with only the single word: pong"); err != nil {
-		t.Fatalf("first SendText: %v", err)
+	if err := sess1.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "Reply with only the single word: pong"},
+	}); err != nil {
+		t.Fatalf("first SendBlocks: %v", err)
 	}
 	events1 := drainUntilTurnDone(t, sess1.Events(), 120*time.Second)
 	if _, ok := findEvent(events1, agent.EventAgentResult); !ok {
@@ -262,8 +266,10 @@ func TestE2E_ResumeThread(t *testing.T) {
 
 	// And one more turn on the resumed session to confirm the
 	// bridge is actually live (not just returning a stale id).
-	if err := sess2.SendText("Reply with only the single word: ping"); err != nil {
-		t.Fatalf("resume SendText: %v", err)
+	if err := sess2.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "Reply with only the single word: ping"},
+	}); err != nil {
+		t.Fatalf("resume SendBlocks: %v", err)
 	}
 	events2 := drainUntilTurnDone(t, sess2.Events(), 120*time.Second)
 	if r, ok := findEvent(events2, agent.EventAgentResult); ok {
@@ -328,8 +334,10 @@ func TestE2E_ApprovalFlow(t *testing.T) {
 
 	prompt := "Please create the file " + marker + " containing exactly the text " +
 		markerBody + " and nothing else."
-	if err := sess.SendText(prompt); err != nil {
-		t.Fatalf("SendText: %v", err)
+	if err := sess.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: prompt},
+	}); err != nil {
+		t.Fatalf("SendBlocks: %v", err)
 	}
 
 	// Stream events looking for an EventAgentPermission. We give

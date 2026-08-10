@@ -48,7 +48,7 @@ import (
 // Spawner contract without forking any process. newcmd's Handle does
 // not actually exercise the agent when selectedCwd is empty
 // (RequireActiveCwd replies "No active workspace…"), so the stub
-// just needs to exist; it never receives SendText or SendBlocks in
+// just needs to exist; it never receives SendBlocks in
 // this test path.
 
 // echoAgent implements agent.Agent. Events() is buffered; Close()
@@ -78,7 +78,6 @@ func (a *echoAgent) Detect() error { return nil }
 func (a *echoAgent) Start(_ context.Context, _ agent.StartConfig) (*agent.Agent, error) {
 	return agent.NewAgent(a.Info(), a.pid, a.events, &echoDriver{inner: a}), nil
 }
-func (a *echoAgent) SendText(string) error                          { return nil }
 func (a *echoAgent) SendBlocks(context.Context, []agent.ContentBlock) error {
 	return nil
 }
@@ -132,7 +131,6 @@ var _ agent.Starter = (*echoAgent)(nil)
 // echoDriver forwards driver calls back to an echoAgent.
 type echoDriver struct{ inner *echoAgent }
 
-func (d *echoDriver) SendText(text string) error { return d.inner.SendText(text) }
 func (d *echoDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
 	return d.inner.SendBlocks(ctx, b)
 }

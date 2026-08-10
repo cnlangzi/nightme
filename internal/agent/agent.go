@@ -801,11 +801,6 @@ func (a *Agent) SessionID() string {
 // driver implementations can write.
 func (a *Agent) setSessionID(id string) { a.sessionID.Store(id) }
 
-// SendText delivers plain-text user input. Convenience wrapper
-// around SendBlocks with a single ContentText block. See the
-// driver interface for per-bridge encoding rules.
-func (a *Agent) SendText(text string) error { return a.driver.SendText(text) }
-
 // SendBlocks delivers a structured user turn. Delegates to the
 // bridge-specific driver.
 func (a *Agent) SendBlocks(ctx context.Context, blocks []ContentBlock) error {
@@ -851,7 +846,7 @@ func (a *Agent) Close() error {
 // inspecting a *closedSpy behind the handle). Exposed as
 // interface{} because the driver interface is package-private.
 // Production code should call the typed methods on *Agent
-// (SendText, Events, …) rather than going through this.
+// (SendBlocks, Events, …) rather than going through this.
 func (a *Agent) Driver() interface{} { return a.driver }
 
 // Stop halts execution of the in-flight turn. Delegates to the
@@ -897,11 +892,10 @@ func NewAgent(info Info, pid int, events chan AgentEvent, d interface{}) *Agent 
 // client / Transport / pump goroutines). It is package-private —
 // external code interacts only with *Agent.
 //
-// The 5 methods capture exactly what bridges expose at runtime;
+// The 4 methods capture exactly what bridges expose at runtime;
 // the static metadata is on Starter.Info, the spawning logic
 // is on Starter.Start, the close machinery is on Agent.Close.
 type driver interface {
-	SendText(text string) error
 	SendBlocks(ctx context.Context, blocks []ContentBlock) error
 	SendPermission(resp string) error
 	Reset(ctx context.Context) error

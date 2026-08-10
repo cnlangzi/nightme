@@ -324,7 +324,6 @@ func (b *fakeAgentBuilder) Start(_ context.Context, _ agent.StartConfig) (*agent
 // fakeBuilderDriver forwards driver calls back to fakeAgentBuilder.
 type fakeBuilderDriver struct{ inner *fakeAgentBuilder }
 
-func (d *fakeBuilderDriver) SendText(text string) error { return d.inner.SendText(text) }
 func (d *fakeBuilderDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
 	return d.inner.SendBlocks(ctx, b)
 }
@@ -339,7 +338,6 @@ func (d *fakeBuilderDriver) SetModel(ctx context.Context, providerID, modelID st
 func (d *fakeBuilderDriver) Close() error                   { return d.inner.Close() }
 func (b *fakeAgentBuilder) Events() <-chan agent.AgentEvent                      { return b.events }
 func (b *fakeAgentBuilder) PID() int                                              { return 99999 }
-func (b *fakeAgentBuilder) SendText(_ string) error                               { return nil }
 func (b *fakeAgentBuilder) SendBlocks(_ context.Context, _ []agent.ContentBlock) error { return nil }
 func (b *fakeAgentBuilder) SendPermission(_ string) error                         { return nil }
 func (b *fakeAgentBuilder) New(_ context.Context) error                           { return nil }

@@ -9,7 +9,7 @@
 //
 // What it covers:
 //
-//	ChatSession.Dispatch → input buffer → Spawn → bridge.SendText →
+//	ChatSession.Dispatch → input buffer → Spawn → bridge.SendBlocks →
 //	pi reads stdin → pi emits events → readPump → AgentEventBus subscriber →
 //	outbound Send on a fake channel
 //

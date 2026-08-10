@@ -18,7 +18,6 @@ type fakeDriver struct {
 	closeCnt int
 }
 
-func (f *fakeDriver) SendText(string) error                       { return nil }
 func (f *fakeDriver) SendBlocks(_ context.Context, _ []ContentBlock) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

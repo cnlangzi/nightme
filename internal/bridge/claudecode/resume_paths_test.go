@@ -83,9 +83,11 @@ func resumeHappyPath(t *testing.T, deadline time.Duration) {
 	}
 	// T-alive (2026-08-07): claude --print is single-turn mode —
 	// it does NOT emit EventAgentReady until it receives the first
-	// stdin block. SendText before waiting for events.
-	if err := sess1.SendText("capture my session id, then say only: pong"); err != nil {
-		t.Fatalf("phase 1 SendText: %v", err)
+	// stdin block. SendBlocks before waiting for events.
+	if err := sess1.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "capture my session id, then say only: pong"},
+	}); err != nil {
+		t.Fatalf("phase 1 SendBlocks: %v", err)
 	}
 	var capturedID string
 	initSeen := false
@@ -133,8 +135,10 @@ initLoop:
 	t.Cleanup(func() { _ = sess2.Close() })
 	t.Logf("[replay] phase 2: Spawned pid=%d", sess2.PID())
 
-	if err := sess2.SendText("reply with one word: pong"); err != nil {
-		t.Fatalf("phase 2 SendText: %v", err)
+	if err := sess2.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "reply with one word: pong"},
+	}); err != nil {
+		t.Fatalf("phase 2 SendBlocks: %v", err)
 	}
 
 	timeout := time.After(60 * time.Second)
@@ -222,8 +226,10 @@ func resumeUserWorkspaceKnownID(t *testing.T, deadline time.Duration) {
 	// events until it receives the first stdin block.
 	// (T-alive, 2026-08-07: this was the silent-failure cause
 	// in the resume_happy_path_replay test before the fix.)
-	if err := sess.SendText("reply with one word: pong"); err != nil {
-		t.Fatalf("SendText: %v", err)
+	if err := sess.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "reply with one word: pong"},
+	}); err != nil {
+		t.Fatalf("SendBlocks: %v", err)
 	}
 
 	start := time.Now()

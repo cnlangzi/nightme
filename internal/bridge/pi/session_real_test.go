@@ -7,7 +7,7 @@
 // deterministic, but it cannot reproduce the production failure
 // mode that motivated this file: a real `pi` binary that starts,
 // completes the get_state handshake (so Spawn returns), accepts
-// the prompt (so SendText returns nil and ChatSession flips
+// the prompt (so SendBlocks returns nil and ChatSession flips
 // MessageState to Forwarded), and then NEVER surfaces an
 // agent_settled event — the F-32 2026-08-06 incident, where
 // feishu showed nothing after /use pi + a plain "hi".
@@ -41,7 +41,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// promptDeadline bounds the wait for EventAgentDone after SendText.
+// promptDeadline bounds the wait for EventAgentDone after SendBlocks.
 // Sized for a real model response on a healthy dev box; a hung
 // pi (the failure mode we guard against) blows past this and the
 // test fails with an elapsed-time message instead of stalling
@@ -60,7 +60,7 @@ const (
 // end-to-end proof that the bridge drives a real `pi` process
 // all the way through:
 //
-//	input  → bridge.SendText   → pi reads it   →
+//	input  → bridge.SendBlocks   → pi reads it   →
 //	                                    ↓
 //	                            pi emits text + agent_settled  →
 //	                                    ↓
@@ -73,7 +73,7 @@ const (
 //  1. Start + get_state handshake complete and emit exactly one
 //     EventAgentReady carrying a non-empty SessionID — so the runtime
 //     can persist the resume id (input pipeline reaches pi).
-//  2. SendText(prompt-with-marker) returns nil within promptDeadline
+//  2. SendBlocks(prompt-with-marker) returns nil within promptDeadline
 //     and the stream terminates in EventAgentDone with Reason:"settled".
 //  3. The aggregated reply text contains the unique marker we
 //     embedded in our prompt — this is the *positive* proof that
@@ -173,10 +173,10 @@ func TestSession_RealPi_E2E_ReceiveInputAndReply(t *testing.T) {
 	}
 }
 
-// driveTurn sends prompt via SendText, waits up to deadline for
+// driveTurn sends prompt via SendBlocks, waits up to deadline for
 // EventAgentDone with Reason:"settled", and asserts:
 //
-//   - SendText did not error (transport write succeeded);
+//   - SendBlocks did not error (transport write succeeded);
 //   - the stream terminated in EventAgentDone with the right reason;
 //   - at least one EventAgentText or EventAgentResult was emitted;
 //   - the aggregated reply text contains marker — i.e. the LLM
@@ -192,8 +192,10 @@ func TestSession_RealPi_E2E_ReceiveInputAndReply(t *testing.T) {
 func driveTurn(t *testing.T, sess *agent.Agent, prompt string, deadline time.Duration, turnLabel string) error {
 	t.Helper()
 	promptStartedAt := time.Now()
-	if err := sess.SendText(prompt); err != nil {
-		t.Errorf("%s: SendText returned %v (elapsed=%s)", turnLabel, err, time.Since(promptStartedAt))
+	if err := sess.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: prompt},
+	}); err != nil {
+		t.Errorf("%s: SendBlocks returned %v (elapsed=%s)", turnLabel, err, time.Since(promptStartedAt))
 		return err
 	}
 	turn := drainEventsUntilDone(t, sess, deadline)

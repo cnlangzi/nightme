@@ -174,15 +174,6 @@ func (d *driver) PID() int { return d.session.pid }
 
 // ─── user input ───
 
-// SendText delivers plain-text user input. Convenience wrapper around
-// SendBlocks.
-func (d *driver) SendText(text string) error {
-	cLog("SendText enter", "len", len(text), "text", text)
-	return d.SendBlocks(context.Background(), []agent.ContentBlock{
-		{Type: agent.ContentText, Text: text},
-	})
-}
-
 // SendBlocks delivers a structured user turn. The bridge maps:
 //
 //	ContentText  → {type:"text", text, text_elements:[]}

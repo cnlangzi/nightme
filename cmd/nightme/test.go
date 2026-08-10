@@ -15,8 +15,9 @@
 //     whose command resolves on PATH are registered as PTY. Agents
 //     not in the registry are auto-registered when their command
 //     resolves to an existing file (handy for `--agent /bin/echo`).
-//   - Stdin → session.SendText; session.Events → stdout. There is no
-//     formatting or aggregation in v0.1 — bytes flow through verbatim.
+//   - Stdin → session.SendBlocks(text); session.Events → stdout.
+//     There is no formatting or aggregation in v0.1 — bytes flow
+//     through verbatim.
 //   - SIGINT triggers session.Kill(); the CLI stays alive per the
 //     default detach policy (SPEC §3). A second signal force-exits.
 package main
@@ -246,8 +247,10 @@ func pumpIO(cmd *cobra.Command, as *chatsession.AgentSession) error {
 		scanner := bufio.NewScanner(os.Stdin)
 		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		for scanner.Scan() {
-			line := scanner.Text() + "\n"
-			if err := as.SendText(line); err != nil {
+			line := scanner.Text()
+			if err := as.SendBlocks(as.OpContext(), []agent.ContentBlock{
+				{Type: agent.ContentText, Text: line},
+			}); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "send: %v\n", err)
 				return
 			}

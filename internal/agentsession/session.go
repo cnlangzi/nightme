@@ -39,7 +39,7 @@ const (
 //
 // commit 7: actual spawn integration via Spawner. The bridge-level
 // handle (agent.Agent) is stored in `handle` and is the
-// source of Events / SendText / SendBlocks / Close. Lifecycle
+// source of Events / SendBlocks / Close. Lifecycle
 // transitions (Running → Exited) are observed via the handle's
 // events channel and trigger SetExited on this struct.
 //
@@ -773,7 +773,7 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	}
 }
 
-// ErrNotRunning is returned by SendText/SendBlocks/Close when called
+// ErrNotRunning is returned by SendBlocks/Close when called
 // before Spawn() succeeds.
 var ErrNotRunning = errors.New("chatsession: AgentSession not running (Spawn not called or failed)")
 
@@ -1033,33 +1033,14 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	return nil
 }
 
-// SendText delivers a single text block to the bridge child.
-// Convenience wrapper around SendBlocks: routes through the
-// chat's per-AS ctx (OpContext()) instead of touching bridge's
-// bare SendText (which has no ctx signature on agent.Agent).
-//
-// The ctx passed to SendBlocks is as.OpContext() — the AS-owned
-// ctx installed by Activate(parent). This makes SendText behave
-// exactly like SendBlocks wrt cancellation: /use Background()
-// wakes any in-flight SendText the same way it wakes an in-flight
-// SendBlocks. The bridge's SendBlocks then derives its own
-// per-call callCtx from as.OpContext().
-//
-// Returns ErrNotRunning if Spawn has not been called.
-func (as *AgentSession) SendText(text string) error {
-	as.asMu.RLock()
-	h := as.handle
-	as.asMu.RUnlock()
-	if h == nil {
-		return ErrNotRunning
-	}
-	return h.SendBlocks(as.OpContext(), []agent.ContentBlock{
-		{Type: agent.ContentText, Text: text},
-	})
-}
-
 // SendBlocks delivers structured content blocks. Returns ErrNotRunning
 // if Spawn has not been called.
+//
+// The ctx passed to SendBlocks flows to the bridge's SendBlocks, which
+// derives its own per-call callCtx. For AS-owned cancellation semantics
+// (i.e. wake any in-flight send when the AS is deactivated), callers
+// should pass as.OpContext() — the AS-owned ctx installed by
+// Activate(parent).
 func (as *AgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
 	as.asMu.RLock()
 	h := as.handle

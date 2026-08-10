@@ -17,7 +17,7 @@
 //
 // Coverage:
 //
-//   1. TestE2E_FreshSession — Start → EventAgentReady → SendText →
+//   1. TestE2E_FreshSession — Start → EventAgentReady → SendBlocks →
 //      one complete turn. Verifies POST /api/session works, the
 //      translator emits EventAgentText, Done.Reason="settled" fires
 //      without closing the events channel.
@@ -177,7 +177,7 @@ func drainUntilReady(t *testing.T, events <-chan agent.AgentEvent, deadline time
 
 // TestE2E_FreshSession drives a single turn against the real
 // `opencode serve` subprocess. The bridge should create a session,
-// emit EventAgentReady, accept a SendText, and produce a turn.
+// emit EventAgentReady, accept a SendBlocks, and produce a turn.
 //
 // Skip guards: requireRealOpencode (binary on PATH) + NIGHTME_OPENCODE_E2E
 // (operator opt-in).
@@ -224,8 +224,10 @@ func TestE2E_FreshSession(t *testing.T) {
 	t.Logf("[e2e-fresh] session=%s model=%s pid=%d",
 		ready.SessionID, ready.Model, sess.PID())
 
-	if err := sess.SendText("say hi in one sentence"); err != nil {
-		t.Fatalf("SendText: %v", err)
+	if err := sess.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "say hi in one sentence"},
+	}); err != nil {
+		t.Fatalf("SendBlocks: %v", err)
 	}
 	events := drainUntilTurnDone(t, sess.Events(), 90*time.Second)
 
@@ -344,8 +346,10 @@ func TestE2E_Interrupt(t *testing.T) {
 	_ = awaitReady(t, sess.Events(), 15*time.Second)
 
 	// Fire a prompt that would normally take a long time.
-	if err := sess.SendText("list every file under /tmp recursively, one per line"); err != nil {
-		t.Fatalf("SendText: %v", err)
+	if err := sess.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "list every file under /tmp recursively, one per line"},
+	}); err != nil {
+		t.Fatalf("SendBlocks: %v", err)
 	}
 	// Immediately stop. agent.Agent exposes Stop (delegating to
 	// the bridge's driver); bridges that can't honor it return

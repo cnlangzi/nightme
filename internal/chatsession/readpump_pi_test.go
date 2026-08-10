@@ -61,7 +61,6 @@ func (a *longLivedFakeAS) buildLive() *agent.Agent {
 // longLivedFakeASDriver forwards driver calls to longLivedFakeAS.
 type longLivedFakeASDriver struct{ inner *longLivedFakeAS }
 
-func (d *longLivedFakeASDriver) SendText(text string) error { return d.inner.SendText(text) }
 func (d *longLivedFakeASDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
 	return d.inner.SendBlocks(ctx, b)
 }
@@ -74,7 +73,6 @@ func (d *longLivedFakeASDriver) SetModel(ctx context.Context, providerID, modelI
 	return d.inner.SetModel(ctx, providerID, modelID)
 }
 func (d *longLivedFakeASDriver) Close() error                   { return d.inner.Close() }
-func (a *longLivedFakeAS) SendText(string) error          { return nil }
 func (a *longLivedFakeAS) SendBlocks(context.Context, []agent.ContentBlock) error {
 	return nil
 }

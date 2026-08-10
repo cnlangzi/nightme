@@ -48,7 +48,6 @@ type closedSpyDriver struct {
 	closes *atomic.Int32
 }
 
-func (d *closedSpyDriver) SendText(text string) error { return d.inner.SendText(text) }
 func (d *closedSpyDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
 	return d.inner.SendBlocks(ctx, b)
 }

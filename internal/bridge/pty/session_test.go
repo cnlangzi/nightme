@@ -1,6 +1,7 @@
 package pty
 
 import (
+	"context"
 	"io"
 	"os"
 	"sync"
@@ -151,15 +152,20 @@ func TestAgentReadError(t *testing.T) {
 	}
 }
 
-// TestAgentSendText verifies that SendText writes bytes to the bridge.
-func TestAgentSendText(t *testing.T) {
+// TestAgentSendBlocks verifies that SendBlocks writes the encoded
+// payload to the PTY. ContentText blocks are emitted verbatim
+// followed by a newline; Image/File blocks are emitted as
+// "@<path>\n".
+func TestAgentSendBlocks(t *testing.T) {
 	b := newFakeTransport()
 	a := newAgentForTest(b)
 	go a.readLoop()
 	t.Cleanup(func() { _ = a.Close() })
 
-	if err := a.SendText("hello\n"); err != nil {
-		t.Fatalf("SendText returned error: %v", err)
+	if err := a.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "hello"},
+	}); err != nil {
+		t.Fatalf("SendBlocks returned error: %v", err)
 	}
 
 	b.mu.Lock()

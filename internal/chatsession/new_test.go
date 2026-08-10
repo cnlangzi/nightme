@@ -42,7 +42,6 @@ type callRecordingASDriver struct {
 	calls *atomic.Int32
 }
 
-func (d *callRecordingASDriver) SendText(text string) error { return d.inner.SendText(text) }
 func (d *callRecordingASDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
 	return d.inner.SendBlocks(ctx, b)
 }
@@ -75,7 +74,6 @@ func (f *failingNewAS) buildLive() *agent.Agent {
 // failingNewASDriver forwards driver calls to a failingNewAS.
 type failingNewASDriver struct{ inner *failingNewAS }
 
-func (d *failingNewASDriver) SendText(text string) error { return d.inner.SendText(text) }
 func (d *failingNewASDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
 	return d.inner.SendBlocks(ctx, b)
 }
@@ -495,7 +493,6 @@ func (r *restartErrAS) buildLive() *agent.Agent {
 // restartErrASDriver forwards driver calls to a restartErrAS.
 type restartErrASDriver struct{ inner *restartErrAS }
 
-func (d *restartErrASDriver) SendText(text string) error { return d.inner.SendText(text) }
 func (d *restartErrASDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
 	return d.inner.SendBlocks(ctx, b)
 }

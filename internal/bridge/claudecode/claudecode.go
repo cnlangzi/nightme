@@ -290,17 +290,6 @@ func (d *driver) StderrLines() <-chan string { return d.stderrLines }
 // PID returns the OS process id of the child.
 func (d *driver) PID() int { return d.pid }
 
-// SendText is a convenience wrapper around SendBlocks for the
-// text-only path.
-func (d *driver) SendText(text string) error {
-	if text == "" {
-		return nil
-	}
-	return d.SendBlocks(context.Background(), []agent.ContentBlock{
-		{Type: agent.ContentText, Text: text},
-	})
-}
-
 // SendBlocks writes a structured user turn to Claude Code's stdin
 // in stream-json format. Each block is encoded into an Anthropic-API
 // content-array element:
@@ -583,7 +572,7 @@ func (d *driver) Close() error {
 }
 
 // writeLine writes a single JSON line to claude's stdin followed by
-// \n. The mutex serializes writes (multiple SendText calls in
+// \n. The mutex serializes writes (multiple SendBlocks calls in
 // flight).
 func (d *driver) writeLine(data []byte) error {
 	d.stdinMu.Lock()
@@ -866,18 +855,16 @@ func detectBranch(workspace string) string {
 }
 
 // Compile-time guarantee that *driver satisfies the package-private
-// agent.driver interface (SendText/SendBlocks/SendPermission/
-// Reset/Close). External callers reach driver via *agent.Agent,
-// which forwards the public methods. The package-private starter
-// half is type-checked in starter.go via the same agentDriver
-// interface declaration.
+// agent.driver interface (SendBlocks/SendPermission/Reset/Close).
+// External callers reach driver via *agent.Agent, which forwards
+// the public methods. The package-private starter half is type-checked
+// in starter.go via the same agentDriver interface declaration.
 var _ agentDriver = (*driver)(nil)
 
 // agentDriver is the local alias for the agent.driver interface so
 // this file can do a compile-time check that driver satisfies it
 // without importing the unexported name from the agent package.
 type agentDriver interface {
-	SendText(text string) error
 	SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error
 	SendPermission(resp string) error
 	Reset(ctx context.Context) error

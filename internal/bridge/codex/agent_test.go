@@ -68,19 +68,13 @@ func TestDetect_AcceptsExistingBinary(t *testing.T) {
 	}
 }
 
-// ─── SendBlocks unit tests (offline) ───
+// ─── Starter type-check (no real Codex binary needed) ───
 
-func TestSendText_WrapsBlocks(t *testing.T) {
-	// We can't call a.SendText directly without a real session, but
-	// we can verify the wrapping logic by calling the lower-level
-	// builder that SendBlocks uses (extracted into buildBlocksInput).
-	//
-	// Since we don't expose buildBlocksInput, this is a smoke test:
-	// verify the live Agent has the expected method signature.
+func TestStarter_SatisfiesAgentStarter(t *testing.T) {
+	// Smoke test: keep the compiler honest that Starter satisfies
+	// agent.Starter; the driver (live handle) satisfies agent.driver
+	// (checked separately via var _ in agent.go).
 	a := NewStarter("codex", "codex", nil)
-	// Type assertion sanity — keep the compiler honest. Starter
-	// satisfies agent.Starter; the driver (live handle) satisfies
-	// agent.driver (checked separately via var _ in agent.go).
 	var _ agent.Starter = a
 }
 

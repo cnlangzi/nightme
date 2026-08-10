@@ -19,9 +19,10 @@ import (
 //
 // One-off: each Run returns the captured stdout/stderr/error triple.
 type pushGit struct {
-	mu       sync.Mutex
-	responses map[string]pushGitResp
-	calls    []pushGitCall
+	mu               sync.Mutex
+	responses        map[string]pushGitResp
+	responsesByArgs  map[string]pushGitResp
+	calls            []pushGitCall
 }
 
 type pushGitResp struct {
@@ -36,7 +37,10 @@ type pushGitCall struct {
 }
 
 func newPushGit() *pushGit {
-	return &pushGit{responses: make(map[string]pushGitResp)}
+	return &pushGit{
+		responses:       make(map[string]pushGitResp),
+		responsesByArgs: make(map[string]pushGitResp),
+	}
 }
 
 // on registers a response keyed by the FIRST argv token (e.g.
@@ -46,6 +50,17 @@ func (f *pushGit) on(prefix string, stdout, stderr string, err error) {
 	f.responses[prefix] = pushGitResp{stdout, stderr, err}
 }
 
+// onArgs registers a response keyed by the FULL argv slice
+// joined with NUL (a separator no shell argv can have). Used
+// when two calls share the same first token (e.g. both
+// countUnpushed and countBaseAhead run `git rev-list ...`,
+// but with different range syntaxes — first-token matching
+// would alias both to one response). Run first tries onArgs
+// matches; only falls back to on() when none match.
+func (f *pushGit) onArgs(args []string, stdout, stderr string, err error) {
+	f.responsesByArgs[joinArgs(args)] = pushGitResp{stdout, stderr, err}
+}
+
 func (f *pushGit) Run(_ context.Context, dir string, args ...string) (string, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -53,11 +68,22 @@ func (f *pushGit) Run(_ context.Context, dir string, args ...string) (string, st
 	if len(args) == 0 {
 		return "", "", errors.New("pushGit: empty argv")
 	}
+	// Specific (full-argv) match wins over first-token match.
+	if resp, ok := f.responsesByArgs[joinArgs(args)]; ok {
+		return resp.stdout, resp.stderr, resp.err
+	}
 	resp, ok := f.responses[args[0]]
 	if !ok {
 		return "", "", errors.New("pushGit: no response for " + args[0])
 	}
 	return resp.stdout, resp.stderr, resp.err
+}
+
+// joinArgs is a tiny helper used by onArgs/Run to serialise an
+// argv slice into a map key. NUL is a safe separator because
+// git argv tokens can't contain it.
+func joinArgs(args []string) string {
+	return strings.Join(args, "\x00")
 }
 
 // recordingAgent is a minimal agent.Starter for the dispatcher
@@ -136,6 +162,10 @@ func writeYml(t *testing.T, dir string, c Context) {
 // buildTestYml is intentionally minimal — only fields dispatchPush
 // reads (Worktree/Branch/RepoRoot/Issue). ReadGTWYml's parser
 // ignores unknown keys.
+//
+// Repo + Provider are emitted when populated so /gtw pr tests
+// can exercise the yml-pinned resolveProvider path without
+// standing up a Detect fallback.
 func buildTestYml(c Context) string {
 	var sb strings.Builder
 	sb.WriteString("worktree: " + c.Worktree + "\n")
@@ -143,6 +173,12 @@ func buildTestYml(c Context) string {
 	sb.WriteString("repoRoot: " + c.RepoRoot + "\n")
 	if c.Issue > 0 {
 		sb.WriteString("issue: " + itoa10(c.Issue) + "\n")
+	}
+	if c.Repo != "" {
+		sb.WriteString("repo: " + c.Repo + "\n")
+	}
+	if c.Provider != "" {
+		sb.WriteString("provider: " + c.Provider + "\n")
 	}
 	return sb.String()
 }
@@ -290,8 +326,9 @@ func TestRunPush_CleanNoUnpushed(t *testing.T) {
 		RepoRoot: mustPwd(t),
 	})
 
-	res, err := dispatchPush(context.Background(), &chatsession.ChatSession{},
+	res, err := dispatchPush(context.Background(), newPushChatSession(t),
 		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
+
 	if err != nil || res == nil {
 		t.Fatalf("dispatchPush err=%v res=%v", err, res)
 	}
@@ -319,8 +356,9 @@ func TestRunPush_CleanWithUnpushed(t *testing.T) {
 		RepoRoot: mustPwd(t),
 	})
 
-	_, err := dispatchPush(context.Background(), &chatsession.ChatSession{},
+	_, err := dispatchPush(context.Background(), newPushChatSession(t),
 		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
+
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -352,7 +390,7 @@ func TestRunPush_DirtyDelegatesToAgent(t *testing.T) {
 		RepoRoot: mustPwd(t),
 		Issue:    7,
 	})
-	cs := &chatsession.ChatSession{}
+	cs := newPushChatSession(t)
 	_ = cs.SetSelectedAgent("claude")
 
 	_, err := dispatchPush(context.Background(), cs,
@@ -402,7 +440,7 @@ func TestRunPush_DirtyWithAgentFlag(t *testing.T) {
 		Branch:   "wt-flag",
 		RepoRoot: mustPwd(t),
 	})
-	cs := &chatsession.ChatSession{}
+	cs := newPushChatSession(t)
 	_ = cs.SetSelectedAgent("claude") // chat default = claude
 
 	_, err := dispatchPush(context.Background(), cs,
@@ -431,8 +469,9 @@ func TestRunPush_NoAgentSelected(t *testing.T) {
 		RepoRoot: mustPwd(t),
 	})
 
-	_, err := dispatchPush(context.Background(), &chatsession.ChatSession{},
+	_, err := dispatchPush(context.Background(), newPushChatSession(t),
 		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
+
 	if err != nil {
 		t.Fatalf("RunPush: %v", err)
 	}
@@ -453,7 +492,7 @@ func TestRunPush_UnknownAgent(t *testing.T) {
 		Branch:   "wt-unknown",
 		RepoRoot: mustPwd(t),
 	})
-	cs := &chatsession.ChatSession{}
+	cs := newPushChatSession(t)
 	_ = cs.SetSelectedAgent("claude")
 
 	_, err := dispatchPush(context.Background(), cs,
@@ -482,7 +521,7 @@ func TestRunPush_AgentBinaryMissing(t *testing.T) {
 		Branch:   "wt-missing",
 		RepoRoot: mustPwd(t),
 	})
-	cs := &chatsession.ChatSession{}
+	cs := newPushChatSession(t)
 	_ = cs.SetSelectedAgent("claude")
 
 	_, err := dispatchPush(context.Background(), cs,
@@ -511,7 +550,7 @@ func TestRunPush_AgentRunOnceError(t *testing.T) {
 		Branch:   "wt-agenterr",
 		RepoRoot: mustPwd(t),
 	})
-	cs := &chatsession.ChatSession{}
+	cs := newPushChatSession(t)
 	_ = cs.SetSelectedAgent("claude")
 
 	_, err := dispatchPush(context.Background(), cs,
@@ -536,7 +575,7 @@ func TestRunPush_ConflictState(t *testing.T) {
 		Branch:   "wt-conflict",
 		RepoRoot: mustPwd(t),
 	})
-	cs := &chatsession.ChatSession{}
+	cs := newPushChatSession(t)
 	_ = cs.SetSelectedAgent("claude")
 
 	_, err := dispatchPush(context.Background(), cs,
@@ -558,8 +597,9 @@ func TestDispatchPush_NoYml(t *testing.T) {
 	withCwd(t, t.TempDir())
 	// Don't call writeYml — leave the dir empty.
 
-	_, err := dispatchPush(context.Background(), &chatsession.ChatSession{},
+	_, err := dispatchPush(context.Background(), newPushChatSession(t),
 		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
+
 	if err != nil {
 		t.Fatalf("dispatchPush: %v", err)
 	}
@@ -585,8 +625,9 @@ func TestDispatchPush_MalformedYml(t *testing.T) {
 		t.Fatalf("write yml: %v", err)
 	}
 
-	_, err := dispatchPush(context.Background(), &chatsession.ChatSession{},
+	_, err := dispatchPush(context.Background(), newPushChatSession(t),
 		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
+
 	if err != nil {
 		t.Fatalf("dispatchPush: %v", err)
 	}
@@ -688,4 +729,63 @@ func mustPwd(t *testing.T) string {
 		t.Fatalf("getwd: %v", err)
 	}
 	return dir
+}
+
+// newPushChatSession returns a *chatsession.ChatSession with
+// SelectedCwd set to the test's current working directory (the
+// same dir the yml helper writes to). loadDispatchContext reads
+// cs.SelectedCwd() (not system pwd), so each dispatchPush test
+// needs a chat that mirrors the system-pwd that withCwd() set.
+//
+// Tests that want a chat with no SelectedCwd (to exercise the
+// "no active workspace" early return) should construct the
+// chat session themselves and leave cwd empty.
+func newPushChatSession(t *testing.T) *chatsession.ChatSession {
+	t.Helper()
+	cs := &chatsession.ChatSession{}
+	_ = cs.SetSelectedCwd(mustPwd(t))
+	return cs
+}
+
+// TestRunPush_NonWorktree_CleanWithUnpushed covers /gtw push on
+// a manually-checked-out branch (no /gtw fix pre-amble, no
+// .nightme/gtw.yml). loadDispatchContext derives Branch / Worktree
+// / RepoRoot from git rev-parse, then dispatchPush proceeds
+// normally.
+func TestRunPush_NonWorktree_CleanWithUnpushed(t *testing.T) {
+	tmp := t.TempDir()
+	withCwd(t, tmp)
+
+	git := newPushGit()
+	// loadDispatchContext's git calls:
+	git.onArgs([]string{"rev-parse", "--show-toplevel"}, tmp, "", nil)
+	git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, "feat/manual", "", nil)
+	// dispatchPush's calls (clean + 3 unpushed → programmatic push):
+	git.on("status", "", "", nil)
+	git.on("rev-list", "3", "", nil)
+	git.on("push", "To origin\n", "", nil)
+
+	withAgent(t)
+	cs := &chatsession.ChatSession{}
+	_ = cs.SetSelectedCwd(tmp)
+	s := captureCh(t, cs)
+
+	_, err := dispatchPush(context.Background(), cs,
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
+	if err != nil {
+		t.Fatalf("RunPush: %v", err)
+	}
+	pushed := false
+	for _, c := range git.calls {
+		if c.args[0] == "push" {
+			pushed = true
+		}
+	}
+	if !pushed {
+		t.Fatalf("expected git push call, got %v", git.calls)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "✅ Pushed") || !strings.Contains(r, "feat/manual") {
+		t.Fatalf("expected push success card with branch name, got:\n%s", r)
+	}
 }

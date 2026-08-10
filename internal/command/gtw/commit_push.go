@@ -3,7 +3,6 @@ package gtw
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -11,19 +10,25 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
-// runOnceTimeout is the hard deadline for a one-shot agent
-// commit+push. 5 minutes covers realistic agent commits (lint
-// fixes, conflict resolution, multi-tool flows) without wedging
-// /gtw push if an agent hangs (e.g. PTY fallback with no idle
-// signal — see pty.RunOnce's ptyIdleTimeout for the per-call
-// short-window heuristic).
-const runOnceTimeout = 5 * time.Minute
+// RunOnceTimeout is the hard deadline for a one-shot agent
+// call (commit+push, PR title+body generation). 5 minutes
+// covers realistic agent commits (lint fixes, conflict
+// resolution, multi-tool flows) without wedging /gtw push if
+// an agent hangs (e.g. PTY fallback with no idle signal — see
+// pty.RunOnce's ptyIdleTimeout for the per-call short-window
+// heuristic).
+//
+// Exported because both /gtw push and /gtw pr use it.
+const RunOnceTimeout = 5 * time.Minute
 
 // dispatchPush is the three-state dispatcher for /gtw push.
 //
 // Flow:
 //
-//  1. Locate selectedCwd + .nightme/gtw.yml → c (Context).
+//  1. loadDispatchContext → c (Context). Reads cs.SelectedCwd()
+//     and either loads `.nightme/gtw.yml` (worktree mode) or
+//     derives Worktree/Branch/RepoRoot from git (non-worktree
+//     mode).
 //  2. git status --porcelain (single call, drives both the
 //     conflict check and the clean/dirty dispatch).
 //  3. If status has unmerged paths → refuse (rebase/merge
@@ -42,26 +47,9 @@ func dispatchPush(
 	args pushArgs,
 	ymlAgent string,
 ) (*Result, error) {
-	selectedCwd, err := pushCwd()
-	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			"❌ no active workspace. Send /cwd <path> first."), nil
-	}
-
-	c, err := ReadGTWYml(selectedCwd)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return reply(ctx, cs.Channel(), chatID, messageID,
-				"❌ no active fix to push in this chat\n"+
-					"hint: /cwd into the /gtw fix worktree first (its "+
-					"`.nightme/gtw.yml` is the push source of truth)."), nil
-		}
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err)), nil
-	}
-	if c.Worktree == "" || c.Branch == "" || c.RepoRoot == "" {
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			"❌ .nightme/gtw.yml is malformed (worktree/branch/repoRoot required)"), nil
+	c, res := loadDispatchContext(ctx, cs, deps, chatID, messageID)
+	if res != nil {
+		return res, nil
 	}
 
 	statusOut, _, err := deps.Git.Run(ctx, c.Worktree, "status", "--porcelain")
@@ -184,7 +172,7 @@ func pushDirty(
 			fmt.Sprintf("❌ agent %s not available: %v", agentName, err)), nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, runOnceTimeout)
+	ctx, cancel := context.WithTimeout(ctx, RunOnceTimeout)
 	defer cancel()
 
 	blocks := []agent.ContentBlock{{

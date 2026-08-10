@@ -139,6 +139,8 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw push                        push the worktree branch (clean → push, dirty → agent commits+pushes)\n" +
 			"/gtw push -a claude              override which agent runs the one-shot\n" +
 			"/gtw push --agent opencode       same, long form\n" +
+			"/gtw pr                          generate PR title+body, then open the PR\n" +
+			"/gtw pr -a claude                override which agent runs the one-shot\n" +
 			"/gtw sync                        checkout the default branch and pull --rebase from origin",
 	}
 }
@@ -167,6 +169,8 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, cs *ch
 		return f.runClose(ctx, rt, cs, input)
 	case "push":
 		return f.runPush(ctx, rt, cs, input)
+	case "pr":
+		return f.runPR(ctx, rt, cs, input)
 	case "sync":
 		return f.runSync(ctx, rt, cs, input)
 	}
@@ -502,6 +506,56 @@ func parsePushArgs(argv []string) (pushArgs, error) {
 			// Unknown token. Silent accept — future flag
 			// additions (e.g. positional branch arg) won't
 			// break callers passing them by mistake.
+		}
+	}
+	return out, nil
+}
+
+// runPR handles `/gtw pr`. Reads the yml at the current CWD
+// to find the worktree, generates a Conventional Commits
+// title + body via a one-shot agent, then asks the provider
+// (GitHub or GitLab) to open the PR.
+//
+// The flow lives entirely in dispatchPR (pr.go); this wrapper
+// is a thin mirror of runPush — parse the agent override, hand
+// off, surface any dispatch error to the chat.
+func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	args, err := parsePRArgs(input.Args[2:])
+	if err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v", err),
+			Consumed: true,
+		}, nil
+	}
+
+	_, err = dispatchPR(ctx, cs, f.deps, input.ChatID, input.MessageID, args)
+	if err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ /gtw pr failed: %v", err),
+			Consumed: true,
+		}, nil
+	}
+	return &command.SlashOutput{Consumed: true}, nil
+}
+
+// parsePRArgs strips `-a <name>` / `--agent <name>` from the
+// pr argv tail. Mirrors parsePushArgs — v1 has no positional
+// arg; /gtw pr always operates on the current chat's worktree,
+// like /gtw push. Unknown flags are tolerated (future flags
+// like --draft / --base can land without breaking callers).
+func parsePRArgs(argv []string) (prArgs, error) {
+	out := prArgs{}
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		switch a {
+		case "-a", "--agent":
+			if i+1 >= len(argv) {
+				return out, fmt.Errorf("missing value for %s", a)
+			}
+			out.Agent = argv[i+1]
+			i++
+		default:
+			// Unknown token. Silent accept.
 		}
 	}
 	return out, nil

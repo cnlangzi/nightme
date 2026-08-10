@@ -4,6 +4,7 @@
 package pty
 
 import (
+	"fmt"
 	"io"
 	"os"
 
@@ -18,6 +19,13 @@ type Transport interface {
 	io.ReadWriteCloser
 	PID() int
 	Setsize(cols, rows int) error
+	// Signal sends a signal to the child process. Tests can
+	// stub it as a no-op; production uses go-pty's underlying
+	// *os.Process.Signal. Note: this exists for the ACP bridge
+	// (which sends SIGINT as its portable Ctrl-C); pty.Agent's
+	// own Abort returns ErrNotSupported because Agent-level
+	// abort should not be confused with raw signal delivery.
+	Signal(os.Signal) error
 }
 
 // ptyTransport is the production implementation backed by
@@ -83,6 +91,19 @@ func (b *ptyTransport) PID() int {
 // straight pass-through.
 func (b *ptyTransport) Setsize(cols, rows int) error {
 	return b.ptmx.Resize(cols, rows)
+}
+
+// Signal sends a signal to the child process. The shell convention
+// is SIGINT (Ctrl-C); the caller picks the signal. We pass through
+// to the underlying gopty.Cmd.Process, which forwards to the
+// child over the controlling terminal so the child sees the signal
+// as if a user pressed the key. Used by the ACP bridge (pty.Agent
+// itself returns ErrNotSupported from Abort — see agent.go).
+func (b *ptyTransport) Signal(sig os.Signal) error {
+	if b.cmd == nil || b.cmd.Process == nil {
+		return fmt.Errorf("pty: no command")
+	}
+	return b.cmd.Process.Signal(sig)
 }
 
 // Compile-time guarantee that *ptyTransport satisfies Transport.

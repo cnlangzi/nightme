@@ -65,6 +65,10 @@ func (d *recordingDriver) SendPermission(resp string) error {
 	return d.inner.SendPermission(resp)
 }
 func (d *recordingDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
+func (d *recordingDriver) Abort(ctx context.Context) error { return d.inner.Abort(ctx) }
+func (d *recordingDriver) SetModel(ctx context.Context, providerID, modelID string) error {
+	return d.inner.SetModel(ctx, providerID, modelID)
+}
 func (d *recordingDriver) Close() error                   { return d.inner.Close() }
 func (r *recordingAgentSession) SendText(_ string) error       { return nil }
 func (r *recordingAgentSession) SendBlocks(_ context.Context, blocks []agent.ContentBlock) error {
@@ -80,6 +84,10 @@ func (r *recordingAgentSession) SendBlocks(_ context.Context, blocks []agent.Con
 }
 func (r *recordingAgentSession) SendPermission(_ string) error { return nil }
 func (r *recordingAgentSession) New(_ context.Context) error   { return nil }
+func (r *recordingAgentSession) Abort(_ context.Context) error { return agent.ErrNotSupported }
+func (r *recordingAgentSession) SetModel(_ context.Context, _, _ string) error {
+	return agent.ErrNotSupported
+}
 func (r *recordingAgentSession) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

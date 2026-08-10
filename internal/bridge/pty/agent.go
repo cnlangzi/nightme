@@ -226,6 +226,31 @@ func (d *driver) New(ctx context.Context) error {
 	return agent.ErrRestartRequired
 }
 
+// Abort is not supported on the PTY bridge. PTY-mode CLIs don't
+// have a structured "abort the in-flight turn" RPC — the only
+// way to interrupt is to write Ctrl-C bytes to stdin or send a
+// signal to the child, both of which are outside the agent.Agent
+// contract (the runtime treats ErrNotSupported as "this bridge
+// can't honor Abort; just close the session instead"). Returning
+// the sentinel lets the runtime surface a clean "not supported"
+// message rather than treating the absence as a generic error.
+//
+// See internal/agent/agent.go ErrNotSupported.
+func (d *driver) Abort(ctx context.Context) error {
+	_ = ctx
+	return agent.ErrNotSupported
+}
+
+// SetModel is not supported on the PTY bridge. PTY has no
+// provider/model concept — the binary decides its own model at
+// startup.
+func (d *driver) SetModel(ctx context.Context, providerID, modelID string) error {
+	_ = ctx
+	_ = providerID
+	_ = modelID
+	return agent.ErrNotSupported
+}
+
 // Close terminates the session by closing the PTY. Idempotent.
 func (d *driver) Close() error {
 	if d.closed {

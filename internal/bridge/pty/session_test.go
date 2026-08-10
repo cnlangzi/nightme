@@ -2,6 +2,7 @@ package pty
 
 import (
 	"io"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -62,8 +63,9 @@ func (f *fakeTransport) Close() error {
 	return nil
 }
 
-func (f *fakeTransport) PID() int               { return 4242 }
-func (f *fakeTransport) Setsize(int, int) error { return nil }
+func (f *fakeTransport) PID() int                          { return 4242 }
+func (f *fakeTransport) Setsize(int, int) error              { return nil }
+func (f *fakeTransport) Signal(os.Signal) error              { return nil }
 
 // push feeds bytes into the bridge as if the child had written them.
 func (f *fakeTransport) push(data string) {

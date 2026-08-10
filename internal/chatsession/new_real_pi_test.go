@@ -332,6 +332,10 @@ func (d *fakeBuilderDriver) SendPermission(resp string) error {
 	return d.inner.SendPermission(resp)
 }
 func (d *fakeBuilderDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
+func (d *fakeBuilderDriver) Abort(ctx context.Context) error { return d.inner.Abort(ctx) }
+func (d *fakeBuilderDriver) SetModel(ctx context.Context, providerID, modelID string) error {
+	return d.inner.SetModel(ctx, providerID, modelID)
+}
 func (d *fakeBuilderDriver) Close() error                   { return d.inner.Close() }
 func (b *fakeAgentBuilder) Events() <-chan agent.AgentEvent                      { return b.events }
 func (b *fakeAgentBuilder) PID() int                                              { return 99999 }
@@ -339,6 +343,8 @@ func (b *fakeAgentBuilder) SendText(_ string) error                             
 func (b *fakeAgentBuilder) SendBlocks(_ context.Context, _ []agent.ContentBlock) error { return nil }
 func (b *fakeAgentBuilder) SendPermission(_ string) error                         { return nil }
 func (b *fakeAgentBuilder) New(_ context.Context) error                           { return nil }
+func (b *fakeAgentBuilder) Abort(_ context.Context) error                         { return agent.ErrNotSupported }
+func (b *fakeAgentBuilder) SetModel(_ context.Context, _, _ string) error          { return agent.ErrNotSupported }
 func (b *fakeAgentBuilder) RunOnce(_ context.Context, _ agent.StartConfig, _ []agent.ContentBlock) (string, error) {
 	return "", errors.New("fakeAgentBuilder: RunOnce not implemented")
 }

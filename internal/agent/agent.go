@@ -566,6 +566,49 @@ type StartConfig struct {
 	SessionID string
 }
 
+// AgentSpec is the static, read-only description of an agent.
+//
+// This is the surface used by tooling that only needs to enumerate
+// or display registered agents (`nightme agents`, config
+// validation, help generation). It deliberately does NOT include
+// Start / Events / Send* — those live on Agent. A consumer holding
+// an AgentSpec is guaranteed (by the type system) not to call
+// runtime methods, so it cannot accidentally spawn a process or
+// leak a live handle.
+//
+// The per-bridge Agent struct satisfies both this interface and
+// Agent. In template state (after the constructor, before Start)
+// only AgentSpec methods are meaningful; in live state (after
+// Start, before Close) both halves are valid.
+type AgentSpec interface {
+	// Name is the unique identifier used in config and the registry.
+	Name() string
+
+	// Mode tells the Bridge which backend to instantiate.
+	Mode() Mode
+
+	// Command is the spawn recipe's executable: the CLI binary name
+	// (resolved via PATH at Start time) or an absolute path. Surfaced
+	// by `nightme agents` so users can see what /run would spawn.
+	Command() string
+
+	// Args returns a defensive copy of the spawn recipe's default
+	// argv (after the binary). Callers may not mutate the returned
+	// slice; per-session overrides arrive separately via StartConfig.
+	Args() []string
+
+	// Env returns a defensive copy of the spawn recipe's default
+	// environment entries (KEY=VALUE strings merged into the child
+	// environment). Most bridges return nil; claudecode / pty return
+	// whatever they were constructed with.
+	Env() []string
+
+	// Detect verifies the agent is runnable (binary on PATH, SDK
+	// available, etc.). Called before Start; an error aborts session
+	// creation with a clear "X not found" message to the user.
+	Detect() error
+}
+
 // ContentBlockType discriminates the payload shape on a ContentBlock.
 type ContentBlockType string
 
@@ -811,6 +854,19 @@ func (a *Agent) Close() error {
 // (SendText, Events, …) rather than going through this.
 func (a *Agent) Driver() interface{} { return a.driver }
 
+// Abort cancels the in-flight turn. Delegates to the bridge's
+// driver; bridges that can't honor the call return
+// agent.ErrNotSupported.
+func (a *Agent) Abort(ctx context.Context) error {
+	return a.driver.Abort(ctx)
+}
+
+// SetModel switches the active model on the next turn. Bridges that
+// can't honor the call return agent.ErrNotSupported.
+func (a *Agent) SetModel(ctx context.Context, providerID, modelID string) error {
+	return a.driver.SetModel(ctx, providerID, modelID)
+}
+
 // NewAgent builds a *Agent from its constituent parts.
 // Exported so bridges and test fakes (outside the agent package)
 // can construct one. The driver is passed as interface{} because
@@ -842,6 +898,12 @@ type driver interface {
 	SendPermission(resp string) error
 	Reset(ctx context.Context) error
 	Close() error
+
+	// Abort / SetModel are bridge-specific runtime methods that
+	// the shared *Agent wrapper exposes. Each driver returns
+	// agent.ErrNotSupported if the bridge cannot honor the call.
+	Abort(ctx context.Context) error
+	SetModel(ctx context.Context, providerID, modelID string) error
 }
 
 // ─── Starter: spawn recipe (interface, the only one) ──────────────
@@ -897,6 +959,17 @@ var (
 	// Returning nil here would be wrong: callers must distinguish
 	// "successfully reset in-place" from "needs full restart".
 	ErrRestartRequired = errors.New("agent: bridge requires restart for reset")
+
+	// ErrNotSupported is returned by Abort / SetModel when the
+	// bridge does not implement the requested operation. The
+	// runtime can detect this with errors.Is and surface a
+	// user-friendly "not supported for this agent" message
+	// instead of treating it as a generic bridge error.
+	//
+	// Bridges that DO implement the operation return nil on
+	// success and a real error on failure. The sentinel is only
+	// for "operation is not implemented on this bridge".
+	ErrNotSupported = errors.New("agent: operation not supported on this bridge")
 )
 
 // sentinelErr is a small helper so tests can match errors with

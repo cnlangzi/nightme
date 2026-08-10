@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,11 @@ type mockTransport struct {
 }
 
 func (b *mockTransport) PID() int { return b.pid }
+
+// Signal is a no-op for the test bridge. Production paths use this
+// to fan out SIGINT to the child; the test path never spawns a real
+// child and never reads Signal.
+func (b *mockTransport) Signal(_ os.Signal) error { return nil }
 
 func TestAcpSession_SendText_EncodesCorrectly(t *testing.T) {
 	client, server := net.Pipe()

@@ -785,7 +785,20 @@ func TestRunPush_NonWorktree_CleanWithUnpushed(t *testing.T) {
 		t.Fatalf("expected git push call, got %v", git.calls)
 	}
 	r := s.lastText()
-	if !strings.Contains(r, "✅ Pushed") || !strings.Contains(r, "feat/manual") {
-		t.Fatalf("expected push success card with branch name, got:\n%s", r)
+	// Format 3 card (commit_push.go pushClean): `✅ pushed` title
+	// + `> <branch>` intent line + raw git output. The previous
+	// `✅ Pushed "<branch>"` form was rewritten to drop the
+	// branch from the title (it lives in the `>` line now).
+	if !strings.Contains(r, "✅ pushed\n") {
+		t.Errorf("expected `✅ pushed` Format 3 title, got:\n%s", r)
+	}
+	if !strings.Contains(r, "> feat/manual\n") {
+		t.Errorf("expected `> <branch>` intent line, got:\n%s", r)
+	}
+	if !strings.Contains(r, "feat/manual") {
+		t.Errorf("expected branch name in output, got:\n%s", r)
+	}
+	if strings.Contains(r, "━━━━━━━━━━━━━━") {
+		t.Errorf("legacy `━━━━━━━━━━━━━━` separator should be gone after Format 3 rewrite, got:\n%s", r)
 	}
 }

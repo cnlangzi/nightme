@@ -303,14 +303,33 @@ func TestFormatResults_ShowsAlways(t *testing.T) {
 }
 
 func TestFormatResults_ShowsFailure(t *testing.T) {
+	// `exit 5` produces an *exec.ExitError with code 5; the
+	// Format 3 rule (gtw/README.md §2.3) prepends `  ❌ exit N`
+	// to the raw block for non-zero exits so the user sees the
+	// cause-of-failure first.
 	results := RunHooks(context.Background(),
 		[]Hook{{Run: "echo oops 1>&2; exit 5"}}, t.TempDir())
 	out := FormatResults("after", results)
 	if !strings.Contains(out, "oops") {
 		t.Errorf("stderr should appear, got: %q", out)
 	}
+	if !strings.Contains(out, "❌ exit 5") {
+		t.Errorf("expected `❌ exit 5` failure indicator, got: %q", out)
+	}
+}
+
+func TestFormatResults_NonExitError_UsesWarning(t *testing.T) {
+	// Errors that don't carry an exit code (timeout, unsupported
+	// type, no workspace, empty run) keep the `⚠️ <msg>` shape —
+	// only `*exec.ExitError` triggers the `❌ exit N` injection.
+	results := RunHooks(context.Background(),
+		[]Hook{{Run: ""}}, t.TempDir())
+	out := FormatResults("after", results)
 	if !strings.Contains(out, "⚠️") {
-		t.Errorf("failure marker should appear, got: %q", out)
+		t.Errorf("expected `⚠️ <msg>` for non-exit error, got: %q", out)
+	}
+	if strings.Contains(out, "❌ exit") {
+		t.Errorf("non-exit error should NOT trigger `❌ exit N`, got: %q", out)
 	}
 }
 
@@ -473,8 +492,12 @@ func TestWithHooks_BeforeFailureDoesNotBlockMain(t *testing.T) {
 	if !mainCalled {
 		t.Fatal("main not called despite before-hook failure")
 	}
-	if len(ch.sent) != 1 || !strings.Contains(ch.sent[0], "⚠️") {
-		t.Errorf("expected follow-up with ⚠️ marker, got: %v", ch.sent)
+	// Format 3 failure indicator: `false; exit 1` produces an
+	// *exec.ExitError with code 1, which FormatResults renders
+	// as `❌ exit 1` (gtw/README.md §2.3). The previous `⚠️`
+	// marker is now reserved for non-exit-code errors only.
+	if len(ch.sent) != 1 || !strings.Contains(ch.sent[0], "❌ exit 1") {
+		t.Errorf("expected follow-up with `❌ exit 1` marker, got: %v", ch.sent)
 	}
 }
 

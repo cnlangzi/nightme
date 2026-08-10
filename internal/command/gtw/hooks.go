@@ -248,6 +248,20 @@ func FormatResults(label string, results []HookResult) string {
 	fmt.Fprintf(&b, "✅ hooks: %s\n", label)
 	for _, r := range results {
 		fmt.Fprintf(&b, "> %s\n", r.Name)
+		// Failure indicator per gtw/README.md §2.3: when the hook
+		// exited with a non-zero code, prepend `  ❌ exit N` to the
+		// raw block so the user sees the cause-of-failure first
+		// without scrolling. Other errors (timeout, unsupported
+		// type, no workspace, empty run) lack an exit code so we
+		// fall back to the descriptive `⚠️ <msg>` line — same
+		// shape as before, semantics unchanged.
+		if r.Err != nil {
+			if exitErr, ok := errors.AsType[*exec.ExitError](r.Err); ok {
+				fmt.Fprintf(&b, "  ❌ exit %d\n", exitErr.ExitCode())
+			} else {
+				fmt.Fprintf(&b, "  ⚠️ %v\n", r.Err)
+			}
+		}
 		if out := strings.TrimRight(r.Stdout, "\n"); out != "" {
 			b.WriteString(indentLines(out, "  "))
 			b.WriteString("\n")
@@ -255,9 +269,6 @@ func FormatResults(label string, results []HookResult) string {
 		if errStr := strings.TrimRight(r.Stderr, "\n"); errStr != "" {
 			b.WriteString(indentLines(errStr, "  "))
 			b.WriteString("\n")
-		}
-		if r.Err != nil {
-			fmt.Fprintf(&b, "  ⚠️ %v\n", r.Err)
 		}
 	}
 	return b.String()

@@ -10,7 +10,7 @@
 //   - Watchdog goroutine state
 //   - Turn-tracking flags (pendingTurnActive, turnHadContent)
 //
-// It implements the unexported agent.driver interface (SendText,
+// It implements the unexported agent.driver interface (SendBlocks,
 // SendBlocks, SendPermission, Reset, Close) and exposes bridge-
 // specific extensions (Compact, ListSessions, AvailableBuiltinCommands,
 // Stop, SetModel) for callers that type-assert *agent.Agent.
@@ -236,14 +236,6 @@ func (d *driver) bootServerAndHandshake(ctx context.Context, s *Starter, cfg age
 }
 
 // ─── driver implements agent.driver ────────────────────────────────
-
-// SendText delivers plain-text user input. Delegates to SendBlocks
-// with a single ContentText block.
-func (d *driver) SendText(text string) error {
-	return d.SendBlocks(context.Background(), []agent.ContentBlock{
-		{Type: agent.ContentText, Text: text},
-	})
-}
 
 // SendBlocks delivers a structured user turn. Encodes image/file
 // blocks inline (base64 for images, file:// URL for non-images) and

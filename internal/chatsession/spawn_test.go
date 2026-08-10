@@ -52,7 +52,6 @@ func (f *fakeAgentSession) buildLive() *agent.Agent {
 // fakeDriver forwards driver calls back to a fakeAgentSession.
 type fakeDriver struct{ inner *fakeAgentSession }
 
-func (d *fakeDriver) SendText(text string) error { return d.inner.SendText(text) }
 func (d *fakeDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
 	return d.inner.SendBlocks(ctx, b)
 }
@@ -64,16 +63,7 @@ func (d *fakeDriver) SetModel(ctx context.Context, providerID, modelID string) e
 }
 func (d *fakeDriver) Close() error                      { return d.inner.Close() }
 
-func (f *fakeAgentSession) SendText(text string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.closed {
-		return errors.New("fake: closed")
-	}
-	return nil
-}
-
-func (f *fakeAgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
+func (f *fakeAgentSession) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.closed {
@@ -258,14 +248,14 @@ func TestAgentSession_NoSpawnerLeavesDetached(t *testing.T) {
 	}
 }
 
-func TestAgentSession_SendTextBeforeSpawn(t *testing.T) {
+func TestAgentSession_SendBlocksBeforeSpawn(t *testing.T) {
 	as := NewAgentSession("as_1", "cs_xxx", "claude", "/x", nil)
-	if err := as.SendText("hi"); !errors.Is(err, ErrNotRunning) {
+	if err := as.SendBlocks(context.Background(), []agent.ContentBlock{{Type: agent.ContentText, Text: "hi"}}); !errors.Is(err, ErrNotRunning) {
 		t.Fatalf("expected ErrNotRunning, got %v", err)
 	}
 }
 
-func TestAgentSession_SendTextAfterSpawn(t *testing.T) {
+func TestAgentSession_SendBlocksAfterSpawn(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
 	cs, _ := New("oc_xxx", "claude", newTestChannel())
@@ -275,8 +265,8 @@ func TestAgentSession_SendTextAfterSpawn(t *testing.T) {
 	cs.SetSelectedAgent("claude")
 
 	as, _ := cs.LookupSelectedAgentSession()
-	if err := as.SendText("hello"); err != nil {
-		t.Fatalf("SendText after spawn: %v", err)
+	if err := as.SendBlocks(context.Background(), []agent.ContentBlock{{Type: agent.ContentText, Text: "hello"}}); err != nil {
+		t.Fatalf("SendBlocks after spawn: %v", err)
 	}
 }
 

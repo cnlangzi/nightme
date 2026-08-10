@@ -20,7 +20,7 @@ import (
 )
 
 // stubStoppable implements the agent.driver contract with the
-// minimum surface required by AgentSession: SendText / SendBlocks /
+// minimum surface required by AgentSession: SendBlocks /
 // SendPermission / Reset / Close / Stop / SetModel. Tests inject
 // their own return values for Stop to drive the success / failure
 // matrix.
@@ -29,7 +29,6 @@ type stubStoppable struct {
 	stopped int
 }
 
-func (s *stubStoppable) SendText(_ string) error { return nil }
 func (s *stubStoppable) SendBlocks(_ context.Context, _ []agent.ContentBlock) error {
 	return nil
 }

@@ -66,7 +66,7 @@ var DefaultArgs = []string{
 // start; 10 s matches the acp bridge's startup deadline.
 const handshakeTimeout = 10 * time.Second
 
-// promptTimeout bounds a single SendText / SendBlocks turn.
+// promptTimeout bounds a single SendBlocks turn.
 //
 // Pi is expected to ack the `prompt` RPC within a few seconds
 // even on slow first-token model latency; 90 s leaves generous
@@ -398,17 +398,6 @@ func (d *driver) Events() <-chan agent.AgentEvent { return d.events }
 // PID returns the child process pid.
 func (d *driver) PID() int { return d.pid }
 
-// SendText delivers a single text user turn. Thin wrapper around
-// SendBlocks.
-func (d *driver) SendText(text string) error {
-	if text == "" {
-		return nil
-	}
-	return d.SendBlocks(context.Background(), []agent.ContentBlock{
-		{Type: agent.ContentText, Text: text},
-	})
-}
-
 // SendBlocks delivers a structured user turn. The bridge joins
 // multiple ContentText blocks with "\n", base64-encodes
 // ContentImage blocks into prompt.images[], and degrades
@@ -601,7 +590,7 @@ func (d *driver) New(ctx context.Context) error {
 // protocol exposes an abort command that cancels the in-flight turn
 // and forces the agent_settled event to fire. The pi process stays
 // alive; the bridge observes the boundary and the next
-// SendText/SendBlocks can proceed once the chat layer's TryFlush
+// SendBlocks can proceed once the chat layer's TryFlush
 // loop sees IsReady() flip back to true.
 //
 // Stop is fire-and-forget: this method returns as soon as the
@@ -991,16 +980,15 @@ func indexByte(s string, c byte) int {
 }
 
 // Compile-time guarantee that *driver satisfies the package-private
-// agent.driver interface (SendText/SendBlocks/SendPermission/
-// Reset/Close). External callers reach driver via *agent.Agent,
-// which forwards the public methods.
+// agent.driver interface (SendBlocks/SendPermission/Reset/Close).
+// External callers reach driver via *agent.Agent, which forwards
+// the public methods.
 var _ agentDriver = (*driver)(nil)
 
 // agentDriver is the local alias for the agent.driver interface so
 // this file can compile-time check driver satisfies it without
 // importing the unexported name from the agent package.
 type agentDriver interface {
-	SendText(text string) error
 	SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error
 	SendPermission(resp string) error
 	Reset(ctx context.Context) error

@@ -27,7 +27,7 @@ func (b *mockTransport) PID() int { return b.pid }
 // child and never reads Signal.
 func (b *mockTransport) Signal(_ os.Signal) error { return nil }
 
-func TestAcpSession_SendText_EncodesCorrectly(t *testing.T) {
+func TestAcpSession_SendBlocks_EncodesCorrectly(t *testing.T) {
 	client, server := net.Pipe()
 	transport := &mockTransport{Conn: client, pid: 42}
 	defer server.Close()
@@ -48,8 +48,10 @@ func TestAcpSession_SendText_EncodesCorrectly(t *testing.T) {
 
 	promptDone := make(chan rpcMessage, 1)
 	go func() { promptDone <- readRPCForTest(t, serverReader) }()
-	if err := a.SendText("hello"); err != nil {
-		t.Fatalf("SendText() error = %v", err)
+	if err := a.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "hello"},
+	}); err != nil {
+		t.Fatalf("SendBlocks() error = %v", err)
 	}
 	select {
 	case request := <-promptDone:

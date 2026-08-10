@@ -693,9 +693,9 @@ func TestAgent_Detect_MissingBinary(t *testing.T) {
 
 // --- Session tests (no real Claude Code binary needed) ---
 
-func TestSession_SendText_NoProcess(t *testing.T) {
-	// newSession requires a real binary; we test the JSON encoding
-	// path indirectly via SendText/EncodeUserAnswer.
+func TestSession_Start_NoProcess(t *testing.T) {
+	// newSession requires a real binary; we test the Start-failure
+	// path indirectly here.
 	a := NewStarter("claude", "this-binary-does-not-exist-12345", nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -979,8 +979,8 @@ func claudeMockCommand(t *testing.T) (string, []string) {
 // TestClaudeCodeBridge_RealSubprocess drives the claudecode bridge
 // through a real subprocess (a Python mock that mimics the Claude
 // Code CLI's stream-json surface) and verifies that three
-// back-to-back SendText calls produce the expected event trio
-// per message. With the pre-fix eviction code the third SendText
+// back-to-back SendBlocks calls produce the expected event trio
+// per message. With the pre-fix eviction code the third SendBlocks
 // would deadlock; with the post-fix code all three messages
 // flow through the bridge's read path and reach the Events
 // channel.
@@ -991,7 +991,7 @@ func claudeMockCommand(t *testing.T) (string, []string) {
 // Failure modes the test catches:
 //   - The bridge writes the wrong stream-json envelope shape
 //     (the mock would fail to extract text and emit "empty").
-//   - The bridge fails to multiplex concurrent SendText calls
+//   - The bridge fails to multiplex concurrent SendBlocks calls
 //     onto the child's stdin pipe (one of the writes would block).
 //   - The bridge's pumpStream drops frames between messages
 //     (the per-message event count would be wrong).
@@ -1026,8 +1026,10 @@ func TestClaudeCodeBridge_RealSubprocess(t *testing.T) {
 	const messages = 3
 	for i := 0; i < messages; i++ {
 		text := fmt.Sprintf("hello-%d", i)
-		if err := sess.SendText(text); err != nil {
-			t.Fatalf("SendText[%d] (%q): %v", i, text, err)
+		if err := sess.SendBlocks(context.Background(), []agent.ContentBlock{
+			{Type: agent.ContentText, Text: text},
+		}); err != nil {
+			t.Fatalf("SendBlocks[%d] (%q): %v", i, text, err)
 		}
 	}
 

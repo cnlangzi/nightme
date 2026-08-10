@@ -57,7 +57,6 @@ func (r *recordingAgentSession) buildLive() *agent.Agent {
 // recordingDriver forwards driver calls to a recordingAgentSession.
 type recordingDriver struct{ inner *recordingAgentSession }
 
-func (d *recordingDriver) SendText(text string) error { return d.inner.SendText(text) }
 func (d *recordingDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
 	return d.inner.SendBlocks(ctx, b)
 }
@@ -70,7 +69,6 @@ func (d *recordingDriver) SetModel(ctx context.Context, providerID, modelID stri
 	return d.inner.SetModel(ctx, providerID, modelID)
 }
 func (d *recordingDriver) Close() error                   { return d.inner.Close() }
-func (r *recordingAgentSession) SendText(_ string) error       { return nil }
 func (r *recordingAgentSession) SendBlocks(_ context.Context, blocks []agent.ContentBlock) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

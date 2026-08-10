@@ -84,8 +84,10 @@ func TestSession_FullRoundTrip(t *testing.T) {
 	// text_delta*2 + text_end + message_end + agent_settled, so
 	// we expect at least one EventAgentText and the terminal
 	// EventAgentDone with Reason:"settled".
-	if err := sess.SendText("hello from the bridge"); err != nil {
-		t.Fatalf("SendText #1: %v", err)
+	if err := sess.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "hello from the bridge"},
+	}); err != nil {
+		t.Fatalf("SendBlocks #1: %v", err)
 	}
 	first := drainEventsUntilDone(t, sess, 3*time.Second)
 	if first.Done == nil {
@@ -107,8 +109,10 @@ func TestSession_FullRoundTrip(t *testing.T) {
 
 	// Step 3: drive a second prompt. Same shape, channel
 	// must still be open.
-	if err := sess.SendText("second turn"); err != nil {
-		t.Fatalf("SendText #2: %v", err)
+	if err := sess.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "second turn"},
+	}); err != nil {
+		t.Fatalf("SendBlocks #2: %v", err)
 	}
 	second := drainEventsUntilDone(t, sess, 3*time.Second)
 	if second.Done == nil || second.Done.Reason != "settled" {
@@ -234,9 +238,9 @@ func TestSession_HandshakeTimeout(t *testing.T) {
 }
 
 // TestSession_PromptTimeout_NotInfinite is the regression for
-// the F-32 2026-08-06 incident where SendText returned
+// the F-32 2026-08-06 incident where SendBlocks returned
 // context.Background() and the bridge blocked forever on a hung
-// pi prompt. The fix (SendText now wraps the ctx with
+// pi prompt. The fix (SendBlocks now wraps the ctx with
 // promptTimeout) means a hung prompt surfaces within
 // promptTimeout as a context.DeadlineExceeded error -- not as
 // a silent blank receipt card.
@@ -247,7 +251,7 @@ func TestSession_HandshakeTimeout(t *testing.T) {
 //     (MOCK_PI_PROMPT_HANG=1);
 //   - we shrink promptTimeout to 300 ms so the test runs in <2s
 //     instead of waiting the production 90 s;
-//   - SendText must return within ~promptTimeout and the error
+//   - SendBlocks must return within ~promptTimeout and the error
 //     must wrap context.DeadlineExceeded.
 //
 // We restore the original promptTimeout via t.Cleanup so this
@@ -286,24 +290,26 @@ func TestSession_PromptTimeout_NotInfinite(t *testing.T) {
 	}()
 
 	// Drain EventAgentReady so we know the bridge is fully up before
-	// we measure SendText's behaviour. Without this, a slow
-	// handshake could leak into the SendText measurement.
+	// we measure SendBlocks's behaviour. Without this, a slow
+	// handshake could leak into the SendBlocks measurement.
 	mustFirstEventOfKind(t, sess, agent.EventAgentReady, 3*time.Second)
 
 	start := time.Now()
-	sendErr := sess.SendText("hi")
+	sendErr := sess.SendBlocks(context.Background(), []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "hi"},
+	})
 	elapsed := time.Since(start)
 
 	if sendErr == nil {
-		t.Fatalf("SendText returned nil after %s; bridge ignored the prompt deadline (F-32 2026-08-06 hang)", elapsed)
+		t.Fatalf("SendBlocks returned nil after %s; bridge ignored the prompt deadline (F-32 2026-08-06 hang)", elapsed)
 	}
 	if elapsed > 2*time.Second {
-		t.Errorf("SendText took %s with a %s deadline; ctx was ignored", elapsed, shrunk)
+		t.Errorf("SendBlocks took %s with a %s deadline; ctx was ignored", elapsed, shrunk)
 	}
 	if !errors.Is(sendErr, context.DeadlineExceeded) {
-		t.Errorf("SendText error %v does not wrap context.DeadlineExceeded; runtime cannot distinguish prompt-hang from other failures", sendErr)
+		t.Errorf("SendBlocks error %v does not wrap context.DeadlineExceeded; runtime cannot distinguish prompt-hang from other failures", sendErr)
 	}
-	t.Logf("SendText timed out as expected in %s: %v", elapsed, sendErr)
+	t.Logf("SendBlocks timed out as expected in %s: %v", elapsed, sendErr)
 }
 
 func mustFirstEventOfKind(t *testing.T, sess *agent.Agent, kind agent.EventKind, timeout time.Duration) agent.AgentEvent {

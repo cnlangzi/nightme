@@ -68,7 +68,6 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // The matching `var _ agentDriver = (*driver)(nil)` check lives in
 // agent.go alongside the type so both files are self-contained.
 type agentDriver interface {
-	SendText(text string) error
 	SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error
 	SendPermission(resp string) error
 	Reset(ctx context.Context) error

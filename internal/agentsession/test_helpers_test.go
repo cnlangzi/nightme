@@ -48,7 +48,6 @@ func (f *fakeAgentSession) buildLive() *agent.Agent {
 // fakeDriver forwards driver calls back to a fakeAgentSession.
 type fakeDriver struct{ inner *fakeAgentSession }
 
-func (d *fakeDriver) SendText(text string) error { return d.inner.SendText(text) }
 func (d *fakeDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
 	return d.inner.SendBlocks(ctx, b)
 }
@@ -57,15 +56,6 @@ func (d *fakeDriver) Reset(ctx context.Context) error    { return d.inner.New(ct
 func (d *fakeDriver) Close() error                      { return d.inner.Close() }
 func (d *fakeDriver) Stop(_ context.Context) error       { return nil }
 func (d *fakeDriver) SetModel(_ context.Context, _, _ string) error { return nil }
-
-func (f *fakeAgentSession) SendText(text string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.closed {
-		return errors.New("fake: closed")
-	}
-	return nil
-}
 
 func (f *fakeAgentSession) SendBlocks(ctx context.Context, blocks []agent.ContentBlock) error {
 	f.mu.Lock()
@@ -142,7 +132,6 @@ type callRecordingASDriver struct {
 	calls *atomic.Int32
 }
 
-func (d *callRecordingASDriver) SendText(text string) error { return d.inner.SendText(text) }
 func (d *callRecordingASDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
 	return d.inner.SendBlocks(ctx, b)
 }
@@ -179,7 +168,6 @@ func (r *restartErrAS) buildLive() *agent.Agent {
 
 type restartErrASDriver struct{ inner *restartErrAS }
 
-func (d *restartErrASDriver) SendText(text string) error { return d.inner.SendText(text) }
 func (d *restartErrASDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
 	return d.inner.SendBlocks(ctx, b)
 }

@@ -141,19 +141,6 @@ func (d *driver) PID() int {
 	return d.transport.PID()
 }
 
-// SendText writes raw user input to the PTY stdin. Newline
-// normalization is the Channel adapter's job (see F-19 §4.2).
-func (d *driver) SendText(text string) error {
-	if text == "" {
-		return nil
-	}
-	if d.transport == nil {
-		return fmt.Errorf("pty: send on un-started agent")
-	}
-	_, err := d.transport.Write([]byte(text))
-	return err
-}
-
 // SendBlocks writes a structured user turn to the PTY stdin as a
 // single text payload. Block encoding for PTY mode:
 //
@@ -296,9 +283,8 @@ func (d *driver) readLoop() {
 }
 
 // Compile-time guarantee that *driver satisfies the package-private
-// agent.driver interface (SendText/SendBlocks/SendPermission/
-// Reset/Close). External callers reach driver via *agent.Agent,
-// which forwards the public methods. The package-private starter
-// half is type-checked in starter.go via the same agentDriver
-// interface declaration.
+// agent.driver interface (SendBlocks/SendPermission/Reset/Close).
+// External callers reach driver via *agent.Agent, which forwards
+// the public methods. The package-private starter half is type-checked
+// in starter.go via the same agentDriver interface declaration.
 var _ agentDriver = (*driver)(nil)

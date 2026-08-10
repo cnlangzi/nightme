@@ -32,7 +32,46 @@ func TestFormatSessionFooterLines_IdentityOnly(t *testing.T) {
 	// Agent + Model only, no tokens / cost → just line 1 (🤖 header).
 	ctx := &gateway.SessionContext{Agent: "claude", Model: "opus-4-5"}
 	got := formatSessionFooterLines(ctx)
-	want := []string{"🤖 claude · opus-4-5"}
+	want := []string{"🤖: claude · opus-4-5"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("formatSessionFooterLines() = %v, want %v", got, want)
+	}
+}
+
+// F-56: appends the agent's own session id as the trailing
+// identity segment, separated from Model by " · " to match the
+// existing Model / usage separator convention. The materialize
+// condition in sessionContextInto guarantees SessionID arrives
+// alongside at least one of Agent / Model / GitStatus / Usage in
+// practice, so the Agent-and-Model-and-SessionID path is the
+// production-common case.
+func TestFormatSessionFooterLines_IdentityWithSessionID(t *testing.T) {
+	ctx := &gateway.SessionContext{
+		Agent:     "claude",
+		Model:     "opus-4-5",
+		SessionID: "abc123-uuid-here",
+	}
+	got := formatSessionFooterLines(ctx)
+	want := []string{"🤖: claude · opus-4-5 · abc123-uuid-here"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("formatSessionFooterLines() = %v, want %v", got, want)
+	}
+}
+
+// F-56: SessionID arrives before Agent has been set (early in the
+// session lifecycle, or when the bridge synthesises a uuid like
+// ACP does before knowing the agent name). The leading-separator
+// rendering ("🤖: · <sid>") is acceptable: in production the
+// materialize condition in sessionContextInto gates the entire
+// SessionContext on at least one of Agent / Model / SessionID /
+// GitStatus / Usage being non-empty, and once any other field
+// arrives the leading separator disappears. Documenting the
+// edge case here so future "fix the leading dot" PRs know it's
+// intentional.
+func TestFormatSessionFooterLines_SessionIDOnly(t *testing.T) {
+	ctx := &gateway.SessionContext{SessionID: "abc123-uuid-here"}
+	got := formatSessionFooterLines(ctx)
+	want := []string{"🤖: · abc123-uuid-here"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("formatSessionFooterLines() = %v, want %v", got, want)
 	}
@@ -59,7 +98,7 @@ func TestFormatSessionFooterLines_TokenSegments(t *testing.T) {
 		},
 	}
 	got := formatSessionFooterLines(ctx)
-	want := []string{"🤖 claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"}
+	want := []string{"🤖: claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("formatSessionFooterLines() mismatch:\n  got:  %v\n  want: %v", got, want)
 	}
@@ -80,7 +119,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageInfo{OutputTokens: 234},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 234 」"},
+			want: []string{"🤖: claude · opus-4-5", "💰:「 234 」"},
 		},
 		{
 			// F-55.1: only cache hits, no new tokens, no output.
@@ -91,7 +130,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageInfo{CacheReadInputTokens: 5_600},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 5.6k 」"},
+			want: []string{"🤖: claude · opus-4-5", "💰:「 5.6k 」"},
 		},
 		{
 			// Cost only — tokens are zero, so the entire
@@ -102,7 +141,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageInfo{CostUSD: 1.245},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 $1.245 」"},
+			want: []string{"🤖: claude · opus-4-5", "💰:「 $1.245 」"},
 		},
 		{
 			// No cost segment when CostUSD == 0.
@@ -113,7 +152,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 					InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k 」"},
+			want: []string{"🤖: claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k 」"},
 		},
 		{
 			// No Agent/Model → only the usage line renders.
@@ -135,7 +174,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageInfo{CacheReadInputTokens: 5_600},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 5.6k 」"},
+			want: []string{"🤖: claude · opus-4-5", "💰:「 5.6k 」"},
 		},
 		{
 			// F-55.1: cache + out > 0, no new — layout shows
@@ -149,7 +188,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 					OutputTokens:         800,
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 5.6k / 800 」"},
+			want: []string{"🤖: claude · opus-4-5", "💰:「 5.6k / 800 」"},
 		},
 	}
 	for _, tc := range tests {
@@ -175,7 +214,7 @@ func TestFormatSessionFooterLines_LargeNumbers(t *testing.T) {
 		},
 	}
 	got := formatSessionFooterLines(ctx)
-	want := []string{"🤖 claude · opus-4-5", "💰:「 156k / 1.2M / 18k · $1.245 」"}
+	want := []string{"🤖: claude · opus-4-5", "💰:「 156k / 1.2M / 18k · $1.245 」"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -195,7 +234,7 @@ func TestFormatSessionFooter_StringForm(t *testing.T) {
 		},
 	}
 	got := formatSessionFooter(ctx)
-	want := "🤖 claude · opus-4-5\n💰:「 12.3k / 8.2k / 1.5k 」"
+	want := "🤖: claude · opus-4-5\n💰:「 12.3k / 8.2k / 1.5k 」"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -253,7 +292,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 					CacheReadInputTokens: 8_200, CostUSD: 0.087,
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"},
+			want: []string{"🤖: claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"},
 		},
 		{
 			name: "pct only — typical post-EventAgentDone snapshot",
@@ -265,7 +304,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 					ContextWindowPct: 10.5, // 21k / 200k * 100
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 20k / 1k · 10.5% (200k) 」"},
+			want: []string{"🤖: claude · opus-4-5", "💰:「 20k / 1k · 10.5% (200k) 」"},
 		},
 		{
 			name: "pct + cost — full usage line",
@@ -278,7 +317,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 					ContextWindowPct: 99.6, // near the ceiling
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 1.2M / 800k / 80k · 99.6% (200k) · $1.234 」"},
+			want: []string{"🤖: claude · opus-4-5", "💰:「 1.2M / 800k / 80k · 99.6% (200k) · $1.234 」"},
 		},
 		{
 			name: "pct at the ceiling — 100.0% is honest, not 'full'",
@@ -289,7 +328,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 					ContextWindowPct: 100.0,
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 100.0% (200k) 」"},
+			want: []string{"🤖: claude · opus-4-5", "💰:「 100.0% (200k) 」"},
 		},
 		{
 			name: "pct without identity — segment still emits alone",
@@ -316,7 +355,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 					ContextWindowPct:     101.6, // 203_103 / 200_000 * 100
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 200k / 3k / 1k · 101.6% (200k) 」"},
+			want: []string{"🤖: claude · opus-4-5", "💰:「 200k / 3k / 1k · 101.6% (200k) 」"},
 		},
 		{
 			// F-55: 1M-class model window rendered with M unit.
@@ -329,7 +368,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 					ContextWindowPct: 20.1,
 				},
 			},
-			want: []string{"🤖 claude · opus-4-8", "💰:「 200k / 1k · 20.1% (1M) 」"},
+			want: []string{"🤖: claude · opus-4-8", "💰:「 200k / 1k · 20.1% (1M) 」"},
 		},
 		{
 			// Defensive: pct==0 drops the entire segment; window
@@ -343,7 +382,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 					ContextWindow: 200_000,
 				},
 			},
-			want: []string{"🤖 claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"},
+			want: []string{"🤖: claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"},
 		},
 	}
 	for _, tc := range tests {
@@ -467,7 +506,7 @@ func TestFormatGitLine_NoWorkspaceReturnsEmpty(t *testing.T) {
 // TestFormatGitLine_NoGitStatusOmitsLine (F-48 review fix):
 // when Workspace is set but GitStatus is nil (caller couldn't
 // collect — non-repo / git error / git timeout), the entire
-// footer line must be omitted. Rendering "📁 <ws> · ⎇ ?" would
+// footer line must be omitted. Rendering "📁: <ws> · ⎇ ?" would
 // imply Git tracking is available when it isn't — the user's
 // review caught this as a misleading UI bug. The "⎇ ?" rendering
 // is reserved for detached HEAD inside a real git repo
@@ -492,7 +531,7 @@ func TestFormatGitLine_FullSnapshot(t *testing.T) {
 		},
 	}
 	got := formatGitLine(ctx)
-	want := "📁 code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 5"
+	want := "📁: code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 5"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -509,28 +548,28 @@ func TestFormatGitLine_OmitsZeroSegments(t *testing.T) {
 			snap: &gtw.GitStatusSnapshot{
 				Branch: "main", HasUpstream: true, AheadOfRemote: 0,
 			},
-			want: "📁 code/nightme · ⎇ main",
+			want: "📁: code/nightme · ⎇ main",
 		},
 		{
 			name: "uncommitted only",
 			snap: &gtw.GitStatusSnapshot{
 				Branch: "feat/x", Uncommitted: 1, HasUpstream: true,
 			},
-			want: "📁 code/nightme · ⎇ feat/x · ↑ 1",
+			want: "📁: code/nightme · ⎇ feat/x · ↑ 1",
 		},
 		{
 			name: "untracked only",
 			snap: &gtw.GitStatusSnapshot{
 				Branch: "feat/x", Untracked: 7, HasUpstream: true,
 			},
-			want: "📁 code/nightme · ⎇ feat/x · ? 7",
+			want: "📁: code/nightme · ⎇ feat/x · ? 7",
 		},
 		{
 			name: "unpushed only",
 			snap: &gtw.GitStatusSnapshot{
 				Branch: "feat/x", AheadOfRemote: 4, HasUpstream: true,
 			},
-			want: "📁 code/nightme · ⎇ feat/x · ⇡ 4",
+			want: "📁: code/nightme · ⎇ feat/x · ⇡ 4",
 		},
 		{
 			name: "no upstream — omit unpushed",
@@ -540,7 +579,7 @@ func TestFormatGitLine_OmitsZeroSegments(t *testing.T) {
 				AheadOfRemote: 0, // parser leaves this 0 when no upstream
 				HasUpstream:   false,
 			},
-			want: "📁 code/nightme · ⎇ feat/new · ↑ 2",
+			want: "📁: code/nightme · ⎇ feat/new · ↑ 2",
 		},
 		{
 			name: "detached HEAD — branch renders as ?",
@@ -550,12 +589,12 @@ func TestFormatGitLine_OmitsZeroSegments(t *testing.T) {
 				HasUpstream:   false,
 				AheadOfRemote: 0,
 			},
-			want: "📁 code/nightme · ⎇ ? · ↑ 1",
+			want: "📁: code/nightme · ⎇ ? · ↑ 1",
 		},
 		{
 			name: "long path — last 2 components",
 			snap: &gtw.GitStatusSnapshot{Branch: "main", HasUpstream: true},
-			want: "📁 code/nightme · ⎇ main",
+			want: "📁: code/nightme · ⎇ main",
 			// (default Workspace is /home/devin/code/nightme → code/nightme)
 		},
 	}
@@ -593,9 +632,9 @@ func TestFormatSessionFooterLines_WithGitLine(t *testing.T) {
 	}
 	got := formatSessionFooterLines(ctx)
 	want := []string{
-		"🤖 claude · opus-4-5",
+		"🤖: claude · opus-4-5",
 		"💰:「 12.3k / 8.2k / 1.5k 」",
-		"📁 code/nightme · ⎇ feat/x · ↑ 2 · ? 1 · ⇡ 3",
+		"📁: code/nightme · ⎇ feat/x · ↑ 2 · ? 1 · ⇡ 3",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
@@ -611,7 +650,7 @@ func TestFormatSessionFooterLines_GitOnly(t *testing.T) {
 		GitStatus: &gtw.GitStatusSnapshot{Branch: "main", HasUpstream: true},
 	}
 	got := formatSessionFooterLines(ctx)
-	want := []string{"📁 code/nightme · ⎇ main"}
+	want := []string{"📁: code/nightme · ⎇ main"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -623,7 +662,7 @@ func TestFormatSessionFooterLines_GitOnly(t *testing.T) {
 func TestFormatSessionFooterLines_NoGitNoUsage(t *testing.T) {
 	ctx := &gateway.SessionContext{Agent: "claude", Model: "opus-4-5"}
 	got := formatSessionFooterLines(ctx)
-	want := []string{"🤖 claude · opus-4-5"}
+	want := []string{"🤖: claude · opus-4-5"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}

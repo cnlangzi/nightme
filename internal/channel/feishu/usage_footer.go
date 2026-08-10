@@ -472,8 +472,23 @@ func formatGitLine(ctx *gateway.SessionContext) string {
 	if ctx.GitStatus.Untracked > 0 {
 		parts = append(parts, fmt.Sprintf("? %d", ctx.GitStatus.Untracked))
 	}
-	if ctx.GitStatus.HasUpstream && ctx.GitStatus.AheadOfRemote > 0 {
+	// Always render the upstream relationship when known. Showing
+	// "⇡ 0" matters: a clean footer with no counts at all reads as
+	// "broken / not stamped" to the user (see issue: "既然有没有
+	// commit, 为什么它下面没有显示那个数字呢"). An explicit 0 is the
+	// honest signal — the branch is in sync with its upstream.
+	if ctx.GitStatus.HasUpstream {
 		parts = append(parts, fmt.Sprintf("⇡ %d", ctx.GitStatus.AheadOfRemote))
+	}
+
+	// When the branch has no upstream AND the working tree is
+	// clean, drop a "local" marker so the footer doesn't silently
+	// end at "⎇ branch" — the user should see at a glance that
+	// this is an untracked branch, not a missing-data bug.
+	if !ctx.GitStatus.HasUpstream &&
+		ctx.GitStatus.Uncommitted == 0 &&
+		ctx.GitStatus.Untracked == 0 {
+		parts = append(parts, "local")
 	}
 
 	return strings.Join(parts, " · ")

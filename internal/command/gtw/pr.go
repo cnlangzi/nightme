@@ -376,6 +376,17 @@ func parsePRReply(text string) (title, body string, err error) {
 			continue
 		}
 		candidate := prLineNoiseRegex.ReplaceAllString(trimmed, "")
+		// Compound prefixes (`- Title: feat: ...`, `## Title:
+		// feat: ...`, `**Title:** feat: ...`) need multiple passes —
+		// a single ReplaceAll only peels the outermost layer.
+		// Loop until the line is stable.
+		for {
+			next := prLineNoiseRegex.ReplaceAllString(candidate, "")
+			if next == candidate {
+				break
+			}
+			candidate = next
+		}
 		if prTitleRegex.MatchString(candidate) {
 			title = candidate
 			titleIdx = i
@@ -444,6 +455,26 @@ func parsePRReply(text string) (title, body string, err error) {
 	}
 	if endIdx > 0 {
 		body = strings.TrimSpace(strings.Join(bodyLines[:endIdx], "\n"))
+	}
+
+	// Normalize: title must be a single line. Phases 1/1b/2
+	// already produce single-line titles, but Phase 1c
+	// (JSON-wrapped capture) can pull a multi-line value when
+	// the JSON value contains literal `\n` escape sequences.
+	// Substitute any literal backslash-n with a real newline
+	// first, then split at the first one. First line → title,
+	// rest → merged into body.
+	title = strings.ReplaceAll(title, "\\n", "\n")
+	if i := strings.Index(title, "\n"); i >= 0 {
+		extraBody := strings.TrimSpace(title[i+1:])
+		title = strings.TrimSpace(title[:i])
+		if extraBody != "" {
+			if body == "" {
+				body = extraBody
+			} else {
+				body = extraBody + "\n" + body
+			}
+		}
 	}
 	return title, body, nil
 }

@@ -175,23 +175,40 @@ func TestParsePRReply_UnclosedFenceNowSucceeds(t *testing.T) {
 // wrapper noise around it.
 func TestParsePRReply_NoiseModes(t *testing.T) {
 	cases := []struct {
-		name  string
-		input string
-		want  string // expected title
+		name      string
+		input     string
+		want      string // expected title
+		wantBody  string // expected body; "" means we don't check
 	}{
 		{
 			// LLM-style JSON wrapper: the entire PR description
-			// is the value of a JSON string key. Both input
-			// and want use a raw string literal so we test
-			// against literal `\n` (backslash-n) — the regex
-			// captures the whole value, including any `\n`
-			// the LLM embedded as escaped sequence. The title
-			// reaches dispatchPR's SplitN which takes the
-			// first line anyway, so the user's final PR title
-			// is still correct.
+			// is the value of a JSON string key. The Phase 1c
+			// regex captures the whole value (it can't easily
+			// distinguish escaped `\n` from a literal end of
+			// title); parsePRReply's final normalization step
+			// then splits at the first literal `\n`, taking
+			// the first line as title and merging the rest
+			// into body. This is the contract dispatchPR
+			// relies on so gh/glab gets a clean title.
+			name:     "json_wrapper",
+			input:    `{"text": "feat(config): add name field\n\nbody goes here"}`,
+			want:     "feat(config): add name field",
+			wantBody: "body goes here",
+		},
+		{
+			// LLM-style JSON wrapper: the entire PR description
+			// is the value of a JSON string key. The Phase 1c
+			// regex captures the whole value (it can't easily
+			// distinguish escaped `\n` from a literal end of
+			// title); parsePRReply's final normalization step
+			// then splits at the first literal `\n`, taking
+			// the first line as title and merging the rest
+			// into body. This is the contract dispatchPR
+			// relies on so gh/glab gets a clean title.
 			name:  "json_wrapper",
 			input: `{"text": "feat(config): add name field\n\nbody goes here"}`,
-			want:  `feat(config): add name field\n\nbody goes here`,
+			want:  "feat(config): add name field",
+			wantBody: "body goes here",
 		},
 		{
 			name:  "markdown_h2_heading",
@@ -248,15 +265,33 @@ func TestParsePRReply_NoiseModes(t *testing.T) {
 			input: "1. test(rig): add NoiseModes cases\n\nbody",
 			want:  "test(rig): add NoiseModes cases",
 		},
+		{
+			// Compound noise: a bullet AND a label prefix on the
+			// same line. Single-pass regex peels only the outer
+			// layer; the loop peels both. Without the loop this
+			// would fall through to the "first non-empty line"
+			// fallback and ship the noisy line as the PR title.
+			name:  "bullet_plus_label",
+			input: "- Title: feat(rig): strip compound noise\n\nbody",
+			want:  "feat(rig): strip compound noise",
+		},
+		{
+			name:  "heading_plus_label",
+			input: "## Title: feat(rig): strip compound noise\n\nbody",
+			want:  "feat(rig): strip compound noise",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			title, _, err := parsePRReply(tc.input)
+			title, body, err := parsePRReply(tc.input)
 			if err != nil {
 				t.Fatalf("unexpected err: %v", err)
 			}
 			if title != tc.want {
 				t.Errorf("title = %q, want %q", title, tc.want)
+			}
+			if tc.wantBody != "" && body != tc.wantBody {
+				t.Errorf("body = %q, want %q", body, tc.wantBody)
 			}
 		})
 	}
@@ -514,32 +549,40 @@ func setupPRWorktree(t *testing.T, rig *prTestRig, ctx Context) string {
 }
 
 // setupPRGit configures the rig's pushGit with responses for
-// the two rev-list invocations dispatchPR makes:
+// the rev-list invocations dispatchPR makes.
 //
-//   / rev-list @{u}..HEAD   → countUnpushed
-//   / rev-list main..HEAD   → countBaseAhead (base == "main")
+// Yml-path (setupPRWorktree wrote .nightme/gtw.yml):
 //
-// Also registers the rev-parse calls that fire when the yml is
-// absent (non-worktree path): rev-parse --show-toplevel +
-// rev-parse --abbrev-ref HEAD.
+//	/ rev-list <branch>@{u}..<branch>   → countUnpushed (branch from c.Branch in yml)
 //
-// Returns a helper that registers CreatePR / Detect calls; tests
-// just say what they want the upstream responses to be.
-func setupPRGit(rig *prTestRig, unpushed, ahead int) {
+// Non-worktree fallback (loadDispatchContext reads rev-parse when
+// there's no yml):
+//
+//	/ rev-list feat/manual@{u}..feat/manual → countUnpushed (branch from rev-parse mock)
+//	/ rev-list main..HEAD                  → countBaseAhead (base == "main")
+//
+// branch is needed because countUnpushed pins its rev-list to
+// the named branch (not HEAD), so HEAD@{u}..HEAD mocks would no
+// longer match. Callers pass the branch that c.Branch will
+// actually resolve to — either the yml branch (when the test
+// writes a yml via setupPRWorktree) or "feat/manual" (when the
+// test takes the git-derive path and accepts whatever the
+// rev-parse mock returns).
+func setupPRGit(rig *prTestRig, branch string, unpushed, ahead int) {
 	rig.git.on("symbolic-ref", "origin/main", "", nil)
-	rig.git.onArgs([]string{"rev-list", "--count", "@{u}..HEAD"}, itoa10(unpushed), "", nil)
+	rig.git.onArgs([]string{"rev-list", "--count", branch + "@{u}.." + branch}, itoa10(unpushed), "", nil)
 	rig.git.onArgs([]string{"rev-list", "--count", "main..HEAD"}, itoa10(ahead), "", nil)
 	// Non-worktree mode fallbacks (loadDispatchContext calls
 	// these when there's no .nightme/gtw.yml):
 	rig.git.onArgs([]string{"rev-parse", "--show-toplevel"}, "/w", "", nil)
-	rig.git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, "main", "", nil)
+	rig.git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, "feat/manual", "", nil)
 }
 
 func TestDispatchPR_UnpushedCommits(t *testing.T) {
 	rig := newPRTestRig(t)
 	setupPRWorktree(t, rig, Context{		Branch:   "wt-unpushed",
 	})
-	setupPRGit(rig, 3, 5) // 3 unpushed, 5 ahead → reject early on unpushed
+	setupPRGit(rig, "wt-unpushed", 3, 5) // 3 unpushed, 5 ahead → reject early on unpushed
 	rig.installDeps()
 
 	cs := rig.cs
@@ -558,7 +601,7 @@ func TestDispatchPR_NothingToPR(t *testing.T) {
 	rig := newPRTestRig(t)
 	setupPRWorktree(t, rig, Context{		Branch:   "wt-empty",
 	})
-	setupPRGit(rig, 0, 0) // 0 ahead → "nothing to PR"
+	setupPRGit(rig, "wt-empty", 0, 0) // 0 ahead → "nothing to PR"
 	rig.installDeps()
 
 	cs := rig.cs
@@ -574,19 +617,25 @@ func TestDispatchPR_NothingToPR(t *testing.T) {
 }
 
 func TestDispatchPR_NoAgentSelected(t *testing.T) {
-	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{		Branch:   "wt",
-	})
+	// Tests the "no agent selected" early-return branch of
+	// dispatchPR. We don't need a yml — the early-return fires
+	// before any git state is consulted, so loadDispatchContext's
+	// git-derive path is fine and we only need to mock the
+	// rev-parse calls it makes. No setupPRWorktree + override
+	// dance — the test's cwd IS the worktree.
+	tmp := t.TempDir()
+	withCwd(t, tmp)
 	// Unregister the recordingAgent so SelectedAgent() returns "".
 	withAgent(t) // empty registry
-	setupPRGit(rig, 0, 5)
-	rig.installDeps()
+
+	git := newPushGit()
+	setupPRGit(&prTestRig{git: git}, "feat/manual", 0, 5)
 
 	cs := &chatsession.ChatSession{} // no SetSelectedAgent
-	_ = cs.SetSelectedCwd(t.TempDir()) // but we still need a cwd for loadDispatchContext
+	_ = cs.SetSelectedCwd(tmp)
 	s := captureCh(t, cs)
-
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	_, err := dispatchPR(context.Background(), cs,
+		HandlerDeps{Git: git}, "chat", "msg", prArgs{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
@@ -601,7 +650,7 @@ func TestDispatchPR_AgentRunOnceFails(t *testing.T) {
 	setupPRWorktree(t, rig, Context{		Branch:   "wt",
 	})
 	rig.agent.runOnceErr = errors.New("boom")
-	setupPRGit(rig, 0, 5)
+	setupPRGit(rig, "wt", 0, 5)
 	rig.installDeps()
 
 	cs := rig.cs
@@ -627,7 +676,7 @@ func TestDispatchPR_AgentOutputUnparsable(t *testing.T) {
 	// falls through to the "first non-empty line" path; see
 	// the parsePRReply unit tests for those cases.
 	rig.agent.runOnceText = "   \n\n  \n"
-	setupPRGit(rig, 0, 5)
+	setupPRGit(rig, "wt", 0, 5)
 	rig.installDeps()
 
 	cs := rig.cs
@@ -657,7 +706,7 @@ func TestDispatchPR_AgentOutputNoFenceNowSucceeds(t *testing.T) {
 	rig.agent.runOnceText = "feat(gtw): add per-instance name\n\n" +
 		"This is the descriptive body.\n\n" +
 		"- bullet one\n- bullet two\n"
-	setupPRGit(rig, 0, 5)
+	setupPRGit(rig, "wt", 0, 5)
 	// Configure the fake git so resolveProvider's Detect
 	// path returns our fake provider — without a remote URL,
 	// dispatchPR short-circuits with "no `origin` remote".
@@ -741,7 +790,7 @@ func TestDispatchPR_ResolveProvider_DetectFallback(t *testing.T) {
 	rig := newPRTestRig(t)
 	setupPRWorktree(t, rig, Context{		Branch:   "wt",
 	})
-	setupPRGit(rig, 0, 5)
+	setupPRGit(rig, "wt", 0, 5)
 	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 	rig.prov.SetCreatePRResp("https://github.com/octocat/hello/pull/7")
 	rig.installDeps()
@@ -762,7 +811,7 @@ func TestDispatchPR_CreatePRExists(t *testing.T) {
 	rig := newPRTestRig(t)
 	setupPRWorktree(t, rig, Context{		Branch:   "wt",
 	})
-	setupPRGit(rig, 0, 5)
+	setupPRGit(rig, "wt", 0, 5)
 	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 	rig.prov.SetCreatePRErr(fmt.Errorf("%w: a PR for this branch already exists", ErrPRExists))
 	rig.installDeps()
@@ -783,7 +832,7 @@ func TestDispatchPR_CreatePRFails(t *testing.T) {
 	rig := newPRTestRig(t)
 	setupPRWorktree(t, rig, Context{		Branch:   "wt",
 	})
-	setupPRGit(rig, 0, 5)
+	setupPRGit(rig, "wt", 0, 5)
 	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 	rig.prov.SetCreatePRErr(errors.New("401 Unauthorized"))
 	rig.installDeps()
@@ -893,12 +942,13 @@ func TestResolveProvider_Detect_NestedGitLab(t *testing.T) {
 // override path: prArgs.Agent wins over cs.SelectedAgent().
 // Mirrors TestRunPush_DirtyWithAgentFlag for symmetry.
 func TestDispatchPR_AgentFlagOverride(t *testing.T) {
-	withCwd(t, t.TempDir())
-	writeYml(t, mustPwd(t), Context{
-		Worktree: mustPwd(t),
-		Branch:   "wt",
-		RepoRoot: mustPwd(t),
-	})
+	// Tests that -a <name> on /gtw pr overrides the chat's
+	// selected agent. We take the git-derive path (no yml) so the
+	// test only needs rev-parse mocks. The yml write that used to
+	// be here was dead code — the test then overrode SelectedCwd
+	// to make the yml irrelevant.
+	tmp := t.TempDir()
+	withCwd(t, tmp)
 
 	// Note: we don't use newPRTestRig here because it would
 	// re-install Builtins with only claude, wiping out the
@@ -909,10 +959,10 @@ func TestDispatchPR_AgentFlagOverride(t *testing.T) {
 
 	cs := &chatsession.ChatSession{}
 	_ = cs.SetSelectedAgent("claude") // chat prefers claude, but -a opencode should win
-	_ = cs.SetSelectedCwd(t.TempDir())
+	_ = cs.SetSelectedCwd(tmp)
 
 	git := newPushGit()
-	setupPRGit(&prTestRig{git: git, agent: opencode}, 0, 5)
+	setupPRGit(&prTestRig{git: git, agent: opencode}, "feat/manual", 0, 5)
 	git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")
 	prov.SetCreatePRResp("https://github.com/octocat/hello/pull/1")
@@ -1058,7 +1108,7 @@ func TestDispatchPR_NonWorktree_HappyPath(t *testing.T) {
 	git.onArgs([]string{"rev-parse", "--show-toplevel"}, tmp, "", nil)
 	git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, "feat/manual", "", nil)
 	git.on("symbolic-ref", "origin/main", "", nil)
-	git.onArgs([]string{"rev-list", "--count", "@{u}..HEAD"}, "0", "", nil)
+	git.onArgs([]string{"rev-list", "--count", "feat/manual@{u}..feat/manual"}, "0", "", nil)
 	git.onArgs([]string{"rev-list", "--count", "main..HEAD"}, "5", "", nil)
 	git.onArgs([]string{"rev-list", "--count", "origin/main..HEAD"}, "5", "", nil)
 	git.on("remote", "git@github.com:octocat/hello.git", "", nil)

@@ -22,6 +22,13 @@ type pushGit struct {
 	mu               sync.Mutex
 	responses        map[string]pushGitResp
 	responsesByArgs  map[string]pushGitResp
+	// seqResponses[prefix] is the ordered list of responses
+	// onSeq registered; the Nth call matching prefix gets the
+	// Nth entry, last entry reused once exhausted. Call count
+	// is per-prefix so a sequence on "rev-list" doesn't get
+	// advanced by intervening "status" or "push" calls.
+	seqResponses     map[string][]pushGitResp
+	seqCallCount     map[string]int
 	calls            []pushGitCall
 }
 
@@ -40,6 +47,8 @@ func newPushGit() *pushGit {
 	return &pushGit{
 		responses:       make(map[string]pushGitResp),
 		responsesByArgs: make(map[string]pushGitResp),
+		seqResponses:    make(map[string][]pushGitResp),
+		seqCallCount:    make(map[string]int),
 	}
 }
 
@@ -61,6 +70,26 @@ func (f *pushGit) onArgs(args []string, stdout, stderr string, err error) {
 	f.responsesByArgs[joinArgs(args)] = pushGitResp{stdout, stderr, err}
 }
 
+// onSeq registers responses that fire in call order for a given
+// argv prefix. The Nth Run call matching prefix gets the Nth
+// response (callIdx is 0-based). If the call count exceeds the
+// number of registered responses, the LAST response is reused —
+// so tests can register [before, after] to model "before push
+// returns N unpushed, after push returns 0". Used to simulate
+// stateful git operations where the answer changes after a
+// side-effect (push, fetch, reset, …).
+//
+// Matched ONLY on first-token (no full-argv sequence support).
+// For per-argv sequences, just use onArgs repeatedly — last
+// registration wins.
+func (f *pushGit) onSeq(prefix string, responses ...pushGitResp) {
+	if len(responses) == 0 {
+		return
+	}
+	f.responses[prefix] = responses[0]
+	f.seqResponses[prefix] = responses
+}
+
 func (f *pushGit) Run(_ context.Context, dir string, args ...string) (string, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -70,6 +99,20 @@ func (f *pushGit) Run(_ context.Context, dir string, args ...string) (string, st
 	}
 	// Specific (full-argv) match wins over first-token match.
 	if resp, ok := f.responsesByArgs[joinArgs(args)]; ok {
+		return resp.stdout, resp.stderr, resp.err
+	}
+	// Sequence-based match: Nth call to prefix gets Nth response
+	// (last reused once exhausted). Wins over plain `on` because
+	// it's more specific. Call count is per-prefix so a
+	// sequence on "rev-list" isn't perturbed by interleaved
+	// "status" or "push" calls.
+	if seq, ok := f.seqResponses[args[0]]; ok {
+		idx := f.seqCallCount[args[0]]
+		f.seqCallCount[args[0]] = idx + 1
+		if idx >= len(seq) {
+			idx = len(seq) - 1
+		}
+		resp := seq[idx]
 		return resp.stdout, resp.stderr, resp.err
 	}
 	resp, ok := f.responses[args[0]]
@@ -345,7 +388,12 @@ func TestRunPush_CleanWithUnpushed(t *testing.T) {
 	git := newPushGit()
 	git.on("status", "", "", nil)
 	git.on("rev-parse", "", "", nil) // upstream exists
-	git.on("rev-list", "3", "", nil) // 3 unpushed
+	// State change across push: before push, 3 unpushed; after
+	// push (verified by verifyPushedAndRetry), 0 unpushed.
+	git.onSeq("rev-list",
+		pushGitResp{"3", "", nil}, // before push
+		pushGitResp{"0", "", nil}, // after push (verify + retry)
+	)
 	git.on("push", "To origin", "", nil)
 
 	withAgent(t)
@@ -370,6 +418,94 @@ func TestRunPush_CleanWithUnpushed(t *testing.T) {
 	}
 	if !pushed {
 		t.Fatalf("expected git push call, got %v", git.calls)
+	}
+}
+
+// TestRunPush_VerifyDetectsSilentPushFailure is the regression
+// test for the user's reported UX gap: /gtw push reported
+// success, but a network race or silent remote rejection left
+// commits behind. With verifyPushedAndRetry, the user now sees
+// a diagnostic naming the unpushed commits instead of a green
+// checkmark that lies.
+//
+// Mock sequence: push returns no error (claiming success), but
+// rev-list keeps returning "1" — simulating the network race
+// where the push silently no-ops. verifyPushedAndRetry retries
+// once and still gets "1", then surfaces the unpushed commits.
+func TestRunPush_VerifyDetectsSilentPushFailure(t *testing.T) {
+	git := newPushGit()
+	git.on("status", "", "", nil)
+	// All rev-list calls return "1" — the push never lands
+	// upstream, even after retry. State change is impossible.
+	git.on("rev-list", "1", "", nil)
+	git.on("push", "To origin", "", nil) // claims success
+
+	withAgent(t)
+	withCwd(t, t.TempDir())
+	writeYml(t, mustPwd(t), Context{
+		Worktree: mustPwd(t),
+		Branch:   "wt-silent-fail",
+		RepoRoot: mustPwd(t),
+	})
+
+	cs := newPushChatSession(t)
+	s := captureCh(t, cs)
+	_, err := dispatchPush(context.Background(), cs,
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
+	if err != nil {
+		t.Fatalf("RunPush: %v", err)
+	}
+	r := s.lastText()
+	if strings.Contains(r, "✅ pushed") {
+		t.Fatalf("expected surface-on-failure diagnostic, got success card:\n%s", r)
+	}
+	if !strings.Contains(r, "still don't appear on origin/wt-silent-fail") {
+		t.Fatalf("expected diagnostic to name unpushed commits, got:\n%s", r)
+	}
+	if !strings.Contains(r, "after retry") {
+		t.Fatalf("expected retry hint in diagnostic, got:\n%s", r)
+	}
+}
+
+// TestRunPush_DirtyAgentLeavesFiles: when the agent claims
+// commit+push succeeded but actually left files uncommitted
+// (intentionally or by mistake), verifyAgentPushedAndRecover
+// surfaces the file list. User can commit manually or retry.
+func TestRunPush_DirtyAgentLeavesFiles(t *testing.T) {
+	git := newPushGit()
+	git.on("status", "?? new-secret.env\n", "", nil) // dirty + still dirty after agent
+
+	claude := &recordingAgent{
+		name:        "claude",
+		runOnceText: "I committed the safe files. The .env is for the user.",
+	}
+	withAgent(t, claude)
+
+	withCwd(t, t.TempDir())
+	writeYml(t, mustPwd(t), Context{
+		Worktree: mustPwd(t),
+		Branch:   "wt-dirty-leftover",
+		RepoRoot: mustPwd(t),
+		Issue:    7,
+	})
+
+	cs := newPushChatSession(t)
+	_ = cs.SetSelectedAgent("claude")
+	s := captureCh(t, cs)
+	_, err := dispatchPush(context.Background(), cs,
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
+	if err != nil {
+		t.Fatalf("RunPush: %v", err)
+	}
+	r := s.lastText()
+	if strings.Contains(r, "🤖 claude pushed") {
+		t.Fatalf("expected warning, got the unverified success card:\n%s", r)
+	}
+	if !strings.Contains(r, "still uncommitted") {
+		t.Fatalf("expected diagnostic to mention uncommitted files, got:\n%s", r)
+	}
+	if !strings.Contains(r, "new-secret.env") {
+		t.Fatalf("expected diagnostic to name the uncommitted file, got:\n%s", r)
 	}
 }
 
@@ -762,7 +898,15 @@ func TestRunPush_NonWorktree_CleanWithUnpushed(t *testing.T) {
 	git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, "feat/manual", "", nil)
 	// dispatchPush's calls (clean + 3 unpushed → programmatic push):
 	git.on("status", "", "", nil)
-	git.on("rev-list", "3", "", nil)
+	// dispatchPush → countUnpushed (3) → programmaticPush →
+	// verifyPushedAndRetry → countUnpushed (0, push succeeded) →
+	// verifyPushedAndRetry returns "" → success card. Model the
+	// state change with onSeq: first rev-list returns 3, all
+	// subsequent return 0.
+	git.onSeq("rev-list",
+		pushGitResp{"3", "", nil}, // before push
+		pushGitResp{"0", "", nil}, // after push (verify + any retry)
+	)
 	git.on("push", "To origin\n", "", nil)
 
 	withAgent(t)

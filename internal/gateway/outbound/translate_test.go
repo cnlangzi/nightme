@@ -1,34 +1,35 @@
-package gateway
+package outbound
 
 import (
 	"errors"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
-// TestTranslate covers the AgentEvent → OutboundMessage mapping for
-// every EventKind that has its own OutboundKind (i.e. events that
-// actually emit something). Terminal / dropped kinds
-// (EventAgentDone, EventAgentError, default) are tested implicitly by the
-// existing tests in cmd/gateway_test.go.
+// TestTranslate covers the AgentEvent → gateway.OutboundMessage mapping
+// for every EventKind that has its own OutboundKind (i.e. events
+// that actually emit something). Terminal / dropped kinds
+// (EventAgentDone, EventAgentError, default) are tested implicitly
+// by the existing tests in cmd/gateway_test.go.
 //
-// Tests follow the pattern: build AgentEvent, call Translate, assert
-// Kind + Text + key Meta fields. We don't assert on every Meta entry —
+// Tests follow the pattern: build AgentEvent, call Translate,
+// assert Kind + Text + key fields. We don't assert on every field —
 // the bridge / translator contract is that producers + consumers
-// agree on key names; consumers are the source of truth for which
-// keys are mandatory (see feishu/adapter_test.go).
+// agree on field names; consumers are the source of truth for which
+// fields are mandatory (see feishu/adapter_test.go).
 
 func TestTranslate_EventText(t *testing.T) {
 	msg, ok := Translate("chat1", agent.AgentEvent{Kind: agent.EventAgentText, Text: "hello"})
-	if !ok || msg.Kind != OutReply || msg.Text != "hello" {
+	if !ok || msg.Kind != gateway.OutReply || msg.Text != "hello" {
 		t.Errorf("got (%v, %v) text=%q, want (OutReply=true, hello)", msg.Kind, ok, msg.Text)
 	}
 }
 
 func TestTranslate_EventText_ThinkingPrefix(t *testing.T) {
 	msg, ok := Translate("chat1", agent.AgentEvent{Kind: agent.EventAgentText, Text: "[思考] thinking…"})
-	if !ok || msg.Kind != OutThinking || msg.Text != "thinking…" {
+	if !ok || msg.Kind != gateway.OutThinking || msg.Text != "thinking…" {
 		t.Errorf("got kind=%v text=%q, want OutThinking / thinking…", msg.Kind, msg.Text)
 	}
 }
@@ -53,7 +54,7 @@ func TestTranslate_EventResult(t *testing.T) {
 	if !ok {
 		t.Fatal("expected translate to emit")
 	}
-	if msg.Kind != OutResult {
+	if msg.Kind != gateway.OutResult {
 		t.Errorf("Kind = %v, want OutResult", msg.Kind)
 	}
 	if msg.Text != "完成" {
@@ -62,7 +63,7 @@ func TestTranslate_EventResult(t *testing.T) {
 	// §1.4 cleanup: Result fields flow through the typed
 	// OutboundMessage.Result payload, not Meta.
 	if msg.Result == nil {
-		t.Fatal("msg.Result is nil; Gateway should populate the typed AgentResultEvent payload")
+		t.Fatal("msg.Result is nil; outbound should populate the typed AgentResultEvent payload")
 	}
 	if msg.Result.DurationMs != 1234 {
 		t.Errorf("Result.DurationMs = %v, want 1234", msg.Result.DurationMs)
@@ -95,7 +96,7 @@ func TestTranslate_EventResult_ErrorKept(t *testing.T) {
 		Result: &agent.AgentResultEvent{Text: "", Subtype: "error_max_turns"},
 	}
 	msg, ok := Translate("chat1", in)
-	if !ok || msg.Kind != OutResult {
+	if !ok || msg.Kind != gateway.OutResult {
 		t.Errorf("IsError=true should keep the event; got kind=%v ok=%v", msg.Kind, ok)
 	}
 }
@@ -123,23 +124,23 @@ func TestTranslate_EventResult_CoLocatesUsage(t *testing.T) {
 	if !ok {
 		t.Fatal("expected translate to emit")
 	}
-	if msg.Kind != OutResult {
+	if msg.Kind != gateway.OutResult {
 		t.Errorf("Kind = %v, want OutResult", msg.Kind)
 	}
 	if msg.Usage == nil {
-		t.Fatal("msg.Usage is nil; Gateway should populate it from AgentResultEvent.Usage")
+		t.Fatal("msg.Usage is nil; outbound should populate it from AgentResultEvent.Usage")
 	}
 	if msg.Usage.InputTokens != 100 {
-		t.Errorf("Usage.InputTokens = %v, want 100", msg.Usage.InputTokens)
+		t.Errorf("Usage.InputTokens = %v, want 100", msg.Usage)
 	}
 	if msg.Usage.OutputTokens != 200 {
-		t.Errorf("Usage.OutputTokens = %v, want 200", msg.Usage.OutputTokens)
+		t.Errorf("Usage.OutputTokens = %v, want 200", msg.Usage)
 	}
 	if msg.Usage.CacheReadInputTokens != 30 {
-		t.Errorf("Usage.CacheReadInputTokens = %v, want 30", msg.Usage.CacheReadInputTokens)
+		t.Errorf("Usage.CacheReadInputTokens = %v, want 30", msg.Usage)
 	}
 	if msg.Usage.CostUSD != 0.001 {
-		t.Errorf("Usage.CostUSD = %v, want 0.001", msg.Usage.CostUSD)
+		t.Errorf("Usage.CostUSD = %v, want 0.001", msg.Usage)
 	}
 	if msg.Text != "完成" {
 		t.Errorf("Text = %q, want 完成", msg.Text)
@@ -171,7 +172,7 @@ func TestTranslate_EventResult_NilUsageFine(t *testing.T) {
 
 func TestTranslate_EventToolEnd_CarriesArgs(t *testing.T) {
 	// F-34 review fix (architecture feedback 2026-08-04):
-	// AgentToolEndEvent.Args flows through the Gateway into
+	// AgentToolEndEvent.Args flows through outbound into
 	// OutboundMessage.Tool.Args (typed ToolInfo) so channel
 	// renderers can produce type-aware thread-reply summaries
 	// without mining Meta for implicit per-tool keys.
@@ -184,11 +185,11 @@ func TestTranslate_EventToolEnd_CarriesArgs(t *testing.T) {
 		},
 	}
 	msg, ok := Translate("chat1", in)
-	if !ok || msg.Kind != OutToolEnd {
+	if !ok || msg.Kind != gateway.OutToolEnd {
 		t.Fatalf("got (%v, %v), want (OutToolEnd, true)", msg.Kind, ok)
 	}
 	if msg.Tool == nil {
-		t.Fatal("msg.Tool is nil; Gateway should populate the unified ToolInfo")
+		t.Fatal("msg.Tool is nil; outbound should populate the unified ToolInfo")
 	}
 	if msg.Tool.Name != "Read" {
 		t.Errorf("Tool.Name = %q, want %q", msg.Tool.Name, "Read")
@@ -201,10 +202,8 @@ func TestTranslate_EventToolEnd_CarriesArgs(t *testing.T) {
 	}
 }
 
-// TestTranslate_EventCompaction removed: F-49 compaction tracking
-// was deleted across the runtime. EventAgentCompaction kind no
-// longer exists; no Translate case remains.
-
+// TestTranslate_EventAgentConnected verifies that an EventAgentReady
+// translates to OutInit with the 5 context fields populated.
 func TestTranslate_EventAgentConnected(t *testing.T) {
 	in := agent.AgentEvent{
 		Kind:      agent.EventAgentReady,
@@ -212,14 +211,14 @@ func TestTranslate_EventAgentConnected(t *testing.T) {
 		Model:     "claude-sonnet-4-5",
 	}
 	msg, ok := Translate("chat1", in)
-	if !ok || msg.Kind != OutInit {
+	if !ok || msg.Kind != gateway.OutInit {
 		t.Fatalf("got (%v, %v), want (OutInit, true)", msg.Kind, ok)
 	}
 	// §1.4 cleanup: init fields flow through the typed
 	// OutboundMessage.SessionID/Model/... flat fields (was
 	// msg.Ready before event flattening).
 	if msg.SessionID == "" {
-		t.Fatal("msg.SessionID is empty; Gateway should populate from AgentEvent.SessionID")
+		t.Fatal("msg.SessionID is empty; outbound should populate from AgentEvent.SessionID")
 	}
 	if msg.SessionID != "s_001" {
 		t.Errorf("Init.SessionID = %v, want 's_001'", msg.SessionID)
@@ -228,12 +227,6 @@ func TestTranslate_EventAgentConnected(t *testing.T) {
 		t.Errorf("Init.Model = %v, want 'claude-sonnet-4-5'", msg.Model)
 	}
 }
-
-// TestTranslate_EventAgentConnected_NilDropped removed: every
-// EventAgentReady now stamps all 5 context fields at the bridge
-// layer, so there is no "nil Ready payload" case to drop. An event
-// with empty SessionID/Model is still rendered as OutInit
-// (channel may want to surface "unknown model" gracefully).
 
 func TestTranslate_EventDone_Dropped(t *testing.T) {
 	// EventAgentDone is reflected in the receipt's terminal header — no

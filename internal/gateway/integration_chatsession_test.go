@@ -1,4 +1,4 @@
-package gateway
+package gateway_test
 
 import (
 	"context"
@@ -13,6 +13,8 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 )
 
 // fakeCh is a minimal chatsession.Channel for tests in this package.
@@ -39,7 +41,7 @@ func newTestChannel() chatsession.Channel { return nopCh{} }
 //                                      // pushes EnrichedEvent to as.eventQueue
 //   AgentSession.Submit(prompt)        // drives bridge via SendBlocks
 //   fake.PushEvent(EventAgentText "hello")  // simulates agent response
-//   assert mock Channel.Record() sees OutReply{ChatID, ReplyTo, Text}
+//   assert mock channel.Record() sees an OutReply{ChatID, ReplyTo, Text}
 //
 // This skips feishu / claudecode / --resume / persistence entirely:
 // every component on the outbound path is exercised, but with a
@@ -48,41 +50,41 @@ func newTestChannel() chatsession.Channel { return nopCh{} }
 // fails with the precise (empty ChatID / empty ReplyTo / missing
 // kind) signal needed to localize the regression.
 
-// --- mock Channel ----------------------------------------------------
+// --- mock gateway.Channel ----------------------------------------------------
 
 type recordingChannel struct {
 	mu      sync.Mutex
 	chatID  string
-	captured []OutboundMessage
+	captured []gateway.OutboundMessage
 }
 
 func (c *recordingChannel) Name() string  { return "mock" }
 func (c *recordingChannel) Start(_ context.Context) error { return nil }
 func (c *recordingChannel) Stop(_ context.Context) error  { return nil }
-func (c *recordingChannel) Incoming() <-chan InboundMessage {
-	ch := make(chan InboundMessage, 1)
+func (c *recordingChannel) Incoming() <-chan gateway.InboundMessage {
+	ch := make(chan gateway.InboundMessage, 1)
 	close(ch)
 	return ch
 }
-func (c *recordingChannel) Send(_ context.Context, msg OutboundMessage) error {
+func (c *recordingChannel) Send(_ context.Context, msg gateway.OutboundMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.captured = append(c.captured, msg)
 	return nil
 }
-func (c *recordingChannel) SendCard(_ context.Context, msg OutboundMessage) (string, error) {
+func (c *recordingChannel) SendCard(_ context.Context, msg gateway.OutboundMessage) (string, error) {
 	_ = c.Send(context.Background(), msg)
 	return "mock-card-0", nil
 }
-func (c *recordingChannel) Record() []OutboundMessage {
+func (c *recordingChannel) Record() []gateway.OutboundMessage {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]OutboundMessage, len(c.captured))
+	out := make([]gateway.OutboundMessage, len(c.captured))
 	copy(out, c.captured)
 	return out
 }
 
-var _ Channel = (*recordingChannel)(nil)
+var _ gateway.Channel = (*recordingChannel)(nil)
 
 // --- minimal runtime handler -----------------------------------------
 //
@@ -90,9 +92,9 @@ var _ Channel = (*recordingChannel)(nil)
 // ch.Send) without the SessionContext / /think / /tools side-paths
 // — those are not relevant to the regression we're hunting.
 
-func integrationEventHandler(ch Channel, _ *chatsession.ChatSession) func(env chatsession.AgentEventEnvelope) bool {
+func integrationEventHandler(ch gateway.Channel, _ *chatsession.ChatSession) func(env chatsession.AgentEventEnvelope) bool {
 	return func(env chatsession.AgentEventEnvelope) bool {
-		out, ok := Translate(env.ChatID, *env.Event)
+		out, ok := outbound.Translate(env.ChatID, *env.Event)
 		if !ok {
 			return false
 		}
@@ -116,7 +118,7 @@ func newIntegrationChatSession(chatID string, spawner chatsession.Spawner) *chat
 
 // TestIntegration_AgentEvent_ReachesChannel is the smallest
 // reproduction: enqueue a message, submit it to the AS, push an
-// EventAgentText from the fake bridge, assert OutReply lands on the
+// EventAgentText from the fake bridge, assert an OutReply lands on the
 // channel with the correct chat_id + reply_to + text.
 func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 	spawner := &integrationSpawner{}
@@ -158,7 +160,7 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 	fake.PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "hello back"})
 
 	// Wait for the round-trip.
-	var rec []OutboundMessage
+	var rec []gateway.OutboundMessage
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		rec = mock.Record()
@@ -173,9 +175,9 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 
 	// Find the OutReply specifically (other Kinds may also fire —
 	// MessageState events come through a different path).
-	var outReply *OutboundMessage
+	var outReply *gateway.OutboundMessage
 	for i := range rec {
-		if rec[i].Kind == OutReply {
+		if rec[i].Kind == gateway.OutReply {
 			outReply = &rec[i]
 			break
 		}
@@ -245,7 +247,7 @@ func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 		},
 	})
 
-	var rec []OutboundMessage
+	var rec []gateway.OutboundMessage
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		rec = mock.Record()
@@ -258,9 +260,9 @@ func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 		t.Fatal("no OutboundMessage captured on channel within 2s — EventAgentResult never reached ch.Send")
 	}
 
-	var outResult *OutboundMessage
+	var outResult *gateway.OutboundMessage
 	for i := range rec {
-		if rec[i].Kind == OutResult {
+		if rec[i].Kind == gateway.OutResult {
 			outResult = &rec[i]
 			break
 		}
@@ -414,8 +416,8 @@ var _ agent.Starter = (*integrationFake)(nil)
 
 // --- helpers ----------------------------------------------------------
 
-func summarizeKinds(msgs []OutboundMessage) []OutboundKind {
-	out := make([]OutboundKind, len(msgs))
+func summarizeKinds(msgs []gateway.OutboundMessage) []gateway.OutboundKind {
+	out := make([]gateway.OutboundKind, len(msgs))
 	for i, m := range msgs {
 		out[i] = m.Kind
 	}
@@ -480,7 +482,7 @@ echo '{"type":"system","subtype":"init","session_id":"test-session-1","model":"c
 # stdin before emitting the assistant turn. Without this, the
 # readpump races the test's QueueUserMessage and the assistant
 # event often lands with currentPrompt still nil → empty
-# UserMsgID → OutReply.ReplyTo = "" assertion failure.
+# UserMsgID → gateway.OutReply.ReplyTo = "" assertion failure.
 read -t 5 _PROMPT || true
 echo '{"type":"assistant","message":{"id":"msg_1","role":"assistant","model":"claude-test","content":[{"type":"text","text":"hello back"}]}}'
 echo '{"type":"result","result":"final answer","duration_ms":100,"is_error":false}'
@@ -532,7 +534,7 @@ exit 0
 
 	// Wait for the round-trip: at minimum we expect OutReply +
 	// OutResult to reach the channel.
-	var rec []OutboundMessage
+	var rec []gateway.OutboundMessage
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		rec = mock.Record()
@@ -546,12 +548,12 @@ exit 0
 	}
 
 	// Find OutReply + OutResult.
-	var outReply, outResult *OutboundMessage
+	var outReply, outResult *gateway.OutboundMessage
 	for i := range rec {
 		switch rec[i].Kind {
-		case OutReply:
+		case gateway.OutReply:
 			outReply = &rec[i]
-		case OutResult:
+		case gateway.OutResult:
 			outResult = &rec[i]
 		}
 	}

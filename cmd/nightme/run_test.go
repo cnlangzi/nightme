@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -31,7 +31,7 @@ func TestEventHandler_ThinkGate_ShowPassesThrough(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
@@ -61,7 +61,7 @@ func TestEventHandler_ThinkGate_HideDropsOutThinking(t *testing.T) {
 	}
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
@@ -97,7 +97,7 @@ func TestEventHandler_ThinkGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	}
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	// (a) OutReply — final assistant reply (no <thinking> prefix)
@@ -154,7 +154,7 @@ func TestEventHandler_ThinkGate_NilLoggerSafe(t *testing.T) {
 	}
 
 	// nil logger — must not panic.
-	h := newEventHandler(ch, cs, mgr, nil)
+	h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, nil)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	// Run inside a recover probe to convert any panic into a
@@ -184,7 +184,7 @@ func TestEventHandler_ThinkGate_PersistsAcrossInvocations(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	thinking := agent.AgentEvent{
@@ -244,7 +244,7 @@ func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_first_turn", "claude")
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_first_turn", "claude", "/tmp", nil)
 
 	// Step 1: EventAgentReady captures Model.
@@ -328,7 +328,7 @@ func TestEventHandler_OutResult_UsageIsPerTurnNotCumulative(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_per", "claude")
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_per", "claude", "/tmp", nil)
 
 	// Turn 1.
@@ -375,7 +375,7 @@ func TestEventHandler_OutResult_NilUsageLeavesEmptySessionContext(t *testing.T) 
 	cs, _ := mgr.GetOrCreate("oc_chat_zero", "claude")
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger)
 	// t.TempDir() is guaranteed NOT to be inside a git working
 	// tree (Go creates it under the OS temp dir; tests don't
 	// nest a .git inside). Pre-F-48 the test hardcoded /tmp,
@@ -544,7 +544,7 @@ func TestEventHandler_Chain_UsageFlowsFromResultEventToFooter(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_chain", "claude")
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger)
 	tmpDir := t.TempDir() // non-git cwd
 	as := chatsession.NewAgentSession("as_chain", "cs_oc_chat_chain", "claude", tmpDir, nil)
 
@@ -661,7 +661,7 @@ func TestEventHandler_ToolsGate_ShowPassesThrough(t *testing.T) {
 	}
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_show", "claude", "/tmp", nil)
 
 	// OutToolStart
@@ -704,7 +704,7 @@ func TestEventHandler_ToolsGate_HideDropsBothToolKinds(t *testing.T) {
 	}
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_hide", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_hide", AgentSession: as, Event: &agent.AgentEvent{
@@ -735,7 +735,7 @@ func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	}
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_indep", "claude", "/tmp", nil)
 
 	// (a) OutReply — final assistant reply (no <thinking> prefix)
@@ -780,7 +780,7 @@ func TestEventHandler_ToolsGate_PersistsAcrossInvocations(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_tools_persist", "claude")
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_persist", "claude", "/tmp", nil)
 
 	toolStart := agent.AgentEvent{
@@ -828,7 +828,7 @@ func TestEventHandler_ToolsAndThinkGatesIndependent(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_both_gates", "claude")
 	logger := slog.Default()
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_both_gates", "claude", "/tmp", nil)
 
 	// Flip both off.
@@ -927,10 +927,10 @@ func TestWireRuntimeCallbacksAndRestore_InstallsHandlersOnRestoredChats(t *testi
 
 	mgr := chatsession.NewManager().WithPersistence(csFile, asFile)
 	ch := echo.New("test", io.Discard)
-	gwImpl := gateway.New(func(_ context.Context, _ *gateway.InboundMessage) error { return nil }).(*gateway.Router)
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	if err := wireRuntimeCallbacksAndRestore(mgr, ch, gwImpl, logger); err != nil {
+	if err := wireRuntimeCallbacksAndRestore(mgr, ch, outbound.New(ch, outbound.Options{}), logger); err != nil {
 		t.Fatalf("wireRuntimeCallbacksAndRestore: %v", err)
 	}
 
@@ -957,10 +957,10 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateDropsEmptyIDs(t *testing.T) 
 
 	mgr := chatsession.NewManager().WithPersistence(csFile, asFile)
 	ch := echo.New("test", io.Discard)
-	gwImpl := gateway.New(func(_ context.Context, _ *gateway.InboundMessage) error { return nil }).(*gateway.Router)
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	if err := wireRuntimeCallbacksAndRestore(mgr, ch, gwImpl, logger); err != nil {
+	if err := wireRuntimeCallbacksAndRestore(mgr, ch, outbound.New(ch, outbound.Options{}), logger); err != nil {
 		t.Fatalf("wireRuntimeCallbacksAndRestore: %v", err)
 	}
 
@@ -1009,10 +1009,10 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateDropsEmptyIDs(t *testing.T) 
 func TestWireRuntimeCallbacksAndRestore_NoPersistence(t *testing.T) {
 	mgr := chatsession.NewManager() // no WithPersistence — csFile is nil
 	ch := echo.New("test", io.Discard)
-	gwImpl := gateway.New(func(_ context.Context, _ *gateway.InboundMessage) error { return nil }).(*gateway.Router)
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	if err := wireRuntimeCallbacksAndRestore(mgr, ch, gwImpl, logger); err != nil {
+	if err := wireRuntimeCallbacksAndRestore(mgr, ch, outbound.New(ch, outbound.Options{}), logger); err != nil {
 		t.Fatalf("wireRuntimeCallbacksAndRestore on cold start: %v", err)
 	}
 	if len(mgr.List()) != 0 {
@@ -1048,7 +1048,7 @@ func TestEventHandler_OnAgentConnected_DoesNotEmitMessageSubmitted(t *testing.T)
 		return false
 	})
 
-	h := newEventHandler(ch, cs, mgr, logger)
+	h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger)
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	// Fire EventAgentReady with a userMsgID present (the L869

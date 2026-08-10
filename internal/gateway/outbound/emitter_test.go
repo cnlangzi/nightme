@@ -1,0 +1,240 @@
+package outbound
+
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+	"testing"
+
+	"github.com/cnlangzi/nightme/internal/gateway"
+)
+
+// fakeChannel is a minimal Channel implementation that records every
+// outbound message and returns programmable results.
+type fakeChannel struct {
+	name        string
+	sendCalls   int32
+	cardCalls   int32
+	sendErr     error
+	cardErr     error
+	cardMsgID   string
+	lastSent    gateway.OutboundMessage
+	lastCard    gateway.OutboundMessage
+}
+
+func (f *fakeChannel) Name() string { return f.name }
+
+func (f *fakeChannel) Send(_ context.Context, msg gateway.OutboundMessage) error {
+	atomic.AddInt32(&f.sendCalls, 1)
+	f.lastSent = msg
+	return f.sendErr
+}
+
+func (f *fakeChannel) SendCard(_ context.Context, msg gateway.OutboundMessage) (string, error) {
+	atomic.AddInt32(&f.cardCalls, 1)
+	f.lastCard = msg
+	return f.cardMsgID, f.cardErr
+}
+
+func TestEmitter_NoStamper_PassesThrough(t *testing.T) {
+	// Zero-value Options (no Stamper, no OnError) must produce a
+	// pure passthrough — the caller-built OutboundMessage goes
+	// straight to Channel.Send, no SessionContext added.
+	fc := &fakeChannel{name: "test"}
+	em := New(fc, Options{})
+
+	in := gateway.OutboundMessage{ChatID: "c1", Kind: gateway.OutReply, Text: "hi"}
+	if err := em.Send(context.Background(), in); err != nil {
+		t.Fatalf("Send returned err = %v", err)
+	}
+	if atomic.LoadInt32(&fc.sendCalls) != 1 {
+		t.Fatalf("sendCalls = %d, want 1", fc.sendCalls)
+	}
+	if fc.lastSent.Text != "hi" {
+		t.Errorf("lastSent.Text = %q, want hi", fc.lastSent.Text)
+	}
+	if fc.lastSent.SessionContext != nil {
+		t.Errorf("lastSent.SessionContext = %+v, want nil (no stamper)", fc.lastSent.SessionContext)
+	}
+}
+
+func TestEmitter_StamperAttachesSessionContext(t *testing.T) {
+	// Caller did NOT set SessionContext. Stamper returns a value.
+	// Emitter must attach it before forwarding.
+	want := &gateway.SessionContext{Agent: "claude", Model: "opus"}
+	fc := &fakeChannel{name: "test"}
+	em := New(fc, Options{Stamper: func(_ string) *gateway.SessionContext { return want }})
+
+	in := gateway.OutboundMessage{ChatID: "c1", Kind: gateway.OutReply, Text: "hi"}
+	if err := em.Send(context.Background(), in); err != nil {
+		t.Fatalf("Send err: %v", err)
+	}
+	if fc.lastSent.SessionContext != want {
+		t.Errorf("lastSent.SessionContext = %p, want %p", fc.lastSent.SessionContext, want)
+	}
+}
+
+func TestEmitter_StamperNil_DoesNotAttach(t *testing.T) {
+	// Stamper returns nil → emitter must NOT manufacture an empty
+	// SessionContext. The footer render path expects nil when the
+	// stamper decides "no active session".
+	fc := &fakeChannel{name: "test"}
+	em := New(fc, Options{Stamper: func(_ string) *gateway.SessionContext { return nil }})
+
+	in := gateway.OutboundMessage{ChatID: "c1", Kind: gateway.OutReply, Text: "hi"}
+	_ = em.Send(context.Background(), in)
+	if fc.lastSent.SessionContext != nil {
+		t.Errorf("lastSent.SessionContext = %+v, want nil", fc.lastSent.SessionContext)
+	}
+}
+
+func TestEmitter_CallerStampedWins(t *testing.T) {
+	// Caller already set SessionContext; stamper must NOT be invoked
+	// (otherwise the caller's value gets silently overwritten).
+	callerSC := &gateway.SessionContext{Agent: "from-caller"}
+	stamperCalled := false
+	stamper := func(_ string) *gateway.SessionContext {
+		stamperCalled = true
+		return &gateway.SessionContext{Agent: "from-stamper"}
+	}
+	fc := &fakeChannel{name: "test"}
+	em := New(fc, Options{Stamper: stamper})
+
+	in := gateway.OutboundMessage{
+		ChatID:         "c1",
+		Kind:           gateway.OutReply,
+		Text:           "hi",
+		SessionContext: callerSC,
+	}
+	_ = em.Send(context.Background(), in)
+	if stamperCalled {
+		t.Error("stamper should not be called when caller pre-set SessionContext")
+	}
+	if fc.lastSent.SessionContext != callerSC {
+		t.Error("caller's SessionContext was overwritten")
+	}
+}
+
+func TestEmitter_SendCard_StampsAndForwards(t *testing.T) {
+	want := &gateway.SessionContext{Agent: "claude"}
+	fc := &fakeChannel{name: "test", cardMsgID: "msg-123"}
+	em := New(fc, Options{Stamper: func(_ string) *gateway.SessionContext { return want }})
+
+	in := gateway.OutboundMessage{ChatID: "c1", Kind: gateway.OutCard}
+	id, err := em.SendCard(context.Background(), in)
+	if err != nil {
+		t.Fatalf("SendCard err: %v", err)
+	}
+	if id != "msg-123" {
+		t.Errorf("msgID = %q, want msg-123", id)
+	}
+	if fc.lastCard.SessionContext != want {
+		t.Error("SendCard path did not stamp SessionContext")
+	}
+}
+
+func TestEmitter_OnError_Callback(t *testing.T) {
+	// Channel.Send fails → OnError invoked AND error returned to
+	// caller. Caller is responsible for handling the error; OnError
+	// is for logging/metrics side-effects only.
+	sendErr := errors.New("channel broken")
+	var hookCalled int32
+	var hookMsg gateway.OutboundMessage
+	var hookErr error
+
+	fc := &fakeChannel{name: "test", sendErr: sendErr}
+	em := New(fc, Options{
+		OnError: func(m gateway.OutboundMessage, e error) {
+			atomic.AddInt32(&hookCalled, 1)
+			hookMsg = m
+			hookErr = e
+		},
+	})
+
+	in := gateway.OutboundMessage{ChatID: "c1", Text: "hi"}
+	err := em.Send(context.Background(), in)
+	if !errors.Is(err, sendErr) {
+		t.Errorf("returned err = %v, want %v", err, sendErr)
+	}
+	if atomic.LoadInt32(&hookCalled) != 1 {
+		t.Errorf("OnError calls = %d, want 1", hookCalled)
+	}
+	if !errors.Is(hookErr, sendErr) {
+		t.Errorf("hook err = %v, want %v", hookErr, sendErr)
+	}
+	if hookMsg.ChatID != "c1" {
+		t.Errorf("hook msg.ChatID = %q, want c1", hookMsg.ChatID)
+	}
+}
+
+func TestEmitter_NoOnError_ErrorStillReturned(t *testing.T) {
+	// nil OnError → no panic, error still returned to caller.
+	fc := &fakeChannel{name: "test", sendErr: errors.New("boom")}
+	em := New(fc, Options{})
+
+	if err := em.Send(context.Background(), gateway.OutboundMessage{ChatID: "c1"}); err == nil {
+		t.Error("Send should return error when Channel.Send fails")
+	}
+}
+
+// TestEmitter_StamperCoLocatesUsageFromMsg covers the F-55 fix:
+// when the stamper's SessionContext.Usage is nil but the message
+// carries Usage (typical on OutResult after gateway.Translate),
+// the emitter must copy msg.Usage across so the footer render
+// path can pick it up via ctx.Usage. Without this, Line 2 of the
+// footer silently drops for usage-bearing events.
+func TestEmitter_StamperCoLocatesUsageFromMsg(t *testing.T) {
+	want := &gateway.UsageInfo{InputTokens: 100, OutputTokens: 200}
+	fc := &fakeChannel{name: "test"}
+	em := New(fc, Options{
+		Stamper: func(_ string) *gateway.SessionContext {
+			// Stamper returns SC without Usage — simulates a
+			// stamper that doesn't see msg.Usage.
+			return &gateway.SessionContext{Agent: "claude", Model: "opus"}
+		},
+	})
+
+	in := gateway.OutboundMessage{
+		ChatID: "c1",
+		Kind:   gateway.OutResult,
+		Text:   "done",
+		Usage:  want,
+	}
+	if err := em.Send(context.Background(), in); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if fc.lastSent.SessionContext == nil {
+		t.Fatal("SessionContext was not stamped")
+	}
+	if fc.lastSent.SessionContext.Usage != want {
+		t.Errorf("SessionContext.Usage = %+v, want %+v (F-55 co-location)", fc.lastSent.SessionContext.Usage, want)
+	}
+}
+
+// TestEmitter_StamperCoLocateDoesNotOverwrite verifies the
+// stamper-set Usage is preserved if non-nil (caller or stamper
+// already had it; emitter must not clobber).
+func TestEmitter_StamperCoLocateDoesNotOverwrite(t *testing.T) {
+	stamperSC := &gateway.SessionContext{
+		Agent: "claude",
+		Usage: &gateway.UsageInfo{InputTokens: 1, OutputTokens: 1},
+	}
+	msgUsage := &gateway.UsageInfo{InputTokens: 999, OutputTokens: 999}
+
+	fc := &fakeChannel{name: "test"}
+	em := New(fc, Options{
+		Stamper: func(_ string) *gateway.SessionContext { return stamperSC },
+	})
+
+	_ = em.Send(context.Background(), gateway.OutboundMessage{
+		ChatID: "c1",
+		Kind:   gateway.OutResult,
+		Usage:  msgUsage,
+	})
+	if fc.lastSent.SessionContext.Usage != stamperSC.Usage {
+		t.Errorf("SessionContext.Usage = %+v, want stamper-set %+v (no overwrite)", fc.lastSent.SessionContext.Usage, stamperSC.Usage)
+	}
+	if fc.lastSent.SessionContext.Usage == msgUsage {
+		t.Error("emitter should not overwrite stamper-set Usage with msg.Usage")
+	}
+}

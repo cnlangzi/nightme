@@ -311,6 +311,16 @@ func TestE2E_ResumeSession(t *testing.T) {
 func TestE2E_Interrupt(t *testing.T) {
 	shouldRunE2E(t)
 
+	// Tighten the watchdog for this test. opencode 1.18 has a
+	// known shape where, if the model dispatch fails silently
+	// (e.g. provider 401 — common on test rigs without a
+	// configured provider), the server neither emits a terminal
+	// event nor kills the SSE stream; the bridge has to detect
+	// the silence itself. The watchdog does that within
+	// NIGHTME_OPENCODE_TURN_WATCHDOG; production defaults to
+	// 10m but this test's deadline is 60s.
+	t.Setenv("NIGHTME_OPENCODE_TURN_WATCHDOG", "20s")
+
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 

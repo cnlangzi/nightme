@@ -3,7 +3,6 @@
 package agent
 
 import (
-	"context"
 	"sync"
 )
 
@@ -77,76 +76,6 @@ func (r *Registry) List() []Starter {
 	}
 	return out
 }
-
-// LegacyRegister is a transitional helper for code paths that
-// still hold a legacy Agent (the old interface) and need to put
-// it into the new registry. Equivalent to Register(AsStarter(a)).
-// Used by migration shims and tests during P1-P3; safe to remove
-// in P4.
-func (r *Registry) LegacyRegister(a Agent) bool {
-	return r.Register(AsStarter(a))
-}
-
-// AsStarter wraps a legacy Agent (the old interface) in a
-// Starter. The wrapper delegates Info/Detect/Start to the inner
-// Agent and wraps the returned live handle in a *LiveAgent via a
-// legacyDriver that forwards Send*/Reset/Close back to the
-// legacy Agent's methods.
-//
-// Removed in P4 after all bridges migrate to driver + starter.
-func AsStarter(a Agent) Starter {
-	return &legacyStarter{inner: a}
-}
-
-// legacyStarter adapts a legacy Agent to the Starter interface.
-type legacyStarter struct {
-	inner Agent
-}
-
-func (l *legacyStarter) Info() Info {
-	return NewInfo(
-		l.inner.Name(),
-		l.inner.Mode(),
-		l.inner.Command(),
-		l.inner.Args(),
-		l.inner.Env(),
-	)
-}
-
-func (l *legacyStarter) Detect() error { return l.inner.Detect() }
-
-func (l *legacyStarter) Start(ctx context.Context, cfg StartConfig) (*LiveAgent, error) {
-	live, err := l.inner.Start(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
-	events := live.Events()
-	return &LiveAgent{
-		Info:   l.Info(),
-		pid:    live.PID(),
-		events: MakeChanAlias(events),
-		driver: &legacyDriver{inner: live},
-		closed: make(chan struct{}),
-	}, nil
-}
-
-// legacyDriver forwards the driver interface methods back to a
-// legacy Agent. The legacy Agent already implements Close/New/
-// SendText/SendBlocks/SendPermission; we just relay them.
-type legacyDriver struct {
-	inner Agent
-}
-
-func (l *legacyDriver) SendText(text string) error { return l.inner.SendText(text) }
-func (l *legacyDriver) SendBlocks(ctx context.Context, blocks []ContentBlock) error {
-	return l.inner.SendBlocks(ctx, blocks)
-}
-func (l *legacyDriver) SendPermission(resp string) error { return l.inner.SendPermission(resp) }
-func (l *legacyDriver) Reset(ctx context.Context) error    { return l.inner.New(ctx) }
-func (l *legacyDriver) Close() error                      { return l.inner.Close() }
-
-// (liveAgentAsAgent wrapper + WrapAsAgent removed; Spawner.Spawn
-// now returns *LiveAgent directly — see internal/chatsession/spawn.go.)
 
 // MakeChanAlias returns a writable channel that forwards values
 // from the read-only source. Used by legacyStarter to bridge a

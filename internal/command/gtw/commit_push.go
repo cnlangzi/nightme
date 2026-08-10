@@ -11,13 +11,16 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
-// runOnceTimeout is the hard deadline for a one-shot agent
-// commit+push. 5 minutes covers realistic agent commits (lint
-// fixes, conflict resolution, multi-tool flows) without wedging
-// /gtw push if an agent hangs (e.g. PTY fallback with no idle
-// signal — see pty.RunOnce's ptyIdleTimeout for the per-call
-// short-window heuristic).
-const runOnceTimeout = 5 * time.Minute
+// RunOnceTimeout is the hard deadline for a one-shot agent
+// call (commit+push, PR title+body generation). 5 minutes
+// covers realistic agent commits (lint fixes, conflict
+// resolution, multi-tool flows) without wedging /gtw push if
+// an agent hangs (e.g. PTY fallback with no idle signal — see
+// pty.RunOnce's ptyIdleTimeout for the per-call short-window
+// heuristic).
+//
+// Exported because both /gtw push and /gtw pr use it.
+const RunOnceTimeout = 5 * time.Minute
 
 // dispatchPush is the three-state dispatcher for /gtw push.
 //
@@ -170,7 +173,7 @@ func pushDirty(
 			fmt.Sprintf("❌ agent %s not available: %v", agentName, err)), nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, runOnceTimeout)
+	ctx, cancel := context.WithTimeout(ctx, RunOnceTimeout)
 	defer cancel()
 
 	blocks := []agent.ContentBlock{{

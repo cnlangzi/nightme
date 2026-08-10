@@ -40,6 +40,12 @@ type fakeGitProvider struct {
 	addLabelErr    error
 	removeLabelErr error
 
+	// CreatePR response. createPRResp is the URL the fake
+	// returns when createPRErr is nil. createPRErr wins when
+	// non-nil (lets tests simulate failure modes).
+	createPRResp string
+	createPRErr  error
+
 	// Recorded calls (chronological).
 	calls []fakeProviderCall
 }
@@ -48,11 +54,18 @@ type fakeGitProvider struct {
 // named after the interface method (one variant per interface
 // method) so tests can pattern-match cleanly.
 type fakeProviderCall struct {
-	Method string // "GetIssue" / "AddLabel" / "RemoveLabel"
+	Method string // "GetIssue" / "AddLabel" / "RemoveLabel" / "CreatePR"
 	Owner  string
 	Repo   string
 	ID     int
 	Label  string // only set for AddLabel / RemoveLabel
+
+	// CreatePR-only fields. Empty for the other methods.
+	Base    string
+	Head    string
+	PRTitle string
+	PRBody  string
+	PRURL   string // returned URL when CreatePRResp is set
 }
 
 // newFakeGitProvider returns a minimal provider. Tests then
@@ -116,6 +129,26 @@ func (f *fakeGitProvider) SetRemoveLabelErr(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removeLabelErr = err
+}
+
+// SetCreatePRResp configures the response for all CreatePR
+// calls. The returned URL is what dispatchPR will echo in its
+// ✅ card. Tests wrap the existing PR URL in ErrPRExists to
+// simulate the "already exists" path; see SetCreatePRErr.
+func (f *fakeGitProvider) SetCreatePRResp(url string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createPRResp = url
+	f.createPRErr = nil
+}
+
+// SetCreatePRErr configures the error returned by CreatePR.
+// Wrap ErrPRExists to simulate "PR already exists" so the
+// dispatcher's branch can use errors.Is cleanly.
+func (f *fakeGitProvider) SetCreatePRErr(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createPRErr = err
 }
 
 // Calls returns a snapshot of recorded calls (so the caller
@@ -188,6 +221,24 @@ func (f *fakeGitProvider) RemoveLabel(_ context.Context, owner, repo string, id 
 	err := f.removeLabelErr
 	f.mu.Unlock()
 	return err
+}
+
+func (f *fakeGitProvider) CreatePR(_ context.Context, owner, repo, base, head, title, body string) (string, error) {
+	f.mu.Lock()
+	url := f.createPRResp
+	err := f.createPRErr
+	f.calls = append(f.calls, fakeProviderCall{
+		Method:  "CreatePR",
+		Owner:   owner,
+		Repo:    repo,
+		Base:    base,
+		Head:    head,
+		PRTitle: title,
+		PRBody:  body,
+		PRURL:   url,
+	})
+	f.mu.Unlock()
+	return url, err
 }
 
 // --- dependency-injection shim ---

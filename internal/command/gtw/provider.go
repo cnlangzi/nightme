@@ -96,6 +96,20 @@ type GitProvider interface {
 
 	// RemoveLabel removes `label` from the issue. Idempotent.
 	RemoveLabel(ctx context.Context, owner, repo string, id int, label string) error
+
+	// CreatePR opens a pull request (GitHub) or merge request
+	// (GitLab). We keep the method name uniform across
+	// providers because the user-facing /gtw pr UX is identical
+	// on both platforms — same command, same card, different
+	// backing CLI. This mirrors the "issue / MR is the same
+	// concept" convention /gtw fix already uses.
+	//
+	// Returns the PR/MR URL on success. Errors should preserve
+	// the underlying CLI's stderr so /gtw pr can echo it to the
+	// IM (the underlying gh/glab messages are often the most
+	// actionable error for the user, e.g. "head ref doesn't
+	// exist" or "401 Unauthorized").
+	CreatePR(ctx context.Context, owner, repo, base, head, title, body string) (string, error)
 }
 
 // ErrIssueNotFound is returned by GetIssue when the platform
@@ -117,6 +131,15 @@ var ErrUnsupportedProvider = errors.New("gtw: unsupported git provider")
 // (user error) from "host not on github/gitlab" (no provider
 // implementation yet — D3 split).
 var ErrInvalidRemoteURL = errors.New("gtw: invalid remote URL")
+
+// ErrPRExists is returned by CreatePR when the platform says a
+// pull/merge request already exists for the same head→base.
+// GitHub prints "a pull request already exists for this branch"
+// in its stderr; GitLab's glab prints "already exists" or "MR
+// already exists". The caller (dispatchPR) maps this to a
+// friendly "PR already exists" message with the existing URL
+// when available.
+var ErrPRExists = errors.New("gtw: PR already exists")
 
 // ParseRepoOwner splits a "<owner>/<repo>" string into its two
 // components. The git CLI prints "origin\thttps://github.com/foo/bar"
@@ -666,6 +689,34 @@ func (c *GitHubProvider) RemoveLabel(ctx context.Context, owner, repo string, id
 	return nil
 }
 
+// CreatePR runs `gh pr create --base <base> --head <head> --title
+// <title> --body <body> --repo <owner>/<repo>`. The head branch must
+// already be pushed to origin (dispatchPR enforces this via the
+// countUnpushed early-return); if not, gh prints "head ref
+// doesn't exist" and we forward that stderr to the user.
+//
+// gh exits 0 with the PR URL on stdout when the PR is created;
+// non-zero + stderr "already exists" → ErrPRExists; any other
+// non-zero → wrapped error with stderr preserved.
+func (c *GitHubProvider) CreatePR(ctx context.Context, owner, repo, base, head, title, body string) (string, error) {
+	args := []string{
+		"pr", "create",
+		"--base", base,
+		"--head", head,
+		"--title", title,
+		"--body", body,
+		"--repo", owner + "/" + repo,
+	}
+	stdout, stderr, err := c.runner().Run(ctx, "gh", args...)
+	if err != nil {
+		if strings.Contains(stderr, "already exists") {
+			return "", fmt.Errorf("%w: %s", ErrPRExists, strings.TrimSpace(stderr))
+		}
+		return "", fmt.Errorf("gh pr create: %v: %s", err, strings.TrimSpace(stderr))
+	}
+	return strings.TrimSpace(stdout), nil
+}
+
 // GitLabProvider wraps the `glab` CLI. Same auth delegation as gh.
 // host is set by Detect / NewProvider; version is populated from
 // /api/v4/version probe when Detect's Stage B succeeds.
@@ -758,4 +809,35 @@ func (c *GitLabProvider) RemoveLabel(ctx context.Context, owner, repo string, id
 		return fmt.Errorf("glab issue update --unlabel: %v: %s", err, stderr)
 	}
 	return nil
+}
+
+// CreatePR runs `glab mr create --target-branch <base> --source-branch
+// <head> --title <title> --description <body> --repo <owner>/<repo>`.
+// (GitLab's term is "merge request", but the GitProvider method is
+// named CreatePR for cross-platform UX consistency — see the
+// interface doc.)
+//
+// glab ≥ 1.11 is required for the --repo flag with "owner/repo"
+// form. Older versions use --target-project with the numeric
+// project id; we don't try to bridge that gap in v1 (callers
+// with older glab get a clear stderr from glab itself).
+//
+// glab prints the MR URL on stdout on success.
+func (c *GitLabProvider) CreatePR(ctx context.Context, owner, repo, base, head, title, body string) (string, error) {
+	args := []string{
+		"mr", "create",
+		"--target-branch", base,
+		"--source-branch", head,
+		"--title", title,
+		"--description", body,
+		"--repo", owner + "/" + repo,
+	}
+	stdout, stderr, err := c.runner().Run(ctx, "glab", args...)
+	if err != nil {
+		if strings.Contains(stderr, "already exists") {
+			return "", fmt.Errorf("%w: %s", ErrPRExists, strings.TrimSpace(stderr))
+		}
+		return "", fmt.Errorf("glab mr create: %v: %s", err, strings.TrimSpace(stderr))
+	}
+	return strings.TrimSpace(stdout), nil
 }

@@ -144,7 +144,7 @@ func TestInput_NotReadySelectedAS_RetainsInQueue(t *testing.T) {
 	cs.selectAgentSessionLocked(as)
 
 	// Force not-ready.
-	as.isReady.Store(false)
+	as.SetIsReadyForTest(false)
 
 	msg := Message{
 		ID:     "msg-busy",

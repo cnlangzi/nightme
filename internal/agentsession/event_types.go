@@ -10,7 +10,7 @@
 // purpose — the structs depend only on `agent.MessageState` and the
 // internal `PromptEndReason` / `Status` types defined here. F-54
 // §3.1.
-package chatsession
+package agentsession
 
 import (
 	"time"

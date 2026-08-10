@@ -165,7 +165,7 @@ translator 里保留的 `case "state_update"` 是**防御性**的（若 pi 未�
 
 #### 3.2.3 pty — `ErrRestartRequired` fallback (kill + respawn via Spawner)
 
-PTY 是协议无关的字节管道，没有 "reset conversation context" 的概念（产品澄清 2026-08-04："pty 是删掉进程, 重启进程"）。`ptySession.New(ctx)` 返回 `agent.ErrRestartRequired`；wrapper 层（`chatsession.AgentSession.New`）捕获这个 sentinel 后走 fallback 路径：关掉旧 handle，调 `spawner.Spawn(ctx, agent, cwd, args, "")`（resumeID 为空），把新 handle 装回 `as.handle`，并 `SetResumeID("")` 清掉旧 id。下次 runtime 收到新 child 的 `EventAgentConnected` 时会重新捕获新 ResumeID。
+PTY 是协议无关的字节管道，没有 "reset conversation context" 的概念（产品澄清 2026-08-04："pty 是删掉进程, 重启进程"）。`ptySession.New(ctx)` 返回 `agent.ErrRestartRequired`；wrapper 层（`agentsession.AgentSession.New`）捕获这个 sentinel 后走 fallback 路径：关掉旧 handle，调 `spawner.Spawn(ctx, agent, cwd, args, "")`（resumeID 为空），把新 handle 装回 `as.handle`，并 `SetResumeID("")` 清掉旧 id。下次 runtime 收到新 child 的 `EventAgentConnected` 时会重新捕获新 ResumeID。
 
 ```go
 // internal/bridge/pty/session.go
@@ -211,7 +211,7 @@ func (s *acpSession) New(ctx context.Context) error {
 
 ACP 的 `session/new` 本来就是创建新 session 的命令；当 transport 已存在时，它等价于"在现有 transport 上换 session"。复用现有 `setSessionID` + `emitInit` 路径，**无需拆 transport**（与 F-34 Phase 1 的设计一致；Phase 2 才考虑更激进的 transport 复用重构）。
 
-### 3.3 `chatsession.AgentSession.New` wrapper + fallback
+### 3.3 `agentsession.AgentSession.New` wrapper + fallback
 
 ```go
 // internal/chatsession/agentsession.go

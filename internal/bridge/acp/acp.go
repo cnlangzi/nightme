@@ -3,13 +3,20 @@
 // production session uses the PTY bridge as that stream's physical carrier.
 package acp
 
-import "io"
+import (
+	"io"
+	"os"
+)
 
 // Transport is the byte transport required by an ACP session. pty.Transport
 // satisfies it, while tests can provide an in-memory or net.Pipe transport.
 type Transport interface {
 	io.ReadWriteCloser
 	PID() int
+	// Signal sends a signal to the child process. Tests can
+	// stub it as a no-op; production uses go-pty's underlying
+	// *os.Process.Signal.
+	Signal(os.Signal) error
 }
 
 const (

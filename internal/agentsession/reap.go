@@ -1,4 +1,4 @@
-package chatsession
+package agentsession
 
 import (
 	"errors"

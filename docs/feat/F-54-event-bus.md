@@ -139,7 +139,7 @@ type LifecycleEvent struct {
     ChatID         string
     AgentSessionID string
     PID            int
-    Status         Status   // chatsession.Status
+    Status         Status   // agentsession.Status
 }
 ```
 
@@ -209,7 +209,7 @@ F-54 设计明确**不保留** last-wins Setter wrapper。理由：
 // 改前
 cs.SetEventHandler(adapter.HandleAgentEvent)
 cs.SetMessageStateHandler(adapter.HandleMessageState)
-cs.SetPromptEndHandler(func(mid string, reason chatsession.PromptEndReason) {
+cs.SetPromptEndHandler(func(mid string, reason agentsession.PromptEndReason) {
     adapter.MarkReceiptPromptDone(ctx, cs.ChatID, mid)
 })
 
@@ -220,7 +220,7 @@ cs.AgentEventBus().Subscribe(func(env chatsession.AgentEventEnvelope) bool {
 cs.MessageStateBus().Subscribe(func(e chatsession.MessageStateEvent) bool {
     return adapter.HandleMessageState(e)
 })
-cs.PromptEndBus().Subscribe(func(e chatsession.PromptEndedEvent) bool {
+cs.PromptEndBus().Subscribe(func(e agentsession.PromptEndedEvent) bool {
     adapter.MarkReceiptPromptDone(ctx, cs.ChatID, e.UserMsgID)
     return true
 })
@@ -234,7 +234,7 @@ cs.PromptEndBus().Subscribe(func(e chatsession.PromptEndedEvent) bool {
 
 ```go
 // 改前
-func (a *Adapter) HandleAgentEvent(chatID string, s *chatsession.AgentSession, ev agent.AgentEvent, userMsgID string) bool
+func (a *Adapter) HandleAgentEvent(chatID string, s *agentsession.AgentSession, ev agent.AgentEvent, userMsgID string) bool
 func (a *Adapter) HandleMessageState(chatID, userMsgID string, state agent.MessageState) bool
 
 // 改后

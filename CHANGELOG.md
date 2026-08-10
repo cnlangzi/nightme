@@ -35,10 +35,41 @@ warn + skip; hook failure → warn + continue to next hook;
 output (success or failure) is echoed back to the chat so users
 can see what actually ran.
 
-Tests added in `internal/command/gtw/hooks_test.go` (28 cases:
+Tests added in `internal/command/gtw/hooks_test.go` (32 cases:
 Load semantics, RunHooks failure isolation, FormatResults
-always-echo, ResolveAgent 3-tier + fallback, withHooks
-factory wrapper).
+always-echo, ResolveAgent 3-tier + fallback + note-honesty,
+withHooks factory wrapper including chat-order split).
+
+### refactor(chatsession): extract AgentSession to internal/agentsession
+
+`AgentSession` and its directly-coupled types (`Prompt`, `EnrichedEvent`,
+`Spawner`, `Message`, `Status`, `agentSessionCounter`) moved from
+`internal/chatsession/` to a new `internal/agentsession/` package.
+
+Layering after this change:
+
+```
+internal/agent/         abstract: AgentSpec / Agent / Bridge / Mode
+internal/agentsession/  runtime unit: AgentSession + per-AS state
+internal/chatsession/   pool manager: ChatSession + persistence
+```
+
+Call-site impact is minimized via type aliases in `chatsession`
+(`type AgentSession = agentsession.AgentSession`, etc.). New public
+methods on `AgentSession`:
+
+- `HandlePTYRestart(ctx, launcher)` — encapsulates the kill + readpump
+  reset + respawn + `SessionID` clear lifecycle. `ChatSession` no
+  longer reaches into AS internals (asMu, readpumpStarted, respawn).
+- `InjectEvent(ev)` — test-only helper to push events directly into
+  the dispatcher queue.
+- Test-only setters: `SetHandleForTest`, `SetStatusForTest`,
+  `SetPIDForTest`, `SetCurrentPromptForTest`, `SetIsReadyForTest`,
+  `EndPromptForTest`. Production code MUST NOT use them.
+
+Docs: `docs/SPEC.md` §1.1a (new) documents the package structure;
+`docs/feat/F-32` / `F-34` / `F-54` updated to use `agentsession.*`
+type names.
 
 ### Codex app-server bridge (new agent)
 

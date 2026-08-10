@@ -340,6 +340,10 @@ func (d *integrationFakeDriver) SendPermission(resp string) error {
 	return d.inner.SendPermission(resp)
 }
 func (d *integrationFakeDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
+func (d *integrationFakeDriver) Abort(ctx context.Context) error  { return d.inner.Abort(ctx) }
+func (d *integrationFakeDriver) SetModel(ctx context.Context, providerID, modelID string) error {
+	return d.inner.SetModel(ctx, providerID, modelID)
+}
 func (d *integrationFakeDriver) Close() error                   { return d.inner.Close() }
 func (f *integrationFake) SendText(string) error          { return nil }
 func (f *integrationFake) SendBlocks(context.Context, []agent.ContentBlock) error {
@@ -347,6 +351,10 @@ func (f *integrationFake) SendBlocks(context.Context, []agent.ContentBlock) erro
 }
 func (f *integrationFake) SendPermission(string) error { return nil }
 func (f *integrationFake) New(context.Context) error   { return nil }
+func (f *integrationFake) Abort(context.Context) error { return agent.ErrNotSupported }
+func (f *integrationFake) SetModel(context.Context, string, string) error {
+	return agent.ErrNotSupported
+}
 func (f *integrationFake) RunOnce(ctx context.Context, _ agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
 	if err := f.SendBlocks(ctx, blocks); err != nil {
 		return "", err

@@ -28,7 +28,7 @@
 //	Web, ...) can adopt the same vocabulary without a duplicate
 //	type, and so the abstract state lives next to the abstract
 //	object it describes.
-package chatsession
+package agentsession
 
 // PromptState is the (currently) 2-value lifecycle enum of a
 // `Prompt` — see type doc above.

@@ -73,7 +73,7 @@ type (
 )
 
 // Prompt state constants — re-export so downstream packages
-// (channel/feishu) can keep using chatsession.PromptRunning etc.
+// (channel/feishu) can keep using agentsession.PromptRunning etc.
 const (
 	PromptRunning = agentsession.PromptRunning
 	PromptDone    = agentsession.PromptDone

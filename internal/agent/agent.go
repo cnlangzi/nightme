@@ -881,7 +881,7 @@ var (
 	// ErrRestartRequired is returned by AgentSession.New when the
 	// bridge cannot perform an in-place conversation reset (no
 	// protocol-level /clear or equivalent). The wrapper layer
-	// (chatsession.AgentSession.New) catches this sentinel and
+	// (agentsession.AgentSession.New) catches this sentinel and
 	// falls back to a kill-and-respawn via the configured Spawner.
 	// Returning nil here would be wrong: callers must distinguish
 	// "successfully reset in-place" from "needs full restart".

@@ -75,7 +75,7 @@ func NewStarter(name, command string, args, env []string, cols, rows int) *Start
 // ─── lifecycle ───
 
 // Start spawns the CLI under a PTY and returns a live Agent. The
-// caller (typically chatsession.AgentSession via the Spawner) must
+// caller (typically agentsession.AgentSession via the Spawner) must
 // Close() the returned *driver when done.
 //
 // Start clones the receiver — the template in Builtins is untouched.
@@ -216,7 +216,7 @@ func (d *driver) SendPermission(resp string) error {
 // New signals that the PTY bridge cannot reset conversation context
 // in-place. PTY is a protocol-less byte pipe (F-34 §3.2 + product
 // clarification 2026-08-04: "pty 是删掉进程, 重启进程"). The wrapper
-// layer (chatsession.AgentSession.New) catches this sentinel and
+// layer (agentsession.AgentSession.New) catches this sentinel and
 // falls back to kill-and-respawn via the configured Spawner.
 // Reset is the agent.driver interface name for New.
 func (d *driver) Reset(ctx context.Context) error { return d.New(ctx) }

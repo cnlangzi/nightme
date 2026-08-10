@@ -305,9 +305,9 @@ SessionContext *SessionContext
 **新格式 (Format D, 「」 enclosed)**：
 
 ```
-🤖 claude · opus-4-5
+🤖: claude · opus-4-5
 💰:「 20.5k / 1.5k · 10.5% · $0.087 」
-📁 code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
+📁: code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
 ```
 
 **Line 2 segments**：
@@ -320,7 +320,7 @@ SessionContext *SessionContext
 | `X% (window)` | `SessionContext.ContextWindowPct` + `SessionContext.Usage.ContextWindow`(F-55 透传:Claude Code `modelUsage[<model>].contextWindow`,Pi `get_state.data.model.contextWindow`) | `ContextWindowPct == 0` 时整段省略(`window == 0 && pct == 0` 也走 omit 路径) | `fmt.Sprintf("%.1f%% (%s)", pct, abbrevWindow(window))` — 一位小数;`99.6%` 不能四舍五入到 `100%`;`pct > 100%` **不 clamp 不告警**,让用户看到分母自行判断(`101.6% (200k)` 即是 MiniMax 兼容端把 1M 模型错报成 200K 的诊断信号) |
 | `$cost` | `agent.UsageEvent.CostUSD`（F-52 透传 API 报的 `total_cost_usd`） | `== 0` 时省略（API 没报） | `fmt.Sprintf("$%.3f", cost)` — 三位小数，与 F-45 原约定一致 |
 
-段之间用 ` · ` 分隔；`「」` 括号只在至少一个段非空时才包裹整行。Line 1 / Line 3 的 omit 规则、emoji 选择（🤖 / 🗜 / 📁）均不变。
+段之间用 ` · ` 分隔；`「」` 括号只在至少一个段非空时才包裹整行。Line 1 / Line 3 的 omit 规则、emoji 选择（🤖 / 🗜 / 📁）均不变，但 Line 1 / Line 3 的 emoji 头部加了 `:` 后缀（`🤖:` / `📁:`），与 Line 2 的 `💰:「」` 共享 category-prefix 形态 — 见 §1.9（F-56 follow-up）。
 
 **Why F-52 改这三件事**：
 1. **in = uncached + cache_creation + cache_read**：Tencent YB 文档 + Claude Code `/cost` 统计口径一致。之前的 `↓ in · ↻ cached` 拆法让用户得自己加两个数才知道"in 总共多少"，违反 footer 一次成型的目的。
@@ -330,15 +330,15 @@ SessionContext *SessionContext
 **实测样例 (F-52 后)**：
 
 ```
-🤖 claude · opus-4-5
+🤖: claude · opus-4-5
 💰:「 20.5k / 1.5k · $0.087 」                                  # 无 ContextWindow 报回
-🤖 claude · opus-4-5
+🤖: claude · opus-4-5
 💰:「 20.0k / 1.0k · 10.5% 」                                   # 有 X%，无 cost
-🤖 claude · opus-4-5
+🤖: claude · opus-4-5
 💰:「 1.4M / 18.0k · 99.6% · $1.234 」                          # 大 turn，接近 ceiling
-🤖 claude · opus-4-5
+🤖: claude · opus-4-5
 💰:「 $1.245 」                                                 # 只有 cost（极少见）
-🤖 claude · opus-4-5
+🤖: claude · opus-4-5
 💰:「 100.0% 」                                                 # 满 context
 ```
 
@@ -377,7 +377,7 @@ claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k   
 **Format**（footer 第 3 行）：
 
 ```
-📁 code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
+📁: code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
 ```
 
 | 段 | 来源 | Omit 规则 |
@@ -396,7 +396,7 @@ claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k   
 **Arrow 选型**（与 F-45 约定一致）：
 - `↑` / `⇡` / `?` — ASCII / Unicode 符号（非 emoji 字体），middle dot ` · ` 分隔
 - `⎇` — Unicode Alternative Key Symbol (U+2387)，代表 branch
-- `📁` — folder emoji，仅作 category header（与 F-45 line 1 🤖 / line 2 💰 风格一致）
+- `📁:` — folder emoji + colon，仅作 category header（与 F-45 line 1 🤖: / line 2 💰:「」 风格一致 — F-56 统一了三条 footer 行的 category-prefix 形态）
 
 **Stamping 规则**：
 - 在 `cmd/nightme/run.go::newEventHandler` 的 4 个 main-chat kind 上 stamp
@@ -415,7 +415,8 @@ type SessionContext struct {
     Usage *agent.UsageEvent
     Workspace       string                  // NEW (F-48)
     GitStatus       *gtw.GitStatusSnapshot  // NEW (F-48)
-    CompactionCount int                     // NEW (F-49: 🗜 N 计数)
+    CompactionCount int                     // NEW (F-49: 🗜 N 计数 — SUPERSEDED 2026-08-08)
+    SessionID       string                  // NEW (F-56: agent 自身 session id)
 }
 
 type GitStatusSnapshot struct {
@@ -463,17 +464,17 @@ F-49 给 Line 1 加 `· 🗜 N` 段（compaction 计数），同时把 Line 2 �
 **改前**（典型长 session，已 compact 3 次）：
 
 ```
-🤖 claude · opus-4-5
+🤖: claude · opus-4-5
 � ↓ 156k · ↻ 1.2M cached · ↑ 18k · Total 1.37M · $1.245
-📁 code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
+📁: code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
 ```
 
 **改后**（同 session，加 🗜 段 + token 归零）：
 
 ```
-🤖 claude · opus-4-5 · 🗜 3
+🤖: claude · opus-4-5 · 🗜 3
 💰 ↓ 5k · ↻ 2k · ↑ 0.8k · 7.8k · $1.245
-📁 code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
+📁: code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
 ```
 
 **关键变化**：
@@ -624,6 +625,104 @@ AgentSession 生命周期:
 - `ResumeID`：EventAgentConnected 时捕获，**永不重置**（除非 `/new` 通过 bridge `New()` 让 agent 重发 EventAgentConnected）
 - `Model`：EventAgentConnected 时捕获，**永不重置**（同 ResumeID 语义）
 - `CumulativeUsage`：EventUsage 时累加，**`/new` 重置**
+
+### 1.10 SessionID + Category-Prefix 形态统一 (F-56 follow-up)
+
+**Why**：三件事打包：(a) `AgentSession.SessionID`（Claude Code 的 `system/init.session_id`、ACP 合成 uuid 等）已经有 runtime 端的 RLock accessor，但没进 `gateway.SessionContext`，footer 拿不到——用户看不到"这是哪个 agent session"；(b) 三条 footer 行的 category-prefix 形态不一致（Line 2 是 `💰:「」`，Line 1 是 `🤖`，Line 3 是 `📁 `），视觉上读起来像两条规则。
+
+**改动**：
+
+**(1) `gateway.SessionContext` 加 `SessionID string` 字段**
+
+```go
+type SessionContext struct {
+    Agent     string
+    Model     string
+    SessionID string  // NEW (F-56)
+    Workspace string
+    GitStatus *gtw.GitStatusSnapshot
+    Usage     *agent.UsageInfo
+}
+```
+
+字段来源：`cmd/nightme/run.go::sessionContextInto` 在 stamp 时调 `s.SessionID()`（RLock）填入；stamp condition 增加 `s.SessionID() != ""` 单独触发 footer 渲染（与 `Agent` / `Model` / `hasGit` / `Usage` 并列）。空值时 footer 跳过该 segment——保持既有"each segment omitted independently"约定。
+
+**(2) Footer Line 1 渲染追加 `· <sessionid>` 段**
+
+```
+🤖: claude · opus-4-5 · abc123-uuid-here
+💰:「 33.3k / 876k / 3.9k · 456.6% (200k) · $0.733 」
+📁: code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
+```
+
+Separator 沿用 ` · ` middle-dot（与 Line 1 已有 `Agent · Model`、Line 2 已有 `new / cache / out` 同一族）；不引入新符号。
+
+Leading-separator caveat：`SessionID != "" && Agent == "" && Model == ""` 时渲染成 `🤖: · <sid>`（前置 `·`）。在生产路径上 `sessionContextInto` 的 materialize 条件保证至少有 1 个字段非空，但单 SessionID 触发 footer 时仍会出现该形态。判定为可接受——文档在 `formatSessionFooterLines` 注释 + `usage_footer_test.go::TestFormatSessionFooterLines_SessionIDOnly` 锁定行为，避免后续 PR "修 leading dot" 时无意回退。
+
+**(3) Line 1 / Line 3 emoji 加 `:` 后缀**
+
+`🤖` → `🤖:`、`📁 ` → `📁: `，与 Line 2 既有 `💰:「」` 共享 `emoji: <content>` 的 category-prefix 形态。两条 line 上的「Segment 头部」对齐后，整张卡片的 `emoji: ... · ... · ...` 节奏统一。
+
+```
+🤖: <agent> · <model> · <sessionid>
+💰:「 <stats> 」
+📁: <workspace> · <branch> · <git-counts>
+```
+
+`💰:` 自身带 `「」` enclosure，因为它承载多段（in/cache/out + X% + $cost），需要括号表达"多段合集"的语义；Line 1 / Line 3 是平铺 segment 链，不需要 enclosure——保留各自 segment 链 + ` · ` separator 的逻辑，不强行套「」。
+
+**Wire 形态**：
+
+```go
+type SessionContext struct {
+    Agent     string
+    Model     string
+    SessionID string                  // NEW (F-56)
+    Workspace string                  // F-48
+    GitStatus *gtw.GitStatusSnapshot  // F-48
+    Usage     *agent.UsageInfo        // F-52 (was *UsageEvent)
+}
+```
+
+**Render 路径**（`internal/channel/feishu/usage_footer.go::formatSessionFooterLines`）：
+- Line 1 idParts：`["🤖:", ctx.Agent, "·", ctx.Model, "·", ctx.SessionID]`（Agent / Model / SessionID 各自独立 omit）
+- Line 3 formatGitLine：`parts := []string{"📁: " + ws, ...}`（emoji 头部加 `:`）
+- Line 2 不变
+
+**Stamp condition**（`cmd/nightme/run.go::sessionContextInto`）：
+
+```go
+if s.Agent != "" || s.Model() != "" || s.SessionID() != "" || hasGit ||
+    out.Usage != nil {
+    out.SessionContext = &gateway.SessionContext{
+        Agent:     s.Agent,
+        Model:     s.Model(),
+        SessionID: s.SessionID(),
+        Workspace: s.Cwd,
+        GitStatus: gitSnap,
+        Usage:     out.Usage,
+    }
+}
+```
+
+**测试覆盖**（`internal/channel/feishu/usage_footer_test.go`）：
+- 既有 27 case 全部更新 `🤖` → `🤖:`、`📁 ` → `📁: `（byte-level snapshot 测试需要同步）
+- 新增 `TestFormatSessionFooterLines_IdentityWithSessionID`：渲染 `🤖: claude · opus-4-5 · <sid>`
+- 新增 `TestFormatSessionFooterLines_SessionIDOnly`：锁定 leading-separator caveat（`🤖: · <sid>`）
+
+**Bridge 兼容性**：
+- `claudecode`：`EventAgentReady.SessionID`（来自 `system/init.session_id`）—— 已实现
+- `pi`：同上
+- `acp`：ACP **协议本身**返回 sessionId —— `internal/bridge/acp/agent.go::setSessionID` 解码 session/new 响应的 `sessionId` / `session_id` 字段；runtime 端 *synthesizes 的是 `EventAgentReady` envelope*（`emitConnected`），不是 sessionID 值。Footer 显示 ACP 真实 sessionId，对 debug 有帮助（识别"这是 ACP 那条 session"），不算误导
+- `codex`：`EventAgentReady.SessionID` 来自 `internal/bridge/codex/session.go::ensureThread` 的 `thread.id`（app-server JSON-RPC thread.start 响应）。同上，真实 id，不是合成
+- `pty`：pty 没有 init 事件，SessionID 为空，footer 跳过该 segment（既有 `each segment omitted independently` 规则自然处理）
+
+**F-56 PR scope**：
+- `internal/gateway/messages.go` — `SessionContext` 加 1 个字段
+- `cmd/nightme/run.go::sessionContextInto` — 填充 + materialize条件
+- `internal/channel/feishu/usage_footer.go` — Line 1 加 sessionid 段 + emoji `:` 后缀 + Line 3 emoji `:` 后缀
+- `internal/channel/feishu/usage_footer_test.go` — 同步既有 fixture + 新增 2 个 case
+- `docs/feat/F-45-session-footer.md` — 本节
 
 ---
 

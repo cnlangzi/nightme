@@ -43,9 +43,11 @@
 //	agent.UsageInfo.CostUSD — the footer NEVER computes
 //	cost client-side (no rate table, no per-model pricing).
 //
-// Line 3 (F-48 follow-up to F-45):
+// Line 3 (F-48 follow-up to F-45, F-56 follow-up: leading colon
+// for category-prefix consistency with Line 1's 🤖: and Line 2's
+// 💰:「」):
 //
-//	📁 code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
+//	📁: code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
 //
 // Each segment is omitted when its value is zero / empty /
 // unknown. Order is fixed within each line; lines themselves are
@@ -70,7 +72,6 @@ package feishu
 import (
 	"fmt"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/command/gtw"
@@ -85,9 +86,9 @@ import (
 // needs multiple elements). Returns nil when there is nothing
 // meaningful to show so callers can skip footer emission cheaply.
 //
-// Line 1: identity — 🤖 + Agent + Model
+// Line 1: identity — 🤖: + Agent + Model + SessionID
 //
-//	🤖 claude opus-4-5
+//	🤖: claude opus-4-5 abc123-...
 //
 // Line 2: usage stats — 💰:「 new / cache / out · X% (window) · $cost 」
 // (F-55.1). F-55.1 splits the original `in` segment into two:
@@ -115,6 +116,13 @@ import (
 //
 // Each segment is omitted independently:
 //   - Line 1: Agent omitted when "". Model omitted when "".
+//     SessionID omitted when "" (F-56). The leading-separator
+//     caveat (`🤖: · <sid>` when only SessionID is set) is
+//     locked by TestFormatSessionFooterLines_SessionIDOnly;
+//     layout stays as-is per §1.10 — the materialize condition
+//     in sessionContextInto guarantees at least one of Agent
+//     / Model / SessionID / GitStatus / Usage is non-empty in
+//     production, so the leading-`·` only surfaces in tests.
 //   - Line 2 segments:
 //     new / cache / out: each token class omitted when its
 //     count is 0 (F-45 §1.6 zero-omit). The first non-zero
@@ -146,8 +154,8 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 	}
 	var lines []string
 
-	// Line 1: identity (🤖 Agent · Model · 🗜 N).
-	idParts := []string{"🤖"}
+	// Line 1: identity (🤖: Agent · Model · SessionID).
+	idParts := []string{"🤖:"}
 	if ctx.Agent != "" {
 		idParts = append(idParts, ctx.Agent)
 	}
@@ -155,23 +163,31 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 		// Use middle-dot · between Agent and Model — same separator
 		// line 2 uses between token segments, so the identity line
 		// reads as a consistent footer taxonomy rather than two
-		// different rhythms ("🤖 claude opus-4-5" → "🤖 claude ·
+		// different rhythms ("🤖: claude opus-4-5" → "🤖: claude ·
 		// opus-4-5"). F-37 / F-44 footer convention; matches the
 		// rest of the line-2 separator family.
 		idParts = append(idParts, "·", ctx.Model)
 	}
+	// F-56: append the agent's own session id (Claude Code's
+	// system/init.session_id, ACP's session/new response id,
+	// codex's thread.id, etc.) as a trailing identity segment.
+	// Each segment is omitted independently when empty; a
+	// SessionID-only stamp renders as "🤖: · <sid>"
+	// (leading-separator caveat locked by
+	// TestFormatSessionFooterLines_SessionIDOnly + F-45 §1.10).
+	// The leading colon after 🤖 matches the 💰:「」 taxonomy
+	// on Line 2 and the 📁: on Line 3 so the three footer lines
+	// share a single category-prefix shape.
+	if ctx.SessionID != "" {
+		idParts = append(idParts, "·", ctx.SessionID)
+	}
 	// F-49 compaction tracking removed: the "· 🗜 N" segment is
 	// no longer rendered. The runtime dropped its
 	// compactionCount bookkeeping; bridges no longer emit
-	// EventAgentCompaction. Line 1 retains Agent · Model only.
-	_ = strconv.Itoa // keep import stable during F-49 cleanup
+	// EventAgentCompaction. Line 1 retains Agent · Model · SessionID.
 	if len(idParts) > 1 {
 		lines = append(lines, strings.Join(idParts, " "))
 	}
-
-	// Compaction tracking (🗜 N) was removed when the
-	// runtime-side compaction chain was dropped. F-49 §1.6 + §1.2
-	// no longer apply; Line 1 retains Agent · Model only.
 
 	// Line 2: usage stats (💰:「 in / out · X% · $cost 」).
 	//
@@ -404,7 +420,7 @@ func formatWorkspacePath(absPath string) string {
 //
 // Output (when non-empty):
 //
-//	📁 code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
+//	📁: code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
 //
 // Omit rules (each segment is dropped independently; the line
 // itself is dropped when ALL segments would be empty):
@@ -441,7 +457,7 @@ func formatGitLine(ctx *gateway.SessionContext) string {
 		return ""
 	}
 
-	parts := []string{"📁 " + ws}
+	parts := []string{"📁: " + ws}
 
 	// Branch segment (always present when line is shown).
 	branch := "?"

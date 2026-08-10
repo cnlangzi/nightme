@@ -1124,11 +1124,22 @@ func sessionContextInto(out *gateway.OutboundMessage, s *chatsession.AgentSessio
 	// fields: any one of (Agent / Model / GitStatus / Usage) being
 	// present is enough to materialize the SessionContext.
 	// Compaction tracking removed (was the 4th condition).
-	if s.Agent != "" || s.Model() != "" || hasGit ||
+	//
+	// Snapshot Model() and SessionID() once each — both take
+	// asMu.RLock() internally; calling them twice in the gate
+	// + the literal doubles the lock acquisitions per stamp for
+	// no functional gain (a racing SetModel / SetSessionID
+	// between gate and literal would either be visible or not
+	// in both places anyway, and a stale read in the literal is
+	// no worse than a stale read in the gate).
+	model := s.Model()
+	sessionID := s.SessionID()
+	if s.Agent != "" || model != "" || sessionID != "" || hasGit ||
 		out.Usage != nil {
 		out.SessionContext = &gateway.SessionContext{
 			Agent:     s.Agent,
-			Model:     s.Model(),
+			Model:     model,
+			SessionID: sessionID,
 			Workspace: s.Cwd,
 			GitStatus: gitSnap,
 			Usage:     out.Usage,

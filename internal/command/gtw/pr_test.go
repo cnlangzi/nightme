@@ -53,9 +53,73 @@ func TestParsePRReply_WithFenceInfoString(t *testing.T) {
 	}
 }
 
-func TestParsePRReply_NoFence(t *testing.T) {
-	if _, _, err := parsePRReply("just some prose without a fence"); err == nil {
-		t.Fatalf("expected error on missing fence")
+// TestParsePRReply_NoFenceAgentForgotFence is the regression test
+// for the bug reported 2026-08-10: an LLM agent emitted a perfectly
+// good PR description but forgot the ``` fence wrapper, and the
+// strict parser hard-errored with "could not parse agent reply".
+// The agent output (verbatim, the actual text that failed in
+// production) is preserved below — DO NOT replace with a
+// hand-condensed variant, the whole point is that the fix must
+// handle real, messy, agent-shaped prose including the unicode
+// ellipsis "…" and the multi-paragraph body.
+func TestParsePRReply_NoFenceAgentForgotFence(t *testing.T) {
+	in := "feat(gtw): add per-instance name and centralize cli exec\n" +
+		"\n" +
+		"Adds a human-readable identifier for each nightme daemon via\n" +
+		"Config.Name (with `nightme name [value]` CLI + NIGHTME_NAME env\n" +
+		"override, falling back to os.Hostname()), and refactors the gtw\n" +
+		"package so every CLI subprocess (`gh`, `glab`, hooks, …) runs\n" +
+		"through a single runCmd wrapper that takes an explicit Dir —\n" +
+		"preventing `git: fatal: Unable to read current working directory`\n" +
+		"failures when the daemon's CWD has been stale'd (moved/deleted\n" +
+		"worktree, NFS gone away, …) since startup.\n" +
+		"\n" +
+		"Changes:\n" +
+		"- config: new `name` field, EffectiveName helper, NIGHTME_NAME env\n" +
+		"- cli: `nightme name` shows/sets the instance name\n" +
+		"- gtw: new exec.go with runCmd(ctx, dir, name, args...)\n"
+
+	title, body, err := parsePRReply(in)
+	if err != nil {
+		t.Fatalf("regression: agent output without fence must not error: %v", err)
+	}
+	if title != "feat(gtw): add per-instance name and centralize cli exec" {
+		t.Errorf("title = %q", title)
+	}
+	if !strings.HasPrefix(body, "Adds a human-readable identifier") {
+		t.Errorf("body should start with the descriptive paragraph; got %q", body)
+	}
+	if !strings.Contains(body, "Changes:") {
+		t.Errorf("body should preserve the structured bullet section; got %q", body)
+	}
+}
+
+// TestParsePRReply_NoFenceProseFallback covers the degenerate
+// case where the agent emits pure prose without anything that
+// looks like Conventional Commits. The old strict version
+// hard-errored; the new version falls back to "first non-empty
+// line is the title" so the user gets a usable PR draft instead
+// of a hard failure.
+func TestParsePRReply_NoFenceProseFallback(t *testing.T) {
+	in := "just some prose without a fence\nand more prose on a second line"
+	title, body, err := parsePRReply(in)
+	if err != nil {
+		t.Fatalf("expected fallback (no err), got %v", err)
+	}
+	if title != "just some prose without a fence" {
+		t.Errorf("title = %q, want first non-empty line", title)
+	}
+	if !strings.Contains(body, "and more prose") {
+		t.Errorf("body = %q, want remaining prose", body)
+	}
+}
+
+// TestParsePRReply_CompletelyEmpty still errors — there's nothing
+// to extract a title from. The fallback path handles empty-after-
+// stripping by returning errParseAgentReply.
+func TestParsePRReply_CompletelyEmpty(t *testing.T) {
+	if _, _, err := parsePRReply("   \n\n  \n"); err == nil {
+		t.Fatalf("expected error on entirely-whitespace input")
 	}
 }
 
@@ -79,9 +143,122 @@ func TestParsePRReply_OnlyTitleNoBody(t *testing.T) {
 	}
 }
 
-func TestParsePRReply_UnclosedFence(t *testing.T) {
-	if _, _, err := parsePRReply("```\nfeat: half-written\n\nbody but no closing"); err == nil {
-		t.Fatalf("expected error on unclosed fence")
+// TestParsePRReply_UnclosedFenceNowSucceeds documents the
+// behavior change introduced when the parser grew LLM-noise
+// tolerance: an unmatched leading ``` (agent forgot to close
+// the fence) is now stripped rather than treated as fatal.
+// The agent's title and body come through intact. This is the
+// same shape of failure as the regression case in
+// TestParsePRReply_NoFenceAgentForgotFence, just with a stray
+// opening fence — proves the strip-and-fall-through path works
+// even when the agent emits a half-formed fence.
+func TestParsePRReply_UnclosedFenceNowSucceeds(t *testing.T) {
+	in := "```\nfeat: half-written\n\nbody but no closing fence"
+	title, body, err := parsePRReply(in)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if title != "feat: half-written" {
+		t.Errorf("title = %q, want feat: half-written", title)
+	}
+	if !strings.Contains(body, "body but no closing") {
+		t.Errorf("body = %q, want the unclosed prose", body)
+	}
+}
+
+// TestParsePRReply_NoiseModes covers the common LLM output
+// shapes that the strict parser used to reject. Each subtest
+// feeds a differently-wrapped input and asserts the title is
+// still found. Together with TestParsePRReply_NoFenceAgentForgotFence
+// these pin the contract: any agent output that CONTAINS a valid
+// Conventional Commits title should parse, regardless of the
+// wrapper noise around it.
+func TestParsePRReply_NoiseModes(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string // expected title
+	}{
+		{
+			// LLM-style JSON wrapper: the entire PR description
+			// is the value of a JSON string key. Both input
+			// and want use a raw string literal so we test
+			// against literal `\n` (backslash-n) — the regex
+			// captures the whole value, including any `\n`
+			// the LLM embedded as escaped sequence. The title
+			// reaches dispatchPR's SplitN which takes the
+			// first line anyway, so the user's final PR title
+			// is still correct.
+			name:  "json_wrapper",
+			input: `{"text": "feat(config): add name field\n\nbody goes here"}`,
+			want:  `feat(config): add name field\n\nbody goes here`,
+		},
+		{
+			name:  "markdown_h2_heading",
+			input: "## PR Title\n\nfix(gtw): bind worktree to provider\n\nbody",
+			want:  "fix(gtw): bind worktree to provider",
+		},
+		{
+			name:  "markdown_h1_heading",
+			input: "# Pull Request\n\nchore(deps): bump yaml.v3\n\nbody",
+			want:  "chore(deps): bump yaml.v3",
+		},
+		{
+			name:  "dash_bullet",
+			input: "- feat(api): add /foo endpoint\n\nbody",
+			want:  "feat(api): add /foo endpoint",
+		},
+		{
+			name:  "star_bullet",
+			input: "* refactor(gtw): extract runCmd\n\nbody",
+			want:  "refactor(gtw): extract runCmd",
+		},
+		{
+			name:  "title_label",
+			input: "Title: feat(ci): cache go modules\n\nbody",
+			want:  "feat(ci): cache go modules",
+		},
+		{
+			name:  "pr_title_label",
+			input: "PR Title: docs(readme): fix typo\n\nbody",
+			want:  "docs(readme): fix typo",
+		},
+		{
+			name:  "leading_blank_lines",
+			input: "\n\n\nfeat: skip the blank lines\n\nbody",
+			want:  "feat: skip the blank lines",
+		},
+		{
+			name:  "breaking_change_bang",
+			input: "feat(api)!: remove deprecated handler\n\nbody",
+			want:  "feat(api)!: remove deprecated handler",
+		},
+		{
+			name:  "unmatched_leading_fence",
+			input: "```\nfeat: agent forgot to close\n\nbody",
+			want:  "feat: agent forgot to close",
+		},
+		{
+			name:  "unmatched_trailing_fence",
+			input: "feat: agent forgot to open\n\nbody\n```",
+			want:  "feat: agent forgot to open",
+		},
+		{
+			name:  "numbered_list",
+			input: "1. test(rig): add NoiseModes cases\n\nbody",
+			want:  "test(rig): add NoiseModes cases",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			title, _, err := parsePRReply(tc.input)
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if title != tc.want {
+				t.Errorf("title = %q, want %q", title, tc.want)
+			}
+		})
 	}
 }
 
@@ -443,7 +620,13 @@ func TestDispatchPR_AgentOutputUnparsable(t *testing.T) {
 	rig := newPRTestRig(t)
 	setupPRWorktree(t, rig, Context{		Branch:   "wt",
 	})
-	rig.agent.runOnceText = "I think the PR should be about..." // no fence
+	// Whitespace-only agent output is the ONLY case the
+	// permissive parser still can't recover from — there's no
+	// non-empty line to take as a title. Everything else
+	// (no fences, JSON wrappers, heading prefixes, etc.) now
+	// falls through to the "first non-empty line" path; see
+	// the parsePRReply unit tests for those cases.
+	rig.agent.runOnceText = "   \n\n  \n"
 	setupPRGit(rig, 0, 5)
 	rig.installDeps()
 
@@ -457,8 +640,47 @@ func TestDispatchPR_AgentOutputUnparsable(t *testing.T) {
 	if !strings.Contains(r, "could not parse agent reply") {
 		t.Fatalf("expected parse-fail reply, got:\n%s", r)
 	}
-	if !strings.Contains(r, "I think the PR should be") {
-		t.Fatalf("expected raw agent text echoed, got:\n%s", r)
+}
+
+// TestDispatchPR_AgentOutputNoFenceNowSucceeds is the dispatch-
+// level regression test for the bug fixed when parsePRReply
+// became permissive. Before, an agent that forgot the ``` fence
+// (the user's actual 2026-08-10 production failure) was hard-
+// errored at dispatch; now the PR is created with the first line
+// of the agent output as the title.
+func TestDispatchPR_AgentOutputNoFenceNowSucceeds(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt"})
+	// Same shape as the agent output that broke production:
+	// well-formed Conventional Commits title, no fence wrapper,
+	// multi-paragraph body.
+	rig.agent.runOnceText = "feat(gtw): add per-instance name\n\n" +
+		"This is the descriptive body.\n\n" +
+		"- bullet one\n- bullet two\n"
+	setupPRGit(rig, 0, 5)
+	// Configure the fake git so resolveProvider's Detect
+	// path returns our fake provider — without a remote URL,
+	// dispatchPR short-circuits with "no `origin` remote".
+	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	rig.prov.SetCreatePRResp("https://github.com/x/y/pull/1")
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	// Should NOT contain "could not parse" — the parse
+	// succeeds thanks to the permissive regex scan.
+	if strings.Contains(r, "could not parse agent reply") {
+		t.Fatalf("dispatch hard-errored on unfenced agent output:\n%s", r)
+	}
+	// PR should have been created; the success card mentions
+	// the URL and the title.
+	if !strings.Contains(r, "https://github.com/x/y/pull/1") {
+		t.Fatalf("expected PR URL in success card, got:\n%s", r)
 	}
 }
 

@@ -192,6 +192,13 @@ func drainUntilReady(t *testing.T, events <-chan agent.AgentEvent, deadline time
 func TestE2E_FreshSession(t *testing.T) {
 	shouldRunE2E(t)
 
+	// Tighten the watchdog for the test (see TestE2E_Interrupt
+	// for the rationale — opencode 1.18 silently swallows 401
+	// dispatch failures and never emits a terminal event, so
+	// the bridge has to detect the silence itself). 20s is
+	// comfortably under the 90s test deadline.
+	t.Setenv("NIGHTME_OPENCODE_TURN_WATCHDOG", "20s")
+
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 

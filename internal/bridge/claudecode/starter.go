@@ -99,3 +99,20 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 
 	return agent.NewAgent(s.Info(), d.pid, d.events, d), nil
 }
+// RunOnce is the one-shot counterpart to Start. Spawns a fresh
+// stream-json session, sends blocks, and drains Events() until
+// the agent produces its final text result. Closes the session
+// before returning.
+//
+// We bypass Start's resume-preservation probe (cfg.SessionID is
+// always empty for one-shot), so we call newDriver directly via
+// the Start path. The shared agent.RunOnceDrain helper handles
+// send + drain.
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
+	a, err := s.Start(ctx, cfg)
+	if err != nil {
+		return "", fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
+	}
+	defer a.Close()
+	return agent.RunOnceDrain(ctx, a, blocks, s.Info().Name)
+}

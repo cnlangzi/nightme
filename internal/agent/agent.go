@@ -870,6 +870,17 @@ type Starter interface {
 	Info() Info
 	Detect() error
 	Start(ctx context.Context, cfg StartConfig) (*Agent, error)
+
+	// RunOnce runs a single synchronous turn: the implementation
+	// owns the full spawn → send → wait → close cycle. cfg.Workspace
+	// is the agent's cwd for this call. Returns the agent's final
+	// text response, or an error if the turn didn't produce one.
+	//
+	// RunOnce is the "one-shot" counterpart to Start. Start returns
+	// a live *Agent for multi-turn / chat sessions; RunOnce is for
+	// callers (e.g. /gtw push) that want a single synchronous turn
+	// and don't need the session handle.
+	RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock) (string, error)
 }
 
 // Errors surfaced by the registry.

@@ -9,7 +9,10 @@ package pty
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
@@ -70,4 +73,91 @@ type agentDriver interface {
 	SendPermission(resp string) error
 	Reset(ctx context.Context) error
 	Close() error
+}
+// ptyIdleTimeout is how long RunOnce waits with no new output
+// before declaring the turn done. PTY has no structured result
+// event, so the heuristic is "agent went quiet for this long".
+// 3s is enough to cover inter-tool-call pauses in shell agents
+// without dragging out genuinely-stuck sessions (the parent push
+// wraps RunOnce in a 5-min deadline as a backstop).
+const ptyIdleTimeout = 3 * time.Second
+
+// RunOnce is the one-shot counterpart to Start for PTY-backed
+// agents. It opens a live PTY session, writes blocks to stdin,
+// and collects EventAgentText until either EventAgentDone arrives
+// or no new bytes have arrived for ptyIdleTimeout. Returns the
+// concatenated text.
+//
+// PTY has no structured "result" event — every byte from the
+// child is emitted as EventAgentText, and the only terminal
+// signal is EventAgentDone{ExitCode: -1} on transport EOF. The
+// idle heuristic is the only practical way to detect "the agent
+// finished writing".
+//
+// The idle timer is "first-byte" — it starts ONLY after the first
+// EventAgentText arrives. Without this guard, a slow PTY-wrapped
+// CLI whose first byte takes >ptyIdleTimeout to appear (e.g.
+// shell wrapper initialization) would be declared done
+// prematurely with an empty reply.
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
+	a, err := s.Start(ctx, cfg)
+	if err != nil {
+		return "", fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
+	}
+	defer a.Close()
+
+	if err := a.SendBlocks(ctx, blocks); err != nil {
+		return "", fmt.Errorf("agent %s: send: %w", s.Info().Name, err)
+	}
+
+	var sb strings.Builder
+	var idle *time.Timer
+	resetIdle := func() {
+		if idle != nil {
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
+			}
+		}
+		idle = time.NewTimer(ptyIdleTimeout)
+	}
+	defer func() {
+		if idle != nil {
+			idle.Stop()
+		}
+	}()
+
+	for {
+		select {
+		case ev, ok := <-a.Events():
+			if !ok {
+				return strings.TrimSpace(sb.String()), nil
+			}
+			switch ev.Kind {
+			case agent.EventAgentText:
+				sb.WriteString(ev.Text)
+				resetIdle()
+			case agent.EventAgentError:
+				if ev.Err != nil {
+					return "", fmt.Errorf("agent %s: %w", s.Info().Name, ev.Err)
+				}
+				return "", fmt.Errorf("agent %s: error event with nil payload", s.Info().Name)
+			case agent.EventAgentDone:
+				return strings.TrimSpace(sb.String()), nil
+			}
+		case <-idle.C:
+			return strings.TrimSpace(sb.String()), nil
+		case <-ctx.Done():
+			// On ctx cancellation, drop the partial text — PTY has
+			// no structured result event, so any output we
+			// collected is "what the agent was in the middle of
+			// writing", not a final answer. Returning it alongside
+			// the error would mislead the caller (push command)
+			// into thinking the agent had produced something
+			// usable.
+			return "", fmt.Errorf("agent %s: canceled: %w", s.Info().Name, ctx.Err())
+		}
+	}
 }

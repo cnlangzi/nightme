@@ -23,8 +23,8 @@ type Transport interface {
 	// stub it as a no-op; production uses go-pty's underlying
 	// *os.Process.Signal. Note: this exists for the ACP bridge
 	// (which sends SIGINT as its portable Ctrl-C); pty.Agent's
-	// own Abort returns ErrNotSupported because Agent-level
-	// abort should not be confused with raw signal delivery.
+	// own Stop returns ErrNotSupported because Agent-level stop
+	// should not be confused with raw signal delivery.
 	Signal(os.Signal) error
 }
 
@@ -98,7 +98,7 @@ func (b *ptyTransport) Setsize(cols, rows int) error {
 // to the underlying gopty.Cmd.Process, which forwards to the
 // child over the controlling terminal so the child sees the signal
 // as if a user pressed the key. Used by the ACP bridge (pty.Agent
-// itself returns ErrNotSupported from Abort — see agent.go).
+// itself returns ErrNotSupported from Stop — see agent.go).
 func (b *ptyTransport) Signal(sig os.Signal) error {
 	if b.cmd == nil || b.cmd.Process == nil {
 		return fmt.Errorf("pty: no command")

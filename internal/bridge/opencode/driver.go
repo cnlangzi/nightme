@@ -13,7 +13,7 @@
 // It implements the unexported agent.driver interface (SendText,
 // SendBlocks, SendPermission, Reset, Close) and exposes bridge-
 // specific extensions (Compact, ListSessions, AvailableBuiltinCommands,
-// Abort, SetModel) for callers that type-assert *agent.Agent.
+// Stop, SetModel) for callers that type-assert *agent.Agent.
 package opencode
 
 import (
@@ -411,8 +411,15 @@ func (d *driver) Close() error {
 
 // ─── bridge-specific extensions on driver ────────────────────────
 
-// Abort sends /interrupt to cancel the in-flight turn.
-func (d *driver) Abort(ctx context.Context) error {
+// Stop sends /interrupt to halt execution of the in-flight turn.
+// The HTTP server emits session.idle (or session.error) and the
+// bridge releases the busy guard. The server keeps running and the
+// SessionID is preserved — the next prompt reuses the same session.
+//
+// Stop is fire-and-forget: it does NOT block until the server
+// confirms the turn has settled. The chat layer's TryFlush watches
+// IsReady() and reschedules the next queued prompt automatically.
+func (d *driver) Stop(ctx context.Context) error {
 	if d.server == nil {
 		return fmt.Errorf("opencode: not started")
 	}

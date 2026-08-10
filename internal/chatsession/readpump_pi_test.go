@@ -69,7 +69,7 @@ func (d *longLivedFakeASDriver) SendPermission(resp string) error {
 	return d.inner.SendPermission(resp)
 }
 func (d *longLivedFakeASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
-func (d *longLivedFakeASDriver) Abort(ctx context.Context) error { return d.inner.Abort(ctx) }
+func (d *longLivedFakeASDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
 func (d *longLivedFakeASDriver) SetModel(ctx context.Context, providerID, modelID string) error {
 	return d.inner.SetModel(ctx, providerID, modelID)
 }
@@ -80,7 +80,7 @@ func (a *longLivedFakeAS) SendBlocks(context.Context, []agent.ContentBlock) erro
 }
 func (a *longLivedFakeAS) SendPermission(string) error { return nil }
 func (a *longLivedFakeAS) New(context.Context) error   { return nil }
-func (a *longLivedFakeAS) Abort(context.Context) error { return agent.ErrNotSupported }
+func (a *longLivedFakeAS) Stop(context.Context) error { return agent.ErrNotSupported }
 func (a *longLivedFakeAS) SetModel(context.Context, string, string) error {
 	return agent.ErrNotSupported
 }

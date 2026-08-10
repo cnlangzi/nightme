@@ -56,7 +56,7 @@ func (d *closedSpyDriver) SendPermission(resp string) error {
 	return d.inner.SendPermission(resp)
 }
 func (d *closedSpyDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
-func (d *closedSpyDriver) Abort(ctx context.Context) error { return d.inner.Abort(ctx) }
+func (d *closedSpyDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
 func (d *closedSpyDriver) SetModel(ctx context.Context, providerID, modelID string) error {
 	return d.inner.SetModel(ctx, providerID, modelID)
 }

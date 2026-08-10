@@ -952,12 +952,18 @@ func (as *AgentSession) Events() <-chan EnrichedEvent {
 }
 
 // IsReady (CS-AS 边界重构 Phase 1) reports whether the AS can
-// accept a new Submit. True when:
-//   - No Prompt is currently in flight (currentPrompt == nil), AND
-//   - The handle is spawned and process is alive.
+// accept a new Submit. True when no Prompt is currently in flight
+// (currentPrompt == nil). The flag flips false on Submit and true
+// again at endPrompt (Spawn also re-arms it).
 //
-// ChatSession.TryFlush polls this before calling Submit. Atomic
-// load — safe to call concurrently with Submit / endPrompt.
+// IsReady does NOT directly track process-alive status — it
+// reflects the prompt lifecycle, not the bridge process. If the
+// bridge dies between Submit and endPrompt, IsReady stays false
+// until the readpump observes the closed events channel and calls
+// endPrompt; callers in that small window may observe IsReady=false
+// alongside a dead process. ChatSession.TryFlush polls this before
+// calling Submit. Atomic load — safe to call concurrently with
+// Submit / endPrompt.
 func (as *AgentSession) IsReady() bool {
 	return as.isReady.Load()
 }
@@ -1145,6 +1151,37 @@ func (as *AgentSession) Close() error {
 		return nil // not running
 	}
 	return h.Close()
+}
+
+// Stop halts execution of the in-flight turn on the bridge without
+// tearing down the AgentSession. After Stop returns, the bridge's
+// responsibility for the old turn is over: the bridge may emit a
+// terminal event (EventAgentDone / EventAgentError), exit the child
+// process, or neither — the chat layer's TryFlush loop watches
+// IsReady() and reschedules the next queued prompt automatically
+// once the bridge settles.
+//
+// Stop is fire-and-forget: it does NOT block waiting for IsReady()
+// to flip back. Callers should treat the call as fire-and-forget;
+// the chat layer coordinates the turn-end → next-submit transition
+// via its existing KindPromptEnded handler.
+//
+// Bridges that cannot honor Stop return agent.ErrNotSupported; the
+// caller can detect with errors.Is and fall back to Close() (full
+// /kill semantics for this AgentSession).
+//
+// Returns ErrNotRunning if Spawn has not been called (handle is
+// nil). Distinct from Close(): Stop does not change the
+// AgentSession's lifecycle status and does not drain the events
+// channel — it only signals the bridge to halt its current work.
+func (as *AgentSession) Stop(ctx context.Context) error {
+	as.asMu.RLock()
+	h := as.handle
+	as.asMu.RUnlock()
+	if h == nil {
+		return ErrNotRunning
+	}
+	return h.Stop(ctx)
 }
 
 // ObserveClose runs in a goroutine after Spawn to watch the bridge

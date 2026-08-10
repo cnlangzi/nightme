@@ -503,14 +503,26 @@ func (d *driver) New(ctx context.Context) error {
 	return d.writeLine(payload)
 }
 
-// Abort sends SIGINT to the claude code child. The stream-json
+// Stop sends SIGINT to the claude code child. The stream-json
 // protocol does not expose a structured cancel, so the closest
 // portable action is the same Ctrl-C signal a user would press.
-// The child catches it and the in-flight turn settles with
-// EventAgentDone or EventAgentError.
+// In --output-format stream-json pipe mode the child's SIGINT
+// behavior is best-effort: it may either emit a final `result`
+// event with is_error=true (which the bridge translates to
+// EventAgentDone, IsReady flips) or it may simply exit on the
+// signal (the events channel closes, the bridge sets the AS to
+// StatusExited, the next Submit triggers a respawn via
+// LookupSelectedAgentSession). Either way the chat layer's
+// TryFlush loop picks up the next queued prompt — Stop itself
+// does not need to coordinate the turn-end → next-submit
+// transition.
+//
+// Stop is fire-and-forget: it does NOT block waiting for a clean
+// EventAgentDone. The caller does not need to know which of the
+// two post-states the child landed in.
 //
 // Returns ErrNotSupported if the bridge is not started.
-func (d *driver) Abort(ctx context.Context) error {
+func (d *driver) Stop(ctx context.Context) error {
 	_ = ctx
 	if d.cmd == nil || d.cmd.Process == nil {
 		return agent.ErrNotSupported

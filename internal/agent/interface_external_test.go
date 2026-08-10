@@ -1,7 +1,7 @@
 // Stage 6 cross-bridge compile-time test: every bridge
 // registered with agent.Builtins must satisfy the new agent.Agent
 // interface (Start + Close + Events + PID + SendText + SendBlocks +
-// SendPermission + New + Abort + SetModel).
+// SendPermission + New + Stop + SetModel).
 //
 // Lives in package agent_test so we can import the bridge
 // packages without creating an import cycle, and so a bridge
@@ -50,8 +50,8 @@ func TestBuiltinBridges_SatisfyAgentInterface(t *testing.T) {
 				t.Errorf("Info().Command empty")
 			}
 			// Start on a fresh Starter must produce a live Agent
-			// whose Abort returns a non-nil error (or succeeds,
-			// for bridges with a real Abort impl) — either way it
+			// whose Stop returns a non-nil error (or succeeds,
+			// for bridges with a real Stop impl) — either way it
 			// must not panic.
 			a, err := b.a.Start(context.Background(), agent.StartConfig{
 				Workspace: "/tmp/" + info.Name,

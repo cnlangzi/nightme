@@ -351,12 +351,19 @@ func (d *driver) New(ctx context.Context) error {
 	return nil
 }
 
-// Abort sends SIGINT to the child process. ACP has no structured
-// "cancel" method on the bridge's PTY-based transport, so the
-// closest portable action is the same Ctrl-C signal a user would
-// press. The user-facing semantic is "interrupt the in-flight
-// turn" — the child interprets that as best it can.
-func (d *driver) Abort(ctx context.Context) error {
+// Stop sends SIGINT to the child process via the PTY transport.
+// The child runs with a TTY, so SIGINT is natively interpreted
+// the same way a user pressing Ctrl-C in interactive mode would
+// be: cancel the in-flight turn, stay alive, await the next
+// prompt. The ACP protocol surfaces the settled state via the
+// bridge's normal event stream; the chat layer's TryFlush picks up
+// the next queued prompt once IsReady() flips.
+//
+// Stop is fire-and-forget: it does NOT block waiting for the
+// settle event.
+//
+// Returns ErrNotSupported if the transport is not started.
+func (d *driver) Stop(ctx context.Context) error {
 	_ = ctx
 	if d.transport == nil {
 		return agent.ErrNotSupported

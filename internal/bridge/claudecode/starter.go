@@ -1,16 +1,16 @@
 // starter.go — the spawn recipe for the claudecode bridge.
 //
-// After the Agent → Info/Starter/LiveAgent/driver refactor
+// After the Agent → Info/Starter/Agent/driver refactor
 // (wip/agent.md), the static metadata (name/command/args) lives
 // on starter and is exposed via Info(). The runtime state (cmd,
 // pipes, goroutines) lives on driver and is exposed via the
 // unexported driver interface. External callers never see
 // *starter or *driver directly — they interact via
-// *agent.LiveAgent, which starter.Start returns.
+// *agent.Agent, which starter.Start returns.
 //
 // starter is reusable: agent.Builtins holds ONE *starter per
 // agent name; every Spawn call invokes starter.Start and gets
-// back an independent *agent.LiveAgent wrapping a fresh driver.
+// back an independent *agent.Agent wrapping a fresh driver.
 package claudecode
 
 import (
@@ -26,7 +26,7 @@ import (
 // as a singleton per agent name. Lifecycle:
 //
 //	Build-time:    NewStarter → Register(Starter) → Builtins holds *Starter
-//	Spawn-time:    Builtins.Get → Starter.Info/Detect/Start → *driver → *agent.LiveAgent
+//	Spawn-time:    Builtins.Get → Starter.Info/Detect/Start → *driver → *agent.Agent
 //	Teardown:      starter itself is never mutated or freed
 type Starter struct {
 	name    string
@@ -62,7 +62,7 @@ func (s *Starter) Detect() error {
 }
 
 // Start spawns Claude Code in stream-json mode and returns a live
-// *agent.LiveAgent that streams parsed events on its Events
+// *agent.Agent that streams parsed events on its Events
 // channel. The starter is unchanged (reusable across many
 // sessions).
 //
@@ -78,7 +78,7 @@ func (s *Starter) Detect() error {
 // is set, the spawn is probed for stderr-detected rejection
 // signals. On detection, the bridge returns ErrResumeUnhealthy
 // instead of silently falling back to a fresh session.
-func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.LiveAgent, error) {
+func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	if cfg.Workspace == "" {
 		return nil, fmt.Errorf("claudecode: workspace is required")
 	}
@@ -97,5 +97,5 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Live
 		}
 	}
 
-	return agent.NewLiveAgent(s.Info(), d.pid, d.events, d), nil
+	return agent.NewAgent(s.Info(), d.pid, d.events, d), nil
 }

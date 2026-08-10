@@ -79,10 +79,10 @@ func (r *Registry) List() []Starter {
 
 // MakeChanAlias returns a writable channel that forwards values
 // from the read-only source. Used by legacyStarter to bridge a
-// legacy Agent.Events() (<-chan) into LiveAgent.events (chan) so
+// legacy Agent.Events() (<-chan) into Agent.events (chan) so
 // the shared struct can have a single field type. Exported because
 // test bridges outside the agent package need to construct a
-// LiveAgent from a legacy Agent and must wire the events chan the
+// Agent from a legacy Agent and must wire the events chan the
 // same way.
 func MakeChanAlias(src <-chan AgentEvent) chan AgentEvent {
 	out := make(chan AgentEvent)

@@ -116,10 +116,10 @@ type AgentSession struct {
 	// handle is the bridge-level live session (returned by
 	// Spawner.Spawn). nil until Spawn succeeds. Committed to the
 	// caller (readPump) only after SetRunning is called. Type is
-	// *agent.LiveAgent (the shared runtime struct); per-bridge
+	// *agent.Agent (the shared runtime struct); per-bridge
 	// state lives in the unexported driver. Tests that need to
 	// reach bridge-specific state use Handle().Driver().
-	handle *agent.LiveAgent
+	handle *agent.Agent
 
 	// events is a tee of handle.Events() that signals handle-side
 	// close (last chan close → SetExited). Created in Spawn; nil
@@ -928,11 +928,11 @@ func (as *AgentSession) respawn(
 // Handle returns the bridge-level agent.Agent (nil if not yet
 // spawned). Exposed for callers that need direct access (e.g., the
 // Handle returns the bridge-level live handle (nil if not yet
-// spawned). Production code uses the typed methods on *LiveAgent
+// spawned). Production code uses the typed methods on *Agent
 // (PID/Events/Send*/Close). Tests that need bridge-specific state
 // use Handle().Driver() and type-assert to the bridge's driver
 // type.
-func (as *AgentSession) Handle() *agent.LiveAgent {
+func (as *AgentSession) Handle() *agent.Agent {
 	as.asMu.RLock()
 	defer as.asMu.RUnlock()
 	return as.handle

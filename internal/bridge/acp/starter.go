@@ -1,12 +1,12 @@
 // starter.go — the spawn recipe for the acp bridge.
 //
-// After the Agent → Info/Starter/LiveAgent/driver refactor
+// After the Agent → Info/Starter/Agent/driver refactor
 // (wip/agent.md), the static metadata (name/command/args/env/
 // cols/rows) lives on Starter and is exposed via Info(). The
 // runtime state (transport/rpc/ctx/cancel/etc.) lives on driver
 // and is exposed via the unexported driver interface. External
 // callers never see *Starter or *driver directly — they interact
-// via *agent.LiveAgent, which Starter.Start returns.
+// via *agent.Agent, which Starter.Start returns.
 package acp
 
 import (
@@ -61,7 +61,7 @@ func (s *Starter) Detect() error {
 }
 
 // Start spawns the CLI under a PTY, runs the ACP initialize +
-// session/new handshake, and returns a live *agent.LiveAgent. The
+// session/new handshake, and returns a live *agent.Agent. The
 // caller (typically chatsession.AgentSession via the Spawner) must
 // Close() the returned handle when done. The Starter is unchanged
 // (reusable across many sessions).
@@ -71,11 +71,11 @@ func (s *Starter) Detect() error {
 // the starter's defaults (cfg wins). cfg.SessionID, when non-empty,
 // is appended as the resume id; ACP does not currently surface it
 // over the wire (the bridge synthesizes a fresh one for now).
-func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.LiveAgent, error) {
+func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	d, err := newDriver(ctx, s, cfg)
 	if err != nil {
 		return nil, err
 	}
 	events := d.Events()
-	return agent.NewLiveAgent(s.Info(), d.PID(), agent.MakeChanAlias(events), d), nil
+	return agent.NewAgent(s.Info(), d.PID(), agent.MakeChanAlias(events), d), nil
 }

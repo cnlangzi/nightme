@@ -306,7 +306,7 @@ func TestSession_PromptTimeout_NotInfinite(t *testing.T) {
 	t.Logf("SendText timed out as expected in %s: %v", elapsed, sendErr)
 }
 
-func mustFirstEventOfKind(t *testing.T, sess *agent.LiveAgent, kind agent.EventKind, timeout time.Duration) agent.AgentEvent {
+func mustFirstEventOfKind(t *testing.T, sess *agent.Agent, kind agent.EventKind, timeout time.Duration) agent.AgentEvent {
 	t.Helper()
 	deadline := time.After(timeout)
 	for {
@@ -327,7 +327,7 @@ func mustFirstEventOfKind(t *testing.T, sess *agent.LiveAgent, kind agent.EventK
 // drainEventsUntilDone collects events from sess until an
 // EventAgentDone arrives or the timeout elapses. Returns a snapshot
 // of the collected events plus the Done payload.
-func drainEventsUntilDone(t *testing.T, sess *agent.LiveAgent, timeout time.Duration) captured {
+func drainEventsUntilDone(t *testing.T, sess *agent.Agent, timeout time.Duration) captured {
 	t.Helper()
 	deadline := time.After(timeout)
 	out := captured{}

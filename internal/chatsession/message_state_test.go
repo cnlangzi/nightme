@@ -178,7 +178,7 @@ func TestEmitMessageDropped_FlipsStageAndEmits(t *testing.T) {
 // proceeding.
 type spySpawner struct{}
 
-func (s *spySpawner) Spawn(_ context.Context, _ string, _ string, _ []string, _ string) (*agent.LiveAgent, error) {
+func (s *spySpawner) Spawn(_ context.Context, _ string, _ string, _ []string, _ string) (*agent.Agent, error) {
 	return nil, errors.New("spySpawner: not implemented")
 }
 

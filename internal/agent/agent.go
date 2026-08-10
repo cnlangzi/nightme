@@ -681,17 +681,17 @@ func copyStrings(s []string) []string {
 	return out
 }
 
-// ─── LiveAgent: shared runtime handle (struct) ─────────────────────
+// ─── Agent: shared runtime handle (struct) ─────────────────────
 
-// LiveAgent is the shared runtime handle for any bridge. It is a
+// Agent is the shared runtime handle for any bridge. It is a
 // concrete struct (not an interface) because the runtime surface
 // (PID / Events / Send* / Close / New) is uniform across bridges —
 // per-bridge protocol details live in the unexported driver.
 //
-// TEMPORARY NAME: this is called LiveAgent during the dual-track
+// TEMPORARY NAME: this is called Agent during the dual-track
 // transition (P1–P3) because the legacy Agent interface still
 // occupies the name Agent. After P4 deletes the legacy interface,
-// LiveAgent is renamed to Agent.
+// Agent is renamed to Agent.
 //
 // The lifecycle is:
 //
@@ -704,9 +704,9 @@ func copyStrings(s []string) []string {
 // sessionID is captured from EventAgentReady and stored atomically
 // here so the runtime can read it without any cross-bridge type
 // switching (F-45).
-type LiveAgent struct {
+type Agent struct {
 	// Info is the fixed metadata. Exported so bridges and test
-	// fakes outside the package can construct a LiveAgent via a
+	// fakes outside the package can construct a Agent via a
 	// struct literal.
 	Info Info
 
@@ -728,13 +728,13 @@ type LiveAgent struct {
 
 // Info returns the agent's fixed metadata. Observable on any
 // Agent handle at any time.
-func (a *LiveAgent) infoValue() Info { return a.Info }
+func (a *Agent) infoValue() Info { return a.Info }
 
 // PID returns the OS process id of the underlying child, or 0 when
 // the session has no process (e.g. SDK backends that do not spawn
 // one) or before Start. The Session Manager caches this value
 // for /run reconnect logic and the registry.
-func (a *LiveAgent) PID() int { return a.pid }
+func (a *Agent) PID() int { return a.pid }
 
 // Events streams AgentEvent values until the session ends. The
 // channel is closed by the bridge implementation only when the
@@ -745,7 +745,7 @@ func (a *LiveAgent) PID() int { return a.pid }
 // exit or Close(). Channels and ChatSession rely on the channel
 // being closed as the universal "session is over" signal;
 // AgentDoneEvent.Reason disambiguates turn-end from process-end.
-func (a *LiveAgent) Events() <-chan AgentEvent { return a.events }
+func (a *Agent) Events() <-chan AgentEvent { return a.events }
 
 // SessionID returns the agent's own session id captured on the
 // last EventAgentReady (e.g. Claude Code's
@@ -753,7 +753,7 @@ func (a *LiveAgent) Events() <-chan AgentEvent { return a.events }
 // semantics or has not yet emitted its init event. Read is
 // concurrent-safe; write happens on the bridge's readPump via
 // setSessionID.
-func (a *LiveAgent) SessionID() string {
+func (a *Agent) SessionID() string {
 	v, _ := a.sessionID.Load().(string)
 	return v
 }
@@ -761,23 +761,23 @@ func (a *LiveAgent) SessionID() string {
 // setSessionID records the agent's own session id. Called by the
 // bridge's readPump on EventAgentReady. Package-private so only
 // driver implementations can write.
-func (a *LiveAgent) setSessionID(id string) { a.sessionID.Store(id) }
+func (a *Agent) setSessionID(id string) { a.sessionID.Store(id) }
 
 // SendText delivers plain-text user input. Convenience wrapper
 // around SendBlocks with a single ContentText block. See the
 // driver interface for per-bridge encoding rules.
-func (a *LiveAgent) SendText(text string) error { return a.driver.SendText(text) }
+func (a *Agent) SendText(text string) error { return a.driver.SendText(text) }
 
 // SendBlocks delivers a structured user turn. Delegates to the
 // bridge-specific driver.
-func (a *LiveAgent) SendBlocks(ctx context.Context, blocks []ContentBlock) error {
+func (a *Agent) SendBlocks(ctx context.Context, blocks []ContentBlock) error {
 	return a.driver.SendBlocks(ctx, blocks)
 }
 
 // SendPermission responds to the most recent EventAgentPermission.
 // Only meaningful in ACP/SDK modes; PTY mode writes it verbatim
 // to stdin. See the driver interface for per-bridge semantics.
-func (a *LiveAgent) SendPermission(resp string) error {
+func (a *Agent) SendPermission(resp string) error {
 	return a.driver.SendPermission(resp)
 }
 
@@ -793,13 +793,13 @@ func (a *LiveAgent) SendPermission(resp string) error {
 // After New returns, the bridge MUST emit a fresh EventAgentReady
 // carrying the new SessionID; the runtime's EventAgentBus
 // subscriber captures it via setSessionID.
-func (a *LiveAgent) New(ctx context.Context) error { return a.driver.Reset(ctx) }
+func (a *Agent) New(ctx context.Context) error { return a.driver.Reset(ctx) }
 
 // Close terminates the session and releases resources.
 // Idempotent. Triggers driver.Close, which stops the underlying
 // process and closes the events channel (after pump goroutines
 // have drained). The driver is responsible for ordering.
-func (a *LiveAgent) Close() error {
+func (a *Agent) Close() error {
 	var err error
 	a.closeOnce.Do(func() {
 		close(a.closed)
@@ -812,19 +812,19 @@ func (a *LiveAgent) Close() error {
 // that need access to bridge-specific state (e.g. tests
 // inspecting a *closedSpy behind the handle). Exposed as
 // interface{} because the driver interface is package-private.
-// Production code should call the typed methods on *LiveAgent
+// Production code should call the typed methods on *Agent
 // (SendText, Events, …) rather than going through this.
-func (a *LiveAgent) Driver() interface{} { return a.driver }
+func (a *Agent) Driver() interface{} { return a.driver }
 
-// NewLiveAgent builds a *LiveAgent from its constituent parts.
+// NewAgent builds a *Agent from its constituent parts.
 // Exported so bridges and test fakes (outside the agent package)
 // can construct one. The driver is passed as interface{} because
 // the driver interface itself is package-private; production
 // callers pass the bridge-specific struct that implements the
 // five Send*/Reset/Close methods. The closed channel is freshly
 // allocated; the caller does not need to manage it.
-func NewLiveAgent(info Info, pid int, events chan AgentEvent, d interface{}) *LiveAgent {
-	return &LiveAgent{
+func NewAgent(info Info, pid int, events chan AgentEvent, d interface{}) *Agent {
+	return &Agent{
 		Info:   info,
 		pid:    pid,
 		events: events,
@@ -854,12 +854,12 @@ type driver interface {
 // Starter is the spawn recipe for an agent. It is the only
 // interface in this package — the runtime surface (PID / Events /
 // Send* / Close) is uniform across bridges and lives on the
-// concrete *LiveAgent struct, while the spawn recipe itself varies
+// concrete *Agent struct, while the spawn recipe itself varies
 // per bridge and stays polymorphic.
 //
 // Each bridge's init() registers one Starter per agent name into
 // agent.Builtins. The registry stores Starter values, not *Agent.
-// Spawner calls Starter.Start(ctx, cfg) to obtain a live *LiveAgent.
+// Spawner calls Starter.Start(ctx, cfg) to obtain a live *Agent.
 //
 // Lifecycle:
 //
@@ -869,12 +869,12 @@ type driver interface {
 //     SDK available). Called by Spawner before Start; an error
 //     aborts session creation with a clear "X not found" message.
 //   - Starter.Start(ctx, cfg) spawns (or attaches to) the agent
-//     and returns a live *LiveAgent. The receiver is unchanged;
+//     and returns a live *Agent. The receiver is unchanged;
 //     Starter is reusable across many sessions.
 type Starter interface {
 	Info() Info
 	Detect() error
-	Start(ctx context.Context, cfg StartConfig) (*LiveAgent, error)
+	Start(ctx context.Context, cfg StartConfig) (*Agent, error)
 }
 
 // Errors surfaced by the registry.

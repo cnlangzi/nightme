@@ -289,7 +289,7 @@ type integrationSpawner struct {
 	calls    int
 }
 
-func (s *integrationSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (*agent.LiveAgent, error) {
+func (s *integrationSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (*agent.Agent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -317,13 +317,13 @@ func (f *integrationFake) Info() agent.Info {
 	return agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil)
 }
 func (f *integrationFake) Detect() error { return nil }
-func (f *integrationFake) Start(context.Context, agent.StartConfig) (*agent.LiveAgent, error) {
+func (f *integrationFake) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
 	return f.buildLive(), nil
 }
 
-// buildLive wraps f in a *agent.LiveAgent with integrationFakeDriver.
-func (f *integrationFake) buildLive() *agent.LiveAgent {
-	return agent.NewLiveAgent(
+// buildLive wraps f in a *agent.Agent with integrationFakeDriver.
+func (f *integrationFake) buildLive() *agent.Agent {
+	return agent.NewAgent(
 		agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil),
 		f.pid, f.events, &integrationFakeDriver{inner: f})
 }
@@ -539,7 +539,7 @@ type realBridgeSpawner struct {
 	agent *claudecode.Starter
 }
 
-func (s *realBridgeSpawner) Spawn(ctx context.Context, _, _ string, args []string, sessionID string) (*agent.LiveAgent, error) {
+func (s *realBridgeSpawner) Spawn(ctx context.Context, _, _ string, args []string, sessionID string) (*agent.Agent, error) {
 	return s.agent.Start(ctx, agent.StartConfig{
 		Workspace: "/tmp",
 		Args:      args,

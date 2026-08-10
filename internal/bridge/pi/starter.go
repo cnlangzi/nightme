@@ -1,12 +1,12 @@
 // starter.go — the spawn recipe for the pi bridge.
 //
-// After the Agent → Info/Starter/LiveAgent/driver refactor
+// After the Agent → Info/Starter/Agent/driver refactor
 // (wip/agent.md), the static metadata (name/command/args) lives
 // on Starter and is exposed via Info(). The runtime state (cmd,
 // pipes, RPC client, goroutines) lives on driver and is exposed
 // via the unexported driver interface. External callers never
 // see *Starter or *driver directly — they interact via
-// *agent.LiveAgent, which Starter.Start returns.
+// *agent.Agent, which Starter.Start returns.
 package pi
 
 import (
@@ -50,7 +50,7 @@ func (s *Starter) Detect() error {
 	return err
 }
 
-// Start spawns Pi in RPC mode and returns a live *agent.LiveAgent
+// Start spawns Pi in RPC mode and returns a live *agent.Agent
 // that streams events on its Events channel. The Starter is
 // unchanged (reusable across many sessions).
 //
@@ -58,7 +58,7 @@ func (s *Starter) Detect() error {
 // after the agent's defaults. cfg.Env is appended to os.Environ()
 // for the child. cfg.SessionID is not used by pi (no resume
 // semantics).
-func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.LiveAgent, error) {
+func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	if cfg.Workspace == "" {
 		return nil, fmt.Errorf("pi: workspace is required")
 	}
@@ -66,5 +66,5 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Live
 	if err != nil {
 		return nil, err
 	}
-	return agent.NewLiveAgent(s.Info(), d.pid, d.events, d), nil
+	return agent.NewAgent(s.Info(), d.pid, d.events, d), nil
 }

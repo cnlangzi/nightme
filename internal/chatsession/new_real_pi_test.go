@@ -316,8 +316,8 @@ func (b *fakeAgentBuilder) Info() agent.Info {
 	return agent.NewInfo(b.name, agent.ModePTY, "fake-"+b.name, nil, nil)
 }
 func (b *fakeAgentBuilder) Detect() error { return nil }
-func (b *fakeAgentBuilder) Start(_ context.Context, _ agent.StartConfig) (*agent.LiveAgent, error) {
-	return agent.NewLiveAgent(b.Info(), 99999, b.events, &fakeBuilderDriver{inner: b}), nil
+func (b *fakeAgentBuilder) Start(_ context.Context, _ agent.StartConfig) (*agent.Agent, error) {
+	return agent.NewAgent(b.Info(), 99999, b.events, &fakeBuilderDriver{inner: b}), nil
 }
 
 // fakeBuilderDriver forwards driver calls back to fakeAgentBuilder.

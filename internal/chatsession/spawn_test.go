@@ -36,15 +36,15 @@ func (f *fakeAgentSession) Info() agent.Info {
 	return agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil)
 }
 func (f *fakeAgentSession) Detect() error { return nil }
-func (f *fakeAgentSession) Start(_ context.Context, _ agent.StartConfig) (*agent.LiveAgent, error) {
+func (f *fakeAgentSession) Start(_ context.Context, _ agent.StartConfig) (*agent.Agent, error) {
 	return f.buildLive(), nil
 }
 
-// buildLive wraps f in a *agent.LiveAgent with a fake driver that
+// buildLive wraps f in a *agent.Agent with a fake driver that
 // forwards Send*/Reset/Close back to f. Used by fakeSpawners to
-// return a *LiveAgent from Spawn().
-func (f *fakeAgentSession) buildLive() *agent.LiveAgent {
-	return agent.NewLiveAgent(
+// return a *Agent from Spawn().
+func (f *fakeAgentSession) buildLive() *agent.Agent {
+	return agent.NewAgent(
 		agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil),
 		f.pid, f.events, &fakeDriver{inner: f})
 }
@@ -125,7 +125,7 @@ type fakeSpawner struct {
 	fakes        map[spawnKey]*fakeAgentSession
 	calls        int
 	lastResumeID string
-	spawnFn      func(name, cwd string) (*agent.LiveAgent, error) // optional override
+	spawnFn      func(name, cwd string) (*agent.Agent, error) // optional override
 }
 
 type spawnKey struct {
@@ -137,7 +137,7 @@ func newFakeSpawner() *fakeSpawner {
 	return &fakeSpawner{fakes: make(map[spawnKey]*fakeAgentSession)}
 }
 
-func (s *fakeSpawner) Spawn(ctx context.Context, name, cwd string, args []string, sessionID string) (*agent.LiveAgent, error) {
+func (s *fakeSpawner) Spawn(ctx context.Context, name, cwd string, args []string, sessionID string) (*agent.Agent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -207,7 +207,7 @@ func TestAgentSession_SpawnIsIdempotent(t *testing.T) {
 
 func TestAgentSession_SpawnFailureLeavesDetached(t *testing.T) {
 	spawner := newFakeSpawner()
-	spawner.spawnFn = func(name, cwd string) (*agent.LiveAgent, error) {
+	spawner.spawnFn = func(name, cwd string) (*agent.Agent, error) {
 		return nil, errors.New("spawn boom")
 	}
 	csFile, asFile := newTestStores(t)

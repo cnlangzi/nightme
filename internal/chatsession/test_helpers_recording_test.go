@@ -41,15 +41,15 @@ func (r *recordingAgentSession) Info() agent.Info {
 	return agent.NewInfo("rec", agent.ModePTY, "rec", nil, nil)
 }
 func (r *recordingAgentSession) Detect() error { return nil }
-func (r *recordingAgentSession) Start(_ context.Context, _ agent.StartConfig) (*agent.LiveAgent, error) {
+func (r *recordingAgentSession) Start(_ context.Context, _ agent.StartConfig) (*agent.Agent, error) {
 	return r.buildLive(), nil
 }
 
-// buildLive wraps r in a *agent.LiveAgent with a recording driver.
+// buildLive wraps r in a *agent.Agent with a recording driver.
 // Used when tests need to install the recording into
 // AgentSession.handle.
-func (r *recordingAgentSession) buildLive() *agent.LiveAgent {
-	return agent.NewLiveAgent(
+func (r *recordingAgentSession) buildLive() *agent.Agent {
+	return agent.NewAgent(
 		agent.NewInfo("rec", agent.ModePTY, "rec", nil, nil),
 		r.pid, r.events, &recordingDriver{inner: r})
 }

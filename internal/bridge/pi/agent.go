@@ -952,7 +952,7 @@ func indexByte(s string, c byte) int {
 
 // Compile-time guarantee that *driver satisfies the package-private
 // agent.driver interface (SendText/SendBlocks/SendPermission/
-// Reset/Close). External callers reach driver via *agent.LiveAgent,
+// Reset/Close). External callers reach driver via *agent.Agent,
 // which forwards the public methods.
 var _ agentDriver = (*driver)(nil)
 

@@ -98,7 +98,7 @@ type pendingAsk struct {
 // bridge-internal helpers (readPump, drainStderr, writeLine).
 //
 // driver is package-private. External code interacts through
-// starter.Start returning *agent.LiveAgent which delegates the
+// starter.Start returning *agent.Agent which delegates the
 // public Send*/Events/Close methods back here.
 //
 // Two states share one type:
@@ -155,7 +155,7 @@ type driver struct {
 // newDriver spawns the process and returns a fully-wired driver.
 // This is what starter.Start calls; the resume-preservation probe
 // (probeResume) sees the live driver before starter.Start wraps
-// it in a *agent.LiveAgent. Split out of the old Agent.Start so
+// it in a *agent.Agent. Split out of the old Agent.Start so
 // the probe can interact with the runtime before it's exposed.
 func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver, error) {
 	args := buildArgs(s.args, cfg)
@@ -833,7 +833,7 @@ func detectBranch(workspace string) string {
 // (SendText/SendBlocks/SendPermission/Reset/Close). The public
 // runtime surface (PID/Events/StderrLines) is also here. After
 // the starter+driver split, callers never see *driver directly —
-// they go through *agent.LiveAgent which wraps it via the agent
+// they go through *agent.Agent which wraps it via the agent
 // package.
 var _ agentDriver = (*driver)(nil)
 

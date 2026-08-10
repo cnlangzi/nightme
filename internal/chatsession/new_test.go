@@ -20,10 +20,10 @@ type callRecordingAS struct {
 	err   error
 }
 
-// buildLive wraps c in a *agent.LiveAgent with callRecordingASDriver
+// buildLive wraps c in a *agent.Agent with callRecordingASDriver
 // so tests can type-assert Handle().Driver().(*callRecordingASDriver).
-func (c *callRecordingAS) buildLive() *agent.LiveAgent {
-	return agent.NewLiveAgent(
+func (c *callRecordingAS) buildLive() *agent.Agent {
+	return agent.NewAgent(
 		agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil),
 		c.pid, c.events,
 		&callRecordingASDriver{inner: c, calls: &c.calls})
@@ -61,8 +61,8 @@ type failingNewAS struct {
 var errInjected = errors.New("injected bridge failure")
 
 
-func (f *failingNewAS) buildLive() *agent.LiveAgent {
-	return agent.NewLiveAgent(
+func (f *failingNewAS) buildLive() *agent.Agent {
+	return agent.NewAgent(
 		agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil),
 		f.pid, f.events,
 		&failingNewASDriver{inner: f})
@@ -87,7 +87,7 @@ func (f *failingNewAS) New(_ context.Context) error { return errInjected }
 // provided handle, bypassing Spawner. Mirrors what Spawn would produce
 // but skips the start-from-zero state, so tests stay focused on the
 // NewActiveAgentSessions filter / counter logic.
-func injectAS(t *testing.T, cs *ChatSession, agentName, cwd string, handle *agent.LiveAgent) *AgentSession {
+func injectAS(t *testing.T, cs *ChatSession, agentName, cwd string, handle *agent.Agent) *AgentSession {
 	t.Helper()
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -475,10 +475,10 @@ func (r *restartErrAS) Close() error {
 	return r.fakeAgentSession.Close()
 }
 
-// buildLive wraps r in a *agent.LiveAgent so its overridden New
+// buildLive wraps r in a *agent.Agent so its overridden New
 // (which returns ErrRestartRequired) is what driver.Reset dispatches.
-func (r *restartErrAS) buildLive() *agent.LiveAgent {
-	return agent.NewLiveAgent(
+func (r *restartErrAS) buildLive() *agent.Agent {
+	return agent.NewAgent(
 		agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil),
 		r.pid, r.events,
 		&restartErrASDriver{inner: r})
@@ -502,11 +502,11 @@ func (d *restartErrASDriver) Close() error                   { return d.inner.Cl
 // sessionID); we record the sessionID it was called with so tests can
 // assert "no --resume on the fresh spawn".
 type fakeRestartSpawner struct {
-	handle             *agent.LiveAgent
+	handle             *agent.Agent
 	calledWithResumeID string
 }
 
-func (f *fakeRestartSpawner) Spawn(_ context.Context, _, _ string, _ []string, sessionID string) (*agent.LiveAgent, error) {
+func (f *fakeRestartSpawner) Spawn(_ context.Context, _, _ string, _ []string, sessionID string) (*agent.Agent, error) {
 	f.calledWithResumeID = sessionID
 	return f.handle, nil
 }
@@ -515,7 +515,7 @@ func (f *fakeRestartSpawner) Spawn(_ context.Context, _, _ string, _ []string, s
 // exercise the wrapper's spawn-failure cleanup path (F-34 review #4).
 type fakeFailingSpawner struct{ err error }
 
-func (f *fakeFailingSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (*agent.LiveAgent, error) {
+func (f *fakeFailingSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (*agent.Agent, error) {
 	return nil, f.err
 }
 

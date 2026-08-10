@@ -156,7 +156,7 @@ func TestStart_ResumeMultiTurnRespawn(t *testing.T) {
 // captureInitSessionID drains the events channel until it sees
 // an EventAgentReady with a non-empty SessionID, or until the deadline
 // elapses. Returns the captured id.
-func captureInitSessionID(t *testing.T, sess *agent.LiveAgent, timeout time.Duration) string {
+func captureInitSessionID(t *testing.T, sess *agent.Agent, timeout time.Duration) string {
 	t.Helper()
 	deadline := time.After(timeout)
 	for {

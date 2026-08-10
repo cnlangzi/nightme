@@ -633,7 +633,7 @@ func (d *driver) emit(event agent.AgentEvent) {
 // agent.Agent interface embeds AgentSpec.
 // Compile-time guarantee that *driver satisfies the package-private
 // agent.driver interface (SendText/SendBlocks/SendPermission/
-// Reset/Close). External callers reach driver via *agent.LiveAgent.
+// Reset/Close). External callers reach driver via *agent.Agent.
 var _ agentDriver = (*driver)(nil)
 
 // agentDriver is the local alias for the agent.driver interface so

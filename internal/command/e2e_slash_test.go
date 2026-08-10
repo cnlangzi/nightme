@@ -74,8 +74,8 @@ func (a *echoAgent) Info() agent.Info {
 	return agent.NewInfo("echo", agent.ModePTY, "echo", nil, nil)
 }
 func (a *echoAgent) Detect() error { return nil }
-func (a *echoAgent) Start(_ context.Context, _ agent.StartConfig) (*agent.LiveAgent, error) {
-	return agent.NewLiveAgent(a.Info(), a.pid, a.events, &echoDriver{inner: a}), nil
+func (a *echoAgent) Start(_ context.Context, _ agent.StartConfig) (*agent.Agent, error) {
+	return agent.NewAgent(a.Info(), a.pid, a.events, &echoDriver{inner: a}), nil
 }
 func (a *echoAgent) SendText(string) error                          { return nil }
 func (a *echoAgent) SendBlocks(context.Context, []agent.ContentBlock) error {
@@ -116,7 +116,7 @@ type echoSpawner struct {
 
 func newEchoSpawner() *echoSpawner { return &echoSpawner{} }
 
-func (s *echoSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (*agent.LiveAgent, error) {
+func (s *echoSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (*agent.Agent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nextPID++

@@ -37,7 +37,7 @@ import (
 // ChatSession.LookupSelectedAgentSession) wraps it in an AgentSession
 // and stores it in the pool.
 type Spawner interface {
-	Spawn(ctx context.Context, agentName, cwd string, args []string, sessionID string) (*agent.LiveAgent, error)
+	Spawn(ctx context.Context, agentName, cwd string, args []string, sessionID string) (*agent.Agent, error)
 }
 
 // ErrSpawnerNotSet is returned by ChatSession.LookupSelectedAgentSession
@@ -62,7 +62,7 @@ func NewRegistrySpawner(reg *agent.Registry) Spawner {
 	return &registrySpawner{agents: reg}
 }
 
-func (s *registrySpawner) Spawn(ctx context.Context, agentName, cwd string, args []string, sessionID string) (*agent.LiveAgent, error) {
+func (s *registrySpawner) Spawn(ctx context.Context, agentName, cwd string, args []string, sessionID string) (*agent.Agent, error) {
 	if s.agents == nil {
 		return nil, errors.New("registrySpawner: nil registry")
 	}

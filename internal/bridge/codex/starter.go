@@ -1,12 +1,12 @@
 // starter.go — the spawn recipe for the codex bridge.
 //
-// After the Agent → Info/Starter/LiveAgent/driver refactor
+// After the Agent → Info/Starter/Agent/driver refactor
 // (wip/agent.md), the static metadata (name/command/args) lives
 // on Starter and is exposed via Info(). The runtime state
 // (session pointer, close machinery) lives on driver and is
 // exposed via the unexported driver interface. External callers
 // never see *Starter or *driver directly — they interact via
-// *agent.LiveAgent, which Starter.Start returns.
+// *agent.Agent, which Starter.Start returns.
 package codex
 
 import (
@@ -50,7 +50,7 @@ func (s *Starter) Detect() error {
 	return err
 }
 
-// Start spawns codex app-server and returns a live *agent.LiveAgent
+// Start spawns codex app-server and returns a live *agent.Agent
 // that streams events on its Events channel. The Starter is
 // unchanged (reusable across many sessions).
 //
@@ -58,7 +58,7 @@ func (s *Starter) Detect() error {
 // forwarded. cfg.SessionID, when non-empty, is forwarded as
 // thread/resume. cfg.PermissionMode is ignored (the app-server uses
 // approvalPolicy on a per-turn / per-thread basis; not exposed yet).
-func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.LiveAgent, error) {
+func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	if cfg.Workspace == "" {
 		return nil, fmt.Errorf("codex: workspace is required")
 	}
@@ -66,5 +66,5 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Live
 	if err != nil {
 		return nil, err
 	}
-	return agent.NewLiveAgent(s.Info(), d.session.pid, d.session.events, d), nil
+	return agent.NewAgent(s.Info(), d.session.pid, d.session.events, d), nil
 }

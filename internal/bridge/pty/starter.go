@@ -1,6 +1,6 @@
 // starter.go — the spawn recipe for the pty bridge.
 //
-// After the Agent → Info/Starter/LiveAgent/driver refactor
+// After the Agent → Info/Starter/Agent/driver refactor
 // (wip/agent.md), the static metadata (name/command/args/env/
 // cols/rows) lives on Starter and is exposed via Info(). The
 // runtime state (transport/events/closed) lives on driver and is
@@ -43,7 +43,7 @@ func (s *Starter) Detect() error {
 }
 
 // Start spawns the CLI under a PTY and returns a live
-// *agent.LiveAgent that streams events on its Events channel. The
+// *agent.Agent that streams events on its Events channel. The
 // Starter is unchanged (reusable across many sessions).
 //
 // cfg.Workspace is the child process's cwd. cfg.Args are appended
@@ -52,22 +52,22 @@ func (s *Starter) Detect() error {
 // is forwarded as the resume id (raw PTY bridges don't currently
 // surface it over the wire — the bridge synthesizes a fresh one
 // for now).
-func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.LiveAgent, error) {
+func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
 	d, err := newDriver(ctx, s, cfg)
 	if err != nil {
 		return nil, err
 	}
-	return agent.NewLiveAgent(s.Info(), d.PID(), d.events, d), nil
+	return agent.NewAgent(s.Info(), d.PID(), d.events, d), nil
 }
 
-// pidForLive extracts the pid from a pty driver for the LiveAgent.
+// pidForLive extracts the pid from a pty driver for the Agent.
 // This is a placeholder; pty.Transport has its own PID() method
 // that we use directly inside the live closure below.
 var _ = fmt.Sprintf
 
 // Compile-time guarantee that *driver satisfies the package-private
 // agent.driver interface (SendText/SendBlocks/SendPermission/
-// Reset/Close). External callers reach driver via *agent.LiveAgent.
+// Reset/Close). External callers reach driver via *agent.Agent.
 var _ agentDriver = (*driver)(nil)
 
 // agentDriver is the local alias for the agent.driver interface so

@@ -31,11 +31,11 @@ type closedSpy struct {
 	closes atomic.Int32
 }
 
-// buildLive wraps c in a *agent.LiveAgent with a closedSpyDriver
+// buildLive wraps c in a *agent.Agent with a closedSpyDriver
 // so tests can type-assert Handle().Driver().(*closedSpyDriver)
 // to inspect the recording.
-func (c *closedSpy) buildLive() *agent.LiveAgent {
-	return agent.NewLiveAgent(
+func (c *closedSpy) buildLive() *agent.Agent {
+	return agent.NewAgent(
 		agent.NewInfo("spy", agent.ModePTY, "spy", nil, nil),
 		c.pid, c.events,
 		&closedSpyDriver{inner: c, closes: &c.closes})

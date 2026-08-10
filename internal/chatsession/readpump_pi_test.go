@@ -46,13 +46,13 @@ func (a *longLivedFakeAS) Command() string                { return "fake" }
 func (a *longLivedFakeAS) Args() []string                 { return nil }
 func (a *longLivedFakeAS) Env() []string                  { return nil }
 func (a *longLivedFakeAS) Detect() error                  { return nil }
-func (a *longLivedFakeAS) Start(context.Context, agent.StartConfig) (*agent.LiveAgent, error) {
+func (a *longLivedFakeAS) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
 	return a.buildLive(), nil
 }
 
-// buildLive wraps a in a *agent.LiveAgent with longLivedFakeASDriver.
-func (a *longLivedFakeAS) buildLive() *agent.LiveAgent {
-	return agent.NewLiveAgent(
+// buildLive wraps a in a *agent.Agent with longLivedFakeASDriver.
+func (a *longLivedFakeAS) buildLive() *agent.Agent {
+	return agent.NewAgent(
 		agent.NewInfo("long-lived", agent.ModePTY, "long-lived", nil, nil),
 		12345, a.events,
 		&longLivedFakeASDriver{inner: a})
@@ -94,9 +94,9 @@ func (a *longLivedFakeAS) push(ev agent.AgentEvent) {
 }
 
 // fakeSpawnerLS is a Spawner that returns our longLivedFakeAS.
-type fakeSpawnerLS struct{ as *agent.LiveAgent }
+type fakeSpawnerLS struct{ as *agent.Agent }
 
-func (f fakeSpawnerLS) Spawn(_ context.Context, _, _ string, _ []string, _ string) (*agent.LiveAgent, error) {
+func (f fakeSpawnerLS) Spawn(_ context.Context, _, _ string, _ []string, _ string) (*agent.Agent, error) {
 	return f.as, nil
 }
 

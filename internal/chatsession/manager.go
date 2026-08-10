@@ -205,6 +205,40 @@ func (m *Manager) Get(chatID string) *ChatSession {
 	return m.sessions[chatID]
 }
 
+// AcceptInbound is the F-watch §3.1.1 per-chat gate, owned by
+// chatsession (not gateway) so the policy sits next to its state.
+// Returns true when the message should proceed to the dispatcher;
+// false when it should be silently dropped.
+//
+// Decision matrix:
+//
+//	HasMention=true                           → accept (any mode)
+//	HasMention=false + no ChatSession yet     → accept (let
+//	                                            downstream reply
+//	                                            "send /cwd first")
+//	HasMention=false + WatchModeAll           → accept
+//	HasMention=false + WatchModeMention (def) → drop
+//
+// The HasMention branch is the DM invariant: the channel adapter
+// is contractually required to set HasMention=true for every DM
+// message (every DM is implicitly "addressed to bot"), so DM
+// chats never reach the WatchMode branch. See
+// docs/SPEC.md §3.1.1 + docs/channel/feishu.md §6.11.
+//
+// Relocated from internal/gateway (was gateway.WithWatchModeResolver
+// + applyWatchModeGate) so the gate stops needing a callback
+// indirection across the import-cycle boundary.
+func (m *Manager) AcceptInbound(chatID string, hasMention bool) bool {
+	if hasMention {
+		return true
+	}
+	cs := m.Get(chatID)
+	if cs == nil {
+		return true
+	}
+	return cs.WatchMode() == WatchModeAll
+}
+
 // PersistAgentSession writes the entry for as to the manager's
 // agent_sessions.json store. Idempotent; safe to call from event
 // handlers (no daemon locks held). Used to durably save the

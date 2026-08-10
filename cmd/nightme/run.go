@@ -485,18 +485,12 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 
 	gwImpl.AttachChannels(ch)
 
-	// F-watch §3.1.1: install the per-chat WatchMode resolver so
-	// the dispatcher can drop non-mention group messages when the
-	// chat's mode is WatchModeMention (default). The resolver
-	// consults the manager directly — no extra state, the registry
-	// (chat_sessions.json) is the single source of truth.
-	gwImpl.WithWatchModeResolver(func(chatID string) (chatsession.WatchMode, bool) {
-		cs := mgr.Get(chatID)
-		if cs == nil {
-			return 0, false
-		}
-		return cs.WatchMode(), true
-	})
+	// F-watch §3.1.1: the per-chat WatchMode gate used to be wired
+	// here via gwImpl.WithWatchModeResolver. It moved into
+	// chatsession.Manager.AcceptInbound (called from
+	// newMessageDispatcher below) so the policy sits next to its
+	// state — no more callback injection across the import
+	// boundary. See internal/chatsession/manager.go AcceptInbound.
 
 	// F-51: the action handler now routes through
 	// services.ReactionRouter instead of calling
@@ -562,6 +556,19 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 func newMessageDispatcher(mgr *chatsession.Manager, ch channel.Channel, primary string, logger *slog.Logger) func(context.Context, *gateway.InboundMessage) error {
 	return func(ctx context.Context, msg *gateway.InboundMessage) error {
 		if msg == nil {
+			return nil
+		}
+		// F-watch §3.1.1: per-chat WatchMode gate (formerly in
+		// gateway.applyWatchModeGate). Lives here now so the
+		// policy sits next to its state — chatsession owns both
+		// the WatchMode field and the AcceptInbound decision.
+		// Drop early, before any GetOrCreate / spawn work, so
+		// filtered messages don't allocate state or wake pumps.
+		// Slash commands never reach this branch (the commander
+		// shim returns first inside DispatchInbound).
+		if !mgr.AcceptInbound(msg.ChatID, msg.HasMention) {
+			slog.Default().Info("dispatcher: drop non-mention group message (WatchMode != All)",
+				"chat_id", msg.ChatID, "message_id", msg.MessageID)
 			return nil
 		}
 		userMsgID := msg.MessageID

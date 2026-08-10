@@ -47,5 +47,5 @@ func init() {
 	// bash — example PTY-backed entry. Shows the registration
 	// shape for any binary the user might want to launch without
 	// an ACP/JSON-IO layer.
-	agent.Builtins.LegacyRegister(pty.NewAgent("bash", "bash", nil, nil))
+	agent.Builtins.Register(pty.NewStarter("bash", "bash", nil, nil, 0, 0))
 }

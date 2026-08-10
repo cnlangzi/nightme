@@ -40,6 +40,7 @@ func dispatchPush(
 	deps HandlerDeps,
 	chatID, messageID string,
 	args pushArgs,
+	ymlAgent string,
 ) (*Result, error) {
 	selectedCwd, err := pushCwd()
 	if err != nil {
@@ -78,7 +79,7 @@ func dispatchPush(
 	if strings.TrimSpace(statusOut) == "" {
 		return pushClean(ctx, cs, deps, chatID, messageID, c)
 	}
-	return pushDirty(ctx, cs, chatID, messageID, c, args)
+	return pushDirty(ctx, cs, chatID, messageID, c, args, ymlAgent)
 }
 
 // pushClean handles the clean-worktree branch:
@@ -150,14 +151,27 @@ func pushDirty(
 	chatID, messageID string,
 	c Context,
 	args pushArgs,
+	ymlAgent string,
 ) (*Result, error) {
-	agentName := args.Agent
+	// pushDirty is the only push path that spawns an agent
+	// (pushClean is a plain git push). The yml-configured agent
+	// name comes from the caller (cmd.go runPush already loaded
+	// the user-level config); pushDirty itself does NOT Load() —
+	// that responsibility lives in the cmd.go wrapper which
+	// surfaces loadNotes to the user. Loading here would
+	// duplicate the warning block in the chat (see wip/gtw-hooks.md
+	// "B1: 双重警告").
+	agentName, agentNotes := ResolveAgent(args.Agent, ymlAgent, cs)
 	if agentName == "" {
-		agentName = cs.SelectedAgent()
-	}
-	if agentName == "" {
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			"❌ no agent selected. Send `/use <name>` first or pass `-a <name>`."), nil
+		// B2: surface agentNotes here too. Without this, a yml
+		// pointing at an unknown agent (e.g. "pi") would
+		// silently degrade to "❌ no agent selected" — hiding
+		// the user's misconfiguration behind a generic error.
+		msg := "❌ no agent selected. Send `/use <name>` first or pass `-a <name>`."
+		for _, n := range agentNotes {
+			msg += "\n" + n
+		}
+		return reply(ctx, cs.Channel(), chatID, messageID, msg), nil
 	}
 
 	a, err := agent.Builtins.Get(agentName)
@@ -204,6 +218,13 @@ func pushDirty(
 			"📁 worktree: %s\n",
 		agentName, indentLines(text, "  "), c.Branch, c.Worktree,
 	)
+	// Surface agent-resolve notes (e.g. yml referenced an unknown
+	// agent but a session default was found) at the bottom of the
+	// reply so the user can see why their config didn't fully apply.
+	// These are diagnostics, not blockers — main flow has succeeded.
+	if len(agentNotes) > 0 {
+		body += "\n" + strings.Join(agentNotes, "\n") + "\n"
+	}
 	return reply(ctx, cs.Channel(), chatID, messageID, body), nil
 }
 

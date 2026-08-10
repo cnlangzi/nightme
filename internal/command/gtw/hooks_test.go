@@ -287,15 +287,18 @@ func TestFormatResults_Empty(t *testing.T) {
 
 func TestFormatResults_ShowsAlways(t *testing.T) {
 	// Per the always-echo decision in wip/gtw-hooks.md, every
-	// hook gets a `[i] $ <name>` line regardless of stdout/stderr.
+	// hook gets a `> <run>` line regardless of stdout/stderr.
 	results := RunHooks(context.Background(),
 		[]Hook{{Run: "true"}}, t.TempDir())
 	out := FormatResults("before", results)
-	if !strings.Contains(out, "[1] $") {
-		t.Errorf("expected [1] $ line, got: %q", out)
+	if !strings.Contains(out, ">") {
+		t.Errorf("expected `>` command prefix, got: %q", out)
 	}
-	if !strings.Contains(out, "hooks: before") {
-		t.Errorf("expected label, got: %q", out)
+	if !strings.Contains(out, "true") {
+		t.Errorf("expected run command in output, got: %q", out)
+	}
+	if !strings.Contains(out, "✅ hooks: before") {
+		t.Errorf("expected standard gtw title `✅ hooks: before`, got: %q", out)
 	}
 }
 

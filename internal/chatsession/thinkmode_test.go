@@ -1,56 +1,68 @@
 package chatsession
 
-import (
-	"testing"
+import "testing"
 
-	"github.com/cnlangzi/nightme/internal/registry"
-)
-
-// _assertThinkModeAlias is a compile-time check that
-// chatsession.ThinkMode is a true type alias of
-// registry.ThinkMode — both directions of assignment must
-// compile without an explicit conversion. If a future refactor
-// changes `type ThinkMode = registry.ThinkMode` to
-// `type ThinkMode registry.ThinkMode` (defined type), this
-// stops compiling and immediately surfaces the breakage.
-//
-// Keeping this as a package-level var (not a test function)
-// means it's evaluated at compile time, so a refactor breaks
-// the test package build before any test runs.
-var _assertThinkModeAlias = []func(){
-	func() {
-		var a ThinkMode
-		var b registry.ThinkMode
-		a = b               // registry.ThinkMode -> chatsession.ThinkMode
-		b = a               // chatsession.ThinkMode -> registry.ThinkMode
-		_ = a
-		_ = b
-	},
+// TestThinkMode_String covers all enum values + the unknown guard.
+func TestThinkMode_String(t *testing.T) {
+	cases := []struct {
+		m    ThinkMode
+		want string
+	}{
+		{ThinkModeShow, "show"},
+		{ThinkModeHide, "hide"},
+		{ThinkMode(99), "unknown"},
+	}
+	for _, c := range cases {
+		if got := c.m.String(); got != c.want {
+			t.Errorf("ThinkMode(%d).String() = %q, want %q", c.m, got, c.want)
+		}
+	}
 }
 
-// TestThinkMode_ParseDelegation confirms that the package-local
-// ParseThinkMode is wired to registry.ParseThinkMode so behaviour
-// stays consistent if registry's parser is ever updated.
-func TestThinkMode_ParseDelegation(t *testing.T) {
+// TestParseThinkMode_Aliases accepts both the slash-command form
+// (on/off) and the semantic form (show/hide) for each direction.
+// Either pair must map to the same enum value.
+//
+// Whitespace tolerance is the caller's responsibility — the
+// /think handler invokes strings.TrimSpace(args[0]) before
+// calling ParseThinkMode, mirroring /watch's handler pattern.
+func TestParseThinkMode_Aliases(t *testing.T) {
 	cases := []struct {
 		in       string
 		wantMode ThinkMode
 		wantOK   bool
 	}{
 		{"on", ThinkModeShow, true},
-		{"off", ThinkModeHide, true},
 		{"show", ThinkModeShow, true},
+		{"off", ThinkModeHide, true},
 		{"hide", ThinkModeHide, true},
-		{"", ThinkModeShow, false},
-		{"nope", ThinkModeShow, false},
 	}
 	for _, c := range cases {
 		got, ok := ParseThinkMode(c.in)
 		if ok != c.wantOK {
 			t.Errorf("ParseThinkMode(%q) ok = %v, want %v", c.in, ok, c.wantOK)
 		}
-		if got != c.wantMode {
-			t.Errorf("ParseThinkMode(%q) = %v, want %v", c.in, got, c.wantMode)
+		if ok && got != c.wantMode {
+			t.Errorf("ParseThinkMode(%q) mode = %v, want %v", c.in, got, c.wantMode)
+		}
+	}
+}
+
+// TestParseThinkMode_UnknownRejects ensures unknown values fall
+// through cleanly so the /think handler can reply with a usage
+// hint instead of committing a state mutation.
+func TestParseThinkMode_UnknownRejects(t *testing.T) {
+	unknowns := []string{"", "maybe", "yes", "no", "true", "false", "ON", "Show"}
+	for _, in := range unknowns {
+		got, ok := ParseThinkMode(in)
+		if ok {
+			t.Errorf("ParseThinkMode(%q) ok=true, want false (got mode=%v)", in, got)
+		}
+		// Even on parse failure, the returned mode is the safe
+		// default (ThinkModeShow) — the caller ignores it on
+		// ok=false, but the function should still be total.
+		if got != ThinkModeShow {
+			t.Errorf("ParseThinkMode(%q) returned %v on failure, want ThinkModeShow", in, got)
 		}
 	}
 }

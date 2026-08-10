@@ -11,8 +11,6 @@ package registry
 import (
 	"encoding/json"
 	"time"
-
-	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // ChatSessionEntry is the persisted form of one ChatSession.
@@ -51,34 +49,17 @@ import (
 //	LastInteractionAt    — last user message; used for idle expiry
 //	                       decisions (future).
 //	WatchMode            — F-watch per-chat message-watch mode.
-//	                       0 = WatchModeMention (default; safe),
-//	                       1 = WatchModeAll. Persisted as int; old
-//	                       chat_sessions.json files lacking the
-//	                       field decode to zero == WatchModeMention.
+//	                       Stored as int. See the field-level
+//	                       comment below for the numeric mapping
+//	                       and the chatsession.WatchMode enum
+//	                       (the authoritative source of meaning).
 //	ThinkMode            — F-think per-chat thinking-content
-//	                       visibility toggle. 0 = ThinkModeShow
-//	                       (default; preserve F-thread-route
-//	                       behavior), 1 = ThinkModeHide (runtime
-//	                       drops OutThinking at EventHandler gate).
-//	                       Persisted as int; old chat_sessions.json
-//	                       files lacking the field decode to zero
-//	                       == ThinkModeShow.
+//	                       visibility toggle. Stored as int. See
+//	                       the field-level comment + chatsession.
+//	                       ThinkMode.
 //	ToolsMode            — F-38 per-chat tool-event visibility
-//	                       toggle. 0 = ToolsModeHide (default;
-//	                       runtime drops OutToolStart / OutToolEnd
-//	                       at EventHandler gate — tool spam is the
-//	                       loudest part of the agent stream and
-//	                       most users do not want it by default),
-//	                       1 = ToolsModeShow (Feishu adapter merges
-//	                       each pair into a single thread reply via
-//	                       PATCH on the same message_id). Persisted
-//	                       as int; old chat_sessions.json files
-//	                       lacking the field decode to zero ==
-//	                       ToolsModeHide. Direction is OPPOSITE of
-//	                       ThinkMode: ThinkMode's default is Show
-//	                       (preserve existing F-thread-route UX);
-//	                       ToolsMode's default is Hide (quiet by
-//	                       default; opt in to see tool calls).
+//	                       toggle. Stored as int. See the field-
+//	                       level comment + chatsession.ToolsMode.
 type ChatSessionEntry struct {
 	ID                     string    `json:"id"`
 	ChatID                 string    `json:"chatId"`
@@ -89,9 +70,25 @@ type ChatSessionEntry struct {
 	SelectedAgentSessionID *string   `json:"selectedAgentSessionId,omitempty"`
 	CreatedAt              time.Time `json:"createdAt"`
 	LastInteractionAt      time.Time `json:"lastInteractionAt"`
-	WatchMode              WatchMode        `json:"watchMode,omitempty"`
-	ThinkMode              ThinkMode        `json:"thinkMode,omitempty"`
-	ToolsMode              agent.ToolsMode  `json:"toolsMode,omitempty"`
+	// Per-chat toggles. Stored as bare int so the registry layer
+	// doesn't depend on the enum types (which live next to their
+	// reader — chatsession — not here). The meaning of each
+	// numeric value is documented on the chatsession-side
+	// declarations (WatchMode / ThinkMode / ToolsMode):
+	//
+	//	WatchMode 0 = chatsession.WatchModeMention (default; safe),
+	//	          1 = chatsession.WatchModeAll.
+	//	ThinkMode 0 = chatsession.ThinkModeShow (default;
+	//	          preserve F-thread-route behaviour),
+	//	          1 = chatsession.ThinkModeHide.
+	//	ToolsMode 0 = chatsession.ToolsModeHide (default; quiet),
+	//	          1 = chatsession.ToolsModeShow.
+	//
+	// The omitempty tag still drops zero values from the JSON
+	// output, preserving on-disk compatibility across upgrades.
+	WatchMode int `json:"watchMode,omitempty"`
+	ThinkMode int `json:"thinkMode,omitempty"`
+	ToolsMode int `json:"toolsMode,omitempty"`
 }
 
 // UnmarshalJSON reads a ChatSessionEntry, transparently migrating

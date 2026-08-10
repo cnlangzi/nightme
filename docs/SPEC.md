@@ -349,7 +349,7 @@ type OutboundMessage struct {
 
 **为什么不叫 v2.0**：v1.3 核心不变式全部保留。F-think 是：(a) 一个新 per-chat toggle（镜像 F-watch 的模式），(b) 一个 OutThinking 渲染升级（不引入新 Kind、不动 Gateway / ChatSession）。两件事都在 v1.3.x 范畴内。
 
-**详细落地**：见 `internal/registry/think_mode.go` + `internal/chatsession/thinkmode.go` + `internal/gateway/handlers_think.go` + `cmd/nightme/run.go::newEventHandler` + `internal/channel/feishu/thinking_card.go`。
+**详细落地**：见 `internal/chatsession/thinkmode.go` + `internal/gateway/handlers_think.go` + `cmd/nightme/run.go::newEventHandler` + `internal/channel/feishu/thinking_card.go`。（枚举定义现在统一在 `chatsession`，registry 侧 `ChatSessionEntry.ThinkMode` 持久化为裸 `int`，读侧由 `Manager.RestoreFromRegistry` 做 `ThinkMode(int)` cast。）
 
 ## 0.9 文档变更摘要（v1.3.x F-41 增量，2026-08-05）
 

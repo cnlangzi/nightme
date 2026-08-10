@@ -4,7 +4,6 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"sync"
 )
 
@@ -146,47 +145,8 @@ func (l *legacyDriver) SendPermission(resp string) error { return l.inner.SendPe
 func (l *legacyDriver) Reset(ctx context.Context) error    { return l.inner.New(ctx) }
 func (l *legacyDriver) Close() error                      { return l.inner.Close() }
 
-// liveAgentAsAgent wraps a *LiveAgent in an Agent interface. Used
-// by registrySpawner.Spawn so the Spawner.Spawn return type
-// remains agent.Agent (unchanged) even though the registry now
-// stores Starters and Start returns *LiveAgent.
-//
-// The wrapper captures the static metadata (Info) at wrap time
-// since Starter.Start has already returned — we don't have the
-// Starter handle anymore at the call site, just the Info we read
-// from it before Start.
-type liveAgentAsAgent struct {
-	live *LiveAgent
-	info Info
-}
-
-func (w *liveAgentAsAgent) Name() string    { return w.info.Name }
-func (w *liveAgentAsAgent) Mode() Mode      { return w.info.Mode }
-func (w *liveAgentAsAgent) Command() string { return w.info.Command }
-func (w *liveAgentAsAgent) Args() []string  { return w.info.Args }
-func (w *liveAgentAsAgent) Env() []string   { return w.info.Env }
-func (w *liveAgentAsAgent) Detect() error   { return nil }
-
-func (w *liveAgentAsAgent) Start(context.Context, StartConfig) (Agent, error) {
-	return nil, errors.New("liveAgentAsAgent: already started")
-}
-func (w *liveAgentAsAgent) Close() error                       { return w.live.Close() }
-func (w *liveAgentAsAgent) Events() <-chan AgentEvent           { return w.live.Events() }
-func (w *liveAgentAsAgent) PID() int                            { return w.live.PID() }
-func (w *liveAgentAsAgent) SendText(text string) error          { return w.live.SendText(text) }
-func (w *liveAgentAsAgent) SendBlocks(ctx context.Context, blocks []ContentBlock) error {
-	return w.live.SendBlocks(ctx, blocks)
-}
-func (w *liveAgentAsAgent) SendPermission(resp string) error { return w.live.SendPermission(resp) }
-func (w *liveAgentAsAgent) New(ctx context.Context) error    { return w.live.New(ctx) }
-
-// WrapAsAgent wraps a *LiveAgent in an Agent interface, capturing
-// the static metadata from info. Used by Spawner implementations
-// that hold a Starter (the new registry type) but need to satisfy
-// the legacy Spawner.Spawn(ctx,…) (agent.Agent, error) signature.
-func WrapAsAgent(live *LiveAgent, info Info) Agent {
-	return &liveAgentAsAgent{live: live, info: info}
-}
+// (liveAgentAsAgent wrapper + WrapAsAgent removed; Spawner.Spawn
+// now returns *LiveAgent directly — see internal/chatsession/spawn.go.)
 
 // MakeChanAlias returns a writable channel that forwards values
 // from the read-only source. Used by legacyStarter to bridge a

@@ -37,10 +37,35 @@ func (r *recordingAgentSession) Mode() agent.Mode              { return agent.Mo
 func (r *recordingAgentSession) Command() string               { return "fake" }
 func (r *recordingAgentSession) Args() []string                { return nil }
 func (r *recordingAgentSession) Env() []string                 { return nil }
-func (r *recordingAgentSession) Detect() error                 { return nil }
-func (r *recordingAgentSession) Start(_ context.Context, _ agent.StartConfig) (agent.Agent, error) {
-	return r, nil
+func (r *recordingAgentSession) Info() agent.Info {
+	return agent.NewInfo("rec", agent.ModePTY, "rec", nil, nil)
 }
+func (r *recordingAgentSession) Detect() error { return nil }
+func (r *recordingAgentSession) Start(_ context.Context, _ agent.StartConfig) (*agent.LiveAgent, error) {
+	return r.buildLive(), nil
+}
+
+// buildLive wraps r in a *agent.LiveAgent with a recording driver.
+// Used when tests need to install the recording into
+// AgentSession.handle.
+func (r *recordingAgentSession) buildLive() *agent.LiveAgent {
+	return agent.NewLiveAgent(
+		agent.NewInfo("rec", agent.ModePTY, "rec", nil, nil),
+		r.pid, r.events, &recordingDriver{inner: r})
+}
+
+// recordingDriver forwards driver calls to a recordingAgentSession.
+type recordingDriver struct{ inner *recordingAgentSession }
+
+func (d *recordingDriver) SendText(text string) error { return d.inner.SendText(text) }
+func (d *recordingDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
+	return d.inner.SendBlocks(ctx, b)
+}
+func (d *recordingDriver) SendPermission(resp string) error {
+	return d.inner.SendPermission(resp)
+}
+func (d *recordingDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
+func (d *recordingDriver) Close() error                   { return d.inner.Close() }
 func (r *recordingAgentSession) SendText(_ string) error       { return nil }
 func (r *recordingAgentSession) SendBlocks(_ context.Context, blocks []agent.ContentBlock) error {
 	r.mu.Lock()

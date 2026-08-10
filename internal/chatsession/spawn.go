@@ -37,7 +37,7 @@ import (
 // ChatSession.LookupSelectedAgentSession) wraps it in an AgentSession
 // and stores it in the pool.
 type Spawner interface {
-	Spawn(ctx context.Context, agentName, cwd string, args []string, sessionID string) (agent.Agent, error)
+	Spawn(ctx context.Context, agentName, cwd string, args []string, sessionID string) (*agent.LiveAgent, error)
 }
 
 // ErrSpawnerNotSet is returned by ChatSession.LookupSelectedAgentSession
@@ -62,7 +62,7 @@ func NewRegistrySpawner(reg *agent.Registry) Spawner {
 	return &registrySpawner{agents: reg}
 }
 
-func (s *registrySpawner) Spawn(ctx context.Context, agentName, cwd string, args []string, sessionID string) (agent.Agent, error) {
+func (s *registrySpawner) Spawn(ctx context.Context, agentName, cwd string, args []string, sessionID string) (*agent.LiveAgent, error) {
 	if s.agents == nil {
 		return nil, errors.New("registrySpawner: nil registry")
 	}
@@ -73,13 +73,5 @@ func (s *registrySpawner) Spawn(ctx context.Context, agentName, cwd string, args
 	if err := s2.Detect(); err != nil {
 		return nil, err
 	}
-	live, err := s2.Start(ctx, agent.StartConfig{Workspace: cwd, Args: args, SessionID: sessionID})
-	if err != nil {
-		return nil, err
-	}
-	// Wrap the *agent.LiveAgent in an agent.Agent-compatible view
-	// so the Spawner.Spawn signature is unchanged. The wrapper
-	// exposes the static metadata from s2.Info() (captured before
-	// Start) and forwards live runtime methods to live.
-	return agent.WrapAsAgent(live, s2.Info()), nil
+	return s2.Start(ctx, agent.StartConfig{Workspace: cwd, Args: args, SessionID: sessionID})
 }

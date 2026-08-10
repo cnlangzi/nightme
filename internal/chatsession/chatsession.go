@@ -1264,7 +1264,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 		// unchanged but the pump goroutine still needs to be
 		// restarted because StopReadPump signaled it to exit.
 		isActive := false
-		oldHandle := agent.Agent(nil)
+		var oldHandle *agent.LiveAgent
 		cs.mu.RLock()
 		isActive = (as == cs.selectedAS)
 		if isActive {

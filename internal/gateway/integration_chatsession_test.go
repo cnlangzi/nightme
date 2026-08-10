@@ -289,7 +289,7 @@ type integrationSpawner struct {
 	calls    int
 }
 
-func (s *integrationSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (agent.Agent, error) {
+func (s *integrationSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (*agent.LiveAgent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls++
@@ -319,7 +319,7 @@ func (f *integrationFake) Command() string                { return "fake" }
 func (f *integrationFake) Args() []string                 { return nil }
 func (f *integrationFake) Env() []string                  { return nil }
 func (f *integrationFake) Detect() error                  { return nil }
-func (f *integrationFake) Start(context.Context, agent.StartConfig) (agent.Agent, error) {
+func (f *integrationFake) Start(context.Context, agent.StartConfig) (*agent.LiveAgent, error) {
 	return f, nil
 }
 func (f *integrationFake) SendText(string) error          { return nil }
@@ -515,23 +515,16 @@ exit 0
 	}
 }
 
-// realBridgeSpawner wraps a real claudecode.Agent (whose Start
+// realBridgeSpawner wraps a real claudecode.Starter (whose Start
 // spawns an actual subprocess via exec.Command).
 type realBridgeSpawner struct {
 	agent *claudecode.Starter
 }
 
-func (s *realBridgeSpawner) Spawn(ctx context.Context, _, _ string, args []string, sessionID string) (agent.Agent, error) {
-	live, err := s.agent.Start(ctx, agent.StartConfig{
+func (s *realBridgeSpawner) Spawn(ctx context.Context, _, _ string, args []string, sessionID string) (*agent.LiveAgent, error) {
+	return s.agent.Start(ctx, agent.StartConfig{
 		Workspace: "/tmp",
 		Args:      args,
 		SessionID: sessionID,
 	})
-	if err != nil {
-		return nil, err
-	}
-	// Wrap *agent.LiveAgent in legacy agent.Agent for the Spawner
-	// signature (which still returns the legacy interface in
-	// P1-P3 transition).
-	return agent.WrapAsAgent(live, s.agent.Info()), nil
 }

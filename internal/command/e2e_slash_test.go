@@ -76,7 +76,7 @@ func (a *echoAgent) Command() string               { return "echo" }
 func (a *echoAgent) Args() []string                { return nil }
 func (a *echoAgent) Env() []string                 { return nil }
 func (a *echoAgent) Detect() error                 { return nil }
-func (a *echoAgent) Start(_ context.Context, _ agent.StartConfig) (agent.Agent, error) {
+func (a *echoAgent) Start(_ context.Context, _ agent.StartConfig) (*agent.LiveAgent, error) {
 	return a, nil
 }
 func (a *echoAgent) SendText(string) error                          { return nil }
@@ -106,7 +106,7 @@ type echoSpawner struct {
 
 func newEchoSpawner() *echoSpawner { return &echoSpawner{} }
 
-func (s *echoSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (agent.Agent, error) {
+func (s *echoSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (*agent.LiveAgent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nextPID++

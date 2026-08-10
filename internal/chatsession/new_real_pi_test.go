@@ -70,7 +70,7 @@ func TestRealPi_NewAfterSwitch(t *testing.T) {
 	// has TWO running AgentSessions when we issue /new — matching
 	// the user's actual sequence (use pi → switch to claude → /new).
 	claudeAgent := newFakeAgentBuilder("claude")
-	reg.LegacyRegister(claudeAgent)
+	reg.Register(claudeAgent)
 	spawner := NewRegistrySpawner(reg)
 
 	cs, _ := New("oc_real_pi_new", "pi", newTestChannel())
@@ -312,15 +312,26 @@ func newFakeAgentBuilder(name string) *fakeAgentBuilder {
 	}
 }
 
-func (b *fakeAgentBuilder) Name() string                                        { return b.name }
-func (b *fakeAgentBuilder) Mode() agent.Mode                                     { return agent.ModePTY }
-func (b *fakeAgentBuilder) Command() string                                      { return "fake-" + b.name }
-func (b *fakeAgentBuilder) Args() []string                                       { return nil }
-func (b *fakeAgentBuilder) Env() []string                                        { return nil }
-func (b *fakeAgentBuilder) Detect() error                                        { return nil }
-func (b *fakeAgentBuilder) Start(_ context.Context, _ agent.StartConfig) (agent.Agent, error) {
-	return b, nil
+func (b *fakeAgentBuilder) Info() agent.Info {
+	return agent.NewInfo(b.name, agent.ModePTY, "fake-"+b.name, nil, nil)
 }
+func (b *fakeAgentBuilder) Detect() error { return nil }
+func (b *fakeAgentBuilder) Start(_ context.Context, _ agent.StartConfig) (*agent.LiveAgent, error) {
+	return agent.NewLiveAgent(b.Info(), 99999, b.events, &fakeBuilderDriver{inner: b}), nil
+}
+
+// fakeBuilderDriver forwards driver calls back to fakeAgentBuilder.
+type fakeBuilderDriver struct{ inner *fakeAgentBuilder }
+
+func (d *fakeBuilderDriver) SendText(text string) error { return d.inner.SendText(text) }
+func (d *fakeBuilderDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
+	return d.inner.SendBlocks(ctx, b)
+}
+func (d *fakeBuilderDriver) SendPermission(resp string) error {
+	return d.inner.SendPermission(resp)
+}
+func (d *fakeBuilderDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
+func (d *fakeBuilderDriver) Close() error                   { return d.inner.Close() }
 func (b *fakeAgentBuilder) Events() <-chan agent.AgentEvent                      { return b.events }
 func (b *fakeAgentBuilder) PID() int                                              { return 99999 }
 func (b *fakeAgentBuilder) SendText(_ string) error                               { return nil }

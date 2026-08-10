@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -29,6 +30,33 @@ type closedSpy struct {
 	*fakeAgentSession
 	closes atomic.Int32
 }
+
+// buildLive wraps c in a *agent.LiveAgent with a closedSpyDriver
+// so tests can type-assert Handle().Driver().(*closedSpyDriver)
+// to inspect the recording.
+func (c *closedSpy) buildLive() *agent.LiveAgent {
+	return agent.NewLiveAgent(
+		agent.NewInfo("spy", agent.ModePTY, "spy", nil, nil),
+		c.pid, c.events,
+		&closedSpyDriver{inner: c, closes: &c.closes})
+}
+
+// closedSpyDriver forwards driver calls to a closedSpy. Test code
+// uses Handle().Driver().(*closedSpyDriver) to reach the recording.
+type closedSpyDriver struct {
+	inner *closedSpy
+	closes *atomic.Int32
+}
+
+func (d *closedSpyDriver) SendText(text string) error { return d.inner.SendText(text) }
+func (d *closedSpyDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
+	return d.inner.SendBlocks(ctx, b)
+}
+func (d *closedSpyDriver) SendPermission(resp string) error {
+	return d.inner.SendPermission(resp)
+}
+func (d *closedSpyDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
+func (d *closedSpyDriver) Close() error                   { return d.inner.Close() }
 
 func (c *closedSpy) Close() error {
 	c.closes.Add(1)
@@ -61,9 +89,9 @@ func TestAgentSessionsInCwd(t *testing.T) {
 	cwd2 := t.TempDir()
 	cs.WithPersistence(nil, nil)
 
-	a1 := injectAS(t, cs, "cc", cwd1, &closedSpy{fakeAgentSession: newFakeAgentSession(1)})
-	a2 := injectAS(t, cs, "codex", cwd1, &closedSpy{fakeAgentSession: newFakeAgentSession(2)})
-	a3 := injectAS(t, cs, "cc", cwd2, &closedSpy{fakeAgentSession: newFakeAgentSession(3)})
+	a1 := injectAS(t, cs, "cc", cwd1, (&closedSpy{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
+	a2 := injectAS(t, cs, "codex", cwd1, (&closedSpy{fakeAgentSession: newFakeAgentSession(2)}).buildLive())
+	a3 := injectAS(t, cs, "cc", cwd2, (&closedSpy{fakeAgentSession: newFakeAgentSession(3)}).buildLive())
 
 	// Empty cwd → nil.
 	if got := cs.AgentSessionsInCwd(""); got != nil {
@@ -97,8 +125,8 @@ func TestAgentSessionsInCwd_DoesNotMutate(t *testing.T) {
 	cwd := t.TempDir()
 	cs.WithPersistence(nil, nil)
 
-	injectAS(t, cs, "cc", cwd, &closedSpy{fakeAgentSession: newFakeAgentSession(1)})
-	injectAS(t, cs, "codex", cwd, &closedSpy{fakeAgentSession: newFakeAgentSession(2)})
+	injectAS(t, cs, "cc", cwd, (&closedSpy{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
+	injectAS(t, cs, "codex", cwd, (&closedSpy{fakeAgentSession: newFakeAgentSession(2)}).buildLive())
 
 	pre := len(cs.Pool())
 	_ = cs.AgentSessionsInCwd(cwd)
@@ -127,8 +155,8 @@ func TestDropAgentSession(t *testing.T) {
 	}
 	cs.WithPersistence(nil, asFile)
 
-	target := injectAS(t, cs, "cc", cwd, &closedSpy{fakeAgentSession: newFakeAgentSession(1)})
-	sibling := injectAS(t, cs, "codex", cwd, &closedSpy{fakeAgentSession: newFakeAgentSession(2)})
+	target := injectAS(t, cs, "cc", cwd, (&closedSpy{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
+	sibling := injectAS(t, cs, "codex", cwd, (&closedSpy{fakeAgentSession: newFakeAgentSession(2)}).buildLive())
 	if err := asFile.Upsert(target.Entry()); err != nil {
 		t.Fatalf("target Upsert: %v", err)
 	}
@@ -160,7 +188,7 @@ func TestDropAgentSession_ActiveASCleared(t *testing.T) {
 	cwd := t.TempDir()
 	cs.WithPersistence(nil, nil)
 
-	a := injectAS(t, cs, "cc", cwd, &closedSpy{fakeAgentSession: newFakeAgentSession(1)})
+	a := injectAS(t, cs, "cc", cwd, (&closedSpy{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
 	cs.mu.Lock()
 	cs.selectedAS = a
 	cs.mu.Unlock()
@@ -179,7 +207,7 @@ func TestDropAgentSession_Idempotent(t *testing.T) {
 	cwd := t.TempDir()
 	cs.WithPersistence(nil, nil)
 
-	a := injectAS(t, cs, "cc", cwd, &closedSpy{fakeAgentSession: newFakeAgentSession(1)})
+	a := injectAS(t, cs, "cc", cwd, (&closedSpy{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
 
 	cs.DropAgentSession(a)
 	cs.DropAgentSession(a) // must not panic
@@ -195,7 +223,7 @@ func TestDropAgentSession_NilSafe(t *testing.T) {
 	cwd := t.TempDir()
 	cs.WithPersistence(nil, nil)
 
-	injectAS(t, cs, "cc", cwd, &closedSpy{fakeAgentSession: newFakeAgentSession(1)})
+	injectAS(t, cs, "cc", cwd, (&closedSpy{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
 
 	cs.DropAgentSession(nil) // must not panic
 	if got := cs.AgentSessionsInCwd(cwd); len(got) != 1 {
@@ -222,10 +250,10 @@ func TestKillWorkflow_KillOne(t *testing.T) {
 	}
 	cs.WithPersistence(nil, nil)
 
-	target := injectAS(t, cs, "cc", cwd, &closedSpy{fakeAgentSession: newFakeAgentSession(1)})
+	target := injectAS(t, cs, "cc", cwd, (&closedSpy{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
 	otherCwd := t.TempDir()
-	sibling := injectAS(t, cs, "cc", otherCwd, &closedSpy{fakeAgentSession: newFakeAgentSession(2)})
-	otherAgent := injectAS(t, cs, "codex", cwd, &closedSpy{fakeAgentSession: newFakeAgentSession(3)})
+	sibling := injectAS(t, cs, "cc", otherCwd, (&closedSpy{fakeAgentSession: newFakeAgentSession(2)}).buildLive())
+	otherAgent := injectAS(t, cs, "codex", cwd, (&closedSpy{fakeAgentSession: newFakeAgentSession(3)}).buildLive())
 
 	as, err := cs.LookupInPool("cc", cwd)
 	if err != nil {
@@ -236,13 +264,13 @@ func TestKillWorkflow_KillOne(t *testing.T) {
 	}
 	cs.DropAgentSession(as)
 
-	if closes := target.Handle().(*closedSpy).closes.Load(); closes != 1 {
+	if closes := target.Handle().Driver().(*closedSpyDriver).closes.Load(); closes != 1 {
 		t.Errorf("target Close(): want 1, got %d", closes)
 	}
-	if closes := sibling.Handle().(*closedSpy).closes.Load(); closes != 0 {
+	if closes := sibling.Handle().Driver().(*closedSpyDriver).closes.Load(); closes != 0 {
 		t.Errorf("sibling (other cwd) Close(): want 0, got %d", closes)
 	}
-	if closes := otherAgent.Handle().(*closedSpy).closes.Load(); closes != 0 {
+	if closes := otherAgent.Handle().Driver().(*closedSpyDriver).closes.Load(); closes != 0 {
 		t.Errorf("sibling (other agent) Close(): want 0, got %d", closes)
 	}
 	if len(cs.Pool()) != 2 {
@@ -260,7 +288,7 @@ func TestKillWorkflow_KillOne_ActiveASCleared(t *testing.T) {
 	}
 	cs.WithPersistence(nil, nil)
 
-	a := injectAS(t, cs, "cc", cwd, &closedSpy{fakeAgentSession: newFakeAgentSession(1)})
+	a := injectAS(t, cs, "cc", cwd, (&closedSpy{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
 	cs.mu.Lock()
 	cs.selectedAS = a
 	cs.mu.Unlock()
@@ -289,13 +317,13 @@ func TestKillWorkflow_KillOne_NotFound(t *testing.T) {
 	cs.WithPersistence(nil, nil)
 
 	otherCwd := t.TempDir()
-	other := injectAS(t, cs, "cc", otherCwd, &closedSpy{fakeAgentSession: newFakeAgentSession(1)})
+	other := injectAS(t, cs, "cc", otherCwd, (&closedSpy{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
 
 	_, err := cs.LookupInPool("cc", cwd)
 	if !errors.Is(err, ErrAgentNotFound) {
 		t.Fatalf("want ErrAgentNotFound, got %v", err)
 	}
-	if closes := other.Handle().(*closedSpy).closes.Load(); closes != 0 {
+	if closes := other.Handle().Driver().(*closedSpyDriver).closes.Load(); closes != 0 {
 		t.Errorf("other entry Close() should not have been called: got %d", closes)
 	}
 	if len(cs.Pool()) != 1 {
@@ -313,10 +341,10 @@ func TestKillWorkflow_KillAllAgents(t *testing.T) {
 	}
 	cs.WithPersistence(nil, nil)
 
-	inCwd1 := injectAS(t, cs, "cc", cwd, &closedSpy{fakeAgentSession: newFakeAgentSession(1)})
-	inCwd2 := injectAS(t, cs, "codex", cwd, &closedSpy{fakeAgentSession: newFakeAgentSession(2)})
+	inCwd1 := injectAS(t, cs, "cc", cwd, (&closedSpy{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
+	inCwd2 := injectAS(t, cs, "codex", cwd, (&closedSpy{fakeAgentSession: newFakeAgentSession(2)}).buildLive())
 	otherCwd := t.TempDir()
-	outOfScope := injectAS(t, cs, "cc", otherCwd, &closedSpy{fakeAgentSession: newFakeAgentSession(3)})
+	outOfScope := injectAS(t, cs, "cc", otherCwd, (&closedSpy{fakeAgentSession: newFakeAgentSession(3)}).buildLive())
 
 	snapshot := cs.AgentSessionsInCwd(cwd)
 	if len(snapshot) != 2 {
@@ -327,13 +355,13 @@ func TestKillWorkflow_KillAllAgents(t *testing.T) {
 		cs.DropAgentSession(as)
 	}
 
-	if closes := inCwd1.Handle().(*closedSpy).closes.Load(); closes != 1 {
+	if closes := inCwd1.Handle().Driver().(*closedSpyDriver).closes.Load(); closes != 1 {
 		t.Errorf("inCwd1 Close(): want 1, got %d", closes)
 	}
-	if closes := inCwd2.Handle().(*closedSpy).closes.Load(); closes != 1 {
+	if closes := inCwd2.Handle().Driver().(*closedSpyDriver).closes.Load(); closes != 1 {
 		t.Errorf("inCwd2 Close(): want 1, got %d", closes)
 	}
-	if closes := outOfScope.Handle().(*closedSpy).closes.Load(); closes != 0 {
+	if closes := outOfScope.Handle().Driver().(*closedSpyDriver).closes.Load(); closes != 0 {
 		t.Errorf("outOfScope Close(): want 0 (preserved), got %d", closes)
 	}
 	if len(cs.Pool()) != 1 {
@@ -348,7 +376,7 @@ func TestKillWorkflow_KillAllAgents_EmptyCwd(t *testing.T) {
 	cs.WithPersistence(nil, nil)
 
 	a := injectAS(t, cs, "cc", "/some/other/cwd",
-		&closedSpy{fakeAgentSession: newFakeAgentSession(1)})
+		&(&closedSpy{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
 	cs.mu.Lock()
 	cs.selectedAS = a
 	cs.mu.Unlock()
@@ -357,7 +385,7 @@ func TestKillWorkflow_KillAllAgents_EmptyCwd(t *testing.T) {
 	if snapshot != nil {
 		t.Errorf("empty cwd: want nil, got %v", snapshot)
 	}
-	if closes := a.Handle().(*closedSpy).closes.Load(); closes != 0 {
+	if closes := a.Handle().Driver().(*closedSpyDriver).closes.Load(); closes != 0 {
 		t.Errorf("entry in other cwd must NOT be killed: got %d closes", closes)
 	}
 	if cs.SelectedAgentSession() != a {

@@ -23,11 +23,11 @@ type spawnerRecording struct {
 	idx      int
 }
 
-func (s *spawnerRecording) Spawn(_ context.Context, _, _ string, _ []string, _ string) (agent.Agent, error) {
-	as := newRecordingAgentSession(42000 + s.idx)
-	s.sessions = append(s.sessions, as)
+func (s *spawnerRecording) Spawn(_ context.Context, _, _ string, _ []string, _ string) (*agent.LiveAgent, error) {
+	rec := newRecordingAgentSession(42000 + s.idx)
+	s.sessions = append(s.sessions, rec)
 	s.idx++
-	return as, nil
+	return rec.buildLive(), nil
 }
 
 // TestFlushHook_DefaultDeliversToAgent: regression test for the

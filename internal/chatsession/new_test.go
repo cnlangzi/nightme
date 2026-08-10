@@ -20,10 +20,37 @@ type callRecordingAS struct {
 	err   error
 }
 
+// buildLive wraps c in a *agent.LiveAgent with callRecordingASDriver
+// so tests can type-assert Handle().Driver().(*callRecordingASDriver).
+func (c *callRecordingAS) buildLive() *agent.LiveAgent {
+	return agent.NewLiveAgent(
+		agent.NewInfo("fake", agent.ModePTY, "fake", nil, nil),
+		c.pid, c.events,
+		&callRecordingASDriver{inner: c, calls: &c.calls})
+}
+
 func (c *callRecordingAS) New(_ context.Context) error {
 	c.calls.Add(1)
 	return c.err
 }
+
+// callRecordingASDriver wraps a callRecordingAS for the agent.driver
+// interface. Tests use Handle().Driver().(*callRecordingASDriver)
+// to read c.calls.
+type callRecordingASDriver struct {
+	inner *callRecordingAS
+	calls *atomic.Int32
+}
+
+func (d *callRecordingASDriver) SendText(text string) error { return d.inner.SendText(text) }
+func (d *callRecordingASDriver) SendBlocks(ctx context.Context, b []agent.ContentBlock) error {
+	return d.inner.SendBlocks(ctx, b)
+}
+func (d *callRecordingASDriver) SendPermission(resp string) error {
+	return d.inner.SendPermission(resp)
+}
+func (d *callRecordingASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
+func (d *callRecordingASDriver) Close() error                   { return d.inner.Close() }
 
 // failingNewAS is a fake whose New always returns errInjected. Used to
 // exercise the partial-failure path.
@@ -33,13 +60,17 @@ type failingNewAS struct {
 
 var errInjected = errors.New("injected bridge failure")
 
+func (f *failingNewAS) buildLive() *agent.LiveAgent {
+	return f.fakeAgentSession.buildLive()
+}
+
 func (f *failingNewAS) New(_ context.Context) error { return errInjected }
 
 // injectAS installs an AgentSession directly into cs.pool with the
 // provided handle, bypassing Spawner. Mirrors what Spawn would produce
 // but skips the start-from-zero state, so tests stay focused on the
 // NewActiveAgentSessions filter / counter logic.
-func injectAS(t *testing.T, cs *ChatSession, agentName, cwd string, handle agent.Agent) *AgentSession {
+func injectAS(t *testing.T, cs *ChatSession, agentName, cwd string, handle *agent.LiveAgent) *AgentSession {
 	t.Helper()
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -83,8 +114,8 @@ func TestNewActiveAgentSessions_AllRunningReset(t *testing.T) {
 	if err := cs.SetSelectedCwd(cwd); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
-	a1 := injectAS(t, cs, "cc", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
-	a2 := injectAS(t, cs, "codex", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(2)})
+	a1 := injectAS(t, cs, "cc", cwd, (&callRecordingAS{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
+	a2 := injectAS(t, cs, "codex", cwd, (&callRecordingAS{fakeAgentSession: newFakeAgentSession(2)}).buildLive())
 
 	// Queue a message so we can assert /new does NOT discard it.
 	// No selectedAS is installed, so the TryFlush inside
@@ -127,8 +158,8 @@ func TestNewActiveAgentSessions_AgentNameFilter(t *testing.T) {
 	if err := cs.SetSelectedCwd(cwd); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
-	a1 := injectAS(t, cs, "cc", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
-	a2 := injectAS(t, cs, "codex", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(2)})
+	a1 := injectAS(t, cs, "cc", cwd, (&callRecordingAS{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
+	a2 := injectAS(t, cs, "codex", cwd, (&callRecordingAS{fakeAgentSession: newFakeAgentSession(2)}).buildLive())
 
 	matched, reset, _, err := cs.NewActiveAgentSessions(context.Background(), "cc")
 	if err != nil {
@@ -138,9 +169,9 @@ func TestNewActiveAgentSessions_AgentNameFilter(t *testing.T) {
 		t.Fatalf("want (1,1), got (%d,%d)", matched, reset)
 	}
 	// Sanity: a2 was not touched.
-	if a2.Handle().(*callRecordingAS).calls.Load() != 0 {
+	if a2.Handle().Driver().(*callRecordingASDriver).calls.Load() != 0 {
 		t.Fatalf("codex AS should not have been New()ed: calls=%d",
-			a2.Handle().(*callRecordingAS).calls.Load())
+			a2.Handle().Driver().(*callRecordingASDriver).calls.Load())
 	}
 	if a1.Handle() == nil {
 		t.Fatalf("a1.Handle() nil unexpectedly")
@@ -198,8 +229,8 @@ func TestNewActiveAgentSessions_CwdFilter(t *testing.T) {
 	if err := cs.SetSelectedCwd(cwd1); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
-	other := injectAS(t, cs, "cc", cwd2, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
-	here := injectAS(t, cs, "cc", cwd1, &callRecordingAS{fakeAgentSession: newFakeAgentSession(2)})
+	other := injectAS(t, cs, "cc", cwd2, (&callRecordingAS{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
+	here := injectAS(t, cs, "cc", cwd1, (&callRecordingAS{fakeAgentSession: newFakeAgentSession(2)}).buildLive())
 
 	matched, reset, _, err := cs.NewActiveAgentSessions(context.Background(), "")
 	if err != nil {
@@ -208,13 +239,13 @@ func TestNewActiveAgentSessions_CwdFilter(t *testing.T) {
 	if matched != 1 || reset != 1 {
 		t.Fatalf("want (1,1), got (%d,%d)", matched, reset)
 	}
-	if other.Handle().(*callRecordingAS).calls.Load() != 0 {
+	if other.Handle().Driver().(*callRecordingASDriver).calls.Load() != 0 {
 		t.Fatalf("other-cwd AS should not have been New()ed: calls=%d",
-			other.Handle().(*callRecordingAS).calls.Load())
+			other.Handle().Driver().(*callRecordingASDriver).calls.Load())
 	}
-	if here.Handle().(*callRecordingAS).calls.Load() != 1 {
+	if here.Handle().Driver().(*callRecordingASDriver).calls.Load() != 1 {
 		t.Fatalf("activeCwd AS should have been New()ed once: calls=%d",
-			here.Handle().(*callRecordingAS).calls.Load())
+			here.Handle().Driver().(*callRecordingASDriver).calls.Load())
 	}
 }
 
@@ -227,8 +258,8 @@ func TestNewActiveAgentSessions_PartialFailure(t *testing.T) {
 	if err := cs.SetSelectedCwd(cwd); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
-	injectAS(t, cs, "cc", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
-	injectAS(t, cs, "codex", cwd, &failingNewAS{fakeAgentSession: newFakeAgentSession(2)})
+	injectAS(t, cs, "cc", cwd, (&callRecordingAS{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
+	injectAS(t, cs, "codex", cwd, (&failingNewAS{fakeAgentSession: newFakeAgentSession(2)}).buildLive())
 	if err := cs.QueueUserMessage(makeTestMessage(cs,
 		[]agent.ContentBlock{{Type: agent.ContentText, Text: "x"}}, "u1")); err != nil {
 		t.Fatalf("QueueUserMessage: %v", err)
@@ -259,14 +290,14 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 		cs, _ := New("chat-running", "cc", newTestChannel())
 		cwd := t.TempDir()
 		cs.SetSelectedCwd(cwd)
-		bh := &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)}
+		bh := (&callRecordingAS{fakeAgentSession: newFakeAgentSession(1)}).buildLive()
 		as := injectAS(t, cs, "cc", cwd, bh)
 
 		if err := as.New(context.Background()); err != nil {
 			t.Fatalf("New: %v", err)
 		}
-		if bh.calls.Load() != 1 {
-			t.Fatalf("bridge New should be called once, got %d", bh.calls.Load())
+		if bh.Driver().(*callRecordingASDriver).calls.Load() != 1 {
+			t.Fatalf("bridge New should be called once, got %d", bh.Driver().(*callRecordingASDriver).calls.Load())
 		}
 	})
 
@@ -294,7 +325,7 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 		cs, _ := New("chat-restart", "cc", newTestChannel())
 		cwd := t.TempDir()
 		cs.SetSelectedCwd(cwd)
-		old := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
+		old := (&restartErrAS{fakeAgentSession: newFakeAgentSession(1)}).buildLive()
 		as := injectAS(t, cs, "cc", cwd, old)
 
 		err := as.New(context.Background())
@@ -326,11 +357,11 @@ func TestChatSession_RestartAgentSession(t *testing.T) {
 		cs, _ := New("chat-restart", "cc", newTestChannel())
 		cwd := t.TempDir()
 		cs.SetSelectedCwd(cwd)
-		old := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
+		old := (&restartErrAS{fakeAgentSession: newFakeAgentSession(1)}).buildLive()
 		as := injectAS(t, cs, "cc", cwd, old)
 		as.SetSessionID("stale-id-should-be-cleared")
 
-		newAS := &callRecordingAS{fakeAgentSession: newFakeAgentSession(2)}
+		newAS := (&callRecordingAS{fakeAgentSession: newFakeAgentSession(2)}).buildLive()
 		spawner := &fakeRestartSpawner{handle: newAS}
 		cs = cs.WithSpawner(spawner)
 
@@ -340,13 +371,13 @@ func TestChatSession_RestartAgentSession(t *testing.T) {
 		if !old.closed {
 			t.Fatalf("old handle should have been Close()d")
 		}
-		if got := as.Handle(); got != agent.Agent(newAS) {
+		if got := as.Handle(); got != newAS {
 			t.Fatalf("handle not swapped: got %T", got)
 		}
 		if got := as.SessionID(); got != "" {
 			t.Fatalf("SessionID should be cleared, got %q", got)
 		}
-		if newAS.calls.Load() != 0 {
+		if newAS.Driver().(*callRecordingASDriver).calls.Load() != 0 {
 			t.Fatalf("newAS should not have been New()ed (it's the freshly-spawned handle)")
 		}
 		if got := as.PID(); got != 2 {
@@ -365,14 +396,15 @@ func TestChatSession_RestartAgentSession(t *testing.T) {
 		cs, _ := New("chat-restart-no-spawner", "cc", newTestChannel())
 		cwd := t.TempDir()
 		cs.SetSelectedCwd(cwd)
-		old := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
+		oldSpy := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
+		old := oldSpy.buildLive()
 		as := injectAS(t, cs, "cc", cwd, old)
 
 		err := cs.restartAgentSession(context.Background(), as)
 		if !errors.Is(err, agent.ErrRestartRequired) {
 			t.Fatalf("want ErrRestartRequired, got %v", err)
 		}
-		if old.closed {
+		if oldSpy.closed {
 			t.Fatalf("old handle should NOT have been Close()d when no spawner available")
 		}
 	})
@@ -387,7 +419,7 @@ func TestChatSession_RestartAgentSession(t *testing.T) {
 		cs, _ := New("chat-respawn-fail", "cc", newTestChannel())
 		cwd := t.TempDir()
 		cs.SetSelectedCwd(cwd)
-		old := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
+		old := (&restartErrAS{fakeAgentSession: newFakeAgentSession(1)}).buildLive()
 		as := injectAS(t, cs, "cc", cwd, old)
 		as.SetSessionID("stale-id")
 
@@ -428,11 +460,11 @@ func (r *restartErrAS) Close() error {
 // sessionID); we record the sessionID it was called with so tests can
 // assert "no --resume on the fresh spawn".
 type fakeRestartSpawner struct {
-	handle             agent.Agent
+	handle             *agent.LiveAgent
 	calledWithResumeID string
 }
 
-func (f *fakeRestartSpawner) Spawn(_ context.Context, _, _ string, _ []string, sessionID string) (agent.Agent, error) {
+func (f *fakeRestartSpawner) Spawn(_ context.Context, _, _ string, _ []string, sessionID string) (*agent.LiveAgent, error) {
 	f.calledWithResumeID = sessionID
 	return f.handle, nil
 }
@@ -441,7 +473,7 @@ func (f *fakeRestartSpawner) Spawn(_ context.Context, _, _ string, _ []string, s
 // exercise the wrapper's spawn-failure cleanup path (F-34 review #4).
 type fakeFailingSpawner struct{ err error }
 
-func (f *fakeFailingSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (agent.Agent, error) {
+func (f *fakeFailingSpawner) Spawn(_ context.Context, _, _ string, _ []string, _ string) (*agent.LiveAgent, error) {
 	return nil, f.err
 }
 
@@ -566,7 +598,7 @@ func TestNewActiveAgentSessions_RunningPlusDeadMixed(t *testing.T) {
 	}
 	cs.WithPersistence(nil, nil)
 
-	live := injectAS(t, cs, "cc", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
+	live := injectAS(t, cs, "cc", cwd, (&callRecordingAS{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
 	dead := NewAgentSession(newAgentSessionID(), cs.ID, "codex", cwd, nil)
 	dead.SetSessionID("codex-sess-dead-789")
 	dead.SetExited(0)
@@ -599,9 +631,9 @@ func TestNewActiveAgentSessions_RunningPlusDeadMixed(t *testing.T) {
 		t.Errorf("dead SessionID should be cleared: got %q", got)
 	}
 	// Live entry's bridge.New was called once.
-	if live.Handle().(*callRecordingAS).calls.Load() != 1 {
+	if live.Handle().Driver().(*callRecordingASDriver).calls.Load() != 1 {
 		t.Errorf("live agent New() should have been called once: got %d",
-			live.Handle().(*callRecordingAS).calls.Load())
+			live.Handle().Driver().(*callRecordingASDriver).calls.Load())
 	}
 }
 
@@ -614,8 +646,8 @@ func TestNewActiveAgentSessions_ResultsSliceHasEveryEntry(t *testing.T) {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 	cs.WithPersistence(nil, nil)
-	injectAS(t, cs, "cc", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(1)})
-	injectAS(t, cs, "codex", cwd, &callRecordingAS{fakeAgentSession: newFakeAgentSession(2)})
+	injectAS(t, cs, "cc", cwd, (&callRecordingAS{fakeAgentSession: newFakeAgentSession(1)}).buildLive())
+	injectAS(t, cs, "codex", cwd, (&callRecordingAS{fakeAgentSession: newFakeAgentSession(2)}).buildLive())
 
 	matched, _, results, err := cs.NewActiveAgentSessions(context.Background(), "")
 	if err != nil {

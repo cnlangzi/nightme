@@ -39,7 +39,7 @@ func makeTestMessage(cs *ChatSession, blocks []agent.ContentBlock, userMsgID str
 // PushEvent / FinishEvent.
 func newTestASWithFakeHandle(cs *ChatSession) (*AgentSession, *fakeAgentSession) {
 	as := NewAgentSession("as_test", cs.ID, "fake", "/tmp", nil)
-	sess := newFakeAgentSession(1)
+	sess := newFakeAgentSession(1).buildLive()
 	as.handle = sess
 	as.stat = StatusRunning
 	as.pid = 1

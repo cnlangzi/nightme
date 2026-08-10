@@ -11,6 +11,38 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### /gtw pr: generate Conventional Commits title+body and open the PR
+
+Closes the loop with `/gtw push`. The user types `/gtw pr [-a <agent>]`
+after pushing; nightme spawns a one-shot agent to read the commits /
+diff, asks it for a Conventional Commits 1.0.0 title + structured
+body (fenced markdown block), and then calls `gh pr create` or
+`glab mr create` to open the PR / MR. GitHub and GitLab both go
+through the same dispatch code path via the unified
+`GitProvider.CreatePR` interface (added to provider.go; both
+implementations live next to the existing `GetIssue` /
+`AddLabel` / `RemoveLabel` methods).
+
+- **Head unpushed check**: refuses when `rev-list @{u}..HEAD > 0`
+  and points the user at `/gtw push first`. No silent push.
+- **Nothing-to-PR check**: refuses when `rev-list <base>..HEAD == 0`
+  so empty PRs aren't opened by accident.
+- **Provider resolution**: yml `Repo` / `Provider` (set by
+  `/gtw fix`) win over a `RemoteOriginURL` + `Detect` fallback,
+  matching the `/gtw fix` policy.
+- **IM-friendly card**: ✅ PR opened with branch / base / url /
+  worktree, same style as `/gtw push` and `/gtw close`. Errors
+  echo `gh` / `glab` stderr verbatim so the user sees the actual
+  reason (auth, head not pushed, repo not found, …).
+- **Agent safety**: prompt explicitly forbids `git commit`,
+  `git push`, `gh pr create`, `glab mr create`; the agent only
+  generates text.
+- **ErrPRExists sentinel**: `gh pr create`'s "already exists"
+  path is mapped to a friendly ❌ instead of a raw error.
+- See [`wip/gtw-pr.md`](./wip/gtw-pr.md) for the design rationale
+  and [`wip/gtw-pr-plan.md`](./wip/gtw-pr-plan.md) for the
+  implementation phases.
+
 ### Codex app-server bridge (new agent)
 
 The `codex` CLI is now a first-class bridge agent, joining

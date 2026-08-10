@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentsession/testutil"
 )
 
 // sentBlock records what the default FlushHook actually sent to
@@ -112,7 +113,7 @@ func TestFlushHook_BusyQueues(t *testing.T) {
 
 	// End the turn — in production the per-AS readpump does this on
 	// EventAgentDone, then routeEvent calls TryFlush.
-	as.EndPromptForTest(PromptEndClean)
+	testutil.EndPrompt(as, PromptEndClean)
 	if err := cs.TryFlush(); err != nil {
 		t.Fatalf("TryFlush: %v", err)
 	}

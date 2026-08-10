@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentsession/testutil"
 )
 
 // TestAgentSession_ReadPump_DeliversEvents verifies that an
@@ -106,7 +107,7 @@ func TestAgentSession_ReadPump_Propagates_NotReadyBeforeSubmit(t *testing.T) {
 	}
 
 	// End the prompt to restore readiness.
-	as.EndPromptForTest(PromptEndClean)
+	testutil.EndPrompt(as, PromptEndClean)
 	if !as.IsReady() {
 		t.Fatal("AS should be ready after endPrompt")
 	}
@@ -451,9 +452,9 @@ func TestAgentSession_EndPrompt_EmitsKindPromptEnded(t *testing.T) {
 	})
 
 	p := &Prompt{ID: "p-1", LastMessageID: "m-1"}
-	as.SetCurrentPromptForTest(p)
+	testutil.SetCurrentPrompt(as, p)
 
-	as.EndPromptForTest(PromptEndClean)
+	testutil.EndPrompt(as, PromptEndClean)
 
 	select {
 	case ev := <-delivered:
@@ -493,10 +494,9 @@ func makeSpawnedAS(t *testing.T, cs *ChatSession, agentName string, parent conte
 	as.Activate(parent)
 
 	fake := newFakeAgentSession(99000)
-	as.SetHandleForTest(fake.buildLive())
-	as.SetPIDForTest(fake.PID())
-	as.SetStatusForTest(StatusRunning)
-	as.StartReadPumpForTest()
+	as.AttachHandleForTest(fake.buildLive(), StatusRunning)
+	testutil.SetPID(as, fake.PID())
+	testutil.StartReadPump(as)
 
 	return as, fake
 }

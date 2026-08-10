@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentsession/testutil"
 )
 
 // TestWritebackMessageState_FiresOnPromptEndHook verifies that
@@ -150,7 +151,7 @@ func TestAgentSession_ReadyFlipSanity(t *testing.T) {
 	if as.IsReady() {
 		t.Fatal("AS should NOT be ready after Submit")
 	}
-	as.EndPromptForTest(PromptEndClean)
+	testutil.EndPrompt(as, PromptEndClean)
 	if !as.IsReady() {
 		t.Fatal("AS should be ready after endPrompt")
 	}

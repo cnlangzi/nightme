@@ -14,6 +14,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
+	"github.com/cnlangzi/nightme/internal/agentsession/testutil"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	stoppkg "github.com/cnlangzi/nightme/internal/command/stop"
@@ -79,9 +80,8 @@ func setupSelectedAS(t *testing.T, agentName, cwd string, isReady bool) (*chatse
 		Mode:    agent.ModeJSONIO,
 		Command: "stub",
 	}, 12345, make(chan agent.AgentEvent, 1), stub)
-	as.SetHandleForTest(a)
-	as.SetStatusForTest(agentsession.StatusRunning)
-	as.SetIsReadyForTest(isReady)
+	as.AttachHandleForTest(a, agentsession.StatusRunning)
+	testutil.SetIsReady(as, isReady)
 	return cs, as, stub
 }
 

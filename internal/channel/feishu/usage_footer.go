@@ -72,7 +72,6 @@ package feishu
 import (
 	"fmt"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/command/gtw"
@@ -117,6 +116,13 @@ import (
 //
 // Each segment is omitted independently:
 //   - Line 1: Agent omitted when "". Model omitted when "".
+//     SessionID omitted when "" (F-56). The leading-separator
+//     caveat (`🤖: · <sid>` when only SessionID is set) is
+//     locked by TestFormatSessionFooterLines_SessionIDOnly;
+//     layout stays as-is per §1.10 — the materialize condition
+//     in sessionContextInto guarantees at least one of Agent
+//     / Model / SessionID / GitStatus / Usage is non-empty in
+//     production, so the leading-`·` only surfaces in tests.
 //   - Line 2 segments:
 //     new / cache / out: each token class omitted when its
 //     count is 0 (F-45 §1.6 zero-omit). The first non-zero
@@ -179,14 +185,9 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 	// no longer rendered. The runtime dropped its
 	// compactionCount bookkeeping; bridges no longer emit
 	// EventAgentCompaction. Line 1 retains Agent · Model · SessionID.
-	_ = strconv.Itoa // keep import stable during F-49 cleanup
 	if len(idParts) > 1 {
 		lines = append(lines, strings.Join(idParts, " "))
 	}
-
-	// Compaction tracking (🗜 N) was removed when the
-	// runtime-side compaction chain was dropped. F-49 §1.6 + §1.2
-	// no longer apply; Line 1 retains Agent · Model only.
 
 	// Line 2: usage stats (💰:「 in / out · X% · $cost 」).
 	//

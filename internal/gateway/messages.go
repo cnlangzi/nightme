@@ -468,7 +468,7 @@ type SessionContext struct {
 	// F-56 (F-45 follow-up): the first footer line
 	// ("🤖: <agent> · <model> · <sessionid>") uses this as the
 	// trailing identity segment. See docs/feat/F-45-session-footer.md
-	// §1.6.
+	// §1.10.
 	SessionID string
 	// Workspace is the absolute path of the AgentSession's
 	// working directory at the time this OutboundMessage was

@@ -98,6 +98,27 @@ func TestFormatSessionFooterLines_AgentSessionIDOnly(t *testing.T) {
 	}
 }
 
+// F-56: Model + SessionID both set but Agent is empty (e.g.
+// bridge emits SessionID before AgentName — possible during
+// session/new handshake on claudecode / pi). The leading
+// separator between `🤖:` and `Model` is the symmetric partner
+// of TestFormatSessionFooterLines_SessionIDOnly's `🤖: · <sid>`
+// — together they pin the layout when Agent is missing.
+// Without this test a future "fix the leading dot" PR could
+// silently change the Model+SessionID-no-Agent path because
+// the other SessionID tests all have Agent set.
+func TestFormatSessionFooterLines_ModelSessionIDOnly(t *testing.T) {
+	ctx := &gateway.SessionContext{
+		Model:     "opus-4-5",
+		SessionID: "abc123-uuid-here",
+	}
+	got := formatSessionFooterLines(ctx)
+	want := []string{"🤖: · opus-4-5 · abc123-uuid-here"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("formatSessionFooterLines() = %v, want %v", got, want)
+	}
+}
+
 // TestFormatSessionFooterLines_CompactionSegment removed: F-49
 // compaction tracking was deleted across the runtime. The "· 🗜 N"
 // segment is no longer rendered; the entire subtest is gone.

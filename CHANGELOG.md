@@ -71,6 +71,20 @@ Docs: `docs/SPEC.md` §1.1a (new) documents the package structure;
 `docs/feat/F-32` / `F-34` / `F-54` updated to use `agentsession.*`
 type names.
 
+### test(agentsession): satisfy driver interface in fakeDrivers
+
+`fakeDriver` and `callRecordingASDriver` in
+`internal/agentsession/test_helpers_test.go` were missing the
+`Abort` and `SetModel` methods added to `internal/agent.driver`
+by #99 (opencode bridge). The interface assertion in
+`agent.NewAgent` then panicked at test runtime once #102
+extracted AgentSession into its own package and started
+actually passing these fakes through `buildLive`. Fixed by
+adding the two no-op methods; no test currently exercises
+those paths so `nil` is correct. Out of scope for gtw hooks
+but blocks CI on `feat-gtw-hooks` (which merged main), so
+landed here to keep CI green.
+
 ### Codex app-server bridge (new agent)
 
 The `codex` CLI is now a first-class bridge agent, joining

@@ -56,6 +56,16 @@ func (d *fakeDriver) SendPermission(resp string) error { return d.inner.SendPerm
 func (d *fakeDriver) Reset(ctx context.Context) error    { return d.inner.New(ctx) }
 func (d *fakeDriver) Close() error                      { return d.inner.Close() }
 
+// Abort / SetModel were added to agent.driver by #99 (opencode
+// bridge) but fakeDriver never caught up. This caused the
+// interface assertion in agent.NewAgent to panic at runtime
+// once AgentSession extraction (#102) made buildLive actually
+// pass fakeDriver through. Latent bug from #99; surfaced by #102.
+// We satisfy the interface here; no inner.Abort/SetModel exists
+// because no test currently exercises those paths, so nil is fine.
+func (d *fakeDriver) Abort(_ context.Context) error                { return nil }
+func (d *fakeDriver) SetModel(_ context.Context, _, _ string) error { return nil }
+
 func (f *fakeAgentSession) SendText(text string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -149,6 +159,8 @@ func (d *callRecordingASDriver) SendPermission(resp string) error {
 }
 func (d *callRecordingASDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
 func (d *callRecordingASDriver) Close() error                   { return d.inner.Close() }
+func (d *callRecordingASDriver) Abort(_ context.Context) error  { return nil }
+func (d *callRecordingASDriver) SetModel(_ context.Context, _, _ string) error { return nil }
 
 // --- restartErrAS -----------------------------------------------------
 

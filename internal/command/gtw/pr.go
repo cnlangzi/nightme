@@ -183,20 +183,10 @@ func dispatchPR(
 	}
 
 	// --- pick provider ----------------------------------------------
-	provider, ownerRepo, err := resolveProvider(ctx, c, deps)
+	provider, owner, repo, err := resolveProvider(ctx, c, deps)
 	if err != nil {
 		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf("❌ %v", err)), nil
-	}
-
-	// Provider.CreatePR expects (owner, repo) split. ownerRepo
-	// is either the yml "owner/repo" form or a remote URL; we
-	// use splitOwnerRepo which handles both (ParseRepoOwner
-	// rejects "owner/repo" because it expects a host prefix).
-	owner, repo, perr := splitOwnerRepo(ownerRepo)
-	if perr != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			fmt.Sprintf("❌ cannot split %q into owner/repo: %v", ownerRepo, perr)), nil
 	}
 
 	url, err := provider.CreatePR(ctx, owner, repo, baseBranch, c.Branch, title, body)
@@ -215,8 +205,8 @@ func dispatchPR(
 			fmt.Sprintf("❌ create PR failed: %v", err)), nil
 	}
 
-	body2 := renderPROpenedCard(c, baseBranch, url)
-	return reply(ctx, cs.Channel(), chatID, messageID, body2), nil
+	card := renderPROpenedCard(c, baseBranch, url)
+	return reply(ctx, cs.Channel(), chatID, messageID, card), nil
 }
 
 // buildPRPrompt renders the text block the agent receives.
@@ -233,6 +223,8 @@ func buildPRPrompt(c Context, base string) string {
 	sb.WriteString("Reply with ONE fenced markdown code block (``` ... ```) and nothing else.\n")
 	sb.WriteString("First line inside the fence is the PR title (Conventional Commits 1.0.0).\n")
 	sb.WriteString("Remaining lines are the PR body (markdown).\n")
+	sb.WriteString("Do NOT nest additional ``` fences — the daemon's parser stops at the first closing fence.\n")
+	sb.WriteString("Indent code samples with 4 spaces instead.\n")
 	sb.WriteString("Example:\n")
 	sb.WriteString("```\n")
 	sb.WriteString("feat(scope): short imperative subject\n")
@@ -272,19 +264,25 @@ func buildPRPrompt(c Context, base string) string {
 // title, the remainder is the body.
 //
 // Robust to:
-//   / preamble prose ("Here you go:") before the opening fence
-//   / postscript prose ("Let me know if you'd like changes")
+//   - preamble prose ("Here you go:") before the opening fence
+//   - postscript prose ("Let me know if you'd like changes")
 //     after the closing fence
-//   / multiple blank lines between the prose and the fence
+//   - multiple blank lines between the prose and the fence
 //
 // Returns errParseAgentReply when:
-//   / no opening fence found
-//   / no closing fence after the opening
-//   / fence is empty
+//   - no opening fence found
+//   - no closing fence after the opening
+//   - fence is empty
 //
 // Title is trimmed of leading/trailing whitespace; body keeps
 // its interior layout (we only strip a single leading newline
 // that follows the title line).
+//
+// Known limitation: a body that contains nested ``` fences (e.g.
+// a syntax-highlighted code sample) truncates at the first
+// closing fence. The buildPRPrompt tells the agent to indent
+// code samples with 4 spaces instead — this is a soft constraint
+// and we trust the LLM to follow it.
 func parsePRReply(text string) (title, body string, err error) {
 	const fence = "```"
 	start := strings.Index(text, fence)
@@ -327,29 +325,40 @@ func parsePRReply(text string) (title, body string, err error) {
 	return title, body, nil
 }
 
-// resolveProvider picks a GitProvider for the current chat.
+// resolveProvider picks a GitProvider for the current chat and
+// returns the (owner, repo) split CreatePR needs.
+//
 // Two-stage resolution (matches the design doc's "Provider
 // 二段式解析" §4.5):
 //
 //  1. If c.Repo AND c.Provider are populated (set by /gtw fix
 //     when the worktree was created), use them directly via
-//     NewProvider — no network.
+//     NewProvider — no network. owner/repo come from the yml
+//     (already in "owner/repo" form), split with the cheap
+//     first-slash helper from action.go.
 //  2. Otherwise fall back to RemoteOriginURL + Detect, which
 //     costs one or two HTTP probes (see Detect's Stage A/B).
+//     For the Detect path owner/repo come from ParseRepoOwner,
+//     which is URL-aware and handles self-hosted nested-group
+//     GitLab URLs (group/subgroup/owner/repo).
 //
 // Errors are reformatted with redactForDisplay so we don't
-// echo credentials; the three-bucket split mirrors runFixRemote.
-func resolveProvider(ctx context.Context, c Context, deps HandlerDeps) (GitProvider, string, error) {
+// echo credentials; the bucket split mirrors runFixRemote.
+func resolveProvider(ctx context.Context, c Context, deps HandlerDeps) (GitProvider, string, string, error) {
 	if c.Repo != "" && c.Provider != "" {
 		prov, err := NewProvider(ProviderKind(c.Provider), "")
 		if err != nil {
-			return nil, "", fmt.Errorf("provider %q from gtw.yml unsupported: %w", c.Provider, err)
+			return nil, "", "", fmt.Errorf("provider %q from gtw.yml unsupported: %w", c.Provider, err)
 		}
-		return prov, c.Repo, nil
+		owner, repo, err := splitOwnerRepo(c.Repo)
+		if err != nil {
+			return nil, "", "", err
+		}
+		return prov, owner, repo, nil
 	}
 	remoteURL, err := RemoteOriginURL(ctx, c.RepoRoot, deps.Git)
 	if err != nil || remoteURL == "" {
-		return nil, "", fmt.Errorf("no `origin` remote — add one with `git remote add origin <url>`")
+		return nil, "", "", fmt.Errorf("no `origin` remote — add one with `git remote add origin <url>`")
 	}
 	detect := deps.Detect
 	if detect == nil {
@@ -364,31 +373,48 @@ func resolveProvider(ctx context.Context, c Context, deps HandlerDeps) (GitProvi
 		redacted := redactForDisplay(remoteURL)
 		switch {
 		case errors.Is(err, ErrInvalidRemoteURL):
-			return nil, "", fmt.Errorf("invalid remote URL: %s", redacted)
+			return nil, "", "", fmt.Errorf("invalid remote URL: %s", redacted)
 		default:
-			return nil, "", fmt.Errorf("unsupported git platform (host: %s)", redacted)
+			return nil, "", "", fmt.Errorf("unsupported git platform (host: %s)", redacted)
 		}
 	}
 	if prov == nil {
-		return nil, "", fmt.Errorf("provider detection returned no result")
+		return nil, "", "", fmt.Errorf("provider detection returned no result")
 	}
-	return prov, remoteURL, nil
+	owner, repo, err := ParseRepoOwner(remoteURL)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("cannot parse owner/repo from remote URL: %v", err)
+	}
+	return prov, owner, repo, nil
 }
 
 // countBaseAhead returns the number of commits on HEAD that are
 // not in `base` (`git rev-list --count base..HEAD`). Used to
 // reject "/gtw pr" when the branch is at base (nothing to PR).
+//
+// `<base>` might not exist as a local ref (e.g. when the user
+// invoked /gtw pr from a manually-created worktree that never
+// ran /gtw fix's `git checkout <base>` step). In that case the
+// local ref is `origin/<base>`; we retry with the remote form
+// before giving up. This matches what /gtw fix gets for free
+// because RefreshDefaultBranch checks the local branch out
+// first; /gtw pr has no such precondition so we handle it here.
 func countBaseAhead(ctx context.Context, worktree, base string, deps HandlerDeps) (int, error) {
-	out, stderr, err := deps.Git.Run(ctx, worktree, "rev-list", "--count", base+"..HEAD")
-	if err != nil {
-		return 0, fmt.Errorf("rev-list --count %s..HEAD: %w (stderr: %s)",
- base, err, strings.TrimSpace(stderr))
+	ranges := []string{base + "..HEAD", "origin/" + base + "..HEAD"}
+	var lastStderr string
+	for _, rng := range ranges {
+		out, stderr, err := deps.Git.Run(ctx, worktree, "rev-list", "--count", rng)
+		if err == nil {
+			n, perr := atoi(strings.TrimSpace(out))
+			if perr != nil {
+				return 0, perr
+			}
+			return n, nil
+		}
+		lastStderr = strings.TrimSpace(stderr)
 	}
-	n, perr := atoi(strings.TrimSpace(out))
-	if perr != nil {
-		return 0, perr
-	}
-	return n, nil
+	return 0, fmt.Errorf("rev-list --count %s..HEAD (also tried origin/%s..HEAD): %s",
+		base, base, lastStderr)
 }
 
 // renderPROpenedCard renders the IM-friendly success card.

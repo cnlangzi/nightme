@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/command"
 )
 
 // -----------------------------------------------------------------------------
@@ -468,7 +469,7 @@ func TestDispatchPR_ResolveProvider_FromYml(t *testing.T) {
 		Repo:     "octocat/hello",
 		Provider: "github",
 	}
-	prov, ownerRepo, err := resolveProvider(context.Background(), c, rig.deps)
+	prov, owner, repo, err := resolveProvider(context.Background(), c, rig.deps)
 	if err != nil {
 		t.Fatalf("resolveProvider: %v", err)
 	}
@@ -478,8 +479,8 @@ func TestDispatchPR_ResolveProvider_FromYml(t *testing.T) {
 	if prov == nil || prov.Kind() != ProviderGitHub {
 		t.Fatalf("provider: %v", prov)
 	}
-	if ownerRepo != "octocat/hello" {
-		t.Fatalf("ownerRepo: %q", ownerRepo)
+	if owner != "octocat" || repo != "hello" {
+		t.Fatalf("owner/repo: %q/%q", owner, repo)
 	}
 }
 
@@ -581,6 +582,177 @@ func TestCountBaseAhead(t *testing.T) {
 	}
 	if len(g.calls) != 1 || g.calls[0].args[0] != "rev-list" {
 		t.Fatalf("git calls: %+v", g.calls)
+	}
+}
+
+// TestCountBaseAhead_OriginFallback covers the "main only exists
+// as origin/main" case (manual git worktree add without
+// /gtw fix's `git checkout main` step). The first rev-list
+// call fails; the second (origin/main..HEAD) succeeds.
+func TestCountBaseAhead_OriginFallback(t *testing.T) {
+	g := newPushGit()
+	// First call: main doesn't resolve → error
+	g.onArgs([]string{"rev-list", "--count", "main..HEAD"},
+		"", "fatal: ambiguous argument 'main..HEAD'",
+		errors.New("exit 128"))
+	// Second call (origin/main..HEAD) → success
+	g.onArgs([]string{"rev-list", "--count", "origin/main..HEAD"},
+		"3", "", nil)
+	n, err := countBaseAhead(context.Background(), "/w", "main", HandlerDeps{Git: g})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("want 3, got %d", n)
+	}
+	// Both calls must have happened (the first was tried and
+	// failed before we fell back).
+	if len(g.calls) != 2 {
+		t.Fatalf("git calls: %d, want 2: %+v", len(g.calls), g.calls)
+	}
+}
+
+// TestResolveProvider_FromYml_SplitOwnerRepo ensures the yml
+// path splits "octocat/hello" correctly (cheap first-slash
+// helper, NOT ParseRepoOwner which needs a host prefix).
+func TestResolveProvider_FromYml_SplitOwnerRepo(t *testing.T) {
+	rig := newPRTestRig(t)
+	rig.deps = HandlerDeps{Git: rig.git}
+	c := Context{Repo: "octocat/hello", Provider: "github"}
+	prov, owner, repo, err := resolveProvider(context.Background(), c, rig.deps)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if prov == nil || prov.Kind() != ProviderGitHub {
+		t.Fatalf("provider: %v", prov)
+	}
+	if owner != "octocat" || repo != "hello" {
+		t.Fatalf("owner/repo: %q/%q", owner, repo)
+	}
+}
+
+// TestResolveProvider_Detect_NestedGitLab covers self-hosted
+// GitLab URLs with nested groups: owner/repo must come from
+// ParseRepoOwner (URL-aware), not splitOwnerRepo (which would
+// split on the first '/' and produce garbage).
+func TestResolveProvider_Detect_NestedGitLab(t *testing.T) {
+	rig := newPRTestRig(t)
+	// Remote URL with nested groups
+	rig.git.on("remote",
+		"git@gitlab.acme.internal:team/sub/owner/repo.git", "", nil)
+	rig.git.on("symbolic-ref", "origin/main", "", nil)
+	rig.deps = HandlerDeps{
+		Git:    rig.git,
+		Detect: fakeDetect(newFakeGitProvider(ProviderGitLab, "gitlab.acme.internal")),
+	}
+	c := Context{RepoRoot: mustPwd(t)}
+	_, owner, repo, err := resolveProvider(context.Background(), c, rig.deps)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if owner != "team/sub/owner" || repo != "repo" {
+		t.Fatalf("owner/repo: %q/%q (ParseRepoOwner should have folded groups)", owner, repo)
+	}
+}
+
+// TestDispatchPR_AgentFlagOverride exercises the -a <name>
+// override path: prArgs.Agent wins over cs.SelectedAgent().
+// Mirrors TestRunPush_DirtyWithAgentFlag for symmetry.
+func TestDispatchPR_AgentFlagOverride(t *testing.T) {
+	withCwd(t, t.TempDir())
+	writeYml(t, mustPwd(t), Context{
+		Worktree: mustPwd(t),
+		Branch:   "wt",
+		RepoRoot: mustPwd(t),
+	})
+
+	// Note: we don't use newPRTestRig here because it would
+	// re-install Builtins with only claude, wiping out the
+	// opencode registration. Build the rig manually.
+	opencode := &recordingAgent{name: "opencode", runOnceText: "```\nfeat: hi\n```"}
+	claude := &recordingAgent{name: "claude", runOnceText: "should-not-be-called"}
+	withAgent(t, claude, opencode)
+
+	cs := &chatsession.ChatSession{}
+	_ = cs.SetSelectedAgent("claude") // chat prefers claude, but -a opencode should win
+
+	git := newPushGit()
+	setupPRGit(&prTestRig{git: git, agent: opencode}, 0, 5)
+	git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	prov.SetCreatePRResp("https://github.com/octocat/hello/pull/1")
+	deps := HandlerDeps{Git: git, Detect: fakeDetect(prov)}
+
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, deps, "chat", "msg",
+		prArgs{Agent: "opencode"})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	opencode.mu.Lock()
+	defer opencode.mu.Unlock()
+	claude.mu.Lock()
+	defer claude.mu.Unlock()
+	if len(opencode.calls) != 1 {
+		t.Fatalf("opencode.RunOnce called %d times, want 1", len(opencode.calls))
+	}
+	if len(claude.calls) != 0 {
+		t.Fatalf("claude.RunOnce should NOT have been called when -a opencode was passed: %d calls",
+			len(claude.calls))
+	}
+	if !strings.Contains(s.lastText(), "✅ PR opened") {
+		t.Fatalf("expected success card, got:\n%s", s.lastText())
+	}
+}
+
+// TestFactory_Handle_RoutesToPR verifies the factory's Handle
+// switch dispatches input.Args[1] == "pr" to runPR (and that
+// /gtw pr with no args still works via dispatchPR's no-workspace
+// early return).
+func TestFactory_Handle_RoutesToPR(t *testing.T) {
+	withCwd(t, "/") // force the no-workspace / no-yml branch
+	mgr := NewManager()
+	f := NewFactoryWithDeps(mgr, HandlerDeps{})
+
+	// Wire a real ChatSession so dispatchPR's cs.Channel()
+	// sends the reply somewhere we can observe. We use the
+	// shared recordingCh from testharness_test.go (the no-op
+	// nopCh from test_helpers_test.go would silently drop the
+	// reply).
+	rec := &recordingCh{}
+	cs, err := chatsession.New("chat-pr-test", "claude", rec)
+	if err != nil {
+		t.Fatalf("chatsession.New: %v", err)
+	}
+	mgr.SetGetChatSession(func(chatID string) *chatsession.ChatSession {
+		return cs
+	})
+	ch := rec
+
+	out, err := f.Handle(context.Background(),
+		command.RuntimeServices{}, cs,
+		command.SlashInput{
+			Args:      []string{"gtw", "pr"},
+			ChatID:    "chat-pr-test",
+			MessageID: "msg",
+		})
+	if err != nil {
+		t.Fatalf("Handle err: %v", err)
+	}
+	if out == nil || !out.Consumed {
+		t.Fatalf("expected Consumed=true, got %+v", out)
+	}
+	// dispatchPR replied via cs.Channel(); assert via the
+	// recordingCh rather than out.Reply (which is always empty
+	// when the reply path is cs.Channel() — see dispatchPush
+	// for the same shape).
+	text := ch.lastText()
+	if text == "" {
+		t.Fatalf("expected a reply via cs.Channel() (no-workspace early return), got empty")
+	}
+	if !strings.Contains(text, "no active workspace") &&
+		!strings.Contains(text, "no active fix to push") {
+		t.Fatalf("unexpected reply: %q", text)
 	}
 }
 

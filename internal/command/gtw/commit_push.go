@@ -3,7 +3,6 @@ package gtw
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -26,7 +25,10 @@ const RunOnceTimeout = 5 * time.Minute
 //
 // Flow:
 //
-//  1. Locate selectedCwd + .nightme/gtw.yml → c (Context).
+//  1. loadDispatchContext → c (Context). Reads cs.SelectedCwd()
+//     and either loads `.nightme/gtw.yml` (worktree mode) or
+//     derives Worktree/Branch/RepoRoot from git (non-worktree
+//     mode).
 //  2. git status --porcelain (single call, drives both the
 //     conflict check and the clean/dirty dispatch).
 //  3. If status has unmerged paths → refuse (rebase/merge
@@ -44,26 +46,9 @@ func dispatchPush(
 	chatID, messageID string,
 	args pushArgs,
 ) (*Result, error) {
-	selectedCwd, err := pushCwd()
-	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			"❌ no active workspace. Send /cwd <path> first."), nil
-	}
-
-	c, err := ReadGTWYml(selectedCwd)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return reply(ctx, cs.Channel(), chatID, messageID,
-				"❌ no active fix to push in this chat\n"+
-					"hint: /cwd into the /gtw fix worktree first (its "+
-					"`.nightme/gtw.yml` is the push source of truth)."), nil
-		}
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err)), nil
-	}
-	if c.Worktree == "" || c.Branch == "" || c.RepoRoot == "" {
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			"❌ .nightme/gtw.yml is malformed (worktree/branch/repoRoot required)"), nil
+	c, res := loadDispatchContext(ctx, cs, deps, chatID, messageID)
+	if res != nil {
+		return res, nil
 	}
 
 	statusOut, _, err := deps.Git.Run(ctx, c.Worktree, "status", "--porcelain")

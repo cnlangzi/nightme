@@ -129,6 +129,25 @@ func TestBuildPRPrompt_LocalNoIssue(t *testing.T) {
 	}
 }
 
+// TestBuildPRPrompt_NonWorktreeRepo covers the c.Repo == "" case
+// (Detect-fallback path / non-worktree mode): the prompt must
+// not print a literal "Repository: " line with nothing after the
+// colon (bug D from the review). The agent is told to resolve from
+// `git remote get-url origin` itself.
+func TestBuildPRPrompt_NonWorktreeRepo(t *testing.T) {
+	c := Context{
+		Worktree: "/w",
+		Branch:   "feat/manual",
+		RepoRoot: "/r",
+		// Repo deliberately empty (non-worktree mode path)
+	}
+	p := buildPRPrompt(c, "main")
+	if strings.Contains(p, "Repository: \n") {
+		t.Fatalf("prompt has 'Repository:' with empty value:\n%s", p)
+	}
+	mustContain(t, p, "Repository: (resolve from `git remote get-url origin`)")
+}
+
 // -----------------------------------------------------------------------------
 // parsePRArgs (plan §P3.1)
 // -----------------------------------------------------------------------------
@@ -197,6 +216,10 @@ func newPRTestRig(t *testing.T) *prTestRig {
 	t.Helper()
 	cs := &chatsession.ChatSession{}
 	_ = cs.SetSelectedAgent("claude")
+	// Tests set the chat's Cwd via setupPRWorktree / direct
+	// SetSelectedCwd calls — leaving it empty here means the
+	// "no active workspace" early return fires unless the test
+	// explicitly opts in.
 	git := newPushGit()
 	claude := &recordingAgent{name: "claude", runOnceText: "```\nfeat: hi\n```"}
 	withAgent(t, claude)
@@ -230,30 +253,32 @@ func captureCh(t *testing.T, cs *chatsession.ChatSession) *recordingCh {
 }
 
 func TestDispatchPR_NoWorkspace(t *testing.T) {
-	withCwd(t, "/") // no yml here
 	rig := newPRTestRig(t)
+	// Don't set SelectedCwd — the "no active workspace" early
+	// return should fire.
 	rig.installDeps()
 	cs := rig.cs
 	s := captureCh(t, cs)
 
-	// pushCwd() will resolve to "/"; .nightme/gtw.yml doesn't
-	// exist there → the no-yml early return fires.
 	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
 	if err != nil {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
 	r := s.lastText()
-	if !strings.Contains(r, "no active fix to push in this chat") &&
-		!strings.Contains(r, "no active workspace") {
-		t.Fatalf("expected no-workspace / no-yml reply, got:\n%s", r)
+	if !strings.Contains(r, "no active workspace") {
+		t.Fatalf("expected no-workspace reply, got:\n%s", r)
 	}
 }
 
 func TestDispatchPR_MalformedYml(t *testing.T) {
-	withCwd(t, t.TempDir())
-	writeYml(t, mustPwd(t), Context{Worktree: "", Branch: "wt", RepoRoot: mustPwd(t)})
-
 	rig := newPRTestRig(t)
+	// Empty Worktree triggers the malformed-yaml check. Don't
+	// use setupPRWorktree (which would auto-fill Worktree/RepoRoot
+	// from the temp dir) — write yml directly.
+	tmp := t.TempDir()
+	withCwd(t, tmp)
+	writeYml(t, tmp, Context{Branch: "wt", RepoRoot: "/r"})
+	_ = rig.cs.SetSelectedCwd(tmp)
 	rig.installDeps()
 	cs := rig.cs
 	s := captureCh(t, cs)
@@ -268,14 +293,8 @@ func TestDispatchPR_MalformedYml(t *testing.T) {
 }
 
 func TestDispatchPR_DefaultBranchFails(t *testing.T) {
-	withCwd(t, t.TempDir())
-	writeYml(t, mustPwd(t), Context{
-		Worktree: mustPwd(t),
-		Branch:   "wt",
-		RepoRoot: mustPwd(t),
-	})
-
 	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt"})
 	// DefaultBranch's git call (symbolic-ref ...) returns an error.
 	rig.git.on("symbolic-ref", "", "fatal: no origin remote",
 		errors.New("exit 128"))
@@ -293,11 +312,39 @@ func TestDispatchPR_DefaultBranchFails(t *testing.T) {
 	}
 }
 
+// setupPRWorktree aligns system pwd, chat SelectedCwd, and the
+// .nightme/gtw.yml location for a yml-present test. Fills in
+// Worktree / RepoRoot from the temp dir if the caller left them
+// blank (the common case). Returns the path so they can reference
+// it as Worktree / RepoRoot.
+//
+// loadDispatchContext reads cs.SelectedCwd() (not system pwd),
+// so we need both. The system-pwd fallback is kept for push
+// tests that haven't been migrated yet (commit_push_test.go).
+func setupPRWorktree(t *testing.T, rig *prTestRig, ctx Context) string {
+	t.Helper()
+	tmp := t.TempDir()
+	if ctx.Worktree == "" {
+		ctx.Worktree = tmp
+	}
+	if ctx.RepoRoot == "" {
+		ctx.RepoRoot = tmp
+	}
+	withCwd(t, tmp)
+	writeYml(t, tmp, ctx)
+	_ = rig.cs.SetSelectedCwd(tmp)
+	return tmp
+}
+
 // setupPRGit configures the rig's pushGit with responses for
 // the two rev-list invocations dispatchPR makes:
 //
 //   / rev-list @{u}..HEAD   → countUnpushed
 //   / rev-list main..HEAD   → countBaseAhead (base == "main")
+//
+// Also registers the rev-parse calls that fire when the yml is
+// absent (non-worktree path): rev-parse --show-toplevel +
+// rev-parse --abbrev-ref HEAD.
 //
 // Returns a helper that registers CreatePR / Detect calls; tests
 // just say what they want the upstream responses to be.
@@ -305,17 +352,16 @@ func setupPRGit(rig *prTestRig, unpushed, ahead int) {
 	rig.git.on("symbolic-ref", "origin/main", "", nil)
 	rig.git.onArgs([]string{"rev-list", "--count", "@{u}..HEAD"}, itoa10(unpushed), "", nil)
 	rig.git.onArgs([]string{"rev-list", "--count", "main..HEAD"}, itoa10(ahead), "", nil)
+	// Non-worktree mode fallbacks (loadDispatchContext calls
+	// these when there's no .nightme/gtw.yml):
+	rig.git.onArgs([]string{"rev-parse", "--show-toplevel"}, "/w", "", nil)
+	rig.git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, "main", "", nil)
 }
 
 func TestDispatchPR_UnpushedCommits(t *testing.T) {
-	withCwd(t, t.TempDir())
-	writeYml(t, mustPwd(t), Context{
-		Worktree: mustPwd(t),
-		Branch:   "wt-unpushed",
-		RepoRoot: mustPwd(t),
-	})
-
 	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{		Branch:   "wt-unpushed",
+	})
 	setupPRGit(rig, 3, 5) // 3 unpushed, 5 ahead → reject early on unpushed
 	rig.installDeps()
 
@@ -332,14 +378,9 @@ func TestDispatchPR_UnpushedCommits(t *testing.T) {
 }
 
 func TestDispatchPR_NothingToPR(t *testing.T) {
-	withCwd(t, t.TempDir())
-	writeYml(t, mustPwd(t), Context{
-		Worktree: mustPwd(t),
-		Branch:   "wt-empty",
-		RepoRoot: mustPwd(t),
-	})
-
 	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{		Branch:   "wt-empty",
+	})
 	setupPRGit(rig, 0, 0) // 0 ahead → "nothing to PR"
 	rig.installDeps()
 
@@ -356,20 +397,16 @@ func TestDispatchPR_NothingToPR(t *testing.T) {
 }
 
 func TestDispatchPR_NoAgentSelected(t *testing.T) {
-	withCwd(t, t.TempDir())
-	writeYml(t, mustPwd(t), Context{
-		Worktree: mustPwd(t),
-		Branch:   "wt",
-		RepoRoot: mustPwd(t),
-	})
-
 	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{		Branch:   "wt",
+	})
 	// Unregister the recordingAgent so SelectedAgent() returns "".
 	withAgent(t) // empty registry
 	setupPRGit(rig, 0, 5)
 	rig.installDeps()
 
 	cs := &chatsession.ChatSession{} // no SetSelectedAgent
+	_ = cs.SetSelectedCwd(t.TempDir()) // but we still need a cwd for loadDispatchContext
 	s := captureCh(t, cs)
 
 	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
@@ -383,14 +420,9 @@ func TestDispatchPR_NoAgentSelected(t *testing.T) {
 }
 
 func TestDispatchPR_AgentRunOnceFails(t *testing.T) {
-	withCwd(t, t.TempDir())
-	writeYml(t, mustPwd(t), Context{
-		Worktree: mustPwd(t),
-		Branch:   "wt",
-		RepoRoot: mustPwd(t),
-	})
-
 	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{		Branch:   "wt",
+	})
 	rig.agent.runOnceErr = errors.New("boom")
 	setupPRGit(rig, 0, 5)
 	rig.installDeps()
@@ -408,14 +440,9 @@ func TestDispatchPR_AgentRunOnceFails(t *testing.T) {
 }
 
 func TestDispatchPR_AgentOutputUnparsable(t *testing.T) {
-	withCwd(t, t.TempDir())
-	writeYml(t, mustPwd(t), Context{
-		Worktree: mustPwd(t),
-		Branch:   "wt",
-		RepoRoot: mustPwd(t),
-	})
-
 	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{		Branch:   "wt",
+	})
 	rig.agent.runOnceText = "I think the PR should be about..." // no fence
 	setupPRGit(rig, 0, 5)
 	rig.installDeps()
@@ -489,14 +516,9 @@ func TestDispatchPR_ResolveProvider_DetectFallback(t *testing.T) {
 	// inject the provider via deps.Detect (same as the yml path
 	// in tests; production would call Detect(ctx, url, prober)
 	// itself).
-	withCwd(t, t.TempDir())
-	writeYml(t, mustPwd(t), Context{
-		Worktree: mustPwd(t),
-		Branch:   "wt",
-		RepoRoot: mustPwd(t),
-	})
-
 	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{		Branch:   "wt",
+	})
 	setupPRGit(rig, 0, 5)
 	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 	rig.prov.SetCreatePRResp("https://github.com/octocat/hello/pull/7")
@@ -515,14 +537,9 @@ func TestDispatchPR_ResolveProvider_DetectFallback(t *testing.T) {
 }
 
 func TestDispatchPR_CreatePRExists(t *testing.T) {
-	withCwd(t, t.TempDir())
-	writeYml(t, mustPwd(t), Context{
-		Worktree: mustPwd(t),
-		Branch:   "wt",
-		RepoRoot: mustPwd(t),
-	})
-
 	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{		Branch:   "wt",
+	})
 	setupPRGit(rig, 0, 5)
 	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 	rig.prov.SetCreatePRErr(fmt.Errorf("%w: a PR for this branch already exists", ErrPRExists))
@@ -541,14 +558,9 @@ func TestDispatchPR_CreatePRExists(t *testing.T) {
 }
 
 func TestDispatchPR_CreatePRFails(t *testing.T) {
-	withCwd(t, t.TempDir())
-	writeYml(t, mustPwd(t), Context{
-		Worktree: mustPwd(t),
-		Branch:   "wt",
-		RepoRoot: mustPwd(t),
-	})
-
 	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{		Branch:   "wt",
+	})
 	setupPRGit(rig, 0, 5)
 	rig.git.on("remote", "git@github.com:octocat/hello.git", "", nil)
 	rig.prov.SetCreatePRErr(errors.New("401 Unauthorized"))
@@ -675,6 +687,7 @@ func TestDispatchPR_AgentFlagOverride(t *testing.T) {
 
 	cs := &chatsession.ChatSession{}
 	_ = cs.SetSelectedAgent("claude") // chat prefers claude, but -a opencode should win
+	_ = cs.SetSelectedCwd(t.TempDir())
 
 	git := newPushGit()
 	setupPRGit(&prTestRig{git: git, agent: opencode}, 0, 5)
@@ -702,6 +715,156 @@ func TestDispatchPR_AgentFlagOverride(t *testing.T) {
 	}
 	if !strings.Contains(s.lastText(), "✅ PR opened") {
 		t.Fatalf("expected success card, got:\n%s", s.lastText())
+	}
+}
+
+// -----------------------------------------------------------------------------
+// loadDispatchContext — non-worktree mode (no .nightme/gtw.yml)
+// -----------------------------------------------------------------------------
+
+// TestLoadDispatchContext_NoCwd covers the empty-chat-cwd case:
+// /gtw push or /gtw pr without /cwd first should fail fast with
+// the same prompt.
+func TestLoadDispatchContext_NoCwd(t *testing.T) {
+	rig := newPRTestRig(t)
+	rig.installDeps()
+	cs := rig.cs // SelectedCwd not set
+	s := captureCh(t, cs)
+
+	c, res := loadDispatchContext(context.Background(), cs, rig.deps, "chat", "msg")
+	if res == nil {
+		t.Fatalf("expected early-return Result, got Context=%+v", c)
+	}
+	if !strings.Contains(s.lastText(), "no active workspace") {
+		t.Fatalf("expected no-workspace reply, got:\n%s", s.lastText())
+	}
+}
+
+// TestLoadDispatchContext_NonWorktree covers a chat whose Cwd
+// points at a manually-checked-out branch with no /gtw fix
+// pre-amble (no .nightme/gtw.yml). Worktree / Branch / RepoRoot
+// must be derived from git rev-parse.
+func TestLoadDispatchContext_NonWorktree(t *testing.T) {
+	rig := newPRTestRig(t)
+	tmp := t.TempDir()
+	_ = rig.cs.SetSelectedCwd(tmp)
+
+	// No yml written. rig.git returns canned values for the
+	// rev-parse calls.
+	rig.git.onArgs([]string{"rev-parse", "--show-toplevel"}, tmp, "", nil)
+	rig.git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, "feat/manual", "", nil)
+	rig.installDeps()
+
+	c, res := loadDispatchContext(context.Background(), rig.cs, rig.deps, "chat", "msg")
+	if res != nil {
+		t.Fatalf("expected nil Result, got %+v", res)
+	}
+	if c.Worktree != tmp {
+		t.Fatalf("Worktree: want %q, got %q", tmp, c.Worktree)
+	}
+	if c.Branch != "feat/manual" {
+		t.Fatalf("Branch: want %q, got %q", "feat/manual", c.Branch)
+	}
+	if c.RepoRoot != tmp {
+		t.Fatalf("RepoRoot: want %q, got %q", tmp, c.RepoRoot)
+	}
+	if c.Mode != ModeLocal {
+		t.Fatalf("Mode: want %q, got %q", ModeLocal, c.Mode)
+	}
+	if c.Issue != -1 {
+		t.Fatalf("Issue: want -1, got %d", c.Issue)
+	}
+	if c.Repo != "" || c.Provider != "" {
+		t.Fatalf("Repo/Provider should be empty (Detect fallback), got %q/%q", c.Repo, c.Provider)
+	}
+}
+
+// TestLoadDispatchContext_NonWorktree_NotGitRepo covers the
+// "cwd is not inside a git repo" failure mode.
+func TestLoadDispatchContext_NonWorktree_NotGitRepo(t *testing.T) {
+	rig := newPRTestRig(t)
+	tmp := t.TempDir()
+	_ = rig.cs.SetSelectedCwd(tmp)
+	// rev-parse --show-toplevel errors (no .git ancestor)
+	rig.git.onArgs([]string{"rev-parse", "--show-toplevel"}, "",
+		"fatal: not a git repository", errors.New("exit 128"))
+	rig.installDeps()
+
+	s := captureCh(t, rig.cs)
+	_, res := loadDispatchContext(context.Background(), rig.cs, rig.deps, "chat", "msg")
+	if res == nil {
+		t.Fatalf("expected early-return Result")
+	}
+	if !strings.Contains(s.lastText(), "not inside a git repository") {
+		t.Fatalf("expected not-a-git-repo reply, got:\n%s", s.lastText())
+	}
+}
+
+// TestLoadDispatchContext_NonWorktree_DetachedHEAD covers a
+// detached-HEAD checkout — we refuse rather than guess a PR target.
+func TestLoadDispatchContext_NonWorktree_DetachedHEAD(t *testing.T) {
+	rig := newPRTestRig(t)
+	tmp := t.TempDir()
+	_ = rig.cs.SetSelectedCwd(tmp)
+	rig.git.onArgs([]string{"rev-parse", "--show-toplevel"}, tmp, "", nil)
+	rig.git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, "HEAD", "", nil)
+	rig.installDeps()
+
+	s := captureCh(t, rig.cs)
+	_, res := loadDispatchContext(context.Background(), rig.cs, rig.deps, "chat", "msg")
+	if res == nil {
+		t.Fatalf("expected early-return Result")
+	}
+	if !strings.Contains(s.lastText(), "detached HEAD") {
+		t.Fatalf("expected detached-HEAD reply, got:\n%s", s.lastText())
+	}
+}
+
+// TestDispatchPR_NonWorktree_HappyPath exercises /gtw pr end-to-end
+// on a non-/gtw fix branch: no yml, derived Branch / Worktree /
+// RepoRoot. The Detect fallback path provides the provider.
+func TestDispatchPR_NonWorktree_HappyPath(t *testing.T) {
+	opencode := &recordingAgent{name: "opencode", runOnceText: "```\nfeat: hi\n```"}
+	withAgent(t, opencode)
+
+	cs := &chatsession.ChatSession{}
+	_ = cs.SetSelectedAgent("opencode")
+	tmp := t.TempDir()
+	_ = cs.SetSelectedCwd(tmp)
+
+	git := newPushGit()
+	git.onArgs([]string{"rev-parse", "--show-toplevel"}, tmp, "", nil)
+	git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, "feat/manual", "", nil)
+	git.on("symbolic-ref", "origin/main", "", nil)
+	git.onArgs([]string{"rev-list", "--count", "@{u}..HEAD"}, "0", "", nil)
+	git.onArgs([]string{"rev-list", "--count", "main..HEAD"}, "5", "", nil)
+	git.onArgs([]string{"rev-list", "--count", "origin/main..HEAD"}, "5", "", nil)
+	git.on("remote", "git@github.com:octocat/hello.git", "", nil)
+	prov := newFakeGitProvider(ProviderGitHub, "github.com")
+	prov.SetCreatePRResp("https://github.com/octocat/hello/pull/7")
+	deps := HandlerDeps{Git: git, Detect: fakeDetect(prov)}
+
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "✅ PR opened") {
+		t.Fatalf("expected success card, got:\n%s", r)
+	}
+	if !strings.Contains(r, "feat/manual") {
+		t.Fatalf("expected branch name in card, got:\n%s", r)
+	}
+	// Detect fallback fires because c.Repo is empty.
+	detectedProv, owner, repo, derr := resolveProvider(context.Background(), Context{
+		RepoRoot: tmp,
+	}, deps)
+	if derr != nil {
+		t.Fatalf("resolveProvider: %v", derr)
+	}
+	if detectedProv == nil || owner != "octocat" || repo != "hello" {
+		t.Fatalf("Detect fallback: provider=%v owner=%q repo=%q", detectedProv, owner, repo)
 	}
 }
 

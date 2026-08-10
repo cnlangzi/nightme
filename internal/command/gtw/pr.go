@@ -27,7 +27,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -76,26 +75,9 @@ func dispatchPR(
 	chatID, messageID string,
 	args prArgs,
 ) (*Result, error) {
-	selectedCwd, err := pushCwd()
-	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			"❌ no active workspace. Send /cwd <path> first."), nil
-	}
-
-	c, err := ReadGTWYml(selectedCwd)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return reply(ctx, cs.Channel(), chatID, messageID,
-				"❌ no active fix to push in this chat\n"+
-					"hint: /cwd into the /gtw fix worktree first (its "+
-					"`.nightme/gtw.yml` is the push source of truth)."), nil
-		}
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err)), nil
-	}
-	if c.Worktree == "" || c.Branch == "" || c.RepoRoot == "" {
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			"❌ .nightme/gtw.yml is malformed (worktree/branch/repoRoot required)"), nil
+	c, res := loadDispatchContext(ctx, cs, deps, chatID, messageID)
+	if res != nil {
+		return res, nil
 	}
 
 	baseBranch, err := DefaultBranch(ctx, c.RepoRoot, deps.Git)
@@ -251,7 +233,16 @@ func buildPRPrompt(c Context, base string) string {
 	sb.WriteString("Only generate the title + body.\n\n")
 
 	sb.WriteString("## Context\n")
-	fmt.Fprintf(&sb, "Repository: %s\n", c.Repo)
+	if c.Repo != "" {
+		fmt.Fprintf(&sb, "Repository: %s\n", c.Repo)
+	} else {
+		// Detect-fallback path (and the new non-worktree path
+		// added in PR #105): we don't yet know the owner/repo.
+		// The agent will derive it from `git remote get-url
+		// origin` if needed for the body; the daemon still calls
+		// provider.CreatePR with the right values.
+		sb.WriteString("Repository: (resolve from `git remote get-url origin`)\n")
+	}
 	fmt.Fprintf(&sb, "Branch (head): %s\n", c.Branch)
 	fmt.Fprintf(&sb, "Base branch: %s\n", base)
 	fmt.Fprintf(&sb, "Working dir: %s\n", c.Worktree)

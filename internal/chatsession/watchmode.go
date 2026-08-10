@@ -2,9 +2,9 @@
 //
 // WatchMode controls whether the chat processes every incoming
 // message or only those that mention the bot (or @_all). The
-// decision is consulted by gateway.Handle when a non-mention
-// group message arrives (see docs/SPEC.md §3.1.1 + docs/channel/
-// feishu.md §6.11).
+// decision is consulted by chatsession.Manager.AcceptInbound
+// when a non-mention group message arrives (see docs/SPEC.md
+// §3.1.1 + docs/channel/feishu.md §6.11).
 //
 // DM chats ignore this value entirely at the gate: the channel
 // adapter sets Message.HasMention=true for every DM message
@@ -15,8 +15,11 @@
 // preserves the user's last-set preference.
 //
 // Lives in chatsession (next to its reader: ChatSession holds
-// it, SetWatchMode mutates it, gateway reads it). The
-// registry-side ChatSessionEntry persists it as a bare int so
+// it, SetWatchMode mutates it, Manager.AcceptInbound gates on
+// it). Previously the gate lived in gateway via a callback
+// injection (gateway.WithWatchModeResolver) — relocated here for
+// functional cohesion so the policy sits next to its state. The
+// registry-side ChatSessionEntry persists this as a bare int so
 // the registry package doesn't import this enum — see the
 // field-level comment on ChatSessionEntry.WatchMode.
 package chatsession

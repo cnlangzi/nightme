@@ -114,9 +114,13 @@ type InboundMessage struct {
 	//   - unknown/empty chat_type: defaults to true (safe fallback;
 	//     dropping is a worse failure than over-processing).
 	//
-	// The Gateway dispatcher uses this with ChatSession.WatchMode
-	// to drop non-mention group messages when WatchMode ==
-	// WatchModeMention (default). See docs/SPEC.md §3.1.1.
+	// The runtime messageDispatcher (cmd/nightme/run.go) passes
+	// this to chatsession.Manager.AcceptInbound, which combines it
+	// with ChatSession.WatchMode() to drop non-mention group
+	// messages when WatchMode == WatchModeMention (default). The
+	// gate used to live in gateway.applyWatchModeGate; it moved
+	// to chatsession so the policy sits next to its state. See
+	// docs/SPEC.md §3.1.1.
 	HasMention bool
 }
 

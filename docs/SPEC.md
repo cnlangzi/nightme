@@ -774,9 +774,26 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 | **Gateway** | 中枢 orchestrator：slash command 路由（**通过 Commander 抽象，不直接 import handlers_*.go**）、binding 表（chat_id ↔ ChatSession）、ChatSession 生命周期、Channel↔ChatSession↔AgentSession 跨层调度、outbound 路由（stamp `ReplyTo=userMsgID` 送到对应 Channel） | IM 协议细节、agent 内部协议、PTY/ACP 细节、Channel 内部渲染状态、命令实现细节（具体命令实现住 `internal/command/<name>/`） |
 | **Slash Command Layer**（Commander）住 `internal/command/`，由 `SlashCommandFactory` 装配 | 命令抽象层：定义 `Commander` / `SlashCommandFactory` / `SlashRegistry` / `RuntimeServices` 接口；声明 `ReactionRouter` 服务接口；提供通用 `preflight` / `reply` helper。各命令子包（`internal/command/<name>/cmd.go`）实现 `SlashCommandFactory`，Factory 构造函数直接拿 `*chatsession.Manager` | 命令的具体业务逻辑由各 `<name>` 子包实现；command 包本身**不** import gtw / gateway / channel 具体类（chatsession 是命令 Factory 的直接依赖） |
 | **ChatSession** | per chat 的会话上下文（持久化）：selectedCwd / selectedAgent / primaryAgent / InputBuffer FSM / `currentTurnUserMsgID` 跟踪 / AgentSession 池索引 | chat_id 之外没有"自己是谁"；Channel 协议细节；agent 内部协议；receipt 渲染；**slash command 详情；任何命令包路径；gtw / command / gateway 任何具体类型的名字**（强化） |
-| **AgentSession** | CLI 进程句柄；`(agent, cwd)` 1:1 唯一标识（immutable）；events() chan；sendText/sendBlocks；close | chat_id、ChatSession、binding、Channel、slash command |
+| **AgentSession**（住 `internal/agentsession/`）| CLI 进程句柄；`(agent, cwd)` 1:1 唯一标识（immutable）；events() chan；sendText/sendBlocks；close | chat_id、ChatSession、binding、Channel、slash command |
 | **Bridge** | nightme 与底层 AI Coding CLI 之间的通信抽象；`AgentSession` 接口（Events / SendText / SendBlocks / SendPermission / Close）；四种模式（ACP / SDK / PTY / JSON-IO） | chat、binding、ChatSession、Channel |
 | **Process Registry** | JSON 持久化层。两类 entry：`ChatSessionEntry`（chat_id ↔ ChatSession 绑定 + selectedCwd/selectedAgent/primaryAgent + AgentSession 索引）+ `AgentSessionEntry`（agent + cwd + pid + status）| 运行时语义；只持久化 |
+
+### 1.1a 包结构（v1.3.x refactor-agentsession）
+
+`AgentSession` 在 v1.3.x 期间从 `internal/chatsession/` 提取到独立的 `internal/agentsession/` 包。语义不变（仍是一等运行时单元 + 桥层 handle 持有者 + EventBus 拥有者），但分层更清晰：
+
+```
+internal/agent/         抽象:AgentSpec / Agent / Bridge / Mode / ContentBlock / Info / Starter
+                        ← 不依赖任何运行时
+internal/agentsession/  运行时单元:AgentSession + Prompt + EnrichedEvent + Spawner + Status
+                        ← 持有 *agent.Agent 句柄;EventBus 是 per-AS 私有
+internal/chatsession/   池管理:ChatSession + Manager + Channel (interface) + queue + persistence
+                        ← 持有 *agentsession.AgentSession 池
+```
+
+依赖方向严格自上而下（agentsession → agent, chatsession → agentsession → agent），无环。
+
+CS 通过 type aliases 暴露 AS 类型保持调用面简洁（`chatsession.AgentSession` = `agentsession.AgentSession`）。
 
 ### 1.2 三状态机，三个 owner（v1.2）
 
@@ -1179,7 +1196,7 @@ command.kill.Factory.Handle(ctx, rt, input)
   │   非空 → 作为 agentName,进入 KillAgent 分支
   ├ case /kill <agent>:
   │   result, err := kill.KillAgent(&kill.Cmd{CS: cs, Ctx: ctx}, agentName)
-  │     ├ chatsession.ErrAgentNotFound → "No <agent> session in <cwd> to kill"
+  │     ├ agentsession.ErrAgentNotFound → "No <agent> session in <cwd> to kill"
   │     └ 成功 → 返回 kill.Result
   └ case /kill:
       results, err := kill.KillAllAgents(&kill.Cmd{CS: cs, Ctx: ctx})
@@ -1316,7 +1333,7 @@ OutboundMessage{
 
 **v1.3.x 显式 UX 回归**：Feishu 用户消息上的 ✅ / 👎 反应**永久下线**（`MessageDone` / `MessageFailed` 物理删除）。用户消息 reaction 序列：`⏳ → 🔄 → （永远停在 🔄）`。终态进度 ✅ 由 receipt card 上独立的 PromptState 通路承载（运行结束时 reaction `DONE`），不再走用户消息。
 
-**Prompt 实体 + PromptState 平行 FSM**：F-53 起 `chatsession.Prompt` 是一等公民对象（见 [`feat/message_lifecycle.md`](./feat/message_lifecycle.md) §4.2），挂在 `AgentSession.currentPrompt` 上。Feishu receipt 内的 `PromptState` 同步收敛：`agent.PromptState` 整体从 `agent` 包私有化到 `internal/channel/feishu`，常量缩为 `Running` / `Done` 两值（`Pending` / `Succeeded` / `Failed` 物理删除；构造初始值改 `Running`；删 `Pending → Running` 转换判断）。与 MessageState 的关键区别：**PromptState 是 channel-internal 状态**（不走 wire event，每个 channel 各自的 receipt 自己观察 `agent.EventDone`/`EventError` 来 transition），而 MessageState 是抽象层广播事件（走 `OutboundMessage{Kind: OutMessageState}`）。两者都描述"消息处理到哪了"但回答的问题不同（投递 vs 执行），分别渲染到 user-message reaction 和 receipt card header。
+**Prompt 实体 + PromptState 平行 FSM**：F-53 起 `agentsession.Prompt` 是一等公民对象（见 [`feat/message_lifecycle.md`](./feat/message_lifecycle.md) §4.2），挂在 `AgentSession.currentPrompt` 上。Feishu receipt 内的 `PromptState` 同步收敛：`agent.PromptState` 整体从 `agent` 包私有化到 `internal/channel/feishu`，常量缩为 `Running` / `Done` 两值（`Pending` / `Succeeded` / `Failed` 物理删除；构造初始值改 `Running`；删 `Pending → Running` 转换判断）。与 MessageState 的关键区别：**PromptState 是 channel-internal 状态**（不走 wire event，每个 channel 各自的 receipt 自己观察 `agent.EventDone`/`EventError` 来 transition），而 MessageState 是抽象层广播事件（走 `OutboundMessage{Kind: OutMessageState}`）。两者都描述"消息处理到哪了"但回答的问题不同（投递 vs 执行），分别渲染到 user-message reaction 和 receipt card header。
 
 详见 [`feat/F-31-message-state.md`](./feat/F-31-message-state.md)（已 superseded；保留作 v1.3 历史参考）+ [`feat/message_lifecycle.md`](./feat/message_lifecycle.md)（v1.3.x 权威定义）。
 

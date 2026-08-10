@@ -9,7 +9,7 @@
 // In tests, a fake Spawner returns synthetic handles without
 // actually forking. This keeps the chat-session package free of any
 // direct dependency on internal/agent or internal/bridge.
-package chatsession
+package agentsession
 
 import (
 	"context"

@@ -19,7 +19,7 @@
 //   - Runs until either eventQueue is closed (Shutdown closed it)
 //     OR dispatchStop is closed (Shutdown interrupts early).
 //   - Returns via `defer close(dispatchDone)`.
-package chatsession
+package agentsession
 
 // startEventDispatch launches the dispatcher goroutine if not already
 // running. Single-launch guard via `dispatchStarted`.
@@ -95,4 +95,16 @@ func (as *AgentSession) eventDispatchLoop(stop chan struct{}) {
 				return
 			}
 		}
+}
+// InjectEvent is a test-only helper to push events directly into the
+// per-AS event queue (the same path the readpump uses in production).
+// It ensures the dispatcher is running before pushing so the event
+// reaches subscribers.
+//
+// Production code MUST NOT use this — the bridge's readpump is the
+// sole source of events. Tests use it to drive CS-level behavior
+// without standing up a real child process.
+func (as *AgentSession) InjectEvent(ev EnrichedEvent) {
+	as.ensureDispatcher()
+	as.eventQueue <- ev
 }

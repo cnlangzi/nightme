@@ -13,7 +13,7 @@
 //   5. Background-then-Activate-then-Background cycles cleanly
 //      — the model is "internal ctx management owned by AS,
 //      parent lifetime owned by caller".
-package chatsession
+package agentsession
 
 import (
 	"context"

@@ -17,8 +17,93 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/registry"
+)
+
+// Type aliases — let ChatSession use AgentSession types without
+// fully qualifying them. The aliases are intentional: ChatSession
+// is the higher-level pool manager and should not feel the cost of
+// the agentsession extraction at every call site.
+type (
+	AgentSession       = agentsession.AgentSession
+	Status             = agentsession.Status
+	Spawner            = agentsession.Spawner
+	Message            = agentsession.Message
+	EnrichedEvent      = agentsession.EnrichedEvent
+	EnrichedEventKind  = agentsession.EnrichedEventKind
+	PromptEndedChange  = agentsession.PromptEndedChange
+	LifecycleChange    = agentsession.LifecycleChange
+	AgentEventEnvelope = agentsession.AgentEventEnvelope
+	MessageStateEvent  = agentsession.MessageStateEvent
+	PromptEndedEvent   = agentsession.PromptEndedEvent
+	Prompt              = agentsession.Prompt
+)
+
+// Constructor + restorer re-exports.
+var (
+	NewAgentSession       = agentsession.NewAgentSession
+	FromAgentSessionEntry = agentsession.FromAgentSessionEntry
+	NewRegistrySpawner    = agentsession.NewRegistrySpawner
+	WithEventQueueCapacity = agentsession.WithEventQueueCapacity
+)
+
+// Re-exported constants.
+const (
+	MessageKindNormal = agentsession.MessageKindNormal
+	MessageKindQueue  = agentsession.MessageKindQueue
+
+	KindAgentEvent  = agentsession.KindAgentEvent
+	KindPromptEnded = agentsession.KindPromptEnded
+	KindLifecycle   = agentsession.KindLifecycle
+
+	PromptEndClean = agentsession.PromptEndClean
+)
+
+// MessageKind is a type alias (re-export).
+type (
+	MessageKind = agentsession.MessageKind
+)
+
+// PromptEndReason is a type; re-export it as a type alias.
+type (
+	PromptEndReason = agentsession.PromptEndReason
+	PromptState     = agentsession.PromptState
+)
+
+// Prompt state constants — re-export so downstream packages
+// (channel/feishu) can keep using chatsession.PromptRunning etc.
+const (
+	PromptRunning = agentsession.PromptRunning
+	PromptDone    = agentsession.PromptDone
+)
+
+// agentCwdKey is the ChatSession pool map key. Moved back from
+// agentsession package — it's a CS-level concept (the pool key
+// for CS's map[agentCwdKey]*AgentSession).
+type agentCwdKey struct {
+	Agent string
+	Cwd   string
+}
+
+// ErrAgentNotFound indicates a pool lookup miss. Callers may use
+// errors.Is to detect and decide whether to spawn.
+var ErrAgentNotFound = errors.New("chatsession: agent not in pool")
+
+// ErrNoSelectedAgent is returned by LookupSelectedAgentSession when
+// cs.selectedAgent is empty. The runtime seeds selectedAgent from
+// cfg.Primary at ChatSession construction (via
+// chatsession.NewManager.GetOrCreate); an empty primary at
+// construction indicates a misconfigured daemon (no global default
+// set in config.yaml).
+var ErrNoSelectedAgent = errors.New("chatsession: selectedAgent is empty (cfg.Primary snapshot was empty at construction)")
+
+// Re-export Status constants so call sites can stay terse.
+const (
+	StatusRunning  = agentsession.StatusRunning
+	StatusDetached = agentsession.StatusDetached
+	StatusExited   = agentsession.StatusExited
 )
 
 // ChatSession is the persistent per-chat session context.
@@ -1335,17 +1420,11 @@ func (cs *ChatSession) restartAgentSession(ctx context.Context, as *AgentSession
 	if cs.spawner == nil {
 		return agent.ErrRestartRequired
 	}
-	if h := as.Handle(); h != nil {
-		_ = h.Close()
-	}
-	as.asMu.Lock()
-	as.readpumpStarted = false
-	as.asMu.Unlock()
-	if err := as.respawn(ctx, cs.spawner, as.Args(), ""); err != nil {
-		as.SetSessionID("")
+	// HandlePTYRestart owns the full kill + respawn + readpump-reset
+	// + sessionID-clear lifecycle. CS just provides the launcher.
+	if err := as.HandlePTYRestart(ctx, cs.spawner); err != nil {
 		return fmt.Errorf("chatsession: restart %s at %s: %w", as.Agent, as.Cwd, err)
 	}
-	as.SetSessionID("")
 	return nil
 }
 

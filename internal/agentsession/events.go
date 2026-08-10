@@ -11,7 +11,7 @@
 //     的判断。能抽象出来的全部上行。
 //  3. 锚点可选:prompt 期事件 (KindAgentEvent / KindPromptEnded) 带
 //     UserMsgID + PromptID;AS 生命周期事件 (KindLifecycle) 不带锚点。
-package chatsession
+package agentsession
 
 import (
 	"time"

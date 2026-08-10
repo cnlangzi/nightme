@@ -16,7 +16,7 @@
 //     and emits `KindPromptEnded`.
 //   - Other events are wrapped as `KindAgentEvent` and pushed to
 //     eventQueue for the dispatcher.
-package chatsession
+package agentsession
 
 import (
 	"time"
@@ -239,4 +239,12 @@ func (as *AgentSession) endPrompt(reason PromptEndReason) {
 	case <-stop:
 		// shutdown wins; event lost
 	}
+}
+
+// EndPromptForTest is the public version of endPrompt for tests
+// that need to simulate prompt-end events. Same semantics as the
+// internal endPrompt — pushes a KindPromptEnded event and clears
+// currentPrompt.
+func (as *AgentSession) EndPromptForTest(reason PromptEndReason) {
+	as.endPrompt(reason)
 }

@@ -256,8 +256,7 @@ func FormatResults(label string, results []HookResult) string {
 		// fall back to the descriptive `⚠️ <msg>` line — same
 		// shape as before, semantics unchanged.
 		if r.Err != nil {
-			var exitErr *exec.ExitError
-			if errors.As(r.Err, &exitErr) {
+			if exitErr, ok := errors.AsType[*exec.ExitError](r.Err); ok {
 				fmt.Fprintf(&b, "  ❌ exit %d\n", exitErr.ExitCode())
 			} else {
 				fmt.Fprintf(&b, "  ⚠️ %v\n", r.Err)

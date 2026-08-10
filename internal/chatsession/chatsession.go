@@ -173,7 +173,7 @@ type ChatSession struct {
 	// default direction is OPPOSITE of ThinkMode's: ThinkMode's
 	// zero value is Show (preserve existing F-thread-route UX);
 	// ToolsMode's zero value is Hide (quiet by default; opt in).
-	toolsMode agent.ToolsMode
+	toolsMode ToolsMode
 
 	// Pool of AgentSessions keyed by (agent, cwd).
 	pool map[agentCwdKey]*AgentSession
@@ -308,7 +308,7 @@ func New(chatID, primaryAgent string, ch Channel) (*ChatSession, error) {
 		pool:             make(map[agentCwdKey]*AgentSession),
 		watchMode:        WatchModeMention, // F-watch default
 		thinkMode:        ThinkModeShow,    // F-think default
-		toolsMode:        agent.ToolsModeHide, // F-38 default (quiet by default)
+		toolsMode:        ToolsModeHide, // F-38 default (quiet by default)
 		channel:          ch,
 		createdAt:        time.Now(),
 		lastInteractionAt: time.Now(),
@@ -530,7 +530,7 @@ func (cs *ChatSession) ThinkMode() ThinkMode {
 // Concurrency: same pattern as SetWatchMode / SetThinkMode — take
 // ChatSession mutex, write, persist, release. The lock is NOT
 // held across any channel.Send reply call.
-func (cs *ChatSession) SetToolsMode(mode agent.ToolsMode) error {
+func (cs *ChatSession) SetToolsMode(mode ToolsMode) error {
 	cs.mu.Lock()
 	cs.toolsMode = mode
 	cs.lastInteractionAt = time.Now()
@@ -542,9 +542,9 @@ func (cs *ChatSession) SetToolsMode(mode agent.ToolsMode) error {
 // ToolsMode returns the current per-chat tool-event visibility.
 // Default value when never set is ToolsModeHide (set in New when
 // the registry has no persisted value). Direction is OPPOSITE of
-// ThinkMode's default — see internal/agent/tools_mode.go doc
+// ThinkMode's default — see tools_mode.go in this package
 // for the rationale. See docs/SPEC.md §3.1.3.
-func (cs *ChatSession) ToolsMode() agent.ToolsMode {
+func (cs *ChatSession) ToolsMode() ToolsMode {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.toolsMode
@@ -1479,9 +1479,9 @@ func (cs *ChatSession) entryLocked() *registry.ChatSessionEntry {
 		SelectedAgentSessionID: activeASID,
 		CreatedAt:            cs.createdAt,
 		LastInteractionAt:    cs.lastInteractionAt,
-		WatchMode:            cs.watchMode,
-		ThinkMode:            cs.thinkMode,
-		ToolsMode:            cs.toolsMode,
+		WatchMode:            int(cs.watchMode),
+		ThinkMode:            int(cs.thinkMode),
+		ToolsMode:            int(cs.toolsMode),
 	}
 }
 

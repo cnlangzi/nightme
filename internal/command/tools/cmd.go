@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 )
@@ -53,7 +52,7 @@ if len(input.Args) < 2 {
 		)), nil
 	}
 
-	mode, ok := agent.ParseToolsMode(strings.TrimSpace(input.Args[1]))
+	mode, ok := chatsession.ParseToolsMode(strings.TrimSpace(input.Args[1]))
 	if !ok {
 		return command.Reply(ctx, rt, fmt.Sprintf(
 			"Unknown tools mode %q. Usage: /tools on | /tools off",
@@ -66,7 +65,7 @@ if len(input.Args) < 2 {
 	}
 
 	replyText := fmt.Sprintf("Tools mode set to %s.", mode)
-	if mode == agent.ToolsModeShow {
+	if mode == chatsession.ToolsModeShow {
 		replyText += " Tool calls will appear in the message thread (one reply per tool, call + result merged)."
 	} else {
 		replyText += " Tool calls will be hidden; only the final answer will be shown."

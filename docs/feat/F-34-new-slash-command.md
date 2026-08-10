@@ -302,7 +302,7 @@ func (cs *ChatSession) NewActiveAgentSessions(ctx context.Context, agentName str
 
 ## 4. `/new` Slash Command
 
-`internal/gateway/handlers_new.go`（对应 `handlers_watch.go` 风格）：
+`internal/command/newcmd/cmd.go`（对应 `internal/command/watch/cmd.go` 风格；F-102 之后 handlers_*.go 全部迁移到 `internal/command/<name>/`）：
 
 ```go
 func handleNew(ctx context.Context, mgr *chatsession.Manager, channel Channel,
@@ -340,7 +340,7 @@ func handleNew(ctx context.Context, mgr *chatsession.Manager, channel Channel,
 }
 ```
 
-注册到 `internal/gateway/handlers_chatsession.go::RegisterChatSessionCommands`：
+注册到 `command.Commander`（[`internal/command/commander.go`](../../internal/command/commander.go)）—— runtime 在 `cmd/nightme/run.go` 把 `newcmd.Factory` 加进注册表：
 
 ```go
 gw.Register(gateway.Command{
@@ -438,7 +438,7 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 | `internal/bridge/acp/acp_test.go` | `New()` 发 `session/new`；验证 `s.sessionID` 被替换 + EventAgentConnected emit |
 | `internal/chatsession/new_test.go` | `ChatSession.NewActiveAgentSessions`：filter / 计数 / InputBuffer.Clear / Status 跳过 / firstErr 聚合 |
 | `internal/chatsession/agentsession_test.go` | `AgentSession.New` delegate：handle=nil 返回 ErrNotRunning |
-| `internal/gateway/handlers_new_test.go` | `handleNew` 命中 + 空 pool 报错 + `/new <agent>` 找不到 + 部分失败 reply |
+| `internal/command/newcmd/commands_test.go` | `Handle` 命中 + 空 pool 报错 + `/new <agent>` 找不到 + 部分失败 reply |
 
 ---
 
@@ -478,10 +478,10 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 | `internal/bridge/claudecode/session.go` | 实现 `New` | +6 |
 | `internal/bridge/pi/session.go` | 实现 `New`（RPC requestAsync）| +12 |
 | `internal/bridge/acp/session.go` | 实现 `New`（session/new + setSessionID）| +20 |
-| `internal/chatsession/agentsession.go` | `New` delegate | +10 |
+| `internal/agentsession/session.go` (F-102 重构后） | `New` delegate | +10 |
 | `internal/chatsession/chatsession.go` | `NewActiveAgentSessions` | +30 |
-| `internal/gateway/handlers_new.go` | 新文件 + `handleNew` | +60 |
-| `internal/gateway/handlers_chatsession.go` | 注册 `/new` 命令 | +8 |
+| `internal/command/newcmd/cmd.go` | `Handle` 实现 + `/new` 路径 | +60 |
+| `internal/command/commander.go` + `cmd/nightme/run.go` | 注册 `/new` 命令（`newcmd.Factory` 加进 `command.Commander`） | +8 |
 | 测试 6 文件 | bridge + chatsession + gateway | +200 |
 | **合计** | | **~360** |
 
@@ -490,5 +490,5 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 1. 改 `agent.AgentSession` 接口（编译会断 3 个 bridge；先 stub）
 2. 三 bridge 各自实现 `New`（claudecode 最简；acp 次之；pi 需要 RPC schema 验证）
 3. chatsession 包装 + `NewActiveAgentSessions`
-4. handlers_new.go + 注册
+4. `internal/command/newcmd/cmd.go` + 注册到 `command.Commander`
 5. 测试

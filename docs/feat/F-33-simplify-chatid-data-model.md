@@ -216,7 +216,7 @@ Adapter.Send(internal/channel/feishu/adapter.go)
 | `internal/gateway/messages.go:38` | 删 `InboundMessage.ChatType` 字段 |
 | `internal/gateway/messages.go:66-73` | 删 `IsDM()` 方法 |
 | `internal/gateway/binding.go:26` | 删 `BindingEntry.ChatType` 字段 + 注释 |
-| `internal/gateway/handlers_chatsession.go:276-282` | 删 `chatTypeFromMessage` |
+| `internal/gateway/handlers_chatsession.go:276-282` | 删 `chatTypeFromMessage`（handlers 文件后已统一迁移；`chatTypeFromMessage` 在仓库中无残留，可直接 grep 验证） |
 | `internal/gateway/gateway.go:515-523` | BindingEntry 写入去掉 ChatType 字段 |
 
 **ChatSession / Registry**:
@@ -325,7 +325,7 @@ Adapter.Send(internal/channel/feishu/adapter.go)
 - [ ] `internal/channel/feishu/adapter.go` 删 `normalizeChatType`
 - [ ] `internal/gateway/messages.go` 删 ChatType 类型 + 常量 + 字段 + IsDM
 - [ ] `internal/gateway/binding.go` 删 BindingEntry.ChatType
-- [ ] `internal/gateway/handlers_chatsession.go` 删 chatTypeFromMessage
+- [x] `internal/gateway/handlers_chatsession.go` 删 chatTypeFromMessage（已完成 + handlers 文件整段迁移；`chatTypeFromMessage` 在仓库中已无残留）
 - [ ] `internal/gateway/gateway.go` BindingEntry 写入去 ChatType
 - [ ] `internal/chatsession/chatsession.go` 删 ChatType 字段
 - [ ] `internal/chatsession/manager.go` RestoreFromRegistry 去 ChatType

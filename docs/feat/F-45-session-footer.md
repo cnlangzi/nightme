@@ -2,14 +2,15 @@
 
 > **Status**: ✅ 已落地（2026-08-05）；§1.7 F-48 follow-up（2026-08-06）
 > **§1.8 F-49 follow-up SUPERSEDED (2026-08-08)**：F-49 compaction tracking 整体删除（详见 [`F-49-compaction-counter.md`](./F-49-compaction-counter.md) OBSOLETE 标记）。本节"🗜 N"段及其相关 schema 字段（`CompactionCount`、`compactionCount`）全部作废。
+> **F-102 follow-up (2026-08-09)** — commit `4a88f3e` 把 `AgentSession` 抽到 `internal/agentsession/`，并重构 `CumulativeUsage` / `AccumulateUsage` / `ResetCumulative` 的语义：usage 现在跟随 `AgentResultEvent` 的 `Usage` 字段通过 accumulator 累积，**不再有 `ResetCumulative` / `AccumulateUsage` / `CumulativeUsage()` 这三个公开 API**。本文件中下文出现的方法签名属于重构前的设计；当前实现只剩 `SetModel` / `Model` / `PersistIfDirty` + `event.EventUsage` → accumulator 链路，详见 `internal/agentsession/`。
 > **F-46 增量**（2026-08-06）—decision cards 加 button + 原地 PATCH；详见 [`F-46-interactive-cards.md`](./F-46-interactive-cards.md)
 > **Milestone**: v1.3.x
 > **Scope**:
 > - `internal/agent/agent.go` — `UsageInfo` 搬到 `agent` 包（type alias in gateway）
-> - `internal/chatsession/agentsession.go` — `Model` / `CumulativeUsage` / `ResetCumulative` / `PersistIfDirty` API
-> - `internal/registry/agent_session_entry.go` — schema 加 `Model` / `CumulativeUsage`
+> - `internal/agentsession/session.go` — F-102 重构后 AgentSession 实体（`Model` / `PersistIfDirty` API；`CumulativeUsage` 链路已迁出到 `internal/agentsession/` accumulator + `AgentResultEvent.Usage`）—— 历史位置 `internal/chatsession/agentsession.go` 已废弃
+> - `internal/registry/agent_session_entry.go` — schema 加 `Model` 字段（`CumulativeUsage` 已不再单独持久化，由 accumulator 派生）
 > - `internal/gateway/messages.go` — `OutboundMessage.SessionContext *SessionContext` typed field
-> - `internal/gateway/handlers_chatsession.go` — `handleNew` 调 `ResetCumulative` + `PersistAgentSession`
+> - `internal/command/newcmd/cmd.go` — `/new` handler (`Handle`) 调 `mgr.PersistAgentSession`；原 `internal/gateway/handlers_chatsession.go::handleNew` 已迁移
 > - `cmd/nightme/run.go::newEventHandler` — `SetModel` / `AccumulateUsage` / stamp `SessionContext` / `PersistIfDirty`
 > - `internal/channel/feishu/usage_footer.go` (NEW) — `formatSessionFooter` helper
 > - `internal/channel/feishu/adapter.go` — `Send` 三个 main-chat case 拼 footer
@@ -884,22 +885,21 @@ if ev.Kind == agent.EventDone {
 
 **改动 E**：（已废弃）早期的 OutResult 缓冲机制。后续 bridge 重构把 Usage 合并到 ResultEvent 之后不再需要 —— 见 §2.5 changelog 末尾的 "single-event design" 注释。
 
-### 2.6 `internal/gateway/handlers_chatsession.go::handleNew`
+### 2.6 `internal/command/newcmd/cmd.go::Handle`（原 `internal/gateway/handlers_chatsession.go::handleNew`）
 
-**改动**：在调 `agentSession.New(ctx)` 之后立即清零：
+**改动**：在调 `agentSession.New(ctx)` 之后立刻持久化。`ResetCumulative` 在 F-102 重构里已删除（cumulative-usage 概念被替换为 `AgentResultEvent`-内 字段，accumulator 重构移走了清零 hook），所以这一步现在只做持久化：
 
 ```go
 // 既有：
 if err := as.New(ctx); err != nil { ... }
 
-// NEW: /new 是唯一清零 cumulative 的入口
-as.ResetCumulative()
+// NEW（F-45 原文追加 ResetCumulative + PersistAgentSession；F-102 后只剩 PersistAgentSession）
 _ = mgr.PersistAgentSession(as)
 ```
 
 **scope**：
-- `/new <agent>`：只清单个 AgentSession
-- `/new`：清 selectedCwd 下所有 AgentSession（pool 内）
+- `/new <agent>`：只重建单个 AgentSession
+- `/new`：重建 selectedCwd 下所有 AgentSession（pool 内）
 
 ### 2.7 `internal/channel/feishu/usage_footer.go` (NEW)
 
@@ -1019,7 +1019,7 @@ if footer != "" {
    - `cmd/nightme/run.go` 4 处改动（§2.5 改动 A/B/C/D）
 
 6. **`feat(gateway): /new handler ResetCumulative + PersistAgentSession`**
-   - `internal/gateway/handlers_chatsession.go::handleNew` 加 2 行
+   - `internal/command/newcmd/cmd.go::Handle` 加 2 行（原 `internal/gateway/handlers_chatsession.go::handleNew`；F-102 之后 slash command 已统一迁移到 `internal/command/<name>/`）
 
 7. **`feat(feishu): formatSessionFooter helper + 3 main-chat case 渲染 footer`**
    - 新文件 `internal/channel/feishu/usage_footer.go`
@@ -1046,7 +1046,7 @@ if footer != "" {
 | `TestPersistIfDirty_NoOpWhenClean` | `internal/chatsession/agentsession_test.go` | dirty=false 时 PersistIfDirty 不调 persist callback |
 | `TestPersistIfDirty_DirtyResets` | `internal/chatsession/agentsession_test.go` | dirty=true 时调一次 callback，dirty 立即重置（不会双重落盘） |
 | `TestEntry_RoundtripPreserves` | `internal/chatsession/agentsession_test.go` | `Entry() → JSON marshal → unmarshal → FromAgentSessionEntry` 字段全相等 |
-| `TestHandleNew_ResetsCumulative` | `internal/gateway/handlers_new_test.go` (EXTEND) | `/new` 后 SelectedAgentSession.CumulativeUsage() 全零 + 持久化 |
+| ~~`TestHandleNew_ResetsCumulative`~~ | ~~`internal/gateway/handlers_new_test.go`~~ (OBSOLETE, **F-102 重构已删**） | F-102 之后 `ResetCumulative` / `CumulativeUsage` API 不再存在 —— usage 累积改走 `internal/agentsession/` accumulator + `AgentResultEvent.Usage`。此 case 已被 `TestHandleNew_PersistsAgentSession`（在 `internal/command/newcmd/commands_test.go`）取代，只断言 `/new` 后持久化路径 |
 | `TestFormatSessionFooter_*` | `internal/channel/feishu/usage_footer_test.go` (NEW) | nil / all-zero / 仅 in / 含 cost / cache 标记 / 大数缩写 |
 | `TestSend_OutReply_AppendsFooter` | `internal/channel/feishu/adapter_test.go` (EXTEND) | msg.SessionContext 非 nil 时，sendContent 收到 body 包含 footer 行 |
 | `TestSend_OutResult_AppendsFooter` | 同上 | 同上 for OutResult |

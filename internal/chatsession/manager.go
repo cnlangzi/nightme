@@ -287,9 +287,12 @@ func (m *Manager) RestoreFromRegistry() error {
 			WithPersistence(m.csFile, m.asFile)
 		cs.selectedCwd = entry.SelectedCwd
 		cs.selectedAgent = entry.SelectedAgent
-		cs.watchMode = entry.WatchMode // F-watch: 0 == WatchModeMention (default, safe)
-		cs.thinkMode = entry.ThinkMode // F-think: 0 == ThinkModeShow (default; preserve F-thread-route behavior)
-		cs.toolsMode = entry.ToolsMode // F-38: 0 == ToolsModeHide (default; quiet by default)
+		// Registry persists bare int; ChatSession fields are
+		// typed enums. Cast on read — Go zero-value semantics
+		// preserve the safe default when the int is 0.
+		cs.watchMode = WatchMode(entry.WatchMode) // 0 == WatchModeMention (default, safe)
+		cs.thinkMode = ThinkMode(entry.ThinkMode) // 0 == ThinkModeShow (default; preserve F-thread-route behavior)
+		cs.toolsMode = ToolsMode(entry.ToolsMode) // 0 == ToolsModeHide (default; quiet by default)
 		cs.lastInteractionAt = entry.LastInteractionAt
 		// commit fix-6: clear selectedAS on restore. The persisted
 		// selectedAgentSessionId points at an AgentSession whose

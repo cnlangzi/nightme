@@ -349,7 +349,7 @@ type OutboundMessage struct {
 
 **为什么不叫 v2.0**：v1.3 核心不变式全部保留。F-think 是：(a) 一个新 per-chat toggle（镜像 F-watch 的模式），(b) 一个 OutThinking 渲染升级（不引入新 Kind、不动 Gateway / ChatSession）。两件事都在 v1.3.x 范畴内。
 
-**详细落地**：见 `internal/chatsession/thinkmode.go` + `internal/gateway/handlers_think.go` + `cmd/nightme/run.go::newEventHandler` + `internal/channel/feishu/thinking_card.go`。（枚举定义现在统一在 `chatsession`，registry 侧 `ChatSessionEntry.ThinkMode` 持久化为裸 `int`，读侧由 `Manager.RestoreFromRegistry` 做 `ThinkMode(int)` cast。）
+**详细落地**：见 `internal/chatsession/thinkmode.go` + `internal/command/think/cmd.go` + `cmd/nightme/run.go::newEventHandler` + `internal/channel/feishu/thinking_card.go`。（枚举定义现在统一在 `chatsession`，registry 侧 `ChatSessionEntry.ThinkMode` 持久化为裸 `int`，读侧由 `Manager.RestoreFromRegistry` 做 `ThinkMode(int)` cast；slash 命令已迁移到 `internal/command/<name>/`，注册走 `command.Commander` 接口。）
 
 ## 0.9 文档变更摘要（v1.3.x F-41 增量，2026-08-05）
 
@@ -706,7 +706,7 @@ type OutboundMessage struct {
 
 **为什么不叫 v2.0**：v1.3 核心不变式全部保留。F-38 是：(a) 一个新 per-chat toggle（镜像 F-think 的模式，但默认方向相反），(b) 一个 OutToolStart/End 渲染升级（不引入新 Kind、不动 Gateway / ChatSession；纯 Channel 自治的 PATCH 合并）。两件事都在 v1.3.x 范畴内。
 
-**详细落地**：见 `internal/registry/tools_mode.go` + `internal/chatsession/toolsmode.go` + `internal/gateway/handlers_tools.go` + `cmd/nightme/run.go::newEventHandler` + `internal/channel/feishu/tool_thread_merge.go` + `internal/channel/feishu/adapter.go::Send`。
+**详细落地**：见 [`internal/chatsession/tools_mode.go`](./internal/chatsession/tools_mode.go) + `internal/command/tools/cmd.go` + `cmd/nightme/run.go::newEventHandler` + `internal/channel/feishu/tool_thread_merge.go` + `internal/channel/feishu/adapter.go::Send`。
 
 ---
 
@@ -1584,7 +1584,7 @@ buildThinkingCard("💭 <text>")  →  Card 2.0 JSON
 - runtime EventHandler（`cmd/nightme/run.go::newEventHandler`）：gate 决策点，读 `cs.ThinkMode()`
 - Channel adapter：照常处理到达的 OutboundMessage，不感知 ThinkMode
 
-**详细落地**：见 [`internal/gateway/handlers_think.go`](./internal/gateway/handlers_think.go) + [`cmd/nightme/run.go::newEventHandler`](./cmd/nightme/run.go) + [`internal/channel/feishu/thinking_card.go`](./internal/channel/feishu/thinking_card.go)。
+**详细落地**：见 [`internal/command/think/cmd.go`](./internal/command/think/cmd.go) + [`cmd/nightme/run.go::newEventHandler`](./cmd/nightme/run.go) + [`internal/channel/feishu/thinking_card.go`](./internal/channel/feishu/thinking_card.go)。`/think` 由 `command.Commander`（[`internal/command/commander.go`](./internal/command/commander.go)）路由，ChatSession 持有 `ThinkMode` 状态、registry 侧 `ChatSessionEntry.ThinkMode` 持久化为裸 `int`，读侧由 `Manager.RestoreFromRegistry` 做 `ThinkMode(int)` cast。
 
 ### 3.1.3 ToolsMode：per-chat 工具调用显示开关 + 合并渲染（F-38）
 
@@ -1634,7 +1634,7 @@ mergeToolReply(om_xxx, "● Bash(ls)\n⎿  💻 Bash → 3 lines")
 - Channel adapter：照常处理到达的 OutboundMessage，不感知 ToolsMode；Feishu 自决是否合并
 - 合并实现：Feishu adapter 自治（`internal/channel/feishu/tool_thread_merge.go`）；不动抽象层
 
-**详细落地**：见 [`internal/registry/tools_mode.go`](./internal/registry/tools_mode.go) + [`internal/chatsession/toolsmode.go`](./internal/chatsession/toolsmode.go) + [`internal/gateway/handlers_tools.go`](./internal/gateway/handlers_tools.go) + [`cmd/nightme/run.go::newEventHandler`](./cmd/nightme/run.go) + [`internal/channel/feishu/tool_thread_merge.go`](./internal/channel/feishu/tool_thread_merge.go) + [`internal/channel/feishu/adapter.go::Send`](./internal/channel/feishu/adapter.go)。
+**详细落地**：见 [`internal/chatsession/tools_mode.go`](./internal/chatsession/tools_mode.go) + `internal/command/tools/cmd.go` + [`cmd/nightme/run.go::newEventHandler`](./cmd/nightme/run.go) + [`internal/channel/feishu/tool_thread_merge.go`](./internal/channel/feishu/tool_thread_merge.go) + [`internal/channel/feishu/adapter.go::Send`](./internal/channel/feishu/adapter.go)。
 
 ### 3.2 状态转换触发器（v1.2）
 
@@ -1854,9 +1854,9 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 - ⏭ **F-watch（WatchMode per-chat 群消息全收 + mention strip）**：
   - `internal/channel/channel.go` `Message.HasMention bool` 字段 + 接口扩展
   - `internal/channel/feishu/adapter.go::handleMessage` 加 mention strip + `HasMention` 计算
-  - `internal/chatsession/chat_session.go` `WatchMode` 类型 + getter/setter
-  - `internal/chatsession/registry.go` `ChatSessionEntry.WatchMode` 字段
-  - `internal/gateway/handlers_watch.go` 新文件：`handleWatch` + `/watch` 注册
+  - `internal/chatsession/watchmode.go` `WatchMode` 类型 + getter/setter（位于 `chat_session.go` → `chatsession.go` 重构后独立成 `watchmode.go`）
+  - `internal/registry/chat_session_entry.go` `ChatSessionEntry.WatchMode` 字段（裸 `int`；F-102 重构后 `WatchMode`/`ThinkMode`/`ToolsMode` 全部统一到 `chatsession/`，registry 只持有裸 int 槽位）
+  - `internal/command/watch/cmd.go`：`/watch` 处理器（`Handle` 方法），注册走 `command.Commander`
   - `internal/gateway/gateway.go::Handle` 入口加 `HasMention` gate
   - `internal/auth/feishu/feishu.go::DefaultAddons` 加 `im:message.group_msg`
   - `internal/auth/feishu/feishu_test.go` 加 case
@@ -1894,7 +1894,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 7. mgr.RestoreFromRegistry()          # 重建内存中 ChatSession 池 (AgentSession 状态=Detached)
 8. ch.Start()                         # Feishu WebSocket / echo channel
 9. gw := gateway.New(newMessageDispatcher(mgr, ch, cfg.Primary), nil)
-10. RegisterChatSessionCommands(gw, mgr, ch, cfg.Primary)
+10. 注册 slash-command factories 到 `command.Commander`（`internal/command/commander.go`）；`cmd/nightme/run.go` 把各 `internal/command/<name>/.Factory` 加进注册表
 11. for each cs in mgr.List(): cs.SetEventHandler(newEventHandler(ch, logger))
 12. gwImpl.AttachChannels(ch) + gwImpl.Start()
 13. block on signal / ctx.Done()

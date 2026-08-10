@@ -2,10 +2,8 @@
 
 > **Status**: Implemented (2026-08-04)
 > **Scope**: v1.3.x F-thread-route follow-up
-> **Files**: `internal/registry/tools_mode.go`, `internal/chatsession/toolsmode.go`,
-> `internal/gateway/handlers_tools.go`, `cmd/nightme/run.go::newEventHandler`,
-> `internal/channel/feishu/tool_thread_merge.go`,
-> `internal/channel/feishu/adapter.go::Send`
+> **Files (current)**:`internal/chatsession/tools_mode.go`、`internal/command/tools/cmd.go`、`cmd/nightme/run.go::newEventHandler`、`internal/channel/feishu/tool_thread_merge.go`、`internal/channel/feishu/adapter.go::Send`
+> **Files (original F-38 commit, 已被 F-102 重构迁移)**:`internal/registry/tools_mode.go`（已并入 `chatsession/tools_mode.go`）、`internal/chatsession/toolsmode.go`（已改名为 `tools_mode.go`）、`internal/gateway/handlers_tools.go`（slash 命令已迁移到 `internal/command/<name>/`）
 > **Related**: [`F-think`](./F-29-think-mode-toggle.md) (mirrored pattern),
 > [`F-watch`](./F-27-watch-mode-toggle.md) (mirror toggle), F-thread-route (predecessor)
 
@@ -334,16 +332,14 @@ becomes two thread replies again (pre-F-38 UX).
 
 | File | Change |
 |------|--------|
-| `internal/registry/tools_mode.go` | NEW — `ToolsMode` enum + `ParseToolsMode` + `String` |
-| `internal/registry/tools_mode_test.go` | NEW — round-trip, missing-field default, omitempty on zero, type aliases |
-| `internal/registry/chat_session_entry.go` | Add `ToolsMode ToolsMode` field with `omitempty` |
-| `internal/chatsession/toolsmode.go` | NEW — re-export of `ToolsMode` + `ParseToolsMode` |
-| `internal/chatsession/toolsmode_test.go` | NEW — type alias assertion, parse delegation, default-is-Hide |
-| `internal/chatsession/chatsession.go` | Add `toolsMode` field, default `ToolsModeHide` in `New()`, `SetToolsMode` / `ToolsMode()`, `entryLocked` includes the field |
-| `internal/chatsession/manager.go` | `RestoreFromRegistry` restores `cs.toolsMode = entry.ToolsMode` |
-| `internal/gateway/handlers_tools.go` | NEW — `handleTools` (mirrors `handleThink`) |
-| `internal/gateway/handlers_tools_test.go` | NEW — 6 sub-tests covering toggle, aliases, lazy-create, registration, default, independence |
-| `internal/gateway/handlers_chatsession.go` | Register `tools` command alongside `think` |
+| `internal/chatsession/tools_mode.go` | NEW — `ToolsMode` enum + `ParseToolsMode` + `String`（F-102 重构后从 `internal/registry/tools_mode.go` 搬过来；不再有 alias 文件） |
+| `internal/chatsession/tools_mode_test.go` | NEW — round-trip, missing-field default, omitempty on zero, type-safety |
+| `internal/registry/chat_session_entry.go` | Add `ToolsMode int` field with `omitempty`（F-102 后由 `agent.ToolsMode` 改为裸 int） |
+| `internal/chatsession/chatsession.go` | Add `toolsMode` field, default `ToolsModeHide` in `New()`, `SetToolsMode` / `ToolsMode()`, persistence cast `int(cs.toolsMode)` |
+| `internal/chatsession/manager.go` | `RestoreFromRegistry` restores `cs.toolsMode = ToolsMode(entry.ToolsMode)` |
+| `internal/command/tools/cmd.go` | NEW — `/tools` slash command (`Handle` method；与 `think/cmd.go` 同形态) |
+| `internal/command/tools/commands_test.go` | NEW — 6 sub-tests covering toggle, aliases, lazy-create, registration, default, independence |
+| `internal/command/commander.go` + `cmd/nightme/run.go` | Register `tools` command alongside `think`（走 `command.Commander` 注册表，不再用单点 `RegisterChatSessionCommands`） |
 | `cmd/nightme/run.go::newEventHandler` | Add `ToolsMode` gate after `ThinkMode` gate |
 | `cmd/nightme/run_test.go` | 5 new tests: Show-passes-through, Hide-drops-both, Hide-doesn't-affect-other, persists-across-invocations, Tools+Think-independent; existing `HideDoesNotAffectOtherKinds` updated to opt into `/tools on` for the OutToolStart assertion |
 | `internal/channel/feishu/adapter.go` | Add `toolEventBuf` + `mergeTextFunc` fields; new `postThreadReplyWithID` helper; `OutToolStart` / `OutToolEnd` cases rewritten to merge; `Adapter.Stop` calls `clearAllToolEvents` |

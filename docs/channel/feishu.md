@@ -443,8 +443,8 @@ text, hasMention := stripAndDetectMention(
 **背景**：飞书默认 `im:message.group_at_msg:readonly` 只让 bot 收 @ 自己的消息。nightme F-watch 反转：bot 默认收全群（需要 `im:message.group_msg` scope，默认在 `DefaultAddons()` 里），由 `ChatSession.WatchMode` 在 nightme 侧决定要不要处理。
 
 **实现位置**：
-- `internal/chatsession/chat_session.go`：`WatchMode` 类型 + getter / setter
-- `internal/gateway/handlers_watch.go`：`/watch on|off` slash command handler
+- `internal/chatsession/watchmode.go`：`WatchMode` 类型 + getter / setter（位于 `chat_session.go` → `chatsession.go` 重构后独立成 `watchmode.go`）
+- `internal/command/watch/cmd.go`：`/watch on|off` slash command handler（注册走 `command.Commander`）
 - `internal/gateway/gateway.go::Handle`：`HasMention` + `WatchMode` gate
 
 **`/watch` slash command**：
@@ -1411,8 +1411,8 @@ WebSearch  -> 10 results
 
 **实施步骤**(详见 F-38 §8):
 
-1. **Foundation**:`internal/registry/tools_mode.go` + `internal/chatsession/toolsmode.go`;`ChatSession.toolsMode` + `SetToolsMode` / `ToolsMode()`;`Manager.RestoreFromRegistry` 恢复;`ChatSessionEntry.ToolsMode` JSON 字段
-2. **Slash command + gate**:`internal/gateway/handlers_tools.go`(镜像 `handleThink`);`RegisterChatSessionCommands` 注册;`cmd/nightme/run.go::newEventHandler` 在 ThinkMode gate 后加 ToolsMode gate
+1. **Foundation**:`internal/chatsession/tools_mode.go`;`ChatSession.toolsMode` + `SetToolsMode` / `ToolsMode()`;`Manager.RestoreFromRegistry` 恢复；`ChatSessionEntry.ToolsMode` 字段为裸 `int`
+2. **Slash command + gate**:`internal/command/tools/cmd.go`（镜像 `think/cmd.go`）;通过 `command.Commander` 注册;`cmd/nightme/run.go::newEventHandler` 在 ThinkMode gate 后加 ToolsMode gate
 3. **Feishu merge**:`internal/channel/feishu/tool_thread_merge.go`(`toolEventEntry` + `pushToolStart` / `popToolStart` / `clearToolEvents` / `clearAllToolEvents` / `mergeToolReply`);`Adapter.toolEventBuf` + `mergeTextFunc` hookable field;`postThreadReplyWithID` sibling helper;`OutToolStart` / `OutToolEnd` cases 重写;`Adapter.Stop` 调 `clearAllToolEvents`
 4. **Tests**:registry round-trip + missing-field + omitempty;chatsession type-alias + default-is-Hide;handlers / event handler gate + 独立性;Feishu FIFO + miss + empty msg_id + parallel tool_use + cross-turn isolation + PATCH failure fallback
 

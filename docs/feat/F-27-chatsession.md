@@ -374,7 +374,7 @@ Each ChatSession has at most **one** active readPump goroutine
 
 **Trigger points** (where the runtime calls `StartReadPump`):
 - After `/use` resolves the new active AgentSession
-  (`internal/gateway/handlers_chatsession.go::handleUse`).
+  (`internal/command/use/cmd.go::Handle`)。
 
 **Why not auto-start on spawn?** LookupSelectedAgentSession does
 **not** auto-start the pump — keeps ChatSession unit-testable

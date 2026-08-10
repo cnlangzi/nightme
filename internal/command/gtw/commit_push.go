@@ -67,7 +67,7 @@ func dispatchPush(
 	if strings.TrimSpace(statusOut) == "" {
 		return pushClean(ctx, cs, deps, chatID, messageID, c)
 	}
-	return pushDirty(ctx, cs, chatID, messageID, c, args, ymlAgent)
+	return pushDirty(ctx, cs, deps, chatID, messageID, c, args, ymlAgent)
 }
 
 // pushClean handles the clean-worktree branch:
@@ -80,6 +80,16 @@ func dispatchPush(
 // push. We do this so the user gets fast feedback on the common
 // "I'm just checking" case. The user can still run `git push`
 // manually if upstream tracking is broken.
+//
+// After programmaticPush returns nil (claimed success), we
+// re-count unpushed. If it's still > 0 we retry once — git push
+// can silently no-op on transient network errors that the
+// command exit code doesn't surface (e.g. partial TCP close,
+// remote returns 200 but the refs aren't updated). One retry
+// catches the common race; if the retry also leaves unpushed
+// commits behind, we surface the actual commit list so the
+// user can investigate (network/auth/protection rule on the
+// remote).
 func pushClean(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
@@ -102,6 +112,15 @@ func pushClean(
 		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf("❌ git push failed: %v\n%s", err, out)), nil
 	}
+
+	// Post-push verification: programmaticPush returning nil is
+	// necessary but not sufficient (network race, remote silently
+	// rejected, etc.). Re-count and retry once if any commit
+	// didn't actually land upstream.
+	if verifyMsg := verifyPushedAndRetry(ctx, deps, c, out); verifyMsg != "" {
+		return reply(ctx, cs.Channel(), chatID, messageID, verifyMsg), nil
+	}
+
 	// Format 3 (see gtw/README.md §2.3): opaque content block.
 	// Title names the action, `> <branch>` line names the entity,
 	// raw git push output follows verbatim. The previous
@@ -115,6 +134,116 @@ func pushClean(
 		c.Branch, strings.TrimRight(out, "\n"),
 	)
 	return reply(ctx, cs.Channel(), chatID, messageID, body), nil
+}
+
+// verifyPushedAndRetry re-counts unpushed after a claimed-successful
+// push. If anything is still missing, it retries programmaticPush
+// once; if the retry also leaves commits behind, it returns the
+// formatted error message naming the unpushed commits. Empty
+// return = push verified successful, caller should report success.
+//
+// Critical: countUnpushed errors MUST be checked, not discarded.
+// If we ignored the error and reported "✅ pushed" based on the
+// zero value of unpushed (which is 0), a real verification
+// failure (NFS unmount, worktree removed, permission denied) would
+// surface as a green checkmark that lies to the user.
+func verifyPushedAndRetry(ctx context.Context, deps HandlerDeps, c Context, firstOut string) string {
+	unpushed, err := countUnpushed(ctx, c.Worktree, c.Branch, deps)
+	if err != nil {
+		return fmt.Sprintf("⚠️ pushed (claimed) but verification failed: %v", err)
+	}
+	if unpushed == 0 {
+		return ""
+	}
+
+	// Retry once.
+	_, err = programmaticPush(ctx, deps, c)
+	if err != nil {
+		return fmt.Sprintf(
+			"❌ push reported success but %d commits on %s still don't appear on origin/%s\n"+
+				"first attempt stderr: %s\n"+
+				"retry error: %v\n"+
+				"hint: check `git push -v %s` — likely network or remote protection rule.\n\n"+
+				"unpushed commits:\n%s",
+			unpushed, c.Branch, c.Branch,
+			strings.TrimSpace(firstOut), err, c.Branch,
+			unpushedCommitsForDisplay(ctx, c.Worktree, c.Branch, deps),
+		)
+	}
+
+	unpushed, err = countUnpushed(ctx, c.Worktree, c.Branch, deps)
+	if err != nil {
+		return fmt.Sprintf(
+			"❌ %d commits on %s couldn't be re-counted after retry: %v\n"+
+				"hint: check `git push -v %s` and `git status` in the worktree.",
+			unpushed, c.Branch, err, c.Branch,
+		)
+	}
+	if unpushed == 0 {
+		return "" // retry succeeded
+	}
+
+	return fmt.Sprintf(
+		"❌ %d commits on %s still don't appear on origin/%s after retry\n"+
+			"hint: check `git push -v %s` — likely network or remote protection rule.\n\n"+
+			"unpushed commits:\n%s",
+		unpushed, c.Branch, c.Branch, c.Branch,
+		unpushedCommitsForDisplay(ctx, c.Worktree, c.Branch, deps),
+	)
+}
+
+// verifyAgentPushedAndRecover is the post-agent sanity check used
+// by pushDirty. After the agent claims it committed and pushed,
+// we independently verify both:
+//
+//  1. uncommitted files: if any remain, the agent skipped them
+//     (intentionally or not). Surface the file list and tell
+//     the user to either commit them manually or re-run
+//     /gtw push. We do NOT re-invoke the agent — the same
+//     agent already had a chance and chose to leave these
+//     behind.
+//
+//  2. unpushed commits: if any remain, the agent's commit
+//     succeeded but the push didn't (network race, non-FF,
+//     etc.). Try programmaticPush once — same retry semantics
+//     as pushClean — and surface the commit list if the retry
+//     also leaves things behind.
+//
+// Returns "" when both checks pass; the caller should report
+// success in that case.
+func verifyAgentPushedAndRecover(ctx context.Context, deps HandlerDeps, c Context) string {
+	uncommitted, err := listUncommittedFiles(ctx, c.Worktree, deps)
+	if err != nil {
+		return fmt.Sprintf("⚠️ agent finished but failed to verify clean state: %v", err)
+	}
+	if len(uncommitted) > 0 {
+		return fmt.Sprintf(
+			"⚠️ agent finished but %d file(s) are still uncommitted in %s:\n"+
+				"  %s\n"+
+				"hint: commit them manually, or re-run /gtw push to retry.\n"+
+				"  (the agent was given a chance to commit them — re-invoking it automatically won't necessarily help)",
+			len(uncommitted), c.Worktree,
+			strings.Join(uncommitted, "\n  "),
+		)
+	}
+
+	// uncommitted is clean → check push.
+	unpushed, err := countUnpushed(ctx, c.Worktree, c.Branch, deps)
+	if err != nil {
+		return fmt.Sprintf("⚠️ agent finished but failed to verify push state: %v", err)
+	}
+	if unpushed == 0 {
+		return ""
+	}
+
+	// Agent committed but the push didn't land — let
+	// verifyPushedAndRetry own the retry+verify loop. Pass ""
+	// for firstOut because the agent's own push is the
+	// "attempt 0" and we don't have its output captured here.
+	if verifyMsg := verifyPushedAndRetry(ctx, deps, c, ""); verifyMsg != "" {
+		return verifyMsg
+	}
+	return ""
 }
 
 // pushDirty handles the dirty-worktree branch — delegates the
@@ -139,6 +268,7 @@ func pushClean(
 func pushDirty(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
+	deps HandlerDeps,
 	chatID, messageID string,
 	c Context,
 	args pushArgs,
@@ -189,6 +319,33 @@ func pushDirty(
 	if err != nil {
 		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf("❌ agent %s failed: %v", agentName, err)), nil
+	}
+
+	// Post-agent verification: the agent may have committed and
+	// pushed (the happy path), but it may also have left files
+	// uncommitted or the push may have silently failed (network
+	// race, non-fast-forward, …). We check both and take
+	// corrective action.
+	//
+	//   - uncommitted > 0 → agent didn't commit everything.
+	//     Surface the file list so the user can commit manually
+	//     or run /gtw push again to retry. We do NOT re-invoke
+	//     the agent automatically — the same agent already had
+	//     a chance and chose to leave these behind, possibly
+	//     deliberately (e.g. secrets, generated files). User
+	//     judgment is required.
+	//
+	//   - unpushed > 0 → agent committed but the push didn't
+	//     reach origin (or HEAD@{u} is on a different branch).
+	//     Try programmaticPush once more before giving up — git
+	//     push can no-op on transient errors that exit 0.
+	postMsg := verifyAgentPushedAndRecover(ctx, deps, c)
+	if postMsg != "" {
+		body := postMsg
+		if text != "" {
+			body += "\n\nagent reply (for context):\n" + indentLines(text, "  ")
+		}
+		return reply(ctx, cs.Channel(), chatID, messageID, body), nil
 	}
 
 	// Format: gtw-standard three-line reply — emoji title on

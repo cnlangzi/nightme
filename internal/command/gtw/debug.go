@@ -3,6 +3,7 @@ package gtw
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -219,5 +220,25 @@ func testPayload(chatID, kind string) FixDraftPayload {
 		Provider:   "github",
 		LabelAdded: kind != "worktree-fail",
 		ChatID:     chatID,
+		// Worktree is the directory gh/glab label-rollback calls
+		// should spawn from. In production this is set from
+		// repoRoot at emit time (see fix.go); for the debug seed
+		// we use the process CWD as a best-effort fallback. If
+		// Getwd fails (rare — typically a deleted worktree, the
+		// exact bug this defends against), leave Worktree empty
+		// and let the action handler fall back to inherited
+		// CWD; the test fakes won't reach gh anyway.
+		Worktree: safeGetwd(),
 	}
+}
+
+// safeGetwd wraps os.Getwd so a CWD error (e.g. the directory
+// was deleted) doesn't crash the debug seed. Returns "" on
+// failure — callers should treat empty Worktree as "no
+// guidance, fall through to defaults".
+func safeGetwd() string {
+	if dir, err := os.Getwd(); err == nil {
+		return dir
+	}
+	return ""
 }

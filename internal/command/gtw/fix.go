@@ -58,7 +58,7 @@ type HandlerDeps struct {
 	// uses package-level Detect (URL hint + API probe). Tests
 	// override to inject a fakeProvider without running real
 	// Detect logic (see F-50 §1.4 for the injection pattern).
-	Detect func(ctx context.Context, remoteURL string, prober HTTPProber) (GitProvider, error)
+	Detect func(ctx context.Context, remoteURL string, prober HTTPProber, worktree string) (GitProvider, error)
 	// Now is the clock. Tests override for deterministic drafts.
 	Now func() time.Time
 
@@ -246,7 +246,14 @@ func runFixRemote(
 	if detect == nil {
 		detect = Detect
 	}
-	provider, err := detect(ctx, remoteURL, prober)
+	// The worktree doesn't exist yet at this point — runFixRemote
+	// runs BEFORE WorktreeAdd so we can use provider hints to name
+	// the worktree. But provider.GetIssue / AddLabel calls below
+	// still need a valid CWD so `gh` can fork `git`. Pass repoRoot
+	// — it's always a real directory (we just computed it from
+	// `git rev-parse --show-toplevel`), so the CWD contract holds
+	// even when the daemon's own CWD has been stale'd.
+	provider, err := detect(ctx, remoteURL, prober, repoRoot)
 	if err != nil {
 		// D3 split: distinguish "URL is malformed" (user error)
 		// from "host not recognised as GitHub/GitLab". Never
@@ -322,6 +329,7 @@ func runFixRemote(
 			Repo:     owner + "/" + repo,
 			Provider: string(providerKind),
 			ChatID:   chatID,
+			Worktree: repoRoot,
 		}, existingPath)
 	}
 
@@ -393,6 +401,7 @@ func runFixRemote(
 			Slug:     branch,
 			Repo:     owner + "/" + repo,
 			Provider: string(providerKind),
+			Worktree: repoRoot,
 			GitError: tailLines(stderrFromWorktreeErr(err), 10),
 			// LabelAdded is intentionally false here — the
 			// label is applied AFTER WorktreeAdd (post-fix),
@@ -545,6 +554,7 @@ func runFixLocal(
 			Slug:    branch,
 			Repo:    "",
 			ChatID:  chatID,
+			Worktree: repoRoot,
 		}, existingPath)
 	}
 
@@ -574,6 +584,7 @@ func runFixLocal(
 			Branch:   branch,
 			Slug:     branch,
 			Repo:     "",
+			Worktree: repoRoot,
 			GitError: tailLines(stderrFromWorktreeErr(err), 10),
 			ChatID:   chatID,
 		})

@@ -27,6 +27,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -274,46 +275,242 @@ func buildPRPrompt(c Context, base string) string {
 // closing fence. The buildPRPrompt tells the agent to indent
 // code samples with 4 spaces instead — this is a soft constraint
 // and we trust the LLM to follow it.
+// prTitleRegex matches a Conventional Commits 1.0.0 title line.
+//
+// Allow-list of types (rather than a permissive "starts with a
+// letter") so we don't accidentally treat agent prose like "Test
+// passed: ..." as a PR title. Scope is optional and may contain
+// any non-`)`. Breaking-change `!` is allowed after the type/scope.
+//
+// Pattern: <type>[(<scope>)]?!: <subject>, where subject starts
+// with a non-whitespace character (rejects empty titles like
+// `feat:`).
+var prTitleRegex = regexp.MustCompile(
+	`^(feat|fix|chore|refactor|docs|test|build|ci|perf|style|revert)(?:\([^)]+\))?!?: \S`,
+)
+
+// prTitleAnywhereRegex is the multiline variant: matches a CC
+// title at the start of any line in the cleaned text. Used as
+// the final fallback when per-line noise stripping can't find a
+// match — e.g. JSON-wrapped single-line output like
+// `{"text": "feat(...): ..."\n"body": "..."}` where the title
+// is embedded inside a JSON string value, not on its own line.
+var prTitleAnywhereRegex = regexp.MustCompile(
+	`(?m)^(feat|fix|chore|refactor|docs|test|build|ci|perf|style|revert)(?:\([^)]+\))?!?: \S.*$`,
+)
+
+// prTitleJSONValueRegex extracts a CC title that's been embedded
+// as a JSON string value: `{"text": "feat(...): ..."}`. The
+// title appears after a `"<key>":` prefix and ends at the next
+// unescaped `"`. Captures group 1 = the title.
+//
+// Used as the LAST fallback after per-line scan and multiline
+// regex both fail — handles the LLM-favorite "let me wrap this
+// in JSON for safety" output where the title is buried inside
+// a string literal.
+var prTitleJSONValueRegex = regexp.MustCompile(
+	`"[^"\\]*(?:\\.[^"\\]*)*"\s*:\s*"((?:feat|fix|chore|refactor|docs|test|build|ci|perf|style|revert)(?:\([^)]+\))?!?: \S[^"\n]*)"`,
+)
+
+// prLineNoiseRegex matches the per-line noise patterns we strip
+// from candidate title lines: Markdown heading marks (#, ##, …),
+// bullet markers (- /*/1.), and label prefixes (Title: /
+// PR Title: / Title :). See stripPRNoise.
+var prLineNoiseRegex = regexp.MustCompile(
+	`^(?:#+\s+|-\s+|\*\s+|\d+\.\s+|PR\s+Title\s*:|Title\s*:)\s*`,
+)
+
+// parsePRReply extracts title and body from an LLM-generated PR
+// description.
+//
+// The original implementation required a strict ``` … ``` fence
+// around the reply. LLMs are unreliable at exact format compliance:
+// they may forget the fence, wrap the output in JSON, prefix it
+// with a Markdown heading, or scatter the title inside a bullet
+// list. Any of those made the daemon hard-error with
+// "could not parse agent reply", forcing the user to re-invoke
+// /gtw pr manually — a bad experience for a feature whose whole
+// point is automation.
+//
+// This version is permissive:
+//
+//  1. Normalize the input (stripPRNoise): trim surrounding
+//     whitespace, drop leading/trailing unmatched ``` fences, peel
+//     off a JSON wrapper if present. Body content is preserved
+//     verbatim by this step.
+//  2. Scan lines from the top; for each non-empty line, strip
+//     per-line noise (heading marks, bullet markers, label
+//     prefixes) and check prTitleRegex. The first match is the
+//     title. Per-line noise stripping is intentionally limited
+//     to candidate title lines so bullets / headings that
+//     legitimately appear in the body are preserved.
+//  3. Body = lines after the title, truncated at the first
+//     trailing ``` if one is present. If no closing fence
+//     exists (the agent forgot it), body = everything after
+//     the title — that's exactly the production regression
+//     case.
+//  4. If no line matches the CC regex, fall back to the first
+//     non-empty line as title. Better to open a PR with a
+//     non-conforming title than to fail outright — the user
+//     can edit before merging.
+//
+// The classic fenced-block path is still preferred (cleaner
+// inputs produce the same result either way); this version
+// degrades gracefully when the agent's output is messy.
 func parsePRReply(text string) (title, body string, err error) {
-	const fence = "```"
-	start := strings.Index(text, fence)
-	if start < 0 {
-		return "", "", errParseAgentReply
-	}
-	// Move past the opening fence (and any info-string like
-	// ```markdown — we accept whatever sits on the fence line).
-	afterOpen := start + len(fence)
-	// Skip rest of fence line (info-string) and the trailing \n.
-	if nl := strings.IndexByte(text[afterOpen:], '\n'); nl >= 0 {
-		afterOpen += nl + 1
-	} else {
-		// Fence was on its own at EOF with no body — empty.
+	cleaned := stripPRNoise(text)
+	if cleaned == "" {
 		return "", "", errParseAgentReply
 	}
 
-	// Find the closing fence after afterOpen.
-	end := strings.Index(text[afterOpen:], fence)
-	if end < 0 {
-		return "", "", errParseAgentReply
-	}
-	inner := text[afterOpen : afterOpen+end]
-	inner = strings.TrimRight(inner, "\n")
-	if inner == "" {
-		return "", "", errParseAgentReply
+	lines := strings.Split(cleaned, "\n")
+
+	// Phase 1: find the first line that, after stripping per-line
+	// noise, matches prTitleRegex. The noise strip is per-line and
+	// ONLY applied to candidate title lines — body bullets and
+	// headings are left alone so they survive into the body.
+	titleIdx := -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		candidate := prLineNoiseRegex.ReplaceAllString(trimmed, "")
+		// Compound prefixes (`- Title: feat: ...`, `## Title:
+		// feat: ...`, `**Title:** feat: ...`) need multiple passes —
+		// a single ReplaceAll only peels the outermost layer.
+		// Loop until the line is stable.
+		for {
+			next := prLineNoiseRegex.ReplaceAllString(candidate, "")
+			if next == candidate {
+				break
+			}
+			candidate = next
+		}
+		if prTitleRegex.MatchString(candidate) {
+			title = candidate
+			titleIdx = i
+			break
+		}
 	}
 
-	// Split title (first line) from body (rest). We allow \n or
-	// \r\n as the line separator; use SplitN so the body keeps
-	// its newlines intact.
-	lines := strings.SplitN(inner, "\n", 2)
-	title = strings.TrimSpace(lines[0])
-	if title == "" {
-		return "", "", errParseAgentReply
+	// Phase 1b: multiline regex over the whole cleaned text. Catches
+	// cases where the per-line approach fails because the title is
+	// embedded inside a JSON value or otherwise not on its own
+	// line — e.g. `{"text": "feat(...): ..."\n...}`. We only fall
+	// through to this if Phase 1 found nothing.
+	if titleIdx == -1 {
+		if loc := prTitleAnywhereRegex.FindStringIndex(cleaned); loc != nil {
+			title = strings.TrimSpace(cleaned[loc[0]:loc[1]])
+			// Compute titleIdx from the byte offset: count newlines
+			// before loc[0] to find the line index.
+			titleIdx = strings.Count(cleaned[:loc[0]], "\n")
+		}
 	}
-	if len(lines) == 2 {
-		body = strings.TrimLeft(lines[1], "\n")
+
+	// Phase 1c: extract a title that's been embedded as a JSON
+	// string value ({"text": "feat(...): ..."}). Handles the
+	// common LLM habit of wrapping replies in a JSON object for
+	// safety. Only reached if Phases 1 and 1b both fail.
+	if titleIdx == -1 {
+		if m := prTitleJSONValueRegex.FindStringSubmatch(cleaned); m != nil {
+			title = m[1]
+			// titleIdx: count newlines before the title's start
+			// position in the cleaned text.
+			idx := strings.Index(cleaned, m[1])
+			if idx >= 0 {
+				titleIdx = strings.Count(cleaned[:idx], "\n")
+			}
+		}
+	}
+
+	// Phase 2: fallback — first non-empty line is the title.
+	// Reaching here means the agent emitted something that doesn't
+	// even pretend to follow Conventional Commits. Take what we
+	// can get; the user can fix the title before merging.
+	if titleIdx == -1 {
+		for i, line := range lines {
+			if trimmed := strings.TrimSpace(line); trimmed != "" {
+				title = trimmed
+				titleIdx = i
+				break
+			}
+		}
+		if titleIdx == -1 {
+			return "", "", errParseAgentReply
+		}
+	}
+
+	// Body: everything after the title, truncated at the first
+	// trailing ``` (so a fenced block parses cleanly), then
+	// TrimSpace'd. If no trailing fence exists, body = all of
+	// it — the agent's "forgot the fence" regression case.
+	bodyLines := lines[titleIdx+1:]
+	endIdx := len(bodyLines)
+	for i, line := range bodyLines {
+		if strings.TrimSpace(line) == "```" {
+			endIdx = i
+			break
+		}
+	}
+	if endIdx > 0 {
+		body = strings.TrimSpace(strings.Join(bodyLines[:endIdx], "\n"))
+	}
+
+	// Normalize: title must be a single line. Phases 1/1b/2
+	// already produce single-line titles, but Phase 1c
+	// (JSON-wrapped capture) can pull a multi-line value when
+	// the JSON value contains literal `\n` escape sequences.
+	// Substitute any literal backslash-n with a real newline
+	// first, then split at the first one. First line → title,
+	// rest → merged into body.
+	title = strings.ReplaceAll(title, "\\n", "\n")
+	if i := strings.Index(title, "\n"); i >= 0 {
+		extraBody := strings.TrimSpace(title[i+1:])
+		title = strings.TrimSpace(title[:i])
+		if extraBody != "" {
+			if body == "" {
+				body = extraBody
+			} else {
+				body = extraBody + "\n" + body
+			}
+		}
 	}
 	return title, body, nil
+}
+
+// stripPRNoise removes whole-input noise that surrounds the
+// title: leading/trailing whitespace, unmatched fences, and an
+// outermost JSON wrapper. Body content (bullet lists, headings
+// inside the body, …) is preserved verbatim — only noise
+// OUTSIDE the body is removed here. Per-line noise near the
+// title is handled separately by parsePRReply's candidate scan.
+func stripPRNoise(text string) string {
+	text = strings.TrimSpace(text)
+
+	// Unmatched leading fence (agent opened ``` but never closed).
+	// Strip one or more in case the agent opened several nested
+	// by accident.
+	for strings.HasPrefix(text, "```") {
+		nl := strings.IndexByte(text, '\n')
+		if nl < 0 {
+			return "" // bare fence at EOF, nothing useful
+		}
+		text = strings.TrimLeft(text[nl+1:], " \t")
+	}
+
+	// Unmatched trailing fence.
+	text = strings.TrimSpace(strings.TrimSuffix(text, "```"))
+
+	// JSON wrapper: outermost `{...}`. Don't try to parse JSON —
+	// LLM JSON wrappers are usually malformed or have extra prose
+	// keys. Just peel the braces; parsePRReply's regex scan will
+	// find the real title inside.
+	if strings.HasPrefix(text, "{") && strings.HasSuffix(text, "}") {
+		text = strings.TrimSpace(text[1 : len(text)-1])
+	}
+
+	return text
 }
 
 // resolveProvider picks a GitProvider for the current chat and
@@ -337,7 +534,7 @@ func parsePRReply(text string) (title, body string, err error) {
 // echo credentials; the bucket split mirrors runFixRemote.
 func resolveProvider(ctx context.Context, c Context, deps HandlerDeps) (GitProvider, string, string, error) {
 	if c.Repo != "" && c.Provider != "" {
-		prov, err := NewProvider(ProviderKind(c.Provider), "")
+		prov, err := NewProvider(ProviderKind(c.Provider), "", c.Worktree)
 		if err != nil {
 			return nil, "", "", fmt.Errorf("provider %q from gtw.yml unsupported: %w", c.Provider, err)
 		}
@@ -359,7 +556,7 @@ func resolveProvider(ctx context.Context, c Context, deps HandlerDeps) (GitProvi
 	if prober == nil {
 		prober = &ExecHTTPProber{Timeout: 3 * time.Second}
 	}
-	prov, err := detect(ctx, remoteURL, prober)
+	prov, err := detect(ctx, remoteURL, prober, c.Worktree)
 	if err != nil {
 		redacted := redactForDisplay(remoteURL)
 		switch {

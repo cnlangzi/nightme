@@ -246,20 +246,20 @@ func (f *fakeGitProvider) CreatePR(_ context.Context, owner, repo, base, head, t
 // fakeDetect is the deps.Detect replacement that always returns
 // the given provider. Tests install this via:
 //
-//	deps.Detect = func(_ context.Context, _ string, _ HTTPProber) (GitProvider, error) {
+//	deps.Detect = func(_ context.Context, _ string, _ HTTPProber, _ string) (GitProvider, error) {
 //	    return prov, nil
 //	}
 //
-// The remoteURL / prober arguments are ignored — the fake has
-// no notion of "URL hint" or "API probe" semantics. We rely on
-// the test seeding the issue map directly via SetIssue /
+// The remoteURL / prober / worktree arguments are ignored — the
+// fake has no notion of "URL hint" or "API probe" semantics. We
+// rely on the test seeding the issue map directly via SetIssue /
 // SetGetIssueErr.
 //
 // Kept as a constructor rather than a free function so tests
 // don't accidentally share a provider across cases — each test
 // gets its own.
-func fakeDetect(prov GitProvider) func(context.Context, string, HTTPProber) (GitProvider, error) {
-	return func(_ context.Context, _ string, _ HTTPProber) (GitProvider, error) {
+func fakeDetect(prov GitProvider) func(context.Context, string, HTTPProber, string) (GitProvider, error) {
+	return func(_ context.Context, _ string, _ HTTPProber, _ string) (GitProvider, error) {
 		return prov, nil
 	}
 }

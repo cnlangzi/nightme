@@ -206,20 +206,19 @@ func runOneHook(ctx context.Context, h Hook, cwd string) HookResult {
 	hctx, cancel := context.WithTimeout(ctx, hookTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(hctx, "sh", "-c", run)
-	cmd.Dir = cwd
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
+	// All exec / Dir / capture plumbing lives in runCmd (see exec.go)
+	// so this path can't drift from GitRunner / CLIRunner. Note that
+	// runCmd trims the trailing newline — FormatResults used to do
+	// that itself per-block (lines 265 / 269), so the trimmed
+	// contract is preserved end-to-end.
+	stdout, stderr, err := runCmd(hctx, cwd, "sh", "-c", run)
 	// Name is the user-facing command label. Held to the bare
 	// run string (no "sh -c " prefix) so FormatResults can render
 	// it as `> <run>` without double-stamping the shell layer.
 	return HookResult{
 		Name:   run,
-		Stdout: stdout.String(),
-		Stderr: stderr.String(),
+		Stdout: stdout,
+		Stderr: stderr,
 		Err:    err,
 	}
 }

@@ -27,6 +27,7 @@ import (
 //
 // v1.2 schema (post interactive-config refactor):
 //
+//	name: macbook-pro                # instance identifier (optional; falls back to os.Hostname())
 //	primary: cc                      # global default agent (top-level)
 //	agents:                          # list of available agents (top-level)
 //	  - name: cc
@@ -43,12 +44,43 @@ import (
 // User-configured `agents:` entries override built-in agents with the
 // same name (merge happens at runtime, not parse time).
 type Config struct {
+	// Name identifies this nightme instance — i.e. which machine is
+	// running the daemon. Surfaced later in logs / IM message headers
+	// / gateway registrations so multiple machines can be told apart.
+	//
+	// If empty at runtime, callers should fall back to os.Hostname()
+	// via EffectiveName — the fallback is intentionally NOT persisted
+	// to config.yaml, so the on-disk file stays a record of choices
+	// the user actually made.
+	// Name uses `omitempty` so resetting (cfg.Name = "") produces a
+	// YAML file with the `name:` line dropped entirely — matching
+	// the "no name = fall back to hostname" semantics rather than
+	// leaving an explicit `name: ""` in the user's config.
+	Name    string        `yaml:"name,omitempty"`
 	Feishu  FeishuConfig  `yaml:"feishu"`
 	Primary string        `yaml:"primary"`
 	Agents  []AgentEntry  `yaml:"agents"`
 	Session SessionConfig `yaml:"session"`
 	Logging LoggingConfig `yaml:"logging"`
 	Paths   PathsConfig   `yaml:"paths"`
+}
+
+// EffectiveName returns the configured Name, or the local machine
+// hostname if Name is empty. Never returns "" — callers can rely on
+// a non-empty string for log fields / message headers.
+//
+// The hostname fallback is NOT written back to c.Name: doing so
+// would silently modify the user's config.yaml on first run. If the
+// caller wants the host as the "real" name, they should run
+// `nightme name <hostname>` explicitly.
+func EffectiveName(c *Config) string {
+	if c != nil && c.Name != "" {
+		return c.Name
+	}
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "unknown"
 }
 
 // FeishuConfig holds credentials for the Feishu (Lark) channel.
@@ -288,6 +320,9 @@ func applyEnvOverrides(c *Config) {
 	}
 	if v := os.Getenv("NIGHTME_PRIMARY"); v != "" {
 		c.Primary = v
+	}
+	if v := os.Getenv("NIGHTME_NAME"); v != "" {
+		c.Name = v
 	}
 	if v := os.Getenv("NIGHTME_LOGGING_LEVEL"); v != "" {
 		c.Logging.Level = v

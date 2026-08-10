@@ -19,9 +19,10 @@ import (
 //
 // One-off: each Run returns the captured stdout/stderr/error triple.
 type pushGit struct {
-	mu       sync.Mutex
-	responses map[string]pushGitResp
-	calls    []pushGitCall
+	mu               sync.Mutex
+	responses        map[string]pushGitResp
+	responsesByArgs  map[string]pushGitResp
+	calls            []pushGitCall
 }
 
 type pushGitResp struct {
@@ -36,7 +37,10 @@ type pushGitCall struct {
 }
 
 func newPushGit() *pushGit {
-	return &pushGit{responses: make(map[string]pushGitResp)}
+	return &pushGit{
+		responses:       make(map[string]pushGitResp),
+		responsesByArgs: make(map[string]pushGitResp),
+	}
 }
 
 // on registers a response keyed by the FIRST argv token (e.g.
@@ -46,6 +50,17 @@ func (f *pushGit) on(prefix string, stdout, stderr string, err error) {
 	f.responses[prefix] = pushGitResp{stdout, stderr, err}
 }
 
+// onArgs registers a response keyed by the FULL argv slice
+// joined with NUL (a separator no shell argv can have). Used
+// when two calls share the same first token (e.g. both
+// countUnpushed and countBaseAhead run `git rev-list ...`,
+// but with different range syntaxes — first-token matching
+// would alias both to one response). Run first tries onArgs
+// matches; only falls back to on() when none match.
+func (f *pushGit) onArgs(args []string, stdout, stderr string, err error) {
+	f.responsesByArgs[joinArgs(args)] = pushGitResp{stdout, stderr, err}
+}
+
 func (f *pushGit) Run(_ context.Context, dir string, args ...string) (string, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -53,11 +68,22 @@ func (f *pushGit) Run(_ context.Context, dir string, args ...string) (string, st
 	if len(args) == 0 {
 		return "", "", errors.New("pushGit: empty argv")
 	}
+	// Specific (full-argv) match wins over first-token match.
+	if resp, ok := f.responsesByArgs[joinArgs(args)]; ok {
+		return resp.stdout, resp.stderr, resp.err
+	}
 	resp, ok := f.responses[args[0]]
 	if !ok {
 		return "", "", errors.New("pushGit: no response for " + args[0])
 	}
 	return resp.stdout, resp.stderr, resp.err
+}
+
+// joinArgs is a tiny helper used by onArgs/Run to serialise an
+// argv slice into a map key. NUL is a safe separator because
+// git argv tokens can't contain it.
+func joinArgs(args []string) string {
+	return strings.Join(args, "\x00")
 }
 
 // recordingAgent is a minimal agent.Starter for the dispatcher
@@ -136,6 +162,10 @@ func writeYml(t *testing.T, dir string, c Context) {
 // buildTestYml is intentionally minimal — only fields dispatchPush
 // reads (Worktree/Branch/RepoRoot/Issue). ReadGTWYml's parser
 // ignores unknown keys.
+//
+// Repo + Provider are emitted when populated so /gtw pr tests
+// can exercise the yml-pinned resolveProvider path without
+// standing up a Detect fallback.
 func buildTestYml(c Context) string {
 	var sb strings.Builder
 	sb.WriteString("worktree: " + c.Worktree + "\n")
@@ -143,6 +173,12 @@ func buildTestYml(c Context) string {
 	sb.WriteString("repoRoot: " + c.RepoRoot + "\n")
 	if c.Issue > 0 {
 		sb.WriteString("issue: " + itoa10(c.Issue) + "\n")
+	}
+	if c.Repo != "" {
+		sb.WriteString("repo: " + c.Repo + "\n")
+	}
+	if c.Provider != "" {
+		sb.WriteString("provider: " + c.Provider + "\n")
 	}
 	return sb.String()
 }

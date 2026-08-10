@@ -457,6 +457,19 @@ type OutboundMessage struct {
 type SessionContext struct {
 	Agent string
 	Model string
+	// SessionID is the agent's own session id captured on the
+	// last run (e.g. Claude Code's `system/init.session_id`,
+	// ACP's synthesized uuid when the bridge does not expose
+	// one). Sourced from AgentSession.SessionID() (RLock). Empty
+	// when the agent has no resume semantics or has not yet
+	// emitted its init event; the footer omits the segment when
+	// "".
+	//
+	// F-56 (F-45 follow-up): the first footer line
+	// ("🤖: <agent> · <model> · <sessionid>") uses this as the
+	// trailing identity segment. See docs/feat/F-45-session-footer.md
+	// §1.6.
+	SessionID string
 	// Workspace is the absolute path of the AgentSession's
 	// working directory at the time this OutboundMessage was
 	// emitted. Sourced from AgentSession.Cwd (immutable post-

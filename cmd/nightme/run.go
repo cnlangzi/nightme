@@ -1089,11 +1089,12 @@ func sessionContextInto(out *gateway.OutboundMessage, s *chatsession.AgentSessio
 	// fields: any one of (Agent / Model / GitStatus / Usage) being
 	// present is enough to materialize the SessionContext.
 	// Compaction tracking removed (was the 4th condition).
-	if s.Agent != "" || s.Model() != "" || hasGit ||
+	if s.Agent != "" || s.Model() != "" || s.SessionID() != "" || hasGit ||
 		out.Usage != nil {
 		out.SessionContext = &gateway.SessionContext{
 			Agent:     s.Agent,
 			Model:     s.Model(),
+			SessionID: s.SessionID(),
 			Workspace: s.Cwd,
 			GitStatus: gitSnap,
 			Usage:     out.Usage,

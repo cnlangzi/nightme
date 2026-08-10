@@ -84,7 +84,7 @@ func (a *echoAgent) SendBlocks(context.Context, []agent.ContentBlock) error {
 }
 func (a *echoAgent) SendPermission(string) error { return nil }
 func (a *echoAgent) New(context.Context) error   { return nil }
-func (a *echoAgent) Abort(context.Context) error { return agent.ErrNotSupported }
+func (a *echoAgent) Stop(context.Context) error { return agent.ErrNotSupported }
 func (a *echoAgent) SetModel(context.Context, string, string) error {
 	return agent.ErrNotSupported
 }
@@ -140,7 +140,7 @@ func (d *echoDriver) SendPermission(resp string) error {
 	return d.inner.SendPermission(resp)
 }
 func (d *echoDriver) Reset(ctx context.Context) error { return d.inner.New(ctx) }
-func (d *echoDriver) Abort(ctx context.Context) error { return d.inner.Abort(ctx) }
+func (d *echoDriver) Stop(ctx context.Context) error { return d.inner.Stop(ctx) }
 func (d *echoDriver) SetModel(ctx context.Context, providerID, modelID string) error {
 	return d.inner.SetModel(ctx, providerID, modelID)
 }

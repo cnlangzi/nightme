@@ -854,11 +854,19 @@ func (a *Agent) Close() error {
 // (SendText, Events, …) rather than going through this.
 func (a *Agent) Driver() interface{} { return a.driver }
 
-// Abort cancels the in-flight turn. Delegates to the bridge's
-// driver; bridges that can't honor the call return
+// Stop halts execution of the in-flight turn. Delegates to the
+// bridge's driver; bridges that can't honor the call return
 // agent.ErrNotSupported.
-func (a *Agent) Abort(ctx context.Context) error {
-	return a.driver.Abort(ctx)
+//
+// Stop is fire-and-forget: it does NOT block waiting for the bridge
+// to settle the turn. Whether the bridge emits a clean
+// EventAgentDone, the child process exits, or nothing visibly
+// happens on the wire is bridge-specific. The chat layer's TryFlush
+// watches IsReady() and reschedules the next queued prompt once
+// the bridge settles — the caller does not need to coordinate that
+// transition.
+func (a *Agent) Stop(ctx context.Context) error {
+	return a.driver.Stop(ctx)
 }
 
 // SetModel switches the active model on the next turn. Bridges that
@@ -899,10 +907,10 @@ type driver interface {
 	Reset(ctx context.Context) error
 	Close() error
 
-	// Abort / SetModel are bridge-specific runtime methods that
+	// Stop / SetModel are bridge-specific runtime methods that
 	// the shared *Agent wrapper exposes. Each driver returns
 	// agent.ErrNotSupported if the bridge cannot honor the call.
-	Abort(ctx context.Context) error
+	Stop(ctx context.Context) error
 	SetModel(ctx context.Context, providerID, modelID string) error
 }
 
@@ -960,7 +968,7 @@ var (
 	// "successfully reset in-place" from "needs full restart".
 	ErrRestartRequired = errors.New("agent: bridge requires restart for reset")
 
-	// ErrNotSupported is returned by Abort / SetModel when the
+	// ErrNotSupported is returned by Stop / SetModel when the
 	// bridge does not implement the requested operation. The
 	// runtime can detect this with errors.Is and surface a
 	// user-friendly "not supported for this agent" message

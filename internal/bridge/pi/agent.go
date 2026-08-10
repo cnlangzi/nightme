@@ -597,25 +597,32 @@ func (d *driver) New(ctx context.Context) error {
 	return nil
 }
 
-// Abort sends an `abort` RPC to the pi session. The pi --mode rpc
+// Stop sends an `abort` RPC to the pi session. The pi --mode rpc
 // protocol exposes an abort command that cancels the in-flight turn
-// and forces the agent_settled event to fire. The next
-// SendText/SendBlocks can proceed once the bridge observes that
-// boundary.
+// and forces the agent_settled event to fire. The pi process stays
+// alive; the bridge observes the boundary and the next
+// SendText/SendBlocks can proceed once the chat layer's TryFlush
+// loop sees IsReady() flip back to true.
+//
+// Stop is fire-and-forget: this method returns as soon as the
+// abort RPC completes (success or failure) and does NOT wait for
+// the agent_settled event. The chat layer coordinates the
+// turn-end → next-submit transition via its existing
+// KindPromptEnded handler.
 //
 // Returns ErrNotSupported if the bridge is not started yet.
-func (d *driver) Abort(ctx context.Context) error {
+func (d *driver) Stop(ctx context.Context) error {
 	if d.rpc == nil {
 		return agent.ErrNotSupported
 	}
-	abortCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
+	stopCtx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 	defer cancel()
-	resp, err := d.rpc.request(abortCtx, "abort", map[string]any{}, "abort-1")
+	resp, err := d.rpc.request(stopCtx, "abort", map[string]any{}, "abort-1")
 	if err != nil {
-		return fmt.Errorf("pi: abort: %w", err)
+		return fmt.Errorf("pi: stop: %w", err)
 	}
 	if !resp.Success {
-		return fmt.Errorf("pi: abort rejected: %s", resp.Error)
+		return fmt.Errorf("pi: stop rejected: %s", resp.Error)
 	}
 	return nil
 }

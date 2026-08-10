@@ -397,15 +397,23 @@ func (d *driver) New(ctx context.Context) error {
 	return nil
 }
 
-// Abort sends SIGINT to the codex app-server. The codex app-server
-// JSON-RPC API does not expose a `turn/cancel` method, so the
-// closest portable action is the same Ctrl-C signal a user would
-// press in interactive mode. The server catches it and the
-// in-flight turn settles eventually with EventAgentDone or
-// EventAgentError.
+// Stop sends SIGINT to the codex app-server. The codex app-server
+// JSON-RPC API does not expose a structured `turn/cancel` method,
+// so the closest portable action is the same Ctrl-C signal a user
+// would press in interactive mode. The app-server catches it,
+// emits `turn/failed` (or `turn/completed`) with subtype
+// "interrupted", and the bridge's translator converts that to
+// EventAgentDone with Reason="settled". The app-server process
+// stays alive — the bridge handle remains valid for the next
+// Submit on the same codex thread.
+//
+// Stop is fire-and-forget: it does NOT block waiting for the
+// app-server to confirm the turn has settled. The chat layer's
+// TryFlush watches IsReady() and reschedules the next queued
+// prompt automatically once the bridge sees KindPromptEnded.
 //
 // Returns ErrNotSupported if the bridge is not started yet.
-func (d *driver) Abort(ctx context.Context) error {
+func (d *driver) Stop(ctx context.Context) error {
 	_ = ctx
 	if d.session == nil || d.session.cmd == nil || d.session.cmd.Process == nil {
 		return agent.ErrNotSupported

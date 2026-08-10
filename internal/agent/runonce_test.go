@@ -26,7 +26,7 @@ func (f *fakeDriver) SendBlocks(_ context.Context, _ []ContentBlock) error {
 }
 func (f *fakeDriver) SendPermission(string) error                 { return nil }
 func (f *fakeDriver) Reset(context.Context) error                 { return nil }
-func (f *fakeDriver) Abort(context.Context) error                  { return nil }
+func (f *fakeDriver) Stop(context.Context) error                  { return nil }
 func (f *fakeDriver) SetModel(context.Context, string, string) error { return nil }
 func (f *fakeDriver) Close() error {
 	f.mu.Lock()

@@ -1,4 +1,4 @@
-// Stage 2 tests: Abort, SetModel, usage tracking, tool name mapping,
+// Stage 2 tests: Stop, SetModel, usage tracking, tool name mapping,
 // current_mode_update, available_commands_update.
 //
 // These tests build on the helpers in transport_test.go and
@@ -18,11 +18,11 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// ─── Abort / SetModel ────────────────────────────────────────────
+// ─── Stop / SetModel ────────────────────────────────────────────
 
-// TestAgent_AbortCallsInterrupt verifies Abort hits the
+// TestAgent_StopCallsInterrupt verifies Stop hits the
 // /api/session/{id}/interrupt endpoint.
-func TestAgent_AbortCallsInterrupt(t *testing.T) {
+func TestAgent_StopCallsInterrupt(t *testing.T) {
 	var gotMethod, gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
@@ -37,8 +37,8 @@ func TestAgent_AbortCallsInterrupt(t *testing.T) {
 		client:    newClient(&serverProc{baseURL: srv.URL}, "/tmp"),
 		sessionID: "ses_1",
 	}
-	if err := a.Abort(context.Background()); err != nil {
-		t.Fatalf("Abort: %v", err)
+	if err := a.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
 	if gotMethod != "POST" {
 		t.Errorf("method = %q, want POST", gotMethod)
@@ -75,12 +75,12 @@ func TestAgent_SetModelCallsSwitch(t *testing.T) {
 	}
 }
 
-// TestAgent_AbortNoServerReturnsError verifies Abort on an unstarted
+// TestAgent_StopNoServerReturnsError verifies Stop on an unstarted
 // Agent returns an error rather than crashing.
-func TestAgent_AbortNoServerReturnsError(t *testing.T) {
+func TestAgent_StopNoServerReturnsError(t *testing.T) {
 	a := &driver{name: "opencode"}
-	if err := a.Abort(context.Background()); err == nil {
-		t.Errorf("Abort on unstarted agent = nil, want error")
+	if err := a.Stop(context.Background()); err == nil {
+		t.Errorf("Stop on unstarted agent = nil, want error")
 	}
 }
 

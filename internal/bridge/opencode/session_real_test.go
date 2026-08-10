@@ -28,7 +28,7 @@
 //      new EventAgentReady must carry the SAME session id.
 //
 //   3. TestE2E_Interrupt — Send a prompt that triggers a long
-//      tool call, immediately call Abort, verify the bridge
+//      tool call, immediately call Stop, verify the bridge
 //      clears the busy guard and the events channel eventually
 //      signals Done or Error.
 //
@@ -309,10 +309,10 @@ func TestE2E_ResumeSession(t *testing.T) {
 }
 
 // TestE2E_Interrupt drives a long prompt and immediately calls
-// Abort. The bridge should clear the busy guard and the events
+// Stop. The bridge should clear the busy guard and the events
 // channel should eventually signal Done or Error.
 //
-// Some opencode models may complete the prompt before Abort can
+// Some opencode models may complete the prompt before Stop can
 // land — we treat that as a soft pass (the turn did end, just by
 // the natural path).
 func TestE2E_Interrupt(t *testing.T) {
@@ -347,14 +347,14 @@ func TestE2E_Interrupt(t *testing.T) {
 	if err := sess.SendText("list every file under /tmp recursively, one per line"); err != nil {
 		t.Fatalf("SendText: %v", err)
 	}
-	// Immediately abort. agent.Agent exposes Abort (delegating to
+	// Immediately stop. agent.Agent exposes Stop (delegating to
 	// the bridge's driver); bridges that can't honor it return
 	// agent.ErrNotSupported, which we treat as acceptable.
-	if err := sess.Abort(ctx); err != nil {
-		t.Logf("[e2e-abort] Abort returned: %v (acceptable)", err)
+	if err := sess.Stop(ctx); err != nil {
+		t.Logf("[e2e-stop] Stop returned: %v (acceptable)", err)
 	}
 
-	// Drain until turn-end signal. After Abort the server should
+	// Drain until turn-end signal. After Stop the server should
 	// send session.idle (or session.error) and the bridge should
 	// release the busy guard.
 	events := drainUntilTurnDone(t, sess.Events(), 60*time.Second)
@@ -365,10 +365,10 @@ func TestE2E_Interrupt(t *testing.T) {
 		}
 	}
 	if !sawTerminal {
-		t.Errorf("no terminal event after Abort; kinds=%v", kindsOnly(events))
+		t.Errorf("no terminal event after Stop; kinds=%v", kindsOnly(events))
 	}
 }
 
 // _ = errors.New keeps the imports when the test file is built
-// without the aborted / resume references in some configurations.
+// without the stopped / resume references in some configurations.
 var _ = errors.New

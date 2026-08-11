@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
@@ -367,6 +368,46 @@ func (m *Manager) RestoreFromRegistry() error {
 		for _, as := range agentsByCS[entry.ID] {
 			cs.attachAgentSession(as)
 		}
+
+		// Replay any in-flight messages that the killed AS had been
+		// processing. Push directly into the queue (NOT via
+		// QueueUserMessage) — the AS isn't spawned yet, so an
+		// immediate TryFlush would race against the spawn. The
+		// next TryFlush call (triggered by /use or by the first
+		// user message after restore) will pick these up, the
+		// Spawn will resume the agent via SessionID, and the agent
+		// decides how to handle the duplicate.
+		//
+		// Blocks is defensively copied (and the queue stores
+		// Message by value) so the queue's Message.Blocks is
+		// independent of as.inFlightMessages and of any other
+		// slice owned by the registry / Entry() snapshot. The
+		// cost is one small slice per replayed message; the
+		// safety is that no future mutation of the source can
+		// reach the queue's snapshot.
+		for _, as := range agentsByCS[entry.ID] {
+			for _, ref := range as.Entry().InFlightMessages {
+				msg := Message{
+					ID:         ref.ID,
+					ChatID:     entry.ChatID,
+					Blocks:     append([]agent.ContentBlock(nil), ref.Blocks...),
+					ReceivedAt: ref.ReceivedAt,
+					// Kind zero value == MessageKindNormal (default
+					// user input). Replayed messages are not
+					// "must stand alone" queued turns.
+				}
+				if err := cs.queue.Push(msg); err != nil {
+					// Should not happen at startup (queue is empty
+					// pre-restore). If it ever does, the message is
+					// lost — log loudly so the user knows the AS
+					// is now silently dropping an in-flight reply.
+					slog.Warn("Manager.RestoreFromRegistry: replay dropped in-flight message",
+						"chat_id", entry.ChatID, "as_id", as.ID,
+						"msg_id", ref.ID, "err", err)
+				}
+			}
+		}
+
 		m.sessions[entry.ChatID] = cs
 
 		// Fire onCreate so the runtime can wire per-ChatSession

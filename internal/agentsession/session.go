@@ -134,6 +134,21 @@ type AgentSession struct {
 	// EventAgentReady lands.
 	model string
 
+	// inFlightMessages mirrors AgentSessionEntry.InFlightMessages.
+	// Set by Submit on successful SendBlocks, cleared by endPrompt.
+	// Strictly co-lives with currentPrompt: when currentPrompt is
+	// non-nil, inFlightMessages holds refs derived from p.Messages;
+	// when currentPrompt is nil, inFlightMessages is nil. This
+	// invariant is what makes restart-replay unambiguous.
+	inFlightMessages []registry.InFlightMessageRef
+
+	// persist is the registry callback used to write the current
+	// entry back to disk. Wired by attachAgentSessionLocked in the
+	// chat layer (it has access to asFile). nil is allowed — Submit
+	// and endPrompt silently skip persistence when unset (e.g.
+	// pre-attachment or test contexts).
+	persist func(*registry.AgentSessionEntry) error
+
 	// F-53: the in-flight Prompt for this AgentSession, or nil if
 	// no Prompt is currently active. Stored on AS (not on
 	// ChatSession) because a Prompt is bound to one specific AS
@@ -334,6 +349,9 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 	as.lastRunAt = e.LastRunAt
 	as.sessionID = e.SessionID
 	as.model = e.Model
+	if len(e.InFlightMessages) > 0 {
+		as.inFlightMessages = append([]registry.InFlightMessageRef(nil), e.InFlightMessages...)
+	}
 	// commit fix-6: any persisted "running" agent is actually dead
 	// after daemon restart (the process handle is in-memory only).
 	// Demote to Detached so the next LookupSelectedAgentSession will
@@ -648,6 +666,16 @@ func (as *AgentSession) ExitCode() *int {
 // `system/init.session_id`) captured on the last run. Empty when
 // the agent has no resume semantics or has not yet emitted its
 // init event.
+// SetPersist wires the registry callback used to flush state
+// transitions (notably InFlightMessages after Submit / endPrompt).
+// Wired by the chat layer at attach time; nil (no persistence or
+// pre-attachment) means Submit / endPrompt silently skip the write.
+func (as *AgentSession) SetPersist(persist func(*registry.AgentSessionEntry) error) {
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
+	as.persist = persist
+}
+
 func (as *AgentSession) SessionID() string {
 	as.asMu.RLock()
 	defer as.asMu.RUnlock()
@@ -750,6 +778,7 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	lastRun := as.lastRunAt
 	resume := as.sessionID
 	model := as.model
+	msgs := as.inFlightMessages
 	var ec *int
 	if as.exitCode != nil {
 		v := *as.exitCode
@@ -758,18 +787,19 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	as.asMu.RUnlock()
 
 	return &registry.AgentSessionEntry{
-		ID:            as.ID,
-		ChatSessionID: as.ChatSessionID,
-		Agent:         as.Agent,
-		Cwd:           as.Cwd,
-		PID:           as.PID(),
-		Status:        stat,
-		Args:          as.Args(),
-		SessionID:     resume,
-		CreatedAt:     as.createdAt,
-		LastRunAt:     lastRun,
-		ExitCode:      ec,
-		Model:         model,
+		ID:               as.ID,
+		ChatSessionID:    as.ChatSessionID,
+		Agent:            as.Agent,
+		Cwd:              as.Cwd,
+		PID:              as.PID(),
+		Status:           stat,
+		Args:             as.Args(),
+		SessionID:        resume,
+		CreatedAt:        as.createdAt,
+		LastRunAt:        lastRun,
+		ExitCode:         ec,
+		Model:            model,
+		InFlightMessages: msgs,
 	}
 }
 
@@ -1025,11 +1055,52 @@ func (as *AgentSession) Submit(p *Prompt) error {
 		"as_id", as.ID,
 		"prompt_id", p.ID)
 
-	// Commit: install currentPrompt and flip isReady.
+	// Commit: install currentPrompt and flip isReady. The
+	// in-flight-message mirror is updated as part of the same
+	// atomic commit so Entry() always sees a consistent
+	// (currentPrompt, inFlightMessages) pair.
+	//
+	// Blocks is defensively copied: Message.Blocks is a slice
+	// header that aliases the queue's storage, and the persisted
+	// InFlightMessageRef may later be re-read by RestoreFromRegistry
+	// and pushed into a fresh queue (see Manager.RestoreFromRegistry).
+	// Copying here keeps the in-memory mirror independent of the
+	// prompt's Messages and safe to round-trip through the registry
+	// without aliasing any other slice.
 	as.asMu.Lock()
 	as.currentPrompt = p
+	as.inFlightMessages = make([]registry.InFlightMessageRef, len(p.Messages))
+	for i, m := range p.Messages {
+		as.inFlightMessages[i] = registry.InFlightMessageRef{
+			ID:         m.ID,
+			Blocks:     append([]agent.ContentBlock(nil), m.Blocks...),
+			ReceivedAt: m.ReceivedAt,
+		}
+	}
 	as.asMu.Unlock()
 	as.isReady.Store(false)
+
+	// Best-effort persistence — failures must NOT roll back the
+	// commit, since SendBlocks already accepted the prompt and the
+	// bridge is now expecting a reply. The next status change
+	// (endPrompt) will retry the write.
+	//
+	// Concurrency note: endPrompt may fire between our Unlock and
+	// the persist call below. as.Entry() takes asMu.RLock so the
+	// snapshot it returns reflects the latest in-memory state —
+	// if endPrompt's clear has run, Entry() sees a nil
+	// InFlightMessages and we persist that. The disk always
+	// converges to the in-memory state; we never observe a stale
+	// non-empty InFlightMessages after the prompt actually ended.
+	// (Restart-replay therefore re-submits in-flight messages
+	// only when the in-memory state still considered them
+	// in-flight at the moment of the last successful persist.)
+	if as.persist != nil {
+		if err := as.persist(as.Entry()); err != nil {
+			slog.Warn("agentsession: persist after Submit failed; entry may be stale on restart",
+				"as_id", as.ID, "prompt_id", p.ID, "err", err)
+		}
+	}
 	return nil
 }
 

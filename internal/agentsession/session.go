@@ -1059,13 +1059,21 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	// in-flight-message mirror is updated as part of the same
 	// atomic commit so Entry() always sees a consistent
 	// (currentPrompt, inFlightMessages) pair.
+	//
+	// Blocks is defensively copied: Message.Blocks is a slice
+	// header that aliases the queue's storage, and the persisted
+	// InFlightMessageRef may later be re-read by RestoreFromRegistry
+	// and pushed into a fresh queue (see Manager.RestoreFromRegistry).
+	// Copying here keeps the in-memory mirror independent of the
+	// prompt's Messages and safe to round-trip through the registry
+	// without aliasing any other slice.
 	as.asMu.Lock()
 	as.currentPrompt = p
 	as.inFlightMessages = make([]registry.InFlightMessageRef, len(p.Messages))
 	for i, m := range p.Messages {
 		as.inFlightMessages[i] = registry.InFlightMessageRef{
 			ID:         m.ID,
-			Blocks:     m.Blocks,
+			Blocks:     append([]agent.ContentBlock(nil), m.Blocks...),
 			ReceivedAt: m.ReceivedAt,
 		}
 	}
@@ -1077,14 +1085,16 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	// bridge is now expecting a reply. The next status change
 	// (endPrompt) will retry the write.
 	//
-	// Known race window: if endPrompt fires between our Unlock and
-	// the persist call below, endPrompt's cleared entry can race
-	// ahead in cs.asFile.Upsert's internal mutex. The disk may end
-	// up showing the stale non-empty InFlightMessages after the
-	// prompt actually ended. Restart would then replay an
-	// already-replied message. Accepted by design: the underlying
-	// agent dedups on resume, and worst case the user sees a
-	// duplicate reply attached to the same msg_id.
+	// Concurrency note: endPrompt may fire between our Unlock and
+	// the persist call below. as.Entry() takes asMu.RLock so the
+	// snapshot it returns reflects the latest in-memory state —
+	// if endPrompt's clear has run, Entry() sees a nil
+	// InFlightMessages and we persist that. The disk always
+	// converges to the in-memory state; we never observe a stale
+	// non-empty InFlightMessages after the prompt actually ended.
+	// (Restart-replay therefore re-submits in-flight messages
+	// only when the in-memory state still considered them
+	// in-flight at the moment of the last successful persist.)
 	if as.persist != nil {
 		if err := as.persist(as.Entry()); err != nil {
 			slog.Warn("agentsession: persist after Submit failed; entry may be stale on restart",

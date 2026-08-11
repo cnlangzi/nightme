@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -352,12 +353,20 @@ func (m *Manager) RestoreFromRegistry() error {
 		// user message after restore) will pick these up, the
 		// Spawn will resume the agent via SessionID, and the agent
 		// decides how to handle the duplicate.
+		//
+		// Blocks is defensively copied (and the queue stores
+		// Message by value) so the queue's Message.Blocks is
+		// independent of as.inFlightMessages and of any other
+		// slice owned by the registry / Entry() snapshot. The
+		// cost is one small slice per replayed message; the
+		// safety is that no future mutation of the source can
+		// reach the queue's snapshot.
 		for _, as := range agentsByCS[entry.ID] {
 			for _, ref := range as.Entry().InFlightMessages {
 				msg := Message{
 					ID:         ref.ID,
 					ChatID:     entry.ChatID,
-					Blocks:     ref.Blocks,
+					Blocks:     append([]agent.ContentBlock(nil), ref.Blocks...),
 					ReceivedAt: ref.ReceivedAt,
 					// Kind zero value == MessageKindNormal (default
 					// user input). Replayed messages are not

@@ -900,8 +900,11 @@ func (cs *ChatSession) writebackMessageState(as *AgentSession, p *Prompt) {
 
 // QueueMaxMsgs is the maximum number of queued messages a
 // ChatSession can hold before QueueUserMessage returns
-// ErrQueueFull. Phase 1 default: 50 (matches v1.3 inputBuffer).
-const QueueMaxMsgs = 50
+// ErrQueueFull. Raised from the v1.3 default of 50 → 4096 so that
+// restart-replay (which pushes every AS's InFlightMessages into
+// the queue) plus normal user input doesn't hit backpressure on
+// chats with many parallel agents or long-running prompts.
+const QueueMaxMsgs = 4096
 
 // DropQueue (CS-AS 边界重构 Phase 1) empties the at-least-once
 // queue, marks each dropped message as MessageDropped, and emits

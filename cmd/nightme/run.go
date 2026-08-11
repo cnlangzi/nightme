@@ -413,7 +413,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 
 	// RuntimeServices carries the shared command runtime interfaces.
 	// Each command package holds *chatsession.Manager directly
-	// via its Factory. Channel wraps *gateway.Channel (any
+	// via its Factory. Channel wraps *channel.Channel (any
 	// command that needs to send replies uses this).
 	rt := command.RuntimeServices{
 		Config: command.Config{Primary: cfg.Primary},
@@ -872,7 +872,7 @@ func wireRuntimeCallbacksAndRestore(
 		// gateway.Bind/chatToChan. For multi-channel deployments,
 		// route via a per-chatID Channel lookup in front of `em`
 		// (the wrap currently does the type conversion; a multi-channel
-		// variant would resolve the underlying gateway.Channel first
+		// variant would resolve the underlying channel.Channel first
 		// and wrap-emit it). The AgentEventBus and PromptEndBus
 		// handlers above have the same latent gap; the same one-line
 		// fix applies to both.

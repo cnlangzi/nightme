@@ -65,7 +65,9 @@ import (
 // Channel is the IM adapter contract. The canonical definition
 // lives in internal/channel; this alias keeps the historical
 // gateway.Channel symbol working for existing call sites.
-type Channel = channel.Channel
+// (Historical gateway.Channel alias was removed in the
+// outbound-extraction refactor; all call sites use
+// channel.Channel directly.)
 
 // Emitter is the outbound chokepoint contract the Gateway
 // requires. The runtime injects a concrete implementation
@@ -186,7 +188,7 @@ type Gateway interface {
 	WithShellDispatch(dispatch func(ctx context.Context, msg *InboundMessage) (*CommandResult, error)) Gateway
 
 	// Lifecycle
-	AttachChannels(channels ...Channel)
+	AttachChannels(channels ...channel.Channel)
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
 }
@@ -210,7 +212,7 @@ type Router = gateway
 // ResolveChannel returns the inbound Channel for chatID (the
 // channel whose pumpInbound produced the messages). nil only
 // when no default was attached.
-func (r *Router) ResolveChannel(chatID string) Channel {
+func (r *Router) ResolveChannel(chatID string) channel.Channel {
 	return r.resolveChannel(chatID)
 }
 
@@ -289,13 +291,13 @@ type gateway struct {
 	emitter Emitter
 
 	// Stage 2 / v1.2 dispatch state. fields below are read/written under mu.
-	channels       []Channel
+	channels       []channel.Channel
 	channelCh      chan InboundMessage
 	stopCh         chan struct{}
 	stopOnce       sync.Once
 	wg             sync.WaitGroup
-	chatToChan     map[string]Channel // ChatID -> the channel that owns the chat
-	defaultChannel Channel            // fallback channel for chats we haven't seen yet
+	chatToChan     map[string]channel.Channel // ChatID -> the channel that owns the chat
+	defaultChannel channel.Channel            // fallback channel for chats we haven't seen yet
 
 	// v1.2 binding table (chat_id → session_id). Owned by Gateway.
 	bindings map[string]*BindingEntry
@@ -355,14 +357,14 @@ func New(messageDispatcher MessageDispatcher, em Emitter) Gateway {
 	return &gateway{
 		messageDispatcher: messageDispatcher,
 		emitter:           em,
-		chatToChan:        make(map[string]Channel),
+		chatToChan:        make(map[string]channel.Channel),
 		bindings:          make(map[string]*BindingEntry),
 	}
 }
 
 // AttachChannels registers the channels the gateway will read from
 // and dispatch to. Multi-channel is supported.
-func (g *gateway) AttachChannels(channels ...Channel) {
+func (g *gateway) AttachChannels(channels ...channel.Channel) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.channels = append(g.channels, channels...)
@@ -664,7 +666,7 @@ func (g *gateway) Stop(ctx context.Context) error {
 
 // pumpInbound reads InboundMessage from ch.Incoming() and pushes it
 // into the central dispatch channel.
-func (g *gateway) pumpInbound(ctx context.Context, ch Channel) {
+func (g *gateway) pumpInbound(ctx context.Context, ch channel.Channel) {
 	defer g.wg.Done()
 	in := ch.Incoming()
 	for {
@@ -825,7 +827,7 @@ func (g *gateway) Unbind(chatID string) {
 
 // resolveChannel returns the channel that owns chatID, falling back
 // to the default channel for chats we haven't seen yet.
-func (g *gateway) resolveChannel(chatID string) Channel {
+func (g *gateway) resolveChannel(chatID string) channel.Channel {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	if ch, ok := g.chatToChan[chatID]; ok && ch != nil {

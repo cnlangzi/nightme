@@ -3,7 +3,7 @@
 //
 // The test wires the same components as cmd/nightme/run.go:
 //
-//	gateway.Channel (echo)
+//	channel.Channel (echo)
 //	  ↓ cs.WithChannel(channelWrap{...})        ← bug fix lives here
 //	ChatSession.Channel() = channelWrap
 //	  ↓ command.Handle → SlashOutput{Reply, Consumed: true}
@@ -252,14 +252,14 @@ func newRuntimeShim(
 // ─── testChannelWrap (test-only chatsession.Channel adapter) ────────
 //
 // Mirrors cmd/nightme/channel_wrap.go:channelWrap — translates
-// gateway.Channel → chatsession.Channel. Lives in this test file
+// channel.Channel → chatsession.Channel. Lives in this test file
 // so we don't drag in cmd/nightme (which is package main, not
 // importable from tests). Once the runtime shim is extracted to a
 // shared package, this helper goes away and the test imports the
 // shared one.
 
 type testChannelWrap struct {
-	ch gateway.Channel
+	ch channel.Channel
 }
 
 func (w *testChannelWrap) Send(ctx context.Context, msg chatsession.OutboundMessage) error {
@@ -307,12 +307,12 @@ type wiredHarness struct {
 func newWiredHarness(t *testing.T) *wiredHarness {
 	t.Helper()
 
-	// Echo Channel (gateway.Channel impl). nil writer — the test
+	// Echo Channel (channel.Channel impl). nil writer — the test
 	// inspects Record() rather than stdout.
 	echoCh := echo.New("echo", nil)
 
 	// Manager + spawner. Mirror run.go: WithChannelResolver wraps
-	// the gateway.Channel as a chatsession.Channel so every new
+	// the channel.Channel as a chatsession.Channel so every new
 	// ChatSession gets bound at GetOrCreate time. This replaces
 	// the old placeholder (`mgr.WithChannelResolver(nil)` +
 	// "runtime shim binds via WithChannel instead" — which the

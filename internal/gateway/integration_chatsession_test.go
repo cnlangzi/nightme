@@ -50,7 +50,7 @@ func newTestChannel() chatsession.Channel { return nopCh{} }
 // fails with the precise (empty ChatID / empty ReplyTo / missing
 // kind) signal needed to localize the regression.
 
-// --- mock gateway.Channel ----------------------------------------------------
+// --- mock channel.Channel ----------------------------------------------------
 
 type recordingChannel struct {
 	mu      sync.Mutex
@@ -84,7 +84,7 @@ func (c *recordingChannel) Record() []gateway.OutboundMessage {
 	return out
 }
 
-var _ gateway.Channel = (*recordingChannel)(nil)
+var _ channel.Channel = (*recordingChannel)(nil)
 
 // --- minimal runtime handler -----------------------------------------
 //
@@ -92,7 +92,7 @@ var _ gateway.Channel = (*recordingChannel)(nil)
 // ch.Send) without the SessionContext / /think / /tools side-paths
 // — those are not relevant to the regression we're hunting.
 
-func integrationEventHandler(ch gateway.Channel, _ *chatsession.ChatSession) func(env chatsession.AgentEventEnvelope) bool {
+func integrationEventHandler(ch channel.Channel, _ *chatsession.ChatSession) func(env chatsession.AgentEventEnvelope) bool {
 	return func(env chatsession.AgentEventEnvelope) bool {
 		out, ok := outbound.Translate(env.ChatID, *env.Event)
 		if !ok {

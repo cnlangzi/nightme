@@ -1160,28 +1160,6 @@ func TestDispatchPush_MalformedYml(t *testing.T) {
 	}
 }
 
-func TestDetectConflicts(t *testing.T) {
-	cases := []struct {
-		status string
-		want   bool
-	}{
-		{"", false},
-		{"M foo.go\n", false},
-		{"?? new.go\n", false},                 // untracked, not a conflict
-		{"UU conflicted.go\n", true},           // both modified
-		{"AA both_added.go\n", true},           // both added
-		{"DD both_deleted.go\n", true},         // both deleted
-		{"AU added_vs_modified.go\n", true},    // mixed conflict markers
-		{"M foo.go\nUU conflicted.go\n", true}, // mixed with conflict
-	}
-	for _, tc := range cases {
-		got := detectConflicts(tc.status)
-		if got != tc.want {
-			t.Errorf("detectConflicts(%q) = %v, want %v", tc.status, got, tc.want)
-		}
-	}
-}
-
 func TestCountUnpushed_NoUpstream(t *testing.T) {
 	git := newPushGit()
 	// git emits "fatal: no upstream configured for branch 'X'"

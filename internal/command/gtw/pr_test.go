@@ -738,6 +738,42 @@ func TestDispatchPR_BehindUpstream(t *testing.T) {
 	}
 }
 
+// TestDispatchPR_DivergedAheadAndBehind pins the F-57 priority
+// order documented in messages/footer.go PRBlockReason (line 191-196):
+// when a branch is BOTH ahead>0 AND behind>0 (diverged after a
+// remote force-push), the ahead branch wins — the user is told to
+// /gtw push first, then rebase. The natural 'put hard-blocks first'
+// reorder would silently regress this without any test failure.
+func TestDispatchPR_DivergedAheadAndBehind(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-diverged"})
+	snap := messages.GitStatusSnapshot{
+		Branch:        "wt-diverged",
+		HasUpstream:   true,
+		AheadOfRemote: 3,
+		BehindRemote:  5,
+	}
+	setupReadiness(rig, "wt-diverged", snap)
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "3 commit(s) made locally but not pushed") {
+		t.Fatalf("expected ahead-wins reply, got:\n%s", r)
+	}
+	if !strings.Contains(r, "/gtw push first") {
+		t.Fatalf("expected /gtw push hint (ahead wins over behind), got:\n%s", r)
+	}
+	if strings.Contains(r, "git pull --rebase") {
+		t.Fatalf("did not expect rebase hint on diverged state — ahead wins; got:\n%s", r)
+	}
+}
+
 func TestDispatchPR_Uncommitted(t *testing.T) {
 	rig := newPRTestRig(t)
 	setupPRWorktree(t, rig, Context{Branch: "wt-dirty"})

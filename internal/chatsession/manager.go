@@ -117,70 +117,82 @@ func (m *Manager) WithOnCreate(fn func(*ChatSession)) *Manager {
 // re-entering m.mu. The constructor never holds a manager lock
 // across external code.
 func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error) {
-	// Phase 1: lock-free fast path. Pure read of the sessions
-	// table — RLock lets concurrent GetOrCreate calls for
-	// distinct chatIDs run in parallel (Phase 1 was m.mu.Lock()
-	// in Commit 8; the lock was functionally safe but serialised
-	// reads unnecessarily).
+	// Phase 1: take a single RLock and snapshot the table +
+	// every dependency we need. The previous split (Phase 1 read
+	// sessions, release, Phase 2 re-acquire for dependencies)
+	// paid for two RLock round-trips on the miss path; one
+	// acquisition is sufficient because the reads are mutually
+	// consistent with the snapshot of `sessions` we made under
+	// the same lock.
 	m.mu.RLock()
 	cs, ok := m.sessions[chatID]
+	if !ok {
+		// Phase 2: read the deps we'll need for the new
+		// ChatSession. Construction runs OUTSIDE the lock so
+		// external callbacks (Spawner, persistence) don't have
+		// to re-enter the manager mutex. The deps snapshot is
+		// taken under the same RLock as the sessions read so the
+		// miss-confirmed-in-Phase-3 invariant still holds.
+		// Concurrency: concurrent GetOrCreate calls for distinct
+		// chatIDs still run in parallel (Phase 1 was Lock in
+		// Commit 8; the lock was functionally safe but serialised
+		// reads unnecessarily).
+		//
+		// A nil emitter is permitted — tests that only care about
+		// ChatSession's internal state (InputBuffer FSM,
+		// persistence, status transitions) don't need an outbound
+		// surface. The production runtime (cmd/nightme) always
+		// wires an Emitter before opening chats, so the production
+		// path is unaffected. cs.Emitter() returning nil is the
+		// contract that downstream callers must already nil-check
+		// (see cs.Emitter doc).
+		var (
+			spawner Spawner
+			csFile  *registry.ChatSessionFile
+			asFile  *registry.AgentSessionFile
+			emitter outbound.Emitter
+		)
+		spawner = m.spawner
+		csFile = m.csFile
+		asFile = m.asFile
+		emitter = m.emitter
+		m.mu.RUnlock()
+
+		cs, err := New(chatID, primaryAgent)
+		if err != nil {
+			return nil, err
+		}
+		cs.WithSpawner(spawner).
+			WithPersistence(csFile, asFile)
+		if emitter != nil {
+			cs.WithEmitter(emitter)
+		}
+
+		// Phase 3: re-lock for the insert + onCreate publish.
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if existing, ok := m.sessions[chatID]; ok {
+			// Another goroutine won the race; discard our construction.
+			// The discarded cs is never visible to anyone (we never
+			// ran onCreate, never registered it, never started any
+			// background goroutine that holds it). The AgentSession
+			// pool is empty so there's nothing to clean up; if a
+			// future change populates the pool here, add a cs.Close.
+			return existing, nil
+		}
+		m.sessions[chatID] = cs
+
+		// Fire onCreate callback before releasing the lock so the
+		// callback's own locks see consistent state.
+		if m.onCreate != nil {
+			m.onCreate(cs)
+		}
+		return cs, nil
+	}
 	m.mu.RUnlock()
-	if ok {
-		return cs, nil // existing cs → emitter already bound
-	}
-
-	// Phase 2: construct + attach spawner/persistence + bind
-	// the Manager's shared emitter (if any). No write lock held
-	// here so external callbacks (Spawner, persistence) don't
-	// have to re-enter the manager mutex; instead we read all
-	// the manager state we need under a single RLock
-	// acquisition.
-	//
-	// A nil emitter is permitted — tests that only care about
-	// ChatSession's internal state (InputBuffer FSM, persistence,
-	// status transitions) don't need an outbound surface. The
-	// production runtime (cmd/nightme) always wires an Emitter
-	// before opening chats, so the production path is unaffected.
-	// cs.Emitter() returning nil is the contract that downstream
-	// callers must already nil-check (see cs.Emitter doc).
-	m.mu.RLock()
-	spawner := m.spawner
-	csFile := m.csFile
-	asFile := m.asFile
-	emitter := m.emitter
-	m.mu.RUnlock()
-
-	cs, err := New(chatID, primaryAgent)
-	if err != nil {
-		return nil, err
-	}
-	cs.WithSpawner(spawner).
-		WithPersistence(csFile, asFile)
-	if emitter != nil {
-		cs.WithEmitter(emitter)
-	}
-
-	// Phase 3: re-lock for the insert + onCreate publish.
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if existing, ok := m.sessions[chatID]; ok {
-		// Another goroutine won the race; discard our construction.
-		// The discarded cs is never visible to anyone (we never
-		// ran onCreate, never registered it, never started any
-		// background goroutine that holds it). The AgentSession
-		// pool is empty so there's nothing to clean up; if a
-		// future change populates the pool here, add a cs.Close.
-		return existing, nil
-	}
-	m.sessions[chatID] = cs
-
-	// Fire onCreate callback before releasing the lock so the
-	// callback's own locks see consistent state.
-	if m.onCreate != nil {
-		m.onCreate(cs)
-	}
-	return cs, nil
+	return cs, nil // existing cs → emitter already bound
 }
+
 
 // WithEmitter binds the single daemon-wide outbound chokepoint
 // to the Manager. Every ChatSession created (or restored) after

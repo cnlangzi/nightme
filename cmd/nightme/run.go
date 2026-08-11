@@ -24,7 +24,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -184,7 +183,7 @@ func runRunWith(cmd *cobra.Command, deps runDeps) error {
 	sigCh := deps.signals
 	if sigCh == nil {
 		owned := make(chan os.Signal, 2)
-		signal.Notify(owned, syscall.SIGINT, syscall.SIGTERM)
+		signal.Notify(owned, shutdownSignals()...)
 		defer signal.Stop(owned)
 		sigCh = owned
 	}

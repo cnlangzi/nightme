@@ -3,10 +3,6 @@
 > **目的**：本 README 解释 `docs/` 目录的**组织规则**，方便后续 contributor 一眼明白"我要写的东西应该放哪"。
 > **本 README 不属于任何业务文档**——它是元文档（meta-document），描述 docs 本身的结构。
 
----
-
-## 1. Overview
-
 nightme 的文档按**内容性质**分 4 层，每层职责单一、不重叠：
 
 ```
@@ -33,7 +29,7 @@ nightme 的文档按**内容性质**分 4 层，每层职责单一、不重叠�
 |----|------|------|----------|
 | **PRD** | `PRD.md` | 产品定位、目标用户、使用场景、核心哲学、功能范围、范围外、成功标准 | 技术栈、架构、代码、文件路径 |
 | **SPEC** | `SPEC.md` | 架构总览、组件、数据流、Session 生命周期、并发模型、技术栈、NFR、安全、技术决策 | Go 代码、JSON schema、YAML 配置、具体函数签名 |
-| **FEATURES** | `FEATURES.md` | F-XX 功能列表（含状态、设计文档链接、release checklist） | 详细设计、代码、edge cases |
+| **FEATURES** | `FEATURES.md` | F-XX 功能列表（含设计文档链接） | 详细设计、代码、edge cases |
 | **feat/** | `feat/F-XX-name.md` | 单个 feature 的详细设计：接口、struct、实现、edge cases、测试 | 跨 feature 的架构描述、产品定位 |
 
 ---
@@ -84,19 +80,26 @@ Q1: 这是关于产品的（用户、场景、价值、范围），还是关于�
 
 ### 4.2 Feature 文档
 
+**单一 F-XX 文档**：
 - `feat/F-XX-kebab-case-name.md`
 - `F-XX`：两位数字编号（01-99），保证字典序 = 逻辑序
 - `kebab-case-name`：短横线连接的英文短语，描述 feature
 - **不要**用中文文件名（保持 Git 工具链兼容）
+
+**合并文档**（多个 F-XX 内容相关时合并到一个文件）：
+- `feat/F-<theme>.md`（无编号，纯主题名）
+- 例：`F-runtime.md` / `F-chat-session.md` / `F-message-flow.md` / `F-gateway.md` / `F-gtw.md`
+- 例：`bridge/cli-transport.md` / `bridge/claude.md` / `channel/feishu-rendering.md`
+- 合并时保留每个原文件的章节结构 + 溯源标注 `> **Source**: 原文件名`
 
 ### 4.3 Feature 编号规则
 
 | 编号段 | 用途 |
 |--------|------|
 | F-01 ~ F-19 | 已分配（见 FEATURES.md） |
-| F-20+ | 新增 feature 时续编，**不能复用旧编号** |
+| F-20+ | 新增 feature 时续编，**不能复用已用编号** |
 
-**调整编号**（删除/合并 feature）：v0.1 阶段允许重排；v0.2+ **禁止重排**（commit 链接、PR 描述里会引用编号）。
+**调整编号**（删除/合并 feature）：一旦 feature 落地，**禁止重排**（commit 链接、PR 描述会引用编号）。
 
 ---
 
@@ -107,7 +110,7 @@ Q1: 这是关于产品的（用户、场景、价值、范围），还是关于�
 | 引用类型 | 语法 | 示例 |
 |----------|------|------|
 | 同目录文件 | `[NAME.md](./NAME.md)` | `[FEATURES.md](./FEATURES.md)` |
-| 子目录文件 | `[NAME.md](./feat/NAME.md)` | `[F-01](./feat/F-01-session-create.md)` |
+| 子目录文件 | `[NAME.md](./feat/NAME.md)` | `[F-01](./feat/F-runtime.md)` |
 | 同目录文件 + 节 | `[NAME.md](./NAME.md) §X` | `[SPEC.md](./SPEC.md) §2.1` |
 | 父目录 | `[NAME.md](../NAME.md)` | （docs/ 子目录引用仓库根时）|
 
@@ -140,14 +143,12 @@ PRD.md  ──► SPEC.md
 | 架构变更 / 换技术栈 / 新增组件 | SPEC.md |
 | 新增 feature | FEATURES.md + 新 feat/F-XX |
 | 已有 feature 设计调整 | feat/F-XX |
-
 | 跨多个 feature 的设计变更 | SPEC.md + 对应 feat/ 都改 |
 
 ### 6.2 每次改动的 checklist
 
 - [ ] 改动符合分类规则（见 §3 决策树）
 - [ ] 更新相关文档的**交叉引用**（章节号改了要同步更新）
-- [ ] 更新文档内部的**更新日志**（v1.0 → v1.0r → v1.0s ...）
 - [ ] 跑 `grep` 检查"哪些文档引用了被改的章节号"
 
 ### 6.3 改动提交格式
@@ -191,10 +192,10 @@ docs/
 ├── SPEC.md                ← Layer 2: 技术架构
 ├── FEATURES.md            ← Layer 3: 功能索引
 └── feat/                  ← Layer 4: 每个 feature 的实现
-    ├── F-01-session-create.md
-    ├── F-02-message-passthrough.md
+    ├── F-runtime.md
+    ├── F-message-flow.md
     ├── ...
-    └── F-19-cli-bridge.md
+    └── ../bridge/cli-transport.md
 ```
 
 ---
@@ -213,7 +214,6 @@ docs/
 
 ---
 
-## 10. 变更历史
+## 10. 变更记录
 
-- **v1.0**：建立 5 层文档结构 + 命名约定 + 决策树
-- **v1.3**：移除 Layer 5 (PLAN.md,已删);当前 4 层
+- 初始：建立 4 层文档结构 + 命名约定 + 决策树

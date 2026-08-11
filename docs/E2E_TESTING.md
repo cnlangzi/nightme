@@ -1,9 +1,9 @@
 # Feishu E2E testing guide
 
-This guide verifies the M2 end-to-end round-trip: a Feishu chat
-talks to nightme via the Gateway, which drives session lifecycle and
-forwards user input to the live agent. Messages flow both
-directions: chat → agent → chat.
+This guide verifies the end-to-end round-trip: a Feishu chat
+talks to nightme via the Gateway, which drives ChatSession
+lifecycle and forwards user input to the live agent. Messages
+flow both directions: chat → agent → chat.
 
 ## Prerequisites
 
@@ -13,7 +13,7 @@ directions: chat → agent → chat.
 - Go 1.22 or newer when building from source.
 - Network access to Feishu's Open Platform endpoints.
 - An AI Coding CLI installed and on `PATH` (e.g. `claude`, `codex`,
-  `opencode`). The agent's binary must be discoverable by
+  `opencode`, `pi`). The agent's binary must be discoverable by
   `exec.LookPath` — verify with `which claude`.
 
 ## Quick Start
@@ -39,19 +39,19 @@ directions: chat → agent → chat.
 3. Configure the agent list in `~/.nightme/config.yaml`:
 
    ```yaml
-   agent:
-     agents:
-       claude:
-         command: claude
-       codex:
-         command: codex
-       opencode:
-         command: opencode
+   primary: claude
+   agents:
+     - name: claude
+       command: claude
+     - name: codex
+       command: codex
+     - name: opencode
+       command: opencode
    ```
 
-   Each agent is registered in PTY mode (v0.1). The `command` field
-   must be on `PATH`; the agent name (`claude`, `codex`, …) is what
-   you pass to `/run`.
+   Each agent must be on `PATH`; `nightme config` runs an interactive menu
+   that generates this section. `primary` is the agent used when a chat
+   starts and has no override.
 
 4. Start the daemon:
 
@@ -66,7 +66,7 @@ directions: chat → agent → chat.
 ## Round-trip test procedure
 
 The round-trip exercises the full Gateway: slash commands drive
-session lifecycle, plain text is forwarded to the agent, and
+ChatSession lifecycle, plain text is forwarded to the agent, and
 agent output is rendered back to the chat.
 
 5. In the Feishu mobile or desktop app, open a 1:1 chat with the
@@ -75,30 +75,27 @@ agent output is rendered back to the chat.
 
    | # | User sends | Bot replies |
    |---|------------|-------------|
-   | 1 | `/cwd /tmp` | `Workspace set to /tmp. Send /run <agent> to start CLI.` |
-   | 2 | `/run /bin/echo` | `Already running (pid=<PID>). Connected.` |
-   | 3 | `hello` | `hello` (from the agent's PTY echo) |
-   | 4 | `/run /bin/echo` | `Already running (pid=<PID>). Connected.` (reconnect) |
-   | 5 | `/close` | `session killed` |
-   | 6 | `/run /bin/echo` | `Already running (pid=<PID>). Connected.` (new PID) |
-   | 7 | `/clear` | passes through to the agent (looks like `/clear` in the PTY) |
-   | 8 | `/help` | the help body listing `/cwd /run /close /help` |
+   | 1 | `/cwd /tmp` | `Workspace set to /tmp.` |
+   | 2 | `hello` | `hello` (from the agent's PTY echo) |
+   | 3 | `/use claude` | `Switched to claude` (or new spawn if not yet started) |
+   | 4 | `/use codex` | `Switched to codex` (new spawn, claude process kept alive in pool) |
+   | 5 | `/use claude` | `Switched to claude` (reuses prior claude process; conversation context preserved) |
+   | 6 | `/close` | per-entry list of killed sessions |
+   | 7 | `/list` | session table (active / detached status, workspace, pid) |
 
-   > The default agent name is `claude`. Replace `/run /bin/echo`
-   > with `/run claude` if you want the real CLI. The echo binary
-   > is used here only because it needs no API key.
+   > If you don't have API keys for the real CLIs, register an
+   > `echo` binary as an agent (`command: /bin/echo`) for steps 2-5.
 
 6. Verify the daemon's terminal output. Each user message appears
    as `received: <text>`, and outbound replies are sent to Feishu
    (no log line in the daemon by default).
 
-7. To prove the bridge is real, run `ps -ef | grep echo` in another
-   terminal during step 2-5 — the `echo` child should be alive
-   with the recorded PID.
+8. To prove the bridge is real, run `ps -ef | grep claude` (or
+   `echo`) in another terminal during steps 2-5 — the spawned
+   child should be alive with the recorded PID.
 
 > **Screenshots:** captured during real Feishu runs are tracked
-> alongside the docs in `docs/feat/M2_FINAL/`. The v0.2 release
-> will publish annotated screenshots here.
+> alongside the docs in `docs/images/`.
 
 ## Troubleshooting
 
@@ -121,7 +118,7 @@ the test user/chat.
 ### Event subscription
 
 Verify that the event name is `im.message.receive_v1` and that the application
-has been published or otherwise enabled for the tenant used by the test. In a
+has been published or otherwise enabled for the tenant used for the test. In a
 group chat, also verify the relevant @mention permission; a direct message is
 the simplest first test.
 
@@ -140,14 +137,14 @@ subscription and bot-availability settings. Images, files, and other rich
 message types are not part of this PR's receive test; the adapter only
 normalizes text content.
 
-### `/run` returns "unknown agent"
+### `/use` returns "unknown agent"
 
-The agent registry is built from `config.yaml`'s `agent.agents` map.
+The agent registry is built from `config.yaml`'s `agents` list.
 Make sure the section exists and the CLI binary is on `PATH` —
 `which claude` should succeed. Restarting `nightme run` re-reads
 the config.
 
-### `/run` returns "binary not found"
+### `/use` returns "binary not found"
 
 The agent's `Detect()` ran `exec.LookPath` and failed. Install the
 CLI or fix the path. The error message comes from the OS's
@@ -161,23 +158,18 @@ spinner), the channel adapter's `SendLongMessage` chunks at
 newline boundaries. If you see one-character frames, the issue is
 the agent's TTY discipline — not nightme.
 
-## Known limitations in M2
+## Known limits
 
-- **PTY mode only.** v0.1 has no ACP backend; raw TTY bytes are
-  forwarded as text. Spinners / ANSI escapes flow through to the
-  chat. v0.2 swaps in an ACP backend for structured events.
-- **One session per chat.** Sending `/cwd` on a second chat
-  creates a new session; there is no "list chats" / "switch chat"
-  UI in the v0.1 CLI.
-- **No permission-card routing.** The renderer emits an
-  interactive card on `EventPermission`, but the Gateway does not
-  yet relay the user's button choice back through `SendPermission`.
-  v0.2 wires the callback.
-- **Single account per Feishu tenant.** Per F-22, the v0.1
-  config holds one `app_id` / `app_secret`. Multi-account support
-  is a v0.3 task.
+- **One chat at a time per agent process.** ChatSession is 1:1
+  bound to its IM chat; opening a second chat with the bot
+  creates a new ChatSession with an independent AgentSession
+  pool. Sharing one agent process across chats is not supported.
+- **Single account per Feishu tenant.** Per F-22, the config
+  holds one `app_id` / `app_secret`. Multi-account support is not
+  implemented.
 - **WebSocket reconnect behavior** depends on the official Lark SDK
-  and the app's tenant permissions. If the daemon drops its
-  connection, just restart `nightme run`; the persisted session
-  table replays `StatusRunning` records as `StatusDetached` so a
-  subsequent `/run` will respawn cleanly.
+  and the app's tenant permissions. Active reconnect (F-41)
+  reduces the worst-case wait to 30s. If the daemon drops its
+  connection, restart `nightme run`; the persisted session table
+  replays `StatusRunning` records as `StatusDetached` so a
+  subsequent message will re-spawn cleanly.

@@ -1,27 +1,31 @@
-// Package gateway — translator from agent.AgentEvent to the
-// abstract OutboundMessage stream. The translator is a Gateway
-// concern (not a Channel concern) because:
+// Package outbound — translator from agent.AgentEvent to the
+// abstract gateway.OutboundMessage stream. The translator is an
+// outbound concern (not a Channel concern) because:
 //
-//   - AgentEvent is part of the agent protocol; only the Gateway
-//     speaks it.
+//   - AgentEvent is part of the agent protocol; only the outbound
+//     package speaks it.
 //   - OutboundMessage is the abstract wire format that Channels
 //     consume. Channels do not see AgentEvent.
 //   - Translation may need to merge multiple AgentEvents into one
 //     OutboundMessage (e.g. OutToolStart + OutToolEnd pair collapsing
-//     into a single line in the rolled log) — a Gateway-level
+//     into a single line in the rolled log) — an outbound-level
 //     decision. Channels render the result.
 //
 // The current translator is a 1:1 mapping: one AgentEvent produces
-// one OutboundMessage. Channels like Feishu may further roll
+// one OutboundMessage. Channels like Feishu may further roll the
 // OutboundMessage stream into a single edited message (see F-25
 // v0.3 + F-26 Stage 3).
-package gateway
+//
+// Moved from internal/gateway/translate.go in the F-?-outbound
+// refactor — see package doc for the broader rationale.
+package outbound
 
 import (
 	"fmt"
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
 // thinkingPrefix is the sentinel the claudecode bridge prepends to
@@ -31,58 +35,58 @@ import (
 const thinkingPrefix = "[思考] "
 
 // Translate converts one agent.AgentEvent into the abstract
-// OutboundMessage stream. Returns the message to send and a
+// gateway.OutboundMessage stream. Returns the message to send and a
 // boolean indicating whether anything should be sent at all:
 //
-//   - (msg, true)  → Channel should send msg
-//   - (zero, false) → Channel should drop (e.g. terminal events that
-//     have no user-facing content; the receipt
-//     already reflects the final state)
+//   - (msg, true)  → Emitter.Send / Emitter.SendCard should send msg
+//   - (zero, false) → drop (e.g. terminal events that have no
+//     user-facing content; the receipt already reflects the
+//     final state)
 //
 // Terminal events (Done, Error) are NOT emitted as separate
 // OutboundMessages; the receipt's terminal header carries that
 // signal. Permission events are mapped to OutCard; the Channel
 // renders the card natively (Feishu interactive, Slack block kit,
 // Web HTML).
-func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
+func Translate(chatID string, ev agent.AgentEvent) (gateway.OutboundMessage, bool) {
 	switch ev.Kind {
 	case agent.EventAgentText:
 		text := strings.TrimSpace(ev.Text)
 		if text == "" {
-			return OutboundMessage{}, false
+			return gateway.OutboundMessage{}, false
 		}
 		if strings.HasPrefix(text, thinkingPrefix) {
-			return OutboundMessage{
+			return gateway.OutboundMessage{
 				ChatID: chatID,
-				Kind:   OutThinking,
+				Kind:   gateway.OutThinking,
 				Text:   strings.TrimPrefix(text, thinkingPrefix),
 			}, true
 		}
-		return OutboundMessage{
+		return gateway.OutboundMessage{
 			ChatID: chatID,
-			Kind:   OutReply,
+			Kind:   gateway.OutReply,
 			Text:   text,
 		}, true
 
 	case agent.EventAgentToolStart:
 		if ev.ToolStart == nil {
-			return OutboundMessage{}, false
+			return gateway.OutboundMessage{}, false
 		}
 		name := ev.ToolStart.Name
 		if name == "" {
 			name = "tool"
 		}
-		// Gateway only transports the unified ToolInfo —
+		// Outbound only transports the unified ToolInfo —
 		// channel decides how to render "🔧 name(args)" or its
-		// own equivalent. Gateway does NOT pre-format Text
+		// own equivalent. Outbound does NOT pre-format Text
 		// (removed) or stash per-tool fields in Meta (those were
 		// Feishu-specific implicit keys leaking into the
 		// abstract layer; see F-34 review P0-2 / Devin
 		// architecture feedback 2026-08-04).
-		return OutboundMessage{
+		return gateway.OutboundMessage{
 			ChatID: chatID,
-			Kind:   OutToolStart,
-			Tool: &ToolInfo{
+			Kind:   gateway.OutToolStart,
+			Tool: &gateway.ToolInfo{
 				Name: name,
 				Args: ev.ToolStart.Args,
 			},
@@ -90,19 +94,19 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 
 	case agent.EventAgentToolEnd:
 		if ev.ToolEnd == nil {
-			return OutboundMessage{}, false
+			return gateway.OutboundMessage{}, false
 		}
 		name := ev.ToolEnd.Name
 		if name == "" {
 			name = "tool"
 		}
 		// Same as EventAgentToolStart above — ToolInfo carries the
-		// generic fields; gateway does not format Text or use
+		// generic fields; outbound does not format Text or use
 		// Meta for tool data.
-		return OutboundMessage{
+		return gateway.OutboundMessage{
 			ChatID: chatID,
-			Kind:   OutToolEnd,
-			Tool: &ToolInfo{
+			Kind:   gateway.OutToolEnd,
+			Tool: &gateway.ToolInfo{
 				Name:   name,
 				Args:   ev.ToolEnd.Args,
 				Output: ev.ToolEnd.Output,
@@ -112,13 +116,13 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 
 	case agent.EventAgentPermission:
 		if ev.Permission == nil {
-			return OutboundMessage{}, false
+			return gateway.OutboundMessage{}, false
 		}
 		req := ev.Permission
-		return OutboundMessage{
+		return gateway.OutboundMessage{
 			ChatID: chatID,
-			Kind:   OutCard,
-			Card: &Card{
+			Kind:   gateway.OutCard,
+			Card: &gateway.Card{
 				Title:   "Permission needed",
 				Body:    req.Tool + ": " + req.Action,
 				Options: req.Options,
@@ -142,7 +146,7 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		// only emit EventAgentDone-with-Usage and no EventAgentResult will not
 		// see their Usage reach the channel footer — by design
 		// (F-45 §1.5 / F-52).
-		return OutboundMessage{}, false
+		return gateway.OutboundMessage{}, false
 
 	case agent.EventAgentResult:
 		// Final assistant reply (Claude Code: result.Result).
@@ -151,14 +155,14 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		// We emit even when Text is empty AND IsError is true so
 		// the channel can flip its header to an error state.
 		if ev.Result == nil {
-			return OutboundMessage{}, false
+			return gateway.OutboundMessage{}, false
 		}
 		if ev.Result.Text == "" && ev.Err == nil {
-			return OutboundMessage{}, false
+			return gateway.OutboundMessage{}, false
 		}
-		out := OutboundMessage{
+		out := gateway.OutboundMessage{
 			ChatID: chatID,
-			Kind:   OutResult,
+			Kind:   gateway.OutResult,
 			Text:   ev.Result.Text,
 			Result: ev.Result,
 		}
@@ -172,7 +176,7 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		// runtime is a passive pass-through, so a nil Usage just
 		// means the channel footer omits Line 2.
 		if u := ev.Result.Usage; u != nil {
-			out.Usage = (*UsageInfo)(u)
+			out.Usage = (*gateway.UsageInfo)(u)
 		}
 		return out, true
 
@@ -187,9 +191,9 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		// Note: bridges always stamp the 5 context fields on every
 		// event (incl. EventAgentReady), so we just pass them
 		// through. No "if Ready != nil" guard needed.
-		return OutboundMessage{
+		return gateway.OutboundMessage{
 			ChatID:    chatID,
-			Kind:      OutInit,
+			Kind:      gateway.OutInit,
 			Text:      fmt.Sprintf("session initialized (model: %s)", ev.Model),
 			SessionID: ev.SessionID,
 			Model:     ev.Model,
@@ -205,11 +209,11 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		// The bridge MUST only emit this after a confirmed success
 		// result (see internal/bridge/claudecode/task.go).
 		if ev.TaskList == nil {
-			return OutboundMessage{}, false
+			return gateway.OutboundMessage{}, false
 		}
-		return OutboundMessage{
+		return gateway.OutboundMessage{
 			ChatID:   chatID,
-			Kind:     OutTaskCreate,
+			Kind:     gateway.OutTaskCreate,
 			TaskList: ev.TaskList,
 		}, true
 
@@ -218,14 +222,13 @@ func Translate(chatID string, ev agent.AgentEvent) (OutboundMessage, bool) {
 		// semantics as EventAgentTaskCreate; an empty Items slice is a
 		// valid "clear the checklist" signal (e.g. all tasks done).
 		if ev.TaskList == nil {
-			return OutboundMessage{}, false
+			return gateway.OutboundMessage{}, false
 		}
-		return OutboundMessage{
+		return gateway.OutboundMessage{
 			ChatID:   chatID,
-			Kind:     OutTaskUpdate,
+			Kind:     gateway.OutTaskUpdate,
 			TaskList: ev.TaskList,
 		}, true
 	}
-	return OutboundMessage{}, false
+	return gateway.OutboundMessage{}, false
 }
-

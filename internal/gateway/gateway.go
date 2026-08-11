@@ -48,10 +48,7 @@ import (
 	"errors"
 	"log"
 	"log/slog"
-	"strings"
 	"sync"
-
-	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // Channel is the abstract surface the Gateway needs from any IM
@@ -112,24 +109,6 @@ type CommandResult struct {
 // slash command are silently dropped (debug / test wiring).
 type MessageDispatcher func(ctx context.Context, msg *InboundMessage) error
 
-// OutboundSource is one running session's outbound event stream.
-// The runtime (typically cmd/nightme) provides these to the
-// Gateway via the SweepSessions callback. Each source maps a chat
-// to a single event channel; the Gateway attaches one outbound
-// pump per source.
-type OutboundSource struct {
-	SessionID string
-	ChatID    string
-	Events    <-chan agent.AgentEvent
-}
-
-// SweepSessions returns the currently-running OutboundSources. The
-// Gateway polls this on a ticker (every 5s) to discover new
-// sessions the /run command creates between sweeps. Returning nil
-// or an empty slice is fine — the Gateway simply has nothing to
-// attach.
-type SweepSessions func() []OutboundSource
-
 // Gateway is the public contract for the slash-command router.
 //
 // v1.2: the interface carries binding-table operations (Bind /
@@ -183,6 +162,19 @@ type Gateway interface {
 	//
 	// nil (default) keeps the legacy handleXxx dispatch path.
 	WithCommander(dispatch func(ctx context.Context, msg *InboundMessage) (*CommandResult, error)) Gateway
+
+	// WithShellDispatch installs the feat-shell `!cmd` dispatcher.
+	// When set, DispatchInbound routes messages whose Text
+	// starts with "!" through dispatch(ctx, msg) AFTER the
+	// commander shim (priority 2.5 — slash beats shell) and
+	// BEFORE the message dispatcher (agent prompt).
+	//
+	// Symmetric with WithCommander: the runtime wires this to
+	// a shim that resolves the chat session, calls
+	// shell.Dispatch, and sends the rendered summary card to
+	// the channel. nil = shell route is disabled; "!" text
+	// falls through to the agent prompt as a plain message.
+	WithShellDispatch(dispatch func(ctx context.Context, msg *InboundMessage) (*CommandResult, error)) Gateway
 
 	// Lifecycle
 	AttachChannels(channels ...Channel)
@@ -238,6 +230,17 @@ func (g *gateway) WithCommander(dispatch func(ctx context.Context, msg *InboundM
 	return g
 }
 
+// WithShellDispatch installs the feat-shell `!cmd` shim. See
+// the Gateway interface doc for ordering rules. Mirrors
+// WithCommander exactly; both fields are read under g.mu.RLock
+// during DispatchInbound so concurrent (re)installation is safe.
+func (g *gateway) WithShellDispatch(dispatch func(ctx context.Context, msg *InboundMessage) (*CommandResult, error)) Gateway {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.shellDispatch = dispatch
+	return g
+}
+
 // gateway is the concrete implementation + dispatch runtime. (It
 // carries the method set; Router is just an alias so external
 // packages can type-assert.)
@@ -282,6 +285,19 @@ type gateway struct {
 	// calls command.Commander.Dispatch, and converts the result
 	// back to *CommandResult. nil = legacy handleXxx dispatch.
 	commandDispatch func(ctx context.Context, msg *InboundMessage) (*CommandResult, error)
+
+	// feat-shell: shell command dispatcher. When set,
+	// DispatchInbound routes messages whose Text starts with
+	// "!" through this AFTER the commander shim (slash wins
+	// over shell — a user typing "/foo" should never hit the
+	// shell) and BEFORE the message dispatcher (agent prompt).
+	// nil = shell route disabled; "!" text falls through to
+	// the agent prompt as a plain message.
+	//
+	// The runtime wires this to a shim that resolves the
+	// ChatSession (for SelectedCwd), calls shell.Dispatch,
+	// and posts the rendered summary card to the channel.
+	shellDispatch func(ctx context.Context, msg *InboundMessage) (*CommandResult, error)
 }
 
 // New constructs a Gateway (the inboundDispatcher).
@@ -348,7 +364,8 @@ func (g *gateway) DispatchInbound(ctx context.Context, msg *InboundMessage) (*Co
 	for _, try := range []func(context.Context, *InboundMessage) (bool, *CommandResult, error){
 		g.tryActionDispatch,   // priority 1: reaction / action events
 		g.tryCommandDispatch,  // priority 2: /-prefixed text via commander shim
-		g.tryMessageDispatch,  // priority 3: universal fallback (WatchMode + agent loop)
+		g.tryShellDispatch,    // priority 3: !-prefixed text via shell shim (feat-shell)
+		g.tryMessageDispatch,  // priority 4: universal fallback (WatchMode + agent loop)
 	} {
 		handled, result, err := try(ctx, msg)
 		if err != nil {
@@ -411,11 +428,42 @@ func (g *gateway) tryActionDispatch(ctx context.Context, msg *InboundMessage) (b
 // must reach dispatchMessage with the original text intact so
 // they fall through to the agent loop.
 func (g *gateway) tryCommandDispatch(ctx context.Context, msg *InboundMessage) (bool, *CommandResult, error) {
-	if !strings.HasPrefix(strings.TrimSpace(msg.Text), "/") {
-		return false, nil, nil
-	}
+	// No prefix check here — the commander shim calls
+	// parseCommand and returns Consumed=false for non-slash
+	// text, which we translate to (false, nil, nil). This
+	// keeps gateway transport-only: prefix detection is a
+	// per-dispatcher concern, owned by the package that owns
+	// the prefix semantics (command.Commander.parseCommand).
 	g.mu.RLock()
 	dispatch := g.commandDispatch
+	g.mu.RUnlock()
+	if dispatch == nil {
+		return false, nil, nil
+	}
+	result, err := dispatch(ctx, msg)
+	if err != nil {
+		return false, nil, err
+	}
+	if result == nil || (!result.Consumed && !result.Dropped) {
+		return false, nil, nil
+	}
+	return true, result, nil
+}
+
+// tryShellDispatch mirrors tryCommandDispatch for the
+// feat-shell "!" route. Like the commander variant, it does
+// NOT do prefix detection — the shell shim calls parseShell
+// and returns Consumed=false for non-shell text, which we
+// translate to (false, nil, nil) so the gateway falls through
+// to the next dispatch step.
+//
+// Called between tryCommandDispatch and tryMessageDispatch;
+// ordering matters because slash takes priority over shell
+// (a "/foo" should never accidentally hit the shell, even
+// though the text would also fail parseShell).
+func (g *gateway) tryShellDispatch(ctx context.Context, msg *InboundMessage) (bool, *CommandResult, error) {
+	g.mu.RLock()
+	dispatch := g.shellDispatch
 	g.mu.RUnlock()
 	if dispatch == nil {
 		return false, nil, nil
@@ -644,33 +692,12 @@ func (g *gateway) sweepSessions(ctx context.Context) {
 
 // pumpOutbound reads AgentEvent from the session's events channel,
 // translates via Translate, and dispatches to the right Channel.
-func (g *gateway) pumpOutbound(ctx context.Context, ch Channel, sessionID, chatID string, events <-chan agent.AgentEvent) {
-	defer g.wg.Done()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-g.stopCh:
-			return
-		case ev, ok := <-events:
-			if !ok {
-				return
-			}
-			msg, send := Translate(chatID, ev)
-			if !send {
-				continue
-			}
-			if err := ch.Send(ctx, msg); err != nil {
-				// Fire-and-ack: log and continue. Retry queue is
-				// explicitly out of scope for v0.3 — failures
-				// surface via the channel's own error reporting
-				// (Feishu's UpdateMessage / AddReaction paths log
-				// their own failures at warn level).
-				log.Printf("gateway: channel send failed (chat=%s, kind=%s): %v", chatID, msg.Kind, err)
-			}
-		}
-	}
-}
+// pumpOutbound was the gateway's internal outbound event pump.
+// Removed in the outbound-package extraction: Translate has moved
+// to internal/gateway/outbound, and the runtime's actual outbound
+// pump (cmd/nightme/run.go's newEventHandler) does this work
+// directly using outbound.Emitter — gateway no longer owns an
+// outbound loop of its own.
 
 // withGateway installs gw into ctx so handlers that need it
 // (currently just /help) can recover it without taking it as a
@@ -691,11 +718,6 @@ func WithGateway(ctx context.Context, gw Gateway) context.Context {
 // (so handlers in gateway/cmd can fetch the gateway from the
 // same context value the gateway's dispatchLoop installed).
 type GatewayKey struct{}
-
-// contextKey aliases GatewayKey so the type used by withGateway
-// and gwFromContext is identical (no duplicate struct declaration
-// in the cmd subpackage).
-type contextKey = GatewayKey
 
 // --- v1.1 binding table (commit 3) ----------------------------------
 

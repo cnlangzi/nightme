@@ -158,6 +158,15 @@ type FixDraftPayload struct {
 	// ProviderGitLab). Used by the rollback path in action.go
 	// to construct a fresh GitProvider for label removal.
 	Provider string
+	// Worktree is the directory gh/glab label-rollback calls
+	// should spawn from. Set to the main repo root (always a
+	// valid git dir) when the draft is emitted — the reaction
+	// handler passes it through to NewProvider so `gh issue edit`
+	// forks git from a directory that exists, even if the
+	// daemon's own CWD has been stale'd since startup. See
+	// internal/command/gtw/exec.go for the CWD contract this
+	// defends against.
+	Worktree string
 	// GitError is the last 10 lines of stderr from the failed
 	// `git worktree add` (only for DraftFixWorktreeFail).
 	GitError string

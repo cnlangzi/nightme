@@ -544,16 +544,38 @@ func formatGitLine(ctx *gateway.SessionContext) string {
 	if ctx.GitStatus.Untracked > 0 {
 		parts = append(parts, fmt.Sprintf("? %d", ctx.GitStatus.Untracked))
 	}
-	if ctx.GitStatus.HasUpstream && ctx.GitStatus.AheadOfRemote > 0 {
+
+	// Upstream relationship: render `⇡ N` when the branch has
+	// upstream. Always render — including `⇡ 0` — so a clean
+	// worktree-with-upstream shows a visible "stamp worked"
+	// signal at the tail of the workspace row (see issue:
+// "既然有没有 commit, 为什么它下面没有显示那个数字呢"; the
+	// explicit 0 is the honest signal — the branch is in sync
+	// with its upstream).
+	if ctx.GitStatus.HasUpstream {
 		parts = append(parts, fmt.Sprintf("⇡ %d", ctx.GitStatus.AheadOfRemote))
 	}
 
 	// PR / MR tail — appended last so the line reads
-	// "workspace → branch → dirty counts → PR". See
-	// formatPRSegment doc for the omit rules and the
+	// "workspace → branch → dirty counts → upstream → PR".
+	// See formatPRSegment doc for the omit rules and the
 	// plain-text / no-markdown-link rationale.
 	if pr := formatPRSegment(ctx); pr != "" {
 		parts = append(parts, pr)
+	}
+
+	// When the branch has no upstream AND the working tree is
+	// clean, drop a "local" marker so the footer doesn't silently
+	// end at "⎇ branch" — the user should see at a glance that
+	// this is an untracked branch, not a missing-data bug.
+	//
+	// Order matters: the "local" marker renders AFTER the PR
+	// segment so the line still reads
+	// "workspace → branch → dirty counts → PR → local state".
+	if !ctx.GitStatus.HasUpstream &&
+		ctx.GitStatus.Uncommitted == 0 &&
+		ctx.GitStatus.Untracked == 0 {
+		parts = append(parts, "local")
 	}
 
 	return strings.Join(parts, " · ")

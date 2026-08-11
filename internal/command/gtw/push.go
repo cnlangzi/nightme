@@ -22,8 +22,15 @@ func programmaticPush(ctx context.Context, deps HandlerDeps, c Context) (string,
 	return stdout + stderr, nil
 }
 
-// countUnpushed returns the count of commits on the local branch
+// countUnpushed returns the count of commits on the named branch
 // that have no upstream counterpart.
+//
+// Uses `branch@{u}..branch` (NOT `HEAD@{u}..HEAD`) so the count
+// reflects the BRANCH we're pushing, not whatever HEAD happens
+// to be on. If HEAD is on a different branch (e.g. user did
+// `git checkout main` inside the worktree), @{u}..HEAD would
+// silently inspect the wrong branch and report a misleading
+// "nothing to push" / wrong unpushed count for c.Branch.
 //
 // When @{u} is unset (first push of a fresh branch) returns 0 —
 // the dispatcher's "clean + unpushed" branch treats that as
@@ -36,8 +43,7 @@ func programmaticPush(ctx context.Context, deps HandlerDeps, c Context) (string,
 // real failures as "nothing to push" would hide unpushed commits
 // from the user.
 func countUnpushed(ctx context.Context, worktree, branch string, deps HandlerDeps) (int, error) {
-	_ = branch // branch not directly queried — @{u} resolves against HEAD's upstream
-	out, stderr, err := deps.Git.Run(ctx, worktree, "rev-list", "--count", "@{u}..HEAD")
+	out, stderr, err := deps.Git.Run(ctx, worktree, "rev-list", "--count", branch+"@{u}.."+branch)
 	if err == nil {
 		n, perr := atoi(strings.TrimSpace(out))
 		if perr != nil {
@@ -52,6 +58,73 @@ func countUnpushed(ctx context.Context, worktree, branch string, deps HandlerDep
 		return 0, nil
 	}
 	return 0, fmt.Errorf("count unpushed commits: %w (stderr: %s)", err, strings.TrimSpace(stderr))
+}
+
+// listUnpushedCommits returns the oneline summary of every
+// commit on `branch` that has no upstream counterpart. Used by
+// dispatchPush / dispatchPR to surface the actual commits the
+// user needs to push, so the message can name them instead of
+// just saying "1 unpushed commit".
+func listUnpushedCommits(ctx context.Context, worktree, branch string, deps HandlerDeps) ([]string, error) {
+	out, stderr, err := deps.Git.Run(ctx, worktree, "rev-list", "--oneline", branch+"@{u}.."+branch)
+	if err != nil {
+		// Same "no upstream" → empty list semantics as countUnpushed.
+		if strings.Contains(stderr, "no upstream configured") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("list unpushed commits: %w (stderr: %s)", err, strings.TrimSpace(stderr))
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
+// unpushedCommitsForDisplay is the error-safe wrapper around
+// listUnpushedCommits that the user-facing diagnostics use.
+// Returns:
+//   - "<commit>\n<commit>\n..." when the list succeeds
+//   - "(couldn't list unpushed commits: <err>)" when it fails
+//     (the user knows the diagnostic is incomplete rather than
+//     seeing an empty list silently)
+//   - "" when there are no unpushed commits
+//
+// Never returns an error itself — callers can paste the result
+// straight into the IM reply body without further unwrapping.
+func unpushedCommitsForDisplay(ctx context.Context, worktree, branch string, deps HandlerDeps) string {
+	commits, err := listUnpushedCommits(ctx, worktree, branch, deps)
+	if err != nil {
+		return "(couldn't list unpushed commits: " + err.Error() + ")"
+	}
+	return strings.Join(commits, "\n")
+}
+
+// listUncommittedFiles returns the porcelain paths of every file
+// that is currently dirty in the worktree (modified, added,
+// deleted, renamed, copied, untracked). Used by dispatchPush to
+// tell the user exactly what's still uncommitted after the agent
+// claimed to be done.
+func listUncommittedFiles(ctx context.Context, worktree string, deps HandlerDeps) ([]string, error) {
+	out, _, err := deps.Git.Run(ctx, worktree, "status", "--porcelain")
+	if err != nil {
+		return nil, fmt.Errorf("git status: %w", err)
+	}
+	var files []string
+	for _, line := range splitNonEmptyLines(out) {
+		if len(line) < 4 {
+			continue
+		}
+		// porcelain: XY <path>  (XY is 2 chars + space, then path)
+		// For renames/copies the format is `XY <orig> -> <new>` —
+		// take the final path.
+		path := strings.TrimSpace(line[3:])
+		if i := strings.Index(path, " -> "); i >= 0 {
+			path = path[i+4:]
+		}
+		files = append(files, path)
+	}
+	return files, nil
 }
 
 // detectConflicts parses a `git status --porcelain` output and

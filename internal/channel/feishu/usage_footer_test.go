@@ -587,25 +587,25 @@ func TestFormatGitLine_OmitsZeroSegments(t *testing.T) {
 		want string
 	}{
 		{
-			name: "clean working tree",
+			name: "clean working tree, has upstream",
 			snap: &gtw.GitStatusSnapshot{
 				Branch: "main", HasUpstream: true, AheadOfRemote: 0,
 			},
-			want: "📁: code/nightme · ⎇ main",
+			want: "📁: code/nightme · ⎇ main · ⇡ 0",
 		},
 		{
 			name: "uncommitted only",
 			snap: &gtw.GitStatusSnapshot{
 				Branch: "feat/x", Uncommitted: 1, HasUpstream: true,
 			},
-			want: "📁: code/nightme · ⎇ feat/x · ↑ 1",
+			want: "📁: code/nightme · ⎇ feat/x · ↑ 1 · ⇡ 0",
 		},
 		{
 			name: "untracked only",
 			snap: &gtw.GitStatusSnapshot{
 				Branch: "feat/x", Untracked: 7, HasUpstream: true,
 			},
-			want: "📁: code/nightme · ⎇ feat/x · ? 7",
+			want: "📁: code/nightme · ⎇ feat/x · ? 7 · ⇡ 0",
 		},
 		{
 			name: "unpushed only",
@@ -615,7 +615,7 @@ func TestFormatGitLine_OmitsZeroSegments(t *testing.T) {
 			want: "📁: code/nightme · ⎇ feat/x · ⇡ 4",
 		},
 		{
-			name: "no upstream — omit unpushed",
+			name: "no upstream + uncommitted — show dirty, no 'local' marker",
 			snap: &gtw.GitStatusSnapshot{
 				Branch:        "feat/new",
 				Uncommitted:   2,
@@ -623,6 +623,14 @@ func TestFormatGitLine_OmitsZeroSegments(t *testing.T) {
 				HasUpstream:   false,
 			},
 			want: "📁: code/nightme · ⎇ feat/new · ↑ 2",
+		},
+		{
+			name: "clean + no upstream — adds 'local' marker",
+			snap: &gtw.GitStatusSnapshot{
+				Branch:      "feat/new",
+				HasUpstream: false,
+			},
+			want: "📁: code/nightme · ⎇ feat/new · local",
 		},
 		{
 			name: "detached HEAD — branch renders as ?",
@@ -637,7 +645,7 @@ func TestFormatGitLine_OmitsZeroSegments(t *testing.T) {
 		{
 			name: "long path — last 2 components",
 			snap: &gtw.GitStatusSnapshot{Branch: "main", HasUpstream: true},
-			want: "📁: code/nightme · ⎇ main",
+			want: "📁: code/nightme · ⎇ main · ⇡ 0",
 			// (default Workspace is /home/devin/code/nightme → code/nightme)
 		},
 	}
@@ -693,7 +701,7 @@ func TestFormatSessionFooterLines_GitOnly(t *testing.T) {
 		GitStatus: &gtw.GitStatusSnapshot{Branch: "main", HasUpstream: true},
 	}
 	got := formatSessionFooterLines(ctx)
-	want := []string{"📁: code/nightme · ⎇ main"}
+	want := []string{"📁: code/nightme · ⎇ main · ⇡ 0"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -736,7 +744,7 @@ func TestFormatSessionFooterLines_PRSegment_AppendedToGitLine(t *testing.T) {
 	got := formatSessionFooterLines(ctx)
 	want := []string{
 		"🤖: claude · opus-4-5",
-		"📁: code/nightme · ⎇ fix-x · [#111](https://github.com/cnlangzi/nightme/pull/111)",
+		"📁: code/nightme · ⎇ fix-x · ⇡ 0 · [#111](https://github.com/cnlangzi/nightme/pull/111)",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v\nwant %v", got, want)
@@ -798,7 +806,7 @@ func TestFormatSessionFooterLines_PRSegment_NilOrInvalid(t *testing.T) {
 			got := formatSessionFooterLines(ctx)
 			want := []string{
 				"🤖: claude · opus-4-5",
-				"📁: code/nightme · ⎇ fix-x",
+				"📁: code/nightme · ⎇ fix-x · ⇡ 0",
 			}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("got %v\nwant %v", got, want)

@@ -102,7 +102,7 @@ func executeBranchExistsAction(
 		// so the user knows the label was NOT removed.
 		if p.LabelAdded && p.Repo != "" {
 			owner, repo, _ := splitOwnerRepo(p.Repo)
-			provider, providerErr := NewProvider(ProviderKind(p.Provider), "")
+			provider, providerErr := NewProvider(ProviderKind(p.Provider), "", p.Worktree)
 			switch {
 			case providerErr != nil || provider == nil:
 				resultText = fmt.Sprintf(
@@ -212,7 +212,7 @@ func executeWorktreeFailAction(
 		// so the user knows the label was NOT removed.
 		if p.LabelAdded && p.Repo != "" {
 			owner, repo, _ := splitOwnerRepo(p.Repo)
-			provider, providerErr := NewProvider(ProviderKind(p.Provider), "")
+			provider, providerErr := NewProvider(ProviderKind(p.Provider), "", p.Worktree)
 			switch {
 			case providerErr != nil || provider == nil:
 				resultText = fmt.Sprintf(

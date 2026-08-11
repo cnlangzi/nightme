@@ -1,6 +1,7 @@
 // Tests for channelWrap: the adapter that bridges the
-// *feishu.Adapter (gateway.Channel) into the chatsession.Channel
-// abstract surface used by the runtime shim after the
+// outbound.Emitter (constructed in runRuntime, holding the
+// runtime's outbound.Channel) into the chatsession.Channel
+// abstract surface used by the command runtime after the
 // Commander refactor.
 package main
 
@@ -11,50 +12,36 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 )
 
-// fakeGatewayChannel is a minimal in-test gateway.Channel
-// implementation that records its received messages. It is
-// passed to channelWrap (which only depends on the gateway.Channel
-// interface).
-type fakeGatewayChannel struct {
-	sent          []gateway.OutboundMessage
-	sentCard      []gateway.OutboundMessage
-	sentCardID    string
-	sentCardErr   error
-	patched       []gateway.OutboundMessage
-	sendErr       error
-	defaultReturn string
+// fakeOutboundChannel is a minimal in-test outbound.Channel
+// implementation that records its received messages. It's
+// wrapped in outbound.New(ch, Options{}) (no Stamper) and passed
+// to channelWrap.
+type fakeOutboundChannel struct {
+	sent        []gateway.OutboundMessage
+	sentCard    []gateway.OutboundMessage
+	sentCardID  string
+	sentCardErr error
+	sendErr     error
 }
 
-func (f *fakeGatewayChannel) Name() string { return "fake" }
-func (f *fakeGatewayChannel) Start(_ context.Context) error { return nil }
-func (f *fakeGatewayChannel) Stop(_ context.Context) error  { return nil }
-func (f *fakeGatewayChannel) Incoming() <-chan gateway.InboundMessage {
-	ch := make(chan gateway.InboundMessage)
-	close(ch)
-	return ch
-}
-
-func (f *fakeGatewayChannel) Send(_ context.Context, m gateway.OutboundMessage) error {
+func (f *fakeOutboundChannel) Name() string { return "fake" }
+func (f *fakeOutboundChannel) Send(_ context.Context, m gateway.OutboundMessage) error {
 	f.sent = append(f.sent, m)
 	return f.sendErr
 }
-
-func (f *fakeGatewayChannel) SendCard(_ context.Context, m gateway.OutboundMessage) (string, error) {
+func (f *fakeOutboundChannel) SendCard(_ context.Context, m gateway.OutboundMessage) (string, error) {
 	f.sentCard = append(f.sentCard, m)
 	return f.sentCardID, f.sentCardErr
 }
 
-func (f *fakeGatewayChannel) Patch(_ context.Context, m gateway.OutboundMessage) error {
-	f.patched = append(f.patched, m)
-	return nil
-}
-
-// Test channelWrap sets OutboundKind for the gateway channel.
+// Test channelWrap sets OutboundKind for the underlying channel.
 func TestChannelWrap_SendSetsCommandReply(t *testing.T) {
-	gw := &fakeGatewayChannel{}
-	wrap := newChannelWrap(gw)
+	ch := &fakeOutboundChannel{}
+	em := outbound.New(ch, outbound.Options{})
+	wrap := newChannelWrap(em)
 
 	if err := wrap.Send(context.Background(), chatsession.OutboundMessage{
 		ChatID:  "c1",
@@ -63,10 +50,10 @@ func TestChannelWrap_SendSetsCommandReply(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	if len(gw.sent) != 1 {
-		t.Fatalf("expected 1 sent, got %d", len(gw.sent))
+	if len(ch.sent) != 1 {
+		t.Fatalf("expected 1 sent, got %d", len(ch.sent))
 	}
-	got := gw.sent[0]
+	got := ch.sent[0]
 	if got.Kind != gateway.OutCommandReply {
 		t.Errorf("Kind = %v, want OutCommandReply", got.Kind)
 	}
@@ -79,8 +66,9 @@ func TestChannelWrap_SendSetsCommandReply(t *testing.T) {
 // gtw-friendly chatsession.Card (Title/Body/Choices) into the
 // gateway OutboundMessage's Card field.
 func TestChannelWrap_SendCardTranslatesCardFields(t *testing.T) {
-	gw := &fakeGatewayChannel{sentCardID: "bot-42"}
-	wrap := newChannelWrap(gw)
+	ch := &fakeOutboundChannel{sentCardID: "bot-42"}
+	em := outbound.New(ch, outbound.Options{})
+	wrap := newChannelWrap(em)
 
 	got, err := wrap.SendCard(context.Background(), chatsession.OutboundMessage{
 		ChatID: "c2",
@@ -100,10 +88,10 @@ func TestChannelWrap_SendCardTranslatesCardFields(t *testing.T) {
 	if got != "bot-42" {
 		t.Errorf("returned id = %q, want bot-42", got)
 	}
-	if len(gw.sentCard) != 1 {
-		t.Fatalf("expected 1 sentCard, got %d", len(gw.sentCard))
+	if len(ch.sentCard) != 1 {
+		t.Fatalf("expected 1 sentCard, got %d", len(ch.sentCard))
 	}
-	m := gw.sentCard[0]
+	m := ch.sentCard[0]
 	if m.Kind != gateway.OutCard {
 		t.Errorf("Kind = %v, want OutCard", m.Kind)
 	}
@@ -124,8 +112,10 @@ func TestChannelWrap_SendCardTranslatesCardFields(t *testing.T) {
 // Test channelWrap.SendCardError returns the SendCard error and
 // does NOT fall back to a Send automatically — caller decides.
 func TestChannelWrap_SendCardErrorPropagates(t *testing.T) {
-	gw := &fakeGatewayChannel{sentCardErr: errors.New("card quota exceeded")}
-	wrap := newChannelWrap(gw)
+	ch := &fakeOutboundChannel{sentCardErr: errors.New("card quota exceeded")}
+	em := outbound.New(ch, outbound.Options{})
+	wrap := newChannelWrap(em)
+
 	_, err := wrap.SendCard(context.Background(), chatsession.OutboundMessage{
 		Card: &chatsession.Card{Title: "T"},
 	})
@@ -138,19 +128,20 @@ func TestChannelWrap_SendCardErrorPropagates(t *testing.T) {
 // PATCH body fields into the gateway OutboundMessage's Card
 // field (so feishu picks them up when the kind matches).
 func TestChannelWrap_PatchBuildsOutCardPatch(t *testing.T) {
-	gw := &fakeGatewayChannel{}
-	wrap := newChannelWrap(gw)
+	ch := &fakeOutboundChannel{}
+	em := outbound.New(ch, outbound.Options{})
+	wrap := newChannelWrap(em)
 
 	err := wrap.Patch(context.Background(), chatsession.OutboundMessage{
 		ChatID:             "c3",
-		ReplyTo:           "msg-42",
+		ReplyTo:            "msg-42",
 		PatchBotMsgID:      "msg-42",
 		PatchChosenEmoji:   "✅",
-		PatchResult:       "card updated",
-		CardTitle:         "Updated",
-		CardBody:          "new body",
-		CardRequestID:     "req-2",
-		ChosenChoiceEmoji: "✅",
+		PatchResult:        "card updated",
+		CardTitle:          "Updated",
+		CardBody:           "new body",
+		CardRequestID:      "req-2",
+		ChosenChoiceEmoji:  "✅",
 		CardChoices: []chatsession.CardChoice{
 			{Emoji: "✅", Label: "Use new variant", Action: "act:/y"},
 		},
@@ -158,10 +149,10 @@ func TestChannelWrap_PatchBuildsOutCardPatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Patch: %v", err)
 	}
-	if len(gw.sent) != 1 {
-		t.Fatalf("expected 1 sent (PATCH uses Send), got %d", len(gw.sent))
+	if len(ch.sent) != 1 {
+		t.Fatalf("expected 1 sent (PATCH uses Send), got %d", len(ch.sent))
 	}
-	m := gw.sent[0]
+	m := ch.sent[0]
 	if m.Kind != gateway.OutCardPatch {
 		t.Errorf("Kind = %v, want OutCardPatch", m.Kind)
 	}
@@ -183,19 +174,20 @@ func TestChannelWrap_PatchBuildsOutCardPatch(t *testing.T) {
 // still sets OutCardPatch so the gateway layer triggers a PATCH
 // with the result text.
 func TestChannelWrap_PatchResultOnly(t *testing.T) {
-	gw := &fakeGatewayChannel{}
-	wrap := newChannelWrap(gw)
+	ch := &fakeOutboundChannel{}
+	em := outbound.New(ch, outbound.Options{})
+	wrap := newChannelWrap(em)
 
 	err := wrap.Patch(context.Background(), chatsession.OutboundMessage{
 		ChatID:        "c4",
-		ReplyTo:      "msg-99",
+		ReplyTo:       "msg-99",
 		PatchBotMsgID: "msg-99",
 		PatchResult:   "card updated",
 	})
 	if err != nil {
 		t.Fatalf("Patch: %v", err)
 	}
-	m := gw.sent[0]
+	m := ch.sent[0]
 	if m.Kind != gateway.OutCardPatch {
 		t.Errorf("Kind = %v, want OutCardPatch", m.Kind)
 	}

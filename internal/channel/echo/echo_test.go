@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/channel"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 func TestEcho_Name(t *testing.T) {
@@ -39,18 +39,18 @@ func TestEcho_SendRecordsAndWrites(t *testing.T) {
 	var buf bytes.Buffer
 	c := New("echo", &buf)
 	ctx := context.Background()
-	if err := c.Send(ctx, gateway.OutboundMessage{
+	if err := c.Send(ctx, messages.OutboundMessage{
 		ChatID: "oc_test",
-		Kind:   gateway.OutReply,
+		Kind:   messages.OutReply,
 		Text:   "hello world",
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	if err := c.Send(ctx, gateway.OutboundMessage{
+	if err := c.Send(ctx, messages.OutboundMessage{
 		ChatID: "oc_test",
-		Kind:   gateway.OutToolStart,
+		Kind:   messages.OutToolStart,
 		Text:   "Read(/tmp)",
-		Tool:   &gateway.ToolInfo{Name: "Read", Args: "/tmp"},
+		Tool:   &messages.ToolInfo{Name: "Read", Args: "/tmp"},
 	}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -68,18 +68,18 @@ func TestEcho_SendRecordsAndWrites(t *testing.T) {
 	if len(rec) != 2 {
 		t.Fatalf("Record len = %d, want 2", len(rec))
 	}
-	if rec[0].Kind != gateway.OutReply || rec[0].Text != "hello world" {
+	if rec[0].Kind != messages.OutReply || rec[0].Text != "hello world" {
 		t.Errorf("rec[0] = %+v, want OutReply/hello world", rec[0])
 	}
-	if rec[1].Kind != gateway.OutToolStart {
+	if rec[1].Kind != messages.OutToolStart {
 		t.Errorf("rec[1].Kind = %s, want tool_start", rec[1].Kind)
 	}
 }
 
 func TestEcho_SendWithNilWriterDoesNotPanic(t *testing.T) {
 	c := New("echo", nil)
-	if err := c.Send(context.Background(), gateway.OutboundMessage{
-		ChatID: "oc_x", Kind: gateway.OutReply, Text: "x",
+	if err := c.Send(context.Background(), messages.OutboundMessage{
+		ChatID: "oc_x", Kind: messages.OutReply, Text: "x",
 	}); err != nil {
 		t.Errorf("Send with nil writer err = %v, want nil", err)
 	}
@@ -90,7 +90,7 @@ func TestEcho_SendWithNilWriterDoesNotPanic(t *testing.T) {
 
 func TestEcho_RecordReturnsCopy(t *testing.T) {
 	c := New("echo", nil)
-	_ = c.Send(context.Background(), gateway.OutboundMessage{ChatID: "x", Kind: gateway.OutReply})
+	_ = c.Send(context.Background(), messages.OutboundMessage{ChatID: "x", Kind: messages.OutReply})
 	rec := c.Record()
 	rec[0].Text = "mutated"
 	// Mutating the returned slice must not affect the Channel.
@@ -113,15 +113,15 @@ func TestEcho_AutoHandlesNewKinds(t *testing.T) {
 	ctx := context.Background()
 
 	cases := []struct {
-		kind gateway.OutboundKind
+		kind messages.OutboundKind
 		text string
 		want string // substring expected in the writer output
 	}{
-		{gateway.OutResult, "完成", "echo: result"},
-		{gateway.OutInit, "session initialized", "echo: init"},
+		{messages.OutResult, "完成", "echo: result"},
+		{messages.OutInit, "session initialized", "echo: init"},
 	}
 	for _, tc := range cases {
-		if err := c.Send(ctx, gateway.OutboundMessage{
+		if err := c.Send(ctx, messages.OutboundMessage{
 			ChatID: "oc_test", Kind: tc.kind, Text: tc.text,
 		}); err != nil {
 			t.Fatalf("Send %v: %v", tc.kind, err)

@@ -13,7 +13,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 func TestFormatStatusBarLines_NilContextReturnsNil(t *testing.T) {
@@ -23,7 +23,7 @@ func TestFormatStatusBarLines_NilContextReturnsNil(t *testing.T) {
 }
 
 func TestFormatStatusBarLines_AllZeroReturnsNil(t *testing.T) {
-	ctx := &gateway.StatusBar{}
+	ctx := &messages.StatusBar{}
 	if got := formatStatusBarLines(ctx); got != nil {
 		t.Fatalf("empty StatusBar should yield nil, got %v", got)
 	}
@@ -31,8 +31,8 @@ func TestFormatStatusBarLines_AllZeroReturnsNil(t *testing.T) {
 
 func TestFormatStatusBarLines_IdentityOnly(t *testing.T) {
 	// Agent + Model only, no tokens / cost → just line 1 (🤖 header).
-	ctx := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+	ctx := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
 	}
 	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: claude · opus-4-5"}
@@ -49,8 +49,8 @@ func TestFormatStatusBarLines_IdentityOnly(t *testing.T) {
 // practice, so the Agent-and-Model-and-SessionID path is the
 // production-common case.
 func TestFormatStatusBarLines_IdentityWithSessionID(t *testing.T) {
-	ctx := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5", SessionID: "abc123-uuid-here"},
+	ctx := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5", SessionID: "abc123-uuid-here"},
 	}
 	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: claude · opus-4-5 · abc123-uuid-here"}
@@ -70,8 +70,8 @@ func TestFormatStatusBarLines_IdentityWithSessionID(t *testing.T) {
 // edge case here so future "fix the leading dot" PRs know it's
 // intentional.
 func TestFormatStatusBarLines_SessionIDOnly(t *testing.T) {
-	ctx := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{SessionID: "abc123-uuid-here"},
+	ctx := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{SessionID: "abc123-uuid-here"},
 	}
 	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: · abc123-uuid-here"}
@@ -90,8 +90,8 @@ func TestFormatStatusBarLines_SessionIDOnly(t *testing.T) {
 // "always-show-the-middle-dot" PR doesn't silently change the
 // visual rhythm.
 func TestFormatStatusBarLines_AgentSessionIDOnly(t *testing.T) {
-	ctx := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{Agent: "claude", SessionID: "abc123-uuid-here"},
+	ctx := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{Agent: "claude", SessionID: "abc123-uuid-here"},
 	}
 	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: claude · abc123-uuid-here"}
@@ -110,8 +110,8 @@ func TestFormatStatusBarLines_AgentSessionIDOnly(t *testing.T) {
 // silently change the Model+SessionID-no-Agent path because
 // the other SessionID tests all have Agent set.
 func TestFormatStatusBarLines_ModelSessionIDOnly(t *testing.T) {
-	ctx := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{Model: "opus-4-5", SessionID: "abc123-uuid-here"},
+	ctx := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{Model: "opus-4-5", SessionID: "abc123-uuid-here"},
 	}
 	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: · opus-4-5 · abc123-uuid-here"}
@@ -129,7 +129,7 @@ func TestFormatStatusBarLines_TokenSegments(t *testing.T) {
 	// counters (uncached + cache_creation + cache_read) per the
 	// Tencent YB doc — see internal/channel/feishu/usage_footer.go
 	// §Line 2 doc block. Here in = 11_700 + 600 + 8_200 = 20_500.
-	ctx := &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+	ctx := &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 			InputTokens:              11_700,
 			OutputTokens:             1_500,
 			CacheCreationInputTokens: 600, // counted into "in"
@@ -146,7 +146,7 @@ func TestFormatStatusBarLines_TokenSegments(t *testing.T) {
 func TestFormatStatusBarLines_OmitsZeroSegments(t *testing.T) {
 	tests := []struct {
 		name string
-		ctx  *gateway.StatusBar
+		ctx  *messages.StatusBar
 		want []string
 	}{
 		{
@@ -154,9 +154,9 @@ func TestFormatStatusBarLines_OmitsZeroSegments(t *testing.T) {
 			// "0 / 234" — zero-side honesty, rare in practice
 			// (e.g. compaction-only turn with no new input).
 			name: "no input but has output",
-			ctx: &gateway.StatusBar{
-				AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-				UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{OutputTokens: 234}},
+			ctx: &messages.StatusBar{
+				AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+				UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{OutputTokens: 234}},
 			},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 234 」"},
 		},
@@ -165,9 +165,9 @@ func TestFormatStatusBarLines_OmitsZeroSegments(t *testing.T) {
 			// Strict zero-omit — single segment renders, no
 			// "0 /" prefix.
 			name: "only cache hits — single segment renders",
-			ctx: &gateway.StatusBar{
-				AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-				UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{CacheReadInputTokens: 5_600}},
+			ctx: &messages.StatusBar{
+				AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+				UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{CacheReadInputTokens: 5_600}},
 			},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 5.6k 」"},
 		},
@@ -176,23 +176,23 @@ func TestFormatStatusBarLines_OmitsZeroSegments(t *testing.T) {
 			// token segment is omitted; $cost segment stands
 			// alone inside the brackets.
 			name: "cost only (no tokens)",
-			ctx: &gateway.StatusBar{
-				AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-				UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{CostUSD: 1.245}},
+			ctx: &messages.StatusBar{
+				AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+				UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{CostUSD: 1.245}},
 			},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 $1.245 」"},
 		},
 		{
 			// No cost segment when CostUSD == 0.
 			name: "no cost (omitted)",
-			ctx: &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+			ctx: &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200}}},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k 」"},
 		},
 		{
 			// No Agent/Model → only the usage line renders.
 			name: "tokens but no Agent / Model",
-			ctx: &gateway.StatusBar{UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+			ctx: &messages.StatusBar{UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					InputTokens: 5_000, OutputTokens: 200}}},
 			want: []string{"💰:「 5k / 200 」"},
 		},
@@ -202,9 +202,9 @@ func TestFormatStatusBarLines_OmitsZeroSegments(t *testing.T) {
 			// practice (turn that hit cache only, no new content
 			// and no generation).
 			name: "only cache hits — single segment renders",
-			ctx: &gateway.StatusBar{
-				AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-				UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{CacheReadInputTokens: 5_600}},
+			ctx: &messages.StatusBar{
+				AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+				UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{CacheReadInputTokens: 5_600}},
 			},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 5.6k 」"},
 		},
@@ -213,7 +213,7 @@ func TestFormatStatusBarLines_OmitsZeroSegments(t *testing.T) {
 			// `cache / out`. Confirms cache doesn't lead the
 			// segment when new is 0 (we drop the leading "0").
 			name: "cache hits + output, no new tokens",
-			ctx: &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+			ctx: &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					CacheReadInputTokens: 5_600,
 					OutputTokens:         800}}},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 5.6k / 800 」"},
@@ -231,7 +231,7 @@ func TestFormatStatusBarLines_OmitsZeroSegments(t *testing.T) {
 
 func TestFormatStatusBarLines_LargeNumbers(t *testing.T) {
 	// in = 156_000 + 0 + 1_200_000 = 1_356_000 → "1.4M" (rounded).
-	ctx := &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+	ctx := &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 			InputTokens:              156_000,
 			OutputTokens:             18_000,
 			CacheCreationInputTokens: 0,
@@ -251,7 +251,7 @@ func TestFormatStatusBarLines_LargeNumbers(t *testing.T) {
 // natively.
 func TestFormatStatusBar_StringForm(t *testing.T) {
 	// in = 12_300 + 0 + 8_200 = 20_500 → "20.5k".
-	ctx := &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+	ctx := &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 			InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200}}}
 	got := formatStatusBar(ctx)
 	want := "🤖: claude · opus-4-5\n💰:「 12.3k / 8.2k / 1.5k 」"
@@ -259,7 +259,7 @@ func TestFormatStatusBar_StringForm(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 	// Empty input → empty string.
-	if got := formatStatusBar(&gateway.StatusBar{}); got != "" {
+	if got := formatStatusBar(&messages.StatusBar{}); got != "" {
 		t.Fatalf("empty ctx should yield empty string, got %q", got)
 	}
 	if got := formatStatusBar(nil); got != "" {
@@ -270,7 +270,7 @@ func TestFormatStatusBar_StringForm(t *testing.T) {
 func TestFormatStatusBar_StableAcrossReRenders(t *testing.T) {
 	// Same input must always produce the same string — receipt
 	// PATCH diffing relies on body equality.
-	ctx := &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+	ctx := &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 			InputTokens: 12_300, OutputTokens: 1_500,
 			CacheReadInputTokens: 8_200, CostUSD: 0.087}}}
 	first := formatStatusBar(ctx)
@@ -296,21 +296,21 @@ func TestFormatStatusBar_StableAcrossReRenders(t *testing.T) {
 func TestFormatStatusBarLines_ContextWindowPct(t *testing.T) {
 	tests := []struct {
 		name string
-		ctx  *gateway.StatusBar
+		ctx  *messages.StatusBar
 		want []string
 	}{
 		{
 			name: "pct=0 — segment omitted (early turn / no ContextWindow reported)",
-			ctx: &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+			ctx: &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					InputTokens: 12_300, OutputTokens: 1_500,
 					CacheReadInputTokens: 8_200, CostUSD: 0.087}}},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"},
 		},
 		{
 			name: "pct only — typical post-EventAgentDone snapshot",
-			ctx: &gateway.StatusBar{
-				AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-				UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+			ctx: &messages.StatusBar{
+				AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+				UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					InputTokens:      20_000,
 					OutputTokens:     1_000,
 					ContextWindow:    200_000,
@@ -321,9 +321,9 @@ func TestFormatStatusBarLines_ContextWindowPct(t *testing.T) {
 		},
 		{
 			name: "pct + cost — full usage line",
-			ctx: &gateway.StatusBar{
-				AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-				UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+			ctx: &messages.StatusBar{
+				AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+				UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					InputTokens:          1_200_000,
 					OutputTokens:         80_000,
 					CacheReadInputTokens: 800_000,
@@ -336,14 +336,14 @@ func TestFormatStatusBarLines_ContextWindowPct(t *testing.T) {
 		},
 		{
 			name: "pct at the ceiling — 100.0% is honest, not 'full'",
-			ctx: &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+			ctx: &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					ContextWindow:    200_000,
 					ContextWindowPct: 100.0}}},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 100.0% (200k) 」"},
 		},
 		{
 			name: "pct without identity — segment still emits alone",
-			ctx: &gateway.StatusBar{UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+			ctx: &messages.StatusBar{UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					ContextWindow:    200_000,
 					ContextWindowPct: 5.0}}},
 			want: []string{"💰:「 5.0% (200k) 」"},
@@ -354,9 +354,9 @@ func TestFormatStatusBarLines_ContextWindowPct(t *testing.T) {
 			// compatibility-layer mismatches themselves (e.g.
 			// `101.6% (200k)` against an actual 1M model).
 			name: "pct > 100% — not clamped, (window) surfaces the mismatch",
-			ctx: &gateway.StatusBar{
-				AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-				UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+			ctx: &messages.StatusBar{
+				AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+				UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					InputTokens:          200_000,
 					OutputTokens:         1_000,
 					CacheReadInputTokens: 3_000,
@@ -369,7 +369,7 @@ func TestFormatStatusBarLines_ContextWindowPct(t *testing.T) {
 		{
 			// F-55: 1M-class model window rendered with M unit.
 			name: "1M context window — M unit",
-			ctx: &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-8"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+			ctx: &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-8"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					InputTokens: 200_000, OutputTokens: 1_000,
 					ContextWindow:    1_000_000,
 					ContextWindowPct: 20.1}}},
@@ -379,7 +379,7 @@ func TestFormatStatusBarLines_ContextWindowPct(t *testing.T) {
 			// Defensive: pct==0 drops the entire segment; window
 			// alone is not surfaced (zero-omit, F-45 §1.6).
 			name: "pct=0 — segment omitted even when window > 0",
-			ctx: &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+			ctx: &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					InputTokens: 12_300, OutputTokens: 1_500,
 					CacheReadInputTokens: 8_200, CostUSD: 0.087,
 					ContextWindow: 200_000}}},
@@ -502,7 +502,7 @@ func TestFormatGitBar_NilContextReturnsEmpty(t *testing.T) {
 // specifically to prove the Workspace-empty gate (not the
 // nil-GitStatus gate) is what's catching this case.
 func TestFormatGitBar_NoWorkspaceReturnsEmpty(t *testing.T) {
-	gb := &gateway.GitStatusBar{
+	gb := &messages.GitStatusBar{
 		Workspace: "",
 		GitStatus: &gtw.GitStatusSnapshot{Branch: "main", HasUpstream: true},
 	}
@@ -522,7 +522,7 @@ func TestFormatGitBar_NoWorkspaceReturnsEmpty(t *testing.T) {
 // specifically to prove the nil-GitStatus gate is what's
 // catching this case.
 func TestFormatGitBar_NoGitStatusOmitsLine(t *testing.T) {
-	gb := &gateway.GitStatusBar{
+	gb := &messages.GitStatusBar{
 		Workspace: "/some/path",
 		GitStatus: nil,
 	}
@@ -533,7 +533,7 @@ func TestFormatGitBar_NoGitStatusOmitsLine(t *testing.T) {
 
 func TestFormatGitBar_FullSnapshot(t *testing.T) {
 	// Branch + dirty + untracked + unpushed — all segments.
-	ctx := &gateway.StatusBar{GitBar: &gateway.GitStatusBar{Workspace: "/home/devin/code/nightme", GitStatus: &gtw.GitStatusSnapshot{
+	ctx := &messages.StatusBar{GitBar: &messages.GitStatusBar{Workspace: "/home/devin/code/nightme", GitStatus: &gtw.GitStatusSnapshot{
 			Branch:        "main",
 			Uncommitted:   3,
 			Untracked:     2,
@@ -623,7 +623,7 @@ func TestFormatGitBar_OmitsZeroSegments(t *testing.T) {
 			// formatGitBar takes a *GitStatusBar — wrap the
 			// snapshot in one so the test stays focused on the
 			// snapshot-shape rules.
-			gb := &gateway.GitStatusBar{
+			gb := &messages.GitStatusBar{
 				Workspace: "/home/devin/code/nightme",
 				GitStatus: tc.snap,
 			}
@@ -639,9 +639,9 @@ func TestFormatGitBar_OmitsZeroSegments(t *testing.T) {
 // appended after lines 1+2 when both are populated.
 func TestFormatStatusBarLines_WithGitLine(t *testing.T) {
 	// in = 12_300 + 0 + 8_200 = 20_500 → "20.5k".
-	ctx := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-		GitBar: &gateway.GitStatusBar{
+	ctx := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+		GitBar: &messages.GitStatusBar{
 			Workspace: "/home/devin/code/nightme",
 			GitStatus: &gtw.GitStatusSnapshot{
 				Branch:        "feat/x",
@@ -651,7 +651,7 @@ func TestFormatStatusBarLines_WithGitLine(t *testing.T) {
 				HasUpstream:   true,
 			},
 		},
-		UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+		UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 			InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
 		}},
 	}
@@ -670,8 +670,8 @@ func TestFormatStatusBarLines_WithGitLine(t *testing.T) {
 // on its own when lines 1+2 are both empty (e.g. first reply on
 // a git repo before any usage / model has been captured).
 func TestFormatStatusBarLines_GitOnly(t *testing.T) {
-	ctx := &gateway.StatusBar{
-		GitBar: &gateway.GitStatusBar{
+	ctx := &messages.StatusBar{
+		GitBar: &messages.GitStatusBar{
 			Workspace: "/home/devin/code/nightme",
 			GitStatus: &gtw.GitStatusSnapshot{Branch: "main", HasUpstream: true, AheadOfRemote: 0},
 		},
@@ -687,8 +687,8 @@ func TestFormatStatusBarLines_GitOnly(t *testing.T) {
 // return nil when nothing meaningful exists — backwards
 // compatible with F-45.
 func TestFormatStatusBarLines_NoGitNoUsage(t *testing.T) {
-	ctx := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+	ctx := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
 	}
 	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: claude · opus-4-5"}
@@ -709,9 +709,9 @@ func TestFormatStatusBarLines_NoGitNoUsage(t *testing.T) {
 // PR without git (no Workspace / no GitStatus) drops with
 // the git line — see TestFormatStatusBarLines_PRSegment_NoGitLine.
 func TestFormatStatusBarLines_PRSegment_AppendedToGitLine(t *testing.T) {
-	ctx := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-		GitBar: &gateway.GitStatusBar{
+	ctx := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+		GitBar: &messages.GitStatusBar{
 			Workspace:   "/home/devin/code/nightme",
 			GitStatus:   &gtw.GitStatusSnapshot{Branch: "fix-x", HasUpstream: true},
 			PullRequest: &gtw.PR{Number: 111, URL: "https://github.com/cnlangzi/nightme/pull/111", State: "open"},
@@ -736,9 +736,9 @@ func TestFormatStatusBarLines_PRSegment_AppendedToGitLine(t *testing.T) {
 // a PR but no Workspace, which is the standard
 // "transient / not in a git repo" configuration.
 func TestFormatStatusBarLines_PRSegment_NoGitLine(t *testing.T) {
-	ctx := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-		GitBar: &gateway.GitStatusBar{
+	ctx := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+		GitBar: &messages.GitStatusBar{
 			PullRequest: &gtw.PR{Number: 111, URL: "https://github.com/cnlangzi/nightme/pull/111", State: "open"},
 		},
 	}
@@ -771,7 +771,7 @@ func TestFormatStatusBarLines_PRSegment_NilOrInvalid(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, GitBar: &gateway.GitStatusBar{Workspace: "/home/devin/code/nightme", GitStatus: &gtw.GitStatusSnapshot{Branch: "fix-x", HasUpstream: true}}}
+			ctx := &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, GitBar: &messages.GitStatusBar{Workspace: "/home/devin/code/nightme", GitStatus: &gtw.GitStatusSnapshot{Branch: "fix-x", HasUpstream: true}}}
 			got := formatStatusBarLines(ctx)
 			want := []string{
 				"🤖: claude · opus-4-5",
@@ -790,9 +790,9 @@ func TestFormatStatusBarLines_PRSegment_NilOrInvalid(t *testing.T) {
 // as "where am I → how dirty → what's the open PR", not
 // "where am I → what's the PR → how dirty".
 func TestFormatStatusBarLines_PRSegment_DirtyCountsBetween(t *testing.T) {
-	ctx := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-		GitBar: &gateway.GitStatusBar{
+	ctx := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+		GitBar: &messages.GitStatusBar{
 			Workspace: "/home/devin/code/nightme",
 			GitStatus: &gtw.GitStatusSnapshot{
 				Branch:        "fix-x",

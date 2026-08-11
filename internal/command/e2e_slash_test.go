@@ -27,22 +27,24 @@ package command_test
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/command/newcmd"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/gateway/inbound"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/gatewaytest"
+	"github.com/cnlangzi/nightme/internal/shell"
 )
 
 // ─── Echo bridge ─────────────────────────────────────────────────────
@@ -184,69 +186,93 @@ func newRuntimeShim(
 	mgr *chatsession.Manager,
 	reg *command.Registry,
 	primary string,
-) func(ctx context.Context, msg *gateway.InboundMessage) (*gateway.CommandResult, error) {
+) *replyingCommander {
 	commander := command.NewCommander(reg)
-	rt := command.RuntimeServices{
-		Config: command.Config{Primary: primary},
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	return &replyingCommander{
+		mgr:       mgr,
+		commander: commander,
+		primary:   primary,
 	}
-	return func(ctx context.Context, msg *gateway.InboundMessage) (*gateway.CommandResult, error) {
-		if msg == nil {
-			return nil, nil
-		}
+}
 
-		cs, err := mgr.GetOrCreate(msg.ChatID, primary)
-		if err != nil {
-			return nil, nil
-		}
+// replyingCommander is a command.Commander wrapper that mirrors
+// the v0.x runtime shim: it dispatches via the real Commander
+// AND posts the resulting reply / out.Outbound via the chat
+// session's Emitter. The inbound layer just routes to it; the
+// reply-side plumbing lives here (next to the chat session it
+// touches).
+type replyingCommander struct {
+	mgr       *chatsession.Manager
+	commander command.Commander
+	primary   string
+}
 
-		input := command.SlashInput{
-			ChatID:     msg.ChatID,
-			UserID:     msg.UserID,
-			Text:       msg.Text,
-			MessageID:  msg.MessageID,
-			HasMention: msg.HasMention,
-		}
-		out, handled, err := commander.Dispatch(ctx, rt, cs, input)
-		if err != nil {
-			errText := "❌ " + err.Error()
-			ch := cs.Emitter()
-			if ch != nil {
-				_ = ch.Send(ctx, gateway.OutboundMessage{
-					ChatID:  msg.ChatID,
-					Text:    errText,
-					ReplyTo: msg.MessageID,
-				})
-			}
-			return &gateway.CommandResult{Consumed: true, Reply: errText}, nil
-		}
-		if !handled {
-			return nil, nil
-		}
+func (r *replyingCommander) Dispatch(ctx context.Context, rt command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, bool, error) {
+	out, handled, err := r.commander.Dispatch(ctx, rt, cs, input)
+	if err != nil {
+		errText := "❌ " + err.Error()
 		ch := cs.Emitter()
-		if out.Consumed && out.Reply != "" && ch != nil {
-			_ = ch.Send(ctx, gateway.OutboundMessage{
-				ChatID:  msg.ChatID,
-				Text:    out.Reply,
-				ReplyTo: msg.MessageID,
+		if ch != nil {
+			_ = ch.Send(ctx, messages.OutboundMessage{
+				ChatID:  input.ChatID,
+				Text:    errText,
+				ReplyTo: input.MessageID,
 			})
 		}
-		for _, ob := range out.Outbound {
-			if ch == nil {
-				continue
-			}
-			if ob.Card != nil {
-				_, _ = ch.SendCard(ctx, ob)
-			} else {
-				_ = ch.Send(ctx, ob)
-			}
-		}
-		return &gateway.CommandResult{
-			Consumed: out.Consumed,
-			Dropped:  out.Dropped,
-			Reply:    out.Reply,
-		}, nil
+		return &command.SlashOutput{Consumed: true, Reply: errText}, true, nil
 	}
+	if !handled {
+		return nil, false, nil
+	}
+	ch := cs.Emitter()
+	if out.Consumed && out.Reply != "" && ch != nil {
+		_ = ch.Send(ctx, messages.OutboundMessage{
+			ChatID:  input.ChatID,
+			Text:    out.Reply,
+			ReplyTo: input.MessageID,
+		})
+	}
+	for _, ob := range out.Outbound {
+		if ch == nil {
+			continue
+		}
+		if ob.Kind == messages.OutCardPatch {
+			_ = ch.Send(ctx, ob)
+		} else if ob.Card != nil {
+			_, _ = ch.SendCard(ctx, ob)
+		} else {
+			_ = ch.Send(ctx, ob)
+		}
+	}
+	return out, true, nil
+}
+
+// e2eStubMgr satisfies inbound.MessageHandler with no-op
+// behaviour; the e2e test never exercises the message
+// e2eStubMgr satisfies inbound.MessageHandler with no-op
+// behaviour; the e2e test never exercises the message
+// (agent-loop) branch.
+//
+// GetOrCreate is forwarded to the manager the caller provides
+// at construction. inbound.tryCommandDispatch needs a real
+// *ChatSession (the replyingCommander shim calls
+// cs.Emitter() to deliver replies), so the stub must hand
+// out real ChatSessions from a real Manager.
+type e2eStubMgr struct {
+	mgr *chatsession.Manager
+}
+
+func (e e2eStubMgr) HandleInbound(_ context.Context, _ *messages.InboundMessage) error { return nil }
+func (e e2eStubMgr) GetOrCreate(chatID, primary string) (*chatsession.ChatSession, error) {
+	return e.mgr.GetOrCreate(chatID, primary)
+}
+
+// e2eStubRouter satisfies inbound.ReactionRouter with no-op
+// behaviour.
+type e2eStubRouter struct{}
+
+func (e2eStubRouter) Handle(_ context.Context, _ string, _ commandServices.ReactionEvent) bool {
+	return false
 }
 
 // ─── testChannelWrap (test-only outbound.Emitter adapter) ──────────
@@ -261,11 +287,11 @@ type testChannelWrap struct {
 	ch channel.Channel
 }
 
-func (w *testChannelWrap) Send(ctx context.Context, msg gateway.OutboundMessage) error {
+func (w *testChannelWrap) Send(ctx context.Context, msg messages.OutboundMessage) error {
 	return w.ch.Send(ctx, msg)
 }
 
-func (w *testChannelWrap) SendCard(ctx context.Context, msg gateway.OutboundMessage) (string, error) {
+func (w *testChannelWrap) SendCard(ctx context.Context, msg messages.OutboundMessage) (string, error) {
 	if err := w.ch.Send(ctx, msg); err != nil {
 		return "", err
 	}
@@ -280,10 +306,10 @@ var _ outbound.Emitter = (*testChannelWrap)(nil)
 // chat-session path; this one is for the gateway's own reference).
 type noopEmitter struct{}
 
-func (noopEmitter) Send(context.Context, gateway.OutboundMessage) error {
+func (noopEmitter) Send(context.Context, messages.OutboundMessage) error {
 	return nil
 }
-func (noopEmitter) SendCard(context.Context, gateway.OutboundMessage) (string, error) {
+func (noopEmitter) SendCard(context.Context, messages.OutboundMessage) (string, error) {
 	return "", nil
 }
 
@@ -295,7 +321,7 @@ func (noopEmitter) SendCard(context.Context, gateway.OutboundMessage) (string, e
 type wiredHarness struct {
 	echoCh *echo.Channel
 	mgr    *chatsession.Manager
-	gw     gateway.Gateway
+	gw     *gateway.Router
 }
 
 func newWiredHarness(t *testing.T) *wiredHarness {
@@ -322,13 +348,17 @@ func newWiredHarness(t *testing.T) *wiredHarness {
 
 	// Gateway with a no-op MessageDispatcher (the test only
 	// exercises the slash command path, never the agent loop).
-	// The Emitter is the same wrap that Manager.WithEmitter
-	// already installed — every slash reply goes through it
-	// twice (once via the runtime shim's cs.Emitter() and once
-	// in case any inline channel adapter path is exercised).
+	// F-58: the dispatch chain is in *inbound.Router; we wire a
+	// real commander + no-op stubs for the other three slots.
 	noop := &gatewaytest.NoopEmitter{}
-	gw := gateway.New(func(context.Context, *gateway.InboundMessage) error { return nil }, noop)
-	gw.WithCommander(newRuntimeShim(mgr, reg, "echo"))
+	ir := inbound.New(
+		&e2eStubMgr{mgr: mgr},
+		newRuntimeShim(mgr, reg, "echo"),
+		shell.NewDispatcher(nil),
+		&e2eStubRouter{},
+		"echo",
+	)
+	gw := gateway.New(ir, noop)
 
 	return &wiredHarness{echoCh: echoCh, mgr: mgr, gw: gw}
 }
@@ -336,14 +366,14 @@ func newWiredHarness(t *testing.T) *wiredHarness {
 // driveSlash sends one InboundMessage through the gateway and waits
 // up to `wait` for the echo channel to capture at least one
 // outbound message. Returns the captured messages.
-func (h *wiredHarness) driveSlash(t *testing.T, msg *gateway.InboundMessage, wait time.Duration) []gateway.OutboundMessage {
+func (h *wiredHarness) driveSlash(t *testing.T, msg *messages.InboundMessage, wait time.Duration) []messages.OutboundMessage {
 	t.Helper()
 	if _, err := h.gw.DispatchInbound(context.Background(), msg); err != nil {
 		t.Fatalf("DispatchInbound(%q): %v", msg.Text, err)
 	}
 
 	deadline := time.Now().Add(wait)
-	var rec []gateway.OutboundMessage
+	var rec []messages.OutboundMessage
 	for time.Now().Before(deadline) {
 		rec = h.echoCh.Record()
 		if len(rec) > 0 {
@@ -371,7 +401,7 @@ func (h *wiredHarness) driveSlash(t *testing.T, msg *gateway.InboundMessage, wai
 func TestSlash_E2E_NewReply_ReachesEchoChannel(t *testing.T) {
 	h := newWiredHarness(t)
 
-	msg := &gateway.InboundMessage{
+	msg := &messages.InboundMessage{
 		ChatID:    "oc_e2e_new_1",
 		UserID:    "ou_e2e_user",
 		Text:      "/new",
@@ -392,7 +422,7 @@ func TestSlash_E2E_NewReply_ReachesEchoChannel(t *testing.T) {
 	// The first /new without a workspace replies with the
 	// "No active workspace…" preflight message — see
 	// internal/command/preflight.go:RequireActiveCwd.
-	var reply *gateway.OutboundMessage
+	var reply *messages.OutboundMessage
 	for i := range rec {
 		if strings.Contains(rec[i].Text, "workspace") {
 			reply = &rec[i]
@@ -438,7 +468,7 @@ func TestSlash_E2E_NewReply_WithCwd_ReachesEchoChannel(t *testing.T) {
 	// newcmd's Handle returns "No agent session in current
 	// workspace to reset. Send a message to start one." (see
 	// internal/command/newcmd/cmd.go:108-109).
-	newMsg := &gateway.InboundMessage{
+	newMsg := &messages.InboundMessage{
 		ChatID:    chatID,
 		UserID:    "ou_e2e_user",
 		Text:      "/new",
@@ -454,7 +484,7 @@ func TestSlash_E2E_NewReply_WithCwd_ReachesEchoChannel(t *testing.T) {
 	// The newcmd reply is unique to /new with cwd set; finding
 	// it in the captured set proves the slash command reached
 	// the command layer (not just the gateway's text fall-through).
-	var newReply *gateway.OutboundMessage
+	var newReply *messages.OutboundMessage
 	for i := range rec {
 		if strings.Contains(rec[i].Text, "No agent session") {
 			newReply = &rec[i]

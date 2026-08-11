@@ -11,7 +11,7 @@
 // translation between gateway messages and command inputs/outputs.
 //
 // The Commander refactor proposed deleting command.Outbound /
-// Card / CardChoice in favour of using gateway.OutboundMessage
+// Card / CardChoice in favour of using messages.OutboundMessage
 // directly. That would require command to import gateway, which
 // creates an import cycle (gateway → command/gtw → command). So
 // we keep the command-side mirror types; the runtime shim
@@ -20,7 +20,7 @@ package command
 
 import (
 	"github.com/cnlangzi/nightme/internal/command/services"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // ReactionEvent is the inbound reaction / action payload.
@@ -38,7 +38,7 @@ type ReactionEvent = services.ReactionEvent
 
 // SlashInput is the command-package's view of one inbound message.
 //
-// gateway.WithCommander receives *gateway.InboundMessage and
+// gateway.WithCommander receives *messages.InboundMessage and
 // translates to this struct before calling Commander.Dispatch.
 // Likewise channel adapters (e.g. feishu/adapter.go) construct
 // SlashInput.Reaction from the channel's native reaction event.
@@ -87,10 +87,10 @@ type SlashOutput struct {
 	// Outbound is an explicit list of outbound messages to send
 	// in order. When non-empty, the runtime shim forwards each
 	// via the chat session's Emitter. Uses the canonical
-	// gateway.OutboundMessage so commands build messages with
+	// messages.OutboundMessage so commands build messages with
 	// the same type the Emitter accepts (no mirror types in
 	// this package).
-	Outbound []gateway.OutboundMessage
+	Outbound []messages.OutboundMessage
 }
 
 // CardChoice is the command-package's view of one button on a

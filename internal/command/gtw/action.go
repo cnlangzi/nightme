@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/command/services"
-	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
 // HandleDraftReaction is the per-draft action router. It is called
@@ -279,12 +279,12 @@ func emitFollowUp(
 		// PATCH semantics: the channel renders an OutboundMessage
 		// with Kind=OutCardPatch. ReplyTo carries the bot-side
 		// message id to PATCH; Card holds the new payload.
-		_ = em.Send(ctx, gateway.OutboundMessage{
+		_ = em.Send(ctx, messages.OutboundMessage{
 			ChatID:    ev.ChatID,
-			Kind:      gateway.OutCardPatch,
+			Kind:      messages.OutCardPatch,
 			ReplyTo:   draft.BotMessageID,
 			Text:      resultText,
-			Card: &gateway.Card{
+			Card: &messages.Card{
 				Title:             draft.CardTitle,
 				Body:              draft.CardBody,
 				Choices:           toCardChoices(draft.CardChoices),
@@ -295,9 +295,9 @@ func emitFollowUp(
 		})
 		return
 	}
-	_ = em.Send(ctx, gateway.OutboundMessage{
+	_ = em.Send(ctx, messages.OutboundMessage{
 		ChatID:  ev.ChatID,
-		Kind:    gateway.OutReply,
+		Kind:    messages.OutReply,
 		ReplyTo: ev.TargetMsgID,
 		Text:    resultText,
 	})
@@ -374,14 +374,14 @@ func variantReadyResultText(p FixDraftPayload, branch string) string {
 // chatsession.CardChoice internal layout for translation.
 // toCardChoices translates internal/command/gtw.CardChoice (the
 // gtw command's button type) to the wire-level
-// gateway.CardChoice that the channel adapter renders.
-func toCardChoices(in []CardChoice) []gateway.CardChoice {
+// messages.CardChoice that the channel adapter renders.
+func toCardChoices(in []CardChoice) []messages.CardChoice {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make([]gateway.CardChoice, len(in))
+	out := make([]messages.CardChoice, len(in))
 	for i, c := range in {
-		out[i] = gateway.CardChoice{
+		out[i] = messages.CardChoice{
 			Emoji:  c.Emoji,
 			Label:  c.Label,
 			Action: c.Action,

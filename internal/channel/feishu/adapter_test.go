@@ -17,7 +17,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/config"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 func testAdapter(t *testing.T) *Adapter {
@@ -462,8 +462,8 @@ func TestSend_OutThinking_PostsMarkdownCard(t *testing.T) {
 		return "om_card_test", nil
 	}
 
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutThinking,
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutThinking,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
 		Text:    "let me think",
@@ -544,11 +544,11 @@ func TestSend_OutToolStart_PostsToThread(t *testing.T) {
 		return "om_text_test", nil
 	}
 
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutToolStart,
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutToolStart,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
-		Tool: &gateway.ToolInfo{
+		Tool: &messages.ToolInfo{
 			Name: "Read",
 			Args: "/foo.go",
 		},
@@ -593,11 +593,11 @@ func TestSend_OutToolEnd_PostsToThread(t *testing.T) {
 		return "om_text_test", nil
 	}
 
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutToolEnd,
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutToolEnd,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
-		Tool: &gateway.ToolInfo{
+		Tool: &messages.ToolInfo{
 			Name:   "Read",
 			Args:   "/foo.go",
 			Output: "line1\nline2",
@@ -667,31 +667,31 @@ func TestSend_OutToolEnd_PostsToThread(t *testing.T) {
 func TestSend_ThreadOnlyEvents_PassReplyInThreadTrue(t *testing.T) {
 	type tc struct {
 		name string
-		msg  gateway.OutboundMessage
+		msg  messages.OutboundMessage
 		want string // expected thread reply body (for text replies)
 	}
 	cases := []tc{
 		{
 			name: "OutThinking",
-			msg: gateway.OutboundMessage{
-				Kind: gateway.OutThinking, ChatID: "oc_t", ReplyTo: "om_user_t",
+			msg: messages.OutboundMessage{
+				Kind: messages.OutThinking, ChatID: "oc_t", ReplyTo: "om_user_t",
 				Text: "let me check…",
 			},
 			want: "💭 let me check…",
 		},
 		{
 			name: "OutToolStart",
-			msg: gateway.OutboundMessage{
-				Kind: gateway.OutToolStart, ChatID: "oc_t", ReplyTo: "om_user_t",
-				Tool: &gateway.ToolInfo{Name: "Read", Args: "/a.go"},
+			msg: messages.OutboundMessage{
+				Kind: messages.OutToolStart, ChatID: "oc_t", ReplyTo: "om_user_t",
+				Tool: &messages.ToolInfo{Name: "Read", Args: "/a.go"},
 			},
 			want: "● Read(/a.go)",
 		},
 		{
 			name: "OutToolEnd",
-			msg: gateway.OutboundMessage{
-				Kind: gateway.OutToolEnd, ChatID: "oc_t", ReplyTo: "om_user_t",
-				Tool: &gateway.ToolInfo{Name: "Read", Output: "x\ny"},
+			msg: messages.OutboundMessage{
+				Kind: messages.OutToolEnd, ChatID: "oc_t", ReplyTo: "om_user_t",
+				Tool: &messages.ToolInfo{Name: "Read", Output: "x\ny"},
 			},
 			// summarizeToolResult("Read", "x\ny", nil) → "⎿  📄 Read → 2 lines"
 			// We don't hard-code the line — assert via prefix below.
@@ -842,7 +842,7 @@ func TestSend_ChatVisibleEvents_PassReplyInThreadFalse(t *testing.T) {
 // main chat regardless of whether the parent user message has a
 // tool thread. The emoji is the channel's visual decoration (so
 // users can scan main chat and immediately see "this is a
-// permission request"); the abstract gateway.Card.Title is the
+// permission request"); the abstract messages.Card.Title is the
 // undecorated plain title.
 func TestSend_OutCard_TopLevelCreate_EmojiPrefixed(t *testing.T) {
 	a := testAdapter(t)
@@ -861,13 +861,13 @@ func TestSend_OutCard_TopLevelCreate_EmojiPrefixed(t *testing.T) {
 		return "om_card_test", nil
 	}
 
-	card := &gateway.Card{
+	card := &messages.Card{
 		Title:   "Permission needed",
 		Body:    "Allow Bash?",
 		Options: []string{"allow", "deny"},
 	}
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutCard,
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutCard,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1", // F-44 follow-up: ReplyTo is ignored
 		Card:    card,
@@ -921,8 +921,8 @@ func TestSend_OutCommandReply_TopLevelCreate_EmojiPrefixed(t *testing.T) {
 		return "om_text_test", nil
 	}
 
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutCommandReply,
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutCommandReply,
 		ChatID:  "oc_test",
 		ReplyTo: "om_cmd_1", // F-44 follow-up: ReplyTo is ignored
 		Text:    "available agents: main, codegraph",
@@ -1153,7 +1153,7 @@ func TestIsFeishuTerminalMessageCode(t *testing.T) {
 func TestSendViaLark_ReplyInBoth_Dispatch(t *testing.T) {
 	cases := []struct {
 		name string
-		msg  gateway.OutboundMessage
+		msg  messages.OutboundMessage
 	}{
 		// F-49: "OutCompaction" case deleted — the OutCompaction
 		// kind no longer exists (see
@@ -1203,12 +1203,12 @@ func TestSendViaLark_ReplyInBoth_Dispatch(t *testing.T) {
 func TestSendViaLark_ReplyInThread_Dispatch(t *testing.T) {
 	cases := []struct {
 		name string
-		msg  gateway.OutboundMessage
+		msg  messages.OutboundMessage
 	}{
 		{
 			name: "OutThinking",
-			msg: gateway.OutboundMessage{
-				Kind:    gateway.OutThinking,
+			msg: messages.OutboundMessage{
+				Kind:    messages.OutThinking,
 				ChatID:  "oc_test",
 				ReplyTo: "om_user_1",
 				Text:    "considering",
@@ -1216,20 +1216,20 @@ func TestSendViaLark_ReplyInThread_Dispatch(t *testing.T) {
 		},
 		{
 			name: "OutToolStart",
-			msg: gateway.OutboundMessage{
-				Kind:    gateway.OutToolStart,
+			msg: messages.OutboundMessage{
+				Kind:    messages.OutToolStart,
 				ChatID:  "oc_test",
 				ReplyTo: "om_user_2",
-				Tool:    &gateway.ToolInfo{Name: "Bash", Args: "ls"},
+				Tool:    &messages.ToolInfo{Name: "Bash", Args: "ls"},
 			},
 		},
 		{
 			name: "OutToolEnd",
-			msg: gateway.OutboundMessage{
-				Kind:    gateway.OutToolEnd,
+			msg: messages.OutboundMessage{
+				Kind:    messages.OutToolEnd,
 				ChatID:  "oc_test",
 				ReplyTo: "om_user_3",
-				Tool:    &gateway.ToolInfo{Name: "Bash", Output: "file1\nfile2"},
+				Tool:    &messages.ToolInfo{Name: "Bash", Output: "file1\nfile2"},
 			},
 		},
 	}
@@ -1286,14 +1286,14 @@ func TestSendViaLark_ReplyInThread_Dispatch(t *testing.T) {
 func TestSendViaLark_Dispatch(t *testing.T) {
 	cases := []struct {
 		name             string
-		msg              gateway.OutboundMessage
+		msg              messages.OutboundMessage
 		wantRootID       string // "" = top-level Create; else = ReplyInBoth anchor
 		wantReplyInThread bool
 	}{
 		{
 			name: "OutTaskCreate",
-			msg: gateway.OutboundMessage{
-				Kind:    gateway.OutTaskCreate,
+			msg: messages.OutboundMessage{
+				Kind:    messages.OutTaskCreate,
 				ChatID:  "oc_test",
 				ReplyTo: "om_user_1",
 				TaskList: &agent.AgentTaskListEvent{Items: []agent.AgentTaskItem{
@@ -1305,8 +1305,8 @@ func TestSendViaLark_Dispatch(t *testing.T) {
 		},
 		{
 			name: "OutTaskUpdate",
-			msg: gateway.OutboundMessage{
-				Kind:    gateway.OutTaskUpdate,
+			msg: messages.OutboundMessage{
+				Kind:    messages.OutTaskUpdate,
 				ChatID:  "oc_test",
 				ReplyTo: "om_user_2",
 				TaskList: &agent.AgentTaskListEvent{Items: []agent.AgentTaskItem{
@@ -1318,11 +1318,11 @@ func TestSendViaLark_Dispatch(t *testing.T) {
 		},
 		{
 			name: "OutCard (permission)",
-			msg: gateway.OutboundMessage{
-				Kind:    gateway.OutCard,
+			msg: messages.OutboundMessage{
+				Kind:    messages.OutCard,
 				ChatID:  "oc_test",
 				ReplyTo: "om_user_3", // F-44 follow-up: ReplyTo is ignored (top-level Create)
-				Card: &gateway.Card{
+				Card: &messages.Card{
 					Title:   "Allow Bash?",
 					Options: []string{"Allow", "Deny"},
 				},
@@ -1332,8 +1332,8 @@ func TestSendViaLark_Dispatch(t *testing.T) {
 		},
 		{
 			name: "OutCommandReply",
-			msg: gateway.OutboundMessage{
-				Kind:    gateway.OutCommandReply,
+			msg: messages.OutboundMessage{
+				Kind:    messages.OutCommandReply,
 				ChatID:  "oc_test",
 				ReplyTo: "om_user_4", // F-44 follow-up: ReplyTo is ignored (top-level Create)
 				Text:    "/help result",
@@ -1383,8 +1383,8 @@ func TestSend_OutResult_LongMarkdownUsesInteractiveCard(t *testing.T) {
 	}
 
 	longText := "intro paragraph\n\n```go\nfunc x() { return 1 }\n```\n\nbody text after"
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutResult,
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_x",
 		Text:    longText,
@@ -1406,8 +1406,8 @@ func TestSend_OutResult_NoMarkdownUsesText(t *testing.T) {
 		gotContent = content
 		return "ok", nil
 	}
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutResult,
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_x",
 		Text:    "plain reply without any markdown markers",
@@ -1436,8 +1436,8 @@ func TestSend_OutResult_LotsOfTablesUsesPost(t *testing.T) {
 		b.WriteString("| A | B |\n|---|---|\n| 1 | 2 |\n\n")
 	}
 	text := strings.TrimRight(b.String(), "\n")
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutResult,
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_x",
 		Text:    text,
@@ -1458,8 +1458,8 @@ func TestSend_OutResult_EmptySkipped(t *testing.T) {
 		sends++
 		return "ok", nil
 	}
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutResult,
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_x",
 		Text:    "",
@@ -1480,8 +1480,8 @@ func TestSend_OutResult_IsErrorPrefixedWithIcon(t *testing.T) {
 		gotContent = content
 		return "ok", nil
 	}
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:    gateway.OutResult,
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:    messages.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_x",
 		Text:    "agent run failed",
@@ -1522,13 +1522,13 @@ func TestSend_OutResult_OrphanTopLevel(t *testing.T) {
 		gotRootID = rootID
 		return "ok", nil
 	}
-	ctx := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-		UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{InputTokens: 200, OutputTokens: 80, CostUSD: 0.456}},
+	ctx := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+		UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{InputTokens: 200, OutputTokens: 80, CostUSD: 0.456}},
 	}
 	text := "## Final\n\nbody"
-	if err := a.Send(t.Context(), gateway.OutboundMessage{
-		Kind:           gateway.OutResult,
+	if err := a.Send(t.Context(), messages.OutboundMessage{
+		Kind:           messages.OutResult,
 		ChatID:         "oc_test",
 		ReplyTo:        "", // orphan
 		Text:           text,
@@ -1684,8 +1684,8 @@ func TestSend_OutReply_FoldsIntoReceipt(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutReply,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutReply,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
 		Text:    "first chunk of the reply",
@@ -1751,8 +1751,8 @@ func TestSend_OutReply_MultipleChunks_PATCHesSameCard(t *testing.T) {
 
 	chunks := []string{"first", "second", "third"}
 	for i, chunk := range chunks {
-		if err := a.Send(context.Background(), gateway.OutboundMessage{
-			Kind:    gateway.OutReply,
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			Kind:    messages.OutReply,
 			ChatID:  "oc_test",
 			ReplyTo: "om_user",
 			Text:    chunk,
@@ -1794,8 +1794,8 @@ func TestSend_OutReply_EmptyText_SilentDrop(t *testing.T) {
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
 	for _, text := range []string{"", "   ", "\n\n\t"} {
-		if err := a.Send(context.Background(), gateway.OutboundMessage{
-			Kind:    gateway.OutReply,
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			Kind:    messages.OutReply,
 			ChatID:  "oc_test",
 			ReplyTo: "om_user",
 			Text:    text,
@@ -1836,14 +1836,14 @@ func TestSend_OutReply_OrphanReplyTo_AlwaysCard(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	ctx := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-		UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+	ctx := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+		UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 			InputTokens: 100, OutputTokens: 50, CostUSD: 0.123,
 		}},
 	}
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:           gateway.OutReply,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:           messages.OutReply,
 		ChatID:         "oc_test",
 		ReplyTo:        "", // orphan — no parent user message
 		Text:           "orphan reply chunk",
@@ -1927,14 +1927,14 @@ func TestSend_OutReply_ColdStartSendCardFails_StillProducesCard(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutReply,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutReply,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
 		Text:    "first chunk after cold-start failure",
-		StatusBar: &gateway.StatusBar{
-			AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-			UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{InputTokens: 10, CostUSD: 0.001}},
+		StatusBar: &messages.StatusBar{
+			AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+			UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{InputTokens: 10, CostUSD: 0.001}},
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutReply cold-start fail): %v", err)
@@ -1998,14 +1998,14 @@ func TestSend_OutReply_AppendEntryOverflow_StillProducesCard(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	ctx := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-		UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{InputTokens: 100, CostUSD: 0.01}},
+	ctx := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+		UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{InputTokens: 100, CostUSD: 0.01}},
 	}
 
 	// Chunk 1: cold-start receipt.
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: "om_user",
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind: messages.OutReply, ChatID: "oc_test", ReplyTo: "om_user",
 		Text: "first chunk", StatusBar: ctx,
 	}); err != nil {
 		t.Fatalf("Send(OutReply chunk 1): %v", err)
@@ -2030,8 +2030,8 @@ func TestSend_OutReply_AppendEntryOverflow_StillProducesCard(t *testing.T) {
 	// Chunk 2: AppendEntryWithFooter sees elementCount > cap →
 	// returns ErrReceiptOverflow → caller bails to
 	// postOrphanReplyCard.
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind: gateway.OutReply, ChatID: "oc_test", ReplyTo: "om_user",
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind: messages.OutReply, ChatID: "oc_test", ReplyTo: "om_user",
 		Text: "second chunk triggers overflow", StatusBar: ctx,
 	}); err != nil {
 		t.Fatalf("Send(OutReply chunk 2): %v", err)
@@ -2073,8 +2073,8 @@ func TestSend_OutReply_NilStatusBar_NoFooterSection(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutReply,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutReply,
 		ChatID:  "oc_test",
 		ReplyTo: "", // orphan path
 		Text:    "no-session-ctx chunk",
@@ -2124,15 +2124,15 @@ func TestSend_OutResult_AnchoredCardFooterStyled(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutResult,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user", // anchored
 		Text:    "intro\n\n```go\nfunc x() { return 1 }\n```\n\noutro",
 		Result:  &agent.AgentResultEvent{Text: "intro\n\n```go\nfunc x() { return 1 }\n```\n\noutro"},
-		StatusBar: &gateway.StatusBar{
-			AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-			UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{InputTokens: 200, OutputTokens: 80, CostUSD: 0.456}},
+		StatusBar: &messages.StatusBar{
+			AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+			UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{InputTokens: 200, OutputTokens: 80, CostUSD: 0.456}},
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutResult anchored): %v", err)
@@ -2228,8 +2228,8 @@ func TestSend_OutInit_SilentDrop(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:      gateway.OutInit,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:      messages.OutInit,
 		ChatID:    "oc_test",
 		ReplyTo:   "om_user",
 		SessionID: "s_1",
@@ -2260,8 +2260,8 @@ func TestSend_OutResult_CoLocatesUsage(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutResult,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutResult,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
 		Text:    "完成",
@@ -2607,17 +2607,17 @@ func TestSend_OutTask_OrphanReplyTo_StillCard(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutTaskCreate,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutTaskCreate,
 		ChatID:  "oc_test",
 		ReplyTo: "", // orphan — no parent user message
 		TaskList: &agent.AgentTaskListEvent{Items: []agent.AgentTaskItem{
 			{ID: "1", Subject: "task A", Status: agent.TaskPending},
 			{ID: "2", Subject: "task B", Status: agent.TaskCompleted},
 		}},
-		StatusBar: &gateway.StatusBar{
-			AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-			UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{InputTokens: 100, CostUSD: 0.001}},
+		StatusBar: &messages.StatusBar{
+			AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+			UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{InputTokens: 100, CostUSD: 0.001}},
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutTask orphan): %v", err)
@@ -2664,16 +2664,16 @@ func TestSend_OutTask_ColdStartSendCardFails_StillCard(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutTaskCreate,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutTaskCreate,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user",
 		TaskList: &agent.AgentTaskListEvent{Items: []agent.AgentTaskItem{
 			{ID: "1", Subject: "fallback task", Status: agent.TaskPending},
 		}},
-		StatusBar: &gateway.StatusBar{
-			AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-			UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{InputTokens: 50, CostUSD: 0.005}},
+		StatusBar: &messages.StatusBar{
+			AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+			UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{InputTokens: 50, CostUSD: 0.005}},
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutTask cold-start fail): %v", err)
@@ -2713,8 +2713,8 @@ func TestSend_OutTask_NilStatusBar_NoFooter(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutTaskCreate,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutTaskCreate,
 		ChatID:  "oc_test",
 		ReplyTo: "", // orphan
 		TaskList: &agent.AgentTaskListEvent{Items: []agent.AgentTaskItem{
@@ -2758,16 +2758,16 @@ func TestSend_OutTask_EmptyItems_ShowsWorkingPlaceholder(t *testing.T) {
 	}
 	a.updateFunc = func(_ context.Context, _, _ string) error { return nil }
 
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutTaskCreate,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutTaskCreate,
 		ChatID:  "oc_test",
 		ReplyTo: "", // orphan
 		TaskList: &agent.AgentTaskListEvent{
 			Items: nil, // ← empty task list edge case
 		},
-		StatusBar: &gateway.StatusBar{
-			AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
-			UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{InputTokens: 10, CostUSD: 0.001}},
+		StatusBar: &messages.StatusBar{
+			AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+			UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{InputTokens: 10, CostUSD: 0.001}},
 		},
 	}); err != nil {
 		t.Fatalf("Send(OutTask empty items): %v", err)

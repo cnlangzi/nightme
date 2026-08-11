@@ -2,8 +2,8 @@
 // surface. Gateway.WithCommander receives a DispatchFunc (not
 // the Commander interface — see F-51 doc §1.2.7); the runtime
 // in cmd/nightme/run.go wraps the Commander with a thin shim
-// that translates *gateway.InboundMessage to SlashInput and
-// *SlashOutput back to *gateway.CommandResult. This package
+// that translates *messages.InboundMessage to SlashInput and
+// *SlashOutput back to *inbound.CommandResult. This package
 // never imports internal/gateway.
 //
 // 2026-08-06: Commander.Dispatch gained a third return value

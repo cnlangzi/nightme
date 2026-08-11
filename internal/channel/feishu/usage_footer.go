@@ -75,7 +75,7 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/command/gtw"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // formatStatusBarLines returns the StatusBar footer as a
@@ -180,7 +180,7 @@ import (
 // Pre-rename this was `formatSessionFooterLines(ctx *SessionContext)`
 // with the flat struct; renamed to operate on the sub-bar
 // StatusBar struct.
-func formatStatusBarLines(sb *gateway.StatusBar) []string {
+func formatStatusBarLines(sb *messages.StatusBar) []string {
 	if sb == nil {
 		return nil
 	}
@@ -343,7 +343,7 @@ func formatStatusBarLines(sb *gateway.StatusBar) []string {
 // The link text (`#N`) is enough for a reader to recognise
 // "this is the open PR for the current branch" — and it's
 // clickable, which is the actual signal of "this is a link".
-func formatPRSegment(gb *gateway.GitStatusBar) string {
+func formatPRSegment(gb *messages.GitStatusBar) string {
 	if gb == nil {
 		return ""
 	}
@@ -367,7 +367,7 @@ func formatPRSegment(gb *gateway.GitStatusBar) string {
 //
 // Pre-rename this was `formatSessionFooter`. Renamed for the
 // same reason as formatSessionFooterLines → formatStatusBarLines.
-func formatStatusBar(sb *gateway.StatusBar) string {
+func formatStatusBar(sb *messages.StatusBar) string {
 	return strings.Join(formatStatusBarLines(sb), "\n")
 }
 
@@ -546,7 +546,7 @@ func formatWorkspacePath(absPath string) string {
 // the sub-bar design: GitBar is only attached to StatusBar
 // when the chat has a workspace, and the renderer drops the
 // line when GitStatus is nil.
-func formatGitBar(gb *gateway.GitStatusBar) string {
+func formatGitBar(gb *messages.GitStatusBar) string {
 	if gb == nil {
 		return ""
 	}

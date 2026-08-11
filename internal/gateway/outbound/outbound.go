@@ -5,7 +5,7 @@
 //
 //  1. Some caller (the runtime event pump, a slash command handler,
 //     the message-dispatcher error path, ...) builds an
-//     gateway.OutboundMessage.
+//     messages.OutboundMessage.
 //  2. The caller passes it to Emitter.Send / Emitter.SendCard.
 //  3. Emitter optionally invokes the injected Stamper to attach
 //     a SessionContext footer (F-45/F-48), then forwards to the
@@ -23,12 +23,12 @@
 // Relationship to internal/gateway:
 //
 //   - outbound imports gateway for the message types
-//     (gateway.OutboundMessage, gateway.OutboundKind, etc.)
+//     (messages.OutboundMessage, messages.OutboundKind, etc.)
 //   - gateway does NOT import outbound — gateway is the shared type
 //     hub, outbound is the send-side behaviour
 //   - chatsession keeps its own outbound.Emitter interface
 //     (takes chatsession.OutboundMessage); cmd/nightme's
-//     outbound.Emitter adapts that to gateway.OutboundMessage and routes
+//     outbound.Emitter adapts that to messages.OutboundMessage and routes
 //     through Emitter, so slash command replies also get stamped.
 //
 // See docs/SPEC.md §3.x for the broader hub-and-spoke rationale.
@@ -38,7 +38,7 @@ import (
 	"context"
 
 	"github.com/cnlangzi/nightme/internal/channel"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // Channel adapters (Feishu, echo test stub, ...) implement
@@ -55,7 +55,7 @@ import (
 // already populated msg.SessionContext OR there is no active
 // session / nothing meaningful to render. Emitter treats nil
 // the same way: don't stamp, just forward.
-type Stamper func(chatID string) *gateway.SessionContext
+type Stamper func(chatID string) *messages.SessionContext
 
 // Options configures optional Emitter behaviour. The zero value
 // is valid: Emitter becomes a pure Channel.Send / SendCard
@@ -73,8 +73,8 @@ type Options struct {
 // event pump, the slash command dispatcher, the message
 // dispatcher closure, the MessageStateBus subscribers.
 type Emitter interface {
-	Send(ctx context.Context, msg gateway.OutboundMessage) error
-	SendCard(ctx context.Context, msg gateway.OutboundMessage) (msgID string, err error)
+	Send(ctx context.Context, msg messages.OutboundMessage) error
+	SendCard(ctx context.Context, msg messages.OutboundMessage) (msgID string, err error)
 }
 
 // New constructs the default Emitter implementation. ch must be
@@ -91,12 +91,12 @@ type emitImpl struct {
 	stamper Stamper
 }
 
-func (e *emitImpl) Send(ctx context.Context, msg gateway.OutboundMessage) error {
+func (e *emitImpl) Send(ctx context.Context, msg messages.OutboundMessage) error {
 	e.stampIfNeeded(&msg)
 	return e.ch.Send(ctx, msg)
 }
 
-func (e *emitImpl) SendCard(ctx context.Context, msg gateway.OutboundMessage) (string, error) {
+func (e *emitImpl) SendCard(ctx context.Context, msg messages.OutboundMessage) (string, error) {
 	e.stampIfNeeded(&msg)
 	return e.ch.SendCard(ctx, msg)
 }
@@ -114,7 +114,7 @@ func (e *emitImpl) SendCard(ctx context.Context, msg gateway.OutboundMessage) (s
 // across. The footer render path keys off ctx.Usage (not the
 // top-level msg.Usage) so a missing co-located value would
 // silently drop Line 2 of the footer for usage-bearing events.
-func (e *emitImpl) stampIfNeeded(msg *gateway.OutboundMessage) {
+func (e *emitImpl) stampIfNeeded(msg *messages.OutboundMessage) {
 	if msg.SessionContext != nil {
 		return
 	}

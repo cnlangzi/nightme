@@ -1,5 +1,5 @@
 // Package outbound — translator from agent.AgentEvent to the
-// abstract gateway.OutboundMessage stream. The translator is an
+// abstract messages.OutboundMessage stream. The translator is an
 // outbound concern (not a Channel concern) because:
 //
 //   - AgentEvent is part of the agent protocol; only the outbound
@@ -25,7 +25,7 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // thinkingPrefix is the sentinel the claudecode bridge prepends to
@@ -35,7 +35,7 @@ import (
 const thinkingPrefix = "[思考] "
 
 // Translate converts one agent.AgentEvent into the abstract
-// gateway.OutboundMessage stream. Returns the message to send and a
+// messages.OutboundMessage stream. Returns the message to send and a
 // boolean indicating whether anything should be sent at all:
 //
 //   - (msg, true)  → Emitter.Send / Emitter.SendCard should send msg
@@ -48,29 +48,29 @@ const thinkingPrefix = "[思考] "
 // signal. Permission events are mapped to OutCard; the Channel
 // renders the card natively (Feishu interactive, Slack block kit,
 // Web HTML).
-func Translate(chatID string, ev agent.AgentEvent) (gateway.OutboundMessage, bool) {
+func Translate(chatID string, ev agent.AgentEvent) (messages.OutboundMessage, bool) {
 	switch ev.Kind {
 	case agent.EventAgentText:
 		text := strings.TrimSpace(ev.Text)
 		if text == "" {
-			return gateway.OutboundMessage{}, false
+			return messages.OutboundMessage{}, false
 		}
 		if strings.HasPrefix(text, thinkingPrefix) {
-			return gateway.OutboundMessage{
+			return messages.OutboundMessage{
 				ChatID: chatID,
-				Kind:   gateway.OutThinking,
+				Kind:   messages.OutThinking,
 				Text:   strings.TrimPrefix(text, thinkingPrefix),
 			}, true
 		}
-		return gateway.OutboundMessage{
+		return messages.OutboundMessage{
 			ChatID: chatID,
-			Kind:   gateway.OutReply,
+			Kind:   messages.OutReply,
 			Text:   text,
 		}, true
 
 	case agent.EventAgentToolStart:
 		if ev.ToolStart == nil {
-			return gateway.OutboundMessage{}, false
+			return messages.OutboundMessage{}, false
 		}
 		name := ev.ToolStart.Name
 		if name == "" {
@@ -83,10 +83,10 @@ func Translate(chatID string, ev agent.AgentEvent) (gateway.OutboundMessage, boo
 		// Feishu-specific implicit keys leaking into the
 		// abstract layer; see F-34 review P0-2 / Devin
 		// architecture feedback 2026-08-04).
-		return gateway.OutboundMessage{
+		return messages.OutboundMessage{
 			ChatID: chatID,
-			Kind:   gateway.OutToolStart,
-			Tool: &gateway.ToolInfo{
+			Kind:   messages.OutToolStart,
+			Tool: &messages.ToolInfo{
 				Name: name,
 				Args: ev.ToolStart.Args,
 			},
@@ -94,7 +94,7 @@ func Translate(chatID string, ev agent.AgentEvent) (gateway.OutboundMessage, boo
 
 	case agent.EventAgentToolEnd:
 		if ev.ToolEnd == nil {
-			return gateway.OutboundMessage{}, false
+			return messages.OutboundMessage{}, false
 		}
 		name := ev.ToolEnd.Name
 		if name == "" {
@@ -103,10 +103,10 @@ func Translate(chatID string, ev agent.AgentEvent) (gateway.OutboundMessage, boo
 		// Same as EventAgentToolStart above — ToolInfo carries the
 		// generic fields; outbound does not format Text or use
 		// Meta for tool data.
-		return gateway.OutboundMessage{
+		return messages.OutboundMessage{
 			ChatID: chatID,
-			Kind:   gateway.OutToolEnd,
-			Tool: &gateway.ToolInfo{
+			Kind:   messages.OutToolEnd,
+			Tool: &messages.ToolInfo{
 				Name:   name,
 				Args:   ev.ToolEnd.Args,
 				Output: ev.ToolEnd.Output,
@@ -116,13 +116,13 @@ func Translate(chatID string, ev agent.AgentEvent) (gateway.OutboundMessage, boo
 
 	case agent.EventAgentPermission:
 		if ev.Permission == nil {
-			return gateway.OutboundMessage{}, false
+			return messages.OutboundMessage{}, false
 		}
 		req := ev.Permission
-		return gateway.OutboundMessage{
+		return messages.OutboundMessage{
 			ChatID: chatID,
-			Kind:   gateway.OutCard,
-			Card: &gateway.Card{
+			Kind:   messages.OutCard,
+			Card: &messages.Card{
 				Title:   "Permission needed",
 				Body:    req.Tool + ": " + req.Action,
 				Options: req.Options,
@@ -146,7 +146,7 @@ func Translate(chatID string, ev agent.AgentEvent) (gateway.OutboundMessage, boo
 		// only emit EventAgentDone-with-Usage and no EventAgentResult will not
 		// see their Usage reach the channel footer — by design
 		// (F-45 §1.5 / F-52).
-		return gateway.OutboundMessage{}, false
+		return messages.OutboundMessage{}, false
 
 	case agent.EventAgentResult:
 		// Final assistant reply (Claude Code: result.Result).
@@ -155,14 +155,14 @@ func Translate(chatID string, ev agent.AgentEvent) (gateway.OutboundMessage, boo
 		// We emit even when Text is empty AND IsError is true so
 		// the channel can flip its header to an error state.
 		if ev.Result == nil {
-			return gateway.OutboundMessage{}, false
+			return messages.OutboundMessage{}, false
 		}
 		if ev.Result.Text == "" && ev.Err == nil {
-			return gateway.OutboundMessage{}, false
+			return messages.OutboundMessage{}, false
 		}
-		out := gateway.OutboundMessage{
+		out := messages.OutboundMessage{
 			ChatID: chatID,
-			Kind:   gateway.OutResult,
+			Kind:   messages.OutResult,
 			Text:   ev.Result.Text,
 			Result: ev.Result,
 		}
@@ -176,7 +176,7 @@ func Translate(chatID string, ev agent.AgentEvent) (gateway.OutboundMessage, boo
 		// runtime is a passive pass-through, so a nil Usage just
 		// means the channel footer omits Line 2.
 		if u := ev.Result.Usage; u != nil {
-			out.Usage = (*gateway.UsageInfo)(u)
+			out.Usage = (*messages.UsageInfo)(u)
 		}
 		return out, true
 
@@ -191,9 +191,9 @@ func Translate(chatID string, ev agent.AgentEvent) (gateway.OutboundMessage, boo
 		// Note: bridges always stamp the 5 context fields on every
 		// event (incl. EventAgentReady), so we just pass them
 		// through. No "if Ready != nil" guard needed.
-		return gateway.OutboundMessage{
+		return messages.OutboundMessage{
 			ChatID:    chatID,
-			Kind:      gateway.OutInit,
+			Kind:      messages.OutInit,
 			Text:      fmt.Sprintf("session initialized (model: %s)", ev.Model),
 			SessionID: ev.SessionID,
 			Model:     ev.Model,
@@ -209,11 +209,11 @@ func Translate(chatID string, ev agent.AgentEvent) (gateway.OutboundMessage, boo
 		// The bridge MUST only emit this after a confirmed success
 		// result (see internal/bridge/claudecode/task.go).
 		if ev.TaskList == nil {
-			return gateway.OutboundMessage{}, false
+			return messages.OutboundMessage{}, false
 		}
-		return gateway.OutboundMessage{
+		return messages.OutboundMessage{
 			ChatID:   chatID,
-			Kind:     gateway.OutTaskCreate,
+			Kind:     messages.OutTaskCreate,
 			TaskList: ev.TaskList,
 		}, true
 
@@ -222,13 +222,13 @@ func Translate(chatID string, ev agent.AgentEvent) (gateway.OutboundMessage, boo
 		// semantics as EventAgentTaskCreate; an empty Items slice is a
 		// valid "clear the checklist" signal (e.g. all tasks done).
 		if ev.TaskList == nil {
-			return gateway.OutboundMessage{}, false
+			return messages.OutboundMessage{}, false
 		}
-		return gateway.OutboundMessage{
+		return messages.OutboundMessage{
 			ChatID:   chatID,
-			Kind:     gateway.OutTaskUpdate,
+			Kind:     messages.OutTaskUpdate,
 			TaskList: ev.TaskList,
 		}, true
 	}
-	return gateway.OutboundMessage{}, false
+	return messages.OutboundMessage{}, false
 }

@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/channel"
-	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 )
 
@@ -34,7 +34,7 @@ import (
 //                                      // pushes EnrichedEvent to as.eventQueue
 //   AgentSession.Submit(prompt)        // drives bridge via SendBlocks
 //   fake.PushEvent(EventAgentText "hello")  // simulates agent response
-//   assert mock channel.Record() sees an OutReply{ChatID, ReplyTo, Text}
+//   assert mock channel.Record() sees an messages.OutReply{ChatID, ReplyTo, Text}
 //
 // This skips feishu / claudecode / --resume / persistence entirely:
 // every component on the outbound path is exercised, but with a
@@ -48,31 +48,31 @@ import (
 type recordingChannel struct {
 	mu      sync.Mutex
 	chatID  string
-	captured []gateway.OutboundMessage
+	captured []messages.OutboundMessage
 }
 
 func (c *recordingChannel) Name() string  { return "mock" }
 func (c *recordingChannel) Start(_ context.Context) error { return nil }
 func (c *recordingChannel) Stop(_ context.Context) error  { return nil }
-func (c *recordingChannel) Incoming() <-chan gateway.InboundMessage {
-	ch := make(chan gateway.InboundMessage, 1)
+func (c *recordingChannel) Incoming() <-chan messages.InboundMessage {
+	ch := make(chan messages.InboundMessage, 1)
 	close(ch)
 	return ch
 }
-func (c *recordingChannel) Send(_ context.Context, msg gateway.OutboundMessage) error {
+func (c *recordingChannel) Send(_ context.Context, msg messages.OutboundMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.captured = append(c.captured, msg)
 	return nil
 }
-func (c *recordingChannel) SendCard(_ context.Context, msg gateway.OutboundMessage) (string, error) {
+func (c *recordingChannel) SendCard(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	_ = c.Send(context.Background(), msg)
 	return "mock-card-0", nil
 }
-func (c *recordingChannel) Record() []gateway.OutboundMessage {
+func (c *recordingChannel) Record() []messages.OutboundMessage {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]gateway.OutboundMessage, len(c.captured))
+	out := make([]messages.OutboundMessage, len(c.captured))
 	copy(out, c.captured)
 	return out
 }
@@ -82,7 +82,7 @@ var _ channel.Channel = (*recordingChannel)(nil)
 // --- minimal runtime handler -----------------------------------------
 //
 // Mirrors newEventHandler's core (Translate + ReplyTo stamping +
-// ch.Send) without the SessionContext / /think / /tools side-paths
+// ch.Send) without the messages.SessionContext / /think / /tools side-paths
 // — those are not relevant to the regression we're hunting.
 
 func integrationEventHandler(ch channel.Channel, _ *chatsession.ChatSession) func(env chatsession.AgentEventEnvelope) bool {
@@ -111,7 +111,7 @@ func newIntegrationChatSession(chatID string, spawner chatsession.Spawner) *chat
 
 // TestIntegration_AgentEvent_ReachesChannel is the smallest
 // reproduction: enqueue a message, submit it to the AS, push an
-// EventAgentText from the fake bridge, assert an OutReply lands on the
+// EventAgentText from the fake bridge, assert an messages.OutReply lands on the
 // channel with the correct chat_id + reply_to + text.
 func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 	spawner := &integrationSpawner{}
@@ -153,7 +153,7 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 	fake.PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "hello back"})
 
 	// Wait for the round-trip.
-	var rec []gateway.OutboundMessage
+	var rec []messages.OutboundMessage
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		rec = mock.Record()
@@ -163,20 +163,20 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if len(rec) == 0 {
-		t.Fatal("no OutboundMessage captured on channel within 2s — AgentEvent never reached ch.Send")
+		t.Fatal("no messages.OutboundMessage captured on channel within 2s — AgentEvent never reached ch.Send")
 	}
 
-	// Find the OutReply specifically (other Kinds may also fire —
+	// Find the messages.OutReply specifically (other Kinds may also fire —
 	// MessageState events come through a different path).
-	var outReply *gateway.OutboundMessage
+	var outReply *messages.OutboundMessage
 	for i := range rec {
-		if rec[i].Kind == gateway.OutReply {
+		if rec[i].Kind == messages.OutReply {
 			outReply = &rec[i]
 			break
 		}
 	}
 	if outReply == nil {
-		t.Fatalf("no OutReply in captured messages (got %d total, kinds: %v)",
+		t.Fatalf("no messages.OutReply in captured messages (got %d total, kinds: %v)",
 			len(rec), summarizeKinds(rec))
 	}
 
@@ -184,14 +184,14 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 	// userMsgID we queued. If empty, the placeholder card on
 	// feishu would never be created (see T-alive root cause).
 	if outReply.ReplyTo != userMsgID {
-		t.Errorf("OutReply.ReplyTo = %q, want %q (placeholder-card anchor broken)",
+		t.Errorf("messages.OutReply.ReplyTo = %q, want %q (placeholder-card anchor broken)",
 			outReply.ReplyTo, userMsgID)
 	}
 	if outReply.ChatID != cs.ChatID {
-		t.Errorf("OutReply.ChatID = %q, want %q", outReply.ChatID, cs.ChatID)
+		t.Errorf("messages.OutReply.ChatID = %q, want %q", outReply.ChatID, cs.ChatID)
 	}
 	if outReply.Text != "hello back" {
-		t.Errorf("OutReply.Text = %q, want %q", outReply.Text, "hello back")
+		t.Errorf("messages.OutReply.Text = %q, want %q", outReply.Text, "hello back")
 	}
 
 	// Tell the test we're done; Shutdown triggers a KindPromptEnded
@@ -200,8 +200,8 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 }
 
 // TestIntegration_AgentEventResult_ReachesChannel exercises the
-// final-result path (EventAgentResult → OutResult). This is the second
-// half of the "no OutReply/OutResult to feishu" symptom.
+// final-result path (EventAgentResult → messages.OutResult). This is the second
+// half of the "no messages.OutReply/messages.OutResult to feishu" symptom.
 func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 	spawner := &integrationSpawner{}
 	cs := newIntegrationChatSession("oc_test_chat", spawner)
@@ -240,7 +240,7 @@ func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 		},
 	})
 
-	var rec []gateway.OutboundMessage
+	var rec []messages.OutboundMessage
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		rec = mock.Record()
@@ -250,25 +250,25 @@ func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if len(rec) == 0 {
-		t.Fatal("no OutboundMessage captured on channel within 2s — EventAgentResult never reached ch.Send")
+		t.Fatal("no messages.OutboundMessage captured on channel within 2s — EventAgentResult never reached ch.Send")
 	}
 
-	var outResult *gateway.OutboundMessage
+	var outResult *messages.OutboundMessage
 	for i := range rec {
-		if rec[i].Kind == gateway.OutResult {
+		if rec[i].Kind == messages.OutResult {
 			outResult = &rec[i]
 			break
 		}
 	}
 	if outResult == nil {
-		t.Fatalf("no OutResult in captured messages (got %d total, kinds: %v)",
+		t.Fatalf("no messages.OutResult in captured messages (got %d total, kinds: %v)",
 			len(rec), summarizeKinds(rec))
 	}
 	if outResult.ReplyTo != userMsgID {
-		t.Errorf("OutResult.ReplyTo = %q, want %q", outResult.ReplyTo, userMsgID)
+		t.Errorf("messages.OutResult.ReplyTo = %q, want %q", outResult.ReplyTo, userMsgID)
 	}
 	if outResult.Text != "final answer" {
-		t.Errorf("OutResult.Text = %q, want %q", outResult.Text, "final answer")
+		t.Errorf("messages.OutResult.Text = %q, want %q", outResult.Text, "final answer")
 	}
 
 	fake.FinishEvent()
@@ -409,8 +409,8 @@ var _ agent.Starter = (*integrationFake)(nil)
 
 // --- helpers ----------------------------------------------------------
 
-func summarizeKinds(msgs []gateway.OutboundMessage) []gateway.OutboundKind {
-	out := make([]gateway.OutboundKind, len(msgs))
+func summarizeKinds(msgs []messages.OutboundMessage) []messages.OutboundKind {
+	out := make([]messages.OutboundKind, len(msgs))
 	for i, m := range msgs {
 		out[i] = m.Kind
 	}
@@ -443,7 +443,7 @@ func TestIntegration_RealBridge_FakeShell(t *testing.T) {
 // immediately. If the script eagerly emits init/assistant/result
 // before the test calls QueueUserMessage, the readpump sees those
 // events while currentPrompt is still nil, so they all carry
-// UserMsgID="" and the OutReply.ReplyTo assertion below fails.
+// UserMsgID="" and the messages.OutReply.ReplyTo assertion below fails.
 // Real claudecode behaves correctly because the real CLI waits for
 // the prompt on stdin before producing the assistant turn — the
 // fake must mirror that. See issue: anchor race in
@@ -475,7 +475,7 @@ echo '{"type":"system","subtype":"init","session_id":"test-session-1","model":"c
 # stdin before emitting the assistant turn. Without this, the
 # readpump races the test's QueueUserMessage and the assistant
 # event often lands with currentPrompt still nil → empty
-# UserMsgID → gateway.OutReply.ReplyTo = "" assertion failure.
+# UserMsgID → messages.OutReply.ReplyTo = "" assertion failure.
 read -t 5 _PROMPT || true
 echo '{"type":"assistant","message":{"id":"msg_1","role":"assistant","model":"claude-test","content":[{"type":"text","text":"hello back"}]}}'
 echo '{"type":"result","result":"final answer","duration_ms":100,"is_error":false}'
@@ -525,9 +525,9 @@ exit 0
 		t.Fatalf("QueueUserMessage: %v", err)
 	}
 
-	// Wait for the round-trip: at minimum we expect OutReply +
-	// OutResult to reach the channel.
-	var rec []gateway.OutboundMessage
+	// Wait for the round-trip: at minimum we expect messages.OutReply +
+	// messages.OutResult to reach the channel.
+	var rec []messages.OutboundMessage
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		rec = mock.Record()
@@ -537,30 +537,30 @@ exit 0
 		time.Sleep(20 * time.Millisecond)
 	}
 	if len(rec) == 0 {
-		t.Fatal("no OutboundMessage captured within 5s — bridge did not produce events end-to-end")
+		t.Fatal("no messages.OutboundMessage captured within 5s — bridge did not produce events end-to-end")
 	}
 
-	// Find OutReply + OutResult.
-	var outReply, outResult *gateway.OutboundMessage
+	// Find messages.OutReply + messages.OutResult.
+	var outReply, outResult *messages.OutboundMessage
 	for i := range rec {
 		switch rec[i].Kind {
-		case gateway.OutReply:
+		case messages.OutReply:
 			outReply = &rec[i]
-		case gateway.OutResult:
+		case messages.OutResult:
 			outResult = &rec[i]
 		}
 	}
 	if outReply == nil {
-		t.Errorf("no OutReply in captured messages (kinds: %v)", summarizeKinds(rec))
+		t.Errorf("no messages.OutReply in captured messages (kinds: %v)", summarizeKinds(rec))
 	} else if outReply.ReplyTo != userMsgID {
-		t.Errorf("OutReply.ReplyTo = %q, want %q", outReply.ReplyTo, userMsgID)
+		t.Errorf("messages.OutReply.ReplyTo = %q, want %q", outReply.ReplyTo, userMsgID)
 	} else if outReply.Text != "hello back" {
-		t.Errorf("OutReply.Text = %q, want %q", outReply.Text, "hello back")
+		t.Errorf("messages.OutReply.Text = %q, want %q", outReply.Text, "hello back")
 	}
 	if outResult == nil {
-		t.Errorf("no OutResult in captured messages (kinds: %v)", summarizeKinds(rec))
+		t.Errorf("no messages.OutResult in captured messages (kinds: %v)", summarizeKinds(rec))
 	} else if outResult.Text != "final answer" {
-		t.Errorf("OutResult.Text = %q, want %q", outResult.Text, "final answer")
+		t.Errorf("messages.OutResult.Text = %q, want %q", outResult.Text, "final answer")
 	}
 }
 
@@ -581,9 +581,9 @@ func (s *realBridgeSpawner) Spawn(ctx context.Context, _, _ string, args []strin
 // noopEmitter is a test-only outbound.Emitter that does nothing.
 type noopEmitter struct{}
 
-func (noopEmitter) Send(context.Context, gateway.OutboundMessage) error {
+func (noopEmitter) Send(context.Context, messages.OutboundMessage) error {
 	return nil
 }
-func (noopEmitter) SendCard(context.Context, gateway.OutboundMessage) (string, error) {
+func (noopEmitter) SendCard(context.Context, messages.OutboundMessage) (string, error) {
 	return "", nil
 }

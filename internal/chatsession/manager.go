@@ -15,12 +15,16 @@
 package chatsession
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -45,6 +49,10 @@ type Manager struct {
 	// F-31) without requiring the runtime to enumerate sessions
 	// after startup. nil = no callback.
 	onCreate func(*ChatSession)
+
+	// primaryAgent is the agent name HandleInbound / GetOrCreate
+	// uses for new ChatSessions. Set via WithPrimaryAgent.
+	primaryAgent string
 
 	// emitter (set via WithEmitter) is the single daemon-wide
 	// outbound chokepoint that every newly-created ChatSession is
@@ -217,11 +225,31 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 // therefore always binds the same Emitter the Manager holds
 // (or none, if Manager.emitter is nil). A daemon restart that
 // constructs a new Emitter instance per process is safe.
+// WithPrimaryAgent records the agent name new ChatSessions
+// should be bound to. Used by HandleInbound and any other
+// path that lazily creates a ChatSession from a chatID alone.
+func (m *Manager) WithPrimaryAgent(name string) *Manager {
+	m.mu.Lock()
+	m.primaryAgent = name
+	m.mu.Unlock()
+	return m
+}
+
 func (m *Manager) WithEmitter(em outbound.Emitter) *Manager {
 	m.mu.Lock()
 	m.emitter = em
 	m.mu.Unlock()
 	return m
+}
+
+// Emitter returns the wired outbound.Emitter, or nil if the
+// runtime has not bound one yet. Used by HandleInbound's
+// error-reply path and by runtime shims that need to send
+// without going through a ChatSession.
+func (m *Manager) Emitter() outbound.Emitter {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.emitter
 }
 
 // Get returns the ChatSession for chatID, or nil if absent.
@@ -264,6 +292,99 @@ func (m *Manager) AcceptInbound(chatID string, hasMention bool) bool {
 	}
 	return cs.WatchMode() == WatchModeAll
 }
+
+// HandleInbound is the F-58 default-branch entry point of the
+// inboundDispatcher. It's called by inbound.tryMessageDispatch
+// for every message that wasn't claimed by an action / command /
+// shell handler. Owns the full chat-side pipeline:
+//
+//  1. WatchMode gate (AcceptInbound)
+//  2. GetOrCreate(chatID) — lazily create ChatSession
+//  3. Emit MessageQueued (FastAck UX: ⏳)
+//  4. LookupSelectedAgentSession — lazy spawn if missing
+//  5. Emit MessageSubmitted (⏳ → 🔄)
+//  6. QueueUserMessage into the per-chat InputBuffer
+//
+// Error paths (no workspace / spawn failed / queue full) reply
+// through the wired outbound.Emitter (m.emitter) so they
+// inherit the SessionContext footer.
+func (m *Manager) HandleInbound(ctx context.Context, msg *messages.InboundMessage) error {
+	if msg == nil {
+		return nil
+	}
+	// F-watch §3.1.1: drop early, before any GetOrCreate / spawn
+	// work, so filtered messages don't allocate state or wake
+	// pumps. Slash commands never reach this branch.
+	if !m.AcceptInbound(msg.ChatID, msg.HasMention) {
+		slog.Default().Info("chatsession: drop non-mention group message (WatchMode != All)",
+			"chat_id", msg.ChatID, "message_id", msg.MessageID)
+		return nil
+	}
+	userMsgID := msg.MessageID
+	if userMsgID == "" {
+		userMsgID = msg.UserID + ":" + msg.Time.UTC().Format(time.RFC3339Nano)
+	}
+
+	cs, _ := m.GetOrCreate(msg.ChatID, m.primaryAgent)
+
+	// F-31 / F-53: ⏳ immediately, before spawn resolves.
+	cs.EmitMessageState(userMsgID, agent.MessageQueued)
+
+	// Resolve active AgentSession (lazy spawn on miss).
+	_, err := cs.LookupSelectedAgentSession()
+	if err != nil {
+		if errors.Is(err, ErrNoSelectedCwd) {
+			return m.sendError(ctx, msg.ChatID, "No workspace set. Send /cwd <path> first.")
+		}
+		// Spawn failed (binary missing, etc.).
+		return m.sendError(ctx, msg.ChatID, fmt.Sprintf("Failed to spawn agent: %v", err))
+	}
+
+	// F-31 / F-53: ⏳ → 🔄 before queueing so the transition is
+	// visible even if queueing is slow.
+	cs.EmitMessageState(userMsgID, agent.MessageSubmitted)
+
+	// Build the per-message domain object. ReceivedAt is the
+	// inbound timestamp (not dispatcher-pass time) so debug
+	// surfaces see the true arrival time.
+	userMsg := Message{
+		ID:         userMsgID,
+		ChatID:     msg.ChatID,
+		Blocks:     msg.Blocks,
+		ReceivedAt: msg.Time,
+	}
+	if err := cs.QueueUserMessage(userMsg); err != nil {
+		if errors.Is(err, ErrQueueFull) {
+			return m.sendError(ctx, msg.ChatID, "Input queue full — the agent is behind. Wait for it to catch up before sending more.")
+		}
+		return err
+	}
+	return nil
+}
+
+// sendError is a small helper that routes an error reply
+// through the wired outbound.Emitter. Returns whatever the
+// Emitter returns (typically nil; the Emitter logs Send
+// failures internally). Falls back to a log line if no
+// Emitter is wired (early-startup or test wiring).
+func (m *Manager) sendError(ctx context.Context, chatID, text string) error {
+	em := m.Emitter()
+	if em == nil {
+		slog.Default().Warn("chatsession: error reply with no Emitter wired",
+			"chat_id", chatID, "text", text)
+		return nil
+	}
+	return em.Send(ctx, messages.OutboundMessage{
+		ChatID: chatID,
+		Kind:   messages.OutReply,
+		Text:   text,
+	})
+}
+
+// primaryAgent is the agent name GetOrCreate uses for new
+// ChatSessions. Set by the runtime via WithPrimaryAgent at
+// construction; defaults to "" (caller's responsibility).
+
 
 // PersistAgentSession writes the entry for as to the manager's
 // agent_sessions.json store. Idempotent; safe to call from event

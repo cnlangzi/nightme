@@ -72,10 +72,18 @@ type Result struct {
 }
 
 // closeGraceTotal is the outer-bound graceful shutdown timeout.
-// Each bridge has its own 2s window + SIGKILL fallback; this 5s
-// covers bridge grace + SIGKILL + race detector margin + bridges
-// that take a beat to surface exit through ObserveClose. Tuned
-// for "user waits for /close to confirm"; rarely triggers.
+// Bridges that implement graceful close (close stdin + SIGINT
+// + 2s grace + SIGKILL fallback inside driver.Close) honour
+// their own watchdog and typically exit well within this bound.
+// Bridges without an internal watchdog (notably the PTY bridge,
+// whose Close() just closes the ptmx fd) rely entirely on this
+// outer bound: the orchestrator logs a "graceful shutdown
+// timeout" warning and abandons the goroutine, but the wedged
+// child process keeps running. The 5s window therefore is the
+// ONLY watchdog for PTY-class bridges.
+//
+// Tuned for "user waits for /close to confirm"; rarely
+// triggers in practice on bridges with internal watchdogs.
 const closeGraceTotal = 5 * time.Second
 
 // closeOutcome carries one goroutine's Close result back to the
@@ -83,6 +91,19 @@ const closeGraceTotal = 5 * time.Second
 type closeOutcome struct {
 	idx int
 	err error
+}
+
+// isCloseAlive classifies whether an AS is still running a
+// bridge process (true) or has already exited / never started
+// (false). Single source of truth for the "should we call
+// Close() on this entry?" decision in CloseAgent /
+// CloseAllAgents — if the rule ever changes (e.g. StatusStarting
+// becomes alive, or Detached-without-handle should be reaped),
+// update here and both call sites follow.
+func isCloseAlive(as *chatsession.AgentSession) bool {
+	st := as.Status()
+	return st == chatsession.StatusRunning ||
+		(st == chatsession.StatusDetached && as.Handle() != nil)
 }
 
 // CloseAgent terminates the bridge process backing the
@@ -122,8 +143,7 @@ func CloseAgent(c *Cmd, agentName string) (Result, error) {
 		BeforeState: as.Status(),
 	}
 
-	isAlive := as.Status() == chatsession.StatusRunning ||
-		(as.Status() == chatsession.StatusDetached && as.Handle() != nil)
+	isAlive := isCloseAlive(as)
 	if !isAlive {
 		result.Action = "stale-cleared"
 		return result, nil
@@ -197,8 +217,7 @@ func CloseAllAgents(c *Cmd) ([]Result, error) {
 			Cwd:         as.Cwd,
 			BeforeState: as.Status(),
 		}
-		isAlive := as.Status() == chatsession.StatusRunning ||
-			(as.Status() == chatsession.StatusDetached && as.Handle() != nil)
+		isAlive := isCloseAlive(as)
 		if !isAlive {
 			results[i].Action = "stale-cleared"
 			continue
@@ -221,14 +240,35 @@ func CloseAllAgents(c *Cmd) ([]Result, error) {
 			"cwd", cwd,
 			"limit", closeGraceTotal)
 	}
-	close(closeCh)
 
-	// 4. Fold per-entry Close errors into Result (review
-	//    finding #B2: previously `_ = as.Close()` was discarded).
-	for oc := range closeCh {
-		if oc.err != nil {
-			results[oc.idx].Error = oc.err
-			results[oc.idx].Action = "close-failed"
+	// 4. Drain closeCh into Result. closeCh is buffered to
+	//    len(snapshot), so receiving up to that many items
+	//    guarantees every alive entry has at least attempted
+	//    its send. We deliberately do NOT close(closeCh):
+	//    a goroutine wedged in as.Close() may unblock after
+	//    the timeout and try to send on a closed channel,
+	//    which panics the daemon. Buffered channel + no close
+	//    lets late senders complete silently; the buffered
+	//    item is GC'd when nothing references it.
+	//
+	//    Stragglers (Close never returned after an additional
+	//    grace window) are logged and abandoned — the bridge
+	//    is wedged beyond our control, the goroutine will
+	//    eventually exit on its own.
+	drained := 0
+	for drained < len(snapshot) {
+		select {
+		case oc := <-closeCh:
+			if oc.err != nil {
+				results[oc.idx].Error = oc.err
+				results[oc.idx].Action = "close-failed"
+			}
+			drained++
+		case <-time.After(2 * time.Second):
+			slog.Warn("closeAllAgents: stragglers after timeout",
+				"drained", drained,
+				"expected", len(snapshot))
+			return results, nil
 		}
 	}
 

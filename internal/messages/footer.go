@@ -28,10 +28,20 @@ package messages
 //	Untracked      — count of "??" entries (files not in the index).
 //	AheadOfRemote  — number of local commits the upstream is
 //	                 behind. Always 0 when HasUpstream is false.
+//	BehindRemote   — number of upstream commits the local branch
+//	                 is behind (i.e. origin/<branch> moved forward
+//	                 via rebase/force-push and local didn't catch
+//	                 up). Always 0 when HasUpstream is false. F-57
+//	                 added this for the readiness gate (see §2.1 /
+//	                 docs/feat/F-57-gtw-push-pr-readiness.md).
 //	HasUpstream    — true when the branch has an upstream tracking
 //	                 ref ("## main...origin/main"). Detached HEAD
 //	                 never has upstream; the Feishu footer omits
 //	                 the "⇡ N" segment in that case.
+//	HasConflicts   — true when the porcelain scan found unmerged
+//	                 paths (UU / AA / DD / AU / UA / DU / UD etc.).
+//	                 /gtw push and /gtw pr both hard-refuse in this
+//	                 state (F-57 §3.1 / §4.1). F-57 added this.
 //
 // F-48 (follow-up to F-45): runtime stamps one of these on every
 // OutboundMessage.SessionContext that flows to a main-chat footer
@@ -41,7 +51,9 @@ type GitStatusSnapshot struct {
 	Uncommitted   int
 	Untracked     int
 	AheadOfRemote int
+	BehindRemote  int
 	HasUpstream   bool
+	HasConflicts  bool
 }
 
 // PR is the abstract cross-platform handle for a single Pull

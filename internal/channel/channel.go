@@ -1,44 +1,65 @@
-// Package channel defines the protocol-neutral boundary between nightme and
-// an instant-messaging backend.
+// Package channel — IM adapter interface and concrete adapters
+// (Feishu, echo test stub). Channel is the runtime contract every
+// transport (Feishu, future Slack, future Web UI, …) must satisfy:
+// it owns BOTH the inbound pump (Incoming) and the outbound send
+// surface (Send / SendCard). The runtime wires it into the
+// outbound chokepoint (which holds the only outbound reference to
+// the Channel) and into the Gateway's inbound pump (which reads
+// from Incoming and never calls Send).
 //
-// In the v0.3 hub-and-spoke architecture (see docs/feat/F-26-gateway-hub.md)
-// the Channel interface is thin: connection management, native ↔ Gateway
-// format conversion, and per-Channel display strategy. The Gateway
-// (internal/gateway) owns message routing, buffering, and delivery
-// semantics; Channel implementations translate outbound messages into
-// their native UI (Feishu collapses the stream into a rolling-log message;
-// Slack could post per-event thread replies; Web could render HTML).
-//
-// v1.3 (SPEC §0.1): the receipt lifecycle interface methods
-// (CreateReceipt / UpdateReceipt / DisposeReceipt) have been removed.
-// The receipt OBJECT is now entirely Channel-internal — Gateway does
-// not see it. Each Channel decides its own state shape and storage
-// form (Feishu: *MessageReceipt with append/PATCH; Slack: thread map;
-// Web: DOM nodes). Gateway routes outbound events by stamping
-// msg.ReplyTo = currentTurnUserMsgID; Channel looks up its own
-// receipt by userMsgID.
-//
-// "Abstract stays abstract, concrete stays concrete": Gateway knows
-// only the five lifecycle/messaging methods below. Receipt shape is
-// each Channel's private affair.
+// Adapter packages in this directory (channel/feishu,
+// channel/echo) implement the interface via Go's structural typing
+// — no explicit registration required.
 package channel
 
 import (
 	"context"
 
-	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-// Message is an alias for gateway.InboundMessage. Kept as a type alias
-// (not a duplicate struct) so existing callers continue to compile
-// while the source-of-truth lives in the gateway package.
-type Message = gateway.InboundMessage
+// Channel is the lifecycle and messaging contract every IM
+// adapter must satisfy.
+//
+// Lifecycle:
+//
+//   - Name:        diagnostic / logging identifier
+//   - Start:       opens the adapter's long-lived receive loop and
+//                  begins publishing on Incoming. Adapter-specific
+//                  (Feishu: WS connect; echo: no-op).
+//   - Stop:        closes the receive loop and releases adapter
+//                  resources.
+//   - Incoming:    the channel publishes inbound user messages on
+//                  this channel; the Gateway reads it in pumpInbound.
+//                  Closed when the channel shuts down.
+//   - Send:        plain-text outbound (one shot, no thread binding).
+//                  Used for OutReply / OutResult / OutCommandReply /
+//                  OutInit / OutTask* messages.
+//   - SendCard:    interactive card outbound; returns the bot-side
+//                  message id assigned by the channel so callers can
+//                  correlate the rendered card with later
+//                  card.action.trigger callbacks.
+//
+// "Abstract stays abstract, concrete stays concrete": the Gateway
+// knows only this surface. Receipt shape is each Channel's private
+// affair.
+type Channel interface {
+	Name() string
+	Start(ctx context.Context) error
+	Stop(ctx context.Context) error
+	Incoming() <-chan messages.InboundMessage
+	Send(ctx context.Context, msg messages.OutboundMessage) error
+	SendCard(ctx context.Context, msg messages.OutboundMessage) (msgID string, err error)
+}
 
-// Attachment is an alias for gateway.Attachment. Same rationale as
-// Message: channel adapters populate this struct, downstream code
-// reads it, and there is one definition to keep in sync.
-type Attachment = gateway.Attachment
+// Message is an alias for messages.InboundMessage. Kept for
+// back-compat with adapter code that imports channel.Message.
+type Message = messages.InboundMessage
+
+// Attachment is an alias for messages.Attachment. Same rationale as
+// Message: adapter code reads this struct from a single canonical
+// definition.
+type Attachment = messages.Attachment
 
 // Normalized chat type constants. Channel adapters may use these
 // internally for chat-type classification, but **no Channel
@@ -62,75 +83,3 @@ const (
 // channels, or a Channel-specific mapping) rather than relying on
 // a removed field. The IsDM helper was the last remaining user of
 // InboundMessage.IsDM() which itself was removed in the same PR.
-
-// Channel is the lifecycle and messaging contract implemented by each IM
-// adapter. v1.3 intentionally minimal:
-//
-//   - 5 methods (Name / Start / Stop / Send / Incoming)
-//   - No receipt FSM API (Gateway does not own receipt state)
-//   - No receipt handle type (Channel owns its own receipt objects)
-//
-// Heavy logic (routing, buffering, the userMsgID anchor) lives at
-// the Gateway. Channel implementations translate OutboundMessage
-// (which carries msg.ReplyTo = userMsgID) into their native UI and
-// decide internally how to find / create / patch the receipt for
-// that userMsgID.
-//
-// Compile-time assertions live alongside the concrete implementations
-// (internal/channel/feishu/adapter.go, internal/channel/echo/echo.go).
-type Channel interface {
-	// Name returns the channel's identifier (e.g. "feishu", "echo",
-	// "slack"). The Gateway uses this as the lookup key when
-	// resolving an outbound message's destination.
-	Name() string
-
-	// Start starts the adapter's long-lived receive loop. The
-	// adapter publishes normalized InboundMessages on Incoming()
-	// from this point until Stop is called.
-	Start(ctx context.Context) error
-
-	// Stop closes the receive loop and releases adapter resources.
-	Stop(ctx context.Context) error
-
-	// Send dispatches one OutboundMessage to the channel's native UI.
-	// "Delivered" means this call returned nil — Gateway treats Send
-	// as fire-and-ack and does not retry. The Channel may silently
-	// drop OutboundMessage kinds its UI cannot represent (e.g. Slack
-	// cannot swap reactions in place) without surfacing an error.
-	//
-	// For OutReply / OutToolStart / OutToolEnd / OutThinking kinds:
-	// the Channel is expected to route by msg.ReplyTo (userMsgID) to
-	// find its existing receipt (card / thread / DOM node) and patch
-	// it in place; if no receipt exists for that userMsgID yet,
-	// cold-create one before patching. This is what makes F-25
-	// rolling-log UX work without Gateway knowing the receipt shape.
-	//
-	// F-46: for OutCard, Send SHOULD record the bot-side message id
-	// so callers can correlate it with later action callbacks.
-	// Callers that need the id back should use SendCard (added in
-	// v1.3.x) instead of Send + discard; Send may return ("", nil)
-	// when the channel cannot expose it.
-	Send(ctx context.Context, msg gateway.OutboundMessage) error
-
-	// SendCard is the F-46 specialised send for interactive
-	// decision cards. It returns the channel-native message id
-	// assigned to the newly created card; callers (notably the
-	// /gtw test command path) use this id to seed gtwDrafts
-	// under the same key the bot's card will receive reactions on.
-	//
-	// Channels that cannot return a meaningful id (test doubles,
-	// simple stubs) return ("", nil) — the caller falls back to a
-	// synthetic id and the action-callback round-trip degrades.
-	SendCard(ctx context.Context, msg gateway.OutboundMessage) (msgID string, err error)
-
-	// Incoming returns the channel's normalized message stream.
-	Incoming() <-chan Message
-}
-
-// Compile-time guard: the agent package is referenced in this file
-// only via type aliases above (kept for back-compat with v0.x
-// callers). If a future cleanup removes the agent import, replace
-// this with the actual reference (e.g. a public helper that uses
-// agent.ContentBlock). Until then, ensure the import is not
-// tree-shaken by referencing it indirectly:
-var _ = agent.ContentText

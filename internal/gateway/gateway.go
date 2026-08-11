@@ -49,30 +49,20 @@ import (
 	"log"
 	"log/slog"
 	"sync"
+
+	"github.com/cnlangzi/nightme/internal/channel"
 )
 
-// Channel is the abstract surface the Gateway needs from any IM
-// backend. Re-declared here (rather than imported from
-// internal/channel) to keep the import graph acyclic: the channel
-// package imports gateway for the abstract types, so gateway
-// cannot import channel in turn. The mirror is kept in sync
-// manually (and the test suite enforces the implementation match).
+// Channel is the IM adapter contract. The canonical definition
+// lives in internal/channel; this alias keeps the historical
+// gateway.Channel symbol working for existing call sites.
 //
 // v1.3: only the 4 lifecycle/messaging methods. The receipt FSM
 // API has been removed — receipts are Channel-internal.
-type Channel interface {
-	Name() string
-	Incoming() <-chan InboundMessage
-	Send(ctx context.Context, msg OutboundMessage) error
-	// SendCard (F-46) is the specialised variant for interactive
-	// decision cards. It returns the bot-side message id assigned
-	// by the channel so callers can correlate the rendered card
-	// with later card.action.trigger callbacks. The inner
-	// channel.Channel interface in internal/channel/channel.go
-	// carries the same method — this duplicate keeps the gateway
-	// package free of the channel-package's circular deps.
-	SendCard(ctx context.Context, msg OutboundMessage) (msgID string, err error)
-}
+// Channel is the IM adapter contract. The canonical definition
+// lives in internal/channel; this alias keeps the historical
+// gateway.Channel symbol working for existing call sites.
+type Channel = channel.Channel
 
 // CommandResult is the per-dispatch outcome.
 type CommandResult struct {

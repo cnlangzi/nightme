@@ -37,7 +37,7 @@ const RunOnceTimeout = 5 * time.Minute
 //     empty → pushClean  (clean branch: nothing OR programmatic push)
 //     dirty → pushDirty  (delegate commit + push to one-shot agent)
 //
-// Reply is sent inline via cs.Channel(); return value is the
+// Reply is sent inline via cs.Emitter(); return value is the
 // runtime's *Result carrying Consumed / Dropped only.
 func dispatchPush(
 	ctx context.Context,
@@ -54,11 +54,11 @@ func dispatchPush(
 
 	statusOut, _, err := deps.Git.Run(ctx, c.Worktree, "status", "--porcelain")
 	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ git status: %v", err)), nil
 	}
 	if detectConflicts(statusOut) {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf(
 				"❌ worktree %s is in a conflicted state (unmerged paths present)\n"+
 					"hint: resolve conflicts and `git add` the resolutions, OR `git rebase --abort` / `git merge --abort`",
@@ -99,17 +99,17 @@ func pushClean(
 ) (*Result, error) {
 	unpushed, err := countUnpushed(ctx, c.Worktree, c.Branch, deps)
 	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ check unpushed commits: %v", err)), nil
 	}
 	if unpushed == 0 {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"✅ nothing to push — worktree clean and no unpushed commits"), nil
 	}
 
 	out, err := programmaticPush(ctx, deps, c)
 	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ git push failed: %v\n%s", err, out)), nil
 	}
 
@@ -118,7 +118,7 @@ func pushClean(
 	// rejected, etc.). Re-count and retry once if any commit
 	// didn't actually land upstream.
 	if verifyMsg := verifyPushedAndRetry(ctx, deps, c, out); verifyMsg != "" {
-		return reply(ctx, cs.Channel(), chatID, messageID, verifyMsg), nil
+		return reply(ctx, cs.Emitter(), chatID, messageID, verifyMsg), nil
 	}
 
 	// Format 3 (see gtw/README.md §2.3): opaque content block.
@@ -133,7 +133,7 @@ func pushClean(
 			"> %s\n%s\n",
 		c.Branch, strings.TrimRight(out, "\n"),
 	)
-	return reply(ctx, cs.Channel(), chatID, messageID, body), nil
+	return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
 }
 
 // verifyPushedAndRetry re-counts unpushed after a claimed-successful
@@ -341,16 +341,16 @@ func pushDirty(
 		for _, n := range agentNotes {
 			msg += "\n" + n
 		}
-		return reply(ctx, cs.Channel(), chatID, messageID, msg), nil
+		return reply(ctx, cs.Emitter(), chatID, messageID, msg), nil
 	}
 
 	a, err := agent.Builtins.Get(agentName)
 	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ unknown agent %q (check `nightme agents` or your config)", agentName)), nil
 	}
 	if err := a.Detect(); err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ agent %s not available: %v", agentName, err)), nil
 	}
 
@@ -366,7 +366,7 @@ func pushDirty(
 		blocks,
 	)
 	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ agent %s failed: %v", agentName, err)), nil
 	}
 
@@ -410,7 +410,7 @@ func pushDirty(
 		if text != "" {
 			body += "\n\nagent reply (for context):\n" + indentLines(text, "  ")
 		}
-		return reply(ctx, cs.Channel(), chatID, messageID, body), nil
+		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
 	}
 
 	// Format: gtw-standard three-line reply — emoji title on
@@ -445,7 +445,7 @@ func pushDirty(
 	if len(agentNotes) > 0 {
 		body += "\n" + strings.Join(agentNotes, "\n") + "\n"
 	}
-	return reply(ctx, cs.Channel(), chatID, messageID, body), nil
+	return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
 }
 
 // buildAgentPrompt renders the single text block the agent

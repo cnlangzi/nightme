@@ -9,6 +9,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command/services"
+	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
 // HandleDraftReaction is the per-draft action router. It is called
@@ -267,35 +268,39 @@ func emitFollowUp(
 	chosenEmoji string,
 	resultText string,
 ) {
-	if draft.BotMessageID != "" {
-		if cs != nil {
-			ch := cs.Channel()
-			if ch != nil {
-				_ = ch.Patch(ctx, chatsession.OutboundMessage{
-					ChatID:            ev.ChatID,
-					PatchBotMsgID:     draft.BotMessageID,
-					PatchChosenEmoji:  chosenEmoji,
-					PatchResult:       resultText,
-					CardTitle:         draft.CardTitle,
-					CardBody:          draft.CardBody,
-					CardChoices:       toChatCardChoices(draft.CardChoices),
-					CardRequestID:     draft.CardRequestID,
-					ChosenChoiceEmoji: chosenEmoji,
-				})
-			}
-		}
+	if cs == nil {
 		return
 	}
-	if cs != nil {
-		ch := cs.Channel()
-		if ch != nil {
-			_ = ch.Send(ctx, chatsession.OutboundMessage{
-				ChatID:  ev.ChatID,
-				ReplyTo: ev.TargetMsgID,
-				Text:    resultText,
-			})
-		}
+	em := cs.Emitter()
+	if em == nil {
+		return
 	}
+	if draft.BotMessageID != "" {
+		// PATCH semantics: the channel renders an OutboundMessage
+		// with Kind=OutCardPatch. ReplyTo carries the bot-side
+		// message id to PATCH; Card holds the new payload.
+		_ = em.Send(ctx, gateway.OutboundMessage{
+			ChatID:    ev.ChatID,
+			Kind:      gateway.OutCardPatch,
+			ReplyTo:   draft.BotMessageID,
+			Text:      resultText,
+			Card: &gateway.Card{
+				Title:             draft.CardTitle,
+				Body:              draft.CardBody,
+				Choices:           toCardChoices(draft.CardChoices),
+				RequestID:         draft.CardRequestID,
+				Disabled:          true, // chosen → grey out the rest
+				ChosenChoiceEmoji: chosenEmoji,
+			},
+		})
+		return
+	}
+	_ = em.Send(ctx, gateway.OutboundMessage{
+		ChatID:  ev.ChatID,
+		Kind:    gateway.OutReply,
+		ReplyTo: ev.TargetMsgID,
+		Text:    resultText,
+	})
 }
 
 // splitOwnerRepo splits "owner/repo" into its two parts.
@@ -367,13 +372,16 @@ func variantReadyResultText(p FixDraftPayload, branch string) string {
 // chatsession.CardChoice (same fields, different packages).
 // Defined here so the gtw package doesn't depend on the
 // chatsession.CardChoice internal layout for translation.
-func toChatCardChoices(in []CardChoice) []chatsession.CardChoice {
+// toCardChoices translates internal/command/gtw.CardChoice (the
+// gtw command's button type) to the wire-level
+// gateway.CardChoice that the channel adapter renders.
+func toCardChoices(in []CardChoice) []gateway.CardChoice {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make([]chatsession.CardChoice, len(in))
+	out := make([]gateway.CardChoice, len(in))
 	for i, c := range in {
-		out[i] = chatsession.CardChoice{
+		out[i] = gateway.CardChoice{
 			Emoji:  c.Emoji,
 			Label:  c.Label,
 			Action: c.Action,

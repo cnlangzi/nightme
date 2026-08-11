@@ -75,21 +75,21 @@ func RunClose(
 	c, err := ReadGTWYml(selectedCwd)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return reply(ctx, cs.Channel(), chatID, messageID,
+			return reply(ctx, cs.Emitter(), chatID, messageID,
 				"❌ no active fix to close in this chat\n"+
 					"hint: /cwd into the /gtw fix worktree first (its "+
 					"`.nightme/gtw.yml` is the close source of truth)."), nil
 		}
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err)), nil
 	}
 
 	if c.Worktree == "" {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ .nightme/gtw.yml is malformed: worktree is empty"), nil
 	}
 	if c.RepoRoot == "" {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ .nightme/gtw.yml is malformed: repoRoot is empty"), nil
 	}
 
@@ -100,7 +100,7 @@ func RunClose(
 	// worktree at the target path); close has no equivalent
 	// because the yml snapshot is the recovery source of truth.
 	if err := assertWorktreeClean(ctx, c.Worktree, deps); err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID, err.Error()), nil
+		return reply(ctx, cs.Emitter(), chatID, messageID, err.Error()), nil
 	}
 
 	// --- step 4: git worktree remove ------------------------------
@@ -116,7 +116,7 @@ func RunClose(
 		if stderr != "" {
 			body += "\n[git stderr tail]\n" + stderr
 		}
-		return reply(ctx, cs.Channel(), chatID, messageID, body), nil
+		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
 	}
 
 	// --- step 5: delete the local branch --------------------------
@@ -133,7 +133,7 @@ func RunClose(
 				"hint: worktree at %s is already removed; clean up the branch manually with `git branch -D %s`.",
 			c.Branch, brErr, tailLines(brStderr, 10), c.Worktree, c.Branch,
 		)
-		return reply(ctx, cs.Channel(), chatID, messageID, body), nil
+		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
 	}
 
 	// --- step 6: switch CWD back to repoRoot ----------------------
@@ -145,7 +145,7 @@ func RunClose(
 		slog.Default().Warn("gtw: SetSelectedCwd back to repoRoot failed",
 			"repo_root", c.RepoRoot,
 			"err", err)
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("⚠️ worktree removed but SetSelectedCwd(%s) failed: %v\n"+
 				"run `/cwd %s` manually.", c.RepoRoot, err, c.RepoRoot)), nil
 	}
@@ -173,7 +173,7 @@ func RunClose(
 	// separate sync card. Every other reply path in this file
 	// uses `return reply(...), nil` because they're terminal;
 	// step 8 is mid-flow by design.
-	reply(ctx, cs.Channel(), chatID, messageID, body)
+	reply(ctx, cs.Emitter(), chatID, messageID, body)
 
 	// --- step 9: sync main (separate card) ------------------------
 	// buildSyncReply shares the /gtw sync card formatter and
@@ -184,7 +184,7 @@ func RunClose(
 	// local fix session is genuinely over regardless.
 	syncBody, syncErr := buildSyncReply(ctx, c.RepoRoot, deps)
 	if syncErr != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ sync failed: "+syncErr.Error()), nil
 	}
 	if syncBody == "" {
@@ -193,7 +193,7 @@ func RunClose(
 		// complete reply for this invocation.
 		return &Result{Consumed: true}, nil
 	}
-	return reply(ctx, cs.Channel(), chatID, messageID, syncBody), nil
+	return reply(ctx, cs.Emitter(), chatID, messageID, syncBody), nil
 }
 
 // assertWorktreeClean returns a user-friendly error if `dir` has

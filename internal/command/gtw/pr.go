@@ -61,7 +61,7 @@ type prArgs struct {
 // checks → RunOnce → provider call → IM-friendly card.
 //
 // All non-success paths return nil error + a Result whose
-// Reply has already been sent via cs.Channel() — the same
+// Reply has already been sent via cs.Emitter() — the same
 // pattern dispatchPush uses (and that the factory wrapper
 // relies on for "consumed: true, drop the message").
 func dispatchPR(
@@ -80,7 +80,7 @@ func dispatchPR(
 	if err != nil {
 		// Reuse the same message format /gtw sync uses — it
 		// already explains the "no origin remote" case.
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ %v", err)), nil
 	}
 
@@ -89,11 +89,11 @@ func dispatchPR(
 	// message, and the user should be nudged to /gtw push first.
 	unpushed, err := countUnpushed(ctx, c.Worktree, c.Branch, deps)
 	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ check unpushed commits: %v", err)), nil
 	}
 	if unpushed > 0 {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf(
 				"⚠️ %d commit(s) made locally but not pushed to remote\n"+
 					"hint: /gtw push first to publish them, then /gtw pr.",
@@ -104,7 +104,7 @@ func dispatchPR(
 	// already in base — opening an empty PR is a no-op.
 	ahead, err := countBaseAhead(ctx, c.Worktree, baseBranch, deps)
 	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ count commits ahead of base: %v", err)), nil
 	}
 	if ahead == 0 {
@@ -118,19 +118,19 @@ func dispatchPR(
 		if snap, _ := CollectStatus(ctx, c.Worktree, deps.Git); snap != nil {
 			switch {
 			case snap.Uncommitted > 0 && snap.Untracked > 0:
-				return reply(ctx, cs.Channel(), chatID, messageID,
+				return reply(ctx, cs.Emitter(), chatID, messageID,
 					fmt.Sprintf(
 						"⚠️ %d file(s) changed but not committed, %d new file(s) not added to git\n"+
 							"hint: /gtw push first to commit + add + push, then /gtw pr.",
 						snap.Uncommitted, snap.Untracked)), nil
 			case snap.Uncommitted > 0:
-				return reply(ctx, cs.Channel(), chatID, messageID,
+				return reply(ctx, cs.Emitter(), chatID, messageID,
 					fmt.Sprintf(
 						"⚠️ %d file(s) changed but not committed\n"+
 							"hint: /gtw push first to commit + push, then /gtw pr.",
 						snap.Uncommitted)), nil
 			case snap.Untracked > 0:
-				return reply(ctx, cs.Channel(), chatID, messageID,
+				return reply(ctx, cs.Emitter(), chatID, messageID,
 					fmt.Sprintf(
 						"⚠️ %d new file(s) not added to git\n"+
 							"hint: git add them, then /gtw push, then /gtw pr.",
@@ -140,7 +140,7 @@ func dispatchPR(
 		// Truly nothing to ship — use ✅ (not an error) and nudge
 		// the user toward making a change rather than leaving them
 		// staring at "nothing to PR" wondering what's wrong.
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf(
 				"✅ branch %s is in sync with %s — nothing new to PR yet\n"+
 					"hint: make some changes, then /gtw push, then /gtw pr.",
@@ -153,16 +153,16 @@ func dispatchPR(
 		agentName = cs.SelectedAgent()
 	}
 	if agentName == "" {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ no agent selected. Send `/use <name>` first or pass `-a <name>`."), nil
 	}
 	a, err := agent.Builtins.Get(agentName)
 	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ unknown agent %q (check `nightme agents` or your config)", agentName)), nil
 	}
 	if err := a.Detect(); err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ agent %s not available: %v", agentName, err)), nil
 	}
 
@@ -179,7 +179,7 @@ func dispatchPR(
 		blocks,
 	)
 	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ agent %s failed: %v", agentName, err)), nil
 	}
 
@@ -187,7 +187,7 @@ func dispatchPR(
 	if perr != nil {
 		// Agent output wasn't usable. Echo the raw text so
 		// the user can copy/paste into gh/glab themselves.
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf(
 				"❌ %v — agent output was:\n%s",
 				perr, indentLines(text, "  "))), nil
@@ -196,7 +196,7 @@ func dispatchPR(
 	// --- pick provider ----------------------------------------------
 	provider, owner, repo, err := resolveProvider(ctx, c, deps)
 	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ %v", err)), nil
 	}
 
@@ -207,12 +207,12 @@ func dispatchPR(
 			// for this branch. We don't have the URL from
 			// gh/glab stderr reliably across versions, so we
 			// just point them at the repo.
-			return reply(ctx, cs.Channel(), chatID, messageID,
+			return reply(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf(
 					"❌ a PR for %s already exists — check your repo's PR list.",
 					c.Branch)), nil
 		}
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ create PR failed: %v", err)), nil
 	}
 
@@ -252,7 +252,7 @@ func dispatchPR(
 		}
 	}
 
-	return reply(ctx, cs.Channel(), chatID, messageID, card), nil
+	return reply(ctx, cs.Emitter(), chatID, messageID, card), nil
 }
 
 // buildPRPrompt renders the text block the agent receives.

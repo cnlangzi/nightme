@@ -7,6 +7,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 )
 
 // Factory implements command.SlashCommandFactory for /gtw.
@@ -93,21 +94,21 @@ func (f *Factory) withHooks(
 	mainErr := main()
 	post := RunHooks(ctx, after, cwd)
 
-	ch := chatsession.Channel(nil)
+	var em outbound.Emitter
 	if cs != nil {
-		ch = cs.Channel()
+		em = cs.Emitter()
 	}
 	// Reply 1: load-notes + before-hooks. Combined so "your yml
 	// had warnings" sits next to "here's what ran before the
 	// action" — both are pre-action context.
 	if block := formatLoadNotes(loadNotes) + FormatResults("before", pre); block != "" {
-		_ = reply(ctx, ch, chatID, messageID, block)
+		_ = reply(ctx, em, chatID, messageID, block)
 	}
 	// Reply 2: after-hooks. Separate reply so it lands AFTER the
 	// before-hooks reply in chat order — the user reads "before"
 	// then "after", matching what actually happened.
 	if block := FormatResults("after", post); block != "" {
-		_ = reply(ctx, ch, chatID, messageID, block)
+		_ = reply(ctx, em, chatID, messageID, block)
 	}
 	return mainErr
 }
@@ -248,7 +249,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, _ *chat
 
 	// RunFix signature: (ctx, mode, cs, slot, drafts, deps,
 	// chatID, messageID, args, force). Reply is sent inline via
-	// cs.Channel(); *Result only carries Consumed / Dropped for
+	// cs.Emitter(); *Result only carries Consumed / Dropped for
 	// the runtime. The withHooks wrapper fires before/after
 	// hooks around the call and ships the hook output as a
 	// follow-up reply (per wip/gtw-hooks.md always-echo policy).
@@ -357,7 +358,7 @@ func parseFixArgs(argv []string) (fixArgs, error) {
 //
 // Construction mirrors runFix: the slot / drafts shims route to
 // the per-chat Manager state, deps are forwarded verbatim, and
-// the reply path is RunClose's own cs.Channel() (no extra wiring).
+// the reply path is RunClose's own cs.Emitter() (no extra wiring).
 // Wrapped in withHooks so close.before / close.after fire.
 func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	cs := f.mgr.GetChatSession(input.ChatID)
@@ -375,7 +376,7 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, _ *ch
 		loadNotes, cfg.Close.Hooks.Before, cfg.Close.Hooks.After,
 		func() error {
 			res, e := RunClose(ctx, cs, slot, f.deps, input.ChatID, input.MessageID)
-			_ = res // RunClose already sent the reply via cs.Channel()
+			_ = res // RunClose already sent the reply via cs.Emitter()
 			return e
 		})
 	if err != nil {
@@ -411,7 +412,7 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *ch
 		loadNotes, cfg.Push.Hooks.Before, cfg.Push.Hooks.After,
 		func() error {
 			res, e := dispatchPush(ctx, cs, f.deps, input.ChatID, input.MessageID, args, cfg.Push.Agent)
-			_ = res // dispatchPush already sent the reply via cs.Channel()
+			_ = res // dispatchPush already sent the reply via cs.Emitter()
 			return e
 		})
 	if err != nil {

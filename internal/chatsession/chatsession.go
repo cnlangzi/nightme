@@ -19,6 +19,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/command/services"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -264,12 +265,13 @@ type ChatSession struct {
 	cancel context.CancelFunc
 	ctxMu  sync.Mutex
 
-	// channel is the IM Channel bound to this chat session.
-	// Set once at New() time (production) or by WithChannel
-	// (test path / late binding). Immutable post-binding; no
-	// lock needed. nil means "no channel bound yet" — commands
-	// must nil-check via Channel() before calling Send/SendCard.
-	channel Channel
+	// emitter is the outbound chokepoint bound to this chat
+	// session. Set once at WithEmitter time (production wires it
+	// from Manager, which holds the single daemon-wide Emitter);
+	// test paths may pass a fake. Immutable post-binding; no
+	// lock needed. nil means "no emitter bound yet" — commands
+	// must nil-check via Emitter() before calling Send/SendCard.
+	emitter outbound.Emitter
 
 	// --- F-45 teamflow (gtw) state ------------------------------
 	//
@@ -297,10 +299,7 @@ type ChatSession struct {
 // Callers can detect this via cs.Channel() == nil and skip
 // channel-dependent operations. Returns (*cs, nil) regardless
 // of ch — construction never fails on the channel binding.
-func New(chatID, primaryAgent string, ch Channel) (*ChatSession, error) {
-	if ch == nil {
-		slog.Default().Warn("chatsession.New: channel is nil (chatID=" + chatID + ")")
-	}
+func New(chatID, primaryAgent string) (*ChatSession, error) {
 	cs := &ChatSession{
 		ID:               deriveIDFromChatID(chatID),
 		ChatID:           chatID,
@@ -310,7 +309,6 @@ func New(chatID, primaryAgent string, ch Channel) (*ChatSession, error) {
 		watchMode:        WatchModeMention, // F-watch default
 		thinkMode:        ThinkModeShow,    // F-think default
 		toolsMode:        ToolsModeHide, // F-38 default (quiet by default)
-		channel:          ch,
 		createdAt:        time.Now(),
 		lastInteractionAt: time.Now(),
 	}
@@ -618,11 +616,18 @@ func (cs *ChatSession) emitMessageDropped(msg Message) {
 // or if WithChannel was never called.
 //
 // Lock-free: channel is set once and never mutated.
-func (cs *ChatSession) Channel() Channel {
+// Emitter returns the outbound chokepoint bound to this chat
+// session. nil when no Emitter has been wired yet (e.g. before
+// Manager.WithEmitter has been called or before GetOrCreate has
+// applied the Manager's emitter). Callers must nil-check before
+// Send / SendCard.
+//
+// Lock-free: emitter is set once and never mutated.
+func (cs *ChatSession) Emitter() outbound.Emitter {
 	if cs == nil {
 		return nil
 	}
-	return cs.channel
+	return cs.emitter
 }
 
 // WithChannel binds a Channel to this ChatSession. Returns
@@ -632,17 +637,23 @@ func (cs *ChatSession) Channel() Channel {
 // Idempotent: subsequent calls with the same Channel are no-ops;
 // calls with a different Channel panic — a chat's channel binding
 // is immutable for the daemon's lifetime.
-func (cs *ChatSession) WithChannel(ch Channel) *ChatSession {
+// WithEmitter binds the outbound chokepoint to this chat session.
+// Set once and never mutated; subsequent calls with the same
+// emitter are no-ops, a different emitter panics.
+//
+// Test paths can use this to inject a fake; production wiring
+// goes through Manager.WithEmitter → Manager.GetOrCreate.
+func (cs *ChatSession) WithEmitter(em outbound.Emitter) *ChatSession {
 	if cs == nil {
 		return cs
 	}
-	if ch == nil {
+	if em == nil {
 		return cs
 	}
-	if cs.channel != nil && cs.channel != ch {
-		panic(fmt.Sprintf("chatsession: ChatSession %s already bound to a different Channel", cs.ChatID))
+	if cs.emitter != nil && cs.emitter != em {
+		panic(fmt.Sprintf("chatsession: ChatSession %s already bound to a different Emitter", cs.ChatID))
 	}
-	cs.channel = ch
+	cs.emitter = em
 	return cs
 }
 

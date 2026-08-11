@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // GitStatusSnapshot is the parsed result of a single
@@ -36,13 +38,12 @@ import (
 // F-48 (follow-up to F-45): runtime stamps one of these on every
 // OutboundMessage.SessionContext that flows to a main-chat footer
 // render site. See docs/feat/F-45-session-footer.md §1.7.
-type GitStatusSnapshot struct {
-	Branch        string
-	Uncommitted   int
-	Untracked     int
-	AheadOfRemote int
-	HasUpstream   bool
-}
+//
+// The canonical definition lives in internal/messages so the wire
+// types package does not need to import the gtw package (avoids
+// a gtw → messages → chatsession → gtw cycle). Existing gtw
+// callers keep working via this alias.
+type GitStatusSnapshot = messages.GitStatusSnapshot
 
 // CollectStatus runs `git -C <dir> status --porcelain --branch`
 // and parses the output into a GitStatusSnapshot.

@@ -2,7 +2,6 @@ package messages
 
 import (
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/command/gtw"
 )
 
 // SessionContext is the runtime-stamped AgentSession snapshot
@@ -67,7 +66,7 @@ type SessionContext struct {
 	// Recomputed on every main-chat stamp (no caching) so the
 	// footer reflects the latest worktree state without an
 	// invalidation hook. See docs/feat/F-45-session-footer.md §1.7.
-	GitStatus *gtw.GitStatusSnapshot
+	GitStatus *GitStatusSnapshot
 
 	// PullRequest is the open PR / MR associated with the
 	// current head branch, resolved asynchronously by the
@@ -96,7 +95,7 @@ type SessionContext struct {
 	// prcache.Registry.Invalidate (which calls Cache.Invalidate
 	// on the relevant AgentSession's cache), triggered by
 	// dispatchPR after a successful CreatePR.
-	PullRequest *gtw.PR
+	PullRequest *PR
 
 	// Usage is the per-turn snapshot from the bridge event that
 	// produced this OutboundMessage — bridges populate it on

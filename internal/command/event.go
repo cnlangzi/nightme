@@ -19,8 +19,8 @@
 package command
 
 import (
-	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command/services"
+	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
 // ReactionEvent is the inbound reaction / action payload.
@@ -70,8 +70,9 @@ type SlashInput struct {
 
 // SlashOutput is the command-package's view of one command's
 // result. The runtime shim consumes Reply / Outbound and routes
-// them through cs.Channel().Send / SendCard / Patch. Consumed +
-// Dropped flow back to the gateway for legacy fall-through handling.
+// them through cs.Emitter().Send / SendCard (PATCH semantics
+// fold into Send with Kind=OutCardPatch). Consumed + Dropped
+// flow back to the gateway for legacy fall-through handling.
 type SlashOutput struct {
 	// Reply is the human-readable reply text. When Outbound is
 	// empty, the runtime shim emits this as a single Send.
@@ -85,11 +86,11 @@ type SlashOutput struct {
 	Dropped bool
 	// Outbound is an explicit list of outbound messages to send
 	// in order. When non-empty, the runtime shim forwards each
-	// via cs.Channel().Send / SendCard / Patch. Uses the canonical
-	// chatsession.OutboundMessage so commands build messages with
-	// the same type the chatsession.Channel accepts (no mirror
-	// types in this package).
-	Outbound []chatsession.OutboundMessage
+	// via the chat session's Emitter. Uses the canonical
+	// gateway.OutboundMessage so commands build messages with
+	// the same type the Emitter accepts (no mirror types in
+	// this package).
+	Outbound []gateway.OutboundMessage
 }
 
 // CardChoice is the command-package's view of one button on a

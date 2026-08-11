@@ -355,7 +355,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 
 	// F-XX: chatID → Channel 解析器。Manager.GetOrCreate 在新建 cs
 	// 时在锁外调它,把 Channel 一次性绑进 cs.channel 字段;之后 cs
-	// 自持 Channel,handler / 命令通过 cs.Channel() 拿。
+	// 自持 Channel,handler / 命令通过 cs.Emitter() 拿。
 	//
 	// 必须在任何 GetOrCreate 之前注入(包括 RestoreFromRegistry
 	// 路径 — 它内部会对每个持久化的 chatID 调一次 GetOrCreate)。
@@ -371,9 +371,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// 盖在每条消息上(runtime pump / slash command / MessageState 三条
 	// 路径都走它)。stamper 在装配层注入,不暴露给 chatsession。
 	em := outbound.New(ch, outbound.Options{Stamper: newRuntimeStamper(mgr, prCacheReg, gtwDeps)})
-	mgr.WithChannelResolver(func(string) chatsession.Channel {
-		return newChannelWrap(em)
-	})
+	mgr.WithEmitter(em)
 
 	// F-XX: wire the per-chat ChatSession lookup. Without this,
 	// /gtw fix and reaction paths would nil-deref on
@@ -444,7 +442,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		}
 
 		// GetOrCreate 这里调用一次,channelResolver 已经注入(见
-		// 上方 WithChannelResolver 调用),所以 cs.Channel() 应当非 nil。
+		// 上方 WithChannelResolver 调用),所以 cs.Emitter() 应当非 nil。
 		// 如果 nil(resolver 失败),log warn 并返回 nil 让 gateway
 		// 走 fallback 到 agent loop。
 		cs, err := mgr.GetOrCreate(msg.ChatID, cfg.Primary)
@@ -464,9 +462,9 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		out, handled, err := commander.Dispatch(ctx, rt, cs, input)
 		if err != nil {
 			errText := "❌ " + err.Error()
-			ch := cs.Channel()
+			ch := cs.Emitter()
 			if ch != nil {
-				_ = ch.Send(ctx, chatsession.OutboundMessage{
+				_ = ch.Send(ctx, gateway.OutboundMessage{
 					ChatID:  msg.ChatID,
 					Text:    errText,
 					ReplyTo: msg.MessageID,
@@ -479,28 +477,24 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		}
 		// handled=true. out 可能 Consumed=true(command replied)
 		// 或 Consumed=false(slash 命令没匹配到 factory)。
-		ch := cs.Channel()
+		ch := cs.Emitter()
 		if out.Consumed && out.Reply != "" && ch != nil {
-			_ = ch.Send(ctx, chatsession.OutboundMessage{
+			_ = ch.Send(ctx, gateway.OutboundMessage{
 				ChatID:  msg.ChatID,
 				Text:    out.Reply,
 				ReplyTo: msg.MessageID,
 			})
 		}
-		// 透传 out.Outbound(都是 chatsession.OutboundMessage,直接
-		// 调 cs.Channel().Send/SendCard/Patch — channelWrap 在 binding
-		// 时已经把 gateway.Channel 包成 chatsession.Channel,所以
-		// runtime shim 这层不需要再做字段翻译)
+		// 透传 out.Outbound (都是 gateway.OutboundMessage,直接
+		// 调 cs.Emitter().Send/SendCard — PATCH 语义由调用方设 Kind=OutCardPatch
+		// 后通过 Send 走,见 channel/feishu/adapter.go: case OutCardPatch)
 		for _, ob := range out.Outbound {
 			if ch == nil {
 				continue
 			}
-			switch {
-			case ob.PatchBotMsgID != "":
-				_ = ch.Patch(ctx, ob)
-			case ob.Card != nil:
+			if ob.Card != nil {
 				_, _ = ch.SendCard(ctx, ob)
-			default:
+			} else {
 				_ = ch.Send(ctx, ob)
 			}
 		}
@@ -1460,18 +1454,18 @@ func shutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, cs
 	return firstErr
 }
 
-// toChatCardChoices translates command.CardChoice (command pkg) to
-// chatsession.CardChoice (chatsession pkg). Both have the same
-// fields; this is a direct copy. Defined here (in run.go) so the
+// toCardChoices translates command.CardChoice (command pkg) to
+// the wire-level gateway.CardChoice. Both have the same fields;
+// this is a direct copy. Defined here (in run.go) so the
 // runtime owns the boundary translation without leaking the
 // command-package's mirror types deeper into the runtime.
-func toChatCardChoices(in []command.CardChoice) []chatsession.CardChoice {
+func toCardChoices(in []command.CardChoice) []gateway.CardChoice {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make([]chatsession.CardChoice, len(in))
+	out := make([]gateway.CardChoice, len(in))
 	for i, c := range in {
-		out[i] = chatsession.CardChoice{
+		out[i] = gateway.CardChoice{
 			Emoji:  c.Emoji,
 			Label:  c.Label,
 			Action: c.Action,
@@ -1504,11 +1498,11 @@ func (s chatSessionChannelSender) Send(ctx context.Context, msg shell.Outbound) 
 	if cs == nil {
 		return nil
 	}
-	ch := cs.Channel()
+	ch := cs.Emitter()
 	if ch == nil {
 		return nil
 	}
-	return ch.Send(ctx, chatsession.OutboundMessage{
+	return ch.Send(ctx, gateway.OutboundMessage{
 		ChatID:  msg.ChatID,
 		Text:    msg.Text,
 		ReplyTo: msg.ReplyTo,

@@ -3,7 +3,7 @@ package gtw
 // loadDispatchContext resolves the per-chat workspace for /gtw push
 // and /gtw pr. It returns either a populated Context (with one of
 // two fill strategies) or a ready-to-send *Result whose reply has
-// already been emitted via cs.Channel().
+// already been emitted via cs.Emitter().
 //
 // Two fill strategies:
 //
@@ -50,7 +50,7 @@ func loadDispatchContext(
 ) (Context, *Result) {
 	cwd := cs.SelectedCwd()
 	if cwd == "" {
-		return Context{}, reply(ctx, cs.Channel(), chatID, messageID,
+		return Context{}, reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ no active workspace. Send /cwd <path> first.")
 	}
 
@@ -58,13 +58,13 @@ func loadDispatchContext(
 	if err == nil {
 		// yml-present: validate and return.
 		if c.Worktree == "" || c.Branch == "" || c.RepoRoot == "" {
-			return Context{}, reply(ctx, cs.Channel(), chatID, messageID,
+			return Context{}, reply(ctx, cs.Emitter(), chatID, messageID,
 				"❌ .nightme/gtw.yml is malformed (worktree/branch/repoRoot required)")
 		}
 		return c, nil
 	}
 	if !os.IsNotExist(err) {
-		return Context{}, reply(ctx, cs.Channel(), chatID, messageID,
+		return Context{}, reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err))
 	}
 
@@ -75,18 +75,18 @@ func loadDispatchContext(
 	// pieces of state we can't otherwise guess.
 	repoRootOut, _, err := deps.Git.Run(ctx, cwd, "rev-parse", "--show-toplevel")
 	if err != nil {
-		return Context{}, reply(ctx, cs.Channel(), chatID, messageID,
+		return Context{}, reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ %s is not inside a git repository", cwd))
 	}
 	branchOut, _, err := deps.Git.Run(ctx, cwd, "rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
-		return Context{}, reply(ctx, cs.Channel(), chatID, messageID,
+		return Context{}, reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ cannot determine current branch in %s: %v", cwd, err))
 	}
 	branch := strings.TrimSpace(branchOut)
 	if branch == "" || branch == "HEAD" {
 		// detached HEAD — refuse rather than guess a PR target.
-		return Context{}, reply(ctx, cs.Channel(), chatID, messageID,
+		return Context{}, reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ %s is on a detached HEAD; checkout a named branch first", cwd))
 	}
 	return Context{

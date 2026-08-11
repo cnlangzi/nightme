@@ -96,10 +96,14 @@ jobs:
               ;;
             zip)
               # python3 is preinstalled on ubuntu-latest runners and
-              # avoids needing the `zip` apt package.
-              (cd "$STAGE" && python3 -m zipfile -c \
-                "../../dist/nightme_${VERSION}_${GOOS}_${GOARCH}.zip" \
-                nightme.exe LICENSE README.md)
+              # avoids needing the `zip` apt package. Paths are
+              # workspace-root-relative (the step's cwd) so we don't
+              # need an inner cd that would shift the output path.
+              python3 -m zipfile -c \
+                "dist/nightme_${VERSION}_${GOOS}_${GOARCH}.zip" \
+                "$STAGE/nightme.exe" \
+                "$STAGE/LICENSE" \
+                "$STAGE/README.md"
               ;;
           esac
 

@@ -666,6 +666,16 @@ func (as *AgentSession) ExitCode() *int {
 // `system/init.session_id`) captured on the last run. Empty when
 // the agent has no resume semantics or has not yet emitted its
 // init event.
+// SetPersist wires the registry callback used to flush state
+// transitions (notably InFlightMessages after Submit / endPrompt).
+// Wired by the chat layer at attach time; nil (no persistence or
+// pre-attachment) means Submit / endPrompt silently skip the write.
+func (as *AgentSession) SetPersist(persist func(*registry.AgentSessionEntry) error) {
+	as.asMu.Lock()
+	defer as.asMu.Unlock()
+	as.persist = persist
+}
+
 func (as *AgentSession) SessionID() string {
 	as.asMu.RLock()
 	defer as.asMu.RUnlock()
@@ -1045,11 +1055,30 @@ func (as *AgentSession) Submit(p *Prompt) error {
 		"as_id", as.ID,
 		"prompt_id", p.ID)
 
-	// Commit: install currentPrompt and flip isReady.
+	// Commit: install currentPrompt and flip isReady. The
+	// in-flight-message mirror is updated as part of the same
+	// atomic commit so Entry() always sees a consistent
+	// (currentPrompt, inFlightMessages) pair.
 	as.asMu.Lock()
 	as.currentPrompt = p
+	as.inFlightMessages = make([]registry.InFlightMessageRef, len(p.Messages))
+	for i, m := range p.Messages {
+		as.inFlightMessages[i] = registry.InFlightMessageRef{
+			ID:         m.ID,
+			Blocks:     m.Blocks,
+			ReceivedAt: m.ReceivedAt,
+		}
+	}
 	as.asMu.Unlock()
 	as.isReady.Store(false)
+
+	// Best-effort persistence — failures must NOT roll back the
+	// commit, since SendBlocks already accepted the prompt and the
+	// bridge is now expecting a reply. The next status change
+	// (endPrompt) will retry the write.
+	if as.persist != nil {
+		_ = as.persist(as.Entry())
+	}
 	return nil
 }
 

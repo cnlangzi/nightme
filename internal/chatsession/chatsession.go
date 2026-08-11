@@ -1000,6 +1000,18 @@ func (cs *ChatSession) attachAgentSessionLocked(as *AgentSession) {
 	if _, exists := cs.pool[key]; exists {
 		return
 	}
+	// Wire the per-AS persist callback so Submit and endPrompt can
+	// flush their own state transitions (specifically
+	// InFlightMessages) without depending on the caller to call
+	// asFile.Upsert at the right moments. nil asFile (chat
+	// constructed without persistence) leaves persist nil and the
+	// in-memory mirror still works.
+	if cs.asFile != nil {
+		asFile := cs.asFile
+		as.SetPersist(func(e *registry.AgentSessionEntry) error {
+			return asFile.Upsert(e)
+		})
+	}
 	cs.pool[key] = as
 }
 

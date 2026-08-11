@@ -215,9 +215,20 @@ func (as *AgentSession) endPrompt(reason PromptEndReason) {
 	p.EndedAt = time.Now()
 	p.EndReason = reason
 	as.currentPrompt = nil
+	// Mirror inFlightMessages with currentPrompt — invariant:
+	// currentPrompt non-nil ⇔ inFlightMessages non-nil.
+	as.inFlightMessages = nil
 	as.isReady.Store(true)
 	stop := as.readpumpStop
 	as.asMu.Unlock()
+
+	// Best-effort persistence of the cleared state. Mirrors the
+	// Submit-side comment: must not roll back the prompt-end
+	// event we just queued. Failures fall through — the next
+	// status transition will retry.
+	if as.persist != nil {
+		_ = as.persist(as.Entry())
+	}
 
 	// Push KindPromptEnded event. Honor readpumpStop so a Shutdown
 	// racing us can interrupt the push (otherwise Shutdown would

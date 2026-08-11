@@ -6,17 +6,22 @@ import (
 	"strings"
 )
 
-// headSHA returns the current HEAD's full SHA in worktree. Used
-// by verifyAgentPushedAndRecover to detect "agent claimed success
-// but didn't commit" — a class of failure where status is empty
-// and unpushed count is 0, but no commit actually landed.
+// headSHA returns the current HEAD's full SHA in worktree.
+// Used by two callers per F-56:
+//
+//   - dispatchPush (Branch 2): captures headBefore at entry so
+//     verifyAgentCommitted can detect "agent claimed success
+//     but didn't commit" (a class of failure where status is
+//     empty and unpushed count is 0, but no commit actually
+//     landed). Per F-56 §B3, dispatchPush aborts on capture
+//     failure — headBefore is required for the verify to work.
+//
+//   - verifyAgentCommitted: reads headAfter to compare against
+//     headBefore. Errors here surface as a diagnostic in the
+//     reply.
 //
 // Returns the SHA with surrounding whitespace trimmed (git's
-// output is one line, but the test fake may not be). Errors
-// propagate so the caller can surface them; verifyAgentPushedAndRecover
-// treats the snapshot as "unavailable" when this fails (skips
-// the HEAD-advance check rather than aborting the verification
-// entirely).
+// output is one line, but the test fake may not be).
 func headSHA(ctx context.Context, worktree string, deps HandlerDeps) (string, error) {
 	out, _, err := deps.Git.Run(ctx, worktree, "rev-parse", "HEAD")
 	if err != nil {
@@ -60,6 +65,60 @@ func programmaticPush(ctx context.Context, deps HandlerDeps, c Context) (string,
 	return stdout + stderr, nil
 }
 
+// programmaticPushWithRetry runs `git push -u origin <branch>` with
+// one retry on transient failure. Per F-56 §4.3, this is the
+// single source of truth for "did the push land": countUnpushed
+// (NOT the push command's exit code — git can exit 0 with commits
+// silently not landing on the remote, or exit non-zero with the
+// branch already up to date).
+//
+// Returns nil on success (unpushed == 0 after at most one retry),
+// or an error whose Error() is a complete IM-friendly message
+// including the unpushed commit list — caller can paste it
+// straight into the reply.
+func programmaticPushWithRetry(ctx context.Context, deps HandlerDeps, c Context) error {
+	// Attempt 1.
+	out1, _ := programmaticPush(ctx, deps, c)
+	if ok, err := unpushedIsZero(ctx, deps, c); err != nil {
+		return fmt.Errorf("verify after push: %w", err)
+	} else if ok {
+		return nil
+	}
+
+	// Attempt 2 (retry on transient failure).
+	out2, _ := programmaticPush(ctx, deps, c)
+	if ok, err := unpushedIsZero(ctx, deps, c); err != nil {
+		return fmt.Errorf("re-count after retry: %w", err)
+	} else if ok {
+		return nil
+	}
+
+	// Both attempts verified-failed. Build the diagnostic.
+	unpushed, _ := countUnpushed(ctx, c.Worktree, c.Branch, deps)
+	return fmt.Errorf(
+		"❌ %d commit(s) on %s still don't appear on origin/%s after retry\n"+
+			"first attempt output: %s\n"+
+			"retry output: %s\n"+
+			"hint: check `git push -v %s` — likely network or remote protection rule.\n\n"+
+			"unpushed commits:\n%s",
+		unpushed, c.Branch, c.Branch,
+		strings.TrimSpace(out1), strings.TrimSpace(out2), c.Branch,
+		unpushedCommitsForDisplay(ctx, c.Worktree, c.Branch, deps),
+	)
+}
+
+// unpushedIsZero is the countUnpushed → bool convenience used by
+// programmaticPushWithRetry's verify loop. Errors propagate so the
+// caller can distinguish "no commits to push" (true) from
+// "couldn't read state" (false + err).
+func unpushedIsZero(ctx context.Context, deps HandlerDeps, c Context) (bool, error) {
+	n, err := countUnpushed(ctx, c.Worktree, c.Branch, deps)
+	if err != nil {
+		return false, err
+	}
+	return n == 0, nil
+}
+
 // countUnpushed returns the count of commits on the named branch
 // that have no upstream counterpart.
 //
@@ -71,9 +130,10 @@ func programmaticPush(ctx context.Context, deps HandlerDeps, c Context) (string,
 // "nothing to push" / wrong unpushed count for c.Branch.
 //
 // When @{u} is unset (first push of a fresh branch) returns 0 —
-// the dispatcher's "clean + unpushed" branch treats that as
-// "nothing to push"; the "dirty" branch will have the agent run
-// `git push -u origin` to establish upstream.
+// dispatchPush's Branch 1 (clean + 0 unpushed) treats that as
+// "nothing to push" and exits with the no-op IM card. Branch 2
+// (dirty) still works: the agent's commits get the upstream
+// established when nightme runs programmaticPushWithRetry.
 //
 // When @{u} is set but rev-list errors for some other reason
 // (permission denied, corrupt worktree, etc.) we return the
@@ -163,6 +223,31 @@ func listUncommittedFiles(ctx context.Context, worktree string, deps HandlerDeps
 		files = append(files, path)
 	}
 	return files, nil
+}
+
+// gitLogRange returns the `<sha> <subject>` oneline of every
+// commit in `revRange` (e.g. "headBefore..origin/branch" or
+// "headBefore..HEAD"). Used by replySuccessCard to build the
+// IM card directly from git state — never from agent prose.
+//
+// Output is the raw `git log --oneline` text, trimmed. Caller
+// can split on "\n" if it wants structured access.
+//
+// An empty range (no commits) returns "" + nil. Errors other
+// than "bad revision" propagate.
+func gitLogRange(ctx context.Context, worktree, revRange string, deps HandlerDeps) (string, error) {
+	out, stderr, err := deps.Git.Run(ctx, worktree, "log", "--oneline", revRange)
+	if err != nil {
+		// Empty rev range (no commits) often surfaces as a non-fatal
+		// error from `git log`; treat that as "no output, no error".
+		// Caller can render an empty list.
+		if strings.Contains(stderr, "does not have any commits") ||
+			strings.Contains(stderr, "unknown revision") {
+			return "", nil
+		}
+		return "", fmt.Errorf("git log %s: %w (stderr: %s)", revRange, err, strings.TrimSpace(stderr))
+	}
+	return strings.TrimRight(out, "\n"), nil
 }
 
 // detectConflicts parses a `git status --porcelain` output and

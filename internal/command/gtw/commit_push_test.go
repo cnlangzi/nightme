@@ -19,17 +19,23 @@ import (
 //
 // One-off: each Run returns the captured stdout/stderr/error triple.
 type pushGit struct {
-	mu               sync.Mutex
-	responses        map[string]pushGitResp
-	responsesByArgs  map[string]pushGitResp
+	mu                    sync.Mutex
+	responses             map[string]pushGitResp
+	responsesByArgs       map[string]pushGitResp
 	// seqResponses[prefix] is the ordered list of responses
 	// onSeq registered; the Nth call matching prefix gets the
 	// Nth entry, last entry reused once exhausted. Call count
 	// is per-prefix so a sequence on "rev-list" doesn't get
 	// advanced by intervening "status" or "push" calls.
-	seqResponses     map[string][]pushGitResp
-	seqCallCount     map[string]int
-	calls            []pushGitCall
+	seqResponses          map[string][]pushGitResp
+	seqCallCount          map[string]int
+	// seqResponsesByArgs is the per-full-argv equivalent of
+	// seqResponses — for onArgsSeq, when the same exact argv
+	// is called multiple times with different state-dependent
+	// answers (e.g. `git rev-parse HEAD` before vs after agent).
+	seqResponsesByArgs    map[string][]pushGitResp
+	seqArgsCallCount      map[string]int
+	calls                 []pushGitCall
 }
 
 type pushGitResp struct {
@@ -45,10 +51,12 @@ type pushGitCall struct {
 
 func newPushGit() *pushGit {
 	return &pushGit{
-		responses:       make(map[string]pushGitResp),
-		responsesByArgs: make(map[string]pushGitResp),
-		seqResponses:    make(map[string][]pushGitResp),
-		seqCallCount:    make(map[string]int),
+		responses:          make(map[string]pushGitResp),
+		responsesByArgs:    make(map[string]pushGitResp),
+		seqResponses:       make(map[string][]pushGitResp),
+		seqCallCount:       make(map[string]int),
+		seqResponsesByArgs: make(map[string][]pushGitResp),
+		seqArgsCallCount:   make(map[string]int),
 	}
 }
 
@@ -68,6 +76,23 @@ func (f *pushGit) on(prefix string, stdout, stderr string, err error) {
 // matches; only falls back to on() when none match.
 func (f *pushGit) onArgs(args []string, stdout, stderr string, err error) {
 	f.responsesByArgs[joinArgs(args)] = pushGitResp{stdout, stderr, err}
+}
+
+// onArgsSeq registers a SEQUENCE of responses for the same
+// full-argv slice. The Nth Run call with matching full argv
+// gets the Nth response; the LAST response is reused once
+// exhausted. Companion to onSeq (which keys on first-token
+// only) — onArgsSeq handles per-argv sequences like "two
+// `git rev-parse HEAD` calls with different SHAs (e.g. one
+// before the agent, one after)". Each new onArgsSeq call
+// overwrites any prior sequence for the same args key.
+func (f *pushGit) onArgsSeq(args []string, responses ...pushGitResp) {
+	if len(responses) == 0 {
+		return
+	}
+	key := joinArgs(args)
+	f.responsesByArgs[key] = responses[0]
+	f.seqResponsesByArgs[key] = responses
 }
 
 // onSeq registers responses that fire in call order for a given
@@ -97,8 +122,21 @@ func (f *pushGit) Run(_ context.Context, dir string, args ...string) (string, st
 	if len(args) == 0 {
 		return "", "", errors.New("pushGit: empty argv")
 	}
+	key := joinArgs(args)
+	// Sequence-based per-argv match: Nth call to this exact argv
+	// gets Nth response (last reused once exhausted). Wins over
+	// plain onArgs because it's more specific.
+	if seq, ok := f.seqResponsesByArgs[key]; ok {
+		idx := f.seqArgsCallCount[key]
+		f.seqArgsCallCount[key] = idx + 1
+		if idx >= len(seq) {
+			idx = len(seq) - 1
+		}
+		resp := seq[idx]
+		return resp.stdout, resp.stderr, resp.err
+	}
 	// Specific (full-argv) match wins over first-token match.
-	if resp, ok := f.responsesByArgs[joinArgs(args)]; ok {
+	if resp, ok := f.responsesByArgs[key]; ok {
 		return resp.stdout, resp.stderr, resp.err
 	}
 	// Sequence-based match: Nth call to prefix gets Nth response
@@ -267,12 +305,23 @@ func TestBuildAgentPrompt_Remote(t *testing.T) {
 	}
 	p := buildAgentPrompt(c)
 
-	mustContain(t, p, "Working directory: /w")
-	mustContain(t, p, "Branch: fix-42-foo")
-	mustContain(t, p, "Issue: #42")
+	// F-56 §3 minimal prompt: role + task + 3 hard rules.
+	mustContain(t, p, "You are a release engineer.")
+	mustContain(t, p, "branch fix-42-foo in /w")
+	mustContain(t, p, "for issue #42")
+	mustContain(t, p, "Conventional Commits")
 	mustContain(t, p, "feat, fix, chore, refactor")
-	mustContain(t, p, "Reference issue with #42 in body")
-	mustContain(t, p, "git push -u origin fix-42-foo")
+	mustContain(t, p, "Do not push.")
+	mustContain(t, p, "never run `git push`")
+	mustContain(t, p, "Do not revert, restore, or stash")
+	mustContain(t, p, "not `git add -A`")
+	// Old prompt's "5-step checklist" + the actual push step
+	// (not the "never run git push" warning) should be gone.
+	if strings.Contains(p, "Step list") || strings.Contains(p, "Task:") ||
+		strings.Contains(p, "git push -u origin") || strings.Contains(p, "Reply with: <commit_hash>") ||
+		strings.Contains(p, "Working directory: /w\nBranch:") {
+		t.Fatalf("old-style prompt leakage detected:\n%s", p)
+	}
 }
 
 func TestBuildAgentPrompt_Local(t *testing.T) {
@@ -283,13 +332,13 @@ func TestBuildAgentPrompt_Local(t *testing.T) {
 	}
 	p := buildAgentPrompt(c)
 
-	mustContain(t, p, "Working directory: /w")
-	mustContain(t, p, "Branch: wt-local")
-	if strings.Contains(p, "Issue: #") {
-		t.Fatalf("Local prompt should not contain 'Issue: #':\n%s", p)
+	mustContain(t, p, "You are a release engineer.")
+	mustContain(t, p, "branch wt-local in /w")
+	if strings.Contains(p, "for issue #") {
+		t.Fatalf("Local prompt should not contain 'for issue #':\n%s", p)
 	}
-	if strings.Contains(p, "Reference issue with #") {
-		t.Fatalf("Local prompt should not contain 'Reference issue':\n%s", p)
+	if strings.Contains(p, "Working directory: /w\nBranch:") {
+		t.Fatalf("Local prompt should not contain the old 'Working directory / Branch' lines:\n%s", p)
 	}
 }
 
@@ -357,6 +406,10 @@ func TestParsePushArgs_MissingValue(t *testing.T) {
 func TestRunPush_CleanNoUnpushed(t *testing.T) {
 	git := newPushGit()
 	git.on("status", "", "", nil)
+	// F-56: dispatchPush now captures headBefore BEFORE deciding
+	// which branch to take. Mock it.
+	git.onArgs([]string{"rev-parse", "HEAD"},
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", "", nil)
 	// rev-list errors with "no upstream configured" → countUnpushed
 	// returns 0 (treated as fresh branch).
 	git.on("rev-list", "", "fatal: no upstream configured for branch 'wt-clean'", errors.New("exit 128"))
@@ -369,32 +422,42 @@ func TestRunPush_CleanNoUnpushed(t *testing.T) {
 		RepoRoot: mustPwd(t),
 	})
 
-	res, err := dispatchPush(context.Background(), newPushChatSession(t),
+	cs := newPushChatSession(t)
+	s := captureCh(t, cs)
+	res, err := dispatchPush(context.Background(), cs,
 		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
 
 	if err != nil || res == nil {
 		t.Fatalf("dispatchPush err=%v res=%v", err, res)
 	}
-	// We expect: status once, then rev-list (no upstream → 0).
-	// NO push call (0 unpushed → terminal "nothing to push" reply).
+	// F-56 Branch 1: clean + 0 unpushed → exit with "ℹ️ nothing
+	// to push" message. NO push call.
 	for _, c := range git.calls {
 		if c.args[0] == "push" {
 			t.Fatalf("clean + 0 unpushed should NOT call git push: %v", c.args)
 		}
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "ℹ️ nothing to push") {
+		t.Errorf("expected Branch 1 no-op card, got:\n%s", r)
 	}
 }
 
 func TestRunPush_CleanWithUnpushed(t *testing.T) {
 	git := newPushGit()
 	git.on("status", "", "", nil)
-	git.on("rev-parse", "", "", nil) // upstream exists
+	// F-56: dispatchPush now captures headBefore at entry.
+	git.onArgs([]string{"rev-parse", "HEAD"},
+		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", "", nil)
 	// State change across push: before push, 3 unpushed; after
-	// push (verified by verifyPushedAndRetry), 0 unpushed.
+	// push (verified by programmaticPushWithRetry), 0 unpushed.
 	git.onSeq("rev-list",
 		pushGitResp{"3", "", nil}, // before push
 		pushGitResp{"0", "", nil}, // after push (verify + retry)
 	)
 	git.on("push", "To origin", "", nil)
+	// F-56: success card reads `git log headBefore..origin/<branch>`.
+	git.on("log", "abc1234 commit 1\ndef5678 commit 2\n", "", nil)
 
 	withAgent(t)
 	withCwd(t, t.TempDir())
@@ -404,7 +467,9 @@ func TestRunPush_CleanWithUnpushed(t *testing.T) {
 		RepoRoot: mustPwd(t),
 	})
 
-	_, err := dispatchPush(context.Background(), newPushChatSession(t),
+	cs := newPushChatSession(t)
+	s := captureCh(t, cs)
+	_, err := dispatchPush(context.Background(), cs,
 		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
 
 	if err != nil {
@@ -418,6 +483,15 @@ func TestRunPush_CleanWithUnpushed(t *testing.T) {
 	}
 	if !pushed {
 		t.Fatalf("expected git push call, got %v", git.calls)
+	}
+	r := s.lastText()
+	// F-56 Branch 3: worktree clean, push-only. Card is
+	// "✅ pushed N commit(s) to <branch>:" + log output.
+	if !strings.Contains(r, "✅ pushed") || !strings.Contains(r, "wt-clean-unpushed") {
+		t.Errorf("expected Branch 3 success card, got:\n%s", r)
+	}
+	if strings.Contains(r, "🤖") {
+		t.Errorf("Branch 3 should not credit an agent, got:\n%s", r)
 	}
 }
 
@@ -435,6 +509,9 @@ func TestRunPush_CleanWithUnpushed(t *testing.T) {
 func TestRunPush_VerifyDetectsSilentPushFailure(t *testing.T) {
 	git := newPushGit()
 	git.on("status", "", "", nil)
+	// F-56 entry: headBefore is captured up-front.
+	git.onArgs([]string{"rev-parse", "HEAD"},
+		"cccccccccccccccccccccccccccccccccccccccc\n", "", nil)
 	// All rev-list calls return "1" — the push never lands
 	// upstream, even after retry. State change is impossible.
 	git.on("rev-list", "1", "", nil)
@@ -473,19 +550,26 @@ func TestRunPush_VerifyDetectsSilentPushFailure(t *testing.T) {
 // surfaces the file list. User can commit manually or retry.
 func TestRunPush_DirtyAgentLeavesFiles(t *testing.T) {
 	git := newPushGit()
+	// F-56: dispatchPush captures headBefore + counts unpushed
+	// at entry, before deciding which branch to take.
+	git.onArgs([]string{"rev-parse", "HEAD"},
+		"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n", "", nil)
+	git.on("rev-list", "0\n", "", nil) // entry countUnpushed: 0
 	// status is checked TWICE: dispatchPush's pre-flight
-	// (dirty → pushDirty) and verifyAgentPushedAndRecover's
+	// (dirty → Branch 2) and verifyAgentCommitted's
 	// post-agent check (still dirty → warning).
 	git.onSeq("status",
 		pushGitResp{"?? new-secret.env\n", "", nil}, // pre-agent: dirty
 		pushGitResp{"?? new-secret.env\n", "", nil}, // post-agent: still dirty
 	)
-	// HEAD-branch + HEAD-SHA snapshots before and after the
-	// agent — used by verifyAgentPushedAndRecover's new
-	// branch-mismatch and HEAD-advance checks. Same branch,
-	// same SHA (agent did nothing).
+	// F-56: dispatchPush captures headBefore (rev-parse HEAD).
+	// verifyAgentCommitted checks branch first (rev-parse
+	// --abbrev-ref HEAD), then HEAD-advance (rev-parse HEAD
+	// again) — but only if worktree clean check passed. Here
+	// uncommitted > 0 short-circuits, so HEAD-advance is skipped.
 	git.on("rev-parse", "wt-dirty-leftover\n", "", nil) // --abbrev-ref HEAD
-	git.onArgs([]string{"rev-parse", "HEAD"}, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n", "", nil)
+	git.onArgs([]string{"rev-parse", "HEAD"},
+		"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n", "", nil)
 
 	claude := &recordingAgent{
 		name:        "claude",
@@ -519,6 +603,12 @@ func TestRunPush_DirtyAgentLeavesFiles(t *testing.T) {
 	if !strings.Contains(r, "new-secret.env") {
 		t.Fatalf("expected diagnostic to name the uncommitted file, got:\n%s", r)
 	}
+	// Branch 2 verify failure MUST NOT call git push.
+	for _, c := range git.calls {
+		if c.args[0] == "push" {
+			t.Fatalf("verify-failed Branch 2 must not call git push: %v", c.args)
+		}
+	}
 }
 
 // TestRunPush_DirtyAgentClaimsDoneButNoCommit is the regression
@@ -534,6 +624,11 @@ func TestRunPush_DirtyAgentLeavesFiles(t *testing.T) {
 // naming the unchanged SHA.
 func TestRunPush_DirtyAgentClaimsDoneButNoCommit(t *testing.T) {
 	git := newPushGit()
+	// F-56: dispatchPush captures headBefore at entry.
+	git.onArgs([]string{"rev-parse", "HEAD"},
+		"cafebabecafebabecafebabecafebabecafebabe\n", "", nil)
+	// countUnpushed at entry: 0 (HEAD already at origin).
+	git.on("rev-list", "0\n", "", nil)
 	// status: pre-agent dirty, post-agent clean (agent did
 	// `git stash` or similar — files moved out of the worktree
 	// without a commit). Pre-fix this looked identical to a
@@ -545,10 +640,6 @@ func TestRunPush_DirtyAgentClaimsDoneButNoCommit(t *testing.T) {
 	// HEAD-branch: agent stayed on c.Branch (didn't switch
 	// branches), so the branch check passes.
 	git.on("rev-parse", "wt-noop\n", "", nil)
-	// HEAD-SHA: SAME before and after the agent — the smoking
-	// gun for "no commit happened".
-	git.onArgs([]string{"rev-parse", "HEAD"},
-		"cafebabecafebabecafebabecafebabecafebabe\n", "", nil)
 
 	claude := &recordingAgent{
 		name:        "claude",
@@ -594,6 +685,10 @@ func TestRunPush_DirtyAgentClaimsDoneButNoCommit(t *testing.T) {
 // for, and will never land on c.Branch.
 func TestRunPush_DirtyAgentSwitchesBranch(t *testing.T) {
 	git := newPushGit()
+	// F-56: dispatchPush captures headBefore + counts unpushed at entry.
+	git.onArgs([]string{"rev-parse", "HEAD"},
+		"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n", "", nil)
+	git.on("rev-list", "0\n", "", nil)
 	git.on("status", "M foo.go\n", "", nil) // pre-agent: dirty
 	// HEAD-branch snapshot after the agent: on wt-side,
 	// NOT on wt-c.Branch. This is the trigger for the
@@ -632,6 +727,10 @@ func TestRunPush_DirtyAgentSwitchesBranch(t *testing.T) {
 
 func TestRunPush_DirtyDelegatesToAgent(t *testing.T) {
 	git := newPushGit()
+	// F-56: dispatchPush entry snapshots.
+	git.onArgs([]string{"rev-parse", "HEAD"},
+		"1111111111111111111111111111111111111111\n", "", nil)
+	git.on("rev-list", "0\n", "", nil)
 	git.on("status", "M foo.go\n", "", nil)
 
 	claude := &recordingAgent{
@@ -669,16 +768,131 @@ func TestRunPush_DirtyDelegatesToAgent(t *testing.T) {
 		t.Fatalf("RunOnce blocks malformed: %+v", call.blocks)
 	}
 	prompt := call.blocks[0].Text
-	if !strings.Contains(prompt, "Branch: wt-dirty") {
+	if !strings.Contains(prompt, "branch wt-dirty") {
 		t.Fatalf("prompt missing branch:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "Issue: #7") {
+	if !strings.Contains(prompt, "issue #7") {
 		t.Fatalf("prompt missing issue:\n%s", prompt)
+	}
+}
+
+// TestRunPush_DirtyAgentCommitsAndPushes is the F-56 §8.1
+// happy-path coverage for Branch 2. Pre-F-56 there was no test
+// that exercised the full chain: agent runs → verify passes →
+// nightme pushes → success card rendered from git log. The
+// old TestRunPush_DirtyDelegatesToAgent only checked the agent
+// was called, leaving the rest of the flow unverified.
+//
+// This test mocks the full sequence:
+//
+//   - dispatchPush entry: rev-parse HEAD (headBefore),
+//     countUnpushed (0), status (dirty → Branch 2).
+//   - agent.RunOnce fires.
+//   - verifyAgentCommitted: status (now clean), rev-parse
+//     --abbrev-ref HEAD (still on wt-dirty), rev-parse HEAD
+//     (headAfter — different SHA, advance OK).
+//   - re-count unpushed: 1 commit now.
+//   - programmaticPushWithRetry: push (success), countUnpushed
+//     re-verify (0).
+//   - replySuccessCard: git log headBefore..origin/wt-dirty
+//     returns 1 commit.
+//
+// Asserts: agent called 1×, push called 1×, IM card contains
+// the Branch 2 header "🤖 pi committed 1 change(s) and pushed
+// to wt-dirty" and the commit's oneline.
+func TestRunPush_DirtyAgentCommitsAndPushes(t *testing.T) {
+	git := newPushGit()
+	// Entry: headBefore + countUnpushed (0 — fresh agent run).
+	git.onArgsSeq([]string{"rev-parse", "HEAD"},
+		pushGitResp{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", "", nil}, // entry: headBefore
+		pushGitResp{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", "", nil}, // verify: headAfter
+	)
+	// rev-list (countUnpushed) sequence: 0 at entry → 1 after
+	// agent → 0 after push verify. All calls share the first
+	// token, so onSeq is the only way to differentiate them.
+	git.onSeq("rev-list",
+		pushGitResp{"0", "", nil}, // entry: no unpushed yet
+		pushGitResp{"1", "", nil}, // re-count after agent: 1 commit
+		pushGitResp{"0", "", nil}, // programmaticPushWithRetry verify: 0
+	)
+	// dispatchPush: status pre-agent is dirty → Branch 2.
+	// verifyAgentCommitted: status post-agent is clean.
+	git.onSeq("status",
+		pushGitResp{"M foo.go\n", "", nil}, // pre-agent: dirty
+		pushGitResp{"", "", nil},           // post-agent: clean
+	)
+	// verifyAgentCommitted (1): branch still on c.Branch.
+	git.on("rev-parse", "wt-dirty\n", "", nil) // --abbrev-ref HEAD
+	// programmaticPushWithRetry: push call.
+	git.on("push", "To origin\n", "", nil)
+	// replySuccessCard: git log for the range.
+	git.on("log", "bbbbbbbb feat: agent did the thing\n", "", nil)
+
+	pi := &recordingAgent{
+		name:        "pi",
+		runOnceText: "", // intentionally empty — agent prose is ignored
+	}
+	withAgent(t, pi)
+
+	withCwd(t, t.TempDir())
+	writeYml(t, mustPwd(t), Context{
+		Worktree: mustPwd(t),
+		Branch:   "wt-dirty",
+		RepoRoot: mustPwd(t),
+		Issue:    7,
+	})
+	cs := newPushChatSession(t)
+	_ = cs.SetSelectedAgent("pi")
+	s := captureCh(t, cs)
+
+	_, err := dispatchPush(context.Background(), cs,
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
+	if err != nil {
+		t.Fatalf("RunPush: %v", err)
+	}
+
+	// Agent was called exactly once.
+	pi.mu.Lock()
+	piCalls := len(pi.calls)
+	pi.mu.Unlock()
+	if piCalls != 1 {
+		t.Fatalf("agent.RunOnce called %d times, want 1", piCalls)
+	}
+
+	// Push was called exactly once.
+	pushCount := 0
+	for _, c := range git.calls {
+		if c.args[0] == "push" {
+			pushCount++
+		}
+	}
+	if pushCount != 1 {
+		t.Fatalf("git push called %d times, want 1; calls=%v", pushCount, git.calls)
+	}
+
+	// IM card is Branch 2 format, sourced from git log (not agent prose).
+	r := s.lastText()
+	if !strings.Contains(r, "🤖 pi committed 1 change(s) and pushed to wt-dirty") {
+		t.Errorf("Branch 2 IM card missing, got:\n%s", r)
+	}
+	if !strings.Contains(r, "feat: agent did the thing") {
+		t.Errorf("commit oneline from git log missing, got:\n%s", r)
+	}
+	if !strings.Contains(r, "> wt-dirty") {
+		t.Errorf("> branch line missing, got:\n%s", r)
+	}
+	// Agent's prose (empty string here) must NOT appear in the card.
+	if strings.Contains(r, "runOnceText") {
+		t.Errorf("agent prose leaked into card:\n%s", r)
 	}
 }
 
 func TestRunPush_DirtyWithAgentFlag(t *testing.T) {
 	git := newPushGit()
+	// F-56: dispatchPush entry snapshots.
+	git.onArgs([]string{"rev-parse", "HEAD"},
+		"2222222222222222222222222222222222222222\n", "", nil)
+	git.on("rev-list", "0\n", "", nil)
 	git.on("status", "M foo.go\n", "", nil)
 
 	opencode := &recordingAgent{
@@ -793,6 +1007,10 @@ func TestRunPush_AgentBinaryMissing(t *testing.T) {
 
 func TestRunPush_AgentRunOnceError(t *testing.T) {
 	git := newPushGit()
+	// F-56: dispatchPush entry snapshots.
+	git.onArgs([]string{"rev-parse", "HEAD"},
+		"3333333333333333333333333333333333333333\n", "", nil)
+	git.on("rev-list", "0\n", "", nil)
 	git.on("status", "M foo.go\n", "", nil)
 
 	claude := &recordingAgent{
@@ -1017,18 +1235,19 @@ func TestRunPush_NonWorktree_CleanWithUnpushed(t *testing.T) {
 	// loadDispatchContext's git calls:
 	git.onArgs([]string{"rev-parse", "--show-toplevel"}, tmp, "", nil)
 	git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, "feat/manual", "", nil)
-	// dispatchPush's calls (clean + 3 unpushed → programmatic push):
+	// dispatchPush's calls (clean + 3 unpushed → Branch 3 push-only):
 	git.on("status", "", "", nil)
-	// dispatchPush → countUnpushed (3) → programmaticPush →
-	// verifyPushedAndRetry → countUnpushed (0, push succeeded) →
-	// verifyPushedAndRetry returns "" → success card. Model the
-	// state change with onSeq: first rev-list returns 3, all
-	// subsequent return 0.
+	// F-56: dispatchPush captures headBefore at entry, then
+	// countUnpushed (3) before deciding Branch 3.
+	git.onArgs([]string{"rev-parse", "HEAD"},
+		"4444444444444444444444444444444444444444\n", "", nil)
 	git.onSeq("rev-list",
-		pushGitResp{"3", "", nil}, // before push
-		pushGitResp{"0", "", nil}, // after push (verify + any retry)
+		pushGitResp{"3", "", nil}, // entry countUnpushed: 3
+		pushGitResp{"0", "", nil}, // post-push verify: 0
 	)
 	git.on("push", "To origin\n", "", nil)
+	// F-56: success card reads `git log headBefore..origin/<branch>`.
+	git.on("log", "abc1234 feat: thing\ndef5678 fix: stuff\n", "", nil)
 
 	withAgent(t)
 	cs := &chatsession.ChatSession{}
@@ -1050,20 +1269,18 @@ func TestRunPush_NonWorktree_CleanWithUnpushed(t *testing.T) {
 		t.Fatalf("expected git push call, got %v", git.calls)
 	}
 	r := s.lastText()
-	// Format 3 card (commit_push.go pushClean): `✅ pushed` title
-	// + `> <branch>` intent line + raw git output. The previous
-	// `✅ Pushed "<branch>"` form was rewritten to drop the
-	// branch from the title (it lives in the `>` line now).
-	if !strings.Contains(r, "✅ pushed\n") {
-		t.Errorf("expected `✅ pushed` Format 3 title, got:\n%s", r)
+	// F-56 Branch 3 card: "✅ pushed N commit(s) to <branch>:" +
+	// `> <branch>` line + commit log entries. No 🤖 (no agent).
+	if !strings.Contains(r, "✅ pushed") || !strings.Contains(r, "feat/manual") {
+		t.Errorf("expected Branch 3 success card, got:\n%s", r)
 	}
-	if !strings.Contains(r, "> feat/manual\n") {
+	if !strings.Contains(r, "> feat/manual") {
 		t.Errorf("expected `> <branch>` intent line, got:\n%s", r)
 	}
-	if !strings.Contains(r, "feat/manual") {
-		t.Errorf("expected branch name in output, got:\n%s", r)
+	if strings.Contains(r, "🤖") {
+		t.Errorf("Branch 3 should not credit an agent, got:\n%s", r)
 	}
 	if strings.Contains(r, "━━━━━━━━━━━━━━") {
-		t.Errorf("legacy `━━━━━━━━━━━━━━` separator should be gone after Format 3 rewrite, got:\n%s", r)
+		t.Errorf("legacy `━━━━━━━━━━━━━━` separator should be gone after F-56 rewrite, got:\n%s", r)
 	}
 }

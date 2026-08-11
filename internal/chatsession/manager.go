@@ -19,7 +19,6 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -355,7 +354,7 @@ func (m *Manager) RestoreFromRegistry() error {
 		// decides how to handle the duplicate.
 		for _, as := range agentsByCS[entry.ID] {
 			for _, ref := range as.Entry().InFlightMessages {
-				msg := agentsession.Message{
+				msg := Message{
 					ID:         ref.ID,
 					ChatID:     entry.ChatID,
 					Blocks:     ref.Blocks,
@@ -364,7 +363,15 @@ func (m *Manager) RestoreFromRegistry() error {
 					// user input). Replayed messages are not
 					// "must stand alone" queued turns.
 				}
-				_ = cs.queue.Push(msg) // ErrFull shouldn't happen at startup; drop on failure.
+				if err := cs.queue.Push(msg); err != nil {
+					// Should not happen at startup (queue is empty
+					// pre-restore). If it ever does, the message is
+					// lost — log loudly so the user knows the AS
+					// is now silently dropping an in-flight reply.
+					slog.Warn("Manager.RestoreFromRegistry: replay dropped in-flight message",
+						"chat_id", entry.ChatID, "as_id", as.ID,
+						"msg_id", ref.ID, "err", err)
+				}
 			}
 		}
 

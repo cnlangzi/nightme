@@ -1076,8 +1076,20 @@ func (as *AgentSession) Submit(p *Prompt) error {
 	// commit, since SendBlocks already accepted the prompt and the
 	// bridge is now expecting a reply. The next status change
 	// (endPrompt) will retry the write.
+	//
+	// Known race window: if endPrompt fires between our Unlock and
+	// the persist call below, endPrompt's cleared entry can race
+	// ahead in cs.asFile.Upsert's internal mutex. The disk may end
+	// up showing the stale non-empty InFlightMessages after the
+	// prompt actually ended. Restart would then replay an
+	// already-replied message. Accepted by design: the underlying
+	// agent dedups on resume, and worst case the user sees a
+	// duplicate reply attached to the same msg_id.
 	if as.persist != nil {
-		_ = as.persist(as.Entry())
+		if err := as.persist(as.Entry()); err != nil {
+			slog.Warn("agentsession: persist after Submit failed; entry may be stale on restart",
+				"as_id", as.ID, "prompt_id", p.ID, "err", err)
+		}
 	}
 	return nil
 }

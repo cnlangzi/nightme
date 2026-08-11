@@ -226,3 +226,79 @@ func TestRestoreFromRegistry_MultipleAgentSessionsEachReplayOwn(t *testing.T) {
 		t.Errorf("expected [m_a_1, m_b_1], got [%s, %s]", got[0].ID, got[1].ID)
 	}
 }
+
+// TestRestoreFromRegistry_ReplayThenSpawnResumesAgent is the
+// end-to-end chain that proves restart-replay works: a persisted
+// AS with InFlightMessages + SessionID gets restored, replayed
+// into the queue, and on next Spawn the spawner receives the
+// persisted session id so the bridge can issue `--resume <id>`.
+// This is the single test that ties the three PRs (P1 data model,
+// P2 hooks, P3 replay) together.
+func TestRestoreFromRegistry_ReplayThenSpawnResumesAgent(t *testing.T) {
+	csFile, asFile := newTestStores(t)
+	chatID := "oc_resume"
+	csID := seedPersistedChatSession(t, csFile, chatID, "claude")
+
+	now := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
+	asID := "as_resume_1"
+	if err := asFile.Upsert(&registry.AgentSessionEntry{
+		ID:            asID,
+		ChatSessionID: csID,
+		Agent:         "claude",
+		Cwd:           "/code/bailing",
+		Status:        registry.StatusDetached,
+		SessionID:     "sess-end-to-end",
+		CreatedAt:     now,
+		LastRunAt:     now,
+		InFlightMessages: []registry.InFlightMessageRef{
+			{
+				ID: "m_resume_1",
+				Blocks: []agent.ContentBlock{
+					{Type: agent.ContentText, Text: "before crash"},
+				},
+				ReceivedAt: now,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Upsert AS: %v", err)
+	}
+
+	spawner := newFakeSpawner()
+
+	mgr := NewManager().
+		WithPersistence(csFile, asFile).
+		WithSpawner(spawner)
+	if err := mgr.RestoreFromRegistry(); err != nil {
+		t.Fatalf("RestoreFromRegistry: %v", err)
+	}
+
+	cs := mgr.Get(chatID)
+	if cs == nil {
+		t.Fatalf("restored chat missing for %q", chatID)
+	}
+
+	// Trigger the spawn chain: LookupSelectedAgentSession sees the
+	// detached AS, calls Spawn, which forwards SessionID to the
+	// spawner (so the bridge can issue --resume).
+	as, err := cs.LookupSelectedAgentSession()
+	if err != nil {
+		t.Fatalf("LookupSelectedAgentSession: %v", err)
+	}
+	if as == nil {
+		t.Fatal("LookupSelectedAgentSession returned nil")
+	}
+
+	if spawner.calls == 0 {
+		t.Error("spawner.Spawn was not called; expected at least one invocation")
+	}
+	if got := spawner.lastResumeID; got != "sess-end-to-end" {
+		t.Errorf("spawner.lastResumeID = %q, want sess-end-to-end", got)
+	}
+
+	// The replayed message must still be in the queue, ready for
+	// the next flush to push to the now-resumed AS.
+	got := cs.queue.Peek()
+	if len(got) != 1 || got[0].ID != "m_resume_1" {
+		t.Errorf("replayed queue after spawn = %v, want [m_resume_1]", got)
+	}
+}

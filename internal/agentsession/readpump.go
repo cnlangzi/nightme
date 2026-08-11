@@ -19,6 +19,7 @@
 package agentsession
 
 import (
+	"log/slog"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -225,9 +226,13 @@ func (as *AgentSession) endPrompt(reason PromptEndReason) {
 	// Best-effort persistence of the cleared state. Mirrors the
 	// Submit-side comment: must not roll back the prompt-end
 	// event we just queued. Failures fall through — the next
-	// status transition will retry.
+	// status transition will retry. See Submit for the
+	// Submit↔endPrompt persist race window rationale.
 	if as.persist != nil {
-		_ = as.persist(as.Entry())
+		if err := as.persist(as.Entry()); err != nil {
+			slog.Warn("agentsession: persist after endPrompt failed; entry may be stale on restart",
+				"as_id", as.ID, "reason", reason, "err", err)
+		}
 	}
 
 	// Push KindPromptEnded event. Honor readpumpStop so a Shutdown

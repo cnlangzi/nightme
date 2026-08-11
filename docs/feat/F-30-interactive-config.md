@@ -1,10 +1,10 @@
 # F-30: Interactive Config Command
 
-> **Status**: locked (v1.2; shipped in commit `nightme config` on `fix/cwd_session`; 2026-08-02)
-> **Milestone**: v1.2
+> **Status**: locked
+
 > **Depends on**: F-08 (config loading), F-09 (Agent registry), F-20 (slash command pattern)
-> **Used by**: end users (manual setup)
-> **Related docs**: [`SPEC.md`](../SPEC.md) v1.2 §5 (config), [`PRD.md`](../PRD.md) v1.2 §4.5 (Minimal)
+
+> **Related docs**: [`SPEC.md`](../SPEC.md)(config), [`PRD.md`](../PRD.md)(Minimal)
 
 ---
 
@@ -41,7 +41,6 @@ nightme config — interactive
 Main menu:
   [1] Agents
   [q] Quit
-> 1
 
 Agents (merged: builtins + your config):
     [1] bash        (pty)     bash
@@ -56,7 +55,7 @@ Enter number to set as primary [1-3], q to cancel: 3
 Main menu:
   [1] Agents
   [q] Quit
-> q
+
 Bye.
 ```
 
@@ -145,11 +144,11 @@ merged list (with Source="config").
 
 ---
 
-## 8. Out of scope (v1.2 / F-30)
+## 8. Out of scope
 
 - **Other submenus** (feishu / session / logging / paths) — future F-XX
 - **Detection of binary presence** — user picks from registered list only;
-  binary-not-found surfaces later as a spawn error (existing v1.1 path)
+  binary-not-found surfaces later as a spawn error (existing path)
 - **Bubbletea TUI** — current implementation is plain stdin/stdout;
   upgrade to a full TUI later if needed
 - **Multi-select** (e.g. pick multiple favorites) — pick-one is sufficient
@@ -172,6 +171,5 @@ merged list (with Source="config").
 
 ## 10. Change log
 
-- **2026-08-02** — v1.2 first implementation: top-level `primary` + `agents:`
   list schema; `MergeAgents` (builtin + cfg, cfg overrides); `nightme config`
   interactive menu with Agents submenu. 7 unit tests, all green.

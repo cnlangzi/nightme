@@ -1,15 +1,15 @@
 # F-33: Simplify ChatID Data Model — Drop ChatType, RootId, Wire ReplyTo
 
 > **Status**: designing (Phase 1 — Devin review; 文档定稿后进 Phase 2 实现)
-> **Milestone**: v1.3.x (post-§13.10)
+
 > **Depends on**: F-08 (Channel abstraction), F-25 (rolling-log receipt), F-26 (Gateway), F-27 (ChatSession), F-29 (AgentSession pool)
-> **Related docs**: [`SPEC.md`](../SPEC.md) v1.3 §1.2 / §1.3 / §2.1 / §2.2 / §3.1 / §5, [`channel/feishu.md`](../channel/feishu.md) §13.10 / §13.11(新增)
+> **Related docs**: [`SPEC.md`](../SPEC.md)/ §1.3 / §2.1 / §2.2 / §3.1 / §5, [`channel/feishu-rendering.md`](../channel/feishu-rendering.md) / §13.11(新增)
 
 ---
 
 ## 0. 摘要
 
-在 v1.3 §13.10 落地 reply-in-thread 之后,我们对 chatID 数据模型做一次系统性清理,落地三个**收口决策**:
+在落地 reply-in-thread 之后,我们对 chatID 数据模型做一次系统性清理,落地三个**收口决策**:
 
 | # | 决策 | 影响范围 |
 |---|------|----------|
@@ -23,9 +23,7 @@
 
 ## 1. Motivation
 
-### 1.1 当前数据模型冗余
-
-v1.3 落地后,我们审计 chatID 数据模型,发现三层未使用/不完整的抽象:
+### 1.1 当前数据模型冗余 落地后,我们审计 chatID 数据模型,发现三层未使用/不完整的抽象:
 
 **ChatType**(Gateway 持有):
 - `internal/gateway/messages.go:18-27` 定义 4 个常量:`ChatTypeP2P/Group/Thread/Other`
@@ -48,7 +46,7 @@ v1.3 落地后,我们审计 chatID 数据模型,发现三层未使用/不完整�
 
 ### 1.2 §13.10 之后语义不清
 
-`docs/channel/feishu.md` §13.10 落地了 outbound 方向的 reply-in-thread(`msg.ReplyTo` 作为 Feishu root_id 投递,走 `POST /im/v1/messages/{rootID}/reply`)。但 inbound 方向仍没 wire,文档语义和实现不对齐。
+`docs/channel/feishu-rendering.md` §13.10 落地了 outbound 方向的 reply-in-thread(`msg.ReplyTo` 作为 Feishu root_id 投递,走 `POST /im/v1/messages/{rootID}/reply`)。但 inbound 方向仍没 wire,文档语义和实现不对齐。
 
 更根本的问题:**"nightme 的 ReplyTo 字段到底代表什么"** 没明确定义。
 
@@ -198,7 +196,7 @@ Adapter.Send(internal/channel/feishu/adapter.go)
 | 文件 | 改动 |
 |------|------|
 | `docs/SPEC.md` | §1.3 不变式新增 4 条(D1/D2/D3);§5 schema 删 `ChatSessionEntry.ChatType` 字段;§3.1 DM vs Group 简化为"ChatID 唯一,Channel 自管 thread 渲染";§2.1/2.2 InboundMessage 描述加 `ReplyTo = ParentId`;§11 backlog 勾掉本项 |
-| `docs/channel/feishu.md` | 加 **§13.11 决策记录**(D1 ChatType 移除 + D2 topic_group 不特殊 + D3 ReplyTo = ParentId + RootId 不进);§13.10 配对说明 inbound 这一腿 |
+| `docs/channel/feishu-rendering.md` | 加 **§13.11 决策记录**(D1 ChatType 移除 + D2 topic_group 不特殊 + D3 ReplyTo = ParentId + RootId 不进);§13.10 配对说明 inbound 这一腿 |
 
 ### 5.2 Code
 
@@ -249,10 +247,10 @@ Adapter.Send(internal/channel/feishu/adapter.go)
 `ChatSessionEntry.ChatType` 字段删除后,**已存在的 `chat_sessions.json` 文件里仍有这个字段**。
 
 **策略**:
-- Go JSON unmarshal **默认容忍未知字段**,旧文件能继续加载
+- Go JSON unmarshal **默认容忍未知字段**,文件能继续加载
 - `entry.ChatType` 永远是零值,不会被读取(已删除)
 - 不需要 migrate 脚本,因为数据不再被使用
-- 旧 daemon 重启 + 新 daemon 加载,无数据丢失
+- daemon 重启后再加载,无数据丢失
 
 ### 6.2 Forward compat
 
@@ -281,7 +279,7 @@ Adapter.Send(internal/channel/feishu/adapter.go)
 
 | 风险 | 等级 | 缓解 |
 |------|------|------|
-| 旧 `chat_sessions.json` 加载问题 | 低 | Go JSON unmarshal 默认容忍未知字段,无需迁移 |
+| chat_sessions.json 加载问题 | 低 | Go JSON unmarshal 默认容忍未知字段,无需迁移 |
 | `/status` 命令不再显示"DM/Group"标签 | 低 | 影响范围仅 `/status` 输出格式;若需要可后续按 ChatID 自行判定 |
 | `InboundMessage.ReplyTo` wire 后无 dispatch 逻辑使用 | 极低 | 纯增量,不改现有行为;为将来"reply context pull"留接口 |
 | Outbound `msg.ReplyTo = currentTurnUserMsgID` 已工作 | 零 | §13.10 已落地且测试覆盖 |
@@ -295,7 +293,6 @@ Adapter.Send(internal/channel/feishu/adapter.go)
 - 不在 Gateway 里加 IsDM / ChatType / TopicGroup 任何分支
 - 不动 Outbound `msg.ReplyTo` 的赋值(已落地 §13.10,语义符合"点对点 ReplyTo")
 
-> **2026-08-04 更新**：原 §8 第一条 ("不实现 reply_in_thread:true") 在 F-37 子决议已落地 —— `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCompaction` 这四条 path 现在显式设 `reply_in_thread=true`，让中间过程只在线程面板可见。这一层仍然是 Channel (Feishu SDK) 自治决定，不进 nightme 数据模型；只是 SDK body 的字段，不破坏"不爬 thread / thread 不进 ChatSession"不变式。详见 `docs/feat/F-37-tool-thread-routing.md` §2.1 + `docs/channel/feishu.md` §13.10 子决议。
 - 不引入 forward-compat hook(彻底关 thread 概念入口)
 - **任何 Channel 都不引入 thread 概念**(Slack thread_ts / Telegram message_thread_id / Discord thread 等不进 nightme 数据模型,仅 Channel 内部渲染时使用)
 
@@ -305,7 +302,7 @@ Adapter.Send(internal/channel/feishu/adapter.go)
 
 按 MEMORY.md 工作流偏好 **先 docs 再 code**:
 
-1. **Step 1 - Docs(本 PR 第一个 commit)**:`docs/SPEC.md` + `docs/channel/feishu.md` 落地决策记录
+1. **Step 1 - Docs(本 PR 第一个 commit)**:`docs/SPEC.md` + `docs/channel/feishu-rendering.md` 落地决策记录
 2. **Step 2 - Code(本 PR 第二个 commit)**:按 "Channel → Gateway → ChatSession → Registry → Test" 顺序
 3. **Step 3 - Verify**:`go build ./...` + `go test -race ./...` + `go vet ./...`
 4. **Step 4 - Commit**:1 个 docs commit + 1 个 code commit(分两个便于 review)
@@ -319,7 +316,7 @@ Adapter.Send(internal/channel/feishu/adapter.go)
 ## 10. 验收清单
 
 - [ ] `docs/SPEC.md` 不变式新增 5 条;schema 删 ChatType 字段
-- [ ] `docs/channel/feishu.md` §13.11 决策记录完整(含"任何 Channel 都不引入 thread 概念")
+- [ ] `docs/channel/feishu-rendering.md` §13.11 决策记录完整(含"任何 Channel 都不引入 thread 概念")
 - [ ] `internal/channel/channel.go` 删 `ChatTypeThread` 常量;保留 `ChatTypeP2P/Group`
 - [ ] `internal/channel/feishu/adapter.go` handleMessage wire `ReplyTo = message.ParentId`
 - [ ] `internal/channel/feishu/adapter.go` 删 `normalizeChatType`
@@ -340,7 +337,7 @@ Adapter.Send(internal/channel/feishu/adapter.go)
 
 ## 11. 相关决策追溯
 
-- **2026-08-03 17:04** — Devin 提问 "reply_to 没有真正用到对不对?",触发 `docs/channel/feishu.md` §13.10 调查,落地 outbound reply-in-thread
+- **2026-08-03 17:04** — Devin 提问 "reply_to 没有真正用到对不对?",触发 `docs/channel/feishu-rendering.md` §13.10 调查,落地 outbound reply-in-thread
 - **2026-08-03 20:35** — Devin 询问 "chatid 怎么设定的?",虾哥审计 chatID 数据流,识别 ChatType 命名空间不一致(channel `"topic_group"` vs gateway `"thread"`)
 - **2026-08-03 20:44** — Devin 询问 Feishu chatid 类型,确认 3 种原生 + nightme 命名空间冲突
 - **2026-08-03 20:49** — Devin 询问 DM reply-in-thread 传几个 ID,确认 ChatId 不变,RootId/ParentId 是 message 级

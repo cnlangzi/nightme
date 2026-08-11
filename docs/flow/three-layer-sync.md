@@ -438,15 +438,6 @@ case agent.EventDone:
 
 ---
 
-## 8. 已知 UX 缺陷(不在当前 PR 范围)
-
-1. **被 abandon 的 receipt 不会翻 `❌`**:pi hang 时 /use 切走,但 pi 的 receipt 永远停在 `Working...`——因为 runReadPump 在 stop 路径上没发 MessageState。建议:`handleUse` 在 SetSelectedAgent 之前,如果旧 as 上有 in-flight turn,emit MessageState(Error) 给旧 userMsgID。
-2. **旧 AS 进程没被 kill**:`/use` 只取消 ctx 关联,旧 AS 还留在 pool 里,旧 bridge 还活着。建议:`/use` 时如果检测到 AS swap,Close 旧 AS(SetRunning → SetExited,bridge.Close,信号结束进程)。
-3. **InputBuffer FSM 没在 cancel 时复位**:`SetBusy` 是 readPump 在非 terminal event 上设的;如果 pump 被 stop 路径打断,SetIdle 不会调用,buffer FSM 留 Busy。建议:StopReadPump 路径上如果离开时 buffer 仍是 Busy,SetIdle。
-4. **dispatchLoop 单 goroutine 同步**:一个慢 handler 会阻塞所有后续 inbound(包括另一个 chat 的)。与本 PR 范围无关,但用户提的"agents 互相影响"在这个层面也成立。
-
----
-
 ## 9. 一句话总结
 
 ChatSession 用 `cs.mu` 守住"哪个 (agent, cwd) 是 active AS"这个事实,把 ctx 派生关系(asCtx → turnCtx → bridge)挂在 AS-swap 和 turn 边界上,每条 bridge 自己的 `turnMu`/`lifecycle`/`closeOnce` 保证子进程的串行化和单一所有者。readPump 在 ChatSession 上是单 goroutine,跟着 selectedAS 走,事件从 bridge.events 出,经 EventHandler 转成 OutboundMessage 发到 IM channel。

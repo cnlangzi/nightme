@@ -6,10 +6,10 @@
 > **姊妹文档**:
 > - [docs/bridge/claude.md](./claude.md) — EventDone 不变量、生产踩坑
 > - [docs/bridge/pi.md](./pi.md) — JSON-IO 模板 + F-52 粒度契约
-> - [docs/feat/F-21-agent-modes.md §6](../feat/F-21-agent-modes.md) — 注册表
-> - [docs/feat/F-32-pi-rpc-bridge.md](../feat/F-32-pi-rpc-bridge.md) — clone + 模板+live 模式
-> - [docs/feat/F-52-pi-stream-aggregation.md](../feat/F-52-pi-stream-aggregation.md) — flush-at-tool-boundary
-> - [docs/feat/F-34-new-slash-command.md](../feat/F-34-new-slash-command.md) — `/new` 在长生命周期 bridge 上
+> - [F-runtime §Agent 注册表](../feat/F-runtime.md) — 注册表
+> - [F-32](../bridge/pi.md) — clone + 模板+live 模式
+> - [F-52](../bridge/pi.md) — flush-at-tool-boundary
+> - [F-34](F-chat-session.md) — `/new` 在长生命周期 bridge 上
 
 ---
 
@@ -195,7 +195,7 @@ item/reasoning/textDelta
 
 ### 4.3 ⛓️ 踩坑:`thread/tokenUsage/updated`(codex ≥ 0.125)
 
-旧版 codex 的 usage 只通过 `turn/completed.params.usage` 报一次;**0.125 之后会单独 push `thread/tokenUsage/updated` 通知**。两条路径都必须接,否则 usage 永远是 0:
+codex < 0.125 的 usage 只通过 `turn/completed.params.usage` 报一次;**0.125 之后会单独 push `thread/tokenUsage/updated` 通知**。两条路径都必须接,否则 usage 永远是 0:
 
 - **路径 A**(`turn/completed` 一次性):`params.usage != nil` → 直接用
 - **路径 B**(`thread/tokenUsage/updated` 多次):overwrite `t.turn.lastUsage`(`Last` 优先,全 0 才退回 `Total`)

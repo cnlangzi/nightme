@@ -1,13 +1,9 @@
 # F-53: Message / Prompt 生命周期模型
 
 > **Status**: design draft（讨论已收敛，未实现）
-> **Milestone**: v1.3.x
+
 > **Depends on**: F-27（ChatSession）、F-29（AgentSession Pool）、F-31（MessageState）、F-32（Pi RPC Bridge）
-> **Related docs**: [`SPEC.md`](../SPEC.md) §2.5、[`F-31-message-state.md`](./F-31-message-state.md)、
->   [`F-42-lazy-receipt-creation.md`](./F-42-lazy-receipt-creation.md)、[`F-44-outreply-independent-and-task-receipt.md`](./F-44-outreply-independent-and-task-receipt.md)
-> **Out of scope（本文档不覆盖）**：
-> - Agent 存活探测 / Prompt 卡死检测 / `nightme health` 扩展等健康监控体系 → 留给"Prompt 投递稳定性优化" PR
-> - Feishu 卡片 / 消息 reaction 的具体渲染调整（对 F-42 / F-44 的后续修订）→ 独立任务，未立项
+> **Related docs**: [`SPEC.md`](../SPEC.md) §2.5、[`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md)、
 
 ---
 
@@ -159,7 +155,7 @@
 - 投递尝试失败：不创建 `Prompt`，消息保持 `Queued`；下次 `flushPending` 自动重投（§3 原则 5）。
 
 一条消息一旦进入 `Submitted` 或 `Dropped`，就不再变化——**`Message` 不会因为它所属 `Prompt` 后续的
-执行结果而改变自己的状态**。这是与旧设计（消息状态镜像 Prompt 终态、需要 fan-out）最大的区别，也是
+执行结果而改变自己的状态**。这是与（消息状态镜像 Prompt 终态、需要 fan-out 最大的区别，也是
 "批次内消息进度不一致"这个老问题的根本解法：每条消息在提交那一刻就已经拿到了自己诚实、最终的状态，
 不需要等待、也不需要之后再广播。
 
@@ -244,9 +240,9 @@ Phase 0 把 `agent.MessageState` 的常量从旧的 `Received` / `Forwarded` / `
 ## 9. References
 
 - [`SPEC.md`](../SPEC.md) §2.5 Message Lifecycle Tracking
-- [`F-27-chatsession.md`](./F-27-chatsession.md) — v1.2 ChatSession 设计（已 superseded by F-53；见文档顶部 SUPERSEDED 横幅）
-- [`F-29-agent-session-pool.md`](./F-29-agent-session-pool.md)
-- [`F-31-message-state.md`](./F-31-message-state.md) — v1.3 MessageState 4 态设计（已 superseded by F-53）
-- [`F-32-pi-rpc-bridge.md`](./F-32-pi-rpc-bridge.md)
-- [`F-42-lazy-receipt-creation.md`](./F-42-lazy-receipt-creation.md) — 已 superseded by F-53
-- [`F-44-outreply-independent-and-task-receipt.md`](./F-44-outreply-independent-and-task-receipt.md) — 已 superseded by F-53
+- [`F-chat-session.md`](./F-chat-session.md) — ChatSession 设计
+- [`F-chat-session.md`](./F-chat-session.md)
+- [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md) — MessageState 4 态设计
+- [`../bridge/pi.md`](./../bridge/pi.md)
+- [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md) — (see F-53)
+- [`../channel/feishu-rendering.md`](./../channel/feishu-rendering.md) — (see F-53)

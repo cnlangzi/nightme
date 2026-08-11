@@ -61,6 +61,35 @@ type IssueAttachment struct {
 	MIMEType string
 }
 
+// PR is the minimal open pull/merge-request shape the footer
+// needs to render its PR reference (`[#N](url)` appended to the
+// workspace footer line; markdown link — clickable blue anchor
+// in lark_md, with the rest of the workspace row staying in the
+// <font color='grey'> wrap). Mirrors Issue but trimmed to the
+// three fields the card actually consumes.
+//
+// Number — the platform-local id (GitHub pr#N, GitLab mr!N).
+// URL    — the human-facing web URL returned by gh/glab at
+//
+//	create time. Stored verbatim so the footer link lands on
+//	the same URL the user already saw in /gtw pr's success
+//	card (no reconstruct from owner/repo/number — the URL
+//	shape may differ across GitHub / self-hosted GitHub
+//	Enterprise / GitLab subgroups).
+//
+// State  — "open" / "merged" / "closed". v1 only requests
+//
+//	PRs in the "open" state (GitHub's `pr list --state open`,
+//	GitLab's `mr list --state opened`); the field stays in
+//	the type so a future "show merged PR too" footer variant
+//	can flip the platform filter without changing the
+//	consumer.
+type PR struct {
+	Number int
+	URL    string
+	State  string
+}
+
 // GitProvider is the abstract /gtw interface to a git hosting
 // platform's issue tracker. Production has two implementations
 // (GitHubProvider / GitLabProvider wrapping the user's local `gh`
@@ -108,6 +137,29 @@ type GitProvider interface {
 	// actionable error for the user, e.g. "head ref doesn't
 	// exist" or "401 Unauthorized").
 	CreatePR(ctx context.Context, owner, repo, base, head, title, body string) (string, error)
+
+	// GetPR returns the open pull request (GitHub) or merge
+	// request (GitLab) whose head branch matches `head`, or
+	// (nil, nil) when no open PR currently exists for that
+	// branch.
+	//
+	// "Open" is a v1 simplification: merged / closed / draft
+	// are not surfaced here. The PR type keeps a State field
+	// so a future variant can flip the platform filter without
+	// touching the interface shape.
+	//
+	// Nil-vs-error semantics mirror GetIssue on the surface but
+	// differ in spirit: GetIssue returning ErrIssueNotFound is
+	// unusual (the user asked for a specific id, and 404 means
+	// the id is wrong), whereas GetPR returning nil is the
+	// common case — most chat sessions don't have a PR open
+	// yet, and forcing the footer caller to discriminate
+	// "network failed" from "no PR exists" every stamp would be
+	// the wrong trade-off. The footer just omits the PR tail
+	// segment in both cases; the only thing that surfaces PR
+	// lookup failures is the warn-level log the runtime emits
+	// when applicable.
+	GetPR(ctx context.Context, owner, repo, head string) (*PR, error)
 }
 
 // ErrIssueNotFound is returned by GetIssue when the platform
@@ -727,6 +779,52 @@ func (c *GitHubProvider) CreatePR(ctx context.Context, owner, repo, base, head, 
 	return strings.TrimSpace(stdout), nil
 }
 
+// GetPR runs `gh pr list --head <head> --state open --json
+// number,url,state --repo <owner>/<repo>` and returns the first
+// matching PR.
+//
+// gh emits an empty JSON array `[]` when no open PR exists for
+// the head branch; we surface that as (nil, nil) so callers
+// don't have to special-case "no PR yet". A non-zero exit with
+// stderr (auth failure, network down, rate-limited) wraps the
+// underlying error verbatim.
+func (c *GitHubProvider) GetPR(ctx context.Context, owner, repo, head string) (*PR, error) {
+	args := []string{
+		"pr", "list",
+		"--head", head,
+		"--state", "open",
+		"--json", "number,url,state",
+		"--repo", owner + "/" + repo,
+	}
+	stdout, stderr, err := c.runner().Run(ctx, "gh", args...)
+	if err != nil {
+		return nil, fmt.Errorf("gh pr list --head %s: %v: %s", head, err, strings.TrimSpace(stderr))
+	}
+	out := strings.TrimSpace(stdout)
+	if out == "" || out == "[]" {
+		return nil, nil
+	}
+	var rows []struct {
+		Number int    `json:"number"`
+		URL    string `json:"url"`
+		State  string `json:"state"`
+	}
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		return nil, fmt.Errorf("gh pr list: decode json: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	// gh returns all open PRs for the head, sorted by recency;
+	// the footer only ever shows one. Pick the freshest.
+	row := rows[0]
+	state := strings.ToLower(row.State)
+	if state == "" {
+		state = "open"
+	}
+	return &PR{Number: row.Number, URL: row.URL, State: state}, nil
+}
+
 // GitLabProvider wraps the `glab` CLI. Same auth delegation as gh.
 // host is set by Detect / NewProvider; version is populated from
 // /api/v4/version probe when Detect's Stage B succeeds.
@@ -855,4 +953,55 @@ func (c *GitLabProvider) CreatePR(ctx context.Context, owner, repo, base, head, 
 		return "", fmt.Errorf("glab mr create: %v: %s", err, strings.TrimSpace(stderr))
 	}
 	return strings.TrimSpace(stdout), nil
+}
+
+// GetPR runs `glab mr list --source-branch <head> --state opened
+// --output json --repo <owner>/<repo>` and returns the first
+// matching MR.
+//
+// glab's --output json shape: array of objects with `iid`,
+// `web_url`, `state` (lowercase: "opened" / "closed" / "merged").
+// "opened" is GitLab's term for the equivalent of GitHub's "open".
+//
+// Returns (nil, nil) when no MR matches the head branch — same
+// fail-soft contract as GitHubProvider.GetPR.
+func (c *GitLabProvider) GetPR(ctx context.Context, owner, repo, head string) (*PR, error) {
+	args := []string{
+		"mr", "list",
+		"--source-branch", head,
+		"--state", "opened",
+		"--output", "json",
+		"--repo", owner + "/" + repo,
+	}
+	stdout, stderr, err := c.runner().Run(ctx, "glab", args...)
+	if err != nil {
+		return nil, fmt.Errorf("glab mr list --source-branch %s: %v: %s", head, err, strings.TrimSpace(stderr))
+	}
+	out := strings.TrimSpace(stdout)
+	if out == "" || out == "[]" {
+		return nil, nil
+	}
+	var rows []struct {
+		IID    int    `json:"iid"`
+		WebURL string `json:"web_url"`
+		State  string `json:"state"`
+	}
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		return nil, fmt.Errorf("glab mr list: decode json: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	row := rows[0]
+	state := strings.ToLower(row.State)
+	if state == "" {
+		state = "opened"
+	}
+	// glab reports "opened" not "open" — normalise to the
+	// convention the PR.State comment documents ("open") so
+	// downstream consumers don't have to know the platform.
+	if state == "opened" {
+		state = "open"
+	}
+	return &PR{Number: row.IID, URL: row.WebURL, State: state}, nil
 }

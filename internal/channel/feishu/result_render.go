@@ -214,7 +214,20 @@ func buildResultCardJSON(content string, footerLines []string) (string, error) {
 //   - <hr> at index 0
 //   - exactly one <markdown> element after hr, with one line of
 //     content per footerLines entry (joined by \n)
-//   - each line wrapped in <font color='grey'>...</font>
+//   - every line wrapped in <font color='grey'>...</font>
+//
+// Earlier revisions had a substring `](` bypass that unwrapped
+// lines containing markdown link syntax to "rescue" the link.
+// That heuristic was solving a problem that doesn't exist in
+// current lark_md (verified 2026-08 against the live client, see
+// pr_render_compare_test.go for the A/B harness and verification
+// history); the PR tile has since been simplified back to plain
+// `#N` (no link). The heuristic also had a brittleness problem —
+// a branch name like `foo](bar` would silently strip the grey
+// wrap from the wrong line. Removed; not coming back. If a future
+// footer line ever needs to surface un-styled content (a raw
+// snippet, an embedded image), render it as its own card element
+// rather than retrofitting the heuristic.
 func cardFooterElements(footerLines []string) []map[string]any {
 	if len(footerLines) == 0 {
 		return nil

@@ -37,6 +37,26 @@ type DraftsMap interface {
 }
 
 // HandlerDeps wires the side effects RunFix / HandleAction need.
+// PRInvalidator is the optional footer-cache invalidation hook
+// used by /gtw pr to refresh the workspace footer line's PR
+// reference (rendered as `[#N](url)` at the end of the 📁: row;
+// clickable blue link in lark_md) immediately after a successful
+// CreatePR (otherwise the new PR number would only surface after
+// the 60s cache TTL).
+//
+// Nil-safe across all callers: dispatchPR skips invalidation
+// when the runtime hasn't installed a registry (mostly in
+// unit tests). The interface lives in gtw (not in prcache)
+// because gtw does NOT import prcache — putting the type
+// in prcache would cycle back through chatsession, which
+// gtw already imports.
+type PRInvalidator interface {
+	// Invalidate marks the cache for the given AgentSession
+	// as stale, so the next stamp spawns a background
+	// refresh instead of waiting out the TTL.
+	Invalidate(asID string)
+}
+
 // All fields are required; pass an instance constructed in the
 // runtime's startup code (cmd/nightme/run.go).
 //
@@ -61,6 +81,11 @@ type HandlerDeps struct {
 	Detect func(ctx context.Context, remoteURL string, prober HTTPProber, worktree string) (GitProvider, error)
 	// Now is the clock. Tests override for deterministic drafts.
 	Now func() time.Time
+	// PRInvalidator optionally lets /gtw pr invalidate the
+	// footer's PR cache for affected AgentSessions on a
+	// successful CreatePR. nil → dispatchPR no-ops.
+	// See PRInvalidator doc for the cycle rationale.
+	PRInvalidator PRInvalidator
 
 	// SkipRefreshDefaultBranch, when true, causes RunFix to
 	// skip the RefreshDefaultBranch step (no `git checkout

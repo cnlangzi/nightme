@@ -12,7 +12,7 @@ import (
 // GitStatusSnapshot is the parsed result of a single
 // `git status --porcelain --branch` invocation against a workspace.
 // It is intentionally a pure value type (no methods) so it can be
-// carried across package boundaries (gateway.SessionContext,
+// carried across package boundaries (gateway.StatusBar,
 // runtime stamping) and tested without running git.
 //
 // Field semantics:
@@ -36,7 +36,7 @@ import (
 //	                 the "⇡ N" segment in that case.
 //
 // F-48 (follow-up to F-45): runtime stamps one of these on every
-// OutboundMessage.SessionContext that flows to a main-chat footer
+// OutboundMessage.StatusBar that flows to a main-chat footer
 // render site. See docs/feat/F-45-session-footer.md §1.7.
 //
 // The canonical definition lives in internal/messages so the wire

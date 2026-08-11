@@ -3,7 +3,7 @@ package messages
 import "fmt"
 
 // Footer payload types — promoted from internal/command/gtw into
-// the messages package so the SessionContext struct can stay in
+// the messages package so the StatusBar struct can stay in
 // this package without creating an import cycle (chatsession →
 // outbound → channel → messages → gtw → chatsession would loop
 // through the gtw package; moving the leaf value types here keeps
@@ -12,7 +12,7 @@ import "fmt"
 // GitStatusSnapshot is the parsed result of a single
 // `git status --porcelain --branch` invocation against a workspace.
 // Pure value type (no exported state, no I/O) so it can be carried
-// across package boundaries (SessionContext, runtime stamping) and
+// across package boundaries (StatusBar, runtime stamping) and
 // tested without running git.
 //
 // F-57 adds read-only predicate methods on this type. They are
@@ -55,7 +55,7 @@ import "fmt"
 //	                 state (F-57 §3.1 / §4.1). F-57 added this.
 //
 // F-48 (follow-up to F-45): runtime stamps one of these on every
-// OutboundMessage.SessionContext that flows to a main-chat footer
+// OutboundMessage.StatusBar that flows to a main-chat footer
 // render site. See docs/feat/F-45-session-footer.md §1.7.
 type GitStatusSnapshot struct {
 	Branch        string

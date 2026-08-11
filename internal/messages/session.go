@@ -4,114 +4,172 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// SessionContext is the runtime-stamped AgentSession snapshot
-// delivered alongside main-chat OutboundMessages for footer
-// rendering. Populated by the runtime's newEventHandler closure
-// (not by bridges) and read by Channel adapters to compose the
-// footer line on each reply / result / task receipt.
+// StatusBar is the runtime-stamped metadata envelope attached to
+// every outbound message that flows from the runtime to a
+// Channel. It groups the per-message decoration data into three
+// sub-bars; the runtime populates each one based on what's
+// available for the current chat, and the Channel decides how
+// to render each sub-bar (Feishu renders a multi-line footer;
+// other Channels may render inline annotations, a sidebar tag,
+// or nothing at all — they read the same typed payload).
+//
+// Sub-bar semantics:
+//
+//	GitBar   — workspace + git + PR context. ALWAYS populated
+//	           when the chat has a selected workspace
+//	           (cs.SelectedCwd != ""), even if no AgentSession
+//	           is selected. This is the "every message carries
+//	           git context" rule: a chat user should always
+//	           see what worktree they're talking about, even
+//	           for /gtw replies or pre-spawn placeholders.
+//	           The runtime collects git status fresh on every
+//	           stamp (no caching) so the Channel sees the
+//	           latest worktree state. PullRequest is nil when
+//	           no AS is selected (PR lookup is per-AS).
+//
+//	AgentBar — agent identity (Agent / Model / SessionID).
+//	           Populated only when a chat has a selected
+//	           AgentSession — without an AS there is no
+//	           identity to surface. Channels render Line 1
+//	           of the footer when AgentBar != nil.
+//
+//	UsageBar — per-turn usage snapshot (in/out tokens,
+//	           context window %, cost). Populated from
+//	           out.Usage when the bridge event carries it
+//	           (typically on OutResult / EventAgentResult).
+//	           nil for streaming OutReply chunks without
+//	           usage. Channels render Line 2 when UsageBar
+//	           != nil.
+//
+// The runtime is the single owner of StatusBar — bridges never
+// populate this directly. Pre-rename this was called
+// SessionContext and carried flat fields (Agent, Model,
+// Workspace, GitStatus, PullRequest, Usage). Renamed because
+// "SessionContext" was semantically inaccurate — it is not
+// only about the AgentSession (Workspace / GitStatus are
+// workspace fields, Usage is a per-turn field) — and because
+// the field-by-field naming collided with Go's
+// context.Context idiom. See docs/feat/F-45-session-footer.md
+// §1.3 for the pre-rename architecture rationale.
+type StatusBar struct {
+	// GitBar carries workspace + git + PR context. Always
+	// populated when the chat has a selected workspace. nil
+	// only when the chat has neither an AgentSession nor a
+	// SelectedCwd — i.e. the chat is unusable for any work.
+	GitBar *GitStatusBar
+	// AgentBar carries agent identity (Agent / Model /
+	// SessionID). nil when no AgentSession is selected — the
+	// "AgentBar / TokensBar 没有 AgentSession 则忽略" rule:
+	// without an AS there's no agent identity to surface.
+	AgentBar *AgentStatusBar
+	// UsageBar carries per-turn usage snapshot. nil when the
+	// bridge event did not carry usage (OutReply chunks
+	// during streaming, etc.); the renderer omits Line 2
+	// entirely in that case.
+	UsageBar *UsageStatusBar
+}
+
+// GitStatusBar is the workspace / git / PR sub-bar of StatusBar.
+// Always populated when the chat has a workspace (cs.SelectedCwd
+// != ""), even without an AgentSession — the "git status is
+// always there" rule.
 //
 // Field semantics:
 //
-//	Agent           — registry name of the agent that produced this
-//	                  event (e.g. "claude", "codex"). Sourced from
-//	                  AgentSession.Agent (immutable, no lock).
-//	Model           — model the agent selected (e.g.
-//	                  "claude-opus-4-5-20250929"). Sourced from
-//	                  AgentSession.Model which the runtime caches
-//	                  on first EventAgentReady. Empty before EventAgentReady
-//	                  lands; footer omits the segment when "".
-//	Usage           — per-turn snapshot from the bridge event that
-//	                  produced this OutboundMessage (a pointer to
-//	                  agent.UsageInfo, copied off out.Usage by
-//	                  sessionContextInto). nil when the bridge
-//	                  event did not carry usage (OutReply chunks
-//	                  during streaming, etc.); the footer omits
-//	                  Line 2 entirely in that case. The runtime
-//	                  is a passive pass-through — it does NOT
-//	                  aggregate across turns, so this snapshot is
-//	                  always the single turn's bridge-reported
-//	                  value, not a running total.
-type SessionContext struct {
-	Agent string
-	Model string
-	// SessionID is the agent's own session id captured on the
-	// last run (e.g. Claude Code's `system/init.session_id`,
-	// ACP's synthesized uuid when the bridge does not expose
-	// one). Sourced from AgentSession.SessionID() (RLock). Empty
-	// when the agent has no resume semantics or has not yet
-	// emitted its init event; the footer omits the segment when
-	// "".
-	//
-	// F-56 (F-45 follow-up): the first footer line
-	// ("🤖: <agent> · <model> · <sessionid>") uses this as the
-	// trailing identity segment. See docs/feat/F-45-session-footer.md
-	// §1.10.
-	SessionID string
-	// Workspace is the absolute path of the AgentSession's
-	// working directory at the time this OutboundMessage was
-	// emitted. Sourced from AgentSession.Cwd (immutable post-
-	// construction, no lock). Empty before the AgentSession has
-	// been bound; the footer omits the workspace segment when "".
-	//
-	// F-48 (F-45 follow-up): the third footer line ("📁 code/nightme
-	// · ⎇ main · …") uses this plus GitStatus to render the
-	// git-tracking segment. See docs/feat/F-45-session-footer.md
-	// §1.7.
-	Workspace string
-	// GitStatus is the per-stamp git status snapshot captured by
-	// the runtime via gtw.CollectReadiness. nil when the workspace
-	// is not a git repo or the git invocation failed — the footer
-	// omits the entire git segment in that case.
-	//
-	// Recomputed on every main-chat stamp (no caching) so the
-	// footer reflects the latest worktree state without an
-	// invalidation hook. See docs/feat/F-45-session-footer.md §1.7.
-	GitStatus *GitStatusSnapshot
-
-	// PullRequest is the open PR / MR associated with the
-	// current head branch, resolved asynchronously by the
-	// runtime via prcache.Registry. nil when:
-	//
-	//   - the workspace has no `origin` remote
-	//   - the git platform cannot be detected (no URL hint
-	//     match AND Stage B probe failed)
-	//   - the most-recent platform call failed (auth,
-	//     network, rate limit)
-	//   - no open PR exists for the head branch
-	//   - the cache has never been refreshed yet (first
-	//     stamp, before the background goroutine has
-	//     completed)
-	//
-	// The footer render path treats nil as "omit the trailing
-	// `#N` PR segment on the workspace line" — PR lookup
-	// failures and "no PR yet" look identical to the user,
-	// which is the right trade-off for a chat-side decoration.
-	// The only observable difference is at debug log level.
-	//
-	// Reads are synchronous (the cache is a struct field); the
-	// underlying refresh goroutine does its own `gh pr list` /
-	// `glab mr list` round-trip and writes back asynchronously.
-	// Invalidation when /gtw pr creates a new PR happens via
-	// prcache.Registry.Invalidate (which calls Cache.Invalidate
-	// on the relevant AgentSession's cache), triggered by
-	// dispatchPR after a successful CreatePR.
+//	Workspace   — absolute path of the AgentSession's working
+//	              directory at stamp time. Sourced from
+//	              AgentSession.Cwd when an AS exists
+//	              (immutable post-construction, no lock); falls
+//	              back to cs.SelectedCwd() when no AS is
+//	              selected — same string in normal operation.
+//	              Empty before any of those is set; the
+//	              renderer omits the workspace segment when
+//	              "".
+//
+//	GitStatus   — per-stamp git status snapshot captured via
+//	              gtw.CollectReadiness with a 3s deadline
+//	              (review fix: a hung git would otherwise
+//	              block the entire outbound-message pipeline).
+//	              nil when the workspace is not a git repo or
+//	              git invocation failed/timed out — Channels
+//	              that render the git line (Line 3 of the
+//	              Feishu footer) omit the entire line in that
+//	              case. Recomputed on every main-chat stamp
+//	              (no caching) so the Channel sees the latest
+//	              worktree state. See
+//	              docs/feat/F-45-session-footer.md §1.7.
+//
+//	PullRequest — open PR/MR associated with the head branch,
+//	              resolved via prcache.Registry per-AS. nil
+//	              when: no AS is selected (PR lookup is
+//	              tied to the AS's cache); the workspace has
+//	              no `origin` remote; the git platform cannot
+//	              be detected; the most-recent platform call
+//	              failed; no open PR exists; or the cache has
+//	              never been refreshed. The renderer treats
+//	              nil as "omit the trailing `#N` PR segment
+//	              on the workspace line".
+type GitStatusBar struct {
+	Workspace   string
+	GitStatus   *GitStatusSnapshot
 	PullRequest *PR
+}
 
-	// Usage is the per-turn snapshot from the bridge event that
-	// produced this OutboundMessage — bridges populate it on
-	// EventAgentResult / EventAgentDone. The runtime is a passive
-	// pass-through; AgentSession does NOT aggregate across turns.
-	// Channel footer reads Usage for the Line 2 segments (in / out
-	// · X% · $cost). nil when the bridge event didn't carry
-	// usage (e.g. OutReply chunks during streaming, which have no
-	// usage field). See docs/feat/F-45-session-footer.md §1.6.
-	//
-	// ContextWindowPct on UsageInfo is the bridge-computed
-	// per-turn context-fill percentage (0–100), via the Doc 1
-	// formula. Channels read it verbatim as the "X%" segment;
-	// 0 means "not reported" and the footer omits X% rather than
-	// showing 0%. See docs/feat/F-45-session-footer.md §1.5.
-	Usage *agent.UsageInfo
+// AgentStatusBar is the agent-identity sub-bar of StatusBar.
+// Populated only when a chat has a selected AgentSession —
+// without an AS there is no agent identity to surface.
+//
+// Field semantics:
+//
+//	Agent     — registry name of the agent that produced this
+//	            event (e.g. "claude", "codex"). Sourced from
+//	            AgentSession.Agent (immutable, no lock).
+//	            Empty before the AS is bound; the renderer
+//	            omits the segment when "".
+//
+//	Model     — model the agent selected (e.g.
+//	            "claude-opus-4-5-20250929"). Sourced from
+//	            AgentSession.Model which the runtime caches
+//	            on first EventAgentReady. Empty before
+//	            EventAgentReady lands; renderer omits when "".
+//
+//	SessionID — the agent's own session id captured on the
+//	            last run (Claude Code's `system/init.session_id`,
+//	            ACP's synthesized uuid, codex's thread.id).
+//	            Sourced from AgentSession.SessionID() (RLock).
+//	            Empty when the agent has no resume semantics
+//	            or has not yet emitted its init event;
+//	            renderer omits when "".
+//
+// F-56 (preserved): the first footer line
+// ("🤖: <agent> · <model> · <sessionid>") uses these as
+// trailing identity segments. Each segment is omitted
+// independently when empty; an AgentBar with only SessionID
+// set renders as "🤖: · <sid>".
+type AgentStatusBar struct {
+	Agent     string
+	Model     string
+	SessionID string
+}
+
+// UsageStatusBar is the per-turn usage sub-bar of StatusBar.
+// Populated from the bridge event's Usage payload (typically
+// co-located on OutResult / EventAgentResult). nil for
+// streaming OutReply chunks without usage.
+//
+// *UsageInfo is embedded so callers access fields directly
+// without an extra indirection:
+//
+//	sb.UsageBar.InputTokens
+//	sb.UsageBar.ContextWindowPct
+//	sb.UsageBar.CostUSD
+//
+// The runtime is a passive pass-through — it does NOT
+// aggregate Usage across turns; this snapshot is always the
+// single turn's bridge-reported value. See
+// docs/feat/F-45-session-footer.md §1.6.
+type UsageStatusBar struct {
+	*UsageInfo
 }
 
 // ToolInfo is the typed payload for OutboundMessage.Tool,
@@ -252,7 +310,7 @@ type MessageStatePayload struct {
 }
 
 // UsageInfo is the typed payload for OutUsage and the
-// SessionContext.CumulativeUsage field. See agent.UsageInfo for
+// StatusBar.CumulativeUsage field. See agent.UsageInfo for
 // field semantics. Re-exported as a type alias here so existing
 // gateway code (translate.go:158) keeps the same symbol name; the
 // canonical definition lives in internal/agent (F-45 §2.1).

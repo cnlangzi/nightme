@@ -404,7 +404,7 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		//      Both are co-located on the same wire event, so we
 		//      emit ONE EventAgentResult with Result.Usage attached. The
 		//      runtime accumulates Usage on the same dispatch,
-		//      before stamping SessionContext — no separate
+		//      before stamping StatusBar — no separate
 		//      EventUsage kind and no buffer needed. We emit even
 		//      when Result is empty AND IsError=true so the header
 		//      can flip to an error state.

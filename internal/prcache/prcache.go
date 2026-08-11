@@ -5,8 +5,8 @@
 // Scope: ONE Cache per AgentSession, owned externally (the
 // runtime in cmd/nightme keeps a Registry keyed by
 // AgentSession.ID). The stamp path — cmd/nightme/run.go's
-// sessionContextInto — calls MaybeRefresh once per stamp and
-// reads PR() to populate SessionContext.PullRequest. PR() is
+// stampFromAS — calls MaybeRefresh once per stamp and
+// reads PR() to populate StatusBar.PullRequest. PR() is
 // strict-synchronous and never blocks on network I/O; the
 // worst-case stamp cost is the duration of an unlocked mutex
 // acquire + a struct field read.
@@ -326,7 +326,7 @@ func (c *Cache) Cancel() {
 //
 // The Registry holds NO strong references to AgentSessions:
 // the AgentSession owns its own lifecycle, and the cache
-// outlives the AS at most by one StampSessionContextInto call
+// outlives the AS at most by one StampStatusBarInto call
 // (after which no further reads happen because the next stamp
 // will GetOrCreate under a new AS.ID). Operators don't have
 // to call a "drop AS" hook — the OS reclaims the cache when

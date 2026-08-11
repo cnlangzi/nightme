@@ -521,10 +521,10 @@ type OutboundMessage struct {
    - 仅保留:`Model` / `SessionID` / Prompt lifecycle（详见 [`feat/F-45-session-footer.md`](./feat/F-45-session-footer.md) §1.2 重构清单）
 
 2. **`OutboundMessage` 加 1 个 typed snapshot field**
-   - 新增 `SessionContext *SessionContext` 字段(不是 3 个分散字段),承载 `{Agent, Model, Usage *agent.UsageEvent, CompactionCount}`
-   - 设计收敛:所有 main-chat metadata 收拢到 1 个 atomic snapshot,扩展新字段只改 `SessionContext` 定义,不破 Channel 接口
+   - 新增 `StatusBar *StatusBar` 字段(不是 3 个分散字段),承载 `{Agent, Model, Usage *agent.UsageEvent, CompactionCount}`
+   - 设计收敛:所有 main-chat metadata 收拢到 1 个 atomic snapshot,扩展新字段只改 `StatusBar` 定义,不破 Channel 接口
    - 仅在 4 个 main-chat Kind 上 stamp:`OutReply` / `OutResult` / `OutTaskCreate` / `OutTaskUpdate`
-   - 其他 Kind(thread / lifecycle / init+usage 自身)`SessionContext == nil`,Channel 跳过 footer
+   - 其他 Kind(thread / lifecycle / init+usage 自身)`StatusBar == nil`,Channel 跳过 footer
    - **`Usage` 字段**:per-turn snapshot(不是 cumulative),bridge 报的 `UsageEvent` 直接引用。`Usage == nil` 时 footer Line 2 省略(典型:OutReply streaming chunk 不带 usage)
 
 3. **`OutboundMessage` 与 `agent` 包结构整理**
@@ -548,10 +548,10 @@ type OutboundMessage struct {
    - 各 segment 在 0 / 空时独立省略（不显示 `0 in`）
 
 5. **Feishu adapter 改 3 case**
-   - `OutReply` → `sendReplyInThreadAndChat`：签名加 `ctx *SessionContext`，helper 内部拼 footer 到 text 末尾（`text + "\n\n" + footer`）
+   - `OutReply` → `sendReplyInThreadAndChat`：签名加 `ctx *StatusBar`，helper 内部拼 footer 到 text 末尾（`text + "\n\n" + footer`）
    - `OutResult` → `sendResultAsReply`：同模式
    - `OutTaskCreate` / `OutTaskUpdate` → receipt card：`buildReceiptCard(tasks, footer)` 新签名，footer 作为独立的 `hr + lark_md div` 追加到 checklist 末尾（占用 2 元素，50 上限远未撞破）
-   - 新文件 `internal/channel/feishu/usage_footer.go`：`formatSessionFooter` + `abbrevTokens` helpers
+   - 新文件 `internal/channel/feishu/usage_footer.go`：`formatStatusBar` + `abbrevTokens` helpers
 
 6. **`/new` 不再清零 AS 任何 usage 状态**
    - `handleNew` 只调 `as.New(ctx)`(bridge 协议层 reset context),runtime 不清零任何 token / cost
@@ -566,7 +566,7 @@ type OutboundMessage struct {
 **wire 形态**（`OutboundMessage` 加 1 字段）：
 
 ```go
-type SessionContext struct {
+type StatusBar struct {
     Agent           string
     Model           string
     CumulativeUsage UsageInfo
@@ -574,19 +574,19 @@ type SessionContext struct {
 
 type OutboundMessage struct {
     // ... 既有字段 ...
-    SessionContext *SessionContext  // F-45: stamped on main-chat kinds
+    StatusBar *StatusBar  // F-45: stamped on main-chat kinds
 }
 ```
 
 **不变式**：
 - `OutboundMessage` 100% typed（§1.4 不变；新字段 typed 不破）
 - §1.3 ChatSession 不 import channel/feishu（不变）
-- §1.3 Channel 不 import chatsession（不变；Channel 通过 typed `SessionContext` 字段读 metadata）
+- §1.3 Channel 不 import chatsession（不变；Channel 通过 typed `StatusBar` 字段读 metadata）
 - 1 turn : 1 anchor 不变式保留（`ReplyTo` 仍是唯一 coordination key;锚点字段 F-53 后为 `as.currentPrompt.LastMessageID`）
 - 抽象归抽象 / 具体归具体（footer 渲染细节由 Feishu adapter 自决，Slack / Web / Echo 各自决定）
 - bridges 协议零变化（仍发 EventAgentConnected / EventUsage，runtime 翻译）
-- OutboundKind 不增不减（`SessionContext` 是字段，不是新 Kind）
-- OutInit / OutUsage 仍是 silent drop（F-44 决策保留；footer 走 `SessionContext` 单独路径）
+- OutboundKind 不增不减（`StatusBar` 是字段，不是新 Kind）
+- OutInit / OutUsage 仍是 silent drop（F-44 决策保留；footer 走 `StatusBar` 单独路径）
 - §1.4 抽象 / 具体 边界规范保留（metadata 是 typed primitive，Channel 自决渲染目标）
 - F-25 / F-31 / F-37 / F-38 / F-39 / F-40 / F-42 / F-43 / F-44 全部决策**保持成立**
 
@@ -647,7 +647,7 @@ type OutboundMessage struct {
 3. **协议差异消化在 Bridge；Runtime 只记数**
    - 各 bridge 把平台特有的 start/end / subtype 归一成**同一次**抽象 compaction 事件
    - Runtime 收到后累加计数并重置 token 快照，**不**再向 Channel 发「正在压缩…」类瞬时出站消息
-   - Channel 只读 SessionContext 上的计数做 footer，不感知 Pi / Claude Code 协议
+   - Channel 只读 StatusBar 上的计数做 footer，不感知 Pi / Claude Code 协议
 
 4. **删除「压缩进行中」出站通路**
    - 去掉专用 OutboundKind 与对应 Channel 渲染分支
@@ -660,7 +660,7 @@ type OutboundMessage struct {
 - `/new` 仍是累计元数据的唯一清零入口；daemon 重启可从 AgentSession 持久化还原
 - F-45 / F-48 footer 契约保留；仅叠加计数与 token 语义澄清
 
-**为什么不是 v2.0**：不改 Gateway 核心路由与 ChatSession 模型；是 SessionContext / footer 语义上的增量，外加删除一条已无产品需求的瞬时出站通路。
+**为什么不是 v2.0**：不改 Gateway 核心路由与 ChatSession 模型；是 StatusBar / footer 语义上的增量，外加删除一条已无产品需求的瞬时出站通路。
 
 **详细设计 / 字段 / bridge 对照 / 测试**：见 [`feat/F-49-compaction-counter.md`](./feat/F-49-compaction-counter.md)；与 footer 的交点见 [`feat/F-45-session-footer.md`](./feat/F-45-session-footer.md) §1.8；Feishu 决策见 [`channel/feishu.md`](./channel/feishu.md) §13.25。
 
@@ -1911,7 +1911,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 5.  deps.newChannel(cfg) + ch.Start(ctx)         # Feishu / echo channel 启动 WS
 6.  spawner := chatsession.NewRegistrySpawner(agents)
 7.  mgr := chatsession.NewManager().WithSpawner(spawner).WithPersistence(csFile, asFile)
-8.  em := outbound.New(ch, outbound.Options{Stamper: newRuntimeStamper(mgr, prCacheReg, gtwDeps)})
+8.  em := outbound.New(ch, outbound.Options{StatusBarSource: newRuntimeStatusBarSource(mgr, prCacheReg, gtwDeps)})
        mgr.WithChannelResolver(func(string) chatsession.Channel { return newChannelWrap(em) })
 9.  gtwMgr := gtw.NewManager(); gtwMgr.SetHandlerDeps(...); gtwMgr.SetGetChatSession(...)
 10. router := commandServices.NewReactionRouter(); router.Register("*", gtwMgr.HandleReaction)
@@ -1931,7 +1931,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 ```
 
 **关键不变量**：
-- Step 8 的 `em`（outbound.Emitter）是所有出站消息的统一咽喉（runtime event pump / slash command / MessageState 三条路径都走它），负责把 `SessionContext` footer 盖到每条消息上
+- Step 8 的 `em`（outbound.Emitter）是所有出站消息的统一咽喉（runtime event pump / slash command / MessageState 三条路径都走它），负责把 `StatusBar` footer 盖到每条消息上
 - Step 10 的 `commandServices.ReactionRouter` 单例持 `map[chatID]handler`，gtw 通过 `Register("*", gtwMgr.HandleReaction)` 注册自己；Channel adapter 把 decision-card 按钮归一化为既有 reaction 通路（与 emoji reaction 汇合）
 - Step 11 的 `command.NewRegistry` + `commander.Dispatch` 取代了 v1.3 之前的 `gateway.RegisterChatSessionCommands`；Gateway 只持有 commander shim，不知道任何命令实现细节
 - Step 13 的 `WithCommander` + `WithShellDispatch` + `WithActionHandler` 三者解耦：`/cwd` `/use` `/gtw` 等所有 slash command 走 commander；`!cmd` 走 shell；reaction / action 事件走 router

@@ -1,6 +1,6 @@
 // Package feishu — F-45 footer rendering tests.
 //
-// Covers the formatSessionFooter + abbrevTokens pure functions —
+// Covers the formatStatusBar + abbrevTokens pure functions —
 // all rules from docs/feat/F-45-session-footer.md §1.6 are tested
 // here so future regressions on the public-facing footer line are
 // caught at unit-test time, before a Feishu E2E round-trip.
@@ -12,50 +12,50 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
+	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
-func TestFormatSessionFooterLines_NilContextReturnsNil(t *testing.T) {
-	if got := formatSessionFooterLines(nil); got != nil {
-		t.Fatalf("formatSessionFooterLines(nil) = %v, want nil", got)
+func TestFormatStatusBarLines_NilContextReturnsNil(t *testing.T) {
+	if got := formatStatusBarLines(nil); got != nil {
+		t.Fatalf("formatStatusBarLines(nil) = %v, want nil", got)
 	}
 }
 
-func TestFormatSessionFooterLines_AllZeroReturnsNil(t *testing.T) {
-	ctx := &messages.SessionContext{Agent: "", Model: ""}
-	if got := formatSessionFooterLines(ctx); got != nil {
-		t.Fatalf("empty SessionContext should yield nil, got %v", got)
+func TestFormatStatusBarLines_AllZeroReturnsNil(t *testing.T) {
+	ctx := &gateway.StatusBar{}
+	if got := formatStatusBarLines(ctx); got != nil {
+		t.Fatalf("empty StatusBar should yield nil, got %v", got)
 	}
 }
 
-func TestFormatSessionFooterLines_IdentityOnly(t *testing.T) {
+func TestFormatStatusBarLines_IdentityOnly(t *testing.T) {
 	// Agent + Model only, no tokens / cost → just line 1 (🤖 header).
-	ctx := &messages.SessionContext{Agent: "claude", Model: "opus-4-5"}
-	got := formatSessionFooterLines(ctx)
+	ctx := &gateway.StatusBar{
+		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+	}
+	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: claude · opus-4-5"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("formatSessionFooterLines() = %v, want %v", got, want)
+		t.Fatalf("formatStatusBarLines() = %v, want %v", got, want)
 	}
 }
 
 // F-56: appends the agent's own session id as the trailing
 // identity segment, separated from Model by " · " to match the
 // existing Model / usage separator convention. The materialize
-// condition in sessionContextInto guarantees SessionID arrives
+// condition in stampFromAS guarantees SessionID arrives
 // alongside at least one of Agent / Model / GitStatus / Usage in
 // practice, so the Agent-and-Model-and-SessionID path is the
 // production-common case.
-func TestFormatSessionFooterLines_IdentityWithSessionID(t *testing.T) {
-	ctx := &messages.SessionContext{
-		Agent:     "claude",
-		Model:     "opus-4-5",
-		SessionID: "abc123-uuid-here",
+func TestFormatStatusBarLines_IdentityWithSessionID(t *testing.T) {
+	ctx := &gateway.StatusBar{
+		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5", SessionID: "abc123-uuid-here"},
 	}
-	got := formatSessionFooterLines(ctx)
+	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: claude · opus-4-5 · abc123-uuid-here"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("formatSessionFooterLines() = %v, want %v", got, want)
+		t.Fatalf("formatStatusBarLines() = %v, want %v", got, want)
 	}
 }
 
@@ -63,18 +63,20 @@ func TestFormatSessionFooterLines_IdentityWithSessionID(t *testing.T) {
 // session lifecycle, or when the bridge synthesises a uuid like
 // ACP does before knowing the agent name). The leading-separator
 // rendering ("🤖: · <sid>") is acceptable: in production the
-// materialize condition in sessionContextInto gates the entire
-// SessionContext on at least one of Agent / Model / SessionID /
+// materialize condition in stampFromAS gates the entire
+// StatusBar on at least one of Agent / Model / SessionID /
 // GitStatus / Usage being non-empty, and once any other field
 // arrives the leading separator disappears. Documenting the
 // edge case here so future "fix the leading dot" PRs know it's
 // intentional.
-func TestFormatSessionFooterLines_SessionIDOnly(t *testing.T) {
-	ctx := &messages.SessionContext{SessionID: "abc123-uuid-here"}
-	got := formatSessionFooterLines(ctx)
+func TestFormatStatusBarLines_SessionIDOnly(t *testing.T) {
+	ctx := &gateway.StatusBar{
+		AgentBar: &gateway.AgentStatusBar{SessionID: "abc123-uuid-here"},
+	}
+	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: · abc123-uuid-here"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("formatSessionFooterLines() = %v, want %v", got, want)
+		t.Fatalf("formatStatusBarLines() = %v, want %v", got, want)
 	}
 }
 
@@ -87,15 +89,14 @@ func TestFormatSessionFooterLines_SessionIDOnly(t *testing.T) {
 // with no separator gap. Locks the layout so a future
 // "always-show-the-middle-dot" PR doesn't silently change the
 // visual rhythm.
-func TestFormatSessionFooterLines_AgentSessionIDOnly(t *testing.T) {
-	ctx := &messages.SessionContext{
-		Agent:     "claude",
-		SessionID: "abc123-uuid-here",
+func TestFormatStatusBarLines_AgentSessionIDOnly(t *testing.T) {
+	ctx := &gateway.StatusBar{
+		AgentBar: &gateway.AgentStatusBar{Agent: "claude", SessionID: "abc123-uuid-here"},
 	}
-	got := formatSessionFooterLines(ctx)
+	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: claude · abc123-uuid-here"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("formatSessionFooterLines() = %v, want %v", got, want)
+		t.Fatalf("formatStatusBarLines() = %v, want %v", got, want)
 	}
 }
 
@@ -103,54 +104,49 @@ func TestFormatSessionFooterLines_AgentSessionIDOnly(t *testing.T) {
 // bridge emits SessionID before AgentName — possible during
 // session/new handshake on claudecode / pi). The leading
 // separator between `🤖:` and `Model` is the symmetric partner
-// of TestFormatSessionFooterLines_SessionIDOnly's `🤖: · <sid>`
+// of TestFormatStatusBarLines_SessionIDOnly's `🤖: · <sid>`
 // — together they pin the layout when Agent is missing.
 // Without this test a future "fix the leading dot" PR could
 // silently change the Model+SessionID-no-Agent path because
 // the other SessionID tests all have Agent set.
-func TestFormatSessionFooterLines_ModelSessionIDOnly(t *testing.T) {
-	ctx := &messages.SessionContext{
-		Model:     "opus-4-5",
-		SessionID: "abc123-uuid-here",
+func TestFormatStatusBarLines_ModelSessionIDOnly(t *testing.T) {
+	ctx := &gateway.StatusBar{
+		AgentBar: &gateway.AgentStatusBar{Model: "opus-4-5", SessionID: "abc123-uuid-here"},
 	}
-	got := formatSessionFooterLines(ctx)
+	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: · opus-4-5 · abc123-uuid-here"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("formatSessionFooterLines() = %v, want %v", got, want)
+		t.Fatalf("formatStatusBarLines() = %v, want %v", got, want)
 	}
 }
 
-// TestFormatSessionFooterLines_CompactionSegment removed: F-49
+// TestFormatStatusBarLines_CompactionSegment removed: F-49
 // compaction tracking was deleted across the runtime. The "· 🗜 N"
 // segment is no longer rendered; the entire subtest is gone.
 
-func TestFormatSessionFooterLines_TokenSegments(t *testing.T) {
+func TestFormatStatusBarLines_TokenSegments(t *testing.T) {
 	// F-52 / new footer convention: "in" folds all three input-side
 	// counters (uncached + cache_creation + cache_read) per the
 	// Tencent YB doc — see internal/channel/feishu/usage_footer.go
 	// §Line 2 doc block. Here in = 11_700 + 600 + 8_200 = 20_500.
-	ctx := &messages.SessionContext{
-		Agent: "claude",
-		Model: "opus-4-5",
-		Usage: &agent.UsageInfo{
+	ctx := &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 			InputTokens:              11_700,
 			OutputTokens:             1_500,
 			CacheCreationInputTokens: 600, // counted into "in"
 			CacheReadInputTokens:     8_200,
 			CostUSD:                  0.087,
-		},
-	}
-	got := formatSessionFooterLines(ctx)
+		}}}
+	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("formatSessionFooterLines() mismatch:\n  got:  %v\n  want: %v", got, want)
+		t.Fatalf("formatStatusBarLines() mismatch:\n  got:  %v\n  want: %v", got, want)
 	}
 }
 
-func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
+func TestFormatStatusBarLines_OmitsZeroSegments(t *testing.T) {
 	tests := []struct {
 		name string
-		ctx  *messages.SessionContext
+		ctx  *gateway.StatusBar
 		want []string
 	}{
 		{
@@ -158,9 +154,9 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			// "0 / 234" — zero-side honesty, rare in practice
 			// (e.g. compaction-only turn with no new input).
 			name: "no input but has output",
-			ctx: &messages.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageInfo{OutputTokens: 234},
+			ctx: &gateway.StatusBar{
+				AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+				UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{OutputTokens: 234}},
 			},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 234 」"},
 		},
@@ -169,9 +165,9 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			// Strict zero-omit — single segment renders, no
 			// "0 /" prefix.
 			name: "only cache hits — single segment renders",
-			ctx: &messages.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageInfo{CacheReadInputTokens: 5_600},
+			ctx: &gateway.StatusBar{
+				AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+				UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{CacheReadInputTokens: 5_600}},
 			},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 5.6k 」"},
 		},
@@ -180,31 +176,24 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			// token segment is omitted; $cost segment stands
 			// alone inside the brackets.
 			name: "cost only (no tokens)",
-			ctx: &messages.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageInfo{CostUSD: 1.245},
+			ctx: &gateway.StatusBar{
+				AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+				UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{CostUSD: 1.245}},
 			},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 $1.245 」"},
 		},
 		{
 			// No cost segment when CostUSD == 0.
 			name: "no cost (omitted)",
-			ctx: &messages.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageInfo{
-					InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
-				},
-			},
+			ctx: &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+					InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200}}},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k 」"},
 		},
 		{
 			// No Agent/Model → only the usage line renders.
 			name: "tokens but no Agent / Model",
-			ctx: &messages.SessionContext{
-				Usage: &agent.UsageInfo{
-					InputTokens: 5_000, OutputTokens: 200,
-				},
-			},
+			ctx: &gateway.StatusBar{UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+					InputTokens: 5_000, OutputTokens: 200}}},
 			want: []string{"💰:「 5k / 200 」"},
 		},
 		{
@@ -213,9 +202,9 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			// practice (turn that hit cache only, no new content
 			// and no generation).
 			name: "only cache hits — single segment renders",
-			ctx: &messages.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageInfo{CacheReadInputTokens: 5_600},
+			ctx: &gateway.StatusBar{
+				AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+				UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{CacheReadInputTokens: 5_600}},
 			},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 5.6k 」"},
 		},
@@ -224,19 +213,15 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			// `cache / out`. Confirms cache doesn't lead the
 			// segment when new is 0 (we drop the leading "0").
 			name: "cache hits + output, no new tokens",
-			ctx: &messages.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageInfo{
+			ctx: &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					CacheReadInputTokens: 5_600,
-					OutputTokens:         800,
-				},
-			},
+					OutputTokens:         800}}},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 5.6k / 800 」"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := formatSessionFooterLines(tc.ctx)
+			got := formatStatusBarLines(tc.ctx)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
@@ -244,71 +229,59 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 	}
 }
 
-func TestFormatSessionFooterLines_LargeNumbers(t *testing.T) {
+func TestFormatStatusBarLines_LargeNumbers(t *testing.T) {
 	// in = 156_000 + 0 + 1_200_000 = 1_356_000 → "1.4M" (rounded).
-	ctx := &messages.SessionContext{
-		Agent: "claude", Model: "opus-4-5",
-		Usage: &agent.UsageInfo{
+	ctx := &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 			InputTokens:              156_000,
 			OutputTokens:             18_000,
 			CacheCreationInputTokens: 0,
 			CacheReadInputTokens:     1_200_000,
-			CostUSD:                  1.245,
-		},
-	}
-	got := formatSessionFooterLines(ctx)
+			CostUSD:                  1.245}}}
+	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: claude · opus-4-5", "💰:「 156k / 1.2M / 18k · $1.245 」"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 }
 
-// TestFormatSessionFooter_StringForm covers the legacy single-
+// TestFormatStatusBar_StringForm covers the legacy single-
 // string helper used by OutReply / OutResult orphan / overflow
 // paths (text concatenation). The string form joins the
 // lines with "\n" — plain-text rendering paths honour \n
 // natively.
-func TestFormatSessionFooter_StringForm(t *testing.T) {
+func TestFormatStatusBar_StringForm(t *testing.T) {
 	// in = 12_300 + 0 + 8_200 = 20_500 → "20.5k".
-	ctx := &messages.SessionContext{
-		Agent: "claude", Model: "opus-4-5",
-		Usage: &agent.UsageInfo{
-			InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
-		},
-	}
-	got := formatSessionFooter(ctx)
+	ctx := &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+			InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200}}}
+	got := formatStatusBar(ctx)
 	want := "🤖: claude · opus-4-5\n💰:「 12.3k / 8.2k / 1.5k 」"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 	// Empty input → empty string.
-	if got := formatSessionFooter(&messages.SessionContext{}); got != "" {
+	if got := formatStatusBar(&gateway.StatusBar{}); got != "" {
 		t.Fatalf("empty ctx should yield empty string, got %q", got)
 	}
-	if got := formatSessionFooter(nil); got != "" {
+	if got := formatStatusBar(nil); got != "" {
 		t.Fatalf("nil ctx should yield empty string, got %q", got)
 	}
 }
 
-func TestFormatSessionFooter_StableAcrossReRenders(t *testing.T) {
+func TestFormatStatusBar_StableAcrossReRenders(t *testing.T) {
 	// Same input must always produce the same string — receipt
 	// PATCH diffing relies on body equality.
-	ctx := &messages.SessionContext{
-		Agent: "claude", Model: "opus-4-5",
-		Usage: &agent.UsageInfo{
+	ctx := &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 			InputTokens: 12_300, OutputTokens: 1_500,
-			CacheReadInputTokens: 8_200, CostUSD: 0.087,
-		},
-	}
-	first := formatSessionFooter(ctx)
+			CacheReadInputTokens: 8_200, CostUSD: 0.087}}}
+	first := formatStatusBar(ctx)
 	for i := 0; i < 5; i++ {
-		if got := formatSessionFooter(ctx); got != first {
+		if got := formatStatusBar(ctx); got != first {
 			t.Fatalf("non-deterministic footer at iteration %d:\n  first: %q\n  got:   %q", i, first, got)
 		}
 	}
 }
 
-// TestFormatSessionFooterLines_ContextWindowPct (F-52) covers the
+// TestFormatStatusBarLines_ContextWindowPct (F-52) covers the
 // "X%" segment: the per-turn context-window usage percentage
 // surfaced from UsageInfo.ContextWindowPct (bridge-computed via
 // the Doc 1 formula). The footer just renders it.
@@ -320,67 +293,59 @@ func TestFormatSessionFooter_StableAcrossReRenders(t *testing.T) {
 //   - Otherwise renders as "X.Y%" with one decimal place (edge
 //     cases like 99.6% matter for context-window tracking —
 //     "%.0f%%" would round to misleading "100%").
-func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
+func TestFormatStatusBarLines_ContextWindowPct(t *testing.T) {
 	tests := []struct {
 		name string
-		ctx  *messages.SessionContext
+		ctx  *gateway.StatusBar
 		want []string
 	}{
 		{
 			name: "pct=0 — segment omitted (early turn / no ContextWindow reported)",
-			ctx: &messages.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageInfo{
+			ctx: &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					InputTokens: 12_300, OutputTokens: 1_500,
-					CacheReadInputTokens: 8_200, CostUSD: 0.087,
-				},
-			},
+					CacheReadInputTokens: 8_200, CostUSD: 0.087}}},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"},
 		},
 		{
 			name: "pct only — typical post-EventAgentDone snapshot",
-			ctx: &messages.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageInfo{
-					InputTokens: 20_000, OutputTokens: 1_000,
+			ctx: &gateway.StatusBar{
+				AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+				UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+					InputTokens:      20_000,
+					OutputTokens:     1_000,
 					ContextWindow:    200_000,
-					ContextWindowPct: 10.5, // 21k / 200k * 100
-				},
+					ContextWindowPct: 10.5,
+				}},
 			},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 20k / 1k · 10.5% (200k) 」"},
 		},
 		{
 			name: "pct + cost — full usage line",
-			ctx: &messages.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageInfo{
-					InputTokens: 1_200_000, OutputTokens: 80_000,
-					CacheReadInputTokens: 800_000, CostUSD: 1.234,
-					ContextWindow:    200_000,
-					ContextWindowPct: 99.6, // near the ceiling
-				},
+			ctx: &gateway.StatusBar{
+				AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+				UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+					InputTokens:          1_200_000,
+					OutputTokens:         80_000,
+					CacheReadInputTokens: 800_000,
+					ContextWindow:        200_000,
+					ContextWindowPct:     99.6,
+					CostUSD:              1.234,
+				}},
 			},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 1.2M / 800k / 80k · 99.6% (200k) · $1.234 」"},
 		},
 		{
 			name: "pct at the ceiling — 100.0% is honest, not 'full'",
-			ctx: &messages.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageInfo{
+			ctx: &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					ContextWindow:    200_000,
-					ContextWindowPct: 100.0,
-				},
-			},
+					ContextWindowPct: 100.0}}},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 100.0% (200k) 」"},
 		},
 		{
 			name: "pct without identity — segment still emits alone",
-			ctx: &messages.SessionContext{
-				Usage: &agent.UsageInfo{
+			ctx: &gateway.StatusBar{UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					ContextWindow:    200_000,
-					ContextWindowPct: 5.0,
-				},
-			},
+					ContextWindowPct: 5.0}}},
 			want: []string{"💰:「 5.0% (200k) 」"},
 		},
 		{
@@ -389,48 +354,41 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 			// compatibility-layer mismatches themselves (e.g.
 			// `101.6% (200k)` against an actual 1M model).
 			name: "pct > 100% — not clamped, (window) surfaces the mismatch",
-			ctx: &messages.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageInfo{
-					InputTokens: 200_000, OutputTokens: 1_000,
+			ctx: &gateway.StatusBar{
+				AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+				UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
+					InputTokens:          200_000,
+					OutputTokens:         1_000,
 					CacheReadInputTokens: 3_000,
 					ContextWindow:        200_000,
-					ContextWindowPct:     101.6, // 203_103 / 200_000 * 100
-				},
+					ContextWindowPct:     101.6,
+				}},
 			},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 200k / 3k / 1k · 101.6% (200k) 」"},
 		},
 		{
 			// F-55: 1M-class model window rendered with M unit.
 			name: "1M context window — M unit",
-			ctx: &messages.SessionContext{
-				Agent: "claude", Model: "opus-4-8",
-				Usage: &agent.UsageInfo{
+			ctx: &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-8"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					InputTokens: 200_000, OutputTokens: 1_000,
 					ContextWindow:    1_000_000,
-					ContextWindowPct: 20.1,
-				},
-			},
+					ContextWindowPct: 20.1}}},
 			want: []string{"🤖: claude · opus-4-8", "💰:「 200k / 1k · 20.1% (1M) 」"},
 		},
 		{
 			// Defensive: pct==0 drops the entire segment; window
 			// alone is not surfaced (zero-omit, F-45 §1.6).
 			name: "pct=0 — segment omitted even when window > 0",
-			ctx: &messages.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				Usage: &agent.UsageInfo{
+			ctx: &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 					InputTokens: 12_300, OutputTokens: 1_500,
 					CacheReadInputTokens: 8_200, CostUSD: 0.087,
-					ContextWindow: 200_000,
-				},
-			},
+					ContextWindow: 200_000}}},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := formatSessionFooterLines(tc.ctx)
+			got := formatStatusBarLines(tc.ctx)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("got %v, want %v", got, tc.want)
 			}
@@ -531,56 +489,65 @@ func TestFormatWorkspacePath(t *testing.T) {
 	}
 }
 
-func TestFormatGitLine_NilContextReturnsEmpty(t *testing.T) {
-	if got := formatGitLine(nil); got != "" {
+func TestFormatGitBar_NilContextReturnsEmpty(t *testing.T) {
+	if got := formatGitBar(nil); got != "" {
 		t.Fatalf("nil ctx should yield empty, got %q", got)
 	}
 }
 
-func TestFormatGitLine_NoWorkspaceReturnsEmpty(t *testing.T) {
-	ctx := &messages.SessionContext{
-		GitStatus: &gtw.GitStatusSnapshot{Branch: "main"},
+// TestFormatGitBar_NoWorkspaceReturnsEmpty (F-48 contract):
+// when Workspace=="" the GitBar branch must drop the entire
+// line — a non-empty GitStatus without a Workspace implies a
+// bug in the runtime stamp path. Pass a populated GitStatus
+// specifically to prove the Workspace-empty gate (not the
+// nil-GitStatus gate) is what's catching this case.
+func TestFormatGitBar_NoWorkspaceReturnsEmpty(t *testing.T) {
+	gb := &gateway.GitStatusBar{
+		Workspace: "",
+		GitStatus: &gtw.GitStatusSnapshot{Branch: "main", HasUpstream: true},
 	}
-	if got := formatGitLine(ctx); got != "" {
+	if got := formatGitBar(gb); got != "" {
 		t.Fatalf("Workspace=\"\" should yield empty, got %q", got)
 	}
 }
 
-// TestFormatGitLine_NoGitStatusOmitsLine (F-48 review fix):
+// TestFormatGitBar_NoGitStatusOmitsLine (F-48 review fix):
 // when Workspace is set but GitStatus is nil (caller couldn't
 // collect — non-repo / git error / git timeout), the entire
 // footer line must be omitted. Rendering "📁: <ws> · ⎇ ?" would
 // imply Git tracking is available when it isn't — the user's
 // review caught this as a misleading UI bug. The "⎇ ?" rendering
 // is reserved for detached HEAD inside a real git repo
-// (Branch=="" + GitStatus!=nil).
-func TestFormatGitLine_NoGitStatusOmitsLine(t *testing.T) {
-	ctx := &messages.SessionContext{Workspace: "/home/devin/code/nightme"}
-	if got := formatGitLine(ctx); got != "" {
+// (Branch=="" + GitStatus!=nil). Pass a populated Workspace
+// specifically to prove the nil-GitStatus gate is what's
+// catching this case.
+func TestFormatGitBar_NoGitStatusOmitsLine(t *testing.T) {
+	gb := &gateway.GitStatusBar{
+		Workspace: "/some/path",
+		GitStatus: nil,
+	}
+	if got := formatGitBar(gb); got != "" {
 		t.Fatalf("Workspace set + GitStatus nil should omit line, got %q", got)
 	}
 }
 
-func TestFormatGitLine_FullSnapshot(t *testing.T) {
+func TestFormatGitBar_FullSnapshot(t *testing.T) {
 	// Branch + dirty + untracked + unpushed — all segments.
-	ctx := &messages.SessionContext{
-		Workspace: "/home/devin/code/nightme",
-		GitStatus: &gtw.GitStatusSnapshot{
+	ctx := &gateway.StatusBar{GitBar: &gateway.GitStatusBar{Workspace: "/home/devin/code/nightme", GitStatus: &gtw.GitStatusSnapshot{
 			Branch:        "main",
 			Uncommitted:   3,
 			Untracked:     2,
 			AheadOfRemote: 5,
 			HasUpstream:   true,
-		},
-	}
-	got := formatGitLine(ctx)
+		}}}
+	got := formatGitBar(ctx.GitBar)
 	want := "📁: code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 5"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
-func TestFormatGitLine_OmitsZeroSegments(t *testing.T) {
+func TestFormatGitBar_OmitsZeroSegments(t *testing.T) {
 	tests := []struct {
 		name string
 		snap *gtw.GitStatusSnapshot
@@ -651,11 +618,16 @@ func TestFormatGitLine_OmitsZeroSegments(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := &messages.SessionContext{
+			// Pre-rename this test passed a snapshot directly to
+			// formatGitBar(*StatusBar). Post-rename
+			// formatGitBar takes a *GitStatusBar — wrap the
+			// snapshot in one so the test stays focused on the
+			// snapshot-shape rules.
+			gb := &gateway.GitStatusBar{
 				Workspace: "/home/devin/code/nightme",
 				GitStatus: tc.snap,
 			}
-			got := formatGitLine(ctx)
+			got := formatGitBar(gb)
 			if got != tc.want {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
@@ -663,25 +635,27 @@ func TestFormatGitLine_OmitsZeroSegments(t *testing.T) {
 	}
 }
 
-// TestFormatSessionFooterLines_WithGitLine confirms line 3 is
+// TestFormatStatusBarLines_WithGitLine confirms line 3 is
 // appended after lines 1+2 when both are populated.
-func TestFormatSessionFooterLines_WithGitLine(t *testing.T) {
+func TestFormatStatusBarLines_WithGitLine(t *testing.T) {
 	// in = 12_300 + 0 + 8_200 = 20_500 → "20.5k".
-	ctx := &messages.SessionContext{
-		Agent: "claude", Model: "opus-4-5",
-		Usage: &agent.UsageInfo{
+	ctx := &gateway.StatusBar{
+		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+		GitBar: &gateway.GitStatusBar{
+			Workspace: "/home/devin/code/nightme",
+			GitStatus: &gtw.GitStatusSnapshot{
+				Branch:        "feat/x",
+				Uncommitted:   2,
+				Untracked:     1,
+				AheadOfRemote: 3,
+				HasUpstream:   true,
+			},
+		},
+		UsageBar: &gateway.UsageStatusBar{UsageInfo: &agent.UsageInfo{
 			InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
-		},
-		Workspace: "/home/devin/code/nightme",
-		GitStatus: &gtw.GitStatusSnapshot{
-			Branch:        "feat/x",
-			Uncommitted:   2,
-			Untracked:     1,
-			AheadOfRemote: 3,
-			HasUpstream:   true,
-		},
+		}},
 	}
-	got := formatSessionFooterLines(ctx)
+	got := formatStatusBarLines(ctx)
 	want := []string{
 		"🤖: claude · opus-4-5",
 		"💰:「 12.3k / 8.2k / 1.5k 」",
@@ -692,34 +666,38 @@ func TestFormatSessionFooterLines_WithGitLine(t *testing.T) {
 	}
 }
 
-// TestFormatSessionFooterLines_GitOnly confirms line 3 appears
+// TestFormatStatusBarLines_GitOnly confirms line 3 appears
 // on its own when lines 1+2 are both empty (e.g. first reply on
 // a git repo before any usage / model has been captured).
-func TestFormatSessionFooterLines_GitOnly(t *testing.T) {
-	ctx := &messages.SessionContext{
-		Workspace: "/home/devin/code/nightme",
-		GitStatus: &gtw.GitStatusSnapshot{Branch: "main", HasUpstream: true},
+func TestFormatStatusBarLines_GitOnly(t *testing.T) {
+	ctx := &gateway.StatusBar{
+		GitBar: &gateway.GitStatusBar{
+			Workspace: "/home/devin/code/nightme",
+			GitStatus: &gtw.GitStatusSnapshot{Branch: "main", HasUpstream: true, AheadOfRemote: 0},
+		},
 	}
-	got := formatSessionFooterLines(ctx)
+	got := formatStatusBarLines(ctx)
 	want := []string{"📁: code/nightme · ⎇ main · ⇡ 0"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 }
 
-// TestFormatSessionFooterLines_NoGitNoUsage confirms we still
+// TestFormatStatusBarLines_NoGitNoUsage confirms we still
 // return nil when nothing meaningful exists — backwards
 // compatible with F-45.
-func TestFormatSessionFooterLines_NoGitNoUsage(t *testing.T) {
-	ctx := &messages.SessionContext{Agent: "claude", Model: "opus-4-5"}
-	got := formatSessionFooterLines(ctx)
+func TestFormatStatusBarLines_NoGitNoUsage(t *testing.T) {
+	ctx := &gateway.StatusBar{
+		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+	}
+	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: claude · opus-4-5"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 }
 
-// TestFormatSessionFooterLines_PRSegment_AppendedToGitLine
+// TestFormatStatusBarLines_PRSegment_AppendedToGitLine
 // pins the layout: when a PR has been resolved and a git line
 // is rendered, the PR reference folds into the git line as its
 // LAST segment, using markdown link syntax `[#N](url)` (no 🔗:
@@ -729,19 +707,17 @@ func TestFormatSessionFooterLines_NoGitNoUsage(t *testing.T) {
 // stays in the <font color='grey'> wrap.
 //
 // PR without git (no Workspace / no GitStatus) drops with
-// the git line — see TestFormatSessionFooterLines_PRSegment_NoGitLine.
-func TestFormatSessionFooterLines_PRSegment_AppendedToGitLine(t *testing.T) {
-	ctx := &messages.SessionContext{
-		Agent: "claude", Model: "opus-4-5",
-		Workspace: "/home/devin/code/nightme",
-		GitStatus: &gtw.GitStatusSnapshot{Branch: "fix-x", HasUpstream: true},
-		PullRequest: &gtw.PR{
-			Number: 111,
-			URL:    "https://github.com/cnlangzi/nightme/pull/111",
-			State:  "open",
+// the git line — see TestFormatStatusBarLines_PRSegment_NoGitLine.
+func TestFormatStatusBarLines_PRSegment_AppendedToGitLine(t *testing.T) {
+	ctx := &gateway.StatusBar{
+		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+		GitBar: &gateway.GitStatusBar{
+			Workspace:   "/home/devin/code/nightme",
+			GitStatus:   &gtw.GitStatusSnapshot{Branch: "fix-x", HasUpstream: true},
+			PullRequest: &gtw.PR{Number: 111, URL: "https://github.com/cnlangzi/nightme/pull/111", State: "open"},
 		},
 	}
-	got := formatSessionFooterLines(ctx)
+	got := formatStatusBarLines(ctx)
 	want := []string{
 		"🤖: claude · opus-4-5",
 		"📁: code/nightme · ⎇ fix-x · ⇡ 0 · [#111](https://github.com/cnlangzi/nightme/pull/111)",
@@ -751,7 +727,7 @@ func TestFormatSessionFooterLines_PRSegment_AppendedToGitLine(t *testing.T) {
 	}
 }
 
-// TestFormatSessionFooterLines_PRSegment_NoGitLine confirms
+// TestFormatStatusBarLines_PRSegment_NoGitLine confirms
 // that the PR number is NOT promoted to its own line when the
 // git line drops (no Workspace / no GitStatus / detached-HEAD-
 // outside-repo edge cases). A stale PR cache must not surface
@@ -759,16 +735,14 @@ func TestFormatSessionFooterLines_PRSegment_AppendedToGitLine(t *testing.T) {
 // identity / usage stack. Test reproduces the case by giving
 // a PR but no Workspace, which is the standard
 // "transient / not in a git repo" configuration.
-func TestFormatSessionFooterLines_PRSegment_NoGitLine(t *testing.T) {
-	ctx := &messages.SessionContext{
-		Agent: "claude", Model: "opus-4-5",
-		PullRequest: &gtw.PR{
-			Number: 111,
-			URL:    "https://github.com/cnlangzi/nightme/pull/111",
-			State:  "open",
+func TestFormatStatusBarLines_PRSegment_NoGitLine(t *testing.T) {
+	ctx := &gateway.StatusBar{
+		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+		GitBar: &gateway.GitStatusBar{
+			PullRequest: &gtw.PR{Number: 111, URL: "https://github.com/cnlangzi/nightme/pull/111", State: "open"},
 		},
 	}
-	got := formatSessionFooterLines(ctx)
+	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: claude · opus-4-5"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v\nwant %v", got, want)
@@ -781,12 +755,12 @@ func TestFormatSessionFooterLines_PRSegment_NoGitLine(t *testing.T) {
 	}
 }
 
-// TestFormatSessionFooterLines_PRSegment_NilOrInvalid covers
+// TestFormatStatusBarLines_PRSegment_NilOrInvalid covers
 // the omit rules for the PR tail: nil PR / Number <= 0 / empty
 // URL all leave the git line without the trailing `[#N](url)`
 // segment. "No PR yet" must look identical to "lookup failed"
 // — chat-side decoration is the wrong place to discriminate them.
-func TestFormatSessionFooterLines_PRSegment_NilOrInvalid(t *testing.T) {
+func TestFormatStatusBarLines_PRSegment_NilOrInvalid(t *testing.T) {
 	tests := []struct {
 		name string
 		pr   *gtw.PR
@@ -797,13 +771,8 @@ func TestFormatSessionFooterLines_PRSegment_NilOrInvalid(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := &messages.SessionContext{
-				Agent: "claude", Model: "opus-4-5",
-				Workspace: "/home/devin/code/nightme",
-				GitStatus: &gtw.GitStatusSnapshot{Branch: "fix-x", HasUpstream: true},
-				PullRequest: tc.pr,
-			}
-			got := formatSessionFooterLines(ctx)
+			ctx := &gateway.StatusBar{AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, GitBar: &gateway.GitStatusBar{Workspace: "/home/devin/code/nightme", GitStatus: &gtw.GitStatusSnapshot{Branch: "fix-x", HasUpstream: true}}}
+			got := formatStatusBarLines(ctx)
 			want := []string{
 				"🤖: claude · opus-4-5",
 				"📁: code/nightme · ⎇ fix-x · ⇡ 0",
@@ -815,29 +784,27 @@ func TestFormatSessionFooterLines_PRSegment_NilOrInvalid(t *testing.T) {
 	}
 }
 
-// TestFormatSessionFooterLines_PRSegment_DirtyCountsBetween
+// TestFormatStatusBarLines_PRSegment_DirtyCountsBetween
 // pins the segment order: workspace → branch → dirty counts
 // → PR. The PR must be the last segment so the line reads
 // as "where am I → how dirty → what's the open PR", not
 // "where am I → what's the PR → how dirty".
-func TestFormatSessionFooterLines_PRSegment_DirtyCountsBetween(t *testing.T) {
-	ctx := &messages.SessionContext{
-		Agent: "claude", Model: "opus-4-5",
-		Workspace: "/home/devin/code/nightme",
-		GitStatus: &gtw.GitStatusSnapshot{
-			Branch:      "fix-x",
-			Uncommitted: 3,
-			Untracked:   2,
-			HasUpstream: true,
-			AheadOfRemote: 1,
-		},
-		PullRequest: &gtw.PR{
-			Number: 42,
-			URL:    "https://example/pr/42",
-			State:  "open",
+func TestFormatStatusBarLines_PRSegment_DirtyCountsBetween(t *testing.T) {
+	ctx := &gateway.StatusBar{
+		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
+		GitBar: &gateway.GitStatusBar{
+			Workspace: "/home/devin/code/nightme",
+			GitStatus: &gtw.GitStatusSnapshot{
+				Branch:        "fix-x",
+				Uncommitted:   3,
+				Untracked:     2,
+				HasUpstream:   true,
+				AheadOfRemote: 1,
+			},
+			PullRequest: &gtw.PR{Number: 42, URL: "https://example/pr/42", State: "open"},
 		},
 	}
-	got := formatSessionFooterLines(ctx)
+	got := formatStatusBarLines(ctx)
 	want := []string{
 		"🤖: claude · opus-4-5",
 		"📁: code/nightme · ⎇ fix-x · ↑ 3 · ? 2 · ⇡ 1 · [#42](https://example/pr/42)",

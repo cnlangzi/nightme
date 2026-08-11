@@ -165,7 +165,7 @@ type OutboundMessage struct {
 	// Bridges populate this from the same source event they put
 	// Result on (Claude Code: result.usage + result.modelUsage;
 	// Pi: message_end.usage on the assistant role). The runtime
-	// accumulates Usage on receipt before stamping SessionContext,
+	// accumulates Usage on receipt before stamping StatusBar,
 	// so footer rendering sees this turn's tokens on the first
 	// try — the previous EventAgentResult-then-EventUsage pair that
 	// required runtime buffering is gone (the data was always
@@ -209,21 +209,41 @@ type OutboundMessage struct {
 	// error UI (📛 icon, ⚠️ prefix, etc.).
 	Err error
 
-	// SessionContext (F-45) is the runtime-stamped snapshot of the
-	// AgentSession that produced this outbound event. It carries
-	// everything the main-chat footer needs (Agent / Model /
-	// Usage, plus Workspace / GitStatus) as a
-	// single atomic value — not a scattered set of fields — so
-	// Channel render paths see one typed payload and future
+	// StatusBar (F-45) is the runtime-stamped metadata envelope
+	// attached to every outbound message that flows to a
+	// Channel. It carries workspace / git / PR context (the
+	// always-present GitBar) plus optional AgentBar and
+	// UsageBar sub-bars — a single atomic typed payload so
+	// Channel render paths see one consistent value and future
 	// metadata additions don't break the Channel interface.
 	//
-	// Stamped ONLY on OutReply / OutResult / OutTaskCreate /
-	// OutTaskUpdate by the runtime's newEventHandler closure. nil
-	// on every other Kind (thread-only, lifecycle, init/usage
-	// payloads themselves) — Channel skips footer rendering when
-	// nil.
+	// Stamped by the outbound package's StatusBarSource on
+	// every Send / SendCard. The runtime's newEventHandler
+	// closure pre-fills StatusBar for a few specific message
+	// kinds (MessageStateBus MessageSubmitted and the runtime
+	// pump's main-chat Kinds) when the source-AS semantics
+	// matter — those pre-fills make the stamper skip. For all
+	// other Kinds the stamper is the sole producer. The
+	// Channel never has to call a separate "stamp" hook.
 	//
-	// Bridges never populate this field directly; runtime is the
-	// single owner. See docs/feat/F-45-session-footer.md §1.3.
-	SessionContext *SessionContext
+	// Pre-rename this was `SessionContext *SessionContext`,
+	// with the runtime only stamping four Kinds. Renamed
+	// because:
+	//   - the rename to StatusBar matches the user-facing
+	//     mental model (it's a status bar at the bottom of
+	//     every message, not a "session context");
+	//   - the GitBar must always be present (when the chat
+	//     has a workspace) — pre-rename a chat with no
+	//     AgentSession would skip the entire stamp;
+	//   - SessionContext was semantically inaccurate
+	//     (Workspace / GitStatus are workspace fields, Usage
+	//     is a per-turn field, only Agent/Model/SessionID are
+	//     session fields);
+	//   - "Context" collided with Go's context.Context idiom
+	//     at every read site.
+	//
+	// Bridges never populate this field directly; runtime is
+	// the single owner. See docs/feat/F-45-session-footer.md
+	// §1.3.
+	StatusBar *StatusBar
 }

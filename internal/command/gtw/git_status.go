@@ -12,7 +12,7 @@ import (
 // GitStatusSnapshot is the parsed result of a single
 // `git status --porcelain --branch` invocation against a workspace.
 // It is intentionally a pure value type (no methods) so it can be
-// carried across package boundaries (messages.SessionContext,
+// carried across package boundaries (gateway.StatusBar,
 // runtime stamping) and tested without running git.
 //
 // Field semantics:
@@ -36,7 +36,7 @@ import (
 //	                 the "⇡ N" segment in that case.
 //
 // F-48 (follow-up to F-45): runtime stamps one of these on every
-// OutboundMessage.SessionContext that flows to a main-chat footer
+// OutboundMessage.StatusBar that flows to a main-chat footer
 // render site. See docs/feat/F-45-session-footer.md §1.7.
 //
 // The canonical definition lives in internal/messages so the wire
@@ -82,9 +82,11 @@ type GitStatusSnapshot = messages.GitStatusSnapshot
 // porcelain output. This avoids any package-level mutable state
 // or test-only hooks in production code paths.
 //
-// F-57: this is the single source of truth for the /gtw push and
-// /gtw pr readiness gates. Both commands call it at entry; see
-// docs/feat/F-57-gtw-push-pr-readiness.md §2.2.
+// F-57: this is the single source of truth for the /gtw commit,
+// /gtw push, and /gtw pr readiness gates. All three commands call
+// it at entry; see docs/feat/F-57-gtw-push-pr-readiness.md §2.2.
+// F-XX (commit/push split): /gtw commit also reads from this snap
+// so push and commit gate on the same git truth.
 func CollectReadiness(ctx context.Context, dir string, git GitRunner) (*GitStatusSnapshot, error) {
 	out, stderr, err := git.Run(ctx, dir, "status", "--porcelain", "--branch",
 		"--untracked-files=normal")

@@ -2,8 +2,11 @@ package gtw
 
 // /gtw pr — generate a Conventional Commits title + body and open
 // the PR/MR on the origin platform (GitHub via `gh`, GitLab via
-// `glab`). Closes the loop with /gtw push: the user has already
-// committed + pushed, /gtw pr just does the remaining bit.
+// `glab`). Closes the loop with /gtw commit + /gtw push: after
+// the F-XX split, `pr` no longer runs the agent commit, and
+// `push` no longer auto-commits. The user is expected to have
+// run `/gtw commit` then `/gtw push` already; `pr` does the
+// remaining bit (open the PR/MR).
 //
 // Design refs:
 //   - wip/gtw-pr.md       (design rationale, IM-friendly card, prompts)
@@ -125,7 +128,7 @@ func dispatchPR(
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf(
 				"✅ branch %s is in sync with %s — nothing new to PR yet\n"+
-					"hint: make some changes, then /gtw push, then /gtw pr.",
+					"hint: make some changes, then /gtw commit, then /gtw push, then /gtw pr.",
 				c.Branch, baseBranch)), nil
 	}
 

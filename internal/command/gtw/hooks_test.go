@@ -692,6 +692,7 @@ func (s *testStarter) RunOnce(context.Context, agent.StartConfig, []agent.Conten
 func cfgIsZero(cfg Config) bool {
 	return cmdCfgIsZero(cfg.Fix) &&
 		cmdCfgIsZero(cfg.Push) &&
+		cmdCfgIsZero(cfg.Commit) &&
 		cmdCfgIsZero(cfg.Close) &&
 		cmdCfgIsZero(cfg.Sync)
 }

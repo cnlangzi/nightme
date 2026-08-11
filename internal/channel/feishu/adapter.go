@@ -668,8 +668,7 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	                       and produces no OutboundMessage, so this
 //	                       routing table has no entry for it. The
 //	                       compaction count surfaces later via
-//	                       SessionContext.CompactionCount → Footer
-//	                       Line 1 "🗜 N".)
+//	                       compaction count tracking removed).)
 //	OutCommandReply      → top-level Create via SendMessageText
 //	                       (PR #47's ReplyInChat — rootID="") with
 //	                       the ❯ emoji prepended to the text body
@@ -879,7 +878,7 @@ func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, 
 }
 
 // ensureReceiptForReplyWithFooter (F-45) is the same as
-// ensureReceiptForReply but stamps the SessionContext footer at
+// ensureReceiptForReply but stamps the StatusBar footer at
 // cold-start so the very first chunk carries cumulative stats.
 func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, userMsgID, firstEntryText string, footerLines []string) (*MessageReceipt, bool, error) {
 	if userMsgID == "" {
@@ -1208,7 +1207,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// count — the per-line array ensures buildReceiptCard
 		// emits one <hr> + <div> block at the bottom instead of
 		// N+1 copies inline.
-		footerLines := formatSessionFooterLines(msg.SessionContext)
+		footerLines := formatStatusBarLines(msg.StatusBar)
 		if msg.ReplyTo == "" {
 			return a.postOrphanReplyCard(ctx, msg.ChatID, text, footerLines)
 		}
@@ -1328,11 +1327,15 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// cold-start path in ensureReceiptForReply stays a
 		// no-op when the placeholder already exists.
 		//
-		// Footer is nil here: SessionContext is only stamped on
-		// OutMessageState at MessageSubmitted time (see
-		// cmd/nightme/run.go newEventHandler), not Queued — the
-		// placeholder shows up before the runtime has the AS
-		// handle. The first OutReply fills the footer in via
+		// Footer is git-only here: StatusBar is only fully
+		// stamped on OutMessageState at MessageSubmitted time
+		// (see cmd/nightme/run.go newEventHandler), not Queued
+		// — the placeholder shows up before the runtime has
+		// the AS handle. The fallback in newRuntimeStatusBar
+		// still attaches GitBar from cs.SelectedCwd() when no
+		// AS is selected, so a chat that has done /cwd already
+		// sees the workspace line on the placeholder card.
+		// The first OutReply fills AgentBar / UsageBar in via
 		// AppendEntryWithFooter.
 		if state == agent.MessageQueued {
 			if _, _, err := a.ensureReceiptForTyping(ctx, msg.ChatID, messageID, nil); err != nil {
@@ -1534,7 +1537,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// uses the same shared cardFooterElements helper, so
 		// OutResult and OutReply cards now render identical
 		// footers.
-		footerLines := formatSessionFooterLines(msg.SessionContext)
+		footerLines := formatStatusBarLines(msg.StatusBar)
 		// F-39 + F-44 follow-up: deliver the full result as a
 		// top-level Create (PR #47's ReplyInChat surface) — see
 		// OutReply case above for the parent-thread rationale that
@@ -1555,8 +1558,9 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 	// instead it calls AgentSession.RecordCompaction() to bump the
 	// counter and reset per-cycle token stats. No transient
 	// "✶ Compacting conversation…" thread reply, no channel side
-	// effect. The count surfaces later via SessionContext.CompactionCount
-	// → Footer Line 1 "🗜 N". See docs/feat/F-49-compaction-counter.md
+	// effect. The count surfaces later via StatusBar (F-49
+	// compaction tracking removed — the runtime dropped its
+	// compactionCount bookkeeping). See docs/feat/F-49-compaction-counter.md
 	// §1.3 / §1.9.
 
 	case messages.OutInit:
@@ -1619,7 +1623,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// orphan path fell through to sendRawOutText (plain text
 		// checklist), violating the "main-chat is card" invariant
 		// F-46 established for OutReply / OutResult.
-		footerLines := formatSessionFooterLines(msg.SessionContext)
+		footerLines := formatStatusBarLines(msg.StatusBar)
 		if msg.ReplyTo == "" {
 			return a.postOrphanTaskCard(ctx, msg.ChatID, msg.TaskList, footerLines)
 		}
@@ -2269,7 +2273,7 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 		})
 	}
 
-	// Section 3 (F-45): SessionContext footer at the bottom of
+	// Section 3 (F-45): StatusBar footer at the bottom of
 	// the card. Empty footer = section omitted. Rendered as
 	// <hr> + <div> wrapper containing one <plain_text> per
 	// footer line — Feishu's plain_text element does NOT honour
@@ -2286,7 +2290,7 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 	// <hr> divider above stays at Feishu's default thin-grey
 	// (≈ #E5E5E5).
 	//
-	// Footer lines are ASCII-only (output of formatSessionFooter
+	// Footer lines are ASCII-only (output of formatStatusBar
 	// Lines — only emits arrow set + Agent / Model names + cost
 	// USD); no sanitisation needed.
 	if footer := cardFooterElements(footerLines); footer != nil {

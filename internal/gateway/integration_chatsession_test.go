@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/channel"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 )
 
@@ -34,7 +34,7 @@ import (
 //                                      // pushes EnrichedEvent to as.eventQueue
 //   AgentSession.Submit(prompt)        // drives bridge via SendBlocks
 //   fake.PushEvent(EventAgentText "hello")  // simulates agent response
-//   assert mock channel.Record() sees an messages.OutReply{ChatID, ReplyTo, Text}
+//   assert mock channel.Record() sees an OutReply{ChatID, ReplyTo, Text}
 //
 // This skips feishu / claudecode / --resume / persistence entirely:
 // every component on the outbound path is exercised, but with a
@@ -82,7 +82,7 @@ var _ channel.Channel = (*recordingChannel)(nil)
 // --- minimal runtime handler -----------------------------------------
 //
 // Mirrors newEventHandler's core (Translate + ReplyTo stamping +
-// ch.Send) without the messages.SessionContext / /think / /tools side-paths
+// ch.Send) without the StatusBar / /think / /tools side-paths
 // — those are not relevant to the regression we're hunting.
 
 func integrationEventHandler(ch channel.Channel, _ *chatsession.ChatSession) func(env chatsession.AgentEventEnvelope) bool {
@@ -111,7 +111,7 @@ func newIntegrationChatSession(chatID string, spawner chatsession.Spawner) *chat
 
 // TestIntegration_AgentEvent_ReachesChannel is the smallest
 // reproduction: enqueue a message, submit it to the AS, push an
-// EventAgentText from the fake bridge, assert an messages.OutReply lands on the
+// EventAgentText from the fake bridge, assert an OutReply lands on the
 // channel with the correct chat_id + reply_to + text.
 func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 	spawner := &integrationSpawner{}
@@ -163,10 +163,10 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if len(rec) == 0 {
-		t.Fatal("no messages.OutboundMessage captured on channel within 2s — AgentEvent never reached ch.Send")
+		t.Fatal("no OutboundMessage captured on channel within 2s — AgentEvent never reached ch.Send")
 	}
 
-	// Find the messages.OutReply specifically (other Kinds may also fire —
+	// Find the OutReply specifically (other Kinds may also fire —
 	// MessageState events come through a different path).
 	var outReply *messages.OutboundMessage
 	for i := range rec {
@@ -176,7 +176,7 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 		}
 	}
 	if outReply == nil {
-		t.Fatalf("no messages.OutReply in captured messages (got %d total, kinds: %v)",
+		t.Fatalf("no OutReply in captured messages (got %d total, kinds: %v)",
 			len(rec), summarizeKinds(rec))
 	}
 
@@ -184,14 +184,14 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 	// userMsgID we queued. If empty, the placeholder card on
 	// feishu would never be created (see T-alive root cause).
 	if outReply.ReplyTo != userMsgID {
-		t.Errorf("messages.OutReply.ReplyTo = %q, want %q (placeholder-card anchor broken)",
+		t.Errorf("OutReply.ReplyTo = %q, want %q (placeholder-card anchor broken)",
 			outReply.ReplyTo, userMsgID)
 	}
 	if outReply.ChatID != cs.ChatID {
-		t.Errorf("messages.OutReply.ChatID = %q, want %q", outReply.ChatID, cs.ChatID)
+		t.Errorf("OutReply.ChatID = %q, want %q", outReply.ChatID, cs.ChatID)
 	}
 	if outReply.Text != "hello back" {
-		t.Errorf("messages.OutReply.Text = %q, want %q", outReply.Text, "hello back")
+		t.Errorf("OutReply.Text = %q, want %q", outReply.Text, "hello back")
 	}
 
 	// Tell the test we're done; Shutdown triggers a KindPromptEnded
@@ -200,8 +200,8 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 }
 
 // TestIntegration_AgentEventResult_ReachesChannel exercises the
-// final-result path (EventAgentResult → messages.OutResult). This is the second
-// half of the "no messages.OutReply/messages.OutResult to feishu" symptom.
+// final-result path (EventAgentResult → OutResult). This is the second
+// half of the "no OutReply/OutResult to feishu" symptom.
 func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 	spawner := &integrationSpawner{}
 	cs := newIntegrationChatSession("oc_test_chat", spawner)
@@ -250,7 +250,7 @@ func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if len(rec) == 0 {
-		t.Fatal("no messages.OutboundMessage captured on channel within 2s — EventAgentResult never reached ch.Send")
+		t.Fatal("no OutboundMessage captured on channel within 2s — EventAgentResult never reached ch.Send")
 	}
 
 	var outResult *messages.OutboundMessage
@@ -261,14 +261,14 @@ func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 		}
 	}
 	if outResult == nil {
-		t.Fatalf("no messages.OutResult in captured messages (got %d total, kinds: %v)",
+		t.Fatalf("no OutResult in captured messages (got %d total, kinds: %v)",
 			len(rec), summarizeKinds(rec))
 	}
 	if outResult.ReplyTo != userMsgID {
-		t.Errorf("messages.OutResult.ReplyTo = %q, want %q", outResult.ReplyTo, userMsgID)
+		t.Errorf("OutResult.ReplyTo = %q, want %q", outResult.ReplyTo, userMsgID)
 	}
 	if outResult.Text != "final answer" {
-		t.Errorf("messages.OutResult.Text = %q, want %q", outResult.Text, "final answer")
+		t.Errorf("OutResult.Text = %q, want %q", outResult.Text, "final answer")
 	}
 
 	fake.FinishEvent()
@@ -443,7 +443,7 @@ func TestIntegration_RealBridge_FakeShell(t *testing.T) {
 // immediately. If the script eagerly emits init/assistant/result
 // before the test calls QueueUserMessage, the readpump sees those
 // events while currentPrompt is still nil, so they all carry
-// UserMsgID="" and the messages.OutReply.ReplyTo assertion below fails.
+// UserMsgID="" and the OutReply.ReplyTo assertion below fails.
 // Real claudecode behaves correctly because the real CLI waits for
 // the prompt on stdin before producing the assistant turn — the
 // fake must mirror that. See issue: anchor race in
@@ -525,8 +525,8 @@ exit 0
 		t.Fatalf("QueueUserMessage: %v", err)
 	}
 
-	// Wait for the round-trip: at minimum we expect messages.OutReply +
-	// messages.OutResult to reach the channel.
+	// Wait for the round-trip: at minimum we expect OutReply +
+	// OutResult to reach the channel.
 	var rec []messages.OutboundMessage
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -537,10 +537,10 @@ exit 0
 		time.Sleep(20 * time.Millisecond)
 	}
 	if len(rec) == 0 {
-		t.Fatal("no messages.OutboundMessage captured within 5s — bridge did not produce events end-to-end")
+		t.Fatal("no OutboundMessage captured within 5s — bridge did not produce events end-to-end")
 	}
 
-	// Find messages.OutReply + messages.OutResult.
+	// Find OutReply + OutResult.
 	var outReply, outResult *messages.OutboundMessage
 	for i := range rec {
 		switch rec[i].Kind {
@@ -551,16 +551,16 @@ exit 0
 		}
 	}
 	if outReply == nil {
-		t.Errorf("no messages.OutReply in captured messages (kinds: %v)", summarizeKinds(rec))
+		t.Errorf("no OutReply in captured messages (kinds: %v)", summarizeKinds(rec))
 	} else if outReply.ReplyTo != userMsgID {
-		t.Errorf("messages.OutReply.ReplyTo = %q, want %q", outReply.ReplyTo, userMsgID)
+		t.Errorf("OutReply.ReplyTo = %q, want %q", outReply.ReplyTo, userMsgID)
 	} else if outReply.Text != "hello back" {
-		t.Errorf("messages.OutReply.Text = %q, want %q", outReply.Text, "hello back")
+		t.Errorf("OutReply.Text = %q, want %q", outReply.Text, "hello back")
 	}
 	if outResult == nil {
-		t.Errorf("no messages.OutResult in captured messages (kinds: %v)", summarizeKinds(rec))
+		t.Errorf("no OutResult in captured messages (kinds: %v)", summarizeKinds(rec))
 	} else if outResult.Text != "final answer" {
-		t.Errorf("messages.OutResult.Text = %q, want %q", outResult.Text, "final answer")
+		t.Errorf("OutResult.Text = %q, want %q", outResult.Text, "final answer")
 	}
 }
 

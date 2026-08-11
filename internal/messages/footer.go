@@ -3,7 +3,7 @@ package messages
 import "fmt"
 
 // Footer payload types — promoted from internal/command/gtw into
-// the messages package so the SessionContext struct can stay in
+// the messages package so the StatusBar struct can stay in
 // this package without creating an import cycle (chatsession →
 // outbound → channel → messages → gtw → chatsession would loop
 // through the gtw package; moving the leaf value types here keeps
@@ -12,7 +12,7 @@ import "fmt"
 // GitStatusSnapshot is the parsed result of a single
 // `git status --porcelain --branch` invocation against a workspace.
 // Pure value type (no exported state, no I/O) so it can be carried
-// across package boundaries (SessionContext, runtime stamping) and
+// across package boundaries (StatusBar, runtime stamping) and
 // tested without running git.
 //
 // F-57 adds read-only predicate methods on this type. They are
@@ -55,7 +55,7 @@ import "fmt"
 //	                 state (F-57 §3.1 / §4.1). F-57 added this.
 //
 // F-48 (follow-up to F-45): runtime stamps one of these on every
-// OutboundMessage.SessionContext that flows to a main-chat footer
+// OutboundMessage.StatusBar that flows to a main-chat footer
 // render site. See docs/feat/F-45-session-footer.md §1.7.
 type GitStatusSnapshot struct {
 	Branch        string
@@ -195,9 +195,9 @@ func (s *GitStatusSnapshot) IsReadyForPR() bool {
 //     commits, but that's the "git push --force-with-lease" path,
 //     not a /gtw pr concern.
 //  5. BehindRemote > 0 — remote moved forward; user must rebase.
-//  6. Uncommitted > 0 — working tree dirty; direct to push (which will
-//     commit + push).
-//  7. Untracked > 0 — git add first, then push.
+//  6. Uncommitted > 0 — working tree dirty. F-XX: /gtw push no longer
+//     auto-commits; direct to /gtw commit first.
+//  7. Untracked > 0 — git add, then commit, then push.
 //
 // The function returns "" when IsReadyForPR() returns true (no block).
 // Callers should check IsReadyForPR first and call PRBlockReason only on
@@ -223,11 +223,11 @@ func (s *GitStatusSnapshot) PRBlockReason() string {
 	case s.Uncommitted > 0:
 		return fmt.Sprintf(
 			"⚠️ %d file(s) changed but not committed\n"+
-				"hint: /gtw push first to commit + push, then /gtw pr", s.Uncommitted)
+				"hint: /gtw commit first, then /gtw push, then /gtw pr", s.Uncommitted)
 	case s.Untracked > 0:
 		return fmt.Sprintf(
 			"⚠️ %d new file(s) not added to git\n"+
-				"hint: git add them, then /gtw push, then /gtw pr", s.Untracked)
+				"hint: git add them, then /gtw commit, then /gtw push, then /gtw pr", s.Untracked)
 	}
 	return ""
 }

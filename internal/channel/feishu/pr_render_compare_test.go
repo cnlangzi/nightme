@@ -43,13 +43,14 @@ import (
 // formatPRSegmentWithEmojiPrefix renders the historical
 // alternate PR-tile format `🔗: [#N](url)` — kept so the A/B
 // harness can re-render the byte-for-byte payload anyone might
-// want to revisit. Production formatPRSegment emits the bare
-// plain `#N`; this helper is NOT used by production code.
-func formatPRSegmentWithEmojiPrefix(ctx *messages.SessionContext) string {
-	if ctx == nil {
+// want to revisit. Production formatPRSegment emits the
+// markdown link `[#N](url)`; this helper is NOT used by
+// production code.
+func formatPRSegmentWithEmojiPrefix(gb *messages.GitStatusBar) string {
+	if gb == nil {
 		return ""
 	}
-	pr := ctx.PullRequest
+	pr := gb.PullRequest
 	if pr == nil || pr.Number <= 0 || pr.URL == "" {
 		return ""
 	}
@@ -57,23 +58,27 @@ func formatPRSegmentWithEmojiPrefix(ctx *messages.SessionContext) string {
 }
 
 func TestPRRenderCompare(t *testing.T) {
-	ctx := &messages.SessionContext{
-		Agent:     "claude",
-		Model:     "MiniMax-M3[1m]",
-		SessionID: "639cc546-3647-44a5-ac0c-4f532cad04f4",
-		Workspace: "/home/devin/code/nightme.nightme/fix-gitstatus",
-		GitStatus: &gtw.GitStatusSnapshot{
-			Branch: "fix-gitstatus",
+	ctx := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{
+			Agent:     "claude",
+			Model:     "MiniMax-M3[1m]",
+			SessionID: "639cc546-3647-44a5-ac0c-4f532cad04f4",
 		},
-		PullRequest: &gtw.PR{
-			Number: 116,
-			URL:    "https://github.com/cnlangzi/nightme/pull/116",
-			State:  "OPEN",
+		GitBar: &messages.GitStatusBar{
+			Workspace: "/home/devin/code/nightme.nightme/fix-gitstatus",
+			GitStatus: &gtw.GitStatusSnapshot{
+				Branch: "fix-gitstatus",
+			},
+			PullRequest: &gtw.PR{
+				Number: 116,
+				URL:    "https://github.com/cnlangzi/nightme/pull/116",
+				State:  "OPEN",
+			},
 		},
 	}
 
 	// --- Variant A: current production format (plain #N) ---
-	linesA := formatSessionFooterLines(ctx)
+	linesA := formatStatusBarLines(ctx)
 	cardA, err := buildResultCardJSON("Hello from the agent.\n\nThis is the reply body.", linesA)
 	if err != nil {
 		t.Fatalf("variant A build: %v", err)
@@ -90,7 +95,7 @@ func TestPRRenderCompare(t *testing.T) {
 		// a stable substring (no other footer line contains it).
 		if strings.Contains(l, "[#116](") {
 			parts := strings.Split(l, " · ")
-			parts[len(parts)-1] = formatPRSegmentWithEmojiPrefix(ctx)
+			parts[len(parts)-1] = formatPRSegmentWithEmojiPrefix(ctx.GitBar)
 			linesB = append(linesB, strings.Join(parts, " · "))
 		} else {
 			linesB = append(linesB, l)

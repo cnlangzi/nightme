@@ -11,6 +11,75 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### `outbound`: rename SessionContext / Stamper to StatusBar / StatusBarSource (F-58)
+
+The per-message metadata envelope attached to every outbound
+message is renamed end-to-end to align with its user-facing
+mental model. The rename touches the type, the field, the
+function, and every comment / doc.
+
+**Terminology:**
+
+| Old | New |
+| --- | --- |
+| `SessionContext` (flat struct) | `StatusBar` (sub-bar struct) |
+| `OutboundMessage.SessionContext` | `OutboundMessage.StatusBar` |
+| `outbound.Stamper` (function type) | `outbound.StatusBarSource` |
+| `Options.Stamper` | `Options.Source` |
+| `stampIfNeeded` | `attachStatusBarIfMissing` |
+| `sessionContextInto` (pre-fill) | `stampFromAS` (same role, same name style) |
+| `newRuntimeStamper` | `newRuntimeStatusBar` |
+| `buildSessionContext` | `buildStatusBar` |
+| `formatSessionFooterLines` / `formatSessionFooter` / `formatPRSegment` | `formatStatusBarLines` / `formatStatusBar` / `formatPRSegment` (param changed from `*SessionContext` to `*GitStatusBar` for `formatPRSegment` only) |
+
+**Sub-bar structure (the semantic fix that came with the rename):**
+
+`StatusBar` is no longer a flat struct of `Agent` / `Model` /
+`Workspace` / `GitStatus` / `Usage` / etc. fields. It groups
+into three sub-bars that encode the "show what exists, hide
+what doesn't" rule structurally:
+
+- `GitBar *GitStatusBar` — workspace + git + PR context.
+  **Always populated** when the chat has a workspace
+  (`cs.SelectedCwd != ""`), even if no `AgentSession` is
+  selected. This is the "git status is always there" rule —
+  every outbound message that flows through the runtime carries
+  its worktree, so slash-command replies in a chat that hasn't
+  spawned an AS yet, and pre-spawn `MessageQueued` placeholder
+  cards, all surface the workspace line. PullRequest is nil
+  when no AS is selected (PR lookup is per-AS).
+- `AgentBar *AgentStatusBar` — agent identity (`Agent` /
+  `Model` / `SessionID`). Populated only when a chat has a
+  selected AgentSession — without an AS there's no agent
+  identity to surface (the "AgentBar / TokensBar 没有 AS 则
+  忽略" rule).
+- `UsageBar *UsageStatusBar` — per-turn usage (in/out tokens,
+  context window %, cost). Populated only when the bridge event
+  carries Usage (typically `OutResult` / `EventAgentResult`).
+  Streaming `OutReply` chunks without usage omit this entirely.
+
+**Stamper → GitBar fallback (the behaviour change that came
+with the rename):**
+
+Pre-rename, `newRuntimeStamper` returned `nil` when the chat had
+no selected `AgentSession`, even if the chat had a workspace.
+That meant slash-command replies in a pre-spawn chat, and
+`MessageQueued` placeholder cards, all rendered with no footer
+at all. Post-rename, the source produces a `StatusBar` with
+only `GitBar` populated when no AS exists — the user always
+sees what worktree they're talking about.
+
+**Why "StatusBar":**
+
+- The data is semantically *not* just a session context:
+  Workspace / GitStatus are workspace fields, Usage is a
+  per-turn field, only Agent/Model/SessionID are session fields.
+- "Context" collided with Go's `context.Context` at every read
+  site.
+- The new name matches the user-facing mental model: it's a
+  status bar at the bottom of every outbound message, not a
+  free-floating context bag.
+
 ### `gtw`: `/gtw push` + `/gtw pr` unified Readiness gate (F-57)
 
 Both commands now share a single `Readiness` snapshot (one
@@ -84,6 +153,71 @@ proof.
   continuity proof + test matrix + migration steps.
 - `internal/command/gtw/README.md`: no change (emoji + IM
   card conventions unchanged).
+
+### `gtw`: split `/gtw push` into `/gtw commit` + `/gtw push` (F-XX)
+
+The combined `/gtw push` (which both committed via a one-shot
+agent and then pushed to origin) is split into two
+single-purpose subcommands:
+
+- **`/gtw commit [-a <agent>]`** — owns the agent path:
+  readiness gate → headBefore capture → one-shot agent → verify
+  HEAD-advance + worktree-clean + branch → re-snapshot (catch
+  agent-introduced conflicts) → commit card. Refuses a clean
+  worktree ("ℹ️ nothing to commit"), conflicts ("unmerged paths"),
+  detached HEAD, and an unavailable agent.
+- **`/gtw push`** — now push-only. Refuses a dirty worktree
+  ("❌ worktree is dirty — /gtw push no longer auto-commits, run
+  `/gtw commit` first, then `/gtw push`"). Continues to be Branch 1
+  (no-op) + Branch 3 (programmatic push with retry verify);
+  Branch 2 ("agent + push") is gone — that agent path moved
+  into `/gtw commit`.
+
+The Commit path's success card switches from
+`🤖 <agent> committed N change(s) and pushed to <branch>`
+(pre-F-XX) to `🤖 <agent> committed N change(s) on <branch>` —
+"pushed" is now a separate step. The Push card stays
+`✅ pushed N commit(s) to <branch>`.
+
+**Field renames / API changes**
+
+- `~/.nightme/gtw.yml`: new `commit:` section (mirror of
+  `push:`) carrying `agent` + `hooks.before` / `hooks.after`.
+  `push.agent` is now ignored when present (parser keeps it
+  for schema back-compat with users' muscle memory). `push:`
+  itself keeps `hooks.before` / `hooks.after` (called around
+  the push-only flow).
+- `internal/command/gtw.commit_push.go`: renamed flow —
+  `dispatchPush` keeps Branches 1+3, drops Branch 2 +
+  post-agent re-snapshot. `RunOnceTimeout` (5 min) stays in
+  this file because `/gtw pr` also uses it.
+- `internal/command/gtw/commit.go` (new): `dispatchCommit`,
+  `runAgentToCommit`, `verifyAgentCommitted`, `buildAgentPrompt`.
+- `internal/command/gtw/cmd.go::Factory.Handle`: routes
+  `"commit"` alongside `fix / close / push / pr / sync`.
+  `runCommit` mirrors `runPush`.
+- `internal/command/gtw/render.go::replySuccessCard` splits
+  into `replyCommitSuccessCard` + `replyPushSuccessCard`.
+- `internal/command/gtw/commit_push.go` header comment updated
+  to describe the push-only shape.
+
+**Tests**
+
+- `commit_push_test.go` (1514 lines) splits into
+  `commit_test.go` (commit-path coverage) + `push_test.go`
+  (push-only coverage + shared helpers).
+- New push test `TestRunPush_DirtyRefused` covers the
+  "commit first" hint.
+- New commit test `TestRunCommit_HappyPath` covers the full
+  agent-commit + verify + re-snapshot + commit-card chain.
+
+**Docs**
+
+- `README.md` + `README.zh-CN.md` Usage lines split
+  `/gtw push` into `/gtw commit` + `/gtw push`.
+- `gtw` Spec / Usage + emoji vocabulary unchanged
+  (`🤖 committed-on` / `✅ pushed-to` are existing
+  headings of the same row count).
 
 ### Breaking: `/kill` renamed to `/close`, and `/close` no longer drops the AgentSession
 

@@ -11,7 +11,7 @@ import (
 // emitMessageState is the v1.3 (F-31) legacy translation path
 // preserved as a test helper. Production code uses the runtime's
 // MessageStateBus subscriber (cmd/nightme/run.go) which adds the
-// F-48 messages.SessionContext stamp; this helper is the un-stamped
+// F-48 StatusBar stamp; this helper is the un-stamped
 // equivalent, kept around so tests that target the translation
 // logic itself don't have to wire a full ChatSession.
 //

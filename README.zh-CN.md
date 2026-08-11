@@ -58,7 +58,8 @@ curl -fsSL https://nightme.dev/install.sh | bash
 
 ```
 /gtw fix                              # 开 worktree + 提议分支 + 拉起 agent
-/gtw push                             # 提交 + 推送（用配置的 agent 写 dirty-push 的 commit message）
+/gtw commit                           # 用配置的 agent 提交本地未提交的改动（不推送）
+/gtw push                             # 推送 worktree 分支；如 worktree 不干净会拒绝（先跑 /gtw commit）
 /gtw pr                               # 通过 gh / glab 开 PR
 /gtw close                            # 拆 worktree，回到 main
 /gtw sync                             # 把 origin/main 拉进 worktree 并 fast-forward
@@ -118,7 +119,7 @@ Agent 选择走三级优先级：
 | 3 | 当前 Chat 的 `/use` agent | — |
 | 兜底 | 都没设 | 维持原 `❌ no agent selected` 行为 |
 
-**作用域（依据代码）**：`push.agent` 在 `pushDirty` 里生效；`pushClean` 是纯 `git push -u origin`，不带 agent。`fix / close / sync` 预留 `agent` 字段以备将来，当前不消费。
+**作用域（依据代码）**：`commit.agent` 是跑一次性 commit 的 agent（F-XX 拆分前是 `push.agent`，agent 路径拆出后字段跟着过去）。`fix / close / sync / push` 预留 `agent` 字段以备将来，当前不消费（`push` 仍按用户肌肉记忆解析 `-a <agent>` 但忽略）。
 
 **降级策略**：yml.agent 配了一个没注册的 agent（比如 `pi` 不在你的 agents 列表里），NightMe 会先警告（`⚠️ gtw.yml agent "pi" not found; falling back to session default`）再退回优先级 3——绝不在你不知情的情况下换 agent。
 
@@ -257,7 +258,8 @@ stderr:
 | `/think on\|off` | 是否在回复卡里展示 agent 思考过程。 |
 | `/tools on\|off` | 是否展示每个工具的独立线程回复（默认关）。 |
 | `/gtw fix [-a <agent>]` | 在 `git worktree` 里拉起一次性 agent，自动提议分支名 + 任务。 |
-| `/gtw push [-a <agent>]` | 提交 + 推送；回复卡里展示分支 / 基线 / URL。 |
+| `/gtw commit [-a <agent>]` | 一次性 agent 把本地未提交的改动 commit 到当前分支（不推送）。若 worktree 不干净，跑在 `/gtw push` 之前。 |
+| `/gtw push` | 推送 worktree 分支。worktree 不干净会拒绝（先跑 `/gtw commit`）。 |
 | `/gtw pr  [-a <agent>]` | 一次性 agent 生成 Conventional Commits 标题 + 正文，通过 `gh` / `glab` 开 PR。 |
 | `/gtw close` | 拆 worktree，回到 main，删分支。 |
 | `/gtw sync` | 把 `origin/main` 拉进 worktree，fast-forward。 |

@@ -314,7 +314,29 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// wireRuntimeCallbacksAndRestore (see below) which bundles
 	// WithOnCreate + RestoreFromRegistry so the order can't be
 	// inverted at the call site.
-	gwImpl := gateway.New(messageDispatcher).(*gateway.Router)
+	// Per-AgentSession PR / MR cache. Built before Emitter
+	// construction (the Stamper reads it) and before
+	// gateway.New (the Emitter flows into Gateway's outbound
+	// chokepoint). See prcache.Registry comment for why this
+	// is owned at runtime scope, not on AgentSession itself.
+	prCacheReg := &prcache.Registry{}
+
+	gtwDeps := gtw.HandlerDeps{
+		Git:           gtw.ExecGitRunner{},
+		Prober:        &gtw.ExecHTTPProber{},
+		PRInvalidator: prCacheReg,
+	}
+
+	// emitter is the single daemon-wide outbound chokepoint.
+	// Constructed here (before gateway.New) so the Gateway can
+	// hold the reference at construction time — every
+	// downstream send (runtime pump / slash command /
+	// MessageState / PATCH) flows through the same Emitter
+	// instance. Manager.WithEmitter (further down) binds the
+	// same Emitter to every ChatSession.
+	em := outbound.New(ch, outbound.Options{Stamper: newRuntimeStamper(mgr, prCacheReg, gtwDeps)})
+
+	gwImpl := gateway.New(messageDispatcher, em).(*gateway.Router)
 	// All chat-session commands (/cwd /use /kill /new /watch /think
 	// /tools) and /gtw are SlashCommandFactory implementations
 	// implementations registered with reg.Register below. The legacy
@@ -335,42 +357,21 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	//       directly.
 	// Per-AgentSession PR / MR cache. Owned at runtime scope
 	// (NOT on AgentSession itself — the import cycle: gtw →
-	// chatsession → agentsession prevents agentsession from
-	// importing gtw, so a separate leaf package keeps the
-	// prcache.Registry here in cmd/nightme where deps already
-	// live). Stamp path looks up the cache by AgentSession.ID
-	// on every OutboundMessage; /gtw pr success calls
-	// Invalidate on the corresponding cache so the new URL
-	// surfaces on the next stamp rather than after the 60s
-	// TTL.
-	prCacheReg := &prcache.Registry{}
+	// (prCacheReg, gtwDeps, em are all constructed earlier, before
+	// gateway.New, so the Gateway can hold the Emitter reference
+	// at construction time. The lines below continue the gtwMgr
+	// setup that depends on those.)
 
-	gtwDeps := gtw.HandlerDeps{
-		Git:          gtw.ExecGitRunner{},
-		Prober:       &gtw.ExecHTTPProber{},
-		PRInvalidator: prCacheReg,
-	}
 	gtwMgr := gtw.NewManager()
 	gtwMgr.SetHandlerDeps(gtwDeps)
 
-	// F-XX: chatID → Channel 解析器。Manager.GetOrCreate 在新建 cs
-	// 时在锁外调它,把 Channel 一次性绑进 cs.channel 字段;之后 cs
-	// 自持 Channel,handler / 命令通过 cs.Emitter() 拿。
-	//
-	// 必须在任何 GetOrCreate 之前注入(包括 RestoreFromRegistry
-	// 路径 — 它内部会对每个持久化的 chatID 调一次 GetOrCreate)。
-	//
-	// 注:chatsession.Channel interface 和 gateway.Channel interface
-	// 签名不兼容(chatsession 用 chatsession.OutboundMessage,gateway
-	// 用 gateway.OutboundMessage),所以 resolver 通过 newChannelWrap
-	// 把 outbound.Emitter 适配成 chatsession.Channel 注入。生产环境
-	// 一个 nightme daemon 只有一个 gateway.Channel(目前永远是 feishu);
-	// 多 channel 部署时把 chatID → gateway.Channel 映射写进 resolver。
-	//
-	// emitter 是所有出站消息的统一咽喉,负责把 SessionContext footer
-	// 盖在每条消息上(runtime pump / slash command / MessageState 三条
-	// 路径都走它)。stamper 在装配层注入,不暴露给 chatsession。
-	em := outbound.New(ch, outbound.Options{Stamper: newRuntimeStamper(mgr, prCacheReg, gtwDeps)})
+	// chatID → ChatSession lookup. The runtime owns this closure
+	// so gtw's reaction / fix handlers can call into the
+	// chatsession API without re-implementing GetOrCreate.
+	// (Replaces the per-channel-resolver pattern that was used
+	// when chatsession carried a per-chat Channel. Now that
+	// chatsession holds a shared Emitter, only a shared CS
+	// lookup is needed here.)
 	mgr.WithEmitter(em)
 
 	// F-XX: wire the per-chat ChatSession lookup. Without this,

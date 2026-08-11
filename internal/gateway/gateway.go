@@ -62,7 +62,26 @@ import (
 // Channel is the IM adapter contract. The canonical definition
 // lives in internal/channel; this alias keeps the historical
 // gateway.Channel symbol working for existing call sites.
+// Channel is the IM adapter contract. The canonical definition
+// lives in internal/channel; this alias keeps the historical
+// gateway.Channel symbol working for existing call sites.
 type Channel = channel.Channel
+
+// Emitter is the outbound chokepoint contract the Gateway
+// requires. The runtime injects a concrete implementation
+// (typically an outbound.Emitter from internal/gateway/outbound)
+// at New() time. Defined here as a local interface so the gateway
+// package does not need to import outbound (which would create
+// gateway → outbound → channel → messages → gateway cycle).
+//
+// outbound.Emitter satisfies this interface structurally: the
+// method signatures are identical and the parameter type
+// (OutboundMessage) is the same type via the messages-package
+// type alias.
+type Emitter interface {
+	Send(ctx context.Context, msg OutboundMessage) error
+	SendCard(ctx context.Context, msg OutboundMessage) (string, error)
+}
 
 // CommandResult is the per-dispatch outcome.
 type CommandResult struct {
@@ -188,8 +207,21 @@ type Router = gateway
 // WithChannel after GetOrCreate). Falls back to the default
 // channel if chatID is not in the chatID→Channel map. Returns
 // nil if no default.
+// ResolveChannel returns the inbound Channel for chatID (the
+// channel whose pumpInbound produced the messages). nil only
+// when no default was attached.
 func (r *Router) ResolveChannel(chatID string) Channel {
 	return r.resolveChannel(chatID)
+}
+
+// Emitter returns the outbound chokepoint bound to this Router.
+// The runtime (cmd/nightme) fetches it once after New to bind
+// the same Emitter to chatsession.Manager (so every chat
+// session's outbound path goes through this single chokepoint).
+//
+// Lock-free: emitter is set once at construction.
+func (r *Router) Emitter() Emitter {
+	return r.emitter
 }
 
 // WithActionHandler installs the reaction/action
@@ -246,6 +278,16 @@ type gateway struct {
 	// nil, such messages are silently dropped.
 	messageDispatcher MessageDispatcher
 
+	// emitter (set via New) is the outbound chokepoint every
+	// downstream caller goes through for send-side operations.
+	// The runtime injects an outbound.Emitter (from
+	// internal/gateway/outbound) at construction; the gateway
+	// stores it for chat-session bind / wire helpers to fetch
+	// via the Emitter() method. Holds only a private reference
+	// to the outbound chokepoint — the underlying IM Channel
+	// is owned by outbound, not by the gateway.
+	emitter Emitter
+
 	// Stage 2 / v1.2 dispatch state. fields below are read/written under mu.
 	channels       []Channel
 	channelCh      chan InboundMessage
@@ -300,9 +342,19 @@ type gateway struct {
 // messageDispatcher closure; the Gateway itself no longer holds a
 // session manager reference. ChatSession lifecycle is owned by
 // the runtime + the chatsession package.
-func New(messageDispatcher MessageDispatcher) Gateway {
+// New constructs a Gateway with the runtime-injected message
+// dispatcher and outbound Emitter. The Emitter is the single
+// outbound surface; downstream code that needs to send goes
+// through Emitter() (and chatsession binds the same Emitter
+// via Manager.WithEmitter). AttachChannels must still be
+// called with the IM-backed Channel(s) for the inbound pump.
+func New(messageDispatcher MessageDispatcher, em Emitter) Gateway {
+	if em == nil {
+		panic("gateway.New: Emitter must not be nil")
+	}
 	return &gateway{
 		messageDispatcher: messageDispatcher,
+		emitter:           em,
 		chatToChan:        make(map[string]Channel),
 		bindings:          make(map[string]*BindingEntry),
 	}

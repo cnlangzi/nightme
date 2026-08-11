@@ -37,23 +37,20 @@ package outbound
 import (
 	"context"
 
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
 // Channel is the minimum contract outbound needs from an IM
-// adapter. Distinct from gateway.Channel (which also has Incoming)
-// because the outbound package only consumes Send / SendCard /
-// Name — it never reads from the adapter.
+// adapter. The full Channel interface lives in internal/channel;
+// outbound embeds it as a private field so no one outside
+// outbound can hold a reference to the underlying IM adapter.
 //
 // Channel adapters (Feishu, echo test stub, ...) implement
-// gateway.Channel with all four methods; that automatically
-// satisfies outbound.Channel via Go's structural typing. No
-// explicit wrapper or assertion needed.
-type Channel interface {
-	Name() string
-	Send(ctx context.Context, msg gateway.OutboundMessage) error
-	SendCard(ctx context.Context, msg gateway.OutboundMessage) (msgID string, err error)
-}
+// channel.Channel with all six methods; that automatically
+// satisfies the embedded field. No explicit wrapper or
+// assertion needed.
+type Channel = channel.Channel
 
 // Stamper produces the F-45/F-48 SessionContext footer for a
 // chat's outbound messages. The runtime injects the
@@ -104,7 +101,7 @@ func New(ch Channel, opts Options) Emitter {
 }
 
 type emitImpl struct {
-	ch      Channel
+	ch      channel.Channel
 	stamper Stamper
 	onError func(gateway.OutboundMessage, error)
 }

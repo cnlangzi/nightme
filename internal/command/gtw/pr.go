@@ -96,6 +96,16 @@ func dispatchPR(
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ read worktree status: %v", err)), nil
 	}
+	if snap == nil {
+		// CollectReadiness returns (nil, nil) on non-repo / empty /
+		// git error (see git_status.go). From /gtw pr's perspective
+		// "no snapshot" means "can't prove the worktree is ready" —
+		// fail closed rather than fall through and call gh against
+		// an unverified state.
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			"❌ cannot read worktree git status — refusing to open a PR\n"+
+				"hint: ensure the worktree is inside a git repo with at least one commit"), nil
+	}
 	if reason := snap.PRBlockReason(); reason != "" {
 		return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
 	}

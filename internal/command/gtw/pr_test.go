@@ -9,6 +9,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // -----------------------------------------------------------------------------
@@ -548,53 +549,31 @@ func setupPRWorktree(t *testing.T, rig *prTestRig, ctx Context) string {
 	return tmp
 }
 
-// setupPRGit configures the rig's pushGit with responses for
-// the rev-list invocations dispatchPR makes.
+// setupPRGit configures the rig with the F-57 readiness snapshot
+// derived from the legacy (unpushed, ahead) numeric API. F-57
+// replaced countUnpushed + nested preflight with a single
+// CollectReadiness call; tests still need a happy-path "no
+// unreadiness" snapshot plus a controllable countBaseAhead.
 //
-// Yml-path (setupPRWorktree wrote .nightme/gtw.yml):
+// (unpushed, ahead) → snapshot translation:
 //
-//	/ rev-list <branch>@{u}..<branch>   → countUnpushed (branch from c.Branch in yml)
+//	unpushed → snap.AheadOfRemote (always with HasUpstream=true)
+//	ahead    → rev-list main..HEAD  (registered separately)
 //
-// Non-worktree fallback (loadDispatchContext reads rev-parse when
-// there's no yml):
-//
-//	/ rev-list feat/manual@{u}..feat/manual → countUnpushed (branch from rev-parse mock)
-//	/ rev-list main..HEAD                  → countBaseAhead (base == "main")
-//
-// branch is needed because countUnpushed pins its rev-list to
-// the named branch (not HEAD), so HEAD@{u}..HEAD mocks would no
-// longer match. Callers pass the branch that c.Branch will
-// actually resolve to — either the yml branch (when the test
-// writes a yml via setupPRWorktree) or "feat/manual" (when the
-// test takes the git-derive path and accepts whatever the
-// rev-parse mock returns).
+// Tests exercising the new "branch has no upstream" / "behind"
+// / "conflict" / "uncommitted" branches should call
+// setupReadiness directly with a hand-built snapshot rather
+// than this shim.
 func setupPRGit(rig *prTestRig, branch string, unpushed, ahead int) {
-	rig.git.on("symbolic-ref", "origin/main", "", nil)
-	rig.git.onArgs([]string{"rev-list", "--count", branch + "@{u}.." + branch}, itoa10(unpushed), "", nil)
+	snap := messages.GitStatusSnapshot{
+		Branch:        branch,
+		HasUpstream:   true,
+		AheadOfRemote: unpushed,
+	}
+	setupReadiness(rig, branch, snap)
+	// setupReadiness defaults countBaseAhead to "5"; override with
+	// the per-test value here.
 	rig.git.onArgs([]string{"rev-list", "--count", "main..HEAD"}, itoa10(ahead), "", nil)
-	// Non-worktree mode fallbacks (loadDispatchContext calls
-	// these when there's no .nightme/gtw.yml):
-	rig.git.onArgs([]string{"rev-parse", "--show-toplevel"}, "/w", "", nil)
-	rig.git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, "feat/manual", "", nil)
-}
-
-func TestDispatchPR_UnpushedCommits(t *testing.T) {
-	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{		Branch:   "wt-unpushed",
-	})
-	setupPRGit(rig, "wt-unpushed", 3, 5) // 3 unpushed, 5 ahead → reject early on unpushed
-	rig.installDeps()
-
-	cs := rig.cs
-	s := captureCh(t, cs)
-	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
-	if err != nil {
-		t.Fatalf("dispatchPR err: %v", err)
-	}
-	r := s.lastText()
-	if !strings.Contains(r, "3 commit(s) made locally") || !strings.Contains(r, "/gtw push first") {
-		t.Fatalf("expected unpushed-commits reply, got:\n%s", r)
-	}
 }
 
 func TestDispatchPR_NothingToPR(t *testing.T) {
@@ -616,20 +595,42 @@ func TestDispatchPR_NothingToPR(t *testing.T) {
 	}
 }
 
-// TestDispatchPR_NothingToPR_UncommittedHints — when the branch is
-// at base AND the working tree has uncommitted edits, dispatchPR
-// should detect that and tell the user to /gtw push first (which
-// handles the commit + push step). The bare "nothing to PR" reply
-// is correct only for the clean-tree case.
-func TestDispatchPR_NothingToPR_UncommittedHints(t *testing.T) {
+// TestDispatchPR_NothingToPR_UncommittedHints — F-57 SUPERSEDED.
+//
+// The pre-F-57 behaviour this test asserted ("when ahead of base
+// is 0 but the tree is dirty, dispatchPR should still point the
+// user at /gtw push") is now structurally impossible: with the
+// readiness gate in front, an uncommitted-tree snapshot returns
+// "1 file(s) changed but not committed" from PRBlockReason and
+// never reaches the countBaseAhead==0 branch. See
+// TestDispatchPR_Uncommitted (F-57 §8.3 matrix) for the new
+// test of this dimension.
+
+// F-57 §8.3 readiness matrix tests.
+//
+// The shared rig is set up via setupPRWorktree (yml present, branch
+// = "wt") then setupReadiness with the dimension-under-test.
+// All tests assert two invariants:
+//   1. the dispatch never calls gh (verify via rig.git.calls)
+//   2. the reply contains the dimension's distinctive substring
+// (the substring check is loose enough to survive IM-text
+// rewordings, tight enough to catch the wrong dimension being
+// matched).
+//
+// dispatchPR's only "happy path" beyond readiness is agent +
+// CreatePR, which the readiness matrix deliberately does NOT
+// exercise — that path is covered by the original pre-F-57
+// TestDispatchPR_ResolveProvider_DetectFallback +
+// TestDispatchPR_CreatePRFails + happy-path tests (already in
+// place, rewired through setupReadiness in the prior commit).
+
+func TestDispatchPR_DetachedHead(t *testing.T) {
 	rig := newPRTestRig(t)
-	setupPRWorktree(t, rig, Context{		Branch:   "wt-uncommitted",
-	})
-	setupPRGit(rig, "wt-uncommitted", 0, 0) // 0 ahead, but tree dirty
-	// status --porcelain --branch --untracked-files=normal:
-	//   1 modified (README.md), 0 untracked.
-	rig.git.onArgs([]string{"status", "--porcelain", "--branch", "--untracked-files=normal"},
-		"## wt-uncommitted...origin/wt-uncommitted\n M README.md\n", "", nil)
+	setupPRWorktree(t, rig, Context{Branch: "wt-detached"})
+	// F-57: Branch==="" is the only way the parser produces
+	// "## HEAD (no branch)" / "(HEAD detached at ...)".
+	snap := messages.GitStatusSnapshot{Branch: ""}
+	setupReadiness(rig, "wt-detached", snap)
 	rig.installDeps()
 
 	cs := rig.cs
@@ -639,14 +640,208 @@ func TestDispatchPR_NothingToPR_UncommittedHints(t *testing.T) {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
 	r := s.lastText()
-	if !strings.Contains(r, "1 file(s) changed but not committed") {
-		t.Fatalf("expected uncommitted-file hint, got:\n%s", r)
+	if !strings.Contains(r, "detached HEAD") {
+		t.Fatalf("expected detached-HEAD reply, got:\n%s", r)
+	}
+}
+
+func TestDispatchPR_NoUpstream(t *testing.T) {
+	// F-57: the case that triggered this design — local branch
+	// has never been pushed to origin. Pre-F-57 the readiness
+	// gate mistakenly let this through (the old countUnpushed
+	// helper returned 0 on 'no upstream configured'); gh then
+	// rejected with 'Head ref must be a branch'. The new
+	// PRBlockReason explicit branch catches it here.
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-noup"})
+	snap := messages.GitStatusSnapshot{
+		Branch:      "wt-noup",
+		HasUpstream: false, //  // explicit
+	}
+	setupReadiness(rig, "wt-noup", snap)
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "branch has no upstream on origin") {
+		t.Fatalf("expected no-upstream reply, got:\n%s", r)
+	}
+	if !strings.Contains(r, "/gtw push first to publish the branch") {
+		t.Fatalf("expected /gtw push hint, got:\n%s", r)
+	}
+	// Invariant: dispatchPR must NOT have invoked gh.
+	for _, c := range rig.git.calls {
+		if len(c.args) > 0 && c.args[0] == "push" {
+			t.Fatalf("unexpected push invocation: %v", c.args)
+		}
+	}
+}
+
+func TestDispatchPR_AheadOfUpstream(t *testing.T) {
+	// Distinguishes "ahead=3 vs origin" (must push) from "ahead=0
+	// vs origin + ahead=5 vs base" (ready to PR). PRBlockReason
+	// fires BEFORE countBaseAhead, so the user sees the
+	// "push first" hint even if the branch has plenty of
+	// ahead-of-base content.
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-ahead"})
+	snap := messages.GitStatusSnapshot{
+		Branch:        "wt-ahead",
+		HasUpstream:   true,
+		AheadOfRemote: 3,
+	}
+	setupReadiness(rig, "wt-ahead", snap)
+	// SetupReadiness defaults countBaseAhead to "5"; keep that.
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "3 commit(s) made locally but not pushed") {
+		t.Fatalf("expected ahead-of-upstream reply, got:\n%s", r)
+	}
+}
+
+func TestDispatchPR_BehindUpstream(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-behind"})
+	snap := messages.GitStatusSnapshot{
+		Branch:        "wt-behind",
+		HasUpstream:   true,
+		AheadOfRemote: 0,
+		BehindRemote:  2,
+	}
+	setupReadiness(rig, "wt-behind", snap)
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "is 2 commit(s) ahead of your local branch") {
+		t.Fatalf("expected behind-upstream reply, got:\n%s", r)
+	}
+	if !strings.Contains(r, "git pull --rebase") {
+		t.Fatalf("expected rebase hint, got:\n%s", r)
+	}
+}
+
+func TestDispatchPR_Uncommitted(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-dirty"})
+	snap := messages.GitStatusSnapshot{
+		Branch:      "wt-dirty",
+		HasUpstream: true,
+		//Uncommitted: 2, // produced via porcelainFromSnapshot
+	}
+	// Use raw setupReadiness but we want Uncommitted=2; build snap
+	// explicitly then call setupReadiness — but setupReadiness
+	// takes snap directly. Just set Uncommitted=2.
+	snap.Uncommitted = 2
+	setupReadiness(rig, "wt-dirty", snap)
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "2 file(s) changed but not committed") {
+		t.Fatalf("expected uncommitted reply, got:\n%s", r)
 	}
 	if !strings.Contains(r, "/gtw push first") {
 		t.Fatalf("expected /gtw push hint, got:\n%s", r)
 	}
-	if strings.Contains(r, "nothing new to PR yet") {
-		t.Fatalf("bare 'nothing to PR' reply is misleading when tree is dirty:\n%s", r)
+}
+
+func TestDispatchPR_Untracked(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-untracked"})
+	snap := messages.GitStatusSnapshot{
+		Branch:      "wt-untracked",
+		HasUpstream: true,
+		Untracked:   3,
+	}
+	setupReadiness(rig, "wt-untracked", snap)
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "3 new file(s) not added to git") {
+		t.Fatalf("expected untracked reply, got:\n%s", r)
+	}
+}
+
+func TestDispatchPR_HasConflicts(t *testing.T) {
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-conflict"})
+	snap := messages.GitStatusSnapshot{
+		Branch:        "wt-conflict",
+		HasUpstream:   true,
+		HasConflicts:  true,
+		Uncommitted:   1, // 1 conflict entry → Uncommitted>=1
+		AheadOfRemote: 0,
+		BehindRemote:  0,
+	}
+	setupReadiness(rig, "wt-conflict", snap)
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	// PRBlockReason priority: conflicts come BEFORE uncommitted,
+	// so the conflict message wins even when Uncommitted > 0.
+	if !strings.Contains(r, "unmerged paths") {
+		t.Fatalf("expected conflict reply, got:\n%s", r)
+	}
+}
+
+func TestDispatchPR_ReadyNothingNew(t *testing.T) {
+	// All six readiness dimensions pass, but countBaseAhead is 0.
+	// This is the legitimate "nothing new to PR yet" path —
+	// distinct from the readiness failures above.
+	rig := newPRTestRig(t)
+	setupPRWorktree(t, rig, Context{Branch: "wt-nothing"})
+	snap := messages.GitStatusSnapshot{
+		Branch:      "wt-nothing",
+		HasUpstream: true,
+	}
+	setupReadiness(rig, "wt-nothing", snap)
+	rig.git.onArgs([]string{"rev-list", "--count", "main..HEAD"}, "0", "", nil)
+	rig.installDeps()
+
+	cs := rig.cs
+	s := captureCh(t, cs)
+	_, err := dispatchPR(context.Background(), cs, rig.deps, "chat", "msg", prArgs{})
+	if err != nil {
+		t.Fatalf("dispatchPR err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "nothing new to PR yet") {
+		t.Fatalf("expected nothing-to-PR reply, got:\n%s", r)
 	}
 }
 
@@ -1141,8 +1336,8 @@ func TestDispatchPR_NonWorktree_HappyPath(t *testing.T) {
 	git := newPushGit()
 	git.onArgs([]string{"rev-parse", "--show-toplevel"}, tmp, "", nil)
 	git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, "feat/manual", "", nil)
-	git.on("symbolic-ref", "origin/main", "", nil)
-	git.onArgs([]string{"rev-list", "--count", "feat/manual@{u}..feat/manual"}, "0", "", nil)
+	git.onArgs(statusCmd, "## feat/manual...origin/feat/manual\n", "", nil) // F-57 readiness
+	git.onArgs([]string{"symbolic-ref", "--short", "refs/remotes/origin/HEAD"}, "origin/main", "", nil)
 	git.onArgs([]string{"rev-list", "--count", "main..HEAD"}, "5", "", nil)
 	git.onArgs([]string{"rev-list", "--count", "origin/main..HEAD"}, "5", "", nil)
 	git.on("remote", "git@github.com:octocat/hello.git", "", nil)

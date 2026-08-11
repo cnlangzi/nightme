@@ -189,6 +189,11 @@ func (s *GitStatusSnapshot) IsReadyForPR() bool {
 //  3. !HasUpstream — this is the bug case F-57 fixes: branch was never
 //     pushed to origin. Direct the user to /gtw push.
 //  4. AheadOfRemote > 0 — local has unpushed commits; direct to push.
+//     NOTE: if BOTH ahead > 0 AND behind > 0 (diverged — local
+//     rebased on stale origin), the ahead branch wins. User must
+//     push first; the resulting push will fail if remote has new
+//     commits, but that's the "git push --force-with-lease" path,
+//     not a /gtw pr concern.
 //  5. BehindRemote > 0 — remote moved forward; user must rebase.
 //  6. Uncommitted > 0 — working tree dirty; direct to push (which will
 //     commit + push).

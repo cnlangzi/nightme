@@ -736,9 +736,10 @@ func (c *GitHubProvider) RemoveLabel(ctx context.Context, owner, repo string, id
 
 // CreatePR runs `gh pr create --base <base> --head <head> --title
 // <title> --body <body> --repo <owner>/<repo>`. The head branch must
-// already be pushed to origin (dispatchPR enforces this via the
-// countUnpushed early-return); if not, gh prints "head ref
-// doesn't exist" and we forward that stderr to the user.
+// already be pushed to origin (dispatchPR's F-57 readiness gate
+// enforces this via snap.LocalIsAtUpstreamTip() — i.e. local HEAD
+// == origin/<branch> tip); if not, gh prints "head ref doesn't
+// exist" and we forward that stderr to the user.
 //
 // gh exits 0 with the PR URL on stdout when the PR is created;
 // non-zero + stderr "already exists" → ErrPRExists; any other

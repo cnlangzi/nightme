@@ -11,6 +11,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // pushGit is a GitRunner whose responses are configured per
@@ -405,14 +406,20 @@ func TestParsePushArgs_MissingValue(t *testing.T) {
 
 func TestRunPush_CleanNoUnpushed(t *testing.T) {
 	git := newPushGit()
-	git.on("status", "", "", nil)
-	// F-56: dispatchPush now captures headBefore BEFORE deciding
-	// which branch to take. Mock it.
+	// F-57: dispatchPush's first readiness probe is
+	// `status --porcelain --branch --untracked-files=normal`.
+	// Snapshot = clean tree + has upstream + ahead=0 →
+	// HasNothingToPush() = true → Branch 1 no-op.
+	git.onArgs(statusCmd, "## wt-clean...origin/wt-clean\n", "", nil)
+	// headSHA helper (headBefore capture for verifyAgentCommitted
+	// + success card revRange).
 	git.onArgs([]string{"rev-parse", "HEAD"},
 		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", "", nil)
-	// rev-list errors with "no upstream configured" → countUnpushed
-	// returns 0 (treated as fresh branch).
-	git.on("rev-list", "", "fatal: no upstream configured for branch 'wt-clean'", errors.New("exit 128"))
+	// F-56's "no upstream" path is no longer reachable from
+	// dispatchPush at entry — HasNothingToPush on a
+	// HasUpstream=true snap is what we exercise. countUnpushed
+	// stays in programmaticPushWithRetry's verify loop (still
+	// useful there) but dispatchPush itself doesn't ask for it.
 
 	withAgent(t)
 	withCwd(t, t.TempDir())
@@ -445,15 +452,23 @@ func TestRunPush_CleanNoUnpushed(t *testing.T) {
 
 func TestRunPush_CleanWithUnpushed(t *testing.T) {
 	git := newPushGit()
-	git.on("status", "", "", nil)
-	// F-56: dispatchPush now captures headBefore at entry.
+	// F-57: dispatchPush's first readiness probe is
+	// `status --porcelain --branch --untracked-files=normal`.
+	// Snapshot = clean tree + has upstream + ahead=3 → NOT
+	// HasNothingToPush → falls through to Branch 3 (push only).
+	git.onArgs(statusCmd, "## wt-clean-unpushed...origin/wt-clean-unpushed [ahead 3]\n", "", nil)
+	// headSHA helper.
 	git.onArgs([]string{"rev-parse", "HEAD"},
 		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", "", nil)
 	// State change across push: before push, 3 unpushed; after
 	// push (verified by programmaticPushWithRetry), 0 unpushed.
+	// dispatchPush itself no longer queries rev-list @{u}..branch
+	// at entry — AheadOfRemote came from the status porcelain —
+	// but programmaticPushWithRetry still does, so this is the
+	// mock for that loop.
 	git.onSeq("rev-list",
-		pushGitResp{"3", "", nil}, // before push
-		pushGitResp{"0", "", nil}, // after push (verify + retry)
+		pushGitResp{"3", "", nil}, // before push (verify attempt 1)
+		pushGitResp{"0", "", nil}, // after push (verify attempt 2)
 	)
 	git.on("push", "To origin", "", nil)
 	// F-56: success card reads `git log headBefore..origin/<branch>`.
@@ -508,7 +523,14 @@ func TestRunPush_CleanWithUnpushed(t *testing.T) {
 // once and still gets "1", then surfaces the unpushed commits.
 func TestRunPush_VerifyDetectsSilentPushFailure(t *testing.T) {
 	git := newPushGit()
-	git.on("status", "", "", nil)
+	// F-57: status porcelain = clean tree + has upstream + ahead=3.
+	// (The push never lands, so the verify loop keeps seeing
+	// ahead>0; we model that by simulating the porcelain ahead
+	// value. Since dispatchPush only takes ONE status snapshot
+	// before pushing, the [ahead 3] in this mock represents the
+	// initial state — the post-push verify loop uses rev-list
+	// directly, not status.)
+	git.onArgs(statusCmd, "## wt-silent-fail...origin/wt-silent-fail [ahead 3]\n", "", nil)
 	// F-56 entry: headBefore is captured up-front.
 	git.onArgs([]string{"rev-parse", "HEAD"},
 		"cccccccccccccccccccccccccccccccccccccccc\n", "", nil)
@@ -550,26 +572,28 @@ func TestRunPush_VerifyDetectsSilentPushFailure(t *testing.T) {
 // surfaces the file list. User can commit manually or retry.
 func TestRunPush_DirtyAgentLeavesFiles(t *testing.T) {
 	git := newPushGit()
+	// F-57: dispatchPush's entry readiness probe is
+	// status --porcelain --branch --untracked-files=normal.
+	// Returns dirty porcelain (1 untracked file).
+	git.onArgs(statusCmd,
+		"## wt-dirty-leftover...origin/wt-dirty-leftover\n?? new-secret.env\n", "", nil)
 	// F-56: dispatchPush captures headBefore + counts unpushed
 	// at entry, before deciding which branch to take.
 	git.onArgs([]string{"rev-parse", "HEAD"},
 		"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n", "", nil)
 	git.on("rev-list", "0\n", "", nil) // entry countUnpushed: 0
-	// status is checked TWICE: dispatchPush's pre-flight
-	// (dirty → Branch 2) and verifyAgentCommitted's
-	// post-agent check (still dirty → warning).
-	git.onSeq("status",
-		pushGitResp{"?? new-secret.env\n", "", nil}, // pre-agent: dirty
-		pushGitResp{"?? new-secret.env\n", "", nil}, // post-agent: still dirty
-	)
+	// verifyAgentCommitted calls `status --porcelain` (no --branch)
+	// — separate argv key from statusCmd, so a per-args mock is
+	// enough. Pre-agent's first statusCmd already covered the
+	// entry check; here we model "agent left the tree dirty".
+	git.onArgs([]string{"status", "--porcelain"},
+		"?? new-secret.env\n", "", nil)
 	// F-56: dispatchPush captures headBefore (rev-parse HEAD).
 	// verifyAgentCommitted checks branch first (rev-parse
 	// --abbrev-ref HEAD), then HEAD-advance (rev-parse HEAD
 	// again) — but only if worktree clean check passed. Here
 	// uncommitted > 0 short-circuits, so HEAD-advance is skipped.
 	git.on("rev-parse", "wt-dirty-leftover\n", "", nil) // --abbrev-ref HEAD
-	git.onArgs([]string{"rev-parse", "HEAD"},
-		"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n", "", nil)
 
 	claude := &recordingAgent{
 		name:        "claude",
@@ -624,19 +648,23 @@ func TestRunPush_DirtyAgentLeavesFiles(t *testing.T) {
 // naming the unchanged SHA.
 func TestRunPush_DirtyAgentClaimsDoneButNoCommit(t *testing.T) {
 	git := newPushGit()
+	// F-57: status --porcelain --branch --untracked-files=normal
+	// entry probe — dirty tree (1 modified). HasUpstream=true,
+	// AheadOfRemote=0 (HEAD already at origin).
+	git.onArgs(statusCmd,
+		"## wt-noop...origin/wt-noop\n M foo.go\n", "", nil)
 	// F-56: dispatchPush captures headBefore at entry.
 	git.onArgs([]string{"rev-parse", "HEAD"},
 		"cafebabecafebabecafebabecafebabecafebabe\n", "", nil)
 	// countUnpushed at entry: 0 (HEAD already at origin).
 	git.on("rev-list", "0\n", "", nil)
-	// status: pre-agent dirty, post-agent clean (agent did
-	// `git stash` or similar — files moved out of the worktree
-	// without a commit). Pre-fix this looked identical to a
-	// successful commit+push.
-	git.onSeq("status",
-		pushGitResp{"M foo.go\n", "", nil},   // pre-agent: dirty
-		pushGitResp{"", "", nil},             // post-agent: clean (no commit!)
-	)
+	// verifyAgentCommitted's worktree-clean check (per-args,
+	// status --porcelain — no --branch). Agent did `git stash`
+	// or similar — files moved out of the worktree without a
+	// commit. Pre-fix this looked identical to a successful
+	// commit+push.
+	git.onArgs([]string{"status", "--porcelain"},
+		"", "", nil) // post-agent: clean (no commit!)
 	// HEAD-branch: agent stayed on c.Branch (didn't switch
 	// branches), so the branch check passes.
 	git.on("rev-parse", "wt-noop\n", "", nil)
@@ -685,11 +713,14 @@ func TestRunPush_DirtyAgentClaimsDoneButNoCommit(t *testing.T) {
 // for, and will never land on c.Branch.
 func TestRunPush_DirtyAgentSwitchesBranch(t *testing.T) {
 	git := newPushGit()
+	// F-57: status --porcelain --branch --untracked-files=normal
+	// entry probe — dirty (1 modified).
+	git.onArgs(statusCmd,
+		"## wt-cbranch...origin/wt-cbranch\n M foo.go\n", "", nil)
 	// F-56: dispatchPush captures headBefore + counts unpushed at entry.
 	git.onArgs([]string{"rev-parse", "HEAD"},
 		"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\n", "", nil)
 	git.on("rev-list", "0\n", "", nil)
-	git.on("status", "M foo.go\n", "", nil) // pre-agent: dirty
 	// HEAD-branch snapshot after the agent: on wt-side,
 	// NOT on wt-c.Branch. This is the trigger for the
 	// branch-mismatch check.
@@ -727,11 +758,14 @@ func TestRunPush_DirtyAgentSwitchesBranch(t *testing.T) {
 
 func TestRunPush_DirtyDelegatesToAgent(t *testing.T) {
 	git := newPushGit()
+	// F-57: status --porcelain --branch --untracked-files=normal
+	// entry probe — dirty (1 modified).
+	git.onArgs(statusCmd,
+		"## wt-dirty...origin/wt-dirty\n M foo.go\n", "", nil)
 	// F-56: dispatchPush entry snapshots.
 	git.onArgs([]string{"rev-parse", "HEAD"},
 		"1111111111111111111111111111111111111111\n", "", nil)
 	git.on("rev-list", "0\n", "", nil)
-	git.on("status", "M foo.go\n", "", nil)
 
 	claude := &recordingAgent{
 		name:        "claude",
@@ -815,12 +849,18 @@ func TestRunPush_DirtyAgentCommitsAndPushes(t *testing.T) {
 		pushGitResp{"1", "", nil}, // re-count after agent: 1 commit
 		pushGitResp{"0", "", nil}, // programmaticPushWithRetry verify: 0
 	)
-	// dispatchPush: status pre-agent is dirty → Branch 2.
-	// verifyAgentCommitted: status post-agent is clean.
-	git.onSeq("status",
-		pushGitResp{"M foo.go\n", "", nil}, // pre-agent: dirty
-		pushGitResp{"", "", nil},           // post-agent: clean
+	// dispatchPush: statusCmd (--porcelain --branch
+	// --untracked-files=normal) pre-agent is dirty → Branch 2;
+	// then re-snapshot after the agent verifies clean AND shows
+	// ahead=1 (the agent's commit). Per-args sequence: entry
+	// dirty → post-verify clean-with-ahead.
+	git.onArgsSeq(statusCmd,
+		pushGitResp{"## wt-dirty...origin/wt-dirty\n M foo.go\n", "", nil},
+		pushGitResp{"## wt-dirty...origin/wt-dirty [ahead 1]\n", "", nil},
 	)
+	// verifyAgentCommitted's listUncommittedFiles probe (a
+	// different argv: status --porcelain, no --branch).
+	git.onArgs([]string{"status", "--porcelain"}, "", "", nil)
 	// verifyAgentCommitted (1): branch still on c.Branch.
 	git.on("rev-parse", "wt-dirty\n", "", nil) // --abbrev-ref HEAD
 	// programmaticPushWithRetry: push call.
@@ -889,11 +929,14 @@ func TestRunPush_DirtyAgentCommitsAndPushes(t *testing.T) {
 
 func TestRunPush_DirtyWithAgentFlag(t *testing.T) {
 	git := newPushGit()
+	// F-57: status --porcelain --branch --untracked-files=normal
+	// entry probe — dirty (1 modified).
+	git.onArgs(statusCmd,
+		"## wt-flag...origin/wt-flag\n M foo.go\n", "", nil)
 	// F-56: dispatchPush entry snapshots.
 	git.onArgs([]string{"rev-parse", "HEAD"},
 		"2222222222222222222222222222222222222222\n", "", nil)
 	git.on("rev-list", "0\n", "", nil)
-	git.on("status", "M foo.go\n", "", nil)
 
 	opencode := &recordingAgent{
 		name:        "opencode",
@@ -1007,11 +1050,14 @@ func TestRunPush_AgentBinaryMissing(t *testing.T) {
 
 func TestRunPush_AgentRunOnceError(t *testing.T) {
 	git := newPushGit()
+	// F-57: status --porcelain --branch --untracked-files=normal
+	// entry probe — dirty (1 modified).
+	git.onArgs(statusCmd,
+		"## wt-error...origin/wt-error\n M foo.go\n", "", nil)
 	// F-56: dispatchPush entry snapshots.
 	git.onArgs([]string{"rev-parse", "HEAD"},
 		"3333333333333333333333333333333333333333\n", "", nil)
 	git.on("rev-list", "0\n", "", nil)
-	git.on("status", "M foo.go\n", "", nil)
 
 	claude := &recordingAgent{
 		name:       "claude",
@@ -1235,8 +1281,10 @@ func TestRunPush_NonWorktree_CleanWithUnpushed(t *testing.T) {
 	// loadDispatchContext's git calls:
 	git.onArgs([]string{"rev-parse", "--show-toplevel"}, tmp, "", nil)
 	git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, "feat/manual", "", nil)
-	// dispatchPush's calls (clean + 3 unpushed → Branch 3 push-only):
-	git.on("status", "", "", nil)
+	// F-57: status --porcelain --branch --untracked-files=normal
+	// entry probe — clean + ahead=3 → Branch 3 push-only.
+	git.onArgs(statusCmd,
+		"## feat/manual...origin/feat/manual [ahead 3]\n", "", nil)
 	// F-56: dispatchPush captures headBefore at entry, then
 	// countUnpushed (3) before deciding Branch 3.
 	git.onArgs([]string{"rev-parse", "HEAD"},
@@ -1282,5 +1330,207 @@ func TestRunPush_NonWorktree_CleanWithUnpushed(t *testing.T) {
 	}
 	if strings.Contains(r, "━━━━━━━━━━━━━━") {
 		t.Errorf("legacy `━━━━━━━━━━━━━━` separator should be gone after F-56 rewrite, got:\n%s", r)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// F-57 §8.2 push matrix tests.
+//
+// Each test stages a single readiness snapshot via setupPushMocks,
+// writes a yml, and asserts:
+//   1. the dispatched state matches the dimension-under-test;
+//   2. the agent is / is not invoked as expected;
+//   3. programmaticPush is / is not called as expected.
+//
+// Helper pushTestRig / setupPushReadiness live in readiness_test.go;
+// this section only writes the assertions.
+// -----------------------------------------------------------------------------
+
+// pushTestRig wraps the bare pushGit + chat session into a struct
+// so the matrix tests can install deps in one call (matching the
+// prTestRig pattern in pr_test.go).
+type pushTestRig struct {
+	git *pushGit
+	cs  *chatsession.ChatSession
+}
+
+func newPushTestRig(t *testing.T) *pushTestRig {
+	t.Helper()
+	tmp := t.TempDir()
+	withCwd(t, tmp)
+	cs := &chatsession.ChatSession{}
+	_ = cs.SetSelectedCwd(tmp)
+	return &pushTestRig{
+		git: newPushGit(),
+		cs:  cs,
+	}
+}
+
+func (r *pushTestRig) installDeps(t *testing.T, branch string) {
+	t.Helper()
+	withAgent(t)
+	writeYml(t, mustPwd(t), Context{
+		Worktree: mustPwd(t),
+		Branch:   branch,
+		RepoRoot: mustPwd(t),
+	})
+	_ = r.cs.SetSelectedAgent("claude")
+}
+
+// TestDispatchPush_HardRefuse_Conflicts — F-57 §8.2 row 1.
+// HasConflicts → PushBlockReason → exit before agent, before push.
+func TestDispatchPush_HardRefuse_Conflicts(t *testing.T) {
+	rig := newPushTestRig(t)
+	rig.installDeps(t, "wt-conflict")
+	setupPushMocks(rig.git, "wt-conflict", messages.GitStatusSnapshot{
+		Branch:       "wt-conflict",
+		HasUpstream:  true,
+		HasConflicts: true,
+		Uncommitted:  1,
+	})
+
+	s := captureCh(t, rig.cs)
+	_, err := dispatchPush(context.Background(), rig.cs,
+		HandlerDeps{Git: rig.git}, "chat", "msg", pushArgs{}, "")
+	if err != nil {
+		t.Fatalf("dispatchPush err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "unmerged paths") {
+		t.Fatalf("expected conflict hard-refuse, got:\n%s", r)
+	}
+	for _, c := range rig.git.calls {
+		if c.args[0] == "push" {
+			t.Fatalf("conflict must not call push: %v", c.args)
+		}
+	}
+}
+
+// TestDispatchPush_NothingToPush — F-57 §8.2 row 2.
+// Clean + has upstream + ahead=0 → HasNothingToPush → exit.
+func TestDispatchPush_NothingToPush(t *testing.T) {
+	rig := newPushTestRig(t)
+	rig.installDeps(t, "wt-clean")
+	setupPushMocks(rig.git, "wt-clean", messages.GitStatusSnapshot{
+		Branch:      "wt-clean",
+		HasUpstream: true,
+	})
+
+	s := captureCh(t, rig.cs)
+	_, err := dispatchPush(context.Background(), rig.cs,
+		HandlerDeps{Git: rig.git}, "chat", "msg", pushArgs{}, "")
+	if err != nil {
+		t.Fatalf("dispatchPush err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "ℹ️ nothing to push") {
+		t.Fatalf("expected nothing-to-push reply, got:\n%s", r)
+	}
+	for _, c := range rig.git.calls {
+		if c.args[0] == "push" {
+			t.Fatalf("nothing-to-push must not call push: %v", c.args)
+		}
+	}
+}
+
+// TestDispatchPush_NoUpstreamFreshBranch — F-57 §8.2 row 5.
+// Clean + !HasUpstream → NOT HasNothingToPush → push with -u.
+// (Worktree is clean, no agent, just programmatic push.)
+func TestDispatchPush_NoUpstreamFreshBranch(t *testing.T) {
+	rig := newPushTestRig(t)
+	rig.installDeps(t, "wt-fresh")
+	setupPushMocks(rig.git, "wt-fresh", messages.GitStatusSnapshot{
+		Branch:      "wt-fresh",
+		HasUpstream: false,
+	})
+	// headBefore capture.
+	rig.git.onArgs([]string{"rev-parse", "HEAD"},
+		"5555555555555555555555555555555555555555\n", "", nil)
+	// programmaticPush runs `git push -u origin <branch>`.
+	rig.git.onArgs([]string{"push", "-u", "origin", "wt-fresh"},
+		"To origin\n", "", nil)
+	// programmaticPushWithRetry's verify loop: rev-list @{u}..branch
+	// returns 0 after the first push.
+	rig.git.on("rev-list", "0", "", nil)
+	// success card log query.
+	rig.git.on("log", "5555555555 first commit\n", "", nil)
+
+	s := captureCh(t, rig.cs)
+	_, err := dispatchPush(context.Background(), rig.cs,
+		HandlerDeps{Git: rig.git}, "chat", "msg", pushArgs{}, "")
+	if err != nil {
+		t.Fatalf("dispatchPush err: %v", err)
+	}
+	// Push must have been called with -u.
+	pushed := false
+	for _, c := range rig.git.calls {
+		if len(c.args) >= 2 && c.args[0] == "push" && c.args[1] == "-u" {
+			pushed = true
+			break
+		}
+	}
+	if !pushed {
+		t.Fatalf("expected `git push -u origin <branch>` call, got %v", rig.git.calls)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "✅ pushed") {
+		t.Fatalf("expected success card, got:\n%s", r)
+	}
+}
+
+// TestDispatchPush_AgentIntroducedConflicts — F-57 §8.2 row 7.
+// Agent runs, verifyAgentCommitted passes (worktree clean from
+// its perspective — listUncommittedFiles saw empty porcelain),
+// but the re-snapshot at the dispatchPush layer sees a UU entry.
+// This is the "agent introduced a conflict via some side-effect
+// (e.g. running a merge mid-flight) that listUncommittedFiles
+// happened to miss" defensive case. The re-snapshot's
+// PushBlockReason is the second line of defense.
+func TestDispatchPush_AgentIntroducedConflicts(t *testing.T) {
+	rig := newPushTestRig(t)
+	rig.installDeps(t, "wt-bad-agent")
+	// Entry: dirty (1 uncommitted, no conflict yet).
+	rig.git.onArgsSeq(statusCmd,
+		pushGitResp{"## wt-bad-agent...origin/wt-bad-agent\n M foo.go\n", "", nil},
+		// Post-agent: agent somehow left a conflict.
+		pushGitResp{"## wt-bad-agent...origin/wt-bad-agent\nUU conflict.go\n", "", nil},
+	)
+	// verifyAgentCommitted sees the worktree as clean (empty
+	// status --porcelain). This is the realistic mismatch:
+	// listUncommittedFiles only looks at the first 4 chars of
+	// each line — if the line is malformed or empty, the
+	// conflict can slip past it. (UU <path> has 4 chars before
+	// the path, so it SHOULD be caught; this test pins the
+	// behaviour at the dispatchPush re-snapshot layer in case
+	// that ever regresses.)
+	rig.git.onArgs([]string{"status", "--porcelain"}, "", "", nil)
+	// verifyAgentCommitted branch check.
+	rig.git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"},
+		"wt-bad-agent\n", "", nil)
+	// headBefore capture (entry) + headAfter (post-agent).
+	// Different SHAs → HEAD advanced.
+	rig.git.onArgsSeq([]string{"rev-parse", "HEAD"},
+		pushGitResp{"6666666666666666666666666666666666666666\n", "", nil},
+		pushGitResp{"7777777777777777777777777777777777777777\n", "", nil},
+	)
+
+	claude := &recordingAgent{name: "claude", runOnceText: "I introduced a conflict."}
+	withAgent(t, claude)
+	_ = rig.cs.SetSelectedAgent("claude")
+
+	s := captureCh(t, rig.cs)
+	_, err := dispatchPush(context.Background(), rig.cs,
+		HandlerDeps{Git: rig.git}, "chat", "msg", pushArgs{}, "")
+	if err != nil {
+		t.Fatalf("dispatchPush err: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "unmerged paths") {
+		t.Fatalf("expected conflict reply after agent, got:\n%s", r)
+	}
+	for _, c := range rig.git.calls {
+		if c.args[0] == "push" {
+			t.Fatalf("agent-introduced conflict must not call push: %v", c.args)
+		}
 	}
 }

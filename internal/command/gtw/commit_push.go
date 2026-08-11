@@ -21,23 +21,25 @@ import (
 // Exported because both /gtw push and /gtw pr use it.
 const RunOnceTimeout = 5 * time.Minute
 
-// dispatchPush is the three-branch dispatcher for /gtw push,
-// per F-56 §2. The dispatch is decided by two git-state queries
-// done once at entry:
+// dispatchPush is the dispatcher for /gtw push, layered on top of
+// the F-57 Readiness gate. The structural shape is still three
+// branches (no-op / agent+push / push-only), but the entry
+// gating moved from a triple git-probe (status + detectConflicts
+// + countUnpushed) to a single CollectReadiness snapshot read
+// from messages.GitStatusSnapshot predicates:
 //
-//	isClean        := strings.TrimSpace(statusOut) == ""
-//	unpushedBefore := countUnpushed(worktree, branch)
+//   - Branch 1 (no-op):  snap.HasNothingToPush() — clean tree,
+//     upstream exists, ahead=0.
+//   - Branch 2 (agent+push): snap.WorkingTreeIsClean() == false
+//     — worktree dirty, agent runs to commit, then we re-snapshot
+//     and verify.
+//   - Branch 3 (push-only): everything else that reaches push
+//     — clean tree + (upstream missing OR ahead > 0). The
+//     "upstream missing" case is the first-push path; programmaticPush
+//     runs `git push -u origin <branch>`.
 //
-// and selects exactly one of:
-//
-//   - Branch 1 (no-op)         — isClean && unpushed==0
-//   - Branch 2 (agent + push)  — !isClean
-//   - Branch 3 (push only)     — isClean && unpushed>0
-//
-// Each branch is mutually exclusive. The agent is only spawned
-// in Branch 2; the push is owned by nightme in Branches 2 and
-// 3; Branch 1 just notifies the user and exits.
-//
+// Agent is only spawned in Branch 2; the push is owned by nightme
+// in Branches 2 and 3; Branch 1 just notifies the user and exits.
 // Reply is sent inline via cs.Emitter(); return value is the
 // runtime's *Result carrying Consumed / Dropped only.
 func dispatchPush(
@@ -62,6 +64,15 @@ func dispatchPush(
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ read worktree status: %v", err)), nil
+	}
+	if snap == nil {
+		// (nil, nil) from CollectReadiness = not a git repo, empty
+		// repo, or git error. None of these are states we can push
+		// from. Surface a clear refusal rather than silently
+		// continuing.
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			"❌ cannot read worktree git status — refusing to push\n"+
+				"hint: ensure the worktree is inside a git repo with at least one commit"), nil
 	}
 
 	// 1. Hard-refuse conflicts. Pushing an unresolved state would

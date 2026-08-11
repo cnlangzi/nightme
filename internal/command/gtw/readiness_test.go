@@ -115,9 +115,11 @@ func setupReadiness(rig *prTestRig, branch string, snap messages.GitStatusSnapsh
 	rig.git.onArgs(statusCmd, porcelainFromSnapshot(snap), "", nil)
 
 	// DefaultBranch (used by both dispatchPush and dispatchPR for
-	// the success-card revRange / PR base ref).
+	// the success-card revRange / PR base ref). DefaultBranch does
+	// strings.TrimPrefix(out, "origin/") so the mock must NOT
+	// include the "refs/remotes/" prefix.
 	rig.git.onArgs([]string{"symbolic-ref", "--short", "refs/remotes/origin/HEAD"},
-		"refs/remotes/origin/main", "", nil)
+		"origin/main", "", nil)
 
 	// countBaseAhead — only /gtw pr reaches this. Default to 5
 	// (happy path "has stuff to PR"). Tests that want the
@@ -134,3 +136,21 @@ func setupReadiness(rig *prTestRig, branch string, snap messages.GitStatusSnapsh
 
 // itoa10 lives in commit_push_test.go (older code) — we reuse it
 // here for the readiness fixture.
+
+// setupPushMocks is the push-test equivalent of setupReadiness.
+// The F-56 push tests already wire their own deps.Git and chat
+// session; this helper registers the readiness-related git
+// responses on the supplied *pushGit so they compose with the
+// rest of the test's per-test setup.
+//
+// Unlike setupReadiness, this does NOT register countBaseAhead
+// or the DefaultBranch mock — those are /gtw pr concerns only.
+// For push tests, only `status --porcelain --branch
+// --untracked-files=normal` matters at the dispatch entry point.
+//
+// Tests that need post-agent re-snapshot behaviour should
+// register an onSeq on statusCmd before calling
+// dispatchPush.
+func setupPushMocks(git *pushGit, branch string, snap messages.GitStatusSnapshot) {
+	git.onArgs(statusCmd, porcelainFromSnapshot(snap), "", nil)
+}

@@ -198,6 +198,26 @@ func runRunWith(cmd *cobra.Command, deps runDeps) error {
 // runDaemon is the daemon core. Wires chatsession.Manager +
 // Spawner + EventCallback; runs the gateway until signal /
 // context cancel.
+//
+// Wiring order (top to bottom — read in order, each step
+// depends on the previous ones):
+//
+//  1. Load config (cfg) and registry stores (csFile, asFile)
+//  2. Build agent registry (agents) + IM channel (ch); ch.Start
+//  3. Build chatsession.Manager (mgr) with spawner + persistence
+//  4. Build shared outbound infra:
+//       - prcache.Registry (per-AS PR cache)
+//       - gtw.HandlerDeps (git runner, HTTP prober)
+//       - outbound.Emitter (the single outbound chokepoint;
+//         holds ch and the Stamper that reads prCacheReg +
+//         gtwDeps + mgr)
+//  5. Build gtw.Manager, ReactionRouter, command.Commander,
+//     shell.Dispatcher (the command-adapter layer)
+//  6. Build gateway.Router (messageDispatcher + em); wire
+//     gwImpl.WithCommander / WithShellDispatch / WithActionHandler
+//  7. mgr.WithEmitter(em) + wireRuntimeCallbacksAndRestore (must
+//     precede gwImpl.Start; the latter depends on chat sessions
+//     having their per-bus subscribers installed)
 func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os.Signal) error {
 	if ctx == nil {
 		ctx = context.Background()

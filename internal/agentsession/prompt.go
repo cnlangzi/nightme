@@ -138,7 +138,7 @@ const (
 	// reserved.
 	PromptEndStalledKilled
 
-	// PromptEndUserKilled: endPrompt called by `/kill` slash
+	// PromptEndUserKilled: endPrompt called by `/close` slash
 	// command before process exit. Phase 0 does not distinguish
 	// user-initiated kills from ProcessDied; reserved.
 	PromptEndUserKilled

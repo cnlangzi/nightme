@@ -1,9 +1,9 @@
 // Package stop implements the `/stop` slash command.
 //
 // /stop halts execution of the in-flight turn on the chat's
-// selectedAgent. Distinct from /kill:
+// selectedAgent. Distinct from /close:
 //
-//   - /kill  — cwd-scoped (every AgentSession whose Cwd ==
+//   - /close — cwd-scoped (every AgentSession whose Cwd ==
 //              activeCwd), destructive (terminates processes +
 //              drops AgentSession entries from the pool +
 //              agent_sessions.json). Next message triggers a
@@ -15,7 +15,7 @@
 //              next queued prompt once the bridge settles).
 //
 // Use /stop for "I changed my mind / want to redirect" — keep the
-// session, drop the in-flight generation. Use /kill for "this
+// session, drop the in-flight generation. Use /close for "this
 // session is wedged / I want a clean slate".
 //
 // Factory holds *chatsession.Manager directly.

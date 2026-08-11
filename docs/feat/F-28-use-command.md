@@ -238,7 +238,7 @@ T4: Both reach ChatSession; serialized via poolMu
 | Spawn semantics | Always spawn (or reconnect if running) | Lazy spawn (reuse if pool has) |
 | Restart on existing | Implicit reconnect | **Never restart**; reuse only |
 | Multiple per chat | Not supported | **Multiple AgentSessions in pool** |
-| /kill interaction | /kill kills the run session | /kill kills entire pool |
+| /close interaction | /close kills the run session | /close kills entire pool |
 
 ### 6.2 Command mapping
 
@@ -246,7 +246,7 @@ T4: Both reach ChatSession; serialized via poolMu
 |------|-----------------|
 | `/cwd <path>` then `/run claude` | `/cwd <path>` then `/use claude` |
 | `/run claude` (no /cwd yet) | `/cwd <path>` then `/use claude` (or `/use` after `/cwd`) |
-| `/kill` | `/kill` (kills entire pool instead of single session) |
+| `/close` | `/close` (kills entire pool instead of single session) |
 | `/cwd <new-path>` then `/run claude` | `/cwd <new-path>` then `/use claude` (spawns new AgentSession for new cwd) |
 
 ### 6.3 Backward compatibility
@@ -272,7 +272,7 @@ T4: Both reach ChatSession; serialized via poolMu
 ### 7.2 Integration
 
 - /use claude → /use codex → /use claude: assert same PID for claude at each "use claude" call
-- /kill → /use claude: assert new PID (old AgentSession removed from pool)
+- /close → /use claude: assert new PID (old AgentSession removed from pool)
 - /cwd /A → /use claude → /cwd /B → /use claude: assert (claude, /A) and (claude, /B) both exist in pool
 
 ### 7.3 E2E

@@ -19,6 +19,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/command/services"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -264,12 +265,13 @@ type ChatSession struct {
 	cancel context.CancelFunc
 	ctxMu  sync.Mutex
 
-	// channel is the IM Channel bound to this chat session.
-	// Set once at New() time (production) or by WithChannel
-	// (test path / late binding). Immutable post-binding; no
-	// lock needed. nil means "no channel bound yet" — commands
-	// must nil-check via Channel() before calling Send/SendCard.
-	channel Channel
+	// emitter is the outbound chokepoint bound to this chat
+	// session. Set once at WithEmitter time (production wires it
+	// from Manager, which holds the single daemon-wide Emitter);
+	// test paths may pass a fake. Immutable post-binding; no
+	// lock needed. nil means "no emitter bound yet" — commands
+	// must nil-check via Emitter() before calling Send/SendCard.
+	emitter outbound.Emitter
 
 	// --- F-45 teamflow (gtw) state ------------------------------
 	//
@@ -297,10 +299,7 @@ type ChatSession struct {
 // Callers can detect this via cs.Channel() == nil and skip
 // channel-dependent operations. Returns (*cs, nil) regardless
 // of ch — construction never fails on the channel binding.
-func New(chatID, primaryAgent string, ch Channel) (*ChatSession, error) {
-	if ch == nil {
-		slog.Default().Warn("chatsession.New: channel is nil (chatID=" + chatID + ")")
-	}
+func New(chatID, primaryAgent string) (*ChatSession, error) {
 	cs := &ChatSession{
 		ID:               deriveIDFromChatID(chatID),
 		ChatID:           chatID,
@@ -310,7 +309,6 @@ func New(chatID, primaryAgent string, ch Channel) (*ChatSession, error) {
 		watchMode:        WatchModeMention, // F-watch default
 		thinkMode:        ThinkModeShow,    // F-think default
 		toolsMode:        ToolsModeHide, // F-38 default (quiet by default)
-		channel:          ch,
 		createdAt:        time.Now(),
 		lastInteractionAt: time.Now(),
 	}
@@ -374,7 +372,7 @@ var ErrUnknownAgent = errors.New("chatsession: unknown agent")
 // to a single pool entry during NewActiveAgentSessions so the handler
 // can render a per-agent status instead of a bare count.
 //
-// See docs/feat/F-43-kill-new-graceful-and-reset.md §5.2.
+// See docs/feat/F-43-close-new-graceful-and-reset.md §5.2.
 type ResetResult struct {
 	Agent       string // e.g. "claude", "codex"
 	Cwd         string // e.g. "/code/A"
@@ -469,7 +467,7 @@ func (cs *ChatSession) SetSelectedAgent(agent string) error {
 	// events on the new AS use the new anchor. The old Prompt's
 	// EndedAt remains zero until either the old AS process dies
 	// (at which point Phase 1 will call endPrompt(ProcessDied))
-	// or the old AS is /killed. endPrompt itself only operates
+	// or the old AS is /closed. endPrompt itself only operates
 	// on cs.selectedAS, so it cannot clean the old one. This is
 	// a deliberate Phase 0 simplification; the cost is one
 	// orphaned Prompt struct per /use-while-busy until the old
@@ -613,36 +611,37 @@ func (cs *ChatSession) emitMessageDropped(msg Message) {
 // subscribers register via PromptEndBus().Subscribe. See
 // docs/feat/F-54-event-bus.md for the migration rationale.
 
-// Channel returns the IM channel bound to this chat session.
-// Returns nil if no channel was bound at New() time (test path)
-// or if WithChannel was never called.
+// Emitter returns the outbound chokepoint bound to this chat
+// session. nil when no Emitter has been wired yet (e.g. before
+// Manager.WithEmitter has been called or before GetOrCreate has
+// applied the Manager's emitter). Callers must nil-check before
+// Send / SendCard.
 //
-// Lock-free: channel is set once and never mutated.
-func (cs *ChatSession) Channel() Channel {
+// Lock-free: emitter is set once and never mutated.
+func (cs *ChatSession) Emitter() outbound.Emitter {
 	if cs == nil {
 		return nil
 	}
-	return cs.channel
+	return cs.emitter
 }
 
-// WithChannel binds a Channel to this ChatSession. Returns
-// the receiver for chaining. Used by Manager.GetOrCreate via
-// the channelResolver path; not normally called by commands.
+// WithEmitter binds the outbound chokepoint to this chat session.
+// Set once and never mutated; subsequent calls with the same
+// emitter are no-ops, a different emitter panics.
 //
-// Idempotent: subsequent calls with the same Channel are no-ops;
-// calls with a different Channel panic — a chat's channel binding
-// is immutable for the daemon's lifetime.
-func (cs *ChatSession) WithChannel(ch Channel) *ChatSession {
+// Test paths can use this to inject a fake; production wiring
+// goes through Manager.WithEmitter → Manager.GetOrCreate.
+func (cs *ChatSession) WithEmitter(em outbound.Emitter) *ChatSession {
 	if cs == nil {
 		return cs
 	}
-	if ch == nil {
+	if em == nil {
 		return cs
 	}
-	if cs.channel != nil && cs.channel != ch {
-		panic(fmt.Sprintf("chatsession: ChatSession %s already bound to a different Channel", cs.ChatID))
+	if cs.emitter != nil && cs.emitter != em {
+		panic(fmt.Sprintf("chatsession: ChatSession %s already bound to a different Emitter", cs.ChatID))
 	}
-	cs.channel = ch
+	cs.emitter = em
 	return cs
 }
 
@@ -711,6 +710,69 @@ func (cs *ChatSession) QueueUserMessage(msg Message) error {
 		return err
 	}
 	_ = cs.TryFlush()
+	return nil
+}
+
+// SteerUserMessage is the runtime entry point for the `/steer <msg>`
+// slash command. It does two things:
+//
+//  1. Try to accelerate the busy-guard release on the current
+//     in-flight turn by calling `as.Stop(ctx)` in a background
+//     goroutine. The goroutine outlives the SteerUserMessage
+//     call, so a slow bridge RPC (opencode's HTTP interrupt,
+//     claudecode's SIGINT + drain, pi's abort RPC) cannot block
+//     the slash command reply.
+//
+//  2. Push msg to the HEAD of the pending region via
+//     `queue.PushFront`. The steered message will be the first
+//     thing the agent sees on the next turn — even if other
+//     user messages had piled up in the queue while the
+//     current turn was running.
+//
+// Ordering note: capacity is checked BEFORE the Stop call. If
+// the queue is at QueueMaxMsgs, PushFront returns ErrFull and
+// we skip Stop — aborting the bridge for a message we couldn't
+// enqueue would leave the user's intent silently lost (the
+// current turn is gone, the new message is gone).
+//
+// Skipped Stop when:
+//   - no AS is selected (Handle() == nil)
+//   - the AS is in StatusExited (e.g. after /close killed the
+//     bridge process; calling Stop on a defunct handle is a
+//     wasted RPC + an ignored error)
+//
+// Distinct from QueueUserMessage in two ways: (a) it tries to
+// abort the current turn first, and (b) the new message goes to
+// the front of the queue instead of the back. Both are needed
+// for "stop + redirect" semantics.
+//
+// The caller (slash command factory) is responsible for emitting
+// `MessageQueued` BEFORE calling this — same timing contract as
+// QueueUserMessage. TryFlush is NOT called here; the FlushHook
+// path on the next KindPromptEnded (which Stop may accelerate)
+// handles submission.
+func (cs *ChatSession) SteerUserMessage(msg Message) error {
+	if msg.ID == "" {
+		return nil
+	}
+
+	// Step 1: capacity check. If we can't enqueue the steered
+	// message, skip Stop entirely — aborting the bridge for a
+	// message we lost is worse than not steering at all.
+	if err := cs.queue.PushFront(msg); err != nil {
+		return err
+	}
+
+	// Step 2: fire-and-forget Stop on a background goroutine.
+	// The call returns immediately; the bridge's terminal event
+	// drives the FlushHook to drain the queue on its own clock.
+	if as := cs.SelectedAgentSession(); as != nil && as.Status() != StatusExited {
+		if h := as.Handle(); h != nil {
+			go func() {
+				_ = h.Stop(cs.Context())
+			}()
+		}
+	}
 	return nil
 }
 
@@ -818,6 +880,19 @@ func (cs *ChatSession) TryFlush() error {
 		cs.queue.Rewind()
 		return nil
 	}
+	if as.Status() == StatusExited {
+		// The bridge process is gone (e.g. after /close) but the
+		// AS entry is still in the pool with sessionID preserved.
+		// Don't try to Submit — wait for the next
+		// LookupSelectedAgentSession call which detects
+		// StatusRunning && Handle() != nil mismatch and respawns
+		// a fresh bridge with --resume.
+		slog.Debug("chatsession: TryFlush SKIP",
+			"chat_id", cs.ChatID, "reason", "as_status_exited",
+			"queue_len", cs.queue.Len(), "as_id", as.ID)
+		cs.queue.Rewind()
+		return nil
+	}
 
 	// Build the Prompt from the peek'd batch. The batch is a
 	// stable snapshot owned by us; the queue can be mutated
@@ -825,6 +900,34 @@ func (cs *ChatSession) TryFlush() error {
 	// is the same set — it's later read by writebackMessageState
 	// (and by the AS-side readpump) but never mutated.
 	p := cs.buildPromptLocked(batch)
+
+	// Pre-Submit re-check under cs.mu. Between the snapshot of
+	// `as` above and the Submit call below, the selected AS can
+	// be respawned by LookupSelectedAgentSession (after /close
+	// killed it) or its status can flip. Submitting the peek'd
+	// batch to a freshly-respawned bridge would re-issue the
+	// message — same race as the SteerUserMessage / Submit
+	// interaction the review flagged.
+	//
+	// Re-acquire and verify:
+	//   1. The selected AS pointer is unchanged (no respawn).
+	//   2. The status hasn't flipped to Exited (no /close).
+	// If either fails, Rewind so the batch is retried against
+	// the correct AS on the next FlushHook.
+	cs.mu.Lock()
+	currentAS := cs.selectedAS
+	statusNow := StatusRunning
+	if currentAS != nil {
+		statusNow = currentAS.Status()
+	}
+	cs.mu.Unlock()
+	if currentAS != as || statusNow == StatusExited {
+		slog.Debug("chatsession: TryFlush SKIP",
+			"chat_id", cs.ChatID, "reason", "as_changed_pre_submit",
+			"queue_len", cs.queue.Len(), "as_id", as.ID)
+		cs.queue.Rewind()
+		return nil
+	}
 
 	// Submit runs OUTSIDE cs.mu and outside the queue's mutex —
 	// SendBlocks can block on a hung prompt RPC. Errors mean
@@ -875,7 +978,7 @@ func (cs *ChatSession) writebackMessageState(as *AgentSession, p *Prompt) {
 
 	// Lock-ordering caveat (F-54 review fix): we previously held
 	// cs.mu across Publish, blocking every concurrent cs.mu caller
-	// (/use, /kill, QueueUserMessage, TryFlush) for the duration
+	// (/use, /close, QueueUserMessage, TryFlush) for the duration
 	// of any subscriber's work — most importantly the feishu
 	// adapter's AddReaction HTTP round-trip (~200-500ms). We now
 	// snapshot the payload under the lock, release it, and then
@@ -910,7 +1013,7 @@ const QueueMaxMsgs = 4096
 // queue, marks each dropped message as MessageDropped, and emits
 // the wire event. Returns the number dropped.
 //
-// Used by /kill and /new to clear queued messages on a forced
+// Used by /close and /new to clear queued messages on a forced
 // buffer reset. SendBlocks failures DO NOT trigger this path —
 // failed messages stay Queued for natural retry (see
 // docs/feat/message_lifecycle.md §5.1).
@@ -1056,7 +1159,7 @@ func (cs *ChatSession) detachAgentSession(as *AgentSession) {
 // keeps running in the background, its readpump continues to
 // consume events, and ChatSession can resume reading from the same
 // channel on re-/use. Real cancellation happens via Shutdown()
-// (called only by /kill or CS shutdown).
+// (called only by /close or CS shutdown).
 //
 // Caller must hold cs.mu. Takes cs.ctxMu (via Context()) and the
 // target's asMu; neither is ever held while acquiring cs.mu, so the
@@ -1210,7 +1313,18 @@ func (cs *ChatSession) AgentSessionsInCwd(cwd string) []*AgentSession {
 }
 
 // DropAgentSession is the per-entry cleanup primitive used by
-// /kill's batch path. For a single kill it composes:
+// callers that want to fully discard a session entry. NOT used
+// by /close itself (which preserves the AgentSession so respawn
+// can continue via --resume <sessionID>). Reach this primitive
+// when:
+//
+//   - Daemon shutdown reaps a stale Detached entry.
+//   - A future /forget slash command wants to drop both the
+//     process AND the persisted session identity.
+//   - Manual cleanup scripts (e.g. editing agent_sessions.json
+//     outside the daemon).
+//
+// Composes four steps:
 //
 //  1. detachAgentSubscription — tears down the EventBus subscriber
 //     so the AS no longer feeds the ChatSession receive loop.
@@ -1222,9 +1336,10 @@ func (cs *ChatSession) AgentSessionsInCwd(cwd string) []*AgentSession {
 //     entry so the next daemon restart does not resurrect a corpse.
 //
 // Safe to call concurrently with LookupSelectedAgentSession: takes
-// cs.mu once. Caller (kill.KillAgent / KillAllAgents) is responsible
-// for invoking as.Close() first so the bridge process is gone before
-// the disk entry is deleted (F-43 §5.3 invariant).
+// cs.mu once. Callers that wish to terminate the bridge process
+// first should invoke as.Close() before calling this; DropAgentSession
+// itself does NOT signal the bridge (the two-step pattern keeps
+// graceful-shutdown timing in the caller's hands).
 func (cs *ChatSession) DropAgentSession(as *AgentSession) {
 	if as == nil {
 		return
@@ -1263,7 +1378,7 @@ func (cs *ChatSession) DropAgentSession(as *AgentSession) {
 //     去启动AgentSession.因为它本身就没启动,所以不需要New".
 //   - InputBuffer cleared: queued user messages are dropped before
 //     the function returns, regardless of how many bridges succeeded.
-//     This matches /kill semantics (F-34 §6 Q-N4).
+//     This matches /close's queue-handling (F-34 §6 Q-N4).
 //   - currentTurnUserMsgID NOT cleared: the next user message after
 //     /new naturally opens a new turn + new anchor + cold-creates a
 //     new receipt (Channel-autonomous per v1.3 §2.4).

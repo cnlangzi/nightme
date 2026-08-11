@@ -88,7 +88,8 @@ func TestIntegration_FixCloseRoundTrip(t *testing.T) {
 
 	// --- step 4: actually run /gtw close -------------------------
 	ch := &recordingCh{}
-	cs, _ := chatsession.New("chat-int-1", "test-agent", ch)
+	cs, _ := chatsession.New("chat-int-1", "test-agent")
+	cs.WithEmitter(ch)
 	if err := cs.SetSelectedCwd(wt); err != nil {
 		t.Fatalf("SetSelectedCwd wt: %v", err)
 	}
@@ -168,7 +169,8 @@ func TestIntegration_CloseRejectsDirty(t *testing.T) {
 	}
 
 	ch := &recordingCh{}
-	cs, _ := chatsession.New("chat-int-2", "test-agent", ch)
+	cs, _ := chatsession.New("chat-int-2", "test-agent")
+	cs.WithEmitter(ch)
 	_ = cs.SetSelectedCwd(wt)
 	slot := &memSlot{Context{Mode: ModeLocal, Branch: branch, Worktree: wt, RepoRoot: repoRoot, State: StateFixing}}
 	deps := HandlerDeps{
@@ -380,7 +382,8 @@ func TestIntegration_ShortFlagNForLocalFix(t *testing.T) {
 	repoRoot := initTempRepo(t)
 
 	ch := &recordingCh{}
-	cs, _ := chatsession.New("chat-int-shortN", "test-agent", ch)
+	cs, _ := chatsession.New("chat-int-shortN", "test-agent")
+	cs.WithEmitter(ch)
 	if err := cs.SetSelectedCwd(repoRoot); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}

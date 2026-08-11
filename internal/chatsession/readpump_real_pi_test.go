@@ -101,7 +101,7 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 	reg.Register(piAgent)
 	spawner := NewRegistrySpawner(reg)
 
-	cs, _ := New("oc_real_pi_test", "pi", newTestChannel())
+	cs, _ := New("oc_real_pi_test", "pi")
 	cs = cs.WithPersistence(csFile, asFile)
 	cs = cs.WithSpawner(spawner)
 	if err := cs.SetSelectedCwd(dir); err != nil {
@@ -164,8 +164,8 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 	go cs.PumpEvents(pumpCtx)
 
 	defer func() {
-		// Simulate /kill via the lifecycle accessors — the kill
-		// package's KillAllAgents is tested in internal/command/kill
+		// Simulate /close via the lifecycle accessors — the close
+		// package's CloseAllAgents is tested in internal/command/close
 		// and importing it here would create a cycle.
 		snapshot := cs.AgentSessionsInCwd(cs.SelectedCwd())
 		for _, as := range snapshot {

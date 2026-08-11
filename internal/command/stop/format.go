@@ -1,8 +1,8 @@
 // /stop reply rendering — produces the IM-friendly plain-text
 // summary the handler returns via command.Reply.
 //
-// Sibling to internal/command/kill/format.go (FormatKillResults
-// for /kill). Lives in the stop package because the /stop
+// Sibling to internal/command/close/format.go (FormatResults
+// for /close). Lives in the stop package because the /stop
 // surface is fully owned by command/stop (see stop.go doc
 // comment). Sharing the byte cap + tail helper would require a
 // third "format" package; not worth it for two callers.
@@ -12,7 +12,7 @@
 //   - stopped         — "Stop signal sent to <agent>. Next prompt
 //                        will take over."
 //   - noop            — "No turn in flight on <agent>."
-//   - not-supported   — "<agent> doesn't support /stop; use /kill
+//   - not-supported   — "<agent> doesn't support /stop; use /close
 //                        instead."
 //   - failed          — "Stop failed on <agent>: <err>"
 package stop
@@ -23,7 +23,7 @@ import "fmt"
 // /stop call. The output is suitable for channel.Send (plain
 // text, Feishu-renderable).
 //
-// Distinct from FormatKillResults in that /stop always operates
+// Distinct from FormatResults in that /stop always operates
 // on exactly one AgentSession (the selectedAgent), so the reply is
 // always one line — no per-entry bucket sort, no byte cap.
 func FormatStopResult(r Result) string {
@@ -35,7 +35,7 @@ func FormatStopResult(r Result) string {
 		case "noop":
 			return "No active agent."
 		case "not-supported":
-			return "This bridge doesn't support /stop; use /kill instead."
+			return "This bridge doesn't support /stop; use /close instead."
 		case "failed":
 			return fmt.Sprintf("Stop failed: %v", r.Error)
 		default:
@@ -49,7 +49,7 @@ func FormatStopResult(r Result) string {
 	case "noop":
 		return fmt.Sprintf("No turn in flight on %s @ %s.", r.Agent, r.Cwd)
 	case "not-supported":
-		return fmt.Sprintf("%s @ %s doesn't support /stop; use /kill instead.",
+		return fmt.Sprintf("%s @ %s doesn't support /stop; use /close instead.",
 			r.Agent, r.Cwd)
 	case "failed":
 		if r.Error != nil {

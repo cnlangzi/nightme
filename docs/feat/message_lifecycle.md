@@ -84,7 +84,7 @@
 |---|---|---|
 | `Queued` | 已收到，正在等待被提交；或提交尝试失败后仍在等待 | 消息进入系统的默认起点；下次 `flushPending` 触发再投 |
 | `Submitted` | 已经正式交给 agent | SendBlocks 返回 nil 后批量置位；失败路径不会到达此状态 |
-| `Dropped` | 被主动清空，从未提交 | 仅对应**主动**的队列清空操作（例如 `/kill`、`/new`、`BufferClear` 调用），不覆盖投递失败 |
+| `Dropped` | 被主动清空，从未提交 | 仅对应**主动**的队列清空操作（例如 `/close`、`/new`、`BufferClear` 调用），不覆盖投递失败 |
 
 **关键澄清（投递失败时的行为）**：如果提交尝试本身失败了（例如发送给 agent 时报错），**不会创建
 `Prompt`**，对应的消息**仍然停留在 `Queued`**——既不转 `Submitted`，也不转 `Dropped`。下次
@@ -155,7 +155,7 @@
 ### 5.1 `Message.Stage`
 
 - `Queued → Submitted`：`PromptHook` 内 `SendBlocks` 返回 nil 后批量置位；失败路径不会到达此状态。
-- `Queued → Dropped`：仅当消息被主动从队列清空（`/kill`、`/new`、`BufferClear`），不覆盖投递失败。
+- `Queued → Dropped`：仅当消息被主动从队列清空（`/close`、`/new`、`BufferClear`），不覆盖投递失败。
 - 投递尝试失败：不创建 `Prompt`，消息保持 `Queued`；下次 `flushPending` 自动重投（§3 原则 5）。
 
 一条消息一旦进入 `Submitted` 或 `Dropped`，就不再变化——**`Message` 不会因为它所属 `Prompt` 后续的

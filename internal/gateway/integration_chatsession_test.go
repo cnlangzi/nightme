@@ -13,19 +13,12 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 )
 
-// fakeCh is a minimal chatsession.Channel for tests in this package.
-// Defined inline to avoid a shared test-helpers package; mirrors the
-// shape in internal/chatsession/test_helpers_test.go.
-type nopCh struct{}
-func (nopCh) Send(_ context.Context, _ chatsession.OutboundMessage) error { return nil }
-func (nopCh) SendCard(_ context.Context, _ chatsession.OutboundMessage) (string, error) { return "", nil }
-func (nopCh) Patch(_ context.Context, _ chatsession.OutboundMessage) error { return nil }
-func newTestChannel() chatsession.Channel { return nopCh{} }
-
+// fakeCh is a minimal outbound.Emitter for tests in this package.
 
 // T-alive: end-to-end integration test that reproduces the
 // "AgentSession events never reach the channel" regression
@@ -50,7 +43,7 @@ func newTestChannel() chatsession.Channel { return nopCh{} }
 // fails with the precise (empty ChatID / empty ReplyTo / missing
 // kind) signal needed to localize the regression.
 
-// --- mock gateway.Channel ----------------------------------------------------
+// --- mock channel.Channel ----------------------------------------------------
 
 type recordingChannel struct {
 	mu      sync.Mutex
@@ -84,7 +77,7 @@ func (c *recordingChannel) Record() []gateway.OutboundMessage {
 	return out
 }
 
-var _ gateway.Channel = (*recordingChannel)(nil)
+var _ channel.Channel = (*recordingChannel)(nil)
 
 // --- minimal runtime handler -----------------------------------------
 //
@@ -92,7 +85,7 @@ var _ gateway.Channel = (*recordingChannel)(nil)
 // ch.Send) without the SessionContext / /think / /tools side-paths
 // — those are not relevant to the regression we're hunting.
 
-func integrationEventHandler(ch gateway.Channel, _ *chatsession.ChatSession) func(env chatsession.AgentEventEnvelope) bool {
+func integrationEventHandler(ch channel.Channel, _ *chatsession.ChatSession) func(env chatsession.AgentEventEnvelope) bool {
 	return func(env chatsession.AgentEventEnvelope) bool {
 		out, ok := outbound.Translate(env.ChatID, *env.Event)
 		if !ok {
@@ -107,7 +100,7 @@ func integrationEventHandler(ch gateway.Channel, _ *chatsession.ChatSession) fun
 // --- helpers ----------------------------------------------------------
 
 func newIntegrationChatSession(chatID string, spawner chatsession.Spawner) *chatsession.ChatSession {
-	cs, _ := chatsession.New(chatID, "fake", newTestChannel())
+	cs, _ := chatsession.New(chatID, "fake")
 	cs = cs.WithSpawner(spawner)
 	cs.SetSelectedCwd("/tmp")
 	cs.SetSelectedAgent("fake")
@@ -583,4 +576,14 @@ func (s *realBridgeSpawner) Spawn(ctx context.Context, _, _ string, args []strin
 		Args:      args,
 		SessionID: sessionID,
 	})
+}
+
+// noopEmitter is a test-only outbound.Emitter that does nothing.
+type noopEmitter struct{}
+
+func (noopEmitter) Send(context.Context, gateway.OutboundMessage) error {
+	return nil
+}
+func (noopEmitter) SendCard(context.Context, gateway.OutboundMessage) (string, error) {
+	return "", nil
 }

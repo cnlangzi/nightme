@@ -718,7 +718,7 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 // the readpump saw EventAgentDone or EventAgentError).
 //
 // Best-effort: silently no-op when no receipt exists yet (e.g.
-// /kill before any event arrived — the receipt would never have
+// /close before any event arrived — the receipt would never have
 // rendered). All API failures inside SetPromptState are logged
 // and do not propagate.
 func (a *Adapter) MarkReceiptPromptDone(ctx context.Context, chatID, userMsgID string) {

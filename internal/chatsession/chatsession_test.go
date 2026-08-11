@@ -18,7 +18,7 @@ import (
 // files now depend on it.
 
 func TestNewAndBasics(t *testing.T) {
-	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs, _ := New("oc_xxx", "claude")
 	if cs.ChatID != "oc_xxx" {
 		t.Fatalf("ChatID: got %q", cs.ChatID)
 	}
@@ -47,7 +47,7 @@ func TestNewAndBasics(t *testing.T) {
 
 func TestSetActiveCwdDoesNotSpawn(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
 	if err := cs.SetSelectedCwd("/code/bailing"); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
@@ -63,7 +63,7 @@ func TestSetActiveCwdDoesNotSpawn(t *testing.T) {
 
 func TestSetActiveAgentDoesNotSpawn(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
 	cs.SetSelectedCwd("/code/bailing")
 	if err := cs.SetSelectedAgent("claude"); err != nil {
@@ -78,7 +78,7 @@ func TestSetActiveAgentDoesNotSpawn(t *testing.T) {
 }
 
 func TestLookupActiveAgentSession_RequiresCwd(t *testing.T) {
-	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs, _ := New("oc_xxx", "claude")
 	_, err := cs.LookupSelectedAgentSession()
 	if err != ErrNoSelectedCwd {
 		t.Fatalf("expected ErrNoSelectedCwd, got %v", err)
@@ -87,7 +87,7 @@ func TestLookupActiveAgentSession_RequiresCwd(t *testing.T) {
 
 func TestLookupActiveAgentSession_SpawnWhenMissing(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
 	cs.SetSelectedCwd("/code/bailing")
 	cs.SetSelectedAgent("claude")
@@ -128,7 +128,7 @@ func TestLookupActiveAgentSession_ReusesPoolEntry(t *testing.T) {
 	// still effectively running (StatusRunning + non-nil Handle).
 	// Without a Spawner, the AgentSession stays Detached between
 	// lookups, so we wire a Spawner to make the test deterministic.
-	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
 	cs = cs.WithSpawner(newFakeSpawner())
 	cs.SetSelectedCwd("/code/bailing")
@@ -152,7 +152,7 @@ func TestLookupActiveAgentSession_ReusesPoolEntry(t *testing.T) {
 // stays; the new entry is spawned alongside it.
 func TestLookupActiveAgentSession_UseOverrides(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
 	cs.SetSelectedCwd("/code/bailing")
 	cs.SetSelectedAgent("claude")
@@ -178,7 +178,7 @@ func TestLookupActiveAgentSession_UseOverrides(t *testing.T) {
 
 func TestLookupActiveAgentSession_SpawnWhenDefaultAlsoMiss(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
 	cs.SetSelectedCwd("/code/bailing")
 	cs.SetSelectedAgent("codex") // active != default
@@ -214,7 +214,7 @@ func killAllForTest(t *testing.T, cs *ChatSession) {
 
 func TestKillAllClearsPool(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
 	cs.SetSelectedCwd("/code/bailing")
 	cs.SetSelectedAgent("claude")
@@ -263,7 +263,7 @@ func TestPersistenceRoundTrip(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
 	cs.SetSelectedCwd("/code/bailing")
 	cs.SetSelectedAgent("claude")
@@ -309,13 +309,13 @@ func TestPersistenceRoundTrip(t *testing.T) {
 }
 
 func TestChatIDDerivationDeterministic(t *testing.T) {
-	a, _ := New("oc_abc", "claude", newTestChannel())
-	b, _ := New("oc_abc", "codex", newTestChannel())
+	a, _ := New("oc_abc", "claude")
+	b, _ := New("oc_abc", "codex")
 	if a.ID != b.ID {
 		t.Fatalf("ID should be deterministic by chatID: %s vs %s", a.ID, b.ID)
 	}
 
-	c, _ := New("oc_xyz", "claude", newTestChannel())
+	c, _ := New("oc_xyz", "claude")
 	if c.ID == a.ID {
 		t.Fatalf("different chatID should give different ID")
 	}
@@ -349,7 +349,7 @@ func TestAgentSessionStatusTransitions(t *testing.T) {
 
 func TestChatSessionConcurrentSetAndLookup(t *testing.T) {
 	csFile, asFile := newTestStores(t)
-	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs, _ := New("oc_xxx", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
 	cs.SetSelectedCwd("/code/bailing")
 	cs.SetSelectedAgent("claude")
@@ -377,7 +377,7 @@ func TestChatSessionConcurrentSetAndLookup(t *testing.T) {
 }
 
 func TestEmptyCwdRejected(t *testing.T) {
-	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs, _ := New("oc_xxx", "claude")
 	if err := cs.SetSelectedCwd(""); err == nil {
 		t.Fatalf("expected error for empty cwd")
 	}
@@ -389,7 +389,7 @@ func TestEmptyCwdRejected(t *testing.T) {
 // Sanity: ChatSession.ID is derived; ChatSession.CreatedAt is set.
 func TestCreatedAtAndID(t *testing.T) {
 	before := time.Now()
-	cs, _ := New("oc_xxx", "claude", newTestChannel())
+	cs, _ := New("oc_xxx", "claude")
 	after := time.Now()
 
 	if cs.CreatedAt().Before(before) || cs.CreatedAt().After(after) {
@@ -419,7 +419,7 @@ func TestCreatedAtAndID(t *testing.T) {
 //
 // Run with -race for this to mean anything.
 func TestSubmit_AnchorWriteIsRaceFree(t *testing.T) {
-	cs, _ := New("oc_chat", "claude", newTestChannel())
+	cs, _ := New("oc_chat", "claude")
 	cs.WithSpawner(&spySpawner{})
 
 	as := newActiveAgentNoop()
@@ -473,7 +473,7 @@ func TestSubmit_AnchorWriteIsRaceFree(t *testing.T) {
 // selectedAS is installed, so the TryFlush inside QueueUserMessage
 // is a no-op and nothing drains.
 func TestQueueUserMessage_RemovesGhostOnQueueFull(t *testing.T) {
-	cs, _ := New("oc_chat", "claude", newTestChannel())
+	cs, _ := New("oc_chat", "claude")
 	cs.SetSelectedCwd("/x")
 	cs.SetSelectedAgent("claude")
 
@@ -522,7 +522,7 @@ func TestQueueUserMessage_RemovesGhostOnQueueFull(t *testing.T) {
 // but no AS will ever flush it" state) cannot recur: readiness now
 // lives on the AgentSession, so a fresh AS is ready by construction.
 func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
-	cs, _ := New("oc_chat", "claude", newTestChannel())
+	cs, _ := New("oc_chat", "claude")
 	cs.SetSelectedCwd(t.TempDir())
 
 	// Subscribe to MessageStateBus so we can observe the

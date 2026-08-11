@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -37,7 +38,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/command/cwd"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
-	"github.com/cnlangzi/nightme/internal/command/kill"
+	"github.com/cnlangzi/nightme/internal/command/close"
 	newcmd "github.com/cnlangzi/nightme/internal/command/newcmd"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/command/stop"
@@ -183,7 +184,7 @@ func runRunWith(cmd *cobra.Command, deps runDeps) error {
 	sigCh := deps.signals
 	if sigCh == nil {
 		owned := make(chan os.Signal, 2)
-		signal.Notify(owned, shutdownSignals()...)
+		signal.Notify(owned, syscall.SIGINT, syscall.SIGTERM)
 		defer signal.Stop(owned)
 		sigCh = owned
 	}
@@ -197,6 +198,26 @@ func runRunWith(cmd *cobra.Command, deps runDeps) error {
 // runDaemon is the daemon core. Wires chatsession.Manager +
 // Spawner + EventCallback; runs the gateway until signal /
 // context cancel.
+//
+// Wiring order (top to bottom — read in order, each step
+// depends on the previous ones):
+//
+//  1. Load config (cfg) and registry stores (csFile, asFile)
+//  2. Build agent registry (agents) + IM channel (ch); ch.Start
+//  3. Build chatsession.Manager (mgr) with spawner + persistence
+//  4. Build shared outbound infra:
+//       - prcache.Registry (per-AS PR cache)
+//       - gtw.HandlerDeps (git runner, HTTP prober)
+//       - outbound.Emitter (the single outbound chokepoint;
+//         holds ch and the Stamper that reads prCacheReg +
+//         gtwDeps + mgr)
+//  5. Build gtw.Manager, ReactionRouter, command.Commander,
+//     shell.Dispatcher (the command-adapter layer)
+//  6. Build gateway.Router (messageDispatcher + em); wire
+//     gwImpl.WithCommander / WithShellDispatch / WithActionHandler
+//  7. mgr.WithEmitter(em) + wireRuntimeCallbacksAndRestore (must
+//     precede gwImpl.Start; the latter depends on chat sessions
+//     having their per-bus subscribers installed)
 func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os.Signal) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -285,7 +306,14 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 
 	// Build the router wiring (slashCommandDispatcher +
 	// messageDispatcher).
-	messageDispatcher := newMessageDispatcher(mgr, ch, cfg.Primary, logger)
+	// messageDispatcher is constructed later (after `em` is
+	// built) so its error-reply paths — queue full / no
+	// workspace / spawn failed — go through the same Emitter as
+	// the runtime pump and pick up the SessionContext footer. The
+	// old channel_wrap prepended its own Emitter wrap, so the
+	// bug class "error replies miss the footer" is now caught at
+	// compile time: the dispatcher is typed as outbound.Emitter
+	// from the start.
 
 	// F-31 + F-think + F-38: install gw.OnMessageState AND the
 	// runtime's EventHandler into every ChatSession via the
@@ -313,7 +341,36 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// wireRuntimeCallbacksAndRestore (see below) which bundles
 	// WithOnCreate + RestoreFromRegistry so the order can't be
 	// inverted at the call site.
-	gwImpl := gateway.New(messageDispatcher).(*gateway.Router)
+	// Per-AgentSession PR / MR cache. Built before Emitter
+	// construction (the Stamper reads it) and before
+	// gateway.New (the Emitter flows into Gateway's outbound
+	// chokepoint). See prcache.Registry comment for why this
+	// is owned at runtime scope, not on AgentSession itself.
+	prCacheReg := &prcache.Registry{}
+
+	gtwDeps := gtw.HandlerDeps{
+		Git:           gtw.ExecGitRunner{},
+		Prober:        &gtw.ExecHTTPProber{},
+		PRInvalidator: prCacheReg,
+	}
+
+	// emitter is the single daemon-wide outbound chokepoint.
+	// Constructed here (before gateway.New) so the Gateway can
+	// hold the reference at construction time — every
+	// downstream send (runtime pump / slash command /
+	// MessageState / PATCH) flows through the same Emitter
+	// instance. Manager.WithEmitter (further down) binds the
+	// same Emitter to every ChatSession.
+	em := outbound.New(ch, outbound.Options{Stamper: newRuntimeStamper(mgr, prCacheReg, gtwDeps)})
+
+	// Build the message dispatcher now that em exists. The
+	// dispatcher's three error reply paths (queue full / no
+	// workspace / spawn failed) all go through this Emitter so
+	// the SessionContext footer is applied — sending the raw
+	// channel.Channel would silently skip the stamper.
+	messageDispatcher := newMessageDispatcher(mgr, em, cfg.Primary, logger)
+
+	gwImpl := gateway.New(messageDispatcher, em).(*gateway.Router)
 	// All chat-session commands (/cwd /use /kill /new /watch /think
 	// /tools) and /gtw are SlashCommandFactory implementations
 	// implementations registered with reg.Register below. The legacy
@@ -334,45 +391,22 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	//       directly.
 	// Per-AgentSession PR / MR cache. Owned at runtime scope
 	// (NOT on AgentSession itself — the import cycle: gtw →
-	// chatsession → agentsession prevents agentsession from
-	// importing gtw, so a separate leaf package keeps the
-	// prcache.Registry here in cmd/nightme where deps already
-	// live). Stamp path looks up the cache by AgentSession.ID
-	// on every OutboundMessage; /gtw pr success calls
-	// Invalidate on the corresponding cache so the new URL
-	// surfaces on the next stamp rather than after the 60s
-	// TTL.
-	prCacheReg := &prcache.Registry{}
+	// (prCacheReg, gtwDeps, em are all constructed earlier, before
+	// gateway.New, so the Gateway can hold the Emitter reference
+	// at construction time. The lines below continue the gtwMgr
+	// setup that depends on those.)
 
-	gtwDeps := gtw.HandlerDeps{
-		Git:          gtw.ExecGitRunner{},
-		Prober:       &gtw.ExecHTTPProber{},
-		PRInvalidator: prCacheReg,
-	}
 	gtwMgr := gtw.NewManager()
 	gtwMgr.SetHandlerDeps(gtwDeps)
 
-	// F-XX: chatID → Channel 解析器。Manager.GetOrCreate 在新建 cs
-	// 时在锁外调它,把 Channel 一次性绑进 cs.channel 字段;之后 cs
-	// 自持 Channel,handler / 命令通过 cs.Channel() 拿。
-	//
-	// 必须在任何 GetOrCreate 之前注入(包括 RestoreFromRegistry
-	// 路径 — 它内部会对每个持久化的 chatID 调一次 GetOrCreate)。
-	//
-	// 注:chatsession.Channel interface 和 gateway.Channel interface
-	// 签名不兼容(chatsession 用 chatsession.OutboundMessage,gateway
-	// 用 gateway.OutboundMessage),所以 resolver 通过 newChannelWrap
-	// 把 outbound.Emitter 适配成 chatsession.Channel 注入。生产环境
-	// 一个 nightme daemon 只有一个 gateway.Channel(目前永远是 feishu);
-	// 多 channel 部署时把 chatID → gateway.Channel 映射写进 resolver。
-	//
-	// emitter 是所有出站消息的统一咽喉,负责把 SessionContext footer
-	// 盖在每条消息上(runtime pump / slash command / MessageState 三条
-	// 路径都走它)。stamper 在装配层注入,不暴露给 chatsession。
-	em := outbound.New(ch, outbound.Options{Stamper: newRuntimeStamper(mgr, prCacheReg, gtwDeps)})
-	mgr.WithChannelResolver(func(string) chatsession.Channel {
-		return newChannelWrap(em)
-	})
+	// chatID → ChatSession lookup. The runtime owns this closure
+	// so gtw's reaction / fix handlers can call into the
+	// chatsession API without re-implementing GetOrCreate.
+	// (Replaces the per-channel-resolver pattern that was used
+	// when chatsession carried a per-chat Channel. Now that
+	// chatsession holds a shared Emitter, only a shared CS
+	// lookup is needed here.)
+	mgr.WithEmitter(em)
 
 	// F-XX: wire the per-chat ChatSession lookup. Without this,
 	// /gtw fix and reaction paths would nil-deref on
@@ -399,7 +433,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	reg.Register(tools.NewFactory(mgr))
 	reg.Register(cwd.NewFactory(mgr))
 	reg.Register(use.NewFactory(mgr))
-	reg.Register(kill.NewFactory(mgr))
+	reg.Register(close.NewFactory(mgr))
 	reg.Register(stop.NewFactory(mgr))
 	reg.Register(newcmd.NewFactory(mgr))
 	commander := command.NewCommander(reg)
@@ -413,7 +447,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 
 	// RuntimeServices carries the shared command runtime interfaces.
 	// Each command package holds *chatsession.Manager directly
-	// via its Factory. Channel wraps *gateway.Channel (any
+	// via its Factory. Channel wraps *channel.Channel (any
 	// command that needs to send replies uses this).
 	rt := command.RuntimeServices{
 		Config: command.Config{Primary: cfg.Primary},
@@ -442,8 +476,8 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 			return nil, nil
 		}
 
-		// GetOrCreate 这里调用一次,channelResolver 已经注入(见
-		// 上方 WithChannelResolver 调用),所以 cs.Channel() 应当非 nil。
+		// GetOrCreate 这里调用一次,emitter 已经注入(见
+		// 上方 WithEmitter 调用),所以 cs.Emitter() 应当非 nil。
 		// 如果 nil(resolver 失败),log warn 并返回 nil 让 gateway
 		// 走 fallback 到 agent loop。
 		cs, err := mgr.GetOrCreate(msg.ChatID, cfg.Primary)
@@ -463,9 +497,9 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		out, handled, err := commander.Dispatch(ctx, rt, cs, input)
 		if err != nil {
 			errText := "❌ " + err.Error()
-			ch := cs.Channel()
+			ch := cs.Emitter()
 			if ch != nil {
-				_ = ch.Send(ctx, chatsession.OutboundMessage{
+				_ = ch.Send(ctx, gateway.OutboundMessage{
 					ChatID:  msg.ChatID,
 					Text:    errText,
 					ReplyTo: msg.MessageID,
@@ -478,28 +512,28 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		}
 		// handled=true. out 可能 Consumed=true(command replied)
 		// 或 Consumed=false(slash 命令没匹配到 factory)。
-		ch := cs.Channel()
+		ch := cs.Emitter()
 		if out.Consumed && out.Reply != "" && ch != nil {
-			_ = ch.Send(ctx, chatsession.OutboundMessage{
+			_ = ch.Send(ctx, gateway.OutboundMessage{
 				ChatID:  msg.ChatID,
 				Text:    out.Reply,
 				ReplyTo: msg.MessageID,
 			})
 		}
-		// 透传 out.Outbound(都是 chatsession.OutboundMessage,直接
-		// 调 cs.Channel().Send/SendCard/Patch — channelWrap 在 binding
-		// 时已经把 gateway.Channel 包成 chatsession.Channel,所以
-		// runtime shim 这层不需要再做字段翻译)
+		// 透传 out.Outbound (都是 gateway.OutboundMessage,直接
+		// 调 cs.Emitter().Send/SendCard — PATCH 语义由调用方设 Kind=OutCardPatch
+		// 后通过 Send 走,见 channel/feishu/adapter.go: case OutCardPatch)
+		// OutCardPatch 必须走 Send: Feishu SendCard 不识别 Kind,会
+		// 当作新卡片创建,导致发重复卡片(回归保护)。
 		for _, ob := range out.Outbound {
 			if ch == nil {
 				continue
 			}
-			switch {
-			case ob.PatchBotMsgID != "":
-				_ = ch.Patch(ctx, ob)
-			case ob.Card != nil:
+			if ob.Kind == gateway.OutCardPatch {
+				_ = ch.Send(ctx, ob)
+			} else if ob.Card != nil {
 				_, _ = ch.SendCard(ctx, ob)
-			default:
+			} else {
 				_ = ch.Send(ctx, ob)
 			}
 		}
@@ -624,7 +658,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// WithOnCreate fires for both restored (RestoreFromRegistry)
 	// and future (GetOrCreate) ChatSessions. Place BEFORE
 	// RestoreFromRegistry so restored chats get their handlers.
-if err := wireRuntimeCallbacksAndRestore(mgr, ch, em, logger, prCacheReg, gtwDeps); err != nil {
+if err := wireRuntimeCallbacksAndRestore(mgr, em, logger, prCacheReg, gtwDeps, markPromptDone(ch)); err != nil {
 		return fmt.Errorf("run: wire+restore: %w", err)
 	}
 
@@ -809,13 +843,33 @@ func newMessageDispatcher(mgr *chatsession.Manager, em outbound.Emitter, primary
 // first interaction. Manager-level contract is covered in
 // chatsession/manager_test.go; this helper's test covers the
 // cmd/nightme/run.go wiring specifically.
+// markPromptDone returns the Feishu-specific PromptEnd callback
+// wired into wireRuntimeCallbacksAndRestore. For non-Feishu
+// channels the no-op default is used; Feishu channels transition
+// the receipt card to PromptDone and add the ✅ reaction. The
+// wrapper exists so the runtime layer doesn't have to type-assert
+// the Channel interface back to *feishu.Adapter inside the
+// per-ChatSession install closure.
+func markPromptDone(ch channel.Channel) func(ctx context.Context, chatID, msgID string) {
+	if fa, ok := ch.(*feishu.Adapter); ok {
+		return fa.MarkReceiptPromptDone
+	}
+	return func(context.Context, string, string) {}
+}
+
 func wireRuntimeCallbacksAndRestore(
 	mgr *chatsession.Manager,
-	ch channel.Channel,
 	em outbound.Emitter,
 	logger *slog.Logger,
 	prReg *prcache.Registry,
 	gtwDeps gtw.HandlerDeps,
+	// markPromptDone is called when ChatSession.endPrompt fires
+	// (EventAgentDone / EventAgentError in the readpump). The
+	// runtime injects the Feishu-specific implementation; for
+	// non-Feishu channels the callback is a no-op. Passing it
+	// in (rather than type-asserting ch to *feishu.Adapter
+	// here) keeps wireRuntimeCallbacksAndRestore channel-agnostic.
+	markPromptDone func(ctx context.Context, chatID, msgID string),
 ) error {
 	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
 		// Startup audit trail: one line per chat, bounded by the
@@ -876,7 +930,7 @@ func wireRuntimeCallbacksAndRestore(
 		// gateway.Bind/chatToChan. For multi-channel deployments,
 		// route via a per-chatID Channel lookup in front of `em`
 		// (the wrap currently does the type conversion; a multi-channel
-		// variant would resolve the underlying gateway.Channel first
+		// variant would resolve the underlying channel.Channel first
 		// and wrap-emit it). The AgentEventBus and PromptEndBus
 		// handlers above have the same latent gap; the same one-line
 		// fix applies to both.
@@ -935,10 +989,10 @@ func wireRuntimeCallbacksAndRestore(
 			// logged inside SetPromptState. We use
 			// context.Background() because the readpump-driven
 			// endPrompt happens off the inbound message path;
-			// there's no inbound ctx to chain.
-			if fa, ok := ch.(*feishu.Adapter); ok {
-				fa.MarkReceiptPromptDone(context.Background(), e.ChatID, e.UserMsgID)
-			}
+			// there's no inbound ctx to chain. The runtime
+			// injects the Feishu-specific implementation; for
+			// non-Feishu channels the callback is a no-op.
+			markPromptDone(context.Background(), e.ChatID, e.UserMsgID)
 			return false
 		})
 
@@ -1209,7 +1263,7 @@ func newEventHandler(
 // placeholders AND every stamped reply/result wait for git to
 // return. 3s is plenty for normal repos (10-50ms typical; up to
 // ~1s on very large monorepos) and far below the user's
-// "chat is not realtime" tolerance. On timeout, CollectStatus
+// "chat is not realtime" tolerance. On timeout, CollectReadiness
 // returns (nil, nil) and the footer omits the git segment
 // silently — chat keeps moving.
 //
@@ -1276,7 +1330,7 @@ func sessionContextInto(out *gateway.OutboundMessage, s *agentsession.AgentSessi
 // the entire outbound-message pipeline. 3s is plenty for normal
 // repos (10-50ms typical; up to ~1s on very large monorepos) and
 // far below the user's "chat is not realtime" tolerance. On
-// timeout, CollectStatus returns (nil, nil) and the footer omits
+// timeout, CollectReadiness returns (nil, nil) and the footer omits
 // the git segment silently.
 //
 // PR / MR lookup (F-49): per-AgentSession, cached on prReg. The
@@ -1295,7 +1349,7 @@ func sessionContextInto(out *gateway.OutboundMessage, s *agentsession.AgentSessi
 // TestSessionContextInto_NilPRRegistryLeavesEmpty.
 func buildSessionContext(s *agentsession.AgentSession, usage *agent.UsageInfo, prReg *prcache.Registry, deps gtw.HandlerDeps) *gateway.SessionContext {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	gitSnap, _ := gtw.CollectStatus(ctx, s.Cwd, gtw.ExecGitRunner{})
+	gitSnap, _ := gtw.CollectReadiness(ctx, s.Cwd, gtw.ExecGitRunner{})
 	cancel()
 	hasGit := gitSnap != nil && s.Cwd != ""
 
@@ -1375,27 +1429,10 @@ func newRuntimeStamper(mgr *chatsession.Manager, prReg *prcache.Registry, deps g
 	}
 }
 
-// responder adapts a channel.Channel for outbound messages.
-// The readPump writes directly here.
-type responder struct {
-	ch     channel.Channel
-	mgr    *chatsession.Manager
-	logger *slog.Logger
-}
-
-// Send translates and dispatches an AgentEvent to the channel for
-// the chat owning the active AgentSession.
-func (r *responder) Send(ctx context.Context, chatID, userMsgID, text string) error {
-	if r.ch == nil {
-		return nil
-	}
-	return r.ch.Send(ctx, gateway.OutboundMessage{
-		ChatID:  chatID,
-		Kind:    gateway.OutReply,
-		Text:    text,
-		ReplyTo: userMsgID,
-	})
-}
+// (responder removed: was a vestigial adapter from the pre-
+// outbound-package readPump era. The runtime pump now constructs
+// its own Emitter.Send calls in newEventHandler; this type had no
+// remaining callers.)
 
 // shutdownRun stops the channel and persists final state.
 //
@@ -1459,18 +1496,18 @@ func shutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, cs
 	return firstErr
 }
 
-// toChatCardChoices translates command.CardChoice (command pkg) to
-// chatsession.CardChoice (chatsession pkg). Both have the same
-// fields; this is a direct copy. Defined here (in run.go) so the
+// toCardChoices translates command.CardChoice (command pkg) to
+// the wire-level gateway.CardChoice. Both have the same fields;
+// this is a direct copy. Defined here (in run.go) so the
 // runtime owns the boundary translation without leaking the
 // command-package's mirror types deeper into the runtime.
-func toChatCardChoices(in []command.CardChoice) []chatsession.CardChoice {
+func toCardChoices(in []command.CardChoice) []gateway.CardChoice {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make([]chatsession.CardChoice, len(in))
+	out := make([]gateway.CardChoice, len(in))
 	for i, c := range in {
-		out[i] = chatsession.CardChoice{
+		out[i] = gateway.CardChoice{
 			Emoji:  c.Emoji,
 			Label:  c.Label,
 			Action: c.Action,
@@ -1480,7 +1517,7 @@ func toChatCardChoices(in []command.CardChoice) []chatsession.CardChoice {
 }
 
 // chatSessionChannelSender is the runtime-side adapter that
-// implements shell.Sender on top of chatsession.Channel. Each
+// implements shell.Sender on top of outbound.Emitter. Each
 // chat session carries its own channel (the Feishu adapter
 // wrapping the underlying connection), and the dispatcher
 // looks it up by ChatID at Send time — so a single sender
@@ -1491,10 +1528,17 @@ func toChatCardChoices(in []command.CardChoice) []chatsession.CardChoice {
 // silently drop. The shell dispatcher's Handle is the
 // fire-and-forget reply path (the result card), not a critical
 // control message.
+// chatSessionChannelSender implements shell.Sender on top of the
+// Manager's shared outbound.Emitter. The shell dispatcher only
+// needs Send (no SendCard) so this is a thin one-method shim.
 type chatSessionChannelSender struct {
 	mgr *chatsession.Manager
 }
 
+// Send looks up the ChatSession for the requested chatID and
+// posts the reply through its Emitter. nil-safe everywhere: a
+// missing chat session, missing emitter, or missing reply
+// target all silently no-op (matches the old wrap's behaviour).
 func (s chatSessionChannelSender) Send(ctx context.Context, msg shell.Outbound) error {
 	if msg.ChatID == "" {
 		return nil
@@ -1503,13 +1547,20 @@ func (s chatSessionChannelSender) Send(ctx context.Context, msg shell.Outbound) 
 	if cs == nil {
 		return nil
 	}
-	ch := cs.Channel()
-	if ch == nil {
+	em := cs.Emitter()
+	if em == nil {
 		return nil
 	}
-	return ch.Send(ctx, chatsession.OutboundMessage{
+	return em.Send(ctx, gateway.OutboundMessage{
 		ChatID:  msg.ChatID,
+		Kind:    gateway.OutCommandReply,
 		Text:    msg.Text,
 		ReplyTo: msg.ReplyTo,
 	})
 }
+
+// (chatSessionChannelSender.Send[1] was the old implementation
+// that called cs.Emitter() into a local variable named 'ch' and
+// passed the chatsession.OutboundMessage-typed payload. It has
+// been removed: the new Send at line ~1483 is the single source
+// of truth.)

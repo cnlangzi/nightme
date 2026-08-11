@@ -167,7 +167,7 @@ Three pain points of tools like openclaw, addressed head-on:
 | Pain | nightme's answer |
 |---|---|
 | The agent dies mid-task, conversation gone | **Process-level resumption.** Daemon / network / sleep interruption — restart and every ChatSession is auto-reattached, every AgentSession in `StatusDetached` is respawned with `--resume <session-id>` (Claude / Pi equivalent for others). Conversation survives. |
-| Silent timeout cuts you off | **Sessions are user-managed.** No "after N minutes you're disconnected" surprise. You pick the level: `/stop` halts the in-flight turn (keep session), `/new` resets context (keep process), `/kill` drops the AgentSession entirely. |
+| Silent timeout cuts you off | **Sessions are user-managed.** No "after N minutes you're disconnected" surprise. You pick the level: `/stop` halts the in-flight turn (keep session), `/steer` redirects with a new direction (keep session), `/new` resets context (keep process), `/close` terminates the bridge process (session preserved, respawn resumes). |
 | Project memory vanishes mid-task | **Continues until you say otherwise.** Default is keep compressing, never zero. Only explicit `/new` resets the agent's conversation context. |
 
 The principle: nightme **doesn't run its own memory system**. Context management is delegated to the upstream Claude Code / Codex / Pi that you're already paying for. So behavior is predictable — what you see is what the CLI sees, not what nightme invents. When the CLI's own compression kicks in, you know. When nightme does nothing, you know.
@@ -250,7 +250,8 @@ stderr:
 | `/cwd <path>` | Bind this chat to a workspace. Validates the path; lazy-spawns on the next message. |
 | `/use <agent>` | Switch the active agent (`claude` / `codex` / `opencode` / `pi`). Reuses or spawns. |
 | `/stop` | Halt the in-flight turn on the selected agent. Session stays; queued messages still flow. |
-| `/kill [agent]` | Drop AgentSession(s) in the current workspace — terminates the CLI process and removes the pool entry. `/kill <agent>` kills one. |
+| `/steer <msg>` | Stop the in-flight turn and prepend `<msg>` to the queue. The steered message becomes the first thing the agent sees on the next turn. |
+| `/close [agent]` | Terminate the bridge process(es) for AgentSession(s) in the current workspace. AgentSession entry is preserved; next user message triggers a respawn that replays `--resume <sessionID>` to continue the conversation. |
 | `/new [agent]` | Reset the agent's conversation context (Claude Code's `/clear` equivalent). Process stays alive; queued messages are cleared. |
 | `/watch on\|off` | Per-chat message-watch mode (default: only `@bot` / `@_all` in groups). |
 | `/think on\|off` | Show / hide the agent's thinking blocks in the receipt card. |
@@ -430,7 +431,7 @@ internal/
     echo/  feishu/                 # adapters (Feishu is the production one)
   chatsession/                     # ChatSession + pool manager + persistence
   command/                         # Slash-command Commander / Registry / Factory
-    cwd/ kill/ newcmd/ use/ think/ tools/ watch/ stop/ services/
+    cwd/ close/ newcmd/ use/ think/ tools/ watch/ stop/ steer/ services/
     gtw/                           # /gtw fix / push / pr / close / sync (worktree workflow)
   config/                          # YAML loader + env overrides
   daemoncontrol/                   # IPC for `nightme doctor` / `status`

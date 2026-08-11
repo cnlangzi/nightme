@@ -47,31 +47,25 @@ import (
 	"context"
 	"errors"
 	"log"
-	"log/slog"
 	"sync"
+
+	"github.com/cnlangzi/nightme/internal/channel"
 )
 
-// Channel is the abstract surface the Gateway needs from any IM
-// backend. Re-declared here (rather than imported from
-// internal/channel) to keep the import graph acyclic: the channel
-// package imports gateway for the abstract types, so gateway
-// cannot import channel in turn. The mirror is kept in sync
-// manually (and the test suite enforces the implementation match).
+// Emitter is the outbound chokepoint contract the Gateway
+// requires. The runtime injects a concrete implementation
+// (typically an outbound.Emitter from internal/gateway/outbound)
+// at New() time. Defined here as a local interface so the gateway
+// package does not need to import outbound (which would create
+// gateway → outbound → channel → messages → gateway cycle).
 //
-// v1.3: only the 4 lifecycle/messaging methods. The receipt FSM
-// API has been removed — receipts are Channel-internal.
-type Channel interface {
-	Name() string
-	Incoming() <-chan InboundMessage
+// outbound.Emitter satisfies this interface structurally: the
+// method signatures are identical and the parameter type
+// (OutboundMessage) is the same type via the messages-package
+// type alias.
+type Emitter interface {
 	Send(ctx context.Context, msg OutboundMessage) error
-	// SendCard (F-46) is the specialised variant for interactive
-	// decision cards. It returns the bot-side message id assigned
-	// by the channel so callers can correlate the rendered card
-	// with later card.action.trigger callbacks. The inner
-	// channel.Channel interface in internal/channel/channel.go
-	// carries the same method — this duplicate keeps the gateway
-	// package free of the channel-package's circular deps.
-	SendCard(ctx context.Context, msg OutboundMessage) (msgID string, err error)
+	SendCard(ctx context.Context, msg OutboundMessage) (string, error)
 }
 
 // CommandResult is the per-dispatch outcome.
@@ -177,7 +171,7 @@ type Gateway interface {
 	WithShellDispatch(dispatch func(ctx context.Context, msg *InboundMessage) (*CommandResult, error)) Gateway
 
 	// Lifecycle
-	AttachChannels(channels ...Channel)
+	AttachChannels(channels ...channel.Channel)
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
 }
@@ -198,8 +192,21 @@ type Router = gateway
 // WithChannel after GetOrCreate). Falls back to the default
 // channel if chatID is not in the chatID→Channel map. Returns
 // nil if no default.
-func (r *Router) ResolveChannel(chatID string) Channel {
+// ResolveChannel returns the inbound Channel for chatID (the
+// channel whose pumpInbound produced the messages). nil only
+// when no default was attached.
+func (r *Router) ResolveChannel(chatID string) channel.Channel {
 	return r.resolveChannel(chatID)
+}
+
+// Emitter returns the outbound chokepoint bound to this Router.
+// The runtime (cmd/nightme) fetches it once after New to bind
+// the same Emitter to chatsession.Manager (so every chat
+// session's outbound path goes through this single chokepoint).
+//
+// Lock-free: emitter is set once at construction.
+func (r *Router) Emitter() Emitter {
+	return r.emitter
 }
 
 // WithActionHandler installs the reaction/action
@@ -256,14 +263,24 @@ type gateway struct {
 	// nil, such messages are silently dropped.
 	messageDispatcher MessageDispatcher
 
+	// emitter (set via New) is the outbound chokepoint every
+	// downstream caller goes through for send-side operations.
+	// The runtime injects an outbound.Emitter (from
+	// internal/gateway/outbound) at construction; the gateway
+	// stores it for chat-session bind / wire helpers to fetch
+	// via the Emitter() method. Holds only a private reference
+	// to the outbound chokepoint — the underlying IM Channel
+	// is owned by outbound, not by the gateway.
+	emitter Emitter
+
 	// Stage 2 / v1.2 dispatch state. fields below are read/written under mu.
-	channels       []Channel
+	channels       []channel.Channel
 	channelCh      chan InboundMessage
 	stopCh         chan struct{}
 	stopOnce       sync.Once
 	wg             sync.WaitGroup
-	chatToChan     map[string]Channel // ChatID -> the channel that owns the chat
-	defaultChannel Channel            // fallback channel for chats we haven't seen yet
+	chatToChan     map[string]channel.Channel // ChatID -> the channel that owns the chat
+	defaultChannel channel.Channel            // fallback channel for chats we haven't seen yet
 
 	// v1.2 binding table (chat_id → session_id). Owned by Gateway.
 	bindings map[string]*BindingEntry
@@ -310,17 +327,27 @@ type gateway struct {
 // messageDispatcher closure; the Gateway itself no longer holds a
 // session manager reference. ChatSession lifecycle is owned by
 // the runtime + the chatsession package.
-func New(messageDispatcher MessageDispatcher) Gateway {
+// New constructs a Gateway with the runtime-injected message
+// dispatcher and outbound Emitter. The Emitter is the single
+// outbound surface; downstream code that needs to send goes
+// through Emitter() (and chatsession binds the same Emitter
+// via Manager.WithEmitter). AttachChannels must still be
+// called with the IM-backed Channel(s) for the inbound pump.
+func New(messageDispatcher MessageDispatcher, em Emitter) Gateway {
+	if em == nil {
+		panic("gateway.New: Emitter must not be nil")
+	}
 	return &gateway{
 		messageDispatcher: messageDispatcher,
-		chatToChan:        make(map[string]Channel),
+		emitter:           em,
+		chatToChan:        make(map[string]channel.Channel),
 		bindings:          make(map[string]*BindingEntry),
 	}
 }
 
 // AttachChannels registers the channels the gateway will read from
 // and dispatch to. Multi-channel is supported.
-func (g *gateway) AttachChannels(channels ...Channel) {
+func (g *gateway) AttachChannels(channels ...channel.Channel) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.channels = append(g.channels, channels...)
@@ -504,24 +531,18 @@ func (g *gateway) tryMessageDispatch(ctx context.Context, msg *InboundMessage) (
 // is installed — that's the v1 pre-F-45 default and lets the
 // runtime come up before the reaction branch is wired.
 func (g *gateway) dispatchAction(ctx context.Context, msg *InboundMessage) (*CommandResult, error) {
-	slog.Default().Warn("F-46 debug: gateway.dispatchAction entry",
-		"chat_id", msg.ChatID,
-		"has_reaction", msg.Reaction != nil)
 	g.mu.RLock()
 	h := g.actionHandler
 	g.mu.RUnlock()
 	if h == nil {
-		slog.Default().Warn("F-46 debug: gateway.dispatchAction: actionHandler is nil, dropping")
 		// Pre-F-45 runtime: action events silently dropped.
 		// Better than routing an empty-text event to the agent
 		// loop, which would queue a no-op turn and confuse the
 		// user with a "thinking…" state.
 		return &CommandResult{Consumed: true, Dropped: true}, nil
 	}
-	slog.Default().Warn("F-46 debug: gateway.dispatchAction: invoking handler")
 	consumed := h(ctx, msg)
 	if consumed {
-		slog.Default().Warn("F-46 debug: gateway.dispatchAction: handler returned true")
 		return &CommandResult{Consumed: true}, nil
 	}
 	// Handler ran but decided not to consume (e.g. no matching
@@ -531,7 +552,6 @@ func (g *gateway) dispatchAction(ctx context.Context, msg *InboundMessage) (*Com
 	// would either send a confusing empty text to the agent
 	// (F-45 path) or re-enter the WatchMode gate (F-watch path,
 	// now applied inside chatsession.AcceptInbound).
-	slog.Default().Warn("F-46 debug: gateway.dispatchAction: handler returned false, dropping")
 	return &CommandResult{Consumed: true, Dropped: true}, nil
 }
 
@@ -622,7 +642,7 @@ func (g *gateway) Stop(ctx context.Context) error {
 
 // pumpInbound reads InboundMessage from ch.Incoming() and pushes it
 // into the central dispatch channel.
-func (g *gateway) pumpInbound(ctx context.Context, ch Channel) {
+func (g *gateway) pumpInbound(ctx context.Context, ch channel.Channel) {
 	defer g.wg.Done()
 	in := ch.Incoming()
 	for {
@@ -783,7 +803,7 @@ func (g *gateway) Unbind(chatID string) {
 
 // resolveChannel returns the channel that owns chatID, falling back
 // to the default channel for chats we haven't seen yet.
-func (g *gateway) resolveChannel(chatID string) Channel {
+func (g *gateway) resolveChannel(chatID string) channel.Channel {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	if ch, ok := g.chatToChan[chatID]; ok && ch != nil {

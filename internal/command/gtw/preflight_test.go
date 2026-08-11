@@ -129,8 +129,8 @@ func TestPreflightOrphanYml_NotAGitRepo(t *testing.T) {
 func TestPreflightOrphanYml_RunFixIntegration_AllowsParallel(t *testing.T) {
 	repoRoot := initTempRepo(t)
 
-	ch := &recordingCh{}
-	cs, _ := chatsession.New("chat-parallel", "test-agent", ch)
+	// ch unused after F-45 refactor
+	cs, _ := chatsession.New("chat-parallel", "test-agent")
 	_ = cs.SetSelectedCwd(repoRoot)
 
 	// Seed an orphan yml in a sibling worktree.

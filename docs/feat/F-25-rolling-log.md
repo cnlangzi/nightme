@@ -224,16 +224,16 @@ failure in one does not affect the other.
 See [`F-31-message-state.md`](./F-31-message-state.md) for the
 full MessageState lifecycle.
 
-## 7. /kill / dispose semantics
+## 7. /close / dispose semantics
 
-`/kill` clears the ChatSession's AgentSession pool. The Channel's
+`/close` clears the ChatSession's AgentSession pool. The Channel's
 receipt objects are NOT touched — they're Channel-private state.
 Feishu receipts are simply never PATCHed again; they stay as the
 last-rendered visual until the user / IM backend cleans them up
 (typical IM: ~24h retention, then server-side GC).
 
-If a Channel wants to actively clean up receipts on `/kill`, it
-MAY subscribe to a future `/kill` event (not currently exposed;
+If a Channel wants to actively clean up receipts on `/close`, it
+MAY subscribe to a future `/close` event (not currently exposed;
 out of scope for v1.3).
 
 ## 8. History

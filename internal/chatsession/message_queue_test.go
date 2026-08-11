@@ -587,3 +587,168 @@ func mustNoErr(t *testing.T, err error) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// --- PushFront: prepend to pending region -----------------------
+
+// PushFront on an empty queue: head/tail/inFlightEnd all point at
+// the new item. Same shape as Push on empty.
+func TestMessageQueue_PushFrontEmpty(t *testing.T) {
+	q := NewMessageQueue(0)
+	mustNoErr(t, q.PushFront(mqMsg("s", MessageKindNormal)))
+	if got := q.Len(); got != 1 {
+		t.Fatalf("Len: got %d, want 1", got)
+	}
+	got := q.Peek()
+	if !equalIDs(ids(got), []string{"s"}) {
+		t.Fatalf("Peek: got %v, want [s]", ids(got))
+	}
+}
+
+// PushFront on a queue with pending items only: n goes to the
+// head; old pending items shift right. Peek returns n first.
+func TestMessageQueue_PushFrontBeforePending(t *testing.T) {
+	q := NewMessageQueue(0)
+	mustNoErr(t, q.Push(mqMsg("a", MessageKindNormal)))
+	mustNoErr(t, q.Push(mqMsg("b", MessageKindNormal)))
+	mustNoErr(t, q.PushFront(mqMsg("s", MessageKindNormal)))
+	if got := q.Len(); got != 3 {
+		t.Fatalf("Len: got %d, want 3", got)
+	}
+	got := q.Peek()
+	if !equalIDs(ids(got), []string{"s", "a", "b"}) {
+		t.Fatalf("Peek: got %v, want [s a b]", ids(got))
+	}
+}
+
+// PushFront with both in-flight and pending items: n is inserted
+// between the in-flight batch and the existing pending head.
+// In-flight items stay in-flight; new item is the first pending.
+func TestMessageQueue_PushFrontDuringInFlight(t *testing.T) {
+	q := NewMessageQueue(0)
+	mustNoErr(t, q.Push(mqMsg("a", MessageKindNormal)))
+	mustNoErr(t, q.Push(mqMsg("b", MessageKindNormal)))
+	mustNoErr(t, q.Push(mqMsg("c", MessageKindNormal)))
+
+	// Peek puts [a, b, c] in-flight (all Normal, one batch).
+	first := q.Peek()
+	if !equalIDs(ids(first), []string{"a", "b", "c"}) {
+		t.Fatalf("first Peek: got %v, want [a b c]", ids(first))
+	}
+
+	// PushFront a steer message. With the entire list in-flight,
+	// PushFront falls through to Push's all-in-flight edge case:
+	// n is appended at tail and inFlightEnd moves to n. The
+	// steer message will be the first thing the next turn sees.
+	mustNoErr(t, q.PushFront(mqMsg("s", MessageKindNormal)))
+	if got := q.Len(); got != 4 {
+		t.Fatalf("Len: got %d, want 4", got)
+	}
+
+	// Commit clears the in-flight batch. Only s should remain.
+	q.Commit()
+	got := q.Peek()
+	if !equalIDs(ids(got), []string{"s"}) {
+		t.Fatalf("Peek after Commit: got %v, want [s]", ids(got))
+	}
+}
+
+// PushFront with mixed in-flight + pending: the steer message
+// becomes the first pending item. Existing pending items stay
+// pending in their original order; in-flight items stay in-flight.
+// Here the existing pending item is a Queue so it forms its own
+// batch and doesn't merge with the steered Normal item.
+func TestMessageQueue_PushFrontMixedInFlight(t *testing.T) {
+	q := NewMessageQueue(0)
+	mustNoErr(t, q.Push(mqMsg("a", MessageKindNormal)))
+	mustNoErr(t, q.Push(mqMsg("b", MessageKindNormal)))
+	mustNoErr(t, q.Push(mqMsg("c", MessageKindQueue)))
+	mustNoErr(t, q.Push(mqMsg("d", MessageKindQueue)))
+
+	// Peek returns [a, b]; commit; peek [c]; commit; peek [d].
+	first := q.Peek()
+	if !equalIDs(ids(first), []string{"a", "b"}) {
+		t.Fatalf("first Peek: got %v, want [a b]", ids(first))
+	}
+	q.Commit()
+	if got := q.Peek(); !equalIDs(ids(got), []string{"c"}) {
+		t.Fatalf("Peek: got %v, want [c]", ids(got))
+	}
+	q.Commit()
+
+	// State: head=d, inFlightEnd=d. d is pending (Queue kind).
+
+	// PushFront a steer message. inFlightEnd != nil, so it goes
+	// before inFlightEnd. d shifts right; s becomes pending head.
+	mustNoErr(t, q.PushFront(mqMsg("s", MessageKindNormal)))
+	if got := q.Len(); got != 2 {
+		t.Fatalf("Len: got %d, want 2", got)
+	}
+
+	// First batch: [s] (Normal alone; the Queue d splits the run).
+	got := q.Peek()
+	if !equalIDs(ids(got), []string{"s"}) {
+		t.Fatalf("Peek: got %v, want [s]", ids(got))
+	}
+	q.Commit()
+	// Next batch: [d] (the previously-pending Queue).
+	got = q.Peek()
+	if !equalIDs(ids(got), []string{"d"}) {
+		t.Fatalf("Peek after Commit: got %v, want [d]", ids(got))
+	}
+}
+
+// PushFront respects capacity.
+func TestMessageQueue_PushFrontCapacity(t *testing.T) {
+	q := NewMessageQueue(2)
+	mustNoErr(t, q.Push(mqMsg("a", MessageKindNormal)))
+	mustNoErr(t, q.Push(mqMsg("b", MessageKindNormal)))
+	if err := q.PushFront(mqMsg("s", MessageKindNormal)); !errors.Is(err, ErrFull) {
+		t.Fatalf("PushFront over capacity: got err=%v, want ErrFull", err)
+	}
+	// After Commit, room frees up.
+	_ = q.Peek()
+	q.Commit()
+	mustNoErr(t, q.PushFront(mqMsg("s", MessageKindNormal)))
+}
+
+// PushFront of zero-id Message is a no-op (matches Push).
+func TestMessageQueue_PushFrontZeroID(t *testing.T) {
+	q := NewMessageQueue(0)
+	if err := q.PushFront(Message{}); err != nil {
+		t.Fatalf("PushFront zero-ID: got err=%v, want nil", err)
+	}
+	if got := q.Len(); got != 0 {
+		t.Fatalf("Len: got %d, want 0", got)
+	}
+}
+
+// PushFront preserves barrier semantics: a steered Normal item
+// merges with the existing Normal run; a steered Queue item
+// starts a new batch ahead of the existing pending items.
+func TestMessageQueue_PushFrontBarrier(t *testing.T) {
+	// Setup: existing pending = [a, b (Normal), c (Queue)].
+	q := NewMessageQueue(0)
+	mustNoErr(t, q.Push(mqMsg("a", MessageKindNormal)))
+	mustNoErr(t, q.Push(mqMsg("b", MessageKindNormal)))
+	mustNoErr(t, q.Push(mqMsg("c", MessageKindQueue)))
+
+	// Steered Normal merges with [a, b].
+	mustNoErr(t, q.PushFront(mqMsg("s", MessageKindNormal)))
+	got := q.Peek()
+	if !equalIDs(ids(got), []string{"s", "a", "b"}) {
+		t.Fatalf("Normal steer merged: got %v, want [s a b]", ids(got))
+	}
+	q.Commit()
+
+	// Steered Queue forms its own batch before c.
+	mustNoErr(t, q.PushFront(mqMsg("q", MessageKindQueue)))
+	got = q.Peek()
+	if !equalIDs(ids(got), []string{"q"}) {
+		t.Fatalf("Queue steer alone: got %v, want [q]", ids(got))
+	}
+	q.Commit()
+	got = q.Peek()
+	if !equalIDs(ids(got), []string{"c"}) {
+		t.Fatalf("after Queue steer: got %v, want [c]", ids(got))
+	}
+}

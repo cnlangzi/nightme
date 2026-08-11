@@ -11,6 +11,80 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### `gtw`: `/gtw push` + `/gtw pr` unified Readiness gate (F-57)
+
+Both commands now share a single `Readiness` snapshot (one
+`git status --porcelain --branch --untracked-files=normal` call),
+parsed into a `GitStatusSnapshot` with two new fields:
+`BehindRemote` (counts upstream commits the local branch is
+behind) and `HasConflicts` (true when the porcelain scan finds
+unmerged paths). `CollectStatus` is renamed `CollectReadiness`
+to reflect the new role.
+
+The three orthogonal atomic predicates on the snapshot
+(`HasUpstreamBranch`, `LocalIsAtUpstreamTip`, `WorkingTreeIsClean`)
+compose differently per command:
+
+- `/gtw push` uses `HasNothingToPush()` + `PushBlockReason()`.
+  Only unresolved conflicts are hard-refused; "no upstream" is
+  the legitimate first-push case and falls through to
+  `programmaticPush` (which now always runs `git push -u origin <branch>`).
+- `/gtw pr` uses `IsReadyForPR()` + `PRBlockReason()`. A single
+  priority-ordered message covers all six block dimensions
+  (detached / conflicts / no upstream / ahead / behind / dirty /
+  untracked) instead of the prior nested if-ladder.
+
+**Bug fix** that triggered this design: `/gtw pr` previously
+reused `countUnpushed` — whose "no upstream configured = 0"
+semantic is correct for `/gtw push` but wrong for `/gtw pr`.
+A local branch that had never been pushed slipped through the
+gate and reached `gh pr create`, which rejected with
+`Head ref must be a branch`. The new gate's
+`!HasUpstream` branch catches this explicitly and points the
+user at `/gtw push first to publish the branch to origin`.
+
+Continuity property: a successful `/gtw push` exit guarantees
+`/gtw pr` readiness passes (modulo external race) — see
+`docs/feat/F-57-gtw-push-pr-readiness.md` §5 for the formal
+proof.
+
+**Field renames / API changes**
+
+- `internal/messages.GitStatusSnapshot`: added `BehindRemote`,
+  `HasConflicts`.
+- `internal/command/gtw.CollectStatus` → `CollectReadiness`.
+  Callers (`cmd/nightme/run.go`, footer render) updated.
+- `internal/command/gtw.dispatchPR` entry no longer calls
+  `countUnpushed`. The legacy `countUnpushed` helper stays
+  in `programmaticPushWithRetry` for push-side verify only.
+- `internal/command/gtw.dispatchPush` entry no longer calls
+  `countUnpushed` either; `isClean` string-compare on
+  `git status --porcelain` is gone; the conflict pre-check
+  (previously `detectConflicts(statusOut)`) is folded into
+  `PushBlockReason`.
+
+**Tests**
+
+- `internal/command/gtw/readiness_test.go` (new): shared
+  `setupReadiness` + `porcelainFromSnapshot` fixtures, used by
+  both pr and push test files.
+- 7 new `/gtw pr` dimension tests (`TestDispatchPR_DetachedHead`,
+  `_NoUpstream`, `_AheadOfUpstream`, `_BehindUpstream`,
+  `_Uncommitted`, `_Untracked`, `_HasConflicts`, `_ReadyNothingNew`).
+- 4 new `/gtw push` matrix tests (`TestDispatchPush_HardRefuse_Conflicts`,
+  `_NothingToPush`, `_NoUpstreamFreshBranch`, `_AgentIntroducedConflicts`).
+- `TestDispatchPR_NothingToPR_UncommittedHints` deleted: the
+  pre-F-57 nested "uncommitted hint inside the nothing-to-PR
+  branch" code path no longer exists; readiness gate catches
+  it first.
+
+**Docs**
+
+- `docs/feat/F-57-gtw-push-pr-readiness.md`: full design +
+  continuity proof + test matrix + migration steps.
+- `internal/command/gtw/README.md`: no change (emoji + IM
+  card conventions unchanged).
+
 ### Breaking: `/kill` renamed to `/close`, and `/close` no longer drops the AgentSession
 
 Two related changes that together clarify the session-lifecycle

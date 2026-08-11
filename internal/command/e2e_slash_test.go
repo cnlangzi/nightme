@@ -42,6 +42,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/command/newcmd"
 	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/gatewaytest"
 )
 
 // ─── Echo bridge ─────────────────────────────────────────────────────
@@ -325,7 +326,7 @@ func newWiredHarness(t *testing.T) *wiredHarness {
 	// already installed — every slash reply goes through it
 	// twice (once via the runtime shim's cs.Emitter() and once
 	// in case any inline channel adapter path is exercised).
-	noop := &noopEmitter{}
+	noop := &gatewaytest.NoopEmitter{}
 	gw := gateway.New(func(context.Context, *gateway.InboundMessage) error { return nil }, noop)
 	gw.WithCommander(newRuntimeShim(mgr, reg, "echo"))
 

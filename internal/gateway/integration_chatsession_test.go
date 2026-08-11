@@ -82,7 +82,7 @@ var _ channel.Channel = (*recordingChannel)(nil)
 // --- minimal runtime handler -----------------------------------------
 //
 // Mirrors newEventHandler's core (Translate + ReplyTo stamping +
-// ch.Send) without the SessionContext / /think / /tools side-paths
+// ch.Send) without the StatusBar / /think / /tools side-paths
 // — those are not relevant to the regression we're hunting.
 
 func integrationEventHandler(ch channel.Channel, _ *chatsession.ChatSession) func(env chatsession.AgentEventEnvelope) bool {

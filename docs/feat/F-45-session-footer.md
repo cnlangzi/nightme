@@ -9,10 +9,10 @@
 > - `internal/agent/agent.go` — `UsageInfo` 搬到 `agent` 包（type alias in gateway）
 > - `internal/agentsession/session.go` — F-102 重构后 AgentSession 实体（`Model` / `PersistIfDirty` API；`CumulativeUsage` 链路已迁出到 `internal/agentsession/` accumulator + `AgentResultEvent.Usage`）—— 历史位置 `internal/chatsession/agentsession.go` 已废弃
 > - `internal/registry/agent_session_entry.go` — schema 加 `Model` 字段（`CumulativeUsage` 已不再单独持久化，由 accumulator 派生）
-> - `internal/gateway/messages.go` — `OutboundMessage.SessionContext *SessionContext` typed field
+> - `internal/gateway/messages.go` — `OutboundMessage.StatusBar *StatusBar` typed field
 > - `internal/command/newcmd/cmd.go` — `/new` handler (`Handle`) 调 `mgr.PersistAgentSession`；原 `internal/gateway/handlers_chatsession.go::handleNew` 已迁移
-> - `cmd/nightme/run.go::newEventHandler` — `SetModel` / `AccumulateUsage` / stamp `SessionContext` / `PersistIfDirty`
-> - `internal/channel/feishu/usage_footer.go` (NEW) — `formatSessionFooter` helper
+> - `cmd/nightme/run.go::newEventHandler` — `SetModel` / `AccumulateUsage` / stamp `StatusBar` / `PersistIfDirty`
+> - `internal/channel/feishu/usage_footer.go` (NEW) — `formatStatusBar` helper
 > - `internal/channel/feishu/adapter.go` — `Send` 三个 main-chat case 拼 footer
 > - 文档同步（`SPEC.md` §0.12 / `channel/feishu.md` §13.22 / `F-44 §6.1` cross-link）
 >
@@ -65,12 +65,12 @@ Usage *agent.UsageEvent  // bridge 报的本轮 usage — runtime 直接 out.Usa
 
 **问题**：Channel 拿到 3 个字段后要自己拼装 footer，metadata 关系散落 3 处，扩展新字段（如 `provider_url` / `agent_version`）要继续加字段。
 
-#### 第二轮（采纳）：1 个 `SessionContext` typed snapshot
+#### 第二轮（采纳）：1 个 `StatusBar` typed snapshot
 
 把所有 metadata 收拢到 1 个 typed struct：
 
 ```go
-type SessionContext struct {
+type StatusBar struct {
     Agent           string
     Model           string
     Usage *agent.UsageEvent
@@ -78,14 +78,14 @@ type SessionContext struct {
 
 type OutboundMessage struct {
     // ...既有字段...
-    SessionContext *SessionContext  // ← 单一字段
+    StatusBar *StatusBar  // ← 单一字段
 }
 ```
 
 **收益**：
 - wire 更紧凑（1 个字段 vs 3 个）
-- Channel 不需要知道"agent / model / tokens 是分别维护的"——`SessionContext` 是 1 个 atomic snapshot
-- 未来扩展新字段只改 `SessionContext` 定义，不破 Channel 接口
+- Channel 不需要知道"agent / model / tokens 是分别维护的"——`StatusBar` 是 1 个 atomic snapshot
+- 未来扩展新字段只改 `StatusBar` 定义，不破 Channel 接口
 - runtime 维护 AgentSession 的 metadata 是单一职责——「AgentSession 自描述」
 
 ### 0.4 用户问题澄清
@@ -188,15 +188,15 @@ main chat:
 switch out.Kind {
 case gateway.OutReply, gateway.OutResult,
     gateway.OutTaskCreate, gateway.OutTaskUpdate:
-    stamp SessionContext  // ← 4 个 main-chat Kind
+    stamp StatusBar  // ← 4 个 main-chat Kind
 }
 ```
 
-### 1.3 SessionContext 字段语义
+### 1.3 StatusBar 字段语义
 
 ```go
 // internal/gateway/messages.go (NEW)
-type SessionContext struct {
+type StatusBar struct {
     // Agent is the registry name of the agent that produced this
     // outbound event (e.g. "claude", "codex"). Sourced from
     // AgentSession.Agent — immutable, no lock needed at read site.
@@ -279,7 +279,7 @@ func (as *AgentSession) PersistIfDirty(persist func(*registry.AgentSessionEntry)
 `OutboundMessage` 加 1 个 typed field：
 
 ```go
-// SessionContext carries the runtime-stamped AgentSession
+// StatusBar carries the runtime-stamped AgentSession
 // snapshot for footer rendering. Stamped ONLY on OutReply /
 // OutResult / OutTaskCreate / OutTaskUpdate. nil on every other
 // kind (thread-only, lifecycle, init/usage payloads themselves).
@@ -287,16 +287,16 @@ func (as *AgentSession) PersistIfDirty(persist func(*registry.AgentSessionEntry)
 // Bridges never populate this field; runtime's newEventHandler
 // closure is the single owner of "what footer should this card
 // render?". See docs/feat/F-45-session-footer.md §1.3.
-SessionContext *SessionContext
+StatusBar *StatusBar
 ```
 
 **不变式**：
 - 1 个字段，不是 3 个（§0.3 论述）
 - bridges 不动（仍是 EventAgentConnected / EventUsage 事件）
 - runtime 唯一 owner
-- Channel 读 `msg.SessionContext`，nil 时跳过 footer
+- Channel 读 `msg.StatusBar`，nil 时跳过 footer
 
-### 1.6 Footer 渲染规则（formatSessionFooter）
+### 1.6 Footer 渲染规则（formatStatusBar）
 
 **F-52 重构 (2026-08)**：F-45 原本把 `in / out / cache / total / $cost` 拆成多段（`↓ in · ↻ cached · ↑ out · Total · $cost`）。F-52 统一为更紧凑的「`💰:「 in / out · X% · $cost 」`」格式，理由：
 - "in" 按 https://yb.tencent.com/s/3G6HphjOxM70 的口径合并三个 input-side 字段（`InputTokens + CacheCreationInputTokens + CacheReadInputTokens`），避免用户在 IM 里还要心算 cache_creation + cache_read。
@@ -318,7 +318,7 @@ SessionContext *SessionContext
 | `in / out` | `in = InputTokens + CacheCreationInputTokens + CacheReadInputTokens`；`out = OutputTokens`。F-55.1 进一步把 `in` 拆 `new / cache / out`： | `in == 0 && out == 0` 时整段省略（无 usage） | F-55.1 render:`new / cache / out`,纯数字无 label；每段按 `> 0` 独立 omit。`cache == 0` 时退回 `new / out` 布局。`new = InputTokens + CacheCreationInputTokens`,`cache = CacheReadInputTokens`。 |
 
 > F-55.1: Anthropic 三个 input-side 字段**互斥**(每个 token 恰好落一个桶),split 不引入重叠——`in == new + cache` 恒成立。Doc 1 pct 仍按 `(new + cache + out) / contextWindow` 计算。
-| `X% (window)` | `SessionContext.ContextWindowPct` + `SessionContext.Usage.ContextWindow`(F-55 透传:Claude Code `modelUsage[<model>].contextWindow`,Pi `get_state.data.model.contextWindow`) | `ContextWindowPct == 0` 时整段省略(`window == 0 && pct == 0` 也走 omit 路径) | `fmt.Sprintf("%.1f%% (%s)", pct, abbrevWindow(window))` — 一位小数;`99.6%` 不能四舍五入到 `100%`;`pct > 100%` **不 clamp 不告警**,让用户看到分母自行判断(`101.6% (200k)` 即是 MiniMax 兼容端把 1M 模型错报成 200K 的诊断信号) |
+| `X% (window)` | `StatusBar.ContextWindowPct` + `StatusBar.Usage.ContextWindow`(F-55 透传:Claude Code `modelUsage[<model>].contextWindow`,Pi `get_state.data.model.contextWindow`) | `ContextWindowPct == 0` 时整段省略(`window == 0 && pct == 0` 也走 omit 路径) | `fmt.Sprintf("%.1f%% (%s)", pct, abbrevWindow(window))` — 一位小数;`99.6%` 不能四舍五入到 `100%`;`pct > 100%` **不 clamp 不告警**,让用户看到分母自行判断(`101.6% (200k)` 即是 MiniMax 兼容端把 1M 模型错报成 200K 的诊断信号) |
 | `$cost` | `agent.UsageEvent.CostUSD`（F-52 透传 API 报的 `total_cost_usd`） | `== 0` 时省略（API 没报） | `fmt.Sprintf("$%.3f", cost)` — 三位小数，与 F-45 原约定一致 |
 
 段之间用 ` · ` 分隔；`「」` 括号只在至少一个段非空时才包裹整行。Line 1 / Line 3 的 omit 规则、emoji 选择（🤖 / 🗜 / 📁）均不变，但 Line 1 / Line 3 的 emoji 头部加了 `:` 后缀（`🤖:` / `📁:`），与 Line 2 的 `💰:「」` 共享 category-prefix 形态 — 见 §1.9（F-56 follow-up）。
@@ -383,7 +383,7 @@ claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k   
 
 | 段 | 来源 | Omit 规则 |
 |---|---|---|
-| 📁 `<workspace>` | `SessionContext.Workspace` = `s.Cwd` | 整段在 Workspace=="" 或 `GitStatus==nil` 时省略（review fix：non-git workspace 不显示误导性的 "⎇ ?"） |
+| 📁 `<workspace>` | `StatusBar.Workspace` = `s.Cwd` | 整段在 Workspace=="" 或 `GitStatus==nil` 时省略（review fix：non-git workspace 不显示误导性的 "⎇ ?"） |
 | ⎇ `<branch>` | `GitStatus.Branch` | 永远显示（当行渲染时）；`Branch==""`（detached HEAD 在 git repo 内）→ 写 `?` |
 | ↑ `<n>` | `GitStatus.Uncommitted` | `n==0` 省略 |
 | ? `<n>` | `GitStatus.Untracked` | `n==0` 省略 |
@@ -407,10 +407,10 @@ claude · opus-4-5 · ↓ 12.3k · ↻ 8.2k cached · ↑ 1.5k · Total 22.0k   
 - `GitStatus` = parse 结果；非 git repo / git 失败 / git 超时 → `nil`（整段省略）
 - stamp condition 扩展：`hasGit := gitSnap != nil && s.Cwd != ""`；其他 usage/model 条件不变
 
-**Wire 形态**（`gateway.SessionContext`）：
+**Wire 形态**（`gateway.StatusBar`）：
 
 ```go
-type SessionContext struct {
+type StatusBar struct {
     Agent           string
     Model           string
     Usage *agent.UsageEvent
@@ -429,7 +429,7 @@ type GitStatusSnapshot struct {
 }
 ```
 
-**Render 路径**（`internal/channel/feishu/usage_footer.go::formatSessionFooterLines`）：
+**Render 路径**（`internal/channel/feishu/usage_footer.go::formatStatusBarLines`）：
 - 现有 line 1 / line 2 不变
 - 新增 line 3：`formatGitLine(ctx)` 返回非空时 append
 - `formatGitLine` 内部调 `formatWorkspacePath`（无 HOME 处理、≤ 2 组件完整、> 2 截尾）
@@ -439,15 +439,15 @@ type GitStatusSnapshot struct {
 - `internal/channel/feishu/usage_footer_test.go` — 新增 `TestFormatWorkspacePath`（17 case）+ `TestFormatGitLine_*`（8 case）+ `TestFormatSessionFooterLines_WithGitLine` / `_GitOnly`
 
 **不变式**：
-- `formatSessionFooterLines` 已存在测试全部通过（line 1/2 行为不变）
-- `OutboundMessage.SessionContext` wire 兼容性保持：Channel 不读 `Workspace` / `GitStatus` 时零影响
+- `formatStatusBarLines` 已存在测试全部通过（line 1/2 行为不变）
+- `OutboundMessage.StatusBar` wire 兼容性保持：Channel 不读 `Workspace` / `GitStatus` 时零影响
 - 不在 Channel 调 git（保持 F-08 "Channel is dumb" 边界）—— git CLI 只在 runtime stamp 时跑
-- 无生产代码注入：测试用真实 mock git output + 直接构造 `SessionContext` 输入，不引入 test-only 变量
+- 无生产代码注入：测试用真实 mock git output + 直接构造 `StatusBar` 输入，不引入 test-only 变量
 
 **F-48 PR scope**：
 - `internal/gtw/git_status.go` (NEW)
 - `internal/gtw/git_status_test.go` (NEW)
-- `internal/gateway/messages.go` — `SessionContext` 加 2 个字段
+- `internal/gateway/messages.go` — `StatusBar` 加 2 个字段
 - `cmd/nightme/run.go::newEventHandler` — stamp 时调用 `gtw.CollectStatus`
 - `internal/channel/feishu/usage_footer.go` — line 3 渲染 + `formatWorkspacePath`
 - `internal/channel/feishu/usage_footer_test.go` — 扩展测试
@@ -548,10 +548,10 @@ F-45 §1.2 的 OutboundKind → Footer 路由表中 `OutCompaction` 一行删除
 
 **`OutCompaction` kind 整体删除**（不是"保留但 runtime 不发"）——runtime handler 不再产生 OutboundMessage；channel adapter 不再有 case 处理。理由见 [`F-49 §1.9`](./F-49-compaction-counter.md)。
 
-#### 1.8.5 SessionContext 扩展
+#### 1.8.5 StatusBar 扩展
 
 ```go
-type SessionContext struct {
+type StatusBar struct {
     Agent           string
     Model           string
     Usage *agent.UsageEvent
@@ -563,7 +563,7 @@ type SessionContext struct {
 
 #### 1.8.6 与 F-45 §1.5 stamping 规则的交互
 
-F-45 §1.5 在 4 个 main-chat Kind 上 stamp SessionContext。F-49 不改变这一规则——只在 stamp 时多填一个 `CompactionCount` 字段。Stamp condition 扩展（[`F-49 §1.8`](./F-49-compaction-counter.md)）：
+F-45 §1.5 在 4 个 main-chat Kind 上 stamp StatusBar。F-49 不改变这一规则——只在 stamp 时多填一个 `CompactionCount` 字段。Stamp condition 扩展（[`F-49 §1.8`](./F-49-compaction-counter.md)）：
 
 ```go
 // 既有 condition（来自 F-45 §2.5 改动 C）
@@ -571,13 +571,13 @@ if snap.InputTokens != 0 || snap.OutputTokens != 0 ||
     snap.CacheCreationInputTokens != 0 ||
     snap.CacheReadInputTokens != 0 || snap.CostUSD != 0 ||
     s.Model() != "" || hasGit {
-    out.SessionContext = &gateway.SessionContext{...}
+    out.StatusBar = &gateway.StatusBar{...}
 }
 
 // F-49 扩展：compactionCount > 0 也触发 stamp
 if snap.InputTokens != 0 || ... || hasGit ||
     s.CompactionCount() > 0 {
-    out.SessionContext = &gateway.SessionContext{
+    out.StatusBar = &gateway.StatusBar{
         // ...
         CompactionCount: s.CompactionCount(),
     }
@@ -602,7 +602,7 @@ State 流转图（见下 §1.9）加一条 compaction 分支：
 
 #### 1.8.8 F-49 不在 F-45 PR scope
 
-F-49 是独立 PR（详见 §7 实施计划），不在 F-45 当初落地范围内。F-45 的 footer helper `formatSessionFooterLines` 在 F-49 PR 里加 `🗜 N` 段；其余文件（AgentSession / SessionContext / newEventHandler / bridges）都是 F-49 新增改动，与 F-45 已落地的代码解耦。
+F-49 是独立 PR（详见 §7 实施计划），不在 F-45 当初落地范围内。F-45 的 footer helper `formatStatusBarLines` 在 F-49 PR 里加 `🗜 N` 段；其余文件（AgentSession / StatusBar / newEventHandler / bridges）都是 F-49 新增改动，与 F-45 已落地的代码解耦。
 
 ### 1.9 State 流转
 
@@ -629,14 +629,14 @@ AgentSession 生命周期:
 
 ### 1.10 SessionID + Category-Prefix 形态统一 (F-56 follow-up)
 
-**Why**：三件事打包：(a) `AgentSession.SessionID`（Claude Code 的 `system/init.session_id`、ACP 合成 uuid 等）已经有 runtime 端的 RLock accessor，但没进 `gateway.SessionContext`，footer 拿不到——用户看不到"这是哪个 agent session"；(b) 三条 footer 行的 category-prefix 形态不一致（Line 2 是 `💰:「」`，Line 1 是 `🤖`，Line 3 是 `📁 `），视觉上读起来像两条规则。
+**Why**：三件事打包：(a) `AgentSession.SessionID`（Claude Code 的 `system/init.session_id`、ACP 合成 uuid 等）已经有 runtime 端的 RLock accessor，但没进 `gateway.StatusBar`，footer 拿不到——用户看不到"这是哪个 agent session"；(b) 三条 footer 行的 category-prefix 形态不一致（Line 2 是 `💰:「」`，Line 1 是 `🤖`，Line 3 是 `📁 `），视觉上读起来像两条规则。
 
 **改动**：
 
-**(1) `gateway.SessionContext` 加 `SessionID string` 字段**
+**(1) `gateway.StatusBar` 加 `SessionID string` 字段**
 
 ```go
-type SessionContext struct {
+type StatusBar struct {
     Agent     string
     Model     string
     SessionID string  // NEW (F-56)
@@ -646,7 +646,7 @@ type SessionContext struct {
 }
 ```
 
-字段来源：`cmd/nightme/run.go::sessionContextInto` 在 stamp 时调 `s.SessionID()`（RLock）填入；stamp condition 增加 `s.SessionID() != ""` 单独触发 footer 渲染（与 `Agent` / `Model` / `hasGit` / `Usage` 并列）。空值时 footer 跳过该 segment——保持既有"each segment omitted independently"约定。
+字段来源：`cmd/nightme/run.go::stampFromAS` 在 stamp 时调 `s.SessionID()`（RLock）填入；stamp condition 增加 `s.SessionID() != ""` 单独触发 footer 渲染（与 `Agent` / `Model` / `hasGit` / `Usage` 并列）。空值时 footer 跳过该 segment——保持既有"each segment omitted independently"约定。
 
 **(2) Footer Line 1 渲染追加 `· <sessionid>` 段**
 
@@ -658,7 +658,7 @@ type SessionContext struct {
 
 Separator 沿用 ` · ` middle-dot（与 Line 1 已有 `Agent · Model`、Line 2 已有 `new / cache / out` 同一族）；不引入新符号。
 
-Leading-separator caveat：`SessionID != "" && Agent == "" && Model == ""` 时渲染成 `🤖: · <sid>`（前置 `·`）。在生产路径上 `sessionContextInto` 的 materialize 条件保证至少有 1 个字段非空，但单 SessionID 触发 footer 时仍会出现该形态。判定为可接受——文档在 `formatSessionFooterLines` 注释 + `usage_footer_test.go::TestFormatSessionFooterLines_SessionIDOnly` 锁定行为，避免后续 PR "修 leading dot" 时无意回退。
+Leading-separator caveat：`SessionID != "" && Agent == "" && Model == ""` 时渲染成 `🤖: · <sid>`（前置 `·`）。在生产路径上 `stampFromAS` 的 materialize 条件保证至少有 1 个字段非空，但单 SessionID 触发 footer 时仍会出现该形态。判定为可接受——文档在 `formatStatusBarLines` 注释 + `usage_footer_test.go::TestFormatSessionFooterLines_SessionIDOnly` 锁定行为，避免后续 PR "修 leading dot" 时无意回退。
 
 **(3) Line 1 / Line 3 emoji 加 `:` 后缀**
 
@@ -675,7 +675,7 @@ Leading-separator caveat：`SessionID != "" && Agent == "" && Model == ""` 时�
 **Wire 形态**：
 
 ```go
-type SessionContext struct {
+type StatusBar struct {
     Agent     string
     Model     string
     SessionID string                  // NEW (F-56)
@@ -685,17 +685,17 @@ type SessionContext struct {
 }
 ```
 
-**Render 路径**（`internal/channel/feishu/usage_footer.go::formatSessionFooterLines`）：
+**Render 路径**（`internal/channel/feishu/usage_footer.go::formatStatusBarLines`）：
 - Line 1 idParts：`["🤖:", ctx.Agent, "·", ctx.Model, "·", ctx.SessionID]`（Agent / Model / SessionID 各自独立 omit）
 - Line 3 formatGitLine：`parts := []string{"📁: " + ws, ...}`（emoji 头部加 `:`）
 - Line 2 不变
 
-**Stamp condition**（`cmd/nightme/run.go::sessionContextInto`）：
+**Stamp condition**（`cmd/nightme/run.go::stampFromAS`）：
 
 ```go
 if s.Agent != "" || s.Model() != "" || s.SessionID() != "" || hasGit ||
     out.Usage != nil {
-    out.SessionContext = &gateway.SessionContext{
+    out.StatusBar = &gateway.StatusBar{
         Agent:     s.Agent,
         Model:     s.Model(),
         SessionID: s.SessionID(),
@@ -719,8 +719,8 @@ if s.Agent != "" || s.Model() != "" || s.SessionID() != "" || hasGit ||
 - `pty`：pty 没有 init 事件，SessionID 为空，footer 跳过该 segment（既有 `each segment omitted independently` 规则自然处理）
 
 **F-56 PR scope**：
-- `internal/gateway/messages.go` — `SessionContext` 加 1 个字段
-- `cmd/nightme/run.go::sessionContextInto` — 填充 + materialize条件
+- `internal/gateway/messages.go` — `StatusBar` 加 1 个字段
+- `cmd/nightme/run.go::stampFromAS` — 填充 + materialize条件
 - `internal/channel/feishu/usage_footer.go` — Line 1 加 sessionid 段 + emoji `:` 后缀 + Line 3 emoji `:` 后缀
 - `internal/channel/feishu/usage_footer_test.go` — 同步既有 fixture + 新增 2 个 case
 - `docs/feat/F-45-session-footer.md` — 本节
@@ -756,15 +756,15 @@ InputTokens int
 
 ### 2.2 `internal/gateway/messages.go`
 
-**改动 A**：定义 `SessionContext` typed struct（见 §1.3）。
+**改动 A**：定义 `StatusBar` typed struct（见 §1.3）。
 
-**改动 B**：给 `OutboundMessage` 加 `SessionContext *SessionContext` 字段（见 §1.5）。
+**改动 B**：给 `OutboundMessage` 加 `StatusBar *StatusBar` 字段（见 §1.5）。
 
 **改动 C**：保留 `UsageInfo` 的 type alias 兼容：
 
 ```go
 // UsageInfo is the cumulative form of UsageEvent — used on
-// AgentSession wrapper and OutboundMessage.SessionContext.
+// AgentSession wrapper and OutboundMessage.StatusBar.
 // Re-exported as a type alias for backward compatibility with
 // existing gateway code (translate.go / OutUsage payload).
 type UsageInfo = agent.UsageInfo
@@ -848,10 +848,10 @@ if ev.Kind == agent.EventUsage && ev.Usage != nil {
 }
 ```
 
-**改动 C**：`out.ReplyTo = userMsgID` 之后 stamp SessionContext：
+**改动 C**：`out.ReplyTo = userMsgID` 之后 stamp StatusBar：
 
 ```go
-// NEW: 在 4 个 main-chat Kind 上 stamp SessionContext 快照
+// NEW: 在 4 个 main-chat Kind 上 stamp StatusBar 快照
 switch out.Kind {
 case gateway.OutReply, gateway.OutResult,
     gateway.OutTaskCreate, gateway.OutTaskUpdate:
@@ -859,7 +859,7 @@ case gateway.OutReply, gateway.OutResult,
     if snap.InputTokens != 0 || snap.OutputTokens != 0 ||
         snap.CacheReadInputTokens != 0 || snap.CostUSD != 0 ||
         s.Model() != "" {
-        out.SessionContext = &gateway.SessionContext{
+        out.StatusBar = &gateway.StatusBar{
             Agent:           s.Agent,        // immutable string, 无锁
             Model:           s.Model(),
             CumulativeUsage: snap,
@@ -908,11 +908,11 @@ _ = mgr.PersistAgentSession(as)
 ```go
 package feishu
 
-// formatSessionFooter 渲染 SessionContext 为单行 markdown。
+// formatStatusBar 渲染 StatusBar 为单行 markdown。
 // 返回 "" 表示无需 footer（nil 或全零）。
 //
 // 见 docs/feat/F-45-session-footer.md §1.6 完整规则。
-func formatSessionFooter(ctx *gateway.SessionContext) string
+func formatStatusBar(ctx *gateway.StatusBar) string
 
 // abbrevTokens token 数字缩写：<1000 raw，≥1k "X.Xk"，≥1M "X.XM"
 func abbrevTokens(n int) string
@@ -933,7 +933,7 @@ func (a *Adapter) sendReplyInThreadAndChat(
     // ... 既有 sanitize / truncate / buildResultPayload 逻辑 ...
     
     // NEW: 在 text 末尾追加 footer（如果有）
-    if footer := formatSessionFooter(msg.SessionContext); footer != "" {
+    if footer := formatStatusBar(msg.StatusBar); footer != "" {
         // 用 "\n\n" 分隔 footer 与正文（lark_md 渲染时换行）
         text = text + "\n\n" + footer
     }
@@ -950,17 +950,17 @@ case gateway.OutReply:
     text := strings.TrimSpace(msg.Text)
     if text == "" { return nil }
     if msg.ReplyTo == "" {
-        return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", text, msg.SessionContext)
+        return a.sendReplyInThreadAndChat(ctx, msg.ChatID, "", text, msg.StatusBar)
     }
     // ... 既有 fold 进 receipt 路径 ...
-    return a.sendReplyInThreadAndChat(ctx, msg.ChatID, msg.ReplyTo, text, msg.SessionContext)
+    return a.sendReplyInThreadAndChat(ctx, msg.ChatID, msg.ReplyTo, text, msg.StatusBar)
 ```
 
-> **简化版决策**：本 PR 把 `sendReplyInThreadAndChat` 签名改为接受 `ctx *SessionContext`，而不是加新参数 `footer string`。前者更内聚——helper 自己读 SessionContext，自己决定要不要加 footer。
+> **简化版决策**：本 PR 把 `sendReplyInThreadAndChat` 签名改为接受 `ctx *StatusBar`，而不是加新参数 `footer string`。前者更内聚——helper 自己读 StatusBar，自己决定要不要加 footer。
 
 #### Case `OutResult` → `sendResultAsReply`
 
-平行改造，签名加 `ctx *SessionContext`。
+平行改造，签名加 `ctx *StatusBar`。
 
 #### Case `OutTaskCreate` / `OutTaskUpdate` → receipt card
 
@@ -989,7 +989,7 @@ if footer != "" {
 
 ### 2.9 Echo channel 透传
 
-`internal/channel/echo/echo.go::Send` —— **零改动**。`SessionContext` 字段自然落到 `recorded` slice，测试用 `c.Record()` 验证被 stamp。
+`internal/channel/echo/echo.go::Send` —— **零改动**。`StatusBar` 字段自然落到 `recorded` slice，测试用 `c.Record()` 验证被 stamp。
 
 ---
 
@@ -1011,17 +1011,17 @@ if footer != "" {
    - 加 6 个方法（§2.4）
    - `Entry()` / `FromAgentSessionEntry` 同步
 
-4. **`feat(gateway): SessionContext typed field on OutboundMessage`**
-   - `internal/gateway/messages.go` 新增 `SessionContext` struct
-   - `OutboundMessage` 加 `SessionContext *SessionContext` 字段
+4. **`feat(gateway): StatusBar typed field on OutboundMessage`**
+   - `internal/gateway/messages.go` 新增 `StatusBar` struct
+   - `OutboundMessage` 加 `StatusBar *StatusBar` 字段
 
-5. **`feat(runtime): newEventHandler accumulate + capture + stamp SessionContext + PersistIfDirty`**
+5. **`feat(runtime): newEventHandler accumulate + capture + stamp StatusBar + PersistIfDirty`**
    - `cmd/nightme/run.go` 4 处改动（§2.5 改动 A/B/C/D）
 
 6. **`feat(gateway): /new handler ResetCumulative + PersistAgentSession`**
    - `internal/command/newcmd/cmd.go::Handle` 加 2 行（原 `internal/gateway/handlers_chatsession.go::handleNew`；F-102 之后 slash command 已统一迁移到 `internal/command/<name>/`）
 
-7. **`feat(feishu): formatSessionFooter helper + 3 main-chat case 渲染 footer`**
+7. **`feat(feishu): formatStatusBar helper + 3 main-chat case 渲染 footer`**
    - 新文件 `internal/channel/feishu/usage_footer.go`
    - `internal/channel/feishu/adapter.go` 改 `Send` 3 case + 改 `buildReceiptCard` 签名 + 改 `sendReplyInThreadAndChat` / `sendResultAsReply` 签名
 
@@ -1048,17 +1048,17 @@ if footer != "" {
 | `TestEntry_RoundtripPreserves` | `internal/chatsession/agentsession_test.go` | `Entry() → JSON marshal → unmarshal → FromAgentSessionEntry` 字段全相等 |
 | ~~`TestHandleNew_ResetsCumulative`~~ | ~~`internal/gateway/handlers_new_test.go`~~ (OBSOLETE, **F-102 重构已删**） | F-102 之后 `ResetCumulative` / `CumulativeUsage` API 不再存在 —— usage 累积改走 `internal/agentsession/` accumulator + `AgentResultEvent.Usage`。此 case 已被 `TestHandleNew_PersistsAgentSession`（在 `internal/command/newcmd/commands_test.go`）取代，只断言 `/new` 后持久化路径 |
 | `TestFormatSessionFooter_*` | `internal/channel/feishu/usage_footer_test.go` (NEW) | nil / all-zero / 仅 in / 含 cost / cache 标记 / 大数缩写 |
-| `TestSend_OutReply_AppendsFooter` | `internal/channel/feishu/adapter_test.go` (EXTEND) | msg.SessionContext 非 nil 时，sendContent 收到 body 包含 footer 行 |
+| `TestSend_OutReply_AppendsFooter` | `internal/channel/feishu/adapter_test.go` (EXTEND) | msg.StatusBar 非 nil 时，sendContent 收到 body 包含 footer 行 |
 | `TestSend_OutResult_AppendsFooter` | 同上 | 同上 for OutResult |
 | `TestBuildReceiptCard_WithFooter` | `internal/channel/feishu/receipt_test.go` (EXTEND) | footer 字符串出现在 card body 的最后 div element |
-| `TestEcho_RecordsSessionContext` | `internal/channel/echo/echo_test.go` (EXTEND) | c.Record() 验证 SessionContext 字段被填充 |
+| `TestEcho_RecordsStatusBar` | `internal/channel/echo/echo_test.go` (EXTEND) | c.Record() 验证 StatusBar 字段被填充 |
 
 ### 4.2 集成测试
 
 | 测试 | 文件 | 覆盖 |
 |------|------|------|
 | `TestNewEventHandler_AccumulatesAcrossTurns` | `cmd/nightme/run_test.go` (EXTEND) | mock 5 个 turn 的 EventUsage → s.CumulativeUsage() 等于 5 个 turn 之和 |
-| `TestNewEventHandler_StampsOnlyMainChatKinds` | 同上 | 5 种 OutboundKind 各发一个 Event，验证 SessionContext 仅在 4 个 main-chat Kind 上非 nil |
+| `TestNewEventHandler_StampsOnlyMainChatKinds` | 同上 | 5 种 OutboundKind 各发一个 Event，验证 StatusBar 仅在 4 个 main-chat Kind 上非 nil |
 | `TestNewEventHandler_PersistsOnEventDone` | 同上 | 模拟 EventUsage + EventDone，验证 PersistAgentSession 被调一次 |
 | `TestRestart_PreservesCumulative` | `cmd/nightme/run_test.go` | spawn AgentSession → 累加 → 模拟 daemon 重启 → 新 AgentSession.CumulativeUsage() 等于上次落盘值 |
 
@@ -1068,8 +1068,8 @@ if footer != "" {
 |------|------|
 | `TestFooter_OmitsZeroSegments` | Model="" / Cost=0 / CacheRead=0 时对应 segment 不显示 |
 | `TestFooter_AllZero_ReturnsEmpty` | 全零时返回 ""，caller 不拼到 text |
-| `TestSessionContext_NeverStampedOnThreadKinds` | OutThinking / OutToolStart / OutToolEnd / OutCompaction 不带 SessionContext |
-| `TestSessionContext_NeverStampedOnLifecycleKinds` | OutInit / OutUsage / OutMessageState / OutCard / OutCommandReply 不带 SessionContext |
+| `TestStatusBar_NeverStampedOnThreadKinds` | OutThinking / OutToolStart / OutToolEnd / OutCompaction 不带 StatusBar |
+| `TestStatusBar_NeverStampedOnLifecycleKinds` | OutInit / OutUsage / OutMessageState / OutCard / OutCommandReply 不带 StatusBar |
 
 ---
 
@@ -1087,9 +1087,9 @@ if footer != "" {
 ### 5.2 wire 兼容性
 
 **`OutboundMessage`**：
-- 新字段 `SessionContext *SessionContext`——Channel 实现需要适配（Feishu adapter 改 3 case）
+- 新字段 `StatusBar *StatusBar`——Channel 实现需要适配（Feishu adapter 改 3 case）
 - 其他 Channel 实现（Echo / Slack / Web）零改动也能编译（只是不渲染 footer）
-- 未来 Channel 想支持 footer：读 `msg.SessionContext` 即可
+- 未来 Channel 想支持 footer：读 `msg.StatusBar` 即可
 
 **bridge 协议**：零变化。bridges 仍发 `EventAgentConnected` / `EventUsage`，runtime 负责捕获并 stamp。
 
@@ -1109,7 +1109,7 @@ if footer != "" {
 - **per-model breakdown**（Anthropic API `modelUsage` map 展开成 multi-line footer）—— 后续 PR
 - **ChatSession-level 总计**（pool 内所有 AgentSession 之和）—— 后续 PR
 - **token 数据准确性改进**（bridge 在 EventText / EventToolStart 之间插 token snapshot）—— 超出 PR 范围，claudecode 当前 `result.usage` 是最后 LLM call 的 token 数
-- **agent_version / provider_url** 等扩展字段——`SessionContext` 已预留扩展位置，按需加
+- **agent_version / provider_url** 等扩展字段——`StatusBar` 已预留扩展位置，按需加
 
 ---
 
@@ -1119,12 +1119,12 @@ if footer != "" {
 
 - **`OutboundMessage` 契约 100% typed**（§1.4 不变；新字段 typed 不破 §1.4 边界规范）
 - **§1.3 ChatSession 不 import channel/feishu**（不变）
-- **Channel 不 import chatsession**（不变；Channel 通过 typed `SessionContext` 字段读 metadata）
+- **Channel 不 import chatsession**（不变；Channel 通过 typed `StatusBar` 字段读 metadata）
 - **1 turn : 1 anchor 不变式**保留（`ReplyTo = currentTurnUserMsgID` 仍是唯一 coordination key）
 - **抽象归抽象 / 具体归具体**（footer 渲染细节由 Feishu adapter 自决，Slack / Web / Echo 各自决定）
 - **bridges 协议零变化**（仍发 EventAgentConnected / EventUsage，runtime 翻译）
-- **OutboundKind 不增不减**（`SessionContext` 是字段，不是新 Kind）
-- **OutInit / OutUsage 仍是 silent drop**（F-44 决策保留；footer 走 `SessionContext` 单独路径）
+- **OutboundKind 不增不减**（`StatusBar` 是字段，不是新 Kind）
+- **OutInit / OutUsage 仍是 silent drop**（F-44 决策保留；footer 走 `StatusBar` 单独路径）
 - **§1.4 抽象 / 具体 边界规范**：metadata 是 typed primitive，Channel 自决渲染目标
 - **F-25 rolling-log UX**：task receipt 仍是 rolling-log，footer 是新增 lark_md div
 - **F-31 MessageState 抽象契约**：不变
@@ -1144,4 +1144,4 @@ if footer != "" {
 
 | 日期 | 版本 | 变更 |
 |---|---|---|
-| 2026-08-05 | 草案 | 初稿；兑现 F-44 §6.1 推迟项；设计经过 §0.3 两轮迭代收敛到 SessionContext 单字段 |
+| 2026-08-05 | 草案 | 初稿；兑现 F-44 §6.1 推迟项；设计经过 §0.3 两轮迭代收敛到 StatusBar 单字段 |

@@ -11,6 +11,75 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### `outbound`: rename SessionContext / Stamper to StatusBar / StatusBarSource (F-58)
+
+The per-message metadata envelope attached to every outbound
+message is renamed end-to-end to align with its user-facing
+mental model. The rename touches the type, the field, the
+function, and every comment / doc.
+
+**Terminology:**
+
+| Old | New |
+| --- | --- |
+| `SessionContext` (flat struct) | `StatusBar` (sub-bar struct) |
+| `OutboundMessage.SessionContext` | `OutboundMessage.StatusBar` |
+| `outbound.Stamper` (function type) | `outbound.StatusBarSource` |
+| `Options.Stamper` | `Options.Source` |
+| `stampIfNeeded` | `attachStatusBarIfMissing` |
+| `sessionContextInto` (pre-fill) | `stampFromAS` (same role, same name style) |
+| `newRuntimeStamper` | `newRuntimeStatusBar` |
+| `buildSessionContext` | `buildStatusBar` |
+| `formatSessionFooterLines` / `formatSessionFooter` / `formatPRSegment` | `formatStatusBarLines` / `formatStatusBar` / `formatPRSegment` (param changed from `*SessionContext` to `*GitStatusBar` for `formatPRSegment` only) |
+
+**Sub-bar structure (the semantic fix that came with the rename):**
+
+`StatusBar` is no longer a flat struct of `Agent` / `Model` /
+`Workspace` / `GitStatus` / `Usage` / etc. fields. It groups
+into three sub-bars that encode the "show what exists, hide
+what doesn't" rule structurally:
+
+- `GitBar *GitStatusBar` — workspace + git + PR context.
+  **Always populated** when the chat has a workspace
+  (`cs.SelectedCwd != ""`), even if no `AgentSession` is
+  selected. This is the "git status is always there" rule —
+  every outbound message that flows through the runtime carries
+  its worktree, so slash-command replies in a chat that hasn't
+  spawned an AS yet, and pre-spawn `MessageQueued` placeholder
+  cards, all surface the workspace line. PullRequest is nil
+  when no AS is selected (PR lookup is per-AS).
+- `AgentBar *AgentStatusBar` — agent identity (`Agent` /
+  `Model` / `SessionID`). Populated only when a chat has a
+  selected AgentSession — without an AS there's no agent
+  identity to surface (the "AgentBar / TokensBar 没有 AS 则
+  忽略" rule).
+- `UsageBar *UsageStatusBar` — per-turn usage (in/out tokens,
+  context window %, cost). Populated only when the bridge event
+  carries Usage (typically `OutResult` / `EventAgentResult`).
+  Streaming `OutReply` chunks without usage omit this entirely.
+
+**Stamper → GitBar fallback (the behaviour change that came
+with the rename):**
+
+Pre-rename, `newRuntimeStamper` returned `nil` when the chat had
+no selected `AgentSession`, even if the chat had a workspace.
+That meant slash-command replies in a pre-spawn chat, and
+`MessageQueued` placeholder cards, all rendered with no footer
+at all. Post-rename, the source produces a `StatusBar` with
+only `GitBar` populated when no AS exists — the user always
+sees what worktree they're talking about.
+
+**Why "StatusBar":**
+
+- The data is semantically *not* just a session context:
+  Workspace / GitStatus are workspace fields, Usage is a
+  per-turn field, only Agent/Model/SessionID are session fields.
+- "Context" collided with Go's `context.Context` at every read
+  site.
+- The new name matches the user-facing mental model: it's a
+  status bar at the bottom of every outbound message, not a
+  free-floating context bag.
+
 ### `gtw`: `/gtw push` + `/gtw pr` unified Readiness gate (F-57)
 
 Both commands now share a single `Readiness` snapshot (one

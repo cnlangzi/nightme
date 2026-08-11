@@ -209,7 +209,7 @@ func runRunWith(cmd *cobra.Command, deps runDeps) error {
 //       - prcache.Registry (per-AS PR cache)
 //       - gtw.HandlerDeps (git runner, HTTP prober)
 //       - outbound.Emitter (the single outbound chokepoint;
-//         holds ch and the Stamper that reads prCacheReg +
+//         holds ch and the StatusBarSource that reads prCacheReg +
 //         gtwDeps + mgr)
 //  5. Build gtw.Manager, ReactionRouter, command.Commander,
 //     shell.Dispatcher (the command-adapter layer)
@@ -309,7 +309,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// messageDispatcher is constructed later (after `em` is
 	// built) so its error-reply paths — queue full / no
 	// workspace / spawn failed — go through the same Emitter as
-	// the runtime pump and pick up the SessionContext footer. The
+	// the runtime pump and pick up the StatusBar footer. The
 	// old channel_wrap prepended its own Emitter wrap, so the
 	// bug class "error replies miss the footer" is now caught at
 	// compile time: the dispatcher is typed as outbound.Emitter
@@ -342,7 +342,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// WithOnCreate + RestoreFromRegistry so the order can't be
 	// inverted at the call site.
 	// Per-AgentSession PR / MR cache. Built before Emitter
-	// construction (the Stamper reads it) and before
+	// construction (the StatusBarSource reads it) and before
 	// gateway.New (the Emitter flows into Gateway's outbound
 	// chokepoint). See prcache.Registry comment for why this
 	// is owned at runtime scope, not on AgentSession itself.
@@ -361,12 +361,12 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// MessageState / PATCH) flows through the same Emitter
 	// instance. Manager.WithEmitter (further down) binds the
 	// same Emitter to every ChatSession.
-	em := outbound.New(ch, outbound.Options{Stamper: newRuntimeStamper(mgr, prCacheReg, gtwDeps)})
+	em := outbound.New(ch, outbound.Options{Source: newRuntimeStatusBar(mgr, prCacheReg, gtwDeps)})
 
 	// Build the message dispatcher now that em exists. The
 	// dispatcher's three error reply paths (queue full / no
 	// workspace / spawn failed) all go through this Emitter so
-	// the SessionContext footer is applied — sending the raw
+	// the StatusBar footer is applied — sending the raw
 	// channel.Channel would silently skip the stamper.
 	messageDispatcher := newMessageDispatcher(mgr, em, cfg.Primary, logger)
 
@@ -912,9 +912,9 @@ func wireRuntimeCallbacksAndRestore(
 		})
 
 		// F-48: wrap the gateway's OnMessageState so the runtime
-		// can stamp SessionContext on MessageSubmitted (the
+		// can stamp StatusBar on MessageSubmitted (the
 		// Feishu placeholder card needs the footer). The gateway's
-		// bare OnMessageState doesn't accept SessionContext — the
+		// bare OnMessageState doesn't accept StatusBar — the
 		// runtime is the right owner of the stamp because it has
 		// access to the AgentSession via cs.SelectedAgentSession().
 		// We bypass gwImpl.OnMessageState entirely here: the
@@ -958,11 +958,11 @@ func wireRuntimeCallbacksAndRestore(
 				// event itself, not from cs.SelectedAgentSession().
 				// We pre-stamp here so the emitter's stamper (which
 				// uses cs.SelectedAgentSession()) sees a non-nil
-				// SessionContext and skips its lookup — preserving
+				// StatusBar and skips its lookup — preserving
 				// the "source AS, not selected AS" semantics this
 				// bus has always had.
 				if as := lookupASByID(cs, e.AgentSessionID); as != nil {
-					sessionContextInto(&out, as, prReg, gtwDeps)
+					stampFromAS(&out, as, prReg, gtwDeps)
 				}
 			}
 			if err := em.Send(context.Background(), out); err != nil {
@@ -1100,14 +1100,14 @@ func newEventHandler(
 			s.SetModel(ev.Model)
 		}
 		// Per-event usage flows from bridge → out.Usage (via
-		// gateway.Translate) → SessionContext.Usage (via
-		// sessionContextInto below) → channel footer. The runtime
+		// gateway.Translate) → StatusBar.Usage (via
+		// stampFromAS below) → channel footer. The runtime
 		// is a passive pass-through; no accumulation, no dedup,
 		// no priority. Usage rides on EventAgentResult (populated by
 		// the bridges via AgentResultEvent.Usage) — AgentDoneEvent.Usage is
 		// not currently surfaced because gateway.Translate drops
 		// EventAgentDone events before the runtime stamps
-		// SessionContext. Bridges that only emit EventAgentDone-with-
+		// StatusBar. Bridges that only emit EventAgentDone-with-
 		// Usage (no EventAgentResult) will not see their Usage in the
 		// footer; only pi-style bridges that have an explicit
 		// EventAgentResult path will.
@@ -1156,7 +1156,7 @@ func newEventHandler(
 		// stays empty for orphan events (EventAgentReady at startup,
 		// internal logs) — Channel renders those as plain text.
 		out.ReplyTo = userMsgID
-		// F-45 §2.5 改动 C: stamp SessionContext snapshot on the
+		// F-45 §2.5 改动 C: stamp StatusBar snapshot on the
 		// four main-chat Kinds. Other Kinds (thread-only,
 		// lifecycle, init/usage payloads themselves) skip the
 		// footer — they don't surface in the main chat timeline
@@ -1169,7 +1169,7 @@ func newEventHandler(
 		switch out.Kind {
 		case gateway.OutReply, gateway.OutResult,
 			gateway.OutTaskCreate, gateway.OutTaskUpdate:
-			sessionContextInto(&out, s, prReg, gtwDeps)
+			stampFromAS(&out, s, prReg, gtwDeps)
 		}
 		// F-think §3.1.2: per-chat OutThinking gate. When the
 		// chat has /think off, drop OutThinking events here
@@ -1243,41 +1243,6 @@ func newEventHandler(
 	}
 }
 
-// sessionContextInto populates the F-45/F-48 SessionContext
-// snapshot on the OutboundMessage when there's at least one
-// meaningful field to render. Reused by the 4 main-chat kind
-// stamp site AND the OutMessageState+MessageSubmitted site (the
-// Feishu placeholder card needs the same snapshot so its footer
-// line 3 — git tracking — renders from the very first "⌨️
-// Working..." emit).
-//
-// F-48: capture per-stamp git status for footer line 3. No
-// caching — every stamp recomputes so the footer always reflects
-// the latest worktree state (uncommitted edits / unpushed
-// commits). Returns (nil, nil) for non-repo / git-failure; we
-// treat that as "no git segment" in the footer render path.
-//
-// Git invocation has a 3s deadline (review fix): a hung git
-// (stalled NFS, broken .git/index, ... ) would otherwise block
-// the entire outbound-message pipeline — MessageSubmitted
-// placeholders AND every stamped reply/result wait for git to
-// return. 3s is plenty for normal repos (10-50ms typical; up to
-// ~1s on very large monorepos) and far below the user's
-// "chat is not realtime" tolerance. On timeout, CollectReadiness
-// returns (nil, nil) and the footer omits the git segment
-// silently — chat keeps moving.
-//
-// Stamp SessionContext when there's something worth showing in
-// the footer — either Agent/Model identity, git tracking, a
-// non-zero compaction count, or a per-event Usage payload on
-// this OutboundMessage.
-//
-// Usage flows straight from the bridge event onto the outbound
-// message (out.Usage is set by gateway.Translate from
-// AgentResultEvent.Usage / AgentDoneEvent.Usage). The runtime does NOT
-// aggregate across turns; Agent is a passive
-// pass-through. The footer renders out.Usage directly.
-
 // lookupASByID finds an AgentSession in the chat's pool by ID.
 // Used by event subscribers to recover the source AS from
 // AgentSessionID carried on each event (multi-as Phase 1: source
@@ -1300,58 +1265,100 @@ func lookupASByID(cs *chatsession.ChatSession, id string) *agentsession.AgentSes
 // AgentSession.Agent is immutable (direct field read, no lock);
 // Model() takes RLock internally; git status is captured fresh
 // on each stamp (3s deadline, no caching — see F-48 §1.7).
-func sessionContextInto(out *gateway.OutboundMessage, s *agentsession.AgentSession, prReg *prcache.Registry, deps gtw.HandlerDeps) {
-	// F-55: out.Usage is set by gateway.Translate from the
-	// bridge wire payload (AgentResultEvent.Usage / AgentDoneEvent.Usage).
-	// The runtime is a passive pass-through — copy verbatim so the
-	// channel footer can render it via ctx.Usage. Pre-F-55 the
-	// copy was missing, so footers silently rendered without
-	// usage data. buildSessionContext is the shared gate; the
-	// stamper and this legacy path both feed it the same AS +
-	// usage inputs. PullRequest lookup is plumbed through here too
-	// (see buildSessionContext) so the F-49 footer line surfaces
-	// the open PR / MR per AgentSession.
-	out.SessionContext = buildSessionContext(s, out.Usage, prReg, deps)
+// stampFromAS is the source-AS pre-fill helper for callers that
+// need to bypass the default source lookup (which uses
+// cs.SelectedAgentSession()). Used in two places today:
+//
+//   1. runtime pump (per-AgentEvent delivery) — `s` is the
+//      source AS that produced the event. Pre-fills StatusBar
+//      from `s` regardless of which AS the chat has selected.
+//   2. MessageStateBus MessageSubmitted — `as` is the source AS
+//      identified by AgentSessionID in the event. Pre-fills
+//      StatusBar from `as` so the multi-AS semantic ("source
+//      AS, not selected AS") is preserved when the runtime
+//      pump's stamper (selected-AS) would otherwise win.
+//
+// Pre-rename this was `sessionContextInto` with the same role;
+// renamed to stampFromAS because (a) "Into" was vague about
+// direction, (b) the new name states explicitly that we're
+// stamping using a specific AS rather than the default source.
+//
+// F-55: out.Usage is set by gateway.Translate from the bridge
+// wire payload (AgentResultEvent.Usage / AgentDoneEvent.Usage).
+// The runtime is a passive pass-through — copy verbatim so the
+// channel footer can render it via sb.UsageBar. Pre-F-55 the
+// copy was missing, so footers silently rendered without usage
+// data. buildStatusBar is the shared gate; this helper and the
+// StatusBarSource both feed it the same AS + usage inputs.
+func stampFromAS(out *gateway.OutboundMessage, s *agentsession.AgentSession, prReg *prcache.Registry, deps gtw.HandlerDeps) {
+	out.StatusBar = buildStatusBar(s, out.Usage, prReg, deps)
 }
 
-// buildSessionContext is the pure (no I/O of its own — git
+// buildStatusBar is the pure (no I/O of its own — git
 // collection is delegated) stamping primitive shared by the
-// runtime pump (sessionContextInto) and the outbound.Stamper
-// (newRuntimeStamper). It snapshots the AgentSession's identity
-// fields plus a freshly-collected git status, and returns a
-// SessionContext when any meaningful field is non-empty.
+// runtime pump (stampFromAS) and the outbound.StatusBarSource
+// (newRuntimeStatusBar). It snapshots the AgentSession's
+// identity fields plus a freshly-collected git status and
+// assembles a StatusBar with the always-present GitBar plus
+// optional AgentBar / UsageBar sub-bars.
 //
-// Returns nil when there's nothing to render — caller treats nil
-// as "skip the footer this turn" rather than rendering an empty
-// footer segment.
+// Always returns a non-nil StatusBar when s is non-nil: the
+// GitBar is populated unconditionally (so the channel can
+// show "git status unknown" honestly when collection timed
+// out), and AgentBar / UsageBar are added when their backing
+// data is present. Pre-rename the gate returned nil when all
+// stamp fields were empty; post-rename the gate is structural
+// (sub-bar nil == absent), so this function never returns nil.
 //
 // Git invocation has a 3s deadline (review fix): a hung git
 // (stalled NFS, broken .git/index, ... ) would otherwise block
 // the entire outbound-message pipeline. 3s is plenty for normal
 // repos (10-50ms typical; up to ~1s on very large monorepos) and
 // far below the user's "chat is not realtime" tolerance. On
-// timeout, CollectReadiness returns (nil, nil) and the footer omits
-// the git segment silently.
+// timeout, CollectReadiness returns (nil, nil) and the renderer
+// omits the git segment silently.
 //
 // PR / MR lookup (F-49): per-AgentSession, cached on prReg. The
 // read is strictly synchronous (returns the cached value,
 // possibly nil on the first ever call) — no I/O blocks the stamp
 // path. MaybeRefresh inspects the cache and spawns the network
 // round-trip asynchronously when the entry is stale; the next
-// stamp picks up the refreshed value. The same prRef is fed to
-// the materialize gate below so a populated PullRequest alone is
-// enough to surface a SessionContext.
+// stamp picks up the refreshed value.
+//
+// AgentSession.Agent is immutable (direct field read, no lock);
+// Model() takes RLock internally; git status is captured fresh
+// on each stamp (3s deadline, no caching — see F-48 §1.7).
 //
 // Nil-safe on the prReg dependency: a hand-wired debug build
 // that skips registry construction still gets a fully-functional
 // stamp path with PullRequest == nil. GetOrCreate itself never
 // returns nil once we have a non-nil registry. Test pinned by
-// TestSessionContextInto_NilPRRegistryLeavesEmpty.
-func buildSessionContext(s *agentsession.AgentSession, usage *agent.UsageInfo, prReg *prcache.Registry, deps gtw.HandlerDeps) *gateway.SessionContext {
+// TestBuildStatusBar_NilPRRegistryLeavesEmpty.
+//
+// Pre-rename this was `buildSessionContext` with a flat struct
+// + "Returns nil when there's nothing to render" gate.
+// Renamed + dropped the nil-return path because GitBar is
+// always populated when an AS exists; the channel renders
+// "git status unknown" honestly when GitStatus is nil.
+func buildStatusBar(s *agentsession.AgentSession, usage *agent.UsageInfo, prReg *prcache.Registry, deps gtw.HandlerDeps) *gateway.StatusBar {
+	// Workspace resolution: AS.Cwd is the source of truth when
+	// an AS exists; the caller is responsible for passing the
+	// correct AS. The status-bar fallback (no AS) lives in
+	// newRuntimeStatusBar, not here — this function is
+	// AS-centric and the runtime pump pre-fills with `s` only.
+	cwd := s.Cwd
+
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	gitSnap, _ := gtw.CollectReadiness(ctx, s.Cwd, gtw.ExecGitRunner{})
+	gitSnap, _ := gtw.CollectReadiness(ctx, cwd, gtw.ExecGitRunner{})
 	cancel()
-	hasGit := gitSnap != nil && s.Cwd != ""
+
+	var prRef *gtw.PR
+	if prReg != nil {
+		if prCache := prReg.GetOrCreate(s.ID); prCache != nil {
+			prCache.MaybeRefresh(cwd, deps)
+			prRef = prCache.PR()
+		}
+	}
 
 	// Snapshot Model() and SessionID() once each — both take
 	// asMu.RLock() internally; calling them twice in the gate
@@ -1363,52 +1370,88 @@ func buildSessionContext(s *agentsession.AgentSession, usage *agent.UsageInfo, p
 	model := s.Model()
 	sessionID := s.SessionID()
 
-	var prRef *gtw.PR
-	if prReg != nil {
-		if prCache := prReg.GetOrCreate(s.ID); prCache != nil {
-			prCache.MaybeRefresh(s.Cwd, deps)
-			prRef = prCache.PR()
-		}
-	}
-	hasPR := prRef != nil
-
-	if s.Agent == "" && model == "" && sessionID == "" && !hasGit && !hasPR && usage == nil {
-		return nil
-	}
-	return &gateway.SessionContext{
-		Agent:       s.Agent,
-		Model:       model,
-		SessionID:   sessionID,
-		Workspace:   s.Cwd,
+	// Always populate GitBar when an AS exists — even when
+	// git collection timed out and GitStatus is nil. The
+	// renderer decides whether to show the git line based on
+	// GitStatus; producing a GitBar with nil GitStatus is the
+	// honest "git status unknown" state. (Pre-rename the gate
+	// returned nil when all stamp fields were empty, which
+	// dropped the StatusBar entirely — including the GitBar
+	// for "git collection timed out" cases.)
+	gitBar := &gateway.GitStatusBar{
+		Workspace:   cwd,
 		GitStatus:   gitSnap,
 		PullRequest: prRef,
-		Usage:       usage,
 	}
+
+	sb := &gateway.StatusBar{
+		GitBar: gitBar,
+	}
+
+	// AgentBar: every segment is omitted independently when
+	// empty (the renderer follows the same rule). Build it
+	// unconditionally — if all three are empty, AgentBar
+	// still carries as a typed marker that the AS exists
+	// (even if no identifying info yet). Channels can choose
+	// to render or omit based on AgentBar.Agent/Model/
+	// SessionID content.
+	if s.Agent != "" || model != "" || sessionID != "" {
+		sb.AgentBar = &gateway.AgentStatusBar{
+			Agent:     s.Agent,
+			Model:     model,
+			SessionID: sessionID,
+		}
+	}
+
+	if usage != nil {
+		sb.UsageBar = &gateway.UsageStatusBar{UsageInfo: usage}
+	}
+
+	return sb
 }
 
-// newRuntimeStamper returns an outbound.Stamper that injects the
-// F-45/F-48 SessionContext footer for every outbound message.
-// Wired into outbound.Emitter at construction time so the stamp
-// happens uniformly — runtime pump, slash-command replies, and
-// MessageState subscribers all converge on the same stamping path.
+// newRuntimeStatusBar returns an outbound.StatusBarSource that
+// attaches a StatusBar to every outbound message for chats
+// that have a workspace to render. Wired into outbound.Emitter
+// at construction time so the stamp happens uniformly — runtime
+// pump, slash-command replies, gtw handlers, and MessageState
+// subscribers all converge on the same stamping path.
 //
-// Returning nil (when the chat has no active AgentSession, or
-// every stamp field is empty) signals "skip the footer this turn";
-// the channel render path treats nil SessionContext as "omit the
-// footer segment" rather than rendering an empty one.
+// Returning nil (when the chat has no workspace AND no
+// selected AgentSession) signals "skip the status bar this
+// turn"; the channel render path treats nil StatusBar as
+// "omit the status bar entirely" rather than rendering an
+// empty one.
 //
-// Pre-refactor this logic lived at every call site (cmd/nightme/run.go's
-// sessionContextInto calls at the pump + MessageStateBus sites) and
-// was skipped entirely by slash-command replies — the whole point
-// of moving it onto outbound.Emitter is that nobody has to remember
-// to call it any more.
+// GitBar fallback (the "git status always present" rule):
+// when the chat has no selected AgentSession but does have a
+// selected workspace (cs.SelectedCwd != ""), the source
+// produces a StatusBar with only GitBar populated — git
+// status is still attached because the chat user should
+// always see what worktree they're talking about, even for
+// /gtw replies or pre-spawn placeholders. AgentBar is
+// skipped (no AS → no agent identity to surface). UsageBar
+// is nil at this layer (the channel reads out.Usage directly
+// in attachStatusBarIfMissing and copies it into the
+// StatusBar when present — see outbound.attachStatusBarIfMissing).
 //
-// PullRequest lookup (F-49) is plumbed through prReg/deps the same
-// way as sessionContextInto — both stamp sites share the per-AS
-// prcache.Registry so a /gtw pr Invalidate surfaces on the very
-// next outbound (not after the 60s TTL).
-func newRuntimeStamper(mgr *chatsession.Manager, prReg *prcache.Registry, deps gtw.HandlerDeps) outbound.Stamper {
-	return func(chatID string) *gateway.SessionContext {
+// Pre-refactor this lived at every call site (cmd/nightme/run.go's
+// stampFromAS calls at the pump + MessageStateBus
+// sites) and was skipped entirely by slash-command replies —
+// the whole point of moving it onto outbound.Emitter is that
+// nobody has to remember to call it any more.
+//
+// PullRequest lookup (F-49) is plumbed through prReg/deps the
+// same way as buildStatusBar — both stamp sites share the
+// per-AS prcache.Registry so a /gtw pr Invalidate surfaces
+// on the very next outbound (not after the 60s TTL).
+//
+// Pre-rename this was `newRuntimeStamper`. Renamed because
+// "Stamper" described the verb (stamp / 盖章) but not the
+// typed payload being produced — the function returns the
+// runtime's StatusBarSource. See outbound package doc.
+func newRuntimeStatusBar(mgr *chatsession.Manager, prReg *prcache.Registry, deps gtw.HandlerDeps) outbound.StatusBarSource {
+	return func(chatID string) *gateway.StatusBar {
 		if mgr == nil {
 			return nil
 		}
@@ -1416,16 +1459,36 @@ func newRuntimeStamper(mgr *chatsession.Manager, prReg *prcache.Registry, deps g
 		if cs == nil {
 			return nil
 		}
-		as := cs.SelectedAgentSession()
-		if as == nil {
+		if as := cs.SelectedAgentSession(); as != nil {
+			// Happy path: AS selected → full StatusBar (GitBar
+			// + AgentBar + optional UsageBar).
+			return buildStatusBar(as, nil, prReg, deps)
+		}
+		// GitBar fallback: no AS, but chat still has a
+		// workspace. Produce a git-only StatusBar so the chat
+		// user always sees what worktree they're on. AgentBar
+		// is skipped (no AS → no agent identity to surface —
+		// the "AgentBar / TokensBar 没有 AgentSession 则忽略"
+		// rule). UsageBar is not produced here (no AS = no
+		// turn; the out.Usage co-location path in
+		// attachStatusBarIfMissing is the canonical entry for
+		// usage data).
+		cwd := cs.SelectedCwd()
+		if cwd == "" {
+			// No workspace at all — chat is unusable for any
+			// work; skip the status bar entirely.
 			return nil
 		}
-		// buildSessionContext takes optional usage; the stamper has
-		// no per-event usage here (usage lives on the OutboundMessage
-		// when present, which the emitter sees before stamper lookup).
-		// Pass nil — usage-bearing events already carry their usage
-		// on the msg and don't need this footer path to populate it.
-		return buildSessionContext(as, nil, prReg, deps)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		gitSnap, _ := gtw.CollectReadiness(ctx, cwd, gtw.ExecGitRunner{})
+		cancel()
+		return &gateway.StatusBar{
+			GitBar: &gateway.GitStatusBar{
+				Workspace: cwd,
+				GitStatus: gitSnap,
+				// PullRequest: nil — PR lookup is per-AS.
+			},
+		}
 	}
 }
 

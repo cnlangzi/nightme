@@ -17,7 +17,7 @@ package agent
 // it via the runtime's MessageStateBus subscriber (see
 // cmd/nightme/run.go) which builds
 // `OutboundMessage{Kind: OutMessageState, MessageState: ...}` and
-// stamps F-48 SessionContext on MessageSubmitted. Channels render
+// stamps F-48 StatusBar on MessageSubmitted. Channels render
 // via their own platform primitives (Feishu reaction emoji, Slack
 // shortcode, Web DOM diff, etc.). Channel authors are NOT required
 // to render every value — Channels choose what subset to surface.

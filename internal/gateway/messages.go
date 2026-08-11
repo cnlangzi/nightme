@@ -8,7 +8,7 @@ package gateway
 import "github.com/cnlangzi/nightme/internal/messages"
 
 // Wire types — re-exported so existing call sites
-// (gateway.OutboundMessage, gateway.SessionContext, …) keep working
+// (gateway.OutboundMessage, gateway.StatusBar, …) keep working
 // during the gradual migration.
 
 type (
@@ -16,7 +16,10 @@ type (
 	Attachment          = messages.Attachment
 	ActionPayload       = messages.ActionPayload
 	OutboundMessage     = messages.OutboundMessage
-	SessionContext      = messages.SessionContext
+	StatusBar           = messages.StatusBar
+	GitStatusBar        = messages.GitStatusBar
+	AgentStatusBar      = messages.AgentStatusBar
+	UsageStatusBar      = messages.UsageStatusBar
 	ToolInfo            = messages.ToolInfo
 	Card                = messages.Card
 	CardChoice          = messages.CardChoice

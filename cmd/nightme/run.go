@@ -442,8 +442,8 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 			return nil, nil
 		}
 
-		// GetOrCreate 这里调用一次,channelResolver 已经注入(见
-		// 上方 WithChannelResolver 调用),所以 cs.Emitter() 应当非 nil。
+		// GetOrCreate 这里调用一次,emitter 已经注入(见
+		// 上方 WithEmitter 调用),所以 cs.Emitter() 应当非 nil。
 		// 如果 nil(resolver 失败),log warn 并返回 nil 让 gateway
 		// 走 fallback 到 agent loop。
 		cs, err := mgr.GetOrCreate(msg.ChatID, cfg.Primary)
@@ -1459,7 +1459,7 @@ func toCardChoices(in []command.CardChoice) []gateway.CardChoice {
 }
 
 // chatSessionChannelSender is the runtime-side adapter that
-// implements shell.Sender on top of chatsession.Channel. Each
+// implements shell.Sender on top of outbound.Emitter. Each
 // chat session carries its own channel (the Feishu adapter
 // wrapping the underlying connection), and the dispatcher
 // looks it up by ChatID at Send time — so a single sender

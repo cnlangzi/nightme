@@ -124,7 +124,7 @@ func newCloseRig(t *testing.T) *closeTestRig {
 	// Use a per-test ChatSession via the existing helper. Each
 	// test gets its own chatID so they don't bleed state. The
 	// recording channel captures every Send so tests can assert
-	// the reply text via cs.Channel().
+	// the reply text via cs.Emitter().
 	rec := &closeTestRecCh{}
 	cs, _ := chatsession.New("chat-close-" + t.Name(), "test-agent")
 	cs.WithEmitter(rec)
@@ -133,7 +133,7 @@ func newCloseRig(t *testing.T) *closeTestRig {
 	rig.rec = rec
 	// Inject a shim HandlerDeps whose Send funnels into the same
 	// recorder so the legacy assertion style keeps working while
-	// the production path is cs.Channel().Send.
+	// the production path is cs.Emitter().Send.
 	//
 	// SkipRefreshDefaultBranch=true is the default test seam for
 	// /gtw close — the basic happy / sad-path tests don't want

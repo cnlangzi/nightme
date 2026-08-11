@@ -1,5 +1,5 @@
 // Test-only shared helpers for the gtw package. Exposes
-// recordingCh (a chatsession.Channel mock that records every
+// recordingCh (a outbound.Emitter mock that records every
 // Send / SendCard / Patch call) and pathsEqual (symlink-safe
 // path comparison for macOS test fixtures). Both used to be
 // duplicated across close_test.go, close_integration_test.go,
@@ -18,7 +18,7 @@ import (
 
 // recordingCh captures every Send / SendCard / Patch call's
 // payload for assertion. Used by integration tests after the
-// cs.Channel() migration; previous deps.Send mock is no longer
+// cs.Emitter() migration; previous deps.Send mock is no longer
 // the actual path. Field-by-field copy of OutboundMessage.
 type recordingCh struct {
 	mu    sync.Mutex

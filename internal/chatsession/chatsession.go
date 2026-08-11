@@ -632,7 +632,7 @@ func (cs *ChatSession) Emitter() outbound.Emitter {
 
 // WithChannel binds a Channel to this ChatSession. Returns
 // the receiver for chaining. Used by Manager.GetOrCreate via
-// the channelResolver path; not normally called by commands.
+// the emitter path; not normally called by commands.
 //
 // Idempotent: subsequent calls with the same Channel are no-ops;
 // calls with a different Channel panic — a chat's channel binding

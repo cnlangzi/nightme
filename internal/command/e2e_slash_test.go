@@ -304,19 +304,12 @@ func newWiredHarness(t *testing.T) *wiredHarness {
 	// inspects Record() rather than stdout.
 	echoCh := echo.New("echo", nil)
 
-	// Manager + spawner. Mirror run.go: WithChannelResolver wraps
-	// the channel.Channel as a chatsession.Channel so every new
-	// ChatSession gets bound at GetOrCreate time. This replaces
-	// the old placeholder (`mgr.WithEmitter(testEmitter)` +
-	// "runtime shim binds via WithChannel instead" — which the
-	// runtime shim never actually did, silently dropping every
-	// slash command reply; see the 2026-08-09 regression).
 	mgr := chatsession.NewManager()
 	mgr.WithSpawner(newEchoSpawner())
-	// Manager + spawner. Wire the same Emitter for every new
-	// ChatSession via WithEmitter. The Emitter is the test
-	// ChannelWrap above — every Send ends up at the echo
-	// channel so Record() can be inspected post-dispatch.
+	// Wire the same Emitter for every new ChatSession via
+	// WithEmitter. The Emitter is the test ChannelWrap above —
+	// every Send ends up at the echo channel so Record() can be
+	// inspected post-dispatch.
 	mgr.WithEmitter(&testChannelWrap{ch: echoCh})
 
 	// Slash command registry: just /new for this test. The factory

@@ -16,7 +16,7 @@
 // of call sites (cmd/nightme/run.go's sessionContextInto) and most
 // outbound messages never got stamped at all — slash command
 // replies bypassed it because they reached the channel via the
-// chatsession.Channel wrap, not the runtime pump. Every outbound
+// outbound.Emitter wrap, not the runtime pump. Every outbound
 // message now flows through Emitter, so every outbound message gets
 // the same treatment.
 //
@@ -26,9 +26,9 @@
 //     (gateway.OutboundMessage, gateway.OutboundKind, etc.)
 //   - gateway does NOT import outbound — gateway is the shared type
 //     hub, outbound is the send-side behaviour
-//   - chatsession keeps its own chatsession.Channel interface
+//   - chatsession keeps its own outbound.Emitter interface
 //     (takes chatsession.OutboundMessage); cmd/nightme's
-//     channel_wrap adapts that to gateway.OutboundMessage and routes
+//     outbound.Emitter adapts that to gateway.OutboundMessage and routes
 //     through Emitter, so slash command replies also get stamped.
 //
 // See docs/SPEC.md §3.x for the broader hub-and-spoke rationale.
@@ -66,7 +66,7 @@ type Stamper func(chatID string) *gateway.SessionContext
 // Options configures optional Emitter behaviour. The zero value
 // is valid: Emitter becomes a pure Channel.Send passthrough with
 // no stamping, no error hooks — equivalent to the legacy
-// channel_wrap behaviour minus the type-conversion step.
+// outbound.Emitter behaviour minus the type-conversion step.
 type Options struct {
 	// Stamper, if non-nil, is invoked for every Send / SendCard
 	// whose msg.SessionContext is nil. The returned SessionContext

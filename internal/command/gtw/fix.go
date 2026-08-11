@@ -64,7 +64,7 @@ type PRInvalidator interface {
 //
 // Send / SendCard / Patch are gone — replies are sent via
 // cs.Emitter().Send / SendCard / Patch directly. The chat
-// session's Channel is wired at construction (Manager.WithChannelResolver)
+// session's Channel is wired at construction (Manager.WithEmitter)
 // and immutable thereafter; production runtime captures via a
 // `capturingChannel` shim in cmd/nightme/debug.go for the gtw-test
 // debug subcommand.

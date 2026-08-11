@@ -42,7 +42,7 @@ func (s *stubStoppable) Stop(_ context.Context) error {
 }
 func (s *stubStoppable) SetModel(_ context.Context, _, _ string) error { return nil }
 
-// nopCh satisfies chatsession.Channel for tests that need a
+// nopCh satisfies outbound.Emitter for tests that need a
 // non-nil channel to construct a ChatSession but don't exercise
 // the channel surface.
 type nopCh struct{}

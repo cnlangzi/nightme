@@ -47,27 +47,12 @@ import (
 	"context"
 	"errors"
 	"log"
-	"log/slog"
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/channel"
 )
 
-// Channel is the IM adapter contract. The canonical definition
-// lives in internal/channel; this alias keeps the historical
-// gateway.Channel symbol working for existing call sites.
-//
-// v1.3: only the 4 lifecycle/messaging methods. The receipt FSM
-// API has been removed — receipts are Channel-internal.
-// Channel is the IM adapter contract. The canonical definition
-// lives in internal/channel; this alias keeps the historical
-// gateway.Channel symbol working for existing call sites.
-// Channel is the IM adapter contract. The canonical definition
-// lives in internal/channel; this alias keeps the historical
-// gateway.Channel symbol working for existing call sites.
-// (Historical gateway.Channel alias was removed in the
-// outbound-extraction refactor; all call sites use
-// channel.Channel directly.)
+// Emitter is the outbound chokepoint contract the Gateway
 
 // Emitter is the outbound chokepoint contract the Gateway
 // requires. The runtime injects a concrete implementation
@@ -548,24 +533,18 @@ func (g *gateway) tryMessageDispatch(ctx context.Context, msg *InboundMessage) (
 // is installed — that's the v1 pre-F-45 default and lets the
 // runtime come up before the reaction branch is wired.
 func (g *gateway) dispatchAction(ctx context.Context, msg *InboundMessage) (*CommandResult, error) {
-	slog.Default().Warn("F-46 debug: gateway.dispatchAction entry",
-		"chat_id", msg.ChatID,
-		"has_reaction", msg.Reaction != nil)
 	g.mu.RLock()
 	h := g.actionHandler
 	g.mu.RUnlock()
 	if h == nil {
-		slog.Default().Warn("F-46 debug: gateway.dispatchAction: actionHandler is nil, dropping")
 		// Pre-F-45 runtime: action events silently dropped.
 		// Better than routing an empty-text event to the agent
 		// loop, which would queue a no-op turn and confuse the
 		// user with a "thinking…" state.
 		return &CommandResult{Consumed: true, Dropped: true}, nil
 	}
-	slog.Default().Warn("F-46 debug: gateway.dispatchAction: invoking handler")
 	consumed := h(ctx, msg)
 	if consumed {
-		slog.Default().Warn("F-46 debug: gateway.dispatchAction: handler returned true")
 		return &CommandResult{Consumed: true}, nil
 	}
 	// Handler ran but decided not to consume (e.g. no matching
@@ -575,7 +554,6 @@ func (g *gateway) dispatchAction(ctx context.Context, msg *InboundMessage) (*Com
 	// would either send a confusing empty text to the agent
 	// (F-45 path) or re-enter the WatchMode gate (F-watch path,
 	// now applied inside chatsession.AcceptInbound).
-	slog.Default().Warn("F-46 debug: gateway.dispatchAction: handler returned false, dropping")
 	return &CommandResult{Consumed: true, Dropped: true}, nil
 }
 

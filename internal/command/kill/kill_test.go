@@ -24,7 +24,7 @@ import (
 // TestKillAgent_NilCS — kill.KillAgent with nil CS returns
 // kill.ErrNoContext (defensive — every cmd preflights before
 // calling, but the package must not panic).
-// nopCh satisfies chatsession.Channel for tests that need a
+// nopCh satisfies outbound.Emitter for tests that need a
 // non-nil channel to construct a ChatSession but don't exercise
 // the channel surface.
 type nopCh struct{}

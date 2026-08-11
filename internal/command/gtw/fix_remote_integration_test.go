@@ -108,10 +108,10 @@ func newFixRemoteRig(t *testing.T) *fixRemoteRig {
 }
 
 // fixRemoteRecCh captures every Send / SendCard / Patch for the
-// fixRemote integration tests after the cs.Channel() migration.
+// fixRemote integration tests after the cs.Emitter() migration.
 // The legacy captureSend stub is kept for
 // backward compat with tests that read sentTexts, but the
-// production code now uses cs.Channel().Send — so we capture in
+// production code now uses cs.Emitter().Send — so we capture in
 // both places.
 type fixRemoteRecCh struct {
 	mu    sync.Mutex
@@ -154,7 +154,7 @@ func (r *fixRemoteRecCh) serialized() []string {
 
 // captureSend is kept as a stub for legacy call sites; the
 // /gtw fix path no longer uses deps.Send (replies go through
-// cs.Channel().Send / SendCard / Patch), so this is a no-op.
+// cs.Emitter().Send / SendCard / Patch), so this is a no-op.
 // Real test assertions go through the recordingCh passed to
 // chatsession.New.
 func (r *fixRemoteRig) captureSend(_ context.Context, _ gateway.OutboundMessage) error {

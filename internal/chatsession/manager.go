@@ -47,8 +47,6 @@ type Manager struct {
 
 	// emitter (set via WithEmitter) is the single daemon-wide
 	// outbound chokepoint that every newly-created ChatSession is
-	// emitter (set via WithEmitter) is the single daemon-wide
-	// outbound chokepoint that every newly-created ChatSession is
 	// bound to. nil means the runtime has not wired an Emitter
 	// yet — GetOrCreate tolerates nil and binds whatever emitter
 	// is set; tests that don't exercise the outbound path may
@@ -186,9 +184,15 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 // chat is opened; calling it again with a non-nil Emitter
 // replaces the previous one.
 //
-// nil clears the binding (test teardown). GetOrCreate refuses
-// to create a new ChatSession when emitter is nil — a missing
-// Emitter is a programming bug, not a runtime fallback.
+// nil clears the binding (test teardown). A nil Emitter is
+// tolerated by GetOrCreate: tests that don't exercise the
+// outbound path can construct ChatSessions without one
+// (cs.Emitter() returns nil; senders must nil-check before
+// Send / SendCard).
+//
+// Concurrency: the write is published through m.mu so
+// concurrent GetOrCreate calls see a consistent value (RLock
+// acquisition in Phase 2).
 // WithEmitter binds the single daemon-wide outbound chokepoint
 // to the Manager. Every ChatSession created (or restored) after
 // this call is bound to the same Emitter via
@@ -205,6 +209,12 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 // Concurrency: the write is published through m.mu so
 // concurrent GetOrCreate calls see a consistent value (RLock
 // acquisition in Phase 2).
+//
+// Note: ChatSession.WithEmitter panics if a different non-nil
+// Emitter is bound to an existing session. RestoreFromRegistry
+// therefore always binds the same Emitter the Manager holds
+// (or none, if Manager.emitter is nil). A daemon restart that
+// constructs a new Emitter instance per process is safe.
 func (m *Manager) WithEmitter(em outbound.Emitter) *Manager {
 	m.mu.Lock()
 	m.emitter = em
@@ -212,8 +222,8 @@ func (m *Manager) WithEmitter(em outbound.Emitter) *Manager {
 	return m
 }
 
-// channelResolver is registered once at startup via
-// WithChannelResolver. GetOrCreate calls it (outside m.mu)
+// emitter is registered once at startup via
+// WithEmitter. GetOrCreate calls it (outside m.mu)
 // when creating a new ChatSession; the returned Channel is
 // bound immutably to the new cs.
 // Get returns the ChatSession for chatID, or nil if absent.

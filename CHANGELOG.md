@@ -90,6 +90,37 @@ selected AS is in `StatusExited` (e.g. between `/close` and the
 next respawn), queued messages stay in the queue instead of being
 submitted to a defunct handle.
 
+### `/steer <message>` — stop the in-flight turn and prepend to the queue
+
+New slash command that gives the user "redirect" semantics when the
+agent's current direction is wrong. Two runtime additions:
+
+- `MessageQueue.PushFront(msg)` — symmetric to `Push`, prepends
+  `msg` to the head of the pending region so the next `Peek`
+  returns it first.
+- `ChatSession.SteerUserMessage(msg)` — calls `as.Stop(ctx)`
+  fire-and-forget (to nudge the bridge into emitting its terminal
+  event sooner) and then `queue.PushFront(msg)`. Stop's outcome
+  is ignored; PushFront always runs.
+
+The slash command factory (`internal/command/steer/`) parses
+trailing args (via `strings.TrimPrefix(input.Text, "/steer")` to
+preserve multi-word bodies), builds a `Message{Kind: Normal}`,
+emits `MessageQueued` for the F-54 wire contract, and replies with
+a short `🛑 Steering: <preview>` card.
+
+Distinguishing semantics vs the other session commands:
+
+| Command | Process | AS entry | sessionID | Queue effect |
+|---------|---------|----------|-----------|--------------|
+| `/stop`  | may or may not exit | preserved | preserved | none |
+| `/steer` | may or may not exit | preserved | preserved | prepend |
+| `/close` | killed (graceful) | preserved | preserved | none |
+| `/new`   | reset in-place | preserved | cleared | none |
+
+See `docs/feat/F-55-steer-slash-command.md` for the full design +
+per-bridge Stop behavior.
+
 ### /gtw pr: generate Conventional Commits title+body and open the PR
 
 Closes the loop with `/gtw push`. The user types `/gtw pr [-a <agent>]`

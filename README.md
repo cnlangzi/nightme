@@ -14,49 +14,92 @@
 
 Many chats run in parallel — one per project. Many agents work in parallel, each on its own task — switching between them is instant, no cold restart. `git` worktree work is hardened into `Git Team Workflow` (`/gtw`): fix / push / pr / close / sync — each step is one IM reply card, integrated with GitHub, GitLab, and similar platforms. NightMe doesn't replace your agent subscriptions or memory; it sits in front of them and keeps them warm.
 
-## Quickstart
-
-## Prerequisites
-
-## Install
-
-```bash
-curl -fsSL https://nightme.dev/install.sh | bash
-```
-
-> One-line installer (placeholder URL — replace once the official site is live).
-
----
-
 ## Why NightMe
 
-### Three real scenarios
+### One chat, one CWD, one project
 
-**Scenario A — many projects at once**
+You (a single developer) work across many projects at once. Each Feishu
+chat (group or DM) is a **ChatSession**, and each ChatSession has a
+**CWD** — its current working directory. The CWD *is* the project:
+set it with `/cwd <path>`, change it anytime. Multiple chats run in
+parallel, each bound to its own directory.
 
-Open three Chat Sessions on one laptop:
+```
+                            You (Feishu)
+                                  │
+                                  ▼
 
-- Chat #1 is refactoring your auth service
-- Chat #2 is fixing a bug in the billing repo
-- Chat #3 is writing a one-off migration script
+    ┌─ ChatSession ─┐  ┌─ ChatSession ─┐  ┌─ ChatSession ─┐
+    │ CWD: ~/a      │  │ CWD: ~/b      │  │ CWD: ~/c      │
+    │               │  │               │  │               │
+    │ AI Agents:    │  │ AI Agents:    │  │ AI Agents:    │
+    │   Claude Code │  │   Claude Code │  │   Claude Code │
+    │   Codex       │  │   Codex       │  │   Codex       │
+    │   Pi          │  │   Pi          │  │   Pi          │
+    │   OpenCode    │  │   OpenCode    │  │   OpenCode    │
+    └───────────────┘  └───────────────┘  └───────────────┘
 
-One machine, three projects running in parallel. Tools like openclaw let you flip between sessions but lose context every time you switch — NightMe keeps every session alive and preserves each one's conversation.
+   ▲ CWD = project; agents run inside that CWD; all parallel from one NightMe instance ▲
+```
 
-**Scenario B — many tasks inside one repo**
+![Feishu chats list — multiple parallel ChatSessions across DMs and groups, each pinned to its own project](docs/images/feishu-multi-chats.png)
 
-You keep chatting in `main`. For each side task, `/gtw fix` opens a fresh git worktree, drops you into a new Chat Session bound to that branch, and you work there. No branch juggling, no stash mess, no `git switch` and pray.
+**Project isolation is by directory.** Each ChatSession's CWD is
+independent — re-running `/cwd` changes which directory a session
+operates on, without affecting the others. Multiple projects stay
+live simultaneously.
 
-**Scenario C — different agents for different jobs**
-
-Refactor with Claude, generate boilerplate with Codex, look up docs with Pi. `/use claude` ↔ `/use codex` ↔ `/use pi` in the same Chat — the old agent process is kept alive in the pool and your conversation context comes back when you switch.
+**The differentiator vs traditional tools** (Hermes, openclaw, cc-connect,
+happycoder): they activate one session at a time. NightMe runs all your
+projects in parallel from a single instance. Switching chats is
+instant — same daemon, no cold start, no re-init.
 
 ### Three core capabilities
 
 | Capability | What it means in practice |
 |---|---|
 | **Multiple Chat Sessions in parallel** | N sessions on one machine, each running a different project or task. |
-| **Project × workspace, switchable any time** | `/cwd` to bind or switch workspace. Old workspaces are cached, not killed. |
+| **CWD = project** | Each ChatSession is bound to one current working directory — that directory *is* the project. Set it with `/cwd <path>`; switch anytime. |
 | **Multi-agent, in the same Chat** | `/use <agent>` swaps the active agent. The previous one stays in the pool with its context. |
+
+## Prerequisites
+
+- **macOS, Linux, or Windows** — NightMe ships as a single static Go binary; no runtime dependencies.
+- **A Feishu account** — currently the only supported IM. `nightme login feishu` registers your bot via QR scan.
+- **At least one local AI Coding Agent** — Claude Code, Pi, OpenCode, or Codex. Install the CLI and have it on your `$PATH`; NightMe spawns it as a subprocess.
+
+## Install
+
+Two ways to get `nightme` on your machine:
+
+1. **Prebuilt binary** (recommended):
+
+   ```bash
+   curl -fsSL https://nightme.dev/install.sh | bash
+   ```
+
+2. **From source** (for development or to pin a commit):
+
+   ```bash
+   git clone https://github.com/cnlangzi/nightme.git
+   cd nightme
+   make dev
+   ```
+
+`make dev` runs nightme directly from source using the example config — no separate build step needed.
+
+---
+
+## Quickstart
+
+```bash
+nightme login feishu   # prints a QR code; scan with the Feishu mobile app
+nightme start          # daemon runs in the background
+```
+
+![Feishu QR scan — `nightme login feishu` walks you through the Feishu bot registration flow on your phone](docs/images/feishu-qr-scan.png)
+
+When `start` returns, NightMe sends a welcome message to your Feishu DM — that's how you know you're live.
 
 ---
 
@@ -72,6 +115,8 @@ Every message from the agent carries a fixed footer card on Kino showing exactly
 - **Git status** — branch, dirty / clean, ahead / behind
 - **Agent status** — `idle` / `running` / `thinking`
 - **Token usage** — used / limit for the current session
+
+![Feishu footer card — agent / cwd / git / token, pinned to every reply](docs/images/feishu-statusbar.png)
 
 Other tools drop you into the dark. NightMe shows you what your agent is doing, where, and at what cost.
 

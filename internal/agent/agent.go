@@ -942,8 +942,8 @@ type Starter interface {
 	//
 	// RunOnce is the "one-shot" counterpart to Start. Start returns
 	// a live *Agent for multi-turn / chat sessions; RunOnce is for
-	// callers (e.g. /gtw push) that want a single synchronous turn
-	// and don't need the session handle.
+	// callers (e.g. /gtw commit, /gtw pr) that want a single
+	// synchronous turn and don't need the session handle.
 	RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock) (string, error)
 }
 

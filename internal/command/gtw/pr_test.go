@@ -799,8 +799,8 @@ func TestDispatchPR_Uncommitted(t *testing.T) {
 	if !strings.Contains(r, "2 file(s) changed but not committed") {
 		t.Fatalf("expected uncommitted reply, got:\n%s", r)
 	}
-	if !strings.Contains(r, "/gtw push first") {
-		t.Fatalf("expected /gtw push hint, got:\n%s", r)
+	if !strings.Contains(r, "/gtw commit first") {
+		t.Fatalf("expected /gtw commit hint, got:\n%s", r)
 	}
 }
 

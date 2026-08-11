@@ -82,9 +82,11 @@ type GitStatusSnapshot = messages.GitStatusSnapshot
 // porcelain output. This avoids any package-level mutable state
 // or test-only hooks in production code paths.
 //
-// F-57: this is the single source of truth for the /gtw push and
-// /gtw pr readiness gates. Both commands call it at entry; see
-// docs/feat/F-57-gtw-push-pr-readiness.md §2.2.
+// F-57: this is the single source of truth for the /gtw commit,
+// /gtw push, and /gtw pr readiness gates. All three commands call
+// it at entry; see docs/feat/F-57-gtw-push-pr-readiness.md §2.2.
+// F-XX (commit/push split): /gtw commit also reads from this snap
+// so push and commit gate on the same git truth.
 func CollectReadiness(ctx context.Context, dir string, git GitRunner) (*GitStatusSnapshot, error) {
 	out, stderr, err := git.Run(ctx, dir, "status", "--porcelain", "--branch",
 		"--untracked-files=normal")

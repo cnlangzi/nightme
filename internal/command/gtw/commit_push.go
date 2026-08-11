@@ -194,24 +194,52 @@ func verifyPushedAndRetry(ctx context.Context, deps HandlerDeps, c Context, firs
 
 // verifyAgentPushedAndRecover is the post-agent sanity check used
 // by pushDirty. After the agent claims it committed and pushed,
-// we independently verify both:
+// we independently verify all of:
 //
-//  1. uncommitted files: if any remain, the agent skipped them
+//  1. HEAD branch: agent must still be on c.Branch. If the agent
+//     `git checkout`'d to a side branch, committed there, and
+//     "pushed" — the worktree from c.Branch's perspective looks
+//     clean, countUnpushed is 0, and the user gets a green
+//     checkmark for a commit that will never land on c.Branch.
+//     Verified by reading the branch HEAD is currently on.
+//
+//  2. uncommitted files: if any remain, the agent skipped them
 //     (intentionally or not). Surface the file list and tell
 //     the user to either commit them manually or re-run
 //     /gtw push. We do NOT re-invoke the agent — the same
 //     agent already had a chance and chose to leave these
 //     behind.
 //
-//  2. unpushed commits: if any remain, the agent's commit
+//  3. unpushed commits: if any remain, the agent's commit
 //     succeeded but the push didn't (network race, non-FF,
 //     etc.). Try programmaticPush once — same retry semantics
 //     as pushClean — and surface the commit list if the retry
 //     also leaves things behind.
 //
-// Returns "" when both checks pass; the caller should report
+//  4. HEAD advanced: if the worktree was dirty before the agent
+//     (pushDirty only runs when status --porcelain has output)
+//     and is clean now, but HEAD didn't move, the agent must
+//     have done something OUTSIDE git (stash, file restore,
+//     etc.) that doesn't constitute a "push". We surface a
+//     warning rather than reporting success.
+//
+// Returns "" when all four checks pass; the caller should report
 // success in that case.
-func verifyAgentPushedAndRecover(ctx context.Context, deps HandlerDeps, c Context) string {
+func verifyAgentPushedAndRecover(ctx context.Context, deps HandlerDeps, c Context, headBefore string) string {
+	// (1) Branch check: agent must still be on c.Branch.
+	branchAfter, err := currentBranch(ctx, c.Worktree, deps)
+	if err != nil {
+		return fmt.Sprintf("⚠️ agent finished but failed to read current branch: %v", err)
+	}
+	if branchAfter != c.Branch {
+		return fmt.Sprintf(
+			"⚠️ agent finished but HEAD is on %q, expected %q.\n"+
+				"hint: the agent may have `git checkout`'d to a side branch and committed there. "+
+				"Re-run /gtw push from %s, or merge the side branch back into %s manually.",
+			branchAfter, c.Branch, c.Worktree, c.Branch)
+	}
+
+	// (2) uncommitted check.
 	uncommitted, err := listUncommittedFiles(ctx, c.Worktree, deps)
 	if err != nil {
 		return fmt.Sprintf("⚠️ agent finished but failed to verify clean state: %v", err)
@@ -225,6 +253,27 @@ func verifyAgentPushedAndRecover(ctx context.Context, deps HandlerDeps, c Contex
 			len(uncommitted), c.Worktree,
 			strings.Join(uncommitted, "\n  "),
 		)
+	}
+
+	// (4) HEAD advance check: if we have a headBefore snapshot
+	// and HEAD didn't move, the agent didn't commit anything.
+	// countUnpushed would be 0 (HEAD already at upstream), but
+	// the dirty → clean transition can't have happened via a
+	// commit, so something's off. headBefore == "" is the
+	// "unknown" sentinel — caller didn't capture it (older
+	// call sites) and we skip this check.
+	if headBefore != "" {
+		headAfter, err := headSHA(ctx, c.Worktree, deps)
+		if err != nil {
+			return fmt.Sprintf("⚠️ agent finished but failed to read HEAD: %v", err)
+		}
+		if headAfter == headBefore {
+			return fmt.Sprintf(
+				"⚠️ agent finished but no new commit was created (HEAD unchanged at %s).\n"+
+					"hint: the worktree was dirty before the agent and is clean now, but git has no record of a commit. "+
+					"Re-run /gtw push to retry, or inspect the worktree manually.",
+				shortSHA(headBefore))
+		}
 	}
 
 	// uncommitted is clean → check push.
@@ -321,6 +370,22 @@ func pushDirty(
 			fmt.Sprintf("❌ agent %s failed: %v", agentName, err)), nil
 	}
 
+	// Snapshot HEAD before verification so we can detect "agent
+	// claimed success but didn't actually commit" — a class of
+	// failure where the worktree's status --porcelain is empty
+	// (e.g. agent did `git stash` instead of commit) and
+	// countUnpushed is 0 (HEAD was already at origin), but
+	// nothing actually landed on the remote. Without this
+	// snapshot we'd happily report "✅ pushed" for a no-op.
+	headBefore, headSnapErr := headSHA(ctx, c.Worktree, deps)
+	if headSnapErr != nil {
+		// Non-fatal — the verification will still catch
+		// uncommitted + unpushed. Pass "" to skip the
+		// HEAD-advance check (caller treats "" as
+		// "snapshot unavailable").
+		headBefore = ""
+	}
+
 	// Post-agent verification: the agent may have committed and
 	// pushed (the happy path), but it may also have left files
 	// uncommitted or the push may have silently failed (network
@@ -339,7 +404,7 @@ func pushDirty(
 	//     reach origin (or HEAD@{u} is on a different branch).
 	//     Try programmaticPush once more before giving up — git
 	//     push can no-op on transient errors that exit 0.
-	postMsg := verifyAgentPushedAndRecover(ctx, deps, c)
+	postMsg := verifyAgentPushedAndRecover(ctx, deps, c, headBefore)
 	if postMsg != "" {
 		body := postMsg
 		if text != "" {

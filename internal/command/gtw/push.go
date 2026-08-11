@@ -6,6 +6,44 @@ import (
 	"strings"
 )
 
+// headSHA returns the current HEAD's full SHA in worktree. Used
+// by verifyAgentPushedAndRecover to detect "agent claimed success
+// but didn't commit" — a class of failure where status is empty
+// and unpushed count is 0, but no commit actually landed.
+//
+// Returns the SHA with surrounding whitespace trimmed (git's
+// output is one line, but the test fake may not be). Errors
+// propagate so the caller can surface them; verifyAgentPushedAndRecover
+// treats the snapshot as "unavailable" when this fails (skips
+// the HEAD-advance check rather than aborting the verification
+// entirely).
+func headSHA(ctx context.Context, worktree string, deps HandlerDeps) (string, error) {
+	out, _, err := deps.Git.Run(ctx, worktree, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("rev-parse HEAD: %w", err)
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// currentBranch returns the name of the branch HEAD is on
+// (equivalent to `git rev-parse --abbrev-ref HEAD`). Empty
+// string is returned for detached HEAD (the caller's failure
+// path should treat that as "agent switched to detached").
+func currentBranch(ctx context.Context, worktree string, deps HandlerDeps) (string, error) {
+	out, _, err := deps.Git.Run(ctx, worktree, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("rev-parse --abbrev-ref HEAD: %w", err)
+	}
+	branch := strings.TrimSpace(out)
+	if branch == "HEAD" {
+		// git returns the literal "HEAD" for detached HEAD.
+		// Normalise to "" so the caller can branch on
+		// "branch != expected" uniformly.
+		return "", nil
+	}
+	return branch, nil
+}
+
 // programmaticPush runs `git push -u origin <branch>`. The -u flag
 // sets upstream tracking so subsequent plain `git push` works
 // without specifying the remote.

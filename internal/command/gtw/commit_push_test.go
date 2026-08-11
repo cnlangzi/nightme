@@ -473,7 +473,19 @@ func TestRunPush_VerifyDetectsSilentPushFailure(t *testing.T) {
 // surfaces the file list. User can commit manually or retry.
 func TestRunPush_DirtyAgentLeavesFiles(t *testing.T) {
 	git := newPushGit()
-	git.on("status", "?? new-secret.env\n", "", nil) // dirty + still dirty after agent
+	// status is checked TWICE: dispatchPush's pre-flight
+	// (dirty → pushDirty) and verifyAgentPushedAndRecover's
+	// post-agent check (still dirty → warning).
+	git.onSeq("status",
+		pushGitResp{"?? new-secret.env\n", "", nil}, // pre-agent: dirty
+		pushGitResp{"?? new-secret.env\n", "", nil}, // post-agent: still dirty
+	)
+	// HEAD-branch + HEAD-SHA snapshots before and after the
+	// agent — used by verifyAgentPushedAndRecover's new
+	// branch-mismatch and HEAD-advance checks. Same branch,
+	// same SHA (agent did nothing).
+	git.on("rev-parse", "wt-dirty-leftover\n", "", nil) // --abbrev-ref HEAD
+	git.onArgs([]string{"rev-parse", "HEAD"}, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n", "", nil)
 
 	claude := &recordingAgent{
 		name:        "claude",
@@ -506,6 +518,115 @@ func TestRunPush_DirtyAgentLeavesFiles(t *testing.T) {
 	}
 	if !strings.Contains(r, "new-secret.env") {
 		t.Fatalf("expected diagnostic to name the uncommitted file, got:\n%s", r)
+	}
+}
+
+// TestRunPush_DirtyAgentClaimsDoneButNoCommit is the regression
+// guard for the false-success class: the agent returns "Done."
+// (or similar terse claim) WITHOUT actually committing. Pre-fix
+// the verification only checked uncommitted + unpushed — both
+// could read clean (HEAD was already at upstream, agent did
+// nothing) and the user got a green checkmark for a no-op.
+//
+// The new HEAD-advance check (snapshot HEAD before the agent
+// runs, compare after) catches this: HEAD unchanged + worktree
+// pre-dirty → impossible without a commit → surface a warning
+// naming the unchanged SHA.
+func TestRunPush_DirtyAgentClaimsDoneButNoCommit(t *testing.T) {
+	git := newPushGit()
+	// status: pre-agent dirty, post-agent clean (agent did
+	// `git stash` or similar — files moved out of the worktree
+	// without a commit). Pre-fix this looked identical to a
+	// successful commit+push.
+	git.onSeq("status",
+		pushGitResp{"M foo.go\n", "", nil},   // pre-agent: dirty
+		pushGitResp{"", "", nil},             // post-agent: clean (no commit!)
+	)
+	// HEAD-branch: agent stayed on c.Branch (didn't switch
+	// branches), so the branch check passes.
+	git.on("rev-parse", "wt-noop\n", "", nil)
+	// HEAD-SHA: SAME before and after the agent — the smoking
+	// gun for "no commit happened".
+	git.onArgs([]string{"rev-parse", "HEAD"},
+		"cafebabecafebabecafebabecafebabecafebabe\n", "", nil)
+
+	claude := &recordingAgent{
+		name:        "claude",
+		runOnceText: "Done.",
+	}
+	withAgent(t, claude)
+
+	withCwd(t, t.TempDir())
+	writeYml(t, mustPwd(t), Context{
+		Worktree: mustPwd(t),
+		Branch:   "wt-noop",
+		RepoRoot: mustPwd(t),
+	})
+
+	cs := newPushChatSession(t)
+	_ = cs.SetSelectedAgent("claude")
+	s := captureCh(t, cs)
+	_, err := dispatchPush(context.Background(), cs,
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
+	if err != nil {
+		t.Fatalf("RunPush: %v", err)
+	}
+	r := s.lastText()
+	if strings.Contains(r, "🤖 claude pushed") {
+		t.Fatalf("expected warning, got the unverified success card:\n%s", r)
+	}
+	if !strings.Contains(r, "no new commit was created") {
+		t.Fatalf("expected HEAD-advance diagnostic, got:\n%s", r)
+	}
+	if !strings.Contains(r, "cafebabe") {
+		t.Fatalf("expected diagnostic to name the unchanged SHA, got:\n%s", r)
+	}
+}
+
+// TestRunPush_DirtyAgentSwitchesBranch is the regression guard
+// for the "agent committed on a side branch" failure mode:
+// agent does `git checkout -b wt-side`, commits there, never
+// merges back to c.Branch. From c.Branch's perspective the
+// worktree is clean (HEAD still on c.Branch, files unchanged
+// relative to c.Branch) and unpushed=0 (HEAD=c.Branch@upstream),
+// so pre-fix verification passed with a green checkmark. The
+// agent's commit lives on a side branch the user never asked
+// for, and will never land on c.Branch.
+func TestRunPush_DirtyAgentSwitchesBranch(t *testing.T) {
+	git := newPushGit()
+	git.on("status", "M foo.go\n", "", nil) // pre-agent: dirty
+	// HEAD-branch snapshot after the agent: on wt-side,
+	// NOT on wt-c.Branch. This is the trigger for the
+	// branch-mismatch check.
+	git.on("rev-parse", "wt-side\n", "", nil)
+
+	claude := &recordingAgent{
+		name:        "claude",
+		runOnceText: "I made a side branch for this work.",
+	}
+	withAgent(t, claude)
+
+	withCwd(t, t.TempDir())
+	writeYml(t, mustPwd(t), Context{
+		Worktree: mustPwd(t),
+		Branch:   "wt-cbranch",
+		RepoRoot: mustPwd(t),
+	})
+
+	cs := newPushChatSession(t)
+	_ = cs.SetSelectedAgent("claude")
+	s := captureCh(t, cs)
+	_, err := dispatchPush(context.Background(), cs,
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{}, "")
+	if err != nil {
+		t.Fatalf("RunPush: %v", err)
+	}
+	r := s.lastText()
+	if strings.Contains(r, "🤖 claude pushed") {
+		t.Fatalf("expected warning, got the unverified success card:\n%s", r)
+	}
+	if !strings.Contains(r, "wt-side") || !strings.Contains(r, "wt-cbranch") {
+		t.Fatalf("expected branch-mismatch diagnostic naming both branches, got:\n%s", r)
 	}
 }
 

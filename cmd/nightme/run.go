@@ -48,6 +48,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/registry"
 	"github.com/cnlangzi/nightme/internal/shell"
 )
@@ -331,9 +332,22 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	//       RunFix / HandleDraftReaction can call
 	//       cs.SelectedCwd / SetSelectedCwd / QueueUserMessage
 	//       directly.
+	// Per-AgentSession PR / MR cache. Owned at runtime scope
+	// (NOT on AgentSession itself — the import cycle: gtw →
+	// chatsession → agentsession prevents agentsession from
+	// importing gtw, so a separate leaf package keeps the
+	// prcache.Registry here in cmd/nightme where deps already
+	// live). Stamp path looks up the cache by AgentSession.ID
+	// on every OutboundMessage; /gtw pr success calls
+	// Invalidate on the corresponding cache so the new URL
+	// surfaces on the next stamp rather than after the 60s
+	// TTL.
+	prCacheReg := &prcache.Registry{}
+
 	gtwDeps := gtw.HandlerDeps{
-		Git:    gtw.ExecGitRunner{},
-		Prober: &gtw.ExecHTTPProber{},
+		Git:          gtw.ExecGitRunner{},
+		Prober:       &gtw.ExecHTTPProber{},
+		PRInvalidator: prCacheReg,
 	}
 	gtwMgr := gtw.NewManager()
 	gtwMgr.SetHandlerDeps(gtwDeps)
@@ -355,7 +369,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// emitter 是所有出站消息的统一咽喉,负责把 SessionContext footer
 	// 盖在每条消息上(runtime pump / slash command / MessageState 三条
 	// 路径都走它)。stamper 在装配层注入,不暴露给 chatsession。
-	em := outbound.New(ch, outbound.Options{Stamper: newRuntimeStamper(mgr)})
+	em := outbound.New(ch, outbound.Options{Stamper: newRuntimeStamper(mgr, prCacheReg, gtwDeps)})
 	mgr.WithChannelResolver(func(string) chatsession.Channel {
 		return newChannelWrap(em)
 	})
@@ -610,7 +624,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// WithOnCreate fires for both restored (RestoreFromRegistry)
 	// and future (GetOrCreate) ChatSessions. Place BEFORE
 	// RestoreFromRegistry so restored chats get their handlers.
-	if err := wireRuntimeCallbacksAndRestore(mgr, ch, em, logger); err != nil {
+if err := wireRuntimeCallbacksAndRestore(mgr, ch, em, logger, prCacheReg, gtwDeps); err != nil {
 		return fmt.Errorf("run: wire+restore: %w", err)
 	}
 
@@ -635,7 +649,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 			fmt.Fprintf(out, "[nightme] received %s\n", sig)
 		}
 	}
-	return shutdownRun(out, ch, mgr, csFile, asFile, logger)
+	return shutdownRun(out, ch, mgr, csFile, asFile, prCacheReg, logger)
 }
 
 // newMessageDispatcher builds the runtime-injected
@@ -800,6 +814,8 @@ func wireRuntimeCallbacksAndRestore(
 	ch channel.Channel,
 	em outbound.Emitter,
 	logger *slog.Logger,
+	prReg *prcache.Registry,
+	gtwDeps gtw.HandlerDeps,
 ) error {
 	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
 		// Startup audit trail: one line per chat, bounded by the
@@ -835,7 +851,7 @@ func wireRuntimeCallbacksAndRestore(
 		// the Subscribe callback) — newEventHandler itself
 		// allocates a closure, so calling it on every Publish
 		// would burn one allocation per event.
-		agentHandler := newEventHandler(em, cs, mgr, logger)
+agentHandler := newEventHandler(em, cs, mgr, logger, prReg, gtwDeps)
 		cs.AgentEventBus.Subscribe(func(env chatsession.AgentEventEnvelope) bool {
 			agentHandler(env)
 			return false
@@ -892,7 +908,7 @@ func wireRuntimeCallbacksAndRestore(
 				// the "source AS, not selected AS" semantics this
 				// bus has always had.
 				if as := lookupASByID(cs, e.AgentSessionID); as != nil {
-					sessionContextInto(&out, as)
+					sessionContextInto(&out, as, prReg, gtwDeps)
 				}
 			}
 			if err := em.Send(context.Background(), out); err != nil {
@@ -983,7 +999,14 @@ func wireRuntimeCallbacksAndRestore(
 // (delivered by cs.AgentEventBus). The legacy
 // `chatsession.EventHandler` callback signature is gone — see
 // docs/feat/F-54-event-bus.md §3.5.
-func newEventHandler(em outbound.Emitter, cs *chatsession.ChatSession, mgr *chatsession.Manager, logger *slog.Logger) func(env chatsession.AgentEventEnvelope) {
+func newEventHandler(
+	em outbound.Emitter,
+	cs *chatsession.ChatSession,
+	mgr *chatsession.Manager,
+	logger *slog.Logger,
+	prReg *prcache.Registry,
+	gtwDeps gtw.HandlerDeps,
+) func(env chatsession.AgentEventEnvelope) {
 	// Per-cs closure. No per-handler mutable state needed anymore:
 	// the bridge layer now attaches per-turn Usage to the SAME
 	// AgentResultEvent that delivers the final text (claudecode
@@ -1092,7 +1115,7 @@ func newEventHandler(em outbound.Emitter, cs *chatsession.ChatSession, mgr *chat
 		switch out.Kind {
 		case gateway.OutReply, gateway.OutResult,
 			gateway.OutTaskCreate, gateway.OutTaskUpdate:
-			sessionContextInto(&out, s)
+			sessionContextInto(&out, s, prReg, gtwDeps)
 		}
 		// F-think §3.1.2: per-chat OutThinking gate. When the
 		// chat has /think off, drop OutThinking events here
@@ -1223,16 +1246,18 @@ func lookupASByID(cs *chatsession.ChatSession, id string) *agentsession.AgentSes
 // AgentSession.Agent is immutable (direct field read, no lock);
 // Model() takes RLock internally; git status is captured fresh
 // on each stamp (3s deadline, no caching — see F-48 §1.7).
-func sessionContextInto(out *gateway.OutboundMessage, s *agentsession.AgentSession) {
-	// Pure-F-55: out.Usage is set by gateway.Translate from the
+func sessionContextInto(out *gateway.OutboundMessage, s *agentsession.AgentSession, prReg *prcache.Registry, deps gtw.HandlerDeps) {
+	// F-55: out.Usage is set by gateway.Translate from the
 	// bridge wire payload (AgentResultEvent.Usage / AgentDoneEvent.Usage).
 	// The runtime is a passive pass-through — copy verbatim so the
 	// channel footer can render it via ctx.Usage. Pre-F-55 the
 	// copy was missing, so footers silently rendered without
 	// usage data. buildSessionContext is the shared gate; the
 	// stamper and this legacy path both feed it the same AS +
-	// usage inputs.
-	out.SessionContext = buildSessionContext(s, out.Usage)
+	// usage inputs. PullRequest lookup is plumbed through here too
+	// (see buildSessionContext) so the F-49 footer line surfaces
+	// the open PR / MR per AgentSession.
+	out.SessionContext = buildSessionContext(s, out.Usage, prReg, deps)
 }
 
 // buildSessionContext is the pure (no I/O of its own — git
@@ -1253,11 +1278,27 @@ func sessionContextInto(out *gateway.OutboundMessage, s *agentsession.AgentSessi
 // far below the user's "chat is not realtime" tolerance. On
 // timeout, CollectStatus returns (nil, nil) and the footer omits
 // the git segment silently.
-func buildSessionContext(s *agentsession.AgentSession, usage *agent.UsageInfo) *gateway.SessionContext {
+//
+// PR / MR lookup (F-49): per-AgentSession, cached on prReg. The
+// read is strictly synchronous (returns the cached value,
+// possibly nil on the first ever call) — no I/O blocks the stamp
+// path. MaybeRefresh inspects the cache and spawns the network
+// round-trip asynchronously when the entry is stale; the next
+// stamp picks up the refreshed value. The same prRef is fed to
+// the materialize gate below so a populated PullRequest alone is
+// enough to surface a SessionContext.
+//
+// Nil-safe on the prReg dependency: a hand-wired debug build
+// that skips registry construction still gets a fully-functional
+// stamp path with PullRequest == nil. GetOrCreate itself never
+// returns nil once we have a non-nil registry. Test pinned by
+// TestSessionContextInto_NilPRRegistryLeavesEmpty.
+func buildSessionContext(s *agentsession.AgentSession, usage *agent.UsageInfo, prReg *prcache.Registry, deps gtw.HandlerDeps) *gateway.SessionContext {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	gitSnap, _ := gtw.CollectStatus(ctx, s.Cwd, gtw.ExecGitRunner{})
 	cancel()
 	hasGit := gitSnap != nil && s.Cwd != ""
+
 	// Snapshot Model() and SessionID() once each — both take
 	// asMu.RLock() internally; calling them twice in the gate
 	// + the literal doubles the lock acquisitions per stamp for
@@ -1267,16 +1308,27 @@ func buildSessionContext(s *agentsession.AgentSession, usage *agent.UsageInfo) *
 	// no worse than a stale read in the gate).
 	model := s.Model()
 	sessionID := s.SessionID()
-	if s.Agent == "" && model == "" && sessionID == "" && !hasGit && usage == nil {
+
+	var prRef *gtw.PR
+	if prReg != nil {
+		if prCache := prReg.GetOrCreate(s.ID); prCache != nil {
+			prCache.MaybeRefresh(s.Cwd, deps)
+			prRef = prCache.PR()
+		}
+	}
+	hasPR := prRef != nil
+
+	if s.Agent == "" && model == "" && sessionID == "" && !hasGit && !hasPR && usage == nil {
 		return nil
 	}
 	return &gateway.SessionContext{
-		Agent:     s.Agent,
-		Model:     model,
-		SessionID: sessionID,
-		Workspace: s.Cwd,
-		GitStatus: gitSnap,
-		Usage:     usage,
+		Agent:       s.Agent,
+		Model:       model,
+		SessionID:   sessionID,
+		Workspace:   s.Cwd,
+		GitStatus:   gitSnap,
+		PullRequest: prRef,
+		Usage:       usage,
 	}
 }
 
@@ -1296,7 +1348,12 @@ func buildSessionContext(s *agentsession.AgentSession, usage *agent.UsageInfo) *
 // was skipped entirely by slash-command replies — the whole point
 // of moving it onto outbound.Emitter is that nobody has to remember
 // to call it any more.
-func newRuntimeStamper(mgr *chatsession.Manager) outbound.Stamper {
+//
+// PullRequest lookup (F-49) is plumbed through prReg/deps the same
+// way as sessionContextInto — both stamp sites share the per-AS
+// prcache.Registry so a /gtw pr Invalidate surfaces on the very
+// next outbound (not after the 60s TTL).
+func newRuntimeStamper(mgr *chatsession.Manager, prReg *prcache.Registry, deps gtw.HandlerDeps) outbound.Stamper {
 	return func(chatID string) *gateway.SessionContext {
 		if mgr == nil {
 			return nil
@@ -1314,7 +1371,7 @@ func newRuntimeStamper(mgr *chatsession.Manager) outbound.Stamper {
 		// when present, which the emitter sees before stamper lookup).
 		// Pass nil — usage-bearing events already carry their usage
 		// on the msg and don't need this footer path to populate it.
-		return buildSessionContext(as, nil)
+		return buildSessionContext(as, nil, prReg, deps)
 	}
 }
 
@@ -1355,7 +1412,7 @@ func (r *responder) Send(ctx context.Context, chatID, userMsgID, text string) er
 // Persistence: chat_sessions.json + agent_sessions.json are left
 // in place. The Manager has been writing through to them
 // throughout the run via WithPersistence.
-func shutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, csFile *registry.ChatSessionFile, asFile *registry.AgentSessionFile, logger *slog.Logger) error {
+func shutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, csFile *registry.ChatSessionFile, asFile *registry.AgentSessionFile, prReg *prcache.Registry, logger *slog.Logger) error {
 	_ = out // future shutdown status line
 	_ = asFile
 	if logger == nil {
@@ -1370,6 +1427,17 @@ func shutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, cs
 		if err := ch.Stop(shutdownCtx); err != nil {
 			firstErr = fmt.Errorf("run: stop channel: %w", err)
 		}
+	}
+
+	// Cancel every per-AgentSession PR-cache refresh goroutine
+	// so the daemon doesn't exit mid-`gh pr list`. Best-effort:
+	// the goroutines are stateless (HTTP/git calls), so a missed
+	// cancel only wastes a few round-trips, not state corruption.
+	// We do this BEFORE persisting chat state so any in-flight
+	// refresh that was about to land back into a Cache sees the
+	// cancel signal at its next checkpoint and exits silently.
+	if prReg != nil {
+		prReg.CloseAll()
 	}
 
 	if mgr != nil {

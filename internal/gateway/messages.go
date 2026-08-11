@@ -495,6 +495,35 @@ type SessionContext struct {
 	// invalidation hook. See docs/feat/F-45-session-footer.md §1.7.
 	GitStatus *gtw.GitStatusSnapshot
 
+	// PullRequest is the open PR / MR associated with the
+	// current head branch, resolved asynchronously by the
+	// runtime via prcache.Registry. nil when:
+	//
+	//   - the workspace has no `origin` remote
+	//   - the git platform cannot be detected (no URL hint
+	//     match AND Stage B probe failed)
+	//   - the most-recent platform call failed (auth,
+	//     network, rate limit)
+	//   - no open PR exists for the head branch
+	//   - the cache has never been refreshed yet (first
+	//     stamp, before the background goroutine has
+	//     completed)
+	//
+	// The footer render path treats nil as "omit the trailing
+	// `#N` PR segment on the workspace line" — PR lookup
+	// failures and "no PR yet" look identical to the user,
+	// which is the right trade-off for a chat-side decoration.
+	// The only observable difference is at debug log level.
+	//
+	// Reads are synchronous (the cache is a struct field); the
+	// underlying refresh goroutine does its own `gh pr list` /
+	// `glab mr list` round-trip and writes back asynchronously.
+	// Invalidation when /gtw pr creates a new PR happens via
+	// prcache.Registry.Invalidate (which calls Cache.Invalidate
+	// on the relevant AgentSession's cache), triggered by
+	// dispatchPR after a successful CreatePR.
+	PullRequest *gtw.PR
+
 	// Usage is the per-turn snapshot from the bridge event that
 	// produced this OutboundMessage — bridges populate it on
 	// EventAgentResult / EventAgentDone. The runtime is a passive

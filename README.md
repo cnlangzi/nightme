@@ -2,7 +2,7 @@
 
 > **Sleep tight, code all night.**
 >
-> A single-process daemon that turns your AI coding CLI into a remote-controlled teammate you can drive from chat.
+> A multi-session orchestrator that turns your AI coding CLIs (Claude Code / Codex / OpenCode / Pi) into teammates you can drive from chat — in parallel, across projects, across agents.
 
 ![Status](https://img.shields.io/badge/status-development-blue)
 ![Go](https://img.shields.io/badge/go-1.22%2B-00ADD8)
@@ -10,108 +10,198 @@
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 ![Single Binary](https://img.shields.io/badge/distribution-single%20binary-success)
 
-nightme sits between **AI coding CLIs** (Claude Code / Codex / OpenCode / Pi)
-and **IM channels** (Feishu / WhatsApp / Web UI), so you can drop
-*"refactor the auth module, push a PR, then sleep"* into a chat at
-night and collect the diff in the morning — without ever opening
-your laptop.
+## Install
 
+```bash
+curl -fsSL https://nightme.dev/install.sh | bash
 ```
-           you (phone, IM, web)                     your laptop
- ┌──────────────────────────┐                  ┌──────────────────────────┐
- │  Feishu DM / WhatsApp /  │ ── text/voice ─► │  nightme daemon (one Go  │
- │  Web UI                  │ ◄─ cards/files ─ │  process, <100MB RAM)    │
- └──────────────────────────┘                  │                          │
-                                              │  ┌────────────────────┐  │
-                                              │  │  AgentSession pool │  │
-                                              │  │  (claude, codex,   │  │
-                                              │  │   opencode, pi)    │  │
-                                              │  └────────────────────┘  │
-                                              └──────────────────────────┘
-```
+
+> One-line installer (placeholder URL — replace once the official site is live).
 
 ---
 
-## Why nightme?
+## What you can do with nightme
 
-Most "AI agent in chat" tools fall into one of two camps:
+### Three real scenarios
 
-1. **Heavy agent runtimes** — they own the LLM, the prompt template, the
-   tool registry, the memory store, the multi-agent orchestrator. You're
-   using *their* agent, just routed through chat.
-2. **Thin one-CLI bridges** — they wrap one vendor's CLI (usually
-   Claude Code) with one IM protocol. Useful, but switching CLIs means
-   re-installing.
+**Scenario A — many projects at once**
 
-nightme takes the boring middle path and runs with it: **a transparent
-byte-pipe daemon that drives the existing CLI you already paid for,
-keeps its conversation context across switches, and lets chat control
-your whole dev workflow — not just one prompt.**
+Open three Chat Sessions on one laptop:
 
-| Principle | What it means in practice |
+- Chat #1 is refactoring your auth service
+- Chat #2 is fixing a bug in the billing repo
+- Chat #3 is writing a one-off migration script
+
+One machine, three projects running in parallel. Tools like openclaw let you flip between sessions but lose context every time you switch — nightme keeps every session alive and preserves each one's conversation.
+
+**Scenario B — many tasks inside one repo**
+
+You keep chatting in `main`. For each side task, `/gtw fix` opens a fresh git worktree, drops you into a new Chat Session bound to that branch, and you work there. No branch juggling, no stash mess, no `git switch` and pray.
+
+**Scenario C — different agents for different jobs**
+
+Refactor with Claude, generate boilerplate with Codex, look up docs with Pi. `/use claude` ↔ `/use codex` ↔ `/use pi` in the same Chat — the old agent process is kept alive in the pool and your conversation context comes back when you switch.
+
+### Three core capabilities
+
+| Capability | What it means in practice |
 |---|---|
-| **Transparent byte pipe** | nightme never rewrites prompts, never filters output, never invents a "memory". What you see in chat is exactly what the CLI saw on its TTY. |
-| **PTY-backed** | Every agent runs in a real pseudo-terminal. Progress bars, colors, interactive prompts, ANSI escapes — they all just work. |
-| **Pool, don't restart** | Switch between agents (`/use codex`) or workspaces (`/cwd ~/code/b`) and the old CLI process is *kept alive*. Switching back reuses the same conversation. |
-| **Local-first, single-binary** | One Go binary on your laptop. No cloud relay, no SaaS, no telemetry. State lives in `~/.nightme/` with `0600` perms and atomic writes. |
-| **Per-chat persistence** | Every IM chat → 1 ChatSession → N AgentSessions. Close the laptop, reopen a week later, the same DM resumes the same process. |
-| **Channel is a dumb renderer** | Channels (Feishu/WhatsApp/Web) only do protocol encoding and visual rendering. All routing / state machines live in the gateway. Adding a new channel never touches session logic. |
+| **Multiple Chat Sessions in parallel** | N sessions on one machine, each running a different project or task. |
+| **Project × workspace, switchable any time** | `/cwd` to bind or switch workspace. Old workspaces are cached, not killed. |
+| **Multi-agent, in the same Chat** | `/use <agent>` swaps the active agent. The previous one stays in the pool with its context. |
 
 ---
 
-## Highlights
+## `/gtw` — git workflow as slash commands
 
-### 🤖 Multiple agents, one pool
-
-A single ChatSession owns a **pool of AgentSessions** — one CLI process
-per `(agent, cwd)` pair. While you're chatting with `claude` on
-`~/code/bailing`, you can `/use codex` to spawn `codex` in the same
-workspace, or `/cwd ~/code/side` to bind a second agent in a second
-workspace. All processes stay alive. `/gtw` workflows can spawn a
-**one-shot** `claude` (via `Starter.RunOnce`) while the long-lived
-chat agent keeps running — the one-shot talks, the chat agent
-stays quiet, and the bus surfaces whichever one has something to say.
-
-### ⚡ Switch any time, restart nothing
+Built-in git team workflow. Every step is one slash command, replied with a structured card (branch / base / url / worktree), not raw `git` spam.
 
 ```
-/use claude       ─►  spawn (or reuse) AgentSession{agent=claude, cwd=…}
-/use codex        ─►  spawn (or reuse) AgentSession{agent=codex, cwd=…}
-/use claude       ─►  hit the pool → reuse the SAME process + conversation
-/cwd ~/code/b     ─►  bind workspace; old AgentSession stays in the pool
-/cwd ~/code/a     ─►  switch back; the previous AgentSession is reattached
+/gtw fix                              # open worktree + propose branch + start agent
+/gtw push                             # commit + push (uses configured agent for dirty-push commit msg)
+/gtw pr                               # open PR via gh / glab
+/gtw close                            # tear down worktree, return to main
+/gtw sync                             # pull origin/main into the worktree, fast-forward
 ```
 
-Pool lookup is `O(1)` by `(agent, cwd)`. The old CLI never dies — it
-just stops being routed to. When you `/kill`, every AgentSession in
-the chat is torn down gracefully (`bridge.Close`, 5s outer timeout).
+### ★ Hooks — bring the dev environment with you
 
-### 📂 Survive restart, resume seamlessly
+AI tool indexes (CodeGraph, language servers, caches) usually live inside the repo. Opening a worktree means they all need rebuilding — currently you have to run `codegraph init` by hand.
 
-- **ChatSession** state (`chat_sessions.json`, `0600`, atomic rename)
-  — selectedAgent, selectedCwd, primaryAgent, watch/think/tools mode.
-- **AgentSession** state (`agent_sessions.json`, `0600`, atomic rename)
-  — per-AS ID, PID, status, args, lastRunAt.
-- On daemon restart, every ChatSession is reattached; every
-  AgentSession in `StatusDetached` is auto-respawned with its saved
-  args (`--resume <session-id>` for Claude / Pi, equivalent for
-  others). Conversation history survives.
-- `nightme list` shows the persisted state so you can confirm before
-  opening your laptop.
+Hooks automate that. Edit `~/.nightme/gtw.yml`:
 
-### ⌨️ Slash commands that actually do work
+```yaml
+# ~/.nightme/gtw.yml
+fix:
+  hooks:
+    after:
+      - codegraph init                # bare string = shell hook
+      - npm install
+      - go mod download
+```
 
-Every action lives behind one slash command. The full catalog:
+Hook sugar:
+
+- `- codegraph init` — short form, treated as a shell hook
+- `- type: shell / run: codegraph init` — long form, same semantics (forward-compatible for future `type: agent` / `type: notify`)
+
+Each command exposes `hooks.before` and `hooks.after`:
+
+| Hook | When it fires | Typical use |
+|---|---|---|
+| `before` | before the main flow | record starting SHA, snapshot state |
+| `after` | after the main flow (always runs, even on failure) | `codegraph init`, install deps, warm caches |
+
+Iron rules (from the code):
+
+- v1 supports **shell hooks only** — anything else warns + skips.
+- Hook failures **never block the main flow**. Failed hook = `⚠️` note in the reply, main command proceeds.
+- All stdout/stderr is echoed back so you can see what actually ran.
+- 30s default timeout per hook.
+
+### ★ Lightweight agent for routine work
+
+Routine work in `/gtw` (commit message generation, etc.) doesn't need a heavy coding agent — they inject chat context and burn tokens you don't need. Push can use a lightweight agent (Pi or similar) via `<cmd>.agent`:
+
+```yaml
+# ~/.nightme/gtw.yml
+push:
+  agent: pi                          # lightweight agent for commit-message generation
+```
+
+Agent selection follows a 3-tier priority chain:
+
+| Priority | Source | Example |
+|---|---|---|
+| 1 | CLI flag | `/gtw push -a claude` |
+| 2 | yml `<cmd>.agent` | `push: agent: pi` |
+| 3 | chat's current `/use` agent | — |
+| fallback | nothing set | existing `❌ no agent selected` reply |
+
+**Scope (per code):** `push.agent` is consumed in `pushDirty` (pushClean runs pure `git push -u origin`, no agent). `fix / close / sync` reserve the `agent` field for future use but currently don't consume it.
+
+**Degradation:** if `yml.agent` references a name that isn't registered (e.g. `pi` missing from your `agents:` list), nightme warns (`⚠️ gtw.yml agent "pi" not found; falling back to session default`) and falls back to priority 3 — never silently swaps your agent.
+
+**What you actually get:** heavy thinking stays in the main Chat's Claude / Codex. `/gtw` runs Pi on commit messages and shell hooks on init scripts. Main session stays clean; tokens drop.
+
+### How `/gtw` plays with multi-Chat + multi-agent
+
+- Chat #1 — keep editing `main` with Claude
+- Chat #2 — `/gtw fix` → opens worktree → hooks rebuild the index → a one-shot Pi generates a conventional commit → `/gtw pr` opens the PR
+- Every worktree has its own AI indexes, its own deps, its own agent process. Nothing collides.
+
+---
+
+## Always-In-The-Loop
+
+Most "AI dev in chat" tools feel like a black box — you type something, scroll a bit, hope. nightme treats visibility as a first-class feature.
+
+### StatusBar — Feishu Kino footer card
+
+Every message from the agent carries a fixed footer card on Kino showing exactly what you need to know without leaving chat:
+
+- **Working directory** — which project / branch is currently active
+- **Git status** — branch, dirty / clean, ahead / behind
+- **Agent status** — `idle` / `running` / `thinking`
+- **Token usage** — used / limit for the current session
+
+Other tools drop you into the dark. nightme shows you what your agent is doing, where, and at what cost.
+
+### Flexible visibility — you decide what you see
+
+| Toggle | What it controls |
+|---|---|
+| `/think on\|off` | Show or hide the agent's thinking blocks in the receipt. |
+| `/tools on\|off` | Show or hide per-tool thread replies (default off to keep the card quiet). |
+| `/watch on\|off` | Whether this chat listens to group messages (default: only `@bot` / `@_all`). |
+| Active progress + explicit confirmation | Critical checkpoints surface to you proactively — you don't have to refresh to see if the agent is alive. |
+
+**Why this matters:** when you're driving multi-agent work from your phone at 11pm, the difference between "I can see what's happening" and "I'm guessing what's happening" is the difference between productive and infuriating. nightme defaults to visible — and gives you the toggles when you want quiet.
+
+---
+
+## Stable & Predictable
+
+Three pain points of tools like openclaw, addressed head-on:
+
+| Pain | nightme's answer |
+|---|---|
+| The agent dies mid-task, conversation gone | **Process-level resumption.** Daemon / network / sleep interruption — restart and every ChatSession is auto-reattached, every AgentSession in `StatusDetached` is respawned with `--resume <session-id>` (Claude / Pi equivalent for others). Conversation survives. |
+| Silent timeout cuts you off | **Sessions are user-managed.** No "after N minutes you're disconnected" surprise. You pick the level: `/stop` halts the in-flight turn (keep session), `/new` resets context (keep process), `/kill` drops the AgentSession entirely. |
+| Project memory vanishes mid-task | **Continues until you say otherwise.** Default is keep compressing, never zero. Only explicit `/new` resets the agent's conversation context. |
+
+The principle: nightme **doesn't run its own memory system**. Context management is delegated to the upstream Claude Code / Codex / Pi that you're already paying for. So behavior is predictable — what you see is what the CLI sees, not what nightme invents. When the CLI's own compression kicks in, you know. When nightme does nothing, you know.
+
+---
+
+## Coding-Tuned. Not Coding-Locked.
+
+The default workflow is coding. The commands, the `/gtw` flow, the agent menu — all oriented toward developer work.
+
+But nightme is a **transparent byte-pipe daemon that drives an existing CLI process**. It doesn't rewrite prompts, doesn't ship its own agent runtime, doesn't pretend to know better than the CLI you're using. So:
+
+- Coding workflow? Optimized. `gtw fix / push / pr / close / sync` is the team workflow you actually want.
+- Non-coding agent work? Still works. If your CLI can run, nightme can drive it.
+- Want to switch CLIs later? Drop in a new `agents:` entry in config. The orchestration stays.
+
+nightme doesn't try to be a "general Agent framework". It doesn't compete with LangChain / OpenAI Agents on that axis. The product claim is narrower and stronger: **a developer-workflow orchestrator for the CLIs you already use.**
+
+---
+
+## Quick reference
+
+### Slash commands
 
 | Command | What it does |
 |---|---|
 | `/cwd <path>` | Bind this chat to a workspace. Validates the path; lazy-spawns on the next message. |
 | `/use <agent>` | Switch the active agent (`claude` / `codex` / `opencode` / `pi`). Reuses or spawns. |
-| `/kill` | Graceful shutdown of all AgentSessions in this chat. |
-| `/new [agent]` | Reset the agent's conversation context without restarting the process. |
-| `/watch on\|off` | Per-chat message-watch mode (default: only `@bot` or `@_all` in groups). |
+| `/stop` | Halt the in-flight turn on the selected agent. Session stays; queued messages still flow. |
+| `/kill [agent]` | Drop AgentSession(s) in the current workspace — terminates the CLI process and removes the pool entry. `/kill <agent>` kills one. |
+| `/new [agent]` | Reset the agent's conversation context (Claude Code's `/clear` equivalent). Process stays alive; queued messages are cleared. |
+| `/watch on\|off` | Per-chat message-watch mode (default: only `@bot` / `@_all` in groups). |
 | `/think on\|off` | Show / hide the agent's thinking blocks in the receipt card. |
-| `/tools on\|off` | Show / hide per-tool thread replies (default off to keep the card quiet). |
+| `/tools on\|off` | Show or hide per-tool thread replies (default off to keep the card quiet). |
 | `/gtw fix [-a <agent>]` | Spawn a one-shot agent in a `git worktree`, propose branch name + work. |
 | `/gtw push [-a <agent>]` | Commit + push; reply card shows branch / base / url. |
 | `/gtw pr  [-a <agent>]` | One-shot agent generates Conventional Commits title+body, opens the PR via `gh` / `glab`. |
@@ -119,138 +209,50 @@ Every action lives behind one slash command. The full catalog:
 | `/gtw sync` | Pull `origin/main` into the worktree, fast-forward. |
 | `/help` | List every slash command (in-chat). |
 
-All slash commands are dispatched through the `command.Commander` /
-`Registry` / `Factory` triple in `internal/command/` — adding a new
-command is a single `Factory` registration; nothing in the gateway
-or channel layer needs to change.
+All slash commands dispatch through `command.Commander` / `Registry` / `Factory` (`internal/command/`) — adding one is a single `Factory` registration; nothing in the gateway or channel layer needs to change.
+
+### `/gtw` hooks cheatsheet
+
+```yaml
+# ~/.nightme/gtw.yml
+fix:
+  hooks:
+    before: [echo "starting fix flow"]
+    after:  [codegraph init, npm install, go mod download]
+
+push:
+  agent: pi                          # lightweight agent for commit-message work
+
+# close:  # reserved for future
+# sync:   # reserved for future
+```
 
 ---
 
-## Features
+## How nightme compares to the alternatives
 
-| Feature | Doc | Summary |
-|---|---|---|
-| **Multi-agent pool** | [F-29](./docs/feat/F-29-agent-session-pool.md) | `(agent, cwd)` 1:1 AgentSession pool. `/use` and `/cwd` never kill a process. |
-| **`/use <agent>`** | [F-28](./docs/feat/F-28-use-command.md) | Lazy switch: reuse existing AgentSession if present, spawn if not. |
-| **ChatSession model** | [F-27](./docs/feat/F-27-chatsession.md) | Per-chat persistent context. Survives daemon restart. |
-| **`/cwd <path>`** | [F-01](./docs/feat/F-01-session-create.md) | Bind the chat to a workspace. Pool lookup by `(agent, cwd)`. |
-| **`/kill`** | [F-43](./docs/feat/F-43-kill-new-graceful-and-reset.md) | Graceful shutdown of all AgentSessions in this chat. |
-| **`/new`** | [F-34](./docs/feat/F-34-new-slash-command.md) | Reset the agent's conversation context without restarting the process. |
-| **Feishu channel** | [F-08](./docs/feat/F-08-channel-abstraction.md) | WebSocket adapter; receipt cards; thread replies; tool merge; interactive cards. |
-| **Interactive cards** | [F-46](./docs/feat/F-46-interactive-cards.md) | `/gtw` decision cards with inline buttons that round-trip via IM reactions. |
-| **Rolling-log receipt UX** | [F-25](./docs/feat/F-25-rolling-log.md) | One card per turn, PATCHed in place — no card spam. |
-| **Task checklist card** | [F-38](./docs/feat/F-38-task-checklist.md) | Claude's `TaskCreate/TaskUpdate` renders as a Feishu task list in the same receipt. |
-| **Usage footer** | [F-45](./docs/feat/F-45-session-footer.md) | Per-turn model + token + cost footer stamped on main-chat messages. |
-| **PTY bridge** | [F-19](./docs/feat/F-19-cli-bridge.md) | PTY-backed byte pipe for any CLI. |
-| **ACP / SDK / JSON-IO / PTY** | [F-21](./docs/feat/F-21-agent-modes.md) | 4 backend modes — use the most structured one the agent supports. |
-| **Pi RPC bridge** | [F-32](./docs/feat/F-32-pi-rpc-bridge.md) | Direct `pi --mode rpc` over stdio JSONL (no ACP layer). |
-| **Active WS reconnect** | [F-41](./docs/feat/F-41-active-reconnect.md) | 30s reconnect cadence on Feishu WS drop (vs SDK default 2 min). |
-| **`/gtw fix / push / pr / close / sync`** | [`wip/gtw-*.md`](./wip/) | Worktree-isolated git workflow as one-line slash commands. |
-| **`nightme config`** | [F-30](./docs/feat/F-30-interactive-config.md) | Interactive menu for picking the primary agent. |
-| **`nightme doctor`** | [cmd/doctor.go](./cmd/nightme/doctor.go) | First-stop diagnostic: WS state, last inbound, reconnect count. |
-| **`nightme test`** | [F-19](./docs/feat/F-19-cli-bridge.md) | Local smoke test — spawn a CLI in PTY, send bytes, read output. |
+nightme targets developers who already use multiple AI coding CLIs locally and want to drive them from chat. Compared to peers:
+
+| Project | Process keep-alive on switch | Worktree-as-slash-command | StatusBar / transparency | Flexible visibility |
+|---|---|---|---|---|
+| **nightme** | ✅ Pool-based — old CLI process stays alive, conversation preserved | ✅ `/gtw fix / push / pr / close / sync` | ✅ Kino footer shows cwd / git / agent / token | ✅ `/think /tools /watch` + active progress |
+| openclaw | ❌ Restart on workspace change | ❌ | ❌ | ⚠️ |
+| cc-connect | ⚠️ Per-project process; not aggressively pooled | ⚠️ Generic cron + memory, not worktree-aware | ⚠️ | ⚠️ |
+| happycoder | ❌ Single-agent, no keep-alive | ❌ | ❌ | ⚠️ |
+| hermes | — | ❌ | ❌ | — |
+
+What you actually get from nightme that the others don't:
+
+- **Genuine process keep-alive, not multi-agent orchestration.** Switching back to a previous agent is instant — same CLI process, same conversation.
+- **`/gtw` as a first-class workflow.** Fix → push → pr → close → sync, every step as one IM reply card. `cc-connect` ships generic `cron` + `memory`; `openclaw` has nothing like it.
+- **StatusBar transparency.** Other tools drop you in a black box. nightme shows you cwd, git state, agent state, token usage on every reply.
+- **Hooks for dev-environment setup.** `codegraph init` and friends run automatically after worktree creation — no manual re-init.
+- **Lightweight agent for routine work.** Push's commit-message agent defaults can be `pi`, not the heavy chat-side Claude. Tokens saved.
+- **Single static Go binary.** ~30 MB. No Node + plugin host + LLM stack. No Python venv. No companion mobile app.
 
 ---
 
-## Quick start
-
-### Install
-
-Requires Go 1.22+ (1.26+ recommended) and a configured `GOPROXY`.
-
-```bash
-go install github.com/cnlangzi/nightme/cmd/nightme@latest
-```
-
-Or build from source:
-
-```bash
-git clone https://github.com/cnlangzi/nightme.git
-cd nightme
-make build          # ./bin/nightme
-```
-
-### Pick your primary agent
-
-```bash
-./bin/nightme config
-```
-
-The interactive menu merges built-in agents (claude / codex / opencode / pi)
-with anything you've declared in `config.yaml` and lets you set the primary.
-
-### Local smoke test
-
-```bash
-./bin/nightme test --workspace /tmp --agent /bin/echo --args hello
-```
-
-`test` forwards stdin to the agent in a PTY and prints its stdout back.
-Ctrl-C detaches (the child survives); `--cleanup` kills it instead.
-
-### Feishu — the real workflow
-
-```bash
-cp configs/nightme.example.yaml ~/.nightme/config.yaml
-
-# One-click registration: run, scan QR, done.
-./bin/nightme login feishu
-
-# Start the daemon (detaches into the background by default).
-./bin/nightme start
-
-# Tail the log; Ctrl-C exits follow.
-./bin/nightme logs --lines 50
-```
-
-Open a 1:1 Feishu DM with the bot and try:
-
-```
-/cwd /Users/you/code/bailing        # bind this chat to a workspace
-/use claude                          # spawn (or reuse) claude in /Users/you/code/bailing
-hello, refactor auth.go              # plain text flows to the agent
-/use codex                           # switch agent — the claude process is kept in the pool
-/use claude                          # switch back — same process, conversation preserved
-/cwd /Users/you/code/side-project    # new workspace, new pool entry
-/cwd /Users/you/code/bailing         # old workspace still cached
-/kill                                # tear down everything in this chat
-/help                                # list every slash command
-```
-
-### `/gtw` — worktree-isolated git workflow
-
-```
-/gtw fix                              # agent proposes worktree name + branch, you approve
-/gtw push [-a <agent>]                # commit + push, get a card with branch / base / url
-/gtw pr  [-a <agent>]                 # one-shot agent generates Conventional Commits title+body, opens PR
-/gtw close                            # drop the worktree, return to main
-/gtw sync                             # pull origin/main into the worktree, fast-forward
-```
-
-Every step replies with a single, structured card (branch / base / url /
-worktree) instead of dumping raw `git` output into chat.
-
-### Daemon lifecycle
-
-```bash
-./bin/nightme start          # start daemon in the background
-./bin/nightme status         # running? pid? uptime?
-./bin/nightme logs -f        # follow the log
-./bin/nightme doctor         # WS state + last inbound + reconnect count
-./bin/nightme restart        # graceful replace
-./bin/nightme stop           # graceful stop (children detached by default)
-./bin/nightme list           # list persisted chat sessions
-./bin/nightme agents         # list registered agents
-./bin/nightme name           # print this instance's name
-./bin/nightme name macbook   # set instance name (multi-machine setups)
-```
-
-Bare `nightme` (no subcommand) drops you into an interactive REPL with
-`↑/↓` history navigation — useful for poking at the daemon over SSH.
-
----
-
-## Architecture
+## Architecture (advanced)
 
 ```
 ┌─────────────┐    ┌─────────────┐    ┌──────────────────────────┐
@@ -269,29 +271,19 @@ Bare `nightme` (no subcommand) drops you into an interactive REPL with
                                      └──────────────────────────┘
 ```
 
-- **Channel** owns transport. v1.3 trimmed to 5 methods; receipt
-  lifecycle moved into the adapter (`adapter.go`).
-- **Gateway** routes inbound: slash commands dispatched via the
-  `command.Commander`, everything else forwarded to the ChatSession's
-  active AgentSession.
-- **ChatSession** is the per-chat context. Owns the AgentSession pool
-  and the InputBuffer FSM. Persists across daemon restarts.
-- **AgentSession** is the per-CLI-process handle. One per
-  `(agent, cwd)` pair, kept alive across `/use` and `/cwd` switches.
-- **Bridge** is the per-agent transport. ModeACP / ModeSDK / ModeJSONIO
-  / ModePTY / ModeRPC, picked by what the CLI supports.
+- **Channel** owns transport. v1.3 trimmed to 5 methods; receipt lifecycle moved into the adapter (`adapter.go`).
+- **Gateway** routes inbound: slash commands dispatched via the `command.Commander`, everything else forwarded to the ChatSession's active AgentSession.
+- **ChatSession** is the per-chat context. Owns the AgentSession pool and the InputBuffer FSM. Persists across daemon restarts.
+- **AgentSession** is the per-CLI-process handle. One per `(agent, cwd)` pair, kept alive across `/use` and `/cwd` switches.
+- **Bridge** is the per-agent transport. ModeACP / ModeSDK / ModeJSONIO / ModePTY / ModeRPC, picked by what the CLI supports.
 
-See [`docs/SPEC.md`](./docs/SPEC.md) §1 for the full responsibility
-table and [`docs/SPEC.md`](./docs/SPEC.md) §0.1 for the v1.3
-"Channel is a dumb renderer" rewrite.
+See [`docs/SPEC.md`](./docs/SPEC.md) §1 for the full responsibility table and [`docs/SPEC.md`](./docs/SPEC.md) §0.1 for the v1.3 "Channel is a dumb renderer" rewrite.
 
 ---
 
 ## Configuration
 
-nightme reads YAML from `~/.nightme/config.yaml` (or `$NIGHTME_CONFIG`
-if set). Env-var overrides: `NIGHTME_<SECTION>_<KEY>` (e.g.
-`NIGHTME_PRIMARY`).
+nightme reads YAML from `~/.nightme/config.yaml` (or `$NIGHTME_CONFIG` if set). Env-var overrides: `NIGHTME_<SECTION>_<KEY>` (e.g. `NIGHTME_PRIMARY`).
 
 ```yaml
 primary: claude                          # global default agent
@@ -330,51 +322,11 @@ paths:
   data_dir: "~/.nightme"
 ```
 
-See [`configs/nightme.example.yaml`](./configs/nightme.example.yaml)
-for the full schema and per-bridge notes.
+The `/gtw` workflow reads a **separate** file: `~/.nightme/gtw.yml` — see the [Quick reference](#gtw-hooks-cheatsheet) above.
 
-Logs go to `~/.nightme/nightme.log` (mode `0600`) as JSON. Attribute
-keys containing `secret`, `token`, or `password` are auto-redacted to
-`***REDACTED***`.
+See [`configs/nightme.example.yaml`](./configs/nightme.example.yaml) for the full schema and per-bridge notes.
 
----
-
-## How nightme compares to the alternatives
-
-nightme targets a specific niche: developers who already use multiple
-AI coding CLIs locally and want to drive them from chat. If that's
-you, here's how the alternatives stack up.
-
-| Project | Language | Channel scope | Agent scope | Conversation reuse across agent switch | Process keep-alive on `/cwd` switch | Local-first / single binary | Worktree-as-slash-command |
-|---|---|---|---|---|---|---|---|
-| **nightme** | Go | Feishu (WS + QR onboarding), Web TUI, echo (smoke test) — `Channel` interface ready for more | claude / codex / opencode / pi — pick at runtime via `/use` | ✅ Process kept; context preserved | ✅ Pool-based, no kill | ✅ Single 30 MB static binary | ✅ `/gtw fix / push / pr / close / sync` |
-| **openclaw** (Node.js) | TypeScript | 15+ IM (WhatsApp / Telegram / Discord / Slack / Feishu / WeChat / Signal / QQ / …) | Bundles its own Pi Agent runtime + multi-LLM orchestration; not a bridge to *your* CLI | ❌ Tied to its own agent | ❌ Restart on workspace change | ❌ Node + plugin host + bundled LLM stack | ❌ |
-| **cc-connect** | Go | 9+ platforms (Feishu / 钉钉 / 企业微信 / 个人微信 / Slack / Telegram / Discord / LINE / QQ) | claude / codex / cursor / gemini / qoder / opencode / iFlow — 7 bundled | ⚠️ Multi-agent orchestration (bots talking in groups), but each agent restart is heavy | ⚠️ Per-project process; not aggressively pooled | ✅ Go binary | ⚠️ Generic `cron` + memory, not worktree-aware |
-| **happycoder** | TypeScript (server) + iOS/Android native apps | Mobile-first — WebSocket bridge to native mobile UI; no IM integration | Claude Code only | ❌ Single-agent | ❌ | ⚠️ Server + companion app required | ❌ |
-| **hermes** (NousResearch) | Python | None — CLI only | Bundled self-improving agent (`hermes_cli`) | — | — | ✅ Python install script | ❌ |
-
-### What you actually get from nightme that the others don't
-
-- **Genuine multi-agent pool, not multi-agent orchestration.** nightme
-  is the only one here that keeps *the actual CLI process* (and its
-  in-memory conversation history) alive across `/cwd` and `/use`
-  switches. `openclaw` and `cc-connect` happily run multiple agents
-  in parallel — but switching back to a previous one pays a respawn
-  cost.
-- **PTY-first.** `happycoder` ships its own UI to sidestep TTY
-  rendering issues; `openclaw` does its own agent runtime. nightme
-  just hands the CLI a real PTY and stops pretending it knows better.
-- **`/gtw` as a first-class workflow.** `fix → push → pr → close →
-  sync`, every step as a one-line IM reply card, with `git worktree`
-  isolation so you can keep chatting in main while a PR is open.
-  `cc-connect` exposes generic `cron` + memory; `openclaw` has
-  nothing like it.
-- **Single static Go binary.** `go install` produces a ~30 MB
-  binary. No Node + plugin host + LLM stack. No Python venv. No
-  companion mobile app to keep updated.
-- **Feishu one-click onboarding.** Run `./bin/nightme login feishu`,
-  scan the QR, you're done. WebSocket connection — no public IP
-  required, no ngrok tunnel.
+Logs go to `~/.nightme/nightme.log` (mode `0600`) as JSON. Attribute keys containing `secret`, `token`, or `password` are auto-redacted to `***REDACTED***`.
 
 ---
 
@@ -404,9 +356,7 @@ make install   # go install to $GOBIN
 make dev       # go run ./cmd/nightme  (uses example config)
 ```
 
-CI runs on GitHub Actions (`.github/workflows/ci.yml`) for every push
-and pull request: `go vet`, `go test -race`, and `go build` must all
-pass.
+CI runs on GitHub Actions (`.github/workflows/ci.yml`) for every push and pull request: `go vet`, `go test -race`, and `go build` must all pass.
 
 ### Project layout
 
@@ -458,15 +408,11 @@ internal/
 
 Issues and PRs are welcome. A few things that help:
 
-1. **Read the 3-layer doc model** ([`docs/README.md`](./docs/README.md))
-   before opening a design PR. PRD → SPEC → FEATURES → feat/F-XX.
-2. **Tests must include race coverage.** `make test` runs
-   `go test -race ./...`; CI enforces it.
+1. **Read the 3-layer doc model** ([`docs/README.md`](./docs/README.md)) before opening a design PR. PRD → SPEC → FEATURES → feat/F-XX.
+2. **Tests must include race coverage.** `make test` runs `go test -race ./...`; CI enforces it.
 3. **Run `make lint`** before pushing — `go vet` warnings are a CI gate.
-4. **Channels are dumb renderers.** If you're tempted to add session
-   logic to an adapter, route it through the gateway instead.
-5. **Don't merge test files mechanically across renames.** Prefer to
-   rewrite them when the underlying API changes.
+4. **Channels are dumb renderers.** If you're tempted to add session logic to an adapter, route it through the gateway instead.
+5. **Don't merge test files mechanically across renames.** Prefer to rewrite them when the underlying API changes.
 
 ---
 

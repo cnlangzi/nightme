@@ -407,3 +407,93 @@ func TestTruncateForLog_UTF8Valid(t *testing.T) {
 		}
 	}
 }
+
+// TestCardFooterElements_AllLinesWrapped pins the invariant:
+// every footer line — including the workspace line that
+// carries the markdown-link PR tail `[#N](url)` as its last
+// segment — is wrapped in <font color='grey'>…</font>.
+// Empirically verified on current Feishu (2026-08, see
+// pr_render_compare_test.go): lark_md correctly renders
+// `[#N](url)` inside <font> — `#N` surfaces as a clickable
+// blue anchor while the rest of the workspace row stays
+// grey. The earlier `](` bypass heuristic was solving a
+// problem that doesn't exist in current lark_md and was
+// removed.
+//
+// Regression guard: if a future change re-adds the `](`
+// heuristic, the workspace row will lose its grey colour
+// to "rescue" whatever was inside the `<font>` — the
+// failure mode this test catches by asserting the grey
+// wrap survives intact even when the footer line contains
+// `](` (from the markdown link syntax). The heuristic was
+// never necessary; if a future lark_md regresses, prefer a
+// dedicated card element for the link rather than blanket-
+// unwrapping footer rows.
+func TestCardFooterElements_AllLinesWrapped(t *testing.T) {
+	elems := cardFooterElements([]string{
+		"🤖: claude · opus-4-5",
+		"💰:「 12.3k / 8.2k / 1.5k · $0.087 」",
+		"📁: code/nightme · ⎇ fix-x · [#42](https://example/pr/42)",
+	})
+	if len(elems) != 2 {
+		t.Fatalf("got %d elements, want 2 (hr + markdown)", len(elems))
+	}
+	if elems[0]["tag"] != "hr" {
+		t.Errorf("elems[0].tag = %v, want hr", elems[0]["tag"])
+	}
+	if elems[1]["tag"] != "markdown" {
+		t.Errorf("elems[1].tag = %v, want markdown", elems[1]["tag"])
+	}
+	content, _ := elems[1]["content"].(string)
+	for _, want := range []string{
+		"<font color='grey'>🤖: claude · opus-4-5</font>",
+		"<font color='grey'>💰:「 12.3k / 8.2k / 1.5k · $0.087 」</font>",
+		"<font color='grey'>📁: code/nightme · ⎇ fix-x · [#42](https://example/pr/42)</font>",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("missing wrapped %q in:\n%s", want, content)
+		}
+	}
+	// The markdown link syntax MUST survive into the markdown
+	// content — guards against a future change accidentally
+	// HTML-escaping `[` / `]` / `(` / `)` and breaking the link.
+	if !strings.Contains(content, "[#42](https://example/pr/42)") {
+		t.Errorf("PR link syntax mangled in markdown content:\n%s", content)
+	}
+	// And no raw (un-wrapped) line should appear in the content.
+	for _, line := range []string{
+		"🤖: claude · opus-4-5",
+		"💰:「 12.3k / 8.2k / 1.5k · $0.087 」",
+		"📁: code/nightme · ⎇ fix-x · [#42](https://example/pr/42)",
+	} {
+		// Each line should NOT appear outside of a <font> wrap.
+		// We check by stripping all <font>…</font> spans and
+		// asserting the bare line doesn't survive.
+		stripped := strings.ReplaceAll(content, "<font color='grey'>"+line+"</font>", "")
+		if strings.Contains(stripped, line) {
+			t.Errorf("line %q appears un-wrapped in:\n%s", line, content)
+		}
+	}
+}
+
+// TestCardFooterElements_NoLinkAllWrapped is the minimal
+// sanity check: footer lines without any markdown link syntax
+// are all wrapped in <font color='grey'> (no heuristic to
+// trip; this is the post-refactor baseline).
+func TestCardFooterElements_NoLinkAllWrapped(t *testing.T) {
+	elems := cardFooterElements([]string{
+		"🤖: claude",
+		"💰:「 1k / 2k 」",
+		"📁: code/nightme · ⎇ main",
+	})
+	content, _ := elems[1]["content"].(string)
+	for _, want := range []string{
+		"<font color='grey'>🤖: claude</font>",
+		"<font color='grey'>💰:「 1k / 2k 」</font>",
+		"<font color='grey'>📁: code/nightme · ⎇ main</font>",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("missing wrapped %q in:\n%s", want, content)
+		}
+	}
+}

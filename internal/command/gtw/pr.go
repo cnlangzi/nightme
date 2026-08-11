@@ -35,12 +35,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
-// prDiffScanCapBytes is reserved for a future pre-scan diff
-// feature (currently unused; see wip/gtw-pr-plan §P1 step 2).
-// Kept here so the constant has a clear home when we add the
-// feature.
-const prDiffScanCapBytes = 64 * 1024
-
 // errParseAgentReply is the sentinel returned by parsePRReply
 // when the agent's reply cannot be parsed into a title + body
 // (no fence, empty fence, malformed fence). The dispatcher
@@ -100,9 +94,9 @@ func dispatchPR(
 	if unpushed > 0 {
 		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf(
-				"❌ branch %s has %d unpushed commits\n"+
-					"hint: /gtw push first, then /gtw pr.",
-				c.Branch, unpushed)), nil
+				"⚠️ %d commit(s) made locally but not pushed to remote\n"+
+					"hint: /gtw push first to publish them, then /gtw pr.",
+				unpushed)), nil
 	}
 
 	// Reject when there's nothing on this branch that's not
@@ -114,39 +108,41 @@ func dispatchPR(
 	}
 	if ahead == 0 {
 		// "Nothing on this branch" almost always means the user
-		// has uncommitted local edits. Detect that and point them
-		// at /gtw push (which handles the commit + push step) so
-		// the next /gtw pr has something to ship. Falling through
-		// to the bare message below if the working tree is clean
-		// (or status can't be read — e.g. tests without a mock).
+		// has local edits they haven't committed yet. Detect that
+		// and point them at /gtw push (which handles the commit +
+		// push step) so the next /gtw pr has something to ship.
+		// Lead with the actionable state in plain language — drop
+		// the technical "branch X is at Y" header so users don't
+		// have to translate git jargon to figure out what to do.
 		if snap, _ := CollectStatus(ctx, c.Worktree, deps.Git); snap != nil {
 			switch {
 			case snap.Uncommitted > 0 && snap.Untracked > 0:
 				return reply(ctx, cs.Channel(), chatID, messageID,
 					fmt.Sprintf(
-						"❌ branch %s is at %s\n"+
-							"⚠️ %d uncommitted file(s), %d untracked\n"+
-							"hint: /gtw push first to commit and push, then /gtw pr.",
-						c.Branch, baseBranch, snap.Uncommitted, snap.Untracked)), nil
+						"⚠️ %d file(s) changed but not committed, %d new file(s) not added to git\n"+
+							"hint: /gtw push first to commit + add + push, then /gtw pr.",
+						snap.Uncommitted, snap.Untracked)), nil
 			case snap.Uncommitted > 0:
 				return reply(ctx, cs.Channel(), chatID, messageID,
 					fmt.Sprintf(
-						"❌ branch %s is at %s\n"+
-							"⚠️ %d uncommitted file(s)\n"+
-							"hint: /gtw push first to commit and push, then /gtw pr.",
-						c.Branch, baseBranch, snap.Uncommitted)), nil
+						"⚠️ %d file(s) changed but not committed\n"+
+							"hint: /gtw push first to commit + push, then /gtw pr.",
+						snap.Uncommitted)), nil
 			case snap.Untracked > 0:
 				return reply(ctx, cs.Channel(), chatID, messageID,
 					fmt.Sprintf(
-						"❌ branch %s is at %s\n"+
-							"⚠️ %d untracked file(s)\n"+
-							"hint: git add them and /gtw push first, then /gtw pr.",
-						c.Branch, baseBranch, snap.Untracked)), nil
+						"⚠️ %d new file(s) not added to git\n"+
+							"hint: git add them, then /gtw push, then /gtw pr.",
+						snap.Untracked)), nil
 			}
 		}
+		// Truly nothing to ship — use ✅ (not an error) and nudge
+		// the user toward making a change rather than leaving them
+		// staring at "nothing to PR" wondering what's wrong.
 		return reply(ctx, cs.Channel(), chatID, messageID,
 			fmt.Sprintf(
-				"❌ branch %s is at %s — nothing to PR",
+				"✅ branch %s is in sync with %s — nothing new to PR yet\n"+
+					"hint: make some changes, then /gtw push, then /gtw pr.",
 				c.Branch, baseBranch)), nil
 	}
 
@@ -220,6 +216,32 @@ func dispatchPR(
 	}
 
 	card := renderPROpenedCard(c, baseBranch, url)
+
+	// Invalidate the footer's PR cache for every AgentSession
+	// in this chat whose Cwd is inside the worktree we just
+	// opened the PR for. Without this, the workspace footer
+	// line's PR reference (rendered as `[#N](url)` at the end
+	// of the 📁: row; clickable blue link in lark_md) would
+	// still render the previous state — either absent or a
+	// stale URL from a branch we last had a PR on — until the
+	// next 60s TTL expires. Iterating the pool + checking Cwd
+	// scopes the blow-up: other chat sessions and unrelated
+	// worktrees are not re-fetched.
+	if deps.PRInvalidator != nil {
+		for _, as := range cs.Pool() {
+			if as == nil || as.Cwd == "" {
+				continue
+			}
+			if !strings.HasPrefix(as.Cwd, c.Worktree) &&
+				!strings.HasPrefix(c.Worktree, as.Cwd) {
+				// AS.Cwd and the fix worktree share no
+				// path prefix → unrelated, skip.
+				continue
+			}
+			deps.PRInvalidator.Invalidate(as.ID)
+		}
+	}
+
 	return reply(ctx, cs.Channel(), chatID, messageID, card), nil
 }
 
@@ -636,9 +658,6 @@ func countBaseAhead(ctx context.Context, worktree, base string, deps HandlerDeps
 		base, base, lastStderr)
 }
 
-// renderPROpenedCard renders the IM-friendly success card.
-// Mirrors the /gtw push and /gtw close card style (✅ + branch /
-// worktree footer; see wip/gtw-pr.md §5).
 // renderPROpenedCard renders the IM-friendly success card.
 // Format 1 (gtw/README.md §2.1): ✅ title + `→ field: value`
 // rows. The previous `━━━━━━━━━━━━━━ \n 🌿/🔗/📁` form was a

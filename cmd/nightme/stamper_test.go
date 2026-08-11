@@ -6,7 +6,9 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/command/gtw"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/prcache"
 )
 
 // TestNewRuntimeStamper_NilMgr verifies that a nil Manager is
@@ -14,7 +16,7 @@ import (
 // or future misconfigurations shouldn't panic. Returning nil
 // matches the contract documented on newRuntimeStamper.
 func TestNewRuntimeStamper_NilMgr(t *testing.T) {
-	stamper := newRuntimeStamper(nil)
+	stamper := newRuntimeStamper(nil, &prcache.Registry{}, gtw.HandlerDeps{})
 	if got := stamper("any-chat"); got != nil {
 		t.Errorf("nil mgr should produce nil SessionContext, got %+v", got)
 	}
@@ -25,7 +27,7 @@ func TestNewRuntimeStamper_NilMgr(t *testing.T) {
 // than panicking on a missing map entry.
 func TestNewRuntimeStamper_UnknownChatID(t *testing.T) {
 	mgr := chatsession.NewManager()
-	stamper := newRuntimeStamper(mgr)
+	stamper := newRuntimeStamper(mgr, &prcache.Registry{}, gtw.HandlerDeps{})
 	if got := stamper("never-created"); got != nil {
 		t.Errorf("unknown chatID should produce nil SessionContext, got %+v", got)
 	}
@@ -40,7 +42,7 @@ func TestNewRuntimeStamper_UnknownChatID(t *testing.T) {
 func TestNewRuntimeStamper_NoActiveAS(t *testing.T) {
 	mgr := chatsession.NewManager()
 	_, _ = mgr.GetOrCreate("oc_no_as", "claude")
-	stamper := newRuntimeStamper(mgr)
+	stamper := newRuntimeStamper(mgr, &prcache.Registry{}, gtw.HandlerDeps{})
 	if got := stamper("oc_no_as"); got != nil {
 		t.Errorf("chat with no selected AS should produce nil SessionContext, got %+v", got)
 	}
@@ -53,7 +55,7 @@ func TestNewRuntimeStamper_NoActiveAS(t *testing.T) {
 // blank footer line).
 func TestBuildSessionContext_AllEmptyReturnsNil(t *testing.T) {
 	as := agentsession.NewAgentSession("as_x", "cs_x", "", "/tmp", nil)
-	if got := buildSessionContext(as, nil); got != nil {
+	if got := buildSessionContext(as, nil, &prcache.Registry{}, gtw.HandlerDeps{}); got != nil {
 		t.Errorf("buildSessionContext with no fields populated should return nil, got %+v", got)
 	}
 }
@@ -65,7 +67,7 @@ func TestBuildSessionContext_AllEmptyReturnsNil(t *testing.T) {
 func TestBuildSessionContext_UsageOnlyReturnsPopulatedSC(t *testing.T) {
 	as := agentsession.NewAgentSession("as_x", "cs_x", "", "/tmp", nil)
 	usage := &agent.UsageInfo{InputTokens: 5, OutputTokens: 7}
-	got := buildSessionContext(as, usage)
+	got := buildSessionContext(as, usage, &prcache.Registry{}, gtw.HandlerDeps{})
 	if got == nil {
 		t.Fatal("usage should be sufficient to materialize SessionContext")
 	}
@@ -84,7 +86,7 @@ func TestSessionContextInto_LegacyGate(t *testing.T) {
 		ChatID: "oc_l",
 		Usage:  &agent.UsageInfo{InputTokens: 1, OutputTokens: 1},
 	}
-	sessionContextInto(msg, as)
+	sessionContextInto(msg, as, &prcache.Registry{}, gtw.HandlerDeps{})
 	if msg.SessionContext == nil {
 		t.Fatal("MessageSubmitted-style path must populate SessionContext")
 	}

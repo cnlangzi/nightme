@@ -8,6 +8,7 @@ package feishu
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -715,5 +716,133 @@ func TestFormatSessionFooterLines_NoGitNoUsage(t *testing.T) {
 	want := []string{"🤖: claude · opus-4-5"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// TestFormatSessionFooterLines_PRSegment_AppendedToGitLine
+// pins the layout: when a PR has been resolved and a git line
+// is rendered, the PR reference folds into the git line as its
+// LAST segment, using markdown link syntax `[#N](url)` (no 🔗:
+// prefix). Empirically verified on current Feishu (2026-08,
+// see pr_render_compare_test.go): lark_md renders `#N` as a
+// clickable blue anchor while the rest of the workspace row
+// stays in the <font color='grey'> wrap.
+//
+// PR without git (no Workspace / no GitStatus) drops with
+// the git line — see TestFormatSessionFooterLines_PRSegment_NoGitLine.
+func TestFormatSessionFooterLines_PRSegment_AppendedToGitLine(t *testing.T) {
+	ctx := &gateway.SessionContext{
+		Agent: "claude", Model: "opus-4-5",
+		Workspace: "/home/devin/code/nightme",
+		GitStatus: &gtw.GitStatusSnapshot{Branch: "fix-x", HasUpstream: true},
+		PullRequest: &gtw.PR{
+			Number: 111,
+			URL:    "https://github.com/cnlangzi/nightme/pull/111",
+			State:  "open",
+		},
+	}
+	got := formatSessionFooterLines(ctx)
+	want := []string{
+		"🤖: claude · opus-4-5",
+		"📁: code/nightme · ⎇ fix-x · ⇡ 0 · [#111](https://github.com/cnlangzi/nightme/pull/111)",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v\nwant %v", got, want)
+	}
+}
+
+// TestFormatSessionFooterLines_PRSegment_NoGitLine confirms
+// that the PR number is NOT promoted to its own line when the
+// git line drops (no Workspace / no GitStatus / detached-HEAD-
+// outside-repo edge cases). A stale PR cache must not surface
+// on a row of its own — the footer stays at the canonical
+// identity / usage stack. Test reproduces the case by giving
+// a PR but no Workspace, which is the standard
+// "transient / not in a git repo" configuration.
+func TestFormatSessionFooterLines_PRSegment_NoGitLine(t *testing.T) {
+	ctx := &gateway.SessionContext{
+		Agent: "claude", Model: "opus-4-5",
+		PullRequest: &gtw.PR{
+			Number: 111,
+			URL:    "https://github.com/cnlangzi/nightme/pull/111",
+			State:  "open",
+		},
+	}
+	got := formatSessionFooterLines(ctx)
+	want := []string{"🤖: claude · opus-4-5"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v\nwant %v", got, want)
+	}
+	// Stale PR cache must not surface standalone on the
+	// identity row. The PR number renders as plain `#N` —
+	// check the literal, not an emoji substring.
+	if strings.Contains(got[0], "#111") {
+		t.Errorf("footer identity line %q absorbed PR #111 with no git line — must not surface standalone", got[0])
+	}
+}
+
+// TestFormatSessionFooterLines_PRSegment_NilOrInvalid covers
+// the omit rules for the PR tail: nil PR / Number <= 0 / empty
+// URL all leave the git line without the trailing `[#N](url)`
+// segment. "No PR yet" must look identical to "lookup failed"
+// — chat-side decoration is the wrong place to discriminate them.
+func TestFormatSessionFooterLines_PRSegment_NilOrInvalid(t *testing.T) {
+	tests := []struct {
+		name string
+		pr   *gtw.PR
+	}{
+		{"nil PR", nil},
+		{"zero number", &gtw.PR{Number: 0, URL: "https://x/y"}},
+		{"empty URL", &gtw.PR{Number: 5, URL: ""}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := &gateway.SessionContext{
+				Agent: "claude", Model: "opus-4-5",
+				Workspace: "/home/devin/code/nightme",
+				GitStatus: &gtw.GitStatusSnapshot{Branch: "fix-x", HasUpstream: true},
+				PullRequest: tc.pr,
+			}
+			got := formatSessionFooterLines(ctx)
+			want := []string{
+				"🤖: claude · opus-4-5",
+				"📁: code/nightme · ⎇ fix-x · ⇡ 0",
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("got %v\nwant %v", got, want)
+			}
+		})
+	}
+}
+
+// TestFormatSessionFooterLines_PRSegment_DirtyCountsBetween
+// pins the segment order: workspace → branch → dirty counts
+// → PR. The PR must be the last segment so the line reads
+// as "where am I → how dirty → what's the open PR", not
+// "where am I → what's the PR → how dirty".
+func TestFormatSessionFooterLines_PRSegment_DirtyCountsBetween(t *testing.T) {
+	ctx := &gateway.SessionContext{
+		Agent: "claude", Model: "opus-4-5",
+		Workspace: "/home/devin/code/nightme",
+		GitStatus: &gtw.GitStatusSnapshot{
+			Branch:      "fix-x",
+			Uncommitted: 3,
+			Untracked:   2,
+			HasUpstream: true,
+			AheadOfRemote: 1,
+		},
+		PullRequest: &gtw.PR{
+			Number: 42,
+			URL:    "https://example/pr/42",
+			State:  "open",
+		},
+	}
+	got := formatSessionFooterLines(ctx)
+	want := []string{
+		"🤖: claude · opus-4-5",
+		"📁: code/nightme · ⎇ fix-x · ↑ 3 · ? 2 · ⇡ 1 · [#42](https://example/pr/42)",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v\nwant %v", got, want)
 	}
 }

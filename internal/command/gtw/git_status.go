@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // GitStatusSnapshot is the parsed result of a single
@@ -198,4 +199,71 @@ func parseBranchHeader(header string) (name string, hasUpstream bool, ahead int)
 
 	name = strings.TrimSpace(headerMain)
 	return name, hasUpstream, ahead
+}
+
+// CollectPR resolves the workspace's remote + provider and asks
+// for the open PR / MR associated with the given head branch.
+// Returns (nil, nil) when:
+//
+//   - `head` is empty (detached HEAD — no branch to look up)
+//   - the workspace has no `origin` remote
+//   - the git platform cannot be detected (URL hint ambiguous
+//     AND Stage B probe failed)
+//   - the platform call fails (auth, network, rate limit,
+//     5xx) — the caller treats this exactly like "no PR yet"
+//     rather than bubbling an error to the IM
+//   - no open PR exists for `head`
+//
+// The function does NOT itself run `git status` to discover
+// `head`; the caller (AgentSession.refreshPRRef) supplies the
+// already-parsed branch. Splitting the responsibility avoids
+// the stamp path paying for two `git status --porcelain
+// --branch` invocations per refresh (CollectStatus in the
+// stamp path + CollectPR via the cache goroutine).
+//
+// `deps.Detect` follows the same fallback rule the rest of
+// the gtw package uses: nil → package-level Detect (URL hint
+// + API probe). `deps.Prober` nil → ExecHTTPProber{Timeout:
+// 3s}. Both dependencies are unused when `deps.Detect` is
+// non-nil (the test-only fakeDetect path) — Detect's Stage A
+// hint + Stage B probe are the only consumers of Prober.
+func CollectPR(ctx context.Context, dir, head string, deps HandlerDeps) (*PR, error) {
+	if head == "" {
+		// Detached HEAD / fresh repo without a commit — the
+		// provider can't match a "head branch" against PR
+		// queries. Skip the network round-trip entirely.
+		return nil, nil
+	}
+	remoteURL, err := RemoteOriginURL(ctx, dir, deps.Git)
+	if err != nil || remoteURL == "" {
+		// Not a git repo, or remote `origin` not configured.
+		// Same fallback as detectPR's caller in dispatchPR:
+		// the workspace footer simply omits the PR-number
+		// tail in this case.
+		return nil, nil
+	}
+	detect := deps.Detect
+	if detect == nil {
+		detect = Detect
+	}
+	prober := deps.Prober
+	if prober == nil {
+		prober = &ExecHTTPProber{Timeout: 3 * time.Second}
+	}
+	prov, err := detect(ctx, remoteURL, prober, dir)
+	if err != nil || prov == nil {
+		// Detection failed (invalid URL / unsupported host /
+		// probe timeout). Fail-soft: the workspace footer
+		// omits the PR-number tail and the next refresh will
+		// retry.
+		return nil, nil
+	}
+	owner, repo, err := ParseRepoOwner(remoteURL)
+	if err != nil {
+		// Remote URL isn't parseable into owner/repo — usually
+		// a self-hosted shape ParseRepoOwner doesn't handle
+		// yet. Don't escalate; just skip this refresh window.
+		return nil, nil
+	}
+	return prov.GetPR(ctx, owner, repo, head)
 }

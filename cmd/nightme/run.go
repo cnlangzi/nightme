@@ -620,7 +620,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// WithOnCreate fires for both restored (RestoreFromRegistry)
 	// and future (GetOrCreate) ChatSessions. Place BEFORE
 	// RestoreFromRegistry so restored chats get their handlers.
-if err := wireRuntimeCallbacksAndRestore(mgr, ch, em, logger, prCacheReg, gtwDeps); err != nil {
+if err := wireRuntimeCallbacksAndRestore(mgr, em, logger, prCacheReg, gtwDeps, markPromptDone(ch)); err != nil {
 		return fmt.Errorf("run: wire+restore: %w", err)
 	}
 
@@ -805,13 +805,33 @@ func newMessageDispatcher(mgr *chatsession.Manager, em outbound.Emitter, primary
 // first interaction. Manager-level contract is covered in
 // chatsession/manager_test.go; this helper's test covers the
 // cmd/nightme/run.go wiring specifically.
+// markPromptDone returns the Feishu-specific PromptEnd callback
+// wired into wireRuntimeCallbacksAndRestore. For non-Feishu
+// channels the no-op default is used; Feishu channels transition
+// the receipt card to PromptDone and add the ✅ reaction. The
+// wrapper exists so the runtime layer doesn't have to type-assert
+// the Channel interface back to *feishu.Adapter inside the
+// per-ChatSession install closure.
+func markPromptDone(ch channel.Channel) func(ctx context.Context, chatID, msgID string) {
+	if fa, ok := ch.(*feishu.Adapter); ok {
+		return fa.MarkReceiptPromptDone
+	}
+	return func(context.Context, string, string) {}
+}
+
 func wireRuntimeCallbacksAndRestore(
 	mgr *chatsession.Manager,
-	ch channel.Channel,
 	em outbound.Emitter,
 	logger *slog.Logger,
 	prReg *prcache.Registry,
 	gtwDeps gtw.HandlerDeps,
+	// markPromptDone is called when ChatSession.endPrompt fires
+	// (EventAgentDone / EventAgentError in the readpump). The
+	// runtime injects the Feishu-specific implementation; for
+	// non-Feishu channels the callback is a no-op. Passing it
+	// in (rather than type-asserting ch to *feishu.Adapter
+	// here) keeps wireRuntimeCallbacksAndRestore channel-agnostic.
+	markPromptDone func(ctx context.Context, chatID, msgID string),
 ) error {
 	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
 		// Startup audit trail: one line per chat, bounded by the
@@ -931,10 +951,10 @@ func wireRuntimeCallbacksAndRestore(
 			// logged inside SetPromptState. We use
 			// context.Background() because the readpump-driven
 			// endPrompt happens off the inbound message path;
-			// there's no inbound ctx to chain.
-			if fa, ok := ch.(*feishu.Adapter); ok {
-				fa.MarkReceiptPromptDone(context.Background(), e.ChatID, e.UserMsgID)
-			}
+			// there's no inbound ctx to chain. The runtime
+			// injects the Feishu-specific implementation; for
+			// non-Feishu channels the callback is a no-op.
+			markPromptDone(context.Background(), e.ChatID, e.UserMsgID)
 			return false
 		})
 

@@ -105,8 +105,8 @@ const (
 // pre-F-51). Field shape unchanged except for the Mode field
 // added in F-XX. F-XX (close): RepoRoot / Repo / Provider added
 // so /gtw close can switch CWD back + run git worktree remove
-// from the right directory, and so future /gtw push has the
-// remote info at hand without re-fetching.
+// from the right directory, and so /gtw push + /gtw pr have the
+// remote info at hand without re-fetching on each dispatch.
 type Context struct {
 	Mode     Mode
 	Issue    int    // -1 for ModeLocal (no remote issue); > 0 for ModeRemote
@@ -123,12 +123,13 @@ type Context struct {
 
 	// Repo is the "owner/repo" form (single-slash, no scheme),
 	// parsed from the origin remote URL at fix time. Empty for
-	// ModeLocal. Reserved for /gtw push (F-XX) and /gtw pr.
+	// ModeLocal. Consumed by /gtw push and /gtw pr to choose
+	// between `gh` and `glab` without re-detecting each call.
 	Repo string
 
 	// Provider is "github" / "gitlab" / "" — picked by Detect at
-	// fix time. Empty for ModeLocal. /gtw push / /gtw pr use it
-	// to choose between `gh` and `glab`.
+	// fix time. Empty for ModeLocal. /gtw push and /gtw pr use
+	// it to skip re-detection on each dispatch.
 	Provider string
 
 	State     State

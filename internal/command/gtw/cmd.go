@@ -137,9 +137,8 @@ func (f *Factory) Spec() command.Spec {
 			"/gtw fix -n <branch>             short form of --name\n" +
 			"/gtw fix <id> --force            nuke any leftover at the target path, then re-create\n" +
 			"/gtw close                       tear down the worktree, delete the branch, and sync main\n" +
-			"/gtw push                        push the worktree branch (clean → push, dirty → agent commits+pushes)\n" +
-			"/gtw push -a claude              override which agent runs the one-shot\n" +
-			"/gtw push --agent opencode       same, long form\n" +
+			"/gtw commit [-a <agent>]         commit uncommitted work via the configured agent (no push)\n" +
+			"/gtw push                        push the worktree branch (clean only — refuses dirty)\n" +
 			"/gtw pr                          generate PR title+body, then open the PR\n" +
 			"/gtw pr -a claude                override which agent runs the one-shot\n" +
 			"/gtw sync                        checkout the default branch and pull --rebase from origin",
@@ -168,6 +167,8 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices, cs *ch
 		return f.runFix(ctx, rt, cs, input)
 	case "close":
 		return f.runClose(ctx, rt, cs, input)
+	case "commit":
+		return f.runCommit(ctx, rt, cs, input)
 	case "push":
 		return f.runPush(ctx, rt, cs, input)
 	case "pr":
@@ -389,14 +390,20 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, _ *ch
 }
 
 // runPush handles `/gtw push`. Reads the yml at the current
-// CWD to find the worktree, commits uncommitted changes
-// (unless --no-commit), pushes the branch to origin, and
-// optionally opens a PR (--pr).
+// CWD to find the worktree, pushes the branch to origin.
+//
+// F-XX (commit/push split): push no longer auto-commits. A
+// dirty worktree is a hard refusal — the user runs `/gtw
+// commit` first, then `/gtw push`. Push's agent path (Branch 2
+// of the legacy flow) moved to `/gtw commit`, so the
+// `push.agent:` yml key is ignored when present (parser keeps
+// it for schema compatibility but the dispatcher no longer
+// reads it).
 //
 // No slot/draft shim needed — push doesn't touch gtw state
 // or reaction cards. Just the same HandlerDeps as everywhere
-// else, plus the parsed push flags. Wrapped in withHooks so
-// push.before / push.after from ~/.nightme/gtw.yml fire.
+// else. Wrapped in withHooks so push.before / push.after from
+// ~/.nightme/gtw.yml fire.
 func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
 	args, err := parsePushArgs(input.Args[2:])
 	if err != nil {
@@ -411,13 +418,49 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *ch
 	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
 		loadNotes, cfg.Push.Hooks.Before, cfg.Push.Hooks.After,
 		func() error {
-			res, e := dispatchPush(ctx, cs, f.deps, input.ChatID, input.MessageID, args, cfg.Push.Agent)
+			res, e := dispatchPush(ctx, cs, f.deps, input.ChatID, input.MessageID, args)
 			_ = res // dispatchPush already sent the reply via cs.Emitter()
 			return e
 		})
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw push failed: %v", err),
+			Consumed: true,
+		}, nil
+	}
+	return &command.SlashOutput{Consumed: true}, nil
+}
+
+// runCommit handles `/gtw commit`. Reads the yml at the current
+// CWD to find the worktree, dispatches the configured one-shot
+// agent to commit uncommitted changes (no push). Wrapped in
+// withHooks so commit.before / commit.after from
+// ~/.nightme/gtw.yml fire.
+//
+// Mirror of runPush with the Agent plumbed through to the
+// dispatcher. Doesn't touch gtw state or reaction cards, so no
+// slot/draft shim is needed.
+func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, error) {
+	args, err := parseCommitArgs(input.Args[2:])
+	if err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ %v", err),
+			Consumed: true,
+		}, nil
+	}
+
+	cfg, loadNotes := Load()
+
+	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
+		loadNotes, cfg.Commit.Hooks.Before, cfg.Commit.Hooks.After,
+		func() error {
+			res, e := dispatchCommit(ctx, cs, f.deps, input.ChatID, input.MessageID, args, cfg.Commit.Agent)
+			_ = res // dispatchCommit already sent the reply via cs.Emitter()
+			return e
+		})
+	if err != nil {
+		return &command.SlashOutput{
+			Reply:    fmt.Sprintf("❌ /gtw commit failed: %v", err),
 			Consumed: true,
 		}, nil
 	}
@@ -475,16 +518,20 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, _ *cha
 // pushArgs bundles the parsed argv tail of `/gtw push <...>`.
 // Same rationale as fixArgs: a struct is more future-proof
 // than a growing positional return tuple.
+//
+// F-XX (commit/push split): /gtw push no longer auto-commits,
+// so pushArgs is intentionally sparse — push takes no agent
+// override of its own. The Agent field is kept here so a
+// future `--remote` / `--force`-like flag can land without
+// reshaping the parser, but it's currently unused.
 type pushArgs struct {
-	// Agent, when non-empty, overrides the chat's currently
-	// Selected Agent for this one-shot commit+push turn.
-	// Comes from `-a <name>` / `--agent <name>`. Empty
-	// means: use cs.SelectedAgent().
-	//
-	// This is per-invocation only. We do NOT mutate
-	// cs.selectedAgent — the chat remains bound to whatever
-	// /use last set. The user can /use back to a different
-	// agent after the push completes.
+	// Agent, when non-empty, was historically the one-shot
+	// commit+push agent override. After the F-XX split /gtw
+	// push no longer runs an agent — the field is parsed for
+	// back-compat with users typing `-a claude` from muscle
+	// memory but ignored by dispatchPush. (The legacy error
+	// "no agent selected" still surfaces from /gtw commit,
+	// which is where it now belongs.)
 	Agent string
 }
 
@@ -507,6 +554,37 @@ func parsePushArgs(argv []string) (pushArgs, error) {
 			// Unknown token. Silent accept — future flag
 			// additions (e.g. positional branch arg) won't
 			// break callers passing them by mistake.
+		}
+	}
+	return out, nil
+}
+
+// commitArgs bundles the parsed argv tail of `/gtw commit
+// <...>`. Shape mirrors pushArgs — a single Agent override
+// from `-a <name>` / `--agent <name>`. Empty means
+// `cs.SelectedAgent()` / `yml.Commit.Agent` apply.
+type commitArgs struct {
+	Agent string
+}
+
+// parseCommitArgs strips `-a <name>` / `--agent <name>` from
+// the commit argv tail. Same shape as parsePushArgs — v1 has
+// no positional arg; /gtw commit always operates on the
+// current chat's worktree. Unknown flags tolerated (future
+// flags like `--amend` can land without breaking callers).
+func parseCommitArgs(argv []string) (commitArgs, error) {
+	out := commitArgs{}
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		switch a {
+		case "-a", "--agent":
+			if i+1 >= len(argv) {
+				return out, fmt.Errorf("missing value for %s", a)
+			}
+			out.Agent = argv[i+1]
+			i++
+		default:
+			// Unknown token. Silent accept.
 		}
 	}
 	return out, nil

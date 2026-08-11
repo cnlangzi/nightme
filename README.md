@@ -60,7 +60,8 @@ Built-in git team workflow. Every step is one slash command, replied with a stru
 
 ```
 /gtw fix                              # open worktree + propose branch + start agent
-/gtw push                             # commit + push (uses configured agent for dirty-push commit msg)
+/gtw commit                           # commit uncommitted work via configured agent (no push)
+/gtw push                             # push the worktree branch (refuses dirty; run /gtw commit first)
 /gtw pr                               # open PR via gh / glab
 /gtw close                            # tear down worktree, return to main
 /gtw sync                             # pull origin/main into the worktree, fast-forward
@@ -120,7 +121,7 @@ Agent selection follows a 3-tier priority chain:
 | 3 | chat's current `/use` agent | — |
 | fallback | nothing set | existing `❌ no agent selected` reply |
 
-**Scope (per code):** `push.agent` is consumed in `pushDirty` (pushClean runs pure `git push -u origin`, no agent). `fix / close / sync` reserve the `agent` field for future use but currently don't consume it.
+**Scope (per code):** `commit.agent` is the agent that runs the one-shot commit (was `push.agent` pre–F-XX split; the field moved with the agent path). `fix / close / sync / push` reserve the `agent` field for future use but currently don't consume it (`push` parses `-a <agent>` for back-compat with users' muscle memory but ignores it).
 
 **Degradation:** if `yml.agent` references a name that isn't registered (e.g. `pi` missing from your `agents:` list), nightme warns (`⚠️ gtw.yml agent "pi" not found; falling back to session default`) and falls back to priority 3 — never silently swaps your agent.
 
@@ -259,7 +260,8 @@ stderr:
 | `/think on\|off` | Show / hide the agent's thinking blocks in the receipt card. |
 | `/tools on\|off` | Show or hide per-tool thread replies (default off to keep the card quiet). |
 | `/gtw fix [-a <agent>]` | Spawn a one-shot agent in a `git worktree`, propose branch name + work. |
-| `/gtw push [-a <agent>]` | Commit + push; reply card shows branch / base / url. |
+| `/gtw commit [-a <agent>]` | One-shot agent commits uncommitted work to the local branch (no push). Run before `/gtw push` if the worktree is dirty. |
+| `/gtw push` | Push the worktree branch. Refuses if dirty (run `/gtw commit` first). |
 | `/gtw pr  [-a <agent>]` | One-shot agent generates Conventional Commits title+body, opens the PR via `gh` / `glab`. |
 | `/gtw close` | Drop the worktree, return to main, delete the branch. |
 | `/gtw sync` | Pull `origin/main` into the worktree, fast-forward. |

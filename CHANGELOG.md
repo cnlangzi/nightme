@@ -154,6 +154,71 @@ proof.
 - `internal/command/gtw/README.md`: no change (emoji + IM
   card conventions unchanged).
 
+### `gtw`: split `/gtw push` into `/gtw commit` + `/gtw push` (F-XX)
+
+The combined `/gtw push` (which both committed via a one-shot
+agent and then pushed to origin) is split into two
+single-purpose subcommands:
+
+- **`/gtw commit [-a <agent>]`** — owns the agent path:
+  readiness gate → headBefore capture → one-shot agent → verify
+  HEAD-advance + worktree-clean + branch → re-snapshot (catch
+  agent-introduced conflicts) → commit card. Refuses a clean
+  worktree ("ℹ️ nothing to commit"), conflicts ("unmerged paths"),
+  detached HEAD, and an unavailable agent.
+- **`/gtw push`** — now push-only. Refuses a dirty worktree
+  ("❌ worktree is dirty — /gtw push no longer auto-commits, run
+  `/gtw commit` first, then `/gtw push`"). Continues to be Branch 1
+  (no-op) + Branch 3 (programmatic push with retry verify);
+  Branch 2 ("agent + push") is gone — that agent path moved
+  into `/gtw commit`.
+
+The Commit path's success card switches from
+`🤖 <agent> committed N change(s) and pushed to <branch>`
+(pre-F-XX) to `🤖 <agent> committed N change(s) on <branch>` —
+"pushed" is now a separate step. The Push card stays
+`✅ pushed N commit(s) to <branch>`.
+
+**Field renames / API changes**
+
+- `~/.nightme/gtw.yml`: new `commit:` section (mirror of
+  `push:`) carrying `agent` + `hooks.before` / `hooks.after`.
+  `push.agent` is now ignored when present (parser keeps it
+  for schema back-compat with users' muscle memory). `push:`
+  itself keeps `hooks.before` / `hooks.after` (called around
+  the push-only flow).
+- `internal/command/gtw.commit_push.go`: renamed flow —
+  `dispatchPush` keeps Branches 1+3, drops Branch 2 +
+  post-agent re-snapshot. `RunOnceTimeout` (5 min) stays in
+  this file because `/gtw pr` also uses it.
+- `internal/command/gtw/commit.go` (new): `dispatchCommit`,
+  `runAgentToCommit`, `verifyAgentCommitted`, `buildAgentPrompt`.
+- `internal/command/gtw/cmd.go::Factory.Handle`: routes
+  `"commit"` alongside `fix / close / push / pr / sync`.
+  `runCommit` mirrors `runPush`.
+- `internal/command/gtw/render.go::replySuccessCard` splits
+  into `replyCommitSuccessCard` + `replyPushSuccessCard`.
+- `internal/command/gtw/commit_push.go` header comment updated
+  to describe the push-only shape.
+
+**Tests**
+
+- `commit_push_test.go` (1514 lines) splits into
+  `commit_test.go` (commit-path coverage) + `push_test.go`
+  (push-only coverage + shared helpers).
+- New push test `TestRunPush_DirtyRefused` covers the
+  "commit first" hint.
+- New commit test `TestRunCommit_HappyPath` covers the full
+  agent-commit + verify + re-snapshot + commit-card chain.
+
+**Docs**
+
+- `README.md` + `README.zh-CN.md` Usage lines split
+  `/gtw push` into `/gtw commit` + `/gtw push`.
+- `gtw` Spec / Usage + emoji vocabulary unchanged
+  (`🤖 committed-on` / `✅ pushed-to` are existing
+  headings of the same row count).
+
 ### Breaking: `/kill` renamed to `/close`, and `/close` no longer drops the AgentSession
 
 Two related changes that together clarify the session-lifecycle

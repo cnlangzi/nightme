@@ -1,6 +1,6 @@
 # F-56: `/gtw push` 三分支流 + Agent 最小化 Prompt
 
-> **Status**: 📝 设计阶段（doc-first；2026-08-11）
+> **Status**: ✅ 已实现（2026-08-11）—— F-XX 拆分后,Branch 2（agent commit + push）移交给 `/gtw commit`,见新文档 [`F-XX-gtw-commit-push-split.md`](F-XX-gtw-commit-push-split.md) 或 CHANGELOG `### gtw: split /gtw push into /gtw commit + /gtw push`。本文保留三分支流的设计动机 + agent prompt 的最小化原则,但 `Branch 2` 的"nightme 接管 push"段落已经不准确 —— push 现在不做 agent commit。
 > **Milestone**: v1.3.x
 > **Depends on**: F-104 (`/gtw push` 3 档 agent 优先级 + yml `~/.nightme/gtw.yml`)、F-120 (PR #120 `fix(gtw): harden push verification and PR cache correctness` — 本次新增的 HEAD-advance check)、`internal/command/gtw/push.go::headSHA`、`internal/command/gtw/push.go::countUnpushed`、`internal/command/gtw/push.go::listUncommittedFiles`
 > **Replaces**: 当前 `internal/command/gtw/commit_push.go::dispatchPush` 的 2 分支设计（`pushClean` / `pushDirty`）+ `verifyAgentPushedAndRecover` 的"agent 自己 push 完 verifier 兜底"模型

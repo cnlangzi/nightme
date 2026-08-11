@@ -346,8 +346,8 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	prCacheReg := &prcache.Registry{}
 
 	gtwDeps := gtw.HandlerDeps{
-		Git:           gtw.ExecGitRunner{},
-		Prober:        &gtw.ExecHTTPProber{},
+		Git:          gtw.ExecGitRunner{},
+		Prober:       &gtw.ExecHTTPProber{},
 		PRInvalidator: prCacheReg,
 	}
 	gtwMgr := gtw.NewManager()
@@ -625,7 +625,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// WithOnCreate fires for both restored (RestoreFromRegistry)
 	// and future (GetOrCreate) ChatSessions. Place BEFORE
 	// RestoreFromRegistry so restored chats get their handlers.
-	if err := wireRuntimeCallbacksAndRestore(mgr, ch, em, logger, prCacheReg, gtwDeps); err != nil {
+if err := wireRuntimeCallbacksAndRestore(mgr, ch, em, logger, prCacheReg, gtwDeps); err != nil {
 		return fmt.Errorf("run: wire+restore: %w", err)
 	}
 

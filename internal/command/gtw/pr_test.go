@@ -592,7 +592,7 @@ func TestDispatchPR_UnpushedCommits(t *testing.T) {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
 	r := s.lastText()
-	if !strings.Contains(r, "3 unpushed") || !strings.Contains(r, "/gtw push first") {
+	if !strings.Contains(r, "3 commit(s) made locally") || !strings.Contains(r, "/gtw push first") {
 		t.Fatalf("expected unpushed-commits reply, got:\n%s", r)
 	}
 }
@@ -611,7 +611,7 @@ func TestDispatchPR_NothingToPR(t *testing.T) {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
 	r := s.lastText()
-	if !strings.Contains(r, "nothing to PR") {
+	if !strings.Contains(r, "nothing new to PR yet") {
 		t.Fatalf("expected nothing-to-PR reply, got:\n%s", r)
 	}
 }
@@ -639,13 +639,13 @@ func TestDispatchPR_NothingToPR_UncommittedHints(t *testing.T) {
 		t.Fatalf("dispatchPR err: %v", err)
 	}
 	r := s.lastText()
-	if !strings.Contains(r, "1 uncommitted") {
+	if !strings.Contains(r, "1 file(s) changed but not committed") {
 		t.Fatalf("expected uncommitted-file hint, got:\n%s", r)
 	}
 	if !strings.Contains(r, "/gtw push first") {
 		t.Fatalf("expected /gtw push hint, got:\n%s", r)
 	}
-	if strings.Contains(r, "nothing to PR") {
+	if strings.Contains(r, "nothing new to PR yet") {
 		t.Fatalf("bare 'nothing to PR' reply is misleading when tree is dirty:\n%s", r)
 	}
 }

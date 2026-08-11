@@ -64,13 +64,17 @@ func porcelainFromSnapshot(snap messages.GitStatusSnapshot) string {
 	body := ""
 	// Order matters only for human-readability of test failures;
 	// parsePorcelainBranchStatus scans lines independently.
+	//
+	// Conflict entries: ALWAYS emit at least one `UU` line when
+	// HasConflicts is true, even if Uncommitted is 0. A snapshot
+	// like {Uncommitted: 0, HasConflicts: true} (e.g. an unmerged
+	// state with no other tracked-file edits) is a legitimate
+	// readiness state the parser must surface as conflicting; the
+	// old Uncommitted-gated emit silently dropped the flag.
+	if snap.HasConflicts {
+		body += "UU conflict.txt\n"
+	}
 	for i := 0; i < snap.Uncommitted; i++ {
-		if snap.HasConflicts && i == 0 {
-			// Surface the conflict marker on the FIRST uncommitted
-			// line so the parser picks it up via isConflictXY.
-			body += "UU conflict.txt\n"
-			continue
-		}
 		body += " M file.txt\n"
 	}
 	for i := 0; i < snap.Untracked; i++ {

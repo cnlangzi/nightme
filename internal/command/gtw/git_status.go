@@ -206,9 +206,10 @@ func isConflictXY(line string) bool {
 	if x == ' ' || y == ' ' {
 		return false
 	}
-	if x == '?' && y == '?' {
-		return false
-	}
+	// Single source of truth for the conflict matrix: both X and
+	// Y must be U, A, or D. '??' (untracked) and any other
+	// porcelain marker fall out automatically — the for-loop is
+	// the predicate.
 	for _, c := range []byte{x, y} {
 		if c != 'U' && c != 'A' && c != 'D' {
 			return false

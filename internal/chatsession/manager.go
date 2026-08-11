@@ -211,10 +211,6 @@ func (m *Manager) WithEmitter(em outbound.Emitter) *Manager {
 	return m
 }
 
-// emitter is registered once at startup via
-// WithEmitter. GetOrCreate calls it (outside m.mu)
-// when creating a new ChatSession; the returned Channel is
-// bound immutably to the new cs.
 // Get returns the ChatSession for chatID, or nil if absent.
 func (m *Manager) Get(chatID string) *ChatSession {
 	m.mu.RLock()

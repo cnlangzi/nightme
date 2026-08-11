@@ -81,6 +81,17 @@ func dispatchPush(
 		return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
 	}
 
+	// 1b. Refuse detached HEAD. Pushing from detached HEAD with
+	// `git push -u origin HEAD` either fails with "no upstream
+	// branch" or — worse — lands an anonymous ref on origin. The
+	// user should checkout a named branch first. Mirrors the
+	// dispatchPR PRBlockReason case 1 (the two gates share the
+	// same readiness snapshot, so the policy stays consistent).
+	if snap.Branch == "" {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			"❌ detached HEAD — checkout a named branch first"), nil
+	}
+
 	// 2. Nothing to do. Note: a branch with no upstream at all
 	// deliberately returns HasNothingToPush=false here (the
 	// branch was never published; programmaticPush handles the
@@ -129,6 +140,15 @@ func dispatchPush(
 		if err != nil {
 			return reply(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ re-read worktree status after agent: %v", err)), nil
+		}
+		if snap == nil {
+			// Same contract as the entry path (line 68): CollectReadiness
+			// returns (nil, nil) on git error / empty repo — neither state
+			// is one we can push from. Surface a refusal rather than
+			// nil-derefing on the next snap.* call.
+			return reply(ctx, cs.Emitter(), chatID, messageID,
+				"❌ cannot read worktree git status — refusing to push\n"+
+					"hint: ensure the worktree is inside a git repo with at least one commit"), nil
 		}
 		// Re-check conflict gate. Pushing must never happen if the
 		// agent left unmerged entries.

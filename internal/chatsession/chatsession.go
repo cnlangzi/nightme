@@ -611,11 +611,6 @@ func (cs *ChatSession) emitMessageDropped(msg Message) {
 // subscribers register via PromptEndBus().Subscribe. See
 // docs/feat/F-54-event-bus.md for the migration rationale.
 
-// Channel returns the IM channel bound to this chat session.
-// Returns nil if no channel was bound at New() time (test path)
-// or if WithChannel was never called.
-//
-// Lock-free: channel is set once and never mutated.
 // Emitter returns the outbound chokepoint bound to this chat
 // session. nil when no Emitter has been wired yet (e.g. before
 // Manager.WithEmitter has been called or before GetOrCreate has
@@ -630,13 +625,6 @@ func (cs *ChatSession) Emitter() outbound.Emitter {
 	return cs.emitter
 }
 
-// WithChannel binds a Channel to this ChatSession. Returns
-// the receiver for chaining. Used by Manager.GetOrCreate via
-// the emitter path; not normally called by commands.
-//
-// Idempotent: subsequent calls with the same Channel are no-ops;
-// calls with a different Channel panic — a chat's channel binding
-// is immutable for the daemon's lifetime.
 // WithEmitter binds the outbound chokepoint to this chat session.
 // Set once and never mutated; subsequent calls with the same
 // emitter are no-ops, a different emitter panics.

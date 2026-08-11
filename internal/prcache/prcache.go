@@ -28,18 +28,27 @@
 //	Per stamp
 //	  → cache.MaybeRefresh(as.Cwd, deps) (sync, no I/O)
 //	  → cache.PR()                          (sync, no I/O)
-//	Per AgentSession teardown (graceful path)
-//	  → in-flight refresh goroutine, if any, is allowed to
-//	    complete on its own — bounded by the 3s prober
-//	    timeout and the cache TTL (60s). Refresh hits are
-//	    stateless (deps.Git.Run + gtw.CollectPR), so an
-//	    orphan goroutine cannot corrupt runtime state; it
-//	    just wastes a few HTTP round-trips.
+//	Per AgentSession teardown
+//	  → Cache.Cancel is defined but NOT currently wired into
+//	    chatsession / agentsession teardown — the in-flight
+//	    refresh goroutine, if any, is allowed to complete on
+//	    its own (bounded by the prober timeout + cache TTL).
+//	    This is intentional: refresh work is stateless
+//	    (deps.Git.Run + gtw.CollectPR), so an orphan goroutine
+//	    after the AgentSession is gone cannot corrupt runtime
+//	    state — it just wastes a few HTTP round-trips. If a
+//	    future caller wants strict cancellation, wire Cancel
+//	    into the AS reap path; the method exists for that
+//	    reason.
 //	Daemon shutdown
-//	  → registry.CloseAll() (drops every in-flight refresh
-//	    goroutine before the daemon exits)
+//	  → registry has no CloseAll; the OS reclaims in-flight
+//	    goroutines on process exit. /gtw pr's success path
+//	    calls Registry.Invalidate(asID) to force the next
+//	    stamp to refresh (otherwise the new PR number would
+//	    only surface after the 60s TTL).
 //	/gtw pr success
-//	  → cache.Invalidate() (force the next stamp to refresh)
+//	  → registry.Invalidate(asID) → cache.Invalidate() (force
+//	    the next stamp to refresh)
 package prcache
 
 import (
@@ -61,6 +70,25 @@ import (
 // burst doesn't fork a refresh per message.
 const TTL = 60 * time.Second
 
+// failureBackoff bounds how long a failed refresh is trusted
+// before another attempt is allowed. refresh() pushes this
+// deadline onto expiresAt when CurrentBranch / CollectPR
+// fails or returns empty — without it, a permanently-broken
+// state (no git, detached HEAD, missing origin, gh auth
+// expired) would fork a fresh goroutine on every single
+// stamp, since expiresAt would otherwise stay zero (never
+// updated) and MaybeRefresh would consider the cache stale
+// forever.
+//
+// 5 s is a reasonable compromise: short enough that a
+// transient `git` failure (e.g. mid-checkout race) recovers
+// within a handful of stamps; long enough that a workspace
+// that simply has no git PR / MR stops trying. /gtw pr's
+// `Invalidate` path resets expiresAt to zero so a freshly
+// created PR surfaces on the next stamp even inside the
+// backoff window.
+const failureBackoff = 5 * time.Second
+
 // Cache holds the most-recently-known open PR / MR associated
 // with one AgentSession's current head branch. Safe for
 // concurrent PR() / MaybeRefresh() / Invalidate() / Cancel()
@@ -71,18 +99,27 @@ const TTL = 60 * time.Second
 //	pr        — the most-recently-known PR (or nil when no
 //	            PR has ever been successfully resolved for
 //	            this branch). The footer render path treats
-//	            nil as "omit Line 4".
+//	            nil as "omit the PR tail segment".
 //	branch    — the head-branch name pr was resolved
-//	            against. Refresh drops its result if the
-//	            branch on disk no longer matches this value
-//	            (a defensive check; in the runtime this is
-//	            pure belt-and-suspenders — agentsession.Cwd
-//	            is immutable post-construction).
+//	            against. The current refresh writes whatever
+//	            branch `git symbolic-ref` reports from the
+//	            passed-in `dir`, overwriting this field
+//	            unconditionally — a previous branch's PR is
+//	            replaced when the user switches worktrees
+//	            mid-TTL. agentsession.Cwd is immutable
+//	            post-construction, so in the runtime this
+//	            "switch" can only happen across distinct
+//	            AgentSessions (each with its own Cache via
+//	            Registry); the overwrite is mostly defensive.
 //	expiresAt — wall-clock deadline beyond which PR() treats
 //	            the cache as stale and the next stamp's
 //	            MaybeRefresh spawns a refresh. Zero value =
 //	            "never populated yet" — the first call kicks
-//	            the first refresh.
+//	            the first refresh. A small `failureBackoff`
+//	            (5 s) is set on the same field when the
+//	            refresh fails (no git / detached HEAD / etc.)
+//	            so a permanently-broken state doesn't fork a
+//	            refresh goroutine on every stamp.
 //	inflight  — true while a refresh goroutine is running.
 //	            Prevents stamp bursts from forking N
 //	            parallel `gh pr list` calls. Set / cleared
@@ -163,18 +200,19 @@ func (c *Cache) MaybeRefresh(dir string, deps gtw.HandlerDeps) {
 // then hand off to gtw.CollectPR for the network lookup. The
 // result lands back in the cache under mu.
 //
-// Branch-drift protection: between the moment MaybeRefresh
-// decided "inflight = false → spawn" and the moment this
-// goroutine acquires mu to write back, the underlying
-// cwd could in principle have moved (test scenario; the
-// runtime doesn't currently change AgentSession.Cwd, but
-// the API surface allows for it). We re-read the
-// parsed-branch from the disk state via `git symbolic-ref
-// --short HEAD` (synchronously, via gtw.CurrentBranch) and
-// compare it against the value cached at spawn time. If
-// they diverge we drop the result — the next stamp's
-// MaybeRefresh spawns a fresh refresh against the new
-// branch.
+// Earlier revisions had a "branch-drift guard" that dropped
+// the result if `c.branch` (cached from a prior refresh) no
+// longer matched the branch the goroutine just resolved. That
+// guard was solving a problem that doesn't exist (the
+// goroutine reads the branch via `git symbolic-ref` from the
+// SAME `dir` the stamp path used — there's no race window
+// where the disk could move) and was creating a real bug:
+// when the user actually switched branches between refresh
+// windows, the guard would reject the new branch's PR but
+// leave `c.branch` and `expiresAt` unchanged, so the cache
+// would either serve the old branch's stale PR (until TTL
+// expired) or fork a fresh refresh every stamp (if expiresAt
+// was still zero). Removed.
 //
 // Cancelled mid-flight (Cache.Cancel): exits silently after
 // noticing ctx.Err(). The inflight flag is reset by the
@@ -206,6 +244,17 @@ func (c *Cache) refresh(ctx context.Context, dir string, deps gtw.HandlerDeps) {
 	}
 	branch, err := gtw.CurrentBranch(ctx, dir, deps.Git)
 	if err != nil || branch == "" {
+		// Push a small back-off so a permanently-broken state
+		// (no git, detached HEAD, etc.) doesn't fork a fresh
+		// refresh on every stamp. Without this, the next
+		// stamp's MaybeRefresh sees expiresAt still in the
+		// past and spawns again — stamp storm. 5 s is short
+		// enough that a transient `git` failure recovers
+		// quickly, long enough that a non-git workspace
+		// stops trying.
+		c.mu.Lock()
+		c.expiresAt = time.Now().Add(failureBackoff)
+		c.mu.Unlock()
 		return
 	}
 	if ctx.Err() != nil {
@@ -217,14 +266,6 @@ func (c *Cache) refresh(ctx context.Context, dir string, deps gtw.HandlerDeps) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// Branch-drift guard: drop the result if the cache was
-	// scheduled against a different branch than the one
-	// currently on disk. Invalidating would be a stronger
-	// semantic, but dropping is cheaper and self-healing on
-	// the next stamp.
-	if c.branch != "" && c.branch != branch {
-		return
-	}
 	c.pr = pr
 	c.branch = branch
 	c.expiresAt = time.Now().Add(TTL)

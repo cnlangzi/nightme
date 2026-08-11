@@ -64,8 +64,11 @@ type IssueAttachment struct {
 }
 
 // PR is the minimal open pull/merge-request shape the footer
-// needs to render Line 4 ("🔗: [#N](url)"). Mirrors Issue but
-// trimmed to the three fields the card actually consumes.
+// needs to render its PR reference (`[#N](url)` appended to the
+// workspace footer line; markdown link — clickable blue anchor
+// in lark_md, with the rest of the workspace row staying in the
+// <font color='grey'> wrap). Mirrors Issue but trimmed to the
+// three fields the card actually consumes.
 //
 // Number — the platform-local id (GitHub pr#N, GitLab mr!N).
 // URL    — the human-facing web URL returned by gh/glab at
@@ -154,9 +157,10 @@ type GitProvider interface {
 	// common case — most chat sessions don't have a PR open
 	// yet, and forcing the footer caller to discriminate
 	// "network failed" from "no PR exists" every stamp would be
-	// the wrong trade-off. The footer just omits Line 4 in both
-	// cases; the only thing that surfaces PR lookup failures
-	// is the warn-level log the runtime emits when applicable.
+	// the wrong trade-off. The footer just omits the PR tail
+	// segment in both cases; the only thing that surfaces PR
+	// lookup failures is the warn-level log the runtime emits
+	// when applicable.
 	GetPR(ctx context.Context, owner, repo, head string) (*PR, error)
 }
 

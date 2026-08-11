@@ -210,25 +210,24 @@ func buildResultCardJSON(content string, footerLines []string) (string, error) {
 // grey-XXX numbered family (grey-100 … grey-1000). The markdown
 // approach is simpler and matches the canonical reference impl.
 //
-// Markdown link bypass (footer Line 4): lines containing
-// markdown link syntax (`[#N](url)`) skip the <font color='grey'>
-// wrap so Feishu's lark_md parser renders `[#N](url)` as a
-// clickable hyperlink. Empirically some lark_md clients strip
-// or mangle link syntax when it's nested inside <font>
-// wrapper tags (the link target gets re-parsed as plain text
-// inside the styled run). The detection is intentionally
-// substring-based — `](` is unambiguous in our footer lines:
-// it only appears as `[...](...)` from formatPRLine. Adding
-// more link-bearing lines later can extend the detection
-// (or pin it to the `🔗:` prefix specifically). Test coverage
-// in result_render_test.go::TestCardFooterElements_LinkLineUnwrapped.
-//
 // Format invariants:
 //   - <hr> at index 0
 //   - exactly one <markdown> element after hr, with one line of
 //     content per footerLines entry (joined by \n)
-//   - lines without link syntax are wrapped in <font color='grey'>...</font>
-//   - lines with link syntax are emitted verbatim
+//   - every line wrapped in <font color='grey'>...</font>
+//
+// Earlier revisions had a substring `](` bypass that unwrapped
+// lines containing markdown link syntax to "rescue" the link.
+// That heuristic was solving a problem that doesn't exist in
+// current lark_md (verified 2026-08 against the live client, see
+// pr_render_compare_test.go for the A/B harness and verification
+// history); the PR tile has since been simplified back to plain
+// `#N` (no link). The heuristic also had a brittleness problem —
+// a branch name like `foo](bar` would silently strip the grey
+// wrap from the wrong line. Removed; not coming back. If a future
+// footer line ever needs to surface un-styled content (a raw
+// snippet, an embedded image), render it as its own card element
+// rather than retrofitting the heuristic.
 func cardFooterElements(footerLines []string) []map[string]any {
 	if len(footerLines) == 0 {
 		return nil
@@ -237,13 +236,6 @@ func cardFooterElements(footerLines []string) []map[string]any {
 	for i, line := range footerLines {
 		if i > 0 {
 			content.WriteByte('\n')
-		}
-		if strings.Contains(line, "](") {
-			// Line 4 case (or any future link-bearing line).
-			// Skip the grey wrapper so the lark_md parser
-			// sees the link syntax intact.
-			content.WriteString(line)
-			continue
 		}
 		content.WriteString("<font color='grey'>")
 		content.WriteString(line)

@@ -509,18 +509,19 @@ type SessionContext struct {
 	//     stamp, before the background goroutine has
 	//     completed)
 	//
-	// The footer render path treats nil as "omit Line 4" —
-	// PR lookup failures and "no PR yet" look identical to
-	// the user, which is the right trade-off for a chat-side
-	// decoration. The only observable difference is at debug
-	// log level.
+	// The footer render path treats nil as "omit the trailing
+	// `#N` PR segment on the workspace line" — PR lookup
+	// failures and "no PR yet" look identical to the user,
+	// which is the right trade-off for a chat-side decoration.
+	// The only observable difference is at debug log level.
 	//
 	// Reads are synchronous (the cache is a struct field); the
 	// underlying refresh goroutine does its own `gh pr list` /
 	// `glab mr list` round-trip and writes back asynchronously.
 	// Invalidation when /gtw pr creates a new PR happens via
-	// prcache.Cache.Invalidate, called by dispatchPR after
-	// a successful CreatePR.
+	// prcache.Registry.Invalidate (which calls Cache.Invalidate
+	// on the relevant AgentSession's cache), triggered by
+	// dispatchPR after a successful CreatePR.
 	PullRequest *gtw.PR
 
 	// Usage is the per-turn snapshot from the bridge event that

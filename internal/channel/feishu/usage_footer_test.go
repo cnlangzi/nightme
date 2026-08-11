@@ -711,17 +711,22 @@ func TestFormatSessionFooterLines_NoGitNoUsage(t *testing.T) {
 	}
 }
 
-// TestFormatSessionFooterLines_PRLine_Populated covers Line 4
-// when a PR has been resolved for the head branch. The line
-// uses markdown link syntax ([#N](url)) so cardFooterElements
-// can hand it to the lark_md parser untouched.
+// TestFormatSessionFooterLines_PRSegment_AppendedToGitLine
+// pins the layout: when a PR has been resolved and a git line
+// is rendered, the PR reference folds into the git line as its
+// LAST segment, using markdown link syntax `[#N](url)` (no 🔗:
+// prefix). Empirically verified on current Feishu (2026-08,
+// see pr_render_compare_test.go): lark_md renders `#N` as a
+// clickable blue anchor while the rest of the workspace row
+// stays in the <font color='grey'> wrap.
 //
-// ASCII-only invariant still holds (the line is header `🔗:`
-// followed by `#[id](url)`, where [id] and url are the
-// footer-bound characters).
-func TestFormatSessionFooterLines_PRLine_Populated(t *testing.T) {
+// PR without git (no Workspace / no GitStatus) drops with
+// the git line — see TestFormatSessionFooterLines_PRSegment_NoGitLine.
+func TestFormatSessionFooterLines_PRSegment_AppendedToGitLine(t *testing.T) {
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
+		Workspace: "/home/devin/code/nightme",
+		GitStatus: &gtw.GitStatusSnapshot{Branch: "fix-x", HasUpstream: true},
 		PullRequest: &gtw.PR{
 			Number: 111,
 			URL:    "https://github.com/cnlangzi/nightme/pull/111",
@@ -731,18 +736,49 @@ func TestFormatSessionFooterLines_PRLine_Populated(t *testing.T) {
 	got := formatSessionFooterLines(ctx)
 	want := []string{
 		"🤖: claude · opus-4-5",
-		"🔗: [#111](https://github.com/cnlangzi/nightme/pull/111)",
+		"📁: code/nightme · ⎇ fix-x · [#111](https://github.com/cnlangzi/nightme/pull/111)",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v\nwant %v", got, want)
 	}
 }
 
-// TestFormatSessionFooterLines_PRLine_NilOrInvalid confirms
-// the omit rules: nil PR / Number <= 0 / empty URL all drop
-// the line entirely. "No PR" must look identical to "lookup
-// failed" — the right trade-off for a chat-side decoration.
-func TestFormatSessionFooterLines_PRLine_NilOrInvalid(t *testing.T) {
+// TestFormatSessionFooterLines_PRSegment_NoGitLine confirms
+// that the PR number is NOT promoted to its own line when the
+// git line drops (no Workspace / no GitStatus / detached-HEAD-
+// outside-repo edge cases). A stale PR cache must not surface
+// on a row of its own — the footer stays at the canonical
+// identity / usage stack. Test reproduces the case by giving
+// a PR but no Workspace, which is the standard
+// "transient / not in a git repo" configuration.
+func TestFormatSessionFooterLines_PRSegment_NoGitLine(t *testing.T) {
+	ctx := &gateway.SessionContext{
+		Agent: "claude", Model: "opus-4-5",
+		PullRequest: &gtw.PR{
+			Number: 111,
+			URL:    "https://github.com/cnlangzi/nightme/pull/111",
+			State:  "open",
+		},
+	}
+	got := formatSessionFooterLines(ctx)
+	want := []string{"🤖: claude · opus-4-5"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v\nwant %v", got, want)
+	}
+	// Stale PR cache must not surface standalone on the
+	// identity row. The PR number renders as plain `#N` —
+	// check the literal, not an emoji substring.
+	if strings.Contains(got[0], "#111") {
+		t.Errorf("footer identity line %q absorbed PR #111 with no git line — must not surface standalone", got[0])
+	}
+}
+
+// TestFormatSessionFooterLines_PRSegment_NilOrInvalid covers
+// the omit rules for the PR tail: nil PR / Number <= 0 / empty
+// URL all leave the git line without the trailing `[#N](url)`
+// segment. "No PR yet" must look identical to "lookup failed"
+// — chat-side decoration is the wrong place to discriminate them.
+func TestFormatSessionFooterLines_PRSegment_NilOrInvalid(t *testing.T) {
 	tests := []struct {
 		name string
 		pr   *gtw.PR
@@ -755,39 +791,48 @@ func TestFormatSessionFooterLines_PRLine_NilOrInvalid(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := &gateway.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
+				Workspace: "/home/devin/code/nightme",
+				GitStatus: &gtw.GitStatusSnapshot{Branch: "fix-x", HasUpstream: true},
 				PullRequest: tc.pr,
 			}
 			got := formatSessionFooterLines(ctx)
-			// PR omitted → no Line 4 in the output.
-			for _, line := range got {
-				if strings.Contains(line, "🔗:") {
-					t.Errorf("footer lines %v contain 🔗:, want omitted when %s", got, tc.name)
-				}
+			want := []string{
+				"🤖: claude · opus-4-5",
+				"📁: code/nightme · ⎇ fix-x",
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("got %v\nwant %v", got, want)
 			}
 		})
 	}
 }
 
-// TestFormatSessionFooterLines_PRLine_CoexistsWithGitLines
-// confirms Line 4 sits AFTER the git line (Line 3) when
-// both are populated. Order matters: identity / usage /
-// workspace / PR is the canonical footer stack.
-func TestFormatSessionFooterLines_PRLine_CoexistsWithGitLines(t *testing.T) {
+// TestFormatSessionFooterLines_PRSegment_DirtyCountsBetween
+// pins the segment order: workspace → branch → dirty counts
+// → PR. The PR must be the last segment so the line reads
+// as "where am I → how dirty → what's the open PR", not
+// "where am I → what's the PR → how dirty".
+func TestFormatSessionFooterLines_PRSegment_DirtyCountsBetween(t *testing.T) {
 	ctx := &gateway.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
 		Workspace: "/home/devin/code/nightme",
-		GitStatus: &gtw.GitStatusSnapshot{Branch: "fix-x", HasUpstream: true},
+		GitStatus: &gtw.GitStatusSnapshot{
+			Branch:      "fix-x",
+			Uncommitted: 3,
+			Untracked:   2,
+			HasUpstream: true,
+			AheadOfRemote: 1,
+		},
 		PullRequest: &gtw.PR{
-			Number: 7,
-			URL:    "https://example/pr/7",
+			Number: 42,
+			URL:    "https://example/pr/42",
 			State:  "open",
 		},
 	}
 	got := formatSessionFooterLines(ctx)
 	want := []string{
 		"🤖: claude · opus-4-5",
-		"📁: code/nightme · ⎇ fix-x",
-		"🔗: [#7](https://example/pr/7)",
+		"📁: code/nightme · ⎇ fix-x · ↑ 3 · ? 2 · ⇡ 1 · [#42](https://example/pr/42)",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v\nwant %v", got, want)

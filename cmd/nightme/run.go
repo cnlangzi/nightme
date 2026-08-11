@@ -351,17 +351,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	gtwMgr := gtw.NewManager()
 	gtwMgr.SetHandlerDeps(gtwDeps)
 
-	// Per-AgentSession PR / MR cache. Owned at runtime scope
-	// (NOT on AgentSession itself — the import cycle: gtw →
-	// chatsession → agentsession prevents agentsession from
-	// importing gtw, so a separate leaf package keeps the
-	// prcache.Registry here in cmd/nightme where deps already
-	// live). Stamp path looks up the cache by AgentSession.ID
-	// on every OutboundMessage; /gtw pr success calls
-	// Invalidate on the corresponding cache so the new URL
-	// surfaces on the next stamp rather than after the 60s
-	// TTL.
-
 	// F-XX: chatID → Channel 解析器。Manager.GetOrCreate 在新建 cs
 	// 时在锁外调它,把 Channel 一次性绑进 cs.channel 字段;之后 cs
 	// 自持 Channel,handler / 命令通过 cs.Channel() 拿。
@@ -1185,16 +1174,19 @@ func sessionContextInto(out *gateway.OutboundMessage, s *agentsession.AgentSessi
 	// result for this stamp, but it would make the gate-vs-
 	// literal share a single allocation instead of two.
 	//
-	// prReg is nil-safe: a hand-wired debug build that skips
-	// the registry construction still gets a fully-functional
-	// stamp path with PullRequest == nil. The production
-	// runtime always passes a non-nil prReg; the guard is
-	// purely defensive.
+	// Nil-safe on the prReg dependency: a hand-wired debug
+	// build that skips registry construction still gets a
+	// fully-functional stamp path with PullRequest == nil.
+	// The guard here is on prReg (which CAN be nil — only the
+	// runtime construction wires a real Registry); GetOrCreate
+	// itself never returns nil once we have a non-nil registry.
+	// Test pinned by TestSessionContextInto_NilPRRegistryLeavesEmpty.
 	var prRef *gtw.PR
 	if prReg != nil {
-		prCache := prReg.GetOrCreate(s.ID)
-		prCache.MaybeRefresh(s.Cwd, deps)
-		prRef = prCache.PR()
+		if prCache := prReg.GetOrCreate(s.ID); prCache != nil {
+			prCache.MaybeRefresh(s.Cwd, deps)
+			prRef = prCache.PR()
+		}
 	}
 
 	// F-55 fix: out.Usage is set by gateway.Translate from the

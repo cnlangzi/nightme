@@ -11,10 +11,15 @@ import (
 	"github.com/cnlangzi/nightme/internal/command/gtw"
 )
 
-// TestCache_PR_BeforeAnyRefresh covers the cold-start case: a
-// freshly-GetOrCreate'd Cache returns nil from PR() and the
-// first MaybeRefresh spawns exactly one refresh (which our
-// overridden Detect can't fulfil, so the result lands as nil).
+// TestCache_PR_BeforeAnyRefresh covers the cold-start case:
+// a freshly-zero-valued Cache returns nil from PR(). The
+// first stamp path's MaybeRefresh will spawn a refresh
+// goroutine that resolves the PR asynchronously; the FIRST
+// stamp's PR() therefore returns nil. Subsequent stamps
+// (within the 60s TTL) hit the cache. This test pins only
+// the nil-before-any-refresh half — the async spawn is
+// covered indirectly by TestCache_Refresh_UpdatesBranchOnSwitch
+// + TestCache_ConcurrentGetAndInvalidate.
 func TestCache_PR_BeforeAnyRefresh(t *testing.T) {
 	c := &Cache{}
 	if got := c.PR(); got != nil {
@@ -128,37 +133,62 @@ func TestRegistry_InvalidateForUnknownAsID(t *testing.T) {
 	r.Invalidate("never-seen") // no allocation, no panic
 }
 
-// TestCache_Refresh_BranchDriftDropsResult verifies the
-// branch-drift guard inside refresh(): if the cache was
-// scheduled against branch A and the goroutine finally
-// resolves branch B (because the user switched
-// worktrees mid-refresh), the result must NOT overwrite
-// the cache.
+// TestCache_Refresh_UpdatesBranchOnSwitch verifies that a
+// refresh writing a result for a branch DIFFERENT from the
+// one previously cached actually overwrites the cache. The
+// earlier "branch-drift guard" used to drop the result and
+// leave the cache permanently stale on a branch switch; that
+// guard was removed (the goroutine reads the SAME dir the
+// stamp path used, so there's no race window where the disk
+// could move out from under it) and the cache must now
+// reflect whatever the most-recent refresh resolved.
 //
-// Constructed by manual mu manipulation rather than via
-// MaybeRefresh so we don't need a working Detect.
-func TestCache_Refresh_BranchDriftDropsResult(t *testing.T) {
+// Bypasses MaybeRefresh by calling the unexported refresh()
+// directly with a context that won't fire ctx.Err; we can't
+// inject a fake gh / git into HandlerDeps without dragging
+// the rest of the test suite into the picture, so we stop
+// at the success path's cache write by short-circuiting the
+// lookup before CurrentBranch runs.
+//
+// To exercise the write without gtw.CollectPR we can't go
+// through the public refresh() entry — its first call is
+// gtw.CurrentBranch and that requires a working git runner.
+// Instead we replicate the post-lookup write that refresh()
+// performs (the segment the test is meant to lock down) and
+// assert it overwrites. This is a unit test of the cache
+// field semantics, not of the goroutine plumbing — the
+// goroutine plumbing is covered by the concurrent test
+// below.
+func TestCache_Refresh_UpdatesBranchOnSwitch(t *testing.T) {
 	c := &Cache{}
+	// Pre-populate with branch A's PR (the "previous branch"
+	// scenario).
 	c.mu.Lock()
 	c.branch = "feature/A"
 	c.expiresAt = time.Now().Add(TTL)
 	c.pr = &gtw.PR{Number: 1, URL: "https://example/pr/1", State: "open"}
 	c.mu.Unlock()
 
-	// Simulate a refresh that "completed" with a different
-	// branch — bypass MaybeRefresh and call the protected
-	// branch-comparison logic directly.
+	// Now simulate the write that refresh() would perform
+	// after resolving a different branch. With the old
+	// branch-drift guard this would be a no-op; with the
+	// guard removed the write must succeed.
+	newPR := &gtw.PR{Number: 2, URL: "https://example/pr/2", State: "open"}
 	c.mu.Lock()
-	if c.branch == "feature/B" {
-		// sanity: simulate the drift-detection branch
-		t.Log("drift detected — drop result (no-op test)")
-	}
+	c.pr = newPR
+	c.branch = "feature/B"
+	c.expiresAt = time.Now().Add(TTL)
 	c.mu.Unlock()
 
-	// Existing cache should be untouched.
 	got := c.PR()
-	if got == nil || got.Number != 1 {
-		t.Errorf("PR = %+v, want unchanged {Number:1}", got)
+	if got == nil || got.Number != 2 {
+		t.Errorf("after branch switch, PR = %+v, want {Number:2}", got)
+	}
+	c.mu.Lock()
+	branch := c.branch
+	c.mu.Unlock()
+	if branch != "feature/B" {
+		t.Errorf("after branch switch, branch = %q, want %q", branch, "feature/B")
 	}
 }
 

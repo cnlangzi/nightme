@@ -237,8 +237,9 @@ func CollectPR(ctx context.Context, dir, head string, deps HandlerDeps) (*PR, er
 	remoteURL, err := RemoteOriginURL(ctx, dir, deps.Git)
 	if err != nil || remoteURL == "" {
 		// Not a git repo, or remote `origin` not configured.
-		// Same fallback as detectP R's caller in dispatchPR:
-		// footer simply omits Line 4 in this case.
+		// Same fallback as detectPR's caller in dispatchPR:
+		// the workspace footer simply omits the PR-number
+		// tail in this case.
 		return nil, nil
 	}
 	detect := deps.Detect
@@ -252,8 +253,9 @@ func CollectPR(ctx context.Context, dir, head string, deps HandlerDeps) (*PR, er
 	prov, err := detect(ctx, remoteURL, prober)
 	if err != nil || prov == nil {
 		// Detection failed (invalid URL / unsupported host /
-		// probe timeout). Fail-soft: footer omits Line 4 and
-		// the next refresh will retry.
+		// probe timeout). Fail-soft: the workspace footer
+		// omits the PR-number tail and the next refresh will
+		// retry.
 		return nil, nil
 	}
 	owner, repo, err := ParseRepoOwner(remoteURL)

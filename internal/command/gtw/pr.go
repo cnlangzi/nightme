@@ -185,13 +185,14 @@ func dispatchPR(
 
 	// Invalidate the footer's PR cache for every AgentSession
 	// in this chat whose Cwd is inside the worktree we just
-	// opened the PR for. Without this, the footer Line 4
-	// ("🔗: [#N](url)") would still render the previous
-	// state — either nil or a stale URL from a branch we
-	// last had a PR on — until the next 60s TTL expires.
-	// Iterating the pool + checking Cwd scopes the blow-up:
-	// other chat sessions and unrelated worktrees are not
-	// re-fetched.
+	// opened the PR for. Without this, the workspace footer
+	// line's PR reference (rendered as `[#N](url)` at the end
+	// of the 📁: row; clickable blue link in lark_md) would
+	// still render the previous state — either absent or a
+	// stale URL from a branch we last had a PR on — until the
+	// next 60s TTL expires. Iterating the pool + checking Cwd
+	// scopes the blow-up: other chat sessions and unrelated
+	// worktrees are not re-fetched.
 	if deps.PRInvalidator != nil {
 		for _, as := range cs.Pool() {
 			if as == nil || as.Cwd == "" {

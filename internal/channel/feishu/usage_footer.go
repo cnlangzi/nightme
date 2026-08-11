@@ -273,49 +273,61 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 		}
 	}
 
-	// Line 3 (F-48): git tracking — workspace · branch · dirty counts.
-	// formatGitLine returns "" when ctx.Workspace is empty, ctx.GitStatus
-	// is nil, or all sub-segments omit — in which case we drop the line.
+	// Line 3 (F-48 + F-49): git tracking — workspace · branch ·
+	// dirty counts · PR number. formatGitLine folds the PR / MR
+	// number in as its last segment (when present) so the footer
+	// stays at three lines regardless of PR state — see the
+	// formatGitLine doc for why we keep the PR number on the
+	// workspace row rather than on its own line. Returns ""
+	// when ctx.Workspace is empty, ctx.GitStatus is nil, or all
+	// sub-segments omit — in which case the entire line drops
+	// (including the PR number, by design: a PR number without a
+	// git workspace is a stale cache state we don't surface on
+	// its own row).
 	if gl := formatGitLine(ctx); gl != "" {
 		lines = append(lines, gl)
-	}
-
-	// Line 4: PR / MR link. formatPRLine returns "" when
-	// ctx.PullRequest is nil — i.e. no PR has been resolved for
-	// the current head branch yet. In that case the line is
-	// dropped, so first-stamp / no-PR chats render no different
-	// from before. Rendered with markdown link syntax (`[#N](url)`)
-	// so cardFooterElements' <markdown> element surfaces the
-	// #N as a clickable hyperlink. The plain-text fallback
-	// (formatSessionFooter) emits the same line — platforms
-	// that render markdown in their text path (Feishu, most IM)
-	// honor the link; pure-text fallback renders the literal.
-	if pl := formatPRLine(ctx); pl != "" {
-		lines = append(lines, pl)
 	}
 
 	return lines
 }
 
-// formatPRLine renders footer line 4 — the per-stamp GitHub /
-// GitLab PR (or MR) reference — and returns "" when there is
-// nothing meaningful to show.
+// formatPRSegment renders the PR / MR reference as the LAST
+// segment of the workspace footer line (folded in from a
+// dedicated line that earlier revisions used).
+// Returns "" when there is nothing meaningful to show — caller
+// drops the trailing segment silently so first-stamp / no-PR
+// chats render no different from before.
 //
 // Output (when non-empty):
 //
-//	🔗: [#42](https://github.com/cnlangzi/nightme/pull/42)
+//	[#42](https://github.com/cnlangzi/nightme/pull/42)
 //
-// Returns "" when ctx == nil or ctx.PullRequest == nil. The
-// "no PR yet" case collapses cleanly to "omit Line 4" —
-// indistinguishable from a failed refresh, which matches the
-// chat-decorator trade-off (footer is non-critical metadata).
+// The [#N](url) form is markdown link syntax. lark_md renders
+// just `#N` as the link text (with platform-native link colour
+// and click behaviour) while the rest of the workspace row
+// stays inside the surrounding <font color='grey'> wrap.
+// Empirically verified on current Feishu (2026-08, see
+// pr_render_compare_test.go for the historical A/B harness) —
+// lark_md handles `[..](..)` inside <font> correctly. The
+// earlier cardFooterElements `](` bypass heuristic was removed
+// because it was solving a problem that doesn't exist.
 //
-// The [#N](url) form is markdown link syntax. cardFooterElements
-// detects this pattern and emits the line without the
-// <font color='grey'> wrapper so Feishu's lark_md parser
-// honors the link as a clickable anchor rather than treating
-// it as plain grey text.
-func formatPRLine(ctx *gateway.SessionContext) string {
+// No `🔗:` emoji+colon prefix on purpose: the workspace row's
+// 📁: prefix already establishes "this row is git metadata",
+// and a secondary emoji on the PR tile was decorative noise.
+// The link text itself (`#N`) is enough for a reader to
+// recognise "this is the open PR for the current branch" —
+// and it's clickable, which is the actual signal of "this is
+// a link". Verified against the live Feishu client (2026-08,
+// via the historical `cmd/send-test-cards/` harness that was
+// removed in favour of pr_render_compare_test.go).
+//
+// Returns "" when ctx == nil or ctx.PullRequest is nil /
+// Number <= 0 / URL empty. The "no PR yet" case is
+// indistinguishable from "lookup failed" by design — chat-side
+// decoration is the wrong place to surface a transient
+// network / auth failure.
+func formatPRSegment(ctx *gateway.SessionContext) string {
 	if ctx == nil {
 		return ""
 	}
@@ -323,7 +335,7 @@ func formatPRLine(ctx *gateway.SessionContext) string {
 	if pr == nil || pr.Number <= 0 || pr.URL == "" {
 		return ""
 	}
-	return fmt.Sprintf("🔗: [#%d](%s)", pr.Number, pr.URL)
+	return fmt.Sprintf("[#%d](%s)", pr.Number, pr.URL)
 }
 
 // formatSessionFooter joins formatSessionFooterLines with "\n"
@@ -458,21 +470,38 @@ func formatWorkspacePath(absPath string) string {
 }
 
 // formatGitLine renders footer line 3 — the per-stamp git status
-// snapshot — and returns "" when there is nothing meaningful to
+// snapshot, with the PR / MR reference folded in as the LAST
+// segment — and returns "" when there is nothing meaningful to
 // show (no Workspace, no GitStatus, no git segment).
 //
-// Output (when non-empty):
+// Output (when non-empty, PR present):
+//
+//	📁: code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2 · [#42](url)
+//
+// Output (when non-empty, no PR yet / lookup failed):
 //
 //	📁: code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
 //
 // Omit rules (each segment is dropped independently; the line
 // itself is dropped when ALL segments would be empty):
 //
-//   - Workspace == ""           → entire line omitted
+//   - Workspace == ""           → entire line omitted (PR segment
+//     drops with it: PR without a git workspace is a stale
+//     cache state we don't surface on its own row)
 //   - ⎇ <branch|?>              → always present when line is shown
 //   - ↑ N (uncommitted)        → omitted when Uncommitted == 0
 //   - ? N (untracked)          → omitted when Untracked == 0
 //   - ⇡ N (unpushed)           → omitted when !HasUpstream OR AheadOfRemote == 0
+//   - [#N](url) (PR / MR)       → appended as last segment when
+//     ctx.PullRequest resolves to a usable shape; see
+//     formatPRSegment for the omit rules
+//
+// The PR reference was originally rendered on its own line
+// (a dedicated Line 4 below the workspace row); folding it in
+// here keeps the footer at three lines regardless of PR state
+// and lets the link read in context with the branch it's
+// tied to — `⎇ <branch> · [#N](url)` reads as a single
+// "branch + open PR" statement.
 //
 // Returns "" when ctx == nil or ctx.GitStatus == nil (caller
 // drops the line). Detached HEAD renders the branch segment as
@@ -517,6 +546,14 @@ func formatGitLine(ctx *gateway.SessionContext) string {
 	}
 	if ctx.GitStatus.HasUpstream && ctx.GitStatus.AheadOfRemote > 0 {
 		parts = append(parts, fmt.Sprintf("⇡ %d", ctx.GitStatus.AheadOfRemote))
+	}
+
+	// PR / MR tail — appended last so the line reads
+	// "workspace → branch → dirty counts → PR". See
+	// formatPRSegment doc for the omit rules and the
+	// plain-text / no-markdown-link rationale.
+	if pr := formatPRSegment(ctx); pr != "" {
+		parts = append(parts, pr)
 	}
 
 	return strings.Join(parts, " · ")

@@ -38,9 +38,11 @@ type DraftsMap interface {
 
 // HandlerDeps wires the side effects RunFix / HandleAction need.
 // PRInvalidator is the optional footer-cache invalidation hook
-// used by /gtw pr to refresh the footer Line 4 ("🔗: [#N](url)")
-// immediately after a successful CreatePR (otherwise the new
-// URL would only surface after the 60s cache TTL).
+// used by /gtw pr to refresh the workspace footer line's PR
+// reference (rendered as `[#N](url)` at the end of the 📁: row;
+// clickable blue link in lark_md) immediately after a successful
+// CreatePR (otherwise the new PR number would only surface after
+// the 60s cache TTL).
 //
 // Nil-safe across all callers: dispatchPR skips invalidation
 // when the runtime hasn't installed a registry (mostly in

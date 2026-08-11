@@ -14,6 +14,8 @@ package registry
 
 import (
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // AgentSessionEntry is the persisted form of one AgentSession.
@@ -63,6 +65,37 @@ type AgentSessionEntry struct {
 	LastRunAt     time.Time `json:"lastRunAt"`
 	ExitCode      *int      `json:"exitCode,omitempty"`
 	Model         string    `json:"model,omitempty"`
+	// InFlightMessages is the set of user messages this AgentSession
+	// has submitted but for which no KindPromptEnded has fired yet.
+	// Multi-message batches (1..N merged into one Prompt) produce
+	// len ≥ 1 here. Cleared on prompt end; preserved across crashes
+	// so restart can replay. omitempty: legacy entries without the
+	// field round-trip as nil (no migration needed).
+	InFlightMessages []InFlightMessageRef `json:"inFlightMessages,omitempty"`
+}
+
+// InFlightMessageRef is the persisted form of an in-flight user message.
+//
+// Used to replay un-acked messages after a daemon restart so the
+// agent's reply continues to attach to the original msg_id. The slice
+// is set when the owning AgentSession commits a Prompt and cleared
+// when the Prompt ends; if a Prompt ends without clearing (process
+// died without firing the prompt-end hook), the slice is replayed
+// as-is on restart and the underlying agent decides how to handle
+// the duplicate.
+//
+// Carries only the fields needed to reconstruct an
+// agentsession.Message on replay; runtime state (Stage / PromptID)
+// is intentionally omitted — it lives in-memory only.
+type InFlightMessageRef struct {
+	// ID is the channel-native message id (= agentsession.Message.ID
+	// = EnrichedEvent.UserMsgID).
+	ID string `json:"id"`
+	// Blocks is the structured content the agent will receive.
+	// Preserved verbatim from the inbound message.
+	Blocks []agent.ContentBlock `json:"blocks"`
+	// ReceivedAt is when the message entered nightme.
+	ReceivedAt time.Time `json:"receivedAt"`
 }
 
 // AgentSessionFileVersion is the on-disk format version for

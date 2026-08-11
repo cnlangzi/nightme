@@ -134,6 +134,21 @@ type AgentSession struct {
 	// EventAgentReady lands.
 	model string
 
+	// inFlightMessages mirrors AgentSessionEntry.InFlightMessages.
+	// Set by Submit on successful SendBlocks, cleared by endPrompt.
+	// Strictly co-lives with currentPrompt: when currentPrompt is
+	// non-nil, inFlightMessages holds refs derived from p.Messages;
+	// when currentPrompt is nil, inFlightMessages is nil. This
+	// invariant is what makes restart-replay unambiguous.
+	inFlightMessages []registry.InFlightMessageRef
+
+	// persist is the registry callback used to write the current
+	// entry back to disk. Wired by attachAgentSessionLocked in the
+	// chat layer (it has access to asFile). nil is allowed — Submit
+	// and endPrompt silently skip persistence when unset (e.g.
+	// pre-attachment or test contexts).
+	persist func(*registry.AgentSessionEntry) error
+
 	// F-53: the in-flight Prompt for this AgentSession, or nil if
 	// no Prompt is currently active. Stored on AS (not on
 	// ChatSession) because a Prompt is bound to one specific AS
@@ -334,6 +349,9 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 	as.lastRunAt = e.LastRunAt
 	as.sessionID = e.SessionID
 	as.model = e.Model
+	if len(e.InFlightMessages) > 0 {
+		as.inFlightMessages = append([]registry.InFlightMessageRef(nil), e.InFlightMessages...)
+	}
 	// commit fix-6: any persisted "running" agent is actually dead
 	// after daemon restart (the process handle is in-memory only).
 	// Demote to Detached so the next LookupSelectedAgentSession will
@@ -750,6 +768,7 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	lastRun := as.lastRunAt
 	resume := as.sessionID
 	model := as.model
+	msgs := as.inFlightMessages
 	var ec *int
 	if as.exitCode != nil {
 		v := *as.exitCode
@@ -758,18 +777,19 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	as.asMu.RUnlock()
 
 	return &registry.AgentSessionEntry{
-		ID:            as.ID,
-		ChatSessionID: as.ChatSessionID,
-		Agent:         as.Agent,
-		Cwd:           as.Cwd,
-		PID:           as.PID(),
-		Status:        stat,
-		Args:          as.Args(),
-		SessionID:     resume,
-		CreatedAt:     as.createdAt,
-		LastRunAt:     lastRun,
-		ExitCode:      ec,
-		Model:         model,
+		ID:               as.ID,
+		ChatSessionID:    as.ChatSessionID,
+		Agent:            as.Agent,
+		Cwd:              as.Cwd,
+		PID:              as.PID(),
+		Status:           stat,
+		Args:             as.Args(),
+		SessionID:        resume,
+		CreatedAt:        as.createdAt,
+		LastRunAt:        lastRun,
+		ExitCode:         ec,
+		Model:            model,
+		InFlightMessages: msgs,
 	}
 }
 

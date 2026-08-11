@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -343,6 +344,30 @@ func (m *Manager) RestoreFromRegistry() error {
 		for _, as := range agentsByCS[entry.ID] {
 			cs.attachAgentSession(as)
 		}
+
+		// Replay any in-flight messages that the killed AS had been
+		// processing. Push directly into the queue (NOT via
+		// QueueUserMessage) — the AS isn't spawned yet, so an
+		// immediate TryFlush would race against the spawn. The
+		// next TryFlush call (triggered by /use or by the first
+		// user message after restore) will pick these up, the
+		// Spawn will resume the agent via SessionID, and the agent
+		// decides how to handle the duplicate.
+		for _, as := range agentsByCS[entry.ID] {
+			for _, ref := range as.Entry().InFlightMessages {
+				msg := agentsession.Message{
+					ID:         ref.ID,
+					ChatID:     entry.ChatID,
+					Blocks:     ref.Blocks,
+					ReceivedAt: ref.ReceivedAt,
+					// Kind zero value == MessageKindNormal (default
+					// user input). Replayed messages are not
+					// "must stand alone" queued turns.
+				}
+				_ = cs.queue.Push(msg) // ErrFull shouldn't happen at startup; drop on failure.
+			}
+		}
+
 		m.sessions[entry.ChatID] = cs
 
 		// Fire onCreate so the runtime can wire per-ChatSession

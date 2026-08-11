@@ -117,19 +117,24 @@ func (m *Manager) WithOnCreate(fn func(*ChatSession)) *Manager {
 // re-entering m.mu. The constructor never holds a manager lock
 // across external code.
 func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error) {
-	// Phase 1: lock-internal fast path
-	m.mu.Lock()
+	// Phase 1: lock-free fast path. Pure read of the sessions
+	// table — RLock lets concurrent GetOrCreate calls for
+	// distinct chatIDs run in parallel (Phase 1 was m.mu.Lock()
+	// in Commit 8; the lock was functionally safe but serialised
+	// reads unnecessarily).
+	m.mu.RLock()
 	cs, ok := m.sessions[chatID]
-	m.mu.Unlock()
+	m.mu.RUnlock()
 	if ok {
 		return cs, nil // existing cs → emitter already bound
 	}
 
 	// Phase 2: construct + attach spawner/persistence + bind
-	// the Manager's shared emitter (if any). No lock held here so
-	// external callbacks (Spawner, persistence) don't have to
-	// re-enter the manager mutex; instead we read all the manager
-	// state we need under a single RLock acquisition.
+	// the Manager's shared emitter (if any). No write lock held
+	// here so external callbacks (Spawner, persistence) don't
+	// have to re-enter the manager mutex; instead we read all
+	// the manager state we need under a single RLock
+	// acquisition.
 	//
 	// A nil emitter is permitted — tests that only care about
 	// ChatSession's internal state (InputBuffer FSM, persistence,
@@ -155,7 +160,7 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 		cs.WithEmitter(emitter)
 	}
 
-	// Phase 3: re-lock + insert with re-check (race-safe)
+	// Phase 3: re-lock for the insert + onCreate publish.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if existing, ok := m.sessions[chatID]; ok {

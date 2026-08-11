@@ -1370,27 +1370,10 @@ func newRuntimeStamper(mgr *chatsession.Manager, prReg *prcache.Registry, deps g
 	}
 }
 
-// responder adapts a channel.Channel for outbound messages.
-// The readPump writes directly here.
-type responder struct {
-	ch     channel.Channel
-	mgr    *chatsession.Manager
-	logger *slog.Logger
-}
-
-// Send translates and dispatches an AgentEvent to the channel for
-// the chat owning the active AgentSession.
-func (r *responder) Send(ctx context.Context, chatID, userMsgID, text string) error {
-	if r.ch == nil {
-		return nil
-	}
-	return r.ch.Send(ctx, gateway.OutboundMessage{
-		ChatID:  chatID,
-		Kind:    gateway.OutReply,
-		Text:    text,
-		ReplyTo: userMsgID,
-	})
-}
+// (responder removed: was a vestigial adapter from the pre-
+// outbound-package readPump era. The runtime pump now constructs
+// its own Emitter.Send calls in newEventHandler; this type had no
+// remaining callers.)
 
 // shutdownRun stops the channel and persists final state.
 //
@@ -1486,10 +1469,17 @@ func toCardChoices(in []command.CardChoice) []gateway.CardChoice {
 // silently drop. The shell dispatcher's Handle is the
 // fire-and-forget reply path (the result card), not a critical
 // control message.
+// chatSessionChannelSender implements shell.Sender on top of the
+// Manager's shared outbound.Emitter. The shell dispatcher only
+// needs Send (no SendCard) so this is a thin one-method shim.
 type chatSessionChannelSender struct {
 	mgr *chatsession.Manager
 }
 
+// Send looks up the ChatSession for the requested chatID and
+// posts the reply through its Emitter. nil-safe everywhere: a
+// missing chat session, missing emitter, or missing reply
+// target all silently no-op (matches the old wrap's behaviour).
 func (s chatSessionChannelSender) Send(ctx context.Context, msg shell.Outbound) error {
 	if msg.ChatID == "" {
 		return nil
@@ -1498,13 +1488,20 @@ func (s chatSessionChannelSender) Send(ctx context.Context, msg shell.Outbound) 
 	if cs == nil {
 		return nil
 	}
-	ch := cs.Emitter()
-	if ch == nil {
+	em := cs.Emitter()
+	if em == nil {
 		return nil
 	}
-	return ch.Send(ctx, gateway.OutboundMessage{
+	return em.Send(ctx, gateway.OutboundMessage{
 		ChatID:  msg.ChatID,
+		Kind:    gateway.OutReply,
 		Text:    msg.Text,
 		ReplyTo: msg.ReplyTo,
 	})
 }
+
+// (chatSessionChannelSender.Send[1] was the old implementation
+// that called cs.Emitter() into a local variable named 'ch' and
+// passed the chatsession.OutboundMessage-typed payload. It has
+// been removed: the new Send at line ~1483 is the single source
+// of truth.)

@@ -222,8 +222,6 @@ fix:
 
 push:
   agent: pi                          # lightweight agent for commit-message work
-  hooks:
-    after:  [codegraph init]
 
 # close:  # reserved for future
 # sync:   # reserved for future

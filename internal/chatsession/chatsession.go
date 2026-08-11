@@ -718,19 +718,11 @@ func (cs *ChatSession) QueueUserMessage(msg Message) error {
 // slash command. It does two things:
 //
 //  1. Try to accelerate the busy-guard release on the current
-//     in-flight turn by calling `as.Stop(ctx)`. Fire-and-forget:
-//     the result is ignored (Stop may return ErrNotSupported for
-//     some bridges, or a real error if the bridge is wedged —
-//     neither is actionable here). The point is to nudge the
-//     bridge into emitting its terminal event (session.idle /
-//     agent_settled / turn/completed) sooner so the FlushHook
-//     can drain the queue.
-//
-//     Skipped when:
-//       - no AS is selected (Handle() == nil)
-//       - the AS is in StatusExited (e.g. after /close killed
-//         the bridge process; calling Stop on a defunct handle
-//         is a wasted RPC + an ignored error)
+//     in-flight turn by calling `as.Stop(ctx)` in a background
+//     goroutine. The goroutine outlives the SteerUserMessage
+//     call, so a slow bridge RPC (opencode's HTTP interrupt,
+//     claudecode's SIGINT + drain, pi's abort RPC) cannot block
+//     the slash command reply.
 //
 //  2. Push msg to the HEAD of the pending region via
 //     `queue.PushFront`. The steered message will be the first
@@ -738,15 +730,22 @@ func (cs *ChatSession) QueueUserMessage(msg Message) error {
 //     user messages had piled up in the queue while the
 //     current turn was running.
 //
+// Ordering note: capacity is checked BEFORE the Stop call. If
+// the queue is at QueueMaxMsgs, PushFront returns ErrFull and
+// we skip Stop — aborting the bridge for a message we couldn't
+// enqueue would leave the user's intent silently lost (the
+// current turn is gone, the new message is gone).
+//
+// Skipped Stop when:
+//   - no AS is selected (Handle() == nil)
+//   - the AS is in StatusExited (e.g. after /close killed the
+//     bridge process; calling Stop on a defunct handle is a
+//     wasted RPC + an ignored error)
+//
 // Distinct from QueueUserMessage in two ways: (a) it tries to
 // abort the current turn first, and (b) the new message goes to
 // the front of the queue instead of the back. Both are needed
 // for "stop + redirect" semantics.
-//
-// Stop is best-effort. If it fails (bridge doesn't support it,
-// bridge is hung, no selected AS), PushFront still runs — the
-// steered message waits in the queue and is dispatched on the
-// next natural FlushHook trigger.
 //
 // The caller (slash command factory) is responsible for emitting
 // `MessageQueued` BEFORE calling this — same timing contract as
@@ -757,17 +756,25 @@ func (cs *ChatSession) SteerUserMessage(msg Message) error {
 	if msg.ID == "" {
 		return nil
 	}
-	// Step 1: try to abort the current in-flight turn. Skip
-	// when the bridge process is already gone (StatusExited) —
-	// calling Stop would be a wasted RPC against a defunct
-	// handle.
+
+	// Step 1: capacity check. If we can't enqueue the steered
+	// message, skip Stop entirely — aborting the bridge for a
+	// message we lost is worse than not steering at all.
+	if err := cs.queue.PushFront(msg); err != nil {
+		return err
+	}
+
+	// Step 2: fire-and-forget Stop on a background goroutine.
+	// The call returns immediately; the bridge's terminal event
+	// drives the FlushHook to drain the queue on its own clock.
 	if as := cs.SelectedAgentSession(); as != nil && as.Status() != StatusExited {
 		if h := as.Handle(); h != nil {
-			_ = h.Stop(cs.Context()) // fire-and-forget
+			go func() {
+				_ = h.Stop(cs.Context())
+			}()
 		}
 	}
-	// Step 2: prepend msg to the pending region.
-	return cs.queue.PushFront(msg)
+	return nil
 }
 
 // buildPromptLocked (CS-AS 边界重构 Phase 1) constructs a candidate
@@ -894,6 +901,34 @@ func (cs *ChatSession) TryFlush() error {
 	// is the same set — it's later read by writebackMessageState
 	// (and by the AS-side readpump) but never mutated.
 	p := cs.buildPromptLocked(batch)
+
+	// Pre-Submit re-check under cs.mu. Between the snapshot of
+	// `as` above and the Submit call below, the selected AS can
+	// be respawned by LookupSelectedAgentSession (after /close
+	// killed it) or its status can flip. Submitting the peek'd
+	// batch to a freshly-respawned bridge would re-issue the
+	// message — same race as the SteerUserMessage / Submit
+	// interaction the review flagged.
+	//
+	// Re-acquire and verify:
+	//   1. The selected AS pointer is unchanged (no respawn).
+	//   2. The status hasn't flipped to Exited (no /close).
+	// If either fails, Rewind so the batch is retried against
+	// the correct AS on the next FlushHook.
+	cs.mu.Lock()
+	currentAS := cs.selectedAS
+	statusNow := StatusRunning
+	if currentAS != nil {
+		statusNow = currentAS.Status()
+	}
+	cs.mu.Unlock()
+	if currentAS != as || statusNow == StatusExited {
+		slog.Debug("chatsession: TryFlush SKIP",
+			"chat_id", cs.ChatID, "reason", "as_changed_pre_submit",
+			"queue_len", cs.queue.Len(), "as_id", as.ID)
+		cs.queue.Rewind()
+		return nil
+	}
 
 	// Submit runs OUTSIDE cs.mu and outside the queue's mutex —
 	// SendBlocks can block on a hung prompt RPC. Errors mean

@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // ChatSessionSender implements shell.Sender on top of a
@@ -54,9 +54,9 @@ func (s *ChatSessionSender) Send(ctx context.Context, msg Outbound) error {
 	if em == nil {
 		return nil
 	}
-	return em.Send(ctx, gateway.OutboundMessage{
+	return em.Send(ctx, messages.OutboundMessage{
 		ChatID:  msg.ChatID,
-		Kind:    gateway.OutCommandReply,
+		Kind:    messages.OutCommandReply,
 		Text:    msg.Text,
 		ReplyTo: msg.ReplyTo,
 	})

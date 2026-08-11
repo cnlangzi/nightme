@@ -7,12 +7,12 @@
 //
 // Default text format:
 //
-//	  NAME     COMMAND          ARGS
-//	  claude   claude
-//	  codex    codex             (app-server)
-//	  opencode opencode         acp
+//	NAME     COMMAND          ARGS
+//	claude   claude
+//	codex    codex             (app-server)
+//	opencode opencode         acp
 //
-//	  (default: claude)
+//	(default: claude)
 //
 // `--json` swaps the table for a JSON array (one element per agent).
 //

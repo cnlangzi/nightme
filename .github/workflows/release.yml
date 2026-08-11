@@ -10,21 +10,85 @@ permissions:
 
 jobs:
   release:
-    name: Build and publish binary
+    name: Build and publish binaries
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # linux: tar.gz convention
+          - goos: linux
+            goarch: amd64
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            archive: tar.gz
+          # darwin: tar.gz convention
+          - goos: darwin
+            goarch: amd64
+            archive: tar.gz
+          - goos: darwin
+            goarch: arm64
+            archive: tar.gz
+          # windows: zip convention (users expect .zip for .exe)
+          - goos: windows
+            goarch: amd64
+            archive: zip
+          - goos: windows
+            goarch: arm64
+            archive: zip
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.26'
           cache: true
 
-      - name: Build
-        run: go build -o nightme ./cmd/nightme
+      - name: Resolve version metadata
+        id: meta
+        run: |
+          # Strip leading 'v' from tag (v1.2.3 → 1.2.3) for archive names.
+          # Falls back to commit SHA if no tag (defensive — tag trigger
+          # is enforced by the workflow's `on.push.tags` filter).
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Upload release asset
+      - name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          # Binary name: nightme.exe on Windows, nightme elsewhere.
+          BINARY="nightme"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            BINARY="nightme.exe"
+          fi
+
+          STAGE="dist/nightme-${{ matrix.goos }}-${{ matrix.goarch }}-${{ steps.meta.outputs.version }}"
+          mkdir -p "$STAGE"
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/cnlangzi/nightme/internal/version.GitCommit=${{ steps.meta.outputs.short_sha }} -X github.com/cnlangzi/nightme/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o "$STAGE/$BINARY" \
+            ./cmd/nightme
+
+          # Pack into the chosen archive format.
+          cd dist
+          case "${{ matrix.archive }}" in
+            tar.gz)
+              tar -czf "nightme-${{ matrix.goos }}-${{ matrix.goarch }}-${{ steps.meta.outputs.version }}.tar.gz" \
+                -C "$STAGE" "$BINARY"
+              ;;
+            zip)
+              (cd "$STAGE" && zip -q "../nightme-${{ matrix.goos }}-${{ matrix.goarch }}-${{ steps.meta.outputs.version }}.zip" "$BINARY")
+              ;;
+          esac
+
+      - name: Upload release asset (${{ matrix.goos }}/${{ matrix.goarch }})
         uses: softprops/action-gh-release@v2
         with:
-          files: nightme
+          files: dist/nightme-${{ matrix.goos }}-${{ matrix.goarch }}-${{ steps.meta.outputs.version }}.${{ matrix.archive }}
           generate_release_notes: true

@@ -24,7 +24,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -183,7 +182,7 @@ func runRunWith(cmd *cobra.Command, deps runDeps) error {
 	sigCh := deps.signals
 	if sigCh == nil {
 		owned := make(chan os.Signal, 2)
-		signal.Notify(owned, syscall.SIGINT, syscall.SIGTERM)
+		signal.Notify(owned, shutdownSignals()...)
 		defer signal.Stop(owned)
 		sigCh = owned
 	}
@@ -1221,7 +1220,6 @@ func lookupASByID(cs *chatsession.ChatSession, id string) *agentsession.AgentSes
 	return nil
 }
 
-//
 // AgentSession.Agent is immutable (direct field read, no lock);
 // Model() takes RLock internally; git status is captured fresh
 // on each stamp (3s deadline, no caching — see F-48 §1.7).

@@ -285,10 +285,20 @@ func (q *MessageQueue) PushFront(msg Message) error {
 			n.next = q.head
 			q.head = n
 		} else {
-			// Find inFlightEnd's predecessor.
+			// Find inFlightEnd's predecessor. Length-bounded
+			// walk: if the invariant (inFlightEnd is reachable
+			// from head via .next) ever breaks, this loop would
+			// spin forever. Cap at q.length so a corrupted
+			// invariant fails loud (panic) instead of hanging
+			// the caller.
 			prev := q.head
+			steps := 0
 			for prev.next != q.inFlightEnd {
 				prev = prev.next
+				steps++
+				if steps > q.length {
+					panic("MessageQueue.PushFront: inFlightEnd not reachable from head (broken invariant)")
+				}
 			}
 			n.next = q.inFlightEnd
 			prev.next = n

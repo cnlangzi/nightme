@@ -101,7 +101,7 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 	reg.Register(piAgent)
 	spawner := NewRegistrySpawner(reg)
 
-	cs, _ := New("oc_real_pi_test", "pi", newTestChannel())
+	cs, _ := New("oc_real_pi_test", "pi")
 	cs = cs.WithPersistence(csFile, asFile)
 	cs = cs.WithSpawner(spawner)
 	if err := cs.SetSelectedCwd(dir); err != nil {

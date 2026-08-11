@@ -259,7 +259,7 @@ type ReactionEvent = services.ReactionEvent
 // Card represents the original decision card stored on a draft.
 // Carries enough information for the action handler to rebuild
 // the card with Disabled=true and a result note (see
-// executeXxxAction → deps.Send → PatchBotMsgID path).
+// executeXxxAction → deps.Send → Kind=OutCardPatch path).
 type Card struct {
 	Title     string
 	Body      string

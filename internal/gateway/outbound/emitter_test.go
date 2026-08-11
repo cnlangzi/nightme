@@ -23,6 +23,9 @@ type fakeChannel struct {
 }
 
 func (f *fakeChannel) Name() string { return f.name }
+func (f *fakeChannel) Start(_ context.Context) error { return nil }
+func (f *fakeChannel) Stop(_ context.Context) error { return nil }
+func (f *fakeChannel) Incoming() <-chan gateway.InboundMessage { return nil }
 
 func (f *fakeChannel) Send(_ context.Context, msg gateway.OutboundMessage) error {
 	atomic.AddInt32(&f.sendCalls, 1)
@@ -37,7 +40,7 @@ func (f *fakeChannel) SendCard(_ context.Context, msg gateway.OutboundMessage) (
 }
 
 func TestEmitter_NoStamper_PassesThrough(t *testing.T) {
-	// Zero-value Options (no Stamper, no OnError) must produce a
+	// Zero-value Options (no Stamper) must produce a
 	// pure passthrough — the caller-built OutboundMessage goes
 	// straight to Channel.Send, no SessionContext added.
 	fc := &fakeChannel{name: "test"}
@@ -133,47 +136,31 @@ func TestEmitter_SendCard_StampsAndForwards(t *testing.T) {
 	}
 }
 
-func TestEmitter_OnError_Callback(t *testing.T) {
-	// Channel.Send fails → OnError invoked AND error returned to
-	// caller. Caller is responsible for handling the error; OnError
-	// is for logging/metrics side-effects only.
+func TestEmitter_SendErrorPropagates(t *testing.T) {
+	// Channel.Send fails → the error is returned to the caller.
+	// Emitter is a passthrough: callers handle logging/metrics
+	// (no OnError hook; that lived through one review cycle and
+	// was deleted for YAGNI — see Commit 10).
 	sendErr := errors.New("channel broken")
-	var hookCalled int32
-	var hookMsg gateway.OutboundMessage
-	var hookErr error
-
 	fc := &fakeChannel{name: "test", sendErr: sendErr}
-	em := New(fc, Options{
-		OnError: func(m gateway.OutboundMessage, e error) {
-			atomic.AddInt32(&hookCalled, 1)
-			hookMsg = m
-			hookErr = e
-		},
-	})
+	em := New(fc, Options{})
 
-	in := gateway.OutboundMessage{ChatID: "c1", Text: "hi"}
-	err := em.Send(context.Background(), in)
+	err := em.Send(context.Background(), gateway.OutboundMessage{ChatID: "c1", Text: "hi"})
 	if !errors.Is(err, sendErr) {
 		t.Errorf("returned err = %v, want %v", err, sendErr)
 	}
-	if atomic.LoadInt32(&hookCalled) != 1 {
-		t.Errorf("OnError calls = %d, want 1", hookCalled)
-	}
-	if !errors.Is(hookErr, sendErr) {
-		t.Errorf("hook err = %v, want %v", hookErr, sendErr)
-	}
-	if hookMsg.ChatID != "c1" {
-		t.Errorf("hook msg.ChatID = %q, want c1", hookMsg.ChatID)
-	}
 }
 
-func TestEmitter_NoOnError_ErrorStillReturned(t *testing.T) {
-	// nil OnError → no panic, error still returned to caller.
-	fc := &fakeChannel{name: "test", sendErr: errors.New("boom")}
+func TestEmitter_SendCardErrorPropagates(t *testing.T) {
+	// SendCard is the same passthrough contract as Send: errors
+	// surface to the caller.
+	cardErr := errors.New("card channel broken")
+	fc := &fakeChannel{name: "test", cardErr: cardErr}
 	em := New(fc, Options{})
 
-	if err := em.Send(context.Background(), gateway.OutboundMessage{ChatID: "c1"}); err == nil {
-		t.Error("Send should return error when Channel.Send fails")
+	_, err := em.SendCard(context.Background(), gateway.OutboundMessage{ChatID: "c1"})
+	if !errors.Is(err, cardErr) {
+		t.Errorf("returned err = %v, want %v", err, cardErr)
 	}
 }
 

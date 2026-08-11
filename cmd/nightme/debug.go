@@ -199,7 +199,7 @@ func newDebugFixture(f debugFlags) (*debugFixture, error) {
 	// Debug mode's reaction capture goes through the action
 	// handler branch, which never reaches the WatchMode gate,
 	// so no replacement is needed.
-	gw := gateway.New(captured.MessageDispatcher())
+	gw := gateway.New(captured.MessageDispatcher(), captured.Emitter())
 	gw.AttachChannels(captured)
 	gw.WithActionHandler(func(ctx context.Context, msg *gateway.InboundMessage) bool {
 		if msg == nil || msg.Reaction == nil {
@@ -428,14 +428,42 @@ func (c *capturingChannel) Send(_ context.Context, m gateway.OutboundMessage) er
 	return nil
 }
 
+// capturingEmitter is the gateway.Emitter-shaped wrapper that
+// routes through capturingChannel. The debug fixture uses one
+// Channel for both the inbound pump and the outbound chokepoint;
+// this thin adapter makes the latter satisfy the Gateway's
+// Emitter interface.
+type capturingEmitter struct {
+	ch *capturingChannel
+}
+
+func (e capturingEmitter) Send(ctx context.Context, m gateway.OutboundMessage) error {
+	return e.ch.Send(ctx, m)
+}
+
+func (e capturingEmitter) SendCard(ctx context.Context, m gateway.OutboundMessage) (string, error) {
+	return e.ch.SendCard(ctx, m)
+}
+
 // MessageDispatcher returns the runtime-side plain-text dispatcher.
 // In the debug fixtures, reactions are short-circuited by the
 // actionHandler before they get here, so this is a safety net
 // that should rarely fire. It returns nil (= the gateway sees
 // the dispatch as consumed-success) so the test doesn't error
 // out on an unexpected fall-through.
+// MessageDispatcher is a no-op dispatcher used when the debug
+// subcommand's gateway is wired up purely for its print path.
 func (c *capturingChannel) MessageDispatcher() gateway.MessageDispatcher {
 	return func(_ context.Context, _ *gateway.InboundMessage) error { return nil }
+}
+
+// Emitter returns an outbound.Emitter that records every Send
+// into c.msgs via the channel's own Send method. The test
+// fixture stands in for both the IM Channel and the outbound
+// chokepoint, so Emitter and Send share the same backing
+// recording slice.
+func (c *capturingChannel) Emitter() gateway.Emitter {
+	return capturingEmitter{ch: c}
 }
 
 // Incoming is required by the channel.Channel interface. The

@@ -250,26 +250,6 @@ func gitLogRange(ctx context.Context, worktree, revRange string, deps HandlerDep
 	return strings.TrimRight(out, "\n"), nil
 }
 
-// detectConflicts parses a `git status --porcelain` output and
-// returns true if any unmerged paths are present (mid-rebase /
-// mid-merge). The caller is expected to have already done the
-// git status call — this is just the parsing half of the check.
-func detectConflicts(statusOut string) bool {
-	for _, line := range splitNonEmptyLines(statusOut) {
-		if len(line) < 2 {
-			continue
-		}
-		xy := line[:2]
-		if xy[0] != ' ' && xy[1] != ' ' && xy != "??" &&
-			(xy[0] == 'U' || xy[1] == 'U' ||
-				xy[0] == 'A' || xy[1] == 'A' ||
-				xy[0] == 'D' || xy[1] == 'D') {
-			return true
-		}
-	}
-	return false
-}
-
 // indentLines prefixes every line of s with prefix. Used for
 // multi-line stdout (git push progress, agent reply text) in the
 // success card so the indentation reads as a code block.

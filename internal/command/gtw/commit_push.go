@@ -21,24 +21,26 @@ import (
 // Exported because both /gtw push and /gtw pr use it.
 const RunOnceTimeout = 5 * time.Minute
 
-// dispatchPush is the three-branch dispatcher for /gtw push,
-// per F-56 §2. The dispatch is decided by two git-state queries
-// done once at entry:
+// dispatchPush is the dispatcher for /gtw push, layered on top of
+// the F-57 Readiness gate. The structural shape is still three
+// branches (no-op / agent+push / push-only), but the entry
+// gating moved from a triple git-probe (status + detectConflicts
+// + countUnpushed) to a single CollectReadiness snapshot read
+// from messages.GitStatusSnapshot predicates:
 //
-//	isClean        := strings.TrimSpace(statusOut) == ""
-//	unpushedBefore := countUnpushed(worktree, branch)
+//   - Branch 1 (no-op):  snap.HasNothingToPush() — clean tree,
+//     upstream exists, ahead=0.
+//   - Branch 2 (agent+push): snap.WorkingTreeIsClean() == false
+//     — worktree dirty, agent runs to commit, then we re-snapshot
+//     and verify.
+//   - Branch 3 (push-only): everything else that reaches push
+//     — clean tree + (upstream missing OR ahead > 0). The
+//     "upstream missing" case is the first-push path; programmaticPush
+//     runs `git push -u origin <branch>`.
 //
-// and selects exactly one of:
-//
-//   - Branch 1 (no-op)         — isClean && unpushed==0
-//   - Branch 2 (agent + push)  — !isClean
-//   - Branch 3 (push only)     — isClean && unpushed>0
-//
-// Each branch is mutually exclusive. The agent is only spawned
-// in Branch 2; the push is owned by nightme in Branches 2 and
-// 3; Branch 1 just notifies the user and exits.
-//
-// Reply is sent inline via cs.Channel(); return value is the
+// Agent is only spawned in Branch 2; the push is owned by nightme
+// in Branches 2 and 3; Branch 1 just notifies the user and exits.
+// Reply is sent inline via cs.Emitter(); return value is the
 // runtime's *Result carrying Consumed / Dropped only.
 func dispatchPush(
 	ctx context.Context,
@@ -53,17 +55,52 @@ func dispatchPush(
 		return res, nil
 	}
 
-	statusOut, _, err := deps.Git.Run(ctx, c.Worktree, "status", "--porcelain")
+	// F-57: single readiness snapshot. Replaces the old
+	// (statusOut → detectConflicts) + (isClean string-compare) +
+	// countUnpushed triple-probe with one git status call. The
+	// snap is the same one /gtw pr uses, so the two gates read
+	// the same truth (continuity is structural — see F-57 §5).
+	snap, err := CollectReadiness(ctx, c.Worktree, deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			fmt.Sprintf("❌ git status: %v", err)), nil
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ read worktree status: %v", err)), nil
 	}
-	if detectConflicts(statusOut) {
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			fmt.Sprintf(
-				"❌ worktree %s is in a conflicted state (unmerged paths present)\n"+
-					"hint: resolve conflicts and `git add` the resolutions, OR `git rebase --abort` / `git merge --abort`",
-				c.Worktree)), nil
+	if snap == nil {
+		// (nil, nil) from CollectReadiness = not a git repo, empty
+		// repo, or git error. None of these are states we can push
+		// from. Surface a clear refusal rather than silently
+		// continuing.
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			"❌ cannot read worktree git status — refusing to push\n"+
+				"hint: ensure the worktree is inside a git repo with at least one commit"), nil
+	}
+
+	// 1. Hard-refuse conflicts. Pushing an unresolved state would
+	// land a broken tip on origin — no override.
+	if reason := snap.PushBlockReason(); reason != "" {
+		return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
+	}
+
+	// 1b. Refuse detached HEAD. Pushing from detached HEAD with
+	// `git push -u origin HEAD` either fails with "no upstream
+	// branch" or — worse — lands an anonymous ref on origin. The
+	// user should checkout a named branch first. Mirrors the
+	// dispatchPR PRBlockReason case 1 (the two gates share the
+	// same readiness snapshot, so the policy stays consistent).
+	if snap.Branch == "" {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			"❌ detached HEAD — checkout a named branch first"), nil
+	}
+
+	// 2. Nothing to do. Note: a branch with no upstream at all
+	// deliberately returns HasNothingToPush=false here (the
+	// branch was never published; programmaticPush handles the
+	// first push).
+	if snap.HasNothingToPush() {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			"ℹ️ nothing to push\n"+
+				"  no uncommitted changes\n"+
+				"  no unpushed commits on "+snap.Branch), nil
 	}
 
 	// headBefore is required by both Branch 2's verifyAgentCommitted
@@ -73,32 +110,16 @@ func dispatchPush(
 	// to render an invalid `..origin/branch` range. Surface it.
 	headBefore, err := headSHA(ctx, c.Worktree, deps)
 	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ read HEAD: %v", err)), nil
 	}
-	isClean := strings.TrimSpace(statusOut) == ""
-	unpushedBefore, err := countUnpushed(ctx, c.Worktree, c.Branch, deps)
-	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			fmt.Sprintf("❌ check unpushed commits: %v", err)), nil
-	}
 
-	// ── Branch 1: no-op ─────────────────────────────────────
-	// Worktree is clean AND no unpushed commits → tell the user
-	// and exit. No agent, no push.
-	if isClean && unpushedBefore == 0 {
-		return reply(ctx, cs.Channel(), chatID, messageID,
-			"ℹ️ nothing to push\n"+
-				"  no uncommitted changes\n"+
-				"  no unpushed commits on "+c.Branch), nil
-	}
-
-	// ── Branch 2: dirty → agent commits → verify → push ─────
+	// ── Branch 2: dirty → agent commits → re-snapshot → push ──
 	agentName := ""
-	if !isClean {
+	if !snap.WorkingTreeIsClean() {
 		name, errMsg := runAgentToCommit(ctx, cs, c, args, ymlAgent)
 		if errMsg != "" {
-			return reply(ctx, cs.Channel(), chatID, messageID, errMsg), nil
+			return reply(ctx, cs.Emitter(), chatID, messageID, errMsg), nil
 		}
 		agentName = name
 
@@ -106,38 +127,51 @@ func dispatchPush(
 		// worktree clean + branch still on c.Branch). If any
 		// check fails, surface the diagnostic and DO NOT push.
 		if msg := verifyAgentCommitted(ctx, deps, c, headBefore); msg != "" {
-			return reply(ctx, cs.Channel(), chatID, messageID, msg), nil
+			return reply(ctx, cs.Emitter(), chatID, messageID, msg), nil
 		}
 
-		// Re-count unpushed after the agent's commits. This
-		// decides the Branch 3 续 push (unpushed>0) vs the
-		// defensive "nothing to push" branch (unpushed==0).
-		// Errors MUST surface — silently treating a real
-		// failure as "0 unpushed" would dump the user into
-		// the defensive branch with a misleading "nothing to
-		// push" hint instead of the actual git error.
-		unpushedBefore, err = countUnpushed(ctx, c.Worktree, c.Branch, deps)
+		// F-57: re-snapshot after the agent runs. We cannot trust
+		// the original snap — the agent may have introduced a
+		// conflict (rare but documented), or the verify may have
+		// passed but the tree still report something we need to
+		// re-decide on. This is the only correct place to ask
+		// "should I push now?".
+		snap, err = CollectReadiness(ctx, c.Worktree, deps.Git)
 		if err != nil {
-			return reply(ctx, cs.Channel(), chatID, messageID,
-				fmt.Sprintf("❌ check unpushed after agent: %v", err)), nil
+			return reply(ctx, cs.Emitter(), chatID, messageID,
+				fmt.Sprintf("❌ re-read worktree status after agent: %v", err)), nil
+		}
+		if snap == nil {
+			// Same contract as the entry path (line 68): CollectReadiness
+			// returns (nil, nil) on git error / empty repo — neither state
+			// is one we can push from. Surface a refusal rather than
+			// nil-derefing on the next snap.* call.
+			return reply(ctx, cs.Emitter(), chatID, messageID,
+				"❌ cannot read worktree git status — refusing to push\n"+
+					"hint: ensure the worktree is inside a git repo with at least one commit"), nil
+		}
+		// Re-check conflict gate. Pushing must never happen if the
+		// agent left unmerged entries.
+		if reason := snap.PushBlockReason(); reason != "" {
+			return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
 		}
 	}
 
 	// ── Branch 3 (or Branch 2 续): worktree is clean, push ──
 	// Defensive: if the agent ran but produced no new commits
-	// (e.g. HEAD advance check passed but countUnpushed still 0
-	// because HEAD@{u} equals HEAD), surface a warning rather
-	// than calling push with nothing to do.
-	if unpushedBefore == 0 {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+	// (e.g. HEAD advance check passed but AheadOfRemote is still
+	// 0 because the agent's commit was already on origin), surface
+	// a warning rather than calling push with nothing to do.
+	if snap.HasNothingToPush() {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"⚠️ worktree is clean but nothing to push.\n"+
-				"hint: inspect the worktree's HEAD vs origin/"+c.Branch+" manually."), nil
+				"hint: inspect the worktree's HEAD vs origin/"+snap.Branch+" manually."), nil
 	}
 
 	if err := programmaticPushWithRetry(ctx, deps, c); err != nil {
 		// err.Error() is already a complete IM-friendly message
 		// (per F-56 §4.3 design). Paste it straight in.
-		return reply(ctx, cs.Channel(), chatID, messageID, err.Error()), nil
+		return reply(ctx, cs.Emitter(), chatID, messageID, err.Error()), nil
 	}
 
 	// Build the success card from git log — NOT from agent prose.
@@ -149,10 +183,10 @@ func dispatchPush(
 	card, err := replySuccessCard(ctx, c, agentName,
 		headBefore+"..origin/"+c.Branch, deps)
 	if err != nil {
-		return reply(ctx, cs.Channel(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ push succeeded but couldn't render card: %v", err)), nil
 	}
-	return reply(ctx, cs.Channel(), chatID, messageID, card), nil
+	return reply(ctx, cs.Emitter(), chatID, messageID, card), nil
 }
 
 // runAgentToCommit spawns the configured one-shot agent and

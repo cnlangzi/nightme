@@ -1,18 +1,24 @@
 // Package version holds the build-time identity of nightme.
 //
-// The Version constant is updated by hand as part of the release
-// commit; GitCommit and BuildDate are intended to be injected via
-// -ldflags at compile time, e.g.:
+// All three fields are intended to be injected via -ldflags at
+// compile time, e.g.:
 //
-//	go build -ldflags "-X github.com/cnlangzi/nightme/internal/version.GitCommit=$(git rev-parse --short HEAD) -X github.com/cnlangzi/nightme/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" ./cmd/nightme
+//	go build -ldflags "\
+//	    -X github.com/cnlangzi/nightme/internal/version.Version=$(git describe --tags --always) \
+//	    -X github.com/cnlangzi/nightme/internal/version.GitCommit=$(git rev-parse --short HEAD) \
+//	    -X github.com/cnlangzi/nightme/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+//	    ./cmd/nightme
 //
-// Release tooling in v0.2 will automate this. The plain `go build`
-// output is good enough for v0.1.
+// The defaults below are used when no -ldflags are supplied (e.g.
+// `go run` during development) so `nightme --version` still prints
+// a stable banner instead of empty fields.
 package version
 
-// Version is the human-friendly release tag (without the leading
-// "v"). Update this string in the release commit.
-const Version = "0.1.0"
+// Version is the human-friendly release tag. Typically injected
+// from the git tag (e.g. "v0.2.0") at release-build time. The
+// default is the most recent released version and is used when
+// the binary is built without -ldflags.
+var Version = "0.1.0"
 
 // GitCommit is the short SHA at build time. "unknown" means it
 // was built without the -ldflags injection.

@@ -9,22 +9,137 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Build and publish binary
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # linux + darwin: tar.gz convention
+          - goos: linux
+            goarch: amd64
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            archive: tar.gz
+          - goos: darwin
+            goarch: amd64
+            archive: tar.gz
+          - goos: darwin
+            goarch: arm64
+            archive: tar.gz
+          # windows: zip convention (users expect .zip for .exe)
+          - goos: windows
+            goarch: amd64
+            archive: zip
+          - goos: windows
+            goarch: arm64
+            archive: zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
-          go-version: '1.22'
+          go-version-file: go.mod
           cache: true
 
-      - name: Build
-        run: go build -o nightme ./cmd/nightme
+      # Cross-compile on a single Linux runner — nightme is pure
+      # Go across all platforms (the daemoncontrol/server split
+      # into _unix / _windows files keeps the unix socket model
+      # out of the Windows path), so building for darwin and
+      # windows from linux is safe.
+      - name: Resolve version metadata
+        id: meta
+        run: |
+          # Strip leading 'v' from tag (v1.2.3 → 1.2.3) for archive names.
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload release asset
-        uses: softprops/action-gh-release@v2
+      - name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          BINARY="nightme"
+          if [ "$GOOS" = "windows" ]; then
+            BINARY="nightme.exe"
+          fi
+          STAGE="dist/stage/${GOOS}-${GOARCH}"
+          mkdir -p "$STAGE"
+          go build -trimpath \
+            -ldflags "-s -w \
+              -X github.com/cnlangzi/nightme/internal/version.Version=${{ github.ref_name }} \
+              -X github.com/cnlangzi/nightme/internal/version.GitCommit=${{ steps.meta.outputs.short_sha }} \
+              -X github.com/cnlangzi/nightme/internal/version.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o "$STAGE/$BINARY" ./cmd/nightme
+          cp LICENSE  "$STAGE/LICENSE"
+          cp README.md "$STAGE/README.md"
+
+      - name: Archive
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.meta.outputs.version }}"
+          STAGE="dist/stage/${GOOS}-${GOARCH}"
+          case "$ARCHIVE" in
+            tar.gz)
+              tar -C "$STAGE" -czf \
+                "dist/nightme_${VERSION}_${GOOS}_${GOARCH}.tar.gz" \
+                nightme LICENSE README.md
+              ;;
+            zip)
+              # python3 is preinstalled on ubuntu-latest runners and
+              # avoids needing the `zip` apt package. Paths are
+              # workspace-root-relative (the step's cwd) so we don't
+              # need an inner cd that would shift the output path.
+              python3 -m zipfile -c \
+                "dist/nightme_${VERSION}_${GOOS}_${GOARCH}.zip" \
+                "$STAGE/nightme.exe" \
+                "$STAGE/LICENSE" \
+                "$STAGE/README.md"
+              ;;
+          esac
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v6
         with:
-          files: nightme
+          name: nightme-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/nightme_*.${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          # sha256sum is content-addressed, so it handles both
+          # .tar.gz and .zip files in the same pass.
+          sha256sum nightme_*.tar.gz nightme_*.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS.txt

@@ -3,7 +3,7 @@
 // These tests exercise stop.StopSelectedAgent / FormatStopResult
 // through the ChatSession + AgentSession public surface only, with
 // an in-memory bridge stub that records Stop calls. Mirrors the
-// pattern in internal/command/kill/kill_test.go.
+// pattern in internal/command/close/close_test.go.
 package stop_test
 
 import (
@@ -201,13 +201,13 @@ func TestFormatStopResult_Noop(t *testing.T) {
 }
 
 // TestFormatStopResult_NotSupported — FormatStopResult on Action=
-// "not-supported" tells the user to fall back to /kill.
+// "not-supported" tells the user to fall back to /close.
 func TestFormatStopResult_NotSupported(t *testing.T) {
 	got := stoppkg.FormatStopResult(stoppkg.Result{
 		Agent: "bash", Cwd: "/code/A", Action: "not-supported",
 	})
-	if !strings.Contains(got, "/kill") {
-		t.Errorf("want reply pointing at /kill fallback, got %q", got)
+	if !strings.Contains(got, "/close") {
+		t.Errorf("want reply pointing at /close fallback, got %q", got)
 	}
 }
 

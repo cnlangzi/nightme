@@ -476,7 +476,7 @@ func (as *AgentSession) Background() {
 //     events onto EventBus before closing it).
 //  5. Closes the EventBus so subscribers see Publish as a no-op.
 //
-// Called by /kill, ChatSession shutdown, and AS reaping. NOT
+// Called by /close, ChatSession shutdown, and AS reaping. NOT
 // called by /use (which only changes `cs.selectedAS` — see
 // Background).
 //
@@ -1149,7 +1149,7 @@ func (as *AgentSession) Close() error {
 //
 // Bridges that cannot honor Stop return agent.ErrNotSupported; the
 // caller can detect with errors.Is and fall back to Close() (full
-// /kill semantics for this AgentSession).
+// /close semantics for this AgentSession).
 //
 // Returns ErrNotRunning if Spawn has not been called (handle is
 // nil). Distinct from Close(): Stop does not change the

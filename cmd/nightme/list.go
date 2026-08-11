@@ -48,25 +48,25 @@ import (
 
 // listCmdFlags captures every flag the list subcommand accepts.
 type listCmdFlags struct {
-	jsonOutput  bool
-	all         bool
-	keepExited  bool
+	jsonOutput bool
+	all        bool
+	keepExited bool
 }
 
 // listRow is the flattened view of one AgentSessionEntry joined with
 // its owning ChatSessionEntry. JSON-serializable (json tags match the
 // JSON-friendly camelCase surface used by the registry).
 type listRow struct {
-	AgentSessionID string             `json:"agentSessionId"`
-	ChatID         string             `json:"chatId"`
-	Agent          string             `json:"agent"`
-	Cwd            string             `json:"cwd"`
-	PID            int                `json:"pid"`
-	Status         registry.Status    `json:"status"`
-	SessionID       string             `json:"resumeId,omitempty"`
-	ExitCode       *int               `json:"exitCode,omitempty"`
-	CreatedAt      time.Time          `json:"createdAt"`
-	LastRunAt      time.Time          `json:"lastRunAt"`
+	AgentSessionID string          `json:"agentSessionId"`
+	ChatID         string          `json:"chatId"`
+	Agent          string          `json:"agent"`
+	Cwd            string          `json:"cwd"`
+	PID            int             `json:"pid"`
+	Status         registry.Status `json:"status"`
+	SessionID      string          `json:"resumeId,omitempty"`
+	ExitCode       *int            `json:"exitCode,omitempty"`
+	CreatedAt      time.Time       `json:"createdAt"`
+	LastRunAt      time.Time       `json:"lastRunAt"`
 }
 
 func newListCmd() *cobra.Command {
@@ -245,7 +245,7 @@ func loadListRows(
 			Cwd:            as.Cwd,
 			PID:            as.PID,
 			Status:         as.Status,
-			SessionID:       as.SessionID,
+			SessionID:      as.SessionID,
 			ExitCode:       as.ExitCode,
 			CreatedAt:      as.CreatedAt,
 			LastRunAt:      as.LastRunAt,
@@ -342,6 +342,7 @@ func startCell(t time.Time) string {
 	}
 	return t.Local().Format("15:04:05")
 }
+
 // printListJSON serializes rows to w. The output is the raw array
 // (not wrapped in an envelope) so `jq '.[]'` works directly.
 func printListJSON(w io.Writer, rows []listRow) error {
@@ -349,4 +350,3 @@ func printListJSON(w io.Writer, rows []listRow) error {
 	enc.SetIndent("", "  ")
 	return enc.Encode(rows)
 }
-

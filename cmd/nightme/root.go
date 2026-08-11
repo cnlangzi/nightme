@@ -48,16 +48,11 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newAgentsCmd())
 	root.AddCommand(newLoginCmd())
 	root.AddCommand(newNameCmd())
-	root.AddCommand(newStartCmd())
-	root.AddCommand(newStatusCmd())
-	root.AddCommand(newStopCmd())
-	root.AddCommand(newRestartCmd())
 	root.AddCommand(newLogsCmd())
-	root.AddCommand(newDaemonCmd())
 	root.AddCommand(newConfigCmd())
 	root.AddCommand(newVersionCmd())
-	root.AddCommand(newDoctorCmd())
 	root.AddCommand(newDebugCmd())
+	addUnixOnlyCommands(root)
 	return root
 }
 

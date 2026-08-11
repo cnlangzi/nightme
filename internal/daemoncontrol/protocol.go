@@ -9,6 +9,13 @@ import (
 	"time"
 )
 
+// ErrNotRunning is returned by Ping / GetStatus / GetHealth /
+// Stop / RequestSocket when no daemon is listening on the
+// requested endpoint. Cross-platform: it covers both "no
+// socket file" (Unix) and "no pipe instance" / "pipe not
+// accessible" (Windows).
+var ErrNotRunning = errors.New("nightme daemon is not running")
+
 const (
 	ProtocolVersion = 1
 	maxFrameSize    = 64 << 10

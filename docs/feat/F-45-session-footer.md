@@ -16,7 +16,7 @@
 > - `internal/channel/feishu/adapter.go` — `Send` 三个 main-chat case 拼 footer
 > - 文档同步（`SPEC.md` §0.12 / `channel/feishu.md` §13.22 / `F-44 §6.1` cross-link）
 >
-> **Depends on**: F-25 (rolling-log receipt), F-37 (multi-div split), F-38 (task checklist), F-39 (OutResult 独立 reply), F-40 (OutReply 改名), F-42 (lazy receipt creation), F-43 (`/kill` graceful), F-44 (OutReply 拆出 receipt + OutInit/OutUsage 推迟)
+> **Depends on**: F-25 (rolling-log receipt), F-37 (multi-div split), F-38 (task checklist), F-39 (OutResult 独立 reply), F-40 (OutReply 改名), F-42 (lazy receipt creation), F-43 (`/close` graceful), F-44 (OutReply 拆出 receipt + OutInit/OutUsage 推迟)
 > **Related**: [`SPEC.md`](../SPEC.md) §0.12（本文落地）/ §1.3 / §1.4 / §2.2；[`channel/feishu.md`](../channel/feishu.md) §12 / §13.22 / §13.24 (F-48 git branch) / §13.25 (F-49 compaction counter) / §18；[`F-44 §6.1`](./F-44-outreply-independent-and-task-receipt.md) 推迟项兑现；**[`F-46-interactive-cards.md`](./F-46-interactive-cards.md)** 决策卡 button + 原地 PATCH；§1.7 F-48 git branch follow-up；§1.8 F-49 compaction counter follow-up；详细 F-49 设计见 [`F-49`](./F-49-compaction-counter.md)
 
 ---
@@ -117,7 +117,7 @@ type OutboundMessage struct {
 ### 0.5 持久化范围澄清
 
 **Q：cumulative 持久化到文件？什么时候清零？**
-> 持久化到 `agent_sessions.json`（`AgentSessionEntry` 加 `CumulativeUsage *UsageInfo` + `Model string`）。**只有 `/new` 命令清零**——其他场景（daemon 重启 / `/cwd` / `/use` / `/kill` / 进程崩溃）一律保留。
+> 持久化到 `agent_sessions.json`（`AgentSessionEntry` 加 `CumulativeUsage *UsageInfo` + `Model string`）。**只有 `/new` 命令清零**——其他场景（daemon 重启 / `/cwd` / `/use` / `/close` / 进程崩溃）一律保留。
 >
 > **理由**：用户视角下，"这个 chat 的累计 token 消耗"是有价值的历史信息，不应被生命周期事件抹掉。`/new` 是用户主动"重置上下文"——此时 footer 也应从零开始计数，语义一致。
 
@@ -1133,7 +1133,7 @@ if footer != "" {
 - **F-39 OutResult 决策**：不变（独立 reply + footer 拼文末）
 - **F-40 OutReply 命名**：不变
 - **F-42 lazy receipt creation**：不变
-- **F-43 `/kill` graceful / `/new` ResetID**：本 PR 在 `handleNew` 加 `ResetCumulative`，与 F-43 的"clear ResumeID"语义对称
+- **F-43 `/close` graceful / `/new` ResetID**：本 PR 在 `handleNew` 加 `ResetCumulative`，与 F-43 的"clear ResumeID"语义对称
 - **F-44 OutReply 拆出 + task receipt 瘦身**：不变
 
 **为什么不是 v2.0**：v1.3 核心不变式（职责隔离、Binding FSM owner、Receipt 自治、抽象归抽象 / 具体归具体、§1.4 边界规范）全部保留。F-45 是 runtime + Channel 自治范围内的"metadata 自描述 + footer 渲染"扩展，不影响 nightme 数据模型与 Gateway 核心契约。

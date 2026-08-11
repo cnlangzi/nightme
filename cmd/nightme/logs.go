@@ -30,14 +30,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/config"
-	"github.com/cnlangzi/nightme/internal/logging"
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
+	"github.com/cnlangzi/nightme/internal/logging"
 )
 
 const (
@@ -221,7 +220,7 @@ func runLogs(cmd *cobra.Command, f logsCmdFlags) error {
 	if !f.follow {
 		return nil
 	}
-	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(cmd.Context(), shutdownSignals()...)
 	defer stop()
 	return followLog(ctx, out, path)
 }

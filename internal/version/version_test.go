@@ -5,17 +5,20 @@ import (
 	"testing"
 )
 
-// TestVersion_Pinned locks the v0.1.0 marker so a release-bump
-// PR accidentally editing this string without bumping Version
-// itself fails loudly.
-func TestVersion_Pinned(t *testing.T) {
-	if Version != "0.1.0" {
-		t.Errorf("Version = %q, want 0.1.0", Version)
+// TestVersion_DefaultNonEmpty guarantees the no-ldflags default
+// (used by `go run` / `go build` during development) still renders
+// a non-empty version banner. Release builds inject Version from
+// the git tag via -ldflags, so this only constrains the dev-time
+// default.
+func TestVersion_DefaultNonEmpty(t *testing.T) {
+	if Version == "" {
+		t.Errorf("Version default is empty; the --version banner would be blank")
 	}
 }
 
 // TestString pins the exact banner printed by `nightme --version`
-// so log scrapers / dashboards can rely on the format.
+// when built without -ldflags, so log scrapers / dashboards can
+// rely on the format.
 func TestString(t *testing.T) {
 	got := String()
 	want := "nightme version 0.1.0 (commit: unknown, built: unknown)"

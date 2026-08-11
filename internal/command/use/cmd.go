@@ -7,7 +7,7 @@
 //
 // commit 8c: also starts the per-ChatSession readPump for the
 // newly-active AgentSession (translates Events → Channel.Send).
-// Old pump is implicitly stopped via /kill or previous /use.
+// Old pump is implicitly stopped via /close or previous /use.
 //
 // Factory holds *chatsession.Manager directly.
 package use

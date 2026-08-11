@@ -216,7 +216,7 @@ func (d *driver) New(ctx context.Context) error {
 // Stop is not supported on the PTY bridge. PTY-mode CLIs don't
 // have a structured "abort the in-flight turn" RPC, and the
 // runtime treats ErrNotSupported as "this bridge can't honor Stop;
-// the caller should fall back to Close (full /kill semantics)".
+// the caller should fall back to Close (full /close semantics)".
 // Returning the sentinel lets the runtime surface a clean "not
 // supported for this bridge" message rather than treating the
 // absence as a generic error.

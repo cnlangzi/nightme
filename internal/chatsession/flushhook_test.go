@@ -121,13 +121,14 @@ func TestFlushHook_BusyQueues(t *testing.T) {
 	}
 }
 
-// TestFlushHook_NoActiveAgentSession: when /kill has cleared the
-// pool (selectedAS == nil), flushing is a safe no-op that leaves the
-// message queued for the next respawn, instead of panicking.
+// TestFlushHook_NoActiveAgentSession: when the bridge process has
+// been killed (e.g. via /close) but the AgentSession entry is
+// preserved with StatusExited, flushing is a safe no-op that leaves
+// the message queued for the next respawn, instead of panicking.
 //
 // CS-AS 边界重构 Phase 1 port: the old default hook returned
 // ErrNotRunning here. TryFlush now SKIPs with reason=activeAS_nil
-// and returns nil — /kill deliberately preserves the queue, and
+// and returns nil — /close deliberately preserves the queue, and
 // the message flushes when the next AS spawns.
 func TestFlushHook_NoActiveAgentSession(t *testing.T) {
 	spawner := &spawnerRecording{}
@@ -139,17 +140,26 @@ func TestFlushHook_NoActiveAgentSession(t *testing.T) {
 	cs.SetSelectedAgent("claude")
 	cs.LookupSelectedAgentSession()
 
-	// Simulate /kill via the lifecycle accessors (snapshot → Close →
-// Drop) — the kill package's KillAllAgents is tested separately in
-// internal/command/kill to avoid an import cycle here.
-snapshot := cs.AgentSessionsInCwd(cs.SelectedCwd())
-for _, as := range snapshot {
-	_ = as.Close()
-	cs.DropAgentSession(as)
-}
+	// Simulate /close: kill the bridge process (Close) but DO NOT
+	// drop the AgentSession entry. The entry stays in the pool with
+	// StatusExited and its sessionID preserved. The close package's
+	// CloseAllAgents is tested separately in
+	// internal/command/close/close_test.go.
+	//
+	// We also call SetExited manually because real production would
+	// have ObserveClose running and would mark StatusExited when the
+	// events channel closed (which is exactly what fakeAgentSession.Close
+	// does — but our test path doesn't run ObserveClose).
+	snapshot := cs.AgentSessionsInCwd(cs.SelectedCwd())
+	for _, as := range snapshot {
+		_ = as.Close()
+		as.SetExited(0)
+	}
 
-	// selectedAS is nil. Queueing must not panic, and the message
-	// must survive for the next respawn.
+	// Bridge process is gone (StatusExited); AS still in pool with
+	// sessionID preserved. Queueing must not panic, and the message
+	// must survive for the next respawn (which will replay
+	// --resume <sessionID> on the same AS entry).
 	msg := makeTestMessage(cs,
 		[]agent.ContentBlock{{Type: agent.ContentText, Text: "lost"}}, "m_lost")
 	if err := cs.QueueUserMessage(msg); err != nil {

@@ -200,7 +200,7 @@ func TestList_PreservesExitedWithResumeID(t *testing.T) {
 		Cwd:           "/tmp/w",
 		Status:        registry.StatusExited,
 		ExitCode:      &code,
-		SessionID:      "sess-preserve-me",
+		SessionID:     "sess-preserve-me",
 		CreatedAt:     now,
 		LastRunAt:     now,
 	}); err != nil {

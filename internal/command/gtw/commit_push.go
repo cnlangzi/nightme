@@ -11,8 +11,8 @@ import (
 )
 
 // RunOnceTimeout is the hard deadline for a one-shot agent
-// call (commit+push, PR title+body generation). 5 minutes
-// covers realistic agent commits (lint fixes, conflict
+// call (Branch 2 of /gtw push, plus /gtw pr's one-shot). 5
+// minutes covers realistic agent commits (lint fixes, conflict
 // resolution, multi-tool flows) without wedging /gtw push if
 // an agent hangs (e.g. PTY fallback with no idle signal — see
 // pty.RunOnce's ptyIdleTimeout for the per-call short-window
@@ -21,21 +21,22 @@ import (
 // Exported because both /gtw push and /gtw pr use it.
 const RunOnceTimeout = 5 * time.Minute
 
-// dispatchPush is the three-state dispatcher for /gtw push.
+// dispatchPush is the three-branch dispatcher for /gtw push,
+// per F-56 §2. The dispatch is decided by two git-state queries
+// done once at entry:
 //
-// Flow:
+//	isClean        := strings.TrimSpace(statusOut) == ""
+//	unpushedBefore := countUnpushed(worktree, branch)
 //
-//  1. loadDispatchContext → c (Context). Reads cs.SelectedCwd()
-//     and either loads `.nightme/gtw.yml` (worktree mode) or
-//     derives Worktree/Branch/RepoRoot from git (non-worktree
-//     mode).
-//  2. git status --porcelain (single call, drives both the
-//     conflict check and the clean/dirty dispatch).
-//  3. If status has unmerged paths → refuse (rebase/merge
-//     mid-state guard via detectConflicts).
-//  4. Otherwise:
-//     empty → pushClean  (clean branch: nothing OR programmatic push)
-//     dirty → pushDirty  (delegate commit + push to one-shot agent)
+// and selects exactly one of:
+//
+//   - Branch 1 (no-op)         — isClean && unpushed==0
+//   - Branch 2 (agent + push)  — !isClean
+//   - Branch 3 (push only)     — isClean && unpushed>0
+//
+// Each branch is mutually exclusive. The agent is only spawned
+// in Branch 2; the push is owned by nightme in Branches 2 and
+// 3; Branch 1 just notifies the user and exits.
 //
 // Reply is sent inline via cs.Emitter(); return value is the
 // runtime's *Result carrying Consumed / Dropped only.
@@ -64,169 +65,204 @@ func dispatchPush(
 					"hint: resolve conflicts and `git add` the resolutions, OR `git rebase --abort` / `git merge --abort`",
 				c.Worktree)), nil
 	}
-	if strings.TrimSpace(statusOut) == "" {
-		return pushClean(ctx, cs, deps, chatID, messageID, c)
-	}
-	return pushDirty(ctx, cs, deps, chatID, messageID, c, args, ymlAgent)
-}
 
-// pushClean handles the clean-worktree branch:
-//
-//   - 0 unpushed commits → "✅ nothing to push" (terminal reply).
-//   - N unpushed commits → we push programmatically via
-//     programmaticPush (git push -u origin <branch>).
-//
-// "Nothing to push" is a hard terminal: no agent call, no git
-// push. We do this so the user gets fast feedback on the common
-// "I'm just checking" case. The user can still run `git push`
-// manually if upstream tracking is broken.
-//
-// After programmaticPush returns nil (claimed success), we
-// re-count unpushed. If it's still > 0 we retry once — git push
-// can silently no-op on transient network errors that the
-// command exit code doesn't surface (e.g. partial TCP close,
-// remote returns 200 but the refs aren't updated). One retry
-// catches the common race; if the retry also leaves unpushed
-// commits behind, we surface the actual commit list so the
-// user can investigate (network/auth/protection rule on the
-// remote).
-func pushClean(
-	ctx context.Context,
-	cs *chatsession.ChatSession,
-	deps HandlerDeps,
-	chatID, messageID string,
-	c Context,
-) (*Result, error) {
-	unpushed, err := countUnpushed(ctx, c.Worktree, c.Branch, deps)
+	// headBefore is required by both Branch 2's verifyAgentCommitted
+	// and the success card's revRange. Silently swallowing the error
+	// would cause the verify to skip its HEAD-advance check (the
+	// very check that catches today's bug) AND the success card
+	// to render an invalid `..origin/branch` range. Surface it.
+	headBefore, err := headSHA(ctx, c.Worktree, deps)
+	if err != nil {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			fmt.Sprintf("❌ read HEAD: %v", err)), nil
+	}
+	isClean := strings.TrimSpace(statusOut) == ""
+	unpushedBefore, err := countUnpushed(ctx, c.Worktree, c.Branch, deps)
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ check unpushed commits: %v", err)), nil
 	}
-	if unpushed == 0 {
+
+	// ── Branch 1: no-op ─────────────────────────────────────
+	// Worktree is clean AND no unpushed commits → tell the user
+	// and exit. No agent, no push.
+	if isClean && unpushedBefore == 0 {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"✅ nothing to push — worktree clean and no unpushed commits"), nil
+			"ℹ️ nothing to push\n"+
+				"  no uncommitted changes\n"+
+				"  no unpushed commits on "+c.Branch), nil
 	}
 
-	out, err := programmaticPush(ctx, deps, c)
+	// ── Branch 2: dirty → agent commits → verify → push ─────
+	agentName := ""
+	if !isClean {
+		name, errMsg := runAgentToCommit(ctx, cs, c, args, ymlAgent)
+		if errMsg != "" {
+			return reply(ctx, cs.Emitter(), chatID, messageID, errMsg), nil
+		}
+		agentName = name
+
+		// Verify the agent actually committed (HEAD advance +
+		// worktree clean + branch still on c.Branch). If any
+		// check fails, surface the diagnostic and DO NOT push.
+		if msg := verifyAgentCommitted(ctx, deps, c, headBefore); msg != "" {
+			return reply(ctx, cs.Emitter(), chatID, messageID, msg), nil
+		}
+
+		// Re-count unpushed after the agent's commits. This
+		// decides the Branch 3 续 push (unpushed>0) vs the
+		// defensive "nothing to push" branch (unpushed==0).
+		// Errors MUST surface — silently treating a real
+		// failure as "0 unpushed" would dump the user into
+		// the defensive branch with a misleading "nothing to
+		// push" hint instead of the actual git error.
+		unpushedBefore, err = countUnpushed(ctx, c.Worktree, c.Branch, deps)
+		if err != nil {
+			return reply(ctx, cs.Emitter(), chatID, messageID,
+				fmt.Sprintf("❌ check unpushed after agent: %v", err)), nil
+		}
+	}
+
+	// ── Branch 3 (or Branch 2 续): worktree is clean, push ──
+	// Defensive: if the agent ran but produced no new commits
+	// (e.g. HEAD advance check passed but countUnpushed still 0
+	// because HEAD@{u} equals HEAD), surface a warning rather
+	// than calling push with nothing to do.
+	if unpushedBefore == 0 {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			"⚠️ worktree is clean but nothing to push.\n"+
+				"hint: inspect the worktree's HEAD vs origin/"+c.Branch+" manually."), nil
+	}
+
+	if err := programmaticPushWithRetry(ctx, deps, c); err != nil {
+		// err.Error() is already a complete IM-friendly message
+		// (per F-56 §4.3 design). Paste it straight in.
+		return reply(ctx, cs.Emitter(), chatID, messageID, err.Error()), nil
+	}
+
+	// Build the success card from git log — NOT from agent prose.
+	// revRange is `headBefore..origin/<branch>` so the card lists
+	// exactly the commits this push just landed. A failure here
+	// is a hard error: the push succeeded but we can't render
+	// the result. Surface the failure rather than fudging a
+	// "pushed 0 commit(s)" card.
+	card, err := replySuccessCard(ctx, c, agentName,
+		headBefore+"..origin/"+c.Branch, deps)
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ git push failed: %v\n%s", err, out)), nil
+			fmt.Sprintf("❌ push succeeded but couldn't render card: %v", err)), nil
 	}
-
-	// Post-push verification: programmaticPush returning nil is
-	// necessary but not sufficient (network race, remote silently
-	// rejected, etc.). Re-count and retry once if any commit
-	// didn't actually land upstream.
-	if verifyMsg := verifyPushedAndRetry(ctx, deps, c, out); verifyMsg != "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID, verifyMsg), nil
-	}
-
-	// Format 3 (see gtw/README.md §2.3): opaque content block.
-	// Title names the action, `> <branch>` line names the entity,
-	// raw git push output follows verbatim. The previous
-	// `[Push]\n━━━━━━━━━━━━━━\n🌿 branch: ...\n📁 worktree: ...`
-	// form was a Format 1/2 hybrid that didn't fit any rule; the
-	// branch is now redundant with the `>` line and the worktree
-	// path is recoverable from git config if the user needs it.
-	body := fmt.Sprintf(
-		"✅ pushed\n"+
-			"> %s\n%s\n",
-		c.Branch, strings.TrimRight(out, "\n"),
-	)
-	return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
+	return reply(ctx, cs.Emitter(), chatID, messageID, card), nil
 }
 
-// verifyPushedAndRetry re-counts unpushed after a claimed-successful
-// push. If anything is still missing, it retries programmaticPush
-// once; if the retry also leaves commits behind, it returns the
-// formatted error message naming the unpushed commits. Empty
-// return = push verified successful, caller should report success.
+// runAgentToCommit spawns the configured one-shot agent and
+// runs the slim buildAgentPrompt against it. The agent's prose
+// text is intentionally ignored — verification reads git state
+// (verifyAgentCommitted) before deciding anything succeeded.
 //
-// Critical: countUnpushed errors MUST be checked, not discarded.
-// If we ignored the error and reported "✅ pushed" based on the
-// zero value of unpushed (which is 0), a real verification
-// failure (NFS unmount, worktree removed, permission denied) would
-// surface as a green checkmark that lies to the user.
-func verifyPushedAndRetry(ctx context.Context, deps HandlerDeps, c Context, firstOut string) string {
-	unpushed, err := countUnpushed(ctx, c.Worktree, c.Branch, deps)
-	if err != nil {
-		return fmt.Sprintf("⚠️ pushed (claimed) but verification failed: %v", err)
-	}
-	if unpushed == 0 {
-		return ""
-	}
-
-	// Retry once.
-	_, err = programmaticPush(ctx, deps, c)
-	if err != nil {
-		return fmt.Sprintf(
-			"❌ push reported success but %d commits on %s still don't appear on origin/%s\n"+
-				"first attempt stderr: %s\n"+
-				"retry error: %v\n"+
-				"hint: check `git push -v %s` — likely network or remote protection rule.\n\n"+
-				"unpushed commits:\n%s",
-			unpushed, c.Branch, c.Branch,
-			strings.TrimSpace(firstOut), err, c.Branch,
-			unpushedCommitsForDisplay(ctx, c.Worktree, c.Branch, deps),
-		)
-	}
-
-	unpushed, err = countUnpushed(ctx, c.Worktree, c.Branch, deps)
-	if err != nil {
-		return fmt.Sprintf(
-			"❌ %d commits on %s couldn't be re-counted after retry: %v\n"+
-				"hint: check `git push -v %s` and `git status` in the worktree.",
-			unpushed, c.Branch, err, c.Branch,
-		)
-	}
-	if unpushed == 0 {
-		return "" // retry succeeded
+// Returns (name, "") on success, ("", errMsg) on any failure
+// that should short-circuit dispatchPush (no agent selected,
+// unknown agent, binary missing, RunOnce errored).
+//
+// Agent selection (per F-104 / wip/gtw-hooks.md): CLI -a flag
+// wins, then yml <cmd>.agent, then chat's currently Selected
+// Agent. The yml-loader lives in cmd.go's runPush wrapper (so
+// loadNotes can be surfaced to the user); runAgentToCommit
+// receives the already-resolved ymlAgent string.
+func runAgentToCommit(
+	ctx context.Context,
+	cs *chatsession.ChatSession,
+	c Context,
+	args pushArgs,
+	ymlAgent string,
+) (string, string) {
+	agentName, agentNotes := ResolveAgent(args.Agent, ymlAgent, cs)
+	if agentName == "" {
+		// B2: surface agentNotes so a yml pointing at an unknown
+		// agent doesn't silently degrade to a generic "no agent
+		// selected" reply.
+		var msg strings.Builder
+		msg.WriteString("❌ no agent selected. Send `/use <name>` first or pass `-a <name>`.")
+		for _, n := range agentNotes {
+			msg.WriteByte('\n')
+			msg.WriteString(n)
+		}
+		return "", msg.String()
 	}
 
-	return fmt.Sprintf(
-		"❌ %d commits on %s still don't appear on origin/%s after retry\n"+
-			"hint: check `git push -v %s` — likely network or remote protection rule.\n\n"+
-			"unpushed commits:\n%s",
-		unpushed, c.Branch, c.Branch, c.Branch,
-		unpushedCommitsForDisplay(ctx, c.Worktree, c.Branch, deps),
+	a, err := agent.Builtins.Get(agentName)
+	if err != nil {
+		return "", fmt.Sprintf("❌ unknown agent %q (check `nightme agents` or your config)", agentName)
+	}
+	if err := a.Detect(); err != nil {
+		return "", fmt.Sprintf("❌ agent %s not available: %v", agentName, err)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, RunOnceTimeout)
+	defer cancel()
+
+	blocks := []agent.ContentBlock{{
+		Type: agent.ContentText,
+		Text: buildAgentPrompt(c),
+	}}
+	// RunOnce's text return value is intentionally discarded.
+	// Per F-56 §1.2, git state — not agent prose — is the
+	// source of truth.
+	_, err = a.RunOnce(ctx,
+		agent.StartConfig{Workspace: c.Worktree},
+		blocks,
 	)
+	if err != nil {
+		return agentName, fmt.Sprintf("❌ agent %s failed: %v", agentName, err)
+	}
+	return agentName, ""
 }
 
-// verifyAgentPushedAndRecover is the post-agent sanity check used
-// by pushDirty. After the agent claims it committed and pushed,
-// we independently verify all of:
+// verifyAgentCommitted is the post-agent sanity check that runs
+// in Branch 2 of dispatchPush. Per F-56 §4.1, it ONLY validates
+// the agent's commit work — never the push (that's
+// programmaticPushWithRetry's job).
 //
-//  1. HEAD branch: agent must still be on c.Branch. If the agent
-//     `git checkout`'d to a side branch, committed there, and
-//     "pushed" — the worktree from c.Branch's perspective looks
-//     clean, countUnpushed is 0, and the user gets a green
-//     checkmark for a commit that will never land on c.Branch.
-//     Verified by reading the branch HEAD is currently on.
+// Three checks, in order:
 //
-//  2. uncommitted files: if any remain, the agent skipped them
-//     (intentionally or not). Surface the file list and tell
-//     the user to either commit them manually or re-run
-//     /gtw push. We do NOT re-invoke the agent — the same
-//     agent already had a chance and chose to leave these
-//     behind.
+//  1. branch: agent must still be on c.Branch. If the agent
+//     `git checkout`'d to a side branch and committed there, the
+//     worktree is clean and HEAD is different from headBefore,
+//     but the commits will never land on c.Branch — we MUST
+//     refuse here, not at push time.
 //
-//  3. unpushed commits: if any remain, the agent's commit
-//     succeeded but the push didn't (network race, non-FF,
-//     etc.). Try programmaticPush once — same retry semantics
-//     as pushClean — and surface the commit list if the retry
-//     also leaves things behind.
+//  2. worktree clean: status --porcelain must be empty after
+//     the agent. If files remain uncommitted, the agent skipped
+//     them (deliberately or not). We surface the file list and
+//     refuse to push.
 //
-//  4. HEAD advanced: if the worktree was dirty before the agent
-//     (pushDirty only runs when status --porcelain has output)
-//     and is clean now, but HEAD didn't move, the agent must
-//     have done something OUTSIDE git (stash, file restore,
-//     etc.) that doesn't constitute a "push". We surface a
-//     warning rather than reporting success.
+//  3. HEAD advanced: headAfter must differ from headBefore.
+//     Catches the false-success class (today's bug) where the
+//     worktree became clean via stash/restore (not via commit).
 //
-// Returns "" when all four checks pass; the caller should report
-// success in that case.
-func verifyAgentPushedAndRecover(ctx context.Context, deps HandlerDeps, c Context, headBefore string) string {
-	// (1) Branch check: agent must still be on c.Branch.
+// Returns "" when all three pass; a complete IM-friendly
+// diagnostic string otherwise (the caller pastes it straight
+// into the reply).
+//
+// headBefore is REQUIRED. The dispatcher (dispatchPush) always
+// captures it before spawning the agent and aborts if the
+// capture itself fails. If this function is ever called with
+// headBefore == "" it returns an internal-error diagnostic
+// rather than skipping the HEAD-advance check — the false-success
+// class is the exact thing this check exists to catch, so it
+// cannot be silently disabled.
+func verifyAgentCommitted(ctx context.Context, deps HandlerDeps, c Context, headBefore string) string {
+	if headBefore == "" {
+		return "⚠️ internal error: headBefore not captured; cannot verify commits.\n" +
+			"hint: this should not happen — please file a bug."
+	}
+	// The 3 checks below are read-only post-mortem: they assume
+	// the agent's RunOnce has already returned and the agent
+	// process is no longer mutating the worktree. This is
+	// guaranteed by RunOnce's contract (returns when the agent
+	// emits its final event and the process is reaped by the
+	// caller's defer a.Close() — see agent/runonce.go).
+	// (1) Branch check.
 	branchAfter, err := currentBranch(ctx, c.Worktree, deps)
 	if err != nil {
 		return fmt.Sprintf("⚠️ agent finished but failed to read current branch: %v", err)
@@ -239,7 +275,7 @@ func verifyAgentPushedAndRecover(ctx context.Context, deps HandlerDeps, c Contex
 			branchAfter, c.Branch, c.Worktree, c.Branch)
 	}
 
-	// (2) uncommitted check.
+	// (2) Worktree clean check.
 	uncommitted, err := listUncommittedFiles(ctx, c.Worktree, deps)
 	if err != nil {
 		return fmt.Sprintf("⚠️ agent finished but failed to verify clean state: %v", err)
@@ -251,232 +287,63 @@ func verifyAgentPushedAndRecover(ctx context.Context, deps HandlerDeps, c Contex
 				"hint: commit them manually, or re-run /gtw push to retry.\n"+
 				"  (the agent was given a chance to commit them — re-invoking it automatically won't necessarily help)",
 			len(uncommitted), c.Worktree,
-			strings.Join(uncommitted, "\n  "),
-		)
+			strings.Join(uncommitted, "\n  "))
 	}
 
-	// (4) HEAD advance check: if we have a headBefore snapshot
-	// and HEAD didn't move, the agent didn't commit anything.
-	// countUnpushed would be 0 (HEAD already at upstream), but
-	// the dirty → clean transition can't have happened via a
-	// commit, so something's off. headBefore == "" is the
-	// "unknown" sentinel — caller didn't capture it (older
-	// call sites) and we skip this check.
-	if headBefore != "" {
-		headAfter, err := headSHA(ctx, c.Worktree, deps)
-		if err != nil {
-			return fmt.Sprintf("⚠️ agent finished but failed to read HEAD: %v", err)
-		}
-		if headAfter == headBefore {
-			return fmt.Sprintf(
-				"⚠️ agent finished but no new commit was created (HEAD unchanged at %s).\n"+
-					"hint: the worktree was dirty before the agent and is clean now, but git has no record of a commit. "+
-					"Re-run /gtw push to retry, or inspect the worktree manually.",
-				shortSHA(headBefore))
-		}
-	}
-
-	// uncommitted is clean → check push.
-	unpushed, err := countUnpushed(ctx, c.Worktree, c.Branch, deps)
+	// (3) HEAD advance check. headBefore is required (checked
+	// at function entry); no `if headBefore != ""` skip here.
+	headAfter, err := headSHA(ctx, c.Worktree, deps)
 	if err != nil {
-		return fmt.Sprintf("⚠️ agent finished but failed to verify push state: %v", err)
+		return fmt.Sprintf("⚠️ agent finished but failed to read HEAD: %v", err)
 	}
-	if unpushed == 0 {
-		return ""
+	if headAfter == headBefore {
+		return fmt.Sprintf(
+			"⚠️ agent finished but no new commit was created (HEAD unchanged at %s).\n"+
+				"hint: the worktree was dirty before the agent and is clean now, but git has no record of a commit. "+
+				"Re-run /gtw push to retry, or inspect the worktree manually.",
+			shortSHA(headBefore))
 	}
 
-	// Agent committed but the push didn't land — let
-	// verifyPushedAndRetry own the retry+verify loop. Pass ""
-	// for firstOut because the agent's own push is the
-	// "attempt 0" and we don't have its output captured here.
-	if verifyMsg := verifyPushedAndRetry(ctx, deps, c, ""); verifyMsg != "" {
-		return verifyMsg
-	}
 	return ""
 }
 
-// pushDirty handles the dirty-worktree branch — delegates the
-// entire commit + push to a one-shot agent call wrapped in a
-// 5-minute timeout.
-//
-// Agent selection:
-//   - args.Agent (from -a / --agent) wins when non-empty.
-//   - Otherwise: chat's currently Selected Agent.
-//   - If both are empty: refuse (the user must /use first).
-//
-// Agent validation:
-//   - agent.Builtins.Get(name) returns ErrUnknownAgent → refuse.
-//   - a.Detect() fails (binary missing) → refuse with a clear
-//     "X not found" message before we even attempt the call.
-//
-// Agent reply:
-//   - We do NOT parse the text. We just check err vs nil. The
-//     text goes verbatim into the success card for the user to
-//     read (commit hash / push status are surfaced from agent
-//     prose; nightme does not re-query git to verify).
-func pushDirty(
-	ctx context.Context,
-	cs *chatsession.ChatSession,
-	deps HandlerDeps,
-	chatID, messageID string,
-	c Context,
-	args pushArgs,
-	ymlAgent string,
-) (*Result, error) {
-	// pushDirty is the only push path that spawns an agent
-	// (pushClean is a plain git push). The yml-configured agent
-	// name comes from the caller (cmd.go runPush already loaded
-	// the user-level config); pushDirty itself does NOT Load() —
-	// that responsibility lives in the cmd.go wrapper which
-	// surfaces loadNotes to the user. Loading here would
-	// duplicate the warning block in the chat (see wip/gtw-hooks.md
-	// "B1: 双重警告").
-	agentName, agentNotes := ResolveAgent(args.Agent, ymlAgent, cs)
-	if agentName == "" {
-		// B2: surface agentNotes here too. Without this, a yml
-		// pointing at an unknown agent (e.g. "pi") would
-		// silently degrade to "❌ no agent selected" — hiding
-		// the user's misconfiguration behind a generic error.
-		msg := "❌ no agent selected. Send `/use <name>` first or pass `-a <name>`."
-		for _, n := range agentNotes {
-			msg += "\n" + n
-		}
-		return reply(ctx, cs.Emitter(), chatID, messageID, msg), nil
-	}
-
-	a, err := agent.Builtins.Get(agentName)
-	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ unknown agent %q (check `nightme agents` or your config)", agentName)), nil
-	}
-	if err := a.Detect(); err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ agent %s not available: %v", agentName, err)), nil
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, RunOnceTimeout)
-	defer cancel()
-
-	blocks := []agent.ContentBlock{{
-		Type: agent.ContentText,
-		Text: buildAgentPrompt(c),
-	}}
-	text, err := a.RunOnce(ctx,
-		agent.StartConfig{Workspace: c.Worktree},
-		blocks,
-	)
-	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ agent %s failed: %v", agentName, err)), nil
-	}
-
-	// Snapshot HEAD before verification so we can detect "agent
-	// claimed success but didn't actually commit" — a class of
-	// failure where the worktree's status --porcelain is empty
-	// (e.g. agent did `git stash` instead of commit) and
-	// countUnpushed is 0 (HEAD was already at origin), but
-	// nothing actually landed on the remote. Without this
-	// snapshot we'd happily report "✅ pushed" for a no-op.
-	headBefore, headSnapErr := headSHA(ctx, c.Worktree, deps)
-	if headSnapErr != nil {
-		// Non-fatal — the verification will still catch
-		// uncommitted + unpushed. Pass "" to skip the
-		// HEAD-advance check (caller treats "" as
-		// "snapshot unavailable").
-		headBefore = ""
-	}
-
-	// Post-agent verification: the agent may have committed and
-	// pushed (the happy path), but it may also have left files
-	// uncommitted or the push may have silently failed (network
-	// race, non-fast-forward, …). We check both and take
-	// corrective action.
-	//
-	//   - uncommitted > 0 → agent didn't commit everything.
-	//     Surface the file list so the user can commit manually
-	//     or run /gtw push again to retry. We do NOT re-invoke
-	//     the agent automatically — the same agent already had
-	//     a chance and chose to leave these behind, possibly
-	//     deliberately (e.g. secrets, generated files). User
-	//     judgment is required.
-	//
-	//   - unpushed > 0 → agent committed but the push didn't
-	//     reach origin (or HEAD@{u} is on a different branch).
-	//     Try programmaticPush once more before giving up — git
-	//     push can no-op on transient errors that exit 0.
-	postMsg := verifyAgentPushedAndRecover(ctx, deps, c, headBefore)
-	if postMsg != "" {
-		body := postMsg
-		if text != "" {
-			body += "\n\nagent reply (for context):\n" + indentLines(text, "  ")
-		}
-		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
-	}
-
-	// Format: gtw-standard three-line reply — emoji title on
-	// line 1, `> <branch>` prompt on line 2, agent's prose on
-	// line 3+. feishu auto-prepends `❯ ` to the first line of
-	// every OutCommandReply (adapter.go:1588), so the rendered
-	// card is:
-	//
-	//	❯ 🤖 <agent> pushed
-	//	> <branch>
-	//	<agent text>
-	//
-	// Note on the header: we deliberately use "🤖 X pushed"
-	// instead of "✅ Pushed (via X)". The agent's RunOnce exits
-	// 0 even when the underlying git push failed (e.g.
-	// non-fast-forward, auth expired) and reports the failure in
-	// its prose reply. By design we do NOT parse that text,
-	// so we cannot honestly claim ✅. The neutral header lets
-	// the agent's text be the source of truth — if it says
-	// "pushed abc1234", great; if it says "push failed: ...",
-	// the user reads that without a green checkmark contradicting
-	// it.
-	body := fmt.Sprintf(
-		"🤖 %s pushed\n"+
-			"> %s\n%s\n",
-		agentName, c.Branch, text,
-	)
-	// Surface agent-resolve notes (e.g. yml referenced an unknown
-	// agent but a session default was found) at the bottom of the
-	// reply so the user can see why their config didn't fully apply.
-	// These are diagnostics, not blockers — main flow has succeeded.
-	if len(agentNotes) > 0 {
-		body += "\n" + strings.Join(agentNotes, "\n") + "\n"
-	}
-	return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
-}
-
 // buildAgentPrompt renders the single text block the agent
-// receives. Format:
-//   - Working directory + branch always present (anchors the agent).
-//   - Issue (#ID) only when ModeRemote (c.Issue > 0).
-//   - Conventional Commits format block is mandatory — without
-//     it the agent sometimes writes non-conforming messages
-//     (free-form subjects, missing type).
-//   - Step list: status → diff → commit → push → reply with hash.
-//   - "Reference issue with #ID in body" only when c.Issue > 0.
+// receives. Per F-56 §3, the prompt is intentionally minimal —
+// only role + task + 3 hard rules. No reference to nightme's
+// verification / push / IM card generation. The agent is a
+// "release engineer" who only commits; push, push retry, and
+// the success card are all owned by nightme's code, derived
+// from git state.
+//
+// F-56 §3.3 enumerates the 3 rules and the rationale for each
+// (don't push / don't restore-or-stash / no `git add -A`).
+// Everything else is left to the agent's judgment.
 func buildAgentPrompt(c Context) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "Working directory: %s\n", c.Worktree)
-	fmt.Fprintf(&sb, "Branch: %s\n", c.Branch)
+	sb.WriteString("You are a release engineer.\n\n")
+
+	fmt.Fprintf(&sb,
+		"The user has uncommitted work on branch %s in %s",
+		c.Branch, c.Worktree)
 	if c.Issue > 0 {
-		fmt.Fprintf(&sb, "Issue: #%d\n", c.Issue)
+		fmt.Fprintf(&sb, " for issue #%d", c.Issue)
 	}
-	sb.WriteString("\nUncommitted changes detected.\n\n")
-	sb.WriteString("Task:\n")
-	sb.WriteString("1. Run `git status` and `git diff` to inspect changes.\n")
-	sb.WriteString("2. Write a Conventional Commits commit message.\n")
-	sb.WriteString("   Format: <type>(<optional-scope>): <subject>\n")
-	sb.WriteString("   Types: feat, fix, chore, refactor, docs, test, build, ci, perf, style, revert\n")
-	sb.WriteString("   Subject: ≤72 chars, imperative mood, no trailing period\n")
-	sb.WriteString("   Body: explain WHY, wrap at 72\n")
-	if c.Issue > 0 {
-		fmt.Fprintf(&sb, "   Reference issue with #%d in body.\n", c.Issue)
-	}
-	sb.WriteString("3. `git add -A && git commit -m \"<msg>\"` (heredoc if multi-line).\n")
-	fmt.Fprintf(&sb, "4. `git push -u origin %s`.\n", c.Branch)
-	sb.WriteString("5. Reply with: <commit_hash> <one-line summary>\n")
+	sb.WriteString(". They need it committed to local git.\n\n")
+
+	sb.WriteString("Group the changes by relevance — different concerns go in\n")
+	sb.WriteString("different commits, related changes go together. Use\n")
+	sb.WriteString("Conventional Commits for each:\n\n")
+	sb.WriteString("  <type>(<scope>): <subject>\n")
+	sb.WriteString("  types: feat, fix, chore, refactor, docs, test, build,\n")
+	sb.WriteString("         ci, perf, style, revert\n")
+	sb.WriteString("  subject: ≤72 chars, imperative, no trailing period\n")
+	sb.WriteString("  body: WHY, wrapped at 72  [<Issue: #N>] if applicable.\n\n")
+
+	sb.WriteString("Rules:\n")
+	sb.WriteString("- Do not push. Push is the user's decision, not yours;\n")
+	sb.WriteString("  never run `git push`.\n")
+	sb.WriteString("- Do not revert, restore, or stash the user's work.\n")
+	sb.WriteString("- `git add <specific files>`, not `git add -A`.\n")
+
 	return sb.String()
 }

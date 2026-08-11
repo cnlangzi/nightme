@@ -57,20 +57,20 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/command/gtw"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/gateway"
-	"github.com/cnlangzi/nightme/internal/command/gtw"
 )
 
 // debugFlags captures the shared flags.
 type debugFlags struct {
-	chatID  string
-	userID  string
+	chatID   string
+	userID   string
 	seedKind string
-	issueID int
-	branch  string
-	repo    string
-	title   string
+	issueID  int
+	branch   string
+	repo     string
+	title    string
 }
 
 func newDebugCmd() *cobra.Command {
@@ -410,7 +410,7 @@ type capturingChannel struct {
 	msgs   []gateway.OutboundMessage
 }
 
-func (c *capturingChannel) Name() string { return "capture" }
+func (c *capturingChannel) Name() string                  { return "capture" }
 func (c *capturingChannel) Start(_ context.Context) error { return nil }
 func (c *capturingChannel) Stop(_ context.Context) error  { return nil }
 

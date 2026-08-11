@@ -90,7 +90,7 @@ const serverStartTimeout = 10 * time.Second
 const handshakeTimeout = 10 * time.Second
 
 // shutdownGrace is the SIGINT-to-SIGKILL window for Close(), kept
-// short so /kill on a stuck server does not hang the runtime.
+// short so /close on a stuck server does not hang the runtime.
 const shutdownGrace = 2 * time.Second
 
 // closeDrainTimeout bounds the time Close() will wait for the

@@ -167,7 +167,7 @@ Three pain points of tools like openclaw, addressed head-on:
 | Pain | nightme's answer |
 |---|---|
 | The agent dies mid-task, conversation gone | **Process-level resumption.** Daemon / network / sleep interruption — restart and every ChatSession is auto-reattached, every AgentSession in `StatusDetached` is respawned with `--resume <session-id>` (Claude / Pi equivalent for others). Conversation survives. |
-| Silent timeout cuts you off | **Sessions are user-managed.** No "after N minutes you're disconnected" surprise. You pick the level: `/stop` halts the in-flight turn (keep session), `/new` resets context (keep process), `/kill` drops the AgentSession entirely. |
+| Silent timeout cuts you off | **Sessions are user-managed.** No "after N minutes you're disconnected" surprise. You pick the level: `/stop` halts the in-flight turn (keep session), `/steer` redirects with a new direction (keep session), `/new` resets context (keep process), `/close` terminates the bridge process (session preserved, respawn resumes). |
 | Project memory vanishes mid-task | **Continues until you say otherwise.** Default is keep compressing, never zero. Only explicit `/new` resets the agent's conversation context. |
 
 The principle: nightme **doesn't run its own memory system**. Context management is delegated to the upstream Claude Code / Codex / Pi that you're already paying for. So behavior is predictable — what you see is what the CLI sees, not what nightme invents. When the CLI's own compression kicks in, you know. When nightme does nothing, you know.
@@ -190,6 +190,59 @@ nightme doesn't try to be a "general Agent framework". It doesn't compete with L
 
 ## Quick reference
 
+### Chat input routing
+
+Every inbound message is dispatched by its first character. The three routes are owned by separate packages — no routing knowledge leaks between them:
+
+| Prefix | Routed to | Package |
+|---|---|---|
+| `!` / `！` (full-width) | Shell dispatcher — runs the body in the chat's CWD via `sh -c` / `cmd /c` | `internal/shell/` |
+| `/` | Command dispatcher — slash command (`/cwd`, `/use`, `/gtw fix`, …) | `internal/command/` |
+| anything else | Agent prompt — forwarded to the active AgentSession | (no package — default route) |
+
+### Shell mode (`!cmd`)
+
+A leading `!` (or full-width `！`) runs the body as a real shell command in the **chat's current CWD** — no agent in the loop, no `/cwd` / `/use` context needed beyond a bound workspace. The reply is a C-style summary card:
+
+```
+✅ $ ls -la
+exit 0 · 12ms · /Users/you/projects/foo
+stdout:
+  drwxr-xr-x  …
+  -rw-r--r--  …
+```
+
+```
+❌ $ go test ./...
+exit 1 · 4321ms · /Users/you/projects/foo
+stdout:
+  ok  	github.com/foo/bar	0.124s
+stderr:
+  # github.com/foo/baz
+  ./baz.go:42:9: undefined: qux
+```
+
+**When to use it**: quick recon (`!ls`, `!git status`, `!tail -n 50 app.log`), environment probes (`!go version`, `!which gh`), or anything where spawning an agent round-trip is overkill. The CWD is whatever you last bound with `/cwd` (or the chat's default), so `!cmd` always runs against the workspace you're already looking at.
+
+**Rules** (locked in by `parseShell` + `internal/shell/dispatch_test.go`):
+
+- **Prefix required.** `!cmd` matches, `echo !hi` does not (the `!` must be the first non-whitespace char).
+- **Empty body is a no-op.** A lone `!` or `!   ` falls through to the agent prompt — no accidental empty shells.
+- **Both bang forms work.** `!cmd` and `！cmd` are equivalent; mobile / full-width IME users don't have to switch keyboards.
+- **No CWD → friendly error.** If the chat has no bound workspace, you get the card below and nothing runs:
+
+  ```
+  ❌ shell: no CWD configured for this chat
+  Try `/use <path>` first.
+  ```
+- **5-minute cap.** A `!cmd` that runs longer than 5 minutes is killed. Longer jobs go in your own screen / tmux.
+- **Async + best-effort reply.** The command runs in a detached goroutine and the result posts as a thread reply; the gateway returns immediately so a slow `!cmd` never blocks the next message. The reply is best-effort — if the daemon is restarting (`!make restart`), the new daemon re-attaches to the chat and you may see the result there.
+- **Panic-safe.** A misbehaving command (or a sender bug) is recovered inside the goroutine — the daemon stays up, you lose one reply, nothing else.
+
+**Cross-platform**: macOS / Linux use `sh -c <cmd>`; Windows uses `cmd /c <cmd>`. Build-tag isolated in `internal/shell/dispatch_unix.go` / `dispatch_windows.go`.
+
+**Output cap**: stdout is inlined up to 50 lines; beyond that the card shows `… N more lines truncated` so a runaway `!cat huge.log` can't blow up the IM message size limit. stderr has no line cap but is always shown after stdout.
+
 ### Slash commands
 
 | Command | What it does |
@@ -197,7 +250,8 @@ nightme doesn't try to be a "general Agent framework". It doesn't compete with L
 | `/cwd <path>` | Bind this chat to a workspace. Validates the path; lazy-spawns on the next message. |
 | `/use <agent>` | Switch the active agent (`claude` / `codex` / `opencode` / `pi`). Reuses or spawns. |
 | `/stop` | Halt the in-flight turn on the selected agent. Session stays; queued messages still flow. |
-| `/kill [agent]` | Drop AgentSession(s) in the current workspace — terminates the CLI process and removes the pool entry. `/kill <agent>` kills one. |
+| `/steer <msg>` | Stop the in-flight turn and prepend `<msg>` to the queue. The steered message becomes the first thing the agent sees on the next turn. |
+| `/close [agent]` | Terminate the bridge process(es) for AgentSession(s) in the current workspace. AgentSession entry is preserved; next user message triggers a respawn that replays `--resume <sessionID>` to continue the conversation. |
 | `/new [agent]` | Reset the agent's conversation context (Claude Code's `/clear` equivalent). Process stays alive; queued messages are cleared. |
 | `/watch on\|off` | Per-chat message-watch mode (default: only `@bot` / `@_all` in groups). |
 | `/think on\|off` | Show / hide the agent's thinking blocks in the receipt card. |
@@ -377,7 +431,7 @@ internal/
     echo/  feishu/                 # adapters (Feishu is the production one)
   chatsession/                     # ChatSession + pool manager + persistence
   command/                         # Slash-command Commander / Registry / Factory
-    cwd/ kill/ newcmd/ use/ think/ tools/ watch/ stop/ services/
+    cwd/ close/ newcmd/ use/ think/ tools/ watch/ stop/ steer/ services/
     gtw/                           # /gtw fix / push / pr / close / sync (worktree workflow)
   config/                          # YAML loader + env overrides
   daemoncontrol/                   # IPC for `nightme doctor` / `status`

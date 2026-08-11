@@ -86,7 +86,7 @@ func TestManager_WithSpawner(t *testing.T) {
 	}
 }
 
-func TestManager_PoolAfterKillCanRespawn(t *testing.T) {
+func TestManager_PoolAfterCloseCanRespawn(t *testing.T) {
 	spawner := newFakeSpawner()
 	csFile, asFile := newTestStores(t)
 	mgr := NewManager().
@@ -102,28 +102,33 @@ func TestManager_PoolAfterKillCanRespawn(t *testing.T) {
 		t.Fatalf("precondition: expected Running")
 	}
 
-	// /kill clears the pool (cwd-scoped: only entries in activeCwd).
-	// Simulate via accessors — kill package tested separately.
+	// /close kills the bridge process but preserves the AgentSession
+	// entry (and its sessionID). Simulate via accessors — close
+	// package tested separately. The post-close pool state:
+	// entry still present, status=Exited, sessionID preserved.
 	snapshot := cs.AgentSessionsInCwd(cs.SelectedCwd())
 	for _, as := range snapshot {
 		_ = as.Close()
-		cs.DropAgentSession(as)
 	}
-	if len(cs.Pool()) != 0 {
-		t.Fatalf("pool should be empty after kill")
+	if len(cs.Pool()) != 1 {
+		t.Fatalf("pool should still have 1 entry after /close (session preserved), got %d", len(cs.Pool()))
 	}
 
-	// Sending a message after /kill re-spawns via the same Spawner.
+	// Sending a message after /close triggers a respawn via the same
+	// Spawner. The AS entry is reused (StatusExited → StatusRunning),
+	// and the AgentSession.ID is preserved so the persisted session
+	// identity stays stable across /close cycles. The bridge handle
+	// (PID + events channel) is the only thing that changes.
 	cs.SetSelectedCwd("/code/bailing")
 	as2, err := cs.LookupSelectedAgentSession()
 	if err != nil {
-		t.Fatalf("LookupSelectedAgentSession after kill: %v", err)
+		t.Fatalf("LookupSelectedAgentSession after close: %v", err)
 	}
 	if as2.Status() != StatusRunning {
 		t.Fatalf("after respawn: got %q, want Running", as2.Status())
 	}
-	if as2.ID == as1.ID {
-		t.Fatalf("respawn should produce a new AgentSession ID")
+	if as2.ID != as1.ID {
+		t.Fatalf("respawn must preserve AgentSession.ID for /close (got %q, want %q)", as2.ID, as1.ID)
 	}
 }
 

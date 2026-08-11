@@ -27,7 +27,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	killpkg "github.com/cnlangzi/nightme/internal/command/kill"
 )
 
 // Factory is the command.SlashCommandFactory for /new.
@@ -109,7 +108,7 @@ agentName := ""
 			"No agent session in current workspace to reset. Send a message to start one."), nil
 	}
 
-	text := killpkg.FormatResetResults(results)
+	text := FormatResetResults(results)
 	if err != nil {
 		text += fmt.Sprintf(" (errors: %v)", err)
 	}

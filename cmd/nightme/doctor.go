@@ -11,6 +11,8 @@
 //
 //	nightme doctor             # human-readable text
 //	nightme doctor --json      # raw JSON for piping to jq etc.
+//go:build !windows
+
 package main
 
 import (

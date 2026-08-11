@@ -38,7 +38,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/command/cwd"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
-	"github.com/cnlangzi/nightme/internal/command/kill"
+	"github.com/cnlangzi/nightme/internal/command/close"
 	newcmd "github.com/cnlangzi/nightme/internal/command/newcmd"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/command/stop"
@@ -433,7 +433,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	reg.Register(tools.NewFactory(mgr))
 	reg.Register(cwd.NewFactory(mgr))
 	reg.Register(use.NewFactory(mgr))
-	reg.Register(kill.NewFactory(mgr))
+	reg.Register(close.NewFactory(mgr))
 	reg.Register(stop.NewFactory(mgr))
 	reg.Register(newcmd.NewFactory(mgr))
 	commander := command.NewCommander(reg)

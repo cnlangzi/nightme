@@ -112,7 +112,7 @@ h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prc
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventAgentResult,
 		Result: &agent.AgentResultEvent{
-			Text:    "Final result text.",
+			Text: "Final result text.",
 		},
 	}, UserMsgID: "om_user_1"})
 	// EventAgentDone flushes the F-45 §2.5 OutResult buffer (turn-end
@@ -904,8 +904,8 @@ func seedPersistedChatForWire(t *testing.T, csFile *registry.ChatSessionFile, ch
 	entry := &registry.ChatSessionEntry{
 		ID:                "cs_" + chatID,
 		ChatID:            chatID,
-		SelectedCwd:         "/code/bailing",
-		SelectedAgent:       primary,
+		SelectedCwd:       "/code/bailing",
+		SelectedAgent:     primary,
 		PrimaryAgent:      primary,
 		CreatedAt:         time.Now(),
 		LastInteractionAt: time.Now(),

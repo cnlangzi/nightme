@@ -34,13 +34,13 @@ func listFixture(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessio
 
 	// ChatSession #1 (Claude, running).
 	cs1 := &registry.ChatSessionEntry{
-		ID:            "cs_oc_run",
-		ChatID:        "oc_run",
-		SelectedCwd:     "/home/devin/code/bailing",
-		SelectedAgent:   "claude",
-		PrimaryAgent:  "claude",
-		AgentSessionIDs: []string{"as_run_1"},
-		CreatedAt:     now,
+		ID:                "cs_oc_run",
+		ChatID:            "oc_run",
+		SelectedCwd:       "/home/devin/code/bailing",
+		SelectedAgent:     "claude",
+		PrimaryAgent:      "claude",
+		AgentSessionIDs:   []string{"as_run_1"},
+		CreatedAt:         now,
 		LastInteractionAt: now,
 	}
 	if err := csFile.Upsert(cs1); err != nil {
@@ -55,7 +55,7 @@ func listFixture(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessio
 		Cwd:           cs1.SelectedCwd,
 		PID:           12345,
 		Status:        registry.StatusRunning,
-		SessionID:      "sess-claude-abc",
+		SessionID:     "sess-claude-abc",
 		CreatedAt:     now,
 		LastRunAt:     now,
 	}
@@ -65,13 +65,13 @@ func listFixture(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessio
 
 	// ChatSession #2 (Codex, detached).
 	cs2 := &registry.ChatSessionEntry{
-		ID:            "cs_oc_det",
-		ChatID:        "oc_det",
-		SelectedCwd:     "/home/devin/code/nightme",
-		SelectedAgent:   "codex",
-		PrimaryAgent:  "codex",
-		AgentSessionIDs: []string{"as_det_1"},
-		CreatedAt:     now.Add(-time.Hour),
+		ID:                "cs_oc_det",
+		ChatID:            "oc_det",
+		SelectedCwd:       "/home/devin/code/nightme",
+		SelectedAgent:     "codex",
+		PrimaryAgent:      "codex",
+		AgentSessionIDs:   []string{"as_det_1"},
+		CreatedAt:         now.Add(-time.Hour),
 		LastInteractionAt: now.Add(-30 * time.Minute),
 	}
 	if err := csFile.Upsert(cs2); err != nil {

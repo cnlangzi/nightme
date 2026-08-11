@@ -9,11 +9,11 @@ jobs:
     name: Build + Vet + Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
-          go-version: '1.22'
+          go-version-file: go.mod
           cache: true
 
       - name: Build
@@ -27,7 +27,68 @@ jobs:
 
       - name: Upload coverage
         if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage
           path: coverage.out
+
+  # Cross-compile check. Runs on ubuntu-latest (cheapest runner)
+  # and cross-compiles to Windows + macOS to catch OS-conditional
+  # build breaks without paying for a Windows/macOS hosted
+  # runner on every PR.
+  #
+  # Why no tests: the test suite contains platform-specific files
+  # tagged with `//go:build unix` (e.g. daemoncontrol tests for
+  # AF_UNIX sockets) that intentionally don't compile on Windows.
+  # Running the unix tests under `GOOS=windows` would fail the
+  # cross-compile job; running only the windows tests under
+  # `GOOS=windows` would require a separate tagged set. We
+  # keep the matrix small here (compile-only) and rely on the
+  # windows-tagged test files (e.g. daemoncontrol_windows_test.go)
+  # to be exercised in a future windows-hosted job.
+  cross-compile:
+    name: Cross-compile (${{ matrix.target.GOOS }}/${{ matrix.target.GOARCH }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - GOOS: windows
+            GOARCH: amd64
+            binary: nightme.exe
+          - GOOS: windows
+            GOARCH: arm64
+            binary: nightme.exe
+          - GOOS: darwin
+            GOARCH: amd64
+            binary: nightme
+          - GOOS: darwin
+            GOARCH: arm64
+            binary: nightme
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build (${{ matrix.target.GOOS }}/${{ matrix.target.GOARCH }})
+        env:
+          GOOS: ${{ matrix.target.GOOS }}
+          GOARCH: ${{ matrix.target.GOARCH }}
+          CGO_ENABLED: "0"
+        run: go build -o dist/${{ matrix.target.GOOS }}-${{ matrix.target.GOARCH }}/${{ matrix.target.binary }} ./cmd/nightme
+
+      - name: Vet (${{ matrix.target.GOOS }}/${{ matrix.target.GOARCH }})
+        env:
+          GOOS: ${{ matrix.target.GOOS }}
+          GOARCH: ${{ matrix.target.GOARCH }}
+        run: go vet ./...
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightme-${{ matrix.target.GOOS }}-${{ matrix.target.GOARCH }}
+          path: dist/${{ matrix.target.GOOS }}-${{ matrix.target.GOARCH }}/${{ matrix.target.binary }}
+          if-no-files-found: error

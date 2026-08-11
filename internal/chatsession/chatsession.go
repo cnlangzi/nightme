@@ -714,6 +714,62 @@ func (cs *ChatSession) QueueUserMessage(msg Message) error {
 	return nil
 }
 
+// SteerUserMessage is the runtime entry point for the `/steer <msg>`
+// slash command. It does two things:
+//
+//  1. Try to accelerate the busy-guard release on the current
+//     in-flight turn by calling `as.Stop(ctx)`. Fire-and-forget:
+//     the result is ignored (Stop may return ErrNotSupported for
+//     some bridges, or a real error if the bridge is wedged —
+//     neither is actionable here). The point is to nudge the
+//     bridge into emitting its terminal event (session.idle /
+//     agent_settled / turn/completed) sooner so the FlushHook
+//     can drain the queue.
+//
+//     Skipped when:
+//       - no AS is selected (Handle() == nil)
+//       - the AS is in StatusExited (e.g. after /close killed
+//         the bridge process; calling Stop on a defunct handle
+//         is a wasted RPC + an ignored error)
+//
+//  2. Push msg to the HEAD of the pending region via
+//     `queue.PushFront`. The steered message will be the first
+//     thing the agent sees on the next turn — even if other
+//     user messages had piled up in the queue while the
+//     current turn was running.
+//
+// Distinct from QueueUserMessage in two ways: (a) it tries to
+// abort the current turn first, and (b) the new message goes to
+// the front of the queue instead of the back. Both are needed
+// for "stop + redirect" semantics.
+//
+// Stop is best-effort. If it fails (bridge doesn't support it,
+// bridge is hung, no selected AS), PushFront still runs — the
+// steered message waits in the queue and is dispatched on the
+// next natural FlushHook trigger.
+//
+// The caller (slash command factory) is responsible for emitting
+// `MessageQueued` BEFORE calling this — same timing contract as
+// QueueUserMessage. TryFlush is NOT called here; the FlushHook
+// path on the next KindPromptEnded (which Stop may accelerate)
+// handles submission.
+func (cs *ChatSession) SteerUserMessage(msg Message) error {
+	if msg.ID == "" {
+		return nil
+	}
+	// Step 1: try to abort the current in-flight turn. Skip
+	// when the bridge process is already gone (StatusExited) —
+	// calling Stop would be a wasted RPC against a defunct
+	// handle.
+	if as := cs.SelectedAgentSession(); as != nil && as.Status() != StatusExited {
+		if h := as.Handle(); h != nil {
+			_ = h.Stop(cs.Context()) // fire-and-forget
+		}
+	}
+	// Step 2: prepend msg to the pending region.
+	return cs.queue.PushFront(msg)
+}
+
 // buildPromptLocked (CS-AS 边界重构 Phase 1) constructs a candidate
 // Prompt from the current queue. Caller MUST hold cs.mu.
 //

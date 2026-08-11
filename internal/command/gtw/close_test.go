@@ -1,7 +1,7 @@
 package gtw
 
 import (
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"context"
 	"sync"
 	"os"
@@ -155,20 +155,20 @@ func newCloseRig(t *testing.T) *closeTestRig {
 // tests want a no-network rig.
 type closeTestRecCh struct {
 	mu    sync.Mutex
-	sends []gateway.OutboundMessage
+	sends []messages.OutboundMessage
 }
 
-func (r *closeTestRecCh) Send(_ context.Context, m gateway.OutboundMessage) error {
+func (r *closeTestRecCh) Send(_ context.Context, m messages.OutboundMessage) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sends = append(r.sends, m)
 	return nil
 }
-func (r *closeTestRecCh) SendCard(_ context.Context, m gateway.OutboundMessage) (string, error) {
+func (r *closeTestRecCh) SendCard(_ context.Context, m messages.OutboundMessage) (string, error) {
 	r.Send(context.Background(), m)
 	return "rec-card-id", nil
 }
-func (r *closeTestRecCh) Patch(_ context.Context, m gateway.OutboundMessage) error {
+func (r *closeTestRecCh) Patch(_ context.Context, m messages.OutboundMessage) error {
 	r.Send(context.Background(), m)
 	return nil
 }

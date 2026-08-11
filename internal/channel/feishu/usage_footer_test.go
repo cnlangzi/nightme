@@ -12,8 +12,8 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
-	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
 func TestFormatSessionFooterLines_NilContextReturnsNil(t *testing.T) {
@@ -23,7 +23,7 @@ func TestFormatSessionFooterLines_NilContextReturnsNil(t *testing.T) {
 }
 
 func TestFormatSessionFooterLines_AllZeroReturnsNil(t *testing.T) {
-	ctx := &gateway.SessionContext{Agent: "", Model: ""}
+	ctx := &messages.SessionContext{Agent: "", Model: ""}
 	if got := formatSessionFooterLines(ctx); got != nil {
 		t.Fatalf("empty SessionContext should yield nil, got %v", got)
 	}
@@ -31,7 +31,7 @@ func TestFormatSessionFooterLines_AllZeroReturnsNil(t *testing.T) {
 
 func TestFormatSessionFooterLines_IdentityOnly(t *testing.T) {
 	// Agent + Model only, no tokens / cost → just line 1 (🤖 header).
-	ctx := &gateway.SessionContext{Agent: "claude", Model: "opus-4-5"}
+	ctx := &messages.SessionContext{Agent: "claude", Model: "opus-4-5"}
 	got := formatSessionFooterLines(ctx)
 	want := []string{"🤖: claude · opus-4-5"}
 	if !reflect.DeepEqual(got, want) {
@@ -47,7 +47,7 @@ func TestFormatSessionFooterLines_IdentityOnly(t *testing.T) {
 // practice, so the Agent-and-Model-and-SessionID path is the
 // production-common case.
 func TestFormatSessionFooterLines_IdentityWithSessionID(t *testing.T) {
-	ctx := &gateway.SessionContext{
+	ctx := &messages.SessionContext{
 		Agent:     "claude",
 		Model:     "opus-4-5",
 		SessionID: "abc123-uuid-here",
@@ -70,7 +70,7 @@ func TestFormatSessionFooterLines_IdentityWithSessionID(t *testing.T) {
 // edge case here so future "fix the leading dot" PRs know it's
 // intentional.
 func TestFormatSessionFooterLines_SessionIDOnly(t *testing.T) {
-	ctx := &gateway.SessionContext{SessionID: "abc123-uuid-here"}
+	ctx := &messages.SessionContext{SessionID: "abc123-uuid-here"}
 	got := formatSessionFooterLines(ctx)
 	want := []string{"🤖: · abc123-uuid-here"}
 	if !reflect.DeepEqual(got, want) {
@@ -88,7 +88,7 @@ func TestFormatSessionFooterLines_SessionIDOnly(t *testing.T) {
 // "always-show-the-middle-dot" PR doesn't silently change the
 // visual rhythm.
 func TestFormatSessionFooterLines_AgentSessionIDOnly(t *testing.T) {
-	ctx := &gateway.SessionContext{
+	ctx := &messages.SessionContext{
 		Agent:     "claude",
 		SessionID: "abc123-uuid-here",
 	}
@@ -109,7 +109,7 @@ func TestFormatSessionFooterLines_AgentSessionIDOnly(t *testing.T) {
 // silently change the Model+SessionID-no-Agent path because
 // the other SessionID tests all have Agent set.
 func TestFormatSessionFooterLines_ModelSessionIDOnly(t *testing.T) {
-	ctx := &gateway.SessionContext{
+	ctx := &messages.SessionContext{
 		Model:     "opus-4-5",
 		SessionID: "abc123-uuid-here",
 	}
@@ -129,7 +129,7 @@ func TestFormatSessionFooterLines_TokenSegments(t *testing.T) {
 	// counters (uncached + cache_creation + cache_read) per the
 	// Tencent YB doc — see internal/channel/feishu/usage_footer.go
 	// §Line 2 doc block. Here in = 11_700 + 600 + 8_200 = 20_500.
-	ctx := &gateway.SessionContext{
+	ctx := &messages.SessionContext{
 		Agent: "claude",
 		Model: "opus-4-5",
 		Usage: &agent.UsageInfo{
@@ -150,7 +150,7 @@ func TestFormatSessionFooterLines_TokenSegments(t *testing.T) {
 func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 	tests := []struct {
 		name string
-		ctx  *gateway.SessionContext
+		ctx  *messages.SessionContext
 		want []string
 	}{
 		{
@@ -158,7 +158,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			// "0 / 234" — zero-side honesty, rare in practice
 			// (e.g. compaction-only turn with no new input).
 			name: "no input but has output",
-			ctx: &gateway.SessionContext{
+			ctx: &messages.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageInfo{OutputTokens: 234},
 			},
@@ -169,7 +169,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			// Strict zero-omit — single segment renders, no
 			// "0 /" prefix.
 			name: "only cache hits — single segment renders",
-			ctx: &gateway.SessionContext{
+			ctx: &messages.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageInfo{CacheReadInputTokens: 5_600},
 			},
@@ -180,7 +180,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			// token segment is omitted; $cost segment stands
 			// alone inside the brackets.
 			name: "cost only (no tokens)",
-			ctx: &gateway.SessionContext{
+			ctx: &messages.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageInfo{CostUSD: 1.245},
 			},
@@ -189,7 +189,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 		{
 			// No cost segment when CostUSD == 0.
 			name: "no cost (omitted)",
-			ctx: &gateway.SessionContext{
+			ctx: &messages.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageInfo{
 					InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
@@ -200,7 +200,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 		{
 			// No Agent/Model → only the usage line renders.
 			name: "tokens but no Agent / Model",
-			ctx: &gateway.SessionContext{
+			ctx: &messages.SessionContext{
 				Usage: &agent.UsageInfo{
 					InputTokens: 5_000, OutputTokens: 200,
 				},
@@ -213,7 +213,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			// practice (turn that hit cache only, no new content
 			// and no generation).
 			name: "only cache hits — single segment renders",
-			ctx: &gateway.SessionContext{
+			ctx: &messages.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageInfo{CacheReadInputTokens: 5_600},
 			},
@@ -224,7 +224,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 			// `cache / out`. Confirms cache doesn't lead the
 			// segment when new is 0 (we drop the leading "0").
 			name: "cache hits + output, no new tokens",
-			ctx: &gateway.SessionContext{
+			ctx: &messages.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageInfo{
 					CacheReadInputTokens: 5_600,
@@ -246,7 +246,7 @@ func TestFormatSessionFooterLines_OmitsZeroSegments(t *testing.T) {
 
 func TestFormatSessionFooterLines_LargeNumbers(t *testing.T) {
 	// in = 156_000 + 0 + 1_200_000 = 1_356_000 → "1.4M" (rounded).
-	ctx := &gateway.SessionContext{
+	ctx := &messages.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
 		Usage: &agent.UsageInfo{
 			InputTokens:              156_000,
@@ -270,7 +270,7 @@ func TestFormatSessionFooterLines_LargeNumbers(t *testing.T) {
 // natively.
 func TestFormatSessionFooter_StringForm(t *testing.T) {
 	// in = 12_300 + 0 + 8_200 = 20_500 → "20.5k".
-	ctx := &gateway.SessionContext{
+	ctx := &messages.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
 		Usage: &agent.UsageInfo{
 			InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
@@ -282,7 +282,7 @@ func TestFormatSessionFooter_StringForm(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 	// Empty input → empty string.
-	if got := formatSessionFooter(&gateway.SessionContext{}); got != "" {
+	if got := formatSessionFooter(&messages.SessionContext{}); got != "" {
 		t.Fatalf("empty ctx should yield empty string, got %q", got)
 	}
 	if got := formatSessionFooter(nil); got != "" {
@@ -293,7 +293,7 @@ func TestFormatSessionFooter_StringForm(t *testing.T) {
 func TestFormatSessionFooter_StableAcrossReRenders(t *testing.T) {
 	// Same input must always produce the same string — receipt
 	// PATCH diffing relies on body equality.
-	ctx := &gateway.SessionContext{
+	ctx := &messages.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
 		Usage: &agent.UsageInfo{
 			InputTokens: 12_300, OutputTokens: 1_500,
@@ -323,12 +323,12 @@ func TestFormatSessionFooter_StableAcrossReRenders(t *testing.T) {
 func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 	tests := []struct {
 		name string
-		ctx  *gateway.SessionContext
+		ctx  *messages.SessionContext
 		want []string
 	}{
 		{
 			name: "pct=0 — segment omitted (early turn / no ContextWindow reported)",
-			ctx: &gateway.SessionContext{
+			ctx: &messages.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageInfo{
 					InputTokens: 12_300, OutputTokens: 1_500,
@@ -339,7 +339,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 		},
 		{
 			name: "pct only — typical post-EventAgentDone snapshot",
-			ctx: &gateway.SessionContext{
+			ctx: &messages.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageInfo{
 					InputTokens: 20_000, OutputTokens: 1_000,
@@ -351,7 +351,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 		},
 		{
 			name: "pct + cost — full usage line",
-			ctx: &gateway.SessionContext{
+			ctx: &messages.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageInfo{
 					InputTokens: 1_200_000, OutputTokens: 80_000,
@@ -364,7 +364,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 		},
 		{
 			name: "pct at the ceiling — 100.0% is honest, not 'full'",
-			ctx: &gateway.SessionContext{
+			ctx: &messages.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageInfo{
 					ContextWindow:    200_000,
@@ -375,7 +375,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 		},
 		{
 			name: "pct without identity — segment still emits alone",
-			ctx: &gateway.SessionContext{
+			ctx: &messages.SessionContext{
 				Usage: &agent.UsageInfo{
 					ContextWindow:    200_000,
 					ContextWindowPct: 5.0,
@@ -389,7 +389,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 			// compatibility-layer mismatches themselves (e.g.
 			// `101.6% (200k)` against an actual 1M model).
 			name: "pct > 100% — not clamped, (window) surfaces the mismatch",
-			ctx: &gateway.SessionContext{
+			ctx: &messages.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageInfo{
 					InputTokens: 200_000, OutputTokens: 1_000,
@@ -403,7 +403,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 		{
 			// F-55: 1M-class model window rendered with M unit.
 			name: "1M context window — M unit",
-			ctx: &gateway.SessionContext{
+			ctx: &messages.SessionContext{
 				Agent: "claude", Model: "opus-4-8",
 				Usage: &agent.UsageInfo{
 					InputTokens: 200_000, OutputTokens: 1_000,
@@ -417,7 +417,7 @@ func TestFormatSessionFooterLines_ContextWindowPct(t *testing.T) {
 			// Defensive: pct==0 drops the entire segment; window
 			// alone is not surfaced (zero-omit, F-45 §1.6).
 			name: "pct=0 — segment omitted even when window > 0",
-			ctx: &gateway.SessionContext{
+			ctx: &messages.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				Usage: &agent.UsageInfo{
 					InputTokens: 12_300, OutputTokens: 1_500,
@@ -538,7 +538,7 @@ func TestFormatGitLine_NilContextReturnsEmpty(t *testing.T) {
 }
 
 func TestFormatGitLine_NoWorkspaceReturnsEmpty(t *testing.T) {
-	ctx := &gateway.SessionContext{
+	ctx := &messages.SessionContext{
 		GitStatus: &gtw.GitStatusSnapshot{Branch: "main"},
 	}
 	if got := formatGitLine(ctx); got != "" {
@@ -555,7 +555,7 @@ func TestFormatGitLine_NoWorkspaceReturnsEmpty(t *testing.T) {
 // is reserved for detached HEAD inside a real git repo
 // (Branch=="" + GitStatus!=nil).
 func TestFormatGitLine_NoGitStatusOmitsLine(t *testing.T) {
-	ctx := &gateway.SessionContext{Workspace: "/home/devin/code/nightme"}
+	ctx := &messages.SessionContext{Workspace: "/home/devin/code/nightme"}
 	if got := formatGitLine(ctx); got != "" {
 		t.Fatalf("Workspace set + GitStatus nil should omit line, got %q", got)
 	}
@@ -563,7 +563,7 @@ func TestFormatGitLine_NoGitStatusOmitsLine(t *testing.T) {
 
 func TestFormatGitLine_FullSnapshot(t *testing.T) {
 	// Branch + dirty + untracked + unpushed — all segments.
-	ctx := &gateway.SessionContext{
+	ctx := &messages.SessionContext{
 		Workspace: "/home/devin/code/nightme",
 		GitStatus: &gtw.GitStatusSnapshot{
 			Branch:        "main",
@@ -651,7 +651,7 @@ func TestFormatGitLine_OmitsZeroSegments(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := &gateway.SessionContext{
+			ctx := &messages.SessionContext{
 				Workspace: "/home/devin/code/nightme",
 				GitStatus: tc.snap,
 			}
@@ -667,7 +667,7 @@ func TestFormatGitLine_OmitsZeroSegments(t *testing.T) {
 // appended after lines 1+2 when both are populated.
 func TestFormatSessionFooterLines_WithGitLine(t *testing.T) {
 	// in = 12_300 + 0 + 8_200 = 20_500 → "20.5k".
-	ctx := &gateway.SessionContext{
+	ctx := &messages.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
 		Usage: &agent.UsageInfo{
 			InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200,
@@ -696,7 +696,7 @@ func TestFormatSessionFooterLines_WithGitLine(t *testing.T) {
 // on its own when lines 1+2 are both empty (e.g. first reply on
 // a git repo before any usage / model has been captured).
 func TestFormatSessionFooterLines_GitOnly(t *testing.T) {
-	ctx := &gateway.SessionContext{
+	ctx := &messages.SessionContext{
 		Workspace: "/home/devin/code/nightme",
 		GitStatus: &gtw.GitStatusSnapshot{Branch: "main", HasUpstream: true},
 	}
@@ -711,7 +711,7 @@ func TestFormatSessionFooterLines_GitOnly(t *testing.T) {
 // return nil when nothing meaningful exists — backwards
 // compatible with F-45.
 func TestFormatSessionFooterLines_NoGitNoUsage(t *testing.T) {
-	ctx := &gateway.SessionContext{Agent: "claude", Model: "opus-4-5"}
+	ctx := &messages.SessionContext{Agent: "claude", Model: "opus-4-5"}
 	got := formatSessionFooterLines(ctx)
 	want := []string{"🤖: claude · opus-4-5"}
 	if !reflect.DeepEqual(got, want) {
@@ -731,7 +731,7 @@ func TestFormatSessionFooterLines_NoGitNoUsage(t *testing.T) {
 // PR without git (no Workspace / no GitStatus) drops with
 // the git line — see TestFormatSessionFooterLines_PRSegment_NoGitLine.
 func TestFormatSessionFooterLines_PRSegment_AppendedToGitLine(t *testing.T) {
-	ctx := &gateway.SessionContext{
+	ctx := &messages.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
 		Workspace: "/home/devin/code/nightme",
 		GitStatus: &gtw.GitStatusSnapshot{Branch: "fix-x", HasUpstream: true},
@@ -760,7 +760,7 @@ func TestFormatSessionFooterLines_PRSegment_AppendedToGitLine(t *testing.T) {
 // a PR but no Workspace, which is the standard
 // "transient / not in a git repo" configuration.
 func TestFormatSessionFooterLines_PRSegment_NoGitLine(t *testing.T) {
-	ctx := &gateway.SessionContext{
+	ctx := &messages.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
 		PullRequest: &gtw.PR{
 			Number: 111,
@@ -797,7 +797,7 @@ func TestFormatSessionFooterLines_PRSegment_NilOrInvalid(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := &gateway.SessionContext{
+			ctx := &messages.SessionContext{
 				Agent: "claude", Model: "opus-4-5",
 				Workspace: "/home/devin/code/nightme",
 				GitStatus: &gtw.GitStatusSnapshot{Branch: "fix-x", HasUpstream: true},
@@ -821,7 +821,7 @@ func TestFormatSessionFooterLines_PRSegment_NilOrInvalid(t *testing.T) {
 // as "where am I → how dirty → what's the open PR", not
 // "where am I → what's the PR → how dirty".
 func TestFormatSessionFooterLines_PRSegment_DirtyCountsBetween(t *testing.T) {
-	ctx := &gateway.SessionContext{
+	ctx := &messages.SessionContext{
 		Agent: "claude", Model: "opus-4-5",
 		Workspace: "/home/devin/code/nightme",
 		GitStatus: &gtw.GitStatusSnapshot{

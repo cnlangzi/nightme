@@ -12,7 +12,7 @@ import (
 // GitStatusSnapshot is the parsed result of a single
 // `git status --porcelain --branch` invocation against a workspace.
 // It is intentionally a pure value type (no methods) so it can be
-// carried across package boundaries (gateway.SessionContext,
+// carried across package boundaries (messages.SessionContext,
 // runtime stamping) and tested without running git.
 //
 // Field semantics:

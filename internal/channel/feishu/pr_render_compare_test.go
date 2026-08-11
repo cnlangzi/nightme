@@ -37,7 +37,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/command/gtw"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // formatPRSegmentWithEmojiPrefix renders the historical
@@ -45,7 +45,7 @@ import (
 // harness can re-render the byte-for-byte payload anyone might
 // want to revisit. Production formatPRSegment emits the bare
 // plain `#N`; this helper is NOT used by production code.
-func formatPRSegmentWithEmojiPrefix(ctx *gateway.SessionContext) string {
+func formatPRSegmentWithEmojiPrefix(ctx *messages.SessionContext) string {
 	if ctx == nil {
 		return ""
 	}
@@ -57,7 +57,7 @@ func formatPRSegmentWithEmojiPrefix(ctx *gateway.SessionContext) string {
 }
 
 func TestPRRenderCompare(t *testing.T) {
-	ctx := &gateway.SessionContext{
+	ctx := &messages.SessionContext{
 		Agent:     "claude",
 		Model:     "MiniMax-M3[1m]",
 		SessionID: "639cc546-3647-44a5-ac0c-4f532cad04f4",

@@ -125,8 +125,8 @@ type Sender interface {
 // placeholder, async execution, reply delivery. All shell-
 // related logic lives here, not in the gateway or the runtime
 // shim. The shim is reduced to type adaptation
-// (gateway.InboundMessage → InboundRequest,
-// HandleResult → gateway.CommandResult).
+// (messages.InboundMessage → InboundRequest,
+// HandleResult → inbound.CommandResult).
 //
 // Dispatcher is stateless and safe for concurrent use.
 type Dispatcher struct {

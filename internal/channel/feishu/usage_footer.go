@@ -75,7 +75,7 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/command/gtw"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // formatSessionFooterLines returns the SessionContext footer as a
@@ -148,7 +148,7 @@ import (
 //
 // Stable across re-renders — same input always produces the same
 // slice, so the receipt PATCH diff stays minimal.
-func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
+func formatSessionFooterLines(ctx *messages.SessionContext) []string {
 	if ctx == nil {
 		return nil
 	}
@@ -327,7 +327,7 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 // indistinguishable from "lookup failed" by design — chat-side
 // decoration is the wrong place to surface a transient
 // network / auth failure.
-func formatPRSegment(ctx *gateway.SessionContext) string {
+func formatPRSegment(ctx *messages.SessionContext) string {
 	if ctx == nil {
 		return ""
 	}
@@ -348,7 +348,7 @@ func formatPRSegment(ctx *gateway.SessionContext) string {
 // paths where \n is honoured natively; the Feishu receipt card
 // path uses formatSessionFooterLines directly because plain_text
 // elements do NOT honour \n within a single element.
-func formatSessionFooter(ctx *gateway.SessionContext) string {
+func formatSessionFooter(ctx *messages.SessionContext) string {
 	return strings.Join(formatSessionFooterLines(ctx), "\n")
 }
 
@@ -506,7 +506,7 @@ func formatWorkspacePath(absPath string) string {
 // Returns "" when ctx == nil or ctx.GitStatus == nil (caller
 // drops the line). Detached HEAD renders the branch segment as
 // "?" — see CollectReadiness / parsePorcelainBranchStatus.
-func formatGitLine(ctx *gateway.SessionContext) string {
+func formatGitLine(ctx *messages.SessionContext) string {
 	if ctx == nil {
 		return ""
 	}

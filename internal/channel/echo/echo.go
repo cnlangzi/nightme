@@ -22,7 +22,7 @@ import (
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/channel"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // Channel is the echo implementation. It satisfies channel.Channel.
@@ -34,7 +34,7 @@ type Channel struct {
 	out  io.Writer
 
 	mu       sync.Mutex
-	recorded []gateway.OutboundMessage
+	recorded []messages.OutboundMessage
 }
 
 // New constructs an echo Channel. The name is surfaced via Name()
@@ -74,10 +74,10 @@ var _ channel.Channel = (*Channel)(nil)
 
 // Send implements channel.Channel. Writes a one-line log and
 // records the message for test assertions.
-func (c *Channel) Send(ctx context.Context, msg gateway.OutboundMessage) error {
+func (c *Channel) Send(ctx context.Context, msg messages.OutboundMessage) error {
 	if c.out != nil {
 		switch {
-		case msg.Kind == gateway.OutCard && msg.Card != nil:
+		case msg.Kind == messages.OutCard && msg.Card != nil:
 			fmt.Fprintf(c.out, "echo: %s chat=%s title=%q options=%v\n",
 				msg.Kind, msg.ChatID, msg.Card.Title, msg.Card.Options)
 		default:
@@ -95,7 +95,7 @@ func (c *Channel) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 // rendered card with later reaction routing. The echo channel
 // always returns "" (no real id); callers fall back to a synthetic
 // "echo-card-<n>" id when needed.
-func (c *Channel) SendCard(ctx context.Context, msg gateway.OutboundMessage) (string, error) {
+func (c *Channel) SendCard(ctx context.Context, msg messages.OutboundMessage) (string, error) {
 	if err := c.Send(ctx, msg); err != nil {
 		return "", err
 	}
@@ -105,10 +105,10 @@ func (c *Channel) SendCard(ctx context.Context, msg gateway.OutboundMessage) (st
 // Record returns a snapshot of every message sent to this Channel
 // in the order they were sent. The slice is a copy — callers can
 // mutate it without affecting the Channel's internal state.
-func (c *Channel) Record() []gateway.OutboundMessage {
+func (c *Channel) Record() []messages.OutboundMessage {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]gateway.OutboundMessage, len(c.recorded))
+	out := make([]messages.OutboundMessage, len(c.recorded))
 	copy(out, c.recorded)
 	return out
 }

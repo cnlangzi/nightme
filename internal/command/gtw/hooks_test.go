@@ -1,7 +1,7 @@
 package gtw
 
 import (
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"context"
 	"errors"
 	"os"
@@ -422,14 +422,14 @@ type fakeChannel struct {
 	sent []string
 }
 
-func (c *fakeChannel) Send(_ context.Context, msg gateway.OutboundMessage) error {
+func (c *fakeChannel) Send(_ context.Context, msg messages.OutboundMessage) error {
 	c.sent = append(c.sent, msg.Text)
 	return nil
 }
-func (c *fakeChannel) SendCard(_ context.Context, _ gateway.OutboundMessage) (string, error) {
+func (c *fakeChannel) SendCard(_ context.Context, _ messages.OutboundMessage) (string, error) {
 	return "", nil
 }
-func (c *fakeChannel) Patch(_ context.Context, _ gateway.OutboundMessage) error {
+func (c *fakeChannel) Patch(_ context.Context, _ messages.OutboundMessage) error {
 	return nil
 }
 

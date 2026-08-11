@@ -67,17 +67,14 @@ type Stamper func(chatID string) *gateway.SessionContext
 // is valid: Emitter becomes a pure Channel.Send passthrough with
 // no stamping, no error hooks — equivalent to the legacy
 // outbound.Emitter behaviour minus the type-conversion step.
+// Options configures optional Emitter behaviour. The zero value
+// is valid: Emitter becomes a pure Channel.Send / SendCard
+// passthrough with no stamping.
 type Options struct {
 	// Stamper, if non-nil, is invoked for every Send / SendCard
 	// whose msg.SessionContext is nil. The returned SessionContext
 	// (if non-nil) is attached to msg before forwarding.
 	Stamper Stamper
-
-	// OnError, if non-nil, is invoked when Channel.Send /
-	// Channel.SendCard returns a non-nil error. The error is
-	// also returned to the caller — OnError is for logging /
-	// metrics side effects only.
-	OnError func(msg gateway.OutboundMessage, err error)
 }
 
 // Emitter is the public surface every outbound caller holds.
@@ -96,37 +93,22 @@ func New(ch Channel, opts Options) Emitter {
 	return &emitImpl{
 		ch:      ch,
 		stamper: opts.Stamper,
-		onError: opts.OnError,
 	}
 }
 
 type emitImpl struct {
 	ch      channel.Channel
 	stamper Stamper
-	onError func(gateway.OutboundMessage, error)
 }
 
 func (e *emitImpl) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 	e.stampIfNeeded(&msg)
-	if err := e.ch.Send(ctx, msg); err != nil {
-		if e.onError != nil {
-			e.onError(msg, err)
-		}
-		return err
-	}
-	return nil
+	return e.ch.Send(ctx, msg)
 }
 
 func (e *emitImpl) SendCard(ctx context.Context, msg gateway.OutboundMessage) (string, error) {
 	e.stampIfNeeded(&msg)
-	msgID, err := e.ch.SendCard(ctx, msg)
-	if err != nil {
-		if e.onError != nil {
-			e.onError(msg, err)
-		}
-		return msgID, err
-	}
-	return msgID, nil
+	return e.ch.SendCard(ctx, msg)
 }
 
 // stampIfNeeded attaches SessionContext to msg when (a) the caller

@@ -164,8 +164,8 @@ func TestRealPi_E2E_PromptRoundTrip(t *testing.T) {
 	go cs.PumpEvents(pumpCtx)
 
 	defer func() {
-		// Simulate /kill via the lifecycle accessors — the kill
-		// package's KillAllAgents is tested in internal/command/kill
+		// Simulate /close via the lifecycle accessors — the close
+		// package's CloseAllAgents is tested in internal/command/close
 		// and importing it here would create a cycle.
 		snapshot := cs.AgentSessionsInCwd(cs.SelectedCwd())
 		for _, as := range snapshot {

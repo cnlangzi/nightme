@@ -127,7 +127,7 @@ callback 注册在 `OnSessionEvent`，由 `manager.SetEventCallback(...)` 在 st
 - `internal/gateway/parser.go` — slash command 解析
 - `internal/gateway/translate.go` — `agent.AgentEvent → gateway.OutboundMessage`
 - `internal/gateway/messages.go` — `InboundMessage / OutboundMessage / OutboundKind` 等
-- `internal/gateway/cmd/handlers.go` — `/cwd /run /kill /help /agents` handler 实现
+- `internal/gateway/cmd/handlers.go` — `/cwd /run /close /help /agents` handler 实现
 
 **核心流程**：
 ```
@@ -140,7 +140,7 @@ Gateway.pumpInbound (per-channel goroutine)
 Gateway.dispatchLoop (single goroutine)
   └ Handle(ctx, msg)
      ├ ParseCommand(msg.Text)
-     │   ├ 命中表 (/cwd /run /kill /help /agents) → handler(msg)
+     │   ├ 命中表 (/cwd /run /close /help /agents) → handler(msg)
      │   │   └ handler 内部走 gateway.bindings → manager.Create/Run/Kill → ch.Send
      │   └ 未命中 / 普通文本 → messageDispatcher(msg)
      └ handler 或 messageDispatcher 走 Receipt FSM（见 §5）
@@ -167,7 +167,7 @@ Gateway.dispatchLoop (single goroutine)
 | `/cwd` | `<path>` | 设置/更新 workspace + 创建 binding | 任意 |
 | `/run` | `<agent> [args...]` | **确保 CLI 在跑**（spawn 或 attach）；binding 必须存在 | **binding 存在** |
 | `/help` | (无) | 返回所有 nightme 命令列表 | 任意 |
-| `/kill` | (无) | 停止当前 CLI（保留 binding + Session record）| CLI 正在跑 |
+| `/close` | (无) | 停止当前 CLI（保留 binding + Session record）| CLI 正在跑 |
 | `/agents` | (无) | 列出已注册的 agent | 任意 |
 
 **别名**：`/workspace` 是 `/cwd` 的别名。
@@ -180,7 +180,7 @@ handler.cwd(ctx, msg, args)
   └ args 有 → 验证 path
      ├ gateway.bindings[msg.ChatID] 查现有 binding
      │   ├ 存在 → 取 binding.SessionID → manager.Get → sess
-     │   │   ├ sess != nil && sess.Status == Running → 拒绝（"CLI running, /kill first"）
+     │   │   ├ sess != nil && sess.Status == Running → 拒绝（"CLI running, /close first"）
      │   │   └ 否则 → 更新 binding.Workspace + 重 spawn（如果有 workspace）
      │   └ 不存在 → 继续
      ├ agentName = (binding 现有 agent) || (Registry.List() 第一个) || "claude"
@@ -199,7 +199,7 @@ handler.cwd(ctx, msg, args)
 **回复模板**：
 - 首次创建："Workspace set to {path}. Send /run <agent> to start CLI."
 - 更新："Workspace updated to {path}."
-- 拒绝："CLI running, /kill first to change workspace"
+- 拒绝："CLI running, /close first to change workspace"
 
 ### 4.2 `/run <agent> [args...]` 详细行为（v1.1：Run 是 Gateway 的逻辑）
 
@@ -252,12 +252,12 @@ handler.run(ctx, msg, args)
 | 1 | `/cwd /tmp/foo` | binding 创建 + session spawn |
 | 2 | `/run claude` | spawn claude in /tmp/foo |
 | 3 | `/run claude --model opus` | CLI 在跑 → reconnect（不动 args）|
-| 4 | `/kill` | CLI 停止，binding 不动 |
+| 4 | `/close` | CLI 停止，binding 不动 |
 | 5 | `/run claude --model opus` | spawn claude --model opus |
 | 6 | `/run` 无参数 | "usage: /run <agent> [args...]" |
 | 7 | `/run foo` | "unknown agent: foo" |
 
-### 4.3 `/kill` 详细行为（v1.1）
+### 4.3 `/close` 详细行为（v1.1）
 
 ```
 handler.kill(ctx, msg, _)
@@ -285,14 +285,14 @@ Available commands:
 /cwd <path>          Set workspace (session-level)
 /run <agent> [args]  Ensure CLI running (spawn or attach)
 /help                Show this help
-/kill                Stop current CLI (keep session)
+/close                Stop current CLI (keep session)
 /agents              List registered agents
 
 Workflow:
   1. /cwd /path/to/project
   2. /run claude
   3. ... work ...
-  4. /kill    (or restart with /run again)
+  4. /close    (or restart with /run again)
 
 Anything else (including unknown /-commands) is sent to the agent.
 ```
@@ -371,7 +371,7 @@ nightme 只拦截**表 4** 列出的 5 个命令。其他所有以 `/` 开头的
 | `/cwd /tmp/foo` | ✅ | nightme 设置 workspace + 创建 binding |
 | `/run claude` | ✅ | nightme spawn / reconnect CLI |
 | `/help` | ✅ | nightme 列命令 |
-| `/kill` | ✅ | nightme 停止 CLI |
+| `/close` | ✅ | nightme 停止 CLI |
 | `/workspace /tmp/foo` | ✅（alias）| 等同 `/cwd` |
 | `/clear` | ❌ | 透传 → agent 收到 `/clear` |
 | `/compact` | ❌ | 透传 → agent 收到 `/compact` |
@@ -385,14 +385,14 @@ nightme 只拦截**表 4** 列出的 5 个命令。其他所有以 `/` 开头的
 | 场景 | 处理 |
 |------|------|
 | `/cwd /nonexistent` | "workspace does not exist: /nonexistent" |
-| `/cwd <path>` 但 CLI 在跑 | 拒绝 "CLI running, /kill first" |
+| `/cwd <path>` 但 CLI 在跑 | 拒绝 "CLI running, /close first" |
 | `/run` 前没发过 `/cwd` | "no workspace set, /cwd first" |
 | `/run foo`（未知 agent）| "unknown agent: foo" |
 | `/run codex --bad-flag` | 透传，codex 自己报错 |
 | `/run` 时 CLI 死了（sess.Status == Exited）| spawn 新 CLI |
 | `/run` 时 CLI 在跑（sess.Status == Running）| reconnect，不重启 |
-| `/kill` 但 binding 不存在 | "no session to kill" |
-| `/kill` 后 binding 保留，user 再 `/run` | 正常 spawn（Session record 复用）|
+| `/close` 但 binding 不存在 | "no session to kill" |
+| `/close` 后 binding 保留，user 再 `/run` | 正常 spawn（Session record 复用）|
 | nightme 重启后，binding 恢复 + session 标 Detached + PID 活着 | `/run` 时 sess.Status == Detached → spawn 新 CLI（覆盖旧 PID，旧 CLI 变孤儿）|
 | nightme 重启后，binding 恢复 + session 标 Detached + PID 死了 | `/run` 时 spawn 新 CLI |
 | CreateReceipt 失败（飞书 API 错）| log warn + ch.Send(OutText msg.Text)（degraded send 路径） |
@@ -450,7 +450,7 @@ nightme 只拦截**表 4** 列出的 5 个命令。其他所有以 `/` 开头的
 - 飞书 DM 发 `hello` → receipt ⏳ → 🔄（立即执行）→ ✅
 - 飞书 DM 发多条消息（Claude 忙） → 所有 receipt ⏳，buffer flush 后同时变 🔄
 - 飞书 DM 发 `/run claude` → "Already running (pid=12345)"
-- 飞书 DM 发 `/kill` → "session killed"
+- 飞书 DM 发 `/close` → "session killed"
 - 飞书 DM 发 `/run claude --model opus` → "Started: claude --model opus"
 - 飞书 DM 发 `/clear` → Claude 收到 `/clear`（透传）
 - `ps aux | grep claude` → 验证进程命令行
@@ -460,10 +460,10 @@ nightme 只拦截**表 4** 列出的 5 个命令。其他所有以 `/` 开头的
 ## 9. Open questions
 
 - `/cwd <path>` 在 CLI 跑着时能否 update workspace？v1.1 拒绝；v0.4 可加 `--force` 或先 kill
-- `/run` 是否允许切换 agent？v1.1 拒绝（必须 /kill 后再 /run 新 agent），v0.4 评估
-- agent args 跟之前不同时，是否需要先 /kill？v1.1 智能：如果 CLI 在跑就不变（保持 agent 状态），如果死了才 spawn 新的
+- `/run` 是否允许切换 agent？v1.1 拒绝（必须 /close 后再 /run 新 agent），v0.4 评估
+- agent args 跟之前不同时，是否需要先 /close？v1.1 智能：如果 CLI 在跑就不变（保持 agent 状态），如果死了才 spawn 新的
 - `/run` 启动失败后 binding 状态？v1.1 报错后 binding 保留但 Session record 标 Exited（用户可重试）
-- 是否需要 `/forget` 命令清空 binding？v1.1 不需要（/cwd 覆盖 + /kill + /run 重启就够）
+- 是否需要 `/forget` 命令清空 binding？v1.1 不需要（/cwd 覆盖 + /close + /run 重启就够）
 
 ---
 

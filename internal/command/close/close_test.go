@@ -1,13 +1,13 @@
-// Tests for the kill package's public API.
+// Tests for the close package's public API.
 //
-// These tests exercise kill.KillAgent / kill.KillAllAgents through
+// These tests exercise close.CloseAgent / close.CloseAllAgents through
 // ChatSession's public lifecycle surface only — no private
 // injection helpers. The chat session's lifecycle accessors
 // (AgentSessionsInCwd, DropAgentSession) and the public
 // LookupSelectedAgentSession spawn path provide everything we need
-// to verify the kill orchestration's behavior at the package
+// to verify the close orchestration's behavior at the package
 // boundary.
-package kill_test
+package close_test
 
 import (
 	"context"
@@ -17,11 +17,11 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	killpkg "github.com/cnlangzi/nightme/internal/command/kill"
+	closepkg "github.com/cnlangzi/nightme/internal/command/close"
 )
 
-// TestKillAgent_NilCS — kill.KillAgent with nil CS returns
-// kill.ErrNoContext (defensive — every cmd preflights before
+// TestCloseAgent_NilCS — close.CloseAgent with nil CS returns
+// close.ErrNoContext (defensive — every cmd preflights before
 // calling, but the package must not panic).
 // nopCh satisfies chatsession.Channel for tests that need a
 // non-nil channel to construct a ChatSession but don't exercise
@@ -34,11 +34,11 @@ func (nopCh) SendCard(_ context.Context, _ chatsession.OutboundMessage) (string,
 }
 func (nopCh) Patch(_ context.Context, _ chatsession.OutboundMessage) error { return nil }
 
-func TestKillAgent_NilCS(t *testing.T) {
+func TestCloseAgent_NilCS(t *testing.T) {
 	cs, _ := chatsession.New("chat-nil", "cc", nopCh{})
 	defer cs.WithPersistence(nil, nil)
 	// Force the CS reference inside Cmd to be nil.
-	_, err := killpkg.KillAgent(&killpkg.Cmd{CS: nil, Ctx: context.Background()}, "cc")
+	_, err := closepkg.CloseAgent(&closepkg.Cmd{CS: nil, Ctx: context.Background()}, "cc")
 	if err == nil {
 		t.Fatal("want error when CS is nil")
 	}
@@ -48,10 +48,10 @@ func TestKillAgent_NilCS(t *testing.T) {
 	_ = cs
 }
 
-// TestKillAllAgents_NilCS — kill.KillAllAgents with nil CS returns
-// kill.ErrNoContext.
-func TestKillAllAgents_NilCS(t *testing.T) {
-	_, err := killpkg.KillAllAgents(&killpkg.Cmd{CS: nil, Ctx: context.Background()})
+// TestCloseAllAgents_NilCS — close.CloseAllAgents with nil CS returns
+// close.ErrNoContext.
+func TestCloseAllAgents_NilCS(t *testing.T) {
+	_, err := closepkg.CloseAllAgents(&closepkg.Cmd{CS: nil, Ctx: context.Background()})
 	if err == nil {
 		t.Fatal("want error when CS is nil")
 	}
@@ -60,28 +60,28 @@ func TestKillAllAgents_NilCS(t *testing.T) {
 	}
 }
 
-// TestKillAllAgents_NoActiveCwd — kill.KillAllAgents on a chat
+// TestCloseAllAgents_NoActiveCwd — close.CloseAllAgents on a chat
 // without an activeCwd is a no-op (no error, nil results). The
-// /kill handler preflights with RequireActiveCwd, but the kill
+// /close handler preflights with RequireActiveCwd, but the close
 // function itself is well-defined when activeCwd is empty.
-func TestKillAllAgents_NoActiveCwd(t *testing.T) {
+func TestCloseAllAgents_NoActiveCwd(t *testing.T) {
 	mgr := chatsession.NewManager()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	// No SetSelectedCwd.
 
-	cmd := &killpkg.Cmd{CS: cs, Ctx: context.Background()}
-	results, err := killpkg.KillAllAgents(cmd)
+	cmd := &closepkg.Cmd{CS: cs, Ctx: context.Background()}
+	results, err := closepkg.CloseAllAgents(cmd)
 	if err != nil {
-		t.Fatalf("KillAllAgents: %v", err)
+		t.Fatalf("CloseAllAgents: %v", err)
 	}
 	if results != nil {
 		t.Errorf("want nil results when activeCwd empty, got %v", results)
 	}
 }
 
-// TestKillAgent_NotFound — kill.KillAgent with an agent not in
+// TestCloseAgent_NotFound — close.CloseAgent with an agent not in
 // the pool returns chatsession.ErrAgentNotFound.
-func TestKillAgent_NotFound(t *testing.T) {
+func TestCloseAgent_NotFound(t *testing.T) {
 	mgr := chatsession.NewManager()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	cs.WithPersistence(nil, nil)
@@ -90,16 +90,16 @@ func TestKillAgent_NotFound(t *testing.T) {
 	}
 	// No LookupSelectedAgentSession — pool is empty.
 
-	cmd := &killpkg.Cmd{CS: cs, Ctx: context.Background()}
-	_, err := killpkg.KillAgent(cmd, "claude")
+	cmd := &closepkg.Cmd{CS: cs, Ctx: context.Background()}
+	_, err := closepkg.CloseAgent(cmd, "claude")
 	if !errors.Is(err, chatsession.ErrAgentNotFound) {
 		t.Fatalf("want ErrAgentNotFound, got %v", err)
 	}
 }
 
-// TestKillAllAgents_EmptyPool — kill.KillAllAgents on a chat with
+// TestCloseAllAgents_EmptyPool — close.CloseAllAgents on a chat with
 // activeCwd set but an empty pool returns (nil, nil).
-func TestKillAllAgents_EmptyPool(t *testing.T) {
+func TestCloseAllAgents_EmptyPool(t *testing.T) {
 	mgr := chatsession.NewManager()
 	cs, _ := mgr.GetOrCreate("c1", "claude")
 	cs.WithPersistence(nil, nil)
@@ -107,31 +107,31 @@ func TestKillAllAgents_EmptyPool(t *testing.T) {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
-	cmd := &killpkg.Cmd{CS: cs, Ctx: context.Background()}
-	results, err := killpkg.KillAllAgents(cmd)
+	cmd := &closepkg.Cmd{CS: cs, Ctx: context.Background()}
+	results, err := closepkg.CloseAllAgents(cmd)
 	if err != nil {
-		t.Fatalf("KillAllAgents: %v", err)
+		t.Fatalf("CloseAllAgents: %v", err)
 	}
 	if results != nil {
 		t.Errorf("want nil results for empty pool, got %v", results)
 	}
 }
 
-// TestFormatKillResults_Empty — kill.FormatKillResults on nil/empty
-// renders the canonical "No active agents to kill." message that
-// the /kill handler relies on for the empty-state reply.
-func TestFormatKillResults_Empty(t *testing.T) {
+// TestFormatResults_Empty — close.FormatResults on nil/empty
+// renders the canonical "No active agents to close." message that
+// the /close handler relies on for the empty-state reply.
+func TestFormatResults_Empty(t *testing.T) {
 	cases := []struct {
 		name   string
-		inputs []killpkg.Result
+		inputs []closepkg.Result
 		want   string
 	}{
-		{"nil slice", nil, "No active agents to kill."},
-		{"empty slice", []killpkg.Result{}, "No active agents to kill."},
+		{"nil slice", nil, "No active agents to close."},
+		{"empty slice", []closepkg.Result{}, "No active agents to close."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := killpkg.FormatKillResults(tc.inputs)
+			got := closepkg.FormatResults(tc.inputs)
 			if got != tc.want {
 				t.Errorf("want %q, got %q", tc.want, got)
 			}
@@ -139,27 +139,27 @@ func TestFormatKillResults_Empty(t *testing.T) {
 	}
 }
 
-// TestFormatKillResults_Killed — kill.FormatKillResults renders
-// killed entries with the ✓ icon and (agent, cwd) annotation.
-func TestFormatKillResults_Killed(t *testing.T) {
-	results := []killpkg.Result{
-		{Agent: "claude", Cwd: "/code/A", BeforeState: chatsession.StatusRunning, Action: "killed"},
+// TestFormatResults_Closed — close.FormatResults renders
+// closed entries with the ✓ icon and (agent, cwd) annotation.
+func TestFormatResults_Closed(t *testing.T) {
+	results := []closepkg.Result{
+		{Agent: "claude", Cwd: "/code/A", BeforeState: chatsession.StatusRunning, Action: "closed"},
 	}
-	got := killpkg.FormatKillResults(results)
+	got := closepkg.FormatResults(results)
 	if !strings.Contains(got, "claude") || !strings.Contains(got, "/code/A") {
-		t.Errorf("want reply to name killed entry, got %q", got)
+		t.Errorf("want reply to name closed entry, got %q", got)
 	}
-	if !strings.Contains(got, "Stopped 1") {
-		t.Errorf("want header mentioning 'Stopped 1', got %q", got)
+	if !strings.Contains(got, "Closed 1") {
+		t.Errorf("want header mentioning 'Closed 1', got %q", got)
 	}
 }
 
-// TestHandler_NoSession — the /kill handler with an unknown chat
-// ID replies with the canonical "No active chat session to kill."
+// TestHandler_NoSession — the /close handler with an unknown chat
+// ID replies with the canonical "No active chat session to close."
 // message.
 func TestHandler_NoSession(t *testing.T) {
 	mgr := chatsession.NewManager()
-	f := killpkg.NewFactory(mgr)
+	f := closepkg.NewFactory(mgr)
 
 	out, err := f.Handle(context.Background(), command.RuntimeServices{}, nil,
 		command.SlashInput{ChatID: "no-such-chat"})
@@ -169,7 +169,7 @@ func TestHandler_NoSession(t *testing.T) {
 	if !out.Consumed {
 		t.Fatal("want Consumed=true")
 	}
-	if !strings.Contains(out.Reply, "No active chat session to kill") {
-		t.Errorf("want reply mentioning 'No active chat session to kill', got %q", out.Reply)
+	if !strings.Contains(out.Reply, "No active chat session to close") {
+		t.Errorf("want reply mentioning 'No active chat session to close', got %q", out.Reply)
 	}
 }

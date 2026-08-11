@@ -124,7 +124,7 @@ func (h *handlerContext) cwd(ctx context.Context, msg *gateway.InboundMessage, a
 | 路径含 `~` | Resolve 展开为 `$HOME` |
 | 路径含空格 / 中文 / emoji | 原样保留（PTY 启动不 care）|
 | 路径在 remote filesystem（NFS）| Validate 可能慢，加 timeout（v1.1 不加，假设本地 fs）|
-| 用户取消（chat 走了 /kill）| 不影响验证（验证是无状态的）|
+| 用户取消（chat 走了 /close）| 不影响验证（验证是无状态的）|
 
 ---
 

@@ -16,7 +16,7 @@
 // fails (Channel() == nil) and every slash command reply is silently
 // dropped. This regression surfaced on 2026-08-09 when a user
 // reported that "/new produces no response"; the bug also affected
-// /cwd, /kill, /use, /watch, /think, /tools — every command whose
+// /cwd, /close, /use, /watch, /think, /tools — every command whose
 // reply routes through the runtime shim's cs.Channel() call.
 //
 // The test MUST fail before the fix and pass after. It is the

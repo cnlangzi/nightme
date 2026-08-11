@@ -17,7 +17,7 @@
 **Gateway 之前**的职责：决定这条消息是 slash command 还是普通文本。
 **本 feature 的职责**：仅处理"普通文本"分支——把消息原样写入 PTY stdin。
 
-slash command 分支由 [F-20 Gateway](./F-20-gateway.md) 负责（包括 `/cwd`、`/kill`、`/help` 等）。
+slash command 分支由 [F-20 Gateway](./F-20-gateway.md) 负责（包括 `/cwd`、`/close`、`/help` 等）。
 
 ## 2. Interface
 

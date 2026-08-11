@@ -1,6 +1,6 @@
 # F-06: Process Cleanup
 
-> **Status**: implemented (v1.1 — detach/kill 路径走 Manager.MarkDetached + Manager.Kill(binding.SessionID))
+> **Status**: implemented (v1.1 — detach/close 路径走 Manager.MarkDetached + Manager.Kill(binding.SessionID))
 > **Milestone**: M3 (Hardening)
 > **Depends on**: F-05 (Registry)
 > **Related docs**: [`SPEC.md`](../SPEC.md) v1.1 §3.2; [`F-01-session-create.md`](./F-01-session-create.md); [`F-05-process-registry.md`](./F-05-process-registry.md); [`F-20-gateway.md`](./F-20-gateway.md) §4.3
@@ -152,7 +152,7 @@ binding 重建：每个 `BindingEntry{ChatID, ChatType, SessionID, Workspace, Ag
 ## 6. Open questions
 
 - 是否需要 "soft kill"（先发退出命令，再 SIGTERM）？v1.1 不做
-- 默认 detach 是否会让用户困惑？v1.1 决策：detach 是合理的（用户主动 /kill 显式语义）
+- 默认 detach 是否会让用户困惑？v1.1 决策：detach 是合理的（用户主动 /close 显式语义）
 - 是否检测 "用户通过其他 channel kill 了 session"？v1.1 不做
 - Restore 时是否检查 PID 还活着？v1.1 决策：**不检查**，下次 /run 一律 spawn 新 CLI 覆盖旧 PID。简化实现，避免 PID recycle 误判
 
@@ -162,7 +162,7 @@ binding 重建：每个 `BindingEntry{ChatID, ChatType, SessionID, Workspace, Ag
 
 - **Session Status 状态机**：见 [`F-01-session-create.md`](./F-01-session-create.md) §2
 - **Registry schema + migration**：见 [`F-05-process-registry.md`](./F-05-process-registry.md) §3, §4
-- **/kill slash command**：见 [`F-20-gateway.md`](./F-20-gateway.md) §4.3
+- **/close slash command**：见 [`F-20-gateway.md`](./F-20-gateway.md) §4.3
 - **v1.1 完整架构**：见 [`F-26-gateway-hub.md`](./F-26-gateway-hub.md)
 
 ---

@@ -115,7 +115,7 @@ Note: `chatSessionId` is implied by `cs.pool` already; only `(agent, cwd)` is th
 | `/use` (new agent, same cwd) | spawn new AgentSession → add to pool |
 | `/use` (same agent, new cwd) | spawn new AgentSession → add to pool |
 | `/cwd` (any) | **no change** to pool; selectedCwd updated |
-| `/kill` | **all** entries killed and removed from pool |
+| `/close` | **all** entries killed and removed from pool |
 | Agent process dies (natural exit) | status → Exited; **entry remains in pool** (pid=0) |
 | Agent process detached (daemon restart) | status → Detached; entry remains; pid=0 |
 | Daemon restart → restore | all entries restored with status=Detached; respawn on lookup |
@@ -385,7 +385,7 @@ guide.
 
 - Pool grows on /use (new agent or new cwd)
 - Pool stable on /cwd (no spawn, no kill)
-- Pool cleared on /kill
+- Pool cleared on /close
 - Pool survives daemon restart (status=Detached, respawn on next message)
 
 ### 8.3 E2E
@@ -432,4 +432,4 @@ oc_bbb        /code/nightme        *         claude       22222  running
 
 ## 12. Change log
 
-- **2026-08-02** — v1.2 draft: AgentSession pool designed; replaces v1.1 single-session-per-chat. Pool membership rules, spawn/reuse/respawn/kill semantics, race scenarios, persistence schema, migration from v1.1 drafted.
+- **2026-08-02** — v1.2 draft: AgentSession pool designed; replaces v1.1 single-session-per-chat. Pool membership rules, spawn/reuse/respawn/close semantics, race scenarios, persistence schema, migration from v1.1 drafted.

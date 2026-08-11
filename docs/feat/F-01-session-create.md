@@ -24,7 +24,7 @@ Session 是 nightme 管理的**单个 CLI 子进程**的进程抽象。它包含
 1. /cwd <path>     → binding 创建 + Session.Create（workspace）
 2. /run <agent> [args]  → Session.Create（agent + args，workspace 复用）
 3. ... 工作 ...
-4. /kill           → Session.Kill（binding 保留）
+4. /close           → Session.Kill（binding 保留）
 5. /run ...        → Session.Create 重 spawn（workspace + binding 复用）
 ```
 
@@ -64,7 +64,7 @@ type Session struct {
 - `Agent` 在 `Session.Create` 之后**不可变**
 - `Args` 在 `Session.Create` 之后**不可变**
 - 改 workspace = 新 Session（binding 替换 SessionID）
-- 改 agent = 先 `/kill` 再 `/run`
+- 改 agent = 先 `/close` 再 `/run`
 
 **Session vs CLI 状态**：
 
@@ -172,7 +172,7 @@ type CreateRequest struct {
 - `internal/session/input_buffer.go` — InputBuffer（无 receipts map）
 - `internal/bridge/pty/pty.go` — pty.New
 - `internal/registry/registry.go` — JSON 持久化（v1.1：两张表）
-- `internal/gateway/cmd/handlers.go` — `/cwd` `/run` `/kill` handlers（用 Gateway 的 binding 表）
+- `internal/gateway/cmd/handlers.go` — `/cwd` `/run` `/close` handlers（用 Gateway 的 binding 表）
 
 ### 4.1 `/cwd <path>` handler（v1.1：走 Gateway.binding）
 
@@ -182,7 +182,7 @@ handler.cwd(ctx, msg, args)
   │   └ binding.Workspace → Reply
   └ args 有 → workspace.Validate(path)
      ├ binding := gw.LookupByChat(msg.ChatID)
-     │   ├ 存在且 binding.SessionID 指向 sess.Status == Running → 拒绝（"CLI running, /kill first"）
+     │   ├ 存在且 binding.SessionID 指向 sess.Status == Running → 拒绝（"CLI running, /close first"）
      │   └ 否则 → 继续
      ├ agentName := (binding?.Agent) || (Registry.List() 第一个) || "claude"
      ├ sess := manager.Create(ctx, CreateRequest{
@@ -225,7 +225,7 @@ cmd := exec.Command(agent.Command(), finalArgs...)
 cmd.Dir = workspace
 ```
 
-### 4.3 `/kill` handler
+### 4.3 `/close` handler
 
 ```
 handler.kill(ctx, msg, _)
@@ -245,7 +245,7 @@ handler.kill(ctx, msg, _)
                                                                   │
                                                                   │ /run (or /cwd 触发 respawn)
                                                                   ▼
-                              /kill ◄─────────────── [binding → session, Running]
+                              /close ◄─────────────── [binding → session, Running]
                                 │                          ▲
                                 │                          │ /run (CLI 死了)
                                 ▼                          │
@@ -271,7 +271,7 @@ handler.kill(ctx, msg, _)
 |------|------|
 | `/cwd` 无参数 | "usage: /cwd <path>" 或 "current workspace: <ws>"（binding 存在时）|
 | `/cwd /nonexistent` | "workspace does not exist: /nonexistent" |
-| `/cwd` 时 CLI 在跑 | "CLI running, /kill first to change workspace" |
+| `/cwd` 时 CLI 在跑 | "CLI running, /close first to change workspace" |
 | `/run` 前没 `/cwd` | "no workspace set, send /cwd <path> first" |
 | `/run` 无参数 | "usage: /run <agent> [args...]" |
 | `/run foo`（未知 agent）| "unknown agent: foo" |
@@ -279,11 +279,11 @@ handler.kill(ctx, msg, _)
 | `/run codex --bad-flag` | 透传，codex 自己报错 |
 | `/run` 时 CLI 死了（sess.Exited）| spawn 新 CLI |
 | `/run` 时 CLI 在跑（sess.Running）| reconnect，不重启 |
-| `/kill` 但 binding 不存在 | "no session to kill" |
-| `/kill` 后 binding 保留，user 再 `/run` | spawn 新 CLI（workspace 保留）|
+| `/close` 但 binding 不存在 | "no session to kill" |
+| `/close` 后 binding 保留，user 再 `/run` | spawn 新 CLI（workspace 保留）|
 | nightme 重启，binding 恢复 + session.Detached + PID 活着 | `/run` 时 sess.Status == Detached → spawn（PID 被覆盖）|
 | nightme 重启，binding 恢复 + session.Detached + PID 死了 | `/run` 时 spawn |
-| `/cwd /a` 然后 `/run claude` 然后 `/cwd /b` | 第二 /cwd 拒绝 "CLI running, /kill first" |
+| `/cwd /a` 然后 `/run claude` 然后 `/cwd /b` | 第二 /cwd 拒绝 "CLI running, /close first" |
 | 用户狂发 `/run`（CLI 已在跑）| 每次都返回 "Already running"，不重启 |
 | `manager.Create` 失败（PTY 错误）| 返回 err；binding 不更新；用户看到 error reply |
 | `manager.Create` 成功但 registry.Upsert 失败 | log warn；in-memory 状态正确；下次 Persist 修复 |
@@ -304,7 +304,7 @@ handler.kill(ctx, msg, _)
 **集成测试**：
 - Gateway + MemoryManager + mock Channel: `/cwd` → `manager.Create` + `gateway.Bind` + `registry.Upsert x2`
 - Gateway + MemoryManager + mock Channel: `/run` → `manager.Create` (新 session) + `binding.SessionID` 替换
-- Gateway + MemoryManager + mock Channel: `/kill` → `manager.Kill` + binding 保留
+- Gateway + MemoryManager + mock Channel: `/close` → `manager.Kill` + binding 保留
 
 **E2E（M2）**：
 - 飞书 DM `/cwd /tmp/foo` → "Workspace set"
@@ -312,7 +312,7 @@ handler.kill(ctx, msg, _)
 - 飞书 DM 发 "hello" → claude 收到
 - `ps aux | grep claude` → 看到进程
 - 飞书 DM `/run claude` → "Already running"
-- 飞书 DM `/kill` → "session killed"
+- 飞书 DM `/close` → "session killed"
 - 飞书 DM `/run claude --model opus` → "Started: claude --model opus"
 - nightme 重启，binding + session 从 registry 恢复
 - 飞书 DM `/run claude` → spawn 或 reconnect（取决于 PID）
@@ -322,7 +322,7 @@ handler.kill(ctx, msg, _)
 ## 8. Open questions
 
 - `/cwd <path>` 在 CLI 跑着时能否 update workspace？v1.1 拒绝；v0.4 可加 `--force` 或先 kill
-- `/run` 是否允许切换 agent？v1.1 拒绝（必须 /kill 后再 /run 新 agent），v0.4 评估
+- `/run` 是否允许切换 agent？v1.1 拒绝（必须 /close 后再 /run 新 agent），v0.4 评估
 - 是否需要 `/forget` 命令清空 binding？v1.1 不需要
 - session 永不过期吗？v1.1 是的；v0.4 可加 session TTL
 - nightme 重启时如何判断 session 该 reconnect 还是 spawn？v1.1：detach 后 PID 失效一律 spawn（不尝试 reattach 老 PID）

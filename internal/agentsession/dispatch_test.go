@@ -226,7 +226,7 @@ func TestAgentSession_Shutdown_NoEventPushed_ReturnsImmediately(t *testing.T) {
 // firing without re-subscribing.
 //
 // Invariant #9: bridge process exit does NOT close the EventBus. Only
-// /kill or ChatSession shutdown closes it. We exercise this by
+// /close or ChatSession shutdown closes it. We exercise this by
 // marking the AS Exited (simulating bridge exit) and verifying the
 // bus remains open + subscribers still fire.
 func TestAgentSession_Respawn_PreservesEventBus(t *testing.T) {

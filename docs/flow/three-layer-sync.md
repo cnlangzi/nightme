@@ -136,7 +136,7 @@ handleUse(ctx, mgr, ch, msg, args, primary):
   reply "Now using <name> (pid=..., source=...)"
 ```
 
-**注意:`/use` 不 kill 旧 AS 的子进程**——只是断开 ctx 关联,旧 AS 仍留在 `pool`,旧 bridge 仍活着(可能在后台跑,可能 hung)。后续 `/kill` 才能真正关掉。这是 UX 上需要补的地方。
+**注意:`/use` 不 kill 旧 AS 的子进程**——只是断开 ctx 关联,旧 AS 仍留在 `pool`,旧 bridge 仍活着(可能在后台跑,可能 hung)。后续 `/close` 才能真正关掉。这是 UX 上需要补的地方。
 
 ---
 
@@ -415,7 +415,7 @@ case agent.EventDone:
 | 5. cs.StartReadPump | ChatSession | `pumpMu` | 等旧 pump done |
 | 6. reply "Now using claude" | runtime | 无 | ch.Send |
 
-### "/kill"
+### "/close"
 
 | 步骤 | 谁做 | 持锁 | 阻塞点 |
 |------|------|------|--------|

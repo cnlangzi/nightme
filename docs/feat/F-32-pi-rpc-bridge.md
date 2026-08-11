@@ -35,7 +35,7 @@ nightme 现有 FSM 假设"一个 AgentSession = 一个进程"；pi RPC 进程是
 
 首期不实现：
 
-- `/abort` + `agent.Abortable`：chat FSM 暂无 Aborting 态；加 `/kill` 已能逃生；后续以可选接口追加。
+- `/abort` + `agent.Abortable`：chat FSM 暂无 Aborting 态；加 `/close` 已能逃生；后续以可选接口追加。
 - `extension_ui_request` → 飞书卡回复闭环：当前 feishu card action 只 toast，不发 decision；扩展 UI 表本身需要 keyed-by-id 的 request map，先把"两端之间加 channel"留到 v1.3.x。
 - `steer` / `follow_up`：复用现有 `InputBuffer` 在 `EventDone` 切 Idle 后 flush，避免给 pi 加双语义。
 - `set_model` / `set_thinking_level` / `cycle_*`：MVP 留给用户在 pi CLI flag 配置；后续按需开 `/use pi --model=…`。
@@ -58,7 +58,7 @@ nightme 现有 FSM 假设"一个 AgentSession = 一个进程"；pi RPC 进程是
 | `get_state` | C→S | `type` | 握手 / 拉初始 model + sessionId |
 | `prompt` | C→S | `type`, `message` (string), `images` ([ImageContent]), `id` (可选) | 发用户 turn |
 | `extension_ui_response` | C→S | `type`, `id` (与 request id 匹配), `value` \| `confirmed` \| `cancelled` | **首期不发送**；本版本对 `extension_ui_request` 自动回 cancelled |
-| `abort` | C→S | `type` | **首期不发送**；用 `/kill` 替代 |
+| `abort` | C→S | `type` | **首期不发送**；用 `/close` 替代 |
 
 `ImageContent` shape：`{"type":"image", "data":<base64>, "mimeType":<MIME>}`。
 
@@ -291,9 +291,9 @@ pnpm add -g @earendil-works/pi-coding-agent
 | compaction | ✅（F-49: `compaction_end` emit `EventCompaction` × 1;`compaction_start` 屏蔽） |
 | session state → EventAgentConnected | ✅（首次 `get_state`） |
 | 多轮长驻 | ✅（`agent_settled` 不关 channel） |
-| `/kill` 终止 | ✅（Close 路径） |
+| `/close` 终止 | ✅（Close 路径） |
 | **跨进程 Resume（daemon 重启续同会话）** | ✅（spawn-time `--session-id <id>`；`AgentSession.ResumeID` 由 `get_state.sessionId` 填入 → 写入 `agent_sessions.json` → 下次 spawn 翻译成 `--session-id`；与 claudecode 的 `--resume <id>` 同 bridge contract 各自翻译） |
-| `/abort` 单 turn 取消 | ❌ 用 `/kill` 替代 |
+| `/abort` 单 turn 取消 | ❌ 用 `/close` 替代 |
 | Extension UI 飞书回复 | ❌ 自动 cancelled，不发卡 |
 | steer / follow_up | ❌ 走 InputBuffer flush |
 | 运行时切 model / thinking | ❌ 改 pi CLI flag |
@@ -345,7 +345,7 @@ pnpm add -g @earendil-works/pi-coding-agent
   - `nightme agents` 列出 `pi / pi / --mode rpc`。
   - daemon 启动，`/use pi`；多轮文本 + 一次图片 + 一次 tool call 完整。
   - footer 显示 session id / model / tokens。
-  - `/kill` 回收子进程。
+  - `/close` 回收子进程。
 
 ## 10. Critical Files
 

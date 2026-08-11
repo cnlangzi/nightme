@@ -4,10 +4,10 @@
 //
 //	StopSelectedAgent(c *Cmd) — /stop (no args) path
 //
-// Distinct from /kill in two ways:
+// Distinct from /close in two ways:
 //
 //   - scope: only the selectedAgent (cs.SelectedAgentSession()),
-//     NOT the whole cwd-scoped batch. /kill acts on every
+//     NOT the whole cwd-scoped batch. /close acts on every
 //     AgentSession whose Cwd == activeCwd; /stop acts on exactly
 //     one entry — the one the user is interacting with right now.
 //   - effect: bridge.Stop (signal / RPC / structured cancel)
@@ -29,7 +29,7 @@
 //	codex     — SIGINT app-server; turn/failed settled; SessionID kept
 //	acp       — SIGINT over PTY; native Ctrl-C; SessionID kept
 //	claudecode — SIGINT over pipe; best-effort (may exit child)
-//	pty       — ErrNotSupported (handler surfaces "use /kill")
+//	pty       — ErrNotSupported (handler surfaces "use /close")
 //
 // Daemon shutdown (cmd/nightme/run.go) does NOT call this — agents
 // survive nightme restart via the Detached registry state.
@@ -83,7 +83,7 @@ type Result struct {
 // settles; /stop's reply is sent as soon as this function returns.
 //
 // Pool / selectedAS / agent_sessions.json state is intentionally
-// NOT touched here. /stop is "pause execution"; /kill is "tear down".
+// NOT touched here. /stop is "pause execution"; /close is "tear down".
 func StopSelectedAgent(c *Cmd) (Result, error) {
 	if c == nil || c.CS == nil {
 		return Result{}, ErrNoContext

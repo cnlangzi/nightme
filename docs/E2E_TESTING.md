@@ -79,10 +79,10 @@ agent output is rendered back to the chat.
    | 2 | `/run /bin/echo` | `Already running (pid=<PID>). Connected.` |
    | 3 | `hello` | `hello` (from the agent's PTY echo) |
    | 4 | `/run /bin/echo` | `Already running (pid=<PID>). Connected.` (reconnect) |
-   | 5 | `/kill` | `session killed` |
+   | 5 | `/close` | `session killed` |
    | 6 | `/run /bin/echo` | `Already running (pid=<PID>). Connected.` (new PID) |
    | 7 | `/clear` | passes through to the agent (looks like `/clear` in the PTY) |
-   | 8 | `/help` | the help body listing `/cwd /run /kill /help` |
+   | 8 | `/help` | the help body listing `/cwd /run /close /help` |
 
    > The default agent name is `claude`. Replace `/run /bin/echo`
    > with `/run claude` if you want the real CLI. The echo binary

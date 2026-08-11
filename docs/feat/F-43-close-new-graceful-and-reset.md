@@ -1,4 +1,4 @@
-# F-43: `/kill` Graceful Shutdown + `/new` ResumeID Clear + 列表式回复
+# F-43: `/close` Graceful Shutdown + `/new` ResumeID Clear + 列表式回复
 
 > **Status**: 📝 设计落地（2026-08-05）
 > **Milestone**: v1.3.x
@@ -11,13 +11,13 @@
 
 三个独立但相互关联的修复,统一打包:
 
-1. **`/kill` 改成 bridge graceful shutdown** —— 当前 `ChatSession.KillAll` 只清理 nightme 侧的内存和 disk,**不向 child CLI 发任何信号**,导致进程孤儿化继续运行;同时清掉 InputBuffer 等不属于该命令管理的 state。
+1. **`/close` 改成 bridge graceful shutdown** —— 当前 `ChatSession.KillAll` 只清理 nightme 侧的内存和 disk,**不向 child CLI 发任何信号**,导致进程孤儿化继续运行;同时清掉 InputBuffer 等不属于该命令管理的 state。
 2. **`/new` 对 dead/detached AgentSession 清 ResumeID** —— 当前 `NewActiveAgentSessions` 对 `StatusRunning` 之外的 entry **silently skip**,但 pool entry 里残留的旧 ResumeID 会在下次 spawn 时被透传,导致 `--resume <死 id>` 试图续接一个死 session(违背 `/new` 的语义)。
 3. **两个命令的回复文案升级为 per-entry 列表** —— 用户从 "Killed 2 agents" 升级到 "✓ claude @ /A\n✓ codex @ /B",每条 entry 都有明确归属。
 
 不变式（受 SPEC §1.3 约束）：
 
-- **slash command 边界**:`/kill` 和 `/new` **只与 agent 进程交互**。`selectedCwd` / `selectedAgent` / `currentTurnUserMsgID` / `InputBuffer` 都不属于它们。
+- **slash command 边界**:`/close` 和 `/new` **只与 agent 进程交互**。`selectedCwd` / `selectedAgent` / `currentTurnUserMsgID` / `InputBuffer` 都不属于它们。
 - **graceful 优先**:每个 bridge 的 `Close()` 已有 stdin EOF + SIGINT + 2s grace + SIGKILL 兜底的本地 watchdog（见 `claudecode` `session.go:466-498`）。nightme 端**不二次升级**信号。
 - **不主动浪费资源**:`/new` **永不**为触发"reset"而 spawn 一个 dead agent。dead 状态 = 不动进程,只清 ResumeID。
 - **state 同步**:disk 删除必须在进程死 *之后*,不能根据"还没发生的事"提前删。
@@ -26,7 +26,7 @@
 
 ## 2. Motivation & Problem
 
-### 2.1 当前 `/kill` 的三个缺陷
+### 2.1 当前 `/close` 的三个缺陷
 
 `internal/chatsession/chatsession.go:769-796` 的 `KillAll` 注释自陈 "v1.2 commit 6: this is a data-only operation — no actual signal is sent (commit 7 will wire SIGTERM)",代码也确实如此:
 
@@ -91,9 +91,9 @@ Reset 3 session(s). Send a message to start fresh.
 
 ### 2.4 设计目标
 
-1. **`/kill` 真正 graceful kill**:每个 bridge 走自己的 Close() 路径,等进程真死,再清 disk。
+1. **`/close` 真正 graceful kill**:每个 bridge 走自己的 Close() 路径,等进程真死,再清 disk。
 2. **`/new` 对 dead state 也要有副作用**:清 ResumeID,让下次 spawn 必然 fresh。
-3. **不动 slash command 边界外的 state**:InputBuffer、selectedCwd、用户当前消息都不归 `/kill` 管。
+3. **不动 slash command 边界外的 state**:InputBuffer、selectedCwd、用户当前消息都不归 `/close` 管。
 4. **per-entry 列表回复**:每个 agent 一行,带 ✓ / ✗ / • 状态标记,失败带 error msg。
 
 ---
@@ -103,9 +103,9 @@ Reset 3 session(s). Send a message to start fresh.
 ### 3.1 graceful shutdown 全貌
 
 ```
-user /kill
+user /close
   ↓
-kill.Factory.Handle (internal/command/kill/kill.go)
+kill.Factory.Handle (internal/command/close/close.go)
   ↓
 cs.KillAll() —— 改造后
   ├ snapshot pool(拷贝 Go 指针,不在原 map 上原地删)
@@ -153,7 +153,7 @@ cs.NewActiveAgentSessions(ctx, agentName)
 
 ---
 
-## 4. `/kill` Slash Command
+## 4. `/close` Slash Command
 
 ### 4.1 不变量
 
@@ -171,7 +171,7 @@ cs.NewActiveAgentSessions(ctx, agentName)
 ### 4.3 `KillResult` 类型
 
 ```go
-// KillResult is one row of the /kill reply. It captures what
+// KillResult is one row of the /close reply. It captures what
 // happened to a single pool entry during KillAll so the handler
 // can render a per-agent status instead of a bare count.
 type KillResult struct {
@@ -201,7 +201,7 @@ func (cs *ChatSession) KillAll() ([]KillResult, error)
 // processes have exited, their persistent entries are deleted from
 // agent_sessions.json so the next spawn won't resume the dead
 // sessions. The InputBuffer is left alone — the user's queued
-// messages are not /kill's concern.
+// messages are not /close's concern.
 func (cs *ChatSession) KillAll() ([]KillResult, error) {
     // 1. snapshot pool under read lock; don't mutate pool until
     //    every bridge has confirmed shutdown.
@@ -280,7 +280,7 @@ func (cs *ChatSession) KillAll() ([]KillResult, error) {
 
 `killGraceTotal` 建议 5s(比 bridge 内部 2s 多一倍,留 2 次 grace 重试 + SIGKILL 余量)。
 
-### 4.6 与 `/kill` 旧版的差异总结
+### 4.6 与 `/close` 旧版的差异总结
 
 | 行为 | 旧 | 新 |
 |------|----|----|
@@ -358,25 +358,32 @@ if as.Status() != StatusRunning {
 }
 ```
 
-### 5.5 `/new` vs `/kill` 对比
+### 5.5 `/new` vs `/close` vs `/stop` 对比
 
-| 维度 | `/kill` | `/new` |
-|------|---------|--------|
-| **目的** | 终止 agent 进程,清干净 | 重置对话上下文,下次 fresh |
-| **进程状态** | `Running → Exited`(graceful) | `Running → Running`(in-place reset) / `Exited/Detached → Exited/Detached`(只清 ResumeID) |
-| **是否 spawn** | ❌ 永不 spawn | ❌ 永不 spawn |
-| **InputBuffer** | ✅ 保留(用户消息) | ❌ 清掉(旧对话的一部分) |
-| `agent_sessions.json` | entry 删除(进程 dead 后) | entry.ResumeID 清空(entry 保留) |
-| `currentTurnUserMsgID` | 清空 | 不动 |
-| **下次 spawn** | fresh(无 ResumeID) | fresh(无 ResumeID) |
-| **bridge 调用** | `as.Close()`(graceful) | `as.New(ctx, spawner)`(in-place);dead 分支 0 bridge 调用 |
-| **强杀兜底** | bridge 内部 2s 后 SIGKILL | N/A |
+| 维度 | `/stop` | `/close` | `/new` |
+|------|---------|---------|--------|
+| **目的** | 中断当前 turn,bridge 继续 | 终止 bridge 进程,会话保留 | 重置对话上下文,下次 fresh |
+| **进程状态** | `Running → Running`(可能,结构化 abort) / `Running → Exited`(可能,SIGINT) | `Running → Exited`(graceful) | `Running → Running`(in-place reset) / `Exited/Detached → Exited/Detached`(只清 ResumeID) |
+| **是否 spawn** | ❌ 永不 spawn | ❌ 永不 spawn | ❌ 永不 spawn |
+| **InputBuffer** | ✅ 保留(用户消息) | ✅ 保留(用户消息) | ❌ 清掉(旧对话的一部分) |
+| **AgentSession pool entry** | 保留(`Handle` 还在) | 保留(`Handle` 失效,sessionID 还在) | 保留 |
+| `agent_sessions.json` | 不动 | entry 保留(下次 spawn 用 `--resume <id>` 续上) | entry.ResumeID 清空(entry 保留) |
+| `currentTurnUserMsgID` | 不动 | 不动 | 不动 |
+| **下次 spawn** | 同 AS,继续 | 同 AS ID,`--resume <id>` 续上 | fresh(无 ResumeID) |
+| **bridge 调用** | `as.Stop(ctx)` | `as.Close()`(graceful) | `as.New(ctx, spawner)`(in-place);dead 分支 0 bridge 调用 |
+| **强杀兜底** | N/A | bridge 内部 2s 后 SIGKILL | N/A |
+
+**关键区别**:
+
+- `/stop` = signal only;`/close` = signal + kill process;`/new` = in-place context reset.
+- `/close` **保留** AgentSession 的 identity(pool entry + sessionID + agent_sessions.json row)以便下次 spawn 续上对话;真正"丢弃 session"需要 daemon shutdown 或手动清理 `agent_sessions.json`。
+- 三者都不 spawn 新进程 —— 用户下次发消息时才走 spawn 路径。
 
 ---
 
 ## 6. 列表式回复文案
 
-### 6.1 `/kill` 模板
+### 6.1 `/close` 模板
 
 **空 pool**:
 ```
@@ -548,10 +555,10 @@ func buildKillHeader(killed, stale, failed int) string {
 
 ## 7. 不变式 checklist
 
-- [ ] `/kill` **永不动** `selectedCwd` / `selectedAgent` / `currentTurnUserMsgID` / `InputBuffer`
-- [ ] `/kill` 调 `as.Close()` 而不是 `cs.pool = make(...)` 直接丢指针
-- [ ] `/kill` 删 `agent_sessions.json` entry 必须在 bridge 关闭 *之后*
-- [ ] `/kill` 整体 timeout 5s 是兜底,bridge 内部 2s 已 SIGKILL,几乎不触发
+- [ ] `/close` **永不动** `selectedCwd` / `selectedAgent` / `currentTurnUserMsgID` / `InputBuffer`
+- [ ] `/close` 调 `as.Close()` 而不是 `cs.pool = make(...)` 直接丢指针
+- [ ] `/close` 删 `agent_sessions.json` entry 必须在 bridge 关闭 *之后*
+- [ ] `/close` 整体 timeout 5s 是兜底,bridge 内部 2s 已 SIGKILL,几乎不触发
 - [ ] `/new` 对 dead/detached 也清 `ResumeID`,不 silently skip
 - [ ] `/new` 不 spawn 任何 dead agent
 - [ ] `/new` **不动** `currentTurnUserMsgID`(下条消息自然重新锚)
@@ -563,7 +570,7 @@ func buildKillHeader(killed, stale, failed int) string {
 
 ## 8. 错误处理矩阵
 
-### 8.1 `/kill`
+### 8.1 `/close`
 
 | 场景 | 行为 |
 |------|------|
@@ -709,7 +716,7 @@ TestFormatResetResults_AllDead
 - **🟢 改 `/cwd` / `/use` 语义**:已经是正确的不动 agent 进程,继续保留。
 - **🟢 改 Feishu card 渲染**:先用 plain text,等用户反馈再升级 Card 2.0 富文本。
 - **🟢 引入 `StatusDraining` 中间态**:当前依赖 `ObserveClose` 异步感知 entries 死亡,wg.Wait + bridge 内部 2s SIGKILL 兜底足够。
-- **🟢 `/kill <agent>` 细粒度**:本次先做"全 pool kill",agent 子集过滤可以下一个 PR。
+- **🟢 `/close <agent>` 细粒度**:本次先做"全 pool kill",agent 子集过滤可以下一个 PR。
 
 ---
 
@@ -717,15 +724,15 @@ TestFormatResetResults_AllDead
 
 | # | 决策 | 结论 |
 |---|------|------|
-| D-1 | `/kill` 是否清 InputBuffer | **否**。用户消息不属于 `/kill` 的语义边界。 |
-| D-2 | `/kill` 是否清 `currentTurnUserMsgID` | **是**。下一条消息该重新锚。 |
-| D-3 | `/kill` 是否做 SIGKILL 兜底 | **不**。bridge 内部 2s 后已 SIGKILL,nightme 端做会和 bridge 抢信号。 |
-| D-4 | `/kill` 整体 timeout | **5s**。比 bridge 内部 2s 多一倍,留 SIGKILL 余量。 |
+| D-1 | `/close` 是否清 InputBuffer | **否**。用户消息不属于 `/close` 的语义边界。 |
+| D-2 | `/close` 是否清 `currentTurnUserMsgID` | **是**。下一条消息该重新锚。 |
+| D-3 | `/close` 是否做 SIGKILL 兜底 | **不**。bridge 内部 2s 后已 SIGKILL,nightme 端做会和 bridge 抢信号。 |
+| D-4 | `/close` 整体 timeout | **5s**。比 bridge 内部 2s 多一倍,留 SIGKILL 余量。 |
 | D-5 | `/new` 是否 spawn dead agent | **否**。只清 ResumeID。 |
 | D-6 | `/new` 是否清 `currentTurnUserMsgID` | **否**。下条消息自然重新锚。 |
 | D-7 | `/new` 是否清 InputBuffer | **是**。沿用 F-34 review #1。 |
 | D-8 | `/new` 对 dead entry 是否静默 | **否**。返回 per-entry result,带 `marked-fresh` Action。 |
-| D-9 | `/kill` / `/new` 报告形式 | **per-entry 列表**,带 `✓` / `✗` / `•` 标记。 |
+| D-9 | `/close` / `/new` 报告形式 | **per-entry 列表**,带 `✓` / `✗` / `•` 标记。 |
 | D-10 | 报告格式 | **plain text**(后续可升级 Card 2.0)。 |
 | D-11 | 长度截断 | **20 行 + "... and N more"**。 |
 | D-12 | 报告用词 | **"Stopped" / "Reset" / "Cleared" / "Marked fresh"**。"kill" 实现是 graceful,不用 "killed"。 |
@@ -744,9 +751,9 @@ TestFormatResetResults_AllDead
 - [ ] 新增 `FormatResetResults` helper
 - [ ] 新增 `killGraceTotal = 5 * time.Second` 常量
 
-### 12.2 `internal/command/kill/kill.go`
+### 12.2 `internal/command/close/close.go`
 
-- [ ] `Handle` 改用 `FormatKillResults`（位于 `internal/command/kill/format.go`）
+- [ ] `Handle` 改用 `FormatKillResults`（位于 `internal/command/close/format.go`）
 
 ### 12.3 `internal/command/newcmd/cmd.go`
 
@@ -760,7 +767,7 @@ TestFormatResetResults_AllDead
 
 ### 12.5 文档
 
-- [ ] SPEC.md §3.2 状态转换触发器表更新(`/kill` 行注明走 graceful)
+- [ ] SPEC.md §3.2 状态转换触发器表更新(`/close` 行注明走 graceful)
 - [ ] F-34 §6 错误处理矩阵加 dead/detached 的 result 行
 - [ ] F-34 README linking 加 F-43
 
@@ -780,9 +787,9 @@ TestFormatResetResults_AllDead
 
 | 风险 | 缓解 |
 |------|------|
-| Bridge `Close()` hang 超过 5s 导致 `/kill` UX 慢 | `killGraceTotal` 可调;bridge 内部 2s 已 SIGKILL |
+| Bridge `Close()` hang 超过 5s 导致 `/close` UX 慢 | `killGraceTotal` 可调;bridge 内部 2s 已 SIGKILL |
 | `SetResumeID("")` + 持久化 race(其它 goroutine 同时 `LookupSelectedAgentSession`) | entry 复用已有 `resumeIDMu`,Upsert 是 atomic write |
-| `/kill` 保留 InputBuffer 但用户期望清 | 设计决策(D-1);若用户反馈,加 `/clear-buffer` 单独命令 |
+| `/close` 保留 InputBuffer 但用户期望清 | 设计决策(D-1);若用户反馈,加 `/clear-buffer` 单独命令 |
 | 旧 `agent_sessions.json` 没 ResumeID 字段 | GO JSON 容忍,不破坏现有数据 |
 
 **回滚方案**:改动都在 `internal/chatsession/` 内部,git revert 那个 commit 即可,不涉及 schema 或 wire format。
@@ -791,7 +798,7 @@ TestFormatResetResults_AllDead
 
 ## 14. 后续 PR(不在本次)
 
-- [ ] `/kill <agent>` agent 子集过滤
+- [ ] `/close <agent>` agent 子集过滤
 - [ ] 升级 Feishu Card 2.0 富文本渲染(目前 plain text)
 - [ ] per-entry 操作耗时显示(`killed (1.2s)`)
 - [ ] 长结果 list 折叠(accordion)

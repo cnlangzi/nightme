@@ -230,6 +230,85 @@ func (q *MessageQueue) Push(msg Message) error {
 	return nil
 }
 
+// PushFront inserts msg at the head of the pending region by value.
+// Returns ErrFull if the queue is at capacity. A zero-value
+// msg (empty ID) is a no-op (returns nil).
+//
+// Used by /steer: when the user wants a new message to take
+// priority over anything else already queued, it lands at the
+// head so the next Peek returns it first.
+//
+// Edge cases:
+//   - Empty queue: head/tail/inFlightEnd all point at n. Same
+//     shape as Push on an empty queue.
+//   - Queue fully in-flight (inFlightEnd == nil, list non-empty):
+//     in-flight items stay in-flight; n is appended at tail and
+//     inFlightEnd moves to n. This is functionally equivalent to
+//     Push's same edge case — the steer message will be the
+//     first (and only) thing the agent sees on the next turn.
+//     Prepending at head would break the invariant that
+//     inFlightEnd points at the first pending item, since the
+//     entire pre-existing list is in-flight (no pending items
+//     to prepend before). Appending is the correct shape.
+//   - Mixed (inFlightEnd != nil): n is inserted before
+//     inFlightEnd; inFlightEnd is updated to n so it remains
+//     the first pending item.
+func (q *MessageQueue) PushFront(msg Message) error {
+	if msg.ID == "" {
+		return nil
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.capacity > 0 && q.length >= q.capacity {
+		return ErrFull
+	}
+	n := &node{value: msg}
+	if q.head == nil {
+		// Empty list. head/tail/inFlightEnd all start at n.
+		q.head = n
+		q.tail = n
+		q.inFlightEnd = n
+	} else if q.inFlightEnd == nil {
+		// Entire list is in-flight. Append at tail and set
+		// inFlightEnd to n (the new item is the only pending
+		// one). Same shape as Push's all-in-flight edge case.
+		q.tail.next = n
+		q.tail = n
+		q.inFlightEnd = n
+	} else {
+		// Insert n before inFlightEnd; move inFlightEnd to n
+		// so the invariant ("items from inFlightEnd inclusive
+		// are pending") is preserved.
+		if q.inFlightEnd == q.head {
+			// inFlightEnd IS the head. Insert at head (no
+			// predecessor to update in a singly-linked list).
+			n.next = q.head
+			q.head = n
+		} else {
+			// Find inFlightEnd's predecessor. Length-bounded
+			// walk: if the invariant (inFlightEnd is reachable
+			// from head via .next) ever breaks, this loop would
+			// spin forever. Cap at q.length so a corrupted
+			// invariant fails loud (panic) instead of hanging
+			// the caller.
+			prev := q.head
+			steps := 0
+			for prev.next != q.inFlightEnd {
+				prev = prev.next
+				steps++
+				if steps > q.length {
+					panic("MessageQueue.PushFront: inFlightEnd not reachable from head (broken invariant)")
+				}
+			}
+			n.next = q.inFlightEnd
+			prev.next = n
+		}
+		q.inFlightEnd = n
+	}
+	q.length++
+	return nil
+}
+
 // Commit removes the in-flight region — everything from head up
 // to inFlightEnd (exclusive). The freed nodes are unlinked and
 // their .next pointer cleared to allow prompt GC. No-op if
@@ -319,7 +398,7 @@ func (q *MessageQueue) Remove(id string) (Message, bool) {
 // Clear removes every item — pending and in-flight — and returns
 // them in their original order. The returned slice is freshly
 // allocated; the queue is empty after the call. Used by
-// ChatSession.DropQueue (for /kill, /new) to clear the queue
+// ChatSession.DropQueue (for /close, /new) to clear the queue
 // while still obtaining the items for per-message MarkDropped
 // wire events.
 func (q *MessageQueue) Clear() []Message {

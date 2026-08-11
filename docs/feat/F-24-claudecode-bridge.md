@@ -281,7 +281,7 @@ Claude Code 支持的 permission modes：
 **nightme 选择 `bypassPermissions`**：
 
 - nightme 是自动化 daemon，不在终端前
-- 用户通过 /kill 控制中断
+- 用户通过 /close 控制中断
 - 不需要交互式确认 UI
 
 ### 4.2 PreToolUse hook（可选）

@@ -9,22 +9,92 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Build and publish binary
+  build:
+    name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,  goarch: amd64 }
+          - { goos: linux,  goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
-          go-version: '1.22'
+          go-version-file: go.mod
           cache: true
 
+      # Cross-compile on a single Linux runner — nightme has no
+      # CGO deps and the daemon is Unix-only (net.UnixListener +
+      # os.ModeSocket in internal/daemoncontrol), so building for
+      # darwin from linux is safe. Windows is intentionally out
+      # of scope.
       - name: Build
-        run: go build -o nightme ./cmd/nightme
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          TAG: ${{ github.ref_name }}
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist stage
+          SHORT="${SHORT_SHA::7}"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          LDFLAGS="-s -w \
+            -X github.com/cnlangzi/nightme/internal/version.Version=${TAG} \
+            -X github.com/cnlangzi/nightme/internal/version.GitCommit=${SHORT} \
+            -X github.com/cnlangzi/nightme/internal/version.BuildDate=${BUILD_DATE}"
+          go build -trimpath -ldflags "$LDFLAGS" \
+            -o stage/nightme ./cmd/nightme
+          cp LICENSE  stage/LICENSE
+          cp README.md stage/README.md
 
-      - name: Upload release asset
-        uses: softprops/action-gh-release@v2
+      - name: Archive
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          tar -C stage -czf \
+            "dist/nightme_${VERSION}_${GOOS}_${GOARCH}.tar.gz" \
+            nightme LICENSE README.md
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v6
         with:
-          files: nightme
+          name: nightme-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum nightme_*.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
           generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt

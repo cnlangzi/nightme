@@ -48,7 +48,9 @@ import (
 	"github.com/cnlangzi/nightme/internal/command/watch"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/gateway/inbound"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/registry"
 	"github.com/cnlangzi/nightme/internal/shell"
@@ -363,18 +365,33 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// same Emitter to every ChatSession.
 	em := outbound.New(ch, outbound.Options{Source: newRuntimeStatusBar(mgr, prCacheReg, gtwDeps)})
 
-	// Build the message dispatcher now that em exists. The
-	// dispatcher's three error reply paths (queue full / no
-	// workspace / spawn failed) all go through this Emitter so
-	// the StatusBar footer is applied — sending the raw
-	// channel.Channel would silently skip the stamper.
-	messageDispatcher := newMessageDispatcher(mgr, em, cfg.Primary, logger)
+	// Bind the same Emitter to chatsession.Manager so its
+	// HandleInbound error-reply paths inherit the StatusBar
+	// footer (no-workspace / spawn-failed / queue-full).
+	mgr.WithEmitter(em).WithPrimaryAgent(cfg.Primary)
 
-	gwImpl := gateway.New(messageDispatcher, em).(*gateway.Router)
+	// F-58: gateway is now a thin pump + binding table. The
+	// dispatch chain lives in *inbound.Router (constructed
+	// below, after commander / shellDispatcher / router are
+	// built). The four direct dependencies here match the
+	// priority chain in inbound.Dispatch:
+	//   1. command.Commander  (/-prefixed text)
+	//   2. shell.Dispatcher   (!-prefixed text)
+	//   3. chatsession.Manager (default — agent loop)
+	//   4. services.ReactionRouter (msg.Reaction / msg.Action)
+	// Note: the ReactionRouter is consulted FIRST in the
+	// chain (action events carry empty Text and must not fall
+	// through to a slash command). Order of the four
+	// constructor arguments does NOT match the priority
+	// order; see internal/gateway/inbound/inbound.go for the
+	// actual chain slice.
+	var gwImpl *gateway.Router
+	_ = em // em is consumed by inbound.Router's runtime wire-up below
+
 	// All chat-session commands (/cwd /use /kill /new /watch /think
 	// /tools) and /gtw are SlashCommandFactory implementations
 	// implementations registered with reg.Register below. The legacy
-	// gateway.RegisterChatSessionCommands helper is deleted; the
+	// gateway.RegisterChatSessionCommands helper is deleted;
 	// gateway only sees the slash-command path via WithCommander
 	// (the shim below) and the reaction path via WithActionHandler.
 
@@ -383,7 +400,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	//   (a) gtw.Manager owns the state,
 	//   (b) services.ReactionRouter dispatches reactions,
 	//   (c) command.Commander routes slash commands,
-	//   (d) this runtime shim translates *gateway.InboundMessage
+	//   (d) this runtime shim translates *messages.InboundMessage
 	//       ↔ command.SlashInput / *CommandResult,
 	//   (e) SetGetChatSession hands gtw a per-chat lookup so
 	//       RunFix / HandleDraftReaction can call
@@ -445,189 +462,12 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// logic.
 	shellDispatcher := shell.NewDispatcher(chatSessionChannelSender{mgr: mgr})
 
-	// RuntimeServices carries the shared command runtime interfaces.
-	// Each command package holds *chatsession.Manager directly
-	// via its Factory. Channel wraps *channel.Channel (any
-	// command that needs to send replies uses this).
-	rt := command.RuntimeServices{
-		Config: command.Config{Primary: cfg.Primary},
-		Logger: logger,
-	}
+	// RuntimeServices is built inside *inbound.Router —
+	// the v0.x runtime shim that wrapped commander.Dispatch
+	// is gone (F-58). The inbound package builds the
+	// RuntimeServices closure internally (Logger, Config)
+	// when calling commander.Dispatch.
 
-	// Shim: translate *gateway.InboundMessage → command.SlashInput,
-	// dispatch, translate back. The gateway.CommandResult shape only
-	// carries Reply/Consumed/Dropped, so out.Outbound (multi-message
-	// atomic batches such as card + reply) is intentionally dropped
-	// here for now. When a future command needs the multi-message
-	// path, extend gateway.CommandResult with an Outbound []OutboundMessage
-	// slice and translate from command.Outbound here.
-	//
-	// 2026-08-06: Commander.Dispatch now returns (output, handled,
-	// err). When handled=false (plain text, no "/" prefix) the shim
-	// returns (nil, nil) so the gateway falls through to its legacy
-	// dispatcher + agent loop. When handled=true but output.Consumed=
-	// false (slash command attempt that did not match any factory),
-	// the shim returns a Consumed=false result — the gateway
-	// recognises that as "fall through" and forwards the original
-	// text to the agent loop, preserving the pre-F-51 passthrough
-	// characteristic for inputs like "/etc/passwd" or "/@everyone".
-	gwImpl.WithCommander(func(ctx context.Context, msg *gateway.InboundMessage) (*gateway.CommandResult, error) {
-		if msg == nil {
-			return nil, nil
-		}
-
-		// GetOrCreate 这里调用一次,emitter 已经注入(见
-		// 上方 WithEmitter 调用),所以 cs.Emitter() 应当非 nil。
-		// 如果 nil(resolver 失败),log warn 并返回 nil 让 gateway
-		// 走 fallback 到 agent loop。
-		cs, err := mgr.GetOrCreate(msg.ChatID, cfg.Primary)
-		if err != nil {
-			slog.Default().Warn("runtime shim: GetOrCreate failed",
-				"chat_id", msg.ChatID, "err", err)
-			return nil, nil
-		}
-
-		input := command.SlashInput{
-			ChatID:     msg.ChatID,
-			UserID:     msg.UserID,
-			Text:       msg.Text,
-			MessageID:  msg.MessageID,
-			HasMention: msg.HasMention,
-		}
-		out, handled, err := commander.Dispatch(ctx, rt, cs, input)
-		if err != nil {
-			errText := "❌ " + err.Error()
-			ch := cs.Emitter()
-			if ch != nil {
-				_ = ch.Send(ctx, gateway.OutboundMessage{
-					ChatID:  msg.ChatID,
-					Text:    errText,
-					ReplyTo: msg.MessageID,
-				})
-			}
-			return &gateway.CommandResult{Consumed: true, Reply: errText}, nil
-		}
-		if !handled {
-			return nil, nil
-		}
-		// handled=true. out 可能 Consumed=true(command replied)
-		// 或 Consumed=false(slash 命令没匹配到 factory)。
-		ch := cs.Emitter()
-		if out.Consumed && out.Reply != "" && ch != nil {
-			_ = ch.Send(ctx, gateway.OutboundMessage{
-				ChatID:  msg.ChatID,
-				Text:    out.Reply,
-				ReplyTo: msg.MessageID,
-			})
-		}
-		// 透传 out.Outbound (都是 gateway.OutboundMessage,直接
-		// 调 cs.Emitter().Send/SendCard — PATCH 语义由调用方设 Kind=OutCardPatch
-		// 后通过 Send 走,见 channel/feishu/adapter.go: case OutCardPatch)
-		// OutCardPatch 必须走 Send: Feishu SendCard 不识别 Kind,会
-		// 当作新卡片创建,导致发重复卡片(回归保护)。
-		for _, ob := range out.Outbound {
-			if ch == nil {
-				continue
-			}
-			if ob.Kind == gateway.OutCardPatch {
-				_ = ch.Send(ctx, ob)
-			} else if ob.Card != nil {
-				_, _ = ch.SendCard(ctx, ob)
-			} else {
-				_ = ch.Send(ctx, ob)
-			}
-		}
-		return &gateway.CommandResult{
-			Consumed: out.Consumed,
-			Dropped:  out.Dropped,
-			Reply:    out.Reply,
-		}, nil
-	})
-
-	// feat-shell: install the `!cmd` shell dispatcher. Symmetric
-	// to the commander shim above; runs in priority 3 of the
-	// gateway dispatch chain (between tryCommandDispatch and
-	// tryMessageDispatch). The shell package owns its own prefix
-	// detection (parseShell) — this shim is transport-only.
-	//
-	// We resolve the chat session once via mgr.GetOrCreate (same
-	// as the commander shim) so shell.Dispatch gets the chat's
-	// SelectedCwd as its working directory. If GetOrCreate fails
-	// (e.g. agent registry not loaded), fall through to message
-	// dispatch — the user can still talk to the agent.
-	//
-	// Reply delivery: the gateway's dispatchLoop only checks
-	// result != nil and otherwise discards CommandResult.Reply
-	// (see gateway.go's dispatchLoop / Contract section). Each
-	// shim is responsible for sending its own reply to the
-	// channel. We mirror the commander shim's pattern.
-	//
-	// ASYNC execution: shell commands run in a detached goroutine,
-	// not the dispatch goroutine. The dispatcher returns immediately
-	// (Consumed=true, no Reply) so the gateway can continue
-	// processing the next message and — crucially — so the daemon
-	// can shut down cleanly without deadlocking on its own restart.
-	//
-	// Why async is REQUIRED (not optional):
-	//
-	//   The dispatchLoop goroutine is registered with the gateway's
-	//   wg. When the daemon shuts down, gateway.Stop calls
-	//   wg.Wait() — which blocks until dispatchLoop exits.
-	//   dispatchLoop can only exit when it's at the top of its
-	//   select. If dispatchLoop is currently blocked inside
-	//   shell.Dispatch (synchronously waiting on `sh -c "make
-	//   restart"`), it can't return to the select, can't exit, and
-	//   wg.Wait() hangs forever.
-	//
-	//   Meanwhile `bin/nightme restart` (a child of `make`, itself
-	//   a child of `sh`) is waiting for the daemon's lockfile to
-	//   release so the new daemon can start. The daemon can't
-	//   release the lockfile because it's stuck in shutdown waiting
-	//   on wg.Wait(). Classic self-deadlock.
-	//
-	//   By returning Consumed=true synchronously and running the
-	//   shell command in a separate goroutine, dispatchLoop is
-	//   freed immediately. The daemon can shutdownRun → Stop →
-	//   wg.Wait() → all goroutines accounted for → exit cleanly.
-	//   The shell goroutine outlives the old daemon (becomes a
-	//   short-lived orphan; init reaps it), `make restart` finishes,
-	//   the new daemon starts, and the user sees the result on the
-	//   new daemon's session via the persisted MessageID.
-	//
-	// Reply delivery happens INSIDE the goroutine, with a fresh
-	// context.Background-derived ctx (the inbound ctx is cancelled
-	// during shutdown, and the goroutine may outlive the shutdown).
-	// Reply is best-effort: if the channel/CS is gone (daemon
-	// restarted, cs unloaded), ch.Send fails silently. The user
-	// still sees the result if the new daemon picked up the same
-	// chat — the messageID is persisted in the inbound envelope.
-	gwImpl.WithShellDispatch(func(ctx context.Context, msg *gateway.InboundMessage) (*gateway.CommandResult, error) {
-		if msg == nil {
-			return nil, nil
-		}
-		cs, err := mgr.GetOrCreate(msg.ChatID, cfg.Primary)
-		if err != nil {
-			slog.Default().Warn("runtime shim (shell): GetOrCreate failed",
-				"chat_id", msg.ChatID, "err", err)
-			return nil, nil
-		}
-
-		// The shell package owns ALL shell-related logic
-		// (prefix detection, placeholder, async exec, reply
-		// posting). This shim is pure type adaptation:
-		// gateway.InboundMessage → shell.InboundRequest.
-		// Handler returning Consumed=false means "not a shell
-		// command" — the gateway falls through to tryMessageDispatch.
-		result := shellDispatcher.Handle(shell.InboundRequest{
-			Request: shell.Request{
-				Text: msg.Text,
-				Cwd:  cs.SelectedCwd(),
-			},
-			ChatID:    msg.ChatID,
-			MessageID: msg.MessageID,
-		})
-		return &gateway.CommandResult{Consumed: result.Consumed}, nil
-	})
 
 	gwImpl.AttachChannels(ch)
 
@@ -642,18 +482,13 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// services.ReactionRouter instead of calling
 	// chatsession.ChatSession.HandleAction (chatsession no
 	// longer dispatches reactions). The shim translates
-	// *commandServices.ReactionEvent → services.ReactionEvent.
-	gwImpl.WithActionHandler(func(ctx context.Context, msg *gateway.InboundMessage) bool {
-		if msg == nil || msg.Reaction == nil {
-			return false
-		}
-		return router.Handle(ctx, msg.ChatID, commandServices.ReactionEvent{
-			TargetMsgID: msg.Reaction.TargetMsgID,
-			Emoji:       msg.Reaction.Emoji,
-			UserID:      msg.Reaction.UserID,
-			ChatID:      msg.Reaction.ChatID,
-		})
-	})
+	// F-58: build the dispatch chain. The *inbound.Router owns
+	// the four direct dependencies (chatsession, command, shell,
+	// action) and walks them in priority order. Replaces the v0.x
+	// shim closures (WithCommander / WithShellDispatch /
+	// WithActionHandler) that used to live here.
+	ir := inbound.New(mgr, commander, shellDispatcher, router, cfg.Primary)
+	gwImpl = gateway.New(ir, em)
 
 	// WithOnCreate fires for both restored (RestoreFromRegistry)
 	// and future (GetOrCreate) ChatSessions. Place BEFORE
@@ -699,8 +534,8 @@ if err := wireRuntimeCallbacksAndRestore(mgr, em, logger, prCacheReg, gtwDeps, m
 //  3. cs.QueueUserMessage(blocks, userMsgID) (Idle → flush now;
 //     Busy → queue)
 //  4. SetBusy on first event (drive FSM)
-func newMessageDispatcher(mgr *chatsession.Manager, em outbound.Emitter, primary string, logger *slog.Logger) func(context.Context, *gateway.InboundMessage) error {
-	return func(ctx context.Context, msg *gateway.InboundMessage) error {
+func newMessageDispatcher(mgr *chatsession.Manager, em outbound.Emitter, primary string, logger *slog.Logger) func(context.Context, *messages.InboundMessage) error {
+	return func(ctx context.Context, msg *messages.InboundMessage) error {
 		if msg == nil {
 			return nil
 		}
@@ -733,16 +568,16 @@ func newMessageDispatcher(mgr *chatsession.Manager, em outbound.Emitter, primary
 		_, err := cs.LookupSelectedAgentSession()
 		if err != nil {
 			if errors.Is(err, chatsession.ErrNoSelectedCwd) {
-				return em.Send(ctx, gateway.OutboundMessage{
+				return em.Send(ctx, messages.OutboundMessage{
 					ChatID: msg.ChatID,
-					Kind:   gateway.OutReply,
+					Kind:   messages.OutReply,
 					Text:   "No workspace set. Send /cwd <path> first.",
 				})
 			}
 			// Spawn failed (binary missing, etc.); let the user know.
-			return em.Send(ctx, gateway.OutboundMessage{
+			return em.Send(ctx, messages.OutboundMessage{
 				ChatID: msg.ChatID,
-				Kind:   gateway.OutReply,
+				Kind:   messages.OutReply,
 				Text:   fmt.Sprintf("Failed to spawn agent: %v", err),
 			})
 		}
@@ -807,9 +642,9 @@ func newMessageDispatcher(mgr *chatsession.Manager, em outbound.Emitter, primary
 		}
 		if err := cs.QueueUserMessage(userMsg); err != nil {
 			if errors.Is(err, chatsession.ErrQueueFull) {
-				return em.Send(ctx, gateway.OutboundMessage{
+				return em.Send(ctx, messages.OutboundMessage{
 					ChatID: msg.ChatID,
-					Kind:   gateway.OutReply,
+					Kind:   messages.OutReply,
 					Text:   "Input queue full — the agent is behind. Wait for it to catch up before sending more.",
 				})
 			}
@@ -944,11 +779,11 @@ func wireRuntimeCallbacksAndRestore(
 			if e.ChatID == "" || e.UserMsgID == "" {
 				return false
 			}
-			out := gateway.OutboundMessage{
-				Kind:    gateway.OutMessageState,
+			out := messages.OutboundMessage{
+				Kind:    messages.OutMessageState,
 				ChatID:  e.ChatID,
 				ReplyTo: e.UserMsgID,
-				MessageState: &gateway.MessageStatePayload{
+				MessageState: &messages.MessageStatePayload{
 					State:     e.State,
 					MessageID: e.UserMsgID,
 				},
@@ -1167,8 +1002,8 @@ func newEventHandler(
 		// — they don't flow through gateway.Translate + this
 		// handler, so the case below would never fire.
 		switch out.Kind {
-		case gateway.OutReply, gateway.OutResult,
-			gateway.OutTaskCreate, gateway.OutTaskUpdate:
+		case messages.OutReply, messages.OutResult,
+			messages.OutTaskCreate, messages.OutTaskUpdate:
 			stampFromAS(&out, s, prReg, gtwDeps)
 		}
 		// F-think §3.1.2: per-chat OutThinking gate. When the
@@ -1185,7 +1020,7 @@ func newEventHandler(
 		// cs is captured in the closure (per-cs handler
 		// factory), so this lookup is a direct field read —
 		// no mgr.Get round-trip, no map probe, no second RLock.
-		if out.Kind == gateway.OutThinking && cs != nil && cs.ThinkMode() == chatsession.ThinkModeHide {
+		if out.Kind == messages.OutThinking && cs != nil && cs.ThinkMode() == chatsession.ThinkModeHide {
 			if logger != nil {
 				// Info level (not Debug): operators running
 				// with default log level must see drops, or
@@ -1214,7 +1049,7 @@ func newEventHandler(
 		// cs is captured in the closure (per-cs handler
 		// factory), so this lookup is a direct field read —
 		// same pattern as the ThinkMode gate above.
-		if (out.Kind == gateway.OutToolStart || out.Kind == gateway.OutToolEnd) &&
+		if (out.Kind == messages.OutToolStart || out.Kind == messages.OutToolEnd) &&
 			cs != nil && cs.ToolsMode() == chatsession.ToolsModeHide {
 			if logger != nil {
 				logger.Info("tools dropped",
@@ -1290,7 +1125,7 @@ func lookupASByID(cs *chatsession.ChatSession, id string) *agentsession.AgentSes
 // copy was missing, so footers silently rendered without usage
 // data. buildStatusBar is the shared gate; this helper and the
 // StatusBarSource both feed it the same AS + usage inputs.
-func stampFromAS(out *gateway.OutboundMessage, s *agentsession.AgentSession, prReg *prcache.Registry, deps gtw.HandlerDeps) {
+func stampFromAS(out *messages.OutboundMessage, s *agentsession.AgentSession, prReg *prcache.Registry, deps gtw.HandlerDeps) {
 	out.StatusBar = buildStatusBar(s, out.Usage, prReg, deps)
 }
 
@@ -1340,7 +1175,7 @@ func stampFromAS(out *gateway.OutboundMessage, s *agentsession.AgentSession, prR
 // Renamed + dropped the nil-return path because GitBar is
 // always populated when an AS exists; the channel renders
 // "git status unknown" honestly when GitStatus is nil.
-func buildStatusBar(s *agentsession.AgentSession, usage *agent.UsageInfo, prReg *prcache.Registry, deps gtw.HandlerDeps) *gateway.StatusBar {
+func buildStatusBar(s *agentsession.AgentSession, usage *agent.UsageInfo, prReg *prcache.Registry, deps gtw.HandlerDeps) *messages.StatusBar {
 	// Workspace resolution: AS.Cwd is the source of truth when
 	// an AS exists; the caller is responsible for passing the
 	// correct AS. The status-bar fallback (no AS) lives in
@@ -1378,13 +1213,13 @@ func buildStatusBar(s *agentsession.AgentSession, usage *agent.UsageInfo, prReg 
 	// returned nil when all stamp fields were empty, which
 	// dropped the StatusBar entirely — including the GitBar
 	// for "git collection timed out" cases.)
-	gitBar := &gateway.GitStatusBar{
+	gitBar := &messages.GitStatusBar{
 		Workspace:   cwd,
 		GitStatus:   gitSnap,
 		PullRequest: prRef,
 	}
 
-	sb := &gateway.StatusBar{
+	sb := &messages.StatusBar{
 		GitBar: gitBar,
 	}
 
@@ -1396,7 +1231,7 @@ func buildStatusBar(s *agentsession.AgentSession, usage *agent.UsageInfo, prReg 
 	// to render or omit based on AgentBar.Agent/Model/
 	// SessionID content.
 	if s.Agent != "" || model != "" || sessionID != "" {
-		sb.AgentBar = &gateway.AgentStatusBar{
+		sb.AgentBar = &messages.AgentStatusBar{
 			Agent:     s.Agent,
 			Model:     model,
 			SessionID: sessionID,
@@ -1404,7 +1239,7 @@ func buildStatusBar(s *agentsession.AgentSession, usage *agent.UsageInfo, prReg 
 	}
 
 	if usage != nil {
-		sb.UsageBar = &gateway.UsageStatusBar{UsageInfo: usage}
+		sb.UsageBar = &messages.UsageStatusBar{UsageInfo: usage}
 	}
 
 	return sb
@@ -1451,7 +1286,7 @@ func buildStatusBar(s *agentsession.AgentSession, usage *agent.UsageInfo, prReg 
 // typed payload being produced — the function returns the
 // runtime's StatusBarSource. See outbound package doc.
 func newRuntimeStatusBar(mgr *chatsession.Manager, prReg *prcache.Registry, deps gtw.HandlerDeps) outbound.StatusBarSource {
-	return func(chatID string) *gateway.StatusBar {
+	return func(chatID string) *messages.StatusBar {
 		if mgr == nil {
 			return nil
 		}
@@ -1482,8 +1317,8 @@ func newRuntimeStatusBar(mgr *chatsession.Manager, prReg *prcache.Registry, deps
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		gitSnap, _ := gtw.CollectReadiness(ctx, cwd, gtw.ExecGitRunner{})
 		cancel()
-		return &gateway.StatusBar{
-			GitBar: &gateway.GitStatusBar{
+		return &messages.StatusBar{
+			GitBar: &messages.GitStatusBar{
 				Workspace: cwd,
 				GitStatus: gitSnap,
 				// PullRequest: nil — PR lookup is per-AS.
@@ -1560,17 +1395,17 @@ func shutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, cs
 }
 
 // toCardChoices translates command.CardChoice (command pkg) to
-// the wire-level gateway.CardChoice. Both have the same fields;
+// the wire-level messages.CardChoice. Both have the same fields;
 // this is a direct copy. Defined here (in run.go) so the
 // runtime owns the boundary translation without leaking the
 // command-package's mirror types deeper into the runtime.
-func toCardChoices(in []command.CardChoice) []gateway.CardChoice {
+func toCardChoices(in []command.CardChoice) []messages.CardChoice {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make([]gateway.CardChoice, len(in))
+	out := make([]messages.CardChoice, len(in))
 	for i, c := range in {
-		out[i] = gateway.CardChoice{
+		out[i] = messages.CardChoice{
 			Emoji:  c.Emoji,
 			Label:  c.Label,
 			Action: c.Action,
@@ -1614,9 +1449,9 @@ func (s chatSessionChannelSender) Send(ctx context.Context, msg shell.Outbound) 
 	if em == nil {
 		return nil
 	}
-	return em.Send(ctx, gateway.OutboundMessage{
+	return em.Send(ctx, messages.OutboundMessage{
 		ChatID:  msg.ChatID,
-		Kind:    gateway.OutCommandReply,
+		Kind:    messages.OutCommandReply,
 		Text:    msg.Text,
 		ReplyTo: msg.ReplyTo,
 	})

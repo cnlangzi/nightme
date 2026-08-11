@@ -84,62 +84,34 @@ func dispatchPR(
 			fmt.Sprintf("❌ %v", err)), nil
 	}
 
-	// Refuse when head has unpushed commits: gh/glab will
-	// report "head ref doesn't exist" with a less actionable
-	// message, and the user should be nudged to /gtw push first.
-	unpushed, err := countUnpushed(ctx, c.Worktree, c.Branch, deps)
+	// F-57: single readiness gate. Replaces the old
+	// countUnpushed + nested uncommitted/untracked if-ladder.
+	// The snapshot covers all six dimensions (D1 detached /
+	// D2 upstream / D3 ahead / D4 behind / D5 dirty / D6
+	// conflicts) plus the legacy "branch in sync with base"
+	// status. PRBlockReason is priority-ordered so the user
+	// sees ONE actionable message per /gtw pr attempt.
+	snap, err := CollectReadiness(ctx, c.Worktree, deps.Git)
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ check unpushed commits: %v", err)), nil
+			fmt.Sprintf("❌ read worktree status: %v", err)), nil
 	}
-	if unpushed > 0 {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf(
-				"⚠️ %d commit(s) made locally but not pushed to remote\n"+
-					"hint: /gtw push first to publish them, then /gtw pr.",
-				unpushed)), nil
+	if reason := snap.PRBlockReason(); reason != "" {
+		return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
 	}
 
-	// Reject when there's nothing on this branch that's not
-	// already in base — opening an empty PR is a no-op.
+	// PR-worthiness check (orthogonal to readiness): is there
+	// actually anything on this branch that isn't already in
+	// base? With the readiness gate passed we know the tree is
+	// clean and the branch is in sync with origin, so "ahead=0
+	// vs base" really means "nothing to ship" — no need for
+	// the legacy nested uncommitted-hint cascade.
 	ahead, err := countBaseAhead(ctx, c.Worktree, baseBranch, deps)
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ count commits ahead of base: %v", err)), nil
 	}
 	if ahead == 0 {
-		// "Nothing on this branch" almost always means the user
-		// has local edits they haven't committed yet. Detect that
-		// and point them at /gtw push (which handles the commit +
-		// push step) so the next /gtw pr has something to ship.
-		// Lead with the actionable state in plain language — drop
-		// the technical "branch X is at Y" header so users don't
-		// have to translate git jargon to figure out what to do.
-		if snap, _ := CollectStatus(ctx, c.Worktree, deps.Git); snap != nil {
-			switch {
-			case snap.Uncommitted > 0 && snap.Untracked > 0:
-				return reply(ctx, cs.Emitter(), chatID, messageID,
-					fmt.Sprintf(
-						"⚠️ %d file(s) changed but not committed, %d new file(s) not added to git\n"+
-							"hint: /gtw push first to commit + add + push, then /gtw pr.",
-						snap.Uncommitted, snap.Untracked)), nil
-			case snap.Uncommitted > 0:
-				return reply(ctx, cs.Emitter(), chatID, messageID,
-					fmt.Sprintf(
-						"⚠️ %d file(s) changed but not committed\n"+
-							"hint: /gtw push first to commit + push, then /gtw pr.",
-						snap.Uncommitted)), nil
-			case snap.Untracked > 0:
-				return reply(ctx, cs.Emitter(), chatID, messageID,
-					fmt.Sprintf(
-						"⚠️ %d new file(s) not added to git\n"+
-							"hint: git add them, then /gtw push, then /gtw pr.",
-						snap.Untracked)), nil
-			}
-		}
-		// Truly nothing to ship — use ✅ (not an error) and nudge
-		// the user toward making a change rather than leaving them
-		// staring at "nothing to PR" wondering what's wrong.
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf(
 				"✅ branch %s is in sync with %s — nothing new to PR yet\n"+

@@ -23,6 +23,9 @@ type fakeChannel struct {
 }
 
 func (f *fakeChannel) Name() string { return f.name }
+func (f *fakeChannel) Start(_ context.Context) error { return nil }
+func (f *fakeChannel) Stop(_ context.Context) error { return nil }
+func (f *fakeChannel) Incoming() <-chan gateway.InboundMessage { return nil }
 
 func (f *fakeChannel) Send(_ context.Context, msg gateway.OutboundMessage) error {
 	atomic.AddInt32(&f.sendCalls, 1)

@@ -460,7 +460,7 @@ func (r *prTestRig) installDeps() {
 func captureCh(t *testing.T, cs *chatsession.ChatSession) *recordingCh {
 	t.Helper()
 	ch := &recordingCh{}
-	cs.WithChannel(ch)
+	cs.WithEmitter(ch)
 	return ch
 }
 
@@ -1189,7 +1189,8 @@ func TestFactory_Handle_RoutesToPR(t *testing.T) {
 	// nopCh from test_helpers_test.go would silently drop the
 	// reply).
 	rec := &recordingCh{}
-	cs, err := chatsession.New("chat-pr-test", "claude", rec)
+	cs, err := chatsession.New("chat-pr-test", "claude")
+	cs.WithEmitter(rec)
 	if err != nil {
 		t.Fatalf("chatsession.New: %v", err)
 	}

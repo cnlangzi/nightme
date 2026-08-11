@@ -10,6 +10,7 @@
 package kill_test
 
 import (
+	"github.com/cnlangzi/nightme/internal/gateway"
 	"context"
 	"errors"
 	"strings"
@@ -28,14 +29,14 @@ import (
 // the channel surface.
 type nopCh struct{}
 
-func (nopCh) Send(_ context.Context, _ chatsession.OutboundMessage) error { return nil }
-func (nopCh) SendCard(_ context.Context, _ chatsession.OutboundMessage) (string, error) {
+func (nopCh) Send(_ context.Context, _ gateway.OutboundMessage) error { return nil }
+func (nopCh) SendCard(_ context.Context, _ gateway.OutboundMessage) (string, error) {
 	return "", nil
 }
-func (nopCh) Patch(_ context.Context, _ chatsession.OutboundMessage) error { return nil }
+// (Patch method removed: PATCH semantics are encoded as Kind=OutCardPatch in the message itself.)
 
 func TestKillAgent_NilCS(t *testing.T) {
-	cs, _ := chatsession.New("chat-nil", "cc", nopCh{})
+	cs, _ := chatsession.New("chat-nil", "cc")
 	defer cs.WithPersistence(nil, nil)
 	// Force the CS reference inside Cmd to be nil.
 	_, err := killpkg.KillAgent(&killpkg.Cmd{CS: nil, Ctx: context.Background()}, "cc")

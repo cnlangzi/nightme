@@ -1,6 +1,7 @@
 package gtw
 
 import (
+	"github.com/cnlangzi/nightme/internal/gateway"
 	"context"
 	"errors"
 	"os"
@@ -421,20 +422,20 @@ type fakeChannel struct {
 	sent []string
 }
 
-func (c *fakeChannel) Send(_ context.Context, msg chatsession.OutboundMessage) error {
+func (c *fakeChannel) Send(_ context.Context, msg gateway.OutboundMessage) error {
 	c.sent = append(c.sent, msg.Text)
 	return nil
 }
-func (c *fakeChannel) SendCard(_ context.Context, _ chatsession.OutboundMessage) (string, error) {
+func (c *fakeChannel) SendCard(_ context.Context, _ gateway.OutboundMessage) (string, error) {
 	return "", nil
 }
-func (c *fakeChannel) Patch(_ context.Context, _ chatsession.OutboundMessage) error {
+func (c *fakeChannel) Patch(_ context.Context, _ gateway.OutboundMessage) error {
 	return nil
 }
 
 func TestWithHooks_BeforeAndAfterFire(t *testing.T) {
 	ch := &fakeChannel{}
-	cs := (&chatsession.ChatSession{}).WithChannel(ch)
+	cs := (&chatsession.ChatSession{}).WithEmitter(ch)
 	_ = cs.SetSelectedCwd(t.TempDir())
 
 	f := &Factory{} // HandlerDeps nil is fine; withHooks doesn't touch it
@@ -474,7 +475,7 @@ func TestWithHooks_BeforeAndAfterFire(t *testing.T) {
 
 func TestWithHooks_BeforeFailureDoesNotBlockMain(t *testing.T) {
 	ch := &fakeChannel{}
-	cs := (&chatsession.ChatSession{}).WithChannel(ch)
+	cs := (&chatsession.ChatSession{}).WithEmitter(ch)
 	_ = cs.SetSelectedCwd(t.TempDir())
 	f := &Factory{}
 
@@ -503,7 +504,7 @@ func TestWithHooks_BeforeFailureDoesNotBlockMain(t *testing.T) {
 
 func TestWithHooks_AfterFiresEvenWhenMainFails(t *testing.T) {
 	ch := &fakeChannel{}
-	cs := (&chatsession.ChatSession{}).WithChannel(ch)
+	cs := (&chatsession.ChatSession{}).WithEmitter(ch)
 	_ = cs.SetSelectedCwd(t.TempDir())
 	f := &Factory{}
 
@@ -525,7 +526,7 @@ func TestWithHooks_AfterFiresEvenWhenMainFails(t *testing.T) {
 
 func TestWithHooks_NoHooksNoReply(t *testing.T) {
 	ch := &fakeChannel{}
-	cs := (&chatsession.ChatSession{}).WithChannel(ch)
+	cs := (&chatsession.ChatSession{}).WithEmitter(ch)
 	_ = cs.SetSelectedCwd(t.TempDir())
 	f := &Factory{}
 
@@ -551,7 +552,7 @@ func TestWithHooks_NilChannel_NoPanic(t *testing.T) {
 
 func TestWithHooks_LoadNotesInReply(t *testing.T) {
 	ch := &fakeChannel{}
-	cs := (&chatsession.ChatSession{}).WithChannel(ch)
+	cs := (&chatsession.ChatSession{}).WithEmitter(ch)
 	_ = cs.SetSelectedCwd(t.TempDir())
 	f := &Factory{}
 
@@ -622,7 +623,7 @@ func TestResolveAgent_NoteMentionsFallbackWhenAvailable(t *testing.T) {
 // only ONE follow-up reply is sent — never two empty ones.
 func TestWithHooks_OnlyAfterHooksFires_OneReply(t *testing.T) {
 	ch := &fakeChannel{}
-	cs := (&chatsession.ChatSession{}).WithChannel(ch)
+	cs := (&chatsession.ChatSession{}).WithEmitter(ch)
 	_ = cs.SetSelectedCwd(t.TempDir())
 	f := &Factory{}
 
@@ -644,7 +645,7 @@ func TestWithHooks_OnlyAfterHooksFires_OneReply(t *testing.T) {
 // reply — that would be a second-card duplicate.
 func TestWithHooks_LoadNotesNotDuplicatedInAfter(t *testing.T) {
 	ch := &fakeChannel{}
-	cs := (&chatsession.ChatSession{}).WithChannel(ch)
+	cs := (&chatsession.ChatSession{}).WithEmitter(ch)
 	_ = cs.SetSelectedCwd(t.TempDir())
 	f := &Factory{}
 

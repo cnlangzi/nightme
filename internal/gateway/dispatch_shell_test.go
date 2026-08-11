@@ -24,7 +24,7 @@ func TestDispatchInbound_ShellConsumed_BypassesMessageDispatcher(t *testing.T) {
 		return nil
 	})
 
-	gw := New(md).(*Router)
+	gw := New(md, &noopEmitter{}).(*Router)
 	gw.WithShellDispatch(func(_ context.Context, msg *InboundMessage) (*CommandResult, error) {
 		if msg.Text == "!ls" {
 			shellCalled = true
@@ -70,7 +70,7 @@ func TestDispatchInbound_ShellNotConsumed_FallsThroughToMessageDispatcher(t *tes
 		return nil
 	})
 
-	gw := New(md).(*Router)
+	gw := New(md, &noopEmitter{}).(*Router)
 	gw.WithShellDispatch(func(_ context.Context, _ *InboundMessage) (*CommandResult, error) {
 		// Shim is wired but the dispatcher's prefix detection
 		// (parseShell) didn't match — return Consumed=false so
@@ -109,7 +109,7 @@ func TestDispatchInbound_NoShellDispatchInstalled_SkipsShell(t *testing.T) {
 		return nil
 	})
 
-	gw := New(md).(*Router)
+	gw := New(md, &noopEmitter{}).(*Router)
 	// No WithShellDispatch call.
 
 	res, err := gw.DispatchInbound(context.Background(), &InboundMessage{
@@ -127,3 +127,4 @@ func TestDispatchInbound_NoShellDispatchInstalled_SkipsShell(t *testing.T) {
 		t.Errorf("expected non-Dropped result (message dispatcher ran), got %+v", res)
 	}
 }
+

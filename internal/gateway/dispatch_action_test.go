@@ -33,7 +33,7 @@ func TestDispatchInbound_ActionBranch(t *testing.T) {
 		gw := New(MessageDispatcher(func(_ context.Context, _ *InboundMessage) error {
 			atomic.AddInt32(&hits, 1)
 			return nil
-		})).(*Router)
+		}), &noopEmitter{}).(*Router)
 		gw.WithActionHandler(func(ctx context.Context, msg *InboundMessage) bool {
 			atomic.AddInt32(&hits, 1)
 			gotCtx = ctx
@@ -82,7 +82,7 @@ func TestDispatchInbound_ActionBranch(t *testing.T) {
 		gw := New(MessageDispatcher(func(_ context.Context, _ *InboundMessage) error {
 			atomic.AddInt32(&mdHits, 1)
 			return nil
-		})).(*Router)
+		}), &noopEmitter{}).(*Router)
 		// no WithActionHandler
 
 		res, err := gw.DispatchInbound(context.Background(), &InboundMessage{
@@ -117,7 +117,7 @@ func TestDispatchInbound_ActionBranch(t *testing.T) {
 		gw := New(MessageDispatcher(func(_ context.Context, _ *InboundMessage) error {
 			atomic.AddInt32(&mdHits, 1)
 			return nil
-		})).(*Router)
+		}), &noopEmitter{}).(*Router)
 		gw.WithActionHandler(func(_ context.Context, _ *InboundMessage) bool {
 			atomic.AddInt32(&handlerHits, 1)
 			return false // "I looked, no draft matched"
@@ -154,7 +154,7 @@ func TestDispatchInbound_ActionBranch(t *testing.T) {
 		gw := New(MessageDispatcher(func(_ context.Context, _ *InboundMessage) error {
 			atomic.AddInt32(&mdHits, 1)
 			return nil
-		})).(*Router)
+		}), &noopEmitter{}).(*Router)
 		gw.WithActionHandler(func(_ context.Context, _ *InboundMessage) bool {
 			// should NOT be called for plain text
 			t.Error("actionHandler called for plain text — branch mis-routing")
@@ -186,7 +186,7 @@ func TestDispatchInbound_ActionHandlerPanicSafe(t *testing.T) {
 	const chatID = "oc_chat"
 	gw := New(MessageDispatcher(func(_ context.Context, _ *InboundMessage) error {
 		return nil
-	})).(*Router)
+	}), &noopEmitter{}).(*Router)
 	gw.WithActionHandler(func(_ context.Context, _ *InboundMessage) bool {
 		return true
 	})
@@ -204,4 +204,14 @@ func TestDispatchInbound_ActionHandlerPanicSafe(t *testing.T) {
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("DispatchInbound: %v", err)
 	}
+}
+
+// noopEmitter is a test-only outbound.Emitter that does nothing.
+type noopEmitter struct{}
+
+func (noopEmitter) Send(context.Context, OutboundMessage) error {
+	return nil
+}
+func (noopEmitter) SendCard(context.Context, OutboundMessage) (string, error) {
+	return "", nil
 }

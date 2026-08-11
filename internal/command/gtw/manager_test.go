@@ -16,7 +16,7 @@ import (
 // embedding a smaller interface) because Manager.chatSessions
 // is typed as *chatsession.ChatSession — no duck typing.
 func fakeChatSession(id, cwd string) *chatsession.ChatSession {
-	cs, _ := chatsession.New(id, "test-agent", newTestChannel())
+	cs, _ := chatsession.New(id, "test-agent")
 	if cwd != "" {
 		_ = cs.SetSelectedCwd(cwd)
 	}

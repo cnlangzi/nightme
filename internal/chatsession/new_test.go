@@ -108,7 +108,7 @@ func injectAS(t *testing.T, cs *ChatSession, agentName, cwd string, handle *agen
 // TestNewActiveAgentSessions_NoCwd verifies the empty-cwd fast path
 // returns (0,0,nil) so the handler can reply "send /cwd first".
 func TestNewActiveAgentSessions_NoCwd(t *testing.T) {
-	cs, _ := New("chat-nocwd", "cc", newTestChannel())
+	cs, _ := New("chat-nocwd", "cc")
 	matched, reset, _, err := cs.NewActiveAgentSessions(context.Background(), "")
 	if err != nil || matched != 0 || reset != 0 {
 		t.Fatalf("want (0,0,nil), got (%d,%d,%v)", matched, reset, err)
@@ -118,7 +118,7 @@ func TestNewActiveAgentSessions_NoCwd(t *testing.T) {
 // TestNewActiveAgentSessions_EmptyPool verifies matched==0 when
 // activeCwd is set but the pool has no entries.
 func TestNewActiveAgentSessions_EmptyPool(t *testing.T) {
-	cs, _ := New("chat-empty", "cc", newTestChannel())
+	cs, _ := New("chat-empty", "cc")
 	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestNewActiveAgentSessions_EmptyPool(t *testing.T) {
 // RUNNING AgentSessions in activeCwd, all N are reset and InputBuffer
 // is cleared.
 func TestNewActiveAgentSessions_AllRunningReset(t *testing.T) {
-	cs, _ := New("chat-all", "cc", newTestChannel())
+	cs, _ := New("chat-all", "cc")
 	cwd := t.TempDir()
 	if err := cs.SetSelectedCwd(cwd); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
@@ -176,7 +176,7 @@ func TestNewActiveAgentSessions_AllRunningReset(t *testing.T) {
 // TestNewActiveAgentSessions_AgentNameFilter verifies /new <agent>
 // only resets the named agent.
 func TestNewActiveAgentSessions_AgentNameFilter(t *testing.T) {
-	cs, _ := New("chat-named", "cc", newTestChannel())
+	cs, _ := New("chat-named", "cc")
 	cwd := t.TempDir()
 	if err := cs.SetSelectedCwd(cwd); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
@@ -211,7 +211,7 @@ func TestNewActiveAgentSessions_AgentNameFilter(t *testing.T) {
 // silently-skip behavior was a bug because the stale SessionID would be
 // replayed on the next spawn.
 func TestNewActiveAgentSessions_DetachedSkipped(t *testing.T) {
-	cs, _ := New("chat-skip", "cc", newTestChannel())
+	cs, _ := New("chat-skip", "cc")
 	cwd := t.TempDir()
 	if err := cs.SetSelectedCwd(cwd); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
@@ -246,7 +246,7 @@ func TestNewActiveAgentSessions_DetachedSkipped(t *testing.T) {
 // TestNewActiveAgentSessions_CwdFilter verifies only the activeCwd
 // entries are touched (other cwd entries are left alone).
 func TestNewActiveAgentSessions_CwdFilter(t *testing.T) {
-	cs, _ := New("chat-cwd", "cc", newTestChannel())
+	cs, _ := New("chat-cwd", "cc")
 	cwd1 := t.TempDir()
 	cwd2 := t.TempDir()
 	if err := cs.SetSelectedCwd(cwd1); err != nil {
@@ -276,7 +276,7 @@ func TestNewActiveAgentSessions_CwdFilter(t *testing.T) {
 // failing New returns matched > reset + non-nil err, and that
 // InputBuffer is still cleared.
 func TestNewActiveAgentSessions_PartialFailure(t *testing.T) {
-	cs, _ := New("chat-fail", "cc", newTestChannel())
+	cs, _ := New("chat-fail", "cc")
 	cwd := t.TempDir()
 	if err := cs.SetSelectedCwd(cwd); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
@@ -310,7 +310,7 @@ func TestNewActiveAgentSessions_PartialFailure(t *testing.T) {
 // TestChatSession_RestartAgentSession.
 func TestAgentSession_New_Delegate(t *testing.T) {
 	t.Run("running delegates", func(t *testing.T) {
-		cs, _ := New("chat-running", "cc", newTestChannel())
+		cs, _ := New("chat-running", "cc")
 		cwd := t.TempDir()
 		cs.SetSelectedCwd(cwd)
 		bh := (&callRecordingAS{fakeAgentSession: newFakeAgentSession(1)}).buildLive()
@@ -325,7 +325,7 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 	})
 
 	t.Run("detached returns ErrNotRunning", func(t *testing.T) {
-		cs, _ := New("chat-detached", "cc", newTestChannel())
+		cs, _ := New("chat-detached", "cc")
 		cwd := t.TempDir()
 		cs.SetSelectedCwd(cwd)
 		// Construct an AS whose handle is nil: use NewAgentSession
@@ -345,7 +345,7 @@ func TestAgentSession_New_Delegate(t *testing.T) {
 		// AgentSession.New no longer has a fallback — the caller
 		// (ChatSession.restartAgentSession) catches
 		// ErrRestartRequired and does the kill+respawn itself.
-		cs, _ := New("chat-restart", "cc", newTestChannel())
+		cs, _ := New("chat-restart", "cc")
 		cwd := t.TempDir()
 		cs.SetSelectedCwd(cwd)
 		oldSpy := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
@@ -378,7 +378,7 @@ func TestChatSession_RestartAgentSession(t *testing.T) {
 		// agent.ErrRestartRequired, the chat layer must close the
 		// old handle and spawn a fresh one via the Spawner, with
 		// SessionID cleared.
-		cs, _ := New("chat-restart", "cc", newTestChannel())
+		cs, _ := New("chat-restart", "cc")
 		cwd := t.TempDir()
 		cs.SetSelectedCwd(cwd)
 		oldSpy := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
@@ -418,7 +418,7 @@ func TestChatSession_RestartAgentSession(t *testing.T) {
 		// only exercise the in-place path) — restartAgentSession
 		// can't fall back, so it returns the original sentinel for
 		// the caller to handle / surface.
-		cs, _ := New("chat-restart-no-spawner", "cc", newTestChannel())
+		cs, _ := New("chat-restart-no-spawner", "cc")
 		cwd := t.TempDir()
 		cs.SetSelectedCwd(cwd)
 		oldSpy := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
@@ -441,7 +441,7 @@ func TestChatSession_RestartAgentSession(t *testing.T) {
 		// LookupSelectedAgentSession lazy-spawns a fresh one.
 		// Previously status stayed Running with handle=nil → next
 		// SendBlocks returned ErrNotRunning.
-		cs, _ := New("chat-respawn-fail", "cc", newTestChannel())
+		cs, _ := New("chat-respawn-fail", "cc")
 		cwd := t.TempDir()
 		cs.SetSelectedCwd(cwd)
 		oldSpy := &restartErrAS{fakeAgentSession: newFakeAgentSession(1)}
@@ -537,7 +537,7 @@ func (f *fakeFailingSpawner) Spawn(_ context.Context, _, _ string, _ []string, _
 // TestNewActiveAgentSessions_DeadEntryClearsResumeIDInMemory verifies
 // that a dead entry's SessionID is cleared in-memory after /new.
 func TestNewActiveAgentSessions_DeadEntryClearsResumeIDInMemory(t *testing.T) {
-	cs, _ := New("chat-dead-mem", "cc", newTestChannel())
+	cs, _ := New("chat-dead-mem", "cc")
 	cwd := t.TempDir()
 	if err := cs.SetSelectedCwd(cwd); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
@@ -575,7 +575,7 @@ func TestNewActiveAgentSessions_DeadEntryClearsResumeIDInMemory(t *testing.T) {
 // that the cleared SessionID is persisted to agent_sessions.json so the
 // next spawn will not replay the old value.
 func TestNewActiveAgentSessions_DeadEntryPersistsClearedResumeID(t *testing.T) {
-	cs, _ := New("chat-dead-persist", "cc", newTestChannel())
+	cs, _ := New("chat-dead-persist", "cc")
 	cwd := t.TempDir()
 	if err := cs.SetSelectedCwd(cwd); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
@@ -614,7 +614,7 @@ func TestNewActiveAgentSessions_DeadEntryPersistsClearedResumeID(t *testing.T) {
 // §6 Q-N4 product clarification: dead entries must NOT trigger a
 // lazy spawn just to reset their conversation.
 func TestNewActiveAgentSessions_DeadEntryDoesNotSpawn(t *testing.T) {
-	cs, _ := New("chat-dead-no-spawn", "cc", newTestChannel())
+	cs, _ := New("chat-dead-no-spawn", "cc")
 	cwd := t.TempDir()
 	if err := cs.SetSelectedCwd(cwd); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
@@ -643,7 +643,7 @@ func TestNewActiveAgentSessions_DeadEntryDoesNotSpawn(t *testing.T) {
 // expected behavior when the pool has both running and dead entries.
 // The dead one gets marked-fresh; the running one gets in-place-reset.
 func TestNewActiveAgentSessions_RunningPlusDeadMixed(t *testing.T) {
-	cs, _ := New("chat-mixed", "cc", newTestChannel())
+	cs, _ := New("chat-mixed", "cc")
 	cwd := t.TempDir()
 	if err := cs.SetSelectedCwd(cwd); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
@@ -692,7 +692,7 @@ func TestNewActiveAgentSessions_RunningPlusDeadMixed(t *testing.T) {
 // TestNewActiveAgentSessions_ResultsSliceHasEveryEntry locks that the
 // result slice length matches the matched count (1:1 mapping).
 func TestNewActiveAgentSessions_ResultsSliceHasEveryEntry(t *testing.T) {
-	cs, _ := New("chat-result-len", "cc", newTestChannel())
+	cs, _ := New("chat-result-len", "cc")
 	cwd := t.TempDir()
 	if err := cs.SetSelectedCwd(cwd); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)

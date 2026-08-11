@@ -1,6 +1,7 @@
 package gtw
 
 import (
+	"github.com/cnlangzi/nightme/internal/gateway"
 	"context"
 	"sync"
 	"os"
@@ -125,7 +126,8 @@ func newCloseRig(t *testing.T) *closeTestRig {
 	// recording channel captures every Send so tests can assert
 	// the reply text via cs.Channel().
 	rec := &closeTestRecCh{}
-	cs, _ := chatsession.New("chat-close-" + t.Name(), "test-agent", rec)
+	cs, _ := chatsession.New("chat-close-" + t.Name(), "test-agent")
+	cs.WithEmitter(rec)
 	_ = cs.SetSelectedCwd("/tmp/start") // neutral starting cwd; tests overwrite
 	rig.cs = cs
 	rig.rec = rec
@@ -153,20 +155,20 @@ func newCloseRig(t *testing.T) *closeTestRig {
 // tests want a no-network rig.
 type closeTestRecCh struct {
 	mu    sync.Mutex
-	sends []chatsession.OutboundMessage
+	sends []gateway.OutboundMessage
 }
 
-func (r *closeTestRecCh) Send(_ context.Context, m chatsession.OutboundMessage) error {
+func (r *closeTestRecCh) Send(_ context.Context, m gateway.OutboundMessage) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sends = append(r.sends, m)
 	return nil
 }
-func (r *closeTestRecCh) SendCard(_ context.Context, m chatsession.OutboundMessage) (string, error) {
+func (r *closeTestRecCh) SendCard(_ context.Context, m gateway.OutboundMessage) (string, error) {
 	r.Send(context.Background(), m)
 	return "rec-card-id", nil
 }
-func (r *closeTestRecCh) Patch(_ context.Context, m chatsession.OutboundMessage) error {
+func (r *closeTestRecCh) Patch(_ context.Context, m gateway.OutboundMessage) error {
 	r.Send(context.Background(), m)
 	return nil
 }

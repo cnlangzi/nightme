@@ -236,7 +236,8 @@ func TestFixRemote_ForceRemovesLeftoverWorktree(t *testing.T) {
 	}
 
 	rec := &recordingCh{}
-	cs, _ := chatsession.New("chat-force", "test-agent", rec)
+	cs, _ := chatsession.New("chat-force", "test-agent")
+	cs.WithEmitter(rec)
 	if err := cs.SetSelectedCwd(repoRoot); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
@@ -304,7 +305,8 @@ func TestFixRemote_WithoutForceStillRejectsOccupied(t *testing.T) {
 	mustGit(t, repoRoot, "worktree", "add", "-b", "oldbranch", wt, "HEAD")
 
 	rec := &recordingCh{}
-	cs, _ := chatsession.New("chat-noforce", "test-agent", rec)
+	cs, _ := chatsession.New("chat-noforce", "test-agent")
+	cs.WithEmitter(rec)
 	_ = cs.SetSelectedCwd(repoRoot)
 
 	prov := newFakeGitProvider(ProviderGitHub, "github.com")

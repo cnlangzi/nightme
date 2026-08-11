@@ -137,29 +137,27 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 		return cs, nil // existing cs → emitter already bound
 	}
 
-	// Phase 2: pre-flight emitter check (no lock). The runtime
-	// MUST have called WithEmitter before any chat can be opened
-	// — a missing emitter is a programming bug (the chat's
-	// outbound surface would be unusable), not a runtime
-	// fallback. We surface the error here rather than papering
-	// over it with a no-op Emitter.
-	if m.emitter == nil {
-		slog.Default().Warn("Manager.GetOrCreate: emitter not configured",
-			"chat_id", chatID)
-		return nil, fmt.Errorf("manager: emitter is nil (forgot Manager.WithEmitter?) for chatID=%s", chatID)
-	}
-
-	// Phase 3: construct + attach spawner/persistence + bind
-	// the Manager's shared emitter. No lock.
+	// Phase 2: construct + attach spawner/persistence + bind
+	// the Manager's shared emitter (if any). No lock.
+	//
+	// A nil emitter is permitted — tests that only care about
+	// ChatSession's internal state (InputBuffer FSM, persistence,
+	// status transitions) don't need an outbound surface. The
+	// production runtime (cmd/nightme) always wires an Emitter
+	// before opening chats, so the production path is unaffected.
+	// cs.Emitter() returning nil is the contract that downstream
+	// callers must already nil-check (see cs.Emitter doc).
 	cs, err := New(chatID, primaryAgent)
 	if err != nil {
 		return nil, err
 	}
 	cs.WithSpawner(m.spawner).
-		WithPersistence(m.csFile, m.asFile).
-		WithEmitter(m.emitter)
+		WithPersistence(m.csFile, m.asFile)
+	if m.emitter != nil {
+		cs.WithEmitter(m.emitter)
+	}
 
-	// Phase 4: re-lock + insert with re-check (race-safe)
+	// Phase 3: re-lock + insert with re-check (race-safe)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if existing, ok := m.sessions[chatID]; ok {

@@ -65,7 +65,7 @@ func (c *captureHandler) snapshot() []messageStateCall {
 // F-53: enum is now MessageQueued / MessageSubmitted /
 // MessageDropped (was Received/Forwarded/Done/Failed).
 func TestEmitMessageState_HandlerInvoked(t *testing.T) {
-	cs, _ := New("oc_chat", "claude", newTestChannel())
+	cs, _ := New("oc_chat", "claude")
 	cap := &captureHandler{}
 	cs.MessageStateBus.Subscribe(cap.handler)
 
@@ -100,7 +100,7 @@ func TestEmitMessageState_HandlerInvoked(t *testing.T) {
 // TestEmitMessageState_NoHandlerIsNoop confirms EmitMessageState is
 // safe to call without a registered subscriber — must not panic.
 func TestEmitMessageState_NoHandlerIsNoop(t *testing.T) {
-	cs, _ := New("oc_chat", "claude", newTestChannel())
+	cs, _ := New("oc_chat", "claude")
 	// No Subscribe call.
 	cs.EmitMessageState("om_msg", agent.MessageQueued)
 	// If we got here without panic, success.
@@ -111,7 +111,7 @@ func TestEmitMessageState_NoHandlerIsNoop(t *testing.T) {
 // the handler. Mirrors the v1.3 "nil clears handler" semantics
 // via Bus.Clear().
 func TestMessageStateBus_UnsubscribeStopsDelivery(t *testing.T) {
-	cs, _ := New("oc_chat", "claude", newTestChannel())
+	cs, _ := New("oc_chat", "claude")
 	cap := &captureHandler{}
 	unbind := cs.MessageStateBus.Subscribe(cap.handler)
 
@@ -130,7 +130,7 @@ func TestMessageStateBus_UnsubscribeStopsDelivery(t *testing.T) {
 // `cs.SetMessageStateHandler(nil)` to wipe the prior handler can
 // now use `cs.MessageStateBus.Clear()`.
 func TestMessageStateBus_ClearDropsAllSubscribers(t *testing.T) {
-	cs, _ := New("oc_chat", "claude", newTestChannel())
+	cs, _ := New("oc_chat", "claude")
 	cap1 := &captureHandler{}
 	cap2 := &captureHandler{}
 	cs.MessageStateBus.Subscribe(cap1.handler)
@@ -154,7 +154,7 @@ func TestMessageStateBus_ClearDropsAllSubscribers(t *testing.T) {
 // Message to MessageDropped AND fires the MessageState event.
 // F-54: firing goes through cs.MessageStateBus.Publish.
 func TestEmitMessageDropped_FlipsStageAndEmits(t *testing.T) {
-	cs, _ := New("oc_chat", "claude", newTestChannel())
+	cs, _ := New("oc_chat", "claude")
 	cap := &captureHandler{}
 	cs.MessageStateBus.Subscribe(cap.handler)
 

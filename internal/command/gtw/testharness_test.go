@@ -9,11 +9,11 @@
 package gtw
 
 import (
+	"github.com/cnlangzi/nightme/internal/gateway"
 	"context"
 	"path/filepath"
 	"sync"
 
-	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
 // recordingCh captures every Send / SendCard / Patch call's
@@ -22,29 +22,23 @@ import (
 // the actual path. Field-by-field copy of OutboundMessage.
 type recordingCh struct {
 	mu    sync.Mutex
-	sends []chatsession.OutboundMessage
+	sends []gateway.OutboundMessage
 }
 
-func (r *recordingCh) Send(_ context.Context, m chatsession.OutboundMessage) error {
+func (r *recordingCh) Send(_ context.Context, m gateway.OutboundMessage) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sends = append(r.sends, m)
 	return nil
 }
 
-func (r *recordingCh) SendCard(_ context.Context, m chatsession.OutboundMessage) (string, error) {
+func (r *recordingCh) SendCard(_ context.Context, m gateway.OutboundMessage) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sends = append(r.sends, m)
 	return "rec-card-id", nil
 }
 
-func (r *recordingCh) Patch(_ context.Context, m chatsession.OutboundMessage) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.sends = append(r.sends, m)
-	return nil
-}
 
 // lastText returns the most recent captured message's Text field,
 // or "" if no captures. Tests inspect a single response after

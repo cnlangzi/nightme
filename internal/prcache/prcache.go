@@ -41,8 +41,9 @@
 //	    into the AS reap path; the method exists for that
 //	    reason.
 //	Daemon shutdown
-//	  → registry has no CloseAll; the OS reclaims in-flight
-//	    goroutines on process exit. /gtw pr's success path
+//	  → Registry.CloseAll cancels every per-AS in-flight
+//	    refresh goroutine and clears the registry map (wired
+//	    in cmd/nightme/shutdownRun). /gtw pr's success path
 //	    calls Registry.Invalidate(asID) to force the next
 //	    stamp to refresh (otherwise the new PR number would
 //	    only surface after the 60s TTL).
@@ -252,7 +253,18 @@ func (c *Cache) refresh(ctx context.Context, dir string, deps gtw.HandlerDeps) {
 		// enough that a transient `git` failure recovers
 		// quickly, long enough that a non-git workspace
 		// stops trying.
+		//
+		// Also clear c.pr (and c.branch): the previous refresh's
+		// PR is for a different branch (or no branch), and
+		// surfacing it on the workspace footer now would be
+		// misleading. Detached HEAD with a previously-cached
+		// PR is the canonical case: without this clear, the
+		// footer would render `⎇ ? · [#N](url)` pointing at
+		// the old branch's PR until the next successful
+		// refresh overwrites it.
 		c.mu.Lock()
+		c.pr = nil
+		c.branch = branch
 		c.expiresAt = time.Now().Add(failureBackoff)
 		c.mu.Unlock()
 		return

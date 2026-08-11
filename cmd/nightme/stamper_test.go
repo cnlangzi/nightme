@@ -4,10 +4,10 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
-	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/prcache"
 )
 
@@ -81,8 +81,8 @@ func TestBuildSessionContext_UsageOnlyReturnsPopulatedSC(t *testing.T) {
 // explicitly so the emitter's stamper doesn't double-stamp).
 func TestSessionContextInto_LegacyGate(t *testing.T) {
 	as := agentsession.NewAgentSession("as_legacy", "cs_l", "claude", "/tmp", nil)
-	msg := &gateway.OutboundMessage{
-		Kind:   gateway.OutMessageState,
+	msg := &messages.OutboundMessage{
+		Kind:   messages.OutMessageState,
 		ChatID: "oc_l",
 		Usage:  &agent.UsageInfo{InputTokens: 1, OutputTokens: 1},
 	}

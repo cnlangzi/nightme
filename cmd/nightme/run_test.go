@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
-	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/registry"
@@ -276,9 +276,9 @@ h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prc
 	// Find the OutResult specifically — EventAgentReady may also have
 	// emitted OutboundMessages (e.g. OutInit on echo); the merged
 	// design only changes how many OutResult-bound sends fire.
-	var out *gateway.OutboundMessage
+	var out *messages.OutboundMessage
 	for i := range got {
-		if got[i].Kind == gateway.OutResult {
+		if got[i].Kind == messages.OutResult {
 			if out != nil {
 				t.Fatalf("multiple OutResult in Record; expected exactly one")
 			}
@@ -398,7 +398,7 @@ h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prc
 	}, UserMsgID: "om_user_1"})
 
 	got := ch.Record()
-	if len(got) != 1 || got[0].Kind != gateway.OutResult {
+	if len(got) != 1 || got[0].Kind != messages.OutResult {
 		t.Fatalf("got %v, want 1 OutResult", got)
 	}
 	// SessionContext IS stamped (Agent is set), but Usage is nil
@@ -436,9 +436,9 @@ func TestSessionContextInto_ForwardsUsage(t *testing.T) {
 	as := chatsession.NewAgentSession("as_test", "cs_ctx", "claude", tmpDir, nil)
 
 	t.Run("usage populated → SessionContext.Usage verbatim", func(t *testing.T) {
-		out := &gateway.OutboundMessage{
+		out := &messages.OutboundMessage{
 			ChatID:  "oc_chat_ctx_1",
-			Kind:    gateway.OutResult,
+			Kind:    messages.OutResult,
 			Text:    "answer",
 			ReplyTo: "om_user_1",
 			Usage: &agent.UsageInfo{
@@ -486,9 +486,9 @@ func TestSessionContextInto_ForwardsUsage(t *testing.T) {
 		// Fresh AS with Agent/Model/Compaction also empty so
 		// every guard condition fails.
 		emptyAS := chatsession.NewAgentSession("as_empty", "cs_empty", "", "", nil)
-		out := &gateway.OutboundMessage{
+		out := &messages.OutboundMessage{
 			ChatID: "oc_chat_ctx_2",
-			Kind:   gateway.OutResult,
+			Kind:   messages.OutResult,
 			Text:   "answer",
 			// Usage intentionally nil
 		}
@@ -499,9 +499,9 @@ func TestSessionContextInto_ForwardsUsage(t *testing.T) {
 	})
 
 	t.Run("usage nil but Agent set → SessionContext stamped, Usage nil", func(t *testing.T) {
-		out := &gateway.OutboundMessage{
+		out := &messages.OutboundMessage{
 			ChatID: "oc_chat_ctx_3",
-			Kind:   gateway.OutResult,
+			Kind:   messages.OutResult,
 			Text:   "answer",
 			// Usage intentionally nil; Agent is set on the
 			// shared `as` so the guard passes via the Agent
@@ -583,9 +583,9 @@ h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prc
 		},
 	}, UserMsgID: "om_user_1"})
 
-	var out *gateway.OutboundMessage
+	var out *messages.OutboundMessage
 	for _, m := range ch.Record() {
-		if m.Kind == gateway.OutResult {
+		if m.Kind == messages.OutResult {
 			out = &m
 			break
 		}
@@ -1107,9 +1107,9 @@ func TestSessionContextInto_NilPRRegistryLeavesEmpty(t *testing.T) {
 	tmpDir := t.TempDir()
 	as := chatsession.NewAgentSession("as_nilpr", "cs_nilpr", "claude", tmpDir, nil)
 
-	out := &gateway.OutboundMessage{
+	out := &messages.OutboundMessage{
 		ChatID: "oc_chat_nilpr",
-		Kind:   gateway.OutResult,
+		Kind:   messages.OutResult,
 		Text:   "answer",
 		Usage:  &agent.UsageInfo{InputTokens: 1},
 	}

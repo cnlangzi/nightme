@@ -10,7 +10,7 @@
 // All subcommands share the same in-memory fixtures:
 //
 //   - a chatsession.Manager with no spawner
-//   - a gateway.Gateway with the F-45 actionHandler installed
+//   - a *gateway.Router with the F-45 actionHandler installed
 //     (looks up the ChatSession via mgr and calls HandleAction,
 //     which delegates to gtw.HandleAction)
 //   - a fake channel that captures every OutboundMessage for
@@ -57,9 +57,14 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/gateway/inbound"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/shell"
 )
 
 // debugFlags captures the shared flags.
@@ -141,7 +146,7 @@ type debugFixture struct {
 	cs       *chatsession.ChatSession
 	mgr      *chatsession.Manager
 	gtwMgr   *gtw.Manager
-	gw       gateway.Gateway
+	gw       *gateway.Router
 	captured *capturingChannel
 }
 
@@ -159,7 +164,7 @@ func newDebugFixture(f debugFlags) (*debugFixture, error) {
 	// gtw executor emits.
 	captured := &capturingChannel{
 		chatID: f.chatID,
-		msgs:   []gateway.OutboundMessage{},
+		msgs:   []messages.OutboundMessage{},
 	}
 
 	// 3. gtw deps — minimal: no real gh/glab (the executor's
@@ -189,29 +194,18 @@ func newDebugFixture(f debugFlags) (*debugFixture, error) {
 	// callback, which installs the SetActionHandler.
 	cs, _ := mgr.GetOrCreate(f.chatID, "primary")
 
-	// 6. Gateway with actionHandler + capturing channel.
-	// WithActionHandler is on the Gateway interface (not just
-	// *Router) per the F-45 dispatcher work.
-	//
-	// F-watch §3.1.1: the per-chat WatchMode gate is no longer
-	// wired here — it lives in chatsession (Manager.AcceptInbound
-	// is called from the runtime messageDispatcher closure).
-	// Debug mode's reaction capture goes through the action
-	// handler branch, which never reaches the WatchMode gate,
-	// so no replacement is needed.
-	gw := gateway.New(captured.MessageDispatcher(), captured.Emitter())
+	// 6. F-58: Gateway is now pump + binding. The dispatch chain
+	// is in *inbound.Router, constructed below from the four
+	// direct dependencies. Debug mode wires a no-op commander +
+	// shell (we only exercise the reaction branch) and the real
+	// gtw ReactionRouter for action dispatch.
+	ir := inbound.New(mgr,
+		noopCommander{},
+		shell.NewDispatcher(nil),
+		gtwRouter,
+		"primary")
+	gw := gateway.New(ir, captured.Emitter())
 	gw.AttachChannels(captured)
-	gw.WithActionHandler(func(ctx context.Context, msg *gateway.InboundMessage) bool {
-		if msg == nil || msg.Reaction == nil {
-			return false
-		}
-		return gtwRouter.Handle(ctx, msg.ChatID, commandServices.ReactionEvent{
-			TargetMsgID: msg.Reaction.TargetMsgID,
-			Emoji:       msg.Reaction.Emoji,
-			UserID:      msg.Reaction.UserID,
-			ChatID:      msg.Reaction.ChatID,
-		})
-	})
 
 	return &debugFixture{
 		cs:       cs,
@@ -254,7 +248,7 @@ func runDebugAction(cmd *cobra.Command, f debugFlags, msgID, emoji string) error
 			f.seedKind, msgID, f.issueID)
 	}
 
-	inbound := &gateway.InboundMessage{
+	inbound := &messages.InboundMessage{
 		ChatID:     f.chatID,
 		UserID:     f.userID,
 		Text:       "", // reactions have no text
@@ -407,28 +401,28 @@ func timeNow() (t time.Time) {
 type capturingChannel struct {
 	chatID string
 	mu     sync.Mutex
-	msgs   []gateway.OutboundMessage
+	msgs   []messages.OutboundMessage
 }
 
 func (c *capturingChannel) Name() string                  { return "capture" }
 func (c *capturingChannel) Start(_ context.Context) error { return nil }
 func (c *capturingChannel) Stop(_ context.Context) error  { return nil }
 
-func (c *capturingChannel) SendCard(_ context.Context, m gateway.OutboundMessage) (string, error) {
+func (c *capturingChannel) SendCard(_ context.Context, m messages.OutboundMessage) (string, error) {
 	_ = c.Send(context.Background(), m)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return fmt.Sprintf("capture-card-%d", len(c.msgs)), nil
 }
 
-func (c *capturingChannel) Send(_ context.Context, m gateway.OutboundMessage) error {
+func (c *capturingChannel) Send(_ context.Context, m messages.OutboundMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.msgs = append(c.msgs, m)
 	return nil
 }
 
-// capturingEmitter is the gateway.Emitter-shaped wrapper that
+// capturingEmitter is the outbound.Emitter-shaped wrapper that
 // routes through capturingChannel. The debug fixture uses one
 // Channel for both the inbound pump and the outbound chokepoint;
 // this thin adapter makes the latter satisfy the Gateway's
@@ -437,24 +431,12 @@ type capturingEmitter struct {
 	ch *capturingChannel
 }
 
-func (e capturingEmitter) Send(ctx context.Context, m gateway.OutboundMessage) error {
+func (e capturingEmitter) Send(ctx context.Context, m messages.OutboundMessage) error {
 	return e.ch.Send(ctx, m)
 }
 
-func (e capturingEmitter) SendCard(ctx context.Context, m gateway.OutboundMessage) (string, error) {
+func (e capturingEmitter) SendCard(ctx context.Context, m messages.OutboundMessage) (string, error) {
 	return e.ch.SendCard(ctx, m)
-}
-
-// MessageDispatcher returns the runtime-side plain-text dispatcher.
-// In the debug fixtures, reactions are short-circuited by the
-// actionHandler before they get here, so this is a safety net
-// that should rarely fire. It returns nil (= the gateway sees
-// the dispatch as consumed-success) so the test doesn't error
-// out on an unexpected fall-through.
-// MessageDispatcher is a no-op dispatcher used when the debug
-// subcommand's gateway is wired up purely for its print path.
-func (c *capturingChannel) MessageDispatcher() gateway.MessageDispatcher {
-	return func(_ context.Context, _ *gateway.InboundMessage) error { return nil }
 }
 
 // Emitter returns an outbound.Emitter that records every Send
@@ -462,15 +444,27 @@ func (c *capturingChannel) MessageDispatcher() gateway.MessageDispatcher {
 // fixture stands in for both the IM Channel and the outbound
 // chokepoint, so Emitter and Send share the same backing
 // recording slice.
-func (c *capturingChannel) Emitter() gateway.Emitter {
+func (c *capturingChannel) Emitter() outbound.Emitter {
 	return capturingEmitter{ch: c}
+}
+
+// noopCommander satisfies command.Commander with the same
+// fall-through contract as the production shim: every input
+// returns (nil, false, nil) so the dispatch chain continues
+// to the next tryDispatch. Used by debug fixtures that only
+// exercise the reaction branch and never need real slash
+// command dispatch.
+type noopCommander struct{}
+
+func (noopCommander) Dispatch(_ context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, _ command.SlashInput) (*command.SlashOutput, bool, error) {
+	return nil, false, nil
 }
 
 // Incoming is required by the channel.Channel interface. The
 // debug subcommands never publish to it; the channel is closed
 // immediately.
-func (c *capturingChannel) Incoming() <-chan gateway.InboundMessage {
-	ch := make(chan gateway.InboundMessage, 1)
+func (c *capturingChannel) Incoming() <-chan messages.InboundMessage {
+	ch := make(chan messages.InboundMessage, 1)
 	close(ch)
 	return ch
 }

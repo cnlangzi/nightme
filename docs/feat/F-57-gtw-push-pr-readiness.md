@@ -1,6 +1,6 @@
 # F-57: `/gtw push` + `/gtw pr` 联动 Readiness Gate
 
-> **Status**: 📝 设计阶段（doc-first；2026-08-11）
+> **Status**: ✅ 已实现（2026-08-11）—— F-XX 拆分后,本文 §3 中描述的 `Branch 2`（agent+push）已迁出 `/gtw push` 到 `/gtw commit`，见 CHANGELOG。`Readiness` snapshot 的共享契约与连续性证明（§5）依然成立: `/gtw commit` 也读同一份 `CollectReadiness`,只是 commit 不调 push。
 > **Milestone**: v1.3.x
 > **Depends on**: F-56 (`/gtw push` 三分支流)、F-50 (GitHub/GitLab Provider)、F-45 (Session footer) — 后者已经在 SessionContext 里跑过 `CollectStatus`,本设计只是扩字段+补谓词
 > **Replaces**: `internal/command/gtw/pr.go::dispatchPR` 当前的两道独立 `countUnpushed` + `countBaseAhead` 预检;以及 `internal/command/gtw/commit_push.go::dispatchPush` 里 `isClean` + `countUnpushed` 双变量驱动的三分支判定

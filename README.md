@@ -107,9 +107,6 @@ Routine work in `/gtw` (commit message generation, etc.) doesn't need a heavy co
 # ~/.nightme/gtw.yml
 push:
   agent: pi                          # lightweight agent for commit-message generation
-  hooks:
-    after:
-      - codegraph init
 ```
 
 Agent selection follows a 3-tier priority chain:
@@ -170,7 +167,7 @@ Three pain points of tools like openclaw, addressed head-on:
 | Pain | nightme's answer |
 |---|---|
 | The agent dies mid-task, conversation gone | **Process-level resumption.** Daemon / network / sleep interruption — restart and every ChatSession is auto-reattached, every AgentSession in `StatusDetached` is respawned with `--resume <session-id>` (Claude / Pi equivalent for others). Conversation survives. |
-| Silent timeout cuts you off | **Sessions are user-managed.** No "after N minutes you're disconnected" surprise. You `/kill` when you mean it. |
+| Silent timeout cuts you off | **Sessions are user-managed.** No "after N minutes you're disconnected" surprise. You pick the level: `/stop` halts the in-flight turn (keep session), `/new` resets context (keep process), `/kill` drops the AgentSession entirely. |
 | Project memory vanishes mid-task | **Continues until you say otherwise.** Default is keep compressing, never zero. Only explicit `/new` resets the agent's conversation context. |
 
 The principle: nightme **doesn't run its own memory system**. Context management is delegated to the upstream Claude Code / Codex / Pi that you're already paying for. So behavior is predictable — what you see is what the CLI sees, not what nightme invents. When the CLI's own compression kicks in, you know. When nightme does nothing, you know.
@@ -199,8 +196,9 @@ nightme doesn't try to be a "general Agent framework". It doesn't compete with L
 |---|---|
 | `/cwd <path>` | Bind this chat to a workspace. Validates the path; lazy-spawns on the next message. |
 | `/use <agent>` | Switch the active agent (`claude` / `codex` / `opencode` / `pi`). Reuses or spawns. |
-| `/kill` | Graceful shutdown of all AgentSessions in this chat. |
-| `/new [agent]` | Reset the agent's conversation context without restarting the process. |
+| `/stop` | Halt the in-flight turn on the selected agent. Session stays; queued messages still flow. |
+| `/kill [agent]` | Drop AgentSession(s) in the current workspace — terminates the CLI process and removes the pool entry. `/kill <agent>` kills one. |
+| `/new [agent]` | Reset the agent's conversation context (Claude Code's `/clear` equivalent). Process stays alive; queued messages are cleared. |
 | `/watch on\|off` | Per-chat message-watch mode (default: only `@bot` / `@_all` in groups). |
 | `/think on\|off` | Show / hide the agent's thinking blocks in the receipt card. |
 | `/tools on\|off` | Show or hide per-tool thread replies (default off to keep the card quiet). |

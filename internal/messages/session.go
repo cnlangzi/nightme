@@ -59,7 +59,7 @@ type SessionContext struct {
 	// §1.7.
 	Workspace string
 	// GitStatus is the per-stamp git status snapshot captured by
-	// the runtime via gtw.CollectStatus. nil when the workspace
+	// the runtime via gtw.CollectReadiness. nil when the workspace
 	// is not a git repo or the git invocation failed — the footer
 	// omits the entire git segment in that case.
 	//

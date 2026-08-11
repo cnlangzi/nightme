@@ -1263,7 +1263,7 @@ func newEventHandler(
 // placeholders AND every stamped reply/result wait for git to
 // return. 3s is plenty for normal repos (10-50ms typical; up to
 // ~1s on very large monorepos) and far below the user's
-// "chat is not realtime" tolerance. On timeout, CollectStatus
+// "chat is not realtime" tolerance. On timeout, CollectReadiness
 // returns (nil, nil) and the footer omits the git segment
 // silently — chat keeps moving.
 //
@@ -1330,7 +1330,7 @@ func sessionContextInto(out *gateway.OutboundMessage, s *agentsession.AgentSessi
 // the entire outbound-message pipeline. 3s is plenty for normal
 // repos (10-50ms typical; up to ~1s on very large monorepos) and
 // far below the user's "chat is not realtime" tolerance. On
-// timeout, CollectStatus returns (nil, nil) and the footer omits
+// timeout, CollectReadiness returns (nil, nil) and the footer omits
 // the git segment silently.
 //
 // PR / MR lookup (F-49): per-AgentSession, cached on prReg. The
@@ -1349,7 +1349,7 @@ func sessionContextInto(out *gateway.OutboundMessage, s *agentsession.AgentSessi
 // TestSessionContextInto_NilPRRegistryLeavesEmpty.
 func buildSessionContext(s *agentsession.AgentSession, usage *agent.UsageInfo, prReg *prcache.Registry, deps gtw.HandlerDeps) *gateway.SessionContext {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	gitSnap, _ := gtw.CollectStatus(ctx, s.Cwd, gtw.ExecGitRunner{})
+	gitSnap, _ := gtw.CollectReadiness(ctx, s.Cwd, gtw.ExecGitRunner{})
 	cancel()
 	hasGit := gitSnap != nil && s.Cwd != ""
 

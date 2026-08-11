@@ -1,8 +1,10 @@
 # nightme
 
-> **Sleep tight, code all night.**
+> **Sleep tight. NightMe codes all night.**
 >
-> A multi-session orchestrator that turns your AI coding CLIs (Claude Code / Codex / OpenCode / Pi) into teammates you can drive from chat — in parallel, across projects, across agents.
+> A remote-pair developer agent. No more babysitting AI—stay in the loop from your phone while your digital twin takes the wheel.
+
+**[English](./README.md)** · [简体中文](./README.zh-CN.md)
 
 ![Status](https://img.shields.io/badge/status-development-blue)
 ![Go](https://img.shields.io/badge/go-1.22%2B-00ADD8)

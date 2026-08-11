@@ -346,8 +346,8 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	prCacheReg := &prcache.Registry{}
 
 	gtwDeps := gtw.HandlerDeps{
-		Git:          gtw.ExecGitRunner{},
-		Prober:       &gtw.ExecHTTPProber{},
+		Git:           gtw.ExecGitRunner{},
+		Prober:        &gtw.ExecHTTPProber{},
 		PRInvalidator: prCacheReg,
 	}
 	gtwMgr := gtw.NewManager()
@@ -625,7 +625,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// WithOnCreate fires for both restored (RestoreFromRegistry)
 	// and future (GetOrCreate) ChatSessions. Place BEFORE
 	// RestoreFromRegistry so restored chats get their handlers.
-if err := wireRuntimeCallbacksAndRestore(mgr, ch, em, logger, prCacheReg, gtwDeps); err != nil {
+	if err := wireRuntimeCallbacksAndRestore(mgr, ch, em, logger, prCacheReg, gtwDeps); err != nil {
 		return fmt.Errorf("run: wire+restore: %w", err)
 	}
 
@@ -852,7 +852,7 @@ func wireRuntimeCallbacksAndRestore(
 		// the Subscribe callback) — newEventHandler itself
 		// allocates a closure, so calling it on every Publish
 		// would burn one allocation per event.
-agentHandler := newEventHandler(em, cs, mgr, logger, prReg, gtwDeps)
+		agentHandler := newEventHandler(em, cs, mgr, logger, prReg, gtwDeps)
 		cs.AgentEventBus.Subscribe(func(env chatsession.AgentEventEnvelope) bool {
 			agentHandler(env)
 			return false
@@ -1244,7 +1244,6 @@ func lookupASByID(cs *chatsession.ChatSession, id string) *agentsession.AgentSes
 	return nil
 }
 
-//
 // AgentSession.Agent is immutable (direct field read, no lock);
 // Model() takes RLock internally; git status is captured fresh
 // on each stamp (3s deadline, no caching — see F-48 §1.7).

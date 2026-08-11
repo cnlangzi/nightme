@@ -27,6 +27,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -226,14 +227,27 @@ func dispatchPR(
 	// scopes the blow-up: other chat sessions and unrelated
 	// worktrees are not re-fetched.
 	if deps.PRInvalidator != nil {
+		// Normalize both paths so a worktree of "/foo/" matches
+		// an AS.Cwd of "/foo" (and vice versa) and so the
+		// separator-aware prefix check below doesn't trip on
+		// either trailing-slash or double-slash inputs.
+		wtClean := filepath.Clean(c.Worktree)
 		for _, as := range cs.Pool() {
 			if as == nil || as.Cwd == "" {
 				continue
 			}
-			if !strings.HasPrefix(as.Cwd, c.Worktree) &&
-				!strings.HasPrefix(c.Worktree, as.Cwd) {
+			asClean := filepath.Clean(as.Cwd)
+			if asClean != wtClean &&
+				!strings.HasPrefix(asClean, wtClean+string(filepath.Separator)) &&
+				!strings.HasPrefix(wtClean, asClean+string(filepath.Separator)) {
 				// AS.Cwd and the fix worktree share no
-				// path prefix → unrelated, skip.
+				// directory boundary → unrelated, skip.
+				// Using separator-aware prefix matching (vs
+				// raw strings.HasPrefix) avoids the classic
+				// `/home/foo` vs `/home/foobar/repo`
+				// false positive that would invalidate
+				// caches for unrelated workspaces with a
+				// shared string prefix.
 				continue
 			}
 			deps.PRInvalidator.Invalidate(as.ID)
@@ -303,7 +317,7 @@ func buildPRPrompt(c Context, base string) string {
 
 // parsePRReply extracts (title, body) from an agent's reply.
 // The reply is expected to contain ONE fenced code block
-// (`` ``` ... ``` ``); the first line inside the fence is the
+// (“ ``` ... ``` “); the first line inside the fence is the
 // title, the remainder is the body.
 //
 // Robust to:

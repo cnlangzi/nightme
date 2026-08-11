@@ -37,7 +37,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/command/gtw"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // formatPRSegmentWithEmojiPrefix renders the historical
@@ -46,7 +46,7 @@ import (
 // want to revisit. Production formatPRSegment emits the
 // markdown link `[#N](url)`; this helper is NOT used by
 // production code.
-func formatPRSegmentWithEmojiPrefix(gb *gateway.GitStatusBar) string {
+func formatPRSegmentWithEmojiPrefix(gb *messages.GitStatusBar) string {
 	if gb == nil {
 		return ""
 	}
@@ -58,13 +58,13 @@ func formatPRSegmentWithEmojiPrefix(gb *gateway.GitStatusBar) string {
 }
 
 func TestPRRenderCompare(t *testing.T) {
-	ctx := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{
+	ctx := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{
 			Agent:     "claude",
 			Model:     "MiniMax-M3[1m]",
 			SessionID: "639cc546-3647-44a5-ac0c-4f532cad04f4",
 		},
-		GitBar: &gateway.GitStatusBar{
+		GitBar: &messages.GitStatusBar{
 			Workspace: "/home/devin/code/nightme.nightme/fix-gitstatus",
 			GitStatus: &gtw.GitStatusSnapshot{
 				Branch: "fix-gitstatus",

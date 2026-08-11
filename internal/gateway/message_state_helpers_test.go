@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // emitMessageState is the v1.3 (F-31) legacy translation path
@@ -30,11 +31,11 @@ func emitMessageState(gw *Router, chatID, userMsgID string, state agent.MessageS
 		log.Printf("gateway: emitMessageState no channel for chat=%s, dropping", chatID)
 		return
 	}
-	out := OutboundMessage{
-		Kind:    OutMessageState,
+	out := messages.OutboundMessage{
+		Kind:    messages.OutMessageState,
 		ChatID:  chatID,
 		ReplyTo: userMsgID, // anchor for Typing placeholder + AddReaction target
-		MessageState: &MessageStatePayload{
+		MessageState: &messages.MessageStatePayload{
 			State:     state,
 			MessageID: userMsgID,
 		},

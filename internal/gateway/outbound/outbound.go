@@ -5,7 +5,7 @@
 //
 //  1. Some caller (the runtime event pump, a slash command handler,
 //     the message-dispatcher error path, ...) builds an
-//     gateway.OutboundMessage.
+//     messages.OutboundMessage.
 //  2. The caller passes it to Emitter.Send / Emitter.SendCard.
 //  3. Emitter optionally invokes the injected StatusBarSource to
 //     attach a StatusBar (F-45/F-48) — workspace / git context
@@ -33,12 +33,12 @@
 // Relationship to internal/gateway:
 //
 //   - outbound imports gateway for the message types
-//     (gateway.OutboundMessage, gateway.OutboundKind, etc.)
+//     (messages.OutboundMessage, gateway.OutboundKind, etc.)
 //   - gateway does NOT import outbound — gateway is the shared
 //     type hub, outbound is the send-side behaviour
 //   - chatsession keeps its own outbound.Emitter interface
 //     (takes chatsession.OutboundMessage); cmd/nightme's
-//     outbound.Emitter adapts that to gateway.OutboundMessage
+//     outbound.Emitter adapts that to messages.OutboundMessage
 //     and routes through Emitter, so slash command replies also
 //     get a StatusBar attached.
 //
@@ -49,7 +49,7 @@ import (
 	"context"
 
 	"github.com/cnlangzi/nightme/internal/channel"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
@@ -76,8 +76,8 @@ type Options struct {
 // event pump, the slash command dispatcher, the message
 // dispatcher closure, the MessageStateBus subscribers.
 type Emitter interface {
-	Send(ctx context.Context, msg gateway.OutboundMessage) error
-	SendCard(ctx context.Context, msg gateway.OutboundMessage) (msgID string, err error)
+	Send(ctx context.Context, msg messages.OutboundMessage) error
+	SendCard(ctx context.Context, msg messages.OutboundMessage) (msgID string, err error)
 }
 
 // New constructs the default Emitter implementation. ch must be
@@ -94,12 +94,12 @@ type emitImpl struct {
 	source statusbar.Source
 }
 
-func (e *emitImpl) Send(ctx context.Context, msg gateway.OutboundMessage) error {
+func (e *emitImpl) Send(ctx context.Context, msg messages.OutboundMessage) error {
 	statusbar.AttachIfMissing(&msg, e.source)
 	return e.ch.Send(ctx, msg)
 }
 
-func (e *emitImpl) SendCard(ctx context.Context, msg gateway.OutboundMessage) (string, error) {
+func (e *emitImpl) SendCard(ctx context.Context, msg messages.OutboundMessage) (string, error) {
 	statusbar.AttachIfMissing(&msg, e.source)
 	return e.ch.SendCard(ctx, msg)
 }

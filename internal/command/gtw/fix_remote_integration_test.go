@@ -11,7 +11,7 @@ package gtw
 // focus on the ID-mode business logic.
 
 import (
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"context"
 	"fmt"
 	"os"
@@ -115,20 +115,20 @@ func newFixRemoteRig(t *testing.T) *fixRemoteRig {
 // both places.
 type fixRemoteRecCh struct {
 	mu    sync.Mutex
-	sends []gateway.OutboundMessage
+	sends []messages.OutboundMessage
 }
 
-func (r *fixRemoteRecCh) Send(_ context.Context, m gateway.OutboundMessage) error {
+func (r *fixRemoteRecCh) Send(_ context.Context, m messages.OutboundMessage) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sends = append(r.sends, m)
 	return nil
 }
-func (r *fixRemoteRecCh) SendCard(_ context.Context, m gateway.OutboundMessage) (string, error) {
+func (r *fixRemoteRecCh) SendCard(_ context.Context, m messages.OutboundMessage) (string, error) {
 	r.Send(context.Background(), m)
 	return "rec-card-id", nil
 }
-func (r *fixRemoteRecCh) Patch(_ context.Context, m gateway.OutboundMessage) error {
+func (r *fixRemoteRecCh) Patch(_ context.Context, m messages.OutboundMessage) error {
 	r.Send(context.Background(), m)
 	return nil
 }
@@ -157,7 +157,7 @@ func (r *fixRemoteRecCh) serialized() []string {
 // cs.Emitter().Send / SendCard / Patch), so this is a no-op.
 // Real test assertions go through the recordingCh passed to
 // chatsession.New.
-func (r *fixRemoteRig) captureSend(_ context.Context, _ gateway.OutboundMessage) error {
+func (r *fixRemoteRig) captureSend(_ context.Context, _ messages.OutboundMessage) error {
 	return nil
 }
 

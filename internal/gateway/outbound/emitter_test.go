@@ -6,7 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/cnlangzi/nightme/internal/gateway"
+	
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // fakeChannel is a minimal Channel implementation that records every
@@ -18,22 +19,22 @@ type fakeChannel struct {
 	sendErr   error
 	cardErr   error
 	cardMsgID string
-	lastSent  gateway.OutboundMessage
-	lastCard  gateway.OutboundMessage
+	lastSent  messages.OutboundMessage
+	lastCard  messages.OutboundMessage
 }
 
 func (f *fakeChannel) Name() string { return f.name }
 func (f *fakeChannel) Start(_ context.Context) error { return nil }
 func (f *fakeChannel) Stop(_ context.Context) error { return nil }
-func (f *fakeChannel) Incoming() <-chan gateway.InboundMessage { return nil }
+func (f *fakeChannel) Incoming() <-chan messages.InboundMessage { return nil }
 
-func (f *fakeChannel) Send(_ context.Context, msg gateway.OutboundMessage) error {
+func (f *fakeChannel) Send(_ context.Context, msg messages.OutboundMessage) error {
 	atomic.AddInt32(&f.sendCalls, 1)
 	f.lastSent = msg
 	return f.sendErr
 }
 
-func (f *fakeChannel) SendCard(_ context.Context, msg gateway.OutboundMessage) (string, error) {
+func (f *fakeChannel) SendCard(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	atomic.AddInt32(&f.cardCalls, 1)
 	f.lastCard = msg
 	return f.cardMsgID, f.cardErr
@@ -46,7 +47,7 @@ func TestEmitter_NoSource_PassesThrough(t *testing.T) {
 	fc := &fakeChannel{name: "test"}
 	em := New(fc, Options{})
 
-	in := gateway.OutboundMessage{ChatID: "c1", Kind: gateway.OutReply, Text: "hi"}
+	in := messages.OutboundMessage{ChatID: "c1", Kind: messages.OutReply, Text: "hi"}
 	if err := em.Send(context.Background(), in); err != nil {
 		t.Fatalf("Send returned err = %v", err)
 	}
@@ -64,13 +65,13 @@ func TestEmitter_NoSource_PassesThrough(t *testing.T) {
 func TestEmitter_SourceAttachesStatusBar(t *testing.T) {
 	// Caller did NOT set StatusBar. Source returns a value.
 	// Emitter must attach it before forwarding.
-	want := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus"},
+	want := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus"},
 	}
 	fc := &fakeChannel{name: "test"}
-	em := New(fc, Options{Source: func(_ string) *gateway.StatusBar { return want }})
+	em := New(fc, Options{Source: func(_ string) *messages.StatusBar { return want }})
 
-	in := gateway.OutboundMessage{ChatID: "c1", Kind: gateway.OutReply, Text: "hi"}
+	in := messages.OutboundMessage{ChatID: "c1", Kind: messages.OutReply, Text: "hi"}
 	if err := em.Send(context.Background(), in); err != nil {
 		t.Fatalf("Send err: %v", err)
 	}
@@ -84,9 +85,9 @@ func TestEmitter_SourceNil_DoesNotAttach(t *testing.T) {
 	// StatusBar. The footer render path expects nil when the
 	// source decides "no chat / no workspace".
 	fc := &fakeChannel{name: "test"}
-	em := New(fc, Options{Source: func(_ string) *gateway.StatusBar { return nil }})
+	em := New(fc, Options{Source: func(_ string) *messages.StatusBar { return nil }})
 
-	in := gateway.OutboundMessage{ChatID: "c1", Kind: gateway.OutReply, Text: "hi"}
+	in := messages.OutboundMessage{ChatID: "c1", Kind: messages.OutReply, Text: "hi"}
 	_ = em.Send(context.Background(), in)
 	if fc.lastSent.StatusBar != nil {
 		t.Errorf("lastSent.StatusBar = %+v, want nil", fc.lastSent.StatusBar)
@@ -96,22 +97,22 @@ func TestEmitter_SourceNil_DoesNotAttach(t *testing.T) {
 func TestEmitter_CallerStampedWins(t *testing.T) {
 	// Caller already set StatusBar; source must NOT be invoked
 	// (otherwise the caller's value gets silently overwritten).
-	callerSB := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{Agent: "from-caller"},
+	callerSB := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{Agent: "from-caller"},
 	}
 	sourceCalled := false
-	source := func(_ string) *gateway.StatusBar {
+	source := func(_ string) *messages.StatusBar {
 		sourceCalled = true
-		return &gateway.StatusBar{
-			AgentBar: &gateway.AgentStatusBar{Agent: "from-source"},
+		return &messages.StatusBar{
+			AgentBar: &messages.AgentStatusBar{Agent: "from-source"},
 		}
 	}
 	fc := &fakeChannel{name: "test"}
 	em := New(fc, Options{Source: source})
 
-	in := gateway.OutboundMessage{
+	in := messages.OutboundMessage{
 		ChatID:    "c1",
-		Kind:      gateway.OutReply,
+		Kind:      messages.OutReply,
 		Text:      "hi",
 		StatusBar: callerSB,
 	}
@@ -125,13 +126,13 @@ func TestEmitter_CallerStampedWins(t *testing.T) {
 }
 
 func TestEmitter_SendCard_AttachesAndForwards(t *testing.T) {
-	want := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{Agent: "claude"},
+	want := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{Agent: "claude"},
 	}
 	fc := &fakeChannel{name: "test", cardMsgID: "msg-123"}
-	em := New(fc, Options{Source: func(_ string) *gateway.StatusBar { return want }})
+	em := New(fc, Options{Source: func(_ string) *messages.StatusBar { return want }})
 
-	in := gateway.OutboundMessage{ChatID: "c1", Kind: gateway.OutCard}
+	in := messages.OutboundMessage{ChatID: "c1", Kind: messages.OutCard}
 	id, err := em.SendCard(context.Background(), in)
 	if err != nil {
 		t.Fatalf("SendCard err: %v", err)
@@ -153,7 +154,7 @@ func TestEmitter_SendErrorPropagates(t *testing.T) {
 	fc := &fakeChannel{name: "test", sendErr: sendErr}
 	em := New(fc, Options{})
 
-	err := em.Send(context.Background(), gateway.OutboundMessage{ChatID: "c1", Text: "hi"})
+	err := em.Send(context.Background(), messages.OutboundMessage{ChatID: "c1", Text: "hi"})
 	if !errors.Is(err, sendErr) {
 		t.Errorf("returned err = %v, want %v", err, sendErr)
 	}
@@ -166,7 +167,7 @@ func TestEmitter_SendCardErrorPropagates(t *testing.T) {
 	fc := &fakeChannel{name: "test", cardErr: cardErr}
 	em := New(fc, Options{})
 
-	_, err := em.SendCard(context.Background(), gateway.OutboundMessage{ChatID: "c1"})
+	_, err := em.SendCard(context.Background(), messages.OutboundMessage{ChatID: "c1"})
 	if !errors.Is(err, cardErr) {
 		t.Errorf("returned err = %v, want %v", err, cardErr)
 	}
@@ -179,21 +180,21 @@ func TestEmitter_SendCardErrorPropagates(t *testing.T) {
 // path can pick it up via sb.UsageBar. Without this, Line 2 of
 // the footer silently drops for usage-bearing events.
 func TestEmitter_SourceCoLocatesUsageFromMsg(t *testing.T) {
-	want := &gateway.UsageInfo{InputTokens: 100, OutputTokens: 200}
+	want := &messages.UsageInfo{InputTokens: 100, OutputTokens: 200}
 	fc := &fakeChannel{name: "test"}
 	em := New(fc, Options{
-		Source: func(_ string) *gateway.StatusBar {
+		Source: func(_ string) *messages.StatusBar {
 			// Source returns StatusBar without UsageBar —
 			// simulates a source that doesn't see msg.Usage.
-			return &gateway.StatusBar{
-				AgentBar: &gateway.AgentStatusBar{Agent: "claude", Model: "opus"},
+			return &messages.StatusBar{
+				AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus"},
 			}
 		},
 	})
 
-	in := gateway.OutboundMessage{
+	in := messages.OutboundMessage{
 		ChatID: "c1",
-		Kind:   gateway.OutResult,
+		Kind:   messages.OutResult,
 		Text:   "done",
 		Usage:  want,
 	}
@@ -212,21 +213,21 @@ func TestEmitter_SourceCoLocatesUsageFromMsg(t *testing.T) {
 // source-set UsageBar is preserved if non-nil (caller or source
 // already had it; emitter must not clobber).
 func TestEmitter_SourceCoLocateDoesNotOverwrite(t *testing.T) {
-	sourceUsage := &gateway.UsageInfo{InputTokens: 1, OutputTokens: 1}
-	sourceSB := &gateway.StatusBar{
-		AgentBar: &gateway.AgentStatusBar{Agent: "claude"},
-		UsageBar: &gateway.UsageStatusBar{UsageInfo: sourceUsage},
+	sourceUsage := &messages.UsageInfo{InputTokens: 1, OutputTokens: 1}
+	sourceSB := &messages.StatusBar{
+		AgentBar: &messages.AgentStatusBar{Agent: "claude"},
+		UsageBar: &messages.UsageStatusBar{UsageInfo: sourceUsage},
 	}
-	msgUsage := &gateway.UsageInfo{InputTokens: 999, OutputTokens: 999}
+	msgUsage := &messages.UsageInfo{InputTokens: 999, OutputTokens: 999}
 
 	fc := &fakeChannel{name: "test"}
 	em := New(fc, Options{
-		Source: func(_ string) *gateway.StatusBar { return sourceSB },
+		Source: func(_ string) *messages.StatusBar { return sourceSB },
 	})
 
-	_ = em.Send(context.Background(), gateway.OutboundMessage{
+	_ = em.Send(context.Background(), messages.OutboundMessage{
 		ChatID: "c1",
-		Kind:   gateway.OutResult,
+		Kind:   messages.OutResult,
 		Usage:  msgUsage,
 	})
 	if fc.lastSent.StatusBar.UsageBar.UsageInfo != sourceUsage {

@@ -14,6 +14,8 @@
 
 ## 0. 文档变更摘要（v1.1 → v1.2）
 
+> **阅读约定**：本节 §0.x 各小节是**冻结于各自日期**的设计快照。`currentTurnUserMsgID` 等字面量在 v1.3.x F-53 之前是 ChatSession 上的字符串标量，**F-53 起被替换为 `AgentSession.currentPrompt.LastMessageID` 一等公民字段**（详见 §0.1 末尾）。§0.3 ~ §0.16 的不变式声明若提到 `currentTurnUserMsgID`，指的是**该次变更时刻的形态**；当前实现以 §0.1 + §1.2 / §1.3 为准。
+
 v1.2 在 v1.1 锁定的职责隔离架构上做**结构重组**——不变的是"职责隔离"，变的是"会话分层"：
 
 1. **v1.1 三层 → v1.2 两层合并**
@@ -137,13 +139,13 @@ v1.3 在 v1.2 架构上做**职责再切分**——核心变化是**删除 Gatew
    - F-25 §3 Channel Implementation Contract 表更新 —— OutThinking / OutToolStart / OutToolEnd 不再进 receipt
    - F-08 §4 加 "Channel autonomous routing examples" —— Feishu 选 thread 是 Channel 自治的具体例子
 
-**不变式**：
+**不变式**（F-thread-route 当刻；锚点字段名后来被 F-53 替换为 `as.currentPrompt.LastMessageID`）：
 - OutboundMessage 不动（无新 Kind，无删 Kind）
 - Gateway 不动（不持有 thread 概念、不感知 channel 分流）
-- ChatSession 不动（`currentTurnUserMsgID` 单数锚点不变）
+- ChatSession 不动（单 userMsgID 锚点结构不变）
 - 1 turn : 1 anchor 不变式保留（所有 event 仍 anchor 到同一个 userMsgID）
 - 抽象归抽象 / 具体归具体原则保留（thread 路由是 Feishu 自治决定）
-- `OutboundMessage.ReplyTo = currentTurnUserMsgID` 契约不变（thread 路由用它作 Feishu `root_id`）
+- `OutboundMessage.ReplyTo` 契约不变（thread 路由用它作 Feishu `root_id`）
 
 **为什么不叫 v2.0**：v1.3 的核心不变式（职责隔离、Binding FSM owner、MessageState 独立、Receipt 自治）全部保留。F-thread-route 是 Channel 自治范围内的渲染细节变化，不影响 nightme 数据模型与 Gateway 契约。
 
@@ -212,13 +214,13 @@ type OutboundMessage struct {
 
 1. **Bridge 在成功结果后归一化任务**：`tool_use` 阶段只缓存 pending operation；匹配的 `tool_result` 确认成功后，bridge 才用 provider 分配的真实 task ID 更新 session-local task map，并发出完整 `TaskListEvent` snapshot。
 2. **新增 typed task contract**：`agent.EventTaskCreate / EventTaskUpdate` → `gateway.OutTaskCreate / OutTaskUpdate`；`OutboundMessage.TaskList *agent.TaskListEvent` 承载 generic `ID / Subject / ActiveForm / Status`，禁止 Meta 和 Claude-specific field 泄漏。
-3. **Gateway 保持无状态**：只翻译 typed event 并由 runtime stamp `ReplyTo=currentTurnUserMsgID`；不保存任务、不解析 TaskCreate、也不决定 checklist UI。
+3. **Gateway 保持无状态**：只翻译 typed event 并由 runtime stamp `ReplyTo`；不保存任务、不解析 TaskCreate、也不决定 checklist UI。
 4. **Feishu receipt 自治渲染**：Channel 保存当前 receipt 的最新 snapshot，在最终答复 entries 后、footer 前渲染一个有界 markdown checklist element；成功的 task tool 不再重复进入 thread。
 
 **不变式**：
 
 - Channel interface、ChatSession、AgentSession、Registry schema 均不变。
-- `ReplyTo=currentTurnUserMsgID` 仍是唯一跨层关联信息；旧 receipt 不被跨 turn 回写。
+- `ReplyTo` 仍是唯一跨层关联信息（锚点字段 F-53 后为 `as.currentPrompt.LastMessageID`）；旧 receipt 不被跨 turn 回写。
 - Bridge 持有的是 provider-session 的规范化任务状态；receipt 只持有展示副本；Gateway 两者都不持有。
 - Task result 无法确认成功时不猜测状态，降级为普通 ToolEnd 并记录 warn。
 - Feishu checklist 只占一个 card element，最终答复优先，card 总元素继续受 50 上限保护。
@@ -227,7 +229,7 @@ type OutboundMessage struct {
 
 ---
 
-## 0.8 文档变更摘要（v1.3.x F-39 增量，2026-08-04）
+## 0.7 文档变更摘要（v1.3.x F-39 增量，2026-08-04）
 
 **背景**：F-37 multi-div 把 OutResult 多 div 拆进 receipt,导致实机出现 `OutResult dedup` 静默丢长答复的 bug。Claude Code stream-json 的 `result.result` 与最后一条 `assistant.event` 内容字节级相等,经 `truncateForLog(text, 600)` 砍后两侧必撞 dedup。长答复(> 600 字)的最终答复整段静默丢失,只在 receipt 里看到 N 条碎裂的"前 600 字 + …" 💬 行,没有 📝 完整文本。
 
@@ -252,8 +254,8 @@ type OutboundMessage struct {
 **不变式**:
 - `OutboundMessage` 契约不变(无新 Kind,无删 Kind,无改 `Result` typed field)
 - Gateway 不动(`Translate` 仍产 OutboundMessage)
-- ChatSession 不动(`currentTurnUserMsgID` 单数锚点保留)
-- `ReplyTo = currentTurnUserMsgID` 不变(独立 reply 也锚同 userMsgID;Feishu 端视觉连接保留)
+- ChatSession 不动(单 userMsgID 锚点结构保留;锚点字段名 F-53 后为 `as.currentPrompt.LastMessageID`)
+- `ReplyTo` 契约不变(独立 reply 也锚同 userMsgID;Feishu 端视觉连接保留)
 - §1.4 边界规范保留(OutResult 字段是 typed `agent.ResultEvent`,Channel 自决 target)
 - 抽象归抽象 / 具体归具体原则保留(独立 reply target 是 Feishu 自治)
 - 1 turn : 1 anchor 不变式保留
@@ -264,7 +266,7 @@ type OutboundMessage struct {
 
 ---
 
-## 0.9 文档变更摘要（v1.3.x F-40 增量，2026-08-04）
+## 0.8 文档变更摘要（v1.3.x F-40 增量，2026-08-04）
 
 **背景**：F-39 修了 OutResult 路径（最终答复独立 reply，无 600 cap），但 **OutText 流式 chunks 仍在 receipt 内被 `truncateForLog(text, 600)` 截断**——长 reply 场景下用户看不到完整内容。同时 `OutText` 这个名字是泛指 "text payload"，在 F-37 / F-38 / F-39 加了一堆专门名字（OutTaskCreate / OutResult / OutThinking 等）后显得太弱。F-40 同时解决这两点：
 
@@ -297,8 +299,8 @@ type OutboundMessage struct {
 **不变式**：
 - `OutboundMessage` 字段不变（仅 `Kind` enum 改名 `OutText` → `OutReply`）
 - Gateway 不动（`Translate` 仍产 OutboundMessage）
-- ChatSession 不动（`currentTurnUserMsgID` 单数锚点保留）
-- `OutboundMessage.ReplyTo = currentTurnUserMsgID` 不变（独立 reply 也锚同 userMsgID；Feishu 端视觉连接保留）
+- ChatSession 不动（单 userMsgID 锚点结构保留;锚点字段名 F-53 后为 `as.currentPrompt.LastMessageID`）
+- `OutboundMessage.ReplyTo` 契约不变（独立 reply 也锚同 userMsgID；Feishu 端视觉连接保留）
 - §1.4 边界规范保留（OutReply 字段是 typed primitive string，Channel 自决 target）
 - 抽象归抽象 / 具体归具体原则保留（超限改独立 reply 是 Feishu 自治）
 - 1 turn : 1 anchor 不变式保留
@@ -312,7 +314,7 @@ type OutboundMessage struct {
 
 ---
 
-### 0.6 文档变更摘要（v1.3.x F-think 增量，2026-08-04）
+### 0.9 文档变更摘要（v1.3.x F-think 增量，2026-08-04）
 
 **背景**：F-thread-route 把 OutThinking / OutToolStart / OutToolEnd / OutCompaction 投到飞书 thread。OutThinking 当前用 plain text（`postThreadReply`）渲染，代码块 / 列表 / 加粗全部丢失；同时用户没有 per-chat 控制 thinking 是否显示的开关。F-think 同时解决这两点：
 
@@ -351,7 +353,7 @@ type OutboundMessage struct {
 
 **详细落地**：见 `internal/chatsession/thinkmode.go` + `internal/command/think/cmd.go` + `cmd/nightme/run.go::newEventHandler` + `internal/channel/feishu/thinking_card.go`。（枚举定义现在统一在 `chatsession`，registry 侧 `ChatSessionEntry.ThinkMode` 持久化为裸 `int`，读侧由 `Manager.RestoreFromRegistry` 做 `ThinkMode(int)` cast；slash 命令已迁移到 `internal/command/<name>/`，注册走 `command.Commander` 接口。）
 
-## 0.9 文档变更摘要（v1.3.x F-41 增量，2026-08-05）
+## 0.10 文档变更摘要（v1.3.x F-41 增量，2026-08-05）
 
 **背景**：F-40 加了 WS lifecycle observability(`nightme health` + struct log + SDK callbacks),但没做主动恢复 ── SDK 默认 `reconnectInterval=2min` 让用户在断开后看到"无响应"的窗口太长。F-41 加 active recovery:30s ticker 在 `OnDisconnected` 触发后无脑 `Stop() + 100ms + Start()`,把重连节奏从 2min 压到 30s,持续到 `OnReconnected` 才停。
 
@@ -379,7 +381,7 @@ type OutboundMessage struct {
 
 ---
 
-## 0.10 文档变更摘要（v1.3.x F-42 增量，2026-08-05）
+## 0.11 文档变更摘要（v1.3.x F-42 增量，2026-08-05）
 
 **背景**：Feishu receipt 在 v1.3 + F-25 落地后形成 rolling-log 形态，但渲染层仍有 3 处冗余 / 不清晰：
 
@@ -409,8 +411,8 @@ type OutboundMessage struct {
 - `OutboundMessage` 契约不变（无新 Kind，无删 Kind，无改字段）
 - `agent.MessageState` enum 不动（Feishu adapter 自决 drop 中间态）
 - Gateway 不动（`Translate` 仍产 `OutboundMessage{Kind: OutMessageState, ...}`）
-- ChatSession 不动（`currentTurnUserMsgID` 单数锚点保留）
-- `ReplyTo = currentTurnUserMsgID` 不变（lazy create 也用同一锚点）
+- ChatSession 不动（单 userMsgID 锚点结构保留;锚点字段名 F-53 后为 `as.currentPrompt.LastMessageID`）
+- `ReplyTo` 契约不变（lazy create 也用同一锚点）
 - §1.4 边界规范保留（OutboundMessage 仍是 typed，Channel 自决渲染细节）
 - 抽象归抽象 / 具体归具体原则保留（lazy create / state 选择 / 标题样式都是 Feishu 自治）
 - 1 turn : 1 anchor 不变式保留
@@ -428,7 +430,7 @@ type OutboundMessage struct {
 
 ---
 
-## 0.11 文档变更摘要（v1.3.x F-44 增量，2026-08-05）
+## 0.12 文档变更摘要（v1.3.x F-44 增量，2026-08-05）
 
 **背景**：F-25 → F-40 → F-42 三轮演进后，Feishu receipt card 承担 4 类内容（prompt state header + OutReply entries + Tasks checklist + init/usage footer），渲染路径 ~1000 行。但其中：
 - **OutReply fold 进 receipt 的价值被稀释** ── 用户等 PATCH 周期才能看到完整内容；fold 路径需要 overflow / late-reply / no-receipt 三种 bail-out 协调
@@ -488,8 +490,8 @@ type OutboundMessage struct {
 **不变式**：
 - `OutboundMessage` 全字段不变（`Init` / `Usage` typed field 保留，footer PR 用）
 - Gateway 不动（`Translate` 仍产 OutboundMessage）
-- ChatSession 不动（`currentTurnUserMsgID` 单数锚点 + `InputBuffer` 不变）
-- `OutboundMessage.ReplyTo = cs.currentTurnUserMsgID` 不变（独立 reply 也锚同 userMsgID）
+- ChatSession 不动（单 userMsgID 锚点结构 + `InputBuffer` 不变;锚点字段名 F-53 后为 `as.currentPrompt.LastMessageID`）
+- `OutboundMessage.ReplyTo` 契约不变（独立 reply 也锚同 userMsgID）
 - §1.4 边界规范保留（Init/Usage 是 typed primitive，Channel 自决渲染目标）
 - 抽象归抽象 / 具体归具体原则保留（独立 reply 是 Feishu 自治决策）
 - 1 turn : 1 anchor 不变式保留
@@ -507,16 +509,16 @@ type OutboundMessage struct {
 
 ---
 
-## 0.12 文档变更摘要（v1.3.x F-45 增量，2026-08-05）
+## 0.13 文档变更摘要（v1.3.x F-45 增量，2026-08-05）
 
-**背景**：兑现 F-44 §0.11 / §6.1 推迟的 footer 设计 —— 「每条 ReplyInThreadAndChat 都带 `🤖 Agent · Model · Tokens · Cost`」从草拟阶段收敛到 doc-first 实现。
+**背景**：兑现 F-44 §0.12 / §6.1 推迟的 footer 设计 —— 「每条 ReplyInThreadAndChat 都带 `🤖 Agent · Model · Tokens · Cost`」从草拟阶段收敛到 doc-first 实现。
 
 **核心变化**：
 
 1. **`AgentSession` 自管 metadata（runtime）**
    - 加 `Model string` 字段：EventAgentConnected 时捕获（`s.SetModel(ev.Connected.Model)`），持久化到 `AgentSessionEntry.Model`
    - **不持有 usage 状态**：F-52 + 后续 single-shot 重构后,`cumulativeUsage` 字段、`AccumulateUsage` / `ResetCumulative` / `CumulativeUsage` 方法全部删除。bridge 报的 `ResultEvent.Usage` / `DoneEvent.Usage` 直接透传,runtime 不累加、不落盘、不重置。
-   - 仅保留:`Model` / `ResumeID` / `CompactionCount` / Prompt lifecycle(详见 [`usage.md`](wip/usage.md) 重构清单)
+   - 仅保留:`Model` / `SessionID` / Prompt lifecycle（详见 [`feat/F-45-session-footer.md`](./feat/F-45-session-footer.md) §1.2 重构清单）
 
 2. **`OutboundMessage` 加 1 个 typed snapshot field**
    - 新增 `SessionContext *SessionContext` 字段(不是 3 个分散字段),承载 `{Agent, Model, Usage *agent.UsageEvent, CompactionCount}`
@@ -528,7 +530,7 @@ type OutboundMessage struct {
 3. **`OutboundMessage` 与 `agent` 包结构整理**
    - `UsageInfo` 从 `internal/gateway/messages.go` 搬到 `internal/agent/agent.go`(紧挨 `UsageEvent`)—— 消除 `chatsession → gateway` 反向 import
    - `gateway/messages.go` 保留 `type UsageInfo = agent.UsageInfo` alias 保 ABI 兼容
-   - **`UsageInfo` 与 `UsageEvent` 都是 per-turn snapshot,不再"cumulative form"** — 重命名 / 注释全面更新,见 [`usage.md`](wip/usage.md) §1.2
+   - **`UsageInfo` 与 `UsageEvent` 都是 per-turn snapshot,不再"cumulative form"** — 重命名 / 注释全面更新,见 [`feat/F-45-session-footer.md`](./feat/F-45-session-footer.md) §1.2
    - 顺手修 `UsageInfo.InputTokens` 注释：原 "total input tokens consumed (prompt + cache reads + tool input)" 误导（实际只搬运裸 `input_tokens`），新注释 "non-cached input token count ... Cache hits are NOT included — see CacheReadInputTokens"
    - `agent.UsageEvent` / `UsageInfo` 新增 `ContextWindowPct float64` — bridge 算的 per-turn context-fill %(Doc 1 公式),runtime 不参与。channel footer 从 `ctx.Usage.ContextWindowPct` 读取 X% 段
    - **`UsageEvent.ContextWindow` 字段生命周期**：[`F-54`](feat/F-54-pi-contextwindow-from-get-state.md) 当时删过(理由:全 codebase 0 read / 0 write);[`F-55`](feat/F-55-footer-show-context-window.md) 又加回来(理由:footer 要给用户显示 `(window)`,让用户自己判断 `pct > 100%` 是否上游兼容端报错)。语义保持"bridge-local 透传":pi 来自 `get_state.data.model.contextWindow`,claudecode 来自 `modelUsage[<model>].contextWindow`。**runtime 不重算、不查表、不 clamp**,CLI Agent 报什么 footer 就显示什么。
@@ -580,7 +582,7 @@ type OutboundMessage struct {
 - `OutboundMessage` 100% typed（§1.4 不变；新字段 typed 不破）
 - §1.3 ChatSession 不 import channel/feishu（不变）
 - §1.3 Channel 不 import chatsession（不变；Channel 通过 typed `SessionContext` 字段读 metadata）
-- 1 turn : 1 anchor 不变式保留（`ReplyTo = currentTurnUserMsgID` 仍是唯一 coordination key）
+- 1 turn : 1 anchor 不变式保留（`ReplyTo` 仍是唯一 coordination key;锚点字段 F-53 后为 `as.currentPrompt.LastMessageID`）
 - 抽象归抽象 / 具体归具体（footer 渲染细节由 Feishu adapter 自决，Slack / Web / Echo 各自决定）
 - bridges 协议零变化（仍发 EventAgentConnected / EventUsage，runtime 翻译）
 - OutboundKind 不增不减（`SessionContext` 是字段，不是新 Kind）
@@ -592,7 +594,7 @@ type OutboundMessage struct {
 
 **详细落地**：见 [`docs/feat/F-45-session-footer.md`](./feat/F-45-session-footer.md) + `docs/channel/feishu.md` §13.22。
 
-## 0.13 文档变更摘要（v1.3.x F-46 交互卡 PATCH 增量，2026-08-06）
+## 0.14 文档变更摘要（v1.3.x F-46 交互卡 PATCH 增量，2026-08-06）
 
 **背景**：兑现 §2.5「用户在 IM 里点反馈」—— gtw 决策卡的 branch-exists / worktree-fail 场景（详见 [`F-46-interactive-cards.md`](./feat/F-46-interactive-cards.md) §3.3）此前只能靠 emoji reaction，移动端体验差。F-46 把决策面升级为**交互卡 + 原地更新**，点击即完成决策。
 
@@ -617,13 +619,12 @@ type OutboundMessage struct {
 
 ---
 
-## 0.14 文档变更摘要（v1.3.x F-49 增量，2026-08-06）
+## 0.15 文档变更摘要（v1.3.x F-49 增量，2026-08-06）
 
 > **⚠️ SUPERSEDED (2026-08-08)**：本文描述的"每 compaction 增计数 + footer 🗜 N"链路被**整体删除**（F-49 abandonment）。
 > 触发原因：bridges 在 F-49 落地后仍未稳定 emit `EventAgentCompaction`（协议差异未消化），
 > runtime `CompactionCount` 计数实际未观察到稳定数据，没有消费者。详见
-> [`wip/agentevent.md`](../wip/agentevent.md) §5 / §10 / §11 与
-> [`feat/F-49-compaction-counter.md`](./feat/F-49-compaction-counter.md)（已标 OBSOLETE）。
+> [`feat/F-49-compaction-counter.md`](./feat/F-49-compaction-counter.md)（已标 OBSOLETE）与
 >
 > footer 退回 F-45 三段结构（Agent · Model / token / git），不显示压缩计数。
 >
@@ -665,7 +666,7 @@ type OutboundMessage struct {
 
 ---
 
-### 0.7 文档变更摘要（v1.3.x F-38 增量，2026-08-04）
+### 0.16 文档变更摘要（v1.3.x F-38 增量，2026-08-04）
 
 **背景**：F-thread-route 把 `OutToolStart` / `OutToolEnd` 都投到飞书 thread，每个 tool 产生**两条**独立 thread reply（先 `● Tool(args)` 再 `⎿  …`）。一次 agent turn 调 10 个工具 = 20 条 thread reply，视觉噪声 + 限速成本都很高。同时用户没有 per-chat 开关控制工具调用是否显示——既不能选择 plain text vs 合并格式，也不能选择看 vs 不看。F-38 同时解决这两点。
 
@@ -757,7 +758,8 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 │  │  primaryAgent       │  │  (claude, /B) 进程   │           │
 │  │  InputBuffer FSM    │  │  (codex,  /B) 进程   │           │
 │  │  (idle ↔ busy)      │  │                      │           │
-│  │  currentTurnUserMsgID│ │  1:1 with (agent,cwd)│           │
+│  │  currentPrompt       │ │  1:1 with (agent,cwd)│           │
+│  │  .LastMessageID      │ │  immutable 标识       │           │
 │  │  (单数, 跟踪变量)   │  │  immutable 标识       │           │
 │  └─────────────────────┘  └─────────────────────┘           │
 │                                                              │
@@ -773,7 +775,7 @@ nightme 是一个**单进程 daemon**，运行在用户的电脑上。它由以�
 | **Channel Adapter** | IM 协议编解码；`Send(OutboundMessage)` 渲染；**自管** receipt card / thread / DOM 节点的完整生命周期（含 cold-create / PATCH / 终态） | ChatSession、AgentSession、workspace、agent、binding、任何渲染状态 |
 | **Gateway** | 中枢 orchestrator：slash command 路由（**通过 Commander 抽象，不直接 import handlers_*.go**）、binding 表（chat_id ↔ ChatSession）、ChatSession 生命周期、Channel↔ChatSession↔AgentSession 跨层调度、outbound 路由（stamp `ReplyTo=userMsgID` 送到对应 Channel） | IM 协议细节、agent 内部协议、PTY/ACP 细节、Channel 内部渲染状态、命令实现细节（具体命令实现住 `internal/command/<name>/`） |
 | **Slash Command Layer**（Commander）住 `internal/command/`，由 `SlashCommandFactory` 装配 | 命令抽象层：定义 `Commander` / `SlashCommandFactory` / `SlashRegistry` / `RuntimeServices` 接口；声明 `ReactionRouter` 服务接口；提供通用 `preflight` / `reply` helper。各命令子包（`internal/command/<name>/cmd.go`）实现 `SlashCommandFactory`，Factory 构造函数直接拿 `*chatsession.Manager` | 命令的具体业务逻辑由各 `<name>` 子包实现；command 包本身**不** import gtw / gateway / channel 具体类（chatsession 是命令 Factory 的直接依赖） |
-| **ChatSession** | per chat 的会话上下文（持久化）：selectedCwd / selectedAgent / primaryAgent / InputBuffer FSM / `currentTurnUserMsgID` 跟踪 / AgentSession 池索引 | chat_id 之外没有"自己是谁"；Channel 协议细节；agent 内部协议；receipt 渲染；**slash command 详情；任何命令包路径；gtw / command / gateway 任何具体类型的名字**（强化） |
+| **ChatSession** | per chat 的会话上下文（持久化）：selectedCwd / selectedAgent / primaryAgent / InputBuffer FSM / AgentSession 池索引（注意：单 turn userMsgID 锚点 F-53 起迁移至 `AgentSession.currentPrompt.LastMessageID`，不再由 ChatSession 持有） | chat_id 之外没有"自己是谁"；Channel 协议细节；agent 内部协议；receipt 渲染；**slash command 详情；任何命令包路径；gtw / command / gateway 任何具体类型的名字**（强化） |
 | **AgentSession**（住 `internal/agentsession/`）| CLI 进程句柄；`(agent, cwd)` 1:1 唯一标识（immutable）；events() chan；sendText/sendBlocks；close | chat_id、ChatSession、binding、Channel、slash command |
 | **Bridge** | nightme 与底层 AI Coding CLI 之间的通信抽象；`AgentSession` 接口（Events / SendText / SendBlocks / SendPermission / Close）；四种模式（ACP / SDK / PTY / JSON-IO） | chat、binding、ChatSession、Channel |
 | **Process Registry** | JSON 持久化层。两类 entry：`ChatSessionEntry`（chat_id ↔ ChatSession 绑定 + selectedCwd/selectedAgent/primaryAgent + AgentSession 索引）+ `AgentSessionEntry`（agent + cwd + pid + status）| 运行时语义；只持久化 |
@@ -812,11 +814,11 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 
 | 变量 | Owner | 语义 |
 |------|-------|------|
-| **`currentTurnUserMsgID`**（per ChatSession）| ChatSession | 当前 turn 的单一 userMsgID 锚点。buffered batch 时锚到最后一条。所有 outbound event 的 `OutboundMessage.ReplyTo` = currentTurnUserMsgID |
+| **`currentPrompt.LastMessageID`**（per AgentSession，F-53 起）| AgentSession | 当前 turn 的单一 userMsgID 锚点。F-53 前为 `cs.currentTurnUserMsgID` 字符串标量；F-53 后改为 `as.currentPrompt.LastMessageID`（挂在 `Prompt` 一等公民上，详见 [`feat/message_lifecycle.md`](./feat/message_lifecycle.md) §4.2）。所有 outbound event 的 `OutboundMessage.ReplyTo` = LastMessageID。buffered batch 时锚到 batch 最后一条 |
 
 **核心 FSM / 跟踪变量的耦合点**（全部经过 Gateway）：
 - **Inbound 流**：Channel → Gateway.pumpInbound → dispatchLoop → DispatchInbound (inboundDispatcher) → 命中 `/cwd` `/use` `/close` 走 slashCommandDispatcher → 走 ChatSession；未命中走 messageDispatcher → `cs.emitMessageState(Received)` + `chatSession.QueueUserMessage` + `chatSession.LookupSelectedAgentSession`（lazy spawn）+ `agentSession.SendBlocks` + `cs.emitMessageState(Forwarded)`
-- **Outbound 流**：`agentSession.Events()` → session 的 readPump（**单消费者**） → ChatSession.EventCallback → 设 `out.ReplyTo = cs.currentTurnUserMsgID` → `channel.Send` → Channel 内部按 ReplyTo 路由到对应 receipt（card / thread / DOM 节点） → PATCH
+- **Outbound 流**：`agentSession.Events()` → session 的 readPump（**单消费者**，F-53 起读的是 AS 自治的 `eventQueue`/`EventBus`） → ChatSession.EventCallback → 设 `out.ReplyTo = as.currentPrompt.LastMessageID`（F-53 前为 `cs.currentTurnUserMsgID`） → `channel.Send` → Channel 内部按 ReplyTo 路由到对应 receipt（card / thread / DOM 节点） → PATCH
 - **切 AgentSession**：`/use` 触发 → ChatSession.LookupSelectedAgentSession 重新解析 → 切换 ChatSession.EventCallback 目标 → 老 AgentSession 的事件不再消费
 
 ### 1.3 不变式（v1.3 强制）
@@ -826,14 +828,14 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 - **Gateway 不 import `channel/feishu`**（只 import `channel.Channel` interface）
 - **`ChatSession` 不知道 Channel**（只持有 Gateway 注入的 callback）
 - **`AgentSession` 知道自己的 `(agent, cwd)` immutable 标识**
-- **Channel 接口不暴露 ChatSession、AgentSession、binding、任何 receipt 概念**——Channel 自管渲染状态（receipt card / thread / DOM 节点），Gateway 一概不知。`Channel` interface 5 个方法：`Name / Start / Stop / Incoming / Send`
+- **Channel 接口不暴露 ChatSession、AgentSession、binding、任何 receipt 概念**——Channel 自管渲染状态（receipt card / thread / DOM 节点），Gateway 一概不知。`Channel` interface 6 个方法：`Name / Start / Stop / Incoming / Send / SendCard`（`SendCard` 为 F-46 决策卡新增，返回 bot-side message_id 用于 PATCH correlation）
 - **`agentSession.Events()` chan 的唯一消费者是 session 自己的 readPump**；ChatSession 通过 `ChatSession.EventCallback` 接收事件，**不直接读 chan**（沿用 v1.1 修复）
 - **ChatSession 内 `(agent, cwd)` 唯一索引**（不是全局唯一；不同 ChatSession 可有独立 `(claude, /path/A)` AgentSession）
 - **`/use` 不重启进程**：永远复用 pool 中的现有 AgentSession，找不到才 spawn 新进程
 - **`/cwd` 不重启任何 AgentSession**：永远只改 selectedCwd，老 AgentSession 保留在 pool
-- **`currentTurnUserMsgID` 单数**：一个 turn 一个 userMsgID 锚点；buffered batch 时锚到最后一条；outbound event 的 `ReplyTo` 必等于此
+- **`currentPrompt.LastMessageID` 单数（F-53 起）**：一个 turn 一个 userMsgID 锚点（来自 `as.currentPrompt.LastMessageID`）；buffered batch 时锚到最后一条；outbound event 的 `ReplyTo` 必等于此。F-53 前的字符串标量 `cs.currentTurnUserMsgID` 已删除
 - **抽象归抽象 / 具体归具体**：Gateway = 路由器（不假设任何 Channel 渲染细节）；Channel = 渲染器（自管 receipt 生命周期，自选存储形态：per-chat map / per-thread map / DOM 节点 / ...）
-- **outbound 路由唯一耦合点**：`EventHandler` 在每个 `OutboundMessage` 上设 `out.ReplyTo = cs.currentTurnUserMsgID`。Channel 据此 key 路由。Gateway 不需要知道 Channel 内部 receipt 怎么存
+- **outbound 路由唯一耦合点**：`EventHandler` 在每个 `OutboundMessage` 上设 `out.ReplyTo = as.currentPrompt.LastMessageID`（F-53 起；F-53 前为 `cs.currentTurnUserMsgID`）。Channel 据此 key 路由。Gateway 不需要知道 Channel 内部 receipt 怎么存
 - **Task checklist 三层状态隔离（F-38）**：Claude bridge 持有 provider-session 的规范化 task map/order，并在成功 tool_result 后发完整 snapshot；Gateway 无状态 typed 透传；Channel receipt 只保存当前 userMsgID 的展示副本。任何一层都不得反向读取另一层状态
 
 **v1.3.x 新增（F-33 落地）**：
@@ -841,7 +843,7 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 - **Gateway 不持有 ChatType**：Gateway 只见 `chat_id string`，假设所有 chat 同质；`InboundMessage` / `BindingEntry` / `ChatSession` / registry schema 都不带 `ChatType` 字段
 - **Channel 自管 chat 语义**：Channel 知道 chat 类型（DM / group / topic）、知道 thread 渲染，但只通过 `OutboundMessage` 暴露渲染能力，不污染 Gateway / ChatSession / Registry 数据模型
 - **`InboundMessage.ReplyTo = message.ParentId`**（Feishu 语义下）：thread 顶层 `RootId` 不进 nightme；`ReplyTo` 字段统一语义 = "被 reply 的那条 message_id"
-- **`OutboundMessage.ReplyTo = currentTurnUserMsgID`**：bot reply 永远 anchor 到 user 当前 message_id，不爬 thread 树
+- **`OutboundMessage.ReplyTo = as.currentPrompt.LastMessageID`**（F-53 前为 `currentTurnUserMsgID`）：bot reply 永远 anchor 到 user 当前 message_id，不爬 thread 树
 
 **v1.3.x 新增（F-watch 落地）**：
 
@@ -856,7 +858,7 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 - **Channel 按 OutboundKind 自决渲染目标**：Channel 拿到 `OutboundMessage{Kind, ReplyTo, Text, Meta}` 后，**可以**按 `Kind` 自决 routing（thread reply / receipt card / reaction / ...），无需 Gateway 指示。F-thread-route 案例：Feishu adapter 把 `OutThinking` / `OutToolStart` / `OutToolEnd` / `OutCompaction` 投到 thread；`OutText` / `OutResult` / `OutInit` / `OutUsage` 投到 receipt card。**不动 OutboundMessage 契约 / Gateway / ChatSession**
 - **OutToolEnd 类型感知摘要 = Channel 职责**：bridge 层把 `ToolEndEvent.Args` 填好（同一 message 的 tool_use block 拿）；Channel 层（Feishu adapter）按 tool name 生成单行摘要（"📄 Read /foo.go → 1234 lines"），不 dump 原始 output。摘要算法属于 Channel 自治（Feishu 用 emoji + 行数；Slack 可用 Block Kit；Web 可用折叠 div）
 - **Routing 决策不写进 OutboundMessage.Meta**：Meta 只承载数据载荷（output / err / args），**不**承载 routing hint。Channel 看到 Kind 后自决。
-- **F-thread-route 不构成"thread 概念侵入 nightme 数据模型"**：Channel 自管的 thread 是 Feishu SDK API 调用层面的细节（`POST /im/v1/messages/{rootID}/reply`）；nightme 仍然只见 `OutboundMessage.ReplyTo = currentTurnUserMsgID`，跟 F-33 不变式完全兼容
+- **F-thread-route 不构成"thread 概念侵入 nightme 数据模型"**：Channel 自管的 thread 是 Feishu SDK API 调用层面的细节（`POST /im/v1/messages/{rootID}/reply`）；nightme 仍然只见 `OutboundMessage.ReplyTo = as.currentPrompt.LastMessageID`（F-53 前为 `currentTurnUserMsgID`），跟 F-33 不变式完全兼容
 
 **v1.4 新增（F-14 post rich-text ordering 落地）**：
 
@@ -895,7 +897,7 @@ v1.3 核心架构不变式——任何状态机都**只有一个** owner，跨�
 
 **为什么**：每条跨层 hardcoded implicit 协议都是一次 leak。一旦 leak，后续 review 容易"基于现状优化"（typed struct、helper）导致边界进一步塌陷。设计上能站得住的唯一办法是：每条跨层数据要么是 generic primitive（string / int / error），要么 boundary 把它 normalize 成 generic primitive。
 
-**三层边界 + 各自的归一化义务**：
+**三层边界 + 各自的归一化义务**（跨通用消息流；command 层另有 4 层扩展，见 §1.3 末段）：
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -1068,14 +1070,14 @@ messageDispatcher(ctx, msg)
   │       InputBuffer FSM:
   │         ├ Idle → 立即 SendBlocks(blocks) → return (dispatched=true)
   │         │   └ onFlush 钩子（ChatSession.defaultFlushHookLocked）触发:
-  │         │       ├ cs.currentTurnUserMsgID = msg.MessageID(单数)
+  │         │       ├ as.currentPrompt.LastMessageID = msg.MessageID(F-53;前为 cs.currentTurnUserMsgID)
   │         │       └ agentSession.SendBlocks(combined)
   │         └ Busy → 入队 → return (dispatched=false)
   └ 如果 queued (Busy):
-        cs.currentTurnUserMsgID 不变(仍是上一 turn 的值)
+        as.currentPrompt.LastMessageID 不变(仍是上一 turn 的值;F-53 前为 cs.currentTurnUserMsgID)
         onFlush 钩子在 EventDone 触发 flush 时:
           ├ onFlush(blocks, userMsgIDs)
-          │   ├ cs.currentTurnUserMsgID = userMsgIDs[len-1](最后一条)
+          │   ├ as.currentPrompt.LastMessageID = userMsgIDs[len-1](最后一条;F-53 前为 cs.currentTurnUserMsgID)
           │   └ agentSession.SendBlocks(combined)
           └
 
@@ -1091,7 +1093,7 @@ messageDispatcher(ctx, msg)
 
 ### 2.2 CLI 输出 → 用户（Outbound）
 
-**核心语义：1 turn : 1 anchor, n events**。每个 agent turn 由 ChatSession 锚定到单一 `currentTurnUserMsgID`（buffered batch 时锚到最后一条 userMsgID）；EventHandler 在每个 OutboundMessage 上设 `out.ReplyTo = currentTurnUserMsgID`；Channel 据此路由到对应 receipt（card / thread / DOM 节点）。`ReplyTo == ""` 是仅有的"无锚" case（启动期 EventAgentConnected、系统日志、内部事件），Channel 走 plain text / 跳过。
+**核心语义：1 turn : 1 anchor, n events**。每个 agent turn 由 AgentSession 锚定到单一 `as.currentPrompt.LastMessageID`（buffered batch 时锚到最后一条 userMsgID；F-53 前为 `cs.currentTurnUserMsgID` 字符串标量）；EventHandler 在每个 OutboundMessage 上设 `out.ReplyTo = as.currentPrompt.LastMessageID`；Channel 据此路由到对应 receipt（card / thread / DOM 节点）。`ReplyTo == ""` 是仅有的"无锚" case（启动期 EventAgentConnected、系统日志、内部事件），Channel 走 plain text / 跳过。
 
 ```
 Claude Code 进程 (PTY child, cwd = chatSession.selectedCwd)
@@ -1111,7 +1113,7 @@ agentSession.readPump (单消费者)
 ChatSession.onAgentEvent(s, ev)        // EventCallback 驱动
   ├ InputBuffer.SetState(Busy)
   ├ out, send := gateway.Translate(chatID, ev)
-  ├ out.ReplyTo = cs.currentTurnUserMsgID    ← **关键耦合点**（唯一关联信息）
+  ├ out.ReplyTo = as.currentPrompt.LastMessageID    ← **关键耦合点**（唯一关联信息;F-53 前为 cs.currentTurnUserMsgID）
   ├ (TaskCreate / TaskUpdate) bridge 在匹配 tool_result 确认成功后更新 session-local task map
   │   ├ emit EventTaskCreate / EventTaskUpdate（每次携带完整 TaskListEvent snapshot）
   │   ├ gateway.Translate → OutTaskCreate / OutTaskUpdate（typed TaskList payload）
@@ -1130,11 +1132,11 @@ channel.Send(ctx, OutboundMessage)
 **关键不变量（v1.3）**：
 - `ChatSession.EventCallback` 是当前 **active AgentSession** 的唯一消费者。当 `/use` 切换 active 时，ChatSession 重新注册 callback 到新的 AgentSession，老 AgentSession 的 `Events()` 不再被消费（但进程可继续跑、产出事件被丢弃——符合 PRD §4.3 的"过时的不管"语义）
 - Gateway **永不** 持有 receipt / receipt map / receipt FSM——Channel 自治
-- `out.ReplyTo = cs.currentTurnUserMsgID` 是 Gateway → Channel 的**唯一关联信息**——Channel 拿这个 key 路由，内部的存储形态（map / DOM / thread）自己选
+- `out.ReplyTo = as.currentPrompt.LastMessageID`（F-53 前为 `cs.currentTurnUserMsgID`）是 Gateway → Channel 的**唯一关联信息**——Channel 拿这个 key 路由，内部的存储形态（map / DOM / thread）自己选
 
 **1 turn : 1 anchor 示例**（buffered batch：3 条用户消息被 flush 为 1 个 agent turn）：
 - ChatSession 的 InputBuffer 攒着 [userMsgID_a, userMsgID_b, userMsgID_c]
-- 上一 turn 的 EventDone 触发 onFlush → `cs.currentTurnUserMsgID = msg_c`（最后一条）
+- 上一 turn 的 EventDone 触发 onFlush → `as.currentPrompt.LastMessageID = msg_c`（最后一条;F-53 前为 `cs.currentTurnUserMsgID`）
 - agent 看到 stdin 是 3 条合并输入，产出 N 个 event
 - 每个 event 都 PATCH msg_c 对应的那张 receipt card（F-25 rolling-log）
 - msg_a / msg_b 自身的 MessageState(Done) 仍然触发（走 §2.5 的 MessageState 路径）
@@ -1282,7 +1284,7 @@ kill 包通过 ChatSession 上的两个通用 lifecycle accessor 访问 pool / s
         ▼
 [2] Gateway
         │  接 OnMessageState callback
-        │  翻译成 OutboundMessage{Kind: OutMessageState, Meta: {message_id, state}}
+        │  翻译成 OutboundMessage{Kind: OutMessageState, MessageState: &MessageStatePayload{MessageID, State}}
         │  通过 Channel.Send 提交
         ▼
 [3] Channel (feishu adapter / future slack / future web ...)
@@ -1309,12 +1311,13 @@ kill 包通过 ChatSession 上的两个通用 lifecycle accessor 访问 pool / s
 **`OutboundKind.OutMessageState`** — 新增枚举值，承载 message state 变化事件。
 
 ```go
+// §0.5 落地后 OutboundMessage 100% typed — Meta 字段已删除
 OutboundMessage{
     Kind: OutMessageState,
     ChatID: chatID,
-    Meta: map[string]any{
-        "message_id": userMsgID,           // 必填：标记哪条用户消息
-        "state":      receipt.MessageState, // 必填：状态值
+    MessageState: &MessageStatePayload{
+        MessageID: userMsgID,              // 必填：标记哪条用户消息
+        State:     state,                  // 必填：状态值 (MessageQueued / MessageSubmitted / MessageDropped)
     },
 }
 ```
@@ -1690,11 +1693,11 @@ nightme 用 Go 的 goroutine 实现并发，结构如下：
 
 | 层 | 选型 | 备选 | 理由 |
 |----|------|------|------|
-| 主语言 | **Go 1.22+** | Rust / Node.js | 单二进制、跨平台编译简单 |
+| 主语言 | **Go 1.22+**（当前 go.mod: 1.26.4）| Rust / Node.js | 单二进制、跨平台编译简单 |
 | PTY | **`github.com/aymanbagabas/go-pty`** | creack/pty | API 干净，跨平台抽象好 |
-| Channel | **飞书官方 Go SDK**（lark-oapi）| 自实现 webhook | 文档全，长连接稳定 |
-| HTTP API | **net/http + chi** | gin | minimal |
-| 持久化 | **JSON 文件**（registry ChatSession + AgentSession 两类 entry）| SQLite | MVP 不需要 DB |
+| Channel | **飞书官方 Go SDK**（`github.com/larksuite/oapi-sdk-go/v3`）| 自实现 webhook | 文档全，长连接稳定 |
+| Daemon control IPC | **Unix socket / Windows named pipe**（`internal/daemoncontrol`）| HTTP server | 客户端/守护进程本地通信，避免 HTTP 协议与监听端口 |
+| 持久化 | **JSON 文件**（`chat_sessions.json` + `agent_sessions.json` 两类 entry）| SQLite | MVP 不需要 DB |
 | 配置 | **YAML** | env | 直观 |
 | 日志 | **`log/slog`**（标准库）| zap / zerolog | stdlib 够用 |
 
@@ -1704,29 +1707,45 @@ nightme 用 Go 的 goroutine 实现并发，结构如下：
 {
   "chat_sessions": {
     "<chatSessionId>": {
-      "chatId":               "oc_xxx",          // UNIQUE 索引 (1 chat = 1 ChatSession); nightme 不持有 chat 类型
-      "selectedCwd":            "/code/bailing",
-      "selectedAgent":          "claude",
-      "primaryAgent":         "claude",          // snapshot of cfg.Primary at creation; read-only
-      "agentSessionIds":      ["as_1", "as_2"],
-      "selectedAgentSessionId": "as_1",            // 引用 pool 中某项; null 表示未激活
-      "createdAt":            "...",
-      "lastInteractionAt":    "..."
+      "id":                       "cs_oc_xxx",
+      "chatId":                   "oc_xxx",            // UNIQUE 索引 (1 chat = 1 ChatSession); nightme 不持有 chat 类型
+      "selectedCwd":              "/code/bailing",
+      "selectedAgent":            "claude",
+      "primaryAgent":             "claude",            // snapshot of cfg.Primary at creation; read-only
+      "agentSessionIds":          ["as_1", "as_2"],
+      "selectedAgentSessionId":   "as_1",              // 引用 pool 中某项; null 表示未激活
+      "createdAt":                "...",
+      "lastInteractionAt":        "...",
+      "watchMode":                0,                   // 0 = WatchModeMention (默认), 1 = WatchModeAll (F-watch)
+      "thinkMode":                0,                   // 0 = ThinkModeShow (默认), 1 = ThinkModeHide (F-think)
+      "toolsMode":                0                    // 0 = ToolsModeHide (默认), 1 = ToolsModeShow (F-38)
     }
   },
   "agent_sessions": {
     "<agentSessionId>": {
-      "chatSessionId":        "<chatSessionId>", // FK, 标识属于哪个 ChatSession 的 pool
-      "agent":                "claude",          // IMMUTABLE
-      "cwd":                  "/code/bailing",   // IMMUTABLE
-      "pid":                  12345,
-      "status":               "running | detached | exited",
-      "createdAt":            "...",
-      "lastRunAt":            "..."
+      "id":                       "as_1",
+      "chatSessionId":            "<chatSessionId>",   // FK, 标识属于哪个 ChatSession 的 pool
+      "agent":                    "claude",            // IMMUTABLE
+      "cwd":                      "/code/bailing",     // IMMUTABLE
+      "pid":                      12345,               // 0 when Detached/Exited
+      "status":                   "running | detached | exited",
+      "args":                     ["--dangerously-skip-permissions"],  // preserved for respawn
+      "sessionId":                "abc123",            // F-53: rename from resumeId; bridge-supplied init event id
+      "createdAt":                "...",
+      "lastRunAt":                "...",
+      "exitCode":                 null,                // 非空当 status == exited
+      "model":                    "claude-opus-4-5-20250929"  // F-45: 首 EventAgentReady 捕获
     }
   }
 }
 ```
+
+**Schema 版本**：
+- `chat_sessions.json` v1（含 `chatType` 字段的旧文件被 Go JSON 默认容忍，F-33 后该字段无意义）
+- `agent_sessions.json` v3（F-53 重命名 `resumeId → sessionId`；`compactionCount` 物理删除；旧 v2 文件 load 时 `sessionId=""`、无 `compactionCount`，兼容）
+
+**v0.x → v1.2 数据迁移**：
+- 旧的 `registry.json`（v0.x）由 `removeLegacyRegistryFile` 在 `nightme run` 与 `nightme list` 启动时归档为 `registry.json.v1.bak`，原文件删除；v1.2 daemon 不读写该文件。详见 `cmd/nightme/paths.go::removeLegacyRegistryFile`
 
 **唯一约束**：
 - `chat_sessions.chatId` UNIQUE（保证 1 chat = 1 ChatSession）
@@ -1840,14 +1859,14 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 剩余（backlog）：
 - ⏭ 真实 E2E 飞书 DM round-trip test
 - ⏭ 删除 `internal/session/` v1.1 MemoryManager（仍被 `internal/gateway/cmd/handlers.go` BindingEntry shim 使用）
-- ⏭ **v1.3 SPEC 落地代码改动**：
+- ⏭ **v1.3 SPEC 落地代码改动**（v1.3 当时的 backlog；当前已进一步被 F-53 演化）：
   - ✅ done: `internal/receipt/` 包删除;`MessageState` 移到 `internal/agent/`
   - `internal/channel/channel.go` 删 `CreateReceipt / UpdateReceipt / DisposeReceipt` 三个方法
   - `internal/gateway/gateway.go` 删 `receipts` map + `CreateReceipt / UpdateReceipt / DisposeReceipt` 方法 + 死代码 `translateAndSend` / `receiptsForSession`
   - `internal/channel/feishu/adapter.go` `Send` 路由改 userMsgID-driven（`msg.ReplyTo` 查 `receiptsByUserMsgID`，miss 时 cold-create）
-  - `internal/chatsession/chatsession.go` `currentTurnUserMsgIDs []string` → `currentTurnUserMsgID string`
-  - `internal/chatsession/readpump.go` `emitMessageStateForCurrentTurn` 改用单一 ID
-  - `cmd/nightme/run.go` `newEventHandler` 设 `out.ReplyTo = cs.currentTurnUserMsgID`
+  - `internal/chatsession/chatsession.go` `currentTurnUserMsgIDs []string` → `currentTurnUserMsgID string`（**F-53 进一步：标量字段整体删除，改为 `AgentSession.currentPrompt.LastMessageID`**）
+  - `internal/chatsession/readpump.go` `emitMessageStateForCurrentTurn` 改用单一 ID（**F-53 进一步：readpump 已迁至 `AgentSession` 自管，per-AS eventQueue + EventBus**）
+  - `cmd/nightme/run.go` `newEventHandler` 设 `out.ReplyTo = cs.currentTurnUserMsgID`（**F-53 后改为 `out.ReplyTo = as.currentPrompt.LastMessageID`**）
 - ✅ done in v1.3: docs/feat/F-25-rolling-log.md renamed from F-25-input-buffer.md; F-26-gateway-hub.md + F-08-channel-abstraction.md + F-31-message-state.md + docs/channel/feishu.md updated with v1.3 annotations
 - ⏭ **F-33（chatID 数据模型简化）**：删 Gateway ChatType 抽象 + topic_group 不特殊处理 + InboundMessage.ReplyTo = message.ParentId。详见 [`docs/feat/F-33-simplify-chatid-data-model.md`](./feat/F-33-simplify-chatid-data-model.md)
 - ⏭ **F-34（`/new` slash command）**：不退进程重置 agent 对话上下文；`/new` 清 selectedCwd 下 pool 全部 AS；`/new <agent>` 清指定 AS；清 InputBuffer。详见 [`docs/feat/F-34-new-slash-command.md`](./feat/F-34-new-slash-command.md)
@@ -1882,29 +1901,42 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 
 ## 11.1 Daemon startup flow
 
-`nightme run` 启动顺序（见 `cmd/nightme/run.go`）：
+`nightme run` 启动顺序（见 `cmd/nightme/run.go::runDaemon`）：
 
 ```
-1. loadConfig()                       # ~/.nightme/config.yaml
-2. openChatSessions() / openAgentSessions()   # chat_sessions.json / agent_sessions.json
-3. buildAgents(cfg)                   # cfg.Agents → agent.Registry
-4. MigrateV1ToV2(v1RegistryPath)     # 备份 registry.json → .v1.bak (idempotent)
-5. spawner := NewRegistrySpawner(agents)
-6. mgr := NewManager().WithSpawner(spawner).WithPersistence(csFile, asFile)
-7. mgr.RestoreFromRegistry()          # 重建内存中 ChatSession 池 (AgentSession 状态=Detached)
-8. ch.Start()                         # Feishu WebSocket / echo channel
-9. gw := gateway.New(newMessageDispatcher(mgr, ch, cfg.Primary), nil)
-10. 注册 slash-command factories 到 `command.Commander`（`internal/command/commander.go`）；`cmd/nightme/run.go` 把各 `internal/command/<name>/.Factory` 加进注册表
-11. for each cs in mgr.List(): cs.SetEventHandler(newEventHandler(ch, logger))
-12. gwImpl.AttachChannels(ch) + gwImpl.Start()
-13. block on signal / ctx.Done()
-14. shutdownRun: stop channel + persist final state(不杀 agent 进程;AgentSession 在 registry 以 Detached 保留,下次启动经 RestoreFromRegistry + LookupSelectedAgentSession 自动 reuse 或 re-spawn)
+1.  loadConfig()                                 # ~/.nightme/config.yaml
+2.  openChatSessions() / openAgentSessions()     # chat_sessions.json / agent_sessions.json
+3.  removeLegacyRegistryFile(cfg)                # 归档 v0.x registry.json → .v1.bak（idempotent）
+4.  buildAgents(cfg)                             # cfg.Agents → agent.Registry
+5.  deps.newChannel(cfg) + ch.Start(ctx)         # Feishu / echo channel 启动 WS
+6.  spawner := chatsession.NewRegistrySpawner(agents)
+7.  mgr := chatsession.NewManager().WithSpawner(spawner).WithPersistence(csFile, asFile)
+8.  em := outbound.New(ch, outbound.Options{Stamper: newRuntimeStamper(mgr, prCacheReg, gtwDeps)})
+       mgr.WithChannelResolver(func(string) chatsession.Channel { return newChannelWrap(em) })
+9.  gtwMgr := gtw.NewManager(); gtwMgr.SetHandlerDeps(...); gtwMgr.SetGetChatSession(...)
+10. router := commandServices.NewReactionRouter(); router.Register("*", gtwMgr.HandleReaction)
+11. reg := command.NewRegistry(); reg.Register(gtw / watch / think / tools / cwd / use / close / stop / steer / newcmd)
+       commander := command.NewCommander(reg)
+12. shellDispatcher := shell.NewDispatcher(chatSessionChannelSender{mgr: mgr})
+13. gwImpl := gateway.New(messageDispatcher).WithCommander(shim).WithShellDispatch(shellShim).WithActionHandler(reactionShim)
+14. wireRuntimeCallbacksAndRestore(mgr, gwImpl, prCacheReg, ...)
+       — mgr.WithOnCreate(...) 必须在 RestoreFromRegistry 之前调，
+         否则恢复的 ChatSession 上的 onCreate 钩子永不触发
+15. mgr.RestoreFromRegistry()                    # 重建内存中 ChatSession 池 (AgentSession 状态=Detached)
+16. gwImpl.AttachChannels(ch) + gwImpl.Start(ctx)
+17. block on signal / ctx.Done()
+18. shutdownRun: stop channel + persist final state（不杀 agent 进程;
+       AgentSession 在 registry 以 Detached 保留,下次启动经
+       RestoreFromRegistry + LookupSelectedAgentSession 自动 reuse 或 re-spawn）
 ```
 
 **关键不变量**：
-- Step 11 的 `SetEventHandler` 在所有 ChatSession 上一次性安装；handler 跨 `/use` 持久。
-- Step 4-7 在没有 v1.x 数据时无操作（idempotent）。
-- Step 7 后所有 AgentSession 是 `Detached`（无进程）。用户第一次发消息 → `LookupSelectedAgentSession` → Spawner spawn。
+- Step 8 的 `em`（outbound.Emitter）是所有出站消息的统一咽喉（runtime event pump / slash command / MessageState 三条路径都走它），负责把 `SessionContext` footer 盖到每条消息上
+- Step 10 的 `commandServices.ReactionRouter` 单例持 `map[chatID]handler`，gtw 通过 `Register("*", gtwMgr.HandleReaction)` 注册自己；Channel adapter 把 decision-card 按钮归一化为既有 reaction 通路（与 emoji reaction 汇合）
+- Step 11 的 `command.NewRegistry` + `commander.Dispatch` 取代了 v1.3 之前的 `gateway.RegisterChatSessionCommands`；Gateway 只持有 commander shim，不知道任何命令实现细节
+- Step 13 的 `WithCommander` + `WithShellDispatch` + `WithActionHandler` 三者解耦：`/cwd` `/use` `/gtw` 等所有 slash command 走 commander；`!cmd` 走 shell；reaction / action 事件走 router
+- Step 14 的 `wireRuntimeCallbacksAndRestore` 把 `WithOnCreate` 与 `RestoreFromRegistry` 绑成一对，防止 restored ChatSession 漏装 EventHandler / MessageStateBus subscriber（详见 `cmd/nightme/run.go` 注释）
+- Step 15 后所有 AgentSession 是 `Detached`（无进程）；用户第一次发消息 → `LookupSelectedAgentSession` → `Spawner.Spawn`
 
 ---
 

@@ -50,6 +50,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/registry"
+	"github.com/cnlangzi/nightme/internal/shell"
 )
 
 // runDeps holds the construction seams for the daemon: every
@@ -390,6 +391,13 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	reg.Register(newcmd.NewFactory(mgr))
 	commander := command.NewCommander(reg)
 
+	// shellDispatcher owns the full shell-dispatch flow:
+	// prefix detection, placeholder reply, async exec, result
+	// posting. The shim in cmd/nightme/run.go only does type
+	// adaptation — see shell.Dispatcher.Handle for the actual
+	// logic.
+	shellDispatcher := shell.NewDispatcher(chatSessionChannelSender{mgr: mgr})
+
 	// RuntimeServices carries the shared command runtime interfaces.
 	// Each command package holds *chatsession.Manager directly
 	// via its Factory. Channel wraps *gateway.Channel (any
@@ -487,6 +495,91 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 			Dropped:  out.Dropped,
 			Reply:    out.Reply,
 		}, nil
+	})
+
+	// feat-shell: install the `!cmd` shell dispatcher. Symmetric
+	// to the commander shim above; runs in priority 3 of the
+	// gateway dispatch chain (between tryCommandDispatch and
+	// tryMessageDispatch). The shell package owns its own prefix
+	// detection (parseShell) — this shim is transport-only.
+	//
+	// We resolve the chat session once via mgr.GetOrCreate (same
+	// as the commander shim) so shell.Dispatch gets the chat's
+	// SelectedCwd as its working directory. If GetOrCreate fails
+	// (e.g. agent registry not loaded), fall through to message
+	// dispatch — the user can still talk to the agent.
+	//
+	// Reply delivery: the gateway's dispatchLoop only checks
+	// result != nil and otherwise discards CommandResult.Reply
+	// (see gateway.go's dispatchLoop / Contract section). Each
+	// shim is responsible for sending its own reply to the
+	// channel. We mirror the commander shim's pattern.
+	//
+	// ASYNC execution: shell commands run in a detached goroutine,
+	// not the dispatch goroutine. The dispatcher returns immediately
+	// (Consumed=true, no Reply) so the gateway can continue
+	// processing the next message and — crucially — so the daemon
+	// can shut down cleanly without deadlocking on its own restart.
+	//
+	// Why async is REQUIRED (not optional):
+	//
+	//   The dispatchLoop goroutine is registered with the gateway's
+	//   wg. When the daemon shuts down, gateway.Stop calls
+	//   wg.Wait() — which blocks until dispatchLoop exits.
+	//   dispatchLoop can only exit when it's at the top of its
+	//   select. If dispatchLoop is currently blocked inside
+	//   shell.Dispatch (synchronously waiting on `sh -c "make
+	//   restart"`), it can't return to the select, can't exit, and
+	//   wg.Wait() hangs forever.
+	//
+	//   Meanwhile `bin/nightme restart` (a child of `make`, itself
+	//   a child of `sh`) is waiting for the daemon's lockfile to
+	//   release so the new daemon can start. The daemon can't
+	//   release the lockfile because it's stuck in shutdown waiting
+	//   on wg.Wait(). Classic self-deadlock.
+	//
+	//   By returning Consumed=true synchronously and running the
+	//   shell command in a separate goroutine, dispatchLoop is
+	//   freed immediately. The daemon can shutdownRun → Stop →
+	//   wg.Wait() → all goroutines accounted for → exit cleanly.
+	//   The shell goroutine outlives the old daemon (becomes a
+	//   short-lived orphan; init reaps it), `make restart` finishes,
+	//   the new daemon starts, and the user sees the result on the
+	//   new daemon's session via the persisted MessageID.
+	//
+	// Reply delivery happens INSIDE the goroutine, with a fresh
+	// context.Background-derived ctx (the inbound ctx is cancelled
+	// during shutdown, and the goroutine may outlive the shutdown).
+	// Reply is best-effort: if the channel/CS is gone (daemon
+	// restarted, cs unloaded), ch.Send fails silently. The user
+	// still sees the result if the new daemon picked up the same
+	// chat — the messageID is persisted in the inbound envelope.
+	gwImpl.WithShellDispatch(func(ctx context.Context, msg *gateway.InboundMessage) (*gateway.CommandResult, error) {
+		if msg == nil {
+			return nil, nil
+		}
+		cs, err := mgr.GetOrCreate(msg.ChatID, cfg.Primary)
+		if err != nil {
+			slog.Default().Warn("runtime shim (shell): GetOrCreate failed",
+				"chat_id", msg.ChatID, "err", err)
+			return nil, nil
+		}
+
+		// The shell package owns ALL shell-related logic
+		// (prefix detection, placeholder, async exec, reply
+		// posting). This shim is pure type adaptation:
+		// gateway.InboundMessage → shell.InboundRequest.
+		// Handler returning Consumed=false means "not a shell
+		// command" — the gateway falls through to tryMessageDispatch.
+		result := shellDispatcher.Handle(shell.InboundRequest{
+			Request: shell.Request{
+				Text: msg.Text,
+				Cwd:  cs.SelectedCwd(),
+			},
+			ChatID:    msg.ChatID,
+			MessageID: msg.MessageID,
+		})
+		return &gateway.CommandResult{Consumed: result.Consumed}, nil
 	})
 
 	gwImpl.AttachChannels(ch)
@@ -1318,4 +1411,39 @@ func toChatCardChoices(in []command.CardChoice) []chatsession.CardChoice {
 		}
 	}
 	return out
+}
+
+// chatSessionChannelSender is the runtime-side adapter that
+// implements shell.Sender on top of chatsession.Channel. Each
+// chat session carries its own channel (the Feishu adapter
+// wrapping the underlying connection), and the dispatcher
+// looks it up by ChatID at Send time — so a single sender
+// routes to any chat the manager knows about.
+//
+// Send is best-effort: if the chat session can't be resolved
+// (e.g. unloaded during shutdown) or the channel refuses, we
+// silently drop. The shell dispatcher's Handle is the
+// fire-and-forget reply path (the result card), not a critical
+// control message.
+type chatSessionChannelSender struct {
+	mgr *chatsession.Manager
+}
+
+func (s chatSessionChannelSender) Send(ctx context.Context, msg shell.Outbound) error {
+	if msg.ChatID == "" {
+		return nil
+	}
+	cs := s.mgr.Get(msg.ChatID)
+	if cs == nil {
+		return nil
+	}
+	ch := cs.Channel()
+	if ch == nil {
+		return nil
+	}
+	return ch.Send(ctx, chatsession.OutboundMessage{
+		ChatID:  msg.ChatID,
+		Text:    msg.Text,
+		ReplyTo: msg.ReplyTo,
+	})
 }

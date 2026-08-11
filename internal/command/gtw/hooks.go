@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/shell"
 )
 
 // Config is the user-level gtw configuration loaded from
@@ -147,11 +147,19 @@ func Load() (Config, LoadNotes) {
 // HookResult captures one hook's outcome. Err is non-nil on any
 // execution failure (exit != 0, timeout, unsupported type, etc.).
 // All failures are non-fatal by design — see wip/gtw-hooks.md.
+//
+// ExitCode carries the child's exit status when the failure
+// surfaces as a shell exit (0 on success / non-fatal cases like
+// "unsupported type"). FormatResults reads this directly instead
+// of relying on errors.As(*exec.ExitError), since the cross-
+// platform shell runner returns a typed *shell.ExitError whose
+// shape isn't compatible with the legacy *exec.ExitError contract.
 type HookResult struct {
-	Name   string // user-facing command label: <run>, or "<empty>" / "<type>:<run-truncated>" for error cases
-	Stdout string
-	Stderr string
-	Err    error
+	Name     string // user-facing command label: <run>, or "<empty>" / "<type>:<run-truncated>" for error cases
+	Stdout   string
+	Stderr   string
+	ExitCode int    // child exit status (0 = success / not-a-shell failure)
+	Err      error  // non-nil on any execution failure
 }
 
 // hookTimeout caps a single hook's runtime. After this it is
@@ -206,20 +214,21 @@ func runOneHook(ctx context.Context, h Hook, cwd string) HookResult {
 	hctx, cancel := context.WithTimeout(ctx, hookTimeout)
 	defer cancel()
 
-	// All exec / Dir / capture plumbing lives in runCmd (see exec.go)
-	// so this path can't drift from GitRunner / CLIRunner. Note that
-	// runCmd trims the trailing newline — FormatResults used to do
-	// that itself per-block (lines 265 / 269), so the trimmed
-	// contract is preserved end-to-end.
-	stdout, stderr, err := runCmd(hctx, cwd, "sh", "-c", run)
+	// Shell execution goes through internal/shell so the platform
+	// shell (sh -c on Unix, cmd /c on Windows) is selected
+	// centrally — no sh-vs-cmd fork here. shell.Run trims the
+	// trailing newline, matching the legacy runCmd contract that
+	// downstream branch-name / remote-URL comparisons rely on.
+	stdout, stderr, exitCode, err := shell.Run(hctx, cwd, run)
 	// Name is the user-facing command label. Held to the bare
 	// run string (no "sh -c " prefix) so FormatResults can render
 	// it as `> <run>` without double-stamping the shell layer.
 	return HookResult{
-		Name:   run,
-		Stdout: stdout,
-		Stderr: stderr,
-		Err:    err,
+		Name:     run,
+		Stdout:   stdout,
+		Stderr:   stderr,
+		ExitCode: exitCode,
+		Err:      err,
 	}
 }
 
@@ -255,8 +264,8 @@ func FormatResults(label string, results []HookResult) string {
 		// fall back to the descriptive `⚠️ <msg>` line — same
 		// shape as before, semantics unchanged.
 		if r.Err != nil {
-			if exitErr, ok := errors.AsType[*exec.ExitError](r.Err); ok {
-				fmt.Fprintf(&b, "  ❌ exit %d\n", exitErr.ExitCode())
+			if r.ExitCode != 0 {
+				fmt.Fprintf(&b, "  ❌ exit %d\n", r.ExitCode)
 			} else {
 				fmt.Fprintf(&b, "  ⚠️ %v\n", r.Err)
 			}

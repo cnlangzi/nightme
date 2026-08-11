@@ -133,15 +133,15 @@ func TestChannelWrap_PatchBuildsOutCardPatch(t *testing.T) {
 	wrap := newChannelWrap(em)
 
 	err := wrap.Patch(context.Background(), chatsession.OutboundMessage{
-		ChatID:             "c3",
-		ReplyTo:            "msg-42",
-		PatchBotMsgID:      "msg-42",
-		PatchChosenEmoji:   "✅",
-		PatchResult:        "card updated",
-		CardTitle:          "Updated",
-		CardBody:           "new body",
-		CardRequestID:      "req-2",
-		ChosenChoiceEmoji:  "✅",
+		ChatID:            "c3",
+		ReplyTo:           "msg-42",
+		PatchBotMsgID:     "msg-42",
+		PatchChosenEmoji:  "✅",
+		PatchResult:       "card updated",
+		CardTitle:         "Updated",
+		CardBody:          "new body",
+		CardRequestID:     "req-2",
+		ChosenChoiceEmoji: "✅",
 		CardChoices: []chatsession.CardChoice{
 			{Emoji: "✅", Label: "Use new variant", Action: "act:/y"},
 		},

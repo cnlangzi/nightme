@@ -32,7 +32,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -238,7 +237,7 @@ func pumpIO(cmd *cobra.Command, as *chatsession.AgentSession) error {
 	}()
 
 	sigCh := make(chan os.Signal, 2)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, shutdownSignals()...)
 	defer signal.Stop(sigCh)
 
 	stdinDone := make(chan struct{})

@@ -17,6 +17,8 @@
 package main
 
 import (
+	"runtime"
+
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
 	"github.com/cnlangzi/nightme/internal/bridge/codex"
@@ -55,6 +57,12 @@ func init() {
 
 	// bash — example PTY-backed entry. Shows the registration
 	// shape for any binary the user might want to launch without
-	// an ACP/JSON-IO layer.
-	agent.Builtins.Register(pty.NewStarter("bash", "bash", nil, nil, 0, 0))
+	// an ACP/JSON-IO layer. Unix-only: Windows has no `bash` on
+	// PATH (cmd.exe + PowerShell are the shells of record there;
+	// WSL / git-bash are user-installed). The nightly Windows
+	// users that want a shell fallback can add a user-defined
+	// entry in their config.yaml.
+	if runtime.GOOS != "windows" {
+		agent.Builtins.Register(pty.NewStarter("bash", "bash", nil, nil, 0, 0))
+	}
 }

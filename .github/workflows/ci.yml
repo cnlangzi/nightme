@@ -9,11 +9,11 @@ jobs:
     name: Build + Vet + Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
-          go-version: '1.26'
+          go-version-file: go.mod
           cache: true
 
       - name: Build
@@ -27,7 +27,7 @@ jobs:
 
       - name: Upload coverage
         if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage
           path: coverage.out
@@ -66,11 +66,11 @@ jobs:
             GOARCH: arm64
             binary: nightme
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
-          go-version: '1.26'
+          go-version-file: go.mod
           cache: true
 
       - name: Build (${{ matrix.target.GOOS }}/${{ matrix.target.GOARCH }})
@@ -87,7 +87,7 @@ jobs:
         run: go vet ./...
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: nightme-${{ matrix.target.GOOS }}-${{ matrix.target.GOARCH }}
           path: dist/${{ matrix.target.GOOS }}-${{ matrix.target.GOARCH }}/${{ matrix.target.binary }}

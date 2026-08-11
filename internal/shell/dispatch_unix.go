@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-func executeShell(ctx context.Context, cwd, cmd string) *Result {
+func executeShell(ctx context.Context, cwd, cmd string) *result {
 	start := time.Now()
 	c := exec.CommandContext(ctx, "sh", "-c", cmd)
 	c.Dir = cwd
@@ -32,7 +32,7 @@ func executeShell(ctx context.Context, cwd, cmd string) *Result {
 	runErr := c.Run()
 	dur := time.Since(start)
 
-	r := &Result{
+	r := &result{
 		Consumed: true,
 		Stdout:   stdout.String(),
 		Stderr:   stderr.String(),

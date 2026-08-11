@@ -5,16 +5,16 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 // TestParseShell_Matrix locks in the 13-row normalization contract
-// shared between shell.parseShell and commander.parseCommand. See
-// wip/feat-shell.md §"防呆示例" for the authoritative table; if you
-// change the rules, update both parsers AND both test matrices
-// (this file + commander_test.go's TestParseCommand_Matrix) in
-// lock-step.
+// shared between shell.parseShell and commander.parseCommand. The
+// parallel test matrix in commander_test.go (TestParseCommand_Matrix)
+// encodes the same cases for the slash side; if you change the
+// rules, update both parsers AND both test matrices in lock-step.
 func TestParseShell_Matrix(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -62,13 +62,13 @@ func TestDispatch_NonBangText_FallsThrough(t *testing.T) {
 	}
 	for _, text := range cases {
 		t.Run(text, func(t *testing.T) {
-			r:= Dispatch(context.Background(), Request{Text: text, Cwd: t.TempDir()})
+			r:= dispatch(context.Background(), Request{Text: text, Cwd: t.TempDir()})
 			
 			if r.Consumed {
-				t.Errorf("Dispatch(%q): expected Consumed=false, got true (reply=%q)", text, r.Reply)
+				t.Errorf("dispatch(%q): expected Consumed=false, got true (reply=%q)", text, r.Reply)
 			}
 			if r.Reply != "" {
-				t.Errorf("Dispatch(%q): expected empty Reply for fall-through, got %q", text, r.Reply)
+				t.Errorf("dispatch(%q): expected empty Reply for fall-through, got %q", text, r.Reply)
 			}
 		})
 	}
@@ -79,17 +79,17 @@ func TestDispatch_LoneBang_FallsThrough(t *testing.T) {
 	// dispatch. Returns Consumed=false so gateway can fall through.
 	for _, text := range []string{"!", "!   ", "！", "！  "} {
 		t.Run(text, func(t *testing.T) {
-			r:= Dispatch(context.Background(), Request{Text: text, Cwd: t.TempDir()})
+			r:= dispatch(context.Background(), Request{Text: text, Cwd: t.TempDir()})
 			
 			if r.Consumed {
-				t.Errorf("Dispatch(%q): lone bang should NOT consume (防呆), got reply=%q", text, r.Reply)
+				t.Errorf("dispatch(%q): lone bang should NOT consume (防呆), got reply=%q", text, r.Reply)
 			}
 		})
 	}
 }
 
 func TestDispatch_EmptyCwd_FriendlyError(t *testing.T) {
-	r:= Dispatch(context.Background(), Request{Text: "!ls", Cwd: ""})
+	r:= dispatch(context.Background(), Request{Text: "!ls", Cwd: ""})
 	
 	if !r.Consumed {
 		t.Fatal("empty CWD should still be consumed (with friendly error)")
@@ -105,7 +105,7 @@ func TestDispatch_EchoHello_StdoutAndSummary(t *testing.T) {
 		// exercised by dispatch_windows_test.go separately.
 		t.Skip("echo path uses sh -c; skip on Windows (covered by dispatch_windows_test.go)")
 	}
-	r:= Dispatch(context.Background(), Request{Text: "!echo hello", Cwd: t.TempDir()})
+	r:= dispatch(context.Background(), Request{Text: "!echo hello", Cwd: t.TempDir()})
 	
 	if !r.Consumed {
 		t.Fatal("expected Consumed=true")
@@ -128,7 +128,7 @@ func TestDispatch_False_ExitCodeOne_AndCrossMark(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("`false` is a Unix builtin; skip on Windows")
 	}
-	r:= Dispatch(context.Background(), Request{Text: "!false", Cwd: t.TempDir()})
+	r:= dispatch(context.Background(), Request{Text: "!false", Cwd: t.TempDir()})
 	
 	if r.ExitCode != 1 {
 		t.Errorf("expected exit 1, got %d", r.ExitCode)
@@ -145,7 +145,7 @@ func TestDispatch_NotFoundCommand_Exit127(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX exit-127 semantic; skip on Windows")
 	}
-	r:= Dispatch(context.Background(), Request{Text: "!definitely-not-a-real-command-xyzzy", Cwd: t.TempDir()})
+	r:= dispatch(context.Background(), Request{Text: "!definitely-not-a-real-command-xyzzy", Cwd: t.TempDir()})
 	
 	if r.ExitCode != 127 {
 		t.Errorf("expected exit 127 for missing command, got %d", r.ExitCode)
@@ -157,7 +157,7 @@ func TestDispatch_Pwd_MatchesCwd(t *testing.T) {
 		t.Skip("`pwd` is a Unix builtin; skip on Windows")
 	}
 	dir := t.TempDir()
-	r:= Dispatch(context.Background(), Request{Text: "!pwd", Cwd: dir})
+	r:= dispatch(context.Background(), Request{Text: "!pwd", Cwd: dir})
 	
 	if r.ExitCode != 0 {
 		t.Fatalf("pwd failed: exit %d, stderr=%q", r.ExitCode, r.Stderr)
@@ -176,7 +176,7 @@ func TestDispatch_LongOutput_Truncated(t *testing.T) {
 	}
 	dir := t.TempDir()
 	// seq 1 200 emits 200 lines, well over MaxStdoutLines=50.
-	r:= Dispatch(context.Background(), Request{Text: "!seq 1 200", Cwd: dir})
+	r:= dispatch(context.Background(), Request{Text: "!seq 1 200", Cwd: dir})
 	
 	if !strings.Contains(r.Reply, "truncated") {
 		t.Errorf("expected summary to mention truncation, got %q", r.Reply)
@@ -187,8 +187,35 @@ func TestDispatch_LongOutput_Truncated(t *testing.T) {
 	}
 }
 
+func TestDispatch_ContextCancel_SignalExit(t *testing.T) {
+	// When the parent context is cancelled mid-execution,
+	// CommandContext kills the child. On Unix this is SIGKILL;
+	// exec.Run returns *exec.ExitError with ExitCode() == -1
+	// (Go's signal-exit sentinel). The summary card should
+	// surface that as ❌ with exit -1.
+	if runtime.GOOS == "windows" {
+		t.Skip("signal-exit semantics differ on Windows; covered by dispatch_windows_test.go")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel BEFORE the child starts → instant SIGKILL
+
+	r := dispatch(ctx, Request{Text: "!sleep 30", Cwd: t.TempDir()})
+	if !r.Consumed {
+		t.Fatal("expected Consumed=true")
+	}
+	if r.ExitCode != -1 {
+		t.Errorf("expected ExitCode=-1 after ctx cancel, got %d", r.ExitCode)
+	}
+	if !strings.Contains(r.Reply, "❌") {
+		t.Errorf("expected ❌ on signal-exit, got %q", r.Reply)
+	}
+	if strings.Contains(r.Reply, "✅") {
+		t.Errorf("signal-exit must not have ✅, got %q", r.Reply)
+	}
+}
+
 func TestRenderSummary_SuccessShape(t *testing.T) {
-	r := &Result{
+	r := &result{
 		Consumed: true,
 		Cmd:      "ls -la",
 		Cwd:      "/tmp",
@@ -209,7 +236,7 @@ func TestRenderSummary_SuccessShape(t *testing.T) {
 }
 
 func TestRenderSummary_FailureShape(t *testing.T) {
-	r := &Result{
+	r := &result{
 		Consumed: true,
 		Cmd:      "false",
 		Cwd:      "/tmp",
@@ -236,7 +263,7 @@ func TestRenderSummary_TruncationNotice(t *testing.T) {
 		}
 		b.WriteString(strings.Repeat("x", 5))
 	}
-	r := &Result{
+	r := &result{
 		Consumed: true,
 		Cmd:      "seq 1 60",
 		Cwd:      "/tmp",
@@ -264,4 +291,131 @@ func evalLinks(p string) string {
 		return resolved
 	}
 	return strings.TrimSpace(p)
+}
+
+// fakeSender records each Send call so tests can assert what
+// the dispatcher posted. Concurrency-safe (Send may be called
+// from a background goroutine).
+type fakeSender struct {
+	mu    sync.Mutex
+	calls []Outbound
+}
+
+func (f *fakeSender) Send(_ context.Context, msg Outbound) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, msg)
+	return nil
+}
+
+func (f *fakeSender) callsCopy() []Outbound {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]Outbound, len(f.calls))
+	copy(out, f.calls)
+	return out
+}
+
+// TestDispatcherHandle_NonShellText covers the fall-through path.
+// Plain text, slash commands, full-width slashes — none of these
+// are shell commands. Handle must return Consumed=false (so the
+// gateway falls through to tryMessageDispatch) and NOT spawn a
+// goroutine (no Sender call).
+func TestDispatcherHandle_NonShellText(t *testing.T) {
+	sender := &fakeSender{}
+	d := NewDispatcher(sender)
+
+	for _, text := range []string{
+		"hello",
+		"/cmd",
+		"／cmd",
+		"   hello",
+		"echo !hi", // bang not at start
+	} {
+		t.Run(text, func(t *testing.T) {
+			sender.mu.Lock()
+			sender.calls = nil
+			sender.mu.Unlock()
+
+			r := d.Handle(InboundRequest{
+				Request:    Request{Text: text, Cwd: t.TempDir()},
+				ChatID:     "oc_test",
+				MessageID:  "om_test",
+			})
+			if r.Consumed {
+				t.Errorf("Handle(%q): expected Consumed=false, got true", text)
+			}
+			if got := sender.callsCopy(); len(got) != 0 {
+				t.Errorf("Handle(%q): non-shell text should not call Sender, got %d calls", text, len(got))
+			}
+		})
+	}
+}
+
+// TestDispatcherHandle_ShellCommand covers the consumption path.
+// For a `!cmd` text, Handle returns Consumed=true and (eventually)
+// calls Sender with the rendered summary card.
+func TestDispatcherHandle_ShellCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("echo path uses sh -c; skip on Windows")
+	}
+	sender := &fakeSender{}
+	d := NewDispatcher(sender)
+
+	r := d.Handle(InboundRequest{
+		Request:    Request{Text: "!echo hello-shell", Cwd: t.TempDir()},
+		ChatID:     "oc_test",
+		MessageID:  "om_test",
+	})
+	if !r.Consumed {
+		t.Fatal("expected Consumed=true for shell command")
+	}
+
+	// Wait for the async goroutine to complete (poll up to
+	// shellTimeout; in practice it finishes in <1s).
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(sender.callsCopy()) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	calls := sender.callsCopy()
+	if len(calls) == 0 {
+		t.Fatal("expected Sender to be called with the result card")
+	}
+	if got := calls[0].Text; !strings.Contains(got, "✅") || !strings.Contains(got, "echo hello-shell") {
+		t.Errorf("expected summary card with ✅ and command, got %q", got)
+	}
+	if calls[0].ChatID != "oc_test" {
+		t.Errorf("ChatID = %q, want oc_test", calls[0].ChatID)
+	}
+	if calls[0].ReplyTo != "om_test" {
+		t.Errorf("ReplyTo = %q, want om_test", calls[0].ReplyTo)
+	}
+}
+
+// TestDispatcherHandle_NilSender verifies that passing nil to
+// NewDispatcher doesn't panic — the dispatcher still consumes
+// shell commands (returns Consumed=true) but silently drops the
+// reply. Lets the runtime stay wired during channel outages.
+func TestDispatcherHandle_NilSender(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("echo path uses sh -c; skip on Windows")
+	}
+	d := NewDispatcher(nil) // sender = nil
+
+	r := d.Handle(InboundRequest{
+		Request: Request{Text: "!echo ok", Cwd: t.TempDir()},
+	})
+	if !r.Consumed {
+		t.Fatal("expected Consumed=true even with nil sender")
+	}
+	// No way to assert "Sender was not called" without a sender
+	// fixture — the goroutine's `d.sender == nil` short-circuit
+	// returns before any Send call, so no panic occurs and no
+	// reply is dispatched. The point of this test is to confirm
+	// NewDispatcher(nil) doesn't panic and Handle still returns
+	// Consumed=true (the dispatcher's contract is intact even
+	// when the channel layer is unavailable).
 }

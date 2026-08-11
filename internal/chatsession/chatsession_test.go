@@ -197,22 +197,23 @@ func TestLookupActiveAgentSession_SpawnWhenDefaultAlsoMiss(t *testing.T) {
 	}
 }
 
-// killAllForTest simulates the /kill (no args) workflow using the
-// lifecycle accessors that kill.KillAllAgents would compose:
-// AgentSessionsInCwd → per-entry Close → per-entry DropAgentSession.
-// Tests use this in place of the kill package directly to avoid an
-// import cycle (kill imports chatsession; chatsession tests cannot
-// transitively import kill).
-func killAllForTest(t *testing.T, cs *ChatSession) {
+// closeAllForTest simulates the /close (no args) workflow using the
+// lifecycle accessors that close.CloseAllAgents would compose:
+// AgentSessionsInCwd → per-entry Close. /close does NOT drop the
+// AgentSession — the entry stays in the pool with its sessionID
+// preserved so the next respawn can continue the conversation.
+// Tests use this in place of the close package directly to avoid an
+// import cycle (close imports chatsession; chatsession tests cannot
+// transitively import close).
+func closeAllForTest(t *testing.T, cs *ChatSession) {
 	t.Helper()
 	snapshot := cs.AgentSessionsInCwd(cs.SelectedCwd())
 	for _, as := range snapshot {
 		_ = as.Close()
-		cs.DropAgentSession(as)
 	}
 }
 
-func TestKillAllClearsPool(t *testing.T) {
+func TestCloseAllPreservesPool(t *testing.T) {
 	csFile, asFile := newTestStores(t)
 	cs, _ := New("oc_xxx", "claude", newTestChannel())
 	cs = cs.WithPersistence(csFile, asFile)
@@ -224,21 +225,25 @@ func TestKillAllClearsPool(t *testing.T) {
 		t.Fatalf("precondition: pool size=%d", len(cs.Pool()))
 	}
 
-	killAllForTest(t, cs)
-	if len(cs.Pool()) != 0 {
-		t.Fatalf("KillAllAgents should clear pool; size=%d", len(cs.Pool()))
+	closeAllForTest(t, cs)
+	// /close kills the bridge process but preserves the AgentSession
+	// entry. The entry stays in the pool with sessionID intact so
+	// the next respawn can continue the conversation via
+	// --resume <sessionID>.
+	if len(cs.Pool()) != 1 {
+		t.Fatalf("CloseAllAgents should preserve pool; size=%d", len(cs.Pool()))
 	}
-	if cs.SelectedAgentSession() != nil {
-		t.Fatalf("selectedAS should be nil after KillAllAgents")
+	if cs.SelectedAgentSession() == nil {
+		t.Fatalf("selectedAS should be preserved after CloseAllAgents (session kept)")
 	}
-	// Persistence also cleared.
+	// Persistence also preserved (no agent_sessions.json deletion).
 	all := asFile.GetByChatPool(cs.ID)
-	if len(all) != 0 {
-		t.Fatalf("persisted AgentSessions should be cleared; got %d", len(all))
+	if len(all) != 1 {
+		t.Fatalf("persisted AgentSessions should be preserved; got %d", len(all))
 	}
-	// activeCwd and activeAgent survive (only the pool is cleared).
+	// activeCwd and activeAgent survive (they were never touched).
 	if cs.SelectedCwd() != "/code/bailing" {
-		t.Fatalf("SelectedCwd should survive /kill; got %q", cs.SelectedCwd())
+		t.Fatalf("SelectedCwd should survive /close; got %q", cs.SelectedCwd())
 	}
 }
 
@@ -400,7 +405,7 @@ func TestCreatedAtAndID(t *testing.T) {
 
 // TestSetActiveAgent_ClearsStaleAnchor verifies the v1.3 fix:
 // F-53: the old TestSetActiveAgent_ClearsStaleAnchor and
-// TestKillAll_ClearsStaleAnchor tests were deleted — their
+// TestCloseAll_ClearsStaleAnchor tests were deleted — their
 // subject (`currentTurnUserMsgID` scalar) is gone. The new
 // anchor lives on `AgentSession.currentPrompt.LastMessageID` and
 // is cleared automatically by `endPrompt` / agent-switch paths.
@@ -508,20 +513,20 @@ func TestQueueUserMessage_RemovesGhostOnQueueFull(t *testing.T) {
 	}
 }
 
-// TestKillAllSequence_QueueSurvivesAndReflushes verifies the
-// post-/kill contract.
+// TestCloseAllSequence_QueueSurvivesAndReflushes verifies the
+// post-/close contract.
 //
 // CS-AS 边界重构 Phase 1 port, with a deliberate semantic change:
-// the old test asserted the /kill handler ran ClearBuffer + SetIdle
-// and that queued messages came out MessageDropped. /kill no longer
+// the old test asserted the /close handler ran ClearBuffer + SetIdle
+// and that queued messages came out MessageDropped. /close no longer
 // discards the queue — it only tears down the agent processes.
 // Queued messages are still owed a reply, so they must survive the
-// kill and flush against the respawned AgentSession.
+// close and flush against the respawned AgentSession.
 //
 // The pre-fix bug this replaces (next message stranded in a "Busy
 // but no AS will ever flush it" state) cannot recur: readiness now
 // lives on the AgentSession, so a fresh AS is ready by construction.
-func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
+func TestCloseAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 	cs, _ := New("oc_chat", "claude", newTestChannel())
 	cs.SetSelectedCwd(t.TempDir())
 
@@ -545,11 +550,11 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 		return false
 	})
 
-	// AS must live in activeCwd so KillAllAgents (cwd-scoped)
+	// AS must live in activeCwd so CloseAllAgents (cwd-scoped)
 	// reaches it. Capture activeCwd before allocating the AS so
 	// the (Agent, Cwd) key matches the pool filter.
 	activeCwd := cs.SelectedCwd()
-	as := NewAgentSession("as_kill", "oc_chat", "claude", activeCwd, nil)
+	as := NewAgentSession("as_close_preserved", "oc_chat", "claude", activeCwd, nil)
 	as.SetHandleForTest(newRecordingAgentSession(1).buildLive())
 	as.SetStatusForTest(StatusRunning)
 	// Put a Prompt in flight so the AS is mid-turn and the message
@@ -568,22 +573,22 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 		t.Fatalf("QueueUserMessage: %v", err)
 	}
 	if got := cs.QueueLen(); got != 1 {
-		t.Fatalf("pre-kill: QueueLen = %d, want 1 (AS is mid-turn)", got)
+		t.Fatalf("pre-close: QueueLen = %d, want 1 (AS is mid-turn)", got)
 	}
 
-	// Run /kill's sequence — KillAllAgents (simulated via accessors
+	// Run /close's sequence — KillAllAgents (simulated via accessors
 	// to avoid import cycle) and nothing else.
-	killAllForTest(t, cs)
+	closeAllForTest(t, cs)
 
-	// The queued message survives, still in the queue (/kill
+	// The queued message survives, still in the queue (/close
 	// must not discard queued work). Stage cannot be observed
 	// from the test's local copy (value semantics); we trust
 	// the queue to still own it.
 	if got := cs.QueueLen(); got != 1 {
-		t.Errorf("post-kill: QueueLen = %d, want 1 (/kill must not discard queued work)", got)
+		t.Errorf("post-close: QueueLen = %d, want 1 (/close must not discard queued work)", got)
 	}
 
-	// Reset the captured state — /kill may not have fired any.
+	// Reset the captured state — /close may not have fired any.
 	mu.Lock()
 	haveStateEvent = false
 	mu.Unlock()
@@ -599,7 +604,7 @@ func TestKillAllSequence_QueueSurvivesAndReflushes(t *testing.T) {
 	cs.mu.Unlock()
 
 	if err := cs.TryFlush(); err != nil {
-		t.Fatalf("post-kill TryFlush: %v", err)
+		t.Fatalf("post-close TryFlush: %v", err)
 	}
 	if got := cs.QueueLen(); got != 0 {
 		t.Errorf("post-respawn: QueueLen = %d, want 0 (queue drained)", got)

@@ -3,7 +3,7 @@
 > **Status**: ✅ **已实现（Phase 3 review 完成，2026-08-04）**。**F-43 supersedes §6 Q-N4 for dead/detached entries**（dead entries 现 is `matched=1, action=marked-fresh`,不再 silently skip）。
 > **Milestone**: v1.3.x
 > **Depends on**: F-09 (Agent abstraction), F-19 (CLI Bridge), F-21 (Agent Modes), F-24 (Claude Code Bridge), F-27 (ChatSession), F-28 (`/use`), F-29 (AgentSession pool), F-32 (Pi RPC Bridge)
-> **Related**: [`SPEC.md`](../SPEC.md) §3.2 状态转换触发器, [`F-28-use-command.md`](./F-28-use-command.md), [`F-29-agent-session-pool.md`](./F-29-agent-session-pool.md), [`F-32-pi-rpc-bridge.md`](./F-32-pi-rpc-bridge.md), [`F-43-kill-new-graceful-and-reset.md`](./F-43-kill-new-graceful-and-reset.md)
+> **Related**: [`SPEC.md`](../SPEC.md) §3.2 状态转换触发器, [`F-28-use-command.md`](./F-28-use-command.md), [`F-29-agent-session-pool.md`](./F-29-agent-session-pool.md), [`F-32-pi-rpc-bridge.md`](./F-32-pi-rpc-bridge.md), [`F-43-close-new-graceful-and-reset.md`](./F-43-close-new-graceful-and-reset.md)
 
 ---
 
@@ -34,19 +34,19 @@
 
 ### 2.1 v1.3.x 现状
 
-nightme 已有 `/kill`（清空 pool + 杀全部进程）和 `/use`（切 active）。但都"过重"：用户只是想 reset 对话上下文、不想丢 pool 槽位或重启进程。
+nightme 已有 `/close`（清空 pool + 杀全部进程）和 `/use`（切 active）。但都"过重"：用户只是想 reset 对话上下文、不想丢 pool 槽位或重启进程。
 
 **场景**：
 
 | 用户场景 | 当前可用命令 | 问题 |
 |---|---|---|
-| Context 满 / 想重新开始 | `/kill` | 太重：杀掉所有进程 + 清空 pool；下次消息要重新 fork（~500ms-2s），所有挂起消息丢失 |
+| Context 满 / 想重新开始 | `/close` | 太重：杀掉所有进程 + 清空 pool；下次消息要重新 fork（~500ms-2s），所有挂起消息丢失 |
 | 切到另一 agent | `/use` | 语义错：`/use` 是"换 agent"，不是"清上下文"。同 agent 没法 `/use cc`（noop）|
-| 只想清 claudecode 的对话 | 无 | 必须 `/kill` 或手动 TUI 输 `/clear` |
+| 只想清 claudecode 的对话 | 无 | 必须 `/close` 或手动 TUI 输 `/clear` |
 
 ### 2.2 设计目标
 
-1. **轻量级 reset**：与 `/kill` 区分 —— 只丢对话，不丢进程 / pool 槽位 / args。
+1. **轻量级 reset**：与 `/close` 区分 —— 只丢对话，不丢进程 / pool 槽位 / args。
 2. **跨 agent 协议统一**：每个 bridge 暴露 `AgentSession.New(ctx) error`，把"reset conversation"的语义收敛到一个方法。
 3. **复用现有持久化链路**：bridge reset 后 emit `EventAgentConnected`（带新 SessionID）→ 现有 `cmd/nightme/run.go:467` 路径自动捕获 + 持久化。零新增 wiring。
 4. **可选精修粒度**：`/new <agent>` 让用户只 reset 一个 agent 的对话，不动其他。
@@ -358,7 +358,7 @@ gw.Register(gateway.Command{
 |---|---|---|---|---|
 | `/new`（默认）| `Cwd == selectedCwd`（无 agent 过滤）| pool 中 selectedCwd 下全部 | ✓ | ✗ |
 | `/new <agent>` | `Cwd == selectedCwd && Agent == <name>` | 至多 1 条 | ✓ | ✗ |
-| `/kill` | 整个 pool | 全部 | ✓ | ✓ |
+| `/close` | 整个 pool | 全部 | ✓ | ✓ |
 | `/use <agent>` | 无 | 无（只切 selectedAS）| ✗ | ✗ |
 
 ### 4.2 `/new <agent>` 的 cwd 范围（决策锁）
@@ -448,7 +448,7 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 - **bridge 层的并发 reset 优化**：当前串行；如有性能诉求可在 Phase 3 加 per-bridge 并发（注意 stdin / RPC 各自串行约束）。
 - **ACP transport 复用重构**：当前每次 `New` 都复用 transport 已有 session/new；不抽公共 transport（与 F-32 / F-21 Phase 2 一致）。
 - **`/new` 清空用户消息历史**：仅清 agent 对话上下文 + InputBuffer queued；不删 Channel 端已发的 user message（Channel 自管 receipt，与 `/new` 正交）。
-- **UI 反馈**：`/new` 只 reply 一行文本；不触发额外 OutboundMessage / reaction（与 `/watch`、`/kill` 一致）。
+- **UI 反馈**：`/new` 只 reply 一行文本；不触发额外 OutboundMessage / reaction（与 `/watch`、`/close` 一致）。
 - **`/reset` 别名**：暂不提供；如用户想要，`/new` 已被锁定。
 
 ---
@@ -460,7 +460,7 @@ if ev.Kind == agent.EventAgentConnected && ev.Connected != nil && ev.Connected.S
 | Q-N1 | `New` 放哪个接口 | `agent.AgentSession` 接口（不是 `agent.Agent`）| 2026-08-04 |
 | Q-N2 | `/new` 无参的清空范围 | pool 中 `Cwd == selectedCwd` 的全部 | 2026-08-04 |
 | Q-N3 | `/new <agent>` 的清空范围 | pool 中 `Cwd == selectedCwd && Agent == <name>`（限定 cwd，对称）| 2026-08-04 |
-| Q-N4 | InputBuffer 处理 | **清空** queued（与 `/kill` 行为对齐）| 2026-08-04 |
+| Q-N4 | InputBuffer 处理 | **清空** queued（与 `/close` 行为对齐）| 2026-08-04 |
 | Q-N5 | claudecode reset 命令 | `writeLine({"type":"user","message":{...,"content":"/clear"}})` —— claude-code 在 stream-json 模式下接受 `/clear` 作为 user-typed slash command（实测 2026-08-04）；控制消息 `{"type":"control",...}` 各种 subtype 全部无效 | 2026-08-04 |
 | Q-N6 | pi reset 协议 | **RPC command** `{"type":"new_session"}`（不是 prompt 文本 `/new`）| 2026-08-04 |
 | Q-N7 | acp reset 协议 | JSON-RPC `session/new` over existing transport | 2026-08-04 |

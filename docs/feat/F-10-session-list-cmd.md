@@ -36,7 +36,7 @@ type SessionInfo struct {
 // HTTP routes (internal/ipc/router.go):
 //   GET  /v1/sessions        → ListResponse
 //   GET  /v1/sessions/{sid}  → SessionInfo
-//   POST /v1/sessions/{sid}/kill  → 204
+//   POST /v1/sessions/{sid}/close  → 204
 ```
 
 **CLI 命令**：
@@ -53,7 +53,7 @@ nightme status            # 检查主进程是否在跑 + session 数
 - `internal/ipc/server.go` — HTTP server（仅 127.0.0.1:7823）
 - `internal/ipc/router.go` — chi router + handlers
 - `cmd/nightme/list.go` — `nightme list` 子命令
-- `cmd/nightme/kill.go` — `nightme kill` 子命令
+- `cmd/nightme/close.go` — `nightme kill` 子命令
 
 **输出格式**（text mode）：
 ```
@@ -85,7 +85,7 @@ s_01HF10XXXXX    claude  /tmp/test                               -       exited(
 
 **集成测试**：
 - 启动 mock IPC server → 调用 GET /v1/sessions → 验证 response
-- POST /v1/sessions/{sid}/kill → 验证 mock process 被 kill
+- POST /v1/sessions/{sid}/close → 验证 mock process 被 kill
 
 **手动测试**：
 - `nightme list` → 看到当前 session

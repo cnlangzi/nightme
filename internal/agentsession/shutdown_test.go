@@ -104,7 +104,7 @@ func TestShutdown_NoEventPushed_ReturnsImmediately(t *testing.T) {
 
 // TestShutdown_BridgeExit_DoesNotCloseEventBus — Phase 1 invariant
 // #9: bridge process exit (SetExited) does NOT close the EventBus
-// or remove subscriptions. Only /kill or ChatSession shutdown does.
+// or remove subscriptions. Only /close or ChatSession shutdown does.
 func TestShutdown_BridgeExit_DoesNotCloseEventBus(t *testing.T) {
 	as := makeBareAgentSession(t, "pi", "/tmp")
 

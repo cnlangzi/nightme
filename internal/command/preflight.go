@@ -4,7 +4,7 @@ import "github.com/cnlangzi/nightme/internal/chatsession"
 
 // RequireActiveCwd is a preflight check used by every slash
 // command that operates on the current workspace (/cwd /use
-// /kill /new /gtw etc.). It returns ("", nil) when the
+// /close /new /gtw etc.). It returns ("", nil) when the
 // session has an active workspace; otherwise it returns the
 // current cwd (always "" in that case) and a SlashOutput with
 // the "send /cwd first" hint reply — the caller should

@@ -2,13 +2,13 @@
 //
 // Manager is the v1.2 equivalent of v1.1's session.MemoryManager: it
 // owns the per-chat ChatSession table and exposes lifecycle
-// operations needed by the Gateway handlers (/cwd, /use, /kill).
+// operations needed by the Gateway handlers (/cwd, /use, /close).
 //
 // Key differences from v1.1 MemoryManager:
 //
 //   - Bound to ChatSession (not bare Session); one ChatSession per
 //     chat_id, with an AgentSession pool inside.
-//   - /cwd no longer spawns; /use is lazy (reuse or spawn); /kill
+//   - /cwd no longer spawns; /use is lazy (reuse or spawn); /close
 //     clears the pool without removing the ChatSession.
 //   - Manager doesn't fork directly; it uses a Spawner (see
 //     spawn.go) to keep agent/bridge imports out of chatsession.

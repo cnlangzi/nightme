@@ -540,7 +540,7 @@ type Session struct {
 |--------|-------|------|-----------------------|
 | **1** | Channel interface: add `CreateReceipt / UpdateReceipt / DisposeReceipt` + `ReceiptState` enum + `Receipt` opaque type. Feishu adapter implements. Echo implements. No business logic change. | Low (additive) | E2E identical |
 | **2** | Session slim-down: remove `ChatID`, `ChatType`, `OnUserMessage` from Session struct. Remove `CreateOrUpdate`, `Run`, `GetByChat`, `KillByChat` from Manager interface. Remove `feishu` import from session package. **Session tests updated**; gateway/cmd still bridges via runtime closure (temporary). | Medium | E2E identical (manager still works because runtime translates chat→session) |
-| **3** | Gateway gets `bindings` table + `receipts` table. New methods: `Bind / Rebind / LookupByChat / LookupSessionByChat / SpawnAgent`. Gateway handlers (`/cwd` / `/run` / `/kill`) rewritten to use them. Fallback rewritten to use `ch.CreateReceipt` + `sess.QueueUserMessage` + `ch.UpdateReceipt(executing)`. **Delete** the `SessionManager` interface in `gateway/cmd/handlers.go`. | High (largest single change) | E2E must be byte-identical for slash commands; receipt UI may shift slightly (closer to v1.1 design) |
+| **3** | Gateway gets `bindings` table + `receipts` table. New methods: `Bind / Rebind / LookupByChat / LookupSessionByChat / SpawnAgent`. Gateway handlers (`/cwd` / `/run` / `/close`) rewritten to use them. Fallback rewritten to use `ch.CreateReceipt` + `sess.QueueUserMessage` + `ch.UpdateReceipt(executing)`. **Delete** the `SessionManager` interface in `gateway/cmd/handlers.go`. | High (largest single change) | E2E must be byte-identical for slash commands; receipt UI may shift slightly (closer to v1.1 design) |
 | **4** | Single-consumer fix: gateway `pumpOutbound` goroutine removed. `Manager.EventCallback` registered at startup. Callback drives `Translate` + `Channel.Send` + receipt flip on `EventResult` / `EventError`. | Medium (lifecycle change) | This is the v0.2.x bug fix; output flow may have been silently broken before |
 | **5** | Registry: add `BindingEntry` table. Restore order: sessions first, then bindings. Old v0.2.x registry files migrate by extracting `ChatID` from `SessionEntry` into a synthetic `BindingEntry{ChatID, SessionID}`. | Medium (data shape change) | All previously persisted state recoverable |
 | **6** | Docs (PRD/SPEC/FEATURES/F-08/F-20/F-25) updated to v1.1 shape. (This is the commit you are reading the spec for.) | Low | N/A |
@@ -551,7 +551,7 @@ Each commit is its own PR. Commits 3-4 should ship together — a half-done refa
 
 ## 7. Behaviour preserved by the refactor
 
-- ✅ Slash commands (`/cwd`, `/run`, `/kill`, `/help`, `/agents`)
+- ✅ Slash commands (`/cwd`, `/run`, `/close`, `/help`, `/agents`)
 - ✅ Inbound fallback to session (now via binding lookup)
 - ✅ Feishu rolling-log with FIFO eviction (unchanged in Translate; Feishu adapter handles the same `OutboundMessage`s)
 - ✅ Tool output surfacing (`✅ Read → 47 lines`)

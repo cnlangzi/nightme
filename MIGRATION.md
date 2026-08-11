@@ -20,7 +20,7 @@ A v1.x install on the current dev binary will fail to start.
 |---|---|
 | `/cwd /tmp` then `/run claude` | `/cwd /tmp` then `/use claude` |
 | `/run <agent>` exists | **deleted** — `/use` is the replacement (lazy spawn) |
-| `/kill` | `/kill` (same name, different semantics — clears pool, preserves cwd/agent) |
+| `/close` | `/close` (same name, different semantics — clears pool, preserves cwd/agent) |
 
 `/use` semantics:
 - If `(agent, cwd)` already in the chat's AgentSession pool →
@@ -113,7 +113,7 @@ package) for any reason, note:
 | `session.Session` | `chatsession.AgentSession` (1:1 with `(agent, cwd)`) |
 | `session.NewMemoryManager` | `chatsession.NewManager` |
 | `mgr.Create` / `mgr.Register` | `mgr.GetOrCreate(chatID, ...)` then `cs.LookupActiveAgentSession` |
-| `mgr.Kill(sessionID)` | `cs.KillAll()` (per chat) |
+| `mgr.Kill(sessionID)` | `cs.CloseAll()` (per chat) |
 | `sess.QueueUserMessage` | `cs.QueueUserMessage` (same signature; flush via default hook) |
 | `session.EventCallback` (set on Manager) | `cs.SetEventHandler` (per-chat) |
 | `session.InputBuffer` (per-Session) | `chatsession.InputBuffer` (per-ChatSession; survives `/use`) |

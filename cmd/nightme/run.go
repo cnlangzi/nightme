@@ -5,7 +5,7 @@
 //   - chatsession.Manager (per-chat ChatSession table)
 //   - chatsession.NewRegistrySpawner (lazy fork via agent.Registry)
 //   - chatsession.InputBuffer FSM (commit 9; ownership moved to ChatSession)
-//   - gateway.RegisterChatSessionCommands (/cwd /use /kill slash commands)
+//   - gateway.RegisterChatSessionCommands (/cwd /use /close slash commands)
 //   - EventCallback: each AgentSession.Events() is consumed by a
 //     per-active-AS readPump goroutine that translates AgentEvent →
 //     OutboundMessage → channel.Send, AND drives the InputBuffer FSM
@@ -37,8 +37,8 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/command/cwd"
+	"github.com/cnlangzi/nightme/internal/command/close"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
-	"github.com/cnlangzi/nightme/internal/command/kill"
 	newcmd "github.com/cnlangzi/nightme/internal/command/newcmd"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/command/stop"
@@ -112,14 +112,14 @@ func newRunCmd() *cobra.Command {
 		Use:   "run",
 		Short: "Start the Feishu daemon (ChatSession-based runtime)",
 		Long: "run starts the Feishu WebSocket channel and serves a Gateway " +
-			"router on top of it. Slash commands (/cwd, /use, /kill, /help) " +
+			"router on top of it. Slash commands (/cwd, /use, /close, /help) " +
 			"drive session lifecycle; plain text is forwarded to the live " +
 			"agent behind the chat's active AgentSession.\n\n" +
 			"On shutdown the daemon stops the channel and persists final " +
 			"state. Agent processes are LONG-LIVED and intentionally NOT " +
 			"killed by nightme — they survive nightme restart via the " +
 			"Detached registry state, and `nightme run` (or /use) re-attaches " +
-			"to them on next start. Use `/kill` from the relevant chat to " +
+			"to them on next start. Use `/close` from the relevant chat to " +
 			"terminate agent processes.\n\n" +
 			"Pass --channel=echo to run the daemon with the echo channel " +
 			"(a no-network stub that prints outbound messages to stdout). " +
@@ -315,7 +315,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// WithOnCreate + RestoreFromRegistry so the order can't be
 	// inverted at the call site.
 	gwImpl := gateway.New(messageDispatcher).(*gateway.Router)
-	// All chat-session commands (/cwd /use /kill /new /watch /think
+	// All chat-session commands (/cwd /use /close /new /watch /think
 	// /tools) and /gtw are SlashCommandFactory implementations
 	// implementations registered with reg.Register below. The legacy
 	// gateway.RegisterChatSessionCommands helper is deleted; the
@@ -400,7 +400,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	reg.Register(tools.NewFactory(mgr))
 	reg.Register(cwd.NewFactory(mgr))
 	reg.Register(use.NewFactory(mgr))
-	reg.Register(kill.NewFactory(mgr))
+	reg.Register(close.NewFactory(mgr))
 	reg.Register(stop.NewFactory(mgr))
 	reg.Register(newcmd.NewFactory(mgr))
 	commander := command.NewCommander(reg)
@@ -957,7 +957,7 @@ func wireRuntimeCallbacksAndRestore(
 		//
 		// The goroutine ends when cs.ActiveEvents() returns !ok,
 		// which happens when the active AS is Shutdown (for /use this
-		// happens at daemon exit; for /kill, immediately).
+		// happens at daemon exit; for /close, immediately).
 		go cs.PumpEvents(context.Background())
 	})
 	return mgr.RestoreFromRegistry()
@@ -1231,7 +1231,7 @@ func newEventHandler(
 // AS comes from the event, not from cs.selectedAS).
 //
 // Returns nil if the AS is no longer in the pool (e.g. after a
-// concurrent /kill). Subscribers must handle nil.
+// concurrent /close). Subscribers must handle nil.
 func lookupASByID(cs *chatsession.ChatSession, id string) *agentsession.AgentSession {
 	if cs == nil || id == "" {
 		return nil
@@ -1406,9 +1406,9 @@ func (r *responder) Send(ctx context.Context, chatID, userMsgID, text string) er
 // Detached; the next `nightme run` re-attach path (Manager.RestoreFromRegistry
 // + FromAgentSessionEntry) hands them back to nightme, and
 // LookupActiveAgentSession reuses them via --resume where the
-// bridge supports it. /kill is the only path that terminates
-// agent processes; it is cwd-scoped and runs in chatsession.KillAgent /
-// chatsession.KillAllAgents (see internal/chatsession/kill.go).
+// bridge supports it. /close is the only path that terminates
+// agent processes; it is cwd-scoped and runs in chatsession.CloseAgent /
+// chatsession.CloseAllAgents (see internal/chatsession/close.go).
 //
 // Persistence: chat_sessions.json + agent_sessions.json are left
 // in place. The Manager has been writing through to them

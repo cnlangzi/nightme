@@ -183,7 +183,7 @@ func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 |---------|------------------|--------------|
 | `/cwd <path>` | Validate → `chatSession.SetSelectedCwd(abs)` | Updates `selectedCwd`; pool untouched; next message triggers `LookupSelectedAgentSession()` |
 | `/use <agent>` | Validate → `chatSession.SetSelectedAgent(name)` → `LookupSelectedAgentSession()` | May spawn new AgentSession if `(agent, selectedCwd)` not in pool |
-| `/kill` | `chatSession.KillAll()` | Kills every AgentSession in pool; clears `selectedAS`; old receipts dispose |
+| `/close` | `chatSession.KillAll()` | Kills every AgentSession in pool; clears `selectedAS`; old receipts dispose |
 
 **No `/default` command** (Q-A simplification, 2026-08-02): the only user-facing Primary Agent is the global `primary` config. The `primaryAgent` field on ChatSession is captured at `New()` time (snapshot of `cfg.Primary`) and never mutated post-construction. Future feature: per-chat Primary via config (not command) — out of scope for v1.2.
 
@@ -211,7 +211,7 @@ func (cs *ChatSession) SetSelectedAgent(agent string) error {
 }
 ```
 
-**Critical invariant**: these methods MUST NOT spawn or kill any AgentSession. Spawning is lazy (next message). Killing is explicit (`/kill`).
+**Critical invariant**: these methods MUST NOT spawn or kill any AgentSession. Spawning is lazy (next message). Killing is explicit (`/close`).
 
 ---
 
@@ -231,7 +231,7 @@ func (cs *ChatSession) SetSelectedAgent(agent string) error {
 ### 4.3 Locks
 
 - `cs.poolMu` — guards `pool`, `selectedAS`, `SelectedCwd`, `SelectedAgent`
-  - **Write**: `/cwd`, `/use`, `/kill`, `LookupSelectedAgentSession()`, spawn, registry flush
+  - **Write**: `/cwd`, `/use`, `/close`, `LookupSelectedAgentSession()`, spawn, registry flush
   - **Read**: readPump callback registration, status queries
 
 ### 4.4 /use switch race window
@@ -387,7 +387,7 @@ AgentSession's events channel to detect close. When the channel
 closes (process died), the registered `AgentExitObserver`
 fires. Currently the runtime does not wire an observer — the
 readPump's natural exit is sufficient. The API is reserved
-for future work (e.g., respawn on death, /kill auto-reply).
+for future work (e.g., respawn on death, /close auto-reply).
 
 ---
 
@@ -463,7 +463,7 @@ user simply opens a fresh chat.
 
 ### 7.1 Unit
 
-- `SetSelectedCwd` / `SetSelectedAgent` — pure state mutation, no spawn/kill
+- `SetSelectedCwd` / `SetSelectedAgent` — pure state mutation, no spawn/close
 - `LookupSelectedAgentSession()` resolution (single path: hit → reuse, miss → spawn `(selectedAgent, selectedCwd)`; no runtime fallback to any "default" agent)
 - `KillAll()` — all AgentSessions killed, selectedAS=nil, pool emptied
 - `Restore()` from ChatSessionEntry + AgentSessionEntry — detached state, no process
@@ -472,12 +472,12 @@ user simply opens a fresh chat.
 ### 7.2 Integration
 
 - `nightme run` → /cwd → /use → message → /use (switch) → /use (switch back) → assert same PID
-- /kill → assert all PIDs gone → message → assert new PIDs spawned
+- /close → assert all PIDs gone → message → assert new PIDs spawned
 - Daemon restart with active cwd/B → assert AgentSession for (A,A) detached but still in pool
 
 ### 7.3 Regression (E2E)
 
-- `nightme run --channel=feishu`: all v0.x slash commands work (`/cwd` new semantics, `/use`, `/kill`, `/help`, `/agents`)
+- `nightme run --channel=feishu`: all v0.x slash commands work (`/cwd` new semantics, `/use`, `/close`, `/help`, `/agents`)
 - `/use codex` after `/use claude` — rolling-log receipt cards remain coherent (Receipt FSM不变)
 - Concurrent /use while AgentSession events flowing — no race; old events dropped
 
@@ -498,7 +498,7 @@ user simply opens a fresh chat.
 - **Q-A**: Default Agent setting granularity — global config only? per ChatSession command? both? (Lean: both)
 - **Q-B** (closed 2026-08-03): lookup only resolves `(selectedAgent, selectedCwd)`. No runtime fallback. selectedAgent is seeded from `cfg.Primary` at ChatSession creation and only mutated by `/use`.
 - **Q-C**: Should `chatSession.SetSelectedCwd` log to user "selectedCwd changed, next message will spawn new AgentSession"? (Lean: yes, ephemeral info message)
-- **Q-D**: When `/kill` clears pool, should queued InputBuffer messages be persisted or dropped? (Lean: dropped; user explicitly killed)
+- **Q-D**: When `/close` clears pool, should queued InputBuffer messages be persisted or dropped? (Lean: dropped; user explicitly killed)
 - **Q-E**: ChatSession.ID is generated once or derived from chatId? (Lean: derived from chatId for 1:1 invariant enforcement)
 
 ---

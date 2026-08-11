@@ -174,7 +174,7 @@ F-49 §6 把这项列为「后续 PR 单独讨论」。倾向方案：`getStateM
 
 ### 6.6 `/abort` 未实现
 
-pi 有 `abort` 命令，nightme 目前用 `/kill`（杀进程）替代。
+pi 有 `abort` 命令，nightme 目前用 `/close`（杀进程）替代。
 
 ### 6.7 生产端到端验证未闭环
 

@@ -374,7 +374,7 @@ var ErrUnknownAgent = errors.New("chatsession: unknown agent")
 // to a single pool entry during NewActiveAgentSessions so the handler
 // can render a per-agent status instead of a bare count.
 //
-// See docs/feat/F-43-kill-new-graceful-and-reset.md §5.2.
+// See docs/feat/F-43-close-new-graceful-and-reset.md §5.2.
 type ResetResult struct {
 	Agent       string // e.g. "claude", "codex"
 	Cwd         string // e.g. "/code/A"
@@ -469,7 +469,7 @@ func (cs *ChatSession) SetSelectedAgent(agent string) error {
 	// events on the new AS use the new anchor. The old Prompt's
 	// EndedAt remains zero until either the old AS process dies
 	// (at which point Phase 1 will call endPrompt(ProcessDied))
-	// or the old AS is /killed. endPrompt itself only operates
+	// or the old AS is /closed. endPrompt itself only operates
 	// on cs.selectedAS, so it cannot clean the old one. This is
 	// a deliberate Phase 0 simplification; the cost is one
 	// orphaned Prompt struct per /use-while-busy until the old
@@ -818,6 +818,19 @@ func (cs *ChatSession) TryFlush() error {
 		cs.queue.Rewind()
 		return nil
 	}
+	if as.Status() == StatusExited {
+		// The bridge process is gone (e.g. after /close) but the
+		// AS entry is still in the pool with sessionID preserved.
+		// Don't try to Submit — wait for the next
+		// LookupSelectedAgentSession call which detects
+		// StatusRunning && Handle() != nil mismatch and respawns
+		// a fresh bridge with --resume.
+		slog.Debug("chatsession: TryFlush SKIP",
+			"chat_id", cs.ChatID, "reason", "as_status_exited",
+			"queue_len", cs.queue.Len(), "as_id", as.ID)
+		cs.queue.Rewind()
+		return nil
+	}
 
 	// Build the Prompt from the peek'd batch. The batch is a
 	// stable snapshot owned by us; the queue can be mutated
@@ -875,7 +888,7 @@ func (cs *ChatSession) writebackMessageState(as *AgentSession, p *Prompt) {
 
 	// Lock-ordering caveat (F-54 review fix): we previously held
 	// cs.mu across Publish, blocking every concurrent cs.mu caller
-	// (/use, /kill, QueueUserMessage, TryFlush) for the duration
+	// (/use, /close, QueueUserMessage, TryFlush) for the duration
 	// of any subscriber's work — most importantly the feishu
 	// adapter's AddReaction HTTP round-trip (~200-500ms). We now
 	// snapshot the payload under the lock, release it, and then
@@ -907,7 +920,7 @@ const QueueMaxMsgs = 50
 // queue, marks each dropped message as MessageDropped, and emits
 // the wire event. Returns the number dropped.
 //
-// Used by /kill and /new to clear queued messages on a forced
+// Used by /close and /new to clear queued messages on a forced
 // buffer reset. SendBlocks failures DO NOT trigger this path —
 // failed messages stay Queued for natural retry (see
 // docs/feat/message_lifecycle.md §5.1).
@@ -1041,7 +1054,7 @@ func (cs *ChatSession) detachAgentSession(as *AgentSession) {
 // keeps running in the background, its readpump continues to
 // consume events, and ChatSession can resume reading from the same
 // channel on re-/use. Real cancellation happens via Shutdown()
-// (called only by /kill or CS shutdown).
+// (called only by /close or CS shutdown).
 //
 // Caller must hold cs.mu. Takes cs.ctxMu (via Context()) and the
 // target's asMu; neither is ever held while acquiring cs.mu, so the
@@ -1195,7 +1208,18 @@ func (cs *ChatSession) AgentSessionsInCwd(cwd string) []*AgentSession {
 }
 
 // DropAgentSession is the per-entry cleanup primitive used by
-// /kill's batch path. For a single kill it composes:
+// callers that want to fully discard a session entry. NOT used
+// by /close itself (which preserves the AgentSession so respawn
+// can continue via --resume <sessionID>). Reach this primitive
+// when:
+//
+//   - Daemon shutdown reaps a stale Detached entry.
+//   - A future /forget slash command wants to drop both the
+//     process AND the persisted session identity.
+//   - Manual cleanup scripts (e.g. editing agent_sessions.json
+//     outside the daemon).
+//
+// Composes four steps:
 //
 //  1. detachAgentSubscription — tears down the EventBus subscriber
 //     so the AS no longer feeds the ChatSession receive loop.
@@ -1207,9 +1231,10 @@ func (cs *ChatSession) AgentSessionsInCwd(cwd string) []*AgentSession {
 //     entry so the next daemon restart does not resurrect a corpse.
 //
 // Safe to call concurrently with LookupSelectedAgentSession: takes
-// cs.mu once. Caller (kill.KillAgent / KillAllAgents) is responsible
-// for invoking as.Close() first so the bridge process is gone before
-// the disk entry is deleted (F-43 §5.3 invariant).
+// cs.mu once. Callers that wish to terminate the bridge process
+// first should invoke as.Close() before calling this; DropAgentSession
+// itself does NOT signal the bridge (the two-step pattern keeps
+// graceful-shutdown timing in the caller's hands).
 func (cs *ChatSession) DropAgentSession(as *AgentSession) {
 	if as == nil {
 		return
@@ -1248,7 +1273,7 @@ func (cs *ChatSession) DropAgentSession(as *AgentSession) {
 //     去启动AgentSession.因为它本身就没启动,所以不需要New".
 //   - InputBuffer cleared: queued user messages are dropped before
 //     the function returns, regardless of how many bridges succeeded.
-//     This matches /kill semantics (F-34 §6 Q-N4).
+//     This matches /close's queue-handling (F-34 §6 Q-N4).
 //   - currentTurnUserMsgID NOT cleared: the next user message after
 //     /new naturally opens a new turn + new anchor + cold-creates a
 //     new receipt (Channel-autonomous per v1.3 §2.4).

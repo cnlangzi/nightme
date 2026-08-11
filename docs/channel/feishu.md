@@ -654,7 +654,7 @@ Feishu IM API 官方支持的顶层 `msg_type`(参考 [create_json 文档](https
 | `OutMessageState` | ChatSession lifecycle | 消息进度变化 | `AddReaction(userMsgID, emoji_type)` -- 走 `messageStates` map 做 idempotency | reaction API | ❌(标在用户消息上) |
 | `OutMessageStateRemoved` | (reserved) | 撤销进度标记 | `DeleteReaction`(v1.3 未用,append-only) | reaction API | ❌ |
 | `OutTyping` | (orphan) | typing 指示 | **silent drop**(飞书 bot 无原生 typing API) | - | ❌ |
-| `OutCommandReply` | (slash cmd / runtime error) | `/cwd` `/use` `/kill` `/help` `/agents` 等 | `SendMessageText` -- 独立 text 消息,**绕过** receipt | `text` Create | ❌ |
+| `OutCommandReply` | (slash cmd / runtime error) | `/cwd` `/use` `/close` `/help` `/agents` 等 | `SendMessageText` -- 独立 text 消息,**绕过** receipt | `text` Create | ❌ |
 
 ### 12.1 映射决策的"为什么"
 
@@ -1922,7 +1922,7 @@ user_msg om_A
    - `Model string` + `modelMu`:EventAgentConnected 时 `SetModel(ev.Connected.Model)`(idempotent,空值不覆盖非空现有值)
    - `cumulativeUsage UsageInfo` + `cumulativeUsageMu` + `cumulativeDirty bool`:EventUsage 时 `AccumulateUsage(ev.Usage)`(加锁累加 + 标 dirty)
    - 6 个新方法:`SetModel` / `Model` / `AccumulateUsage` / `ResetCumulative` / `CumulativeUsage` / `PersistIfDirty`
-   - **`/new` 是唯一清零点**(`ResetCumulative` + 立即 `PersistAgentSession`);daemon 重启 / `/cwd` / `/use` / `/kill` / 进程崩溃一律保留
+   - **`/new` 是唯一清零点**(`ResetCumulative` + 立即 `PersistAgentSession`);daemon 重启 / `/cwd` / `/use` / `/close` / 进程崩溃一律保留
    - EventDone 时 `PersistIfDirty(...)` 触发落盘,每个 turn 最多 1 次 `agent_sessions.json` atomic write
 
 2. **`OutboundMessage` 加 1 个 typed snapshot field**(不是 3 个分散字段):
@@ -2015,8 +2015,8 @@ case gateway.OutReply, gateway.OutResult,
 | 取舍 | 选择 | 理由 |
 |---|---|---|
 | 3 字段 vs 1 typed struct | **1 struct** (`SessionContext`) | wire 更紧凑;Channel 拿到 atomic snapshot;扩展新字段(agent_version 等)只改 struct 定义,不破 Channel 接口 |
-| Cumulative 持久化粒度 | turn-end (EventDone) | hot path 写入开销不可接受;`/kill` 写太迟;turn-end 是用户视角的"自然快照点",刚好与 `emitMessageStateForCurrentTurn` 对齐 |
-| Cumulative 清零范围 | **仅 `/new`** | 用户视角下"累计 token"是有价值历史信息;`/kill` 杀进程不清 token(`/kill` 是 process-cleanup,语义不重叠);daemon 重启是 lifecycle,不算用户主动 reset |
+| Cumulative 持久化粒度 | turn-end (EventDone) | hot path 写入开销不可接受;`/close` 写太迟;turn-end 是用户视角的"自然快照点",刚好与 `emitMessageStateForCurrentTurn` 对齐 |
+| Cumulative 清零范围 | **仅 `/new`** | 用户视角下"累计 token"是有价值历史信息;`/close` 杀进程不清 token(`/close` 是 process-cleanup,语义不重叠);daemon 重启是 lifecycle,不算用户主动 reset |
 | Footer 用 `↓ ↻ ↑` 箭头 vs emoji | **箭头** | 用户偏好简洁;ASCII 箭头不依赖 emoji 字体;middle dot 分隔符与 F-37 / F-44 footer 视觉一致 |
 | 累计写盘失败处理 | log warn, 不回滚 | 累计是 best-effort 累加;写盘失败只丢最近 turn 的增量,下次 turn 自动重新落盘;不阻塞 reply 路径 |
 | `Total` 字段存 vs derive | **derive** at render | 4 个原始字段已存 Total 是冗余;derive 一次成本可忽略;少一个字段 = 少一处可能不一致 |

@@ -11,6 +11,85 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### Breaking: `/kill` renamed to `/close`, and `/close` no longer drops the AgentSession
+
+Two related changes that together clarify the session-lifecycle
+command surface.
+
+**1. Rename.** The slash command previously known as `/kill` is
+renamed to `/close`. The implementation has always been a graceful
+close (close stdin → SIGINT → 2 s grace → SIGKILL fallback), so the
+old name overstated the cost and confused users into expecting a
+hard SIGKILL. `/close` matches the actual semantics and parallels
+the rest of the session-lifecycle naming.
+
+What changed in the rename:
+
+- `internal/command/kill/` → `internal/command/close/`. Package
+  symbols renamed in lock-step: `KillAgent` → `CloseAgent`,
+  `KillAllAgents` → `CloseAllAgents`, `FormatKillResults` →
+  `FormatResults`, `killGraceTotal` → `closeGraceTotal`. Internal
+  `Result.Action` strings: `"killed"` → `"closed"`,
+  `"kill-failed"` → `"close-failed"`.
+- `Spec.Name = "close"`. No `/kill` alias — this is a hard rename,
+  not a soft migration. Existing users must update their IM
+  shortcuts and any muscle memory.
+- All comments, tests, doc files cross-referencing `/kill` updated;
+  `docs/feat/F-43-kill-new-graceful-and-reset.md` renamed to
+  `docs/feat/F-43-close-new-graceful-and-reset.md`.
+
+**2. `/close` no longer drops the AgentSession entry.** Previously
+`/kill` (now `/close`) called `ChatSession.DropAgentSession` after
+the graceful close — removing the entry from the pool, clearing
+`selectedAS`, and deleting the row from `agent_sessions.json`. That
+was inconsistent with the "session identity" theme of the rest of
+the runtime: even `/stop` preserves the AgentSession, and the
+intended semantic of a graceful close is "give the bridge process
+a hard restart while preserving the conversation context".
+
+The new `/close` semantics:
+
+- Calls `as.Close()` to terminate the bridge process (graceful
+  shutdown, same as before).
+- Does **not** call `DropAgentSession`. The AgentSession entry stays
+  in the pool; `selectedAS` stays pointed at it; the row in
+  `agent_sessions.json` stays; the captured `sessionID` stays.
+- The AS goes to `StatusExited` (via `ObserveClose` once the events
+  channel drains) and `Handle()` returns a defunct handle.
+- The next user message triggers a respawn via the same Spawner on
+  the same `(Agent, Cwd)` key, which detects `StatusRunning &&
+  Handle() != nil` mismatch in `LookupSelectedAgentSession` and
+  re-execs the child with `--resume <sessionID>` to continue the
+  conversation.
+
+What this means operationally:
+
+- `/close` is now "give the bridge a hard restart without losing
+  the conversation" — use it when the bridge is wedged or you want
+  to flush its in-memory state.
+- To fully discard a session (kill process AND forget
+  conversation), wait for daemon shutdown (stale Detached entries
+  are reaped) or edit `agent_sessions.json` directly.
+- `cs.DropAgentSession` is no longer called by `/close`. The
+  accessor is still exported for callers that need it (daemon
+  shutdown reaper, future `/forget` command); see the updated doc
+  comment in `internal/chatsession/chatsession.go`.
+
+Compare the three commands:
+
+| Command | Process | AS entry | sessionID | resume on next msg |
+|---------|---------|----------|-----------|--------------------|
+| `/stop` | may or may not exit | preserved | preserved | n/a |
+| `/close` | killed | preserved | preserved | yes (`--resume`) |
+| `/new` | reset in-place | preserved | cleared | no |
+
+### TryFlush SKIP reason `as_status_exited`
+
+Added a new skip path in `ChatSession.TryFlush` so that when the
+selected AS is in `StatusExited` (e.g. between `/close` and the
+next respawn), queued messages stay in the queue instead of being
+submitted to a defunct handle.
+
 ### /gtw pr: generate Conventional Commits title+body and open the PR
 
 Closes the loop with `/gtw push`. The user types `/gtw pr [-a <agent>]`
@@ -256,22 +335,22 @@ plan), [`docs/feat/F-49-compaction-counter.md`](./docs/feat/F-49-compaction-coun
 (stale — needs follow-up edit; current entry still describes the
 original F-49 increment).
 
-### F-42: `/kill` graceful shutdown + `/new` ResumeID clear + per-entry list reply
+### F-42: `/close` graceful shutdown + `/new` ResumeID clear + per-entry list reply
 
 Three related fixes bundled:
 
-- **`/kill` graceful shutdown**: `ChatSession.KillAll()` now actually signals each child process to exit via the bridge's own `Close()` path (stdin EOF + SIGINT + 2s grace + SIGKILL fallback). Old v1.2 implementation was a data-only operation that orphaned children. Disk entries are deleted *after* the process dies. `InputBuffer` is preserved (user messages are not /kill's concern).
+- **`/close graceful shutdown: `ChatSession.CloseAll()` now actually signals each child process to exit via the bridge's own `Close()` path (stdin EOF + SIGINT + 2s grace + SIGKILL fallback). Old v1.2 implementation was a data-only operation that orphaned children. Disk entries are deleted *after* the process dies. `InputBuffer` is preserved (user messages are not /close's concern).
 
 - **`/new` clears ResumeID on dead/detached entries**: previously `NewActiveAgentSessions` silently skipped dead entries, leaving a stale `ResumeID` that the next spawn would replay as `--resume <dead-id>` — defeating the user's `/new` intent. Dead entries now count as `matched=1`, `action=marked-fresh`, and their ResumeID is cleared in-memory + persisted.
 
 - **Per-entry list reply** for both commands: instead of "Killed N" / "Reset X/Y", the user sees a per-agent status list with `✓` / `✗` / `•` markers, sorted alphabetically, capped at 20 lines + "...and N more" tail (Feishu 4KB safety).
 
-**Docs**: `docs/feat/F-43-kill-new-graceful-and-reset.md` (canonical — 14 sections, design + decision log + error matrix + test plan + risk).
+**Docs**: `docs/feat/F-43-close-new-graceful-and-reset.md` (canonical — 14 sections, design + decision log + error matrix + test plan + risk).
 
-**Background**: v1.2 §3.2 documented `/kill` as "清空 pool" with no mention of process lifecycle. The bridge's graceful shutdown infrastructure (each bridge has its own 2s grace + SIGKILL watchdog) was already in place — but `KillAll` never called it. v1.3.x F-34 introduced `/new` with the "skip dead" optimization (Q-N4) which was correct for the no-spawn decision but didn't account for the stale ResumeID side effect.
+**Background**: v1.2 §3.2 documented `/close` as "清空 pool" with no mention of process lifecycle. The bridge's graceful shutdown infrastructure (each bridge has its own 2s grace + SIGKILL watchdog) was already in place — but `KillAll` never called it. v1.3.x F-34 introduced `/new` with the "skip dead" optimization (Q-N4) which was correct for the no-spawn decision but didn't account for the stale ResumeID side effect.
 
 **API changes (breaking)**:
-- `KillAll() error` → `[]KillResult, error`
+- `CloseAll() error` → `[]CloseResult, error`
 - `NewActiveAgentSessions(ctx, name) (matched, reset int, err error)` → `(matched, reset int, results []ResetResult, firstErr error)`
 
 ### F-41: Active Reconnect — 30s forced Stop+Start (no HTTP probe, no tier)
@@ -386,7 +465,7 @@ v1.x `session.MemoryManager`). See
 | `/cwd <path>` | `/cwd <path>` | Set workspace for the chat. **Does not spawn.** |
 | `/run <agent>` | (deleted) | Spawn was eager; now lazy. |
 | (none) | `/use <agent>` | Switch active agent; **lazy spawn** — reuse pool if present, else spawn. |
-| `/kill` | `/kill` | Clear the AgentSession pool (activeCwd/activeAgent survive). |
+| `/close` | `/close` | Clear the AgentSession pool (activeCwd/activeAgent survive). |
 
 InputBuffer FSM moves to ChatSession level: queued messages flush
 to whichever `AgentSession` is currently active. The buffer state

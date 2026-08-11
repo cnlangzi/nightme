@@ -129,7 +129,7 @@ func (s MessageState) String() string {
 | 触发源 | 是否产生 MessageState |
 |---|---|
 | `dispatchMessage`（普通文本消息） | ✅ 是 |
-| `dispatchSlashCommand`（`/cwd` `/use` `/kill` 等） | ❌ 否 |
+| `dispatchSlashCommand`（`/cwd` `/use` `/close` 等） | ❌ 否 |
 | ChatSession lifecycle 内部事件 | ❌ 否（除非该事件由用户消息触发） |
 
 理由：slash command 是**控制平面**，用户发命令是为了控制系统状态，不是为了让系统"处理一条消息"。控制平面有它自己的反馈（`Channel.Send(OutboundMessage{Kind: OutCommandReply})`），不需要进度标记。
@@ -445,7 +445,7 @@ case gateway.OutMessageState:
 | `TestChatSession_EmitsForwarded_OnLookupActive` | LookupSelectedAgentSession 成功后 callback 被调 |
 | `TestChatSession_EmitsDone_OnEventDone` | readPump 收到 EventDone 后 callback 被调 |
 | `TestChatSession_EmitsError_OnEventError` | readPump 收到 EventError 后 callback 被调 |
-| `TestChatSession_NoEmit_OnSlashCommand` | `/cwd` `/use` `/kill` 不触发任何 MessageState |
+| `TestChatSession_NoEmit_OnSlashCommand` | `/cwd` `/use` `/close` 不触发任何 MessageState |
 | `TestGateway_TranslatesMessageState_ToOutbound` | OnMessageState 产生正确的 OutboundMessage{Kind, Meta} |
 | `TestGateway_RoutesMessageState_ToCorrectChannel` | multi-channel 场景下 chatID 路由正确 |
 

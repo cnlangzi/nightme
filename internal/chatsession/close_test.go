@@ -1,13 +1,20 @@
-// Tests for the kill workflow via ChatSession's lifecycle accessors.
+// Tests for the close workflow via ChatSession's lifecycle accessors.
 //
-// The /kill orchestration lives in internal/command/kill (separate
+// The /close orchestration lives in internal/command/close (separate
 // package). It calls ChatSession.AgentSessionsInCwd + per-entry
-// as.Close() + ChatSession.DropAgentSession in sequence. To avoid an
-// import cycle (chatsession tests → command/kill → chatsession),
-// these tests exercise the SAME workflow by calling the accessor +
-// per-entry Close steps directly. The kill package's wrapper (5s
-// timeout, fan-out goroutines, error collection) is tested
-// separately in internal/command/kill/kill_test.go.
+// as.Close() in sequence. /close does NOT call DropAgentSession —
+// the AgentSession entry is preserved in the pool so the next
+// user message can respawn via --resume <sessionID> and continue
+// the conversation. To avoid an import cycle (chatsession tests →
+// command/close → chatsession), these tests exercise the SAME
+// workflow by calling the accessor + per-entry Close steps
+// directly. The close package's wrapper (5s timeout, fan-out
+// goroutines, error collection) is tested separately in
+// internal/command/close/close_test.go.
+//
+// DropAgentSession itself is still tested below — it's a public
+// accessor that callers may invoke directly (e.g. when daemon
+// shutdown reaps a stale Detached entry).
 package chatsession
 
 import (
@@ -84,7 +91,7 @@ func (f *failingCloseAS) Close() error {
 // =========================================================================
 
 // TestAgentSessionsInCwd verifies the read-only snapshot accessor
-// used by kill.KillAllAgents. Empty cwd → nil; non-matching cwd →
+// used by close.CloseAllAgents. Empty cwd → nil; non-matching cwd →
 // nil; matching cwd → entries in undefined order.
 func TestAgentSessionsInCwd(t *testing.T) {
 	cs, _ := New("chat-asic", "cc", newTestChannel())
@@ -235,17 +242,18 @@ func TestDropAgentSession_NilSafe(t *testing.T) {
 }
 
 // =========================================================================
-// End-to-end kill workflow (via accessors, simulating kill package)
+// End-to-end close workflow (via accessors, simulating close package)
 // =========================================================================
 
-// The kill package does: snapshot → fan-out Close → per-entry Drop.
+// The close package does: snapshot → fan-out Close only. It does
+// NOT call DropAgentSession — the AgentSession entry is preserved.
 // These tests reproduce the same workflow directly on ChatSession
 // to verify the lifecycle primitives work as advertised.
 
-// TestKillWorkflow_KillOne — the /kill <agent> path simulated.
-// Find (agent, cwd) via LookupInPool, Close, Drop. Other entries
-// must not be touched.
-func TestKillWorkflow_KillOne(t *testing.T) {
+// TestCloseWorkflow_CloseOne — the /close <agent> path simulated.
+// Find (agent, cwd) via LookupInPool, Close. Other entries must
+// not be touched. The AgentSession entry stays in the pool.
+func TestCloseWorkflow_CloseOne(t *testing.T) {
 	cs, _ := New("chat-wf-ka", "cc", newTestChannel())
 	cwd := t.TempDir()
 	if err := cs.SetSelectedCwd(cwd); err != nil {
@@ -265,7 +273,7 @@ func TestKillWorkflow_KillOne(t *testing.T) {
 	if err := as.Close(); err != nil {
 		t.Fatalf("target Close: %v", err)
 	}
-	cs.DropAgentSession(as)
+	// No DropAgentSession — entry is preserved.
 
 	if closes := target.Handle().Driver().(*closedSpyDriver).closes.Load(); closes != 1 {
 		t.Errorf("target Close(): want 1, got %d", closes)
@@ -276,14 +284,16 @@ func TestKillWorkflow_KillOne(t *testing.T) {
 	if closes := otherAgent.Handle().Driver().(*closedSpyDriver).closes.Load(); closes != 0 {
 		t.Errorf("sibling (other agent) Close(): want 0, got %d", closes)
 	}
-	if len(cs.Pool()) != 2 {
-		t.Errorf("pool size post-KillOne: want 2, got %d", len(cs.Pool()))
+	// All 3 pool entries survive — /close only kills the bridge process.
+	if len(cs.Pool()) != 3 {
+		t.Errorf("pool size post-CloseOne: want 3 (sessions preserved), got %d", len(cs.Pool()))
 	}
 }
 
-// TestKillWorkflow_KillOne_ActiveASCleared — workflow handles
-// selectedAS correctly: cleared iff killed entry was active.
-func TestKillWorkflow_KillOne_ActiveASCleared(t *testing.T) {
+// TestCloseWorkflow_CloseOne_ActiveASPreserved — workflow does NOT
+// clear selectedAS (only DropAgentSession would do that). The
+// next user message would respawn via --resume on the same AS.
+func TestCloseWorkflow_CloseOne_ActiveASPreserved(t *testing.T) {
 	cs, _ := New("chat-wf-ka-active", "cc", newTestChannel())
 	cwd := t.TempDir()
 	if err := cs.SetSelectedCwd(cwd); err != nil {
@@ -301,17 +311,17 @@ func TestKillWorkflow_KillOne_ActiveASCleared(t *testing.T) {
 		t.Fatalf("LookupInPool: %v", err)
 	}
 	_ = as.Close()
-	cs.DropAgentSession(as)
+	// No DropAgentSession.
 
-	if got := cs.SelectedAgentSession(); got != nil {
-		t.Errorf("selectedAS should be nil post-Drop of active entry, got %v", got)
+	if got := cs.SelectedAgentSession(); got != a {
+		t.Errorf("selectedAS should remain %v post-Close (no Drop), got %v", a, got)
 	}
 }
 
-// TestKillWorkflow_KillOne_NotFound — when (agent, cwd) is not in
+// TestCloseWorkflow_CloseOne_NotFound — when (agent, cwd) is not in
 // the pool, LookupInPool returns ErrAgentNotFound. The workflow
 // must NOT mutate anything.
-func TestKillWorkflow_KillOne_NotFound(t *testing.T) {
+func TestCloseWorkflow_CloseOne_NotFound(t *testing.T) {
 	cs, _ := New("chat-wf-ka-notfound", "cc", newTestChannel())
 	cwd := t.TempDir()
 	if err := cs.SetSelectedCwd(cwd); err != nil {
@@ -334,9 +344,10 @@ func TestKillWorkflow_KillOne_NotFound(t *testing.T) {
 	}
 }
 
-// TestKillWorkflow_KillAllAgents — the /kill (no args) path
-// simulated. AgentSessionsInCwd returns targets; Close each; Drop each.
-func TestKillWorkflow_KillAllAgents(t *testing.T) {
+// TestCloseWorkflow_CloseAllAgents — the /close (no args) path
+// simulated. AgentSessionsInCwd returns targets; Close each. No
+// DropAgentSession — all entries preserved.
+func TestCloseWorkflow_CloseAllAgents(t *testing.T) {
 	cs, _ := New("chat-wf-kaa", "cc", newTestChannel())
 	cwd := t.TempDir()
 	if err := cs.SetSelectedCwd(cwd); err != nil {
@@ -355,7 +366,7 @@ func TestKillWorkflow_KillAllAgents(t *testing.T) {
 	}
 	for _, as := range snapshot {
 		_ = as.Close()
-		cs.DropAgentSession(as)
+		// No DropAgentSession.
 	}
 
 	if closes := inCwd1.Handle().Driver().(*closedSpyDriver).closes.Load(); closes != 1 {
@@ -367,14 +378,15 @@ func TestKillWorkflow_KillAllAgents(t *testing.T) {
 	if closes := outOfScope.Handle().Driver().(*closedSpyDriver).closes.Load(); closes != 0 {
 		t.Errorf("outOfScope Close(): want 0 (preserved), got %d", closes)
 	}
-	if len(cs.Pool()) != 1 {
-		t.Errorf("pool size post-KillAllAgents: want 1, got %d", len(cs.Pool()))
+	// All 3 pool entries survive.
+	if len(cs.Pool()) != 3 {
+		t.Errorf("pool size post-CloseAllAgents: want 3 (all preserved), got %d", len(cs.Pool()))
 	}
 }
 
-// TestKillWorkflow_KillAllAgents_EmptyCwd — AgentSessionsInCwd("")
+// TestCloseWorkflow_CloseAllAgents_EmptyCwd — AgentSessionsInCwd("")
 // returns nil → workflow is a no-op.
-func TestKillWorkflow_KillAllAgents_EmptyCwd(t *testing.T) {
+func TestCloseWorkflow_CloseAllAgents_EmptyCwd(t *testing.T) {
 	cs, _ := New("chat-wf-kaa-emptycwd", "cc", newTestChannel())
 	cs.WithPersistence(nil, nil)
 
@@ -389,39 +401,38 @@ func TestKillWorkflow_KillAllAgents_EmptyCwd(t *testing.T) {
 		t.Errorf("empty cwd: want nil, got %v", snapshot)
 	}
 	if closes := a.Handle().Driver().(*closedSpyDriver).closes.Load(); closes != 0 {
-		t.Errorf("entry in other cwd must NOT be killed: got %d closes", closes)
+		t.Errorf("entry in other cwd must NOT be closed: got %d closes", closes)
 	}
 	if cs.SelectedAgentSession() != a {
-		t.Errorf("selectedAS must NOT be cleared when no kill happened")
+		t.Errorf("selectedAS must NOT be cleared when no close happened")
 	}
 }
 
-// TestKillWorkflow_StaleCleared — StatusExited entries: workflow
-// detects no live handle → skips Close, just Drop.
-func TestKillWorkflow_StaleCleared(t *testing.T) {
+// TestCloseWorkflow_StaleCleared — StatusExited entries: the /close
+// workflow detects no live handle and reports "stale-cleared" in
+// the reply without calling Close. The AgentSession entry itself
+// is preserved; this test verifies the liveness-detection branch.
+//
+// Separately, callers that want to fully reap a stale Detached
+// entry (daemon shutdown, manual cleanup) can still call
+// DropAgentSession directly — see TestDropAgentSession above.
+func TestCloseWorkflow_StaleCleared(t *testing.T) {
 	cs, _ := New("chat-wf-stale", "cc", newTestChannel())
 	cwd := t.TempDir()
 	if err := cs.SetSelectedCwd(cwd); err != nil {
 		t.Fatalf("SetSelectedCwd: %v", err)
 	}
 
-	asFile, err := registry.OpenAgentSessionFile(filepath.Join(t.TempDir(), "agent_sessions.json"))
-	if err != nil {
-		t.Fatalf("OpenAgentSessionFile: %v", err)
-	}
-	cs.WithPersistence(nil, asFile)
+	cs.WithPersistence(nil, nil)
 
 	a := NewAgentSession(newAgentSessionID(), cs.ID, "cc", cwd, nil)
 	a.SetExited(0)
 	cs.mu.Lock()
 	cs.pool[agentCwdKey{Agent: "cc", Cwd: cwd}] = a
 	cs.mu.Unlock()
-	if err := asFile.Upsert(a.Entry()); err != nil {
-		t.Fatalf("Upsert: %v", err)
-	}
 
 	// Workflow: isAlive=false (StatusExited, no handle) → skip
-	// Close, just Drop.
+	// Close, classify as stale-cleared. No DropAgentSession.
 	as, err := cs.LookupInPool("cc", cwd)
 	if err != nil {
 		t.Fatalf("LookupInPool: %v", err)
@@ -431,13 +442,11 @@ func TestKillWorkflow_StaleCleared(t *testing.T) {
 	if isAlive {
 		t.Errorf("StatusExited with no handle should NOT be alive")
 	}
-	cs.DropAgentSession(as)
 
-	if len(cs.Pool()) != 0 {
-		t.Errorf("pool should be empty after stale-clear, got %d", len(cs.Pool()))
-	}
-	if n := len(asFile.GetByChatPool(cs.ID)); n != 0 {
-		t.Errorf("registry row should be deleted, got %d entries", n)
+	// Pool entry survives /close — only the bridge process would
+	// have been killed (it was already dead).
+	if len(cs.Pool()) != 1 {
+		t.Errorf("pool should still have the stale entry, got %d", len(cs.Pool()))
 	}
 	_ = context.Background() // keep context import
 }

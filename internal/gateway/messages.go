@@ -256,7 +256,7 @@ const (
 	OutInit
 	// OutCommandReply is a one-shot plain-text message sent in
 	// response to a system-level slash command (e.g. /cwd, /run,
-	// /help, /kill, /agents) or to a runtime error that needs to
+	// /help, /close, /agents) or to a runtime error that needs to
 	// surface to the user without the rolling-log card path.
 	//
 	// Distinct from OutReply: OutReply is the agent's stream of

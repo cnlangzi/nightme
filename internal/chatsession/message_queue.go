@@ -319,7 +319,7 @@ func (q *MessageQueue) Remove(id string) (Message, bool) {
 // Clear removes every item — pending and in-flight — and returns
 // them in their original order. The returned slice is freshly
 // allocated; the queue is empty after the call. Used by
-// ChatSession.DropQueue (for /kill, /new) to clear the queue
+// ChatSession.DropQueue (for /close, /new) to clear the queue
 // while still obtaining the items for per-message MarkDropped
 // wire events.
 func (q *MessageQueue) Clear() []Message {

@@ -1,24 +1,29 @@
-// /kill reply rendering — produces the IM-friendly plain-text
+// /close reply rendering — produces the IM-friendly plain-text
 // summary the handler returns via command.Reply.
 //
 // Sibling to internal/chatsession/format.go (FormatResetResults
-// for /new), but lives in the kill package because the kill
-// surface is fully owned by command/kill (see kill.go doc comment).
+// for /new), but lives in the close package because the close
+// surface is fully owned by command/close (see close.go doc comment).
 // Sharing formatReplyByteCap / truncateByBytes / etc. with the
 // reset formatter would require a third "format" package; not
 // worth it for two callers.
 //
-// Output templates (selected by the (killed, stale, failed) tuple):
-//   - all empty:           "No active agents to kill."
-//   - all killed:          "Stopped N agent session(s):\n  ✓ <name> @ <cwd>\n..."
-//   - all stale:           "Cleared N stale agent session(s) ...:\n  • <name> @ <cwd> ..."
+// Output templates (selected by the (closed, stale, failed) tuple):
+//   - all empty:           "No active agents to close."
+//   - all closed:          "Closed N bridge process(es):\n  ✓ <name> @ <cwd>\n..."
+//   - all stale:           "Skipped N already-exited bridges:\n  • <name> @ <cwd> ..."
 //   - mixed:               "<header>:\n  ✓ ... \n  • ... \n  ✗ ...\n..."
 //
 // Errors surface per-row (never swallowed). Output capped to 4 KB
 // total bytes (Feishu single-message limit) + "...and N more"
 // tail. Rows sorted by typed priority (success → failure →
 // skipped), then by (Agent, Cwd) for stable display.
-package kill
+//
+// Note: /close preserves the AgentSession entry in the pool. The
+// header wording reflects this — "Closed N bridge process(es)"
+// rather than "Closed N agent session(s)" — because the session
+// identity is kept; only the underlying child process is gone.
+package close
 
 import (
 	"fmt"
@@ -28,21 +33,21 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
-// FormatKillResults produces a human-readable summary of /kill's
+// FormatResults produces a human-readable summary of /close's
 // per-entry outcomes. The output is suitable for channel.Send
 // (plain text, Feishu-renderable).
-func FormatKillResults(results []Result) string {
+func FormatResults(results []Result) string {
 	if len(results) == 0 {
-		return "No active agents to kill."
+		return "No active agents to close."
 	}
 
 	rows := make([]resultRow, 0, len(results))
-	var killed, stale, failed int
+	var closed, stale, failed int
 	for _, r := range results {
-		row, bucket := renderKillRow(r)
+		row, bucket := renderRow(r)
 		switch bucket {
 		case bucketSuccess:
-			killed++
+			closed++
 		case bucketSkipped:
 			stale++
 		case bucketFailure:
@@ -61,7 +66,7 @@ func FormatKillResults(results []Result) string {
 		return rows[i].cwd < rows[j].cwd
 	})
 
-	header := buildKillHeader(killed, stale, failed)
+	header := buildHeader(closed, stale, failed)
 	return truncateByBytes(header, rows, formatTail)
 }
 
@@ -86,8 +91,8 @@ type resultRow struct {
 	agent, cwd string
 }
 
-// renderKillRow is FormatKillResults' per-row branch.
-func renderKillRow(r Result) (resultRow, formatRowBucket) {
+// renderRow is FormatResults' per-row branch.
+func renderRow(r Result) (resultRow, formatRowBucket) {
 	if r.Error != nil {
 		return resultRow{
 			text: fmt.Sprintf("  ✗ %s @ %s — %s: %v",
@@ -98,7 +103,7 @@ func renderKillRow(r Result) (resultRow, formatRowBucket) {
 		}, bucketFailure
 	}
 	switch r.Action {
-	case "killed":
+	case "closed":
 		return resultRow{
 			text:     fmt.Sprintf("  ✓ %s @ %s", r.Agent, r.Cwd),
 			priority: bucketSuccess,
@@ -107,7 +112,7 @@ func renderKillRow(r Result) (resultRow, formatRowBucket) {
 		}, bucketSuccess
 	case "stale-cleared":
 		return resultRow{
-			text:     fmt.Sprintf("  • %s @ %s — already exited, entry cleaned", r.Agent, r.Cwd),
+			text:     fmt.Sprintf("  • %s @ %s — already exited", r.Agent, r.Cwd),
 			priority: bucketSkipped,
 			agent:    r.Agent,
 			cwd:      r.Cwd,
@@ -126,30 +131,32 @@ func renderKillRow(r Result) (resultRow, formatRowBucket) {
 // string (used in error messages).
 func humanAction(action string) string {
 	switch action {
-	case "killed":
-		return "kill"
+	case "closed":
+		return "close"
 	case "stale-cleared":
-		return "stale-clear"
+		return "stale"
 	default:
 		return action
 	}
 }
 
-// buildKillHeader mirrors the spec template wording for the
-// top-of-reply summary line.
-func buildKillHeader(killed, stale, failed int) string {
+// buildHeader mirrors the spec template wording for the
+// top-of-reply summary line. Wording reflects the close-only-
+// kill semantics: bridge processes are gone, but AgentSession
+// entries (and their session IDs) stay in the pool.
+func buildHeader(closed, stale, failed int) string {
 	if failed == 0 && stale == 0 {
-		return fmt.Sprintf("Stopped %d agent session(s):", killed)
+		return fmt.Sprintf("Closed %d bridge process(es) (sessions preserved):", closed)
 	}
-	if killed == 0 && stale > 0 && failed == 0 {
-		return fmt.Sprintf("Cleared %d stale agent session(s) (no live processes):", stale)
+	if closed == 0 && stale > 0 && failed == 0 {
+		return fmt.Sprintf("Skipped %d already-exited bridge(s):", stale)
 	}
 	parts := make([]string, 0, 3)
-	if killed > 0 {
-		parts = append(parts, fmt.Sprintf("Stopped %d", killed))
+	if closed > 0 {
+		parts = append(parts, fmt.Sprintf("%d closed", closed))
 	}
 	if stale > 0 {
-		parts = append(parts, fmt.Sprintf("%d stale entry cleared", stale))
+		parts = append(parts, fmt.Sprintf("%d stale", stale))
 	}
 	if failed > 0 {
 		parts = append(parts, fmt.Sprintf("%d failed", failed))
@@ -158,7 +165,7 @@ func buildKillHeader(killed, stale, failed int) string {
 }
 
 // formatReplyByteCap is the Feishu single-message payload limit.
-// Both /kill and /new format strings cap here to keep the channel
+// Both /close and /new format strings cap here to keep the channel
 // side from rejecting the message outright.
 const formatReplyByteCap = 4096
 
@@ -191,10 +198,10 @@ func tailFmtFor(i, total int) string {
 }
 
 // FormatResetResults produces a human-readable summary of /new's
-// per-entry outcomes. Companion to FormatKillResults; same plain-text
+// per-entry outcomes. Companion to FormatResults; same plain-text
 // shape, same byte-based cap, same typed-priority sort.
 //
-// See docs/feat/F-43-kill-new-graceful-and-reset.md §6.2.
+// See docs/feat/F-43-close-new-graceful-and-reset.md §6.2.
 func FormatResetResults(results []chatsession.ResetResult) string {
 	if len(results) == 0 {
 		return "Reset 0 sessions."
@@ -265,7 +272,7 @@ func renderResetRow(r chatsession.ResetResult) (resultRow, formatRowBucket) {
 	}
 }
 
-// buildResetHeader mirrors the /kill header but with /new-specific
+// buildResetHeader mirrors the /close header but with /new-specific
 // wording. The two commands share the (success / failure / skipped)
 // tuple but differ in label vocabulary.
 func buildResetHeader(running, dead, failed int) string {

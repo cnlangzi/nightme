@@ -1,25 +1,40 @@
-// Package kill — /kill's process-shutdown logic.
+// Package close — /close's "stop + kill the bridge process" logic.
 //
 // Two entry points, both cwd-scoped to the chat's SelectedCwd:
 //
-//	KillAgent(c *Cmd, agentName)    /kill <agent> path
-//	KillAllAgents(c *Cmd)            /kill (no args) path
+//	CloseAgent(c *Cmd, agentName)    /close <agent> path
+//	CloseAllAgents(c *Cmd)            /close (no args) path
 //
 // Per-entry graceful shutdown is owned here (5s outer bound, per-
 // bridge Close goroutine fan-out, StatusRunning / StatusDetached-
-// with-handle → Close, otherwise "stale-cleared"). Pool + selectedAS
-// + agent_sessions.json cleanup is delegated to ChatSession's
-// lifecycle primitives (LookupInPool / AgentSessionsInCwd /
-// DropAgentSession) — this package never reaches into ChatSession's
-// private fields.
+// with-handle → Close, otherwise "stale-cleared"). The AgentSession
+// entry is intentionally NOT touched here: /close kills the
+// process but preserves session identity (pool entry, sessionID,
+// agent_sessions.json row) so the next user message triggers a
+// respawn that replays `--resume <id>` to continue the
+// conversation.
 //
-// Preserved invariants (matching /kill semantics):
-//   - cs.selectedCwd / cs.selectedAgent / queue / InputBuffer
-//   - Sibling entries in OTHER cwds / OTHER agent names
+// Compare to the sibling commands:
+//
+//   - /stop — signals the bridge to halt its in-flight turn; the
+//     bridge process may or may not exit. No state mutation on
+//     the AgentSession.
+//   - /close — forcibly terminates the bridge process (close stdin
+//     → SIGINT → 2 s grace → SIGKILL fallback). AgentSession goes
+//     to StatusExited but stays in the pool; sessionID is preserved
+//     so respawn resumes the conversation.
+//   - /new — invokes the bridge's in-place context reset (claude's
+//     `/clear`, pi's `new_session` RPC, etc.). The conversation
+//     history is cleared but the bridge process stays alive.
+//
+// Use /close for "this bridge is wedged, give it a hard restart"
+// without losing the conversation context. To fully discard the
+// session (kill process AND forget conversation), use daemon
+// restart or `agent_sessions.json` cleanup.
 //
 // Daemon shutdown (cmd/nightme/run.go) does NOT call these —
 // agents survive nightme restart via the Detached registry state.
-package kill
+package close
 
 import (
 	"context"
@@ -32,7 +47,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
-// Cmd is the per-call kill context. CS is the ChatSession whose
+// Cmd is the per-call close context. CS is the ChatSession whose
 // pool entries to operate on; Ctx is the parent context for any
 // blocking bridge calls (currently unused but kept for forward
 // compat with bridges that may want to wire it).
@@ -43,25 +58,25 @@ type Cmd struct {
 
 // ErrNoContext is returned when Cmd.CS is nil. Validation should
 // happen at the handler / gateway layer; this is the safety net.
-var ErrNoContext = errors.New("kill: nil ChatSession")
+var ErrNoContext = errors.New("close: nil ChatSession")
 
-// Result is one row of the /kill reply. It captures what happened
-// to a single pool entry during KillAgent / KillAllAgents so the
+// Result is one row of the /close reply. It captures what happened
+// to a single pool entry during CloseAgent / CloseAllAgents so the
 // handler can render a per-agent status instead of a bare count.
 type Result struct {
 	Agent       string // e.g. "claude", "codex"
 	Cwd         string // e.g. "/code/A"
 	BeforeState chatsession.Status // StatusRunning / StatusDetached / StatusExited
-	Action      string // "killed" | "stale-cleared"
+	Action      string // "closed" | "stale-cleared" | "close-failed"
 	Error       error  // nil on success
 }
 
-// killGraceTotal is the outer-bound graceful shutdown timeout.
+// closeGraceTotal is the outer-bound graceful shutdown timeout.
 // Each bridge has its own 2s window + SIGKILL fallback; this 5s
 // covers bridge grace + SIGKILL + race detector margin + bridges
 // that take a beat to surface exit through ObserveClose. Tuned
-// for "user waits for /kill to confirm"; rarely triggers.
-const killGraceTotal = 5 * time.Second
+// for "user waits for /close to confirm"; rarely triggers.
+const closeGraceTotal = 5 * time.Second
 
 // closeOutcome carries one goroutine's Close result back to the
 // orchestrator. idx indexes into the snapshot slice.
@@ -70,7 +85,9 @@ type closeOutcome struct {
 	err error
 }
 
-// KillAgent terminates the (agentName, c.CS.ActiveCwd()) entry.
+// CloseAgent terminates the bridge process backing the
+// (agentName, c.CS.ActiveCwd()) entry. The AgentSession entry
+// itself stays in the pool; sessionID is preserved for respawn.
 //
 // Returns chatsession.ErrAgentNotFound when no entry matches.
 // Returns ErrNoContext when c.CS is nil.
@@ -78,15 +95,16 @@ type closeOutcome struct {
 // Per-entry behavior:
 //   - StatusRunning / StatusDetached-with-handle → Close() with
 //     5s outer bound. Per-bridge 2s + SIGKILL fallback is layered
-//     inside the bridge; killGraceTotal covers a wedged bridge
+//     inside the bridge; closeGraceTotal covers a wedged bridge
 //     that bypasses its own watchdog.
 //   - StatusExited / StatusDetached-without-handle → "stale-cleared"
-//     (no live process to signal; just clean disk).
+//     (no live process to signal; the entry was already dead).
 //
-// After Close (or the stale-clear decision), ChatSession.DropAgentSession
-// handles pool + selectedAS + agent_sessions.json cleanup. This
-// function never reaches into CS private fields directly.
-func KillAgent(c *Cmd, agentName string) (Result, error) {
+// This function never reaches into CS private fields directly. It
+// does NOT call DropAgentSession — the AgentSession is preserved so
+// the next user message can respawn the bridge with `--resume
+// <sessionID>` and continue the conversation.
+func CloseAgent(c *Cmd, agentName string) (Result, error) {
 	if c == nil || c.CS == nil {
 		return Result{}, ErrNoContext
 	}
@@ -108,47 +126,48 @@ func KillAgent(c *Cmd, agentName string) (Result, error) {
 		(as.Status() == chatsession.StatusDetached && as.Handle() != nil)
 	if !isAlive {
 		result.Action = "stale-cleared"
-	} else {
-		result.Action = "killed"
-		done := make(chan error, 1)
-		go func() { done <- as.Close() }()
-		select {
-		case err := <-done:
-			if err != nil {
-				result.Action = "kill-failed"
-				result.Error = err
-			}
-		case <-time.After(killGraceTotal):
-			slog.Warn("kill: graceful shutdown timeout",
-				"agent", as.Agent,
-				"cwd", as.Cwd,
-				"limit", killGraceTotal)
-			result.Action = "kill-failed"
-			result.Error = fmt.Errorf("graceful shutdown timed out after %s", killGraceTotal)
-		}
+		return result, nil
 	}
 
-	cs.DropAgentSession(as)
+	result.Action = "closed"
+	done := make(chan error, 1)
+	go func() { done <- as.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			result.Action = "close-failed"
+			result.Error = err
+		}
+	case <-time.After(closeGraceTotal):
+		slog.Warn("close: graceful shutdown timeout",
+			"agent", as.Agent,
+			"cwd", as.Cwd,
+			"limit", closeGraceTotal)
+		result.Action = "close-failed"
+		result.Error = fmt.Errorf("graceful shutdown timed out after %s", closeGraceTotal)
+	}
 	return result, nil
 }
 
-// KillAllAgents terminates every pool entry whose Cwd ==
-// c.CS.SelectedCwd().
+// CloseAllAgents terminates every bridge process backing the pool
+// entries whose Cwd == c.CS.SelectedCwd(). AgentSession entries
+// are preserved so the next user message can respawn each bridge
+// with `--resume <sessionID>` and continue.
 //
 // Returns nil + nil when selectedCwd is empty OR the pool has no
-// entries in that cwd (no action taken). FormatKillResults on
-// nil/empty renders as "No active agents to kill."
+// entries in that cwd (no action taken). FormatResults on
+// nil/empty renders as "No active agents to close."
 //
-// Per-entry behavior mirrors KillAgent. Pool + selectedAS cleanup
-// is scoped to the matching entries only; entries in OTHER cwds
-// (from prior /cwd switches) are preserved, matching /kill's
+// Per-entry behavior mirrors CloseAgent. Entries in OTHER cwds
+// (from prior /cwd switches) are preserved, matching /close's
 // cwd-scoped invariant.
 //
 // Concurrency: pool snapshot via cs.AgentSessionsInCwd (read-
 // only); each bridge drives its own Close goroutine; wg.Wait
 // + 5s outer timeout guards against a wedged bridge that bypasses
-// its own SIGKILL fallback. Per-entry cleanup via cs.DropAgentSession.
-func KillAllAgents(c *Cmd) ([]Result, error) {
+// its own SIGKILL fallback. No DropAgentSession call — the pool
+// stays intact so respawn can resume each conversation.
+func CloseAllAgents(c *Cmd) ([]Result, error) {
 	if c == nil || c.CS == nil {
 		return nil, ErrNoContext
 	}
@@ -168,7 +187,7 @@ func KillAllAgents(c *Cmd) ([]Result, error) {
 	// 2. Classify each entry + fan out graceful shutdown for
 	//    alive ones. StatusRunning / StatusDetached-with-handle
 	//    → Close(); StatusExited / StatusDetached-without-handle
-	//    → "stale-cleared" (no process to signal).
+	//    → "stale-cleared" (no live processes to signal).
 	results := make([]Result, len(snapshot))
 	closeCh := make(chan closeOutcome, len(snapshot))
 	var wg sync.WaitGroup
@@ -184,7 +203,7 @@ func KillAllAgents(c *Cmd) ([]Result, error) {
 			results[i].Action = "stale-cleared"
 			continue
 		}
-		results[i].Action = "killed"
+		results[i].Action = "closed"
 		wg.Add(1)
 		go func(i int, as *chatsession.AgentSession) {
 			defer wg.Done()
@@ -197,27 +216,21 @@ func KillAllAgents(c *Cmd) ([]Result, error) {
 	go func() { wg.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(killGraceTotal):
-		slog.Warn("killAllAgents: graceful shutdown timeout",
+	case <-time.After(closeGraceTotal):
+		slog.Warn("closeAllAgents: graceful shutdown timeout",
 			"cwd", cwd,
-			"limit", killGraceTotal)
+			"limit", closeGraceTotal)
 	}
 	close(closeCh)
 
-	// 4. Fold per-entry Close errors into KillResult (review
+	// 4. Fold per-entry Close errors into Result (review
 	//    finding #B2: previously `_ = as.Close()` was discarded).
 	for oc := range closeCh {
 		if oc.err != nil {
 			results[oc.idx].Error = oc.err
-			results[oc.idx].Action = "kill-failed"
+			results[oc.idx].Action = "close-failed"
 		}
 	}
 
-	// 5. Per-entry cleanup via DropAgentSession. selectedAS is
-	//    cleared by DropAgentSession iff it pointed to one of
-	//    the killed entries (safety invariant).
-	for _, as := range snapshot {
-		cs.DropAgentSession(as)
-	}
 	return results, nil
 }

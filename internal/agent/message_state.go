@@ -50,7 +50,7 @@ const (
 	// MessageDropped: the message was explicitly cleared before
 	// it could be submitted. Triggered by `ChatSession.
 	// MarkDropped`, which is called from:
-	//   - BufferClear (which `/kill` and `/new` invoke to drop
+	//   - BufferClear (which `/close` and `/new` invoke to drop
 	//     the queued batch)
 	//
 	// NOT triggered by SendBlocks failure — a failed send leaves

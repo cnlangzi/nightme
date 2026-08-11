@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync/atomic"
 	"testing"
+
+	"github.com/cnlangzi/nightme/internal/gatewaytest"
 )
 
 // TestDispatchInbound_CommanderFallThrough covers the
@@ -33,7 +35,7 @@ func TestDispatchInbound_CommanderFallThrough(t *testing.T) {
 		return nil
 	})
 
-	gw := New(md, &noopEmitter{}).(*Router)
+	gw := New(md, &gatewaytest.NoopEmitter{}).(*Router)
 	gw.WithCommander(func(_ context.Context, msg *InboundMessage) (*CommandResult, error) {
 		// Stub commander: only /known is "registered". Everything
 		// else is treated as either not-a-slash-command (handled=
@@ -148,7 +150,7 @@ func TestDispatchInbound_FallThrough_HitsMessageDispatcher(t *testing.T) {
 		return nil
 	})
 
-	gw := New(md, &noopEmitter{}).(*Router)
+	gw := New(md, &gatewaytest.NoopEmitter{}).(*Router)
 	gw.WithCommander(func(_ context.Context, msg *InboundMessage) (*CommandResult, error) {
 		// No slash commands "registered" — every /-input falls
 		// through with handled=true + Consumed=false.
@@ -207,7 +209,7 @@ func TestDispatchInbound_RecognisedSlash_BypassesMessageDispatcher(t *testing.T)
 		return nil
 	})
 
-	gw := New(md, &noopEmitter{}).(*Router)
+	gw := New(md, &gatewaytest.NoopEmitter{}).(*Router)
 	gw.WithCommander(func(_ context.Context, msg *InboundMessage) (*CommandResult, error) {
 		if msg.Text == "/watch on" {
 			commanderCalled = true

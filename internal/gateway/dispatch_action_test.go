@@ -207,12 +207,3 @@ func TestDispatchInbound_ActionHandlerPanicSafe(t *testing.T) {
 	}
 }
 
-// noopEmitter is a test-only outbound.Emitter that does nothing.
-type noopEmitter struct{}
-
-func (noopEmitter) Send(context.Context, OutboundMessage) error {
-	return nil
-}
-func (noopEmitter) SendCard(context.Context, OutboundMessage) (string, error) {
-	return "", nil
-}

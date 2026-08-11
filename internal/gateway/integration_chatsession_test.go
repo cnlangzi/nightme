@@ -19,14 +19,6 @@ import (
 )
 
 // fakeCh is a minimal outbound.Emitter for tests in this package.
-// Defined inline to avoid a shared test-helpers package; mirrors the
-// shape in internal/chatsession/test_helpers_test.go.
-type nopCh struct{}
-func (nopCh) Send(_ context.Context, _ gateway.OutboundMessage) error { return nil }
-func (nopCh) SendCard(_ context.Context, _ gateway.OutboundMessage) (string, error) { return "", nil }
-func (nopCh) Patch(_ context.Context, _ gateway.OutboundMessage) error { return nil }
-func newTestChannel() outbound.Emitter { return nopCh{} }
-
 
 // T-alive: end-to-end integration test that reproduces the
 // "AgentSession events never reach the channel" regression

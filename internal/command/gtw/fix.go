@@ -783,6 +783,7 @@ func completeFixAndDispatch(
 			// roll back the worktree — see comment above.
 			_ = cs.Emitter().Send(ctx, gateway.OutboundMessage{
 				ChatID:  chatID,
+				Kind:    gateway.OutCommandReply, // one-shot plain text, not a rolling-log receipt card
 				ReplyTo: messageID,
 				Text:    fmt.Sprintf("⚠️ Could not dispatch issue #%d to agent: %v\nThe worktree is ready; you can /cwd into %s and tell the agent to fix #%d.", issue.ID, err, worktreePath, issue.ID),
 			})
@@ -1040,10 +1041,15 @@ func renderCardMarkdown(c Card) string {
 
 // gtwCardToGateway translates gtw.Card (business view) to the
 // wire-level gateway.Card. gtw.Card has fewer fields (no
-// Kind/Disabled/ChosenEmoji); those get zero values in the
-// destination.
+// Kind/Disabled/ChosenEmoji); Kind defaults to CardKindDecision
+// (the only /gtw card kind) — pre-refactor this default lived
+// in the deleted cardKindFromString. Disabled and ChosenEmoji
+// stay zero; the runtime path that needs them (gtw.emitFollowUp
+// post-reaction) sets them inline on the gateway.OutboundMessage
+// after the fact.
 func gtwCardToGateway(in Card) *gateway.Card {
 	return &gateway.Card{
+		Kind:      gateway.CardKindDecision,
 		Title:     in.Title,
 		Body:      in.Body,
 		Choices:   gtwCardChoicesToGateway(in.Choices),

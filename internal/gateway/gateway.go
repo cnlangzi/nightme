@@ -53,8 +53,6 @@ import (
 )
 
 // Emitter is the outbound chokepoint contract the Gateway
-
-// Emitter is the outbound chokepoint contract the Gateway
 // requires. The runtime injects a concrete implementation
 // (typically an outbound.Emitter from internal/gateway/outbound)
 // at New() time. Defined here as a local interface so the gateway

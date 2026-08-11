@@ -306,7 +306,14 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 
 	// Build the router wiring (slashCommandDispatcher +
 	// messageDispatcher).
-	messageDispatcher := newMessageDispatcher(mgr, ch, cfg.Primary, logger)
+	// messageDispatcher is constructed later (after `em` is
+	// built) so its error-reply paths — queue full / no
+	// workspace / spawn failed — go through the same Emitter as
+	// the runtime pump and pick up the SessionContext footer. The
+	// old channel_wrap prepended its own Emitter wrap, so the
+	// bug class "error replies miss the footer" is now caught at
+	// compile time: the dispatcher is typed as outbound.Emitter
+	// from the start.
 
 	// F-31 + F-think + F-38: install gw.OnMessageState AND the
 	// runtime's EventHandler into every ChatSession via the
@@ -355,6 +362,13 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// instance. Manager.WithEmitter (further down) binds the
 	// same Emitter to every ChatSession.
 	em := outbound.New(ch, outbound.Options{Stamper: newRuntimeStamper(mgr, prCacheReg, gtwDeps)})
+
+	// Build the message dispatcher now that em exists. The
+	// dispatcher's three error reply paths (queue full / no
+	// workspace / spawn failed) all go through this Emitter so
+	// the SessionContext footer is applied — sending the raw
+	// channel.Channel would silently skip the stamper.
+	messageDispatcher := newMessageDispatcher(mgr, em, cfg.Primary, logger)
 
 	gwImpl := gateway.New(messageDispatcher, em).(*gateway.Router)
 	// All chat-session commands (/cwd /use /kill /new /watch /think
@@ -509,11 +523,15 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		// 透传 out.Outbound (都是 gateway.OutboundMessage,直接
 		// 调 cs.Emitter().Send/SendCard — PATCH 语义由调用方设 Kind=OutCardPatch
 		// 后通过 Send 走,见 channel/feishu/adapter.go: case OutCardPatch)
+		// OutCardPatch 必须走 Send: Feishu SendCard 不识别 Kind,会
+		// 当作新卡片创建,导致发重复卡片(回归保护)。
 		for _, ob := range out.Outbound {
 			if ch == nil {
 				continue
 			}
-			if ob.Card != nil {
+			if ob.Kind == gateway.OutCardPatch {
+				_ = ch.Send(ctx, ob)
+			} else if ob.Card != nil {
 				_, _ = ch.SendCard(ctx, ob)
 			} else {
 				_ = ch.Send(ctx, ob)
@@ -1535,7 +1553,7 @@ func (s chatSessionChannelSender) Send(ctx context.Context, msg shell.Outbound) 
 	}
 	return em.Send(ctx, gateway.OutboundMessage{
 		ChatID:  msg.ChatID,
-		Kind:    gateway.OutReply,
+		Kind:    gateway.OutCommandReply,
 		Text:    msg.Text,
 		ReplyTo: msg.ReplyTo,
 	})

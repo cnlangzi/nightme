@@ -193,22 +193,6 @@ func (m *Manager) GetOrCreate(chatID, primaryAgent string) (*ChatSession, error)
 // Concurrency: the write is published through m.mu so
 // concurrent GetOrCreate calls see a consistent value (RLock
 // acquisition in Phase 2).
-// WithEmitter binds the single daemon-wide outbound chokepoint
-// to the Manager. Every ChatSession created (or restored) after
-// this call is bound to the same Emitter via
-// ChatSession.WithEmitter. Wired once at startup before any
-// chat is opened; calling it again with a non-nil Emitter
-// replaces the previous one.
-//
-// nil clears the binding (test teardown). A nil Emitter is
-// tolerated by GetOrCreate: tests that don't exercise the
-// outbound path can construct ChatSessions without one
-// (cs.Emitter() returns nil; senders must nil-check before
-// Send / SendCard).
-//
-// Concurrency: the write is published through m.mu so
-// concurrent GetOrCreate calls see a consistent value (RLock
-// acquisition in Phase 2).
 //
 // Note: ChatSession.WithEmitter panics if a different non-nil
 // Emitter is bound to an existing session. RestoreFromRegistry

@@ -41,16 +41,10 @@ import (
 	"github.com/cnlangzi/nightme/internal/gateway"
 )
 
-// Channel is the minimum contract outbound needs from an IM
-// adapter. The full Channel interface lives in internal/channel;
-// outbound embeds it as a private field so no one outside
-// outbound can hold a reference to the underlying IM adapter.
-//
 // Channel adapters (Feishu, echo test stub, ...) implement
 // channel.Channel with all six methods; that automatically
-// satisfies the embedded field. No explicit wrapper or
-// assertion needed.
-type Channel = channel.Channel
+// satisfies the constructor's channel.Channel parameter. No
+// alias needed — outbound takes channel.Channel directly.
 
 // Stamper produces the F-45/F-48 SessionContext footer for a
 // chat's outbound messages. The runtime injects the
@@ -63,10 +57,6 @@ type Channel = channel.Channel
 // the same way: don't stamp, just forward.
 type Stamper func(chatID string) *gateway.SessionContext
 
-// Options configures optional Emitter behaviour. The zero value
-// is valid: Emitter becomes a pure Channel.Send passthrough with
-// no stamping, no error hooks — equivalent to the legacy
-// outbound.Emitter behaviour minus the type-conversion step.
 // Options configures optional Emitter behaviour. The zero value
 // is valid: Emitter becomes a pure Channel.Send / SendCard
 // passthrough with no stamping.
@@ -89,7 +79,7 @@ type Emitter interface {
 
 // New constructs the default Emitter implementation. ch must be
 // non-nil; opts may be its zero value.
-func New(ch Channel, opts Options) Emitter {
+func New(ch channel.Channel, opts Options) Emitter {
 	return &emitImpl{
 		ch:      ch,
 		stamper: opts.Stamper,

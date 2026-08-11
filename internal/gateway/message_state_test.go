@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/gatewaytest"
 )
 
 // fakeChannel is a minimal Channel implementation used by
@@ -142,7 +143,7 @@ func TestOnMessageState_AllStatesPassThrough(t *testing.T) {
 func newWiredRouter(t *testing.T) (*Router, *fakeChannel) {
 	t.Helper()
 	ch := &fakeChannel{}
-	gw := New(nil, &noopEmitter{}).(*Router)
+	gw := New(nil, &gatewaytest.NoopEmitter{}).(*Router)
 	gw.AttachChannels(ch)
 	// Resolve-channel path uses g.chatToChan populated by pumpInbound
 	// in production; for tests, seed it directly.

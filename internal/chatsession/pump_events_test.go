@@ -476,7 +476,7 @@ func TestAgentSession_EndPrompt_EmitsKindPromptEnded(t *testing.T) {
 // newChatSessionForTest is a thin wrapper that returns a ChatSession
 // with the test-friendly defaults (no Spawner, no persistence).
 func newChatSessionForTest(chatID string) *ChatSession {
-	cs, _ := New(chatID, "pi", newTestChannel())
+	cs, _ := New(chatID, "pi")
 	return cs
 }
 

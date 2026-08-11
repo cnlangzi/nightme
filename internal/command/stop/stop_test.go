@@ -7,6 +7,7 @@
 package stop_test
 
 import (
+	"github.com/cnlangzi/nightme/internal/gateway"
 	"context"
 	"errors"
 	"strings"
@@ -41,16 +42,16 @@ func (s *stubStoppable) Stop(_ context.Context) error {
 }
 func (s *stubStoppable) SetModel(_ context.Context, _, _ string) error { return nil }
 
-// nopCh satisfies chatsession.Channel for tests that need a
+// nopCh satisfies outbound.Emitter for tests that need a
 // non-nil channel to construct a ChatSession but don't exercise
 // the channel surface.
 type nopCh struct{}
 
-func (nopCh) Send(_ context.Context, _ chatsession.OutboundMessage) error { return nil }
-func (nopCh) SendCard(_ context.Context, _ chatsession.OutboundMessage) (string, error) {
+func (nopCh) Send(_ context.Context, _ gateway.OutboundMessage) error { return nil }
+func (nopCh) SendCard(_ context.Context, _ gateway.OutboundMessage) (string, error) {
 	return "", nil
 }
-func (nopCh) Patch(_ context.Context, _ chatsession.OutboundMessage) error { return nil }
+func (nopCh) Patch(_ context.Context, _ gateway.OutboundMessage) error { return nil }
 
 // setupSelectedAS wires up a ChatSession + selected AgentSession +
 // stub driver, returning the stub so the test can drive Stop's

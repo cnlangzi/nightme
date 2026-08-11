@@ -932,7 +932,7 @@ func TestWireRuntimeCallbacksAndRestore_InstallsHandlersOnRestoredChats(t *testi
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-if err := wireRuntimeCallbacksAndRestore(mgr, ch, outbound.New(ch, outbound.Options{}), logger, &prcache.Registry{}, gtw.HandlerDeps{}); err != nil {
+if err := wireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, &prcache.Registry{}, gtw.HandlerDeps{}, markPromptDone(ch)); err != nil {
 		t.Fatalf("wireRuntimeCallbacksAndRestore: %v", err)
 	}
 
@@ -962,7 +962,7 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateDropsEmptyIDs(t *testing.T) 
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-if err := wireRuntimeCallbacksAndRestore(mgr, ch, outbound.New(ch, outbound.Options{}), logger, &prcache.Registry{}, gtw.HandlerDeps{}); err != nil {
+if err := wireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, &prcache.Registry{}, gtw.HandlerDeps{}, markPromptDone(ch)); err != nil {
 		t.Fatalf("wireRuntimeCallbacksAndRestore: %v", err)
 	}
 
@@ -1014,7 +1014,7 @@ func TestWireRuntimeCallbacksAndRestore_NoPersistence(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-if err := wireRuntimeCallbacksAndRestore(mgr, ch, outbound.New(ch, outbound.Options{}), logger, &prcache.Registry{}, gtw.HandlerDeps{}); err != nil {
+if err := wireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, &prcache.Registry{}, gtw.HandlerDeps{}, markPromptDone(ch)); err != nil {
 		t.Fatalf("wireRuntimeCallbacksAndRestore on cold start: %v", err)
 	}
 	if len(mgr.List()) != 0 {

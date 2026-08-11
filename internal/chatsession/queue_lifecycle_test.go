@@ -37,7 +37,7 @@ import (
 // local copy is untouched). The MessageStateBus event is the
 // canonical signal.
 func TestDropQueue_DropsQueuedMessages(t *testing.T) {
-	cs, _ := New("test_dropqueue", "pi", newTestChannel())
+	cs, _ := New("test_dropqueue", "pi")
 	cs = cs.WithSpawner(nil)
 	// Observe drop events.
 	var (
@@ -95,7 +95,7 @@ func TestDropQueue_DropsQueuedMessages(t *testing.T) {
 func TestQueueSurvivesAgentSwitch(t *testing.T) {
 	spawner := &spawnerRecording{}
 	csFile, asFile := newTestStores(t)
-	cs, _ := New("oc_use_swap", "claude", newTestChannel())
+	cs, _ := New("oc_use_swap", "claude")
 	cs = cs.WithPersistence(csFile, asFile)
 	cs = cs.WithSpawner(spawner)
 	if err := cs.SetSelectedCwd(t.TempDir()); err != nil {

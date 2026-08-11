@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 )
 
 // makeTestMessage constructs a `Message` value with the minimal
@@ -53,38 +55,45 @@ func newTestASWithFakeHandle(cs *ChatSession) (*AgentSession, *fakeAgentSession)
 	return as, spy
 }
 
-// testChannel is a minimal Channel impl for in-package tests.
-// Records every Send/SendCard so tests can assert what was emitted.
-type testChannel struct {
-	Sent []OutboundMessage
+// testEmitter is a minimal outbound.Emitter impl for in-package
+// tests. Records every Send/SendCard so tests can assert what
+// was emitted. PATCH semantics are encoded as Kind=OutCardPatch
+// in the message itself; the Send path applies the disabled-flag
+// conventions that the runtime would have set.
+//
+// Replaces the pre-refactor testChannel which implemented the
+// chatsession.Channel interface (deleted in Commit 4); the new
+// world has no chatsession.Channel — every chat session holds
+// an outbound.Emitter, so the test stub is an Emitter.
+type testEmitter struct {
+	Sent []gateway.OutboundMessage
 }
 
-func (t *testChannel) Send(_ context.Context, msg OutboundMessage) error {
+func (t *testEmitter) Send(_ context.Context, msg gateway.OutboundMessage) error {
 	t.Sent = append(t.Sent, msg)
 	return nil
 }
 
-func (t *testChannel) SendCard(_ context.Context, msg OutboundMessage) (string, error) {
+func (t *testEmitter) SendCard(_ context.Context, msg gateway.OutboundMessage) (string, error) {
 	t.Sent = append(t.Sent, msg)
 	return "bot-msg-test", nil
 }
 
-func (t *testChannel) Patch(_ context.Context, msg OutboundMessage) error {
-	t.Sent = append(t.Sent, msg)
-	return nil
+// newTestEmitter returns a fresh testEmitter for tests that need
+// to bind an Emitter to a ChatSession or to a Manager.
+func newTestEmitter() *testEmitter {
+	return &testEmitter{}
 }
 
-// newTestChannel returns a fresh testChannel for tests that need
-// to bind a Channel to a ChatSession.
-func newTestChannel() *testChannel {
-	return &testChannel{}
+// newTestChannel is a back-compat alias used by older tests that
+// still call chatsession.New(chatID, primary, newTestChannel()).
+// Returns an *testEmitter (the channel-binding step is no longer
+// part of New; tests should call cs.WithEmitter(em) or
+// mgr.WithEmitter(em) instead).
+func newTestChannel() *testEmitter {
+	return newTestEmitter()
 }
 
-// fakeResolvedChannel returns a resolver that always produces the
-// given channel.
-func fakeResolvedChannel(ch Channel) func(chatID string) Channel {
-	return func(string) Channel { return ch }
-}
 // pushEvent pushes an EnrichedEvent into the AS's dispatch queue
 // (via the public InjectEvent helper). Test-only — production
 // events come from the bridge's readpump.
@@ -100,3 +109,7 @@ func makeBareAgentSession(t *testing.T, agentName, cwd string) *AgentSession {
 	t.Helper()
 	return NewAgentSession(newAgentSessionID(), "cs_test", agentName, cwd, nil)
 }
+
+// Compile-time guard: testEmitter must satisfy outbound.Emitter so
+// any signature drift in outbound is caught at test compile.
+var _ outbound.Emitter = (*testEmitter)(nil)

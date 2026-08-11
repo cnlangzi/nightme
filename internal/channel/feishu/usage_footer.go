@@ -505,7 +505,7 @@ func formatWorkspacePath(absPath string) string {
 //
 // Returns "" when ctx == nil or ctx.GitStatus == nil (caller
 // drops the line). Detached HEAD renders the branch segment as
-// "?" — see CollectStatus / parsePorcelainBranchStatus.
+// "?" — see CollectReadiness / parsePorcelainBranchStatus.
 func formatGitLine(ctx *gateway.SessionContext) string {
 	if ctx == nil {
 		return ""

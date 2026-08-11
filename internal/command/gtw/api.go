@@ -34,7 +34,7 @@
 // ChatSession.mu; the gtw package itself is stateless.
 //
 // The gtw package is gateway-agnostic on purpose: it does not import
-// internal/gateway. The runtime wraps the IM channel into a chatsession.Channel
+// internal/gateway. The runtime wraps the IM channel into a outbound.Emitter
 // (a single function value), which keeps the dependency graph a
 // tree (gtw → chatsession; gateway → gtw → chatsession; no cycles).
 package gtw

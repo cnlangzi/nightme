@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // ProviderKind names a supported git hosting platform. v1 supports
@@ -61,34 +63,15 @@ type IssueAttachment struct {
 	MIMEType string
 }
 
-// PR is the minimal open pull/merge-request shape the footer
-// needs to render its PR reference (`[#N](url)` appended to the
-// workspace footer line; markdown link — clickable blue anchor
-// in lark_md, with the rest of the workspace row staying in the
-// <font color='grey'> wrap). Mirrors Issue but trimmed to the
-// three fields the card actually consumes.
+// PR (alias for messages.PR) is the abstract cross-platform
+// handle for a single Pull Request / Merge Request. See
+// internal/messages/footer.go for full field semantics.
 //
-// Number — the platform-local id (GitHub pr#N, GitLab mr!N).
-// URL    — the human-facing web URL returned by gh/glab at
-//
-//	create time. Stored verbatim so the footer link lands on
-//	the same URL the user already saw in /gtw pr's success
-//	card (no reconstruct from owner/repo/number — the URL
-//	shape may differ across GitHub / self-hosted GitHub
-//	Enterprise / GitLab subgroups).
-//
-// State  — "open" / "merged" / "closed". v1 only requests
-//
-//	PRs in the "open" state (GitHub's `pr list --state open`,
-//	GitLab's `mr list --state opened`); the field stays in
-//	the type so a future "show merged PR too" footer variant
-//	can flip the platform filter without changing the
-//	consumer.
-type PR struct {
-	Number int
-	URL    string
-	State  string
-}
+// The canonical definition lives in internal/messages so the
+// wire types package does not need to import the gtw package
+// (avoids a gtw → messages → chatsession → gtw cycle). Existing
+// gtw callers keep working via this alias.
+type PR = messages.PR
 
 // GitProvider is the abstract /gtw interface to a git hosting
 // platform's issue tracker. Production has two implementations
@@ -753,9 +736,10 @@ func (c *GitHubProvider) RemoveLabel(ctx context.Context, owner, repo string, id
 
 // CreatePR runs `gh pr create --base <base> --head <head> --title
 // <title> --body <body> --repo <owner>/<repo>`. The head branch must
-// already be pushed to origin (dispatchPR enforces this via the
-// countUnpushed early-return); if not, gh prints "head ref
-// doesn't exist" and we forward that stderr to the user.
+// already be pushed to origin (dispatchPR's F-57 readiness gate
+// enforces this via snap.LocalIsAtUpstreamTip() — i.e. local HEAD
+// == origin/<branch> tip); if not, gh prints "head ref doesn't
+// exist" and we forward that stderr to the user.
 //
 // gh exits 0 with the PR URL on stdout when the PR is created;
 // non-zero + stderr "already exists" → ErrPRExists; any other

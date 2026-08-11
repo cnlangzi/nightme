@@ -3,21 +3,21 @@
 //
 // The test wires the same components as cmd/nightme/run.go:
 //
-//	gateway.Channel (echo)
-//	  ↓ cs.WithChannel(channelWrap{...})        ← bug fix lives here
+//	channel.Channel (echo)
+//	  ↓ cs.WithEmitter(channelWrap{...})        ← bug fix lives here
 //	ChatSession.Channel() = channelWrap
 //	  ↓ command.Handle → SlashOutput{Reply, Consumed: true}
-//	runtime shim → cs.Channel().Send(...) → echo.Send(...)
+//	runtime shim → cs.Emitter().Send(...) → echo.Send(...)
 //	  ↓
 //	echo.Record() captures the OutboundMessage
 //
 // Without cs.WithChannel binding, the runtime shim's
-// `if out.Consumed && out.Reply != "" && cs.Channel() != nil` guard
+// `if out.Consumed && out.Reply != "" && cs.Emitter() != nil` guard
 // fails (Channel() == nil) and every slash command reply is silently
 // dropped. This regression surfaced on 2026-08-09 when a user
 // reported that "/new produces no response"; the bug also affected
-// /cwd, /close, /use, /watch, /think, /tools — every command whose
-// reply routes through the runtime shim's cs.Channel() call.
+// /cwd, /kill, /use, /watch, /think, /tools — every command whose
+// reply routes through the runtime shim's cs.Emitter() call.
 //
 // The test MUST fail before the fix and pass after. It is the
 // regression guard for the silent-drop bug.
@@ -35,11 +35,14 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/command/newcmd"
 	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/gatewaytest"
 )
 
 // ─── Echo bridge ─────────────────────────────────────────────────────
@@ -207,9 +210,9 @@ func newRuntimeShim(
 		out, handled, err := commander.Dispatch(ctx, rt, cs, input)
 		if err != nil {
 			errText := "❌ " + err.Error()
-			ch := cs.Channel()
+			ch := cs.Emitter()
 			if ch != nil {
-				_ = ch.Send(ctx, chatsession.OutboundMessage{
+				_ = ch.Send(ctx, gateway.OutboundMessage{
 					ChatID:  msg.ChatID,
 					Text:    errText,
 					ReplyTo: msg.MessageID,
@@ -220,9 +223,9 @@ func newRuntimeShim(
 		if !handled {
 			return nil, nil
 		}
-		ch := cs.Channel()
+		ch := cs.Emitter()
 		if out.Consumed && out.Reply != "" && ch != nil {
-			_ = ch.Send(ctx, chatsession.OutboundMessage{
+			_ = ch.Send(ctx, gateway.OutboundMessage{
 				ChatID:  msg.ChatID,
 				Text:    out.Reply,
 				ReplyTo: msg.MessageID,
@@ -232,12 +235,9 @@ func newRuntimeShim(
 			if ch == nil {
 				continue
 			}
-			switch {
-			case ob.PatchBotMsgID != "":
-				_ = ch.Patch(ctx, ob)
-			case ob.Card != nil:
+			if ob.Card != nil {
 				_, _ = ch.SendCard(ctx, ob)
-			default:
+			} else {
 				_ = ch.Send(ctx, ob)
 			}
 		}
@@ -249,49 +249,43 @@ func newRuntimeShim(
 	}
 }
 
-// ─── testChannelWrap (test-only chatsession.Channel adapter) ────────
+// ─── testChannelWrap (test-only outbound.Emitter adapter) ──────────
 //
-// Mirrors cmd/nightme/channel_wrap.go:channelWrap — translates
-// gateway.Channel → chatsession.Channel. Lives in this test file
-// so we don't drag in cmd/nightme (which is package main, not
-// importable from tests). Once the runtime shim is extracted to a
-// shared package, this helper goes away and the test imports the
-// shared one.
+// Wraps a channel.Channel into an outbound.Emitter so the e2e
+// test can exercise the chat-session-bound Emitter path without
+// dragging in the runtime wiring from cmd/nightme. PATCH semantics
+// are encoded as Kind=OutCardPatch (the wrap just forwards to
+// Send with the same Kind).
 
 type testChannelWrap struct {
-	ch gateway.Channel
+	ch channel.Channel
 }
 
-func (w *testChannelWrap) Send(ctx context.Context, msg chatsession.OutboundMessage) error {
-	return w.ch.Send(ctx, gateway.OutboundMessage{
-		ChatID:  msg.ChatID,
-		Text:    msg.Text,
-		ReplyTo: msg.ReplyTo,
-	})
+func (w *testChannelWrap) Send(ctx context.Context, msg gateway.OutboundMessage) error {
+	return w.ch.Send(ctx, msg)
 }
 
-func (w *testChannelWrap) SendCard(ctx context.Context, msg chatsession.OutboundMessage) (string, error) {
-	if err := w.ch.Send(ctx, gateway.OutboundMessage{
-		ChatID:  msg.ChatID,
-		Text:    msg.Text,
-		ReplyTo: msg.ReplyTo,
-		Kind:    gateway.OutCard,
-	}); err != nil {
+func (w *testChannelWrap) SendCard(ctx context.Context, msg gateway.OutboundMessage) (string, error) {
+	if err := w.ch.Send(ctx, msg); err != nil {
 		return "", err
 	}
 	return "", nil
 }
 
-func (w *testChannelWrap) Patch(ctx context.Context, msg chatsession.OutboundMessage) error {
-	return w.ch.Send(ctx, gateway.OutboundMessage{
-		ChatID:  msg.ChatID,
-		Text:    msg.PatchResult,
-		ReplyTo: msg.PatchBotMsgID,
-		Kind:    gateway.OutCardPatch,
-	})
-}
+var _ outbound.Emitter = (*testChannelWrap)(nil)
 
-var _ chatsession.Channel = (*testChannelWrap)(nil)
+// noopEmitter is a do-nothing outbound.Emitter used by tests
+// that drive the gateway but don't care about outbound flow
+// (the e2e harness already wires the real wrap above for the
+// chat-session path; this one is for the gateway's own reference).
+type noopEmitter struct{}
+
+func (noopEmitter) Send(context.Context, gateway.OutboundMessage) error {
+	return nil
+}
+func (noopEmitter) SendCard(context.Context, gateway.OutboundMessage) (string, error) {
+	return "", nil
+}
 
 // ─── Wiring helper ───────────────────────────────────────────────────
 
@@ -307,22 +301,17 @@ type wiredHarness struct {
 func newWiredHarness(t *testing.T) *wiredHarness {
 	t.Helper()
 
-	// Echo Channel (gateway.Channel impl). nil writer — the test
+	// Echo Channel (channel.Channel impl). nil writer — the test
 	// inspects Record() rather than stdout.
 	echoCh := echo.New("echo", nil)
 
-	// Manager + spawner. Mirror run.go: WithChannelResolver wraps
-	// the gateway.Channel as a chatsession.Channel so every new
-	// ChatSession gets bound at GetOrCreate time. This replaces
-	// the old placeholder (`mgr.WithChannelResolver(nil)` +
-	// "runtime shim binds via WithChannel instead" — which the
-	// runtime shim never actually did, silently dropping every
-	// slash command reply; see the 2026-08-09 regression).
 	mgr := chatsession.NewManager()
 	mgr.WithSpawner(newEchoSpawner())
-	mgr.WithChannelResolver(func(string) chatsession.Channel {
-		return &testChannelWrap{ch: echoCh}
-	})
+	// Wire the same Emitter for every new ChatSession via
+	// WithEmitter. The Emitter is the test ChannelWrap above —
+	// every Send ends up at the echo channel so Record() can be
+	// inspected post-dispatch.
+	mgr.WithEmitter(&testChannelWrap{ch: echoCh})
 
 	// Slash command registry: just /new for this test. The factory
 	// takes *chatsession.Manager; the test exercises both the
@@ -333,7 +322,12 @@ func newWiredHarness(t *testing.T) *wiredHarness {
 
 	// Gateway with a no-op MessageDispatcher (the test only
 	// exercises the slash command path, never the agent loop).
-	gw := gateway.New(func(context.Context, *gateway.InboundMessage) error { return nil })
+	// The Emitter is the same wrap that Manager.WithEmitter
+	// already installed — every slash reply goes through it
+	// twice (once via the runtime shim's cs.Emitter() and once
+	// in case any inline channel adapter path is exercised).
+	noop := &gatewaytest.NoopEmitter{}
+	gw := gateway.New(func(context.Context, *gateway.InboundMessage) error { return nil }, noop)
 	gw.WithCommander(newRuntimeShim(mgr, reg, "echo"))
 
 	return &wiredHarness{echoCh: echoCh, mgr: mgr, gw: gw}
@@ -366,8 +360,8 @@ func (h *wiredHarness) driveSlash(t *testing.T, msg *gateway.InboundMessage, wai
 // for the 2026-08-09 silent-drop bug.
 //
 // The runtime shim (cmd/nightme/run.go:447-454) guards every slash
-// command reply on `cs.Channel() != nil`. With the buggy wiring
-// (`mgr.WithChannelResolver(nil)` + no `cs.WithChannel` call), the
+// command reply on `cs.Emitter() != nil`. With the buggy wiring
+// (`mgr.WithEmitter(testEmitter)` + no `cs.WithChannel` call), the
 // guard is false for every chat and the reply is silently dropped.
 //
 // Driving /new without a selected cwd exercises the cheapest path:
@@ -390,7 +384,7 @@ func TestSlash_E2E_NewReply_ReachesEchoChannel(t *testing.T) {
 		t.Fatal("no OutboundMessage captured on echo channel within 2s — " +
 			"slash command reply was silently dropped. " +
 			"This is the 2026-08-09 regression: the runtime shim never " +
-			"binds cs.WithChannel(...) so cs.Channel() returns nil and " +
+			"binds cs.WithEmitter(...) so cs.Emitter() returns nil and " +
 			"every /cmd reply is dropped by the `ch != nil` guard at " +
 			"cmd/nightme/run.go:447-454.")
 	}

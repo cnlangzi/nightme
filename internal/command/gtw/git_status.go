@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // GitStatusSnapshot is the parsed result of a single
@@ -36,15 +38,14 @@ import (
 // F-48 (follow-up to F-45): runtime stamps one of these on every
 // OutboundMessage.SessionContext that flows to a main-chat footer
 // render site. See docs/feat/F-45-session-footer.md §1.7.
-type GitStatusSnapshot struct {
-	Branch        string
-	Uncommitted   int
-	Untracked     int
-	AheadOfRemote int
-	HasUpstream   bool
-}
+//
+// The canonical definition lives in internal/messages so the wire
+// types package does not need to import the gtw package (avoids
+// a gtw → messages → chatsession → gtw cycle). Existing gtw
+// callers keep working via this alias.
+type GitStatusSnapshot = messages.GitStatusSnapshot
 
-// CollectStatus runs `git -C <dir> status --porcelain --branch`
+// CollectReadiness runs `git -C <dir> status --porcelain --branch`
 // and parses the output into a GitStatusSnapshot.
 //
 // Returns (nil, nil) when:
@@ -62,7 +63,29 @@ type GitStatusSnapshot struct {
 // `gtw.ExecGitRunner{}`, tests pass a fakeGit with canned
 // porcelain output. This avoids any package-level mutable state
 // or test-only hooks in production code paths.
-func CollectStatus(ctx context.Context, dir string, git GitRunner) (*GitStatusSnapshot, error) {
+// CollectReadiness runs `git -C <dir> status --porcelain --branch`
+// and parses the output into a GitStatusSnapshot.
+//
+// Returns (nil, nil) when:
+//   - dir is not inside a git working tree
+//   - the porcelain output is empty / malformed
+//   - the underlying git invocation fails for any reason
+//
+// The footer render path treats (nil, nil) as "no git segment".
+// We intentionally do NOT propagate errors upward — the footer
+// is decorative metadata, not a correctness-critical signal, and
+// blocking an outbound message because `git status` is slow or
+// broken would be the wrong trade-off (chat UX > git visibility).
+//
+// `git` is the runner abstraction; production passes
+// `gtw.ExecGitRunner{}`, tests pass a fakeGit with canned
+// porcelain output. This avoids any package-level mutable state
+// or test-only hooks in production code paths.
+//
+// F-57: this is the single source of truth for the /gtw push and
+// /gtw pr readiness gates. Both commands call it at entry; see
+// docs/feat/F-57-gtw-push-pr-readiness.md §2.2.
+func CollectReadiness(ctx context.Context, dir string, git GitRunner) (*GitStatusSnapshot, error) {
 	out, stderr, err := git.Run(ctx, dir, "status", "--porcelain", "--branch",
 		"--untracked-files=normal")
 	if err != nil {
@@ -113,19 +136,20 @@ func parsePorcelainBranchStatus(out string) *GitStatusSnapshot {
 	switch {
 	case header == "HEAD (no branch)":
 		// Fresh repo with zero commits — git refuses to name a
-		// branch. Leave Branch empty (footer renders "⎇ ?") and
+		// branch. Leave Branch empty (footer renders "⎇ ") and
 		// HasUpstream false.
 		snap.HasUpstream = false
 	case strings.HasPrefix(header, "(HEAD detached at"):
 		// Detached HEAD on a commit / remote ref — no branch name
-		// we can show. Branch stays empty; footer renders "⎇ ?".
+		// we can show. Branch stays empty; footer renders "⎇ ".
 		snap.HasUpstream = false
 	default:
 		// Active branch line: "name[...upstream[ [ahead N][, behind M]]]".
-		name, hasUpstream, ahead := parseBranchHeader(header)
+		name, hasUpstream, ahead, behind := parseBranchHeader(header)
 		snap.Branch = name
 		snap.HasUpstream = hasUpstream
 		snap.AheadOfRemote = ahead
+		snap.BehindRemote = behind
 	}
 
 	// Parse status entries (remaining lines).
@@ -147,6 +171,13 @@ func parsePorcelainBranchStatus(out string) *GitStatusSnapshot {
 			// --ignored which we don't pass.
 			continue
 		default:
+			// F-57: distinguish conflict entries (UU/AA/DD/AU/UA/DU/UD)
+			// from ordinary uncommitted edits. push and pr both hard-refuse
+			// when HasConflicts; the readiness gate uses the flag instead of
+			// re-detecting in dispatchPush/PR.
+			if isConflictXY(line) {
+				snap.HasConflicts = true
+			}
 			// Everything else counts as "uncommitted": modified
 			// (M), staged add/delete/rename/copy (A/D/R/C),
 			// and unmerged conflict entries (UU, AA, DD, etc.).
@@ -154,6 +185,37 @@ func parsePorcelainBranchStatus(out string) *GitStatusSnapshot {
 		}
 	}
 	return snap
+}
+
+// isConflictXY reports whether a porcelain status line's first two
+// characters indicate an unresolved merge/rebase conflict.
+//
+// Git's conflict matrix:
+//
+//	XY where X != ' ' and Y != ' ' and XY != "??" → conflict
+//
+// Specifically: any position is U, A, or D (with the same set on the
+// other side or another conflict marker). Mirrors the pattern in
+// push.go::detectConflicts so a single source of truth governs the
+// conflict detection regex across the package.
+func isConflictXY(line string) bool {
+	if len(line) < 2 {
+		return false
+	}
+	x, y := line[0], line[1]
+	if x == ' ' || y == ' ' {
+		return false
+	}
+	// Single source of truth for the conflict matrix: both X and
+	// Y must be U, A, or D. '??' (untracked) and any other
+	// porcelain marker fall out automatically — the for-loop is
+	// the predicate.
+	for _, c := range []byte{x, y} {
+		if c != 'U' && c != 'A' && c != 'D' {
+			return false
+		}
+	}
+	return true
 }
 
 // parseBranchHeader extracts (localBranchName, hasUpstream,
@@ -167,7 +229,7 @@ func parsePorcelainBranchStatus(out string) *GitStatusSnapshot {
 // Returns (name, false, 0) when the header doesn't match the
 // expected shape (defensive — git could theoretically add new
 // forms).
-func parseBranchHeader(header string) (name string, hasUpstream bool, ahead int) {
+func parseBranchHeader(header string) (name string, hasUpstream bool, ahead, behind int) {
 	// Strip the optional " [ahead N[, behind M]]" suffix.
 	headerMain := header
 	if idx := strings.Index(headerMain, " ["); idx >= 0 {
@@ -178,15 +240,20 @@ func parseBranchHeader(header string) (name string, hasUpstream bool, ahead int)
 		// Inside the brackets: "ahead N" / "behind M" / "ahead N, behind M".
 		for _, part := range strings.Split(suffix, ", ") {
 			part = strings.TrimSpace(part)
-			if rest, ok := strings.CutPrefix(part, "ahead "); ok {
-				if n, err := strconv.Atoi(strings.TrimSpace(rest)); err == nil {
+			switch {
+			case strings.HasPrefix(part, "ahead "):
+				if n, err := strconv.Atoi(strings.TrimSpace(part[len("ahead "):])); err == nil {
 					ahead = n
 				}
+			case strings.HasPrefix(part, "behind "):
+				// F-57: surfaced so the readiness gate can detect
+				// "remote moved forward, local is stale" — a
+				// senior-dev should pull --rebase before opening
+				// a PR from a stale branch.
+				if n, err := strconv.Atoi(strings.TrimSpace(part[len("behind "):])); err == nil {
+					behind = n
+				}
 			}
-			// "behind M" intentionally not surfaced — the user
-			// asked only for unpushed (ahead), not behind. If we
-			// ever surface "behind", add a similar parsing branch
-			// here and a new field on GitStatusSnapshot.
 		}
 		headerMain = headerMain[:idx]
 	}
@@ -198,7 +265,7 @@ func parseBranchHeader(header string) (name string, hasUpstream bool, ahead int)
 	}
 
 	name = strings.TrimSpace(headerMain)
-	return name, hasUpstream, ahead
+	return name, hasUpstream, ahead, behind
 }
 
 // CollectPR resolves the workspace's remote + provider and asks
@@ -218,7 +285,7 @@ func parseBranchHeader(header string) (name string, hasUpstream bool, ahead int)
 // `head`; the caller (AgentSession.refreshPRRef) supplies the
 // already-parsed branch. Splitting the responsibility avoids
 // the stamp path paying for two `git status --porcelain
-// --branch` invocations per refresh (CollectStatus in the
+// --branch` invocations per refresh (CollectReadiness in the
 // stamp path + CollectPR via the cache goroutine).
 //
 // `deps.Detect` follows the same fallback rule the rest of

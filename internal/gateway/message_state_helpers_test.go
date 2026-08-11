@@ -5,12 +5,13 @@ import (
 	"log"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // emitMessageState is the v1.3 (F-31) legacy translation path
 // preserved as a test helper. Production code uses the runtime's
 // MessageStateBus subscriber (cmd/nightme/run.go) which adds the
-// F-48 SessionContext stamp; this helper is the un-stamped
+// F-48 StatusBar stamp; this helper is the un-stamped
 // equivalent, kept around so tests that target the translation
 // logic itself don't have to wire a full ChatSession.
 //
@@ -30,11 +31,11 @@ func emitMessageState(gw *Router, chatID, userMsgID string, state agent.MessageS
 		log.Printf("gateway: emitMessageState no channel for chat=%s, dropping", chatID)
 		return
 	}
-	out := OutboundMessage{
-		Kind:    OutMessageState,
+	out := messages.OutboundMessage{
+		Kind:    messages.OutMessageState,
 		ChatID:  chatID,
 		ReplyTo: userMsgID, // anchor for Typing placeholder + AddReaction target
-		MessageState: &MessageStatePayload{
+		MessageState: &messages.MessageStatePayload{
 			State:     state,
 			MessageID: userMsgID,
 		},

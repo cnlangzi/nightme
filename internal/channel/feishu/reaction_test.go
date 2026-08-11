@@ -8,7 +8,7 @@ import (
 	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 func TestHandleActionCreated_TranslatesToInboundMessage(t *testing.T) {
@@ -44,7 +44,7 @@ func TestHandleActionCreated_TranslatesToInboundMessage(t *testing.T) {
 		t.Fatalf("handleReactionCreated: %v", err)
 	}
 
-	var got gateway.InboundMessage
+	var got messages.InboundMessage
 	select {
 	case got = <-a.Incoming():
 	case <-time.After(time.Second):

@@ -1,6 +1,6 @@
 // Package feishu — usage footer rendering (F-45).
 //
-// formatSessionFooter composes the SessionContext into a set of
+// formatStatusBar composes the StatusBar into a set of
 // short markdown lines that the Feishu adapter appends to the
 // body of every main-chat OutboundMessage (OutReply / OutResult /
 // OutTaskCreate / OutTaskUpdate). See docs/feat/F-45-session-footer.md
@@ -75,10 +75,10 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/command/gtw"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-// formatSessionFooterLines returns the SessionContext footer as a
+// formatStatusBarLines returns the StatusBar footer as a
 // slice of non-empty lines suitable for Feishu Card 2.0
 // rendering, where each line maps to one plain_text element
 // inside a `note` or `div` block (Feishu plain_text does NOT
@@ -118,9 +118,9 @@ import (
 //   - Line 1: Agent omitted when "". Model omitted when "".
 //     SessionID omitted when "" (F-56). The leading-separator
 //     caveat (`🤖: · <sid>` when only SessionID is set) is
-//     locked by TestFormatSessionFooterLines_SessionIDOnly;
+//     locked by TestFormatStatusBarLines_SessionIDOnly;
 //     layout stays as-is per §1.10 — the materialize condition
-//     in sessionContextInto guarantees at least one of Agent
+//     in stampFromAS guarantees at least one of Agent
 //     / Model / SessionID / GitStatus / Usage is non-empty in
 //     production, so the leading-`·` only surfaces in tests.
 //   - Line 2 segments:
@@ -148,54 +148,83 @@ import (
 //
 // Stable across re-renders — same input always produces the same
 // slice, so the receipt PATCH diff stays minimal.
-func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
-	if ctx == nil {
+// formatStatusBarLines returns the StatusBar footer as a
+// slice of non-empty lines suitable for Feishu Card 2.0
+// rendering, where each line maps to one plain_text element
+// inside a `note` or `div` block (Feishu plain_text does NOT
+// honour \n for line breaks within a single element — multi-line
+// needs multiple elements). Returns nil when there is nothing
+// meaningful to show so callers can skip footer emission cheaply.
+//
+// Reads three sub-bars on sb (each independently nil-omitted):
+//   - AgentBar → Line 1 identity (🤖: Agent · Model · SessionID).
+//     Each segment omitted when its string field is empty
+//     (F-45 §1.10 zero-omit; F-56 for the SessionID segment).
+//   - UsageBar → Line 2 usage (�:「 new / cache / out · X% (window) · $cost 」).
+//     F-55.1 split: `in = new + cache`, positions are the
+//     meaning; F-55 appends (window) for the denominator;
+//     pct > 100% renders verbatim without clamp or warning.
+//     Each segment omitted when its data is zero/missing.
+//   - GitBar → Line 3 workspace (📁: ws · ⎇ branch · ↑ N · ? N · � N · PR).
+//     Always present when the chat has a workspace; see
+//     formatGitBar for the per-segment omit rules.
+//
+// Token count formatting (F-45 §1.6):
+//   - < 1000:   raw number ("234")
+//   - >= 1000, < 1_000_000: "X.Xk" with one decimal ("12.3k")
+//   - >= 1_000_000: "X.XM" with one decimal ("1.4M")
+//
+// Stable across re-renders — same input always produces the same
+// slice, so the receipt PATCH diff stays minimal.
+//
+// Pre-rename this was `formatSessionFooterLines(ctx *SessionContext)`
+// with the flat struct; renamed to operate on the sub-bar
+// StatusBar struct.
+func formatStatusBarLines(sb *messages.StatusBar) []string {
+	if sb == nil {
 		return nil
 	}
 	var lines []string
 
-	// Line 1: identity (🤖: Agent · Model · SessionID).
-	idParts := []string{"🤖:"}
-	if ctx.Agent != "" {
-		idParts = append(idParts, ctx.Agent)
-	}
-	if ctx.Model != "" {
-		// Use middle-dot · between Agent and Model — same separator
-		// line 2 uses between token segments, so the identity line
-		// reads as a consistent footer taxonomy rather than two
-		// different rhythms ("🤖: claude opus-4-5" → "🤖: claude ·
-		// opus-4-5"). F-37 / F-44 footer convention; matches the
-		// rest of the line-2 separator family.
-		idParts = append(idParts, "·", ctx.Model)
-	}
-	// F-56: append the agent's own session id (Claude Code's
-	// system/init.session_id, ACP's session/new response id,
-	// codex's thread.id, etc.) as a trailing identity segment.
-	// Each segment is omitted independently when empty; a
-	// SessionID-only stamp renders as "🤖: · <sid>"
-	// (leading-separator caveat locked by
-	// TestFormatSessionFooterLines_SessionIDOnly + F-45 §1.10).
-	// The leading colon after 🤖 matches the 💰:「」 taxonomy
-	// on Line 2 and the 📁: on Line 3 so the three footer lines
-	// share a single category-prefix shape.
-	if ctx.SessionID != "" {
-		idParts = append(idParts, "·", ctx.SessionID)
-	}
-	// F-49 compaction tracking removed: the "· 🗜 N" segment is
-	// no longer rendered. The runtime dropped its
-	// compactionCount bookkeeping; bridges no longer emit
-	// EventAgentCompaction. Line 1 retains Agent · Model · SessionID.
-	if len(idParts) > 1 {
-		lines = append(lines, strings.Join(idParts, " "))
+	// Line 1: identity (�: Agent · Model · SessionID).
+	// Rendered from AgentBar (optional). Each segment is
+	// omitted independently when empty; an AgentBar with only
+	// SessionID set renders as "🤖: · <sid>" (leading-separator
+	// caveat locked by
+	// TestFormatStatusBarLines_AgentBarSessionIDOnly +
+	// F-45 §1.10). The leading colon after 🤖 matches the 💰:「」
+	// taxonomy on Line 2 and the 📁: on Line 3 so the three
+	// footer lines share a single category-prefix shape.
+	if ab := sb.AgentBar; ab != nil {
+		idParts := []string{"🤖:"}
+		if ab.Agent != "" {
+			idParts = append(idParts, ab.Agent)
+		}
+		if ab.Model != "" {
+			// Use middle-dot · between Agent and Model — same
+			// separator Line 2 uses between token segments, so
+			// the identity line reads as a consistent footer
+			// taxonomy rather than two different rhythms
+			// ("🤖: claude opus-4-5" → "🤖: claude · opus-4-5").
+			// F-37 / F-44 footer convention; matches the rest
+			// of the line-2 separator family.
+			idParts = append(idParts, "·", ab.Model)
+		}
+		// F-56: append the agent's own session id as a trailing
+		// identity segment.
+		if ab.SessionID != "" {
+			idParts = append(idParts, "·", ab.SessionID)
+		}
+		// F-49 compaction tracking removed: the "· 🗜 N"
+		// segment is no longer rendered. Line 1 retains Agent ·
+		// Model · SessionID.
+		if len(idParts) > 1 {
+			lines = append(lines, strings.Join(idParts, " "))
+		}
 	}
 
 	// Line 2: usage stats (💰:「 in / out · X% · $cost 」).
-	//
-	// Renders the per-turn Usage snapshot stamped on the
-	// OutboundMessage (ctx.Usage, populated by
-	// gateway.Translate from AgentResultEvent.Usage / AgentDoneEvent.Usage
-	// on the bridge event). The runtime is a passive
-	// pass-through — it does NOT aggregate across turns.
+	// Rendered from UsageBar (optional).
 	//
 	// The "in" stat folds the three input-side counters per the
 	// Tencent YB doc convention (uncached + cache_creation +
@@ -214,59 +243,54 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 	// result.total_cost_usd) — forwarded verbatim, NEVER
 	// recomputed client-side.
 	//
-	// When ctx.Usage is nil (e.g. OutReply chunks during
+	// When UsageBar is nil (e.g. OutReply chunks during
 	// streaming have no usage), the entire Line 2 is omitted
 	// (F-45 §1.6 zero-omit). Each segment is dropped
 	// independently with its owning "·" separator; the final
 	// 「」 enclosure is added only when at least one segment is
 	// present.
-	if u := ctx.Usage; u != nil {
+	if ub := sb.UsageBar; ub != nil {
 		usageParts := make([]string, 0, 3)
-		// F-55.1: split `in` into `new` (tokens not from cache this
-		// turn: input_tokens + cache_creation_input_tokens) and
-		// `cache` (tokens read from existing cache:
+		// F-55.1: split `in` into `new` (tokens not from cache
+		// this turn: input_tokens + cache_creation_input_tokens)
+		// and `cache` (tokens read from existing cache:
 		// cache_read_input_tokens). Per Anthropic docs the three
-		// input-side fields are MUTUALLY EXCLUSIVE — each token is
-		// counted exactly once. nightme does NOT recompute pct on
-		// the split — Doc 1 formula still uses
+		// input-side fields are MUTUALLY EXCLUSIVE — each token
+		// is counted exactly once. nightme does NOT recompute
+		// pct on the split — Doc 1 formula still uses
 		// (new + cache + out) / contextWindow.
 		//
 		// F-55.1 render: three numbers separated by " / ", no
-		// labels. The position (new / cache / out) is the meaning.
-		// Each segment independently omitted when zero (F-45 §1.6
-		// zero-omit); when cache == 0 the layout collapses to
-		// `new / out` (the pre-F-55.1 format). User can read at a
-		// glance whether a turn is dominated by cache hits (e.g.
-		// MiniMax `cache_read_input_tokens` reporting cumulative
-		// session totals — see F-55 §1.2).
-		new := u.InputTokens + u.CacheCreationInputTokens
-		cacheRead := u.CacheReadInputTokens
+		// labels. The position (new / cache / out) is the
+		// meaning. Each segment independently omitted when zero
+		// (F-45 §1.6 zero-omit); when cache == 0 the layout
+		// collapses to `new / out` (the pre-F-55.1 format).
+		newTokens := ub.InputTokens + ub.CacheCreationInputTokens
+		cacheRead := ub.CacheReadInputTokens
 		tokens := make([]string, 0, 3)
-		if new > 0 {
-			tokens = append(tokens, abbrevTokens(new))
+		if newTokens > 0 {
+			tokens = append(tokens, abbrevTokens(newTokens))
 		}
 		if cacheRead > 0 {
 			tokens = append(tokens, abbrevTokens(cacheRead))
 		}
-		if u.OutputTokens > 0 {
-			tokens = append(tokens, abbrevTokens(u.OutputTokens))
+		if ub.OutputTokens > 0 {
+			tokens = append(tokens, abbrevTokens(ub.OutputTokens))
 		}
 		if len(tokens) > 0 {
 			usageParts = append(usageParts, strings.Join(tokens, " / "))
 		}
-		if u.ContextWindowPct > 0 {
-			// F-55: append `(window)` after X% so the user can see
-			// the denominator and judge upstream compatibility-layer
-			// mismatches themselves (e.g. `101.6% (200k)` against an
-			// actual 1M model). nightme does NOT clamp / catalog /
-			// override — CLI Agent 报什么就显示什么,错了让用户
-			// 自己计算. One decimal place: 99.5% vs 100.0% is a
-			// different signal to the user, and "%.0f%%" would
-			// round 99.6 to "100%" misleadingly.
-			usageParts = append(usageParts, fmt.Sprintf("%.1f%% (%s)", u.ContextWindowPct, abbrevWindow(u.ContextWindow)))
+		if ub.ContextWindowPct > 0 {
+			// F-55: append `(window)` after X% so the user can
+			// see the denominator and judge upstream
+			// compatibility-layer mismatches themselves.
+			// One decimal place: 99.5% vs 100.0% is a different
+			// signal to the user, and "%.0f%%" would round
+			// 99.6 to "100%" misleadingly.
+			usageParts = append(usageParts, fmt.Sprintf("%.1f%% (%s)", ub.ContextWindowPct, abbrevWindow(ub.ContextWindow)))
 		}
-		if u.CostUSD > 0 {
-			usageParts = append(usageParts, fmt.Sprintf("$%.3f", u.CostUSD))
+		if ub.CostUSD > 0 {
+			usageParts = append(usageParts, fmt.Sprintf("$%.3f", ub.CostUSD))
 		}
 		if len(usageParts) > 0 {
 			lines = append(lines, "💰:「 "+strings.Join(usageParts, " · ")+" 」")
@@ -274,86 +298,81 @@ func formatSessionFooterLines(ctx *gateway.SessionContext) []string {
 	}
 
 	// Line 3 (F-48 + F-49): git tracking — workspace · branch ·
-	// dirty counts · PR number. formatGitLine folds the PR / MR
-	// number in as its last segment (when present) so the footer
-	// stays at three lines regardless of PR state — see the
-	// formatGitLine doc for why we keep the PR number on the
-	// workspace row rather than on its own line. Returns ""
-	// when ctx.Workspace is empty, ctx.GitStatus is nil, or all
-	// sub-segments omit — in which case the entire line drops
-	// (including the PR number, by design: a PR number without a
-	// git workspace is a stale cache state we don't surface on
-	// its own row).
-	if gl := formatGitLine(ctx); gl != "" {
+	// dirty counts · PR number. Rendered from GitBar (always
+	// present when the chat has a workspace). formatGitBar
+	// folds the PR / MR number in as its last segment (when
+	// present) so the footer stays at three lines regardless
+	// of PR state — see the formatGitBar doc for why we keep
+	// the PR number on the workspace row rather than on its
+	// own line. Returns "" when sb.GitBar is nil OR its
+	// Workspace is empty OR GitStatus is nil OR all sub-
+	// segments omit — in which case the entire line drops
+	// (including the PR number, by design: a PR number without
+	// a git workspace is a stale cache state we don't surface
+	// on its own row).
+	if gl := formatGitBar(sb.GitBar); gl != "" {
 		lines = append(lines, gl)
 	}
 
 	return lines
 }
 
-// formatPRSegment renders the PR / MR reference as the LAST
-// segment of the workspace footer line (folded in from a
-// dedicated line that earlier revisions used).
-// Returns "" when there is nothing meaningful to show — caller
-// drops the trailing segment silently so first-stamp / no-PR
-// chats render no different from before.
+// formatPRSegment renders the trailing `[#N](url)` PR / MR
+// segment of the workspace footer line. Operates on GitBar
+// (pre-rename: the flat StatusContext). Reads gb.PullRequest
+// and returns "" when nil / Number<=0 / URL empty.
 //
-// Output (when non-empty):
+// Returns "" also when gb is nil (caller drops the trailing
+// segment silently so first-stamp / no-PR chats render no
+// different from before).
 //
-//	[#42](https://github.com/cnlangzi/nightme/pull/42)
+// The "no PR yet" case is indistinguishable from "lookup
+// failed" by design — chat-side decoration is the wrong place
+// to surface a transient network / auth failure.
 //
-// The [#N](url) form is markdown link syntax. lark_md renders
-// just `#N` as the link text (with platform-native link colour
+// Markdown link syntax (`[#N](url)`): lark_md renders just
+// `#N` as the link text (with platform-native link colour
 // and click behaviour) while the rest of the workspace row
 // stays inside the surrounding <font color='grey'> wrap.
-// Empirically verified on current Feishu (2026-08, see
-// pr_render_compare_test.go for the historical A/B harness) —
-// lark_md handles `[..](..)` inside <font> correctly. The
-// earlier cardFooterElements `](` bypass heuristic was removed
-// because it was solving a problem that doesn't exist.
+// Verified on Feishu 2026-08 (pr_render_compare_test.go has
+// the historical A/B harness).
 //
-// No `🔗:` emoji+colon prefix on purpose: the workspace row's
+// No `�:` emoji+colon prefix on purpose: the workspace row's
 // 📁: prefix already establishes "this row is git metadata",
-// and a secondary emoji on the PR tile was decorative noise.
-// The link text itself (`#N`) is enough for a reader to
-// recognise "this is the open PR for the current branch" —
-// and it's clickable, which is the actual signal of "this is
-// a link". Verified against the live Feishu client (2026-08,
-// via the historical `cmd/send-test-cards/` harness that was
-// removed in favour of pr_render_compare_test.go).
-//
-// Returns "" when ctx == nil or ctx.PullRequest is nil /
-// Number <= 0 / URL empty. The "no PR yet" case is
-// indistinguishable from "lookup failed" by design — chat-side
-// decoration is the wrong place to surface a transient
-// network / auth failure.
-func formatPRSegment(ctx *gateway.SessionContext) string {
-	if ctx == nil {
+// and a secondary emoji on the PR tile is decorative noise.
+// The link text (`#N`) is enough for a reader to recognise
+// "this is the open PR for the current branch" — and it's
+// clickable, which is the actual signal of "this is a link".
+func formatPRSegment(gb *messages.GitStatusBar) string {
+	if gb == nil {
 		return ""
 	}
-	pr := ctx.PullRequest
+	pr := gb.PullRequest
 	if pr == nil || pr.Number <= 0 || pr.URL == "" {
 		return ""
 	}
 	return fmt.Sprintf("[#%d](%s)", pr.Number, pr.URL)
 }
 
-// formatSessionFooter joins formatSessionFooterLines with "\n"
-// for callers that need a single string (OutReply / OutResult
-// orphan / overflow paths where the footer is appended to the
-// reply text rather than emitted as a card element). Returns ""
-// when there is nothing to show.
+// formatStatusBar joins formatStatusBarLines with "\n" for
+// callers that want a single string instead of a slice (e.g.
+// the Feishu receipt's plain-text path, where the footer is
+// appended to the reply text rather than emitted as a card
+// element). Returns "" when there is nothing to show.
 //
 // The string form is useful for plain-text / markdown rendering
 // paths where \n is honoured natively; the Feishu receipt card
-// path uses formatSessionFooterLines directly because plain_text
+// path uses formatStatusBarLines directly because plain_text
 // elements do NOT honour \n within a single element.
-func formatSessionFooter(ctx *gateway.SessionContext) string {
-	return strings.Join(formatSessionFooterLines(ctx), "\n")
+//
+// Pre-rename this was `formatSessionFooter`. Renamed for the
+// same reason as formatSessionFooterLines → formatStatusBarLines.
+func formatStatusBar(sb *messages.StatusBar) string {
+	return strings.Join(formatStatusBarLines(sb), "\n")
 }
 
 // abbrevTokens formats a token count into a compact human-readable
-// string. Used only by formatSessionFooter; lives here so the
+// string. Used only by formatStatusBar; lives here so the
 // formatting policy is in one place (test coverage in
 // usage_footer_test.go).
 //
@@ -383,7 +402,7 @@ func abbrevTokens(n int) string {
 // helpers exist as separate symbols so the formatting policy is
 // in one place per kind (test coverage in usage_footer_test.go).
 //
-// F-55: used by formatSessionFooterLines to render the `(window)`
+// F-55: used by formatStatusBarLines to render the `(window)`
 // segment alongside `X%` so the user can read the denominator and
 // judge upstream compatibility-layer mismatches themselves.
 //
@@ -469,7 +488,7 @@ func formatWorkspacePath(absPath string) string {
 	}
 }
 
-// formatGitLine renders footer line 3 — the per-stamp git status
+// formatGitBar renders footer line 3 — the per-stamp git status
 // snapshot, with the PR / MR reference folded in as the LAST
 // segment — and returns "" when there is nothing meaningful to
 // show (no Workspace, no GitStatus, no git segment).
@@ -506,25 +525,38 @@ func formatWorkspacePath(absPath string) string {
 // Returns "" when ctx == nil or ctx.GitStatus == nil (caller
 // drops the line). Detached HEAD renders the branch segment as
 // "?" — see CollectReadiness / parsePorcelainBranchStatus.
-func formatGitLine(ctx *gateway.SessionContext) string {
-	if ctx == nil {
+// formatGitBar renders the Line 3 (workspace · git · PR) of
+// the Feishu status bar footer. Operates on the GitBar
+// sub-struct (always populated when the chat has a workspace
+// — pre-rename this was the flat StatusBar).
+//
+// Returns "" (line dropped) when:
+//   - gb is nil (the chat has no workspace at all);
+//   - gb.Workspace is "" (no path to render);
+//   - gb.GitStatus is nil (non-git workspace — "📁 <ws> · ⎇ ?"
+//     would imply Git tracking is available when it's not,
+//     caller couldn't collect because the workspace isn't a
+//     git repo, git is missing, or git failed). The "⎇ ?"
+//     rendering is reserved for detached HEAD inside an actual
+//     git repo (Branch=="" + GitStatus!=nil).
+//
+// F-48 documented contract (pre-rename):
+// "Workspace=='' OR GitStatus==nil → entire line omitted."
+// The new contract (post-rename) is structurally enforced by
+// the sub-bar design: GitBar is only attached to StatusBar
+// when the chat has a workspace, and the renderer drops the
+// line when GitStatus is nil.
+func formatGitBar(gb *messages.GitStatusBar) string {
+	if gb == nil {
 		return ""
 	}
-	if ctx.Workspace == "" {
+	if gb.Workspace == "" {
 		return ""
 	}
-	// Non-Git workspaces (Workspace set, GitStatus nil) must drop
-	// the entire line — rendering "📁 <ws> · ⎇ ?" would imply
-	// Git tracking is available when it's not (caller couldn't
-	// collect because the workspace isn't a git repo, git is
-	// missing, or git failed). F-48 documented contract:
-	// "Workspace=='' OR GitStatus==nil → entire line omitted."
-	// The "⎇ ?" rendering is reserved for detached HEAD inside
-	// an actual git repo (Branch=="" + GitStatus!=nil).
-	if ctx.GitStatus == nil {
+	if gb.GitStatus == nil {
 		return ""
 	}
-	ws := formatWorkspacePath(ctx.Workspace)
+	ws := formatWorkspacePath(gb.Workspace)
 	if ws == "" {
 		return ""
 	}
@@ -533,48 +565,49 @@ func formatGitLine(ctx *gateway.SessionContext) string {
 
 	// Branch segment (always present when line is shown).
 	branch := "?"
-	if ctx.GitStatus.Branch != "" {
-		branch = ctx.GitStatus.Branch
+	if gb.GitStatus.Branch != "" {
+		branch = gb.GitStatus.Branch
 	}
 	parts = append(parts, "⎇ "+branch)
 
-	if ctx.GitStatus.Uncommitted > 0 {
-		parts = append(parts, fmt.Sprintf("↑ %d", ctx.GitStatus.Uncommitted))
+	if gb.GitStatus.Uncommitted > 0 {
+		parts = append(parts, fmt.Sprintf("↑ %d", gb.GitStatus.Uncommitted))
 	}
-	if ctx.GitStatus.Untracked > 0 {
-		parts = append(parts, fmt.Sprintf("? %d", ctx.GitStatus.Untracked))
+	if gb.GitStatus.Untracked > 0 {
+		parts = append(parts, fmt.Sprintf("? %d", gb.GitStatus.Untracked))
 	}
 
 	// Upstream relationship: render `⇡ N` when the branch has
 	// upstream. Always render — including `⇡ 0` — so a clean
 	// worktree-with-upstream shows a visible "stamp worked"
 	// signal at the tail of the workspace row (see issue:
-// "既然有没有 commit, 为什么它下面没有显示那个数字呢"; the
+	// "既然有没有 commit, 为什么它下面没有显示那个数字呢"; the
 	// explicit 0 is the honest signal — the branch is in sync
 	// with its upstream).
-	if ctx.GitStatus.HasUpstream {
-		parts = append(parts, fmt.Sprintf("⇡ %d", ctx.GitStatus.AheadOfRemote))
+	if gb.GitStatus.HasUpstream {
+		parts = append(parts, fmt.Sprintf("⇡ %d", gb.GitStatus.AheadOfRemote))
 	}
 
 	// PR / MR tail — appended last so the line reads
 	// "workspace → branch → dirty counts → upstream → PR".
 	// See formatPRSegment doc for the omit rules and the
 	// plain-text / no-markdown-link rationale.
-	if pr := formatPRSegment(ctx); pr != "" {
+	if pr := formatPRSegment(gb); pr != "" {
 		parts = append(parts, pr)
 	}
 
 	// When the branch has no upstream AND the working tree is
-	// clean, drop a "local" marker so the footer doesn't silently
-	// end at "⎇ branch" — the user should see at a glance that
-	// this is an untracked branch, not a missing-data bug.
+	// clean, drop a "local" marker so the footer doesn't
+	// silently end at "⎇ branch" — the user should see at a
+	// glance that this is an untracked branch, not a
+	// missing-data bug.
 	//
 	// Order matters: the "local" marker renders AFTER the PR
 	// segment so the line still reads
 	// "workspace → branch → dirty counts → PR → local state".
-	if !ctx.GitStatus.HasUpstream &&
-		ctx.GitStatus.Uncommitted == 0 &&
-		ctx.GitStatus.Untracked == 0 {
+	if !gb.GitStatus.HasUpstream &&
+		gb.GitStatus.Uncommitted == 0 &&
+		gb.GitStatus.Untracked == 0 {
 		parts = append(parts, "local")
 	}
 
@@ -582,7 +615,7 @@ func formatGitLine(ctx *gateway.SessionContext) string {
 }
 
 // _ ensures the gtw import is recognised as "used" by the
-// compiler: formatGitLine accesses ctx.GitStatus typed as
+// compiler: formatGitBar accesses gb.GitStatus typed as
 // *gtw.GitStatusSnapshot but never writes `gtw.X` by name, so
 // Go's unused-import check (correctly) rejects the import
 // without an explicit reference. Field-type-only access doesn't

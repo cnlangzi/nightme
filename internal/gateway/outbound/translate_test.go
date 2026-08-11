@@ -5,10 +5,10 @@ import (
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
-// TestTranslate covers the AgentEvent → gateway.OutboundMessage mapping
+// TestTranslate covers the AgentEvent → messages.OutboundMessage mapping
 // for every EventKind that has its own OutboundKind (i.e. events
 // that actually emit something). Terminal / dropped kinds
 // (EventAgentDone, EventAgentError, default) are tested implicitly
@@ -22,14 +22,14 @@ import (
 
 func TestTranslate_EventText(t *testing.T) {
 	msg, ok := Translate("chat1", agent.AgentEvent{Kind: agent.EventAgentText, Text: "hello"})
-	if !ok || msg.Kind != gateway.OutReply || msg.Text != "hello" {
+	if !ok || msg.Kind != messages.OutReply || msg.Text != "hello" {
 		t.Errorf("got (%v, %v) text=%q, want (OutReply=true, hello)", msg.Kind, ok, msg.Text)
 	}
 }
 
 func TestTranslate_EventText_ThinkingPrefix(t *testing.T) {
 	msg, ok := Translate("chat1", agent.AgentEvent{Kind: agent.EventAgentText, Text: "[思考] thinking…"})
-	if !ok || msg.Kind != gateway.OutThinking || msg.Text != "thinking…" {
+	if !ok || msg.Kind != messages.OutThinking || msg.Text != "thinking…" {
 		t.Errorf("got kind=%v text=%q, want OutThinking / thinking…", msg.Kind, msg.Text)
 	}
 }
@@ -54,7 +54,7 @@ func TestTranslate_EventResult(t *testing.T) {
 	if !ok {
 		t.Fatal("expected translate to emit")
 	}
-	if msg.Kind != gateway.OutResult {
+	if msg.Kind != messages.OutResult {
 		t.Errorf("Kind = %v, want OutResult", msg.Kind)
 	}
 	if msg.Text != "完成" {
@@ -96,7 +96,7 @@ func TestTranslate_EventResult_ErrorKept(t *testing.T) {
 		Result: &agent.AgentResultEvent{Text: "", Subtype: "error_max_turns"},
 	}
 	msg, ok := Translate("chat1", in)
-	if !ok || msg.Kind != gateway.OutResult {
+	if !ok || msg.Kind != messages.OutResult {
 		t.Errorf("IsError=true should keep the event; got kind=%v ok=%v", msg.Kind, ok)
 	}
 }
@@ -124,7 +124,7 @@ func TestTranslate_EventResult_CoLocatesUsage(t *testing.T) {
 	if !ok {
 		t.Fatal("expected translate to emit")
 	}
-	if msg.Kind != gateway.OutResult {
+	if msg.Kind != messages.OutResult {
 		t.Errorf("Kind = %v, want OutResult", msg.Kind)
 	}
 	if msg.Usage == nil {
@@ -185,7 +185,7 @@ func TestTranslate_EventToolEnd_CarriesArgs(t *testing.T) {
 		},
 	}
 	msg, ok := Translate("chat1", in)
-	if !ok || msg.Kind != gateway.OutToolEnd {
+	if !ok || msg.Kind != messages.OutToolEnd {
 		t.Fatalf("got (%v, %v), want (OutToolEnd, true)", msg.Kind, ok)
 	}
 	if msg.Tool == nil {
@@ -211,7 +211,7 @@ func TestTranslate_EventAgentConnected(t *testing.T) {
 		Model:     "claude-sonnet-4-5",
 	}
 	msg, ok := Translate("chat1", in)
-	if !ok || msg.Kind != gateway.OutInit {
+	if !ok || msg.Kind != messages.OutInit {
 		t.Fatalf("got (%v, %v), want (OutInit, true)", msg.Kind, ok)
 	}
 	// §1.4 cleanup: init fields flow through the typed

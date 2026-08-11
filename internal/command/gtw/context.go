@@ -1,9 +1,10 @@
 package gtw
 
-// loadDispatchContext resolves the per-chat workspace for /gtw push
-// and /gtw pr. It returns either a populated Context (with one of
-// two fill strategies) or a ready-to-send *Result whose reply has
-// already been emitted via cs.Emitter().
+// loadDispatchContext resolves the per-chat workspace for
+// /gtw commit, /gtw push, and /gtw pr. It returns either a
+// populated Context (with one of two fill strategies) or a
+// ready-to-send *Result whose reply has already been emitted via
+// cs.Emitter().
 //
 // Two fill strategies:
 //
@@ -38,10 +39,11 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
-// loadDispatchContext returns the Context for /gtw push or /gtw pr
-// or an already-sent *Result on early-return errors. The caller
-// must check `res != nil` first; if non-nil, propagate the Result
-// verbatim and don't touch the (zero-value) Context.
+// loadDispatchContext returns the Context for /gtw commit,
+// /gtw push, or /gtw pr, or an already-sent *Result on
+// early-return errors. The caller must check `res != nil`
+// first; if non-nil, propagate the Result verbatim and don't
+// touch the (zero-value) Context.
 func loadDispatchContext(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
@@ -68,11 +70,11 @@ func loadDispatchContext(
 			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err))
 	}
 
-	// yml-absent: derive from git. This branch lets /gtw push and
-	// /gtw pr work on manually-created branches (no /gtw fix
-	// pre-amble). The cwd must be inside a git repo; we use
-	// --show-toplevel + rev-parse --abbrev-ref HEAD for the two
-	// pieces of state we can't otherwise guess.
+	// yml-absent: derive from git. This branch lets /gtw commit,
+	// /gtw push, and /gtw pr work on manually-created branches (no
+	// /gtw fix pre-amble). The cwd must be inside a git repo;
+	// we use --show-toplevel + rev-parse --abbrev-ref HEAD for
+	// the two pieces of state we can't otherwise guess.
 	repoRootOut, _, err := deps.Git.Run(ctx, cwd, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return Context{}, reply(ctx, cs.Emitter(), chatID, messageID,

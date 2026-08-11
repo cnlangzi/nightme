@@ -14,7 +14,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/channel"
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 )
 
@@ -48,31 +48,31 @@ import (
 type recordingChannel struct {
 	mu      sync.Mutex
 	chatID  string
-	captured []gateway.OutboundMessage
+	captured []messages.OutboundMessage
 }
 
 func (c *recordingChannel) Name() string  { return "mock" }
 func (c *recordingChannel) Start(_ context.Context) error { return nil }
 func (c *recordingChannel) Stop(_ context.Context) error  { return nil }
-func (c *recordingChannel) Incoming() <-chan gateway.InboundMessage {
-	ch := make(chan gateway.InboundMessage, 1)
+func (c *recordingChannel) Incoming() <-chan messages.InboundMessage {
+	ch := make(chan messages.InboundMessage, 1)
 	close(ch)
 	return ch
 }
-func (c *recordingChannel) Send(_ context.Context, msg gateway.OutboundMessage) error {
+func (c *recordingChannel) Send(_ context.Context, msg messages.OutboundMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.captured = append(c.captured, msg)
 	return nil
 }
-func (c *recordingChannel) SendCard(_ context.Context, msg gateway.OutboundMessage) (string, error) {
+func (c *recordingChannel) SendCard(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	_ = c.Send(context.Background(), msg)
 	return "mock-card-0", nil
 }
-func (c *recordingChannel) Record() []gateway.OutboundMessage {
+func (c *recordingChannel) Record() []messages.OutboundMessage {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make([]gateway.OutboundMessage, len(c.captured))
+	out := make([]messages.OutboundMessage, len(c.captured))
 	copy(out, c.captured)
 	return out
 }
@@ -82,7 +82,7 @@ var _ channel.Channel = (*recordingChannel)(nil)
 // --- minimal runtime handler -----------------------------------------
 //
 // Mirrors newEventHandler's core (Translate + ReplyTo stamping +
-// ch.Send) without the SessionContext / /think / /tools side-paths
+// ch.Send) without the StatusBar / /think / /tools side-paths
 // — those are not relevant to the regression we're hunting.
 
 func integrationEventHandler(ch channel.Channel, _ *chatsession.ChatSession) func(env chatsession.AgentEventEnvelope) bool {
@@ -153,7 +153,7 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 	fake.PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "hello back"})
 
 	// Wait for the round-trip.
-	var rec []gateway.OutboundMessage
+	var rec []messages.OutboundMessage
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		rec = mock.Record()
@@ -168,9 +168,9 @@ func TestIntegration_AgentEvent_ReachesChannel(t *testing.T) {
 
 	// Find the OutReply specifically (other Kinds may also fire —
 	// MessageState events come through a different path).
-	var outReply *gateway.OutboundMessage
+	var outReply *messages.OutboundMessage
 	for i := range rec {
-		if rec[i].Kind == gateway.OutReply {
+		if rec[i].Kind == messages.OutReply {
 			outReply = &rec[i]
 			break
 		}
@@ -240,7 +240,7 @@ func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 		},
 	})
 
-	var rec []gateway.OutboundMessage
+	var rec []messages.OutboundMessage
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		rec = mock.Record()
@@ -253,9 +253,9 @@ func TestIntegration_AgentEventResult_ReachesChannel(t *testing.T) {
 		t.Fatal("no OutboundMessage captured on channel within 2s — EventAgentResult never reached ch.Send")
 	}
 
-	var outResult *gateway.OutboundMessage
+	var outResult *messages.OutboundMessage
 	for i := range rec {
-		if rec[i].Kind == gateway.OutResult {
+		if rec[i].Kind == messages.OutResult {
 			outResult = &rec[i]
 			break
 		}
@@ -409,8 +409,8 @@ var _ agent.Starter = (*integrationFake)(nil)
 
 // --- helpers ----------------------------------------------------------
 
-func summarizeKinds(msgs []gateway.OutboundMessage) []gateway.OutboundKind {
-	out := make([]gateway.OutboundKind, len(msgs))
+func summarizeKinds(msgs []messages.OutboundMessage) []messages.OutboundKind {
+	out := make([]messages.OutboundKind, len(msgs))
 	for i, m := range msgs {
 		out[i] = m.Kind
 	}
@@ -475,7 +475,7 @@ echo '{"type":"system","subtype":"init","session_id":"test-session-1","model":"c
 # stdin before emitting the assistant turn. Without this, the
 # readpump races the test's QueueUserMessage and the assistant
 # event often lands with currentPrompt still nil → empty
-# UserMsgID → gateway.OutReply.ReplyTo = "" assertion failure.
+# UserMsgID → messages.OutReply.ReplyTo = "" assertion failure.
 read -t 5 _PROMPT || true
 echo '{"type":"assistant","message":{"id":"msg_1","role":"assistant","model":"claude-test","content":[{"type":"text","text":"hello back"}]}}'
 echo '{"type":"result","result":"final answer","duration_ms":100,"is_error":false}'
@@ -527,7 +527,7 @@ exit 0
 
 	// Wait for the round-trip: at minimum we expect OutReply +
 	// OutResult to reach the channel.
-	var rec []gateway.OutboundMessage
+	var rec []messages.OutboundMessage
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		rec = mock.Record()
@@ -541,12 +541,12 @@ exit 0
 	}
 
 	// Find OutReply + OutResult.
-	var outReply, outResult *gateway.OutboundMessage
+	var outReply, outResult *messages.OutboundMessage
 	for i := range rec {
 		switch rec[i].Kind {
-		case gateway.OutReply:
+		case messages.OutReply:
 			outReply = &rec[i]
-		case gateway.OutResult:
+		case messages.OutResult:
 			outResult = &rec[i]
 		}
 	}
@@ -581,9 +581,9 @@ func (s *realBridgeSpawner) Spawn(ctx context.Context, _, _ string, args []strin
 // noopEmitter is a test-only outbound.Emitter that does nothing.
 type noopEmitter struct{}
 
-func (noopEmitter) Send(context.Context, gateway.OutboundMessage) error {
+func (noopEmitter) Send(context.Context, messages.OutboundMessage) error {
 	return nil
 }
-func (noopEmitter) SendCard(context.Context, gateway.OutboundMessage) (string, error) {
+func (noopEmitter) SendCard(context.Context, messages.OutboundMessage) (string, error) {
 	return "", nil
 }

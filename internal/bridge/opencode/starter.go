@@ -90,8 +90,8 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // RunOnce runs a single synchronous turn. Spawns a fresh session,
 // sends blocks, drains Events() until the agent produces its final
 // text result, closes the session before returning. Used by callers
-// like /gtw push that want a single turn without holding a session
-// handle.
+// like /gtw commit and /gtw pr that want a single turn without
+// holding a session handle.
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
 	a, err := s.Start(ctx, cfg)
 	if err != nil {

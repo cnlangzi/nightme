@@ -55,7 +55,7 @@ live simultaneously.
 |---|---|
 | **Multiple Chat Sessions in parallel** | N sessions on one machine, each running a different project or task. |
 | **CWD = project** | Each ChatSession is bound to one current working directory — that directory *is* the project. Set it with `/cwd <path>`; switch anytime. |
-| **Multi-agent, in the same Chat** | `/use <agent>` swaps the active agent. The previous one stays in the pool with its context. |
+| **Multi-agent, in the same Chat** | `/use <agent>` swaps the active agent. The previous one keeps running in the background — its task continues, results still come back, but new messages route to the new active agent. |
 
 ## Prerequisites
 
@@ -69,9 +69,15 @@ Two ways to get `nightme` on your machine:
 
 1. **Prebuilt binary** (recommended):
 
-   ```bash
-   curl -fsSL https://nightme.dev/install.sh | bash
-   ```
+   - Grab the binary for your platform from the
+     [latest release page](https://github.com/cnlangzi/nightme/releases/latest)
+     (e.g. `nightme-darwin-amd64`, `nightme-linux-amd64`,
+     `nightme-windows-amd64.exe`)
+   - Drop it on your `$PATH` and make it executable:
+     ```bash
+     mv nightme-darwin-amd64 /usr/local/bin/nightme
+     chmod +x /usr/local/bin/nightme
+     ```
 
 2. **From source** (for development or to pin a commit):
 
@@ -151,17 +157,11 @@ We sit in front of Claude / Codex / Pi / OpenCode. You stay in control. Nothing 
 
 ## Shell mode
 
-You don't always need the agent to run a shell command. With
-Claude Code / Codex, asking the agent to run something goes through
-the agent's tool loop — long chain, eats context, nudges your real
-task aside while the agent's busy reading shell output.
+You don't always need the agent to run a shell command. With Claude Code / Codex, asking the agent to run something goes through the agent's tool loop — long chain, eats context, nudges your real task aside while the agent's busy reading shell output.
 
-`!cmd` skips all that. Type `!make test` and NightMe runs the
-command in the chat's CWD directly. The result comes back as a
-plain IM card. No agent, no round trip, no context eaten.
+`!cmd` skips all that. Type `!make test` and NightMe runs the command in the chat's CWD directly. The result comes back as a plain IM card. No agent, no round trip, no context eaten.
 
-For the scripts you already have — `make`, `npm test`, deploy
-hooks. Anywhere the agent's reasoning adds nothing but a delay.
+For the scripts you already have — `make`, `npm test`, deploy hooks. Anywhere the agent's reasoning adds nothing but a delay.
 
 ```
 ✅ $ make test
@@ -176,17 +176,24 @@ stdout:
 
 GitHub / GitLab issues are the task flow — each `/gtw fix` pins to an issue, and the work moves through the issue's state as the subcommands fire.
 
-### The local dev loop: fix → hooks → sync → close
+### The local dev loop: fix → hooks → close
 
-Four subcommands chain into a complete **local multi-branch
-development workflow** in your main repo. Run 3 of these in
-parallel — three issues, three worktrees, three agents, no state
-collision.
+Three subcommands chain into a complete **local multi-branch development workflow**. Run 3 of these in parallel — three issues, three worktrees, three agents, no state collision.
+
+> **`/gtw sync` is NOT part of this loop.** `sync` (a.k.a.
+> `git checkout main && git pull --rebase origin main`) is a
+> **main-repo operation** — it switches the current branch to
+> main and pulls. Don't call it from inside a worktree; it
+> refuses to run there by design. Both **`/gtw fix`** (step 1)
+> and **`/gtw close`** (last step) already call sync internally
+> on the main repo before / after the worktree operation, so
+> you don't need to call sync manually. After `close`, main is
+> fresh; the next `fix` starts from that.
 
 1. **`/gtw fix -n <branch>`** — opens a fresh worktree named
-   `<branch>` on your local main, runs a one-shot agent to do
-   the work. Pure local — no GitHub issue needed. You keep
-   chatting in your main chat.
+   `<branch>` on your just-up-to-date main, runs a one-shot
+   agent to do the work. Pure local — no GitHub issue needed.
+   You keep chatting in your main chat.
 
    For the GitHub / GitLab flow, use `/gtw fix <issue-id>` to
    pin the worktree to a remote issue.
@@ -208,20 +215,13 @@ collision.
 
 3. (You work. Agent on demand. Or just edit files yourself.)
 
-4. **`/gtw sync`** — when main has moved (other issues landed,
-   other worktrees merged), pull `origin/main` into your worktree
-   to keep your branch current. Avoids drift when you eventually
-   push.
-
-5. **`/gtw close`** — when the task is done (or you decide not
+4. **`/gtw close`** — when the task is done (or you decide not
    to), `/gtw close` tears down the worktree, returns you to
    main, and the branch is ready to ship (or discard).
 
 ### Hooks — bring the dev environment with you
 
-AI tool indexes (CodeGraph, language servers, caches) usually live
-inside the repo. Each worktree is a fresh checkout — they all
-need rebuilding. Hooks automate that.
+AI tool indexes (CodeGraph, language servers, caches) usually live inside the repo. Each worktree is a fresh checkout — they all need rebuilding. Hooks automate that.
 
 The common case is `fix: hooks: after` — fires right after
 `/gtw fix` opens a new worktree, rehydrating the dev env
@@ -236,13 +236,6 @@ fix:
       - npm install                   # install deps
       - go mod download               # download Go modules
 ```
-
-Hook sugar (the YAML accepts both):
-
-- `- codegraph init` — short form, treated as a shell hook
-- `- type: shell / run: codegraph init` — long form, same
-  semantics (forward-compatible for future `type: agent` /
-  `type: notify`)
 
 Each command (not just `fix`) exposes `hooks.before` and
 `hooks.after`:
@@ -260,9 +253,37 @@ Iron rules (from the code):
 - All stdout/stderr is echoed back so you can see what actually ran.
 - 30s default timeout per hook.
 
+## Slash commands
+
+Chat-level slash commands. The `/gtw` subcommands live in
+[their own section](#git-team-workflow-gtw) and are not listed
+here.
+
+| Command | What it does |
+|---|---|
+| `/cwd <path>` | Bind this chat to a workspace. Validates the path; lazy-spawns on the next message. |
+| `/use <agent>` | Switch the active agent (`claude` / `codex` / `opencode` / `pi`). The previous one keeps running in the background — its task continues, results still come back, but new messages route to the new active agent. |
+| `/stop` | Halt the in-flight turn on the selected agent. Session stays; queued messages still flow. |
+| `/steer <msg>` | Stop the in-flight turn and prepend `<msg>` to the queue. The steered message becomes the first thing the agent sees on the next turn. |
+| `/close [agent]` | Terminate the bridge process(es) for AgentSession(s) in the current workspace. The AgentSession entry is preserved; next user message triggers a respawn that replays `--resume <sessionID>` to continue the conversation. |
+| `/new [agent]` | Reset the agent's conversation context (Claude Code's `/clear` equivalent). Process stays alive; queued messages are cleared. |
+| `/watch on\|off` | Per-chat message-watch mode (default: only `@bot` / `@_all` in groups). |
+| `/think on\|off` | Show or hide the agent's thinking blocks in the receipt card. |
+| `/tools on\|off` | Show or hide per-tool thread replies (default off to keep the card quiet). |
+| `/help` | List every slash command in-chat. |
+
+`!cmd` runs shell commands directly in the chat's CWD — see
+[Shell mode](#shell-mode) for the rules.
+
+Anything that doesn't match a slash command (or `!cmd`) is
+forwarded to the active agent as a regular prompt — same as
+sending the message in Claude Code's own CLI. NightMe doesn't
+intercept or transform; the agent receives the message verbatim
+and runs its own built-in slash commands (e.g. Claude Code's
+`/clear`, `/compact`, `/init`, etc.).
+
 ## For developers
 
-### Architecture (advanced)
 
 ```
 ┌─────────────┐    ┌─────────────┐    ┌──────────────────────────┐
@@ -281,11 +302,11 @@ Iron rules (from the code):
                                      └──────────────────────────┘
 ```
 
-- **Channel** owns transport. v1.3 trimmed to 5 methods; receipt lifecycle moved into the adapter (`adapter.go`).
-- **Gateway** routes inbound: slash commands dispatched via the `command.Commander`, everything else forwarded to the ChatSession's active AgentSession.
+- **Channel** owns transport.
+- **Gateway** routes inbound. The `inbound` subpackage owns the slash-command dispatch chain; everything else is forwarded to the ChatSession's active AgentSession.
 - **ChatSession** is the per-chat context. Owns the AgentSession pool and the InputBuffer FSM. Persists across daemon restarts.
 - **AgentSession** is the per-CLI-process handle. One per `(agent, cwd)` pair, kept alive across `/use` and `/cwd` switches.
-- **Bridge** is the per-agent transport. ModeACP / ModeSDK / ModeJSONIO / ModePTY / ModeRPC, picked by what the CLI supports.
+- **Bridge** is the per-agent transport — one of `acp`, `claudecode`, `codex`, `opencode`, `pi`, or `pty` (under `internal/bridge/`), picked by what the CLI supports.
 
 See [`docs/SPEC.md`](./docs/SPEC.md) §1 for the full responsibility table and [`docs/SPEC.md`](./docs/SPEC.md) §0.1 for the v1.3 "Channel is a dumb renderer" rewrite.
 
@@ -296,7 +317,7 @@ NightMe reads YAML from `~/.nightme/config.yaml` (or `$NIGHTME_CONFIG` if set). 
 ```yaml
 primary: claude                          # global default agent
 
-agents:                                  # list; each entry = name/bridge/command
+agents:                                  # each entry = name / bridge / command
   - name: claude
     bridge: claude
     command: "claude --dangerously-skip-permissions"
@@ -316,18 +337,18 @@ feishu:
   verification_token: ""
   encrypt_key: ""
 
-session:
+session:                                 # initial PTY + aggregator tunables
   default_pty_cols: 80
   default_pty_rows: 24
-  output_chunk_size: 4096
-  output_flush_interval_ms: 200
+  output_chunk_size: 4096        # bytes
+  output_flush_interval_ms: 200  # milliseconds
 
 logging:
   level: "info"          # debug | info | warn | error
   file: ""               # empty = stdout; path = file
 
 paths:
-  data_dir: "~/.nightme"
+  data_dir: "~/.nightme"  # chat_sessions.json + agent_sessions.json root
 ```
 
 The `/gtw` workflow reads a **separate** file: `~/.nightme/gtw.yml` — see the [Git Team Workflow section](#git-team-workflow-gtw) above.
@@ -346,6 +367,7 @@ Logs go to `~/.nightme/nightme.log` (mode `0600`) as JSON. Attribute keys contai
 | [`docs/feat/`](./docs/feat/) | Per-feature design docs. |
 | [`docs/bridge/`](./docs/bridge/) | Per-agent bridge design: claude, codex, opencode, pi. |
 | [`docs/channel/feishu.md`](./docs/channel/feishu.md) | Feishu adapter reference (rendering rules, card semantics, thread routing). |
+| [`docs/flow/`](./docs/flow/) | Cross-cutting flow docs (e.g. the 3-layer doc model). |
 | [`docs/E2E_TESTING.md`](./docs/E2E_TESTING.md) | Manual Feishu round-trip + troubleshooting. |
 | [`CHANGELOG.md`](./CHANGELOG.md) | Current snapshot (single `[Unreleased]` section). |
 | [`MIGRATION.md`](./MIGRATION.md) | Breaking changes between earlier snapshots. |
@@ -371,24 +393,34 @@ docs/
   PRD.md SPEC.md FEATURES.md       # 3-layer doc model
   feat/                            # F-XX per-feature design
   bridge/  channel/  flow/         # per-subsystem design
+  images/                          # README-served screenshots
 internal/
   agent/                           # Agent / AgentEvent / Info / Starter interface
   agentsession/                    # AgentSession + Prompt + Spawner (per-CLI-process runtime unit)
-  bridge/                          # Bridge abstraction
-    acp/  pty/  sdk/
-    claudecode/  codex/  opencode/  pi/
+  bridge/                          # Bridge abstraction, one sub-package per agent
+    acp/  claudecode/  codex/  opencode/  pi/  pty/
   channel/                         # Channel interface
     echo/  feishu/                 # adapters (Feishu is the production one)
   chatsession/                     # ChatSession + pool manager + persistence
+  cli/                              # shared CLI helpers (config / doctor / login)
   command/                         # Slash-command Commander / Registry / Factory
     cwd/ close/ newcmd/ use/ think/ tools/ watch/ stop/ steer/ services/
-    gtw/                           # /gtw fix / push / pr / close / sync (worktree workflow)
+    gtw/                           # /gtw fix / hooks / sync / close (worktree workflow)
   config/                          # YAML loader + env overrides
   daemoncontrol/                   # IPC for `nightme doctor` / `status`
   errors/                          # CodedError + ExitCode
   gateway/                         # Slash router + binding + receipt FSM
+    inbound/  outbound/            # inbound dispatch chain + outbound sender
+  gatewaytest/                     # integration test harness
   logging/                         # slog + secret redaction
+  login/                           # Feishu app registration / QR login
+  messages/                        # IM message types + dispatch
+  prcache/                         # PR metadata cache (per-F-50)
   registry/                        # JSON-backed chat_sessions.json + agent_sessions.json (0600, atomic)
+  shell/                           # `!cmd` shell-mode dispatcher
+  statusbar/                       # Feishu footer-card stamp runtime (per F-58, F-133)
+  testdata/                        # shared test fixtures
+  version/                         # build-time version metadata
 ```
 
 ### Exit codes
@@ -410,13 +442,19 @@ internal/
 
 ## Contributing
 
-Issues and PRs are welcome. A few things that help:
+PRs and issues are welcome. The full guide lives in
+[`/docs`](./docs/) — see the [3-layer doc model](./docs/README.md)
+for the design workflow.
 
-1. **Read the 3-layer doc model** ([`docs/README.md`](./docs/README.md)) before opening a design PR. PRD → SPEC → FEATURES → feat/F-XX.
-2. **Tests must include race coverage.** `make test` runs `go test -race ./...`; CI enforces it.
-3. **Run `make lint`** before pushing — `go vet` warnings are a CI gate.
-4. **Channels are dumb renderers.** If you're tempted to add session logic to an adapter, route it through the gateway instead.
-5. **Don't merge test files mechanically across renames.** Prefer to rewrite them when the underlying API changes.
+Thanks for building with NightMe — we want more **channels**
+(Feishu, Web TUI, anything) and more **AI Coding Agents**
+(Claude Code, Codex, Pi, OpenCode, anything else) to plug in.
+Drop a `Channel` / `Bridge` and the architecture handles the rest.
+
+Contact the maintainer:
+
+- Twitter: [@imlangzi](https://x.com/imlangzi)
+- WeChat: `langzi` (please mention "NightMe" when adding)
 
 ---
 

@@ -12,85 +12,241 @@
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 ![Single Binary](https://img.shields.io/badge/distribution-single%20binary-success)
 
-## Install
+## What is NightMe
 
-```bash
-curl -fsSL https://nightme.dev/install.sh | bash
+**NightMe** 把你的本地 AI Coding Agent（Claude Code、Codex、Pi、OpenCode 等）放进聊天里跑。你在任何已接入的 IM 里发条消息，NightMe 就把消息路由到对应的 agent 进程，回复以结构化卡片形式返回。
+
+多个 chat 并行——一个项目一个，目录就是项目本身：每个 ChatSession 跑在自己的工作目录上，目录即项目本体。多个 agent 并行工作——切换是即时的，无需冷启动。`git` worktree 操作被封装进 `Git Team Workflow`（`/gtw`）：fix / hooks / close——每一步一张 IM 回复卡，集成 GitHub、GitLab 之类平台。NightMe 不替换你的 agent 订阅或记忆，只在它们前面做一个轻量代理。
+
+## Why NightMe
+
+### 一个 chat，一个 CWD，一个项目
+
+作为独立开发者，你一个人同时管很多项目。每个飞书群组或 DM 是一个 **ChatSession**，每个 ChatSession 有自己的 **CWD**（当前工作目录）。CWD *就是* 项目：用 `/cwd <path>` 设置，随时可以改。多个 chat 并行跑，各自绑定各自的目录。
+
+```
+                            You (Feishu)
+                                  │
+                                  ▼
+
+    ┌─ ChatSession ─┐  ┌─ ChatSession ─┐  ┌─ ChatSession ─┐
+    │ CWD: ~/a      │  │ CWD: ~/b      │  │ CWD: ~/c      │
+    │               │  │               │  │               │
+    │ AI Agents:    │  │ AI Agents:    │  │ AI Agents:    │
+    │   Claude Code │  │   Claude Code │  │   Claude Code │
+    │   Codex       │  │   Codex       │  │   Codex       │
+    │   Pi          │  │   Pi          │  │   Pi          │
+    │   OpenCode    │  │   OpenCode    │  │   OpenCode    │
+    └───────────────┘  └───────────────┘  └───────────────┘
+
+   ▲ CWD = 项目；agent 在该 CWD 里跑；全部从同一个 NightMe 实例并行 ▲
 ```
 
----
+![飞书聊天列表——多个并行 ChatSession（DM + 群组），每个钉在各自项目上](docs/images/feishu-multi-chats.png)
 
-## NightMe 能做什么
+**项目之间靠目录隔开。** 每个 ChatSession 的 CWD 互不影响——重跑 `/cwd` 只改当前 session 的工作目录。多个项目同时跑着，互不打扰。
 
-### 三个真实场景
-
-**场景 A：多个项目一起跑**
-
-在一台机器上同时开三个 Chat Session：
-
-- Chat #1 在重构你的鉴权服务
-- Chat #2 在改计费仓库的 bug
-- Chat #3 在写一个临时的迁移脚本
-
-一台机器，三个项目并行。openclaw 之类的工具切会话就丢上下文，NightMe 让每个会话一直活着，对话历史一条不漏。
-
-**场景 B：单仓库多任务**
-
-你一直在 main 上聊。每开一个支线任务，就 `/gtw fix` 一下——自动开 worktree，把你拉进一个绑定该分支的新 Chat Session。不用再和分支较劲、不用 stash 一把梭、切分支也不用烧香。
-
-**场景 C：同一 Chat 里换 agent**
-
-重构用 Claude，写模板用 Codex，查文档用 Pi。`/use claude` ↔ `/use codex` ↔ `/use pi`，老 agent 进程留在池子里活着，切回去上下文还在。
+**与传统工具的差异**（Hermes、openclaw、cc-connect、happycoder）：他们一次只激活一个 session。NightMe 在一个实例上同时跑所有项目。切换 chat 是即时的——同一个 daemon，无需冷启动，无需重新初始化。
 
 ### 三项核心能力
 
 | 能力 | 实际意义 |
 |---|---|
-| **并行多 Chat Session** | 一台机器 N 个会话，各自对应不同项目或任务。 |
-| **项目 × 工作区，任意切换** | `/cwd` 绑定或切换工作区。旧工作区缓存不杀。 |
-| **同 Chat 多 agent** | `/use <agent>` 切当前 agent，老的留在池子里带上下文。 |
+| **并行多 ChatSession** | 一台机器 N 个 session，各自跑不同项目或任务。 |
+| **CWD = 项目** | 每个 ChatSession 绑定一个当前工作目录——目录 *就是* 项目。用 `/cwd <path>` 设置；随时切换。 |
+| **同 Chat 多 agent** | `/use <agent>` 切换当前 agent。前一个 agent 切到后台继续跑——任务推进、结果照常回，只是新消息不再路由给它。 |
+
+## Prerequisites
+
+- **macOS、Linux 或 Windows** — NightMe 是单文件静态 Go 二进制；无运行时依赖。
+- **一个 Feishu 账号** — 目前唯一支持的 IM。`nightme login feishu` 通过扫码完成 bot 注册。
+- **至少一个本地 AI Coding Agent** — Claude Code、Pi、OpenCode、Codex 任一。装好 CLI 放到 `$PATH` 上，NightMe 会作为子进程拉起。
+
+## Install
+
+两种方式装 `nightme`：
+
+1. **预编译二进制**（推荐）：
+
+   - 去 [latest release page](https://github.com/cnlangzi/nightme/releases/latest)
+     下载对应平台二进制（如 `nightme-darwin-amd64`、`nightme-linux-amd64`、
+     `nightme-windows-amd64.exe`）
+   - 放到 `$PATH` 上并加可执行权限：
+     ```bash
+     mv nightme-darwin-amd64 /usr/local/bin/nightme
+     chmod +x /usr/local/bin/nightme
+     ```
+
+2. **从源码**（开发或钉死一个 commit）：
+
+   ```bash
+   git clone https://github.com/cnlangzi/nightme.git
+   cd nightme
+   make dev
+   ```
+
+`make dev` 直接从源码跑 nightme，配置文件用 example config，无需单独构建。
 
 ---
 
-## `/gtw`：把 Git 工作流做成斜杠命令
+## Quickstart
 
-内置的 Git 团队工作流。每一步就是一个斜杠命令，回复是一张结构化卡片（分支 / 基线 / URL / worktree），不是一坨 `git` 灌水。
-
-```
-/gtw fix                              # 开 worktree + 提议分支 + 拉起 agent
-/gtw push                             # 提交 + 推送（用配置的 agent 写 dirty-push 的 commit message）
-/gtw pr                               # 通过 gh / glab 开 PR
-/gtw close                            # 拆 worktree，回到 main
-/gtw sync                             # 把 origin/main 拉进 worktree 并 fast-forward
+```bash
+nightme login feishu   # 终端打印二维码；用 Feishu 移动端扫码
+nightme start          # daemon 在后台跑起来
 ```
 
-### ★ Hooks：把开发环境一起带过去
+`start` 返回后，NightMe 会给你的 Feishu DM 发一条 welcome message——这就是它已经 ready 的信号。
 
-AI 工具的索引（CodeGraph、语言服务器、缓存）一般放在仓库里。开 worktree 就得重建——目前你得手敲 `codegraph init`。
+---
 
-Hooks 就是干这事的。编辑 `~/.nightme/gtw.yml`：
+## Slash commands
+
+Chat 级别的斜杠命令。`/gtw` 子命令见 [它们自己的 section](#git-team-workflow-gtw)，这里不列。
+
+| 命令 | 干什么 |
+|---|---|
+| `/cwd <path>` | 绑定这个 Chat 到一个工作区。会校验路径，下次发消息时 lazy-spawn。 |
+| `/use <agent>` | 切换当前 agent（`claude` / `codex` / `opencode` / `pi`）。前一个 agent 切到后台继续跑——任务推进、结果照常回，只是新消息不再路由给它。 |
+| `/stop` | 停掉当前 agent 上的 in-flight turn。会话留着，队列里的消息继续流。 |
+| `/steer <msg>` | 停掉 in-flight turn 并把 `<msg>` 插到队首。下个 turn agent 第一眼看到的就是这条。 |
+| `/close [agent]` | 终止当前工作区里 AgentSession 的 bridge 进程。AgentSession 记录保留——下次发消息触发 respawn 时会用 `--resume <sessionID>` 接着聊。 |
+| `/new [agent]` | 重置 agent 对话上下文（Claude Code 的 `/clear` 等价）。进程保留，队列清空。 |
+| `/watch on\|off` | 当前 Chat 的消息监听模式（默认群内只听 `@bot` / `@_all`）。 |
+| `/think on\|off` | 是否在回复卡里展示 agent 思考过程。 |
+| `/tools on\|off` | 是否展示每个工具的独立线程回复（默认关）。 |
+| `/help` | 在 Chat 里列出所有斜杠命令。 |
+
+`!cmd` 在当前 Chat 的 CWD 里直接跑 shell 命令——规则见 [Shell mode](#shell-mode)。
+
+任何不匹配斜杠命令（或 `!cmd`）的消息，都会被透传到底层 agent 当作普通 prompt——跟你直接在 Claude Code 自己的 CLI 里发消息一样。NightMe 不拦截也不改写；agent 收到原样消息，会运行它自带的斜杠命令（例如 Claude Code 的 `/clear` / `/compact` / `/init` 等）。
+
+---
+
+## Always-in-the-loop
+
+你随时知道 agent 在哪、干到哪、烧了多少钱——每条回复都带一张固定页脚，写清楚关键信息，不用离开 chat。多数「AI 写代码 + 聊天」工具都跟黑盒一样；NightMe 把可视化当成一等公民。
+
+### StatusBar——钉在每条 Feishu 回复上
+
+![飞书页脚卡——CWD / git / agent / token，每条回复都带](docs/images/feishu-statusbar.png)
+
+每条回复都带一张固定页脚，写清楚关键信息：
+
+- **CWD** — 当前 ChatSession 处于哪个目录（也就是项目）
+- **Git status** — 分支、是否 dirty、ahead / behind
+- **Agent status** — `idle` / `running` / `thinking`
+- **Token usage** — 当前 session 已用 / 上限
+
+别的工具把你丢进黑盒。NightMe 让你随时看到 agent 在哪、干到哪、花了多少。
+
+### Flexible visibility
+
+| 开关 | 作用 |
+|---|---|
+| `/think on\|off` | 是否展示 agent 的思考过程。 |
+| `/tools on\|off` | 是否展示每个工具的独立线程回复（默认关）。 |
+| `/watch on\|off` | 监听群内所有消息，不再只听 `@bot` / `@_all`。 |
+
+**为什么这很重要：** NightMe 默认把状态摊开，想安静的时候随时切回静音——这是你的选择，不会突然跳出来。
+
+---
+
+## What we do differently
+
+
+| 特性 | openclaw / Hermes | NightMe |
+|---|---|---|
+| Sessions survive daemon restart | ❌ | ✅ |
+| 真的 `/stop` 和 `/steer` | ❌ | ✅ |
+| 没有 server-side timeout | 30 min | none |
+| Clean prompts, no preamble | ❌ | ✅ |
+
+四点不同，简而言之：
+
+1. **Sessions survive。** Daemon 重启、网络抖动、合盖休眠——聊天从你断的地方接住。上游 CLI 的 session 通过 `--resume <session-id>` 恢复。
+
+2. **真的 escape hatches。** `/stop` 停掉 in-flight turn。`/steer <msg>` 改方向。两者都保留 session 和上下文。
+
+3. **No clock on you。** Claude 跑 30 分钟，NightMe 等 30 分钟。你决定什么时候停。
+
+4. **No prompt padding。** 没有 preamble、没有 brand voice、没有 injected system message。CLI 只看到你写的话。
+
+We sit in front of Claude / Codex / Pi / OpenCode. You stay in control. Nothing in a black box.
+
+---
+
+## Shell mode
+
+你并不总是需要 agent 跑 shell 命令。用 Claude Code / Codex 时，让 agent 跑命令要绕它的 tool loop——链路长，context 也被消耗，agent 忙着读 shell 输出，你正事反而被挤到一边。
+
+`!cmd` 跳过这一切。在 chat 里敲 `!make test`，NightMe 直接在 chat 的 CWD 里跑命令。回复是一张简洁的 IM 卡。No agent, no round trip, no context eaten。
+
+项目里那些本来就有的脚本——`make`、`npm test`、deploy hook——谁 run 都一样。agent 在中间想一遍反而浪费时间。
+
+```
+✅ $ make test
+exit 0 · 12ms · ~/work/foo
+stdout:
+  All tests passed
+```
+
+---
+
+## Git Team Workflow (`/gtw`)
+
+`git worktree` 给你按任务隔离的分支。`gh pr create` 给你一次性 PR。AI agent 给你随叫随到的编码帮手。`/gtw` 把这三者粘起来——每个 `/gtw <cmd>` 是一个斜杠命令，**起一个 short-lived agent** 干重活，返回一张干净的 IM 卡。agent 跑一次就退出。主 chat 保持干净。
+
+GitHub / GitLab issues 是任务流——每次 `/gtw fix` 钉到一个 issue，工作随着 subcommand 推进在 issue 的 state 里流动。
+
+### The local dev loop: fix → hooks → close
+
+三个 subcommand 串起来就是一个完整的 **local multi-branch development workflow**。3 个可以并行跑——三个 issue、三个 worktree、三个 agent，state 不打架。
+
+> **`/gtw sync` 不在这个 loop 里。** `sync`（`git checkout main && git pull --rebase origin main`）是 **main-repo 操作**——它切当前分支到 main 并拉。从 worktree 里调 sync 是错的，代码层就 refuse。**`/gtw fix`**（第 1 步）和 **`/gtw close`**（最后一步）都已经在 main repo 上自动 sync 了，所以你不需要手动 sync。`close` 之后 main 是新的，下次 `fix` 直接基于它。
+
+1. **`/gtw fix -n <branch>`** — 在刚刚最新的 main 上开一个新 worktree（叫 `<branch>`），起一个 one-shot agent 干任务。纯本地——不需要 GitHub issue。你在主 chat 继续聊。
+
+   走 GitHub / GitLab 流程的话，用 `/gtw fix <issue-id>` 把 worktree 钉到远程 issue。
+
+2. **hooks 自动跑** — 新 worktree 里开发环境自己重新装起来。CodeGraph 重新索引，`npm install` / `go mod download` / `cargo build`——你项目要啥就装啥。编辑 `~/.nightme/gtw.yml`：
+
+   ```yaml
+   # ~/.nightme/gtw.yml
+   fix:
+     hooks:
+       after:
+         - codegraph init                # bare string = shell hook
+         - npm install
+         - go mod download
+   ```
+
+3. （你干活。需要时让 agent 出手，或者直接自己改文件。）
+
+4. **`/gtw close`** — 任务做完了（或者决定不做了），`/gtw close` 拆 worktree、回到 main，分支 ready to ship（或者 discard）。
+
+### Hooks——把开发环境一起带过去
+
+AI 工具的索引（CodeGraph、语言服务器、缓存）一般放在仓库里。每个 worktree 是新 checkout——都要重建。Hooks 把这件事自动化了。
+
+最常见的是 `fix: hooks: after`——在 `/gtw fix` 开新 worktree 之后立刻跑，让新 worktree 的 dev env 就地装起来：
 
 ```yaml
 # ~/.nightme/gtw.yml
 fix:
   hooks:
     after:
-      - codegraph init                # 裸字符串 = shell hook
-      - npm install
-      - go mod download
+      - codegraph init                # 重新索引新 worktree
+      - npm install                   # 装依赖
+      - go mod download               # 下载 Go modules
 ```
 
-写法简繁都行：
-
-- `- codegraph init` — 简写，当 shell hook 处理
-- `- type: shell / run: codegraph init` — 长写，语义一致（为以后的 `type: agent` / `type: notify` 留口子）
-
-每个命令都有 `hooks.before` 和 `hooks.after`：
+每个命令（不只是 `fix`）都有 `hooks.before` 和 `hooks.after`：
 
 | Hook | 触发时机 | 典型用途 |
 |---|---|---|
 | `before` | 主流程之前 | 记录起始 SHA、拍状态快照 |
-| `after` | 主流程之后（即便失败也跑） | `codegraph init`、装依赖、暖缓存 |
+| `after` | 主流程之后（即使失败也跑） | 重新索引、装依赖、暖缓存 |
 
 铁律（来自代码）：
 
@@ -99,214 +255,38 @@ fix:
 - stdout / stderr 全部回显，能看到实际跑过什么。
 - 单个 hook 默认 30s 超时。
 
-### ★ 轻量 agent 干杂活
-
-`/gtw` 里的杂活（写 commit message 之类）不需要重型编码 agent——那东西会往对话里塞上下文，浪费 token。push 这类动作可以走轻量 agent（Pi 或类似），在 yml 里通过 `<cmd>.agent` 指定：
-
-```yaml
-# ~/.nightme/gtw.yml
-push:
-  agent: pi                          # 写 commit message 用的轻量 agent
-```
-
-Agent 选择走三级优先级：
-
-| 优先级 | 来源 | 示例 |
-|---|---|---|
-| 1 | CLI flag | `/gtw push -a claude` |
-| 2 | yml `<cmd>.agent` | `push: agent: pi` |
-| 3 | 当前 Chat 的 `/use` agent | — |
-| 兜底 | 都没设 | 维持原 `❌ no agent selected` 行为 |
-
-**作用域（依据代码）**：`push.agent` 在 `pushDirty` 里生效；`pushClean` 是纯 `git push -u origin`，不带 agent。`fix / close / sync` 预留 `agent` 字段以备将来，当前不消费。
-
-**降级策略**：yml.agent 配了一个没注册的 agent（比如 `pi` 不在你的 agents 列表里），NightMe 会先警告（`⚠️ gtw.yml agent "pi" not found; falling back to session default`）再退回优先级 3——绝不在你不知情的情况下换 agent。
-
-**实际效果**：重型思考留在主 Chat 的 Claude / Codex 上。`/gtw` 让 Pi 写 commit message，让 shell hook 跑 init 脚本。主会话保持干净，token 省下来。
-
-### `/gtw` 怎么和「多 Chat + 多 agent」配合
-
-- Chat #1 —— 继续在 main 上用 Claude 改东西
-- Chat #2 —— `/gtw fix` → 开 worktree → hook 重建索引 → 一次性 Pi 生成 Conventional Commit → `/gtw pr` 开 PR
-- 每个 worktree 都有自己的 AI 索引、自己的依赖、自己的 agent 进程，互不打架。
-
 ---
 
-## Always-In-The-Loop
+## For developers
 
-大多数「AI 写代码 + 聊天」工具都跟黑盒一样——你发一段、滚一屏、心里没底。NightMe 把「可观测」当成一等公民。
-
-### StatusBar：飞书 Kino 页脚卡片
-
-agent 发的每条消息在 Kino 上都带一个固定页脚卡片，告诉你关键信息，不用来回切窗口：
-
-- **工作目录** —— 当前活跃的是哪个项目 / 哪个分支
-- **Git 状态** —— 分支名、是否 dirty、ahead / behind
-- **Agent 状态** —— `idle` / `running` / `thinking`
-- **Token 用量** —— 当前 session 已用 / 上限
-
-别的工具把你丢进黑盒。NightMe 让你随时看到 agent 在哪、干什么、花了多少。
-
-### Flexible visibility
-
-| 开关 | 作用 |
-|---|---|
-| `/think on\|off` | 是否展示 agent 的思考过程。 |
-| `/tools on\|off` | 是否展示每个工具的独立线程回复（默认关，卡片更干净）。 |
-| `/watch on\|off` | 当前 Chat 是否监听群消息（默认群内只听 `@bot` / `@_all`）。 |
-| 主动进度 + 显式确认 | 关键节点主动推上来，不用刷新也能知道 agent 还活着。 |
-
-**为什么这很重要**：大半夜你拿手机驱动多 agent 干活，「我知道发生了什么」和「我在猜发生了什么」之间的距离，就是「高效」和「窝火」之间的距离。NightMe 默认把状态摊开，想安静的时候再切到静音。
-
----
-
-## 稳定可预测
-
-针对 openclaw 之类工具的三个老毛病，NightMe 一一接住：
-
-| 痛点 | NightMe 的解法 |
-|---|---|
-| Agent 跑到一半挂了，对话没了 | **进程级恢复。** 守护进程 / 网络 / 休眠中断——重启后所有 ChatSession 自动重连，所有处于 `StatusDetached` 的 AgentSession 用 `--resume <session-id>`（Claude / Pi 走等价机制）重新拉起。对话不丢。 |
-| 静默超时被踢下线 | **会话由用户管理。** 没有「N 分钟自动断开」这种意外。`/stop` 停掉当前 turn（会话保留）、`/steer` 改方向（会话保留）、`/new` 清上下文（进程保留）、`/close` 终止 bridge 进程（会话记录保留，下次按需恢复）。 |
-| 项目记忆跑到一半蒸发 | **默认一直压缩，永不归零。** 显式 `/new` 才会重置 agent 对话上下文。 |
-
-原则：NightMe **不自己造一套记忆系统**。上下文交给上游的 Claude Code / Codex / Pi 自己管——你本来就在为它们付费。表现稳定可预期：你看到什么，CLI 看到什么，NightMe 不夹私货。CLI 自己压上下文你就知道；NightMe 啥都不干你也知道。
-
----
-
-## 为编码而生，但不锁死在编码
-
-默认工作流是编码。命令、`/gtw`、agent 菜单——都围着开发场景转。
-
-但 NightMe 实际上是个 **透传字节的守护进程，驱动一个现成的 CLI 进程**。不改 prompt、不自带 agent runtime、不装作比你的 CLI 更懂——所以：
-
-- 编码工作流？给你最顺手的配置。`gtw fix / push / pr / close / sync` 就是你想要的团队工作流。
-- 非编码 agent 任务？也能跑。CLI 跑得动，NightMe 就驱动得了。
-- 想换 CLI？在 config 里加个 `agents:` 项就完事，编排层不用动。
-
-NightMe 不抢 LangChain / OpenAI Agents 的赛道——它不是「通用 Agent 框架」。它说的是一件更窄、更硬的事：**为你已经在用的那些 CLI 做编码工作流编排。**
-
----
-
-## Quick reference
-
-### Chat 输入路由
-
-每条入站消息按首字符分派，三条路由由独立 package 拥有，互不串味：
-
-| 前缀 | 分派给 | Package |
-|---|---|---|
-| `!` / `！`（全角） | Shell 分派——在当前 Chat 的 CWD 用 `sh -c` / `cmd /c` 执行 | `internal/shell/` |
-| `/` | 命令分派——斜杠命令（`/cwd`、`/use`、`/gtw fix` …） | `internal/command/` |
-| 其他 | Agent prompt——转给当前活跃的 AgentSession | （无 package——默认路由） |
-
-### Shell 模式（`!cmd`）
-
-行首的 `!`（或全角 `！`）把后面那段当真正的 shell 命令，**在当前 Chat 的 CWD 下**执行——不绕 agent，不需要 `/cwd` / `/use` 上下文，前提是这个 Chat 绑了工作区。回复是一张 C 风格摘要卡：
+### Architecture (advanced)
 
 ```
-✅ $ ls -la
-exit 0 · 12ms · /Users/you/projects/foo
-stdout:
-  drwxr-xr-x  …
-  -rw-r--r--  …
+┌─────────────┐    ┌─────────────┐    ┌──────────────────────────┐
+│  Channel    │ →  │  Gateway    │ →  │  ChatSession (per chat)   │
+│  (Feishu,   │ ←  │  (router +  │ ←  │  ├─ AgentSession pool     │
+│   Web TUI)  │    │   binding)  │    │  │  (agent, cwd) 1:1       │
+└─────────────┘    └─────────────┘    │  ├─ InputBuffer FSM       │
+                                     │  ├─ readPump              │
+                                     │  └─ EventHandler          │
+                                     │           ↓               │
+                                     │  AgentSession → Bridge    │
+                                     │     (PTY / ACP / SDK /    │
+                                     │      JSON-IO / RPC)       │
+                                     │           ↓               │
+                                     │       Agent CLI           │
+                                     └──────────────────────────┘
 ```
 
-```
-❌ $ go test ./...
-exit 1 · 4321ms · /Users/you/projects/foo
-stdout:
-  ok  	github.com/foo/bar	0.124s
-stderr:
-  # github.com/foo/baz
-  ./baz.go:42:9: undefined: qux
-```
+- **Channel** 拥有 transport。
+- **Gateway** 路由入站。`inbound` 子包负责斜杠命令派发链；其它都转发到 ChatSession 的 active AgentSession。
+- **ChatSession** 是每个 chat 的 context。拥有 AgentSession 池和 InputBuffer FSM。daemon 重启之间持久化。
+- **AgentSession** 是每个 CLI 进程的句柄。每个 `(agent, cwd)` 一份，`/use` 和 `/cwd` 切换之间保活。
+- **Bridge** 是每个 agent 的 transport——`acp`、`claudecode`、`codex`、`opencode`、`pi` 或 `pty`（在 `internal/bridge/` 下），按 CLI 支持情况选。
 
-**适合的场景**：快速侦察（`!ls`、`!git status`、`!tail -n 50 app.log`）、环境探针（`!go version`、`!which gh`），或任何不值得跑一次 agent round-trip 的事。CWD 永远是你最近一次 `/cwd` 绑定的那个工作区，所以 `!cmd` 总是落在你正在看的那份代码上。
+完整责任表见 [`docs/SPEC.md`](./docs/SPEC.md) §1，"Channel 是 dumb renderer" 的设计动机见 §0.1。
 
-**规则**（由 `parseShell` + `internal/shell/dispatch_test.go` 锁住）：
-
-- **必须行首。** `!cmd` 命中，`echo !hi` 不命中（`!` 必须是第一个非空白字符）。
-- **空内容就是空操作。** 单独的 `!` 或 `!   ` 直接落到 agent prompt——不会误触发空 shell。
-- **两种叹号都行。** `!cmd` 和 `！cmd` 等价，手机 / 全角输入法的用户不用切键盘。
-- **没绑 CWD → 友好报错。** 还没绑工作区的话，回复这张卡，啥也不跑：
-
-  ```
-  ❌ shell: no CWD configured for this chat
-  Try `/use <path>` first.
-  ```
-- **5 分钟上限。** `!cmd` 超过 5 分钟会被砍掉。耗时更长的活儿自己上 screen / tmux。
-- **异步 + 尽力回复。** 命令在 detached goroutine 里跑，结果以线程回复的形式发出去；网关立刻返回——慢 `!cmd` 不会卡住下一条消息。回复是尽力而为——如果守护进程正在重启（`!make restart`），新守护进程会重新接 Chat，结果可能落在那里。
-- **Panic-safe。** 命令出岔（或发送方出 bug）会在 goroutine 里 recover——守护进程不掉，你丢一条回复，没别的。
-
-**跨平台**：macOS / Linux 用 `sh -c <cmd>`；Windows 用 `cmd /c <cmd>`。通过 build tag 隔离在 `internal/shell/dispatch_unix.go` / `dispatch_windows.go`。
-
-**输出截断**：stdout 默认内联前 50 行；超过就显示 `… N more lines truncated`，避免 `!cat huge.log` 把 IM 消息体撑爆。stderr 不限行数，但永远在 stdout 后面。
-
-### 斜杠命令
-
-| 命令 | 干什么 |
-|---|---|
-| `/cwd <path>` | 绑定这个 Chat 到一个工作区。会校验路径，下次发消息时 lazy-spawn。 |
-| `/use <agent>` | 切当前 agent（`claude` / `codex` / `opencode` / `pi`）。复用或新拉。 |
-| `/stop` | 停掉当前 agent 上的 in-flight turn。会话留着，队列里的消息继续流。 |
-| `/steer <msg>` | 停掉 in-flight turn 并把 `<msg>` 插到队首。下个 turn agent 第一眼看到的就是这条。 |
-| `/close [agent]` | 终止当前工作区里 AgentSession 的 bridge 进程。AgentSession 记录保留——下次发消息触发 respawn 时会用 `--resume <sessionID>` 接着聊。 |
-| `/new [agent]` | 重置 agent 对话上下文（Claude Code 的 `/clear` 等价）。进程保留，队列清空。 |
-| `/watch on\|off` | 当前 Chat 的消息监听模式（默认群内只听 `@bot` / `@_all`）。 |
-| `/think on\|off` | 是否在回复卡里展示 agent 思考过程。 |
-| `/tools on\|off` | 是否展示每个工具的独立线程回复（默认关）。 |
-| `/gtw fix [-a <agent>]` | 在 `git worktree` 里拉起一次性 agent，自动提议分支名 + 任务。 |
-| `/gtw push [-a <agent>]` | 提交 + 推送；回复卡里展示分支 / 基线 / URL。 |
-| `/gtw pr  [-a <agent>]` | 一次性 agent 生成 Conventional Commits 标题 + 正文，通过 `gh` / `glab` 开 PR。 |
-| `/gtw close` | 拆 worktree，回到 main，删分支。 |
-| `/gtw sync` | 把 `origin/main` 拉进 worktree，fast-forward。 |
-| `/help` | 在 Chat 里列出所有斜杠命令。 |
-
-所有斜杠命令都走 `command.Commander` / `Registry` / `Factory`（`internal/command/`）——加一个新命令就是一次 `Factory` 注册，网关和 channel 层不用动。
-
-### `/gtw` hooks 速查
-
-```yaml
-# ~/.nightme/gtw.yml
-fix:
-  hooks:
-    before: [echo "starting fix flow"]
-    after:  [codegraph init, npm install, go mod download]
-
-push:
-  agent: pi                          # 写 commit message 的轻量 agent
-
-# close:  # 预留
-# sync:   # 预留
-```
-
----
-
-## NightMe 和同类工具的差异
-
-NightMe 面向的是「已经在本地用多个 AI 编码 CLI、想从聊天里调度它们」的开发者。对比一下同类：
-
-| Project | Process keep-alive on switch | Worktree-as-slash-command | StatusBar / transparency | Flexible visibility |
-|---|---|---|---|---|
-| **NightMe** | ✅ 池化——老 CLI 进程活着，对话保留 | ✅ `/gtw fix / push / pr / close / sync` | ✅ Kino 页脚展示 cwd / git / agent / token | ✅ `/think /tools /watch` + 主动进度 |
-| openclaw | ❌ 切工作区就重启 | ❌ | ❌ | ⚠️ |
-| cc-connect | ⚠️ 每项目一个进程，池化弱 | ⚠️ 通用 cron + memory，不感知 worktree | ⚠️ | ⚠️ |
-| happycoder | ❌ 单 agent，不保活 | ❌ | ❌ | ⚠️ |
-| hermes | — | ❌ | ❌ | — |
-
-NightMe 真正比同行多的：
-
-- **真正的进程保活，不是「多 agent 编排」。** 切回上一个 agent 是瞬时的——同一个 CLI 进程，同一段对话。
-- **`/gtw` 是一等公民的工作流。** fix → push → pr → close → sync，每一步一张 IM 回复卡。`cc-connect` 给你通用 `cron` + `memory`；`openclaw` 完全没有。
-- **状态栏透明。** 其他工具把你丢进黑盒。NightMe 每条回复都展示 cwd、git 状态、agent 状态、token 用量。
-- **Hooks 自动搭开发环境。** `codegraph init` 在 worktree 开起来之后自动跑——不用手敲重初始化。
-- **轻量 agent 干杂活。** push 的 commit message 默认走 `pi`，不是主 Chat 里那个重的 Claude。省 token。
-- **单文件 Go 静态二进制。** ~30 MB。没有 Node + 插件宿主 + LLM 栈。没有 Python 虚拟环境。没有手机端 App。
-
----
-
-## Configuration
+### Configuration
 
 NightMe 从 `~/.nightme/config.yaml`（或 `$NIGHTME_CONFIG` 指定的文件）读 YAML。环境变量可覆盖：`NIGHTME_<SECTION>_<KEY>`（如 `NIGHTME_PRIMARY`）。
 
@@ -333,29 +313,27 @@ feishu:
   verification_token: ""
   encrypt_key: ""
 
-session:
+session:                                 # 初始 PTY + aggregator 参数
   default_pty_cols: 80
   default_pty_rows: 24
-  output_chunk_size: 4096
-  output_flush_interval_ms: 200
+  output_chunk_size: 4096        # bytes
+  output_flush_interval_ms: 200  # milliseconds
 
 logging:
   level: "info"          # debug | info | warn | error
   file: ""               # 空 = stdout；非空 = 文件路径
 
 paths:
-  data_dir: "~/.nightme"
+  data_dir: "~/.nightme"  # chat_sessions.json + agent_sessions.json 的根
 ```
 
-`/gtw` 工作流读的是 **另一个文件**：`~/.nightme/gtw.yml`——见上文的 [hooks 速查](#gtw-hooks-速查)。
+`/gtw` 工作流读的是 **另一个文件**：`~/.nightme/gtw.yml`——见上文的 [Hooks 那一节](#hooks把开发环境一起带过去)。
 
 完整 schema 和每个 bridge 的说明见 [`configs/nightme.example.yaml`](./configs/nightme.example.yaml)。
 
 日志写到 `~/.nightme/nightme.log`（权限 `0600`），JSON 格式。属性名里含 `secret`、`token`、`password` 的会被自动改成 `***REDACTED***`。
 
----
-
-## Documentation
+### Documentation
 
 | 文档 | 内容 |
 |---|---|
@@ -365,9 +343,91 @@ paths:
 | [`docs/feat/`](./docs/feat/) | 每个 feature 的设计文档。 |
 | [`docs/bridge/`](./docs/bridge/) | 每个 agent bridge 的设计：claude、codex、opencode、pi。 |
 | [`docs/channel/feishu.md`](./docs/channel/feishu.md) | 飞书 adapter 参考（渲染规则、卡片语义、线程路由）。 |
+| [`docs/flow/`](./docs/flow/) | 横切流程文档（如 3-layer doc model）。 |
 | [`docs/E2E_TESTING.md`](./docs/E2E_TESTING.md) | 飞书端到端手动测试 + 排错。 |
 | [`CHANGELOG.md`](./CHANGELOG.md) | 当前 snapshot（单 `[Unreleased]` 段）。 |
 | [`MIGRATION.md`](./MIGRATION.md) | 历史 snapshot 之间的 breaking change 列表。 |
+
+### Development
+
+```bash
+make build     # ./bin/nightme，带 version metadata
+make test      # go test -race ./...   (~20 packages, race-tested)
+make lint      # go vet ./...          (0 warnings required by CI)
+make install   # go install to $GOBIN
+make dev       # go run ./cmd/nightme  (uses example config)
+```
+
+CI 跑在 GitHub Actions（`.github/workflows/ci.yml`），每次 push 和 PR 都会跑：`go vet`、`go test -race`、`go build` 必须全过。
+
+### Project layout
+
+```
+cmd/nightme/                       # cobra CLI (start / stop / restart / status / logs / doctor / test / config / list / login / agents / name / debug)
+configs/                           # example YAML config
+docs/
+  PRD.md SPEC.md FEATURES.md       # 3-layer doc model
+  feat/                            # F-XX per-feature design
+  bridge/  channel/  flow/         # per-subsystem design
+  images/                          # README-served screenshots
+internal/
+  agent/                           # Agent / AgentEvent / Info / Starter interface
+  agentsession/                    # AgentSession + Prompt + Spawner (per-CLI-process runtime unit)
+  bridge/                          # Bridge abstraction, one sub-package per agent
+    acp/  claudecode/  codex/  opencode/  pi/  pty/
+  channel/                         # Channel interface
+    echo/  feishu/                 # adapters (Feishu is the production one)
+  chatsession/                     # ChatSession + pool manager + persistence
+  cli/                              # shared CLI helpers (config / doctor / login)
+  command/                         # Slash-command Commander / Registry / Factory
+    cwd/ close/ newcmd/ use/ think/ tools/ watch/ stop/ steer/ services/
+    gtw/                           # /gtw fix / hooks / close (worktree workflow)
+  config/                          # YAML loader + env overrides
+  daemoncontrol/                   # IPC for `nightme doctor` / `status`
+  errors/                          # CodedError + ExitCode
+  gateway/                         # Slash router + binding + receipt FSM
+    inbound/  outbound/            # inbound dispatch chain + outbound sender
+  gatewaytest/                     # integration test harness
+  logging/                         # slog + secret redaction
+  login/                           # Feishu app registration / QR login
+  messages/                        # IM message types + dispatch
+  prcache/                         # PR metadata cache (per-F-50)
+  registry/                        # JSON-backed chat_sessions.json + agent_sessions.json (0600, atomic)
+  shell/                           # `!cmd` shell-mode dispatcher
+  statusbar/                       # Feishu footer-card stamp runtime (per F-58, F-133)
+  testdata/                        # shared test fixtures
+  version/                         # build-time version metadata
+```
+
+### Exit codes
+
+| Code | 含义 |
+|------|---------|
+| 0 | Success |
+| 1 | Generic / unmapped error |
+| 2 | Config error |
+| 3 | Auth error |
+| 4 | Channel error |
+| 5 | Session error |
+| 6 | Agent error |
+| 7 | Bridge error |
+| 8 | Validation error |
+| 9 | Not found |
+
+---
+
+## Contributing
+
+PRs 和 issues 都欢迎。大改动的话先开 issue 聊聊，再写代码。
+
+详细指南在 [`/docs`](./docs/) — 设计流程参考 [3-layer doc model](./docs/README.md)。
+
+感谢使用 NightMe——我们欢迎更多 **channels**（Feishu、Web TUI、其他）和更多 **AI Coding Agents**（Claude Code、Codex、Pi、OpenCode、任何新的）接入。Drop 一个 `Channel` / `Bridge`，架构处理剩下的事。
+
+联系维护者：
+
+- Twitter：[@imlangzi](https://x.com/imlangzi)
+- 微信：`langzi`（加好友请注明 "NightMe"）
 
 ---
 

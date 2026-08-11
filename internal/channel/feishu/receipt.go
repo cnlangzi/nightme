@@ -65,7 +65,7 @@ type receiptBot interface {
 	// yet). v1.3.x (§13.10): rootID is the user message id to thread
 	// the cold-start card to. Renamed from SendCard in F-46 to
 	// disambiguate from the channel.Channel.SendCard interface
-	// method that takes a gateway.OutboundMessage.
+	// method that takes a messages.OutboundMessage.
 	SendCardForReceipt(ctx context.Context, chatID, cardJSON, rootID string, replyInThread bool) (string, error)
 	// PatchMessage replaces the body of an existing message in place
 	// (Feishu PATCH /im/v1/messages/{id}). Used on every render after
@@ -145,14 +145,14 @@ type MessageReceipt struct {
 	// element list (split by divTextCharLimit).
 	tasks []agent.AgentTaskItem
 
-	// footerLines (F-45) is the rendered SessionContext footer
+	// footerLines (F-45) is the rendered StatusBar footer
 	// split into one entry per output line. Each entry maps to
 	// one <plain_text> element inside the bottom-of-card <div>
 	// — Feishu plain_text does NOT honour \n inside a single
 	// element, so the receipt must store the multi-line form
 	// directly (rather than a single string with embedded \n).
 	// nil / empty slice = no footer (silent drop, pre-EventAgentReady,
-	// or no SessionContext on the wire).
+	// or no StatusBar on the wire).
 	footerLines []string
 
 	// cardMsgID is the Feishu message id of the rolling-log card
@@ -233,12 +233,12 @@ func (r *MessageReceipt) SetTaskList(ctx context.Context, list *agent.AgentTaskL
 }
 
 // SetTaskListWithFooter (F-45) replaces the per-turn task
-// checklist AND stamps the rendered SessionContext footer at the
+// checklist AND stamps the rendered StatusBar footer at the
 // bottom of the receipt card. footerLines may be nil / empty
-// when no SessionContext is stamped (silent drop); the receipt
+// when no StatusBar is stamped (silent drop); the receipt
 // preserves the previously-stamped footer in that case —
 // symmetric with AppendEntryWithFooter's preserve-on-empty
-// semantics, so a transient nil/zero SessionContext between
+// semantics, so a transient nil/zero StatusBar between
 // turns doesn't wipe a previously-rendered footer.
 func (r *MessageReceipt) SetTaskListWithFooter(ctx context.Context, list *agent.AgentTaskListEvent, footerLines []string) error {
 	if r == nil {
@@ -369,8 +369,8 @@ func (r *MessageReceipt) AppendEntry(ctx context.Context, entry LogEntry) error 
 }
 
 // AppendEntryWithFooter (F-45) appends a rolling-log entry AND
-// stamps the rendered SessionContext footer for this turn.
-// footerLines may be nil / empty (no SessionContext stamped this
+// stamps the rendered StatusBar footer for this turn.
+// footerLines may be nil / empty (no StatusBar stamped this
 // turn); the receipt keeps the previously-stored footer in that
 // case so the rendered card's footer doesn't visually regress
 // between turns.

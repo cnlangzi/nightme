@@ -26,18 +26,26 @@ import (
 //   - read error other than not-exist → zero-value + warning note
 //   - yaml malformed → zero-value + warning note
 //
-// Per-command fields (Fix/Push/Close/Sync) are independently
-// optional — a partial yml is fine.
+// Per-command fields (Fix/Push/Commit/Close/Sync) are
+// independently optional — a partial yml is fine. Push still
+// honours before/after hooks; Push.Agent, if set in an older
+// yml, is silently ignored (push no longer runs an agent).
 type Config struct {
 	Fix   CmdConfig `yaml:"fix"`
 	Push  CmdConfig `yaml:"push"`
-	Close CmdConfig `yaml:"close"`
-	Sync  CmdConfig `yaml:"sync"`
+	// Commit owns the /gtw commit subcommand's defaults (F-XX
+	// split: commit and push are two distinct commands; Commit
+	// carries the agent that runs the one-shot commit, plus
+	// before/after hooks).
+	Commit CmdConfig `yaml:"commit"`
+	Close  CmdConfig `yaml:"close"`
+	Sync   CmdConfig `yaml:"sync"`
 }
 
 // CmdConfig is the per-command subsection of Config. Agent is the
-// default agent name for flows that need one (only pushDirty in
-// v1). Hooks is the before/after hook list.
+// default agent name for flows that need one (only Commit in
+// v1 — Push no longer touches an agent). Hooks is the before/
+// after hook list.
 type CmdConfig struct {
 	Agent string `yaml:"agent"`
 	Hooks Hooks  `yaml:"hooks"`

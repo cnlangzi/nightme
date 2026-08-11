@@ -11,11 +11,11 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/command/gtw"
-	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/registry"
+	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 // TestEventHandler_ThinkGate_ShowPassesThrough verifies the
@@ -33,7 +33,7 @@ func TestEventHandler_ThinkGate_ShowPassesThrough(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
@@ -63,7 +63,7 @@ func TestEventHandler_ThinkGate_HideDropsOutThinking(t *testing.T) {
 	}
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
@@ -99,7 +99,7 @@ func TestEventHandler_ThinkGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	}
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	// (a) OutReply — final assistant reply (no <thinking> prefix)
@@ -156,7 +156,7 @@ func TestEventHandler_ThinkGate_NilLoggerSafe(t *testing.T) {
 	}
 
 	// nil logger — must not panic.
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, nil, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, nil, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	// Run inside a recover probe to convert any panic into a
@@ -186,7 +186,7 @@ func TestEventHandler_ThinkGate_PersistsAcrossInvocations(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	thinking := agent.AgentEvent{
@@ -232,7 +232,7 @@ var _ = slog.Default
 // TestEventHandler_OutResult_FooterFirstTurnExact is the regression
 // for the user-reported bug ("first tokens always 0") post the
 // EventAgentResult + EventUsage → single EventAgentResult{Result, Usage}
-// merge. The runtime now stamps SessionContext on the same ch.Send
+// merge. The runtime now stamps StatusBar on the same ch.Send
 // dispatch where the Usage arrives — the footer sees the turn's
 // own tokens on the very first send.
 //
@@ -246,7 +246,7 @@ func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_first_turn", "claude")
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_first_turn", "claude", "/tmp", nil)
 
 	// Step 1: EventAgentReady captures Model.
@@ -276,9 +276,9 @@ h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prc
 	// Find the OutResult specifically — EventAgentReady may also have
 	// emitted OutboundMessages (e.g. OutInit on echo); the merged
 	// design only changes how many OutResult-bound sends fire.
-	var out *gateway.OutboundMessage
+	var out *messages.OutboundMessage
 	for i := range got {
-		if got[i].Kind == gateway.OutResult {
+		if got[i].Kind == messages.OutResult {
 			if out != nil {
 				t.Fatalf("multiple OutResult in Record; expected exactly one")
 			}
@@ -288,11 +288,11 @@ h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prc
 	if out == nil {
 		t.Fatalf("no OutResult in Record: %+v", got)
 	}
-	// SessionContext stamped with THIS turn's tokens — the user
+	// StatusBar stamped with THIS turn's tokens — the user
 	// bug surface is gone: footer shows turn-1 cumulative = the
 	// actual usage, not 0.
-	if out.SessionContext == nil {
-		t.Fatal("OutResult SessionContext is nil; runtime should stamp inline")
+	if out.StatusBar == nil {
+		t.Fatal("OutResult StatusBar is nil; runtime should stamp inline")
 	}
 	u := out.Usage
 	if u == nil {
@@ -305,12 +305,12 @@ h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prc
 	if u.CostUSD != cost {
 		t.Errorf("OutboundMessage.Usage.CostUSD = %v, want %v", u.CostUSD, cost)
 	}
-	if out.SessionContext.Model != "claude-opus-4-5" {
-		t.Errorf("SessionContext.Model = %q, want 'claude-opus-4-5'", out.SessionContext.Model)
+	if out.StatusBar.AgentBar.Model != "claude-opus-4-5" {
+		t.Errorf("StatusBar.Model = %q, want 'claude-opus-4-5'", out.StatusBar.AgentBar.Model)
 	}
 	// Co-located Usage rides on the same OutboundMessage for any
 	// channel that wants to render it directly (today's channels
-	// render via SessionContext, but the field stays for symmetry
+	// render via StatusBar, but the field stays for symmetry
 	// with the AgentResultEvent.Usage shape).
 	if out.Usage == nil {
 		t.Error("OutboundMessage.Usage is nil; gateway should populate from AgentResultEvent.Usage")
@@ -320,7 +320,7 @@ h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prc
 }
 
 // TestEventHandler_OutResult_UsageIsPerTurnNotCumulative verifies
-// the per-turn snapshot semantics: SessionContext.Usage on each
+// the per-turn snapshot semantics: StatusBar.Usage on each
 // turn reflects ONLY that turn's bridge-reported usage, NOT a
 // running total. The runtime is a passive pass-through; AgentSession
 // has no cumulative state.
@@ -330,7 +330,7 @@ func TestEventHandler_OutResult_UsageIsPerTurnNotCumulative(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_per", "claude")
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_per", "claude", "/tmp", nil)
 
 	// Turn 1.
@@ -366,24 +366,24 @@ h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prc
 	}
 }
 
-// TestEventHandler_OutResult_NilUsageLeavesEmptySessionContext: a
+// TestEventHandler_OutResult_NilUsageLeavesEmptyStatusBar: a
 // AgentResultEvent with no Usage (zero-usage turn / synthetic message)
-// still ships OutResult, with SessionContext populated only by
+// still ships OutResult, with StatusBar populated only by
 // Model / Agent (no tokens to display). The runtime is a passive
 // pass-through; nil Usage means the footer Line 2 is omitted.
-func TestEventHandler_OutResult_NilUsageLeavesEmptySessionContext(t *testing.T) {
+func TestEventHandler_OutResult_NilUsage_StillStampsStatusBar(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	mgr := chatsession.NewManager()
 	cs, _ := mgr.GetOrCreate("oc_chat_zero", "claude")
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	// t.TempDir() is guaranteed NOT to be inside a git working
 	// tree (Go creates it under the OS temp dir; tests don't
 	// nest a .git inside). Pre-F-48 the test hardcoded /tmp,
 	// which happened to be non-git on most dev machines but
 	// could fail under a CI runner that mounts the workspace
-	// under /tmp. F-48 stamps SessionContext whenever the cwd
+	// under /tmp. F-48 stamps StatusBar whenever the cwd
 	// is in a git repo (regardless of usage), so the test must
 	// pin a non-git cwd explicitly.
 	tmpDir := t.TempDir()
@@ -398,47 +398,47 @@ h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prc
 	}, UserMsgID: "om_user_1"})
 
 	got := ch.Record()
-	if len(got) != 1 || got[0].Kind != gateway.OutResult {
+	if len(got) != 1 || got[0].Kind != messages.OutResult {
 		t.Fatalf("got %v, want 1 OutResult", got)
 	}
-	// SessionContext IS stamped (Agent is set), but Usage is nil
+	// StatusBar IS stamped (Agent is set), but Usage is nil
 	// (no per-turn usage on this event) and the footer Line 2
 	// is omitted because ctx.Usage == nil.
-	if got[0].SessionContext == nil {
-		t.Fatal("SessionContext = nil; Agent is set so SessionContext should be stamped")
+	if got[0].StatusBar == nil {
+		t.Fatal("StatusBar = nil; Agent is set so StatusBar should be stamped")
 	}
 	if got[0].Usage != nil {
 		t.Errorf("OutboundMessage.Usage = %+v, want nil (no usage on this event)", got[0].Usage)
 	}
 }
 
-// TestSessionContextInto_ForwardsUsage pins F-55: sessionContextInto
+// TestStampFromAS_ForwardsUsage pins F-55: stampFromAS
 // must copy out.Usage (set by gateway.Translate from the bridge
-// wire payload) into out.SessionContext.Usage so the channel footer
+// wire payload) into out.StatusBar.UsageBar.UsageInfo so the channel footer
 // can render it via ctx.Usage. Pre-F-55 the copy was missing, so
 // footers silently rendered without usage data even when the
 // bridge had populated it. The 1-line fix lives in run.go; this
 // test catches any future regression that drops Usage from the
-// SessionContext struct literal.
+// StatusBar struct literal.
 //
 // Sub-cases:
-//   - Usage populated → SessionContext.Usage matches verbatim
+//   - Usage populated → StatusBar.Usage matches verbatim
 //     (input / output / cache_creation / cache_read /
 //     context_window / context_window_pct / costUSD all flow
 //     through unchanged — runtime is a passive pass-through).
-//   - Usage nil AND no other field qualifies → no SessionContext
+//   - Usage nil AND no other field qualifies → no StatusBar
 //     materialized (guard skips the whole block).
-//   - Usage nil BUT Agent set → SessionContext still stamped
+//   - Usage nil BUT Agent set → StatusBar still stamped
 //     (Agent path wins; footer Line 2 omitted because ctx.Usage
 //     is nil — same behaviour as the pre-fix code for this case).
-func TestSessionContextInto_ForwardsUsage(t *testing.T) {
+func TestStampFromAS_ForwardsUsage(t *testing.T) {
 	tmpDir := t.TempDir() // non-git cwd
 	as := chatsession.NewAgentSession("as_test", "cs_ctx", "claude", tmpDir, nil)
 
-	t.Run("usage populated → SessionContext.Usage verbatim", func(t *testing.T) {
-		out := &gateway.OutboundMessage{
+	t.Run("usage populated → StatusBar.Usage verbatim", func(t *testing.T) {
+		out := &messages.OutboundMessage{
 			ChatID:  "oc_chat_ctx_1",
-			Kind:    gateway.OutResult,
+			Kind:    messages.OutResult,
 			Text:    "answer",
 			ReplyTo: "om_user_1",
 			Usage: &agent.UsageInfo{
@@ -451,13 +451,13 @@ func TestSessionContextInto_ForwardsUsage(t *testing.T) {
 				ContextWindowPct:         10.55,
 			},
 		}
-		sessionContextInto(out, as, &prcache.Registry{}, gtw.HandlerDeps{})
-		if out.SessionContext == nil {
-			t.Fatal("SessionContext is nil; Usage alone must materialize it (F-55)")
+		statusbar.StampFromAS(out, as, statusbar.Deps{})
+		if out.StatusBar == nil {
+			t.Fatal("StatusBar is nil; Usage alone must materialize it (F-55)")
 		}
-		u := out.SessionContext.Usage
+		u := out.StatusBar.UsageBar.UsageInfo
 		if u == nil {
-			t.Fatal("SessionContext.Usage is nil; out.Usage must be copied verbatim")
+			t.Fatal("StatusBar.Usage is nil; out.Usage must be copied verbatim")
 		}
 		if u.InputTokens != 12_300 {
 			t.Errorf("InputTokens = %d, want 12_300", u.InputTokens)
@@ -482,37 +482,48 @@ func TestSessionContextInto_ForwardsUsage(t *testing.T) {
 		}
 	})
 
-	t.Run("usage nil + no other field → no SessionContext", func(t *testing.T) {
-		// Fresh AS with Agent/Model/Compaction also empty so
-		// every guard condition fails.
+	t.Run("usage nil + no other field → StatusBar with only GitBar", func(t *testing.T) {
+		// Fresh AS with no identity and no Cwd: the new
+		// structure still produces a StatusBar because GitBar
+		// is always populated when an AS exists (even when
+		// Workspace==""). AgentBar / UsageBar stay nil because
+		// their gates don't qualify.
 		emptyAS := chatsession.NewAgentSession("as_empty", "cs_empty", "", "", nil)
-		out := &gateway.OutboundMessage{
+		out := &messages.OutboundMessage{
 			ChatID: "oc_chat_ctx_2",
-			Kind:   gateway.OutResult,
+			Kind:   messages.OutResult,
 			Text:   "answer",
 			// Usage intentionally nil
 		}
-		sessionContextInto(out, emptyAS, &prcache.Registry{}, gtw.HandlerDeps{})
-		if out.SessionContext != nil {
-			t.Errorf("SessionContext = %+v, want nil (no field qualifies)", out.SessionContext)
+		statusbar.StampFromAS(out, emptyAS, statusbar.Deps{})
+		if out.StatusBar == nil {
+			t.Fatal("StatusBar should be non-nil (GitBar always present)")
+		}
+		if out.StatusBar.AgentBar != nil {
+			t.Errorf("AgentBar = %+v, want nil (no identity)", out.StatusBar.AgentBar)
+		}
+		if out.StatusBar.UsageBar != nil {
+			t.Errorf("UsageBar = %+v, want nil (no usage)", out.StatusBar.UsageBar)
 		}
 	})
 
-	t.Run("usage nil but Agent set → SessionContext stamped, Usage nil", func(t *testing.T) {
-		out := &gateway.OutboundMessage{
+	t.Run("usage nil but Agent set → StatusBar with AgentBar, UsageBar nil", func(t *testing.T) {
+		out := &messages.OutboundMessage{
 			ChatID: "oc_chat_ctx_3",
-			Kind:   gateway.OutResult,
+			Kind:   messages.OutResult,
 			Text:   "answer",
 			// Usage intentionally nil; Agent is set on the
-			// shared `as` so the guard passes via the Agent
-			// branch.
+			// shared `as` so AgentBar populates.
 		}
-		sessionContextInto(out, as, &prcache.Registry{}, gtw.HandlerDeps{})
-		if out.SessionContext == nil {
-			t.Fatal("SessionContext is nil; Agent is set so SessionContext should be stamped")
+		statusbar.StampFromAS(out, as, statusbar.Deps{})
+		if out.StatusBar == nil {
+			t.Fatal("StatusBar is nil; Agent is set so StatusBar should be populated")
 		}
-		if out.SessionContext.Usage != nil {
-			t.Errorf("SessionContext.Usage = %+v, want nil (Usage was nil on the wire)", out.SessionContext.Usage)
+		if out.StatusBar.AgentBar == nil || out.StatusBar.AgentBar.Agent != "claude" {
+			t.Errorf("AgentBar = %+v, want Agent=claude", out.StatusBar.AgentBar)
+		}
+		if out.StatusBar.UsageBar != nil {
+			t.Errorf("UsageBar = %+v, want nil (Usage was nil on the wire)", out.StatusBar.UsageBar)
 		}
 	})
 }
@@ -522,7 +533,7 @@ func TestSessionContextInto_ForwardsUsage(t *testing.T) {
 //
 //	EventAgentResult.Usage (set by bridge)
 //	  → gateway.Translate populates OutboundMessage.Usage
-//	  → sessionContextInto copies to OutboundMessage.SessionContext.Usage
+//	  → stampFromAS copies to OutboundMessage.StatusBar.Usage
 //	  → channel reads ctx.Usage and renders (window) + new/cache/out
 //
 // The test does NOT import the feishu package (cmd/nightme must
@@ -535,9 +546,9 @@ func TestSessionContextInto_ForwardsUsage(t *testing.T) {
 // reads the values from OutboundMessage.Usage.
 //
 // This test is the regression guard for the F-55 footgun: a
-// future refactor that drops Usage from sessionContextInto (or
-// stops stamping it onto SessionContext) will fail this test
-// with a precise signal (SessionContext.Usage nil even though
+// future refactor that drops Usage from stampFromAS (or
+// stops stamping it onto StatusBar) will fail this test
+// with a precise signal (StatusBar.Usage nil even though
 // OutboundMessage.Usage is populated), and the footer Line 2
 // will be silently empty in production until someone notices.
 func TestEventHandler_Chain_UsageFlowsFromResultEventToFooter(t *testing.T) {
@@ -546,7 +557,7 @@ func TestEventHandler_Chain_UsageFlowsFromResultEventToFooter(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_chain", "claude")
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	tmpDir := t.TempDir() // non-git cwd
 	as := chatsession.NewAgentSession("as_chain", "cs_oc_chat_chain", "claude", tmpDir, nil)
 
@@ -583,9 +594,9 @@ h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prc
 		},
 	}, UserMsgID: "om_user_1"})
 
-	var out *gateway.OutboundMessage
+	var out *messages.OutboundMessage
 	for _, m := range ch.Record() {
-		if m.Kind == gateway.OutResult {
+		if m.Kind == messages.OutResult {
 			out = &m
 			break
 		}
@@ -601,15 +612,15 @@ h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prc
 		t.Fatal("OutboundMessage.Usage is nil; gateway.Translate should populate from AgentResultEvent.Usage")
 	}
 
-	// Link 2: sessionContextInto copies out.Usage to
-	// out.SessionContext.Usage. This is the runtime→channel
+	// Link 2: stampFromAS copies out.Usage to
+	// out.StatusBar.UsageBar.UsageInfo. This is the runtime→channel
 	// boundary; if it breaks, the footer Line 2 silently
 	// disappears (the actual user-facing bug F-55 surfaced).
-	if out.SessionContext == nil {
-		t.Fatal("SessionContext is nil; runtime should stamp it on OutResult")
+	if out.StatusBar == nil {
+		t.Fatal("StatusBar is nil; runtime should stamp it on OutResult")
 	}
-	if out.SessionContext.Usage == nil {
-		t.Fatal("SessionContext.Usage is nil; sessionContextInto must copy out.Usage verbatim")
+	if out.StatusBar.UsageBar.UsageInfo == nil {
+		t.Fatal("StatusBar.Usage is nil; stampFromAS must copy out.Usage verbatim")
 	}
 
 	// F-55 invariants: every wire field survives the chain
@@ -620,23 +631,23 @@ h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prc
 		got  any
 		want any
 	}{
-		{"InputTokens", out.SessionContext.Usage.InputTokens, inTok},
-		{"OutputTokens", out.SessionContext.Usage.OutputTokens, outTok},
-		{"CacheCreationInputTokens", out.SessionContext.Usage.CacheCreationInputTokens, cacheCr},
-		{"CacheReadInputTokens", out.SessionContext.Usage.CacheReadInputTokens, cacheRd},
-		{"CostUSD", out.SessionContext.Usage.CostUSD, cost},
-		{"ContextWindow", out.SessionContext.Usage.ContextWindow, win},
-		{"ContextWindowPct", out.SessionContext.Usage.ContextWindowPct, pct},
+		{"InputTokens", out.StatusBar.UsageBar.UsageInfo.InputTokens, inTok},
+		{"OutputTokens", out.StatusBar.UsageBar.UsageInfo.OutputTokens, outTok},
+		{"CacheCreationInputTokens", out.StatusBar.UsageBar.UsageInfo.CacheCreationInputTokens, cacheCr},
+		{"CacheReadInputTokens", out.StatusBar.UsageBar.UsageInfo.CacheReadInputTokens, cacheRd},
+		{"CostUSD", out.StatusBar.UsageBar.UsageInfo.CostUSD, cost},
+		{"ContextWindow", out.StatusBar.UsageBar.UsageInfo.ContextWindow, win},
+		{"ContextWindowPct", out.StatusBar.UsageBar.UsageInfo.ContextWindowPct, pct},
 	}
 	for _, tc := range cases {
 		if tc.got != tc.want {
-			t.Errorf("SessionContext.Usage.%s = %v, want %v", tc.name, tc.got, tc.want)
+			t.Errorf("StatusBar.Usage.%s = %v, want %v", tc.name, tc.got, tc.want)
 		}
 	}
 
-	// Same identity is preserved on SessionContext.
-	if out.SessionContext.Model != "claude-opus-4-5" {
-		t.Errorf("SessionContext.Model = %q, want 'claude-opus-4-5'", out.SessionContext.Model)
+	// Same identity is preserved on StatusBar.
+	if out.StatusBar.AgentBar.Model != "claude-opus-4-5" {
+		t.Errorf("StatusBar.Model = %q, want 'claude-opus-4-5'", out.StatusBar.AgentBar.Model)
 	}
 
 	// Footer Line 2 will read these exact fields downstream
@@ -663,7 +674,7 @@ func TestEventHandler_ToolsGate_ShowPassesThrough(t *testing.T) {
 	}
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_show", "claude", "/tmp", nil)
 
 	// OutToolStart
@@ -706,7 +717,7 @@ func TestEventHandler_ToolsGate_HideDropsBothToolKinds(t *testing.T) {
 	}
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_hide", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_hide", AgentSession: as, Event: &agent.AgentEvent{
@@ -737,7 +748,7 @@ func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	}
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_indep", "claude", "/tmp", nil)
 
 	// (a) OutReply — final assistant reply (no <thinking> prefix)
@@ -782,7 +793,7 @@ func TestEventHandler_ToolsGate_PersistsAcrossInvocations(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_tools_persist", "claude")
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_persist", "claude", "/tmp", nil)
 
 	toolStart := agent.AgentEvent{
@@ -830,7 +841,7 @@ func TestEventHandler_ToolsAndThinkGatesIndependent(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_both_gates", "claude")
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_both_gates", "claude", "/tmp", nil)
 
 	// Flip both off.
@@ -932,7 +943,7 @@ func TestWireRuntimeCallbacksAndRestore_InstallsHandlersOnRestoredChats(t *testi
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-if err := wireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, &prcache.Registry{}, gtw.HandlerDeps{}, markPromptDone(ch)); err != nil {
+if err := wireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, markPromptDone(ch)); err != nil {
 		t.Fatalf("wireRuntimeCallbacksAndRestore: %v", err)
 	}
 
@@ -962,7 +973,7 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateDropsEmptyIDs(t *testing.T) 
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-if err := wireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, &prcache.Registry{}, gtw.HandlerDeps{}, markPromptDone(ch)); err != nil {
+if err := wireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, markPromptDone(ch)); err != nil {
 		t.Fatalf("wireRuntimeCallbacksAndRestore: %v", err)
 	}
 
@@ -1014,7 +1025,7 @@ func TestWireRuntimeCallbacksAndRestore_NoPersistence(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-if err := wireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, &prcache.Registry{}, gtw.HandlerDeps{}, markPromptDone(ch)); err != nil {
+if err := wireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, markPromptDone(ch)); err != nil {
 		t.Fatalf("wireRuntimeCallbacksAndRestore on cold start: %v", err)
 	}
 	if len(mgr.List()) != 0 {
@@ -1050,7 +1061,7 @@ func TestEventHandler_OnAgentConnected_DoesNotEmitMessageSubmitted(t *testing.T)
 		return false
 	})
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	// Fire EventAgentReady with a userMsgID present (the L869
@@ -1083,18 +1094,18 @@ type messageStateCall struct {
 	state             agent.MessageState
 }
 
-// TestSessionContextInto_NilPRRegistryLeavesEmpty verifies the
+// TestStampFromAS_NilPRRegistryLeavesEmpty verifies the
 // runtime is nil-safe on the prcache dependency: a nil
 // *prcache.Registry MUST NOT panic, MUST leave PullRequest nil
-// (no SessionContext.PullRequest from this path), and MUST still
-// materialize SessionContext when other gate fields fire.
+// (no StatusBar.PullRequest from this path), and MUST still
+// materialize StatusBar when other gate fields fire.
 //
 // This pins the "defensive nil-handling" contract documented in
-// sessionContextInto's doc — a regression that drops the
+// stampFromAS's doc — a regression that drops the
 // `if prReg == nil` guard would crash on every stamp in a
 // single-process debug build that wires deps by hand.
 //
-// The non-nil-PR wiring (cached PR → SessionContext.PullRequest)
+// The non-nil-PR wiring (cached PR → StatusBar.PullRequest)
 // is exercised by the integration tests in
 // internal/prcache/prcache_test.go (same-package field access)
 // and by the runtime stamp path that already passes a
@@ -1102,27 +1113,27 @@ type messageStateCall struct {
 // doesn't need a separate test for that path: the runtime's
 // only job is to copy the cache pointer, and a one-line read
 // is well-covered by the existing materialise-gate tests
-// (TestSessionContextInto_ForwardsUsage above).
-func TestSessionContextInto_NilPRRegistryLeavesEmpty(t *testing.T) {
+// (TestStampFromAS_ForwardsUsage above).
+func TestStampFromAS_NilPRRegistryLeavesEmpty(t *testing.T) {
 	tmpDir := t.TempDir()
 	as := chatsession.NewAgentSession("as_nilpr", "cs_nilpr", "claude", tmpDir, nil)
 
-	out := &gateway.OutboundMessage{
+	out := &messages.OutboundMessage{
 		ChatID: "oc_chat_nilpr",
-		Kind:   gateway.OutResult,
+		Kind:   messages.OutResult,
 		Text:   "answer",
 		Usage:  &agent.UsageInfo{InputTokens: 1},
 	}
 	// MUST NOT panic. The deps are empty so MaybeRefresh would
 	// no-op even with a registry — but with nil registry we
 	// specifically skip the GetOrCreate/MaybeRefresh/PR path.
-	sessionContextInto(out, as, nil, gtw.HandlerDeps{})
+	statusbar.StampFromAS(out, as, statusbar.Deps{})
 
-	if out.SessionContext == nil {
-		t.Fatal("SessionContext is nil; Usage alone must materialize it even with nil prReg")
+	if out.StatusBar == nil {
+		t.Fatal("StatusBar is nil; Usage alone must materialize it even with nil prReg")
 	}
-	if out.SessionContext.PullRequest != nil {
-		t.Errorf("PullRequest = %+v, want nil (nil registry → no cached PR)", out.SessionContext.PullRequest)
+	if out.StatusBar.GitBar.PullRequest != nil {
+		t.Errorf("PullRequest = %+v, want nil (nil registry → no cached PR)", out.StatusBar.GitBar.PullRequest)
 	}
 }
 

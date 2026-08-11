@@ -227,8 +227,9 @@ func listUncommittedFiles(ctx context.Context, worktree string, deps HandlerDeps
 
 // gitLogRange returns the `<sha> <subject>` oneline of every
 // commit in `revRange` (e.g. "headBefore..origin/branch" or
-// "headBefore..HEAD"). Used by replySuccessCard to build the
-// IM card directly from git state — never from agent prose.
+// "headBefore..HEAD"). Used by replyCommitSuccessCard and
+// replyPushSuccessCard to build the IM card directly from git
+// state — never from agent prose.
 //
 // Output is the raw `git log --oneline` text, trimmed. Caller
 // can split on "\n" if it wants structured access.

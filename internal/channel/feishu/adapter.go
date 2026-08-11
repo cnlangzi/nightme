@@ -25,11 +25,11 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/channel"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/config"
-	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
 )
 
@@ -668,8 +668,7 @@ func (a *Adapter) Incoming() <-chan channel.Message { return a.incoming }
 //	                       and produces no OutboundMessage, so this
 //	                       routing table has no entry for it. The
 //	                       compaction count surfaces later via
-//	                       SessionContext.CompactionCount → Footer
-//	                       Line 1 "🗜 N".)
+//	                       compaction count tracking removed).)
 //	OutCommandReply      → top-level Create via SendMessageText
 //	                       (PR #47's ReplyInChat — rootID="") with
 //	                       the ❯ emoji prepended to the text body
@@ -879,7 +878,7 @@ func (a *Adapter) ensureReceiptForReply(ctx context.Context, chatID, userMsgID, 
 }
 
 // ensureReceiptForReplyWithFooter (F-45) is the same as
-// ensureReceiptForReply but stamps the SessionContext footer at
+// ensureReceiptForReply but stamps the StatusBar footer at
 // cold-start so the very first chunk carries cumulative stats.
 func (a *Adapter) ensureReceiptForReplyWithFooter(ctx context.Context, chatID, userMsgID, firstEntryText string, footerLines []string) (*MessageReceipt, bool, error) {
 	if userMsgID == "" {
@@ -1154,9 +1153,9 @@ func (a *Adapter) ensureReceiptForTask(ctx context.Context, chatID, userMsgID st
 	return transient, true, nil
 }
 
-func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
+func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error {
 	switch msg.Kind {
-	case gateway.OutReply:
+	case messages.OutReply:
 		// F-44 revert: OutReply folds into the rolling-log receipt
 		// card (F-25 → F-40 model) for visual scan benefit (1
 		// card, N chunks, PATCH in place).
@@ -1208,7 +1207,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// count — the per-line array ensures buildReceiptCard
 		// emits one <hr> + <div> block at the bottom instead of
 		// N+1 copies inline.
-		footerLines := formatSessionFooterLines(msg.SessionContext)
+		footerLines := formatStatusBarLines(msg.StatusBar)
 		if msg.ReplyTo == "" {
 			return a.postOrphanReplyCard(ctx, msg.ChatID, text, footerLines)
 		}
@@ -1237,7 +1236,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// need to call AppendEntry again.
 		return nil
 
-	case gateway.OutThinking:
+	case messages.OutThinking:
 		// F-34: thinking is posted to the user message thread so
 		// the main chat stays focused on the final answer. Falls
 		// back to a top-level send if ReplyTo is empty (orphan
@@ -1262,7 +1261,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// §3.1.2.
 		return a.postThreadMarkdownReply(ctx, msg.ChatID, msg.ReplyTo, "💭 "+msg.Text, true)
 
-	case gateway.OutMessageState:
+	case messages.OutMessageState:
 		// F-31: read abstract state from typed MessageStatePayload,
 		// map to feishu emoji_type internally. Channel decides
 		// how to render.
@@ -1328,11 +1327,15 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// cold-start path in ensureReceiptForReply stays a
 		// no-op when the placeholder already exists.
 		//
-		// Footer is nil here: SessionContext is only stamped on
-		// OutMessageState at MessageSubmitted time (see
-		// cmd/nightme/run.go newEventHandler), not Queued — the
-		// placeholder shows up before the runtime has the AS
-		// handle. The first OutReply fills the footer in via
+		// Footer is git-only here: StatusBar is only fully
+		// stamped on OutMessageState at MessageSubmitted time
+		// (see cmd/nightme/run.go newEventHandler), not Queued
+		// — the placeholder shows up before the runtime has
+		// the AS handle. The fallback in newRuntimeStatusBar
+		// still attaches GitBar from cs.SelectedCwd() when no
+		// AS is selected, so a chat that has done /cwd already
+		// sees the workspace line on the placeholder card.
+		// The first OutReply fills AgentBar / UsageBar in via
 		// AppendEntryWithFooter.
 		if state == agent.MessageQueued {
 			if _, _, err := a.ensureReceiptForTyping(ctx, msg.ChatID, messageID, nil); err != nil {
@@ -1377,7 +1380,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		return nil
 
-	case gateway.OutMessageStateRemoved:
+	case messages.OutMessageStateRemoved:
 		// v1.3: not used (append-only reactions). Reserved for
 		// future when channels need mutable state markers.
 		if msg.MessageState == nil {
@@ -1391,7 +1394,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		return a.DeleteReaction(ctx, msg.MessageState.MessageID, msg.MessageState.ReactionID)
 
-	case gateway.OutCard:
+	case messages.OutCard:
 		if msg.Card == nil {
 			return errors.New("feishu: OutCard missing card payload")
 		}
@@ -1416,7 +1419,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		_, err = a.sendContent(ctx, msg.ChatID, interactiveMessageType, content, "", false)
 		return err
 
-	case gateway.OutCardPatch:
+	case messages.OutCardPatch:
 		// F-46: in-place PATCH of a previously sent decision card.
 		// gtw.HandleAction emits this when a follow-up wants to
 		// disable the original choices and surface the outcome
@@ -1434,7 +1437,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		return a.PatchMessage(ctx, msg.ReplyTo, content)
 
-	case gateway.OutToolStart:
+	case messages.OutToolStart:
 		// F-34: tool_start is posted to the user message
 		// thread as the "call" line (`● Tool(args)`), matching
 		// Claude Code's terminal UX. The receipt card no
@@ -1465,7 +1468,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		a.pushToolStart(msg.ReplyTo, startMsgID, body)
 		return nil
 
-	case gateway.OutToolEnd:
+	case messages.OutToolEnd:
 		// F-34: tool_end is posted to the user message thread
 		// as the "result" line (`⎿  summary`), the second half
 		// of Claude Code's two-line UX. Args are NOT included
@@ -1513,7 +1516,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		}
 		return nil
 
-	case gateway.OutResult:
+	case messages.OutResult:
 		if msg.Result == nil {
 			return errors.New("feishu: OutResult missing Result payload")
 		}
@@ -1534,7 +1537,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// uses the same shared cardFooterElements helper, so
 		// OutResult and OutReply cards now render identical
 		// footers.
-		footerLines := formatSessionFooterLines(msg.SessionContext)
+		footerLines := formatStatusBarLines(msg.StatusBar)
 		// F-39 + F-44 follow-up: deliver the full result as a
 		// top-level Create (PR #47's ReplyInChat surface) — see
 		// OutReply case above for the parent-thread rationale that
@@ -1555,17 +1558,18 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 	// instead it calls AgentSession.RecordCompaction() to bump the
 	// counter and reset per-cycle token stats. No transient
 	// "✶ Compacting conversation…" thread reply, no channel side
-	// effect. The count surfaces later via SessionContext.CompactionCount
-	// → Footer Line 1 "🗜 N". See docs/feat/F-49-compaction-counter.md
+	// effect. The count surfaces later via StatusBar (F-49
+	// compaction tracking removed — the runtime dropped its
+	// compactionCount bookkeeping). See docs/feat/F-49-compaction-counter.md
 	// §1.3 / §1.9.
 
-	case gateway.OutInit:
+	case messages.OutInit:
 		// F-44: silent drop. Same rationale as OutUsage — footer
 		// design deferred. OutboundMessage{Init} is preserved on
 		// the wire; only the channel-side render is skipped.
 		return nil
 
-	case gateway.OutCommandReply:
+	case messages.OutCommandReply:
 		// Slash command response (or runtime error reply). Plain
 		// text, no receipt, no in-place update — the user sees a
 		// standalone text bubble. The Feishu SendMessageText path
@@ -1588,7 +1592,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		_, err := a.SendMessageText(ctx, msg.ChatID, "❯ "+msg.Text, "", false)
 		return err
 
-	case gateway.OutTaskCreate, gateway.OutTaskUpdate:
+	case messages.OutTaskCreate, messages.OutTaskUpdate:
 		// F-38 + PR #47 + F-44 follow-up: replace the per-turn
 		// checklist in the current receipt. We never call
 		// postThreadReply for task tools — the bridge suppresses
@@ -1619,7 +1623,7 @@ func (a *Adapter) Send(ctx context.Context, msg gateway.OutboundMessage) error {
 		// orphan path fell through to sendRawOutText (plain text
 		// checklist), violating the "main-chat is card" invariant
 		// F-46 established for OutReply / OutResult.
-		footerLines := formatSessionFooterLines(msg.SessionContext)
+		footerLines := formatStatusBarLines(msg.StatusBar)
 		if msg.ReplyTo == "" {
 			return a.postOrphanTaskCard(ctx, msg.ChatID, msg.TaskList, footerLines)
 		}
@@ -1919,21 +1923,21 @@ func (l *threadReplyLimiter) Wait(ctx context.Context, key string) error {
 // tool concept via the Tool field; Meta is no longer the carrier
 // for tool data. See gateway/messages.go ToolInfo docs and
 // gateway/translate.go for the producer side.
-func toolName(m gateway.OutboundMessage) string {
+func toolName(m messages.OutboundMessage) string {
 	if m.Tool != nil && m.Tool.Name != "" {
 		return m.Tool.Name
 	}
 	return "tool"
 }
 
-func toolArgs(m gateway.OutboundMessage) string {
+func toolArgs(m messages.OutboundMessage) string {
 	if m.Tool != nil {
 		return m.Tool.Args
 	}
 	return ""
 }
 
-func toolOutput(m gateway.OutboundMessage) string {
+func toolOutput(m messages.OutboundMessage) string {
 	if m.Tool != nil {
 		return m.Tool.Output
 	}
@@ -1941,7 +1945,7 @@ func toolOutput(m gateway.OutboundMessage) string {
 }
 
 // buildInteractiveCard renders a Feishu Card 2.0 permission card
-// from an abstract gateway.Card. Each option becomes a primary
+// from an abstract messages.Card. Each option becomes a primary
 // button whose value carries the request_id so the inbound Action
 // carries it back.
 //
@@ -1959,7 +1963,7 @@ func toolOutput(m gateway.OutboundMessage) string {
 // a permission request (same visual pattern as the 💭 prefix
 // OutThinking uses for reasoning, the ❯ prefix OutCommandReply
 // uses for slash-command responses). The emoji is the channel's
-// visual decoration — gateway.Card.Title is the original plain
+// visual decoration — messages.Card.Title is the original plain
 // title; we prepend here so the abstract gateway type stays
 // decoration-agnostic and other channels (e.g. CLI) can render
 // the same payload without the prefix.
@@ -1978,7 +1982,7 @@ func toolOutput(m gateway.OutboundMessage) string {
 // primary-button list (kept for permission cards); F-46 adds the
 // Choices path with column_set equal-width layout for decision
 // cards. See docs/feat/F-46-interactive-cards.md §3.
-func buildInteractiveCard(c *gateway.Card) (string, error) {
+func buildInteractiveCard(c *messages.Card) (string, error) {
 	if c == nil {
 		return "", errors.New("feishu: card is nil")
 	}
@@ -1991,7 +1995,7 @@ func buildInteractiveCard(c *gateway.Card) (string, error) {
 	// to preserve the pre-F-46 behaviour for callers that haven't
 	// been migrated yet.
 	title := c.Title
-	if c.Kind == gateway.CardKindPermission {
+	if c.Kind == messages.CardKindPermission {
 		title = "🔐 " + title
 	}
 
@@ -2020,7 +2024,7 @@ func buildInteractiveCard(c *gateway.Card) (string, error) {
 
 	buttons := buildCardButtons(c)
 	if len(buttons) > 0 {
-		if c.Kind == gateway.CardKindDecision {
+		if c.Kind == messages.CardKindDecision {
 			elements = append(elements, buildColumnSet(buttons))
 		} else {
 			elements = append(elements, map[string]any{
@@ -2059,7 +2063,7 @@ func buildInteractiveCard(c *gateway.Card) (string, error) {
 //     (greyed-out look). Both styles include the full label so the
 //     user can read what each option does even when only an icon
 //     is visible.
-func buildCardButtons(c *gateway.Card) []map[string]any {
+func buildCardButtons(c *messages.Card) []map[string]any {
 	var buttons []map[string]any
 	addButton := func(label, action string, isChosen bool) {
 		valMap := map[string]string{
@@ -2269,7 +2273,7 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 		})
 	}
 
-	// Section 3 (F-45): SessionContext footer at the bottom of
+	// Section 3 (F-45): StatusBar footer at the bottom of
 	// the card. Empty footer = section omitted. Rendered as
 	// <hr> + <div> wrapper containing one <plain_text> per
 	// footer line — Feishu's plain_text element does NOT honour
@@ -2286,7 +2290,7 @@ func buildReceiptCard(entries []LogEntry, tasks []agent.AgentTaskItem, footerLin
 	// <hr> divider above stays at Feishu's default thin-grey
 	// (≈ #E5E5E5).
 	//
-	// Footer lines are ASCII-only (output of formatSessionFooter
+	// Footer lines are ASCII-only (output of formatStatusBar
 	// Lines — only emits arrow set + Agent / Model names + cost
 	// USD); no sanitisation needed.
 	if footer := cardFooterElements(footerLines); footer != nil {
@@ -2933,7 +2937,7 @@ func isFeishuTerminalMessageCode(err error) bool {
 // helper. Returns the bot-side message id assigned by Feishu; empty
 // string + nil on transient errors that the SDK returns without an
 // id.
-func (a *Adapter) SendCard(ctx context.Context, msg gateway.OutboundMessage) (string, error) {
+func (a *Adapter) SendCard(ctx context.Context, msg messages.OutboundMessage) (string, error) {
 	if msg.Card == nil {
 		return "", errors.New("feishu: SendCard requires msg.Card")
 	}

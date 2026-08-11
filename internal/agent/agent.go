@@ -125,7 +125,7 @@ const (
 	// the same field — bridges populate it from the source event's
 	// usage / modelUsage instead of emitting a separate EventUsage.
 	// Runtime accumulates Usage on receipt before stamping
-	// SessionContext, so the footer sees this turn's tokens on the
+	// StatusBar, so the footer sees this turn's tokens on the
 	// first try.
 	EventAgentResult
 
@@ -313,7 +313,7 @@ type AgentDoneEvent struct {
 // this on the SAME AgentResultEvent rather than emitting a separate
 // EventUsage — the data is contextually attached to the turn's
 // result, not a peer event. Runtime accumulates Usage on receipt;
-// channels fold it into the SessionContext footer. nil is a valid
+// channels fold it into the StatusBar footer. nil is a valid
 // "no usage reported" value (the bridge may legitimately observe a
 // zero-usage turn, e.g. a synthetic assistant message).
 type AgentResultEvent struct {
@@ -334,7 +334,7 @@ type AgentResultEvent struct {
 	// Usage is the per-turn token usage observed on the same wire
 	// event as Text. See struct doc above. Populated by bridges;
 	// consumed by the runtime's newEventHandler via
-	// agent.AgentResultEvent.Usage before stamping SessionContext.
+	// agent.AgentResultEvent.Usage before stamping StatusBar.
 	Usage *UsageInfo
 }
 
@@ -942,8 +942,8 @@ type Starter interface {
 	//
 	// RunOnce is the "one-shot" counterpart to Start. Start returns
 	// a live *Agent for multi-turn / chat sessions; RunOnce is for
-	// callers (e.g. /gtw push) that want a single synchronous turn
-	// and don't need the session handle.
+	// callers (e.g. /gtw commit, /gtw pr) that want a single
+	// synchronous turn and don't need the session handle.
 	RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock) (string, error)
 }
 

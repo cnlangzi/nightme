@@ -194,7 +194,7 @@ Shell 失败 (`❌ exit N` 注入):
 
 ```
 ↳ work freely here · or `/gtw close` to drop the worktree
-↳ `/gtw push` to ship · `/gtw close` to drop the worktree · or keep developing
+↳ `/gtw commit` + `/gtw push` to ship · `/gtw close` to drop the worktree · or keep developing
 ```
 
 不是 invariant 数据(像 `→ base: ...`),就别用 `↳`。

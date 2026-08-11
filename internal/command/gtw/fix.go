@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 )
 
@@ -106,8 +106,8 @@ type HandlerDeps struct {
 }
 
 // Result is the gtw-package view of a command's outcome. Mirrors
-// gateway.CommandResult without taking a dependency on gateway.
-// The runtime layer converts to *gateway.CommandResult before
+// inbound.CommandResult without taking a dependency on inbound.
+// The runtime layer converts to *inbound.CommandResult before
 // returning from the slash-command handler.
 type Result struct {
 	Consumed bool
@@ -781,9 +781,9 @@ func completeFixAndDispatch(
 			// Append a single-line warning so the user knows
 			// the agent didn't receive the dispatch. We do not
 			// roll back the worktree — see comment above.
-			_ = cs.Emitter().Send(ctx, gateway.OutboundMessage{
+			_ = cs.Emitter().Send(ctx, messages.OutboundMessage{
 				ChatID:  chatID,
-				Kind:    gateway.OutCommandReply, // one-shot plain text, not a rolling-log receipt card
+				Kind:    messages.OutCommandReply, // one-shot plain text, not a rolling-log receipt card
 				ReplyTo: messageID,
 				Text:    fmt.Sprintf("⚠️ Could not dispatch issue #%d to agent: %v\nThe worktree is ready; you can /cwd into %s and tell the agent to fix #%d.", issue.ID, err, worktreePath, issue.ID),
 			})
@@ -965,9 +965,9 @@ func sendDraft(
 	em := cs.Emitter()
 	var botMsgID string
 	if em != nil {
-		id, err := em.SendCard(ctx, gateway.OutboundMessage{
+		id, err := em.SendCard(ctx, messages.OutboundMessage{
 			ChatID: chatID,
-			Kind:   gateway.OutCard,
+			Kind:   messages.OutCard,
 			Card:   gtwCardToGateway(card),
 		})
 		if err == nil {
@@ -984,9 +984,9 @@ func sendDraft(
 		// just emits plain text follow-ups (no PATCH) when the
 		// bot message id is empty.
 		if em != nil {
-			_ = em.Send(ctx, gateway.OutboundMessage{
+			_ = em.Send(ctx, messages.OutboundMessage{
 				ChatID:  chatID,
-				Kind:    gateway.OutReply,
+				Kind:    messages.OutReply,
 				ReplyTo: messageID,
 				Text:    renderCardMarkdown(card),
 			})
@@ -1040,16 +1040,16 @@ func renderCardMarkdown(c Card) string {
 }
 
 // gtwCardToGateway translates gtw.Card (business view) to the
-// wire-level gateway.Card. gtw.Card has fewer fields (no
+// wire-level messages.Card. gtw.Card has fewer fields (no
 // Kind/Disabled/ChosenEmoji); Kind defaults to CardKindDecision
 // (the only /gtw card kind) — pre-refactor this default lived
 // in the deleted cardKindFromString. Disabled and ChosenEmoji
 // stay zero; the runtime path that needs them (gtw.emitFollowUp
-// post-reaction) sets them inline on the gateway.OutboundMessage
+// post-reaction) sets them inline on the messages.OutboundMessage
 // after the fact.
-func gtwCardToGateway(in Card) *gateway.Card {
-	return &gateway.Card{
-		Kind:      gateway.CardKindDecision,
+func gtwCardToGateway(in Card) *messages.Card {
+	return &messages.Card{
+		Kind:      messages.CardKindDecision,
 		Title:     in.Title,
 		Body:      in.Body,
 		Choices:   gtwCardChoicesToGateway(in.Choices),
@@ -1057,13 +1057,13 @@ func gtwCardToGateway(in Card) *gateway.Card {
 	}
 }
 
-func gtwCardChoicesToGateway(in []CardChoice) []gateway.CardChoice {
+func gtwCardChoicesToGateway(in []CardChoice) []messages.CardChoice {
 	if len(in) == 0 {
 		return nil
 	}
-	out := make([]gateway.CardChoice, len(in))
+	out := make([]messages.CardChoice, len(in))
 	for i, c := range in {
-		out[i] = gateway.CardChoice{
+		out[i] = messages.CardChoice{
 			Emoji:  c.Emoji,
 			Label:  c.Label,
 			Action: c.Action,
@@ -1081,9 +1081,9 @@ func gtwCardChoicesToGateway(in []CardChoice) []gateway.CardChoice {
 // nil-skip invariant.
 func reply(ctx context.Context, em outbound.Emitter, chatID, messageID, text string) *Result {
 	if em != nil {
-		_ = em.Send(ctx, gateway.OutboundMessage{
+		_ = em.Send(ctx, messages.OutboundMessage{
 			ChatID:  chatID,
-			Kind:    gateway.OutReply,
+			Kind:    messages.OutReply,
 			ReplyTo: messageID,
 			Text:    text,
 		})

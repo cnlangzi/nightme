@@ -54,7 +54,7 @@ func renderFixSuccessCard(issue *Issue, branch, worktree, repo, baseSHA string) 
 	if baseSHA != "" {
 		fmt.Fprintf(&b, "→ base:     %s\n", shortSHA(baseSHA))
 	}
-	b.WriteString("↳ `/gtw push` to ship · `/gtw close` to drop the worktree · or keep developing\n")
+	b.WriteString("↳ `/gtw commit` + `/gtw push` to ship · `/gtw close` to drop the worktree · or keep developing\n")
 	return b.String()
 }
 
@@ -207,47 +207,68 @@ func WorktreeFailCard(p FixDraftPayload) Card {
 	}
 }
 
-// replySuccessCard builds the post-push success IM card for
-// /gtw push from git state — never from agent prose. Per F-56
-// §5, the agent's text is intentionally NOT used: nightme reads
-// `git log` itself and renders the card so the format is
-// consistent across agents (pi / claude / codex).
+// replyCommitSuccessCard builds the post-/gtw commit success IM
+// card from git state — never from agent prose. Per F-56 §5, the
+// agent's text is intentionally NOT used: nightme reads `git log`
+// itself and renders the card so the format is consistent across
+// agents (pi / claude / codex).
 //
-// `agentName` is the agent name to credit in Branch 2's header
-// (e.g. "🤖 pi committed 2 change(s) and pushed to …"); empty
-// for Branch 3 (no agent involved).
+// `agentName` is the agent that just ran the one-shot commit
+// (e.g. "pi"); empty when no agent was involved (reserved for
+// future "raw git commit" mode).
 //
 // `revRange` is the git log range that captures the commits the
-// push just landed (typically `headBefore..origin/<branch>`).
+// commit just produced (typically `headBefore..HEAD`).
 //
 // Returns the rendered card on success, or an error if the
-// underlying `git log` failed. The caller (dispatchPush) treats
-// the error as a hard failure: a successful push with a
-// broken log query is a bug we want to surface, not a card we
-// want to fudge with `pushed 0 commit(s)`.
-func replySuccessCard(ctx context.Context, c Context, agentName, revRange string, deps HandlerDeps) (string, error) {
+// underlying `git log` failed. A successful commit with a broken
+// log query is a bug we want to surface, not a card we want to
+// fudge with `committed 0 change(s)`.
+func replyCommitSuccessCard(ctx context.Context, c Context, agentName, revRange string, deps HandlerDeps) (string, error) {
 	logOut, err := gitLogRange(ctx, c.Worktree, revRange, deps)
 	if err != nil {
-		return "", fmt.Errorf("read pushed commits: %w", err)
+		return "", fmt.Errorf("read committed commits: %w", err)
 	}
-
 	commitCount := 0
 	if logOut != "" {
 		commitCount = strings.Count(logOut, "\n") + 1
 	}
 
 	var b strings.Builder
-	switch {
-	case agentName != "":
-		// Branch 2: agent committed + nightme pushed.
-		fmt.Fprintf(&b, "🤖 %s committed %d change(s) and pushed to %s:\n",
-			agentName, commitCount, c.Branch)
-	default:
-		// Branch 3: worktree was already clean, just pushed.
-		fmt.Fprintf(&b, "✅ pushed %d commit(s) to %s:\n",
-			commitCount, c.Branch)
+	fmt.Fprintf(&b, "🤖 %s committed %d change(s) on %s:\n",
+		agentName, commitCount, c.Branch)
+	if logOut != "" {
+		b.WriteString(logOut)
+		b.WriteByte('\n')
+	}
+	fmt.Fprintf(&b, "> %s\n", c.Branch)
+	return b.String(), nil
+}
+
+// replyPushSuccessCard builds the post-/gtw push success IM card
+// from git state — never from agent prose. Same source-of-truth
+// rule as replyCommitSuccessCard.
+//
+// `revRange` is the git log range that captures the commits the
+// push just landed (typically `headBefore..origin/<branch>`).
+//
+// Returns the rendered card on success, or an error if the
+// underlying `git log` failed. A successful push with a broken
+// log query is a bug we want to surface, not a card we want to
+// fudge with `pushed 0 commit(s)`.
+func replyPushSuccessCard(ctx context.Context, c Context, revRange string, deps HandlerDeps) (string, error) {
+	logOut, err := gitLogRange(ctx, c.Worktree, revRange, deps)
+	if err != nil {
+		return "", fmt.Errorf("read pushed commits: %w", err)
+	}
+	commitCount := 0
+	if logOut != "" {
+		commitCount = strings.Count(logOut, "\n") + 1
 	}
 
+	var b strings.Builder
+	fmt.Fprintf(&b, "✅ pushed %d commit(s) to %s:\n",
+		commitCount, c.Branch)
 	if logOut != "" {
 		b.WriteString(logOut)
 		b.WriteByte('\n')

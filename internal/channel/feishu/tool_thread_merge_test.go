@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cnlangzi/nightme/internal/gateway"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // TestPushPopToolStart_FIFO locks the FIFO ordering invariant:
@@ -162,21 +162,21 @@ func TestMergeToolReply_PatchesSameMessage(t *testing.T) {
 	}
 
 	// OutToolStart
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutToolStart,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutToolStart,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
-		Tool:    &gateway.ToolInfo{Name: "Bash", Args: "ls"},
+		Tool:    &messages.ToolInfo{Name: "Bash", Args: "ls"},
 	}); err != nil {
 		t.Fatalf("Send(OutToolStart): %v", err)
 	}
 
 	// OutToolEnd — should PATCH the start, not post a new reply.
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutToolEnd,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutToolEnd,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
-		Tool:    &gateway.ToolInfo{Name: "Bash", Output: "file1\nfile2"},
+		Tool:    &messages.ToolInfo{Name: "Bash", Output: "file1\nfile2"},
 	}); err != nil {
 		t.Fatalf("Send(OutToolEnd): %v", err)
 	}
@@ -213,11 +213,11 @@ func TestMergeToolReply_PATCHFailureFallsBackToFreshReply(t *testing.T) {
 	}
 
 	// OutToolStart
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutToolStart,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutToolStart,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
-		Tool:    &gateway.ToolInfo{Name: "Bash", Args: "ls"},
+		Tool:    &messages.ToolInfo{Name: "Bash", Args: "ls"},
 	}); err != nil {
 		t.Fatalf("Send(OutToolStart): %v", err)
 	}
@@ -226,11 +226,11 @@ func TestMergeToolReply_PATCHFailureFallsBackToFreshReply(t *testing.T) {
 	// reply with the result body. Send should NOT return the
 	// PATCH error to the caller (the data was preserved via the
 	// fallback).
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutToolEnd,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutToolEnd,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
-		Tool:    &gateway.ToolInfo{Name: "Bash", Output: "file1\nfile2"},
+		Tool:    &messages.ToolInfo{Name: "Bash", Output: "file1\nfile2"},
 	}); err != nil {
 		t.Fatalf("Send(OutToolEnd) returned error after PATCH failure: %v", err)
 	}
@@ -265,11 +265,11 @@ func TestMergeToolReply_OrphanEndFallsBackToFreshReply(t *testing.T) {
 
 	// OutToolEnd with no preceding OutToolStart — buffer is
 	// empty, popToolStart returns miss, fallback posts fresh.
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutToolEnd,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutToolEnd,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
-		Tool:    &gateway.ToolInfo{Name: "Bash", Output: "file1"},
+		Tool:    &messages.ToolInfo{Name: "Bash", Output: "file1"},
 	}); err != nil {
 		t.Fatalf("Send(OutToolEnd) orphan: %v", err)
 	}
@@ -314,30 +314,30 @@ func TestMergeToolReply_ParallelToolUse(t *testing.T) {
 
 	// Two parallel tool_use blocks: Start A, Start B, End A, End B.
 	for _, name := range []string{"Read", "Bash"} {
-		if err := a.Send(context.Background(), gateway.OutboundMessage{
-			Kind:    gateway.OutToolStart,
+		if err := a.Send(context.Background(), messages.OutboundMessage{
+			Kind:    messages.OutToolStart,
 			ChatID:  "oc_test",
 			ReplyTo: "om_user_1",
-			Tool:    &gateway.ToolInfo{Name: name},
+			Tool:    &messages.ToolInfo{Name: name},
 		}); err != nil {
 			t.Fatalf("Send(OutToolStart %s): %v", name, err)
 		}
 	}
 	// End for first tool (Read). Should PATCH om_msg_A.
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutToolEnd,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutToolEnd,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
-		Tool:    &gateway.ToolInfo{Name: "Read", Output: "x"},
+		Tool:    &messages.ToolInfo{Name: "Read", Output: "x"},
 	}); err != nil {
 		t.Fatalf("Send(OutToolEnd Read): %v", err)
 	}
 	// End for second tool (Bash). Should PATCH om_msg_B.
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutToolEnd,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutToolEnd,
 		ChatID:  "oc_test",
 		ReplyTo: "om_user_1",
-		Tool:    &gateway.ToolInfo{Name: "Bash", Output: "y"},
+		Tool:    &messages.ToolInfo{Name: "Bash", Output: "y"},
 	}); err != nil {
 		t.Fatalf("Send(OutToolEnd Bash): %v", err)
 	}
@@ -373,11 +373,11 @@ func TestMergeToolReply_DifferentUserMsgIDsAreIndependent(t *testing.T) {
 	}
 
 	// Start on turn 1 (userMsgID = om_turn_1).
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutToolStart,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutToolStart,
 		ChatID:  "oc_test",
 		ReplyTo: "om_turn_1",
-		Tool:    &gateway.ToolInfo{Name: "Read"},
+		Tool:    &messages.ToolInfo{Name: "Read"},
 	}); err != nil {
 		t.Fatalf("Send start turn1: %v", err)
 	}
@@ -385,11 +385,11 @@ func TestMergeToolReply_DifferentUserMsgIDsAreIndependent(t *testing.T) {
 	// End on turn 2 (userMsgID = om_turn_2) — orphan for this
 	// buffer, falls back to fresh post. Must NOT PATCH the turn-1
 	// start's message_id.
-	if err := a.Send(context.Background(), gateway.OutboundMessage{
-		Kind:    gateway.OutToolEnd,
+	if err := a.Send(context.Background(), messages.OutboundMessage{
+		Kind:    messages.OutToolEnd,
 		ChatID:  "oc_test",
 		ReplyTo: "om_turn_2",
-		Tool:    &gateway.ToolInfo{Name: "Read", Output: "x"},
+		Tool:    &messages.ToolInfo{Name: "Read", Output: "x"},
 	}); err != nil {
 		t.Fatalf("Send end turn2: %v", err)
 	}

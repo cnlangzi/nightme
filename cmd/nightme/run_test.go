@@ -11,11 +11,11 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/command/gtw"
 	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/registry"
+	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 // TestEventHandler_ThinkGate_ShowPassesThrough verifies the
@@ -33,7 +33,7 @@ func TestEventHandler_ThinkGate_ShowPassesThrough(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
@@ -63,7 +63,7 @@ func TestEventHandler_ThinkGate_HideDropsOutThinking(t *testing.T) {
 	}
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
@@ -99,7 +99,7 @@ func TestEventHandler_ThinkGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	}
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	// (a) OutReply — final assistant reply (no <thinking> prefix)
@@ -156,7 +156,7 @@ func TestEventHandler_ThinkGate_NilLoggerSafe(t *testing.T) {
 	}
 
 	// nil logger — must not panic.
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, nil, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, nil, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	// Run inside a recover probe to convert any panic into a
@@ -186,7 +186,7 @@ func TestEventHandler_ThinkGate_PersistsAcrossInvocations(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	thinking := agent.AgentEvent{
@@ -246,7 +246,7 @@ func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_first_turn", "claude")
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_first_turn", "claude", "/tmp", nil)
 
 	// Step 1: EventAgentReady captures Model.
@@ -330,7 +330,7 @@ func TestEventHandler_OutResult_UsageIsPerTurnNotCumulative(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_per", "claude")
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_per", "claude", "/tmp", nil)
 
 	// Turn 1.
@@ -377,7 +377,7 @@ func TestEventHandler_OutResult_NilUsage_StillStampsStatusBar(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_zero", "claude")
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	// t.TempDir() is guaranteed NOT to be inside a git working
 	// tree (Go creates it under the OS temp dir; tests don't
 	// nest a .git inside). Pre-F-48 the test hardcoded /tmp,
@@ -451,7 +451,7 @@ func TestStampFromAS_ForwardsUsage(t *testing.T) {
 				ContextWindowPct:         10.55,
 			},
 		}
-		stampFromAS(out, as, &prcache.Registry{}, gtw.HandlerDeps{})
+		statusbar.StampFromAS(out, as, statusbar.Deps{})
 		if out.StatusBar == nil {
 			t.Fatal("StatusBar is nil; Usage alone must materialize it (F-55)")
 		}
@@ -495,7 +495,7 @@ func TestStampFromAS_ForwardsUsage(t *testing.T) {
 			Text:   "answer",
 			// Usage intentionally nil
 		}
-		stampFromAS(out, emptyAS, &prcache.Registry{}, gtw.HandlerDeps{})
+		statusbar.StampFromAS(out, emptyAS, statusbar.Deps{})
 		if out.StatusBar == nil {
 			t.Fatal("StatusBar should be non-nil (GitBar always present)")
 		}
@@ -515,7 +515,7 @@ func TestStampFromAS_ForwardsUsage(t *testing.T) {
 			// Usage intentionally nil; Agent is set on the
 			// shared `as` so AgentBar populates.
 		}
-		stampFromAS(out, as, &prcache.Registry{}, gtw.HandlerDeps{})
+		statusbar.StampFromAS(out, as, statusbar.Deps{})
 		if out.StatusBar == nil {
 			t.Fatal("StatusBar is nil; Agent is set so StatusBar should be populated")
 		}
@@ -557,7 +557,7 @@ func TestEventHandler_Chain_UsageFlowsFromResultEventToFooter(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_chain", "claude")
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	tmpDir := t.TempDir() // non-git cwd
 	as := chatsession.NewAgentSession("as_chain", "cs_oc_chat_chain", "claude", tmpDir, nil)
 
@@ -674,7 +674,7 @@ func TestEventHandler_ToolsGate_ShowPassesThrough(t *testing.T) {
 	}
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_show", "claude", "/tmp", nil)
 
 	// OutToolStart
@@ -717,7 +717,7 @@ func TestEventHandler_ToolsGate_HideDropsBothToolKinds(t *testing.T) {
 	}
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_hide", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_hide", AgentSession: as, Event: &agent.AgentEvent{
@@ -748,7 +748,7 @@ func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	}
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_indep", "claude", "/tmp", nil)
 
 	// (a) OutReply — final assistant reply (no <thinking> prefix)
@@ -793,7 +793,7 @@ func TestEventHandler_ToolsGate_PersistsAcrossInvocations(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_tools_persist", "claude")
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_persist", "claude", "/tmp", nil)
 
 	toolStart := agent.AgentEvent{
@@ -841,7 +841,7 @@ func TestEventHandler_ToolsAndThinkGatesIndependent(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_both_gates", "claude")
 	logger := slog.Default()
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_both_gates", "claude", "/tmp", nil)
 
 	// Flip both off.
@@ -943,7 +943,7 @@ func TestWireRuntimeCallbacksAndRestore_InstallsHandlersOnRestoredChats(t *testi
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-if err := wireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, &prcache.Registry{}, gtw.HandlerDeps{}, markPromptDone(ch)); err != nil {
+if err := wireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, markPromptDone(ch)); err != nil {
 		t.Fatalf("wireRuntimeCallbacksAndRestore: %v", err)
 	}
 
@@ -973,7 +973,7 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateDropsEmptyIDs(t *testing.T) 
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-if err := wireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, &prcache.Registry{}, gtw.HandlerDeps{}, markPromptDone(ch)); err != nil {
+if err := wireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, markPromptDone(ch)); err != nil {
 		t.Fatalf("wireRuntimeCallbacksAndRestore: %v", err)
 	}
 
@@ -1025,7 +1025,7 @@ func TestWireRuntimeCallbacksAndRestore_NoPersistence(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-if err := wireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, &prcache.Registry{}, gtw.HandlerDeps{}, markPromptDone(ch)); err != nil {
+if err := wireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, markPromptDone(ch)); err != nil {
 		t.Fatalf("wireRuntimeCallbacksAndRestore on cold start: %v", err)
 	}
 	if len(mgr.List()) != 0 {
@@ -1061,7 +1061,7 @@ func TestEventHandler_OnAgentConnected_DoesNotEmitMessageSubmitted(t *testing.T)
 		return false
 	})
 
-h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, &prcache.Registry{}, gtw.HandlerDeps{})
+h := newEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	// Fire EventAgentReady with a userMsgID present (the L869
@@ -1127,7 +1127,7 @@ func TestStampFromAS_NilPRRegistryLeavesEmpty(t *testing.T) {
 	// MUST NOT panic. The deps are empty so MaybeRefresh would
 	// no-op even with a registry — but with nil registry we
 	// specifically skip the GetOrCreate/MaybeRefresh/PR path.
-	stampFromAS(out, as, nil, gtw.HandlerDeps{})
+	statusbar.StampFromAS(out, as, statusbar.Deps{})
 
 	if out.StatusBar == nil {
 		t.Fatal("StatusBar is nil; Usage alone must materialize it even with nil prReg")

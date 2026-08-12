@@ -39,7 +39,10 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/agent"
 )
 
 // serverURLRegex matches the line opencode emits on stdout when the
@@ -110,6 +113,9 @@ func startServer(ctx context.Context, cfg serverConfig) (*serverProc, error) {
 	// the workspace (legacy behaviour).
 	cmd.Dir = opencodeHomeDir(cfg.workspace)
 	cmd.Env = append([]string(nil), cfg.env...)
+	// Detach from the daemon's controlling TTY. See F-54 / stop
+	// hang investigation in claudecode.go for the full rationale.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	// Capture stdout so we can parse the banner. We close the stdout
 	// reader after the banner is captured; the lifecycle goroutine
@@ -291,7 +297,10 @@ func (p *serverProc) Close() error {
 	if p == nil || p.cmd == nil || p.cmd.Process == nil {
 		return nil
 	}
-	_ = p.cmd.Process.Signal(os.Interrupt)
+	// Process-group broadcast — opencode may have spawned helper
+	// subprocesses that would otherwise keep the unix pipe alive
+	// past the server's own exit.
+	_ = agent.SignalProcessGroup(p.cmd.Process, syscall.SIGINT)
 	timer := time.AfterFunc(shutdownGrace, func() {
 		if p.cmd != nil && p.cmd.Process != nil {
 			_ = p.cmd.Process.Kill()

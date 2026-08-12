@@ -43,6 +43,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -275,6 +276,9 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	cmd := exec.CommandContext(ctx, s.command, args...)
 	cmd.Dir = cfg.Workspace
 	cmd.Env = append(os.Environ(), env...)
+	// Detach from the daemon's controlling TTY. See F-54 / stop
+	// hang investigation in claudecode.go for the full rationale.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -635,9 +639,11 @@ func (d *driver) Close() error {
 	var firstErr error
 	d.closeOnce.Do(func() {
 		close(d.closed)
-		// SIGINT the child so it shuts down gracefully.
+		// Broadcast SIGINT to the cli's process group so any
+		// subprocesses (e.g. a tool that's holding the rpc
+		// pipe) shut down with it. Escalate to SIGKILL after.
 		if d.cmd != nil && d.cmd.Process != nil {
-			_ = d.cmd.Process.Signal(os.Interrupt)
+			_ = agent.SignalProcessGroup(d.cmd.Process, syscall.SIGINT)
 		}
 		// Escalate to SIGKILL after shutdownGrace.
 		time.AfterFunc(shutdownGrace, func() {

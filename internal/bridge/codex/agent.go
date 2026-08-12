@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -409,7 +410,7 @@ func (d *driver) Stop(ctx context.Context) error {
 	if d.session == nil || d.session.cmd == nil || d.session.cmd.Process == nil {
 		return agent.ErrNotSupported
 	}
-	return d.session.cmd.Process.Signal(os.Interrupt)
+	return agent.SignalProcessGroup(d.session.cmd.Process, syscall.SIGINT)
 }
 
 // SetModel is not supported on the codex bridge. codex reads the

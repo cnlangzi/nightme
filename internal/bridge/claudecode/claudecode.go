@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"sync"
 	"time"
 
@@ -166,6 +167,15 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	cmd := exec.CommandContext(ctx, s.command, args...)
 	cmd.Dir = cfg.Workspace
 	cmd.Env = append(os.Environ(), env...)
+	// Detach from the daemon's controlling TTY. Without Setsid,
+	// the child inherits the daemon's session and on macOS re-opens
+	// /dev/tty for raw-mode input — pi/claude's TUI code waits
+	// forever on that fd even after spawn, wedging the cli event
+	// loop when there is no TTY traffic (see F-54 / stop hang
+	// investigation). Setsid also makes the child the leader of
+	// its own session and process group, so a future /stop can
+	// broadcast SIGINT to the whole subtree via kill(-pid).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -511,12 +521,21 @@ func (d *driver) New(ctx context.Context) error {
 // two post-states the child landed in.
 //
 // Returns ErrNotSupported if the bridge is not started.
+// Stop fires SIGINT to the cli's process group. The cli is the
+// session/pg leader thanks to Setsid in newDriver, so a
+// negative-pid kill (kill(-pid, SIGINT)) reaches every spawned
+// descendant — most importantly the `Bash` tool subprocess — the
+// same way a Ctrl-C in a TTY would. Single-pid Process.Signal
+// would only hit the cli's main loop and any orphan subtask
+// would keep running, which is why the previous /stop hung.
+//
+// Returns ErrNotSupported if the bridge is not started.
 func (d *driver) Stop(ctx context.Context) error {
 	_ = ctx
 	if d.cmd == nil || d.cmd.Process == nil {
 		return agent.ErrNotSupported
 	}
-	return d.cmd.Process.Signal(os.Interrupt)
+	return agent.SignalProcessGroup(d.cmd.Process, syscall.SIGINT)
 }
 
 // SetModel is not supported on the claudecode bridge. The
@@ -544,7 +563,10 @@ func (d *driver) Close() error {
 		d.stdinMu.Unlock()
 
 		if d.cmd != nil && d.cmd.Process != nil {
-			_ = d.cmd.Process.Signal(os.Interrupt)
+			// Broadcast to the whole process group so a Bash
+			// tool subprocess doesn't keep the kernel pipe alive
+			// past the cli's own exit.
+			_ = agent.SignalProcessGroup(d.cmd.Process, syscall.SIGINT)
 		}
 
 		// Wait up to 2s for graceful exit; SIGKILL after.

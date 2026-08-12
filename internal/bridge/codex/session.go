@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -236,6 +237,9 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 	cmd := exec.CommandContext(ctx, cfg.command, argv...)
 	cmd.Dir = cfg.workspace
 	cmd.Env = append(os.Environ(), cfg.env...)
+	// Detach from the daemon's controlling TTY. See F-54 / stop
+	// hang investigation in claudecode.go for the full rationale.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

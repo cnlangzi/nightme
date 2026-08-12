@@ -1,5 +1,9 @@
 # NightMe
 
+<p align="center">
+  <img src="./logo.png" alt="NightMe Logo" width="128">
+</p>
+
 > **Sleep tight. NightMe codes all night.**
 >
 > A remote-pair developer agent. No more babysitting AI—stay in the loop from your phone while NightMe takes the wheel.

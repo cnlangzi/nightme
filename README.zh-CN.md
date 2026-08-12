@@ -1,5 +1,9 @@
 # NightMe
 
+<p align="center">
+  <img src="./logo.png" alt="NightMe Logo" width="128">
+</p>
+
 > 安享好梦，NightMe 彻夜向前。
 >
 > 奔赴你的星辰大海，拥有你的自由生活。而那些必须死守电脑、避无可避的无奈，就让 NightMe 替你守候。

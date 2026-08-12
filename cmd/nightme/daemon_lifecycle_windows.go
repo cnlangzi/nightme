@@ -75,7 +75,7 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 		return fmt.Errorf("resolve nightme executable: %w", err)
 	}
 
-	child := exec.Command(executable, "_daemon", "--channel", opts.channel)
+	child := exec.Command(executable, daemonChildCommand, "--channel", opts.channel)
 	child.SysProcAttr = &windows.SysProcAttr{
 		// DETACHED_PROCESS: no console inheritance. Required
 		// because `nightme start` was launched from a console;
@@ -92,18 +92,18 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 	}
 	child.Stdin = nil
 	child.Stdout = nil
-	child.Stderr = nil
-	// Panics write to stderr; /dev/null throws the stack trace
-	// away and a daemon crash then looks like "the log just
-	// stops". Opt in to capturing it with
-	// NIGHTME_STDERR_FILE=<path> when diagnosing — same
-	// convention as daemon_lifecycle_unix.go.
-	if p := os.Getenv("NIGHTME_STDERR_FILE"); p != "" {
-		if f, ferr := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); ferr == nil {
-			defer f.Close()
-			child.Stderr = f
-		}
+	// Panics (in ANY goroutine) and runtime fatals write to stderr
+	// and nowhere else; a nil Stderr discards them and a daemon
+	// crash then looks like "the log just stops". Capture to
+	// <DataDir>\daemon-stderr.log (NIGHTME_STDERR_FILE overrides) —
+	// same helper and same policy as daemon_lifecycle_unix.go. A
+	// capture failure degrades to "discarded" rather than failing
+	// the start: nil Stderr is Windows' /dev/null equivalent here.
+	stderrSink, stderrPath, closeStderr := openDaemonStderrOrDevNull(cfg, nil, os.Stderr)
+	if closeStderr != nil {
+		defer closeStderr()
 	}
+	child.Stderr = stderrSink
 
 	if err := child.Start(); err != nil {
 		return fmt.Errorf("start daemon process: %w", err)
@@ -128,7 +128,12 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 			if time.Now().After(deadline) {
 				_ = child.Process.Kill()
 				_ = child.Wait()
-				return nmerrors.New(nmerrors.CodeBridgeError, "daemon did not become ready within 15s")
+				// Same rationale as daemon_lifecycle_unix.go: the
+				// child was alive but slow, so the capture file may
+				// be empty — but it's still the right place to look
+				// for whatever the daemon printed.
+				return nmerrors.New(nmerrors.CodeBridgeError, fmt.Sprintf(
+					"daemon did not become ready within 15s; child stderr: %s", stderrPath))
 			}
 			ok, err := daemoncontrol.Ping(paths.Socket, startReadyPingTimeout)
 			if err == nil && ok {
@@ -158,7 +163,8 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 			if errors.Is(err, daemoncontrol.ErrNotRunning) {
 				if state, werr := child.Process.Wait(); werr == nil && state != nil {
 					return nmerrors.New(nmerrors.CodeBridgeError,
-						fmt.Sprintf("daemon child exited before becoming ready (code=%d)", exitCodeOf(state)))
+						fmt.Sprintf("daemon child exited before becoming ready (code=%d); crash output: %s",
+							exitCodeOf(state), stderrPath))
 				}
 			}
 		}
@@ -176,6 +182,14 @@ func exitCodeOf(state *os.ProcessState) int {
 	return state.ExitCode()
 }
 
+// runDaemonChild is the Windows daemon process.
+//
+// Unlike the Unix version it installs no panic recover: there is no
+// readiness pipe here (the parent polls Ping), so a panic already
+// surfaces to the parent as "daemon child exited before becoming
+// ready (code=...)" and the stack lands in the stderr capture file.
+// The Unix recover exists only to turn an otherwise information-free
+// EOF on that pipe into a real message.
 func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
 	// Take the daemon lock ourselves. Unlike Unix, we can't
 	// inherit the parent's fd — LockFileEx is per-handle, so

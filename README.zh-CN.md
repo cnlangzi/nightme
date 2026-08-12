@@ -16,7 +16,7 @@
 
 **NightMe** 把你的本地 AI Coding Agent（Claude Code、Codex、Pi、OpenCode 等）放进聊天里跑。你在任何已接入的 IM 里发条消息，NightMe 就把消息路由到对应的 agent 进程，回复以结构化卡片形式返回。
 
-多个 chat 并行——一个项目一个，目录就是项目本身：每个 ChatSession 跑在自己的工作目录上，目录即项目本体。多个 agent 并行工作——切换是即时的，无需冷启动。`git` worktree 操作被封装进 `Git Team Workflow`（`/gtw`）：fix / hooks / close——每一步一张 IM 回复卡，集成 GitHub、GitLab 之类平台。NightMe 不替换你的 agent 订阅或记忆，只在它们前面做一个轻量代理。
+多个 chat 并行——一个项目一个，目录就是项目本身：每个 ChatSession 跑在自己的工作目录上，目录即项目本体。多个 Agent 并行工作——切换是即时的，无需冷启动。`git` worktree 操作被封装进 `Git Team Workflow`（`/gtw`）：fix / hooks / close——每一步一张 IM 回复卡，集成 GitHub、GitLab 之类平台。NightMe 不替换你的 agent 订阅或记忆，只在它们前面做一个轻量代理。
 
 ## Why NightMe
 
@@ -97,6 +97,22 @@ nightme start          # daemon 在后台跑起来
 ```
 
 `start` 返回后，NightMe 会给你的 Feishu DM 发一条 welcome message——这就是它已经 ready 的信号。
+
+### CLI commands
+
+大多数时候你都在 chat 里。需要回终端的只有这几条：
+
+| 命令 | 作用 |
+|---|---|
+| `nightme start` / `stop` / `restart` | 开关 NightMe。开也好关也好，你的 agent 照常干活。 |
+| `nightme status` | NightMe 在跑吗？ |
+| `nightme list` | 列出你所有的 agent：在哪个 chat、哪个项目、还活着还是已结束。 |
+| `nightme kill` | 一次性停掉所有 agent。在 chat 里发条消息就回来了，对话不丢。 |
+| `nightme logs` | 实时看 NightMe 在干什么。 |
+| `nightme doctor` | 觉得哪里不对时，看一眼 NightMe 是否健康。 |
+| `nightme agents` | 你配了哪些 AI agent。 |
+
+「停」分三个范围：`/close`（单个项目）· `nightme kill`（所有 agent）· `nightme stop`（NightMe 自己）。三种都不会丢对话。
 
 ---
 

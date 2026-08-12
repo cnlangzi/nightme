@@ -403,8 +403,13 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// constructor arguments does NOT match the priority
 	// order; see internal/gateway/inbound/inbound.go for the
 	// actual chain slice.
-	var gwImpl *gateway.Router
-	_ = em // em is consumed by inbound.Router's runtime wire-up below
+	// gwImpl is constructed below, once inbound.Router exists. It
+	// is deliberately NOT declared here as a nil *gateway.Router:
+	// a nil declaration this far from the assignment is what let
+	// `gwImpl.AttachChannels(ch)` drift ABOVE the constructor
+	// during the F-58 refactor, which made every daemon start
+	// SIGSEGV on a nil receiver. Declare-at-assignment keeps that
+	// class of reordering a compile error instead of a crash.
 
 	// All chat-session commands (/cwd /use /kill /new /watch /think
 	// /tools) and /gtw are SlashCommandFactory implementations
@@ -481,8 +486,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// when calling commander.Dispatch.
 
 
-	gwImpl.AttachChannels(ch)
-
 	// F-watch §3.1.1: the per-chat WatchMode gate used to be wired
 	// here via gwImpl.WithWatchModeResolver. It moved into
 	// chatsession.Manager.AcceptInbound (called from
@@ -500,7 +503,11 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// shim closures (WithCommander / WithShellDispatch /
 	// WithActionHandler) that used to live here.
 	ir := inbound.New(mgr, commander, shellDispatcher, router, cfg.Primary)
-	gwImpl = gateway.New(ir, em)
+	gwImpl := gateway.New(ir, em)
+	// Attach AFTER construction (see the note at the declaration
+	// site above): the gateway needs its channel binding before
+	// Start pumps inbound messages.
+	gwImpl.AttachChannels(ch)
 
 	// WithOnCreate fires for both restored (RestoreFromRegistry)
 	// and future (GetOrCreate) ChatSessions. Place BEFORE

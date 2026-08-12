@@ -61,7 +61,28 @@ func (h *closeableHandler) WithGroup(name string) slog.Handler {
 	return &closeableHandler{Handler: h.Handler.WithGroup(name), file: h.file}
 }
 
+// New returns the CLI logger: every line is teed to the log file,
+// stdout, and stderr so an interactive user sees the same trace the
+// persisted log captures.
 func New(cfg *config.Config) (*slog.Logger, error) {
+	return newLogger(cfg, true)
+}
+
+// NewQuiet returns a logger that writes ONLY to the log file.
+//
+// It exists for the detached daemon child (`nightme _daemon`, forked
+// by `nightme start` / `restart`), which has no console at all: its
+// stdout is /dev/null and its stderr is the crash-capture file (see
+// cmd/nightme/daemon_stderr.go). Teeing the log stream there would
+// write every line twice for nobody to read, and — worse — bury the
+// one thing that capture file exists for, the panic stack, under a
+// full duplicate of nightme.log (9 MB and growing on the author's
+// machine).
+func NewQuiet(cfg *config.Config) (*slog.Logger, error) {
+	return newLogger(cfg, false)
+}
+
+func newLogger(cfg *config.Config, console bool) (*slog.Logger, error) {
 	path, err := resolvePath(cfg)
 	if err != nil {
 		return nil, err
@@ -88,7 +109,12 @@ func New(cfg *config.Config) (*slog.Logger, error) {
 	// redirections without losing the trace. The cost is one
 	// extra write per log line — negligible at nightme's log
 	// volume (single-digit messages per minute).
-	sink := io.MultiWriter(f, os.Stdout, os.Stderr)
+	//
+	// console=false drops both console sinks — see NewQuiet.
+	var sink io.Writer = f
+	if console {
+		sink = io.MultiWriter(f, os.Stdout, os.Stderr)
+	}
 	handler := &closeableHandler{Handler: slog.NewJSONHandler(sink, &slog.HandlerOptions{Level: level}), file: f}
 	return slog.New(handler), nil
 }

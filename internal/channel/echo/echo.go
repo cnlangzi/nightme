@@ -33,6 +33,13 @@ type Channel struct {
 	name string
 	out  io.Writer
 
+	// in is the inbound queue. It is created once in New (rather
+	// than per Incoming() call) so a test can Inject a message and
+	// have the gateway's reader — which called Incoming() at
+	// startup — actually receive it. Buffered so Inject never
+	// blocks a test that has no reader attached.
+	in chan channel.Message
+
 	mu       sync.Mutex
 	recorded []messages.OutboundMessage
 }
@@ -46,7 +53,7 @@ func New(name string, out io.Writer) *Channel {
 	if name == "" {
 		name = "echo"
 	}
-	return &Channel{name: name, out: out}
+	return &Channel{name: name, out: out, in: make(chan channel.Message, 8)}
 }
 
 // Name implements channel.Channel.
@@ -62,10 +69,28 @@ func (c *Channel) Start(ctx context.Context) error { return nil }
 // never starts any.
 func (c *Channel) Stop(ctx context.Context) error { return nil }
 
-// Incoming implements channel.Channel. Echo never produces
-// inbound messages, so the channel never yields.
+// Incoming implements channel.Channel. The returned channel yields
+// only what Inject puts there, so a caller that never injects sees
+// the same "never produces" behavior echo has always had.
 func (c *Channel) Incoming() <-chan channel.Message {
-	return make(chan channel.Message)
+	return c.in
+}
+
+// Inject queues an inbound message as if it had arrived from a real
+// IM channel. It is the counterpart of Record(): Record asserts what
+// the runtime sent, Inject drives what it receives, which together
+// let a test exercise the whole inbound → dispatch → outbound path
+// without a network.
+//
+// Non-blocking: if the buffer is full the message is dropped and
+// false is returned, so a stub channel can never wedge the caller.
+func (c *Channel) Inject(msg channel.Message) bool {
+	select {
+	case c.in <- msg:
+		return true
+	default:
+		return false
+	}
 }
 
 // var _ block ensures echo.Channel satisfies channel.Channel at

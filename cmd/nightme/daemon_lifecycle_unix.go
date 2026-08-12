@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"strconv"
 	"syscall"
 	"time"
@@ -58,7 +59,7 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 	}
 	defer readyR.Close()
 
-	child := exec.Command(executable, "_daemon", "--channel", opts.channel)
+	child := exec.Command(executable, daemonChildCommand, "--channel", opts.channel)
 	child.Env = append(os.Environ(), daemonLockFDEnv+"=3", readyFDEnv+"=4")
 	child.ExtraFiles = []*os.File{lock.File(), readyW}
 	child.Stdin = nil
@@ -69,16 +70,18 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 	}
 	defer devNull.Close()
 	child.Stdout = devNull
-	// Panics write to stderr; devNull throws the stack trace away and
-	// a daemon crash then looks like "the log just stops". Opt in to
-	// capturing it with NIGHTME_STDERR_FILE=<path> when diagnosing.
-	child.Stderr = devNull
-	if p := os.Getenv("NIGHTME_STDERR_FILE"); p != "" {
-		if f, ferr := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); ferr == nil {
-			defer f.Close()
-			child.Stderr = f
-		}
+	// Panics (in ANY goroutine) and runtime fatals write to stderr
+	// and nowhere else. Sending stderr to devNull made a daemon
+	// crash look like "the log just stops" — see daemon_stderr.go
+	// for the full rationale. The capture file is
+	// <DataDir>/daemon-stderr.log unless NIGHTME_STDERR_FILE
+	// overrides it; if it cannot be opened we degrade to devNull
+	// rather than failing the start.
+	stderrSink, stderrPath, closeStderr := openDaemonStderrOrDevNull(cfg, devNull, os.Stderr)
+	if closeStderr != nil {
+		defer closeStderr()
 	}
+	child.Stderr = stderrSink
 	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := child.Start(); err != nil {
@@ -117,12 +120,32 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 			return nmerrors.New(nmerrors.CodeBridgeError, msg.Error)
 		}
 	case err := <-errCh:
+		// Wait reaps the child AND populates child.ProcessState,
+		// which is the only evidence we have about why it went
+		// away. Report it: "exit status 2" means the daemon
+		// crashed on its own (look at the stderr capture for the
+		// stack), "signal: killed" means something else killed it.
 		_ = child.Wait()
+		if errors.Is(err, io.EOF) {
+			// EOF = every write end of the readiness pipe closed
+			// without a byte being written = the child exited
+			// before reaching onReady. Reporting the bare EOF
+			// (the pre-fix behavior) told the operator nothing
+			// about the actual failure.
+			return nmerrors.New(nmerrors.CodeBridgeError, fmt.Sprintf(
+				"daemon exited before signalling readiness (%s); crash output: %s",
+				childExitDetail(child.ProcessState), stderrPath))
+		}
 		return fmt.Errorf("read daemon readiness: %w", err)
 	case <-timer.C:
 		_ = child.Process.Signal(syscall.SIGTERM)
 		_ = child.Wait()
-		return nmerrors.New(nmerrors.CodeBridgeError, "daemon did not become ready within 15s")
+		// Deliberately NOT called "crash output" here: a timeout
+		// means the child was alive and simply too slow, so the
+		// file may well be empty. It is still the right place to
+		// look for whatever it did print.
+		return nmerrors.New(nmerrors.CodeBridgeError, fmt.Sprintf(
+			"daemon did not become ready within 15s; child stderr: %s", stderrPath))
 	case <-ctx.Done():
 		_ = child.Process.Signal(syscall.SIGTERM)
 		_ = child.Wait()
@@ -152,11 +175,11 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
 	lockFD, err := strconv.Atoi(os.Getenv(daemonLockFDEnv))
 	if err != nil || lockFD < 3 {
-		return errors.New("_daemon must be launched by `nightme start` or `nightme restart`")
+		return fmt.Errorf("%s must be launched by `nightme start` or `nightme restart`", daemonChildCommand)
 	}
 	readyFD, err := strconv.Atoi(os.Getenv(readyFDEnv))
 	if err != nil || readyFD < 3 {
-		return errors.New("_daemon readiness pipe is missing")
+		return fmt.Errorf("%s readiness pipe is missing", daemonChildCommand)
 	}
 	lock, err := daemoncontrol.LockFromFile(os.NewFile(uintptr(lockFD), "daemon.lock"))
 	if err != nil {
@@ -172,6 +195,27 @@ func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
 		_ = json.NewEncoder(readyFile).Encode(msg)
 		_ = readyFile.Close()
 	}
+
+	// A panic on this goroutine used to reach the parent as a bare
+	// EOF: the deferred readyFile.Close() fired during unwinding, so
+	// the pipe closed with nothing written. Turn it into a real
+	// handshake failure (the parent then prints the panic message
+	// instead of "read daemon readiness: EOF") and log it, then
+	// re-panic so the stack still lands in the stderr capture and
+	// the exit status stays non-zero.
+	//
+	// Scope: this goroutine only. A panic in any OTHER goroutine
+	// terminates the process immediately with no unwinding — for
+	// those, the stderr capture file is the only evidence, which is
+	// exactly why it exists.
+	defer func() {
+		if r := recover(); r != nil {
+			writeBootstrap(bootstrapMessage{Error: fmt.Sprintf("daemon panic: %v", r)})
+			loggerFromContext(cmd.Context()).Error("daemon panic",
+				"err", r, "stack", string(debug.Stack()))
+			panic(r)
+		}
+	}()
 
 	cfg, err := config.LoadDefault()
 	if err != nil {

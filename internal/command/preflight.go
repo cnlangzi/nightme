@@ -2,6 +2,15 @@ package command
 
 import "github.com/cnlangzi/nightme/internal/chatsession"
 
+// NoActiveCwdReply is the canonical user-facing reply when a
+// slash command needs an active workspace but the chat has
+// none. Exported so handlers that preflight outside the
+// RequireActiveCwd helper (currently internal/command/gtw
+// /close and /fix, which do their own preflight to chain
+// additional work) stay in lockstep with the helper's
+// wording. Keep in sync with RequireActiveCwd's SlashOutput.
+const NoActiveCwdReply = "No active workspace. Send /cwd <path> first."
+
 // RequireActiveCwd is a preflight check used by every slash
 // command that operates on the current workspace (/cwd /use
 // /close /new /gtw etc.). It returns ("", nil) when the
@@ -30,7 +39,7 @@ func RequireActiveCwd(cs *chatsession.ChatSession) (cwd string, failOut *SlashOu
 	cwd = cs.SelectedCwd()
 	if cwd == "" {
 		return "", &SlashOutput{
-			Reply:    "No active workspace. Send /cwd <path> first.",
+			Reply:    NoActiveCwdReply,
 			Consumed: true,
 		}
 	}

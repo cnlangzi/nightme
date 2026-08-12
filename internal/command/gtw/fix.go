@@ -13,6 +13,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 )
 
@@ -149,7 +150,7 @@ func RunFix(
 	// --- preflight: SelectedCwd must be set for both modes --------
 	if cs == nil || cs.SelectedCwd() == "" {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ No active workspace. Send /cwd <path> first."), nil
+			"❌ "+command.NoActiveCwdReply), nil
 	}
 	if cur := slot.Load(); cur != (Context{}) {
 		return reply(ctx, cs.Emitter(), chatID, messageID,

@@ -54,3 +54,41 @@ func requireRealPi(t *testing.T) {
 		t.Skipf("pi binary not on PATH: %v", err)
 	}
 }
+
+// ccTypes is the Conventional Commits 1.0.0 type allow-list.
+// Single source of truth for splitCCSubject / conventionalCommitsTitle
+// in the real-pi smokes (and mirrors the type allow-list baked
+// into prTitleRegex in pr.go).
+var ccTypes = []string{
+	"feat", "fix", "chore", "refactor", "docs", "test",
+	"build", "ci", "perf", "style", "revert",
+}
+
+// ccType extracts the type token from a Conventional Commits
+// subject. Returns "" if the subject is not CC-shaped.
+func ccType(subject string) string {
+	for _, ty := range ccTypes {
+		if strings.HasPrefix(subject, ty+"(") || strings.HasPrefix(subject, ty+":") {
+			return ty
+		}
+	}
+	return ""
+}
+
+// conventionalCommitsTitle reports whether title starts with a
+// Conventional Commits type token followed by "(" or ":".
+// Mirrors the type allow-list in prTitleRegex (pr.go).
+func conventionalCommitsTitle(title string) bool {
+	return ccType(strings.TrimSpace(title)) != ""
+}
+
+// truncateOutput returns s unchanged if its byte length is at
+// most n, otherwise returns the first n bytes followed by a
+// truncation marker. Used by the real-pi smoke tests to keep
+// t.Logf of long agent output readable.
+func truncateOutput(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "\n... [truncated]"
+}

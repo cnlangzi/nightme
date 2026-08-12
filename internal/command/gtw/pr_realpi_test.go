@@ -206,27 +206,7 @@ func gitOutput(dir string, args ...string) (string, error) {
 	return string(out), nil
 }
 
-func truncateOutput(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "\n... [truncated]"
-}
-
-// conventionalCommitsTitle mirrors the type allow-list in
-// prTitleRegex (pr.go). Kept here as a free function so the
-// failure message can name the title verbatim instead of routing
-// through the regex match groups.
-func conventionalCommitsTitle(title string) bool {
-	types := []string{
-		"feat", "fix", "chore", "refactor", "docs", "test",
-		"build", "ci", "perf", "style", "revert",
-	}
-	t := strings.TrimSpace(title)
-	for _, ty := range types {
-		if strings.HasPrefix(t, ty+"(") || strings.HasPrefix(t, ty+":") {
-			return true
-		}
-	}
-	return false
-}
+// truncateOutput and conventionalCommitsTitle are defined in
+// testhelpers_realpi_test.go so the commit real-pi smoke can
+// share them without an implicit cross-file dependency on this
+// file.

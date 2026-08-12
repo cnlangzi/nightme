@@ -385,17 +385,38 @@ func TestRunPush_CleanNoUnpushed(t *testing.T) {
 
 // TestRunPush_CleanWithUnpushed — Branch 3. Clean + has upstream
 // + ahead=3 → programmatic push with retry verify.
+//
+// Mock reflects REAL git semantics (this used to be wrong — see
+// the "pushed 0 commits" bug fixed alongside this rename). After
+// a successful push, `origin/<branch>` advances to the same SHA
+// as HEAD, so the success card MUST read commits off the
+// *previous* origin tip (captured before the push into
+// `originBefore`) not off `headBefore`.
 func TestRunPush_CleanWithUnpushed(t *testing.T) {
 	git := newPushGit()
 	git.onArgs(statusCmd, "## wt-clean-unpushed...origin/wt-clean-unpushed [ahead 3]\n", "", nil)
-	git.onArgs([]string{"rev-parse", "HEAD"},
-		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", "", nil)
+	// origin/<branch> BEFORE push = aaaa… (40 chars). dispatchPush
+	// captures this into `originBefore`, then re-uses it as the
+	// left side of the post-push rev range
+	// `aaaa..origin/wt-clean-unpushed`. The exact same 40-char
+	// string MUST appear in the log mock below — otherwise the
+	// post-push `git log` call lands on a key with no registered
+	// response and replyPushSuccessCard errors out (this is what
+	// masked the original bug for so long: the old test "worked"
+	// only because the broken rev range collapsed to empty).
+	git.onArgs([]string{"rev-parse", "--verify", "origin/wt-clean-unpushed"},
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", "", nil)
+	// rev-list calls: countUnpushed pre-push (3) and post-push
+	// verify (0). The 0 lets programmaticPushWithRetry exit cleanly.
 	git.onSeq("rev-list",
 		pushGitResp{"3", "", nil},
 		pushGitResp{"0", "", nil},
 	)
 	git.on("push", "To origin", "", nil)
-	git.on("log", "abc1234 commit 1\ndef5678 commit 2\n", "", nil)
+	// Post-push log of `aaaa…..origin/wt-clean-unpushed` lists the
+	// 3 commits that just landed. Used by replyPushSuccessCard.
+	git.onArgs([]string{"log", "--oneline", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa..origin/wt-clean-unpushed"},
+		"abc1234 commit 1\ndef5678 commit 2\n123abcd commit 3\n", "", nil)
 
 	withAgent(t)
 	withCwd(t, t.TempDir())
@@ -423,11 +444,167 @@ func TestRunPush_CleanWithUnpushed(t *testing.T) {
 		t.Fatalf("expected git push call, got %v", git.calls)
 	}
 	r := s.lastText()
-	if !strings.Contains(r, "✅ pushed") || !strings.Contains(r, "wt-clean-unpushed") {
-		t.Errorf("expected Branch 3 success card, got:\n%s", r)
+	if !strings.Contains(r, "✅ pushed 3 commit(s)") {
+		t.Errorf("expected success card to count the 3 pushed commits, got:\n%s", r)
+	}
+	if !strings.Contains(r, "wt-clean-unpushed") {
+		t.Errorf("expected card to name the branch, got:\n%s", r)
 	}
 	if strings.Contains(r, "🤖") {
 		t.Errorf("Branch 3 should not credit an agent, got:\n%s", r)
+	}
+}
+
+// TestRunPush_FirstPush_NoUpstream — Branch 3 first-push case.
+// Branch has never been on origin, so `rev-parse origin/<branch>`
+// fails; dispatchPush sets originBefore="" and the success card
+// falls back to `git log origin/<default>..origin/<branch>`
+// (anchored to the default branch) to show ONLY the commits this
+// push uploaded — not the entire local branch history.
+//
+// Regression for the over-counting bug found after the F-56/first
+// push fix: previously this fallback used `git log <branch>` which
+// would have included main's whole history when the branch was
+// forked from main, making the card say "pushed N+main commits"
+// instead of "pushed N".
+func TestRunPush_FirstPush_NoUpstream(t *testing.T) {
+	git := newPushGit()
+	git.onArgs(statusCmd, "## wt-fresh-branch\n", "", nil)
+	// origin/<branch> does NOT exist — git exits non-zero with
+	// "unknown revision" on stderr. dispatchPush catches this and
+	// sets originBefore="".
+	git.onArgs([]string{"rev-parse", "--verify", "origin/wt-fresh-branch"},
+		"", "fatal: unknown revision or path not in the working tree: 'origin/wt-fresh-branch'", errors.New("exit status 128"))
+	// countUnpushed pre-push: branch@{u} is unset so countUnpushed
+	// returns 0 via the "no upstream configured" branch. Post-push
+	// verify also returns 0 (upstream now equals tip).
+	git.onSeq("rev-list",
+		pushGitResp{"0", "", nil},
+		pushGitResp{"0", "", nil},
+	)
+	git.on("push", "To origin\n * [new branch]      wt-fresh-branch -> wt-fresh-branch\n", "", nil)
+	// DefaultBranch lookup: the repo's default is "main".
+	git.onArgs([]string{"symbolic-ref", "--short", "refs/remotes/origin/HEAD"},
+		"origin/main\n", "", nil)
+	// First-push fallback: log of origin/main..origin/wt-fresh-branch
+	// lists the 2 commits that landed — NOT the 5 commits of main's
+	// history that the branch was forked from.
+	git.onArgs([]string{"log", "--oneline", "origin/main..origin/wt-fresh-branch"},
+		"beef000 initial commit\ndead111 second commit\n", "", nil)
+
+	withAgent(t)
+	withCwd(t, t.TempDir())
+	writeYml(t, mustPwd(t), Context{
+		Worktree: mustPwd(t),
+		Branch:   "wt-fresh-branch",
+		RepoRoot: mustPwd(t),
+	})
+
+	cs := newPushChatSession(t)
+	s := captureCh(t, cs)
+	_, err := dispatchPush(context.Background(), cs,
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{})
+	if err != nil {
+		t.Fatalf("RunPush: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "✅ pushed 2 commit(s)") {
+		t.Errorf("first-push card must count the 2 commits that landed, got:\n%s", r)
+	}
+	if !strings.Contains(r, "wt-fresh-branch") {
+		t.Errorf("expected branch name in card, got:\n%s", r)
+	}
+	// Anti-regression: main's commits must NOT leak into the count.
+	if strings.Contains(r, "✅ pushed 7 commit(s)") ||
+		strings.Contains(r, "✅ pushed 5 commit(s)") {
+		t.Errorf("first-push card over-counted (likely listed main's history), got:\n%s", r)
+	}
+}
+
+// TestRunPush_FirstPush_PushingDefaultBranch — Branch 3 first-push
+// case where the branch being pushed IS the default branch itself
+// (e.g. fresh repo, no prior `git push`). originBefore="" AND the
+// default-branch look-up returns c.Branch itself, so the helper
+// falls back to listing the entire branch — which IS what was
+// pushed (everything reachable from local main).
+func TestRunPush_FirstPush_PushingDefaultBranch(t *testing.T) {
+	git := newPushGit()
+	git.onArgs(statusCmd, "## main\n", "", nil)
+	git.onArgs([]string{"rev-parse", "--verify", "origin/main"},
+		"", "fatal: unknown revision or path not in the working tree: 'origin/main'", errors.New("exit status 128"))
+	git.onSeq("rev-list",
+		pushGitResp{"0", "", nil},
+		pushGitResp{"0", "", nil},
+	)
+	git.on("push", "To origin\n * [new branch]      main -> main\n", "", nil)
+	// DefaultBranch: same as the branch we're pushing → fallback path.
+	git.onArgs([]string{"symbolic-ref", "--short", "refs/remotes/origin/HEAD"},
+		"origin/main\n", "", nil)
+	// Entire branch history — that's what was pushed.
+	git.onArgs([]string{"log", "--oneline", "main"},
+		"aaa000 initial\nbbb001 second\nccc002 third\n", "", nil)
+
+	withAgent(t)
+	withCwd(t, t.TempDir())
+	writeYml(t, mustPwd(t), Context{
+		Worktree: mustPwd(t),
+		Branch:   "main",
+		RepoRoot: mustPwd(t),
+	})
+
+	cs := newPushChatSession(t)
+	s := captureCh(t, cs)
+	_, err := dispatchPush(context.Background(), cs,
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{})
+	if err != nil {
+		t.Fatalf("RunPush: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "✅ pushed 3 commit(s)") {
+		t.Errorf("pushing default branch first time should list all 3 commits, got:\n%s", r)
+	}
+}
+
+// TestRunPush_FirstPush_NoOriginRemote — degenerate case: brand-new
+// repo with no `origin/HEAD` set. firstPushRevRange's DefaultBranch
+// lookup fails; the helper falls back to `c.Branch`, listing
+// everything reachable (which IS what was uploaded).
+func TestRunPush_FirstPush_NoOriginRemote(t *testing.T) {
+	git := newPushGit()
+	git.onArgs(statusCmd, "## solo-branch\n", "", nil)
+	git.onArgs([]string{"rev-parse", "--verify", "origin/solo-branch"},
+		"", "fatal: unknown revision or path not in the working tree: 'origin/solo-branch'", errors.New("exit status 128"))
+	git.onSeq("rev-list",
+		pushGitResp{"0", "", nil},
+		pushGitResp{"0", "", nil},
+	)
+	git.on("push", "To origin\n * [new branch]      solo-branch -> solo-branch\n", "", nil)
+	// DefaultBranch errors — no origin/HEAD.
+	git.onArgs([]string{"symbolic-ref", "--short", "refs/remotes/origin/HEAD"},
+		"", "fatal: no such ref", errors.New("exit status 128"))
+	// Falls back to `git log solo-branch` — lists all 4 reachable
+	// commits (which is correct: this is the only thing on origin).
+	git.onArgs([]string{"log", "--oneline", "solo-branch"},
+		"111 first\n222 second\n333 third\n444 fourth\n", "", nil)
+
+	withAgent(t)
+	withCwd(t, t.TempDir())
+	writeYml(t, mustPwd(t), Context{
+		Worktree: mustPwd(t),
+		Branch:   "solo-branch",
+		RepoRoot: mustPwd(t),
+	})
+
+	cs := newPushChatSession(t)
+	s := captureCh(t, cs)
+	_, err := dispatchPush(context.Background(), cs,
+		HandlerDeps{Git: git}, "chat", "msg", pushArgs{})
+	if err != nil {
+		t.Fatalf("RunPush: %v", err)
+	}
+	r := s.lastText()
+	if !strings.Contains(r, "✅ pushed 4 commit(s)") {
+		t.Errorf("no-origin-remote case should list all 4 reachable commits, got:\n%s", r)
 	}
 }
 
@@ -438,7 +615,7 @@ func TestRunPush_CleanWithUnpushed(t *testing.T) {
 func TestRunPush_VerifyDetectsSilentPushFailure(t *testing.T) {
 	git := newPushGit()
 	git.onArgs(statusCmd, "## wt-silent-fail...origin/wt-silent-fail [ahead 3]\n", "", nil)
-	git.onArgs([]string{"rev-parse", "HEAD"},
+	git.onArgs([]string{"rev-parse", "--verify", "origin/wt-silent-fail"},
 		"cccccccccccccccccccccccccccccccccccccccc\n", "", nil)
 	// All rev-list calls return "1" — the push never lands
 	// upstream, even after retry.
@@ -598,14 +775,22 @@ func TestRunPush_NonWorktree_CleanWithUnpushed(t *testing.T) {
 	git.onArgs([]string{"rev-parse", "--abbrev-ref", "HEAD"}, "feat/manual", "", nil)
 	git.onArgs(statusCmd,
 		"## feat/manual...origin/feat/manual [ahead 3]\n", "", nil)
-	git.onArgs([]string{"rev-parse", "HEAD"},
-		"4444444444444444444444444444444444444444\n", "", nil)
+	// dispatchPush now reads origin/<branch> via `rev-parse --verify` to
+	// seed the success-card rev range. The previous `headBefore..origin/<branch>`
+	// shape collapsed to empty after a successful push; using
+	// `originBefore..origin/<branch>` is what fixes the "pushed 0 commits" bug.
+	git.onArgs([]string{"rev-parse", "--verify", "origin/feat/manual"},
+		"3333333333333333333333333333333333333333\n", "", nil)
 	git.onSeq("rev-list",
 		pushGitResp{"3", "", nil},
 		pushGitResp{"0", "", nil},
 	)
 	git.on("push", "To origin\n", "", nil)
-	git.on("log", "abc1234 feat: thing\ndef5678 fix: stuff\n", "", nil)
+	// The post-push log query reads `333..origin/feat/manual` (the
+	// pre-push origin tip .. new origin tip), so the onArgs key must
+	// match that exact range or the mock returns "no response".
+	git.onArgs([]string{"log", "--oneline", "3333333333333333333333333333333333333333..origin/feat/manual"},
+		"abc1234 feat: thing\ndef5678 fix: stuff\n", "", nil)
 
 	withAgent(t)
 	cs := &chatsession.ChatSession{}
@@ -783,12 +968,17 @@ func TestDispatchPush_NoUpstreamFreshBranch(t *testing.T) {
 		Branch:      "wt-fresh",
 		HasUpstream: false,
 	})
-	rig.git.onArgs([]string{"rev-parse", "HEAD"},
-		"5555555555555555555555555555555555555555\n", "", nil)
+	// First-push: origin/<branch> does NOT exist. dispatchPush
+	// captures this with `rev-parse --verify origin/<branch>`,
+	// treats the "unknown revision" stderr as originBefore="",
+	// and falls back to `git log <branch>` for the success card.
+	rig.git.onArgs([]string{"rev-parse", "--verify", "origin/wt-fresh"},
+		"", "fatal: unknown revision or path not in the working tree: 'origin/wt-fresh'", errors.New("exit status 128"))
 	rig.git.onArgs([]string{"push", "-u", "origin", "wt-fresh"},
 		"To origin\n", "", nil)
 	rig.git.on("rev-list", "0", "", nil)
-	rig.git.on("log", "5555555555 first commit\n", "", nil)
+	rig.git.onArgs([]string{"log", "--oneline", "wt-fresh"},
+		"5555555555 first commit\n", "", nil)
 
 	s := captureCh(t, rig.cs)
 	_, err := dispatchPush(context.Background(), rig.cs,

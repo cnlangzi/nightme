@@ -44,7 +44,7 @@ import (
 //   3. The body does not contain commit-time actions (push /
 //      add -A / stash) — the agent only commits.
 //
-// Writes /tmp/nightme-v2-commit-output.txt with the raw agent
+// Writes nightme-v2-commit-output.txt under t.TempDir() with the raw agent
 // text on success so the human who ran the smoke can eyeball
 // the result.
 func TestRealPi_CommitPromptV2(t *testing.T) {
@@ -139,8 +139,9 @@ func TestRealPi_CommitPromptV2(t *testing.T) {
 	t.Logf("=== RAW AGENT TEXT (first 2000 chars) ===\n%s\n=== END RAW ===",
 		truncateOutput(rawText, 2000))
 
-	_ = os.WriteFile("/tmp/nightme-v2-commit-output.txt", []byte(rawText), 0o644)
-	t.Logf("raw text written to /tmp/nightme-v2-commit-output.txt")
+	outPath := filepath.Join(t.TempDir(), "nightme-v2-commit-output.txt")
+	_ = os.WriteFile(outPath, []byte(rawText), 0o644)
+	t.Logf("raw text written to %s", outPath)
 
 	// ---- Assertions on the live output. ------------------------
 	//
@@ -187,13 +188,13 @@ func TestRealPi_CommitPromptV2(t *testing.T) {
 
 	// 3. No commit-time actions in the BODY (not the full raw
 	// text — see comment at the top of this block). The check
-	// requires backticks around the command (markdown code-span
-	// style) so that the LLM echoing the prompt's hard rules or
-	// describing what it avoided (e.g. "didn't run `git add -A`")
-	// doesn't fire. LLMs always quote a command they intend to
-	// propose in backticks; narrative mentions are usually
-	// unquoted or differently formatted.
-	for _, banned := range []string{"`git push`", "`git add -A`", "`git stash`", "`git restore`", "`git checkout --"} {
+	// matches the bare command name ("git push"), which also
+	// catches the backticked form ("`git push`") as a substring.
+	// The release-engineer prompt forbids these commands
+	// entirely, so any mention in the body is a violation —
+	// whether the LLM proposes to run them, claims it didn't
+	// run them, or summarises what it avoided.
+	for _, banned := range []string{"git push", "git add -A", "git stash", "git restore", "git checkout --"} {
 		if strings.Contains(body, banned) {
 			t.Errorf("commit body contains %q — the agent should never propose these commands", banned)
 		}

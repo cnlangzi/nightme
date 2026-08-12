@@ -30,7 +30,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -204,38 +203,16 @@ func dispatchPR(
 	card := renderPROpenedCard(c, baseBranch, url)
 
 	// Invalidate the footer's PR cache for every AgentSession
-	// in this chat whose Cwd is inside the worktree we just
-	// opened the PR for. Without this, the workspace footer
-	// line's PR reference (rendered as `[#N](url)` at the end
-	// of the 📁: row; clickable blue link in lark_md) would
-	// still render the previous state — either absent or a
-	// stale URL from a branch we last had a PR on — until the
-	// next 60s TTL expires. Iterating the pool + checking Cwd
-	// scopes the blow-up: other chat sessions and unrelated
-	// worktrees are not re-fetched.
-	if deps.PRInvalidator != nil {
-		for _, as := range cs.Pool() {
-			if as == nil || as.Cwd == "" {
-				continue
-			}
-			asClean := filepath.Clean(as.Cwd)
-			wtClean := filepath.Clean(c.Worktree)
-			if asClean != wtClean &&
-				!strings.HasPrefix(asClean, wtClean+string(filepath.Separator)) &&
-				!strings.HasPrefix(wtClean, asClean+string(filepath.Separator)) {
-				// AS.Cwd and the fix worktree share no
-				// directory boundary → unrelated, skip.
-				// Using separator-aware prefix matching (vs
-				// raw strings.HasPrefix) avoids the classic
-				// `/home/foo` vs `/home/foobar/repo`
-				// false positive that would invalidate
-				// caches for unrelated workspaces with a
-				// shared string prefix.
-				continue
-			}
-			deps.PRInvalidator.Invalidate(as.ID)
-		}
-	}
+	// in this chat. Without this, the workspace footer line's
+	// PR reference (rendered as `[#N](url)` at the end of the
+	// 📁: row; clickable blue link in lark_md) would still
+	// render the previous state — either absent (the OLD
+	// branch had no PR) or a stale URL from a previous branch
+	// we had a PR on — until the 60s prcache.Cache TTL
+	// expires. The helper covers the full chat pool so any AS
+	// that re-stamps before the TTL picks up the new PR id
+	// immediately.
+	invalidateChatASPRCache(deps, cs)
 
 	return reply(ctx, cs.Emitter(), chatID, messageID, card), nil
 }

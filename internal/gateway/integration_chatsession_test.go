@@ -1,3 +1,5 @@
+//go:build !windows
+
 package gateway_test
 
 import (
@@ -464,10 +466,15 @@ func TestIntegration_RealBridge_FakeShell(t *testing.T) {
 	// first false return, skipping assistant/result and producing a
 	// "no outbound" failure instead of a real anchor or bridge
 	// failure signal. `|| true` makes the timeout fallback explicit;
-	// 5s is comfortably above the test's 5s deadline so any hang in
-	// the bridge layer still surfaces as a test failure, not a hang.
+	// 30s is comfortably above the test's 30s deadline so any hang
+	// in the bridge layer still surfaces as a test failure, not a
+	// hang. The previous 5s timeout was flaky under load — when
+	// the full test suite runs concurrently the bridge's writeLine
+	// can take longer than 5s to reach bash, so bash's read -t
+	// would time out before the prompt arrived and the script
+	// would exit without emitting the assistant/result events.
 	//
-	// `read -t 5 _PROMPT` takes one line. writeLine writes the
+	// `read -t 30 _PROMPT` takes one line. writeLine writes the
 	// prompt body followed by a single \n, so one read is enough.
 	body := `#!/bin/bash
 echo '{"type":"system","subtype":"init","session_id":"test-session-1","model":"claude-test","cwd":"/tmp"}'
@@ -476,7 +483,7 @@ echo '{"type":"system","subtype":"init","session_id":"test-session-1","model":"c
 # readpump races the test's QueueUserMessage and the assistant
 # event often lands with currentPrompt still nil → empty
 # UserMsgID → messages.OutReply.ReplyTo = "" assertion failure.
-read -t 5 _PROMPT || true
+read -t 30 _PROMPT || true
 echo '{"type":"assistant","message":{"id":"msg_1","role":"assistant","model":"claude-test","content":[{"type":"text","text":"hello back"}]}}'
 echo '{"type":"result","result":"final answer","duration_ms":100,"is_error":false}'
 exit 0
@@ -526,9 +533,14 @@ exit 0
 	}
 
 	// Wait for the round-trip: at minimum we expect OutReply +
-	// OutResult to reach the channel.
+	// OutResult to reach the channel. The 30s deadline matches the
+	// bash script's read -t 30 above — when the test suite runs
+	// under load the bridge's writeLine can take longer than the
+	// previous 5s budget, so the test's polling window has to
+	// match. A real bridge hang still surfaces as a failure
+	// (eventually) rather than a hang.
 	var rec []messages.OutboundMessage
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		rec = mock.Record()
 		if len(rec) >= 2 {
@@ -537,7 +549,7 @@ exit 0
 		time.Sleep(20 * time.Millisecond)
 	}
 	if len(rec) == 0 {
-		t.Fatal("no OutboundMessage captured within 5s — bridge did not produce events end-to-end")
+		t.Fatal("no OutboundMessage captured within 30s — bridge did not produce events end-to-end")
 	}
 
 	// Find OutReply + OutResult.

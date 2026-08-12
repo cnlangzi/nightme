@@ -505,6 +505,61 @@ func TestPumpStream_RealModelSayingNoContent_Kept(t *testing.T) {
 	}
 }
 
+// TestPumpStream_PlaceholderMatchIsStrict pins the byte-exact
+// match contract of isSyntheticNoContent. Whitespace-padded
+// variants of "(no content)" must NOT be dropped — the guard
+// only swallows the literal byte sequence Claude Code emits.
+// Review feedback: a previous revision used strings.TrimSpace,
+// which silently widened the match to " (no content)" and
+// "(no content)\n". That is the wrong failure mode (silent data
+// loss beats a stray character), so this test guards against
+// future "be lenient" drift.
+func TestPumpStream_PlaceholderMatchIsStrict(t *testing.T) {
+	cases := []struct {
+		name  string
+		text  string
+		drop  bool
+	}{
+		{name: "literal placeholder", text: "(no content)", drop: true},
+		{name: "leading space", text: " (no content)", drop: false},
+		{name: "trailing space", text: "(no content) ", drop: false},
+		{name: "leading and trailing space", text: " (no content) ", drop: false},
+		{name: "trailing newline", text: "(no content)\n", drop: false},
+		{name: "tab padding", text: "\t(no content)\t", drop: false},
+		{name: "embedded in larger text", text: "agent decided: (no content)", drop: false},
+		{name: "different phrasing", text: "(no content yet)", drop: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := `{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":` + mustJSONString(tc.text) + `}]}}` + "\n"
+			evs := streamFromString(input)
+			switch {
+			case tc.drop && len(evs) != 0:
+				t.Errorf("text=%q: got %d events, want 0 (must be dropped)", tc.text, len(evs))
+			case !tc.drop && len(evs) != 1:
+				t.Errorf("text=%q: got %d events, want 1 (must be forwarded)", tc.text, len(evs))
+			case !tc.drop && len(evs) == 1:
+				if evs[0].Text != tc.text {
+					t.Errorf("text round-trip: got %q, want %q", evs[0].Text, tc.text)
+				}
+			}
+		})
+	}
+}
+
+// mustJSONString returns the JSON-encoded form of s (quoted, with
+// the necessary escapes for ", \, control characters). Used by
+// strict-match tests that build wire envelopes from Go strings —
+// string concatenation would break on inputs containing " or \.
+func mustJSONString(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err) // json.Marshal on a string cannot fail
+	}
+	return string(b)
+}
+
 // TestPumpStream_OtherSyntheticMessages_Kept covers the rest of
 // the synthetic class. Claude Code also uses "<synthetic>" for
 // interrupt notices and API-error surfaces that DO carry real

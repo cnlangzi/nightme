@@ -139,8 +139,14 @@ const noContentPlaceholder = "(no content)"
 
 // isSyntheticNoContent reports whether a text block is Claude Code's
 // zero-information placeholder for an empty assistant turn. Both the
-// synthetic model marker AND the exact placeholder text are required
+// synthetic model marker AND the literal placeholder text are required
 // so a real model answering "(no content)" is never swallowed.
+//
+// Matching is strict (==, no TrimSpace). The contract is: only the
+// byte sequence the CLI emits is dropped; whitespace-padded variants
+// like " (no content)" or "(no content)\n" flow through to the
+// channel — they are vanishingly rare and "be lenient" is the wrong
+// failure mode (silent data loss is worse than a stray character).
 //
 // This is the /new path: AgentSession.New → driver.New writes
 // `{"type":"user","message":{"role":"user","content":"/clear"}}` to
@@ -150,7 +156,7 @@ const noContentPlaceholder = "(no content)"
 // content, and it says nothing — dropping it here keeps /new to a
 // single receipt card.
 func isSyntheticNoContent(model, text string) bool {
-	return model == syntheticModel && strings.TrimSpace(text) == noContentPlaceholder
+	return model == syntheticModel && text == noContentPlaceholder
 }
 
 // contentBlock is the union shape for assistant message content. The

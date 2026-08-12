@@ -184,7 +184,7 @@ func (d *Dispatcher) Handle(cs *chatsession.ChatSession, ir InboundRequest) (*Sh
 	// before any user-visible reply text arrives. Symmetric with
 	// commander.Dispatch's pre-Handle MessageQueued emit; see
 	// docs/feat/slash-command-reactions.md.
-	emitShellState(cs, ir.MessageID, agent.MessageQueued)
+	chatsession.PublishMessageState(cs, ir.MessageID, agent.MessageQueued)
 
 	go d.runShell(cs, ir)
 
@@ -209,7 +209,7 @@ func (d *Dispatcher) runShell(cs *chatsession.ChatSession, ir InboundRequest) {
 	// LIFO: this defer runs LAST (after the inner defer recovers
 	// from panic). Putting MessageDone here guarantees ✅ fires
 	// on every exit path — success, error, panic.
-	defer emitShellState(cs, ir.MessageID, agent.MessageDone)
+	defer chatsession.PublishMessageState(cs, ir.MessageID, agent.MessageDone)
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -246,19 +246,6 @@ func (d *Dispatcher) runShell(cs *chatsession.ChatSession, ir InboundRequest) {
 			"chat_id", ir.ChatID,
 			"message_id", ir.MessageID)
 	}
-}
-
-// emitShellState is the shell-package mirror of
-// commander.emitSlashState. Same nil-guard contract: nil cs,
-// empty MessageID, and nil MessageStateBus all short-circuit
-// before any publish. This lets tests construct bare
-// &chatsession.ChatSession{} without a fully-wired bus; production
-// code always passes a session built via chatsession.New.
-func emitShellState(cs *chatsession.ChatSession, userMsgID string, state agent.MessageState) {
-	if cs == nil || userMsgID == "" || cs.MessageStateBus == nil {
-		return
-	}
-	cs.EmitMessageState(userMsgID, state)
 }
 
 // dispatch is the synchronous, low-level shell command runner.

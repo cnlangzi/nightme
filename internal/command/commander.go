@@ -142,14 +142,14 @@ func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, cs *chatse
 	// Framework ⏳ — every matched slash command gets a placeholder
 	// reaction on the user message before any work begins. Skipped
 	// for nil sessions / synthetic inbounds (no MessageID).
-	emitSlashState(cs, input.MessageID, agent.MessageQueued)
+	chatsession.PublishMessageState(cs, input.MessageID, agent.MessageQueued)
 
 	out, err := cmd.Handle(ctx, rt, cs, input)
 
 	// Framework ✅ — fires unconditionally after cmd.Handle returns
 	// (success or error). For a nil cs / empty MessageID the helper
 	// is a no-op, so we don't need to repeat the guard here.
-	emitSlashState(cs, input.MessageID, agent.MessageDone)
+	chatsession.PublishMessageState(cs, input.MessageID, agent.MessageDone)
 
 	if err != nil {
 		// The command itself errored — surface as a reply so the
@@ -158,26 +158,6 @@ func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, cs *chatse
 		return &SlashOutput{Consumed: true, Reply: "❌ " + err.Error()}, true, nil
 	}
 	return out, true, nil
-}
-
-// emitSlashState is the framework-level helper that wraps the
-// nil-guard + empty-MessageID-guard + nil-bus-guard contract for
-// slash command MessageStateBus emissions. Extracted so the
-// Dispatch flow stays readable and the guard logic lives in one
-// place.
-//
-// The cs mu.RLock + bus.Publish path is the same as Manager.HandleInbound's
-// inline calls; we just add the per-slash-command precondition.
-// The MessageStateBus nil guard lets unit tests (and any future
-// "shell-less" ChatSession consumers) construct bare &ChatSession{}
-// values without a fully-wired bus — production code always passes
-// a session built via chatsession.New, which wires the bus eagerly
-// (internal/chatsession/chatsession.go:320).
-func emitSlashState(cs *chatsession.ChatSession, userMsgID string, state agent.MessageState) {
-	if cs == nil || userMsgID == "" || cs.MessageStateBus == nil {
-		return
-	}
-	cs.EmitMessageState(userMsgID, state)
 }
 
 // parseCommand detects whether text begins with a slash command prefix

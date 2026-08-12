@@ -2,7 +2,7 @@
 
 > **Sleep tight. NightMe codes all night.**
 >
-> A remote-pair developer agent. No more babysitting AI—stay in the loop from your phone while your digital twin takes the wheel.
+> A remote-pair developer agent. No more babysitting AI—stay in the loop from your phone while NightMe takes the wheel.
 
 [English](./README.md) · [简体中文](./README.zh-CN.md)
 
@@ -99,6 +99,22 @@ nightme start          # daemon runs in the background
 ```
 
 When `start` returns, NightMe sends a welcome message to your Feishu DM — that's how you know you're live.
+
+### CLI commands
+
+Most of the time you live in chat. These are the few things you do from a terminal:
+
+| Command | What it does |
+|---|---|
+| `nightme start` / `stop` / `restart` | Turn NightMe on and off. Your agents keep working either way. |
+| `nightme status` | Is NightMe running? |
+| `nightme list` | All your agents: which chat, which project, still alive or finished. |
+| `nightme kill` | Stop every agent at once. Send a message in the chat and it comes back, conversation intact. |
+| `nightme logs` | Watch what NightMe is doing, live. |
+| `nightme doctor` | Check NightMe's health when something feels off. |
+| `nightme agents` | Which AI agents you have set up. |
+
+Stopping comes in three scopes: `/close` (one project) · `nightme kill` (all agents) · `nightme stop` (NightMe itself). Your conversations survive all three.
 
 ---
 

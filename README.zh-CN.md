@@ -98,6 +98,22 @@ nightme start          # daemon 在后台跑起来
 
 `start` 返回后，NightMe 会给你的 Feishu DM 发一条 welcome message——这就是它已经 ready 的信号。
 
+### CLI commands
+
+大多数时候你都在 chat 里。需要回终端的只有这几条：
+
+| 命令 | 作用 |
+|---|---|
+| `nightme start` / `stop` / `restart` | 开关 NightMe。开也好关也好，你的 agent 照常干活。 |
+| `nightme status` | NightMe 在跑吗？ |
+| `nightme list` | 列出你所有的 agent：在哪个 chat、哪个项目、还活着还是已结束。 |
+| `nightme kill` | 一次性停掉所有 agent。在 chat 里发条消息就回来了，对话不丢。 |
+| `nightme logs` | 实时看 NightMe 在干什么。 |
+| `nightme doctor` | 觉得哪里不对时，看一眼 NightMe 是否健康。 |
+| `nightme agents` | 你配了哪些 AI agent。 |
+
+「停」分三个范围：`/close`（单个项目）· `nightme kill`（所有 agent）· `nightme stop`（NightMe 自己）。三种都不会丢对话。
+
 ---
 
 ## Slash commands

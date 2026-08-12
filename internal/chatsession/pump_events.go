@@ -71,21 +71,16 @@ func (cs *ChatSession) attachAgentSubscription(as *AgentSession) {
 	})
 }
 
-// detachAgentSubscription removes the subscription record for as.
-// Idempotent. The actual bus handler still fires on Publish until
-// the AS is shut down (in practice Shutdown follows this call and
-// closes the bus).
-func (cs *ChatSession) detachAgentSubscription(as *AgentSession) {
-	if as == nil {
-		return
-	}
-	cs.mu.Lock()
-	delete(cs.subs, as.ID)
-	cs.mu.Unlock()
-}
-
-// detachAgentSubscriptionLocked is detachAgentSubscription without
-// the lock acquire. MUST be called with cs.mu held (write).
+// detachAgentSubscriptionLocked removes the subscription record for
+// as. Idempotent. MUST be called with cs.mu held (write). The
+// actual bus handler still fires on Publish until the AS is
+// shut down (in practice Shutdown follows this call and closes
+// the bus).
+//
+// The non-Locked wrapper that lived here was deleted in F-46:
+// every caller is already under cs.mu (DropAgentSession's lock
+// section), so the `Lock()/Unlock()` pair inside the wrapper
+// was a no-op that round-tripped the same mutex.
 func (cs *ChatSession) detachAgentSubscriptionLocked(as *AgentSession) {
 	if as == nil {
 		return

@@ -816,7 +816,7 @@ func completeFixAndDispatch(
 // already used by completeFixAndDispatch for the Context
 // timestamp) so tests can pin time deterministically.
 func dispatchIssueToChatSession(
-	ctx context.Context,
+	_ context.Context,
 	cs *chatsession.ChatSession,
 	now func() time.Time,
 	chatID, messageID string,

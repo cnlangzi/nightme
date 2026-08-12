@@ -49,7 +49,7 @@ func dispatchPush(
 	cs *chatsession.ChatSession,
 	deps HandlerDeps,
 	chatID, messageID string,
-	args pushArgs,
+	_ pushArgs,
 ) (*Result, error) {
 	c, res := loadDispatchContext(ctx, cs, deps, chatID, messageID)
 	if res != nil {

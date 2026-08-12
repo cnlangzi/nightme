@@ -71,6 +71,87 @@ func RunClose(
 ) (*Result, error) {
 	selectedCwd := cs.SelectedCwd()
 
+	// --- step 0.5: dangling-cwd safety net -------------------------
+	// Three failure modes the step 1+2 IsNotExist branch would
+	// otherwise misreport as "no active fix to close":
+	//
+	//   (a) Another chat's /gtw close ran `git worktree remove`
+	//       against THIS chat's fix worktree (or some external
+	//       `rm -rf` ate the directory). selectedCwd now points
+	//       at a path that does not exist; the in-memory slot
+	//       carries the matching Worktree; the yml is gone with
+	//       the worktree.
+	//
+	//   (b) The chat just /cwd'd into a directory that someone
+	//       else later removed (e.g. another chat's /gtw close
+	//       on a sibling /gtw fix). selectedCwd is dangling;
+	//       slot is empty; the user never ran /gtw fix here.
+	//
+	//   (c) selectedCwd is empty (cmd.go:364-389 does not
+	//       preflight this). Without this guard, ReadGTWYml("")
+	//       would resolve to "./.nightme/gtw.yml" relative to
+	//       wherever the daemon happens to be running — not
+	//       what the user expects. Same reply text as
+	//       command.RequireActiveCwd (internal/command/preflight.go:30)
+	//       for consistency.
+	//
+	// All three are resolved by closing+dropping the ASes in
+	// the cwd (when there is one), clearing the dangling state,
+	// and telling the user to /cwd again. The successful close
+	// path (step 5.5 below) does the same AS cleanup so the
+	// principle generalises: a /gtw close that tears down a
+	// worktree must kill the agent processes pinned to it,
+	// otherwise they accumulate as orphans and drag the daemon
+	// down.
+	if selectedCwd == "" {
+		return reply(ctx, cs.Emitter(), chatID, messageID,
+			"❌ No active workspace. Send /cwd <path> first."), nil
+	}
+	// Treat *any* stat failure as a gone/unreachable cwd for
+	// the purposes of the safety net — IsNotExist, EACCES, ENOTDIR,
+	// EIO on a now-unmounted volume, etc. all leave the chat
+	// pointing at a path /gtw close can't operate on. Falling
+	// through to ReadGTWYml on a non-IsNotExist stat error
+	// would surface "failed to read .nightme/gtw.yml: <stat
+	// err>" and leave the user with no clear path forward;
+	// clearing the dangling state and asking them to /cwd
+	// again is the same recovery the IsNotExist case gets.
+	if _, statErr := os.Stat(selectedCwd); statErr != nil {
+		cur := slot.Load()
+		slotMatched := cur.Worktree != "" &&
+			filepath.Clean(cur.Worktree) == filepath.Clean(selectedCwd)
+		// Always tear down ASes pinned to the unreachable path —
+		// they are orphaned regardless of slot state.
+		closedN, _ := cs.EvictAgentSessionsInCwd(selectedCwd)
+		if slotMatched {
+			slot.Store(Context{}) // Manager.ClearContext via cmd.go:655-661 shim
+		}
+		cs.ClearSelectedCwd()
+		agentsLine := ""
+		if n := closedN; n > 0 {
+			agentsLine = fmt.Sprintf("closed %d orphaned agent(s); ", n)
+		}
+		var body string
+		if slotMatched {
+			body = fmt.Sprintf(
+				"⚠️ worktree directory is unreachable: %s\n"+
+					"(stat: %v) another /gtw close (or an external `git worktree remove`) "+
+					"tore down this chat's fix worktree.\n"+
+					"%scleared the in-flight fix and the dangling cwd.\n"+
+					"hint: run /cwd <path> to point this chat at a directory again.",
+				selectedCwd, statErr, agentsLine)
+		} else {
+			body = fmt.Sprintf(
+				"⚠️ directory is unreachable: %s\n"+
+					"(stat: %v) it was deleted out from under this chat (e.g. by another "+
+					"/gtw close running `git worktree remove`).\n"+
+					"%scleared the dangling cwd.\n"+
+					"hint: run /cwd <path> to point this chat at a directory again.",
+				selectedCwd, statErr, agentsLine)
+		}
+		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
+	}
+
 	// --- step 1+2: locate the snapshot ---------------------------
 	c, err := ReadGTWYml(selectedCwd)
 	if err != nil {
@@ -118,6 +199,19 @@ func RunClose(
 		}
 		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
 	}
+
+	// --- step 5.5: close ASes pinned to the about-to-be-gone worktree ---
+	// Every AgentSession whose Cwd == c.Worktree is orphaned the
+	// moment `git worktree remove` (step 4) succeeds — its cwd
+	// is gone. Without this step, the orphan agent processes
+	// accumulate across fixes and drag the daemon down. Mirrors
+	// the cleanup the step 0.5 safety net performs, generalised
+	// to the happy path.
+	//
+	// The result is fed into the step 8 success card so the user
+	// sees an `→ agents: N closed ...` line when applicable; the
+	// no-agents happy path keeps its existing 4-line card body.
+	droppedN, _ := cs.EvictAgentSessionsInCwd(c.Worktree)
 
 	// --- step 5: delete the local branch --------------------------
 	// `-D` (uppercase) is force-delete — refuses to keep the
@@ -168,6 +262,12 @@ func RunClose(
 			"→ cwd → %s",
 		c.Branch, c.Worktree, c.Branch, c.RepoRoot,
 	)
+	if n := droppedN; n > 0 {
+		// Surface the agent-process cleanup only when it
+		// actually fired. The no-agents happy path keeps
+		// its existing 4-line card body.
+		body += fmt.Sprintf("\n→ agents: %d closed (orphaned by worktree removal)", n)
+	}
 	// Send close's own success card. The reply() return is
 	// intentionally discarded — returning here would skip step 9's
 	// separate sync card. Every other reply path in this file

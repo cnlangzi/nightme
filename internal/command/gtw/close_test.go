@@ -608,5 +608,297 @@ type fakeExitError struct {
 
 func (e *fakeExitError) Error() string { return e.msg }
 
+// --- regression tests for the step 0.5 / step 5.5 fix ---
+//
+// Two bug classes drove this fix:
+//   1. /gtw close in a chat whose SelectedCwd had been torn down
+//      by another chat (or an external `git worktree remove`)
+//      reported the misleading "❌ no active fix to close in this
+//      chat" line. The step 0.5 safety net now distinguishes
+//      "directory missing" from "yml missing" and emits a
+//      tailored warning.
+//   2. Every /gtw close left AgentSession subprocesses that
+//      were spawned into the now-deleted worktree running as
+//      orphans. Long-lived daemons accumulated these until
+//      they dragged the host down. The fix closes+drops them
+//      on every /gtw close (both step 0.5 and step 5.5 happy
+//      path).
+//
+// Helper-level coverage of EvictAgentSessionsInCwd
+// (with a live bridge handle, asserting as.Close() is invoked)
+// lives in internal/chatsession/test_close_drop_test.go. The
+// tests here exercise RunClose's logic flow only; the seeded
+// AgentSessions use StatusExited so the helper takes the "stale
+// entry, no live process to signal" branch — still cleans the
+// pool, but doesn't increment the user-facing "closed N
+// orphaned agent(s)" line. That count is exercised by the
+// chatsession-package test.
+
+// seedAgentSession attaches a minimal AgentSession to the rig's
+// ChatSession pool, pinned to `cwd`, marked as StatusExited.
+// StatusExited is intentional: the gtw-package close_test rig
+// has no live bridge handle to give to `agent.NewAgent` (the
+// driver type is unexported). StatusExited trips the
+// not-alive branch in EvictAgentSessionsInCwd —
+// DropAgentSession still fires, but no goroutine for as.Close()
+// is spawned, so the "closed N orphaned agent(s)" count stays
+// at 0. Real-bridge, count-asserting tests live in
+// internal/chatsession/test_close_drop_test.go.
+func seedAgentSession(t *testing.T, rig *closeTestRig, agentName, cwd string) {
+	t.Helper()
+	as := chatsession.NewAgentSession("as-"+agentName+"-test", rig.cs.ChatID, agentName, cwd, nil)
+	as.SetStatusForTest(chatsession.StatusExited)
+	rig.cs.AttachAgentSessionForTest(as)
+}
+
+// TestRunClose_DanglingSelectedCwd_FixActive exercises the
+// subcase where SelectedCwd is dangling AND the in-memory slot
+// carries a matching Worktree (case (a) in step 0.5). The
+// yml+dir are gone (we RemoveAll'd wt before invoking), one
+// AgentSession pinned to wt sits in the pool; RunClose must
+// short-circuit before git worktree remove, emit the slot-aware
+// "worktree directory is gone" reply, clear SelectedCwd and
+// the slot, and tidy up the pool.
+func TestRunClose_DanglingSelectedCwd_FixActive(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	seedFix(t, rig, wt, repoRoot)
+	seedAgentSession(t, rig, "test-agent", wt)
+
+	// Simulate "another chat's /gtw close tore down our worktree"
+	// by removing the entire worktree directory. The yml goes
+	// with it; the in-memory slot still references wt (carried
+	// over from seedFix).
+	if err := os.RemoveAll(wt); err != nil {
+		t.Fatalf("RemoveAll wt: %v", err)
+	}
+
+	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	if err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+	if got := rig.cs.SelectedCwd(); got != "" {
+		t.Errorf("SelectedCwd after dangling close = %q, want \"\"", got)
+	}
+	if got := rig.slot.Load(); got != (Context{}) {
+		t.Errorf("slot.Load() after dangling close = %+v, want zero", got)
+	}
+	// No git calls — the safety net must short-circuit before
+	// step 4 (WorktreeRemove).
+	for _, args := range rig.git.calls {
+		if len(args) >= 2 && args[0] == "worktree" && args[1] == "remove" {
+			t.Errorf("git worktree remove called on dangling close: %v", args)
+		}
+	}
+	// Pool must be empty — the seeded StatusExited AS still got
+	// dropped by EvictAgentSessionsInCwd's stale-entry
+	// branch.
+	if n := len(rig.cs.Pool()); n != 0 {
+		t.Errorf("pool after dangling close = %d entries, want 0", n)
+	}
+	reply := rig.rec.lastText()
+	// The seeded AS was StatusExited (no live bridge), but
+	// it was still pinned to the now-gone worktree — the
+	// pool entry was still removed by the safety net, so
+	// the "closed N orphaned agent(s)" line MUST appear
+	// with N=1. The previous "0 reported" behaviour
+	// undercounted the actual cleanup.
+	if !strings.Contains(reply, "closed 1 orphaned agent(s)") {
+		t.Errorf("reply missing 'closed 1 orphaned agent(s)' line:\n%s", reply)
+	}
+	if !strings.Contains(reply, "worktree directory is unreachable") {
+		t.Errorf("reply missing 'worktree directory is unreachable' prefix:\n%s", reply)
+	}
+	if !strings.Contains(reply, "in-flight fix") {
+		t.Errorf("reply missing 'in-flight fix' line:\n%s", reply)
+	}
+	if !strings.Contains(reply, "/cwd") {
+		t.Errorf("reply missing /cwd hint:\n%s", reply)
+	}
+}
+
+// TestRunClose_DanglingSelectedCwd_SlotEmpty exercises the
+// subcase where SelectedCwd is dangling but the chat never
+// started its own /gtw fix (case (b) in step 0.5). The
+// message must NOT mention an "in-flight fix" being cleared,
+// because there wasn't one.
+func TestRunClose_DanglingSelectedCwd_SlotEmpty(t *testing.T) {
+	wt := t.TempDir()
+
+	rig := newCloseRig(t)
+	// User just /cwd'd into wt; never ran /gtw fix here. Slot
+	// stays at its zero value (the rig's memSlot default).
+	if err := rig.cs.SetSelectedCwd(wt); err != nil {
+		t.Fatalf("seed SetSelectedCwd: %v", err)
+	}
+	seedAgentSession(t, rig, "test-agent", wt)
+
+	if err := os.RemoveAll(wt); err != nil {
+		t.Fatalf("RemoveAll wt: %v", err)
+	}
+
+	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	if err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+	if got := rig.cs.SelectedCwd(); got != "" {
+		t.Errorf("SelectedCwd = %q, want \"\"", got)
+	}
+	if got := rig.slot.Load(); got != (Context{}) {
+		t.Errorf("slot.Load() = %+v, want zero", got)
+	}
+	if n := len(rig.cs.Pool()); n != 0 {
+		t.Errorf("pool after dangling close = %d entries, want 0", n)
+	}
+	reply := rig.rec.lastText()
+	// The seeded AS was StatusExited (no live bridge), but
+	// it was still pinned to the now-gone cwd — the pool
+	// entry was still removed by the safety net, so the
+	// "closed N orphaned agent(s)" line MUST appear with N=1.
+	if !strings.Contains(reply, "closed 1 orphaned agent(s)") {
+		t.Errorf("reply missing 'closed 1 orphaned agent(s)' line:\n%s", reply)
+	}
+	if !strings.Contains(reply, "directory is unreachable") {
+		t.Errorf("reply missing 'directory is unreachable' prefix:\n%s", reply)
+	}
+	if !strings.Contains(reply, "another /gtw close") {
+		t.Errorf("reply missing root-cause line:\n%s", reply)
+	}
+	if strings.Contains(reply, "in-flight fix") {
+		t.Errorf("reply incorrectly mentions in-flight fix (slot was empty):\n%s", reply)
+	}
+}
+
+// TestRunClose_EmptySelectedCwd defends the cmd.go:364-389
+// dispatcher (which doesn't preflight empty SelectedCwd before
+// invoking RunClose). Without the explicit empty-cwd branch in
+// step 0.5, ReadGTWYml("") would resolve to "./.nightme/gtw.yml"
+// — whatever the daemon's CWD happens to be — and emit a
+// misleading "no active fix" reply.
+func TestRunClose_EmptySelectedCwd(t *testing.T) {
+	rig := newCloseRig(t)
+	// newCloseRig seeds SelectedCwd="/tmp/start"; reset via the
+	// new public API to exercise the empty-cwd branch.
+	rig.cs.ClearSelectedCwd()
+
+	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	if err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+	if len(rig.git.calls) != 0 {
+		t.Errorf("git called despite empty SelectedCwd: %v", rig.git.calls)
+	}
+	reply := rig.rec.lastText()
+	if !strings.Contains(reply, "No active workspace") {
+		t.Errorf("reply = %q, want 'No active workspace'", reply)
+	}
+	if !strings.Contains(reply, "/cwd") {
+		t.Errorf("reply missing /cwd hint:\n%s", reply)
+	}
+}
+
+// TestRunClose_Success_NoAgents_NoExtraLine is a
+// regression-coverage extension of TestRunClose_CleanWorktree_Success:
+// the Step 5.5 AS cleanup must NOT add the "→ agents: N closed"
+// line to the success card when no AS was seeded. The existing
+// happy path is gated on zero ASes; this test pins that.
+func TestRunClose_Success_NoAgents_NoExtraLine(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	seedFix(t, rig, wt, repoRoot)
+	// Intentionally NO seedAgentSession call — pool stays empty.
+
+	// The success path needs git worktree remove + branch -D to
+	// succeed. programmableGit returns ("", "", nil) by default
+	// for unrecognised calls, so just running RunClose is enough.
+	// No preconditions on git calls; programmableGit returns
+	// success by default. RunClose is expected to issue
+	// worktree remove + branch -D; the happy-path assertions
+	// below verify both effects indirectly via CWD + slot
+	// state.
+
+	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	if err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+	reply := rig.rec.lastText()
+	if strings.Contains(reply, "agents:") {
+		t.Errorf("reply incorrectly mentions agents when pool was empty:\n%s", reply)
+	}
+	if !strings.Contains(reply, "fix/42-test") {
+		t.Errorf("reply missing branch label:\n%s", reply)
+	}
+}
+
+// TestRunClose_Success_ClosesOrphanedAgents covers step 5.5
+// (the happy-path AS cleanup). Seeded ASes are StatusExited so
+// the gtw-package rig avoids needing a live bridge — the
+// close-and-drop path runs (pool entry gets dropped), but the
+// "closed N orphaned agent(s)" count stays 0 (StatusExited is
+// not "alive" per the helper). The pool emptiness after the
+// success path is the testable assertion for THIS rig; the
+// count line is covered by the chatsession-package test.
+func TestRunClose_Success_ClosesOrphanedAgents(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	seedFix(t, rig, wt, repoRoot)
+	seedAgentSession(t, rig, "test-agent", wt)
+	seedAgentSession(t, rig, "other-agent", wt)
+
+	if n := len(rig.cs.Pool()); n != 2 {
+		t.Fatalf("setup: pool = %d entries, want 2", n)
+	}
+
+	// No preconditions on git calls; programmableGit returns
+	// success by default. RunClose is expected to issue
+	// worktree remove + branch -D; the happy-path assertions
+	// below verify both effects indirectly via CWD + slot
+	// state.
+
+	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	if err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+	if n := len(rig.cs.Pool()); n != 0 {
+		t.Errorf("pool after success close = %d entries, want 0", n)
+	}
+	if got := rig.cs.SelectedCwd(); got != repoRoot {
+		t.Errorf("SelectedCwd after success close = %q, want %q", got, repoRoot)
+	}
+	if got := rig.slot.Load(); got != (Context{}) {
+		t.Errorf("slot.Load() = %+v, want zero", got)
+	}
+	reply := rig.rec.lastText()
+	// Both seeded ASes are StatusExited but are still pinned
+	// to the worktree about to be removed — the safety net
+	// removes their pool entries, so the count must reflect
+	// them. The "closed N orphaned agent(s)" line appears with
+	// N=2.
+	if !strings.Contains(reply, "agents: 2 closed") {
+		t.Errorf("reply missing 'agents: 2 closed' line:\n%s", reply)
+	}
+}
+
 // (rigSetCwd removed; we don't need it — RunClose takes the
 // ChatSession's SelectedCwd directly.)

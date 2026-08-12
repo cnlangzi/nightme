@@ -152,15 +152,6 @@ func (r *fixRemoteRecCh) serialized() []string {
 	return out
 }
 
-// captureSend is kept as a stub for legacy call sites; the
-// /gtw fix path no longer uses deps.Send (replies go through
-// cs.Emitter().Send / SendCard / Patch), so this is a no-op.
-// Real test assertions go through the recordingCh passed to
-// chatsession.New.
-func (r *fixRemoteRig) captureSend(_ context.Context, _ messages.OutboundMessage) error {
-	return nil
-}
-
 // drive is shorthand: invoke RunFix in ID mode with the given
 // raw issue id. Returns the same fields the production code
 // does.

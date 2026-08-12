@@ -31,30 +31,6 @@ func makeTestMessage(cs *ChatSession, blocks []agent.ContentBlock, userMsgID str
 	}
 }
 
-// newTestASWithFakeHandle wires a fresh AgentSession to a fake
-// bridge handle WITHOUT going through Spawn / Spawner. Used by
-// the FSM-transition tests that only care about the readPump /
-// InputBuffer path, not bridge bring-up.
-//
-// Returns the AgentSession (already inserted into cs.pool and
-// set as cs.selectedAS, with handle wired and stat=Running) and
-// the underlying fakeAgentSession the test can drive via
-// PushEvent / FinishEvent.
-func newTestASWithFakeHandle(cs *ChatSession) (*AgentSession, *fakeAgentSession) {
-	as := NewAgentSession("as_test", cs.ID, "fake", "/tmp", nil)
-	spy := newFakeAgentSession(1)
-	as.SetHandleForTest(spy.buildLive())
-	as.SetStatusForTest(StatusRunning)
-	as.SetPIDForTest(1)
-
-	cs.mu.Lock()
-	cs.pool[agentCwdKey{Agent: as.Agent, Cwd: as.Cwd}] = as
-	cs.selectedAS = as
-	cs.mu.Unlock()
-
-	return as, spy
-}
-
 // testEmitter is a minimal outbound.Emitter impl for in-package
 // tests. Records every Send/SendCard so tests can assert what
 // was emitted. PATCH semantics are encoded as Kind=OutCardPatch
@@ -77,21 +53,6 @@ func (t *testEmitter) Send(_ context.Context, msg messages.OutboundMessage) erro
 func (t *testEmitter) SendCard(_ context.Context, msg messages.OutboundMessage) (string, error) {
 	t.Sent = append(t.Sent, msg)
 	return "bot-msg-test", nil
-}
-
-// newTestEmitter returns a fresh testEmitter for tests that need
-// to bind an Emitter to a ChatSession or to a Manager.
-func newTestEmitter() *testEmitter {
-	return &testEmitter{}
-}
-
-// newTestChannel is a back-compat alias used by older tests that
-// still call chatsession.New(chatID, primary, newTestChannel()).
-// Returns an *testEmitter (the channel-binding step is no longer
-// part of New; tests should call cs.WithEmitter(em) or
-// mgr.WithEmitter(em) instead).
-func newTestChannel() *testEmitter {
-	return newTestEmitter()
 }
 
 // pushEvent pushes an EnrichedEvent into the AS's dispatch queue

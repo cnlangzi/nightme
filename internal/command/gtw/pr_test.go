@@ -320,7 +320,9 @@ func TestBuildPRPrompt_Remote(t *testing.T) {
 	mustContain(t, p, "Branch (head): fix-42-foo")
 	mustContain(t, p, "Base branch: main")
 	mustContain(t, p, "Working dir: /w")
-	mustContain(t, p, "Reference issue with #42")
+	// v2 anchor: GitHub issue closing keyword, not the old prose hint.
+	mustContain(t, p, "Closes #42")
+	mustContain(t, p, "Refs #42")
 
 	// Negative: push-only instructions must NOT leak into pr's prompt.
 	// The prompt DOES mention "git push" inside the "DO NOT run ..."
@@ -359,6 +361,144 @@ func TestBuildPRPrompt_NonWorktreeRepo(t *testing.T) {
 		t.Fatalf("prompt has 'Repository:' with empty value:\n%s", p)
 	}
 	mustContain(t, p, "Repository: (resolve from `git remote get-url origin`)")
+}
+
+// -----------------------------------------------------------------------------
+// buildPRPrompt v2 invariants
+//
+// These tests lock in the structural / behavioural anchors introduced
+// in the v2 prompt rewrite (see buildPRPrompt doc comment). Each
+// invariant maps to one of the LLM-failure modes observed in
+// recent PRs (#140-#144: 4-bullet regression after the LLM falls
+// back to its training-data modal pattern). They are not exhaustive
+// style tests — they fail if a future edit silently drops the
+// guard that prevents the regression from coming back.
+// -----------------------------------------------------------------------------
+
+// TestBuildPRPromptV2_ToolFloorMandatory checks that the prompt
+// tells the agent to RUN git log / diff before writing, not merely
+// to consult them. The tool floor is what prevents the "write the
+// body from commit messages alone" failure mode.
+func TestBuildPRPromptV2_ToolFloorMandatory(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
+	p := buildPRPrompt(c, "main")
+
+	mustContain(t, p, "## Before you write")
+	mustContain(t, p, "You MUST run")
+	mustContain(t, p, "git log --oneline main..HEAD")
+	mustContain(t, p, "git diff main...HEAD --stat")
+	mustContain(t, p, "Do NOT write the body from commit messages alone")
+}
+
+// TestBuildPRPromptV2_BodyLengthSelfCheck checks the objective
+// rule "body should not be shorter than raw git log output".
+// The rule is LLM-checkable against its own tool output, which is
+// what makes it effective — the model can compare two strings it
+// actually has in context, not just aim at an abstract "be longer".
+func TestBuildPRPromptV2_BodyLengthSelfCheck(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
+	p := buildPRPrompt(c, "main")
+
+	mustContain(t, p, "shorter than the raw `git log` output")
+	mustContain(t, p, "you've written too little")
+}
+
+// TestBuildPRPromptV2_FourDimensions checks that the four
+// dimensions (what / why / diff overview / test evidence) are all
+// named as required coverage. This is the v2 replacement for the
+// v1 "structured body summarising the change" empty anchor — the
+// LLM is now held to specific dimensions, not to a vague adjective.
+func TestBuildPRPromptV2_FourDimensions(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
+	p := buildPRPrompt(c, "main")
+
+	mustContain(t, p, "## Four dimensions")
+	mustContain(t, p, "**What changed**")
+	mustContain(t, p, "**Why it changed**")
+	mustContain(t, p, "**Diff overview**")
+	mustContain(t, p, "**Test evidence**")
+	// Order matters: Why leads, Test evidence closes. If the
+	// ordering drifts, reviewers lose the "is this merge-worthy"
+	// signal that Why-first provides.
+	mustContain(t, p, "Lead with Why, then What, then Diff overview, then Test evidence")
+}
+
+// TestBuildPRPromptV2_AntiModalPattern is the single most
+// important regression guard: the line that tells the LLM NOT to
+// default to a 4-bullet list. Without it, every other improvement
+// is overridden by the modal training-data pattern. If a future
+// edit drops this line, the regression observed in #140-#144
+// returns within a few PRs.
+func TestBuildPRPromptV2_AntiModalPattern(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
+	p := buildPRPrompt(c, "main")
+
+	mustContain(t, p, "Do NOT default to a 4-bullet list")
+	mustContain(t, p, "modal pattern in training data")
+}
+
+// TestBuildPRPromptV2_DoNotSection checks that the anti-pattern
+// block exists and lists the four key failure modes (skip Why,
+// paraphrase the diff, omit Tests, prose outside the fence).
+// Transformer attention to negative imperatives ("Do NOT") is
+// higher than to positive rules of equal length, so this short
+// blacklist is the most reliable way to suppress the failure modes.
+func TestBuildPRPromptV2_DoNotSection(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
+	p := buildPRPrompt(c, "main")
+
+	mustContain(t, p, "## Do NOT")
+	mustContain(t, p, "Do NOT skip **Why**")
+	mustContain(t, p, "Do NOT paraphrase the diff")
+	mustContain(t, p, "Do NOT omit **Test evidence**")
+	mustContain(t, p, "Do NOT include prose outside the fence")
+}
+
+// TestBuildPRPromptV2_PreserveParseability guards the v1
+// invariants that made the existing parser happy. v2 adds content
+// guidance but MUST NOT regress parseability — a future edit that
+// drops these strings silently breaks every existing
+// parsePRReply test in this file.
+func TestBuildPRPromptV2_PreserveParseability(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", RepoRoot: "/r", Repo: "o/r"}
+	p := buildPRPrompt(c, "main")
+
+	mustContain(t, p, "ONE fenced markdown code block")
+	mustContain(t, p, "First line inside the fence is the PR title")
+	mustContain(t, p, "Do NOT nest additional ``` fences")
+	mustContain(t, p, "Indent code samples with 4 spaces")
+	// "DO NOT run git commit / git push / gh / glab" guard is the
+	// agent-side safety rail that keeps pr() from triggering
+	// side effects. Do not let v2 edits drop it.
+	mustContain(t, p, "DO NOT run `git commit`")
+	mustContain(t, p, "`gh pr create`")
+}
+
+// TestBuildPRPromptV2_IssueKeywordOnlyOnIssue checks that the
+// GitHub issue-closing keyword is gated on c.Issue > 0 (same
+// invariant as v1's "Reference issue" — just renamed to the
+// GitHub-recognised Closes/Refs form).
+func TestBuildPRPromptV2_IssueKeywordOnlyOnIssue(t *testing.T) {
+	withIssue := buildPRPrompt(Context{Worktree: "/w", Branch: "x", RepoRoot: "/r", Repo: "o/r", Issue: 7}, "main")
+	mustContain(t, withIssue, "Closes #7")
+	mustContain(t, withIssue, "Refs #7")
+
+	noIssue := buildPRPrompt(Context{Worktree: "/w", Branch: "x", RepoRoot: "/r", Repo: "o/r"}, "main")
+	if strings.Contains(noIssue, "Closes #") || strings.Contains(noIssue, "Refs #") {
+		t.Fatalf("no-issue prompt should not include issue keyword:\n%s", noIssue)
+	}
+}
+
+// TestBuildPRPromptV2_BranchInCommands checks that the actual
+// base branch name appears in the tool-floor git commands. The
+// LLM has to copy-paste or mentally substitute the branch, and a
+// literal placeholder like `<base>` in the executed command
+// breaks the floor. This is a small but real regression risk.
+func TestBuildPRPromptV2_BranchInCommands(t *testing.T) {
+	p := buildPRPrompt(Context{Worktree: "/w", Branch: "feat/y", RepoRoot: "/r", Repo: "o/r"}, "develop")
+
+	mustContain(t, p, "git log --oneline develop..HEAD")
+	mustContain(t, p, "git diff develop...HEAD --stat")
 }
 
 // -----------------------------------------------------------------------------

@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Real-pi runtime e2e test for the readPump path.
 //
 // File: readpump_real_pi_test.go

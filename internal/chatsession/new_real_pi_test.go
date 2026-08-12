@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Repro for the user-reported failure mode at the chat-session layer.
 //
 // User scenario:

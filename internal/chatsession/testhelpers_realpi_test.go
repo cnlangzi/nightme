@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Shared skip guard for tests that spawn the REAL `pi` CLI.
 //
 // Counterpart to internal/bridge/claudecode/testhelpers_realclaude_test.go

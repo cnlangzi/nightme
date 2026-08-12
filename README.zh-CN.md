@@ -1,16 +1,23 @@
 # NightMe
 
+<p align="center">
+  <img src="./logo.png" alt="NightMe Logo" width="150">
+</p>
+
 > 安享好梦，NightMe 彻夜向前。
 >
 > 奔赴你的星辰大海，拥有你的自由生活。而那些必须死守电脑、避无可避的无奈，就让 NightMe 替你守候。
 
 [English](./README.md) · **简体中文**
 
-![Status](https://img.shields.io/badge/status-development-blue)
-![Go](https://img.shields.io/badge/go-1.22%2B-00ADD8)
+![Release](https://img.shields.io/github/v/release/cnlangzi/nightme)
+![CI](https://github.com/cnlangzi/nightme/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-green)
+![Go Reference](https://pkg.go.dev/badge/github.com/cnlangzi/nightme.svg)
+
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 ![Single Binary](https://img.shields.io/badge/distribution-single%20binary-success)
+![GitHub stars](https://img.shields.io/github/stars/cnlangzi/nightme?style=social)
 
 ## What is NightMe
 

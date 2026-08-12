@@ -29,7 +29,6 @@ package runtime
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -38,21 +37,27 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/cnlangzi/nightme/internal/channel/feishu"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
-	"github.com/cnlangzi/nightme/internal/command/close"
-	"github.com/cnlangzi/nightme/internal/command/cwd"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
-	newcmd "github.com/cnlangzi/nightme/internal/command/newcmd"
-	"github.com/cnlangzi/nightme/internal/command/queue"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
-	"github.com/cnlangzi/nightme/internal/command/steer"
-	"github.com/cnlangzi/nightme/internal/command/stop"
-	"github.com/cnlangzi/nightme/internal/command/think"
-	"github.com/cnlangzi/nightme/internal/command/tools"
-	"github.com/cnlangzi/nightme/internal/command/use"
-	"github.com/cnlangzi/nightme/internal/command/watch"
+
+	// Phase 2.3: each command package's init() self-registers
+	// via command.RegisterBuilder. The blank imports below
+	// ensure those init() functions actually run when the
+	// daemon starts — without them, SetDeps would finalize
+	// an empty registry.
+	_ "github.com/cnlangzi/nightme/internal/command/close"
+	_ "github.com/cnlangzi/nightme/internal/command/cwd"
+	_ "github.com/cnlangzi/nightme/internal/command/newcmd"
+	_ "github.com/cnlangzi/nightme/internal/command/queue"
+	_ "github.com/cnlangzi/nightme/internal/command/steer"
+	_ "github.com/cnlangzi/nightme/internal/command/stop"
+	_ "github.com/cnlangzi/nightme/internal/command/think"
+	_ "github.com/cnlangzi/nightme/internal/command/tools"
+	_ "github.com/cnlangzi/nightme/internal/command/use"
+	_ "github.com/cnlangzi/nightme/internal/command/watch"
+
 	"github.com/cnlangzi/nightme/internal/gateway"
 	"github.com/cnlangzi/nightme/internal/gateway/inbound"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
@@ -214,28 +219,17 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	logger.Info("channel connected")
 	fmt.Fprintln(out, "Channel connected")
 
-	var fa *feishu.Adapter
-	if f, ok := ch.(*feishu.Adapter); ok {
-		fa = f
-		fa.SetLogger(logger)
-	}
+	// Phase 2.1: Channel interface carries its own logger +
+	// health snapshot — no feishu-specific type assertion here.
+	ch.SetLogger(logger)
 
 	// F-40: register the WS lifecycle snapshot with the daemoncontrol
-	// server so `nightme health` can answer. The closure captures `fa`
-	// and is invoked on every "health" RPC; the closure itself is
-	// safe to call concurrently because WSHealth.Snapshot takes the
-	// read lock. (fa is captured by reference in the closure — the
-	// local `fa` in this scope is never reassigned after this point,
-	// so no `fa := fa` shadow is needed.)
-	if deps.RegisterHealth != nil && fa != nil {
-		deps.RegisterHealth(fa, func() (string, json.RawMessage, error) {
-			snap := fa.Health()
-			data, err := json.Marshal(snap)
-			if err != nil {
-				return "", nil, fmt.Errorf("encode health snapshot: %w", err)
-			}
-			return ch.Name(), data, nil
-		})
+	// server so `nightme health` can answer. ch.HealthSnapshot
+	// is implemented by every Channel (feishu returns its
+	// WSHealthSnapshot JSON-encoded; echo returns Name() + an
+	// empty payload).
+	if deps.RegisterHealth != nil {
+		deps.RegisterHealth(ch.HealthSnapshot)
 	}
 
 	// Build the router wiring (slashCommandDispatcher +
@@ -376,26 +370,37 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		return cs
 	})
 
-	// Reaction router (services) — gtw registers its
-	// HandleReaction at startup; other commands can do the
-	// same in their own init() or factory construction.
+	// Phase 2.3: command/* packages self-register via init()
+	// — see internal/command/runtime.go. The orchestrator just
+	// calls SetDeps once with the manager + primary + gtw
+	// extension deps, then fetches the populated registry.
+
+	// Wire gtw's per-process state. gtw's init() builder does
+	// the heavy lifting (creating its own *Manager, calling
+	// SetHandlerDeps + SetGetChatSession), but the runtime
+	// owns the gtw.HandleReaction registration with the
+	// reaction router (the router itself isn't a factory
+	// pattern).
+	command.SetDeps(command.Deps{
+		Manager: mgr,
+		Primary: cfg.Primary,
+		GTWExt:  gtwDeps,
+	})
+
+	// Reaction router (services) — gtw's ReactionRouter
+	// dispatches msg.Reaction / msg.Action events. The
+	// handler is built from gtw.NewManager() inside gtw's
+	// init closure above, but we still need a reference to
+	// it here to register with the router. Easiest: create
+	// the same Manager + SetHandlerDeps once more, and reuse
+	// the router.Register pattern from the v0.x code.
 	router := commandServices.NewReactionRouter()
 	router.Register("*", gtwMgr.HandleReaction)
 
-	// Slash command registry + commander.
-	gtwFactory := gtw.NewFactoryWithDeps(gtwMgr, gtwDeps)
-	reg := command.NewRegistry()
-	reg.Register(gtwFactory)
-	reg.Register(watch.NewFactory(mgr))
-	reg.Register(think.NewFactory(mgr))
-	reg.Register(tools.NewFactory(mgr))
-	reg.Register(cwd.NewFactory(mgr))
-	reg.Register(use.NewFactory(mgr))
-	reg.Register(close.NewFactory(mgr))
-	reg.Register(stop.NewFactory(mgr))
-	reg.Register(newcmd.NewFactory(mgr))
-	reg.Register(steer.NewFactory(mgr))
-	reg.Register(queue.NewFactory(mgr))
+	// Slash command registry + commander. After SetDeps above
+	// every command/* package's init() has produced a factory;
+	// Default() returns the populated registry.
+	reg := command.Default()
 	commander := command.NewCommander(reg)
 
 	// shellDispatcher owns the full shell-dispatch flow:

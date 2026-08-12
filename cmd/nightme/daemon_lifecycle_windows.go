@@ -47,7 +47,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/daemoncontrol"
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
@@ -236,7 +235,7 @@ func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
 	deps.OnReady = func() {
 		server.SetReady()
 	}
-	deps.RegisterHealth = func(_ channel.Channel, fn func() (string, json.RawMessage, error)) {
+	deps.RegisterHealth = func(fn func() (string, json.RawMessage, error)) {
 		server.SetHealthProvider(fn)
 	}
 	cmd.SetContext(withLogger(ctx, loggerFromContext(cmd.Context())))

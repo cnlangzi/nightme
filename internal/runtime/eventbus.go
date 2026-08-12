@@ -21,32 +21,30 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/channel"
-	"github.com/cnlangzi/nightme/internal/channel/feishu"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
-// MarkPromptDone returns the Feishu-specific PromptEnd callback
-// wired into WireRuntimeCallbacksAndRestore. For non-Feishu
-// channels the no-op default is used; Feishu channels transition
-// the receipt card to PromptDone and add the ✅ reaction. The
-// wrapper exists so the runtime layer doesn't have to type-assert
-// the Channel interface back to *feishu.Adapter inside the
-// per-ChatSession install closure.
+// MarkPromptDone returns the channel's OnPromptEnded method
+// value. Phase 2.1 moved the implementation onto channel.Channel
+// so the runtime no longer needs a type assertion to reach it:
+// every Channel satisfies the contract (Feishu transitions the
+// receipt card to PromptDone; echo is a no-op).
 func MarkPromptDone(ch channel.Channel) func(ctx context.Context, chatID, msgID string) {
-	if fa, ok := ch.(*feishu.Adapter); ok {
-		return fa.MarkReceiptPromptDone
-	}
-	return noOpPromptDone
+	return ch.OnPromptEnded
 }
 
-// noOpPromptDone is the shared no-op PromptEnd callback for
-// non-Feishu channels. Reusing one closure (rather than
-// allocating a fresh `func(_, _, _){}` on every MarkPromptDone
-// call) avoids per-ChatSession allocation when many restored
-// chats get a per-cs markPromptDone subscriber.
+// noOpPromptDone is a sentinel value kept for tests that
+// explicitly pin the non-Feishu contract. Production goes
+// through ch.OnPromptEnded (Phase 2.1) which is a no-op on
+// adapters that don't render receipts.
+//
+// (The variable is also used by ctor_test.go to verify
+// MarkPromptDone's old "returns the same no-op for every
+// non-Feishu channel" property, even though the implementation
+// path has moved into the channel package.)
 var noOpPromptDone = func(context.Context, string, string) {}
 
 // WireRuntimeCallbacksAndRestore installs the per-ChatSession

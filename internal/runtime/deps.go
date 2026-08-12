@@ -51,10 +51,11 @@ type Deps struct {
 	OnReady           func()
 
 	// RegisterHealth, if non-nil, is called after the channel is
-	// constructed and started; the closure wires a closure returning
-	// the channel's live WS lifecycle snapshot into the daemoncontrol
-	// server's "health" RPC.
-	RegisterHealth func(ch channel.Channel, register func() (string, json.RawMessage, error))
+	// constructed and started. The closure receives the channel's
+	// HealthSnapshot function directly (Phase 2.1: every Channel
+	// implements HealthSnapshot itself — no feishu type assertion
+	// needed at the runtime layer).
+	RegisterHealth func(snapshot func() (string, json.RawMessage, error))
 }
 
 // DefaultDeps returns the production Deps: real config loader,
@@ -124,8 +125,9 @@ func defaultBuildAgents(cfg *config.Config) *agent.Registry {
 }
 
 // RemoveLegacyRegistryFile is best-effort cleanup of the v0.1
-// registry.json (the v1.2 daemon no longer reads it). Exposed
-// for the CLI's `list` command which also calls it.
+// registry.json (the v1.2 daemon no longer reads it). Exported
+// so the CLI's `list` command can call it directly without
+// having its own copy.
 func RemoveLegacyRegistryFile(cfg *config.Config) error {
 	path, err := legacyRegistryPath(cfg)
 	if err != nil {
@@ -150,8 +152,9 @@ func RemoveLegacyRegistryFile(cfg *config.Config) error {
 	return nil
 }
 
-// chatSessionsPath returns the absolute path to chat_sessions.json
-// under cfg.Paths.DataDir.
+// ChatSessionsPath returns the absolute path to chat_sessions.json
+// under cfg.Paths.DataDir. Exported so the CLI's `list` command
+// can resolve the same file the daemon writes.
 func ChatSessionsPath(cfg *config.Config) (string, error) {
 	base, err := filepath.Abs(cfg.Paths.DataDir)
 	if err != nil {
@@ -160,8 +163,9 @@ func ChatSessionsPath(cfg *config.Config) (string, error) {
 	return filepath.Join(base, "chat_sessions.json"), nil
 }
 
-// agentSessionsPath returns the absolute path to agent_sessions.json
-// under cfg.Paths.DataDir.
+// AgentSessionsPath returns the absolute path to agent_sessions.json
+// under cfg.Paths.DataDir. Exported so the CLI's `list` command
+// can resolve the same file the daemon writes.
 func AgentSessionsPath(cfg *config.Config) (string, error) {
 	base, err := filepath.Abs(cfg.Paths.DataDir)
 	if err != nil {
@@ -172,6 +176,7 @@ func AgentSessionsPath(cfg *config.Config) (string, error) {
 
 // legacyRegistryPath returns the absolute path to the v0.1
 // registry.json that the v1.2 daemon no longer writes.
+// Unexported — only RemoveLegacyRegistryFile uses it.
 func legacyRegistryPath(cfg *config.Config) (string, error) {
 	base, err := filepath.Abs(cfg.Paths.DataDir)
 	if err != nil {

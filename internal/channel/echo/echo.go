@@ -17,10 +17,13 @@ package echo
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
@@ -136,4 +139,31 @@ func (c *Channel) Record() []messages.OutboundMessage {
 	out := make([]messages.OutboundMessage, len(c.recorded))
 	copy(out, c.recorded)
 	return out
+}
+
+// OnPromptEnded implements channel.Channel.OnPromptEnded as a
+// no-op — echo doesn't render receipts.
+func (c *Channel) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {}
+
+// HealthSnapshot implements channel.Channel.HealthSnapshot as a
+// no-op — echo has no connection state worth reporting. Returns
+// (Name(), empty JSON object, nil) so the daemoncontrol "health"
+// RPC still answers.
+func (c *Channel) HealthSnapshot() (string, json.RawMessage, error) {
+	return c.Name(), json.RawMessage("{}"), nil
+}
+
+// SetLogger implements channel.Channel.SetLogger as a no-op —
+// echo doesn't log internally.
+func (c *Channel) SetLogger(logger *slog.Logger) {}
+
+// BuildBlocks implements channel.Channel.BuildBlocks as the
+// plain-text fallback: a single ContentText block. Echo has no
+// paragraph / attachment awareness — when the dispatcher falls
+// back to BuildBlocks, that's what an echo-fed agent sees.
+func (c *Channel) BuildBlocks(text string, _ []messages.Attachment) []agent.ContentBlock {
+	if text == "" {
+		return nil
+	}
+	return []agent.ContentBlock{{Type: agent.ContentText, Text: text}}
 }

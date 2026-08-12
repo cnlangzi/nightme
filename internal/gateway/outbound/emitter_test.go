@@ -2,11 +2,13 @@ package outbound
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"sync/atomic"
 	"testing"
 
-	
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -38,6 +40,20 @@ func (f *fakeChannel) SendCard(_ context.Context, msg messages.OutboundMessage) 
 	atomic.AddInt32(&f.cardCalls, 1)
 	f.lastCard = msg
 	return f.cardMsgID, f.cardErr
+}
+
+// Channel-interface extensions (Phase 2.1 + 2.2). fakeChannel
+// has no live state — all three are trivial fallbacks.
+func (f *fakeChannel) OnPromptEnded(_ context.Context, _, _ string)        {}
+func (f *fakeChannel) HealthSnapshot() (string, json.RawMessage, error) {
+	return f.name, json.RawMessage("{}"), nil
+}
+func (f *fakeChannel) SetLogger(_ *slog.Logger) {}
+func (f *fakeChannel) BuildBlocks(text string, _ []messages.Attachment) []agent.ContentBlock {
+	if text == "" {
+		return nil
+	}
+	return []agent.ContentBlock{{Type: agent.ContentText, Text: text}}
 }
 
 func TestEmitter_NoSource_PassesThrough(t *testing.T) {

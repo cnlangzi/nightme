@@ -43,6 +43,25 @@ func NewFactoryWithDeps(mgr *Manager, deps HandlerDeps) *Factory {
 	return &Factory{mgr: mgr, deps: deps}
 }
 
+// init self-registers the gtw command. Phase 2.3: each
+// command package's init() calls RegisterBuilder; the runtime
+// orchestrator calls SetDeps once at startup to finalize
+// every registered builder. GTWExt carries gtw.HandlerDeps
+// (typed as `any` in command.Deps to avoid command ↔ gtw
+// import cycle).
+func init() {
+	command.RegisterBuilder(func(d command.Deps) command.SlashCommandFactory {
+		handlerDeps, _ := d.GTWExt.(HandlerDeps)
+		mgr := NewManager()
+		mgr.SetHandlerDeps(handlerDeps)
+		mgr.SetGetChatSession(func(chatID string) *chatsession.ChatSession {
+			cs, _ := d.Manager.GetOrCreate(chatID, d.Primary)
+			return cs
+		})
+		return NewFactoryWithDeps(mgr, handlerDeps)
+	})
+}
+
 // SetHandlerDeps primes the factory with runtime deps. Also
 // pushes the same deps into the Manager so reaction handlers
 // see them.

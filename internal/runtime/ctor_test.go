@@ -177,7 +177,7 @@ func TestNewMessageDispatcher_WatchModeDrop(t *testing.T) {
 		t.Fatalf("GetOrCreate: %v", err)
 	}
 
-	d := NewMessageDispatcher(mgr, em, "claude", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d := NewMessageDispatcher(mgr, em, ch, "claude", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	err := d(context.Background(), &messages.InboundMessage{
 		ChatID:     "oc_drop",
@@ -204,7 +204,7 @@ func TestNewMessageDispatcher_NoSelectedCwdErr(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	em := outbound.New(ch, outbound.Options{})
 
-	d := NewMessageDispatcher(mgr, em, "claude", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d := NewMessageDispatcher(mgr, em, ch, "claude", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	err := d(context.Background(), &messages.InboundMessage{
 		ChatID:     "oc_nocwd",
@@ -233,7 +233,7 @@ func TestNewMessageDispatcher_AcceptInboundGateAccepts(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	em := outbound.New(ch, outbound.Options{})
 
-	d := NewMessageDispatcher(mgr, em, "claude", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d := NewMessageDispatcher(mgr, em, ch, "claude", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	err := d(context.Background(), &messages.InboundMessage{
 		ChatID:     "oc_mention",
@@ -264,7 +264,7 @@ func TestNewMessageDispatcher_NilMsg(t *testing.T) {
 	ch := echo.New("test", io.Discard)
 	em := outbound.New(ch, outbound.Options{})
 
-	d := NewMessageDispatcher(mgr, em, "claude", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	d := NewMessageDispatcher(mgr, em, ch, "claude", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	defer func() {
 		if r := recover(); r != nil {

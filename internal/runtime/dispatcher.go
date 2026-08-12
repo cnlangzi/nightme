@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/channel/feishu"
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -39,6 +39,12 @@ type MessageDispatchFunc = func(context.Context, *messages.InboundMessage) error
 // inbound message to the chat's active AgentSession via the
 // InputBuffer.
 //
+// The ch parameter is used as the BuildBlocks source for the
+// "msg.Blocks empty" fallback path (Phase 2.2: every Channel
+// implements BuildBlocks itself, so the dispatcher stays
+// channel-agnostic). Pass nil only in tests that never
+// trigger the fallback.
+//
 // Flow:
 //
 //  1. cs = mgr.GetOrCreate(chatID, cfg.Primary)   // F-33: chatType removed
@@ -46,7 +52,7 @@ type MessageDispatchFunc = func(context.Context, *messages.InboundMessage) error
 //  3. cs.QueueUserMessage(blocks, userMsgID) (Idle → flush now;
 //     Busy → queue)
 //  4. SetBusy on first event (drive FSM)
-func NewMessageDispatcher(mgr *chatsession.Manager, em outbound.Emitter, primary string, logger *slog.Logger) func(context.Context, *messages.InboundMessage) error {
+func NewMessageDispatcher(mgr *chatsession.Manager, em outbound.Emitter, ch channel.Channel, primary string, logger *slog.Logger) MessageDispatchFunc {
 	return func(ctx context.Context, msg *messages.InboundMessage) error {
 		if msg == nil {
 			return nil
@@ -110,23 +116,20 @@ func NewMessageDispatcher(mgr *chatsession.Manager, em outbound.Emitter, primary
 		// F-14 v1.4b: post rich-text messages arrive with
 		// msg.Blocks already populated (ordered by Feishu paragraph)
 		// and LocalPath back-filled. Prefer msg.Blocks when non-nil;
-		// otherwise fall back to the legacy BuildBlocks(msg.Text,
-		// msg.Attachments) shape (single-resource msg_types).
-		//
-		// TODO(channel-ext): feishu.BuildBlocks is a Feishu-specific
-		// helper called from this generic dispatcher. The
-		// channel-interface extension (Phase 2 of plan B) will move
-		// BuildBlocks onto the Channel interface so the runtime
-		// stays channel-agnostic. Until then, this is the one place
-		// the runtime depends on a specific channel implementation.
+		// otherwise fall back to ch.BuildBlocks(msg.Text,
+		// msg.Attachments) (single-resource msg_types). The
+		// channel-specific fallback now lives on the Channel
+		// interface (Phase 2.2), so this dispatcher is
+		// channel-agnostic — Feishu paragraphs vs. plain text
+		// is each adapter's own concern.
 		var blocks []agent.ContentBlock
 		var blocksPath string
 		if len(msg.Blocks) > 0 {
 			blocks = msg.Blocks
 			blocksPath = "ordered_blocks"
-		} else {
-			blocks = feishu.BuildBlocks(msg.Text, msg.Attachments)
-			blocksPath = "legacy_build_blocks"
+		} else if ch != nil {
+			blocks = ch.BuildBlocks(msg.Text, msg.Attachments)
+			blocksPath = "channel_build_blocks"
 		}
 		// F-14 visibility: before queuing, trace what the agent will
 		// actually receive. Specifically: if blocks only contains

@@ -25,6 +25,12 @@ type Factory struct {
 }
 
 // NewFactory constructs a Factory backed by mgr.
+func init() {
+	command.RegisterBuilder(func(d command.Deps) command.SlashCommandFactory {
+		return NewFactory(d.Manager)
+	})
+}
+
 func NewFactory(mgr *chatsession.Manager) *Factory {
 	return &Factory{mgr: mgr}
 }

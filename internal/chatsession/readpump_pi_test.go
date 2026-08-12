@@ -151,6 +151,13 @@ func TestReadPump_ContinuesAfterEventDone(t *testing.T) {
 
 	// Now the "process" dies: close the channel. The pump
 	// observes the close and transitions to Exited.
+	//
+	// F-61: call as.Close() so closedByUser is set BEFORE the
+	// readpump exits. Without this, the KindLifecycle handler's
+	// immediate-respawn path would respawn a fresh agent and the
+	// AS would flip back to Running — defeating the test's intent
+	// to verify "after channel close, status == Exited".
+	_ = cs.selectedAS.Close()
 	fake.Close()
 
 	// Wait for the pump to observe the close and flip the

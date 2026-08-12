@@ -392,6 +392,69 @@ func DownloadAttachments(ctx context.Context, c *lark.Client,
 	}
 }
 
+// F-61: outer-retry configuration for DownloadAttachments. The
+// inner per-attachment retry lives in downloadOneWithRetry
+// (maxDownloadAttempts). Total worst-case = MaxAttempts × 3 inner
+// transport attempts per failed attachment before declaring
+// AllFailed; in practice most transient blips clear on the
+// second outer attempt. Backoffs[attempt-1] before attempt N
+// (Backoffs[0]=0 means attempt 1 fires immediately).
+var downloadRetryConfig = struct {
+	MaxAttempts int
+	Backoffs    []time.Duration
+}{
+	MaxAttempts: 3,
+	Backoffs:    []time.Duration{0, 5 * time.Second, 15 * time.Second},
+}
+
+// DownloadAttachmentsWithRetry (F-61) wraps DownloadAttachments
+// with an outer ladder: up to downloadRetryConfig.MaxAttempts
+// attempts with downloadRetryConfig.Backoffs[attempt-1] between
+// them. Returns the last DownloadResult regardless of outcome —
+// caller inspects result.AllFailed.
+//
+// onRetry (optional, may be nil) is invoked between attempts with
+// the just-failed attempt number, so the caller can emit per-
+// attempt reaction feedback (e.g. ⏳ retrying attachment 2/3)
+// without this package having to know about reactions.
+//
+// F-61: the 2026-08-12 incident showed that a single transient
+// download failure (network blip during inbound ctx lifetime) led
+// to a silent message drop. The ladder is the recovery path for
+// that class of failure; only the second-order case ("downloads
+// still fail 30s later") escalates to user-facing text-only.
+func DownloadAttachmentsWithRetry(ctx context.Context, c *lark.Client,
+	messageID string, atts []channel.Attachment, sessionID string,
+	onRetry func(attempt int),
+) DownloadResult {
+	if len(atts) == 0 {
+		return DownloadResult{}
+	}
+	var lastResult DownloadResult
+	for attempt := 1; attempt <= downloadRetryConfig.MaxAttempts; attempt++ {
+		if attempt > 1 {
+			wait := downloadRetryConfig.Backoffs[attempt-1]
+			if wait > 0 {
+				timer := time.NewTimer(wait)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return lastResult
+				}
+			}
+			if onRetry != nil {
+				onRetry(attempt)
+			}
+		}
+		lastResult = DownloadAttachments(ctx, c, messageID, atts, sessionID)
+		if !lastResult.AllFailed {
+			return lastResult
+		}
+	}
+	return lastResult
+}
+
 // downloadOneWithRetry attempts up to maxDownloadAttempts downloads
 // of a single attachment, sleeping between failures with
 // exponential backoff (initialBackoff * backoffMultiplier^attempt).

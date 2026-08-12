@@ -274,6 +274,11 @@ type ChatSession struct {
 	// must nil-check via Emitter() before calling Send/SendCard.
 	emitter outbound.Emitter
 
+	// watchdog (F-61) is the per-chat diagnostic timer. nil
+	// until lazily initialized by Watchdog(). Owned by the chat
+	// session; lifetime matches the CS.
+	watchdog *Watchdog
+
 	// --- F-45 teamflow (gtw) state ------------------------------
 	//
 	// REMOVED in F-51: gtwContext, gtwDrafts, and the
@@ -349,6 +354,16 @@ func (cs *ChatSession) Spawner() Spawner {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.spawner
+}
+
+// Watchdog returns the per-chat watchdog, lazily constructing it
+// on first call. Used by routeEvent to arm/disarm timers; tests
+// inject fakes by setting cs.watchdog directly.
+func (cs *ChatSession) Watchdog() *Watchdog {
+	if cs.watchdog == nil {
+		cs.watchdog = newWatchdog(cs)
+	}
+	return cs.watchdog
 }
 
 // deriveIDFromChatID produces a deterministic ID from the chat ID
@@ -986,6 +1001,12 @@ func (cs *ChatSession) TryFlush() error {
 		cs.queue.Rewind()
 		return err
 	}
+
+	// F-61: arm HungPrompt. If no KindPromptEnded arrives
+	// within HungMins, the watchdog marks the active AS as
+	// Suspect("hung_prompt") so the prober revives it under
+	// cooldown. Submit succeeded — the prompt is in flight.
+	cs.Watchdog().ArmHungPrompt()
 
 	// On success: commit the in-flight batch (removes it from
 	// the queue), then emit MessageSubmitted wire events

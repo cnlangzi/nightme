@@ -142,6 +142,21 @@ type AgentSession struct {
 	// invariant is what makes restart-replay unambiguous.
 	inFlightMessages []registry.InFlightMessageRef
 
+	// F-61: watchdog suspect state (mirrors Entry fields).
+	// SetSuspect/ClearSuscept maintain the invariant "SuspectSince
+	// is non-nil iff SuspectReason != ''". Read by the prober to
+	// gate proactive respawn under the 5min cooldown window.
+	suspectReason string
+	suspectSince  *time.Time
+
+	// F-61: closedByUser is set by Close() to tell the immediate
+	// respawn path "this death was intentional, don't respawn".
+	// Stays sticky across the lifetime of the AgentSession;
+	// cleared by respawn so a future crash IS recoverable. Without
+	// this flag, the F-61 §3.2 Lifecycle handler would race with
+	// /close and respawn a bridge the user just asked to close.
+	closedByUser bool
+
 	// persist is the registry callback used to write the current
 	// entry back to disk. Wired by attachAgentSessionLocked in the
 	// chat layer (it has access to asFile). nil is allowed — Submit
@@ -351,6 +366,15 @@ func FromAgentSessionEntry(e *registry.AgentSessionEntry) *AgentSession {
 	as.model = e.Model
 	if len(e.InFlightMessages) > 0 {
 		as.inFlightMessages = append([]registry.InFlightMessageRef(nil), e.InFlightMessages...)
+	}
+	// F-61: restore suspect state verbatim. Cooldown window is
+	// measured from SuspectSince; on restart, the prober picks up
+	// from there so a suspect-then-crashed AS doesn't immediately
+	// re-trigger a respawn.
+	as.suspectReason = e.SuspectReason
+	if e.SuspectSince != nil {
+		t := *e.SuspectSince
+		as.suspectSince = &t
 	}
 	// commit fix-6: any persisted "running" agent is actually dead
 	// after daemon restart (the process handle is in-memory only).
@@ -761,11 +785,111 @@ func (as *AgentSession) SetDetached() {
 // code. PID is cleared.
 func (as *AgentSession) SetExited(code int) {
 	as.asMu.Lock()
-	defer as.asMu.Unlock()
 	as.pid = 0
 	as.stat = StatusExited
 	as.lastRunAt = time.Now()
 	as.exitCode = &code
+	// F-61: clear suspect state on terminal transition — a dead AS
+	// has nothing left to probe. The cooldown window is implicit
+	// (next Spawn will overwrite SuspectReason anyway).
+	as.suspectReason = ""
+	as.suspectSince = nil
+	persist := as.persist
+	as.asMu.Unlock()
+
+	// Best-effort persistence. Failures fall through — the next
+	// status transition will retry. Symmetric with endPrompt's
+	// persist hook (readpump.go:231).
+	if persist != nil {
+		if err := persist(as.Entry()); err != nil {
+			slog.Warn("agentsession: persist after SetExited failed; JSON may be stale",
+				"as_id", as.ID, "err", err)
+		}
+	}
+}
+
+// SetSuspect (F-61) marks the AS as suspect for the given reason.
+// Persists the new state so a daemon restart can honor the
+// cooldown window. Cooldown window is enforced by the prober
+// (5min per AS) — not here. Setting the same reason twice is a
+// no-op (only the first timestamp sticks) so spam from a flapping
+// bridge doesn't reset the cooldown.
+func (as *AgentSession) SetSuspect(reason string) {
+	if reason == "" {
+		return
+	}
+	as.asMu.Lock()
+	if as.suspectReason == reason {
+		as.asMu.Unlock()
+		return
+	}
+	now := time.Now()
+	as.suspectReason = reason
+	as.suspectSince = &now
+	persist := as.persist
+	as.asMu.Unlock()
+
+	if persist != nil {
+		if err := persist(as.Entry()); err != nil {
+			slog.Warn("agentsession: persist after SetSuspect failed; JSON may be stale",
+				"as_id", as.ID, "reason", reason, "err", err)
+		}
+	}
+}
+
+// ClearSuspect (F-61) removes the suspect marking. Called when a
+// prompt ends cleanly (KindPromptEnded in pump_events) so the
+// prober stops considering this AS for proactive respawn.
+func (as *AgentSession) ClearSuspect() {
+	as.asMu.Lock()
+	if as.suspectReason == "" {
+		as.asMu.Unlock()
+		return
+	}
+	as.suspectReason = ""
+	as.suspectSince = nil
+	persist := as.persist
+	as.asMu.Unlock()
+
+	if persist != nil {
+		if err := persist(as.Entry()); err != nil {
+			slog.Warn("agentsession: persist after ClearSuspect failed; JSON may be stale",
+				"as_id", as.ID, "err", err)
+		}
+	}
+}
+
+// Suspect (F-61) returns the current suspect reason and since
+// timestamp. Used by the prober to decide whether to probe + respawn.
+// Both are zero-valued when not suspect.
+func (as *AgentSession) Suspect() (reason string, since time.Time) {
+	as.asMu.RLock()
+	defer as.asMu.RUnlock()
+	if as.suspectSince == nil {
+		return as.suspectReason, time.Time{}
+	}
+	return as.suspectReason, *as.suspectSince
+}
+
+// SetSuspectAt (F-61, test-only) sets the suspect state with an
+// explicit timestamp. Exported because tests need to backdate
+// SuspectSince to exercise the cooldown gate. Production code
+// uses SetSuspect (no timestamp arg).
+func (as *AgentSession) SetSuspectAt(reason string, at time.Time) {
+	if reason == "" {
+		return
+	}
+	as.asMu.Lock()
+	as.suspectReason = reason
+	as.suspectSince = &at
+	persist := as.persist
+	as.asMu.Unlock()
+	if persist != nil {
+		if err := persist(as.Entry()); err != nil {
+			slog.Warn("agentsession: persist after SetSuspectAt failed",
+				"as_id", as.ID, "err", err)
+		}
+	}
 }
 
 // Entry returns a snapshot of this AgentSession as a registry entry
@@ -779,6 +903,8 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 	resume := as.sessionID
 	model := as.model
 	msgs := as.inFlightMessages
+	sr := as.suspectReason
+	ss := as.suspectSince
 	var ec *int
 	if as.exitCode != nil {
 		v := *as.exitCode
@@ -800,6 +926,8 @@ func (as *AgentSession) Entry() *registry.AgentSessionEntry {
 		ExitCode:         ec,
 		Model:            model,
 		InFlightMessages: msgs,
+		SuspectReason:    sr,
+		SuspectSince:     ss,
 	}
 }
 
@@ -837,6 +965,12 @@ func (as *AgentSession) Spawn(ctx context.Context, spawner Spawner) error {
 	// renderers would block.
 	resume := as.sessionID
 	args := append([]string(nil), as.args...)
+	// F-61: explicit user-driven spawn overrides any prior /close
+	// intent. Without this, after /close the next user message
+	// would still see closedByUser=true and... actually respawn's
+	// internal rollback handles the race. But clearing here makes
+	// the intent explicit: user said "spawn" so spawn we will.
+	as.closedByUser = false
 	_ = as.pid // respawn will read it under its own RLock
 	as.asMu.Unlock()
 
@@ -916,7 +1050,42 @@ func (as *AgentSession) respawn(
 	as.stat = StatusRunning
 	as.lastRunAt = time.Now()
 	as.exitCode = nil
+	// F-61: race-detect against Close() during the spawn. fork+
+	// exec+handshake is multi-second; Close() can flip
+	// closedByUser=true between our snapshot and here. If so,
+	// roll back: close the freshly-spawned bridge, mark Exited.
+	if as.closedByUser {
+		h := as.handle
+		as.handle = nil
+		as.pid = 0
+		as.stat = StatusExited
+		code := -1
+		as.exitCode = &code
+		as.lastRunAt = time.Now()
+		as.asMu.Unlock()
+		if h != nil {
+			_ = h.Close()
+		}
+		if persist := as.persist; persist != nil {
+			if err := persist(as.Entry()); err != nil {
+				slog.Warn("agentsession: persist after rollback respawn failed",
+					"as_id", as.ID, "err", err)
+			}
+		}
+		return nil
+	}
+	persist := as.persist
 	as.asMu.Unlock()
+
+	// F-61: persist on success so agent_sessions.json reflects
+	// the new PID/status immediately (otherwise the previous
+	// SetExited writeback sits on disk until the next transition).
+	if persist != nil {
+		if err := persist(as.Entry()); err != nil {
+			slog.Warn("agentsession: persist after respawn success failed; JSON may be stale",
+				"as_id", as.ID, "err", err)
+		}
+	}
 
 	// T-alive (2026-08-07): restore isReady on every Spawn. The
 	// disk-restore path (FromAgentSessionEntry) constructs the
@@ -1196,13 +1365,71 @@ func (as *AgentSession) HandlePTYRestart(ctx context.Context, launcher Spawner) 
 // Close terminates the bridge child (sends shutdown signal to the
 // underlying bridge). Idempotent. Marks status=Exited on success.
 func (as *AgentSession) Close() error {
-	as.asMu.RLock()
+	as.asMu.Lock()
+	// F-61: mark this death as user-initiated so the Lifecycle
+	// handler's immediate-respawn path skips this AS. Without
+	// this flag, /close would race with the respawn and leave
+	// a freshly-spawned bridge that the user didn't ask for.
+	as.closedByUser = true
 	h := as.handle
-	as.asMu.RUnlock()
+	as.asMu.Unlock()
 	if h == nil {
 		return nil // not running
 	}
 	return h.Close()
+}
+
+// RestartFromDeath (F-61) is the synchronous recovery path called
+// from chatsession.routeEvent's KindLifecycle handler. It forks a
+// fresh bridge with the SAME sessionID (so --resume picks up the
+// user's in-flight message from the bridge's JSONL history) and
+// re-arms the readpump.
+//
+// Returns nil on a clean respawn; the AS is then StatusRunning
+// and the caller's TryFlush will drain any queued messages. On
+// error the AS stays StatusExited and the watchdog/prober takes
+// over with its 5min cooldown.
+//
+// ClosedByUser skips the respawn entirely — the /close path goes
+// through here when the bridge actually exits AFTER Close was
+// called, and we don't want to undo the user's intent.
+func (as *AgentSession) RestartFromDeath(ctx context.Context, launcher Spawner) error {
+	if launcher == nil {
+		return ErrSpawnerNotSet
+	}
+	as.asMu.Lock()
+	if as.closedByUser {
+		as.asMu.Unlock()
+		return nil
+	}
+	resume := as.sessionID
+	args := append([]string(nil), as.args...)
+	as.asMu.Unlock()
+
+	if err := as.respawn(ctx, launcher, args, resume); err != nil {
+		return err
+	}
+
+	// F-61: respawn returned nil. Check whether closedByUser got
+	// re-set by a racing Close() during the spawn. If so, respawn
+	// already rolled back the bridge and AS is back to Exited —
+	// do NOT clear closedByUser (user wants it closed).
+	as.asMu.Lock()
+	if as.closedByUser {
+		// respawn's internal rollback already handled cleanup.
+		as.asMu.Unlock()
+		return nil
+	}
+	persist := as.persist
+	as.asMu.Unlock()
+
+	if persist != nil {
+		if err := persist(as.Entry()); err != nil {
+			slog.Warn("agentsession: persist after RestartFromDeath failed",
+				"as_id", as.ID, "err", err)
+		}
+	}
+	return nil
 }
 
 // Stop halts execution of the in-flight turn on the bridge without

@@ -162,6 +162,28 @@ type WSHealthSnapshot struct {
 	// and Active becomes false. Set by adapter.go from a *prober
 	// field; readers should treat this as advisory.
 	Prober ProberSnapshot `json:"prober"`
+
+	// F-61: agent process liveness prober (fallback for readpump-
+	// missed bridge deaths). Mirrors Prober's shape but tracks
+	// pool-wide AS heartbeats rather than WS reconnect attempts.
+	// Currently zero-valued — the daemon-level wiring to populate
+	// this from chatsession.AgentProber.Snapshot() is a follow-up.
+	AgentProber AgentProberSnapshot `json:"agent_prober"`
+}
+
+// AgentProberSnapshot (F-61) is the wire mirror of
+// chatsession.AgentProberSnapshot. Defined locally to avoid
+// importing chatsession (the wire format only needs plain data;
+// the actual snapshot lives in chatsession). The two structs
+// must stay in sync — keep fields identical.
+type AgentProberSnapshot struct {
+	Active       bool          `json:"active"`
+	StartedAt    time.Time     `json:"started_at"`
+	Interval     time.Duration `json:"interval"`
+	ScannedTotal int64         `json:"scanned_total"`
+	ProbesRun    int64         `json:"probes_run"`
+	RespawnsHit  int64         `json:"respawns_hit"`
+	LastScanAt   time.Time     `json:"last_scan_at"`
 }
 
 // --- Mutators (called from adapter callbacks and message handlers) ---

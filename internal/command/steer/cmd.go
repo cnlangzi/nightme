@@ -114,10 +114,13 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		ReceivedAt: time.Now(),
 	}
 
-	// Emit MessageQueued before SteerUserMessage — same timing
-	// contract as QueueUserMessage. Channels render the ⏳
-	// indicator while the agent spawns.
-	cs.EmitMessageState(input.MessageID, agent.MessageQueued)
+	// /steer used to emit cs.EmitMessageState(input.MessageID,
+	// agent.MessageQueued) here. The framework commander layer
+	// (internal/command/commander.go Dispatch) now wraps every
+	// matched slash command with the MessageQueued → MessageDone
+	// pair automatically, so this manual emission is redundant and
+	// would be dropped by the feishu adapter's LRU dedup anyway.
+	// Removed for clarity — see docs/feat/slash-command-reactions.md.
 
 	if err := cs.SteerUserMessage(msg); err != nil {
 		return command.Reply(ctx, rt, fmt.Sprintf("Steer failed: %v", err)), nil

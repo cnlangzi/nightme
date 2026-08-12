@@ -222,6 +222,14 @@ Phase 0 把 `agent.MessageState` 的常量从旧的 `Received` / `Forwarded` / `
 - **Phase 0 显式行为变更**：✅ / 👎 反应从 Feishu 用户消息上**永久移除**（`MessageDone` /
   `MessageFailed` 物理删除）。用户消息 reaction 序列由"⏳ → 🔄 → ✅"变为"⏳ → 🔄 →（不变）"。
   替代 UX（占位卡上展示终态？reaction 移到卡片？）由独立后续任务决定。
+  - **后续落地**：`agent.MessageDone` 已通过
+    [slash-command-reactions.md](slash-command-reactions.md) 重新引入,
+    仅服务于**同步 dispatch 路径**(slash command / shell dispatch)的"dispatcher 完成"语义;
+    不表达执行成功 / 失败(失败仍由 reply 文本的 ❌ prefix 表达)。`MessageFailed`
+    仍物理不存在。Framework 层(`commander.Dispatch`)在 `cmd.Handle`
+    调用前后自动埋两个 emit,所有 slash command 自动获得 ⏳ → ✅ 对,
+    无需各 command 单独接线。Receipt card 上的 ✅ 仍走
+    `PromptEndBus → SetPromptState(PromptDone)` 老路径不变。
 - **进程异常退出时 `endPrompt(ProcessDied)` 的收口**：`runReadPump` 的 `!ok` 分支目前只
   `SetExited(0)` 后 return，buffer 永久 Busy。下一阶段"Prompt 投递稳定性优化" PR 统一处理
   （包括主动 respawn、stall watchdog、`nightme health` 扩展）。Phase 0 不实现。

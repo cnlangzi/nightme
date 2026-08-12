@@ -20,6 +20,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
@@ -87,6 +88,27 @@ type commander struct {
 //     pre-populates input.Args, the trailing-token fields are
 //     NOT updated (the commander does not know whether the
 //     pre-parsed argv matches the Text-parse argv).
+//
+// Framework-level ⏳→✅ reaction contract (F-XX):
+//
+//   - Before invoking cmd.Handle, emit cs.EmitMessageState(input.MessageID,
+//     agent.MessageQueued) so the channel can render a ⏳ placeholder on
+//     the user's original message. This is symmetric with Manager.HandleInbound
+//     (internal/chatsession/manager.go:331) for regular messages.
+//   - After cmd.Handle returns (success or error), emit
+//     agent.MessageDone so the channel can render ✅. Symmetric with the
+//     chat-session completion indicator; orthogonal to PromptDone (which
+//     renders on the receipt card, not the user message).
+//   - Both emits are guarded by `cs != nil && input.MessageID != ""` so
+//     unconfigured sessions and synthetic / test inbounds can't trigger
+//     empty-keyed events. The runtime subscriber at cmd/nightme/run.go
+//     already drops empty UserMsgID silently, but the commander-level
+//     guard keeps the contract local and test-friendly.
+//   - Fall-through paths (handled=false, or handled=true + Consumed=false
+//     for unknown commands) do NOT emit — the user didn't trigger a real
+//     command, and we don't want ⏳ on inputs like "/etc/passwd".
+//
+// See docs/feat/slash-command-reactions.md for the full design rationale.
 func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, cs *chatsession.ChatSession, input SlashInput) (*SlashOutput, bool, error) {
 	cmdName, trailingArgs, isCommand := c.extractCommand(input)
 	if !isCommand {
@@ -117,7 +139,18 @@ func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, cs *chatse
 		input.Args = append(input.Args, trailingArgs...)
 	}
 
+	// Framework ⏳ — every matched slash command gets a placeholder
+	// reaction on the user message before any work begins. Skipped
+	// for nil sessions / synthetic inbounds (no MessageID).
+	emitSlashState(cs, input.MessageID, agent.MessageQueued)
+
 	out, err := cmd.Handle(ctx, rt, cs, input)
+
+	// Framework ✅ — fires unconditionally after cmd.Handle returns
+	// (success or error). For a nil cs / empty MessageID the helper
+	// is a no-op, so we don't need to repeat the guard here.
+	emitSlashState(cs, input.MessageID, agent.MessageDone)
+
 	if err != nil {
 		// The command itself errored — surface as a reply so the
 		// user gets feedback. Still handled=true (we know what
@@ -125,6 +158,26 @@ func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, cs *chatse
 		return &SlashOutput{Consumed: true, Reply: "❌ " + err.Error()}, true, nil
 	}
 	return out, true, nil
+}
+
+// emitSlashState is the framework-level helper that wraps the
+// nil-guard + empty-MessageID-guard + nil-bus-guard contract for
+// slash command MessageStateBus emissions. Extracted so the
+// Dispatch flow stays readable and the guard logic lives in one
+// place.
+//
+// The cs mu.RLock + bus.Publish path is the same as Manager.HandleInbound's
+// inline calls; we just add the per-slash-command precondition.
+// The MessageStateBus nil guard lets unit tests (and any future
+// "shell-less" ChatSession consumers) construct bare &ChatSession{}
+// values without a fully-wired bus — production code always passes
+// a session built via chatsession.New, which wires the bus eagerly
+// (internal/chatsession/chatsession.go:320).
+func emitSlashState(cs *chatsession.ChatSession, userMsgID string, state agent.MessageState) {
+	if cs == nil || userMsgID == "" || cs.MessageStateBus == nil {
+		return
+	}
+	cs.EmitMessageState(userMsgID, state)
 }
 
 // parseCommand detects whether text begins with a slash command prefix

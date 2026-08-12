@@ -1274,41 +1274,49 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		messageID := msg.MessageState.MessageID
 		state := msg.MessageState.State
 
-		// F-53 follow-up: MessageDone / MessageFailed no longer
-		// exist (see docs/feat/message_lifecycle.md §7). The old
-		// "Typing placeholder" created on MessageSubmitted is also
-		// gone — receipt progress is reflected on the card itself
-		// via `MessageReceipt.SetPromptState`, which the adapter
-		// invokes when the runtime emits the `OnPromptEnd` callback
-		// from `ChatSession.endPrompt`. The user-message reaction
-		// surface is now minimal: only MessageQueued renders ⏳;
-		// everything else is silent.
+		// F-53 follow-up: MessageDone was physically deleted in F-53
+		// §6.3, but §8 explicitly left the user-message ✅ reaction
+		// for synchronous dispatch paths (slash command, shell
+		// dispatch) as an independent follow-up. MessageDone is now
+		// re-introduced for that exact purpose — see
+		// docs/feat/slash-command-reactions.md. The "Typing
+		// placeholder" created on MessageSubmitted is also gone —
+		// receipt progress is reflected on the card itself via
+		// `MessageReceipt.SetPromptState`, which the adapter invokes
+		// when the runtime emits the `OnPromptEnd` callback from
+		// `ChatSession.endPrompt`. The user-message reaction surface
+		// is now: MessageQueued → ⏳, MessageSubmitted → 🔄,
+		// MessageDone → ✅; everything else is silent.
 		//
 		// Same-state idempotency (was the "terminal guard" before
-		// F-53): skip duplicate emits of the same state.
+		// F-53): skip duplicate emits of the same state. MessageDone
+		// is NOT terminal-guarded here (the LRU's different-state
+		// dedup + append-only reactions means a late MessageDone
+		// arriving after MessageSubmitted just stacks a ✅ on top of
+		// the existing 🔄 — which is the intended slash-command UX).
+		// MessageFailed remains absent — failure is conveyed by the
+		// reply text's ❌ prefix, not by a user-message reaction.
 
-		// F-53 follow-up: MessageDone / MessageFailed no longer exist (see
-		// docs/feat/message_lifecycle.md §7). Message.Stage has no
-		// terminal value, so the previous "terminal guard" branch
-		// is removed. Queued → (silent) is the only valid user-
-		// message sequence; receipt progress is reflected on the
-		// card itself via `MessageReceipt.SetPromptState` (not via
-		// user-message reactions).
-		// Terminal-state guard: once we've rendered MessageDone or
-		// MessageFailed for a userMsgID, no later MessageState can
-		// change the reaction. Feishu reactions are append-only, so
-		// without this guard a late EventAgentDone arriving after
-		// EventAgentError used to flip the user-message reaction from
-		// 👎 (failed) back to ✅ (done), contradicting the ❌ header
-		// that the receipt card already shows (see receipt.go
-		// promptHeaderLine for PromptFailed). This guard mirrors
-		// the receipt-side terminal protection in Append.
-		//
-		// Intermediate states (MessageQueued / MessageSubmitted)
-		// are NOT terminal and continue to flow through normally;
-		// they restore the F-42 drop that left the user message
+		// F-53 follow-up: MessageDone is re-introduced (as the §8
+		// follow-up for synchronous dispatch paths; see
+		// docs/feat/slash-command-reactions.md); MessageFailed remains
+		// absent. Message.Stage still has no FAILED terminal — failure
+		// is conveyed by the reply text's ❌ prefix. The previous
+		// terminal-guard branch (which prevented a late EventAgentDone
+		// from flipping 👎 back to ✅) is still removed because no
+		// terminal MessageState exists for the failure→success flip
+		// case to recur. Intermediate states (MessageQueued /
+		// MessageSubmitted) continue to flow through normally; they
+		// restore the F-42 drop that left the user message
 		// reaction-less during the FastAck window (the gap between
 		// user message dispatch and first OutReply / OutTask*).
+		//
+		// Note: a late MessageDone arriving after MessageSubmitted
+		// (slash command path) just stacks a ✅ on top of the
+		// existing 🔄 in the user's reaction surface — that's the
+		// intended UX. The receipt card's own ✅ continues to come
+		// from `MessageReceipt.SetPromptState(PromptDone)`, an
+		// orthogonal path.
 		emoji := mapStateToFeishuEmoji(state)
 		if emoji == "" {
 			// Unknown state: silent drop (forward-compatible).
@@ -1350,12 +1358,14 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		prev, hasPrev := a.messageStates.Get(messageID)
 		// Idempotency: same state twice → drop.
 		skip := hasPrev && prev == state
-		// F-53: MessageDone / MessageFailed no longer exist (see
-		// docs/feat/message_lifecycle.md §7). Message.Stage has no
-		// terminal value, so the previous "terminal guard" branch
-		// is removed. Queued → Submitted → (silent) is the only
-		// valid sequence on user messages; same-state idempotency
-		// above is sufficient.
+		// F-53: MessageFailed is permanently absent — failure is
+		// conveyed by the reply text's ❌ prefix, not by a user-
+		// message reaction. MessageDone was re-introduced as the
+		// §8 follow-up for synchronous dispatch paths (slash
+		// command, shell dispatch). Same-state idempotency above is
+		// still sufficient; different-state transitions still
+		// append (Queued → Submitted → Done renders ⏳ → 🔄 → ✅
+		// stacked on the user message).
 		if !skip {
 			a.messageStates.Add(messageID, state)
 		}
@@ -2521,6 +2531,8 @@ func mapStateToFeishuEmoji(state agent.MessageState) string {
 		return "OneSecond" // ⏳
 	case agent.MessageSubmitted:
 		return "OnIt" // 🔄
+	case agent.MessageDone:
+		return "DONE" // ✅
 	}
 	return ""
 }

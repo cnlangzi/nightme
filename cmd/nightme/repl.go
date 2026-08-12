@@ -29,14 +29,18 @@ import (
 	"github.com/spf13/cobra"
 
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
-	"github.com/cnlangzi/nightme/internal/version"
 )
 
 // replBanner explains the available surface. Kept short so the
 // first-time user can scan it in a glance and the returning user
 // can ignore it. Updated to mention every registered subcommand
 // name so /help is not needed for the common path.
-const replBanner = `nightme %s (commit: %s, built: %s)
+//
+// The banner is printed via the %s placeholder, which runREPLInteractive
+// and runREPLWith fill with bannerWithVersion() (ASCII logo + the
+// shared version.String() line). Tests pin substrings — see
+// TestREPL_EOF for the substring contract.
+const replBanner = `%s
 Interactive shell. Type a command and press Enter.
 
 Common:
@@ -95,7 +99,7 @@ func runREPLInteractive(root *cobra.Command, logger *slog.Logger) error {
 	defer func() { _ = rl.Close() }()
 
 	out := rl.Stdout()
-	fmt.Fprintf(out, replBanner, version.Version, version.GitCommit, version.BuildDate)
+	fmt.Fprintf(out, replBanner, bannerWithVersion())
 
 	for {
 		line, err := rl.Readline()
@@ -167,7 +171,7 @@ func runREPLWith(root *cobra.Command, logger *slog.Logger, in io.Reader, out io.
 		logger.Info("repl started")
 	}
 
-	fmt.Fprintf(out, replBanner, version.Version, version.GitCommit, version.BuildDate)
+	fmt.Fprintf(out, replBanner, bannerWithVersion())
 
 	scanner := bufio.NewScanner(in)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)

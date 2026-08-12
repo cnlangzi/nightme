@@ -5,14 +5,14 @@
 // `version` at the prompt is more natural than `--version`, and
 // Cobra does not register a `version` verb on its own.
 //
-// The output matches `nightme --version` (both go through
-// version.String()) so the two are guaranteed to stay in sync.
+// Both `nightme --version` and `nightme version` route through
+// bannerWithVersion() so they print the ASCII logo header on top of
+// the version line — keeping the two output paths guaranteed in
+// sync (no risk of one drifting away from the other).
 package main
 
 import (
 	"github.com/spf13/cobra"
-
-	"github.com/cnlangzi/nightme/internal/version"
 )
 
 func newVersionCmd() *cobra.Command {
@@ -21,7 +21,7 @@ func newVersionCmd() *cobra.Command {
 		Short: "Print the nightme version and exit",
 		Long:  "Print the nightme version metadata (version, commit, build date) and exit.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, err := cmd.OutOrStdout().Write([]byte(version.String() + "\n"))
+			_, err := cmd.OutOrStdout().Write([]byte(bannerWithVersion() + "\n"))
 			return err
 		},
 	}

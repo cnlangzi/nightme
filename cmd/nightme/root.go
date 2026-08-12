@@ -41,7 +41,7 @@ func newRootCmd() *cobra.Command {
 			"to inspect persisted sessions. See docs/SPEC.md.",
 		SilenceUsage: true, SilenceErrors: true,
 	}
-	root.SetVersionTemplate(version.String() + "\n")
+	root.SetVersionTemplate(bannerWithVersion() + "\n")
 	root.Version = version.Version
 	root.AddCommand(newTestCmd())
 	root.AddCommand(newListCmd())

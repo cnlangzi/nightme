@@ -10,7 +10,7 @@
 
 [English](./README.md) · **简体中文**
 
-![Status](https://img.shields.io/badge/status-development-blue)
+![Release](https://img.shields.io/github/v/release/cnlangzi/nightme)
 ![Go](https://img.shields.io/badge/go-1.22%2B-00ADD8)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)

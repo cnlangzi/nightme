@@ -72,9 +72,24 @@ live simultaneously.
 
 ## Install
 
-Two ways to get `nightme` on your machine:
+Three ways to get `nightme` on your machine:
 
-1. **Prebuilt binary** (recommended):
+1. **One-liner** (recommended):
+
+   **macOS / Linux:**
+   ```bash
+   curl -fsSL https://nightme.dev/install.sh | bash
+   ```
+
+   **Windows (PowerShell):**
+   ```powershell
+   powershell -c "irm https://nightme.dev/install.ps1 | iex"
+   ```
+
+   Drops the latest release into a stable location on your `$PATH`
+   and runs `nightme version` to verify.
+
+2. **Prebuilt binary** (manual):
 
    - Grab the binary for your platform from the
      [latest release page](https://github.com/cnlangzi/nightme/releases/latest)
@@ -86,7 +101,7 @@ Two ways to get `nightme` on your machine:
      chmod +x /usr/local/bin/nightme
      ```
 
-2. **From source** (for development or to pin a commit):
+3. **From source** (for development or to pin a commit):
 
    ```bash
    git clone https://github.com/cnlangzi/nightme.git
@@ -94,7 +109,8 @@ Two ways to get `nightme` on your machine:
    make dev
    ```
 
-`make dev` runs nightme directly from source using the example config — no separate build step needed.
+   `make dev` runs nightme directly from source using the example
+   config — no separate build step needed.
 
 ---
 

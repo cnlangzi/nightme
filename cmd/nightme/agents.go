@@ -1,5 +1,6 @@
+//go:build !windows
+
 // Package main — agent registration table.
-//
 // This file is the single source of truth for which agents ship
 // with nightme at compile time. Each line is one entry; the agent
 // name is what /run <name> (and `nightme agents`) accepts, the

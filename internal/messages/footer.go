@@ -49,10 +49,13 @@ import "fmt"
 //	                 index). Rendered as a separate "? N" segment
 //	                 by the Feishu footer (iTerm2-aligned) rather
 //	                 than folded into Added.
-//	Conflicts      — count of unmerged conflict entries (UU / AA /
-//	                 DD / AU / UA / DU / UD). Tracked separately
-//	                 from Modified so the footer can render a
-//	                 distinct "! N" segment without double-counting.
+//	Conflicts      — count of unmerged conflict entries (UU /
+//	                 UA / UD / AU / AA / AD / DU / DA / DD; the
+//	                 full X,Y ∈ {U,A,D} matrix is 9 codes —
+//	                 see isConflictXY in gtw/git_status.go).
+//	                 Tracked separately from Modified so the footer
+//	                 can render a distinct "! N" segment without
+//	                 double-counting.
 //	                 HasConflicts is the boolean mirror of this
 //	                 field (HasConflicts == (Conflicts > 0)); kept
 //	                 for /gtw push and /gtw pr readiness predicates

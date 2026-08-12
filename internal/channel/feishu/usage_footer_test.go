@@ -67,7 +67,7 @@ func TestFormatStatusBarLines_IdentityWithSessionID(t *testing.T) {
 // StatusBar on at least one of Agent / Model / SessionID /
 // GitStatus / Usage being non-empty, and once any other field
 // arrives the leading separator disappears. Documenting the
-// edge case here so future"fix the leading dot" PRs know it's
+// edge case here so future "fix the leading dot" PRs know it's
 // intentional.
 func TestFormatStatusBarLines_SessionIDOnly(t *testing.T) {
 	ctx := &messages.StatusBar{
@@ -106,7 +106,7 @@ func TestFormatStatusBarLines_AgentSessionIDOnly(t *testing.T) {
 // separator between `🤖:` and `Model` is the symmetric partner
 // of TestFormatStatusBarLines_SessionIDOnly's `🤖: · <sid>`
 // — together they pin the layout when Agent is missing.
-// Without this test a future"fix the leading dot" PR could
+// Without this test a future "fix the leading dot" PR could
 // silently change the Model+SessionID-no-Agent path because
 // the other SessionID tests all have Agent set.
 func TestFormatStatusBarLines_ModelSessionIDOnly(t *testing.T) {
@@ -125,7 +125,7 @@ func TestFormatStatusBarLines_ModelSessionIDOnly(t *testing.T) {
 // segment is no longer rendered; the entire subtest is gone.
 
 func TestFormatStatusBarLines_TokenSegments(t *testing.T) {
-	// F-52 / new footer convention:"in" folds all three input-side
+	// F-52 / new footer convention: "in" folds all three input-side
 	// counters (uncached + cache_creation + cache_read) per the
 	// Tencent YB doc — see internal/channel/feishu/usage_footer.go
 	// §Line 2 doc block. Here in = 11_700 + 600 + 8_200 = 20_500.

@@ -15,7 +15,7 @@ is committed there is the version users build and run.
 
 The git status footer line now follows the iTerm2 / powerlevel10k
 convention with one segment per porcelain category. The old
-single `Uncommitted` count is removed; callers now read three
+single `Uncommitted` count is removed; callers now read four
 separate fields.
 
 **Field changes (`messages.GitStatusSnapshot`):**
@@ -57,7 +57,7 @@ applies uniformly to `+`, `−`, `±`, `?`, `!`, and `⇡`. The previous
 "always render `⇡ 0` to prove the stamp worked" rule is gone —
 the absence of the segment is now the honest signal that
 nothing is unpushed. Clean worktrees with `HasUpstream=true`
-collapse to the minimal `�: <ws> · ⎇ <branch>` line.
+collapse to the minimal `📁: <ws> · ⎇ <branch>` line.
 
 **Local-marker / PullRequest race guard (review fix):**
 

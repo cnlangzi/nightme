@@ -16,8 +16,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
+	// The forked daemon child has no console: its stdout is
+	// /dev/null and its stderr is the crash-capture file
+	// (daemon_stderr.go). Teeing the log stream there would bury
+	// the panic stack that file exists for under a full duplicate
+	// of nightme.log, so the child logs to the file only.
+	newLogger := logging.New
+	if isDaemonChild(os.Args) {
+		newLogger = logging.NewQuiet
+	}
 	var logger *slog.Logger
-	if l, err := logging.New(cfg); err != nil {
+	if l, err := newLogger(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	} else {

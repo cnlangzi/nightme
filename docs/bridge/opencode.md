@@ -2,7 +2,7 @@
 
 > **Status**: 已落地 M3 — 本文档是**活文档**,包含实测踩坑 + 实战经验
 > **Scope**: `internal/bridge/opencode/*` — nightme 侧的 opencode CLI 适配器
-> **设计稿**: [docs/feat/F-OPENCODE-opencode-bridge.md](../feat/F-OPENCODE-opencode-bridge.md)
+> **设计稿**: 实现见本文件（[docs/bridge/opencode.md](../bridge/opencode.md)）
 > **姊妹文档**:
 > - [docs/bridge/codex.md](./codex.md) — 设计基线 + 单一后端 + 生命周期踩坑
 > - [docs/bridge/pi.md](./pi.md) — JSON-IO 模板 + F-52 粒度契约
@@ -133,7 +133,7 @@ cfg.SessionID != ""
 
 ### 2.7 ⛓️ 踩坑教训: `closeOnce` 死锁
 
-**问题**: 旧 codex 模式 `closeOnce.Do { close(a.closed); close(events); cmd.Wait() }` 在 `Close()` 和 `lifecycle()` 都进 closeOnce 时死锁 — lifecycle 拿着 closeOnce 等 cmd.Wait,Close() 拿着 closeOnce 等 exitDone。
+**问题**: closeOnce.Do { close(a.closed); close(events); cmd.Wait() }` 在 `Close()` 和 `lifecycle()` 都进 closeOnce 时死锁 — lifecycle 拿着 closeOnce 等 cmd.Wait,Close() 拿着 closeOnce 等 exitDone。
 
 **修复**: 拆 `closeOnce`:
 - `closeOnce.Do`: `close(a.closed) + sseCancel() + server.Close()`
@@ -183,7 +183,7 @@ GET /api/session/ses_1
 → 200 {"data": {"id":"ses_1", "slug":"...", "directory":"/tmp"}}
 ```
 
-旧版本无信封。`Unmarshal(struct{Data *Session})` 在无信封时 `Data == nil`,fallback 跑又会重发请求 → e2e 看到 2 倍 GET。
+无信封。`Unmarshal(struct{Data *Session})` 在无信封时 `Data == nil`,fallback 跑又会重发请求 → e2e 看到 2 倍 GET。
 
 **修复**: `decodeSession()` 一次读 body,先 unmarshal Wrapped,**只在 `Data.ID != ""` 时返回**;否则 fallback unmarshal Bare,**只发一次请求**。
 
@@ -629,14 +629,8 @@ GET /api/session/ses_xxx/event
 
 - **最低 opencode CLI 版本**: ≥ 1.10 (HTTP server 起)
 - **已知兼容**: opencode 1.18.15 (信封 + SSE 已知 bug)
-- **旧版本 (< 1.10)**: 无 HTTP server,只能用 `opencode acp` (推荐走 ACP bridge,本包不适用)
+- **< 1.10**: 无 HTTP server,只能用 `opencode acp` (推荐走 ACP bridge,本包不适用)
 - **opencode 2.x**: 未知;以信封 + 9 端点为估计基准
 
 ---
 
-## 16. 变更历史
-
-- **2026-08-09 (stage 3)**: 真机 e2e 脚手架 + resume 路径强化 + `{data: Session}` 信封修复
-- **2026-08-09 (stage 2)**: interrupt / model / usage / tool name normalization
-- **2026-08-09 (stage 1)**: HTTP bridge skeleton + lifecycle 死锁修复 + 9 端点 + producer-side buffer
-- **2026-08-08 (design)**: F-OPENCODE v2 设计稿落定

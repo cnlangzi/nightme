@@ -571,6 +571,27 @@ func (cs *ChatSession) Pool() []*AgentSession {
 	return out
 }
 
+// LookupAS returns the AgentSession with the given ID from the
+// pool, or nil if not present. Used by event subscribers to
+// recover the source AS from an AgentSessionID carried on
+// each event (multi-as Phase 1: source AS comes from the
+// event, not from cs.selectedAS).
+//
+// Returns nil if the AS is no longer in the pool (e.g. after
+// a concurrent /kill). Subscribers must handle nil. nil-safe
+// on cs and on empty id.
+func (cs *ChatSession) LookupAS(id string) *AgentSession {
+	if cs == nil || id == "" {
+		return nil
+	}
+	for _, as := range cs.Pool() {
+		if as.ID == id {
+			return as
+		}
+	}
+	return nil
+}
+
 // SelectedAgentSession returns the current active AgentSession (or nil).
 func (cs *ChatSession) SelectedAgentSession() *AgentSession {
 	cs.mu.RLock()

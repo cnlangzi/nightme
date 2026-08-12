@@ -22,16 +22,13 @@
 // message now flows through Emitter, so every outbound message
 // gets the same StatusBar treatment.
 //
-// Pre-rename this package used `Stamper` (function type) +
-// `stampIfNeeded` (the Emitter method) + `SessionContext` (the
-// flat data struct). All three renamed together so the new
-// terminology is consistent across discussion, docs, and code:
-// `StatusBarSource` (the function type — produces a StatusBar)
-// + `attachStatusBarIfMissing` (the Emitter method — gates on
-// "missing") + `StatusBar` (the typed payload — sub-bar struct
-// with GitBar / AgentBar / UsageBar). See package doc for the
-// broader hub-and-spoke rationale and the GitBar-always-present
-// rule.
+// StatusBar stamping lives in internal/statusbar (Source +
+// AttachIfMissing). Outbound is now a thin consumer: Send /
+// SendCard call statusbar.AttachIfMissing before forwarding to
+// the Channel. The "attach if missing" / "co-locate UsageBar"
+// logic is owned by statusbar, not by outbound. See package
+// doc for the broader hub-and-spoke rationale and the
+// GitBar-always-present rule.
 //
 // Relationship to internal/gateway:
 //
@@ -53,6 +50,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 // Channel adapters (Feishu, echo test stub, ...) implement
@@ -60,35 +58,16 @@ import (
 // satisfies the constructor's channel.Channel parameter. No
 // alias needed — outbound takes channel.Channel directly.
 
-// StatusBarSource produces the StatusBar attached to a chat's
-// outbound messages. The runtime injects the implementation at
-// Emitter construction time; outbound itself knows nothing about
-// AgentSession, chatsession, git status, etc.
-//
-// Returning nil means "skip the status bar this turn" — caller
-// has already populated msg.StatusBar OR there is no chat / no
-// workspace for the chat. Emitter treats nil the same way:
-// don't attach, just forward.
-//
-// Pre-rename this was called `Stamper`. Renamed to
-// StatusBarSource because "Stamper" described the verb (stamp /
-// 盖章) but not the noun (the metadata envelope being stamped
-// onto the message). StatusBarSource describes both — it
-// produces a StatusBar.
-type StatusBarSource func(chatID string) *messages.StatusBar
-
 // Options configures optional Emitter behaviour. The zero value
 // is valid: Emitter becomes a pure Channel.Send / SendCard
 // passthrough with no StatusBar attachment.
 type Options struct {
 	// Source, if non-nil, is invoked for every Send / SendCard
 	// whose msg.StatusBar is nil. The returned StatusBar (if
-	// non-nil) is attached to msg before forwarding.
-	//
-	// Pre-rename this was `Stamper Stamper`; renamed to
-	// `Source StatusBarSource` for the same reasons as the
-	// StatusBarSource type itself.
-	Source StatusBarSource
+	// non-nil) is attached to msg before forwarding. The
+	// canonical type lives in internal/statusbar (Source) —
+	// outbound is now a thin consumer of that interface.
+	Source statusbar.Source
 }
 
 // Emitter is the public surface every outbound caller holds.
@@ -112,53 +91,15 @@ func New(ch channel.Channel, opts Options) Emitter {
 
 type emitImpl struct {
 	ch     channel.Channel
-	source StatusBarSource
+	source statusbar.Source
 }
 
 func (e *emitImpl) Send(ctx context.Context, msg messages.OutboundMessage) error {
-	e.attachStatusBarIfMissing(&msg)
+	statusbar.AttachIfMissing(&msg, e.source)
 	return e.ch.Send(ctx, msg)
 }
 
 func (e *emitImpl) SendCard(ctx context.Context, msg messages.OutboundMessage) (string, error) {
-	e.attachStatusBarIfMissing(&msg)
+	statusbar.AttachIfMissing(&msg, e.source)
 	return e.ch.SendCard(ctx, msg)
-}
-
-// attachStatusBarIfMissing attaches a StatusBar to msg when (a)
-// the caller didn't already set one and (b) the source returns a
-// non-nil value. Pointer receiver because we mutate msg in
-// place — the caller observes its pre-attach msg, but the
-// Channel sees the post-attach version. That's intentional
-// (callers don't need to see the StatusBar they didn't ask for;
-// channels do).
-//
-// "attachIfMissing" rather than "overwrite" because callers
-// that explicitly pre-filled msg.StatusBar (e.g. the runtime
-// pump using the source-AS semantics) win over the default
-// source lookup. Pre-rename this was `stampIfNeeded`; the new
-// name makes the "missing / present" gate explicit.
-//
-// Co-location (F-55): when the source produced StatusBar
-// without a UsageBar but the message itself carries Usage
-// (typically on OutResult after gateway.Translate), copy it
-// across into StatusBar.UsageBar. The footer render path reads
-// sb.UsageBar.InputTokens (not the top-level msg.Usage) so a
-// missing co-located value would silently drop Line 2 of the
-// footer for usage-bearing events.
-func (e *emitImpl) attachStatusBarIfMissing(msg *messages.OutboundMessage) {
-	if msg.StatusBar != nil {
-		return
-	}
-	if e.source == nil {
-		return
-	}
-	sb := e.source(msg.ChatID)
-	if sb == nil {
-		return
-	}
-	if sb.UsageBar == nil && msg.Usage != nil {
-		sb.UsageBar = &messages.UsageStatusBar{UsageInfo: msg.Usage}
-	}
-	msg.StatusBar = sb
 }

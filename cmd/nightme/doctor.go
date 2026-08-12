@@ -16,15 +16,19 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/channel/feishu"
+	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/daemoncontrol"
 )
 
@@ -57,18 +61,99 @@ Examples:
 }
 
 func runDoctor(out io.Writer, jsonOut bool) error {
-	_, paths, err := loadLifecyclePaths()
+	cfg, paths, err := loadLifecyclePaths()
 	if err != nil {
 		return err
 	}
 	payload, err := daemoncontrol.GetHealth(paths.Socket, 5*time.Second)
 	if err != nil {
+		// The daemon is unreachable — which is precisely when the
+		// crash capture is worth reading. Print it BEFORE returning
+		// the RPC error, otherwise the one command a user runs when
+		// "the daemon is gone" tells them nothing about why.
+		if summary, ok := crashCaptureSummary(cfg); ok {
+			fmt.Fprint(out, summary)
+		}
 		return fmt.Errorf("daemon health RPC: %w", err)
 	}
 	if jsonOut {
 		return writeDoctorJSON(out, payload)
 	}
-	return writeDoctorText(out, payload)
+	if err := writeDoctorText(out, payload); err != nil {
+		return err
+	}
+	// A live daemon can still be the survivor of an earlier crash
+	// loop, so surface the capture here too — as a footer, not an
+	// alarm.
+	if summary, ok := crashCaptureSummary(cfg); ok {
+		fmt.Fprint(out, summary)
+	}
+	return nil
+}
+
+// crashCaptureSummary renders the CRASH CAPTURE section, or ok=false
+// when there is nothing to report (no file, or an empty one — the
+// steady state). It shows the panic headline rather than the whole
+// stack: enough to recognize the failure, with the path to read the
+// rest.
+func crashCaptureSummary(cfg *config.Config) (string, bool) {
+	path, err := daemonStderrPath(cfg)
+	if err != nil {
+		return "", false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Size() == 0 {
+		return "", false
+	}
+
+	var sb strings.Builder
+	tw := tabwriter.NewWriter(&sb, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "")
+	fmt.Fprintln(tw, "CRASH CAPTURE (daemon stderr — non-empty means it printed something it should not have)")
+	fmt.Fprintf(tw, "  file:\t%s\n", path)
+	fmt.Fprintf(tw, "  size:\t%d bytes\t(written %s ago)\n", info.Size(), formatAge(info.ModTime(), time.Now()))
+	if head := crashHeadline(path); head != "" {
+		fmt.Fprintf(tw, "  headline:\t%s\n", truncate(head, 100))
+	}
+	tw.Flush()
+	return sb.String(), true
+}
+
+// crashHeadline returns the first line that looks like a Go failure
+// banner ("panic: ...", "fatal error: ..."), falling back to the
+// first non-empty line. Reading a bounded prefix keeps `doctor` cheap
+// even if the file grew large before rotation.
+func crashHeadline(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	var first string
+	sc := bufio.NewScanner(io.LimitReader(f, 64<<10))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "panic:") || strings.HasPrefix(line, "fatal error:") {
+			return line
+		}
+		if first == "" {
+			first = line
+		}
+	}
+	// A scanner error here is almost certainly bufio.ErrTooLong: a
+	// single panic line longer than the 64KB scan/token limit. The
+	// file is non-empty (the caller already checked Size() > 0) but
+	// we couldn't extract a headline — point the user at the file
+	// rather than printing an empty headline that suggests the
+	// capture is benign.
+	if err := sc.Err(); err != nil && first == "" {
+		return fmt.Sprintf("(headline unreadable: %v; see file)", err)
+	}
+	return first
 }
 
 // writeDoctorJSON pretty-prints the raw payload. The Health field

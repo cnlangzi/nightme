@@ -161,3 +161,64 @@ func TestLogger_LevelParsing(t *testing.T) {
 		}
 	}
 }
+
+// TestNewQuiet_FileOnly is the counterpart to
+// TestLogger_TeesToStdoutAndStderr: the forked daemon child must
+// NOT tee its log stream to the console, because its stderr is the
+// crash-capture file (cmd/nightme/daemon_stderr.go). Teeing there
+// would bury the panic stack that file exists for under a full
+// duplicate of nightme.log.
+func TestNewQuiet_FileOnly(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "nightme.log")
+
+	origStdout := os.Stdout
+	origStderr := os.Stderr
+	rOut, wOut, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stdout: %v", err)
+	}
+	rErr, wErr, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stderr: %v", err)
+	}
+	os.Stdout = wOut
+	os.Stderr = wErr
+	t.Cleanup(func() {
+		os.Stdout = origStdout
+		os.Stderr = origStderr
+		_ = rOut.Close()
+		_ = rErr.Close()
+	})
+
+	lg, err := NewQuiet(&config.Config{Logging: config.LoggingConfig{File: logPath}})
+	if err != nil {
+		t.Fatalf("NewQuiet: %v", err)
+	}
+	lg.Info("quiet-me", "kind", "file-only")
+
+	_ = wOut.Close()
+	_ = wErr.Close()
+
+	var outBuf, errBuf bytes.Buffer
+	if _, err := io.Copy(&outBuf, rOut); err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	if _, err := io.Copy(&errBuf, rErr); err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+
+	fileContent, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if !strings.Contains(string(fileContent), "quiet-me") {
+		t.Errorf("file missing log line: %q", fileContent)
+	}
+	if outBuf.Len() != 0 {
+		t.Errorf("stdout got %q, want nothing (quiet logger must not tee)", outBuf.String())
+	}
+	if errBuf.Len() != 0 {
+		t.Errorf("stderr got %q, want nothing — this is the crash-capture stream", errBuf.String())
+	}
+}

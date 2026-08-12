@@ -45,6 +45,7 @@ func newRootCmd() *cobra.Command {
 	root.Version = version.Version
 	root.AddCommand(newTestCmd())
 	root.AddCommand(newListCmd())
+	root.AddCommand(newKillCmd())
 	root.AddCommand(newAgentsCmd())
 	root.AddCommand(newLoginCmd())
 	root.AddCommand(newNameCmd())

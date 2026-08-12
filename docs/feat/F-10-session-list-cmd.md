@@ -1,9 +1,9 @@
 # F-10: Session List Command
 
-> **Status**: designed (v0.1)
-> **Milestone**: M3 (CLI tools)
+> **Status**: designed
+
 > **Depends on**: F-05 (Registry)
-> **Related docs**: [SPEC.md](../SPEC.md) §2.5
+> **Related docs**: [SPEC.md](../SPEC.md)
 
 ## 1. Description
 
@@ -73,9 +73,9 @@ s_01HF10XXXXX    claude  /tmp/test                               -       exited(
 | registry 文件损坏 | API 返回 500 + error message |
 | kill 的 session 不存在 | API 返回 404 |
 | kill 的 session 状态是 exited | 返回 200，提示 "session already exited" |
-| 多个 nightme daemon（用户误操作）| v0.1 不防，假设只有一个 |
+| 多个 nightme daemon（用户误操作）| 不防，假设只有一个 |
 | 本地 7823 端口被占用 | Server.Start 返回 error，主进程退出 |
-| 通过远程访问（v0.1 不支持）| Server 仅 listen 127.0.0.1，远程不可达 |
+| 通过远程访问| Server 仅 listen 127.0.0.1，远程不可达 |
 
 ## 5. Test plan
 
@@ -93,7 +93,6 @@ s_01HF10XXXXX    claude  /tmp/test                               -       exited(
 
 ## 6. Open questions
 
-- 是否需要 `nightme attach <sid>` 进入交互式 terminal？v0.1 不做，留 v0.2
-- 是否需要 `nightme logs <sid>` 看 stdout 历史？v0.1 不记录历史（F-15 v0.2）
-- 是否需要 Unix socket（不用 TCP）？v0.1 用 TCP 简单；v0.2 改 socket
-- IPC 是否要鉴权？v0.1 不需要（仅 127.0.0.1）
+- 是否需要 `nightme attach <sid>` 进入交互式 terminal？不做，留 - 是否需要 `nightme logs <sid>` 看 stdout 历史？不记录历史（F-15）
+- 是否需要 Unix socket（不用 TCP）？用 TCP 简单；改 socket
+- IPC 是否要鉴权？不需要（仅 127.0.0.1）

@@ -54,6 +54,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/registry"
 	"github.com/cnlangzi/nightme/internal/shell"
+	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 // runDeps holds the construction seams for the daemon: every
@@ -211,7 +212,7 @@ func runRunWith(cmd *cobra.Command, deps runDeps) error {
 //       - prcache.Registry (per-AS PR cache)
 //       - gtw.HandlerDeps (git runner, HTTP prober)
 //       - outbound.Emitter (the single outbound chokepoint;
-//         holds ch and the StatusBarSource that reads prCacheReg +
+//         holds ch and the statusbar.Source that reads prCacheReg +
 //         gtwDeps + mgr)
 //  5. Build gtw.Manager, ReactionRouter, command.Commander,
 //     shell.Dispatcher (the command-adapter layer)
@@ -319,32 +320,15 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 
 	// F-31 + F-think + F-38: install gw.OnMessageState AND the
 	// runtime's EventHandler into every ChatSession via the
-	// Manager.onCreate hook. Both callbacks MUST be installed in
-	// this single closure — separating them (one here, one in
-	// /use or newMessageDispatcher) is a silent-failure landmine
-	// because readpump fires only when AgentEventBus has subscribers.
+	// Manager.onCreate hook. Both callbacks MUST be installed
+	// together — separating them is a silent-failure landmine
+	// because AgentEventBus / MessageStateBus fire only when
+	// they have subscribers. The actual wiring + ordering
+	// (WithOnCreate BEFORE RestoreFromRegistry) is enforced
+	// inside wireRuntimeCallbacksAndRestore — see its doc.
 	//
-	// ORDER MATTERS: WithOnCreate MUST be called BEFORE
-	// RestoreFromRegistry. RestoreFromRegistry fires onCreate for
-	// every restored ChatSession so handlers are installed
-	// uniformly across restored + future chats. Calling
-	// WithOnCreate after RestoreFromRegistry silently leaves the
-	// restored chats without handlers — no MessageState reactions
-	// (⏳/🔄), no OutReply / OutResult / OutTool* forwarding to
-	// the channel. The user sees incoming messages arrive but no
-	// outgoing follow-up. Bug surfaced when the user restarted
-	// the daemon between F-38 implementation and first
-	// interaction — fresh in-memory state from chat_sessions.json
-	// had no handlers installed because WithOnCreate was set
-	// after RestoreFromRegistry. This is a pre-existing bug from
-	// the /think refactor (commit 5725a90) that F-38 surfaced
-	// because F-38 added more dependency on the handlers actually
-	// being installed. The fix is in
-	// wireRuntimeCallbacksAndRestore (see below) which bundles
-	// WithOnCreate + RestoreFromRegistry so the order can't be
-	// inverted at the call site.
 	// Per-AgentSession PR / MR cache. Built before Emitter
-	// construction (the StatusBarSource reads it) and before
+	// construction (the statusbar.Source reads it) and before
 	// gateway.New (the Emitter flows into Gateway's outbound
 	// chokepoint). See prcache.Registry comment for why this
 	// is owned at runtime scope, not on AgentSession itself.
@@ -356,6 +340,28 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 		PRInvalidator: prCacheReg,
 	}
 
+	// StatusBar deps — shared by every stamp site (runtime
+	// pump, MessageStateBus, Emitter's Source). The closures
+	// capture gtwDeps + prCacheReg; statusbar itself stays
+	// decoupled from gtw (which would create an import cycle:
+	// statusbar → gtw → chatsession → outbound → statusbar).
+	statusbarDeps := statusbar.Deps{
+		CollectGit: func(ctx context.Context, cwd string) (*messages.GitStatusSnapshot, error) {
+			return gtw.CollectReadiness(ctx, cwd, gtw.ExecGitRunner{})
+		},
+		RefreshPR: func(asID, cwd string) {
+			if prCache := prCacheReg.GetOrCreate(asID); prCache != nil {
+				prCache.MaybeRefresh(cwd, gtwDeps)
+			}
+		},
+		LookupPR: func(asID string) *messages.PR {
+			if prCache := prCacheReg.GetOrCreate(asID); prCache != nil {
+				return prCache.PR()
+			}
+			return nil
+		},
+	}
+
 	// emitter is the single daemon-wide outbound chokepoint.
 	// Constructed here (before gateway.New) so the Gateway can
 	// hold the reference at construction time — every
@@ -363,7 +369,19 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// MessageState / PATCH) flows through the same Emitter
 	// instance. Manager.WithEmitter (further down) binds the
 	// same Emitter to every ChatSession.
-	em := outbound.New(ch, outbound.Options{Source: newRuntimeStatusBar(mgr, prCacheReg, gtwDeps)})
+	em := outbound.New(ch, outbound.Options{Source: statusbar.NewRuntimeSource(
+		func(chatID string) statusbar.ChatInfo {
+			cs := mgr.Get(chatID)
+			if cs == nil {
+				return statusbar.ChatInfo{}
+			}
+			return statusbar.ChatInfo{
+				Cwd: cs.SelectedCwd(),
+				AS:  cs.SelectedAgentSession(),
+			}
+		},
+		statusbarDeps,
+	)})
 
 	// Bind the same Emitter to chatsession.Manager so its
 	// HandleInbound error-reply paths inherit the StatusBar
@@ -385,8 +403,13 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// constructor arguments does NOT match the priority
 	// order; see internal/gateway/inbound/inbound.go for the
 	// actual chain slice.
-	var gwImpl *gateway.Router
-	_ = em // em is consumed by inbound.Router's runtime wire-up below
+	// gwImpl is constructed below, once inbound.Router exists. It
+	// is deliberately NOT declared here as a nil *gateway.Router:
+	// a nil declaration this far from the assignment is what let
+	// `gwImpl.AttachChannels(ch)` drift ABOVE the constructor
+	// during the F-58 refactor, which made every daemon start
+	// SIGSEGV on a nil receiver. Declare-at-assignment keeps that
+	// class of reordering a compile error instead of a crash.
 
 	// All chat-session commands (/cwd /use /kill /new /watch /think
 	// /tools) and /gtw are SlashCommandFactory implementations
@@ -406,12 +429,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	//       RunFix / HandleDraftReaction can call
 	//       cs.SelectedCwd / SetSelectedCwd / QueueUserMessage
 	//       directly.
-	// Per-AgentSession PR / MR cache. Owned at runtime scope
-	// (NOT on AgentSession itself — the import cycle: gtw →
-	// (prCacheReg, gtwDeps, em are all constructed earlier, before
-	// gateway.New, so the Gateway can hold the Emitter reference
-	// at construction time. The lines below continue the gtwMgr
-	// setup that depends on those.)
 
 	gtwMgr := gtw.NewManager()
 	gtwMgr.SetHandlerDeps(gtwDeps)
@@ -460,7 +477,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// posting. The shim in cmd/nightme/run.go only does type
 	// adaptation — see shell.Dispatcher.Handle for the actual
 	// logic.
-	shellDispatcher := shell.NewDispatcher(chatSessionChannelSender{mgr: mgr})
+	shellDispatcher := shell.NewDispatcher(shell.NewChatSessionSender(mgr))
 
 	// RuntimeServices is built inside *inbound.Router —
 	// the v0.x runtime shim that wrapped commander.Dispatch
@@ -468,8 +485,6 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// RuntimeServices closure internally (Logger, Config)
 	// when calling commander.Dispatch.
 
-
-	gwImpl.AttachChannels(ch)
 
 	// F-watch §3.1.1: the per-chat WatchMode gate used to be wired
 	// here via gwImpl.WithWatchModeResolver. It moved into
@@ -488,12 +503,16 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// shim closures (WithCommander / WithShellDispatch /
 	// WithActionHandler) that used to live here.
 	ir := inbound.New(mgr, commander, shellDispatcher, router, cfg.Primary)
-	gwImpl = gateway.New(ir, em)
+	gwImpl := gateway.New(ir, em)
+	// Attach AFTER construction (see the note at the declaration
+	// site above): the gateway needs its channel binding before
+	// Start pumps inbound messages.
+	gwImpl.AttachChannels(ch)
 
 	// WithOnCreate fires for both restored (RestoreFromRegistry)
 	// and future (GetOrCreate) ChatSessions. Place BEFORE
 	// RestoreFromRegistry so restored chats get their handlers.
-if err := wireRuntimeCallbacksAndRestore(mgr, em, logger, prCacheReg, gtwDeps, markPromptDone(ch)); err != nil {
+if err := wireRuntimeCallbacksAndRestore(mgr, em, logger, statusbarDeps, markPromptDone(ch)); err != nil {
 		return fmt.Errorf("run: wire+restore: %w", err)
 	}
 
@@ -696,8 +715,7 @@ func wireRuntimeCallbacksAndRestore(
 	mgr *chatsession.Manager,
 	em outbound.Emitter,
 	logger *slog.Logger,
-	prReg *prcache.Registry,
-	gtwDeps gtw.HandlerDeps,
+	sbDeps statusbar.Deps,
 	// markPromptDone is called when ChatSession.endPrompt fires
 	// (EventAgentDone / EventAgentError in the readpump). The
 	// runtime injects the Feishu-specific implementation; for
@@ -740,7 +758,7 @@ func wireRuntimeCallbacksAndRestore(
 		// the Subscribe callback) — newEventHandler itself
 		// allocates a closure, so calling it on every Publish
 		// would burn one allocation per event.
-		agentHandler := newEventHandler(em, cs, mgr, logger, prReg, gtwDeps)
+		agentHandler := newEventHandler(em, cs, mgr, logger, sbDeps)
 		cs.AgentEventBus.Subscribe(func(env chatsession.AgentEventEnvelope) bool {
 			agentHandler(env)
 			return false
@@ -796,8 +814,8 @@ func wireRuntimeCallbacksAndRestore(
 				// StatusBar and skips its lookup — preserving
 				// the "source AS, not selected AS" semantics this
 				// bus has always had.
-				if as := lookupASByID(cs, e.AgentSessionID); as != nil {
-					stampFromAS(&out, as, prReg, gtwDeps)
+				if as := cs.LookupAS(e.AgentSessionID); as != nil {
+					statusbar.StampFromAS(&out, as, sbDeps)
 				}
 			}
 			if err := em.Send(context.Background(), out); err != nil {
@@ -893,8 +911,7 @@ func newEventHandler(
 	cs *chatsession.ChatSession,
 	mgr *chatsession.Manager,
 	logger *slog.Logger,
-	prReg *prcache.Registry,
-	gtwDeps gtw.HandlerDeps,
+	sbDeps statusbar.Deps,
 ) func(env chatsession.AgentEventEnvelope) {
 	// Per-cs closure. No per-handler mutable state needed anymore:
 	// the bridge layer now attaches per-turn Usage to the SAME
@@ -1002,9 +1019,9 @@ func newEventHandler(
 		// — they don't flow through gateway.Translate + this
 		// handler, so the case below would never fire.
 		switch out.Kind {
-		case messages.OutReply, messages.OutResult,
+case messages.OutReply, messages.OutResult,
 			messages.OutTaskCreate, messages.OutTaskUpdate:
-			stampFromAS(&out, s, prReg, gtwDeps)
+			statusbar.StampFromAS(&out, s, sbDeps)
 		}
 		// F-think §3.1.2: per-chat OutThinking gate. When the
 		// chat has /think off, drop OutThinking events here
@@ -1078,261 +1095,9 @@ func newEventHandler(
 	}
 }
 
-// lookupASByID finds an AgentSession in the chat's pool by ID.
-// Used by event subscribers to recover the source AS from
-// AgentSessionID carried on each event (multi-as Phase 1: source
-// AS comes from the event, not from cs.selectedAS).
-//
-// Returns nil if the AS is no longer in the pool (e.g. after a
-// concurrent /kill). Subscribers must handle nil.
-func lookupASByID(cs *chatsession.ChatSession, id string) *agentsession.AgentSession {
-	if cs == nil || id == "" {
-		return nil
-	}
-	for _, as := range cs.Pool() {
-		if as.ID == id {
-			return as
-		}
-	}
-	return nil
-}
-
-// AgentSession.Agent is immutable (direct field read, no lock);
-// Model() takes RLock internally; git status is captured fresh
-// on each stamp (3s deadline, no caching — see F-48 §1.7).
-// stampFromAS is the source-AS pre-fill helper for callers that
-// need to bypass the default source lookup (which uses
-// cs.SelectedAgentSession()). Used in two places today:
-//
-//   1. runtime pump (per-AgentEvent delivery) — `s` is the
-//      source AS that produced the event. Pre-fills StatusBar
-//      from `s` regardless of which AS the chat has selected.
-//   2. MessageStateBus MessageSubmitted — `as` is the source AS
-//      identified by AgentSessionID in the event. Pre-fills
-//      StatusBar from `as` so the multi-AS semantic ("source
-//      AS, not selected AS") is preserved when the runtime
-//      pump's stamper (selected-AS) would otherwise win.
-//
-// Pre-rename this was `sessionContextInto` with the same role;
-// renamed to stampFromAS because (a) "Into" was vague about
-// direction, (b) the new name states explicitly that we're
-// stamping using a specific AS rather than the default source.
-//
-// F-55: out.Usage is set by gateway.Translate from the bridge
-// wire payload (AgentResultEvent.Usage / AgentDoneEvent.Usage).
-// The runtime is a passive pass-through — copy verbatim so the
-// channel footer can render it via sb.UsageBar. Pre-F-55 the
-// copy was missing, so footers silently rendered without usage
-// data. buildStatusBar is the shared gate; this helper and the
-// StatusBarSource both feed it the same AS + usage inputs.
-func stampFromAS(out *messages.OutboundMessage, s *agentsession.AgentSession, prReg *prcache.Registry, deps gtw.HandlerDeps) {
-	out.StatusBar = buildStatusBar(s, out.Usage, prReg, deps)
-}
-
-// buildStatusBar is the pure (no I/O of its own — git
-// collection is delegated) stamping primitive shared by the
-// runtime pump (stampFromAS) and the outbound.StatusBarSource
-// (newRuntimeStatusBar). It snapshots the AgentSession's
-// identity fields plus a freshly-collected git status and
-// assembles a StatusBar with the always-present GitBar plus
-// optional AgentBar / UsageBar sub-bars.
-//
-// Always returns a non-nil StatusBar when s is non-nil: the
-// GitBar is populated unconditionally (so the channel can
-// show "git status unknown" honestly when collection timed
-// out), and AgentBar / UsageBar are added when their backing
-// data is present. Pre-rename the gate returned nil when all
-// stamp fields were empty; post-rename the gate is structural
-// (sub-bar nil == absent), so this function never returns nil.
-//
-// Git invocation has a 3s deadline (review fix): a hung git
-// (stalled NFS, broken .git/index, ... ) would otherwise block
-// the entire outbound-message pipeline. 3s is plenty for normal
-// repos (10-50ms typical; up to ~1s on very large monorepos) and
-// far below the user's "chat is not realtime" tolerance. On
-// timeout, CollectReadiness returns (nil, nil) and the renderer
-// omits the git segment silently.
-//
-// PR / MR lookup (F-49): per-AgentSession, cached on prReg. The
-// read is strictly synchronous (returns the cached value,
-// possibly nil on the first ever call) — no I/O blocks the stamp
-// path. MaybeRefresh inspects the cache and spawns the network
-// round-trip asynchronously when the entry is stale; the next
-// stamp picks up the refreshed value.
-//
-// AgentSession.Agent is immutable (direct field read, no lock);
-// Model() takes RLock internally; git status is captured fresh
-// on each stamp (3s deadline, no caching — see F-48 §1.7).
-//
-// Nil-safe on the prReg dependency: a hand-wired debug build
-// that skips registry construction still gets a fully-functional
-// stamp path with PullRequest == nil. GetOrCreate itself never
-// returns nil once we have a non-nil registry. Test pinned by
-// TestBuildStatusBar_NilPRRegistryLeavesEmpty.
-//
-// Pre-rename this was `buildSessionContext` with a flat struct
-// + "Returns nil when there's nothing to render" gate.
-// Renamed + dropped the nil-return path because GitBar is
-// always populated when an AS exists; the channel renders
-// "git status unknown" honestly when GitStatus is nil.
-func buildStatusBar(s *agentsession.AgentSession, usage *agent.UsageInfo, prReg *prcache.Registry, deps gtw.HandlerDeps) *messages.StatusBar {
-	// Workspace resolution: AS.Cwd is the source of truth when
-	// an AS exists; the caller is responsible for passing the
-	// correct AS. The status-bar fallback (no AS) lives in
-	// newRuntimeStatusBar, not here — this function is
-	// AS-centric and the runtime pump pre-fills with `s` only.
-	cwd := s.Cwd
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	gitSnap, _ := gtw.CollectReadiness(ctx, cwd, gtw.ExecGitRunner{})
-	cancel()
-
-	var prRef *gtw.PR
-	if prReg != nil {
-		if prCache := prReg.GetOrCreate(s.ID); prCache != nil {
-			prCache.MaybeRefresh(cwd, deps)
-			prRef = prCache.PR()
-		}
-	}
-
-	// Snapshot Model() and SessionID() once each — both take
-	// asMu.RLock() internally; calling them twice in the gate
-	// + the literal doubles the lock acquisitions per stamp for
-	// no functional gain (a racing SetModel / SetSessionID
-	// between gate and literal would either be visible or not
-	// in both places anyway, and a stale read in the literal is
-	// no worse than a stale read in the gate).
-	model := s.Model()
-	sessionID := s.SessionID()
-
-	// Always populate GitBar when an AS exists — even when
-	// git collection timed out and GitStatus is nil. The
-	// renderer decides whether to show the git line based on
-	// GitStatus; producing a GitBar with nil GitStatus is the
-	// honest "git status unknown" state. (Pre-rename the gate
-	// returned nil when all stamp fields were empty, which
-	// dropped the StatusBar entirely — including the GitBar
-	// for "git collection timed out" cases.)
-	gitBar := &messages.GitStatusBar{
-		Workspace:   cwd,
-		GitStatus:   gitSnap,
-		PullRequest: prRef,
-	}
-
-	sb := &messages.StatusBar{
-		GitBar: gitBar,
-	}
-
-	// AgentBar: every segment is omitted independently when
-	// empty (the renderer follows the same rule). Build it
-	// unconditionally — if all three are empty, AgentBar
-	// still carries as a typed marker that the AS exists
-	// (even if no identifying info yet). Channels can choose
-	// to render or omit based on AgentBar.Agent/Model/
-	// SessionID content.
-	if s.Agent != "" || model != "" || sessionID != "" {
-		sb.AgentBar = &messages.AgentStatusBar{
-			Agent:     s.Agent,
-			Model:     model,
-			SessionID: sessionID,
-		}
-	}
-
-	if usage != nil {
-		sb.UsageBar = &messages.UsageStatusBar{UsageInfo: usage}
-	}
-
-	return sb
-}
-
-// newRuntimeStatusBar returns an outbound.StatusBarSource that
-// attaches a StatusBar to every outbound message for chats
-// that have a workspace to render. Wired into outbound.Emitter
-// at construction time so the stamp happens uniformly — runtime
-// pump, slash-command replies, gtw handlers, and MessageState
-// subscribers all converge on the same stamping path.
-//
-// Returning nil (when the chat has no workspace AND no
-// selected AgentSession) signals "skip the status bar this
-// turn"; the channel render path treats nil StatusBar as
-// "omit the status bar entirely" rather than rendering an
-// empty one.
-//
-// GitBar fallback (the "git status always present" rule):
-// when the chat has no selected AgentSession but does have a
-// selected workspace (cs.SelectedCwd != ""), the source
-// produces a StatusBar with only GitBar populated — git
-// status is still attached because the chat user should
-// always see what worktree they're talking about, even for
-// /gtw replies or pre-spawn placeholders. AgentBar is
-// skipped (no AS → no agent identity to surface). UsageBar
-// is nil at this layer (the channel reads out.Usage directly
-// in attachStatusBarIfMissing and copies it into the
-// StatusBar when present — see outbound.attachStatusBarIfMissing).
-//
-// Pre-refactor this lived at every call site (cmd/nightme/run.go's
-// stampFromAS calls at the pump + MessageStateBus
-// sites) and was skipped entirely by slash-command replies —
-// the whole point of moving it onto outbound.Emitter is that
-// nobody has to remember to call it any more.
-//
-// PullRequest lookup (F-49) is plumbed through prReg/deps the
-// same way as buildStatusBar — both stamp sites share the
-// per-AS prcache.Registry so a /gtw pr Invalidate surfaces
-// on the very next outbound (not after the 60s TTL).
-//
-// Pre-rename this was `newRuntimeStamper`. Renamed because
-// "Stamper" described the verb (stamp / 盖章) but not the
-// typed payload being produced — the function returns the
-// runtime's StatusBarSource. See outbound package doc.
-func newRuntimeStatusBar(mgr *chatsession.Manager, prReg *prcache.Registry, deps gtw.HandlerDeps) outbound.StatusBarSource {
-	return func(chatID string) *messages.StatusBar {
-		if mgr == nil {
-			return nil
-		}
-		cs := mgr.Get(chatID)
-		if cs == nil {
-			return nil
-		}
-		if as := cs.SelectedAgentSession(); as != nil {
-			// Happy path: AS selected → full StatusBar (GitBar
-			// + AgentBar + optional UsageBar).
-			return buildStatusBar(as, nil, prReg, deps)
-		}
-		// GitBar fallback: no AS, but chat still has a
-		// workspace. Produce a git-only StatusBar so the chat
-		// user always sees what worktree they're on. AgentBar
-		// is skipped (no AS → no agent identity to surface —
-		// the "AgentBar / TokensBar 没有 AgentSession 则忽略"
-		// rule). UsageBar is not produced here (no AS = no
-		// turn; the out.Usage co-location path in
-		// attachStatusBarIfMissing is the canonical entry for
-		// usage data).
-		cwd := cs.SelectedCwd()
-		if cwd == "" {
-			// No workspace at all — chat is unusable for any
-			// work; skip the status bar entirely.
-			return nil
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		gitSnap, _ := gtw.CollectReadiness(ctx, cwd, gtw.ExecGitRunner{})
-		cancel()
-		return &messages.StatusBar{
-			GitBar: &messages.GitStatusBar{
-				Workspace: cwd,
-				GitStatus: gitSnap,
-				// PullRequest: nil — PR lookup is per-AS.
-			},
-		}
-	}
-}
-
-// (responder removed: was a vestigial adapter from the pre-
-// outbound-package readPump era. The runtime pump now constructs
-// its own Emitter.Send calls in newEventHandler; this type had no
-// remaining callers.)
-
 // shutdownRun stops the channel and persists final state.
+//
+// Agent processes are INTENTIONALLY NOT killed here — they are
 //
 // Agent processes are INTENTIONALLY NOT killed here — they are
 // long-running CLI sessions independent of nightme's lifetime.
@@ -1393,72 +1158,3 @@ func shutdownRun(out io.Writer, ch channel.Channel, mgr *chatsession.Manager, cs
 
 	return firstErr
 }
-
-// toCardChoices translates command.CardChoice (command pkg) to
-// the wire-level messages.CardChoice. Both have the same fields;
-// this is a direct copy. Defined here (in run.go) so the
-// runtime owns the boundary translation without leaking the
-// command-package's mirror types deeper into the runtime.
-func toCardChoices(in []command.CardChoice) []messages.CardChoice {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]messages.CardChoice, len(in))
-	for i, c := range in {
-		out[i] = messages.CardChoice{
-			Emoji:  c.Emoji,
-			Label:  c.Label,
-			Action: c.Action,
-		}
-	}
-	return out
-}
-
-// chatSessionChannelSender is the runtime-side adapter that
-// implements shell.Sender on top of outbound.Emitter. Each
-// chat session carries its own channel (the Feishu adapter
-// wrapping the underlying connection), and the dispatcher
-// looks it up by ChatID at Send time — so a single sender
-// routes to any chat the manager knows about.
-//
-// Send is best-effort: if the chat session can't be resolved
-// (e.g. unloaded during shutdown) or the channel refuses, we
-// silently drop. The shell dispatcher's Handle is the
-// fire-and-forget reply path (the result card), not a critical
-// control message.
-// chatSessionChannelSender implements shell.Sender on top of the
-// Manager's shared outbound.Emitter. The shell dispatcher only
-// needs Send (no SendCard) so this is a thin one-method shim.
-type chatSessionChannelSender struct {
-	mgr *chatsession.Manager
-}
-
-// Send looks up the ChatSession for the requested chatID and
-// posts the reply through its Emitter. nil-safe everywhere: a
-// missing chat session, missing emitter, or missing reply
-// target all silently no-op (matches the old wrap's behaviour).
-func (s chatSessionChannelSender) Send(ctx context.Context, msg shell.Outbound) error {
-	if msg.ChatID == "" {
-		return nil
-	}
-	cs := s.mgr.Get(msg.ChatID)
-	if cs == nil {
-		return nil
-	}
-	em := cs.Emitter()
-	if em == nil {
-		return nil
-	}
-	return em.Send(ctx, messages.OutboundMessage{
-		ChatID:  msg.ChatID,
-		Kind:    messages.OutCommandReply,
-		Text:    msg.Text,
-		ReplyTo: msg.ReplyTo,
-	})
-}
-
-// (chatSessionChannelSender.Send[1] was the old implementation
-// that called cs.Emitter() into a local variable named 'ch' and
-// passed the chatsession.OutboundMessage-typed payload. It has
-// been removed: the new Send at line ~1483 is the single source
-// of truth.)

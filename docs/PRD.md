@@ -1,11 +1,9 @@
 # nightme — Product Requirements Document (PRD)
 
-> **状态**：v1.2 **已锁定**（2026-08-02；Q-A ✅ 全局 Default only；Q-B 默认 exact → default → spawn；架构已落地于 commits 5/6/7/8a/8b/8c/9）
 > **作者**：🦞 虾哥（PM/Architect）
-> **日期**：2026-08-02
 > **文档层级**：产品级（**不含技术内容**）
 > **关联文档**：
-> - 技术架构 → [`SPEC.md`](./SPEC.md) **v1.2**
+> - 技术架构 → [`SPEC.md`](./SPEC.md)
 > - 功能索引 → [`FEATURES.md`](./FEATURES.md)
 > - 每个 feature 的详细实现 → [`feat/`](./feat/)
 
@@ -63,7 +61,7 @@ nightme · side-project   ← ChatSession C，workspace ~/code/side
 - DM nightme · production-tools → slash command 设置 cwd 到 ~/tools/prod
 - 通过 Claude Code 排查问题（agent 有完整的工具 + 上下文）
 
-### 3.5 同一 chat 内切换 agent 试不同方案（v1.2 新增）
+### 3.5 同一 chat 内切换 agent 试不同方案
 - 在 bailing 项目的 chat 里跟 claude 聊了一会
 - 想让 codex 也看看 → 发 `/use codex`
 - nightme 启动 `(codex, /code/bailing)` AgentSession（pool 里没有，新建）
@@ -103,8 +101,8 @@ nightme **不调** Claude Code 的 non-interactive 模式（`--print` / `-p`）�
 - **切换 `/cwd` 或 `/use` 不杀任何 AgentSession**——只是改 ChatSession 的 selectedCwd / selectedAgent 和消息推送目标
 - **切回原 cwd/agent 时复用之前的 AgentSession**（保持进程和对话上下文）
 
-**不支持**（v1.2 范围内）：
-- 同一 chat 内同时跑多个 AgentSession（并行协作场景放 v0.4+）
+**不支持**：
+- 同一 chat 内同时跑多个 AgentSession（并行协作不在范围内）
 
 **为什么这样设计**：
 - **Chat 仍是项目边界**（飞书 DM 列表 = 项目列表）—— 用户认知不变
@@ -118,14 +116,14 @@ nightme **只控制自己启动的进程**。用户的 bash / zsh / vscode / 其
 **为什么**：跟"做一件事做到极致"的原则一致。nightme 不接管用户电脑，它只管理自己创建的 agent 进程。
 
 ### 4.5 Minimal 原则
-v0.1 MVP **只做一件事**：从 IM 转发文本到 PTY stdin，再把 PTY 输出回推给 IM。文件、图片、语音、按钮、卡片全部放后期。
+nightme MVP **只做一件事**：从 IM 转发文本到 PTY stdin，再把 PTY 输出回推给 IM。文件、图片、语音、按钮、卡片全部放后期。
 
 **为什么**：先把最核心的"打字 → agent 看见 → agent 回答 → 用户看见"链路跑通，其他都是装饰。
 
-**v1.2 的扩展**：在 MVP 之上加 ChatSession 模型（架构层），但**产品语义保持简单**——1 个 active AgentSession、可切换但不并行、不支持跨 chat 共享。ChatSession 的"魔法"对用户透明。
+**当前扩展**：在 MVP 之上加 ChatSession 模型（架构层），但**产品语义保持简单**——1 个 active AgentSession、可切换但不并行、不支持跨 chat 共享。ChatSession 的"魔法"对用户透明。
 
-### 4.6 ChatSession vs AgentSession — 分层的意义（v1.2 新增）
-v1.1 之前的 nightme 里"Session" = CLI 进程，session 死了就没了。v1.2 把"会话上下文"和"CLI 进程"分开：
+### 4.6 ChatSession vs AgentSession — 分层的意义
+nightme 把"会话上下文"和"CLI 进程"分开：
 
 - **ChatSession**（产品概念）= "我跟这个 chat 的会话"，由 nightme 持久化
 - **AgentSession**（技术实现）= 一个 CLI 进程的会话句柄，由 ChatSession 池化保留
@@ -133,29 +131,26 @@ v1.1 之前的 nightme 里"Session" = CLI 进程，session 死了就没了。v1.
 **用户感知**：
 - ChatSession 是**透明的**——用户不需要知道它存在。飞书 DM 看起来还是"会话历史"
 - AgentSession 是**显式的**——用户用 `/use claude` / `/use codex` 切换
-- 切换的"魔法"在 ChatSession 内部完成：复用旧进程、保留上下文
+- 切换的"魔法"在 ChatSession 内部完成：复用进程、保留上下文
 
 **为什么这样分层**：
-- **简单心智**：chat ↔ 会话历史（不变）
-- **灵活能力**：agent 切换 / 进程复用（v1.2 新增）
-- **进程归属不变**（v1.1 §4.4 不变）：nightme 仍只管自己启动的进程
+- **简单心智**：chat ↔ 会话历史
+- **灵活能力**：agent 切换 / 进程复用
+- **进程归属不变**（§4.4）：nightme 仍只管自己启动的进程
 
 ---
 
 ## 5. 功能范围
 
-完整功能列表（F-01 ~ F-29）见 [`FEATURES.md`](./FEATURES.md)。每个功能的设计细节见 [`feat/`](./feat/)。
+完整功能列表（F-01 ~ F-56）见 [`FEATURES.md`](./FEATURES.md)。每个功能的设计细节见 [`feat/`](./feat/)。
 
-**v1.2 新增**（PRD v1.2 → SPEC v1.2 锁定）：
-- **ChatSession 模型**（F-27）：ChatSession 取代 v1.1 的 Session，作为 chat ↔ AgentSession 间的会话上下文
+**核心模型**：
+- **ChatSession**（F-27）：chat ↔ AgentSession 间的会话上下文
 - **`/use <agent>` 命令**（F-28）：切换 ChatSession 的 selectedAgent；复用或新建 AgentSession
 - **AgentSession 池**（F-29）：ChatSession 内 `(agent, cwd)` 1:1 池化；切换 cwd/agent 不杀进程
 
-**MVP（v0.1）已发布**：F-01 ~ F-10, F-19 ~ F-22。
-**v0.2 → v0.3 增量**：F-24（Claude Code Bridge）、F-25（Input Buffer）、F-26（v1.1 职责隔离架构）。
-
-**v1.2 范围外**（明确不做）：
-- 多 AgentSession 并行协作（v0.4+）
+**范围外**（明确不做）：
+- 多 AgentSession 并行协作
 - 跨 chat 共享 ChatSession（保留 Channel 隔离）
 - AgentSession 跨 ChatSession 共享（每个 chat 独立进程池）
 
@@ -175,31 +170,22 @@ nightme 明确**不**做以下事情：
 | 写底层 AI Coding Agent 的 prompt / system message | 透传原则 |
 | 主动补全 / 联想 / 模板化建议 | 透传原则 |
 | 项目的 git / 文件系统扫描 | nightme 不关心项目结构 |
-| 多 AgentSession 并行协作（v1.2 范围外）| ChatSession active 单一原则（v1.2 §4.3）|
-| 跨 chat 共享 ChatSession（v1.2 范围外）| Channel 隔离原则 |
+| 多 AgentSession 并行协作 | ChatSession active 单一原则（§4.3）|
+| 跨 chat 共享 ChatSession | Channel 隔离原则 |
 
 ---
 
 ## 7. 成功标准
 
-nightme v1.2 发布时，以下场景必须能跑通：
+nightme 发布时，以下场景必须能跑通：
 
-1. ✅ 用户从飞书 DM 创建 ChatSession，workspace 验证生效，agent 启动
-2. ✅ 用户在飞书发的每条消息 ≤ 200ms 到达 agent stdin
-3. ✅ agent 的输出聚合后 ≤ 1s 出现在飞书 DM
-4. ✅ agent 正常 / 异常退出后，nightme 推送 "session ended" 给用户
-5. ✅ nightme 重启后，已存在的 ChatSession 自动 reattach
-6. ✅ `nightme list` 命令能列出所有 ChatSession（含状态、workspace、pid、active agent）
-7. ✅ 单 laptop 跑 5+ 并发 ChatSession，资源占用 < 100MB
-8. ✅ 用户的非 nightme 启动的进程不受任何影响
-9. ✅（v1.2 新增）`/use codex` 切到 codex 后 `/use claude` 切回，claude 进程是同一个（对话上下文保留）
-10. ✅（v1.2 新增）`/cwd /path/B` 切到新 cwd，原 `(claude, /path/A)` AgentSession 不被杀，再 `/cwd /path/A` 能接回
-
----
-
-## 8. 更新日志
-
-- **v1.0**：锁定 6 项关键决策 + Chat↔Session 1:1 模型 + Minimal MVP 范围
-- **v1.0r**：从 SPEC.md 分离，独立维护产品级文档
-- **v1.2**：Chat=Session 1:1 → **Chat=ChatSession** 模型；新增 AgentSession 池 + `/use` 命令；产品语义锁定，架构在 SPEC v1.2
-  - **状态**：**已锁定**（2026-08-02；Q-A ✅ 全局 Primary only；Q-B ✅ lookup 只看 `(selectedAgent, selectedCwd)`，无运行时 fallback；落地 commits 5/6/7/8a/8b/8c/9）
+1. 用户从飞书 DM 创建 ChatSession，workspace 验证生效，agent 启动
+2. 用户在飞书发的每条消息 ≤ 200ms 到达 agent stdin
+3. agent 的输出聚合后 ≤ 1s 出现在飞书 DM
+4. agent 正常 / 异常退出后，nightme 推送 "session ended" 给用户
+5. nightme 重启后，已存在的 ChatSession 自动 reattach
+6. `nightme list` 命令能列出所有 ChatSession（含状态、workspace、pid、active agent）
+7. 单 laptop 跑 5+ 并发 ChatSession，资源占用 < 100MB
+8. 用户的非 nightme 启动的进程不受任何影响
+9. `/use codex` 切到 codex 后 `/use claude` 切回，claude 进程是同一个（对话上下文保留）
+10. `/cwd /path/B` 切到新 cwd，原 `(claude, /path/A)` AgentSession 不被杀，再 `/cwd /path/A` 能接回

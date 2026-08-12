@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -483,6 +484,33 @@ func (cs *ChatSession) SelectedCwd() string {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.selectedCwd
+}
+
+// ClearSelectedCwd removes the active workspace. Used by /gtw
+// close when the directory the chat is sitting on has been
+// deleted out from under it (most often by another chat's /gtw
+// close running `git worktree remove` against the same
+// worktree): the chat's selected cwd now points at a path
+// that does not exist, so the safe fallback is to drop it and
+// let the user re-cwd.
+//
+// Unlike SetSelectedCwd, an empty value is the whole point —
+// no validation rejection. Persists unconditionally so the
+// cleared state survives daemon restart. KNOWN FOLLOW-UP:
+// persistChatEntryLocked (chatsession.go:1650-1655) does not
+// dedup on unchanged state, so a clear-after-empty still
+// writes to csFile; flagged in the audit, not addressed here.
+//
+// Does NOT touch the AgentSession pool: SetSelectedCwd's
+// "no spawn, no kill" contract applies. Callers that need to
+// tear down in-flight sessions should follow up with
+// EvictAgentSessionsInCwd.
+func (cs *ChatSession) ClearSelectedCwd() {
+	cs.mu.Lock()
+	cs.selectedCwd = ""
+	cs.lastInteractionAt = time.Now()
+	cs.mu.Unlock()
+	cs.persistChatEntry()
 }
 
 // SelectedAgent returns the current active agent name.
@@ -1117,6 +1145,31 @@ func (cs *ChatSession) attachAgentSession(as *AgentSession) {
 	cs.attachAgentSubscription(as)
 }
 
+// AttachAgentSessionForTest inserts as into cs.pool WITHOUT
+// going through Spawn / Spawner (no bus subscription, no
+// emit-buffer, no readpump). Used by tests outside this
+// package that need to seed AgentSessions for code paths
+// that read cs.pool — currently
+// internal/command/gtw/close_test.go's step-0.5 / step-5.5
+// / happy-path-with-orphaned-AS assertions.
+//
+// Naming follows the SetHandleForTest / SetStatusForTest
+// convention on AgentSession: only test code should call
+// this. Caller is expected to wire Handle via SetHandleForTest
+// before any code path that drives as.Close() executes.
+//
+// Idempotent on the same (Agent, Cwd) key — overwrites the
+// prior entry. Fine for tests; a leaked AS from a previous
+// test case is re-stamped, not duplicated.
+func (cs *ChatSession) AttachAgentSessionForTest(as *AgentSession) {
+	if as == nil {
+		return
+	}
+	cs.mu.Lock()
+	cs.pool[agentCwdKey{Agent: as.Agent, Cwd: as.Cwd}] = as
+	cs.mu.Unlock()
+}
+
 // attachAgentSessionLocked is attachAgentSession without the lock
 // acquire. MUST be called with cs.mu held (write). Idempotent.
 func (cs *ChatSession) attachAgentSessionLocked(as *AgentSession) {
@@ -1314,19 +1367,23 @@ func (cs *ChatSession) LookupSelectedAgentSession() (*AgentSession, error) {
 }
 
 // AgentSessionsInCwd returns a fresh slice of every AgentSession in
-// the pool whose Cwd == cwd. The returned slice is independent of
-// cs.pool (callers may mutate / range without disturbing subsequent
-// reads). Returns nil when no entries match — including when cwd is
-// empty (no selection yet).
+// the pool whose Cwd matches cwd after filepath.Clean on both
+// sides — keeps the comparison behaviour consistent with
+// EvictAgentSessionsInCwd so a caller that switches between the
+// two helpers gets the same answer for the same AS. The returned
+// slice is independent of cs.pool (callers may mutate / range
+// without disturbing subsequent reads). Returns nil when no
+// entries match — including when cwd is empty (no selection yet).
 func (cs *ChatSession) AgentSessionsInCwd(cwd string) []*AgentSession {
 	if cwd == "" {
 		return nil
 	}
+	want := filepath.Clean(cwd)
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	out := make([]*AgentSession, 0)
 	for _, as := range cs.pool {
-		if as.Cwd == cwd {
+		if filepath.Clean(as.Cwd) == want {
 			out = append(out, as)
 		}
 	}
@@ -1375,6 +1432,158 @@ func (cs *ChatSession) DropAgentSession(as *AgentSession) {
 	if cs.asFile != nil {
 		_ = cs.asFile.Delete(as.ID)
 	}
+}
+
+// DropResult describes the outcome of closing+dropping one
+// AgentSession from a pool. Returned per-entry by
+// EvictAgentSessionsInCwd so callers can surface a
+// per-agent status if they want (the /gtw close path chooses
+// to log only, not emit to the user).
+type DropResult struct {
+	Agent string
+	Cwd   string
+	Err   error
+}
+
+// evictGraceTotal bounds the close phase of
+// EvictAgentSessionsInCwd. Wedged bridges that bypass
+// their own SIGKILL fallback would otherwise pin the
+// goroutine indefinitely. 5s mirrors the bound used by
+// command/close's CloseAllAgents (close.go:238). Kept local
+// rather than exported to avoid cross-package coupling.
+const evictGraceTotal = 5 * time.Second
+
+// evictStragglerBound bounds the drain phase after
+// the close phase has timed out — bridges may unblock late;
+// we keep draining for at most this long before declaring the
+// remaining pool entries dropped-anyway (the goroutine will
+// exit on its own later).
+const evictStragglerBound = 2 * time.Second
+
+// EvictAgentSessionsInCwd tears down every
+// AgentSession in the chat that is pinned to cwd: closes the
+// bridge process (graceful, bounded by evictGraceTotal)
+// and removes the entry from the pool and asFile. Returns
+// the total number of evicted sessions (alive + stale; the
+// "did anything happen" answer the user-facing path cares
+// about) and a slice of per-alive-session outcomes for
+// callers that want richer status.
+//
+// Distinct from /close's CloseAllAgents
+// (internal/command/close/close.go:190): /close keeps the
+// pool intact so respawn can resume each conversation after
+// the user reopens it. This helper is for the
+// worktree-is-gone case where there is nothing to respawn
+// into — the AS is orphaned at birth.
+//
+// Wedged bridges are bounded by evictGraceTotal;
+// stragglers are logged and dropped anyway. After the bound
+// elapses the helper still proceeds to DropAgentSession for
+// every entry in the snapshot — a wedged goroutine is briefly
+// leaked (it will exit on its own once the bridge unwedges),
+// but the pool entry is removed so the chat's view of the
+// world is consistent. The returned count includes wedged
+// ASes; the returned results slice only contains the ones
+// whose close goroutine responded before the straggler
+// timeout.
+//
+// Filtering by cwd keeps the operation scoped to a known
+// workspace; the helper does not consult cs.selectedCwd.
+func (cs *ChatSession) EvictAgentSessionsInCwd(cwd string) (int, []DropResult) {
+	if cwd == "" {
+		return 0, nil
+	}
+	want := filepath.Clean(cwd)
+
+	// Snapshot under read lock; close outside the lock so we
+	// don't hold it across potentially-slow bridge Close calls.
+	var snapshot []*AgentSession
+	cs.mu.RLock()
+	for _, as := range cs.pool {
+		if filepath.Clean(as.Cwd) == want {
+			snapshot = append(snapshot, as)
+		}
+	}
+	cs.mu.RUnlock()
+	if len(snapshot) == 0 {
+		return 0, nil
+	}
+
+	type outcome struct {
+		as  *AgentSession
+		err error
+	}
+	closeCh := make(chan outcome, len(snapshot))
+	var wg sync.WaitGroup
+	alive := 0
+	for _, as := range snapshot {
+		st := as.Status()
+		handle := as.Handle()
+		isAlive := st == StatusRunning || (st == StatusDetached && handle != nil)
+		if !isAlive {
+			// Stale entry — no live process to signal. Drop
+			// directly so the pool doesn't carry dead refs.
+			cs.DropAgentSession(as)
+			continue
+		}
+		alive++
+		wg.Add(1)
+		go func(as *AgentSession) {
+			defer wg.Done()
+			closeCh <- outcome{as: as, err: as.Close()}
+		}(as)
+	}
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(evictGraceTotal):
+		slog.Warn("chatsession: agent close timed out",
+			"cwd", cwd, "alive", alive)
+	}
+
+	// Drain whatever we got back. Track which ASes have
+	// already been dropped so the straggler-timeout branch can
+	// drop the rest — without this, wedged bridges would
+	// leave their pool entries behind (the bridge's own
+	// SIGKILL fallback owns eventual process termination;
+	// we own the pool entry removal here).
+	results := make([]DropResult, 0, alive)
+	dropped := make(map[*AgentSession]bool, alive)
+	for drained := 0; drained < alive; {
+		select {
+		case oc := <-closeCh:
+			cs.DropAgentSession(oc.as)
+			dropped[oc.as] = true
+			results = append(results, DropResult{
+				Agent: oc.as.Agent,
+				Cwd:   oc.as.Cwd,
+				Err:   oc.err,
+			})
+			drained++
+		case <-time.After(evictStragglerBound):
+			slog.Warn("chatsession: straggler close",
+				"cwd", cwd,
+				"drained", drained,
+				"alive", alive)
+			// Drop any AS whose goroutine is still wedged
+			// so the pool doesn't carry the corpse.
+			for _, as := range snapshot {
+				if !dropped[as] {
+					cs.DropAgentSession(as)
+				}
+			}
+			drained = alive
+		}
+	}
+	// The user-facing count includes wedged ASes — they
+	// were pinned to the now-gone worktree and were dropped
+	// from the pool even though their close goroutine never
+	// reported back. Reporting "0 closed" when 3 bridges
+	// wedged and 3 pool entries were still removed would
+	// be a misleading UX.
+	return len(snapshot), results
 }
 
 // NewActiveAgentSessions resets the conversation context on the

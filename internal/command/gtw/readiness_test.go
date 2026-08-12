@@ -155,6 +155,6 @@ func setupReadiness(rig *prTestRig, branch string, snap messages.GitStatusSnapsh
 // Tests that need post-agent re-snapshot behaviour should
 // register an onSeq on statusCmd before calling
 // dispatchPush.
-func setupPushMocks(git *pushGit, branch string, snap messages.GitStatusSnapshot) {
+func setupPushMocks(git *pushGit, _ string, snap messages.GitStatusSnapshot) {
 	git.onArgs(statusCmd, porcelainFromSnapshot(snap), "", nil)
 }

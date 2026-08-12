@@ -27,6 +27,12 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
+// MessageDispatchFunc is the type returned by NewMessageDispatcher.
+// Named so the signature is readable at call sites (vs. an
+// inline `func(context.Context, *messages.InboundMessage) error`
+// that requires the reader to count parens).
+type MessageDispatchFunc = func(context.Context, *messages.InboundMessage) error
+
 // NewMessageDispatcher builds the runtime-injected
 // messageDispatcher (the default branch of the inboundDispatcher).
 // It is invoked when no slash command matches; it routes the

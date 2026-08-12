@@ -1,4 +1,4 @@
-package main
+package runtime
 
 import (
 	"io"
@@ -15,7 +15,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/registry"
-	"github.com/cnlangzi/nightme/internal/runtime"
 	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
@@ -34,7 +33,7 @@ func TestEventHandler_ThinkGate_ShowPassesThrough(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
 	logger := slog.Default()
 
-h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
@@ -64,7 +63,7 @@ func TestEventHandler_ThinkGate_HideDropsOutThinking(t *testing.T) {
 	}
 	logger := slog.Default()
 
-h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat", AgentSession: as, Event: &agent.AgentEvent{
@@ -100,7 +99,7 @@ func TestEventHandler_ThinkGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	}
 	logger := slog.Default()
 
-h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	// (a) OutReply — final assistant reply (no <thinking> prefix)
@@ -157,7 +156,7 @@ func TestEventHandler_ThinkGate_NilLoggerSafe(t *testing.T) {
 	}
 
 	// nil logger — must not panic.
-h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, nil, statusbar.Deps{})
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, nil, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	// Run inside a recover probe to convert any panic into a
@@ -187,7 +186,7 @@ func TestEventHandler_ThinkGate_PersistsAcrossInvocations(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat", "claude")
 	logger := slog.Default()
 
-h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	thinking := agent.AgentEvent{
@@ -228,7 +227,8 @@ h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logg
 // only usage; prevents the import from being flagged as unused
 // by go vet. (slog.Default() is the explicit user; this line is
 // a no-op for any future lint tooling that flags unused refs.)
-var _ = slog.Default
+// (Kept commented out — slog is used by TestEventHandler_* body.)
+// var _ = slog.Default
 
 // TestEventHandler_OutResult_FooterFirstTurnExact is the regression
 // for the user-reported bug ("first tokens always 0") post the
@@ -247,7 +247,7 @@ func TestEventHandler_OutResult_FooterFirstTurnExact(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_first_turn", "claude")
 	logger := slog.Default()
 
-h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_first_turn", "claude", "/tmp", nil)
 
 	// Step 1: EventAgentReady captures Model.
@@ -331,7 +331,7 @@ func TestEventHandler_OutResult_UsageIsPerTurnNotCumulative(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_per", "claude")
 	logger := slog.Default()
 
-h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_per", "claude", "/tmp", nil)
 
 	// Turn 1.
@@ -378,7 +378,7 @@ func TestEventHandler_OutResult_NilUsage_StillStampsStatusBar(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_zero", "claude")
 	logger := slog.Default()
 
-h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	// t.TempDir() is guaranteed NOT to be inside a git working
 	// tree (Go creates it under the OS temp dir; tests don't
 	// nest a .git inside). Pre-F-48 the test hardcoded /tmp,
@@ -418,7 +418,7 @@ h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logg
 // wire payload) into out.StatusBar.UsageBar.UsageInfo so the channel footer
 // can render it via ctx.Usage. Pre-F-55 the copy was missing, so
 // footers silently rendered without usage data even when the
-// bridge had populated it. The 1-line fix lives in run.go; this
+// bridge had populated it. The 1-line fix lives in handler.go; this
 // test catches any future regression that drops Usage from the
 // StatusBar struct literal.
 //
@@ -530,14 +530,14 @@ func TestStampFromAS_ForwardsUsage(t *testing.T) {
 }
 
 // TestEventHandler_Chain_UsageFlowsFromResultEventToFooter exercises
-// the full F-55 chain end-to-end on the cmd/nightme side:
+// the full F-55 chain end-to-end on the runtime side:
 //
 //	EventAgentResult.Usage (set by bridge)
 //	  → gateway.Translate populates OutboundMessage.Usage
-//	  → stampFromAS copies to OutboundMessage.StatusBar.Usage
+//	  → StampFromAS copies to OutboundMessage.StatusBar.UsageBar.UsageInfo
 //	  → channel reads ctx.Usage and renders (window) + new/cache/out
 //
-// The test does NOT import the feishu package (cmd/nightme must
+// The test does NOT import the feishu package (runtime must
 // stay free of the channel impl to keep the runtime / channel
 // boundary clean). It verifies the runtime side of the chain
 // directly: every link from the AgentEvent envelope to the
@@ -547,7 +547,7 @@ func TestStampFromAS_ForwardsUsage(t *testing.T) {
 // reads the values from OutboundMessage.Usage.
 //
 // This test is the regression guard for the F-55 footgun: a
-// future refactor that drops Usage from stampFromAS (or
+// future refactor that drops Usage from StampFromAS (or
 // stops stamping it onto StatusBar) will fail this test
 // with a precise signal (StatusBar.Usage nil even though
 // OutboundMessage.Usage is populated), and the footer Line 2
@@ -558,7 +558,7 @@ func TestEventHandler_Chain_UsageFlowsFromResultEventToFooter(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_chain", "claude")
 	logger := slog.Default()
 
-h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	tmpDir := t.TempDir() // non-git cwd
 	as := chatsession.NewAgentSession("as_chain", "cs_oc_chat_chain", "claude", tmpDir, nil)
 
@@ -613,7 +613,7 @@ h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logg
 		t.Fatal("OutboundMessage.Usage is nil; gateway.Translate should populate from AgentResultEvent.Usage")
 	}
 
-	// Link 2: stampFromAS copies out.Usage to
+	// Link 2: StampFromAS copies out.Usage to
 	// out.StatusBar.UsageBar.UsageInfo. This is the runtime→channel
 	// boundary; if it breaks, the footer Line 2 silently
 	// disappears (the actual user-facing bug F-55 surfaced).
@@ -621,7 +621,7 @@ h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logg
 		t.Fatal("StatusBar is nil; runtime should stamp it on OutResult")
 	}
 	if out.StatusBar.UsageBar.UsageInfo == nil {
-		t.Fatal("StatusBar.Usage is nil; stampFromAS must copy out.Usage verbatim")
+		t.Fatal("StatusBar.Usage is nil; StampFromAS must copy out.Usage verbatim")
 	}
 
 	// F-55 invariants: every wire field survives the chain
@@ -675,7 +675,7 @@ func TestEventHandler_ToolsGate_ShowPassesThrough(t *testing.T) {
 	}
 	logger := slog.Default()
 
-h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_show", "claude", "/tmp", nil)
 
 	// OutToolStart
@@ -718,7 +718,7 @@ func TestEventHandler_ToolsGate_HideDropsBothToolKinds(t *testing.T) {
 	}
 	logger := slog.Default()
 
-h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_hide", "claude", "/tmp", nil)
 
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_hide", AgentSession: as, Event: &agent.AgentEvent{
@@ -749,33 +749,33 @@ func TestEventHandler_ToolsGate_HideDoesNotAffectOtherKinds(t *testing.T) {
 	}
 	logger := slog.Default()
 
-h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_indep", "claude", "/tmp", nil)
 
 	// (a) OutReply — final assistant reply (no <thinking> prefix)
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_indep", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventAgentText,
 		Text: "Here is your answer.",
-	}, UserMsgID: "om_user_1"})
+	}, UserMsgID: "om_1"})
 
 	// (b) EventAgentResult — typed Result event (OutResult)
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_indep", AgentSession: as, Event: &agent.AgentEvent{
 		Kind:   agent.EventAgentResult,
 		Result: &agent.AgentResultEvent{Text: "Final result text."},
-	}, UserMsgID: "om_user_1"})
+	}, UserMsgID: "om_1"})
 	// EventAgentDone flushes the F-45 §2.5 OutResult buffer (turn-end
 	// fallback) — keeps the count at 3 (OutReply + OutResult + OutThinking).
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_indep", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventAgentDone,
 		Done: &agent.AgentDoneEvent{ExitCode: 0},
-	}, UserMsgID: "om_user_1"})
+	}, UserMsgID: "om_1"})
 
 	// (c) OutThinking — must not be dropped by /tools off
 	// (ThinkMode is the orthogonal gate; default Show passes it)
 	h(chatsession.AgentEventEnvelope{ChatID: "oc_chat_tools_indep", AgentSession: as, Event: &agent.AgentEvent{
 		Kind: agent.EventAgentText,
 		Text: "[思考] reasoning",
-	}, UserMsgID: "om_user_1"})
+	}, UserMsgID: "om_1"})
 
 	got := ch.Record()
 	if len(got) != 3 {
@@ -794,7 +794,7 @@ func TestEventHandler_ToolsGate_PersistsAcrossInvocations(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_tools_persist", "claude")
 	logger := slog.Default()
 
-h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_tools_persist", "claude", "/tmp", nil)
 
 	toolStart := agent.AgentEvent{
@@ -842,7 +842,7 @@ func TestEventHandler_ToolsAndThinkGatesIndependent(t *testing.T) {
 	cs, _ := mgr.GetOrCreate("oc_chat_both_gates", "claude")
 	logger := slog.Default()
 
-h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat_both_gates", "claude", "/tmp", nil)
 
 	// Flip both off.
@@ -893,7 +893,7 @@ h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logg
 
 // newWireTestStores opens a temp-dir pair of ChatSessionFile +
 // AgentSessionFile. Mirrors chatsession.newTestStores but lives in
-// cmd/nightme (cross-package helpers in test packages aren't
+// runtime (cross-package helpers in test packages aren't
 // visible by default).
 func newWireTestStores(t *testing.T) (*registry.ChatSessionFile, *registry.AgentSessionFile) {
 	t.Helper()
@@ -928,12 +928,12 @@ func seedPersistedChatForWire(t *testing.T, csFile *registry.ChatSessionFile, ch
 }
 
 // TestWireRuntimeCallbacksAndRestore_InstallsHandlersOnRestoredChats
-// is the cmd/nightme-side regression for the F-38 silent-failure
+// is the runtime-side regression for the F-38 silent-failure
 // bug: if WithOnCreate is set AFTER RestoreFromRegistry, every
 // restored ChatSession ends up with nil EventHandler and nil
 // MessageStateHandler. The Manager-level contract is covered in
-// chatsession/manager_test.go; this test pins the cmd/nightme
-// wiring that wraps both calls in wireRuntimeCallbacksAndRestore.
+// chatsession/manager_test.go; this test pins the runtime
+// wiring that wraps both calls in WireRuntimeCallbacksAndRestore.
 func TestWireRuntimeCallbacksAndRestore_InstallsHandlersOnRestoredChats(t *testing.T) {
 	csFile, asFile := newWireTestStores(t)
 	seedPersistedChatForWire(t, csFile, "oc_alpha", "claude")
@@ -944,8 +944,8 @@ func TestWireRuntimeCallbacksAndRestore_InstallsHandlersOnRestoredChats(t *testi
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-if err := runtime.WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, runtime.MarkPromptDone(ch)); err != nil {
-		t.Fatalf("wireRuntimeCallbacksAndRestore: %v", err)
+	if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, MarkPromptDone(ch)); err != nil {
+		t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)
 	}
 
 	for _, cs := range mgr.List() {
@@ -974,8 +974,8 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateDropsEmptyIDs(t *testing.T) 
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-if err := runtime.WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, runtime.MarkPromptDone(ch)); err != nil {
-		t.Fatalf("wireRuntimeCallbacksAndRestore: %v", err)
+	if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, MarkPromptDone(ch)); err != nil {
+		t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)
 	}
 
 	csList := mgr.List()
@@ -1026,8 +1026,8 @@ func TestWireRuntimeCallbacksAndRestore_NoPersistence(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-if err := runtime.WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, runtime.MarkPromptDone(ch)); err != nil {
-		t.Fatalf("wireRuntimeCallbacksAndRestore on cold start: %v", err)
+	if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, MarkPromptDone(ch)); err != nil {
+		t.Fatalf("WireRuntimeCallbacksAndRestore on cold start: %v", err)
 	}
 	if len(mgr.List()) != 0 {
 		t.Errorf("expected no restored chats; got %d", len(mgr.List()))
@@ -1062,7 +1062,7 @@ func TestEventHandler_OnAgentConnected_DoesNotEmitMessageSubmitted(t *testing.T)
 		return false
 	})
 
-h := runtime.NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
+	h := NewEventHandler(outbound.New(ch, outbound.Options{}), cs, mgr, logger, statusbar.Deps{})
 	as := chatsession.NewAgentSession("as_test", "cs_oc_chat", "claude", "/tmp", nil)
 
 	// Fire EventAgentReady with a userMsgID present (the L869
@@ -1102,7 +1102,7 @@ type messageStateCall struct {
 // materialize StatusBar when other gate fields fire.
 //
 // This pins the "defensive nil-handling" contract documented in
-// stampFromAS's doc — a regression that drops the
+// StampFromAS's doc — a regression that drops the
 // `if prReg == nil` guard would crash on every stamp in a
 // single-process debug build that wires deps by hand.
 //
@@ -1110,10 +1110,10 @@ type messageStateCall struct {
 // is exercised by the integration tests in
 // internal/prcache/prcache_test.go (same-package field access)
 // and by the runtime stamp path that already passes a
-// non-nil registry in cmd/nightme/run.go:344. cmd/nightme
-// doesn't need a separate test for that path: the runtime's
-// only job is to copy the cache pointer, and a one-line read
-// is well-covered by the existing materialise-gate tests
+// non-nil registry in runtime.go. The runtime
+// doesn't need a separate test for that path: the only job is
+// to copy the cache pointer, and a one-line read is
+// well-covered by the existing materialise-gate tests
 // (TestStampFromAS_ForwardsUsage above).
 func TestStampFromAS_NilPRRegistryLeavesEmpty(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -1142,7 +1142,7 @@ func TestStampFromAS_NilPRRegistryLeavesEmpty(t *testing.T) {
 // shutdown hook drains every per-AgentSession PR-cache refresh
 // goroutine so the process exits cleanly. The test pre-populates
 // the registry with a cache that holds an inflight goroutine
-// driven by a slow Detect prober, calls shutdownRun, and asserts
+// driven by a slow Detect prober, calls ShutdownRun, and asserts
 // the goroutine observed the cancel signal within the bounded
 // shutdown timeout.
 //
@@ -1155,7 +1155,7 @@ func TestStampFromAS_NilPRRegistryLeavesEmpty(t *testing.T) {
 // Note: the cancel-observation itself lives in
 // internal/prcache/prcache_test.go (same-package, accesses
 // Cache's unexported inflight/cancel directly). This test only
-// verifies that shutdownRun threads the prReg through to
+// verifies that ShutdownRun threads the prReg through to
 // CloseAll — the actual cancel propagation is prcache's
 // contract.
 func TestShutdownRun_CloseAllCancelsCaches(t *testing.T) {
@@ -1164,8 +1164,8 @@ func TestShutdownRun_CloseAllCancelsCaches(t *testing.T) {
 	// After CloseAll, the registry's map is cleared; a fresh
 	// GetOrCreate returns a NEW cache pointer (the old one is
 	// still valid for prior holders, but the registry forgot it).
-	if err := runtime.ShutdownRun(io.Discard, nil, nil, nil, nil, prReg, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
-		t.Fatalf("shutdownRun: %v", err)
+	if err := ShutdownRun(io.Discard, nil, nil, nil, nil, prReg, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatalf("ShutdownRun: %v", err)
 	}
 	fresh := prReg.GetOrCreate("as_shutdown_test")
 	if fresh == pre {

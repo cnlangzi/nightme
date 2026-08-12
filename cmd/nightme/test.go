@@ -29,16 +29,13 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/agent"
-	"github.com/cnlangzi/nightme/internal/bridge/pty"
+	"github.com/cnlangzi/nightme/internal/agentregistry"
 	"github.com/cnlangzi/nightme/internal/chatsession"
-	"github.com/cnlangzi/nightme/internal/config"
 )
 
 // testCmdFlags captures every flag the test subcommand accepts.
@@ -90,7 +87,7 @@ func runTest(cmd *cobra.Command, f testCmdFlags) error {
 	// persistence wiring (csFile / asFile) can be added here
 	// without changing the test's public surface.
 
-	agentReg := buildAgentRegistry(cfg, f.agentName)
+	agentReg := agentregistry.Build(cfg, f.agentName)
 
 	spawner := chatsession.NewRegistrySpawner(agentReg)
 	mgr := chatsession.NewManager().WithSpawner(spawner)
@@ -136,52 +133,16 @@ func validateTestRequest(f testCmdFlags) error {
 	return nil
 }
 
-// buildAgentRegistry seeds an agent.Registry for nightme run / nightme
-// test / nightme agents. The dispatch is:
+// configuredAgentEnv flattens a map into a deterministic sorted
+// slice of KEY=VALUE strings for use as an agent env. The shape
+// matches what `agent -pty` expects; the runtime does not
+// currently inject any per-call env, but this helper is the
+// seam where future per-agent overrides land.
 //
-//  1. Start with agent.Builtins (claude is the only v0.2.x built-in
-//     — each agent package registers itself via init()).
-//  2. Layer cfg.Agents on top. A name matching a built-in
-//     replaces the built-in (custom binary path); an unknown name
-//     becomes a PTY agent (the safe default for user-supplied CLIs).
-//  3. If --agent /some/binary was passed, auto-register that bare
-//     path so a typo surfaces as "agent not found" instead of a
-//     confusing exec error.
-func buildAgentRegistry(cfg *config.Config, requested string) *agent.Registry {
-	reg := agent.New()
-	for _, a := range agent.Builtins.List() {
-		reg.Register(a)
-	}
-	if cfg != nil && len(cfg.Agents) > 0 {
-		for _, entry := range cfg.Agents {
-			if entry.Name == "" || entry.Command == "" {
-				continue
-			}
-			// v1.2 schema: Command is the full command line (binary + args),
-			// e.g. "claude --dangerously-skip-permissions". Split with
-			// strings.Fields; first token is the binary.
-			fields := strings.Fields(entry.Command)
-			if len(fields) == 0 {
-				continue
-			}
-			a := pty.NewStarter(entry.Name, fields[0], fields[1:], nil, cfg.Session.DefaultPtyCols, cfg.Session.DefaultPtyRows)
-			reg.Register(a)
-		}
-	}
-	if _, err := reg.Get(requested); err != nil {
-		// Auto-register a bare-path agent when the user passed
-		// `--agent /some/binary`. Only do this if the file exists
-		// so a typo surfaces as "agent not found" instead of a
-		// confusing exec error.
-		if requested != "" {
-			if _, statErr := os.Stat(requested); statErr == nil {
-				reg.Register(pty.NewStarter(requested, filepath.Base(requested), nil, nil, 0, 0))
-			}
-		}
-	}
-	return reg
-}
-
+// Note: buildAgentRegistry / buildRunAgentRegistry used to live
+// here too; they moved to internal/agentregistry so the runtime
+// (nightme run) and the CLI subcommands (nightme test / agents)
+// share one implementation. See internal/agentregistry.
 func configuredAgentEnv(env map[string]string) []string {
 	if len(env) == 0 {
 		return nil
@@ -196,12 +157,6 @@ func configuredAgentEnv(env map[string]string) []string {
 		out = append(out, key+"="+env[key])
 	}
 	return out
-}
-
-// buildRunAgentRegistry registers every configured agent with its selected
-// v0.2 mode. User-defined names still use PTY as the safe fallback.
-func buildRunAgentRegistry(cfg *config.Config) *agent.Registry {
-	return buildAgentRegistry(cfg, "")
 }
 
 // pumpIO bridges stdin ↔ agent and stdout. It returns when the

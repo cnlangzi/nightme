@@ -97,7 +97,7 @@ func WithChannel(deps Deps, channelName string) (Deps, error) {
 // defaultOpenChatSessions opens chat_sessions.json relative to
 // cfg.Paths.DataDir.
 func defaultOpenChatSessions(cfg *config.Config) (*registry.ChatSessionFile, error) {
-	path, err := chatSessionsPath(cfg)
+	path, err := ChatSessionsPath(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +107,7 @@ func defaultOpenChatSessions(cfg *config.Config) (*registry.ChatSessionFile, err
 // defaultOpenAgentSessions opens agent_sessions.json relative to
 // cfg.Paths.DataDir.
 func defaultOpenAgentSessions(cfg *config.Config) (*registry.AgentSessionFile, error) {
-	path, err := agentSessionsPath(cfg)
+	path, err := AgentSessionsPath(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +152,7 @@ func RemoveLegacyRegistryFile(cfg *config.Config) error {
 
 // chatSessionsPath returns the absolute path to chat_sessions.json
 // under cfg.Paths.DataDir.
-func chatSessionsPath(cfg *config.Config) (string, error) {
+func ChatSessionsPath(cfg *config.Config) (string, error) {
 	base, err := filepath.Abs(cfg.Paths.DataDir)
 	if err != nil {
 		return "", err
@@ -162,7 +162,7 @@ func chatSessionsPath(cfg *config.Config) (string, error) {
 
 // agentSessionsPath returns the absolute path to agent_sessions.json
 // under cfg.Paths.DataDir.
-func agentSessionsPath(cfg *config.Config) (string, error) {
+func AgentSessionsPath(cfg *config.Config) (string, error) {
 	base, err := filepath.Abs(cfg.Paths.DataDir)
 	if err != nil {
 		return "", err

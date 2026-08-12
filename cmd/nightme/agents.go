@@ -53,7 +53,7 @@ func init() {
 	// docs/feat/F-32-pi-rpc-bridge.md for wire details and the
 	// F-32 MVP scope. User config can override the command path;
 	// the structured bridge only works for builtin registration,
-	// not for the PTY fallback in buildAgentRegistry.
+	// not for the PTY fallback in agentregistry.Build.
 	agent.Builtins.Register(pi.NewStarter("pi", "pi", nil))
 
 	// bash — example PTY-backed entry. Shows the registration

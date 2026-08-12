@@ -38,7 +38,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/channel/feishu"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
@@ -88,11 +87,10 @@ func New(deps Deps) *Runner {
 	return &Runner{Deps: deps}
 }
 
-// RunWith builds a Runner with explicit RunOptions.
+// RunWith builds a Runner with explicit RunOptions. Nil fields
+// in opts are still filled by Runner.Run — no early fill here
+// to avoid two passes (Run already calls withDefaults).
 func RunWith(deps Deps, opts RunOptions) *Runner {
-	if opts.outDefaults() {
-		opts = opts.withDefaults()
-	}
 	return &Runner{Deps: deps, Out: opts}
 }
 
@@ -124,12 +122,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	return runDaemon(ctx, opts.Out, deps, sigCh, opts.Logger)
 }
 
-// outDefaults / withDefaults / fillDefaults — local helpers to
-// keep Runner construction noise-free.
-
-func (o RunOptions) outDefaults() bool {
-	return o.Out == nil && o.Logger == nil && o.SigCh == nil
-}
+// withDefaults / fillDefaults — local helpers to keep Runner
+// construction noise-free.
 
 func (o RunOptions) withDefaults() RunOptions {
 	if o.Out == nil {
@@ -473,5 +467,5 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 // deeper runtime files that we'll add next; these locals let
 // the file compile before handler.go / dispatcher.go are wired).
 var (
-	_ = agent.MessageQueued
+	_ = io.Discard
 )

@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/agentregistry"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/registry"
+	"github.com/cnlangzi/nightme/internal/runtime"
 )
 
 // listFixture creates a v1.2 pair of on-disk stores (chat_sessions.json
@@ -308,13 +310,13 @@ func TestChatSessionsPathResolvesRelative(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Paths.DataDir = dir
 
-	got, err := chatSessionsPath(cfg)
+	got, err := runtime.ChatSessionsPath(cfg)
 	if err != nil {
-		t.Fatalf("chatSessionsPath: %v", err)
+		t.Fatalf("runtime.ChatSessionsPath: %v", err)
 	}
 	want := filepath.Join(dir, "chat_sessions.json")
 	if got != want {
-		t.Errorf("chatSessionsPath = %q, want %q", got, want)
+		t.Errorf("runtime.ChatSessionsPath = %q, want %q", got, want)
 	}
 }
 
@@ -325,13 +327,13 @@ func TestAgentSessionsPathResolvesRelative(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Paths.DataDir = dir
 
-	got, err := agentSessionsPath(cfg)
+	got, err := runtime.AgentSessionsPath(cfg)
 	if err != nil {
-		t.Fatalf("agentSessionsPath: %v", err)
+		t.Fatalf("runtime.AgentSessionsPath: %v", err)
 	}
 	want := filepath.Join(dir, "agent_sessions.json")
 	if got != want {
-		t.Errorf("agentSessionsPath = %q, want %q", got, want)
+		t.Errorf("runtime.AgentSessionsPath = %q, want %q", got, want)
 	}
 }
 
@@ -377,7 +379,7 @@ func TestBuildAgentRegistryAutoRegister(t *testing.T) {
 		t.Skipf("test requires %s: %v", bin, err)
 	}
 
-	reg := buildAgentRegistry(cfg, bin)
+	reg := agentregistry.Build(cfg, bin)
 	got, err := reg.Get(bin)
 	if err != nil {
 		t.Fatalf("Get(%s) after auto-register: %v", bin, err)
@@ -395,7 +397,7 @@ func TestBuildAgentRegistryAutoRegister(t *testing.T) {
 // path should surface as an "unknown agent" error at Create time.
 func TestBuildAgentRegistryUnknownAgent(t *testing.T) {
 	cfg := &config.Config{}
-	reg := buildAgentRegistry(cfg, "/no/such/binary/anywhere")
+	reg := agentregistry.Build(cfg, "/no/such/binary/anywhere")
 	if _, err := reg.Get("/no/such/binary/anywhere"); err == nil {
 		t.Errorf("unknown agent was silently registered")
 	}

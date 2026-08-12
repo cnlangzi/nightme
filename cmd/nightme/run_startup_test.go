@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentregistry"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/config"
@@ -47,7 +49,7 @@ func TestRunDaemon_ReachesReady(t *testing.T) {
 		LoadConfig:        func() (*config.Config, error) { return cfg, nil },
 		OpenChatSessions:  defaults.OpenChatSessions,
 		OpenAgentSessions: defaults.OpenAgentSessions,
-		BuildAgents:       buildRunAgentRegistry,
+		BuildAgents:       func(cfg *config.Config) *agent.Registry { return agentregistry.Build(cfg, "") },
 		NewChannel: func(*config.Config) (channel.Channel, error) {
 			return ch, nil
 		},

@@ -39,8 +39,15 @@ func MarkPromptDone(ch channel.Channel) func(ctx context.Context, chatID, msgID 
 	if fa, ok := ch.(*feishu.Adapter); ok {
 		return fa.MarkReceiptPromptDone
 	}
-	return func(context.Context, string, string) {}
+	return noOpPromptDone
 }
+
+// noOpPromptDone is the shared no-op PromptEnd callback for
+// non-Feishu channels. Reusing one closure (rather than
+// allocating a fresh `func(_, _, _){}` on every MarkPromptDone
+// call) avoids per-ChatSession allocation when many restored
+// chats get a per-cs markPromptDone subscriber.
+var noOpPromptDone = func(context.Context, string, string) {}
 
 // WireRuntimeCallbacksAndRestore installs the per-ChatSession
 // outbound handlers (EventHandler for AgentEvent → OutboundMessage
@@ -162,7 +169,7 @@ func WireRuntimeCallbacksAndRestore(
 					MessageID: e.UserMsgID,
 				},
 			}
-			if e.State == agent.MessageSubmitted { //nolint:gocritic // keep import
+			if e.State == agent.MessageSubmitted {
 				// multi-as Phase 1: source AS comes from the
 				// event itself, not from cs.SelectedAgentSession().
 				// We pre-stamp here so the emitter's stamper (which

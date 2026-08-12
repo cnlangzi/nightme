@@ -902,3 +902,106 @@ func TestRunClose_Success_ClosesOrphanedAgents(t *testing.T) {
 
 // (rigSetCwd removed; we don't need it — RunClose takes the
 // ChatSession's SelectedCwd directly.)
+
+// withStatStub swaps the package-level statPath for the duration
+// of the test and restores it via t.Cleanup. Used by transient
+// stat-error tests that need a non-IsNotExist failure (EACCES,
+// EIO, etc.) without chmod'ing the worktree directory —
+// chmod 000 is silently bypassed for root on Linux and the test
+// would race with later reads anyway.
+func withStatStub(t *testing.T, fn func(string) (os.FileInfo, error)) {
+	t.Helper()
+	orig := statPath
+	statPath = fn
+	t.Cleanup(func() { statPath = orig })
+}
+
+// TestRunClose_TransientStatError_PreservesState covers the
+// non-IsNotExist branch of RunClose's stat-failure handling
+// (close.go step 0.5): when the worktree is reachable but stat
+// fails for a transient reason (EACCES / EIO / ESTALE / ENOTDIR
+// / ENOTCONN), the chat must surface the error as an IM reply
+// WITHOUT clearing slot, selectedCwd, or the AgentSession pool.
+// The user can retry once the path is reachable again.
+//
+// Companion to TestRunClose_DanglingSelectedCwd_FixActive
+// (IsNotExist branch with slot) and
+// TestRunClose_DanglingSelectedCwd_SlotEmpty (IsNotExist branch
+// without slot). Locks in the wording of the transient-reply
+// and the state-preservation contract; a future "simplification"
+// pass that conflates the two branches would regress this.
+func TestRunClose_TransientStatError_PreservesState(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+	rig := newCloseRig(t)
+	seedFix(t, rig, wt, repoRoot)
+	seedAgentSession(t, rig, "test-agent", wt)
+
+	// Snapshot pre-state so we can prove nothing was cleared.
+	selectedCwdBefore := rig.cs.SelectedCwd()
+	slotBefore := rig.slot.Load()
+	poolLenBefore := len(rig.cs.Pool())
+	gitCallsBefore := len(rig.git.calls)
+
+	// Force a non-IsNotExist stat error (EACCES-like). The
+	// worktree directory still exists on disk — stat is what
+	// fails. (os.ErrPermission is the EACCES-equivalent sentinel;
+	// os.IsNotExist(os.ErrPermission) is false.)
+	withStatStub(t, func(path string) (os.FileInfo, error) {
+		return nil, os.ErrPermission
+	})
+
+	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	if err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+
+	// State preserved: slot, selectedCwd, AS pool, no git calls.
+	if got := rig.cs.SelectedCwd(); got != selectedCwdBefore {
+		t.Errorf("SelectedCwd = %q after transient stat error, want %q (preserved)", got, selectedCwdBefore)
+	}
+	if got := rig.slot.Load(); got != slotBefore {
+		t.Errorf("slot.Load() changed after transient stat error:\n got  %+v\n want %+v", got, slotBefore)
+	}
+	if n := len(rig.cs.Pool()); n != poolLenBefore {
+		t.Errorf("pool after transient stat error = %d entries, want %d (preserved)", n, poolLenBefore)
+	}
+	// No git calls at all — the safety net short-circuits before
+	// step 4 (WorktreeRemove), and step 2.5 (close pinned ASes)
+	// did not run either (stat failure path is above both).
+	if len(rig.git.calls) != gitCallsBefore {
+		t.Errorf("git runner got %d new calls on transient stat error, want 0",
+			len(rig.git.calls)-gitCallsBefore)
+	}
+
+	// Reply text: the new transient-reply wording.
+	reply := rig.rec.lastText()
+	for _, want := range []string{
+		"cannot reach workspace",
+		"(stat:",
+		"transient",
+		"retry /gtw close",
+		"agent sessions are left intact",
+	} {
+		if !strings.Contains(reply, want) {
+			t.Errorf("reply missing %q:\n%s", want, reply)
+		}
+	}
+	// The reply must NOT contain the dangling-clear wording from
+	// the IsNotExist branch — that branch's whole job is to clear
+	// state, which we explicitly do NOT want here.
+	for _, forbidden := range []string{
+		"cleared the in-flight fix",
+		"cleared the dangling cwd",
+		"worktree directory is unreachable",
+		"directory is unreachable",
+		"orphaned agent", // the IsNotExist branch counts dropped ASes
+	} {
+		if strings.Contains(reply, forbidden) {
+			t.Errorf("reply unexpectedly contains %q (transient path should not say this):\n%s", forbidden, reply)
+		}
+	}
+}

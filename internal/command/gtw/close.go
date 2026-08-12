@@ -13,6 +13,18 @@ import (
 	"github.com/cnlangzi/nightme/internal/command"
 )
 
+// statPath is the os.Stat function used by RunClose to detect
+// unreachable cwd. Exposed as a package-level var so tests can
+// swap in a stub that returns non-IsNotExist errors (EACCES,
+// EIO, ESTALE, etc.) without chmod'ing the worktree directory —
+// a transient stat failure must NOT clear slot / selectedCwd /
+// the AS pool, and that's easier to lock in via a stub than by
+// chmod races (chmod 000 is silently bypassed for root on
+// Linux, and the test would race with later reads anyway).
+// Production uses os.Stat directly; tests restore via
+// withStatStub in close_test.go.
+var statPath = os.Stat
+
 // maxDirtyFilesReported caps how many uncommitted paths we
 // surface in the "worktree is dirty" error reply. 10 is the
 // sweet spot the user tested with: enough to identify the
@@ -117,7 +129,7 @@ func RunClose(
 	// a transient or permission failure on a path that may
 	// still be there in a moment — preserve all state, surface
 	// the stat error as an IM reply, and let the user retry.
-	if _, statErr := os.Stat(selectedCwd); statErr != nil {
+	if _, statErr := statPath(selectedCwd); statErr != nil {
 		if !os.IsNotExist(statErr) {
 			return reply(ctx, cs.Emitter(), chatID, messageID,
 				fmt.Sprintf("❌ cannot reach workspace: %s\n(stat: %v)\n"+

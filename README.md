@@ -1,7 +1,7 @@
 # NightMe
 
 <p align="center">
-  <img src="./logo.png" alt="NightMe Logo" width="128">
+  <img src="./logo.png" alt="NightMe Logo" width="150">
 </p>
 
 > **Sleep tight. NightMe codes all night.**

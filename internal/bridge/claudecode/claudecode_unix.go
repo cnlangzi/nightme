@@ -166,18 +166,12 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	env := append([]string(nil), cfg.Env...)
 	env = append(env, s.command) // ensure command name is in env (defensive)
 
-	cmd := exec.CommandContext(ctx, s.command, args...)
+	// Spawn via the agent.NewCmd helper so the platform-specific
+	// SysProcAttr (Setsid on unix, no-op on Windows) is in one
+	// place — see internal/agent/exec_unix.go for the rationale.
+	cmd := agent.NewCmd(ctx, s.command, args...)
 	cmd.Dir = cfg.Workspace
 	cmd.Env = append(os.Environ(), env...)
-	// Detach from the daemon's controlling TTY. Without Setsid,
-	// the child inherits the daemon's session and on macOS re-opens
-	// /dev/tty for raw-mode input — pi/claude's TUI code waits
-	// forever on that fd even after spawn, wedging the cli event
-	// loop when there is no TTY traffic (see F-54 / stop hang
-	// investigation). Setsid also makes the child the leader of
-	// its own session and process group, so a future /stop can
-	// broadcast SIGINT to the whole subtree via kill(-pid).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

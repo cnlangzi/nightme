@@ -95,7 +95,7 @@ func startServer(ctx context.Context, cfg serverConfig) (*serverProc, error) {
 	}
 	args = append(args, cfg.args...)
 
-	cmd := exec.CommandContext(ctx, "opencode", args...)
+	cmd := agent.NewCmd(ctx, "opencode", args...)
 	// The server's cwd determines which instance context it picks
 	// up — the InstanceStore maps (directory → provider/auth). The
 	// user's opencode config lives at ~/.config/opencode (or
@@ -115,9 +115,6 @@ func startServer(ctx context.Context, cfg serverConfig) (*serverProc, error) {
 	// the workspace (legacy behaviour).
 	cmd.Dir = opencodeHomeDir(cfg.workspace)
 	cmd.Env = append([]string(nil), cfg.env...)
-	// Detach from the daemon's controlling TTY. See F-54 / stop
-	// hang investigation in claudecode.go for the full rationale.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	// Capture stdout so we can parse the banner. We close the stdout
 	// reader after the banner is captured; the lifecycle goroutine

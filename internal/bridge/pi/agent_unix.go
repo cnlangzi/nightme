@@ -275,12 +275,11 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	branch := detectBranch(cfg.Workspace)
 	logger := slog.Default()
 
-	cmd := exec.CommandContext(ctx, s.command, args...)
+	// Spawn via agent.NewCmd — see internal/agent/exec_unix.go
+	// for the platform-specific SysProcAttr rationale.
+	cmd := agent.NewCmd(ctx, s.command, args...)
 	cmd.Dir = cfg.Workspace
 	cmd.Env = append(os.Environ(), env...)
-	// Detach from the daemon's controlling TTY. See F-54 / stop
-	// hang investigation in claudecode.go for the full rationale.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

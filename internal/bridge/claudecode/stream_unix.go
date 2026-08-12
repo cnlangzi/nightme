@@ -105,15 +105,17 @@ type streamEvent struct {
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	IsError    bool   `json:"is_error,omitempty"`
 
+	// conversation_reset only — the id assigned to the freshly
+	// cleared transcript. Diagnostic; the authoritative SessionID
+	// arrives in the immediately-following system/init.
+	NewConversationID string `json:"new_conversation_id,omitempty"`
+
 	// result.usage / result.modelUsage — kept as RawMessage so the
 	// decoder is permissive (extra keys / unexpected shapes are dropped
 	// silently). decodeUsage / decodeCostUSD shape them into
 	// agent.UsageInfo when translate() emits EventUsage.
 	Usage      json.RawMessage `json:"usage,omitempty"`
 	ModelUsage json.RawMessage `json:"modelUsage,omitempty"`
-
-	// permissive extras
-	Raw json.RawMessage `json:"-"`
 }
 
 type assistantMsg struct {
@@ -121,6 +123,40 @@ type assistantMsg struct {
 	Role    string         `json:"role,omitempty"`
 	Model   string         `json:"model,omitempty"`
 	Content []contentBlock `json:"content,omitempty"`
+}
+
+// syntheticModel is the model name Claude Code stamps on messages it
+// fabricates locally rather than receiving from the API (empty-turn
+// placeholders, interrupt notices, API-error surfaces).
+const syntheticModel = "<synthetic>"
+
+// noContentPlaceholder is the text Claude Code substitutes for an
+// assistant turn that produced no output at all. Local slash commands
+// executed over stream-json stdin always land here: the command runs,
+// no assistant text is generated, and the CLI still emits one
+// assistant message so the transcript stays well-formed.
+const noContentPlaceholder = "(no content)"
+
+// isSyntheticNoContent reports whether a text block is Claude Code's
+// zero-information placeholder for an empty assistant turn. Both the
+// synthetic model marker AND the literal placeholder text are required
+// so a real model answering "(no content)" is never swallowed.
+//
+// Matching is strict (==, no TrimSpace). The contract is: only the
+// byte sequence the CLI emits is dropped; whitespace-padded variants
+// like " (no content)" or "(no content)\n" flow through to the
+// channel — they are vanishingly rare and "be lenient" is the wrong
+// failure mode (silent data loss is worse than a stray character).
+//
+// This is the /new path: AgentSession.New → driver.New writes
+// `{"type":"user","message":{"role":"user","content":"/clear"}}` to
+// the CLI's stdin, and the CLI answers with conversation_reset +
+// system/init + a synthetic "(no content)" assistant message +
+// result{result:""}. Only the assistant message has user-visible
+// content, and it says nothing — dropping it here keeps /new to a
+// single receipt card.
+func isSyntheticNoContent(model, text string) bool {
+	return model == syntheticModel && text == noContentPlaceholder
 }
 
 // contentBlock is the union shape for assistant message content. The
@@ -258,6 +294,24 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 			switch block.Type {
 			case "text":
 				if block.Text == "" {
+					continue
+				}
+				// Claude Code renders an assistant turn that produced
+				// no text as a SYNTHETIC message whose single text
+				// block is the literal placeholder "(no content)"
+				// (model: "<synthetic>", usage all-zero). The most
+				// common producer is a local slash command executed
+				// over stream-json stdin — i.e. exactly what
+				// driver.New writes for /new ("/clear"). Forwarding
+				// it posts a content-free bubble to the chat right
+				// after the /new receipt card.
+				//
+				// Gated on model == "<synthetic>" so a real model
+				// that legitimately answers "(no content)" still
+				// reaches the user. Other synthetic messages
+				// (interrupt notices, API errors) carry real text
+				// and are deliberately NOT filtered here.
+				if isSyntheticNoContent(ev.Message.Model, block.Text) {
 					continue
 				}
 				// TEXT-FALLBACK (F-24 §5.3): when AskUserQuestion
@@ -472,6 +526,40 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 			logger.Debug("claudecode: control_request received (unhandled under bypassPermissions)")
 		}
 
+	case "conversation_reset":
+		// Claude Code emits this right after a local slash command
+		// over stream-json stdin resets the conversation (the
+		// /clear path used by /new via driver.New). Carries the
+		// new_conversation_id only; the authoritative SessionID +
+		// Model arrive in the immediately-following system/init
+		// event, which we already wire through EventAgentReady.
+		//
+		// Log at info (not debug) so a future protocol revision
+		// that swaps or drops the matching system/init becomes
+		// visible in default logs — without this, a break would
+		// silently corrupt /new (no SessionID refresh → next
+		// /resume pins to the dead conversation).
+		//
+		// The id is omitempty in streamEvent so a CLI revision
+		// that drops the field decodes to "". Treat absent and
+		// present-empty as the same shape: still log the event,
+		// just don't claim the reset succeeded by stamping an
+		// empty id — an operator looking at the log should be
+		// able to tell "CLI did not report an id" apart from
+		// "the reset cleared nothing".
+		if logger != nil {
+			attrs := []any{
+				"agent_name", agentName,
+				"workspace", workspace,
+			}
+			if ev.NewConversationID != "" {
+				attrs = append(attrs, "new_conversation_id", ev.NewConversationID)
+			} else {
+				attrs = append(attrs, "new_conversation_id_absent", true)
+			}
+			logger.Info("claudecode: conversation_reset (post /clear)", attrs...)
+		}
+
 	default:
 		if logger != nil {
 			logger.Debug("claudecode: unknown event type", "type", ev.Type)
@@ -531,9 +619,6 @@ func handleToolUse(
 //
 //  1. ev.Model — top-level field on system/init and result events.
 //  2. ev.Message.Model — nested field on assistant events.
-//  3. (legacy) probe ev.Raw for a top-level "model" key. This path
-//     is dead under json.Unmarshal because Raw is json:"-"; kept
-//     for documentation purposes only.
 func extractModel(ev streamEvent) string {
 	if ev.Model != "" {
 		return ev.Model
@@ -541,11 +626,7 @@ func extractModel(ev streamEvent) string {
 	if ev.Message != nil && ev.Message.Model != "" {
 		return ev.Message.Model
 	}
-	var probe struct {
-		Model string `json:"model"`
-	}
-	_ = json.Unmarshal(ev.Raw, &probe)
-	return probe.Model
+	return ""
 }
 
 // stringifyToolResult flattens a tool_result's content payload to a

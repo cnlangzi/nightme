@@ -22,12 +22,26 @@ import (
 //	                 or "## (HEAD detached at <sha>)"). The Feishu
 //	                 footer renders this as "⎇ ?" so users see
 //	                 "branch unknown" without the underlying reason.
-//	Uncommitted    — count of porcelain entries that are NOT
-//	                 untracked or ignored. Includes modified (M),
-//	                 added (A), deleted (D), renamed (R), copied
-//	                 (C), and unmerged conflict entries (UU, AA,
-//	                 etc.). Excludes "!!" ignored lines.
+//	Added          — count of porcelain entries with X=='A'
+//	                 (staged new files). "??" untracked entries
+//	                 are NOT counted here — see Untracked.
+//	Deleted        — count of porcelain entries with X=='D' OR
+//	                 Y=='D'.
+//	Modified       — count of porcelain entries with X=='M' OR
+//	                 Y=='M' (plus R / C). Does NOT include conflict
+//	                 entries — those live in Conflicts so the
+//	                 footer can render a distinct "! N" segment without
+//	                 double-counting.
 //	Untracked      — count of "??" entries (files not in the index).
+//	Conflicts      — count of unmerged conflict entries (UU /
+//	                 AA / DD / AU / UA / DU / UD; the full X,Y ∈
+//	                 {U,A,D} matrix is 9 codes — see
+//	                 isConflictXY below). Tracked separately from
+//	                 Modified so the footer can render a distinct
+//	                 "! N" segment without double-counting. HasConflicts
+//	                 is the boolean mirror (HasConflicts == Conflicts > 0)
+//	                 and remains the source of truth for the F-57 /gtw
+//	                 push and /gtw pr readiness gates.
 //	AheadOfRemote  — number of local commits the upstream is
 //	                 behind. Always 0 when HasUpstream is false.
 //	HasUpstream    — true when the branch has an upstream tracking
@@ -85,7 +99,6 @@ type GitStatusSnapshot = messages.GitStatusSnapshot
 // F-57: this is the single source of truth for the /gtw commit,
 // /gtw push, and /gtw pr readiness gates. All three commands call
 // it at entry; see docs/feat/F-57-gtw-push-pr-readiness.md §2.2.
-// F-XX (commit/push split): /gtw commit also reads from this snap
 // so push and commit gate on the same git truth.
 func CollectReadiness(ctx context.Context, dir string, git GitRunner) (*GitStatusSnapshot, error) {
 	out, stderr, err := git.Run(ctx, dir, "status", "--porcelain", "--branch",
@@ -166,24 +179,50 @@ func parsePorcelainBranchStatus(out string) *GitStatusSnapshot {
 		}
 		switch {
 		case line[0] == '?' && line[1] == '?':
-			// Untracked file.
+			// Untracked file — kept separate from Added so the
+			// Feishu footer can render "? N" as its own segment
+			// (iTerm2-aligned git status bar). Prior to the
+			// status-bar split, "??" was lumped into Uncommitted;
+			// the redesign exposes it as a distinct count without
+			// folding it into "added".
 			snap.Untracked++
 		case line[0] == '!' && line[1] == '!':
 			// Ignored file — not surfaced; only emitted with
 			// --ignored which we don't pass.
 			continue
 		default:
-			// F-57: distinguish conflict entries (UU/AA/DD/AU/UA/DU/UD)
+			// F-57: distinguish conflict entries (UU / UA / UD / AU / AA / AD / DU / DA / DD)
 			// from ordinary uncommitted edits. push and pr both hard-refuse
 			// when HasConflicts; the readiness gate uses the flag instead of
 			// re-detecting in dispatchPush/PR.
+			//
+			// Status-bar split: categorise the remaining porcelain
+			// entries into Added / Deleted / Modified / Conflicts
+			// so the Feishu footer can render `+ N / − N / ± N /
+			// ! N` segments without double-counting. Renamed (R)
+			// and copied (C) collapse into Modified — iTerm2 and
+			// friends do the same, and git itself treats them as
+			// variants of "modified". Conflict entries bump
+			// Conflicts (NOT Modified) so the footer shows two
+			// distinct, non-overlapping counts.
 			if isConflictXY(line) {
 				snap.HasConflicts = true
+				snap.Conflicts++
+				continue
 			}
-			// Everything else counts as "uncommitted": modified
-			// (M), staged add/delete/rename/copy (A/D/R/C),
-			// and unmerged conflict entries (UU, AA, DD, etc.).
-			snap.Uncommitted++
+			x, y := line[0], line[1]
+			switch {
+			case x == 'A':
+				snap.Added++
+			case x == 'D' || y == 'D':
+				snap.Deleted++
+			default:
+				// M / R / C — anything that means "the file
+				// changed but wasn't added/deleted" lands here.
+				// This deliberately groups R and C with M so the
+				// footer can present a single "± N" count.
+				snap.Modified++
+			}
 		}
 	}
 	return snap
@@ -192,14 +231,21 @@ func parsePorcelainBranchStatus(out string) *GitStatusSnapshot {
 // isConflictXY reports whether a porcelain status line's first two
 // characters indicate an unresolved merge/rebase conflict.
 //
-// Git's conflict matrix:
+// Git's full conflict matrix:
 //
 //	XY where X != ' ' and Y != ' ' and XY != "??" → conflict
 //
 // Specifically: any position is U, A, or D (with the same set on the
-// other side or another conflict marker). Mirrors the pattern in
-// push.go::detectConflicts so a single source of truth governs the
-// conflict detection regex across the package.
+// other side or another conflict marker). The complete matrix is
+// 3×3 = 9 codes — UU / UA / UD / AU / AA / AD / DU / DA / DD —
+// all unmerged merge/rebase states. isConflictXY is the SINGLE
+// source of truth for this classification in the gtw package;
+// other readiness predicates (PushBlockReason / PRBlockReason)
+// branch on the resulting HasConflicts flag rather than re-running
+// the detection. (Pre-F-57 there was a sibling push.go helper
+// that this function mirrored; F-57 collapsed the two call sites
+// onto the snapshot's HasConflicts field, so isConflictXY now
+// stands alone.)
 func isConflictXY(line string) bool {
 	if len(line) < 2 {
 		return false

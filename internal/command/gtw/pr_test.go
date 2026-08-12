@@ -780,12 +780,12 @@ func TestDispatchPR_Uncommitted(t *testing.T) {
 	snap := messages.GitStatusSnapshot{
 		Branch:      "wt-dirty",
 		HasUpstream: true,
-		//Uncommitted: 2, // produced via porcelainFromSnapshot
+		//Modified: 2, // produced via porcelainFromSnapshot
 	}
-	// Use raw setupReadiness but we want Uncommitted=2; build snap
+	// Use raw setupReadiness but we want Modified=2; build snap
 	// explicitly then call setupReadiness — but setupReadiness
-	// takes snap directly. Just set Uncommitted=2.
-	snap.Uncommitted = 2
+	// takes snap directly. Just set Modified=2.
+	snap.Modified = 2
 	setupReadiness(rig, "wt-dirty", snap)
 	rig.installDeps()
 
@@ -834,7 +834,7 @@ func TestDispatchPR_HasConflicts(t *testing.T) {
 		Branch:        "wt-conflict",
 		HasUpstream:   true,
 		HasConflicts:  true,
-		Uncommitted:   1, // 1 conflict entry → Uncommitted>=1
+		Modified:      1, // 1 modified entry; conflicts are tracked separately via Conflicts (set by HasConflicts=true below)
 		AheadOfRemote: 0,
 		BehindRemote:  0,
 	}

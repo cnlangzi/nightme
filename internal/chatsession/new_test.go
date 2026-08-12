@@ -100,7 +100,12 @@ func injectAS(t *testing.T, cs *ChatSession, agentName, cwd string, handle *agen
 	id := newAgentSessionID()
 	as := NewAgentSession(id, cs.ID, agentName, cwd, nil)
 	as.SetHandleForTest(handle)
-	as.SetRunning(1234) // arbitrary pid; needed so Status()==StatusRunning
+	// Use a high pid that is virtually guaranteed not to be a real
+	// OS pid, so that the reapOrphan() call inside restartAgentSession's
+	// respawn path doesn't accidentally try to kill a system
+	// process (pid 1234 is LaunchTrampoline on macOS — kill returned
+	// "operation not permitted" and the test spuriously failed).
+	as.SetRunning(999_999_999)
 	cs.pool[agentCwdKey{Agent: agentName, Cwd: cwd}] = as
 	return as
 }

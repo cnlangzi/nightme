@@ -175,11 +175,11 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
 	lockFD, err := strconv.Atoi(os.Getenv(daemonLockFDEnv))
 	if err != nil || lockFD < 3 {
-		return errors.New("_daemon must be launched by `nightme start` or `nightme restart`")
+		return fmt.Errorf("%s must be launched by `nightme start` or `nightme restart`", daemonChildCommand)
 	}
 	readyFD, err := strconv.Atoi(os.Getenv(readyFDEnv))
 	if err != nil || readyFD < 3 {
-		return errors.New("_daemon readiness pipe is missing")
+		return fmt.Errorf("%s readiness pipe is missing", daemonChildCommand)
 	}
 	lock, err := daemoncontrol.LockFromFile(os.NewFile(uintptr(lockFD), "daemon.lock"))
 	if err != nil {

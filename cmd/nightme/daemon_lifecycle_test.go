@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -22,8 +23,15 @@ func TestRootLifecycleCommandSurface(t *testing.T) {
 			t.Fatalf("command %q not registered: cmd=%v err=%v", name, cmd, err)
 		}
 	}
-	if cmd, _, err := root.Find([]string{"_daemon"}); err != nil || !cmd.Hidden {
+	if cmd, _, err := root.Find([]string{daemonChildCommand}); err != nil || !cmd.Hidden {
 		t.Fatalf("hidden daemon command: cmd=%v err=%v", cmd, err)
+	}
+	// The leading underscore is the convention that marks this as an
+	// internal, non-user-facing subcommand: it can never collide with
+	// a real command name, and it is recognizable as a nightme child
+	// process in `ps` output. Hidden alone would not say that.
+	if !strings.HasPrefix(daemonChildCommand, "_") {
+		t.Errorf("daemonChildCommand = %q, want a leading underscore", daemonChildCommand)
 	}
 }
 

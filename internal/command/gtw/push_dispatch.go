@@ -116,15 +116,20 @@ func dispatchPush(
 				"  no unpushed commits on "+snap.Branch), nil
 	}
 
-	// 3. Capture headBefore for the success card's rev-range. We
-	// capture it here (after the readiness gate, so we know the
+	// 3. Capture originBefore (the previous origin/<branch> tip)
+	// BEFORE the push, so the success card can list exactly the
+	// commits that just landed. EMPTY when the branch has never
+	// been pushed (first-push path); in that case `git push -u`
+	// is what establishes origin/<branch>.
+	//
+	// Captured here (after the readiness gate, so we know the
 	// worktree is clean + on a real branch) rather than at entry
 	// (where a dirty worktree would have made the captured SHA
 	// useless for the post-push log query).
-	headBefore, err := headSHA(ctx, c.Worktree, deps)
+	originBefore, err := originBranchSHA(ctx, c.Worktree, c.Branch, deps)
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ read HEAD: %v", err)), nil
+			fmt.Sprintf("❌ read origin/%s: %v", c.Branch, err)), nil
 	}
 
 	// 4. Push with retry + post-push verification
@@ -136,13 +141,34 @@ func dispatchPush(
 	}
 
 	// 5. Build the success card from git log — NOT from agent
-	// prose. revRange is `headBefore..origin/<branch>` so the
-	// card lists exactly the commits this push just landed. A
-	// failure here is a hard error: the push succeeded but we
-	// can't render the result. Surface the failure rather than
-	// fudging a "pushed 0 commit(s)" card.
-	card, err := replyPushSuccessCard(ctx, c,
-		headBefore+"..origin/"+c.Branch, deps)
+	// prose. The rev range MUST be `originBefore..origin/<branch>`
+	// so the card lists exactly the commits this push just landed.
+	//
+	// Historical trap (the bug behind the "pushed 0 commit(s)"
+	// behaviour the Feishu card was showing): the previous shape
+	// was `headBefore..origin/<branch>`. After a successful push
+	// origin/<branch> == local tip == headBefore, so that range
+	// collapses to empty and the card lies about having pushed
+	// nothing. Using the pre-push origin tip as the left side
+	// avoids the collapse.
+	//
+	// First-push case: originBefore is "" because origin/<branch>
+	// didn't exist before. Anchoring to `c.Branch` alone is a trap
+	// — if the branch was forked from `main`, that range lists
+	// every commit reachable from `<branch>`, i.e. main's entire
+	// history plus the new commits. Better: anchor to
+	// `origin/<default>..origin/<branch>` so we list ONLY the
+	// commits this push landed. Falls back to `c.Branch` when
+	// origin/<default> doesn't exist (brand-new repo) or when the
+	// branch being pushed IS the default (pushing main itself for
+	// the first time uploads everything reachable).
+	var revRange string
+	if originBefore != "" {
+		revRange = originBefore + "..origin/" + c.Branch
+	} else {
+		revRange = firstPushRevRange(ctx, c, deps)
+	}
+	card, err := replyPushSuccessCard(ctx, c, revRange, deps)
 	if err != nil {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ push succeeded but couldn't render card: %v", err)), nil

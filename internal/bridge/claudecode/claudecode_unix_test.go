@@ -458,6 +458,71 @@ func TestPumpStream_Result(t *testing.T) {
 	}
 }
 
+// TestPumpStream_SyntheticNoContent_Dropped guards the /new
+// regression. driver.New writes
+// `{"type":"user","message":{"role":"user","content":"/clear"}}` to
+// the CLI's stdin; the CLI answers with conversation_reset +
+// system/init + a synthetic "(no content)" assistant message +
+// result{result:""}. Only the assistant message has user-visible
+// text, but it says nothing — forwarding it posts a content-free
+// bubble to the chat right after the /new receipt card.
+//
+// The fix drops the synthetic placeholder in the assistant/text
+// branch. The gate requires BOTH the "<synthetic>" model marker
+// AND the exact "(no content)" text so a real model that
+// legitimately answers "(no content)" still reaches the user.
+func TestPumpStream_SyntheticNoContent_Dropped(t *testing.T) {
+	// Just the assistant message (the only one with user-visible
+	// text). Reproduced verbatim from a live run of
+	// `claude --output-format stream-json --input-format stream-json`
+	// fed a /clear line on stdin.
+	input := `{"type":"assistant","message":{"id":"1cd25b3f-37cb-48e0-b1cc-72260a2c305c","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"(no content)"}]}}` + "\n"
+	evs := streamFromString(input)
+	if len(evs) != 0 {
+		t.Errorf("got %d events, want 0 — synthetic \"(no content)\" must be dropped", len(evs))
+		for i, ev := range evs {
+			t.Logf("  evs[%d] = %+v", i, ev)
+		}
+	}
+}
+
+// TestPumpStream_RealModelSayingNoContent_Kept is the negative
+// half of the guard. A non-synthetic model that produces the
+// literal text "(no content)" (e.g. as part of an answer) must
+// still be forwarded. The gate is AND-ed, not OR-ed.
+func TestPumpStream_RealModelSayingNoContent_Kept(t *testing.T) {
+	input := `{"type":"assistant","message":{"model":"claude-opus-4-1","role":"assistant","content":[{"type":"text","text":"(no content)"}]}}` + "\n"
+	evs := streamFromString(input)
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want 1 — real model saying \"(no content)\" must be forwarded", len(evs))
+	}
+	if evs[0].Kind != agent.EventAgentText {
+		t.Errorf("kind = %v, want EventAgentText", evs[0].Kind)
+	}
+	if evs[0].Text != "(no content)" {
+		t.Errorf("text = %q, want \"(no content)\"", evs[0].Text)
+	}
+}
+
+// TestPumpStream_OtherSyntheticMessages_Kept covers the rest of
+// the synthetic class. Claude Code also uses "<synthetic>" for
+// interrupt notices and API-error surfaces that DO carry real
+// user-visible text. The drop is narrow on purpose — only the
+// exact zero-content placeholder.
+func TestPumpStream_OtherSyntheticMessages_Kept(t *testing.T) {
+	input := `{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Request interrupted by user."}]}}` + "\n"
+	evs := streamFromString(input)
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want 1 — non-placeholder synthetic text must be forwarded", len(evs))
+	}
+	if evs[0].Kind != agent.EventAgentText {
+		t.Errorf("kind = %v, want EventAgentText", evs[0].Kind)
+	}
+	if evs[0].Text != "Request interrupted by user." {
+		t.Errorf("text = %q, want interrupt notice verbatim", evs[0].Text)
+	}
+}
+
 func TestPumpStream_Result_EmptyText_NoResultEvent(t *testing.T) {
 	// When the result has no text AND is_error=false, the entire
 	// result branch is dropped (text + usage are useless). Only

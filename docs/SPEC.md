@@ -1136,8 +1136,14 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 10. router := commandServices.NewReactionRouter(); router.Register("*", gtwMgr.HandleReaction)
 11. reg := command.NewRegistry(); reg.Register(gtw / watch / think / tools / cwd / use / close / stop / newcmd)
        commander := command.NewCommander(reg)
-12. shellDispatcher := shell.NewDispatcher(chatSessionChannelSender{mgr: mgr})
-13. gwImpl := gateway.New(messageDispatcher).WithCommander(shim).WithShellDispatch(shellShim).WithActionHandler(reactionShim)
+12. shellDispatcher := shell.NewDispatcher(mgr.Emitter())  # shell 走共享 outbound.Emitter,跟 command / 普通消息同一条消息路径(F-XX Sender→Emitter 重构后)
+13. ir := inbound.New(mgr, commander, shellDispatcher, router, cfg.Primary)
+       gwImpl := gateway.New(ir, em)
+       # inbound.Router owns the 4-branch dispatch chain (tryAction /
+       # tryCommand / tryShell / tryMessage) — F-58 replaced the v0.x
+       # shim closures (WithCommander / WithShellDispatch /
+       # WithActionHandler) and the standalone messageDispatcher
+       # pointer that gateway.New used to take.
 14. wireRuntimeCallbacksAndRestore(mgr, gwImpl, prCacheReg, ...)
        — mgr.WithOnCreate(...) 必须在 RestoreFromRegistry 之前调，
          否则恢复的 ChatSession 上的 onCreate 钩子永不触发
@@ -1153,7 +1159,7 @@ User-configured `agents:` entries override built-ins of the same name (merge hap
 - Step 8 的 `em`（outbound.Emitter）是所有出站消息的统一咽喉（runtime event pump / slash command / MessageState 三条路径都走它），负责把 `StatusBar` footer 盖到每条消息上
 - Step 10 的 `commandServices.ReactionRouter` 单例持 `map[chatID]handler`，gtw 通过 `Register("*", gtwMgr.HandleReaction)` 注册自己；Channel adapter 把 decision-card 按钮归一化为既有 reaction 通路（与 emoji reaction 汇合）
 - Step 11 的 `command.NewRegistry` + `commander.Dispatch` 取代了 之前的 `gateway.RegisterChatSessionCommands`；Gateway 只持有 commander shim，不知道任何命令实现细节
-- Step 13 的 `WithCommander` + `WithShellDispatch` + `WithActionHandler` 三者解耦：`/cwd` `/use` `/gtw` 等所有 slash command 走 commander；`!cmd` 走 shell；reaction / action 事件走 router
+- Step 13 的 `inbound.Router` 4-branch dispatch chain 解耦:`/cwd` `/use` `/gtw` 等所有 slash command 走 `commander.Dispatch`;`!cmd` 走 `shell.Dispatcher.Handle`;reaction / action 事件走 `services.ReactionRouter`(F-58 替代了 v0.x 的 `WithCommander` + `WithShellDispatch` + `WithActionHandler` 三个 shim closure)
 - Step 14 的 `wireRuntimeCallbacksAndRestore` 把 `WithOnCreate` 与 `RestoreFromRegistry` 绑成一对，防止 restored ChatSession 漏装 EventHandler / MessageStateBus subscriber（详见 `cmd/nightme/run.go` 注释）
 - Step 15 后所有 AgentSession 是 `Detached`（无进程）；用户第一次发消息 → `LookupSelectedAgentSession` → `Spawner.Spawn`
 

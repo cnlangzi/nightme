@@ -224,6 +224,94 @@ Queued + Done pair won't double-fire.
 
 ---
 
+## Shell `!cmd` path — same ⏳→✅ contract
+
+Shell commands (`!ls`, `!make build`, etc.) share the user-message
+⏳→✅ UX with slash commands. The implementation differs in two
+ways:
+
+1. **Async goroutine preserved**: shell commands often run 5-60s,
+   so `Dispatcher.Handle` cannot synchronously wait for completion
+   the way `commander.Dispatch` does. The goroutine outlives the
+   inbound ctx — that's intentional (e.g. `!make restart` lets
+   the shell command finish even after the inbound-ctx cancel).
+2. **Reply posted async inside the goroutine**: shell replies
+   don't flow through the runtime shim the way slash replies do.
+   `ShellOutput` therefore doesn't carry a Reply field — the
+   goroutine calls `emitter.Send(messages.OutboundMessage{Kind:
+   OutCommandReply, ...})` directly.
+
+### Framework-level emission in `Dispatcher.Handle`
+
+```go
+if _, matched := parseShell(ir.Text); !matched {
+    return nil, false  // not a !cmd — fall through
+}
+emitShellState(cs, ir.MessageID, agent.MessageQueued)  // ⏳ synchronously, before goroutine
+go d.runShell(cs, ir)                                  // work + reply + ✅ inside
+return &ShellOutput{Consumed: true}, true
+```
+
+`runShell`'s first defer is `emitShellState(cs, ir.MessageID,
+agent.MessageDone)`. Because defers are LIFO, it runs LAST — after
+the inner panic-recovery defer. This guarantees ✅ fires on every
+exit path:
+
+- normal completion (reply sent successfully)
+- command failed (exit non-zero, dispatch error)
+- reply Send failed
+- panic in the goroutine
+
+### Why shell package now imports chatsession + outbound
+
+Pre-refactor: `internal/shell.Sender` interface + `sender_chatsession.go`
+bridge translated `shell.Outbound` → `messages.OutboundMessage` and
+delegated to the per-chat outbound.Emitter. The bridge existed to
+keep `internal/shell` from importing `internal/chatsession` /
+`internal/gateway/outbound`.
+
+The decoupling never paid off: the only call site was
+`cmd/nightme/run.go:480` (the production wire-up) and two test
+wirings. There was no third-party `internal/shell` consumer that
+needed the package-import isolation.
+
+Post-refactor: `Dispatcher` holds `outbound.Emitter` directly, no
+bridge, and `Handle` accepts `cs *chatsession.ChatSession` as its
+first parameter. Same shape as `commander.Dispatch` — both
+packages now follow the convention `(ctx-or-implicit, cs,
+input) → (*Output, bool)`. The shell package joins command in
+walking the full chat-session lifecycle instead of skirting it.
+
+### What fall-through paths do
+
+- `parseShell` no-match → `return nil, false`, no goroutine, no
+  emit. Identical contract to `commander.Dispatch`'s no-match
+  branch: don't flash ⏳ on inputs that aren't actually commands.
+
+### Tests
+
+`internal/shell/dispatch_test.go` — new tests mirror the commander
+set:
+
+- `TestDispatcherHandle_EmitsQueuedThenDone` — happy path,
+  ⏳ → ✅ sequence.
+- `TestDispatcherHandle_FallThroughEmitsNothing` — non-!cmd must
+  not emit any MessageState.
+- `TestDispatcherHandle_NilMessageIDSkipsEmit` — empty MessageID
+  guard.
+- `TestDispatcherHandle_NilCSSkipsEmit` — nil cs guard.
+- `TestDispatcherHandle_ZeroValueCSDoesNotPanic` — bare
+  `&chatsession.ChatSession{}` (nil MessageStateBus) doesn't
+  crash; the nil-bus guard in `emitShellState` keeps the contract
+  local and test-friendly.
+- `TestDispatcherHandle_NilEmitter` — `NewDispatcher(nil)`
+  doesn't panic; reply is silently dropped.
+- `TestDispatcherHandle_ShellCommand` — happy path: `!echo hello`
+  produces a summary card with `OutCommandReply` kind and the
+  correct `ChatID` / `ReplyTo`.
+
+---
+
 ## Migration checklist (for someone reading this in the future)
 
 1. ✅ `agent.MessageDone` constant + String case — `internal/agent/message_state.go`
@@ -232,3 +320,4 @@ Queued + Done pair won't double-fire.
 4. ✅ Remove manual emit in `/steer` — `internal/command/steer/cmd.go`
 5. ✅ Tests — `internal/command/commander_test.go`, `internal/agent/message_state_test.go`, `internal/channel/feishu/adapter_message_state_test.go`
 6. ✅ Update F-53 §8 row — see [F-53-message-prompt-lifecycle.md](F-53-message-prompt-lifecycle.md) follow-up note
+7. ✅ Shell ⏳→✅ (F-XX Sender→Emitter refactor) — `internal/shell/dispatch.go` (drop `Sender`/`Outbound`/bridge, take `outbound.Emitter` + `cs` directly), `internal/shell/sender_chatsession.go` deleted, `internal/gateway/inbound/shell.go` + `inbound.go` updated to new shape, `internal/gateway/inbound/teststubs/teststubs.go` + `internal/gateway/dispatch_slash_reply_test.go` stubs updated, `cmd/nightme/run.go:480` wires `mgr.Emitter()`.

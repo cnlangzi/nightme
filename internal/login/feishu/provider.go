@@ -134,9 +134,10 @@ func (f *Provider) Name() string { return "feishu" }
 // so callers can errors.Is-match without depending on the SDK.
 //
 // Login does NOT itself send the greeting DM — that is the
-// orchestrator's job (calls Provider.Greet right after Login
-// returns). Login only captures the owner ID + builds the lark
-// client so Greet is ready to fire.
+// orchestrator's job. Login only captures the owner ID + builds
+// the lark client so Greet is ready to fire; the orchestrator
+// calls Greet AFTER config.SaveDefault has succeeded (see
+// cmd/nightme/login.go).
 func (f *Provider) Login(ctx context.Context) (*login.Credentials, error) {
 	opts := &registration.Options{
 		AppID:      f.opts.ExistingAppID,

@@ -16,13 +16,13 @@
 
 **NightMe** drives your local AI Coding Agents — Claude Code, Codex, Pi, OpenCode, etc. — from chat. Send a message in any connected chat platform; NightMe routes it to the right agent process and returns the reply as a structured card.
 
-Many chats run in parallel — one per project. Many agents work in parallel, each on its own task — switching between them is instant, no cold restart. `git` worktree work is hardened into `Git Team Workflow` (`/gtw`): fix / push / pr / close / sync — each step is one IM reply card, integrated with GitHub, GitLab, and similar platforms. NightMe doesn't replace your agent subscriptions or memory; it sits in front of them and keeps them warm.
+Multiple chats run in parallel — one per project. Multiple agents work in parallel, each on its own task — switching between them is instant, no cold restart. `git` worktree work is hardened into `Git Team Workflow` (`/gtw`): fix / push / pr / close / sync — each step is one IM reply card, integrated with GitHub, GitLab, and similar platforms. NightMe doesn't replace your agent subscriptions or memory; it sits in front of them and keeps them warm.
 
 ## Why NightMe
 
 ### One chat, one CWD, one project
 
-You (a single developer) work across many projects at once. Each Feishu chat (group or DM) is a **ChatSession**, and each ChatSession has a **CWD** — its current working directory. The CWD *is* the project: set it with `/cwd <path>`, change it anytime. Multiple chats run in parallel, each bound to its own directory.
+You work across multiple projects at once. Each Feishu chat (group or DM) is a **ChatSession**, and each ChatSession has a **CWD** — its current working directory. The CWD *is* the project: set it with `/cwd <path>`, change it anytime. Multiple chats run in parallel, each bound to its own directory.
 
 ```
                             You (Feishu)

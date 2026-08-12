@@ -16,7 +16,7 @@
 
 **NightMe** 把你的本地 AI Coding Agent（Claude Code、Codex、Pi、OpenCode 等）放进聊天里跑。你在任何已接入的 IM 里发条消息，NightMe 就把消息路由到对应的 agent 进程，回复以结构化卡片形式返回。
 
-多个 chat 并行——一个项目一个，目录就是项目本身：每个 ChatSession 跑在自己的工作目录上，目录即项目本体。多个 agent 并行工作——切换是即时的，无需冷启动。`git` worktree 操作被封装进 `Git Team Workflow`（`/gtw`）：fix / hooks / close——每一步一张 IM 回复卡，集成 GitHub、GitLab 之类平台。NightMe 不替换你的 agent 订阅或记忆，只在它们前面做一个轻量代理。
+多个 chat 并行——一个项目一个，目录就是项目本身：每个 ChatSession 跑在自己的工作目录上，目录即项目本体。多个 Agent 并行工作——切换是即时的，无需冷启动。`git` worktree 操作被封装进 `Git Team Workflow`（`/gtw`）：fix / hooks / close——每一步一张 IM 回复卡，集成 GitHub、GitLab 之类平台。NightMe 不替换你的 agent 订阅或记忆，只在它们前面做一个轻量代理。
 
 ## Why NightMe
 

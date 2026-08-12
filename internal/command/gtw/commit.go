@@ -22,19 +22,19 @@ import (
 //
 // The flow:
 //
-//	1. CollectReadiness (single source of truth, F-57).
-//	2. Hard-refuse conflicts (a commit on an unresolved
-//	   state still lands broken history locally — even though
-//	   push would catch it, refuse early so the user fixes
-//	   intent).
-//	3. Refuse detached HEAD.
-//	4. No-op if worktree is already clean.
-//	5. Capture headBefore.
-//	6. Run the configured one-shot agent; verify HEAD advanced,
-//	   worktree is clean, branch matches c.Branch.
-//	7. Re-snapshot and refuse if the agent introduced conflicts
-//	   (rare but documented).
-//	8. Render the commit success card from git log.
+//  1. CollectReadiness (single source of truth, F-57).
+//  2. Hard-refuse conflicts (a commit on an unresolved
+//     state still lands broken history locally — even though
+//     push would catch it, refuse early so the user fixes
+//     intent).
+//  3. Refuse detached HEAD.
+//  4. No-op if worktree is already clean.
+//  5. Capture headBefore.
+//  6. Run the configured one-shot agent; verify HEAD advanced,
+//     worktree is clean, branch matches c.Branch.
+//  7. Re-snapshot and refuse if the agent introduced conflicts
+//     (rare but documented).
+//  8. Render the commit success card from git log.
 //
 // Agent selection (CLI -a > yml cfg.Commit.Agent >
 // cs.SelectedAgent()) is handled inside runAgentToCommit's
@@ -324,13 +324,11 @@ func buildAgentPrompt(c Context) string {
 	}
 	sb.WriteString(". They need it committed to local git.\n\n")
 
-	sb.WriteString("Group the changes by relevance — different concerns go in\n")
-	sb.WriteString("different commits, related changes go together. Use\n")
-	sb.WriteString("Conventional Commits for each:\n\n")
+	sb.WriteString("Group the changes by relevance — different concerns go indifferent commits, related changes go together.\n")
+	sb.WriteString("Use Conventional Commits for each:\n\n")
 
 	sb.WriteString("  <type>(<scope>): <subject>\n")
-	sb.WriteString("  types: feat, fix, chore, refactor, docs, test, build,\n")
-	sb.WriteString("         ci, perf, style, revert\n")
+	sb.WriteString("  types: feat, fix, chore, refactor, docs, test, build, ci, perf, style, revert\n")
 	sb.WriteString("  subject: ≤72 chars, imperative, no trailing period\n")
 	sb.WriteString("  body: WHY, wrapped at 72  [<Issue: #N>] if applicable.\n\n")
 

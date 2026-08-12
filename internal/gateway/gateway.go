@@ -43,7 +43,7 @@ package gateway
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"sync"
 
 	"github.com/cnlangzi/nightme/internal/channel"
@@ -252,10 +252,34 @@ func (r *Router) dispatchLoop(ctx context.Context) {
 			}
 			result, err := r.DispatchInbound(withRouter(ctx, r), &msg)
 			if err != nil {
-				log.Printf("gateway: dispatch %s failed: %v", msg.ChatID, err)
+				slog.Default().Warn("gateway: dispatch failed",
+					"chat_id", msg.ChatID, "err", err)
 			}
 			if result == nil {
 				continue
+			}
+			// Slash commands return a CommandResult whose Reply
+			// field carries the bot's text. The previous loop
+			// dropped it on the floor — /new / /use / /close /
+			// /gtw subcommands all hung silently after the
+			// F-58 dispatcher rewrite. Forward Reply through
+			// the wired Emitter so the user sees the expected
+			// "Now using pi…", "Reset N session(s)…", etc.
+			//
+			// ReplyTo = msg.MessageID anchors the chat-side
+			// thread so Feishu renders the reply as a thread
+			// reply to the slash command, not as a free-floating
+			// bot message.
+			if result.Reply != "" && r.emitter != nil {
+				if sendErr := r.emitter.Send(ctx, messages.OutboundMessage{
+					ChatID:  msg.ChatID,
+					Kind:    messages.OutReply,
+					Text:    result.Reply,
+					ReplyTo: msg.MessageID,
+				}); sendErr != nil {
+					slog.Default().Warn("gateway: emit reply failed",
+						"chat_id", msg.ChatID, "err", sendErr)
+				}
 			}
 		}
 	}

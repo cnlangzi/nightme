@@ -53,8 +53,11 @@ const (
 	OutInit
 	// OutCommandReply is a one-shot plain-text message sent in
 	// response to a system-level slash command (e.g. /cwd, /run,
-	// /help, /kill, /agents) or to a runtime error that needs to
-	// surface to the user without the rolling-log card path.
+	// /help, /kill, /agents), a shell `!cmd` dispatch (see
+	// internal/shell/dispatch.go runShell — shell replies use this
+	// Kind because shell has no receipt card), or to a runtime
+	// error that needs to surface to the user without the
+	// rolling-log card path.
 	//
 	// Distinct from OutReply: OutReply is the agent's stream of
 	// intermediate / final replies and goes through the receipt
@@ -191,11 +194,11 @@ type OutboundMessage struct {
 	// the legacy Ready *AgentReadyEvent field (deleted when event
 	// payloads were flattened). Channel reads these directly to
 	// render the receipt header / footer.
-	SessionID  string
-	Model      string
-	AgentName  string
+	SessionID string
+	Model     string
+	AgentName string
 	Workspace string
-	Branch     string
+	Branch    string
 
 	// ReplyTo carries the channel-native root message id when the
 	// agent wants to reply in a thread.

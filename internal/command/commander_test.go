@@ -237,8 +237,8 @@ func TestNewCommander_LeadingWhitespace_BeforeSlash_Routes(t *testing.T) {
 // change the rules, update both parsers AND this test in lock-step.
 func TestParseCommand_Matrix(t *testing.T) {
 	cases := []struct {
-		name    string
-		input   string
+		name     string
+		input    string
 		wantBody string
 		wantOK   bool
 	}{
@@ -528,9 +528,9 @@ func TestDispatch_ZeroValueCSDoesNotPanic(t *testing.T) {
 // during the work and a ✅ marker on completion.
 //
 // We verify ordering by combining three independent signals:
-//   1. cap.snapshot() records MessageState events in publish order.
-//   2. fakeCmd.calls is incremented inside Handle (set to 1).
-//   3. fakeCmd.got is populated inside Handle.
+//  1. cap.snapshot() records MessageState events in publish order.
+//  2. fakeCmd.calls is incremented inside Handle (set to 1).
+//  3. fakeCmd.got is populated inside Handle.
 //
 // If the snapshot's first event is Queued AND the second is Done
 // AND fakeCmd.calls == 1, then Handle ran exactly once between the

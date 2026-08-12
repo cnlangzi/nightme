@@ -279,8 +279,8 @@ func verifyAgentCommitted(ctx context.Context, deps HandlerDeps, c Context, head
 		return fmt.Sprintf(
 			"⚠️ agent finished but %d file(s) are still uncommitted in %s:\n"+
 				"  %s\n"+
-				"hint: commit them manually, or re-run /gtw commit to retry.\n"+
-				"  (the agent was given a chance to commit them — re-invoking it automatically won't necessarily help)",
+				"\n"+
+				"💡 hint: commit them manually, or re-run /gtw commit to retry.",
 			len(uncommitted), c.Worktree,
 			strings.Join(uncommitted, "\n  "))
 	}

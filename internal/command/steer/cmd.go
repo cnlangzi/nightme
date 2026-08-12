@@ -10,17 +10,17 @@
 // Compare to sibling commands:
 //
 //   - /stop  — signals the bridge to halt the in-flight turn;
-//              does NOT enqueue a new message.
+//     does NOT enqueue a new message.
 //   - /close — forcibly terminates the bridge process (graceful);
-//              does NOT enqueue a new message; preserves session
-//              identity for respawn.
+//     does NOT enqueue a new message; preserves session
+//     identity for respawn.
 //   - /new   — invokes the bridge's in-place context reset
-//              (claudecode's `/clear`, pi's `new_session`, etc.).
-//              Does NOT abort the in-flight turn or enqueue a
-//              new message.
+//     (claudecode's `/clear`, pi's `new_session`, etc.).
+//     Does NOT abort the in-flight turn or enqueue a
+//     new message.
 //   - /steer — aborts the in-flight turn AND prepends a new
-//              message to the queue. The new message takes
-//              priority over any already-queued user input.
+//     message to the queue. The new message takes
+//     priority over any already-queued user input.
 //
 // Implementation:
 //

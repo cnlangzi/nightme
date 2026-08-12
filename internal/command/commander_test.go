@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
@@ -235,8 +237,8 @@ func TestNewCommander_LeadingWhitespace_BeforeSlash_Routes(t *testing.T) {
 // change the rules, update both parsers AND this test in lock-step.
 func TestParseCommand_Matrix(t *testing.T) {
 	cases := []struct {
-		name    string
-		input   string
+		name     string
+		input    string
 		wantBody string
 		wantOK   bool
 	}{
@@ -290,5 +292,283 @@ func TestNewCommander_HandlerError_BecomesReply(t *testing.T) {
 	}
 	if !strings.Contains(got.Reply, "kaboom") {
 		t.Errorf("reply should contain the error message, got %q", got.Reply)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Framework-level ⏳ → ✅ reaction contract (F-XX, see
+// docs/feat/slash-command-reactions.md)
+// ---------------------------------------------------------------------------
+//
+// These tests verify that commander.Dispatch automatically emits
+// agent.MessageQueued before the matched SlashCommandFactory.Handle call
+// and agent.MessageDone after it, regardless of whether Handle returned
+// successfully or errored. The pair lands on the user message via the
+// MessageStateBus → feishu adapter path so the user sees ⏳ then ✅ in
+// their IM channel without per-command wiring.
+
+// stateCapture is a small test recorder subscribed to a ChatSession's
+// MessageStateBus. Mirrors the captureHandler pattern in
+// internal/chatsession/message_state_test.go but stays in the command
+// package to avoid an import cycle on the unexported event type.
+type stateCapture struct {
+	mu    sync.Mutex
+	calls []stateCall
+}
+
+type stateCall struct {
+	chatID, userMsgID string
+	state             agent.MessageState
+}
+
+func (c *stateCapture) handler(e chatsession.MessageStateEvent) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls = append(c.calls, stateCall{chatID: e.ChatID, userMsgID: e.UserMsgID, state: e.State})
+	return false
+}
+
+func (c *stateCapture) snapshot() []stateCall {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]stateCall, len(c.calls))
+	copy(out, c.calls)
+	return out
+}
+
+// newWiredCS constructs a ChatSession via chatsession.New so the
+// MessageStateBus is wired, then subscribes cap to it. Production code
+// never bypasses chatsession.New; tests that need to assert on
+// MessageStateBus must use this helper (or an equivalent) to avoid
+// the nil-bus path in emitSlashState.
+func newWiredCS(t *testing.T, cap *stateCapture) *chatsession.ChatSession {
+	t.Helper()
+	cs, err := chatsession.New("oc_test", "claude")
+	if err != nil {
+		t.Fatalf("chatsession.New: %v", err)
+	}
+	cs.MessageStateBus.Subscribe(cap.handler)
+	return cs
+}
+
+// TestDispatch_EmitsQueuedThenDone verifies the happy path: a matched
+// slash command with a non-empty MessageID gets exactly the
+// MessageQueued → cmd.Handle → MessageDone sequence on its bus.
+func TestDispatch_EmitsQueuedThenDone(t *testing.T) {
+	reg := NewRegistry()
+	cmd := newFakeCmd("gtw", "")
+	cmd.output = &SlashOutput{Consumed: true, Reply: "ok"}
+	reg.Register(cmd)
+
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+
+	c := NewCommander(reg)
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{}, cs,
+		SlashInput{Text: "/gtw fix 42", MessageID: "om_42"})
+	if err != nil {
+		t.Fatalf("dispatch err: %v", err)
+	}
+	if !handled || got == nil || !got.Consumed {
+		t.Fatalf("expected consumed reply, got handled=%v out=%+v", handled, got)
+	}
+
+	calls := cap.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("captured %d state events; want 2 (Queued + Done)", len(calls))
+	}
+	if calls[0].state != agent.MessageQueued || calls[0].userMsgID != "om_42" {
+		t.Errorf("calls[0] = %+v; want {MessageQueued, om_42}", calls[0])
+	}
+	if calls[1].state != agent.MessageDone || calls[1].userMsgID != "om_42" {
+		t.Errorf("calls[1] = %+v; want {MessageDone, om_42}", calls[1])
+	}
+}
+
+// TestDispatch_EmitsDoneOnHandlerError verifies that the framework
+// still emits MessageDone when the matched command's Handle returns
+// an error. The user still gets the ✅ completion reaction even
+// though the reply is the ❌ error text.
+func TestDispatch_EmitsDoneOnHandlerError(t *testing.T) {
+	reg := NewRegistry()
+	cmd := newFakeCmd("boom", "")
+	cmd.err = errors.New("kaboom")
+	reg.Register(cmd)
+
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+
+	c := NewCommander(reg)
+	got, handled, dispatchErr := c.Dispatch(context.Background(), RuntimeServices{}, cs,
+		SlashInput{Text: "/boom", MessageID: "om_err"})
+	if dispatchErr != nil {
+		t.Fatalf("dispatch err: %v", dispatchErr)
+	}
+	if !handled || got == nil || !got.Consumed {
+		t.Fatalf("expected consumed reply on error path, got handled=%v out=%+v", handled, got)
+	}
+
+	calls := cap.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("captured %d state events; want 2 (Queued + Done)", len(calls))
+	}
+	if calls[0].state != agent.MessageQueued || calls[1].state != agent.MessageDone {
+		t.Errorf("want [Queued, Done], got [%v, %v]", calls[0].state, calls[1].state)
+	}
+}
+
+// TestDispatch_FallThroughEmitsNothing verifies the contract that
+// fall-through paths (non-slash input, unknown slash command) do
+// NOT emit MessageQueued/MessageDone — only matched commands get the
+// ⏳/✅ pair. This prevents "⏳ flash" on inputs like "/etc/passwd"
+// that the user intended as plain text.
+func TestDispatch_FallThroughEmitsNothing(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(newFakeCmd("gtw", ""))
+
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+
+	c := NewCommander(reg)
+
+	for _, text := range []string{
+		"hello world", // plain text — handled=false
+		"/unknown",    // unknown slash — handled=true, Consumed=false
+		"/etc/passwd", // path-like fall-through
+	} {
+		cap.calls = nil
+		got, handled, err := c.Dispatch(context.Background(), RuntimeServices{}, cs,
+			SlashInput{Text: text, MessageID: "om_x"})
+		if err != nil {
+			t.Fatalf("Dispatch(%q): %v", text, err)
+		}
+		if handled && got != nil && got.Consumed {
+			t.Errorf("Dispatch(%q): expected fall-through (Consumed=false), got Consumed=true", text)
+		}
+		if calls := cap.snapshot(); len(calls) != 0 {
+			t.Errorf("Dispatch(%q): expected zero state events on fall-through, got %+v", text, calls)
+		}
+	}
+}
+
+// TestDispatch_EmptyMessageIDSkipsEmit covers the empty-MessageID
+// guard. A slash command routed through Dispatch with an empty
+// MessageID must not panic and must not emit any state events.
+// This matches the runtime subscriber at cmd/nightme/run.go which
+// silently drops empty UserMsgID; framework-side the guard prevents
+// the unnecessary bus.Publish.
+func TestDispatch_EmptyMessageIDSkipsEmit(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(newFakeCmd("gtw", ""))
+
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+
+	c := NewCommander(reg)
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{}, cs,
+		SlashInput{Text: "/gtw", MessageID: ""}) // explicitly empty
+	if err != nil {
+		t.Fatalf("dispatch err: %v", err)
+	}
+	if !handled || got == nil || !got.Consumed {
+		t.Errorf("command should still be consumed when MessageID is empty, got handled=%v out=%+v", handled, got)
+	}
+	if calls := cap.snapshot(); len(calls) != 0 {
+		t.Errorf("empty MessageID should suppress both emits, got %+v", calls)
+	}
+}
+
+// TestDispatch_NilCSSkipsEmit covers the defensive nil-cs guard.
+// Commands whose Handle is still invoked (the commander receives cs
+// as an interface parameter that may be nil in tests) must not
+// crash the framework; no emits should happen because the cs is
+// unusable.
+func TestDispatch_NilCSSkipsEmit(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(newFakeCmd("gtw", ""))
+
+	c := NewCommander(reg)
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{}, nil,
+		SlashInput{Text: "/gtw", MessageID: "om_nil"})
+	if err != nil {
+		t.Fatalf("dispatch err: %v", err)
+	}
+	if !handled || got == nil || !got.Consumed {
+		t.Errorf("command should still be consumed when cs is nil, got handled=%v out=%+v", handled, got)
+	}
+}
+
+// TestDispatch_ZeroValueCSDoesNotPanic verifies that bare
+// &chatsession.ChatSession{} (zero value, no MessageStateBus) does
+// not panic when matched commands go through the framework emit
+// path. The nil-bus guard inside emitSlashState keeps the existing
+// commander_test.go suite working without requiring every test to
+// wire a real bus. This is also the test that catches any future
+// regression where someone removes the cs.MessageStateBus nil check.
+func TestDispatch_ZeroValueCSDoesNotPanic(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(newFakeCmd("gtw", ""))
+
+	c := NewCommander(reg)
+	cs := &chatsession.ChatSession{} // zero value, MessageStateBus == nil
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{}, cs,
+		SlashInput{Text: "/gtw", MessageID: "om_zv"})
+	if err != nil {
+		t.Fatalf("dispatch err: %v", err)
+	}
+	if !handled || got == nil || !got.Consumed {
+		t.Errorf("expected consumed reply, got handled=%v out=%+v", handled, got)
+	}
+}
+
+// TestDispatch_QueuedBeforeHandleDoneAfter verifies the precise
+// ordering: MessageQueued must be observed BEFORE cmd.Handle starts
+// and MessageDone must be observed AFTER cmd.Handle returns. This
+// is the contract that lets slash commands render a ⏳ placeholder
+// during the work and a ✅ marker on completion.
+//
+// We verify ordering by combining three independent signals:
+//  1. cap.snapshot() records MessageState events in publish order.
+//  2. fakeCmd.calls is incremented inside Handle (set to 1).
+//  3. fakeCmd.got is populated inside Handle.
+//
+// If the snapshot's first event is Queued AND the second is Done
+// AND fakeCmd.calls == 1, then Handle ran exactly once between the
+// two emissions. This is a static-ordering assertion; it doesn't
+// need a delay or a probe channel.
+func TestDispatch_QueuedBeforeHandleDoneAfter(t *testing.T) {
+	reg := NewRegistry()
+	cmd := newFakeCmd("slow", "")
+	cmd.output = &SlashOutput{Consumed: true, Reply: "ok"}
+	reg.Register(cmd)
+
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+
+	c := NewCommander(reg)
+	got, handled, err := c.Dispatch(context.Background(), RuntimeServices{}, cs,
+		SlashInput{Text: "/slow", MessageID: "om_ord"})
+	if err != nil {
+		t.Fatalf("dispatch err: %v", err)
+	}
+	if !handled || got == nil || !got.Consumed {
+		t.Fatalf("expected consumed reply, got handled=%v out=%+v", handled, got)
+	}
+	if cmd.calls != 1 {
+		t.Fatalf("Handle should have run exactly once; got calls=%d", cmd.calls)
+	}
+	if cmd.got == nil || cmd.got.MessageID != "om_ord" {
+		t.Errorf("Handle should have observed MessageID=om_ord; got %+v", cmd.got)
+	}
+
+	calls := cap.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("captured %d events; want 2 (Queued, then Done)", len(calls))
+	}
+	if calls[0].state != agent.MessageQueued {
+		t.Errorf("first event should be Queued, got %v", calls[0].state)
+	}
+	if calls[1].state != agent.MessageDone {
+		t.Errorf("second event should be Done, got %v", calls[1].state)
 	}
 }

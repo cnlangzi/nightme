@@ -2,12 +2,18 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // TestParseShell_Matrix locks in the 13-row normalization contract
@@ -293,37 +299,131 @@ func evalLinks(p string) string {
 	return strings.TrimSpace(p)
 }
 
-// fakeSender records each Send call so tests can assert what
-// the dispatcher posted. Concurrency-safe (Send may be called
-// from a background goroutine).
-type fakeSender struct {
-	mu    sync.Mutex
-	calls []Outbound
+// ---------------------------------------------------------------------------
+// Dispatcher.Handle + framework ⏳→✅ contract
+//
+// F-XX (Sender→Emitter refactor) introduced a new Handle signature
+// (cs + InboundRequest + *ShellOutput + bool) and wired framework
+// ⏳→✅ MessageState emissions. The tests below cover:
+//
+//   - Handle's fall-through path (non-!cmd)
+//   - Handle's consumption path (matched !cmd posts summary card)
+//   - Framework ⏳ is emitted BEFORE the goroutine spawns
+//   - Framework ✅ is emitted AFTER the goroutine completes
+//     (success, failure, panic — all paths covered by runShell's
+//     LIFO defer order)
+//   - nil / empty guards on cs and MessageID don't crash and
+//     don't emit
+// ---------------------------------------------------------------------------
+
+// fakeEmitter records each Send call. Implements outbound.Emitter
+// via the Send method; SendCard is unimplemented (returns ""
+// + nil) because shell.Dispatcher only uses Send. Tests that
+// need both methods can extend this struct.
+//
+// sendErr, when non-nil, is returned from Send — used to verify
+// the "reply Send failed → goroutine still completes and emits
+// MessageDone via LIFO defer" contract.
+type fakeEmitter struct {
+	mu       sync.Mutex
+	calls    []messages.OutboundMessage
+	sendErr  error // optional — inject to test "reply Send failed" path
+	gotReply atomic.Bool
 }
 
-func (f *fakeSender) Send(_ context.Context, msg Outbound) error {
+func (f *fakeEmitter) Send(_ context.Context, msg messages.OutboundMessage) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.calls = append(f.calls, msg)
-	return nil
+	f.mu.Unlock()
+	f.gotReply.Store(true)
+	return f.sendErr
 }
 
-func (f *fakeSender) callsCopy() []Outbound {
+func (f *fakeEmitter) SendCard(_ context.Context, _ messages.OutboundMessage) (string, error) {
+	return "", nil
+}
+
+func (f *fakeEmitter) callsCopy() []messages.OutboundMessage {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]Outbound, len(f.calls))
+	out := make([]messages.OutboundMessage, len(f.calls))
 	copy(out, f.calls)
 	return out
 }
 
+func (f *fakeEmitter) didReceiveReply() bool {
+	return f.gotReply.Load()
+}
+
+// stateCapture subscribes to a ChatSession's MessageStateBus and
+// records every event for assertions on the framework ⏳→✅ contract.
+// Mirrors the captureHandler pattern in internal/chatsession/message_state_test.go
+// but stays in the shell package to avoid an import cycle on the
+// unexported MessageStateEvent type.
+type stateCapture struct {
+	mu    sync.Mutex
+	calls []stateCall
+}
+
+type stateCall struct {
+	chatID, userMsgID string
+	state             agent.MessageState
+}
+
+func (c *stateCapture) handler(e chatsession.MessageStateEvent) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls = append(c.calls, stateCall{chatID: e.ChatID, userMsgID: e.UserMsgID, state: e.State})
+	return false
+}
+
+func (c *stateCapture) snapshot() []stateCall {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]stateCall, len(c.calls))
+	copy(out, c.calls)
+	return out
+}
+
+// newWiredCS builds a ChatSession via chatsession.New so its
+// MessageStateBus is wired, then subscribes cap. Production
+// always uses chatsession.New; bare &chatsession.ChatSession{}
+// would skip the framework emit (the nil-bus guard in
+// emitShellState short-circuits) — covered separately below.
+func newWiredCS(t *testing.T, cap *stateCapture) *chatsession.ChatSession {
+	t.Helper()
+	cs, err := chatsession.New("oc_test", "claude")
+	if err != nil {
+		t.Fatalf("chatsession.New: %v", err)
+	}
+	cs.MessageStateBus.Subscribe(cap.handler)
+	return cs
+}
+
+// awaitReply polls up to 10s for the goroutine to call Send. Returns
+// the recorded messages (may be empty if timeout fires).
+func awaitReply(t *testing.T, em *fakeEmitter) []messages.OutboundMessage {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if em.didReceiveReply() {
+			return em.callsCopy()
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return em.callsCopy()
+}
+
 // TestDispatcherHandle_NonShellText covers the fall-through path.
-// Plain text, slash commands, full-width slashes — none of these
-// are shell commands. Handle must return Consumed=false (so the
-// gateway falls through to tryMessageDispatch) and NOT spawn a
-// goroutine (no Sender call).
+// Plain text / slash commands / non-leading bang — none of these
+// are shell commands. Handle must return (nil, false) so the
+// gateway falls through to tryMessageDispatch, AND must NOT spawn
+// a goroutine (no MessageStateBus emission either).
 func TestDispatcherHandle_NonShellText(t *testing.T) {
-	sender := &fakeSender{}
-	d := NewDispatcher(sender)
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+	em := &fakeEmitter{}
+	d := NewDispatcher(em)
 
 	for _, text := range []string{
 		"hello",
@@ -333,89 +433,409 @@ func TestDispatcherHandle_NonShellText(t *testing.T) {
 		"echo !hi", // bang not at start
 	} {
 		t.Run(text, func(t *testing.T) {
-			sender.mu.Lock()
-			sender.calls = nil
-			sender.mu.Unlock()
+			cap.calls = nil
+			em.calls = nil
+			em.gotReply.Store(false)
 
-			r := d.Handle(InboundRequest{
+			out, handled := d.Handle(cs, InboundRequest{
 				Request:   Request{Text: text, Cwd: t.TempDir()},
 				ChatID:    "oc_test",
 				MessageID: "om_test",
 			})
-			if r.Consumed {
-				t.Errorf("Handle(%q): expected Consumed=false, got true", text)
+			if handled {
+				t.Errorf("Handle(%q): expected handled=false, got true (out=%+v)", text, out)
 			}
-			if got := sender.callsCopy(); len(got) != 0 {
-				t.Errorf("Handle(%q): non-shell text should not call Sender, got %d calls", text, len(got))
+			if out != nil {
+				t.Errorf("Handle(%q): expected nil output, got %+v", text, out)
+			}
+			if got := cap.snapshot(); len(got) != 0 {
+				t.Errorf("Handle(%q): non-shell text should not emit MessageState, got %+v", text, got)
+			}
+			if got := em.callsCopy(); len(got) != 0 {
+				t.Errorf("Handle(%q): non-shell text should not call Emitter, got %d calls", text, len(got))
 			}
 		})
 	}
 }
 
 // TestDispatcherHandle_ShellCommand covers the consumption path.
-// For a `!cmd` text, Handle returns Consumed=true and (eventually)
-// calls Sender with the rendered summary card.
+// For a `!cmd` text, Handle returns (&ShellOutput{Consumed: true},
+// true) and (eventually) calls Emitter with the rendered summary
+// card as a messages.OutboundMessage{Kind: OutCommandReply}.
 func TestDispatcherHandle_ShellCommand(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("echo path uses sh -c; skip on Windows")
 	}
-	sender := &fakeSender{}
-	d := NewDispatcher(sender)
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+	em := &fakeEmitter{}
+	d := NewDispatcher(em)
 
-	r := d.Handle(InboundRequest{
+	out, handled := d.Handle(cs, InboundRequest{
 		Request:   Request{Text: "!echo hello-shell", Cwd: t.TempDir()},
 		ChatID:    "oc_test",
 		MessageID: "om_test",
 	})
-	if !r.Consumed {
-		t.Fatal("expected Consumed=true for shell command")
+	if !handled || out == nil || !out.Consumed {
+		t.Fatalf("expected (ShellOutput{Consumed:true}, true), got handled=%v out=%+v", handled, out)
 	}
 
-	// Wait for the async goroutine to complete (poll up to
-	// shellTimeout; in practice it finishes in <1s).
-	deadline := time.Now().Add(10 * time.Second)
+	calls := awaitReply(t, em)
+	if len(calls) == 0 {
+		t.Fatal("expected Emitter to be called with the result card")
+	}
+	c := calls[0]
+	if c.Kind != messages.OutCommandReply {
+		t.Errorf("Kind = %v, want OutCommandReply", c.Kind)
+	}
+	if c.ChatID != "oc_test" {
+		t.Errorf("ChatID = %q, want oc_test", c.ChatID)
+	}
+	if c.ReplyTo != "om_test" {
+		t.Errorf("ReplyTo = %q, want om_test", c.ReplyTo)
+	}
+	if !strings.Contains(c.Text, "✅") || !strings.Contains(c.Text, "echo hello-shell") {
+		t.Errorf("expected summary card with ✅ and command, got %q", c.Text)
+	}
+}
+
+// TestDispatcherHandle_NilEmitter verifies that NewDispatcher(nil)
+// doesn't panic — the dispatcher still consumes shell commands
+// (returns Consumed=true) but silently drops the reply. Lets the
+// runtime stay wired during channel outages.
+func TestDispatcherHandle_NilEmitter(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("echo path uses sh -c; skip on Windows")
+	}
+	d := NewDispatcher(nil) // emitter = nil
+
+	out, handled := d.Handle(&chatsession.ChatSession{}, InboundRequest{
+		Request: Request{Text: "!echo ok", Cwd: t.TempDir()},
+	})
+	if !handled || out == nil || !out.Consumed {
+		t.Fatalf("expected consumed=true even with nil emitter, got handled=%v out=%+v", handled, out)
+	}
+	// The goroutine's `d.emitter == nil` short-circuit returns
+	// before any Send call. No panic occurs, no reply is
+	// dispatched. The point of this test is to confirm
+	// NewDispatcher(nil) doesn't panic and Handle still returns
+	// the consumed=true contract.
+}
+
+// ---------------------------------------------------------------------------
+// Framework ⏳→✅ reactions
+// ---------------------------------------------------------------------------
+
+// TestDispatcherHandle_EmitsQueuedThenDone verifies the framework
+// ⏳→✅ sequence. MessageQueued fires synchronously BEFORE the
+// goroutine spawns; MessageDone fires inside the goroutine's
+// LIFO defer (after the reply Send). This is the same contract
+// as commander.Dispatch — see docs/feat/slash-command-reactions.md.
+func TestDispatcherHandle_EmitsQueuedThenDone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("echo path uses sh -c; skip on Windows")
+	}
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+	em := &fakeEmitter{}
+	d := NewDispatcher(em)
+
+	out, handled := d.Handle(cs, InboundRequest{
+		Request:   Request{Text: "!echo queued-done", Cwd: t.TempDir()},
+		ChatID:    "oc_test",
+		MessageID: "om_qd",
+	})
+	if !handled || out == nil {
+		t.Fatalf("expected consumed, got handled=%v out=%+v", handled, out)
+	}
+
+	// Wait for the goroutine to finish (Send → defer → Done).
+	calls := awaitReply(t, em)
+	if len(calls) == 0 {
+		t.Fatal("expected Emitter to be called")
+	}
+
+	states := cap.snapshot()
+	if len(states) != 2 {
+		t.Fatalf("captured %d state events; want 2 (Queued + Done)", len(states))
+	}
+	if states[0].state != agent.MessageQueued {
+		t.Errorf("states[0] = %v, want MessageQueued", states[0].state)
+	}
+	if states[1].state != agent.MessageDone {
+		t.Errorf("states[1] = %v, want MessageDone", states[1].state)
+	}
+	if states[0].userMsgID != "om_qd" || states[1].userMsgID != "om_qd" {
+		t.Errorf("MessageID mismatch: states=%+v", states)
+	}
+}
+
+// TestDispatcherHandle_FallThroughEmitsNothing guards the
+// framework contract: non-!cmd text must NOT trigger any
+// MessageState emission. Otherwise `/etc/passwd`-style inputs
+// would flash ⏳/✅ on the user message for no reason.
+func TestDispatcherHandle_FallThroughEmitsNothing(t *testing.T) {
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+	em := &fakeEmitter{}
+	d := NewDispatcher(em)
+
+	for _, text := range []string{"hello", "/etc/passwd", "!   ", "echo !hi"} {
+		cap.calls = nil
+		_, handled := d.Handle(cs, InboundRequest{
+			Request:   Request{Text: text, Cwd: t.TempDir()},
+			ChatID:    "oc_test",
+			MessageID: "om_x",
+		})
+		if handled {
+			t.Errorf("Handle(%q): expected handled=false on fall-through", text)
+		}
+		if got := cap.snapshot(); len(got) != 0 {
+			t.Errorf("Handle(%q): expected zero MessageState events, got %+v", text, got)
+		}
+	}
+}
+
+// TestDispatcherHandle_NilMessageIDSkipsEmit covers the
+// empty-MessageID guard. Matches commander.Dispatch's contract —
+// runtime subscriber at cmd/nightme/run.go already drops empty
+// UserMsgID silently, but the framework-level guard keeps the
+// contract local and test-friendly.
+func TestDispatcherHandle_NilMessageIDSkipsEmit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("echo path uses sh -c; skip on Windows")
+	}
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+	em := &fakeEmitter{}
+	d := NewDispatcher(em)
+
+	_, handled := d.Handle(cs, InboundRequest{
+		Request: Request{Text: "!echo empty-id", Cwd: t.TempDir()},
+		ChatID:  "oc_test",
+		// MessageID: "" — explicitly empty
+	})
+	if !handled {
+		t.Fatal("expected handled=true even with empty MessageID")
+	}
+	// Wait for the goroutine, then assert no emits happened.
+	_ = awaitReply(t, em)
+	if got := cap.snapshot(); len(got) != 0 {
+		t.Errorf("empty MessageID should suppress both Queued + Done, got %+v", got)
+	}
+}
+
+// TestDispatcherHandle_NilCSSkipsEmit covers the nil-cs guard.
+// Match commander.Dispatch: nil cs must not crash, must not emit.
+func TestDispatcherHandle_NilCSSkipsEmit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("echo path uses sh -c; skip on Windows")
+	}
+	em := &fakeEmitter{}
+	d := NewDispatcher(em)
+
+	out, handled := d.Handle(nil, InboundRequest{
+		Request:   Request{Text: "!echo nil-cs", Cwd: t.TempDir()},
+		ChatID:    "oc_test",
+		MessageID: "om_nil",
+	})
+	if !handled || out == nil {
+		t.Fatalf("expected consumed=true even with nil cs, got handled=%v out=%+v", handled, out)
+	}
+	// Wait for goroutine completion so any deferred MessageDone
+	// would have fired if it had a cs to call into. The
+	// emitShellState nil-guard means this is a no-op.
+	_ = awaitReply(t, em)
+}
+
+// TestDispatcherHandle_ZeroValueCSDoesNotPanic covers the bare
+// &chatsession.ChatSession{} (zero-value, MessageStateBus == nil)
+// case — emitShellState's nil-bus guard short-circuits both
+// emits, so the goroutine completes cleanly without panic. This
+// mirrors commander.Dispatch's zero-value-CS test; both packages
+// share the same framework contract.
+func TestDispatcherHandle_ZeroValueCSDoesNotPanic(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("echo path uses sh -c; skip on Windows")
+	}
+	em := &fakeEmitter{}
+	d := NewDispatcher(em)
+
+	out, handled := d.Handle(&chatsession.ChatSession{}, InboundRequest{
+		Request:   Request{Text: "!echo zero-cs", Cwd: t.TempDir()},
+		ChatID:    "oc_test",
+		MessageID: "om_zv",
+	})
+	if !handled || out == nil {
+		t.Fatalf("expected consumed with zero-value cs, got handled=%v out=%+v", handled, out)
+	}
+	// Wait for goroutine — if the nil-bus guard is broken the
+	// emit call would panic and the goroutine would die before
+	// calling Send. The assertion below catches that.
+	calls := awaitReply(t, em)
+	if len(calls) == 0 {
+		t.Fatal("expected Emitter to be called even with zero-value cs (nil-bus emit is a no-op)")
+	}
+}
+
+// TestDispatcherHandle_ReplySendFailed verifies that when the
+// wired emitter's Send returns an error, the goroutine still
+// completes and the framework still emits MessageDone via the
+// LIFO defer. This is the "reply Send failed → user still sees
+// ✅" contract — without it the user has no idea their command
+// "ran successfully" inside the daemon but the reply vanished.
+// Mirrors the post-recovery defer order in shell.runShell.
+func TestDispatcherHandle_ReplySendFailed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("echo path uses sh -c; skip on Windows")
+	}
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+	em := &fakeEmitter{sendErr: errors.New("emitter down")}
+	d := NewDispatcher(em)
+
+	_, handled := d.Handle(cs, InboundRequest{
+		Request:   Request{Text: "!echo send-fails", Cwd: t.TempDir()},
+		ChatID:    "oc_test",
+		MessageID: "om_sendfail",
+	})
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	// Wait for the goroutine to attempt Send (it will fail).
+	calls := awaitReply(t, em)
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly one Send call, got %d", len(calls))
+	}
+	if calls[0].Kind != messages.OutCommandReply {
+		t.Errorf("Send Kind = %v, want OutCommandReply", calls[0].Kind)
+	}
+
+	// The framework must still emit MessageDone even though
+	// Send failed — that's the LIFO defer contract.
+	states := cap.snapshot()
+	if len(states) != 2 {
+		t.Fatalf("captured %d state events; want 2 (Queued + Done despite Send failure)", len(states))
+	}
+	if states[1].state != agent.MessageDone {
+		t.Errorf("states[1] = %v, want MessageDone (Send-fail must not skip Done)", states[1].state)
+	}
+}
+
+// panickingEmitter panics inside Send so runShell's recover
+// defer fires. Used by TestDispatcherHandle_PanicStillEmitsDone
+// to lock the LIFO defer ordering.
+type panickingEmitter struct{}
+
+func (panickingEmitter) Send(_ context.Context, _ messages.OutboundMessage) error {
+	panic("panickingEmitter: simulating dispatcher-side panic")
+}
+
+func (panickingEmitter) SendCard(_ context.Context, _ messages.OutboundMessage) (string, error) {
+	return "", nil
+}
+
+// TestDispatcherHandle_PanicStillEmitsDone verifies that even
+// when the async goroutine panics, the framework ⏳→✅ contract
+// is preserved. The defer ordering in runShell is:
+//
+//	defer emitShellState(MessageDone)   // outer (LIFO last)
+//	defer func() { recover() ... }()     // inner (LIFO first)
+//
+// LIFO means a panic in dispatch() or emitter.Send is recovered
+// first (logged, swallowed), then MessageDone fires. A future
+// refactor that drops either defer would silently break this
+// contract — this test is the regression guard.
+func TestDispatcherHandle_PanicStillEmitsDone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("echo path uses sh -c; skip on Windows")
+	}
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+	d := NewDispatcher(panickingEmitter{})
+
+	_, handled := d.Handle(cs, InboundRequest{
+		Request:   Request{Text: "!echo panic-me", Cwd: t.TempDir()},
+		ChatID:    "oc_test",
+		MessageID: "om_panic",
+	})
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+
+	// Wait long enough for the goroutine to finish — it will
+	// panic inside emitter.Send, recover, then emit MessageDone.
+	// The recover-defer swallows the panic so the goroutine
+	// exits cleanly; the outer Done-defer fires last.
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if len(sender.callsCopy()) > 0 {
+		if len(cap.snapshot()) >= 2 {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	calls := sender.callsCopy()
-	if len(calls) == 0 {
-		t.Fatal("expected Sender to be called with the result card")
+
+	states := cap.snapshot()
+	if len(states) != 2 {
+		t.Fatalf("captured %d state events; want 2 (Queued sync + Done from LIFO defer)", len(states))
 	}
-	if got := calls[0].Text; !strings.Contains(got, "✅") || !strings.Contains(got, "echo hello-shell") {
-		t.Errorf("expected summary card with ✅ and command, got %q", got)
+	if states[0].state != agent.MessageQueued {
+		t.Errorf("states[0] = %v, want MessageQueued", states[0].state)
 	}
-	if calls[0].ChatID != "oc_test" {
-		t.Errorf("ChatID = %q, want oc_test", calls[0].ChatID)
-	}
-	if calls[0].ReplyTo != "om_test" {
-		t.Errorf("ReplyTo = %q, want om_test", calls[0].ReplyTo)
+	if states[1].state != agent.MessageDone {
+		t.Errorf("states[1] = %v, want MessageDone (panic must not skip Done)", states[1].state)
 	}
 }
 
-// TestDispatcherHandle_NilSender verifies that passing nil to
-// NewDispatcher doesn't panic — the dispatcher still consumes
-// shell commands (returns Consumed=true) but silently drops the
-// reply. Lets the runtime stay wired during channel outages.
-func TestDispatcherHandle_NilSender(t *testing.T) {
+// TestDispatcherHandle_ShellCommandFails covers the non-zero-exit
+// path. !false exits 1, the summary card flips to ❌, and the
+// reply still routes through emitter.Send with OutCommandReply
+// kind. Verifies the framework ⏳→✅ contract holds on the error
+// path (Done must fire even when the command fails).
+func TestDispatcherHandle_ShellCommandFails(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("echo path uses sh -c; skip on Windows")
+		t.Skip("`false` is a Unix builtin; skip on Windows")
 	}
-	d := NewDispatcher(nil) // sender = nil
+	cap := &stateCapture{}
+	cs := newWiredCS(t, cap)
+	em := &fakeEmitter{}
+	d := NewDispatcher(em)
 
-	r := d.Handle(InboundRequest{
-		Request: Request{Text: "!echo ok", Cwd: t.TempDir()},
+	_, handled := d.Handle(cs, InboundRequest{
+		Request:   Request{Text: "!false", Cwd: t.TempDir()},
+		ChatID:    "oc_test",
+		MessageID: "om_fail",
 	})
-	if !r.Consumed {
-		t.Fatal("expected Consumed=true even with nil sender")
+	if !handled {
+		t.Fatal("expected handled=true")
 	}
-	// No way to assert "Sender was not called" without a sender
-	// fixture — the goroutine's `d.sender == nil` short-circuit
-	// returns before any Send call, so no panic occurs and no
-	// reply is dispatched. The point of this test is to confirm
-	// NewDispatcher(nil) doesn't panic and Handle still returns
-	// Consumed=true (the dispatcher's contract is intact even
-	// when the channel layer is unavailable).
+
+	calls := awaitReply(t, em)
+	if len(calls) == 0 {
+		t.Fatal("expected Emitter.Send to be called even on command failure")
+	}
+	c := calls[0]
+	if c.Kind != messages.OutCommandReply {
+		t.Errorf("Kind = %v, want OutCommandReply", c.Kind)
+	}
+	if c.ReplyTo != "om_fail" {
+		t.Errorf("ReplyTo = %q, want om_fail", c.ReplyTo)
+	}
+	if !strings.Contains(c.Text, "❌") {
+		t.Errorf("failure reply should contain ❌, got %q", c.Text)
+	}
+	if strings.Contains(c.Text, "✅") {
+		t.Errorf("failure reply must NOT contain ✅, got %q", c.Text)
+	}
+
+	// Framework ⏳→✅ on the failure path — Done must fire even
+	// when the command exits non-zero, otherwise the user sees
+	// ⏳ "stuck" until the next inbound.
+	states := cap.snapshot()
+	if len(states) != 2 {
+		t.Fatalf("captured %d state events; want 2 (Queued + Done on failure)", len(states))
+	}
+	if states[1].state != agent.MessageDone {
+		t.Errorf("states[1] = %v, want MessageDone (failure path must still emit Done)", states[1].state)
+	}
 }

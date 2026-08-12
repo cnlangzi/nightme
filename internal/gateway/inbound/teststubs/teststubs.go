@@ -168,25 +168,25 @@ func (s *Shell) Recognize(text string) {
 	s.Recognized[text] = true
 }
 
-func (s *Shell) Handle(ir shell.InboundRequest) shell.HandleResult {
+func (s *Shell) Handle(_ *chatsession.ChatSession, ir shell.InboundRequest) (*shell.ShellOutput, bool) {
 	s.calls.Add(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.Recognized[ir.Request.Text] {
-		return shell.HandleResult{Consumed: true}
+		return &shell.ShellOutput{Consumed: true}, true
 	}
-	return shell.HandleResult{Consumed: false}
+	return &shell.ShellOutput{Consumed: false}, true
 }
 
 func (s *Shell) Calls() int32 { return s.calls.Load() }
 
 // AlwaysFallThroughShell is a shell.Dispatcher that always
-// reports Consumed=false. Used by action + fallthrough tests
+// reports handled=false. Used by action + fallthrough tests
 // that only care about one branch.
 type AlwaysFallThroughShell struct{}
 
-func (AlwaysFallThroughShell) Handle(_ shell.InboundRequest) shell.HandleResult {
-	return shell.HandleResult{Consumed: false}
+func (AlwaysFallThroughShell) Handle(_ *chatsession.ChatSession, _ shell.InboundRequest) (*shell.ShellOutput, bool) {
+	return nil, false
 }
 
 // ─── ReactionRouter (services.ReactionRouter) ──────────────────────

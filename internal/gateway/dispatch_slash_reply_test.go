@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/gateway/inbound"
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/shell"
@@ -42,13 +42,15 @@ func (stubMessageHandler) GetOrCreate(chatID, primaryAgent string) (*chatsession
 	return cs, nil
 }
 
-// stubShell always falls through (returns shell.HandleResult{}
-// zero-value, Consumed=false) so the slash-command path is
-// exercised without shell handling.
+// stubShell always falls through (returns nil, false) so the
+// slash-command path is exercised without shell handling.
+// Mirrors the new shell.Dispatcher.Handle signature introduced
+// in F-XX (Sender→Emitter refactor; cs parameter for ⏳→✅
+// framework emissions).
 type stubShell struct{}
 
-func (stubShell) Handle(ir shell.InboundRequest) shell.HandleResult {
-	return shell.HandleResult{}
+func (stubShell) Handle(_ *chatsession.ChatSession, _ shell.InboundRequest) (*shell.ShellOutput, bool) {
+	return nil, false
 }
 
 // stubAction never fires.

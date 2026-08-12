@@ -36,9 +36,9 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel/feishu"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/command/close"
 	"github.com/cnlangzi/nightme/internal/command/cwd"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
-	"github.com/cnlangzi/nightme/internal/command/close"
 	newcmd "github.com/cnlangzi/nightme/internal/command/newcmd"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/command/stop"
@@ -209,11 +209,11 @@ func runRunWith(cmd *cobra.Command, deps runDeps) error {
 //  2. Build agent registry (agents) + IM channel (ch); ch.Start
 //  3. Build chatsession.Manager (mgr) with spawner + persistence
 //  4. Build shared outbound infra:
-//       - prcache.Registry (per-AS PR cache)
-//       - gtw.HandlerDeps (git runner, HTTP prober)
-//       - outbound.Emitter (the single outbound chokepoint;
-//         holds ch and the statusbar.Source that reads prCacheReg +
-//         gtwDeps + mgr)
+//     - prcache.Registry (per-AS PR cache)
+//     - gtw.HandlerDeps (git runner, HTTP prober)
+//     - outbound.Emitter (the single outbound chokepoint;
+//     holds ch and the statusbar.Source that reads prCacheReg +
+//     gtwDeps + mgr)
 //  5. Build gtw.Manager, ReactionRouter, command.Commander,
 //     shell.Dispatcher (the command-adapter layer)
 //  6. Build gateway.Router (messageDispatcher + em); wire
@@ -473,18 +473,21 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	commander := command.NewCommander(reg)
 
 	// shellDispatcher owns the full shell-dispatch flow:
-	// prefix detection, placeholder reply, async exec, result
-	// posting. The shim in cmd/nightme/run.go only does type
-	// adaptation — see shell.Dispatcher.Handle for the actual
-	// logic.
-	shellDispatcher := shell.NewDispatcher(shell.NewChatSessionSender(mgr))
+	// prefix detection, framework ⏳→✅ MessageState emission,
+	// async exec, result posting. The shim in cmd/nightme/run.go
+	// only does type adaptation — see shell.Dispatcher.Handle
+	// for the actual logic. shell.Dispatcher takes the shared
+	// outbound.Emitter directly (post-F-XX Sender removal), so
+	// all outbound messages — including shell replies — flow
+	// through the same chokepoint as slash commands, regular
+	// messages, and receipt cards.
+	shellDispatcher := shell.NewDispatcher(mgr.Emitter())
 
 	// RuntimeServices is built inside *inbound.Router —
 	// the v0.x runtime shim that wrapped commander.Dispatch
 	// is gone (F-58). The inbound package builds the
 	// RuntimeServices closure internally (Logger, Config)
 	// when calling commander.Dispatch.
-
 
 	// F-watch §3.1.1: the per-chat WatchMode gate used to be wired
 	// here via gwImpl.WithWatchModeResolver. It moved into
@@ -512,7 +515,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	// WithOnCreate fires for both restored (RestoreFromRegistry)
 	// and future (GetOrCreate) ChatSessions. Place BEFORE
 	// RestoreFromRegistry so restored chats get their handlers.
-if err := wireRuntimeCallbacksAndRestore(mgr, em, logger, statusbarDeps, markPromptDone(ch)); err != nil {
+	if err := wireRuntimeCallbacksAndRestore(mgr, em, logger, statusbarDeps, markPromptDone(ch)); err != nil {
 		return fmt.Errorf("run: wire+restore: %w", err)
 	}
 
@@ -1019,7 +1022,7 @@ func newEventHandler(
 		// — they don't flow through gateway.Translate + this
 		// handler, so the case below would never fire.
 		switch out.Kind {
-case messages.OutReply, messages.OutResult,
+		case messages.OutReply, messages.OutResult,
 			messages.OutTaskCreate, messages.OutTaskUpdate:
 			statusbar.StampFromAS(&out, s, sbDeps)
 		}
@@ -1097,7 +1100,7 @@ case messages.OutReply, messages.OutResult,
 
 // shutdownRun stops the channel and persists final state.
 //
-// Agent processes are INTENTIONALLY NOT killed here — they are
+// # Agent processes are INTENTIONALLY NOT killed here — they are
 //
 // Agent processes are INTENTIONALLY NOT killed here — they are
 // long-running CLI sessions independent of nightme's lifetime.

@@ -1109,6 +1109,27 @@ func (cs *ChatSession) EmitMessageState(userMsgID string, state agent.MessageSta
 	})
 }
 
+// PublishMessageState is the framework-level helper for emitting
+// MessageState events on a chat's MessageStateBus. It centralises
+// the three-guard contract (nil cs / empty MessageID / nil bus) so
+// framework-level dispatchers — the slash-command commander
+// (internal/command/commander.go) and the shell dispatcher
+// (internal/shell/dispatch.go) — share one guard implementation.
+//
+// The guards let tests construct bare &ChatSession{} without a
+// fully-wired bus; production code always passes a session built
+// via New, which wires the bus eagerly. Direct callers that know
+// cs is non-nil and the bus is wired can call cs.EmitMessageState
+// directly and skip this helper — it exists for the framework
+// dispatcher use case where every callsite would otherwise
+// duplicate the same three-guard block.
+func PublishMessageState(cs *ChatSession, userMsgID string, state agent.MessageState) {
+	if cs == nil || userMsgID == "" || cs.MessageStateBus == nil {
+		return
+	}
+	cs.EmitMessageState(userMsgID, state)
+}
+
 // LookupInPool returns the AgentSession matching (agent, cwd) if
 // present in the pool (regardless of status). Returns
 // ErrAgentNotFound if not in pool.
@@ -1442,7 +1463,6 @@ func (cs *ChatSession) DropAgentSession(as *AgentSession) {
 type DropResult struct {
 	Agent string
 	Cwd   string
-	Err   error
 }
 
 // evictGraceTotal bounds the close phase of
@@ -1459,6 +1479,67 @@ const evictGraceTotal = 5 * time.Second
 // remaining pool entries dropped-anyway (the goroutine will
 // exit on its own later).
 const evictStragglerBound = 2 * time.Second
+
+// evictOutcome is the per-AS close result produced by
+// EvictAgentSessionsInCwd's close goroutines. err is the error
+// from as.Close() (nil on clean shutdown).
+type evictOutcome struct {
+	as  *AgentSession
+	err error
+}
+
+// drainCloseOutcomes reads up to `alive` outcomes from closeCh
+// and returns them in channel-receive order. Used by
+// EvictAgentSessionsInCwd as the post-timeout drain phase.
+//
+// Invariants (the helper does not relax these — callers depend
+// on them):
+//
+//   - alive >= 0. When alive == 0 the helper short-circuits to
+//     nil without touching closeCh (no bridges were spawned).
+//   - If timedOut == false, len(returned) == alive on return.
+//     Every bridge reported back before the outer timeout; the
+//     caller knows the pool entries line up with outcomes.
+//   - If timedOut == true, len(returned) ∈ [0, alive]. Late
+//     bridges may still be on the channel after the helper
+//     returns; the caller must sweep the snapshot via
+//     DropAgentSession to keep the pool consistent.
+//   - The straggler timer fires exactly ONCE (NewTimer + defer
+//     Stop), so evictStragglerBound is total budget for the
+//     whole drain. `time.After` inside a select would reset the
+//     budget on every receive — that was the pre-fix bug.
+func drainCloseOutcomes(closeCh <-chan evictOutcome, alive int, timedOut bool) []evictOutcome {
+	if alive <= 0 {
+		return nil
+	}
+	if !timedOut {
+		// Fast path: every bridge reported back before the
+		// outer timeout. Drain the channel without a timer.
+		results := make([]evictOutcome, 0, alive)
+		for drained := 0; drained < alive; drained++ {
+			results = append(results, <-closeCh)
+		}
+		return results
+	}
+
+	// Slow path: outer timeout fired. Bridges may unblock
+	// late; give them evictStragglerBound total before
+	// declaring the rest dropped-anyway. Single-shot timer
+	// is critical (see invariants above).
+	straggler := time.NewTimer(evictStragglerBound)
+	defer straggler.Stop()
+	results := make([]evictOutcome, 0, alive)
+	for drained := 0; drained < alive; {
+		select {
+		case oc := <-closeCh:
+			results = append(results, oc)
+			drained++
+		case <-straggler.C:
+			return results
+		}
+	}
+	return results
+}
 
 // EvictAgentSessionsInCwd tears down every
 // AgentSession in the chat that is pinned to cwd: closes the
@@ -1493,27 +1574,18 @@ func (cs *ChatSession) EvictAgentSessionsInCwd(cwd string) (int, []DropResult) {
 	if cwd == "" {
 		return 0, nil
 	}
-	want := filepath.Clean(cwd)
 
-	// Snapshot under read lock; close outside the lock so we
+	// Snapshot via the shared helper so this and
+	// AgentSessionsInCwd can never disagree about what "in
+	// cwd" means. AgentSessionsInCwd takes cs.mu.RLock()
+	// itself; close/drop happens outside the lock so we
 	// don't hold it across potentially-slow bridge Close calls.
-	var snapshot []*AgentSession
-	cs.mu.RLock()
-	for _, as := range cs.pool {
-		if filepath.Clean(as.Cwd) == want {
-			snapshot = append(snapshot, as)
-		}
-	}
-	cs.mu.RUnlock()
+	snapshot := cs.AgentSessionsInCwd(cwd)
 	if len(snapshot) == 0 {
 		return 0, nil
 	}
 
-	type outcome struct {
-		as  *AgentSession
-		err error
-	}
-	closeCh := make(chan outcome, len(snapshot))
+	closeCh := make(chan evictOutcome, len(snapshot))
 	var wg sync.WaitGroup
 	alive := 0
 	for _, as := range snapshot {
@@ -1530,57 +1602,57 @@ func (cs *ChatSession) EvictAgentSessionsInCwd(cwd string) (int, []DropResult) {
 		wg.Add(1)
 		go func(as *AgentSession) {
 			defer wg.Done()
-			closeCh <- outcome{as: as, err: as.Close()}
+			closeCh <- evictOutcome{as: as, err: as.Close()}
 		}(as)
 	}
 
+	// Phase 1 — outer timeout on the close phase. If every
+	// bridge reports back before evictGraceTotal we set
+	// timedOut = false and drainCloseOutcomes returns exactly
+	// `alive` outcomes. Otherwise the slow path adds the
+	// straggler bound.
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
+	timedOut := false
 	select {
 	case <-done:
 	case <-time.After(evictGraceTotal):
+		timedOut = true
 		slog.Warn("chatsession: agent close timed out",
 			"cwd", cwd, "alive", alive)
 	}
 
-	// Drain whatever we got back. Track which ASes have
-	// already been dropped so the straggler-timeout branch can
-	// drop the rest — without this, wedged bridges would
-	// leave their pool entries behind (the bridge's own
-	// SIGKILL fallback owns eventual process termination;
-	// we own the pool entry removal here).
-	results := make([]DropResult, 0, alive)
-	dropped := make(map[*AgentSession]bool, alive)
-	for drained := 0; drained < alive; {
-		select {
-		case oc := <-closeCh:
-			cs.DropAgentSession(oc.as)
-			dropped[oc.as] = true
-			results = append(results, DropResult{
-				Agent: oc.as.Agent,
-				Cwd:   oc.as.Cwd,
-				Err:   oc.err,
-			})
-			drained++
-		case <-time.After(evictStragglerBound):
-			slog.Warn("chatsession: straggler close",
-				"cwd", cwd,
-				"drained", drained,
-				"alive", alive)
-			// Drop any AS whose goroutine is still wedged
-			// so the pool doesn't carry the corpse.
-			for _, as := range snapshot {
-				if !dropped[as] {
-					cs.DropAgentSession(as)
-				}
-			}
-			drained = alive
+	outcomes := drainCloseOutcomes(closeCh, alive, timedOut)
+
+	// Drop pool entries for every received outcome AND for
+	// any snapshot entry whose bridge wedged without reporting
+	// back. DropAgentSession is idempotent (delete-by-key +
+	// nil-out selectedAS) so a second drop on an already-drained
+	// entry is a no-op.
+	for _, oc := range outcomes {
+		cs.DropAgentSession(oc.as)
+	}
+	if timedOut && len(outcomes) < alive {
+		slog.Warn("chatsession: straggler close",
+			"cwd", cwd,
+			"drained", len(outcomes),
+			"alive", alive)
+		for _, as := range snapshot {
+			cs.DropAgentSession(as)
 		}
+	}
+
+	results := make([]DropResult, 0, len(outcomes))
+	for _, oc := range outcomes {
+		results = append(results, DropResult{
+			Agent: oc.as.Agent,
+			Cwd:   oc.as.Cwd,
+		})
 	}
 	// The user-facing count includes wedged ASes — they
 	// were pinned to the now-gone worktree and were dropped
 	// from the pool even though their close goroutine never
-	// reported back. Reporting "0 closed" when 3 bridges
+	// reported back. Reporting "0 dropped" when 3 bridges
 	// wedged and 3 pool entries were still removed would
 	// be a misleading UX.
 	return len(snapshot), results

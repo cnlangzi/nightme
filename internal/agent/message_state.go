@@ -9,9 +9,16 @@ package agent
 //   - MessageDropped:   new (Phase 0; explicit clear only)
 //
 // The previous MessageDone / MessageFailed values (which conflated
-// execution result with delivery state) are physically deleted —
-// terminal execution result is now carried by `chatsession.Prompt.
-// EndReason`. See docs/feat/message_lifecycle.md §3 原则 1 / §6.3.
+// execution result with delivery state) are physically deleted in
+// F-53 §6.3. MessageDone has since been re-introduced under a
+// narrower contract (see "MessageDone is the F-53 §8 follow-up"
+// below) as the explicit F-53 §8 follow-up for synchronous
+// dispatch paths. MessageFailed remains absent — see "What
+// MessageDone does NOT mean" in the MessageDone section.
+//
+// Terminal execution result is carried by `chatsession.Prompt.
+// EndReason`. See docs/feat/F-53-message-prompt-lifecycle.md §3 原则 1
+// / §6.3 for the original rationale.
 //
 // MessageState is the abstract-layer vocabulary; Channels consume
 // it via the runtime's MessageStateBus subscriber (see
@@ -26,6 +33,18 @@ package agent
 // present on the gateway interface for v1.3 test compatibility,
 // but production wiring must NOT call it (would cause duplicate
 // MessageState events per transition).
+//
+// MessageDone is the explicit F-53 §8 follow-up: it restores a
+// completion indicator on the user message for synchronous
+// dispatch paths (slash command, shell dispatch) that have no
+// Prompt lifecycle. Semantics are deliberately narrow —
+// "the dispatcher has finished interacting with this user message;
+// no further MessageState transitions will arrive for this user
+// message id". This is orthogonal to chatsession.PromptDone, which
+// marks the receipt card (not the user message). MessageDone
+// carries NO success / failure information; outcome is conveyed
+// by the reply text itself (the ❌ prefix is the existing
+// convention for failure replies).
 type MessageState int
 
 const (
@@ -43,8 +62,8 @@ const (
 	// ChatSession.defaultPromptHookLocked after successful
 	// submission. Terminal from a delivery-pipeline perspective
 	// — `Message.Stage` does NOT change when the corresponding
-	// Prompt ends (no fan-out; see docs/feat/message_lifecycle.md
-	// §5.1).
+	// Prompt ends (no fan-out; see
+	// docs/feat/F-53-message-prompt-lifecycle.md §5.1).
 	MessageSubmitted
 
 	// MessageDropped: the message was explicitly cleared before
@@ -57,6 +76,18 @@ const (
 	// the message in `MessageQueued` and the next
 	// `flushPending` retries it.
 	MessageDropped
+
+	// MessageDone: the dispatcher has finished its interaction
+	// with this user message. Currently emitted by the framework
+	// commander layer (internal/command/commander.go Dispatch)
+	// immediately after the matched SlashCommandFactory.Handle
+	// returns, regardless of success / failure. Symmetric with
+	// the framework's pre-Handle MessageQueued emission so every
+	// slash command gets a ⏳ → ✅ pair on the user message
+	// without per-command wiring. See
+	// docs/feat/slash-command-reactions.md for the full design
+	// and rationale.
+	MessageDone
 )
 
 // String renders MessageState as a short human label, primarily
@@ -69,6 +100,8 @@ func (s MessageState) String() string {
 		return "submitted"
 	case MessageDropped:
 		return "dropped"
+	case MessageDone:
+		return "done"
 	}
 	return "unknown"
 }

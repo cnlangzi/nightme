@@ -234,7 +234,7 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, _ *chat
 	cs := f.mgr.GetChatSession(input.ChatID)
 	if cs == nil || cs.SelectedCwd() == "" {
 		return &command.SlashOutput{
-			Reply:    "No active workspace. Send /cwd <path> first.",
+			Reply:    command.NoActiveCwdReply,
 			Consumed: true,
 		}, nil
 	}

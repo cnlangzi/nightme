@@ -10,17 +10,17 @@
 // Compare to sibling commands:
 //
 //   - /stop  — signals the bridge to halt the in-flight turn;
-//              does NOT enqueue a new message.
+//     does NOT enqueue a new message.
 //   - /close — forcibly terminates the bridge process (graceful);
-//              does NOT enqueue a new message; preserves session
-//              identity for respawn.
+//     does NOT enqueue a new message; preserves session
+//     identity for respawn.
 //   - /new   — invokes the bridge's in-place context reset
-//              (claudecode's `/clear`, pi's `new_session`, etc.).
-//              Does NOT abort the in-flight turn or enqueue a
-//              new message.
+//     (claudecode's `/clear`, pi's `new_session`, etc.).
+//     Does NOT abort the in-flight turn or enqueue a
+//     new message.
 //   - /steer — aborts the in-flight turn AND prepends a new
-//              message to the queue. The new message takes
-//              priority over any already-queued user input.
+//     message to the queue. The new message takes
+//     priority over any already-queued user input.
 //
 // Implementation:
 //
@@ -114,10 +114,13 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		ReceivedAt: time.Now(),
 	}
 
-	// Emit MessageQueued before SteerUserMessage — same timing
-	// contract as QueueUserMessage. Channels render the ⏳
-	// indicator while the agent spawns.
-	cs.EmitMessageState(input.MessageID, agent.MessageQueued)
+	// /steer used to emit cs.EmitMessageState(input.MessageID,
+	// agent.MessageQueued) here. The framework commander layer
+	// (internal/command/commander.go Dispatch) now wraps every
+	// matched slash command with the MessageQueued → MessageDone
+	// pair automatically, so this manual emission is redundant and
+	// would be dropped by the feishu adapter's LRU dedup anyway.
+	// Removed for clarity — see docs/feat/slash-command-reactions.md.
 
 	if err := cs.SteerUserMessage(msg); err != nil {
 		return command.Reply(ctx, rt, fmt.Sprintf("Steer failed: %v", err)), nil

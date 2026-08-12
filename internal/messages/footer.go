@@ -31,12 +31,35 @@ import "fmt"
 //	                 or "## (HEAD detached at <sha>)"). The Feishu
 //	                 footer renders this as "⎇ ?" so users see
 //	                 "branch unknown" without the underlying reason.
-//	Uncommitted    — count of porcelain entries that are NOT
-//	                 untracked or ignored. Includes modified (M),
-//	                 added (A), deleted (D), renamed (R), copied
-//	                 (C), and unmerged conflict entries (UU, AA,
-//	                 etc.). Excludes "!!" ignored lines.
-//	Untracked      — count of "??" entries (files not in the index).
+//	Added          — count of porcelain entries with X=='A'
+//	                 (staged new files). Excludes "??" untracked
+//	                 entries (those are kept separate as Untracked
+//	                 and rendered as "? N" by the Feishu footer).
+//	                 Renamed/copied/conflict entries do NOT count
+//	                 here — see Modified / HasConflicts.
+//	Deleted        — count of porcelain entries with X=='D' OR
+//	                 Y=='D' (a file removed in the index OR the
+//	                 working tree).
+//	Modified       — count of porcelain entries with X=='M' OR
+//	                 Y=='M', plus renamed (R) and copied (C).
+//	                 Does NOT include conflict entries — those live
+//	                 in Conflicts so the `± N` segment doesn't double-
+//	                 count alongside `! N`.
+//	Untracked      — count of "??" entries (files not in the
+//	                 index). Rendered as a separate "? N" segment
+//	                 by the Feishu footer (iTerm2-aligned) rather
+//	                 than folded into Added.
+//	Conflicts      — count of unmerged conflict entries (UU /
+//	                 UA / UD / AU / AA / AD / DU / DA / DD; the
+//	                 full X,Y ∈ {U,A,D} matrix is 9 codes —
+//	                 see isConflictXY in gtw/git_status.go).
+//	                 Tracked separately from Modified so the footer
+//	                 can render a distinct "! N" segment without
+//	                 double-counting.
+//	                 HasConflicts is the boolean mirror of this
+//	                 field (HasConflicts == (Conflicts > 0)); kept
+//	                 for /gtw push and /gtw pr readiness predicates
+//	                 that branch on the flag.
 //	AheadOfRemote  — number of local commits the upstream is
 //	                 behind. Always 0 when HasUpstream is false.
 //	BehindRemote   — number of upstream commits the local branch
@@ -49,18 +72,21 @@ import "fmt"
 //	                 ref ("## main...origin/main"). Detached HEAD
 //	                 never has upstream; the Feishu footer omits
 //	                 the "⇡ N" segment in that case.
-//	HasConflicts   — true when the porcelain scan found unmerged
-//	                 paths (UU / AA / DD / AU / UA / DU / UD etc.).
-//	                 /gtw push and /gtw pr both hard-refuse in this
-//	                 state (F-57 §3.1 / §4.1). F-57 added this.
+//	HasConflicts   — true when Conflicts > 0. Source of truth for
+//	                 the readiness gate (F-57 §3.1 / §4.1); the
+//	                 Feishu footer reads Conflicts directly to
+//	                 render the "! N" count.
 //
 // F-48 (follow-up to F-45): runtime stamps one of these on every
 // OutboundMessage.StatusBar that flows to a main-chat footer
 // render site. See docs/feat/F-45-session-footer.md §1.7.
 type GitStatusSnapshot struct {
 	Branch        string
-	Uncommitted   int
+	Added         int
+	Deleted       int
+	Modified      int
 	Untracked     int
+	Conflicts     int
 	AheadOfRemote int
 	BehindRemote  int
 	HasUpstream   bool
@@ -130,7 +156,9 @@ func (s *GitStatusSnapshot) LocalIsAtUpstreamTip() bool {
 // This is the senior-dev "before opening a PR" hygiene gate. It does NOT
 // check upstream alignment (see LocalIsAtUpstreamTip for that).
 func (s *GitStatusSnapshot) WorkingTreeIsClean() bool {
-	return s.Uncommitted == 0 && s.Untracked == 0 && !s.HasConflicts
+	return s.Added == 0 && s.Deleted == 0 &&
+		s.Modified == 0 && s.Untracked == 0 &&
+		s.Conflicts == 0
 }
 
 // HasNothingToPush reports whether /gtw push should bail out with a
@@ -195,8 +223,11 @@ func (s *GitStatusSnapshot) IsReadyForPR() bool {
 //     commits, but that's the "git push --force-with-lease" path,
 //     not a /gtw pr concern.
 //  5. BehindRemote > 0 — remote moved forward; user must rebase.
-//  6. Uncommitted > 0 — working tree dirty. F-XX: /gtw push no longer
-//     auto-commits; direct to /gtw commit first.
+//  6. Added / Deleted / Modified > 0 — working tree dirty. /gtw
+//     push no longer auto-commits; direct to /gtw commit first.
+//     All three categories share a single hint line so /gtw pr's
+//     refusal reads as one "working tree has uncommitted work"
+//     statement, not three.
 //  7. Untracked > 0 — git add, then commit, then push.
 //
 // The function returns "" when IsReadyForPR() returns true (no block).
@@ -220,10 +251,11 @@ func (s *GitStatusSnapshot) PRBlockReason() string {
 		return fmt.Sprintf(
 			"⚠️ origin/%s is %d commit(s) ahead of your local branch\n"+
 				"hint: `git pull --rebase`, then /gtw pr", s.Branch, s.BehindRemote)
-	case s.Uncommitted > 0:
+	case s.Added+s.Deleted+s.Modified > 0:
 		return fmt.Sprintf(
 			"⚠️ %d file(s) changed but not committed\n"+
-				"hint: /gtw commit first, then /gtw push, then /gtw pr", s.Uncommitted)
+				"hint: /gtw commit first, then /gtw push, then /gtw pr",
+			s.Added+s.Deleted+s.Modified)
 	case s.Untracked > 0:
 		return fmt.Sprintf(
 			"⚠️ %d new file(s) not added to git\n"+

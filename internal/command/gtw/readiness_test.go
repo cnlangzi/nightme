@@ -65,16 +65,37 @@ func porcelainFromSnapshot(snap messages.GitStatusSnapshot) string {
 	// Order matters only for human-readability of test failures;
 	// parsePorcelainBranchStatus scans lines independently.
 	//
-	// Conflict entries: ALWAYS emit at least one `UU` line when
-	// HasConflicts is true, even if Uncommitted is 0. A snapshot
-	// like {Uncommitted: 0, HasConflicts: true} (e.g. an unmerged
-	// state with no other tracked-file edits) is a legitimate
-	// readiness state the parser must surface as conflicting; the
-	// old Uncommitted-gated emit silently dropped the flag.
-	if snap.HasConflicts {
+	// Conflict entries: emit one `UU` line per Conflicts entry
+	// so the parser populates Conflicts (not Modified). The
+	// F-57 readiness tests rely on HasConflicts=true reaching
+	// the parser; setting Conflicts>=1 covers both HasConflicts
+	// (boolean mirror) and the numeric Conflicts field in one
+	// shot. Always emit at least one `UU` line when HasConflicts
+	// is set so a {Modified: 0, Conflicts: 0, HasConflicts: true}
+	// snapshot still surfaces as conflicting — the parser
+	// derives HasConflicts from Conflicts, but tests can also
+	// set the flag directly to bypass Conflicts plumbing.
+	for i := 0; i < snap.Conflicts; i++ {
 		body += "UU conflict.txt\n"
 	}
-	for i := 0; i < snap.Uncommitted; i++ {
+	if snap.HasConflicts && snap.Conflicts == 0 {
+		// Defensive fallback for tests that set HasConflicts
+		// without populating Conflicts: emit one conflict line
+		// so the parser surfaces the flag.
+		body += "UU conflict.txt\n"
+	}
+	// F-XX (status-bar split): emit one porcelain line per
+	// category so parsePorcelainBranchStatus populates the
+	// matching Added/Deleted/Modified field. The fixture uses
+	// canonical XY positions for each category (X=='A', Y=='D',
+	// Y=='M') so the parser's switch lands in the right arm.
+	for i := 0; i < snap.Added; i++ {
+		body += "A  file.txt\n"
+	}
+	for i := 0; i < snap.Deleted; i++ {
+		body += " D file.txt\n"
+	}
+	for i := 0; i < snap.Modified; i++ {
 		body += " M file.txt\n"
 	}
 	for i := 0; i < snap.Untracked; i++ {

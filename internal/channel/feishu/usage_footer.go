@@ -47,7 +47,7 @@
 // for category-prefix consistency with Line 1's 🤖: and Line 2's
 // 💰:「」):
 //
-//	📁: code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
+//	📁: code/nightme · ⎇ main · + 2 · ± 3 · ? 4 · ⇡ 5 · [#42](url)
 //
 // Each segment is omitted when its value is zero / empty /
 // unknown. Order is fixed within each line; lines themselves are
@@ -165,7 +165,7 @@ import (
 //     meaning; F-55 appends (window) for the denominator;
 //     pct > 100% renders verbatim without clamp or warning.
 //     Each segment omitted when its data is zero/missing.
-//   - GitBar → Line 3 workspace (📁: ws · ⎇ branch · ↑ N · ? N · � N · PR).
+//   - GitBar → Line 3 workspace (📁: ws · ⎇ branch · + N · − N · ± N · ? N · ! N · ⇡ N · PR).
 //     Always present when the chat has a workspace; see
 //     formatGitBar for the per-segment omit rules.
 //
@@ -495,11 +495,15 @@ func formatWorkspacePath(absPath string) string {
 //
 // Output (when non-empty, PR present):
 //
-//	📁: code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2 · [#42](url)
+//	📁: code/nightme · ⎇ main · + 2 · ± 3 · − 1 · ? 4 · ⇡ 5 · [#42](url)
 //
 // Output (when non-empty, no PR yet / lookup failed):
 //
-//	📁: code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 2
+//	📁: code/nightme · ⎇ main · + 2 · ± 3 · − 1 · ? 4 · ⇡ 5
+//
+// Output (clean worktree, has upstream, no PR):
+//
+//	📁: code/nightme · ⎇ main
 //
 // Omit rules (each segment is dropped independently; the line
 // itself is dropped when ALL segments would be empty):
@@ -508,12 +512,26 @@ func formatWorkspacePath(absPath string) string {
 //     drops with it: PR without a git workspace is a stale
 //     cache state we don't surface on its own row)
 //   - ⎇ <branch|?>              → always present when line is shown
-//   - ↑ N (uncommitted)        → omitted when Uncommitted == 0
-//   - ? N (untracked)          → omitted when Untracked == 0
-//   - ⇡ N (unpushed)           → omitted when !HasUpstream OR AheadOfRemote == 0
+//   - + N (added, staged A)     → omitted when Added == 0
+//   - − N (deleted, X/Y = D)    → omitted when Deleted == 0
+//   - ± N (modified, M/R/C) → omitted when Modified == 0
+//   - ? N (untracked)           → omitted when Untracked == 0
+//   - ! N (conflicts, UU / UA / UD / AU / AA / AD / DU / DA / DD) → omitted when Conflicts == 0
+//   - ⇡ N (unpushed)            → omitted when !HasUpstream OR AheadOfRemote == 0
 //   - [#N](url) (PR / MR)       → appended as last segment when
 //     ctx.PullRequest resolves to a usable shape; see
 //     formatPRSegment for the omit rules
+//
+// Symbol source: `+`, `−` (U+2212 MINUS SIGN), `±` (U+00B1
+// PLUS-MINUS SIGN), `?`, `⇡` (U+21E1 UPWARDS WHITE ARROW), `!`
+// match iTerm2's git-status-bar conventions; `−` and `±` are
+// Unicode rather than ASCII so the rendered widths stay aligned
+// with the single-character `+` and `?` segments in Feishu's
+// fixed-width fonts.
+//
+// Segment order (fixed): workspace → branch → + → − → ± → ?
+// → ! → ⇡ → PR. Added → deleted → modified → untracked →
+// conflict → unpushed → PR.
 //
 // The PR reference was originally rendered on its own line
 // (a dedicated Line 4 below the workspace row); folding it in
@@ -530,6 +548,16 @@ func formatWorkspacePath(absPath string) string {
 // sub-struct (always populated when the chat has a workspace
 // — pre-rename this was the flat StatusBar).
 //
+// Segments, in fixed order: workspace → branch → + N (added) →
+// − N (deleted) → ± N (modified) → ? N (untracked) → ! N
+// (conflicts) → ⇡ N (unpushed) → [#N](url) (PR). Each numeric
+// segment is dropped when its count is 0; "⇡ N" additionally
+// drops when HasUpstream is false; the PR segment drops when
+// no usable PullRequest is cached. A "local" marker is appended
+// when the branch has no upstream, no PR is cached, and the
+// working tree is clean — guarding against the stale-PR-cache
+// race against a freshly-detached upstream.
+//
 // Returns "" (line dropped) when:
 //   - gb is nil (the chat has no workspace at all);
 //   - gb.Workspace is "" (no path to render);
@@ -539,6 +567,10 @@ func formatWorkspacePath(absPath string) string {
 //     git repo, git is missing, or git failed). The "⎇ ?"
 //     rendering is reserved for detached HEAD inside an actual
 //     git repo (Branch=="" + GitStatus!=nil).
+//   - every segment after "⎇ <branch|?>" drops — a clean
+//     worktree with no upstream AND no cached PR surfaces
+//     "⎇ <branch> · local"; a clean worktree with upstream
+//     surfaces "⎇ <branch>" alone.
 //
 // F-48 documented contract (pre-rename):
 // "Workspace=='' OR GitStatus==nil → entire line omitted."
@@ -570,22 +602,52 @@ func formatGitBar(gb *messages.GitStatusBar) string {
 	}
 	parts = append(parts, "⎇ "+branch)
 
-	if gb.GitStatus.Uncommitted > 0 {
-		parts = append(parts, fmt.Sprintf("↑ %d", gb.GitStatus.Uncommitted))
+	// Working-tree segments, fixed order: added → deleted →
+	// modified → untracked. Each is dropped independently when
+	// its count is 0. `−` is U+2212 MINUS SIGN and `±` is U+00B1
+	// PLUS-MINUS SIGN — Unicode on purpose so all five symbols
+	// (`+`, `−`, `±`, `?`, `⇡`) render with consistent width in
+	// Feishu's fixed-width footer font (iTerm2 alignment).
+	dirty := gb.GitStatus
+	if dirty.Added > 0 {
+		parts = append(parts, fmt.Sprintf("+ %d", dirty.Added))
 	}
-	if gb.GitStatus.Untracked > 0 {
-		parts = append(parts, fmt.Sprintf("? %d", gb.GitStatus.Untracked))
+	if dirty.Deleted > 0 {
+		parts = append(parts, fmt.Sprintf("− %d", dirty.Deleted))
+	}
+	if dirty.Modified > 0 {
+		parts = append(parts, fmt.Sprintf("± %d", dirty.Modified))
+	}
+	if dirty.Untracked > 0 {
+		parts = append(parts, fmt.Sprintf("? %d", dirty.Untracked))
+	}
+
+	// Conflict marker (`! N`) — emitted when the porcelain scan
+	// found unmerged paths (UU / UA / UD / AU / AA / AD / DU / DA / DD). Sits BEFORE
+	// the upstream segment so the line reads "branch → counts →
+	// conflict → upstream → PR"; placing it after the counts keeps
+	// the visual grammar "what's wrong with the working tree?
+	// + − ± ? !" before "what about the remote?".
+	//
+	// Conflicts are tracked separately from Modified (see the
+	// GitStatusSnapshot field doc) so the user sees two distinct,
+	// non-overlapping counts: e.g. `± 2 · ! 1` means "2 modified
+	// files, plus 1 conflict (separate file)".
+	if dirty.Conflicts > 0 {
+		parts = append(parts, fmt.Sprintf("! %d", dirty.Conflicts))
 	}
 
 	// Upstream relationship: render `⇡ N` when the branch has
-	// upstream. Always render — including `⇡ 0` — so a clean
-	// worktree-with-upstream shows a visible "stamp worked"
-	// signal at the tail of the workspace row (see issue:
-	// "既然有没有 commit, 为什么它下面没有显示那个数字呢"; the
-	// explicit 0 is the honest signal — the branch is in sync
-	// with its upstream).
-	if gb.GitStatus.HasUpstream {
-		parts = append(parts, fmt.Sprintf("⇡ %d", gb.GitStatus.AheadOfRemote))
+	// upstream AND has local unpushed commits. The `⇡ 0` form
+	// is intentionally omitted — the user's "0 就不显示" rule
+	// applies uniformly across all numeric segments. A clean
+	// repo with HasUpstream=true renders as just
+	// "📁: <ws> · ⎇ <branch>" (no ⇡), which is fine: the
+	// presence of the branch line already tells the reader
+	// "we have an upstream branch"; the absent number
+	// truthfully says "nothing to push".
+	if dirty.HasUpstream && dirty.AheadOfRemote > 0 {
+		parts = append(parts, fmt.Sprintf("⇡ %d", dirty.AheadOfRemote))
 	}
 
 	// PR / MR tail — appended last so the line reads
@@ -597,17 +659,24 @@ func formatGitBar(gb *messages.GitStatusBar) string {
 	}
 
 	// When the branch has no upstream AND the working tree is
-	// clean, drop a "local" marker so the footer doesn't
-	// silently end at "⎇ branch" — the user should see at a
-	// glance that this is an untracked branch, not a
-	// missing-data bug.
+	// clean AND no PR is cached, drop a "local" marker so the
+	// footer doesn't silently end at "⎇ branch" — the user
+	// should see at a glance that this is an untracked branch,
+	// not a missing-data bug. The PullRequest gate prevents a
+	// stale PR cache from racing against a freshly-detached
+	// upstream state and producing the contradictory
+	// `… · [#42](url) · local` line.
 	//
 	// Order matters: the "local" marker renders AFTER the PR
 	// segment so the line still reads
 	// "workspace → branch → dirty counts → PR → local state".
-	if !gb.GitStatus.HasUpstream &&
-		gb.GitStatus.Uncommitted == 0 &&
-		gb.GitStatus.Untracked == 0 {
+	if !dirty.HasUpstream &&
+		gb.PullRequest == nil &&
+		dirty.Added == 0 &&
+		dirty.Deleted == 0 &&
+		dirty.Modified == 0 &&
+		dirty.Untracked == 0 &&
+		dirty.Conflicts == 0 {
 		parts = append(parts, "local")
 	}
 

@@ -42,7 +42,7 @@ func TestFormatStatusBarLines_IdentityOnly(t *testing.T) {
 }
 
 // F-56: appends the agent's own session id as the trailing
-// identity segment, separated from Model by " · " to match the
+// identity segment, separated from Model by"" to match the
 // existing Model / usage separator convention. The materialize
 // condition in stampFromAS guarantees SessionID arrives
 // alongside at least one of Agent / Model / GitStatus / Usage in
@@ -84,7 +84,7 @@ func TestFormatStatusBarLines_SessionIDOnly(t *testing.T) {
 // (e.g. bridge hasn't reported the model yet — EventAgentReady
 // carries SessionID but Model can arrive later or be omitted
 // entirely by the bridge). The middle-dot segment is dropped
-// when Model is empty per the "each segment omitted
+// when Model is empty per the"each segment omitted
 // independently" convention; Agent · SessionID chain renders
 // with no separator gap. Locks the layout so a future
 // "always-show-the-middle-dot" PR doesn't silently change the
@@ -121,7 +121,7 @@ func TestFormatStatusBarLines_ModelSessionIDOnly(t *testing.T) {
 }
 
 // TestFormatStatusBarLines_CompactionSegment removed: F-49
-// compaction tracking was deleted across the runtime. The "· 🗜 N"
+// compaction tracking was deleted across the runtime. The"· 🗜 N"
 // segment is no longer rendered; the entire subtest is gone.
 
 func TestFormatStatusBarLines_TokenSegments(t *testing.T) {
@@ -130,12 +130,12 @@ func TestFormatStatusBarLines_TokenSegments(t *testing.T) {
 	// Tencent YB doc — see internal/channel/feishu/usage_footer.go
 	// §Line 2 doc block. Here in = 11_700 + 600 + 8_200 = 20_500.
 	ctx := &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
-			InputTokens:              11_700,
-			OutputTokens:             1_500,
-			CacheCreationInputTokens: 600, // counted into "in"
-			CacheReadInputTokens:     8_200,
-			CostUSD:                  0.087,
-		}}}
+		InputTokens:              11_700,
+		OutputTokens:             1_500,
+		CacheCreationInputTokens: 600, // counted into"in"
+		CacheReadInputTokens:     8_200,
+		CostUSD:                  0.087,
+	}}}
 	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"}
 	if !reflect.DeepEqual(got, want) {
@@ -151,7 +151,7 @@ func TestFormatStatusBarLines_OmitsZeroSegments(t *testing.T) {
 	}{
 		{
 			// No input-side tokens, only output. Renders as
-			// "0 / 234" — zero-side honesty, rare in practice
+			//"0 / 234" — zero-side honesty, rare in practice
 			// (e.g. compaction-only turn with no new input).
 			name: "no input but has output",
 			ctx: &messages.StatusBar{
@@ -163,7 +163,7 @@ func TestFormatStatusBarLines_OmitsZeroSegments(t *testing.T) {
 		{
 			// F-55.1: only cache hits, no new tokens, no output.
 			// Strict zero-omit — single segment renders, no
-			// "0 /" prefix.
+			//"0 /" prefix.
 			name: "only cache hits — single segment renders",
 			ctx: &messages.StatusBar{
 				AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
@@ -186,14 +186,14 @@ func TestFormatStatusBarLines_OmitsZeroSegments(t *testing.T) {
 			// No cost segment when CostUSD == 0.
 			name: "no cost (omitted)",
 			ctx: &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
-					InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200}}},
+				InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200}}},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k 」"},
 		},
 		{
 			// No Agent/Model → only the usage line renders.
 			name: "tokens but no Agent / Model",
 			ctx: &messages.StatusBar{UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
-					InputTokens: 5_000, OutputTokens: 200}}},
+				InputTokens: 5_000, OutputTokens: 200}}},
 			want: []string{"💰:「 5k / 200 」"},
 		},
 		{
@@ -211,11 +211,11 @@ func TestFormatStatusBarLines_OmitsZeroSegments(t *testing.T) {
 		{
 			// F-55.1: cache + out > 0, no new — layout shows
 			// `cache / out`. Confirms cache doesn't lead the
-			// segment when new is 0 (we drop the leading "0").
+			// segment when new is 0 (we drop the leading"0").
 			name: "cache hits + output, no new tokens",
 			ctx: &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
-					CacheReadInputTokens: 5_600,
-					OutputTokens:         800}}},
+				CacheReadInputTokens: 5_600,
+				OutputTokens:         800}}},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 5.6k / 800 」"},
 		},
 	}
@@ -230,13 +230,13 @@ func TestFormatStatusBarLines_OmitsZeroSegments(t *testing.T) {
 }
 
 func TestFormatStatusBarLines_LargeNumbers(t *testing.T) {
-	// in = 156_000 + 0 + 1_200_000 = 1_356_000 → "1.4M" (rounded).
+	// in = 156_000 + 0 + 1_200_000 = 1_356_000 →"1.4M" (rounded).
 	ctx := &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
-			InputTokens:              156_000,
-			OutputTokens:             18_000,
-			CacheCreationInputTokens: 0,
-			CacheReadInputTokens:     1_200_000,
-			CostUSD:                  1.245}}}
+		InputTokens:              156_000,
+		OutputTokens:             18_000,
+		CacheCreationInputTokens: 0,
+		CacheReadInputTokens:     1_200_000,
+		CostUSD:                  1.245}}}
 	got := formatStatusBarLines(ctx)
 	want := []string{"🤖: claude · opus-4-5", "💰:「 156k / 1.2M / 18k · $1.245 」"}
 	if !reflect.DeepEqual(got, want) {
@@ -247,12 +247,12 @@ func TestFormatStatusBarLines_LargeNumbers(t *testing.T) {
 // TestFormatStatusBar_StringForm covers the legacy single-
 // string helper used by OutReply / OutResult orphan / overflow
 // paths (text concatenation). The string form joins the
-// lines with "\n" — plain-text rendering paths honour \n
+// lines with"\n" — plain-text rendering paths honour \n
 // natively.
 func TestFormatStatusBar_StringForm(t *testing.T) {
-	// in = 12_300 + 0 + 8_200 = 20_500 → "20.5k".
+	// in = 12_300 + 0 + 8_200 = 20_500 →"20.5k".
 	ctx := &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
-			InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200}}}
+		InputTokens: 12_300, OutputTokens: 1_500, CacheReadInputTokens: 8_200}}}
 	got := formatStatusBar(ctx)
 	want := "🤖: claude · opus-4-5\n💰:「 12.3k / 8.2k / 1.5k 」"
 	if got != want {
@@ -271,8 +271,8 @@ func TestFormatStatusBar_StableAcrossReRenders(t *testing.T) {
 	// Same input must always produce the same string — receipt
 	// PATCH diffing relies on body equality.
 	ctx := &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
-			InputTokens: 12_300, OutputTokens: 1_500,
-			CacheReadInputTokens: 8_200, CostUSD: 0.087}}}
+		InputTokens: 12_300, OutputTokens: 1_500,
+		CacheReadInputTokens: 8_200, CostUSD: 0.087}}}
 	first := formatStatusBar(ctx)
 	for i := 0; i < 5; i++ {
 		if got := formatStatusBar(ctx); got != first {
@@ -290,9 +290,10 @@ func TestFormatStatusBar_StableAcrossReRenders(t *testing.T) {
 //   - ContextWindowPct == 0 → segment dropped (bridge didn't
 //     expose contextWindow this turn, pi protocol doesn't expose
 //     it yet, or the model simply didn't report it).
-//   - Otherwise renders as "X.Y%" with one decimal place (edge
+//   - Otherwise renders as"X.Y%" with one decimal place (edge
 //     cases like 99.6% matter for context-window tracking —
-//     "%.0f%%" would round to misleading "100%").
+//
+// "%.0f%%" would round to misleading"100%").
 func TestFormatStatusBarLines_ContextWindowPct(t *testing.T) {
 	tests := []struct {
 		name string
@@ -302,8 +303,8 @@ func TestFormatStatusBarLines_ContextWindowPct(t *testing.T) {
 		{
 			name: "pct=0 — segment omitted (early turn / no ContextWindow reported)",
 			ctx: &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
-					InputTokens: 12_300, OutputTokens: 1_500,
-					CacheReadInputTokens: 8_200, CostUSD: 0.087}}},
+				InputTokens: 12_300, OutputTokens: 1_500,
+				CacheReadInputTokens: 8_200, CostUSD: 0.087}}},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"},
 		},
 		{
@@ -337,15 +338,15 @@ func TestFormatStatusBarLines_ContextWindowPct(t *testing.T) {
 		{
 			name: "pct at the ceiling — 100.0% is honest, not 'full'",
 			ctx: &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
-					ContextWindow:    200_000,
-					ContextWindowPct: 100.0}}},
+				ContextWindow:    200_000,
+				ContextWindowPct: 100.0}}},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 100.0% (200k) 」"},
 		},
 		{
 			name: "pct without identity — segment still emits alone",
 			ctx: &messages.StatusBar{UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
-					ContextWindow:    200_000,
-					ContextWindowPct: 5.0}}},
+				ContextWindow:    200_000,
+				ContextWindowPct: 5.0}}},
 			want: []string{"💰:「 5.0% (200k) 」"},
 		},
 		{
@@ -370,9 +371,9 @@ func TestFormatStatusBarLines_ContextWindowPct(t *testing.T) {
 			// F-55: 1M-class model window rendered with M unit.
 			name: "1M context window — M unit",
 			ctx: &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-8"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
-					InputTokens: 200_000, OutputTokens: 1_000,
-					ContextWindow:    1_000_000,
-					ContextWindowPct: 20.1}}},
+				InputTokens: 200_000, OutputTokens: 1_000,
+				ContextWindow:    1_000_000,
+				ContextWindowPct: 20.1}}},
 			want: []string{"🤖: claude · opus-4-8", "💰:「 200k / 1k · 20.1% (1M) 」"},
 		},
 		{
@@ -380,9 +381,9 @@ func TestFormatStatusBarLines_ContextWindowPct(t *testing.T) {
 			// alone is not surfaced (zero-omit, F-45 §1.6).
 			name: "pct=0 — segment omitted even when window > 0",
 			ctx: &messages.StatusBar{AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"}, UsageBar: &messages.UsageStatusBar{UsageInfo: &agent.UsageInfo{
-					InputTokens: 12_300, OutputTokens: 1_500,
-					CacheReadInputTokens: 8_200, CostUSD: 0.087,
-					ContextWindow: 200_000}}},
+				InputTokens: 12_300, OutputTokens: 1_500,
+				CacheReadInputTokens: 8_200, CostUSD: 0.087,
+				ContextWindow: 200_000}}},
 			want: []string{"🤖: claude · opus-4-5", "💰:「 12.3k / 8.2k / 1.5k · $0.087 」"},
 		},
 	}
@@ -401,13 +402,13 @@ func TestAbbrevTokens(t *testing.T) {
 		in   int
 		want string
 	}{
-		{0, "0"},         // caller is expected to skip, but defensively still formats
-		{1, "1"},         // raw integer
-		{999, "999"},     // boundary
-		{1_000, "1k"},    // boundary, integer multiple drops ".0"
+		{0, "0"},      // caller is expected to skip, but defensively still formats
+		{1, "1"},      // raw integer
+		{999, "999"},  // boundary
+		{1_000, "1k"}, // boundary, integer multiple drops".0"
 		{12_345, "12.3k"},
-		{999_999, "1000k"}, // edge of M threshold, integer multiple drops ".0"
-		{1_000_000, "1M"},  // boundary, integer multiple drops ".0"
+		{999_999, "1000k"}, // edge of M threshold, integer multiple drops".0"
+		{1_000_000, "1M"},  // boundary, integer multiple drops".0"
 		{1_234_567, "1.2M"},
 	}
 	for _, tc := range tests {
@@ -435,10 +436,10 @@ func TestAbbrevWindow(t *testing.T) {
 		{0, "0"}, // defensive (caller omits the segment when pct==0)
 		{1, "1"},
 		{999, "999"},
-		{1_000, "1k"},        // integer multiple drops ".0"
-		{200_000, "200k"},   // canonical MiniMax 200K case (the F-55 motivation)
-		{999_999, "1000k"},  // integer multiple drops ".0"
-		{1_000_000, "1M"},   // canonical 1M model window, integer multiple drops ".0"
+		{1_000, "1k"},      // integer multiple drops".0"
+		{200_000, "200k"},  // canonical MiniMax 200K case (the F-55 motivation)
+		{999_999, "1000k"}, // integer multiple drops".0"
+		{1_000_000, "1M"},  // canonical 1M model window, integer multiple drops".0"
 		{1_234_567, "1.2M"},
 	}
 	for _, tc := range tests {
@@ -514,9 +515,9 @@ func TestFormatGitBar_NoWorkspaceReturnsEmpty(t *testing.T) {
 // TestFormatGitBar_NoGitStatusOmitsLine (F-48 review fix):
 // when Workspace is set but GitStatus is nil (caller couldn't
 // collect — non-repo / git error / git timeout), the entire
-// footer line must be omitted. Rendering "📁: <ws> · ⎇ ?" would
+// footer line must be omitted. Rendering"📁: <ws> · ⎇ ?" would
 // imply Git tracking is available when it isn't — the user's
-// review caught this as a misleading UI bug. The "⎇ ?" rendering
+// review caught this as a misleading UI bug. The"⎇ ?" rendering
 // is reserved for detached HEAD inside a real git repo
 // (Branch=="" + GitStatus!=nil). Pass a populated Workspace
 // specifically to prove the nil-GitStatus gate is what's
@@ -534,14 +535,14 @@ func TestFormatGitBar_NoGitStatusOmitsLine(t *testing.T) {
 func TestFormatGitBar_FullSnapshot(t *testing.T) {
 	// Branch + dirty + untracked + unpushed — all segments.
 	ctx := &messages.StatusBar{GitBar: &messages.GitStatusBar{Workspace: "/home/devin/code/nightme", GitStatus: &gtw.GitStatusSnapshot{
-			Branch:        "main",
-			Uncommitted:   3,
-			Untracked:     2,
-			AheadOfRemote: 5,
-			HasUpstream:   true,
-		}}}
+		Branch:        "main",
+		Modified:      3,
+		Untracked:     2,
+		AheadOfRemote: 5,
+		HasUpstream:   true,
+	}}}
 	got := formatGitBar(ctx.GitBar)
-	want := "📁: code/nightme · ⎇ main · ↑ 3 · ? 2 · ⇡ 5"
+	want := "📁: code/nightme · ⎇ main · ± 3 · ? 2 · ⇡ 5"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -558,21 +559,21 @@ func TestFormatGitBar_OmitsZeroSegments(t *testing.T) {
 			snap: &gtw.GitStatusSnapshot{
 				Branch: "main", HasUpstream: true, AheadOfRemote: 0,
 			},
-			want: "📁: code/nightme · ⎇ main · ⇡ 0",
+			want: "📁: code/nightme · ⎇ main",
 		},
 		{
 			name: "uncommitted only",
 			snap: &gtw.GitStatusSnapshot{
-				Branch: "feat/x", Uncommitted: 1, HasUpstream: true,
+				Branch: "feat/x", Modified: 1, HasUpstream: true,
 			},
-			want: "📁: code/nightme · ⎇ feat/x · ↑ 1 · ⇡ 0",
+			want: "📁: code/nightme · ⎇ feat/x · ± 1",
 		},
 		{
 			name: "untracked only",
 			snap: &gtw.GitStatusSnapshot{
 				Branch: "feat/x", Untracked: 7, HasUpstream: true,
 			},
-			want: "📁: code/nightme · ⎇ feat/x · ? 7 · ⇡ 0",
+			want: "📁: code/nightme · ⎇ feat/x · ? 7",
 		},
 		{
 			name: "unpushed only",
@@ -585,11 +586,11 @@ func TestFormatGitBar_OmitsZeroSegments(t *testing.T) {
 			name: "no upstream + uncommitted — show dirty, no 'local' marker",
 			snap: &gtw.GitStatusSnapshot{
 				Branch:        "feat/new",
-				Uncommitted:   2,
+				Modified:      2,
 				AheadOfRemote: 0, // parser leaves this 0 when no upstream
 				HasUpstream:   false,
 			},
-			want: "📁: code/nightme · ⎇ feat/new · ↑ 2",
+			want: "📁: code/nightme · ⎇ feat/new · ± 2",
 		},
 		{
 			name: "clean + no upstream — adds 'local' marker",
@@ -602,17 +603,17 @@ func TestFormatGitBar_OmitsZeroSegments(t *testing.T) {
 		{
 			name: "detached HEAD — branch renders as ?",
 			snap: &gtw.GitStatusSnapshot{
-				Branch:        "", // empty -> renders "?"
-				Uncommitted:   1,
+				Branch:        "", // empty -> renders"?"
+				Modified:      1,
 				HasUpstream:   false,
 				AheadOfRemote: 0,
 			},
-			want: "📁: code/nightme · ⎇ ? · ↑ 1",
+			want: "📁: code/nightme · ⎇ ? · ± 1",
 		},
 		{
 			name: "long path — last 2 components",
 			snap: &gtw.GitStatusSnapshot{Branch: "main", HasUpstream: true},
-			want: "📁: code/nightme · ⎇ main · ⇡ 0",
+			want: "📁: code/nightme · ⎇ main",
 			// (default Workspace is /home/devin/code/nightme → code/nightme)
 		},
 	}
@@ -635,17 +636,119 @@ func TestFormatGitBar_OmitsZeroSegments(t *testing.T) {
 	}
 }
 
+// TestFormatGitBar_AllCategoriesInFixedOrder pins the iTerm2-
+// aligned segment order: workspace -> branch -> + N -> - N ->
+// +- N -> ? N -> #N. Each category is populated with a
+// non-zero count so the test fails if any segment is dropped
+// or reordered.
+func TestFormatGitBar_AllCategoriesInFixedOrder(t *testing.T) {
+	gb := &messages.GitStatusBar{
+		Workspace: "/home/devin/code/nightme",
+		GitStatus: &gtw.GitStatusSnapshot{
+			Branch:        "feat/order",
+			Added:         2,
+			Deleted:       1,
+			Modified:      3,
+			Untracked:     4,
+			AheadOfRemote: 5,
+			HasUpstream:   true,
+		},
+		PullRequest: &gtw.PR{
+			Number: 99,
+			URL:    "https://example/pr/99",
+			State:  "open",
+		},
+	}
+	got := formatGitBar(gb)
+	want := "📁: code/nightme · ⎇ feat/order · + 2 · − 1 · ± 3 · ? 4 · ⇡ 5 · [#99](https://example/pr/99)"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestFormatGitBar_ConflictMarkerRendersAfterUntracked
+// confirms the "! conflict" segment is appended AFTER the
+// working-tree counts (+ - +- ?) but BEFORE the upstream (arrow)
+// and PR ([#N](url)) segments.
+func TestFormatGitBar_ConflictMarkerRendersAfterUntracked(t *testing.T) {
+	gb := &messages.GitStatusBar{
+		Workspace: "/home/devin/code/nightme",
+		GitStatus: &gtw.GitStatusSnapshot{
+			Branch:       "feat/conflict",
+			Added:        1,
+			Modified:     1,
+			Untracked:    1,
+			Conflicts:    1,
+			HasUpstream:  true,
+			HasConflicts: true,
+		},
+	}
+	got := formatGitBar(gb)
+	want := "📁: code/nightme · ⎇ feat/conflict · + 1 · ± 1 · ? 1 · ! 1"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestFormatGitBar_ConflictsSeparateFromModified pins the
+// status-bar split invariant: a conflict entry counts as
+// Conflicts, NOT Modified. 2 M + 1 UU must render as
+// "± 2 · ! 1" (non-overlapping counts), not "± 3 · ! 1"
+// (which would double-count the conflict inside Modified).
+func TestFormatGitBar_ConflictsSeparateFromModified(t *testing.T) {
+	gb := &messages.GitStatusBar{
+		Workspace: "/home/devin/code/nightme",
+		GitStatus: &gtw.GitStatusSnapshot{
+			Branch:       "feat/x",
+			Modified:     2,
+			Conflicts:    1,
+			HasConflicts: true,
+		},
+	}
+	got := formatGitBar(gb)
+	want := "📁: code/nightme · ⎇ feat/x · ± 2 · ! 1"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestFormatGitBar_LocalSuppressedByPullRequest guards against
+// the race window where PullRequest is cached but HasUpstream
+// is false (e.g. upstream detached after PR was opened).
+// Without this gate the line would read contradictory:
+// "... · [#42](url) · local". PullRequest != nil suppresses
+// the local marker.
+func TestFormatGitBar_LocalSuppressedByPullRequest(t *testing.T) {
+	gb := &messages.GitStatusBar{
+		Workspace: "/home/devin/code/nightme",
+		GitStatus: &gtw.GitStatusSnapshot{
+			Branch:      "feat/x",
+			HasUpstream: false,
+		},
+		PullRequest: &gtw.PR{
+			Number: 42,
+			URL:    "https://example/pr/42",
+			State:  "open",
+		},
+	}
+	got := formatGitBar(gb)
+	want := "📁: code/nightme · ⎇ feat/x · [#42](https://example/pr/42)"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 // TestFormatStatusBarLines_WithGitLine confirms line 3 is
 // appended after lines 1+2 when both are populated.
 func TestFormatStatusBarLines_WithGitLine(t *testing.T) {
-	// in = 12_300 + 0 + 8_200 = 20_500 → "20.5k".
+	// in = 12_300 + 0 + 8_200 = 20_500 →"20.5k".
 	ctx := &messages.StatusBar{
 		AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus-4-5"},
 		GitBar: &messages.GitStatusBar{
 			Workspace: "/home/devin/code/nightme",
 			GitStatus: &gtw.GitStatusSnapshot{
 				Branch:        "feat/x",
-				Uncommitted:   2,
+				Modified:      2,
 				Untracked:     1,
 				AheadOfRemote: 3,
 				HasUpstream:   true,
@@ -659,7 +762,7 @@ func TestFormatStatusBarLines_WithGitLine(t *testing.T) {
 	want := []string{
 		"🤖: claude · opus-4-5",
 		"💰:「 12.3k / 8.2k / 1.5k 」",
-		"📁: code/nightme · ⎇ feat/x · ↑ 2 · ? 1 · ⇡ 3",
+		"📁: code/nightme · ⎇ feat/x · ± 2 · ? 1 · ⇡ 3",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
@@ -677,7 +780,7 @@ func TestFormatStatusBarLines_GitOnly(t *testing.T) {
 		},
 	}
 	got := formatStatusBarLines(ctx)
-	want := []string{"📁: code/nightme · ⎇ main · ⇡ 0"}
+	want := []string{"📁: code/nightme · ⎇ main"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -720,7 +823,7 @@ func TestFormatStatusBarLines_PRSegment_AppendedToGitLine(t *testing.T) {
 	got := formatStatusBarLines(ctx)
 	want := []string{
 		"🤖: claude · opus-4-5",
-		"📁: code/nightme · ⎇ fix-x · ⇡ 0 · [#111](https://github.com/cnlangzi/nightme/pull/111)",
+		"📁: code/nightme · ⎇ fix-x · [#111](https://github.com/cnlangzi/nightme/pull/111)",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v\nwant %v", got, want)
@@ -758,7 +861,7 @@ func TestFormatStatusBarLines_PRSegment_NoGitLine(t *testing.T) {
 // TestFormatStatusBarLines_PRSegment_NilOrInvalid covers
 // the omit rules for the PR tail: nil PR / Number <= 0 / empty
 // URL all leave the git line without the trailing `[#N](url)`
-// segment. "No PR yet" must look identical to "lookup failed"
+// segment."No PR yet" must look identical to"lookup failed"
 // — chat-side decoration is the wrong place to discriminate them.
 func TestFormatStatusBarLines_PRSegment_NilOrInvalid(t *testing.T) {
 	tests := []struct {
@@ -775,7 +878,7 @@ func TestFormatStatusBarLines_PRSegment_NilOrInvalid(t *testing.T) {
 			got := formatStatusBarLines(ctx)
 			want := []string{
 				"🤖: claude · opus-4-5",
-				"📁: code/nightme · ⎇ fix-x · ⇡ 0",
+				"📁: code/nightme · ⎇ fix-x",
 			}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("got %v\nwant %v", got, want)
@@ -787,7 +890,7 @@ func TestFormatStatusBarLines_PRSegment_NilOrInvalid(t *testing.T) {
 // TestFormatStatusBarLines_PRSegment_DirtyCountsBetween
 // pins the segment order: workspace → branch → dirty counts
 // → PR. The PR must be the last segment so the line reads
-// as "where am I → how dirty → what's the open PR", not
+// as"where am I → how dirty → what's the open PR", not
 // "where am I → what's the PR → how dirty".
 func TestFormatStatusBarLines_PRSegment_DirtyCountsBetween(t *testing.T) {
 	ctx := &messages.StatusBar{
@@ -796,7 +899,7 @@ func TestFormatStatusBarLines_PRSegment_DirtyCountsBetween(t *testing.T) {
 			Workspace: "/home/devin/code/nightme",
 			GitStatus: &gtw.GitStatusSnapshot{
 				Branch:        "fix-x",
-				Uncommitted:   3,
+				Modified:      3,
 				Untracked:     2,
 				HasUpstream:   true,
 				AheadOfRemote: 1,
@@ -807,7 +910,7 @@ func TestFormatStatusBarLines_PRSegment_DirtyCountsBetween(t *testing.T) {
 	got := formatStatusBarLines(ctx)
 	want := []string{
 		"🤖: claude · opus-4-5",
-		"📁: code/nightme · ⎇ fix-x · ↑ 3 · ? 2 · ⇡ 1 · [#42](https://example/pr/42)",
+		"📁: code/nightme · ⎇ fix-x · ± 3 · ? 2 · ⇡ 1 · [#42](https://example/pr/42)",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v\nwant %v", got, want)

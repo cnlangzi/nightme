@@ -11,6 +11,62 @@ is committed there is the version users build and run.
 
 ## [Unreleased] — current dev (locked 2026-08-02)
 
+### `statusbar`: split `Uncommitted` into Added / Deleted / Modified / Conflicts
+
+The git status footer line now follows the iTerm2 / powerlevel10k
+convention with one segment per porcelain category. The old
+single `Uncommitted` count is removed; callers now read four
+separate fields.
+
+**Field changes (`messages.GitStatusSnapshot`):**
+
+| Old | New |
+| --- | --- |
+| `Uncommitted int` (lumped M / A / D / R / C / UU / AA / DD) | `Added int` (X='A') · `Deleted int` (X='D' or Y='D') · `Modified int` (X='M' or Y='M', plus R / C) — **no conflicts** |
+| (none) | `Conflicts int` (NEW — UU / AA / DD / AU / UA / DU / UD) |
+| `Untracked int` (also rendered as `? N`) | `Untracked int` (still `? N`; `??` no longer folds into Added) |
+| `HasConflicts bool` (binary flag) | unchanged — now mirrors `Conflicts > 0`; /gtw push and /gtw pr readiness predicates keep using the bool |
+
+
+**Footer segments (iTerm2-aligned, fixed order):**
+
+`📁: <ws> · ⎇ <branch> · + N · − N · ± N · ? N · ! N · ⇡ N · [#N](url)`
+
+| Segment | Source field | Symbol | Omitted when |
+| --- | --- | --- | --- |
+| `+ N` added | `Added` | `+` | count == 0 |
+| `− N` deleted | `Deleted` | U+2212 MINUS SIGN | count == 0 |
+| `± N` modified | `Modified` | U+00B1 PLUS-MINUS SIGN | count == 0 |
+| `? N` untracked | `Untracked` | `?` | count == 0 |
+| `! N` conflict | `Conflicts` | `!` | count == 0 |
+| `⇡ N` unpushed | `AheadOfRemote` (when `HasUpstream`) | U+21E1 | !HasUpstream **or** AheadOfRemote == 0 |
+| `[#N](url)` PR | `PullRequest` | markdown link | PullRequest nil / invalid |
+| `local` (binary) | — | `local` | HasUpstream **or** PullRequest != nil **or** any dirty field > 0 |
+
+**Working-tree-clean gate (F-57):**
+
+`WorkingTreeIsClean()` now checks `Added`, `Deleted`, `Modified`,
+`Untracked`, **and** `Conflicts`. `PRBlockReason()` aggregates `Added + Deleted +
+Modified` into a single "X file(s) changed but not committed"
+hint rather than splitting per category.
+
+**Zero-honesty rule (review fix):**
+
+Every numeric segment is dropped when its count is 0; this
+applies uniformly to `+`, `−`, `±`, `?`, `!`, and `⇡`. The previous
+"always render `⇡ 0` to prove the stamp worked" rule is gone —
+the absence of the segment is now the honest signal that
+nothing is unpushed. Clean worktrees with `HasUpstream=true`
+collapse to the minimal `📁: <ws> · ⎇ <branch>` line.
+
+**Local-marker / PullRequest race guard (review fix):**
+
+The `local` marker ("branch has never been pushed to origin")
+is now also gated against `PullRequest != nil`. Without this
+gate, a stale PR cache racing against a freshly-detached
+upstream could surface the contradictory
+`… · [#42](url) · local` line.
+
 ### `outbound`: rename SessionContext / Stamper to StatusBar / StatusBarSource (F-58)
 
 The per-message metadata envelope attached to every outbound

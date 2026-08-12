@@ -727,7 +727,7 @@ func TestDispatchPush_HardRefuse_Conflicts(t *testing.T) {
 		Branch:       "wt-conflict",
 		HasUpstream:  true,
 		HasConflicts: true,
-		Uncommitted:  1,
+		Modified:     1,
 	})
 
 	s := captureCh(t, rig.cs)

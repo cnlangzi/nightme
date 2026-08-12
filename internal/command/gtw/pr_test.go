@@ -1653,8 +1653,10 @@ func (r *recordingInvalidator) snapshot() []string {
 }
 
 // TestInvalidateChatASPRCache_HappyPath: every non-nil AS in
-// the pool gets Invalidate called exactly once, in iteration
-// order.
+// the pool gets Invalidate called exactly once. Iteration order
+// is NOT asserted because cs.Pool() iterates a Go map whose
+// order is intentionally randomized per process — asserting
+// order would make the test flaky across runs.
 func TestInvalidateChatASPRCache_HappyPath(t *testing.T) {
 	rec := &recordingInvalidator{}
 	deps := HandlerDeps{PRInvalidator: rec}
@@ -1674,9 +1676,18 @@ func TestInvalidateChatASPRCache_HappyPath(t *testing.T) {
 	if len(got) != len(want) {
 		t.Fatalf("Invalidate calls = %d, want %d (%v)", len(got), len(want), got)
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("call[%d] = %q, want %q", i, got[i], want[i])
+	// Coverage check: every expected AS ID was invalidated
+	// exactly once, regardless of map iteration order.
+	for _, expected := range want {
+		count := 0
+		for _, actual := range got {
+			if actual == expected {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("AS %q was invalidated %d times, want exactly 1 (got=%v)",
+				expected, count, got)
 		}
 	}
 }

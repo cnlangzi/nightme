@@ -112,6 +112,16 @@ func runLoginWith(cmd *cobra.Command, f *loginCmdFlags, provider login.Provider)
 		return fmt.Errorf("login: %w", err)
 	}
 
+	// Fire the canonical greeting DM at the owner. Best-effort: a
+	// failed greeting must NOT roll back the successful registration —
+	// credentials are persisted regardless. Each provider implements
+	// Greet against its own channel SDK; the orchestrator just
+	// hands over the bilingual brand copy and swallows the error
+	// after logging.
+	if greetErr := provider.Greet(ctx, login.GreetingTexts()); greetErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: greeting DM failed: %v\n", greetErr)
+	}
+
 	cfg.Feishu.AppID = creds.AppID
 	cfg.Feishu.AppSecret = creds.AppSecret
 

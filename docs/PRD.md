@@ -17,7 +17,7 @@
 
 nightme 自己**不调用 LLM、不做任务编排、不做代码审查**。它只是一个 I/O 搬运工：把 IM 消息搬到本地 CLI 的 TTY 输入框，再把 CLI 的屏幕输出搬回 IM。
 
-**Slogan**：`Sleep tight, code all night.`
+**Slogan**：`Sleep tight, NightMe code all night.`
 
 可以把它想象成：一个"被 IM 控制的 Web TTY"，但这个 TTY 不是通用 shell，只针对 AI Coding Agent。
 

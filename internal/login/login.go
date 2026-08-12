@@ -36,6 +36,25 @@ type Provider interface {
 	// cancelled). On success the caller persists the returned
 	// Credentials into the on-disk Config.
 	Login(ctx context.Context) (*Credentials, error)
+
+	// Greet dispatches the canonical NightMe greeting to the user
+	// who just completed the flow. Implementations are expected
+	// to honour the best-effort contract: never a pre-requisite
+	// for credential persistence, and silent when the channel
+	// did not return an owner ID.
+	//
+	// The login package is intentionally data-only: messages
+	// carries a per-locale ordered list and the provider decides
+	// which locale to ship (based on tenant_brand / user locale /
+	// anything it knows about the recipient). A provider that
+	// can't tell locale can ship every array — both languages
+	// arrive as separate DMs.
+	//
+	// Greet is called by the CLI orchestrator right after Login
+	// returns. Providers are expected to use a short, internal
+	// timeout (15s) so a channel-side stall cannot hold the CLI
+	// open after the QR scan finished.
+	Greet(ctx context.Context, messages GreetingMessages) error
 }
 
 // Credentials is the on-disk shape of a successful Login. Only

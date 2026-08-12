@@ -1499,6 +1499,7 @@ WebSearch  -> 10 results
 - **2026-08-03(同日增量)** - 加入 §13.6-§13.9:Devin 拍板 Thinking/ToolStart/ToolEnd 全部折叠;列出 3 个 UX 折叠粒度方案(per-event / aggregate-paired / category-aggregate)+ 4 个待确认问题。等 Devin 决定后启动 PR。
 - **2026-08-03(同日再增量)** - 加入 §13.10:Devin 发现 `OutboundMessage.ReplyTo` 字段被消费在内部 receipt map 但**从未投递为 Feishu `root_id`**,所有 bot 回复都是顶层消息,与用户消息无视觉连接。SDK 字段 `larkim.CreateMessageReqBody.RootId` 已存在但代码没用。F-26 v1.1 设计文档 `ReplyTo 非空 → 必须镇定到该 userMsgID(用 ReplyMessage API 或已有 receipt)` 在 v1.3 refactor 中丢失。提供 A/B/C 三种修复范围(最小/中等/完整)+ 4 个待确认问题。
 - **2026-08-03(同日三增量)** - 加入 §13.11(F-33 决策记录):D1 ChatType 不进 Gateway + D2 topic_group 不特殊处理 + D3 `ReplyTo = ParentId`(RootId 不进 nightme)+ D4 任何 Channel 都不引入 thread 概念。落地 chatID 数据模型系统性清理,关闭 inbound 方向 ReplyTo 接线缺失。详见 [`docs/feat/F-33-simplify-chatid-data-model.md`](../feat/F-33-simplify-chatid-data-model.md)。
+- **2026-08-12** - 加入 §19: Greeting Localization 调研与选型。Strategy B(bilingual post envelope)替代 Strategy A(按 tenant_brand 单语言 text)。实测验证 Feishu `post` envelope 的 `zh_cn` + `en_us` 双 locale 块在客户端按 receiver UI 渲染;API response echo 字段误导(只显示一条 locale)但客户端体验正常。改动:`internal/login/greeting.go` 数据结构从 `{English, Chinese []string}` 改为 `[]GreetingBody`;`internal/login/feishu/provider.go` Greet 循环发送 bilingual post;`tenantBrand` 字段删除。详见 §19。
 - **2026-08-04** - 加入 §13.12(F-thread-route 决策反转):折叠方案(§13.6-§13.9)实机验证失败,反转决策 → OutThinking / OutToolStart / OutToolEnd / OutCompaction 作为独立 thread reply 投递;receipt card 收窄到只承载最终答复 + 元数据;OutToolEnd 走类型感知摘要(`summarize_tool.go`)。新建 [`docs/feat/F-37-tool-thread-routing.md`](../feat/F-37-tool-thread-routing.md) 作为本 feature 的权威文档。`docs/SPEC.md` §0.3 同步加变更摘要;§15 实施计划待修订(下个 commit)。
 - **2026-08-04(同日增量 F-38)** - 加入 §13.14 决策:Claude TaskCreate / TaskUpdate → Receipt Checklist。Bridge 在 `tool_result` 确认成功后发完整 typed task snapshot;Gateway 增加 `OutTaskCreate` / `OutTaskUpdate` 无状态透传;Feishu receipt 在 answer entries 后、footer 前加入单一 markdown checklist element,成功 task tool 不再投递到 thread。新建 [`docs/feat/F-38-task-checklist.md`](../feat/F-38-task-checklist.md) 作为权威设计。`docs/SPEC.md` §0.6 + §11 backlog 同步登记。
 
@@ -2899,3 +2900,131 @@ Claude Code 的 `TaskCreate` / `TaskUpdate` 在 `--output-format stream-json` �
 ### 18.6 详细规格
 
 [`docs/feat/F-38-task-checklist.md`](../feat/F-38-task-checklist.md)。
+
+## 19. Greeting 本地化策略（feat-greeting, 2026-08-12）
+
+`nightme login feishu` 扫码成功后，provider 自动 DM 一组 greeting 文案给 owner。本节记录文案本地化方案的调研结论与最终选择（Strategy B：每条 message 都塞 `zh_cn` + `en_us` 双 locale 块，由 receiver 客户端按 UI 选展示语言）。
+
+### 19.1 调研过程
+
+#### 19.1.1 三种候选策略
+
+| 策略 | 描述 | provider 复杂度 |
+|---|---|---|
+| **A**（最初方案） | 按 `tenant_brand` 选一种语言，发 N 条 `msg_type=text` | 中：需要 tenant_brand 字段；拿不到时 fallback |
+| **B**（最终方案） | 每条 message 都是 `msg_type=post`，content 同时含 `zh_cn` + `en_us` 块 | **低**：provider 不参与 locale 选择 |
+| C | channel capability flag，A/B 按 channel 分流 | 高：抽象层 + 测试矩阵翻倍 |
+
+#### 19.1.2 实测：用 probe API 验证 post envelope 行为
+
+时间：2026-08-12 16:30 (CST)
+工具：curl + Feishu tenant_access_token（从 `~/.nightme/config.yaml` 读 app_id/app_secret）
+bot：`cli_aaf337daa1785ccc`，owner open_id `ou_1823727676a5fa54e027187faf1d5207`
+
+**Probe 1**：post envelope 顺序 `zh_cn` 在前、`en_us` 在后，两块都填。
+
+```json
+{
+  "receive_id": "ou_xxx",
+  "msg_type": "post",
+  "content": "{\"zh_cn\":{\"content\":[[{\"tag\":\"text\",\"text\":\"[中文版] 你好,我是 NightMe。打开你的飞书客户端,看显示的是中文还是英文?\"}]]},\"en_us\":{\"content\":[[{\"tag\":\"text\",\"text\":\"[English] Hi, I'm NightMe. Open your Feishu client — does it render this English line or the Chinese one above?\"}]]}}"
+}
+```
+
+**Probe 2**：相同 envelope 但 locale 顺序反过来（`en_us` 在前、`zh_cn` 在后）。
+
+#### 19.1.3 关键发现：**API response echo 与客户端渲染不一致**
+
+**API 行为（误导）**：
+- `POST /open-apis/im/v1/messages` 的 response.data.body.content 只 echo **一条** locale（probe 1 + 2 都 echo en_us）。
+- `GET /open-apis/im/v1/messages/{message_id}`（带 `?lang=zh_cn` 或 `?lang=en_us`）也只 echo 那一条。
+- 看上去 server 只存了一条 locale。
+
+**客户端行为（真实）**：
+- owner 用 zh_CN locale 的飞书客户端打开这两条消息，**两条都显示中文版**（probe 1 显示 `[中文版] 你好...`，probe 2 显示 `[中文-2] zh 在 en 后面`）。
+- 因为我们写的 `zh_cn` 文案包含 `[中文版]` 前缀和"打开你的飞书客户端"这种特定措辞（机器翻译不会生成完全相同的句子），可以确认：**server 实际存了双语，客户端按 UI 渲染对应 locale 块**。
+
+**结论**：server 端的 echo 字段是 API 表达的局限；客户端的 locale-pick 行为是 Feishu 的固定渲染规则。Strategy B 在客户端层面是可靠的。
+
+#### 19.1.4 为什么不用 Strategy A
+
+| 问题 | 说明 |
+|---|---|
+| `tenant_brand` 拿不到时 fallback 到英文 | SDK 实测中能拿到（"tenant brand: feishu" 那行 debug 输出），但**不能保证**所有用户/所有注册路径都回 `UserInfo.TenantBrand`。如果拿不到，CN 用户会收到英文 —— 这是 A 的结构性缺陷。 |
+| tenant_brand 语义已变 | 之前我们以为 `tenant_brand` 决定 client UI 渲染，但实际上 client 不看 tenant_brand，只看用户自己设置的 UI 语言。tenant_brand 只决定 server 域名（feishu.cn vs larksuite.com），与 locale rendering 无关。 |
+| 单语言投递风险 | A 一次只发一种语言；如果发错了（user 实际是 EN 但我们按 tenant_brand=feishu 发了中文），user 完全看不到正确文案 —— Strategy B 没有这个问题（两条都在）。 |
+
+### 19.2 选型结论：**Strategy B**
+
+每条 greeting message 都是一个 `msg_type=post`，content 是：
+
+```json
+{
+  "zh_cn": {"content": [[{"tag": "text", "text": "<中文文案>"}]]},
+  "en_us": {"content": [[{"tag": "text", "text": "<English copy>"}]]}
+}
+```
+
+**优势**：
+- ✅ provider 不需要选 locale —— 不依赖 `tenant_brand`、不依赖任何 receiver 信息。
+- ✅ receiver 一定看得到一种正确语言 —— 不管 UI 是 zh_CN / en_US / ja_JP / 任意。
+- ✅ 双语都送达 —— user 切换 Feishu 客户端语言时不用重发。
+- ✅ 任何 IM 协议只要支持 post envelope + 双 locale 块都能用；Slack / WhatsApp 等 fallback 路径不在本期 scope，但接口预留了。
+
+**代价**：
+- 每次调用发的是 N 条 post（不是 N 条 text），API 流量 ×1（仍受 5 QPS 限流）。
+- API response 看起来只存了一条 locale —— 这是 Feishu API 表达限制，不影响客户端体验。
+
+### 19.3 数据结构（最终方案）
+
+`internal/login/greeting.go`：
+
+```go
+type GreetingBody struct {
+    Chinese string
+    English string
+}
+
+type GreetingMessages []GreetingBody
+```
+
+每条 message = 一个 `GreetingBody`（双语单元）。`GreetingMessages` 是有序列表，provider 顺序发送。
+
+文案：
+
+| 序号 | Chinese | English |
+|---|---|---|
+| 1 | `你好，我是 NightMe 🌙。` | `Hi, this is NightMe 👋. Your pair programmer.` |
+| 2 | `奔赴你的星辰大海，拥有你的自由生活。那些必须死守电脑、避无可避的无奈，让我替你守候 🛡️。` | `Set it running. Stay in the loop from your phone, on your terms 🚀.` |
+
+中文第 2 条取自 `README.zh-CN.md` §开篇 verbatim；英文第 2 条强调 user agency（"stay in the loop ... on your terms"），与 A 方案"sci-fi `digital twin takes the wheel`"刻意保持距离。
+
+### 19.4 实现位置
+
+| 层 | 文件 | 改动 |
+|---|---|---|
+| 数据 | `internal/login/greeting.go` | `GreetingMessages = []GreetingBody`（替换之前的 `{English, Chinese []string}`） |
+| Provider | `internal/login/feishu/provider.go::Greet` | 循环每个 `GreetingBody`，build bilingual post envelope，调 `Message.Create` |
+| Provider | `internal/login/feishu/provider.go` | 删 `tenantBrand` 字段（不再用） |
+| 测试 | `internal/login/greeting_test.go` | 4 个 exact copy 常量 + bilingual shape 测试 |
+| CLI | `cmd/nightme/login.go` | 不变 —— `Provider.Greet(ctx, login.GreetingTexts())` 接口稳 |
+
+### 19.5 未来扩展
+
+- **更多语言**：在 `GreetingBody` 加 `Japanese string`、`Korean string` 等字段；provider 只填存在的 locale 块。Feishu 的 `post` envelope 支持任意 `xx_XX` locale tag。
+- **Slack / WhatsApp 接入**：Strategy A 是 fallback —— provider 拿不到 `tenant_brand`/language header 时直接发 `text`，避免空 envelope 报错。
+- **首条更突出**：当前 2 条都是 bilingual post；如果产品希望"前 N 条更轻量、后 N 条带格式"，可在 `GreetingBody` 加 `RenderHint` 字段。
+
+### 19.6 已知未确认
+
+- Feishu 官方文档**没有明确说明** `post` envelope 的 locale 块在客户端按 receiver UI pick 的行为。我们是基于实测 + §13.1 (chat-mode reply semantics) 的同源结论。**风险**：未来 Feishu 客户端改渲染策略会破坏 Strategy B —— 届时需要 fallback 到 Strategy A 或迁移到 `interactive` card（cardkit 路径支持更明确的 i18n 配置）。
+
+### 19.7 Probe 工件
+
+调试用脚本：`/tmp/feishu_probe.py`、`/tmp/feishu_probe2.py`、`/tmp/feishu_readback2.py`、`/tmp/feishu_dump.py` —— 留作未来验证（如果 Feishu 改渲染行为，可以用同样脚本复测）。
+
+---
+
+## 20. 变更日志追加
+
+- **2026-08-12** - 加入 §19: Greeting Localization 调研与选型。Strategy B（bilingual post envelope）替代 Strategy A（按 tenant_brand 单语言 text）。实测验证 Feishu `post` envelope 的 `zh_cn` + `en_us` 双 locale 块在客户端按 receiver UI 渲染；API response echo 字段误导（只显示一条 locale）但客户端体验正常。改动：`internal/login/greeting.go` 数据结构从 `{English, Chinese []string}` 改为 `[]GreetingBody`；`internal/login/feishu/provider.go` Greet 循环发送 bilingual post；`tenantBrand` 字段删除。

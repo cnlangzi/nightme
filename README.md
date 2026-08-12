@@ -15,7 +15,6 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Go Reference](https://pkg.go.dev/badge/github.com/cnlangzi/nightme.svg)
 
-![Go](https://img.shields.io/badge/Go-1.26-00ADD8?style=flat&logo=go&logoColor=white)
 ![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 ![Single Binary](https://img.shields.io/badge/distribution-single%20binary-success)
 ![GitHub stars](https://img.shields.io/github/stars/cnlangzi/nightme?style=social)

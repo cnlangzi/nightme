@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/command"
 )
 
 // maxDirtyFilesReported caps how many uncommitted paths we
@@ -105,49 +106,56 @@ func RunClose(
 	// down.
 	if selectedCwd == "" {
 		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ No active workspace. Send /cwd <path> first."), nil
+			"❌ " + command.NoActiveCwdReply), nil
 	}
-	// Treat *any* stat failure as a gone/unreachable cwd for
-	// the purposes of the safety net — IsNotExist, EACCES, ENOTDIR,
-	// EIO on a now-unmounted volume, etc. all leave the chat
-	// pointing at a path /gtw close can't operate on. Falling
-	// through to ReadGTWYml on a non-IsNotExist stat error
-	// would surface "failed to read .nightme/gtw.yml: <stat
-	// err>" and leave the user with no clear path forward;
-	// clearing the dangling state and asking them to /cwd
-	// again is the same recovery the IsNotExist case gets.
+	// Stat failure handling: split the permanent case from the
+	// transient case. IsNotExist means another /gtw close (or an
+	// external `git worktree remove`) tore down this chat's
+	// fix worktree — the path is gone, recovery is to clear
+	// the dangling state and ask the user to /cwd again.
+	// Anything else (EACCES, EIO, ESTALE, ENOTDIR, ENOTCONN) is
+	// a transient or permission failure on a path that may
+	// still be there in a moment — preserve all state, surface
+	// the stat error as an IM reply, and let the user retry.
 	if _, statErr := os.Stat(selectedCwd); statErr != nil {
+		if !os.IsNotExist(statErr) {
+			return reply(ctx, cs.Emitter(), chatID, messageID,
+				fmt.Sprintf("❌ cannot reach workspace: %s\n(stat: %v)\n"+
+					"hint: this may be transient (e.g. NFS hiccup, briefly-unmounted volume). "+
+					"retry /gtw close once the path is reachable again — the in-flight fix and "+
+					"agent sessions are left intact.", selectedCwd, statErr)), nil
+		}
 		cur := slot.Load()
 		slotMatched := cur.Worktree != "" &&
 			filepath.Clean(cur.Worktree) == filepath.Clean(selectedCwd)
 		// Always tear down ASes pinned to the unreachable path —
 		// they are orphaned regardless of slot state.
-		closedN, _ := cs.EvictAgentSessionsInCwd(selectedCwd)
+		droppedN, _ := cs.EvictAgentSessionsInCwd(selectedCwd)
 		if slotMatched {
 			slot.Store(Context{}) // Manager.ClearContext via cmd.go:655-661 shim
 		}
 		cs.ClearSelectedCwd()
 		agentsLine := ""
-		if n := closedN; n > 0 {
-			agentsLine = fmt.Sprintf("closed %d orphaned agent(s); ", n)
+		if n := droppedN; n > 0 {
+			agentsLine = fmt.Sprintf("dropped %d orphaned agent session(s); ", n)
 		}
 		var body string
 		if slotMatched {
 			body = fmt.Sprintf(
 				"⚠️ worktree directory is unreachable: %s\n"+
-					"(stat: %v) another /gtw close (or an external `git worktree remove`) "+
+					"another /gtw close (or an external `git worktree remove`) "+
 					"tore down this chat's fix worktree.\n"+
 					"%scleared the in-flight fix and the dangling cwd.\n"+
 					"hint: run /cwd <path> to point this chat at a directory again.",
-				selectedCwd, statErr, agentsLine)
+				selectedCwd, agentsLine)
 		} else {
 			body = fmt.Sprintf(
 				"⚠️ directory is unreachable: %s\n"+
-					"(stat: %v) it was deleted out from under this chat (e.g. by another "+
+					"it was deleted out from under this chat (e.g. by another "+
 					"/gtw close running `git worktree remove`).\n"+
 					"%scleared the dangling cwd.\n"+
 					"hint: run /cwd <path> to point this chat at a directory again.",
-				selectedCwd, statErr, agentsLine)
+				selectedCwd, agentsLine)
 		}
 		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
 	}
@@ -174,6 +182,27 @@ func RunClose(
 			"❌ .nightme/gtw.yml is malformed: repoRoot is empty"), nil
 	}
 
+	// --- step 2.5: close ASes pinned to the about-to-be-gone worktree ---
+	// Every AgentSession whose Cwd == c.Worktree is orphaned the
+	// moment `git worktree remove` (step 4) succeeds — its cwd
+	// is gone. Without this step, the orphan agent processes
+	// accumulate across fixes and drag the daemon down.
+	//
+	// Runs BEFORE the dirty check (step 3) so a live agent
+	// cannot dirty the worktree in the small window between
+	// the dirty check and `git worktree remove`; with the
+	// agent still alive, that window was a TOCTOU where
+	// step 4's worktree remove could fail with "contains
+	// modified or untracked files" and the orphan bridge
+	// survived every retry.
+	//
+	// Mirrors the cleanup the step 0.5 safety net performs.
+	// The result is fed into the step 8 success card so the
+	// user sees an `→ agents: N dropped ...` line when
+	// applicable; the no-agents happy path keeps its existing
+	// 4-line card body.
+	droppedN, _ := cs.EvictAgentSessionsInCwd(c.Worktree)
+
 	// --- step 3: dirty check --------------------------------------
 	// Close is intentionally all-or-nothing — the user must
 	// commit / stash / discard before re-running. /gtw fix keeps
@@ -199,19 +228,6 @@ func RunClose(
 		}
 		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
 	}
-
-	// --- step 5.5: close ASes pinned to the about-to-be-gone worktree ---
-	// Every AgentSession whose Cwd == c.Worktree is orphaned the
-	// moment `git worktree remove` (step 4) succeeds — its cwd
-	// is gone. Without this step, the orphan agent processes
-	// accumulate across fixes and drag the daemon down. Mirrors
-	// the cleanup the step 0.5 safety net performs, generalised
-	// to the happy path.
-	//
-	// The result is fed into the step 8 success card so the user
-	// sees an `→ agents: N closed ...` line when applicable; the
-	// no-agents happy path keeps its existing 4-line card body.
-	droppedN, _ := cs.EvictAgentSessionsInCwd(c.Worktree)
 
 	// --- step 5: delete the local branch --------------------------
 	// `-D` (uppercase) is force-delete — refuses to keep the
@@ -266,7 +282,7 @@ func RunClose(
 		// Surface the agent-process cleanup only when it
 		// actually fired. The no-agents happy path keeps
 		// its existing 4-line card body.
-		body += fmt.Sprintf("\n→ agents: %d closed (orphaned by worktree removal)", n)
+		body += fmt.Sprintf("\n→ agents: %d dropped (orphaned by worktree removal)", n)
 	}
 	// Send close's own success card. The reply() return is
 	// intentionally discarded — returning here would skip step 9's

@@ -708,8 +708,8 @@ func TestRunClose_DanglingSelectedCwd_FixActive(t *testing.T) {
 	// the "closed N orphaned agent(s)" line MUST appear
 	// with N=1. The previous "0 reported" behaviour
 	// undercounted the actual cleanup.
-	if !strings.Contains(reply, "closed 1 orphaned agent(s)") {
-		t.Errorf("reply missing 'closed 1 orphaned agent(s)' line:\n%s", reply)
+	if !strings.Contains(reply, "dropped 1 orphaned agent session(s)") {
+		t.Errorf("reply missing 'dropped 1 orphaned agent session(s)' line:\n%s", reply)
 	}
 	if !strings.Contains(reply, "worktree directory is unreachable") {
 		t.Errorf("reply missing 'worktree directory is unreachable' prefix:\n%s", reply)
@@ -763,8 +763,8 @@ func TestRunClose_DanglingSelectedCwd_SlotEmpty(t *testing.T) {
 	// it was still pinned to the now-gone cwd — the pool
 	// entry was still removed by the safety net, so the
 	// "closed N orphaned agent(s)" line MUST appear with N=1.
-	if !strings.Contains(reply, "closed 1 orphaned agent(s)") {
-		t.Errorf("reply missing 'closed 1 orphaned agent(s)' line:\n%s", reply)
+	if !strings.Contains(reply, "dropped 1 orphaned agent session(s)") {
+		t.Errorf("reply missing 'dropped 1 orphaned agent session(s)' line:\n%s", reply)
 	}
 	if !strings.Contains(reply, "directory is unreachable") {
 		t.Errorf("reply missing 'directory is unreachable' prefix:\n%s", reply)
@@ -895,8 +895,8 @@ func TestRunClose_Success_ClosesOrphanedAgents(t *testing.T) {
 	// removes their pool entries, so the count must reflect
 	// them. The "closed N orphaned agent(s)" line appears with
 	// N=2.
-	if !strings.Contains(reply, "agents: 2 closed") {
-		t.Errorf("reply missing 'agents: 2 closed' line:\n%s", reply)
+	if !strings.Contains(reply, "agents: 2 dropped") {
+		t.Errorf("reply missing 'agents: 2 dropped' line:\n%s", reply)
 	}
 }
 

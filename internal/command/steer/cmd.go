@@ -40,19 +40,11 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 )
-
-// previewRuneCap is the IM-card-friendly preview length. IM
-// channels (Feishu especially) truncate plain-text payloads
-// around 4 KB, but the visible header is much shorter; 80 runes
-// keeps one short sentence visible while still leaving room for
-// the emoji + label + ellipsis.
-const previewRuneCap = 80
 
 // Factory is the command.SlashCommandFactory for /steer.
 type Factory struct {
@@ -126,23 +118,9 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 		return command.Reply(ctx, rt, fmt.Sprintf("Steer failed: %v", err)), nil
 	}
 
-	// Reply with a short preview of the steered body. Truncate
-	// by rune count (not bytes) so multi-byte UTF-8 sequences
-	// (CJK / emoji) are never split — a half-cut character would
-	// render as U+FFFD in the IM card.
-	preview := body
-	if utf8.RuneCountInString(preview) > previewRuneCap {
-		var b strings.Builder
-		b.Grow(previewRuneCap*4 + 3) // worst-case 4 bytes per rune + ellipsis
-		count := 0
-		for _, r := range preview {
-			if count >= previewRuneCap-3 {
-				break
-			}
-			b.WriteRune(r)
-			count++
-		}
-		preview = b.String() + "..."
-	}
-	return command.Reply(ctx, rt, fmt.Sprintf("🛑 Steering: %s", preview)), nil
+	// Reply with a short preview of the steered body (truncated
+	// at rune boundary — see command.PreviewForIM for the
+	// multi-byte UTF-8 safety rationale).
+	return command.Reply(ctx, rt,
+		fmt.Sprintf("🛑 Steering: %s", command.PreviewForIM(body))), nil
 }

@@ -40,7 +40,9 @@ import (
 	"github.com/cnlangzi/nightme/internal/command/cwd"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
 	newcmd "github.com/cnlangzi/nightme/internal/command/newcmd"
+	"github.com/cnlangzi/nightme/internal/command/queue"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
+	"github.com/cnlangzi/nightme/internal/command/steer"
 	"github.com/cnlangzi/nightme/internal/command/stop"
 	"github.com/cnlangzi/nightme/internal/command/think"
 	"github.com/cnlangzi/nightme/internal/command/tools"
@@ -470,6 +472,8 @@ func runDaemon(ctx context.Context, out io.Writer, deps runDeps, sigCh <-chan os
 	reg.Register(close.NewFactory(mgr))
 	reg.Register(stop.NewFactory(mgr))
 	reg.Register(newcmd.NewFactory(mgr))
+	reg.Register(steer.NewFactory(mgr))
+	reg.Register(queue.NewFactory(mgr))
 	commander := command.NewCommander(reg)
 
 	// shellDispatcher owns the full shell-dispatch flow:

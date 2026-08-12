@@ -258,10 +258,24 @@ func validateDaemonOptions(opts daemonOptions) error {
 	return nil
 }
 
+// daemonChildCommand is the hidden subcommand the forked daemon
+// child runs under. `nightme start` / `restart` re-exec the nightme
+// binary with this argument; main() also keys the console-quiet
+// logger off it (see isDaemonChild).
+const daemonChildCommand = "_daemon"
+
+// isDaemonChild reports whether argv belongs to the forked daemon
+// child rather than a user-facing CLI invocation. The child has no
+// console (stdout → /dev/null, stderr → crash capture), so it must
+// not tee its log stream to those streams.
+func isDaemonChild(argv []string) bool {
+	return len(argv) > 1 && argv[1] == daemonChildCommand
+}
+
 func newDaemonCmd() *cobra.Command {
 	var channelName string
 	cmd := &cobra.Command{
-		Use:    "_daemon",
+		Use:    daemonChildCommand,
 		Short:  "Internal daemon process",
 		Hidden: true,
 		Args:   cobra.NoArgs,

@@ -324,7 +324,7 @@ func buildAgentPrompt(c Context) string {
 	}
 	sb.WriteString(". They need it committed to local git.\n\n")
 
-	sb.WriteString("Group the changes by relevance — different concerns go indifferent commits, related changes go together.\n")
+	sb.WriteString("Group the changes by relevance — different concerns go in different commits, related changes go together.\n")
 	sb.WriteString("Use Conventional Commits for each:\n\n")
 
 	sb.WriteString("  <type>(<scope>): <subject>\n")

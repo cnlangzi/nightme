@@ -30,6 +30,11 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/chatsession"
+	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // MaxStdoutLines caps the number of stdout lines inlined into
@@ -61,12 +66,17 @@ type Request struct {
 
 // InboundRequest is what the runtime shim hands to
 // Dispatcher.Handle. It augments Request with routing info so
-// the shell package can post replies without depending on the
-// gateway/Feishu types.
+// the shell package can post replies through the wired
+// outbound.Emitter.
+//
+// ChatID is the routing target for replies. MessageID is the
+// user-side message id; used as the ReplyTo anchor for the
+// outbound summary card AND as the userMsgID for the framework
+// ⏳→✅ MessageStateBus emissions.
 type InboundRequest struct {
 	Request
-	ChatID    string // routing target for replies
-	MessageID string // Feishu message_id; used as ReplyTo anchor
+	ChatID    string
+	MessageID string
 }
 
 // result is the outcome of dispatch (low-level, synchronous
@@ -77,8 +87,8 @@ type InboundRequest struct {
 //
 // Unexported: this struct is internal to the shell package.
 // Tests in the same package access it directly; the runtime
-// uses only Dispatcher.Handle (which exposes Consumed as
-// HandleResult — see below).
+// uses only Dispatcher.Handle (which exposes Consumed via
+// ShellOutput — see below).
 type result struct {
 	Consumed bool
 
@@ -92,156 +102,168 @@ type result struct {
 	Cwd      string        // the Cwd from Request
 }
 
-// HandleResult is what Dispatcher.Handle returns. Consumed
-// false → gateway falls through to message dispatch. Consumed
-// true → gateway stops here; the result reply (if any) was
-// already posted via Sender.
-type HandleResult struct {
+// ShellOutput is the framework-level return of Dispatcher.Handle,
+// parallel to command.SlashOutput. The bool return carries
+// "handled" (slash command attempt, not necessarily consumed);
+// ShellOutput's Consumed carries the gateway-meaningful "this
+// dispatcher ran the work" flag.
+//
+// Reply is intentionally absent: shell replies are async (posted
+// by the runShell goroutine, not by Handle's caller), so the
+// runtime shim has nothing to translate. Slash commands are
+// synchronous, which is why SlashOutput carries Reply; the
+// asymmetry mirrors the execution-model difference, not a
+// missed symmetry.
+type ShellOutput struct {
 	Consumed bool
 }
 
-// Outbound is a minimal message struct the Sender posts to
-// whatever channel it wraps (Feishu, Slack, log, etc.). Defined
-// here so the shell package stays decoupled from the gateway /
-// channel-adapter types.
-type Outbound struct {
-	ChatID  string
-	Text    string
-	ReplyTo string // optional: when non-empty, post as thread reply
-}
-
-// Sender is the abstraction the shell package uses to post
-// messages back to the user. Implementations are thin adapters
-// over whatever the runtime uses (Feishu adapter, log, etc.).
-//
-// Send may block bounded by ctx. The shell package does NOT
-// retry on failure — replies are best-effort, especially the
-// goroutine-posted result which may run after a daemon restart.
-type Sender interface {
-	Send(ctx context.Context, msg Outbound) error
-}
-
 // Dispatcher handles shell commands end-to-end: prefix check,
-// placeholder, async execution, reply delivery. All shell-
-// related logic lives here, not in the gateway or the runtime
-// shim. The shim is reduced to type adaptation
-// (messages.InboundMessage → InboundRequest,
-// HandleResult → inbound.CommandResult).
+// framework ⏳→✅ MessageStateBus emission, async execution,
+// reply delivery. All shell-related logic lives here, not in
+// the gateway or the runtime shim.
 //
 // Dispatcher is stateless and safe for concurrent use.
 type Dispatcher struct {
-	sender Sender
+	emitter outbound.Emitter
 }
 
 // NewDispatcher constructs a Dispatcher that posts replies via
-// the given Sender.
+// the given outbound.Emitter.
 //
-// Sender may be nil: the dispatcher will still parse prefix and
-// spawn the async goroutine, but the result reply (and any
-// future placeholder) is silently dropped. This lets the
-// runtime keep the dispatcher wired even if the channel layer
-// is unavailable (e.g. during shutdown), and gives tests a way
-// to assert the Consumed contract without mocking a Sender.
-func NewDispatcher(sender Sender) *Dispatcher {
-	return &Dispatcher{sender: sender}
+// Emitter may be nil: the dispatcher will still parse prefix
+// and spawn the async goroutine, but the result reply is silently
+// dropped. This lets the runtime keep the dispatcher wired even
+// if the channel layer is unavailable (e.g. during shutdown),
+// and gives tests a way to assert the Consumed contract without
+// mocking an emitter.
+func NewDispatcher(emitter outbound.Emitter) *Dispatcher {
+	return &Dispatcher{emitter: emitter}
 }
 
 // Handle is the package's single runtime entry point. It runs
 // the FULL shell dispatch flow:
 //
 //  1. Detect prefix via parseShell (FW→HW + trim + empty-body guard)
-//  2. Not matched → return Consumed=false (gateway falls through
-//     to tryMessageDispatch — the original "agent prompt" route)
-//  3. Matched → spawn a goroutine that runs Dispatch and posts the
-//     C-style summary card via the Sender. The goroutine is
+//  2. Not matched → return (nil, false) — gateway falls through
+//     to tryMessageDispatch (the original "agent prompt" route)
+//  3. Matched → emit framework ⏳ on the user message, spawn a
+//     goroutine that runs dispatch and posts the C-style
+//     summary card via the wired emitter, then return
+//     (&ShellOutput{Consumed: true}, true). The goroutine is
 //     intentionally NOT tracked by the gateway's wg, so
 //     dispatchLoop isn't blocked and the daemon can shut down
 //     cleanly without deadlocking on its own restart.
-//  4. Return Consumed=true (gateway stops the chain here)
+//  4. The goroutine emits framework ✅ on the user message at
+//     exit (success, failure, panic) so the channel can render
+//     the completion reaction.
 //
-// Placeholder / "🔄 running …" delivery is OUT OF SCOPE for
-// this method — that lives at a higher layer (the inbound
-// pipeline has its own progress UX). This method focuses on
-// executing the command and posting the final result.
-//
-// All shell-related logic — prefix detection, async execution,
-// reply delivery — lives in this method.
-// Handle is the package's single runtime entry point.
-//
-// It does NOT take a context.Context parameter — by design. The
-// async goroutine below uses context.Background() so the shell
+// Handle does NOT take a context.Context parameter — by design.
+// The async goroutine uses context.Background() so the shell
 // command outlives any inbound-ctx cancellation (including the
 // daemon shutdown triggered by `!make restart`). Adding a ctx
 // parameter would be misleading: callers might assume cancelling
-// it cancels the shell command, which it wouldn't.
-//
-// Flow:
-//  1. Detect prefix via parseShell (FW→HW + trim + empty-body guard)
-//  2. Not matched → return Consumed=false (gateway falls through
-//     to tryMessageDispatch — the original "agent prompt" route)
-//  3. Matched → spawn a goroutine that runs dispatch and posts
-//     the C-style summary card via the Sender. The goroutine is
-//     intentionally NOT tracked by the gateway's wg, so
-//     dispatchLoop isn't blocked and the daemon can shut down
-//     cleanly without deadlocking on its own restart.
-//  4. Return Consumed=true (gateway stops the chain here)
+// it cancels the shell command, which it wouldn't. (Mirrors the
+// pre-refactor doc; the rationale survived the Sender→Emitter
+// swap.)
 //
 // Panic safety: the background goroutine recovers from any
-// panic so a misbehaving shell command (or a Sender bug) cannot
-// crash the daemon process. The panic is logged and swallowed —
-// the user loses a reply but the daemon stays up.
-func (d *Dispatcher) Handle(ir InboundRequest) HandleResult {
-	_, matched := parseShell(ir.Text)
-	if !matched {
-		return HandleResult{Consumed: false}
+// panic so a misbehaving shell command (or an emitter bug)
+// cannot crash the daemon process. The panic is logged and
+// swallowed — the user loses a reply but the daemon stays up.
+func (d *Dispatcher) Handle(cs *chatsession.ChatSession, ir InboundRequest) (*ShellOutput, bool) {
+	if _, matched := parseShell(ir.Text); !matched {
+		// Fall-through contract: not a !cmd, gateway continues
+		// to tryMessageDispatch. No MessageState emission — we
+		// don't want ⏳ on inputs that aren't actually commands.
+		return nil, false
 	}
 
-	// Async execution. The goroutine outlives this Handle call
-	// (and possibly the daemon, in the !make restart case) —
-	// see shellTimeout for the lifetime bound.
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Default().Error("shell: panic in background dispatch",
-					"panic", fmt.Sprint(r),
-					"chat_id", ir.ChatID,
-					"message_id", ir.MessageID)
-			}
-		}()
+	// Framework ⏳ — emitted synchronously before the goroutine
+	// spawns so the channel has the placeholder reaction ready
+	// before any user-visible reply text arrives. Symmetric with
+	// commander.Dispatch's pre-Handle MessageQueued emit; see
+	// docs/feat/slash-command-reactions.md.
+	emitShellState(cs, ir.MessageID, agent.MessageQueued)
 
-		shellCtx, cancel := context.WithTimeout(context.Background(), shellTimeout)
-		defer cancel()
+	go d.runShell(cs, ir)
 
-		out := dispatch(shellCtx, ir.Request)
-		if !out.Consumed || out.Reply == "" || d.sender == nil {
-			return
-		}
+	return &ShellOutput{Consumed: true}, true
+}
 
-		replyCtx, cancel := context.WithTimeout(context.Background(), replyTimeout)
-		defer cancel()
-		if err := d.sender.Send(replyCtx, Outbound{
-			ChatID:  ir.ChatID,
-			Text:    out.Reply,
-			ReplyTo: ir.MessageID,
-		}); err != nil {
-			// Reply delivery is best-effort (the user may still
-			// see the result via the new daemon after a restart),
-			// but a Send failure is worth a diagnostic line — a
-			// silent drop makes "my `!cmd` produced nothing"
-			// debugging painful.
-			slog.Default().Warn("shell: reply send failed",
-				"err", err,
+// runShell is the body of the async goroutine spawned by Handle.
+// It executes the shell command and posts the summary card via
+// the wired emitter. Exits in one of three modes:
+//
+//   - normal completion → reply sent via emitter, ✅ emitted
+//   - command failed (exit non-zero, dispatch error) → reply
+//     sent (if any), ✅ still emitted
+//   - panic → recovered, logged, ✅ still emitted (so the
+//     user sees the completion reaction even when the
+//     dispatcher itself crashed)
+//
+// The MessageDone emit is the FIRST defer so it runs LAST (LIFO
+// defer order). All three modes above exit through the defer,
+// guaranteeing the user always sees ✅ for any matched !cmd.
+func (d *Dispatcher) runShell(cs *chatsession.ChatSession, ir InboundRequest) {
+	// LIFO: this defer runs LAST (after the inner defer recovers
+	// from panic). Putting MessageDone here guarantees ✅ fires
+	// on every exit path — success, error, panic.
+	defer emitShellState(cs, ir.MessageID, agent.MessageDone)
+
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Default().Error("shell: panic in background dispatch",
+				"panic", fmt.Sprint(r),
 				"chat_id", ir.ChatID,
 				"message_id", ir.MessageID)
 		}
 	}()
 
-	return HandleResult{Consumed: true}
+	shellCtx, cancel := context.WithTimeout(context.Background(), shellTimeout)
+	defer cancel()
+
+	out := dispatch(shellCtx, ir.Request)
+	if !out.Consumed || out.Reply == "" || d.emitter == nil {
+		return
+	}
+
+	replyCtx, cancel := context.WithTimeout(context.Background(), replyTimeout)
+	defer cancel()
+	if err := d.emitter.Send(replyCtx, messages.OutboundMessage{
+		ChatID:  ir.ChatID,
+		Kind:    messages.OutCommandReply,
+		Text:    out.Reply,
+		ReplyTo: ir.MessageID,
+	}); err != nil {
+		// Reply delivery is best-effort (the user may still
+		// see the result via the new daemon after a restart),
+		// but a Send failure is worth a diagnostic line — a
+		// silent drop makes "my `!cmd` produced nothing"
+		// debugging painful.
+		slog.Default().Warn("shell: reply send failed",
+			"err", err,
+			"chat_id", ir.ChatID,
+			"message_id", ir.MessageID)
+	}
+}
+
+// emitShellState is the shell-package mirror of
+// commander.emitSlashState. Same nil-guard contract: nil cs,
+// empty MessageID, and nil MessageStateBus all short-circuit
+// before any publish. This lets tests construct bare
+// &chatsession.ChatSession{} without a fully-wired bus; production
+// code always passes a session built via chatsession.New.
+func emitShellState(cs *chatsession.ChatSession, userMsgID string, state agent.MessageState) {
+	if cs == nil || userMsgID == "" || cs.MessageStateBus == nil {
+		return
+	}
+	cs.EmitMessageState(userMsgID, state)
 }
 
 // dispatch is the synchronous, low-level shell command runner.
 // It does NOT post replies — it just runs the command and
-// returns the result. Used by Dispatcher.Handle (which wraps
+// returns the result. Used by Dispatcher.runShell (which wraps
 // it with reply delivery) and by tests that want to inspect
 // stdout/stderr/exit-code directly.
 //
@@ -272,6 +294,7 @@ func dispatch(ctx context.Context, req Request) *result {
 // empty-body contract is implemented.
 //
 // Rules:
+//
 //  1. Trim leading whitespace (TrimLeft)
 //  2. First character normalized: '!' (U+0021) or '！' (U+FF01)
 //  3. Trim leading whitespace after prefix

@@ -26,10 +26,10 @@
 //
 // Dispatch chain (priority order, first match wins):
 //
-//	1. tryActionDispatch   — msg.Reaction / msg.Action events
-//	2. tryCommandDispatch  — /-prefixed text via command.Commander
-//	3. tryShellDispatch    — !-prefixed text via shell.Dispatcher
-//	4. tryMessageDispatch  — universal fallback (WatchMode + agent loop)
+//  1. tryActionDispatch   — msg.Reaction / msg.Action events
+//  2. tryCommandDispatch  — /-prefixed text via command.Commander
+//  3. tryShellDispatch    — !-prefixed text via shell.Dispatcher
+//  4. tryMessageDispatch  — universal fallback (WatchMode + agent loop)
 package inbound
 
 import (
@@ -100,9 +100,15 @@ type (
 
 	// ShellDispatcher is shell.Dispatcher: the inbound.Router's
 	// shell branch (tryShellDispatch) resolves the chat session,
-	// builds an InboundRequest, and calls Handle.
+	// builds an InboundRequest, and calls Handle. The signature
+	// is symmetric with command.Commander.Dispatch — both take
+	// the per-chat ChatSession, both return a (*Output, bool)
+	// pair (bool = handled). shell.Handle does NOT take a
+	// context.Context because the spawned goroutine intentionally
+	// outlives any inbound ctx (see internal/shell/dispatch.go
+	// Dispatcher.Handle doc for the full rationale).
 	ShellDispatcher interface {
-		Handle(ir shell.InboundRequest) shell.HandleResult
+		Handle(cs *chatsession.ChatSession, ir shell.InboundRequest) (*shell.ShellOutput, bool)
 	}
 
 	// ReactionRouter is services.ReactionRouter: the inbound.Router's

@@ -9,10 +9,16 @@ package agent
 //   - MessageDropped:   new (Phase 0; explicit clear only)
 //
 // The previous MessageDone / MessageFailed values (which conflated
-// execution result with delivery state) are physically deleted —
-// terminal execution result is now carried by `chatsession.Prompt.
+// execution result with delivery state) are physically deleted in
+// F-53 §6.3. MessageDone has since been re-introduced under a
+// narrower contract (see "MessageDone is the F-53 §8 follow-up"
+// below) as the explicit F-53 §8 follow-up for synchronous
+// dispatch paths. MessageFailed remains absent — see "What
+// MessageDone does NOT mean" in the MessageDone section.
+//
+// Terminal execution result is carried by `chatsession.Prompt.
 // EndReason`. See docs/feat/F-53-message-prompt-lifecycle.md §3 原则 1
-// / §6.3.
+// / §6.3 for the original rationale.
 //
 // MessageState is the abstract-layer vocabulary; Channels consume
 // it via the runtime's MessageStateBus subscriber (see

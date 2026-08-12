@@ -34,7 +34,7 @@ func TestMapStateToFeishuEmoji(t *testing.T) {
 		{agent.MessageQueued, "OneSecond"},
 		{agent.MessageSubmitted, "OnIt"},
 		{agent.MessageDone, "DONE"},
-		{agent.MessageDropped, ""}, // not mapped — silent drop is the contract
+		{agent.MessageDropped, ""},   // not mapped — silent drop is the contract
 		{agent.MessageState(99), ""}, // unknown value → silent drop (forward-compatible)
 	}
 	for _, tc := range cases {

@@ -40,7 +40,7 @@ func (r *Router) tryShellDispatch(ctx context.Context, msg *messages.InboundMess
 			"chat_id", msg.ChatID, "err", err)
 		return false, nil, nil
 	}
-	result := sh.Handle(shell.InboundRequest{
+	result, handled := sh.Handle(cs, shell.InboundRequest{
 		Request: shell.Request{
 			Text: msg.Text,
 			Cwd:  cs.SelectedCwd(),
@@ -49,9 +49,11 @@ func (r *Router) tryShellDispatch(ctx context.Context, msg *messages.InboundMess
 		MessageID: msg.MessageID,
 	})
 	// Same fall-through contract as tryCommandDispatch: a
-	// non-claiming shell result (Consumed=false) means "not a
+	// non-claiming shell result (handled=false) means "not a
 	// shell command" and the chain continues to tryMessageDispatch.
-	if !result.Consumed {
+	// shell.Handle guarantees result != nil whenever handled=true,
+	// so the dereference is safe.
+	if !handled || result == nil || !result.Consumed {
 		return false, nil, nil
 	}
 	return true, &CommandResult{Consumed: true}, nil

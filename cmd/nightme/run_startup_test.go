@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/runtime"
 )
 
 // TestRunDaemon_ReachesReady is the regression test for a daemon
@@ -25,8 +27,8 @@ import (
 // run_test.go case exercises a single handler in isolation.
 //
 // This test drives the real startup path end to end through the
-// runDeps seams (echo channel, temp stores, no Feishu login) and
-// asserts it reaches onReady and shuts down cleanly. Any future
+// runtime.Deps seams (echo channel, temp stores, no Feishu login)
+// and asserts it reaches OnReady and shuts down cleanly. Any future
 // nil-receiver / ordering break in the construction block fails
 // here instead of in production.
 func TestRunDaemon_ReachesReady(t *testing.T) {
@@ -39,21 +41,27 @@ func TestRunDaemon_ReachesReady(t *testing.T) {
 	ch := echo.New("echo", io.Discard)
 	sigCh := make(chan os.Signal, 1)
 	ready := make(chan struct{})
-	deps := runDeps{
-		loadConfig:        func() (*config.Config, error) { return cfg, nil },
-		openChatSessions:  defaultOpenChatSessions,
-		openAgentSessions: defaultOpenAgentSessions,
-		buildAgents:       buildRunAgentRegistry,
-		newChannel: func(*config.Config) (channel.Channel, error) {
+
+	defaults := runtime.DefaultDeps()
+	deps := runtime.Deps{
+		LoadConfig:        func() (*config.Config, error) { return cfg, nil },
+		OpenChatSessions:  defaults.OpenChatSessions,
+		OpenAgentSessions: defaults.OpenAgentSessions,
+		BuildAgents:       buildRunAgentRegistry,
+		NewChannel: func(*config.Config) (channel.Channel, error) {
 			return ch, nil
 		},
-		skipFeishuLogin: true,
-		signals:         sigCh,
-		onReady:         func() { close(ready) },
+		SkipFeishuLogin: true,
+		OnReady:         func() { close(ready) },
 	}
 
+	runner := runtime.RunWith(deps, runtime.RunOptions{
+		Out:    io.Discard,
+		Logger: slog.Default(),
+		SigCh:  sigCh,
+	})
 	done := make(chan error, 1)
-	go func() { done <- runDaemon(t.Context(), io.Discard, deps, sigCh) }()
+	go func() { done <- runner.Run(t.Context()) }()
 
 	select {
 	case <-ready:
@@ -86,7 +94,7 @@ func TestRunDaemon_ReachesReady(t *testing.T) {
 		}
 		sigCh <- os.Interrupt
 	case err := <-done:
-		// runDaemon returned before onReady — startup failed.
+		// runDaemon returned before OnReady — startup failed.
 		t.Fatalf("daemon exited before becoming ready: %v", err)
 	case <-time.After(30 * time.Second):
 		t.Fatal("daemon did not become ready within 30s")
@@ -95,7 +103,7 @@ func TestRunDaemon_ReachesReady(t *testing.T) {
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("runDaemon returned %v, want nil after clean shutdown", err)
+			t.Fatalf("daemon returned %v, want nil after clean shutdown", err)
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("daemon did not shut down within 30s of the signal")

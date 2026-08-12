@@ -31,6 +31,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/daemoncontrol"
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
+	"github.com/cnlangzi/nightme/internal/runtime"
 	"github.com/cnlangzi/nightme/internal/version"
 )
 
@@ -245,16 +246,17 @@ func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve() }()
 
-	deps := withChannel(defaultRunDeps(), channelName)
-	deps.onReady = func() {
+	deps := runtime.DefaultDeps()
+	deps, _ = runtime.WithChannel(deps, channelName)
+	deps.OnReady = func() {
 		server.SetReady()
 		writeBootstrap(bootstrapMessage{Ready: true})
 	}
 	// F-40: the lifecycle layer holds the daemoncontrol server
-	// reference. The runDeps.registerHealth callback bridges the
-	// post-`newChannel` adapter handle (built inside runRunWith)
+	// reference. The runtime.Deps.RegisterHealth callback bridges the
+	// post-`newChannel` adapter handle (built inside Runner.Run)
 	// back here so we can wire the "health" RPC responder.
-	deps.registerHealth = func(_ channel.Channel, fn func() (string, json.RawMessage, error)) {
+	deps.RegisterHealth = func(_ channel.Channel, fn func() (string, json.RawMessage, error)) {
 		server.SetHealthProvider(fn)
 	}
 	cmd.SetContext(withLogger(ctx, loggerFromContext(cmd.Context())))

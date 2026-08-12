@@ -243,7 +243,8 @@ func TestLogin_CallsGreet(t *testing.T) {
 	}
 	for i, m := range want {
 		if i >= len(prov.greetBody) {
-			break
+			t.Errorf("Greet body missing element %d (want %+v)", i, m)
+			continue
 		}
 		if prov.greetBody[i] != m {
 			t.Errorf("Greet body[%d] = %+v, want %+v", i, prov.greetBody[i], m)

@@ -181,7 +181,10 @@ func (f *Provider) Login(ctx context.Context) (*login.Credentials, error) {
 		f.sendDM = f.defaultSendDM
 	}
 
-	name := f.preset.Name
+	name := ""
+	if f.preset != nil {
+		name = f.preset.Name
+	}
 	return &login.Credentials{
 		AppID:     result.ClientID,
 		AppSecret: result.ClientSecret,
@@ -220,10 +223,12 @@ func (f *Provider) Login(ctx context.Context) (*login.Credentials, error) {
 // field was never wired) — better to skip silently than to attempt
 // a malformed send. The reason is logged so the operator can tell
 // "I forgot to ask" from "Feishu did not return one".
+//
+// ctx is the parent of the per-message deadline: each iteration
+// derives its own deadline-capped context from ctx, so a cancelled
+// caller (orchestrator's timeout, user Ctrl+C) aborts the
+// remaining sends without abandoning the in-flight one.
 func (f *Provider) Greet(ctx context.Context, messages login.GreetingMessages) error {
-	// ctx is intentionally ignored — we run on detached, deadline-capped
-	// contexts inside the loop so a cancelled parent ctx doesn't abort
-	// the greeting before it starts.
 	if f.sendDM == nil {
 		fmt.Fprintln(f.out, "greeting skip: sendDM not wired (Login bypassed or no owner captured)")
 		return nil
@@ -234,7 +239,7 @@ func (f *Provider) Greet(ctx context.Context, messages login.GreetingMessages) e
 	fmt.Fprintf(f.out, "Sending %d greeting DM(s)...\n", len(messages))
 
 	for i, body := range messages {
-		msgCtx, cancel := context.WithTimeout(context.Background(), greetTimeout)
+		msgCtx, cancel := context.WithTimeout(ctx, greetTimeout)
 		err := f.sendDM(msgCtx, body)
 		cancel()
 		if err != nil {

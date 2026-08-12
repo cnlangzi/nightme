@@ -44,16 +44,21 @@ type Provider interface {
 	// did not return an owner ID.
 	//
 	// The login package is intentionally data-only: messages
-	// carries a per-locale ordered list and the provider decides
-	// which locale to ship (based on tenant_brand / user locale /
-	// anything it knows about the recipient). A provider that
-	// can't tell locale can ship every array — both languages
-	// arrive as separate DMs.
+	// carries an ordered list of bilingual units (each
+	// GreetingBody has both Chinese and English) and the
+	// provider decides how to lay them out in the channel's
+	// native envelope. For Feishu, each GreetingBody becomes one
+	// `post` message carrying both `zh_cn` and `en_us` blocks
+	// — the receiver's client picks the locale tag matching its
+	// UI language, so the same payload renders correctly for any
+	// user regardless of locale. See docs/channel/feishu.md §19
+	// for the empirical verification.
 	//
-	// Greet is called by the CLI orchestrator right after Login
-	// returns. Providers are expected to use a short, internal
-	// timeout (15s) so a channel-side stall cannot hold the CLI
-	// open after the QR scan finished.
+	// Greet is called by the CLI orchestrator AFTER Login returns
+	// AND config.SaveDefault has succeeded — see cmd/nightme/login.go
+	// for ordering rationale. The ctx parameter is honored as the
+	// parent of per-message deadlines; a cancelled parent aborts
+	// subsequent sends.
 	Greet(ctx context.Context, messages GreetingMessages) error
 }
 

@@ -347,10 +347,53 @@ func (m *Manager) HandleInbound(ctx context.Context, msg *messages.InboundMessag
 	// Build the per-message domain object. ReceivedAt is the
 	// inbound timestamp (not dispatcher-pass time) so debug
 	// surfaces see the true arrival time.
+	//
+	// F-54 / fix-stop bug: Feishu only pre-populates msg.Blocks
+	// for text-only or rich-text messages carrying downloaded
+	// attachments. The legacy cmd/nightme dispatcher fell back
+	// to feishu.BuildBlocks(msg.Text, msg.Attachments) in the
+	// empty-Blocks case, but Manager.HandleInbound (the actual
+	// inbound path — the cmd/nightme dispatcher is dead code)
+	// was missing the fallback, so every short text message was
+	// queued with 0 blocks → the bridge's SendBlocks no-op
+	// branch fired → the agent never saw the prompt.
+	//
+	// Inlined here to keep the chatsession↔feishu import cycle
+	// closed. Behaviour matches feishu.BuildBlocks: empty-text
+	// attachments build a ContentImage/ContentFile block iff
+	// the attachment has a LocalPath (downloads succeeded);
+	// attachments with empty LocalPath are silently dropped
+	// (the channel side is responsible for emitting a
+	// user-visible download-failure note).
+	blocks := msg.Blocks
+	if len(blocks) == 0 {
+		if msg.Text != "" {
+			blocks = append(blocks, agent.ContentBlock{Type: agent.ContentText, Text: msg.Text})
+		}
+		for _, a := range msg.Attachments {
+			if a.LocalPath == "" {
+				continue
+			}
+			switch a.Type {
+			case "image":
+				blocks = append(blocks, agent.ContentBlock{
+					Type:      agent.ContentImage,
+					Path:      a.LocalPath,
+					MediaType: a.MimeType,
+				})
+			default:
+				blocks = append(blocks, agent.ContentBlock{
+					Type:      agent.ContentFile,
+					Path:      a.LocalPath,
+					MediaType: a.MimeType,
+				})
+			}
+		}
+	}
 	userMsg := Message{
 		ID:         userMsgID,
 		ChatID:     msg.ChatID,
-		Blocks:     msg.Blocks,
+		Blocks:     blocks,
 		ReceivedAt: msg.Time,
 	}
 	if err := cs.QueueUserMessage(userMsg); err != nil {

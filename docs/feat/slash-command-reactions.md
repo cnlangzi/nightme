@@ -66,7 +66,7 @@ never publish on `MessageStateBus`.
 ## The fix
 
 Reintroduce `agent.MessageDone` (the F-53-deleted value) with a
-narrow, explicitly-delivery-pipeline semantic, and have the
+narrow, explicitly-delivery-pipeline semantics, and have the
 commander framework emit it automatically around every matched
 slash command.
 

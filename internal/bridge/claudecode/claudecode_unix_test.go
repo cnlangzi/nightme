@@ -3,6 +3,7 @@
 package claudecode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -523,6 +524,86 @@ func TestPumpStream_OtherSyntheticMessages_Kept(t *testing.T) {
 	}
 }
 
+// TestPumpStream_ConversationReset_LoggedNoEvents covers the
+// /new observability upgrade: a conversation_reset event from
+// the CLI must be surfaced in logs at info level (not buried in
+// debug) and must NOT produce agent events — the authoritative
+// SessionID + Model arrive in the immediately-following system/init,
+// which is wired separately. A future protocol revision that swaps
+// or drops that pairing would otherwise silently break /new; this
+// test pins both halves of the contract.
+//
+// Two cases: with-id (current CLI behavior) and absent-id
+// (defensive — a future revision that drops the field must still
+// log something, but distinguishable from a successful reset so an
+// operator looking at the log can tell them apart).
+func TestPumpStream_ConversationReset_LoggedNoEvents(t *testing.T) {
+	t.Run("with new_conversation_id", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		input := `{"type":"conversation_reset","new_conversation_id":"acd2bd4e-6261-45b4-ad93-bf2792d062ca","uuid":"c78637d4-0373-4bf0-9c32-0dc5d4e17d67"}` + "\n"
+
+		got := streamFromStringWithLogger(input, logger)
+		assertResetLoggedNoEvents(t, got, buf.Bytes(), "acd2bd4e-6261-45b4-ad93-bf2792d062ca", false)
+	})
+
+	t.Run("without new_conversation_id (future protocol drift)", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		// uuid is the only other field Claude Code emits; new_conversation_id is gone.
+		input := `{"type":"conversation_reset","uuid":"c78637d4-0373-4bf0-9c32-0dc5d4e17d67"}` + "\n"
+
+		got := streamFromStringWithLogger(input, logger)
+		assertResetLoggedNoEvents(t, got, buf.Bytes(), "", true)
+	})
+}
+
+// assertResetLoggedNoEvents consolidates the per-case assertions so
+// both subtests stay focused on their scenario (present vs absent id).
+//
+// Parses the log line rather than substring-matching raw JSON:
+// slog's handler field order, indentation, and key set are not
+// contractual, and a brittle Contains check would fail the next
+// time someone adds an attr or switches handler.
+func assertResetLoggedNoEvents(t *testing.T, got []agent.AgentEvent, raw []byte, wantID string, wantAbsent bool) {
+	t.Helper()
+	if len(got) != 0 {
+		t.Errorf("got %d events, want 0 — conversation_reset is informational only", len(got))
+		for i, ev := range got {
+			t.Logf("  evs[%d] = %+v", i, ev)
+		}
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &entry); err != nil {
+		t.Fatalf("log line is not valid JSON: %v\nraw: %s", err, string(raw))
+	}
+	if entry["msg"] != "claudecode: conversation_reset (post /clear)" {
+		t.Errorf("msg = %q, want %q\nfull entry: %+v", entry["msg"],
+			"claudecode: conversation_reset (post /clear)", entry)
+	}
+	if level, _ := entry["level"].(string); level != "INFO" {
+		t.Errorf("level = %q, want INFO\nfull entry: %+v", level, entry)
+	}
+
+	switch {
+	case wantAbsent:
+		// Absent-id marker must be present; new_conversation_id must NOT be
+		// (the field is absent in the JSON object, not just "").
+		if entry["new_conversation_id_absent"] != true {
+			t.Errorf("expected new_conversation_id_absent=true marker, full entry: %+v", entry)
+		}
+		if _, has := entry["new_conversation_id"]; has {
+			t.Errorf("did not expect new_conversation_id field on absent-id path, full entry: %+v", entry)
+		}
+	default:
+		if entry["new_conversation_id"] != wantID {
+			t.Errorf("new_conversation_id = %q, want %q\nfull entry: %+v",
+				entry["new_conversation_id"], wantID, entry)
+		}
+	}
+}
+
 func TestPumpStream_Result_EmptyText_NoResultEvent(t *testing.T) {
 	// When the result has no text AND is_error=false, the entire
 	// result branch is dropped (text + usage are useless). Only
@@ -927,12 +1008,27 @@ func countSeq(got []string, seq ...string) int {
 // replay + assistant + result, to verify the parser doesn't
 // drop frames under burst input.
 func streamFromString(stream string) []agent.AgentEvent {
+	return streamFromStringWithLogger(stream, nil)
+}
+
+// streamFromStringWithLogger is the logger-aware variant. Tests
+// that need to assert on log output (e.g. the conversation_reset
+// observability test) pass a *slog.Logger writing into a buffer;
+// the rest go through streamFromString with nil and don't pay the
+// allocation cost.
+//
+// The buffered chan size 64 matches streamFromString: enough headroom
+// for the parser's internal emits on a multi-message burst, small
+// enough to surface accidental back-pressure stalls as test hangs
+// rather than silent drops. Tests that emit more than 64 events
+// should bump this.
+func streamFromStringWithLogger(stream string, logger *slog.Logger) []agent.AgentEvent {
 	events := make(chan agent.AgentEvent, 64)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pumpStream(strings.NewReader(stream), events, nil, "claude", "/tmp", "main", nil)
+		pumpStream(strings.NewReader(stream), events, nil, "claude", "/tmp", "main", logger)
 		close(events)
 	}()
 	var got []agent.AgentEvent

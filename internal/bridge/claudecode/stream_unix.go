@@ -105,6 +105,11 @@ type streamEvent struct {
 	DurationMs int64  `json:"duration_ms,omitempty"`
 	IsError    bool   `json:"is_error,omitempty"`
 
+	// conversation_reset only — the id assigned to the freshly
+	// cleared transcript. Diagnostic; the authoritative SessionID
+	// arrives in the immediately-following system/init.
+	NewConversationID string `json:"new_conversation_id,omitempty"`
+
 	// result.usage / result.modelUsage — kept as RawMessage so the
 	// decoder is permissive (extra keys / unexpected shapes are dropped
 	// silently). decodeUsage / decodeCostUSD shape them into
@@ -513,6 +518,40 @@ func translate(ev streamEvent, state *streamState, events chan<- agent.AgentEven
 		// will hook this case to emit EventAgentPermission.
 		if logger != nil {
 			logger.Debug("claudecode: control_request received (unhandled under bypassPermissions)")
+		}
+
+	case "conversation_reset":
+		// Claude Code emits this right after a local slash command
+		// over stream-json stdin resets the conversation (the
+		// /clear path used by /new via driver.New). Carries the
+		// new_conversation_id only; the authoritative SessionID +
+		// Model arrive in the immediately-following system/init
+		// event, which we already wire through EventAgentReady.
+		//
+		// Log at info (not debug) so a future protocol revision
+		// that swaps or drops the matching system/init becomes
+		// visible in default logs — without this, a break would
+		// silently corrupt /new (no SessionID refresh → next
+		// /resume pins to the dead conversation).
+		//
+		// The id is omitempty in streamEvent so a CLI revision
+		// that drops the field decodes to "". Treat absent and
+		// present-empty as the same shape: still log the event,
+		// just don't claim the reset succeeded by stamping an
+		// empty id — an operator looking at the log should be
+		// able to tell "CLI did not report an id" apart from
+		// "the reset cleared nothing".
+		if logger != nil {
+			attrs := []any{
+				"agent_name", agentName,
+				"workspace", workspace,
+			}
+			if ev.NewConversationID != "" {
+				attrs = append(attrs, "new_conversation_id", ev.NewConversationID)
+			} else {
+				attrs = append(attrs, "new_conversation_id_absent", true)
+			}
+			logger.Info("claudecode: conversation_reset (post /clear)", attrs...)
 		}
 
 	default:

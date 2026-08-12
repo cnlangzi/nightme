@@ -13,16 +13,27 @@ package feishu
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"time"
 
+	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	"github.com/larksuite/oapi-sdk-go/v3/scene/registration"
 
 	"github.com/cnlangzi/nightme/internal/login"
 )
+
+// greetTimeout caps the channel-side hello call so a Feishu stall
+// cannot keep the CLI open after the QR scan finished. 15s is well
+// above the p99 create_message latency observed on the openclaw-lark
+// reference bot (sub-second in normal operation, sub-5s in the
+// worst corner cases) but well below the 10-minute user-visible
+// login deadline.
+const greetTimeout = 15 * time.Second
 
 // Options configures a single login flow run. AppPreset and
 // DefaultAddons are merged with built-in fallbacks in New
@@ -34,9 +45,10 @@ type Options struct {
 
 	// AppPreset pre-fills the app's name/description/avatar on the
 	// consent page; nil means use DefaultAppPreset (the nightme
-	// brand default — "NightMe" / "Sleep tight, code all night.").
-	// The user can still edit the fields on the consent page
-	// before submitting; the final values are whatever they enter.
+	// brand default — "NightMe" / "Sleep tight, NightMe code all
+	// night."). The user can still edit the fields on the consent
+	// page before submitting; the final values are whatever they
+	// enter.
 	AppPreset *registration.AppPreset
 
 	// ExistingAppID set with CreateOnly or as update-mode: asks
@@ -57,7 +69,30 @@ type Provider struct {
 	addons *registration.AppAddons
 	preset *registration.AppPreset
 	out    io.Writer
+
+	// ownerOpenID is the channel-side identifier of the user who
+	// just completed the QR-code flow. Captured by Login from
+	// registration.RegisterAppResult.UserInfo.OpenID and consumed
+	// by Greet. Empty when the SDK did not echo user_info back
+	// (rare — see Greet's no-op contract).
+	ownerOpenID string
+
+	// larkClient is built lazily inside Login() from the
+	// freshly-issued AppID/AppSecret. nil before Login.
+	larkClient *lark.Client
+
+	// sendDM is the SDK-bound send boundary used by Greet. Defaults
+	// to defaultSendDM (the real Feishu CreateMessage call) and is
+	// the testable seam — tests can swap it to record calls without
+	// instantiating a real lark.Client.
+	sendDM sendDMFunc
 }
+
+// sendDMFunc is the testable seam for Greet's per-message send.
+// The real implementation hits Feishu's CreateMessage API; tests
+// substitute a stub that captures (ctx, body) tuples without
+// touching the network.
+type sendDMFunc func(ctx context.Context, body login.GreetingBody) error
 
 // New returns a ready-to-Login Provider. opts.Addons is
 // defaulted to DefaultAddons(); opts.AppPreset is defaulted to
@@ -82,6 +117,7 @@ func New(opts Options) *Provider {
 		addons: addons,
 		preset: preset,
 		out:    out,
+		sendDM: nil, // wired in Login() once larkClient is ready; nil = no-op in Greet
 	}
 }
 
@@ -96,6 +132,12 @@ func (f *Provider) Name() string { return "feishu" }
 // does the heavy lifting (HTTP, polling, error wrapping). All we add
 // is the QR callback, the status callback, and a sentinel-error wrap
 // so callers can errors.Is-match without depending on the SDK.
+//
+// Login does NOT itself send the greeting DM — that is the
+// orchestrator's job. Login only captures the owner ID + builds
+// the lark client so Greet is ready to fire; the orchestrator
+// calls Greet AFTER config.SaveDefault has succeeded (see
+// cmd/nightme/login.go).
 func (f *Provider) Login(ctx context.Context) (*login.Credentials, error) {
 	opts := &registration.Options{
 		AppID:      f.opts.ExistingAppID,
@@ -122,6 +164,24 @@ func (f *Provider) Login(ctx context.Context) (*login.Credentials, error) {
 		return nil, fmt.Errorf("feishu: register: %w", err)
 	}
 
+	// Capture the owner ID for Greet. tenant_brand is no longer
+	// used since Strategy B (bilingual post envelope) lets the
+	// receiver's Feishu client pick the locale — see
+	// docs/channel/feishu.md §Greeting Localization.
+	if result.UserInfo != nil {
+		f.ownerOpenID = result.UserInfo.OpenID
+	}
+	// Build the SDK client here (after RegisterApp) because the
+	// client authenticates with the freshly-issued AppID/Secret.
+	// We only construct it when an owner was captured — without
+	// one, Greet is a no-op and a client would be wasted. Wire
+	// the Greet seam at the same point so the function value
+	// captures the freshly-built lark.Client + owner ID.
+	if f.ownerOpenID != "" {
+		f.larkClient = lark.NewClient(result.ClientID, result.ClientSecret)
+		f.sendDM = f.defaultSendDM
+	}
+
 	name := ""
 	if f.preset != nil {
 		name = f.preset.Name
@@ -132,6 +192,132 @@ func (f *Provider) Login(ctx context.Context) (*login.Credentials, error) {
 		AppName:   name,
 		CreatedAt: time.Now(),
 	}, nil
+}
+
+// Greet implements login.Provider. It fires the canonical NightMe
+// greeting at the user who just completed the QR-code flow.
+//
+// Each greeting element is sent as one Feishu `post` message with
+// both `zh_cn` and `en_us` blocks. The receiver's Feishu client
+// picks the locale tag matching its UI language, so the same
+// payload renders correctly for any user regardless of their
+// locale — no tenant_brand guessing required. See
+// docs/channel/feishu.md §Greeting Localization for the empirical
+// verification of the locale-pick behavior.
+//
+// Per-message budget: each post gets its own greetTimeout context,
+// so a slow first post doesn't steal budget from the second.
+//
+// Greet does NOT take an owner argument — the recipient identity
+// is captured by Login and lives on the Provider struct. The
+// caller just needs to know "send the greeting"; the provider has
+// already worked out "to whom".
+//
+// Best-effort: a failed greeting does NOT roll back the successful
+// registration. The CLI orchestrator is expected to log + swallow
+// the error. We use a fresh context.Background() so a cancelled
+// parent ctx (e.g. user hit Ctrl+C after the scan succeeded) does
+// not abort the greeting before it even starts.
+//
+// Returns nil (no-op) when sendDM is nil (Login was bypassed in
+// tests, or the SDK did not echo user_info back so the function
+// field was never wired) — better to skip silently than to attempt
+// a malformed send. The reason is logged so the operator can tell
+// "I forgot to ask" from "Feishu did not return one".
+//
+// ctx is the parent of the per-message deadline: each iteration
+// derives its own deadline-capped context from ctx, so a cancelled
+// caller (orchestrator's timeout, user Ctrl+C) aborts the
+// remaining sends without abandoning the in-flight one.
+func (f *Provider) Greet(ctx context.Context, messages login.GreetingMessages) error {
+	if f.sendDM == nil {
+		fmt.Fprintln(f.out, "greeting skip: sendDM not wired (Login bypassed or no owner captured)")
+		return nil
+	}
+	if len(messages) == 0 {
+		return nil
+	}
+	fmt.Fprintf(f.out, "Sending %d greeting DM(s)...\n", len(messages))
+
+	for i, body := range messages {
+		msgCtx, cancel := context.WithTimeout(ctx, greetTimeout)
+		err := f.sendDM(msgCtx, body)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("feishu: greet: send post %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// postLang is the per-locale envelope Feishu expects inside a
+// msg_type=post content string. Per docs/feishu/create_message §post
+// schema, every locale must carry a `content` array of paragraphs
+// of element nodes — the SDK does not surface a builder for the
+// inner shape, so we hand-roll the JSON envelope and pass it as
+// the `content` string.
+type postLang struct {
+	Content [][]postNode `json:"content"`
+}
+
+// postNode is one inline element inside a paragraph. `tag:"text"`
+// yields a plain text span; the family also supports at / a / img,
+// but we only need text for the greeting.
+type postNode struct {
+	Tag  string `json:"tag"`
+	Text string `json:"text"`
+}
+
+// buildPostEnvelope renders the bilingual GreetingBody into the
+// Feishu post envelope. The client picks the locale tag matching
+// the receiver's UI language — that's why we ship both halves in
+// one message. The post form is the documented multi-language
+// carrier; see docs/channel/feishu.md §19.
+//
+// Pulled out as a pure helper so the wire-level shape can be unit
+// tested without instantiating a lark.Client.
+func buildPostEnvelope(body login.GreetingBody) (string, error) {
+	envelope := struct {
+		ZhCn postLang `json:"zh_cn"`
+		EnUs postLang `json:"en_us"`
+	}{
+		ZhCn: postLang{Content: [][]postNode{{{Tag: "text", Text: body.Chinese}}}},
+		EnUs: postLang{Content: [][]postNode{{{Tag: "text", Text: body.English}}}},
+	}
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
+// defaultSendDM is the production implementation wired into f.sendDM
+// at Login time. It builds the post envelope via buildPostEnvelope
+// and hits Feishu's CreateMessage API.
+//
+// json.Marshal handles quote-escape in both bodies so a future
+// translation that contains " or \ round-trips safely.
+func (f *Provider) defaultSendDM(ctx context.Context, body login.GreetingBody) error {
+	envelope, err := buildPostEnvelope(body)
+	if err != nil {
+		return fmt.Errorf("feishu: greet: marshal envelope: %w", err)
+	}
+	req := larkim.NewCreateMessageReqBuilder().
+		ReceiveIdType(larkim.CreateMessageV1ReceiveIDTypeOpenId).
+		Body(larkim.NewCreateMessageReqBodyBuilder().
+			ReceiveId(f.ownerOpenID).
+			MsgType("post").
+			Content(envelope).
+			Build()).
+		Build()
+	resp, err := f.larkClient.Im.V1.Message.Create(ctx, req)
+	if err != nil {
+		return fmt.Errorf("create: %w", err)
+	}
+	if resp != nil && !resp.Success() {
+		return fmt.Errorf("rejected: code=%d msg=%s", resp.Code, resp.Msg)
+	}
+	return nil
 }
 
 // printQRCode renders the QR for the user. The QR itself is the
@@ -173,13 +359,13 @@ func (f *Provider) printStatus(info *registration.StatusChangeInfo) {
 
 // DefaultAppPreset returns the brand default pre-fill for the
 // consent page: the app name "NightMe" with the tagline
-// "Sleep tight, code all night.". Callers can override any field
-// at construction time via Options.AppPreset; the user
+// "Sleep tight, NightMe code all night.". Callers can override any
+// field at construction time via Options.AppPreset; the user
 // can still edit them on the consent page before submitting.
 func DefaultAppPreset() *registration.AppPreset {
 	return &registration.AppPreset{
 		Name: "NightMe",
-		Desc: "Sleep tight, code all night.",
+		Desc: "Sleep tight, NightMe code all night.",
 	}
 }
 

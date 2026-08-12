@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,9 +18,12 @@ import (
 // test set up. It is the test's handle to "what the QR flow would
 // have produced".
 type fakeProvider struct {
-	creds *login.Credentials
-	err   error
-	delay time.Duration // simulate >zero Login before returning
+	creds     *login.Credentials
+	err       error
+	greetErr  error
+	delay     time.Duration // simulate >zero Login before returning
+	greetBody login.GreetingMessages
+	greetHits int
 }
 
 func (f *fakeProvider) Name() string { return "feishu" }
@@ -32,6 +36,15 @@ func (f *fakeProvider) Login(ctx context.Context) (*login.Credentials, error) {
 		}
 	}
 	return f.creds, f.err
+}
+
+// Greet implements login.Provider for the fake. Captures the
+// messages it received + counts hits so orchestrator tests can
+// assert "Greet was actually called with X". The fake never sends.
+func (f *fakeProvider) Greet(_ context.Context, m login.GreetingMessages) error {
+	f.greetBody = m
+	f.greetHits++
+	return f.greetErr
 }
 
 // withTempConfig points NIGHTME_CONFIG at a fresh temp file so the
@@ -197,5 +210,80 @@ func TestLogin_ContextDeadline(t *testing.T) {
 		// Tolerated: if timer scheduling gets weird it can race,
 		// but neither side should crash.
 		t.Logf("note: timed error returned (likely scheduling): %v", err)
+	}
+}
+
+// TestLogin_CallsGreet asserts the orchestrator invokes
+// provider.Greet with login.GreetingTexts() right after a
+// successful Login. Locks the post-login greeting flow.
+func TestLogin_CallsGreet(t *testing.T) {
+	_ = withTempConfig(t)
+
+	prov := &fakeProvider{
+		creds: &login.Credentials{
+			AppID: "cli_x", AppSecret: "s", AppName: "n",
+			CreatedAt: time.Now(),
+		},
+	}
+	flags := &loginCmdFlags{timeout: 5 * time.Second}
+	cmd := newLoginFeishuCmd(flags)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetContext(context.Background())
+
+	if err := runLoginWith(cmd, flags, prov); err != nil {
+		t.Fatalf("runLoginWith: %v", err)
+	}
+	if prov.greetHits != 1 {
+		t.Errorf("Greet called %d times, want 1", prov.greetHits)
+	}
+	want := login.GreetingTexts()
+	if len(prov.greetBody) != len(want) {
+		t.Errorf("Greet body len = %d, want %d", len(prov.greetBody), len(want))
+	}
+	for i, m := range want {
+		if i >= len(prov.greetBody) {
+			t.Errorf("Greet body missing element %d (want %+v)", i, m)
+			continue
+		}
+		if prov.greetBody[i] != m {
+			t.Errorf("Greet body[%d] = %+v, want %+v", i, prov.greetBody[i], m)
+		}
+	}
+}
+
+// TestLogin_GreetError_DoesNotBlockConfigWrite ensures a failing
+// Greet does NOT roll back the successful registration. The
+// orchestrator must swallow the error after logging, then proceed
+// to write credentials + print success banner.
+func TestLogin_GreetError_DoesNotBlockConfigWrite(t *testing.T) {
+	_ = withTempConfig(t)
+
+	prov := &fakeProvider{
+		creds: &login.Credentials{
+			AppID: "cli_y", AppSecret: "s", AppName: "n",
+			CreatedAt: time.Now(),
+		},
+		greetErr: errors.New("greeting blew up"),
+	}
+	flags := &loginCmdFlags{timeout: 5 * time.Second}
+	cmd := newLoginFeishuCmd(flags)
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetContext(context.Background())
+
+	if err := runLoginWith(cmd, flags, prov); err != nil {
+		t.Fatalf("runLoginWith returned err: %v", err)
+	}
+	cfg, err := config.LoadDefault()
+	if err != nil {
+		t.Fatalf("LoadDefault: %v", err)
+	}
+	if cfg.Feishu.AppID != "cli_y" {
+		t.Errorf("config Feishu.AppID = %q, want cli_y (Greet failure must not roll back)", cfg.Feishu.AppID)
+	}
+	if !strings.Contains(stderr.String(), "greeting DM failed") {
+		t.Errorf("stderr missing greeting failure log: %s", stderr.String())
 	}
 }

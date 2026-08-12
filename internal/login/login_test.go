@@ -23,6 +23,13 @@ func (f *fakeProvider) Login(_ context.Context) (*Credentials, error) {
 	return f.out, f.err
 }
 
+// Greet implements Provider. The fake is only used to exercise
+// the interface contract — it never actually sends; the orchestrator
+// tests assert on the warning log / error path instead.
+func (f *fakeProvider) Greet(_ context.Context, _ GreetingMessages) error {
+	return nil
+}
+
 // TestProvider_Interface is a compile-time check: any concrete
 // Provider (real or fake) must satisfy the interface. If this
 // stops compiling, the interface changed — update fakes too.
@@ -38,6 +45,7 @@ type feishuStub struct{ name string }
 
 func (f *feishuStub) Name() string                                  { return f.name }
 func (f *feishuStub) Login(_ context.Context) (*Credentials, error) { return nil, nil }
+func (f *feishuStub) Greet(_ context.Context, _ GreetingMessages) error { return nil }
 
 // TestProvider_Name_And_Login verifies the fake behaves as the
 // interface contract promises: name is sticky, errors propagate.

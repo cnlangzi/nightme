@@ -2,10 +2,15 @@ package feishu
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/larksuite/oapi-sdk-go/v3/scene/registration"
+
+	"github.com/cnlangzi/nightme/internal/login"
 )
 
 // TestProvider_Name is the cheapest sanity check: the provider's
@@ -108,7 +113,7 @@ func TestNew_FillsDefaults(t *testing.T) {
 		if got, want := a.preset.Name, "NightMe"; got != want {
 			t.Errorf("default preset.Name = %q, want %q", got, want)
 		}
-		if got, want := a.preset.Desc, "Sleep tight, code all night."; got != want {
+		if got, want := a.preset.Desc, "Sleep tight, NightMe code all night."; got != want {
 			t.Errorf("default preset.Desc = %q, want %q", got, want)
 		}
 	})
@@ -132,7 +137,7 @@ func TestDefaultAppPreset(t *testing.T) {
 	if got, want := p.Name, "NightMe"; got != want {
 		t.Errorf("DefaultAppPreset().Name = %q, want %q", got, want)
 	}
-	if got, want := p.Desc, "Sleep tight, code all night."; got != want {
+	if got, want := p.Desc, "Sleep tight, NightMe code all night."; got != want {
 		t.Errorf("DefaultAppPreset().Desc = %q, want %q", got, want)
 	}
 }
@@ -301,6 +306,192 @@ func TestPrintStatus_FriendlyMessages(t *testing.T) {
 			t.Errorf("unknown status lost; got %q, want substring %q", out, "future_thing")
 		}
 	})
+}
+
+// TestBuildPostEnvelope_BothLocales asserts the wire-level shape
+// every greeting rides on: a `zh_cn` block AND an `en_us` block,
+// each containing exactly one paragraph of one text node. The
+// receiver's Feishu client picks the locale tag matching its UI
+// language; if either block is missing or empty, the user sees
+// the wrong-language greeting (or nothing).
+func TestBuildPostEnvelope_BothLocales(t *testing.T) {
+	body := login.GreetingBody{
+		Chinese: "你好 🌙。",
+		English: "Hi 👋.",
+	}
+	envelope, err := buildPostEnvelope(body)
+	if err != nil {
+		t.Fatalf("buildPostEnvelope: %v", err)
+	}
+
+	var parsed struct {
+		ZhCn postLang `json:"zh_cn"`
+		EnUs postLang `json:"en_us"`
+	}
+	if err := json.Unmarshal([]byte(envelope), &parsed); err != nil {
+		t.Fatalf("envelope invalid JSON: %v\nraw: %s", err, envelope)
+	}
+
+	// Both locale blocks must have exactly one paragraph of one
+	// text node — the only shape we want in v1.
+	if got, want := nodeText(parsed.ZhCn.Content), body.Chinese; got != want {
+		t.Errorf("zh_cn text = %q, want %q", got, want)
+	}
+	if got, want := nodeText(parsed.EnUs.Content), body.English; got != want {
+		t.Errorf("en_us text = %q, want %q", got, want)
+	}
+}
+
+// TestBuildPostEnvelope_QuoteSafety ensures JSON escapes survive
+// a round-trip when bodies contain " or \. The greeting copy is
+// currently ASCII / CJK (no special chars), but a future
+// translation could include a quote — we want the envelope to
+// still be valid JSON.
+func TestBuildPostEnvelope_QuoteSafety(t *testing.T) {
+	body := login.GreetingBody{
+		Chinese: `他说 "你好" —— 没问题。`,
+		English: `He said "hi" — it's fine.`,
+	}
+	envelope, err := buildPostEnvelope(body)
+	if err != nil {
+		t.Fatalf("buildPostEnvelope: %v", err)
+	}
+	if !strings.Contains(envelope, `\"hi\"`) {
+		t.Errorf("envelope did not escape double quotes: %s", envelope)
+	}
+	if !strings.Contains(envelope, `\"你好\"`) {
+		t.Errorf("envelope did not escape Chinese double quotes: %s", envelope)
+	}
+	// Round-trip: parse it back, both halves survive.
+	var parsed struct {
+		ZhCn postLang `json:"zh_cn"`
+		EnUs postLang `json:"en_us"`
+	}
+	if err := json.Unmarshal([]byte(envelope), &parsed); err != nil {
+		t.Fatalf("round-trip failed: %v", err)
+	}
+	if got := nodeText(parsed.ZhCn.Content); got != body.Chinese {
+		t.Errorf("zh_cn round-trip = %q, want %q", got, body.Chinese)
+	}
+}
+
+// nodeText walks a Feishu post envelope's content array (paragraphs
+// of element nodes) and concatenates the text nodes. Used by the
+// buildPostEnvelope tests to verify the bilingual payload survives
+// the JSON round-trip.
+func nodeText(content [][]postNode) string {
+	var out string
+	for _, paragraph := range content {
+		for _, node := range paragraph {
+			if node.Tag == "text" {
+				out += node.Text
+			}
+		}
+	}
+	return out
+}
+
+// TestProvider_Greet_NoSendDM_Skips covers the no-op branch: when
+// Login was bypassed (tests) or the SDK didn't echo user_info back
+// (production), sendDM is nil and Greet must NOT touch the network.
+func TestProvider_Greet_NoSendDM_Skips(t *testing.T) {
+	p := New(Options{})
+	// sendDM left nil; larkClient left nil.
+	if err := p.Greet(context.Background(), []login.GreetingBody{{
+		Chinese: "x", English: "y",
+	}}); err != nil {
+		t.Errorf("Greet with nil sendDM should be a no-op, got error: %v", err)
+	}
+}
+
+// TestProvider_Greet_EmptyMessages covers the empty-slice fast path.
+// sendDM is wired (via the test seam) but the loop never runs.
+func TestProvider_Greet_EmptyMessages(t *testing.T) {
+	p := New(Options{})
+	p.sendDM = func(_ context.Context, _ login.GreetingBody) error {
+		t.Error("sendDM called despite empty messages slice")
+		return nil
+	}
+	if err := p.Greet(context.Background(), nil); err != nil {
+		t.Errorf("Greet with empty messages should be a no-op, got error: %v", err)
+	}
+}
+
+// TestProvider_Greet_ForwardsAllBodies asserts the loop visits every
+// element in order, passing the bilingual body to sendDM exactly
+// once per element. If a future refactor drops a body or reorders
+// the loop, this test catches it.
+func TestProvider_Greet_ForwardsAllBodies(t *testing.T) {
+	p := New(Options{})
+	p.sendDM = func(_ context.Context, _ login.GreetingBody) error { return nil }
+
+	in := login.GreetingMessages{
+		{Chinese: "中文 A", English: "English A"},
+		{Chinese: "中文 B", English: "English B"},
+		{Chinese: "中文 C", English: "English C"},
+	}
+
+	var seen []login.GreetingBody
+	p.sendDM = func(_ context.Context, b login.GreetingBody) error {
+		seen = append(seen, b)
+		return nil
+	}
+
+	if err := p.Greet(context.Background(), in); err != nil {
+		t.Fatalf("Greet: %v", err)
+	}
+	if len(seen) != 3 {
+		t.Fatalf("sendDM called %d times, want 3", len(seen))
+	}
+	for i, want := range in {
+		if seen[i] != want {
+			t.Errorf("call %d: got %+v, want %+v", i, seen[i], want)
+		}
+	}
+}
+
+// TestProvider_Greet_PropagatesErrorAndStops ensures a failure on
+// post 1 short-circuits the loop — post 2 is NOT attempted.
+// Otherwise a transient first-message error would spam the user's
+// chat with a half-baked greeting (post 2 lands even though
+// post 1 failed).
+func TestProvider_Greet_PropagatesErrorAndStops(t *testing.T) {
+	p := New(Options{})
+	wantErr := errors.New("post 1 send failed")
+	calls := 0
+	p.sendDM = func(_ context.Context, _ login.GreetingBody) error {
+		calls++
+		return wantErr
+	}
+
+	in := login.GreetingMessages{
+		{Chinese: "A", English: "A"},
+		{Chinese: "B", English: "B"},
+	}
+	err := p.Greet(context.Background(), in)
+	if !errors.Is(err, wantErr) {
+		t.Errorf("Greet err = %v, want wraps %v", err, wantErr)
+	}
+	if calls != 1 {
+		t.Errorf("sendDM called %d times, want 1 (post 2 should NOT be attempted)", calls)
+	}
+}
+
+// TestProvider_Greet_DetachedContext asserts the per-message ctx
+// the loop creates is independent of the caller-passed ctx. A
+// cancelled parent ctx must NOT short-circuit the greeting — Login
+// just returned with a healthy 10-min deadline, and the user
+// might Ctrl+C right after; we still want the greeting to fire.
+func TestProvider_Greet_DetachedContext(t *testing.T) {
+	p := New(Options{})
+	p.sendDM = func(_ context.Context, _ login.GreetingBody) error { return nil }
+
+	parent, cancel := context.WithCancel(context.Background())
+	cancel() // parent already dead before Greet starts
+
+	if err := p.Greet(parent, login.GreetingMessages{{Chinese: "x", English: "y"}}); err != nil {
+		t.Errorf("Greet should ignore cancelled parent ctx, got: %v", err)
+	}
 }
 
 func containsString(haystack []string, needle string) bool {

@@ -132,6 +132,19 @@ func runLoginWith(cmd *cobra.Command, f *loginCmdFlags, provider login.Provider)
 		return fmt.Errorf("login: %w", err)
 	}
 
+	// Fire the canonical greeting DM at the owner — AFTER the
+	// config write has succeeded. Firing before save would mean a
+	// save failure followed by a retry re-issues credentials AND a
+	// duplicate greeting, leaving the user to clean up DMs.
+	// Best-effort: a failed greeting must NOT roll back the
+	// successful registration. Each provider implements Greet
+	// against its own channel SDK; the orchestrator just hands
+	// over the bilingual brand copy and swallows the error after
+	// logging.
+	if greetErr := provider.Greet(ctx, login.GreetingTexts()); greetErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: greeting DM failed: %v\n", greetErr)
+	}
+
 	fmt.Fprintf(out, "✓ App registered successfully!\n")
 	fmt.Fprintf(out, "  App ID:    %s\n", creds.AppID)
 	if creds.AppName != "" {

@@ -276,8 +276,13 @@ type ChatSession struct {
 
 	// watchdog (F-61) is the per-chat diagnostic timer. nil
 	// until lazily initialized by Watchdog(). Owned by the chat
-	// session; lifetime matches the CS.
-	watchdog *Watchdog
+	// session; lifetime matches the CS. watchdogOnce guarantees
+	// the first-init write is visible to all subsequent
+	// readers — without it, two goroutines (e.g. TryFlush in
+	// the dispatcher and routeEvent on KindLifecycle) race on
+	// the lazy-init read/write pair (F-61 data race fix).
+	watchdog     *Watchdog
+	watchdogOnce sync.Once
 
 	// --- F-45 teamflow (gtw) state ------------------------------
 	//
@@ -359,10 +364,18 @@ func (cs *ChatSession) Spawner() Spawner {
 // Watchdog returns the per-chat watchdog, lazily constructing it
 // on first call. Used by routeEvent to arm/disarm timers; tests
 // inject fakes by setting cs.watchdog directly.
+//
+// sync.Once provides the happens-before guarantee needed for
+// safe concurrent lazy init — without it, callers racing on the
+// first Watchdog() would see a torn pointer write (data race).
+// After Once returns, the pointer is safely published to all
+// subsequent goroutines.
 func (cs *ChatSession) Watchdog() *Watchdog {
-	if cs.watchdog == nil {
-		cs.watchdog = newWatchdog(cs)
-	}
+	cs.watchdogOnce.Do(func() {
+		if cs.watchdog == nil {
+			cs.watchdog = newWatchdog(cs)
+		}
+	})
 	return cs.watchdog
 }
 

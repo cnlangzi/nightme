@@ -272,6 +272,16 @@ func RunClose(
 				"run `/cwd %s` manually.", c.RepoRoot, err, c.RepoRoot)), nil
 	}
 
+	// --- step 6.5: invalidate PR cache for the chat's AS pool ----
+	// The chat's workspace just flipped from the now-deleted
+	// worktree back to repoRoot. Any AS pinned to the dead
+	// worktree (whose PR cache still names the old branch) or
+	// repoRoot (whose cache may still hold a stale "PR for old
+	// branch" entry) must refresh so the next StatusBar build
+	// — the one attached to the close success card below —
+	// shows the right workspace and the right PR link.
+	invalidateChatASPRCache(deps, cs)
+
 	// --- step 7: clear in-memory state ----------------------------
 	slot.Store(Context{})
 

@@ -60,6 +60,42 @@ type PRInvalidator interface {
 	Invalidate(asID string)
 }
 
+// invalidateChatASPRCache invalidates the PR cache for every
+// AgentSession in the chat's pool. Used by /gtw fix, /gtw pr,
+// and /gtw close to surface workspace / branch / PR-link changes
+// in the StatusBar footer immediately instead of waiting out
+// the prcache.Cache TTL (60s).
+//
+// The PR cache is keyed by AS.ID with a 60s TTL — without
+// invalidation, a successful /gtw fix would leave the footer's
+// `⎇ branch` segment pointing at the OLD branch and the PR link
+// pointing at the OLD branch's PR (or stale "no PR" for the
+// NEW branch) until the TTL expires.
+//
+// We invalidate ALL ASes in the pool (rather than scoping by
+// worktree prefix as the original /gtw pr did) because:
+//   - The chat's selectedCwd just changed; any AS pinned to
+//     either the old or new worktree now has a stale view of
+//     the chat's workspace.
+//   - PR() against origin is fast — the cache is an
+//     optimisation, not a correctness layer.
+//   - One scope-limitation rule for all three dispatchers is
+//     easier to reason about than per-dispatcher heuristics.
+//
+// nil-safe: skips when deps.PRInvalidator is nil (unit tests
+// that don't wire the runtime registry).
+func invalidateChatASPRCache(deps HandlerDeps, cs *chatsession.ChatSession) {
+	if deps.PRInvalidator == nil {
+		return
+	}
+	for _, as := range cs.Pool() {
+		if as == nil {
+			continue
+		}
+		deps.PRInvalidator.Invalidate(as.ID)
+	}
+}
+
 // All fields are required; pass an instance constructed in the
 // runtime's startup code (cmd/nightme/run.go).
 //
@@ -744,6 +780,15 @@ func completeFixAndDispatch(
 		State:     StateFixing,
 		UpdatedAt: now,
 	})
+
+	// --- invalidate PR cache for the chat's AS pool (§5.2.⑥-a) ----
+	// The new worktree has a different branch (and no PR yet),
+	// so any AS that re-stamps before the prcache TTL would
+	// otherwise render the OLD branch + OLD PR link in the
+	// footer. Forcing invalidation here makes the very next
+	// StatusBar build (the one attached to the success card
+	// below) reflect the new workspace correctly.
+	invalidateChatASPRCache(deps, cs)
 
 	// --- render the success card (§5.2.⑥) ------------------------
 	var card string

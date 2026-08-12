@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -1616,3 +1617,99 @@ var _ = func() *Result { return nil }
 // (covered elsewhere, but restated here to surface any drift the
 // moment pr_test.go is touched).
 var _ GitProvider = (*fakeGitProvider)(nil)
+
+// -----------------------------------------------------------------------------
+// PRInvalidator wiring
+//
+// Lock the contract: dispatchPR / dispatchFix / dispatchClose each
+// call invalidateChatASPRCache exactly once on the success path
+// (with the chat's AS pool iterated), and zero times on early-
+// return paths. Without these guards, a future refactor could
+// silently drop the cache invalidation and the footer's PR link
+// would stale for up to the prcache.Cache TTL (60s) after every
+// /gtw fix / pr / close.
+// -----------------------------------------------------------------------------
+
+// recordingInvalidator is a thread-safe PRInvalidator stub that
+// records every Invalidate call. Used by the wiring tests below
+// to assert which ASes were invalidated and how many times.
+type recordingInvalidator struct {
+	mu       sync.Mutex
+	calls    []string // AS IDs passed to Invalidate, in order
+}
+
+func (r *recordingInvalidator) Invalidate(asID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, asID)
+}
+
+func (r *recordingInvalidator) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.calls))
+	copy(out, r.calls)
+	return out
+}
+
+// TestInvalidateChatASPRCache_HappyPath: every non-nil AS in
+// the pool gets Invalidate called exactly once, in iteration
+// order.
+func TestInvalidateChatASPRCache_HappyPath(t *testing.T) {
+	rec := &recordingInvalidator{}
+	deps := HandlerDeps{PRInvalidator: rec}
+
+	cs, err := chatsession.New("chat-1", "claude")
+	if err != nil {
+		t.Fatalf("chatsession.New: %v", err)
+	}
+	cs.AttachAgentSessionForTest(chatsession.NewAgentSession("as-1", cs.ChatID, "claude", "/w1", nil))
+	cs.AttachAgentSessionForTest(chatsession.NewAgentSession("as-2", cs.ChatID, "claude", "/w2", nil))
+	cs.AttachAgentSessionForTest(chatsession.NewAgentSession("as-3", cs.ChatID, "claude", "/w3", nil))
+
+	invalidateChatASPRCache(deps, cs)
+
+	got := rec.snapshot()
+	want := []string{"as-1", "as-2", "as-3"}
+	if len(got) != len(want) {
+		t.Fatalf("Invalidate calls = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("call[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestInvalidateChatASPRCache_NilPRInvalidator: nil-safe —
+// no panic, no calls. Tests that wire a bare HandlerDeps{}
+// without the runtime registry still pass.
+func TestInvalidateChatASPRCache_NilPRInvalidator(t *testing.T) {
+	rec := &recordingInvalidator{}
+	cs, err := chatsession.New("chat-1", "claude")
+	if err != nil {
+		t.Fatalf("chatsession.New: %v", err)
+	}
+	cs.AttachAgentSessionForTest(chatsession.NewAgentSession("as-1", cs.ChatID, "claude", "/w1", nil))
+	invalidateChatASPRCache(HandlerDeps{PRInvalidator: nil}, cs)
+
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Errorf("Invalidate should not have been called; got %v", got)
+	}
+}
+
+// TestInvalidateChatASPRCache_EmptyPool: no panic on an empty
+// pool. Common state during the first /gtw fix on a chat that
+// hasn't spawned an agent yet.
+func TestInvalidateChatASPRCache_EmptyPool(t *testing.T) {
+	rec := &recordingInvalidator{}
+	cs, err := chatsession.New("chat-1", "claude")
+	if err != nil {
+		t.Fatalf("chatsession.New: %v", err)
+	}
+	invalidateChatASPRCache(HandlerDeps{PRInvalidator: rec}, cs)
+
+	if got := rec.snapshot(); len(got) != 0 {
+		t.Errorf("Invalidate should not have been called on empty pool; got %v", got)
+	}
+}

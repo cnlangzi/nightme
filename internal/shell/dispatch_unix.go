@@ -19,11 +19,14 @@ import (
 	"time"
 )
 
-func executeShell(ctx context.Context, cwd, cmd string) *result {
+func executeShell(ctx context.Context, cwd, cmd string, extraEnv []string) *result {
 	start := time.Now()
 	c := exec.CommandContext(ctx, "sh", "-c", cmd)
 	c.Dir = cwd
-	c.Env = os.Environ()
+	// Parent env first, then caller-supplied vars on top. A
+	// duplicate key in extraEnv intentionally overrides the
+	// parent's value (e.g. PATH injection by the caller wins).
+	c.Env = append(os.Environ(), extraEnv...)
 
 	var stdout, stderr bytes.Buffer
 	c.Stdout = &stdout

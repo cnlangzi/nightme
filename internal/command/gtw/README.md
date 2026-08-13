@@ -6,6 +6,56 @@ git 工作流封装成 IM 一来一回的卡片。本文件只规定**回复的�
 
 ---
 
+## 0. Hook 环境变量
+
+每次 hook(`fix.before` / `fix.after` / `push.before` / ...)被 spawn
+时,gtw 在子进程的 `os.Environ()` 之上**额外**注入 4 个 `GTW_*`
+变量。父进程的 env 完全保留(PATH / HOME / LANG 等)—— setenv
+只追加,不覆盖。
+
+| 变量 | 含义 | 来源 |
+|---|---|---|
+| `GTW_REPO_ROOT` | 主库绝对路径 | yml 优先;git fallback (rev-parse --show-toplevel) |
+| `GTW_WORKTREE` | worktree 绝对路径 | 同上;sync 命令下 = `GTW_REPO_ROOT` |
+| `GTW_BRANCH` | worktree 当前分支 | git rev-parse --abbrev-ref HEAD |
+| `GTW_DEFAULT_BRANCH` | 上游默认分支 (e.g. `main`) | git symbolic-ref refs/remotes/origin/HEAD |
+
+**空字段会被省略**(不是设为空字符串)。hook 可以这样检测:
+
+```bash
+[[ -n "$GTW_DEFAULT_BRANCH" ]] && echo "default branch: $GTW_DEFAULT_BRANCH"
+```
+
+**铁律**:"hook 是附加的,不阻塞主流程" —— hook 拿不到某个 env 变量
+**绝对不能** fail。它只代表该字段在当前上下文无法解析(没有
+origin 远程,yml 不存在,等等),不是错误。
+
+**示例 `~/.nightme/gtw.yml`**:
+
+```yaml
+fix:
+  hooks:
+    before:
+      - run: codegraph init  # 工作目录已经设到 GTW_WORKTREE
+    after:
+      - run: echo "pushed $GTW_BRANCH to base $GTW_DEFAULT_BRANCH"
+push:
+  hooks:
+    before:
+      - run: make lint  # cwd = GTW_WORKTREE
+pr:
+  hooks:
+    before:
+      - run: gh pr list --head $GTW_BRANCH --json url -q '.[0].url' # sanity check
+```
+
+**顶层 `pr:`** 是这次新增 —— `cfg.PR` 之前是静默丢的字段,
+加在 Config 后用户写 `pr: hooks:` 才生效。
+
+---
+
+---
+
 ## 1. 标题
 
 每个 reply 卡的**第一行**就是标题:

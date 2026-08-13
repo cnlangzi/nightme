@@ -29,9 +29,17 @@ func (e *ExitError) Error() string {
 	return "shell: exit code " + strconv.Itoa(e.Code)
 }
 
-// Run executes cmd in cwd using the platform shell
-// (sh -c on Unix, cmd /c on Windows) and returns captured
-// stdout/stderr plus exit diagnostics.
+// Run executes cmd in cwd using the platform shell (sh -c on
+// Unix, cmd /c on Windows) and returns captured stdout/stderr
+// plus exit diagnostics.
+//
+// extraEnv is appended on top of the parent process's
+// environment in "KEY=VALUE" form (the same shape as
+// exec.Cmd.Env). Empty / nil is fine — only os.Environ() is
+// then inherited. The parent process is never mutated (no
+// global os.Setenv); the child gets a one-shot copy via exec.
+// Duplicate keys in extraEnv intentionally override the
+// parent's value.
 //
 // Trailing newlines are stripped to match the legacy gtw
 // runCmd contract.
@@ -42,8 +50,8 @@ func (e *ExitError) Error() string {
 // Stderr is the child stderr (best-effort UTF-8 / Windows code-
 // page-decoded by the platform dispatcher). The same string is
 // also embedded in *ExitError.Stderr for caller convenience.
-func Run(ctx context.Context, cwd, cmd string) (stdout, stderr string, exitCode int, err error) {
-	r := executeShell(ctx, cwd, cmd)
+func Run(ctx context.Context, cwd, cmd string, extraEnv []string) (stdout, stderr string, exitCode int, err error) {
+	r := executeShell(ctx, cwd, cmd, extraEnv)
 	out := strings.TrimRight(r.Stdout, "\n")
 	eerr := strings.TrimRight(r.Stderr, "\n")
 	if r.ExitCode != 0 {

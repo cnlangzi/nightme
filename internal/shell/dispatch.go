@@ -273,7 +273,9 @@ func dispatch(ctx context.Context, req Request) *result {
 			Cmd:      cmd,
 		}
 	}
-	return executeShell(ctx, req.Cwd, cmd)
+	// dispatch.go is the "!cmd" interactive-shell path. No
+	// GTW_* vars here — those only apply to gtw hooks.
+	return executeShell(ctx, req.Cwd, cmd, nil)
 }
 
 // parseShell is the canonical "!" prefix detector for this

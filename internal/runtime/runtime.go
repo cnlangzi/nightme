@@ -440,7 +440,7 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// WithOnCreate fires for both restored (RestoreFromRegistry)
 	// and future (GetOrCreate) ChatSessions. Place BEFORE
 	// RestoreFromRegistry so restored chats get their handlers.
-	if err := WireRuntimeCallbacksAndRestore(mgr, em, logger, statusbarDeps, MarkPromptDone(ch)); err != nil {
+	if err := WireRuntimeCallbacksAndRestore(mgr, em, logger, statusbarDeps, ch); err != nil {
 		return fmt.Errorf("run: wire+restore: %w", err)
 	}
 

@@ -6,11 +6,6 @@
 // because the cmd/nightme tests pin the F-38 silent-failure
 // contract (handler installation must precede RestoreFromRegistry).
 //
-// markPromptDone is the Feishu-specific PromptEnd callback;
-// for non-Feishu channels the no-op default is used. The
-// wrapper exists so the runtime layer doesn't have to type-
-// assert the Channel interface back to *feishu.Adapter inside
-// the per-ChatSession install closure.
 
 package runtime
 
@@ -27,25 +22,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
-// MarkPromptDone returns the channel's OnPromptEnded method
-// value. Phase 2.1 moved the implementation onto channel.Channel
-// so the runtime no longer needs a type assertion to reach it:
-// every Channel satisfies the contract (Feishu transitions the
-// receipt card to PromptDone; echo is a no-op).
-func MarkPromptDone(ch channel.Channel) func(ctx context.Context, chatID, msgID string) {
-	return ch.OnPromptEnded
-}
 
-// noOpPromptDone is a sentinel value kept for tests that
-// explicitly pin the non-Feishu contract. Production goes
-// through ch.OnPromptEnded (Phase 2.1) which is a no-op on
-// adapters that don't render receipts.
-//
-// (The variable is also used by ctor_test.go to verify
-// MarkPromptDone's old "returns the same no-op for every
-// non-Feishu channel" property, even though the implementation
-// path has moved into the channel package.)
-var noOpPromptDone = func(context.Context, string, string) {}
 
 // WireRuntimeCallbacksAndRestore installs the per-ChatSession
 // outbound handlers (EventHandler for AgentEvent → OutboundMessage
@@ -72,18 +49,22 @@ var noOpPromptDone = func(context.Context, string, string) {}
 // chatsession/manager_test.go; this helper's test covers the
 // cmd/nightme/run.go wiring specifically.
 //
-// markPromptDone is called when ChatSession.endPrompt fires
-// (EventAgentDone / EventAgentError in the readpump). The
-// runtime injects the Feishu-specific implementation; for
-// non-Feishu channels the callback is a no-op. Passing it
-// in (rather than type-asserting ch to *feishu.Adapter
-// here) keeps WireRuntimeCallbacksAndRestore channel-agnostic.
+// ch carries the channel whose OnPromptEnded method the
+// PromptEndBus subscriber calls when ChatSession.endPrompt
+// fires (EventAgentDone / EventAgentError in the readpump).
+// Phase 2.1 moved the implementation onto channel.Channel —
+// Feishu transitions the receipt card to PromptDone + adds
+// the ✅ reaction; echo is a no-op. We pass the Channel
+// (rather than its OnPromptEnded method value) so a single
+// per-cs subscriber closure can call ch.OnPromptEnded for
+// every PromptEndedEvent without rebuilding the method
+// value on every event.
 func WireRuntimeCallbacksAndRestore(
 	mgr *chatsession.Manager,
 	em outbound.Emitter,
 	logger *slog.Logger,
 	sbDeps statusbar.Deps,
-	markPromptDone func(ctx context.Context, chatID, msgID string),
+	ch channel.Channel,
 ) error {
 	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
 		// Startup audit trail: one line per chat, bounded by the
@@ -206,7 +187,7 @@ func WireRuntimeCallbacksAndRestore(
 			// there's no inbound ctx to chain. The runtime
 			// injects the Feishu-specific implementation; for
 			// non-Feishu channels the callback is a no-op.
-			markPromptDone(context.Background(), e.ChatID, e.UserMsgID)
+			ch.OnPromptEnded(context.Background(), e.ChatID, e.UserMsgID)
 			return false
 		})
 

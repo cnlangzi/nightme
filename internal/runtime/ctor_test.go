@@ -1,6 +1,8 @@
 // ctor_test.go — direct tests for DefaultDeps, WithChannel,
-// MarkPromptDone, NewMessageDispatcher, and the shared no-op
-// promptDone closure.
+// NewMessageDispatcher, and the WireRuntimeCallbacksAndRestore
+// PromptEndBus subscriber (Phase 2.5: the MarkPromptDone
+// wrapper was deleted — the runtime now calls ch.OnPromptEnded
+// directly inside the subscriber closure).
 //
 // These tests close coverage gaps that cmd/nightme/run_test.go
 // left implicit: every exported constructor / dispatcher
@@ -11,16 +13,22 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"reflect"
 	"runtime"
+	"sync"
 	"testing"
 
+	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentsession"
+	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/channel/echo"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
+	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 // TestDefaultDeps_HasProductionHooks verifies the production
@@ -111,47 +119,82 @@ func TestWithChannel_UnknownErrors(t *testing.T) {
 	}
 }
 
-// TestMarkPromptDone_NoOpIsShared pins the contract for
-// non-Feishu channels: MarkPromptDone returns the SAME
-// package-level `noOpPromptDone` closure on every call so
-// per-ChatSession install does not allocate a new closure
-// per chat.
+// TestPromptEndBus_DelegatesToChannelOnPromptEnded pins the
+// Phase 2.5 contract: WireRuntimeCallbacksAndRestore's
+// PromptEndBus subscriber invokes ch.OnPromptEnded for each
+// PromptEndedEvent. The previous MarkPromptDone wrapper
+// was deleted because it added an indirection (return
+// ch.OnPromptEnded) with no type-assertion benefit — the
+// channel interface already exposes OnPromptEnded.
 //
-// Regression guard for "MarkPromptDone re-allocated the
-// no-op on every call". The patch landed before this
-// invariant was pinned; if a future edit re-introduces
-// allocation, this test fails.
-func TestMarkPromptDone_NoOpIsShared(t *testing.T) {
-	ch := echo.New("test", io.Discard)
-	first := MarkPromptDone(ch)
-	second := MarkPromptDone(ch)
-	if first == nil || second == nil {
-		t.Fatal("MarkPromptDone returned nil closure")
+// To test: capture the OnPromptEnded calls via a stub
+// Channel, create a ChatSession AFTER the wiring so
+// WithOnCreate fires the subscriber, publish a
+// PromptEndedEvent, assert the call landed.
+func TestPromptEndBus_DelegatesToChannelOnPromptEnded(t *testing.T) {
+	mgr := chatsession.NewManager().WithPrimaryAgent("claude")
+	stub := &capturingChannel{name: "capture", record: []string{}}
+
+	if err := WireRuntimeCallbacksAndRestore(
+		mgr,
+		outbound.New(echo.New("test", io.Discard), outbound.Options{}),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		statusbar.Deps{},
+		stub,
+	); err != nil {
+		t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)
 	}
-	// Two values both referring to the same `noOpPromptDone`
-	// variable compare equal via reflect.ValueOf.Pointer()
-	// (the F-58 perf invariant). Direct equality on function
-	// values is not allowed in Go, so we compare the
-	// underlying code pointers via runtime.FuncForPC.
-	if funcPC(t, first) != funcPC(t, second) {
-		t.Errorf("non-Feishu MarkPromptDone did not return the shared no-op closure " +
-			"(per-ChatSession install would re-allocate)")
+
+	// Create the ChatSession AFTER wiring so WithOnCreate
+	// fires and installs the PromptEndBus subscriber.
+	cs, _ := mgr.GetOrCreate("oc_prompt_end", "claude")
+
+	cs.PromptEndBus.Publish(agentsession.PromptEndedEvent{
+		ChatID:    cs.ChatID,
+		UserMsgID: "om_pe_test",
+	})
+
+	if len(stub.record) != 1 {
+		t.Fatalf("expected 1 OnPromptEnded call, got %d", len(stub.record))
+	}
+	if stub.record[0] != "oc_prompt_end|om_pe_test" {
+		t.Errorf("OnPromptEnded call args = %q, want %q", stub.record[0], "oc_prompt_end|om_pe_test")
 	}
 }
 
-// TestMarkPromptDone_NoOpDoesNotPanic verifies the shared
-// no-op closure is safe to call with any (ctx, chatID,
-// msgID) — a future regression that adds e.g. a nil-check
-// on ctx without guarding it would panic here.
-func TestMarkPromptDone_NoOpDoesNotPanic(t *testing.T) {
-	cb := noOpPromptDone
+// TestPromptEndBus_NonFeishuChannelIsNoOp pins the contract
+// that echo's OnPromptEnded is a no-op — a future regression
+// that adds logging/side-effects to echo's no-op would
+// change behavior under WireRuntimeCallbacksAndRestore.
+func TestPromptEndBus_NonFeishuChannelIsNoOp(t *testing.T) {
+	mgr := chatsession.NewManager().WithPrimaryAgent("claude")
+	ch := echo.New("test", io.Discard) // echo.OnPromptEnded is no-op
+
+	if err := WireRuntimeCallbacksAndRestore(
+		mgr,
+		outbound.New(ch, outbound.Options{}),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		statusbar.Deps{},
+		ch,
+	); err != nil {
+		t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)
+	}
+
+	// Create the ChatSession AFTER wiring so WithOnCreate
+	// fires and installs the subscriber.
+	cs, _ := mgr.GetOrCreate("oc_echo_pe", "claude")
+
+	// Must not panic. echo.OnPromptEnded is a no-op, so this
+	// returns cleanly.
 	defer func() {
 		if r := recover(); r != nil {
-			t.Fatalf("noOpPromptDone panicked: %v", r)
+			t.Fatalf("non-Feishu PromptEnd panicked: %v", r)
 		}
 	}()
-	cb(context.Background(), "oc_x", "om_x")
-	cb(context.Background(), "", "")
+	cs.PromptEndBus.Publish(agentsession.PromptEndedEvent{
+		ChatID:    cs.ChatID,
+		UserMsgID: "om_echo_pe",
+	})
 }
 
 // TestNewMessageDispatcher_WatchModeDrop pins F-watch §3.1.1:
@@ -290,12 +333,10 @@ func contains(haystack, needle string) bool {
 	return false
 }
 
-// funcPC returns the program-counter of fn's underlying code.
-// Two closures pointing at the same `noOpPromptDone` variable
-// share a PC; two freshly-allocated no-op closures don't.
-// Used to pin the F-58 perf invariant: MarkPromptDone must
-// return the SAME no-op for every non-Feishu channel.
-func funcPC(t *testing.T, fn any) uintptr {
+// funcPC was used by the deleted TestMarkPromptDone_NoOpIsShared
+// — kept as a stub for future tests that need to compare
+// method-value code pointers (rare but cheap to retain).
+var _ = func(t *testing.T, fn any) uintptr {
 	t.Helper()
 	v := reflect.ValueOf(fn)
 	if v.Kind() != reflect.Func {
@@ -305,11 +346,53 @@ func funcPC(t *testing.T, fn any) uintptr {
 	if pc == 0 {
 		t.Fatalf("funcPC: zero pointer for %v", fn)
 	}
-	// Resolve via runtime.FuncForPC to sanity-check that the
-	// PC maps to a real function (some nil-function values
-	// expose a non-zero PC but no Func entry).
 	if f := runtime.FuncForPC(pc); f == nil {
 		t.Fatalf("funcPC: no runtime.Func for PC=%x", pc)
 	}
 	return pc
 }
+
+// capturingChannel is a minimal channel.Channel stub that
+// records every OnPromptEnded call so TestPromptEndBus_*
+// tests can assert the subscriber routed the event through
+// ch.OnPromptEnded (Phase 2.5 contract). Every other method
+// is a trivial fallback — the tests don't exercise Send /
+// SendCard / etc.
+type capturingChannel struct {
+	name   string
+	mu     sync.Mutex
+	record []string
+}
+
+func (c *capturingChannel) Name() string { return c.name }
+func (c *capturingChannel) Start(_ context.Context) error { return nil }
+func (c *capturingChannel) Stop(_ context.Context) error  { return nil }
+func (c *capturingChannel) Incoming() <-chan messages.InboundMessage {
+	return make(<-chan messages.InboundMessage)
+}
+func (c *capturingChannel) Send(_ context.Context, _ messages.OutboundMessage) error {
+	return nil
+}
+func (c *capturingChannel) SendCard(_ context.Context, _ messages.OutboundMessage) (string, error) {
+	return "", nil
+}
+func (c *capturingChannel) OnPromptEnded(_ context.Context, chatID, msgID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.record = append(c.record, chatID+"|"+msgID)
+}
+func (c *capturingChannel) HealthSnapshot() (string, json.RawMessage, error) {
+	return c.name, json.RawMessage("{}"), nil
+}
+func (c *capturingChannel) SetLogger(_ *slog.Logger) {}
+func (c *capturingChannel) BuildBlocks(text string, _ []messages.Attachment) []agent.ContentBlock {
+	if text == "" {
+		return nil
+	}
+	return []agent.ContentBlock{{Type: agent.ContentText, Text: text}}
+}
+
+// channel.Channel contract compliance — compiler-checked at
+// build time. (The interface is satisfied implicitly; this
+// declaration is documentation.)
+var _ channel.Channel = (*capturingChannel)(nil)

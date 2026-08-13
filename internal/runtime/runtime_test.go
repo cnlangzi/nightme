@@ -944,7 +944,7 @@ func TestWireRuntimeCallbacksAndRestore_InstallsHandlersOnRestoredChats(t *testi
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, MarkPromptDone(ch)); err != nil {
+	if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, ch); err != nil {
 		t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)
 	}
 
@@ -974,7 +974,7 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateDropsEmptyIDs(t *testing.T) 
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, MarkPromptDone(ch)); err != nil {
+	if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, ch); err != nil {
 		t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)
 	}
 
@@ -1026,7 +1026,7 @@ func TestWireRuntimeCallbacksAndRestore_NoPersistence(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, MarkPromptDone(ch)); err != nil {
+	if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, statusbar.Deps{}, ch); err != nil {
 		t.Fatalf("WireRuntimeCallbacksAndRestore on cold start: %v", err)
 	}
 	if len(mgr.List()) != 0 {

@@ -82,19 +82,21 @@ var (
 // appends to the list — the next SetDeps rebuilds every
 // factory. Tests can call Reset() to wipe both the builders
 // list and the default registry.
+//
+// RegisterBuilder does NOT immediately instantiate the
+// factory. SetDeps is the single point where every builder
+// runs against currentDeps. This avoids the double-build
+// bug (Phase 2.5: late RegisterBuilder after SetDeps was
+// building the factory twice — once at register time, once
+// on the next SetDeps — which was wasted work for every
+// builder and observable for gtw, whose builder creates a
+// *Manager + sets up routes).
 func RegisterBuilder(b func(rt Deps) SlashCommandFactory) {
 	if b == nil {
 		return
 	}
 	depsMu.Lock()
 	builders = append(builders, b)
-	// If deps are already wired, immediately apply the new
-	// builder. This lets late-registered commands (e.g. tests
-	// that add a one-off factory) take effect without requiring
-	// a second SetDeps call.
-	if currentDeps.Manager != nil {
-		defaultRegistry.Register(b(currentDeps))
-	}
 	depsMu.Unlock()
 }
 

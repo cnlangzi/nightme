@@ -157,10 +157,15 @@ func TestAS_ReuseAcrossMessages_RealPi(t *testing.T) {
 		t.Errorf("pid drifted across messages: first=%d now=%d", firstPID, as.PID())
 	}
 
-	// Cleanup.
+	// Cleanup the bridge BEFORE returning, so t.TempDir() can
+	// remove the cwd without "directory not empty" failures.
+	// (The bridge process holds file handles to the workspace.)
 	snapshot := cs.AgentSessionsInCwd(dir)
 	for _, as := range snapshot {
 		_ = as.Close()
 		cs.DropAgentSession(as)
 	}
+	// Give the close goroutine a moment to reap the child
+	// and release its handles to the workspace files.
+	time.Sleep(500 * time.Millisecond)
 }

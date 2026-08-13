@@ -225,30 +225,6 @@ type Draft struct {
 	CardRequestID string
 }
 
-// ReactionKind tags a single user-emoji response on a gtw draft card.
-// Each draft kind has a fixed set of accepted reaction kinds; other
-// emojis are no-ops.
-type ReactionKind string
-
-const (
-	// ReactionConfirm: ✅ — accept the current draft, advance the flow.
-	ReactionConfirm ReactionKind = "✅"
-	// ReactionEdit: ✏️ — "let me change something" (v1: no-op; reserved).
-	ReactionEdit ReactionKind = "✏️"
-	// ReactionCancel: ❌ — abort the current gtw step; rollback side
-	// effects where possible.
-	ReactionCancel ReactionKind = "❌"
-	// ReactionNewV2: 🆕 — branch already exists; create a -v2 variant.
-	ReactionNewV2 ReactionKind = "🆕"
-	// ReactionJoin: 🔗 — branch already exists; reuse the existing one
-	// without creating a new worktree.
-	ReactionJoin ReactionKind = "🔗"
-	// ReactionForce: 🤝 — somebody else holds the label; force-take it.
-	ReactionForce ReactionKind = "🤝"
-	// ReactionRetry: 🔄 — last step failed; re-run.
-	ReactionRetry ReactionKind = "🔄"
-)
-
 // ReactionEvent is the inbound reaction payload. Type alias to
 // services.ReactionEvent (the canonical location). Old
 // `chatsession.ReactionEvent` and the prior `gtw.ReactionEvent`

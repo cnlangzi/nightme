@@ -27,7 +27,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/channel"
-	"github.com/cnlangzi/nightme/internal/command/gtw"
 	commandServices "github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/messages"
@@ -1448,7 +1447,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 
 	case messages.OutCardPatch:
 		// F-46: in-place PATCH of a previously sent decision card.
-		// gtw.HandleAction emits this when a follow-up wants to
+		// gtw.HandleDraftReaction emits this when a follow-up wants to
 		// disable the original choices and surface the outcome
 		// (e.g. "✅ 已选择 🔄 重试 — Retry failed: …"). ReplyTo
 		// is the bot-side message id assigned at OutCard time.
@@ -3528,7 +3527,7 @@ func (a *Adapter) handleActCardAction(
 	if event == nil || event.Event == nil || event.Event.Context == nil {
 		return nil, nil
 	}
-	emoji, ok := gtw.ActionLookup(actionStr)
+	emoji, ok := messages.ActionLookup(actionStr)
 	if !ok {
 		return &larkcallback.CardActionTriggerResponse{
 			Toast: &larkcallback.Toast{Type: "warning", Content: "未知操作: " + actionStr},

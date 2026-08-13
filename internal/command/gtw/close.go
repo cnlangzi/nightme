@@ -11,6 +11,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/command/newcmd"
 )
 
 // statPath is the os.Stat function used by RunClose to detect
@@ -68,6 +69,13 @@ const maxDirtyFilesReported = 10
 //     sync errors (dirty main, rebase conflict), its own error
 //     card surfaces the cause — close's card above is not
 //     retracted because the local fix session genuinely ended.
+// 10. Invoke /new on the new cwd (c.RepoRoot) to drop any AS
+//     left there of its accumulated conversation context. This
+//     mirrors the user's manual workflow ("close the fix, then
+//     clear the chat") and is the single terminal step: all
+//     three sync branches (error / normal / skip) fall through
+//     here. matched==0 means no AS survives in repoRoot — the
+//     common case after step 2.5 — and no extra card is sent.
 //
 // On any error before step 7 (yml missing / dirty / worktree-
 // remove / branch-delete fail) we leave the chat's active cwd
@@ -75,6 +83,10 @@ const maxDirtyFilesReported = 10
 // once they fix the underlying problem. Step 9 (sync) errors
 // surface their own card but DO NOT undo steps 4-7: from the
 // user's perspective the local fix is gone either way.
+// Step 10 (/new) runs unconditionally after step 9 — sync
+// failure does not skip the context reset, because the local
+// fix is gone either way and the user still wants a clean
+// context in the main repo.
 func RunClose(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
@@ -320,18 +332,51 @@ func RunClose(
 	// (RefreshDefaultBranch's own errors sometimes lack one);
 	// the close success card above is NOT retracted because the
 	// local fix session is genuinely over regardless.
+	//
+	// Sync's reply is emitted but we deliberately do NOT return
+	// here — step 10 (/new) must run regardless of sync outcome,
+	// including the SkipRefreshDefaultBranch (test-only) case
+	// where syncBody == "". Refactored from three early-return
+	// branches to a fall-through so step 10 is the single
+	// terminal statement.
 	syncBody, syncErr := buildSyncReply(ctx, c.RepoRoot, deps)
 	if syncErr != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ sync failed: "+syncErr.Error()), nil
+		reply(ctx, cs.Emitter(), chatID, messageID,
+			"❌ sync failed: "+syncErr.Error())
+	} else if syncBody != "" {
+		reply(ctx, cs.Emitter(), chatID, messageID, syncBody)
 	}
-	if syncBody == "" {
-		// SkipRefreshDefaultBranch was set (test-only path);
-		// no sync card to emit. close's card above is the
-		// complete reply for this invocation.
-		return &Result{Consumed: true}, nil
+	// else: SkipRefreshDefaultBranch set (test-only); no sync
+	// card. close's card above still stands.
+
+	// --- step 10: /new (clear agent context in repoRoot) ---------
+	// Mirrors the user's manual workflow: after /gtw close wipes
+	// the worktree and /gtw sync refreshes main, they usually fire
+	// /new to drop the agent's accumulated conversation context
+	// for the new cwd. We do it here so they don't have to.
+	//
+	// Symmetric to step 2.5's AS cleanup at the dead worktree:
+	// the worktree-pinned ASes are already dropped. Any AS left
+	// in c.RepoRoot (the new cwd after step 6) survives with
+	// stale context; /new forces them cold so the next turn in
+	// the main repo doesn't inherit the fix's conversation.
+	//
+	// matched==0 means the pool is empty in c.RepoRoot — the
+	// common path after step 2.5 — and we skip the extra card so
+	// close + sync stays a two-card story for that case. The
+	// queue is deliberately NOT dropped (same contract as
+	// /new: queued messages are still owed a reply and flush
+	// into the fresh context on the next TryFlush).
+	matched, _, results, newErr := cs.NewActiveAgentSessions(ctx, "")
+	if matched > 0 {
+		body := newcmd.FormatResetResults(results)
+		if newErr != nil {
+			body += fmt.Sprintf("\n(errors: %v)", newErr)
+		}
+		reply(ctx, cs.Emitter(), chatID, messageID, body)
 	}
-	return reply(ctx, cs.Emitter(), chatID, messageID, syncBody), nil
+
+	return &Result{Consumed: true}, nil
 }
 
 // assertWorktreeClean returns a user-friendly error if `dir` has

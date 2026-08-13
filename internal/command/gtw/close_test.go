@@ -900,6 +900,103 @@ func TestRunClose_Success_ClosesOrphanedAgents(t *testing.T) {
 	}
 }
 
+// TestRunClose_Success_ResetsRepoRootAgentContext exercises
+// step 10: an AgentSession pinned to c.RepoRoot (the new cwd
+// after step 6) survives step 2.5's worktree-pinned cleanup
+// and must be reset by /new. The "marked fresh" path applies
+// (StatusExited → no live conversation to reset, but stale
+// SessionID cleared per F-43 §5.4).
+//
+// Asserts:
+//   - The repoRoot AS stays in the pool but its SessionID is
+//     cleared (a fresh cold-start would otherwise resume the
+//     dead conversation).
+//   - Two cards are sent (close + /new; sync is skipped via
+//     SkipRefreshDefaultBranch=true). The /new card names the
+//     agent and uses the "marked fresh" vocabulary.
+//   - The worktree-pinned AS is still dropped by step 2.5 —
+//     proves the /new step does NOT accidentally re-evict it.
+func TestRunClose_Success_ResetsRepoRootAgentContext(t *testing.T) {
+	wt := t.TempDir()
+	repoRoot := t.TempDir()
+
+	rig := newCloseRig(t)
+	seedFix(t, rig, wt, repoRoot)
+	// Two ASes at the worktree (must be dropped by step 2.5).
+	seedAgentSession(t, rig, "wt-agent-a", wt)
+	seedAgentSession(t, rig, "wt-agent-b", wt)
+	// One AS at the new cwd (must survive, then be reset by step 10).
+	seedAgentSession(t, rig, "repo-agent", repoRoot)
+
+	// Capture the repoRoot AS reference and pre-populate its
+	// SessionID so we can assert step 10 cleared it.
+	var repoAS *chatsession.AgentSession
+	for _, as := range rig.cs.Pool() {
+		if as.Cwd == repoRoot {
+			repoAS = as
+			break
+		}
+	}
+	if repoAS == nil {
+		t.Fatalf("setup: no AS pinned to repoRoot")
+	}
+	repoAS.SetSessionID("stale-resume-id-must-be-cleared")
+	if got := repoAS.SessionID(); got != "stale-resume-id-must-be-cleared" {
+		t.Fatalf("setup: SessionID = %q, want pre-populated", got)
+	}
+
+	res, err := RunClose(context.Background(), rig.cs, rig.slot, rig.deps, rig.cs.ChatID, "msg-1")
+	if err != nil {
+		t.Fatalf("RunClose: %v", err)
+	}
+	if res == nil || !res.Consumed {
+		t.Fatalf("Result = %+v, want Consumed=true", res)
+	}
+
+	// repoRoot AS must still be in the pool (StatusExited was
+	// preserved — step 10 marked-fresh, didn't drop). Its
+	// SessionID must be empty now.
+	if got := repoAS.SessionID(); got != "" {
+		t.Errorf("repoRoot AS SessionID after close = %q, want empty (step 10 must clear)", got)
+	}
+	// The worktree-pinned ASes must be gone — proves step 2.5
+	// fired before step 10 and that step 10 didn't re-evict
+	// repoRoot survivors (matched by Cwd == repoRoot only).
+	if n := len(rig.cs.Pool()); n != 1 {
+		t.Errorf("pool after close = %d entries, want 1 (the repoRoot survivor)", n)
+	}
+
+	// Card count: SkipRefreshDefaultBranch=true means no sync
+	// card. Two cards expected — close + /new.
+	rig.rec.mu.Lock()
+	defer rig.rec.mu.Unlock()
+	if got := len(rig.rec.sends); got != 2 {
+		// Dump texts on mismatch so the failure message
+		// tells us which cards fired.
+		texts := make([]string, len(rig.rec.sends))
+		for i, m := range rig.rec.sends {
+			texts[i] = m.Text
+		}
+		t.Fatalf("cards sent = %d, want 2 (close + /new):\n%s",
+			got, strings.Join(texts, "\n---\n"))
+	}
+
+	// First card: close's own. Second card: /new result.
+	closeCard := rig.rec.sends[0].Text
+	newCard := rig.rec.sends[1].Text
+	if !strings.Contains(closeCard, "fix/42-test") {
+		t.Errorf("first card missing branch label:\n%s", closeCard)
+	}
+	if !strings.Contains(newCard, "repo-agent") {
+		t.Errorf("/new card missing repo-agent name:\n%s", newCard)
+	}
+	// FormatResetResults uses "marked fresh" wording for
+	// StatusExited survivors — proves the right branch ran.
+	if !strings.Contains(newCard, "marked fresh") {
+		t.Errorf("/new card missing 'marked fresh' wording:\n%s", newCard)
+	}
+}
+
 // (rigSetCwd removed; we don't need it — RunClose takes the
 // ChatSession's SelectedCwd directly.)
 

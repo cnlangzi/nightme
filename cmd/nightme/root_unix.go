@@ -4,18 +4,16 @@ package main
 
 import "github.com/spf13/cobra"
 
-// addUnixOnlyCommands registers commands that depend on the unix
-// daemon lifecycle: start/stop/restart/status, the internal
-// _daemon subcommand, and `nightme doctor` (which queries the
-// unix-socket daemon). On Windows these have no implementation
-// yet — see `cmd/nightme/daemon_lifecycle.go` (already
-// `//go:build unix`) and `internal/daemoncontrol/` (the package
-// is `//go:build !windows`).
+// addUnixOnlyCommands registers commands that depend on Unix-only
+// surfaces — currently just `nightme doctor`, which queries the
+// running daemon via daemoncontrol.GetHealth (that part is
+// cross-platform; doctor itself just isn't wired up on Windows
+// yet because nothing in the runtime surfaces a useful snapshot
+// to it on that OS).
+//
+// The cross-platform daemon lifecycle commands (start / stop /
+// restart / status / _daemon) are registered separately via
+// addLifecycleCommands in root.go so Windows can pick them up.
 func addUnixOnlyCommands(root *cobra.Command) {
-	root.AddCommand(newStartCmd())
-	root.AddCommand(newStatusCmd())
-	root.AddCommand(newStopCmd())
-	root.AddCommand(newRestartCmd())
-	root.AddCommand(newDaemonCmd())
 	root.AddCommand(newDoctorCmd())
 }

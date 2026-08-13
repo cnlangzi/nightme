@@ -11,8 +11,11 @@
 //
 //	nightme doctor             # human-readable text
 //	nightme doctor --json      # raw JSON for piping to jq etc.
-//go:build !windows
-
+//
+// Cross-platform: doctor only consumes the cross-platform
+// daemoncontrol.GetHealth RPC (named pipe on Windows, AF_UNIX
+// socket on Unix) and reads the daemon-stderr crash-capture file
+// at <DataDir>/daemon-stderr.log. No Unix-only assumptions.
 package main
 
 import (

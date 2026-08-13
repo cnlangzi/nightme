@@ -103,10 +103,13 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 	// active — the leading full-width slash would otherwise
 	// cause resolvePath to misclassify the path.
 	//
-	// The mapping never produces an empty string from a
-	// non-empty input (every mapped rune expands to a
-	// non-empty ASCII sequence), so no second empty-check is
-	// needed here.
+	// Preserve the original input in rawOriginal so error
+	// messages echo what the user actually typed (full-width
+	// slash and all), not the normalised form they can't
+	// easily correlate with. The mapping never produces an
+	// empty string from a non-empty input, so no second
+	// empty-check is needed here.
+	rawOriginal := raw
 	raw = normalizePathInput(raw)
 
 	// 1. ~ expansion
@@ -117,17 +120,17 @@ func (f *Factory) Handle(ctx context.Context, rt command.RuntimeServices,
 
 	// 2. Resolve to an absolute path. The platform-specific
 	// resolvePath (path_unix.go / path_windows.go) decides
-	// whether the input is absolute or $HOME-relative — on
-	// Windows, root-relative forms like "/foo" or "C:foo"
-	// also need platform-aware handling because Go's
-	// filepath.IsAbs doesn't classify them the same way.
+	// whether the input is absolute or $HOME-relative. On
+	// Windows, drive-relative forms like "C:foo" are rejected
+	// explicitly because Go's filepath.IsAbs classifies them
+	// as relative and would silently join them with $HOME.
 	abs, err := resolvePath(expanded)
 	if err != nil {
-		return command.Reply(ctx, rt, fmt.Sprintf("Cannot resolve path %q: %v", raw, err)), nil
+		return command.Reply(ctx, rt, fmt.Sprintf("Cannot resolve path %q: %v", rawOriginal, err)), nil
 	}
 
 	// 3. Existence + directory check, also platform-specific.
-	if err := verifyDirectory(abs, raw); err != nil {
+	if err := verifyDirectory(abs, rawOriginal); err != nil {
 		return command.Reply(ctx, rt, err.Error()), nil
 	}
 

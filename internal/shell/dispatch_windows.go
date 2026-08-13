@@ -47,12 +47,13 @@ const cpACPChinese = 936
 // single argument and let cmd.exe handle its own parsing —
 // this matches how Windows users actually type commands in
 // cmd.exe interactively.
-func executeShell(ctx context.Context, cwd, cmd string) *result {
+func executeShell(ctx context.Context, cwd, cmd string, extraEnv []string) *result {
 	start := time.Now()
 
 	c := exec.CommandContext(ctx, "cmd", "/c", cmd)
 	c.Dir = cwd
-	c.Env = os.Environ()
+	// Parent env first, then caller-supplied vars on top.
+	c.Env = append(os.Environ(), extraEnv...)
 
 	var stdoutRaw, stderrRaw bytes.Buffer
 	c.Stdout = &stdoutRaw

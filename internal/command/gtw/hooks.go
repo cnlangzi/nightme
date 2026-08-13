@@ -40,6 +40,12 @@ type Config struct {
 	Commit CmdConfig `yaml:"commit"`
 	Close  CmdConfig `yaml:"close"`
 	Sync   CmdConfig `yaml:"sync"`
+	// PR owns the /gtw pr subcommand's before/after hooks.
+	// Agent selection for the PR-generation step is per-call
+	// (-a / --agent), not stored in the yml — there's no
+	// PR-default agent to remember, since the agent is the
+	// user's choice at the moment they decide to open a PR.
+	PR CmdConfig `yaml:"pr"`
 }
 
 // CmdConfig is the per-command subsection of Config. Agent is the
@@ -176,6 +182,51 @@ type HookResult struct {
 // a hung binary from stalling the chat.
 const hookTimeout = 30 * time.Second
 
+// HookContext carries the per-invocation state that flows from
+// /gtw command dispatch into every hook subprocess. It is the
+// single source of truth for the GTW_* environment variables
+// documented in gtw/README.md "Hook 环境变量".
+//
+// Construction: Factory.deriveHookContext reads current chat
+// state (yml + git fallback) to fill RepoRoot / Worktree /
+// Branch / DefaultBranch; the caller (runFix / runPush /
+// runCommit / runSync / runClose / runPR) overrides Command
+// with the slash name. All six gtw subcommands are wired
+// through withHooks — including "pr" in v1.
+//
+// Empty fields are omitted from the rendered env (see ToEnv),
+// so a hook can use `[[ -n "$GTW_DEFAULT_BRANCH" ]]` to detect
+// "not discoverable" (e.g. no origin remote) without parsing
+// the empty string as a literal branch name.
+type HookContext struct {
+	RepoRoot      string // main repo absolute path
+	Worktree      string // worktree absolute path (empty if command has no worktree)
+	Branch        string // current branch in Worktree (empty if detached)
+	DefaultBranch string // upstream default branch name (empty if not discoverable)
+	Command       string // fix / push / close / sync / commit
+}
+
+// ToEnv renders the 4 GTW_* env vars. Empty fields are skipped.
+// Caller (withHooks) is responsible for appending to the child's
+// env via shell.Run's extraEnv parameter; this method just
+// produces the strings.
+func (hc HookContext) ToEnv() []string {
+	out := make([]string, 0, 4)
+	if hc.RepoRoot != "" {
+		out = append(out, "GTW_REPO_ROOT="+hc.RepoRoot)
+	}
+	if hc.Worktree != "" {
+		out = append(out, "GTW_WORKTREE="+hc.Worktree)
+	}
+	if hc.Branch != "" {
+		out = append(out, "GTW_BRANCH="+hc.Branch)
+	}
+	if hc.DefaultBranch != "" {
+		out = append(out, "GTW_DEFAULT_BRANCH="+hc.DefaultBranch)
+	}
+	return out
+}
+
 // RunHooks executes the given hooks sequentially in declaration
 // order. Failures never abort the loop — each hook gets a chance
 // to run, and per-hook failures are surfaced via the returned
@@ -183,13 +234,13 @@ const hookTimeout = 30 * time.Second
 //
 // Returns nil when hooks is empty or nil. Otherwise the returned
 // slice has the same length as hooks (1:1 index correspondence).
-func RunHooks(ctx context.Context, hooks []Hook, cwd string) []HookResult {
+func RunHooks(ctx context.Context, hooks []Hook, hc HookContext, cwd string) []HookResult {
 	if len(hooks) == 0 {
 		return nil
 	}
 	results := make([]HookResult, 0, len(hooks))
 	for _, h := range hooks {
-		results = append(results, runOneHook(ctx, h, cwd))
+		results = append(results, runOneHook(ctx, h, hc, cwd))
 	}
 	return results
 }
@@ -197,7 +248,7 @@ func RunHooks(ctx context.Context, hooks []Hook, cwd string) []HookResult {
 // runOneHook executes a single hook. See Hook for type semantics;
 // v1 only honours shell hooks (Type == "" or "shell"). Anything
 // else is a warn-skip per the iron rule.
-func runOneHook(ctx context.Context, h Hook, cwd string) HookResult {
+func runOneHook(ctx context.Context, h Hook, hc HookContext, cwd string) HookResult {
 	t := strings.ToLower(strings.TrimSpace(h.Type))
 	if t != "" && t != "shell" {
 		return HookResult{
@@ -227,7 +278,11 @@ func runOneHook(ctx context.Context, h Hook, cwd string) HookResult {
 	// centrally — no sh-vs-cmd fork here. shell.Run trims the
 	// trailing newline, matching the legacy runCmd contract that
 	// downstream branch-name / remote-URL comparisons rely on.
-	stdout, stderr, exitCode, err := shell.Run(hctx, cwd, run)
+	//
+	// The 4 GTW_* env vars from hc.ToEnv() are appended on top
+	// of os.Environ() inside shell.Run — see shell/dispatch_*.
+	// The child's PATH, HOME, LANG, etc. all stay inherited.
+	stdout, stderr, exitCode, err := shell.Run(hctx, cwd, run, hc.ToEnv())
 	// Name is the user-facing command label. Held to the bare
 	// run string (no "sh -c " prefix) so FormatResults can render
 	// it as `> <run>` without double-stamping the shell layer.

@@ -72,46 +72,134 @@ func (f *Factory) SetHandlerDeps(deps HandlerDeps) {
 	}
 }
 
+// deriveHookContext best-effort populates a HookContext from
+// current chat state. Tries .nightme/gtw.yml first (authoritative
+// when present); falls back to the canonical RepoRoot helper +
+// `git rev-parse --abbrev-ref HEAD` on SelectedCwd.
+//
+// Any derivation failure is silent — empty fields are skipped by
+// HookContext.ToEnv and hooks see "not set" rather than fake
+// values. This keeps the "hooks are additive, never block main
+// flow" iron rule intact.
+//
+// For commands that don't have a yml yet (runFix pre-creation,
+// runSync on a manual branch) this gives hooks the rough shape:
+// repo == worktree, branch from HEAD. Better-than-nothing —
+// `codegraph init` etc. work.
+func (f *Factory) deriveHookContext(ctx context.Context, cs *chatsession.ChatSession, command string) HookContext {
+	hc := HookContext{Command: command}
+	if cs == nil {
+		return hc
+	}
+	cwd := cs.SelectedCwd()
+	if cwd == "" {
+		return hc
+	}
+	// yml path — exact values from the active fix.
+	if c, err := ReadGTWYml(cwd); err == nil && c.Worktree != "" {
+		hc.RepoRoot = c.RepoRoot
+		hc.Worktree = c.Worktree
+		hc.Branch = c.Branch
+		return hc
+	}
+	if f.deps.Git == nil {
+		return hc
+	}
+	// Fallback: use the canonical RepoRoot helper (which
+	// distinguishes ErrNotInGitRepo). sync-style commands operate
+	// on the main checkout, so repo == worktree is correct.
+	if repo, err := RepoRoot(ctx, cwd, f.deps.Git); err == nil && repo != "" {
+		hc.RepoRoot = repo
+		hc.Worktree = repo
+	}
+	if out, _, err := f.deps.Git.Run(ctx, cwd, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
+		if trimmed := strings.TrimSpace(out); trimmed != "" && trimmed != "HEAD" {
+			hc.Branch = trimmed
+		}
+	}
+	return hc
+}
+
 // withHooks wraps an inner command run with the before/after
-// hook execution defined in ~/.nightme/gtw.yml. See
-// wip/gtw-hooks.md for the iron rule ("hooks are additive,
-// never block main flow") and the always-echo output policy.
+// hook lists from the user-level config. The hcFn closure is
+// called TWICE — once before main() to capture pre-hook state,
+// once after main() returns so the post-hook sees whatever main()
+// produced. This is what lets /gtw fix's after-hook see the
+// newly-created worktree: runFix mutates its captured HookContext
+// from inside the main() closure (after WriteGTWYml), and withHooks
+// reads it back via hcFn().
 //
-// Behaviour:
+// The single-source-of-truth "cwd" the hook subprocess actually
+// runs in is also re-read after main() — runFix's SetSelectedCwd
+// moves chat cwd into the worktree, and post-hooks should run
+// there (so $GTW_WORKTREE == $PWD, hooks can `cd $GTW_WORKTREE`
+// without surprises). Pre-hooks run from the user's original cwd.
 //
-//   - before hooks run first, sequentially, in declaration order
-//   - main() runs next; its error is returned unchanged
-//   - after hooks run after main(), regardless of main() outcome
-//   - hook failures never block main() and never short-circuit
-//     later hooks
-//   - hook output (success OR failure) is sent as TWO follow-up
-//     replies — one for before-hooks, one for after-hooks — so
-//     the chat ordering matches the execution ordering. The
-//     before-hooks reply lands AFTER main's own replies but
-//     BEFORE the after-hooks reply, eliminating the ambiguity
-//     of "did `codegraph init` run before or after the push?"
-//   - load-time notes (yml read/parse errors) ride with the
-//     before-hooks reply (the natural first thing the user
-//     reads in the follow-up)
-//
-// Returns main()'s error so callers can keep their existing
-// error-to-SlashOutput translation. All hook-related work is
-// best-effort and never surfaces as an error.
+// Empty before+after short-circuits: no hcFn invocation, no
+// git enrichment, no RunHooks calls. main() still runs and
+// loadNotes still flow through to the user — the short-circuit
+// only skips the (relatively expensive) env-derivation +
+// shell-spawn paths. This avoids 2-4 wasted git invocations per
+// command on a config that doesn't use hooks at all.
 func (f *Factory) withHooks(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
 	chatID, messageID string,
 	loadNotes LoadNotes,
+	hcFn func() HookContext,
 	before, after []Hook,
 	main func() error,
 ) error {
-	cwd := ""
-	if cs != nil {
-		cwd = cs.SelectedCwd()
+	// Fast-path: no hooks configured → skip hcFn, DefaultBranch,
+	// and RunHooks entirely. main() still runs (the actual gtw
+	// command is the whole point) and loadNotes still flow through
+	// to the user. This avoids 2-4 wasted git invocations per
+	// command on a config that doesn't use hooks at all.
+	if len(before) == 0 && len(after) == 0 {
+		mainErr := main()
+		if block := formatLoadNotes(loadNotes); block != "" {
+			em := outbound.Emitter(nil)
+			if cs != nil {
+				em = cs.Emitter()
+			}
+			_ = reply(ctx, em, chatID, messageID, block)
+		}
+		return mainErr
 	}
-	pre := RunHooks(ctx, before, cwd)
+
+	preCwd := ""
+	if cs != nil {
+		preCwd = cs.SelectedCwd()
+	}
+	preHC := hcFn()
+	// Enrich DefaultBranch from the pre-state. Failure is
+	// silent — "no default branch info" must NEVER block main
+	// flow; that would re-introduce the v0 "yml missing → hard
+	// fail" anti-pattern this whole feature was designed to
+	// avoid.
+	if preHC.RepoRoot != "" && f.deps.Git != nil {
+		if db, derr := DefaultBranch(ctx, preHC.RepoRoot, f.deps.Git); derr == nil {
+			preHC.DefaultBranch = db
+		}
+	}
+	pre := RunHooks(ctx, before, preHC, preCwd)
+
 	mainErr := main()
-	post := RunHooks(ctx, after, cwd)
+
+	// Re-read chat cwd (main() may have moved it via
+	// SetSelectedCwd) and re-invoke hcFn (main() may have mutated
+	// the captured HookContext — see /gtw fix).
+	postCwd := preCwd
+	if cs != nil {
+		postCwd = cs.SelectedCwd()
+	}
+	postHC := hcFn()
+	if postHC.RepoRoot != "" && f.deps.Git != nil {
+		if db, derr := DefaultBranch(ctx, postHC.RepoRoot, f.deps.Git); derr == nil {
+			postHC.DefaultBranch = db
+		}
+	}
+	post := RunHooks(ctx, after, postHC, postCwd)
 
 	var em outbound.Emitter
 	if cs != nil {
@@ -226,14 +314,19 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, _ *chat
 
 	// Local-mode quick validation: the slug must not be empty
 	// after normalisation. Doing this here (before RunFix) keeps
-	// the SlashOutput path simple when no channel is wired in tests.
+	// the SlashOutput path simple when no channel is wired in
+	// tests. We cache the derived branch name so we don't pay
+	// DeriveBranchFromName twice (validation + hc.Branch fill).
+	var predictedBranch string
 	if args.Mode == ModeLocal {
-		if _, err := DeriveBranchFromName(args.RawArg); err != nil {
+		derived, derr := DeriveBranchFromName(args.RawArg)
+		if derr != nil {
 			return &command.SlashOutput{
-				Reply:    fmt.Sprintf("❌ %v", err),
+				Reply:    fmt.Sprintf("❌ %v", derr),
 				Consumed: true,
 			}, nil
 		}
+		predictedBranch = derived
 	}
 	// ID-mode quick validation: pre-validate locally with
 	// parseIssueID (not strconv.Atoi) so "#42" is accepted —
@@ -273,12 +366,26 @@ func (f *Factory) runFix(ctx context.Context, _ command.RuntimeServices, _ *chat
 	// the runtime. The withHooks wrapper fires before/after
 	// hooks around the call and ships the hook output as a
 	// follow-up reply (per wip/gtw-hooks.md always-echo policy).
+	// Pre-fill what we know. The hc variable is captured by the
+	// hcFn closure below; when main() reassigns it on success
+	// (cs.SelectedCwd has moved into the worktree and WriteGTWYml
+	// wrote .nightme/gtw.yml, so a fresh deriveHookContext reads
+	// the full state), the next hcFn() call — for the post-hook
+	// — sees the new value. Pre-hook sees the predicted state.
+	hc := f.deriveHookContext(ctx, cs, "fix")
+	hc.Branch = predictedBranch // empty string for ModeRemote
+	hcFn := func() HookContext { return hc }
 	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
-		loadNotes, cfg.Fix.Hooks.Before, cfg.Fix.Hooks.After,
+		loadNotes, hcFn, cfg.Fix.Hooks.Before, cfg.Fix.Hooks.After,
 		func() error {
 			_, e := RunFix(ctx, args.Mode, cs, slot, drafts, f.deps,
 				input.ChatID, input.MessageID,
 				[]string{args.RawArg}, args.Force)
+			if e == nil {
+				// Re-derive so post-hook sees the worktree
+				// that RunFix just created + yml-wrote.
+				hc = f.deriveHookContext(ctx, cs, "fix")
+			}
 			return e
 		})
 	if err != nil {
@@ -392,11 +499,31 @@ func (f *Factory) runClose(ctx context.Context, _ command.RuntimeServices, _ *ch
 
 	cfg, loadNotes := Load()
 
+	hc := f.deriveHookContext(ctx, cs, "close")
+	hcFn := func() HookContext { return hc }
 	err := f.withHooks(ctx, cs, input.ChatID, input.MessageID,
-		loadNotes, cfg.Close.Hooks.Before, cfg.Close.Hooks.After,
+		loadNotes, hcFn, cfg.Close.Hooks.Before, cfg.Close.Hooks.After,
 		func() error {
 			res, e := RunClose(ctx, cs, slot, f.deps, input.ChatID, input.MessageID)
 			_ = res // RunClose already sent the reply via cs.Emitter()
+			// RunClose tears down the worktree + branch +
+			// .nightme/gtw.yml and resets cs.SelectedCwd
+			// back to repoRoot. Post-hook env then reflects
+			// the post-close state: yml is gone so the git
+			// fallback fires, and since cwd is now repoRoot,
+			// GTW_WORKTREE == GTW_REPO_ROOT in the env.
+			// That's semantically muddled (the label
+			// "WORKTREE" is misleading when there's no
+			// separate worktree) but it's the path the user
+			// is now in, and hooks can detect
+			// "no active fix" by checking the yml-equivalent
+			// — see gtw/README.md §0. The alternative
+			// (leaving GTW_WORKTREE empty) would force every
+			// hook to handle "post-close" specially, which
+			// is worse than a slightly confusing label.
+			if e == nil {
+				hc = f.deriveHookContext(ctx, cs, "close")
+			}
 			return e
 		})
 	if err != nil {
@@ -434,11 +561,20 @@ func (f *Factory) runPush(ctx context.Context, _ command.RuntimeServices, cs *ch
 
 	cfg, loadNotes := Load()
 
+	hc := f.deriveHookContext(ctx, cs, "push")
+	hcFn := func() HookContext { return hc }
 	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
-		loadNotes, cfg.Push.Hooks.Before, cfg.Push.Hooks.After,
+		loadNotes, hcFn, cfg.Push.Hooks.Before, cfg.Push.Hooks.After,
 		func() error {
 			res, e := dispatchPush(ctx, cs, f.deps, input.ChatID, input.MessageID, args)
 			_ = res // dispatchPush already sent the reply via cs.Emitter()
+			// dispatchPush doesn't move cs.SelectedCwd, so
+			// re-derive is a no-op here — but we still call
+			// it so the post-hook env is always fresh (e.g.
+			// if a future change mutates cwd during push).
+			if e == nil {
+				hc = f.deriveHookContext(ctx, cs, "push")
+			}
 			return e
 		})
 	if err != nil {
@@ -470,11 +606,16 @@ func (f *Factory) runCommit(ctx context.Context, _ command.RuntimeServices, cs *
 
 	cfg, loadNotes := Load()
 
+	hc := f.deriveHookContext(ctx, cs, "commit")
+	hcFn := func() HookContext { return hc }
 	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
-		loadNotes, cfg.Commit.Hooks.Before, cfg.Commit.Hooks.After,
+		loadNotes, hcFn, cfg.Commit.Hooks.Before, cfg.Commit.Hooks.After,
 		func() error {
 			res, e := dispatchCommit(ctx, cs, f.deps, input.ChatID, input.MessageID, args, cfg.Commit.Agent)
 			_ = res // dispatchCommit already sent the reply via cs.Emitter()
+			if e == nil {
+				hc = f.deriveHookContext(ctx, cs, "commit")
+			}
 			return e
 		})
 	if err != nil {
@@ -504,9 +645,12 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, _ *cha
 
 	cfg, loadNotes := Load()
 
+	hc := f.deriveHookContext(ctx, cs, "sync")
+	hcFn := func() HookContext { return hc }
+
 	var replyText string
 	err := f.withHooks(ctx, cs, input.ChatID, input.MessageID,
-		loadNotes, cfg.Sync.Hooks.Before, cfg.Sync.Hooks.After,
+		loadNotes, hcFn, cfg.Sync.Hooks.Before, cfg.Sync.Hooks.After,
 		func() error {
 			repoRoot, e := RepoRoot(ctx, cwd, f.deps.Git)
 			if e != nil {
@@ -522,6 +666,14 @@ func (f *Factory) runSync(ctx context.Context, _ command.RuntimeServices, _ *cha
 				return e
 			}
 			replyText = body
+			// Re-derive so post-hook env is always fresh,
+			// matching the runPush/runClose/runCommit
+			// pattern. Today sync doesn't mutate cs.SelectedCwd
+			// so this is a no-op; we keep it so future sync
+			// changes (e.g. an auto-rebase scratch dir) flow
+			// through to the post-hook env without each
+			// handler drifting apart.
+			hc = f.deriveHookContext(ctx, cs, "sync")
 			return nil
 		})
 	if err != nil {
@@ -626,7 +778,23 @@ func (f *Factory) runPR(ctx context.Context, _ command.RuntimeServices, cs *chat
 		}, nil
 	}
 
-	_, err = dispatchPR(ctx, cs, f.deps, input.ChatID, input.MessageID, args)
+	cfg, loadNotes := Load()
+
+	hc := f.deriveHookContext(ctx, cs, "pr")
+	hcFn := func() HookContext { return hc }
+	err = f.withHooks(ctx, cs, input.ChatID, input.MessageID,
+		loadNotes, hcFn, cfg.PR.Hooks.Before, cfg.PR.Hooks.After,
+		func() error {
+			_, e := dispatchPR(ctx, cs, f.deps, input.ChatID, input.MessageID, args)
+			// dispatchPR loads the dispatch context internally
+			// (worktree/branch from yml). Re-derive so any
+			// future change that mutates cwd during PR
+			// dispatch flows to the post-hook env.
+			if e == nil {
+				hc = f.deriveHookContext(ctx, cs, "pr")
+			}
+			return e
+		})
 	if err != nil {
 		return &command.SlashOutput{
 			Reply:    fmt.Sprintf("❌ /gtw pr failed: %v", err),

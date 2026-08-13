@@ -6,9 +6,37 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/spf13/cobra"
+
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/logging"
 )
+
+func init() {
+	// Disable Cobra's Windows mousetrap. By default Cobra checks
+	// whether the parent process is explorer.exe (mousetrap.StartedByExplorer)
+	// on every root.Execute() and, if so, prints
+	//   "This is a command line tool.
+	//    You need to open cmd.exe and run it from there."
+	// then sleeps 5s and os.Exit(1).
+	//
+	// nightme's bare `nightme.exe` invocation enters the REPL
+	// (cmd/nightme/repl.go) — that path never calls root.Execute(),
+	// so a freshly double-clicked binary shows the banner fine. But
+	// the first command dispatched from inside the REPL (`login
+	// feishu`, `start`, `status`, …) goes through root.Execute(),
+	// which fires the mousetrap because the parent is still
+	// explorer.exe. Result: the REPL appears to work, then any
+	// command silently exits 5s later — confusing.
+	//
+	// The mousetrap is designed for CLIs that have no interactive
+	// mode and want to nudge the user toward cmd.exe. nightme's
+	// REPL is the intended interaction surface for explorer-launched
+	// binaries, so the nudge is counter-productive here. Clearing
+	// MousetrapHelpText to "" turns the check off entirely (see
+	// cobra.go:68-75 — empty string disables the message).
+	cobra.MousetrapHelpText = ""
+}
 
 func main() {
 	cfg, err := config.LoadDefault()

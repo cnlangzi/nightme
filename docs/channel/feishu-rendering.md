@@ -5415,13 +5415,14 @@ type OutMsg struct {
 
 ```go
 // internal/channel/feishu/adapter.go
-type Adapter struct {
-    // ...existing...
-    cardActionRouter func(actionStr string, ev chatsession.ReactionEvent) (emoji gtw.ReactionKind, ok bool)
+func (a *Adapter) handleActCardAction(ctx context.Context, event *larkcallback.CardActionTriggerEvent) (*larkcallback.CardActionTriggerResponse, error) {
+    // 1. 从 event.Action.Value["action"] 抽 "act:/gtw/<scenario>"
+    // 2. messages.ActionLookup(actionStr) → ReactionKind
+    //    （契约由 internal/command/gtw/render_lookup_contract_test.go 锁住）
+    // 3. 合成 InboundMessage{Reaction: services.ReactionEvent{TargetMsgID, Emoji, ChatID, UserID}}
+    // 4. push 到 a.incoming（buffer=128, 默认 0 阻塞）
+    // 5. 返回 Toast（unknown action 时给 warning toast "未知操作: ..."）
 }
-
-// 用 SetCardActionRouter 注入（F-46 测试 fixture 用）
-func (a *Adapter) SetCardActionRouter(router func(string, chatsession.ReactionEvent) (gtw.ReactionKind, bool))
 ```
 
 ### 4.2 gateway Card 字段
@@ -5546,7 +5547,7 @@ Feishu SDK 收到 card.action.trigger 事件
 internal/channel/feishu/adapter.go::handleCardAction (OnP2CardActionTrigger 注册)
         │
         ▼
-gtw.ActionLookup(actionStr) → 解析 act:/gtw/<scenario> → ReactionKind (🔄 / 🆕 / 🔗 / ❌)
+messages.ActionLookup(actionStr) → 解析 act:/gtw/<scenario> → ReactionKind (🔄 / 🆕 / 🔗 / ❌)
         │
         ▼
 handleActCardAction 合成一个 InboundMessage{Reaction: <ReactionEvent>}

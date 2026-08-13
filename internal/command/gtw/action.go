@@ -93,8 +93,8 @@ func executeBranchExistsAction(
 		return true
 	}
 
-	switch ReactionKind(ev.Emoji) {
-	case ReactionCancel:
+	switch messages.ReactionKind(ev.Emoji) {
+	case messages.ReactionCancel:
 		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
 		resultText := cancelResultText(p)
 		// Label rollback only applies to ID-mode drafts (local
@@ -116,7 +116,7 @@ func executeBranchExistsAction(
 		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), resultText)
 		return true
 
-	case ReactionNewV2:
+	case messages.ReactionNewV2:
 		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
 		repoRoot := repoRootFromChatSession(cs)
 		resultText := ""
@@ -157,7 +157,7 @@ func executeBranchExistsAction(
 		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), resultText)
 		return true
 
-	case ReactionJoin:
+	case messages.ReactionJoin:
 		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
 		repoRoot := repoRootFromChatSession(cs)
 		existingPath, err := WorktreeListPath(ctx, repoRoot, p.Branch, deps.Git)
@@ -197,13 +197,13 @@ func executeWorktreeFailAction(
 	draft *Draft,
 ) bool {
 	p := draft.Payload
-	rk := ReactionKind(ev.Emoji)
+	rk := messages.ReactionKind(ev.Emoji)
 	slog.Default().Warn("F-46 debug: executeWorktreeFailAction entry",
 		"emoji", ev.Emoji,
 		"reaction_kind", rk)
 
 	switch rk {
-	case ReactionCancel:
+	case messages.ReactionCancel:
 		slog.Default().Warn("F-46 debug: executeWorktreeFailAction → ReactionCancel")
 		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
 		resultText := cancelResultText(p)
@@ -226,7 +226,7 @@ func executeWorktreeFailAction(
 		emitFollowUp(ctx, cs, draft, ev, string(ev.Emoji), resultText)
 		return true
 
-	case ReactionRetry:
+	case messages.ReactionRetry:
 		slog.Default().Warn("F-46 debug: executeWorktreeFailAction → ReactionRetry")
 		m.TakeDraft(ev.ChatID, ev.TargetMsgID)
 		repoRoot := repoRootFromChatSession(cs)

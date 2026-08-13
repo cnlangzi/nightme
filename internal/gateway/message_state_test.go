@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
+	"log/slog"
 	"strconv"
 	"sync"
 	"testing"
@@ -40,6 +42,20 @@ func (c *fakeChannel) SendCard(_ context.Context, m messages.OutboundMessage) (s
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return "fake-card-" + strconv.Itoa(len(c.sends)), nil
+}
+
+// Channel-interface extensions (Phase 2.1 + 2.2). fakeChannel
+// has no live state — all four are trivial fallbacks.
+func (c *fakeChannel) OnPromptEnded(_ context.Context, _, _ string)        {}
+func (c *fakeChannel) HealthSnapshot() (string, json.RawMessage, error) {
+	return "fake", json.RawMessage("{}"), nil
+}
+func (c *fakeChannel) SetLogger(_ *slog.Logger) {}
+func (c *fakeChannel) BuildBlocks(text string, _ []messages.Attachment) []agent.ContentBlock {
+	if text == "" {
+		return nil
+	}
+	return []agent.ContentBlock{{Type: agent.ContentText, Text: text}}
 }
 
 // TestEmitMessageState_TranslatesToOutbound verifies that

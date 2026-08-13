@@ -22,7 +22,7 @@
 //     verbatim so operators can copy-paste the command line.
 //   - The "(default: X)" footer comes from cfg.Primary, falling
 //     back to the v0.1 hard-coded "claude" if unset.
-//   - Registry build reuses buildRunAgentRegistry so the CLI view
+//   - Registry build reuses agentregistry.Build so the CLI view
 //     matches what the daemon would actually see at startup.
 package main
 
@@ -35,6 +35,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/cnlangzi/nightme/internal/agent"
+	"github.com/cnlangzi/nightme/internal/agentregistry"
 	"github.com/cnlangzi/nightme/internal/config"
 )
 
@@ -79,7 +80,7 @@ func runAgents(cmd *cobra.Command, f agentsCmdFlags) error {
 		return fmt.Errorf("agents: load config: %w", err)
 	}
 
-	reg := buildRunAgentRegistry(cfg)
+	reg := agentregistry.Build(cfg, "")
 	specs := reg.List()
 	rows := collectAgents(specs) //nolint:staticcheck
 	defaultName := cfg.Primary

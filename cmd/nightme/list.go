@@ -44,6 +44,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/registry"
+	"github.com/cnlangzi/nightme/internal/runtime"
 )
 
 // listCmdFlags captures every flag the list subcommand accepts.
@@ -155,18 +156,18 @@ func openV12Stores(cfg *config.Config, warn io.Writer) (*registry.ChatSessionFil
 	// Tidy up the obsolete v1.x registry.json (the v1.2 daemon
 	// no longer reads it; we archive the file to .v1.bak so a
 	// human can recover v1.x data after upgrading).
-	if err := removeLegacyRegistryFile(cfg); err != nil {
+	if err := runtime.RemoveLegacyRegistryFile(cfg); err != nil {
 		// Non-fatal: the listing still works.
 		if warn != nil {
 			fmt.Fprintf(warn, "list: remove legacy registry: %v\n", err)
 		}
 	}
 
-	csPath, err := chatSessionsPath(cfg)
+	csPath, err := runtime.ChatSessionsPath(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
-	asPath, err := agentSessionsPath(cfg)
+	asPath, err := runtime.AgentSessionsPath(cfg)
 	if err != nil {
 		return nil, nil, err
 	}

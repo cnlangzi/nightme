@@ -47,10 +47,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/daemoncontrol"
 	nmerrors "github.com/cnlangzi/nightme/internal/errors"
+	"github.com/cnlangzi/nightme/internal/runtime"
 	"github.com/cnlangzi/nightme/internal/version"
 	"golang.org/x/sys/windows"
 )
@@ -239,11 +239,12 @@ func runDaemonChild(cmd *cobra.Command, channelName string) (retErr error) {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.Serve() }()
 
-	deps := withChannel(defaultRunDeps(), channelName)
-	deps.onReady = func() {
+	deps := runtime.DefaultDeps()
+	deps, _ = runtime.WithChannel(deps, channelName)
+	deps.OnReady = func() {
 		server.SetReady()
 	}
-	deps.registerHealth = func(_ channel.Channel, fn func() (string, json.RawMessage, error)) {
+	deps.RegisterHealth = func(fn func() (string, json.RawMessage, error)) {
 		server.SetHealthProvider(fn)
 	}
 	cmd.SetContext(withLogger(ctx, loggerFromContext(cmd.Context())))

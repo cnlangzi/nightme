@@ -14,7 +14,10 @@ package channel
 
 import (
 	"context"
+	"encoding/json"
+	"log/slog"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -43,6 +46,30 @@ import (
 // "Abstract stays abstract, concrete stays concrete": the Gateway
 // knows only this surface. Receipt shape is each Channel's private
 // affair.
+//
+// Channel-specific extensions:
+//
+//   - OnPromptEnded: the runtime fires this when a chat's
+//     active prompt terminates (success / error / cancel).
+//     Implementations typically transition a receipt card to
+//     PromptDone + add a ✅ reaction. No-op for adapters
+//     without receipt rendering (echo, …).
+//   - HealthSnapshot: the daemoncontrol server calls this on
+//     every "health" RPC. The returned JSON is served
+//     verbatim. No-op adapters return (Name(), empty
+//     RawMessage, nil).
+//   - SetLogger: the runtime calls this once after
+//     construction, before Start. Lets adapters route their
+//     internal log lines through the daemon's structured
+//     logger. No-op for adapters that don't log (echo).
+//   - BuildBlocks: the runtime's dispatcher calls this as the
+//     fallback when msg.Blocks is empty. Adapters that
+//     produce structured rich text (Feishu paragraphs,
+//     Slack blocks, …) implement their per-channel shape;
+//     plain-text adapters return [{Type: ContentText, Text}].
+//     The package-level feishu.BuildBlocks helper stays for
+//     direct callers (chatsession tests); the Adapter
+//     method delegates to it.
 type Channel interface {
 	Name() string
 	Start(ctx context.Context) error
@@ -50,6 +77,11 @@ type Channel interface {
 	Incoming() <-chan messages.InboundMessage
 	Send(ctx context.Context, msg messages.OutboundMessage) error
 	SendCard(ctx context.Context, msg messages.OutboundMessage) (msgID string, err error)
+
+	OnPromptEnded(ctx context.Context, chatID, userMsgID string)
+	HealthSnapshot() (name string, payload json.RawMessage, err error)
+	SetLogger(logger *slog.Logger)
+	BuildBlocks(text string, attachments []messages.Attachment) []agent.ContentBlock
 }
 
 // Message is an alias for messages.InboundMessage. Kept for

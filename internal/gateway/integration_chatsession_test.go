@@ -4,7 +4,9 @@ package gateway_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,6 +79,20 @@ func (c *recordingChannel) Record() []messages.OutboundMessage {
 	out := make([]messages.OutboundMessage, len(c.captured))
 	copy(out, c.captured)
 	return out
+}
+
+// Channel-interface extensions (Phase 2.1 + 2.2). recordingChannel
+// has no live state — all four are trivial fallbacks.
+func (c *recordingChannel) OnPromptEnded(_ context.Context, _, _ string)        {}
+func (c *recordingChannel) HealthSnapshot() (string, json.RawMessage, error) {
+	return "mock", json.RawMessage("{}"), nil
+}
+func (c *recordingChannel) SetLogger(_ *slog.Logger) {}
+func (c *recordingChannel) BuildBlocks(text string, _ []messages.Attachment) []agent.ContentBlock {
+	if text == "" {
+		return nil
+	}
+	return []agent.ContentBlock{{Type: agent.ContentText, Text: text}}
 }
 
 var _ channel.Channel = (*recordingChannel)(nil)

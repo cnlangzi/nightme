@@ -40,6 +40,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/cnlangzi/nightme/internal/agentregistry"
 	"github.com/cnlangzi/nightme/internal/config"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
@@ -211,7 +212,7 @@ func killSession(asFile *registry.AgentSessionFile, r listRow, wantCommand strin
 // built; every lookup then yields "" and verification is skipped
 // rather than blocking the sweep.
 func agentCommands(cfg *config.Config) map[string]string {
-	reg := buildRunAgentRegistry(cfg)
+	reg := agentregistry.Build(cfg, "")
 	if reg == nil {
 		return map[string]string{}
 	}

@@ -722,16 +722,22 @@ func (a *Adapter) receiptFor(ctx context.Context, chatID, userMsgID string) *Mes
 	return a.receiptsByUserMsgID[userMsgID] // nil on miss — caller decides
 }
 
-// MarkReceiptPromptDone (F-53 follow-up) transitions the receipt
-// bound to `userMsgID` to agentsession.PromptDone (✅ reaction on the card).
-// Called by the runtime when `ChatSession.endPrompt` fires (i.e.
-// the readpump saw EventAgentDone or EventAgentError).
+// OnPromptEnded (F-53 follow-up; Phase 2.1 channel-ext) transitions
+// the receipt bound to `userMsgID` to agentsession.PromptDone (✅
+// reaction on the card). Called by the runtime when
+// `ChatSession.endPrompt` fires (i.e. the readpump saw
+// EventAgentDone or EventAgentError).
 //
 // Best-effort: silently no-op when no receipt exists yet (e.g.
 // /close before any event arrived — the receipt would never have
 // rendered). All API failures inside SetPromptState are logged
 // and do not propagate.
-func (a *Adapter) MarkReceiptPromptDone(ctx context.Context, chatID, userMsgID string) {
+//
+// Satisfies channel.Channel.OnPromptEnded. Previously named
+// MarkReceiptPromptDone; renamed in Phase 2.1 to align with the
+// channel interface — the runtime no longer needs a type
+// assertion to reach this method.
+func (a *Adapter) OnPromptEnded(ctx context.Context, chatID, userMsgID string) {
 	r := a.receiptFor(ctx, chatID, userMsgID)
 	if r == nil {
 		return
@@ -2370,6 +2376,30 @@ func (a *Adapter) Health() WSHealthSnapshot {
 		snap.Prober = a.prober.Snapshot()
 	}
 	return snap
+}
+
+// HealthSnapshot implements channel.Channel.HealthSnapshot.
+// Wraps Health() with json.Marshal so the daemoncontrol server
+// can serve it on the "health" RPC without taking a
+// feishu-package dependency. The returned (name, payload)
+// pair matches the channel.Channel contract: name is the
+// channel identifier (always "feishu"), payload is the
+// JSON-encoded WSHealthSnapshot (prober included).
+func (a *Adapter) HealthSnapshot() (string, json.RawMessage, error) {
+	snap := a.Health()
+	data, err := json.Marshal(snap)
+	if err != nil {
+		return "", nil, fmt.Errorf("encode health snapshot: %w", err)
+	}
+	return a.Name(), data, nil
+}
+
+// BuildBlocks implements channel.Channel.BuildBlocks by
+// delegating to the package-level BuildBlocks helper. The
+// adapter indirection exists so the runtime dispatcher can
+// call ch.BuildBlocks without a feishu-package import.
+func (a *Adapter) BuildBlocks(text string, attachments []messages.Attachment) []agent.ContentBlock {
+	return BuildBlocks(text, attachments)
 }
 
 // logOutgoing emits one info-level line per outgoing Feishu call so

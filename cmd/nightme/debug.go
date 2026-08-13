@@ -51,11 +51,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/command/gtw"
@@ -467,4 +469,20 @@ func (c *capturingChannel) Incoming() <-chan messages.InboundMessage {
 	ch := make(chan messages.InboundMessage, 1)
 	close(ch)
 	return ch
+}
+
+// OnPromptEnded, HealthSnapshot, SetLogger, BuildBlocks:
+// channel.Channel extensions (Phase 2.1 + 2.2). The debug
+// fixture has no live connection state, so all four are
+// no-ops or trivial fallbacks.
+func (c *capturingChannel) OnPromptEnded(_ context.Context, _, _ string)        {}
+func (c *capturingChannel) HealthSnapshot() (string, json.RawMessage, error) {
+	return "capture", json.RawMessage("{}"), nil
+}
+func (c *capturingChannel) SetLogger(_ *slog.Logger) {}
+func (c *capturingChannel) BuildBlocks(text string, _ []messages.Attachment) []agent.ContentBlock {
+	if text == "" {
+		return nil
+	}
+	return []agent.ContentBlock{{Type: agent.ContentText, Text: text}}
 }

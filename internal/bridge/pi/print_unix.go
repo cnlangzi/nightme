@@ -213,11 +213,12 @@ func streamPrintEvents(ctx context.Context, stdout io.Reader, workspace string) 
 	sawSettled := false
 
 	for scanner.Scan() {
-		// Honour ctx cancellation between lines so a stuck
-		// pi doesn't outlive its caller's deadline. We don't
-		// kill the process here — that's streamPrintEvents'
-		// caller's job (SIGKILL after reader error) — we
-		// just stop reading.
+		// Honour ctx cancellation between lines so we exit
+		// promptly when the caller's deadline fires. The
+		// process is killed by exec.CommandContext (used via
+		// agent.NewCmd) when ctx is cancelled — we just stop
+		// reading here and let runPrintMode's cmd.Wait() reap
+		// the SIGKILLed process.
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}

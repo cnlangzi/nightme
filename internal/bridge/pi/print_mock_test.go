@@ -106,10 +106,7 @@ func TestPrintMode_Mock_NoSettled_ReportsMissingEvent(t *testing.T) {
 }
 
 func TestPrintMode_Mock_MultipleTextBlocks_JoinedWithNewline(t *testing.T) {
-	// This is the bridge layer's behaviour, not pi's, but it's
-	// easier to verify here than to mock translate.go. The
-	// mock's stdout echoes each block as its own user message,
-	// but the bridge layer's blocksToPrompt joins ContentText
+	// The bridge layer's blocksToPrompt joins ContentText
 	// blocks with "\n" BEFORE handing them to pi — so pi sees
 	// one combined prompt. The text returned is still the
 	// mock's fixed TEXT, so we can only assert that the run
@@ -121,6 +118,10 @@ func TestPrintMode_Mock_MultipleTextBlocks_JoinedWithNewline(t *testing.T) {
 	// in the echoed prompt. Real pi does. We use single-line
 	// block contents to avoid the embedded-newline problem;
 	// a real-newline-join test would need a richer mock.
+	//
+	// This test sends a single text block (the simpler case
+	// the mock can validate); multi-block behaviour is covered
+	// by the buildAgentPrompt prompt in the real-pi smoke.
 	a := NewStarter("pi-mock", piPrintMockPath, []string{"--mode", "rpc"})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -128,12 +129,6 @@ func TestPrintMode_Mock_MultipleTextBlocks_JoinedWithNewline(t *testing.T) {
 
 	t.Setenv("PI_PRINT_TEXT", "ok")
 
-	// Single-block test: confirms the basic multi-arg → single-
-	// prompt path doesn't break anything. blocksToPrompt's
-	// newline-join path is covered indirectly because any
-	// regression that produced empty text (e.g. mis-counted
-	// separators) would surface here as `got != "ok"` or a
-	// translate error.
 	got, err := a.RunOnce(ctx, agent.StartConfig{Workspace: t.TempDir()}, []agent.ContentBlock{
 		{Type: agent.ContentText, Text: "single-block"},
 	})

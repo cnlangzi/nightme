@@ -3,22 +3,14 @@
 // Windows path resolution and verification for /cwd.
 //
 // Windows has several notions of "absolute" that POSIX does
-// not, and Go's filepath.IsAbs handles most of them but not
-// all of the variants a user might type into /cwd:
+// not. Go's filepath.IsAbs handles most of them after Clean
+// normalises separator slashes:
 //
 //	filepath.IsAbs("C:\\foo")  → true   (drive-rooted)
 //	filepath.IsAbs("C:/foo")   → true   (forward-slash variant)
 //	filepath.IsAbs("C:foo")    → false  (drive-relative — ambiguous)
 //	filepath.IsAbs("\\foo")    → true   (root-relative on current drive)
-//	filepath.IsAbs("/foo")     → false  before Clean, true after
-//
-// The last row is the bug we're fixing: a forward-slash-only
-// path like "/Users/me/projects" was being joined with $HOME
-// because the old inline IsAbs check saw "/" as relative.
-// filepath.Clean normalises "/" to "\" on Windows, so once
-// we route the input through Clean first, IsAbs correctly
-// classifies "/foo" as absolute (root-relative on the
-// current drive, e.g. "C:\foo").
+//	filepath.IsAbs("/foo")     → true   after Clean (Clean → "\\foo")
 //
 // "C:foo" (drive letter without separator) is genuinely
 // ambiguous on Windows — it means "relative to the current

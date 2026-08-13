@@ -331,10 +331,12 @@ func (f *Provider) defaultSendDM(ctx context.Context, body login.GreetingBody) e
 func (f *Provider) printQRCode(info *registration.QRCodeInfo) {
 	fmt.Fprintf(f.out, "Scan this QR code with Feishu mobile, or open this URL:\n%s\n(expires in %d seconds)\n\n",
 		info.URL, info.ExpireIn)
-	// Errors here mean stdout is broken (closed pipe); nothing for
-	// the user to do, and registration.RegisterApp will still
-	// block on the polling loop.
-	_ = RenderASCII(info.URL, f.out, false)
+	// QR rendering is OS-specific: RenderASCII on Unix (Unicode
+	// half-block); RenderANSI or WritePNGToTemp on Windows. The
+	// per-OS helper renderQRPlatform lives in provider_unix.go /
+	// provider_windows.go and picks the best mode for the runtime
+	// terminal.
+	f.renderQRPlatform(info.URL)
 	fmt.Fprintln(f.out, "Waiting for you to scan and confirm in Feishu...")
 }
 

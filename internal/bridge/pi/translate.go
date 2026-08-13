@@ -158,12 +158,27 @@ type turnState struct {
 	// reported an end (Pi aborted mid-call) must not leak into the
 	// next turn and mis-attribute a later tool's args.
 	pendingTools map[string]pendingTool
+
+	// thinkHoldings buffers the trailing partial of a <think>
+	// block that straddled two text_delta events. Keyed by
+	// contentIndex because Pi can interleave multiple text blocks
+	// per assistant message. Populated by splitThinking when it
+	// sees an opening tag with no matching close in the current
+	// delta; cleared when the matching </think> arrives (the next
+	// delta is prepended with it) or when the turn resets.
+	//
+	// Discarded wholesale with the rest of the turn state — a
+	// half-open think block that never closes (model aborted
+	// mid-reasoning, partial reply) must not bleed into the next
+	// turn's first text block.
+	thinkHoldings map[int]string
 }
 
 func newTurnState() *turnState {
 	return &turnState{
 		textBuf:      make(map[int]*strings.Builder),
 		pendingTools: make(map[string]pendingTool),
+		thinkHoldings: make(map[int]string),
 	}
 }
 
@@ -554,13 +569,49 @@ func (t *translator) translateMessageUpdateLocked(raw []byte, logger *slog.Logge
 		if delta.Delta == "" {
 			return nil, nil
 		}
-		b := t.turn.textBuf[delta.ContentIndex]
-		if b == nil {
-			b = &strings.Builder{}
-			t.turn.textBuf[delta.ContentIndex] = b
+		// Pi sometimes emits reasoning inline as <think>...</think>
+		// inside text_delta instead of via the structured
+		// thinking_* events (consistent on the Windows trace that
+		// prompted this branch — see think_tags.go). Strip those
+		// tags before the text lands in textBuf so they do not
+		// surface in OutReply.
+		//
+		// A <think> that opened on a previous delta may close on
+		// this one (or vice versa): splitThinking's Held carries
+		// the partial forward across calls, keyed by contentIndex
+		// because each Pi text block has its own delta stream.
+		combined := t.turn.thinkHoldings[delta.ContentIndex] + delta.Delta
+		t.turn.thinkHoldings[delta.ContentIndex] = ""
+		split := splitThinking(combined)
+
+		if split.Kept != "" {
+			b := t.turn.textBuf[delta.ContentIndex]
+			if b == nil {
+				b = &strings.Builder{}
+				t.turn.textBuf[delta.ContentIndex] = b
+			}
+			b.WriteString(split.Kept)
+			t.turn.active = true
 		}
-		b.WriteString(delta.Delta)
-		t.turn.active = true
+		if split.Held != "" {
+			t.turn.thinkHoldings[delta.ContentIndex] = split.Held
+		}
+
+		// Emit any extracted reasoning as a single EventAgentText
+		// with the [思考] sentinel — the gateway's outbound
+		// translator routes those to OutThinking rather than
+		// OutReply, matching the structured thinking_* path.
+		var out []agent.AgentEvent
+		if text := strings.TrimSpace(split.Thinking); text != "" {
+			t.turn.active = true
+			out = append(out, agent.AgentEvent{
+				Kind: agent.EventAgentText,
+				Text: thinkingPrefix + text,
+			})
+		}
+		if len(out) > 0 {
+			return out, nil
+		}
 		return nil, nil
 
 	case "text_end":
@@ -651,8 +702,13 @@ func (t *translator) translateMessageEndLocked(raw []byte, logger *slog.Logger) 
 		if err := json.Unmarshal(env.Message, &msg); err != nil {
 			return nil, err
 		}
-		t.recordAssistantMessageLocked(msg)
-		return nil, nil
+		// recordAssistantMessageLocked may surface reasoning it
+		// extracted from the content blocks (Type "thinking" or
+		// inline <think>...</think>) as EventAgentText events.
+		// Thread them through so the channel sees the reasoning
+		// in document order with the rest of the message_end
+		// delivery.
+		return t.recordAssistantMessageLocked(msg), nil
 	case "toolResult":
 		// Already covered by tool_execution_end.
 		return nil, nil
@@ -666,22 +722,70 @@ func (t *translator) translateMessageEndLocked(raw []byte, logger *slog.Logger) 
 }
 
 // recordAssistantMessageLocked folds one finalized assistant message
-// into the turn state. Nothing is emitted; agent_settled delivers.
+// into the turn state. Two surfaces:
+//
+//   - Reasoning carried as a contentBlock of Type "thinking"
+//     (Pi's wire-level type) or as <think>...</think> tags embedded
+//     inside a Type "text" block is emitted immediately as
+//     EventAgentText events with the [思考] prefix, so the
+//     reasoning is delivered before any later tool boundary flush.
+//     Returns those events to translateMessageEndLocked so they
+//     hit the channel in document order alongside the message_end.
+//   - Plain reply text is folded into lastMessageText as a
+//     fallback for turns that never streamed (replayed /
+//     non-streamed messages).
 //
 // Caller must hold turnMu.
-func (t *translator) recordAssistantMessageLocked(msg assistantMessage) {
+func (t *translator) recordAssistantMessageLocked(msg assistantMessage) []agent.AgentEvent {
 	// Pi's own rendering of this message's text. Kept only as a
 	// fallback for when the delta stream produced nothing (replayed
 	// or non-streamed message) — the streamed buffers are the
 	// primary source because they are what the tool-boundary flush
 	// operates on, and mixing the two could double-deliver.
 	var text string
+	var out []agent.AgentEvent
 	for _, b := range msg.Content {
-		if b.Type == "text" && b.Text != "" {
-			if text != "" {
-				text += "\n"
+		switch b.Type {
+		case "thinking":
+			// Reasoning arrived as a fully formed block (not via
+			// the streamed thinking_* events). Pi alternates
+			// between "Thinking" and "Text" as the field name
+			// across versions (see protocol.go contentBlock);
+			// prefer Thinking when both are populated.
+			inner := b.Thinking
+			if inner == "" {
+				inner = b.Text
 			}
-			text += b.Text
+			inner = strings.TrimSpace(inner)
+			if inner != "" {
+				out = append(out, agent.AgentEvent{
+					Kind: agent.EventAgentText,
+					Text: thinkingPrefix + inner,
+				})
+			}
+		case "text":
+			if b.Text == "" {
+				continue
+			}
+			// Strip inline <think>...</think> from the text so
+			// they do not surface in OutReply. See
+			// translate.go's text_delta handler and think_tags.go
+			// for the rationale; message_end is the non-streamed
+			// counterpart and sees the same wire shapes on a
+			// replayed message.
+			split := splitThinking(b.Text)
+			if kept := strings.TrimSpace(split.Kept); kept != "" {
+				if text != "" {
+					text += "\n"
+				}
+				text += kept
+			}
+			if thinkText := strings.TrimSpace(split.Thinking); thinkText != "" {
+				out = append(out, agent.AgentEvent{
+					Kind: agent.EventAgentText,
+					Text: thinkingPrefix + thinkText,
+				})
+			}
 		}
 	}
 	// Overwrite, not append: only the turn's final assistant message
@@ -689,6 +793,12 @@ func (t *translator) recordAssistantMessageLocked(msg assistantMessage) {
 	// has already been flushed at the tool boundary that followed it.
 	t.turn.lastMessageText = text
 	t.turn.stopReason = msg.StopReason
+	// An assistant message_end arrived — the turn has an assistant
+	// message worth reporting, even if the content[] carried no
+	// text blocks (e.g. toolCall-only or empty on stopReason=error).
+	// finishTurnLocked consults active to decide whether to emit
+	// an EventAgentResult at all, and the usage / stopReason on
+	// the result are the canonical carriers for those turns.
 	t.turn.active = true
 
 	// Usage is a context-occupancy snapshot, so the latest one wins.
@@ -699,6 +809,7 @@ func (t *translator) recordAssistantMessageLocked(msg assistantMessage) {
 	if u := decodeMessageUsage(msg.Usage, int(t.contextWindow.Load())); u != nil {
 		t.turn.lastUsage = u
 	}
+	return out
 }
 
 // closeTextBlockLocked drains the accumulated deltas for one content

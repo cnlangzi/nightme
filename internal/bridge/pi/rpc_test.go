@@ -1,4 +1,3 @@
-
 // Unit tests for the JSONL framing + request/response correlation
 // layer. These tests do not spawn a process; they drive the
 // rpcClient against in-memory pipe pairs to exercise the same code

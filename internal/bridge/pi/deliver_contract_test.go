@@ -1,4 +1,3 @@
-
 // Regression tests for the pi bridge's deliver() contract.
 //
 // These lock in the "no timeout drop, no default drop" producer-side

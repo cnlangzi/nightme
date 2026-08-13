@@ -1,4 +1,3 @@
-
 // Package pi implements a bridge to the Pi coding agent using its
 // native `pi --mode rpc` long-lived JSONL protocol.
 //
@@ -306,20 +305,20 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	}
 
 	live := &driver{
-				cmd:       cmd,
-		stdinW:    stdin,
-		stdoutR:   stdout,
-		stderrR:   stderr,
-		rpc:       newRPCClient(stdin),
-		events:    make(chan agent.AgentEvent, eventsBufferSize),
-		pid:       cmd.Process.Pid,
-		agentName: s.name,
-		workspace: cfg.Workspace,
-		branch:    branch,
+		cmd:        cmd,
+		stdinW:     stdin,
+		stdoutR:    stdout,
+		stderrR:    stderr,
+		rpc:        newRPCClient(stdin),
+		events:     make(chan agent.AgentEvent, eventsBufferSize),
+		pid:        cmd.Process.Pid,
+		agentName:  s.name,
+		workspace:  cfg.Workspace,
+		branch:     branch,
 		translator: newTranslator(s.name, cfg.Workspace, branch),
-		logger:    logger,
-		closed:    make(chan struct{}),
-		exitDone:  make(chan struct{}),
+		logger:     logger,
+		closed:     make(chan struct{}),
+		exitDone:   make(chan struct{}),
 	}
 
 	// Read pump and stderr drainer start in parallel with the
@@ -744,8 +743,8 @@ func (d *driver) readPump() {
 		}
 		if err := json.Unmarshal(line, &probe); err != nil {
 			d.deliver(agent.AgentEvent{
-				Kind:  agent.EventAgentError,
-				Err: fmt.Errorf("%w: %s", ErrMalformedJSON, string(line)),
+				Kind: agent.EventAgentError,
+				Err:  fmt.Errorf("%w: %s", ErrMalformedJSON, string(line)),
 			})
 			d.lifecycleHalt()
 			return
@@ -754,8 +753,8 @@ func (d *driver) readPump() {
 			var resp responseEnvelope
 			if err := json.Unmarshal(line, &resp); err != nil {
 				d.deliver(agent.AgentEvent{
-					Kind:  agent.EventAgentError,
-					Err: fmt.Errorf("%w: %s", ErrMalformedJSON, string(line)),
+					Kind: agent.EventAgentError,
+					Err:  fmt.Errorf("%w: %s", ErrMalformedJSON, string(line)),
 				})
 				d.lifecycleHalt()
 				return
@@ -770,8 +769,8 @@ func (d *driver) readPump() {
 		events, err := d.translator.translate(line, d.logger)
 		if err != nil {
 			d.deliver(agent.AgentEvent{
-				Kind:  agent.EventAgentError,
-				Err: fmt.Errorf("%w: %s", ErrMalformedJSON, string(line)),
+				Kind: agent.EventAgentError,
+				Err:  fmt.Errorf("%w: %s", ErrMalformedJSON, string(line)),
 			})
 			d.lifecycleHalt()
 			return
@@ -783,8 +782,8 @@ func (d *driver) readPump() {
 
 	if err := scanner.Err(); err != nil {
 		d.deliver(agent.AgentEvent{
-			Kind:  agent.EventAgentError,
-			Err: fmt.Errorf("%w: %v", ErrFrameTooLarge, err),
+			Kind: agent.EventAgentError,
+			Err:  fmt.Errorf("%w: %v", ErrFrameTooLarge, err),
 		})
 		d.lifecycleHalt()
 	}
@@ -834,8 +833,8 @@ func (d *driver) lifecycle() {
 
 	if err != nil && !d.isGracefulClose() {
 		d.deliver(agent.AgentEvent{
-			Kind:  agent.EventAgentError,
-			Err: fmt.Errorf("pi: process exit: %w", err),
+			Kind: agent.EventAgentError,
+			Err:  fmt.Errorf("pi: process exit: %w", err),
 		})
 	}
 	d.pumpWG.Wait()

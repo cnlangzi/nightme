@@ -38,7 +38,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // resolvePath turns an already-tilde-expanded path into an
@@ -50,10 +49,15 @@ import (
 //	C:foo, C:, c:foo                      → rejected (drive-relative ambiguity)
 //	foo, ./foo, ../foo                    → joined with $HOME
 func resolvePath(expanded string) (string, error) {
-	// Drive-relative check runs on the RAW input so we don't
-	// rely on filepath.Clean's behaviour for "C:" (which
-	// varies subtly between Go versions — some return "C:.",
-	// others leave it as "C:").
+	// Drive-relative check runs on the RAW input. We can't
+	// rely on filepath.Clean to flag these — Go 1.26's Clean
+	// preserves the volume name verbatim (per the stdlib docs:
+	// "On Windows, Clean does not modify the volume name"),
+	// so Clean("C:") returns "C:" (NOT "C:." as one might
+	// expect). Without the upfront check we'd fall through to
+	// IsAbs("C:") which is false, and the user would get a
+	// confusing "$HOME/C:" result instead of an actionable
+	// error.
 	if isWindowsDriveRel(expanded) {
 		return "", fmt.Errorf(
 			"drive-relative path %q is ambiguous on Windows; "+
@@ -70,14 +74,6 @@ func resolvePath(expanded string) (string, error) {
 	// the original "/foo joined with $HOME" bug — Clean
 	// turns "/" into "\" before IsAbs sees it.
 	if filepath.IsAbs(cleaned) {
-		return filepath.Abs(cleaned)
-	}
-
-	// Belt-and-suspenders: in case a future Go version keeps
-	// the leading slash through Clean, treat any path that
-	// still starts with a separator as root-relative. Cheap
-	// to check, avoids depending on a single Clean guarantee.
-	if strings.HasPrefix(cleaned, "/") || strings.HasPrefix(cleaned, `\`) {
 		return filepath.Abs(cleaned)
 	}
 

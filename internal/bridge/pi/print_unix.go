@@ -57,7 +57,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -139,29 +138,35 @@ func runPrintMode(ctx context.Context, command, prompt, workspace string) (strin
 	// the pipe broke mid-run (rare; would normally be EOF
 	// from a clean exit).
 	text, translateErr := streamPrintEvents(ctx, stdout, workspace)
-	if translateErr != nil {
-		// Make sure the process is reaped even if the
-		// reader errored out before EOF. SIGKILL is the
-		// safe fallback when the process is wedged or we
-		// lost the pipe.
-		_ = cmd.Process.Kill()
-		<-stderrDone
-		return "", translateErr
-	}
 
-	// Wait for the process to fully exit and capture the
-	// exit code. Print-mode is supposed to exit 0 after the
-	// turn completes; a non-zero exit is a model / setup
-	// error worth surfacing.
+	// Always wait for the process to exit so we can capture
+	// both the exit code AND stderr. If streamPrintEvents
+	// errored early (e.g. agent_settled never fired) pi may
+	// still be a useful signal via its stderr — model errors,
+	// auth errors, etc. land there. The wait+reap path is
+	// shared between success and failure so neither path loses
+	// diagnostic info.
 	waitErr := cmd.Wait()
 	<-stderrDone
 
 	piLog("PrintMode Exit",
 		"pid", pid,
 		"elapsed_ms", time.Since(startTime).Milliseconds(),
-		"exit_err", errStr(waitErr),
+		"wait_err", errStr(waitErr),
 		"stderr_bytes", stderrBuf.Len(),
 	)
+
+	if translateErr != nil {
+		// Stream reader hit a non-EOF error, OR the JSON
+		// stream ended without an agent_settled event.
+		// Either way the prompt did not complete normally;
+		// surface stderr if pi left a hint about why.
+		stderr := strings.TrimSpace(stderrBuf.String())
+		if stderr != "" {
+			return "", fmt.Errorf("pi: %w (stderr: %s)", translateErr, stderr)
+		}
+		return "", translateErr
+	}
 
 	if waitErr != nil {
 		// Surface stderr if any — most failures land here
@@ -194,13 +199,15 @@ func streamPrintEvents(ctx context.Context, stdout io.Reader, workspace string) 
 
 	branch := detectBranch(workspace)
 	translator := newTranslator("pi-print", workspace, branch)
-	// connectedSent=true skips the EventAgentReady path; print-mode
-	// doesn't emit a get_state envelope, so the translator's
-	// "haven't seen connected yet" guard would otherwise drop
-	// every event. The chat-session path calls deliverConnectedLocked
-	// after Start's handshake — we have no handshake here, so we
-	// mark connected directly.
-	translator.connectedSent = true
+	// Note: print-mode does NOT call emitConnected (no
+	// handshake). connectedSent stays false but that doesn't
+	// matter here — translate() never reads it (only
+	// emitConnected does, which we don't call). The state_update
+	// case in translate.go bypasses the connectedSent check,
+	// so a stray state_update event would still surface
+	// EventAgentReady. Print-mode doesn't emit state_update,
+	// so this is academic — flagged in case a future pi version
+	// starts emitting it.
 
 	var finalText string
 	sawSettled := false
@@ -268,8 +275,3 @@ func truncateForErr(line []byte) string {
 	}
 	return string(line[:cap]) + "..."
 }
-
-// os is imported only for the future image-encoding extension
-// point (see comment in RunOnce); keeping the explicit import
-// rather than relying on transitive use keeps go vet honest.
-var _ = os.Stat

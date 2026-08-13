@@ -1,4 +1,3 @@
-
 // starter.go — the spawn recipe for the pi bridge.
 //
 // After the Agent → Info/Starter/Agent/driver refactor
@@ -14,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
@@ -69,19 +69,75 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	}
 	return agent.NewAgent(s.Info(), d.pid, d.events, d), nil
 }
-// RunOnce is the one-shot counterpart to Start. Spawns a fresh
-// RPC session, sends blocks, and drains Events() until the agent
-// produces its final text result. Closes the session before
-// returning. pi is a long-lived bridge (single process, many
-// turns), but RunOnce only consumes one turn — the EventAgentDone
-// that fires at turn end carries Reason:"settled" so the runtime
-// distinguishes turn-end from process-end. We don't care about
-// that distinction here because we Close the live immediately.
+
+// RunOnce is the one-shot counterpart to Start. Drives the
+// configured agent through a single prompt and returns the
+// final text.
+//
+// As of F-PI-PRINT-001 (2026-08-13), RunOnce routes through
+// the print-mode spawn (--mode json -p) rather than the long-
+// lived RPC session that Start uses. Rationale:
+//
+//   - One-shot invocations (/gtw commit, buildAgentPrompt)
+//     don't need a multi-turn session; they spawn, do the
+//     work, and exit.
+//   - The RPC path was observed to flake in production — pi's
+//     stdout pipe closed 2-5 s after the prompt RPC ack with
+//     no events ever delivered, even though the same RunOnce
+//     flow worked in `go test` smoke tests. Root cause is still
+//     under investigation but the print-mode path sidesteps
+//     it: there is no long-lived pipe, no response-correlation
+//     map, and process exit is the natural turn-end signal.
+//
+// The print-mode spawn lives in print_unix.go / print_windows.go
+// and reuses the shared JSON-event translator (translate.go)
+// because print-mode emits the same event format as RPC.
+//
+// Start (above) is unchanged: it still opens an RPC session
+// for the chat session's long-lived use case where multiple
+// turns ride one bridge. RunOnce and Start share the same
+// Starter; only the spawn path differs.
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
-	a, err := s.Start(ctx, cfg)
+	prompt := blocksToPrompt(blocks)
+	text, err := runPrintMode(ctx, s.command, prompt, cfg.Workspace)
 	if err != nil {
-		return "", fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
+		return "", fmt.Errorf("agent %s: %w", s.Info().Name, err)
 	}
-	defer a.Close()
-	return agent.RunOnceDrain(ctx, a, blocks, s.Info().Name)
+	return text, nil
+}
+
+// blocksToPrompt joins multiple ContentText blocks with "\n"
+// and degrades ContentImage / ContentFile blocks to compact
+// "[file: ...]" / "[image: ...]" suffixes on the message. The
+// output is the single string passed to `pi -p`. Images are
+// not yet threaded through the print-mode argv (pi's `-p`
+// flag accepts only one positional prompt); the image-encoding
+// helper at encodeImageForPrint in print_unix.go is the
+// extension point when /gtw commit starts carrying image
+// attachments.
+func blocksToPrompt(blocks []agent.ContentBlock) string {
+	var sb strings.Builder
+	for i, b := range blocks {
+		switch b.Type {
+		case agent.ContentText:
+			if b.Text == "" {
+				continue
+			}
+			if sb.Len() > 0 {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString(b.Text)
+		case agent.ContentImage:
+			if i > 0 {
+				sb.WriteByte('\n')
+			}
+			fmt.Fprintf(&sb, "[image: %s (%s)]", b.Path, b.MediaType)
+		case agent.ContentFile:
+			if i > 0 {
+				sb.WriteByte('\n')
+			}
+			fmt.Fprintf(&sb, "[file: %s]", b.Path)
+		}
+	}
+	return sb.String()
 }

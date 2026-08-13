@@ -34,6 +34,7 @@ package pi
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -96,6 +97,16 @@ const (
 // the goal is "I get a human-readable answer", not just "the
 // stream terminated".
 func TestSession_RealPi_E2E_ReceiveInputAndReply(t *testing.T) {
+	// F-PI-PRINT-001 (2026-08-13): gate the RPC-mode real-pi
+	// smoke on NIGHTME_REAL_PI=1, matching the print-mode
+	// smoke. Without the gate, `go test ./...` on a dev box
+	// with pi installed blocks for 30+ seconds per smoke and
+	// can time out the package. The smoke still serves its
+	// purpose (regression guard for RPC mode) but only when
+	// deliberately enabled.
+	if os.Getenv("NIGHTME_REAL_PI") != "1" {
+		t.Skip("set NIGHTME_REAL_PI=1 to run real-pi smoke (skipped by default)")
+	}
 	bin, err := exec.LookPath("pi")
 	if err != nil {
 		t.Skipf("pi binary not on PATH; skipping real-binary e2e: %v", err)

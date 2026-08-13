@@ -269,21 +269,11 @@ wait:
 		len(events), len(replyStr), time.Since(sendStart), preview)
 }
 
-// helper for marker-stripping in the test log; matches the
-// implementation in internal/bridge/pi/session_real_test.go.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
-}
+// itoa is defined in as_reuse_test.go (compiled on all platforms).
+// We previously redeclared it here under //go:build !windows, which
+// collided with as_reuse_test.go on non-Windows builds. The shared
+// helper above handles negative integers too, so call sites like
+// `itoa(len(replyStr)-240)` keep working unchanged.
 
 // Suppress unused-import warnings for packages that look unused
 // at first glance but are actually consumed by the test helpers

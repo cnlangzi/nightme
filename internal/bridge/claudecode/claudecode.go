@@ -515,19 +515,6 @@ func (d *driver) New(ctx context.Context) error {
 // two post-states the child landed in.
 //
 // Returns ErrNotSupported if the bridge is not started.
-// Stop fires SIGINT to the cli's process group. The cli is the
-// session/pg leader thanks to Setsid in newDriver, so a
-// negative-pid kill (kill(-pid, SIGINT)) reaches every spawned
-// descendant — most importantly the `Bash` tool subprocess — the
-// same way a Ctrl-C in a TTY would. Single-pid Process.Signal
-// would only hit the cli's main loop and any orphan subtask
-// would keep running, which is why the previous /stop hung.
-//
-// On Windows SignalProcessGroup falls back to single-pid
-// signaling (no process-group concept); the same os.Interrupt
-// value works on both platforms.
-//
-// Returns ErrNotSupported if the bridge is not started.
 func (d *driver) Stop(ctx context.Context) error {
 	_ = ctx
 	if d.cmd == nil || d.cmd.Process == nil {

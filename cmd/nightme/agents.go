@@ -1,5 +1,3 @@
-//go:build !windows
-
 // Package main — agent registration table.
 // This file is the single source of truth for which agents ship
 // with nightme at compile time. Each line is one entry; the agent
@@ -15,6 +13,10 @@
 // There is no name-based dispatch table elsewhere in the binary —
 // if an agent is not listed here and not in user config, /run
 // returns "unknown agent". This is intentional.
+//
+// Cross-platform: this file compiles on both Unix and Windows.
+// The bash entry below is the only one with a runtime GOOS gate,
+// since `bash` is not on PATH on a stock Windows install.
 package main
 
 import (

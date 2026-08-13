@@ -47,6 +47,22 @@ func headSHA(ctx context.Context, worktree string, deps HandlerDeps) (string, er
 // origin/<branch> == headBefore, so the range collapses to empty
 // and the card reports "pushed 0 commit(s)".
 //
+// The "ref not found" stderr varies by git version and whether
+// `--verify` is used:
+//
+//	git rev-parse origin/<branch>
+//	    fatal: ambiguous argument 'origin/<branch>': unknown revision
+//	    or path not in the working tree.
+//	git rev-parse --verify origin/<branch>
+//	    fatal: Needed a single revision
+//	git rev-parse --verify --quiet origin/<branch>
+//	    (no stderr, but a quick scan across 2.30..2.47 shows
+//	     exit code 128 is the only signal we get)
+//
+// We match all known shapes so neither an old nor a new git
+// surprises the user with a spurious "read origin/..." error on
+// their first push.
+//
 // Errors other than "unknown ref" propagate so the caller can
 // distinguish "first push" (== "") from "git is broken" (= err).
 func originBranchSHA(ctx context.Context, worktree, branch string, deps HandlerDeps) (string, error) {
@@ -56,7 +72,9 @@ func originBranchSHA(ctx context.Context, worktree, branch string, deps HandlerD
 		return strings.TrimSpace(out), nil
 	}
 	if strings.Contains(stderr, "unknown revision or path not in the working tree") ||
-		strings.Contains(stderr, "Not a valid ref") {
+		strings.Contains(stderr, "Not a valid ref") ||
+		strings.Contains(stderr, "Needed a single revision") ||
+		strings.Contains(stderr, "ambiguous argument") {
 		return "", nil
 	}
 	return "", fmt.Errorf("rev-parse origin/%s: %w (stderr: %s)",

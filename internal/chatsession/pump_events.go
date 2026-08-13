@@ -127,6 +127,20 @@ func (cs *ChatSession) routeEvent(as *AgentSession, ev EnrichedEvent) {
 		_ = cs.TryFlush()
 	case KindLifecycle:
 		if ev.Lifecycle != nil && ev.Lifecycle.Status == StatusExited {
+			// F-61 readpump fires KindLifecycle{StatusExited}
+			// when the events channel closes. If the caller has
+			// already marked the AS Exited (e.g. the /close path
+			// does `as.Close(); as.SetExited(0)` before the
+			// readpump goroutine observes the channel close), the
+			// SetExited below would race with the caller's write
+			// to agent_sessions.json — the readpump's persist can
+			// outlive the test's main goroutine, leaving a stray
+			// .tmp file that breaks t.TempDir() cleanup. Skip the
+			// whole cascade when the AS is already in the terminal
+			// state we were about to record.
+			if as.Status() == StatusExited {
+				return
+			}
 			as.SetExited(0)
 			// F-61: disarm HungPrompt. The bridge died without
 			// emitting KindPromptEnded, so the 5min timer armed

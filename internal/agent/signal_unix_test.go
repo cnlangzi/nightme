@@ -3,6 +3,7 @@
 package agent
 
 import (
+	"os"
 	"os/exec"
 	"syscall"
 	"testing"
@@ -14,7 +15,7 @@ import (
 // unconditionally on whatever process it has. We don't want a nil
 // deref if the bridge is closed mid-flight.
 func TestSignalProcessGroup_NilProcessIsSafe(t *testing.T) {
-	if err := SignalProcessGroup(nil, syscall.SIGINT); err != nil {
+	if err := SignalProcessGroup(nil, os.Interrupt); err != nil {
 		t.Errorf("nil process should be a no-op, got err=%v", err)
 	}
 }
@@ -59,7 +60,7 @@ func TestSignalProcessGroup_BroadcastsToPGChildren(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 
 	// Broadcast to the whole process group.
-	if err := SignalProcessGroup(cmd.Process, syscall.SIGINT); err != nil {
+	if err := SignalProcessGroup(cmd.Process, os.Interrupt); err != nil {
 		t.Fatalf("SignalProcessGroup: %v", err)
 	}
 

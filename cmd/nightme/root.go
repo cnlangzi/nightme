@@ -53,8 +53,28 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newConfigCmd())
 	root.AddCommand(newVersionCmd())
 	root.AddCommand(newDebugCmd())
+	addLifecycleCommands(root)
 	addUnixOnlyCommands(root)
 	return root
+}
+
+// addLifecycleCommands registers the cross-platform daemon
+// lifecycle commands: start / stop / restart / status / _daemon.
+// All five are defined in daemon_lifecycle.go (no build tag);
+// their platform-specific behaviour (fork + fd inheritance vs
+// CreateProcess + LockFileEx; AF_UNIX socket vs named pipe) lives
+// in daemon_lifecycle_unix.go / daemon_lifecycle_windows.go and
+// the matching files in internal/daemoncontrol.
+//
+// Kept here in root.go so a single edit point covers both Unix
+// and Windows; root_unix.go and root_windows.go only differ in
+// what they add on top (Unix: doctor; Windows: nothing extra).
+func addLifecycleCommands(root *cobra.Command) {
+	root.AddCommand(newStartCmd())
+	root.AddCommand(newStatusCmd())
+	root.AddCommand(newStopCmd())
+	root.AddCommand(newRestartCmd())
+	root.AddCommand(newDaemonCmd())
 }
 
 func Execute(logger *slog.Logger) {

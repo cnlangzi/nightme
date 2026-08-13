@@ -144,8 +144,17 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 		// means the child was alive and simply too slow, so the
 		// file may well be empty. It is still the right place to
 		// look for whatever it did print.
-		return nmerrors.New(nmerrors.CodeBridgeError, fmt.Sprintf(
-			"daemon did not become ready within 15s; child stderr: %s", stderrPath))
+		//
+		// stderrPath is "" when openDaemonStderrOrDevNull failed
+		// to open the capture file; "/dev/null" is a real path on
+		// Unix but not one the operator can usefully read, so we
+		// skip the path suffix when capture is disabled.
+		if stderrPath != "" {
+			return nmerrors.New(nmerrors.CodeBridgeError, fmt.Sprintf(
+				"daemon did not become ready within 15s; child stderr: %s", stderrPath))
+		}
+		return nmerrors.New(nmerrors.CodeBridgeError,
+			"daemon did not become ready within 15s (stderr capture was disabled at start; see warning above)")
 	case <-ctx.Done():
 		_ = child.Process.Signal(syscall.SIGTERM)
 		_ = child.Wait()

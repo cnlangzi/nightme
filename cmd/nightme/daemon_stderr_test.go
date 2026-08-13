@@ -156,8 +156,8 @@ func TestOpenDaemonStderrOrDevNull_FallsBackOnError(t *testing.T) {
 	if sink != discard {
 		t.Errorf("sink = %v, want the fallback discard handle", sink)
 	}
-	if path != os.DevNull {
-		t.Errorf("path = %q, want %q", path, os.DevNull)
+	if path != "" {
+		t.Errorf("path = %q, want empty string when capture disabled (contract: callers must not interpolate /dev/null or NUL into diagnostic messages)", path)
 	}
 	if closer != nil {
 		t.Errorf("closer must be nil so the caller's discard handle is not double-closed")

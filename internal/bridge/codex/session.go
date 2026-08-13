@@ -226,7 +226,43 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 	}
 
 	// Build argv.
-	argv := []string{"app-server", "--listen", "stdio://"}
+	//
+	// Permission defaults (F-codex-permissions): the codex CLI
+	// defaults to sandbox_mode="read-only" and a prompt-driven
+	// approval policy. Any shell write — Out-File, Set-Content,
+	// go build tmp dirs, codex's own apply-patch path — then
+	// fails inside the sandbox with "Access is denied" before any
+	// approval RPC can be surfaced to the user. That made the
+	// agent unusable for any task that touches the filesystem
+	// (the documented "current session is sandbox read-only"
+	// error surfaced by the model).
+	//
+	// We override both at spawn time via `-c <key>="<value>"`,
+	// which is the documented app-server config layer (verified
+	// against codex-rs/app-server/{README.md, shared_options.rs};
+	// actual accepted variants read out of the live binary via
+	// `codex app-server -c <key>="<bogus>" …`, see F-codex-permissions
+	// smoke). `approval_policy="never"` is one of
+	// untrusted|on-failure|on-request|granular|never — we pick
+	// `never` to suppress on-turn approval prompts so the bridge's
+	// existing permissions.go handler stops being asked. The FS
+	// sandbox accepts read-only|workspace-write|danger-full-access;
+	// we pick `danger-full-access` (NOT `full-access` — that value
+	// is from the Python SDK enum and the Rust CLI rejects it).
+	// Together these are the app-server analogue of Claude Code's
+	// --permission-mode bypassPermissions
+	// (internal/bridge/claudecode/permissions.go:65); the design
+	// across both bridges is "ChatOps agent defaults to acting".
+	//
+	// The permissions.go handler stays reachable as a downgrade
+	// path for callers that wish to flip cfg.PermissionMode at a
+	// later time — once that field is wired through, this is the
+	// only place that needs to change to forward the override.
+	argv := []string{
+		"app-server", "--listen", "stdio://",
+		"-c", `approval_policy="never"`,
+		"-c", `sandbox_mode="danger-full-access"`,
+	}
 	if cfg.model != "" {
 		argv = append(argv, "-c", fmt.Sprintf("model=%q", cfg.model))
 	}

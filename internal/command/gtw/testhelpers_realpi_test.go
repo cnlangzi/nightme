@@ -23,6 +23,7 @@ package gtw
 import (
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -56,9 +57,18 @@ func requireRealPi(t *testing.T) {
 }
 
 // ccTypes is the Conventional Commits 1.0.0 type allow-list.
-// Single source of truth for splitCCSubject / conventionalCommitsTitle
-// in the real-pi smokes (and mirrors the type allow-list baked
-// into prTitleRegex in pr.go).
+// Mirrors the type list embedded in prTitleRegex (pr.go). The
+// regex is the production source of truth — this slice is a
+// parallel copy used by the real-pi smoke helpers
+// (conventionalCommitsTitle / ccType / splitCCSubject).
+//
+// The two lists MUST stay in sync. The
+// TestCCTypesMatchProductionRegex test below is the regression
+// guard: it parses the type list out of prTitleRegex and
+// asserts equality, so any future change to either list fails
+// the build. Without this guard the type lists could drift and
+// the live-pi smokes would silently accept (or reject) a type
+// the production parser doesn't.
 var ccTypes = []string{
 	"feat", "fix", "chore", "refactor", "docs", "test",
 	"build", "ci", "perf", "style", "revert",
@@ -91,4 +101,49 @@ func truncateOutput(s string, n int) string {
 		return s
 	}
 	return s[:n] + "\n... [truncated]"
+}
+
+// TestCCTypesMatchProductionRegex is the sync guard for the CC
+// type list. It parses the type allow-list out of prTitleRegex
+// (the production source of truth in pr.go) and asserts the
+// ccTypes slice in this file matches it byte-for-byte.
+//
+// If you add or remove a CC type, this test fails until BOTH
+// lists are updated. Without this guard, the real-pi smoke
+// helpers would silently accept types the production regex
+// rejects (or vice versa), giving a misleading PASS when
+// dispatchPR's parsePRReply would later fail on the LLM output.
+//
+// The expected extraction pattern is the `(feat|fix|...)` group
+// inside prTitleRegex. If the regex structure ever changes,
+// this test fails first and the regex / slice are updated
+// together.
+func TestCCTypesMatchProductionRegex(t *testing.T) {
+	// Extract the type alternation group from prTitleRegex.
+	// The pattern is hardcoded to match prTitleRegex in pr.go;
+	// if that regex is restructured this test fails and the
+	// extraction logic is updated alongside it.
+	//
+	// Pattern: ^(feat|fix|...)(?:\(...)...
+	src := prTitleRegex.String()
+	re := regexp.MustCompile(`^\^(?:\(([^)]+)\))`)
+	m := re.FindStringSubmatch(src)
+	if m == nil {
+		t.Fatalf("could not extract type alternation from prTitleRegex source: %q", src)
+	}
+	prodTypes := strings.Split(m[1], "|")
+
+	if len(prodTypes) != len(ccTypes) {
+		t.Fatalf("type count mismatch: ccTypes=%d prTitleRegex=%d (%v vs %v)",
+			len(ccTypes), len(prodTypes), ccTypes, prodTypes)
+	}
+	// Order is also asserted — `ccTypes` mirrors the regex's
+	// left-to-right alternation order. If a type is reordered in
+	// the regex, this fails and you re-sort both lists.
+	for i := range ccTypes {
+		if ccTypes[i] != prodTypes[i] {
+			t.Errorf("type[%d] mismatch: ccTypes=%q prTitleRegex=%q",
+				i, ccTypes[i], prodTypes[i])
+		}
+	}
 }

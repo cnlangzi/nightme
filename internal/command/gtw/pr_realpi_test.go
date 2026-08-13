@@ -114,21 +114,22 @@ func TestRealPi_PRPromptV2(t *testing.T) {
 	// "could not parse agent reply" error and the user has to
 	// paste title + body manually. Verify it accepts.
 	title, body, perr := parsePRReply(rawText)
+	outPath := filepath.Join(t.TempDir(), "nightme-v2-prompt-output.md")
 	if perr != nil {
 		// Fall back to raw dump so the human can see what the
 		// LLM actually produced even when the parser rejected it.
 		t.Logf("parsePRReply: %v\nfalling back to raw-text dump", perr)
-		_ = os.WriteFile("/tmp/nightme-v2-prompt-output.md", []byte(rawText), 0o644)
-		t.Logf("raw text written to /tmp/nightme-v2-prompt-output.md")
-		t.Fatalf("parsePRReply rejected the live output; see /tmp/nightme-v2-prompt-output.md for the raw text")
+		_ = os.WriteFile(outPath, []byte(rawText), 0o644)
+		t.Logf("raw text written to %s", outPath)
+		t.Fatalf("parsePRReply rejected the live output; see %s for the raw text", outPath)
 	}
 
 	t.Logf("=== PARSED TITLE ===\n%s", title)
 	t.Logf("=== PARSED BODY (%d bytes) ===\n%s", len(body), body)
 
 	md := title + "\n\n" + body + "\n"
-	_ = os.WriteFile("/tmp/nightme-v2-prompt-output.md", []byte(md), 0o644)
-	t.Logf("structured output written to /tmp/nightme-v2-prompt-output.md")
+	_ = os.WriteFile(outPath, []byte(md), 0o644)
+	t.Logf("structured output written to %s", outPath)
 
 	// ---- Live-output invariants ---------------------------------
 	//

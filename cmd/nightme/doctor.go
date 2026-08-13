@@ -240,6 +240,28 @@ func writeDoctorText(out io.Writer, payload daemoncontrol.HealthPayload) error {
 		fmt.Fprintf(tw, "  last_error:\t%s\n", snap.Prober.LastError)
 	}
 
+	// F-61: agent process prober (fallback for readpump-missed
+	// bridge deaths). Mirrors F-41's format for consistency.
+	fmt.Fprintln(tw, "")
+	fmt.Fprintln(tw, "PROBER (F-61 agent liveness)")
+	if snap.AgentProber.Active {
+		fmt.Fprintf(tw, "  active:\t%s\n", "yes")
+	} else {
+		fmt.Fprintf(tw, "  active:\t%s\n", "no")
+	}
+	fmt.Fprintf(tw, "  interval:\t%s\n", snap.AgentProber.Interval)
+	fmt.Fprintf(tw, "  scanned_total:\t%d\n", snap.AgentProber.ScannedTotal)
+	fmt.Fprintf(tw, "  probes_run:\t%d\n", snap.AgentProber.ProbesRun)
+	fmt.Fprintf(tw, "  respawns_triggered:\t%d\n", snap.AgentProber.RespawnsHit)
+	if !snap.AgentProber.LastScanAt.IsZero() {
+		fmt.Fprintf(tw, "  last_scan_at:\t%s ago\n", formatAge(snap.AgentProber.LastScanAt, now))
+	} else {
+		fmt.Fprintln(tw, "  last_scan_at:\tnever")
+	}
+	if !snap.AgentProber.StartedAt.IsZero() {
+		fmt.Fprintf(tw, "  started_at:\t%s ago\n", formatAge(snap.AgentProber.StartedAt, now))
+	}
+
 	// Section 4: event ring (most recent first)
 	if len(snap.EventRing) > 0 {
 		fmt.Fprintln(tw, "")

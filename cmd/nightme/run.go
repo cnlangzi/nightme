@@ -589,6 +589,14 @@ func newMessageDispatcher(mgr *chatsession.Manager, em outbound.Emitter, primary
 
 		cs, _ := mgr.GetOrCreate(msg.ChatID, primary)
 
+		// F-61: FastAck watchdog is intentionally NOT armed here.
+		// Without an ObserveOutbound call site on the adapter
+		// (the channel doesn't have a direct reference to
+		// cs.Watchdog), every successful reaction would
+		// false-positive → mark Suspect("no_fast_ack"). HungPrompt
+		// (armed in TryFlush after Submit) is the high-value
+		// watchdog; FastAck remains defined for future wiring.
+
 		// F-31 / F-53: ChatSession has accepted the message. Emit
 		// MessageQueued synchronously so the channel can render
 		// ⏳ even before spawn resolves (FastAck UX).

@@ -1,4 +1,3 @@
-
 // JSONL framing + request/response correlation for the Pi RPC bridge.
 //
 // The bridge drives a long-lived `pi --mode rpc` child over real
@@ -78,11 +77,11 @@ var ErrMalformedJSON = errors.New("pi: malformed JSON")
 // bytes (or the read end has consumed them on synchronous
 // pipes).
 type rpcClient struct {
-	stdinW   io.WriteCloser
-	writeMu  sync.Mutex
+	stdinW    io.WriteCloser
+	writeMu   sync.Mutex
 	pendingMu sync.Mutex
-	pending  map[string]chan responseEnvelope
-	nextID   atomic.Int64
+	pending   map[string]chan responseEnvelope
+	nextID    atomic.Int64
 
 	// closed flips to true when failPending has been called; new
 	// requests after that point return ErrSessionClosed immediately.

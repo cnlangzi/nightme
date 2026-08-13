@@ -1,4 +1,3 @@
-
 // Pi event -> agent.AgentEvent translation table.
 //
 // The translator is purely functional from the caller's point of
@@ -506,13 +505,13 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 			return nil, nil
 		}
 		return []agent.AgentEvent{{
-		Kind:      agent.EventAgentReady,
-		SessionID: ev.SessionID,
-		Model:     modelDisplay(ev.ModelID, ev.ModelName),
-		AgentName: t.agentName,
-		Workspace: t.workspace,
-		Branch:    t.branch,
-	}}, nil
+			Kind:      agent.EventAgentReady,
+			SessionID: ev.SessionID,
+			Model:     modelDisplay(ev.ModelID, ev.ModelName),
+			AgentName: t.agentName,
+			Workspace: t.workspace,
+			Branch:    t.branch,
+		}}, nil
 
 	default:
 		// Unknown event. Drop silently with a debug log so a

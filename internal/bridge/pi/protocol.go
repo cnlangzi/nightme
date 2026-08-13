@@ -1,4 +1,3 @@
-
 // Wire-level structs for the Pi RPC protocol. These are intentionally
 // permissive: every optional or evolving field is captured as
 // json.RawMessage so unknown additions from upstream Pi do not break
@@ -7,9 +6,9 @@
 //
 // Wire shape (per Pi docs/rpc.md):
 //
-//   command  : {"id":<id>, "type":<command name>, ...fields}
-//   response : {"id":<id>, "type":"response", "command":<name>, "success":<bool>, "data":<obj|absent>, "error":<string|absent>}
-//   event    : {"type":<event name>, ...event-specific fields}
+//	command  : {"id":<id>, "type":<command name>, ...fields}
+//	response : {"id":<id>, "type":"response", "command":<name>, "success":<bool>, "data":<obj|absent>, "error":<string|absent>}
+//	event    : {"type":<event name>, ...event-specific fields}
 //
 // Strict LF framing. No JSON-RPC 2.0 envelope. The "id" is opaque;
 // commands and responses share the same id space.
@@ -168,13 +167,13 @@ type assistantMessageEvent struct {
 // translateAssistantMessage and F-32 §2.3 for the single-event
 // rationale.
 type assistantMessage struct {
-	Role       string           `json:"role"`
-	Content    []contentBlock   `json:"content"`
-	StopReason string           `json:"stopReason"`
-	Usage      *messageUsage    `json:"usage"`
-	Model      string           `json:"model"`
-	Provider   string           `json:"provider"`
-	Timestamp  int64            `json:"timestamp"`
+	Role       string         `json:"role"`
+	Content    []contentBlock `json:"content"`
+	StopReason string         `json:"stopReason"`
+	Usage      *messageUsage  `json:"usage"`
+	Model      string         `json:"model"`
+	Provider   string         `json:"provider"`
+	Timestamp  int64          `json:"timestamp"`
 }
 
 // contentBlock is one element of assistantMessage.Content. Pi's
@@ -206,12 +205,12 @@ type contentBlock struct {
 // "cost" with input/output/cacheRead/cacheWrite/total in dollars.// messageUsage is the per-message usage block. Pi nests cost under
 // "cost" with input/output/cacheRead/cacheWrite/total in dollars.
 type messageUsage struct {
-	Input      int           `json:"input"`
-	Output     int           `json:"output"`
-	CacheRead  int           `json:"cacheRead"`
-	CacheWrite int           `json:"cacheWrite"`
-	Total      int           `json:"totalTokens"`
-	Cost       *usageCost    `json:"cost"`
+	Input      int        `json:"input"`
+	Output     int        `json:"output"`
+	CacheRead  int        `json:"cacheRead"`
+	CacheWrite int        `json:"cacheWrite"`
+	Total      int        `json:"totalTokens"`
+	Cost       *usageCost `json:"cost"`
 }
 
 // usageCost holds the dollar cost breakdown. The bridge attaches
@@ -237,7 +236,7 @@ type toolExecutionStart struct {
 }
 
 type toolExecutionEnd struct {
-	ToolCallID string          `json:"toolCallId"`
+	ToolCallID string `json:"toolCallId"`
 	// ToolName is the canonical tool name on the wire
 	// (docs/rpc.md: every tool_execution_end carries a toolName).
 	// Used as a fallback when no matching tool_execution_start
@@ -273,11 +272,11 @@ type compactionEnd struct {
 // confirm, input, editor, notify, setStatus, setWidget, setTitle) is
 // captured as raw to allow future translator extensions.
 type extensionUIRequest struct {
-	ID     string          `json:"id"`
-	Method string          `json:"method"`
-	Title  string          `json:"title,omitempty"`
-	Options []string       `json:"options,omitempty"`
-	Raw    json.RawMessage `json:"-"`
+	ID      string          `json:"id"`
+	Method  string          `json:"method"`
+	Title   string          `json:"title,omitempty"`
+	Options []string        `json:"options,omitempty"`
+	Raw     json.RawMessage `json:"-"`
 }
 
 // extensionError is logged at warning; not surfaced as EventAgentError.
@@ -296,8 +295,8 @@ type extensionError struct {
 // value). The bridge only ever relies on SessionID for the runtime
 // SessionID pipeline.
 type stateUpdate struct {
-	SessionID  string `json:"sessionId"`
-	ModelID    string `json:"modelId"`
-	ModelName  string `json:"modelName"`
+	SessionID   string `json:"sessionId"`
+	ModelID     string `json:"modelId"`
+	ModelName   string `json:"modelName"`
 	SessionFile string `json:"sessionFile"`
 }

@@ -1,4 +1,3 @@
-
 // Translation table tests for the Pi event -> agent.AgentEvent
 // mapper. Each table-driven case feeds one raw event JSON into the
 // translator and asserts the resulting AgentEvent stream matches

@@ -1,4 +1,3 @@
-
 // Tests for the spawn argv builder. Mirrors
 // internal/bridge/claudecode/claudecode_test.go in spirit: pure
 // argv shaping, no child process. The same builder is used in
@@ -74,7 +73,7 @@ func TestBuildArgs_ResumeFlagGoesLastAfterUserArgs(t *testing.T) {
 	got := buildArgs(
 		nil,
 		agent.StartConfig{
-			Args:     []string{"--model", "google/gemini"},
+			Args:      []string{"--model", "google/gemini"},
 			SessionID: "sess-xyz",
 		},
 	)
@@ -177,7 +176,7 @@ func TestBuildArgs_ResumeIDStripsConflictingArg(t *testing.T) {
 	got := buildArgs(
 		nil,
 		agent.StartConfig{
-			Args:     []string{"--session-id", "user-id", "--model", "x"},
+			Args:      []string{"--session-id", "user-id", "--model", "x"},
 			SessionID: "resume-id",
 		},
 	)
@@ -205,7 +204,7 @@ func TestBuildArgs_NoResume_PassesSessionIDThrough(t *testing.T) {
 	got := buildArgs(
 		nil,
 		agent.StartConfig{
-			Args:     []string{"--session-id", "user-fresh"},
+			Args:      []string{"--session-id", "user-fresh"},
 			SessionID: "",
 		},
 	)

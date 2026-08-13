@@ -11,6 +11,7 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
+	"github.com/cnlangzi/nightme/internal/command/newcmd"
 )
 
 // statPath is the os.Stat function used by RunClose to detect
@@ -61,20 +62,29 @@ const maxDirtyFilesReported = 10
 //     spawns in the main repo.
 //  7. Clear the in-memory Context.
 //  8. Emit close's own success card.
-//  9. Run `git pull --rebase origin <default>` on repoRoot and
-//     emit the same sync card /gtw sync uses. Sync runs AFTER
-//     close's local cleanup so the user sees two cards: one for
-//     the worktree tear-down, one for the upstream refresh. If
-//     sync errors (dirty main, rebase conflict), its own error
-//     card surfaces the cause — close's card above is not
+//  9. Invoke /new on the new cwd (c.RepoRoot) to drop any AS
+//     left there of its accumulated conversation context. This
+//     mirrors the user's manual workflow ("close the fix, then
+//     clear the chat") — context reset BEFORE upstream refresh
+//     so the next turn spawned by sync's pull summary (if any)
+//     starts cold. matched==0 means no AS survives in repoRoot
+//     — the common case after step 2.5 — and no extra card is
+//     sent.
+// 10. Run `git pull --rebase origin <default>` on repoRoot and
+//     emit the same sync card /gtw sync uses. Sync runs LAST
+//     so the user sees the full sequence: close → /new → sync.
+//     If sync errors (dirty main, rebase conflict), its own
+//     error card surfaces the cause — close's card above is not
 //     retracted because the local fix session genuinely ended.
 //
 // On any error before step 7 (yml missing / dirty / worktree-
 // remove / branch-delete fail) we leave the chat's active cwd
 // and the in-memory Context untouched, so the user can retry
-// once they fix the underlying problem. Step 9 (sync) errors
-// surface their own card but DO NOT undo steps 4-7: from the
-// user's perspective the local fix is gone either way.
+// once they fix the underlying problem. Steps 9 (/new) and 10
+// (sync) run unconditionally after step 8 — neither error
+// undoes the local-fix tear-down, and neither skips the
+// other. Step 9's matched==0 path silently skips its card so
+// the empty-pool case stays a two-card story (close + sync).
 func RunClose(
 	ctx context.Context,
 	cs *chatsession.ChatSession,
@@ -313,25 +323,59 @@ func RunClose(
 	// step 8 is mid-flow by design.
 	reply(ctx, cs.Emitter(), chatID, messageID, body)
 
-	// --- step 9: sync main (separate card) ------------------------
+	// --- step 9: /new (clear agent context in repoRoot) ---------
+	// Mirrors the user's manual workflow: after /gtw close wipes
+	// the worktree they fire /new to drop the agent's accumulated
+	// conversation context for the new cwd. We do it here so they
+	// don't have to.
+	//
+	// Symmetric to step 2.5's AS cleanup at the dead worktree:
+	// the worktree-pinned ASes are already dropped. Any AS left
+	// in c.RepoRoot (the new cwd after step 6) survives with
+	// stale context; /new forces them cold so the next turn in
+	// the main repo doesn't inherit the fix's conversation.
+	//
+	// Runs BEFORE sync (step 10) so any agent spawned by sync's
+	// pull summary (if the bridge echoes one) starts cold —
+	// reset first, refresh second.
+	//
+	// matched==0 means the pool is empty in c.RepoRoot — the
+	// common path after step 2.5 — and we skip the extra card so
+	// close + sync stays a two-card story for that case. The
+	// queue is deliberately NOT dropped (same contract as
+	// /new: queued messages are still owed a reply and flush
+	// into the fresh context on the next TryFlush).
+	matched, _, results, newErr := cs.NewActiveAgentSessions(ctx, "")
+	if matched > 0 {
+		body := newcmd.FormatResetResults(results)
+		if newErr != nil {
+			body += fmt.Sprintf("\n(errors: %v)", newErr)
+		}
+		reply(ctx, cs.Emitter(), chatID, messageID, body)
+	}
+
+	// --- step 10: sync main (separate card) ----------------------
 	// buildSyncReply shares the /gtw sync card formatter and
 	// respects deps.SkipRefreshDefaultBranch (test seam). If
 	// sync fails the error surfaces its own card with a ❌ prefix
 	// (RefreshDefaultBranch's own errors sometimes lack one);
-	// the close success card above is NOT retracted because the
+	// the close + /new cards above are NOT retracted because the
 	// local fix session is genuinely over regardless.
+	//
+	// Single terminal step: all three sync branches (error /
+	// normal / skip) fall through to the same return.
 	syncBody, syncErr := buildSyncReply(ctx, c.RepoRoot, deps)
 	if syncErr != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ sync failed: "+syncErr.Error()), nil
+		reply(ctx, cs.Emitter(), chatID, messageID,
+			"❌ sync failed: "+syncErr.Error())
+	} else if syncBody != "" {
+		reply(ctx, cs.Emitter(), chatID, messageID, syncBody)
 	}
-	if syncBody == "" {
-		// SkipRefreshDefaultBranch was set (test-only path);
-		// no sync card to emit. close's card above is the
-		// complete reply for this invocation.
-		return &Result{Consumed: true}, nil
-	}
-	return reply(ctx, cs.Emitter(), chatID, messageID, syncBody), nil
+	// else: SkipRefreshDefaultBranch set (test-only); no sync
+	// card. close's card (and /new card when applicable) still
+	// stand.
+
+	return &Result{Consumed: true}, nil
 }
 
 // assertWorktreeClean returns a user-friendly error if `dir` has

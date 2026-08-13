@@ -162,7 +162,6 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	args := buildArgs(s.args, cfg)
 
 	env := append([]string(nil), cfg.Env...)
-	env = append(env, s.command) // ensure command name is in env (defensive)
 
 	// Spawn via the agent.NewCmd helper so the platform-specific
 	// SysProcAttr (Setsid on unix, no-op on Windows) is in one

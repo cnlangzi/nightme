@@ -265,7 +265,6 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	startTime := time.Now()
 	args := buildArgs(s.args, cfg)
 	env := append([]string(nil), cfg.Env...)
-	env = append(env, s.command)
 
 	piLog("Start enter", "agent", s.name, "command", s.command, "workspace", cfg.Workspace, "args", args)
 

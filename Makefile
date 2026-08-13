@@ -1,7 +1,6 @@
 # nightme Makefile
 # Minimal, opinionated build/test/dev workflow.
 
-BINARY        ?= bin/nightme
 GO            ?= go
 VERSION       ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "0.1.0")
 GIT_COMMIT    ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -15,9 +14,16 @@ LDFLAGS       := -X github.com/cnlangzi/nightme/internal/version.Version=$(VERSI
 # GOOS/GOARCH per matrix row.
 GOOS          ?= $(shell go env GOOS)
 GOARCH        ?= $(shell go env GOARCH)
+# EXT is .exe on Windows, empty elsewhere. Applied uniformly to
+# both the `build` and `release` outputs so callers can `./bin/nightme`
+# on Linux/macOS and `./bin/nightme.exe` on Windows. Windows's
+# CreateProcess rejects a path without the .exe suffix, so the
+# build target MUST use $(EXT) — see `make restart` below.
 EXT           ?= $(if $(filter windows,$(GOOS)),.exe,)
 BIN_DIR       ?= dist
-RELEASE_BIN   := $(BIN_DIR)/nightme-$(GOOS)-$(GOARCH)$(EXT)
+BIN_NAME      ?= nightme
+BINARY        ?= bin/$(BIN_NAME)$(EXT)
+RELEASE_BIN   := $(BIN_DIR)/$(BIN_NAME)-$(GOOS)-$(GOARCH)$(EXT)
 
 .PHONY: help
 help: ## Show this help.
@@ -25,7 +31,7 @@ help: ## Show this help.
 		/^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 .PHONY: build
-build: ## Compile binary to bin/nightme with version metadata.
+build: ## Compile binary to bin/nightme[.exe] with version metadata.
 	@mkdir -p bin
 	$(GO) build -ldflags '$(LDFLAGS)' -o $(BINARY) ./cmd/nightme
 
@@ -40,6 +46,10 @@ release-all: ## Build every release matrix row into dist/. CI does this per-row 
 		GOOS=$${pair%/*} GOARCH=$${pair#*/} $(MAKE) release; \
 	done
 
+# restart runs the local `nightme restart` subcommand on the
+# freshly built binary. Requires the binary to actually exist
+# with the platform-correct suffix (handled by BINARY above);
+# Windows CreateProcess can't run a path missing the .exe.
 .PHONY: restart
 restart: build ## Build and restart nightme daemon.
 	$(BINARY) restart

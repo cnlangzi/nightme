@@ -2045,7 +2045,7 @@ case gateway.OutReply, gateway.OutResult,
    // internal/channel/feishu/adapter.go
    func (a *Adapter) handleCardAction(ctx, event *larkcallback.CardActionTriggerEvent) (*larkcallback.CardActionTriggerResponse, error) {
        // 1. 从 event.Action.Value["action"] 抽 "act:/gtw/<scenario>"
-       // 2. gtw.ActionLookup → ReactionKind
+       // 2. messages.ActionLookup → ReactionKind
        // 3. 合成 InboundMessage{Reaction: {TargetMsgID, Emoji, ChatID, UserID}}
        // 4. push 到 a.incoming（buffer=128, 默认 0 阻塞）
        // 5. 返回 toast "✅ 已选择 X"

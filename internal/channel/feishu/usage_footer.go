@@ -74,7 +74,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/cnlangzi/nightme/internal/command/gtw"
 	"github.com/cnlangzi/nightme/internal/messages"
 )
 
@@ -682,11 +681,3 @@ func formatGitBar(gb *messages.GitStatusBar) string {
 
 	return strings.Join(parts, " · ")
 }
-
-// _ ensures the gtw import is recognised as "used" by the
-// compiler: formatGitBar accesses gb.GitStatus typed as
-// *gtw.GitStatusSnapshot but never writes `gtw.X` by name, so
-// Go's unused-import check (correctly) rejects the import
-// without an explicit reference. Field-type-only access doesn't
-// satisfy the import-use check.
-var _ = (*gtw.GitStatusSnapshot)(nil)

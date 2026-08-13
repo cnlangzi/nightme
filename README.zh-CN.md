@@ -91,13 +91,17 @@
 2. **预编译二进制**（手动）：
 
    - 去 [latest release page](https://github.com/cnlangzi/nightme/releases/latest)
-     下载对应平台二进制（如 `nightme-darwin-amd64`、`nightme-linux-amd64`、
-     `nightme-windows-amd64.exe`）
-   - 放到 `$PATH` 上并加可执行权限：
+     下载对应平台的压缩包（如 `nightme_<version>_darwin_amd64.tar.gz`、
+     `nightme_<version>_linux_amd64.tar.gz`、
+     `nightme_<version>_windows_amd64.zip`）
+   - 解压后里面的二进制就叫 `nightme`（Windows 是 `nightme.exe`），
+     放到 `$PATH` 上并加可执行权限：
      ```bash
-     mv nightme-darwin-amd64 /usr/local/bin/nightme
+     tar -xzf nightme_<version>_darwin_amd64.tar.gz
+     mv nightme /usr/local/bin/nightme
      chmod +x /usr/local/bin/nightme
      ```
+     Windows 上解压后把 `nightme.exe` 放到 `PATH` 上的某个目录即可。
 
 3. **从源码**（开发或钉死一个 commit）：
 

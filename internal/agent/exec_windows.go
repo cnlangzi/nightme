@@ -8,16 +8,35 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
+
+// CREATE_NO_WINDOW tells CreateProcess not to allocate a console for
+// the child. Without this flag, every spawn of a Windows console
+// binary (cmd.exe wrapping a .cmd shim, the .exe agent binary
+// itself, node.exe, powershell.exe, …) opens a new console window
+// on the user's desktop — visible as a flashing black rectangle in
+// the taskbar, one per agent spawn. With the flag set, the child
+// runs silently and inherits only the stdin / stdout / stderr pipes
+// the bridge wires up; no visible window.
+//
+// Value is the documented Win32 constant
+// (https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags).
+const createNoWindow = 0x08000000
 
 // NewCmd is the bridge spawn recipe in one place on Windows. It
 // returns an *exec.Cmd wired so the child process starts cleanly
 // regardless of how the target binary is installed:
 //
 //	.exe / .com / no extension   → exec.CommandContext(name, args...) directly
-//	.cmd / .bat (batch shim)     → exec.CommandContext(cmd.exe, /d, /c, <resolved>, args...)
+//	.cmd / .bat (batch shim)     → exec.CommandContext(cmd.exe, /d /c, <resolved>, args...)
 //	.ps1 (PowerShell script)     → exec.CommandContext(powershell.exe, -NoProfile, -NonInteractive, -File, <resolved>, args...)
 //	.js  (Node.js script)        → exec.CommandContext(node.exe, <resolved>, args...)
+//
+// Every returned *exec.Cmd has CREATE_NO_WINDOW set on its
+// SysProcAttr so the child never allocates a visible console —
+// nightme talks to it via stdin / stdout / stderr pipes, no UI
+// surface needed.
 //
 // Why this matters: every Windows install where an agent binary is
 // shipped as a Node-style shim (pi-node's current\pi.cmd,
@@ -53,7 +72,9 @@ func NewCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
 	if lp, err := exec.LookPath(name); err == nil {
 		resolved = lp
 	}
-	return launchOnWindows(ctx, resolved, args...)
+	cmd := launchOnWindows(ctx, resolved, args...)
+	hideWindow(cmd)
+	return cmd
 }
 
 // launchOnWindows picks the right exec.Cmd shape for the
@@ -92,6 +113,23 @@ func launchOnWindows(ctx context.Context, resolved string, args ...string) *exec
 	// the resolved path (not the original `name`) so the kernel
 	// sees an absolute path and skips its own PATH search.
 	return exec.CommandContext(ctx, resolved, args...)
+}
+
+// hideWindow sets CREATE_NO_WINDOW on cmd so the child runs
+// without a console window. Idempotent: a nil SysProcAttr is
+// allocated; an existing non-nil SysProcAttr is preserved
+// (CREATE_NO_WINDOW is merged with any caller-provided flags).
+//
+// Split out so tests can pin it without re-checking the launch
+// matrix.
+func hideWindow(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= createNoWindow
 }
 
 // comspecOrDefault returns %ComSpec% (set on every standard

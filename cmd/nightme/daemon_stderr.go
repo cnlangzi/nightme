@@ -117,8 +117,17 @@ func rotateDaemonStderr(path string) {
 // openDaemonStderrOrDevNull is the caller-facing helper used by
 // startDaemon on both platforms. It never fails: when the capture
 // file cannot be opened it falls back to the supplied /dev/null
-// handle and reports the reason through warn (which callers wire
-// to stderr of the launching command).
+// handle (which may itself be nil — Windows passes nil because
+// Go treats child.Stderr == nil as "discard", same end result) and
+// reports the reason through warn (which callers wire to stderr of
+// the launching command).
+//
+// The returned path is EMPTY when capture failed. Callers must not
+// interpolate it into diagnostic messages without checking —
+// "/dev/null" / "NUL" are valid paths on Unix / Windows respectively
+// but are not files the operator can open, so the diagnostic aid
+// the error message promises is silently gone. An empty path is
+// the contract that says "there is nothing for the operator to read."
 //
 // The returned closer is nil when the fallback was used, so the
 // caller does not close the shared devNull handle twice.
@@ -128,7 +137,7 @@ func openDaemonStderrOrDevNull(cfg *config.Config, devNull *os.File, warn io.Wri
 		if warn != nil {
 			fmt.Fprintf(warn, "warning: daemon stderr capture disabled (%v)\n", err)
 		}
-		return devNull, os.DevNull, nil
+		return devNull, "", nil
 	}
 	return f, path, func() { _ = f.Close() }
 }

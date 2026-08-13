@@ -1463,31 +1463,7 @@ func (as *AgentSession) Stop(ctx context.Context) error {
 	return h.Stop(ctx)
 }
 
-// ObserveClose runs in a goroutine after Spawn to watch the bridge
-// events channel. When the channel closes (EventAgentDone / EventAgentError /
-// child EOF), the AgentSession transitions to Exited. Returns a
-// channel that the caller can wait on for clean shutdown.
-//
-// Convention: ChatSession starts one ObserveClose per AgentSession
-// in its pool.
-func (as *AgentSession) ObserveClose() <-chan struct{} {
-	done := make(chan struct{})
-	as.asMu.RLock()
-	ev := as.handle.Events()
-	as.asMu.RUnlock()
 
-	go func() {
-		defer close(done)
-		if ev == nil {
-			return
-		}
-		// Drain until close.
-		for range ev {
-		}
-		as.SetExited(0)
-	}()
-	return done
-}
 // newAgentSessionID returns a unique ID for an AgentSession. v1.2
 // commit 6 uses a simple counter-based scheme for testability;
 // commit 7 may swap to UUID v7.

@@ -270,48 +270,7 @@ func TestAgentSession_SendBlocksAfterSpawn(t *testing.T) {
 	}
 }
 
-func TestAgentSession_ObserveCloseTransitionsToExited(t *testing.T) {
-	spawner := newFakeSpawner()
-	csFile, asFile := newTestStores(t)
-	cs, _ := New("oc_xxx", "claude")
-	cs = cs.WithPersistence(csFile, asFile)
-	cs = cs.WithSpawner(spawner)
-	cs.SetSelectedCwd("/x")
-	cs.SetSelectedAgent("claude")
-	as, _ := cs.LookupSelectedAgentSession()
 
-	// F-61: AS goroutines (eventDispatchLoop + readpump) must be
-	// drained before t.TempDir cleanup, otherwise a late Lifecycle
-	// event triggers a persist() against the deleted tempdir.
-	// Without Shutdown, t.TempDir's RemoveAll races with pending
-	// persist calls → "no such file or directory" or
-	// "directory not empty" errors during test cleanup.
-	t.Cleanup(func() {
-		as.Shutdown()
-	})
-
-	// Drain a few events then finish.
-	spawner.Get("claude", "/x").PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "hi"})
-	spawner.Get("claude", "/x").PushEvent(agent.AgentEvent{Kind: agent.EventAgentToolStart, ToolStart: &agent.AgentToolStartEvent{ID: "t1", Name: "Bash"}})
-	spawner.Get("claude", "/x").FinishEvent()
-
-	// Start ObserveClose; it should transition Running → Exited
-	// when the channel drains.
-	done := as.ObserveClose()
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("ObserveClose did not complete within 2s")
-	}
-
-	if as.Status() != StatusExited {
-		t.Fatalf("after observe close: got %q, want Exited", as.Status())
-	}
-	if as.PID() != 0 {
-		t.Fatalf("PID should be cleared on exit, got %d", as.PID())
-	}
-}
 
 // TestAgentSession_ResumeIDRoundTrip asserts that SetSessionID is
 // idempotent, accessible via SessionID(), and survives a round-trip

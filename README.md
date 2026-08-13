@@ -91,15 +91,19 @@ Three ways to get `nightme` on your machine:
 
 2. **Prebuilt binary** (manual):
 
-   - Grab the binary for your platform from the
+   - Grab the archive for your platform from the
      [latest release page](https://github.com/cnlangzi/nightme/releases/latest)
-     (e.g. `nightme-darwin-amd64`, `nightme-linux-amd64`,
-     `nightme-windows-amd64.exe`)
-   - Drop it on your `$PATH` and make it executable:
+     (e.g. `nightme_<version>_darwin_amd64.tar.gz`,
+     `nightme_<version>_linux_amd64.tar.gz`,
+     `nightme_<version>_windows_amd64.zip`)
+   - Extract it — the binary inside is just `nightme`
+     (or `nightme.exe` on Windows):
      ```bash
-     mv nightme-darwin-amd64 /usr/local/bin/nightme
+     tar -xzf nightme_<version>_darwin_amd64.tar.gz
+     mv nightme /usr/local/bin/nightme
      chmod +x /usr/local/bin/nightme
      ```
+     On Windows, unzip and place `nightme.exe` somewhere on your `PATH`.
 
 3. **From source** (for development or to pin a commit):
 

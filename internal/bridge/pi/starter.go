@@ -111,13 +111,12 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 // "[file: ...]" / "[image: ...]" suffixes on the message. The
 // output is the single string passed to `pi -p`. Images are
 // not yet threaded through the print-mode argv (pi's `-p`
-// flag accepts only one positional prompt); the image-encoding
-// helper at encodeImageForPrint in print_unix.go is the
-// extension point when /gtw commit starts carrying image
-// attachments.
+// flag accepts only one positional prompt); when /gtw commit
+// starts carrying image attachments this is where the
+// base64-encoding or placeholder strategy will land.
 func blocksToPrompt(blocks []agent.ContentBlock) string {
 	var sb strings.Builder
-	for i, b := range blocks {
+	for _, b := range blocks {
 		switch b.Type {
 		case agent.ContentText:
 			if b.Text == "" {
@@ -128,12 +127,18 @@ func blocksToPrompt(blocks []agent.ContentBlock) string {
 			}
 			sb.WriteString(b.Text)
 		case agent.ContentImage:
-			if i > 0 {
+			if b.Path == "" {
+				continue
+			}
+			if sb.Len() > 0 {
 				sb.WriteByte('\n')
 			}
 			fmt.Fprintf(&sb, "[image: %s (%s)]", b.Path, b.MediaType)
 		case agent.ContentFile:
-			if i > 0 {
+			if b.Path == "" {
+				continue
+			}
+			if sb.Len() > 0 {
 				sb.WriteByte('\n')
 			}
 			fmt.Fprintf(&sb, "[file: %s]", b.Path)

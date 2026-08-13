@@ -117,8 +117,20 @@ func TestSessionConfig_ResumeFlagFromSessionID(t *testing.T) {
 // (not in session.go) because the production argv is a single
 // short literal slice; pulling it into a named function would add
 // a level of indirection without behavioural gain.
+//
+// Note: newSession always appends the two permission default flags
+// (approval_policy="never", sandbox_mode="full-access") at the
+// front of the -c list, ahead of any per-session model / effort
+// overrides. This mirrors claudecode's --permission-mode
+// bypassPermissions default (see internal/bridge/claudecode/
+// permissions.go:65) and is the app-server analogue of
+// --dangerously-bypass-approvals-and-sandbox.
 func argvForSession(cfg sessionConfig) []string {
-	argv := []string{"app-server", "--listen", "stdio://"}
+	argv := []string{
+		"app-server", "--listen", "stdio://",
+		"-c", `approval_policy="never"`,
+		"-c", `sandbox_mode="full-access"`,
+	}
 	if cfg.model != "" {
 		argv = append(argv, "-c", `model="`+cfg.model+`"`)
 	}
@@ -130,7 +142,11 @@ func argvForSession(cfg sessionConfig) []string {
 
 func TestArgvForSession_NoExtras(t *testing.T) {
 	got := argvForSession(sessionConfig{})
-	want := []string{"app-server", "--listen", "stdio://"}
+	want := []string{
+		"app-server", "--listen", "stdio://",
+		"-c", `approval_policy="never"`,
+		"-c", `sandbox_mode="full-access"`,
+	}
 	if !sliceEqual(got, want) {
 		t.Errorf("argv = %v, want %v", got, want)
 	}
@@ -138,16 +154,28 @@ func TestArgvForSession_NoExtras(t *testing.T) {
 
 func TestArgvForSession_ModelAndEffort(t *testing.T) {
 	got := argvForSession(sessionConfig{model: "o4-mini", effort: "high"})
-	// argv: [app-server, --listen, stdio://, -c, model=..., -c, model_reasoning_effort=...]
-	// 7 elements (each -c is paired with its value, so 2 flags = 2 pairs).
-	if len(got) != 7 {
-		t.Fatalf("argv length = %d, want 7; argv = %v", len(got), got)
+	// argv layout (each -c consumes two slots — flag + value):
+	//   [app-server, --listen, stdio://,
+	//    -c, approval_policy="never",
+	//    -c, sandbox_mode="full-access",
+	//    -c, model="o4-mini",
+	//    -c, model_reasoning_effort="high"]
+	// = 11 elements.
+	if len(got) != 11 {
+		t.Fatalf("argv length = %d, want 11; argv = %v", len(got), got)
 	}
-	if got[3] != "-c" || !strings.Contains(got[4], "model=") {
-		t.Errorf("argv[3:5] = %v, want -c model=...", got[3:5])
+	// Permission defaults occupy argv[3..6]; model / effort come after.
+	if got[3] != "-c" || got[4] != `approval_policy="never"` {
+		t.Errorf("argv[3:5] = %v, want -c approval_policy=\"never\"", got[3:5])
 	}
-	if got[5] != "-c" || !strings.Contains(got[6], "model_reasoning_effort=") {
-		t.Errorf("argv[5:7] = %v, want -c model_reasoning_effort=...", got[5:7])
+	if got[5] != "-c" || got[6] != `sandbox_mode="full-access"` {
+		t.Errorf("argv[5:7] = %v, want -c sandbox_mode=\"full-access\"", got[5:7])
+	}
+	if got[7] != "-c" || !strings.Contains(got[8], "model=") {
+		t.Errorf("argv[7:9] = %v, want -c model=...", got[7:9])
+	}
+	if got[9] != "-c" || !strings.Contains(got[10], "model_reasoning_effort=") {
+		t.Errorf("argv[9:11] = %v, want -c model_reasoning_effort=...", got[9:11])
 	}
 }
 

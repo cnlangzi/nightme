@@ -132,8 +132,17 @@ func startDaemon(ctx context.Context, out io.Writer, cfg *config.Config, paths d
 				// child was alive but slow, so the capture file may
 				// be empty — but it's still the right place to look
 				// for whatever the daemon printed.
-				return nmerrors.New(nmerrors.CodeBridgeError, fmt.Sprintf(
-					"daemon did not become ready within 15s; child stderr: %s", stderrPath))
+				//
+				// stderrPath is "" when openDaemonStderrOrDevNull
+				// failed to open the capture file; in that case the
+				// diagnostic aid is gone, so don't promise a file the
+				// operator cannot open.
+				if stderrPath != "" {
+					return nmerrors.New(nmerrors.CodeBridgeError, fmt.Sprintf(
+						"daemon did not become ready within 15s; child stderr: %s", stderrPath))
+				}
+				return nmerrors.New(nmerrors.CodeBridgeError,
+					"daemon did not become ready within 15s (stderr capture was disabled at start; see warning above)")
 			}
 			ok, err := daemoncontrol.Ping(paths.Socket, startReadyPingTimeout)
 			if err == nil && ok {

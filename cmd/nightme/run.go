@@ -24,7 +24,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -189,7 +188,12 @@ func runRunWith(cmd *cobra.Command, deps runDeps) error {
 	sigCh := deps.signals
 	if sigCh == nil {
 		owned := make(chan os.Signal, 2)
-		signal.Notify(owned, syscall.SIGINT, syscall.SIGTERM)
+		// shutdownSignals is platform-split (signals_unix.go /
+		// signals_windows.go) — on Windows SIGTERM silently no-ops
+		// under signal.Notify, so the Windows variant returns only
+		// os.Interrupt + os.Kill. Hard-coding syscall.SIGINT here
+		// would fail to compile on Windows.
+		signal.Notify(owned, shutdownSignals()...)
 		defer signal.Stop(owned)
 		sigCh = owned
 	}

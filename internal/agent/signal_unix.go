@@ -16,15 +16,25 @@ import (
 // SysProcAttr{Setsid: true} the cli is the session/pg leader, so
 // -p.Pid is its own pgid and the broadcast lands everywhere.
 //
+// Accepts os.Signal (not syscall.Signal) so call sites stay
+// cross-platform — Windows callers pass os.Interrupt directly.
+// On Unix we type-assert back to syscall.Signal to feed
+// syscall.Kill; a non-syscall os.Signal (e.g. a future Windows-only
+// value) falls through to the single-pid fallback.
+//
 // Falls back to a single-pid signal when the OS rejects the
 // broadcast (e.g. a transient ESRCH between the SIGCHLD and the
 // caller observing the reaped cli). Returns nil when p is nil so
 // the helpers can stay call-site-clean.
-func SignalProcessGroup(p *os.Process, sig syscall.Signal) error {
+func SignalProcessGroup(p *os.Process, sig os.Signal) error {
 	if p == nil {
 		return nil
 	}
-	if err := syscall.Kill(-p.Pid, sig); err != nil {
+	s, ok := sig.(syscall.Signal)
+	if !ok {
+		return p.Signal(sig)
+	}
+	if err := syscall.Kill(-p.Pid, s); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return p.Signal(sig)
 		}

@@ -146,14 +146,24 @@ func TestFlushHook_NoActiveAgentSession(t *testing.T) {
 	// CloseAllAgents is tested separately in
 	// internal/command/close/close_test.go.
 	//
-	// We also call SetExited manually because real production would
-	// have ObserveClose running and would mark StatusExited when the
-	// events channel closed (which is exactly what fakeAgentSession.Close
-	// does — but our test path doesn't run ObserveClose).
+	// Production marks the AS Exited via the F-61 readpump chain:
+	// Close() closes the events channel → readpump observes !ok →
+	// endPrompt(PromptEndProcessDied) + emitLifecycleLocked(StatusExited)
+	// → dispatcher → cs.routeEvent → SetExited(0). Earlier drafts of
+	// this test called `as.SetExited(0)` manually to bypass the
+	// chain, which masked the cascade-write race against t.TempDir
+	// cleanup. To stay synchronous AND production-shaped we close
+	// the events channel (production path) and then synchronously
+	// mark Exited + Shutdown to drain the readpump / dispatcher
+	// goroutines. The readpump's late SetExited is a no-op now
+	// (pump_events.go:128 skips the cascade when the AS is already
+	// in StatusExited), so no double-write or RestartFromDeath
+	// thunderstorm.
 	snapshot := cs.AgentSessionsInCwd(cs.SelectedCwd())
 	for _, as := range snapshot {
 		_ = as.Close()
 		as.SetExited(0)
+		as.Shutdown()
 	}
 
 	// Bridge process is gone (StatusExited); AS still in pool with

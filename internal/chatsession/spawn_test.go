@@ -280,6 +280,16 @@ func TestAgentSession_ObserveCloseTransitionsToExited(t *testing.T) {
 	cs.SetSelectedAgent("claude")
 	as, _ := cs.LookupSelectedAgentSession()
 
+	// F-61: AS goroutines (eventDispatchLoop + readpump) must be
+	// drained before t.TempDir cleanup, otherwise a late Lifecycle
+	// event triggers a persist() against the deleted tempdir.
+	// Without Shutdown, t.TempDir's RemoveAll races with pending
+	// persist calls → "no such file or directory" or
+	// "directory not empty" errors during test cleanup.
+	t.Cleanup(func() {
+		as.Shutdown()
+	})
+
 	// Drain a few events then finish.
 	spawner.Get("claude", "/x").PushEvent(agent.AgentEvent{Kind: agent.EventAgentText, Text: "hi"})
 	spawner.Get("claude", "/x").PushEvent(agent.AgentEvent{Kind: agent.EventAgentToolStart, ToolStart: &agent.AgentToolStartEvent{ID: "t1", Name: "Bash"}})

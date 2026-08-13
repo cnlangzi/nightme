@@ -72,6 +72,14 @@ type AgentSessionEntry struct {
 	// so restart can replay. omitempty: legacy entries without the
 	// field round-trip as nil (no migration needed).
 	InFlightMessages []InFlightMessageRef `json:"inFlightMessages,omitempty"`
+	// F-61: watchdog suspect state. Set when the per-ChatSession
+	// watchdog marks this AS as suspect (no_fast_ack / hung_prompt /
+	// probed_dead). Cleared on a successful prompt end. omitempty:
+	// legacy entries without the field round-trip as zero values.
+	SuspectReason string `json:"suspectReason,omitempty"`
+	// F-61: when SuspectReason was last set; used to compute the
+	// respawn cooldown window (5 min per AS).
+	SuspectSince *time.Time `json:"suspectSince,omitempty"`
 }
 
 // InFlightMessageRef is the persisted form of an in-flight user message.

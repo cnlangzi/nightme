@@ -119,17 +119,18 @@ func TestSessionConfig_ResumeFlagFromSessionID(t *testing.T) {
 // a level of indirection without behavioural gain.
 //
 // Note: newSession always appends the two permission default flags
-// (approval_policy="never", sandbox_mode="full-access") at the
-// front of the -c list, ahead of any per-session model / effort
-// overrides. This mirrors claudecode's --permission-mode
+// (approval_policy="never", sandbox_mode="danger-full-access") at
+// the front of the -c list, ahead of any per-session model /
+// effort overrides. This mirrors claudecode's --permission-mode
 // bypassPermissions default (see internal/bridge/claudecode/
 // permissions.go:65) and is the app-server analogue of
-// --dangerously-bypass-approvals-and-sandbox.
+// --dangerously-bypass-approvals-and-sandbox on the `codex exec`
+// subcommand.
 func argvForSession(cfg sessionConfig) []string {
 	argv := []string{
 		"app-server", "--listen", "stdio://",
 		"-c", `approval_policy="never"`,
-		"-c", `sandbox_mode="full-access"`,
+		"-c", `sandbox_mode="danger-full-access"`,
 	}
 	if cfg.model != "" {
 		argv = append(argv, "-c", `model="`+cfg.model+`"`)
@@ -145,7 +146,7 @@ func TestArgvForSession_NoExtras(t *testing.T) {
 	want := []string{
 		"app-server", "--listen", "stdio://",
 		"-c", `approval_policy="never"`,
-		"-c", `sandbox_mode="full-access"`,
+		"-c", `sandbox_mode="danger-full-access"`,
 	}
 	if !sliceEqual(got, want) {
 		t.Errorf("argv = %v, want %v", got, want)
@@ -157,7 +158,7 @@ func TestArgvForSession_ModelAndEffort(t *testing.T) {
 	// argv layout (each -c consumes two slots — flag + value):
 	//   [app-server, --listen, stdio://,
 	//    -c, approval_policy="never",
-	//    -c, sandbox_mode="full-access",
+	//    -c, sandbox_mode="danger-full-access",
 	//    -c, model="o4-mini",
 	//    -c, model_reasoning_effort="high"]
 	// = 11 elements.
@@ -168,8 +169,8 @@ func TestArgvForSession_ModelAndEffort(t *testing.T) {
 	if got[3] != "-c" || got[4] != `approval_policy="never"` {
 		t.Errorf("argv[3:5] = %v, want -c approval_policy=\"never\"", got[3:5])
 	}
-	if got[5] != "-c" || got[6] != `sandbox_mode="full-access"` {
-		t.Errorf("argv[5:7] = %v, want -c sandbox_mode=\"full-access\"", got[5:7])
+	if got[5] != "-c" || got[6] != `sandbox_mode="danger-full-access"` {
+		t.Errorf("argv[5:7] = %v, want -c sandbox_mode=\"danger-full-access\"", got[5:7])
 	}
 	if got[7] != "-c" || !strings.Contains(got[8], "model=") {
 		t.Errorf("argv[7:9] = %v, want -c model=...", got[7:9])

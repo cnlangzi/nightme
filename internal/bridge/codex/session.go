@@ -239,12 +239,18 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 	//
 	// We override both at spawn time via `-c <key>="<value>"`,
 	// which is the documented app-server config layer (verified
-	// against codex-rs/app-server/{README.md, shared_options.rs}).
-	// `approval_policy="never"` suppresses the on-turn approval
-	// prompts so the bridge's existing permissions.go handler
-	// stops being asked. `sandbox_mode="full-access"` removes
-	// the FS sandbox entirely. These together are the app-server
-	// analogue of Claude Code's --permission-mode bypassPermissions
+	// against codex-rs/app-server/{README.md, shared_options.rs};
+	// actual accepted variants read out of the live binary via
+	// `codex app-server -c <key>="<bogus>" …`, see F-codex-permissions
+	// smoke). `approval_policy="never"` is one of
+	// untrusted|on-failure|on-request|granular|never — we pick
+	// `never` to suppress on-turn approval prompts so the bridge's
+	// existing permissions.go handler stops being asked. The FS
+	// sandbox accepts read-only|workspace-write|danger-full-access;
+	// we pick `danger-full-access` (NOT `full-access` — that value
+	// is from the Python SDK enum and the Rust CLI rejects it).
+	// Together these are the app-server analogue of Claude Code's
+	// --permission-mode bypassPermissions
 	// (internal/bridge/claudecode/permissions.go:65); the design
 	// across both bridges is "ChatOps agent defaults to acting".
 	//
@@ -255,7 +261,7 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 	argv := []string{
 		"app-server", "--listen", "stdio://",
 		"-c", `approval_policy="never"`,
-		"-c", `sandbox_mode="full-access"`,
+		"-c", `sandbox_mode="danger-full-access"`,
 	}
 	if cfg.model != "" {
 		argv = append(argv, "-c", fmt.Sprintf("model=%q", cfg.model))

@@ -151,6 +151,6 @@ func runLoginWith(cmd *cobra.Command, f *loginCmdFlags, provider login.Provider)
 		fmt.Fprintf(out, "  App Name:  %s\n", creds.AppName)
 	}
 	fmt.Fprintf(out, "  Saved to:  %s\n", config.DefaultPath())
-	fmt.Fprintf(out, "\nNext: run `nightme run` to start the gateway.\n")
+	fmt.Fprintf(out, "\nNext: run `nightme start` to launch the gateway daemon.\n")
 	return nil
 }

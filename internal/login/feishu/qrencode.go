@@ -1,48 +1,37 @@
 // Package feishu provides the Feishu (Lark) login.Provider for nightme.
 //
-// The Terminal QR renderer (RenderASCII) is also kept here so the
-// feishu-only rendering logic does not leak into the parent package.
+// QR rendering is split per-OS via build tags so the Unix and
+// Windows implementations evolve independently:
+//
+//   - qrencode_unix.go   (//go:build !windows)
+//     RenderASCII: Unicode half-block ("▀", "▄", " ", "█"). Default
+//     path on macOS, Linux, *BSD. Works in any terminal that has a
+//     monospace font with the half-block glyphs and a UTF-8 output
+//     encoding. One terminal row carries two source-module rows.
+//
+//   - qrencode_windows.go (//go:build windows)
+//     RenderANSI: 24-bit ANSI color half-block. Used on Windows
+//     Terminal (Cascadia Code, VT processing). The colors come from
+//     background/foreground escape codes, so the half-block glyphs
+//     don't need to exist in the font — the result is a clean
+//     black-and-white QR.
+//     WritePNGToDesktop: 512×512 PNG on the user's Desktop, with
+//     an instruction caption band underneath. Fallback for legacy
+//     conhost (cmd.exe / Windows PowerShell on Win7–Win10 pre-
+//     Cascadia, or any conhost where VT processing is off) and for
+//     the 120-second time-based backup that fires after the
+//     in-terminal QR is shown.
+//
+// The provider.go entry point (printQRCode) calls a per-OS helper
+// (renderQRPlatform) that picks the best mode for the runtime
+// platform.
 package feishu
 
-import (
-	"fmt"
-	"io"
-
-	"github.com/skip2/go-qrcode"
-)
+import "github.com/skip2/go-qrcode"
 
 // qrcodeErrorLevel trades QR density (more modules) for scan
-// reliability in noisy terminals. Medium is the skip2 default and
-// is good enough for CLI use — no need to chase Low for a few extra
-// rows of vertical space.
+// reliability. Medium is the skip2 default and is good enough for
+// CLI use — no need to chase Low for a few extra rows of vertical
+// space in the ASCII path. (The PNG path is size-independent since
+// the user can zoom the image.)
 const qrcodeErrorLevel = qrcode.Medium
-
-// RenderASCII encodes content as a QR code and writes it to w using
-// the half-block Unicode characters ("▀", "▄", " ", "█") so each
-// terminal row carries two source-module rows. Each output column
-// maps to exactly one source module, so the rendered modules stay
-// physically square (the terminal cell is roughly 2:1 tall, and the
-// half-block halves vertical extent, giving a 1:1 visual aspect).
-//
-// No downsampling is applied: the QR's module fidelity is what
-// makes it scannable. For the typical Feishu auth URL at medium
-// error correction this produces a 41-column × ~21-line grid.
-//
-// inverseColor=false uses the standard "dark on light" mapping
-// (matches what most terminals render correctly); pass true if your
-// terminal has a light background.
-func RenderASCII(content string, w io.Writer, inverseColor bool) error {
-	if content == "" {
-		return fmt.Errorf("feishu: cannot render QR for empty content")
-	}
-	q, err := qrcode.New(content, qrcodeErrorLevel)
-	if err != nil {
-		return fmt.Errorf("feishu: encode qr: %w", err)
-	}
-	// ToSmallString uses half-block characters; without it each row
-	// is 2 terminal lines which makes a 30-module QR noticeably tall.
-	if _, err := io.WriteString(w, q.ToSmallString(inverseColor)); err != nil {
-		return fmt.Errorf("feishu: write qr: %w", err)
-	}
-	return nil
-}

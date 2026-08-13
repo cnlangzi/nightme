@@ -15,9 +15,12 @@
 //     background/foreground escape codes, so the half-block glyphs
 //     don't need to exist in the font — the result is a clean
 //     black-and-white QR.
-//     WritePNGToTemp: PNG file in os.TempDir(). Fallback for legacy
+//     WritePNGToDesktop: 512×512 PNG on the user's Desktop, with
+//     an instruction caption band underneath. Fallback for legacy
 //     conhost (cmd.exe / Windows PowerShell on Win7–Win10 pre-
-//     Cascadia, or any conhost where VT processing is off).
+//     Cascadia, or any conhost where VT processing is off) and for
+//     the 120-second time-based backup that fires after the
+//     in-terminal QR is shown.
 //
 // The provider.go entry point (printQRCode) calls a per-OS helper
 // (renderQRPlatform) that picks the best mode for the runtime

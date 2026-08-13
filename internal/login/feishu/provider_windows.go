@@ -37,45 +37,10 @@ import (
 //      Consolas / Cascadia Code font, or any conhost where VT
 //      processing is off): RenderASCII — half-block Unicode chars
 //      (▀▄█), with the console output code page forced to UTF-8
-//      first via enableConsoleOutputUTF8. Works on Win10+ where the
-//      default font has the half-block glyphs.
+//      first via enableConsoleOutputUTF8 and the console font set
+//      to a known-good face via ensureConsoleFont.
 //
 //   3. Universal fallback: WritePNGToDesktop — a 512×512 PNG on
-//      the user's Desktop, auto-opened via `cmd /c start "" <path>`
-//      so the default photo viewer (Photos on Win10/11) pops up.
-//      Always works regardless of font, code page, or Win version.
-// renderQRPlatform is the Windows rendering entry point.
-//
-// On Windows we do NOT hand the registration URL to a browser —
-// Feishu's web page serves a different (OAuth-style) confirmation
-// flow that does NOT signal the device-flow poll endpoint, so the
-// SDK polls forever and `nightme login feishu` hangs for the full
-// 10-minute timeout with no greeting sent. We confirmed this in
-// practice: the user successfully authorized via the browser page
-// but the SDK never saw the authorization, no credentials were
-// saved, no greeting was sent.
-//
-// Instead we render the QR ourselves, in four tiers of fallback:
-//
-//   1. Windows Terminal (Cascadia Code, VT processing on, detected
-//      via WT_SESSION env var): RenderANSI — 24-bit ANSI color
-//      half-block. Inline in the terminal, no external file. The
-//      best UX, immune to font glyph issues because the colors do
-//      the work.
-//
-//   2. Legacy conhost with a supported font (Cascadia Code /
-//      Consolas / MS Gothic / ... — see supportedConsoleFonts):
-//      RenderASCII — half-block Unicode chars (▀▄█), with the
-//      console output code page forced to UTF-8 first via
-//      enableConsoleOutputUTF8. The font is confirmed to ship the
-//      half-block glyphs so the rendered QR will be clean.
-//
-//   3. Legacy conhost with an unknown / unsupported font (rare —
-//      most users have one of the supported defaults): silently
-//      skip the half-block path because we can't be sure the
-//      glyphs render correctly. Fall through to PNG.
-//
-//   4. Universal fallback: WritePNGToDesktop — a 512×512 PNG on
 //      the user's Desktop, auto-opened via `cmd /c start "" <path>`
 //      so the default photo viewer (Photos on Win10/11) pops up.
 //      Always works regardless of font, code page, or Win version.
@@ -175,24 +140,6 @@ func writeAndOpenPNG(url string, out io.Writer) {
 // basis and may have been visually broken on a misconfigured font;
 // the PNG is guaranteed scannable.
 //
-// The function returns immediately; the goroutine runs in the
-// background for up to (delay) seconds. If the nightme process
-// exits before then (e.g. quick successful auth), the goroutine
-// is killed with the process — no orphaned subprocesses.
-//
-// Why we don't synchronize with the polling loop: doing so would
-// require a shared context or done channel wired through
-// Provider, OnQRCode callback, and back into renderQRPlatform. The
-// goroutine is the simplest implementation, and the worst-case
-// (popup arriving after a successful auth) is a minor annoyance
-// the user can dismiss with one click.
-// schedulePNGFallback spawns a goroutine that, after delay,
-// writes a fresh PNG copy of the QR to the user's Desktop and
-// auto-opens it in the default photo viewer. The fresh file is
-// important — the in-terminal QR was rendered on a best-effort
-// basis and may have been visually broken on a misconfigured font;
-// the PNG is guaranteed scannable.
-//
 // Before opening the PNG, we print a short explanation on stdout
 // so the user understands why a QR suddenly appeared on their
 // Desktop. Without this hint the popup feels random: "why did a
@@ -223,32 +170,6 @@ func schedulePNGFallback(url string, delay time.Duration, out io.Writer) {
 	}()
 }
 
-// _ keeps io referenced for godoc tools even if all the typed
-// signatures below change shape.
-
-// enableConsoleOutputUTF8 puts the current process's console into
-// UTF-8 output mode (code page 65001) so Unicode characters like
-// the half-block glyphs used by RenderASCII (▀▄█) and any CJK
-// strings in error messages survive the OEM/ANSI code-page
-// translation that legacy Windows conhost applies to stdout bytes.
-//
-// On Windows Terminal and other VT-aware hosts this is a visual
-// no-op (the terminal already speaks UTF-8 natively), but it still
-// helps when the program pipes to a file or to another tool that
-// does its own code-page decoding.
-//
-// On legacy conhost with the default Consolas / Cascadia Code font
-// (Win10 1809+), this is the difference between seeing half-block
-// QR modules and seeing mojibake vertical bars in the rendered QR.
-//
-// Only affects this process's console; the user's parent shell
-// session is left untouched, so closing nightme leaves cmd /
-// PowerShell with its original code page.
-//
-// We use kernel32!SetConsoleOutputCP directly rather than shelling
-// out to `chcp 65001` because the subprocess would either affect
-// the user's whole shell (rude) or race with our own stdout writes
-// (subtle).
 // enableConsoleOutputUTF8 puts the current process's console into
 // UTF-8 output mode (code page 65001) so Unicode characters like
 // the half-block glyphs used by RenderASCII (▀▄█) and any CJK
@@ -274,6 +195,14 @@ func schedulePNGFallback(url string, delay time.Duration, out io.Writer) {
 // writes — subtle). x/sys/windows has its own test suite for
 // SetConsoleOutputCP and is the same wrapper the Go toolchain
 // itself uses for its own Windows console calls.
+func enableConsoleOutputUTF8() {
+	// We intentionally swallow the error: a failed UTF-8 setting
+	// only affects the half-block glyphs, and the worst-case
+	// outcome is that RenderASCII's output is mojibake — which the
+	// user will see and the PNG fallback path will rescue.
+	_ = windows.SetConsoleOutputCP(65001)
+}
+
 // qrFallbackAfter is how long to display the in-terminal QR before
 // the time-based backup fires (also open a PNG copy in the default
 // photo viewer).
@@ -298,14 +227,6 @@ func schedulePNGFallback(url string, delay time.Duration, out io.Writer) {
 // backup covers the "user never noticed the QR" failure mode long
 // before the polling gives up.
 const qrFallbackAfter = 120 * time.Second
-
-func enableConsoleOutputUTF8() {
-	// We intentionally swallow the error: a failed UTF-8 setting
-	// only affects the half-block glyphs, and the worst-case
-	// outcome is that RenderASCII's output is mojibake — which the
-	// user will see and the PNG fallback path will rescue.
-	_ = windows.SetConsoleOutputCP(65001)
-}
 
 // ensureConsoleFont picks a known-good monospace font and sets
 // it on the current console, so the half-block Unicode glyphs

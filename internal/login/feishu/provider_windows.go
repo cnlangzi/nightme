@@ -301,11 +301,19 @@ func trySetConsoleFont(handle windows.Handle, faceName string) bool {
 	}
 	fontInfo.cbSize = uint32(unsafe.Sizeof(fontInfo))
 
-	nameUTF16 := syscall.StringToUTF16(faceName)
-	// StringToUTF16 returns a NUL-terminated slice. Copy as much
-	// as fits; the trailing NUL is preserved by the slice's
+	// UTF16FromString returns a NUL-terminated UTF-16 slice (and
+	// an error we ignore — faceName here is a hard-coded ASCII
+	// constant from a Go literal, so encoding errors can't
+	// happen). Copy as much as fits into the fixed-size FaceName
+	// array; the trailing NUL is preserved by the slice's
 	// terminator and Windows treats a NUL-padded FaceName as
 	// equivalent to a length-prefixed string.
+	//
+	// (Go 1.26 deprecated the older StringToUTF16 spelling in
+	// favour of UTF16FromString, which returns an explicit error
+	// so callers can detect unencodable input rather than getting
+	// a silently truncated result.)
+	nameUTF16, _ := syscall.UTF16FromString(faceName)
 	copy(fontInfo.FaceName[:], nameUTF16)
 
 	ret, _, _ := proc.Call(

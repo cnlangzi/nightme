@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Translation table tests for the Pi event -> agent.AgentEvent
 // mapper. Each table-driven case feeds one raw event JSON into the

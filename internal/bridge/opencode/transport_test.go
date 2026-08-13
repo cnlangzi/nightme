@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Tests for the SSE parser and the client HTTP wrapper.
 //

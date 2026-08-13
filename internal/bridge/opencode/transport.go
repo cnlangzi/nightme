@@ -1,4 +1,3 @@
-//go:build !windows
 
 // SSE event stream reader for the opencode server's
 // GET /api/session/{id}/event endpoint.

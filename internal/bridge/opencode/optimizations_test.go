@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Tests for the start-retry + watchdog + empty-response patches
 // (Patches 1-3). Each test is intentionally narrow — the goal is
@@ -17,6 +16,14 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
+
+// stubDeliver is a no-op deliver func used by the opencode
+// translator tests. It lives here (not in agent_e2e_unix_test.go)
+// because optimizations_test.go references it and is itself
+// cross-platform.
+func stubDeliver() func(agent.AgentEvent) agent.AgentEvent {
+	return func(ev agent.AgentEvent) agent.AgentEvent { return ev }
+}
 
 // TestIsUnrecoverableStartErr covers the classifier used by the
 // Start retry wrapper. Auth / config / context-cancel errors must

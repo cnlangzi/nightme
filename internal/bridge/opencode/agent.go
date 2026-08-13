@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Package opencode — shared helpers for the bridge.
 //

@@ -1,4 +1,3 @@
-//go:build !windows
 
 // HTTP client for the opencode server. Only the 9 endpoints we
 // actually use are wired up; the rest of the OpenAPI surface is

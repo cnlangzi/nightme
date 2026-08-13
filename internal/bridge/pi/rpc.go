@@ -1,4 +1,3 @@
-//go:build !windows
 
 // JSONL framing + request/response correlation for the Pi RPC bridge.
 //

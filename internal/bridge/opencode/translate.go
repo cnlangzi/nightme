@@ -1,4 +1,3 @@
-//go:build !windows
 
 // SSE event → agent.AgentEvent translator.
 //

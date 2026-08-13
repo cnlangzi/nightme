@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Public Agent (template + live) for the codex app-server bridge.
 //
@@ -38,7 +37,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -412,7 +410,7 @@ func (d *driver) Stop(ctx context.Context) error {
 	if d.session == nil || d.session.cmd == nil || d.session.cmd.Process == nil {
 		return agent.ErrNotSupported
 	}
-	return agent.SignalProcessGroup(d.session.cmd.Process, syscall.SIGINT)
+	return agent.SignalProcessGroup(d.session.cmd.Process, os.Interrupt)
 }
 
 // SetModel is not supported on the codex bridge. codex reads the

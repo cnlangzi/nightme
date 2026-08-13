@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Regression test for the claudecode bridge's events-buffer cap.
 //

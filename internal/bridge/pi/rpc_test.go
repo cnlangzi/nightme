@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Unit tests for the JSONL framing + request/response correlation
 // layer. These tests do not spawn a process; they drive the

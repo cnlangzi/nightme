@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Package codex implements a bridge to the Codex CLI via its
 // `codex app-server --listen stdio://` JSON-RPC 2.0 transport.

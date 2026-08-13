@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Regression tests for Agent-level busy-guard handling in
 // SendBlocks. These codify the two early-return paths that the

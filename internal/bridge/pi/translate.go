@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Pi event -> agent.AgentEvent translation table.
 //

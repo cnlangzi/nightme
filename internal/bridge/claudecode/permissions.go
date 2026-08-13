@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Package claudecode implements bridge.Agent for Anthropic's Claude Code
 // CLI using its stream-json mode. See docs/feat/F-24-claudecode-bridge.md.

@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Package opencode — Starter (spawn recipe) for the opencode HTTP
 // bridge. Adapted to the agent.Info/Starter/Agent/driver three-piece

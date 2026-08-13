@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Package opencode implements the bridge to the opencode CLI via its
 // first-party HTTP server (`opencode serve`).

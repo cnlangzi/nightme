@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Regression tests for the pi bridge's deliver() contract.
 //

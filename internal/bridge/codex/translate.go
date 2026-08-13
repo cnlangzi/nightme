@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Package codex — translator + notification / server-request dispatch.
 //

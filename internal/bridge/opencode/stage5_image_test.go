@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Tests for stage 5: image base64 inline.
 //

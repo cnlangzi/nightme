@@ -4,7 +4,6 @@ package agent
 
 import (
 	"os"
-	"syscall"
 )
 
 // SignalProcessGroup on Windows falls back to single-pid signaling.
@@ -16,9 +15,11 @@ import (
 // keep running. Callers that need stricter teardown on Windows
 // should track child handles explicitly and signal them.
 //
+// Accepts os.Signal (not syscall.Signal) so call sites stay
+// cross-platform — Windows callers pass os.Interrupt directly.
 // Returns nil when p is nil so call-site code can stay
 // panic-free across the bridge layer.
-func SignalProcessGroup(p *os.Process, sig syscall.Signal) error {
+func SignalProcessGroup(p *os.Process, sig os.Signal) error {
 	if p == nil {
 		return nil
 	}

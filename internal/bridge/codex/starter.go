@@ -1,4 +1,3 @@
-//go:build !windows
 
 // starter.go — the spawn recipe for the codex bridge.
 //

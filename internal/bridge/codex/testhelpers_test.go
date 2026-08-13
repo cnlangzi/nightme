@@ -1,17 +1,13 @@
-//go:build !windows
-
 package codex
 
-// Shared skip guard for tests that spawn the REAL `codex` CLI's
-// app-server protocol. These tests exercise actual codex behaviour
-// (handshake, thread/start, turn lifecycle, JSON-RPC envelopes)
-// against the user's local `codex` install and are inherently
-// environment-dependent (API key, network, proxy, model routing,
-// sandbox — see docs/bridge/codex.md §Testing). CI (and any machine
-// without `codex` on PATH) must SKIP them, not fail the build.
+// Cross-platform test helpers for the codex bridge.
 //
-// Every test file under this package that drives a real `codex`
-// process MUST call requireRealCodex(t) as its first line.
+// requireRealCodex lives here (not in testhelpers_realcodex_unix_test.go)
+// because it is purely a skip-guard — it does not depend on any Unix-only
+// surface, and the tests that call it (`agent_test.go`) also exercise
+// non-CLI behaviour (NewStarter construction, Detect() error path, image
+// staging). On Windows where `codex` is not on PATH, the guard simply
+// skips the real-binary branch; the rest of the test file still runs.
 
 import (
 	"os"

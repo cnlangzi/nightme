@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Package opencode — driver (runtime state) for the opencode HTTP
 // bridge. Created by Starter.Start; wrapped by agent.NewAgent so

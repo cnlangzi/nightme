@@ -1,4 +1,3 @@
-//go:build !windows
 
 // F-38: provider-native task tool parsing and snapshot management.
 //

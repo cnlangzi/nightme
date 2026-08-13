@@ -1,4 +1,3 @@
-//go:build !windows
 
 // F-38: TaskCreate / TaskUpdate bridge tests. Each test runs a
 // real pumpStream against a synthetic stream of stream-json

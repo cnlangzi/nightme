@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Server-initiated request handling for the codex app-server bridge.
 //

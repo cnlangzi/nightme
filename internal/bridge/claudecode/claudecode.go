@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Package claudecode implements a bridge to the Claude Code CLI
 // using stream-json mode over stdin/stdout. See
@@ -23,7 +22,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"sync"
 	"time"
 
@@ -525,13 +523,17 @@ func (d *driver) New(ctx context.Context) error {
 // would only hit the cli's main loop and any orphan subtask
 // would keep running, which is why the previous /stop hung.
 //
+// On Windows SignalProcessGroup falls back to single-pid
+// signaling (no process-group concept); the same os.Interrupt
+// value works on both platforms.
+//
 // Returns ErrNotSupported if the bridge is not started.
 func (d *driver) Stop(ctx context.Context) error {
 	_ = ctx
 	if d.cmd == nil || d.cmd.Process == nil {
 		return agent.ErrNotSupported
 	}
-	return agent.SignalProcessGroup(d.cmd.Process, syscall.SIGINT)
+	return agent.SignalProcessGroup(d.cmd.Process, os.Interrupt)
 }
 
 // SetModel is not supported on the claudecode bridge. The
@@ -562,7 +564,7 @@ func (d *driver) Close() error {
 			// Broadcast to the whole process group so a Bash
 			// tool subprocess doesn't keep the kernel pipe alive
 			// past the cli's own exit.
-			_ = agent.SignalProcessGroup(d.cmd.Process, syscall.SIGINT)
+			_ = agent.SignalProcessGroup(d.cmd.Process, os.Interrupt)
 		}
 
 		// Wait up to 2s for graceful exit; SIGKILL after.

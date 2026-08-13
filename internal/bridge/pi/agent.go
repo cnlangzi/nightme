@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Package pi implements a bridge to the Pi coding agent using its
 // native `pi --mode rpc` long-lived JSONL protocol.
@@ -45,7 +44,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -644,7 +642,7 @@ func (d *driver) Close() error {
 		// subprocesses (e.g. a tool that's holding the rpc
 		// pipe) shut down with it. Escalate to SIGKILL after.
 		if d.cmd != nil && d.cmd.Process != nil {
-			_ = agent.SignalProcessGroup(d.cmd.Process, syscall.SIGINT)
+			_ = agent.SignalProcessGroup(d.cmd.Process, os.Interrupt)
 		}
 		// Escalate to SIGKILL after shutdownGrace.
 		time.AfterFunc(shutdownGrace, func() {

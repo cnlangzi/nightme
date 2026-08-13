@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Wire-level structs for the Pi RPC protocol. These are intentionally
 // permissive: every optional or evolving field is captured as

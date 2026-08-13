@@ -418,9 +418,9 @@ func TestAgent_Close_IsIdempotent(t *testing.T) {
 
 // ─── helpers ─────────────────────────────────────────────────────
 
-func stubDeliver() func(agent.AgentEvent) agent.AgentEvent {
-	return func(ev agent.AgentEvent) agent.AgentEvent { return ev }
-}
+// stubDeliver / stubDeliver2 (cross-platform, defined in
+// optimizations_test.go / stage5_image_test.go) are 1-line
+// no-op deliver funcs shared by the opencode translator tests.
 
 // drainEvents reads kind strings from the events channel up to
 // either `max` events or `timeout` elapses. Returns whatever was

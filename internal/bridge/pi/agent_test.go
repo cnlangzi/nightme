@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Tests for the spawn argv builder. Mirrors
 // internal/bridge/claudecode/claudecode_test.go in spirit: pure

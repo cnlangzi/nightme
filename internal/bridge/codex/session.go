@@ -1,4 +1,3 @@
-//go:build !windows
 
 // Process / I/O lifecycle for the codex app-server bridge.
 //

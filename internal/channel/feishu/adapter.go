@@ -409,6 +409,17 @@ func (a *Adapter) DownloadAttachments(ctx context.Context,
 	return DownloadAttachments(ctx, a.larkClient, messageID, atts, sessionID)
 }
 
+// downloadWithRetry (F-61) wraps the package-level
+// DownloadAttachmentsWithRetry with the per-Adapter lark client.
+// Caller passes nil for onRetry if it doesn't want per-attempt
+// reaction feedback. See attachment.go for the full ladder
+// semantics (3 attempts, 0/5s/15s backoff).
+func (a *Adapter) downloadWithRetry(ctx context.Context,
+	messageID string, atts []channel.Attachment, sessionID string,
+) DownloadResult {
+	return DownloadAttachmentsWithRetry(ctx, a.larkClient, messageID, atts, sessionID, nil)
+}
+
 // Start starts the Feishu WebSocket receive loop. The SDK itself handles
 // reconnects; this method only owns the lifetime context and goroutine.
 func (a *Adapter) Start(ctx context.Context) error {
@@ -3192,22 +3203,59 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 	// across AgentSession re-spawns within the same chat). AllFailed
 	// aborts the message entirely with a user-facing notification;
 	// partial failures emit a warning but continue with the rest.
+	//
+	// F-61: wrap in downloadWithRetry — outer ladder (3 attempts,
+	// 0/5s/15s backoff) handles transient infra failures. Inner
+	// per-attachment retry lives in downloadOneWithRetry
+	// (attachment.go:397). Only after both layers exhaust do we
+	// declare AllFailed and degrade to text-only publish.
 	if len(attachments) > 0 {
-		result := a.DownloadAttachments(ctx, messageID, attachments, chatID)
+		result := a.downloadWithRetry(ctx, messageID, attachments, chatID)
 		if result.AllFailed {
 			if logger != nil {
-				logger.Info("feishu: all attachments failed to download; dropping message",
+				logger.Warn("feishu: all attachment retries exhausted",
 					"message_id", messageID,
 					"failed_count", len(result.FailureKeys),
 					"failure_keys", result.FailureKeys,
+					"attempts", downloadRetryConfig.MaxAttempts,
 				)
 			}
-			_ = a.SendMessage(ctx, chatID,
-				fmt.Sprintf("❌ %d attachment(s) failed to download, please retry",
-					len(result.FailureKeys)))
-			return nil
-		}
-		if len(result.FailureKeys) > 0 {
+			// F-61 fix #6: detect pure-image messages (text==""
+			// + no surviving text-bearing blocks). A pure-image
+			// message that fails to download has nothing left
+			// to send — degrade-to-text-only would yield an
+			// empty msg that confuses the bridge. Drop it instead
+			// and tell the user to retry.
+			pureImage := text == "" && blocks == nil
+			bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if pureImage {
+				_ = a.SendMessage(bgCtx, chatID,
+					fmt.Sprintf("❌ %d attachment(s) failed to download after %d attempts. Message dropped — please retry.",
+						len(result.FailureKeys), downloadRetryConfig.MaxAttempts))
+			} else {
+				// F-61: notify user via background ctx. Reusing
+				// inbound ctx is the 2026-08-12 incident root
+				// cause: WithTransientRetry sees ctx.Canceled at
+				// entry and swallows the warn. Always use a
+				// fresh ctx here.
+				_ = a.SendMessage(bgCtx, chatID,
+					fmt.Sprintf("⚠️ %d attachment(s) failed to download after %d attempts; sending text only. Original message ID: %s",
+						len(result.FailureKeys), downloadRetryConfig.MaxAttempts, messageID))
+				// F-61: degrade to text-only — continue past the
+				// attachment download section. attachments and
+				// blocks are reset below so downstream publishers
+				// don't try to render empty LocalPath placeholders.
+				attachments = nil
+				if blocks != nil {
+					blocks = resolveBlocks(blocks, nil)
+				}
+			}
+			cancel()
+			if pureImage {
+				return nil
+			}
+			// Fall through to publish for text-only path.
+		} else if len(result.FailureKeys) > 0 {
 			if logger != nil {
 				logger.Info("feishu: partial attachment download failure; sending the rest",
 					"message_id", messageID,
@@ -3216,11 +3264,22 @@ func (a *Adapter) handleMessage(ctx context.Context, event *larkim.P2MessageRece
 					"succeeded_count", len(result.Atts)-len(result.FailureKeys),
 				)
 			}
-			_ = a.SendMessage(ctx, chatID,
-				fmt.Sprintf("⚠️ %d of %d attachment(s) failed to download; sending the rest",
-					len(result.FailureKeys), len(attachments)))
+			// F-61: notify user via background ctx (inbound ctx
+			// may be canceled; same root cause as the AllFailed
+			// branch above). Partial-failure warnings are NOT
+			// duplicated with the AllFailed path — the two
+			// branches are mutually exclusive (if AllFailed,
+			// we returned earlier; partial failure here means
+			// at least one attachment downloaded successfully).
+			bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = a.SendMessage(bgCtx, chatID,
+				fmt.Sprintf("⚠️ %d of %d attachment(s) failed to download after %d attempts; sending the rest. Original message ID: %s",
+					len(result.FailureKeys), len(attachments), downloadRetryConfig.MaxAttempts, messageID))
+			cancel()
+			attachments = result.Atts
+		} else {
+			attachments = result.Atts
 		}
-		attachments = result.Atts
 		// F-14 v1.4b: back-fill LocalPath into post rich-text image
 		// blocks whose Path currently holds a FileKey placeholder.
 		if blocks != nil {

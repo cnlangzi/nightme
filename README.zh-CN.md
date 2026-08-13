@@ -71,9 +71,24 @@
 
 ## Install
 
-两种方式装 `nightme`：
+三种方式装 `nightme`：
 
-1. **预编译二进制**（推荐）：
+1. **One-liner**（推荐）：
+
+   **macOS / Linux：**
+   ```bash
+   curl -fsSL https://nightme.dev/install.sh | bash
+   ```
+
+   **Windows（PowerShell）：**
+   ```powershell
+   powershell -c "irm https://nightme.dev/install.ps1 | iex"
+   ```
+
+   会把最新版 release 装到 `$PATH` 上的稳定路径，并跑 `nightme version`
+   验证。
+
+2. **预编译二进制**（手动）：
 
    - 去 [latest release page](https://github.com/cnlangzi/nightme/releases/latest)
      下载对应平台二进制（如 `nightme-darwin-amd64`、`nightme-linux-amd64`、
@@ -84,7 +99,7 @@
      chmod +x /usr/local/bin/nightme
      ```
 
-2. **从源码**（开发或钉死一个 commit）：
+3. **从源码**（开发或钉死一个 commit）：
 
    ```bash
    git clone https://github.com/cnlangzi/nightme.git
@@ -92,7 +107,7 @@
    make dev
    ```
 
-`make dev` 直接从源码跑 nightme，配置文件用 example config，无需单独构建。
+   `make dev` 直接从源码跑 nightme，配置文件用 example config，无需单独构建。
 
 ---
 

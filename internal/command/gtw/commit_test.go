@@ -10,7 +10,8 @@ import (
 // -----------------------------------------------------------------------------
 // buildAgentPrompt tests (F-56 §3 invariant: prompt is role +
 // task + 3 hard rules; no reference to nightme, push, or
-// verification).
+// verification). v2 invariants below add the prompt-engineering
+// guards (tool floor, split anchors, Do NOT block, gold example).
 // -----------------------------------------------------------------------------
 
 func TestBuildAgentPrompt_Remote(t *testing.T) {
@@ -21,9 +22,10 @@ func TestBuildAgentPrompt_Remote(t *testing.T) {
 	}
 	p := buildAgentPrompt(c)
 
-	mustContain(t, p, "You are a release engineer.")
-	mustContain(t, p, "branch fix-42-foo in /w")
-	mustContain(t, p, "for issue #42")
+	mustContain(t, p, "release engineer")
+	mustContain(t, p, "Branch: fix-42-foo")
+	mustContain(t, p, "Worktree: /w")
+	mustContain(t, p, "Issue: #42")
 	mustContain(t, p, "Conventional Commits")
 	mustContain(t, p, "feat, fix, chore, refactor")
 	mustContain(t, p, "Do not push.")
@@ -47,14 +49,166 @@ func TestBuildAgentPrompt_Local(t *testing.T) {
 	}
 	p := buildAgentPrompt(c)
 
-	mustContain(t, p, "You are a release engineer.")
-	mustContain(t, p, "branch wt-local in /w")
-	if strings.Contains(p, "for issue #") {
-		t.Fatalf("Local prompt should not contain 'for issue #':\n%s", p)
+	mustContain(t, p, "release engineer")
+	mustContain(t, p, "Branch: wt-local")
+	// The body-rules section legitimately mentions `Issue: #N`
+	// as a generic phrase. Check for the more specific "Issue: #N\n"
+	// line that only appears when c.Issue > 0.
+	if strings.Contains(p, "Issue: #1") || strings.Contains(p, "Issue: #42") {
+		t.Fatalf("Local prompt should not contain a specific Issue: #N line:\n%s", p)
 	}
 	if strings.Contains(p, "Working directory: /w\nBranch:") {
 		t.Fatalf("Local prompt should not contain the old 'Working directory / Branch' lines:\n%s", p)
 	}
+}
+
+// -----------------------------------------------------------------------------
+// buildAgentPrompt v2 invariants (mirror the v2 PR prompt
+// invariants in pr_test.go). Each test fails loudly if a future
+// edit silently drops a guard that prevents one of the observed
+// regressions:
+//   - subject-only commits for non-trivial work (PR #135's
+//     `fix(gtw): restore missing space in the commit-agent prompt`
+//     is literal evidence this regression hits production)
+//   - split anchors removed → LLM reverts to single-commit default
+//   - Do NOT block removed → modal training-data pattern wins
+//   - tool floor removed → LLM skips git inspection, writes from
+//     file names alone
+//   - issue trailer dropped → commits lose their bug-tracker link
+// -----------------------------------------------------------------------------
+
+// TestBuildAgentPromptV2_ToolFloorMandatory: the agent MUST run
+// git status + git diff + git diff --staged + git log before
+// staging anything. Without this, the LLM falls back to guessing
+// from file names — same regression the v2 PR prompt fixes.
+func TestBuildAgentPromptV2_ToolFloorMandatory(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
+	p := buildAgentPrompt(c)
+
+	mustContain(t, p, "## Before staging — tool floor")
+	mustContain(t, p, "You MUST run")
+	mustContain(t, p, "`git status`")
+	mustContain(t, p, "`git diff` (no args)")
+	mustContain(t, p, "`git diff --staged`")
+	mustContain(t, p, "`git log --oneline -5`")
+	mustContain(t, p, "Do NOT stage files without reading their diff")
+}
+
+// TestBuildAgentPromptV2_SplitAnchorsConcrete: the prompt names
+// five concrete split patterns so the LLM has a decision rubric,
+// not an adjective. "ONE commit beats a forced split" is the
+// counter-anchor that prevents the opposite regression.
+func TestBuildAgentPromptV2_SplitAnchorsConcrete(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
+	p := buildAgentPrompt(c)
+
+	mustContain(t, p, "## Splitting into multiple commits")
+	mustContain(t, p, "**Code change + its test**")
+	mustContain(t, p, "**Implementation + refactor**")
+	mustContain(t, p, "**Style/formatting churn mixed with logic change**")
+	mustContain(t, p, "**Unrelated chore")
+	mustContain(t, p, "ONE commit with a clear subject is better than a forced split")
+}
+
+// TestBuildAgentPromptV2_TwoTierBodyRule: the prompt must
+// distinguish commit body (short, focused, per-change intent)
+// from PR body (long, structured, all four dimensions). Without
+// this distinction the LLM either pads commit bodies to PR
+// length or strips them to nothing.
+func TestBuildAgentPromptV2_TwoTierBodyRule(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
+	p := buildAgentPrompt(c)
+
+	mustContain(t, p, "commit body is NOT a PR body")
+	mustContain(t, p, "5-15 lines total")
+	mustContain(t, p, "longer than the `git diff`")
+	mustContain(t, p, "empty for a `fix:` / `feat:`")
+}
+
+// TestBuildAgentPromptV2_TypeByBodyRule: chore: gets an OPTIONAL
+// body, fix:/feat: get a REQUIRED body. Without this anchor the
+// LLM either pads every chore commit or strips every fix commit.
+func TestBuildAgentPromptV2_TypeByBodyRule(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
+	p := buildAgentPrompt(c)
+
+	mustContain(t, p, "`chore:` (typos, dep bumps")
+	mustContain(t, p, "OPTIONAL")
+	mustContain(t, p, "`fix:` and `feat:` a body is REQUIRED")
+}
+
+// TestBuildAgentPromptV2_IssueTrailerEnforced: when c.Issue > 0,
+// the prompt must both show `Issue: #N` in the example and emit
+// a Do NOT line that punishes dropping it. PR #135's
+// `fix(gtw): restore missing space in the commit-agent prompt`
+// shows that regression-hits-production; this test guards the
+// fix.
+//
+// The no-issue branch checks for the Do NOT line specifically
+// (not just any "Issue: #" substring) because the body-rules
+// section legitimately mentions `Issue: #N` as a generic phrase.
+func TestBuildAgentPromptV2_IssueTrailerEnforced(t *testing.T) {
+	withIssue := buildAgentPrompt(Context{Worktree: "/w", Branch: "x", Issue: 42})
+	mustContain(t, withIssue, "Issue: #42")
+	mustContain(t, withIssue, "Do NOT skip the `Issue: #42` trailer")
+
+	noIssue := buildAgentPrompt(Context{Worktree: "/w", Branch: "x", Issue: -1})
+	if strings.Contains(noIssue, "Do NOT skip the `Issue:") {
+		t.Fatalf("no-issue prompt should not have Issue-trailer Do NOT line:\n%s", noIssue)
+	}
+	// Also verify the gold example omits the Issue trailer when
+	// no issue is provided.
+	if strings.Contains(noIssue, "Issue: #\n") || strings.Contains(noIssue, "Issue: #1\n") {
+		t.Fatalf("no-issue prompt's gold example should not include Issue: #N trailer:\n%s", noIssue)
+	}
+}
+
+// TestBuildAgentPromptV2_AntiModalPattern: the single most
+// important regression guard. The "subject-only commit for
+// non-trivial work" line directly attacks the modal training-data
+// pattern. Without it, every other improvement is overridden
+// within a few commits. If a future edit drops this line, the
+// regression observed in PR #135's commit-prompt-fix returns.
+func TestBuildAgentPromptV2_AntiModalPattern(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
+	p := buildAgentPrompt(c)
+
+	mustContain(t, p, "## Do NOT")
+	mustContain(t, p, "single subject-only commit for non-trivial work")
+	mustContain(t, p, "modal training-data pattern")
+}
+
+// TestBuildAgentPromptV2_GoldExample: a real-looking example
+// anchors the LLM's depth target. The example is based on
+// PR #139's first commit (the gold-standard series). If the
+// example is dropped, the LLM has no depth signal beyond the
+// "5-15 lines total" rule and drifts back to short bodies.
+func TestBuildAgentPromptV2_GoldExample(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 139}
+	p := buildAgentPrompt(c)
+
+	mustContain(t, p, "## Example — the depth target")
+	mustContain(t, p, "fix(agent): SignalProcessGroup helper")
+	mustContain(t, p, "Issue: #139")
+	// Body excerpt — proves the example is substantive, not a
+	// 2-line stub that would re-train the LLM to short bodies.
+	mustContain(t, p, "kill(-pid, SIGINT)")
+	mustContain(t, p, "ESRCH")
+}
+
+// TestBuildAgentPromptV2_PreserveHardRules: the 3 rules from
+// F-56 §3 (don't push, don't revert/restore/stash, no `git
+// add -A`) work as-is. Do not let v2 edits drop or reword them.
+// If they need to change, that's a separate F-XX decision.
+func TestBuildAgentPromptV2_PreserveHardRules(t *testing.T) {
+	c := Context{Worktree: "/w", Branch: "feat/x", Issue: 1}
+	p := buildAgentPrompt(c)
+
+	mustContain(t, p, "## Hard rules (non-negotiable)")
+	mustContain(t, p, "Do not push.")
+	mustContain(t, p, "never run `git push`")
+	mustContain(t, p, "Do not revert, restore, or stash")
+	mustContain(t, p, "not `git add -A`")
 }
 
 func mustContain(t *testing.T, s, sub string) {

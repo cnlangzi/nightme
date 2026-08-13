@@ -30,7 +30,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -204,88 +203,126 @@ func dispatchPR(
 	card := renderPROpenedCard(c, baseBranch, url)
 
 	// Invalidate the footer's PR cache for every AgentSession
-	// in this chat whose Cwd is inside the worktree we just
-	// opened the PR for. Without this, the workspace footer
-	// line's PR reference (rendered as `[#N](url)` at the end
-	// of the 📁: row; clickable blue link in lark_md) would
-	// still render the previous state — either absent or a
-	// stale URL from a branch we last had a PR on — until the
-	// next 60s TTL expires. Iterating the pool + checking Cwd
-	// scopes the blow-up: other chat sessions and unrelated
-	// worktrees are not re-fetched.
-	if deps.PRInvalidator != nil {
-		for _, as := range cs.Pool() {
-			if as == nil || as.Cwd == "" {
-				continue
-			}
-			asClean := filepath.Clean(as.Cwd)
-			wtClean := filepath.Clean(c.Worktree)
-			if asClean != wtClean &&
-				!strings.HasPrefix(asClean, wtClean+string(filepath.Separator)) &&
-				!strings.HasPrefix(wtClean, asClean+string(filepath.Separator)) {
-				// AS.Cwd and the fix worktree share no
-				// directory boundary → unrelated, skip.
-				// Using separator-aware prefix matching (vs
-				// raw strings.HasPrefix) avoids the classic
-				// `/home/foo` vs `/home/foobar/repo`
-				// false positive that would invalidate
-				// caches for unrelated workspaces with a
-				// shared string prefix.
-				continue
-			}
-			deps.PRInvalidator.Invalidate(as.ID)
-		}
-	}
+	// in this chat. Without this, the workspace footer line's
+	// PR reference (rendered as `[#N](url)` at the end of the
+	// 📁: row; clickable blue link in lark_md) would still
+	// render the previous state — either absent (the OLD
+	// branch had no PR) or a stale URL from a previous branch
+	// we had a PR on — until the 60s prcache.Cache TTL
+	// expires. The helper covers the full chat pool so any AS
+	// that re-stamps before the TTL picks up the new PR id
+	// immediately.
+	invalidateChatASPRCache(deps, cs)
 
 	return reply(ctx, cs.Emitter(), chatID, messageID, card), nil
 }
 
 // buildPRPrompt renders the text block the agent receives.
-// Format follows wip/gtw-pr.md §4.2 — Output Format first (the
-// hard constraint), then Task, then Context. Issue ref (#N)
-// appears in the body instruction when c.Issue > 0.
 //
-// We deliberately do NOT pre-fetch git log / git diff: the agent
-// has its own workspace and can stream output of either as it
-// reads them. See wip/gtw-pr.md §4.1 "agent self-inspects".
+// Design rationale (v2, prompt-engineering lens):
+//
+//   - Output Format is a hard constraint the LLM can violate and
+//     break parsing. It comes first and is fenced-example driven.
+//   - Tool floor: the previous prompt's "Run git log" was an
+//     optional suggestion; the agent would skip it for small
+//     diffs and write the body from memory, producing the 4-bullet
+//     regression observed in #140-#144. v2 makes git log + diff
+//     mandatory and adds a length comparison ("body should not be
+//     shorter than git log output") that the LLM can check
+//     objectively against its own tool output.
+//   - Four dimensions instead of four sections. Specifying header
+//     names (## Summary / ## Why / ## Changes / ## Tests) forced a
+//     rigid template that suppresses the LLM's own organisation
+//     instinct. Specifying the four dimensions (what / why / diff /
+//     test evidence) lets the LLM pick any markdown shape —
+//     sections, prose, bullets, tables — while still being held
+//     accountable for covering all four.
+//   - "Do NOT default to a 4-bullet list" directly attacks the
+//     modal training-data pattern. Without this line the LLM
+//     falls back to the median PR shape regardless of how good
+//     the rest of the prompt is.
+//   - Do NOT block lists short rules. Transformer attention to
+//     negative imperatives ("do NOT", "never") is higher than to
+//     positive rules of equal length, so a short blacklist of
+//     failure modes is more effective than a long whitelist.
+//
+// We deliberately do NOT pre-fetch git log / git diff here: the
+// agent has its own workspace and Bash tool, and we want the body
+// to be grounded in real diff output the LLM itself inspected.
 func buildPRPrompt(c Context, base string) string {
 	var sb strings.Builder
+
+	// --- Output Format (parseability — hard constraint) -----------
 	sb.WriteString("## Output Format\n")
 	sb.WriteString("Reply with ONE fenced markdown code block (``` ... ```) and nothing else.\n")
 	sb.WriteString("First line inside the fence is the PR title (Conventional Commits 1.0.0).\n")
 	sb.WriteString("Remaining lines are the PR body (markdown).\n")
 	sb.WriteString("Do NOT nest additional ``` fences — the daemon's parser stops at the first closing fence.\n")
 	sb.WriteString("Indent code samples with 4 spaces instead.\n")
-	sb.WriteString("Example:\n")
+	sb.WriteString("Minimal parseability example (your body should be richer than this):\n")
 	sb.WriteString("```\n")
-	sb.WriteString("feat(scope): short imperative subject\n")
-	sb.WriteString("\n")
+	sb.WriteString("feat(scope): short imperative subject\n\n")
 	sb.WriteString("- bullet describing the change\n")
 	sb.WriteString("- another bullet\n")
 	sb.WriteString("```\n\n")
 
-	sb.WriteString("Conventional Commits rules (strict):\n")
+	// --- Tool floor (mandatory git inspection) --------------------
+	// Frame as MUST + an objective length check the LLM can apply
+	// to its own tool output. "If your final body is shorter than
+	// the raw git log output" is a rule the model can verify
+	// against the bytes it just received from Bash.
+	sb.WriteString("## Before you write — tool floor\n")
+	sb.WriteString("You MUST run and read the output of these commands BEFORE composing the body:\n")
+	sb.WriteString("- `git log --oneline " + base + "..HEAD` — full commit list on this branch.\n")
+	sb.WriteString("- `git diff " + base + "...HEAD --stat` — per-file change footprint.\n")
+	sb.WriteString("- `git diff " + base + "...HEAD -- <path>` for at least one file you intend to mention by name.\n\n")
+	sb.WriteString("Do NOT write the body from commit messages alone — the body must add context (why, alternatives, tradeoffs, blast radius) that no commit subject captures.\n\n")
+	sb.WriteString("Self-check: if your final body is shorter than the raw `git log` output above, you've written too little. Go back, read more of the diff, and add the missing dimension.\n\n")
+
+	// --- Four dimensions (goal-driven coverage) -------------------
+	// Prescribe WHAT must be covered, not the exact header names.
+	// LLMs naturally use ## Summary / ## Why / ## Changes / ## Tests
+	// or a hybrid; either is fine as long as all four dimensions
+	// are present and non-trivial.
+	sb.WriteString("## Four dimensions — the body must cover all of these\n")
+	sb.WriteString("A good PR body for this repo answers four questions, in roughly this order. You may use any markdown structure (sections, bullets, prose, tables) as long as all four are present and substantive.\n\n")
+	sb.WriteString("1. **What changed** — the user-visible or maintainer-visible effect, 1-3 sentences. State the change, not the diff.\n")
+	sb.WriteString("2. **Why it changed** — the problem this solves or the use case it unlocks. Reviewers decide merge-worthiness from this dimension more than any other. If you cannot write a real Why, ask whether this PR should exist.\n")
+	sb.WriteString("3. **Diff overview** — a file-grouped summary of the change. Each item names the file and ends with the consequence. Reviewers scan by file, not by verb; bullets without a path are unreviewable.\n")
+	sb.WriteString("4. **Test evidence** — what you ran, what's new, what was verified. If the change is docs-only or a one-line chore, say so explicitly (`Tests: n/a — pure doc change`).\n\n")
+	sb.WriteString("Do NOT default to a 4-bullet list. That is the modal pattern in training data and reviewers cannot act on it — the bullets become a paraphrase of the diff instead of context the diff does not already contain.\n\n")
+
+	// --- Conventional Commits title rules ------------------------
+	sb.WriteString("## Conventional Commits — title rules (strict)\n")
 	sb.WriteString("- Format: <type>(<optional-scope>): <subject>\n")
 	sb.WriteString("- Types: feat, fix, chore, refactor, docs, test, build, ci, perf, style, revert\n")
-	sb.WriteString("- Subject ≤72 chars, imperative mood, no trailing period\n")
-	sb.WriteString("- Body explains WHY, wrapped at 72 cols\n")
-	sb.WriteString("- Breaking change: `!` after type/scope + `BREAKING CHANGE:` footer\n\n")
+	sb.WriteString("- Subject ≤72 chars, imperative mood, no trailing period.\n")
+	sb.WriteString("- Scope names the layer (e.g. cmd, command, gtw, feishu, login), not the file path.\n")
+	sb.WriteString("- Breaking change: `!` after type/scope + `BREAKING CHANGE:` footer.\n\n")
 
+	// --- Anti-patterns (negative-weight list) ---------------------
+	sb.WriteString("## Do NOT\n")
+	sb.WriteString("- Do NOT skip **Why**. A body without Why is a diff in disguise.\n")
+	sb.WriteString("- Do NOT paraphrase the diff in bullets (\"updated X\", \"refactored Y\"). Name the file, name the consequence.\n")
+	sb.WriteString("- Do NOT omit **Test evidence**. If you did not run tests, say so — that is itself evidence.\n")
+	sb.WriteString("- Do NOT include prose outside the fence. The daemon's parser stops at the first closing ```.\n\n")
+
+	// --- Task -----------------------------------------------------
 	sb.WriteString("## Task\n")
-	sb.WriteString("1. Run `git log --oneline <base>..HEAD` to inspect commits on this branch.\n")
-	sb.WriteString("2. Spot-check key files with `git diff <base>...HEAD -- <path>` when you need detail.\n")
-	sb.WriteString("3. Write a Conventional Commits title + structured body summarising the change.\n")
+	sb.WriteString("1. Run the three commands in **Before you write** and read every line of their output.\n")
+	sb.WriteString("2. Compose the title from the dominant commit subject — or invent one if this branch is a squash candidate.\n")
+	sb.WriteString("3. Write the body covering all four dimensions above. Lead with Why, then What, then Diff overview, then Test evidence.\n")
 	if c.Issue > 0 {
-		sb.WriteString(fmt.Sprintf("4. Reference issue with #%d in the body footer.\n", c.Issue))
+		fmt.Fprintf(&sb, "4. Add `Closes #%d` (or `Refs #%d`) as the last line of the body so GitHub auto-closes the issue.\n", c.Issue, c.Issue)
 	}
-	sb.WriteString("\nDO NOT run `git commit`, `git push`, `gh pr create`, or `glab mr create`. ")
-	sb.WriteString("Only generate the title + body.\n\n")
+	sb.WriteString("\nDO NOT run `git commit`, `git push`, `gh pr create`, or `glab mr create`. Only generate the title + body.\n\n")
 
+	// --- Context --------------------------------------------------
 	sb.WriteString("## Context\n")
 	if c.Repo != "" {
 		fmt.Fprintf(&sb, "Repository: %s\n", c.Repo)
 	} else {
-		// Detect-fallback path (and the new non-worktree path
+		// Detect-fallback path (and the non-worktree path
 		// added in PR #105): we don't yet know the owner/repo.
 		// The agent will derive it from `git remote get-url
 		// origin` if needed for the body; the daemon still calls

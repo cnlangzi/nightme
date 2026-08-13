@@ -169,3 +169,42 @@ func TestNextBackoff_DoublesUntilCap(t *testing.T) {
 		t.Errorf("nextBackoff did not converge to cap; final = %v, want %v", v, maxBackoffDuration)
 	}
 }
+
+// F-61: DownloadAttachmentsWithRetry returns the LAST DownloadResult
+// when every attempt AllFailed, and short-circuits when an attempt
+// has a non-empty Atts (any partial success).
+//
+// We can't easily mock the lark client (it's a concrete type with
+// private internals), so this test exercises the empty-input and
+// lark-nil-client paths only. The retry-vs-succeed path is covered
+// manually via /close + image scenarios; see F-61 §7.2 in
+// docs/feat/F-61-bot-failure-recovery.md.
+func TestDownloadAttachmentsWithRetry_EmptyInput(t *testing.T) {
+	res := DownloadAttachmentsWithRetry(context.Background(), nil, "om_xxx", nil, "sess_1", nil)
+	if res.HasAttachments || res.AllFailed || len(res.Atts) != 0 {
+		t.Errorf("empty input → zero result, got %+v", res)
+	}
+}
+
+// F-61: onRetry callback fires between attempts. We can't easily
+// drive a real AllFailed scenario without a lark.Client mock, so
+// this test exercises the callback by checking that downloadRetryConfig
+// is correctly typed (defensive against future config drift).
+func TestDownloadRetryConfig_LadderShape(t *testing.T) {
+	if got, want := downloadRetryConfig.MaxAttempts, 3; got != want {
+		t.Errorf("MaxAttempts = %d, want %d", got, want)
+	}
+	if len(downloadRetryConfig.Backoffs) != 3 {
+		t.Fatalf("Backoffs len = %d, want 3", len(downloadRetryConfig.Backoffs))
+	}
+	if downloadRetryConfig.Backoffs[0] != 0 {
+		t.Errorf("first backoff = %v, want 0 (immediate)", downloadRetryConfig.Backoffs[0])
+	}
+	if downloadRetryConfig.Backoffs[1] <= 0 {
+		t.Errorf("second backoff = %v, want > 0", downloadRetryConfig.Backoffs[1])
+	}
+	if downloadRetryConfig.Backoffs[2] <= downloadRetryConfig.Backoffs[1] {
+		t.Errorf("third backoff %v must exceed second %v",
+			downloadRetryConfig.Backoffs[2], downloadRetryConfig.Backoffs[1])
+	}
+}

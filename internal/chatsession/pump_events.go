@@ -116,14 +116,60 @@ func (cs *ChatSession) routeEvent(as *AgentSession, ev EnrichedEvent) {
 		})
 	case KindPromptEnded:
 		cs.writebackMessageState(as, ev.Prompt)
+		// F-61: arm HungPrompt + clear suspect on clean turn end.
+		// The synchronous respawn path (KindLifecycle below) handles
+		// bridge deaths; this timer catches the rarer "bridge alive
+		// but hung" case where no event ever fires.
+		cs.Watchdog().disarmHungPrompt()
+		as.ClearSuspect()
 		// After a PromptEnds, the AS is ready again. TryFlush
 		// will pick up the queued messages if any.
 		_ = cs.TryFlush()
 	case KindLifecycle:
 		if ev.Lifecycle != nil && ev.Lifecycle.Status == StatusExited {
 			as.SetExited(0)
+			// F-61: disarm HungPrompt. The bridge died without
+			// emitting KindPromptEnded, so the 5min timer armed
+			// at Submit is still live. Without this, it would
+			// fire later and mark the freshly-respawned bridge
+			// as Suspect("hung_prompt") — wrong: the respawned
+			// bridge just started, the previous one died.
+			cs.Watchdog().disarmHungPrompt()
 			slog.Info("chatsession: AS marked Exited (claude process exited)",
 				"chat_id", ev.ChatID, "as_id", ev.AgentSessionID)
+			// F-61: immediate respawn right after marking Exited.
+			// Synchronous spawn — the new bridge starts with
+			// --resume <sessionID> and re-processes the
+			// in-flight user message from its own JSONL
+			// history. No need to wait for the async watchdog
+			// prober. The user sees a brief delay (1-2s for
+			// fork+exec+handshake) and then a normal reply.
+			//
+			// /close path is excluded via as.closedByUser
+			// (set by Close()). Respawn failures fall through
+			// to the watchdog/prober retry under the 5min
+			// cooldown.
+			if cs.spawner != nil {
+				if err := as.RestartFromDeath(cs.ctx, cs.spawner); err != nil {
+					slog.Warn("chatsession: immediate respawn after bridge death failed; watchdog will retry",
+						"chat_id", ev.ChatID, "as_id", ev.AgentSessionID,
+						"err", err)
+					as.SetSuspect("immediate_respawn_failed")
+				} else {
+					// F-61: drain queue with the freshly-
+					// respawned AS. The in-flight message is
+					// already covered by --resume on the
+					// bridge side; any further queued user
+					// messages (submitted after this death
+					// was detected but before respawn
+					// finished) need TryFlush to land.
+					_ = cs.TryFlush()
+				}
+			} else {
+				slog.Warn("chatsession: cannot respawn after bridge death — no spawner on chat session",
+					"chat_id", ev.ChatID, "as_id", ev.AgentSessionID)
+				as.SetSuspect("immediate_respawn_no_spawner")
+			}
 		}
 	}
 }

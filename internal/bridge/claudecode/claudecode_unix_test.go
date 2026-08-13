@@ -3,6 +3,7 @@
 package claudecode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -458,6 +459,206 @@ func TestPumpStream_Result(t *testing.T) {
 	}
 }
 
+// TestPumpStream_SyntheticNoContent_Dropped guards the /new
+// regression. driver.New writes
+// `{"type":"user","message":{"role":"user","content":"/clear"}}` to
+// the CLI's stdin; the CLI answers with conversation_reset +
+// system/init + a synthetic "(no content)" assistant message +
+// result{result:""}. Only the assistant message has user-visible
+// text, but it says nothing — forwarding it posts a content-free
+// bubble to the chat right after the /new receipt card.
+//
+// The fix drops the synthetic placeholder in the assistant/text
+// branch. The gate requires BOTH the "<synthetic>" model marker
+// AND the exact "(no content)" text so a real model that
+// legitimately answers "(no content)" still reaches the user.
+func TestPumpStream_SyntheticNoContent_Dropped(t *testing.T) {
+	// Just the assistant message (the only one with user-visible
+	// text). Reproduced verbatim from a live run of
+	// `claude --output-format stream-json --input-format stream-json`
+	// fed a /clear line on stdin.
+	input := `{"type":"assistant","message":{"id":"1cd25b3f-37cb-48e0-b1cc-72260a2c305c","model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"(no content)"}]}}` + "\n"
+	evs := streamFromString(input)
+	if len(evs) != 0 {
+		t.Errorf("got %d events, want 0 — synthetic \"(no content)\" must be dropped", len(evs))
+		for i, ev := range evs {
+			t.Logf("  evs[%d] = %+v", i, ev)
+		}
+	}
+}
+
+// TestPumpStream_RealModelSayingNoContent_Kept is the negative
+// half of the guard. A non-synthetic model that produces the
+// literal text "(no content)" (e.g. as part of an answer) must
+// still be forwarded. The gate is AND-ed, not OR-ed.
+func TestPumpStream_RealModelSayingNoContent_Kept(t *testing.T) {
+	input := `{"type":"assistant","message":{"model":"claude-opus-4-1","role":"assistant","content":[{"type":"text","text":"(no content)"}]}}` + "\n"
+	evs := streamFromString(input)
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want 1 — real model saying \"(no content)\" must be forwarded", len(evs))
+	}
+	if evs[0].Kind != agent.EventAgentText {
+		t.Errorf("kind = %v, want EventAgentText", evs[0].Kind)
+	}
+	if evs[0].Text != "(no content)" {
+		t.Errorf("text = %q, want \"(no content)\"", evs[0].Text)
+	}
+}
+
+// TestPumpStream_PlaceholderMatchIsStrict pins the byte-exact
+// match contract of isSyntheticNoContent. Whitespace-padded
+// variants of "(no content)" must NOT be dropped — the guard
+// only swallows the literal byte sequence Claude Code emits.
+// Review feedback: a previous revision used strings.TrimSpace,
+// which silently widened the match to " (no content)" and
+// "(no content)\n". That is the wrong failure mode (silent data
+// loss beats a stray character), so this test guards against
+// future "be lenient" drift.
+func TestPumpStream_PlaceholderMatchIsStrict(t *testing.T) {
+	cases := []struct {
+		name  string
+		text  string
+		drop  bool
+	}{
+		{name: "literal placeholder", text: "(no content)", drop: true},
+		{name: "leading space", text: " (no content)", drop: false},
+		{name: "trailing space", text: "(no content) ", drop: false},
+		{name: "leading and trailing space", text: " (no content) ", drop: false},
+		{name: "trailing newline", text: "(no content)\n", drop: false},
+		{name: "tab padding", text: "\t(no content)\t", drop: false},
+		{name: "embedded in larger text", text: "agent decided: (no content)", drop: false},
+		{name: "different phrasing", text: "(no content yet)", drop: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := `{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":` + mustJSONString(tc.text) + `}]}}` + "\n"
+			evs := streamFromString(input)
+			switch {
+			case tc.drop && len(evs) != 0:
+				t.Errorf("text=%q: got %d events, want 0 (must be dropped)", tc.text, len(evs))
+			case !tc.drop && len(evs) != 1:
+				t.Errorf("text=%q: got %d events, want 1 (must be forwarded)", tc.text, len(evs))
+			case !tc.drop && len(evs) == 1:
+				if evs[0].Text != tc.text {
+					t.Errorf("text round-trip: got %q, want %q", evs[0].Text, tc.text)
+				}
+			}
+		})
+	}
+}
+
+// mustJSONString returns the JSON-encoded form of s (quoted, with
+// the necessary escapes for ", \, control characters). Used by
+// strict-match tests that build wire envelopes from Go strings —
+// string concatenation would break on inputs containing " or \.
+func mustJSONString(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err) // json.Marshal on a string cannot fail
+	}
+	return string(b)
+}
+
+// TestPumpStream_OtherSyntheticMessages_Kept covers the rest of
+// the synthetic class. Claude Code also uses "<synthetic>" for
+// interrupt notices and API-error surfaces that DO carry real
+// user-visible text. The drop is narrow on purpose — only the
+// exact zero-content placeholder.
+func TestPumpStream_OtherSyntheticMessages_Kept(t *testing.T) {
+	input := `{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Request interrupted by user."}]}}` + "\n"
+	evs := streamFromString(input)
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want 1 — non-placeholder synthetic text must be forwarded", len(evs))
+	}
+	if evs[0].Kind != agent.EventAgentText {
+		t.Errorf("kind = %v, want EventAgentText", evs[0].Kind)
+	}
+	if evs[0].Text != "Request interrupted by user." {
+		t.Errorf("text = %q, want interrupt notice verbatim", evs[0].Text)
+	}
+}
+
+// TestPumpStream_ConversationReset_LoggedNoEvents covers the
+// /new observability upgrade: a conversation_reset event from
+// the CLI must be surfaced in logs at info level (not buried in
+// debug) and must NOT produce agent events — the authoritative
+// SessionID + Model arrive in the immediately-following system/init,
+// which is wired separately. A future protocol revision that swaps
+// or drops that pairing would otherwise silently break /new; this
+// test pins both halves of the contract.
+//
+// Two cases: with-id (current CLI behavior) and absent-id
+// (defensive — a future revision that drops the field must still
+// log something, but distinguishable from a successful reset so an
+// operator looking at the log can tell them apart).
+func TestPumpStream_ConversationReset_LoggedNoEvents(t *testing.T) {
+	t.Run("with new_conversation_id", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		input := `{"type":"conversation_reset","new_conversation_id":"acd2bd4e-6261-45b4-ad93-bf2792d062ca","uuid":"c78637d4-0373-4bf0-9c32-0dc5d4e17d67"}` + "\n"
+
+		got := streamFromStringWithLogger(input, logger)
+		assertResetLoggedNoEvents(t, got, buf.Bytes(), "acd2bd4e-6261-45b4-ad93-bf2792d062ca", false)
+	})
+
+	t.Run("without new_conversation_id (future protocol drift)", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		// uuid is the only other field Claude Code emits; new_conversation_id is gone.
+		input := `{"type":"conversation_reset","uuid":"c78637d4-0373-4bf0-9c32-0dc5d4e17d67"}` + "\n"
+
+		got := streamFromStringWithLogger(input, logger)
+		assertResetLoggedNoEvents(t, got, buf.Bytes(), "", true)
+	})
+}
+
+// assertResetLoggedNoEvents consolidates the per-case assertions so
+// both subtests stay focused on their scenario (present vs absent id).
+//
+// Parses the log line rather than substring-matching raw JSON:
+// slog's handler field order, indentation, and key set are not
+// contractual, and a brittle Contains check would fail the next
+// time someone adds an attr or switches handler.
+func assertResetLoggedNoEvents(t *testing.T, got []agent.AgentEvent, raw []byte, wantID string, wantAbsent bool) {
+	t.Helper()
+	if len(got) != 0 {
+		t.Errorf("got %d events, want 0 — conversation_reset is informational only", len(got))
+		for i, ev := range got {
+			t.Logf("  evs[%d] = %+v", i, ev)
+		}
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &entry); err != nil {
+		t.Fatalf("log line is not valid JSON: %v\nraw: %s", err, string(raw))
+	}
+	if entry["msg"] != "claudecode: conversation_reset (post /clear)" {
+		t.Errorf("msg = %q, want %q\nfull entry: %+v", entry["msg"],
+			"claudecode: conversation_reset (post /clear)", entry)
+	}
+	if level, _ := entry["level"].(string); level != "INFO" {
+		t.Errorf("level = %q, want INFO\nfull entry: %+v", level, entry)
+	}
+
+	switch {
+	case wantAbsent:
+		// Absent-id marker must be present; new_conversation_id must NOT be
+		// (the field is absent in the JSON object, not just "").
+		if entry["new_conversation_id_absent"] != true {
+			t.Errorf("expected new_conversation_id_absent=true marker, full entry: %+v", entry)
+		}
+		if _, has := entry["new_conversation_id"]; has {
+			t.Errorf("did not expect new_conversation_id field on absent-id path, full entry: %+v", entry)
+		}
+	default:
+		if entry["new_conversation_id"] != wantID {
+			t.Errorf("new_conversation_id = %q, want %q\nfull entry: %+v",
+				entry["new_conversation_id"], wantID, entry)
+		}
+	}
+}
+
 func TestPumpStream_Result_EmptyText_NoResultEvent(t *testing.T) {
 	// When the result has no text AND is_error=false, the entire
 	// result branch is dropped (text + usage are useless). Only
@@ -862,12 +1063,27 @@ func countSeq(got []string, seq ...string) int {
 // replay + assistant + result, to verify the parser doesn't
 // drop frames under burst input.
 func streamFromString(stream string) []agent.AgentEvent {
+	return streamFromStringWithLogger(stream, nil)
+}
+
+// streamFromStringWithLogger is the logger-aware variant. Tests
+// that need to assert on log output (e.g. the conversation_reset
+// observability test) pass a *slog.Logger writing into a buffer;
+// the rest go through streamFromString with nil and don't pay the
+// allocation cost.
+//
+// The buffered chan size 64 matches streamFromString: enough headroom
+// for the parser's internal emits on a multi-message burst, small
+// enough to surface accidental back-pressure stalls as test hangs
+// rather than silent drops. Tests that emit more than 64 events
+// should bump this.
+func streamFromStringWithLogger(stream string, logger *slog.Logger) []agent.AgentEvent {
 	events := make(chan agent.AgentEvent, 64)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pumpStream(strings.NewReader(stream), events, nil, "claude", "/tmp", "main", nil)
+		pumpStream(strings.NewReader(stream), events, nil, "claude", "/tmp", "main", logger)
 		close(events)
 	}()
 	var got []agent.AgentEvent

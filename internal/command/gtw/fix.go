@@ -1037,17 +1037,18 @@ func sendDraft(
 	}
 	if em == nil || botMsgID == "" {
 		// Legacy / fallback: render the card as plain markdown and
-		// send via Send. The dispatcher still stores the
+		// send via the unified sink. The dispatcher still stores the
 		// draft so the reaction pipeline works; the action handler
 		// just emits plain text follow-ups (no PATCH) when the
 		// bot message id is empty.
 		if em != nil {
-			_ = em.Send(ctx, messages.OutboundMessage{
-				ChatID:  chatID,
-				Kind:    messages.OutReply,
-				ReplyTo: messageID,
-				Text:    renderCardMarkdown(card),
-			})
+			// Card-render-failure fallback is NOT the agent-result
+			// surface — replyAgent with empty agent stamp keeps
+			// this path uniform with the rest of GTW's outbound
+			// writes (git footer is still stamped by the Emitter's
+			// stampGitStatus chokepoint).
+			_ = replyAgent(ctx, em, chatID, messageID,
+				renderCardMarkdown(card), "", agent.RunResult{})
 		}
 	}
 
@@ -1138,19 +1139,20 @@ func gtwCardChoicesToGateway(in []CardChoice) []messages.CardChoice {
 // missing outbound surface — see wip/commander.md §2.7 for the
 // nil-skip invariant.
 //
+// reply is the GTW-package no-agent-stamp thin wrapper over
+// replyAgent (agent_reply.go). Dispatchers that did NOT invoke
+// an agent (push / sync / close / fix / ctx-error paths) keep
+// using reply — they have no agent metadata to stamp on the
+// OutboundMessage. Dispatchers that DID invoke an agent (commit /
+// pr) use replyAgent directly with the captured agentName +
+// agent.RunResult so the channel footer renders the agentbar and
+// usagebar lines (F-CLAUDE-PRINT-002 follow-up: GTW bypasses the
+// runtime event pipeline, so the stamp has to happen here).
+//
 // reply sends a single OutReply through the shared Emitter. The
 // Emitter stamps GitStatus at the chokepoint (outbound.Options
 // .GitStatusLookup); callers don't need a ChatSession reference
 // here.
 func reply(ctx context.Context, em outbound.Emitter, chatID, messageID, text string) *Result {
-	if em != nil {
-		out := messages.OutboundMessage{
-			ChatID:  chatID,
-			Kind:    messages.OutReply,
-			ReplyTo: messageID,
-			Text:    text,
-		}
-		_ = em.Send(ctx, out)
-	}
-	return &Result{Consumed: true}
+	return replyAgent(ctx, em, chatID, messageID, text, "", agent.RunResult{})
 }

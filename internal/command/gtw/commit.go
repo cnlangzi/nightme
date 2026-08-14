@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
@@ -101,10 +100,19 @@ func dispatchCommit(
 			fmt.Sprintf("❌ read HEAD: %v", err)), nil
 	}
 
-	// 4. Run agent.
-	agentName, errMsg := runAgentToCommit(ctx, cs, c, args.Agent, ymlAgent)
-	if errMsg != "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID, errMsg), nil
+	// 4. Run agent. runAgentFor returns the full RunResult so the
+	// success-path reply can stamp Model / SessionID / Usage onto
+	// the OutboundMessage — see replyAgent's doc for the footer
+	// stamping rationale (F-CLAUDE-PRINT-002 follow-up: agentbar /
+	// usagebar must reach the channel even when GTW bypasses the
+	// runtime event pipeline).
+	ctx, cancel := context.WithTimeout(ctx, RunOnceTimeout)
+	defer cancel()
+	runRes, agentName, err := runAgentFor(ctx, cs, c.Worktree,
+		buildAgentPrompt(c), args.Agent, ymlAgent)
+	if err != nil {
+		return replyAgent(ctx, cs.Emitter(), chatID, messageID,
+			err.Error(), agentName, runRes), nil
 	}
 
 	// 4b. F-CLAUDE-PRINT-002: refresh chatsession.GitStatus
@@ -152,76 +160,19 @@ func dispatchCommit(
 		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ commit landed but couldn't render card: %v", err)), nil
 	}
-	return reply(ctx, cs.Emitter(), chatID, messageID, card), nil
+	// Success path: forward runRes so the footer (agentbar +
+	// usagebar) renders. Failure paths above stay on the no-stamp
+	// reply — the user just got an error message, not an agent
+	// result, so footer metadata isn't applicable.
+	return replyAgent(ctx, cs.Emitter(), chatID, messageID,
+		card, agentName, runRes), nil
 }
 
-// runAgentToCommit spawns the configured one-shot agent and
-// runs the slim buildAgentPrompt against it. The agent's prose
-// text is intentionally ignored — verification reads git state
-// (verifyAgentCommitted) before deciding anything succeeded.
-//
-// Returns (name, "") on success, ("", errMsg) on any failure
-// that should short-circuit dispatchCommit (no agent selected,
-// unknown agent, binary missing, RunOnce errored).
-//
-// Agent selection (per F-104 / wip/gtw-hooks.md): CLI -a flag
-// wins, then yml <commit>.agent, then chat's currently Selected
-// Agent. The yml-loader lives in cmd.go's runCommit wrapper (so
-// loadNotes can be surfaced to the user); runAgentToCommit
-// receives the already-resolved ymlAgent string.
-//
-// The signature accepts the per-invocation `cliAgent` separately
-// (rather than passing a fully-parsed `commitArgs`) so the
-// dispatcher can also accept agents resolved from a future
-// non-CLI source (e.g. /gtw commit --interactive) without
-// reshaping the helper.
-func runAgentToCommit(
-	ctx context.Context,
-	cs *chatsession.ChatSession,
-	c Context,
-	cliAgent, ymlAgent string,
-) (string, string) {
-	agentName, agentNotes := ResolveAgent(cliAgent, ymlAgent, cs)
-	if agentName == "" {
-		// B2: surface agentNotes so a yml pointing at an unknown
-		// agent doesn't silently degrade to a generic "no agent
-		// selected" reply.
-		var msg strings.Builder
-		msg.WriteString("❌ no agent selected. Send `/use <name>` first or pass `-a <name>`.")
-		for _, n := range agentNotes {
-			msg.WriteByte('\n')
-			msg.WriteString(n)
-		}
-		return "", msg.String()
-	}
-
-	a, err := agent.Builtins.Get(agentName)
-	if err != nil {
-		return "", fmt.Sprintf("❌ unknown agent %q (check `nightme agents` or your config)", agentName)
-	}
-	if err := a.Detect(); err != nil {
-		return "", fmt.Sprintf("❌ agent %s not available: %v", agentName, err)
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, RunOnceTimeout)
-	defer cancel()
-
-	blocks := []agent.ContentBlock{{
-		Type: agent.ContentText,
-		Text: buildAgentPrompt(c),
-	}}
-	// RunOnce's text return value is intentionally discarded.
-	// Per F-56 §1.2, git state — not agent prose — is the
-	// source of truth.
-	_, err = a.RunOnce(ctx,
-		agent.StartConfig{Workspace: c.Worktree},
-		blocks,
-	)
-	if err != nil {
-		return agentName, fmt.Sprintf("❌ agent %s failed: %v", agentName, err)
-	}
-	return agentName, ""
-}
+// runAgentFor (in agent_reply.go) is the shared one-shot agent
+// invoker used by both /gtw commit and /gtw pr. Commit passes
+// buildAgentPrompt(c) as the prompt and c.Worktree as the workspace.
+// The returned RunResult is forwarded to replyAgent on the
+// success path so the footer (agentbar / usagebar) renders.
 
 // verifyAgentCommitted is the post-agent sanity check that runs
 // in dispatchCommit. Per F-56 §4.1, it ONLY validates the

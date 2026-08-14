@@ -66,6 +66,11 @@ type Manager struct {
 	// Read under m.mu (RLock); written under m.mu (Lock) in
 	// WithEmitter. See GetOrCreate Phase 2 for the read site.
 	emitter outbound.Emitter
+
+	// F-CLAUDE-PRINT-002: deps for refreshing each chatsession's
+	// GitStatus. Wired once at startup via WithGitStatusDeps; not
+	// re-read per chatsession. See Manager.RefreshAllGitStatus.
+	gitStatusDeps GitStatusDeps
 }
 
 // NewManager creates an empty Manager. Both spawner and persistence
@@ -98,11 +103,97 @@ func (m *Manager) WithPersistence(csFile *registry.ChatSessionFile, asFile *regi
 // ChatSession before GetOrCreate returns. Restored sessions
 // (RestoreFromRegistry) also fire this callback so the runtime
 // can wire per-ChatSession handlers uniformly.
+//
+// Chaining: if a previous onCreate hook was registered (e.g. by
+// WithGitStatusDeps) it is invoked first, so deps propagation
+// survives later hook registrations. Without this chaining, a
+// call sequence of WithGitStatusDeps + WithOnCreate would silently
+// drop the deps hook — restored chats would have no
+// gitStatusDeps wired and the per-chat RefreshGitStatus would
+// no-op (depsConfigured=false) on every subsequent dispatcher
+// call.
 func (m *Manager) WithOnCreate(fn func(*ChatSession)) *Manager {
 	m.mu.Lock()
-	m.onCreate = fn
+	prev := m.onCreate
+	m.onCreate = func(cs *ChatSession) {
+		if prev != nil {
+			prev(cs)
+		}
+		fn(cs)
+	}
 	m.mu.Unlock()
 	return m
+}
+
+// WithGitStatusDeps wires the deps every chatsession uses to
+// refresh its GitStatus. Called once at startup. RefreshGitStatus
+// is the per-chat consumer; RefreshAllGitStatus iterates the
+// pool. Returns self for chaining.
+//
+// Stores on the Manager (for RefreshAllGitStatus) AND
+// propagates to every existing chat (so per-chat refreshes work
+// after the initial pass). Also registers an OnCreate hook
+// that propagates to future chats. This way the chat's own
+// RefreshGitStatus is always callable with non-nil deps — no
+// "no deps wired yet" silent-skip failure mode.
+func (m *Manager) WithGitStatusDeps(deps GitStatusDeps) *Manager {
+	m.mu.Lock()
+	m.gitStatusDeps = deps
+	// Propagate to every existing chat so per-chat
+	// RefreshGitStatus (called by /gtw commit pre/post,
+	// /gtw pr, etc.) has the deps it needs.
+	for _, cs := range m.sessions {
+		if cs != nil {
+			cs.WithGitStatusDeps(deps)
+		}
+	}
+	// Install an OnCreate hook so future chats created via
+	// GetOrCreate receive the same deps.
+	prevOnCreate := m.onCreate
+	m.onCreate = func(cs *ChatSession) {
+		cs.WithGitStatusDeps(deps)
+		if prevOnCreate != nil {
+			prevOnCreate(cs)
+		}
+	}
+	m.mu.Unlock()
+	return m
+}
+
+// RefreshAllGitStatus iterates every chatsession in the pool and
+// calls RefreshGitStatus on each. Called once at startup so the
+// first outbound from each chat has a populated GitStatus. After
+// this initial pass, individual refreshes happen at /gtw commit
+// pre/post + /gtw pr (Batch 4 will wire these).
+//
+// Skips chats with no workspace (cs.SelectedCwd() == ""). Cheap to
+// call repeatedly — 30-event turns don't trigger 30 git calls
+// because of this; the chatsession caches the result.
+func (m *Manager) RefreshAllGitStatus(ctx context.Context, deps GitStatusDeps) {
+	m.mu.RLock()
+	chatIDs := make([]string, 0, len(m.sessions))
+	for id := range m.sessions {
+		chatIDs = append(chatIDs, id)
+	}
+	depsCopy := m.gitStatusDeps
+	m.mu.RUnlock()
+
+	if depsCopy.CollectGit == nil && depsCopy.LookupPR == nil {
+		// Use the passed deps if the manager's stored deps is empty.
+		// (caller might not have called WithGitStatusDeps.)
+		depsCopy = deps
+	}
+
+	for _, id := range chatIDs {
+		cs := m.Get(id)
+		if cs == nil {
+			continue
+		}
+		if cs.SelectedCwd() == "" {
+			continue
+		}
+		_ = cs.RefreshGitStatus(ctx, depsCopy)
+	}
 }
 
 // GetOrCreate returns the ChatSession for chatID, creating it if

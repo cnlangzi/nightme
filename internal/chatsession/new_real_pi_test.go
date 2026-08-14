@@ -345,8 +345,8 @@ func (b *fakeAgentBuilder) SendPermission(_ string) error                       
 func (b *fakeAgentBuilder) New(_ context.Context) error                           { return nil }
 func (b *fakeAgentBuilder) Stop(_ context.Context) error                         { return agent.ErrNotSupported }
 func (b *fakeAgentBuilder) SetModel(_ context.Context, _, _ string) error          { return agent.ErrNotSupported }
-func (b *fakeAgentBuilder) RunOnce(_ context.Context, _ agent.StartConfig, _ []agent.ContentBlock) (string, error) {
-	return "", errors.New("fakeAgentBuilder: RunOnce not implemented")
+func (b *fakeAgentBuilder) RunOnce(_ context.Context, _ agent.StartConfig, _ []agent.ContentBlock) (agent.RunResult, error) {
+	return agent.RunResult{}, errors.New("fakeAgentBuilder: RunOnce not implemented")
 }
 func (b *fakeAgentBuilder) Close() error {
 	select {

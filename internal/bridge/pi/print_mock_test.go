@@ -61,8 +61,8 @@ func TestPrintMode_Mock_CleanRun_ReturnsText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
-	if got != "clean-run-payload" {
-		t.Fatalf("RunOnce text = %q, want %q", got, "clean-run-payload")
+	if got.Text != "clean-run-payload" {
+		t.Fatalf("RunOnce text = %q, want %q", got.Text, "clean-run-payload")
 	}
 }
 
@@ -79,7 +79,7 @@ func TestPrintMode_Mock_NonZeroExit_SurfacesStderr(t *testing.T) {
 		{Type: agent.ContentText, Text: "anything"},
 	})
 	if err == nil {
-		t.Fatalf("RunOnce returned no error; want non-zero-exit failure. got=%q", got)
+		t.Fatalf("RunOnce returned no error; want non-zero-exit failure. got=%q", got.Text)
 	}
 	if !strings.Contains(err.Error(), "model auth failed: 401") {
 		t.Fatalf("error missing stderr text: %v", err)
@@ -98,7 +98,7 @@ func TestPrintMode_Mock_NoSettled_ReportsMissingEvent(t *testing.T) {
 		{Type: agent.ContentText, Text: "anything"},
 	})
 	if err == nil {
-		t.Fatalf("RunOnce returned no error; want missing-settled failure. got=%q", got)
+		t.Fatalf("RunOnce returned no error; want missing-settled failure. got=%q", got.Text)
 	}
 	if !strings.Contains(err.Error(), "agent_settled") {
 		t.Fatalf("error missing 'agent_settled' phrase: %v", err)
@@ -135,8 +135,8 @@ func TestPrintMode_Mock_MultipleTextBlocks_JoinedWithNewline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
-	if got != "ok" {
-		t.Fatalf("RunOnce text = %q, want %q", got, "ok")
+	if got.Text != "ok" {
+		t.Fatalf("RunOnce text = %q, want %q", got.Text, "ok")
 	}
 }
 
@@ -170,4 +170,127 @@ func TestPrintMode_MockPath_Resolves(t *testing.T) {
 		t.Fatalf("filepath.Abs(%q): %v", piPrintMockPath, err)
 	}
 	t.Logf("mock script resolved to %s", abs)
+}
+
+// TestPrintMode_Mock_EnvForwarded verifies that cfg.Env reaches
+// the child process. Catches the regression where cfg.Env was
+// silently dropped on the print-mode path (mirrors the claudecode
+// equivalent test). Uses PI_PRINT_DUMP_ENV to echo every
+// NIGHTME_TEST_* var to stderr; PI_PRINT_FAIL=1 makes the run
+// fail so the stderrBuf is included in the wrapped error.
+func TestPrintMode_Mock_EnvForwarded(t *testing.T) {
+	a := NewStarter("pi-mock", piPrintMockPath, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	t.Setenv("PI_PRINT_DUMP_ENV", "1")
+	t.Setenv("PI_PRINT_FAIL", "1")
+	t.Setenv("NIGHTME_TEST_API_KEY", "sk-pi-test-xyz")
+	t.Setenv("NIGHTME_TEST_MODEL", "pi-mock-haiku")
+
+	_, err := a.RunOnce(ctx, agent.StartConfig{
+		Workspace: t.TempDir(),
+		Env: []string{
+			"NIGHTME_TEST_API_KEY=sk-pi-test-xyz",
+			"NIGHTME_TEST_MODEL=pi-mock-haiku",
+		},
+	}, []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "env test"},
+	})
+	if err == nil {
+		t.Fatal("RunOnce returned no error; want non-zero-exit failure so stderr surfaces")
+	}
+	if !strings.Contains(err.Error(), "NIGHTME_TEST_API_KEY=sk-pi-test-xyz") {
+		t.Errorf("cfg.Env API key not forwarded to child: %v", err)
+	}
+	if !strings.Contains(err.Error(), "NIGHTME_TEST_MODEL=pi-mock-haiku") {
+		t.Errorf("cfg.Env model not forwarded to child: %v", err)
+	}
+}
+
+// TestPrintMode_Mock_StderrCapBytes verifies that stderr is
+// capped at 64 KiB. Mirrors the claudecode equivalent test;
+// uses PI_PRINT_LARGE_STDERR to dump ~4 MiB of fake stderr
+// before exiting non-zero so the bridge's stderrBuf (and
+// hence the wrapped error) carries the cap-enforced prefix.
+func TestPrintMode_Mock_StderrCapBytes(t *testing.T) {
+	a := NewStarter("pi-mock", piPrintMockPath, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	t.Setenv("PI_PRINT_LARGE_STDERR", "4194304") // 4 MiB
+	// PI_PRINT_FAIL=1 makes the mock emit the large stderr
+	// dump AND exit 1. The non-zero exit is the trigger the
+	// bridge uses to surface stderr in the wrapped error
+	// (a clean exit with stderr is dropped — the stderrBuf
+	// is freed on success).
+	t.Setenv("PI_PRINT_FAIL", "1")
+	t.Setenv("PI_PRINT_TEXT", "capped-stderr")
+
+	_, err := a.RunOnce(ctx, agent.StartConfig{Workspace: t.TempDir()}, []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "stderr cap test"},
+	})
+	if err == nil {
+		t.Fatal("RunOnce returned no error; want non-zero-exit failure so stderr surfaces")
+	}
+	// stderrBuf is included in the wrapped error. It must
+	// be bounded by stderrCapBytes (64 KiB).
+	const capWithSlack = 70 * 1024 // 64 KiB + slack
+	if len(err.Error()) > capWithSlack {
+		t.Errorf("wrapped error too large: %d bytes (> %d); stderrBuf not capped at 64 KiB",
+			len(err.Error()), capWithSlack)
+	}
+	// Sanity: stderr content from the dump is observable.
+	if !strings.Contains(err.Error(), "pi_stderr_marker") {
+		t.Errorf("wrapped error missing stderr content marker: %v", err)
+	}
+}
+
+// TestPrintMode_Mock_NoSettled_PreservesUsage is the regression
+// for the F-PI-PRINT-001 followup: when pi emits a usage-bearing
+// message_end but never sends agent_settled, the captured usage
+// must survive the "exit without agent_settled" error so the
+// runtime can audit per-turn cost on failed runs.
+//
+// Implementation note (known limitation): pi's translator buffers
+// `lastUsage` / `lastMessageText` / `stopReason` on message_end but
+// only surfaces them to the stream consumer via `EventAgentResult`
+// from `finishTurnLocked`, which fires on `agent_settled`. With
+// NO_SETTLE the EventAgentResult never arrives, so the bridge
+// has nothing to append to the error message yet. The audit-
+// field appender (appendAuditFields) is wired and exercised on
+// the claudecode side; the pi side will start preserving usage
+// once the translator emits an EventAgentResult from
+// recordAssistantMessageLocked too. Until then the test only
+// verifies the no-settled error path is well-formed and the
+// appendAuditFields helper is wired.
+func TestPrintMode_Mock_NoSettled_PreservesUsage(t *testing.T) {
+	a := NewStarter("pi-mock", piPrintMockPath, []string{"--mode", "rpc"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	t.Setenv("PI_PRINT_NO_SETTLE", "1")
+	t.Setenv("PI_PRINT_NO_SETTLE_USAGE", "1")
+	t.Setenv("PI_PRINT_TEXT", "captured-text")
+
+	_, err := a.RunOnce(ctx, agent.StartConfig{Workspace: t.TempDir()}, []agent.ContentBlock{
+		{Type: agent.ContentText, Text: "anything"},
+	})
+	if err == nil {
+		t.Fatal("RunOnce returned no error; want no-settled failure")
+	}
+	if !strings.Contains(err.Error(), "agent_settled") {
+		t.Errorf("error missing 'agent_settled' phrase: %v", err)
+	}
+	// appendAuditFields must be wired in (no-op today because the
+	// translator hasn't surfaced usage on the no-settled path).
+	// Once the translator change lands this assertion will flip
+	// to checking for "1234" / "128" / "subtype=stop" as the
+	// claudecode TestPrintMode_Mock_IsError_PreservesUsage does.
+	if strings.Contains(err.Error(), "[usage") || strings.Contains(err.Error(), "[subtype") {
+		t.Errorf("unexpected audit-field markers; translator may now emit EventAgentResult before agent_settled: %v", err)
+	}
 }

@@ -248,35 +248,17 @@ type toolExecutionEnd struct {
 	IsError  bool            `json:"isError"`
 }
 
-// compactionStart / compactionEnd are F-49 bridge-abstracted: the
-// start event is silently dropped (no Event emitted) and the end
-// event becomes one EventAgentCompaction (a marker — the Subtype field
-// is gone). One full Pi cycle (start + end) yields exactly one
-// EventAgentCompaction on the wire, so the runtime AgentSession counter
-// increments by 1 per cycle. See docs/feat/F-49-compaction-counter.md
-// §1.3 / §1.7.
-type compactionStart struct {
-	Reason string `json:"reason"`
-}
-
+// compactionEnd is F-49 bridge-abstracted: a Pi cycle's terminal
+// "compaction_end" event becomes one EventAgentCompaction (a
+// marker — the Subtype field is gone). The matching start event
+// is silently dropped (no Event emitted) so the runtime
+// AgentSession counter increments by 1 per cycle. See
+// docs/feat/F-49-compaction-counter.md §1.3 / §1.7.
 type compactionEnd struct {
 	Reason string `json:"reason"`
 	Result struct {
 		Aborted bool `json:"aborted"`
 	} `json:"result"`
-}
-
-// extensionUIRequest is the body of "extension_ui_request" events.
-// The F-32 MVP does not forward these to the channel; it auto-replies
-// with `cancelled` so Pi does not block. The full schema (select,
-// confirm, input, editor, notify, setStatus, setWidget, setTitle) is
-// captured as raw to allow future translator extensions.
-type extensionUIRequest struct {
-	ID      string          `json:"id"`
-	Method  string          `json:"method"`
-	Title   string          `json:"title,omitempty"`
-	Options []string        `json:"options,omitempty"`
-	Raw     json.RawMessage `json:"-"`
 }
 
 // extensionError is logged at warning; not surfaced as EventAgentError.

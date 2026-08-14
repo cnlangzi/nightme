@@ -11,13 +11,14 @@
 package runtime
 
 import (
+	"bytes"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 // makeAS is a tiny helper that builds an AgentSession with
@@ -38,56 +39,6 @@ func makeEnvelope(cs *chatsession.ChatSession) chatsession.AgentEventEnvelope {
 		AgentSession: chatsession.NewAgentSession("as_policy_test", cs.ID, "claude", "/tmp", nil),
 		Event:        &agent.AgentEvent{Kind: agent.EventAgentText},
 		UserMsgID:    "om_policy_test",
-	}
-}
-
-// TestStatusBarStampPolicy_StampsFourKinds verifies the F-45
-// §2.5 改动 C contract: only the four main-chat Kinds
-// (OutReply / OutResult / OutTaskCreate / OutTaskUpdate)
-// receive a StatusBar stamp. Other Kinds must NOT —
-// thread-only / lifecycle / init payloads would only inflate
-// wire size.
-func TestStatusBarStampPolicy_StampsFourKinds(t *testing.T) {
-	cs := makeAS(t)
-	p := StatusBarStampPolicy(statusbar.Deps{})
-
-	stamped := []messages.OutboundKind{
-		messages.OutReply, messages.OutResult,
-		messages.OutTaskCreate, messages.OutTaskUpdate,
-	}
-	for _, kind := range stamped {
-		out := &messages.OutboundMessage{Kind: kind, ChatID: cs.ChatID}
-		if drop := p.Apply(out, makeEnvelope(cs)); drop {
-			t.Errorf("Kind %s: policy returned drop=true (want false)", kind)
-		}
-		if out.StatusBar == nil {
-			t.Errorf("Kind %s: StatusBar was not stamped", kind)
-		}
-	}
-}
-
-// TestStatusBarStampPolicy_SkipsOtherKinds is the negative
-// half: thread-only / lifecycle / init / usage / result Kinds
-// must NOT incur a stamp (would inflate payload size with no
-// user-visible benefit). The four Kinds above are covered
-// separately.
-func TestStatusBarStampPolicy_SkipsOtherKinds(t *testing.T) {
-	cs := makeAS(t)
-	p := StatusBarStampPolicy(statusbar.Deps{})
-
-	skipped := []messages.OutboundKind{
-		messages.OutCard, messages.OutInit,
-		messages.OutMessageState, messages.OutThinking,
-		messages.OutToolStart, messages.OutToolEnd,
-	}
-	for _, kind := range skipped {
-		out := &messages.OutboundMessage{Kind: kind, ChatID: cs.ChatID}
-		if drop := p.Apply(out, makeEnvelope(cs)); drop {
-			t.Errorf("Kind %s: policy returned drop=true (want false)", kind)
-		}
-		if out.StatusBar != nil {
-			t.Errorf("Kind %s: StatusBar stamped (want nil — not in the 4 main-chat Kinds)", kind)
-		}
 	}
 }
 
@@ -224,30 +175,26 @@ func TestDefaultPolicies_OrderMatters(t *testing.T) {
 		t.Fatalf("SetThinkMode: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(testDevNull{t}, nil))
-	policies := DefaultPolicies(statusbar.Deps{}, cs, logger)
-	if len(policies) != 3 {
-		t.Fatalf("DefaultPolicies returned %d policies, want 3", len(policies))
+	policies := DefaultPolicies(chatsession.GitStatusDeps{}, cs, logger)
+	if len(policies) != 2 {
+		t.Fatalf("DefaultPolicies returned %d policies, want 2 (F-CLAUDE-PRINT-002 dropped StatusBarStampPolicy)", len(policies))
 	}
 
-	// policy[0] (statusbar): stamps OutReply, doesn't drop.
-	out := &messages.OutboundMessage{Kind: messages.OutReply, ChatID: cs.ChatID}
-	if drop := policies[0].Apply(out, makeEnvelope(cs)); drop {
-		t.Errorf("policy[0] dropped OutReply (want stamp, not drop)")
-	}
-	if out.StatusBar == nil {
-		t.Errorf("policy[0] did not stamp OutReply's StatusBar")
+	// F-CLAUDE-PRINT-002: StatusBarStampPolicy is gone. The
+	// runtime event hook (handler.go) stamps chatsession.GitStatus
+	// onto out.GitStatus directly. The remaining two policies
+	// (think gate, tools gate) are unchanged.
+
+	// policy[0] (think gate) drops OutThinking when Hide.
+	out := &messages.OutboundMessage{Kind: messages.OutThinking, ChatID: cs.ChatID}
+	if drop := policies[0].Apply(out, makeEnvelope(cs)); !drop {
+		t.Errorf("policy[0] did not drop OutThinking under Hide mode")
 	}
 
-	// policy[1] (think gate) drops OutThinking when Hide.
-	out2 := &messages.OutboundMessage{Kind: messages.OutThinking, ChatID: cs.ChatID}
+	// policy[1] (tools gate) drops OutToolStart when Hide.
+	out2 := &messages.OutboundMessage{Kind: messages.OutToolStart, ChatID: cs.ChatID}
 	if drop := policies[1].Apply(out2, makeEnvelope(cs)); !drop {
-		t.Errorf("policy[1] did not drop OutThinking under Hide mode")
-	}
-
-	// policy[2] (tools gate) drops OutToolStart when Hide.
-	out3 := &messages.OutboundMessage{Kind: messages.OutToolStart, ChatID: cs.ChatID}
-	if drop := policies[2].Apply(out3, makeEnvelope(cs)); !drop {
-		t.Errorf("policy[2] did not drop OutToolStart under Hide mode")
+		t.Errorf("policy[1] did not drop OutToolStart under Hide mode")
 	}
 }
 
@@ -263,6 +210,145 @@ func TestPolicyFunc_NilSafe(t *testing.T) {
 	drop := f.Apply(out, makeEnvelope(makeAS(t)))
 	if drop {
 		t.Errorf("nil PolicyFunc returned drop=true")
+	}
+}
+
+// TestThinkModeGatePolicy_NilAgentSession_DoesNotPanic pins
+// the runtime-handler contract documented in
+// agentsession/event_types.go: "AgentSession is ALWAYS non-nil
+// in production. … If you add a new publish site that omits
+// this guard, the runtime handler will panic — fix the
+// publisher, not the subscriber."
+//
+// Despite that contract, the gate itself is built to defend
+// against a missed guard: the "think dropped" log line uses
+// env.AgentSession.ID, and a missed publisher guard would
+// panic here. This test sends env.AgentSession=nil and asserts
+// the gate still returns drop=true (it doesn't panic, and the
+// drop decision is unaffected). The asID log field just
+// serializes as "".
+func TestThinkModeGatePolicy_NilAgentSession_DoesNotPanic(t *testing.T) {
+	cs := makeAS(t)
+	if err := cs.SetThinkMode(chatsession.ThinkModeHide); err != nil {
+		t.Fatalf("SetThinkMode: %v", err)
+	}
+
+	// Capture log output so we can assert the gate ran the
+	// "think dropped" log line without panicking on nil AS.
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	p := ThinkModeGatePolicy(cs, logger)
+
+	// envelope with AgentSession deliberately nil — simulates
+	// a future publisher that misses the as==nil guard.
+	env := chatsession.AgentEventEnvelope{
+		ChatID:       cs.ChatID,
+		AgentSession: nil,
+		Event:        &agent.AgentEvent{Kind: agent.EventAgentText},
+		UserMsgID:    "om_nil_as",
+	}
+	out := &messages.OutboundMessage{Kind: messages.OutThinking, ChatID: cs.ChatID}
+
+	// Must not panic. If the nil-guard regressed, this call
+	// would panic on env.AgentSession.ID.
+	drop := p.Apply(out, env)
+	if !drop {
+		t.Errorf("Hide mode: drop=false (want true) — gate silently passed OutThinking")
+	}
+
+	// And the log line was emitted (proves the guard is the
+	// nil-safe path, not a panic-recovered path).
+	logs := logBuf.String()
+	if !strings.Contains(logs, "think dropped") {
+		t.Errorf("expected 'think dropped' log line; got %q", logs)
+	}
+	// asID is empty because AgentSession was nil — the
+	// operator can grep the empty string in production logs
+	// to spot missed guards.
+	if !strings.Contains(logs, "agent_session_id=") {
+		t.Errorf("expected agent_session_id field in log; got %q", logs)
+	}
+}
+
+// TestToolsModeGatePolicy_NilAgentSession_DoesNotPanic is the
+// symmetric regression for ToolsModeGatePolicy. Same rationale
+// as TestThinkModeGatePolicy_NilAgentSession_DoesNotPanic.
+func TestToolsModeGatePolicy_NilAgentSession_DoesNotPanic(t *testing.T) {
+	cs := makeAS(t)
+	if got := cs.ToolsMode(); got != chatsession.ToolsModeHide {
+		t.Fatalf("fresh ChatSession ToolsMode = %q, want ToolsModeHide", got)
+	}
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	p := ToolsModeGatePolicy(cs, logger)
+
+	env := chatsession.AgentEventEnvelope{
+		ChatID:       cs.ChatID,
+		AgentSession: nil,
+		Event:        &agent.AgentEvent{Kind: agent.EventAgentText},
+		UserMsgID:    "om_nil_as_tools",
+	}
+	for _, kind := range []messages.OutboundKind{messages.OutToolStart, messages.OutToolEnd} {
+		out := &messages.OutboundMessage{Kind: kind, ChatID: cs.ChatID}
+		drop := p.Apply(out, env)
+		if !drop {
+			t.Errorf("Kind %s: drop=false (want true) — gate silently passed tool event", kind)
+		}
+	}
+
+	logs := logBuf.String()
+	if !strings.Contains(logs, "tools dropped") {
+		t.Errorf("expected 'tools dropped' log line; got %q", logs)
+	}
+}
+
+// TestDefaultPolicies_NilAgentSession_ChainSurvives verifies
+// that the full DefaultPolicies chain (think gate + tools gate)
+// handles a nil-AgentSession envelope without panicking. This
+// is the end-to-end form of the per-policy nil-safety tests —
+// a regression in either gate would surface here as a panic
+// during the DefaultPolicies call.
+func TestDefaultPolicies_NilAgentSession_ChainSurvives(t *testing.T) {
+	cs := makeAS(t)
+	if err := cs.SetThinkMode(chatsession.ThinkModeHide); err != nil {
+		t.Fatalf("SetThinkMode: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(&testDevNull{t}, nil))
+	policies := DefaultPolicies(chatsession.GitStatusDeps{}, cs, logger)
+
+	env := chatsession.AgentEventEnvelope{
+		ChatID:       cs.ChatID,
+		AgentSession: nil,
+		Event:        &agent.AgentEvent{Kind: agent.EventAgentText},
+		UserMsgID:    "om_chain_nil",
+	}
+	cases := []struct {
+		kind     messages.OutboundKind
+		wantDrop bool
+	}{
+		// think gate fires (Hide + OutThinking → drop)
+		{messages.OutThinking, true},
+		// tools gate fires (Hide + OutToolStart → drop)
+		{messages.OutToolStart, true},
+		// neither gate fires — pass-through
+		{messages.OutReply, false},
+		{messages.OutResult, false},
+	}
+	for _, tc := range cases {
+		out := &messages.OutboundMessage{Kind: tc.kind, ChatID: cs.ChatID}
+		drop := false
+		for _, pol := range policies {
+			if drop = pol.Apply(out, env); drop {
+				break
+			}
+		}
+		if drop != tc.wantDrop {
+			t.Errorf("kind=%s nil-AS: drop=%v, want %v", tc.kind, drop, tc.wantDrop)
+		}
 	}
 }
 

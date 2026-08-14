@@ -127,7 +127,7 @@ func RunClose(
 	// otherwise they accumulate as orphans and drag the daemon
 	// down.
 	if selectedCwd == "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			"❌ " + command.NoActiveCwdReply), nil
 	}
 	// Stat failure handling: split the permanent case from the
@@ -141,7 +141,7 @@ func RunClose(
 	// the stat error as an IM reply, and let the user retry.
 	if _, statErr := statPath(selectedCwd); statErr != nil {
 		if !os.IsNotExist(statErr) {
-			return reply(ctx, cs.Emitter(), chatID, messageID,
+			return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 				fmt.Sprintf("❌ cannot reach workspace: %s\n(stat: %v)\n"+
 					"hint: this may be transient (e.g. NFS hiccup, briefly-unmounted volume). "+
 					"retry /gtw close once the path is reachable again — the in-flight fix and "+
@@ -179,28 +179,28 @@ func RunClose(
 					"hint: run /cwd <path> to point this chat at a directory again.",
 				selectedCwd, agentsLine)
 		}
-		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID, body), nil
 	}
 
 	// --- step 1+2: locate the snapshot ---------------------------
 	c, err := ReadGTWYml(selectedCwd)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return reply(ctx, cs.Emitter(), chatID, messageID,
+			return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 				"❌ no active fix to close in this chat\n"+
 					"hint: /cwd into the /gtw fix worktree first (its "+
 					"`.nightme/gtw.yml` is the close source of truth)."), nil
 		}
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ failed to read .nightme/gtw.yml: %v", err)), nil
 	}
 
 	if c.Worktree == "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			"❌ .nightme/gtw.yml is malformed: worktree is empty"), nil
 	}
 	if c.RepoRoot == "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			"❌ .nightme/gtw.yml is malformed: repoRoot is empty"), nil
 	}
 
@@ -232,7 +232,7 @@ func RunClose(
 	// worktree at the target path); close has no equivalent
 	// because the yml snapshot is the recovery source of truth.
 	if err := assertWorktreeClean(ctx, c.Worktree, deps); err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID, err.Error()), nil
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID, err.Error()), nil
 	}
 
 	// --- step 4: git worktree remove ------------------------------
@@ -248,7 +248,7 @@ func RunClose(
 		if stderr != "" {
 			body += "\n[git stderr tail]\n" + stderr
 		}
-		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID, body), nil
 	}
 
 	// --- step 5: delete the local branch --------------------------
@@ -265,7 +265,7 @@ func RunClose(
 				"hint: worktree at %s is already removed; clean up the branch manually with `git branch -D %s`.",
 			c.Branch, brErr, tailLines(brStderr, 10), c.Worktree, c.Branch,
 		)
-		return reply(ctx, cs.Emitter(), chatID, messageID, body), nil
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID, body), nil
 	}
 
 	// --- step 6: switch CWD back to repoRoot ----------------------
@@ -277,7 +277,7 @@ func RunClose(
 		slog.Default().Warn("gtw: SetSelectedCwd back to repoRoot failed",
 			"repo_root", c.RepoRoot,
 			"err", err)
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("⚠️ worktree removed but SetSelectedCwd(%s) failed: %v\n"+
 				"run `/cwd %s` manually.", c.RepoRoot, err, c.RepoRoot)), nil
 	}
@@ -321,7 +321,7 @@ func RunClose(
 	// separate sync card. Every other reply path in this file
 	// uses `return reply(...), nil` because they're terminal;
 	// step 8 is mid-flow by design.
-	reply(ctx, cs.Emitter(), chatID, messageID, body)
+	reply(ctx, cs.Emitter(), cs, chatID, messageID, body)
 
 	// --- step 9: /new (clear agent context in repoRoot) ---------
 	// Mirrors the user's manual workflow: after /gtw close wipes
@@ -351,7 +351,7 @@ func RunClose(
 		if newErr != nil {
 			body += fmt.Sprintf("\n(errors: %v)", newErr)
 		}
-		reply(ctx, cs.Emitter(), chatID, messageID, body)
+		reply(ctx, cs.Emitter(), cs, chatID, messageID, body)
 	}
 
 	// --- step 10: sync main (separate card) ----------------------
@@ -366,10 +366,10 @@ func RunClose(
 	// normal / skip) fall through to the same return.
 	syncBody, syncErr := buildSyncReply(ctx, c.RepoRoot, deps)
 	if syncErr != nil {
-		reply(ctx, cs.Emitter(), chatID, messageID,
+		reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			"❌ sync failed: "+syncErr.Error())
 	} else if syncBody != "" {
-		reply(ctx, cs.Emitter(), chatID, messageID, syncBody)
+		reply(ctx, cs.Emitter(), cs, chatID, messageID, syncBody)
 	}
 	// else: SkipRefreshDefaultBranch set (test-only); no sync
 	// card. close's card (and /new card when applicable) still

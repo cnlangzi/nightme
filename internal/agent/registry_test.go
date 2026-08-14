@@ -21,8 +21,8 @@ func (f *fakeAgent) Detect() error       { return nil }
 func (f *fakeAgent) Start(context.Context, StartConfig) (*Agent, error) {
 	return nil, errors.New("fakeAgent: Start not implemented")
 }
-func (f *fakeAgent) RunOnce(context.Context, StartConfig, []ContentBlock) (string, error) {
-	return "", errors.New("fakeAgent: RunOnce not implemented")
+func (f *fakeAgent) RunOnce(context.Context, StartConfig, []ContentBlock) (RunResult, error) {
+	return RunResult{}, errors.New("fakeAgent: RunOnce not implemented")
 }
 
 func TestRegisterAndGet(t *testing.T) {

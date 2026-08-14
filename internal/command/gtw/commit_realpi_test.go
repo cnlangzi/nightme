@@ -128,13 +128,14 @@ func TestRealPi_CommitPromptV2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pi not registered: %v", err)
 	}
-	rawText, err := starter.RunOnce(ctx, cfg, []agent.ContentBlock{{
+	rawResult, err := starter.RunOnce(ctx, cfg, []agent.ContentBlock{{
 		Type: agent.ContentText,
 		Text: prompt,
 	}})
 	if err != nil {
 		t.Fatalf("pi RunOnce: %v", err)
 	}
+	rawText := rawResult.Text
 
 	t.Logf("=== RAW AGENT TEXT (first 2000 chars) ===\n%s\n=== END RAW ===",
 		truncateOutput(rawText, 2000))

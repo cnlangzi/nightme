@@ -212,41 +212,22 @@ type OutboundMessage struct {
 	// error UI (📛 icon, ⚠️ prefix, etc.).
 	Err error
 
-	// StatusBar (F-45) is the runtime-stamped metadata envelope
-	// attached to every outbound message that flows to a
-	// Channel. It carries workspace / git / PR context (the
-	// always-present GitBar) plus optional AgentBar and
-	// UsageBar sub-bars — a single atomic typed payload so
-	// Channel render paths see one consistent value and future
-	// metadata additions don't break the Channel interface.
+	// GitStatus (F-CLAUDE-PRINT-002) is the workspace + git + PR
+	// context attached to every outbound message that flows to a
+	// Channel. Sourced from chatsession (chatsession caches its
+	// own GitStatus, refreshed on /gtw commit, /gtw pr, and
+	// chatsession startup). The runtime doesn't recompute; the
+	// chatsession is the single owner.
 	//
-	// Stamped by the outbound package's StatusBarSource on
-	// every Send / SendCard. The runtime's newEventHandler
-	// closure pre-fills StatusBar for a few specific message
-	// kinds (MessageStateBus MessageSubmitted and the runtime
-	// pump's main-chat Kinds) when the source-AS semantics
-	// matter — those pre-fills make the stamper skip. For all
-	// other Kinds the stamper is the sole producer. The
-	// Channel never has to call a separate "stamp" hook.
+	// Per the F-CLAUDE-PRINT-002 refactor: the legacy StatusBar
+	// wrapper is gone. Agent identity (Agent / Model / SessionID)
+	// and per-turn usage are on this OutboundMessage directly
+	// (AgentName, Model, SessionID, Usage). This field carries
+	// only the workspace-level snapshot that bridges can't
+	// observe.
 	//
-	// Pre-rename this was `SessionContext *SessionContext`,
-	// with the runtime only stamping four Kinds. Renamed
-	// because:
-	//   - the rename to StatusBar matches the user-facing
-	//     mental model (it's a status bar at the bottom of
-	//     every message, not a "session context");
-	//   - the GitBar must always be present (when the chat
-	//     has a workspace) — pre-rename a chat with no
-	//     AgentSession would skip the entire stamp;
-	//   - SessionContext was semantically inaccurate
-	//     (Workspace / GitStatus are workspace fields, Usage
-	//     is a per-turn field, only Agent/Model/SessionID are
-	//     session fields);
-	//   - "Context" collided with Go's context.Context idiom
-	//     at every read site.
-	//
-	// Bridges never populate this field directly; runtime is
-	// the single owner. See docs/feat/F-45-session-footer.md
-	// §1.3.
-	StatusBar *StatusBar
+	// Nil when the chat has no workspace or no AgentSession.
+	// Channels omit the workspace footer line entirely in that
+	// case.
+	GitStatus *GitStatus
 }

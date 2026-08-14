@@ -459,7 +459,7 @@ func (t *translator) translate(raw []byte, logger *slog.Logger) ([]agent.AgentEv
 		// start+end pair per compaction cycle; only the end is
 		// surfaced to the runtime as one EventAgentCompaction, so a single
 		// Pi cycle bumps the AgentSession counter exactly once.
-		// Reasons live in protocol.go's compactionStart.Reason but
+		// Reasons live in protocol.go's compactionEnd.Reason but
 		// are intentionally not propagated (no Subtype field after
 		// F-49). See docs/feat/F-49-compaction-counter.md §1.3.
 		return nil, nil

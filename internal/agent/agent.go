@@ -796,11 +796,6 @@ func (a *Agent) SessionID() string {
 	return v
 }
 
-// setSessionID records the agent's own session id. Called by the
-// bridge's readPump on EventAgentReady. Package-private so only
-// driver implementations can write.
-func (a *Agent) setSessionID(id string) { a.sessionID.Store(id) }
-
 // SendBlocks delivers a structured user turn. Delegates to the
 // bridge-specific driver.
 func (a *Agent) SendBlocks(ctx context.Context, blocks []ContentBlock) error {
@@ -927,6 +922,76 @@ type driver interface {
 //   - Starter.Detect() is the pre-flight check (binary on PATH,
 //     SDK available). Called by Spawner before Start; an error
 //     aborts session creation with a clear "X not found" message.
+// RunResult is the per-call output of Starter.RunOnce.
+// Captures everything a one-shot caller might want after the
+// turn — final text plus the per-turn metadata the bridge
+// could observe (token usage, model, duration, bridge-
+// specific subtype). Replaces the previous `(string, error)`
+// signature so /gtw commit etc. can audit cost / timing
+// without re-querying the bridge layer.
+//
+// Bridges populate as many fields as their wire protocol
+// carries; fields the bridge cannot observe are left at the
+// zero value. Callers MUST treat nil/empty as "not reported"
+// rather than as "zero cost / zero tokens / zero duration".
+type RunResult struct {
+	// Text is the agent's final response. /gtw pr parses this.
+	// Empty when the bridge rejected the prompt (caller sees
+	// an error in the second return value).
+	Text string
+
+	// Usage is the per-turn token usage observed on the same
+	// wire event as Text. nil when the bridge couldn't observe
+	// usage (PTY heuristic impl). Populated by bridges whose
+	// wire format carries `usage` / `modelUsage`.
+	Usage *UsageInfo
+
+	// Model is the model name that actually produced Text.
+	// Important when RunOnce uses a different model than the
+	// chat session's selectedAgent (e.g. /gtw commit might
+	// run on a cheaper model via cfg override) — callers
+	// rendering a StatusBar should prefer Result.Model over
+	// the chat session's selectedAgent model. Empty when
+	// the bridge didn't observe model metadata.
+	Model string
+
+	// SessionID is the bridge-side session identifier for
+	// the call (Claude Code: system/init.session_id; Codex:
+	// thread.id; Pi print-mode: empty — no session event on
+	// that path). Bridges populate when their wire format
+	// carries the value; empty when it doesn't. Print-mode
+	// sessions are short-lived (one per `-p` invocation), so
+	// the value is mostly useful for audit (logging which
+	// session produced which output) and future resume
+	// flows (`--resume <sid>` on retry) rather than as a
+	// persistent identifier.
+	SessionID string
+
+	// DurationMs is the wall-clock duration of the call in
+	// milliseconds. Useful for /gtw commit timing logs and
+	// for tracking slow one-shot paths.
+	DurationMs int64
+
+	// Subtype is the bridge-specific turn category. Values
+	// are HETEROGENEOUS across bridges — see the per-bridge
+	// comment below. Callers MUST NOT do cross-bridge string
+	// matching; only use Subtype for within-bridge audit or
+	// for the coarse "is this an error category?" check.
+	//
+	// Per-bridge values:
+	//   - claudecode: result.subtype
+	//       "success" / "error_max_turns" / "refusal" / "compact"
+	//   - codex:     turn status
+	//       "completed" / "failed"
+	//   - pi:        message_end.stopReason
+	//       "stop" / "toolUse" / "error"
+	//   - opencode:  terminal SSE event type
+	//       "session.idle" / "error" / etc.
+	//   - acp:       bridge-defined; consult the bridge's docs
+	//   - pty:       always "" (no structured event)
+	Subtype string
+}
+
 //   - Starter.Start(ctx, cfg) spawns (or attaches to) the agent
 //     and returns a live *Agent. The receiver is unchanged;
 //     Starter is reusable across many sessions.
@@ -937,14 +1002,17 @@ type Starter interface {
 
 	// RunOnce runs a single synchronous turn: the implementation
 	// owns the full spawn → send → wait → close cycle. cfg.Workspace
-	// is the agent's cwd for this call. Returns the agent's final
-	// text response, or an error if the turn didn't produce one.
+	// is the agent's cwd for this call. Returns a RunResult
+	// carrying the agent's final text plus any per-turn metadata
+	// (usage / session id / model / duration / subtype) the
+	// bridge could observe. Errors when the turn didn't produce
+	// a usable response.
 	//
 	// RunOnce is the "one-shot" counterpart to Start. Start returns
 	// a live *Agent for multi-turn / chat sessions; RunOnce is for
 	// callers (e.g. /gtw commit, /gtw pr) that want a single
 	// synchronous turn and don't need the session handle.
-	RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock) (string, error)
+	RunOnce(ctx context.Context, cfg StartConfig, blocks []ContentBlock) (RunResult, error)
 }
 
 // Errors surfaced by the registry.

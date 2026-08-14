@@ -112,10 +112,10 @@ func TestPrintMode_RealPi_CommitPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunOnce (print mode): %v", err)
 	}
-	if text == "" {
+	if text.Text == "" {
 		t.Fatal("RunOnce returned empty text")
 	}
-	t.Logf("Agent text (first 400 chars): %s", truncateForDisplay(text, 400))
+	t.Logf("Agent text (first 400 chars): %s", truncateForDisplay(text.Text, 400))
 
 	// Sanity: the prompt instructed the agent not to push and
 	// not to add -A. We can't easily assert those didn't happen

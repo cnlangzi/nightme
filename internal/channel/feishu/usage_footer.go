@@ -176,43 +176,34 @@ import (
 // Stable across re-renders — same input always produces the same
 // slice, so the receipt PATCH diff stays minimal.
 //
-// Pre-rename this was `formatSessionFooterLines(ctx *SessionContext)`
-// with the flat struct; renamed to operate on the sub-bar
-// StatusBar struct.
-func formatStatusBarLines(sb *messages.StatusBar) []string {
-	if sb == nil {
+// F-CLAUDE-PRINT-002: takes OutboundMessage directly instead of
+// a StatusBar wrapper. Identity (Agent / Model / SessionID) and
+// usage (per-event) live on OutboundMessage directly. GitStatus
+// is also on OutboundMessage. Renderer is a pure consumer —
+// no fallback, no Source, no defensive patching.
+func formatStatusBarLines(msg *messages.OutboundMessage) []string {
+	if msg == nil {
 		return nil
 	}
 	var lines []string
 
-	// Line 1: identity (�: Agent · Model · SessionID).
-	// Rendered from AgentBar (optional). Each segment is
+	// Line 1: identity (🤖: Agent · Model · SessionID).
+	// Read directly from OutboundMessage flat fields (translated
+	// from AgentEvent by gateway.Translate). Each segment is
 	// omitted independently when empty; an AgentBar with only
-	// SessionID set renders as "🤖: · <sid>" (leading-separator
-	// caveat locked by
-	// TestFormatStatusBarLines_AgentBarSessionIDOnly +
-	// F-45 §1.10). The leading colon after 🤖 matches the 💰:「」
-	// taxonomy on Line 2 and the 📁: on Line 3 so the three
-	// footer lines share a single category-prefix shape.
-	if ab := sb.AgentBar; ab != nil {
+	// SessionID set renders as "🤖: · <sid>".
+	if msg.AgentName != "" || msg.Model != "" || msg.SessionID != "" {
 		idParts := []string{"🤖:"}
-		if ab.Agent != "" {
-			idParts = append(idParts, ab.Agent)
+		if msg.AgentName != "" {
+			idParts = append(idParts, msg.AgentName)
 		}
-		if ab.Model != "" {
-			// Use middle-dot · between Agent and Model — same
-			// separator Line 2 uses between token segments, so
-			// the identity line reads as a consistent footer
-			// taxonomy rather than two different rhythms
-			// ("🤖: claude opus-4-5" → "🤖: claude · opus-4-5").
-			// F-37 / F-44 footer convention; matches the rest
-			// of the line-2 separator family.
-			idParts = append(idParts, "·", ab.Model)
+		if msg.Model != "" {
+			idParts = append(idParts, "·", msg.Model)
 		}
 		// F-56: append the agent's own session id as a trailing
 		// identity segment.
-		if ab.SessionID != "" {
-			idParts = append(idParts, "·", ab.SessionID)
+		if msg.SessionID != "" {
+			idParts = append(idParts, "·", msg.SessionID)
 		}
 		// F-49 compaction tracking removed: the "· 🗜 N"
 		// segment is no longer rendered. Line 1 retains Agent ·
@@ -248,7 +239,8 @@ func formatStatusBarLines(sb *messages.StatusBar) []string {
 	// independently with its owning "·" separator; the final
 	// 「」 enclosure is added only when at least one segment is
 	// present.
-	if ub := sb.UsageBar; ub != nil {
+	if msg.Usage != nil {
+		ub := msg.Usage
 		usageParts := make([]string, 0, 3)
 		// F-55.1: split `in` into `new` (tokens not from cache
 		// this turn: input_tokens + cache_creation_input_tokens)
@@ -297,19 +289,17 @@ func formatStatusBarLines(sb *messages.StatusBar) []string {
 	}
 
 	// Line 3 (F-48 + F-49): git tracking — workspace · branch ·
-	// dirty counts · PR number. Rendered from GitBar (always
-	// present when the chat has a workspace). formatGitBar
+	// dirty counts · PR number. Rendered from GitStatus (always
+	// present when the chat has a workspace). formatGitLine
 	// folds the PR / MR number in as its last segment (when
 	// present) so the footer stays at three lines regardless
-	// of PR state — see the formatGitBar doc for why we keep
-	// the PR number on the workspace row rather than on its
-	// own line. Returns "" when sb.GitBar is nil OR its
-	// Workspace is empty OR GitStatus is nil OR all sub-
+	// of PR state. Returns "" when msg.GitStatus is nil OR its
+	// Workspace is empty OR Snapshot is nil OR all sub-
 	// segments omit — in which case the entire line drops
 	// (including the PR number, by design: a PR number without
 	// a git workspace is a stale cache state we don't surface
 	// on its own row).
-	if gl := formatGitBar(sb.GitBar); gl != "" {
+	if gl := formatGitLine(msg.GitStatus); gl != "" {
 		lines = append(lines, gl)
 	}
 
@@ -318,7 +308,7 @@ func formatStatusBarLines(sb *messages.StatusBar) []string {
 
 // formatPRSegment renders the trailing `[#N](url)` PR / MR
 // segment of the workspace footer line. Operates on GitBar
-// (pre-rename: the flat StatusContext). Reads gb.PullRequest
+// (pre-rename: the flat StatusContext). Reads gs.PullRequest
 // and returns "" when nil / Number<=0 / URL empty.
 //
 // Returns "" also when gb is nil (caller drops the trailing
@@ -342,11 +332,11 @@ func formatStatusBarLines(sb *messages.StatusBar) []string {
 // The link text (`#N`) is enough for a reader to recognise
 // "this is the open PR for the current branch" — and it's
 // clickable, which is the actual signal of "this is a link".
-func formatPRSegment(gb *messages.GitStatusBar) string {
-	if gb == nil {
+func formatPRSegment(gs *messages.GitStatus) string {
+	if gs == nil {
 		return ""
 	}
-	pr := gb.PullRequest
+	pr := gs.PullRequest
 	if pr == nil || pr.Number <= 0 || pr.URL == "" {
 		return ""
 	}
@@ -364,11 +354,11 @@ func formatPRSegment(gb *messages.GitStatusBar) string {
 // path uses formatStatusBarLines directly because plain_text
 // elements do NOT honour \n within a single element.
 //
-// Pre-rename this was `formatSessionFooter`. Renamed for the
-// same reason as formatSessionFooterLines → formatStatusBarLines.
-func formatStatusBar(sb *messages.StatusBar) string {
-	return strings.Join(formatStatusBarLines(sb), "\n")
-}
+// F-CLAUDE-PRINT-002: renamed from formatGitBar. Takes
+// *messages.GitStatus directly (the GitStatus lives on
+// OutboundMessage now; pre-rename was the GitBar sub-bar of
+// StatusBar).
+func formatGitBar(gs *messages.GitStatus) string { return formatGitLine(gs) }
 
 // abbrevTokens formats a token count into a compact human-readable
 // string. Used only by formatStatusBar; lives here so the
@@ -559,8 +549,8 @@ func formatWorkspacePath(absPath string) string {
 //
 // Returns "" (line dropped) when:
 //   - gb is nil (the chat has no workspace at all);
-//   - gb.Workspace is "" (no path to render);
-//   - gb.GitStatus is nil (non-git workspace — "📁 <ws> · ⎇ ?"
+//   - gs.Workspace is "" (no path to render);
+//   - gs.Snapshot is nil (non-git workspace — "📁 <ws> · ⎇ ?"
 //     would imply Git tracking is available when it's not,
 //     caller couldn't collect because the workspace isn't a
 //     git repo, git is missing, or git failed). The "⎇ ?"
@@ -573,21 +563,21 @@ func formatWorkspacePath(absPath string) string {
 //
 // F-48 documented contract (pre-rename):
 // "Workspace=='' OR GitStatus==nil → entire line omitted."
-// The new contract (post-rename) is structurally enforced by
-// the sub-bar design: GitBar is only attached to StatusBar
-// when the chat has a workspace, and the renderer drops the
-// line when GitStatus is nil.
-func formatGitBar(gb *messages.GitStatusBar) string {
-	if gb == nil {
+//
+// F-CLAUDE-PRINT-002: takes a *messages.GitStatus directly (was
+// the GitBar sub-bar of StatusBar). The GitStatus lives on
+// OutboundMessage now; the renderer is a pure consumer.
+func formatGitLine(gs *messages.GitStatus) string {
+	if gs == nil {
 		return ""
 	}
-	if gb.Workspace == "" {
+	if gs.Workspace == "" {
 		return ""
 	}
-	if gb.GitStatus == nil {
+	if gs.Snapshot == nil {
 		return ""
 	}
-	ws := formatWorkspacePath(gb.Workspace)
+	ws := formatWorkspacePath(gs.Workspace)
 	if ws == "" {
 		return ""
 	}
@@ -596,8 +586,8 @@ func formatGitBar(gb *messages.GitStatusBar) string {
 
 	// Branch segment (always present when line is shown).
 	branch := "?"
-	if gb.GitStatus.Branch != "" {
-		branch = gb.GitStatus.Branch
+	if gs.Snapshot.Branch != "" {
+		branch = gs.Snapshot.Branch
 	}
 	parts = append(parts, "⎇ "+branch)
 
@@ -607,7 +597,7 @@ func formatGitBar(gb *messages.GitStatusBar) string {
 	// PLUS-MINUS SIGN — Unicode on purpose so all five symbols
 	// (`+`, `−`, `±`, `?`, `⇡`) render with consistent width in
 	// Feishu's fixed-width footer font (iTerm2 alignment).
-	dirty := gb.GitStatus
+	dirty := gs.Snapshot
 	if dirty.Added > 0 {
 		parts = append(parts, fmt.Sprintf("+ %d", dirty.Added))
 	}
@@ -653,7 +643,7 @@ func formatGitBar(gb *messages.GitStatusBar) string {
 	// "workspace → branch → dirty counts → upstream → PR".
 	// See formatPRSegment doc for the omit rules and the
 	// plain-text / no-markdown-link rationale.
-	if pr := formatPRSegment(gb); pr != "" {
+	if pr := formatPRSegment(gs); pr != "" {
 		parts = append(parts, pr)
 	}
 
@@ -670,7 +660,7 @@ func formatGitBar(gb *messages.GitStatusBar) string {
 	// segment so the line still reads
 	// "workspace → branch → dirty counts → PR → local state".
 	if !dirty.HasUpstream &&
-		gb.PullRequest == nil &&
+		gs.PullRequest == nil &&
 		dirty.Added == 0 &&
 		dirty.Deleted == 0 &&
 		dirty.Modified == 0 &&

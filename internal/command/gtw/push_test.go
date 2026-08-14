@@ -175,11 +175,11 @@ func (r *recordingAgent) Detect() error { return r.detectErr }
 func (r *recordingAgent) Start(context.Context, agent.StartConfig) (*agent.Agent, error) {
 	return nil, errors.New("recordingAgent: Start not implemented")
 }
-func (r *recordingAgent) RunOnce(_ context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
+func (r *recordingAgent) RunOnce(_ context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, runOnceCall{workspace: cfg.Workspace, blocks: append([]agent.ContentBlock(nil), blocks...)})
-	return r.runOnceText, r.runOnceErr
+	return agent.RunResult{Text: r.runOnceText}, r.runOnceErr
 }
 
 // withAgent swaps agent.Builtins for a local registry containing

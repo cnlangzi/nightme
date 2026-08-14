@@ -275,9 +275,14 @@ in-place:
 fix:
   hooks:
     after:
+      - tokensave branch add "$GTW_BRANCH" --repo "$GTW_REPO_ROOT"
       - codegraph init                # re-index the new worktree
       - npm install                   # install deps
       - go mod download               # download Go modules
+close:
+  hooks:
+    before:
+      - tokensave branch remove "$GTW_BRANCH" --repo "$GTW_REPO_ROOT"
 ```
 
 Each command (not just `fix`) exposes `hooks.before` and

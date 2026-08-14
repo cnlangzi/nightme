@@ -73,10 +73,10 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // JSON-RPC session, sends blocks, and drains Events() until the
 // agent produces its final text result. Closes the session
 // before returning.
-func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	a, err := s.Start(ctx, cfg)
 	if err != nil {
-		return "", fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
+		return agent.RunResult{}, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
 	}
 	defer a.Close()
 	return agent.RunOnceDrain(ctx, a, blocks, s.Info().Name)

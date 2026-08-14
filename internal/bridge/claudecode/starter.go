@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
@@ -101,19 +102,78 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	return agent.NewAgent(s.Info(), d.pid, d.events, d), nil
 }
 // RunOnce is the one-shot counterpart to Start. Spawns a fresh
-// stream-json session, sends blocks, and drains Events() until
-// the agent produces its final text result. Closes the session
-// before returning.
+// `claude -p <prompt>` print-mode session (process exits after
+// the turn), streams events through the shared stream.go
+// translator, and returns the agent's final text on a clean run.
 //
-// We bypass Start's resume-preservation probe (cfg.SessionID is
-// always empty for one-shot), so we call newDriver directly via
-// the Start path. The shared agent.RunOnceDrain helper handles
-// send + drain.
-func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
-	a, err := s.Start(ctx, cfg)
+// As of F-CLAUDE-PRINT-001 (2026-08-14), RunOnce routes through
+// the print-mode spawn (print_unix.go) rather than the long-
+// lived stream-json session that Start uses. Rationale:
+//
+//   - One-shot invocations (/gtw commit, buildAgentPrompt)
+//     don't need a multi-turn session; they spawn, do the
+//     work, and exit.
+//   - The Start path was observed to carry unnecessary
+//     surface for one-shot: stream-json stdin correlation,
+//     resume-preservation probe, busy guard, held-open pipe.
+//     Mirrors pi's F-PI-PRINT-001 (2026-08-13) finding that
+//     the long-lived path is unreliable for single-turn use
+//     while print-mode is deterministic.
+//   - Print-mode uses positional `-p <prompt>` (no stdin reads),
+//     runs the turn, emits the result event, and exits. The
+//     shared stream.go translator consumes the wire events
+//     without modification.
+//
+// Start (above) is unchanged: it still opens the stream-json
+// held-stdin session for the chat-session use case where many
+// turns ride one bridge. RunOnce and Start share the same
+// Starter; only the spawn path differs.
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+	prompt := blocksToPrompt(blocks)
+	result, err := runPrintMode(ctx, s.command, prompt, cfg.Workspace, cfg.Env)
 	if err != nil {
-		return "", fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
+		return agent.RunResult{}, fmt.Errorf("agent %s: %w", s.Info().Name, err)
 	}
-	defer a.Close()
-	return agent.RunOnceDrain(ctx, a, blocks, s.Info().Name)
+	return result, nil
+}
+
+// blocksToPrompt joins multiple ContentText blocks with "\n"
+// and degrades ContentImage / ContentFile blocks to compact
+// "[image: ...]" / "[file: ...]" suffixes on the message. The
+// output is the single string passed to `claude -p`. Images
+// are not yet threaded through print-mode (claude's `-p` flag
+// accepts only one positional prompt); when /gtw commit starts
+// carrying image attachments this is where the base64-encoding
+// or placeholder strategy will land.
+func blocksToPrompt(blocks []agent.ContentBlock) string {
+	var sb strings.Builder
+	for _, b := range blocks {
+		switch b.Type {
+		case agent.ContentText:
+			if b.Text == "" {
+				continue
+			}
+			if sb.Len() > 0 {
+				sb.WriteByte('\n')
+			}
+			sb.WriteString(b.Text)
+		case agent.ContentImage:
+			if b.Path == "" {
+				continue
+			}
+			if sb.Len() > 0 {
+				sb.WriteByte('\n')
+			}
+			fmt.Fprintf(&sb, "[image: %s (%s)]", b.Path, b.MediaType)
+		case agent.ContentFile:
+			if b.Path == "" {
+				continue
+			}
+			if sb.Len() > 0 {
+				sb.WriteByte('\n')
+			}
+			fmt.Fprintf(&sb, "[file: %s]", b.Path)
+		}
+	}
+	return sb.String()
 }

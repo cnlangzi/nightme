@@ -64,7 +64,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/prcache"
 	"github.com/cnlangzi/nightme/internal/shell"
-	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 // RunOptions bundles the per-run parameters that aren't part of
@@ -267,10 +266,10 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 
 	// StatusBar deps — shared by every stamp site (runtime
 	// pump, MessageStateBus, Emitter's Source). The closures
-	// capture gtwDeps + prCacheReg; statusbar itself stays
+	// capture gtwDeps + prCacheReg; chatsession itself stays
 	// decoupled from gtw (which would create an import cycle:
-	// statusbar → gtw → chatsession → outbound → statusbar).
-	statusbarDeps := statusbar.Deps{
+	// gtw → chatsession → outbound).
+	statusbarDeps := chatsession.GitStatusDeps{
 		CollectGit: func(ctx context.Context, cwd string) (*messages.GitStatusSnapshot, error) {
 			return gtw.CollectReadiness(ctx, cwd, gtw.ExecGitRunner{})
 		},
@@ -294,24 +293,25 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	// MessageState / PATCH) flows through the same Emitter
 	// instance. Manager.WithEmitter (further down) binds the
 	// same Emitter to every ChatSession.
-	em := outbound.New(ch, outbound.Options{Source: statusbar.NewRuntimeSource(
-		func(chatID string) statusbar.ChatInfo {
-			cs := mgr.Get(chatID)
-			if cs == nil {
-				return statusbar.ChatInfo{}
-			}
-			return statusbar.ChatInfo{
-				Cwd: cs.SelectedCwd(),
-				AS:  cs.SelectedAgentSession(),
-			}
-		},
-		statusbarDeps,
-	)})
+	//
+	// F-CLAUDE-PRINT-002: statusbar.NewRuntimeSource + AttachIfMissing
+	// are deleted (Batch 3). The Emitter becomes pure transport
+	// for the rest of this PR; chatsession.GitStatus is the
+	// sole source of GitStatus, and chatsession's event hook
+	// (Batch 2) stamps it onto out.GitStatus directly.
+	em := outbound.New(ch, outbound.Options{})
 
 	// Bind the same Emitter to chatsession.Manager so its
 	// HandleInbound error-reply paths inherit the StatusBar
 	// footer (no-workspace / spawn-failed / queue-full).
-	mgr.WithEmitter(em).WithPrimaryAgent(cfg.Primary)
+	mgr.WithEmitter(em).WithPrimaryAgent(cfg.Primary).
+		WithGitStatusDeps(statusbarDeps)
+
+	// Initial GitStatus refresh for the primary agent's chatsession
+	// (and any pre-existing chats the manager has). After this, the
+	// first outbound from each chat has a populated GitStatus;
+	// later refreshes happen at /gtw commit pre/post + /gtw pr.
+	mgr.RefreshAllGitStatus(ctx, statusbarDeps)
 
 	// F-58: gateway is now a thin pump + binding table. The
 	// dispatch chain lives in *inbound.Router (constructed

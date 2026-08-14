@@ -82,7 +82,7 @@ func dispatchPR(
 	if err != nil {
 		// Reuse the same message format /gtw sync uses — it
 		// already explains the "no origin remote" case.
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ %v", err)), nil
 	}
 
@@ -95,7 +95,7 @@ func dispatchPR(
 	// sees ONE actionable message per /gtw pr attempt.
 	snap, err := CollectReadiness(ctx, c.Worktree, deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ read worktree status: %v", err)), nil
 	}
 	if snap == nil {
@@ -104,12 +104,12 @@ func dispatchPR(
 		// "no snapshot" means "can't prove the worktree is ready" —
 		// fail closed rather than fall through and call gh against
 		// an unverified state.
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			"❌ cannot read worktree git status — refusing to open a PR\n"+
 				"hint: ensure the worktree is inside a git repo with at least one commit"), nil
 	}
 	if reason := snap.PRBlockReason(); reason != "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID, reason), nil
 	}
 
 	// PR-worthiness check (orthogonal to readiness): is there
@@ -120,11 +120,11 @@ func dispatchPR(
 	// the legacy nested uncommitted-hint cascade.
 	ahead, err := countBaseAhead(ctx, c.Worktree, baseBranch, deps)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ count commits ahead of base: %v", err)), nil
 	}
 	if ahead == 0 {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf(
 				"✅ branch %s is in sync with %s — nothing new to PR yet\n"+
 					"hint: make some changes, then /gtw commit, then /gtw push, then /gtw pr.",
@@ -137,16 +137,16 @@ func dispatchPR(
 		agentName = cs.SelectedAgent()
 	}
 	if agentName == "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			"❌ no agent selected. Send `/use <name>` first or pass `-a <name>`."), nil
 	}
 	a, err := agent.Builtins.Get(agentName)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ unknown agent %q (check `nightme agents` or your config)", agentName)), nil
 	}
 	if err := a.Detect(); err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ agent %s not available: %v", agentName, err)), nil
 	}
 
@@ -158,20 +158,21 @@ func dispatchPR(
 		Type: agent.ContentText,
 		Text: prompt,
 	}}
-	text, err := a.RunOnce(ctx,
+	result, err := a.RunOnce(ctx,
 		agent.StartConfig{Workspace: c.Worktree},
 		blocks,
 	)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ agent %s failed: %v", agentName, err)), nil
 	}
+	text := result.Text
 
 	title, body, perr := parsePRReply(text)
 	if perr != nil {
 		// Agent output wasn't usable. Echo the raw text so
 		// the user can copy/paste into gh/glab themselves.
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf(
 				"❌ %v — agent output was:\n%s",
 				perr, indentLines(text, "  "))), nil
@@ -180,23 +181,28 @@ func dispatchPR(
 	// --- pick provider ----------------------------------------------
 	provider, owner, repo, err := resolveProvider(ctx, c, deps)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ %v", err)), nil
 	}
 
 	url, err := provider.CreatePR(ctx, owner, repo, baseBranch, c.Branch, title, body)
 	if err != nil {
 		if errors.Is(err, ErrPRExists) {
+			// F-CLAUDE-PRINT-002: PR is being created by another
+			// command; refresh chatsession.GitStatus so the
+			// friendly-reuse message footer shows the existing
+			// PR.
+			_ = cs.RefreshGitStatus(ctx, deps.GitStatusDeps)
 			// Friendly reuse — the user already opened a PR
 			// for this branch. We don't have the URL from
 			// gh/glab stderr reliably across versions, so we
 			// just point them at the repo.
-			return reply(ctx, cs.Emitter(), chatID, messageID,
+			return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 				fmt.Sprintf(
 					"❌ a PR for %s already exists — check your repo's PR list.",
 					c.Branch)), nil
 		}
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ create PR failed: %v", err)), nil
 	}
 
@@ -214,7 +220,7 @@ func dispatchPR(
 	// immediately.
 	invalidateChatASPRCache(deps, cs)
 
-	return reply(ctx, cs.Emitter(), chatID, messageID, card), nil
+	return reply(ctx, cs.Emitter(), cs, chatID, messageID, card), nil
 }
 
 // buildPRPrompt renders the text block the agent receives.

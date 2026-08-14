@@ -3,8 +3,9 @@
 //
 // agent.go (this file) holds:
 //   - the helpers used by both Starter (starter.go) and driver
-//     (driver.go): deliver, readSSE, lifecycle, watchdog,
-//     finishTurn, detectBranch, isUnrecoverableStartErr, oLog.
+//     (driver.go): deliver, sseLoop (with reconnect), lifecycle,
+//     watchdog, livenessProbeConfig, finishTurn, detectBranch,
+//     isUnrecoverableStartErr, oLog.
 //
 // The Starter + driver split (see starter.go and driver.go
 // respectively) follows the codebase-wide Info/Starter/Agent/
@@ -126,9 +127,6 @@ func (d *driver) sseLoop(ctx context.Context) {
 
 	backoff := sseReconnectMin
 	for {
-		if ctx.Err() != nil {
-			return
-		}
 		select {
 		case <-ctx.Done():
 			return
@@ -313,7 +311,7 @@ func watchdogTimeout() time.Duration {
 
 // watchdog is a per-turn self-healing timer. Patterned after
 // cc-connect (defaultEventIdleTimeout in their engine.go:953):
-// the timer is reset on every SSE event (readSSE writes
+// the timer is reset on every SSE event (sseLoop writes
 // lastEventAtUnixNano on each frame). If the gap exceeds the
 // threshold while a turn is pending, we kill the server,
 // synthesise an EventAgentError, and let the runtime readpump

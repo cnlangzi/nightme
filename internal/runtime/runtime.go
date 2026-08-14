@@ -260,42 +260,58 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 	prCacheReg := &prcache.Registry{}
 
 	gtwDeps := gtw.HandlerDeps{
-		Git:           gtw.ExecGitRunner{},
-		Prober:        &gtw.ExecHTTPProber{},
-		PRInvalidator: prCacheReg,
+		Git:     gtw.ExecGitRunner{},
+		Prober:  &gtw.ExecHTTPProber{},
+		PRCache: prCacheReg,
 	}
 
-	// GitStatus deps — shared by every refresh site (chatsession
-	// SetSelectedCwd / RefreshGitStatus / pull-on-read fallback).
-	// The closures capture gtwDeps + prCacheReg; chatsession itself
-	// stays decoupled from gtw (which would create an import cycle:
-	// gtw → chatsession → outbound).
+	// prResolver is the prcache ↔ gtw bridge: the cache
+	// stores (pr, branch, expiresAt) but doesn't know how to
+	// git symbolic-ref or `gh pr list`. We compose those
+	// here, in the runtime, so prcache stays a leaf package
+	// (no `gtw` import). Called by Cache.MaybeRefresh inside
+	// the per-stamp trigger; runs in a goroutine on the
+	// background-refresh path.
+	prResolver := func(ctx context.Context, dir string) (*messages.PR, string, error) {
+		branch, err := gtw.CurrentBranch(ctx, dir, gtwDeps.Git)
+		if err != nil || branch == "" {
+			return nil, branch, err
+		}
+		pr, err := gtw.CollectPR(ctx, dir, branch, gtwDeps)
+		return pr, branch, err
+	}
+
+	// GitStatus deps — used by ChatSession.GitStatus on every
+	// outbound stamp. The closures capture gtwDeps + prCacheReg;
+	// chatsession itself stays decoupled from gtw (which would
+	// create an import cycle: gtw → chatsession → outbound).
 	gitStatusDeps := chatsession.GitStatusDeps{
 		CollectGit: func(ctx context.Context, cwd string) (*messages.GitStatusSnapshot, error) {
 			return gtw.CollectReadiness(ctx, cwd, gtw.ExecGitRunner{})
 		},
-		RefreshPR: func(asID, cwd string) {
+		LookupPR: func(asID, cwd string) *messages.PR {
+			// Per-read update attempt: every stamp's PR query
+			// pessimistically nudges the cache. MaybeRefresh is
+			// sync, no I/O, conditional: it only spawns a
+			// goroutine when the 60s TTL has elapsed AND no
+			// refresh is currently in flight. The common case
+			// (cache fresh, no recent refresh) is one mutex
+			// acquire + one time.Now() compare + one unlock.
+			// PR() returns the last-known value either way —
+			// a fresh refresh is visible on the NEXT read,
+			// not this one. /gtw {pr, close} bypass the lazy
+			// trigger by writing directly via
+			// deps.PRCache.WritePR when they already know the
+			// answer (the new PR number, or "branch deleted,
+			// clear").
 			if prCache := prCacheReg.GetOrCreate(asID); prCache != nil {
-				prCache.MaybeRefresh(cwd, gtwDeps)
-			}
-		},
-		LookupPR: func(asID string) *messages.PR {
-			if prCache := prCacheReg.GetOrCreate(asID); prCache != nil {
+				prCache.MaybeRefresh(cwd, prResolver)
 				return prCache.PR()
 			}
 			return nil
 		},
 	}
 
-	// Wire the same deps into gtwDeps so /gtw commit and /gtw pr
-	// can refresh the chatsession cache after RunOnce.
-	// Without this, cs.RefreshGitStatus(ctx, deps.GitStatusDeps)
-	// passes the zero value, depsConfigured short-circuits, and
-	// the chatsession cache holds the pre-mutation snapshot
-	// until the next pull-on-read cache miss — every outbound
-	// stamped by the Emitter in between shows stale branch / HEAD
-	// info on the workspace footer line.
-	gtwDeps.GitStatusDeps = gitStatusDeps
 
 	// emitter is the single daemon-wide outbound chokepoint.
 	// Constructed here (before gateway.New) so the Gateway can
@@ -316,10 +332,13 @@ func runDaemon(ctx context.Context, out io.Writer, deps Deps, sigCh <-chan os.Si
 		// delegates to cs.GitStatus(ctx). The lookup is invoked for
 		// every Send / SendCard whose msg.GitStatus is nil — the
 		// SINGLE chokepoint where every outbound message picks up
-		// its git snapshot. Pull-on-read: cache miss (chat just
-		// restored / created after startup) triggers a synchronous
-		// refresh with a 3s timeout, then subsequent reads hit
-		// cache for the rest of the turn.
+		// its git snapshot. ChatSession.GitStatus rebuilds the
+		// snapshot from scratch on every call (no per-chat cache
+		// layer): CollectGit runs `git status --porcelain --branch`
+		// synchronously against SelectedCwd with a 3s timeout cap,
+		// and LookupPR runs prcache.Cache.MaybeRefresh + PR() so
+		// every read also nudges the PR refresh. See
+		// chatsession.GitStatus for the contract.
 		GitStatusLookup: func(ctx context.Context, chatID string) *messages.GitStatus {
 			cs := mgr.Get(chatID)
 			if cs == nil {

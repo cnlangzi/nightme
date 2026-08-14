@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/command/gtw"
+	"github.com/cnlangzi/nightme/internal/messages"
 )
 
 // TestCache_PR_BeforeAnyRefresh covers the cold-start case:
@@ -19,7 +19,7 @@ import (
 // (within the 60s TTL) hit the cache. This test pins only
 // the nil-before-any-refresh half — the async spawn is
 // covered indirectly by TestCache_Refresh_UpdatesBranchOnSwitch
-// + TestCache_ConcurrentGetAndInvalidate.
+// + TestCache_ConcurrentGetAndWritePR.
 func TestCache_PR_BeforeAnyRefresh(t *testing.T) {
 	c := &Cache{}
 	if got := c.PR(); got != nil {
@@ -27,37 +27,69 @@ func TestCache_PR_BeforeAnyRefresh(t *testing.T) {
 	}
 }
 
-// TestCache_InvalidateForcesRefresh verifies that
-// Invalidate() resets the TTL so the next MaybeRefresh
-// spawns a refresh goroutine, regardless of whether the
-// previous refresh had populated the cache.
-func TestCache_InvalidateForcesRefresh(t *testing.T) {
+// TestCache_WritePR_NilClears verifies the nil-clears branch
+// of WritePR: pr=nil drops pr, branch, and expiresAt. The
+// next MaybeRefresh would then kick a fresh refresh from
+// scratch (expiresAt zero == expired).
+func TestCache_WritePR_NilClears(t *testing.T) {
 	c := &Cache{}
-
-	// Pre-populate with a non-expired entry to model the
-	// "cache is fresh" state.
 	c.mu.Lock()
-	c.pr = &gtw.PR{Number: 7, URL: "https://example/pr/7", State: "open"}
+	c.pr = &messages.PR{Number: 1, URL: "https://example/pr/1", State: "open"}
 	c.branch = "main"
 	c.expiresAt = time.Now().Add(TTL)
 	c.mu.Unlock()
 
-	if got := c.PR(); got == nil || got.Number != 7 {
-		t.Fatalf("after populate, PR = %+v, want {Number:7}", c.PR())
-	}
+	c.WritePR(nil)
 
-	c.Invalidate()
-
-	// After invalidate, expiresAt is zero, so the next
-	// MaybeRefresh would spawn a refresh. We can't easily
-	// inject a fake Detect into MaybeRefresh (the function
-	// signature uses gtw.HandlerDeps directly), but we can
-	// inspect expiresAt directly to confirm.
 	c.mu.Lock()
-	got := c.expiresAt
+	gotPR := c.pr
+	gotBranch := c.branch
+	gotExpires := c.expiresAt
 	c.mu.Unlock()
-	if !got.IsZero() {
-		t.Errorf("expiresAt = %v, want zero after Invalidate", got)
+	if gotPR != nil {
+		t.Errorf("WritePR(nil) left pr = %+v, want nil", gotPR)
+	}
+	if gotBranch != "" {
+		t.Errorf("WritePR(nil) left branch = %q, want \"\"", gotBranch)
+	}
+	if !gotExpires.IsZero() {
+		t.Errorf("WritePR(nil) left expiresAt = %v, want zero", gotExpires)
+	}
+}
+
+// TestCache_WritePR_NonNilSets verifies the non-nil branch:
+// pr is stored, expiresAt is reset to now+TTL, branch is
+// intentionally left untouched.
+func TestCache_WritePR_NonNilSets(t *testing.T) {
+	c := &Cache{}
+	// Pre-populate branch + an old expiresAt to confirm
+	// WritePR only touches pr + expiresAt.
+	c.mu.Lock()
+	c.branch = "feature/old"
+	c.expiresAt = time.Time{}
+	c.mu.Unlock()
+
+	newPR := &messages.PR{Number: 42, URL: "https://example/pr/42", State: "open"}
+	before := time.Now()
+	c.WritePR(newPR)
+	after := time.Now()
+
+	c.mu.Lock()
+	gotPR := c.pr
+	gotBranch := c.branch
+	gotExpires := c.expiresAt
+	c.mu.Unlock()
+	if gotPR == nil || gotPR.Number != 42 {
+		t.Errorf("after WritePR, PR = %+v, want {Number:42}", gotPR)
+	}
+	if gotBranch != "feature/old" {
+		t.Errorf("WritePR touched branch = %q, want unchanged %q", gotBranch, "feature/old")
+	}
+	// expiresAt must be in (before+TTL - slop, after+TTL + slop).
+	low := before.Add(TTL)
+	high := after.Add(TTL)
+	if gotExpires.Before(low) || gotExpires.After(high.Add(50*time.Millisecond)) {
+		t.Errorf("expiresAt = %v, want within [%v, %v]", gotExpires, low, high)
 	}
 }
 
@@ -106,6 +138,96 @@ func TestCache_CancelStopsInflightRefresh(t *testing.T) {
 	c.mu.Unlock()
 }
 
+// TestCache_MaybeRefresh_NilResolver is a guard: passing
+// resolver=nil into MaybeRefresh must not panic. The
+// production runtime always wires a real Resolver, but a
+// misconfigured test fixture could leave it nil.
+func TestCache_MaybeRefresh_NilResolver(t *testing.T) {
+	c := &Cache{}
+	c.MaybeRefresh("/w", nil) // no panic, no-op
+	if c.PR() != nil {
+		t.Errorf("MaybeRefresh(nil resolver) populated PR")
+	}
+}
+
+// TestCache_MaybeRefresh_NoGoroutineOnFresh covers the
+// common case: a fresh (non-expired) cache does NOT spawn
+// a refresh goroutine. We probe by inspecting inflight
+// after a small delay.
+func TestCache_MaybeRefresh_NoGoroutineOnFresh(t *testing.T) {
+	c := &Cache{}
+	c.mu.Lock()
+	c.expiresAt = time.Now().Add(TTL)
+	c.pr = &messages.PR{Number: 7, URL: "https://example/pr/7", State: "open"}
+	c.mu.Unlock()
+
+	c.MaybeRefresh("/w", func(ctx context.Context, dir string) (*messages.PR, string, error) {
+		t.Errorf("resolver was invoked on a fresh cache; want no-op")
+		return nil, "", nil
+	})
+
+	time.Sleep(20 * time.Millisecond)
+	c.mu.Lock()
+	inflight := c.inflight
+	c.mu.Unlock()
+	if inflight {
+		t.Errorf("MaybeRefresh spawned a goroutine on a fresh cache; want no-op")
+	}
+}
+
+// TestCache_MaybeRefresh_SpawnsOnExpired covers the
+// expired-cache case: a Resolver is invoked exactly once
+// even if MaybeRefresh is hammered from N goroutines.
+func TestCache_MaybeRefresh_SpawnsOnExpired(t *testing.T) {
+	c := &Cache{}
+	// expiresAt is zero → expired → MaybeRefresh should spawn.
+
+	var calls atomic.Int64
+	resolver := func(ctx context.Context, dir string) (*messages.PR, string, error) {
+		calls.Add(1)
+		// simulate the resolver writing back into the cache
+		// (mirrors what refresh() does after a successful
+		// resolver call) so subsequent MaybeRefreshs see a
+		// fresh cache and short-circuit.
+		c.mu.Lock()
+		c.pr = &messages.PR{Number: 1, URL: "https://example/pr/1", State: "open"}
+		c.branch = "main"
+		c.expiresAt = time.Now().Add(TTL)
+		c.mu.Unlock()
+		return c.pr, "main", nil
+	}
+
+	const N = 20
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.MaybeRefresh("/w", resolver)
+		}()
+	}
+	wg.Wait()
+
+	// Give the spawned goroutine a chance to finish.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		c.mu.Lock()
+		done := !c.inflight
+		c.mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := calls.Load(); got < 1 {
+		t.Errorf("resolver was called %d times, want >=1", got)
+	}
+	if got := calls.Load(); got > 2 {
+		t.Errorf("resolver was called %d times; want at most 2 (one for the race-winner, possibly a second after inflight clears)", got)
+	}
+}
+
 // TestRegistry_GetOrCreate_AllocatesOnce covers the lazy
 // allocation contract: repeated GetOrCreate(asID) calls return
 // the same pointer; missing keys allocate on first call.
@@ -124,81 +246,59 @@ func TestRegistry_GetOrCreate_AllocatesOnce(t *testing.T) {
 	}
 }
 
-// TestRegistry_InvalidateForUnknownAsID does not panic when
-// invoked before GetOrCreate has been called for that asID
-// — the common path during /gtw pr when the user has not
-// yet had any stamp on this AS.
-func TestRegistry_InvalidateForUnknownAsID(t *testing.T) {
-	var r Registry
-	r.Invalidate("never-seen") // no allocation, no panic
+// TestRegistry_WritePR_NoOpOnUnknown pins the contract that
+// Registry.WritePR is a no-op for ASes the registry hasn't
+// allocated a Cache for yet. The /gtw dispatchers may
+// legitimately look up an AS that hasn't been stamped enough
+// to trigger GetOrCreate; WritePR on such an AS must not
+// panic and must not allocate a Cache (otherwise /gtw pr
+// success on a chat with zero stamps would allocate caches
+// for every AS).
+func TestRegistry_WritePR_NoOpOnUnknown(t *testing.T) {
+	r := &Registry{}
+	r.WritePR("as-never-stamped", &messages.PR{Number: 1, URL: "x", State: "open"})
+	r.WritePR("as-never-stamped-2", nil)
+
+	// Registry must remain empty: GetOrCreate was never called.
+	r.mu.RLock()
+	if _, ok := r.caches["as-never-stamped"]; ok {
+		r.mu.RUnlock()
+		t.Fatalf("WritePR allocated a Cache for an unregistered AS")
+	}
+	if _, ok := r.caches["as-never-stamped-2"]; ok {
+		r.mu.RUnlock()
+		t.Fatalf("WritePR(nil) allocated a Cache for an unregistered AS")
+	}
+	r.mu.RUnlock()
 }
 
-// TestCache_Refresh_UpdatesBranchOnSwitch verifies that a
-// refresh writing a result for a branch DIFFERENT from the
-// one previously cached actually overwrites the cache. The
-// earlier "branch-drift guard" used to drop the result and
-// leave the cache permanently stale on a branch switch; that
-// guard was removed (the goroutine reads the SAME dir the
-// stamp path used, so there's no race window where the disk
-// could move out from under it) and the cache must now
-// reflect whatever the most-recent refresh resolved.
-//
-// Bypasses MaybeRefresh by calling the unexported refresh()
-// directly with a context that won't fire ctx.Err; we can't
-// inject a fake gh / git into HandlerDeps without dragging
-// the rest of the test suite into the picture, so we stop
-// at the success path's cache write by short-circuiting the
-// lookup before CurrentBranch runs.
-//
-// To exercise the write without gtw.CollectPR we can't go
-// through the public refresh() entry — its first call is
-// gtw.CurrentBranch and that requires a working git runner.
-// Instead we replicate the post-lookup write that refresh()
-// performs (the segment the test is meant to lock down) and
-// assert it overwrites. This is a unit test of the cache
-// field semantics, not of the goroutine plumbing — the
-// goroutine plumbing is covered by the concurrent test
-// below.
-func TestCache_Refresh_UpdatesBranchOnSwitch(t *testing.T) {
-	c := &Cache{}
-	// Pre-populate with branch A's PR (the "previous branch"
-	// scenario).
-	c.mu.Lock()
-	c.branch = "feature/A"
-	c.expiresAt = time.Now().Add(TTL)
-	c.pr = &gtw.PR{Number: 1, URL: "https://example/pr/1", State: "open"}
-	c.mu.Unlock()
+// TestRegistry_WritePR_RoutesToAllocatedCache covers the
+// happy path: WritePR on an already-allocated asID lands
+// in the Cache.
+func TestRegistry_WritePR_RoutesToAllocatedCache(t *testing.T) {
+	r := &Registry{}
+	c := r.GetOrCreate("as-1")
+	c.WritePR(&messages.PR{Number: 9, URL: "https://example/pr/9", State: "open"})
 
-	// Now simulate the write that refresh() would perform
-	// after resolving a different branch. With the old
-	// branch-drift guard this would be a no-op; with the
-	// guard removed the write must succeed.
-	newPR := &gtw.PR{Number: 2, URL: "https://example/pr/2", State: "open"}
-	c.mu.Lock()
-	c.pr = newPR
-	c.branch = "feature/B"
-	c.expiresAt = time.Now().Add(TTL)
-	c.mu.Unlock()
+	r.WritePR("as-1", &messages.PR{Number: 11, URL: "https://example/pr/11", State: "open"})
 
-	got := c.PR()
-	if got == nil || got.Number != 2 {
-		t.Errorf("after branch switch, PR = %+v, want {Number:2}", got)
+	if got := c.PR(); got == nil || got.Number != 11 {
+		t.Errorf("after Registry.WritePR, c.PR() = %+v, want {Number:11}", got)
 	}
-	c.mu.Lock()
-	branch := c.branch
-	c.mu.Unlock()
-	if branch != "feature/B" {
-		t.Errorf("after branch switch, branch = %q, want %q", branch, "feature/B")
+
+	r.WritePR("as-1", nil)
+	if got := c.PR(); got != nil {
+		t.Errorf("after Registry.WritePR(nil), c.PR() = %+v, want nil", got)
 	}
 }
 
-// TestCache_ConcurrentGetAndInvalidate hammers a Cache from
-// many goroutines doing PR/Invalidate in parallel — the lock
+// TestCache_ConcurrentGetAndWritePR hammers a Cache from
+// many goroutines doing PR/WritePR in parallel — the lock
 // must not race. (Run with -race to catch data races; CI
 // does this for every PR.)
-func TestCache_ConcurrentGetAndInvalidate(t *testing.T) {
+func TestCache_ConcurrentGetAndWritePR(t *testing.T) {
 	c := &Cache{}
-	c.pr = &gtw.PR{Number: 9, URL: "https://example/pr/9", State: "open"}
+	c.pr = &messages.PR{Number: 9, URL: "https://example/pr/9", State: "open"}
 	c.branch = "main"
 	c.expiresAt = time.Now().Add(TTL)
 
@@ -216,13 +316,28 @@ func TestCache_ConcurrentGetAndInvalidate(t *testing.T) {
 			}
 		}()
 	}
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				if i%2 == 0 {
+					c.WritePR(&messages.PR{Number: i*1000 + j, URL: "x", State: "open"})
+				} else {
+					c.WritePR(nil)
+				}
+				ops.Add(1)
+			}
+		}(i)
+	}
 
 	wg.Wait()
 
-	got := c.PR()
-	if got == nil || got.Number != 9 {
-		t.Fatalf("after parallel PR()/invalidate, PR = %+v, want {Number:9}", got)
-	}
+	// After the storm the cache must still be readable.
+	// We don't pin the exact final state — interleavings
+	// between PR() and WritePR() are non-deterministic —
+	// only that PR() returns without panic / nil-deref.
+	_ = c.PR()
 }
 
 // TestRegistry_CloseAll_CancelsInflight verifies Registry.CloseAll

@@ -115,13 +115,10 @@ func dispatchCommit(
 			err.Error(), agentName, runRes), nil
 	}
 
-	// 4b. F-CLAUDE-PRINT-002: refresh chatsession.GitStatus
-	// post-RunOnce. The agent just landed a commit; the cached
-	// snapshot is now stale. Without this, the success card
-	// footer would show the pre-commit HEAD/snapshot.
-	// RefreshGitStatus is a no-op when the chatsession has no
-	// GitStatusDeps wired (test fixtures, unit tests).
-	_ = cs.RefreshGitStatus(ctx, deps.GitStatusDeps)
+	// 4b. (no cs-level GitStatus refresh needed post-RunOnce:
+	// ChatSession.GitStatus now rebuilds a fresh snapshot on
+	// every call, so the success card stamp naturally sees the
+	// post-commit HEAD/snapshot.)
 
 	// 5. Verify the agent actually committed (HEAD advance +
 	// worktree clean + branch still on c.Branch).

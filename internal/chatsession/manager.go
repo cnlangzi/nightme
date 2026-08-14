@@ -67,10 +67,13 @@ type Manager struct {
 	// WithEmitter. See GetOrCreate Phase 2 for the read site.
 	emitter outbound.Emitter
 
-	// (no Manager-level gitStatusDeps — the cache is per-ChatSession
-// and the Emitter's GitStatusLookup reaches the chat via mgr.Get
-// at message time, using cs.gitStatusDeps that WithGitStatusDeps
-// propagated to each chat.)
+	// (no Manager-level gitStatusDeps — gitStatusDeps is
+	// per-ChatSession (cs.gitStatusDeps), wired by
+	// WithGitStatusDeps on every existing AND future chat.
+	// The Emitter's GitStatusLookup reaches the chat via mgr.Get
+	// at message time and calls cs.GitStatus(ctx), which
+	// rebuilds the snapshot on every call — no per-chat cache
+	// layer.)
 }
 
 // NewManager creates an empty Manager. Both spawner and persistence
@@ -109,9 +112,8 @@ func (m *Manager) WithPersistence(csFile *registry.ChatSessionFile, asFile *regi
 // survives later hook registrations. Without this chaining, a
 // call sequence of WithGitStatusDeps + WithOnCreate would silently
 // drop the deps hook — restored chats would have no
-// gitStatusDeps wired and the per-chat RefreshGitStatus would
-// no-op (depsConfigured=false) on every subsequent dispatcher
-// call.
+// gitStatusDeps wired and per-chat GitStatus calls would hit
+// the unconfigured-deps early return on every stamp.
 func (m *Manager) WithOnCreate(fn func(*ChatSession)) *Manager {
 	m.mu.Lock()
 	prev := m.onCreate
@@ -126,20 +128,19 @@ func (m *Manager) WithOnCreate(fn func(*ChatSession)) *Manager {
 }
 
 // WithGitStatusDeps wires the deps every chatsession uses to
-// refresh its GitStatus (called via cs.RefreshGitStatus or
-// implicitly via cs.GitStatus(ctx) on cache miss). Called once
-// at startup. Returns self for chaining.
+// build its GitStatus on every pull-on-read call (CollectGit
+// + LookupPR). Called once at startup. Returns self for
+// chaining.
 //
 // Propagates to every existing chat AND registers an OnCreate
-// hook for future chats created via GetOrCreate. This way the
-// chat's own refresh is always callable with non-nil deps —
-// no "no deps wired yet" silent-skip failure mode.
+// hook for future chats created via GetOrCreate. This way
+// every chat always sees non-nil deps — no "no deps wired
+// yet" silent-skip failure mode.
 func (m *Manager) WithGitStatusDeps(deps GitStatusDeps) *Manager {
 	m.mu.Lock()
-	// Propagate to every existing chat so per-chat
-	// RefreshGitStatus (called by /gtw commit pre/post,
-	// /gtw pr, SetSelectedCwd, and the Emitter's
-	// GitStatusLookup on cache miss) has the deps it needs.
+	// Propagate to every existing chat so per-chat GitStatus
+	// calls (from the Emitter's GitStatusLookup on every
+	// outbound stamp) have the deps they need.
 	for _, cs := range m.sessions {
 		if cs != nil {
 			cs.WithGitStatusDeps(deps)

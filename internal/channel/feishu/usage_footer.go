@@ -119,7 +119,7 @@ import (
 //     caveat (`🤖: · <sid>` when only SessionID is set) is
 //     locked by TestFormatStatusBarLines_SessionIDOnly;
 //     layout stays as-is per §1.10 — the materialize condition
-//     in stampFromAS guarantees at least one of Agent
+//     in the stamp path guarantees at least one of Agent
 //     / Model / SessionID / GitStatus / Usage is non-empty in
 //     production, so the leading-`·` only surfaces in tests.
 //   - Line 2 segments:

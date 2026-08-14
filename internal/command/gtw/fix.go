@@ -15,6 +15,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/command"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/prcache"
 )
 
 // ContextSlot is the gtw-package view of one Manager's per-chat
@@ -39,62 +40,20 @@ type DraftsMap interface {
 	Lookup(userMsgID string) *Draft
 }
 
-// HandlerDeps wires the side effects RunFix / HandleAction need.
-// PRInvalidator is the optional footer-cache invalidation hook
-// used by /gtw pr to refresh the workspace footer line's PR
-// reference (rendered as `[#N](url)` at the end of the 📁: row;
-// clickable blue link in lark_md) immediately after a successful
-// CreatePR (otherwise the new PR number would only surface after
-// the 60s cache TTL).
+// /gtw {pr, close} success paths apply a known PR result to
+// every AgentSession in the chat's pool by calling
+// `deps.PRCache.WritePR(as.ID, pr)` inline:
 //
-// Nil-safe across all callers: dispatchPR skips invalidation
-// when the runtime hasn't installed a registry (mostly in
-// unit tests). The interface lives in gtw (not in prcache)
-// because gtw does NOT import prcache — putting the type
-// in prcache would cycle back through chatsession, which
-// gtw already imports.
-type PRInvalidator interface {
-	// Invalidate marks the cache for the given AgentSession
-	// as stale, so the next stamp spawns a background
-	// refresh instead of waiting out the TTL.
-	Invalidate(asID string)
-}
-
-// invalidateChatASPRCache invalidates the PR cache for every
-// AgentSession in the chat's pool. Used by /gtw fix, /gtw pr,
-// and /gtw close to surface workspace / branch / PR-link changes
-// in the StatusBar footer immediately instead of waiting out
-// the prcache.Cache TTL (60s).
+//   - /gtw pr:  pr = the new PR from `gh pr create`
+//               (no refresh; the next stamp's lazy MaybeRefresh
+//               corrects any branch mismatch within 60 s).
+//   - /gtw close: pr = nil (branch is being deleted; no
+//                 refresh; the next stamp's lazy MaybeRefresh
+//                 fetches fresh from scratch).
 //
-// The PR cache is keyed by AS.ID with a 60s TTL — without
-// invalidation, a successful /gtw fix would leave the footer's
-// `⎇ branch` segment pointing at the OLD branch and the PR link
-// pointing at the OLD branch's PR (or stale "no PR" for the
-// NEW branch) until the TTL expires.
-//
-// We invalidate ALL ASes in the pool (rather than scoping by
-// worktree prefix as the original /gtw pr did) because:
-//   - The chat's selectedCwd just changed; any AS pinned to
-//     either the old or new worktree now has a stale view of
-//     the chat's workspace.
-//   - PR() against origin is fast — the cache is an
-//     optimisation, not a correctness layer.
-//   - One scope-limitation rule for all three dispatchers is
-//     easier to reason about than per-dispatcher heuristics.
-//
-// nil-safe: skips when deps.PRInvalidator is nil (unit tests
-// that don't wire the runtime registry).
-func invalidateChatASPRCache(deps HandlerDeps, cs *chatsession.ChatSession) {
-	if deps.PRInvalidator == nil {
-		return
-	}
-	for _, as := range cs.Pool() {
-		if as == nil {
-			continue
-		}
-		deps.PRInvalidator.Invalidate(as.ID)
-	}
-}
+// /gtw fix and /gtw push don't touch the cache — the
+// per-stamp MaybeRefresh covers them. Inline pool walk lives
+// directly at each callsite so the intent reads in context.
 
 // All fields are required; pass an instance constructed in the
 // runtime's startup code (cmd/nightme/run.go).
@@ -120,11 +79,15 @@ type HandlerDeps struct {
 	Detect func(ctx context.Context, remoteURL string, prober HTTPProber, worktree string) (GitProvider, error)
 	// Now is the clock. Tests override for deterministic drafts.
 	Now func() time.Time
-	// PRInvalidator optionally lets /gtw pr invalidate the
-	// footer's PR cache for affected AgentSessions on a
-	// successful CreatePR. nil → dispatchPR no-ops.
-	// See PRInvalidator doc for the cycle rationale.
-	PRInvalidator PRInvalidator
+	// PRCache is the runtime-owned *prcache.Registry that
+	// /gtw {pr, close} success paths write into directly
+	// (we already know the answer; no refresh round-trip).
+	// nil → /gtw dispatchers no-op (unit tests that don't
+	// wire the runtime registry). The runtime injects the
+	// same instance that powers the per-stamp MaybeRefresh
+	// trigger in runtime.go, so writes here land on the live
+	// cache.
+	PRCache *prcache.Registry
 
 	// SkipRefreshDefaultBranch, when true, causes RunFix to
 	// skip the RefreshDefaultBranch step (no `git checkout
@@ -141,17 +104,6 @@ type HandlerDeps struct {
 	// needing a usable origin remote.
 	SkipRefreshDefaultBranch bool
 
-	// GitStatusDeps is the workspace snapshot deps (git status
-	// collector + PR cache lookup). /gtw commit and /gtw pr
-	// refresh this after RunOnce so the success-card footer
-	// reflects the post-mutation state. nil is OK — the
-	// chatsession falls back to a no-op when deps is unconfigured.
-	// F-CLAUDE-PRINT-002 + fix-status-bar-git: this is the only
-	// per-message-state-related dep the dispatcher needs; the
-	// runtime owns the per-chatsession GitStatus cache (chatsession
-	// .GitStatus(ctx) / RefreshGitStatus), and the Emitter stamps it
-	// onto every outbound via Options.GitStatusLookup.
-	GitStatusDeps chatsession.GitStatusDeps
 }
 
 // Result is the gtw-package view of a command's outcome. Mirrors
@@ -793,14 +745,13 @@ func completeFixAndDispatch(
 		UpdatedAt: now,
 	})
 
-	// --- invalidate PR cache for the chat's AS pool (§5.2.⑥-a) ----
-	// The new worktree has a different branch (and no PR yet),
-	// so any AS that re-stamps before the prcache TTL would
-	// otherwise render the OLD branch + OLD PR link in the
-	// footer. Forcing invalidation here makes the very next
-	// StatusBar build (the one attached to the success card
-	// below) reflect the new workspace correctly.
-	invalidateChatASPRCache(deps, cs)
+	// /gtw fix doesn't touch the PR cache: the new worktree's
+	// AS has no cache yet (fresh allocation on the next
+	// stamp's GetOrCreate → MaybeRefresh), and any OLD
+	// worktree's AS still correctly points at its own branch.
+	// The per-stamp lazy MaybeRefresh in runtime.go's
+	// LookupPR closure picks up the new workspace on the
+	// next outbound stamp.
 
 	// --- render the success card (§5.2.⑥) ------------------------
 	var card string

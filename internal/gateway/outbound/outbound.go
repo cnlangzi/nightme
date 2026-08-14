@@ -16,17 +16,17 @@
 // Why a single chokepoint: pre-fix-status-bar-git, GitStatus
 // stamping lived at five caller sites (runtime pump,
 // MessageState eventbus, and each gtw dispatch), all calling
-// cs.GitStatus() without a context. Cache-miss on a
-// freshly-restored chat would block, and stale/empty footers
-// surfaced as the fix-status-bar-git bug. The Emitter is now
-// the single chokepoint: GitStatusLookup (set once in
-// cmd/nightme/run.go's runDaemon) is invoked for every Send /
-// SendCard whose msg.GitStatus is nil. Business code never
-// touches GitStatus directly — runtime/handler.go and
-// eventbus.go drop the stamps, gtw dispatchers stop
-// pre-filling out.GitStatus. ChatSession owns the snapshot
-// per-chat with a pull-on-read getter that refreshes on
-// cache miss.
+// cs.GitStatus() without a context. Without the chokepoint the
+// footer was sometimes stale or empty, and the same snapshot
+// could land on multiple outbound paths with subtly different
+// mutation semantics. The Emitter is now the single chokepoint:
+// GitStatusLookup (set once in cmd/nightme/run.go's runDaemon)
+// is invoked for every Send / SendCard whose msg.GitStatus is
+// nil. Business code never touches GitStatus directly —
+// runtime/handler.go and eventbus.go drop the stamps, gtw
+// dispatchers stop pre-filling out.GitStatus. ChatSession owns
+// the snapshot per-chat and rebuilds it fresh on every lookup
+// (no per-chat cache layer; freshness is the contract).
 //
 // Relationship to internal/gateway:
 //
@@ -59,14 +59,14 @@ import (
 // now done by the Emitter at the single chokepoint, not at every
 // caller. The model:
 //
-//   - chatsession owns the GitStatus snapshot
-//     (cs.GitStatus(ctx) — pull-on-read with cache-miss refresh).
-//   - SetSelectedCwd proactively refreshes; ClearSelectedCwd
-//     drops the cache; /gtw commit pre/post + /gtw pr refresh
-//     explicitly. RefreshGitStatus stays the single mutator.
+//   - chatsession owns the GitStatus snapshot directly:
+//     ChatSession.GitStatus(ctx) rebuilds a fresh snapshot on
+//     every call — git status runs against the workspace, the
+//     PR is a synchronous prcache.Cache.PR() read. There is no
+//     per-chat cache layer; freshness is the explicit goal.
 //   - The Emitter's GitStatusLookup (wired once by runtime) is
 //     invoked for every Send / SendCard whose msg.GitStatus is
-//     nil. Returns the chat's pull-on-read snapshot.
+//     nil, returning the freshly-built snapshot.
 //   - Business code (runtime pump, slash commands, gtw replies)
 //     sends through em.Send without touching GitStatus directly.
 //

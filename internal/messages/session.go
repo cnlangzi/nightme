@@ -10,18 +10,21 @@ import (
 // outbound message that flows from the runtime to a Channel.
 //
 // F-CLAUDE-PRINT-002: this is the consolidation of the legacy
-// StatusBar wrapper. OutboundMessage.GitStatus *GitStatus is the
-// sole per-chatsession snapshot; chatsession owns the cache
-// (chatsession.GitStatus / RefreshGitStatus) and the runtime
-// event hook stamps it onto every outbound. Channel adapters
-// read this directly via formatStatusBarLines → formatGitLine.
+// StatusBar wrapper. OutboundMessage.GitStatus *GitStatus is
+// the per-chatsession snapshot rebuilt fresh on every read by
+// ChatSession.GitStatus(ctx); the runtime event hook stamps it
+// onto every outbound via the Emitter's GitStatusLookup closure.
+// Channel adapters read this directly via formatStatusBarLines →
+// formatGitLine.
 //
-// Sourced from chatsession: each ChatSession caches its
-// GitStatus (refreshed on /gtw commit, /gtw pr, and chatsession
-// startup). The runtime doesn't recompute; the chatsession is
-// the single owner. Empty / nil when the chat has no workspace
-// or no AgentSession yet — Channel adapters treat nil as
-// "no workspace line".
+// Sourced from chatsession: each ChatSession.GitStatus call
+// invokes deps.CollectGit against the current workspace and
+// deps.LookupPR against prcache.Cache (the only persistent
+// layer; PR caching stays in prcache because gh/glab API
+// round-trips are expensive). The runtime doesn't recompute;
+// the chatsession is the single owner. nil / empty when the
+// chat has no workspace or no AgentSession yet — Channel
+// adapters treat nil as "no workspace line".
 type GitStatus struct {
 	Workspace   string
 	Snapshot    *GitStatusSnapshot

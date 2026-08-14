@@ -313,9 +313,9 @@ func TestManager_RestoreFromRegistry_WithOnCreateAfter_MissesHandlers(t *testing
 // (buses, EventHandler, etc.). Without explicit chaining in
 // WithOnCreate, the second call would REPLACE the deps hook —
 // every chat created after that wiring (including restored
-// chats) would have no gitStatusDeps, RefreshGitStatus would
-// no-op (depsConfigured=false), and the per-chat GitStatus
-// footer would never populate.
+// chats) would have no gitStatusDeps, ChatSession.GitStatus
+// would hit the unconfigured-deps early return, and the
+// per-chat footer would never populate.
 //
 // This test simulates that exact wiring order:
 //
@@ -387,16 +387,15 @@ func TestManager_WithGitStatusDeps_ThenWithOnCreate_ChainsHooks(t *testing.T) {
 		}
 	}
 
-	// Now the critical assertion: depsConfigured on each chat
-	// must be true (i.e. deps.CollectGit was actually wired).
+	// Now the critical assertion: deps.CollectGit on each
+	// chat must be non-nil (i.e. deps were actually wired).
 	// Without chaining, the OnCreate call above would have
 	// replaced the deps hook, and no chat would have
 	// gitStatusDeps.
 	for _, cs := range mgr.List() {
-		// Use the unexported field via the public method:
-		// RefreshGitStatus is a no-op when depsConfigured=false.
-		// We instead verify the wiring landed by checking the
-		// chat's own gitStatusDeps was set via WithGitStatusDeps.
+		// Verify the wiring landed by checking the chat's own
+		// gitStatusDeps was set via WithGitStatusDeps (the field
+		// is unexported; this is a same-package test).
 		if cs.gitStatusDeps.CollectGit == nil {
 			t.Errorf("chat %q: gitStatusDeps.CollectGit is nil — WithOnCreate replaced (instead of chained) the deps hook",
 				cs.ChatID)

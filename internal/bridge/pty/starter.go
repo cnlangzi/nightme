@@ -98,15 +98,15 @@ const ptyIdleTimeout = 3 * time.Second
 // CLI whose first byte takes >ptyIdleTimeout to appear (e.g.
 // shell wrapper initialization) would be declared done
 // prematurely with an empty reply.
-func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	a, err := s.Start(ctx, cfg)
 	if err != nil {
-		return "", fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
+		return agent.RunResult{}, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
 	}
 	defer a.Close()
 
 	if err := a.SendBlocks(ctx, blocks); err != nil {
-		return "", fmt.Errorf("agent %s: send: %w", s.Info().Name, err)
+		return agent.RunResult{}, fmt.Errorf("agent %s: send: %w", s.Info().Name, err)
 	}
 
 	var sb strings.Builder
@@ -132,7 +132,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 		select {
 		case ev, ok := <-a.Events():
 			if !ok {
-				return strings.TrimSpace(sb.String()), nil
+				return agent.RunResult{Text: strings.TrimSpace(sb.String())}, nil
 			}
 			switch ev.Kind {
 			case agent.EventAgentText:
@@ -140,14 +140,14 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 				resetIdle()
 			case agent.EventAgentError:
 				if ev.Err != nil {
-					return "", fmt.Errorf("agent %s: %w", s.Info().Name, ev.Err)
+					return agent.RunResult{}, fmt.Errorf("agent %s: %w", s.Info().Name, ev.Err)
 				}
-				return "", fmt.Errorf("agent %s: error event with nil payload", s.Info().Name)
+				return agent.RunResult{}, fmt.Errorf("agent %s: error event with nil payload", s.Info().Name)
 			case agent.EventAgentDone:
-				return strings.TrimSpace(sb.String()), nil
+				return agent.RunResult{Text: strings.TrimSpace(sb.String())}, nil
 			}
 		case <-idle.C:
-			return strings.TrimSpace(sb.String()), nil
+			return agent.RunResult{Text: strings.TrimSpace(sb.String())}, nil
 		case <-ctx.Done():
 			// On ctx cancellation, drop the partial text — PTY has
 			// no structured result event, so any output we
@@ -156,7 +156,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
 			// the error would mislead the caller (push command)
 			// into thinking the agent had produced something
 			// usable.
-			return "", fmt.Errorf("agent %s: canceled: %w", s.Info().Name, ctx.Err())
+			return agent.RunResult{}, fmt.Errorf("agent %s: canceled: %w", s.Info().Name, ctx.Err())
 		}
 	}
 }

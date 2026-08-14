@@ -52,15 +52,6 @@ func (s *Starter) Info() agent.Info {
 	return agent.NewInfo(s.name, agent.ModeJSONIO, s.command, s.args, nil)
 }
 
-// Spec accessors — the starter itself IS the spec-half; these
-// return its immutable fields directly.
-
-func (s *Starter) Name() string    { return s.name }
-func (s *Starter) Mode() agent.Mode { return agent.ModeJSONIO }
-func (s *Starter) Command() string { return s.command }
-func (s *Starter) Args() []string  { return append([]string(nil), s.args...) }
-func (s *Starter) Env() []string   { return nil }
-
 // Detect verifies the binary resolves on PATH. Called by Spawner
 // before Start; an error aborts session creation with a clear
 // "<binary> not found" message to the user.
@@ -93,10 +84,10 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // text result, closes the session before returning. Used by callers
 // like /gtw commit and /gtw pr that want a single turn without
 // holding a session handle.
-func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	a, err := s.Start(ctx, cfg)
 	if err != nil {
-		return "", fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
+		return agent.RunResult{}, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
 	}
 	defer a.Close()
 	return agent.RunOnceDrain(ctx, a, blocks, s.Info().Name)

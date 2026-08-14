@@ -20,38 +20,40 @@ import (
 // spec-half fields correctly and the Agent satisfies agent.Agent.
 func TestNewAndSpec(t *testing.T) {
 	a := NewStarter("opencode", "opencode", nil)
-	if a.Name() != "opencode" {
-		t.Errorf("Name() = %q, want opencode", a.Name())
+	if a.name != "opencode" {
+		t.Errorf("a.name = %q, want opencode", a.name)
 	}
-	if a.Command() != "opencode" {
-		t.Errorf("Command() = %q, want opencode", a.Command())
+	if a.command != "opencode" {
+		t.Errorf("a.command = %q, want opencode", a.command)
 	}
-	if a.Args() != nil {
-		t.Errorf("Args() = %v, want nil", a.Args())
+	if a.args != nil {
+		t.Errorf("a.args = %v, want nil", a.args)
 	}
-	if a.Env() != nil {
-		t.Errorf("Env() = %v, want nil", a.Env())
+	if a.Info().Mode != agent.ModeJSONIO {
+		t.Errorf("a.Info().Mode = %v, want ModeJSONIO", a.Info().Mode)
 	}
-	if a.Mode() != agent.ModeJSONIO {
-		t.Errorf("Mode() = %v, want ModeJSONIO", a.Mode())
+	// Info() returns the same data via agent.Info — verifies the
+	// "Agent satisfies agent.Agent" half of the contract.
+	info := a.Info()
+	if info.Name != "opencode" {
+		t.Errorf("Info().Name = %q, want opencode", info.Name)
 	}
-	// Args() must return a defensive copy.
+	if info.Mode != agent.ModeJSONIO {
+		t.Errorf("Info().Mode = %v, want ModeJSONIO", info.Mode)
+	}
+	// Constructor args are stored on the unexported field; the
+	// Info() surface exposes them via Args().
 	a2 := NewStarter("opencode", "opencode", []string{"--foo"})
-	if a2.Args()[0] != "--foo" {
-		t.Errorf("Args() did not carry constructor args")
-	}
-	cpy := a2.Args()
-	cpy[0] = "MUTATED"
-	if a2.args[0] != "--foo" {
-		t.Errorf("Args() returned slice shares underlying array")
+	if a2.Info().Args[0] != "--foo" {
+		t.Errorf("Info().Args[0] = %q, want --foo", a2.Info().Args[0])
 	}
 }
 
 // TestNew_NilArgsIsSafe verifies New does not panic when args is nil.
 func TestNew_NilArgsIsSafe(t *testing.T) {
 	a := NewStarter("opencode", "opencode", nil)
-	if a.Args() != nil {
-		t.Errorf("Args() = %v, want nil", a.Args())
+	if a.Info().Args != nil {
+		t.Errorf("Args() = %v, want nil", a.Info().Args)
 	}
 }
 
@@ -62,8 +64,8 @@ func TestNew_NilArgsIsSafe(t *testing.T) {
 // would silently drop args.
 func TestNew_EmptyArgs(t *testing.T) {
 	a := NewStarter("opencode", "opencode", []string{})
-	if len(a.Args()) != 0 {
-		t.Errorf("Args() = %v, want empty", a.Args())
+	if len(a.Info().Args) != 0 {
+		t.Errorf("Args() = %v, want empty", a.Info().Args)
 	}
 }
 

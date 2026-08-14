@@ -1,3 +1,11 @@
+// F-CLAUDE-PRINT-002: the Emitter is now a pure transport — no
+// StatusBar Source, no AttachIfMissing. Every layer that builds
+// an OutboundMessage (chatsession event hook, slash-command
+// dispatchers, one-shot dispatchers) is responsible for
+// filling out.GitStatus themselves.
+//
+// These tests verify the passthrough: every field on the input
+// OutboundMessage reaches the channel unchanged.
 package outbound
 
 import (
@@ -56,99 +64,61 @@ func (f *fakeChannel) BuildBlocks(text string, _ []messages.Attachment) []agent.
 	return []agent.ContentBlock{{Type: agent.ContentText, Text: text}}
 }
 
-func TestEmitter_NoSource_PassesThrough(t *testing.T) {
-	// Zero-value Options (no Source) must produce a pure
-	// passthrough — the caller-built OutboundMessage goes
-	// straight to Channel.Send, no StatusBar added.
+func TestEmitter_Passthrough_Send(t *testing.T) {
+	// Zero-value Options (no Source, no anything) — Emitter
+	// is a pure passthrough. The caller-built OutboundMessage
+	// (with whatever fields it has) goes straight to
+	// Channel.Send, untouched.
 	fc := &fakeChannel{name: "test"}
 	em := New(fc, Options{})
 
-	in := messages.OutboundMessage{ChatID: "c1", Kind: messages.OutReply, Text: "hi"}
+	in := messages.OutboundMessage{
+		ChatID:    "c1",
+		Kind:      messages.OutReply,
+		Text:      "hi",
+		Model:     "claude-opus-4-5",
+		SessionID: "sess-123",
+		Usage:     &agent.UsageInfo{InputTokens: 10, OutputTokens: 20},
+		GitStatus: &messages.GitStatus{Workspace: "/repo"},
+	}
 	if err := em.Send(context.Background(), in); err != nil {
 		t.Fatalf("Send returned err = %v", err)
 	}
 	if atomic.LoadInt32(&fc.sendCalls) != 1 {
 		t.Fatalf("sendCalls = %d, want 1", fc.sendCalls)
 	}
+
+	// Every field passes through unchanged — the Emitter doesn't
+	// synthesize / overwrite / strip anything.
 	if fc.lastSent.Text != "hi" {
-		t.Errorf("lastSent.Text = %q, want hi", fc.lastSent.Text)
+		t.Errorf("Text = %q, want hi", fc.lastSent.Text)
 	}
-	if fc.lastSent.StatusBar != nil {
-		t.Errorf("lastSent.StatusBar = %+v, want nil (no source)", fc.lastSent.StatusBar)
+	if fc.lastSent.Model != "claude-opus-4-5" {
+		t.Errorf("Model = %q, want claude-opus-4-5", fc.lastSent.Model)
 	}
-}
-
-func TestEmitter_SourceAttachesStatusBar(t *testing.T) {
-	// Caller did NOT set StatusBar. Source returns a value.
-	// Emitter must attach it before forwarding.
-	want := &messages.StatusBar{
-		AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus"},
+	if fc.lastSent.SessionID != "sess-123" {
+		t.Errorf("SessionID = %q, want sess-123", fc.lastSent.SessionID)
 	}
-	fc := &fakeChannel{name: "test"}
-	em := New(fc, Options{Source: func(_ string) *messages.StatusBar { return want }})
-
-	in := messages.OutboundMessage{ChatID: "c1", Kind: messages.OutReply, Text: "hi"}
-	if err := em.Send(context.Background(), in); err != nil {
-		t.Fatalf("Send err: %v", err)
+	if fc.lastSent.Usage == nil || fc.lastSent.Usage.InputTokens != 10 {
+		t.Errorf("Usage = %+v, want InputTokens=10", fc.lastSent.Usage)
 	}
-	if fc.lastSent.StatusBar != want {
-		t.Errorf("lastSent.StatusBar = %p, want %p", fc.lastSent.StatusBar, want)
+	if fc.lastSent.GitStatus == nil || fc.lastSent.GitStatus.Workspace != "/repo" {
+		t.Errorf("GitStatus = %+v, want Workspace=/repo", fc.lastSent.GitStatus)
 	}
 }
 
-func TestEmitter_SourceNil_DoesNotAttach(t *testing.T) {
-	// Source returns nil → emitter must NOT manufacture an empty
-	// StatusBar. The footer render path expects nil when the
-	// source decides "no chat / no workspace".
-	fc := &fakeChannel{name: "test"}
-	em := New(fc, Options{Source: func(_ string) *messages.StatusBar { return nil }})
-
-	in := messages.OutboundMessage{ChatID: "c1", Kind: messages.OutReply, Text: "hi"}
-	_ = em.Send(context.Background(), in)
-	if fc.lastSent.StatusBar != nil {
-		t.Errorf("lastSent.StatusBar = %+v, want nil", fc.lastSent.StatusBar)
-	}
-}
-
-func TestEmitter_CallerStampedWins(t *testing.T) {
-	// Caller already set StatusBar; source must NOT be invoked
-	// (otherwise the caller's value gets silently overwritten).
-	callerSB := &messages.StatusBar{
-		AgentBar: &messages.AgentStatusBar{Agent: "from-caller"},
-	}
-	sourceCalled := false
-	source := func(_ string) *messages.StatusBar {
-		sourceCalled = true
-		return &messages.StatusBar{
-			AgentBar: &messages.AgentStatusBar{Agent: "from-source"},
-		}
-	}
-	fc := &fakeChannel{name: "test"}
-	em := New(fc, Options{Source: source})
+func TestEmitter_Passthrough_SendCard(t *testing.T) {
+	// SendCard also pure passthrough — returns the channel's
+	// messageID and forwards the message.
+	fc := &fakeChannel{name: "test", cardMsgID: "msg-123"}
+	em := New(fc, Options{})
 
 	in := messages.OutboundMessage{
-		ChatID:    "c1",
-		Kind:      messages.OutReply,
-		Text:      "hi",
-		StatusBar: callerSB,
+		ChatID:  "c1",
+		Kind:    messages.OutCard,
+		Text:    "card-body",
+		ReplyTo: "user-msg-1",
 	}
-	_ = em.Send(context.Background(), in)
-	if sourceCalled {
-		t.Error("source should not be called when caller pre-set StatusBar")
-	}
-	if fc.lastSent.StatusBar != callerSB {
-		t.Error("caller's StatusBar was overwritten")
-	}
-}
-
-func TestEmitter_SendCard_AttachesAndForwards(t *testing.T) {
-	want := &messages.StatusBar{
-		AgentBar: &messages.AgentStatusBar{Agent: "claude"},
-	}
-	fc := &fakeChannel{name: "test", cardMsgID: "msg-123"}
-	em := New(fc, Options{Source: func(_ string) *messages.StatusBar { return want }})
-
-	in := messages.OutboundMessage{ChatID: "c1", Kind: messages.OutCard}
 	id, err := em.SendCard(context.Background(), in)
 	if err != nil {
 		t.Fatalf("SendCard err: %v", err)
@@ -156,100 +126,47 @@ func TestEmitter_SendCard_AttachesAndForwards(t *testing.T) {
 	if id != "msg-123" {
 		t.Errorf("msgID = %q, want msg-123", id)
 	}
-	if fc.lastCard.StatusBar != want {
-		t.Error("SendCard path did not attach StatusBar")
+	if atomic.LoadInt32(&fc.cardCalls) != 1 {
+		t.Errorf("cardCalls = %d, want 1", fc.cardCalls)
+	}
+	if fc.lastCard.Text != "card-body" {
+		t.Errorf("Card text = %q, want card-body", fc.lastCard.Text)
 	}
 }
 
-func TestEmitter_SendErrorPropagates(t *testing.T) {
-	// Channel.Send fails → the error is returned to the caller.
-	// Emitter is a passthrough: callers handle logging/metrics
-	// (no OnError hook; that lived through one review cycle and
-	// was deleted for YAGNI — see Commit 10).
-	sendErr := errors.New("channel broken")
-	fc := &fakeChannel{name: "test", sendErr: sendErr}
-	em := New(fc, Options{})
-
-	err := em.Send(context.Background(), messages.OutboundMessage{ChatID: "c1", Text: "hi"})
-	if !errors.Is(err, sendErr) {
-		t.Errorf("returned err = %v, want %v", err, sendErr)
-	}
-}
-
-func TestEmitter_SendCardErrorPropagates(t *testing.T) {
-	// SendCard is the same passthrough contract as Send: errors
-	// surface to the caller.
-	cardErr := errors.New("card channel broken")
-	fc := &fakeChannel{name: "test", cardErr: cardErr}
-	em := New(fc, Options{})
-
-	_, err := em.SendCard(context.Background(), messages.OutboundMessage{ChatID: "c1"})
-	if !errors.Is(err, cardErr) {
-		t.Errorf("returned err = %v, want %v", err, cardErr)
-	}
-}
-
-// TestEmitter_SourceCoLocatesUsageFromMsg covers the F-55 fix:
-// when the source's StatusBar.UsageBar is nil but the message
-// carries Usage (typical on OutResult after gateway.Translate),
-// the emitter must copy msg.Usage across so the footer render
-// path can pick it up via sb.UsageBar. Without this, Line 2 of
-// the footer silently drops for usage-bearing events.
-func TestEmitter_SourceCoLocatesUsageFromMsg(t *testing.T) {
-	want := &messages.UsageInfo{InputTokens: 100, OutputTokens: 200}
+func TestEmitter_NoMysteryMutation(t *testing.T) {
+	// The Emitter must NOT inject any field the caller didn't set.
+	// This is the F-CLAUDE-PRINT-002 invariant: no runtime
+	// "stamp" step, no Source lookup, no AttachIfMissing.
+	// StatusBar / Usage / GitStatus are all nil (caller didn't
+	// set them), and the Emitter must not fill them in.
 	fc := &fakeChannel{name: "test"}
-	em := New(fc, Options{
-		Source: func(_ string) *messages.StatusBar {
-			// Source returns StatusBar without UsageBar —
-			// simulates a source that doesn't see msg.Usage.
-			return &messages.StatusBar{
-				AgentBar: &messages.AgentStatusBar{Agent: "claude", Model: "opus"},
-			}
-		},
-	})
+	em := New(fc, Options{})
 
 	in := messages.OutboundMessage{
 		ChatID: "c1",
-		Kind:   messages.OutResult,
-		Text:   "done",
-		Usage:  want,
+		Kind:   messages.OutReply,
+		Text:   "hi",
 	}
-	if err := em.Send(context.Background(), in); err != nil {
-		t.Fatalf("Send: %v", err)
+	_ = em.Send(context.Background(), in)
+
+	// All optional fields stay nil — Emitter didn't fill them.
+	if fc.lastSent.GitStatus != nil {
+		t.Errorf("Emitted GitStatus = %+v, want nil (no source)", fc.lastSent.GitStatus)
 	}
-	if fc.lastSent.StatusBar == nil {
-		t.Fatal("StatusBar was not attached")
-	}
-	if fc.lastSent.StatusBar.UsageBar == nil || fc.lastSent.StatusBar.UsageBar.UsageInfo != want {
-		t.Errorf("StatusBar.UsageBar.UsageInfo = %+v, want %+v (F-55 co-location)", fc.lastSent.StatusBar.UsageBar.UsageInfo, want)
+	if fc.lastSent.Usage != nil {
+		t.Errorf("Emitted Usage = %+v, want nil (no source)", fc.lastSent.Usage)
 	}
 }
 
-// TestEmitter_SourceCoLocateDoesNotOverwrite verifies the
-// source-set UsageBar is preserved if non-nil (caller or source
-// already had it; emitter must not clobber).
-func TestEmitter_SourceCoLocateDoesNotOverwrite(t *testing.T) {
-	sourceUsage := &messages.UsageInfo{InputTokens: 1, OutputTokens: 1}
-	sourceSB := &messages.StatusBar{
-		AgentBar: &messages.AgentStatusBar{Agent: "claude"},
-		UsageBar: &messages.UsageStatusBar{UsageInfo: sourceUsage},
-	}
-	msgUsage := &messages.UsageInfo{InputTokens: 999, OutputTokens: 999}
+func TestEmitter_ChannelErrorPropagates(t *testing.T) {
+	// Channel.Send error propagates up unchanged — Emitter doesn't
+	// swallow it.
+	fc := &fakeChannel{name: "test", sendErr: errors.New("channel dead")}
+	em := New(fc, Options{})
 
-	fc := &fakeChannel{name: "test"}
-	em := New(fc, Options{
-		Source: func(_ string) *messages.StatusBar { return sourceSB },
-	})
-
-	_ = em.Send(context.Background(), messages.OutboundMessage{
-		ChatID: "c1",
-		Kind:   messages.OutResult,
-		Usage:  msgUsage,
-	})
-	if fc.lastSent.StatusBar.UsageBar.UsageInfo != sourceUsage {
-		t.Errorf("StatusBar.UsageBar.UsageInfo = %+v, want source-set %+v (no overwrite)", fc.lastSent.StatusBar.UsageBar.UsageInfo, sourceUsage)
-	}
-	if fc.lastSent.StatusBar.UsageBar.UsageInfo == msgUsage {
-		t.Error("emitter should not overwrite source-set UsageInfo with msg.Usage")
+	in := messages.OutboundMessage{ChatID: "c1", Kind: messages.OutReply}
+	if err := em.Send(context.Background(), in); err == nil {
+		t.Fatal("Send returned nil, want error")
 	}
 }

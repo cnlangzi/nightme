@@ -1,11 +1,13 @@
 package chatsession
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -299,6 +301,192 @@ func TestManager_RestoreFromRegistry_WithOnCreateAfter_MissesHandlers(t *testing
 	}
 	if cs.MessageStateBus.Len() != 0 {
 		t.Errorf("MessageStateBus subscribers unexpectedly non-zero — bug repro is no longer valid; restore this assertion's expectation")
+	}
+}
+
+// TestManager_WithGitStatusDeps_ThenWithOnCreate_ChainsHooks is
+// the regression for the F-CLAUDE-PRINT-002 ordering bug.
+//
+// Production wiring (cmd/nightme/run.go + runtime.go) installs
+// WithGitStatusDeps BEFORE any other WithOnCreate calls. The
+// runtime then calls WithOnCreate to wire per-chat handlers
+// (buses, EventHandler, etc.). Without explicit chaining in
+// WithOnCreate, the second call would REPLACE the deps hook —
+// every chat created after that wiring (including restored
+// chats) would have no gitStatusDeps, RefreshGitStatus would
+// no-op (depsConfigured=false), and the per-chat GitStatus
+// footer would never populate.
+//
+// This test simulates that exact wiring order:
+//
+//	mgr := NewManager().WithGitStatusDeps(deps).WithOnCreate(handler)
+//
+// and asserts BOTH the deps hook AND the handler fire on a
+// fresh GetOrCreate + on a persisted RestoreFromRegistry.
+func TestManager_WithGitStatusDeps_ThenWithOnCreate_ChainsHooks(t *testing.T) {
+	csFile, _ := newTestStores(t)
+	seedPersistedChatSession(t, csFile, "oc_alpha", "claude")
+
+	// Sentinel: when the deps hook runs it stamps the chatID
+	// here. When the handler hook runs it stamps the chatID
+	// here too. The test asserts BOTH lists contain every
+	// chat that goes through the manager.
+	var (
+		mu          sync.Mutex
+		handlerSeen []string
+	)
+
+	deps := GitStatusDeps{
+		CollectGit: func(ctx context.Context, cwd string) (*messages.GitStatusSnapshot, error) {
+			return nil, nil
+		},
+	}
+
+	mgr := NewManager().
+		WithPersistence(csFile, nil).
+		WithGitStatusDeps(deps) // installs deps hook first
+	mgr.WithOnCreate(func(cs *ChatSession) {
+		// This is the runtime's handler-install hook (e.g.
+		// AgentEventBus.Subscribe). It runs AFTER the deps
+		// hook thanks to the chaining in WithOnCreate.
+		mu.Lock()
+		defer mu.Unlock()
+		handlerSeen = append(handlerSeen, cs.ChatID)
+	})
+
+	// Restore — exercises the deps hook's existing-chat
+	// propagation AND the OnCreate hook on restored chats.
+	if err := mgr.RestoreFromRegistry(); err != nil {
+		t.Fatalf("RestoreFromRegistry: %v", err)
+	}
+
+	// Fresh GetOrCreate — exercises the OnCreate hook on a
+	// brand new chat.
+	if _, err := mgr.GetOrCreate("oc_new", "claude"); err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// handlerSeen must include BOTH the restored chat AND the
+	// freshly-created chat. If WithOnCreate had not chained
+	// the deps hook (or had replaced it), this assertion would
+	// still pass — the regression we're testing is about the
+	// deps hook, not the handler hook. The deps verification
+	// is below.
+
+	wantHandler := map[string]bool{"oc_alpha": true, "oc_new": true}
+	if len(handlerSeen) != 2 {
+		t.Fatalf("handler hook: got %d calls %v, want 2 (oc_alpha, oc_new)",
+			len(handlerSeen), handlerSeen)
+	}
+	for _, id := range handlerSeen {
+		if !wantHandler[id] {
+			t.Errorf("handler hook saw unexpected chat %q", id)
+		}
+	}
+
+	// Now the critical assertion: depsConfigured on each chat
+	// must be true (i.e. deps.CollectGit was actually wired).
+	// Without chaining, the OnCreate call above would have
+	// replaced the deps hook, and no chat would have
+	// gitStatusDeps.
+	for _, cs := range mgr.List() {
+		// Use the unexported field via the public method:
+		// RefreshGitStatus is a no-op when depsConfigured=false.
+		// We instead verify the wiring landed by checking the
+		// chat's own gitStatusDeps was set via WithGitStatusDeps.
+		if cs.gitStatusDeps.CollectGit == nil {
+			t.Errorf("chat %q: gitStatusDeps.CollectGit is nil — WithOnCreate replaced (instead of chained) the deps hook",
+				cs.ChatID)
+		}
+	}
+}
+
+// TestManager_WithOnCreate_ThenWithGitStatusDeps_ChainsHooks
+// is the symmetric regression: if a future caller wires
+// WithOnCreate FIRST and WithGitStatusDeps second, the deps
+// hook must still chain (i.e. fire AFTER the handler hook on
+// every chat). This protects against accidentally reversing
+// the order in production without breaking the wiring.
+//
+// WithGitStatusDeps always installs the deps-Set on every
+// existing chat AND on every future chat; the order with
+// WithOnCreate doesn't matter for existing chats (they get
+// deps-set synchronously inside WithGitStatusDeps) but does
+// matter for future chats — those rely on the OnCreate hook
+// chain.
+func TestManager_WithOnCreate_ThenWithGitStatusDeps_ChainsHooks(t *testing.T) {
+	var (
+		mu        sync.Mutex
+		handlerSeen []string
+	)
+
+	mgr := NewManager()
+	mgr.WithOnCreate(func(cs *ChatSession) {
+		mu.Lock()
+		defer mu.Unlock()
+		handlerSeen = append(handlerSeen, cs.ChatID)
+	})
+
+	deps := GitStatusDeps{
+		CollectGit: func(ctx context.Context, cwd string) (*messages.GitStatusSnapshot, error) {
+			return nil, nil
+		},
+	}
+	mgr.WithGitStatusDeps(deps) // installed AFTER handler
+
+	if _, err := mgr.GetOrCreate("oc_alpha", "claude"); err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(handlerSeen) != 1 || handlerSeen[0] != "oc_alpha" {
+		t.Fatalf("handler hook: got %v, want [oc_alpha]", handlerSeen)
+	}
+
+	cs := mgr.Get("oc_alpha")
+	if cs == nil {
+		t.Fatal("oc_alpha not in manager")
+	}
+	if cs.gitStatusDeps.CollectGit == nil {
+		t.Errorf("chat %q: gitStatusDeps.CollectGit is nil — deps hook didn't fire after handler hook",
+			cs.ChatID)
+	}
+}
+
+// TestManager_WithGitStatusDeps_PropagatesToExistingChats is the
+// regression for the F-CLAUDE-PRINT-002 propagation fix: when
+// WithGitStatusDeps is called AFTER chats already exist, every
+// existing chat must receive the deps. Without the in-loop
+// propagation, callsites that lazy-create chats (e.g. /gtw
+// commit before /cwd) would silently skip git status refreshes
+// until the chat was recreated.
+func TestManager_WithGitStatusDeps_PropagatesToExistingChats(t *testing.T) {
+	mgr := NewManager()
+
+	// Create chats BEFORE wiring deps.
+	for _, id := range []string{"oc_a", "oc_b", "oc_c"} {
+		if _, err := mgr.GetOrCreate(id, "claude"); err != nil {
+			t.Fatalf("GetOrCreate %s: %v", id, err)
+		}
+	}
+
+	// Now wire deps — must propagate to all three.
+	deps := GitStatusDeps{
+		CollectGit: func(ctx context.Context, cwd string) (*messages.GitStatusSnapshot, error) {
+			return nil, nil
+		},
+	}
+	mgr.WithGitStatusDeps(deps)
+
+	for _, cs := range mgr.List() {
+		if cs.gitStatusDeps.CollectGit == nil {
+			t.Errorf("chat %q: gitStatusDeps.CollectGit is nil after WithGitStatusDeps (propagation missed)",
+				cs.ChatID)
+		}
 	}
 }
 

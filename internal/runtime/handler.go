@@ -21,7 +21,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
-	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 // NewEventHandler returns the per-event callback installed on
@@ -71,7 +70,7 @@ func NewEventHandler(
 	cs *chatsession.ChatSession,
 	mgr *chatsession.Manager,
 	logger *slog.Logger,
-	sbDeps statusbar.Deps,
+	sbDeps chatsession.GitStatusDeps,
 	policies ...OutboundPolicy,
 ) func(env chatsession.AgentEventEnvelope) {
 	// Per-cs closure. No per-handler mutable state needed anymore:
@@ -168,6 +167,41 @@ func NewEventHandler(
 		// startup, internal logs) — Channel renders those as
 		// plain text.
 		out.ReplyTo = userMsgID
+
+		// F-CLAUDE-PRINT-002: identity (Agent / Model / SessionID)
+		// is sticky on the AgentSession (set by EventAgentReady
+		// once at session start). Per-event bridge events
+		// (EventAgentResult, EventAgentText, etc.) don't carry
+		// these fields — translate leaves the flat identity
+		// fields empty on those events. Stamp them here from the
+		// AS state so the Channel always has them. Out-of-band
+		// /override: dispatcher that wants a different model
+		// (one-shot /gtw commit on a cheaper model) sets
+		// out.Model itself; the `if == ""` guard below respects
+		// that override.
+		if out.AgentName == "" {
+			out.AgentName = s.Agent
+		}
+		if out.Model == "" {
+			out.Model = s.Model()
+		}
+		if out.SessionID == "" {
+			out.SessionID = s.SessionID()
+		}
+		if out.Workspace == "" {
+			out.Workspace = s.Cwd
+		}
+
+		// F-CLAUDE-PRINT-002: chatsession owns the GitStatus
+		// snapshot (workspace + git status + PR). The runtime
+		// event hook stamps it onto every outbound so Channel
+		// adapters can render Line 3 of the footer without a
+		// separate StatusBar wrapper. chatsession.RefreshGitStatus
+		// decides when the snapshot is fresh; the runtime never
+		// recomputes — it just attaches the cached pointer.
+		if out.GitStatus == nil {
+			out.GitStatus = cs.GitStatus()
+		}
 
 		// Apply OutboundPolicy chain. Each policy may mutate
 		// out (e.g. StatusBarStampPolicy fills out.StatusBar)

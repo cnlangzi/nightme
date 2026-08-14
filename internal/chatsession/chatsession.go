@@ -21,6 +21,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/command/services"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
+	"github.com/cnlangzi/nightme/internal/messages"
 	"github.com/cnlangzi/nightme/internal/registry"
 )
 
@@ -132,6 +133,19 @@ type ChatSession struct {
 	ChatID string
 
 	mu sync.RWMutex
+
+	// F-CLAUDE-PRINT-002: chatsession-cached GitStatus (workspace
+	// path + git status snapshot + open PR). Populated by
+	// RefreshGitStatus (called at startup, /gtw commit, /gtw pr).
+	// Stamped onto OutboundMessage at the chatsession event-hook
+	// (Batch 2) so Channels can render Line 3 of the footer.
+	//
+	// gitStatusDeps is the deps that RefreshGitStatus uses for
+	// CollectGit + LookupPR; wired at chatsession construction
+	// via WithGitStatusDeps (manager.go).
+	gitStatus   *messages.GitStatus
+	gitStatusMu sync.RWMutex
+	gitStatusDeps GitStatusDeps
 
 	// Active routing state. selectedAgent is mutable via /use;
 	// selectedCwd via /cwd. primaryAgent is the cfg.Primary snapshot
@@ -512,6 +526,99 @@ func (cs *ChatSession) SelectedCwd() string {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return cs.selectedCwd
+}
+
+// GitStatus returns the chatsession's cached workspace snapshot
+// (workspace path + git status + open PR). RefreshGitStatus()
+// populates this; the runtime / dispatcher reads it and stamps
+// it onto outbound messages so Channel adapters can render
+// Line 3 of the footer (workspace / branch / ahead-behind / PR).
+//
+// Returns nil when the chat has no workspace OR no AgentSession
+// yet (i.e. before /cwd is set or before the first /use). Channel
+// adapters treat nil as "no workspace line" and skip the segment.
+//
+// Cached at the chatsession level (not per-event-bus-message,
+// not per-outbound) so a 30-event turn doesn't trigger 30 git
+// status calls. RefreshGitStatus decides when to re-collect
+// (startup, /gtw commit pre/post, /gtw pr, etc.).
+func (cs *ChatSession) GitStatus() *messages.GitStatus {
+	cs.gitStatusMu.RLock()
+	defer cs.gitStatusMu.RUnlock()
+	return cs.gitStatus
+}
+
+// RefreshGitStatus re-runs git status + PR lookup and stores the
+// snapshot on the chatsession. Callers:
+//
+//   - chatsession startup (manager.go): one initial call after the
+//     chat is wired so the first outbound already has GitStatus.
+//   - /gtw commit pre-RunOnce: capture pre-commit workspace state
+//     (used by verifyAgentCommitted).
+//   - /gtw commit post-RunOnce: capture post-commit state for the
+//     success card footer (HEAD advanced, branch moved).
+//   - /gtw pr: capture pre-pr state for the success card.
+//
+// The 3s git deadline (F-45 §1.7) lives inside deps.CollectGit
+// so a hung git can't block the outbound pipeline. A failing
+// or non-git workspace stores nil Snapshot, never blocks.
+//
+// Takes a separate statusbar.Deps rather than the runtime's
+// shared instance because chatsession has no direct runtime
+// reference — the runtime wires deps at startup and stores
+// them on the chatsession via this method (or via the
+// constructor). See manager.go for the wiring.
+func (cs *ChatSession) RefreshGitStatus(ctx context.Context, deps GitStatusDeps) error {
+	// No deps wired yet (e.g. unit tests before WithGitStatusDeps).
+	// Skip; chatsession keeps the previous value (or nil if first call).
+	if !depsConfigured(deps) {
+		return nil
+	}
+	cwd := cs.SelectedCwd()
+	if cwd == "" {
+		// No workspace. Clear the cache so the next emitter
+		// doesn't surface a stale Workspace path.
+		cs.gitStatusMu.Lock()
+		cs.gitStatus = nil
+		cs.gitStatusMu.Unlock()
+		return nil
+	}
+
+	snap, _ := deps.CollectGit(ctx, cwd)
+
+	var pr *messages.PR
+	if deps.LookupPR != nil {
+		as := cs.SelectedAgentSession()
+		if as != nil {
+			pr = deps.LookupPR(as.ID)
+		}
+	}
+
+	cs.gitStatusMu.Lock()
+	cs.gitStatus = &messages.GitStatus{
+		Workspace:   cwd,
+		Snapshot:    snap,
+		PullRequest: pr,
+	}
+	cs.gitStatusMu.Unlock()
+	return nil
+}
+
+// WithGitStatusDeps wires the deps used by RefreshGitStatus.
+// Called once at chatsession startup so the chat can refresh
+// its workspace snapshot on demand (without going through the
+// runtime). Returns self for chaining.
+func (cs *ChatSession) WithGitStatusDeps(deps GitStatusDeps) *ChatSession {
+	cs.gitStatusDeps = deps
+	return cs
+}
+
+// depsConfigured reports whether deps has at least one wired
+// function (CollectGit or LookupPR). Used by RefreshGitStatus
+// to skip the git call when neither is set — e.g. unit tests
+// that don't wire the runtime registry.
+func depsConfigured(deps GitStatusDeps) bool {
+	return deps.CollectGit != nil || deps.LookupPR != nil
 }
 
 // ClearSelectedCwd removes the active workspace. Used by /gtw

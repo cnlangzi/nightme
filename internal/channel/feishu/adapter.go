@@ -1223,7 +1223,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// count — the per-line array ensures buildReceiptCard
 		// emits one <hr> + <div> block at the bottom instead of
 		// N+1 copies inline.
-		footerLines := formatStatusBarLines(msg.StatusBar)
+		footerLines := formatStatusBarLines(&msg)
 		if msg.ReplyTo == "" {
 			return a.postOrphanReplyCard(ctx, msg.ChatID, text, footerLines)
 		}
@@ -1563,7 +1563,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// uses the same shared cardFooterElements helper, so
 		// OutResult and OutReply cards now render identical
 		// footers.
-		footerLines := formatStatusBarLines(msg.StatusBar)
+		footerLines := formatStatusBarLines(&msg)
 		// F-39 + F-44 follow-up: deliver the full result as a
 		// top-level Create (PR #47's ReplyInChat surface) — see
 		// OutReply case above for the parent-thread rationale that
@@ -1649,7 +1649,7 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// orphan path fell through to sendRawOutText (plain text
 		// checklist), violating the "main-chat is card" invariant
 		// F-46 established for OutReply / OutResult.
-		footerLines := formatStatusBarLines(msg.StatusBar)
+		footerLines := formatStatusBarLines(&msg)
 		if msg.ReplyTo == "" {
 			return a.postOrphanTaskCard(ctx, msg.ChatID, msg.TaskList, footerLines)
 		}

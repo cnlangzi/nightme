@@ -62,8 +62,8 @@ func TestRunOnceDrain_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if got != "ok" {
-		t.Fatalf("got %q, want ok", got)
+	if got.Text != "ok" {
+		t.Fatalf("got %q, want ok", got.Text)
 	}
 }
 
@@ -80,8 +80,8 @@ func TestRunOnceDrain_TrimsResultText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if got != "pushed abc1234" {
-		t.Fatalf("got %q, want %q", got, "pushed abc1234")
+	if got.Text != "pushed abc1234" {
+		t.Fatalf("got %q, want %q", got.Text, "pushed abc1234")
 	}
 }
 

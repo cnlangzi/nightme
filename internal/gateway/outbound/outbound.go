@@ -50,25 +50,33 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 // Channel adapters (Feishu, echo test stub, ...) implement
 // channel.Channel with all six methods; that automatically
 // satisfies the constructor's channel.Channel parameter. No
 // alias needed — outbound takes channel.Channel directly.
-
-// Options configures optional Emitter behaviour. The zero value
-// is valid: Emitter becomes a pure Channel.Send / SendCard
-// passthrough with no StatusBar attachment.
-type Options struct {
-	// Source, if non-nil, is invoked for every Send / SendCard
-	// whose msg.StatusBar is nil. The returned StatusBar (if
-	// non-nil) is attached to msg before forwarding. The
-	// canonical type lives in internal/statusbar (Source) —
-	// outbound is now a thin consumer of that interface.
-	Source statusbar.Source
-}
+//
+// F-CLAUDE-PRINT-002: Options.Source is gone. The previous
+// "if msg.StatusBar is nil, attach from Source" defensive
+// fallback was an anti-pattern — it hid bugs by silently
+// patching missing data, and it coupled the gateway to
+// statusbar (creating an import cycle). The new model:
+//
+//   - chatsession owns the GitStatus snapshot
+//     (cs.GitStatus() / cs.RefreshGitStatus()).
+//   - The runtime event hook (internal/runtime/handler.go)
+//     stamps chatsession.GitStatus onto out.GitStatus
+//     directly, at translate-time.
+//   - Slash-command replies (commander.Dispatch, etc.) and
+//     one-shot dispatchers stamp their own out.GitStatus
+//     before calling em.Send.
+//   - Outbound is now a pure transport. No Source, no fallback.
+//
+// Options is retained as a struct (instead of removed entirely)
+// so call sites that already pass `outbound.Options{}` keep
+// working — no churn at the construction site.
+type Options struct{}
 
 // Emitter is the public surface every outbound caller holds.
 // Constructed once per daemon (in cmd/nightme/run.go); passed to
@@ -83,23 +91,17 @@ type Emitter interface {
 // New constructs the default Emitter implementation. ch must be
 // non-nil; opts may be its zero value.
 func New(ch channel.Channel, opts Options) Emitter {
-	return &emitImpl{
-		ch:     ch,
-		source: opts.Source,
-	}
+	return &emitImpl{ch: ch}
 }
 
 type emitImpl struct {
-	ch     channel.Channel
-	source statusbar.Source
+	ch channel.Channel
 }
 
 func (e *emitImpl) Send(ctx context.Context, msg messages.OutboundMessage) error {
-	statusbar.AttachIfMissing(&msg, e.source)
 	return e.ch.Send(ctx, msg)
 }
 
 func (e *emitImpl) SendCard(ctx context.Context, msg messages.OutboundMessage) (string, error) {
-	statusbar.AttachIfMissing(&msg, e.source)
 	return e.ch.SendCard(ctx, msg)
 }

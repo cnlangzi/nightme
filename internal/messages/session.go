@@ -1,175 +1,228 @@
 package messages
 
 import (
+	"fmt"
+
 	"github.com/cnlangzi/nightme/internal/agent"
 )
 
-// StatusBar is the runtime-stamped metadata envelope attached to
-// every outbound message that flows from the runtime to a
-// Channel. It groups the per-message decoration data into three
-// sub-bars; the runtime populates each one based on what's
-// available for the current chat, and the Channel decides how
-// to render each sub-bar (Feishu renders a multi-line footer;
-// other Channels may render inline annotations, a sidebar tag,
-// or nothing at all — they read the same typed payload).
+// GitStatus is the workspace / git / PR context attached to every
+// outbound message that flows from the runtime to a Channel.
 //
-// Sub-bar semantics:
+// F-CLAUDE-PRINT-002: this is the consolidation of the legacy
+// StatusBar wrapper. OutboundMessage.GitStatus *GitStatus is the
+// sole per-chatsession snapshot; chatsession owns the cache
+// (chatsession.GitStatus / RefreshGitStatus) and the runtime
+// event hook stamps it onto every outbound. Channel adapters
+// read this directly via formatStatusBarLines → formatGitLine.
 //
-//	GitBar   — workspace + git + PR context. ALWAYS populated
-//	           when the chat has a selected workspace
-//	           (cs.SelectedCwd != ""), even if no AgentSession
-//	           is selected. This is the "every message carries
-//	           git context" rule: a chat user should always
-//	           see what worktree they're talking about, even
-//	           for /gtw replies or pre-spawn placeholders.
-//	           The runtime collects git status fresh on every
-//	           stamp (no caching) so the Channel sees the
-//	           latest worktree state. PullRequest is nil when
-//	           no AS is selected (PR lookup is per-AS).
-//
-//	AgentBar — agent identity (Agent / Model / SessionID).
-//	           Populated only when a chat has a selected
-//	           AgentSession — without an AS there is no
-//	           identity to surface. Channels render Line 1
-//	           of the footer when AgentBar != nil.
-//
-//	UsageBar — per-turn usage snapshot (in/out tokens,
-//	           context window %, cost). Populated from
-//	           out.Usage when the bridge event carries it
-//	           (typically on OutResult / EventAgentResult).
-//	           nil for streaming OutReply chunks without
-//	           usage. Channels render Line 2 when UsageBar
-//	           != nil.
-//
-// The runtime is the single owner of StatusBar — bridges never
-// populate this directly. Pre-rename this was called
-// SessionContext and carried flat fields (Agent, Model,
-// Workspace, GitStatus, PullRequest, Usage). Renamed because
-// "SessionContext" was semantically inaccurate — it is not
-// only about the AgentSession (Workspace / GitStatus are
-// workspace fields, Usage is a per-turn field) — and because
-// the field-by-field naming collided with Go's
-// context.Context idiom. See docs/feat/F-45-session-footer.md
-// §1.3 for the pre-rename architecture rationale.
-type StatusBar struct {
-	// GitBar carries workspace + git + PR context. Always
-	// populated when the chat has a selected workspace. nil
-	// only when the chat has neither an AgentSession nor a
-	// SelectedCwd — i.e. the chat is unusable for any work.
-	GitBar *GitStatusBar
-	// AgentBar carries agent identity (Agent / Model /
-	// SessionID). nil when no AgentSession is selected — the
-	// "AgentBar / TokensBar 没有 AgentSession 则忽略" rule:
-	// without an AS there's no agent identity to surface.
-	AgentBar *AgentStatusBar
-	// UsageBar carries per-turn usage snapshot. nil when the
-	// bridge event did not carry usage (OutReply chunks
-	// during streaming, etc.); the renderer omits Line 2
-	// entirely in that case.
-	UsageBar *UsageStatusBar
-}
-
-// GitStatusBar is the workspace / git / PR sub-bar of StatusBar.
-// Always populated when the chat has a workspace (cs.SelectedCwd
-// != ""), even without an AgentSession — the "git status is
-// always there" rule.
-//
-// Field semantics:
-//
-//	Workspace   — absolute path of the AgentSession's working
-//	              directory at stamp time. Sourced from
-//	              AgentSession.Cwd when an AS exists
-//	              (immutable post-construction, no lock); falls
-//	              back to cs.SelectedCwd() when no AS is
-//	              selected — same string in normal operation.
-//	              Empty before any of those is set; the
-//	              renderer omits the workspace segment when
-//	              "".
-//
-//	GitStatus   — per-stamp git status snapshot captured via
-//	              gtw.CollectReadiness with a 3s deadline
-//	              (review fix: a hung git would otherwise
-//	              block the entire outbound-message pipeline).
-//	              nil when the workspace is not a git repo or
-//	              git invocation failed/timed out — Channels
-//	              that render the git line (Line 3 of the
-//	              Feishu footer) omit the entire line in that
-//	              case. Recomputed on every main-chat stamp
-//	              (no caching) so the Channel sees the latest
-//	              worktree state. See
-//	              docs/feat/F-45-session-footer.md §1.7.
-//
-//	PullRequest — open PR/MR associated with the head branch,
-//	              resolved via prcache.Registry per-AS. nil
-//	              when: no AS is selected (PR lookup is
-//	              tied to the AS's cache); the workspace has
-//	              no `origin` remote; the git platform cannot
-//	              be detected; the most-recent platform call
-//	              failed; no open PR exists; or the cache has
-//	              never been refreshed. The renderer treats
-//	              nil as "omit the trailing `#N` PR segment
-//	              on the workspace line".
-type GitStatusBar struct {
+// Sourced from chatsession: each ChatSession caches its
+// GitStatus (refreshed on /gtw commit, /gtw pr, and chatsession
+// startup). The runtime doesn't recompute; the chatsession is
+// the single owner. Empty / nil when the chat has no workspace
+// or no AgentSession yet — Channel adapters treat nil as
+// "no workspace line".
+type GitStatus struct {
 	Workspace   string
-	GitStatus   *GitStatusSnapshot
+	Snapshot    *GitStatusSnapshot
 	PullRequest *PR
 }
 
-// AgentStatusBar is the agent-identity sub-bar of StatusBar.
-// Populated only when a chat has a selected AgentSession —
-// without an AS there is no agent identity to surface.
+// GitStatusSnapshot is the parsed result of a single
+// `git status --porcelain --branch` invocation against a workspace.
+// Pure value type (no exported state, no I/O) so it can be carried
+// across package boundaries and tested without running git.
+//
+// F-57 adds read-only predicate methods on this type. They are
+// defined here (not in the gtw package) because gtw uses a type
+// alias (`type GitStatusSnapshot = messages.GitStatusSnapshot`) and
+// Go forbids attaching new methods to the alias's underlying type
+// from a different package. Keeping the predicates next to the
+// field definitions also avoids an import cycle between messages
+// and gtw: the predicates must NOT touch the gtw package or any
+// transitive dep of it.
+type GitStatusSnapshot struct {
+	Branch        string
+	Added         int
+	Deleted       int
+	Modified      int
+	Untracked     int
+	Conflicts     int
+	AheadOfRemote int
+	BehindRemote  int
+	HasUpstream   bool
+	HasConflicts  bool
+}
+
+// PR is the abstract cross-platform handle for a single Pull
+// Request / Merge Request. Production has two impls (GitHub /
+// GitLab) and the runtime caches one PR per AgentSession via
+// prcache.Registry.
 //
 // Field semantics:
 //
-//	Agent     — registry name of the agent that produced this
-//	            event (e.g. "claude", "codex"). Sourced from
-//	            AgentSession.Agent (immutable, no lock).
-//	            Empty before the AS is bound; the renderer
-//	            omits the segment when "".
-//
-//	Model     — model the agent selected (e.g.
-//	            "claude-opus-4-5-20250929"). Sourced from
-//	            AgentSession.Model which the runtime caches
-//	            on first EventAgentReady. Empty before
-//	            EventAgentReady lands; renderer omits when "".
-//
-//	SessionID — the agent's own session id captured on the
-//	            last run (Claude Code's `system/init.session_id`,
-//	            ACP's synthesized uuid, codex's thread.id).
-//	            Sourced from AgentSession.SessionID() (RLock).
-//	            Empty when the agent has no resume semantics
-//	            or has not yet emitted its init event;
-//	            renderer omits when "".
-//
-// F-56 (preserved): the first footer line
-// ("🤖: <agent> · <model> · <sessionid>") uses these as
-// trailing identity segments. Each segment is omitted
-// independently when empty; an AgentBar with only SessionID
-// set renders as "🤖: · <sid>".
-type AgentStatusBar struct {
-	Agent     string
-	Model     string
-	SessionID string
+//	Number — platform-native PR number (GitHub: #N; GitLab: !N).
+//	URL    — web URL to the PR / MR page.
+//	State  — "open" / "merged" / "closed". v1 only requests
+//	         PRs in the "open" state (GitHub's `pr list --state open`,
+//	         GitLab's `mr list --state opened`); the field stays in
+//	         the type so a future "show merged PR too" footer variant
+//	         can flip the platform filter without changing the
+//	         consumer.
+type PR struct {
+	Number int
+	URL    string
+	State  string
 }
 
-// UsageStatusBar is the per-turn usage sub-bar of StatusBar.
-// Populated from the bridge event's Usage payload (typically
-// co-located on OutResult / EventAgentResult). nil for
-// streaming OutReply chunks without usage.
+// -----------------------------------------------------------------------------
+// F-57 readiness predicates
 //
-// *UsageInfo is embedded so callers access fields directly
-// without an extra indirection:
+// The three atomic predicates below are the building blocks both /gtw push
+// and /gtw pr compose to make their business decisions. They are deliberately
+// pure functions on the snapshot — they do NOT call into the gtw package,
+// touch git, or know anything about the push/pr commands' UX. The push and
+// pr layers add their own composition logic (PushBlockReason / PRBlockReason)
+// on top.
 //
-//	sb.UsageBar.InputTokens
-//	sb.UsageBar.ContextWindowPct
-//	sb.UsageBar.CostUSD
+// Keeping these predicates in the messages package (where the struct lives)
+// is a deliberate architectural choice — see the type-level comment for the
+// import-cycle reasoning. The methods are accessed via the type alias
+// `gtw.GitStatusSnapshot = messages.GitStatusSnapshot` from the gtw layer.
+// -----------------------------------------------------------------------------
+
+// HasUpstreamBranch reports whether this snapshot's branch exists on the
+// origin remote (i.e. has an upstream tracking ref). Detached HEAD never
+// has upstream, even if the porcelain header still parses.
+func (s *GitStatusSnapshot) HasUpstreamBranch() bool {
+	return s.Branch != "" && s.HasUpstream
+}
+
+// LocalIsAtUpstreamTip reports whether the local branch tip is exactly the
+// same commit as origin/<branch> — i.e. there are zero unpushed local
+// commits AND zero upstream commits the local branch hasn't caught up to.
 //
-// The runtime is a passive pass-through — it does NOT
-// aggregate Usage across turns; this snapshot is always the
-// single turn's bridge-reported value. See
-// docs/feat/F-45-session-footer.md §1.6.
-type UsageStatusBar struct {
-	*UsageInfo
+// HasUpstream must be true for this to be meaningful; without an upstream
+// reference there is no "tip" to compare against. The function returns
+// false in that case rather than panicking, which is the safer default
+// for a "is everything pushed?" check.
+func (s *GitStatusSnapshot) LocalIsAtUpstreamTip() bool {
+	return s.HasUpstreamBranch() && s.AheadOfRemote == 0 && s.BehindRemote == 0
+}
+
+// WorkingTreeIsClean reports whether the working tree has nothing to commit:
+// no modified / staged / deleted / renamed entries, no untracked files, and
+// no unresolved merge/rebase conflicts.
+//
+// This is the senior-dev "before opening a PR" hygiene gate. It does NOT
+// check upstream alignment (see LocalIsAtUpstreamTip for that).
+func (s *GitStatusSnapshot) WorkingTreeIsClean() bool {
+	return s.Added == 0 && s.Deleted == 0 &&
+		s.Modified == 0 && s.Untracked == 0 &&
+		s.Conflicts == 0
+}
+
+// HasNothingToPush reports whether /gtw push should bail out with a
+// "nothing to push" informational message. Returns true only when:
+//
+//   - the working tree is fully committed (WorkingTreeIsClean), AND
+//   - the branch exists on origin (HasUpstreamBranch), AND
+//   - local is at upstream tip (AheadOfRemote == 0)
+//
+// Note that "no upstream at all" deliberately returns FALSE — a branch
+// that has never been pushed is exactly the case /gtw push needs to handle
+// (programmaticPush runs `git push -u origin <branch>` for that). Calling
+// /gtw push on such a branch is the happy path, not a no-op.
+func (s *GitStatusSnapshot) HasNothingToPush() bool {
+	return s.WorkingTreeIsClean() &&
+		s.HasUpstreamBranch() &&
+		s.AheadOfRemote == 0
+}
+
+// PushBlockReason returns the single hard-refuse reason for /gtw push, or
+// "" if push should proceed. Currently the only hard-refuse condition is
+// unresolved merge/rebase conflicts — pushing an unresolved state would
+// land a broken tip on origin and is rejected at the gate.
+//
+// All other "not ready" conditions (uncommitted files, no upstream, etc.)
+// are NOT hard-refused here; the agent commit path or programmaticPush
+// handle them. See F-57 §3.1.
+func (s *GitStatusSnapshot) PushBlockReason() string {
+	if s.HasConflicts {
+		return "❌ worktree has unmerged paths (merge/rebase conflict)\n" +
+			"hint: resolve conflicts and `git add`, OR `git rebase --abort` / `git merge --abort`"
+	}
+	return ""
+}
+
+// IsReadyForPR reports whether /gtw pr should proceed past the readiness
+// gate. A worktree is "ready" iff:
+//
+//   - the branch exists on origin (HasUpstreamBranch), AND
+//   - local branch tip == upstream tip (LocalIsAtUpstreamTip), AND
+//   - working tree is fully committed (WorkingTreeIsClean)
+//
+// /gtw push's successful exit guarantees this (modulo race); see F-57 §5
+// for the continuity proof.
+func (s *GitStatusSnapshot) IsReadyForPR() bool {
+	return s.HasUpstreamBranch() && s.LocalIsAtUpstreamTip() && s.WorkingTreeIsClean()
+}
+
+// PRBlockReason returns the single actionable reason /gtw pr is being
+// refused, in priority order (hard blocks first, then cleanup nudges).
+//
+// Priority rationale:
+//  1. Branch == "" (detached HEAD) — refuse first; there's no ref to PR
+//     from. Cannot be "fixed" by /gtw push; the user must checkout.
+//  2. HasConflicts — refuse; resolve manually.
+//  3. !HasUpstream — this is the bug case F-57 fixes: branch was never
+//     pushed to origin. Direct the user to /gtw push.
+//  4. AheadOfRemote > 0 — local has unpushed commits; direct to push.
+//     NOTE: if BOTH ahead > 0 AND behind > 0 (diverged — local
+//     rebased on stale origin), the ahead branch wins. User must
+//     push first; the resulting push will fail if remote has new
+//     commits, but that's the "git push --force-with-lease" path,
+//     not a /gtw pr concern.
+//  5. BehindRemote > 0 — remote moved forward; user must rebase.
+//  6. Added / Deleted / Modified > 0 — working tree dirty. /gtw
+//     push no longer auto-commits; direct to /gtw commit first.
+//     All three categories share a single hint line so /gtw pr's
+//     refusal reads as one "working tree has uncommitted work"
+//     statement, not three.
+//  7. Untracked > 0 — git add, then commit, then push, then pr.
+//
+// The function returns "" when IsReadyForPR() returns true (no block).
+// Callers should check IsReadyForPR first and call PRBlockReason only on
+// the negative path, but the "" return here is also safe to ignore.
+func (s *GitStatusSnapshot) PRBlockReason() string {
+	switch {
+	case s.Branch == "":
+		return "❌ detached HEAD — checkout a named branch first"
+	case s.HasConflicts:
+		return "❌ worktree has unmerged paths (merge/rebase conflict)\n" +
+			"hint: resolve conflicts and `git add`, then /gtw pr"
+	case !s.HasUpstream:
+		return "❌ branch has no upstream on origin\n" +
+			"hint: /gtw push first to publish the branch to origin, then /gtw pr"
+	case s.AheadOfRemote > 0:
+		return fmt.Sprintf(
+			"⚠️ %d commit(s) made locally but not pushed\n"+
+				"hint: /gtw push first, then /gtw pr", s.AheadOfRemote)
+	case s.BehindRemote > 0:
+		return fmt.Sprintf(
+			"⚠️ origin/%s is %d commit(s) ahead of your local branch\n"+
+				"hint: `git pull --rebase`, then /gtw pr", s.Branch, s.BehindRemote)
+	case s.Added+s.Deleted+s.Modified > 0:
+		return fmt.Sprintf(
+			"⚠️ %d file(s) changed but not committed\n"+
+				"hint: /gtw commit first, then /gtw push, then /gtw pr",
+			s.Added+s.Deleted+s.Modified)
+	case s.Untracked > 0:
+		return fmt.Sprintf(
+			"⚠️ %d new file(s) not added to git\n"+
+				"hint: git add them, then /gtw commit, then /gtw push, then /gtw pr", s.Untracked)
+	}
+	return ""
 }
 
 // ToolInfo is the typed payload for OutboundMessage.Tool,
@@ -200,118 +253,8 @@ type ToolInfo struct {
 	Err    error
 }
 
-// Card is an interactive permission card or any other card that
-// requires the user's choice.
-//
-// F-46: kind + choices + action encoding (see docs/feat/F-46-
-// interactive-cards.md). The legacy Options field still works for
-// callers that just want a flat list of button labels — build-
-// InteractiveCard renders Options as primary buttons when Choices
-// is empty.
-type Card struct {
-	// Title is the short headline (e.g., "Permission needed").
-	Title string
-	// Body is the question or instructions.
-	Body string
-	// Options enumerates the user-selectable choices. The first
-	// option is the default / safe choice. The Gateway maps
-	// the user's selection back via SendPermission(choice).
-	Options []string
-	// RequestID is the correlation token.
-	RequestID string
-
-	// F-46 fields.
-	// Kind drives header decoration: CardKindPermission gets a
-	// 🔐 prefix and the default blue template; CardKindDecision
-	// renders the raw title with no prefix.
-	Kind CardKind
-	// Choices is the F-46 structured form of Options. Each choice
-	// emits one button; the action string is encoded into the
-	// button's `value` field with the F-46 {"action":..., "request_id":...}
-	// envelope so handleCardAction can route it back into the
-	// gtw pipeline via the act:/gtw/<scenario> prefix.
-	Choices []CardChoice
-	// Action is a single-button shortcut: when set, the card emits
-	// one primary button with this action string (used for simple
-	// "confirm" cards where Options/Choices would be overkill).
-	Action string
-	// Disabled disables every button on the card. PATCH-rendered
-	// cards use this to grey out the original choices once the
-	// user has picked one.
-	Disabled bool
-	// ChosenChoiceEmoji is the emoji of the button the user
-	// picked. When set together with Disabled, the chosen button
-	// is rendered with a "✅ 已<original-label>" label so the
-	// user sees the click result inline in the card (the toast
-	// position is controlled by Feishu and not always visible).
-	ChosenChoiceEmoji string
-	// HeaderColor overrides the default colour template
-	// (blue / red / green / grey / etc.). Empty string = pick
-	// from Kind.
-	HeaderColor string
-}
-
-// CardKind tags the semantic shape of a Card. Drives header
-// decoration and the 🔐 prefix policy.
-type CardKind int
-
-const (
-	// CardKindPermission is the original permission card. Header
-	// is prefixed with 🔐 and uses the blue template. v1 only
-	// ships this kind for /gtw permission flows.
-	CardKindPermission CardKind = iota
-	// CardKindDecision is a gtw decision card (§5.3.1 / §5.3.3).
-	// No 🔐 prefix; header is the title verbatim; buttons are
-	// rendered as an equal-width column_set.
-	CardKindDecision
-	// CardKindPreview is /gtw test card — non-interactive preview
-	// only; no buttons, no actions.
-	CardKindPreview
-)
-
-// CardChoice is one button on a F-46 decision card. The action
-// string follows the cc-connect convention: `act:/gtw/<scenario>`
-// for action dispatch (handled in F-46 main work; for the
-// prototype the action is encoded into the button value so a
-// future handleCardAction can read it back).
-type CardChoice struct {
-	Emoji  string // optional leading emoji (e.g. "🆕"); rendered as part of the button text
-	Label  string // visible button text
-	Action string // value sent back via card.action.trigger (e.g. "act:/gtw/branch-newv2")
-}
-
-// MessageStatePayload is the OutboundMessage payload for
-// OutMessageState / OutMessageStateRemoved kinds (F-31). It is
-// the typed transport for the same data that v0.2 carried in
-// Meta["message_id"] / ["state"] / ["reaction_id"]; channels
-// read from this typed field directly. Replaces the legacy
-// Reaction struct + implicit Meta keys (removed in §1.4
-// cleanup).
-type MessageStatePayload struct {
-	// State is the abstract MessageState value (received /
-	// forwarded / done / error).
-	State agent.MessageState
-	// MessageID is the channel-native id of the message being
-	// reacted on (typically the user message that triggered the
-	// assistant turn). Required for both OutMessageState (target
-	// of AddReaction) and OutMessageStateRemoved (target of
-	// DeleteReaction).
-	MessageID string
-	// ReactionID is the channel-native reaction id returned by a
-	// prior AddReaction call. Required for OutMessageStateRemoved
-	// so the channel can target the right reaction row (Feishu
-	// has no UpdateReaction API). Empty for OutMessageState (the
-	// reaction has not been created yet at that point).
-	ReactionID string
-	// Emoji is an optional channel-native emoji override. Most
-	// channels ignore this and map State → emoji via their own
-	// table (e.g. Feishu: StateReceived → "OneSecond").
-	Emoji string
-}
-
-// UsageInfo is the typed payload for OutUsage and the
-// StatusBar.CumulativeUsage field. See agent.UsageInfo for
-// field semantics. Re-exported as a type alias here so existing
+// UsageInfo is the typed payload for OutUsage. See agent.UsageInfo
+// for field semantics. Re-exported as a type alias here so existing
 // gateway code (translate.go:158) keeps the same symbol name; the
 // canonical definition lives in internal/agent (F-45 §2.1).
 //
@@ -321,3 +264,45 @@ type MessageStatePayload struct {
 // misleading — InputTokens is the non-cached input count, NOT the
 // sum with cache reads. Cache hits live in CacheReadInputTokens.
 type UsageInfo = agent.UsageInfo
+
+// Card is an interactive permission card or any other card that
+// requires the user's choice.
+//
+// F-46: kind + choices + action encoding (see docs/feat/F-46-
+// interactive-cards.md). The legacy Options field still works for
+// callers that just want a flat list of button labels — build-
+// InteractiveCard renders Options as primary buttons when Choices
+// is empty.
+type Card struct {
+	Title    string
+	Body     string
+	Options  []string
+	RequestID string
+	Kind     CardKind
+	Choices  []CardChoice
+	Action   string
+	Disabled bool
+	ChosenChoiceEmoji string
+	HeaderColor string
+}
+
+type CardKind int
+
+const (
+	CardKindPermission CardKind = iota
+	CardKindDecision
+	CardKindPreview
+)
+
+type CardChoice struct {
+	Emoji  string
+	Label  string
+	Action string
+}
+
+type MessageStatePayload struct {
+	State      agent.MessageState
+	MessageID  string
+	ReactionID string
+	Emoji      string
+}

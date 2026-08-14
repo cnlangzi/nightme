@@ -19,7 +19,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 
@@ -63,7 +62,7 @@ func WireRuntimeCallbacksAndRestore(
 	mgr *chatsession.Manager,
 	em outbound.Emitter,
 	logger *slog.Logger,
-	sbDeps statusbar.Deps,
+	sbDeps chatsession.GitStatusDeps,
 	ch channel.Channel,
 ) error {
 	mgr.WithOnCreate(func(cs *chatsession.ChatSession) {
@@ -149,15 +148,14 @@ func WireRuntimeCallbacksAndRestore(
 				},
 			}
 			if e.State == agent.MessageSubmitted {
-				// multi-as Phase 1: source AS comes from the
-				// event itself, not from cs.SelectedAgentSession().
-				// We pre-stamp here so the emitter's stamper (which
-				// uses cs.SelectedAgentSession()) sees a non-nil
-				// StatusBar and skips its lookup — preserving
-				// the "source AS, not selected AS" semantics this
-				// bus has always had.
-				if as := cs.LookupAS(e.AgentSessionID); as != nil {
-					statusbar.StampFromAS(&out, as, sbDeps)
+				// F-CLAUDE-PRINT-002: chatsession.GitStatus is the
+				// single source of GitStatus on the outbound
+				// message. The runtime pump's event hook (handler.go)
+				// already stamps it for AgentEvent → OutboundMessage
+				// translations. For MessageState events that don't
+				// go through that path, stamp here.
+				if out.GitStatus == nil {
+					out.GitStatus = cs.GitStatus()
 				}
 			}
 			if err := em.Send(context.Background(), out); err != nil {

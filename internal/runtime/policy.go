@@ -31,7 +31,6 @@ import (
 
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 // OutboundPolicy inspects / modifies an outbound message before
@@ -63,44 +62,22 @@ func (f PolicyFunc) Apply(out *messages.OutboundMessage, env chatsession.AgentEv
 	return f(out, env)
 }
 
-// DefaultPolicies returns the three policies every production
-// daemon installs (statusbar stamp + think gate + tools gate).
-// The order matters: statusbar runs first so dropped events
-// don't accidentally incur a stamp, and the two gates run last
-// so a dropped event still records a debug log on the gate's
-// owner.
+// DefaultPolicies returns the policies every production daemon
+// installs (think gate + tools gate).
+//
+// F-CLAUDE-PRINT-002: StatusBarStampPolicy is gone. The runtime
+// event hook (handler.go) stamps chatsession.GitStatus onto
+// out.GitStatus directly — no policy needed for that.
 //
 // Pass the result of this directly to NewEventHandler:
 //
 //	NewEventHandler(em, cs, mgr, logger, sbDeps,
 //	    DefaultPolicies(sbDeps, cs, logger)...)
-func DefaultPolicies(sbDeps statusbar.Deps, cs *chatsession.ChatSession, logger *slog.Logger) []OutboundPolicy {
+func DefaultPolicies(sbDeps chatsession.GitStatusDeps, cs *chatsession.ChatSession, logger *slog.Logger) []OutboundPolicy {
 	return []OutboundPolicy{
-		StatusBarStampPolicy(sbDeps),
 		ThinkModeGatePolicy(cs, logger),
 		ToolsModeGatePolicy(cs, logger),
 	}
-}
-
-// StatusBarStampPolicy stamps out.StatusBar on the four
-// main-chat Kinds (OutReply, OutResult, OutTaskCreate,
-// OutTaskUpdate). Other Kinds skip — thread-only / lifecycle
-// / init payloads would only inflate the wire payload.
-//
-// F-45 §2.5 改动 C: this is the F-48 stamp path. The
-// dispatcher-side MessageStateBus subscriber stamps the
-// MessageSubmitted transition (so the Feishu placeholder card
-// has the footer from the first send); this handler stamps
-// the agent-content transitions.
-func StatusBarStampPolicy(sbDeps statusbar.Deps) OutboundPolicy {
-	return PolicyFunc(func(out *messages.OutboundMessage, env chatsession.AgentEventEnvelope) bool {
-		switch out.Kind {
-		case messages.OutReply, messages.OutResult,
-			messages.OutTaskCreate, messages.OutTaskUpdate:
-			statusbar.StampFromAS(out, env.AgentSession, sbDeps)
-		}
-		return false
-	})
 }
 
 // ThinkModeGatePolicy drops OutThinking events when the chat
@@ -122,10 +99,19 @@ func ThinkModeGatePolicy(cs *chatsession.ChatSession, logger *slog.Logger) Outbo
 			return false
 		}
 		if logger != nil {
+			// env.AgentSession is documented as ALWAYS non-nil in
+			// production (the publisher guards as == nil), but a
+			// future publisher that misses the guard would
+			// produce a nil-deref panic. Defend here so a policy
+			// regression doesn't take down the runtime.
+			asID := ""
+			if env.AgentSession != nil {
+				asID = env.AgentSession.ID
+			}
 			logger.Info("think dropped",
 				"chat_id", env.ChatID,
 				"user_msg_id", env.UserMsgID,
-				"agent_session_id", env.AgentSession.ID)
+				"agent_session_id", asID)
 		}
 		return true
 	})
@@ -147,10 +133,16 @@ func ToolsModeGatePolicy(cs *chatsession.ChatSession, logger *slog.Logger) Outbo
 			return false
 		}
 		if logger != nil {
+			// Defend against a future publisher that misses the
+			// env.AgentSession nil guard (see ThinkModeGatePolicy).
+			asID := ""
+			if env.AgentSession != nil {
+				asID = env.AgentSession.ID
+			}
 			logger.Info("tools dropped",
 				"chat_id", env.ChatID,
 				"user_msg_id", env.UserMsgID,
-				"agent_session_id", env.AgentSession.ID,
+				"agent_session_id", asID,
 				"kind", out.Kind.String())
 		}
 		return true

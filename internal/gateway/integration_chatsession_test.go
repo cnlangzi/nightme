@@ -366,32 +366,37 @@ func (f *integrationFake) Stop(context.Context) error { return agent.ErrNotSuppo
 func (f *integrationFake) SetModel(context.Context, string, string) error {
 	return agent.ErrNotSupported
 }
-func (f *integrationFake) RunOnce(ctx context.Context, _ agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
+func (f *integrationFake) RunOnce(ctx context.Context, _ agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	if err := f.SendBlocks(ctx, blocks); err != nil {
-		return "", err
+		return agent.RunResult{}, err
 	}
 	for {
 		select {
 		case ev, ok := <-f.events:
 			if !ok {
-				return "", errors.New("integrationFake: event stream closed without result")
+				return agent.RunResult{}, errors.New("integrationFake: event stream closed without result")
 			}
 			switch ev.Kind {
 			case agent.EventAgentResult:
 				if ev.Result == nil {
-					return "", errors.New("integrationFake: nil result payload")
+					return agent.RunResult{}, errors.New("integrationFake: nil result payload")
 				}
-				return ev.Result.Text, nil
+				return agent.RunResult{
+					Text:       ev.Result.Text,
+					Usage:      ev.Result.Usage,
+					DurationMs: ev.Result.DurationMs,
+					Subtype:    ev.Result.Subtype,
+				}, nil
 			case agent.EventAgentDone:
-				return "", errors.New("integrationFake: turn ended without result")
+				return agent.RunResult{}, errors.New("integrationFake: turn ended without result")
 			case agent.EventAgentError:
 				if ev.Err != nil {
-					return "", ev.Err
+					return agent.RunResult{}, ev.Err
 				}
-				return "", errors.New("integrationFake: nil error payload")
+				return agent.RunResult{}, errors.New("integrationFake: nil error payload")
 			}
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return agent.RunResult{}, ctx.Err()
 		}
 	}
 }

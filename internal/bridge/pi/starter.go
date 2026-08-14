@@ -97,13 +97,13 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // for the chat session's long-lived use case where multiple
 // turns ride one bridge. RunOnce and Start share the same
 // Starter; only the spawn path differs.
-func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (string, error) {
+func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
 	prompt := blocksToPrompt(blocks)
-	text, err := runPrintMode(ctx, s.command, prompt, cfg.Workspace)
+	result, err := runPrintMode(ctx, s.command, prompt, cfg.Workspace, cfg.Env)
 	if err != nil {
-		return "", fmt.Errorf("agent %s: %w", s.Info().Name, err)
+		return agent.RunResult{}, fmt.Errorf("agent %s: %w", s.Info().Name, err)
 	}
-	return text, nil
+	return result, nil
 }
 
 // blocksToPrompt joins multiple ContentText blocks with "\n"

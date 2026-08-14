@@ -64,7 +64,7 @@ func dispatchPush(
 	// — see F-57 §5).
 	snap, err := CollectReadiness(ctx, c.Worktree, deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ read worktree status: %v", err)), nil
 	}
 	if snap == nil {
@@ -72,7 +72,7 @@ func dispatchPush(
 		// repo, or git error. None of these are states we can push
 		// from. Surface a clear refusal rather than silently
 		// continuing.
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			"❌ cannot read worktree git status — refusing to push\n"+
 				"hint: ensure the worktree is inside a git repo with at least one commit"), nil
 	}
@@ -80,7 +80,7 @@ func dispatchPush(
 	// 1. Hard-refuse conflicts. Pushing an unresolved state would
 	// land a broken tip on origin — no override.
 	if reason := snap.PushBlockReason(); reason != "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID, reason), nil
 	}
 
 	// 1b. Refuse detached HEAD. Pushing from detached HEAD with
@@ -90,7 +90,7 @@ func dispatchPush(
 	// dispatchPR PRBlockReason case 1 (the two gates share the
 	// same readiness snapshot, so the policy stays consistent).
 	if snap.Branch == "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			"❌ detached HEAD — checkout a named branch first"), nil
 	}
 
@@ -100,7 +100,7 @@ func dispatchPush(
 	// intentionally wants to commit later; either way, push is
 	// the wrong next step. Surface a "commit first" guidance.
 	if !snap.WorkingTreeIsClean() {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			"❌ worktree is dirty — /gtw push no longer auto-commits\n"+
 				"hint: run `/gtw commit` first, then `/gtw push`"), nil
 	}
@@ -110,7 +110,7 @@ func dispatchPush(
 	// branch was never published; programmaticPush handles the
 	// first push).
 	if snap.HasNothingToPush() {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			"ℹ️ nothing to push\n"+
 				"  no uncommitted changes\n"+
 				"  no unpushed commits on "+snap.Branch), nil
@@ -128,7 +128,7 @@ func dispatchPush(
 	// useless for the post-push log query).
 	originBefore, err := originBranchSHA(ctx, c.Worktree, c.Branch, deps)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ read origin/%s: %v", c.Branch, err)), nil
 	}
 
@@ -137,7 +137,7 @@ func dispatchPush(
 	if err := programmaticPushWithRetry(ctx, deps, c); err != nil {
 		// err.Error() is already a complete IM-friendly message
 		// (per F-56 §4.3 design). Paste it straight in.
-		return reply(ctx, cs.Emitter(), chatID, messageID, err.Error()), nil
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID, err.Error()), nil
 	}
 
 	// 5. Build the success card from git log — NOT from agent
@@ -170,8 +170,8 @@ func dispatchPush(
 	}
 	card, err := replyPushSuccessCard(ctx, c, revRange, deps)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
+		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
 			fmt.Sprintf("❌ push succeeded but couldn't render card: %v", err)), nil
 	}
-	return reply(ctx, cs.Emitter(), chatID, messageID, card), nil
+	return reply(ctx, cs.Emitter(), cs, chatID, messageID, card), nil
 }

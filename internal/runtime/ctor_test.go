@@ -28,7 +28,6 @@ import (
 	"github.com/cnlangzi/nightme/internal/chatsession"
 	"github.com/cnlangzi/nightme/internal/gateway/outbound"
 	"github.com/cnlangzi/nightme/internal/messages"
-	"github.com/cnlangzi/nightme/internal/statusbar"
 )
 
 // TestDefaultDeps_HasProductionHooks verifies the production
@@ -139,7 +138,7 @@ func TestPromptEndBus_DelegatesToChannelOnPromptEnded(t *testing.T) {
 		mgr,
 		outbound.New(echo.New("test", io.Discard), outbound.Options{}),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		statusbar.Deps{},
+		chatsession.GitStatusDeps{},
 		stub,
 	); err != nil {
 		t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)
@@ -174,7 +173,7 @@ func TestPromptEndBus_NonFeishuChannelIsNoOp(t *testing.T) {
 		mgr,
 		outbound.New(ch, outbound.Options{}),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		statusbar.Deps{},
+		chatsession.GitStatusDeps{},
 		ch,
 	); err != nil {
 		t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)

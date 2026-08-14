@@ -15,7 +15,6 @@ package opencode
 
 import (
 	"context"
-	"fmt"
 	"os/exec"
 
 	"github.com/cnlangzi/nightme/internal/agent"
@@ -79,18 +78,38 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 	return agent.NewAgent(s.Info(), d.PID(), d.events, d), nil
 }
 
-// RunOnce runs a single synchronous turn. Spawns a fresh session,
-// sends blocks, drains Events() until the agent produces its final
-// text result, closes the session before returning. Used by callers
-// like /gtw commit and /gtw pr that want a single turn without
-// holding a session handle.
+// RunOnce is the one-shot counterpart to Start. Delegates to
+// runPrintMode in print.go, which spawns `opencode run --format
+// json` directly (bypassing the long-lived `opencode serve` HTTP
+// pipeline).
+//
+// As of F-OPENCODE-PRINT-001, RunOnce routes through the
+// print-mode spawn rather than the long-lived Start path.
+// Rationale (mirrors F-CODEX-PRINT-001 / F-CLAUDE-PRINT-001 /
+// F-PI-PRINT-001):
+//
+//   - One-shot invocations (/gtw commit, /gtw pr,
+//     buildAgentPrompt) don't need a multi-turn session; they
+//     spawn, do the work, and exit.
+//   - The Start path was observed to carry unnecessary surface
+//     for one-shot: opencode serve subprocess boot (~1s),
+//     session handshake (POST /api/session), SSE subscription,
+//     and closeDrainTimeout (~5s) on Close. Mirrors the
+//     F-CODEX-PRINT-001 finding that the long-lived path is
+//     wasted work for single-turn use.
+//   - `opencode run --format json <prompt>` is the documented
+//     CLI counterpart of `claude -p` / `codex exec` /
+//     `pi --mode json -p`: spawns, runs the turn, emits the
+//     step_finish event, and exits. Wire schema is JSON-Lines
+//     (one event per line) with envelope {type, timestamp,
+//     sessionID, ...data}; see print.go for the parser.
+//
+// Start (above) is unchanged: it still opens the long-lived
+// opencode serve HTTP session for the chat-session use case
+// where many turns ride one bridge. RunOnce and Start share
+// the same Starter; only the spawn path differs.
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
-	a, err := s.Start(ctx, cfg)
-	if err != nil {
-		return agent.RunResult{}, fmt.Errorf("agent %s: spawn: %w", s.Info().Name, err)
-	}
-	defer a.Close()
-	return agent.RunOnceDrain(ctx, a, blocks, s.Info().Name)
+	return runPrintMode(ctx, s, cfg, blocks)
 }
 
 // Compact asks the server to compact the conversation history.

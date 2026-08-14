@@ -34,7 +34,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/chatsession"
 )
 
@@ -131,42 +130,22 @@ func dispatchPR(
 				c.Branch, baseBranch)), nil
 	}
 
-	// --- pick agent --------------------------------------------------
-	agentName := args.Agent
-	if agentName == "" {
-		agentName = cs.SelectedAgent()
-	}
-	if agentName == "" {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			"❌ no agent selected. Send `/use <name>` first or pass `-a <name>`."), nil
-	}
-	a, err := agent.Builtins.Get(agentName)
+	// --- run agent --------------------------------------------------
+	// runAgentFor returns the full RunResult so the success-path
+	// reply can stamp Model / SessionID / Usage onto the
+	// OutboundMessage — see replyAgent's doc for the footer
+	// stamping rationale (F-CLAUDE-PRINT-002 follow-up: agentbar /
+	// usagebar must reach the channel even when GTW bypasses the
+	// runtime event pipeline).
+	prCtx, prCancel := context.WithTimeout(ctx, RunOnceTimeout)
+	defer prCancel()
+	runRes, agentName, err := runAgentFor(prCtx, cs, c.Worktree,
+		buildPRPrompt(c, baseBranch), args.Agent, "")
 	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ unknown agent %q (check `nightme agents` or your config)", agentName)), nil
+		return replyAgent(ctx, cs.Emitter(), chatID, messageID,
+			err.Error(), agentName, runRes), nil
 	}
-	if err := a.Detect(); err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ agent %s not available: %v", agentName, err)), nil
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, RunOnceTimeout)
-	defer cancel()
-
-	prompt := buildPRPrompt(c, baseBranch)
-	blocks := []agent.ContentBlock{{
-		Type: agent.ContentText,
-		Text: prompt,
-	}}
-	result, err := a.RunOnce(ctx,
-		agent.StartConfig{Workspace: c.Worktree},
-		blocks,
-	)
-	if err != nil {
-		return reply(ctx, cs.Emitter(), chatID, messageID,
-			fmt.Sprintf("❌ agent %s failed: %v", agentName, err)), nil
-	}
-	text := result.Text
+	text := runRes.Text
 
 	title, body, perr := parsePRReply(text)
 	if perr != nil {
@@ -220,7 +199,12 @@ func dispatchPR(
 	// immediately.
 	invalidateChatASPRCache(deps, cs)
 
-	return reply(ctx, cs.Emitter(), chatID, messageID, card), nil
+	// Success path: forward runRes so the footer (agentbar +
+	// usagebar) renders. Failure paths above (parsePRReply,
+	// resolveProvider, CreatePR, ErrPRExists) stay on the
+	// no-stamp reply — they're not the agent-result surface.
+	return replyAgent(ctx, cs.Emitter(), chatID, messageID,
+		card, agentName, runRes), nil
 }
 
 // buildPRPrompt renders the text block the agent receives.

@@ -43,8 +43,10 @@
 //     carries `thread_id`; `turn.completed.usage` carries token
 //     counts. We consume those for RunResult.SessionID / Usage.
 //   - `-i <path>` is repeatable and produces a working image
-//     attachment (verified by feeding a 1×1 PNG and reading the
-//     agent's description).
+//     attachment (verified by feeding a 100×100 PNG and asking
+//     the model to count pixels — it answered "100" correctly,
+//     proving vision content was actually consumed; not just a
+//     hallucinated answer based on the path string).
 //   - `--dangerously-bypass-approvals-and-sandbox` is the
 //     documented one-flag replacement for the app-server's
 //     approval_policy="never" + sandbox_mode="danger-full-access"
@@ -62,13 +64,20 @@
 // the file bytes internally and feeds them to the model as
 // vision content. We pass paths; codex does the base64.
 //
-// Verified end-to-end: a 100×100 RGBA PNG via `-i <path>`
-// caused Usage.InputTokens to jump from 17,871 (text-only
-// baseline) to 35,740 — a ~17,869 token delta that can ONLY
-// come from vision encoding of the image pixels. The model
-// also correctly answered "Red." for a solid-red 100×100
-// square. So `-i <path>` is the right path; base64-in-prompt
-// would not be accepted by the CLI.
+// Verified end-to-end with a disambiguation test (F-CODEX-PRINT-001
+// follow-up): a 100×100 solid-color PNG via `-i <path>` and
+// "how many pixels tall is the image?" → model answered "100"
+// correctly. This is the only reliable proof — the model had to
+// actually see the image to answer a numeric question. Token
+// counts vary (17K-36K) for the same image across runs because
+// codex CLI 0.145 has unstable vision-token accounting; do NOT
+// use token count as a "was the image attached?" signal — only
+// the model's content-aware answers are reliable.
+//
+// JSON stdin is NOT parsed as structured input (verified
+// empirically — `codex exec - < json.json` treats stdin as a
+// plain `<stdin>` text block; the `path` field in JSON is
+// ignored and the model hallucinates).
 //
 // Contrast with claudecode/pi: both lack a CLI-level image
 // flag in their print mode (claude -p / pi --mode json -p)

@@ -6,7 +6,7 @@
 
 > **Sleep tight. NightMe codes all night.**
 >
-> A remote-pair developer agent. No more babysitting AI—stay in the loop from your phone while NightMe takes the wheel.
+> A remote-pair developer agent. No more babysitting AI—stay in the loop from your phone while it takes the wheel.
 
 [English](./README.md) · [简体中文](./README.zh-CN.md)
 

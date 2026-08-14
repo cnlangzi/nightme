@@ -155,18 +155,18 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 		Branch:    d.branch,
 	})
 
-	// Start the SSE reader + lifecycle goroutine. Once these are
-	// running the events channel is the source of truth for the
-	// runtime.
+	// Start the SSE loop + lifecycle + liveness goroutines. Once
+	// these are running the events channel is the source of truth
+	// for the runtime.
+	//
+	// sseLoop owns the long-lived /api/event subscription itself,
+	// including reconnect on transient drops (local TCP should not
+	// drop, but if it does we self-heal instead of going blind).
 	sseCtx, sseCancel := context.WithCancel(ctx)
 	d.sseCancel = sseCancel
-	body, err := d.client.Subscribe(sseCtx, d.sessionID)
-	if err != nil {
-		_ = d.Close()
-		return nil, fmt.Errorf("opencode: subscribe: %w", err)
-	}
-	go d.readSSE(body)
+	go d.sseLoop(sseCtx)
 	go d.lifecycle()
+	go d.livenessLoop(ctx)
 
 	// Tear down on parent context cancellation.
 	go func() {
@@ -483,3 +483,88 @@ func (d *driver) IsBuiltinCommand(name string) bool {
 	}
 	return d.trans.IsBuiltinCommand(name)
 }
+
+// ─── server liveness probe ───────────────────────────────────────
+
+// livenessLoop periodically polls GET /api/health on a SEPARATE
+// HTTP connection (the SSE stream itself is left alone). The whole
+// point of decoupling liveness from the SSE wire: a long stretch of
+// silent SSE during model thinking is normal and must not be
+// mistaken for "server is dead". When /api/health itself starts
+// failing repeatedly the opencode process has actually wedged or
+// exited, and we tear the session down with a clear EventAgentError.
+//
+// Design constraints:
+//   - Probe runs on its own HTTP connection (uses c.http, which is
+//     the short-lived client; the SSE client is reserved for the
+//     SSE stream).
+//   - Each probe has its own bounded context (livenessProbeTimeout)
+//     so a stuck Health call never blocks the loop forever.
+//   - The loop terminates as soon as the parent ctx (passed in at
+//     Start) is cancelled or the session is closed.
+//   - On `livenessFailThreshold` consecutive failures we synthesise
+//     EventAgentError and let the runtime readpump surface the
+//     "agent session timed out (server unreachable)" message. The
+//     watchdog / runtime-level HungPrompt sweeper handles the rest.
+func (d *driver) livenessLoop(ctx context.Context) {
+	interval, timeout, threshold := livenessProbeConfig()
+
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+
+	consecutiveFails := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.closed:
+			return
+		case <-tick.C:
+			if d.server == nil || d.client == nil {
+				return
+			}
+			probeCtx, cancel := context.WithTimeout(ctx, timeout)
+			err := d.client.Health(probeCtx)
+			cancel()
+			if err == nil {
+				consecutiveFails = 0
+				continue
+			}
+			consecutiveFails++
+			oLog("liveness probe failed",
+				"err", err.Error(),
+				"consecutive", consecutiveFails,
+				"threshold", threshold,
+			)
+			if consecutiveFails < threshold {
+				continue
+			}
+			// Server has been unreachable for too long. Kill the
+			// process so the runtime can recover (the runtime
+			// has its own HungPrompt sweeper that respawns the
+			// agent session). Emit EventAgentError so any
+			// in-flight turn's readpump unblocks immediately.
+			oLog("liveness probe exhausted, killing session",
+				"consecutive", consecutiveFails,
+			)
+			d.deliver(agent.AgentEvent{
+				Kind:    agent.EventAgentError,
+				SessionID: d.sessionID,
+				AgentName: d.name,
+				Workspace: d.workspace,
+				Branch:    d.branch,
+				Err: fmt.Errorf("opencode: server unreachable (liveness probe failed %d times): %w", consecutiveFails, err),
+			})
+			// Use the bridge's Close() rather than ad-hoc sseCancel
+			// + server.Close so the lifecycle goroutine unblocks
+			// via d.closed (matches the watchdog's teardown path,
+			// avoids a half-shut-down session that strands the
+			// runtime HungPrompt sweeper). Close blocks up to
+			// closeDrainTimeout (5s) waiting for lifecycle — that
+			// is fine because we have already decided to die.
+			_ = d.Close()
+			return
+		}
+	}
+}
+

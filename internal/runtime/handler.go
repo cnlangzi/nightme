@@ -28,8 +28,10 @@ import (
 // AgentEvent → OutboundMessage and dispatches via the channel.
 //
 // The optional policies slice lets callers customise the
-// post-translate behaviour (statusbar stamp, /think gate,
-// /tools gate are the defaults; see DefaultPolicies). When
+// post-translate behaviour (/think gate, /tools gate are the
+// defaults; see DefaultPolicies). GitStatus stamping is no longer
+// a policy — it happens at the outbound Emitter chokepoint
+// (outbound.Options.GitStatusLookup) and is invisible here. When
 // policies is empty, DefaultPolicies is used. To add a custom
 // policy, append it after DefaultPolicies(...) — order
 // matters; the first drop wins.
@@ -190,17 +192,6 @@ func NewEventHandler(
 		}
 		if out.Workspace == "" {
 			out.Workspace = s.Cwd
-		}
-
-		// F-CLAUDE-PRINT-002: chatsession owns the GitStatus
-		// snapshot (workspace + git status + PR). The runtime
-		// event hook stamps it onto every outbound so Channel
-		// adapters can render Line 3 of the footer without a
-		// separate StatusBar wrapper. chatsession.RefreshGitStatus
-		// decides when the snapshot is fresh; the runtime never
-		// recomputes — it just attaches the cached pointer.
-		if out.GitStatus == nil {
-			out.GitStatus = cs.GitStatus()
 		}
 
 		// Apply OutboundPolicy chain. Each policy may mutate

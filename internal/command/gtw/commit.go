@@ -59,11 +59,11 @@ func dispatchCommit(
 	// gates reading the same truth.
 	snap, err := CollectReadiness(ctx, c.Worktree, deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ read worktree status: %v", err)), nil
 	}
 	if snap == nil {
-		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ cannot read worktree git status — refusing to commit\n"+
 				"hint: ensure the worktree is inside a git repo with at least one commit"), nil
 	}
@@ -72,13 +72,13 @@ func dispatchCommit(
 	// unmerged state means the worktree isn't coherent; the user
 	// should resolve (or `git rebase --abort`) first.
 	if reason := snap.PushBlockReason(); reason != "" {
-		return reply(ctx, cs.Emitter(), cs, chatID, messageID, reason), nil
+		return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
 	}
 
 	// 1b. Refuse detached HEAD. Mirrors dispatchPush PRBlockReason
 	// case 1 — keep the two gates' policy symmetrical.
 	if snap.Branch == "" {
-		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ detached HEAD — checkout a named branch first"), nil
 	}
 
@@ -86,7 +86,7 @@ func dispatchCommit(
 	// "nothing to push" so the user sees which axis they're
 	// short on.
 	if snap.WorkingTreeIsClean() {
-		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"ℹ️ nothing to commit\n"+
 				"  no uncommitted changes on "+snap.Branch), nil
 	}
@@ -97,14 +97,14 @@ func dispatchCommit(
 	// didn't commit" class. Surface the read error.
 	headBefore, err := headSHA(ctx, c.Worktree, deps)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ read HEAD: %v", err)), nil
 	}
 
 	// 4. Run agent.
 	agentName, errMsg := runAgentToCommit(ctx, cs, c, args.Agent, ymlAgent)
 	if errMsg != "" {
-		return reply(ctx, cs.Emitter(), cs, chatID, messageID, errMsg), nil
+		return reply(ctx, cs.Emitter(), chatID, messageID, errMsg), nil
 	}
 
 	// 4b. F-CLAUDE-PRINT-002: refresh chatsession.GitStatus
@@ -118,7 +118,7 @@ func dispatchCommit(
 	// 5. Verify the agent actually committed (HEAD advance +
 	// worktree clean + branch still on c.Branch).
 	if msg := verifyAgentCommitted(ctx, deps, c, headBefore); msg != "" {
-		return reply(ctx, cs.Emitter(), cs, chatID, messageID, msg), nil
+		return reply(ctx, cs.Emitter(), chatID, messageID, msg), nil
 	}
 
 	// 6. Re-snapshot. Rare but documented: an agent can produce
@@ -128,16 +128,16 @@ func dispatchCommit(
 	// added a conflict entry. We cannot trust the original snap.
 	snap, err = CollectReadiness(ctx, c.Worktree, deps.Git)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ re-read worktree status after agent: %v", err)), nil
 	}
 	if snap == nil {
-		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			"❌ cannot read worktree git status — refusing to commit\n"+
 				"hint: ensure the worktree is inside a git repo with at least one commit"), nil
 	}
 	if reason := snap.PushBlockReason(); reason != "" {
-		return reply(ctx, cs.Emitter(), cs, chatID, messageID, reason), nil
+		return reply(ctx, cs.Emitter(), chatID, messageID, reason), nil
 	}
 
 	// 7. Build the success card from git log — NOT from agent
@@ -149,10 +149,10 @@ func dispatchCommit(
 	card, err := replyCommitSuccessCard(ctx, c, agentName,
 		headBefore+"..HEAD", deps)
 	if err != nil {
-		return reply(ctx, cs.Emitter(), cs, chatID, messageID,
+		return reply(ctx, cs.Emitter(), chatID, messageID,
 			fmt.Sprintf("❌ commit landed but couldn't render card: %v", err)), nil
 	}
-	return reply(ctx, cs.Emitter(), cs, chatID, messageID, card), nil
+	return reply(ctx, cs.Emitter(), chatID, messageID, card), nil
 }
 
 // runAgentToCommit spawns the configured one-shot agent and

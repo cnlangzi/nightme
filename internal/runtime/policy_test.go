@@ -157,9 +157,10 @@ func TestToolsModeGatePolicy_HideDoesNotAffectOtherKinds(t *testing.T) {
 }
 
 // TestDefaultPolicies_OrderMatters pins the production
-// policy ordering: statusbar runs FIRST so a stamp never
-// happens after a drop would have made it moot (small wire-
-// size win), and the think gate runs BEFORE the tools gate
+// policy ordering: post-fix-status-bar-git the chain is just
+// the think gate + tools gate (no StatusBar policy — that
+// moved to the outbound Emitter). The think gate runs BEFORE
+// the tools gate
 // so a chat with both modes hidden still produces a single
 // coherent "X dropped" log entry instead of two stacked
 // lines per OutThinking event.

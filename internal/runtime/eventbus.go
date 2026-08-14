@@ -13,7 +13,6 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/agentsession"
 	"github.com/cnlangzi/nightme/internal/channel"
 	"github.com/cnlangzi/nightme/internal/chatsession"
@@ -146,17 +145,6 @@ func WireRuntimeCallbacksAndRestore(
 					State:     e.State,
 					MessageID: e.UserMsgID,
 				},
-			}
-			if e.State == agent.MessageSubmitted {
-				// F-CLAUDE-PRINT-002: chatsession.GitStatus is the
-				// single source of GitStatus on the outbound
-				// message. The runtime pump's event hook (handler.go)
-				// already stamps it for AgentEvent → OutboundMessage
-				// translations. For MessageState events that don't
-				// go through that path, stamp here.
-				if out.GitStatus == nil {
-					out.GitStatus = cs.GitStatus()
-				}
 			}
 			if err := em.Send(context.Background(), out); err != nil {
 				logger.Warn("runtime: MessageState send failed",

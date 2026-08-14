@@ -7,28 +7,26 @@
 //     the message-dispatcher error path, ...) builds an
 //     messages.OutboundMessage.
 //  2. The caller passes it to Emitter.Send / Emitter.SendCard.
-//  3. Emitter optionally invokes the injected StatusBarSource to
-//     attach a StatusBar (F-45/F-48) — workspace / git context
-//     is always attached when the chat has a workspace, plus
-//     optional AgentBar / UsageBar sub-bars. Then forwards to
+//  3. Emitter stamps the chatsession's GitStatus snapshot (via
+//     the injected GitStatusLookup closure) when the message
+//     doesn't carry one yet — workspace / git context is always
+//     attached when the chat has a workspace. Then forwards to
 //     the Channel adapter for actual rendering.
 //
-// Why a single chokepoint: pre-outbound-package, "stamp the
-// status bar before sending" was open-coded at a handful of
-// call sites (cmd/nightme/run.go's stampFromAS) and most
-// outbound messages never got stamped at all — slash command
-// replies bypassed it because they reached the channel via the
-// outbound.Emitter wrap, not the runtime pump. Every outbound
-// message now flows through Emitter, so every outbound message
-// gets the same StatusBar treatment.
-//
-// StatusBar stamping lives in internal/statusbar (Source +
-// AttachIfMissing). Outbound is now a thin consumer: Send /
-// SendCard call statusbar.AttachIfMissing before forwarding to
-// the Channel. The "attach if missing" / "co-locate UsageBar"
-// logic is owned by statusbar, not by outbound. See package
-// doc for the broader hub-and-spoke rationale and the
-// GitBar-always-present rule.
+// Why a single chokepoint: pre-fix-status-bar-git, GitStatus
+// stamping lived at five caller sites (runtime pump,
+// MessageState eventbus, and each gtw dispatch), all calling
+// cs.GitStatus() without a context. Cache-miss on a
+// freshly-restored chat would block, and stale/empty footers
+// surfaced as the fix-status-bar-git bug. The Emitter is now
+// the single chokepoint: GitStatusLookup (set once in
+// cmd/nightme/run.go's runDaemon) is invoked for every Send /
+// SendCard whose msg.GitStatus is nil. Business code never
+// touches GitStatus directly — runtime/handler.go and
+// eventbus.go drop the stamps, gtw dispatchers stop
+// pre-filling out.GitStatus. ChatSession owns the snapshot
+// per-chat with a pull-on-read getter that refreshes on
+// cache miss.
 //
 // Relationship to internal/gateway:
 //
@@ -40,7 +38,7 @@
 //     (takes chatsession.OutboundMessage); cmd/nightme's
 //     outbound.Emitter adapts that to messages.OutboundMessage
 //     and routes through Emitter, so slash command replies also
-//     get a StatusBar attached.
+//     pick up the GitStatus stamp.
 //
 // See docs/SPEC.md §3.x for the broader hub-and-spoke rationale.
 package outbound
@@ -57,26 +55,36 @@ import (
 // satisfies the constructor's channel.Channel parameter. No
 // alias needed — outbound takes channel.Channel directly.
 //
-// F-CLAUDE-PRINT-002: Options.Source is gone. The previous
-// "if msg.StatusBar is nil, attach from Source" defensive
-// fallback was an anti-pattern — it hid bugs by silently
-// patching missing data, and it coupled the gateway to
-// statusbar (creating an import cycle). The new model:
+// F-CLAUDE-PRINT-002 + fix-status-bar-git: GitStatus stamping is
+// now done by the Emitter at the single chokepoint, not at every
+// caller. The model:
 //
 //   - chatsession owns the GitStatus snapshot
-//     (cs.GitStatus() / cs.RefreshGitStatus()).
-//   - The runtime event hook (internal/runtime/handler.go)
-//     stamps chatsession.GitStatus onto out.GitStatus
-//     directly, at translate-time.
-//   - Slash-command replies (commander.Dispatch, etc.) and
-//     one-shot dispatchers stamp their own out.GitStatus
-//     before calling em.Send.
-//   - Outbound is now a pure transport. No Source, no fallback.
+//     (cs.GitStatus(ctx) — pull-on-read with cache-miss refresh).
+//   - SetSelectedCwd proactively refreshes; ClearSelectedCwd
+//     drops the cache; /gtw commit pre/post + /gtw pr refresh
+//     explicitly. RefreshGitStatus stays the single mutator.
+//   - The Emitter's GitStatusLookup (wired once by runtime) is
+//     invoked for every Send / SendCard whose msg.GitStatus is
+//     nil. Returns the chat's pull-on-read snapshot.
+//   - Business code (runtime pump, slash commands, gtw replies)
+//     sends through em.Send without touching GitStatus directly.
+//
+// The gitStatusLookup closure reaches the chatsession via
+// mgr.Get(chatID) and calls cs.GitStatus(ctx). The closure-based
+// wiring avoids the outbound → chatsession import cycle.
 //
 // Options is retained as a struct (instead of removed entirely)
 // so call sites that already pass `outbound.Options{}` keep
-// working — no churn at the construction site.
-type Options struct{}
+// working — no churn at the construction site. GitStatusLookup
+// is the only field for now; nil is safe (skips stamping).
+type Options struct {
+	// GitStatusLookup, if non-nil, is invoked for every Send /
+	// SendCard whose msg.GitStatus is nil. Returns the chat's
+	// pull-on-read snapshot; nil means "no chat / no workspace"
+	// and the renderer drops the git line.
+	GitStatusLookup func(ctx context.Context, chatID string) *messages.GitStatus
+}
 
 // Emitter is the public surface every outbound caller holds.
 // Constructed once per daemon (in cmd/nightme/run.go); passed to
@@ -89,19 +97,39 @@ type Emitter interface {
 }
 
 // New constructs the default Emitter implementation. ch must be
-// non-nil; opts may be its zero value.
+// non-nil; opts.GitStatusLookup may be nil.
 func New(ch channel.Channel, opts Options) Emitter {
-	return &emitImpl{ch: ch}
+	return &emitImpl{ch: ch, gitStatusLookup: opts.GitStatusLookup}
 }
 
 type emitImpl struct {
-	ch channel.Channel
+	ch              channel.Channel
+	gitStatusLookup func(context.Context, string) *messages.GitStatus
 }
 
 func (e *emitImpl) Send(ctx context.Context, msg messages.OutboundMessage) error {
+	e.stampGitStatus(ctx, &msg)
 	return e.ch.Send(ctx, msg)
 }
 
 func (e *emitImpl) SendCard(ctx context.Context, msg messages.OutboundMessage) (string, error) {
+	e.stampGitStatus(ctx, &msg)
 	return e.ch.SendCard(ctx, msg)
+}
+
+// stampGitStatus attaches the chat's git snapshot to msg if not
+// already set. Single chokepoint — every outbound path (runtime
+// pump / slash command / MessageState / gtw) flows through here.
+//
+// Three guards:
+//   - gitStatusLookup nil: deps not wired (e.g. unit tests); skip.
+//   - msg.GitStatus non-nil: caller pre-stamped (e.g. one-shot
+//     dispatchers that want to override); respect it.
+//   - msg.ChatID empty: non-routed message (e.g. internal log);
+//     nothing to look up.
+func (e *emitImpl) stampGitStatus(ctx context.Context, msg *messages.OutboundMessage) {
+	if e.gitStatusLookup == nil || msg.GitStatus != nil || msg.ChatID == "" {
+		return
+	}
+	msg.GitStatus = e.gitStatusLookup(ctx, msg.ChatID)
 }

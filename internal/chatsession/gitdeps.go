@@ -1,8 +1,8 @@
-// F-CLAUDE-PRINT-002: GitStatus collection deps live with
-// ChatSession (their sole consumer) after the statusbar package
-// was deleted. The runtime constructs Deps at startup and wires
-// it to every ChatSession via Manager.WithGitStatusDeps. Each
-// ChatSession uses it in RefreshGitStatus.
+// F-CLAUDE-PRINT-002 + fix-status-bar-git: GitStatus collection
+// deps live with ChatSession (their sole consumer). The runtime
+// constructs Deps at startup and wires it to every ChatSession
+// via Manager.WithGitStatusDeps. Each ChatSession uses it in
+// RefreshGitStatus (and in the pull-on-read fallback in GitStatus).
 //
 // All fields are nil-safe: missing deps degrade gracefully
 // (Snapshot nil / PullRequest nil) rather than failing the

@@ -151,13 +151,6 @@ func (c *rpcClient) writeCommand(name string, body any, id string) (string, erro
 	return id, nil
 }
 
-// writeRawLine writes a pre-encoded JSON object as one line.
-// Reserved for response / extension_ui_response commands where the
-// caller has already produced the envelope.
-func (c *rpcClient) writeRawLine(payload []byte) error {
-	return c.writeLine(payload)
-}
-
 // writeLine atomically writes payload + "\n" to the underlying
 // pipe. Holds writeMu for the entire critical section so two
 // goroutines cannot interleave halves of two frames.

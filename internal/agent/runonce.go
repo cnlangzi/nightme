@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -29,8 +30,11 @@ import (
 //     SessionID (from the first EventAgentReady), Model (same),
 //     DurationMs, Subtype populated.
 //   - EventAgentDone with exit 0 but no preceding Result: error
-//     "turn ended without result event".
-//   - EventAgentDone with non-zero exit: error mentioning exit code.
+//     "turn ended without result event" — captured session /
+//     model / usage are appended as audit fields so the
+//     failure is still inspectable.
+//   - EventAgentDone with non-zero exit: error mentioning exit
+//     code, with audit fields appended.
 //   - EventAgentError: wrapped error.
 //   - ctx canceled: ctx.Err().
 //   - events channel closed without result: error.
@@ -54,7 +58,7 @@ func RunOnceDrain(ctx context.Context, live *Agent, blocks []ContentBlock, name 
 		select {
 		case ev, ok := <-live.Events():
 			if !ok {
-				return RunResult{}, fmt.Errorf("agent %s: event stream closed without result", name)
+				return RunResult{}, fmt.Errorf("agent %s: event stream closed without result%s", name, appendRunOnceAudit(nil, sessionID, model))
 			}
 			switch ev.Kind {
 			case EventAgentReady:
@@ -83,10 +87,19 @@ func RunOnceDrain(ctx context.Context, live *Agent, blocks []ContentBlock, name 
 				if ev.Done != nil {
 					exit = ev.Done.ExitCode
 				}
+				// Session identity (model / session_id) is the
+				// only audit data we have at this point — Result
+				// is terminal, so a "Done without Result" path
+				// has no captured text / usage to surface.
+				// Future bridges that need to carry usage
+				// through Done can populate pendingResult via
+				// their own bookkeeping; today no production
+				// bridge does, so we pass nil.
+				audit := appendRunOnceAudit(nil, sessionID, model)
 				if exit != 0 {
-					return RunResult{}, fmt.Errorf("agent %s: turn ended with exit %d (no result text)", name, exit)
+					return RunResult{}, fmt.Errorf("agent %s: turn ended with exit %d (no result text)%s", name, exit, audit)
 				}
-				return RunResult{}, fmt.Errorf("agent %s: turn ended without result event", name)
+				return RunResult{}, fmt.Errorf("agent %s: turn ended without result event%s", name, audit)
 			case EventAgentError:
 				if ev.Err != nil {
 					return RunResult{}, fmt.Errorf("agent %s: %w", name, ev.Err)
@@ -101,4 +114,50 @@ func RunOnceDrain(ctx context.Context, live *Agent, blocks []ContentBlock, name 
 			return RunResult{}, fmt.Errorf("agent %s: %w", name, ctx.Err())
 		}
 	}
+}
+
+// appendRunOnceAudit builds the audit-suffix string for the
+// non-Result failure paths in RunOnceDrain. Format is
+// symmetric with the claudecode / pi bridges' auditFields:
+// [session_id=…] [model=…] [subtype=…] [usage in=… out=… cache_read=…].
+// Empty when nothing is captured.
+//
+// pendingResult is reserved for a future bridge that might
+// cache an in-flight Result before Done; today no production
+// bridge does (Result is terminal, the success path returns
+// immediately). sessionID / model are the per-session identity
+// captured from EventAgentReady and are the only audit data
+// the failure paths can surface today.
+func appendRunOnceAudit(pendingResult *AgentResultEvent, sessionID, model string) string {
+	if pendingResult == nil && sessionID == "" && model == "" {
+		return ""
+	}
+	var audit strings.Builder
+	if sessionID != "" {
+		audit.WriteString(" [session_id=")
+		audit.WriteString(sessionID)
+		audit.WriteByte(']')
+	}
+	if model != "" {
+		audit.WriteString(" [model=")
+		audit.WriteString(model)
+		audit.WriteByte(']')
+	}
+	if pendingResult != nil {
+		if pendingResult.Subtype != "" {
+			audit.WriteString(" [subtype=")
+			audit.WriteString(pendingResult.Subtype)
+			audit.WriteByte(']')
+		}
+		if pendingResult.Usage != nil {
+			audit.WriteString(" [usage in=")
+			audit.WriteString(strconv.Itoa(pendingResult.Usage.InputTokens))
+			audit.WriteString(" out=")
+			audit.WriteString(strconv.Itoa(pendingResult.Usage.OutputTokens))
+			audit.WriteString(" cache_read=")
+			audit.WriteString(strconv.Itoa(pendingResult.Usage.CacheReadInputTokens))
+			audit.WriteByte(']')
+		}
+	}
+	return audit.String()
 }

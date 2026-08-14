@@ -1,4 +1,4 @@
-// Package chatsession — typed event payloads (F-54).
+// Package agentsession — typed event payloads (F-54).
 //
 // These four structs are the domain vocabulary consumed by
 // `services.Bus[T]` instances held on ChatSession. Each Bus takes
@@ -6,8 +6,8 @@
 // compile-time signature checking and eliminates the per-event
 // "what were the positional args again?" friction.
 //
-// File lives in the chatsession main package (no subpackage) on
-// purpose — the structs depend only on `agent.MessageState` and the
+// File lives in the agentsession subpackage on purpose — the
+// structs depend only on `agent.MessageState` and the
 // internal `PromptEndReason` / `Status` types defined here. F-54
 // §3.1.
 package agentsession

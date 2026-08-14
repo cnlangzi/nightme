@@ -796,11 +796,6 @@ func (a *Agent) SessionID() string {
 	return v
 }
 
-// setSessionID records the agent's own session id. Called by the
-// bridge's readPump on EventAgentReady. Package-private so only
-// driver implementations can write.
-func (a *Agent) setSessionID(id string) { a.sessionID.Store(id) }
-
 // SendBlocks delivers a structured user turn. Delegates to the
 // bridge-specific driver.
 func (a *Agent) SendBlocks(ctx context.Context, blocks []ContentBlock) error {

@@ -163,6 +163,21 @@ func (c *commander) Match(text string) (string, bool) {
 //     for unknown commands) do NOT emit — the user didn't trigger a real
 //     command, and we don't want ⏳ on inputs like "/etc/passwd".
 //
+// Slash-command placeholder card vs agent stamp (fix-placehold-card
+// note): the MessageQueued emit happens BEFORE cmd.Handle runs, so
+// the runtime subscriber reads cs.SelectedAgentSession() at that
+// moment. For most slash commands this is fine — selectedAS at the
+// time the user typed the slash is the active agent. For /use
+// specifically the placeholder card briefly shows the OLD agent
+// name (selectedAS hasn't been swapped yet — cmd.Handle does that
+// after this emit). The transient is ~ms: cmd.Handle is
+// synchronous, the response bubble (OutCommandReply) replaces the
+// placeholder immediately, and the user sees the actual /use
+// outcome in the response text. Accepting the limitation rather
+// than engineering a "skip AgentBar for slash commands" path —
+// the alternative (silently dropping the ⏳ on /use) would diverge
+// from every other slash command's UX.
+//
 // See docs/feat/slash-command-reactions.md for the full design rationale.
 func (c *commander) Dispatch(ctx context.Context, rt RuntimeServices, cs *chatsession.ChatSession, input SlashInput) (*SlashOutput, bool, error) {
 	cmdName, trailingArgs, isCommand := c.extractCommand(input)

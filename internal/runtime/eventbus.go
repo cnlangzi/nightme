@@ -146,6 +146,62 @@ func WireRuntimeCallbacksAndRestore(
 					MessageID: e.UserMsgID,
 				},
 			}
+			// fix-placehold-card: read the AS identity off the
+			// chat's selectedAS at publish time and stamp it
+			// onto the OutboundMessage so the Feishu adapter
+			// can render AgentBar on the placeholder card from
+			// the very first MessageQueued emit.
+			//
+			// Why this works (and why we don't need to
+			// denormalize fields onto MessageStateEvent): the
+			// dispatcher now resolves the AS BEFORE emitting
+			// MessageQueued / MessageSubmitted (see
+			// internal/runtime/dispatcher.go and
+			// internal/chatsession/manager.go::HandleInbound),
+			// so cs.selectedAS is set by the time this
+			// subscriber runs. The Feishu adapter then calls
+			// formatStatusBarLines(&msg) (instead of the pre-fix
+			// `nil`) and AgentBar renders on the first frame.
+			//
+			// Empty fields are safe: formatStatusBarLines
+			// treats the all-empty case as "no AgentBar line"
+			// (back-compat with framework slash / shell
+			// dispatches that still emit via PublishMessageState
+			// without a resolved AS).
+			//
+			// Concurrency (cs-side): Publish runs synchronously
+			// inside EmitMessageState without cs.mu held, so the
+			// SelectedAgentSession() read below is race-free —
+			// it takes cs.mu.RLock internally and releases
+			// before we dereference as.
+			//
+			// Concurrency (AS-side): the field reads as.Agent /
+			// as.Cwd / as.SessionID() are NOT lock-protected
+			// here. They are safe today because the fields are
+			// set once at construction (NewAgentSession) and
+			// never mutated; as.SessionID() takes asMu.RLock
+			// internally and is also safe. If a future refactor
+			// introduces a SetCwd or SetAgent on AgentSession
+			// (e.g. for /use across running ASes), add explicit
+			// asMu.RLock around the field reads here — the
+			// pre-fix assumption won't carry over.
+			//
+			// F-54 review note: this handler routes via `em`
+			// (the single Emitter passed into
+			// WireRuntimeCallbacksAndRestore). Today there is
+			// one Channel in production, so the difference is
+			// observable only in tests that wire multiple
+			// channels via gateway.Bind/chatToChan. For
+			// multi-channel deployments, route via a
+			// per-chatID Channel lookup in front of `em` (the
+			// wrap currently does the type conversion; a
+			// multi-channel variant would resolve the underlying
+			// channel.Channel first and wrap-emit it).
+			if as := cs.SelectedAgentSession(); as != nil {
+				out.AgentName = as.Agent
+				out.Workspace = as.Cwd
+				out.SessionID = as.SessionID()
+			}
 			if err := em.Send(context.Background(), out); err != nil {
 				logger.Warn("runtime: MessageState send failed",
 					"chat_id", e.ChatID,

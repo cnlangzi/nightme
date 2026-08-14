@@ -381,10 +381,24 @@ func (m *Manager) HandleInbound(ctx context.Context, msg *messages.InboundMessag
 
 	cs, _ := m.GetOrCreate(msg.ChatID, m.primaryAgent)
 
-	// F-31 / F-53: ⏳ immediately, before spawn resolves.
-	cs.EmitMessageState(userMsgID, agent.MessageQueued)
-
-	// Resolve active AgentSession (lazy spawn on miss).
+	// fix-placehold-card: resolve AS BEFORE emitting MessageQueued
+	// so the Feishu placeholder card can stamp AgentBar (Agent /
+	// Cwd / SessionID) on its first render. The runtime eventbus
+	// subscriber (see internal/runtime/eventbus.go::MessageStateBus
+	// handler) reads cs.SelectedAgentSession() at publish time,
+	// which is only set once this lookup completes — emitting
+	// MessageQueued first (pre-fix FastAck order) meant the
+	// subscriber saw a nil selectedAS and the placeholder card
+	// shipped with no AgentBar until the first OutReply /
+	// AppendEntryWithFooter overwrote footerLines.
+	//
+	// Trade-off: on cold-start (no pool hit, spawn takes a few
+	// hundred ms) the ⏳ reaction now lands a beat later than
+	// before. Pool-hit chats (the common case) see no latency
+	// change — LookupSelectedAgentSession returns synchronously.
+	// On error paths (no cwd / spawn failed) we deliberately do
+	// NOT emit MessageQueued — the user gets an immediate error
+	// reply and no orphan ⏳ reaction stays on the user message.
 	_, err := cs.LookupSelectedAgentSession()
 	if err != nil {
 		if errors.Is(err, ErrNoSelectedCwd) {
@@ -393,6 +407,10 @@ func (m *Manager) HandleInbound(ctx context.Context, msg *messages.InboundMessag
 		// Spawn failed (binary missing, etc.).
 		return m.sendError(ctx, msg.ChatID, fmt.Sprintf("Failed to spawn agent: %v", err))
 	}
+
+	// F-31 / F-53: ⏳ immediately (post-fix: with AgentBar, via
+	// the subscriber reading cs.SelectedAgentSession()).
+	cs.EmitMessageState(userMsgID, agent.MessageQueued)
 
 	// F-31 / F-53: ⏳ → 🔄 before queueing so the transition is
 	// visible even if queueing is slow.

@@ -855,6 +855,177 @@ func TestWireRuntimeCallbacksAndRestore_MessageStateDropsEmptyIDs(t *testing.T) 
 	}
 }
 
+// TestWireRuntimeCallbacksAndRestore_MessageStateStampsAgentBar
+// (fix-placehold-card) locks the contract that the runtime's
+// MessageStateBus subscriber stamps AgentName / Workspace /
+// SessionID from cs.SelectedAgentSession() onto the OutboundMessage
+// it constructs for OutMessageState events. This is what makes
+// the Feishu placeholder card render AgentBar from the very first
+// MessageQueued emit (see
+// internal/channel/feishu/adapter.go::Send →
+// ensureReceiptForTyping → formatStatusBarLines).
+//
+// Three sub-tests:
+//
+//  1. AS with all three fields populated → OutboundMessage gets
+//     all three stamped verbatim.
+//  2. AS with SessionID empty (pre-EventAgentReady) → AgentName /
+//     Workspace still stamped; SessionID stays "". formatStatusBarLines
+//     omits the empty SessionID segment but the AgentBar line
+//     still renders.
+//  3. selectedAS nil (legacy framework path: slash command /
+//     shell dispatch with no AS in scope) → all three fields
+//     empty. formatStatusBarLines treats the all-empty case as
+//     "no AgentBar line" (back-compat).
+func TestWireRuntimeCallbacksAndRestore_MessageStateStampsAgentBar(t *testing.T) {
+	t.Run("stamps AgentBar when selectedAS populated", func(t *testing.T) {
+		csFile, asFile := newWireTestStores(t)
+		seedPersistedChatForWire(t, csFile, "oc_stamp_full", "claude")
+
+		mgr := chatsession.NewManager().WithPersistence(csFile, asFile)
+		ch := echo.New("test", io.Discard)
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+		if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, chatsession.GitStatusDeps{}, ch); err != nil {
+			t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)
+		}
+
+		csList := mgr.List()
+		if len(csList) != 1 {
+			t.Fatalf("mgr.List len = %d, want 1", len(csList))
+		}
+		cs := csList[0]
+
+		// Manually install selectedAS + its SessionID (simulating
+		// a fully-spawned AS that has reported EventAgentReady).
+		// Direct field assignment mirrors the pattern in
+		// chatsession/chatsession_test.go::TestKillAllSequence_*
+		// — we're testing the subscriber's read of selectedAS,
+		// not the lookup / spawn machinery.
+		as := chatsession.NewAgentSession("as_full", cs.ID, "claude", cs.SelectedCwd(), nil)
+		as.SetSessionID("bridge_sid_full")
+		cs.SelectedAgentSessionForTest(as)
+
+		// Snapshot the channel record before the emit so we can
+		// inspect only the message produced by this call.
+		before := len(ch.Record())
+
+		cs.EmitMessageState("om_stamp_full", agent.MessageQueued)
+
+		after := ch.Record()
+		if len(after) != before+1 {
+			t.Fatalf("expected 1 new OutboundMessage, got %d", len(after)-before)
+		}
+		got := after[len(after)-1]
+		if got.Kind != messages.OutMessageState {
+			t.Fatalf("Kind = %v, want OutMessageState", got.Kind)
+		}
+		if got.AgentName != "claude" {
+			t.Errorf("AgentName = %q, want %q", got.AgentName, "claude")
+		}
+		if got.Workspace != cs.SelectedCwd() {
+			t.Errorf("Workspace = %q, want %q", got.Workspace, cs.SelectedCwd())
+		}
+		if got.SessionID != "bridge_sid_full" {
+			t.Errorf("SessionID = %q, want %q", got.SessionID, "bridge_sid_full")
+		}
+	})
+
+	t.Run("stamps Agent/Workspace even when SessionID empty", func(t *testing.T) {
+		// Pre-EventAgentReady case: the AS exists but the bridge
+		// hasn't reported its SessionID yet. The subscriber
+		// should still stamp Agent / Cwd so the placeholder
+		// card shows the AgentBar identity line (sans the
+		// trailing SessionID segment). formatStatusBarLines
+		// omits the empty SessionID segment via the
+		// "SessionID omitted when '' (F-56)" rule.
+		csFile, asFile := newWireTestStores(t)
+		seedPersistedChatForWire(t, csFile, "oc_stamp_no_sid", "claude")
+
+		mgr := chatsession.NewManager().WithPersistence(csFile, asFile)
+		ch := echo.New("test", io.Discard)
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+		if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, chatsession.GitStatusDeps{}, ch); err != nil {
+			t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)
+		}
+
+		csList := mgr.List()
+		if len(csList) != 1 {
+			t.Fatalf("mgr.List len = %d, want 1", len(csList))
+		}
+		cs := csList[0]
+
+		as := chatsession.NewAgentSession("as_no_sid", cs.ID, "claude", cs.SelectedCwd(), nil)
+		// no SetSessionID — bridge pre-EventAgentReady
+		cs.SelectedAgentSessionForTest(as)
+
+		before := len(ch.Record())
+		cs.EmitMessageState("om_stamp_no_sid", agent.MessageQueued)
+		after := ch.Record()
+
+		if len(after) != before+1 {
+			t.Fatalf("expected 1 new OutboundMessage, got %d", len(after)-before)
+		}
+		got := after[len(after)-1]
+		if got.AgentName != "claude" {
+			t.Errorf("AgentName = %q, want %q", got.AgentName, "claude")
+		}
+		if got.Workspace != cs.SelectedCwd() {
+			t.Errorf("Workspace = %q, want %q", got.Workspace, cs.SelectedCwd())
+		}
+		if got.SessionID != "" {
+			t.Errorf("SessionID = %q, want \"\" (pre-EventAgentReady)", got.SessionID)
+		}
+	})
+
+	t.Run("selectedAS nil leaves AgentBar fields empty", func(t *testing.T) {
+		// Legacy framework paths (slash commands via
+		// commander.Dispatch / shell via shell.Dispatcher) emit
+		// MessageQueued via PublishMessageState without a
+		// resolved AS in scope. The subscriber must NOT fake a
+		// default — selectedAS is nil → all three fields stay
+		// empty → formatStatusBarLines drops the AgentBar line
+		// entirely (no misleading "🤖: " header on a slash
+		// command placeholder card).
+		csFile, asFile := newWireTestStores(t)
+		seedPersistedChatForWire(t, csFile, "oc_stamp_nil", "claude")
+
+		mgr := chatsession.NewManager().WithPersistence(csFile, asFile)
+		ch := echo.New("test", io.Discard)
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+		if err := WireRuntimeCallbacksAndRestore(mgr, outbound.New(ch, outbound.Options{}), logger, chatsession.GitStatusDeps{}, ch); err != nil {
+			t.Fatalf("WireRuntimeCallbacksAndRestore: %v", err)
+		}
+
+		csList := mgr.List()
+		if len(csList) != 1 {
+			t.Fatalf("mgr.List len = %d, want 1", len(csList))
+		}
+		cs := csList[0]
+
+		// No SelectedAgentSessionForTest call — selectedAS stays
+		// nil for this ChatSession.
+		if as := cs.SelectedAgentSession(); as != nil {
+			t.Fatalf("precondition: selectedAS = %+v, want nil", as)
+		}
+
+		before := len(ch.Record())
+		cs.EmitMessageState("om_stamp_nil", agent.MessageQueued)
+		after := ch.Record()
+
+		if len(after) != before+1 {
+			t.Fatalf("expected 1 new OutboundMessage, got %d", len(after)-before)
+		}
+		got := after[len(after)-1]
+		if got.AgentName != "" || got.Workspace != "" || got.SessionID != "" {
+			t.Errorf("nil selectedAS leaked identity: AgentName=%q Workspace=%q SessionID=%q",
+				got.AgentName, got.Workspace, got.SessionID)
+		}
+	})
+}
+
 // TestWireRuntimeCallbacksAndRestore_NoPersistence verifies the
 // helper handles the cold-start path (no chat_sessions.json yet):
 // WithOnCreate is set, RestoreFromRegistry is a no-op, no error.

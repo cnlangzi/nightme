@@ -1351,18 +1351,21 @@ func (a *Adapter) Send(ctx context.Context, msg messages.OutboundMessage) error 
 		// cold-start path in ensureReceiptForReply stays a
 		// no-op when the placeholder already exists.
 		//
-		// Footer is git-only here: StatusBar is only fully
-		// stamped on OutMessageState at MessageSubmitted time
-		// (see cmd/nightme/run.go newEventHandler), not Queued
-		// — the placeholder shows up before the runtime has
-		// the AS handle. The fallback in newRuntimeStatusBar
-		// still attaches GitBar from cs.SelectedCwd() when no
-		// AS is selected, so a chat that has done /cwd already
-		// sees the workspace line on the placeholder card.
-		// The first OutReply fills AgentBar / UsageBar in via
-		// AppendEntryWithFooter.
+		// fix-placehold-card: the dispatcher now resolves the AS
+		// BEFORE emitting MessageQueued (see
+		// internal/runtime/dispatcher.go and
+		// internal/chatsession/manager.go::HandleInbound), and the
+		// MessageStateBus subscriber stamps AgentName / Workspace /
+		// SessionID onto this OutboundMessage. We therefore call
+		// formatStatusBarLines(&msg) here so AgentBar (and the
+		// workspace line, when present) renders on the placeholder
+		// from the very first emit — no longer deferred to the
+		// first OutReply / AppendEntryWithFooter. The pre-fix
+		// comment ("placeholder shows up before the runtime has the
+		// AS handle") no longer applies.
 		if state == agent.MessageQueued {
-			if _, _, err := a.ensureReceiptForTyping(ctx, msg.ChatID, messageID, nil); err != nil {
+			footerLines := formatStatusBarLines(&msg)
+			if _, _, err := a.ensureReceiptForTyping(ctx, msg.ChatID, messageID, footerLines); err != nil {
 				// Non-fatal: the reaction still fires, and the
 				// first OutReply will retry the cold-start card.
 				a.logger.Warn("feishu: ensureReceiptForTyping at MessageQueued failed",

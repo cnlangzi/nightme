@@ -1387,6 +1387,27 @@ func (cs *ChatSession) AttachAgentSessionForTest(as *AgentSession) {
 	cs.mu.Unlock()
 }
 
+// SelectedAgentSessionForTest installs as as the chat's
+// selectedAS WITHOUT going through selectAgentSessionLocked (no
+// Activate call, no bus subscription). Used by runtime-package
+// tests that need to exercise the "subscriber reads
+// cs.SelectedAgentSession()" contract but can't reach into
+// cs.mu / selectedAS directly (cross-package access). Pool
+// membership is independent — if the test also needs the AS in
+// the pool, call AttachAgentSessionForTest first.
+//
+// Passing nil is a no-op (selectedAS stays whatever it was).
+// Production code MUST use LookupSelectedAgentSession or
+// selectAgentSessionLocked — this helper exists for tests only.
+func (cs *ChatSession) SelectedAgentSessionForTest(as *AgentSession) {
+	if as == nil {
+		return
+	}
+	cs.mu.Lock()
+	cs.selectedAS = as
+	cs.mu.Unlock()
+}
+
 // attachAgentSessionLocked is attachAgentSession without the lock
 // acquire. MUST be called with cs.mu held (write). Idempotent.
 func (cs *ChatSession) attachAgentSessionLocked(as *AgentSession) {

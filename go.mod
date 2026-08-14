@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	github.com/aymanbagabas/go-pty v0.2.3
 	github.com/chzyer/readline v1.5.1
-	github.com/gorilla/websocket v1.5.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/larksuite/oapi-sdk-go/v3 v3.9.10
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e

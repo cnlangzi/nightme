@@ -5,6 +5,20 @@
 // We use json.RawMessage liberally where the bridge does not yet
 // decode a payload — the translate layer unmarshals on demand to
 // stay ahead of upstream additions.
+//
+// IMPORTANT (2026-08-14): every session/event payload on the mux
+// channel arrives wrapped under a top-level `data` object whose
+// shape is type-specific (assistant/chunk puts the streaming
+// chunk under `data.chunk`, assistant/message puts the complete
+// message under `data.message`, tool/call flattens its fields into
+// `data.{callId,name,arguments}`). The sessionEventEnvelope
+// exposes that envelope as `Data json.RawMessage` so each case
+// in translate.go can decode the type-specific payload without
+// ambiguously re-unmarshalling the wire envelope. The previous
+// version decoded per-type payloads directly from the envelope
+// and silently produced zero-value fields for every event
+// (assistant/message Content was always nil, tool/call callId
+// always empty, …), which made the bridge a black box.
 package dsh
 
 import (
@@ -157,73 +171,196 @@ type questionPayload struct {
 
 // ─── Mux session/event SessionEvent shapes (the 11 we decode) ────────
 
-// sessionEventEnvelope is the common envelope of all SessionEvent
-// variants. We unmarshal `Type` first then dispatch on it; payload
-// is kept as RawMessage and unmarshaled per-Type.
+// sessionEventEnvelope is the common shape every mux session/event
+// carries: a `type` discriminator plus a `data` object whose
+// shape depends on Type. Decoders ignore everything except Type
+// and Data; the per-type data structs (assistantChunkData,
+// assistantMessageData, toolCallData, …) are unmarshalled FROM
+// Data, never from the envelope itself.
+//
+// Captured wire shape (real, from the 2026-08-14
+// session-3dbe433e-* lifecycle that exposed the schema bug):
+//
+//	{
+//	  "type": "assistant/message",
+//	  "data": {
+//	    "turn": 1, "step": 1,
+//	    "message": { "role": "assistant", "content": [ … ] }
+//	  }
+//	}
 type sessionEventEnvelope struct {
-	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"-"`
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
 }
 
-// assistantChunkEvent corresponds to event type "assistant/chunk".
-// Carries a single delta token; the translator accumulates into
-// textBuf[contentIndex] (F-52 buffering; mirror pi/translate.go).
-type assistantChunkEvent struct {
-	MessageID    string `json:"messageId"`
-	ContentIndex int    `json:"contentIndex"`
-	Delta        string `json:"delta"`
+// assistantChunkData is the `data` body of an assistant/chunk event.
+// F-52 contract: chunks are streaming deltas; the per-text-block
+// accumulation lives in translator.textBuf, keyed by Chunk.Index.
+// Chunk.Type discriminates the sub-shape ("text-delta",
+// "tool-call-delta", "block-end", "block-start", "usage", "finish").
+type assistantChunkData struct {
+	Turn  int            `json:"turn"`
+	Step  int            `json:"step"`
+	Chunk assistantChunk `json:"chunk"`
 }
 
-// assistantMessageEvent corresponds to event type "assistant/message".
-// One complete committed message — flush point for pendingText.
-// Image / file blocks degrade to text annotations on the bridge
-// side (dsh web's baseline-only protocol doesn't carry inline
-// images).
-type assistantMessageEvent struct {
-	MessageID string             `json:"messageId"`
-	Content   []contentBlockDTO `json:"content"`
+// assistantChunk is one assistant/chunk's `data.chunk` body. Field
+// presence depends on Chunk.Type:
+//
+//   - "block-start":     BlockType carries "text" | "tool-call" | …
+//   - "block-delta":     reserved for future streaming block updates
+//                        (current dsh builds only emit text-delta /
+//                        tool-call-delta)
+//   - "block-end":       Block carries the complete finalized block
+//   - "text-delta":      Text carries the streaming fragment,
+//                        Index is the content-block slot
+//   - "tool-call-delta": ID + Name + ArgumentsDelta carry a partial
+//                        tool-call accumulator
+//   - "usage":           Usage carries the model's usage row
+//   - "finish":          Reason carries the step-finish discriminator
+type assistantChunk struct {
+	Type           string            `json:"type"`
+	Index          int               `json:"index,omitempty"`
+	BlockType      string            `json:"blockType,omitempty"`
+	Text           string            `json:"text,omitempty"`
+	ArgumentsDelta string            `json:"argumentsDelta,omitempty"`
+	ID             string            `json:"id,omitempty"`
+	Name           string            `json:"name,omitempty"`
+	Block          *assistantBlock   `json:"block,omitempty"`
+	Usage          *usageInfo        `json:"usage,omitempty"`
+	Reason         *chunkFinishReason `json:"reason,omitempty"`
 }
 
-// contentBlockDTO is one element of assistantMessageEvent.Content.
-// Type is "text" | "image" | "file" — see dsh-llm ContentBlock.
+// assistantBlock is the `block` payload of a `block-end` chunk —
+// the complete block the model emitted in this content slot.
+// Type discriminator: "text" (Text populated) | "tool-call"
+// (ID/Name/Arguments populated) | other (audit-only).
+type assistantBlock struct {
+	Type      string `json:"type"`
+	Text      string `json:"text,omitempty"`
+	ID        string `json:"id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+}
+
+// chunkFinishReason is the `reason` payload of a `finish` chunk.
+// Examples observed on the wire:
+//
+//	{"kind":"tool-calls"}  — model produced tool calls
+//	{"kind":"stop"}        — natural model stop
+//	{"kind":"length"}      — truncated by maxTokens
+type chunkFinishReason struct {
+	Kind string `json:"kind"`
+}
+
+// assistantMessageData is the `data` body of an assistant/message
+// event. The complete message — content blocks + role — lives at
+// `data.message.content[]`. Text blocks have `{"type":"text",
+// "text":"…"}`; tool-call blocks have
+// `{"type":"tool-call","id":"…","name":"…","arguments":"…"}`.
+//
+// `data.message.content[]` is the F-52 flush input: the translator
+// picks the text blocks and emits EventAgentText at this boundary.
+type assistantMessageData struct {
+	Turn    int                      `json:"turn"`
+	Step    int                      `json:"step"`
+	Message assistantMessageEnvelope `json:"message"`
+	Usage   *usageInfo               `json:"usage,omitempty"`
+}
+
+// assistantMessageEnvelope wraps one committed assistant message.
+type assistantMessageEnvelope struct {
+	Role    string            `json:"role"`
+	Content []contentBlockDTO `json:"content"`
+}
+
+// contentBlockDTO is one element of an assistant message's
+// `content[]` (text blocks, tool-call blocks) or a tool-result's
+// nested content.
+//
+// Type vocabulary (verified against dsh wire captures):
+//
+//	"text"        — Text populated, the model spoke.
+//	"tool-call"   — ToolCallID/Name/Args populated, model wanted a tool.
+//	"tool-result" — ToolCallID + IsError + nested Content (a
+//	                 tool-result envelope wrapping a list of
+//	                 text/image blocks under content.content).
+//	"image"       — Path/MediaType populated for outbound (we
+//	                 decode but the bridge doesn't currently use
+//	                 the fields for inbound rendering).
 type contentBlockDTO struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	Path     string `json:"path,omitempty"`
-	MediaType string `json:"mediaType,omitempty"`
+	Type       string            `json:"type"`
+	Text       string            `json:"text,omitempty"`
+	Path       string            `json:"path,omitempty"`
+	MediaType  string            `json:"mediaType,omitempty"`
+	ToolCallID string            `json:"id,omitempty"`
+	Name       string            `json:"name,omitempty"`
+	Arguments  string            `json:"arguments,omitempty"`
+	IsError    bool              `json:"isError,omitempty"`
+	Content    []contentBlockDTO `json:"content,omitempty"`
 }
 
-// toolCallEvent corresponds to event type "tool/call". We record
-// Name+Args in pendingTools[ID] so toolResultEvent can backfill.
-type toolCallEvent struct {
-	ToolCallID string `json:"toolCallId"`
-	ToolName   string `json:"toolName"`
-	Args       string `json:"args"`
-	MessageID  string `json:"messageId,omitempty"`
+// toolCallData is the `data` body of a tool/call event. Fields
+// are FLATTENED into the `data` object (not nested under a message
+// sub-object): `data.callId`, `data.name`, `data.arguments`. The
+// translator decodes these to populate pendingTools[id] so the
+// matching tool/result can backfill Name + Args.
+type toolCallData struct {
+	Turn      int    `json:"turn"`
+	Step      int    `json:"step"`
+	CallID    string `json:"callId"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
-// toolResultEvent corresponds to event type "tool/result".
-type toolResultEvent struct {
-	ToolCallID string `json:"toolCallId"`
-	Result     string `json:"result"`
-	IsError    bool   `json:"isError,omitempty"`
-	MessageID  string `json:"messageId,omitempty"`
+// toolResultData is the `data` body of a tool/result event. dsh
+// nests the result inside a `message` user-role echo:
+// `data.message.content[]` is a list of `tool-result` blocks
+// (each tool-result can wrap inner text/image blocks under
+// content.content). The translator walks the array itself to
+// extract every tool-result, not just the first.
+type toolResultData struct {
+	Turn    int                    `json:"turn"`
+	Step    int                    `json:"step"`
+	Message toolResultUserEnvelope `json:"message"`
 }
 
-// turnStartEvent corresponds to event type "turn/start". The
-// translator uses this to mark the turn as "active" so empty
-// agent_settled doesn't synthesize a "Done." result card.
-type turnStartEvent struct {
-	TurnID string `json:"turnId"`
+// toolResultUserEnvelope is the user-role message dsh echoes back
+// to carry the tool/result payload. Its `content[]` is a flat
+// list of `tool-result` blocks.
+type toolResultUserEnvelope struct {
+	Role    string            `json:"role"`
+	Content []contentBlockDTO `json:"content"`
+	ID      string            `json:"id,omitempty"`
 }
 
-// turnEndEvent corresponds to event type "turn/end". This is the
-// canonical F-52 turn-end signal: emit EventResult{Usage} +
-// EventDone{Reason:"settled"} in order.
-type turnEndEvent struct {
-	TurnID    string     `json:"turnId"`
-	StopReason string    `json:"stopReason,omitempty"`
-	Usage     *usageInfo `json:"usage,omitempty"`
+// pickToolResultBlock returns the first tool-result block, or nil
+// if none is present in the user envelope.
+func (m toolResultUserEnvelope) pickToolResultBlock() *contentBlockDTO {
+	for i := range m.Content {
+		if m.Content[i].Type == "tool-result" {
+			return &m.Content[i]
+		}
+	}
+	return nil
+}
+
+// turnStartData is the `data` body of a turn/start event. Captured
+// wire shape: `{"turn": 1}`. We deliberately ignore any extra
+// fields (turnId/title) the upstream may add later — the
+// translator only needs the integer counter to know the turn
+// became live.
+type turnStartData struct {
+	Turn int `json:"turn"`
+}
+
+// turnEndData is the `data` body of a turn/end event. StopReason
+// is the optional model stop reason ("stop" | "end_turn" |
+// "toolUse" | "length" | "abort" | …); not all dsh builds emit
+// it on every settle, so it's `omitempty`.
+type turnEndData struct {
+	Turn       int    `json:"turn"`
+	StopReason string `json:"stopReason,omitempty"`
 }
 
 // usageInfo mirrors dsh's LLM usage payload. We decode the minimum
@@ -238,16 +375,18 @@ type usageInfo struct {
 	ContextWindowPct     float64 `json:"contextWindowPct,omitempty"`
 }
 
-// compactionEndEvent corresponds to event type "compaction/end".
-// One cycle = one EventCompaction.
-type compactionEndEvent struct {
-	Reason   string `json:"reason,omitempty"`
-	Aborted  bool   `json:"aborted,omitempty"`
+// compactionEndData is the `data` body of a compaction/end event.
+// One cycle = one EventCompaction. The envelope strip happens in
+// translate.go before unmarshalling this struct.
+type compactionEndData struct {
+	Reason  string `json:"reason,omitempty"`
+	Aborted bool   `json:"aborted,omitempty"`
 }
 
-// todoWriteEvent corresponds to event type "todo/write". Items is
-// a full snapshot (last-write-wins), translated to F-38 TaskList.
-type todoWriteEvent struct {
+// todoWriteData is the `data` body of a todo/write event. Items
+// is a full snapshot (last-write-wins), translated to F-38
+// TaskList.
+type todoWriteData struct {
 	Items []todoItem `json:"items"`
 }
 
@@ -258,10 +397,13 @@ type todoItem struct {
 	Status  string `json:"status"` // "pending" | "in_progress" | "completed"
 }
 
-// approvalAskedEvent corresponds to event type "approval/asked"
+// approvalAskedData is the `data` body of an approval/asked event
 // (the session/event channel for approval flows; distinct from
 // mux approval/requested which is the server-pushed version).
-type approvalAskedEvent struct {
+// Wire field names may not all match — translate.go's catch-all
+// falls through to a debug log when the payload is empty, which
+// is the expected behaviour when dsh skips this event entirely.
+type approvalAskedData struct {
 	ToolCallID string   `json:"toolCallId"`
 	ToolName   string   `json:"toolName"`
 	Action     string   `json:"action"`

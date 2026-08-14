@@ -260,19 +260,26 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// pumpStream owns the events-channel close so Close() can wait
 	// for it to drain (via pumpWG) before allowing close.
 	live.pumpWG.Add(1)
-	go func() {
+	// Both pumps are wrapped in agent.SafeGo so a claudecode
+	// translator bug or a wire-decode panic cannot take down the
+	// nightme daemon. The 2026-08-15 dsh textBuf panic that
+	// motivated this pattern would have hit claudecode the same
+	// way if its pumpStream ever hit a noCopy-triggering struct —
+	// we apply the isolation pre-emptively. See
+	// internal/agent/safego.go for the contract.
+	agent.SafeGo("claudecode:stream-pump", func() {
 		defer live.pumpWG.Done()
 		defer close(live.events)
 		pumpStream(stdout, live.events, handler, live.agentName, live.workspace, live.branch, logger)
-	}()
+	})
 
 	// stderr drainer — Claude Code logs to stderr; we both log
 	// (debug) and forward each line to live.stderrLines so the
 	// --resume fallback probe can react to deterministic stderr
 	// signals.
-	go func() {
+	agent.SafeGo("claudecode:stderr-drain", func() {
 		_ = drainStderr(stderr, logger, live.stderrLines)
-	}()
+	})
 
 	return live, nil
 }

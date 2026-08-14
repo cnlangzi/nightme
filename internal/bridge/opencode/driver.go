@@ -164,11 +164,27 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// drop, but if it does we self-heal instead of going blind).
 	sseCtx, sseCancel := context.WithCancel(ctx)
 	d.sseCancel = sseCancel
-	go d.sseLoop(sseCtx)
-	go d.lifecycle()
-	go d.livenessLoop(ctx)
+	// The long-lived loops are wrapped in agent.SafeGo so an
+	// opencode wire-decode or translator panic cannot take down
+	// the nightme daemon. The 2026-08-15 dsh textBuf panic that
+	// motivated this pattern would have hit opencode the same way
+	// if its sseLoop ever hit a noCopy-triggering struct — we
+	// apply the isolation pre-emptively. lifecycle is also
+	// wrapped because it drains the events channel; a panic
+	// there would orphan the reader. See internal/agent/safego.go
+	// for the contract.
+	agent.SafeGo("opencode:sse-loop", func() {
+		d.sseLoop(sseCtx)
+	})
+	agent.SafeGo("opencode:liveness", func() {
+		d.livenessLoop(ctx)
+	})
+	agent.SafeGo("opencode:lifecycle", func() {
+		d.lifecycle()
+	})
 
-	// Tear down on parent context cancellation.
+	// Tear down on parent context cancellation. Short-lived
+	// (single ctx.Done receive) — no SafeGo needed.
 	go func() {
 		<-ctx.Done()
 		_ = d.Close()

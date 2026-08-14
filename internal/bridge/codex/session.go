@@ -323,15 +323,23 @@ func newSession(ctx context.Context, cfg sessionConfig) (*session, error) {
 
 	// Pumps: readPump + stderrLoop. Both incremented BEFORE the
 	// goroutine starts so lifecycle's Wait cannot race a missed Add.
+	//
+	// Both pumps are wrapped in agent.SafeGo so a codex
+	// translator bug or a wire-decode panic cannot take down the
+	// nightme daemon. The 2026-08-15 dsh textBuf panic that
+	// motivated this pattern would have hit codex the same way if
+	// its readPump ever hit a noCopy-triggering struct — we apply
+	// the isolation pre-emptively. See internal/agent/safego.go
+	// for the contract.
 	s.pumpWG.Add(2)
-	go func() {
+	agent.SafeGo("codex:read-pump", func() {
 		defer s.pumpWG.Done()
 		s.rpc.readPump(parentCtx, s.emitWireError)
-	}()
-	go func() {
+	})
+	agent.SafeGo("codex:stderr-loop", func() {
 		defer s.pumpWG.Done()
 		s.stderrLoop(parentCtx)
-	}()
+	})
 	go s.lifecycle()
 
 	cLog("session started",

@@ -289,24 +289,34 @@ func parseWebURL(ctx context.Context, stdout io.Reader) (string, error) {
 //      but dsh keeps printing HMR / plugin init / debug lines
 //      — we MUST keep the pipe flowing or dsh blocks once its
 //      64 KiB stdout pipe buffer fills, deadlocking the bridge.)
+//
+// Each pump is wrapped in agent.SafeGo so a single bridge bug
+// (e.g. a translator panic in the mux pump) cannot tear down the
+// entire nightme daemon. Before SafeGo, a panic in the mux pump
+// goroutine propagated up and killed the host process — every
+// chatsession was orphaned and the daemon entered a wedged
+// restart loop (stale daemon.lock vs. dead PID). The 2026-08-15
+// dsh textBuf panic was the trigger for adding this isolation —
+// see internal/bridge/dsh/translate.go for the root cause and
+// internal/agent/safego.go for the contract.
 func (d *driver) startPumps() {
 	d.pumpWG.Add(4)
-	go func() {
+	agent.SafeGo("dsh:mux-pump", func() {
 		defer d.pumpWG.Done()
 		readMuxPump(d.muxWS, "mux", d.handleMuxFrame)
-	}()
-	go func() {
+	})
+	agent.SafeGo("dsh:host-pump", func() {
 		defer d.pumpWG.Done()
 		readMuxPump(d.hostWS, "host", d.handleHostFrame)
-	}()
-	go func() {
+	})
+	agent.SafeGo("dsh:stderr-drain", func() {
 		defer d.pumpWG.Done()
 		d.drainStderr()
-	}()
-	go func() {
+	})
+	agent.SafeGo("dsh:stdout-drain", func() {
 		defer d.pumpWG.Done()
 		d.drainStdout()
-	}()
+	})
 	go d.lifecycle()
 }
 

@@ -328,14 +328,21 @@ func newDriver(ctx context.Context, s *Starter, cfg agent.StartConfig) (*driver,
 	// and decremented inside them so the lifecycle Wait below
 	// cannot race a missed Add.
 	live.pumpWG.Add(2)
-	go func() {
+	// Both pumps are wrapped in agent.SafeGo so a pi translator
+	// bug or a wire-decode panic cannot take down the nightme
+	// daemon. The 2026-08-15 dsh textBuf panic that motivated
+	// this pattern would have hit pi the same way if its
+	// readPump ever hit a noCopy-triggering struct — we apply
+	// the isolation pre-emptively. See internal/agent/safego.go
+	// for the contract.
+	agent.SafeGo("pi:read-pump", func() {
 		defer live.pumpWG.Done()
 		live.readPump()
-	}()
-	go func() {
+	})
+	agent.SafeGo("pi:stderr-drain", func() {
 		defer live.pumpWG.Done()
 		live.drainStderr()
-	}()
+	})
 	go live.lifecycle()
 
 	piLog("Start pumps+lifecycle spawned",

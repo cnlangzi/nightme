@@ -300,6 +300,17 @@ func (c *Cache) refresh(ctx context.Context, dir string, resolver Resolver) {
 //     deleted; the next stamp's lazy MaybeRefresh will fetch
 //     fresh (or stay nil if the workspace has no PR).
 //
+// Cancels any in-flight refresh goroutine before writing.
+// Without this cancel, a refresh that was already in flight
+// when WritePR fires would acquire c.mu after WritePR
+// releases it and overwrite our fresh write with the stale
+// resolver result — defeating the whole point of having a
+// direct-write fast path on /gtw {pr, close}. cancel() runs
+// BEFORE c.mu.Unlock() so the in-flight refresh goroutine's
+// post-resolver `if ctx.Err() != nil { return }` check
+// observes the cancellation without ever acquiring c.mu to
+// write its result.
+//
 // branch is intentionally NOT touched: the caller (gtw
 // dispatch walking the chat pool) doesn't know which branch
 // each AS is pinned to, and writing a wrong branch would
@@ -309,15 +320,26 @@ func (c *Cache) refresh(ctx context.Context, dir string, resolver Resolver) {
 // the new pr immediately.
 func (c *Cache) WritePR(pr *messages.PR) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	cancel := c.cancel
+	c.cancel = nil
 	if pr == nil {
 		c.pr = nil
 		c.branch = ""
 		c.expiresAt = time.Time{}
-		return
+	} else {
+		c.pr = pr
+		c.expiresAt = time.Now().Add(TTL)
 	}
-	c.pr = pr
-	c.expiresAt = time.Now().Add(TTL)
+	c.mu.Unlock()
+	// Run cancel() AFTER releasing c.mu so a Cancel that
+	// blocks (rare — only happens with a custom Cancel
+	// implementation that holds a lock) can't deadlock
+	// against us. cancel() is just a channel close in
+	// production; ordering doesn't matter for correctness,
+	// only for not deadlocking against pathological Cancellers.
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // Cancel aborts the in-flight refresh goroutine (if any)

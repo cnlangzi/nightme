@@ -93,6 +93,115 @@ func TestCache_WritePR_NonNilSets(t *testing.T) {
 	}
 }
 
+// TestCache_WritePR_CancelsInflightRefresh locks the contract
+// that WritePR cancels any in-flight refresh goroutine so the
+// goroutine's stale resolver result does NOT overwrite the
+// fresh write. Without this, a /gtw pr fired while a refresh
+// was already running would have its WritePR overwritten by
+// the refresh's pre-/gtw-pr resolver result — the footer would
+// show the OLD PR (or no PR) for up to 60s until the TTL
+// expired and the next MaybeRefresh finally fetched fresh.
+//
+// Race exercised:
+//   T0: stamp triggers MaybeRefresh → spawns goroutine
+//   T1: goroutine starts the slow resolver
+//   T2: /gtw pr succeeds → WritePR(as.ID, newPR)
+//   T3: resolver returns (stale result for the pre-/gtw-pr
+//        branch state)
+//   T4: WritePR's cancel() must have set ctx.Err() so the
+//        goroutine's post-resolver `if ctx.Err() != nil`
+//        check returns early WITHOUT writing its result.
+func TestCache_WritePR_CancelsInflightRefresh(t *testing.T) {
+	c := &Cache{}
+
+	// Block the resolver until we explicitly release it,
+	// so we can observe the cancellation mid-flight.
+	release := make(chan struct{})
+	resolver := func(ctx context.Context, dir string) (*messages.PR, string, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		}
+		if ctx.Err() != nil {
+			// ctx.Err() observed: WritePR cancelled us.
+			// Return whatever — refresh() will early-return
+			// before writing.
+			return nil, "", ctx.Err()
+		}
+		// Buggy path: we'd write a stale result. With the
+		// cancel-in-WritePR fix, we never reach here.
+		t.Errorf("resolver was not cancelled; WritePR failed to cancel in-flight refresh")
+		return &messages.PR{Number: 999, URL: "stale", State: "open"}, "stale-branch", nil
+	}
+
+	// T0: kick off an in-flight refresh.
+	c.MaybeRefresh("/w", resolver)
+	if !c.inflight {
+		t.Fatal("MaybeRefresh did not mark inflight=true")
+	}
+
+	// Give the goroutine a moment to enter the resolver
+	// and block on `release` / ctx.Done().
+	time.Sleep(10 * time.Millisecond)
+
+	// T2: simulate /gtw pr's WritePR.
+	newPR := &messages.PR{Number: 42, URL: "https://example/pr/42", State: "open"}
+	c.WritePR(newPR)
+
+	// T3/T4: release the resolver — it should observe
+	// ctx.Err() (cancelled) and bail without writing.
+	close(release)
+
+	// Give the goroutine a moment to exit.
+	time.Sleep(50 * time.Millisecond)
+
+	if got := c.PR(); got == nil || got.Number != 42 {
+		t.Errorf("WritePR was overwritten by stale refresh: PR = %+v, want {Number:42}", got)
+	}
+	if c.inflight {
+		t.Errorf("inflight = true after WritePR; refresh goroutine did not exit via ctx.Err()")
+	}
+}
+
+// TestCache_WritePR_NilCancelsInflightRefresh is the close-path
+// counterpart: WritePR(nil) must also cancel any in-flight
+// refresh, otherwise the refresh would write a non-nil PR
+// after we cleared, un-doing the clear.
+func TestCache_WritePR_NilCancelsInflightRefresh(t *testing.T) {
+	c := &Cache{}
+
+	release := make(chan struct{})
+	resolver := func(ctx context.Context, dir string) (*messages.PR, string, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, "", ctx.Err()
+		}
+		if ctx.Err() != nil {
+			return nil, "", ctx.Err()
+		}
+		t.Errorf("resolver was not cancelled; WritePR(nil) failed to cancel in-flight refresh")
+		return &messages.PR{Number: 999, URL: "stale", State: "open"}, "main", nil
+	}
+
+	c.MaybeRefresh("/w", resolver)
+	time.Sleep(10 * time.Millisecond)
+
+	// /gtw close's WritePR(nil).
+	c.WritePR(nil)
+
+	close(release)
+	time.Sleep(50 * time.Millisecond)
+
+	if got := c.PR(); got != nil {
+		t.Errorf("WritePR(nil) was overwritten by stale refresh: PR = %+v, want nil", got)
+	}
+	if c.inflight {
+		t.Errorf("inflight = true after WritePR(nil); refresh goroutine did not exit via ctx.Err()")
+	}
+}
+
 // TestCache_CancelNoOpWhenIdle covers Cancel's nil-cancel
 // branch — calling Cancel on a Cache whose refresh isn't
 // running must not panic and must not block.

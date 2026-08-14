@@ -5,7 +5,8 @@
 // The opencode bridge historically had ONE spawn recipe for
 // RunOnce: the long-lived `opencode serve` HTTP path used by
 // Starter.Start. RunOnce would Start + defer Close +
-// agent.RunOnceDrain. That pattern works but carries three costs
+// drain Events() until EventAgentResult. That pattern works but
+// carries three costs
 // the one-shot use case doesn't need:
 //
 //  1. ~1s server boot. opencode serve spawns a subprocess, binds
@@ -317,7 +318,8 @@ func buildPrintArgs(cfg agent.StartConfig, blocks []agent.ContentBlock) []string
 			// Distinguish `[image: ...]` from `[file: ...]` so the
 			// model reads the user's INTENT from the placeholder
 			// even though both reach the model via the same `-f`
-			// flag. Mirrors claudecode/pi blocksToPrompt. MIME is
+			// flag. Mirrors claudecode/pi buildPrintArgs (which
+			// now delegates to agent.BlocksToPrompt). MIME is
 			// appended when present (claudecode pattern) for
 			// diagnostic + format-discrimination value.
 			if b.MediaType != "" {

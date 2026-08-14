@@ -6,7 +6,10 @@
 //
 // The codex bridge historically had ONE spawn recipe for RunOnce:
 // the long-lived `codex app-server` path used by Starter.Start.
-// RunOnce would Start + defer Close + agent.RunOnceDrain. That
+// RunOnce would Start + defer Close + drain Events() until
+// EventAgentResult, then Close (which on codex paid a 5s
+// closeDrainTimeout because the app-server has no "exit after
+// one turn" protocol flag). That
 // pattern works but has two costs the one-shot use case doesn't
 // need:
 //

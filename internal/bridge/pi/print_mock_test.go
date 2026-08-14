@@ -106,13 +106,13 @@ func TestPrintMode_Mock_NoSettled_ReportsMissingEvent(t *testing.T) {
 }
 
 func TestPrintMode_Mock_MultipleTextBlocks_JoinedWithNewline(t *testing.T) {
-	// The bridge layer's blocksToPrompt joins ContentText
-	// blocks with "\n" BEFORE handing them to pi — so pi sees
-	// one combined prompt. The text returned is still the
-	// mock's fixed TEXT, so we can only assert that the run
-	// completes cleanly (a regression in blocksToPrompt would
-	// show up as a parse failure in the mock, since the prompt
-	// wouldn't be the one the mock echoes).
+	// The bridge layer's buildPrintArgs → agent.BlocksToPrompt
+	// joins ContentText blocks with "\n" BEFORE handing them to
+	// pi — so pi sees one combined prompt. The text returned is
+	// still the mock's fixed TEXT, so we can only assert that
+	// the run completes cleanly (a regression in BlocksToPrompt
+	// would show up as a parse failure in the mock, since the
+	// prompt wouldn't be the one the mock echoes).
 	//
 	// Caveat: the mock doesn't JSON-escape control characters
 	// in the echoed prompt. Real pi does. We use single-line

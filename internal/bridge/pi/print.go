@@ -13,7 +13,7 @@
 //     2-5 seconds after the prompt RPC ack, with no
 //     `agent_start` / `turn_start` / message events ever
 //     streamed back through the bridge's readPump. The bridge
-//     saw EOF, RunOnceDrain returned "event stream closed
+//     saw EOF, the bridge's RunOnce returned "event stream closed
 //     without result", and the verify step in commit.go
 //     reported "agent finished but no commit happened".
 //   - The exact same RunOnce flow passed when driven from a
@@ -56,7 +56,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -71,6 +70,19 @@ import (
 // long-lived bridge's stderr tail.
 const stderrCapBytes = 64 * 1024
 
+// buildPrintArgs assembles the argv for a one-shot `pi --mode json -p`
+// call. The prompt portion is delegated to agent.BlocksToPrompt
+// (shared by claudecode / pi / dsh; the print-mode bridges whose
+// -p flag accepts a single positional string). Returns (args,
+// prompt) so callers can log prompt_bytes without re-extracting
+// it from argv — mirrors codex/buildPrintArgs + opencode/buildPrintArgs
+// signatures so all four print-mode bridges expose the same surface.
+func buildPrintArgs(blocks []agent.ContentBlock) (args []string, prompt string) {
+	prompt = agent.BlocksToPrompt(blocks)
+	args = []string{"--mode", "json", "-p", prompt}
+	return args, prompt
+}
+
 // runPrintMode spawns pi in `--mode json -p` mode for one-shot
 // invocations. It owns the process from spawn to exit, streams
 // events through the standard translator, and returns a
@@ -84,27 +96,27 @@ const stderrCapBytes = 64 * 1024
 // is absent (no stdin writes), and the translator never needs
 // to see one because the event stream is what produces
 // AgentEvents.
-func runPrintMode(ctx context.Context, command, prompt, workspace string, env []string) (agent.RunResult, error) {
-	if workspace == "" {
+func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
+	if cfg.Workspace == "" {
 		return agent.RunResult{}, fmt.Errorf("pi: workspace is required")
 	}
 
 	startTime := time.Now()
 
-	// Build argv. -p takes the prompt as a single argv entry;
-	// quoting is handled by exec, not by us. --mode json forces
-	// structured output (one JSON event per stdout line) so the
-	// translator can parse each line.
-	args := []string{"--mode", "json", "-p", prompt}
+	// Build argv from blocks. -p takes the prompt as a single
+	// argv entry; quoting is handled by exec, not by us. --mode
+	// json forces structured output (one JSON event per stdout
+	// line) so the translator can parse each line.
+	args, prompt := buildPrintArgs(blocks)
 
-	cmd := agent.NewCmd(ctx, command, args...)
-	cmd.Dir = workspace
+	cmd := agent.NewCmd(ctx, s.command, args...)
+	cmd.Dir = cfg.Workspace
 	// Forward cfg.Env the same way Start does (append to
 	// os.Environ, cfg wins on conflict). Without this,
 	// /gtw commit-time env overrides (custom API keys, MCP
 	// credentials) are silently dropped on the print-mode path.
-	if len(env) > 0 {
-		cmd.Env = append(os.Environ(), env...)
+	if len(cfg.Env) > 0 {
+		cmd.Env = append(os.Environ(), cfg.Env...)
 	}
 
 	stdout, err := cmd.StdoutPipe()
@@ -125,7 +137,7 @@ func runPrintMode(ctx context.Context, command, prompt, workspace string, env []
 	pid := cmd.Process.Pid
 
 	piLog("PrintMode Start",
-		"command", command, "workspace", workspace,
+		"command", s.command, "workspace", cfg.Workspace,
 		"prompt_bytes", len(prompt), "pid", pid)
 
 	// Drain stderr in the background. Print-mode stderr is
@@ -165,10 +177,10 @@ func runPrintMode(ctx context.Context, command, prompt, workspace string, env []
 	// and capture the final text + per-turn metadata. A reader
 	// error here means the pipe broke mid-run (rare; would
 	// normally be EOF from a clean exit).
-	result, translateErr := streamPrintEvents(ctx, stdout, workspace)
+	result, translateErr := parsePrintStream(ctx, stdout, cfg.Workspace)
 
 	// Always wait for the process to exit so we can capture
-	// both the exit code AND stderr. If streamPrintEvents
+	// both the exit code AND stderr. If parsePrintStream
 	// errored early (e.g. agent_settled never fired) pi may
 	// still be a useful signal via its stderr — model errors,
 	// auth errors, etc. land there. The wait+reap path is
@@ -211,7 +223,7 @@ func runPrintMode(ctx context.Context, command, prompt, workspace string, env []
 	return result, nil
 }
 
-// streamPrintEvents drives the JSON event reader from a
+// parsePrintStream drives the JSON event reader from a
 // print-mode pi spawn. It runs the existing translator
 // (translate.go) over each line and watches for either an
 // `agent_settled` event (turn-end marker carrying the final
@@ -222,7 +234,7 @@ func runPrintMode(ctx context.Context, command, prompt, workspace string, env []
 // readPump + lifecycle pair, minus the RPC plumbing. The
 // translator is reused as-is because the event format is
 // shared between print and RPC modes.
-func streamPrintEvents(ctx context.Context, stdout io.Reader, workspace string) (agent.RunResult, error) {
+func parsePrintStream(ctx context.Context, stdout io.Reader, workspace string) (agent.RunResult, error) {
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), MaxFrameSize)
 
@@ -343,25 +355,11 @@ func truncateForErr(line []byte) string {
 // pi translate.go usage fields (input_tokens / output_tokens /
 // cache_read_tokens).
 func appendAuditFields(result agent.RunResult, whenSessionID bool) string {
-	var audit strings.Builder
-	if whenSessionID && result.SessionID != "" {
-		audit.WriteString(" [session_id=")
-		audit.WriteString(result.SessionID)
-		audit.WriteByte(']')
+	var b strings.Builder
+	if whenSessionID {
+		b.WriteString(agent.FormatSessionID(result.SessionID))
 	}
-	if result.Subtype != "" {
-		audit.WriteString(" [subtype=")
-		audit.WriteString(result.Subtype)
-		audit.WriteByte(']')
-	}
-	if result.Usage != nil {
-		audit.WriteString(" [usage in=")
-		audit.WriteString(strconv.Itoa(result.Usage.InputTokens))
-		audit.WriteString(" out=")
-		audit.WriteString(strconv.Itoa(result.Usage.OutputTokens))
-		audit.WriteString(" cache_read=")
-		audit.WriteString(strconv.Itoa(result.Usage.CacheReadInputTokens))
-		audit.WriteByte(']')
-	}
-	return audit.String()
+	b.WriteString(agent.FormatSubtype(result.Subtype))
+	b.WriteString(agent.FormatUsage(result.Usage))
+	return b.String()
 }

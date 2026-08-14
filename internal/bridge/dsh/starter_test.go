@@ -1,5 +1,7 @@
 // starter_test.go — single-CLI-runnable unit tests for the dsh
-// bridge. Covers Info / Detect / blocksToPrompt / runPrintMode
+// bridge. Covers Info / Detect / buildPrintArgs / runPrintMode
+// (the local blocksToPrompt was deleted in F-RUNONCEDRAIN-INTERNAL;
+// the bridge now uses agent.BlocksToPrompt directly)
 // using the real local `dsh` binary (no mock; dsh is installed via
 // npm on the test machine). The e2e ping test in
 // print_real_unix_test.go gates the larger end-to-end against
@@ -110,60 +112,10 @@ func TestStart_NotImplemented(t *testing.T) {
 	}
 }
 
-// TestBlocksToPrompt_TextOnly covers the common case: multiple
-// ContentText blocks joined with "\n".
-func TestBlocksToPrompt_TextOnly(t *testing.T) {
-	got := blocksToPrompt([]agent.ContentBlock{
-		{Type: agent.ContentText, Text: "hello"},
-		{Type: agent.ContentText, Text: "world"},
-	})
-	want := "hello\nworld"
-	if got != want {
-		t.Errorf("blocksToPrompt(text) = %q, want %q", got, want)
-	}
-}
-
-// TestBlocksToPrompt_EmptySkipped covers: empty text blocks are
-// skipped (no leading/trailing newlines).
-func TestBlocksToPrompt_EmptySkipped(t *testing.T) {
-	got := blocksToPrompt([]agent.ContentBlock{
-		{Type: agent.ContentText, Text: "hi"},
-		{Type: agent.ContentText, Text: ""},
-		{Type: agent.ContentText, Text: "there"},
-	})
-	want := "hi\nthere"
-	if got != want {
-		t.Errorf("blocksToPrompt() = %q, want %q", got, want)
-	}
-}
-
-// TestBlocksToPrompt_ImageAndFile covers the fallback annotation
-// path: ContentImage → "[image: <path> (<mime>)]", ContentFile →
-// "[file: <path>]".
-func TestBlocksToPrompt_ImageAndFile(t *testing.T) {
-	got := blocksToPrompt([]agent.ContentBlock{
-		{Type: agent.ContentText, Text: "look at this"},
-		{Type: agent.ContentImage, Path: "/tmp/img.png", MediaType: "image/png"},
-		{Type: agent.ContentFile, Path: "/tmp/data.json"},
-	})
-	want := "look at this\n[image: /tmp/img.png (image/png)]\n[file: /tmp/data.json]"
-	if got != want {
-		t.Errorf("blocksToPrompt() = %q, want %q", got, want)
-	}
-}
-
-// TestBlocksToPrompt_EmptyPathSkipped covers: an Image / File with
-// Path="" is skipped silently.
-func TestBlocksToPrompt_EmptyPathSkipped(t *testing.T) {
-	got := blocksToPrompt([]agent.ContentBlock{
-		{Type: agent.ContentImage, Path: "", MediaType: "image/png"},
-		{Type: agent.ContentText, Text: "hello"},
-	})
-	want := "hello"
-	if got != want {
-		t.Errorf("blocksToPrompt() = %q, want %q", got, want)
-	}
-}
+// TestBlocksToPrompt_* were removed in F-RUNONCEDRAIN-INTERNAL —
+// the bridge's local blocksToPrompt was deleted in favor of
+// agent.BlocksToPrompt, whose contract is locked in by
+// internal/agent/blocks_test.go (9 sub-cases).
 
 // TestRunOnce_EmptyWorkspaceError verifies the workspace preflight.
 // runPrintMode requires cfg.Workspace != "" before spawning.

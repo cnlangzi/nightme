@@ -133,6 +133,8 @@ func (s *Starter) lookPath() (string, error) {
 
 // Start 不实现(chat session 走 JSON-RPC,后续 PR)
 // 本期只做 RunOnce;Start() 返 ErrNotSupported,要求调用方用 RunOnceDrain。
+// *(F-RUNONCEDRAIN-INTERNAL 后 acp 路径已改为 `(*Starter).collectResult`,
+//   dsh 走 print-mode 所以不涉及。)
 func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agent, error) {
     return nil, errors.New("dsh: chat session not implemented (RunOnce only)")
 }
@@ -142,6 +144,7 @@ func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []a
     if err != nil { return agent.RunResult{}, err }
     defer a.Close()
     return agent.RunOnceDrain(ctx, a, blocks, s.Info().Name)
+// *(F-RUNONCEDRAIN-INTERNAL 后已删除,acp 改用 `(*Starter).collectResult`)*
 }
 
 // startEphemeral spawn 一个临时 driver,只为 drain 一次 turn。
@@ -154,7 +157,7 @@ func (s *Starter) startEphemeral(ctx context.Context, cfg agent.StartConfig, blo
     }
     cmdPath, err := s.lookPath()
     if err != nil { return nil, err }
-    d.cmd = exec.CommandContext(ctx, cmdPath, "--profile", "headless", "--", blocksToPrompt(blocks))
+    d.cmd = exec.CommandContext(ctx, cmdPath, "--profile", "headless", "--", agent.BlocksToPrompt(blocks))
     d.cmd.Dir = cfg.Workspace
     d.cmd.Env = append(os.Environ(), "DSH_PERMISSION_MODE=danger-full-access")
     // ... wait cmd.Output() 异步 → deliver to events chan → close
@@ -228,8 +231,8 @@ internal/bridge/dsh/
   ├── doc.go                 # package doc(引用本文件 F-dsh-bridge.md)
   ├── starter.go             # Starter + NewStarter + Info + Detect
   ├── print.go               # RunOnce 实现(spawn + drain stdout)
-  ├── prompt.go              # blocksToPrompt(ContentBlock → string)
-  ├── starter_test.go        # 单测覆盖 Detect / Info / blocksToPrompt / BuildArgs
+  ├── prompt.go              # *(F-RUNONCEDRAIN-INTERNAL 后删除,使用 agent.BlocksToPrompt)*
+  ├── starter_test.go        # 单测覆盖 Detect / Info / BuildArgs
   └── print_real_unix_test.go # NIGHTME_REAL_DSH=1 e2e(PongSmoke)
 ```
 

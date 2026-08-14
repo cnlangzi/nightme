@@ -293,7 +293,8 @@ func TestBuildPrintArgs_Text(t *testing.T) {
 // AND a `[image: <path> (<mime>)]` placeholder so the model
 // sees both the binary AND its position in the message AND
 // knows the user intended an image (vs a generic file
-// attachment). Mirrors claudecode/pi blocksToPrompt.
+// attachment). Mirrors claudecode/pi buildPrintArgs (which
+// delegates to agent.BlocksToPrompt).
 func TestBuildPrintArgs_ImageFile(t *testing.T) {
 	args := buildPrintArgs(
 		agent.StartConfig{Workspace: "/tmp/ws"},

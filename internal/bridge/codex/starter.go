@@ -75,7 +75,10 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // doc on print.go for rationale (F-CODEX-PRINT-001, 2026-08-14).
 //
 // The previous implementation was `Start + defer Close +
-// agent.RunOnceDrain`, mirroring acp / opencode. That pattern
+// drain Events()` — still the pattern acp uses today (acp has
+// no CLI-side print-mode flag), but for codex / opencode the
+// 5s closeDrainTimeout + handshake / SSE subscription overhead
+// made it the wrong shape for one-shot. That pattern
 // paid the full app-server handshake + 5s closeDrainTimeout cost
 // per call, which is wasted work for one-shot uses (/gtw commit,
 // /gtw pr, buildAgentPrompt).

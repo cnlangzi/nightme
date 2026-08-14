@@ -115,7 +115,7 @@ Start 路径(`Starter.Start` → `newDriver`)完全不动——chat session
 2. `stdout` / `stderr` 走 `cmd.StdoutPipe` / `cmd.StderrPipe`
 3. 后台 goroutine drain stderr 到 `strings.Builder`(失败路径带
    stderr 一起 wrap 进 error)
-4. `streamPrintEvents(ctx, stdout, ...)` 同步跑:
+4. `parsePrintStream(ctx, stdout, ...)` 同步跑:
    - 一行一行 `json.Unmarshal` 进 `streamEvent`
    - 复用 `stream.go::translate` 翻译(协议事件相同)
    - 监听 `EventAgentResult` 捕获 `result.result` 文本
@@ -195,6 +195,10 @@ func (s *Starter) RunOnce(ctx, cfg, blocks) (string, error) {
     if err != nil { ... }
     defer a.Close()
     return agent.RunOnceDrain(ctx, a, blocks, s.Info().Name)
+    // *(F-RUNONCEDRAIN-INTERNAL 后该 helper 被删除,逻辑内联进
+    //   (*acp.Starter).collectResult —— acp 是当时唯一还在用它
+    //   的 bridge。claudecode / pi / codex / opencode / dsh 现在都
+    //   走各自的 print-mode path。)*
 }
 ```
 

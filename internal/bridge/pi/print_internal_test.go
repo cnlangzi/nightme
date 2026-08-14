@@ -2,7 +2,7 @@
 // helper used by the pi print-mode failure paths.
 //
 // Mirrors claudecode's analogous inline formatting (which is
-// inlined in print.go's streamPrintEvents; the helper lives
+// inlined in print.go's parsePrintStream; the helper lives
 // here because pi uses an auditFields-style suffix rather
 // than interleaving the bits into a strings.Builder call).
 

@@ -25,6 +25,7 @@ import (
 	"github.com/cnlangzi/nightme/internal/agent"
 	"github.com/cnlangzi/nightme/internal/bridge/claudecode"
 	"github.com/cnlangzi/nightme/internal/bridge/codex"
+	"github.com/cnlangzi/nightme/internal/bridge/dsh"
 	"github.com/cnlangzi/nightme/internal/bridge/opencode"
 	"github.com/cnlangzi/nightme/internal/bridge/pi"
 	"github.com/cnlangzi/nightme/internal/bridge/pty"
@@ -42,6 +43,22 @@ func init() {
 	// docs/bridge/codex.md §1 for the rationale on not supporting
 	// the legacy `codex exec` backend.
 	agent.Builtins.Register(codex.NewStarter("codex", "codex", nil))
+
+	// dsh — DeepSeek Harness print-mode bridge. Spawns
+	// `dsh --profile headless -- "<prompt>"` per call; one-shot
+	// only (no chat session — dsh's headless profile does not
+	// support --resume). Per the agent-no-config-tampering
+	// principle, the bridge only injects cmd.Dir (workspace) and
+	// DSH_PERMISSION_MODE=danger-full-access; model / provider /
+	// credentials flow from the user's `~/.dsh/settings.yaml` +
+	// `~/.dsh/.credentials.yaml`. See docs/feat/F-dsh-bridge.md.
+	if runtime.GOOS != "windows" {
+		// dsh is a Node.js CLI; Windows support is a non-goal per
+		// the dsh project. Skip registration on Windows so
+		// `nightme agents` doesn't list a permanently-broken
+		// entry there.
+		agent.Builtins.Register(dsh.NewStarter("dsh"))
+	}
 
 	// opencode — the `opencode serve` HTTP bridge. The bridge
 	// spawns `opencode serve --hostname=127.0.0.1 --port=0`, parses

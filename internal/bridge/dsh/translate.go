@@ -161,7 +161,7 @@ func (d *driver) handleMuxFrame(method, rpcID string, payload json.RawMessage) {
 	case "session/jobs":
 		dLog("dsh: session/jobs: %d bytes", len(payload))
 	case "approval/asked":
-		var aa approvalAskedEvent
+		var aa approvalAskedData
 		if err := json.Unmarshal(payload, &aa); err != nil {
 			dLog("dsh: approval/asked decode: %v", err)
 			return
@@ -202,8 +202,8 @@ func (t *translator) handleSessionEvent(ev muxSessionEvent, deliver func(agent.A
 
 	switch env.Type {
 	case "assistant/chunk":
-		var ch assistantChunkEvent
-		if err := json.Unmarshal(ev.Event, &ch); err != nil {
+		var data assistantChunkData
+		if err := json.Unmarshal(env.Data, &data); err != nil {
 			return
 		}
 		t.active = true
@@ -219,21 +219,22 @@ func (t *translator) handleSessionEvent(ev muxSessionEvent, deliver func(agent.A
 		// malicious / buggy dsh web from triggering OOM via a
 		// single huge JSON int. 16 streams is comfortably more
 		// than any legitimate dsh message needs.
-		if ch.ContentIndex < 0 || ch.ContentIndex >= maxTextStreams {
+		idx := data.Chunk.Index
+		if idx < 0 || idx >= maxTextStreams {
 			dLog("dsh: assistant/chunk contentIndex out of range",
-				"content_index", ch.ContentIndex,
+				"content_index", idx,
 				"max", maxTextStreams)
 			return
 		}
-		for len(t.textBuf) <= ch.ContentIndex {
+		for len(t.textBuf) <= idx {
 			t.textBuf = append(t.textBuf, strings.Builder{})
 		}
-		t.textBuf[ch.ContentIndex].Grow(256) // typical chunk size hint
-		t.textBuf[ch.ContentIndex].WriteString(ch.Delta)
+		t.textBuf[idx].Grow(256) // typical chunk size hint
+		t.textBuf[idx].WriteString(data.Chunk.Text)
 
 	case "assistant/message":
-		var am assistantMessageEvent
-		if err := json.Unmarshal(ev.Event, &am); err != nil {
+		var data assistantMessageData
+		if err := json.Unmarshal(env.Data, &data); err != nil {
 			return
 		}
 		t.active = true
@@ -242,13 +243,13 @@ func (t *translator) handleSessionEvent(ev muxSessionEvent, deliver func(agent.A
 		// here — the tool-boundary flush below is the canonical
 		// emit point so OutResult (turn/end) carries the LAST
 		// paragraph and never duplicates already-shown chunks.
-		t.pendingText = pickText(am.Content)
+		t.pendingText = pickText(data.Message.Content)
 		t.lastText = t.pendingText
 
 	case "tool/call":
 		t.active = true
-		var tc toolCallEvent
-		if err := json.Unmarshal(ev.Event, &tc); err != nil {
+		var data toolCallData
+		if err := json.Unmarshal(env.Data, &data); err != nil {
 			return
 		}
 		// Flush pendingText at tool-boundary (F-52 — tool start is
@@ -263,28 +264,46 @@ func (t *translator) handleSessionEvent(ev muxSessionEvent, deliver func(agent.A
 			t.pendingText = ""
 		}
 		// Stash Name + Args so tool/result can backfill.
-		t.pendingTools[tc.ToolCallID] = pendingTool{
-			Name: tc.ToolName,
-			Args: tc.Args,
+		t.pendingTools[data.CallID] = pendingTool{
+			Name: data.Name,
+			Args: data.Arguments,
 		}
 		deliver(agent.AgentEvent{
 			Kind: agent.EventAgentToolStart,
 			ToolStart: &agent.AgentToolStartEvent{
-				ID:   tc.ToolCallID,
-				Name: tc.ToolName,
-				Args: tc.Args,
+				ID:   data.CallID,
+				Name: data.Name,
+				Args: data.Arguments,
 			},
 		})
 
 	case "tool/result":
-		var tr toolResultEvent
-		if err := json.Unmarshal(ev.Event, &tr); err != nil {
+		var data toolResultData
+		if err := json.Unmarshal(env.Data, &data); err != nil {
 			return
 		}
 		t.active = true
-		pt, hasPending := t.pendingTools[tr.ToolCallID]
+		block := data.Message.pickToolResultBlock()
+		var toolCallID, resultText string
+		var isError bool
+		if block != nil {
+			toolCallID = block.ToolCallID
+			isError = block.IsError
+			// Concatenate inner text blocks as the result body.
+			var sb strings.Builder
+			for _, inner := range block.Content {
+				if inner.Type == "text" && inner.Text != "" {
+					if sb.Len() > 0 {
+						sb.WriteByte('\n')
+					}
+					sb.WriteString(inner.Text)
+				}
+			}
+			resultText = sb.String()
+		}
+		pt, hasPending := t.pendingTools[toolCallID]
 		if hasPending {
-			delete(t.pendingTools, tr.ToolCallID)
+			delete(t.pendingTools, toolCallID)
 		}
 		name := pt.Name
 		args := pt.Args
@@ -295,16 +314,16 @@ func (t *translator) handleSessionEvent(ev muxSessionEvent, deliver func(agent.A
 			name = ""
 		}
 		var errOut error
-		if tr.IsError {
-			errOut = fmt.Errorf("dsh: tool %s failed: %s", name, tr.Result)
+		if isError {
+			errOut = fmt.Errorf("dsh: tool %s failed: %s", name, resultText)
 		}
 		ev := agent.AgentEvent{
 			Kind: agent.EventAgentToolEnd,
 			ToolEnd: &agent.AgentToolEndEvent{
-				ID:     tr.ToolCallID,
+				ID:     toolCallID,
 				Name:   name,
 				Args:   args,
-				Output: tr.Result,
+				Output: resultText,
 			},
 		}
 		if errOut != nil {
@@ -313,8 +332,8 @@ func (t *translator) handleSessionEvent(ev muxSessionEvent, deliver func(agent.A
 		deliver(ev)
 
 	case "turn/start":
-		var ts turnStartEvent
-		_ = json.Unmarshal(ev.Event, &ts)
+		var data turnStartData
+		_ = json.Unmarshal(env.Data, &data)
 		t.active = true
 		// New turn — clear per-turn buffers AND pendingTools.
 		// pendingTools is cleared because:
@@ -333,8 +352,8 @@ func (t *translator) handleSessionEvent(ev muxSessionEvent, deliver func(agent.A
 		t.pendingTools = map[string]pendingTool{}
 
 	case "turn/end":
-		var te turnEndEvent
-		_ = json.Unmarshal(ev.Event, &te)
+		var data turnEndData
+		_ = json.Unmarshal(env.Data, &data)
 		// F-52 guard #1: only synthesize EventResult if the turn
 		// was actually active. fire-and-forget settlements
 		// (e.g. out-of-band compactions) don't get a phantom
@@ -364,7 +383,7 @@ func (t *translator) handleSessionEvent(ev muxSessionEvent, deliver func(agent.A
 				Result: &agent.AgentResultEvent{
 					Text:       text,
 					DurationMs: 0, // not on the wire; runtime can compute
-					Subtype:    stopReasonToSubtype(te.StopReason),
+					Subtype:    stopReasonToSubtype(data.StopReason),
 					Usage:      usage,
 				},
 			})
@@ -385,27 +404,27 @@ func (t *translator) handleSessionEvent(ev muxSessionEvent, deliver func(agent.A
 		t.lastUsage = nil
 
 	case "compaction/end":
-		var ce compactionEndEvent
-		_ = json.Unmarshal(ev.Event, &ce)
+		var data compactionEndData
+		_ = json.Unmarshal(env.Data, &data)
 		// F-49 compaction event. There's no EventAgentCompaction
 		// kind in the agent package today (pi/claudecode also
 		// don't emit it) — adding it is a cross-bridge change
 		// that lands separately. Until then, debug log so a
 		// curious operator can see compaction happen.
-		if !ce.Aborted {
-			dLog("dsh: compaction completed", "reason", ce.Reason)
+		if !data.Aborted {
+			dLog("dsh: compaction completed", "reason", data.Reason)
 		}
 
 	case "todo/write":
-		var tw todoWriteEvent
-		if err := json.Unmarshal(ev.Event, &tw); err != nil {
+		var data todoWriteData
+		if err := json.Unmarshal(env.Data, &data); err != nil {
 			return
 		}
 		// F-38 TaskList snapshot. We always emit Create (not
 		// Update) so the runtime replaces the checklist wholesale
 		// rather than diff-applying — last-write-wins.
-		items := make([]agent.AgentTaskItem, 0, len(tw.Items))
-		for _, it := range tw.Items {
+		items := make([]agent.AgentTaskItem, 0, len(data.Items))
+		for _, it := range data.Items {
 			items = append(items, agent.AgentTaskItem{
 				Subject: it.Content,
 				Status:  todoStatusToTaskStatus(it.Status),

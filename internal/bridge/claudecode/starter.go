@@ -1,4 +1,3 @@
-
 // starter.go — the spawn recipe for the claudecode bridge.
 //
 // After the Agent → Info/Starter/Agent/driver refactor
@@ -19,7 +18,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
-	"strings"
 
 	"github.com/cnlangzi/nightme/internal/agent"
 )
@@ -101,6 +99,7 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 
 	return agent.NewAgent(s.Info(), d.pid, d.events, d), nil
 }
+
 // RunOnce is the one-shot counterpart to Start. Spawns a fresh
 // `claude -p <prompt>` print-mode session (process exits after
 // the turn), streams events through the shared stream.go
@@ -129,51 +128,9 @@ func (s *Starter) Start(ctx context.Context, cfg agent.StartConfig) (*agent.Agen
 // turns ride one bridge. RunOnce and Start share the same
 // Starter; only the spawn path differs.
 func (s *Starter) RunOnce(ctx context.Context, cfg agent.StartConfig, blocks []agent.ContentBlock) (agent.RunResult, error) {
-	prompt := blocksToPrompt(blocks)
-	result, err := runPrintMode(ctx, s.command, prompt, cfg.Workspace, cfg.Env)
+	result, err := runPrintMode(ctx, s, cfg, blocks)
 	if err != nil {
 		return agent.RunResult{}, fmt.Errorf("agent %s: %w", s.Info().Name, err)
 	}
 	return result, nil
-}
-
-// blocksToPrompt joins multiple ContentText blocks with "\n"
-// and degrades ContentImage / ContentFile blocks to compact
-// "[image: ...]" / "[file: ...]" suffixes on the message. The
-// output is the single string passed to `claude -p`. Images
-// are not yet threaded through print-mode (claude's `-p` flag
-// accepts only one positional prompt); when /gtw commit starts
-// carrying image attachments this is where the base64-encoding
-// or placeholder strategy will land.
-func blocksToPrompt(blocks []agent.ContentBlock) string {
-	var sb strings.Builder
-	for _, b := range blocks {
-		switch b.Type {
-		case agent.ContentText:
-			if b.Text == "" {
-				continue
-			}
-			if sb.Len() > 0 {
-				sb.WriteByte('\n')
-			}
-			sb.WriteString(b.Text)
-		case agent.ContentImage:
-			if b.Path == "" {
-				continue
-			}
-			if sb.Len() > 0 {
-				sb.WriteByte('\n')
-			}
-			fmt.Fprintf(&sb, "[image: %s (%s)]", b.Path, b.MediaType)
-		case agent.ContentFile:
-			if b.Path == "" {
-				continue
-			}
-			if sb.Len() > 0 {
-				sb.WriteByte('\n')
-			}
-			fmt.Fprintf(&sb, "[file: %s]", b.Path)
-		}
-	}
-	return sb.String()
 }

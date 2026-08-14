@@ -58,6 +58,7 @@ nightme ──stdio JSON-RPC 2.0──> codex app-server --listen stdio:// [-c m
 #### 1.4.1 为什么不用 app-server 做一次性
 
 旧实现是 `Start + defer Close + agent.RunOnceDrain`,跟 acp / opencode 对齐。但对一次性调用有两个浪费:
+*(F-RUNONCEDRAIN-INTERNAL 后 `agent.RunOnceDrain` 已被删除,acp 的对应逻辑内联进 `(*acp.Starter).collectResult`,codex 走 print-mode 不再涉及)*
 
 1. **5s `closeDrainTimeout` 上限**(`session.go:53`)。app-server 没有"做完一个 turn 就退出"的协议 flag,一次性场景等满 5s 是浪费。
 2. **握手 + pump goroutine 开销**。`newSession` 起 4 个 goroutine(`readPump` + `stderrLoop` + `lifecycle` + `rpc`,见 §2)就跑一个 turn,全部拆掉——性价比为零。

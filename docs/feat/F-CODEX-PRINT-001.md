@@ -240,9 +240,10 @@ result: Text="PONG"  Subtype=completed  DurationMs=9828
 - **chat-session 路径完全不动**。`Starter.Start` → `newDriver` →
   `newSession` → JSON-RPC handshake → 持续 turn 流程,均不修改。
   chat 用户(夜跑会话)的体验完全一致。
-- **`agent.RunOnceDrain` 不变**。该函数仍是 `internal/agent/runonce.go` 的
+- **`agent.RunOnceDrain` 不变**(本 PR 时点)。该函数仍是 `internal/agent/runonce.go` 的
   公开 helper,**本次迁移只删了 codex 这一个 bridge 对它的引用**(acp / opencode
   还在用)。后续 Phase 1b / 1c(acp / opencode)按相同模式迁完之后,会一并删除。
+  *(后续 F-OPENCODE-PRINT-001 / F-RUNONCEDRAIN-INTERNAL 已完成此合并,见对应 feat doc。)*
 - **`Starter` 接口签名不变**。`Starter.RunOnce` 还是 4 个参数 + 2 个返回值,
   `/gtw commit` / `/gtw pr` / `buildAgentPrompt` 调用方零改动。
 - **`Starter.Info` / `Starter.Detect` / `Starter.Start` 不变**。docs §1.2
@@ -255,16 +256,16 @@ result: Text="PONG"  Subtype=completed  DurationMs=9828
 
 | Phase | 内容 | 状态 |
 |---|---|---|
-| 1b | `acp/print.go` 同样按 print-mode 思路切(若 ACP CLI 有 `-p` / 一次性 flag) | 待评估 |
-| 1c | `opencode/print.go` 同样按 print-mode 思路切(若 opencode CLI 有) | 待评估 |
-| 3 | 三 bridge 全部迁完后,删除 `agent.RunOnceDrain` + `runonce.go` + `runonce_test.go` | 待启动 |
+| 1b | `acp/print.go` 同样按 print-mode 思路切(若 ACP CLI 有 `-p` / 一次性 flag) | 待评估 *(ACP 无 CLI-side print-mode flag,  此 Phase 跳过,见 F-RUNONCEDRAIN-INTERNAL)* |
+| 1c | `opencode/print.go` 同样按 print-mode 思路切(若 opencode CLI 有) | ✅ done in F-OPENCODE-PRINT-001 |
+| 3 | 三 bridge 全部迁完后,删除 `agent.RunOnceDrain` + `runonce.go` + `runonce_test.go` | ✅ done in F-RUNONCEDRAIN-INTERNAL — helper 被内联进 `(*acp.Starter).collectResult` |
 
 ---
 
 ## 回滚
 
 需要的话只需 revert 本 PR:
-- `internal/bridge/codex/starter.go` 恢复 `Start + defer Close + agent.RunOnceDrain`
+- `internal/bridge/codex/starter.go` 恢复 `Start + defer Close + agent.RunOnceDrain` *(F-RUNONCEDRAIN-INTERNAL 后 acp 的对应实现变为 `Start + defer Close + (*Starter).collectResult`,内联 drain 循环)*
 - 删除 `internal/bridge/codex/print*.go`
 - docs 改动回滚
 

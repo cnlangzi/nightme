@@ -71,7 +71,7 @@ func runPrintMode(ctx context.Context, s *Starter, cfg agent.StartConfig, blocks
 		return agent.RunResult{}, fmt.Errorf("dsh: workspace is required")
 	}
 
-	prompt := blocksToPrompt(blocks)
+	prompt := agent.BlocksToPrompt(blocks)
 
 	startTime := time.Now()
 

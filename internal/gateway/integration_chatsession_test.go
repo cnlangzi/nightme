@@ -553,18 +553,36 @@ exit 0
 		t.Fatalf("QueueUserMessage: %v", err)
 	}
 
-	// Wait for the round-trip: at minimum we expect OutReply +
-	// OutResult to reach the channel. The 30s deadline matches the
-	// bash script's read -t 30 above — when the test suite runs
-	// under load the bridge's writeLine can take longer than the
-	// previous 5s budget, so the test's polling window has to
-	// match. A real bridge hang still surfaces as a failure
-	// (eventually) rather than a hang.
+	// Wait for the round-trip: we expect OutInit (from
+	// system/init) + OutReply (assistant text) + OutResult
+	// (final answer) to reach the channel. Poll until OutResult
+	// arrives (or timeout) — checking len >= 2 races the
+	// readpump when init + reply flow through faster than the
+	// result event, producing a spurious "no OutResult" failure
+	// even though the bridge is functioning correctly. The
+	// previous "len >= 2" condition was the flake root cause:
+	// when the fake script's `read -t 30` returns EOF
+	// immediately (stdin is /dev/null on this test harness),
+	// all three echos land at the subprocess stdout within a
+	// few ms, the bridge processes init + reply faster than
+	// the result event reaches channel.Send, and the test
+	// breaks out of the loop before OutResult is captured.
+	// The 30s deadline still matches the bash script's
+	// `read -t 30` above so a real bridge hang surfaces as a
+	// failure rather than a hang.
 	var rec []messages.OutboundMessage
 	deadline := time.Now().Add(30 * time.Second)
+	var hasOutResult bool
 	for time.Now().Before(deadline) {
 		rec = mock.Record()
-		if len(rec) >= 2 {
+		hasOutResult = false
+		for i := range rec {
+			if rec[i].Kind == messages.OutResult {
+				hasOutResult = true
+				break
+			}
+		}
+		if hasOutResult {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)

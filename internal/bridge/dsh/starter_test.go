@@ -94,19 +94,18 @@ func TestDetect_MissingBinary(t *testing.T) {
 	}
 }
 
-// TestStart_NotImplemented pins the chat-session error. This is the
-// contract that surfaces the limitation to the user instead of
-// silently falling back to PTY noise.
-func TestStart_NotImplemented(t *testing.T) {
+// TestStart_RequiresWorkspace is a fast unit-only check that Start
+// rejects an empty workspace preflight (same contract as
+// runPrintMode). Full Start smoke lives in session_real_unix_test.go
+// behind NIGHTME_REAL_DSH.
+func TestStart_RequiresWorkspace(t *testing.T) {
 	s := NewStarter("dsh")
-	_, err := s.Start(context.Background(), agent.StartConfig{
-		Workspace: "/tmp",
-	})
+	_, err := s.Start(context.Background(), agent.StartConfig{})
 	if err == nil {
-		t.Fatal("Start() = nil, want error")
+		t.Fatal("Start(empty workspace) = nil, want error")
 	}
-	if !strings.Contains(err.Error(), "chat session not implemented") {
-		t.Errorf("Start() error %q should mention 'chat session not implemented'", err.Error())
+	if !strings.Contains(err.Error(), "workspace is required") {
+		t.Errorf("Start(empty) error %q should mention 'workspace is required'", err.Error())
 	}
 }
 

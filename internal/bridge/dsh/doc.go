@@ -1,13 +1,25 @@
 // Package dsh is the nightme bridge for DeepSeek Harness (dsh).
 //
-// The bridge is print-mode only: it spawns `dsh --profile headless
-// "<prompt>"` as a child process, captures the final assistant text
-// from stdout, and returns it as agent.RunResult. There is no chat
-// session path — dsh's `--profile headless` profile is documented as
-// "Answer one task, print the final assistant message, and exit"
-// (no --resume support), and the only other long-lived transport
-// (`dsh-jsonrpc-agent-pkg`) requires pip-installing the packaged
-// runtime which is outside the scope of this PR.
+// Two modes, two paths:
+//
+//  1. Print-mode (`Starter.RunOnce` → `dsh --profile headless
+//     -- "<prompt>"`): one-shot CLI invocation. Final assistant
+//     text comes back on stdout. Bridges `/gtw commit`,
+//     `/gtw pr`, and `buildAgentPrompt`. **No `--resume`
+//     support** — dsh web's `headless` profile documents itself as
+//     "Answer one task, print the final assistant message, and
+//     exit"; each RunOnce spawns a fresh process with no carry-over.
+//     Callers that need multi-turn context for print-mode must use
+//     the chat-session path.
+//
+//  2. Chat session (`Starter.Start` → `dsh --profile web --port 0`):
+//     long-lived process; the bridge dials two WebSocket downlinks
+//     (`/api/events.mux` + `/api/events.host`) and POSTs prompts
+//     via HTTP RPC (`/api/session.prompt`). Supports mixed
+//     text+image content blocks (dsh web accepts both `type:"text"`
+//     and `type:"image"` with base64 inline data; resource_link
+//     is rejected at the prompt boundary per 实机 HTTP probe
+//     2026-08-14).
 //
 // The bridge deliberately does NOT modify dsh's local default
 // configuration. Per the user's locked-in principle
@@ -20,12 +32,5 @@
 // Everything else (provider / model / API key / system prompt /
 // sandbox policy / compaction / etc.) flows from dsh's local
 // defaults at `~/.dsh/settings.yaml` + `~/.dsh/.credentials.yaml`.
-// See docs/feat/F-dsh-bridge.md for the full rationale.
-//
-// Scope:
-//
-//   - RunOnce  — `/gtw commit`, `/gtw pr`, `buildAgentPrompt`
-//   - chat session  — NOT implemented; dsh starter.Start returns
-//     "chat session not implemented" to surface the limitation
-//     instead of silently falling back to PTY noise.
+// See docs/bridge/dsh.md for the full rationale.
 package dsh

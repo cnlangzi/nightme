@@ -30,13 +30,15 @@ func TestDispatch_ShellConsumed_BypassesMessageHandler(t *testing.T) {
 	sh.Recognize("!ls")
 
 	msg := teststubs.NewMessage(chatsession.NewManager())
-	r := New(msg, teststubs.AlwaysFallThrough{}, sh, teststubs.NewReaction(true), "primary")
+	r := New(msg, teststubs.AlwaysFallThrough{}, sh, teststubs.NewReaction(true), nil, "primary")
 
 	res, err := r.Dispatch(context.Background(), &messages.InboundMessage{
 		ChatID:    chatID,
 		Text:      "!ls",
 		MessageID: "om_shell",
 	})
+	// F-59: async dispatch — wait before asserting.
+	r.WaitExec()
 	if err != nil {
 		t.Fatalf("Dispatch(!ls): %v", err)
 	}
@@ -67,7 +69,7 @@ func TestDispatch_ShellNotConsumed_FallsThroughToMessageHandler(t *testing.T) {
 
 	sh := teststubs.NewShell() // no shell commands "registered"
 	msg := teststubs.NewMessage(chatsession.NewManager())
-	r := New(msg, teststubs.AlwaysFallThrough{}, sh, teststubs.NewReaction(true), "primary")
+	r := New(msg, teststubs.AlwaysFallThrough{}, sh, teststubs.NewReaction(true), nil, "primary")
 
 	res, err := r.Dispatch(context.Background(), &messages.InboundMessage{
 		ChatID:     chatID,
@@ -75,6 +77,8 @@ func TestDispatch_ShellNotConsumed_FallsThroughToMessageHandler(t *testing.T) {
 		HasMention: true,
 		MessageID:  "om_plain",
 	})
+	// F-59: async dispatch — wait before asserting.
+	r.WaitExec()
 	if err != nil {
 		t.Fatalf("Dispatch(hello world): %v", err)
 	}
@@ -104,7 +108,7 @@ func TestDispatch_ShellPriorityAfterCommander(t *testing.T) {
 	sh.Recognize("/foo")
 
 	msg := teststubs.NewMessage(chatsession.NewManager())
-	r := New(msg, commander, sh, teststubs.NewReaction(true), "primary")
+	r := New(msg, commander, sh, teststubs.NewReaction(true), nil, "primary")
 
 	res, err := r.Dispatch(context.Background(), &messages.InboundMessage{
 		ChatID:     chatID,
@@ -112,11 +116,20 @@ func TestDispatch_ShellPriorityAfterCommander(t *testing.T) {
 		HasMention: true,
 		MessageID:  "om_priority",
 	})
+	// F-59: async dispatch — wait before asserting.
+	r.WaitExec()
 	if err != nil {
 		t.Fatalf("Dispatch(/foo): %v", err)
 	}
-	if res == nil || res.Reply != "from-commander" {
-		t.Errorf("Reply = %q, want %q (commander must run before shell)", res.Reply, "from-commander")
+	if res == nil || !res.Consumed {
+		t.Errorf("expected Consumed=true from commander branch; got %+v", res)
+	}
+	// F-59: the reply text is no longer carried on the dispatch
+	// result (it's emitted asynchronously via the Emitter). The
+	// priority invariant is what this test pins: commander ran
+	// before shell, so the dispatcher took the command branch.
+	if commander.Calls() != 1 {
+		t.Errorf("commander must run exactly once for /foo; got %d calls", commander.Calls())
 	}
 	if sh.Calls() != 0 {
 		t.Errorf("shell dispatcher must not run for a slash command; got %d calls", sh.Calls())

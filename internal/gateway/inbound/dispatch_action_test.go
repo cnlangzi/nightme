@@ -25,7 +25,7 @@ func TestDispatchInbound_ActionBranch(t *testing.T) {
 	t.Run("msg.Reaction routes to ReactionRouter", func(t *testing.T) {
 		action := teststubs.NewReaction(true)
 		msg := teststubs.NewMessage(chatsession.NewManager())
-		r := New(msg, teststubs.AlwaysFallThrough{}, teststubs.AlwaysFallThroughShell{}, action, "primary")
+		r := New(msg, teststubs.AlwaysFallThrough{}, teststubs.AlwaysFallThroughShell{}, action, nil, "primary")
 
 		res, err := r.Dispatch(context.Background(), &messages.InboundMessage{
 			ChatID: chatID,
@@ -37,6 +37,10 @@ func TestDispatchInbound_ActionBranch(t *testing.T) {
 				ChatID:      chatID,
 			},
 		})
+		// F-59: dispatch is async; wait for the runAction goroutine
+		// to complete before asserting on the ReactionRouter side
+		// effects.
+		r.WaitExec()
 		if err != nil {
 			t.Fatalf("Dispatch: %v", err)
 		}
@@ -65,7 +69,7 @@ func TestDispatchInbound_ActionBranch(t *testing.T) {
 		// gateway took ownership; the agent loop is not invoked.
 		action := teststubs.NewReaction(false)
 		msg := teststubs.NewMessage(chatsession.NewManager())
-		r := New(msg, teststubs.AlwaysFallThrough{}, teststubs.AlwaysFallThroughShell{}, action, "primary")
+		r := New(msg, teststubs.AlwaysFallThrough{}, teststubs.AlwaysFallThroughShell{}, action, nil, "primary")
 
 		res, err := r.Dispatch(context.Background(), &messages.InboundMessage{
 			ChatID: chatID,
@@ -76,11 +80,22 @@ func TestDispatchInbound_ActionBranch(t *testing.T) {
 				ChatID:      chatID,
 			},
 		})
+		// F-59: async dispatch — wait before asserting.
+		r.WaitExec()
 		if err != nil {
 			t.Fatalf("Dispatch: %v", err)
 		}
-		if res == nil || !res.Consumed || !res.Dropped {
-			t.Errorf("result = %+v, want Consumed=true Dropped=true (router declined)", res)
+		// F-59: tryActionDispatch is async; the router's decline
+		// decision lands inside the runAction goroutine, not in
+		// the synchronous CommandResult. The Dispatch-level
+		// placeholder is Consumed=true Dropped=false (chain
+		// semantics — the action branch claimed the event);
+		// observable side effect is router.Events getting one
+		// entry (router.Handle was called once). The original
+		// Dropped=true signal has moved into the goroutine and
+		// is now observable only by inspecting router state.
+		if res == nil || !res.Consumed || res.Dropped {
+			t.Errorf("result = %+v, want Consumed=true Dropped=false (F-59 placeholder; chain always claims)", res)
 		}
 		if len(action.Events) != 1 {
 			t.Errorf("router hits = %d, want 1", len(action.Events))
@@ -96,7 +111,7 @@ func TestDispatchInbound_ActionBranch(t *testing.T) {
 		// still go to the message handler for the agent loop.
 		action := teststubs.NewReaction(true)
 		msg := teststubs.NewMessage(chatsession.NewManager())
-		r := New(msg, teststubs.AlwaysFallThrough{}, teststubs.AlwaysFallThroughShell{}, action, "primary")
+		r := New(msg, teststubs.AlwaysFallThrough{}, teststubs.AlwaysFallThroughShell{}, action, nil, "primary")
 
 		_, err := r.Dispatch(context.Background(), &messages.InboundMessage{
 			ChatID:     chatID,
@@ -104,6 +119,8 @@ func TestDispatchInbound_ActionBranch(t *testing.T) {
 			Text:       "hello world",
 			HasMention: true,
 		})
+		// F-59: async dispatch — wait before asserting.
+		r.WaitExec()
 		if err != nil {
 			t.Fatalf("Dispatch: %v", err)
 		}

@@ -200,27 +200,33 @@ func (s *GitStatusSnapshot) PRBlockReason() string {
 		return "❌ detached HEAD — checkout a named branch first"
 	case s.HasConflicts:
 		return "❌ worktree has unmerged paths (merge/rebase conflict)\n" +
-			"hint: resolve conflicts and `git add`, then /gtw pr"
+			"\n" +
+			"💡 hint: resolve conflicts and `git add`, then /gtw pr"
 	case !s.HasUpstream:
 		return "❌ branch has no upstream on origin\n" +
-			"hint: /gtw push first to publish the branch to origin, then /gtw pr"
+			"\n" +
+			"💡 hint: /gtw push first to publish the branch to origin, then /gtw pr"
 	case s.AheadOfRemote > 0:
 		return fmt.Sprintf(
 			"⚠️ %d commit(s) made locally but not pushed\n"+
-				"hint: /gtw push first, then /gtw pr", s.AheadOfRemote)
+				"\n"+
+				"💡 hint: /gtw push first, then /gtw pr", s.AheadOfRemote)
 	case s.BehindRemote > 0:
 		return fmt.Sprintf(
 			"⚠️ origin/%s is %d commit(s) ahead of your local branch\n"+
-				"hint: `git pull --rebase`, then /gtw pr", s.Branch, s.BehindRemote)
+				"\n"+
+				"💡 hint: `git pull --rebase`, then /gtw pr", s.Branch, s.BehindRemote)
 	case s.Added+s.Deleted+s.Modified > 0:
 		return fmt.Sprintf(
 			"⚠️ %d file(s) changed but not committed\n"+
-				"hint: /gtw commit first, then /gtw push, then /gtw pr",
+				"\n"+
+				"💡 hint: /gtw commit first, then /gtw push, then /gtw pr",
 			s.Added+s.Deleted+s.Modified)
 	case s.Untracked > 0:
 		return fmt.Sprintf(
 			"⚠️ %d new file(s) not added to git\n"+
-				"hint: git add them, then /gtw commit, then /gtw push, then /gtw pr", s.Untracked)
+				"\n"+
+				"💡 hint: git add them, then /gtw commit, then /gtw push, then /gtw pr", s.Untracked)
 	}
 	return ""
 }

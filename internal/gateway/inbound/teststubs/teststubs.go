@@ -127,6 +127,21 @@ func (c *Commander) Dispatch(_ context.Context, _ command.RuntimeServices, _ *ch
 	return nil, false, nil
 }
 
+// Match implements command.Commander. Mirrors the Dispatch
+// fall-through contract: returns true only when text is a
+// recognised slash command (i.e. Recognized contains the
+// text). Slash-prefixed inputs that aren't in Recognized
+// return false — preserving the "/etc/passwd" passthrough
+// semantics in the priority chain.
+func (c *Commander) Match(text string) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.Recognized[text]; ok {
+		return text, true
+	}
+	return "", false
+}
+
 // Calls returns the number of times Dispatch has been
 // called. Concurrent-safe.
 func (c *Commander) Calls() int32 { return c.calls.Load() }
@@ -139,6 +154,11 @@ type AlwaysFallThrough struct{}
 func (AlwaysFallThrough) Dispatch(_ context.Context, _ command.RuntimeServices, _ *chatsession.ChatSession, _ command.SlashInput) (*command.SlashOutput, bool, error) {
 	return nil, false, nil
 }
+
+// Match implements command.Commander — always false. The
+// chain skips this branch and falls through to the next
+// tryDispatch.
+func (AlwaysFallThrough) Match(_ string) (string, bool) { return "", false }
 
 // ─── ShellDispatcher (shell.Dispatcher) ────────────────────────────
 

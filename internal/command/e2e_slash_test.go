@@ -212,6 +212,10 @@ type replyingCommander struct {
 	primary   string
 }
 
+func (r *replyingCommander) Match(text string) (string, bool) {
+	return r.commander.Match(text)
+}
+
 func (r *replyingCommander) Dispatch(ctx context.Context, rt command.RuntimeServices, cs *chatsession.ChatSession, input command.SlashInput) (*command.SlashOutput, bool, error) {
 	out, handled, err := r.commander.Dispatch(ctx, rt, cs, input)
 	if err != nil {
@@ -361,6 +365,7 @@ func newWiredHarness(t *testing.T) *wiredHarness {
 		newRuntimeShim(mgr, reg, "echo"),
 		shell.NewDispatcher(nil),
 		&e2eStubRouter{},
+		noop,
 		"echo",
 	)
 	gw := gateway.New(ir, noop)

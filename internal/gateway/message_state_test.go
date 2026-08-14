@@ -173,6 +173,7 @@ func newWiredRouter(t *testing.T) (*Router, *fakeChannel) {
 		teststubs.AlwaysFallThrough{},              // commander: never claims
 		teststubs.AlwaysFallThroughShell{},         // shell: never claims
 		teststubs.NewReaction(false),               // reaction router: never claims
+		&gatewaytest.NoopEmitter{},                 // F-59: emitter moved into inbound.Router
 		"primary",
 	)
 	gw := New(ir, &gatewaytest.NoopEmitter{})

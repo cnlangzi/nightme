@@ -25,6 +25,11 @@ func (s *stubDispatcher) Dispatch(ctx context.Context, rt command.RuntimeService
 	return &command.SlashOutput{Consumed: true, Reply: s.reply}, true, nil
 }
 
+// Match implements command.Commander — always true so the
+// slash branch always claims in this regression test (the
+// test's whole point is to verify the reply path runs end-to-end).
+func (s *stubDispatcher) Match(_ string) (string, bool) { return "", true }
+
 // stubMessageHandler returns a real ChatSession so the dispatcher's
 // tryCommandDispatch path can succeed end-to-end.
 type stubMessageHandler struct{}
@@ -86,13 +91,20 @@ func (r *recordingEmitter) Record() []messages.OutboundMessage {
 	return append([]messages.OutboundMessage(nil), r.out...)
 }
 
-// runReplyForwardingLoop is the regression-equivalent of the
+// runDispatchLoop is the regression-equivalent of the
 // production dispatchLoop: it reads from a channel, dispatches
-// through the wired Router, and forwards result.Reply to the
-// Emitter. We isolate it so the test does not need to drive the
-// real channel pumps (which spawned goroutines that blocked
-// indefinitely against the un-wired test channels).
-func runReplyForwardingLoop(ctx context.Context, r *Router, in <-chan messages.InboundMessage) {
+// through the wired Router. We isolate it so the test does not
+// need to drive the real channel pumps (which spawned
+// goroutines that blocked indefinitely against the un-wired
+// test channels).
+//
+// F-59: the reply is now emitted asynchronously from inside
+// runCommand via the wired Emitter — the F-58 placeholder
+// CommandResult always has an empty Reply, so this loop no
+// longer forwards result.Reply. We still drive DispatchInbound
+// here so the goroutine actually fires (the test polls the
+// emitter for the async reply).
+func runDispatchLoop(ctx context.Context, r *Router, in <-chan messages.InboundMessage) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -101,19 +113,9 @@ func runReplyForwardingLoop(ctx context.Context, r *Router, in <-chan messages.I
 			if !ok {
 				return
 			}
-			result, err := r.DispatchInbound(ctx, &msg)
-			if err != nil {
+			if _, err := r.DispatchInbound(ctx, &msg); err != nil {
 				continue
 			}
-			if result == nil || result.Reply == "" || r.emitter == nil {
-				continue
-			}
-			_ = r.emitter.Send(ctx, messages.OutboundMessage{
-				ChatID:  msg.ChatID,
-				Kind:    messages.OutReply,
-				Text:    result.Reply,
-				ReplyTo: msg.MessageID,
-			})
 		}
 	}
 }
@@ -128,19 +130,21 @@ func TestDispatchLoop_ForwardsSlashReply(t *testing.T) {
 	em := &recordingEmitter{}
 	want := "Now using pi (pid=12345, cwd=/tmp, source=spawn)"
 
-	r := New(inbound.New(stubMessageHandler{}, &stubDispatcher{reply: want}, stubShell{}, stubAction{}, "claude"), em)
+	r := New(inbound.New(stubMessageHandler{}, &stubDispatcher{reply: want}, stubShell{}, stubAction{}, em, "claude"), em)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	// Mirror the dispatch loop's reply-forwarding logic in a
-	// goroutine so we don't need to drive the channel pumps.
+	// Mirror the dispatch loop's logic in a goroutine so we
+	// don't need to drive the channel pumps. F-59: the reply is
+	// emitted asynchronously from inside runCommand, so we poll
+	// the emitter to detect it.
 	in := make(chan messages.InboundMessage, 1)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runReplyForwardingLoop(ctx, r, in)
+		runDispatchLoop(ctx, r, in)
 	}()
 
 	// Synthesize a slash command inbound.

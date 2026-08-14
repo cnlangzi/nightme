@@ -163,24 +163,63 @@ func programmaticPush(ctx context.Context, deps HandlerDeps, c Context) (string,
 // or an error whose Error() is a complete IM-friendly message
 // including the unpushed commit list — caller can paste it
 // straight into the reply.
+//
+// Push error handling: the push itself can fail (auth, network,
+// remote protection rule). The earlier code discarded
+// programmaticPush's error and relied solely on the post-push
+// `unpushedIsZero` verify — but when push fails, @{u} stays unset,
+// countUnpushed returns 0 silently via its "no upstream
+// configured" branch, and the dispatcher proceeds to render a
+// misleading "pushed 0 commit(s)" card while /gtw pr correctly
+// reports "no upstream". We now retain the push error and
+// surface it instead: if the push errored, the verify count is
+// meaningless, so we bail out with the real failure.
+//
+// The retry retains its purpose for transient errors (network
+// blip, gh rate-limit): attempt 2 runs only if attempt 1's push
+// succeeded but the verify count came back non-zero (commits
+// didn't fully land). If attempt 1's push itself errored, no
+// retry — repeated auth/protection failures won't heal on
+// retry.
 func programmaticPushWithRetry(ctx context.Context, deps HandlerDeps, c Context) error {
 	// Attempt 1.
-	out1, _ := programmaticPush(ctx, deps, c)
+	out1, pushErr1 := programmaticPush(ctx, deps, c)
+	if pushErr1 != nil {
+		// Push itself failed — surface the real error rather than
+		// masking it with a "pushed 0 commit(s)" success card.
+		// No retry: auth / protection / network-class errors
+		// don't heal on retry.
+		return fmt.Errorf(
+			"❌ git push failed: %w\n"+
+				"hint: check auth (`gh auth status`), remote protection rules, or network.\n"+
+				"raw output:\n%s",
+			pushErr1, strings.TrimSpace(out1))
+	}
 	if ok, err := unpushedIsZero(ctx, deps, c); err != nil {
 		return fmt.Errorf("verify after push: %w", err)
 	} else if ok {
 		return nil
 	}
 
-	// Attempt 2 (retry on transient failure).
-	out2, _ := programmaticPush(ctx, deps, c)
+	// Attempt 2 (retry on transient failure — push succeeded but
+	// verify came back non-zero, suggesting commits didn't land
+	// cleanly the first time).
+	out2, pushErr2 := programmaticPush(ctx, deps, c)
+	if pushErr2 != nil {
+		return fmt.Errorf(
+			"❌ git push failed on retry: %w\n"+
+				"first attempt output:\n%s\n"+
+				"retry output:\n%s",
+			pushErr2, strings.TrimSpace(out1), strings.TrimSpace(out2))
+	}
 	if ok, err := unpushedIsZero(ctx, deps, c); err != nil {
 		return fmt.Errorf("re-count after retry: %w", err)
 	} else if ok {
 		return nil
 	}
 
-	// Both attempts verified-failed. Build the diagnostic.
+	// Both attempts: push succeeded but verify came back non-zero.
+	// Build the diagnostic.
 	unpushed, _ := countUnpushed(ctx, c.Worktree, c.Branch, deps)
 	return fmt.Errorf(
 		"❌ %d commit(s) on %s still don't appear on origin/%s after retry\n"+

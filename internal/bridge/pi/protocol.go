@@ -48,6 +48,20 @@ type eventEnvelope struct {
 	// translate table.
 	Type string `json:"type"`
 
+	// F-PI-PRINT-002: ID + Message are peeked by the print-mode
+	// RunResult path (internal/bridge/pi/print.go:peekPrintMeta)
+	// so the AgentBar footer can render SessionID + Model
+	// without going through a second json.Unmarshal round-trip.
+	// RPC mode's emitConnected reads the same fields from a
+	// different source (get_state.data.model + get_state.sessionId)
+	// so the duplication is intentional — print-mode has no
+	// get_state handshake.
+	ID      string `json:"id,omitempty"`
+	Message struct {
+		Role  string `json:"role,omitempty"`
+		Model string `json:"model,omitempty"`
+	} `json:"message,omitempty"`
+
 	// Raw captures the full original JSON so translators can decode
 	// event-specific fields without losing data.
 	Raw json.RawMessage `json:"-"`

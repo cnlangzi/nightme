@@ -859,6 +859,39 @@ func (as *AgentSession) ClearSuspect() {
 	}
 }
 
+// ClearInFlight (F-62) drops the in-flight message mirror without
+// firing the Prompt end lifecycle. Used at chat-session "new
+// session" boundaries — /cwd switch (SetSelectedCwd) and the
+// hadPrior branch of LookupSelectedAgentSession — to declare the
+// previous (agent, cwd) focus lost. Idempotent (no-op on empty
+// slice). Persists the empty state so the next daemon restart
+// does not re-push the abandoned messages.
+//
+// Differs from endPrompt(reason) in two ways:
+//   - Does not emit KindPromptEnded (no receipt card transition).
+//   - Does not touch currentPrompt / isReady — the AS is
+//     detached here, so the readPump's subscribers are already
+//     gone.
+//
+// See docs/feat/F-62-inflight-cwd-home.md §3.3.4.
+func (as *AgentSession) ClearInFlight() {
+	as.asMu.Lock()
+	if len(as.inFlightMessages) == 0 {
+		as.asMu.Unlock()
+		return
+	}
+	as.inFlightMessages = nil
+	persist := as.persist
+	as.asMu.Unlock()
+
+	if persist != nil {
+		if err := persist(as.Entry()); err != nil {
+			slog.Warn("agentsession: persist after ClearInFlight failed; JSON may be stale",
+				"as_id", as.ID, "err", err)
+		}
+	}
+}
+
 // Suspect (F-61) returns the current suspect reason and since
 // timestamp. Used by the prober to decide whether to probe + respawn.
 // Both are zero-valued when not suspect.
